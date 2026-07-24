@@ -19,6 +19,8 @@ import setuptools
 
 from .utils import (
     cmake_bin,
+    cuda_home_path,
+    cuda_version,
     debug_build_enabled,
     found_ninja,
     get_frameworks,
@@ -61,6 +63,29 @@ class CMakeExtension(setuptools.Extension):
             f"-DCMAKE_BUILD_TYPE={build_type}",
             f"-DCMAKE_INSTALL_PREFIX={install_dir}",
         ]
+
+        discovered_cuda_home = cuda_home_path()
+        if discovered_cuda_home is not None:
+            configure_command += [
+                f"-DCUDAToolkit_ROOT={discovered_cuda_home}",
+                # CUDA wheels use `lib`, while nvcc's host linker expects `lib64`.
+                f"-DCMAKE_CUDA_FLAGS=-L{discovered_cuda_home}/lib",
+            ]
+
+            if cuda_full_version := cuda_version():
+                cuda_major_version = cuda_full_version[0]
+                cuda_lib_dir = discovered_cuda_home / "lib"
+                configure_command += [
+                    f"-DCUDA_CUDART={cuda_lib_dir / f'libcudart.so.{cuda_major_version}'}",
+                    f"-DCUDA_cudart_LIBRARY={cuda_lib_dir / f'libcudart.so.{cuda_major_version}'}",
+                    f"-DCUDA_cublas_LIBRARY={cuda_lib_dir / f'libcublas.so.{cuda_major_version}'}",
+                    f"-DCUDA_cublasLt_LIBRARY={cuda_lib_dir / f'libcublasLt.so.{cuda_major_version}'}",
+                ]
+
+        discovered_nvcc_path = nvcc_path()
+        if discovered_nvcc_path is not None:
+            configure_command.append(f"-DCMAKE_CUDA_COMPILER={discovered_nvcc_path}")
+
         if bool(int(os.getenv("NVTE_USE_CCACHE", "0"))):
             ccache_bin = os.getenv("NVTE_CCACHE_BIN", "ccache")
             configure_command += [
@@ -185,6 +210,9 @@ def get_build_ext(
                             and not framework_extension_only
                         ):
                             nvcc_bin = nvcc_path()
+                            if nvcc_bin is None:
+                                raise RuntimeError(f"NVCC not found and is required for building CUDA source {src}")
+
                             self.compiler.set_executable("compiler_so", str(nvcc_bin))
                             if isinstance(cflags, dict):
                                 cflags = cflags["nvcc"]
