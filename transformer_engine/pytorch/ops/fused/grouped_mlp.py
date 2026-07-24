@@ -1930,8 +1930,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         fc2_bias_grads: Optional[list[Optional[torch.Tensor]]] = None
         fc2_bias_grad_packed: Optional[torch.Tensor] = None
         if scale_bias:
-            fc2_biases = fc2_op._get_bias_tensors(dtype)
-            bias_packed = torch.stack(fc2_biases)
+            bias_packed = fc2_op._get_packed_bias_tensor(dtype)
             fc2_dbias_packed_result, grad_scales = compute_grouped_dbias_dscales(
                 fc2_dy,
                 scales_f32,

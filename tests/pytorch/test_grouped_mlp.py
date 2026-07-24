@@ -23,6 +23,7 @@ from transformer_engine.pytorch.ops.basic.grouped_linear import (
     OUTPUT_BUFFER_KEY,
     GRAD_INPUT_BUFFER_KEY,
 )
+from transformer_engine.pytorch.utils import get_device_compute_capability
 from transformer_engine.pytorch import (
     QuantizedTensor,
     Float8CurrentScalingQuantizer,
@@ -129,6 +130,28 @@ def maybe_skip_quantization(
             pytest.skip("NVFP4 quantization is only supported with BF16 data")
 
 
+def grouped_tensor_path_supported(
+    *,
+    quantized_compute: bool,
+    quantization: Optional[str],
+    dtype: torch.dtype,
+    single_grouped_weight: bool,
+) -> bool:
+    """Mirror GroupedLinear's native grouped-tensor backend selection."""
+    compute_capability = get_device_compute_capability()
+    if not (9, 0) <= compute_capability <= (11, 0):
+        return False
+    if not quantized_compute:
+        return dtype in (torch.bfloat16, torch.float16)
+    if quantization == "fp8_current_scaling":
+        return compute_capability >= (10, 0) or tex.get_cublasLt_version() >= 130500
+    if quantization == "mxfp8":
+        return compute_capability >= (10, 0)
+    if quantization == "nvfp4_rht":
+        return compute_capability >= (10, 0) and not single_grouped_weight
+    return False
+
+
 @torch.no_grad()
 def make_reference_and_test_tensors(
     shape: int | Iterable[int],
@@ -232,6 +255,26 @@ def make_reference_and_test_tensors(
 class TestGroupedLinearOp:
     """Tests for advanced features with grouped linear basic op"""
 
+    def test_single_grouped_bias_uses_registered_packed_storage(self, monkeypatch) -> None:
+        """The grouped bias compute view must alias the registered trainable parent."""
+        monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
+        op = te.ops.GroupedLinear(
+            2,
+            128,
+            128,
+            bias=True,
+            device="cuda",
+            dtype=torch.bfloat16,
+            single_grouped_bias=True,
+        )
+
+        bias_packed = op._get_packed_bias_tensor(torch.bfloat16)
+
+        assert bias_packed.shape == (op.num_groups, op.out_features)
+        assert bias_packed.untyped_storage().data_ptr() == op.bias.rowwise_data.data_ptr()
+        assert op.bias.requires_grad
+        assert dict(op.named_parameters())["bias"] is op.bias
+
     @pytest.mark.parametrize("bias", (False, True))
     @pytest.mark.parametrize("dtype", _dtypes)
     @pytest.mark.parametrize("quantization", _quantization_list)
@@ -292,6 +335,14 @@ class TestGroupedLinearOp:
 
         if single_grouped_bias and not bias:
             pytest.skip("single_grouped_bias requires bias=True")
+        if (single_grouped_weight or single_grouped_bias) and not grouped_tensor_path_supported(
+            quantized_compute=quantized_compute,
+            quantization=quantization,
+            dtype=dtype,
+            single_grouped_weight=single_grouped_weight,
+        ):
+            # Single grouped parameters intentionally have no split-quantize fallback.
+            pytest.skip("Single grouped parameters require the native grouped-tensor path")
         if single_grouped_weight and quantized_weight and quantization in ("fp8_delayed_scaling"):
             pytest.skip(
                 "single_grouped_weight does not support FP8 delayed scaling "

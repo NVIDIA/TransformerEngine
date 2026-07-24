@@ -1504,6 +1504,20 @@ _fp8_block_scaling_available, _reason_for_no_fp8_block_scaling = te.is_fp8_block
 )
 
 
+def _require_native_grouped_tensor_gemm(*, mxfp8: bool = False) -> None:
+    """Skip unless the native GroupedTensor grouped GEMM is available."""
+    device_capability = torch.cuda.get_device_capability()
+    if not (9, 0) <= device_capability <= (11, 0):
+        pytest.skip("Native GroupedTensor grouped GEMM requires Hopper or Blackwell.")
+    if mxfp8 and device_capability < (10, 0):
+        pytest.skip("MXFP8 native GroupedTensor grouped GEMM requires Blackwell.")
+    cublaslt_version = tex.get_cublasLt_version()
+    if cublaslt_version < 130300:
+        pytest.skip("Native GroupedTensor grouped GEMM requires cuBLASLt 13.3+.")
+    if device_capability < (10, 0) and cublaslt_version < 130400:
+        pytest.skip("Native GroupedTensor grouped GEMM on Hopper requires cuBLASLt 13.4+.")
+
+
 @pytest.fixture(autouse=True)
 def _reset_fp8_state(monkeypatch):
     monkeypatch.setenv(_FUSED_GROUPED_GEMM_ENV, "0")
@@ -1512,8 +1526,416 @@ def _reset_fp8_state(monkeypatch):
     monkeypatch.delenv(_FUSED_GROUPED_GEMM_ENV, raising=False)
 
 
+@pytest.mark.parametrize(
+    "m_splits,exception",
+    [([256, 256], ValueError), (torch.tensor([256, 256]), ValueError)],
+    ids=["python-list", "cpu-tensor"],
+)
+def test_single_grouped_weight_rejects_host_m_splits(monkeypatch, m_splits, exception):
+    """A single parent parameter must never fall back to host-split per-expert GEMMs."""
+    monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
+    grouped_linear = GroupedLinear(
+        2,
+        64,
+        64,
+        bias=False,
+        params_dtype=torch.bfloat16,
+        device="cuda",
+        single_grouped_weight=True,
+        grouped_gemm_backend="grouped_tensor",
+    )
+    x = torch.randn(512, 64, dtype=torch.bfloat16, device="cuda")
+    with pytest.raises(exception, match="requires.*CUDA"):
+        grouped_linear(x, m_splits)
+
+
+def test_single_grouped_weight_native_bf16_matches_discrete(monkeypatch):
+    """Native BF16 grouped storage produces one parent wgrad and no member split calls."""
+    _require_native_grouped_tensor_gemm()
+    monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
+    FP8GlobalStateManager.reset()
+
+    num_gemms = 3
+    in_features = 128
+    out_features = 128
+    m_splits = torch.tensor([256, 512, 256], dtype=torch.int64, device="cuda")
+    total_tokens = int(m_splits.sum())
+    weights = torch.randn(
+        num_gemms,
+        out_features,
+        in_features,
+        dtype=torch.bfloat16,
+        device="cuda",
+    )
+
+    discrete = GroupedLinear(
+        num_gemms,
+        in_features,
+        out_features,
+        bias=False,
+        params_dtype=torch.bfloat16,
+        device="cuda",
+        grouped_gemm_backend="grouped_tensor",
+    )
+    single = GroupedLinear(
+        num_gemms,
+        in_features,
+        out_features,
+        bias=False,
+        params_dtype=torch.bfloat16,
+        device="cuda",
+        single_grouped_weight=True,
+        grouped_gemm_backend="grouped_tensor",
+    )
+    with torch.no_grad():
+        for idx in range(num_gemms):
+            getattr(discrete, f"weight{idx}").copy_(weights[idx])
+        single.weight.rowwise_data.view_as(weights).copy_(weights)
+
+    x = torch.randn(total_tokens, in_features, dtype=torch.bfloat16, device="cuda")
+    dy = torch.randn(total_tokens, out_features, dtype=torch.bfloat16, device="cuda")
+    x_discrete = x.detach().clone().requires_grad_(True)
+    x_single = x.detach().clone().requires_grad_(True)
+
+    y_discrete = discrete(x_discrete, m_splits)
+    y_single = single(x_single, m_splits)
+    y_discrete.backward(dy)
+    y_single.backward(dy)
+
+    tolerances = dict(rtol=1e-2, atol=5e-3)
+    torch.testing.assert_close(y_single.float(), y_discrete.float(), **tolerances)
+    torch.testing.assert_close(x_single.grad.float(), x_discrete.grad.float(), **tolerances)
+    discrete_wgrad = torch.stack(
+        [getattr(discrete, f"weight{idx}").grad for idx in range(num_gemms)]
+    )
+    torch.testing.assert_close(single.weight.grad.float(), discrete_wgrad.float(), **tolerances)
+
+
+@pytest.mark.skipif(not _mxfp8_available, reason=_reason_for_no_mxfp8)
+def test_single_grouped_weight_mxfp8_workspace_cache(monkeypatch):
+    """BF16 primary weights update one persistent MXFP8 grouped workspace per iteration."""
+    _require_native_grouped_tensor_gemm(mxfp8=True)
+    monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
+    FP8GlobalStateManager.reset()
+    mxfp8_recipe = recipe.MXFP8BlockScaling()
+    grouped_linear = GroupedLinear(
+        2,
+        256,
+        256,
+        bias=False,
+        params_dtype=torch.bfloat16,
+        device="cuda",
+        single_grouped_weight=True,
+        grouped_gemm_backend="grouped_tensor",
+    )
+
+    x = torch.randn(512, 256, dtype=torch.bfloat16, device="cuda", requires_grad=True)
+    m_splits = torch.tensor([256, 256], dtype=torch.int64, device="cuda")
+
+    with autocast(enabled=True, recipe=mxfp8_recipe):
+        grouped_linear(x, m_splits, is_first_microbatch=True)
+        workspace = grouped_linear._fp8_workspaces["weight"]
+        assert isinstance(workspace, GroupedTensor)
+        pointers = (
+            workspace.rowwise_data.data_ptr(),
+            workspace.columnwise_data.data_ptr(),
+            workspace.scale_inv.data_ptr(),
+            workspace.columnwise_scale_inv.data_ptr(),
+        )
+        old_data = workspace.rowwise_data.clone()
+
+        with torch.no_grad():
+            grouped_linear.weight.rowwise_data.add_(1)
+        grouped_linear(x, m_splits, is_first_microbatch=False)
+        assert torch.equal(workspace.rowwise_data, old_data)
+
+        grouped_linear(x, m_splits, is_first_microbatch=True)
+        assert pointers == (
+            workspace.rowwise_data.data_ptr(),
+            workspace.columnwise_data.data_ptr(),
+            workspace.scale_inv.data_ptr(),
+            workspace.columnwise_scale_inv.data_ptr(),
+        )
+        assert not torch.equal(workspace.rowwise_data, old_data)
+
+
+@pytest.mark.skipif(not _mxfp8_available, reason=_reason_for_no_mxfp8)
+def test_single_grouped_primary_mxfp8_bypasses_weight_workspace(monkeypatch):
+    """An MXFP8 primary grouped parameter is already GEMM-ready and is not requantized."""
+    _require_native_grouped_tensor_gemm(mxfp8=True)
+    monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
+    FP8GlobalStateManager.reset()
+    mxfp8_recipe = recipe.MXFP8BlockScaling()
+    with quantized_model_init(enabled=True, recipe=mxfp8_recipe):
+        grouped_linear = GroupedLinear(
+            2,
+            256,
+            256,
+            bias=False,
+            params_dtype=torch.bfloat16,
+            device="cuda",
+            single_grouped_weight=True,
+            grouped_gemm_backend="grouped_tensor",
+        )
+
+    x = torch.randn(512, 256, dtype=torch.bfloat16, device="cuda")
+    m_splits = torch.tensor([256, 256], dtype=torch.int64, device="cuda")
+    with torch.no_grad(), autocast(enabled=True, recipe=mxfp8_recipe):
+        grouped_linear(x, m_splits, is_first_microbatch=True)
+    assert grouped_linear.weight.quantizer is not None
+    assert "weight" not in grouped_linear._fp8_workspaces
+
+
 def _clone_outputs(outputs):
     return [None if out is None else out.detach().clone() for out in outputs]
+
+
+def _grouped_linear_weight_params(module):
+    if module.single_grouped_weight:
+        return [module.weight]
+    return [getattr(module, f"weight{i}") for i in range(module.num_gemms)]
+
+
+def _grouped_linear_bias_params(module):
+    if not module.use_bias:
+        return []
+    if module.single_grouped_bias:
+        return [module.bias]
+    return [getattr(module, f"bias{i}") for i in range(module.num_gemms)]
+
+
+def _run_grouped_parameter_layout(
+    *,
+    grouped_gemm_backend,
+    fp8_recipe,
+    single_grouped_weight,
+    single_grouped_bias,
+    use_bias,
+    delay_wgrad_compute,
+    fuse_wgrad_accumulation,
+    x_base,
+    dy,
+    weights,
+    biases,
+    m_splits,
+):
+    """Run one layout and return all numerically observable forward/backward results."""
+    FP8GlobalStateManager.reset()
+    num_gemms, out_features, in_features = weights.shape
+    module = GroupedLinear(
+        num_gemms,
+        in_features,
+        out_features,
+        bias=use_bias,
+        params_dtype=torch.bfloat16,
+        device="cuda",
+        fuse_wgrad_accumulation=fuse_wgrad_accumulation,
+        delay_wgrad_compute=delay_wgrad_compute,
+        single_grouped_weight=single_grouped_weight,
+        single_grouped_bias=single_grouped_bias,
+        grouped_gemm_backend=grouped_gemm_backend,
+    )
+
+    with torch.no_grad():
+        if single_grouped_weight:
+            module.weight.rowwise_data.view_as(weights).copy_(weights)
+        else:
+            for i in range(num_gemms):
+                getattr(module, f"weight{i}").copy_(weights[i])
+        if use_bias:
+            if single_grouped_bias:
+                module.bias.rowwise_data.view_as(biases).copy_(biases)
+            else:
+                for i in range(num_gemms):
+                    getattr(module, f"bias{i}").copy_(biases[i])
+
+    flat_main_grad = None
+    initial_main_grad = None
+    weight_params = _grouped_linear_weight_params(module)
+    if fuse_wgrad_accumulation:
+        # MCore owns one flat FP32 grad buffer. Discrete parameters receive per-expert
+        # views, while a single grouped parameter receives one view over the full range.
+        flat_main_grad = torch.full(
+            (weights.numel(),),
+            0.25,
+            dtype=torch.float32,
+            device="cuda",
+        )
+        packed_main_grad = flat_main_grad.view_as(weights)
+        main_grad_views = (
+            [packed_main_grad]
+            if single_grouped_weight
+            else [packed_main_grad[i] for i in range(num_gemms)]
+        )
+        for param, main_grad in zip(weight_params, main_grad_views):
+            param.main_grad = main_grad
+            param.overwrite_main_grad = False
+            param.zero_out_wgrad = False
+            param.grad_added_to_main_grad = False
+            assert (
+                param.main_grad.untyped_storage().data_ptr()
+                == flat_main_grad.untyped_storage().data_ptr()
+            )
+        initial_main_grad = flat_main_grad.clone()
+
+    x = x_base.detach().clone().requires_grad_(True)
+    m_splits_arg = (
+        torch.tensor(m_splits, dtype=torch.int64, device="cuda")
+        if grouped_gemm_backend == "grouped_tensor"
+        else m_splits
+    )
+    with autocast(enabled=fp8_recipe is not None, recipe=fp8_recipe):
+        y = module(
+            x,
+            m_splits_arg,
+            is_first_microbatch=False if fuse_wgrad_accumulation else None,
+        )
+    y.backward(dy)
+
+    if fuse_wgrad_accumulation and delay_wgrad_compute:
+        torch.testing.assert_close(flat_main_grad, initial_main_grad, rtol=0, atol=0)
+
+    # The grouped-tensor path computes dbias during the main backward even when dW is delayed.
+    if use_bias and grouped_gemm_backend == "grouped_tensor":
+        assert all(param.grad is not None for param in _grouped_linear_bias_params(module))
+
+    if delay_wgrad_compute:
+        module.backward_dw()
+
+    if fuse_wgrad_accumulation:
+        assert not torch.equal(flat_main_grad, initial_main_grad)
+        for param in weight_params:
+            assert param.grad_added_to_main_grad
+            assert (
+                param.main_grad.untyped_storage().data_ptr()
+                == flat_main_grad.untyped_storage().data_ptr()
+            )
+        packed_wgrad = flat_main_grad.view_as(weights)
+    elif single_grouped_weight:
+        packed_wgrad = module.weight.grad.view_as(weights)
+    else:
+        packed_wgrad = torch.stack([param.grad for param in weight_params])
+
+    packed_dbias = None
+    if use_bias:
+        bias_params = _grouped_linear_bias_params(module)
+        if single_grouped_bias:
+            packed_dbias = bias_params[0].grad.view_as(biases)
+        else:
+            packed_dbias = torch.stack([param.grad for param in bias_params])
+
+    return {
+        "output": y.detach().clone(),
+        "dgrad": x.grad.detach().clone(),
+        "wgrad": packed_wgrad.detach().clone(),
+        "dbias": None if packed_dbias is None else packed_dbias.detach().clone(),
+    }
+
+
+_GROUPED_PARAMETER_LAYOUTS = [
+    pytest.param(False, False, False, id="no-bias-discrete-weight"),
+    pytest.param(False, True, False, id="no-bias-single-weight"),
+    pytest.param(True, False, False, id="bias-discrete-weight-discrete-bias"),
+    pytest.param(True, True, False, id="bias-single-weight-discrete-bias"),
+    pytest.param(True, False, True, id="bias-discrete-weight-single-bias"),
+    pytest.param(True, True, True, id="bias-single-weight-single-bias"),
+]
+
+
+@pytest.mark.parametrize(
+    "use_bias,single_grouped_weight,single_grouped_bias", _GROUPED_PARAMETER_LAYOUTS
+)
+@pytest.mark.parametrize(
+    "fp8_recipe",
+    [
+        pytest.param(None, id="bf16"),
+        pytest.param(
+            recipe.MXFP8BlockScaling(),
+            marks=pytest.mark.skipif(not _mxfp8_available, reason=_reason_for_no_mxfp8),
+            id="mxfp8",
+        ),
+    ],
+)
+@pytest.mark.parametrize("delay_wgrad_compute", _ALL_BOOLEAN)
+@pytest.mark.parametrize("fuse_wgrad_accumulation", _ALL_BOOLEAN)
+def test_grouped_parameter_layout_matches_cpu_m_splits(
+    monkeypatch,
+    use_bias,
+    single_grouped_weight,
+    single_grouped_bias,
+    fp8_recipe,
+    delay_wgrad_compute,
+    fuse_wgrad_accumulation,
+):
+    """Match CUDA m_splits and all meaningful parameter layouts against the legacy path."""
+    use_mxfp8 = fp8_recipe is not None
+    _require_native_grouped_tensor_gemm(mxfp8=use_mxfp8)
+    FP8GlobalStateManager.reset()
+
+    torch.manual_seed(1234)
+    # MXFP8 grouped quantization requires each expert problem to be 256-aligned. Use the same
+    # aligned shapes for BF16 so both precision modes exercise an identical problem layout.
+    num_gemms = 2
+    in_features = 256
+    out_features = 256
+    m_splits = [256, 512]
+    total_tokens = sum(m_splits)
+    x_base = (0.1 * torch.randn(total_tokens, in_features, device="cuda")).to(torch.bfloat16)
+    dy = (0.1 * torch.randn(total_tokens, out_features, device="cuda")).to(torch.bfloat16)
+    weights = (0.1 * torch.randn(num_gemms, out_features, in_features, device="cuda")).to(
+        torch.bfloat16
+    )
+    biases = None
+    if use_bias:
+        biases = (0.1 * torch.randn(num_gemms, out_features, device="cuda")).to(torch.bfloat16)
+
+    # The CPU m_splits baseline is explicitly the legacy, discrete-parameter contract.
+    monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "0")
+    reference = _run_grouped_parameter_layout(
+        grouped_gemm_backend="legacy",
+        fp8_recipe=fp8_recipe,
+        single_grouped_weight=False,
+        single_grouped_bias=False,
+        use_bias=use_bias,
+        delay_wgrad_compute=delay_wgrad_compute,
+        fuse_wgrad_accumulation=fuse_wgrad_accumulation,
+        x_base=x_base,
+        dy=dy,
+        weights=weights,
+        biases=biases,
+        m_splits=m_splits,
+    )
+
+    # Enable single parameters only for the CUDA m_splits target. The explicit layout flags
+    # below still decide whether this particular case uses discrete or grouped parameters.
+    monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
+    result = _run_grouped_parameter_layout(
+        grouped_gemm_backend="grouped_tensor",
+        fp8_recipe=fp8_recipe,
+        single_grouped_weight=single_grouped_weight,
+        single_grouped_bias=single_grouped_bias,
+        use_bias=use_bias,
+        delay_wgrad_compute=delay_wgrad_compute,
+        fuse_wgrad_accumulation=fuse_wgrad_accumulation,
+        x_base=x_base,
+        dy=dy,
+        weights=weights,
+        biases=biases,
+        m_splits=m_splits,
+    )
+
+    tolerances = dict(rtol=1e-2, atol=5e-3)
+
+    for name in ("output", "dgrad", "wgrad", "dbias"):
+        if reference[name] is None:
+            assert result[name] is None
+        else:
+            torch.testing.assert_close(
+                result[name].float(),
+                reference[name].float(),
+                **tolerances,
+                msg=f"Mismatch for {name}",
+            )
 
 
 def _run_grouped_linear_path(
@@ -1720,6 +2142,92 @@ def test_grouped_linear_grouped_tensor_path_single_grouped_bias_delay_wgrad(monk
     y = grouped_linear(x, m_splits)
     y.backward(dy)
     grouped_linear.backward_dw()
+
+
+def test_grouped_linear_returns_single_grouped_bias_parameter(monkeypatch):
+    """return_bias preserves the grouped parent and accumulates dbias into it.
+
+    This mirrors how MCore applies a returned MoE bias::
+
+        x -> GroupedLinear (bias not applied) -> output
+                                                   +
+        grouped bias [2, 128]
+                 |
+                 +-> repeat_interleave([256, 256])
+                       -> per-token bias [512, 128]
+                              |
+                              * routing probabilities
+                              |
+                              +-> loss.backward() -> grouped bias.grad
+
+    Since the loss sums every output feature, each feature of expert ``i`` receives
+    ``sum(probs_for_expert_i)``. The identity assertion also ensures that TE returns the
+    registered grouped parent rather than copied or split bias tensors.
+    """
+    _require_native_grouped_tensor_gemm()
+    monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
+
+    dtype = torch.bfloat16
+    num_gemms = 2
+    in_features = 128
+    out_features = 128
+    m_splits = torch.tensor([256, 256], dtype=torch.int64, device="cuda")
+    total_tokens = 512
+    grouped_linear = GroupedLinear(
+        num_gemms,
+        in_features,
+        out_features,
+        bias=True,
+        return_bias=True,
+        params_dtype=dtype,
+        device="cuda",
+        single_grouped_weight=False,
+        single_grouped_bias=True,
+        grouped_gemm_backend="grouped_tensor",
+    )
+
+    x = torch.randn(
+        total_tokens,
+        in_features,
+        dtype=dtype,
+        device="cuda",
+        requires_grad=True,
+    )
+    probs = torch.rand(total_tokens, dtype=dtype, device="cuda")
+    output, returned_bias = grouped_linear(x, m_splits)
+
+    assert returned_bias is grouped_linear.bias
+    assert returned_bias.shape == (num_gemms, out_features)
+
+    bias_per_token = torch.repeat_interleave(
+        returned_bias,
+        m_splits,
+        dim=0,
+        output_size=total_tokens,
+    )
+    biased_output = (output + bias_per_token * probs.reshape(-1, 1)).to(output.dtype)
+    biased_output.sum().backward()
+
+    # For token t and output feature j, the externally applied bias contributes
+    # bias[expert(t), j] * probs[t] to the summed loss. Therefore every bias feature for
+    # expert e receives sum(probs[t]) over that expert's token range. m_splits places the
+    # first 256 tokens on expert 0 and the remaining 256 tokens on expert 1.
+    expected_dbias = (
+        torch.stack(
+            (probs[:256].float().sum(), probs[256:].float().sum()),
+        )
+        .unsqueeze(-1)
+        .expand(num_gemms, out_features)
+    )
+    assert grouped_linear.bias.grad is not None
+    # Megatron applies the packed bias in BF16. Compare its gradient against an independently
+    # accumulated FP32 reference with a tolerance appropriate for a 256-element BF16 reduction.
+    torch.testing.assert_close(
+        grouped_linear.bias.grad.float(),
+        expected_dbias,
+        rtol=5e-2,
+        atol=5e-3,
+    )
 
 
 @pytest.mark.parametrize("use_fused_path", [False, True], ids=["legacy", "grouped_tensor"])
