@@ -14,6 +14,7 @@ import torch
 import transformer_engine.pytorch as te
 import transformer_engine_torch as tex
 import tvm_ffi
+
 from transformer_engine.common import _get_shared_object_file
 from transformer_engine.pytorch import MXFP8Quantizer
 
@@ -28,7 +29,14 @@ if not hasattr(CORE_LIB, "nvte_set_cutedsl_quant_backend"):
         "Transformer Engine core library."
     )
 
-pytestmark = pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+# The CuTeDSL entrypoint is registered only when NVTE_ENABLE_CUTEDSL_QUANT_BACKEND
+# is set (see common/__init__.py); without it there is nothing to compare against
+# the CUDA path, so skip these runs.
+cutedsl_enabled = os.environ.get("NVTE_ENABLE_CUTEDSL_QUANT_BACKEND", "0") != "0"
+pytestmark = pytest.mark.skipif(
+    not (recipe_available and cutedsl_enabled),
+    reason=reason_for_no_recipe or "NVTE_ENABLE_CUTEDSL_QUANT_BACKEND is not set",
+)
 
 
 class Fusion(NamedTuple):
