@@ -1264,16 +1264,20 @@ def _validate_hybrid_partial_master_policy(
     start_offset,
     fsdp_shard_model_weight,
 ):
-    """Reject an unsafe independently sourced Hybrid column before distopt mutation."""
+    """Reject unsupported Hybrid column-source updates before distopt mutation."""
     row_sub = model_weight._rowwise_storage
     col_sub = model_weight._columnwise_storage
     quantizer = model_weight._get_quantizer()
-    if (
-        master_weight is None
-        or row_sub is None
-        or col_sub is None
-        or quantizer.columnwise_source != "original"
-    ):
+
+    if col_sub is not None and quantizer.columnwise_source == "rowwise_dequantized":
+        raise NotImplementedError(
+            "quantize_master_weights does not support HybridQuantizer with a live "
+            "columnwise representation and "
+            "columnwise_source='rowwise_dequantized'. The column must be derived "
+            "after the rowwise update/all-gather. See #3158."
+        )
+
+    if master_weight is None or row_sub is None or col_sub is None:
         return
 
     shard_has_both_directions = (
@@ -1293,7 +1297,7 @@ def _validate_hybrid_partial_master_policy(
         "HybridQuantizedTensor from a partial master shard when "
         "columnwise_source='original': the one-payload distributed-optimizer "
         "path cannot preserve an independently quantized columnwise value. "
-        "Use columnwise_source='rowwise_dequantized' or provide full-master data."
+        "Provide full-master data or retain only the rowwise representation."
     )
 
 

@@ -610,14 +610,6 @@ def fill_userbuffers_buffer_for_all_gather(
             local_tensor = quantizer(local_tensor)
         return local_tensor, local_tensor
 
-    # TODO(#3158): Support HybridQuantizer with standard Userbuffers.
-    if isinstance(quantizer, HybridQuantizer):
-        raise NotImplementedError(
-            "Standard Userbuffers does not support HybridQuantizer yet. "
-            "Disable Userbuffers all-gather overlap or use a supported "
-            "single-format quantizer. See #3158."
-        )
-
     # Tensor dimensions
     local_shape = local_tensor.size()
     if not local_shape:

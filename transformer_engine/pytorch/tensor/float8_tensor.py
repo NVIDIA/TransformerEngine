@@ -399,6 +399,10 @@ class Float8CurrentScalingQuantizer(Quantizer):
         """
         return True
 
+    def is_requantization_safe(self) -> bool:
+        """Current scaling is derived deterministically from each input."""
+        return True
+
 
 register_value_opaque_quantizer(Float8CurrentScalingQuantizer)
 

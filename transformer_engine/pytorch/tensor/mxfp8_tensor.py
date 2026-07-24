@@ -180,6 +180,10 @@ class MXFP8Quantizer(Quantizer):
     def _get_compatible_recipe(self) -> Union[type[Recipe], None]:
         return MXFP8BlockScaling
 
+    def is_requantization_safe(self) -> bool:
+        """MXFP8 block scales are derived deterministically from each input."""
+        return True
+
 
 register_value_opaque_quantizer(MXFP8Quantizer)
 

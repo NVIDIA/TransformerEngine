@@ -122,6 +122,10 @@ class Float8BlockQuantizer(Quantizer):
         """Quantize tensor implementation"""
         return tex.quantize(tensor, self)
 
+    def is_requantization_safe(self) -> bool:
+        """Block-FP8 scales are derived deterministically from each input."""
+        return True
+
     def get_scale_shape(self, shape: Iterable[int], columnwise: bool) -> Tuple[int, int]:
         """Scaling tensor shape.
 

@@ -453,15 +453,13 @@ class Quantizer(abc.ABC):
         """Returns True if the quantizer supports only rowwise all-gather"""
         return False
 
-    def allows_save_original_input_for_backward(self) -> bool:
-        """Whether ``save_original_input`` preserves backward operand semantics.
+    def is_requantization_safe(self) -> bool:
+        """Whether repeated quantization of the same input reproduces the same value.
 
-        Modules may use ``save_original_input`` as a memory optimization by saving
-        the high-precision input and re-preparing the backward operand later. Some
-        quantizers require the exact forward-produced quantized value for backward,
-        so replacing it with the original tensor would change recipe semantics.
+        Stateful or stochastic quantizers should return ``False``. This lets callers
+        decide whether a quantized value may be discarded and reconstructed later.
         """
-        return True
+        return False
 
     def is_quantizable(self, inp: torch.Tensor) -> bool:  # pylint: disable=unused-argument
         """Whether tensor supports quantized all-gather

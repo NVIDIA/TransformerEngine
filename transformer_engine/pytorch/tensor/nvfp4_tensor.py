@@ -254,6 +254,10 @@ class NVFP4Quantizer(Quantizer):
         """Quantize tensor implementation"""
         return tex.quantize(tensor, self)
 
+    def is_requantization_safe(self) -> bool:
+        """NVFP4 quantization is replay-safe unless stochastic rounding is enabled."""
+        return not self.stochastic_rounding
+
     def is_quantizable(self, inp: torch.Tensor) -> bool:
         """Returns whether or not given inp can be quantized"""
         if self.row_scaled_nvfp4:

@@ -24,7 +24,11 @@ from ...utils import (
     devices_match,
 )
 from ..op import BasicOperation, OperationContext
-from .._common import maybe_autocast_dtype, maybe_dequantize
+from .._common import (
+    get_fused_normalization_quantizer,
+    maybe_autocast_dtype,
+    maybe_dequantize,
+)
 
 
 class RMSNorm(BasicOperation):
@@ -165,6 +169,11 @@ class RMSNorm(BasicOperation):
     ) -> torch.Tensor:
         if is_in_onnx_export_mode():
             return self.op_onnx_forward(input_)
+
+        # Fall back to a high-precision output when fused quantization is unsupported.
+        next_op_input_quantizer = get_fused_normalization_quantizer(
+            next_op_input_quantizer
+        )
 
         # Check tensor dims
         weight = self.weight

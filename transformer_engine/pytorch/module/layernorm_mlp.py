@@ -76,7 +76,12 @@ from ..tensor.nvfp4_tensor import NVFP4Quantizer
 from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ..tensor.hybrid_tensor import HybridQuantizer
 from ..tensor.identity_tensor import IdentityQuantizer
-from ._common import apply_normalization, set_quantizer_amax_reduction_group, WeightGradStore
+from ._common import (
+    apply_normalization,
+    set_quantizer_amax_reduction_group,
+    set_quantizer_usage_for_wgrad_all_gather,
+    WeightGradStore,
+)
 from ..cpu_offload import (
     is_cpu_offload_enabled,
     start_offload,
@@ -1177,12 +1182,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 quantizer = None
                 if ctx.fp8 or ctx.debug:
                     quantizer = ctx.fc1_input_quantizer
-                    if isinstance(quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer)):
-                        # If data is in FP8, we compute FP8 transposes manually
-                        quantizer.set_usage(rowwise=True, columnwise=False)
-                    else:
-                        # wgrad GEMM requires input with column-wise usage
-                        quantizer.set_usage(rowwise=False, columnwise=True)
+                    set_quantizer_usage_for_wgrad_all_gather(quantizer)
                 if ctx.ub_bulk_dgrad:
                     ub_obj_fc1_dgrad = get_ub("fc1_dgrad", ctx.fp8)
                     ln_out_total, _ = fill_userbuffers_buffer_for_all_gather(
@@ -1300,7 +1300,9 @@ class _LayerNormMLP(torch.autograd.Function):
                 and ctx.ub_obj_gradout.with_cublasmp()
             ):
                 if ctx.fc2_grad_output_quantizer is not None:
-                    ctx.fc2_grad_output_quantizer.set_usage(rowwise=True, columnwise=False)
+                    set_quantizer_usage_for_wgrad_all_gather(
+                        ctx.fc2_grad_output_quantizer
+                    )
                 grad_output, _ = gather_along_first_dim(
                     grad_output,
                     ctx.tp_group,
@@ -2185,15 +2187,6 @@ class LayerNormMLP(TransformerEngineBaseModule):
         recipe = FP8GlobalStateManager.get_fp8_recipe()
         if recipe.float8_current_scaling():
             self._customize_quantizers_float8_current_scaling(fwd, recipe)
-        # Hybrid (CustomRecipe) needs no SP amax-reduction setup today: its SP
-        # activations are gathered in high precision and re-quantized whole, so
-        # every rank already sees the same global amax.
-        # TODO(#3158): once native quantized all-gather lands (see
-        # supports_only_rowwise_all_gather / gather_along_first_dim) the SP path
-        # quantizes per-shard, needing a hybrid branch here that mirrors the
-        # current-scaling / NVFP4 SP reduction above:
-        #     elif recipe.custom():
-        #         ...  # enable SP amax reduction on the hybrid input/grad quantizer
 
     def get_quantizer_roles(
         self,

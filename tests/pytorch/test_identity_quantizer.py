@@ -245,16 +245,27 @@ class TestIdentityQuantizerUnit:
         assert isinstance(out, IdentityTensorStorage)
         assert not isinstance(out, IdentityTensor)
 
+    def test_make_empty_internal_returns_storage(self):
+        q = IdentityQuantizer()
+        q.internal = True
+
+        out = q.make_empty((8, 16), dtype=torch.bfloat16, device="cuda")
+
+        assert isinstance(out, IdentityTensorStorage)
+        assert not isinstance(out, IdentityTensor)
+        assert out.size() == torch.Size((8, 16))
+        assert out.dequantize().dtype == torch.bfloat16
+
     def test_grouped_split_all_identity_uses_plain_tensor_views(self):
         from transformer_engine.pytorch.module.grouped_linear import (
-            _split_quantize_with_identity_fallback,
+            _split_quantize_non_hybrid,
         )
 
         x = torch.randn(8, 16, device="cuda", dtype=torch.bfloat16)
         m_splits = [3, 5]
         quantizers = [IdentityQuantizer(), IdentityQuantizer()]
 
-        out = _split_quantize_with_identity_fallback(
+        out = _split_quantize_non_hybrid(
             x, m_splits, quantizers, activation_dtype=torch.bfloat16
         )
 
@@ -267,7 +278,7 @@ class TestIdentityQuantizerUnit:
             IdentityQuantizer(dtype=torch.float32),
             IdentityQuantizer(dtype=torch.float32),
         ]
-        cast_out = _split_quantize_with_identity_fallback(
+        cast_out = _split_quantize_non_hybrid(
             x, m_splits, cast_quantizers, activation_dtype=torch.bfloat16
         )
         assert all(isinstance(t, IdentityTensorStorage) for t in cast_out)
@@ -306,7 +317,7 @@ class TestIdentityQuantizerUnit:
 
     def test_hybrid_split_forwards_disable_bulk_allocation_to_both_directions(self, monkeypatch):
         import transformer_engine.pytorch.module.grouped_linear as grouped_linear
-        from transformer_engine.pytorch.module.grouped_linear import _hybrid_split_quantize
+        from transformer_engine.pytorch.module.grouped_linear import _split_quantize_hybrid
 
         calls = []
 
@@ -318,6 +329,11 @@ class TestIdentityQuantizerUnit:
             ]
 
         monkeypatch.setattr(grouped_linear.tex, "split_quantize", fake_split_quantize)
+        monkeypatch.setattr(
+            grouped_linear,
+            "_supports_native_split_quantize",
+            lambda quantizer: True,
+        )
         x = torch.randn(8, 16, dtype=torch.bfloat16)
         m_splits = [3, 5]
         quantizers = [
@@ -328,7 +344,7 @@ class TestIdentityQuantizerUnit:
             for _ in m_splits
         ]
 
-        out = _hybrid_split_quantize(
+        out = _split_quantize_hybrid(
             x,
             m_splits,
             quantizers,
@@ -357,7 +373,7 @@ class TestIdentityQuantizerUnit:
 
         calls = []
 
-        def fake_hybrid_split_quantize(
+        def fake_split_quantize_hybrid(
             tensor, m_splits, quantizers, *, disable_bulk_allocation=False, **kwargs
         ):
             del tensor, m_splits, quantizers, kwargs
@@ -365,7 +381,9 @@ class TestIdentityQuantizerUnit:
             raise StopAfterFlagCapture("captured hybrid split kwargs")
 
         monkeypatch.setattr(grouped_linear, "is_cpu_offload_enabled", lambda: True)
-        monkeypatch.setattr(grouped_linear, "_hybrid_split_quantize", fake_hybrid_split_quantize)
+        monkeypatch.setattr(
+            grouped_linear, "_split_quantize_hybrid", fake_split_quantize_hybrid
+        )
 
         model = te.GroupedLinear(2, 64, 64, params_dtype=torch.bfloat16).cuda()
         x = torch.randn(64, 64, device="cuda", dtype=torch.bfloat16)
@@ -1486,15 +1504,9 @@ class TestZooDequantizedBackwardFactoryModuleCoverage:
         y_ref, dx_ref, grads_ref = _fwd_bwd_zoo_dequantized_module(
             module_name, ref, inp, ref_recipe
         )
-        if module_name in ("Linear", "GroupedLinear", "LayerNormLinearLinear"):
-            with pytest.warns(UserWarning, match="Ignoring save_original_input=True"):
-                y_test, dx_test, grads_test = _fwd_bwd_zoo_dequantized_module(
-                    module_name, test, inp, qfactory_recipe
-                )
-        else:
-            y_test, dx_test, grads_test = _fwd_bwd_zoo_dequantized_module(
-                module_name, test, inp, qfactory_recipe
-            )
+        y_test, dx_test, grads_test = _fwd_bwd_zoo_dequantized_module(
+            module_name, test, inp, qfactory_recipe
+        )
 
         torch.testing.assert_close(y_test, y_ref, rtol=0.0, atol=0.0)
         torch.testing.assert_close(dx_test, dx_ref, rtol=0.0, atol=0.0)

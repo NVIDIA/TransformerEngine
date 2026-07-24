@@ -5,7 +5,7 @@
 """Tensor and quantizer classes for composed rowwise and columnwise representations."""
 
 from __future__ import annotations
-from typing import Any, Dict, Iterable, Literal, Optional, Tuple
+from typing import Any, Dict, Iterable, Literal, Optional, Tuple, Union
 
 import torch
 
@@ -235,7 +235,7 @@ class HybridQuantizer(Quantizer):
         device: Optional[torch.device] = None,
         requires_grad: bool = False,
         pin_memory: bool = False,
-    ) -> HybridQuantizedTensor:
+    ) -> Union["HybridQuantizedTensor", HybridQuantizedTensorStorage]:
         # Mirror ``quantize_impl``: invoke each sub-quantizer with its own
         # ``internal`` setting (no toggle), so the produced sub-storages have
         # the same type that ``quantize_impl`` would produce via
@@ -254,6 +254,14 @@ class HybridQuantizer(Quantizer):
             if self.columnwise_usage
             else None
         )
+
+        if self.internal:
+            return HybridQuantizedTensorStorage(
+                rowwise_storage=rowwise_empty,
+                columnwise_storage=columnwise_empty,
+                quantizer=self,
+                fake_dtype=dtype,
+            )
 
         return HybridQuantizedTensor(
             shape=shape,
@@ -298,67 +306,13 @@ class HybridQuantizer(Quantizer):
         return dst
 
     def supports_only_rowwise_all_gather(self) -> bool:
-        """Whether TP activation all-gather must preserve rowwise data.
+        """Whether all-gather requires a rowwise-dequantizable source.
 
-        Used by ``_linear_forward_impl`` / ``_linear_backward`` to decide
-        which direction of the saved activation to keep for the backward
-        input-AG: ``True`` keeps rowwise (drops columnwise),
-        ``False`` keeps columnwise (drops rowwise, default for block-
-        scaled formats whose columnwise is directly consumable by wgrad).
-
-        Why hybrid needs a custom rule
-        ------------------------------
-        ``gather_along_first_dim`` has no hybrid-specific dispatch, so
-        hybrid falls through to the generic BF16 fallback::
-
-            inp.dequantize() → all_gather BF16 → quantizer(out)
-
-        The direction we preserve must therefore be one the hybrid can
-        dequantize. Two cases force rowwise preservation:
-
-        1. The rowwise sub-quantizer itself declares rowwise-only AG
-           (e.g. Float8 delayed / current scaling). Propagating keeps
-           hybrid consistent with its component semantics.
-        2. The columnwise sub-quantizer is :class:`NVFP4Quantizer`:
-           ``NVFP4TensorStorage`` has no columnwise dequantize
-           (``_FromNVFP4Func.forward`` raises for ``is_colwise=True``),
-           so a columnwise-only NVFP4 sub-storage cannot traverse the
-           BF16 fallback. Rowwise preservation routes the fallback
-           through NVFP4's working rowwise dequantize instead.
-
-        For MXFP8 / Float8Block / Float8CurrentScaling columnwise sub-
-        quantizers, columnwise dequantize works and the default
-        (``False``) keeps the smaller, wgrad-ready columnwise shard
-        saved — which is the more efficient memory choice.
-
-        TODO(#3158): Add native hybrid dispatch to
-        ``gather_along_first_dim`` to remove the BF16 detour.
-
-        * **Scope.** Branch at the top of ``gather_along_first_dim`` that
-          detects ``HybridQuantizedTensorStorage`` / ``HybridQuantizer``,
-          extracts ``rowwise_sub_storage`` and ``columnwise_sub_storage``
-          with their sub-quantizers, dispatches each to its native
-          ``_all_gather_{fp8,mxfp8,nvfp4,fp8_blockwise}`` path, and wraps
-          the gathered sub-storages back into a ``HybridQuantizedTensor``.
-          Each per-format AG routine already supports rowwise-only or
-          columnwise-only input natively (including NVFP4 columnwise —
-          it gathers packed FP4 bytes without dequantize).
-
-        * **Impact.** Replaces 2×–4× BF16 bandwidth cost with native
-          quantized AG. Mirrors the FSDP2 native-AG pattern we already
-          ship on ``fsdp_pre_all_gather`` / ``fsdp_post_all_gather``.
-          Once it lands, the ``NVFP4Quantizer`` branch in this method
-          can be removed (columnwise NVFP4 AG works natively), leaving
-          only the rowwise-sub-quantizer propagation.
-
-        * **Implementation notes.** Compose async handles across the two
-          per-direction AG calls into a single handle object with a
-          ``.wait()`` that waits on both. Pass ``out_shape=None`` to the
-          recursive calls so each format computes its own packed shape.
-          Preserve FP8 current / delayed rowwise-only semantics on
-          Hopper / L40 (``_all_gather_fp8`` reads ``inp._data`` which
-          may be ``None`` for a columnwise-only FP8 sub-storage on
-          those architectures).
+        Hybrid tensors currently use the high-precision fallback, which
+        dequantizes the local shard before communication. Preserve rowwise
+        data when required by the rowwise sub-quantizer or when the
+        columnwise sub-quantizer is NVFP4, whose columnwise-only storage
+        cannot be dequantized.
         """
         if self.rowwise_quantizer.supports_only_rowwise_all_gather():
             return True
@@ -366,14 +320,21 @@ class HybridQuantizer(Quantizer):
         # (nvfp4_tensor → quantized_tensor → hybrid_tensor at module import).
         from .nvfp4_tensor import NVFP4Quantizer  # noqa: PLC0415
 
-        if isinstance(self.columnwise_quantizer, NVFP4Quantizer):
-            return True
-        return False
+        return isinstance(self.columnwise_quantizer, NVFP4Quantizer)
 
-    def allows_save_original_input_for_backward(self) -> bool:
-        # TODO(#3158): Add an explicit recompute-from-original policy for deterministic
-        # quantizers that can trade backward compute for saved activation memory.
-        return self.columnwise_source == "original"
+    def is_requantization_safe(self) -> bool:
+        """Whether repeated quantization reproduces all requested representations."""
+        if self.rowwise_usage and not self.rowwise_quantizer.is_requantization_safe():
+            return False
+        if self.columnwise_usage and not self.columnwise_quantizer.is_requantization_safe():
+            return False
+        if (
+            self.columnwise_usage
+            and self.columnwise_source == "rowwise_dequantized"
+            and not self.rowwise_quantizer.is_requantization_safe()
+        ):
+            return False
+        return True
 
     def _get_compatible_recipe(self):
         # HybridQuantizer is only reachable via CustomRecipe (the qfactory
@@ -494,18 +455,20 @@ class HybridQuantizedTensor(HybridQuantizedTensorStorage, QuantizedTensor):
             if hasattr(row_cls, "make_like"):
                 row = row_cls.make_like(self._rowwise_storage)
             else:
-                # Storage-only sub-storages (HybridQuantizer.internal=True
-                # path) don't have make_like; the cpu_offload_v2 path does
-                # not hit this branch, but keep the behaviour safe by
-                # sharing the reference as before.
-                row = self._rowwise_storage
+                raise NotImplementedError(
+                    "HybridQuantizedTensor.detach() does not support storage-only "
+                    f"rowwise sub-storage {row_cls.__name__}"
+                )
         col = None
         if self._columnwise_storage is not None:
             col_cls = type(self._columnwise_storage)
             if hasattr(col_cls, "make_like"):
                 col = col_cls.make_like(self._columnwise_storage)
             else:
-                col = self._columnwise_storage
+                raise NotImplementedError(
+                    "HybridQuantizedTensor.detach() does not support storage-only "
+                    f"columnwise sub-storage {col_cls.__name__}"
+                )
         return HybridQuantizedTensor(
             shape=self.shape,
             dtype=self.dtype,

@@ -14,7 +14,7 @@ FP32 specifically.
 """
 
 from __future__ import annotations
-from typing import Any, Iterable, Optional, Tuple
+from typing import Any, Iterable, Optional, Tuple, Union
 
 import torch
 from torch.ops import aten
@@ -96,6 +96,10 @@ class IdentityQuantizer(Quantizer):
             device=data.device,
         )
 
+    def is_requantization_safe(self) -> bool:
+        """Identity quantization is deterministic."""
+        return True
+
     def make_empty(
         self,
         shape: Iterable[int],
@@ -104,12 +108,18 @@ class IdentityQuantizer(Quantizer):
         device: Optional[torch.device] = None,
         requires_grad: bool = False,
         pin_memory: bool = False,
-    ) -> "IdentityTensor":
+    ) -> Union["IdentityTensor", IdentityTensorStorage]:
         if device is None:
             device = torch.device("cuda")
         device = torch.device(device)
         data_dtype = self.dtype if self.dtype is not None else dtype
         data = torch.empty(tuple(shape), dtype=data_dtype, device=device, pin_memory=pin_memory)
+        if self.internal:
+            return IdentityTensorStorage(
+                hp_data=data,
+                fake_dtype=data_dtype,
+                quantizer=self,
+            )
         return IdentityTensor(
             data.shape,
             data_dtype,

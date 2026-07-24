@@ -63,6 +63,7 @@ from ._common import (
     apply_normalization,
     noop_cat,
     set_quantizer_amax_reduction_group,
+    set_quantizer_usage_for_wgrad_all_gather,
     WeightGradStore,
 )
 from ..quantized_tensor import (
@@ -752,12 +753,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 quantizer = None
                 if ctx.input_quantizer is not None and ctx.fp8:
                     quantizer = ctx.input_quantizer
-                    if quantizer.supports_only_rowwise_all_gather():
-                        # If data is in FP8, we compute FP8 transposes manually
-                        quantizer.set_usage(rowwise=True, columnwise=False)
-                    else:
-                        # wgrad GEMM requires input with column-wise usage
-                        quantizer.set_usage(rowwise=False, columnwise=True)
+                    set_quantizer_usage_for_wgrad_all_gather(quantizer)
                 if ctx.ub_bulk_dgrad:
                     ln_out_total, _ = fill_userbuffers_buffer_for_all_gather(
                         ub_obj_dgrad,
@@ -914,7 +910,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 and ctx.ub_obj_gradout.with_cublasmp()
             ):
                 if ctx.grad_output_quantizer is not None:
-                    ctx.grad_output_quantizer.set_usage(rowwise=True, columnwise=False)
+                    set_quantizer_usage_for_wgrad_all_gather(ctx.grad_output_quantizer)
                 grad_output, _ = gather_along_first_dim(
                     grad_output,
                     ctx.tp_group,
@@ -1580,15 +1576,6 @@ class LayerNormLinear(TransformerEngineBaseModule):
         recipe = FP8GlobalStateManager.get_fp8_recipe()
         if recipe.float8_current_scaling():
             self._customize_quantizers_float8_current_scaling(fwd, recipe)
-        # Hybrid (CustomRecipe) needs no SP amax-reduction setup today: its SP
-        # activations are gathered in high precision and re-quantized whole, so
-        # every rank already sees the same global amax.
-        # TODO(#3158): once native quantized all-gather lands (see
-        # supports_only_rowwise_all_gather / gather_along_first_dim) the SP path
-        # quantizes per-shard, needing a hybrid branch here that mirrors the
-        # current-scaling / NVFP4 SP reduction above:
-        #     elif recipe.custom():
-        #         ...  # enable SP amax reduction on the hybrid input/grad quantizer
 
     def get_quantizer_roles(
         self,

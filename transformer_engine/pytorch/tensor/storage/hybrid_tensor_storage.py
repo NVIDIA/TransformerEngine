@@ -58,7 +58,7 @@ class HybridQuantizedTensorStorage(QuantizedTensorStorage):
 
         instance._rowwise_storage = rowwise_storage
         instance._columnwise_storage = columnwise_storage
-        instance._quantizer = quantizer
+        instance._quantizer = quantizer.copy()
         return instance
 
     @property
