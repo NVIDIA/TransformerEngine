@@ -106,6 +106,7 @@ def derive_swizzled_scale_layout(
     mS_row,
     mS_col,
 ):
+    """Derive the swizzled layout for the rowwise and colwise scale tensors."""
     num_scale_cols = N // MXFP8_BLOCK_SCALING_SIZE
     num_scale_rows = M // MXFP8_BLOCK_SCALING_SIZE
 
@@ -1628,6 +1629,7 @@ class MXFP8QuantizeSpecializedRowwiseKernel(MXFP8QuantizeKernelBase):
 
     @cute.kernel
     def kernel(self, mX, mO_row, mS_row, mNoop, max_norm_rcp, DTYPE):
+        """Device entry: no-op the CTA when the noop flag is set, else run the quantize main loop."""
         skip_execution = cutlass.const_expr(self.cfg.WITH_NOOP) and mNoop[0] == Float32(1.0)
         if not skip_execution:
             self._kernel_main(mX, mO_row, mS_row, max_norm_rcp, DTYPE)
@@ -1898,6 +1900,7 @@ class MXFP8QuantizeSpecializedBidimensionalKernel(MXFP8QuantizeKernelBase):
         tma_atom_out_col,
         tma_dst_out_col,
     ):
+        l"""Device entry: no-op the CTA when the noop flag is set, else run the quantize main loop."""
         skip_execution = cutlass.const_expr(self.cfg.WITH_NOOP) and mNoop[0] == Float32(1.0)
         if not skip_execution:
             self._kernel_main(
