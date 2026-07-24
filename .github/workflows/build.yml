@@ -92,7 +92,7 @@ jobs:
     name: 'JAX'
     runs-on: ubuntu-latest
     container:
-      image: ghcr.io/nvidia/jax:jax
+      image: ghcr.io/nvidia/jax:jax-2026-07-21
       options: --user root
     steps:
       - name: 'Dependencies'
@@ -143,7 +143,7 @@ jobs:
 
       - name: Start named container
         run: |
-          docker run -v $(pwd):$(pwd) -w $(pwd) --name builder -d ghcr.io/nvidia/jax:jax sleep infinity
+          docker run -v $(pwd):$(pwd) -w $(pwd) --name builder -d ghcr.io/nvidia/jax:jax-2026-07-21 sleep infinity
 
       - name: 'Dependencies'
         run: |
