@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 """Attention Backends."""
+
 from contextlib import nullcontext
 from importlib.metadata import version as get_pkg_version
 from importlib.metadata import PackageNotFoundError
@@ -365,7 +366,22 @@ class UnfusedDotProductAttention(torch.nn.Module):
         """Fast attribute set for non-parameter fields."""
         self.__dict__[name] = value
 
-    def forward(
+    def forward(self, *args, fp8: bool = False, fp8_output: bool = False, **kwargs) -> torch.Tensor:
+        """Unfused attention fprop; see `_forward` for the argument list.
+
+        FP8 (emulation and/or Float8Tensor output) is not supported under
+        torch.compile -- run the backend as an eager island in that case.
+        """
+        if fp8 or fp8_output:
+            return self._forward_eager(*args, fp8=fp8, fp8_output=fp8_output, **kwargs)
+        return self._forward(*args, fp8=False, fp8_output=False, **kwargs)
+
+    @no_torch_dynamo()
+    def _forward_eager(self, *args, **kwargs) -> torch.Tensor:
+        """Eager-only (dynamo-disabled) wrapper around `_forward`."""
+        return self._forward(*args, **kwargs)
+
+    def _forward(
         self,
         _alibi_cache: Dict[str, Any],
         query_layer: torch.Tensor,
@@ -399,6 +415,14 @@ class UnfusedDotProductAttention(torch.nn.Module):
         qkv_format, q_format, _ = dpa_utils.get_qkv_format(qkv_layout, inference_params)
         if inference_params is not None and inference_params.is_paged:
             key_layer, value_layer = inference_params.convert_paged_to_nonpaged(self.layer_number)
+
+        # Token count for the thd output conversion (ConvertBSHDtoTHD) below.
+        # Captured here, before any layout conversion, because when the query
+        # enters in thd layout (qkv_format "thd" for training or "thd_2bshd" for
+        # inference) shape[0] is the total query token count. Deriving it later
+        # via cu_seqlens_q[-1].item() would sync with the GPU and break
+        # torch.compile + cudagraphs (unbacked SymInt).
+        total_tokens_q = query_layer.shape[0] if q_format == "thd" else None
 
         # convert to sbhd
         # training: bshd, thd
@@ -708,6 +732,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
             context_layer = ConvertBSHDtoTHD.apply(
                 context_layer,
                 cu_seqlens_q,
+                total_tokens_q,
             )
 
             # [tq, h, d] --> [tq, hd]
