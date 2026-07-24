@@ -123,6 +123,8 @@ def setup_requirements() -> Tuple[List[str], List[str]]:
         "pydantic",
         "importlib-metadata>=1.0",
         "packaging",
+        "apache-tvm-ffi>=0.1.12",
+        "nvidia-cutlass-dsl>=4.4.2",
     ]
     test_reqs: List[str] = ["pytest>=8.2.1"]
 

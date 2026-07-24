@@ -103,6 +103,23 @@ set(CUTLASS_TOOLS_INCLUDE_DIR
 # Python
 find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
 
+# Find tvm_ffi pip package's path in build time. We need to retrieve the include path to obtain its headers
+# in order to compile the CuTeDSL quantize backend bridge (common/tvm_ffi_bridge.h).
+# At runtime, we will attempt to find tvm_ffi's shared library path (libtvmffi.so) via python import in common/__init__.py.
+# If no libtvmffi.so is found, the CuTeDSL backend will be disabled and fall back to the default TE CUDA C++ kernels.
+execute_process(
+  COMMAND ${Python_EXECUTABLE} -c "import tvm_ffi.libinfo as li; print(li.find_include_path())"
+  OUTPUT_VARIABLE TVM_FFI_INCLUDE_DIR
+  OUTPUT_STRIP_TRAILING_WHITESPACE
+  RESULT_VARIABLE TVM_FFI_INCLUDE_QUERY)
+if(NOT TVM_FFI_INCLUDE_QUERY EQUAL 0)
+  message(FATAL_ERROR
+          "Could not import the tvm_ffi Python package (with '${Python_EXECUTABLE}'), "
+          "whose headers Transformer Engine needs to compile the CuTeDSL quantize "
+          "backend bridge (common/tvm_ffi_bridge.h). Install it into this Python "
+          "environment: `pip install apache-tvm-ffi`.")
+endif()
+
 function(find_nccl_version OUT_VERSION OUT_INCLUDE_DIR)
   find_path(_nvte_nccl_include_dir
             NAMES nccl.h
@@ -360,6 +377,10 @@ target_link_libraries(transformer_engine PUBLIC
                       CUDA::cublas
                       CUDA::cudart
                       CUDNN::cudnn_all)
+
+# Include tvm-ffi headers to compile tvm_ffi_bridge.h. The tvm-ffi library is loaded at runtime via dlopen.
+# If libtvmffi.so is not successfully loaded, the CuTeDSL backend is disabled and will fall back to the default TE CUDA C++ kernels.
+target_include_directories(transformer_engine PRIVATE ${TVM_FFI_INCLUDE_DIR})
 
 target_include_directories(transformer_engine PRIVATE
                            ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
