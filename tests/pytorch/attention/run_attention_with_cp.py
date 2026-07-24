@@ -15,7 +15,11 @@ from transformer_engine.pytorch.attention.dot_product_attention.context_parallel
 from transformer_engine.pytorch.attention.dot_product_attention.utils import combine_and_quantize
 import transformer_engine_torch as tex
 from transformer_engine.pytorch import DType
-from test_attention_with_cp import model_configs_flash_attn, model_configs_fused_attn
+from test_attention_with_cp import (
+    model_configs_flash_attn,
+    model_configs_fused_attn,
+    model_configs_fused_attn_d256,
+)
 from transformer_engine.pytorch import (
     autocast,
     DotProductAttention,
@@ -231,7 +235,12 @@ def run_dpa_with_cp(
         config = copy.deepcopy(model_configs_flash_attn[model])
     if kernel_backend == "FusedAttention":
         os.environ["NVTE_FUSED_ATTN"] = "1"
-        config = copy.deepcopy(model_configs_fused_attn[model])
+        if model in model_configs_fused_attn:
+            config = copy.deepcopy(model_configs_fused_attn[model])
+        elif model in model_configs_fused_attn_d256:
+            config = copy.deepcopy(model_configs_fused_attn_d256[model])
+        else:
+            assert False, f"{model=} is not a known FusedAttention CP config!"
     assert config.attn_mask_type in [
         "causal",
         "no_mask",
