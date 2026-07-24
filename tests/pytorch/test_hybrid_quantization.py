@@ -609,9 +609,7 @@ class TestHybridColumnwiseSource:
         # Wgrad reconstruction only repeats the rowwise stage for a
         # rowwise-dequantized columnwise source.
         expected_reconstruction = columnwise_source == "original" or rowwise_safe
-        assert (
-            can_reconstruct_wgrad_input_from_original(hq) is expected_reconstruction
-        )
+        assert can_reconstruct_wgrad_input_from_original(hq) is expected_reconstruction
 
     def test_hybrid_rowwise_source_requires_safe_rowwise_quantizer(self):
         hq = HybridQuantizer(
@@ -761,9 +759,7 @@ class TestHybridSaveOriginalInputPolicy:
 
     def test_grouped_linear_classifies_requantization_safety_once_per_generation(self):
         counters = [{"calls": 0}, {"calls": 0}]
-        input_quantizers = [
-            _CountingUnsafeIdentityQuantizer(counter) for counter in counters
-        ]
+        input_quantizers = [_CountingUnsafeIdentityQuantizer(counter) for counter in counters]
         generation = []
         for input_quantizer in input_quantizers:
             generation.extend((input_quantizer, IdentityQuantizer(), IdentityQuantizer()))
@@ -797,9 +793,7 @@ class TestHybridSaveOriginalInputPolicy:
         def factory(role):
             if role is not None and role.module_type == "linear" and role.tensor_type == "input":
                 rowwise_cls = (
-                    _CountingIdentityQuantizer
-                    if rowwise_safe
-                    else _CountingUnsafeIdentityQuantizer
+                    _CountingIdentityQuantizer if rowwise_safe else _CountingUnsafeIdentityQuantizer
                 )
                 columnwise_cls = (
                     _CountingIdentityQuantizer
@@ -5196,10 +5190,7 @@ class TestHybridQuantizeMasterWeights:
 
         with pytest.raises(
             ValueError,
-            match=(
-                "partial master shard.*columnwise_source='original'.*"
-                "full-master data"
-            ),
+            match="partial master shard.*columnwise_source='original'.*full-master data",
         ):
             quantize_master_weights(
                 [weight],

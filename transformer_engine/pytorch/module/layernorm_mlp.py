@@ -1300,9 +1300,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 and ctx.ub_obj_gradout.with_cublasmp()
             ):
                 if ctx.fc2_grad_output_quantizer is not None:
-                    set_quantizer_usage_for_wgrad_all_gather(
-                        ctx.fc2_grad_output_quantizer
-                    )
+                    set_quantizer_usage_for_wgrad_all_gather(ctx.fc2_grad_output_quantizer)
                 grad_output, _ = gather_along_first_dim(
                     grad_output,
                     ctx.tp_group,

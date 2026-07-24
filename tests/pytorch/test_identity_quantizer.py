@@ -265,9 +265,7 @@ class TestIdentityQuantizerUnit:
         m_splits = [3, 5]
         quantizers = [IdentityQuantizer(), IdentityQuantizer()]
 
-        out = _split_quantize_non_hybrid(
-            x, m_splits, quantizers, activation_dtype=torch.bfloat16
-        )
+        out = _split_quantize_non_hybrid(x, m_splits, quantizers, activation_dtype=torch.bfloat16)
 
         assert all(isinstance(t, torch.Tensor) for t in out)
         assert not any(isinstance(t, IdentityTensorStorage) for t in out)
@@ -381,9 +379,7 @@ class TestIdentityQuantizerUnit:
             raise StopAfterFlagCapture("captured hybrid split kwargs")
 
         monkeypatch.setattr(grouped_linear, "is_cpu_offload_enabled", lambda: True)
-        monkeypatch.setattr(
-            grouped_linear, "_split_quantize_hybrid", fake_split_quantize_hybrid
-        )
+        monkeypatch.setattr(grouped_linear, "_split_quantize_hybrid", fake_split_quantize_hybrid)
 
         model = te.GroupedLinear(2, 64, 64, params_dtype=torch.bfloat16).cuda()
         x = torch.randn(64, 64, device="cuda", dtype=torch.bfloat16)

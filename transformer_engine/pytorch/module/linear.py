@@ -323,9 +323,7 @@ def _linear_forward_impl(
                 )
                 save_original_input = False
             else:
-                raise ValueError(
-                    "DelayedScaling recipe is not supported with save_original_input"
-                )
+                raise ValueError("DelayedScaling recipe is not supported with save_original_input")
         elif not can_reconstruct_wgrad_input_from_original(input_quantizer):
             warnings.warn(
                 "Ignoring save_original_input=True because the input quantizer cannot "

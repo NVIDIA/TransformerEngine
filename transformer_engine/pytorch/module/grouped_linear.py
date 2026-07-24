@@ -266,8 +266,10 @@ def _split_quantize_non_hybrid(
         )
 
     tensor = cast_if_needed(tensor, activation_dtype)
-    if allow_identity_views and type(reference) is IdentityQuantizer and (
-        reference.dtype is None or reference.dtype == activation_dtype
+    if (
+        allow_identity_views
+        and type(reference) is IdentityQuantizer
+        and (reference.dtype is None or reference.dtype == activation_dtype)
     ):
         return torch.split(tensor, m_splits)
 
@@ -917,10 +919,7 @@ class _GroupedLinear(torch.autograd.Function):
             # Megatron-Core may enable this automatically to reuse an activation
             # already retained by an upstream operation. The resolved quantizer
             # generation is classified once in ``_validate_quantizer_generation``.
-            if (
-                save_original_input
-                and unsafe_requantization_input_quantizer is not None
-            ):
+            if save_original_input and unsafe_requantization_input_quantizer is not None:
                 warnings.warn(
                     "Ignoring save_original_input=True because the input quantizer cannot "
                     "safely reconstruct the backward operand from the original input "
@@ -1922,15 +1921,12 @@ class GroupedLinear(TransformerEngineBaseModule):
                 (
                     q
                     for q in input_quantizers
-                    if q is not None
-                    and not can_reconstruct_wgrad_input_from_original(q)
+                    if q is not None and not can_reconstruct_wgrad_input_from_original(q)
                 ),
                 None,
             )
             self._delayed_scaling_input_quantizer = delayed_scaling_input_quantizer
-            self._unsafe_requantization_input_quantizer = (
-                unsafe_requantization_input_quantizer
-            )
+            self._unsafe_requantization_input_quantizer = unsafe_requantization_input_quantizer
         else:
             stride = self._num_fp8_tensors_per_gemm["bwd"]
             grad_output_quantizers = tuple(

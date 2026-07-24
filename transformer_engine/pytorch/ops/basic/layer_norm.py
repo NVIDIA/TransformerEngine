@@ -188,9 +188,7 @@ class LayerNorm(BasicOperation):
             return self.op_onnx_forward(input_)
 
         # Fall back to a high-precision output when fused quantization is unsupported.
-        next_op_input_quantizer = get_fused_normalization_quantizer(
-            next_op_input_quantizer
-        )
+        next_op_input_quantizer = get_fused_normalization_quantizer(next_op_input_quantizer)
 
         # Check tensor dims
         weight = self.weight
