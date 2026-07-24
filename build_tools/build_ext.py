@@ -4,11 +4,12 @@
 
 """Installation script."""
 
+import copy
 import os
 import subprocess
 import sys
 import sysconfig
-import copy
+import tempfile
 import time
 
 from pathlib import Path
@@ -111,21 +112,31 @@ def get_build_ext(
             for ext in self.extensions:
                 package_path = Path(self.get_ext_fullpath(ext.name))
                 install_dir = package_path.resolve().parent
-                if isinstance(ext, CMakeExtension):
-                    print(f"Building CMake extension {ext.name}")
-                    # Set up incremental builds for CMake extensions
-                    build_dir = os.getenv("NVTE_CMAKE_BUILD_DIR")
-                    if build_dir:
-                        build_dir = Path(build_dir).resolve()
-                    else:
-                        root_dir = Path(__file__).resolve().parent.parent
-                        build_dir = root_dir / "build" / "cmake"
+                if not isinstance(ext, CMakeExtension):
+                    continue
 
-                    # Ensure the directory exists
+                print(f"Building CMake extension {ext.name}")
+                configured_build_dir = os.getenv("NVTE_CMAKE_BUILD_DIR")
+                if configured_build_dir:
+                    # An explicit build directory enables incremental builds.
+                    build_dir = Path(configured_build_dir).resolve()
                     build_dir.mkdir(parents=True, exist_ok=True)
-
                     ext._build_cmake(
                         build_dir=build_dir,
+                        install_dir=install_dir,
+                    )
+                    continue
+
+                # Isolate CMake state between concurrent and successive builds.
+                build_temp = Path(self.build_temp)
+                build_temp.mkdir(parents=True, exist_ok=True)
+                with tempfile.TemporaryDirectory(
+                    prefix=f"cmake-build-{ext.name}-",
+                    dir=build_temp,
+                ) as build_dir:
+                    print(f"Building CMake extension {ext.name} in temporary directory {build_dir}")
+                    ext._build_cmake(
+                        build_dir=Path(build_dir),
                         install_dir=install_dir,
                     )
 
