@@ -77,6 +77,8 @@ do
   XML_ATTN="$XML_LOG_DIR/pytest_test_attention_fa${fa_tag}.xml"
   XML_CP="$XML_LOG_DIR/pytest_test_attention_with_cp_fa${fa_tag}.xml"
 
+  # test_attention.py reloads its own trusted delayed-scaling FP8 checkpoint,
+  # whose legacy extra state requires an explicit pickle opt-in.
   if [ "$fa_version" = "$CP_FA_VERSION" ]; then
     echo "Running CP tests with FA $fa_version (CP version for sm$sm_arch)"
     if [ "$NUM_GPUS" -ge 5 ]; then
@@ -84,7 +86,7 @@ do
       CP_GPUS=$(seq -s, 1 $CP_NUM_GPUS)
       echo "Running tests in parallel: test_attention.py on GPU 0, test_attention_with_cp.py on GPUs $CP_GPUS ($CP_NUM_GPUS GPUs)"
 
-      CUDA_VISIBLE_DEVICES=0 NVTE_TORCH_COMPILE=0 python3 -m pytest -v -s \
+      CUDA_VISIBLE_DEVICES=0 NVTE_TORCH_COMPILE=0 NVTE_ALLOW_UNSAFE_PICKLE_EXTRA_STATE=1 python3 -m pytest -v -s \
         --junitxml=$XML_ATTN \
         $TE_PATH/tests/pytorch/attention/test_attention.py &
       PID_ATTN=$!
@@ -98,12 +100,12 @@ do
       wait $PID_CP || test_fail "test_attention_with_cp.py (FA $fa_version)"
     else
       echo "Running tests sequentially: need >=5 GPUs for parallel execution (1 for test_attention + 4 for test_attention_with_cp)"
-      NVTE_TORCH_COMPILE=0 python3 -m pytest -v -s --junitxml=$XML_ATTN $TE_PATH/tests/pytorch/attention/test_attention.py || test_fail "test_attention.py (FA $fa_version)"
+      NVTE_TORCH_COMPILE=0 NVTE_ALLOW_UNSAFE_PICKLE_EXTRA_STATE=1 python3 -m pytest -v -s --junitxml=$XML_ATTN $TE_PATH/tests/pytorch/attention/test_attention.py || test_fail "test_attention.py (FA $fa_version)"
       NVTE_TORCH_COMPILE=0 python3 -m pytest -v -s --junitxml=$XML_CP $TE_PATH/tests/pytorch/attention/test_attention_with_cp.py || test_fail "test_attention_with_cp.py (FA $fa_version)"
     fi
   else
     echo "Skipping CP tests for FA $fa_version (CP only runs with FA $CP_FA_VERSION on sm$sm_arch)"
-    NVTE_TORCH_COMPILE=0 python3 -m pytest -v -s --junitxml=$XML_ATTN $TE_PATH/tests/pytorch/attention/test_attention.py || test_fail "test_attention.py (FA $fa_version)"
+    NVTE_TORCH_COMPILE=0 NVTE_ALLOW_UNSAFE_PICKLE_EXTRA_STATE=1 python3 -m pytest -v -s --junitxml=$XML_ATTN $TE_PATH/tests/pytorch/attention/test_attention.py || test_fail "test_attention.py (FA $fa_version)"
   fi
 done
 
