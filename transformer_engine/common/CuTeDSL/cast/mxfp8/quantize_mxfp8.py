@@ -2220,7 +2220,8 @@ class MXFP8QuantizeSpecializedBidimensionalKernel(MXFP8QuantizeKernelBase):
         WIDTH: cutlass.Constexpr,
     ):
         """Flush a staged (ROWS, COLS) SMEM scale block (a plain row-major 2D tensor) to its (bidy, bidx) slice of the gmem scale tensor,
-        where each GMEM slice has the same shape as this SMEM tile. Use `WIDTH` bytes per vectorized store."""
+        where each GMEM slice has the same shape as this SMEM tile. Use `WIDTH` bytes per vectorized store.
+        """
         mS_M = mS.shape[0]
         mS_N = mS.shape[1]
         # Obtain the GMEM slice for the output scale factor block of this CTA
