@@ -2213,76 +2213,136 @@ class UnpackTensor(torch.autograd.Function):
         return None, None, _pack_tensor(indices, grad_output)
 
 
-class ConvertTHDtoBSHD(torch.autograd.Function):
+# ---------------------------------------------------------------------------
+# THD <-> BSHD conversions exposed as `torch.library` custom ops so that
+# `torch.compile` can trace them. Backward of each direction is the other
+# direction, wired through `register_autograd` + `setup_context`, mirroring
+# the pattern in `transformer_engine/pytorch/permutation.py`.
+# ---------------------------------------------------------------------------
+
+
+@torch.library.custom_op("te_attention::convert_thd_to_bshd", mutates_args=())
+def _convert_thd_to_bshd_op(
+    thd_tensor: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    batch_size: int,
+    max_seqlen: int,
+) -> torch.Tensor:
+    """Forward pass for THD->BSHD conversion."""
+    if not thd_tensor.is_contiguous():
+        thd_tensor = thd_tensor.contiguous()
+    return tex.convert_thd_to_bshd(thd_tensor, cu_seqlens, batch_size, max_seqlen)
+
+
+@_convert_thd_to_bshd_op.register_fake
+def _convert_thd_to_bshd_fake(
+    thd_tensor: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    batch_size: int,
+    max_seqlen: int,
+) -> torch.Tensor:
+    del cu_seqlens
+    h, d = thd_tensor.shape[1], thd_tensor.shape[2]
+    return torch.empty(
+        (batch_size, max_seqlen, h, d), dtype=thd_tensor.dtype, device=thd_tensor.device
+    )
+
+
+@torch.library.custom_op("te_attention::convert_bshd_to_thd", mutates_args=())
+def _convert_bshd_to_thd_op(
+    bshd_tensor: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    num_tokens: int,
+) -> torch.Tensor:
+    """Forward pass for BSHD->THD conversion."""
+    if not bshd_tensor.is_contiguous():
+        bshd_tensor = bshd_tensor.contiguous()
+    return tex.convert_bshd_to_thd(bshd_tensor, cu_seqlens, num_tokens)
+
+
+@_convert_bshd_to_thd_op.register_fake
+def _convert_bshd_to_thd_fake(
+    bshd_tensor: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    num_tokens: int,
+) -> torch.Tensor:
+    del cu_seqlens
+    h, d = bshd_tensor.shape[2], bshd_tensor.shape[3]
+    return torch.empty((num_tokens, h, d), dtype=bshd_tensor.dtype, device=bshd_tensor.device)
+
+
+def _convert_thd_to_bshd_setup_context(ctx, inputs, output):
+    del output
+    thd_tensor, cu_seqlens, _batch_size, _max_seqlen = inputs
+    ctx.save_for_backward(cu_seqlens)
+    ctx.num_tokens = thd_tensor.size(0)
+
+
+def _convert_thd_to_bshd_backward_wrapper(ctx, grad_bshd):
+    (cu_seqlens,) = ctx.saved_tensors
+    grad_thd = torch.ops.te_attention.convert_bshd_to_thd(grad_bshd, cu_seqlens, ctx.num_tokens)
+    return grad_thd, None, None, None
+
+
+_convert_thd_to_bshd_op.register_autograd(
+    _convert_thd_to_bshd_backward_wrapper,
+    setup_context=_convert_thd_to_bshd_setup_context,
+)
+
+
+def _convert_bshd_to_thd_setup_context(ctx, inputs, output):
+    del output
+    bshd_tensor, cu_seqlens, _num_tokens = inputs
+    ctx.save_for_backward(cu_seqlens)
+    ctx.batch_size = bshd_tensor.size(0)
+    ctx.max_seqlen = bshd_tensor.size(1)
+
+
+def _convert_bshd_to_thd_backward_wrapper(ctx, grad_thd):
+    (cu_seqlens,) = ctx.saved_tensors
+    grad_bshd = torch.ops.te_attention.convert_thd_to_bshd(
+        grad_thd, cu_seqlens, ctx.batch_size, ctx.max_seqlen
+    )
+    return grad_bshd, None, None
+
+
+_convert_bshd_to_thd_op.register_autograd(
+    _convert_bshd_to_thd_backward_wrapper,
+    setup_context=_convert_bshd_to_thd_setup_context,
+)
+
+
+class ConvertTHDtoBSHD:
     """
     Convert a tensor from qkv_format = thd to qkv_format = bshd.
+
+    Thin wrapper around the ``te_attention::convert_thd_to_bshd`` custom op,
+    exposing an ``.apply(thd_tensor, cu_seqlens, max_seqlen)`` staticmethod so
+    callsites keep the ``autograd.Function``-style ``.apply(...)`` invocation.
     """
 
     @staticmethod
-    def forward(ctx, thd_tensor, cu_seqlens, max_seqlen):
+    def apply(thd_tensor, cu_seqlens, max_seqlen):
         # pylint: disable=missing-function-docstring
         batch_size = cu_seqlens.shape[0] - 1
-        if not thd_tensor.is_contiguous():
-            thd_tensor = thd_tensor.contiguous()
-        bshd_tensor = tex.convert_thd_to_bshd(
-            thd_tensor,
-            cu_seqlens,
-            batch_size,
-            max_seqlen,
+        return torch.ops.te_attention.convert_thd_to_bshd(
+            thd_tensor, cu_seqlens, batch_size, max_seqlen
         )
-        ctx.save_for_backward(cu_seqlens)
-        ctx.num_tokens = thd_tensor.shape[0]
-        return bshd_tensor
-
-    @staticmethod
-    def backward(ctx, bshd_tensor):
-        # pylint: disable=missing-function-docstring
-        (cu_seqlens,) = ctx.saved_tensors
-        if not bshd_tensor.is_contiguous():
-            bshd_tensor = bshd_tensor.contiguous()
-        thd_tensor = tex.convert_bshd_to_thd(
-            bshd_tensor,
-            cu_seqlens,
-            ctx.num_tokens,
-        )
-        return thd_tensor, None, None
 
 
-class ConvertBSHDtoTHD(torch.autograd.Function):
+class ConvertBSHDtoTHD:
     """
     Convert a tensor from qkv_format = bshd to qkv_format = thd.
+
+    Thin wrapper around the ``te_attention::convert_bshd_to_thd`` custom op,
+    exposing an ``.apply(bshd_tensor, cu_seqlens, num_tokens)`` staticmethod so
+    callsites keep the ``autograd.Function``-style ``.apply(...)`` invocation.
     """
 
     @staticmethod
-    def forward(ctx, bshd_tensor, cu_seqlens):
+    def apply(bshd_tensor, cu_seqlens, num_tokens):
         # pylint: disable=missing-function-docstring
-        num_tokens = cu_seqlens[-1]
-        max_seqlen = bshd_tensor.shape[1]
-        if not bshd_tensor.is_contiguous():
-            bshd_tensor = bshd_tensor.contiguous()
-        thd_tensor = tex.convert_bshd_to_thd(
-            bshd_tensor,
-            cu_seqlens,
-            num_tokens,
-        )
-        ctx.save_for_backward(cu_seqlens)
-        ctx.max_seqlen = max_seqlen
-        return thd_tensor
-
-    @staticmethod
-    def backward(ctx, thd_tensor):
-        # pylint: disable=missing-function-docstring
-        (cu_seqlens,) = ctx.saved_tensors
-        batch_size = cu_seqlens.shape[0] - 1
-        if not thd_tensor.is_contiguous():
-            thd_tensor = thd_tensor.contiguous()
-        bshd_tensor = tex.convert_thd_to_bshd(
-            thd_tensor,
-            cu_seqlens,
-            batch_size,
-            ctx.max_seqlen,
-        )
-        return bshd_tensor, None
+        return torch.ops.te_attention.convert_bshd_to_thd(bshd_tensor, cu_seqlens, num_tokens)
 
 
 def get_qkv_format(
