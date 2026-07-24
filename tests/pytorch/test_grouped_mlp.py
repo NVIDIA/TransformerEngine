@@ -78,14 +78,9 @@ if mxfp8_available:
 if nvfp4_available:
     _grouped_mlp_quantization_list.append("nvfp4_rht")
 
-# Quantization recipes for ScaledActivation + GroupedLinear fusion
-_grouped_mlp_act_grouped_linear_quantization_list: list[str] = []
+# Quantization recipes supported by ScaledActivation + GroupedLinear fusion
 if fp8_available:
-    _grouped_mlp_act_grouped_linear_quantization_list.append("fp8_current_scaling")
-if mxfp8_available:
-    _grouped_mlp_act_grouped_linear_quantization_list.append("mxfp8")
-if nvfp4_available:
-    _grouped_mlp_act_grouped_linear_quantization_list.append("nvfp4_rht")
+    _grouped_mlp_quantization_list.append("fp8_current_scaling")
 
 
 @pytest.fixture(autouse=True, scope="function")
@@ -1017,8 +1012,10 @@ class TestGroupedMLPFusedOp:
             or (
                 quantization == "nvfp4_rht"
                 and dtype == torch.bfloat16
-                and activation == "scaled_srelu"
-                and glu_interleave_size is None
+                and (
+                    ( not activation_is_glu and glu_interleave_size is None)
+                    or (activation_is_glu and glu_interleave_size == 32)
+                )
             )
         )
         forward_ops = module._module_groups[0]._forward_ops
@@ -1116,25 +1113,6 @@ class TestGroupedMLPFusedOp:
         elif single_grouped_weight:
             assert_close(fc1.weight.grad, fc1_w_ref_grad, **tols)
             assert_close(fc2.weight.grad, fc2_w_ref_grad, **tols)
-
-    @pytest.mark.parametrize("quantization", _grouped_mlp_act_grouped_linear_quantization_list)
-    def test_grouped_mlp_act_grouped_linear_fusion(
-        self,
-        *,
-        quantization: str,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Exercise ScaledActivation + GroupedLinear fusion without the full CuTe DSL MLP fusion."""
-        monkeypatch.setenv("NVTE_CUTEDSL_FUSED_GROUPED_MLP", "0")
-        self.test_grouped_mlp(
-            group_size=2,
-            bias=False,
-            hidden_size=128,
-            quantization=quantization,
-            single_grouped_weight=False,
-            split_alignment=128,
-            activation="scaled_swiglu",
-        )
 
     @pytest.mark.parametrize("bias", (False, True))
     @pytest.mark.parametrize("quantization", _grouped_mlp_quantization_list)

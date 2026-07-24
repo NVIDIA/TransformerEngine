@@ -182,6 +182,7 @@ class ForwardScaledActivationGroupedLinear(FusedOperation):
             device=device,
             split_points=grouped_tensor_offsets[0],
             base_split_offsets=grouped_tensor_offsets[1],
+            input_tensor_offsets=grouped_tensor_offsets[2],
             output_tensor_offsets=grouped_tensor_offsets[3],
             out_shape=list(input_.size())[:-1] + [linear.out_features],
         )

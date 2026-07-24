@@ -980,14 +980,29 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             split_points,
             base_split_offsets,
             fc1_x_tensor_offsets,
+            fc1_out_tensor_offsets,
             fc2_x_tensor_offsets,
             fc2_out_tensor_offsets,
         ) = tex.splits_to_offsets_multi(
             split_sizes,
             device,
-            strides=[1, 1, fc1_weight_shape[1], fc2_weight_shape[1], fc2_weight_shape[0]],
-            include_leading_zero=[False, True, True, True, True],
-            dtypes=[torch.int32, torch.int64, torch.int64, torch.int64, torch.int64],
+            strides=[
+                1,
+                1,
+                fc1_weight_shape[1],
+                fc1_weight_shape[0],
+                fc2_weight_shape[1],
+                fc2_weight_shape[0],
+            ],
+            include_leading_zero=[False, True, True, True, True, True],
+            dtypes=[
+                torch.int32,
+                torch.int64,
+                torch.int64,
+                torch.int64,
+                torch.int64,
+                torch.int64,
+            ],
             bulk_allocate=True,
         )
 
@@ -1549,6 +1564,10 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                 split_sizes,
                 base_split_offsets,
                 split_points,
+                fc1_x_tensor_offsets,
+                fc1_out_tensor_offsets,
+                fc2_x_tensor_offsets,
+                fc2_out_tensor_offsets,
                 grouped_fc1_x,
                 *fc1_weight_tensors,
                 activation_in,
@@ -1601,12 +1620,22 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
 
         # Saved tensors from the joint forward.
         # Layout: [split_sizes, base_split_offsets, split_points,
+        #          fc1_x_tensor_offsets, fc1_out_tensor_offsets,
+        #          fc2_x_tensor_offsets, fc2_out_tensor_offsets,
         #          grouped_fc1_x, *fc1_weights,
         #          activation_in, scales,
         #          grouped_fc2_x, *fc2_weights]
         saved_tensors = fc1_ctx.saved_tensors
-        split_sizes, base_split_offsets, split_points = saved_tensors[:3]
-        saved_tensors = saved_tensors[3:]
+        (
+            split_sizes,
+            base_split_offsets,
+            split_points,
+            fc1_x_tensor_offsets,
+            fc1_out_tensor_offsets,
+            fc2_x_tensor_offsets,
+            fc2_out_tensor_offsets,
+        ) = saved_tensors[:7]
+        saved_tensors = saved_tensors[7:]
         grouped_fc1_x, saved_tensors = saved_tensors[0], saved_tensors[1:]
         if fc1_op.single_grouped_weight:
             grouped_fc1_weight, saved_tensors = saved_tensors[0], saved_tensors[1:]
@@ -1673,6 +1702,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                     fc2_grad_output_quantizer,
                     num_groups,
                     split_sizes,
+                    tensor_offsets=fc2_out_tensor_offsets,
                 )
             else:
                 grouped_fc2_dy = _group_quantize_for_grouped_mlp(
@@ -1680,7 +1710,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                     fc2_grad_output_quantizer,
                     num_groups,
                     split_sizes,
-                    tensor_offsets=base_split_offsets * fc2_weight_shape[0],
+                    tensor_offsets=fc2_out_tensor_offsets,
                 )
 
         use_nvfp4 = (
@@ -1901,7 +1931,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                     fc2_input_quantizer,
                     num_groups,
                     split_sizes,
-                    tensor_offsets=base_split_offsets * fc2_weight_shape[1],
+                    tensor_offsets=fc2_x_tensor_offsets,
                 )
             else:
                 sfd_col_d_srelu_tensor = fc2_dgrad_kernel_out.get("sfd_col_d_srelu_tensor")
@@ -1923,7 +1953,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                     scale_inv=None,
                     columnwise_scale_inv=fc2_x_col_scale.reshape(-1),
                     first_dims=split_sizes,
-                    tensor_offsets=base_split_offsets * fc2_weight_shape[1],
+                    tensor_offsets=fc2_x_tensor_offsets,
                     with_gemm_swizzled_scales=True,
                 )
 
@@ -1966,7 +1996,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                     fc1_bias_grads = [dbias_2d[group_idx] for group_idx in range(num_groups)]
 
         # FC1 grad output for dgrad and wgrad GEMMs
-        fc1_dy_tensor_offsets = base_split_offsets * fc1_weight_shape[0]
+        fc1_dy_tensor_offsets = fc1_out_tensor_offsets
         fc1_grad_output_quantizer = fc1_ctx.grad_output_quantizers[0]
         if use_nvfp4:
             fc1_grad_output_quantizer.set_usage(
@@ -2057,7 +2087,6 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                         layout="NN",
                     )
                 else:
-                    fc1_x_tensor_offsets = base_split_offsets * fc1_weight_shape[1]
                     grouped_grad_input = GroupedTensor(
                         shape=(out_shape[0], fc1_weight_shape[1]),
                         dtype=dtype,

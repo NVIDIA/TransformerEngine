@@ -112,6 +112,14 @@ class BackwardScaledActivationGroupedLinear(FusedOperation):
             )
             return None, [(), ()], [(), act_grad_extra_inputs[0]]
 
+        if not activation_ctx.requires_grad:
+            grad_input, grad_params, grad_extra_inputs = linear.fuser_backward(
+                [linear_ctx],
+                grad_output,
+                basic_op_grad_extra_outputs=[basic_op_grad_extra_outputs[0]],
+            )
+            return grad_input, [grad_params[0], ()], [grad_extra_inputs[0], (None,)]
+
         del basic_op_grad_extra_outputs
         input_, scales = activation_ctx.saved_tensors
         input_ = maybe_dequantize(input_, activation_ctx.dtype)
@@ -119,14 +127,7 @@ class BackwardScaledActivationGroupedLinear(FusedOperation):
         grad_output = maybe_dequantize(grad_output, activation_ctx.dtype)
 
         split_sizes = linear_ctx.saved_tensors[0]
-        split_sizes, (grad_output_tensor_offsets,) = tex.splits_to_offsets_multi(
-            split_sizes,
-            input_.device,
-            strides=[linear.out_features],
-            include_leading_zero=[True],
-            dtypes=[torch.int64],
-            bulk_allocate=False,
-        )
+        grad_output_tensor_offsets = linear_ctx.saved_tensors[4]
         grad_output_quantizer = linear_ctx.grad_output_quantizers[0]
         grad_output_quantizer.set_usage(
             rowwise=linear_ctx.input_requires_grad,
