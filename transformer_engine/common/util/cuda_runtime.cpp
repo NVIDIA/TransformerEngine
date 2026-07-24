@@ -7,7 +7,6 @@
 #include "../util/cuda_runtime.h"
 
 #include <cublasLt.h>
-
 #include <dlfcn.h>
 
 #include <filesystem>
