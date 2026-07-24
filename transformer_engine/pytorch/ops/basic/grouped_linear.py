@@ -47,8 +47,10 @@ from .._common import (
     get_accumulate_flag_in_param,
     get_dummy_wgrads_for_params,
     get_main_grad_from_param,
+    grouped_storage_from_grouped_tensor,
     is_quantized_tensor,
     maybe_dequantize,
+    prepare_prequantized_mxfp8_grouped_input,
     validate_or_alloc_output,
     view_main_grad_as_grouped_buffer,
 )
@@ -1180,6 +1182,11 @@ class GroupedLinear(BasicOperation):
         out_buffer: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, tuple[Optional[torch.Tensor], ...]]:
         """Legacy ``tex.split_quantize`` + ``general_grouped_gemm`` flow."""
+        if isinstance(input_, GroupedTensor):
+            raise NotImplementedError(
+                "Pre-quantized GroupedTensor input is only supported on the "
+                "graph-safe grouped-tensor path."
+            )
         num_groups = self.num_groups
         has_bias = self.has_bias
 
@@ -1304,11 +1311,42 @@ class GroupedLinear(BasicOperation):
 
         # Flatten to 2D so the first dim is the total token count.
         original_shape = list(input_.size())
-        x = maybe_dequantize(input_, dtype).reshape(-1, self.in_features)
-        total_tokens = x.size(0)
+        prequantized_mxfp8_input = (
+            with_quantized_compute
+            and isinstance(input_, GroupedTensor)
+            and isinstance(input_quantizers[0], MXFP8Quantizer)
+            and isinstance(input_.quantizer, MXFP8Quantizer)
+        )
+        if prequantized_mxfp8_input:
+            # GroupedTensor forbids reshape and is already in the canonical
+            # (total_tokens, in_features) layout; just validate the shape.
+            if input_.dim() != 2 or input_.size(-1) != self.in_features:
+                raise ValueError(
+                    "GroupedTensor input must have shape (total_tokens, "
+                    f"{self.in_features}), but got {tuple(input_.size())}."
+                )
+            total_tokens = input_.size(0)
+        else:
+            x = maybe_dequantize(input_, dtype).reshape(-1, self.in_features)
+            total_tokens = x.size(0)
 
         # Build the input GroupedTensor.
-        if with_quantized_compute:
+        if prequantized_mxfp8_input:
+            # Rowwise-only MXFP8 input (e.g. FP8 token dispatch): feed the
+            # rowwise data to the forward GEMM as-is, manufacture the
+            # columnwise copy needed by the wgrad GEMM, and swizzle the
+            # rowwise scales for the GEMM.
+            grouped_x = grouped_storage_from_grouped_tensor(input_)
+            prepare_prequantized_mxfp8_grouped_input(
+                grouped_x,
+                input_quantizers[0],
+                num_groups,
+                split_sizes,
+                dtype,
+                with_columnwise=weight_requires_grad,
+                tensor_offsets=base_split_offsets * self.in_features,
+            )
+        elif with_quantized_compute:
             input_quantizer = input_quantizers[0]
             input_quantizer.set_usage(rowwise=True, columnwise=weight_requires_grad)
             input_quantizer.optimize_for_gemm = True

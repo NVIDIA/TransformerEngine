@@ -10,12 +10,17 @@ from typing import Optional
 
 import torch
 
+import transformer_engine_torch as tex
 from transformer_engine_torch import FP8TensorMeta
+from ..constants import TE_DType
 from ..torch_version import torch_version
 from ..quantization import FP8GlobalStateManager
 from ..tensor.float8_tensor import Float8Tensor
+from ..tensor.grouped_tensor import GroupedTensor
+from ..tensor.mxfp8_tensor import MXFP8Quantizer, MXFP8Tensor
+from ..tensor.storage.grouped_tensor_storage import GroupedTensorStorage
 from ..quantized_tensor import QuantizedTensorStorage
-from ..utils import canonicalize_dtype
+from ..utils import canonicalize_dtype, round_up_to_nearest_multiple
 
 
 def validate_or_alloc_output(
@@ -64,6 +69,128 @@ def maybe_dequantize(
     if not tensor.is_contiguous():
         tensor = tensor.contiguous()
     return tensor
+
+
+def grouped_storage_from_grouped_tensor(tensor: GroupedTensor) -> GroupedTensorStorage:
+    """Repack a ``GroupedTensor`` into a ``GroupedTensorStorage``.
+
+    ``GroupedTensor`` is a ``torch.Tensor`` subclass, so the CPU offload
+    infrastructure's ``prepare_for_saving`` treats it as a plain tensor and
+    does not decompose it into its component data tensors. By repacking into
+    a ``GroupedTensorStorage`` (not a ``torch.Tensor``), the fuser's
+    ``prepare_for_saving`` call correctly decomposes the activation before
+    ``save_for_backward``.
+    """
+    return GroupedTensorStorage(
+        shape=tensor.logical_shape,
+        dtype=tensor.fake_dtype,
+        num_tensors=tensor.num_tensors,
+        shapes=tensor.tensor_shapes,
+        quantizer=tensor.quantizer,
+        data=tensor.rowwise_data,
+        columnwise_data=tensor.columnwise_data,
+        scale_inv=tensor.scale_inv,
+        columnwise_scale_inv=tensor.columnwise_scale_inv,
+        amax=tensor.amax,
+        columnwise_amax=tensor.columnwise_amax,
+        scale=tensor.scale,
+        first_dims=tensor.first_dims,
+        last_dims=tensor.last_dims,
+        tensor_offsets=tensor.tensor_offsets,
+        offsets=tensor.offsets,
+        scale_inv_offsets=tensor.scale_inv_offsets,
+        columnwise_scale_inv_offsets=tensor.columnwise_scale_inv_offsets,
+        with_gemm_swizzled_scales=tensor._with_gemm_swizzled_scales,
+        row_scaled_nvfp4=tensor.row_scaled_nvfp4,
+        nvfp4_use_4over6=tensor.nvfp4_use_4over6,
+        nvfp4_e4m3_max=tensor.nvfp4_e4m3_max,
+    )
+
+
+def prepare_prequantized_mxfp8_grouped_input(
+    grouped_x: GroupedTensorStorage,
+    quantizer: MXFP8Quantizer,
+    num_groups: int,
+    split_sizes: torch.Tensor,
+    dtype: torch.dtype,
+    *,
+    with_columnwise: bool,
+    tensor_offsets: Optional[torch.Tensor] = None,
+) -> None:
+    """Prepare a rowwise-only MXFP8 grouped input for grouped GEMM (in place).
+
+    Supports inputs that arrive already rowwise-quantized (e.g. FP8 token
+    dispatch): the rowwise data is fed to the forward GEMM as-is, while the
+    columnwise copy needed by the wgrad GEMM cannot be derived from the
+    rowwise data (per-block scales differ per direction), so it is
+    manufactured by dequantizing the rowwise data and requantizing
+    columnwise-only. Rowwise scales must arrive in compact (unswizzled)
+    format; they are converted to the GEMM-swizzled layout afterwards.
+    TODO: optimize and fuse the round-trips requant
+    """
+    if grouped_x.rowwise_data is None:
+        raise ValueError("Pre-quantized MXFP8 grouped input is missing rowwise data.")
+    if grouped_x._with_gemm_swizzled_scales:
+        raise NotImplementedError(
+            "Pre-quantized MXFP8 grouped input must have scales in compact format."
+        )
+    if grouped_x.columnwise_data is not None:
+        # Columnwise grouped scales have a per-group layout, so the global
+        # single-tensor swizzle below cannot convert them.
+        raise NotImplementedError(
+            "Pre-quantized MXFP8 grouped input with compact scales must be rowwise-only."
+        )
+    if grouped_x.quantizer is not None and grouped_x.quantizer.dtype != quantizer.dtype:
+        # The forward GEMM consumes the input's rowwise data verbatim while the
+        # wgrad GEMM consumes the columnwise copy we manufacture with ``quantizer``.
+        # A dtype mismatch would make the two directions disagree numerically.
+        raise ValueError(
+            f"Pre-quantized MXFP8 grouped input has FP8 dtype {grouped_x.quantizer.dtype}, "
+            f"but the op's input quantizer expects {quantizer.dtype}."
+        )
+
+    # Manufacture columnwise data for the wgrad GEMM: dequantize the rowwise
+    # wire data and requantize columnwise-only.
+    if with_columnwise:
+        hp_x = tex.group_dequantize(grouped_x, TE_DType[dtype])
+        colwise_quantizer = quantizer.copy()
+        colwise_quantizer.set_usage(rowwise=False, columnwise=True)
+        colwise_quantizer.optimize_for_gemm = True
+        colwise_quantizer.internal = True
+        colwise_x = tex.group_quantize(
+            hp_x.rowwise_data.view(grouped_x.logical_shape),
+            colwise_quantizer,
+            num_groups,
+            split_sizes,
+            tensor_offsets=tensor_offsets,
+        )
+        grouped_x.columnwise_data = colwise_x.columnwise_data
+        grouped_x.columnwise_scale_inv = colwise_x.columnwise_scale_inv
+
+    # Convert rowwise scales to the GEMM-swizzled layout. The grouped GEMM
+    # reads activation scales as one (total_tokens, cols) matrix, so the
+    # single-tensor swizzle applies. Swizzling allocates a new scale buffer;
+    # the original compact scales are left untouched.
+    total_tokens, cols = grouped_x.logical_shape
+    scale_shape = (
+        round_up_to_nearest_multiple(total_tokens, 128),
+        round_up_to_nearest_multiple(cols // 32, 4),
+    )
+    tmp = MXFP8Tensor(
+        shape=(total_tokens, cols),
+        dtype=dtype,
+        fp8_dtype=quantizer.dtype,
+        rowwise_data=grouped_x.rowwise_data.view(total_tokens, cols),
+        rowwise_scale_inv=grouped_x.scale_inv.view(scale_shape),
+        columnwise_data=None,
+        columnwise_scale_inv=None,
+        quantizer=quantizer,
+        requires_grad=False,
+        with_gemm_swizzled_scales=False,
+    )
+    tex.swizzle_scales_for_gemm_(tmp)
+    grouped_x.scale_inv = tmp._rowwise_scale_inv.view(-1)
+    grouped_x._with_gemm_swizzled_scales = True
 
 
 def maybe_autocast_dtype(
