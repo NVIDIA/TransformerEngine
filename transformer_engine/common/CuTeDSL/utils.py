@@ -25,20 +25,19 @@ logger = logging.getLogger("transformer_engine.cutedsl.utils")
 
 
 @functools.lru_cache(maxsize=None)
-def device_compute_capability() -> tuple:
-    """(major, minor) of CUDA device 0, or (0, 0) if it can't be queried."""
+def device_compute_capability(device_id: int = 0) -> tuple:
+    """(major, minor) compute capability of the given CUDA device (default 0), or (0, 0) if it can't be queried."""
     from cuda.core import Device  # pylint: disable=no-name-in-module
 
-    major_minor = Device().arch  # compute capability as digits, e.g. "120"
+    major_minor = Device(device_id).arch  # compute capability as digits, e.g. "120"
     return (int(major_minor[:-1]), int(major_minor[-1])) if major_minor else (0, 0)
 
 
 @functools.lru_cache(maxsize=None)
-def device_is_blackwell() -> bool:
-    """Return True for the Blackwell family (SM 10.0 / 11.0 / 12.0)
-    This is a run-time check, not a compile-time check. It check if the current device is Blackwell architecture.
-    """
-    major, minor = device_compute_capability()
+def device_is_blackwell(device_id: int = 0) -> bool:
+    """Return True if the given CUDA device (default 0) is Blackwell family (SM 10.0 / 11.0 / 12.0).
+    Run-time check, not compile-time."""
+    major, minor = device_compute_capability(device_id)
     return (
         (major == 10 and minor == 0) or (major == 11 and minor == 0) or (major == 12 and minor == 0)
     )
