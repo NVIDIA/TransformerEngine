@@ -1013,7 +1013,7 @@ class TestGroupedMLPFusedOp:
                 quantization == "nvfp4_rht"
                 and dtype == torch.bfloat16
                 and (
-                    ( not activation_is_glu and glu_interleave_size is None)
+                    (not activation_is_glu and glu_interleave_size is None)
                     or (activation_is_glu and glu_interleave_size == 32)
                 )
             )
