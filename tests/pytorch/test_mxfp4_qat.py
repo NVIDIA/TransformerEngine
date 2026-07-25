@@ -162,6 +162,31 @@ def test_E_mxfp8_rowwise_lossless():
             print("  NOTE: TE software dequant now handles UE8M0 code 0 -> fully exact")
 
 
+def test_dequantize_e8m0_extreme_codes():
+    """End-to-end nvte MXFP8 software dequantize with planted extreme UE8M0
+    scale codes through the REAL kernel: code 0 must expand to 2^-127 and code
+    255 to NaN once the ptx.cuh exp2f fix is in the built library; the pre-fix
+    wheel flushes code 0 to zero and expands code 255 to Inf. Auto-detects and
+    reports which behavior the installed build has."""
+    w = make_weight(32, 64)
+    q = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3, columnwise=False).quantize(
+        mxfp4_fake_quantize(w)
+    )
+    data = q._rowwise_data.view(torch.uint8)
+    codes = q._rowwise_scale_inv.view(torch.uint8)
+    data[0, :32] = 56
+    codes[0, 0] = 0
+    data[1, :32] = 56
+    codes[1, 0] = 255
+    dq = q.dequantize(dtype=torch.float32)
+    if (dq[0, :32] == 2.0**-127).all() and torch.isnan(dq[1, :32]).all():
+        print("  fixed build: code 0 -> 2^-127, code 255 -> NaN")
+    else:
+        assert (dq[0, :32] == 0).all(), "code 0 neither 2^-127 (fixed) nor 0 (pre-fix)"
+        assert torch.isinf(dq[1, :32]).all(), "code 255 neither NaN (fixed) nor Inf (pre-fix)"
+        print("  pre-fix wheel: code 0 flushed to 0, code 255 -> Inf (rebuild pending)")
+
+
 def test_G_blockwise_lossless_and_transpose():
     for m, n in SHAPES:
         w = make_weight(m, n, zero_blocks=4)
@@ -199,7 +224,9 @@ def test_lossless_dequant_to_bf16():
         assert torch.equal(dq8[~flushed], w_hat[~flushed]), (
             f"mxfp8 rowwise dequant to bf16 not lossless {m}x{n}"
         )
-        assert (dq8[flushed] == 0).all()
+        if not (dq8[flushed] == 0).all():
+            assert torch.equal(dq8, w_hat), "dequant neither flushed nor exact?"
+            print("  NOTE: TE software dequant now handles UE8M0 code 0 -> fully exact")
 
         w2_hat = mxfp4_fake_quantize(make_weight(m, n, zero_blocks=4))
         qb = Float8BlockQuantizer(
@@ -575,6 +602,8 @@ def test_exp2f_e8m0_all_codes():
     exp_ref = torch.ldexp(torch.ones(256), codes - 127)
     rcp_ref = torch.ldexp(torch.ones(256), 127 - codes)
     assert torch.isnan(e[255]) and torch.isnan(r[255]), "code 255 must be NaN"
+    assert e.view(torch.int32)[255].item() == 0x7FFFFFFF, "code 255 NaN payload"
+    assert r.view(torch.int32)[255].item() == 0x7FFFFFFF, "code 255 rcp NaN payload"
     assert torch.equal(e[:255].cpu(), exp_ref[:255]), "exp2f wrong (code 0 == 2^-127?)"
     assert torch.equal(r[:255].cpu(), rcp_ref[:255]), "exp2f_rcp wrong"
 
@@ -1111,6 +1140,7 @@ TESTS = [
     test_fake_quant_grid_scale_rtne,
     test_D_lossless_in_bf16,
     test_E_mxfp8_rowwise_lossless,
+    test_dequantize_e8m0_extreme_codes,
     test_G_blockwise_lossless_and_transpose,
     test_C_mxfp8_colwise_bound,
     test_lossless_dequant_to_bf16,
