@@ -2530,9 +2530,7 @@ class GroupedLinear(TransformerEngineBaseModule):
         num_gemms = self.num_gemms
 
         # Make sure splits are in expected format
-        if (
-            self.single_grouped_weight or self.single_grouped_bias
-        ) and not self.use_grouped_tensor:
+        if (self.single_grouped_weight or self.single_grouped_bias) and not self.use_grouped_tensor:
             raise RuntimeError(
                 "single_grouped_weight and single_grouped_bias require "
                 "use_grouped_tensor=True; the split-quantize path only supports discrete "

@@ -1780,9 +1780,7 @@ def _run_grouped_parameter_layout(
 
     x = x_base.detach().clone().requires_grad_(True)
     m_splits_arg = (
-        torch.tensor(m_splits, dtype=torch.int64, device="cuda")
-        if use_grouped_tensor
-        else m_splits
+        torch.tensor(m_splits, dtype=torch.int64, device="cuda") if use_grouped_tensor else m_splits
     )
     with autocast(enabled=fp8_recipe is not None, recipe=fp8_recipe):
         y = module(
