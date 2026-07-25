@@ -653,6 +653,146 @@ void launch_quantize_4over6(const Tensor &input, const Tensor *noop, Tensor *out
   });
 }
 
+// ---------------------------------------------------------------------------
+// Batched (multi-tensor) 4over6 quantization.
+//
+// Quantizes many same-shaped tensors in two kernel launches (one batched amax
+// pass + one batched quantize pass) instead of 2 launches per tensor. Each
+// tensor keeps its own scalar amax / global scale, so results are bit-identical
+// to calling the single-tensor path in a loop: per-tensor amax is an exact max
+// (order independent), and every 1x16 block's scales and 4/6 selection are
+// block-local.
+// ---------------------------------------------------------------------------
+
+struct BatchedQuantizeParams {
+  const void *input;  // IType*, [rows, cols]
+  void *output;       // fp4e2m1x2*, [rows, cols/2]
+  void *scales;       // nvfp4_scale_t*, [rows, scale_stride]
+  float *amax;        // float*, scalar output amax for this tensor
+};
+
+constexpr int kBatchedAmaxThreads = 256;
+constexpr int kBatchedAmaxTiles = 8;
+
+// Computes one scalar amax per tensor. grid = (kBatchedAmaxTiles, 1, num_tensors).
+// Partial block maxima are combined with atomicMax on the int view of the float
+// (exact for non-negative floats), after the caller zero-initializes temp_amax.
+template <typename IType>
+__global__ void __launch_bounds__(kBatchedAmaxThreads)
+    batched_amax_kernel(const BatchedQuantizeParams *params, float *temp_amax, const size_t rows,
+                        const size_t cols) {
+  const int z = blockIdx.z;
+  const IType *input = reinterpret_cast<const IType *>(params[z].input);
+  const size_t total = rows * cols;
+  float local = 0.0f;
+  for (size_t idx = blockIdx.x * kBatchedAmaxThreads + threadIdx.x; idx < total;
+       idx += static_cast<size_t>(kBatchedAmaxTiles) * kBatchedAmaxThreads) {
+    local = fmaxf(local, fabsf(static_cast<float>(input[idx])));
+  }
+#pragma unroll
+  for (int offset = kWarpThreads / 2; offset > 0; offset /= 2) {
+    local = fmaxf(local, __shfl_down_sync(0xffffffffu, local, offset));
+  }
+  __shared__ float smem[kBatchedAmaxThreads / kWarpThreads];
+  if ((threadIdx.x & (kWarpThreads - 1)) == 0) {
+    smem[threadIdx.x / kWarpThreads] = local;
+  }
+  __syncthreads();
+  if (threadIdx.x < kWarpThreads) {
+    constexpr int num_warps = kBatchedAmaxThreads / kWarpThreads;
+    local = threadIdx.x < num_warps ? smem[threadIdx.x] : 0.0f;
+#pragma unroll
+    for (int offset = num_warps / 2; offset > 0; offset /= 2) {
+      local = fmaxf(local, __shfl_down_sync(0xffffffffu, local, offset));
+    }
+    if (threadIdx.x == 0) {
+      atomicMax(reinterpret_cast<int *>(&temp_amax[z]), __float_as_int(local));
+    }
+  }
+}
+
+// grid = (col_tiles, row_tiles, num_tensors). Rowwise output only.
+template <typename Cfg, int E4M3_MAX, typename IType>
+__global__ void __launch_bounds__(kThreads)
+    quantize_4over6_batched_kernel(const BatchedQuantizeParams *params_arr,
+                                   const float *temp_amax, const size_t rows, const size_t cols,
+                                   const size_t scale_stride, const float *noop) {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+  if (noop != nullptr && noop[0] == 1.0f) {
+    return;
+  }
+  const int z = blockIdx.z;
+  const BatchedQuantizeParams &p = params_arr[z];
+  const IType *input = reinterpret_cast<const IType *>(p.input);
+  fp4e2m1x2 *output = reinterpret_cast<fp4e2m1x2 *>(p.output);
+  nvfp4_scale_t *scales = reinterpret_cast<nvfp4_scale_t *>(p.scales);
+  const float *amax = temp_amax + z;
+
+  // Publish this tensor's scalar amax into its own output buffer.
+  if (blockIdx.x == 0 && blockIdx.y == 0 && threadIdx.x == 0) {
+    *p.amax = temp_amax[z];
+  }
+
+  extern __shared__ char dynamic_shmem[];
+  auto *tiles = reinterpret_cast<IType *>(dynamic_shmem);
+  const size_t tile_col = blockIdx.x * kTileCols;
+  const size_t tile_row = blockIdx.y * kTileRows;
+
+  IType *stage_tiles[kPipelineStages];
+#pragma unroll
+  for (int stage = 0; stage < kPipelineStages; ++stage) {
+    stage_tiles[stage] = &tiles[stage * kStageRows * kTileCols];
+  }
+
+  load_stage_to_shared_async(input, stage_tiles[0], rows, cols, tile_row, tile_col);
+  cp_async_commit_group();
+  cp_async_wait_group<0>();
+  __syncthreads();
+
+  for (int stage = 0; stage < kPipelineStages; ++stage) {
+    const int next_stage = stage + 1;
+    if (next_stage < kPipelineStages) {
+      const size_t next_stage_row = tile_row + next_stage * kStageRows;
+      load_stage_to_shared_async(input, stage_tiles[next_stage], rows, cols, next_stage_row,
+                                 tile_col);
+      cp_async_commit_group();
+    }
+
+    const size_t stage_row = tile_row + stage * kStageRows;
+    IType *stage_tile = stage_tiles[stage];
+
+    quantize_stage_rowwise</*USE_2D_QUANTIZATION=*/false, /*ROW_SCALED_NVFP4=*/false, Cfg,
+                           E4M3_MAX>(stage_tile, output, scales, amax, rows, cols, stage_row,
+                                     tile_col, scale_stride);
+
+    if (next_stage < kPipelineStages) {
+      cp_async_wait_group<0>();
+      __syncthreads();
+    }
+  }
+#else
+  NVTE_DEVICE_ERROR("sm_100 or higher is required.");
+#endif
+}
+
+template <typename Cfg, int E4M3_MAX, typename IType>
+void launch_quantize_4over6_batched(const void *params_dev, float *temp_amax_dev, int num_tensors,
+                                    size_t rows, size_t cols, size_t scale_stride,
+                                    const float *noop, cudaStream_t stream) {
+  const auto *params = reinterpret_cast<const BatchedQuantizeParams *>(params_dev);
+  batched_amax_kernel<IType>
+      <<<dim3(kBatchedAmaxTiles, 1, num_tensors), kBatchedAmaxThreads, 0, stream>>>(
+          params, temp_amax_dev, rows, cols);
+
+  const dim3 grid(DIVUP(cols, static_cast<size_t>(kTileCols)),
+                  DIVUP(rows, static_cast<size_t>(kTileRows)), num_tensors);
+  const dim3 block(kThreads);
+  const size_t shmem = kPipelineStages * kStageRows * kTileCols * sizeof(IType);
+  auto kernel = quantize_4over6_batched_kernel<Cfg, E4M3_MAX, IType>;
+  cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, shmem);
+  kernel<<<grid, block, shmem, stream>>>(params, temp_amax_dev, rows, cols, scale_stride, noop);
+}
+
 }  // namespace quantize_4over6_kernel
 
 #endif  // FP4_TYPE_SUPPORTED

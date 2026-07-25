@@ -235,6 +235,75 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
         self._amax_columnwise = tensors[5]
         return tensors[6:]
 
+    def slice_rows(self, start: int, end: int, *, scale_row_multiple: int = 0):
+        """Row-range view of a rowwise-quantized NVFP4 tensor (zero-copy).
+
+        All rowwise fields are row-major, so slicing dim 0 yields valid views
+        sharing storage with this tensor. Only supported for rowwise-only
+        tensors; per-row amax (row-scaled) is sliced along, scalar amax is kept.
+
+        If scale_row_multiple > 0 and the row count is not a multiple of it,
+        the rowwise scale is copied into a fresh buffer whose rows are padded
+        up to that multiple (TE rowwise scale layout requires 128-row
+        alignment for cuBLAS block-scaling); padding rows are left uninitialized
+        and must not be consumed, matching split_quantize's allocation behavior.
+        """
+        if self._columnwise_data is not None:
+            raise RuntimeError("slice_rows only supports rowwise-only NVFP4 tensors")
+        num_rows = self._rowwise_data.shape[0]
+        if not (0 <= start <= end <= num_rows):
+            raise ValueError(f"slice_rows({start}, {end}) out of range for {num_rows} rows")
+        amax = self._amax_rowwise
+        if amax is not None and amax.numel() > 1:
+            amax = amax[start:end]
+        scale = self._rowwise_scale_inv[start:end]
+        rows = end - start
+        if scale_row_multiple > 0 and rows % scale_row_multiple != 0:
+            padded_rows = -(-rows // scale_row_multiple) * scale_row_multiple
+            padded = torch.empty(
+                (padded_rows,) + tuple(scale.shape[1:]), dtype=scale.dtype, device=scale.device
+            )
+            padded[:rows].copy_(scale)
+            scale = padded
+        data = self._rowwise_data[start:end]
+        if type(self) is NVFP4TensorStorage:
+            return NVFP4TensorStorage(
+                data,
+                scale,
+                None,
+                None,
+                amax,
+                None,
+                self._fp4_dtype,
+                self._quantizer,
+                self._with_gemm_swizzled_scales,
+                fake_dtype=self._dtype,
+                row_scaled_nvfp4=self._row_scaled_nvfp4,
+                nvfp4_use_4over6=self._nvfp4_use_4over6,
+                nvfp4_e4m3_max=self._nvfp4_e4m3_max,
+            )
+        from ..nvfp4_tensor import NVFP4Tensor
+
+        parent_shape = self.size()
+        shape = (rows,) + tuple(parent_shape[1:])
+        return NVFP4Tensor(
+            shape,
+            self._dtype,
+            rowwise_data=data,
+            rowwise_scale_inv=scale,
+            columnwise_data=None,
+            columnwise_scale_inv=None,
+            amax_rowwise=amax,
+            amax_columnwise=None,
+            fp4_dtype=self._fp4_dtype,
+            quantizer=self._quantizer,
+            with_gemm_swizzled_scales=self._with_gemm_swizzled_scales,
+            row_scaled_nvfp4=self._row_scaled_nvfp4,
+            nvfp4_use_4over6=self._nvfp4_use_4over6,
+            nvfp4_e4m3_max=self._nvfp4_e4m3_max,
+            device=data.device,
+        )
+
     def get_data_tensors(self):
         """Get this Tensor's data."""
         return self._rowwise_data, self._columnwise_data
