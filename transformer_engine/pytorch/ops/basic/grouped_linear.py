@@ -49,7 +49,7 @@ from .._common import (
     grouped_storage_from_grouped_tensor,
     is_quantized_tensor,
     maybe_dequantize,
-    prepare_prequantized_mxfp8_grouped_input,
+    prepare_prequantized_mxfp8_input_for_gemm,
     validate_or_alloc_output,
     view_main_grad_as_grouped_buffer,
 )
@@ -1329,7 +1329,7 @@ class GroupedLinear(BasicOperation):
             # columnwise copy needed by the wgrad GEMM, and swizzle the
             # rowwise scales for the GEMM.
             grouped_x = grouped_storage_from_grouped_tensor(input_)
-            prepare_prequantized_mxfp8_grouped_input(
+            prepare_prequantized_mxfp8_input_for_gemm(
                 grouped_x,
                 input_quantizers[0],
                 num_groups,

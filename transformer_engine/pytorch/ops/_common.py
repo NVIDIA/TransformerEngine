@@ -12,7 +12,7 @@ import torch
 
 import transformer_engine_torch as tex
 from transformer_engine_torch import FP8TensorMeta
-from ..constants import TE_DType
+from ..constants import MXFP8_BLOCK_SCALING_SIZE, TE_DType
 from ..torch_version import torch_version
 from ..quantization import FP8GlobalStateManager
 from ..tensor.float8_tensor import Float8Tensor
@@ -20,7 +20,7 @@ from ..tensor.grouped_tensor import GroupedTensor
 from ..tensor.mxfp8_tensor import MXFP8Quantizer, MXFP8Tensor
 from ..tensor.storage.grouped_tensor_storage import GroupedTensorStorage
 from ..quantized_tensor import QuantizedTensorStorage
-from ..utils import canonicalize_dtype, round_up_to_nearest_multiple
+from ..utils import canonicalize_dtype
 
 
 def validate_or_alloc_output(
@@ -107,7 +107,7 @@ def grouped_storage_from_grouped_tensor(tensor: GroupedTensor) -> GroupedTensorS
     )
 
 
-def prepare_prequantized_mxfp8_grouped_input(
+def prepare_prequantized_mxfp8_input_for_gemm(
     grouped_x: GroupedTensorStorage,
     quantizer: MXFP8Quantizer,
     num_groups: int,
@@ -117,28 +117,29 @@ def prepare_prequantized_mxfp8_grouped_input(
     with_columnwise: bool,
     tensor_offsets: Optional[torch.Tensor] = None,
 ) -> None:
-    """Prepare a rowwise-only MXFP8 grouped input for grouped GEMM (in place).
+    """Make an already-quantized MXFP8 grouped input GEMM-ready (in place).
 
-    Supports inputs that arrive already rowwise-quantized (e.g. FP8 token
-    dispatch): the rowwise data is fed to the forward GEMM as-is, while the
-    columnwise copy needed by the wgrad GEMM cannot be derived from the
-    rowwise data (per-block scales differ per direction), so it is
-    manufactured by dequantizing the rowwise data and requantizing
-    columnwise-only. Rowwise scales must arrive in compact (unswizzled)
-    format; they are converted to the GEMM-swizzled layout afterwards.
+    For inputs that arrive rowwise-quantized (e.g. FP8 token dispatch). On return
+    the rowwise scales are GEMM-swizzled; columnwise data/scales are populated iff
+    ``with_columnwise``, manufactured by dequantize + columnwise-only requantize
+    since the two directions scale along perpendicular axes.
+
+    Requires rowwise-only input with unswizzled scales and per-group token counts
+    that are multiples of 128 (caller contract: ``split_sizes`` is on device).
+
     TODO: optimize and fuse the round-trips requant
     """
     if grouped_x.rowwise_data is None:
         raise ValueError("Pre-quantized MXFP8 grouped input is missing rowwise data.")
+    if grouped_x.scale_inv is None:
+        raise ValueError("Pre-quantized MXFP8 grouped input is missing rowwise scales.")
     if grouped_x._with_gemm_swizzled_scales:
-        raise NotImplementedError(
-            "Pre-quantized MXFP8 grouped input must have scales in compact format."
-        )
+        raise NotImplementedError("Pre-quantized MXFP8 grouped input must have unswizzled scales.")
     if grouped_x.columnwise_data is not None:
         # Columnwise grouped scales have a per-group layout, so the global
         # single-tensor swizzle below cannot convert them.
         raise NotImplementedError(
-            "Pre-quantized MXFP8 grouped input with compact scales must be rowwise-only."
+            "Pre-quantized MXFP8 grouped input with unswizzled scales must be rowwise-only."
         )
     if grouped_x.quantizer is not None and grouped_x.quantizer.dtype != quantizer.dtype:
         # The forward GEMM consumes the input's rowwise data verbatim while the
@@ -170,12 +171,20 @@ def prepare_prequantized_mxfp8_grouped_input(
     # Convert rowwise scales to the GEMM-swizzled layout. The grouped GEMM
     # reads activation scales as one (total_tokens, cols) matrix, so the
     # single-tensor swizzle applies. Swizzling allocates a new scale buffer;
-    # the original compact scales are left untouched.
+    # the original unswizzled scales are left untouched.
+    # 128-alignment (see docstring) means the scale array needs no padding.
     total_tokens, cols = grouped_x.logical_shape
-    scale_shape = (
-        round_up_to_nearest_multiple(total_tokens, 128),
-        round_up_to_nearest_multiple(cols // 32, 4),
-    )
+    if total_tokens % 128 != 0 or cols % 128 != 0:
+        raise ValueError(
+            "Pre-quantized MXFP8 grouped input requires dims that are multiples of 128, "
+            f"but got ({total_tokens}, {cols})."
+        )
+    scale_shape = (total_tokens, cols // MXFP8_BLOCK_SCALING_SIZE)
+    if grouped_x.scale_inv.numel() != math.prod(scale_shape):
+        raise ValueError(
+            f"Pre-quantized MXFP8 grouped input has {grouped_x.scale_inv.numel()} rowwise "
+            f"scales, but expected {math.prod(scale_shape)} for shape {scale_shape}."
+        )
     tmp = MXFP8Tensor(
         shape=(total_tokens, cols),
         dtype=dtype,

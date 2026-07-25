@@ -55,7 +55,7 @@ from .._common import (
     grouped_storage_from_grouped_tensor,
     is_quantized_tensor,
     maybe_dequantize,
-    prepare_prequantized_mxfp8_grouped_input,
+    prepare_prequantized_mxfp8_input_for_gemm,
     validate_or_alloc_output,
     view_main_grad_as_grouped_buffer,
 )
@@ -1099,7 +1099,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                 # Rowwise-only MXFP8 input (e.g. FP8 token dispatch):
                 # manufacture the columnwise copy needed by the wgrad GEMM
                 # and swizzle the rowwise scales for the forward GEMM.
-                prepare_prequantized_mxfp8_grouped_input(
+                prepare_prequantized_mxfp8_input_for_gemm(
                     grouped_fc1_x,
                     fc1_input_quantizer,
                     num_groups,
