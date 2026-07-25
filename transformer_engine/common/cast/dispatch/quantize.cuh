@@ -111,9 +111,20 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
       if (row_scaled_nvfp4) {
         NVTE_CHECK(!quant_config_cpp.nvfp4_2d_quantization,
                    "Row-scaled NVFP4 quantization does not support 2D quantization.");
-        NVTE_CHECK(!output_tensor->has_columnwise_data(),
-                   "Row-scaled NVFP4 quantization does not produce columnwise output.");
+        NVTE_CHECK(
+            !(nvfp4_use_4over6 && output_tensor->has_columnwise_data()),
+            "Row-scaled NVFP4 transpose quantization is not supported with 4over6 mode. The 4over6 "
+            "kernel does not consume the per-row/per-column amaxes, so the columnwise output would "
+            "be incorrect.");
+        NVTE_CHECK(
+            !output_tensor->has_columnwise_data() ||
+                (dtype == DType::kBFloat16 && rows % 32 == 0 && cols % 32 == 0),
+            "Row-scaled NVFP4 transpose quantization requires BF16 input and dimensions that are "
+            "multiples of 32.");
         nvfp4::compute_rowwise_amax(*input_tensor, noop_tensor, output_tensor, stream);
+        if (output_tensor->has_columnwise_data()) {
+          nvfp4::compute_columnwise_amax(*input_tensor, noop_tensor, output_tensor, stream);
+        }
       }
       // Columnwise-only is supported on the optimized path only for 2D scaling; rowwise-only and
       // both-directions keep their existing routing. Columnwise-only 1D and non-bf16 fall back to
@@ -268,13 +279,30 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
       // Choose kernel
       const auto [rows, cols] = grad_tensor->flat_2d_dims();
       auto dtype = grad_tensor->dtype();
+      const bool row_scaled_nvfp4 = output_tensor->row_scaled_nvfp4;
       const bool nvfp4_use_4over6 = quant_config_cpp.nvfp4_4over6_mode != kNVTENVFP44Over6Disabled;
       NVTE_CHECK(nvfp4_use_4over6 || output_tensor->nvfp4_e4m3_max == 448,
                  "Non-4over6 NVFP4 quantization requires E4M3 max 448.");
       NVTE_CHECK(!nvfp4_use_4over6 || !quant_config_cpp.stochastic_rounding,
                  "NVFP4 4over6 quantization does not support stochastic rounding.");
-      NVTE_CHECK(!output_tensor->row_scaled_nvfp4,
-                 "Backward NVFP4 quantization does not support row-scaled outputs.");
+      if (row_scaled_nvfp4) {
+        NVTE_CHECK(!quant_config_cpp.nvfp4_2d_quantization,
+                   "Row-scaled NVFP4 quantization does not support 2D quantization.");
+        NVTE_CHECK(
+            !(nvfp4_use_4over6 && output_tensor->has_columnwise_data()),
+            "Row-scaled NVFP4 transpose quantization is not supported with 4over6 mode. The 4over6 "
+            "kernel does not consume the per-row/per-column amaxes, so the columnwise output would "
+            "be incorrect.");
+        NVTE_CHECK(
+            !output_tensor->has_columnwise_data() ||
+                (dtype == DType::kBFloat16 && rows % 32 == 0 && cols % 32 == 0),
+            "Row-scaled NVFP4 transpose quantization requires BF16 input and dimensions that are "
+            "multiples of 32.");
+        nvfp4::compute_rowwise_amax(*grad_tensor, noop_tensor, output_tensor, stream);
+        if (output_tensor->has_columnwise_data()) {
+          nvfp4::compute_columnwise_amax(*grad_tensor, noop_tensor, output_tensor, stream);
+        }
+      }
       // Columnwise-only is supported on the optimized path only for 2D scaling; rowwise-only and
       // both-directions keep their existing routing. Columnwise-only 1D and non-bf16 fall back to
       // quantize_transpose_vector_blockwise_fp4.
@@ -314,7 +342,7 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
             /*use_stochastic_rounding=*/quant_config_cpp.stochastic_rounding,
             /*rng_state=*/quant_config_cpp.rng_state,
             /*use_2d_quantization=*/quant_config_cpp.nvfp4_2d_quantization,
-            /*row_scaled_nvfp4=*/false,
+            /*row_scaled_nvfp4=*/row_scaled_nvfp4,
             /*noop_tensor=*/noop_tensor->data,
             /*stream=*/stream);
       }

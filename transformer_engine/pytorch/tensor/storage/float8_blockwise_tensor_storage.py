@@ -5,6 +5,7 @@
 """Mixin class holding data specific for Float8BlockwiseQTensor"""
 
 from __future__ import annotations
+from collections.abc import Iterable
 import math
 from typing import Optional, Dict, Any, Tuple, Union
 import torch
@@ -322,6 +323,61 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
             reordered.append(dims[i])
         reordered.append(dims[0])
         return torch.Size(reordered)
+
+    def view(self, shape):
+        """Reshape the leading (token) dims without dequantizing.
+
+        Mirrors ``MXFP8TensorStorage.view``. Only leading dims may change: block tiling fixes
+        the inner dim (1D) or inner two (2D), so scale-inv stays valid. Columnwise data is
+        stored transposed, viewed as ``[inner, *leading]``.
+        """
+        cur_shape = self.size()
+        if shape is None or shape == cur_shape:
+            return self
+        # Canonicalize shape
+        if not isinstance(shape, Iterable):
+            shape = [shape]
+        elif len(shape) == 1 and isinstance(shape[0], Iterable):
+            shape = shape[0]
+        shape = list(shape)
+        if -1 in shape:
+            d_inferred = -math.prod(cur_shape) // math.prod(shape)
+            for i, d in enumerate(shape):
+                if d == -1:
+                    shape[i] = d_inferred
+                    break
+        if shape == list(cur_shape):
+            return self
+
+        if self._is_2D_scaled:
+            if shape[-2:] != list(cur_shape)[-2:]:
+                raise RuntimeError(
+                    "Float8BlockwiseQTensorStorage (2D block scaling) cannot reshape the inner "
+                    f"two dimensions (attempted {tuple(cur_shape)} -> {tuple(shape)})"
+                )
+        elif shape[-1] != cur_shape[-1]:
+            raise RuntimeError(
+                "Float8BlockwiseQTensorStorage (1D block scaling) cannot reshape the inner "
+                f"dimension (attempted {tuple(cur_shape)} -> {tuple(shape)})"
+            )
+
+        new_rowwise_data = None
+        if self._rowwise_data is not None:
+            new_rowwise_data = self._rowwise_data.view(*shape)
+        new_columnwise_data = None
+        if self._columnwise_data is not None:
+            new_columnwise_data = self._columnwise_data.view([shape[-1], *shape[:-1]])
+
+        return Float8BlockwiseQTensorStorage(
+            new_rowwise_data,
+            self._rowwise_scale_inv,
+            new_columnwise_data,
+            self._columnwise_scale_inv,
+            self._fp8_dtype,
+            self._quantizer,
+            self._is_2D_scaled,
+            fake_dtype=self._dtype,
+        )
 
     @property
     def device(self):
