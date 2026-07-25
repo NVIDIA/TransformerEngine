@@ -1011,6 +1011,34 @@ def test_recipe_switch_invalidates_cache():
         assert torch.equal(y2_switch, y2_fresh), "QAT->base switch reused a PROJECTED cached weight"
 
 
+def test_recipe_field_controls_qat():
+    """mxfp4_qat_weights field (env NVTE_MXFP4_QAT) turns base recipes into QAT recipes."""
+    import warnings as _warnings
+    from transformer_engine.common.recipe import Float8BlockScaling, MXFP8BlockScaling
+
+    base = MXFP8BlockScaling(mxfp4_qat_weights=True)
+    assert base.mxfp4_qat() and MXFP4QATMXFP8BlockScaling().mxfp4_qat()
+    assert not MXFP8BlockScaling().mxfp4_qat()
+
+    torch.manual_seed(9)
+    x = torch.randn(64, 256, device=DEV, dtype=torch.bfloat16)
+    mod = te.Linear(256, 128, bias=False, params_dtype=torch.bfloat16, device=DEV)
+    with _warnings.catch_warnings():
+        _warnings.simplefilter("ignore")
+        with fp8_autocast(enabled=True, fp8_recipe=base):
+            y_field = mod(x, is_first_microbatch=True)
+        with fp8_autocast(enabled=True, fp8_recipe=MXFP4QATMXFP8BlockScaling()):
+            y_class = mod(x, is_first_microbatch=True)
+    assert torch.equal(y_field, y_class), "field-driven QAT differs from class-driven QAT"
+
+    assert Float8BlockScaling(mxfp4_qat_weights=True).mxfp4_qat()
+    try:
+        Float8BlockScaling(mxfp4_qat_weights=True, w_block_scaling_dim=1)
+        raise SystemExit("field-driven blockwise QAT must validate 2D weight blocks")
+    except ValueError:
+        pass
+
+
 def test_ops_api_rejected():
     """te.ops bypasses the QAT weight hook and must reject MXFP4 QAT recipes."""
     import transformer_engine.pytorch.ops as te_ops
@@ -1164,6 +1192,7 @@ TESTS = [
     test_tilekernels_cross_parity,
     test_blockwise_feasibility_enumeration,
     test_recipe_switch_invalidates_cache,
+    test_recipe_field_controls_qat,
     test_ops_api_rejected,
     test_fp16_pipeline_rejected,
     test_fourway_matrix,
