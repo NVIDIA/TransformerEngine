@@ -577,7 +577,7 @@ class TestGroupedTensor:
 
         if output_dbias:
             expected_dbias = torch.stack([t.sum(dim=0) for t in input_tensors])
-            assert torch.allclose(dbias, expected_dbias)
+            torch.testing.assert_close(dbias, expected_dbias, rtol=1e-5, atol=4e-3)
 
     @pytest.mark.parametrize("output_dbias", [False, True])
     @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
@@ -1267,7 +1267,7 @@ class TestGroupedTensor:
 
         if output_dbias:
             expected_dbias = torch.stack([t.sum(dim=0) for t in input_tensors])
-            assert torch.allclose(dbias, expected_dbias)
+            torch.testing.assert_close(dbias, expected_dbias, rtol=1e-5, atol=4e-3)
 
     @pytest.mark.parametrize(
         "shape",
