@@ -31,7 +31,7 @@ struct NVFP4QuantConfig {
   bool use_fast_math;            // If fast math approximations are used during quantization
   bool row_scaled_nvfp4;         // If scales are computed per row (row-scaled NVFP4)
   bool return_transpose;         // If columnwise (transposed) output is produced
-  
+
   std::string to_key() const {
     std::string key;
     key.reserve(32);
@@ -94,7 +94,7 @@ inline bool nvfp4_quantize_transpose_cutedsl(const NVFP4QuantConfig &config, con
   // noop passed as ptr because the null-check must be done at runtime on device
   void *noop_ptr = (noop != nullptr) ? noop->data.dptr : nullptr;
   // stream is a tvm-ffi opaque "handle"; pass the CUDA stream as void*.
-  void* stream_ptr = static_cast<void *>(stream);
+  void *stream_ptr = static_cast<void *>(stream);
 
   // Dispatches to NVFP4QuantizeTransposeTuned1DKernel.__call__
   (*nvfp4_quant_func_opt)(&mX, &mO_row, &mS_row, &mO_col, &mS_col, &mAmaxRow, &mAmaxCol, noop_ptr,
