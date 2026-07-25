@@ -480,14 +480,8 @@ model_configs_fused_attn = {
     "cp_4_3": ModelConfig(
         2, 4096, 64, 64, attn_mask_type="causal", window_size=(128, 0), softmax_type="learnable"
     ),  # GQA
-}
-
-
-model_configs_fused_attn_d256 = {
-    # cuDNN FusedAttention D=256 bprop is Blackwell server only. Keep these
-    # outside the generic CP sweep so the D=256 signal is focused and inexpensive.
-    "cp_d256_causal": ModelConfig(2, 1024, 16, 256, attn_mask_type="causal"),
-    "cp_d256_causal_swa": ModelConfig(
+    "cp_5_0": ModelConfig(2, 1024, 16, 256, attn_mask_type="causal"),
+    "cp_5_1": ModelConfig(
         2, 1024, 16, 256, attn_mask_type="causal", window_size=(128, 0)
     ),
 }
@@ -508,6 +502,8 @@ if test_essential:
         "cp_3_4",
         "cp_4_2",
         "cp_4_3",
+        "cp_5_0",
+        "cp_5_1",
     ]
     model_configs_fused_attn = {k: model_configs_fused_attn[k] for k in configs}
     dtypes = ["bf16", "fp8"]
@@ -540,6 +536,23 @@ def test_cp_with_fused_attention(
     config = model_configs_fused_attn[model]
     config.context_parallel = True
     config.cp_comm_type = cp_comm_type
+
+    if config.head_dim_qk == 256 and config.head_dim_v == 256:
+        # D=256 uses this generic CP runner, but only a subset of its axes is supported.
+        if get_device_compute_capability() not in ((10, 0), (10, 3)):
+            pytest.skip("D=256 CP fused attention is only enabled on Blackwell server GPUs.")
+        if dtype == "fp8":
+            pytest.skip("D=256 CP fused attention is covered for BF16/FP16 only.")
+        if cp_comm_type not in ["p2p", "all_gather"]:
+            pytest.skip("D=256 CP fused attention is covered for p2p and all_gather only.")
+
+        required_cudnn_version = (9, 25, 0) if qkv_format == "thd" else (9, 23, 0)
+        required_cudnn_version_label = "9.25" if qkv_format == "thd" else "9.23"
+        if get_cudnn_version() < required_cudnn_version:
+            pytest.skip(
+                f"D=256 CP fused attention with {qkv_format.upper()} requires cuDNN"
+                f" {required_cudnn_version_label} or newer."
+            )
 
     num_gpus = 4 if cp_comm_type == "a2a+p2p" else 2
     pool = cp_pool(num_gpus)
@@ -707,124 +720,3 @@ def test_cp_with_fused_attention(
         log_level=pytest_logging_level,
     )
 
-
-# Keep these as explicit cases because the CP axes are not independent:
-# - This runner covers separate-layout CP (bshd_bshd_bshd/thd_thd_thd); KV-packed
-#   D=256 is covered by test_dpa_fused_attn_d256 in test_attention.py.
-# - THD starts from a causal config and is rewritten to padding_causal by the runner.
-# - SWA is sampled only through all_gather; p2p does not support SWA.
-BSHD_FUSED_D256_CP_CUDNN_MARK = pytest.mark.skipif(
-    get_cudnn_version() < (9, 23, 0),
-    reason="cuDNN 9.23+ is required for BSHD D=256 fused-attn CP backward.",
-)
-THD_FUSED_D256_CP_CUDNN_MARK = pytest.mark.skipif(
-    get_cudnn_version() < (9, 25, 0),
-    reason="cuDNN 9.25+ is required for THD D=256 fused-attn CP backward.",
-)
-
-DPA_CP_FUSED_D256_CASES = [
-    pytest.param(
-        "cp_d256_causal",
-        "bshd",
-        "p2p",
-        id="BSHD-P2P-CAUSAL-NO_SWA",
-        marks=BSHD_FUSED_D256_CP_CUDNN_MARK,
-    ),
-    pytest.param(
-        "cp_d256_causal",
-        "bshd",
-        "all_gather",
-        id="BSHD-ALL_GATHER-CAUSAL-NO_SWA",
-        marks=BSHD_FUSED_D256_CP_CUDNN_MARK,
-    ),
-    pytest.param(
-        "cp_d256_causal_swa",
-        "bshd",
-        "all_gather",
-        id="BSHD-ALL_GATHER-CAUSAL-SWA",
-        marks=BSHD_FUSED_D256_CP_CUDNN_MARK,
-    ),
-    pytest.param(
-        "cp_d256_causal",
-        "thd",
-        "p2p",
-        id="THD-P2P-PADDING_CAUSAL-NO_SWA",
-        marks=THD_FUSED_D256_CP_CUDNN_MARK,
-    ),
-    pytest.param(
-        "cp_d256_causal",
-        "thd",
-        "all_gather",
-        id="THD-ALL_GATHER-PADDING_CAUSAL-NO_SWA",
-        marks=THD_FUSED_D256_CP_CUDNN_MARK,
-    ),
-    pytest.param(
-        "cp_d256_causal_swa",
-        "thd",
-        "all_gather",
-        id="THD-ALL_GATHER-PADDING_CAUSAL-SWA",
-        marks=THD_FUSED_D256_CP_CUDNN_MARK,
-    ),
-]
-
-
-@pytest.mark.skipif(
-    get_device_compute_capability() not in ((10, 0), (10, 3)),
-    reason="cuDNN FusedAttention head_dim=256 backward is SM100/SM103-only.",
-)
-@pytest.mark.parametrize("dtype", ["bf16", "fp16"])
-@pytest.mark.parametrize("model,qkv_format,cp_comm_type", DPA_CP_FUSED_D256_CASES)
-def test_cp_with_fused_attention_d256(cp_pool, dtype, model, qkv_format, cp_comm_type):
-    """Test cuDNN FusedAttention CP with head_dim=256 backward on Blackwell."""
-    pool = cp_pool(2)
-    config = copy.deepcopy(model_configs_fused_attn_d256[model])
-    config.context_parallel = True
-    config.cp_comm_type = cp_comm_type
-
-    if qkv_format == "thd":
-        config.attn_mask_type = "padding_causal"
-
-    dtype_map = {"fp16": torch.float16, "bf16": torch.bfloat16}
-    available_backends, _, _ = get_available_attention_backends(
-        config,
-        qkv_dtype=dtype_map[dtype],
-        qkv_layout="_".join([qkv_format] * 3),
-        is_training=True,
-        deterministic=_deterministic,
-    )
-
-    _, fused_attn_supported, _ = available_backends
-    if fused_attn_supported and config.attn_mask_type in ["causal", "padding_causal"]:
-        # CP can internally invoke bottom-right aligned fused-attn subcalls for
-        # causal masks. Check that inner fused-attn backend directly; the CP wrapper
-        # itself rejects user-facing bottom-right masks.
-        config_copy = copy.deepcopy(config)
-        config_copy.context_parallel = False
-        config_copy.attn_mask_type = config.attn_mask_type + "_bottom_right"
-        available_backends, _, _ = get_available_attention_backends(
-            config_copy,
-            qkv_dtype=dtype_map[dtype],
-            qkv_layout="_".join([qkv_format] * 3),
-            is_training=True,
-            deterministic=_deterministic,
-        )
-        _, fused_attn_supported, _ = available_backends
-    if not fused_attn_supported:
-        pytest.skip("No attention backend available.")
-
-    _submit(
-        pool,
-        dtype=dtype,
-        model=model,
-        qkv_format=qkv_format,
-        kernel_backend="FusedAttention",
-        cp_comm_type=cp_comm_type,
-        fp8_bwd=False,
-        fp8_dpa=False,
-        fp8_mha=False,
-        scaling_mode=None,
-        f16_O=True,
-        is_training=True,
-        deterministic=_deterministic,
-        log_level=pytest_logging_level,
-    )
