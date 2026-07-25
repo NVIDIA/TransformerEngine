@@ -166,12 +166,22 @@ try:
 except PackageNotFoundError:
     flash_attn_func_v4 = None
     flash_attn_varlen_func_v4 = None
+    _flash_attn_fwd_v4 = None
+    _flash_attn_bwd_v4 = None
 else:
     from flash_attn.cute.interface import (  # pylint: disable=ungrouped-imports,no-name-in-module
         flash_attn_func as flash_attn_func_v4,
         flash_attn_varlen_func as flash_attn_varlen_func_v4,
         _validate_head_dims as _fa4_validate_head_dims,
     )
+    try:
+        from flash_attn.cute.interface import (  # pylint: disable=ungrouped-imports,no-name-in-module
+            _flash_attn_fwd as _flash_attn_fwd_v4,
+            _flash_attn_bwd as _flash_attn_bwd_v4,
+        )
+    except ImportError:
+        _flash_attn_fwd_v4 = None
+        _flash_attn_bwd_v4 = None
 
     fa_utils.v4_validate_head_dims = _fa4_validate_head_dims
     fa_utils.set_flash_attention_4_params()
@@ -1079,6 +1089,7 @@ class FlashAttention(torch.nn.Module):
                     quantizers=quantizers,
                     pad_between_seqs=pad_between_seqs,
                     use_flash_attn_3=use_flash_attn_3,
+                    use_flash_attn_4=use_flash_attn_4,
                     fp8_output=fp8_output,
                 )
         else:
