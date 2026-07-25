@@ -500,7 +500,8 @@ class MXFP4QATMXFP8BlockScaling(MXFP8BlockScaling):
     dgrad is quantized from the same MXFP4-grid weight. Activations and
     gradients are handled exactly as in the base recipe, and
     ``backward_override`` keeps its base-recipe meaning ('high_precision'
-    uses the original unquantized weight for dgrad).
+    uses the original unquantized weight for dgrad). Only bf16/fp32 weights
+    and activation dtypes are supported: the MXFP4 grid exceeds fp16 range.
     """
 
 
@@ -517,6 +518,8 @@ class MXFP4QATFloat8BlockScaling(Float8BlockScaling):
     tile's maximum scale; weights are quantized in square 128x128 blocks so
     no rowwise/columnwise distinction applies (the transpose is exact).
     Activations and gradients are handled exactly as in the base recipe.
+    Only bf16/fp32 weights and activation dtypes are supported: the MXFP4
+    grid exceeds fp16 range.
     """
 
     def __post_init__(self) -> None:

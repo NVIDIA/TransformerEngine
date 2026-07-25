@@ -806,6 +806,12 @@ def quantize_weight(
         if FP8GlobalStateManager.is_fp8_enabled()
         else False
     )
+    if _mxfp4_qat_active and workspace_dtype == torch.float16:
+        raise NotImplementedError(
+            "MXFP4 QAT does not support fp16 as the activation/dequantize dtype: "
+            "the MXFP4 grid (values up to 6*2^125) exceeds fp16 range. Use bf16 "
+            "or fp32."
+        )
 
     # Already-quantized weight (primary FP8 parameters)
     if isinstance(tensor, QuantizedTensor):

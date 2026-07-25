@@ -756,6 +756,21 @@ def test_blockwise_feasibility_enumeration():
           "(E4M3 subnormal lattice bound)")
 
 
+def test_fp16_pipeline_rejected():
+    """fp16 cannot represent the MXFP4 grid (top 6*2^125 >> fp16 max): both the
+    fp16-weight path and the fp16 activation/dequantize dtype must fail loudly
+    under MXFP4 QAT instead of silently overflowing."""
+    mod = te.Linear(256, 128, bias=False, params_dtype=torch.float16, device=DEV)
+    x = torch.randn(64, 256, device=DEV, dtype=torch.float16)
+    for recipe in (MXFP4QATMXFP8BlockScaling(), MXFP4QATFloat8BlockScaling()):
+        try:
+            with fp8_autocast(enabled=True, fp8_recipe=recipe):
+                mod(x)
+            raise SystemExit(f"fp16 pipeline must be rejected ({recipe.__class__.__name__})")
+        except (NotImplementedError, ValueError):
+            pass
+
+
 def test_fourway_matrix():
     """TileKernels deployment reference vs CuTe DSL vs CUDA kernel vs torch
     reference, bitwise, over every previously-hit edge domain and every
@@ -1114,6 +1129,7 @@ TESTS = [
     test_blockwise_feasibility_enumeration,
     test_recipe_switch_invalidates_cache,
     test_ops_api_rejected,
+    test_fp16_pipeline_rejected,
     test_fourway_matrix,
     test_kernel_perf,
     test_kernel_fast_math_immune,

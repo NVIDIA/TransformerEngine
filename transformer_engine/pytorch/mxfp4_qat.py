@@ -36,7 +36,8 @@ Value-domain semantics (identical in all implementations):
   NaN must not silently fall back to scale 1 — corruption is made visible.
 * huge amax (> 6*2^125): the scale is capped at 2^125 so the dequantized grid
   stays representable in bf16/fp32; values saturate at 6*2^125 (satfinite).
-* fp16 weights are rejected: even capped scales overflow fp16's range.
+* fp16 is rejected for both weights and the activation/dequantize dtype:
+  even capped scales overflow fp16's range.
 """
 import os
 import warnings
