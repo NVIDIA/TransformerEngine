@@ -556,6 +556,25 @@ py::object bgrad_group_quantize(const at::Tensor &tensor, py::handle quantizer,
                         py::cast(std::move(dbias_torch)));
 }
 
+at::Tensor mxfp4_fake_quantize(const at::Tensor &input) {
+  TORCH_CHECK(input.is_cuda(), "mxfp4_fake_quantize: input must be a CUDA tensor.");
+  TORCH_CHECK(input.dim() == 2, "mxfp4_fake_quantize: input must be 2D, got dim=", input.dim());
+  TORCH_CHECK(input.size(1) % 32 == 0,
+              "mxfp4_fake_quantize: innermost dimension must be divisible by 32, got ",
+              input.size(1));
+  const c10::cuda::CUDAGuard device_guard(input.device());
+  auto input_contiguous = input.contiguous();
+  if (reinterpret_cast<uintptr_t>(input_contiguous.data_ptr()) % 16 != 0) {
+    input_contiguous = input_contiguous.clone();
+  }
+  auto output = at::empty_like(input_contiguous);
+  auto input_cpp = makeTransformerEngineTensor(input_contiguous);
+  auto output_cpp = makeTransformerEngineTensor(output);
+  nvte_mxfp4_fake_quantize(input_cpp.data(), output_cpp.data(),
+                           at::cuda::getCurrentCUDAStream());
+  return output;
+}
+
 py::object dequantize(const py::handle &input, transformer_engine::DType otype) {
   init_extension();
 

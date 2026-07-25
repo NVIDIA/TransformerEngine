@@ -558,6 +558,16 @@ class BasicLinear(BasicOperation):
 
         # Check weight tensor
         w = weight
+        if (
+            with_quantized_compute
+            and FP8GlobalStateManager.is_fp8_enabled()
+            and FP8GlobalStateManager.get_fp8_recipe().mxfp4_qat()
+        ):
+            raise NotImplementedError(
+                "MXFP4 QAT recipes are not implemented for the operations API "
+                "(te.ops): weight quantization here bypasses the QAT projection. "
+                "Use the module API (te.Linear/te.GroupedLinear/...)."
+            )
         if not with_quantized_compute:
             w = maybe_dequantize(w, dtype)
         elif with_quantized_compute and not is_quantized_tensor(w):

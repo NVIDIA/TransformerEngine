@@ -46,6 +46,7 @@ from ..distributed import (
     _fsdp_gather_tensors,
 )
 from ..constants import dist_group_type
+from ..mxfp4_qat import mxfp4_fake_quantize
 from ..cpp_extensions.gemm import _NUM_MAX_UB_STREAMS
 from ..quantized_tensor import QuantizedTensor, QuantizedTensorStorage, Quantizer
 from ..tensor.float8_tensor import Float8Quantizer, Float8CurrentScalingQuantizer
@@ -800,8 +801,20 @@ def quantize_weight(
         ``_fp8_workspaces``.
     """
 
+    _mxfp4_qat_active = (
+        FP8GlobalStateManager.get_fp8_recipe().mxfp4_qat()
+        if FP8GlobalStateManager.is_fp8_enabled()
+        else False
+    )
+
     # Already-quantized weight (primary FP8 parameters)
     if isinstance(tensor, QuantizedTensor):
+        if _mxfp4_qat_active:
+            raise NotImplementedError(
+                "MXFP4 QAT recipes do not support primary quantized weights: the "
+                "high-precision master weight is required to project onto the "
+                "MXFP4 grid."
+            )
         update_rowwise = True if quantizer.rowwise_usage else None
         update_columnwise = True if quantizer.columnwise_usage else None
         tensor.update_usage(
@@ -833,6 +846,8 @@ def quantize_weight(
         if update_workspace:
             if tensor is None:
                 raise ValueError("tensor kwarg must be provided to update FP8 workspace")
+            if _mxfp4_qat_active:
+                tensor = mxfp4_fake_quantize(tensor)
             if hasattr(workspace, "quantize_"):
                 workspace.quantize_(tensor, noop_flag=skip_update_flag)
             else:
@@ -842,6 +857,8 @@ def quantize_weight(
     # Cache miss — create new workspace
     if tensor is None or quantizer is None:
         raise ValueError("tensor and quantizer kwargs must be provided to construct FP8 workspace")
+    if _mxfp4_qat_active:
+        tensor = mxfp4_fake_quantize(tensor)
     if cache:
         # Ensure the tensor in the cache is an instance of torch.Tensor,
         # as it persists beyond a single forward pass.
@@ -1506,9 +1523,12 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             meta["recipe"] = FP8GlobalStateManager.get_fp8_recipe()
 
         _current_recipe = meta["recipe"]
-        if _original_recipe is not None and not (
-            issubclass(_current_recipe.__class__, _original_recipe.__class__)
-            or issubclass(_original_recipe.__class__, _current_recipe.__class__)
+        if _original_recipe is not None and (
+            not (
+                issubclass(_current_recipe.__class__, _original_recipe.__class__)
+                or issubclass(_original_recipe.__class__, _current_recipe.__class__)
+            )
+            or _current_recipe.mxfp4_qat() != _original_recipe.mxfp4_qat()
         ):
             warnings.warn(
                 f"Recipe type changed from {_original_recipe.__class__.__name__} "

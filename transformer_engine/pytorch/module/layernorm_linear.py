@@ -32,6 +32,7 @@ from .base import (
     _2X_ACC_WGRAD,
 )
 from ..quantization import FP8GlobalStateManager, QuantizerRole
+from ..mxfp4_qat import mxfp4_fake_quantize
 from ..utils import (
     assert_dim_for_fp8_exec,
     cast_if_needed,
@@ -810,6 +811,8 @@ class _LayerNormLinear(torch.autograd.Function):
                     # fsdp2 quantized-tensor hooks when workspace was not saved.
                     weight = saved_weight
                 elif ctx.weight_quantizer is not None:
+                    if ctx.fp8_recipe is not None and ctx.fp8_recipe.mxfp4_qat():
+                        saved_weight = mxfp4_fake_quantize(saved_weight)
                     ctx.weight_quantizer.set_usage(rowwise=True, columnwise=True)
                     weight = ctx.weight_quantizer(saved_weight)
 

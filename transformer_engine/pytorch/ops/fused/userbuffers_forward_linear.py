@@ -319,6 +319,10 @@ class UserbuffersForwardLinear(FusedOperation):
                 raise RuntimeError(
                     f"Unsupported recipe for Userbuffers ({recipe.__class__.__name__})"
                 )
+            if recipe.mxfp4_qat():
+                raise NotImplementedError(
+                    "MXFP4 QAT recipes are not implemented for Userbuffers fused ops."
+                )
 
         # Get autocast dtype if needed
         if torch.is_autocast_enabled():

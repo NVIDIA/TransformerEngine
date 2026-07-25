@@ -15,6 +15,7 @@ import torch
 import transformer_engine_torch as tex
 
 from transformer_engine.common.recipe import Recipe
+from ..mxfp4_qat import mxfp4_fake_quantize
 from transformer_engine.pytorch.torch_version import torch_version
 
 from .base import (
@@ -1003,6 +1004,8 @@ def _linear_backward(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None], ..
                     # fsdp2 quantized-tensor hooks when workspace was not saved.
                     weight_fp8 = saved_weight
                 elif bwd_args.weight_quantizer is not None:
+                    if bwd_args.fp8 and FP8GlobalStateManager.get_fp8_recipe().mxfp4_qat():
+                        saved_weight = mxfp4_fake_quantize(saved_weight)
                     bwd_args.weight_quantizer.set_usage(rowwise=True, columnwise=True)
                     weight_fp8 = bwd_args.weight_quantizer(saved_weight)
             elif (
@@ -1013,6 +1016,8 @@ def _linear_backward(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None], ..
             ):
                 # Distributed weight re-gathered a BF16 weight: quantize with the layer quantizer
                 # so the dgrad operand isn't cast by the delayed recipe.
+                if FP8GlobalStateManager.get_fp8_recipe().mxfp4_qat():
+                    weight_fp8 = mxfp4_fake_quantize(weight_fp8)
                 bwd_args.weight_quantizer.set_usage(rowwise=True, columnwise=True)
                 weight_fp8 = bwd_args.weight_quantizer(weight_fp8)
 

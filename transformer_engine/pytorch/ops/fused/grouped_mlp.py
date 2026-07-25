@@ -26,6 +26,7 @@ from ...distributed_weight import (
     finalize_weight_grads,
 )
 from ...module.base import _2X_ACC_WGRAD
+from ...fp8 import FP8GlobalStateManager
 from ...quantization import Recipe
 from ...tensor import NVFP4Quantizer, NVFP4Tensor, NVFP4TensorStorage, Quantizer
 from ...tensor.grouped_tensor import GroupedTensor
@@ -960,6 +961,11 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         fc2_input_quantizer = fc2_op.get_quantizer("forward", 0)
         fc2_weight_quantizer = fc2_op.get_quantizer("forward", 1)
         fc2_grad_output_quantizer = fc2_op.get_quantizer("backward", 0)
+        if FP8GlobalStateManager.is_fp8_enabled() and FP8GlobalStateManager.get_fp8_recipe().mxfp4_qat():
+            raise NotImplementedError(
+                "MXFP4 QAT recipes are not implemented for fused grouped-MLP ops: "
+                "weight quantization here bypasses the QAT projection."
+            )
 
         # Extract split sizes from extra input
         fc1_split_sizes = basic_op_extra_inputs[0][0]

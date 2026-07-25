@@ -168,6 +168,11 @@ class Recipe:
         """Whether the given recipe is custom."""
         return issubclass(cls, CustomRecipe)
 
+    @classmethod
+    def mxfp4_qat(cls):
+        """Whether the given recipe applies MXFP4 weight QAT on top of its base recipe."""
+        return issubclass(cls, (MXFP4QATMXFP8BlockScaling, MXFP4QATFloat8BlockScaling))
+
 
 @dataclass(repr=False)
 class DelayedScaling(Recipe):
@@ -479,6 +484,53 @@ class Float8BlockScaling(Recipe):
             f"fp8_mha={self.fp8_mha}, "
             f"backward_override={self.backward_override}"
         )
+
+
+@dataclass(repr=False)
+class MXFP4QATMXFP8BlockScaling(MXFP8BlockScaling):
+    """
+    MXFP8 recipe with MXFP4 weight quantization-aware training.
+
+    Identical to :class:`MXFP8BlockScaling` except that weights are first
+    projected onto the MXFP4 (E2M1) grid with a 1x32 power-of-two scale
+    before the regular MXFP8 weight quantization. Because MXFP4 blocks are
+    1x32-aligned with MXFP8 blocks and the E2M1 grid is a subset of E4M3,
+    the rowwise MXFP8 weight representation is an exact (lossless) encoding
+    of the MXFP4-grid weight; the columnwise (32x1) representation used by
+    dgrad is quantized from the same MXFP4-grid weight. Activations and
+    gradients are handled exactly as in the base recipe, and
+    ``backward_override`` keeps its base-recipe meaning ('high_precision'
+    uses the original unquantized weight for dgrad).
+    """
+
+
+@dataclass(repr=False)
+class MXFP4QATFloat8BlockScaling(Float8BlockScaling):
+    """
+    Float8 block-scaling recipe with MXFP4 weight quantization-aware training.
+
+    Identical to :class:`Float8BlockScaling` except that weights are first
+    projected onto the MXFP4 (E2M1) grid with a 1x32 power-of-two scale
+    before the regular 128x128 blockwise FP8 weight quantization. The FP8
+    weight encoding is exact (lossless) whenever every 1x32 MXFP4 scale
+    within a 128x128 tile lies within the FP8 dynamic-range headroom of the
+    tile's maximum scale; weights are quantized in square 128x128 blocks so
+    no rowwise/columnwise distinction applies (the transpose is exact).
+    Activations and gradients are handled exactly as in the base recipe.
+    """
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if self.w_block_scaling_dim != 2:
+            raise ValueError(
+                "MXFP4 QAT requires 128x128 (2D) weight scaling blocks, got "
+                f"w_block_scaling_dim={self.w_block_scaling_dim}."
+            )
+        if not self.fp8_quant_fwd_weight.power_2_scale:
+            raise ValueError(
+                "MXFP4 QAT requires power-of-two weight scales; "
+                "NVTE_FP8_BLOCK_SCALING_FP32_SCALES=1 is incompatible."
+            )
 
 
 @dataclass(repr=False)
