@@ -805,6 +805,152 @@ class TestGroupedTensor:
         assert torch.equal(static_output.rowwise_data, expected.rowwise_data)
         assert torch.equal(static_output.scale_inv, expected.scale_inv)
 
+    @pytest.mark.parametrize(
+        "quantization",
+        [
+            pytest.param(
+                "fp8_current_scaling",
+                marks=pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8),
+            ),
+            pytest.param(
+                "fp8_blockwise",
+                marks=pytest.mark.skipif(
+                    not fp8_block_scaling_grouped_available,
+                    reason=reason_for_no_fp8_block_scaling_grouped,
+                ),
+            ),
+        ],
+    )
+    def test_group_quantize_reuses_destination_and_honors_noop_fp8(self, quantization: str) -> None:
+        """Check pointer-stable weight-cache updates and no-op CUDA graph replays."""
+        num_tensors = 2
+        shape = (num_tensors * 256, 256)
+        if quantization == "fp8_current_scaling":
+            quantizer = Float8CurrentScalingQuantizer(
+                fp8_dtype=tex.DType.kFloat8E4M3,
+                device="cuda",
+                force_pow_2_scales=False,
+                amax_epsilon=0.0,
+            )
+            quantizer.set_usage(rowwise=True, columnwise=True)
+        else:
+            quantizer = Float8BlockQuantizer(
+                fp8_dtype=tex.DType.kFloat8E4M3,
+                rowwise=True,
+                columnwise=True,
+                force_pow_2_scales=False,
+                amax_epsilon=0.0,
+                block_scaling_dim=1,
+            )
+
+        source = torch.randn(shape, dtype=torch.bfloat16, device="cuda")
+        output = tex.group_quantize(source, quantizer, num_tensors, None)
+        output_buffers = tuple(
+            buffer
+            for buffer in (
+                output.rowwise_data,
+                output.columnwise_data,
+                output.scale_inv,
+                output.columnwise_scale_inv,
+                output.amax,
+                output.columnwise_amax,
+                output.scale,
+            )
+            if buffer is not None
+        )
+        assert output_buffers
+        pointers = tuple(buffer.data_ptr() for buffer in output_buffers)
+
+        # Re-quantization must update the existing allocations because a captured GEMM keeps
+        # their raw addresses rather than looking them up again through the Python object.
+        updated_source = source + 1
+        updated = tex.group_quantize(
+            updated_source,
+            quantizer,
+            num_tensors,
+            None,
+            output=output,
+        )
+        reference = tex.group_quantize(updated_source, quantizer, num_tensors, None)
+        assert updated is output
+        assert pointers == tuple(buffer.data_ptr() for buffer in output_buffers)
+        reference_buffers = tuple(
+            buffer
+            for buffer in (
+                reference.rowwise_data,
+                reference.columnwise_data,
+                reference.scale_inv,
+                reference.columnwise_scale_inv,
+                reference.amax,
+                reference.columnwise_amax,
+                reference.scale,
+            )
+            if buffer is not None
+        )
+        assert len(output_buffers) == len(reference_buffers)
+        for output_buffer, reference_buffer in zip(output_buffers, reference_buffers, strict=True):
+            assert torch.equal(output_buffer, reference_buffer)
+
+        # A nonzero device flag must preserve every cached payload and metadata buffer.
+        old_buffers = tuple(buffer.clone() for buffer in output_buffers)
+        noop = torch.ones(1, dtype=torch.float32, device="cuda")
+        tex.group_quantize(
+            updated_source * 2,
+            quantizer,
+            num_tensors,
+            None,
+            noop_flag=noop,
+            output=output,
+        )
+        for output_buffer, old_buffer in zip(output_buffers, old_buffers, strict=True):
+            assert torch.equal(output_buffer, old_buffer)
+
+        # Capture one pointer-stable update. Replays change only source contents and the device
+        # no-op value, matching TE's CUDA graph microbatch weight-cache protocol.
+        graph_source = updated_source.clone()
+        noop.zero_()
+        torch.cuda.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            tex.group_quantize(
+                graph_source,
+                quantizer,
+                num_tensors,
+                None,
+                noop_flag=noop,
+                output=output,
+            )
+
+        graph_source.copy_(source - 1)
+        noop.zero_()
+        graph.replay()
+        torch.cuda.synchronize()
+        reference = tex.group_quantize(graph_source, quantizer, num_tensors, None)
+        reference_buffers = tuple(
+            buffer
+            for buffer in (
+                reference.rowwise_data,
+                reference.columnwise_data,
+                reference.scale_inv,
+                reference.columnwise_scale_inv,
+                reference.amax,
+                reference.columnwise_amax,
+                reference.scale,
+            )
+            if buffer is not None
+        )
+        assert len(output_buffers) == len(reference_buffers)
+        for output_buffer, reference_buffer in zip(output_buffers, reference_buffers, strict=True):
+            assert torch.equal(output_buffer, reference_buffer)
+
+        old_buffers = tuple(buffer.clone() for buffer in output_buffers)
+        graph_source.copy_(source + 2)
+        noop.fill_(1)
+        graph.replay()
+        torch.cuda.synchronize()
+        for output_buffer, old_buffer in zip(output_buffers, old_buffers, strict=True):
+            assert torch.equal(output_buffer, old_buffer)
+
     @pytest.mark.parametrize("mode", ["rowwise", "columnwise", "both"])
     @pytest.mark.parametrize(
         "shape_case",

@@ -404,6 +404,9 @@ py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const 
       QuantizationConfigWrapper quant_config_cpp;
       quant_config_cpp.set_force_pow_2_scales(fp8_block_quantizer_cpp->force_pow_2_scales);
       quant_config_cpp.set_amax_epsilon(fp8_block_quantizer_cpp->amax_epsilon);
+      if (noop_flag_cpp.has_value()) {
+        quant_config_cpp.set_noop_tensor(noop_flag_cpp->data());
+      }
       NVTE_SCOPED_GIL_RELEASE({
         nvte_group_quantize(grouped_input_tensor.data(), grouped_output_tensor_cpp.data(),
                             quant_config_cpp, at::cuda::getCurrentCUDAStream());

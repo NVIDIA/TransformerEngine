@@ -30,7 +30,10 @@ from transformer_engine.pytorch.cpp_extensions import (
     general_grouped_gemm,
     general_grouped_gemm_for_grouped_tensor,
 )
-from transformer_engine.pytorch.module.grouped_linear import _GroupedLinear
+from transformer_engine.pytorch.module.grouped_linear import (
+    _GroupedLinear,
+    is_module_grouped_tensor_path_supported,
+)
 from transformer_engine.pytorch.quantization import (
     FP8GlobalStateManager,
     get_align_size_for_quantization,
@@ -1550,15 +1553,45 @@ def test_single_grouped_weight_rejects_host_m_splits(monkeypatch, m_splits, exce
         grouped_linear(x, m_splits)
 
 
-def test_single_grouped_weight_native_bf16_matches_discrete(monkeypatch):
-    """Native BF16 grouped storage produces one parent wgrad and no member split calls."""
-    _require_native_grouped_tensor_gemm()
+@pytest.mark.parametrize(
+    "fp8_recipe",
+    [
+        pytest.param(None, id="bf16"),
+        pytest.param(
+            recipe.Float8CurrentScaling(),
+            marks=pytest.mark.skipif(not _fp8_available, reason=_reason_for_no_fp8),
+            id="fp8-current-scaling",
+        ),
+        pytest.param(
+            recipe.MXFP8BlockScaling(),
+            marks=pytest.mark.skipif(not _mxfp8_available, reason=_reason_for_no_mxfp8),
+            id="mxfp8",
+        ),
+        pytest.param(
+            recipe.Float8BlockScaling(),
+            marks=pytest.mark.skipif(
+                not _fp8_block_scaling_available,
+                reason=_reason_for_no_fp8_block_scaling,
+            ),
+            id="fp8-block-scaling",
+        ),
+    ],
+)
+def test_single_grouped_weight_matches_discrete_grouped_tensor_path(monkeypatch, fp8_recipe):
+    """Match single and discrete weights while both use CUDA m_splits and grouped GEMM."""
+    if not is_module_grouped_tensor_path_supported(
+        fp8_recipe,
+        torch.bfloat16,
+        single_grouped_weight=True,
+    ):
+        pytest.skip("Recipe is not supported with a single grouped weight on this system.")
+
     monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
     FP8GlobalStateManager.reset()
 
     num_gemms = 3
-    in_features = 128
-    out_features = 128
+    in_features = 256
+    out_features = 256
     m_splits = torch.tensor([256, 512, 256], dtype=torch.int64, device="cuda")
     total_tokens = int(m_splits.sum())
     weights = torch.randn(
@@ -1598,8 +1631,9 @@ def test_single_grouped_weight_native_bf16_matches_discrete(monkeypatch):
     x_discrete = x.detach().clone().requires_grad_(True)
     x_single = x.detach().clone().requires_grad_(True)
 
-    y_discrete = discrete(x_discrete, m_splits)
-    y_single = single(x_single, m_splits)
+    with autocast(enabled=fp8_recipe is not None, recipe=fp8_recipe):
+        y_discrete = discrete(x_discrete, m_splits)
+        y_single = single(x_single, m_splits)
     y_discrete.backward(dy)
     y_single.backward(dy)
 
@@ -1897,9 +1931,22 @@ _GROUPED_PARAMETER_LAYOUTS = [
     [
         pytest.param(None, id="bf16"),
         pytest.param(
+            recipe.Float8CurrentScaling(),
+            marks=pytest.mark.skipif(not _fp8_available, reason=_reason_for_no_fp8),
+            id="fp8-current-scaling",
+        ),
+        pytest.param(
             recipe.MXFP8BlockScaling(),
             marks=pytest.mark.skipif(not _mxfp8_available, reason=_reason_for_no_mxfp8),
             id="mxfp8",
+        ),
+        pytest.param(
+            recipe.Float8BlockScaling(),
+            marks=pytest.mark.skipif(
+                not _fp8_block_scaling_available,
+                reason=_reason_for_no_fp8_block_scaling,
+            ),
+            id="fp8-block-scaling",
         ),
     ],
 )
@@ -1915,13 +1962,17 @@ def test_grouped_parameter_layout_matches_cpu_m_splits(
     fuse_wgrad_accumulation,
 ):
     """Match CUDA m_splits and all meaningful parameter layouts against the legacy path."""
-    use_mxfp8 = fp8_recipe is not None
-    _require_native_grouped_tensor_gemm(mxfp8=use_mxfp8)
+    if not is_module_grouped_tensor_path_supported(
+        fp8_recipe,
+        torch.bfloat16,
+        single_grouped_weight=single_grouped_weight,
+    ):
+        pytest.skip("Recipe is not supported by the module GroupedTensor path on this system.")
     FP8GlobalStateManager.reset()
 
     torch.manual_seed(1234)
-    # MXFP8 grouped quantization requires each expert problem to be 256-aligned. Use the same
-    # aligned shapes for BF16 so both precision modes exercise an identical problem layout.
+    # MXFP8 and the grouped FP8 recipes require aligned expert problems. Use the same
+    # 256-aligned shapes for every recipe so all precision modes exercise one layout.
     num_gemms = 2
     in_features = 256
     out_features = 256
