@@ -72,19 +72,13 @@ def fake_quant_ref_fp64(w):
     cand = torch.cat([-grid.flip(0)[:-1], grid])
     d = (y.unsqueeze(-1) - cand).abs()
     near = d.argmin(dim=-1)
-    even = torch.tensor(
-        [abs(v) in (0.0, 1.0, 2.0, 4.0) for v in cand.tolist()], device=w.device
-    )
+    even = torch.tensor([abs(v) in (0.0, 1.0, 2.0, 4.0) for v in cand.tolist()], device=w.device)
     dmin = d.gather(-1, near.unsqueeze(-1)).squeeze(-1)
     tie_even = d.eq(dmin.unsqueeze(-1)) & even
     has_even_tie = tie_even.any(dim=-1)
-    near_even = torch.where(
-        has_even_tie, tie_even.to(torch.uint8).argmax(dim=-1), near
-    )
+    near_even = torch.where(has_even_tie, tie_even.to(torch.uint8).argmax(dim=-1), near)
     q = cand[near_even]
     return (q * scale).view(m, n).to(torch.float64)
-
-
 
 
 def test_fake_quant_grid_scale_rtne():
@@ -118,11 +112,9 @@ def test_D_lossless_in_bf16():
         w = make_weight(m, n, outliers=4)
         w_hat_bf16 = mxfp4_fake_quantize(w)
         w_hat_fp32 = mxfp4_fake_quantize(w.to(torch.float32))
-        assert torch.equal(w_hat_bf16.to(torch.float32), w_hat_fp32), (
-            "MXFP4-grid weight is not exact in bf16"
-        )
-
-
+        assert torch.equal(
+            w_hat_bf16.to(torch.float32), w_hat_fp32
+        ), "MXFP4-grid weight is not exact in bf16"
 
 
 def test_E_mxfp8_rowwise_lossless():
@@ -140,15 +132,15 @@ def test_E_mxfp8_rowwise_lossless():
         raw_vals = data.view(torch.float8_e4m3fn).to(torch.float32).view(m, n // 32, 32)
         raw_scale = torch.ldexp(torch.ones_like(codes, dtype=torch.float32), codes - 127)
         raw_dq = (raw_vals * raw_scale.unsqueeze(-1)).view(m, n)
-        assert torch.equal(raw_dq, wh32), (
-            f"RAW MXFP8 encoding of the MXFP4-grid weight is not lossless {m}x{n}"
-        )
+        assert torch.equal(
+            raw_dq, wh32
+        ), f"RAW MXFP8 encoding of the MXFP4-grid weight is not lossless {m}x{n}"
 
         flushed = wh32.abs() == 2.0**-127
         assert flushed.any() and not flushed.all(), "artifact case not exercised"
-        assert torch.equal(dq[~flushed], wh32[~flushed]), (
-            f"MXFP8 rowwise encoding of the MXFP4-grid weight is not lossless {m}x{n}"
-        )
+        assert torch.equal(
+            dq[~flushed], wh32[~flushed]
+        ), f"MXFP8 rowwise encoding of the MXFP4-grid weight is not lossless {m}x{n}"
         if not (dq[flushed] == 0).all():
             assert torch.equal(dq, wh32), "dequant neither flushed nor exact?"
             print("  NOTE: TE software dequant now handles UE8M0 code 0 -> fully exact")
@@ -187,14 +179,14 @@ def test_G_blockwise_lossless_and_transpose():
             block_scaling_dim=2,
         ).quantize(w_hat)
         dq = q.dequantize(dtype=torch.float32)
-        assert torch.equal(dq, w_hat.to(torch.float32)), (
-            f"128x128 blockwise encoding of the MXFP4-grid weight is not lossless {m}x{n}"
-        )
+        assert torch.equal(
+            dq, w_hat.to(torch.float32)
+        ), f"128x128 blockwise encoding of the MXFP4-grid weight is not lossless {m}x{n}"
         q.update_usage(rowwise_usage=False, columnwise_usage=True)
         dqc = q.dequantize(dtype=torch.float32)
-        assert torch.equal(dqc, w_hat.to(torch.float32)), (
-            f"columnwise 128x128 dequant differs from the MXFP4-grid weight {m}x{n}"
-        )
+        assert torch.equal(
+            dqc, w_hat.to(torch.float32)
+        ), f"columnwise 128x128 dequant differs from the MXFP4-grid weight {m}x{n}"
 
 
 def test_lossless_dequant_to_bf16():
@@ -208,21 +200,24 @@ def test_lossless_dequant_to_bf16():
         dq8 = q8.dequantize(dtype=torch.bfloat16)
         flushed = w_hat.to(torch.float32).abs() == 2.0**-127
         assert flushed.any(), "artifact case not exercised"
-        assert torch.equal(dq8[~flushed], w_hat[~flushed]), (
-            f"mxfp8 rowwise dequant to bf16 not lossless {m}x{n}"
-        )
+        assert torch.equal(
+            dq8[~flushed], w_hat[~flushed]
+        ), f"mxfp8 rowwise dequant to bf16 not lossless {m}x{n}"
         if not (dq8[flushed] == 0).all():
             assert torch.equal(dq8, w_hat), "dequant neither flushed nor exact?"
             print("  NOTE: TE software dequant now handles UE8M0 code 0 -> fully exact")
 
         w2_hat = mxfp4_fake_quantize(make_weight(m, n, zero_blocks=4))
         qb = Float8BlockQuantizer(
-            fp8_dtype=tex.DType.kFloat8E4M3, rowwise=True, columnwise=True,
-            force_pow_2_scales=True, block_scaling_dim=2,
+            fp8_dtype=tex.DType.kFloat8E4M3,
+            rowwise=True,
+            columnwise=True,
+            force_pow_2_scales=True,
+            block_scaling_dim=2,
         ).quantize(w2_hat)
-        assert torch.equal(qb.dequantize(dtype=torch.bfloat16), w2_hat), (
-            f"blockwise 128x128 dequant to bf16 not lossless {m}x{n}"
-        )
+        assert torch.equal(
+            qb.dequantize(dtype=torch.bfloat16), w2_hat
+        ), f"blockwise 128x128 dequant to bf16 not lossless {m}x{n}"
 
 
 def test_C_mxfp8_colwise_bound():
@@ -238,10 +233,6 @@ def test_C_mxfp8_colwise_bound():
         assert (err <= bound + 1e-30).all(), f"colwise 32x1 requant error above bound {m}x{n}"
 
 
-
-
-
-
 _INTREE_KERNELS = {}
 
 
@@ -255,7 +246,10 @@ def _intree_kernel(fast_math=False):
             "NVTE_MXFP4_QAT_TEST_SRC",
             os.path.join(
                 os.path.dirname(os.path.abspath(__file__)),
-                "..", "..", "transformer_engine", "common",
+                "..",
+                "..",
+                "transformer_engine",
+                "common",
             ),
         )
         cuda_src = r"""
@@ -294,7 +288,8 @@ torch::Tensor mxfp4_fake_quantize_intree(torch::Tensor w) {
                 "-U__CUDA_NO_HALF2_OPERATORS__",
                 "-U__CUDA_NO_BFLOAT16_OPERATORS__",
                 "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
-            ] + (["--use_fast_math"] if fast_math else []),
+            ]
+            + (["--use_fast_math"] if fast_math else []),
             verbose=False,
         )
     return _INTREE_KERNELS[fast_math]
@@ -302,6 +297,7 @@ torch::Tensor mxfp4_fake_quantize_intree(torch::Tensor w) {
 
 def _both_paths(w):
     import transformer_engine.pytorch.mxfp4_qat as M
+
     got_kernel = _intree_kernel().mxfp4_fake_quantize_intree(w.contiguous())
     got_torch = M._mxfp4_fake_quantize_torch(w)
     return got_kernel, got_torch
@@ -342,25 +338,29 @@ def test_edge_value_domains():
     gk, gt = _both_paths(z)
     assert torch.equal(gk, z) and torch.equal(gt, z)
 
-    wz = w.clone(); wz[0, :32] = -0.0
+    wz = w.clone()
+    wz[0, :32] = -0.0
     gk, gt = _both_paths(wz)
     assert (gk[0, :32] == 0).all() and torch.signbit(gk[0, :32]).all(), "-0.0 sign lost"
     _assert_bits_equal(gk, gt, "-0 block")
 
-    ws = w.clone(); ws[1, :32] = torch.tensor(2.0**-133, dtype=torch.bfloat16)
+    ws = w.clone()
+    ws[1, :32] = torch.tensor(2.0**-133, dtype=torch.bfloat16)
     gk, gt = _both_paths(ws)
     assert torch.isfinite(gk[1, :32]).all() and torch.equal(gk, gt)
     ref = fake_quant_ref_fp64(ws)
     assert torch.equal(gt.to(torch.float64), ref), "subnormal block deviates from fp64 ref"
 
-    wp = w.clone(); wp[5, :32] = torch.tensor(2.0**-127, dtype=torch.bfloat16)
+    wp = w.clone()
+    wp[5, :32] = torch.tensor(2.0**-127, dtype=torch.bfloat16)
     gk, gt = _both_paths(wp)
     assert (gk[5, :32].to(torch.float32) == 2.0**-127).all(), "2^-127 grid point lost"
     _assert_bits_equal(gk, gt, "2^-127 grid point")
     ref = fake_quant_ref_fp64(wp)
     assert torch.equal(gt.to(torch.float64), ref), "2^-127 block deviates from fp64 ref"
 
-    wh = w.clone(); wh[2, :32] = torch.tensor(3.0e38, dtype=torch.bfloat16)
+    wh = w.clone()
+    wh[2, :32] = torch.tensor(3.0e38, dtype=torch.bfloat16)
     wh[2, 0] = -3.0e38
     gk, gt = _both_paths(wh)
     assert torch.isfinite(gk[2, :32]).all() and torch.equal(gk, gt)
@@ -368,12 +368,14 @@ def test_edge_value_domains():
     assert torch.equal(gt.to(torch.float64), ref), "huge block deviates from fp64 ref"
 
     for bad in (float("inf"), float("-inf"), float("nan")):
-        wb = w.clone(); wb[3, 40] = bad
+        wb = w.clone()
+        wb[3, 40] = bad
         gk, gt = _both_paths(wb)
         _assert_same_with_nan(gk, gt, f"bad={bad}")
         assert torch.isnan(gk[3, 32:64]).all(), f"{bad}: block not NaN-poisoned"
         assert torch.isfinite(gk[3, :32]).all(), f"{bad}: neighbor block affected"
-        clean_rows = torch.ones(m, dtype=torch.bool); clean_rows[3] = False
+        clean_rows = torch.ones(m, dtype=torch.bool)
+        clean_rows[3] = False
         assert torch.isfinite(gk[clean_rows]).all()
 
     try:
@@ -388,8 +390,11 @@ def test_blockwise_recipe_is_128x128():
     assert r.x_block_scaling_dim == 1 and r.w_block_scaling_dim == 2
     assert r.grad_block_scaling_dim == 1
     q = Float8BlockQuantizer(
-        fp8_dtype=tex.DType.kFloat8E4M3, rowwise=True, columnwise=True,
-        force_pow_2_scales=True, block_scaling_dim=2,
+        fp8_dtype=tex.DType.kFloat8E4M3,
+        rowwise=True,
+        columnwise=True,
+        force_pow_2_scales=True,
+        block_scaling_dim=2,
     )
     assert q.block_len == 128
     w_hat = mxfp4_fake_quantize(make_weight(256, 512))
@@ -403,8 +408,11 @@ def test_blockwise_over_ratio_is_bounded_not_lossless():
     w[64, 0] = 100.0
     w_hat = mxfp4_fake_quantize(w)
     q = Float8BlockQuantizer(
-        fp8_dtype=tex.DType.kFloat8E4M3, rowwise=True, columnwise=True,
-        force_pow_2_scales=True, block_scaling_dim=2,
+        fp8_dtype=tex.DType.kFloat8E4M3,
+        rowwise=True,
+        columnwise=True,
+        force_pow_2_scales=True,
+        block_scaling_dim=2,
     ).quantize(w_hat)
     dq = q.dequantize(dtype=torch.float32)
     assert torch.isfinite(dq).all()
@@ -525,10 +533,9 @@ def test_kernel_fast_math_immune():
     got = k.mxfp4_fake_quantize_intree(w.contiguous())
     ref = M._mxfp4_fake_quantize_torch(w)
     _assert_same_with_nan(got, ref, "fast-math edge")
-    assert (got[5, :32].to(torch.float32) == 2.0**-127).all(), (
-        "fast-math build flushed the 2^-127 grid point"
-    )
-
+    assert (
+        got[5, :32].to(torch.float32) == 2.0**-127
+    ).all(), "fast-math build flushed the 2^-127 grid point"
 
 
 def test_exp2f_e8m0_all_codes():
@@ -538,12 +545,20 @@ def test_exp2f_e8m0_all_codes():
 
     src_dir = os.environ.get(
         "NVTE_MXFP4_QAT_TEST_SRC",
-        os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                     "..", "..", "transformer_engine", "common"),
+        os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "..", "..", "transformer_engine", "common"
+        ),
     )
     ptx_src = open(os.path.join(src_dir, "util", "ptx.cuh")).read()
-    m_exp = _re.search(r"__device__ __forceinline__ float exp2f\(e8m0_t biased_exp\) \{.*?\n\}", ptx_src, _re.S)
-    m_rcp = _re.search(r"template <>\n__device__ __forceinline__ float exp2f_rcp<float>\(e8m0_t biased_exp\) \{.*?\n\}", ptx_src, _re.S)
+    m_exp = _re.search(
+        r"__device__ __forceinline__ float exp2f\(e8m0_t biased_exp\) \{.*?\n\}", ptx_src, _re.S
+    )
+    m_rcp = _re.search(
+        r"template <>\n__device__ __forceinline__ float exp2f_rcp<float>\(e8m0_t biased_exp\)"
+        r" \{.*?\n\}",
+        ptx_src,
+        _re.S,
+    )
     assert m_exp and m_rcp, "could not extract exp2f/exp2f_rcp from ptx.cuh"
     cuda_src = (
         "#include <cuda.h>\n#include <torch/extension.h>\n"
@@ -552,7 +567,10 @@ def test_exp2f_e8m0_all_codes():
         "typedef unsigned char e8m0_t;\n"
         "constexpr unsigned FP32_MANTISSA_BITS = 23;\n"
         "template <typename T> __device__ __forceinline__ T exp2f_rcp(e8m0_t);\n"
-        + m_rcp.group(0) + "\n" + m_exp.group(0) + "\n}\n"
+        + m_rcp.group(0)
+        + "\n"
+        + m_exp.group(0)
+        + "\n}\n"
         "__global__ void all_codes_kernel(float *e, float *r) {\n"
         "  const int b = threadIdx.x;\n"
         "  e[b] = teptx::exp2f(static_cast<teptx::e8m0_t>(b));\n"
@@ -566,7 +584,9 @@ def test_exp2f_e8m0_all_codes():
     mod = load_inline(
         name="nvte_mxfp4_qat_exp2f_test",
         cpp_sources="void run_all_codes(torch::Tensor e, torch::Tensor r);",
-        cuda_sources=cuda_src, functions=["run_all_codes"], verbose=False,
+        cuda_sources=cuda_src,
+        functions=["run_all_codes"],
+        verbose=False,
     )
     e = torch.empty(256, dtype=torch.float32, device=DEV)
     r = torch.empty_like(e)
@@ -639,7 +659,7 @@ def test_fp32_bit_fuzz():
     """Random raw fp32 bit patterns (subnormals/NaN/Inf included)."""
     g = torch.Generator().manual_seed(99)
     for _ in range(4):
-        bits = torch.randint(-2**31, 2**31 - 1, (4096, 32), generator=g, dtype=torch.int64)
+        bits = torch.randint(-(2**31), 2**31 - 1, (4096, 32), generator=g, dtype=torch.int64)
         w = bits.to(torch.int32).cuda().view(torch.float32)
         gk, gt = _both_paths(w)
         _assert_same_with_nan(gk, gt, "fp32 fuzz")
@@ -668,12 +688,18 @@ def test_scale_threshold_and_rtne_midpoints():
     expected = torch.tensor([0.0, 1.0, 1.0, 2.0, 2.0, 4.0, 4.0])
     for t in (-60, 0, 60):
         sc = 2.0**t
-        block = torch.zeros(32); block[:7] = mids * sc; block[7] = 6.0 * sc
+        block = torch.zeros(32)
+        block[:7] = mids * sc
+        block[7] = 6.0 * sc
         w = block.view(1, 32).to(torch.float32).cuda()
         gk, gt = _both_paths(w)
         _assert_bits_equal(gk, gt, f"midpoints t={t}")
-        exp_row = torch.zeros(32); exp_row[:7] = expected * sc; exp_row[7] = 6.0 * sc
-        assert torch.equal(gt[0].cpu().to(torch.float32), exp_row.to(torch.float32)), f"midpoint values t={t}"
+        exp_row = torch.zeros(32)
+        exp_row[:7] = expected * sc
+        exp_row[7] = 6.0 * sc
+        assert torch.equal(
+            gt[0].cpu().to(torch.float32), exp_row.to(torch.float32)
+        ), f"midpoint values t={t}"
 
 
 def test_deployment_top_cap_domain():
@@ -694,7 +720,10 @@ def test_deployment_top_cap_domain():
 def test_tilekernels_cross_parity():
     """Bitwise parity with the TileKernels torch reference (round_sf=True) on the finite below-cap domain."""
     import sys
-    tk_root = os.environ.get("NVTE_MXFP4_QAT_TILEKERNELS", os.path.expanduser("~/Desktop/v4/TileKernels"))
+
+    tk_root = os.environ.get(
+        "NVTE_MXFP4_QAT_TILEKERNELS", os.path.expanduser("~/Desktop/v4/TileKernels")
+    )
     if os.path.isdir(tk_root) and tk_root not in sys.path:
         sys.path.insert(0, tk_root)
     try:
@@ -722,14 +751,17 @@ def test_blockwise_feasibility_enumeration():
     for d in range(17):
         w = torch.zeros(128, 128, dtype=torch.float32)
         w[0, 0] = 6.0
-        vals = payloads * 2.0**(-d)
+        vals = payloads * 2.0 ** (-d)
         w[1, :7] = vals
         w[1, 7:14] = -vals
         wc = w.cuda()
         assert torch.equal(mxfp4_fake_quantize(wc), wc), f"tile not on MXFP4 grid (d={d})"
         q = Float8BlockQuantizer(
-            fp8_dtype=tex.DType.kFloat8E4M3, rowwise=True, columnwise=False,
-            force_pow_2_scales=True, block_scaling_dim=2,
+            fp8_dtype=tex.DType.kFloat8E4M3,
+            rowwise=True,
+            columnwise=False,
+            force_pow_2_scales=True,
+            block_scaling_dim=2,
         ).quantize(wc)
         S = q._rowwise_scale_inv.reshape(-1)[0].item()
         dq = q.dequantize(dtype=torch.float32)
@@ -738,11 +770,13 @@ def test_blockwise_feasibility_enumeration():
         assert torch.equal(pred, got), f"E4M3-lattice prediction mismatch at spread d={d}"
         if boundary is None and not bool(pred.all()):
             boundary = d
-    assert boundary is not None and boundary >= 12, (
-        f"full-payload exactness should hold at least through spread 2^11, got {boundary}"
+    assert (
+        boundary is not None and boundary >= 12
+    ), f"full-payload exactness should hold at least through spread 2^11, got {boundary}"
+    print(
+        f"  full-grid exact through spread d={boundary - 1}; first loss at d={boundary} "
+        "(E4M3 subnormal lattice bound)"
     )
-    print(f"  full-grid exact through spread d={boundary - 1}; first loss at d={boundary} "
-          "(E4M3 subnormal lattice bound)")
 
 
 def test_fp16_pipeline_rejected():
@@ -761,6 +795,7 @@ def test_fp16_pipeline_rejected():
 def test_fourway_matrix():
     """TileKernels vs CuTe DSL vs CUDA vs torch, bitwise, over all edge domains and every quant/dequant hop."""
     import sys
+
     tk_root = os.environ.get(
         "NVTE_MXFP4_QAT_TILEKERNELS", os.path.expanduser("~/Desktop/v4/TileKernels")
     )
@@ -835,8 +870,10 @@ def test_fourway_matrix():
     _assert_bits_equal(dsl(wcap), t, "cap DSL")
     tk32, _ = tk_roundtrip(wcap, (1, 32), "e2m1")
     assert not torch.equal(tk32, t.to(torch.float32)), "TK must diverge above 6*2^125"
-    print(f"  above-cap domain: ours satfinite {CAP:.3e}, TK diverges as documented "
-          f"(payload at 2^126 -> {tk32[0, 0].item()}): PASS")
+    print(
+        f"  above-cap domain: ours satfinite {CAP:.3e}, TK diverges as documented "
+        f"(payload at 2^126 -> {tk32[0, 0].item()}): PASS"
+    )
 
     w_hat = tref(w)
     wh32 = w_hat.to(torch.float32)
@@ -844,20 +881,21 @@ def test_fourway_matrix():
     m, n = w_hat.shape
     data = q._rowwise_data.view(torch.uint8)[:m, :n]
     codes = q._rowwise_scale_inv.view(torch.uint8)[:m, : n // 32].to(torch.int32)
-    raw = (data.view(torch.float8_e4m3fn).to(torch.float32).view(m, n // 32, 32)
-           * torch.ldexp(torch.ones_like(codes, dtype=torch.float32), codes - 127).unsqueeze(-1))
+    raw = data.view(torch.float8_e4m3fn).to(torch.float32).view(m, n // 32, 32) * torch.ldexp(
+        torch.ones_like(codes, dtype=torch.float32), codes - 127
+    ).unsqueeze(-1)
     assert torch.equal(raw.view(m, n), wh32), "mxfp8 row RAW encode not lossless"
     e4m3_floor = float(tk_min_clamp(torch.float8_e4m3fn))
     blk_amax = wh32.abs().view(m, n // 32, 32).amax(dim=-1)
-    ok = ((blk_amax >= e4m3_floor) | (blk_amax == 0))
+    ok = (blk_amax >= e4m3_floor) | (blk_amax == 0)
     okm = ok.unsqueeze(-1).expand(m, n // 32, 32).reshape(m, n)
     tk32, tkb16 = tk_roundtrip(w_hat, (1, 32), "e4m3")
-    assert torch.equal(tk32.view(torch.int32)[okm], wh32.view(torch.int32)[okm]), (
-        "mxfp8 row TK roundtrip (fp32)"
-    )
-    assert torch.equal(tkb16.view(torch.int16)[okm], w_hat.view(torch.int16)[okm]), (
-        "mxfp8 row TK roundtrip (bf16)"
-    )
+    assert torch.equal(
+        tk32.view(torch.int32)[okm], wh32.view(torch.int32)[okm]
+    ), "mxfp8 row TK roundtrip (fp32)"
+    assert torch.equal(
+        tkb16.view(torch.int16)[okm], w_hat.view(torch.int16)[okm]
+    ), "mxfp8 row TK roundtrip (bf16)"
     assert (tk32[~okm] == 0).all(), "TK e4m3 sub-floor blocks must flush to zero"
     assert (~ok).sum() > 0, "TK e4m3 floor case not exercised"
     dq = q.dequantize(dtype=torch.float32)
@@ -866,21 +904,23 @@ def test_fourway_matrix():
     if flushed.any() and not (dq[flushed] == 0).all():
         assert torch.equal(dq, wh32)
         print("  NOTE: TE software dequant now handles UE8M0 code 0 -> fully exact")
-    print(f"  mxfp8 row: TE raw encode lossless incl 2^-127; TK roundtrip bitwise on "
-          f"amax >= {e4m3_floor:g} blocks ({int((~ok).sum())} sub-floor blocks flush in TK "
-          "e4m3, a TK-only floor); TE software dequant exact outside the code-0 wheel bug: PASS")
+    print(
+        "  mxfp8 row: TE raw encode lossless incl 2^-127; TK roundtrip bitwise on "
+        f"amax >= {e4m3_floor:g} blocks ({int((~ok).sum())} sub-floor blocks flush in TK "
+        "e4m3, a TK-only floor); TE software dequant exact outside the code-0 wheel bug: PASS"
+    )
 
     q.update_usage(rowwise_usage=False, columnwise_usage=True)
     te_col = q.dequantize(dtype=torch.float32)
     tk_col32, _ = tk_roundtrip(w_hat, (32, 1), "e4m3")
     col_amax = wh32.abs().view(m // 32, 32, n).amax(dim=1)
-    cok = ((col_amax >= e4m3_floor) | (col_amax == 0))
+    cok = (col_amax >= e4m3_floor) | (col_amax == 0)
     cokm = cok.unsqueeze(1).expand(m // 32, 32, n).reshape(m, n)
     nzm = (wh32 != 0) & cokm
     zm = (wh32 == 0) & cokm
-    assert torch.equal(te_col.view(torch.int32)[nzm], tk_col32.view(torch.int32)[nzm]), (
-        "mxfp8 col TE vs TK (nonzero)"
-    )
+    assert torch.equal(
+        te_col.view(torch.int32)[nzm], tk_col32.view(torch.int32)[nzm]
+    ), "mxfp8 col TE vs TK (nonzero)"
     assert (te_col[zm] == 0).all() and (tk_col32[zm] == 0).all(), "mxfp8 col zeros"
     negz = zm & torch.signbit(wh32)
     assert negz.any()
@@ -889,14 +929,19 @@ def test_fourway_matrix():
     blk = wh32.view(m // 32, 32, n)
     bound = blk.abs().amax(dim=1, keepdim=True) * 2.0**-3
     assert ((te_col.view(m // 32, 32, n) - blk).abs() <= bound + 1e-30).all()
-    print("  mxfp8 col (32x1): TE == TK bitwise on nonzeros, zeros value-equal "
-          "(TE col canonicalizes -0 -> +0, TK preserves the sign), bounded vs w_hat: PASS")
+    print(
+        "  mxfp8 col (32x1): TE == TK bitwise on nonzeros, zeros value-equal "
+        "(TE col canonicalizes -0 -> +0, TK preserves the sign), bounded vs w_hat: PASS"
+    )
 
     wb_hat = tref(make_weight(128, 256, zero_blocks=4))
     wb32 = wb_hat.to(torch.float32)
     qb = Float8BlockQuantizer(
-        fp8_dtype=tex.DType.kFloat8E4M3, rowwise=True, columnwise=True,
-        force_pow_2_scales=True, block_scaling_dim=2,
+        fp8_dtype=tex.DType.kFloat8E4M3,
+        rowwise=True,
+        columnwise=True,
+        force_pow_2_scales=True,
+        block_scaling_dim=2,
     ).quantize(wb_hat)
     assert torch.equal(qb.dequantize(dtype=torch.float32), wb32)
     assert torch.equal(qb.dequantize(dtype=torch.bfloat16), wb_hat)
@@ -905,8 +950,10 @@ def test_fourway_matrix():
     _assert_bits_equal(tkb16, wb_hat, "blockwise TK roundtrip (bf16)")
     qb.update_usage(rowwise_usage=False, columnwise_usage=True)
     assert torch.equal(qb.dequantize(dtype=torch.float32), wb32), "blockwise col transpose"
-    print("  blockwise 128x128: TE row+col dequant == TK roundtrip == w_hat bitwise "
-          "(fp32 + bf16 targets): PASS")
+    print(
+        "  blockwise 128x128: TE row+col dequant == TK roundtrip == w_hat bitwise "
+        "(fp32 + bf16 targets): PASS"
+    )
 
     bits = torch.arange(65536, dtype=torch.int32, device=DEV).to(torch.int16)
     we = bits.view(torch.bfloat16).view(2048, 32)
@@ -917,11 +964,13 @@ def test_fourway_matrix():
     ok_rows = torch.isfinite(we32).all(dim=-1) & (we32.abs().amax(dim=-1) <= CAP)
     tk32, _ = tk_roundtrip(we[ok_rows], (1, 32), "e2m1")
     _assert_bits_equal(tk32, t[ok_rows].to(torch.float32), "exhaustive TK")
-    print(f"  bf16 exhaustive 65536 patterns: CUDA/DSL/torch 3-way full, "
-          f"TK on {int(ok_rows.sum())}/2048 finite below-cap rows, bitwise: PASS")
+    print(
+        "  bf16 exhaustive 65536 patterns: CUDA/DSL/torch 3-way full, "
+        f"TK on {int(ok_rows.sum())}/2048 finite below-cap rows, bitwise: PASS"
+    )
 
     g = torch.Generator().manual_seed(123)
-    fb = torch.randint(-2**31, 2**31 - 1, (512, 32), generator=g, dtype=torch.int64)
+    fb = torch.randint(-(2**31), 2**31 - 1, (512, 32), generator=g, dtype=torch.int64)
     wf = fb.to(torch.int32).cuda().view(torch.float32)
     t = tref(wf)
     _assert_same_with_nan(kern(wf.contiguous()), t, "fuzz CUDA")
@@ -930,8 +979,10 @@ def test_fourway_matrix():
     if ok_rows.any():
         tk32, _ = tk_roundtrip(wf[ok_rows], (1, 32), "e2m1")
         _assert_bits_equal(tk32, t[ok_rows], "fuzz TK")
-    print(f"  fp32 bit-fuzz 512 blocks: 3-way full, TK on {int(ok_rows.sum())} "
-          f"finite below-cap rows, bitwise: PASS")
+    print(
+        f"  fp32 bit-fuzz 512 blocks: 3-way full, TK on {int(ok_rows.sum())} "
+        "finite below-cap rows, bitwise: PASS"
+    )
 
 
 def test_recipe_switch_invalidates_cache():
@@ -951,15 +1002,13 @@ def test_recipe_switch_invalidates_cache():
         with fp8_autocast(enabled=True, fp8_recipe=qat):
             y_switch = mod(x, is_first_microbatch=False)
             y_fresh = mod(x, is_first_microbatch=True)
-        assert torch.equal(y_switch, y_fresh), (
-            "base->QAT switch reused an UNPROJECTED cached weight"
-        )
+        assert torch.equal(
+            y_switch, y_fresh
+        ), "base->QAT switch reused an UNPROJECTED cached weight"
         with fp8_autocast(enabled=True, fp8_recipe=base):
             y2_switch = mod(x, is_first_microbatch=False)
             y2_fresh = mod(x, is_first_microbatch=True)
-        assert torch.equal(y2_switch, y2_fresh), (
-            "QAT->base switch reused a PROJECTED cached weight"
-        )
+        assert torch.equal(y2_switch, y2_fresh), "QAT->base switch reused a PROJECTED cached weight"
 
 
 def test_ops_api_rejected():
@@ -977,8 +1026,6 @@ def test_ops_api_rejected():
             pass
 
 
-
-
 def _run_module(module_kind, recipe, override, fuse):
     torch.manual_seed(7)
     m_splits = [192, 320]
@@ -987,13 +1034,22 @@ def _run_module(module_kind, recipe, override, fuse):
 
     if module_kind == "linear":
         mod = te.Linear(
-            in_f, out_f, bias=False, params_dtype=torch.bfloat16, device=DEV,
+            in_f,
+            out_f,
+            bias=False,
+            params_dtype=torch.bfloat16,
+            device=DEV,
             fuse_wgrad_accumulation=fuse,
         )
         params = [mod.weight]
     else:
         mod = te.GroupedLinear(
-            2, in_f, out_f, bias=False, params_dtype=torch.bfloat16, device=DEV,
+            2,
+            in_f,
+            out_f,
+            bias=False,
+            params_dtype=torch.bfloat16,
+            device=DEV,
             fuse_wgrad_accumulation=fuse,
         )
         params = [mod.weight0, mod.weight1]
@@ -1006,9 +1062,7 @@ def _run_module(module_kind, recipe, override, fuse):
             p.main_grad = torch.zeros_like(p, dtype=torch.float32)
             p.grad_added_to_main_grad = False
 
-    x = (torch.randn(tokens, in_f, device=DEV, dtype=torch.float32) * 0.5).to(
-        torch.bfloat16
-    )
+    x = (torch.randn(tokens, in_f, device=DEV, dtype=torch.float32) * 0.5).to(torch.bfloat16)
     x.requires_grad_(True)
     with fp8_autocast(enabled=True, fp8_recipe=recipe):
         if module_kind == "linear":
@@ -1023,8 +1077,11 @@ def _run_module(module_kind, recipe, override, fuse):
         return torch.cat(
             [
                 mat[offs[i] : offs[i + 1]].to(torch.float32)
-                @ (weights[i].detach().to(torch.float32).t() if transpose
-                   else weights[i].detach().to(torch.float32))
+                @ (
+                    weights[i].detach().to(torch.float32).t()
+                    if transpose
+                    else weights[i].detach().to(torch.float32)
+                )
                 for i in range(nsplit)
             ]
         )
@@ -1060,9 +1117,8 @@ def _run_module(module_kind, recipe, override, fuse):
 
     wgrad_tol = BF16_TOL if override == "high_precision" else FP8_TOL_2OP
     for i, p in enumerate(params):
-        ref_wg = (
-            g[offs[i] : offs[i + 1]].to(torch.float32).t()
-            @ x[offs[i] : offs[i + 1]].to(torch.float32)
+        ref_wg = g[offs[i] : offs[i + 1]].to(torch.float32).t() @ x[offs[i] : offs[i + 1]].to(
+            torch.float32
         )
         if fuse:
             assert p.grad_added_to_main_grad is True, "fused-wgrad flag not set (G)"

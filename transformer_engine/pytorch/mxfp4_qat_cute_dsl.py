@@ -37,11 +37,7 @@ def _is_nonfinite_f32(x: Float32, *, loc=None, ip=None) -> Int32:
         llvm.inline_asm(
             T.i32(),
             [Float32(x).ir_value(loc=loc, ip=ip)],
-            "{\n"
-            "  .reg .pred p;\n"
-            "  testp.finite.f32 p, $1;\n"
-            "  selp.s32 $0, 0, 1, p;\n"
-            "}",
+            "{\n  .reg .pred p;\n  testp.finite.f32 p, $1;\n  selp.s32 $0, 0, 1, p;\n}",
             "=r,f",
             loc=loc,
             ip=ip,

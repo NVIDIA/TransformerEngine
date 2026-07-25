@@ -4,7 +4,6 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-
 #ifndef TRANSFORMER_ENGINE_CAST_MXFP4_FAKE_QUANTIZE_MXFP4_CUH_
 #define TRANSFORMER_ENGINE_CAST_MXFP4_FAKE_QUANTIZE_MXFP4_CUH_
 
@@ -75,10 +74,9 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       amax_bits = max(amax_bits, __float_as_int(elts[i]) & 0x7fffffff);
     }
     const unsigned lane = threadIdx.x & 31u;
-    const unsigned group_mask =
-        (LANES_PER_BLOCK == 32)
-            ? 0xffffffffu
-            : (((1u << LANES_PER_BLOCK) - 1u) << (lane & ~(LANES_PER_BLOCK - 1u)));
+    const unsigned group_mask = (LANES_PER_BLOCK == 32) ? 0xffffffffu
+                                                        : (((1u << LANES_PER_BLOCK) - 1u)
+                                                           << (lane & ~(LANES_PER_BLOCK - 1u)));
 #pragma unroll
     for (int offset = LANES_PER_BLOCK / 2; offset > 0; offset >>= 1) {
       amax_bits = max(amax_bits, __shfl_xor_sync(group_mask, amax_bits, offset));
@@ -108,7 +106,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   }
 }
 
-}
+}  // namespace fake_quantize_kernel
 
 template <typename IType>
 void fake_quantize_mxfp4_launch(const IType *input, IType *output, const size_t numel,
@@ -122,8 +120,8 @@ void fake_quantize_mxfp4_launch(const IType *input, IType *output, const size_t 
       <<<grid, THREADS_PER_CHUNK, 0, stream>>>(input, output, num_vectors);
 }
 
-}
-}
-}
+}  // namespace mxfp4
+}  // namespace dispatch
+}  // namespace transformer_engine
 
 #endif

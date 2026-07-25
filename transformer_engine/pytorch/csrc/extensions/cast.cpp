@@ -570,8 +570,7 @@ at::Tensor mxfp4_fake_quantize(const at::Tensor &input) {
   auto output = at::empty_like(input_contiguous);
   auto input_cpp = makeTransformerEngineTensor(input_contiguous);
   auto output_cpp = makeTransformerEngineTensor(output);
-  nvte_mxfp4_fake_quantize(input_cpp.data(), output_cpp.data(),
-                           at::cuda::getCurrentCUDAStream());
+  nvte_mxfp4_fake_quantize(input_cpp.data(), output_cpp.data(), at::cuda::getCurrentCUDAStream());
   return output;
 }
 

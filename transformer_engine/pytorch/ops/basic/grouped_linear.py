@@ -488,7 +488,10 @@ class GroupedLinear(BasicOperation):
     ) -> Sequence[torch.Tensor]:
         """Construct quantized weight tensors."""
 
-        if FP8GlobalStateManager.is_fp8_enabled() and FP8GlobalStateManager.get_fp8_recipe().mxfp4_qat():
+        if (
+            FP8GlobalStateManager.is_fp8_enabled()
+            and FP8GlobalStateManager.get_fp8_recipe().mxfp4_qat()
+        ):
             raise NotImplementedError(
                 "MXFP4 QAT recipes do not support quantized primary weights in the "
                 "operations API: the high-precision master is required for the QAT "

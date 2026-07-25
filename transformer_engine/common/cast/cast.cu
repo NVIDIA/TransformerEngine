@@ -54,7 +54,8 @@ void nvte_mxfp4_fake_quantize(const NVTETensor input, NVTETensor output, cudaStr
   const Tensor &input_tensor = *convertNVTETensorCheck(input);
   Tensor &output_tensor = *convertNVTETensorCheck(output);
   NVTE_CHECK(input_tensor.dtype() == DType::kBFloat16 || input_tensor.dtype() == DType::kFloat32,
-             "MXFP4 fake-quantize supports BF16/FP32 inputs, got ", to_string(input_tensor.dtype()));
+             "MXFP4 fake-quantize supports BF16/FP32 inputs, got ",
+             to_string(input_tensor.dtype()));
   NVTE_CHECK(output_tensor.dtype() == input_tensor.dtype(),
              "MXFP4 fake-quantize output dtype must match the input dtype.");
   NVTE_CHECK(input_tensor.data.shape == output_tensor.data.shape,

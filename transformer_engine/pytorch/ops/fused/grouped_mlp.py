@@ -961,7 +961,10 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         fc2_input_quantizer = fc2_op.get_quantizer("forward", 0)
         fc2_weight_quantizer = fc2_op.get_quantizer("forward", 1)
         fc2_grad_output_quantizer = fc2_op.get_quantizer("backward", 0)
-        if FP8GlobalStateManager.is_fp8_enabled() and FP8GlobalStateManager.get_fp8_recipe().mxfp4_qat():
+        if (
+            FP8GlobalStateManager.is_fp8_enabled()
+            and FP8GlobalStateManager.get_fp8_recipe().mxfp4_qat()
+        ):
             raise NotImplementedError(
                 "MXFP4 QAT recipes are not implemented for fused grouped-MLP ops: "
                 "weight quantization here bypasses the QAT projection."
