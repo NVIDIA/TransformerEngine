@@ -714,9 +714,9 @@ __global__ void __launch_bounds__(kBatchedAmaxThreads)
 // grid = (col_tiles, row_tiles, num_tensors). Rowwise output only.
 template <typename Cfg, int E4M3_MAX, typename IType>
 __global__ void __launch_bounds__(kThreads)
-    quantize_4over6_batched_kernel(const BatchedQuantizeParams *params_arr,
-                                   const float *temp_amax, const size_t rows, const size_t cols,
-                                   const size_t scale_stride, const float *noop) {
+    quantize_4over6_batched_kernel(const BatchedQuantizeParams *params_arr, const float *temp_amax,
+                                   const size_t rows, const size_t cols, const size_t scale_stride,
+                                   const float *noop) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   if (noop != nullptr && noop[0] == 1.0f) {
     return;

@@ -35,10 +35,9 @@ std::vector<py::object> nvfp4_quantize_4over6_multi(const std::vector<at::Tensor
   NVFP4Quantizer *nvfp4_quantizer_cpp = static_cast<NVFP4Quantizer *>(quantizer_cpp.get());
   NVTE_CHECK(nvfp4_quantizer_cpp->nvfp4_4over6_mode != kNVTENVFP44Over6Disabled,
              "nvfp4_quantize_4over6_multi requires a non-disabled 4over6 mode.");
-  NVTE_CHECK(
-      !nvfp4_quantizer_cpp->with_rht && !nvfp4_quantizer_cpp->stochastic_rounding &&
-          !nvfp4_quantizer_cpp->with_2d_quantization,
-      "Batched 4over6 requires non-RHT, non-stochastic-rounding, 1D quantization.");
+  NVTE_CHECK(!nvfp4_quantizer_cpp->with_rht && !nvfp4_quantizer_cpp->stochastic_rounding &&
+                 !nvfp4_quantizer_cpp->with_2d_quantization,
+             "Batched 4over6 requires non-RHT, non-stochastic-rounding, 1D quantization.");
   NVTE_CHECK(nvfp4_quantizer_cpp->rowwise_usage && !nvfp4_quantizer_cpp->columnwise_usage,
              "Batched 4over6 supports rowwise-only quantization.");
   NVTE_CHECK(!nvfp4_quantizer_cpp->row_scaled_nvfp4,

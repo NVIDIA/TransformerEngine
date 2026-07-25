@@ -693,8 +693,7 @@ class _GroupedLinear(torch.autograd.Function):
                 and not wq0.columnwise_usage
                 and all(w.shape == weights[0].shape for w in weights)
                 and all(
-                    isinstance(q, NVFP4Quantizer) and q.nvfp4_use_4over6
-                    for q in weight_quantizers
+                    isinstance(q, NVFP4Quantizer) and q.nvfp4_use_4over6 for q in weight_quantizers
                 )
                 and os.getenv("NVTE_NVFP4_BATCHED_WEIGHT_QUANTIZE", "1") == "1"
             )
@@ -702,9 +701,7 @@ class _GroupedLinear(torch.autograd.Function):
                 # Batched 4over6: quantize all expert weights in two kernel
                 # launches instead of two launches per expert. Each expert keeps
                 # its own scalar amax, so results are bit-identical to the loop.
-                ws_in = (
-                    list(weight_workspaces) if weight_workspaces else [None] * num_gemms
-                )
+                ws_in = list(weight_workspaces) if weight_workspaces else [None] * num_gemms
                 weights_fp8 = tex.nvfp4_quantize_4over6_multi(weights, wq0, ws_in)
                 for i in range(num_gemms):
                     if ws_in[i] is None:
