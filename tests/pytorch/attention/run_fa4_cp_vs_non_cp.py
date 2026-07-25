@@ -160,9 +160,7 @@ def main():
 
     local_metrics = []
     for name, (actual, expected) in checks.items():
-        max_abs, rmse = _assert_close(
-            name, actual, expected, args.atol, args.rtol, args.rmse_tol
-        )
+        max_abs, rmse = _assert_close(name, actual, expected, args.atol, args.rtol, args.rmse_tol)
         local_metrics.append((name, max_abs, rmse))
         print(
             f"[rank {rank}] {name}: max_abs={max_abs.item():.6g}, rmse={rmse.item():.6g}",
