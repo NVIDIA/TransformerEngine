@@ -1011,7 +1011,7 @@ class _GroupedLinear(torch.autograd.Function):
             debug,
             single_grouped_weight,
             single_grouped_bias,
-            grouped_gemm_backend,
+            use_grouped_tensor,
         ) = non_tensor_args
         recipe = FP8GlobalStateManager.get_fp8_recipe() if fp8 else None
         backward_override = recipe.backward_override if recipe is not None else None
@@ -1108,43 +1108,44 @@ class _GroupedLinear(torch.autograd.Function):
             single_grouped_weight=single_grouped_weight,
         )
         grouped_tensor_features_supported = (
-            grouped_gemm_backend == "grouped_tensor"
-            and not fp8_calibration
+            not fp8_calibration
             and not debug
             and not cpu_offloading
             and not save_original_input
             and not any(q is not None for q in output_quantizers)
         )
         if (
-            grouped_tensor_features_supported
+            use_grouped_tensor
+            and grouped_tensor_features_supported
             and fp8
             and recipe.float8_block_scaling()
             and (10, 0) <= get_device_compute_capability() <= (11, 0)
         ):
             raise RuntimeError(
-                "grouped_gemm_backend='grouped_tensor' does not support the FP8 "
-                "block-scaling recipe on Blackwell GPUs. Select grouped_gemm_backend='legacy' "
-                "to use the MXFP8-emulated path."
+                "use_grouped_tensor=True does not support the FP8 block-scaling recipe on "
+                "Blackwell GPUs. Set use_grouped_tensor=False to use the MXFP8-emulated path."
             )
         use_grouped_tensor_path = (
-            grouped_tensor_features_supported and recipe_supports_grouped_tensor
+            use_grouped_tensor
+            and grouped_tensor_features_supported
+            and recipe_supports_grouped_tensor
         )
         if (
-            grouped_gemm_backend == "grouped_tensor"
+            use_grouped_tensor
             and not use_grouped_tensor_path
             and (single_grouped_weight or single_grouped_bias)
         ):
             raise RuntimeError(
-                "The active device, cuBLASLt version, quantization recipe, or GroupedLinear "
-                "feature configuration does not support the grouped_tensor backend. Legacy "
-                "fallback is unavailable for single grouped parameters; use discrete parameters "
-                "or a supported grouped_tensor configuration."
+                "Single grouped parameters require the native grouped-tensor path, but the active "
+                "device, cuBLASLt version, quantization recipe, or GroupedLinear feature "
+                "configuration does not support it. Disable single_grouped_weight and "
+                "single_grouped_bias to allow the split-quantize fallback."
             )
         if use_grouped_tensor_path:
             if m_splits.device.type != "cuda":
                 raise ValueError(
                     "The native grouped_tensor path requires CUDA m_splits. Pass a CUDA int64 "
-                    "tensor, or select grouped_gemm_backend='legacy'."
+                    "tensor, or set use_grouped_tensor=False."
                 )
             return _GroupedLinear._forward_grouped_tensor(
                 ctx,
@@ -1936,13 +1937,13 @@ class GroupedLinear(TransformerEngineBaseModule):
                        EXPERIMENTAL and subject to change. Gated by the
                        ``NVTE_GROUPED_LINEAR_SINGLE_PARAM`` environment variable: if the env var
                        is not set this argument is forced to ``False`` with a warning.
-    grouped_gemm_backend : {"legacy", "grouped_tensor"}, default = None
-                       Selects the per-expert legacy implementation or the native GroupedTensor
-                       grouped GEMM implementation. The native backend requires CUDA ``m_splits``.
-                       ``None`` preserves the deprecated
+    use_grouped_tensor : bool or None, default = None
+                       Prefer the native GroupedTensor grouped GEMM path. Discrete parameters
+                       fall back to split-quantize when the path is unsupported. Single grouped
+                       parameters require the native path and raise instead of falling back.
+                       The native path requires CUDA ``m_splits``. ``None`` preserves the deprecated
                        ``NVTE_GROUPED_LINEAR_USE_FUSED_GROUPED_GEMM`` environment-variable
-                       selection for compatibility. New callers should select the backend
-                       explicitly.
+                       selection for compatibility. New callers should pass a boolean explicitly.
 
     Notes
     -----
@@ -1976,7 +1977,7 @@ class GroupedLinear(TransformerEngineBaseModule):
         single_grouped_weight: bool = False,
         single_grouped_bias: bool = False,
         name: Optional[str] = None,
-        grouped_gemm_backend: Optional[str] = None,
+        use_grouped_tensor: Optional[bool] = None,
     ) -> None:
         super().__init__(name)
 
@@ -1992,27 +1993,24 @@ class GroupedLinear(TransformerEngineBaseModule):
         self.ub_overlap_ag = ub_overlap_ag
         self.ub_name = ub_name
         self.save_original_input = save_original_input
-        if grouped_gemm_backend is None:
-            grouped_gemm_backend_env = os.getenv("NVTE_GROUPED_LINEAR_USE_FUSED_GROUPED_GEMM")
-            if grouped_gemm_backend_env is not None:
+        if use_grouped_tensor is None:
+            use_grouped_tensor_env = os.getenv("NVTE_GROUPED_LINEAR_USE_FUSED_GROUPED_GEMM")
+            if use_grouped_tensor_env is not None:
                 warnings.warn(
                     "NVTE_GROUPED_LINEAR_USE_FUSED_GROUPED_GEMM is deprecated and will be "
-                    "removed in a future release. Pass grouped_gemm_backend='grouped_tensor' "
-                    "or grouped_gemm_backend='legacy' to GroupedLinear instead.",
+                    "removed in a future release. Pass use_grouped_tensor=True or "
+                    "use_grouped_tensor=False to GroupedLinear instead.",
                     FutureWarning,
                     stacklevel=2,
                 )
             else:
-                grouped_gemm_backend_env = "0"
-            grouped_gemm_backend = (
-                "grouped_tensor" if bool(int(grouped_gemm_backend_env)) else "legacy"
+                use_grouped_tensor_env = "0"
+            use_grouped_tensor = bool(int(use_grouped_tensor_env))
+        if not isinstance(use_grouped_tensor, bool):
+            raise TypeError(
+                f"use_grouped_tensor must be a bool or None, got {type(use_grouped_tensor)}."
             )
-        if grouped_gemm_backend not in ("legacy", "grouped_tensor"):
-            raise ValueError(
-                "grouped_gemm_backend must be 'legacy' or 'grouped_tensor', "
-                f"got {grouped_gemm_backend!r}."
-            )
-        self.grouped_gemm_backend = grouped_gemm_backend
+        self.use_grouped_tensor = use_grouped_tensor
         single_grouped_weight, single_grouped_bias = resolve_grouped_linear_single_param_flags(
             single_grouped_weight, single_grouped_bias
         )
@@ -2534,11 +2532,11 @@ class GroupedLinear(TransformerEngineBaseModule):
         # Make sure splits are in expected format
         if (
             self.single_grouped_weight or self.single_grouped_bias
-        ) and self.grouped_gemm_backend != "grouped_tensor":
+        ) and not self.use_grouped_tensor:
             raise RuntimeError(
                 "single_grouped_weight and single_grouped_bias require "
-                "grouped_gemm_backend='grouped_tensor'; the legacy backend only supports "
-                "discrete parameters."
+                "use_grouped_tensor=True; the split-quantize path only supports discrete "
+                "parameters."
             )
         if not isinstance(m_splits, torch.Tensor):
             # Convert list of ints to tensor for backward compatibility
@@ -2636,7 +2634,7 @@ class GroupedLinear(TransformerEngineBaseModule):
                 debug,
                 self.single_grouped_weight,
                 use_grouped_bias,
-                self.grouped_gemm_backend,
+                self.use_grouped_tensor,
             )
             out, new_workspaces = linear_fn(
                 *autograd_ctx,
@@ -2691,7 +2689,7 @@ class GroupedLinear(TransformerEngineBaseModule):
                 grad_bias is not None and grad_bias.numel() != 0 for grad_bias in grad_biases_
             ]
             if self.use_bias and any(has_grad_biases):
-                if self.grouped_gemm_backend == "grouped_tensor":
+                if self.use_grouped_tensor:
                     raise RuntimeError(
                         "Delayed wgrad unexpectedly produced bias gradients; the grouped-tensor "
                         "path computes them during the main backward."

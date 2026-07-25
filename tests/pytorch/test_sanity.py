@@ -632,7 +632,7 @@ def test_sanity_grouped_linear(
             params_dtype=dtype,
             single_grouped_weight=single_param,
             single_grouped_bias=single_param,
-            grouped_gemm_backend="grouped_tensor" if single_param else "legacy",
+            use_grouped_tensor=single_param,
         ).cuda()
 
     # Verify grouped linear exposes a single grouped weight parameter(and bias when applicable).

@@ -1520,7 +1520,7 @@ def _require_native_grouped_tensor_gemm(*, mxfp8: bool = False) -> None:
 
 @pytest.fixture(autouse=True)
 def _reset_fp8_state(monkeypatch):
-    monkeypatch.setenv(_FUSED_GROUPED_GEMM_ENV, "0")
+    monkeypatch.delenv(_FUSED_GROUPED_GEMM_ENV, raising=False)
     yield
     FP8GlobalStateManager.reset()
     monkeypatch.delenv(_FUSED_GROUPED_GEMM_ENV, raising=False)
@@ -1542,7 +1542,7 @@ def test_single_grouped_weight_rejects_host_m_splits(monkeypatch, m_splits, exce
         params_dtype=torch.bfloat16,
         device="cuda",
         single_grouped_weight=True,
-        grouped_gemm_backend="grouped_tensor",
+        use_grouped_tensor=True,
     )
     x = torch.randn(512, 64, dtype=torch.bfloat16, device="cuda")
     with pytest.raises(exception, match="requires.*CUDA"):
@@ -1575,7 +1575,7 @@ def test_single_grouped_weight_native_bf16_matches_discrete(monkeypatch):
         bias=False,
         params_dtype=torch.bfloat16,
         device="cuda",
-        grouped_gemm_backend="grouped_tensor",
+        use_grouped_tensor=True,
     )
     single = GroupedLinear(
         num_gemms,
@@ -1585,7 +1585,7 @@ def test_single_grouped_weight_native_bf16_matches_discrete(monkeypatch):
         params_dtype=torch.bfloat16,
         device="cuda",
         single_grouped_weight=True,
-        grouped_gemm_backend="grouped_tensor",
+        use_grouped_tensor=True,
     )
     with torch.no_grad():
         for idx in range(num_gemms):
@@ -1626,7 +1626,7 @@ def test_single_grouped_weight_mxfp8_workspace_cache(monkeypatch):
         params_dtype=torch.bfloat16,
         device="cuda",
         single_grouped_weight=True,
-        grouped_gemm_backend="grouped_tensor",
+        use_grouped_tensor=True,
     )
 
     x = torch.randn(512, 256, dtype=torch.bfloat16, device="cuda", requires_grad=True)
@@ -1675,7 +1675,7 @@ def test_single_grouped_primary_mxfp8_bypasses_weight_workspace(monkeypatch):
             params_dtype=torch.bfloat16,
             device="cuda",
             single_grouped_weight=True,
-            grouped_gemm_backend="grouped_tensor",
+            use_grouped_tensor=True,
         )
 
     x = torch.randn(512, 256, dtype=torch.bfloat16, device="cuda")
@@ -1706,7 +1706,7 @@ def _grouped_linear_bias_params(module):
 
 def _run_grouped_parameter_layout(
     *,
-    grouped_gemm_backend,
+    use_grouped_tensor,
     fp8_recipe,
     single_grouped_weight,
     single_grouped_bias,
@@ -1733,7 +1733,7 @@ def _run_grouped_parameter_layout(
         delay_wgrad_compute=delay_wgrad_compute,
         single_grouped_weight=single_grouped_weight,
         single_grouped_bias=single_grouped_bias,
-        grouped_gemm_backend=grouped_gemm_backend,
+        use_grouped_tensor=use_grouped_tensor,
     )
 
     with torch.no_grad():
@@ -1781,7 +1781,7 @@ def _run_grouped_parameter_layout(
     x = x_base.detach().clone().requires_grad_(True)
     m_splits_arg = (
         torch.tensor(m_splits, dtype=torch.int64, device="cuda")
-        if grouped_gemm_backend == "grouped_tensor"
+        if use_grouped_tensor
         else m_splits
     )
     with autocast(enabled=fp8_recipe is not None, recipe=fp8_recipe):
@@ -1796,7 +1796,7 @@ def _run_grouped_parameter_layout(
         torch.testing.assert_close(flat_main_grad, initial_main_grad, rtol=0, atol=0)
 
     # The grouped-tensor path computes dbias during the main backward even when dW is delayed.
-    if use_bias and grouped_gemm_backend == "grouped_tensor":
+    if use_bias and use_grouped_tensor:
         assert all(param.grad is not None for param in _grouped_linear_bias_params(module))
 
     if delay_wgrad_compute:
@@ -1892,7 +1892,7 @@ def test_grouped_parameter_layout_matches_cpu_m_splits(
     # The CPU m_splits baseline is explicitly the legacy, discrete-parameter contract.
     monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "0")
     reference = _run_grouped_parameter_layout(
-        grouped_gemm_backend="legacy",
+        use_grouped_tensor=False,
         fp8_recipe=fp8_recipe,
         single_grouped_weight=False,
         single_grouped_bias=False,
@@ -1910,7 +1910,7 @@ def test_grouped_parameter_layout_matches_cpu_m_splits(
     # below still decide whether this particular case uses discrete or grouped parameters.
     monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
     result = _run_grouped_parameter_layout(
-        grouped_gemm_backend="grouped_tensor",
+        use_grouped_tensor=True,
         fp8_recipe=fp8_recipe,
         single_grouped_weight=single_grouped_weight,
         single_grouped_bias=single_grouped_bias,
@@ -2183,7 +2183,7 @@ def test_grouped_linear_returns_single_grouped_bias_parameter(monkeypatch):
         device="cuda",
         single_grouped_weight=False,
         single_grouped_bias=True,
-        grouped_gemm_backend="grouped_tensor",
+        use_grouped_tensor=True,
     )
 
     x = torch.randn(
@@ -2327,19 +2327,16 @@ def test_grouped_linear_caller_output_buffers(use_fused_path, supply, monkeypatc
 
 
 @pytest.mark.skipif(not _nvfp4_available, reason=_reason_for_no_nvfp4)
-def test_grouped_linear_grouped_tensor_path_skips_non_rht_nvfp4(monkeypatch):
-    """Non-RHT NVFP4 falls back to the legacy path; check it stays numerically correct.
+def test_grouped_linear_grouped_tensor_path_skips_non_rht_nvfp4():
+    """Non-RHT NVFP4 falls back to split-quantize for discrete parameters.
 
-    Graph-safe grouped quantization currently requires RHT, so requesting NVFP4 with
-    ``disable_rht=True`` while the fused grouped-tensor path is enabled falls back to the
-    legacy path internally. We verify the output and gradients against a reference built from
-    per-GEMM ``te.Linear`` modules that share the same weights and use the same NVFP4 recipe;
-    the grouped GEMM should match the loop of single GEMMs.
+    Graph-safe grouped quantization currently requires RHT. Discrete parameters have a valid
+    split-quantize fallback, so enabling the grouped-tensor path is a preference rather than a
+    hard requirement for this parameter layout.
     """
     if torch.cuda.get_device_capability() < (10, 0):
         pytest.skip("NVFP4 GroupedTensor grouped GEMM path requires SM100+")
 
-    monkeypatch.setenv(_FUSED_GROUPED_GEMM_ENV, "1")
     FP8GlobalStateManager.reset()
 
     dtype = torch.bfloat16
@@ -2362,7 +2359,6 @@ def test_grouped_linear_grouped_tensor_path_skips_non_rht_nvfp4(monkeypatch):
         disable_stochastic_rounding=True,
     )
 
-    # Grouped path: fused path enabled, but non-RHT NVFP4 falls back to legacy internally.
     grouped_linear = GroupedLinear(
         num_gemms,
         in_features,
@@ -2370,6 +2366,7 @@ def test_grouped_linear_grouped_tensor_path_skips_non_rht_nvfp4(monkeypatch):
         bias=False,
         params_dtype=dtype,
         device="cuda",
+        use_grouped_tensor=True,
     )
     with torch.no_grad():
         for i in range(num_gemms):
@@ -2380,7 +2377,6 @@ def test_grouped_linear_grouped_tensor_path_skips_non_rht_nvfp4(monkeypatch):
         y = grouped_linear(x, m_splits)
     y.backward(dy)
 
-    # Reference: one te.Linear per GEMM sharing the same weights and NVFP4 recipe.
     ref_linears = torch.nn.ModuleList(
         [
             Linear(in_features, out_features, bias=False, params_dtype=dtype, device="cuda")
@@ -2398,7 +2394,6 @@ def test_grouped_linear_grouped_tensor_path_skips_non_rht_nvfp4(monkeypatch):
         )
     y_ref.backward(dy)
 
-    # cuBLAS grouped GEMM should match the loop of single GEMMs bit-for-bit.
     tols = dict(rtol=0, atol=0)
     torch.testing.assert_close(y.float(), y_ref.float(), **tols)
     torch.testing.assert_close(x.grad.float(), x_ref.grad.float(), **tols)
