@@ -30,6 +30,7 @@ from transformer_engine.pytorch.cpp_extensions import (
     general_grouped_gemm,
     general_grouped_gemm_for_grouped_tensor,
 )
+from transformer_engine.pytorch.module.grouped_linear import _GroupedLinear
 from transformer_engine.pytorch.quantization import (
     FP8GlobalStateManager,
     get_align_size_for_quantization,
@@ -1657,6 +1658,54 @@ def test_single_grouped_weight_mxfp8_workspace_cache(monkeypatch):
             workspace.columnwise_scale_inv.data_ptr(),
         )
         assert not torch.equal(workspace.rowwise_data, old_data)
+
+
+@pytest.mark.skipif(not _mxfp8_available, reason=_reason_for_no_mxfp8)
+@pytest.mark.parametrize("fp8_recipe", [recipe.MXFP8BlockScaling()], ids=recipe_id)
+def test_single_grouped_weight_with_disabled_weight_preswizzle(monkeypatch, fp8_recipe):
+    """Grouped weight preparation preserves a disabled preswizzle decision."""
+    monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
+    FP8GlobalStateManager.reset()
+    with quantized_model_init(enabled=True, recipe=fp8_recipe):
+        grouped_linear = GroupedLinear(
+            2,
+            256,
+            256,
+            bias=False,
+            params_dtype=torch.bfloat16,
+            device="cuda",
+            single_grouped_weight=True,
+            use_grouped_tensor=True,
+        )
+
+    weight_quantizer = grouped_linear.weight.quantizer
+    assert weight_quantizer is not None
+    preswizzle = grouped_linear._enable_weight_preswizzle(
+        weight_quantizer,
+        grouped_linear.weight,
+    )
+    assert preswizzle is False
+    weight_quantizer.optimize_for_gemm = preswizzle
+    grouped_weight, new_workspaces = _GroupedLinear._prepare_weights_for_grouped_tensor_gemm(
+        (grouped_linear.weight,),
+        [weight_quantizer],
+        [None],
+        num_gemms=grouped_linear.num_gemms,
+        single_grouped_weight=True,
+        with_quantized_compute=True,
+        columnwise_usage=True,
+        activation_dtype=torch.bfloat16,
+        is_first_microbatch=True,
+        skip_fp8_weight_update=None,
+        cache_weight=True,
+    )
+
+    assert weight_quantizer.optimize_for_gemm is False
+    assert len(new_workspaces) == 1
+    assert new_workspaces[0] is None
+    assert grouped_weight is grouped_linear.weight
+    assert hasattr(grouped_weight, "_with_gemm_swizzled_scales")
+    assert grouped_weight._with_gemm_swizzled_scales is False
 
 
 @pytest.mark.skipif(not _mxfp8_available, reason=_reason_for_no_mxfp8)

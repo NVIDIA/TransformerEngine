@@ -621,9 +621,10 @@ class _GroupedLinear(torch.autograd.Function):
 
             weight_quantizer = weight_quantizers[0]
             if weight_quantizer is None:
-                raise RuntimeError("MXFP8 grouped compute requires a weight quantizer.")
+                raise RuntimeError("Quantized grouped compute requires a weight quantizer.")
             weight_quantizer.set_usage(rowwise=True, columnwise=columnwise_usage)
-            weight_quantizer.optimize_for_gemm = True
+            # forward() already applied _enable_weight_preswizzle(); preserve that decision
+            # because not every quantizer and weight shape supports fused quantize-swizzle.
 
             workspace = weight_workspaces[0] if weight_workspaces else None
 
@@ -1123,7 +1124,10 @@ class _GroupedLinear(torch.autograd.Function):
         ):
             raise RuntimeError(
                 "use_grouped_tensor=True does not support the FP8 block-scaling recipe on "
-                "Blackwell GPUs. Set use_grouped_tensor=False to use the MXFP8-emulated path."
+                "Blackwell GPUs: the native grouped FP8 block-scaling path is Hopper-only. "
+                "Set use_grouped_tensor=False, or unset "
+                "NVTE_GROUPED_LINEAR_USE_FUSED_GROUPED_GEMM if it enabled this path, to use "
+                "the MXFP8-emulated path on Blackwell."
             )
         use_grouped_tensor_path = (
             use_grouped_tensor
