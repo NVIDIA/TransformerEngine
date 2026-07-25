@@ -174,6 +174,7 @@ else:
         flash_attn_varlen_func as flash_attn_varlen_func_v4,
         _validate_head_dims as _fa4_validate_head_dims,
     )
+
     try:
         from flash_attn.cute.interface import (  # pylint: disable=ungrouped-imports,no-name-in-module
             _flash_attn_fwd as _flash_attn_fwd_v4,

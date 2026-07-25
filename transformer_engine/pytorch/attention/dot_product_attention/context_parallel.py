@@ -1786,9 +1786,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 )
                 fa_forward_kwargs["return_lse"] = True
                 fa_forward_kwargs["softcap"] = 0.0
-                _flash_attn_v4_set_window_kwargs(
-                    fa_forward_kwargs, (-1, 0) if causal else (-1, -1)
-                )
+                _flash_attn_v4_set_window_kwargs(fa_forward_kwargs, (-1, 0) if causal else (-1, -1))
             elif use_flash_attn_3:
                 from transformer_engine.pytorch.attention.dot_product_attention.backends import (
                     _flash_attn_fwd_v3,
