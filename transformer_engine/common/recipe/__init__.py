@@ -491,17 +491,10 @@ class MXFP4QATMXFP8BlockScaling(MXFP8BlockScaling):
     """
     MXFP8 recipe with MXFP4 weight quantization-aware training.
 
-    Identical to :class:`MXFP8BlockScaling` except that weights are first
-    projected onto the MXFP4 (E2M1) grid with a 1x32 power-of-two scale
-    before the regular MXFP8 weight quantization. Because MXFP4 blocks are
-    1x32-aligned with MXFP8 blocks and the E2M1 grid is a subset of E4M3,
-    the rowwise MXFP8 weight representation is an exact (lossless) encoding
-    of the MXFP4-grid weight; the columnwise (32x1) representation used by
-    dgrad is quantized from the same MXFP4-grid weight. Activations and
-    gradients are handled exactly as in the base recipe, and
-    ``backward_override`` keeps its base-recipe meaning ('high_precision'
-    uses the original unquantized weight for dgrad). Only bf16/fp32 weights
-    and activation dtypes are supported: the MXFP4 grid exceeds fp16 range.
+    Weights are projected onto the MXFP4 (E2M1, 1x32 power-of-two scale) grid
+    before the regular MXFP8 weight quantization; the rowwise encoding of the
+    projected weight is lossless. Activations, gradients and
+    ``backward_override`` behave as in the base recipe. bf16/fp32 only.
     """
 
 
@@ -510,16 +503,10 @@ class MXFP4QATFloat8BlockScaling(Float8BlockScaling):
     """
     Float8 block-scaling recipe with MXFP4 weight quantization-aware training.
 
-    Identical to :class:`Float8BlockScaling` except that weights are first
-    projected onto the MXFP4 (E2M1) grid with a 1x32 power-of-two scale
-    before the regular 128x128 blockwise FP8 weight quantization. The FP8
-    weight encoding is exact (lossless) whenever every 1x32 MXFP4 scale
-    within a 128x128 tile lies within the FP8 dynamic-range headroom of the
-    tile's maximum scale; weights are quantized in square 128x128 blocks so
-    no rowwise/columnwise distinction applies (the transpose is exact).
-    Activations and gradients are handled exactly as in the base recipe.
-    Only bf16/fp32 weights and activation dtypes are supported: the MXFP4
-    grid exceeds fp16 range.
+    Weights are projected onto the MXFP4 (E2M1, 1x32 power-of-two scale) grid
+    before the regular 128x128 blockwise FP8 weight quantization (lossless
+    within each tile's FP8 dynamic-range headroom). Activations, gradients and
+    ``backward_override`` behave as in the base recipe. bf16/fp32 only.
     """
 
     def __post_init__(self) -> None:

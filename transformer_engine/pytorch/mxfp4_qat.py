@@ -4,40 +4,13 @@
 
 """MXFP4 weight fake-quantization for quantization-aware training.
 
-Projects a weight onto the MXFP4 (E2M1) grid with 1x32 power-of-two (UE8M0)
-block scales and returns the dequantized result in the input dtype — i.e. the
-fused form of ``bf16 -> mxfp4(row) -> dequantize -> bf16``. The returned values
-are exactly representable in bf16/fp32 (E2M1 needs at most two significant
-mantissa bits and the scales are powers of two), so composing with the base
-recipe's weight quantization stays lossless:
-
-* MXFP8 (1x32, E8M0): MXFP4 blocks are 1x32-aligned and the E2M1 grid is a
-  subset of E4M3 — the rowwise MXFP8 encoding of the projected weight is exact.
-* Float8 block scaling (128x128, power-of-two scales): exact whenever every
-  1x32 MXFP4 scale within a tile lies within the FP8 dynamic-range headroom of
-  the tile's maximum scale.
-
-Three bit-identical implementations are dispatched via ``NVTE_MXFP4_QAT_IMPL``
-(``auto``/``cuda``/``cute_dsl``/``torch``, default ``auto`` = CUDA binding,
-then CuTe DSL, then the PyTorch reference): the CUDA kernel in
-``common/cast/mxfp4/fake_quantize_mxfp4.cuh`` (``tex.mxfp4_fake_quantize``),
-the CuTe DSL kernel in ``mxfp4_qat_cute_dsl.py``, and
-``_mxfp4_fake_quantize_torch`` below.
-
-Value-domain semantics (identical in all implementations):
-* zero block (amax == 0): scale 1, output zeros — exact.
-* tiny amax (<= 6*2^-126): the scale floors at 2^-126 (TileKernels deployment
-  contract). The 0.5 payload then dequantizes to 2^-127, a bf16/fp32
-  subnormal. NOTE: TE's MXFP8 software dequantize flushes that grid point to
-  zero until rebuilt with the ptx.cuh UE8M0 code-0 fix (raw encoding and
-  hardware GEMM are exact).
-* non-finite amax (inf/NaN anywhere in a 1x32 block): the WHOLE block becomes
-  NaN. A single inf must not silently rescale its 31 neighbors to zero, and
-  NaN must not silently fall back to scale 1 — corruption is made visible.
-* huge amax (> 6*2^125): the scale is capped at 2^125 so the dequantized grid
-  stays representable in bf16/fp32; values saturate at 6*2^125 (satfinite).
-* fp16 is rejected for both weights and the activation/dequantize dtype:
-  even capped scales overflow fp16's range.
+Projects weights onto the MXFP4 (E2M1) grid with 1x32 power-of-two block
+scales and returns the dequantized values in the input dtype. The output is
+exact in bf16/fp32, so the host recipe's weight quantization (MXFP8 rowwise,
+128x128 blockwise) encodes it losslessly. Scale floor 2^-126 / cap 2^125
+(TileKernels deployment contract); non-finite values NaN-poison their 1x32
+block; fp16 is rejected. Implementation picked by NVTE_MXFP4_QAT_IMPL
+(auto/cuda/cute_dsl/torch).
 """
 import os
 import warnings
@@ -69,12 +42,7 @@ class _MXFP4FakeQuantizeSTE(torch.autograd.Function):
 
 
 def _round_to_e2m1_grid(y: torch.Tensor) -> torch.Tensor:
-    """RTNE onto the E2M1 magnitude grid {0, .5, 1, 1.5, 2, 3, 4, 6}.
-
-    Input must be non-negative and <= 6. Within each binade the grid is
-    uniform, so torch.round (RTNE) on the rescaled value reproduces IEEE RTNE
-    exactly, including ties across binade boundaries (2.5 -> 2, 3.5 -> 4, 5 -> 4).
-    """
+    """RTNE onto the E2M1 magnitude grid {0, .5, 1, 1.5, 2, 3, 4, 6}; input in [0, 6]."""
     fine = torch.round(y * 2.0) * 0.5
     mid = torch.round(y)
     coarse = torch.round(y * 0.5) * 2.0
@@ -187,17 +155,9 @@ def _resolve_impl(weight: torch.Tensor):
 def mxfp4_fake_quantize(weight: torch.Tensor) -> torch.Tensor:
     """Project ``weight`` onto the MXFP4 grid and return it in the input dtype.
 
-    Per 1x32 block: scale = 2^ceil(log2(amax / 6)) (all-zero blocks use 1.0),
-    values are divided by the scale, rounded RTNE onto the E2M1 grid with
-    saturation at +-6, and multiplied back. Blocks containing non-finite
-    values become NaN. The gradient is the straight-through estimator
-    (identity), the QAT-correct semantics.
-
-    Env knobs: ``NVTE_MXFP4_QAT_IMPL`` picks the implementation
-    (``auto``/``cuda``/``cute_dsl``/``torch``);
-    ``NVTE_MXFP4_QAT_REQUIRE_KERNEL=1`` makes a kernel-less fallback a hard
-    error instead of a warn-once (recommended in production so a stale wheel
-    cannot silently train on the slow path).
+    Per 1x32 block: scale = 2^clamp(ceil(log2(amax / 6)), -126, 125), RTNE onto
+    E2M1, saturate at 6, multiply back. Gradient is the straight-through
+    estimator. ``NVTE_MXFP4_QAT_REQUIRE_KERNEL=1`` forbids the torch fallback.
     """
     if weight.dim() != 2:
         raise ValueError(f"MXFP4 QAT expects a 2D weight, got {tuple(weight.shape)}")

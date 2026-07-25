@@ -419,11 +419,9 @@ void nvte_group_quantize_dbias_dsrelu(const NVTEGroupedTensor input,
 void nvte_dequantize(const NVTETensor input, NVTETensor output, cudaStream_t stream);
 
 /*! \brief Project a BF16/FP32 tensor onto the MXFP4 (E2M1) grid with 1x32
- *         power-of-two block scales and write back the dequantized values
- *         (weight fake-quantization for MXFP4 QAT). Non-finite values poison
- *         their whole 1x32 block with NaN.
+ *         power-of-two block scales, writing back dequantized values.
  *
- *  \param[in]     input     Input tensor (BF16/FP32, element count divisible by 32).
+ *  \param[in]     input     Input tensor (BF16/FP32, innermost dim divisible by 32).
  *  \param[in,out] output    Output tensor with the same dtype and shape.
  *  \param[in]     stream    CUDA stream used for the operation.
  */

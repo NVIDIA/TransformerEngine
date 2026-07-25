@@ -2,15 +2,7 @@
 #
 # See LICENSE for license information.
 
-"""Per-step and end-to-end tests for the MXFP4 weight-QAT recipes.
-
-Step coverage (letters refer to the design notes):
-  D/E/F  losslessness: fake-quant exact in bf16; MXFP8 rowwise and 128x128
-         blockwise weight encodings of the MXFP4-grid weight are bit-exact.
-  A/B/C  backward_override weight semantics through real fwd/bwd GEMMs,
-         with discriminators (closer to w_hat vs closer to the master).
-  G      STE: weight gradients land on the module parameter / main_grad.
-"""
+"""Per-step and end-to-end tests for the MXFP4 weight-QAT recipes."""
 import ctypes
 import os
 
@@ -163,11 +155,7 @@ def test_E_mxfp8_rowwise_lossless():
 
 
 def test_dequantize_e8m0_extreme_codes():
-    """End-to-end nvte MXFP8 software dequantize with planted extreme UE8M0
-    scale codes through the REAL kernel: code 0 must expand to 2^-127 and code
-    255 to NaN once the ptx.cuh exp2f fix is in the built library; the pre-fix
-    wheel flushes code 0 to zero and expands code 255 to Inf. Auto-detects and
-    reports which behavior the installed build has."""
+    """Real MXFP8 software dequantize with planted UE8M0 codes 0/255; auto-detects pre-fix wheel vs fixed build."""
     w = make_weight(32, 64)
     q = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3, columnwise=False).quantize(
         mxfp4_fake_quantize(w)
@@ -210,8 +198,7 @@ def test_G_blockwise_lossless_and_transpose():
 
 
 def test_lossless_dequant_to_bf16():
-    """The bwd override paths dequantize to activation dtype (bf16): both weight
-    encodings must reproduce the MXFP4-grid weight bit-exactly at bf16 too."""
+    """Both weight encodings dequantize to bf16 bit-exactly (bwd override target dtype)."""
     for m, n in SHAPES:
         w = make_weight(m, n, zero_blocks=4, outliers=4)
         w[0, :32] = torch.tensor(2.0**-127, dtype=torch.bfloat16)
@@ -259,9 +246,7 @@ _INTREE_KERNELS = {}
 
 
 def _intree_kernel(fast_math=False):
-    """JIT-compile the in-tree TE kernel for testing (the product path is the
-    tex.mxfp4_fake_quantize binding compiled with the wheel). fast_math=True
-    builds the SAME source with --use_fast_math to prove flag immunity."""
+    """JIT-compile the in-tree kernel; fast_math=True builds the same source with --use_fast_math."""
     if fast_math not in _INTREE_KERNELS:
         import os
         from torch.utils.cpp_extension import load_inline
@@ -519,13 +504,7 @@ def test_cute_dsl_version():
 
 
 def test_kernel_fast_math_immune():
-    """The kernel must stay bit-identical when compiled with --use_fast_math.
-
-    Guards the hazard class from the bitwise.md PR list (flashinfer#3387 etc.):
-    approximate division / ftz under fast-math flags silently changing
-    quantization results. The kernel uses only integer exponent math, exact
-    power-of-two multiplies, and rintf — no fp division, no MUFU.
-    """
+    """The kernel stays bit-identical when compiled with --use_fast_math."""
     import transformer_engine.pytorch.mxfp4_qat as M
 
     k = _intree_kernel(fast_math=True)
@@ -553,12 +532,7 @@ def test_kernel_fast_math_immune():
 
 
 def test_exp2f_e8m0_all_codes():
-    """UE8M0 scale expansion: code 0 is 2^-127 (fp32 subnormal), code 255 NaN.
-
-    Compiles the exp2f/exp2f_rcp<float> FUNCTION TEXT extracted verbatim from
-    common/util/ptx.cuh (the mxfp8 dequant kernels' scale expansion) and checks
-    all 256 codes. Guards the code-0 fix: the old bit-shift construction gave
-    +0.0 and zeroed whole blocks on software dequant."""
+    """All 256 UE8M0 codes through exp2f/exp2f_rcp extracted verbatim from ptx.cuh."""
     import re as _re
     from torch.utils.cpp_extension import load_inline
 
@@ -609,8 +583,7 @@ def test_exp2f_e8m0_all_codes():
 
 
 def test_ste_identity_gradient():
-    """Public mxfp4_fake_quantize must carry an identity (STE) gradient on both
-    implementation paths — the QAT semantics for d(w_hat)/dw."""
+    """mxfp4_fake_quantize carries an identity (STE) gradient on both implementation paths."""
     import transformer_engine.pytorch.mxfp4_qat as M
 
     for dtype in (torch.bfloat16, torch.float32):
@@ -633,8 +606,7 @@ def test_ste_identity_gradient():
 
 
 def test_misaligned_and_noncontiguous():
-    """Storage-offset views (contiguous but not 16B-aligned) and non-contiguous
-    inputs must produce the same bits as an aligned contiguous copy."""
+    """Misaligned storage-offset views and non-contiguous inputs match an aligned copy bitwise."""
     import transformer_engine.pytorch.mxfp4_qat as M
 
     for dtype, off in ((torch.bfloat16, 4), (torch.float32, 2)):
@@ -653,8 +625,7 @@ def test_misaligned_and_noncontiguous():
 
 
 def test_bf16_exhaustive_bit_patterns():
-    """All 65536 bf16 bit patterns (as 2048 blocks of 32): kernel/torch bit
-    parity everywhere, fp64 oracle on the all-finite blocks."""
+    """All 65536 bf16 bit patterns: kernel/torch parity, fp64 oracle on finite blocks."""
     bits = torch.arange(65536, dtype=torch.int32, device=DEV).to(torch.int16)
     w = bits.view(torch.bfloat16).view(2048, 32)
     gk, gt = _both_paths(w)
@@ -679,8 +650,7 @@ def test_fp32_bit_fuzz():
 
 
 def test_scale_threshold_and_rtne_midpoints():
-    """amax = 1.5*2^k boundary (one ulp below / exact / one ulp above) and every
-    RTNE midpoint of the E2M1 grid, against explicit expected values."""
+    """amax = 1.5*2^k ulp triples and all E2M1 RTNE midpoints vs explicit expected values."""
     rows = []
     for k in (-100, -10, 0, 42, 100):
         a = torch.tensor(1.5 * 2.0**k, dtype=torch.float32)
@@ -707,12 +677,7 @@ def test_scale_threshold_and_rtne_midpoints():
 
 
 def test_deployment_top_cap_domain():
-    """Top-of-range contract: for amax <= 6*2^125 the fake-quant is bitwise the
-    TileKernels deployment result. Above that, TileKernels moves to scale 2^126
-    (packed payload + UE8M0 byte 253 -- representable in packed form only, since
-    {4,6}*2^126 overflow bf16/fp32), while this path pins satfinite at the cap
-    2^125. Restricted-domain divergence, documented and unreachable for real
-    weights (requires |w| > 2.55e38)."""
+    """amax <= 6*2^125 is deployment-bitwise; above, satfinite at the cap while TileKernels moves to scale 2^126."""
     s125 = 6.0 * 2.0**125
     w = torch.zeros(2, 32, dtype=torch.float32)
     w[0, 0] = s125
@@ -727,9 +692,7 @@ def test_deployment_top_cap_domain():
 
 
 def test_tilekernels_cross_parity():
-    """Cross-backend golden: TileKernels' torch reference (deployment semantics,
-    (1,32) e2m1 cast -> dequant) must reproduce mxfp4_fake_quantize bit-for-bit
-    on the finite domain with amax <= 6*2^125."""
+    """Bitwise parity with the TileKernels torch reference (round_sf=True) on the finite below-cap domain."""
     import sys
     tk_root = os.environ.get("NVTE_MXFP4_QAT_TILEKERNELS", os.path.expanduser("~/Desktop/v4/TileKernels"))
     if os.path.isdir(tk_root) and tk_root not in sys.path:
@@ -753,10 +716,7 @@ def test_tilekernels_cross_parity():
 
 
 def test_blockwise_feasibility_enumeration():
-    """128x128 exactness contract, enumerated: for exponent spread d = 0..16 and
-    every signed E2M1 payload, predict from the E4M3 lattice (subnormals
-    included) whether p*2^(t-d) survives the tile encode at the tile's actual
-    scale, and check TE's quantizer agrees element-for-element."""
+    """Per-element E4M3-lattice prediction == TE 128x128 quantizer for exponent spreads d=0..16."""
     payloads = torch.tensor([0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0])
     boundary = None
     for d in range(17):
@@ -786,9 +746,7 @@ def test_blockwise_feasibility_enumeration():
 
 
 def test_fp16_pipeline_rejected():
-    """fp16 cannot represent the MXFP4 grid (top 6*2^125 >> fp16 max): both the
-    fp16-weight path and the fp16 activation/dequantize dtype must fail loudly
-    under MXFP4 QAT instead of silently overflowing."""
+    """fp16 weights and fp16 activation dtypes must fail loudly under MXFP4 QAT."""
     mod = te.Linear(256, 128, bias=False, params_dtype=torch.float16, device=DEV)
     x = torch.randn(64, 256, device=DEV, dtype=torch.float16)
     for recipe in (MXFP4QATMXFP8BlockScaling(), MXFP4QATFloat8BlockScaling()):
@@ -801,11 +759,7 @@ def test_fp16_pipeline_rejected():
 
 
 def test_fourway_matrix():
-    """TileKernels deployment reference vs CuTe DSL vs CUDA kernel vs torch
-    reference, bitwise, over every previously-hit edge domain and every
-    quant/dequant step: fake-quant (bf16+fp32), mxfp8 row encode/dequant,
-    mxfp8 col encode/dequant, blockwise 128x128 encode/dequant, bf16+fp32
-    dequant targets, bf16-exhaustive and fp32 bit-fuzz sweeps."""
+    """TileKernels vs CuTe DSL vs CUDA vs torch, bitwise, over all edge domains and every quant/dequant hop."""
     import sys
     tk_root = os.environ.get(
         "NVTE_MXFP4_QAT_TILEKERNELS", os.path.expanduser("~/Desktop/v4/TileKernels")
@@ -981,9 +935,7 @@ def test_fourway_matrix():
 
 
 def test_recipe_switch_invalidates_cache():
-    """base <-> QAT recipe switch must invalidate cached weight workspaces: a
-    non-first microbatch right after the switch has to requantize under the new
-    semantics instead of silently reusing the other recipe's weight."""
+    """base<->QAT recipe switches must requantize instead of reusing cached weight workspaces."""
     import warnings as _warnings
     from transformer_engine.common.recipe import MXFP8BlockScaling
 
@@ -1011,9 +963,7 @@ def test_recipe_switch_invalidates_cache():
 
 
 def test_ops_api_rejected():
-    """The operations API bypasses the quantize_weight QAT hook, so it must
-    reject MXFP4 QAT recipes loudly instead of silently training without the
-    projection."""
+    """te.ops bypasses the QAT weight hook and must reject MXFP4 QAT recipes."""
     import transformer_engine.pytorch.ops as te_ops
 
     op = te_ops.Linear(256, 128, bias=False, device=DEV, dtype=torch.bfloat16)

@@ -2,15 +2,11 @@
 #
 # See LICENSE for license information.
 
-"""CuTe DSL implementation of MXFP4 weight fake-quantization for QAT.
+"""CuTe DSL implementation of MXFP4 weight fake-quantization.
 
-Bit-identical to the CUDA kernel in
-``common/cast/mxfp4/fake_quantize_mxfp4.cuh`` and to the PyTorch reference in
-``transformer_engine/pytorch/mxfp4_qat.py``: the block-scale exponent is
-derived in integer arithmetic and the value path uses explicit non-FTZ PTX,
-so results are insensitive to compilation modes. Requires the cutlass CuTe
-DSL package; selected via ``NVTE_MXFP4_QAT_IMPL=cute_dsl`` or as the ``auto``
-fallback when the CUDA binding is unavailable.
+Bit-identical to the CUDA kernel and the PyTorch reference: integer-bit scale
+derivation and non-FTZ inline PTX on the value path. Requires the cutlass
+CuTe DSL package.
 """
 import functools
 
