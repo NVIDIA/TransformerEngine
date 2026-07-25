@@ -688,6 +688,102 @@ def get_fa_args(
     ]
 
 
+def _flash_attn_v4_set_window_kwargs(fa_kwargs: dict, window_size: Tuple[int, int]):
+    """Set window kwargs for the FlashAttention v4 raw API."""
+    fa_kwargs["window_size_left"] = window_size[0]
+    fa_kwargs["window_size_right"] = window_size[1]
+
+
+def _flash_attn_fwd_raw(
+    qkv_format: str,
+    fa_forward_kwargs: dict,
+    flash_attn_fwd,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+    cu_seqlens_kv: torch.Tensor,
+    max_seqlen_q: int,
+    max_seqlen_kv: int,
+    causal: bool,
+    seqused_q: torch.Tensor = None,
+    seqused_k: torch.Tensor = None,
+):
+    """Run the FlashAttention v4 raw forward call."""
+    if flash_attn_fwd is None:
+        raise RuntimeError(
+            "FlashAttention v4 context parallelism requires the raw "
+            "flash_attn.cute.interface._flash_attn_fwd API."
+        )
+    fa_outputs = flash_attn_fwd(
+        q,
+        k,
+        v,
+        cu_seqlens_q=cu_seqlens_q if qkv_format == "thd" else None,
+        cu_seqlens_k=cu_seqlens_kv if qkv_format == "thd" else None,
+        seqused_q=seqused_q,
+        seqused_k=seqused_k,
+        max_seqlen_q=max_seqlen_q,
+        max_seqlen_k=max_seqlen_kv,
+        causal=causal,
+        **fa_forward_kwargs,
+    )
+    return fa_outputs[0], fa_outputs[1], None
+
+
+def _flash_attn_bwd_raw(
+    qkv_format: str,
+    fa_backward_kwargs: dict,
+    flash_attn_bwd,
+    dout: torch.Tensor,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    out: torch.Tensor,
+    softmax_lse: torch.Tensor,
+    dq: torch.Tensor,
+    dk: torch.Tensor,
+    dv: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+    cu_seqlens_kv: torch.Tensor,
+    max_seqlen_q: int,
+    max_seqlen_kv: int,
+    causal: bool,
+    seqused_q: torch.Tensor = None,
+    seqused_k: torch.Tensor = None,
+):
+    """Run the FlashAttention v4 raw backward call."""
+    if flash_attn_bwd is None:
+        raise RuntimeError(
+            "FlashAttention v4 context parallelism requires the raw "
+            "flash_attn.cute.interface._flash_attn_bwd API."
+        )
+    grads = flash_attn_bwd(
+        q,
+        k,
+        v,
+        out,
+        dout,
+        softmax_lse,
+        dq=dq,
+        dk=dk,
+        dv=dv,
+        softmax_scale=fa_backward_kwargs["softmax_scale"],
+        causal=causal,
+        softcap=fa_backward_kwargs.get("softcap", 0.0),
+        window_size_left=fa_backward_kwargs.get("window_size_left", -1),
+        window_size_right=fa_backward_kwargs.get("window_size_right", 0 if causal else -1),
+        cu_seqlens_q=cu_seqlens_q if qkv_format == "thd" else None,
+        cu_seqlens_k=cu_seqlens_kv if qkv_format == "thd" else None,
+        seqused_q=seqused_q,
+        seqused_k=seqused_k,
+        max_seqlen_q=max_seqlen_q,
+        max_seqlen_k=max_seqlen_kv,
+        deterministic=fa_backward_kwargs.get("deterministic", False),
+    )
+    return grads[:3]
+
+
 def cp_p2p_fwd_prepare_qkv(
     q_part,
     k_part,
@@ -968,6 +1064,7 @@ def cp_p2p_fwd_fused_attn(
 
 def cp_p2p_fwd_flash_attn(
     use_flash_attn_3,
+    use_flash_attn_4,
     qkv_format,
     fa_forward_kwargs,
     flash_attn_fwd,
@@ -996,7 +1093,9 @@ def cp_p2p_fwd_flash_attn(
     elif section == "upper-triangle":
         max_seqlen_q_ = max_seqlen_q // 2
     if section in ["lower-triangle", "upper-triangle"]:
-        if fa_utils.v2_3_plus and not fa_utils.v2_7_0_plus:
+        if use_flash_attn_4:
+            _flash_attn_v4_set_window_kwargs(fa_forward_kwargs, (-1, -1))
+        elif fa_utils.v2_3_plus and not fa_utils.v2_7_0_plus:
             fa_forward_kwargs["window_size"] = (-1, -1)
         elif use_flash_attn_3 or fa_utils.v2_7_0_plus:
             fa_forward_kwargs["window_size_left"] = -1
@@ -1015,6 +1114,23 @@ def cp_p2p_fwd_flash_attn(
             cu_seqlens_kv_ = cu_seqlens_kv_padded // 2
         elif section == "upper-triangle":
             cu_seqlens_q_ = cu_seqlens_q_padded // 2
+
+    if use_flash_attn_4:
+        return _flash_attn_fwd_raw(
+            qkv_format,
+            fa_forward_kwargs,
+            flash_attn_fwd,
+            q_part,
+            k_part,
+            v_part,
+            cu_seqlens_q_,
+            cu_seqlens_kv_,
+            max_seqlen_q_,
+            max_seqlen_kv_,
+            causal_,
+            seqused_q=seqused_q,
+            seqused_k=seqused_k,
+        )
 
     fa_forward_args_thd = get_fa_args(
         True,
@@ -1256,6 +1372,7 @@ def cp_p2p_bwd_fused_attn(
 
 def cp_p2p_bwd_flash_attn(
     use_flash_attn_3,
+    use_flash_attn_4,
     qkv_format,
     max_seqlen_q,
     max_seqlen_kv,
@@ -1283,7 +1400,9 @@ def cp_p2p_bwd_flash_attn(
         dq, dk, dv = [torch.zeros_like(x) for x in [q_part, k_part, v_part]]
     else:
         dq, dk, dv = [torch.empty_like(x) for x in [q_part, k_part, v_part]]
-    if fa_utils.v2_3_plus and not fa_utils.v2_7_0_plus:
+    if use_flash_attn_4:
+        _flash_attn_v4_set_window_kwargs(fa_backward_kwargs, (-1, -1))
+    elif fa_utils.v2_3_plus and not fa_utils.v2_7_0_plus:
         fa_backward_kwargs["window_size"] = (-1, -1)
     elif use_flash_attn_3 or fa_utils.v2_7_0_plus:
         fa_backward_kwargs["window_size_left"] = -1
@@ -1295,7 +1414,9 @@ def cp_p2p_bwd_flash_attn(
     softmax_lse__ = softmax_lse
     causal_ = False
     if section == "diagonal":
-        if fa_utils.v2_3_plus and not fa_utils.v2_7_0_plus:
+        if use_flash_attn_4:
+            _flash_attn_v4_set_window_kwargs(fa_backward_kwargs, (-1, 0))
+        elif fa_utils.v2_3_plus and not fa_utils.v2_7_0_plus:
             fa_backward_kwargs["window_size"] = (-1, 0)
         elif use_flash_attn_3 or fa_utils.v2_7_0_plus:
             fa_backward_kwargs["window_size_left"] = -1
@@ -1320,6 +1441,29 @@ def cp_p2p_bwd_flash_attn(
             cu_seqlens_kv_bwd = cu_seqlens_kv_padded // 2
         elif section == "upper-triangle":
             cu_seqlens_q_bwd = cu_seqlens_q_padded // 2
+
+    if use_flash_attn_4:
+        return _flash_attn_bwd_raw(
+            qkv_format,
+            fa_backward_kwargs,
+            flash_attn_bwd,
+            dout_part,
+            q_part,
+            k_part,
+            v_part,
+            out_part,
+            softmax_lse__,
+            dq,
+            dk,
+            dv,
+            cu_seqlens_q_bwd,
+            cu_seqlens_kv_bwd,
+            max_seqlen_q_,
+            max_seqlen_kv_,
+            causal_,
+            seqused_q=seqused_q,
+            seqused_k=seqused_k,
+        )
 
     fa_backward_args_thd = get_fa_args(
         False,
@@ -1395,6 +1539,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         quantizers,
         pad_between_seqs,
         use_flash_attn_3,
+        use_flash_attn_4,
         fp8_output,
         layer_number,
     ):
@@ -1622,14 +1767,29 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                     0,
                 ) and get_device_compute_capability() != (12, 0)
             else:
-                softmax_lse_in_packed_format = fa_utils.v2_6_0_plus or use_flash_attn_3
+                softmax_lse_in_packed_format = (
+                    fa_utils.v2_6_0_plus or use_flash_attn_3 or use_flash_attn_4
+                )
 
         # set up args for FlashAttention backend
         flash_attn_fwd = None
         fa_forward_kwargs = {}
         if not use_fused_attention:
             fa_forward_kwargs = {"softmax_scale": softmax_scale}
-            if use_flash_attn_3:
+            if use_flash_attn_4:
+                from transformer_engine.pytorch.attention.dot_product_attention.backends import (
+                    _flash_attn_fwd_v4,
+                )
+
+                flash_attn_fwd = (
+                    _flash_attn_fwd_v4  # pylint: disable=possibly-used-before-assignment
+                )
+                fa_forward_kwargs["return_lse"] = True
+                fa_forward_kwargs["softcap"] = 0.0
+                _flash_attn_v4_set_window_kwargs(
+                    fa_forward_kwargs, (-1, 0) if causal else (-1, -1)
+                )
+            elif use_flash_attn_3:
                 from transformer_engine.pytorch.attention.dot_product_attention.backends import (
                     _flash_attn_fwd_v3,
                 )
@@ -1768,6 +1928,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                     else:
                         flash_attn_inputs = [
                             use_flash_attn_3,
+                            use_flash_attn_4,
                             qkv_format,
                             fa_forward_kwargs,
                             flash_attn_fwd,
@@ -2164,6 +2325,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         ctx.is_input_fp8 = is_input_fp8
         ctx.is_output_fp8 = is_output_fp8
         ctx.use_flash_attn_3 = use_flash_attn_3
+        ctx.use_flash_attn_4 = use_flash_attn_4
 
         ctx.orig_q_shape = orig_q_shape
         ctx.orig_k_shape = orig_k_shape
@@ -2426,7 +2588,17 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         flash_attn_bwd = None
         if not ctx.use_fused_attention:
             fa_backward_kwargs = {"softmax_scale": ctx.softmax_scale}
-            if ctx.use_flash_attn_3:
+            if ctx.use_flash_attn_4:
+                from transformer_engine.pytorch.attention.dot_product_attention.backends import (
+                    _flash_attn_bwd_v4,
+                )
+
+                flash_attn_bwd = (
+                    _flash_attn_bwd_v4  # pylint: disable=possibly-used-before-assignment
+                )
+                fa_backward_kwargs["softcap"] = 0.0
+                fa_backward_kwargs["deterministic"] = ctx.deterministic
+            elif ctx.use_flash_attn_3:
                 from transformer_engine.pytorch.attention.dot_product_attention.backends import (
                     _flash_attn_bwd_v3,
                 )
@@ -2557,6 +2729,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             else:
                 flash_attn_inputs = [
                     ctx.use_flash_attn_3,
+                    ctx.use_flash_attn_4,
                     ctx.qkv_format,
                     ctx.max_seqlen_q,
                     ctx.max_seqlen_kv,
@@ -2957,6 +3130,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             None,
             None,
             attn_dbias,
+            None,
             None,
             None,
             None,
@@ -4947,6 +5121,7 @@ def attn_forward_func_with_cp(
     quantizers=None,
     pad_between_seqs=False,
     use_flash_attn_3=False,
+    use_flash_attn_4=False,
     softmax_type="vanilla",
     softmax_offset=None,
     fp8_output=False,
@@ -5035,6 +5210,12 @@ def attn_forward_func_with_cp(
             cp_group, dist_group_type
         ), f"cp_group must be {dist_group_type} type for {cp_comm_type=}!"
 
+    if use_flash_attn_4 and cp_comm_type not in ["p2p", "a2a+p2p"]:
+        raise ValueError(
+            "FlashAttention v4 context parallelism is supported for "
+            "cp_comm_type='p2p' and 'a2a+p2p' only."
+        )
+
     assert qkv_format in [
         "bshd",
         "sbhd",
@@ -5103,6 +5284,7 @@ def attn_forward_func_with_cp(
             quantizers,
             pad_between_seqs,
             use_flash_attn_3,
+            use_flash_attn_4,
             fp8_output,
             layer_number,
         ]

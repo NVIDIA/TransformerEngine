@@ -1144,9 +1144,6 @@ def get_attention_backend(
             "Disabling UnfusedDotProductAttention as it does not support context parallelism"
         )
         use_unfused_attention = False
-    if context_parallel and use_flash_attention_4 and FlashAttentionUtils.v4_is_installed:
-        logger.debug("Disabling FlashAttention 4 as it does not support context parallelism yet")
-        use_flash_attention_4 = False
     if context_parallel and (
         use_flash_attention_2 or use_flash_attention_3 or use_flash_attention_4
     ):
