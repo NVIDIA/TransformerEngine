@@ -428,33 +428,12 @@ _no_op_logger = _NoOpLogger()
 
 
 @torch.compiler.assume_constant_result
-def _get_fused_attn_backend(
-    is_training,
-    q_type,
-    kv_type,
-    qkv_layout,
-    bias_type,
-    attn_mask_type,
-    softmax_type,
-    *args,
-):
+def _get_fused_attn_backend(fused_attn_params):
     """Constant-foldable tex.get_fused_attn_backend: the result depends only on
     the attention config, and the python-side enum keeps it traceable by
-    torch.compile (see the FusedAttnBackend docstring). Layout/bias/mask/softmax
-    are taken as their string keys and resolved to the pybind enums here, so
-    that every argument is a python literal or a python enum."""
-    return FusedAttnBackend.cast(
-        tex.get_fused_attn_backend(
-            is_training,
-            q_type,
-            kv_type,
-            QKVLayout[qkv_layout],
-            AttnBiasType[bias_type],
-            AttnMaskType[attn_mask_type],
-            SoftmaxType[softmax_type],
-            *args,
-        )
-    )
+    torch.compile (see the FusedAttnBackend docstring)."""
+    fused_attention_backend, reject_message = tex.get_fused_attn_backend(fused_attn_params)
+    return FusedAttnBackend.cast(fused_attention_backend), reject_message
 
 
 def get_attention_backend(
@@ -1640,12 +1619,10 @@ def get_attention_backend(
                     fused_attn_kwargs["bias_seqlen_kv"] = step_seqlen_kv
             fused_attn_params = FusedAttentionParams(**fused_attn_kwargs)
 
-            # NOTE: under torch.compile the numeric args below must not be symbolic
-            # (assume_constant_result requires concrete values); ints/floats made
+            # NOTE: under torch.compile the numeric fields of fused_attn_params must not be
+            # symbolic (assume_constant_result requires concrete values); ints/floats made
             # dynamic by automatic dynamic currently graph break here.
-            fused_attention_backend = _get_fused_attn_backend(fused_attn_params)
-
-            fused_attention_backend, reject_message = tex.get_fused_attn_backend(fused_attn_params)
+            fused_attention_backend, reject_message = _get_fused_attn_backend(fused_attn_params)
             if fused_attention_backend == FusedAttnBackend["No_Backend"]:
                 logger.debug(
                     "Disabling FusedAttention: %s%s",
