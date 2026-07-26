@@ -1691,8 +1691,25 @@ class GroupedLinear(BasicOperation):
 
         # Flatten grad_output to 2D (total_tokens, out_features)
         # to figure out total tokens.
-        dy_2d = grad_output.reshape(-1, self.out_features)
-        total_tokens = dy_2d.size(0)
+        prequantized_mxfp8_grad = (
+            with_quantized_compute
+            and isinstance(grad_output, GroupedTensor)
+            and isinstance(ctx.grad_output_quantizers[0], MXFP8Quantizer)
+            and isinstance(grad_output.quantizer, MXFP8Quantizer)
+        )
+        if prequantized_mxfp8_grad:
+            # GroupedTensor forbids reshape and is already in the canonical
+            # (total_tokens, out_features) layout; just validate the shape.
+            if grad_output.dim() != 2 or grad_output.size(-1) != self.out_features:
+                raise ValueError(
+                    "GroupedTensor grad output must have shape (total_tokens, "
+                    f"{self.out_features}), but got {tuple(grad_output.size())}."
+                )
+            dy_2d = None
+            total_tokens = grad_output.size(0)
+        else:
+            dy_2d = grad_output.reshape(-1, self.out_features)
+            total_tokens = dy_2d.size(0)
 
         # Build the grad_output GroupedTensor.
         # Optionally get dbias is fusion available with bgrad_group_quantize
@@ -1704,7 +1721,35 @@ class GroupedLinear(BasicOperation):
             )
             grad_output_quantizer.optimize_for_gemm = True
 
-            if (
+            if prequantized_mxfp8_grad:
+                # Rowwise-only MXFP8 grad output (e.g. FP8 token dispatch): reuse the
+                # rowwise data for the dgrad GEMM and manufacture the columnwise copy
+                # for wgrad. ``scale_bias`` needs the high-precision grad below, so it
+                # takes the dequantized tensor instead of the fused dbias.
+                grouped_dy = grouped_storage_from_grouped_tensor(grad_output)
+                dbias_packed, dy_2d = prepare_prequantized_mxfp8_input_for_gemm(
+                    grouped_dy,
+                    grad_output_quantizer,
+                    num_groups,
+                    split_sizes,
+                    dtype,
+                    with_columnwise=ctx.weight_requires_grad,
+                    with_dbias=has_bias and not self._scale_bias,
+                    tensor_offsets=base_split_offsets * self.out_features,
+                )
+                if has_bias and self._scale_bias:
+                    if dy_2d is None:
+                        # dbias/dscales below need the dequantized grad, which is
+                        # only materialized when the columnwise copy is built.
+                        raise NotImplementedError(
+                            "Pre-quantized MXFP8 grad output with scale_bias requires "
+                            "weight gradients."
+                        )
+                else:
+                    # Nothing else reads the dequantized grad; drop it so the buffer
+                    # is freed instead of living until backward ends.
+                    dy_2d = None
+            elif (
                 has_bias
                 and not self._scale_bias
                 and isinstance(grad_output_quantizer, MXFP8Quantizer)

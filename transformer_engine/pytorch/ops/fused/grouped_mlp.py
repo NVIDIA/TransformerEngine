@@ -1589,7 +1589,16 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         # Tensor properties
         fc1_weight_shape = (fc1_op.out_features, fc1_op.in_features)
         fc2_weight_shape = (fc2_op.out_features, fc2_op.in_features)
-        grad_output = grad_output.reshape(-1, fc2_weight_shape[0])
+        if isinstance(grad_output, GroupedTensor):
+            # GroupedTensor forbids reshape and is already in the canonical
+            # (total_tokens, out_features) layout; just validate the shape.
+            if grad_output.dim() != 2 or grad_output.size(-1) != fc2_weight_shape[0]:
+                raise ValueError(
+                    "GroupedTensor grad output must have shape (total_tokens, "
+                    f"{fc2_weight_shape[0]}), but got {tuple(grad_output.size())}."
+                )
+        else:
+            grad_output = grad_output.reshape(-1, fc2_weight_shape[0])
         out_shape = list(grad_output.size())
         num_groups = fc1_op.num_groups
         fc1_weight_param = fc1_op.weight if fc1_op.single_grouped_weight else fc1_op.weight0
@@ -1657,12 +1666,43 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             isinstance(fc2_grad_output_quantizer, NVFP4Quantizer)
             and isinstance(grad_output_quantizer, NVFP4Quantizer)
         )
+        prequantized_mxfp8_grad = isinstance(fc2_grad_output_quantizer, MXFP8Quantizer)
         if (
-            not output_fc2_dbias
+            (not output_fc2_dbias or prequantized_mxfp8_grad)
             and isinstance(grad_output, GroupedTensor)
             and fc2_grad_output_quantizer_matches
         ):
-            grouped_fc2_dy = grad_output
+            if prequantized_mxfp8_grad:
+                # Rowwise-only MXFP8 grad output (e.g. FP8 token dispatch): reuse
+                # the rowwise data for the dgrad GEMM and manufacture FC2's
+                # columnwise copy for wgrad. ``scale_bias`` needs the
+                # high-precision grad below, so it takes the dequantized tensor
+                # instead of the fused dbias.
+                grouped_fc2_dy = grouped_storage_from_grouped_tensor(grad_output)
+                fc2_dbias_packed, fc2_dy = prepare_prequantized_mxfp8_input_for_gemm(
+                    grouped_fc2_dy,
+                    fc2_grad_output_quantizer,
+                    num_groups,
+                    split_sizes,
+                    dtype,
+                    with_columnwise=fc2_ctx.weight_requires_grad,
+                    with_dbias=output_fc2_dbias and not scale_bias,
+                    tensor_offsets=base_split_offsets * fc2_weight_shape[0],
+                )
+                if scale_bias:
+                    if fc2_dy is None:
+                        # dbias/dscales below need the dequantized grad, which is
+                        # only materialized when the columnwise copy is built.
+                        raise NotImplementedError(
+                            "Pre-quantized MXFP8 grad output with scale_bias requires "
+                            "FC2 weight gradients."
+                        )
+                else:
+                    # Nothing else reads the dequantized grad; drop it so the
+                    # buffer is freed instead of living until backward ends.
+                    fc2_dy = None
+            else:
+                grouped_fc2_dy = grad_output
         else:
             fc2_dy = maybe_dequantize(grad_output, dtype)
             if output_fc2_dbias and not scale_bias:
