@@ -20,6 +20,7 @@ from ..tensor.grouped_tensor import GroupedTensor
 from ..tensor.mxfp8_tensor import MXFP8Quantizer, MXFP8Tensor
 from ..tensor.storage.grouped_tensor_storage import GroupedTensorStorage
 from ..quantized_tensor import QuantizedTensorStorage
+from ..triton.grouped_dbias_dscales import compute_grouped_dbias
 from ..utils import canonicalize_dtype
 
 
@@ -148,9 +149,10 @@ def prepare_prequantized_mxfp8_input_for_gemm(
     with_columnwise : bool
         Whether to build the columnwise copy that the wgrad GEMM consumes.
     with_dbias : bool, default = ``False``
-        Whether to also produce the per-group bias gradient. The quantize kernel
-        accumulates it in the columnwise stage it is already running, so this
-        costs no extra pass but requires ``with_columnwise``.
+        Whether to also produce the per-group bias gradient. When a columnwise
+        copy is built the quantize kernel accumulates it in the stage it is
+        already running, so it costs no extra pass; otherwise it is reduced from
+        the dequantized tensor.
     with_dequantized : bool, default = ``False``
         Whether to dequantize even when no columnwise copy is needed. It must be
         requested here rather than recovered later, since the rowwise scales are
@@ -189,18 +191,11 @@ def prepare_prequantized_mxfp8_input_for_gemm(
             f"but the op's input quantizer expects {quantizer.dtype}."
         )
 
-    if with_dbias and not with_columnwise:
-        # The fused dbias is accumulated by the quantize kernel's columnwise stage.
-        raise NotImplementedError(
-            "Pre-quantized MXFP8 grouped input cannot produce a fused dbias without "
-            "a columnwise copy."
-        )
-
     # Manufacture columnwise data for the wgrad GEMM: dequantize the rowwise
     # wire data and requantize columnwise-only.
     dbias = None
     dequantized = None
-    if with_columnwise or with_dequantized:
+    if with_columnwise or with_dbias or with_dequantized:
         dequantized = tex.group_dequantize(grouped_x, TE_DType[dtype]).rowwise_data.view(
             grouped_x.logical_shape
         )
@@ -227,6 +222,12 @@ def prepare_prequantized_mxfp8_input_for_gemm(
             )
         grouped_x.columnwise_data = colwise_x.columnwise_data
         grouped_x.columnwise_scale_inv = colwise_x.columnwise_scale_inv
+    elif with_dbias:
+        # No columnwise stage to accumulate into (e.g. frozen weights need no
+        # wgrad), so reduce the dequantized grad directly.
+        dbias = compute_grouped_dbias(
+            dequantized, tex.splits_to_offsets(split_sizes, 1), num_groups
+        )
 
     # Convert rowwise scales to the GEMM-swizzled layout. The grouped GEMM
     # reads activation scales as one (total_tokens, cols) matrix, so the

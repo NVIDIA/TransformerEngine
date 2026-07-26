@@ -541,7 +541,8 @@ class TestGroupedLinearOp:
         for wgrad_test, wgrad_ref in zip(wgrads_test, wgrads_ref):
             torch.testing.assert_close(wgrad_test, wgrad_ref, rtol=0, atol=0)
 
-    @pytest.mark.parametrize("bias", (False, True))
+    @pytest.mark.parametrize("bias_mode", ("none", "plain", "scaled"))
+    @pytest.mark.parametrize("weight_requires_grad", (False, True))
     def test_grouped_linear_prequantized_mxfp8_grad(
         self,
         *,
@@ -550,18 +551,29 @@ class TestGroupedLinearOp:
         split_alignment: int = 128,
         dtype: torch.dtype = torch.bfloat16,
         device: torch.device = "cuda",
-        bias: bool,
+        bias_mode: str,
+        weight_requires_grad: bool,
     ) -> None:
         """Rowwise-only MXFP8 GroupedTensor grad output (FP8 token dispatch, backward).
 
         Mirrors ``test_grouped_linear_prequantized_mxfp8_input`` on the backward
         side: the rowwise data feeds the dgrad GEMM and the columnwise copy is
-        manufactured for wgrad. With ``bias`` the per-group bias gradient rides
-        the columnwise stage of the quantize kernel.
+        manufactured for wgrad. Covers all three bias gradient sources: none,
+        ``plain`` (fused into the columnwise stage of the quantize kernel, or
+        reduced from the dequantized grad when frozen weights leave no columnwise
+        stage), and ``scaled`` (``scale_bias``, whose dbias/dscales need the
+        dequantized grad because they depend on the routing probabilities).
+
+        With frozen weights TE also requires frozen biases, so bias gradients are
+        not observable there; ``dscales`` still is, since the probabilities are an
+        input rather than a parameter.
         """
         if not mxfp8_available:
             pytest.skip(reason_for_no_mxfp8)
         maybe_skip_quantization("mxfp8", dims=weight_shape, device=device, dtype=dtype)
+
+        has_bias = bias_mode != "none"
+        use_scale_bias = bias_mode == "scaled"
 
         # Split sizes (including an empty group)
         split_sizes = [split_alignment * i for i in range(group_size)]
@@ -573,6 +585,7 @@ class TestGroupedLinearOp:
 
         x = torch.rand((total_tokens, in_features), dtype=dtype, device=device) - 0.5
         dy_hp = torch.rand((total_tokens, out_features), dtype=dtype, device=device) - 0.5
+        probs = torch.rand((total_tokens,), dtype=dtype, device=device)
 
         # Wire-format grad output and its exact dequantization (the reference grad).
         dy_wire = self._make_rowwise_mxfp8_wire_input(dy_hp, group_size, split_sizes)
@@ -582,35 +595,47 @@ class TestGroupedLinearOp:
 
         recipe = make_recipe("mxfp8")
         op = te.ops.GroupedLinear(
-            group_size, in_features, out_features, bias=bias, device=device, dtype=dtype
+            group_size,
+            in_features,
+            out_features,
+            bias=has_bias,
+            device=device,
+            dtype=dtype,
+            scale_bias=use_scale_bias,
         )
+        if not weight_requires_grad:
+            # TE requires bias.requires_grad to match weight.requires_grad.
+            for param in op.parameters():
+                param.requires_grad_(False)
 
         def _run(grad):
             x_in = x.detach().clone().requires_grad_()
+            probs_in = probs.detach().clone().requires_grad_(use_scale_bias)
+            extra_inputs = (split_sizes, probs_in) if use_scale_bias else (split_sizes,)
             with te.autocast(enabled=True, recipe=recipe):
-                y = op(x_in, split_sizes)
+                y = op(x_in, *extra_inputs)
             # Deliver ``grad`` as the op's grad output, as FP8 dispatch would.
             _InjectGrad.apply(y, grad).backward(torch.ones_like(y))
-            wgrads, bgrads = [], []
-            for group_idx in range(group_size):
-                weight = getattr(op, f"weight{group_idx}")
-                wgrads.append(weight.grad.detach().clone())
-                weight.grad = None
-                if bias:
-                    bias_param = getattr(op, f"bias{group_idx}")
-                    bgrads.append(bias_param.grad.detach().clone())
-                    bias_param.grad = None
-            return x_in.grad, wgrads, bgrads
+            grads = [("dx", x_in.grad)]
+            if use_scale_bias:
+                grads.append(("dprobs", probs_in.grad))
+            if weight_requires_grad:
+                for group_idx in range(group_size):
+                    weight = getattr(op, f"weight{group_idx}")
+                    grads.append((f"w{group_idx}", weight.grad.detach().clone()))
+                    weight.grad = None
+                    if has_bias:
+                        bias_param = getattr(op, f"bias{group_idx}")
+                        grads.append((f"b{group_idx}", bias_param.grad.detach().clone()))
+                        bias_param.grad = None
+            return grads
 
-        dx_ref, wgrads_ref, bgrads_ref = _run(dy_ref)
-        dx_test, wgrads_test, bgrads_test = _run(dy_wire)
+        grads_ref = _run(dy_ref)
+        grads_test = _run(dy_wire)
 
         # Bit-exact match expected (identical quantized grads and kernels).
-        torch.testing.assert_close(dx_test, dx_ref, rtol=0, atol=0)
-        for wgrad_test, wgrad_ref in zip(wgrads_test, wgrads_ref):
-            torch.testing.assert_close(wgrad_test, wgrad_ref, rtol=0, atol=0)
-        for bgrad_test, bgrad_ref in zip(bgrads_test, bgrads_ref):
-            torch.testing.assert_close(bgrad_test, bgrad_ref, rtol=0, atol=0)
+        for (_, grad_test), (_, grad_ref) in zip(grads_test, grads_ref):
+            torch.testing.assert_close(grad_test, grad_ref, rtol=0, atol=0)
 
     @pytest.mark.parametrize("dtype", (torch.bfloat16, torch.float16))
     @pytest.mark.parametrize(
