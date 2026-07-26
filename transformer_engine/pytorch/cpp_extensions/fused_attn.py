@@ -5,6 +5,7 @@
 """Python interface for fused attention extensions"""
 
 import math
+from enum import IntEnum
 from typing import Tuple, List, Union, Optional
 import torch
 import transformer_engine_torch as tex
@@ -97,11 +98,65 @@ SoftmaxType = {
     "learnable": NVTE_Softmax_Type.NVTE_LEARNABLE_SOFTMAX,
 }
 
-FusedAttnBackend = {
-    "F16_arbitrary_seqlen": NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
-    "FP8": NVTE_Fused_Attn_Backend.NVTE_FP8,
-    "No_Backend": NVTE_Fused_Attn_Backend.NVTE_No_Backend,
-}
+
+class FusedAttnBackend(IntEnum):
+    """Fused attention sub-backends.
+
+    This is the canonical fused-attention backend enum for
+    ``transformer_engine.pytorch``. It mirrors the backend
+    ``transformer_engine_torch.NVTE_Fused_Attn_Backend`` (pybind11) enum
+    value-for-value, and instances of the two enums compare equal when they
+    share the same integer value. Unlike the pybind enum, a plain-python
+    ``IntEnum`` is traceable by ``torch.compile``: comparisons constant-fold
+    cleanly and instances safely cross the ``assume_constant_result`` boundary
+    in ``get_attention_backend``. Lookup by name (``FusedAttnBackend["FP8"]``)
+    works the same way as with the dict this used to be.
+    """
+
+    No_Backend = int(NVTE_Fused_Attn_Backend.NVTE_No_Backend)
+    F16_arbitrary_seqlen = int(NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen)
+    FP8 = int(NVTE_Fused_Attn_Backend.NVTE_FP8)
+
+    @classmethod
+    def cast(
+        cls, backend: "Union[FusedAttnBackend, NVTE_Fused_Attn_Backend]"
+    ) -> "FusedAttnBackend":
+        """Normalize a backend value to the canonical ``FusedAttnBackend`` member.
+
+        The pybind ``transformer_engine_torch.NVTE_Fused_Attn_Backend`` enum is
+        accepted as input for backward compatibility and mapped to the matching
+        ``FusedAttnBackend`` member.
+        """
+        if isinstance(backend, cls):
+            return backend
+        return cls(int(backend))
+
+    def __eq__(self, other: object) -> bool:
+        # ``FusedAttnBackend`` is an ``IntEnum`` while ``NVTE_Fused_Attn_Backend``
+        # is a pybind11 enum. Compare by integer value so the two enums stay
+        # equivalent regardless of the pybind11 version (the pybind ``__eq__``
+        # handles the reverse order).
+        if isinstance(other, NVTE_Fused_Attn_Backend):
+            return int(self) == int(other)
+        return int.__eq__(self, other)
+
+    def __ne__(self, other: object) -> bool:
+        result = self.__eq__(other)
+        if result is NotImplemented:
+            return result
+        return not result
+
+    def __hash__(self) -> int:
+        return int.__hash__(self)
+
+
+# Fail fast at import time if a new enumerator is added on the C++ side
+# without being mirrored above.
+assert {f"NVTE_{m.name}" for m in FusedAttnBackend} == set(NVTE_Fused_Attn_Backend.__members__), (
+    "FusedAttnBackend in python is out of sync with"
+    " transformer_engine_torch.NVTE_Fused_Attn_Backend defined on the C++ side."
+    " Please make sure TE C++ and python are in sync."
+)
 
 BACKEND_FP8_THREADS_PER_CTA = 128
 BACKEND_F16arb_ELTS_PER_THREADS = 16
@@ -124,7 +179,7 @@ def fused_attn_fwd(
     k: torch.Tensor,
     v: torch.Tensor,
     fake_dtype: torch.dtype,
-    fused_attention_backend: tex.NVTE_Fused_Attn_Backend,
+    fused_attention_backend: FusedAttnBackend,
     attn_bias: torch.Tensor = None,
     cu_seqlens_q_padded: torch.Tensor = None,
     cu_seqlens_kv_padded: torch.Tensor = None,
@@ -176,7 +231,7 @@ def fused_attn_fwd(
     fake_dtype : DType
                 data type of Q, K and V - in case of high precision, fake dtype in case of FP8;
                 in torch.dtype
-    fused_attention_backend : tex.NVTE_Fused_Attn_Backend
+    fused_attention_backend : FusedAttnBackend
                 please see FusedAttention module for details on supported backends.
     attn_bias : torch.Tensor, default = None
                 input tensor Bias when attn_bias_type is "pre_scale_bias" or "post_scale_bias";
@@ -285,6 +340,8 @@ def fused_attn_fwd(
                 f"attn_bias.dtype={attn_bias.dtype} but q.dtype={q.dtype}."
             )
 
+    # Accept the pybind enum for backward compatibility.
+    fused_attention_backend = FusedAttnBackend.cast(fused_attention_backend)
     if fused_attention_backend == FusedAttnBackend["No_Backend"]:
         raise ValueError(
             "Fused attention does not support this input combination:"
@@ -397,7 +454,7 @@ def fused_attn_bwd(
     d_o: torch.Tensor,
     fake_dtype: torch.dtype,
     aux_ctx_tensors: List[torch.Tensor],
-    fused_attention_backend: tex.NVTE_Fused_Attn_Backend,
+    fused_attention_backend: FusedAttnBackend,
     cu_seqlens_q_padded: torch.Tensor = None,
     cu_seqlens_kv_padded: torch.Tensor = None,
     s_quantizer: Quantizer = None,
@@ -453,7 +510,7 @@ def fused_attn_bwd(
     aux_ctx_tensors : List[torch.Tensor]
                 auxiliary output tensors of the forward pass when its is_training is True,
                 e.g. aux_ctx_tensors = [S, Max, rng_state]
-    fused_attention_backend : tex.NVTE_Fused_Attn_Backend
+    fused_attention_backend : FusedAttnBackend
                 please see FusedAttention module for details on supported backends.
     cu_seqlens_q_padded : torch.Tensor, default = None
                 cumulative sequence offsets for Q; shape [batch_size + 1]
@@ -538,6 +595,8 @@ def fused_attn_bwd(
         d = q.size(-1)
         attn_scale = 1.0 / math.sqrt(d)
 
+    # Accept the pybind enum for backward compatibility.
+    fused_attention_backend = FusedAttnBackend.cast(fused_attention_backend)
     if fused_attention_backend == FusedAttnBackend["No_Backend"]:
         raise ValueError(
             "Fused attention backward does not support this input combination:"
