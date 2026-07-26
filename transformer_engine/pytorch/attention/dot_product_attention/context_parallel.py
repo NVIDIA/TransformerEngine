@@ -3180,7 +3180,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         fp8_meta_kwargs = {}
         if fp8:
             assert use_fused_attention, "FP8 is only supported with FusedAttention backend!"
-            fused_attn_backend = tex.NVTE_Fused_Attn_Backend.NVTE_FP8
+            fused_attn_backend = FusedAttnBackend["FP8"]
             if not is_input_fp8 and not fp8_recipe.mxfp8():
                 q_fp8, k_fp8, v_fp8, qkv_layout, _ = combine_and_quantize(
                     qkv_layout, q, k, v, QKV_quantizer
@@ -3190,7 +3190,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
             fp8_meta_kwargs["s_quantizer"] = S_quantizer
             fp8_meta_kwargs["o_quantizer"] = O_quantizer
         elif use_fused_attention:
-            fused_attn_backend = tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen
+            fused_attn_backend = FusedAttnBackend["F16_arbitrary_seqlen"]
         orig_q_shape, _, orig_v_shape = q.shape, k.shape, v.shape
         orig_o_shape = orig_q_shape[:-1] + orig_v_shape[-1:]
 
@@ -3901,14 +3901,14 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                             softmax_lse_per_step[i],
                             rng_states[i],
                         ]
-                        fused_attn_backend = tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen
+                        fused_attn_backend = FusedAttnBackend["F16_arbitrary_seqlen"]
                         fp8_meta_kwargs = {}
                         new_qkv_layout = ctx.qkv_layout
                         do_format = ctx.o_format
                         qkv_scale_inv_format = None
                         do_scale_inv_format = None
                         if ctx.fp8:
-                            fused_attn_backend = tex.NVTE_Fused_Attn_Backend.NVTE_FP8
+                            fused_attn_backend = FusedAttnBackend["FP8"]
                             fp8_meta_kwargs["s_quantizer"] = ctx.S_quantizer
                             fp8_meta_kwargs["dp_quantizer"] = ctx.dP_quantizer
                             fp8_meta_kwargs["dqkv_quantizer"] = ctx.dQKV_quantizer
