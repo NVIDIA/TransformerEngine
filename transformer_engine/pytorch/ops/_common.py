@@ -116,26 +116,57 @@ def prepare_prequantized_mxfp8_input_for_gemm(
     *,
     with_columnwise: bool,
     with_dbias: bool = False,
+    with_dequantized: bool = False,
     tensor_offsets: Optional[torch.Tensor] = None,
 ) -> tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
     """Make an already-quantized MXFP8 grouped input GEMM-ready (in place).
 
-    For inputs that arrive rowwise-quantized (e.g. FP8 token dispatch). On return
-    the rowwise scales are GEMM-swizzled; columnwise data/scales are populated iff
-    ``with_columnwise``, manufactured by dequantize + columnwise-only requantize
-    since the two directions scale along perpendicular axes.
+    For inputs that arrive rowwise-quantized (e.g. FP8 token dispatch), where the
+    high-precision tensor no longer exists. The rowwise data feeds the GEMM as-is
+    and its scales are swizzled; the columnwise copy cannot be derived from it
+    (the two directions scale along perpendicular axes) so it is manufactured by
+    dequantize + columnwise-only requantize.
 
-    Returns ``(dbias, dequantized)``. ``dbias`` is the per-group bias gradient,
-    produced only when ``with_dbias``: the grouped quantize kernel accumulates it
-    in the columnwise stage it is already running, so it costs no extra pass.
-    ``dequantized`` is the high-precision tensor materialized for the requantize
-    (``None`` if none was needed), for callers that cannot use the fused dbias
-    (e.g. ``scale_bias``, whose dbias/dscales depend on routing probabilities).
-
-    Requires rowwise-only input with unswizzled scales and per-group token counts
-    that are multiples of 128 (caller contract: ``split_sizes`` is on device).
+    The input must be rowwise-only with unswizzled scales, and each group's token
+    count must be a multiple of 128 so per-group scales start on a swizzle-tile
+    boundary.
 
     TODO: optimize and fuse the round-trips requant
+
+    Parameters
+    ----------
+    grouped_x : GroupedTensorStorage
+        Rowwise-quantized input, updated in place.
+    quantizer : MXFP8Quantizer
+        The op's input quantizer. Supplies the FP8 dtype for the columnwise copy.
+    num_groups : int
+        Number of groups.
+    split_sizes : torch.Tensor
+        Per-group row counts, on device.
+    dtype : torch.dtype
+        High-precision dtype to dequantize to.
+    with_columnwise : bool
+        Whether to build the columnwise copy that the wgrad GEMM consumes.
+    with_dbias : bool, default = ``False``
+        Whether to also produce the per-group bias gradient. The quantize kernel
+        accumulates it in the columnwise stage it is already running, so this
+        costs no extra pass but requires ``with_columnwise``.
+    with_dequantized : bool, default = ``False``
+        Whether to dequantize even when no columnwise copy is needed. It must be
+        requested here rather than recovered later, since the rowwise scales are
+        swizzled before returning and dequantization requires unswizzled ones.
+    tensor_offsets : torch.Tensor, optional
+        Per-group element offsets for the columnwise requantize.
+
+    Returns
+    -------
+    torch.Tensor or None
+        Per-group bias gradient, when ``with_dbias``.
+    torch.Tensor or None
+        Dequantized input, when it was materialized (``with_columnwise``, where it
+        is a byproduct, or ``with_dequantized``). Used by callers that cannot use
+        the fused ``dbias``, e.g. ``scale_bias``, whose dbias/dscales depend on
+        the routing probabilities.
     """
     if grouped_x.rowwise_data is None:
         raise ValueError("Pre-quantized MXFP8 grouped input is missing rowwise data.")
@@ -169,10 +200,11 @@ def prepare_prequantized_mxfp8_input_for_gemm(
     # wire data and requantize columnwise-only.
     dbias = None
     dequantized = None
-    if with_columnwise:
+    if with_columnwise or with_dequantized:
         dequantized = tex.group_dequantize(grouped_x, TE_DType[dtype]).rowwise_data.view(
             grouped_x.logical_shape
         )
+    if with_columnwise:
         colwise_quantizer = quantizer.copy()
         colwise_quantizer.set_usage(rowwise=False, columnwise=True)
         colwise_quantizer.optimize_for_gemm = True

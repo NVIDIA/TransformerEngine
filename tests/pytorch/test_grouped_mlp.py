@@ -1342,6 +1342,7 @@ class TestGroupedMLPFusedOp:
             torch.testing.assert_close(wgrad_test, wgrad_ref, rtol=0, atol=0)
 
     @pytest.mark.parametrize("bias", (False, True))
+    @pytest.mark.parametrize("weight_requires_grad", (False, True))
     def test_grouped_mlp_prequantized_mxfp8_grad(
         self,
         *,
@@ -1351,6 +1352,7 @@ class TestGroupedMLPFusedOp:
         dtype: torch.dtype = torch.bfloat16,
         device: torch.device = "cuda",
         bias: bool,
+        weight_requires_grad: bool,
     ) -> None:
         """Fused grouped MLP with a rowwise-only MXFP8 GroupedTensor grad output.
 
@@ -1362,6 +1364,11 @@ class TestGroupedMLPFusedOp:
             pytest.skip(reason_for_no_mxfp8)
         if not te.ops.fused.GroupedMLP_CuTeGEMMGLU.is_supported():
             pytest.skip("Fused grouped MLP (CuTeDSL) is not supported on this system")
+        if not weight_requires_grad:
+            # Independent of pre-quantization: the fused forward saves the input
+            # activations whenever anything requires grad, then asserts they carry
+            # columnwise data -- which is only built when the weights need grads.
+            pytest.skip("Fused grouped MLP does not support frozen weights")
         maybe_skip_quantization(
             "mxfp8", dims=(hidden_size, hidden_size), device=device, dtype=dtype
         )
@@ -1401,6 +1408,13 @@ class TestGroupedMLPFusedOp:
                 fc1, te.ops.ScaledSwiGLU(glu_interleave_size=glu_interleave_size), fc2
             )
 
+        # Frozen experts (weights) with a still-training bias/router is the case
+        # where the dequantized grad is needed but is not a byproduct of wgrad.
+        if not weight_requires_grad:
+            for fc in (fc1, fc2):
+                for group_idx in range(group_size):
+                    getattr(fc, f"weight{group_idx}").requires_grad_(False)
+
         def _run(grad):
             x_in = x.detach().clone().requires_grad_()
             fc2_extra = (split_sizes, probs) if bias else (split_sizes,)
@@ -1410,9 +1424,10 @@ class TestGroupedMLPFusedOp:
             grads = [("dx", x_in.grad)]
             for name, fc in (("fc1", fc1), ("fc2", fc2)):
                 for group_idx in range(group_size):
-                    weight = getattr(fc, f"weight{group_idx}")
-                    grads.append((f"{name}_w{group_idx}", weight.grad.detach().clone()))
-                    weight.grad = None
+                    if weight_requires_grad:
+                        weight = getattr(fc, f"weight{group_idx}")
+                        grads.append((f"{name}_w{group_idx}", weight.grad.detach().clone()))
+                        weight.grad = None
                     if bias:
                         bias_param = getattr(fc, f"bias{group_idx}")
                         grads.append((f"{name}_b{group_idx}", bias_param.grad.detach().clone()))

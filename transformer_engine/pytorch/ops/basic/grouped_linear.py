@@ -1748,19 +1748,12 @@ class GroupedLinear(BasicOperation):
                     dtype,
                     with_columnwise=ctx.weight_requires_grad,
                     with_dbias=has_bias and not self._scale_bias,
+                    with_dequantized=has_bias and self._scale_bias,
                     tensor_offsets=base_split_offsets * self.out_features,
                 )
-                if has_bias and self._scale_bias:
-                    if dy_2d is None:
-                        # dbias/dscales below need the dequantized grad, which is
-                        # only materialized when the columnwise copy is built.
-                        raise NotImplementedError(
-                            "Pre-quantized MXFP8 grad output with scale_bias requires "
-                            "weight gradients."
-                        )
-                else:
-                    # Nothing else reads the dequantized grad; drop it so the buffer
-                    # is freed instead of living until backward ends.
+                if not (has_bias and self._scale_bias):
+                    # Only scale_bias reads the dequantized grad; drop it so the
+                    # buffer is freed instead of living until backward ends.
                     dy_2d = None
             elif has_bias and not self._scale_bias and fuse_bgrad:
                 grouped_dy, dbias_packed = tex.bgrad_group_quantize(

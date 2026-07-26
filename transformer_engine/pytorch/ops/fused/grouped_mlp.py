@@ -1687,18 +1687,11 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                     dtype,
                     with_columnwise=fc2_ctx.weight_requires_grad,
                     with_dbias=output_fc2_dbias and not scale_bias,
+                    with_dequantized=scale_bias,
                     tensor_offsets=base_split_offsets * fc2_weight_shape[0],
                 )
-                if scale_bias:
-                    if fc2_dy is None:
-                        # dbias/dscales below need the dequantized grad, which is
-                        # only materialized when the columnwise copy is built.
-                        raise NotImplementedError(
-                            "Pre-quantized MXFP8 grad output with scale_bias requires "
-                            "FC2 weight gradients."
-                        )
-                else:
-                    # Nothing else reads the dequantized grad; drop it so the
+                if not scale_bias:
+                    # Only scale_bias reads the dequantized grad; drop it so the
                     # buffer is freed instead of living until backward ends.
                     fc2_dy = None
             else:
