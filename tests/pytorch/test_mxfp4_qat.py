@@ -23,6 +23,7 @@ from transformer_engine.common.recipe import (
 )
 from transformer_engine.pytorch import fp8_autocast
 from transformer_engine.pytorch.mxfp4_qat import mxfp4_fake_quantize
+from references.mxfp4_qat_reference import mxfp4_fake_quantize_reference
 from transformer_engine.pytorch.tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
 
@@ -136,18 +137,13 @@ def test_E_mxfp8_rowwise_lossless():
             raw_dq, wh32
         ), f"RAW MXFP8 encoding of the MXFP4-grid weight is not lossless {m}x{n}"
 
-        flushed = wh32.abs() == 2.0**-127
-        assert flushed.any() and not flushed.all(), "artifact case not exercised"
         assert torch.equal(
-            dq[~flushed], wh32[~flushed]
+            dq, wh32
         ), f"MXFP8 rowwise encoding of the MXFP4-grid weight is not lossless {m}x{n}"
-        if not (dq[flushed] == 0).all():
-            assert torch.equal(dq, wh32), "dequant neither flushed nor exact?"
-            print("  NOTE: TE software dequant now handles UE8M0 code 0 -> fully exact")
 
 
 def test_dequantize_e8m0_extreme_codes():
-    """Real MXFP8 software dequantize with planted UE8M0 codes 0/255; auto-detects pre-fix wheel vs fixed build."""
+    """Real MXFP8 software dequantize with planted UE8M0 codes 0/255."""
     w = make_weight(32, 64)
     q = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3, columnwise=False).quantize(
         mxfp4_fake_quantize(w)
@@ -159,12 +155,8 @@ def test_dequantize_e8m0_extreme_codes():
     data[1, :32] = 56
     codes[1, 0] = 255
     dq = q.dequantize(dtype=torch.float32)
-    if (dq[0, :32] == 2.0**-127).all() and torch.isnan(dq[1, :32]).all():
-        print("  fixed build: code 0 -> 2^-127, code 255 -> NaN")
-    else:
-        assert (dq[0, :32] == 0).all(), "code 0 neither 2^-127 (fixed) nor 0 (pre-fix)"
-        assert torch.isinf(dq[1, :32]).all(), "code 255 neither NaN (fixed) nor Inf (pre-fix)"
-        print("  pre-fix wheel: code 0 flushed to 0, code 255 -> Inf (rebuild pending)")
+    assert (dq[0, :32] == 2.0**-127).all(), "UE8M0 code 0 must dequantize to 2^-127"
+    assert torch.isnan(dq[1, :32]).all(), "UE8M0 code 255 must dequantize to NaN"
 
 
 def test_G_blockwise_lossless_and_transpose():
@@ -198,14 +190,7 @@ def test_lossless_dequant_to_bf16():
 
         q8 = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3, columnwise=False).quantize(w_hat)
         dq8 = q8.dequantize(dtype=torch.bfloat16)
-        flushed = w_hat.to(torch.float32).abs() == 2.0**-127
-        assert flushed.any(), "artifact case not exercised"
-        assert torch.equal(
-            dq8[~flushed], w_hat[~flushed]
-        ), f"mxfp8 rowwise dequant to bf16 not lossless {m}x{n}"
-        if not (dq8[flushed] == 0).all():
-            assert torch.equal(dq8, w_hat), "dequant neither flushed nor exact?"
-            print("  NOTE: TE software dequant now handles UE8M0 code 0 -> fully exact")
+        assert torch.equal(dq8, w_hat), f"mxfp8 rowwise dequant to bf16 not lossless {m}x{n}"
 
         w2_hat = mxfp4_fake_quantize(make_weight(m, n, zero_blocks=4))
         qb = Float8BlockQuantizer(
@@ -296,10 +281,8 @@ torch::Tensor mxfp4_fake_quantize_intree(torch::Tensor w) {
 
 
 def _both_paths(w):
-    import transformer_engine.pytorch.mxfp4_qat as M
-
     got_kernel = _intree_kernel().mxfp4_fake_quantize_intree(w.contiguous())
-    got_torch = M._mxfp4_fake_quantize_torch(w)
+    got_torch = mxfp4_fake_quantize_reference(w)
     return got_kernel, got_torch
 
 
@@ -425,14 +408,12 @@ def test_kernel_perf():
     if not RUN_PERF:
         print("  SKIP (set NVTE_MXFP4_QAT_PERF=1 to run benchmarks)")
         return
-    import transformer_engine.pytorch.mxfp4_qat as M
-
     rows, cols = 8192, 8192
     w = make_weight(rows, cols)
     k = _intree_kernel()
     for _ in range(3):
         k.mxfp4_fake_quantize_intree(w)
-        M._mxfp4_fake_quantize_torch(w)
+        mxfp4_fake_quantize_reference(w)
     torch.cuda.synchronize()
 
     def timeit(fn, iters=20):
@@ -445,7 +426,7 @@ def test_kernel_perf():
         return start.elapsed_time(end) / iters * 1e3
 
     t_kernel = timeit(lambda: k.mxfp4_fake_quantize_intree(w))
-    t_torch = timeit(lambda: M._mxfp4_fake_quantize_torch(w))
+    t_torch = timeit(lambda: mxfp4_fake_quantize_reference(w))
     moved = rows * cols * 2 * 2
     print(
         f"  kernel: {t_kernel:.1f} us ({moved / t_kernel / 1e3:.0f} GB/s), "
@@ -454,73 +435,14 @@ def test_kernel_perf():
     assert t_kernel < t_torch, "kernel slower than the torch reference"
 
 
-def test_cute_dsl_version():
-    try:
-        from transformer_engine.pytorch.mxfp4_qat_cute_dsl import mxfp4_fake_quantize_cute_dsl
-    except Exception as e:
-        print(f"  SKIP (cutlass DSL unavailable: {type(e).__name__}: {e})")
-        return
-    import transformer_engine.pytorch.mxfp4_qat as M
-
-    for m, n in SHAPES:
-        for dtype in (torch.bfloat16, torch.float32):
-            w = make_weight(m, n, dtype=dtype, zero_blocks=4, outliers=4)
-            gd = mxfp4_fake_quantize_cute_dsl(w)
-            gt = M._mxfp4_fake_quantize_torch(w)
-            _assert_bits_equal(gd, gt, f"cute-dsl != torch ref {m}x{n} {dtype}")
-
-    w = make_weight(64, 128)
-    w[0, :32] = 0.0
-    w[1, 5] = float("inf")
-    w[2, 9] = float("nan")
-    w[3, :32] = torch.tensor(2.0**-133, dtype=torch.bfloat16)
-    w[4, :32] = torch.tensor(3.0e38, dtype=torch.bfloat16)
-    w[5, :32] = torch.tensor(2.0**-127, dtype=torch.bfloat16)
-    gd = mxfp4_fake_quantize_cute_dsl(w)
-    gt = M._mxfp4_fake_quantize_torch(w)
-    _assert_same_with_nan(gd, gt, "cute-dsl edge")
-    assert (gd[5, :32].to(torch.float32) == 2.0**-127).all(), "cute-dsl: 2^-127 lost"
-
-    if not RUN_PERF:
-        print("  parity OK; SKIP perf (set NVTE_MXFP4_QAT_PERF=1)")
-        return
-
-    rows, cols = 8192, 8192
-    wb = make_weight(rows, cols)
-    k = _intree_kernel()
-    for _ in range(3):
-        mxfp4_fake_quantize_cute_dsl(wb)
-        k.mxfp4_fake_quantize_intree(wb)
-    torch.cuda.synchronize()
-
-    def timeit(fn, iters=20):
-        start, end = torch.cuda.Event(True), torch.cuda.Event(True)
-        start.record()
-        for _ in range(iters):
-            fn()
-        end.record()
-        torch.cuda.synchronize()
-        return start.elapsed_time(end) / iters * 1e3
-
-    t_dsl = timeit(lambda: mxfp4_fake_quantize_cute_dsl(wb))
-    t_cuda = timeit(lambda: k.mxfp4_fake_quantize_intree(wb))
-    moved = rows * cols * 2 * 2
-    print(
-        f"  cute-dsl: {t_dsl:.1f} us ({moved / t_dsl / 1e3:.0f} GB/s), "
-        f"cuda kernel: {t_cuda:.1f} us ({moved / t_cuda / 1e3:.0f} GB/s)"
-    )
-
-
 def test_kernel_fast_math_immune():
     """The kernel stays bit-identical when compiled with --use_fast_math."""
-    import transformer_engine.pytorch.mxfp4_qat as M
-
     k = _intree_kernel(fast_math=True)
     for m, n in PARITY_SHAPES:
         for dtype in (torch.bfloat16, torch.float32):
             w = make_weight(m, n, dtype=dtype, zero_blocks=4, outliers=4)
             got = k.mxfp4_fake_quantize_intree(w.contiguous())
-            ref = M._mxfp4_fake_quantize_torch(w)
+            ref = mxfp4_fake_quantize_reference(w)
             _assert_bits_equal(got, ref, f"fast-math build diverged {m}x{n} {dtype}")
 
     w = make_weight(64, 128)
@@ -531,7 +453,7 @@ def test_kernel_fast_math_immune():
     w[4, :32] = torch.tensor(3.0e38, dtype=torch.bfloat16)
     w[5, :32] = torch.tensor(2.0**-127, dtype=torch.bfloat16)
     got = k.mxfp4_fake_quantize_intree(w.contiguous())
-    ref = M._mxfp4_fake_quantize_torch(w)
+    ref = mxfp4_fake_quantize_reference(w)
     _assert_same_with_nan(got, ref, "fast-math edge")
     assert (
         got[5, :32].to(torch.float32) == 2.0**-127
@@ -603,32 +525,18 @@ def test_exp2f_e8m0_all_codes():
 
 
 def test_ste_identity_gradient():
-    """mxfp4_fake_quantize carries an identity (STE) gradient on both implementation paths."""
-    import transformer_engine.pytorch.mxfp4_qat as M
-
+    """mxfp4_fake_quantize carries an identity (STE) gradient and matches the reference forward."""
     for dtype in (torch.bfloat16, torch.float32):
         w = make_weight(64, 128, dtype=dtype).requires_grad_(True)
         up = torch.randn_like(w)
         out = mxfp4_fake_quantize(w)
         out.backward(up)
         assert torch.equal(w.grad, up), f"STE gradient is not identity ({dtype})"
-
-        w2 = w.detach().clone().requires_grad_(True)
-        old = M._torch_path_forced
-        M._torch_path_forced = True
-        try:
-            out2 = mxfp4_fake_quantize(w2)
-            out2.backward(up)
-        finally:
-            M._torch_path_forced = old
-        assert torch.equal(w2.grad, up), f"torch-path STE gradient is not identity ({dtype})"
-        _assert_bits_equal(out.detach(), out2.detach(), "STE fwd parity")
+        _assert_bits_equal(out.detach(), mxfp4_fake_quantize_reference(w.detach()), "STE fwd")
 
 
 def test_misaligned_and_noncontiguous():
     """Misaligned storage-offset views and non-contiguous inputs match an aligned copy bitwise."""
-    import transformer_engine.pytorch.mxfp4_qat as M
-
     for dtype, off in ((torch.bfloat16, 4), (torch.float32, 2)):
         m, n = 64, 128
         flat = (torch.randn(m * n + off, device=DEV, dtype=torch.float32) * 0.02).to(dtype)
@@ -640,8 +548,8 @@ def test_misaligned_and_noncontiguous():
 
     nc = (torch.randn(64, 256, device=DEV, dtype=torch.float32) * 0.02)[:, ::2]
     assert not nc.is_contiguous()
-    got = M._mxfp4_fake_quantize_torch(nc)
-    assert torch.equal(got, M._mxfp4_fake_quantize_torch(nc.contiguous()))
+    got = mxfp4_fake_quantize_reference(nc)
+    assert torch.equal(got, mxfp4_fake_quantize_reference(nc.contiguous()))
 
 
 def test_bf16_exhaustive_bit_patterns():
@@ -792,8 +700,8 @@ def test_fp16_pipeline_rejected():
             pass
 
 
-def test_fourway_matrix():
-    """TileKernels vs CuTe DSL vs CUDA vs torch, bitwise, over all edge domains and every quant/dequant hop."""
+def test_cross_impl_matrix():
+    """TileKernels vs CUDA kernel vs torch reference, bitwise, over all edge domains and every quant/dequant hop."""
     import sys
 
     tk_root = os.environ.get(
@@ -810,17 +718,8 @@ def test_fourway_matrix():
     except Exception as e:
         print(f"  SKIP (tile_kernels unavailable: {type(e).__name__}: {e})")
         return
-    try:
-        from transformer_engine.pytorch.mxfp4_qat_cute_dsl import (
-            mxfp4_fake_quantize_cute_dsl as dsl,
-        )
-    except Exception as e:
-        print(f"  SKIP (cute dsl unavailable: {type(e).__name__}: {e})")
-        return
-    import transformer_engine.pytorch.mxfp4_qat as M
-
     kern = _intree_kernel().mxfp4_fake_quantize_intree
-    tref = M._mxfp4_fake_quantize_torch
+    tref = mxfp4_fake_quantize_reference
     CAP = 6.0 * 2.0**125
 
     def tk_roundtrip(x, block, fmt):
@@ -845,11 +744,10 @@ def test_fourway_matrix():
     for W in (w, w.to(torch.float32)):
         t = tref(W)
         _assert_bits_equal(kern(W.contiguous()), t, "fake-quant CUDA vs torch")
-        _assert_bits_equal(dsl(W), t, "fake-quant DSL vs torch")
         tk32, tkb16 = tk_roundtrip(W, (1, 32), "e2m1")
         _assert_bits_equal(tk32, t.to(torch.float32), "fake-quant TK vs torch (fp32)")
         _assert_bits_equal(tkb16, t.to(torch.bfloat16), "fake-quant TK vs torch (bf16)")
-    print("  fake-quant 4-way bitwise: PASS (bf16 + fp32 corpus)")
+    print("  fake-quant 3-way bitwise: PASS (bf16 + fp32 corpus)")
 
     wnf = w.clone()
     wnf[8, 40] = float("inf")
@@ -857,17 +755,15 @@ def test_fourway_matrix():
     wnf[10, 5] = float("nan")
     t = tref(wnf)
     _assert_same_with_nan(kern(wnf.contiguous()), t, "nonfinite CUDA")
-    _assert_same_with_nan(dsl(wnf), t, "nonfinite DSL")
     assert torch.isnan(t[8, 32:64]).all() and torch.isnan(t[9, 32:64]).all()
     assert torch.isnan(t[10, :32]).all() and torch.isfinite(t[11].to(torch.float32)).all()
-    print("  nonfinite 3-way (whole-block NaN poisoning): PASS (TK policy differs, excluded)")
+    print("  nonfinite 2-way (whole-block NaN poisoning): PASS (TK policy differs, excluded)")
 
     wcap = torch.zeros(1, 32, dtype=torch.bfloat16, device=DEV)
     wcap[0, 0] = torch.tensor(3.2e38, dtype=torch.bfloat16)
     t = tref(wcap)
     assert t[0, 0].item() == CAP, "satfinite cap at 6*2^125"
     _assert_bits_equal(kern(wcap.contiguous()), t, "cap CUDA")
-    _assert_bits_equal(dsl(wcap), t, "cap DSL")
     tk32, _ = tk_roundtrip(wcap, (1, 32), "e2m1")
     assert not torch.equal(tk32, t.to(torch.float32)), "TK must diverge above 6*2^125"
     print(
@@ -899,15 +795,11 @@ def test_fourway_matrix():
     assert (tk32[~okm] == 0).all(), "TK e4m3 sub-floor blocks must flush to zero"
     assert (~ok).sum() > 0, "TK e4m3 floor case not exercised"
     dq = q.dequantize(dtype=torch.float32)
-    flushed = wh32.abs() == 2.0**-127
-    assert torch.equal(dq[~flushed], wh32[~flushed]), "mxfp8 row TE software dequant"
-    if flushed.any() and not (dq[flushed] == 0).all():
-        assert torch.equal(dq, wh32)
-        print("  NOTE: TE software dequant now handles UE8M0 code 0 -> fully exact")
+    assert torch.equal(dq, wh32), "mxfp8 row TE software dequant"
     print(
         "  mxfp8 row: TE raw encode lossless incl 2^-127; TK roundtrip bitwise on "
         f"amax >= {e4m3_floor:g} blocks ({int((~ok).sum())} sub-floor blocks flush in TK "
-        "e4m3, a TK-only floor); TE software dequant exact outside the code-0 wheel bug: PASS"
+        "e4m3, a TK-only floor); TE software dequant exact incl 2^-127: PASS"
     )
 
     q.update_usage(rowwise_usage=False, columnwise_usage=True)
@@ -959,13 +851,12 @@ def test_fourway_matrix():
     we = bits.view(torch.bfloat16).view(2048, 32)
     t = tref(we)
     _assert_same_with_nan(kern(we.contiguous()), t, "exhaustive CUDA")
-    _assert_same_with_nan(dsl(we), t, "exhaustive DSL")
     we32 = we.to(torch.float32)
     ok_rows = torch.isfinite(we32).all(dim=-1) & (we32.abs().amax(dim=-1) <= CAP)
     tk32, _ = tk_roundtrip(we[ok_rows], (1, 32), "e2m1")
     _assert_bits_equal(tk32, t[ok_rows].to(torch.float32), "exhaustive TK")
     print(
-        "  bf16 exhaustive 65536 patterns: CUDA/DSL/torch 3-way full, "
+        "  bf16 exhaustive 65536 patterns: CUDA/torch full, "
         f"TK on {int(ok_rows.sum())}/2048 finite below-cap rows, bitwise: PASS"
     )
 
@@ -974,13 +865,12 @@ def test_fourway_matrix():
     wf = fb.to(torch.int32).cuda().view(torch.float32)
     t = tref(wf)
     _assert_same_with_nan(kern(wf.contiguous()), t, "fuzz CUDA")
-    _assert_same_with_nan(dsl(wf), t, "fuzz DSL")
     ok_rows = torch.isfinite(wf).all(dim=-1) & (wf.abs().amax(dim=-1) <= CAP)
     if ok_rows.any():
         tk32, _ = tk_roundtrip(wf[ok_rows], (1, 32), "e2m1")
         _assert_bits_equal(tk32, t[ok_rows], "fuzz TK")
     print(
-        f"  fp32 bit-fuzz 512 blocks: 3-way full, TK on {int(ok_rows.sum())} "
+        f"  fp32 bit-fuzz 512 blocks: CUDA/torch full, TK on {int(ok_rows.sum())} "
         "finite below-cap rows, bitwise: PASS"
     )
 
@@ -1195,10 +1085,9 @@ TESTS = [
     test_recipe_field_controls_qat,
     test_ops_api_rejected,
     test_fp16_pipeline_rejected,
-    test_fourway_matrix,
+    test_cross_impl_matrix,
     test_kernel_perf,
     test_kernel_fast_math_immune,
-    test_cute_dsl_version,
     test_e2e_matrix,
 ]
 
