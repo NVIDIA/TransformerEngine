@@ -76,19 +76,18 @@ inline EventCounters &counters(bool is_fwd) {
 inline void print_counters(const char *event) {
   const EventCounters &f = counters(/*is_fwd=*/true);
   const EventCounters &b = counters(/*is_fwd=*/false);
-  std::fprintf(
-      stderr,
-      "[FUSED-ATTN-CACHE] %-10s | tid=%u | fwd built=%llu exec=%llu hit=%llu miss=%llu | "
-      "bwd built=%llu exec=%llu hit=%llu miss=%llu\n",
-      event, thread_seq_id(),
-      static_cast<unsigned long long>(f.built.load(std::memory_order_relaxed)),
-      static_cast<unsigned long long>(f.exec.load(std::memory_order_relaxed)),
-      static_cast<unsigned long long>(f.hit.load(std::memory_order_relaxed)),
-      static_cast<unsigned long long>(f.miss.load(std::memory_order_relaxed)),
-      static_cast<unsigned long long>(b.built.load(std::memory_order_relaxed)),
-      static_cast<unsigned long long>(b.exec.load(std::memory_order_relaxed)),
-      static_cast<unsigned long long>(b.hit.load(std::memory_order_relaxed)),
-      static_cast<unsigned long long>(b.miss.load(std::memory_order_relaxed)));
+  std::fprintf(stderr,
+               "[FUSED-ATTN-CACHE] %-10s | tid=%u | fwd built=%llu exec=%llu hit=%llu miss=%llu | "
+               "bwd built=%llu exec=%llu hit=%llu miss=%llu\n",
+               event, thread_seq_id(),
+               static_cast<unsigned long long>(f.built.load(std::memory_order_relaxed)),
+               static_cast<unsigned long long>(f.exec.load(std::memory_order_relaxed)),
+               static_cast<unsigned long long>(f.hit.load(std::memory_order_relaxed)),
+               static_cast<unsigned long long>(f.miss.load(std::memory_order_relaxed)),
+               static_cast<unsigned long long>(b.built.load(std::memory_order_relaxed)),
+               static_cast<unsigned long long>(b.exec.load(std::memory_order_relaxed)),
+               static_cast<unsigned long long>(b.hit.load(std::memory_order_relaxed)),
+               static_cast<unsigned long long>(b.miss.load(std::memory_order_relaxed)));
   std::fflush(stderr);
 }
 
@@ -138,7 +137,8 @@ inline void record_cache_lookup(const char *pass, bool hit, const FusedAttnConfi
       static_cast<long long>(c.head_dim_qk), static_cast<long long>(c.head_dim_v),
       static_cast<long long>(c.max_seqlen_q), static_cast<long long>(c.max_seqlen_kv),
       static_cast<long long>(c.num_tokens_q), static_cast<long long>(c.num_tokens_kv),
-      static_cast<long long>(c.bucketed_batch_size), static_cast<long long>(c.bucketed_num_tokens_q),
+      static_cast<long long>(c.bucketed_batch_size),
+      static_cast<long long>(c.bucketed_num_tokens_q),
       static_cast<long long>(c.bucketed_num_tokens_kv), static_cast<long long>(c.num_pages_k),
       static_cast<long long>(c.num_pages_v), static_cast<long long>(c.page_size_k),
       static_cast<long long>(c.page_size_v), static_cast<long long>(c.max_pages_per_seq_k),
@@ -155,9 +155,8 @@ inline void record_cache_lookup(const char *pass, bool hit, const FusedAttnConfi
 // ============================================================================
 
 enum class BuildStage { Validate, BuildOpGraph, CreatePlans, CheckSupport, BuildPlans, kCount };
-inline constexpr const char *kStageNames[] = {"validate", "build_operation_graph",
-                                              "create_execution_plans", "check_support",
-                                              "build_plans"};
+inline constexpr const char *kStageNames[] = {
+    "validate", "build_operation_graph", "create_execution_plans", "check_support", "build_plans"};
 struct StageTiming {
   std::atomic<uint64_t> calls{0};
   std::atomic<uint64_t> time_ns{0};
@@ -182,10 +181,10 @@ struct ScopedBuildTimer {
   }
   ~ScopedBuildTimer() {
     if (!on) return;
-    const uint64_t elapsed_ns = static_cast<uint64_t>(
-        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() -
-                                                             start)
-            .count());
+    const uint64_t elapsed_ns =
+        static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                  std::chrono::steady_clock::now() - start)
+                                  .count());
     StageTiming &t = stage_timing(is_fwd, stage);
     t.time_ns.fetch_add(elapsed_ns, std::memory_order_relaxed);
     t.calls.fetch_add(1, std::memory_order_relaxed);
@@ -216,10 +215,10 @@ inline void register_summary_once() {
           if (n == 0) continue;
           const double total_ms =
               static_cast<double>(t.time_ns.load(std::memory_order_relaxed)) / 1e6;
-          std::fprintf(stderr,
-                       "[FUSED-ATTN-CACHE] %-3s %-22s | calls=%llu | time=%9.1f ms | avg=%9.3f ms/call\n",
-                       pass, kStageNames[i], static_cast<unsigned long long>(n), total_ms,
-                       total_ms / n);
+          std::fprintf(
+              stderr,
+              "[FUSED-ATTN-CACHE] %-3s %-22s | calls=%llu | time=%9.1f ms | avg=%9.3f ms/call\n",
+              pass, kStageNames[i], static_cast<unsigned long long>(n), total_ms, total_ms / n);
         }
       }
       std::fflush(stderr);

@@ -396,17 +396,17 @@ void fused_attn_fp8_fwd_impl(const FusedAttnConfig& cfg, void* devPtrQ, void* de
                                       : std::make_tuple(nullptr, nullptr);
 
       graph_cache_debug::timer("fwd", graph_cache_debug::BuildStage::Validate,
-                                    [&] { NVTE_CHECK_CUDNN_FE(mha_graph->validate()); });
-      graph_cache_debug::timer(
-          "fwd", graph_cache_debug::BuildStage::BuildOpGraph,
-          [&] { NVTE_CHECK_CUDNN_FE(mha_graph->build_operation_graph(handle)); });
-      graph_cache_debug::timer(
-          "fwd", graph_cache_debug::BuildStage::CreatePlans,
-          [&] { NVTE_CHECK_CUDNN_FE(mha_graph->create_execution_plans({fe::HeurMode_t::A})); });
+                               [&] { NVTE_CHECK_CUDNN_FE(mha_graph->validate()); });
+      graph_cache_debug::timer("fwd", graph_cache_debug::BuildStage::BuildOpGraph, [&] {
+        NVTE_CHECK_CUDNN_FE(mha_graph->build_operation_graph(handle));
+      });
+      graph_cache_debug::timer("fwd", graph_cache_debug::BuildStage::CreatePlans, [&] {
+        NVTE_CHECK_CUDNN_FE(mha_graph->create_execution_plans({fe::HeurMode_t::A}));
+      });
       graph_cache_debug::timer("fwd", graph_cache_debug::BuildStage::CheckSupport,
-                                    [&] { NVTE_CHECK_CUDNN_FE(mha_graph->check_support()); });
+                               [&] { NVTE_CHECK_CUDNN_FE(mha_graph->check_support()); });
       graph_cache_debug::timer("fwd", graph_cache_debug::BuildStage::BuildPlans,
-                                    [&] { NVTE_CHECK_CUDNN_FE(mha_graph->build_plans()); });
+                               [&] { NVTE_CHECK_CUDNN_FE(mha_graph->build_plans()); });
       auto return_tuple =
           std::tuple_cat(std::make_tuple(mha_graph), key_tensors_tuple, Stats_tuple, bias_tuple,
                          softmax_offset_tuple, padding_tuple, dropout_tuple);
@@ -1021,17 +1021,17 @@ void fused_attn_fp8_bwd_impl(
                                       : std::make_tuple(nullptr, nullptr);
 
       graph_cache_debug::timer("bwd", graph_cache_debug::BuildStage::Validate,
-                                    [&] { NVTE_CHECK_CUDNN_FE(mha_graph->validate()); });
-      graph_cache_debug::timer(
-          "bwd", graph_cache_debug::BuildStage::BuildOpGraph,
-          [&] { NVTE_CHECK_CUDNN_FE(mha_graph->build_operation_graph(handle)); });
-      graph_cache_debug::timer(
-          "bwd", graph_cache_debug::BuildStage::CreatePlans,
-          [&] { NVTE_CHECK_CUDNN_FE(mha_graph->create_execution_plans({fe::HeurMode_t::A})); });
+                               [&] { NVTE_CHECK_CUDNN_FE(mha_graph->validate()); });
+      graph_cache_debug::timer("bwd", graph_cache_debug::BuildStage::BuildOpGraph, [&] {
+        NVTE_CHECK_CUDNN_FE(mha_graph->build_operation_graph(handle));
+      });
+      graph_cache_debug::timer("bwd", graph_cache_debug::BuildStage::CreatePlans, [&] {
+        NVTE_CHECK_CUDNN_FE(mha_graph->create_execution_plans({fe::HeurMode_t::A}));
+      });
       graph_cache_debug::timer("bwd", graph_cache_debug::BuildStage::CheckSupport,
-                                    [&] { NVTE_CHECK_CUDNN_FE(mha_graph->check_support()); });
+                               [&] { NVTE_CHECK_CUDNN_FE(mha_graph->check_support()); });
       graph_cache_debug::timer("bwd", graph_cache_debug::BuildStage::BuildPlans,
-                                    [&] { NVTE_CHECK_CUDNN_FE(mha_graph->build_plans()); });
+                               [&] { NVTE_CHECK_CUDNN_FE(mha_graph->build_plans()); });
 
       auto return_tuple =
           std::tuple_cat(std::make_tuple(mha_graph), key_tensors_tuple, mxfp8_tensors_tuple,
