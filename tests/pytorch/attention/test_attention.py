@@ -1,6 +1,7 @@
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
+import copy
 import logging
 import os
 import sys
@@ -139,7 +140,7 @@ def test_dot_product_attention(
     tols = dict(atol=1e-3, rtol=1e-3)
     if dtype == torch.bfloat16:
         tols = dict(atol=1.5e-2, rtol=1.5e-2)
-    config = model_configs[model]
+    config = copy.deepcopy(model_configs[model])
     is_mla = config.head_dim_qk != config.head_dim_v
     is_mqa_gqa = config.num_heads != config.num_gqa_groups
     if qkv_layout is None:
@@ -550,6 +551,9 @@ def test_dpa_softmax(dtype, model_configs, model):
 @pytest.mark.parametrize("model", model_configs_softmax.keys())
 def test_dpa_softmax_thd(dtype, model_configs, model):
     """Test DotProductAttention module with different softmax types"""
+    config = model_configs[model]
+    if "padding" not in config.attn_mask_type:
+        pytest.skip(f"Duplicate test to others with THD and padding mask.")
     test_dot_product_attention(dtype, model_configs, model, True, "thd_thd_thd", False, False)
 
 
@@ -820,6 +824,9 @@ model_configs_swa = {
 @pytest.mark.parametrize("qkv_layout", ["thd_thd_thd", "sbhd_sbhd_sbhd"])
 def test_dpa_sliding_window(dtype, model_configs, model, qkv_layout):
     """Test DotProductAttention module with sliding window attention"""
+    config = model_configs[model]
+    if qkv_layout == "thd_thd_thd" and "padding" not in config.attn_mask_type:
+        pytest.skip(f"Duplicate test to others with THD and padding mask.")
     test_dot_product_attention(dtype, model_configs, model, False, qkv_layout, True, False)
 
 
@@ -1985,6 +1992,9 @@ def test_mha_fp8_vs_f16(
     scaling_mode,
 ):
     """Test MultiHeadAttention module in FP8"""
+    if not is_training and fp8_dpa_bwd:
+        pytest.skip("fp8_dpa_bwd=True not applicable for inference")
+
     os.environ["NVTE_FP8_DPA_BWD"] = "1" if fp8_dpa_bwd else "0"
     config = model_configs_fp8_vs_f16[model]
 
@@ -2234,6 +2244,10 @@ def _run_mha_fp8_vs_f16(
 def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training, scaling_mode):
     """Test DotProductAttention module in FP8"""
     config = model_configs_fp8_vs_f16[model]
+    if config.num_heads != config.num_gqa_groups and "3" in qkv_layout:
+        pytest.skip("qkv_layout not applicable for MQA/GQA")
+    if not is_training and fp8_dpa_bwd:
+        pytest.skip("fp8_dpa_bwd=True not applicable for inference")
 
     # TODO(cyang): think of another way to verify dropout results
     # test cuDNN FP8 dropout
@@ -2293,8 +2307,6 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training, scal
         pytest.skip("No FP8 attention backend available.")
     if not fused_attn_supported_f16:
         pytest.skip("No reference backend available.")
-    if config.num_heads != config.num_gqa_groups and "3" in qkv_layout:
-        pytest.skip("qkv_layout not applicable for MQA/GQA")
 
     if flash_attn_supported:
         os.environ["NVTE_FLASH_ATTN"] = "1"
