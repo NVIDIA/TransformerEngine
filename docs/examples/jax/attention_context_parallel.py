@@ -48,24 +48,27 @@ from transformer_engine.jax.sharding import MeshResource
 
 # ATTENTION_CP_INPUTS_START
 cp_size = 4
-batch, seq, num_attention_heads, head_dim = 2, 65536, 128, 128
-runtime_segments_per_seq = 16
+batch, seq, num_query_heads, num_kv_heads, head_dim = 2, 65536, 128, 8, 128
+runtime_segments_per_seq = 4
 max_segments_per_seq = runtime_segments_per_seq
-window_size = (128, 0)
+window_size = (8192, 0)
 dtype = jnp.bfloat16
 timing_iters = 5
 warmup_iters = 2
 ring_stripe_size = 1
-ag_stripe_size = 4096
+ag_stripe_size = 512
 
 
 def create_qkv_inputs(seed: int = 2026):
+    """Create separate THD GQA tensors and an output gradient."""
+
     q_key, k_key, v_key, dout_key = jax.random.split(jax.random.PRNGKey(seed), 4)
-    shape = (batch, seq, num_attention_heads, head_dim)
-    q = jax.random.normal(q_key, shape).astype(dtype)
-    k = jax.random.normal(k_key, shape).astype(dtype)
-    v = jax.random.normal(v_key, shape).astype(dtype)
-    dout = jax.random.normal(dout_key, shape).astype(dtype)
+    q_shape = (batch, seq, num_query_heads, head_dim)
+    kv_shape = (batch, seq, num_kv_heads, head_dim)
+    q = jax.random.normal(q_key, q_shape).astype(dtype)
+    k = jax.random.normal(k_key, kv_shape).astype(dtype)
+    v = jax.random.normal(v_key, kv_shape).astype(dtype)
+    dout = jax.random.normal(dout_key, q_shape).astype(dtype)
     return q, k, v, dout
 
 
@@ -108,6 +111,8 @@ def build_cp_mesh():
 
     devices = np.asarray(jax.devices()[:cp_size])
     mesh = Mesh(devices, axis_names=("cp",))
+    # Also set the corresponding MeshResource fields when other parallelisms
+    # use additional mesh axis names in the surrounding model.
     mesh_resource = MeshResource(cp_resource="cp")
     return mesh, mesh_resource
 
@@ -248,8 +253,8 @@ def context_parallel_supported() -> Tuple[bool, str]:
         AttnMaskType.PADDING_CAUSAL_MASK,
         AttnSoftmaxType.VANILLA_SOFTMAX,
         0.0,
-        num_attention_heads,
-        num_attention_heads,
+        num_query_heads,
+        num_kv_heads,
         seq,
         seq,
         head_dim,
@@ -261,7 +266,17 @@ def context_parallel_supported() -> Tuple[bool, str]:
     return True, ""
 
 
+def _single_gpu_grad_fn():
+    def loss_fn(qkv_arg, seq_desc_arg, dout_arg):
+        out = fused_thd_attention(qkv_arg, seq_desc_arg)
+        return jnp.vdot(out.astype(jnp.float32), dout_arg.astype(jnp.float32))
+
+    return jax.jit(jax.value_and_grad(loss_fn))
+
+
 def run_reference_attention():
+    """Run single-GPU fused attention for CP output comparisons."""
+
     out = fused_thd_attention((q, k, v), sequence_descriptor)
     return jax.block_until_ready(out)
 
@@ -321,7 +336,28 @@ def run_context_parallel_case(strategy: CPStrategy, stripe_size: int):
     return {"loss": loss, "grads": grads, "output": out}
 
 
-def run_context_parallel_bench(strategy: CPStrategy, stripe_size: int):
+def run_single_gpu_bench():
+    grad_fn = _single_gpu_grad_fn()
+
+    print("Single-GPU THD GQA + SWA:")
+    for _ in range(warmup_iters):
+        result = grad_fn((q, k, v), sequence_descriptor, dout)
+    jax.block_until_ready(result)
+
+    start = time.time()
+    for _ in range(timing_iters):
+        result = grad_fn((q, k, v), sequence_descriptor, dout)
+    jax.block_until_ready(result)
+    mean_ms = (time.time() - start) * 1000 / timing_iters
+    print(f"Mean time: {mean_ms} ms")
+    return mean_ms
+
+
+def run_context_parallel_bench(
+    strategy: CPStrategy,
+    stripe_size: int,
+    single_gpu_ms: float | None = None,
+):
     mesh, mesh_resource = build_cp_mesh()
     sharded = shard_for_context_parallel(mesh, stripe_size)
     grad_fn, _ = _context_parallel_jit_fns(strategy, stripe_size, sharded)
@@ -346,7 +382,10 @@ def run_context_parallel_bench(strategy: CPStrategy, stripe_size: int):
         jax.block_until_ready(result)
         end = time.time()
 
-    print(f"Mean time: {(end - start) * 1000 / timing_iters} ms")
+    mean_ms = (end - start) * 1000 / timing_iters
+    print(f"Mean time: {mean_ms} ms")
+    if single_gpu_ms is not None:
+        print(f"Speedup vs single GPU: {single_gpu_ms / mean_ms:.2f}x")
 
 
 # ATTENTION_CP_RUN_END
@@ -357,22 +396,22 @@ if __name__ == "__main__":
     if not supported:
         print(f"skipped context-parallel example: {reason}")
     else:
+        print("# SINGLE_GPU_OUTPUT_START")
+        single_gpu_ms = run_single_gpu_bench()
+        print("# SINGLE_GPU_OUTPUT_END")
+
         print("# RING_OUTPUT_START")
-        run_context_parallel_bench(CPStrategy.RING, ring_stripe_size)
-        ring_result = run_context_parallel_case(CPStrategy.RING, ring_stripe_size)
-        print(
-            "Ring output shape="
-            f"{tuple(ring_result['output'].shape)}, dtype={ring_result['output'].dtype}"
+        run_context_parallel_bench(
+            CPStrategy.RING,
+            ring_stripe_size,
+            single_gpu_ms,
         )
-        print(f"Ring grad shapes={[tuple(grad.shape) for grad in ring_result['grads']]}")
         print("# RING_OUTPUT_END")
 
         print("\n# AG_OUTPUT_START")
-        run_context_parallel_bench(CPStrategy.ALL_GATHER, ag_stripe_size)
-        ag_result = run_context_parallel_case(CPStrategy.ALL_GATHER, ag_stripe_size)
-        print(
-            "AllGather output shape="
-            f"{tuple(ag_result['output'].shape)}, dtype={ag_result['output'].dtype}"
+        run_context_parallel_bench(
+            CPStrategy.ALL_GATHER,
+            ag_stripe_size,
+            single_gpu_ms,
         )
-        print(f"AllGather grad shapes={[tuple(grad.shape) for grad in ag_result['grads']]}")
         print("# AG_OUTPUT_END")

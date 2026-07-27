@@ -88,12 +88,12 @@ def _context_parallel_supported():
         AttnSoftmaxType.VANILLA_SOFTMAX,
         0.0,
         128,
-        128,
+        8,
         65536,
         65536,
         128,
         128,
-        (128, 0),
+        (8192, 0),
     )
     if not has_kernel:
         return False, "no fused attention kernel for the THD SWA shape"
@@ -114,7 +114,7 @@ def _assert_cp_result(cp_attention, strategy, stripe_size):
     assert result["output"].shape == (
         cp_attention.batch,
         cp_attention.seq,
-        cp_attention.num_attention_heads,
+        cp_attention.num_query_heads,
         cp_attention.head_dim,
     )
     assert result["output"].dtype == cp_attention.dtype
@@ -171,11 +171,14 @@ def test_multi_gpu_context_parallel_allgather_case():
 def test_multi_gpu_context_parallel_benchmarks():
     import attention_context_parallel as cp_attention
 
+    single_gpu_ms = cp_attention.run_single_gpu_bench()
     cp_attention.run_context_parallel_bench(
         cp_attention.CPStrategy.RING,
         cp_attention.ring_stripe_size,
+        single_gpu_ms,
     )
     cp_attention.run_context_parallel_bench(
         cp_attention.CPStrategy.ALL_GATHER,
         cp_attention.ag_stripe_size,
+        single_gpu_ms,
     )
