@@ -780,6 +780,10 @@ class TestQuantizedTensor:
         columnwise-only tensor is where the two can drift apart.
         """
         quantizer = make_quantizer(quantization, device=device)
+        # Row-scaled NVFP4 accepts set_usage(rowwise=False) but rejects the
+        # allocation itself, so it has to be filtered out up front.
+        if getattr(quantizer, "row_scaled_nvfp4", False) and not rowwise:
+            pytest.skip(f"{quantization} requires rowwise usage")
         quantizer.set_usage(rowwise=rowwise, columnwise=columnwise)
         if (quantizer.rowwise_usage, quantizer.columnwise_usage) != (rowwise, columnwise):
             pytest.skip(f"{quantization} does not support this usage combination")
