@@ -408,7 +408,6 @@ model_configs_d256 = {
     [
         pytest.param(
             "bshd_bs2hd",
-            id="BSHD_KV_PACKED",
             marks=pytest.mark.skipif(
                 get_cudnn_version() < (9, 23, 0),
                 reason="cuDNN 9.23+ is required for BSHD D=256 fused-attn backward.",
@@ -416,7 +415,6 @@ model_configs_d256 = {
         ),
         pytest.param(
             "thd_t2hd",
-            id="THD_KV_PACKED",
             marks=pytest.mark.skipif(
                 get_cudnn_version() < (9, 25, 0),
                 reason="cuDNN 9.25+ is required for THD D=256 fused-attn backward.",
