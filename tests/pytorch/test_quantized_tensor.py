@@ -757,6 +757,38 @@ class TestQuantizedTensor:
             f"after setting data to None on {type(x_test).__name__}"
         )
 
+    @pytest.mark.parametrize("quantization", _quantization_list)
+    @pytest.mark.parametrize(
+        "rowwise, columnwise",
+        [(True, True), (True, False), (False, True)],
+        ids=["rowwise_columnwise", "rowwise_only", "columnwise_only"],
+    )
+    def test_shape_matches_size(
+        self,
+        *,
+        quantization: str,
+        rowwise: bool,
+        columnwise: bool,
+        shape: Iterable[int] = (128, 256),
+        dtype: torch.dtype = torch.bfloat16,
+        device: torch.device = "cuda",
+    ) -> None:
+        """shape and size() agree with the requested shape for every usage combination.
+
+        Both are fast paths derived from whichever data buffer is present, and
+        classes that store columnwise data transposed have to undo that. A
+        columnwise-only tensor is where the two can drift apart.
+        """
+        quantizer = make_quantizer(quantization, device=device)
+        quantizer.set_usage(rowwise=rowwise, columnwise=columnwise)
+        if (quantizer.rowwise_usage, quantizer.columnwise_usage) != (rowwise, columnwise):
+            pytest.skip(f"{quantization} does not support this usage combination")
+
+        x = quantizer.make_empty(shape, dtype=dtype, device=device)
+
+        assert tuple(x.shape) == tuple(shape), f"{type(x).__name__}.shape is {tuple(x.shape)}"
+        assert tuple(x.size()) == tuple(shape), f"{type(x).__name__}.size() is {tuple(x.size())}"
+
     @pytest.mark.parametrize(
         "quantization",
         _quantization_list + (["nvfp4_2d"] if nvfp4_available else []),

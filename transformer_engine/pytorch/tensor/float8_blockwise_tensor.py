@@ -551,7 +551,9 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorStorage, QuantizedTensor):
         if self._rowwise_data is not None:
             return self._rowwise_data.shape
         if self._columnwise_data is not None:
-            return self._columnwise_data.shape
+            # Columnwise data is stored transposed, matching size() in the storage.
+            dims = list(self._columnwise_data.shape)
+            return torch.Size(dims[1:] + dims[:1])
         return torch.Tensor.size(self)
 
     @property
