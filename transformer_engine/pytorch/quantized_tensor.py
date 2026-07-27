@@ -708,7 +708,7 @@ class QuantizedTensor(torch.Tensor):
 
         # View op
         if func == torch.ops.aten.view.default:
-            raise NotImplementedError("{cls.__name__} class does not support tensor views")
+            raise NotImplementedError(f"{cls.__name__} class does not support tensor views")
 
         # New empty op (used by DCP async staging to create CPU copies)
         if func == torch.ops.aten.new_empty.default:
