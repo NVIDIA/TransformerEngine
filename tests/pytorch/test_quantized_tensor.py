@@ -763,21 +763,23 @@ class TestQuantizedTensor:
         [(True, True), (True, False), (False, True)],
         ids=["rowwise_columnwise", "rowwise_only", "columnwise_only"],
     )
+    @pytest.mark.parametrize("shape", [(128, 256), (4, 128, 256)], ids=["2d", "3d"])
     def test_shape_matches_size(
         self,
         *,
         quantization: str,
         rowwise: bool,
         columnwise: bool,
-        shape: Iterable[int] = (128, 256),
+        shape: Iterable[int],
         dtype: torch.dtype = torch.bfloat16,
         device: torch.device = "cuda",
     ) -> None:
-        """shape and size() agree with the requested shape for every usage combination.
+        """shape, size() and size(dim) stay consistent for every usage combination.
 
-        Both are fast paths derived from whichever data buffer is present, and
-        classes that store columnwise data transposed have to undo that. A
-        columnwise-only tensor is where the two can drift apart.
+        Both shape and size() are derived from whichever data buffer is present,
+        and classes that store columnwise data transposed have to undo that. A
+        columnwise-only tensor is where they can drift apart -- from each other,
+        and from the shape the tensor was allocated with.
         """
         quantizer = make_quantizer(quantization, device=device)
         # Row-scaled NVFP4 accepts set_usage(rowwise=False) but rejects the
@@ -789,9 +791,23 @@ class TestQuantizedTensor:
             pytest.skip(f"{quantization} does not support this usage combination")
 
         x = quantizer.make_empty(shape, dtype=dtype, device=device)
+        name = type(x).__name__
 
-        assert tuple(x.shape) == tuple(shape), f"{type(x).__name__}.shape is {tuple(x.shape)}"
-        assert tuple(x.size()) == tuple(shape), f"{type(x).__name__}.size() is {tuple(x.size())}"
+        # shape and size() must describe the same tensor, whichever buffer they
+        # end up reading.
+        assert tuple(x.shape) == tuple(x.size()), f"{name}: {tuple(x.shape)} vs {tuple(x.size())}"
+
+        # size(dim) must agree with the full shape, including negative indices.
+        # It cannot be served by forwarding dim to a transposed buffer.
+        for dim in range(len(x.shape)):
+            assert x.size(dim) == x.shape[dim], f"{name}.size({dim}) is {x.size(dim)}"
+            neg = dim - len(x.shape)
+            assert x.size(neg) == x.shape[neg], f"{name}.size({neg}) is {x.size(neg)}"
+
+        # NVFP4 deliberately reports columnwise-only tensors flattened to 2D and
+        # warns about it, so only the ranks it preserves are checked here.
+        if not (isinstance(quantizer, NVFP4Quantizer) and not rowwise and len(shape) > 2):
+            assert tuple(x.shape) == tuple(shape), f"{name}.shape is {tuple(x.shape)}"
 
     @pytest.mark.parametrize(
         "quantization",
