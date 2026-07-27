@@ -18,6 +18,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cinttypes>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -77,17 +78,14 @@ inline void print_counters(const char *event) {
   const EventCounters &f = counters(/*is_fwd=*/true);
   const EventCounters &b = counters(/*is_fwd=*/false);
   std::fprintf(stderr,
-               "[FUSED-ATTN-CACHE] %-10s | tid=%u | fwd built=%llu exec=%llu hit=%llu miss=%llu | "
-               "bwd built=%llu exec=%llu hit=%llu miss=%llu\n",
-               event, thread_seq_id(),
-               static_cast<unsigned long long>(f.built.load(std::memory_order_relaxed)),
-               static_cast<unsigned long long>(f.exec.load(std::memory_order_relaxed)),
-               static_cast<unsigned long long>(f.hit.load(std::memory_order_relaxed)),
-               static_cast<unsigned long long>(f.miss.load(std::memory_order_relaxed)),
-               static_cast<unsigned long long>(b.built.load(std::memory_order_relaxed)),
-               static_cast<unsigned long long>(b.exec.load(std::memory_order_relaxed)),
-               static_cast<unsigned long long>(b.hit.load(std::memory_order_relaxed)),
-               static_cast<unsigned long long>(b.miss.load(std::memory_order_relaxed)));
+               "[FUSED-ATTN-CACHE] %-10s | tid=%u | fwd built=%" PRIu64 " exec=%" PRIu64
+               " hit=%" PRIu64 " miss=%" PRIu64 " | bwd built=%" PRIu64 " exec=%" PRIu64
+               " hit=%" PRIu64 " miss=%" PRIu64 "\n",
+               event, thread_seq_id(), f.built.load(std::memory_order_relaxed),
+               f.exec.load(std::memory_order_relaxed), f.hit.load(std::memory_order_relaxed),
+               f.miss.load(std::memory_order_relaxed), b.built.load(std::memory_order_relaxed),
+               b.exec.load(std::memory_order_relaxed), b.hit.load(std::memory_order_relaxed),
+               b.miss.load(std::memory_order_relaxed));
   std::fflush(stderr);
 }
 
@@ -114,37 +112,39 @@ inline void record_cache_lookup(const char *pass, bool hit, const FusedAttnConfi
   (hit ? pc.hit : pc.miss).fetch_add(1, std::memory_order_relaxed);
   std::fprintf(
       stderr,
-      "[FUSED-ATTN-CACHE] %-3s %-4s | tid=%u | train=%d det=%d cg=%d maxlogit=%d fwd=%d mask=%lld "
-      "bias=%lld wl=%lld wr=%lld brd=%d softmax=%lld scale_mode=%lld dropout=%g attn_scale=%g "
-      "qkv_dt=%lld o_dt=%lld do_dt=%lld dqkv_dt=%lld qkv_lay=%lld o_fmt=%lld do_fmt=%lld "
-      "dqkv_lay=%lld qkv_sif=%lld do_sif=%lld b=%lld h=%lld hg=%lld dqk=%lld dv=%lld sq=%lld "
-      "skv=%lld tq=%lld tkv=%lld bb=%lld btq=%lld btkv=%lld npk=%lld npv=%lld psk=%lld psv=%lld "
-      "mppk=%lld mppv=%lld bias_b=%lld bias_h=%lld bias_sq=%lld bias_skv=%lld\n",
+      "[FUSED-ATTN-CACHE] %-3s %-4s | tid=%u | train=%d det=%d cg=%d maxlogit=%d fwd=%d "
+      "mask=%" PRId64 " bias=%" PRId64 " wl=%" PRId64 " wr=%" PRId64 " brd=%d softmax=%" PRId64
+      " scale_mode=%" PRId64 " dropout=%g attn_scale=%g qkv_dt=%" PRId64 " o_dt=%" PRId64
+      " do_dt=%" PRId64 " dqkv_dt=%" PRId64 " qkv_lay=%" PRId64 " o_fmt=%" PRId64 " do_fmt=%" PRId64
+      " dqkv_lay=%" PRId64 " qkv_sif=%" PRId64 " do_sif=%" PRId64 " b=%" PRId64 " h=%" PRId64
+      " hg=%" PRId64 " dqk=%" PRId64 " dv=%" PRId64 " sq=%" PRId64 " skv=%" PRId64 " tq=%" PRId64
+      " tkv=%" PRId64 " bb=%" PRId64 " btq=%" PRId64 " btkv=%" PRId64 " npk=%" PRId64 " npv=%" PRId64
+      " psk=%" PRId64 " psv=%" PRId64 " mppk=%" PRId64 " mppv=%" PRId64 " bias_b=%" PRId64
+      " bias_h=%" PRId64 " bias_sq=%" PRId64 " bias_skv=%" PRId64 "\n",
       pass, hit ? "HIT" : "MISS", thread_seq_id(), static_cast<int>(c.is_training),
       static_cast<int>(c.deterministic), static_cast<int>(c.cuda_graph),
       static_cast<int>(c.return_max_logit), static_cast<int>(c.is_forward),
-      static_cast<long long>(c.attn_mask_type), static_cast<long long>(c.bias_type),
-      static_cast<long long>(c.window_size_left), static_cast<long long>(c.window_size_right),
-      static_cast<int>(c.bottom_right_diagonal), static_cast<long long>(c.softmax_type),
-      static_cast<long long>(c.scaling_mode), static_cast<double>(c.dropout),
-      static_cast<double>(c.attn_scale), static_cast<long long>(c.qkv_dtype),
-      static_cast<long long>(c.o_dtype), static_cast<long long>(c.do_dtype),
-      static_cast<long long>(c.dqkv_dtype), static_cast<long long>(c.qkv_layout),
-      static_cast<long long>(c.o_format), static_cast<long long>(c.do_format),
-      static_cast<long long>(c.dqkv_layout), static_cast<long long>(c.qkv_scale_inv_format),
-      static_cast<long long>(c.do_scale_inv_format), static_cast<long long>(c.batch_size),
-      static_cast<long long>(c.num_attn_heads), static_cast<long long>(c.num_gqa_groups),
-      static_cast<long long>(c.head_dim_qk), static_cast<long long>(c.head_dim_v),
-      static_cast<long long>(c.max_seqlen_q), static_cast<long long>(c.max_seqlen_kv),
-      static_cast<long long>(c.num_tokens_q), static_cast<long long>(c.num_tokens_kv),
-      static_cast<long long>(c.bucketed_batch_size),
-      static_cast<long long>(c.bucketed_num_tokens_q),
-      static_cast<long long>(c.bucketed_num_tokens_kv), static_cast<long long>(c.num_pages_k),
-      static_cast<long long>(c.num_pages_v), static_cast<long long>(c.page_size_k),
-      static_cast<long long>(c.page_size_v), static_cast<long long>(c.max_pages_per_seq_k),
-      static_cast<long long>(c.max_pages_per_seq_v), static_cast<long long>(c.bias_batch_size),
-      static_cast<long long>(c.bias_num_heads), static_cast<long long>(c.bias_seqlen_q),
-      static_cast<long long>(c.bias_seqlen_kv));
+      static_cast<int64_t>(c.attn_mask_type), static_cast<int64_t>(c.bias_type),
+      static_cast<int64_t>(c.window_size_left), static_cast<int64_t>(c.window_size_right),
+      static_cast<int>(c.bottom_right_diagonal), static_cast<int64_t>(c.softmax_type),
+      static_cast<int64_t>(c.scaling_mode), static_cast<double>(c.dropout),
+      static_cast<double>(c.attn_scale), static_cast<int64_t>(c.qkv_dtype),
+      static_cast<int64_t>(c.o_dtype), static_cast<int64_t>(c.do_dtype),
+      static_cast<int64_t>(c.dqkv_dtype), static_cast<int64_t>(c.qkv_layout),
+      static_cast<int64_t>(c.o_format), static_cast<int64_t>(c.do_format),
+      static_cast<int64_t>(c.dqkv_layout), static_cast<int64_t>(c.qkv_scale_inv_format),
+      static_cast<int64_t>(c.do_scale_inv_format), static_cast<int64_t>(c.batch_size),
+      static_cast<int64_t>(c.num_attn_heads), static_cast<int64_t>(c.num_gqa_groups),
+      static_cast<int64_t>(c.head_dim_qk), static_cast<int64_t>(c.head_dim_v),
+      static_cast<int64_t>(c.max_seqlen_q), static_cast<int64_t>(c.max_seqlen_kv),
+      static_cast<int64_t>(c.num_tokens_q), static_cast<int64_t>(c.num_tokens_kv),
+      static_cast<int64_t>(c.bucketed_batch_size), static_cast<int64_t>(c.bucketed_num_tokens_q),
+      static_cast<int64_t>(c.bucketed_num_tokens_kv), static_cast<int64_t>(c.num_pages_k),
+      static_cast<int64_t>(c.num_pages_v), static_cast<int64_t>(c.page_size_k),
+      static_cast<int64_t>(c.page_size_v), static_cast<int64_t>(c.max_pages_per_seq_k),
+      static_cast<int64_t>(c.max_pages_per_seq_v), static_cast<int64_t>(c.bias_batch_size),
+      static_cast<int64_t>(c.bias_num_heads), static_cast<int64_t>(c.bias_seqlen_q),
+      static_cast<int64_t>(c.bias_seqlen_kv));
   std::fflush(stderr);
 }
 
@@ -215,10 +215,10 @@ inline void register_summary_once() {
           if (n == 0) continue;
           const double total_ms =
               static_cast<double>(t.time_ns.load(std::memory_order_relaxed)) / 1e6;
-          std::fprintf(
-              stderr,
-              "[FUSED-ATTN-CACHE] %-3s %-22s | calls=%llu | time=%9.1f ms | avg=%9.3f ms/call\n",
-              pass, kStageNames[i], static_cast<unsigned long long>(n), total_ms, total_ms / n);
+          std::fprintf(stderr,
+                       "[FUSED-ATTN-CACHE] %-3s %-22s | calls=%" PRIu64
+                       " | time=%9.1f ms | avg=%9.3f ms/call\n",
+                       pass, kStageNames[i], n, total_ms, total_ms / n);
         }
       }
       std::fflush(stderr);

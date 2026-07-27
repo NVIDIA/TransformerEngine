@@ -235,10 +235,9 @@ thread_local std::string fused_attn_backend_message_buffer;
 // Stash `reason` in the thread-local buffer and, if the caller asked for a diagnostic,
 // publish a NUL-terminated pointer to it via `*message`. Safe to call with `message == nullptr`.
 void set_message(const char **message, std::string reason) {
+  if (message == nullptr) return;
   fused_attn_backend_message_buffer = std::move(reason);
-  if (message != nullptr) {
-    *message = fused_attn_backend_message_buffer.c_str();
-  }
+  *message = fused_attn_backend_message_buffer.c_str();
 }
 
 }  // namespace
