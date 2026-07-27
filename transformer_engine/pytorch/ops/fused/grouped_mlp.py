@@ -480,9 +480,9 @@ def _single_group_fc2_gemm(
     if bias is not None:
         token_bias = bias.transpose(0, 1).contiguous().expand(out.shape[0], -1)
         if bias_scale is not None:
-            out = out + token_bias * bias_scale.view(-1, 1)
+            out.add_(token_bias * bias_scale.view(-1, 1))
         else:
-            out = out + token_bias
+            out.add_(token_bias)
     return out
 
 
