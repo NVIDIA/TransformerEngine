@@ -2687,7 +2687,6 @@ def test_custom_mha_fp8_vs_f16(dtype, model):
     Both paths take F16 input and output. QKV layout is bs3hd"""
 
     config = model_configs_fp8[model]
-    os.environ["NVTE_UnfusedDPA_Emulate_FP8"] = "1"
 
     # Test backend availability
     is_training = True
