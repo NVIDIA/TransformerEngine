@@ -45,8 +45,7 @@ typedef struct {
   /*! Upper bound on tokens this rank sends per dispatch. */
   int max_tokens_per_rank;
   /*! Upper bound on tokens this rank receives per dispatch. 0 selects eager
-   *  mode: the library derives its internal bound and the caller sizes recv
-   *  buffers to the per-routing recv count. */
+   *  mode: the caller sizes recv buffers to the per-routing recv count. */
   int max_recv_tokens_per_rank;
   /*! Token hidden dimension. */
   int hidden_dim;
@@ -60,13 +59,11 @@ typedef struct {
    *  by NVTECommWindow handles and transfer in place (no staging copies);
    *  0 (default) = staged. */
   int zero_copy;
-  /*! Upper bound on per-token top-k across the group's handles. Required for
-   *  eager mode (max_recv_tokens_per_rank == 0) with the expert-major layout,
-   *  where it sizes internal buffers; 0 = unset. */
+  /*! Per-token top-k; sizes NCCL EP internal buffers. Required in eager mode
+   *  (max_recv_tokens_per_rank == 0); 0 = unset. */
   int num_topk;
-  /*! Recv overflow policy. When nonzero, tokens past max_recv_tokens_per_rank
-   *  are dropped and dispatch continues; 0 (default) traps on overflow.
-   *  Not supported in eager mode. */
+  /*! Recv overflow policy. Nonzero drops tokens past max_recv_tokens_per_rank
+   *  and continues; 0 (default) traps. Not supported in eager mode. */
   int drop_on_overflow;
 } NVTEEpGroupConfig;
 

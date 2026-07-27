@@ -125,7 +125,7 @@ bool ep_get_zero_copy() { return g_zero_copy_enabled.load(std::memory_order_rela
 void ep_initialize(uintptr_t comm_ptr, const std::string& group_name, int64_t num_experts,
                    int64_t max_tokens_per_rank, int64_t max_recv_tokens_per_rank,
                    int64_t hidden_dim, int64_t max_num_sms, pybind11::object max_token_dtype,
-                   bool zero_copy, int64_t max_num_topk, bool drop_on_overflow) {
+                   bool zero_copy, int64_t num_topk, bool drop_on_overflow) {
   NVTE_CHECK(!group_name.empty(), "group_name must be non-empty (used for symm-mem lookup)");
   NVTE_CHECK(comm_ptr != 0, "comm_ptr must be non-null (torch NCCL host comm pointer)");
   NVTE_CHECK(!g_ep_initialized, "ep_initialize called twice without ep_finalize");
@@ -144,7 +144,7 @@ void ep_initialize(uintptr_t comm_ptr, const std::string& group_name, int64_t nu
       .num_comm_sms = static_cast<int>(max_num_sms),
       .max_token_dtype = static_cast<NVTEDType>(GetTransformerEngineDType(torch_dtype)),
       .zero_copy = zero_copy ? 1 : 0,
-      .num_topk = static_cast<int>(max_num_topk),
+      .num_topk = static_cast<int>(num_topk),
       .drop_on_overflow = drop_on_overflow ? 1 : 0,
   };
   // Release the GIL only around the native init. It must stay held while pybind11 casts
@@ -385,7 +385,7 @@ void register_ep_bindings(pybind11::module_& m) {
         py::arg("comm_ptr"), py::arg("group_name"), py::arg("num_experts"),
         py::arg("max_tokens_per_rank"), py::arg("max_recv_tokens_per_rank"), py::arg("hidden_dim"),
         py::arg("max_num_sms") = 0, py::arg("max_token_dtype"), py::arg("zero_copy") = false,
-        py::arg("max_num_topk") = 0, py::arg("drop_on_overflow") = false);
+        py::arg("num_topk") = 0, py::arg("drop_on_overflow") = false);
   m.def("ep_finalize", &ep_finalize, "Tear down the EP backend. Idempotent.",
         py::call_guard<py::gil_scoped_release>());
   m.def("ep_get_zero_copy", &ep_get_zero_copy, "Return the current EP zero-copy toggle state.");

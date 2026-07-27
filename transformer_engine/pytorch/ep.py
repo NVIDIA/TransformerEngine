@@ -69,8 +69,9 @@ _BOOTSTRAPPED = False
 _ATEXIT_REGISTERED = False
 # EP group captured at bootstrap; used by the zero-copy symm-mem pool allocator.
 _EP_GROUP: Optional[dist.ProcessGroup] = None
-# Eager-mode toggle captured at bootstrap; ep_dispatch reads it to size the recv
-# outputs from the per-step recv-token total instead of recv_capacity_per_rank.
+# Eager-mode toggle captured at bootstrap (set when recv_capacity_per_rank is
+# omitted); ep_dispatch reads it to size the recv outputs from the per-step
+# recv-token total instead of a fixed recv_capacity_per_rank.
 _EAGER = False
 
 
@@ -94,12 +95,11 @@ def ep_bootstrap(
     ep_group: dist.ProcessGroup,
     num_experts: int,
     max_tokens_per_rank: int,
-    recv_capacity_per_rank: int,
     hidden_dim: int,
+    num_topk: int,
+    recv_capacity_per_rank: Optional[int] = None,
     max_num_sms: int = 0,
     zero_copy: bool = False,
-    eager: bool = False,
-    max_num_topk: int = 0,
     drop_on_overflow: bool = False,
     max_token_dtype: torch.dtype = torch.bfloat16,
 ) -> None:
@@ -108,32 +108,32 @@ def ep_bootstrap(
     max_token_dtype sets the widest token dtype this EP group will dispatch;
     it sizes NCCL EP staging buffers.
 
+    ``recv_capacity_per_rank`` bounds the tokens one rank receives per step and
+    sizes the recv outputs. Omit it (``None``) for eager mode, which sizes recv
+    outputs from the per-step recv total instead; eager needs a host sync each
+    step and is not CUDA-graph capturable.
+
     ``zero_copy`` opts the EP group into the symm-mem zero-copy IO path; pass
     ``True`` only when payload tensors are allocated via ``symm_mem_alloc``.
-    Defaults to ``False``.
+    Requires ``recv_capacity_per_rank``.
 
-    ``eager`` sizes the dispatch recv outputs from the per-step recv-token total
-    reported by ep_prepare, instead of the fixed ``recv_capacity_per_rank`` upper
-    bound. This requires a host sync each step, so it is not CUDA-graph
-    capturable. Mutually exclusive with ``zero_copy``. Defaults to ``False``.
+    ``num_topk`` is the per-token top-k; it sizes NCCL EP internal buffers.
 
-    ``max_num_topk`` is the upper bound on per-token top-k; it sizes NCCL EP
-    internal buffers and is required (>= 1) for ``eager`` mode.
-
-    ``drop_on_overflow`` drops tokens that exceed ``recv_capacity_per_rank``
-    instead of trapping. Not supported in ``eager`` mode. Defaults to ``False``.
+    ``drop_on_overflow`` drops tokens exceeding ``recv_capacity_per_rank`` instead
+    of trapping. Requires ``recv_capacity_per_rank``.
     """
     global _BOOTSTRAPPED, _ATEXIT_REGISTERED, _EP_GROUP, _EAGER
+    eager = recv_capacity_per_rank is None
     if _BOOTSTRAPPED:
         raise RuntimeError("ep_bootstrap was already called in this process")
     if ep_group.size() < 2:
         raise ValueError(f"ep_bootstrap requires ep_group.size() >= 2 (got {ep_group.size()}).")
+    if num_topk < 1:
+        raise ValueError(f"ep_bootstrap requires num_topk >= 1 (got {num_topk}).")
     if zero_copy and eager:
-        raise ValueError("ep_bootstrap: zero_copy and eager modes are mutually exclusive")
-    if eager and max_num_topk < 1:
-        raise ValueError("ep_bootstrap: eager mode requires max_num_topk >= 1")
-    if eager and drop_on_overflow:
-        raise ValueError("ep_bootstrap: drop_on_overflow is not supported in eager mode")
+        raise ValueError("ep_bootstrap: zero_copy requires recv_capacity_per_rank")
+    if drop_on_overflow and eager:
+        raise ValueError("ep_bootstrap: drop_on_overflow requires recv_capacity_per_rank")
     _check_nccl_runtime_version()
     if zero_copy:
         warnings.warn(
@@ -151,14 +151,14 @@ def ep_bootstrap(
         str(ep_group.group_name),
         int(num_experts),
         int(max_tokens_per_rank),
-        # Eager mode sizes recv buffers per routing, so the group uses the
-        # library-derived bound (0 = NCCL_EP_AUTO) instead of a fixed budget.
-        0 if eager else int(recv_capacity_per_rank),
+        # Eager mode (recv_capacity_per_rank=None) sizes recv buffers per routing,
+        # so the group uses the library-derived bound (0 = NCCL_EP_AUTO).
+        int(recv_capacity_per_rank or 0),
         int(hidden_dim),
         int(max_num_sms),
         max_token_dtype,
         bool(zero_copy),
-        int(max_num_topk),
+        int(num_topk),
         bool(drop_on_overflow),
     )
     _BOOTSTRAPPED = True
@@ -237,9 +237,9 @@ class EpBuffer:
         self,
         top_k: int,
         max_tokens_per_rank: int,
-        recv_capacity_per_rank: int,
         hidden_dim: int,
         num_local_experts: int,
+        recv_capacity_per_rank: Optional[int] = None,
         alignment: int = 0,
         payload_dtype: torch.dtype = torch.bfloat16,
         device: Optional[torch.device] = None,
@@ -249,16 +249,23 @@ class EpBuffer:
         alignment = int(alignment)
         if alignment > 1 and (alignment & (alignment - 1)) != 0:
             raise ValueError(f"alignment must be 0, 1, or a power of two (got {alignment}).")
+        self.eager = _EAGER
+        if not self.eager and recv_capacity_per_rank is None:
+            raise ValueError(
+                "EpBuffer requires recv_capacity_per_rank unless the EP group was "
+                "bootstrapped in eager mode (recv_capacity_per_rank omitted)."
+            )
         self.top_k = int(top_k)
         self.alignment = alignment
         self.max_tokens_per_rank = int(max_tokens_per_rank)
-        self.recv_capacity_per_rank = int(recv_capacity_per_rank)
+        self.recv_capacity_per_rank = (
+            None if recv_capacity_per_rank is None else int(recv_capacity_per_rank)
+        )
         self.hidden_dim = int(hidden_dim)
         self.num_local_experts = int(num_local_experts)
         self.payload_dtype = payload_dtype
         self.device = device
         self.zero_copy = bool(tex.ep_get_zero_copy())
-        self.eager = _EAGER
 
         size_bytes = tex.ep_handle_mem_size(self.top_k, self.alignment)
         self.handle_mem = torch.empty(int(size_bytes), dtype=torch.uint8, device=device)
@@ -268,13 +275,11 @@ class EpBuffer:
         # Persistent tensor; keep resident if activation CPU offloading is on.
         mark_not_offload(self.handle_mem)
         # Per-step recv-token total (device int64 [1]), written by ep_prepare.
-        # The true pre-drop count: under drop_on_overflow it includes dropped
-        # tokens and may exceed recv_capacity_per_rank. Eager mode syncs it to
-        # size the recv outputs; graph mode reads it after replay to check overflow.
+        # Eager mode uses it to size the recv outputs; graph mode reads it after
+        # replay to detect overflow past recv_capacity_per_rank.
         self.total_recv_tokens = torch.empty(1, dtype=torch.int64, device=device)
         mark_not_offload(self.total_recv_tokens)
-        # Host mirror of total_recv_tokens; set by ep_prepare in eager mode (one
-        # D2H) to size the recv outputs. None otherwise.
+        # Host mirror of total_recv_tokens, set by ep_prepare in eager mode.
         self._host_total_recv_tokens: Optional[int] = None
 
 
@@ -389,11 +394,9 @@ def ep_prepare(buffer: "EpBuffer", topk_idx: torch.Tensor) -> torch.Tensor:
     ``buffer.tokens_per_expert`` (int64, shape [num_local_experts]). topk_idx must
     be int32 or int64.
 
-    Always fills ``buffer.total_recv_tokens`` (device int64 [1]) with the
-    per-step recv-token total. In eager mode its host value is cached in
-    ``buffer._host_total_recv_tokens`` (one D2H) to size the recv outputs;
-    otherwise it stays device-side for the caller to read after a graph replay
-    and compare against ``recv_capacity_per_rank`` to detect overflow.
+    Also fills ``buffer.total_recv_tokens`` (device int64 [1]) with the per-step
+    recv total; eager mode mirrors it to the host to size the recv outputs, graph
+    mode reads it device-side to detect overflow.
     """
     torch.ops.transformer_engine_ep.prepare(
         buffer.handle_mem,
@@ -431,30 +434,19 @@ def _ep_combine_raw(buffer: "EpBuffer", expert_out: torch.Tensor, result: torch.
 
 
 class _EpDispatch(torch.autograd.Function):
-    """Autograd prepare+dispatch; bwd uses user-supplied grad inputs as-is."""
+    """Autograd dispatch; caller runs prepare first. bwd uses user-supplied grad inputs as-is."""
 
     @staticmethod
     def forward(  # type: ignore[override]
         ctx,
         handle_mem: torch.Tensor,
-        top_k: int,
-        alignment: int,
         recv_tokens: torch.Tensor,
         recv_topk_weights: torch.Tensor,
-        tokens_per_expert: torch.Tensor,
-        total_recv_tokens: torch.Tensor,
         topk_idx: torch.Tensor,
         tokens: torch.Tensor,
         topk_weights: torch.Tensor,
-        skip_prepare: bool = False,
     ):
-        """Prepare + dispatch fwd. In eager mode the caller runs prepare first
-        (to size recv outputs from the recv-token total), so ``skip_prepare``
-        avoids re-running the routing AllGather here."""
-        if not skip_prepare:
-            torch.ops.transformer_engine_ep.prepare(
-                handle_mem, top_k, topk_idx, tokens_per_expert, alignment, total_recv_tokens
-            )
+        """Dispatch fwd; prepare must have run into ``handle_mem`` beforehand."""
         torch.ops.transformer_engine_ep.dispatch(
             handle_mem,
             topk_idx,
@@ -470,15 +462,13 @@ class _EpDispatch(torch.autograd.Function):
         ctx.tokens_T_flat = tokens.numel() // tokens.shape[-1]
         ctx.topk_T_flat = topk_weights.numel() // topk_weights.shape[-1]
         ctx.top_k = topk_weights.shape[-1]
-        ctx.recv_capacity = recv_tokens.shape[0]
         ctx.hidden_dim = tokens.shape[-1]
-        ctx.mark_non_differentiable(tokens_per_expert)
         # Detach so the long-lived buffers aren't tracked as differentiable outputs;
         # autograd re-attaches grad_fn pointing back at this Function.
-        return recv_tokens.detach(), recv_topk_weights.detach(), tokens_per_expert
+        return recv_tokens.detach(), recv_topk_weights.detach()
 
     @staticmethod
-    def backward(ctx, g_recv_tokens, g_recv_topk_weights, _g_tokens_per_expert):  # type: ignore[override]
+    def backward(ctx, g_recv_tokens, g_recv_topk_weights):  # type: ignore[override]
         """Dispatch bwd; normalizes grad-input layout, otherwise passes through."""
         (handle_mem,) = ctx.saved_tensors
         device = handle_mem.device
@@ -499,16 +489,11 @@ class _EpDispatch(torch.autograd.Function):
         )
         return (
             None,  # handle_mem
-            None,  # top_k
-            None,  # alignment
             None,  # recv_tokens
             None,  # recv_topk_weights
-            None,  # tokens_per_expert
-            None,  # total_recv_tokens
             None,  # topk_idx
             grad_tokens.view(ctx.tokens_shape),
             grad_topk_weights.view(ctx.topk_weights_shape),
-            None,  # skip_prepare
         )
 
 
@@ -615,20 +600,15 @@ def ep_dispatch(
             f"topk_weights must be float32; got dtype={topk_weights.dtype}. "
             "Cast with topk_weights.float() before calling."
         )
-    skip_prepare = False
-    if buffer.eager:
-        if recv_tokens is not None or recv_topk_weights is not None:
-            raise ValueError(
-                "eager mode sizes the recv outputs from the per-step recv-token total "
-                "and cannot use caller-supplied recv_tokens / recv_topk_weights"
-            )
-        # Prepare first to learn this step's recv total, then size the recv
-        # outputs to it; skip re-running prepare inside the autograd forward.
-        ep_prepare(buffer, topk_idx)
-        rows = buffer._host_total_recv_tokens
-        skip_prepare = True
-    else:
-        rows = buffer.recv_capacity_per_rank
+    if buffer.eager and (recv_tokens is not None or recv_topk_weights is not None):
+        raise ValueError(
+            "eager mode sizes the recv outputs from the per-step recv-token total "
+            "and cannot use caller-supplied recv_tokens / recv_topk_weights"
+        )
+    # Prepare (routing AllGather) up front so the recv outputs can be sized; in
+    # eager mode ep_prepare also host-syncs this step's recv-token total.
+    tokens_per_expert = ep_prepare(buffer, topk_idx)
+    rows = buffer._host_total_recv_tokens if buffer.eager else buffer.recv_capacity_per_rank
     if recv_tokens is None:
         recv_tokens = _alloc_io(
             (rows, buffer.hidden_dim),
@@ -638,19 +618,15 @@ def ep_dispatch(
         )
     if recv_topk_weights is None:
         recv_topk_weights = _alloc_io((rows,), torch.float32, buffer.device, buffer.zero_copy)
-    return _EpDispatch.apply(
+    recv_tokens, recv_topk_weights = _EpDispatch.apply(
         buffer.handle_mem,
-        buffer.top_k,
-        buffer.alignment,
         recv_tokens,
         recv_topk_weights,
-        buffer.tokens_per_expert,
-        buffer.total_recv_tokens,
         topk_idx,
         tokens,
         topk_weights,
-        skip_prepare,
     )
+    return recv_tokens, recv_topk_weights, tokens_per_expert
 
 
 def ep_combine(

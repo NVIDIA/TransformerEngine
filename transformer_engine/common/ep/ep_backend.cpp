@@ -220,8 +220,7 @@ void EPBackend::init(ncclComm_t ep_comm, NVTEEpGroupConfig group_config) {
   // 0 = NCCL_EP_AUTO, which enables eager mode (recv buffers sized per routing).
   cfg.max_recv_tokens_per_rank = static_cast<unsigned int>(group_config.max_recv_tokens_per_rank);
   cfg.zero_copy = group_config.zero_copy ? NCCL_EP_ZERO_COPY_ON : NCCL_EP_ZERO_COPY_OFF;
-  // Upper bound on per-token top-k; required for eager mode with the
-  // expert-major layout, where NCCL EP sizes internal buffers from it.
+  // Per-token top-k; NCCL EP sizes internal buffers from it in eager mode.
   cfg.num_topk = static_cast<unsigned int>(group_config.num_topk);
   cfg.overflow_policy =
       group_config.drop_on_overflow ? NCCL_EP_OVERFLOW_DROP : NCCL_EP_OVERFLOW_AUTO;

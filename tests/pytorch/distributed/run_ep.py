@@ -162,11 +162,11 @@ class TestEP(unittest.TestCase):
             cls.ep_group,
             num_experts=cls.cfg.num_experts,
             max_tokens_per_rank=TOKENS_PER_RANK,
-            recv_capacity_per_rank=cls.cfg.recv_capacity_per_rank,
             hidden_dim=HIDDEN_DIM,
+            num_topk=TOP_K,
+            # Omit recv_capacity_per_rank to select eager mode.
+            recv_capacity_per_rank=None if EAGER else cls.cfg.recv_capacity_per_rank,
             zero_copy=ZERO_COPY,
-            eager=EAGER,
-            max_num_topk=TOP_K,
             drop_on_overflow=OVERFLOW,
         )
 
@@ -189,9 +189,9 @@ class TestEP(unittest.TestCase):
         return EpBuffer(
             top_k=top_k,
             max_tokens_per_rank=TOKENS_PER_RANK,
-            recv_capacity_per_rank=self.cfg.recv_capacity_per_rank,
             hidden_dim=HIDDEN_DIM,
             num_local_experts=NUM_LOCAL_EXPERTS,
+            recv_capacity_per_rank=None if EAGER else self.cfg.recv_capacity_per_rank,
             alignment=alignment,
         )
 
