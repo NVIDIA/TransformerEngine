@@ -58,6 +58,7 @@ from ..tensor.storage.nvfp4_tensor_storage import NVFP4TensorStorage
 from ..utils import (
     is_non_tn_fp8_gemm_supported,
     torch_get_autocast_gpu_dtype,
+    get_device_compute_capability,
     get_nvtx_range_context,
     nvtx_range_push,
     nvtx_range_pop,
@@ -85,6 +86,27 @@ _ub_initialized = False
 _ub_with_cublasmp = False
 _MIN_STREAM_PRIORITY, _MAX_STREAM_PRIORITY = None, None
 layers_atomic_ring_exchange = []
+
+
+def _get_high_precision_init_val(parameter: torch.Tensor) -> Optional[torch.Tensor]:
+    """Return temporary pre-quantization initialization stored on a parameter."""
+    return getattr(parameter, "_high_precision_init_val", None)
+
+
+def _clear_high_precision_init_val(parameter: torch.Tensor) -> None:
+    """Release temporary pre-quantization initialization stored on a parameter."""
+    if hasattr(parameter, "_high_precision_init_val"):
+        del parameter._high_precision_init_val
+
+
+def _attach_high_precision_init_val(
+    parameter: torch.Tensor,
+    high_precision_init_val: torch.Tensor,
+) -> None:
+    """Attach TE's temporary high-precision initialization contract to a parameter."""
+    parameter._high_precision_init_val = high_precision_init_val
+    parameter.get_high_precision_init_val = MethodType(_get_high_precision_init_val, parameter)
+    parameter.clear_high_precision_init_val = MethodType(_clear_high_precision_init_val, parameter)
 
 
 def is_ub_initialized() -> bool:
@@ -1207,6 +1229,40 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             f"{self.__class__.__name__} class does not implement _get_weight_quantizers function"
         )
 
+    def _enable_weight_preswizzle(
+        self,
+        quantizer: Quantizer,
+        weight: torch.Tensor,
+    ) -> bool:
+        """Whether to fuse scale-factor swizzling into weight quantization.
+
+        When enabled, scales are preswizzled during quantization instead of lazily
+        inside every GEMM. Disabled when primary weights are already quantized
+        (dequant and FSDP2 all-gather expect the unswizzled layout). For NVFP4,
+        enabled only for shapes/architectures where the fused swizzle+quantize
+        kernel is supported. Weight quantization always uses the single-tensor
+        kernel (including GroupedLinear's cached weights), so NVFP4 RHT
+        eligibility uses that kernel's 64-row alignment.
+        """
+        if self.primary_weights_in_fp8:
+            return False
+        if isinstance(quantizer, MXFP8Quantizer):
+            return True
+        if isinstance(quantizer, NVFP4Quantizer):
+            rows, cols = weight.numel() // weight.shape[-1], weight.shape[-1]
+            arch_supported = get_device_compute_capability() >= (10, 0)
+            if quantizer.with_rht:
+                return arch_supported and rows % 64 == 0 and cols % 128 == 0
+            return (
+                arch_supported
+                and quantizer.with_2d_quantization
+                and not quantizer.row_scaled_nvfp4
+                and not quantizer.nvfp4_use_4over6
+                and rows % 128 == 0
+                and cols % 128 == 0
+            )
+        return False
+
     def init_fp8_meta_tensors(self, recipe: Recipe) -> None:
         """Init scales and amaxes."""
         self.set_meta_tensor(True, recipe)
@@ -1787,21 +1843,10 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 #   should call `clear_high_precision_init_val` to remove it after master weight
                 #   is initialized.
 
-                def get(self):
-                    if hasattr(self, "_high_precision_init_val"):
-                        return self._high_precision_init_val
-                    return None
-
-                def clear(self):
-                    if hasattr(self, "_high_precision_init_val"):
-                        del self._high_precision_init_val
-
                 # DTensor.from_local() does not preserve object identity,
                 # so attach to the DTensor's local tensor when applicable.
                 target = dtensor_param._local_tensor if is_dtensor else param
-                target._high_precision_init_val = high_precision_init_val
-                target.get_high_precision_init_val = MethodType(get, target)
-                target.clear_high_precision_init_val = MethodType(clear, target)
+                _attach_high_precision_init_val(target, high_precision_init_val)
 
             if not is_dtensor:
                 self.module_setattr(name, param)

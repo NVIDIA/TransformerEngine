@@ -509,9 +509,9 @@ void performTest(const ProcessingMethod processing_method,
             break;
         }
         case ProcessingMethod::CAST_DBIAS: {
-            nvte_group_quantize_dbias(grad_group_tensor, out_group_tensor, output_dbias_tensor, workspace.data(), 0);
+            nvte_group_quantize_dbias(grad_group_tensor, out_group_tensor, output_dbias_tensor, workspace.data(), nullptr, 0);
             workspace = Tensor("workspace", workspace.rowwise_shape(), workspace.dtype());
-            nvte_group_quantize_dbias(grad_group_tensor, out_group_tensor, output_dbias_tensor, workspace.data(), 0);
+            nvte_group_quantize_dbias(grad_group_tensor, out_group_tensor, output_dbias_tensor, workspace.data(), nullptr, 0);
             break;
         }
         case ProcessingMethod::CAST_DBIAS_DACT: {

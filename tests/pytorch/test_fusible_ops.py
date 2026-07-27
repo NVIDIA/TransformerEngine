@@ -36,6 +36,7 @@ from transformer_engine.pytorch.ops.fused import (
 )
 from transformer_engine.pytorch import (
     QuantizedTensor,
+    Float8BlockQuantizer,
     Float8CurrentScalingQuantizer,
     Float8Quantizer,
     MXFP8Quantizer,
@@ -58,6 +59,9 @@ from utils import (
 fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
 mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available(return_reason=True)
 nvfp4_available, reason_for_no_nvfp4 = te.is_nvfp4_available(return_reason=True)
+fp8_block_scaling_available, reason_for_no_fp8_block_scaling = te.is_fp8_block_scaling_available(
+    return_reason=True
+)
 
 # Supported data types
 _dtypes: list[torch.dtype] = [torch.float32, torch.float16]
@@ -76,6 +80,8 @@ if mxfp8_available:
 if nvfp4_available:
     _quantization_list.append("nvfp4")
     _quantization_list.append("nvfp4_4over6")
+if fp8_block_scaling_available:
+    _quantization_list.append("fp8_block_scaling")
 
 
 @pytest.fixture(autouse=True, scope="function")
@@ -110,6 +116,8 @@ def maybe_skip_quantization(
         and not nvfp4_available
     ):
         pytest.skip(reason_for_no_nvfp4)
+    if quantization == "fp8_block_scaling" and not fp8_block_scaling_available:
+        pytest.skip(reason_for_no_fp8_block_scaling)
 
     # Check dims
     if dims is not None:
@@ -121,6 +129,9 @@ def maybe_skip_quantization(
         elif quantization == "mxfp8":
             if math.prod(dims[:-1]) % 32 != 0 or dims[-1] % 32 != 0:
                 pytest.skip("MXFP8 GEMMs require dims that are divisible by 32")
+        elif quantization == "fp8_block_scaling":
+            if math.prod(dims[:-1]) % 128 != 0 or dims[-1] % 128 != 0:
+                pytest.skip("FP8 block scaling requires dims that are divisible by 128")
         elif quantization in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6", "nvfp4_rht"):
             if math.prod(dims[:-1]) % 16 != 0 or dims[-1] % 16 != 0:
                 pytest.skip("NVFP4 GEMMs require dims that are divisible by 16")
@@ -186,6 +197,17 @@ def make_reference_and_test_tensors(
         test = quantizer(test)
     elif quantization == "mxfp8":
         test = MXFP8Quantizer(fp8_dtype=te.DType.kFloat8E4M3)(test)
+    elif quantization == "fp8_block_scaling":
+        tensor_type = "input"
+        if quantizer_role is not None:
+            tensor_type = quantizer_role.tensor_type
+        # Weights use 2D (128x128) blocks; everything else 1D (1x128).
+        test = Float8BlockQuantizer(
+            fp8_dtype=te.DType.kFloat8E4M3,
+            rowwise=True,
+            columnwise=True,
+            block_scaling_dim=2 if tensor_type == "weight" else 1,
+        )(test)
     elif quantization in ("nvfp4", "nvfp4_row_scaled", "nvfp4_rht"):
         tensor_type = "input"
         if quantizer_role is not None:
@@ -1017,8 +1039,9 @@ class TestBasicOps:
             )
         torch.testing.assert_close(dw_test, w_ref.grad, **tols)
 
-    @pytest.mark.parametrize("weight_shape", ((64, 32), (3, 5)))
-    @pytest.mark.parametrize("in_shape", ((-1,), (5, 1, -1), (4, 2, 4, -1)))
+    # (128, 128) + a 128-token in_shape keep FP8 block scaling (128-divisible dims) unskipped.
+    @pytest.mark.parametrize("weight_shape", ((64, 32), (3, 5), (128, 128)))
+    @pytest.mark.parametrize("in_shape", ((-1,), (5, 1, -1), (4, 2, 4, -1), (128, -1)))
     @pytest.mark.parametrize("dtype", _dtypes)
     @pytest.mark.parametrize("quantization", _quantization_list)
     @pytest.mark.parametrize("accumulate_into_main_grad", (False, True))
@@ -3360,7 +3383,7 @@ class TestSequentialModules:
         quantization: Optional[str],
         device: torch.device = "cuda",
         hidden_size: int = 256,
-        sequence_length: int = 48,
+        sequence_length: int = 64,
         batch_size: int = 4,
         ffn_hidden_size: int = 384,
         layernorm_epsilon: float = 1e-5,

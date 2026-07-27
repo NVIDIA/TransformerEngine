@@ -17,6 +17,8 @@ import transformer_engine.jax.cpp_extensions as tex
 from transformer_engine.jax.cpp_extensions.ep import _ep_outer_axis
 from transformer_engine.jax.cpp_extensions.misc import jax_dtype_to_te_dtype
 from transformer_engine.jax.sharding import (
+    _get_mesh,
+    get_num_devices_in_mesh,
     global_mesh_resource,
     get_mesh_axis_size,
     with_sharding_constraint,
@@ -69,6 +71,34 @@ def _allgather_uid(uid_arr, world_size, uid_size):
 # ── Bootstrap ────────────────────────────────────────────────────────────────
 
 
+def _ep_domain_for_rank(mesh, ep_resource, rank, device_to_rank=None):
+    """Resolve the EP domain (NCCL comm) for ``rank`` from the mesh layout.
+
+    One domain groups ranks sharing all non-ep coordinates, so any orthogonal
+    axis (tp, pp, cp, ...) yields its own domains. Returns
+    ``(root_rank, rank_within_group, num_domains)``; ``root_rank`` (ep
+    coordinate 0) posts the domain's NCCL unique id.
+    """
+    if device_to_rank is None:
+
+        def device_to_rank(d):
+            return d.process_index
+
+    ep_pos = mesh.axis_names.index(ep_resource)
+    ep_size = mesh.shape[ep_resource]
+    ranks = np.vectorize(device_to_rank, otypes=[np.int64])(mesh.devices)
+    # Move ep last and flatten: each row is one domain (all non-ep coords fixed).
+    grid = np.moveaxis(ranks, ep_pos, -1).reshape(-1, ep_size)
+    loc = np.argwhere(grid == rank)
+    if loc.shape[0] != 1:
+        raise ValueError(
+            f"ep_bootstrap: rank {rank} must appear exactly once in the mesh device"
+            f" grid; found {loc.shape[0]} occurrences."
+        )
+    row, col = int(loc[0, 0]), int(loc[0, 1])
+    return int(grid[row, 0]), col, int(grid.shape[0])
+
+
 def ep_bootstrap(
     world_size,
     rank,
@@ -83,10 +113,11 @@ def ep_bootstrap(
 
     Must run inside the active JAX Mesh and a global_shard_guard; ep_size and
     num_ep_groups are read from the mesh axes named by MeshResource.ep_resource
-    and MeshResource.dp_resource/fsdp_resource.
+    and MeshResource.dp_resource/fsdp_resource. Axes orthogonal to EP (tp, pp,
+    cp, ...) are supported and replicated across EP tensors.
 
     Args:
-        world_size: Total number of processes (dp_size * ep_size).
+        world_size: Total number of processes (product of all mesh axes).
         rank: Global rank of the calling process.
         num_experts: Total experts across the EP group.
         max_tokens_per_rank: Max tokens one rank dispatches per step (sizes send buffers).
@@ -120,30 +151,27 @@ def ep_bootstrap(
             "ep_bootstrap requires MeshResource.ep_resource to be set; enter a"
             " global_shard_guard(MeshResource(..., ep_resource=<axis name>)) before bootstrap."
         )
-    ep_size = get_mesh_axis_size(ep_resource)
-    outer_axis = _ep_outer_axis()
-    if outer_axis is None:
-        if world_size != ep_size:
-            raise ValueError(
-                f"ep_bootstrap: world_size ({world_size}) > ep_size ({ep_size}) but neither"
-                " MeshResource.dp_resource nor fsdp_resource is set; name the outer axis so"
-                " EP-output tensors can shard across EP groups."
-            )
-        num_ep_groups = 1
-    else:
-        num_ep_groups = get_mesh_axis_size(outer_axis)
-    if num_ep_groups * ep_size != world_size:
+    mesh = _get_mesh()
+    if mesh.empty:
         raise ValueError(
-            f"ep_bootstrap: num_ep_groups*ep_size ({num_ep_groups}*{ep_size}="
-            f"{num_ep_groups * ep_size}) must equal world_size ({world_size}); check that"
-            f" the '{outer_axis}' and '{ep_resource}' mesh axes cover all ranks."
+            "ep_bootstrap must run inside an active jax.sharding.Mesh; enter"
+            " `with mesh:` (or jax.set_mesh(mesh)) before calling it."
         )
+    if get_num_devices_in_mesh(mesh) != world_size:
+        raise ValueError(
+            f"ep_bootstrap: mesh device count ({get_num_devices_in_mesh(mesh)}) must equal"
+            f" world_size ({world_size})."
+        )
+    ep_size = get_mesh_axis_size(ep_resource)
+    # num_ep_groups counts only the distinct-token (dp/fsdp) axes; replicated
+    # axes (tp, pp, ...) do not create distinct EP-output slabs.
+    outer_axis = _ep_outer_axis()
+    num_ep_groups = 1 if outer_axis is None else get_mesh_axis_size(outer_axis)
     if num_experts % ep_size != 0:
         raise ValueError(f"num_experts ({num_experts}) must be divisible by ep_size ({ep_size}).")
 
     UID_SIZE = 128
-    dp_color = rank // ep_size
-    rank_within_group = rank % ep_size
+    root_rank, rank_within_group, _num_domains = _ep_domain_for_rank(mesh, ep_resource, rank)
     is_color_root = rank_within_group == 0
     if is_color_root:
         libnccl = ctypes.CDLL("libnccl.so.2", use_errno=True)
@@ -156,7 +184,7 @@ def ep_bootstrap(
 
     uid_arr = jnp.frombuffer(uid_bytes, dtype=jnp.uint8)
     all_uids = _allgather_uid(uid_arr, world_size, UID_SIZE)
-    uid_bytes = bytes(np.asarray(all_uids[dp_color * ep_size]).tolist())
+    uid_bytes = bytes(np.asarray(all_uids[root_rank]).tolist())
 
     # Eager NCCL init while ranks are barrier-synced by the UID broadcast above.
     transformer_engine_jax.set_ep_bootstrap_params(
