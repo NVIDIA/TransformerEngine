@@ -244,6 +244,8 @@ class EpBuffer:
         payload_dtype: torch.dtype = torch.bfloat16,
         device: Optional[torch.device] = None,
     ) -> None:
+        if not _BOOTSTRAPPED:
+            raise RuntimeError("EpBuffer requires ep_bootstrap() to be called first.")
         if device is None:
             device = torch.device("cuda", torch.cuda.current_device())
         alignment = int(alignment)
