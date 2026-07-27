@@ -481,9 +481,7 @@ model_configs_fused_attn = {
         2, 4096, 64, 64, attn_mask_type="causal", window_size=(128, 0), softmax_type="learnable"
     ),  # GQA
     "cp_5_0": ModelConfig(2, 1024, 16, 256, attn_mask_type="causal"),
-    "cp_5_1": ModelConfig(
-        2, 1024, 16, 256, attn_mask_type="causal", window_size=(128, 0)
-    ),
+    "cp_5_1": ModelConfig(2, 1024, 16, 256, attn_mask_type="causal", window_size=(128, 0)),
 }
 
 
@@ -719,4 +717,3 @@ def test_cp_with_fused_attention(
         deterministic=_deterministic,
         log_level=pytest_logging_level,
     )
-
