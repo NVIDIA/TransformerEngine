@@ -16,11 +16,17 @@ from transformer_engine.jax.attention import (
     QKVLayout,
     is_fused_attn_kernel_available,
 )
+from transformer_engine_jax import get_device_compute_capability
 
 # Imports from ``attention`` and ``attention_context_parallel`` are intentionally
 # deferred into each test body. The tutorial modules create tensors and initialize
 # models at module scope; deferring imports lets pytest apply skip marks before
 # unsupported CI nodes allocate those examples.
+
+requires_hopper_or_newer = pytest.mark.skipif(
+    get_device_compute_capability(0) < 90,
+    reason="the 4K native JAX baseline requires more than 48 GiB of device memory",
+)
 
 
 def test_bshd_gqa_swa_runs():
@@ -37,12 +43,14 @@ def test_bshd_gqa_swa_runs():
     assert out.dtype == attention.dtype
 
 
+@requires_hopper_or_newer
 def test_bshd_gqa_swa_matches_baseline():
     import attention
 
     attention.compare_te_to_baseline()
 
 
+@requires_hopper_or_newer
 def test_single_gpu_benchmark():
     import attention
 
