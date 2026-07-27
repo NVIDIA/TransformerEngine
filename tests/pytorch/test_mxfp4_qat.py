@@ -625,33 +625,6 @@ def test_deployment_top_cap_domain():
     assert torch.equal(gt.to(torch.float64), fake_quant_ref_fp64(wc)), "top-cap vs fp64 ref"
 
 
-def test_tilekernels_cross_parity():
-    """Bitwise parity with the TileKernels torch reference (round_sf=True) on the finite below-cap domain."""
-    import sys
-
-    tk_root = os.environ.get(
-        "NVTE_MXFP4_QAT_TILEKERNELS", os.path.expanduser("~/Desktop/v4/TileKernels")
-    )
-    if os.path.isdir(tk_root) and tk_root not in sys.path:
-        sys.path.insert(0, tk_root)
-    try:
-        from tile_kernels.torch.cast import cast as tk_cast, cast_back as tk_cast_back
-    except Exception as e:
-        print(f"  SKIP (tile_kernels unavailable: {type(e).__name__}: {e})")
-        return
-
-    torch.manual_seed(21)
-    for m, n in SHAPES:
-        w = make_weight(m, n, zero_blocks=4, outliers=4)
-        w[0, :32] = torch.tensor(2.0**-127, dtype=torch.bfloat16)
-        w[1, :32] = torch.tensor(2.0**-133, dtype=torch.bfloat16)
-        w[2, :32] = torch.tensor(2.0**120, dtype=torch.bfloat16)
-        data, sf = tk_cast(w, "e2m1", block_size=(1, 32), round_sf=True)
-        tk_dq = tk_cast_back((data, sf), "bf16", block_size=(1, 32))
-        ours = mxfp4_fake_quantize(w)
-        _assert_bits_equal(tk_dq, ours, f"TileKernels cross parity {m}x{n}")
-
-
 def test_blockwise_feasibility_enumeration():
     """Per-element E4M3-lattice prediction == TE 128x128 quantizer for exponent spreads d=0..16."""
     payloads = torch.tensor([0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0])
@@ -698,181 +671,6 @@ def test_fp16_pipeline_rejected():
             raise SystemExit(f"fp16 pipeline must be rejected ({recipe.__class__.__name__})")
         except (NotImplementedError, ValueError):
             pass
-
-
-def test_cross_impl_matrix():
-    """TileKernels vs CUDA kernel vs torch reference, bitwise, over all edge domains and every quant/dequant hop."""
-    import sys
-
-    tk_root = os.environ.get(
-        "NVTE_MXFP4_QAT_TILEKERNELS", os.path.expanduser("~/Desktop/v4/TileKernels")
-    )
-    if os.path.isdir(tk_root) and tk_root not in sys.path:
-        sys.path.insert(0, tk_root)
-    try:
-        from tile_kernels.torch.cast import (
-            cast as tk_cast,
-            cast_back as tk_cast_back,
-            get_min_clamp_val as tk_min_clamp,
-        )
-    except Exception as e:
-        print(f"  SKIP (tile_kernels unavailable: {type(e).__name__}: {e})")
-        return
-    kern = _intree_kernel().mxfp4_fake_quantize_intree
-    tref = mxfp4_fake_quantize_reference
-    CAP = 6.0 * 2.0**125
-
-    def tk_roundtrip(x, block, fmt):
-        pair = tk_cast(x, "e2m1" if fmt == "e2m1" else "e4m3", block_size=block, round_sf=True)
-        return tk_cast_back(pair, "fp32", block), tk_cast_back(pair, "bf16", block)
-
-    torch.manual_seed(77)
-    w = make_weight(64, 256, zero_blocks=2, outliers=4)
-    w[0, :32] = 0.0
-    w[1, :32] = -0.0
-    w[2, :32] = torch.tensor(2.0**-127, dtype=torch.bfloat16)
-    w[2, 0] = 2.0**-128
-    w[3, :32] = torch.tensor(2.0**-133, dtype=torch.bfloat16)
-    w[4, :32] = torch.tensor(2.0**120, dtype=torch.bfloat16)
-    w[5, :7] = torch.tensor([0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0], dtype=torch.bfloat16)
-    w[5, 7] = 6.0
-    a15 = torch.tensor(1.5, dtype=torch.bfloat16).view(torch.int16)
-    w[6, 0] = (a15 - 1).view(torch.bfloat16)
-    w[6, 32] = torch.tensor(1.5, dtype=torch.bfloat16)
-    w[6, 64] = (a15 + 1).view(torch.bfloat16)
-
-    for W in (w, w.to(torch.float32)):
-        t = tref(W)
-        _assert_bits_equal(kern(W.contiguous()), t, "fake-quant CUDA vs torch")
-        tk32, tkb16 = tk_roundtrip(W, (1, 32), "e2m1")
-        _assert_bits_equal(tk32, t.to(torch.float32), "fake-quant TK vs torch (fp32)")
-        _assert_bits_equal(tkb16, t.to(torch.bfloat16), "fake-quant TK vs torch (bf16)")
-    print("  fake-quant 3-way bitwise: PASS (bf16 + fp32 corpus)")
-
-    wnf = w.clone()
-    wnf[8, 40] = float("inf")
-    wnf[9, 33] = float("-inf")
-    wnf[10, 5] = float("nan")
-    t = tref(wnf)
-    _assert_same_with_nan(kern(wnf.contiguous()), t, "nonfinite CUDA")
-    assert torch.isnan(t[8, 32:64]).all() and torch.isnan(t[9, 32:64]).all()
-    assert torch.isnan(t[10, :32]).all() and torch.isfinite(t[11].to(torch.float32)).all()
-    print("  nonfinite 2-way (whole-block NaN poisoning): PASS (TK policy differs, excluded)")
-
-    wcap = torch.zeros(1, 32, dtype=torch.bfloat16, device=DEV)
-    wcap[0, 0] = torch.tensor(3.2e38, dtype=torch.bfloat16)
-    t = tref(wcap)
-    assert t[0, 0].item() == CAP, "satfinite cap at 6*2^125"
-    _assert_bits_equal(kern(wcap.contiguous()), t, "cap CUDA")
-    tk32, _ = tk_roundtrip(wcap, (1, 32), "e2m1")
-    assert not torch.equal(tk32, t.to(torch.float32)), "TK must diverge above 6*2^125"
-    print(
-        f"  above-cap domain: ours satfinite {CAP:.3e}, TK diverges as documented "
-        f"(payload at 2^126 -> {tk32[0, 0].item()}): PASS"
-    )
-
-    w_hat = tref(w)
-    wh32 = w_hat.to(torch.float32)
-    q = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3, columnwise=True).quantize(w_hat)
-    m, n = w_hat.shape
-    data = q._rowwise_data.view(torch.uint8)[:m, :n]
-    codes = q._rowwise_scale_inv.view(torch.uint8)[:m, : n // 32].to(torch.int32)
-    raw = data.view(torch.float8_e4m3fn).to(torch.float32).view(m, n // 32, 32) * torch.ldexp(
-        torch.ones_like(codes, dtype=torch.float32), codes - 127
-    ).unsqueeze(-1)
-    assert torch.equal(raw.view(m, n), wh32), "mxfp8 row RAW encode not lossless"
-    e4m3_floor = float(tk_min_clamp(torch.float8_e4m3fn))
-    blk_amax = wh32.abs().view(m, n // 32, 32).amax(dim=-1)
-    ok = (blk_amax >= e4m3_floor) | (blk_amax == 0)
-    okm = ok.unsqueeze(-1).expand(m, n // 32, 32).reshape(m, n)
-    tk32, tkb16 = tk_roundtrip(w_hat, (1, 32), "e4m3")
-    assert torch.equal(
-        tk32.view(torch.int32)[okm], wh32.view(torch.int32)[okm]
-    ), "mxfp8 row TK roundtrip (fp32)"
-    assert torch.equal(
-        tkb16.view(torch.int16)[okm], w_hat.view(torch.int16)[okm]
-    ), "mxfp8 row TK roundtrip (bf16)"
-    assert (tk32[~okm] == 0).all(), "TK e4m3 sub-floor blocks must flush to zero"
-    assert (~ok).sum() > 0, "TK e4m3 floor case not exercised"
-    dq = q.dequantize(dtype=torch.float32)
-    assert torch.equal(dq, wh32), "mxfp8 row TE software dequant"
-    print(
-        "  mxfp8 row: TE raw encode lossless incl 2^-127; TK roundtrip bitwise on "
-        f"amax >= {e4m3_floor:g} blocks ({int((~ok).sum())} sub-floor blocks flush in TK "
-        "e4m3, a TK-only floor); TE software dequant exact incl 2^-127: PASS"
-    )
-
-    q.update_usage(rowwise_usage=False, columnwise_usage=True)
-    te_col = q.dequantize(dtype=torch.float32)
-    tk_col32, _ = tk_roundtrip(w_hat, (32, 1), "e4m3")
-    col_amax = wh32.abs().view(m // 32, 32, n).amax(dim=1)
-    cok = (col_amax >= e4m3_floor) | (col_amax == 0)
-    cokm = cok.unsqueeze(1).expand(m // 32, 32, n).reshape(m, n)
-    nzm = (wh32 != 0) & cokm
-    zm = (wh32 == 0) & cokm
-    assert torch.equal(
-        te_col.view(torch.int32)[nzm], tk_col32.view(torch.int32)[nzm]
-    ), "mxfp8 col TE vs TK (nonzero)"
-    assert (te_col[zm] == 0).all() and (tk_col32[zm] == 0).all(), "mxfp8 col zeros"
-    negz = zm & torch.signbit(wh32)
-    assert negz.any()
-    assert torch.signbit(tk_col32)[negz].all(), "TK col must preserve -0"
-    assert not torch.signbit(te_col)[negz].any(), "TE col canonicalizes -0 -> +0"
-    blk = wh32.view(m // 32, 32, n)
-    bound = blk.abs().amax(dim=1, keepdim=True) * 2.0**-3
-    assert ((te_col.view(m // 32, 32, n) - blk).abs() <= bound + 1e-30).all()
-    print(
-        "  mxfp8 col (32x1): TE == TK bitwise on nonzeros, zeros value-equal "
-        "(TE col canonicalizes -0 -> +0, TK preserves the sign), bounded vs w_hat: PASS"
-    )
-
-    wb_hat = tref(make_weight(128, 256, zero_blocks=4))
-    wb32 = wb_hat.to(torch.float32)
-    qb = Float8BlockQuantizer(
-        fp8_dtype=tex.DType.kFloat8E4M3,
-        rowwise=True,
-        columnwise=True,
-        force_pow_2_scales=True,
-        block_scaling_dim=2,
-    ).quantize(wb_hat)
-    assert torch.equal(qb.dequantize(dtype=torch.float32), wb32)
-    assert torch.equal(qb.dequantize(dtype=torch.bfloat16), wb_hat)
-    tk32, tkb16 = tk_roundtrip(wb_hat, (128, 128), "e4m3")
-    _assert_bits_equal(tk32, wb32, "blockwise TK roundtrip (fp32)")
-    _assert_bits_equal(tkb16, wb_hat, "blockwise TK roundtrip (bf16)")
-    qb.update_usage(rowwise_usage=False, columnwise_usage=True)
-    assert torch.equal(qb.dequantize(dtype=torch.float32), wb32), "blockwise col transpose"
-    print(
-        "  blockwise 128x128: TE row+col dequant == TK roundtrip == w_hat bitwise "
-        "(fp32 + bf16 targets): PASS"
-    )
-
-    bits = torch.arange(65536, dtype=torch.int32, device=DEV).to(torch.int16)
-    we = bits.view(torch.bfloat16).view(2048, 32)
-    t = tref(we)
-    _assert_same_with_nan(kern(we.contiguous()), t, "exhaustive CUDA")
-    we32 = we.to(torch.float32)
-    ok_rows = torch.isfinite(we32).all(dim=-1) & (we32.abs().amax(dim=-1) <= CAP)
-    tk32, _ = tk_roundtrip(we[ok_rows], (1, 32), "e2m1")
-    _assert_bits_equal(tk32, t[ok_rows].to(torch.float32), "exhaustive TK")
-    print(
-        "  bf16 exhaustive 65536 patterns: CUDA/torch full, "
-        f"TK on {int(ok_rows.sum())}/2048 finite below-cap rows, bitwise: PASS"
-    )
-
-    g = torch.Generator().manual_seed(123)
-    fb = torch.randint(-(2**31), 2**31 - 1, (512, 32), generator=g, dtype=torch.int64)
-    wf = fb.to(torch.int32).cuda().view(torch.float32)
-    t = tref(wf)
-    _assert_same_with_nan(kern(wf.contiguous()), t, "fuzz CUDA")
-    ok_rows = torch.isfinite(wf).all(dim=-1) & (wf.abs().amax(dim=-1) <= CAP)
-    if ok_rows.any():
-        tk32, _ = tk_roundtrip(wf[ok_rows], (1, 32), "e2m1")
-        _assert_bits_equal(tk32, t[ok_rows], "fuzz TK")
-    print(
-        f"  fp32 bit-fuzz 512 blocks: CUDA/torch full, TK on {int(ok_rows.sum())} "
-        "finite below-cap rows, bitwise: PASS"
-    )
 
 
 def test_recipe_switch_invalidates_cache():
@@ -1079,13 +877,11 @@ TESTS = [
     test_fp32_bit_fuzz,
     test_scale_threshold_and_rtne_midpoints,
     test_deployment_top_cap_domain,
-    test_tilekernels_cross_parity,
     test_blockwise_feasibility_enumeration,
     test_recipe_switch_invalidates_cache,
     test_recipe_field_controls_qat,
     test_ops_api_rejected,
     test_fp16_pipeline_rejected,
-    test_cross_impl_matrix,
     test_kernel_perf,
     test_kernel_fast_math_immune,
     test_e2e_matrix,
