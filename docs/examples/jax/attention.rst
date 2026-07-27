@@ -18,8 +18,8 @@ stages in DeepSeek-style MLA.
 
 For long contexts, selected BSHD and THD configurations support context
 parallelism with Ring or AllGather collectives. Exact fused-kernel availability
-depends on the input shape, dtype, GPU, and feature combination; see the
-`JAX DotProductAttention API reference
+depends on the input shape, dtype, GPU architecture, and feature combination;
+see the `JAX DotProductAttention API reference
 <../../api/jax.html#transformer_engine.jax.flax.DotProductAttention>`_ for the
 full interface. Choose the tutorial that matches how the sequence dimension is
 distributed in your model.

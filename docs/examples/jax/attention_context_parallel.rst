@@ -11,8 +11,11 @@ selected BSHD and packed THD Q/K/V layouts; see the
 `JAX DotProductAttention API reference
 <../../api/jax.html#transformer_engine.jax.flax.DotProductAttention>`_ for the
 layout definitions and full interface. This tutorial focuses on a
-representative packed THD configuration with GQA, padded segments, causal SWA,
-and both Ring and AllGather strategies.
+representative packed THD configuration with
+`grouped-query attention (GQA) <https://arxiv.org/abs/2305.13245>`_, padded
+segments, causal
+`sliding-window attention (SWA) <https://arxiv.org/pdf/1904.10509>`_, and both
+Ring and AllGather strategies.
 
 CP shards the sequence dimension over a JAX mesh axis so long-context attention
 can split activation memory and attention work across devices while
@@ -23,10 +26,9 @@ attention call.
 
    CP is most useful when attention does not fit on one GPU, or when long
    sequences and sufficiently wide attention windows provide enough
-   computation to amortize communication. Applications that already use GQA
-   may be better suited to CP because their lower K/V head count results in
-   less communication across devices. Conversely, workloads with narrow
-   `sliding-window attention (SWA) <https://arxiv.org/pdf/1904.10509>`_ windows
+   computation to amortize communication. For instance, applications that use
+   GQA may be good candidates for CP because GQA's lower K/V head count reduces
+   communication across devices. Conversely, workloads with narrow SWA windows
    may be better suited to single-GPU fused attention: CP still communicates
    K/V across devices while each query attends to relatively few tokens.
 

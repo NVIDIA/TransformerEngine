@@ -90,11 +90,12 @@ implementation="cudnn")``.
 4. DeepSeek-style MLA head dimensions
 -------------------------------------
 
-This example covers the attention-kernel interface used after DeepSeek-style
-MLA projections, not the latent projection layers themselves. At this point,
-separate Q, K, and V tensors can use different per-head dimensions for Q/K and
-V. Keep ``qkv_layout="bshd_bshd_bshd"`` so TE can see the Q/K head dimension
-and the V head dimension separately.
+This example covers the attention-kernel interface used after
+`DeepSeek-style MLA projections <https://arxiv.org/abs/2405.04434>`_, not the
+latent projection layers themselves. At this point, separate Q, K, and V
+tensors can use different per-head dimensions for Q/K and V. Keep
+``qkv_layout="bshd_bshd_bshd"`` so TE can see the Q/K head dimension and the V
+head dimension separately.
 
 .. literalinclude:: attention.py
    :language: python
