@@ -473,9 +473,8 @@ class FusedAttnRunner:
 
     def _check_configs(self):
         # Trim SWA configs for L0 and L1 to reduce test time; need to trim more in future test refactoring.
-        if (
-            self.window_size is not None
-            and (self.dropout_prob != 0.0 or self.attn_bias_type is not AttnBiasType.NO_BIAS)
+        if self.window_size is not None and (
+            self.dropout_prob != 0.0 or self.attn_bias_type is not AttnBiasType.NO_BIAS
         ):
             if _TEST_LEVEL == "L0" and (
                 self.softmax_type != AttnSoftmaxType.VANILLA_SOFTMAX
@@ -483,12 +482,16 @@ class FusedAttnRunner:
                 or self.attn_bias_type is not AttnBiasType.POST_SCALE_BIAS
                 or self.attn_mask_type is not AttnMaskType.NO_MASK
             ):
-                pytest.skip("Trimmed SWA+bias/dropout config: only vanilla-softmax + bf16 + post_scale_bias + no-mask runs at L0")
+                pytest.skip(
+                    "Trimmed SWA+bias/dropout config: only vanilla-softmax + bf16 + post_scale_bias"
+                    " + no-mask runs at L0"
+                )
             if _TEST_LEVEL == "L1" and (
-                self.dtype != jnp.float16
-                or self.softmax_type != AttnSoftmaxType.LEARNABLE_SOFTMAX
+                self.dtype != jnp.float16 or self.softmax_type != AttnSoftmaxType.LEARNABLE_SOFTMAX
             ):
-                pytest.skip("Trimmed SWA+bias/dropout config: only float16 + learnable-softmax runs at L1")
+                pytest.skip(
+                    "Trimmed SWA+bias/dropout config: only float16 + learnable-softmax runs at L1"
+                )
 
         # TODO(rewang): probably adds this in is_fused_attn_available
         if self.qkv_layout.is_thd() and not self.attn_mask_type.is_padding():
