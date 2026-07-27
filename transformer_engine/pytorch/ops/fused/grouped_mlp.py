@@ -1513,8 +1513,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             else:
                 # Discrete-weight kernel: per-expert data/scale pointers
                 fc1_b_ptrs, fc1_sfb_ptrs, _fc1_sfb_buffer = (
-                    tex.grouped_mlp_experimental
-                    .swizzle_scales_and_pack_ptrs_for_discrete_weights(
+                    tex.grouped_mlp_experimental.swizzle_scales_and_pack_ptrs_for_discrete_weights(
                         [w._rowwise_data for w in grouped_fc1_weight],
                         [w._rowwise_scale_inv for w in grouped_fc1_weight],
                         "nvfp4" if use_nvfp4 else "mxfp8_rowwise",
@@ -1703,9 +1702,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                     )
                     fc2_w_data = fc2_w_data.permute(1, 2, 0)
 
-                    fc2_w_scales = fc2_weight_for_gemm.scale_inv.view(
-                        dtype=torch.float8_e8m0fnu
-                    )
+                    fc2_w_scales = fc2_weight_for_gemm.scale_inv.view(dtype=torch.float8_e8m0fnu)
                     fc2_w_scales = fc2_w_scales.view(
                         num_groups,
                         ceil_div(fc2_weight_shape[0], 128),
@@ -1719,8 +1716,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                     fc2_quant_kwargs["sfb_tensor"] = fc2_w_scales
                 else:
                     fc2_b_ptrs, fc2_sfb_ptrs, _fc2_sfb_buffer = (
-                        tex.grouped_mlp_experimental
-                        .swizzle_scales_and_pack_ptrs_for_discrete_weights(
+                        tex.grouped_mlp_experimental.swizzle_scales_and_pack_ptrs_for_discrete_weights(
                             [w._rowwise_data for w in grouped_fc2_weight],
                             [w._rowwise_scale_inv for w in grouped_fc2_weight],
                             "mxfp8_rowwise",
@@ -1940,9 +1936,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                     num_groups,
                     split_sizes,
                     tensor_offsets=(
-                        None
-                        if num_groups == 1
-                        else base_split_offsets * fc2_weight_shape[0]
+                        None if num_groups == 1 else base_split_offsets * fc2_weight_shape[0]
                     ),
                 )
 
@@ -2133,9 +2127,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                     fc2_weight_k,
                 )
                 fc2_w_data = (
-                    fc2_w_data.permute(1, 2, 0)
-                    if use_nvfp4
-                    else fc2_w_data.permute(2, 1, 0)
+                    fc2_w_data.permute(1, 2, 0) if use_nvfp4 else fc2_w_data.permute(2, 1, 0)
                 )
                 fc2_w_scales = swizzled_columnwise_scale.view(dtype=scale_view_dtype)
                 fc2_w_scales = fc2_w_scales.view(
@@ -2155,8 +2147,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                 fc2_dactivation_kwargs["sfb_tensor"] = fc2_w_scales
             else:
                 fc2_b_ptrs, fc2_sfb_ptrs, _fc2_sfb_buffer = (
-                    tex.grouped_mlp_experimental
-                    .swizzle_scales_and_pack_ptrs_for_discrete_weights(
+                    tex.grouped_mlp_experimental.swizzle_scales_and_pack_ptrs_for_discrete_weights(
                         [w._columnwise_data for w in grouped_fc2_weight],
                         [w._columnwise_scale_inv for w in grouped_fc2_weight],
                         "nvfp4" if use_nvfp4 else "mxfp8_columnwise",
@@ -2361,9 +2352,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
 
             use_single_group_dense_dgrad = num_groups == 1
             if use_single_group_dense_dgrad:
-                grad_input = validate_or_alloc_output(
-                    grad_input_buffer, in_shape, dtype, device
-                )
+                grad_input = validate_or_alloc_output(grad_input_buffer, in_shape, dtype, device)
                 _single_group_dgrad_gemm(
                     grouped_fc1_dy,
                     grouped_fc1_weight,
@@ -2372,9 +2361,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                     dtype=dtype,
                 )
             elif use_nvfp4:
-                grad_input = validate_or_alloc_output(
-                    grad_input_buffer, in_shape, dtype, device
-                )
+                grad_input = validate_or_alloc_output(grad_input_buffer, in_shape, dtype, device)
                 fc1_x_tensor_offsets = base_split_offsets * fc1_weight_shape[1]
                 grouped_grad_input = GroupedTensor(
                     shape=(out_shape[0], fc1_weight_shape[1]),
@@ -2502,7 +2489,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                 grouped_fc1_x.columnwise_data,
                 grouped_fc1_x.scale_inv,
                 grouped_fc1_x.columnwise_scale_inv,
-        )
+            )
 
         fc2_grad_extra = (None, None) if fc2_op._scale_bias else (None,)
         if unit_activation_scale:
