@@ -39,12 +39,11 @@ struct MXFP8QuantConfig {
   bool with_dbias = false;  // If the dbias is computated (via the workspace tensor)
   bool with_dact = false;   // If an activation derivative operation is fused
   bool with_act = false;    // If an activation operation is fused
-  bool with_noop = false;   // If a non-nullptr noop tensor is passed to the kernel
   Activation activation = Activation::kNone;
 
   std::string to_key() const {
     std::string key;
-    key.reserve(56);
+    key.reserve(54);
     key.append("cutedsl_mxfp8_")
         .append(te_dtype_to_str(dtype))
         .append("_")
@@ -64,8 +63,6 @@ struct MXFP8QuantConfig {
         .append("_")
         .append(with_act ? "1" : "0")
         .append("_")
-        .append(with_noop ? "1" : "0")
-        .append("_")
         .append(activation_to_str(activation));
     return key;
   }
@@ -75,11 +72,10 @@ struct MXFP8QuantConfig {
     if (!entrypoint.has_value()) {
       return false;
     }
-    tvm::ffi::Any result =
-        (*entrypoint)(tvm::ffi::String(fn_name), tvm::ffi::String(te_dtype_to_str(dtype)),
-                      tvm::ffi::String(te_dtype_to_str(fp8_dtype)), rowwise, colwise, swizzled,
-                      with_amax, with_dbias, with_dact, with_act, with_noop,
-                      tvm::ffi::String(activation_to_str(activation)));
+    tvm::ffi::Any result = (*entrypoint)(
+        tvm::ffi::String(fn_name), tvm::ffi::String(te_dtype_to_str(dtype)),
+        tvm::ffi::String(te_dtype_to_str(fp8_dtype)), rowwise, colwise, swizzled, with_amax,
+        with_dbias, with_dact, with_act, tvm::ffi::String(activation_to_str(activation)));
     return result.try_cast<bool>().value_or(false);
   }
 };
@@ -178,12 +174,15 @@ inline bool mxfp8_quantize_cutedsl(const MXFP8QuantConfig &config, const Tensor 
     return true;
   }
 
+  // The cast-noop flag travels as a raw device pointer (not a tensor): it may be null, and
+  // both the zero-scales kernel below and the CuTeDSL kernel null-check it on device. Keeping
+  // it out of the config means one compiled kernel serves both the noop and no-noop cases.
+  void *noop_ptr = (noop_tensor != nullptr) ? noop_tensor->data.dptr : nullptr;
+
   // Zero out swizzled scales if padding is needed.
   // Mirrors the CUDA C++ implementation in quantize_mxfp8.cuh. Skip when noop flag is set.
   if (config.swizzled && (flat_m % 128 != 0 || flat_n % 128 != 0)) {
-    const float *noop_ptr = (noop_tensor != nullptr && noop_tensor->data.dptr != nullptr)
-                                ? reinterpret_cast<const float *>(noop_tensor->data.dptr)
-                                : nullptr;
+    const float *noop_flag_ptr = reinterpret_cast<const float *>(noop_ptr);
     constexpr size_t zero_threads = 256;
     if (output_tensor->has_data()) {
       const size_t size_bytes = output_tensor->scale_inv.buffer_size_bytes();
@@ -191,7 +190,8 @@ inline bool mxfp8_quantize_cutedsl(const MXFP8QuantConfig &config, const Tensor 
         const size_t zero_blocks = (size_bytes + zero_threads - 1) / zero_threads;
         dispatch::mxfp8::quantize_kernel::
             zero_scales_kernel<<<zero_blocks, zero_threads, 0, stream>>>(
-                reinterpret_cast<uint8_t *>(output_tensor->scale_inv.dptr), size_bytes, noop_ptr);
+                reinterpret_cast<uint8_t *>(output_tensor->scale_inv.dptr), size_bytes,
+                noop_flag_ptr);
         NVTE_CHECK_CUDA(cudaGetLastError());
       }
     }
@@ -202,17 +202,16 @@ inline bool mxfp8_quantize_cutedsl(const MXFP8QuantConfig &config, const Tensor 
         dispatch::mxfp8::quantize_kernel::
             zero_scales_kernel<<<zero_blocks, zero_threads, 0, stream>>>(
                 reinterpret_cast<uint8_t *>(output_tensor->columnwise_scale_inv.dptr), size_bytes,
-                noop_ptr);
+                noop_flag_ptr);
         NVTE_CHECK_CUDA(cudaGetLastError());
       }
     }
   }
 
   // Data tensors auto-flatten to 2D (DLTensorWrapper's default), matching the
-  // kernel's flat (rows, cols) view; scale/amax/noop are rank <= 2 and pass through.
+  // kernel's flat (rows, cols) view; scale/amax are rank <= 2 and pass through.
   tvm_ffi_bridge::DLTensorWrapper mX(input_tensor->data);
-  tvm_ffi_bridge::DLTensorWrapper mO_row, mS_row, mO_col, mS_col, mAmax, mNoop, mActInput,
-      mWorkspace;
+  tvm_ffi_bridge::DLTensorWrapper mO_row, mS_row, mO_col, mS_col, mAmax, mActInput, mWorkspace;
   if (output_tensor->has_data()) {
     mO_row = tvm_ffi_bridge::DLTensorWrapper(output_tensor->data);
     mS_row = tvm_ffi_bridge::DLTensorWrapper(output_tensor->scale_inv);
@@ -223,14 +222,12 @@ inline bool mxfp8_quantize_cutedsl(const MXFP8QuantConfig &config, const Tensor 
   }
   if (output_tensor->amax.dptr != nullptr)
     mAmax = tvm_ffi_bridge::DLTensorWrapper(output_tensor->amax);
-  if (noop_tensor != nullptr && noop_tensor->data.dptr != nullptr)
-    mNoop = tvm_ffi_bridge::DLTensorWrapper(noop_tensor->data);
   if (act_input_tensor != nullptr && act_input_tensor->data.dptr != nullptr)
     mActInput = tvm_ffi_bridge::DLTensorWrapper(act_input_tensor->data);
   if (workspace_tensor != nullptr && workspace_tensor->data.dptr != nullptr)
     mWorkspace = tvm_ffi_bridge::DLTensorWrapper(workspace_tensor->data);
-  // stream is a tvm-ffi opaque "handle"; pass the CUDA stream as void*.
-  (*mxfp8_quant_func_opt)(&mX, &mO_row, &mS_row, &mO_col, &mS_col, &mAmax, &mNoop, &mActInput,
+  // noop and stream are tvm-ffi opaque "handles"; pass them as void*.
+  (*mxfp8_quant_func_opt)(&mX, &mO_row, &mS_row, &mO_col, &mS_col, &mAmax, noop_ptr, &mActInput,
                           &mWorkspace, static_cast<void *>(stream));
 
   // If WITH_DBIAS, reduce the workspace partial dbias in CUDA C++ for now.
@@ -254,10 +251,6 @@ bool mxfp8_quantize_cutedsl(const Tensor *input_tensor, const Tensor *act_input_
   if constexpr (!Fused::supported) {
     return false;
   } else {
-    // Check this in C++, because the CuTeDSL kernel is compiled with an 1 element fake tensor
-    // so if we pass a nullptr or a tensor with nullptr data, when we check this tensor in CuTedsl
-    // it would violate the compiled kernel's assumption and will segfault.
-    const bool with_noop = noop_tensor != nullptr && noop_tensor->data.dptr != nullptr;
     const MXFP8QuantConfig config{/*dtype=*/input_tensor->dtype(),
                                   /*fp8_dtype=*/output_tensor->dtype(),
                                   /*rowwise=*/output_tensor->has_data(),
@@ -267,7 +260,6 @@ bool mxfp8_quantize_cutedsl(const Tensor *input_tensor, const Tensor *act_input_
                                   /*with_dbias=*/IS_DBIAS,
                                   /*with_dact=*/IS_DACT,
                                   /*with_act=*/IS_ACT,
-                                  /*with_noop=*/with_noop,
                                   /*activation=*/Fused::activation};
     checkCuDriverContext(stream);
     // Sanity checks, mirroring mxfp8::quantize in quantize_mxfp8.cuh

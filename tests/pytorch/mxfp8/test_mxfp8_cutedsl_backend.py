@@ -147,7 +147,7 @@ def get_cfg_key(method, act, in_dtype, fp8_dtype, rowwise, colwise):
         desc = act.desc
     elif with_dact:
         desc = f"d{act.desc}"
-    flags = (rowwise, colwise, False, False, with_dbias, with_dact, with_act, False)
+    flags = (rowwise, colwise, False, False, with_dbias, with_dact, with_act)
     return (
         "cutedsl_mxfp8_"
         + DTYPE_TO_STR[in_dtype]

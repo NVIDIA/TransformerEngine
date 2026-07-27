@@ -28,7 +28,7 @@ from typing import Optional, Type
 import cutlass
 from cutlass import cute
 from cutlass import pipeline
-from cutlass import Float32, Int16, Int32, Int64, Uint32, Uint8
+from cutlass import Boolean, Float32, Int16, Int32, Int64, Uint32, Uint8
 from cuda.bindings.driver import CUstream  # pylint: disable=no-name-in-module
 import tvm_ffi
 
@@ -637,6 +637,21 @@ def quantize_bidimensional_mxfp8_swizzled(
         cute.autovec_copy(rO_col, tXsO_col)
 
 
+@cute.jit
+def noop_flag_is_set(mNoop: cute.Pointer) -> Boolean:
+    """Whether the cast_noop flag says this quantization is a no-op and must be skipped.
+
+    mNoop is a pointer rather than a tensor so that one compiled kernel serves both a present and
+    an absent flag, hence the address is checked before it is dereferenced, exactly like the CUDA
+    C++ kernel's `noop != nullptr && noop[0] == 1.0f`. The two checks cannot be joined with `and`,
+    which the DSL lowers to a non-short-circuiting op that would load from the null pointer.
+    """
+    flag_is_set = Boolean(False)
+    if mNoop.toint() != Int64(0):
+        flag_is_set = cute.make_tensor(mNoop, cute.make_layout((1,)))[0] == Float32(1.0)
+    return flag_is_set
+
+
 class MXFP8QuantizeConfig:
     """Configs for the compiled CuTeDSL kernel. These will be fixed once the kernel is compiled and
     they will behave as const expressions.
@@ -653,7 +668,6 @@ class MXFP8QuantizeConfig:
         with_dbias: bool = False,
         with_dact: bool = False,
         with_act: bool = False,
-        with_noop: bool = False,
         activation: Optional[str] = None,
     ):
         if dtype is None or dtype not in ("fp32", "fp16", "bf16"):
@@ -705,7 +719,6 @@ class MXFP8QuantizeConfig:
         # uses a cross-thread smem reduction over THREADS_Y. Both mirror the CUDA
         # kernel's COLWISE_SCALING / rowwise dbias branches.
         self.WITH_DBIAS = with_dbias
-        self.WITH_NOOP = with_noop
         self.MAX_NORM_RCP = FP8E4M3_MAX_NORM_RCP if fp8_dtype == "e4m3" else FP8E5M2_MAX_NORM_RCP
 
     def __str__(self):
@@ -714,8 +727,7 @@ class MXFP8QuantizeConfig:
             f"rowwise={self.ROWWISE}, colwise={self.COLWISE}, "
             f"swizzled={self.WITH_GEMM_SWIZZLED_SCALES}, with_amax={self.WITH_AMAX}, "
             f"with_dbias={self.WITH_DBIAS}, with_dact={self.WITH_DACT}, "
-            f"with_act={self.WITH_ACT}, with_noop={self.WITH_NOOP}, "
-            f"activation={self.ACTIVATION})"
+            f"with_act={self.WITH_ACT}, activation={self.ACTIVATION})"
         )
 
     __repr__ = __str__
@@ -733,7 +745,7 @@ class MXFP8QuantizeKernelBase(abc.ABC):
         mO_col: Optional[cute.Tensor],
         mS_col: Optional[cute.Tensor],
         mAmax: Optional[cute.Tensor],
-        mNoop: Optional[cute.Tensor],
+        mNoop: cute.Pointer,
         mDActInput: Optional[cute.Tensor],
         mWorkspace: Optional[cute.Tensor],
         stream: CUstream,
@@ -807,7 +819,7 @@ class MXFP8QuantizeKernel(MXFP8QuantizeKernelBase):
         mO_col: Optional[cute.Tensor],
         mS_col: Optional[cute.Tensor],  # Colwise output and scale tensors
         mAmax: Optional[cute.Tensor],  # Global amax accumulator, only used when WITH_AMAX is True
-        mNoop: Optional[cute.Tensor],  # 1-element cast_noop flag, only used when WITH_NOOP is True
+        mNoop: cute.Pointer,  # f32 cast_noop flag; may be null, checked on device
         mDActInput: Optional[
             cute.Tensor
         ],  # Activation input for activation derivative fusion, only used when WITH_DACT is True
@@ -945,13 +957,12 @@ class MXFP8QuantizeKernel(MXFP8QuantizeKernelBase):
     ):
         """Device entry: no-op the CTA when the noop flag is set, else run the quantize main loop."""
 
-        # Only check the noop flag when WITH_NOOP is True (the noop tensor is passed and it's not nullptr)
-        # and both WITH_ACT and WITH_DACT are False (it's legitimate to skip the quantization because no fusion is involved)
-        CHECK_NOOP_FLAG: cutlass.const_expr = (
-            self.cfg.WITH_NOOP and not self.cfg.WITH_ACT and not self.cfg.WITH_DACT
-        )
-        # Only perform the runtime check to read the noop flag's value when the compiled kernel allows us to do so
-        skip_execution = cutlass.const_expr(CHECK_NOOP_FLAG) and mNoop[0] == Float32(1.0)
+        # Only honor the noop flag when no activation is fused, so that skipping the quantization
+        # skips nothing else; mirrors the NO_ACTIVATIONS guard of the CUDA C++ kernel
+        CHECK_NOOP_FLAG: cutlass.const_expr = not self.cfg.WITH_ACT and not self.cfg.WITH_DACT
+        skip_execution = False
+        if cutlass.const_expr(CHECK_NOOP_FLAG):
+            skip_execution = noop_flag_is_set(mNoop)
         if not skip_execution:
             self._kernel_main(
                 mX,
@@ -1594,7 +1605,7 @@ class MXFP8QuantizeSpecializedRowwiseKernel(MXFP8QuantizeKernelBase):
         mO_col: Optional[cute.Tensor],
         mS_col: Optional[cute.Tensor],  # Unused, kept for API compatibility
         mAmax: Optional[cute.Tensor],  # Unused, kept for API compatibility
-        mNoop: Optional[cute.Tensor],  # 1-element cast_noop flag, only used when WITH_NOOP is True
+        mNoop: cute.Pointer,  # f32 cast_noop flag; may be null, checked on device
         mDActInput: Optional[cute.Tensor],  # Unused, kept for API compatibility
         mWorkspace: Optional[cute.Tensor],  # Unused, kept for API compatibility
         stream: CUstream,
@@ -1630,8 +1641,7 @@ class MXFP8QuantizeSpecializedRowwiseKernel(MXFP8QuantizeKernelBase):
     @cute.kernel
     def kernel(self, mX, mO_row, mS_row, mNoop, max_norm_rcp, DTYPE):
         """Device entry: no-op the CTA when the noop flag is set, else run the quantize main loop."""
-        skip_execution = cutlass.const_expr(self.cfg.WITH_NOOP) and mNoop[0] == Float32(1.0)
-        if not skip_execution:
+        if not noop_flag_is_set(mNoop):
             self._kernel_main(mX, mO_row, mS_row, max_norm_rcp, DTYPE)
 
     @cute.jit
@@ -1808,7 +1818,7 @@ class MXFP8QuantizeSpecializedBidimensionalKernel(MXFP8QuantizeKernelBase):
         mO_col: Optional[cute.Tensor],
         mS_col: Optional[cute.Tensor],
         mAmax: Optional[cute.Tensor],
-        mNoop: Optional[cute.Tensor],
+        mNoop: cute.Pointer,  # f32 cast_noop flag; may be null, checked on device
         mDActInput: Optional[cute.Tensor],
         mWorkspace: Optional[cute.Tensor],
         stream: CUstream,
@@ -1901,8 +1911,7 @@ class MXFP8QuantizeSpecializedBidimensionalKernel(MXFP8QuantizeKernelBase):
         tma_dst_out_col,
     ):
         """Device entry: no-op the CTA when the noop flag is set, else run the quantize main loop."""
-        skip_execution = cutlass.const_expr(self.cfg.WITH_NOOP) and mNoop[0] == Float32(1.0)
-        if not skip_execution:
+        if not noop_flag_is_set(mNoop):
             self._kernel_main(
                 mX,
                 mS_row,
@@ -2355,13 +2364,11 @@ def compile_cutedsl_function_from_cfg(cfg):
         if cfg.WITH_AMAX
         else None
     )
-    noop_fake = (
-        cute.runtime.make_fake_compact_tensor(
-            Float32, (1,), stride_order=(0,), memspace=cute.AddressSpace.gmem, assumed_align=4
-        )
-        if cfg.WITH_NOOP
-        else None
-    )
+    # The cast-noop flag is an always-present f32 pointer instead of an optional tensor, so that
+    # the same compiled kernel serves both an absent and a present flag (see noop_flag_is_set).
+    # The null address here is only a compile-time placeholder for the pointer the C++ dispatcher
+    # passes at launch.
+    noop_fake = cute.runtime.nullptr(Float32, mem_space=cute.AddressSpace.gmem, assumed_align=4)
     act_input_fake = (
         cute.runtime.make_fake_compact_tensor(
             cfg.DTYPE,
@@ -2389,7 +2396,7 @@ def compile_cutedsl_function_from_cfg(cfg):
         out_col_fake,
         scale_col_fake,  # mO_col, mS_col
         amax_fake,  # mAmax
-        noop_fake,  # mNoop (1-element cast_noop flag)
+        noop_fake,  # mNoop (pointer to the cast_noop flag, may be null at launch)
         act_input_fake,  # mDActInput (backward slot, unused)
         workspace_fake,  # mWorkspace(backward slot, unused)
         cute.runtime.make_fake_stream(),  # stream (compiled as an explicit tvm-ffi
@@ -2411,7 +2418,6 @@ def get_mxfp8_quantization_function(
     with_dbias: bool,
     with_dact: bool,
     with_act: bool,
-    with_noop: bool,
     activation: str,
 ) -> bool:
     """Compile the MXFP8 quantize kernel for this config and register it in the TVM-FFI global registry
@@ -2444,7 +2450,6 @@ def get_mxfp8_quantization_function(
             with_dbias=with_dbias,
             with_dact=with_dact,
             with_act=with_act,
-            with_noop=with_noop,
             activation=activation,
         )
     except ValueError as e:
