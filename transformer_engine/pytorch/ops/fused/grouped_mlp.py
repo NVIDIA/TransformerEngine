@@ -101,22 +101,6 @@ def _nvidia_cudnn_frontend_supports_wgrad() -> bool:
     return _cudnn_frontend_version_supported()
 
 
-def _single_group_mlp_optimization_enabled(disable_env: str) -> bool:
-    """Whether to use one optimized single-group grouped-MLP path."""
-    if int(os.getenv("NVTE_DISABLE_SINGLE_GROUP_MLP_OPT", "0")) != 0:
-        return False
-    return int(os.getenv(disable_env, "0")) == 0
-
-
-def _allocate_dprob_tensor(scales_tensor: torch.Tensor) -> torch.Tensor:
-    """Allocate the cuDNN DGLU dprob accumulator.
-
-    Kept as a small helper so tests can inject nonzero initial contents and
-    verify cuDNN's zero-initialization requirement.
-    """
-    return torch.zeros_like(scales_tensor)
-
-
 def _wrap_single_quantized_as_grouped(
     tensor: torch.Tensor,
     quantized: MXFP8Tensor | NVFP4Tensor | NVFP4TensorStorage,
@@ -150,12 +134,6 @@ def _wrap_single_quantized_as_grouped(
         k_dim = columnwise_data.shape[0]
     else:
         k_dim = tensor.shape[-1]
-
-    if tensor_offsets is None and not _single_group_mlp_optimization_enabled(
-        "NVTE_DISABLE_SINGLE_GROUP_MLP_OFFSETLESS_WRAPPER_OPT"
-    ):
-        tensor_offsets = torch.zeros(2, dtype=torch.int64, device=tensor.device)
-        tensor_offsets[1] = m_dim * k_dim
 
     return GroupedTensor(
         shape=(m_dim, k_dim),
@@ -193,12 +171,7 @@ def _group_quantize_for_grouped_mlp(
             tensor_offsets=tensor_offsets,
         )
 
-    if not isinstance(quantizer, (MXFP8Quantizer, NVFP4Quantizer)) or (
-        isinstance(quantizer, MXFP8Quantizer)
-        and not _single_group_mlp_optimization_enabled(
-            "NVTE_DISABLE_SINGLE_GROUP_MLP_QUANT_OPT"
-        )
-    ):
+    if not isinstance(quantizer, (MXFP8Quantizer, NVFP4Quantizer)):
         return tex.group_quantize(
             tensor,
             quantizer,
@@ -747,15 +720,7 @@ def _compute_grad_params(
             num_groups == 1
             and isinstance(grouped_x, (GroupedTensor, GroupedTensorStorage))
             and isinstance(grouped_dy, (GroupedTensor, GroupedTensorStorage))
-            and (
-                isinstance(grouped_x.quantizer, NVFP4Quantizer)
-                or (
-                    isinstance(grouped_x.quantizer, MXFP8Quantizer)
-                    and _single_group_mlp_optimization_enabled(
-                        "NVTE_DISABLE_SINGLE_GROUP_MLP_WGRAD_OPT"
-                    )
-                )
-            )
+            and isinstance(grouped_x.quantizer, (MXFP8Quantizer, NVFP4Quantizer))
             and isinstance(grouped_dy.quantizer, grouped_x.quantizer.__class__)
         ):
             gemm_fn = functools.partial(
@@ -1143,24 +1108,6 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             num_groups == 1
             and unit_activation_scale
             and isinstance(fc1_input_quantizer, MXFP8Quantizer)
-            and _single_group_mlp_optimization_enabled(
-                "NVTE_DISABLE_SINGLE_GROUP_MLP_OFFSETLESS_METADATA_OPT"
-            )
-            and _single_group_mlp_optimization_enabled(
-                "NVTE_DISABLE_SINGLE_GROUP_MLP_OFFSETLESS_WRAPPER_OPT"
-            )
-            and _single_group_mlp_optimization_enabled(
-                "NVTE_DISABLE_SINGLE_GROUP_MLP_QUANT_OPT"
-            )
-            and _single_group_mlp_optimization_enabled(
-                "NVTE_DISABLE_SINGLE_GROUP_MLP_MXFP8_FC2_GEMM_OPT"
-            )
-            and _single_group_mlp_optimization_enabled(
-                "NVTE_DISABLE_SINGLE_GROUP_MLP_MXFP8_DGRAD_GEMM_OPT"
-            )
-            and _single_group_mlp_optimization_enabled(
-                "NVTE_DISABLE_SINGLE_GROUP_MLP_WGRAD_OPT"
-            )
         )
 
         # Prepare split metadata
@@ -1176,9 +1123,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             fc1_x_tensor_offsets = None
             fc2_x_tensor_offsets = None
             fc2_out_tensor_offsets = None
-        elif num_groups == 1 and _single_group_mlp_optimization_enabled(
-            "NVTE_DISABLE_SINGLE_GROUP_MLP_METADATA_OPT"
-        ):
+        elif num_groups == 1:
             metadata_key = (
                 device.type,
                 device.index,
@@ -1306,9 +1251,6 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             and weight_requires_grad
             and isinstance(fc1_input_quantizer, MXFP8Quantizer)
             and not is_quantized_tensor(input_)
-            and _single_group_mlp_optimization_enabled(
-                "NVTE_DISABLE_SINGLE_GROUP_MLP_DEFER_FC1_COLUMNWISE_OPT"
-            )
         )
 
         # Group-quantize input tensor and convert dtypes if needed
@@ -1505,12 +1447,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         if fc1_op.single_grouped_weight:
             # Clone and swizzle scales for GEMM.
             fc1_weight_for_gemm = grouped_fc1_weight.copy()
-            use_single_group_weight_swizzle = (
-                num_groups == 1
-                and _single_group_mlp_optimization_enabled(
-                    "NVTE_DISABLE_SINGLE_GROUP_MLP_FC1_WEIGHT_SWIZZLE_OPT"
-                )
-            )
+            use_single_group_weight_swizzle = num_groups == 1
             if use_single_group_weight_swizzle:
                 fc1_weight_single = _single_quantized_tensor_from_grouped(fc1_weight_for_gemm)
                 fc1_weight_single._columnwise_data = None
@@ -1547,12 +1484,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             fc1_activation_kwargs["b_tensor"] = fc1_w_data
             fc1_activation_kwargs["sfb_tensor"] = fc1_w_scales
         else:
-            use_single_discrete_weight = (
-                num_groups == 1
-                and _single_group_mlp_optimization_enabled(
-                    "NVTE_DISABLE_SINGLE_GROUP_MLP_FC1_DISCRETE_WEIGHT_OPT"
-                )
-            )
+            use_single_discrete_weight = num_groups == 1
             if use_single_discrete_weight:
                 fc1_weight_single = grouped_fc1_weight[0]
                 original_rowwise_scale = fc1_weight_single._rowwise_scale_inv
@@ -1725,12 +1657,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                 with_gemm_swizzled_scales=True,
             )
 
-            use_single_group_dense_fc2 = (
-                num_groups == 1
-                and _single_group_mlp_optimization_enabled(
-                    "NVTE_DISABLE_SINGLE_GROUP_MLP_MXFP8_FC2_GEMM_OPT"
-                )
-            )
+            use_single_group_dense_fc2 = num_groups == 1
             fc2_out_buf = validate_or_alloc_output(output_buffer, fc2_out_shape, dtype, device)
             if use_single_group_dense_fc2:
                 fc2_out = _single_group_fc2_gemm(
@@ -2098,7 +2025,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         if not unit_activation_scale:
             scales_f32 = scales.detach().to(dtype=torch.float32)
             scales_tensor = scales_f32.reshape(-1, 1, 1)
-            dscales_tensor = _allocate_dprob_tensor(scales_tensor)
+            dscales_tensor = torch.zeros_like(scales_tensor)
 
         fc2_d_dtype = torch.bfloat16 if use_nvfp4 else torch.float8_e4m3fn
         if use_nvfp4:
@@ -2192,12 +2119,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             fc2_dactivation_kwargs["b_tensor"] = fc2_w_data
             fc2_dactivation_kwargs["sfb_tensor"] = fc2_w_scales
         else:
-            use_single_discrete_weight = (
-                num_groups == 1
-                and _single_group_mlp_optimization_enabled(
-                    "NVTE_DISABLE_SINGLE_GROUP_MLP_FC2_DGRAD_DISCRETE_WEIGHT_OPT"
-                )
-            )
+            use_single_discrete_weight = num_groups == 1
             if use_single_discrete_weight:
                 fc2_weight_single = grouped_fc2_weight[0]
                 original_rowwise_data = fc2_weight_single._rowwise_data
@@ -2446,12 +2368,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             if is_distributed_weight(fc1_leader):
                 grouped_fc1_weight = materialize_weight_for_backward(fc1_leader)
 
-            use_single_group_dense_dgrad = num_groups == 1 and (
-                use_nvfp4
-                or _single_group_mlp_optimization_enabled(
-                    "NVTE_DISABLE_SINGLE_GROUP_MLP_MXFP8_DGRAD_GEMM_OPT"
-                )
-            )
+            use_single_group_dense_dgrad = num_groups == 1
             if use_single_group_dense_dgrad:
                 grad_input = validate_or_alloc_output(
                     grad_input_buffer, in_shape, dtype, device
