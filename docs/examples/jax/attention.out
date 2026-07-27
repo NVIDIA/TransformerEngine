@@ -7,7 +7,7 @@ Mean time: 0.09856224060058594 ms
 # SINGLE_GPU_OUTPUT_END
 
 # MLA_OUTPUT_START
-TE MLA-style BSHD: q/k head dim=128, v head dim=64
+TE DeepSeek-style MLA head dimensions: q/k head dim=128, v head dim=64
 Output shape=(2, 4096, 128, 64), dtype=bfloat16
 Grad shapes=[(2, 4096, 128, 128), (2, 4096, 8, 128), (2, 4096, 8, 64)]
 # MLA_OUTPUT_END

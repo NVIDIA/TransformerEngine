@@ -276,7 +276,7 @@ def run_mla_variant():
     )
     jax.block_until_ready((out, loss, grads))
     print(
-        "TE MLA-style BSHD: "
+        "TE DeepSeek-style MLA head dimensions: "
         f"q/k head dim={mla_head_dim_qk}, v head dim={mla_head_dim_v}"
     )
     print(f"Output shape={tuple(out.shape)}, dtype={out.dtype}")
