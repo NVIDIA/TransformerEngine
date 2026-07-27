@@ -381,16 +381,16 @@ def test_dpa_fa4_hdim256(dtype, model_configs, model):
 # SDPA bprop kernel. BSHD support starts with cuDNN FE 1.24 / BE 9.23; THD support starts
 # with cuDNN FE 1.26 / BE 9.25. The kernel supports d_qk == d_v == 256 only, vanilla softmax only,
 # no dropout, no ALiBi, and (for non-causal masks) full-window attention only.
-model_configs_fused_d256 = {
+model_configs_d256 = {
     # test: ModelConfig(b, sq, hq, dqk)  -> head_dim_v defaults to head_dim_qk (256)
-    "fused_d256_no_mask": ModelConfig(2, 512, 16, 256),
-    "fused_d256_padding": ModelConfig(2, 512, 16, 256, attn_mask_type="padding"),
+    "d256_no_mask": ModelConfig(2, 512, 16, 256),
+    "d256_padding": ModelConfig(2, 512, 16, 256, attn_mask_type="padding"),
     # SWA is allowed only together with a causal mask on the D=256 bprop kernel.
-    "fused_d256_causal_swa": ModelConfig(
+    "d256_causal_swa": ModelConfig(
         2, 1024, 16, 256, attn_mask_type="causal", window_size=(128, 0)
     ),
     # GQA variant (num_gqa_groups < num_heads).
-    "fused_d256_padding_causal_gqa": ModelConfig(
+    "d256_padding_causal_gqa": ModelConfig(
         2, 1024, 16, 256, num_gqa_groups=4, attn_mask_type="padding_causal"
     ),
 }
@@ -401,8 +401,8 @@ model_configs_fused_d256 = {
     reason="cuDNN FusedAttention head_dim=256 backward is Blackwell server (SM100/SM103) only.",
 )
 @pytest.mark.parametrize("dtype", param_types)
-@pytest.mark.parametrize("model_configs", [model_configs_fused_d256])
-@pytest.mark.parametrize("model", model_configs_fused_d256.keys())
+@pytest.mark.parametrize("model_configs", [model_configs_d256])
+@pytest.mark.parametrize("model", model_configs_d256.keys())
 @pytest.mark.parametrize(
     "qkv_layout",
     [
@@ -424,8 +424,8 @@ model_configs_fused_d256 = {
         ),
     ],
 )
-def test_dpa_fused_attn_d256(dtype, model_configs, model, qkv_layout):
-    """Test DotProductAttention with cuDNN FusedAttention: head_dim=256 backward on Blackwell"""
+def test_dpa_d256(dtype, model_configs, model, qkv_layout):
+    """Test DotProductAttention with head_dim=256 backward on Blackwell"""
     test_dot_product_attention(dtype, model_configs, model, False, qkv_layout, False, False)
 
 
