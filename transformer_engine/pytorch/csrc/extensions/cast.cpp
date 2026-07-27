@@ -19,6 +19,7 @@
 #include "../extensions.h"
 #include "common.h"
 #include "common/common.h"
+#include "common/util/cuda_runtime.h"
 #include "common/util/system.h"
 #include "pybind.h"
 #include "transformer_engine/multi_tensor.h"
@@ -1630,6 +1631,25 @@ void split_quantize_nvfp4_impl(const TensorWrapper &input,
 
   // CUDA stream
   auto stream = at::cuda::getCurrentCUDAStream();
+
+  // The RHT helper dispatches to grouped Hadamard transform kernels that are
+  // implemented for the SM100 family only. On other architectures, where
+  // NVFP4Quantizer::is_eligible_for_rht_cast_fusion is false as well, quantize
+  // each split on its own instead. That takes the generic unfused RHT path.
+  const int sm = transformer_engine::cuda::sm_arch();
+  const bool grouped_rht_supported = sm >= 100 && sm <= 110;
+  if (quantizer.with_rht && !grouped_rht_supported) {
+    NVTE_CHECK(input.dtype() == DType::kBFloat16, "RHT is only supported for bfloat16 input");
+    NVTE_SCOPED_GIL_RELEASE({
+      for (size_t i = 0; i < num_tensors; ++i) {
+        if (input_list[i].numel() == 0) {
+          continue;
+        }
+        quantizers[i]->quantize(input_list[i], output_list[i], std::nullopt);
+      }
+    });
+    return;
+  }
 
   // Perform multi-tensor quantization
   NVTE_SCOPED_GIL_RELEASE({
