@@ -23,33 +23,10 @@ from transformer_engine.pytorch.tensor.float8_tensor import (
 )
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
 from transformer_engine.pytorch.tensor.float8_blockwise_tensor import Float8BlockQuantizer
-
-try:
-    from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Quantizer
-
-    _nvfp4_available = True
-except ImportError:
-    _nvfp4_available = False
-    NVFP4Quantizer = None
+from transformer_engine.pytorch.tensor.utils import get_quantization_recipe_name
 
 
 ALL_RECIPE_NAMES = ["fp8_delayed_scaling", "fp8_current_scaling", "mxfp8", "fp8_block_scaling"]
-
-
-def _get_recipe_name(quantizer: Optional[Quantizer]):
-    if quantizer is None:
-        return ""
-    if isinstance(quantizer, Float8Quantizer):
-        return "fp8_delayed_scaling"
-    if isinstance(quantizer, Float8CurrentScalingQuantizer):
-        return "fp8_current_scaling"
-    if isinstance(quantizer, MXFP8Quantizer):
-        return "mxfp8"
-    if isinstance(quantizer, Float8BlockQuantizer):
-        return "fp8_block_scaling"
-    if _nvfp4_available and isinstance(quantizer, NVFP4Quantizer):
-        return "nvfp4"
-    raise ValueError(f"Unsupported quantizer type: {type(quantizer)}")
 
 
 def _get_new_quantizer(recipe_name, fp8_dtype):
@@ -336,7 +313,9 @@ class LogFp8TensorStats(BaseLogTensorStats):
             )
             return
 
-        recipe_name = _get_recipe_name(quantizer)
+        recipe_name = get_quantization_recipe_name(quantizer)
+        if recipe_name == "nvfp4_rowwise":
+            recipe_name = "nvfp4"
 
         for stat in config["stats"]:
             self.check_if_stat_is_supported(
