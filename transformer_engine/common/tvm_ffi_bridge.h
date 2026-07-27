@@ -251,9 +251,13 @@ class TVMFFICentral {
     // Only check if libtvm_ffi.so is loaded if user enables the CuTeDSL backend.
     // So if user disables the CuTeDSL backend, don't output this warning message.
     if (!tvm_ffi_available_) {
-      NVTE_WARN(
-          "Cannot dispatch to CuTeDSL kernels because libtvm_ffi.so is not successfully loaded."
-          " Will fall back to the default CUDA C++ kernels.");
+      // Warn once: the state is permanent, so a per-call warning would spam every quantize.
+      static std::once_flag warned;
+      std::call_once(warned, [] {
+        NVTE_WARN(
+            "Cannot dispatch to CuTeDSL kernels because libtvm_ffi.so is not successfully loaded."
+            " Will fall back to the default CUDA C++ kernels.");
+      });
       return std::nullopt;
     }
     const std::string key = cfg.to_key();
