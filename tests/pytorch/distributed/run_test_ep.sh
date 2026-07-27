@@ -9,8 +9,6 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-TE_REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
-export PYTHONPATH="${TE_REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
 
 DETECTED_GPUS=$(nvidia-smi -L 2>/dev/null | wc -l)
 if [ "${DETECTED_GPUS}" -lt 4 ]; then

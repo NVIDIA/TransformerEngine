@@ -26,10 +26,8 @@ if [ "${NSYS}" -eq 1 ] && [ "${KINETO}" -eq 1 ]; then
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-TE_REPO_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
 RESULTS="${SCRIPT_DIR}/results"
 mkdir -p "${RESULTS}"
-export PYTHONPATH="${TE_REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
 
 DETECTED_GPUS=$(nvidia-smi -L 2>/dev/null | wc -l)
 NUM_GPUS="${NUM_GPUS:-${DETECTED_GPUS}}"

@@ -19,6 +19,10 @@ from transformer_engine.pytorch.ops.fused.grouped_mlp import (
     _cudnn_frontend_supports_grouped_gemm_srelu,
     _cudnn_frontend_version_supported,
 )
+from transformer_engine.pytorch.ops.basic.grouped_linear import (
+    OUTPUT_BUFFER_KEY,
+    GRAD_INPUT_BUFFER_KEY,
+)
 from transformer_engine.pytorch import (
     QuantizedTensor,
     Float8CurrentScalingQuantizer,
@@ -515,7 +519,8 @@ class TestGroupedLinearOp:
         split_sizes = torch.tensor(split_sizes, dtype=torch.int, device=device)
 
         # Pad input tokens to validate the sync-free flow
-        in_shape = (split_sizes.sum().item() + token_padding, in_features)
+        num_active_tokens = split_sizes.sum().item()
+        in_shape = (num_active_tokens + token_padding, in_features)
         out_shape = (in_shape[0], out_features)
 
         recipe = make_recipe(quantization)
@@ -531,33 +536,45 @@ class TestGroupedLinearOp:
                 single_grouped_weight=single_grouped_weight,
                 single_grouped_bias=single_grouped_bias,
             )
+            reference_op = te.ops.GroupedLinear(
+                group_size,
+                in_features,
+                out_features,
+                bias=bias,
+                device=device,
+                dtype=dtype,
+                accumulate_into_main_grad=accumulate_into_main_grad,
+                single_grouped_weight=single_grouped_weight,
+                single_grouped_bias=single_grouped_bias,
+            )
+        reference_op.load_state_dict(op.state_dict())
 
-        def _weight_params() -> list[torch.nn.Parameter]:
+        def _weight_params(module: torch.nn.Module) -> list[torch.nn.Parameter]:
             if single_grouped_weight:
-                return [op.weight]
-            return [getattr(op, f"weight{i}") for i in range(group_size)]
+                return [module.weight]
+            return [getattr(module, f"weight{i}") for i in range(group_size)]
 
-        def _bias_params() -> list[torch.nn.Parameter]:
+        def _bias_params(module: torch.nn.Module) -> list[torch.nn.Parameter]:
             if not bias:
                 return []
             if single_grouped_bias:
-                return [op.bias]
-            return [getattr(op, f"bias{i}") for i in range(group_size)]
+                return [module.bias]
+            return [getattr(module, f"bias{i}") for i in range(group_size)]
 
-        def _init_main_grads(value: float = 0.0) -> None:
+        def _init_main_grads(module: torch.nn.Module, value: float = 0.0) -> None:
             if not accumulate_into_main_grad:
                 return
             with torch.no_grad():
-                for w in _weight_params():
+                for w in _weight_params(module):
                     if getattr(w, "main_grad", None) is None:
                         w.main_grad = torch.empty(w.size(), device=device, dtype=torch.float32)
                     w.main_grad.fill_(value)
 
-        def _collect_main_grads() -> list[torch.Tensor]:
-            return [w.main_grad.detach().clone() for w in _weight_params()]
+        def _collect_main_grads(module: torch.nn.Module) -> list[torch.Tensor]:
+            return [w.main_grad.detach().clone() for w in _weight_params(module)]
 
-        def _zero_param_grads() -> None:
-            for param in op.parameters():
+        def _zero_param_grads(module: torch.nn.Module) -> None:
+            for param in module.parameters():
                 if param.grad is None:
                     param.grad = torch.zeros_like(param)
                 else:
@@ -582,7 +599,7 @@ class TestGroupedLinearOp:
             out_buf.copy_(out)
             return out_buf
 
-        _init_main_grads(0.0)
+        _init_main_grads(op, 0.0)
 
         static_x = torch.randn(in_shape, device=device, dtype=dtype, requires_grad=True)
         static_dy = torch.randn(out_shape, device=device, dtype=dtype)
@@ -605,8 +622,8 @@ class TestGroupedLinearOp:
             static_dy.copy_(fresh_dy)
 
         # Reset grads & main_grads so the captured iteration starts fresh.
-        _zero_param_grads()
-        _init_main_grads(0.5)
+        _zero_param_grads(op)
+        _init_main_grads(op, 0.5)
         if static_x.grad is not None:
             static_x.grad.zero_()
 
@@ -617,35 +634,36 @@ class TestGroupedLinearOp:
         torch.cuda.synchronize()
         graph_dx = static_x.grad.detach().clone()
         if accumulate_into_main_grad:
-            graph_main_grads = _collect_main_grads()
+            graph_main_grads = _collect_main_grads(op)
             graph_param_grads: list[torch.Tensor] = []
         else:
             graph_main_grads = []
             graph_param_grads = [param.grad.detach().clone() for param in op.parameters()]
 
-        # Reference: same op invoked eagerly with the same fresh inputs and
-        # the same starting grad/main_grad state.
-        _zero_param_grads()
-        _init_main_grads(0.5)
-        static_x.grad.zero_()
+        # Reference: an independent op invoked eagerly with the same fresh
+        # inputs and starting grad/main_grad state.
+        _zero_param_grads(reference_op)
+        _init_main_grads(reference_op, 0.5)
 
         expected_x = fresh_x.detach().clone().requires_grad_(True)
         expected_dy = fresh_dy.detach().clone()
         with te.autocast(enabled=quantization is not None, recipe=recipe):
-            expected_out = op(expected_x, static_split_sizes)
+            expected_out = reference_op(expected_x, static_split_sizes)
         expected_out.backward(expected_dy)
 
         tols = dtype_tols(dtype)
         if quantization is not None:
             tols = quantization_tols(quantization)
 
-        assert_close(graph_out, expected_out, **tols)
-        assert_close(graph_dx, expected_x.grad, **tols)
+        # Grouped GEMM only defines rows covered by split_sizes. The padded tail
+        # is intentionally outside every group and remains uninitialized.
+        assert_close(graph_out[:num_active_tokens], expected_out[:num_active_tokens], **tols)
+        assert_close(graph_dx[:num_active_tokens], expected_x.grad[:num_active_tokens], **tols)
         if accumulate_into_main_grad:
-            for g, w in zip(graph_main_grads, _weight_params()):
+            for g, w in zip(graph_main_grads, _weight_params(reference_op)):
                 assert_close(g, w.main_grad, **tols)
         else:
-            for g, param in zip(graph_param_grads, op.parameters()):
+            for g, param in zip(graph_param_grads, reference_op.parameters()):
                 assert_close(g, param.grad, **tols)
 
 
@@ -1317,6 +1335,103 @@ class TestGroupedMLPFusedOp:
             torch.testing.assert_close(fc1_db_false, fc1_db_true, **bias_tols)
             torch.testing.assert_close(fc2_db_false, fc2_db_true, **bias_tols)
 
+    @pytest.mark.parametrize("quantization", ("mxfp8", "nvfp4_rht"))
+    def test_grouped_mlp_caller_buffers(
+        self,
+        quantization: str,
+        *,
+        dtype: torch.dtype = torch.bfloat16,
+        device: torch.device = "cuda",
+        group_size: int = 4,
+        hidden_size: int = 256,
+        split_alignment: int = 256,
+        glu_interleave_size: int = 32,
+    ) -> None:
+        """Caller-provided output/grad_input buffers on the fused MXFP8/NVFP4 grouped MLP."""
+        if quantization == "mxfp8" and not mxfp8_available:
+            pytest.skip(reason_for_no_mxfp8)
+        if quantization == "nvfp4_rht" and not nvfp4_available:
+            pytest.skip(reason_for_no_nvfp4)
+        if not te.ops.fused.GroupedMLP_CuTeGEMMGLU.is_supported():
+            pytest.skip("Fused grouped MLP is not supported on this system")
+
+        split_sizes = torch.tensor(
+            [split_alignment * (i + 1) for i in range(group_size)],
+            dtype=torch.int64,
+            device=device,
+        )
+        num_tokens = int(split_sizes.sum())
+        recipe = make_recipe(quantization)
+
+        x_base = torch.empty((num_tokens, hidden_size), device=device, dtype=dtype).uniform_(
+            -0.25, 0.25
+        )
+        probs_base = torch.empty((num_tokens,), device=device, dtype=dtype).uniform_(-0.25, 0.25)
+        dy_base = torch.empty((num_tokens, hidden_size), device=device, dtype=dtype).uniform_(
+            -0.25, 0.25
+        )
+        fc1_ws_base = [
+            torch.empty((2 * hidden_size, hidden_size), device=device, dtype=dtype).uniform_(
+                -0.25, 0.25
+            )
+            for _ in range(group_size)
+        ]
+        fc2_ws_base = [
+            torch.empty((hidden_size, hidden_size), device=device, dtype=dtype).uniform_(
+                -0.25, 0.25
+            )
+            for _ in range(group_size)
+        ]
+
+        def build() -> te.ops.Sequential:
+            with te.quantized_model_init(enabled=True, recipe=recipe):
+                fc1 = te.ops.GroupedLinear(
+                    group_size, hidden_size, 2 * hidden_size, bias=False, device=device, dtype=dtype
+                )
+                scaled_act = te.ops.ScaledSwiGLU(glu_interleave_size=glu_interleave_size)
+                fc2 = te.ops.GroupedLinear(
+                    group_size, hidden_size, hidden_size, bias=False, device=device, dtype=dtype
+                )
+                module = te.ops.Sequential(fc1, scaled_act, fc2)
+            with torch.no_grad():
+                for i in range(group_size):
+                    getattr(fc1, f"weight{i}").copy_(fc1_ws_base[i])
+                    getattr(fc2, f"weight{i}").copy_(fc2_ws_base[i])
+            return module
+
+        def run(module, *, output=None, grad_input=None):
+            x = x_base.detach().clone().requires_grad_(True)
+            probs = probs_base.detach().clone().requires_grad_(True)
+            op_kwargs = {}
+            if grad_input is not None:
+                op_kwargs[module[0]] = {GRAD_INPUT_BUFFER_KEY: grad_input}
+            if output is not None:
+                op_kwargs[module[2]] = {OUTPUT_BUFFER_KEY: output}
+            with te.autocast(enabled=True, recipe=recipe):
+                y = module(x, split_sizes, probs, split_sizes, op_kwargs=op_kwargs or None)
+            y.backward(dy_base)
+            return y, x.grad
+
+        # Reference: internal allocation.
+        y_ref, dx_ref = run(build())
+
+        # Caller-provided buffers.
+        module = build()
+        sentinel = 7.0
+        out_buf = torch.full((num_tokens, hidden_size), sentinel, dtype=dtype, device=device)
+        dgrad_buf = torch.full((num_tokens, hidden_size), sentinel, dtype=dtype, device=device)
+        y, _ = run(module, output=out_buf, grad_input=dgrad_buf)
+
+        # The fused op ran, the returned output aliases the buffer, and both buffers were written.
+        assert isinstance(
+            module._module_groups[0]._forward_ops[0][0],
+            te.ops.fused.GroupedMLP_CuTeGEMMGLU,
+        )
+        assert y.data_ptr() == out_buf.data_ptr()
+        assert not torch.all(dgrad_buf == sentinel)
+        torch.testing.assert_close(y, y_ref, rtol=0, atol=0)
+        torch.testing.assert_close(dgrad_buf, dx_ref, rtol=0, atol=0)
+
     @pytest.mark.parametrize("single_grouped_weight", (False, True))
     @pytest.mark.parametrize("delay_wgrad_compute", (False, True))
     @pytest.mark.parametrize("zero_out_wgrad", (False, True))
@@ -1491,7 +1606,8 @@ class TestGroupedMLPFusedOp:
         random.shuffle(split_sizes)
         split_sizes = torch.tensor(split_sizes, dtype=torch.int64, device=device)
         # Pad the input tokens to validate the sync-free MOE
-        in_shape = (split_sizes.sum().item() + token_padding, hidden_size)
+        num_active_tokens = split_sizes.sum().item()
+        in_shape = (num_active_tokens + token_padding, hidden_size)
         recipe = make_recipe("mxfp8")
         with te.quantized_model_init(enabled=True, recipe=recipe):
             fc1 = te.ops.GroupedLinear(
@@ -1524,8 +1640,43 @@ class TestGroupedMLPFusedOp:
                 scaled_act,
                 fc2,
             )
+            reference_fc1 = te.ops.GroupedLinear(
+                group_size,
+                hidden_size,
+                2 * hidden_size,
+                bias=False,
+                device=device,
+                dtype=dtype,
+                single_grouped_weight=single_grouped_weight,
+                accumulate_into_main_grad=accumulate_into_main_grad,
+            )
+            reference_fc2 = te.ops.GroupedLinear(
+                group_size,
+                hidden_size,
+                hidden_size,
+                bias=False,
+                device=device,
+                dtype=dtype,
+                single_grouped_weight=single_grouped_weight,
+                accumulate_into_main_grad=accumulate_into_main_grad,
+            )
+            reference_scaled_act = (
+                te.ops.ScaledSwiGLU(glu_interleave_size=glu_interleave_size)
+                if activation == "scaled_swiglu"
+                else te.ops.ScaledClampedQGeGLU(glu_interleave_size=glu_interleave_size)
+            )
+            reference_module = te.ops.Sequential(
+                reference_fc1,
+                reference_scaled_act,
+                reference_fc2,
+            )
+        reference_module.load_state_dict(module.state_dict())
 
-        def _init_main_grads(value: float = 0.0) -> None:
+        def _init_main_grads(
+            fc1: torch.nn.Module,
+            fc2: torch.nn.Module,
+            value: float = 0.0,
+        ) -> None:
             if not accumulate_into_main_grad:
                 return
             with torch.no_grad():
@@ -1563,7 +1714,10 @@ class TestGroupedMLPFusedOp:
                         fc1_weight.main_grad.fill_(value)
                         fc2_weight.main_grad.fill_(value)
 
-        def _collect_main_grads() -> tuple[torch.Tensor, torch.Tensor]:
+        def _collect_main_grads(
+            fc1: torch.nn.Module,
+            fc2: torch.nn.Module,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
             if single_grouped_weight:
                 fc1_main_grad = fc1.weight.main_grad.detach().clone()
                 fc2_main_grad = fc2.weight.main_grad.detach().clone()
@@ -1604,7 +1758,7 @@ class TestGroupedMLPFusedOp:
             out_buf.copy_(out)
             return out_buf
 
-        _init_main_grads(0.0)
+        _init_main_grads(fc1, fc2, 0.0)
 
         static_x = torch.randn(in_shape, device=device, dtype=dtype, requires_grad=True)
         static_probs = torch.randn((in_shape[0],), device=device, dtype=dtype, requires_grad=True)
@@ -1643,7 +1797,7 @@ class TestGroupedMLPFusedOp:
 
         for param in module.parameters():
             param.grad = torch.zeros_like(param)
-        _init_main_grads(0.5)
+        _init_main_grads(fc1, fc2, 0.5)
         if static_x.grad is not None:
             static_x.grad.zero_()
         if static_probs.grad is not None:
@@ -1658,21 +1812,19 @@ class TestGroupedMLPFusedOp:
         graph_dx = static_x.grad.detach().clone()
         graph_dprobs = static_probs.grad.detach().clone()
         if accumulate_into_main_grad:
-            graph_fc1_main_grad, graph_fc2_main_grad = _collect_main_grads()
+            graph_fc1_main_grad, graph_fc2_main_grad = _collect_main_grads(fc1, fc2)
         else:
             graph_param_grads = [param.grad.detach().clone() for param in module.parameters()]
 
-        for param in module.parameters():
-            param.grad.zero_()
-        _init_main_grads(0.5)
-        static_x.grad.zero_()
-        static_probs.grad.zero_()
+        for param in reference_module.parameters():
+            param.grad = torch.zeros_like(param)
+        _init_main_grads(reference_fc1, reference_fc2, 0.5)
 
         expected_x = fresh_x.detach().clone().requires_grad_(True)
         expected_probs = fresh_probs.detach().clone().requires_grad_(True)
         expected_dy = fresh_dy.detach().clone()
         with te.autocast(enabled=True, recipe=recipe):
-            expected_out = module(
+            expected_out = reference_module(
                 expected_x,
                 static_split_sizes,
                 expected_probs,
@@ -1681,15 +1833,24 @@ class TestGroupedMLPFusedOp:
         expected_out.backward(expected_dy)
 
         tols = dtype_tols(dtype)
-        assert_close(graph_out, expected_out, **tols)
-        assert_close(graph_dx, expected_x.grad, **tols)
-        assert_close(graph_dprobs, expected_probs.grad, **tols)
+        # The padded tail is outside every expert and its outputs/gradients are
+        # intentionally left uninitialized.
+        assert_close(graph_out[:num_active_tokens], expected_out[:num_active_tokens], **tols)
+        assert_close(graph_dx[:num_active_tokens], expected_x.grad[:num_active_tokens], **tols)
+        assert_close(
+            graph_dprobs[:num_active_tokens],
+            expected_probs.grad[:num_active_tokens],
+            **tols,
+        )
         if accumulate_into_main_grad:
-            expected_fc1_main_grad, expected_fc2_main_grad = _collect_main_grads()
+            expected_fc1_main_grad, expected_fc2_main_grad = _collect_main_grads(
+                reference_fc1,
+                reference_fc2,
+            )
             assert_close(graph_fc1_main_grad, expected_fc1_main_grad, **tols)
             assert_close(graph_fc2_main_grad, expected_fc2_main_grad, **tols)
         else:
-            for graph_grad, param in zip(graph_param_grads, module.parameters()):
+            for graph_grad, param in zip(graph_param_grads, reference_module.parameters()):
                 assert_close(graph_grad, param.grad, **tols)
 
 

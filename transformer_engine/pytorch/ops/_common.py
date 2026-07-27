@@ -18,6 +18,36 @@ from ..quantized_tensor import QuantizedTensorStorage
 from ..utils import canonicalize_dtype
 
 
+def validate_or_alloc_output(
+    buffer: Optional[torch.Tensor],
+    shape: tuple[int, ...] | list[int],
+    dtype: torch.dtype,
+    device: torch.device,
+) -> torch.Tensor:
+    """Return the caller's output buffer, or allocate one if it is None.
+
+    The buffer must be a contiguous, non-grad tensor matching the required
+    shape, dtype, and device. Validation reads host-side metadata only. If the
+    buffer is reused across iterations, pass ``buffer.detach()`` so autograd does
+    not set its ``requires_grad`` (which would trip the non-grad check here on the
+    next call).
+    """
+    shape = tuple(shape)
+    if buffer is None:
+        return torch.empty(shape, dtype=dtype, device=device)
+    if tuple(buffer.shape) != shape:
+        raise ValueError(f"Output buffer shape {tuple(buffer.shape)} does not match {shape}.")
+    if buffer.dtype != dtype:
+        raise ValueError(f"Output buffer dtype {buffer.dtype} does not match {dtype}.")
+    if buffer.device != device:
+        raise ValueError(f"Output buffer device {buffer.device} does not match {device}.")
+    if not buffer.is_contiguous():
+        raise ValueError("Output buffer must be contiguous.")
+    if buffer.requires_grad:
+        raise ValueError("Output buffer must not require gradient.")
+    return buffer
+
+
 def is_quantized_tensor(tensor: torch.Tensor | QuantizedTensorStorage) -> bool:
     """Check if tensor is a quantized tensor"""
     return isinstance(tensor, QuantizedTensorStorage)
