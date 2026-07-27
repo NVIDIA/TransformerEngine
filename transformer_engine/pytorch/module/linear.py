@@ -30,7 +30,13 @@ from .base import (
     _2X_ACC_DGRAD,
     _2X_ACC_WGRAD,
 )
-from ._common import noop_cat, set_quantizer_amax_reduction_group, WeightGradStore
+from ._common import (
+    _get_scale_buffer_info,
+    _update_scale_buffers,
+    noop_cat,
+    set_quantizer_amax_reduction_group,
+    WeightGradStore,
+)
 from ..quantization import FP8GlobalStateManager, QuantizerRole
 from ..utils import (
     cast_if_needed,
@@ -76,7 +82,10 @@ from ..quantized_tensor import (
 )
 from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantizer
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
-from ..tensor.utils import clear_columnwise_cache, is_custom
+from ..tensor.utils import (
+    clear_columnwise_cache,
+    is_custom,
+)
 from ..export import is_in_onnx_export_mode, assert_warmed_up
 from ..cpu_offload import (
     is_cpu_offload_enabled,
@@ -159,6 +168,10 @@ class LinearFwdArgs:
     # --- Weight-grad scheduling ---
     fuse_wgrad_accumulation: bool
     wgrad_store: Optional[Any]
+
+    # Inference Scaling Factor Calibration Buffering
+    scale_buffers: Optional[Dict[str, Optional[torch.Tensor]]]
+    quantized_scaling_factor_buffering_decay: float
 
     # --- Misc ---
     cpu_offloading: bool
@@ -266,8 +279,8 @@ def _linear_forward_impl(
 
     Returns ``(out, new_weight_workspace, tensors_to_save_from_forward, None,
     ctx_attrs)``. ``new_weight_workspace`` is the freshly produced FP8 weight
-    workspace (returned alongside ``out`` so the caller can refresh its
-    cache). The last three are ``None`` when gradients are disabled.
+    workspace returned alongside ``out`` so the caller can refresh its cache.
+    Scaling-factor checkpoint buffers are updated through ``args.scale_buffers``.
     """
 
     weight = args.weight
@@ -479,6 +492,25 @@ def _linear_forward_impl(
             input_quantizer.calibrate(inputmat_total)
         if weight_quantizer is not None:
             weight_quantizer.calibrate(weight)
+
+    # Capture scaling metadata while it is still available.
+    if args.scale_buffers is not None:
+        scale_updates = {}
+        input_scale_buffer = _get_scale_buffer_info(
+            "input", inputmat_total, input_quantizer
+        )
+        if input_scale_buffer is not None:
+            scale_updates[input_scale_buffer[0]] = input_scale_buffer[1]
+        weight_scale_buffer = _get_scale_buffer_info(
+            "weight", weightmat, weight_quantizer
+        )
+        if weight_scale_buffer is not None:
+            scale_updates[weight_scale_buffer[0]] = weight_scale_buffer[1]
+        _update_scale_buffers(
+            args.scale_buffers,
+            scale_updates,
+            args.quantized_scaling_factor_buffering_decay,
+        )
 
     # Choose whether to use GEMM kernel with split accumulator
     use_split_accumulator = _2X_ACC_FPROP
@@ -1532,6 +1564,18 @@ class Linear(TransformerEngineBaseModule):
                        cast tensor. In some scenarios, the input tensor is used by multiple modules,
                        and saving the original input tensor may reduce the memory usage.
                        Cannot work with FP8 DelayedScaling recipe.
+    buffer_quantized_scaling_factors : bool, default = False
+                       If set to ``True``, maintain nonpersistent input and weight quantization
+                       metadata buffers for inference checkpoint export. Per-tensor buffers
+                       store raw global amaxes, except FP8 current scaling buffers, which store
+                       inverse scales directly.
+                       Each buffer is materialized only when its tensor uses a quantizer with a
+                       per-tensor scaling factor. Used to propagate scaling factors from training
+                       into inference.
+    quantized_scaling_factor_buffering_decay : float, default = 0.0
+                       Decay applied to buffered activation scaling factors before incorporating
+                       each new observation. Defaults to 0.0, in which case only the most recent
+                       scaling factor is buffered.
     """
 
     def __init__(
@@ -1561,6 +1605,8 @@ class Linear(TransformerEngineBaseModule):
         symmetric_ar_type: Optional[str] = None,
         save_original_input: bool = False,
         name: Optional[str] = None,
+        buffer_quantized_scaling_factors: bool = False,
+        quantized_scaling_factor_buffering_decay: float = 0.0,
     ) -> None:
         super().__init__(name)
 
@@ -1788,6 +1834,9 @@ class Linear(TransformerEngineBaseModule):
                 if name in self.weight_names or name in self.bias_names:
                     param.skip_backward_post_hook = True
 
+        self.buffer_quantized_scaling_factors = buffer_quantized_scaling_factors
+        self.quantized_scaling_factor_buffering_decay = quantized_scaling_factor_buffering_decay
+
     def get_quantizer_roles(
         self,
         *,
@@ -1972,6 +2021,13 @@ class Linear(TransformerEngineBaseModule):
                 bias_tensor if (self.apply_bias and not self.gemm_bias_unfused_add) else None
             )
             wgrad_store = self.wgrad_store if self.wgrad_store.delay_wgrad_compute() else None
+            scale_buffers = None
+            if self.buffer_quantized_scaling_factors:
+                scale_buffers = {
+                    name: value
+                    for name, value in self._buffers.items()
+                    if name.endswith("_te_ptq_calibrated")
+                }
             fwd_args = LinearFwdArgs(
                 # tensors
                 weight=weight_tensor,
@@ -2028,6 +2084,11 @@ class Linear(TransformerEngineBaseModule):
                 # weight-grad scheduling
                 fuse_wgrad_accumulation=self.fuse_wgrad_accumulation,
                 wgrad_store=wgrad_store,
+                # Inference Scaling Factor Calibration Buffering
+                scale_buffers=scale_buffers,
+                quantized_scaling_factor_buffering_decay=(
+                    self.quantized_scaling_factor_buffering_decay
+                ),
                 # misc
                 cpu_offloading=is_cpu_offload_enabled(),
                 is_grad_enabled=is_grad_enabled,
@@ -2039,6 +2100,16 @@ class Linear(TransformerEngineBaseModule):
                 linear_bias_tensor,
                 fwd_args,
             )
+
+            if scale_buffers is not None:
+                # Assign the scaling factor calibration buffers to model.
+                # Requires CUDA graph warmup step.
+                for name, value in scale_buffers.items():
+                    if value is not None:
+                        if name in self._buffers:
+                            setattr(self, name, value)
+                        else:
+                            self.register_buffer(name, value, persistent=False)
 
             if new_weight_workspace is not None and cache_name is not None:
                 if isinstance(new_weight_workspace, torch.Tensor):

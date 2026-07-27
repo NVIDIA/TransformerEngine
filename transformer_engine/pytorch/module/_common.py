@@ -6,14 +6,79 @@
 
 import dataclasses
 import queue
-from typing import Any, Callable, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import torch
 
 from .. import cpp_extensions as tex
 from ..constants import TE_DType
 from ..export import is_in_onnx_export_mode
+from ..tensor.utils import get_quantization_recipe_name
 from ..utils import get_default_init_method
+
+
+def _get_scale_buffer_info(
+    tensor_name: str,
+    tensor: Any,
+    quantizer: Any,
+) -> Optional[Tuple[str, Optional[torch.Tensor]]]:
+    """Get the calibration buffer name and value for a quantized tensor."""
+    recipe = get_quantization_recipe_name(quantizer)
+    if not recipe:
+        return None
+    if recipe == "fp8_current_scaling":
+        metadata_name = "scale_inv"
+        metadata = getattr(tensor, "_scale_inv", None)
+    else:
+        metadata_name = "amax_rowwise"
+        metadata = getattr(
+            tensor,
+            "_amax_rowwise",
+            getattr(quantizer, "amax", None),
+        )
+    buffer_name = f"{tensor_name}_tensor_{metadata_name}_{recipe}_te_ptq_calibrated"
+    return buffer_name, metadata
+
+
+def _update_scale_buffers(
+    scale_buffers: Dict[str, Optional[torch.Tensor]],
+    scale_updates: Dict[str, Optional[torch.Tensor]],
+    activation_scale_decay: float = 0.0,
+) -> None:
+    """Merge observed scaling factors into checkpoint buffers."""
+    for buffer_name, scale in scale_updates.items():
+        if scale is None:
+            continue
+        if buffer_name.startswith("input"):
+            observed_scale = scale.detach().float()
+            scale_buffer = scale_buffers.get(buffer_name)
+            if scale_buffer is not None and scale_buffer.shape != observed_scale.shape:
+                raise RuntimeError(
+                    "Quantized scaling-factor buffer shape changed from "
+                    f"{tuple(scale_buffer.shape)} to {tuple(observed_scale.shape)}"
+                )
+            if activation_scale_decay == 0.0:
+                # If not using scale decay, just buffer the current scaling.
+                scale_buffers[buffer_name] = observed_scale
+                continue
+            if scale_buffer is None:
+                # Initialize the rolling activation scaling factor.
+                # Requires CUDA graph warmup step.
+                scale_buffer = torch.zeros_like(observed_scale)
+                scale_buffers[buffer_name] = scale_buffer
+            # Track a decaying maximum so early-training activation
+            # outliers do not permanently determine the inference scale.
+            scale_buffer.mul_(activation_scale_decay)
+            torch.maximum(
+                scale_buffer,
+                observed_scale,
+                out=scale_buffer,
+            )
+        else:
+            # Keep a reference to the current weight metadata without
+            # allocating or copying a separate buffer.
+            # Requires CUDA graph warmup step.
+            scale_buffers[buffer_name] = scale.detach()
 
 
 def set_quantizer_amax_reduction_group(quantizer, amax_reduction_group) -> None:
