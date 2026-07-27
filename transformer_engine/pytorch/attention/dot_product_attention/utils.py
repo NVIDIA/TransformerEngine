@@ -361,11 +361,17 @@ def _get_fused_attn_backend(
     *args,
 ):
     """Constant-foldable tex.get_fused_attn_backend: the result depends only on
-    the attention config, and the python-side enum keeps it traceable by
-    torch.compile (see the FusedAttnBackend docstring). Layout/bias/mask/softmax
-    are taken as their string keys and resolved to the pybind enums here, so
-    that every argument is a python literal or a python enum."""
-    return FusedAttnBackend.cast(
+    the attention config. Layout/bias/mask/softmax are taken as their string
+    keys and resolved to the pybind enums here, so that every argument is a
+    python literal or a python enum.
+
+    Returns a plain int rather than a FusedAttnBackend member: dynamo
+    reconstructs the result of an assume_constant_result call by re-emitting the
+    call, which is only valid inside the frame that made it. An int survives a
+    graph break because it is baked into the graph as a literal, while an enum
+    member comes out of the reconstruction corrupted (see the cast at the call
+    site, which restores the enum)."""
+    return int(
         tex.get_fused_attn_backend(
             is_training,
             q_type,
@@ -397,6 +403,9 @@ def get_attention_backend(
         Whether the `FusedAttention` backend has been selected.
     fused_attention_backend : FusedAttnBackend
         If `use_fused_attention = True`, one of `FusedAttention` three sub-backends, else `None`.
+        Under `torch.compile` this is the sub-backend's plain integer value instead of the enum
+        member (see the cast below); `FusedAttnBackend.cast` accepts both, as does every consumer
+        in `transformer_engine.pytorch`.
     use_unfused_attention : bool
         Whether the `UnfusedDotProductAttention` backend has been selected.
     available_backends : List[bool]
@@ -1455,11 +1464,13 @@ def get_attention_backend(
             cuda_graph,
             deterministic,
         )
-        if fused_attention_backend == FusedAttnBackend["No_Backend"]:
+        if fused_attention_backend == FusedAttnBackend.No_Backend.value:
             logger.debug("Disabling FusedAttention as no backend supports the provided input")
             use_fused_attention = False
             fused_attention_backend = None
-        elif has_score_mod and fused_attention_backend != FusedAttnBackend["F16_arbitrary_seqlen"]:
+        elif (
+            has_score_mod and fused_attention_backend != FusedAttnBackend.F16_arbitrary_seqlen.value
+        ):
             logger.debug(
                 "Disabling FusedAttention for score_mod because sub-backend %s is not "
                 "F16/BF16 arbitrary-seqlen",
@@ -1509,7 +1520,7 @@ def get_attention_backend(
             use_fused_attention = False
             fused_attention_backend = None
         if (
-            fused_attention_backend == FusedAttnBackend["FP8"]
+            fused_attention_backend == FusedAttnBackend.FP8.value
             and is_training
             and (device_compute_capability < (9, 0) or cudnn_version < (9, 19, 0))
         ):
@@ -1520,7 +1531,7 @@ def get_attention_backend(
             use_fused_attention = False
             fused_attention_backend = None
         if (
-            fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]
+            fused_attention_backend == FusedAttnBackend.F16_arbitrary_seqlen.value
             and is_training
             and (
                 device_compute_capability < (9, 0)
@@ -1589,6 +1600,13 @@ def get_attention_backend(
         use_flash_attention_4 = False
     use_flash_attention = use_flash_attention_2 or use_flash_attention_3 or use_flash_attention_4
     available_backends = [use_flash_attention, use_fused_attention, use_unfused_attention]
+    if fused_attention_backend is not None and not torch.compiler.is_compiling():
+        # The fused sub-backend is kept as a plain int while tracing: it has to
+        # survive a graph break (DotProductAttention hands it to FusedAttention,
+        # which is an eager island) and an enum member does not -- dynamo
+        # reconstructs the constant-folded member into the resumed frame as the
+        # function that produced it. Eager callers get the enum, as before.
+        fused_attention_backend = FusedAttnBackend.cast(fused_attention_backend)
     if use_flash_attention_2:
         flash_attention_backend = FlashAttentionUtils.version
     if use_flash_attention_3:
@@ -2025,7 +2043,10 @@ def get_full_cu_seqlens(
             device=device,
         )
 
-    if is_in_onnx_export_mode():
+    if is_in_onnx_export_mode() or torch.compiler.is_compiling():
+        # torch.is_inference_mode_enabled() (the cache key below) is a fundamental
+        # graph break under torch.compile; building the tensor is a single arange
+        # that the compiler captures into the graph anyway.
         return _get_cu_seqlens(batch_size, max_seqlen, device)
 
     is_inference = torch.is_inference_mode_enabled()
@@ -2538,7 +2559,22 @@ def get_qkv_layout(
 
         return qkv_layout
 
-    if not is_in_onnx_export_mode():
+    if torch.compiler.is_compiling():
+        # The detection in run_iteratively is untraceable by dynamo -- it reads
+        # UntypedStorage.data_ptr and Tensor.storage_offset -- and pointers are
+        # meaningless on the fake tensors used while tracing anyway. Under
+        # torch.compile, packed q/k/v must therefore be declared explicitly, via
+        # DotProductAttention's qkv_layer/kv_layer arguments (which bypass this
+        # function entirely); q/k/v passed separately are treated as three
+        # independent tensors. Views into a packed buffer are non-contiguous, so
+        # making the inputs contiguous keeps the returned layout truthful for
+        # every backend.
+        q, k, v = [x if x.is_contiguous() else x.contiguous() for x in [q, k, v]]
+        if is_same_q_kv_format:
+            qkv_layout = "_".join([qkv_format] * 3)
+        else:
+            qkv_layout = q_format + "_" + kv_format + "_" + kv_format
+    elif not is_in_onnx_export_mode():
         qkv_layout = run_iteratively(q, k, v)
     else:
         qkv_layout = "not_supported"

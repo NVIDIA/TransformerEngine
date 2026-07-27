@@ -107,10 +107,13 @@ class FusedAttnBackend(IntEnum):
     ``transformer_engine_torch.NVTE_Fused_Attn_Backend`` (pybind11) enum
     value-for-value, and instances of the two enums compare equal when they
     share the same integer value. Unlike the pybind enum, a plain-python
-    ``IntEnum`` is traceable by ``torch.compile``: comparisons constant-fold
-    cleanly and instances safely cross the ``assume_constant_result`` boundary
-    in ``get_attention_backend``. Lookup by name (``FusedAttnBackend["FP8"]``)
-    works the same way as with the dict this used to be.
+    ``IntEnum`` is traceable by ``torch.compile``: comparisons against a member
+    constant-fold cleanly. Lookup by name (``FusedAttnBackend["FP8"]``) works
+    the same way as with the dict this used to be.
+
+    Members do not survive a graph break, though, so ``get_attention_backend``
+    hands out plain ints while tracing -- ``cast`` normalizes both back to a
+    member.
     """
 
     No_Backend = int(NVTE_Fused_Attn_Backend.NVTE_No_Backend)

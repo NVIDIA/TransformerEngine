@@ -42,7 +42,6 @@ from transformer_engine.pytorch.distributed import (
     CudaRNGStatesTracker,
     graph_safe_rng_available,
 )
-from transformer_engine.pytorch.jit import no_torch_dynamo
 from transformer_engine.pytorch.graph import is_graph_capturing
 from transformer_engine.pytorch.attention.inference import InferenceParams
 
@@ -715,6 +714,22 @@ class DotProductAttention(TransformerEngineBaseModule):
         """
         _original_recipe = self.fp8_meta.get("recipe", None)
 
+        fp8 = FP8GlobalStateManager.is_fp8_enabled()
+        fp8_calibration = FP8GlobalStateManager.is_fp8_calibration()
+        fp8_parameters = FP8GlobalStateManager.with_fp8_parameters()
+        if not (fp8 or fp8_calibration or fp8_parameters):
+            # Nothing below has an effect when FP8 is off everywhere -- the recipe
+            # juggling ends in the "turn off and return" branch. Bailing out here
+            # also keeps DotProductAttention traceable by torch.compile: with no
+            # autocast active, get_fp8_recipe() below builds a default Recipe,
+            # whose construction is not traceable.
+            self.fast_setattr("fp8_parameters", fp8_parameters)
+            self.fast_setattr("fp8", fp8)
+            self.fast_setattr("fp8_calibration", fp8_calibration)
+            self.fp8_meta["fp8_checkpoint"] = False
+            self.fast_setattr("fp8_initialized", False)
+            return
+
         # global recipe set in autocast()
         fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
         if fp8_recipe.custom():
@@ -1090,7 +1105,6 @@ class DotProductAttention(TransformerEngineBaseModule):
             ]
         return base[:num_quantizers]
 
-    @no_torch_dynamo(recursive=False)
     def forward(
         self,
         query_layer: Optional[torch.Tensor] = None,
@@ -1820,18 +1834,23 @@ class DotProductAttention(TransformerEngineBaseModule):
                     _attention_backends["fused_attention_backend"] = fused_attention_backend
                     _attention_backends["use_unfused_attention"] = use_unfused_attention
                     _attention_backends["backend_selection_requires_update"] = False
-                    if use_flash_attention:
-                        self.logger.info(
-                            "Running with FlashAttention backend (version %s)",
-                            flash_attention_backend,
-                        )
-                    elif use_fused_attention:
-                        self.logger.info(
-                            "Running with FusedAttention backend (sub-backend %s)",
-                            int(fused_attention_backend),
-                        )
-                    elif use_unfused_attention:
-                        self.logger.info("Running with UnfusedDotProductAttention backend")
+                    # Backend selection is only logged in eager mode: dynamo
+                    # graph-breaks on logging.Logger methods, and even the
+                    # arguments below are untraceable (int() of the sub-backend
+                    # enum). Same restriction as in get_attention_backend.
+                    if not torch.compiler.is_compiling():
+                        if use_flash_attention:
+                            self.logger.info(
+                                "Running with FlashAttention backend (version %s)",
+                                flash_attention_backend,
+                            )
+                        elif use_fused_attention:
+                            self.logger.info(
+                                "Running with FusedAttention backend (sub-backend %s)",
+                                fused_attention_backend,
+                            )
+                        elif use_unfused_attention:
+                            self.logger.info("Running with UnfusedDotProductAttention backend")
                 else:
                     use_flash_attention = _attention_backends["use_flash_attention"]
                     flash_attention_backend = _attention_backends["flash_attention_backend"]
