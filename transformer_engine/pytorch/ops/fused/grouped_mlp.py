@@ -162,16 +162,7 @@ def _group_quantize_for_grouped_mlp(
 ) -> GroupedTensor:
     """Quantize into grouped storage."""
 
-    if num_groups != 1:
-        return tex.group_quantize(
-            tensor,
-            quantizer,
-            num_groups,
-            split_sizes,
-            tensor_offsets=tensor_offsets,
-        )
-
-    if not isinstance(quantizer, (MXFP8Quantizer, NVFP4Quantizer)):
+    if num_groups != 1 or not isinstance(quantizer, (MXFP8Quantizer, NVFP4Quantizer)):
         return tex.group_quantize(
             tensor,
             quantizer,
