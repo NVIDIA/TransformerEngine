@@ -18,7 +18,10 @@ import transformer_engine_torch as tex
 
 from transformer_engine.common.recipe import Recipe
 from transformer_engine.pytorch.torch_version import torch_version
-from transformer_engine.pytorch.tensor.utils import clear_columnwise_cache, is_custom
+from transformer_engine.pytorch.tensor.utils import (
+    clear_columnwise_cache,
+    is_custom,
+)
 from .base import (
     fill_userbuffers_buffer_for_all_gather,
     _ub_communicators,
@@ -73,6 +76,8 @@ from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ..tensor.hybrid_tensor import HybridQuantizer
 from ..tensor.identity_tensor import IdentityQuantizer
 from ._common import (
+    _get_scale_buffer_info,
+    _update_scale_buffers,
     apply_normalization,
     set_quantizer_amax_reduction_group,
     set_quantizer_usage_for_wgrad_all_gather,
@@ -244,6 +249,8 @@ class _LayerNormMLP(torch.autograd.Function):
             checkpoint,
             debug,
             is_fsdp2,
+            quantized_scaling_factor_buffering_decay,
+            scale_buffers,
             recompute_for_bwd,
         ) = non_tensor_args
         if fp8:
@@ -346,6 +353,10 @@ class _LayerNormMLP(torch.autograd.Function):
                 "checkpoint": checkpoint,
                 "debug": debug,
                 "is_fsdp2": is_fsdp2,
+                "quantized_scaling_factor_buffering_decay": (
+                    quantized_scaling_factor_buffering_decay
+                ),
+                "scale_buffers": scale_buffers,
                 "recompute_for_bwd": True,  # set this to true for recomputation phase
             }
         # Make sure input dimensions are compatible
@@ -564,6 +575,16 @@ class _LayerNormMLP(torch.autograd.Function):
             if fc1_weight_quantizer is not None:
                 fc1_weight_quantizer.calibrate(fc1_weight)
 
+        fc1_input_scale_buffer = None
+        fc1_weight_scale_buffer = None
+        if scale_buffers is not None:
+            fc1_input_scale_buffer = _get_scale_buffer_info(
+                "fc1_input", ln_out_total, fc1_input_quantizer
+            )
+            fc1_weight_scale_buffer = _get_scale_buffer_info(
+                "fc1_weight", fc1_weight_final, fc1_weight_quantizer
+            )
+
         # ------------------------------------------------------
         # FC1 GEMM
         # ------------------------------------------------------
@@ -677,6 +698,28 @@ class _LayerNormMLP(torch.autograd.Function):
 
                 if fc2_weight_quantizer is not None:
                     fc2_weight_quantizer.calibrate(fc2_weight)
+
+            if scale_buffers is not None:
+                scale_updates = {}
+                if fc1_input_scale_buffer is not None:
+                    scale_updates[fc1_input_scale_buffer[0]] = fc1_input_scale_buffer[1]
+                if fc1_weight_scale_buffer is not None:
+                    scale_updates[fc1_weight_scale_buffer[0]] = fc1_weight_scale_buffer[1]
+                fc2_input_scale_buffer = _get_scale_buffer_info(
+                    "fc2_input", act_out, fc2_input_quantizer
+                )
+                if fc2_input_scale_buffer is not None:
+                    scale_updates[fc2_input_scale_buffer[0]] = fc2_input_scale_buffer[1]
+                fc2_weight_scale_buffer = _get_scale_buffer_info(
+                    "fc2_weight", fc2_weight_final, fc2_weight_quantizer
+                )
+                if fc2_weight_scale_buffer is not None:
+                    scale_updates[fc2_weight_scale_buffer[0]] = fc2_weight_scale_buffer[1]
+                _update_scale_buffers(
+                    scale_buffers,
+                    scale_updates,
+                    quantized_scaling_factor_buffering_decay,
+                )
 
             # Configure Userbuffers reduce-scatter if needed
             ub_obj_fc2out = None
@@ -1944,6 +1987,15 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 whether to use selective activation checkpointing, where activations are not saved for bwd,
                 and instead are recomputed (skipping fc2, as it is not needed for backward). Trades compute
                 for memory. default is false, in which activations are saved in fwd. not supported for onnx forward
+    buffer_quantized_scaling_factors : bool, default = False
+                       If set to ``True``, maintain nonpersistent activation and weight quantization
+                       metadata buffers for both internal linear layers for inference checkpoint
+                       export. Per-tensor buffers store raw global amaxes, except FP8 current
+                       scaling buffers, which store inverse scales directly.
+    quantized_scaling_factor_buffering_decay : float, default = 0.0
+                       Decay applied to buffered activation scaling factors before incorporating
+                       each new observation. Defaults to 0.0, in which case only the most recent
+                       scaling factor is buffered.
     """
 
     def __init__(
@@ -1980,6 +2032,8 @@ class LayerNormMLP(TransformerEngineBaseModule):
         delay_wgrad_compute: bool = False,
         symmetric_ar_type: Optional[str] = None,
         checkpoint: bool = False,
+        buffer_quantized_scaling_factors: bool = False,
+        quantized_scaling_factor_buffering_decay: float = 0.0,
     ) -> None:
         super().__init__(name)
 
@@ -2001,6 +2055,10 @@ class LayerNormMLP(TransformerEngineBaseModule):
         self.zero_centered_gamma = zero_centered_gamma
         self.symmetric_ar_type = symmetric_ar_type
         self.checkpoint = checkpoint
+        self.buffer_quantized_scaling_factors = buffer_quantized_scaling_factors
+        self.quantized_scaling_factor_buffering_decay = (
+            quantized_scaling_factor_buffering_decay
+        )
 
         # GEMM-GELU fusion is currently only supported with split GEMM-AG overlap
         self.gemm_gelu_fusion = (
@@ -2381,6 +2439,14 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 self._fp8_workspaces.get(cache_name_fc2) if cache_name_fc2 is not None else None
             )
 
+            scale_buffers = None
+            if self.buffer_quantized_scaling_factors:
+                scale_buffers = {
+                    name: value
+                    for name, value in self._buffers.items()
+                    if name.endswith("_te_ptq_calibrated")
+                }
+
             non_tensor_args = (
                 self.eps,
                 is_first_microbatch,
@@ -2431,6 +2497,8 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 self.checkpoint,
                 debug,
                 self.is_fsdp2,
+                self.quantized_scaling_factor_buffering_decay,
+                scale_buffers,
             )
             out, ln_out, new_fc1_ws, new_fc2_ws = fwd_fn(
                 *autograd_ctx,
@@ -2445,6 +2513,14 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 fc2_bias if self.apply_bias and not self.gemm_bias_unfused_add else None,
                 non_tensor_args,
             )
+
+            if scale_buffers is not None:
+                for name, value in scale_buffers.items():
+                    if value is not None:
+                        if name in self._buffers:
+                            setattr(self, name, value)
+                        else:
+                            self.register_buffer(name, value, persistent=False)
 
             if new_fc1_ws is not None and cache_name_fc1 is not None:
                 if isinstance(new_fc1_ws, torch.Tensor):
