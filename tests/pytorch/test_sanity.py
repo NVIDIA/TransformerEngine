@@ -564,6 +564,7 @@ def test_sanity_linear_with_zero_tokens(
         out = te_linear(inp_hidden_states)
     loss = out.sum()
     loss.backward()
+    torch.cuda.synchronize()
     assert out.shape == (num_tokens, ffn_hidden_size)
 
 
@@ -615,6 +616,17 @@ def test_sanity_grouped_linear(
         # test must satisfy the native grouped kernels' shape contract. MCore pads each
         # expert's token count to 256; TE requires at least 128-row alignment. Weight K must
         # be 64-aligned.
+        if (
+            bs == 0
+            and fp8_recipe is not None
+            and fp8_recipe.float8_current_scaling()
+            and (10, 0) <= te.get_device_compute_capability() <= (11, 0)
+        ):
+            # TODO: Re-enable when cuBLASLt grouped FP8 current-scaling GEMM supports an
+            # all-empty problem on Blackwell without an illegal memory access.
+            pytest.skip(
+                "Blackwell grouped FP8 current-scaling GEMM does not support all-empty inputs"
+            )
         tokens_per_nonempty_expert = bs * config.max_seqlen_q
         if tokens_per_nonempty_expert % 128 != 0:
             pytest.skip("Single grouped parameters require each nonempty m_split to be 128-aligned")
@@ -681,6 +693,7 @@ def test_sanity_grouped_linear(
         out = te_grouped_linear(inp_hidden_states, m_splits)
     loss = out.sum()
     loss.backward()
+    torch.cuda.synchronize()
     assert out.shape == (num_tokens, ffn_hidden_size)
 
 
