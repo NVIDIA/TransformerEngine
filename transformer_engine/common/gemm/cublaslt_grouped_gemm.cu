@@ -1909,8 +1909,6 @@ void launch_grouped_bias_add(const transformer_engine::GroupedTensor *outputD,
   NVTE_CHECK(outputD->num_tensors >= 1, api_name, ": number of tensors must be at least 1");
   NVTE_CHECK(outputD->num_tensors == bias_tensor->num_tensors, api_name,
              ": output and bias must have the same number of tensors");
-  NVTE_CHECK(outputD->has_data(), api_name, ": output is missing row-wise data");
-  NVTE_CHECK(bias_tensor->has_data(), api_name, ": bias is missing row-wise data");
   NVTE_CHECK(outputD->dtype() == bias_tensor->dtype(), api_name,
              ": output and bias must have matching dtypes");
   NVTE_CHECK(bias_tensor->all_same_first_dim(), api_name,
@@ -1921,15 +1919,23 @@ void launch_grouped_bias_add(const transformer_engine::GroupedTensor *outputD,
   NVTE_CHECK(outputD->get_common_last_dim() == bias_tensor->get_common_last_dim(), api_name,
              ": output and bias last dims must match");
 
+  const int num_tensors = static_cast<int>(outputD->num_tensors);
+  NVTE_CHECK(num_tensors <= kMaxGroups, api_name, " supports at most ", kMaxGroups,
+             " tensors, got ", num_tensors);
+  const int total_rows = static_cast<int>(outputD->logical_shape.data[0]);
+  // A valid zero-sized CUDA allocation may have a null data pointer.
+  if (total_rows == 0) {
+    return;
+  }
+
+  NVTE_CHECK(outputD->has_data(), api_name, ": output is missing row-wise data");
+  NVTE_CHECK(bias_tensor->has_data(), api_name, ": bias is missing row-wise data");
+
   const TensorShapeInfo d_meta = TensorShapeInfo::from_tensor(outputD);
 
   const DType dtype = outputD->dtype();
   constexpr int kThreads = 128;
 
-  const int num_tensors = static_cast<int>(outputD->num_tensors);
-  NVTE_CHECK(num_tensors <= kMaxGroups, api_name, " supports at most ", kMaxGroups,
-             " tensors, got ", num_tensors);
-  const int total_rows = static_cast<int>(outputD->logical_shape.data[0]);
   const int n = static_cast<int>(outputD->get_common_last_dim());
 
   const size_t elem_size = typeToSize(dtype);
@@ -1997,8 +2003,6 @@ void nvte_grouped_scaled_bias_add(const NVTEGroupedTensor output, const NVTEGrou
   const GroupedTensor *bias_tensor = convertNVTEGroupedTensorCheck(bias);
   const Tensor *scale_tensor = convertNVTETensorCheck(scale);
 
-  NVTE_CHECK(scale_tensor->data.dptr != nullptr,
-             "Grouped scaled bias add: scale tensor must not be null");
   NVTE_CHECK(scale_tensor->dtype() == DType::kFloat32,
              "Grouped scaled bias add: scale must be float32");
   NVTE_CHECK(scale_tensor->data.shape.size() == 1,
@@ -2007,6 +2011,10 @@ void nvte_grouped_scaled_bias_add(const NVTEGroupedTensor output, const NVTEGrou
   const size_t total_rows = static_cast<size_t>(outputD->logical_shape.data[0]);
   NVTE_CHECK(scale_tensor->data.shape[0] == total_rows, "Grouped scaled bias add: scale size (",
              scale_tensor->data.shape[0], ") must equal total rows (", total_rows, ")");
+  if (total_rows > 0) {
+    NVTE_CHECK(scale_tensor->data.dptr != nullptr,
+               "Grouped scaled bias add: scale tensor must not be null");
+  }
 
   const float *scale_ptr = static_cast<const float *>(scale_tensor->data.dptr);
   launch_grouped_bias_add(outputD, bias_tensor, scale_ptr, true, stream);

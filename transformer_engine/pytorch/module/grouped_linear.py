@@ -472,8 +472,9 @@ def is_module_grouped_tensor_path_supported(
       quantization kernels are unavailable.
     * FP8 block scaling is unsupported by this path on Blackwell because it
       does not implement the legacy path's MXFP8-broadcast emulation.
-    * Grouped GEMM requires cuBLASLt 13.3+, with 13.4+ required on Hopper and
-      13.5+ required for FP8 per-tensor current scaling on Hopper.
+    * Grouped GEMM requires cuBLASLt 13.3+, with 13.4+ required on Hopper,
+      13.5+ required for FP8 per-tensor current scaling on Hopper, and 13.6+
+      required for FP8 block scaling on Hopper.
     * FP32 is unsupported by the cuBLASLt grouped GEMM.
 
     Runtime-only restrictions such as debug mode, CPU offloading, calibration,
@@ -501,7 +502,8 @@ def is_module_grouped_tensor_path_supported(
     if recipe.float8_current_scaling():
         return device_capability >= (10, 0) or cublaslt_version >= 130500
     if recipe.float8_block_scaling():
-        return device_capability < (10, 0)
+        # cuBLASLt 13.6 fixes Hopper grouped GEMM algo selection for block-scaled FP8.
+        return device_capability < (10, 0) and cublaslt_version >= 130600
     if recipe.mxfp8():
         return device_capability >= (10, 0)
     if recipe.nvfp4():
@@ -2245,7 +2247,7 @@ class GroupedLinear(TransformerEngineBaseModule):
             if weight_quantizers and weight_quantizers[0] is not None
             else None
         )
-        if recipe is not None and (recipe.delayed() or recipe.float8_current_scaling()):
+        if recipe is not None and recipe.delayed():
             self.set_tensor_parallel_attributes(defer_init=defer_init)
             return
 

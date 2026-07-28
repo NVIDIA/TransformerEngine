@@ -1158,6 +1158,56 @@ def test_grouped_gemm_grouped_tensor(z, m, n, k, case, layout, accumulate, use_b
             torch.testing.assert_close(o, o_ref, **tols)
 
 
+@pytest.mark.parametrize("use_bias_scale", [False, True])
+def test_grouped_gemm_grouped_tensor_zero_work_bias(use_bias_scale) -> None:
+    """A grouped bias operation is a no-op when every group has zero rows.
+
+    Zero-sized CUDA tensors may legally have a null data pointer. Exercise both bias entry points
+    so neither the ordinary nor scaled path mistakes that pointer for missing output storage.
+    This BF16 case runs on both Hopper and Blackwell when grouped cuBLASLt GEMM is available.
+    """
+    if not is_module_grouped_tensor_path_supported(
+        None,
+        torch.bfloat16,
+        single_grouped_weight=False,
+    ):
+        pytest.skip("BF16 GroupedTensor GEMM is unavailable.")
+
+    num_groups = 4
+    in_features = 256
+    out_features = 256
+    m_sizes = [0] * num_groups
+    dtype = torch.bfloat16
+    device = torch.device("cuda")
+
+    weights = [
+        torch.randn(out_features, in_features, dtype=dtype, device=device)
+        for _ in range(num_groups)
+    ]
+    biases = [torch.randn(1, out_features, dtype=dtype, device=device) for _ in range(num_groups)]
+    grouped_weights = _make_grouped_tensor_uniform(
+        num_groups, out_features, in_features, device, dtype
+    )
+    grouped_input = _make_grouped_tensor_from_splits(m_sizes, in_features, device, dtype)
+    grouped_output = _make_grouped_tensor_from_splits(m_sizes, out_features, device, dtype)
+    grouped_bias = _make_grouped_tensor_uniform(num_groups, 1, out_features, device, dtype)
+    _pack_grouped_tensor(grouped_weights, weights)
+    _pack_grouped_tensor(grouped_bias, biases)
+
+    bias_scale = torch.empty(0, dtype=torch.float32, device=device) if use_bias_scale else None
+    general_grouped_gemm_for_grouped_tensor(
+        grouped_weights,
+        grouped_input,
+        grouped_output,
+        layout="TN",
+        bias=grouped_bias,
+        bias_scale=bias_scale,
+    )
+    torch.cuda.synchronize()
+
+    assert grouped_output.rowwise_data.numel() == 0
+
+
 @pytest.mark.parametrize("layout", ["TN", "NN", "NT"])
 @pytest.mark.parametrize("accumulate", [False, True])
 @pytest.mark.parametrize("quant_type", ["bf16", "mxfp8"])

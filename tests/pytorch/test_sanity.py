@@ -610,6 +610,17 @@ def test_sanity_grouped_linear(
         single_grouped_weight=True,
     ):
         pytest.skip("Single grouped parameters require the native grouped-tensor path")
+    if single_param:
+        # Single grouped parameters intentionally have no split-quantize fallback, so this
+        # test must satisfy the native grouped kernels' shape contract. MCore pads each
+        # expert's token count to 256; TE requires at least 128-row alignment. Weight K must
+        # be 64-aligned.
+        tokens_per_nonempty_expert = bs * config.max_seqlen_q
+        if tokens_per_nonempty_expert % 128 != 0:
+            pytest.skip("Single grouped parameters require each nonempty m_split to be 128-aligned")
+        k_alignment = 64
+        if config.hidden_size % k_alignment != 0:
+            pytest.skip(f"Single grouped parameters require GEMM K to be {k_alignment}-aligned")
 
     if fp8_recipe is not None:
         if not is_fp8_supported(config):
