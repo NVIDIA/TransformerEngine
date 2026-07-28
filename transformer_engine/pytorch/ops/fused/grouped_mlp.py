@@ -1240,22 +1240,10 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         ):
             grouped_fc1_weight._with_gemm_swizzled_scales = False
 
-        # The canonical shared-expert TELinear saves its original BF16 input and
-        # creates the columnwise MXFP8 representation just before FC1 wgrad.
-        # Preserve that policy for the single-group fused path so fprop only
-        # pays for the rowwise representation required by the Rubin kernel.
-        defer_fc1_input_columnwise = (
-            num_groups == 1
-            and unit_activation_scale
-            and weight_requires_grad
-            and isinstance(fc1_input_quantizer, MXFP8Quantizer)
-            and not is_quantized_tensor(input_)
-        )
-
         # Group-quantize input tensor and convert dtypes if needed
         fc1_input_quantizer.set_usage(
             rowwise=True,
-            columnwise=weight_requires_grad and not defer_fc1_input_columnwise,
+            columnwise=weight_requires_grad,
         )
         fc1_input_quantizer.optimize_for_gemm = True
         fc1_input_quantizer.internal = True
@@ -1746,10 +1734,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
 
         # Save state for backward pass
         if requires_grad:
-            # The deferred path saves the caller-owned BF16 input in the slot
-            # normally occupied by the columnwise grouped tensor. Backward
-            # converts it immediately before FC1 wgrad.
-            saved_fc1_x = input_ if defer_fc1_input_columnwise else grouped_fc1_x
+            saved_fc1_x = grouped_fc1_x
             mark_grouped_tensor(saved_fc1_x, activation_in, scales, grouped_fc2_x)
             activation_op = self.basic_ops[1]
             cpu_offloading = is_cpu_offload_enabled()
@@ -1812,7 +1797,6 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             fc1_ctx.input_requires_grad = input_requires_grad
             fc1_ctx.weight_requires_grad = weight_requires_grad
             fc1_ctx.unit_activation_scale = unit_activation_scale
-            fc1_ctx.defer_fc1_input_columnwise = defer_fc1_input_columnwise
 
             fc2_ctx.input_quantizers = [fc2_input_quantizer]
             fc2_ctx.grad_output_quantizers = [fc2_grad_output_quantizer]
@@ -1892,18 +1876,6 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
 
         if not fc1_ctx.weight_requires_grad:
             grouped_fc1_x = None
-        elif bool(getattr(fc1_ctx, "defer_fc1_input_columnwise", False)):
-            fc1_input_quantizer = fc1_ctx.input_quantizers[0]
-            fc1_input_quantizer.set_usage(rowwise=False, columnwise=True)
-            fc1_input_quantizer.optimize_for_gemm = True
-            fc1_input_quantizer.internal = True
-            grouped_fc1_x = _group_quantize_for_grouped_mlp(
-                grouped_fc1_x,
-                fc1_input_quantizer,
-                num_groups,
-                split_sizes,
-                tensor_offsets=None,
-            )
         if not fc2_ctx.weight_requires_grad:
             grouped_fc2_x = None
 
