@@ -728,7 +728,10 @@ class TestGroupedMLPFusedOp:
         """GroupedLinear + scaled activation + GroupedLinear"""
 
         # Split sizes
-        split_sizes = [split_alignment * (i) for i in range(group_size)]
+        if group_size == 1:
+            split_sizes = [split_alignment]
+        else:
+            split_sizes = [split_alignment * i for i in range(group_size)]
         random.shuffle(split_sizes)
         split_sizes = torch.tensor(split_sizes, dtype=torch.int, device=device)
 
@@ -1129,6 +1132,22 @@ class TestGroupedMLPFusedOp:
             quantization=quantization,
             single_grouped_weight=True,
             activation=activation,
+        )
+
+    @pytest.mark.parametrize("bias", (False, True))
+    def test_grouped_mlp_single_group_mxfp8(
+        self,
+        *,
+        bias: bool,
+    ) -> None:
+        """Single-group GroupedLinear + ScaledSwiGLU + GroupedLinear with MXFP8."""
+        self.test_grouped_mlp(
+            group_size=1,
+            bias=bias,
+            hidden_size=128,
+            quantization="mxfp8",
+            single_grouped_weight=False,
+            activation="scaled_swiglu",
         )
 
     @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)

@@ -3558,10 +3558,7 @@ class TestSequentialModules:
         """GroupedLinear + scaled activation + GroupedLinear"""
 
         # Split sizes
-        if group_size == 1:
-            split_sizes = [split_alignment]
-        else:
-            split_sizes = [split_alignment * i for i in range(group_size)]
+        split_sizes = [split_alignment * (i) for i in range(group_size)]
         random.shuffle(split_sizes)
         split_sizes = torch.tensor(split_sizes, dtype=torch.int, device=device)
 
@@ -3751,24 +3748,6 @@ class TestSequentialModules:
             device=device,
             activation="scaled_srelu",
         )
-
-    @pytest.mark.parametrize("bias", (False, True))
-    def test_grouped_mlp_single_group_mxfp8(
-        self,
-        *,
-        bias: bool,
-        device: torch.device = "cuda",
-    ) -> None:
-        """Single-group GroupedLinear + ScaledSwiGLU + GroupedLinear with MXFP8."""
-
-        self.test_grouped_mlp(
-            group_size=1,
-            bias=bias,
-            dtype=torch.bfloat16,
-            quantization="mxfp8",
-            device=device,
-        )
-
 
 class TestCustomOps:
     """Test with ops that are defined externally"""
