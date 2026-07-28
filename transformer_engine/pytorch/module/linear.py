@@ -691,6 +691,8 @@ def _linear_forward_impl_fake(
     save_original_input = args.save_original_input
     if args.backward_override == "high_precision":
         save_original_input = True
+    elif args.backward_override == "dequantized":
+        save_original_input = False
 
     out_features, _ = weight.shape
     backward_needs_input = is_grad_enabled and args.weight_requires_grad
