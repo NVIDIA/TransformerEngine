@@ -3749,6 +3749,7 @@ class TestSequentialModules:
             activation="scaled_srelu",
         )
 
+
 class TestCustomOps:
     """Test with ops that are defined externally"""
 
