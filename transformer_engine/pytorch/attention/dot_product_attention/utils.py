@@ -1667,8 +1667,14 @@ def get_padding_mask(
         # describe the current batch.
         seqlens = cu_seqlens[1 : batch_size + 1] - cu_seqlens[:batch_size]
         positions = torch.arange(max_seqlen, device=cu_seqlens.device)
-        # True marks a padding token, i.e. one beyond the sequence length.
-        return (positions.unsqueeze(0) >= seqlens.unsqueeze(1)).view(batch_size, 1, 1, max_seqlen)
+        # True marks a padding token, i.e. one beyond the sequence length. The
+        # mask is applied to the attention scores, so it goes on the device
+        # those live on -- a no-op unless cu_seqlens is a CPU tensor.
+        return (
+            (positions.unsqueeze(0) >= seqlens.unsqueeze(1))
+            .view(batch_size, 1, 1, max_seqlen)
+            .to(device="cuda")
+        )
 
     attention_mask_q = _mask(cu_seqlens_q, max_seqlen_q)
     if attention_type == "self":
