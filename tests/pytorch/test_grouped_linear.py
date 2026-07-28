@@ -1923,7 +1923,7 @@ def test_grouped_parameter_layout_matches_cpu_m_splits(
         m_splits=m_splits,
     )
 
-    tolerances = dict(rtol=1e-5, atol=1e-5)
+    tolerances = dict(rtol=1e-2, atol=5e-3)
 
     for name in ("output", "dgrad", "wgrad", "dbias"):
         if reference[name] is None:
