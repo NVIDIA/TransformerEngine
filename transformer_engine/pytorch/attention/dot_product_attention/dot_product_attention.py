@@ -1875,10 +1875,9 @@ class DotProductAttention(TransformerEngineBaseModule):
                     _attention_backends["fused_attention_backend"] = fused_attention_backend
                     _attention_backends["use_unfused_attention"] = use_unfused_attention
                     _attention_backends["backend_selection_requires_update"] = False
-                    # Backend selection is only logged in eager mode: dynamo
-                    # graph-breaks on logging.Logger methods, and even the
-                    # arguments below are untraceable (int() of the sub-backend
-                    # enum). Same restriction as in get_attention_backend.
+                    # Logged in eager only: dynamo graph-breaks on logging.Logger
+                    # methods, and log arguments are evaluated regardless of the
+                    # logger, so a no-op logger would not be enough.
                     if not torch.compiler.is_compiling():
                         if use_flash_attention:
                             self.logger.info(
@@ -1888,7 +1887,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                         elif use_fused_attention:
                             self.logger.info(
                                 "Running with FusedAttention backend (sub-backend %s)",
-                                fused_attention_backend,
+                                int(fused_attention_backend),
                             )
                         elif use_unfused_attention:
                             self.logger.info("Running with UnfusedDotProductAttention backend")
