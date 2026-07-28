@@ -4925,6 +4925,8 @@ def cp_per_step_configs(
     *,
     max_seqlen_q,
     max_seqlen_kv,
+    num_tokens_q,
+    num_tokens_kv,
     num_heads,
     num_gqa_groups,
     attn_mask_type,
@@ -4941,11 +4943,13 @@ def cp_per_step_configs(
     padding_or_no_mask = "padding" if "padding" in attn_mask_type else "no_mask"
     window_left, window_right = window_size
 
-    def config(mask, s_q, s_kv, heads, gqa, bottom_right):
+    def config(mask, s_q, s_kv, heads, gqa, bottom_right, t_q, t_kv):
         return {
             "attn_mask_type": mask,
             "max_seqlen_q": s_q,
             "max_seqlen_kv": s_kv,
+            "num_tokens_q": t_q,
+            "num_tokens_kv": t_kv,
             "num_attn_heads": heads,
             "num_gqa_groups": gqa,
             "window_size_left": window_left,
@@ -4963,6 +4967,8 @@ def cp_per_step_configs(
                 num_heads // cp_size,
                 num_gqa_groups // cp_size,
                 bottom_right_diagonal,
+                num_tokens_q * cp_size,
+                num_tokens_kv * cp_size,
             )
         ]
 
@@ -4973,10 +4979,20 @@ def cp_per_step_configs(
         mask, br = attn_mask_type, bottom_right_diagonal
         if is_causal and "bottom_right" not in attn_mask_type:
             mask, br = attn_mask_type + "_bottom_right", True
+        t_q = num_tokens_q // 2
         # s_kv ranges from s_kv_chunk, i*s_kv_chunk, ..., max_seqlen_kv
         # check a single chunk and the full KV
         return [
-            config(mask, s_q, s_kv, num_heads, num_gqa_groups, br)
+            config(
+                mask,
+                s_q,
+                s_kv,
+                num_heads,
+                num_gqa_groups,
+                br,
+                t_q,
+                num_tokens_kv * cp_size * s_kv // max_seqlen_kv if max_seqlen_kv else 0,
+            )
             for s_kv in dict.fromkeys([s_kv_chunk, max_seqlen_kv])
         ]
 
@@ -4986,15 +5002,20 @@ def cp_per_step_configs(
     gqa = num_gqa_groups // cp_size_a2a
     r_q = max_seqlen_q // p2p_size
     r_kv = max_seqlen_kv // p2p_size
+    # The tensors handed to this rank already correspond to (r_q, r_kv), so the token counts
+    # need no rescaling here; they only follow the halving below.
+    t_q, t_kv = num_tokens_q, num_tokens_kv
     if not is_causal:
-        return [config(attn_mask_type, r_q, r_kv, heads, gqa, bottom_right_diagonal)]
+        return [config(attn_mask_type, r_q, r_kv, heads, gqa, bottom_right_diagonal, t_q, t_kv)]
     return [
-        config(attn_mask_type, r_q, r_kv, heads, gqa, bottom_right_diagonal),  # diagonal
         config(
-            padding_or_no_mask, r_q, r_kv // 2, heads, gqa, bottom_right_diagonal
+            attn_mask_type, r_q, r_kv, heads, gqa, bottom_right_diagonal, t_q, t_kv
+        ),  # diagonal
+        config(
+            padding_or_no_mask, r_q, r_kv // 2, heads, gqa, bottom_right_diagonal, t_q, t_kv // 2
         ),  # lower-triangle
         config(
-            padding_or_no_mask, r_q // 2, r_kv, heads, gqa, bottom_right_diagonal
+            padding_or_no_mask, r_q // 2, r_kv, heads, gqa, bottom_right_diagonal, t_q // 2, t_kv
         ),  # upper-triangle
     ]
 
