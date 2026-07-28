@@ -15,6 +15,7 @@ import pytest
 import torch
 
 import transformer_engine.pytorch as te
+import transformer_engine.pytorch.ops.fused.grouped_mlp as grouped_mlp_module
 from transformer_engine.pytorch.ops.fused.grouped_mlp import (
     _cudnn_frontend_supports_grouped_gemm_srelu,
     _cudnn_frontend_version_supported,
@@ -1135,12 +1136,20 @@ class TestGroupedMLPFusedOp:
         )
 
     @pytest.mark.parametrize("bias", (False, True))
+    @pytest.mark.parametrize("runtime_offsets_supported", (False, True))
     def test_grouped_mlp_single_group_mxfp8(
         self,
+        monkeypatch,
         *,
         bias: bool,
+        runtime_offsets_supported: bool,
     ) -> None:
         """Single-group GroupedLinear + ScaledSwiGLU + GroupedLinear with MXFP8."""
+        monkeypatch.setattr(
+            grouped_mlp_module,
+            "_cudnn_frontend_supports_single_group_runtime_offsets",
+            lambda: runtime_offsets_supported,
+        )
         self.test_grouped_mlp(
             group_size=1,
             bias=bias,

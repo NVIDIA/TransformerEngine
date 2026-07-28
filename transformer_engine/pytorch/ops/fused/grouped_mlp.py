@@ -101,6 +101,11 @@ def _nvidia_cudnn_frontend_supports_wgrad() -> bool:
     return _cudnn_frontend_version_supported()
 
 
+def _cudnn_frontend_supports_single_group_runtime_offsets() -> bool:
+    """Check cuDNN FE min version for single-group runtime offsets."""
+    return _cudnn_frontend_version_at_least("1.27.0")
+
+
 def _wrap_single_quantized_as_grouped(
     tensor: torch.Tensor,
     quantized: MXFP8Tensor | NVFP4Tensor | NVFP4TensorStorage,
@@ -1089,14 +1094,22 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         if unit_activation_scale and num_groups != 1:
             unit_activation_scale = False
 
+        activation_kernel = self.grouped_gemm_activation_kernel()
+        supports_single_group_runtime_offsets = (
+            _cudnn_frontend_supports_single_group_runtime_offsets()
+        )
+
         # Shared experts have one dense group and all optimized kernels derive M
         # from their runtime tensor shapes. Reuse the caller-owned split tensor
         # as the ignored cuDNN padded-offset argument and omit tensor offsets
         # entirely. This avoids both splits_to_offsets and cached CUDA pointers.
+        # Older cuDNN frontends do not expose this specialization, so retain the
+        # real single-group metadata path for compatibility.
         use_offsetless_metadata = (
             num_groups == 1
             and unit_activation_scale
             and isinstance(fc1_input_quantizer, MXFP8Quantizer)
+            and supports_single_group_runtime_offsets
         )
 
         # Prepare split metadata
@@ -1420,7 +1433,8 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         else:
             fc1_activation_kwargs["norm_const_tensor"] = fc1_norm_const_tensor
             fc1_activation_kwargs["discrete_col_sfd"] = not use_nvfp4
-            fc1_activation_kwargs["use_single_group_runtime_offsets"] = num_groups == 1
+            if supports_single_group_runtime_offsets:
+                fc1_activation_kwargs["use_single_group_runtime_offsets"] = num_groups == 1
         if self._pass_geglu_runtime_params:
             fc1_activation_kwargs.update(
                 linear_offset=self._cudnn_linear_offset,
@@ -1523,7 +1537,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         if use_fc1_act_hadamard:
             fc1_kernel_out = self.grouped_gemm_act_hadamard_kernel()(**fc1_activation_kwargs)
         else:
-            fc1_kernel_out = self.grouped_gemm_activation_kernel()(**fc1_activation_kwargs)
+            fc1_kernel_out = activation_kernel(**fc1_activation_kwargs)
 
         if fc2_is_dist:
             grouped_fc2_weight = materialize_weight_for_forward(grouped_fc2_weight)
@@ -1674,8 +1688,10 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                     "sf_vec_size": MXFP8_BLOCK_SCALING_SIZE,
                     "current_stream": current_stream,
                     "use_dynamic_sched": True,
-                    "use_single_group_runtime_offsets": num_groups == 1,
                 }
+                fc2_quant_kernel = self.grouped_gemm_quant_kernel()
+                if supports_single_group_runtime_offsets:
+                    fc2_quant_kwargs["use_single_group_runtime_offsets"] = num_groups == 1
 
                 if fc2_op.single_grouped_weight:
                     # Clone and swizzle scales for GEMM
@@ -1727,7 +1743,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                     (in_shape[0], fc2_weight_shape[0], 1),
                     (fc2_weight_shape[0], 1, in_shape[0] * fc2_weight_shape[0]),
                 )
-                self.grouped_gemm_quant_kernel()(**fc2_quant_kwargs)
+                fc2_quant_kernel(**fc2_quant_kwargs)
                 fc2_out = fc2_out_buf
 
         # Save state for backward pass
@@ -2034,8 +2050,10 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             "current_stream": current_stream,
             "discrete_col_sfd": not use_nvfp4,
             "use_dynamic_sched": True,
-            "use_single_group_runtime_offsets": num_groups == 1,
         }
+        dactivation_kernel = self.grouped_gemm_dactivation_kernel()
+        if _cudnn_frontend_supports_single_group_runtime_offsets():
+            fc2_dactivation_kwargs["use_single_group_runtime_offsets"] = num_groups == 1
         if self._cudnn_dact_func is not None:
             fc2_dactivation_kwargs["beta_tensor"] = fc2_beta_tensor
             fc2_dactivation_kwargs["act_func"] = self._cudnn_dact_func
@@ -2138,7 +2156,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                 fc2_dactivation_kwargs["b_dtype"] = data_dtype
                 fc2_dactivation_kwargs["b_major"] = "k" if use_nvfp4 else "n"
 
-        fc2_dgrad_kernel_out = self.grouped_gemm_dactivation_kernel()(**fc2_dactivation_kwargs)
+        fc2_dgrad_kernel_out = dactivation_kernel(**fc2_dactivation_kwargs)
 
         if use_nvfp4:
             fc1_dy_bf16 = fc2_dgrad_kernel_out["d_row_tensor"]
@@ -2376,8 +2394,10 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                     "current_stream": current_stream,
                     "discrete_col_sfd": True,
                     "use_dynamic_sched": True,
-                    "use_single_group_runtime_offsets": num_groups == 1,
                 }
+                fc1_dgrad_kernel = self.grouped_gemm_quant_kernel()
+                if _cudnn_frontend_supports_single_group_runtime_offsets():
+                    fc1_dgrad_kwargs["use_single_group_runtime_offsets"] = num_groups == 1
 
                 if fc1_op.single_grouped_weight:
                     # Clone and swizzle scales for GEMM
@@ -2432,7 +2452,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                     (out_shape[0], fc1_weight_shape[1], 1),
                     (fc1_weight_shape[1], 1, out_shape[0] * fc1_weight_shape[1]),
                 )
-                self.grouped_gemm_quant_kernel()(**fc1_dgrad_kwargs)
+                fc1_dgrad_kernel(**fc1_dgrad_kwargs)
                 grad_input = grad_input_buffer
 
         # FC1 wgrad GEMM
