@@ -965,6 +965,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             self._cudnn_geglu_alpha: float = activation._clamped.alpha
             self._cudnn_glu_clamp_max: float = activation._clamped.limit
             self._cudnn_glu_clamp_min: float = -activation._clamped.limit
+
     def fuser_forward(
         self,
         basic_op_ctxs: list[OperationContext],
