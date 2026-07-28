@@ -5008,9 +5008,7 @@ def cp_per_step_configs(
     if not is_causal:
         return [config(attn_mask_type, r_q, r_kv, heads, gqa, bottom_right_diagonal, t_q, t_kv)]
     return [
-        config(
-            attn_mask_type, r_q, r_kv, heads, gqa, bottom_right_diagonal, t_q, t_kv
-        ),  # diagonal
+        config(attn_mask_type, r_q, r_kv, heads, gqa, bottom_right_diagonal, t_q, t_kv),  # diagonal
         config(
             padding_or_no_mask, r_q, r_kv // 2, heads, gqa, bottom_right_diagonal, t_q, t_kv // 2
         ),  # lower-triangle
