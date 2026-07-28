@@ -714,20 +714,12 @@ class DotProductAttention(TransformerEngineBaseModule):
         """
         _original_recipe = self.fp8_meta.get("recipe", None)
 
-        fp8 = FP8GlobalStateManager.is_fp8_enabled()
-        fp8_calibration = FP8GlobalStateManager.is_fp8_calibration()
-        fp8_parameters = FP8GlobalStateManager.with_fp8_parameters()
-        if not (fp8 or fp8_calibration or fp8_parameters):
-            # Nothing below has an effect when FP8 is off everywhere -- the recipe
-            # juggling ends in the "turn off and return" branch. Bailing out here
-            # also keeps DotProductAttention traceable by torch.compile: with no
-            # autocast active, get_fp8_recipe() below builds a default Recipe,
-            # whose construction is not traceable.
-            self.fast_setattr("fp8_parameters", fp8_parameters)
-            self.fast_setattr("fp8", fp8)
-            self.fast_setattr("fp8_calibration", fp8_calibration)
-            self.fp8_meta["fp8_checkpoint"] = False
-            self.fast_setattr("fp8_initialized", False)
+        qstate = FP8GlobalStateManager.quantization_state
+        if not (qstate.fp8_enabled or qstate.fp8_calibration or qstate.fp8_parameters):
+            # Without FP8 the recipe juggling below is a no-op, and its
+            # get_fp8_recipe() call would build a default Recipe -- which
+            # torch.compile cannot trace.
+            super().init_fp8_metadata(num_gemms=num_gemms)
             return
 
         # global recipe set in autocast()
