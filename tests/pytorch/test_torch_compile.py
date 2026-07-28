@@ -759,6 +759,47 @@ def test_dpa_torch_compile_cudagraphs(monkeypatch, backend):
     _assert_dpa_backend(backend)
 
 
+@pytest.mark.parametrize("backend", ["flash", "unfused"])
+@pytest.mark.parametrize("interleave_dim", [-3, -2])
+def test_dpa_torch_compile_packed_views_fall_back(monkeypatch, backend, interleave_dim):
+    """Packed q/k/v passed as plain views cannot be recognized while tracing (the
+    detection reads data pointers), so DotProductAttention runs that detection
+    eagerly instead -- correct results, at the cost of a graph break. Declaring
+    the packing via qkv_layer/kv_layer keeps it on the compiled path, which
+    test_dpa_torch_compile covers."""
+    dtype = torch.bfloat16
+    cfg = _dpa_config(**_DPA_COMPILE_CONFIGS["self_bshd_causal"])
+    _force_dpa_backend(monkeypatch, backend)
+
+    module = _make_dpa(cfg, dtype)
+    b, s = cfg["batch_size"], cfg["max_seqlen_q"]
+    h, d = cfg["num_heads"], cfg["head_dim"]
+    shape = (b, s, 3, h, d) if interleave_dim == -3 else (b, s, h, 3, d)
+    qkv = torch.randn(shape, dtype=dtype, device="cuda", requires_grad=True)
+    q, k, v = [qkv.select(interleave_dim, i) for i in range(3)]
+
+    ref = module(q, k, v)
+    ref.sum().backward()
+    ref_grad = qkv.grad.clone()
+    qkv.grad = None
+
+    torch._dynamo.reset()
+    _force_dpa_backend(monkeypatch, backend)
+    with pytest.warns(UserWarning, match="Falling back to eager execution"):
+        out = torch.compile(module)(q, k, v)
+    out.sum().backward()
+    torch.cuda.synchronize()
+
+    torch.testing.assert_close(out, ref)
+    torch.testing.assert_close(qkv.grad, ref_grad)
+
+    # The same graph break is an error when the user asked for a full graph.
+    torch._dynamo.reset()
+    _force_dpa_backend(monkeypatch, backend)
+    with pytest.raises(Exception, match="torch.compiler.disable"):
+        torch.compile(module, fullgraph=True)(q, k, v)
+
+
 def test_dpa_torch_compile_fused_backend(monkeypatch):
     """The FusedAttention backend is an eager island, so it graph-breaks rather
     than compiles; DotProductAttention must still be correct around it."""

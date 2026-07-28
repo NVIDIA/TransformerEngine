@@ -59,7 +59,7 @@ from transformer_engine.pytorch.utils import (
 )
 from transformer_engine.pytorch.export import is_in_onnx_export_mode
 
-from transformer_engine.pytorch.jit import jit_fuser
+from transformer_engine.pytorch.jit import jit_fuser, no_torch_dynamo
 
 # NVTE_DEBUG = 0/1 # disables/enables debug mode, default = 0
 _NVTE_DEBUG = int(os.getenv("NVTE_DEBUG", "0"))
@@ -2386,6 +2386,20 @@ def get_qkv_format(
     return qkv_format, q_format, kv_format
 
 
+def qkv_layout_needs_detection(*qkv: Optional[torch.Tensor]) -> bool:
+    """Whether the layout of these q/k/v can only be told by inspecting memory.
+
+    True for tensors that may be slices of a packed buffer, i.e. strided ones
+    that do not own their whole storage.
+    """
+    return any(
+        x is not None
+        and not x.is_contiguous()
+        and x.untyped_storage().size() != x.numel() * x.element_size()
+        for x in qkv
+    )
+
+
 def get_qkv_layout(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -2560,16 +2574,13 @@ def get_qkv_layout(
         return qkv_layout
 
     if torch.compiler.is_compiling():
-        # The detection in run_iteratively is untraceable by dynamo -- it reads
-        # UntypedStorage.data_ptr and Tensor.storage_offset -- and pointers are
-        # meaningless on the fake tensors used while tracing anyway. Under
-        # torch.compile, packed q/k/v must therefore be declared explicitly, via
-        # DotProductAttention's qkv_layer/kv_layer arguments (which bypass this
-        # function entirely); q/k/v passed separately are treated as three
-        # independent tensors. Views into a packed buffer are non-contiguous, so
-        # making the inputs contiguous keeps the returned layout truthful for
-        # every backend.
-        q, k, v = [x if x.is_contiguous() else x.contiguous() for x in [q, k, v]]
+        # run_iteratively reads data pointers and storage offsets, which dynamo
+        # cannot trace; unpacked q/k/v need no detection anyway.
+        assert not qkv_layout_needs_detection(q, k, v), (
+            "q/k/v may be views into a packed buffer, whose layout cannot be detected under"
+            " torch.compile. Pass the packed buffer explicitly via DotProductAttention's"
+            " qkv_layer/kv_layer (with qkv_interleave_dim)."
+        )
         if is_same_q_kv_format:
             qkv_layout = "_".join([qkv_format] * 3)
         else:

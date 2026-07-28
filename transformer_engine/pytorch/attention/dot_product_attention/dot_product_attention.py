@@ -4,6 +4,7 @@
 
 """Attention."""
 from contextlib import nullcontext
+from functools import wraps
 import math
 import os
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
@@ -42,6 +43,7 @@ from transformer_engine.pytorch.distributed import (
     CudaRNGStatesTracker,
     graph_safe_rng_available,
 )
+from transformer_engine.pytorch.jit import no_torch_dynamo
 from transformer_engine.pytorch.graph import is_graph_capturing
 from transformer_engine.pytorch.attention.inference import InferenceParams
 
@@ -193,6 +195,50 @@ def _trim_output(attn_out, num_attention_heads, padded_head_dim_v, orig_head_dim
     out_shape = attn_out.shape[:-1]
     attn_out = attn_out.reshape(*out_shape, num_attention_heads, padded_head_dim_v)
     return attn_out[..., :orig_head_dim_v].reshape(*out_shape, -1)
+
+
+def _needs_eager_dpa(
+    _self,
+    query_layer: Optional[torch.Tensor] = None,
+    key_layer: Optional[torch.Tensor] = None,
+    value_layer: Optional[torch.Tensor] = None,
+    *_args,
+    qkv_layer: Optional[torch.Tensor] = None,
+    kv_layer: Optional[torch.Tensor] = None,
+    **_kwargs,
+) -> bool:
+    """Whether this DotProductAttention call has to run outside the graph, i.e.
+    whether it passes packed q/k/v without declaring them."""
+    if qkv_layer is not None or kv_layer is not None:
+        return False
+    return dpa_utils.qkv_layout_needs_detection(query_layer, key_layer, value_layer)
+
+
+def _eager_under_compile_if(needs_eager: Callable[..., bool], reason: str):
+    """Decorator running the wrapped method eagerly when `needs_eager` says the
+    call is unsupported on the compiled path."""
+
+    def decorator(fn):
+        # The warning belongs inside the dynamo-disabled function: warnings.warn
+        # graph-breaks on its own, masking the break that matters.
+        @no_torch_dynamo()
+        def eager_fn(*args, **kwargs):
+            warnings.warn(
+                f"Falling back to eager execution under torch.compile: {reason} is"
+                " unsupported on the compiled path (graph-breaks under fullgraph=True).",
+                stacklevel=3,
+            )
+            return fn(*args, **kwargs)
+
+        @wraps(fn)
+        def wrapper(*args, **kwargs):
+            if torch.compiler.is_compiling() and needs_eager(*args, **kwargs):
+                return eager_fn(*args, **kwargs)
+            return fn(*args, **kwargs)
+
+        return wrapper
+
+    return decorator
 
 
 def _unpack_packed_qkv(
@@ -1097,6 +1143,9 @@ class DotProductAttention(TransformerEngineBaseModule):
             ]
         return base[:num_quantizers]
 
+    @_eager_under_compile_if(
+        _needs_eager_dpa, "detecting packed q/k/v that were not declared via qkv_layer/kv_layer"
+    )
     def forward(
         self,
         query_layer: Optional[torch.Tensor] = None,
