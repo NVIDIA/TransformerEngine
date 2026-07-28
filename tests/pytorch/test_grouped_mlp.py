@@ -1145,6 +1145,11 @@ class TestGroupedMLPFusedOp:
         runtime_offsets_supported: bool,
     ) -> None:
         """Single-group GroupedLinear + ScaledSwiGLU + GroupedLinear with MXFP8."""
+        if (
+            runtime_offsets_supported
+            and not grouped_mlp_module._cudnn_frontend_supports_single_group_runtime_offsets()
+        ):
+            pytest.skip("Requires cuDNN frontend >= 1.27.0")
         monkeypatch.setattr(
             grouped_mlp_module,
             "_cudnn_frontend_supports_single_group_runtime_offsets",
