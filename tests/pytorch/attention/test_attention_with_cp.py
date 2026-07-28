@@ -380,6 +380,7 @@ def test_cp_with_flash_attention(cp_pool, dtype, model, qkv_format, cp_comm_type
         qkv_layout="_".join([qkv_format] * 3),
         cp_size=num_gpus,
         cp_size_a2a=2 if cp_comm_type == "a2a+p2p" else 1,
+        skip_fused_attn=True,
     )
     flash_attn_supported, *_ = available_backends
     if not flash_attn_supported:
