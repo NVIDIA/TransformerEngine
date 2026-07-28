@@ -1652,51 +1652,31 @@ def get_padding_mask(
     max_seqlen_kv: int = None,
     attention_type: str = "self",
 ):
-    """Convert cu_seqlens to attention_mask"""
+    """Convert cu_seqlens to attention_mask.
+
+    Built with device-side ops only: reading the sequence lengths on the host
+    would synchronize the device once per sequence.
+    """
     assert (
         cu_seqlens_q is not None and max_seqlen_q is not None
     ), "cu_seqlens_q and max_seqlen_q are required for self-attention and cross-attention"
-    seqlens_q = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
-    attention_mask_q = torch.Tensor([]).to(dtype=torch.bool)
-    if attention_type == "cross":
-        assert (
-            cu_seqlens_kv is not None and max_seqlen_kv is not None
-        ), "cu_seqlens_kv and max_seqlen_kv are required for cross-attention"
-        seqlens_kv = cu_seqlens_kv[1:] - cu_seqlens_kv[:-1]
-        attention_mask_kv = torch.Tensor([]).to(dtype=torch.bool)
-    for i in range(batch_size):
-        attention_mask_q = torch.cat(
-            [
-                attention_mask_q,
-                torch.Tensor([False] * seqlens_q[i] + [True] * (max_seqlen_q - seqlens_q[i]))
-                .to(dtype=torch.bool)
-                .unsqueeze(0)
-                .unsqueeze(0)
-                .unsqueeze(0),
-            ],
-            dim=0,
-        )
-        if attention_type == "cross":
-            attention_mask_kv = torch.cat(
-                [
-                    attention_mask_kv,
-                    torch.Tensor([False] * seqlens_kv[i] + [True] * (max_seqlen_kv - seqlens_kv[i]))
-                    .to(dtype=torch.bool)
-                    .unsqueeze(0)
-                    .unsqueeze(0)
-                    .unsqueeze(0),
-                ],
-                dim=0,
-            )
-    attention_mask_q = attention_mask_q.to(device="cuda")
+
+    def _mask(cu_seqlens: torch.Tensor, max_seqlen: int) -> torch.Tensor:
+        # cu_seqlens may be longer than batch_size + 1 -- inference allocates it
+        # for the maximum batch size -- so only its first batch_size + 1 entries
+        # describe the current batch.
+        seqlens = cu_seqlens[1 : batch_size + 1] - cu_seqlens[:batch_size]
+        positions = torch.arange(max_seqlen, device=cu_seqlens.device)
+        # True marks a padding token, i.e. one beyond the sequence length.
+        return (positions.unsqueeze(0) >= seqlens.unsqueeze(1)).view(batch_size, 1, 1, max_seqlen)
+
+    attention_mask_q = _mask(cu_seqlens_q, max_seqlen_q)
     if attention_type == "self":
-        attention_mask = attention_mask_q
-    else:
-        attention_mask = (
-            attention_mask_q,
-            attention_mask_kv.to(device="cuda"),
-        )
-    return attention_mask
+        return attention_mask_q
+    assert (
+        cu_seqlens_kv is not None and max_seqlen_kv is not None
+    ), "cu_seqlens_kv and max_seqlen_kv are required for cross-attention"
+    return attention_mask_q, _mask(cu_seqlens_kv, max_seqlen_kv)
 
 
 @torch.no_grad()
