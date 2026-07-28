@@ -213,9 +213,7 @@ def run_dpa_with_cp(
     if qkv_format == "thd":
         # Keep this in sync with generate_input_shapes so DPA gets the explicit
         # padding state without a GPU-to-CPU sync.
-        pad_between_seqs = (
-            kernel_backend == "FusedAttention" or fa_pad_between_seqs == "True"
-        )
+        pad_between_seqs = kernel_backend == "FusedAttention" or fa_pad_between_seqs == "True"
 
     # set up environment variables and config
     if deterministic == "True":
