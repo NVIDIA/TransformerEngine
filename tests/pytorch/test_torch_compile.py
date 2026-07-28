@@ -719,14 +719,7 @@ _VALUE_QUANTIZERS = [
     pytest.param(_mxfp8, id="mxfp8"),
     pytest.param(_blockwise, id="float8_blockwise"),
     pytest.param(_current_scaling, id="float8_current_scaling"),
-    pytest.param(
-        _nvfp4,
-        id="nvfp4",
-        marks=pytest.mark.skipif(
-            not torch.cuda.is_available(),
-            reason="NVFP4Quantizer requires CUDA to construct",
-        ),
-    ),
+    pytest.param(_nvfp4, id="nvfp4"),
 ]
 
 
@@ -748,7 +741,7 @@ def test_quantizer_value_object(factory):
     # but that is absent from the key (e.g. NVFP4's derived ``rht_matrix``) would
     # slip through the checks above and only blow up at quantize time. Run the
     # real quantize kernel on both and require bit-exact results.
-    if torch.cuda.is_available() and _hw_available(a):
+    if _hw_available(a):
         x = torch.randn(128, 256, dtype=torch.bfloat16, device="cuda")
         torch.testing.assert_close(rebuilt(x).dequantize(), a(x).dequantize(), rtol=0.0, atol=0.0)
 
@@ -817,7 +810,7 @@ def test_quantizer_value_object_fullgraph(factory):
     unlike merely passing the quantizer through.
     """
     q = factory()
-    if not (torch.cuda.is_available() and _hw_available(q)):
+    if not _hw_available(q):
         pytest.skip("format not supported on this HW")
 
     op = _QDQ_OPS[type(q)]
@@ -839,19 +832,13 @@ def test_quantizer_value_object_fullgraph(factory):
 
 # (factory, logical shape) -- shapes respect MXFP8 (mult. of 32) / blockwise (128)
 # / NVFP4 (mult. of 16) constraints.
+# Format support is gated at runtime, in the tests that run a kernel; the rest is
+# pure Python and works on any HW.
 _PROTO_QUANTIZERS = [
     pytest.param(_current_scaling, (4, 8), id="fp8_current_scaling"),
     pytest.param(_mxfp8, (64, 128), id="mxfp8"),
     pytest.param(_blockwise, (128, 256), id="fp8_blockwise"),
-    pytest.param(
-        _nvfp4,
-        (64, 128),
-        id="nvfp4",
-        marks=pytest.mark.skipif(
-            not nvfp4_available,
-            reason="NVFP4 is not available",
-        ),
-    ),
+    pytest.param(_nvfp4, (64, 128), id="nvfp4"),
 ]
 
 
@@ -1008,7 +995,7 @@ def test_python_alloc_matches_cpp_make_empty(factory, shape, rowwise, columnwise
         return q
 
     q_ref = make_quantizer()
-    if not (torch.cuda.is_available() and _hw_available(q_ref)):
+    if not _hw_available(q_ref):
         pytest.skip("format not supported on this HW")
     q_py = make_quantizer()
 
@@ -1070,6 +1057,12 @@ def test_python_alloc_matches_cpp_make_empty(factory, shape, rowwise, columnwise
             tex.quantize(x, quantizer, dst, None)
         else:
             quantizer.update_quantized(x, dst)
+
+    # Scale-inv padding is never written by the kernel and both paths allocate it
+    # uninitialized; zero it so the comparison below covers only kernel output.
+    for name in ref_names:
+        getattr(ref, name).zero_()
+        getattr(py, name).zero_()
 
     # Some combos are rejected by the quantize kernel itself regardless of who
     # allocated the tensor (e.g. FP8 current-scaling columnwise-only on
