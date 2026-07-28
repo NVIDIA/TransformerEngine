@@ -151,12 +151,6 @@ inline bool mxfp8_quantize_cutedsl(const MXFP8QuantConfig &config, const Tensor 
     return false;
   }
 
-  std::optional<tvm::ffi::Function> mxfp8_quant_func_opt =
-      tvm_ffi_bridge::TVMFFICentral::getInstance().lazyload_function(config);
-  if (!mxfp8_quant_func_opt.has_value()) {
-    return false;
-  }
-
   // When only WITH_DBIAS is true, we use a larger tile size (align with CUDA C++ implementation)
   const bool cast_dbias_only = config.with_dbias && !config.with_dact && !config.with_act;
   const size_t chunk_rows = cast_dbias_only ? 128 : 64;  // input rows reduced per CTA
@@ -172,6 +166,12 @@ inline bool mxfp8_quantize_cutedsl(const MXFP8QuantConfig &config, const Tensor 
     workspace_tensor->data.shape = {workspace_rows, flat_n};
     workspace_tensor->data.dtype = DType::kFloat32;
     return true;
+  }
+
+  std::optional<tvm::ffi::Function> mxfp8_quant_func_opt =
+      tvm_ffi_bridge::TVMFFICentral::getInstance().lazyload_function(config);
+  if (!mxfp8_quant_func_opt.has_value()) {
+    return false;
   }
 
   // The cast-noop flag travels as a raw device pointer (not a tensor): it may be null, and
@@ -247,6 +247,9 @@ template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
 bool mxfp8_quantize_cutedsl(const Tensor *input_tensor, const Tensor *act_input_tensor,
                             const Tensor *noop_tensor, Tensor *output_tensor, Tensor *dbias_tensor,
                             Tensor *workspace_tensor, cudaStream_t stream) {
+  if (!tvm_ffi_bridge::TVMFFICentral::getInstance().get_cutedsl_backend_enabled()) {
+    return false;
+  }
   using Fused = MXFP8QuantFused<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>;
   if constexpr (!Fused::supported) {
     return false;

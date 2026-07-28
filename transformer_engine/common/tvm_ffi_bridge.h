@@ -292,6 +292,10 @@ class TVMFFICentral {
     cutedsl_backend_enabled_.store(enabled, std::memory_order_relaxed);
   }
 
+  bool get_cutedsl_backend_enabled() const {
+    return cutedsl_backend_enabled_.load(std::memory_order_relaxed);
+  }
+
  private:
   ~TVMFFICentral() = default;
   TVMFFICentral()
