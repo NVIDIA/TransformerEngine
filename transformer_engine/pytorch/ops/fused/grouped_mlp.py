@@ -356,37 +356,6 @@ def _use_tmem_post_rht_amax() -> bool:
     return os.environ.get("NVTE_CUTEDSL_FUSED_GROUPED_MLP_FC1_GLU_RHT_AMAX_TMEM", "0") == "1"
 
 
-def _single_group_split_metadata(
-    num_tokens: int,
-    device: torch.device,
-    *,
-    fc1_in_features: int,
-    fc2_in_features: int,
-    fc2_out_features: int,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Create split/offset metadata for num_groups=1 without a GPU prefix-sum kernel."""
-    split_sizes = torch.zeros(1, dtype=torch.int64, device=device)
-    split_sizes[0] = num_tokens
-    split_points = torch.zeros(1, dtype=torch.int32, device=device)
-    split_points[0] = num_tokens
-    base_split_offsets = torch.zeros(2, dtype=torch.int64, device=device)
-    base_split_offsets[1] = num_tokens
-    fc1_x_tensor_offsets = torch.zeros(2, dtype=torch.int64, device=device)
-    fc1_x_tensor_offsets[1] = num_tokens * fc1_in_features
-    fc2_x_tensor_offsets = torch.zeros(2, dtype=torch.int64, device=device)
-    fc2_x_tensor_offsets[1] = num_tokens * fc2_in_features
-    fc2_out_tensor_offsets = torch.zeros(2, dtype=torch.int64, device=device)
-    fc2_out_tensor_offsets[1] = num_tokens * fc2_out_features
-    return (
-        split_sizes,
-        split_points,
-        base_split_offsets,
-        fc1_x_tensor_offsets,
-        fc2_x_tensor_offsets,
-        fc2_out_tensor_offsets,
-    )
-
-
 def _single_group_wgrad_gemm(
     grouped_x: GroupedTensor,
     grouped_dy: GroupedTensor,
@@ -996,8 +965,6 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             self._cudnn_geglu_alpha: float = activation._clamped.alpha
             self._cudnn_glu_clamp_max: float = activation._clamped.limit
             self._cudnn_glu_clamp_min: float = -activation._clamped.limit
-        self._single_group_split_metadata_cache = {}
-
     def fuser_forward(
         self,
         basic_op_ctxs: list[OperationContext],
@@ -1103,8 +1070,8 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         # from their runtime tensor shapes. Reuse the caller-owned split tensor
         # as the ignored cuDNN padded-offset argument and omit tensor offsets
         # entirely. This avoids both splits_to_offsets and cached CUDA pointers.
-        # Older cuDNN frontends do not expose this specialization, so retain the
-        # real single-group metadata path for compatibility.
+        # Older cuDNN frontends do not expose this specialization, so use the
+        # live generic offset calculation rather than caching CUDA metadata.
         use_offsetless_metadata = (
             num_groups == 1
             and unit_activation_scale
@@ -1125,33 +1092,6 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             fc1_x_tensor_offsets = None
             fc2_x_tensor_offsets = None
             fc2_out_tensor_offsets = None
-        elif num_groups == 1:
-            metadata_key = (
-                device.type,
-                device.index,
-                in_shape[0],
-                fc1_weight_shape[1],
-                fc2_weight_shape[1],
-                fc2_weight_shape[0],
-            )
-            if metadata_key not in self._single_group_split_metadata_cache:
-                self._single_group_split_metadata_cache[metadata_key] = (
-                    _single_group_split_metadata(
-                        in_shape[0],
-                        device,
-                        fc1_in_features=fc1_weight_shape[1],
-                        fc2_in_features=fc2_weight_shape[1],
-                        fc2_out_features=fc2_weight_shape[0],
-                    )
-                )
-            (
-                split_sizes,
-                split_points,
-                base_split_offsets,
-                fc1_x_tensor_offsets,
-                fc2_x_tensor_offsets,
-                fc2_out_tensor_offsets,
-            ) = self._single_group_split_metadata_cache[metadata_key]
         else:
             split_sizes, (
                 split_points,
