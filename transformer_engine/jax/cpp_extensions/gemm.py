@@ -969,7 +969,8 @@ class GemmPrimitive(BasePrimitive):
             for spec in lhs_non_cspecs:
                 flattened_lhs_non_cspecs.extend(spec if isinstance(spec, tuple) else [spec])
             rhs_non_cspecs = tuple(
-                None if spec in flattened_lhs_non_cspecs else spec for spec in rhs_non_cspecs
+                None if spec in flattened_lhs_non_cspecs or spec in lhs_non_cspecs else spec
+                for spec in rhs_non_cspecs
             )
 
         else:
@@ -1001,7 +1002,8 @@ class GemmPrimitive(BasePrimitive):
             for spec in rhs_non_cspecs:
                 flattened_rhs_non_cspecs.extend(spec if isinstance(spec, tuple) else [spec])
             lhs_non_cspecs = tuple(
-                None if spec in flattened_rhs_non_cspecs else spec for spec in lhs_non_cspecs
+                None if spec in flattened_rhs_non_cspecs or spec in rhs_non_cspecs else spec
+                for spec in lhs_non_cspecs
             )
 
         out_specs = lhs_non_cspecs + rhs_non_cspecs
