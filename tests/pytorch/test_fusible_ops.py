@@ -436,6 +436,48 @@ class TestSequentialContainer:
         torch.testing.assert_close(x3, x3_orig + x2 + b)
         torch.testing.assert_close(x4, x4_orig + x3)
 
+    def test_internal_extra_tensor_channel_fanout(self, size: int = 16) -> None:
+        """An internal extra output can feed multiple later consumers."""
+        producer = te_ops.MakeExtraOutput()
+        consumer1 = te_ops.AddExtraInput()
+        consumer2 = te_ops.AddExtraInput()
+        producer.set_extra_output_channel(0, "route")
+        consumer1.set_extra_input_channel(0, "route")
+        consumer2.set_extra_input_channel(0, "route")
+        model = te_ops.Sequential(producer, consumer1, consumer2)
+
+        x = torch.rand((size,), requires_grad=True)
+        y = model(x)
+
+        # Main path: x -> x + route -> x + route + route.
+        torch.testing.assert_close(y, 3 * x)
+        y.sum().backward()
+        # The channel fan-out contributes two independent gradient paths.
+        torch.testing.assert_close(x.grad, torch.full_like(x, 3))
+
+        # Internal slots are unavailable before forward, so grad discovery
+        # must tolerate them when no public input requires gradients.
+        x_no_grad = x.detach()
+        torch.testing.assert_close(model(x_no_grad), 3 * x_no_grad)
+
+    def test_internal_and_external_extra_tensor_inputs(self, size: int = 16) -> None:
+        """Unbound slots remain public when other slots use internal channels."""
+        producer = te_ops.MakeExtraOutput()
+        internal_consumer = te_ops.AddExtraInput()
+        external_consumer = te_ops.AddExtraInput()
+        producer.set_extra_output_channel(0, "route")
+        internal_consumer.set_extra_input_channel(0, "route")
+        model = te_ops.Sequential(producer, internal_consumer, external_consumer)
+
+        x = torch.rand((size,), requires_grad=True)
+        extra = torch.rand((size,), requires_grad=True)
+        y = model(x, extra)
+
+        torch.testing.assert_close(y, 2 * x + extra)
+        y.sum().backward()
+        torch.testing.assert_close(x.grad, torch.full_like(x, 2))
+        torch.testing.assert_close(extra.grad, torch.ones_like(extra))
+
 
 class TestFuser:
     """Tests for operation fusion infrastructure"""

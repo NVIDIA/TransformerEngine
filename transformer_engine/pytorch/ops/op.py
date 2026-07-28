@@ -187,9 +187,47 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
     def __init__(self) -> None:
         super().__init__()
 
+        # Optional names for extra-tensor channels internal to an OperationFuser.
+        # Unbound slots remain public inputs/outputs, preserving the original API.
+        self._extra_input_channels: list[Optional[str]] = [None] * self.num_extra_inputs
+        self._extra_output_channels: list[Optional[str]] = [None] * self.num_extra_outputs
+
         # Objects for quantization
         self._fp8_metas: Optional[dict[str, dict[str, Any]]] = None
         self._quantizers: Optional[dict[str, list[Quantizer]]] = None
+
+    def set_extra_input_channel(self, index: int, channel: Optional[str]) -> BasicOperation:
+        """Bind an extra input slot to an internal fuser channel.
+
+        A bound slot receives the matching extra output from an earlier
+        operation in the same fuser instead of consuming a public extra input.
+        Passing ``None`` removes the binding.
+        """
+        if not 0 <= index < self.num_extra_inputs:
+            raise IndexError(
+                f"Extra input index {index} is out of range for "
+                f"{type(self).__name__} with {self.num_extra_inputs} extra inputs"
+            )
+        if channel is not None and (not isinstance(channel, str) or not channel):
+            raise ValueError("Extra input channel must be a non-empty string or None")
+        self._extra_input_channels[index] = channel
+        return self
+
+    def set_extra_output_channel(self, index: int, channel: Optional[str]) -> BasicOperation:
+        """Bind an extra output slot to an internal fuser channel.
+
+        A bound slot can feed one or more later operations and is not returned
+        as a public extra output. Passing ``None`` removes the binding.
+        """
+        if not 0 <= index < self.num_extra_outputs:
+            raise IndexError(
+                f"Extra output index {index} is out of range for "
+                f"{type(self).__name__} with {self.num_extra_outputs} extra outputs"
+            )
+        if channel is not None and (not isinstance(channel, str) or not channel):
+            raise ValueError("Extra output channel must be a non-empty string or None")
+        self._extra_output_channels[index] = channel
+        return self
 
     @property
     def is_fused_op(self) -> bool:

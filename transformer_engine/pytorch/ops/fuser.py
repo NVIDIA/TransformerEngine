@@ -102,12 +102,16 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
         for tensor in (input_,) + params_and_extra_inputs:
             tensor._do_not_clear = True
 
-        # Unflatten list of parameters and extra tensor inputs
-        extra_inputs = params_and_extra_inputs[-fuser.num_extra_inputs :]
-        basic_op_extra_inputs = []
-        for op in fuser._basic_ops:
-            xs, extra_inputs = _split_tuple(extra_inputs, op.num_extra_inputs)
-            basic_op_extra_inputs.append(xs)
+        # Place public extra inputs into their basic-op slots. Slots bound to
+        # internal channels are filled lazily as their producers execute.
+        extra_inputs = params_and_extra_inputs[len(fuser._flat_basic_op_params) :]
+        basic_op_extra_inputs: list[list[Optional[torch.Tensor]]] = [
+            [None] * op.num_extra_inputs for op in fuser._basic_ops
+        ]
+        for tensor, (op_idx, input_idx) in zip(
+            extra_inputs, fuser._external_extra_input_slots
+        ):
+            basic_op_extra_inputs[op_idx][input_idx] = tensor
 
         # Apply forward ops
         x = input_
@@ -118,8 +122,31 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
             for idx in basic_op_idxs:
                 basic_op_ctxs[idx].requires_grad = idx >= fuser.first_op_requiring_backward
 
-            # Forward op
-            extra_inputs = [basic_op_extra_inputs[idx] for idx in basic_op_idxs]
+            # Forward op. Resolve internal channel inputs from outputs of
+            # earlier basic ops. A fusion may consume an earlier channel, but
+            # may not contain both its producer and consumer.
+            for idx in basic_op_idxs:
+                for input_idx, source in enumerate(
+                    fuser._basic_op_extra_input_sources[idx]
+                ):
+                    if source is None:
+                        continue
+                    producer_idx, output_idx = source
+                    if producer_idx in basic_op_idxs:
+                        raise RuntimeError(
+                            "An operation fusion contains both producer and consumer "
+                            f"of extra tensor channel "
+                            f"{fuser._basic_op_extra_output_channels[producer_idx][output_idx]!r}"
+                        )
+                    producer_outputs = extra_outputs[producer_idx]
+                    if producer_outputs is None:
+                        raise RuntimeError(
+                            f"Extra tensor channel producer op {producer_idx} has not run"
+                        )
+                    basic_op_extra_inputs[idx][input_idx] = producer_outputs[output_idx]
+            op_extra_inputs = [
+                tuple(basic_op_extra_inputs[idx]) for idx in basic_op_idxs
+            ]
             prev_op_idx = basic_op_idxs[0] - 1
             prev_op = fuser._basic_ops[prev_op_idx] if prev_op_idx >= 0 else None
             prev_op_grad_output_quantizer = None
@@ -134,18 +161,21 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
             x, fused_op_extra_outputs = op.fuser_forward(
                 [basic_op_ctxs[idx] for idx in basic_op_idxs],
                 x,
-                basic_op_extra_inputs=extra_inputs,
+                basic_op_extra_inputs=op_extra_inputs,
                 prev_op_grad_output_quantizer=prev_op_grad_output_quantizer,
                 next_op_input_quantizer=next_op_input_quantizer,
                 basic_op_kwargs=[basic_op_kwargs[idx] for idx in basic_op_idxs],
             )
             for idx, ys in zip(basic_op_idxs, fused_op_extra_outputs):
                 for y in ys:
-                    if set_output_requires_grad:
+                    if set_output_requires_grad and (
+                        y.is_floating_point() or y.is_complex()
+                    ):
                         y.requires_grad_(idx >= fuser.first_op_requiring_backward)
                 extra_outputs[idx] = ys
 
-        # Flatten list of extra outputs
+        # Validate extra outputs and flatten only public slots. Outputs bound
+        # to channels stay internal to the fuser.
         extra_outputs_flat = []
         for idx, ys in enumerate(extra_outputs):
             ys = list(ys)
@@ -156,7 +186,9 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
                     "{num_extra_outputs} extra inputs, "
                     f"but got {len(ys)}"
                 )
-            extra_outputs_flat.extend(ys)
+            for output_idx, y in enumerate(ys):
+                if fuser._basic_op_extra_output_channels[idx][output_idx] is None:
+                    extra_outputs_flat.append(y)
 
         # Save context for backward pass
         if func_ctx is not None:
@@ -188,10 +220,12 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
             func_ctx.basic_op_num_params = fuser._basic_op_num_params
             func_ctx.num_extra_inputs = fuser.num_extra_inputs
             func_ctx.num_extra_outputs = len(extra_outputs_flat)
+            func_ctx.fuser = fuser
             func_ctx.is_first_module = is_first_module
 
         # Mark output tensors as not deletable in backward
-        for tensor in [x] + extra_outputs_flat:
+        all_extra_outputs = [y for ys in extra_outputs for y in ys]
+        for tensor in [x] + all_extra_outputs:
             tensor._do_not_clear = True
 
         if set_output_requires_grad:
@@ -224,21 +258,28 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
             ctx.saved_tensors = saved_tensors[slice(*ctx._saved_tensors_range)]
             ctx._saved_tensors_range = None
 
-        # Unflatten list of extra tensor output grads
+        fuser = func_ctx.fuser
+
+        # Place public extra-output grads into their basic-op slots. Internal
+        # output grads are accumulated from channel consumers during backward.
         if len(grad_extra_outputs) != func_ctx.num_extra_outputs:
             raise ValueError(
                 f"Expected grads for {func_ctx.num_extra_outputs} extra tensor outputs, "
                 f"but got {len(grad_extra_outputs)}"
             )
-        basic_op_grad_extra_outputs = []
-        for op in basic_ops:
-            dys, grad_extra_outputs = _split_tuple(grad_extra_outputs, op.num_extra_outputs)
-            basic_op_grad_extra_outputs.append(dys)
+        basic_op_grad_extra_outputs: list[list[Optional[torch.Tensor]]] = [
+            [None] * op.num_extra_outputs for op in basic_ops
+        ]
+        for grad, (op_idx, output_idx) in zip(
+            grad_extra_outputs, fuser._external_extra_output_slots
+        ):
+            basic_op_grad_extra_outputs[op_idx][output_idx] = grad
 
         # Apply backward ops
         dx = grad_output
         grad_params = [None for _ in range(len(basic_ops))]
         grad_extra_inputs = [None for _ in range(len(basic_ops))]
+        channel_grads: dict[str, torch.Tensor] = {}
         for op, basic_op_idxs in reversed(backward_ops):
 
             # Stop if no more gradients are required
@@ -246,18 +287,39 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
                 dx = None
                 break
 
-            # Backward op
-            grad_extra_outputs = [basic_op_grad_extra_outputs[idx] for idx in basic_op_idxs]
+            # Backward op. Supply gradients accumulated from every consumer of
+            # each internal channel.
+            for idx in basic_op_idxs:
+                for output_idx, channel in enumerate(
+                    fuser._basic_op_extra_output_channels[idx]
+                ):
+                    if channel is not None:
+                        basic_op_grad_extra_outputs[idx][output_idx] = channel_grads.get(
+                            channel
+                        )
+            op_grad_extra_outputs = [
+                tuple(basic_op_grad_extra_outputs[idx]) for idx in basic_op_idxs
+            ]
             dx, fused_op_grad_params, fused_op_grad_extra_inputs = op.fuser_backward(
                 [basic_op_ctxs[idx] for idx in basic_op_idxs],
                 dx,
-                basic_op_grad_extra_outputs=grad_extra_outputs,
+                basic_op_grad_extra_outputs=op_grad_extra_outputs,
             )
             for idx, dparams in zip(basic_op_idxs, fused_op_grad_params):
                 grad_params[idx] = dparams
                 basic_op_ctxs[idx].saved_tensors = None
             for idx, dxs in zip(basic_op_idxs, fused_op_grad_extra_inputs):
                 grad_extra_inputs[idx] = dxs
+                for input_idx, grad in enumerate(dxs):
+                    source = fuser._basic_op_extra_input_sources[idx][input_idx]
+                    if source is None or grad is None:
+                        continue
+                    producer_idx, output_idx = source
+                    channel = fuser._basic_op_extra_output_channels[producer_idx][output_idx]
+                    previous_grad = channel_grads.get(channel)
+                    channel_grads[channel] = (
+                        grad if previous_grad is None else previous_grad + grad
+                    )
 
         # Flatten list of parameter gradients
         grad_params_flat = []
@@ -288,7 +350,9 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
                     f"for {num_extra_inputs} extra inputs, "
                     f"but got {len(dxs)}"
                 )
-            grad_extra_inputs_flat.extend(dxs)
+            for input_idx, grad in enumerate(dxs):
+                if fuser._basic_op_extra_input_sources[idx][input_idx] is None:
+                    grad_extra_inputs_flat.append(grad)
 
         # Update FP8 scaling factors
         if func_ctx.is_first_module and not _is_graph_capturing():
@@ -342,7 +406,52 @@ class OperationFuser:
 
         # Number of extra tensor inputs
         self._basic_op_num_extra_inputs: list[int] = list(op.num_extra_inputs for op in basic_ops)
-        self.num_extra_inputs: int = sum(self._basic_op_num_extra_inputs)
+        self._basic_op_extra_input_sources: list[list[Optional[tuple[int, int]]]] = [
+            [None] * op.num_extra_inputs for op in basic_ops
+        ]
+        self._basic_op_extra_output_channels: list[list[Optional[str]]] = [
+            list(op._extra_output_channels) for op in basic_ops
+        ]
+        self._external_extra_input_slots: list[tuple[int, int]] = []
+        self._external_extra_output_slots: list[tuple[int, int]] = []
+
+        # Resolve named channels in pipeline order. Channels deliberately only
+        # connect an output to later inputs, which keeps execution acyclic.
+        channel_producers: dict[str, tuple[int, int]] = {}
+        consumed_channels: set[str] = set()
+        for op_idx, op in enumerate(basic_ops):
+            for input_idx, channel in enumerate(op._extra_input_channels):
+                if channel is None:
+                    self._external_extra_input_slots.append((op_idx, input_idx))
+                    continue
+                if channel not in channel_producers:
+                    raise ValueError(
+                        f"Extra tensor channel {channel!r} consumed by op {op_idx} "
+                        f"({type(op).__name__}) has no earlier producer"
+                    )
+                self._basic_op_extra_input_sources[op_idx][input_idx] = channel_producers[
+                    channel
+                ]
+                consumed_channels.add(channel)
+            for output_idx, channel in enumerate(op._extra_output_channels):
+                if channel is None:
+                    self._external_extra_output_slots.append((op_idx, output_idx))
+                    continue
+                if channel in channel_producers:
+                    producer_idx, _ = channel_producers[channel]
+                    raise ValueError(
+                        f"Extra tensor channel {channel!r} has multiple producers "
+                        f"(ops {producer_idx} and {op_idx})"
+                    )
+                channel_producers[channel] = (op_idx, output_idx)
+
+        unused_channels = channel_producers.keys() - consumed_channels
+        if unused_channels:
+            channels = ", ".join(repr(channel) for channel in sorted(unused_channels))
+            raise ValueError(f"Extra tensor channels have no consumers: {channels}")
+
+        self.num_extra_inputs = len(self._external_extra_input_slots)
+        self.num_extra_outputs = len(self._external_extra_output_slots)
 
         # Ops for forward and backward pass, will be populated in maybe_fuse_ops
         self._forward_ops: list[tuple[FusibleOperation, list[int]]]
@@ -432,7 +541,9 @@ class OperationFuser:
             first_op_requiring_backward = self._num_basic_ops
             for op_idx in range(self._num_basic_ops):
                 op_inputs = itertools.chain(self._basic_op_params[op_idx], extra_inputs[op_idx])
-                if any(tensor.requires_grad for tensor in op_inputs):
+                if any(
+                    tensor is not None and tensor.requires_grad for tensor in op_inputs
+                ):
                     first_op_requiring_backward = op_idx
                     break
 
@@ -517,12 +628,15 @@ class OperationFuser:
         if basic_op_kwargs is None:
             basic_op_kwargs = [{}] * self._num_basic_ops
 
-        # Unflatten list of extra tensor inputs
-        extra_inputs_copy = list(extra_inputs)
-        basic_op_extra_inputs = []
-        for op in self._basic_ops:
-            xs, extra_inputs_copy = _split_tuple(extra_inputs_copy, op.num_extra_inputs)
-            basic_op_extra_inputs.append(xs)
+        # Place public extra inputs into their basic-op slots. Internal slots
+        # are not available until forward executes their producers.
+        basic_op_extra_inputs: list[list[Optional[torch.Tensor]]] = [
+            [None] * op.num_extra_inputs for op in self._basic_ops
+        ]
+        for tensor, (op_idx, input_idx) in zip(
+            extra_inputs, self._external_extra_input_slots
+        ):
+            basic_op_extra_inputs[op_idx][input_idx] = tensor
 
         # Get environment state
         recipe = None
