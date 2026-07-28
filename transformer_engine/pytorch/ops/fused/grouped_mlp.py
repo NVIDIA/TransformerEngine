@@ -1019,8 +1019,13 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                     "FC1 expected GroupedTensor weight with single_grouped_weight=True."
                 )
             if fc1_op.weight.quantizer is not None:
-                fc1_weight_quantizer.set_usage(rowwise=True, columnwise=input_requires_grad)
-                fc1_op.weight.quantizer = fc1_weight_quantizer
+                # Update param quantizer
+                # Note: Only add usages, never drop. The same weight may be used in multiple steps.
+                fc1_weight_quantizer = fc1_op.weight.quantizer
+                fc1_weight_quantizer.set_usage(
+                    rowwise=True,
+                    columnwise=True if input_requires_grad else None,
+                )
                 grouped_fc1_weight = fc1_op.weight
             else:
                 if fc1_op.weight.rowwise_data is None:
@@ -1053,8 +1058,11 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                     "FC2 expected GroupedTensor weight with single_grouped_weight=True."
                 )
             if fc2_op.weight.quantizer is not None:
-                fc2_weight_quantizer.set_usage(rowwise=True, columnwise=input_requires_grad)
-                fc2_op.weight.quantizer = fc2_weight_quantizer
+                fc2_weight_quantizer = fc2_op.weight.quantizer
+                fc2_weight_quantizer.set_usage(
+                    rowwise=True,
+                    columnwise=True if requires_grad else None,
+                )
                 grouped_fc2_weight = fc2_op.weight
             else:
                 if fc2_op.weight.rowwise_data is None:

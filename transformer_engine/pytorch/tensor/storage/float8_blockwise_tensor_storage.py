@@ -317,12 +317,15 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
         # pylint: disable=missing-function-docstring
         if self._rowwise_data is not None:
             return self._rowwise_data.size(*args, **kwargs)
-        dims = list(self._columnwise_data.size(*args, **kwargs))
-        reordered = []
-        for i in range(1, len(dims)):
-            reordered.append(dims[i])
-        reordered.append(dims[0])
-        return torch.Size(reordered)
+        # Columnwise data is stored transposed, so a dim argument cannot be
+        # forwarded to it: rebuild the logical shape first, then index into it.
+        dims = self._columnwise_data.shape
+        if len(dims) == 2:
+            shape = torch.Size((dims[1], dims[0]))
+        else:
+            shape = torch.Size(tuple(dims[1:]) + (dims[0],))
+        dim = args[0] if args else kwargs.get("dim")
+        return shape if dim is None else shape[dim]
 
     def view(self, shape):
         """Reshape the leading (token) dims without dequantizing.
