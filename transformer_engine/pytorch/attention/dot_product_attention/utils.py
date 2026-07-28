@@ -427,24 +427,20 @@ class _NoOpLogger:
 _no_op_logger = _NoOpLogger()
 
 
-# torch.compile:
-# sub-backend ids, i.e. the FusedAttnBackend values as plain ints, and the reverse mapping.
-_FUSED_ATTN_BACKEND_IDS = {
-    name: int(member) for name, member in FusedAttnBackend.__members__.items()
-}
-_FUSED_ATTN_BACKENDS_BY_ID = {int(member): member for member in FusedAttnBackend}
-
-
 @torch.compiler.assume_constant_result
 def _get_fused_attn_backend(**fused_attn_kwargs):
-    """Constant-foldable tex.get_fused_attn_backend: the result depends only on the
-    attention config, so torch.compile can bake it in. Returns the sub-backend as a plain
-    int, i.e. one of `_FUSED_ATTN_BACKEND_IDS`, next to the rejection message.
+    """Constant-foldable tex.get_fused_attn_backend: the result depends only on
+    the attention config, and the python-side enum keeps it traceable by
+    torch.compile (see the FusedAttnBackend docstring).
+
+    The config comes in as keyword arguments rather than as a FusedAttentionParams:
+    torch.compile materializes the arguments of a constant-folded call, and a
+    dataclass built by traced code arrives here with its fields reset to defaults.
     """
     fused_attention_backend, reject_message = tex.get_fused_attn_backend(
         FusedAttentionParams(**fused_attn_kwargs)
     )
-    return int(fused_attention_backend), reject_message
+    return FusedAttnBackend.cast(fused_attention_backend), reject_message
 
 
 def get_attention_backend(
@@ -1516,7 +1512,7 @@ def get_attention_backend(
             use_fused_attention = False
 
     # Filter: cuDNN support
-    fused_attention_backend_id = None
+    fused_attention_backend = None
     if use_fused_attention:
         recipe = fp8_meta["recipe"] if (fp8 and fp8_meta["recipe"].fp8_dpa) else None
         cs_o_in_f16 = os.getenv("NVTE_DPA_FP8CS_O_in_F16", "1") == "1"
@@ -1631,10 +1627,8 @@ def get_attention_backend(
             # NOTE: under torch.compile the numeric entries of fused_attn_kwargs must not be
             # symbolic (assume_constant_result requires concrete values); ints/floats made
             # dynamic by automatic dynamic currently graph break here.
-            fused_attention_backend_id, reject_message = _get_fused_attn_backend(
-                **fused_attn_kwargs
-            )
-            if fused_attention_backend_id == _FUSED_ATTN_BACKEND_IDS["No_Backend"]:
+            fused_attention_backend, reject_message = _get_fused_attn_backend(**fused_attn_kwargs)
+            if fused_attention_backend == FusedAttnBackend["No_Backend"]:
                 logger.debug(
                     "Disabling FusedAttention: %s%s",
                     reject_message,
@@ -1645,21 +1639,21 @@ def get_attention_backend(
                     ),
                 )
                 use_fused_attention = False
-                fused_attention_backend_id = None
+                fused_attention_backend = None
                 break
 
         if (
             use_fused_attention
             and has_score_mod
-            and fused_attention_backend_id != _FUSED_ATTN_BACKEND_IDS["F16_arbitrary_seqlen"]
+            and fused_attention_backend != FusedAttnBackend["F16_arbitrary_seqlen"]
         ):
             logger.debug(
                 "Disabling FusedAttention for score_mod because sub-backend %s is not "
                 "F16/BF16 arbitrary-seqlen",
-                fused_attention_backend_id,
+                int(fused_attention_backend),
             )
             use_fused_attention = False
-            fused_attention_backend_id = None
+            fused_attention_backend = None
     # Filter: Determinism
     # backend                      | deterministic
     # ---------------------------------------------
@@ -1700,9 +1694,9 @@ def get_attention_backend(
                 softmax_type,
             )
             use_fused_attention = False
-            fused_attention_backend_id = None
+            fused_attention_backend = None
         if (
-            fused_attention_backend_id == _FUSED_ATTN_BACKEND_IDS["FP8"]
+            fused_attention_backend == FusedAttnBackend["FP8"]
             and is_training
             and (device_compute_capability < (9, 0) or cudnn_version < (9, 19, 0))
         ):
@@ -1711,9 +1705,9 @@ def get_attention_backend(
                 " < 9.19.0"
             )
             use_fused_attention = False
-            fused_attention_backend_id = None
+            fused_attention_backend = None
         if (
-            fused_attention_backend_id == _FUSED_ATTN_BACKEND_IDS["F16_arbitrary_seqlen"]
+            fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]
             and is_training
             and (
                 device_compute_capability < (9, 0)
@@ -1723,7 +1717,7 @@ def get_attention_backend(
         ):
             logger.debug("Disabling FusedAttention for determinism reasons with post_scale_bias")
             use_fused_attention = False
-            fused_attention_backend_id = None
+            fused_attention_backend = None
 
     # use_flash_attention may have been set above
     use_flash_attention_2 = use_flash_attention and use_flash_attention_2
@@ -1796,8 +1790,8 @@ def get_attention_backend(
         (f" ({str(flash_attention_backend)})" if flash_attention_backend is not None else ""),
         bool(available_backends[1]),
         (
-            f" (sub-backend {fused_attention_backend_id})"
-            if fused_attention_backend_id is not None
+            f" (sub-backend {int(fused_attention_backend)})"
+            if fused_attention_backend is not None
             else ""
         ),
         bool(available_backends[2]),
@@ -1821,17 +1815,10 @@ def get_attention_backend(
     if use_flash_attention:
         selected_backend = f"FlashAttention ({str(flash_attention_backend)})"
     elif use_fused_attention:
-        selected_backend = f"FusedAttention (sub-backend {fused_attention_backend_id})"
+        selected_backend = f"FusedAttention (sub-backend {int(fused_attention_backend)})"
     elif use_unfused_attention:
         selected_backend = "UnfusedDotProductAttention"
     logger.debug("Selected backend = %s.", selected_backend)
-
-    # Hand the sub-backend back as a FusedAttnBackend member.
-    fused_attention_backend = (
-        None
-        if fused_attention_backend_id is None
-        else _FUSED_ATTN_BACKENDS_BY_ID[fused_attention_backend_id]
-    )
 
     return (
         use_flash_attention,
