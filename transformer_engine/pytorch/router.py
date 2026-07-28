@@ -13,11 +13,11 @@ Precision Notes:
 - Only cast to low-precision when necessary and the casting only happens in writing to
   global memory. For example, the gradient is required to have the same dtype as the input.
 """
+
 from typing import Optional, Union
 
 import torch
 import transformer_engine_torch as tex
-
 
 # Re-export the C++ enum NVTERoutingMapFormat under a friendlier Python name.
 # Members:
@@ -26,6 +26,7 @@ import transformer_engine_torch as tex
 #                                LSB-first / little-endian packing along the
 #                                expert axis.
 RoutingMapFormat = tex.NVTERoutingMapFormat
+QBHistogramMode = tex.NVTEQBHistogramMode
 
 
 _ROUTING_MAP_FORMAT_FROM_STRING = {
@@ -33,9 +34,15 @@ _ROUTING_MAP_FORMAT_FROM_STRING = {
     "bitmap_u8": int(RoutingMapFormat.BITMAP_U8),
 }
 _VALID_ROUTING_MAP_FORMAT_INTS = frozenset(_ROUTING_MAP_FORMAT_FROM_STRING.values())
+_QB_HISTOGRAM_MODE_FROM_STRING = {
+    "two_kernel": int(QBHistogramMode.TWO_KERNEL),
+    "fused_atomic": int(QBHistogramMode.FUSED_ATOMIC),
+}
 
 
-def _validate_routing_map_format(routing_map_format: Union[str, RoutingMapFormat, int]) -> int:
+def _validate_routing_map_format(
+    routing_map_format: Union[str, RoutingMapFormat, int],
+) -> int:
     """Coerce user-supplied routing_map_format into a plain int (0 or 1).
 
     Accepts the enum, an int matching one of the enum's values, or the
@@ -134,6 +141,74 @@ class FusedTopkScoreFunction(torch.autograd.Function):
         return grad_logits, None, None, None, None, None, None, None, None, None
 
 
+class FusedTopkScoreFunctionQB(torch.autograd.Function):
+    """Kimi K3 QB router with histogram accumulation."""
+
+    @staticmethod
+    def forward(
+        ctx,
+        logits: torch.Tensor,
+        topk: int,
+        scaling_factor: Optional[float],
+        expert_bias: torch.Tensor,
+        routing_map_format: int,
+        topk_indices: Optional[torch.Tensor],
+        histogram: torch.Tensor,
+        bin_bounds: torch.Tensor,
+        histogram_mode: int,
+    ):
+        # pylint: disable=missing-function-docstring
+        (
+            probs,
+            routing_output,
+            intermediate_output,
+            _cutoff,
+            histogram_output,
+        ) = tex.fused_topk_with_score_function_qb_fwd(
+            logits,
+            topk,
+            scaling_factor,
+            expert_bias,
+            routing_map_format,
+            topk_indices,
+            histogram,
+            bin_bounds,
+            histogram_mode,
+        )
+        if topk_indices is not None:
+            routing_output = topk_indices
+            ctx.mark_dirty(topk_indices)
+        ctx.mark_dirty(histogram)
+        ctx.mark_non_differentiable(routing_output, histogram_output)
+        ctx.save_for_backward(routing_output, intermediate_output)
+        ctx.topk = topk
+        ctx.scaling_factor = scaling_factor
+        ctx.routing_map_format = routing_map_format
+        ctx.use_dense_indices = topk_indices is not None
+        return probs, routing_output, histogram_output
+
+    @staticmethod
+    def backward(ctx, grad_probs, _, _histogram_grad):
+        # pylint: disable=missing-function-docstring
+        routing_output, intermediate_output = ctx.saved_tensors
+        if not grad_probs.is_contiguous():
+            grad_probs = grad_probs.contiguous()
+        grad_logits = torch.empty_like(grad_probs)
+        tex.fused_topk_with_score_function_bwd(
+            routing_output,
+            intermediate_output,
+            grad_probs,
+            grad_logits,
+            ctx.topk,
+            False,
+            ctx.scaling_factor,
+            "sigmoid",
+            ctx.use_dense_indices,
+            ctx.routing_map_format,
+        )
+        return grad_logits, None, None, None, None, None, None, None, None
+
+
 def fused_topk_with_score_function(
     logits: torch.Tensor,
     topk: int,
@@ -145,6 +220,9 @@ def fused_topk_with_score_function(
     expert_bias: Optional[torch.Tensor],
     routing_map_format: Union[str, RoutingMapFormat, int] = RoutingMapFormat.BYTEMAP,
     topk_indices: Optional[torch.Tensor] = None,
+    qb_histogram: Optional[torch.Tensor] = None,
+    qb_bin_bounds: Optional[torch.Tensor] = None,
+    qb_histogram_mode: Optional[str] = None,
 ):
     """
     Fused topk with score function router.
@@ -172,6 +250,12 @@ def fused_topk_with_score_function(
     topk_indices : torch.Tensor, optional
         Optional output buffer with shape [num_tokens, topk]. When provided, its dtype
         controls the dense index output dtype and the routing map is not materialized.
+    qb_histogram : torch.Tensor, optional
+        Caller-owned int32 ``[num_experts, num_bins]`` histogram accumulated in place.
+    qb_bin_bounds : torch.Tensor, optional
+        FP32 CUDA tensor ``[lower, upper]`` defining uniform QB histogram bins.
+    qb_histogram_mode : str, optional
+        ``"two_kernel"`` or ``"fused_atomic"``. Must be provided with the two QB tensors.
 
     Returns
     -------
@@ -187,6 +271,36 @@ def fused_topk_with_score_function(
     if logits.dtype == torch.float64:
         raise ValueError("Current TE does not support float64 router type.")
     routing_map_format = _validate_routing_map_format(routing_map_format)
+    qb_arguments = (qb_histogram, qb_bin_bounds, qb_histogram_mode)
+    if any(value is not None for value in qb_arguments):
+        if any(value is None for value in qb_arguments):
+            raise ValueError(
+                "qb_histogram, qb_bin_bounds, and qb_histogram_mode must be provided together"
+            )
+        if score_function != "sigmoid":
+            raise ValueError("Quantile Balancing only supports score_function='sigmoid'")
+        if expert_bias is None:
+            raise ValueError("Quantile Balancing requires expert_bias")
+        if num_groups is not None or group_topk is not None:
+            raise ValueError("Quantile Balancing does not support grouped Top-k")
+        mode = _QB_HISTOGRAM_MODE_FROM_STRING.get(qb_histogram_mode)
+        if mode is None:
+            raise ValueError(
+                "qb_histogram_mode must be 'two_kernel' or 'fused_atomic', "
+                f"got {qb_histogram_mode!r}"
+            )
+        probs, routing_output, _ = FusedTopkScoreFunctionQB.apply(
+            logits,
+            topk,
+            scaling_factor,
+            expert_bias,
+            routing_map_format,
+            topk_indices,
+            qb_histogram,
+            qb_bin_bounds,
+            mode,
+        )
+        return probs, routing_output
     return FusedTopkScoreFunction.apply(
         logits,
         topk,
