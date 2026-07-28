@@ -25,6 +25,7 @@ from .base import (
     is_ub_initialized,
     using_cublasmp_backend,
     quantize_weight,
+    _is_weight_workspace_valid,
     TransformerEngineBaseModule,
     _2X_ACC_FPROP,
     _2X_ACC_DGRAD,
@@ -74,7 +75,7 @@ from ..quantized_tensor import (
     prepare_for_saving,
     restore_from_func_ctx,
 )
-from ..dynamo import TensorProto
+from ..dynamo import TensorProto, to_tensor_proto
 from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantizer
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor.utils import clear_columnwise_cache, is_custom
@@ -751,21 +752,26 @@ def _linear_forward_impl_fake(
             weightmat_is_storage = True
             weightmat_aliases_weight = True
         else:
-            weightmat = TensorProto(
-                shape=tuple(weight.shape),
-                dtype=activation_dtype,
-                quantizer=weight_quantizer,
-                device=weight.device,
-            )
             weightmat_is_storage = True
-            update_ws = args.is_first_microbatch is None or args.is_first_microbatch
-            if args.cache_weight and update_ws and args.weight_workspace is None:
-                new_weight_workspace = TensorProto(
+            workspace = args.weight_workspace
+            if workspace is not None and weight_quantizer is not None:
+                if not _is_weight_workspace_valid(workspace, weight_quantizer):
+                    workspace = None
+            if workspace is not None:
+                weightmat = to_tensor_proto(workspace)
+            else:
+                weightmat = TensorProto(
                     shape=tuple(weight.shape),
                     dtype=activation_dtype,
                     quantizer=weight_quantizer,
                     device=weight.device,
                 )
+                if args.cache_weight:
+                    # Persistent cache entries are wrappers, not bare storages.
+                    if weightmat.quantizer is not None:
+                        weightmat.quantizer.internal = False
+                    new_weight_workspace = weightmat
+            weightmat.update_usage(rowwise_usage=True)
     else:
         weightmat_aliases_weight = weight.dtype == activation_dtype
         weightmat = TensorProto(
