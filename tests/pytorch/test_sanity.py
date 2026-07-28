@@ -655,6 +655,17 @@ def test_sanity_grouped_linear(
     if single_param:
         m_splits = torch.tensor(m_splits, dtype=torch.int64, device="cuda")
 
+    if NVTE_TEST_NVINSPECT_ENABLED and single_param:
+        # DebugQuantizer operates on per-GEMM tensors, while single grouped parameters
+        # intentionally have no split-quantize fallback.
+        with pytest.raises(
+            RuntimeError,
+            match="TE debug features do not support single grouped parameters",
+        ):
+            with autocast(enabled=use_fp8, recipe=fp8_recipe):
+                te_grouped_linear(inp_hidden_states, m_splits)
+        return
+
     with autocast(enabled=use_fp8, recipe=fp8_recipe):
         out = te_grouped_linear(inp_hidden_states, m_splits)
     loss = out.sum()

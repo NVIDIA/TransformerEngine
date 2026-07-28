@@ -2576,6 +2576,13 @@ class GroupedLinear(TransformerEngineBaseModule):
                 if self.no_debug_features_active(list(chain(*quantizers))):
                     debug = False
                     quantizers = self._get_quantizers()
+            if debug and (self.single_grouped_weight or self.single_grouped_bias):
+                raise RuntimeError(
+                    "TE debug features do not support single grouped parameters. DebugQuantizer "
+                    "uses the split-quantize path, which only supports discrete parameters. "
+                    "Disable single_grouped_weight and single_grouped_bias, or disable TE debug "
+                    "features for this GroupedLinear."
+                )
 
             (
                 input_quantizers,

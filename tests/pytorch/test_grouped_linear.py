@@ -1537,6 +1537,13 @@ def _reset_fp8_state(monkeypatch):
 )
 def test_single_grouped_weight_rejects_host_m_splits(monkeypatch, m_splits, exception):
     """A single parent parameter must never fall back to host-split per-expert GEMMs."""
+    if not is_module_grouped_tensor_path_supported(
+        None,
+        torch.bfloat16,
+        single_grouped_weight=True,
+    ):
+        pytest.skip("Native GroupedTensor GEMM is unavailable on this system.")
+
     monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
     grouped_linear = GroupedLinear(
         2,
@@ -1968,10 +1975,6 @@ def test_grouped_parameter_layout_matches_cpu_m_splits(
         single_grouped_weight=single_grouped_weight,
     ):
         pytest.skip("Recipe is not supported by the module GroupedTensor path on this system.")
-    if fuse_wgrad_accumulation and fp8_recipe is not None and fp8_recipe.float8_block_scaling():
-        # TODO: Re-enable after resolving cuBLASLt grouped FP8 block-scaling support for
-        # accumulating Wgrad directly into an FP32 main-grad buffer with the cuBLAS team.
-        pytest.skip("Fused Wgrad accumulation is not supported with FP8 block scaling.")
     FP8GlobalStateManager.reset()
 
     torch.manual_seed(1234)
