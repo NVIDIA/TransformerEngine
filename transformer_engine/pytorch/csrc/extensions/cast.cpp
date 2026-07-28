@@ -1632,33 +1632,30 @@ void split_quantize_nvfp4_impl(const TensorWrapper &input,
   // CUDA stream
   auto stream = at::cuda::getCurrentCUDAStream();
 
-  // The RHT helper dispatches to grouped Hadamard transform kernels that are
-  // implemented for the SM100 family only. On other architectures, where
+  // The grouped Hadamard transform kernels are implemented for the SM100 family
+  // only. On other architectures, where
   // NVFP4Quantizer::is_eligible_for_rht_cast_fusion is false as well, quantize
   // each split on its own instead. That takes the generic unfused RHT path.
   const int sm = transformer_engine::cuda::sm_arch();
   const bool grouped_rht_supported = sm >= 100 && sm <= 110;
-  if (quantizer.with_rht && !grouped_rht_supported) {
-    NVTE_CHECK(input.dtype() == DType::kBFloat16, "RHT is only supported for bfloat16 input");
-    NVTE_SCOPED_GIL_RELEASE({
-      for (size_t i = 0; i < num_tensors; ++i) {
-        if (input_list[i].numel() == 0) {
-          continue;
-        }
-        quantizers[i]->quantize(input_list[i], output_list[i], std::nullopt);
-      }
-    });
-    return;
-  }
 
   // Perform multi-tensor quantization
   NVTE_SCOPED_GIL_RELEASE({
     if (quantizer.with_rht) {  // Quantize row-wise data, RHT+quantize column-wise data
       // Check that config is supported
       NVTE_CHECK(input.dtype() == DType::kBFloat16, "RHT is only supported for bfloat16 input");
-      // Fuse the rowwise and colwise into one when the kernel is ready
-      split_quantize_nvfp4_impl_with_rht_helper(input, input_list, output_list, split_sections,
-                                                quantizers, stream);
+      if (grouped_rht_supported) {
+        // Fuse the rowwise and colwise into one when the kernel is ready
+        split_quantize_nvfp4_impl_with_rht_helper(input, input_list, output_list, split_sections,
+                                                  quantizers, stream);
+      } else {
+        for (size_t i = 0; i < num_tensors; ++i) {
+          if (input_list[i].numel() == 0) {
+            continue;
+          }
+          quantizers[i]->quantize(input_list[i], output_list[i], std::nullopt);
+        }
+      }
     } else {  // NVFP4 quantize
       // Fuse the rowwise and colwise into one when the kernel is ready
       split_quantize_nvfp4_impl_helper(input, input_list, output_list, split_sections, quantizers,
