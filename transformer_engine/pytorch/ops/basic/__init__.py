@@ -13,6 +13,7 @@ from .activation import (
     ReLU,
     ReGLU,
     SReLU,
+    ScaledSReLU,
     SReGLU,
     SiLU,
 )

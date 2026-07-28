@@ -578,8 +578,7 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
   constexpr bool CAST_DBIAS_ONLY = IS_DBIAS && (!IS_DACT) && (!IS_ACT);
 
   // Tensor dimensions
-  const size_t rows = input.flat_first_dim();
-  const size_t cols = input.flat_last_dim();
+  const auto [rows, cols] = input.flat_2d_dims();
 
   // Tensor chunk handled by each CUDA block
   constexpr size_t CHUNK_DIM_Y = CAST_DBIAS_ONLY ? 128 : 64;
@@ -622,7 +621,7 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
 
   if constexpr (IS_DBIAS) {
     NVTE_CHECK(dbias->data.dtype == input.dtype(), "DBias must have the same type as input.");
-    NVTE_CHECK(dbias->data.shape == std::vector<size_t>{cols}, "Wrong shape of DBias.");
+    NVTE_CHECK(dbias->data.shape == Shape{cols}, "Wrong shape of DBias.");
     NVTE_CHECK(workspace != nullptr, "Workspace must be a tensor.");
 
     if (workspace->data.dptr == nullptr) {

@@ -46,8 +46,8 @@ namespace {
 
 using namespace cute;
 
-// Ensure Tensor refers to cute::Tensor, not transformer_engine::Tensor
-using cute::Tensor;
+using cute::Shape;   // Avoid conflict with transformer_engine::Shape
+using cute::Tensor;  // Avoid conflict with transformer_engine::Tensor
 
 constexpr int kMaxTensorsPerKernel = 64;
 constexpr int kNVFP4BlockSize = 16;
@@ -1343,7 +1343,7 @@ void group_hadamard_transform_cast_fusion_graph_safe(const GroupedTensor *input,
     const Tensor &rng_state_tensor = *convertNVTETensorCheck(quant_config.rng_state);
     NVTE_CHECK(rng_state_tensor.dtype() == DType::kInt64,
                "RNG state should contain 2 64-bit values.");
-    NVTE_CHECK(rng_state_tensor.data.shape == std::vector<size_t>{2},
+    NVTE_CHECK(rng_state_tensor.data.shape == Shape{2},
                "Shape of the RNG state should be [2], but got ", rng_state_tensor.data.shape);
     rng_state = reinterpret_cast<const size_t *>(rng_state_tensor.data.dptr);
   }
@@ -1371,11 +1371,9 @@ void group_hadamard_transform_cast_fusion_graph_safe(const GroupedTensor *input,
              "Hadamard matrix must be BF16 tensor, but dtype is ",
              to_string(hadamard_matrix_.dtype()), ".");
   const SimpleTensor &hadamard_matrix = hadamard_matrix_.data;
-  NVTE_CHECK(
-      (hadamard_matrix_.shape() == std::vector<size_t>{kHadamardDimension, kHadamardDimension}),
-      "Hadamard matrix must have shape=",
-      std::vector<size_t>{kHadamardDimension, kHadamardDimension},
-      ", but got shape=", hadamard_matrix_.shape(), ".");
+  NVTE_CHECK((hadamard_matrix_.shape() == Shape{kHadamardDimension, kHadamardDimension}),
+             "Hadamard matrix must have shape=", Shape{kHadamardDimension, kHadamardDimension},
+             ", but got shape=", hadamard_matrix_.shape(), ".");
   const size_t hadamard_dimension = hadamard_matrix.shape[0];
 
   const size_t num_tensors = input->num_tensors;

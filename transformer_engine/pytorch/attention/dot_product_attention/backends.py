@@ -53,6 +53,9 @@ from transformer_engine.pytorch.jit import no_torch_dynamo
 from transformer_engine.pytorch.attention.dot_product_attention.context_parallel import (
     attn_forward_func_with_cp,
 )
+from transformer_engine.pytorch.attention.dot_product_attention.flex_attention import (
+    FusedAttentionWithScoreModFunc,
+)
 from transformer_engine.pytorch.attention.dot_product_attention.softmax import FusedScaleMaskSoftmax
 from transformer_engine.pytorch.attention.inference import InferenceParams
 from transformer_engine.pytorch.cpu_offload import (
@@ -89,7 +92,6 @@ _flash_attn_fwd = None
 _flash_attn_bwd = None
 _flash_attn_varlen_fwd = None
 _flash_attn_varlen_bwd = None
-
 # Try to import Flash Attention v2
 try:
     fa_utils.version = PkgVersion(PkgVersion(get_pkg_version("flash-attn")).public)
@@ -1985,6 +1987,10 @@ class FusedAttention(torch.nn.Module):
         inference_params: Optional[InferenceParams] = None,
         softmax_offset: torch.Tensor = None,
         fp8_output: bool = False,
+        score_mod: Optional[Callable] = None,
+        score_mod_bprop: Optional[Callable] = None,
+        score_mod_tensors: Optional[Dict[str, torch.Tensor]] = None,
+        score_mod_bprop_tensors: Optional[Dict[str, torch.Tensor]] = None,
     ) -> torch.Tensor:
         """fused attention fprop"""
         assert (
@@ -2153,6 +2159,21 @@ class FusedAttention(torch.nn.Module):
                     layer_number=self.layer_number,
                     return_max_logit=self.return_max_logit,
                 )
+        elif score_mod is not None:
+            output = FusedAttentionWithScoreModFunc.apply(
+                self.training,
+                query_layer,
+                key_layer,
+                value_layer,
+                q_format,
+                kv_format,
+                self.softmax_scale,
+                score_mod,
+                score_mod_bprop,
+                score_mod_tensors,
+                score_mod_bprop_tensors,
+                self.deterministic,
+            )
         else:
             with self.attention_dropout_ctx():
                 output = FusedAttnFunc.apply(

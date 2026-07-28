@@ -221,6 +221,8 @@ class NVFP4TensorRef(QuantizedTensorStorage):
     scale_t: Optional[torch.Tensor] = None
     global_amax_row: Optional[torch.Tensor] = None
     global_amax_col: Optional[torch.Tensor] = None
+    nvfp4_use_4over6: bool = False
+    nvfp4_e4m3_max: int = 448
 
     dtype: Optional[torch.dtype] = None
     device: Optional[torch.device] = None
@@ -350,9 +352,14 @@ class NVFP4QuantizerRef(Quantizer):
         eps: float = 0.0,
         quant_tile_shape: Tuple[int, int] = (1, 16),
         row_scaled_nvfp4: bool = False,
+        nvfp4_use_4over6: bool = False,
+        nvfp4_e4m3_max: int = 448,
+        nvfp4_4over6_err_mode: str = "MAE",
+        nvfp4_4over6_err_use_fast_math: bool = False,
         with_rht: bool = False,
         with_random_sign_mask: bool = True,
     ):
+        nvfp4_4over6_err_mode = nvfp4_4over6_err_mode.upper()
         if row_scaled_nvfp4:
             if not rowwise:
                 raise ValueError("Row-scaled NVFP4 reference quantization requires rowwise usage.")
@@ -360,6 +367,13 @@ class NVFP4QuantizerRef(Quantizer):
                 raise ValueError(
                     "Row-scaled NVFP4 reference quantization does not support columnwise usage."
                 )
+        if nvfp4_use_4over6:
+            if nvfp4_4over6_err_mode not in ("MAE", "MSE"):
+                raise ValueError(f"Unsupported NVFP4 4over6 error mode: {nvfp4_4over6_err_mode}.")
+            if pow_2_scales:
+                raise ValueError("4over6 is only supported for NVFP4 (non-pow2) mode.")
+            if quant_tile_shape not in ((1, 16), (16, 16)):
+                raise ValueError("4over6 reference quantization only supports 1x16 or 16x16 tiles.")
         super().__init__(rowwise=rowwise, columnwise=columnwise)
         self.internal = True
 
@@ -368,6 +382,12 @@ class NVFP4QuantizerRef(Quantizer):
         self.eps = eps
         self.quant_tile_shape = quant_tile_shape
         self.row_scaled_nvfp4 = row_scaled_nvfp4
+        self.nvfp4_use_4over6 = nvfp4_use_4over6
+        self.nvfp4_e4m3_max = nvfp4_e4m3_max if nvfp4_use_4over6 else 448
+        if self.nvfp4_e4m3_max not in (448, 256):
+            raise ValueError("nvfp4_e4m3_max must be 448 or 256.")
+        self.nvfp4_4over6_err_mode = nvfp4_4over6_err_mode
+        self.nvfp4_4over6_err_use_fast_math = nvfp4_4over6_err_use_fast_math
         self.with_rht = with_rht
         self.with_random_sign_mask = with_random_sign_mask
 
@@ -446,6 +466,191 @@ class NVFP4QuantizerRef(Quantizer):
         result = torch.reshape(tmp, (rounded_m, rounded_n))
         return result[:m, :scale_n]
 
+    @staticmethod
+    def _ref_nvfp4_4over6_fp16_candidate(q: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
+        """Decode E2M1 x E4M3 with the kernel's FP16 product semantics."""
+        q_float = q.to(torch.float32)
+        q_sign = (q_float < 0).to(torch.int32)
+        q_sig = (torch.abs(q_float) * 2).to(torch.int32)
+
+        scale_code = scale.contiguous().view(torch.uint8).to(torch.int32)
+        scale_sign = scale_code >> 7
+        scale_exp_field = (scale_code >> 3) & 0xF
+        scale_mantissa = scale_code & 0x7
+        scale_sig = torch.where(scale_exp_field == 0, scale_mantissa, scale_mantissa + 8)
+        scale_exp2 = torch.where(scale_exp_field == 0, scale_exp_field - 9, scale_exp_field - 10)
+
+        product_sign = q_sign ^ scale_sign
+        product_sig = q_sig * scale_sig
+        product_exp2 = scale_exp2 - 1
+
+        log2_sig = torch.zeros_like(product_sig)
+        for threshold in (2, 4, 8, 16, 32, 64, 128, 256):
+            log2_sig = log2_sig + (product_sig >= threshold).to(torch.int32)
+
+        floor_exp = log2_sig + product_exp2
+        normal_bits = ((floor_exp + 15) << 10) | (
+            torch.bitwise_left_shift(product_sig, 10 - log2_sig) - 1024
+        )
+        subnormal_bits = torch.bitwise_left_shift(product_sig, product_exp2 + 24)
+        magnitude_bits = torch.where(floor_exp < -14, subnormal_bits, normal_bits)
+        prod_bits = (product_sign << 15) | magnitude_bits
+        prod_bits = torch.where(product_sig == 0, product_sign << 15, prod_bits)
+        prod_bits = torch.where(
+            (scale_code & 0x7F) == 0x7F,
+            torch.full_like(prod_bits, 0x7E00),
+            prod_bits,
+        )
+
+        sign_f32 = torch.where(
+            (prod_bits & 0x8000) != 0,
+            torch.tensor(-1.0, device=prod_bits.device, dtype=torch.float32),
+            torch.tensor(1.0, device=prod_bits.device, dtype=torch.float32),
+        )
+        fp16_exp = (prod_bits >> 10) & 0x1F
+        fp16_frac = prod_bits & 0x3FF
+        normal_f32 = torch.ldexp((fp16_frac + 1024).to(torch.float32), fp16_exp - 25)
+        subnormal_f32 = torch.ldexp(fp16_frac.to(torch.float32), fp16_exp - 24)
+        return sign_f32 * torch.where(fp16_exp == 0, subnormal_f32, normal_f32)
+
+    @staticmethod
+    def _sum_4over6_2d_error(err: torch.Tensor, tile_len_y: int) -> torch.Tensor:
+        """Reduce 16 row errors in the same tree order as the CUDA warp reduction."""
+        assert tile_len_y == 16, "NVFP4 4over6 2D error reduction expects 16 rows."
+        rows = err.view(err.shape[0] // tile_len_y, tile_len_y, err.shape[1], 1)
+        rows = rows.squeeze(-1)
+        rows = rows[:, 0:8, :] + rows[:, 8:16, :]
+        rows = rows[:, 0:4, :] + rows[:, 4:8, :]
+        rows = rows[:, 0:2, :] + rows[:, 2:4, :]
+        return (rows[:, 0, :] + rows[:, 1, :]).unsqueeze(-1)
+
+    @staticmethod
+    def _quantize_blockwise_4over6_reference(
+        x: torch.Tensor,
+        vec_max: torch.Tensor,
+        global_amax: torch.Tensor,
+        global_encode_scale: torch.Tensor,
+        global_decode_scale: torch.Tensor,
+        row_scaled_nvfp4: bool,
+        tile_len_y: int,
+        nvfp4_4over6_err_mode: str,
+        nvfp4_4over6_err_use_fast_math: bool,
+        nvfp4_e4m3_max: int,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Quantize NVFP4 with 4over6 candidate selection.
+
+        This mirrors the CUDA path: map-to-4 uses a 1.5x expanded E4M3 block scale,
+        MAE/MSE compute error in the original input domain by default, the
+        fast-math error path computes error in the E4M3-scaled FP16 product
+        domain, and ties choose map-to-6.
+        """
+        m, num_blocks, tile_len_x = x.shape
+        n = num_blocks * tile_len_x
+        FLOAT4_E2M1_MAX = torch.tensor(6.0, device=x.device, dtype=torch.float32)
+        FLOAT8_E4M3_MAX = torch.tensor(448.0, device=x.device, dtype=torch.float32)
+        GLOBAL_SCALE_E4M3_MAX = torch.tensor(
+            float(nvfp4_e4m3_max), device=x.device, dtype=torch.float32
+        )
+
+        decode_scale_base = torch.div(vec_max, FLOAT4_E2M1_MAX) * global_encode_scale
+        decode_scale_map4 = decode_scale_base * 1.5
+        decode_scale_map6 = decode_scale_base
+        decode_scale_map4 = torch.clamp(
+            decode_scale_map4, min=-FLOAT8_E4M3_MAX, max=FLOAT8_E4M3_MAX
+        ).to(torch.float8_e4m3fn)
+        decode_scale_map6 = torch.clamp(
+            decode_scale_map6, min=-FLOAT8_E4M3_MAX, max=FLOAT8_E4M3_MAX
+        ).to(torch.float8_e4m3fn)
+
+        fp32_max = torch.tensor(
+            torch.finfo(torch.float32).max,
+            device=decode_scale_map4.device,
+            dtype=torch.float32,
+        )
+        encode_scale_map4 = torch.min(
+            torch.div(1.0, decode_scale_map4.to(torch.float32) * global_decode_scale),
+            fp32_max,
+        )
+        encode_scale_map6 = torch.min(
+            torch.div(1.0, decode_scale_map6.to(torch.float32) * global_decode_scale),
+            fp32_max,
+        )
+
+        clipped_x_map4 = torch.clamp(
+            x.to(torch.float32) * encode_scale_map4,
+            -FLOAT4_E2M1_MAX,
+            FLOAT4_E2M1_MAX,
+        ).reshape(m, n)
+        clipped_x_map6 = torch.clamp(
+            x.to(torch.float32) * encode_scale_map6,
+            -FLOAT4_E2M1_MAX,
+            FLOAT4_E2M1_MAX,
+        ).reshape(m, n)
+        qx_map4 = cast_to_fp4x2(clipped_x_map4)
+        qx_map6 = cast_to_fp4x2(clipped_x_map6)
+
+        err_map4 = torch.zeros_like(vec_max)
+        err_map6 = torch.zeros_like(vec_max)
+        fp4_map4 = cast_from_fp4x2(qx_map4, torch.float32).view(m, num_blocks, tile_len_x)
+        fp4_map6 = cast_from_fp4x2(qx_map6, torch.float32).view(m, num_blocks, tile_len_x)
+        x_float = x.to(torch.float32)
+        if nvfp4_4over6_err_use_fast_math:
+            original_scaled = x_float * global_encode_scale
+            candidate_map4 = NVFP4QuantizerRef._ref_nvfp4_4over6_fp16_candidate(
+                fp4_map4, decode_scale_map4
+            )
+            candidate_map6 = NVFP4QuantizerRef._ref_nvfp4_4over6_fp16_candidate(
+                fp4_map6, decode_scale_map6
+            )
+            for idx in range(tile_len_x):
+                diff_map4 = candidate_map4[:, :, idx] - original_scaled[:, :, idx]
+                diff_map6 = candidate_map6[:, :, idx] - original_scaled[:, :, idx]
+                if nvfp4_4over6_err_mode == "MSE":
+                    err_map4 = err_map4 + (diff_map4 * diff_map4).unsqueeze(-1)
+                    err_map6 = err_map6 + (diff_map6 * diff_map6).unsqueeze(-1)
+                else:
+                    err_map4 = err_map4 + torch.abs(diff_map4).unsqueeze(-1)
+                    err_map6 = err_map6 + torch.abs(diff_map6).unsqueeze(-1)
+        else:
+            denom = FLOAT4_E2M1_MAX * GLOBAL_SCALE_E4M3_MAX
+            sf_map4 = decode_scale_map4.to(torch.float32).squeeze(-1)
+            sf_map6 = decode_scale_map6.to(torch.float32).squeeze(-1)
+            if row_scaled_nvfp4:
+                error_global_amax = global_amax.squeeze(-1)
+            else:
+                error_global_amax = global_amax
+            for idx in range(tile_len_x):
+                val_map4 = fp4_map4[:, :, idx] * sf_map4
+                val_map4 = val_map4 * error_global_amax
+                val_map4 = val_map4 / denom
+                diff_map4 = val_map4 - x_float[:, :, idx]
+                if nvfp4_4over6_err_mode == "MSE":
+                    err_map4 = err_map4 + (diff_map4 * diff_map4).unsqueeze(-1)
+                else:
+                    err_map4 = err_map4 + torch.abs(diff_map4).unsqueeze(-1)
+
+                val_map6 = fp4_map6[:, :, idx] * sf_map6
+                val_map6 = val_map6 * error_global_amax
+                val_map6 = val_map6 / denom
+                diff_map6 = val_map6 - x_float[:, :, idx]
+                if nvfp4_4over6_err_mode == "MSE":
+                    err_map6 = err_map6 + (diff_map6 * diff_map6).unsqueeze(-1)
+                else:
+                    err_map6 = err_map6 + torch.abs(diff_map6).unsqueeze(-1)
+        if tile_len_y == 1:
+            pick_map4 = err_map4 < err_map6
+        else:
+            err_map4_blocks = NVFP4QuantizerRef._sum_4over6_2d_error(err_map4, tile_len_y)
+            err_map6_blocks = NVFP4QuantizerRef._sum_4over6_2d_error(err_map6, tile_len_y)
+            pick_map4 = (err_map4_blocks < err_map6_blocks).repeat_interleave(tile_len_y, dim=0)
+        qx = torch.where(
+            pick_map4.expand(-1, -1, tile_len_x // 2),
+            qx_map4.view(m, num_blocks, tile_len_x // 2),
+            qx_map6.view(m, num_blocks, tile_len_x // 2),
+        ).reshape(m, n // 2)
+        decode_scale = torch.where(pick_map4, decode_scale_map4, decode_scale_map6).squeeze(-1)
+        return qx, decode_scale
+
     @classmethod
     def _quantize_blockwise_reference(
         cls,
@@ -456,6 +661,10 @@ class NVFP4QuantizerRef(Quantizer):
         *,
         pow_2_scales: bool,
         row_scaled_nvfp4: bool = False,
+        nvfp4_use_4over6: bool = False,
+        nvfp4_e4m3_max: int = 448,
+        nvfp4_4over6_err_mode: str = "MAE",
+        nvfp4_4over6_err_use_fast_math: bool = False,
         eps: float,  # pylint: disable=unused-argument
     ) -> Tuple[torch.Tensor, torch.Tensor]:
 
@@ -488,6 +697,10 @@ class NVFP4QuantizerRef(Quantizer):
         x = x.view(m, n // tile_len_x, tile_len_x)
         FLOAT4_E2M1_MAX = torch.tensor(6.0, device=x.device, dtype=torch.float32)
         FLOAT8_E4M3_MAX = torch.tensor(448.0, device=x.device, dtype=torch.float32)
+        global_scale_e4m3_max = float(nvfp4_e4m3_max if nvfp4_use_4over6 else 448)
+        GLOBAL_SCALE_E4M3_MAX = torch.tensor(
+            global_scale_e4m3_max, device=x.device, dtype=torch.float32
+        )
         decode_scale = torch.div(vec_max, FLOAT4_E2M1_MAX)
 
         if pow_2_scales:
@@ -500,7 +713,7 @@ class NVFP4QuantizerRef(Quantizer):
             if row_scaled_nvfp4:
                 global_amax = global_amax.to(torch.float32).view(m, 1, 1)
 
-            global_encode_scale = torch.div(FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX, global_amax)
+            global_encode_scale = torch.div(GLOBAL_SCALE_E4M3_MAX * FLOAT4_E2M1_MAX, global_amax)
             global_encode_scale = torch.min(
                 global_encode_scale,
                 torch.tensor(
@@ -519,6 +732,23 @@ class NVFP4QuantizerRef(Quantizer):
                     global_encode_scale,
                 )
             global_decode_scale = torch.div(1.0, global_encode_scale)
+            if nvfp4_use_4over6:
+                # FourOverSix compares map-to-4 and map-to-6 candidates using
+                # the configured error mode, while keeping TE-style FP4
+                # quantization for each candidate.
+                return cls._quantize_blockwise_4over6_reference(
+                    x,
+                    vec_max,
+                    global_amax,
+                    global_encode_scale,
+                    global_decode_scale,
+                    row_scaled_nvfp4,
+                    tile_len_y,
+                    nvfp4_4over6_err_mode,
+                    nvfp4_4over6_err_use_fast_math,
+                    nvfp4_e4m3_max,
+                )
+
             global_encode_scale_multiplier = global_encode_scale * torch.reciprocal(FLOAT4_E2M1_MAX)
 
             # Match the kernel's default path: fold the FP4 reciprocal into the
@@ -679,6 +909,10 @@ class NVFP4QuantizerRef(Quantizer):
                 self.quant_tile_shape[0],
                 pow_2_scales=self.pow_2_scales,
                 row_scaled_nvfp4=self.row_scaled_nvfp4,
+                nvfp4_use_4over6=self.nvfp4_use_4over6,
+                nvfp4_e4m3_max=self.nvfp4_e4m3_max,
+                nvfp4_4over6_err_mode=self.nvfp4_4over6_err_mode,
+                nvfp4_4over6_err_use_fast_math=self.nvfp4_4over6_err_use_fast_math,
                 eps=self.eps,
             )
             if transpose_scales:
@@ -702,6 +936,10 @@ class NVFP4QuantizerRef(Quantizer):
                 self.quant_tile_shape[1],
                 self.quant_tile_shape[0],
                 pow_2_scales=self.pow_2_scales,
+                nvfp4_use_4over6=self.nvfp4_use_4over6,
+                nvfp4_e4m3_max=self.nvfp4_e4m3_max,
+                nvfp4_4over6_err_mode=self.nvfp4_4over6_err_mode,
+                nvfp4_4over6_err_use_fast_math=self.nvfp4_4over6_err_use_fast_math,
                 eps=self.eps,
             )
 
@@ -741,6 +979,8 @@ class NVFP4QuantizerRef(Quantizer):
             scale_t=sx_t,
             global_amax_row=global_amax_row,
             global_amax_col=global_amax_col,
+            nvfp4_use_4over6=self.nvfp4_use_4over6,
+            nvfp4_e4m3_max=self.nvfp4_e4m3_max,
             dtype=tensor.dtype,
             device=tensor.device,
             quant_dtype=self.dtype,
@@ -788,6 +1028,8 @@ class NVFP4QuantizerRef(Quantizer):
         dst.scale_t = sx_t
         dst.global_amax_row = global_amax_row
         dst.global_amax_col = global_amax_col
+        dst.nvfp4_use_4over6 = self.nvfp4_use_4over6
+        dst.nvfp4_e4m3_max = self.nvfp4_e4m3_max
         dst.dtype = src.dtype
         dst.quant_dtype = self.dtype
         dst.original_shape = original_shape
@@ -893,7 +1135,35 @@ class NVFP4QuantizerRef(Quantizer):
             sx = sx.to(torch.float32)
             sw = sw.to(torch.float32)
 
-            factor = 6.0 * 6.0 * 448.0 * 448.0
+            qresult_x_nvfp4_use_4over6 = getattr(
+                qresult_x,
+                "nvfp4_use_4over6",
+                getattr(qresult_x, "_nvfp4_use_4over6", self.nvfp4_use_4over6),
+            )
+            qresult_w_nvfp4_use_4over6 = getattr(
+                qresult_w,
+                "nvfp4_use_4over6",
+                getattr(qresult_w, "_nvfp4_use_4over6", self.nvfp4_use_4over6),
+            )
+            qresult_x_e4m3_max = getattr(
+                qresult_x,
+                "nvfp4_e4m3_max",
+                getattr(qresult_x, "_nvfp4_e4m3_max", self.nvfp4_e4m3_max),
+            )
+            qresult_w_e4m3_max = getattr(
+                qresult_w,
+                "nvfp4_e4m3_max",
+                getattr(qresult_w, "_nvfp4_e4m3_max", self.nvfp4_e4m3_max),
+            )
+            if qresult_x_nvfp4_use_4over6:
+                fp8_max_x = float(qresult_x_e4m3_max)
+            else:
+                fp8_max_x = 448.0
+            if qresult_w_nvfp4_use_4over6:
+                fp8_max_w = float(qresult_w_e4m3_max)
+            else:
+                fp8_max_w = 448.0
+            factor = 6.0 * 6.0 * fp8_max_x * fp8_max_w
 
             if gemm_type == quantization.GEMMType.WGRAD:
                 partial_alpha = qresult_x.global_amax_col * qresult_w.global_amax_col
