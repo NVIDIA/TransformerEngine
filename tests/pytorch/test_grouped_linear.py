@@ -1558,20 +1558,6 @@ _fp8_block_scaling_available, _reason_for_no_fp8_block_scaling = te.is_fp8_block
 )
 
 
-def _require_native_grouped_tensor_gemm(*, mxfp8: bool = False) -> None:
-    """Skip unless the native GroupedTensor grouped GEMM is available."""
-    device_capability = torch.cuda.get_device_capability()
-    if not (9, 0) <= device_capability <= (11, 0):
-        pytest.skip("Native GroupedTensor grouped GEMM requires Hopper or Blackwell.")
-    if mxfp8 and device_capability < (10, 0):
-        pytest.skip("MXFP8 native GroupedTensor grouped GEMM requires Blackwell.")
-    cublaslt_version = tex.get_cublasLt_version()
-    if cublaslt_version < 130300:
-        pytest.skip("Native GroupedTensor grouped GEMM requires cuBLASLt 13.3+.")
-    if device_capability < (10, 0) and cublaslt_version < 130400:
-        pytest.skip("Native GroupedTensor grouped GEMM on Hopper requires cuBLASLt 13.4+.")
-
-
 @pytest.fixture(autouse=True)
 def _reset_fp8_state(monkeypatch):
     monkeypatch.delenv(_FUSED_GROUPED_GEMM_ENV, raising=False)
@@ -1706,10 +1692,15 @@ def test_single_grouped_weight_matches_discrete_grouped_tensor_path(monkeypatch,
 @pytest.mark.skipif(not _mxfp8_available, reason=_reason_for_no_mxfp8)
 def test_single_grouped_weight_mxfp8_workspace_cache(monkeypatch):
     """BF16 primary weights update one persistent MXFP8 grouped workspace per iteration."""
-    _require_native_grouped_tensor_gemm(mxfp8=True)
+    mxfp8_recipe = recipe.MXFP8BlockScaling()
+    if not is_module_grouped_tensor_path_supported(
+        mxfp8_recipe,
+        torch.bfloat16,
+        single_grouped_weight=True,
+    ):
+        pytest.skip("MXFP8 single-weight GroupedTensor path is unavailable on this system.")
     monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
     FP8GlobalStateManager.reset()
-    mxfp8_recipe = recipe.MXFP8BlockScaling()
     grouped_linear = GroupedLinear(
         2,
         256,
@@ -1802,10 +1793,15 @@ def test_single_grouped_weight_with_disabled_weight_preswizzle(monkeypatch, fp8_
 @pytest.mark.skipif(not _mxfp8_available, reason=_reason_for_no_mxfp8)
 def test_single_grouped_primary_mxfp8_bypasses_weight_workspace(monkeypatch):
     """An MXFP8 primary grouped parameter is already GEMM-ready and is not requantized."""
-    _require_native_grouped_tensor_gemm(mxfp8=True)
+    mxfp8_recipe = recipe.MXFP8BlockScaling()
+    if not is_module_grouped_tensor_path_supported(
+        mxfp8_recipe,
+        torch.bfloat16,
+        single_grouped_weight=True,
+    ):
+        pytest.skip("MXFP8 single-weight GroupedTensor path is unavailable on this system.")
     monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
     FP8GlobalStateManager.reset()
-    mxfp8_recipe = recipe.MXFP8BlockScaling()
     with quantized_model_init(enabled=True, recipe=mxfp8_recipe):
         grouped_linear = GroupedLinear(
             2,
@@ -2186,33 +2182,17 @@ def test_grouped_linear_grouped_tensor_path_matches_legacy(
     fp8_recipe, bias, fp8_model_params, delay_wgrad_compute, monkeypatch
 ):
     use_fp8 = fp8_recipe is not None
-    device_capability = torch.cuda.get_device_capability()
-    if not (9, 0) <= device_capability <= (11, 0):
-        pytest.skip(
-            "GroupedTensor grouped GEMM path requires Hopper (SM90) or Blackwell (SM10x and SM110)."
-        )
-    # MXFP8/NVFP4 grouped quantization kernels require Blackwell; FP8 per-tensor
-    # current scaling runs on Hopper and Blackwell; FP8 block scaling is Hopper-only.
-    is_current_scaling = use_fp8 and fp8_recipe.float8_current_scaling()
-    is_block_scaling = use_fp8 and fp8_recipe.float8_block_scaling()
-    if is_block_scaling and not (9, 0) <= device_capability < (10, 0):
-        pytest.skip("Fused grouped FP8 block-scaling requires Hopper (SM90).")
-    if use_fp8 and not is_current_scaling and not is_block_scaling and device_capability < (10, 0):
-        pytest.skip(
-            "Quantized GroupedTensor grouped GEMM path (MXFP8/NVFP4) requires Blackwell (SM100+)."
-        )
-    cublaslt_version = tex.get_cublasLt_version()
-    if device_capability < (10, 0) and cublaslt_version < 130400:
-        pytest.skip("Grouped GEMM on Hopper requires cuBLAS 13.4+.")
-    if is_current_scaling and device_capability < (10, 0) and cublaslt_version < 130500:
-        pytest.skip("FP8 per-tensor scaling grouped GEMM on Hopper requires cuBLAS 13.5+.")
-    if cublaslt_version < 130300:
-        pytest.skip("Grouped GEMM requires cuBLAS 13.3+.")
+    dtype = torch.bfloat16
+    if not is_module_grouped_tensor_path_supported(
+        fp8_recipe,
+        dtype,
+        single_grouped_weight=False,
+    ):
+        pytest.skip("Recipe is not supported by the module GroupedTensor path on this system.")
 
     if fp8_model_params and not use_fp8:
         pytest.skip("fp8_model_params requires FP8")
 
-    dtype = torch.bfloat16
     num_gemms = 3
     in_features = 128
     out_features = 128
@@ -2269,8 +2249,12 @@ def test_grouped_linear_grouped_tensor_path_matches_legacy(
 
 
 def test_grouped_linear_grouped_tensor_path_single_grouped_bias_delay_wgrad(monkeypatch):
-    if torch.cuda.get_device_capability() < (10, 0):
-        pytest.skip("GroupedTensor grouped GEMM path requires SM100+")
+    if not is_module_grouped_tensor_path_supported(
+        None,
+        torch.bfloat16,
+        single_grouped_weight=False,
+    ):
+        pytest.skip("BF16 GroupedTensor path is unavailable on this system.")
 
     monkeypatch.setenv(_FUSED_GROUPED_GEMM_ENV, "1")
 
@@ -2319,7 +2303,12 @@ def test_grouped_linear_returns_single_grouped_bias_parameter(monkeypatch):
     ``sum(probs_for_expert_i)``. The identity assertion also ensures that TE returns the
     registered grouped parent rather than copied or split bias tensors.
     """
-    _require_native_grouped_tensor_gemm()
+    if not is_module_grouped_tensor_path_supported(
+        None,
+        torch.bfloat16,
+        single_grouped_weight=False,
+    ):
+        pytest.skip("BF16 GroupedTensor path is unavailable on this system.")
     monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
 
     dtype = torch.bfloat16
@@ -2348,7 +2337,13 @@ def test_grouped_linear_returns_single_grouped_bias_parameter(monkeypatch):
         device="cuda",
         requires_grad=True,
     )
-    probs = torch.rand(total_tokens, dtype=dtype, device="cuda")
+
+    probs = torch.cat(
+        (
+            torch.full((256,), 0.25, dtype=dtype, device="cuda"),
+            torch.full((256,), 0.5, dtype=dtype, device="cuda"),
+        )
+    )
     output, returned_bias = grouped_linear(x, m_splits)
 
     assert returned_bias is grouped_linear.bias
@@ -2393,18 +2388,12 @@ def test_grouped_linear_caller_output_buffers(use_fused_path, supply, monkeypatc
     Checks that a supplied buffer is written in place (bit-for-bit vs internal allocation)
     and, on the fused path with a padded input, that only the valid rows are touched.
     """
-    if use_fused_path:
-        device_capability = torch.cuda.get_device_capability()
-        if not (9, 0) <= device_capability <= (11, 0):
-            pytest.skip(
-                "GroupedTensor grouped GEMM path requires Hopper (SM90) or Blackwell"
-                " (SM10x and SM110)."
-            )
-        cublaslt_version = tex.get_cublasLt_version()
-        if device_capability < (10, 0) and cublaslt_version < 130400:
-            pytest.skip("Grouped GEMM on Hopper requires cuBLAS 13.4+.")
-        if cublaslt_version < 130300:
-            pytest.skip("Grouped GEMM requires cuBLAS 13.3+.")
+    if use_fused_path and not is_module_grouped_tensor_path_supported(
+        None,
+        torch.bfloat16,
+        single_grouped_weight=False,
+    ):
+        pytest.skip("BF16 GroupedTensor path is unavailable on this system.")
 
     monkeypatch.setenv(_FUSED_GROUPED_GEMM_ENV, "1" if use_fused_path else "0")
     give_out = supply in ("out", "both")
@@ -2589,33 +2578,17 @@ def test_grouped_linear_grouped_tensor_path_skips_non_rht_nvfp4():
 def test_grouped_linear_fused_path_cuda_graph_safe(fp8_recipe, bias, monkeypatch):
     """Fused GroupedTensor GEMM path should be CUDA graph capturable."""
     use_fp8 = fp8_recipe is not None
-    device_capability = torch.cuda.get_device_capability()
-    if not (9, 0) <= device_capability <= (11, 0):
-        pytest.skip(
-            "GroupedTensor grouped GEMM path requires Hopper (SM90) or Blackwell (SM10x and SM110)."
-        )
-    # MXFP8/NVFP4 grouped quantization kernels require Blackwell; FP8 per-tensor
-    # current scaling runs on Hopper and Blackwell; FP8 block scaling is Hopper-only.
-    is_current_scaling = use_fp8 and fp8_recipe.float8_current_scaling()
-    is_block_scaling = use_fp8 and fp8_recipe.float8_block_scaling()
-    if is_block_scaling and not (9, 0) <= device_capability < (10, 0):
-        pytest.skip("Fused grouped FP8 block-scaling requires Hopper (SM90).")
-    if use_fp8 and not is_current_scaling and not is_block_scaling and device_capability < (10, 0):
-        pytest.skip(
-            "Quantized GroupedTensor grouped GEMM path (MXFP8/NVFP4) requires Blackwell (SM100+)."
-        )
-    cublaslt_version = tex.get_cublasLt_version()
-    if device_capability < (10, 0) and cublaslt_version < 130400:
-        pytest.skip("Grouped GEMM on Hopper requires cuBLAS 13.4+.")
-    if is_current_scaling and device_capability < (10, 0) and cublaslt_version < 130500:
-        pytest.skip("FP8 per-tensor scaling grouped GEMM on Hopper requires cuBLAS 13.5+.")
-    if cublaslt_version < 130300:
-        pytest.skip("Grouped GEMM requires cuBLAS 13.3+.")
+    dtype = torch.bfloat16
+    if not is_module_grouped_tensor_path_supported(
+        fp8_recipe,
+        dtype,
+        single_grouped_weight=False,
+    ):
+        pytest.skip("Recipe is not supported by the module GroupedTensor path on this system.")
 
     monkeypatch.setenv(_FUSED_GROUPED_GEMM_ENV, "1")
     FP8GlobalStateManager.reset()
 
-    dtype = torch.bfloat16
     device = "cuda"
     num_gemms = 3
     in_features = 128
