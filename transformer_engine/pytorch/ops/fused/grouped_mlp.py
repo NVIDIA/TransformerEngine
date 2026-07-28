@@ -1087,9 +1087,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             getattr(self.basic_ops[1], "_grouped_mlp_unit_activation_scale", False)
         )
         if unit_activation_scale and num_groups != 1:
-            raise ValueError(
-                "Unit activation scaling is only supported for a single-group grouped MLP."
-            )
+            unit_activation_scale = False
 
         # Shared experts have one dense group and all optimized kernels derive M
         # from their runtime tensor shapes. Reuse the caller-owned split tensor
