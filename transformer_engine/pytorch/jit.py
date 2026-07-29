@@ -3,9 +3,11 @@
 # See LICENSE for license information.
 
 """NVFuser functions and JIT utilities"""
+import inspect
 import os
+import warnings
 from functools import wraps
-from typing import Callable, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 import torch
 
 from .torch_version import torch_version
@@ -75,6 +77,44 @@ else:
     def no_torch_dynamo(recursive=True):  # pylint: disable=unused-argument
         """No-op decorator for PyTorch < 2.0."""
         return lambda func: func
+
+
+def eager_under_compile_if(needs_eager: Callable[[Dict[str, Any]], Optional[str]]):
+    """Decorator running the wrapped method eagerly whenever `needs_eager` gives
+    a reason why the call is unsupported on the compiled path.
+
+    `needs_eager` is handed the call's arguments keyed by parameter name, taken
+    from the wrapped signature, so it does not have to care whether the caller
+    passed them by name or by position. Returning None keeps the call compiled.
+    """
+
+    def decorator(fn):
+        parameter_names = list(inspect.signature(fn).parameters)
+
+        # The warning belongs inside the dynamo-disabled function: warnings.warn
+        # graph-breaks on its own, masking the break that matters.
+        @no_torch_dynamo()
+        def eager_fn(reason, *args, **kwargs):
+            warnings.warn(
+                f"Falling back to eager execution under torch.compile: {reason} is"
+                " unsupported on the compiled path (graph-breaks under fullgraph=True).",
+                stacklevel=3,
+            )
+            return fn(*args, **kwargs)
+
+        @wraps(fn)
+        def wrapper(*args, **kwargs):
+            if torch.compiler.is_compiling():
+                call = dict(zip(parameter_names, args))
+                call.update(kwargs)
+                reason = needs_eager(call)
+                if reason is not None:
+                    return eager_fn(reason, *args, **kwargs)
+            return fn(*args, **kwargs)
+
+        return wrapper
+
+    return decorator
 
 
 def set_jit_fusion_options() -> None:

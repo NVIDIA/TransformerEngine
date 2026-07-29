@@ -4,8 +4,6 @@
 
 """Attention."""
 from contextlib import nullcontext
-from functools import wraps
-import inspect
 import math
 import os
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
@@ -44,7 +42,7 @@ from transformer_engine.pytorch.distributed import (
     CudaRNGStatesTracker,
     graph_safe_rng_available,
 )
-from transformer_engine.pytorch.jit import no_torch_dynamo
+from transformer_engine.pytorch.jit import eager_under_compile_if
 from transformer_engine.pytorch.graph import is_graph_capturing
 from transformer_engine.pytorch.attention.inference import InferenceParams
 
@@ -225,44 +223,6 @@ def _needs_eager_dpa(call: Dict[str, Any]) -> Optional[str]:
         if dpa_utils.qkv_layout_needs_detection(*qkv):
             return "detecting packed q/k/v that were not declared via qkv_layer/kv_layer"
     return None
-
-
-def _eager_under_compile_if(needs_eager: Callable[[Dict[str, Any]], Optional[str]]):
-    """Decorator running the wrapped method eagerly whenever `needs_eager` gives
-    a reason why the call is unsupported on the compiled path.
-
-    `needs_eager` is handed the call's arguments keyed by parameter name, taken
-    from the wrapped signature, so it does not have to care whether the caller
-    passed them by name or by position.
-    """
-
-    def decorator(fn):
-        parameter_names = list(inspect.signature(fn).parameters)
-
-        # The warning belongs inside the dynamo-disabled function: warnings.warn
-        # graph-breaks on its own, masking the break that matters.
-        @no_torch_dynamo()
-        def eager_fn(reason, *args, **kwargs):
-            warnings.warn(
-                f"Falling back to eager execution under torch.compile: {reason} is"
-                " unsupported on the compiled path (graph-breaks under fullgraph=True).",
-                stacklevel=3,
-            )
-            return fn(*args, **kwargs)
-
-        @wraps(fn)
-        def wrapper(*args, **kwargs):
-            if torch.compiler.is_compiling():
-                call = dict(zip(parameter_names, args))
-                call.update(kwargs)
-                reason = needs_eager(call)
-                if reason is not None:
-                    return eager_fn(reason, *args, **kwargs)
-            return fn(*args, **kwargs)
-
-        return wrapper
-
-    return decorator
 
 
 def _unpack_packed_qkv(
@@ -1167,7 +1127,7 @@ class DotProductAttention(TransformerEngineBaseModule):
             ]
         return base[:num_quantizers]
 
-    @_eager_under_compile_if(_needs_eager_dpa)
+    @eager_under_compile_if(_needs_eager_dpa)
     def forward(
         self,
         query_layer: Optional[torch.Tensor] = None,
