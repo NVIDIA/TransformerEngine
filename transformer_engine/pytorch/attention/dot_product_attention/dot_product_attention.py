@@ -5,6 +5,7 @@
 """Attention."""
 from contextlib import nullcontext
 from functools import wraps
+import inspect
 import math
 import os
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
@@ -197,32 +198,11 @@ def _trim_output(attn_out, num_attention_heads, padded_head_dim_v, orig_head_dim
     return attn_out[..., :orig_head_dim_v].reshape(*out_shape, -1)
 
 
-# Positions of the `DotProductAttention.forward` arguments the predicate below
-# reads, so that they are found whether they were passed by name or by position.
-_FORWARD_ARG_POSITIONS = {
-    "query_layer": 1,
-    "key_layer": 2,
-    "value_layer": 3,
-    "qkv_format": 5,
-    "max_seqlen_q": 10,
-    "max_seqlen_kv": 11,
-    "qkv_layer": 28,
-    "kv_layer": 29,
-}
-
-
-def _forward_arg(name: str, args: tuple, kwargs: dict) -> Any:
-    if name in kwargs:
-        return kwargs[name]
-    position = _FORWARD_ARG_POSITIONS[name]
-    return args[position] if len(args) > position else None
-
-
-def _needs_eager_dpa(*args, **kwargs) -> Optional[str]:
+def _needs_eager_dpa(call: Dict[str, Any]) -> Optional[str]:
     """Why this DotProductAttention call has to run outside the graph, or None.
 
-    Takes `DotProductAttention.forward`'s arguments as they were passed, with
-    `args[0]` being `self`.
+    `call` maps `DotProductAttention.forward`'s parameter names to the arguments
+    this call passed, including `self`.
     """
     # FP8 GEMMs with the attention itself in high precision -- the common
     # training setup -- stay on the compiled path; only FP8 attention bails out.
@@ -232,32 +212,33 @@ def _needs_eager_dpa(*args, **kwargs) -> Optional[str]:
         if fp8_recipe.fp8_dpa or fp8_recipe.fp8_mha:
             return "FP8 attention"
 
-    qkv_format = _forward_arg("qkv_format", args, kwargs) or args[0].qkv_format
+    qkv_format = call.get("qkv_format") or call["self"].qkv_format
     if qkv_format == "thd" and (
-        _forward_arg("max_seqlen_q", args, kwargs) is None
-        or _forward_arg("max_seqlen_kv", args, kwargs) is None
+        call.get("max_seqlen_q") is None or call.get("max_seqlen_kv") is None
     ):
         # Deriving it reads the sequence lengths off cu_seqlens, which is a
         # device synchronization and a data-dependent value while tracing.
         return "deriving max_seqlen from cu_seqlens"
 
-    if (
-        _forward_arg("qkv_layer", args, kwargs) is None
-        and _forward_arg("kv_layer", args, kwargs) is None
-    ):
-        qkv = [
-            _forward_arg(name, args, kwargs) for name in ("query_layer", "key_layer", "value_layer")
-        ]
+    if call.get("qkv_layer") is None and call.get("kv_layer") is None:
+        qkv = [call.get(name) for name in ("query_layer", "key_layer", "value_layer")]
         if dpa_utils.qkv_layout_needs_detection(*qkv):
             return "detecting packed q/k/v that were not declared via qkv_layer/kv_layer"
     return None
 
 
-def _eager_under_compile_if(needs_eager: Callable[..., Optional[str]]):
+def _eager_under_compile_if(needs_eager: Callable[[Dict[str, Any]], Optional[str]]):
     """Decorator running the wrapped method eagerly whenever `needs_eager` gives
-    a reason why the call is unsupported on the compiled path."""
+    a reason why the call is unsupported on the compiled path.
+
+    `needs_eager` is handed the call's arguments keyed by parameter name, taken
+    from the wrapped signature, so it does not have to care whether the caller
+    passed them by name or by position.
+    """
 
     def decorator(fn):
+        parameter_names = list(inspect.signature(fn).parameters)
+
         # The warning belongs inside the dynamo-disabled function: warnings.warn
         # graph-breaks on its own, masking the break that matters.
         @no_torch_dynamo()
@@ -272,7 +253,9 @@ def _eager_under_compile_if(needs_eager: Callable[..., Optional[str]]):
         @wraps(fn)
         def wrapper(*args, **kwargs):
             if torch.compiler.is_compiling():
-                reason = needs_eager(*args, **kwargs)
+                call = dict(zip(parameter_names, args))
+                call.update(kwargs)
+                reason = needs_eager(call)
                 if reason is not None:
                     return eager_fn(reason, *args, **kwargs)
             return fn(*args, **kwargs)
