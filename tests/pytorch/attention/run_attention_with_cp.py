@@ -209,6 +209,11 @@ def run_dpa_with_cp(
     logging.root.setLevel(log_level)
     # When is_training is False, gradient outputs are None.
     is_training = is_training == "True"
+    pad_between_seqs = None
+    if qkv_format == "thd":
+        # Keep this in sync with generate_input_shapes so DPA gets the explicit
+        # padding state without a GPU-to-CPU sync.
+        pad_between_seqs = kernel_backend == "FusedAttention" or fa_pad_between_seqs == "True"
 
     # set up environment variables and config
     if deterministic == "True":
@@ -411,6 +416,7 @@ def run_dpa_with_cp(
             cu_seqlens_kv=cu_seqlens_kv,
             cu_seqlens_q_padded=cu_seqlens_q_padded,
             cu_seqlens_kv_padded=cu_seqlens_kv_padded,
+            pad_between_seqs=pad_between_seqs,
             fp8_output=fp8_mha,
         )
         if config.return_max_logit:
@@ -528,6 +534,7 @@ def run_dpa_with_cp(
             cu_seqlens_kv=cu_seqlens_kv,
             cu_seqlens_q_padded=cu_seqlens_q_padded,
             cu_seqlens_kv_padded=cu_seqlens_kv_padded,
+            pad_between_seqs=pad_between_seqs,
             fp8_output=fp8_mha,
         )
         if config.return_max_logit:

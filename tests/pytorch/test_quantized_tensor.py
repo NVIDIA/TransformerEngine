@@ -110,6 +110,42 @@ def to_float8_CS(
     return quantizer(tensor)
 
 
+def make_quantizer(quantization: str, device: torch.device = "cuda"):
+    """Construct a quantizer for the given quantization scheme."""
+    if quantization in ("fp8", "fp8_delayed_scaling"):
+        return Float8Quantizer(
+            scale=torch.ones(1, dtype=torch.float32, device=device).squeeze(),
+            amax=torch.zeros(1, dtype=torch.float32, device=device),
+            fp8_dtype=te.DType.kFloat8E4M3,
+        )
+    if quantization == "fp8_current_scaling":
+        return Float8CurrentScalingQuantizer(fp8_dtype=te.DType.kFloat8E4M3, device=device)
+    if quantization == "fp8_blockwise":
+        return Float8BlockQuantizer(
+            fp8_dtype=te.DType.kFloat8E4M3,
+            rowwise=True,
+            columnwise=True,
+            force_pow_2_scales=True,
+            amax_epsilon=0.0,
+            block_scaling_dim=1,
+        )
+    if quantization == "mxfp8":
+        return MXFP8Quantizer(fp8_dtype=te.DType.kFloat8E4M3)
+    if quantization in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6"):
+        row_scaled_nvfp4 = quantization == "nvfp4_row_scaled"
+        return NVFP4Quantizer(
+            columnwise=not row_scaled_nvfp4,
+            with_rht=False,
+            with_post_rht_amax=False,
+            with_2d_quantization=False,
+            stochastic_rounding=False,
+            row_scaled_nvfp4=row_scaled_nvfp4,
+            with_random_sign_mask=False,
+            nvfp4_use_4over6=(quantization == "nvfp4_4over6"),
+        )
+    raise ValueError(f"Unsupported quantization scheme ({quantization})")
+
+
 @torch.no_grad()
 def make_reference_and_test_tensors(
     shape: int | Iterable[int],
@@ -139,45 +175,8 @@ def make_reference_and_test_tensors(
     if quantization is None:
         if test.data_ptr() == ref.data_ptr():
             test = test.clone()
-    elif quantization in ("fp8", "fp8_delayed_scaling"):
-        quantizer = Float8Quantizer(
-            scale=torch.ones(1, dtype=torch.float32, device=test_device).squeeze(),
-            amax=torch.zeros(1, dtype=torch.float32, device=test_device),
-            fp8_dtype=te.DType.kFloat8E4M3,
-        )
-        test = quantizer(test)
-    elif quantization == "fp8_current_scaling":
-        quantizer = Float8CurrentScalingQuantizer(
-            fp8_dtype=te.DType.kFloat8E4M3,
-            device=test_device,
-        )
-        test = quantizer(test)
-    elif quantization == "fp8_blockwise":
-        quantizer = Float8BlockQuantizer(
-            fp8_dtype=te.DType.kFloat8E4M3,
-            rowwise=True,
-            columnwise=True,
-            force_pow_2_scales=True,
-            amax_epsilon=0.0,
-            block_scaling_dim=1,
-        )
-        test = quantizer(test)
-    elif quantization == "mxfp8":
-        test = MXFP8Quantizer(fp8_dtype=te.DType.kFloat8E4M3)(test)
-    elif quantization in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6"):
-        row_scaled_nvfp4 = quantization == "nvfp4_row_scaled"
-        test = NVFP4Quantizer(
-            columnwise=not row_scaled_nvfp4,
-            with_rht=False,
-            with_post_rht_amax=False,
-            with_2d_quantization=False,
-            stochastic_rounding=False,
-            row_scaled_nvfp4=row_scaled_nvfp4,
-            with_random_sign_mask=False,
-            nvfp4_use_4over6=(quantization == "nvfp4_4over6"),
-        )(test)
     else:
-        raise ValueError(f"Unsupported quantization scheme ({quantization})")
+        test = make_quantizer(quantization, device=test_device)(test)
 
     # Make sure reference and test tensors match each other
     ref.copy_(test.to(dtype=ref.dtype))
@@ -714,6 +713,14 @@ class TestQuantizedTensor:
             y_test = y_test.to(dtype=torch.float64, device="cpu")
             torch.testing.assert_close(y_test, y_ref, **tols)
 
+    def test_view_not_implemented(self) -> None:
+        """QuantizedTensor base class does not support tensor views."""
+        qt = QuantizedTensor((128, 128), torch.bfloat16)
+        with pytest.raises(
+            NotImplementedError, match="QuantizedTensor class does not support tensor views"
+        ):
+            qt.view(-1)
+
     @pytest.mark.parametrize("quantization", _quantization_list)
     def test_shape_with_none_data(
         self,
@@ -757,6 +764,58 @@ class TestQuantizedTensor:
             f"Expected shape {shape} but got {x_test.shape} "
             f"after setting data to None on {type(x_test).__name__}"
         )
+
+    @pytest.mark.parametrize("quantization", _quantization_list)
+    @pytest.mark.parametrize(
+        "rowwise, columnwise",
+        [(True, True), (True, False), (False, True)],
+        ids=["rowwise_columnwise", "rowwise_only", "columnwise_only"],
+    )
+    @pytest.mark.parametrize("shape", [(128, 256), (4, 128, 256)], ids=["2d", "3d"])
+    def test_shape_matches_size(
+        self,
+        *,
+        quantization: str,
+        rowwise: bool,
+        columnwise: bool,
+        shape: Iterable[int],
+        dtype: torch.dtype = torch.bfloat16,
+        device: torch.device = "cuda",
+    ) -> None:
+        """shape, size() and size(dim) stay consistent for every usage combination.
+
+        Both shape and size() are derived from whichever data buffer is present,
+        and classes that store columnwise data transposed have to undo that. A
+        columnwise-only tensor is where they can drift apart -- from each other,
+        and from the shape the tensor was allocated with.
+        """
+        quantizer = make_quantizer(quantization, device=device)
+        # Row-scaled NVFP4 accepts set_usage(rowwise=False) but rejects the
+        # allocation itself, so it has to be filtered out up front.
+        if getattr(quantizer, "row_scaled_nvfp4", False) and not rowwise:
+            pytest.skip(f"{quantization} requires rowwise usage")
+        quantizer.set_usage(rowwise=rowwise, columnwise=columnwise)
+        if (quantizer.rowwise_usage, quantizer.columnwise_usage) != (rowwise, columnwise):
+            pytest.skip(f"{quantization} does not support this usage combination")
+
+        x = quantizer.make_empty(shape, dtype=dtype, device=device)
+        name = type(x).__name__
+
+        # shape and size() must describe the same tensor, whichever buffer they
+        # end up reading.
+        assert tuple(x.shape) == tuple(x.size()), f"{name}: {tuple(x.shape)} vs {tuple(x.size())}"
+
+        # size(dim) must agree with the full shape, including negative indices.
+        # It cannot be served by forwarding dim to a transposed buffer.
+        for dim in range(len(x.shape)):
+            assert x.size(dim) == x.shape[dim], f"{name}.size({dim}) is {x.size(dim)}"
+            neg = dim - len(x.shape)
+            assert x.size(neg) == x.shape[neg], f"{name}.size({neg}) is {x.size(neg)}"
+
+        # NVFP4 deliberately reports columnwise-only tensors flattened to 2D and
+        # warns about it, so only the ranks it preserves are checked here.
+        if not (isinstance(quantizer, NVFP4Quantizer) and not rowwise and len(shape) > 2):
+            assert tuple(x.shape) == tuple(shape), f"{name}.shape is {tuple(x.shape)}"
 
     @pytest.mark.parametrize(
         "quantization",
@@ -817,6 +876,35 @@ class TestQuantizedTensor:
         q_ref = quantizer(x_new)
         assert q_x.shape == torch.Size(shape)
         assert_close(q_x, q_ref, rtol=0, atol=0)
+
+    @pytest.mark.parametrize("quantization", _quantization_list)
+    def test_quantize_dequantize_autograd(
+        self,
+        *,
+        quantization: str,
+        shape: Iterable[int] = (128, 128),
+        dtype: torch.dtype = torch.bfloat16,
+        device: torch.device = "cuda",
+    ) -> None:
+        """Autograd must survive a quantize -> dequantize round trip."""
+
+        quantizer = make_quantizer(quantization, device=device)
+        x = torch.randn(list(shape), dtype=dtype, device=device, requires_grad=True)
+        # Quantize with autograd enabled: a grad_fn is attached to the output.
+        x_q = quantizer(x)
+        assert isinstance(x_q, QuantizedTensor)
+        assert x_q.grad_fn is not None, "quantized tensor is missing its grad_fn"
+        # requires_grad must reflect the attached grad_fn, not a stale cache.
+        assert x_q.requires_grad, (
+            "quantized tensor reports requires_grad=False despite having a "
+            "grad_fn (stale requires_grad cache)"
+        )
+
+        # Dequantize and take a loss; the gradient must reach the input.
+        (x_q.dequantize().float() ** 2).sum().backward()
+        assert (
+            x.grad is not None and x.grad.norm().item() > 0
+        ), "Gradient did not flow back to the input through quantize -> dequantize"
 
 
 @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)

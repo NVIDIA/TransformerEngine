@@ -90,8 +90,8 @@ def pytest_addoption(parser):
     """CLI options used by multiprocess JAX tests.
 
     ``--num-process`` and ``--process-id`` let a multiprocess launcher
-    (see ``tests/jax/run_multiprocess_moe_vjp.sh``) fork one pytest
-    process per GPU and tell each child its rank, so the test module
+    (see ``tests/jax/run_te_ep_moe.sh``) fork one pytest process per
+    GPU and tell each child its rank, so the test module
     can call ``jax.distributed.initialize(...)`` with the right
     ``local_device_ids``. Both default to 0; non-multiprocess tests
     ignore them.

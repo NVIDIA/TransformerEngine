@@ -21,7 +21,6 @@ from transformer_engine.common.recipe import (
     Float8CurrentScaling,
     MXFP8BlockScaling,
 )
-from transformer_engine.pytorch.utils import get_cudnn_version
 from transformer_engine.pytorch.quantization import (
     QuantizerRole,
     get_fp8_te_dtype,
@@ -195,6 +194,111 @@ def _trim_output(attn_out, num_attention_heads, padded_head_dim_v, orig_head_dim
     out_shape = attn_out.shape[:-1]
     attn_out = attn_out.reshape(*out_shape, num_attention_heads, padded_head_dim_v)
     return attn_out[..., :orig_head_dim_v].reshape(*out_shape, -1)
+
+
+def _unpack_packed_qkv(
+    qkv_layer: Optional[torch.Tensor],
+    kv_layer: Optional[torch.Tensor],
+    query_layer: Optional[torch.Tensor],
+    key_layer: Optional[torch.Tensor],
+    value_layer: Optional[torch.Tensor],
+    qkv_format: str,
+    qkv_interleave_dim: int,
+    inference_params: Optional[InferenceParams],
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[str]]:
+    """Resolve declarative packed inputs into q/k/v.
+
+    Derives q/k/v as zero-copy views of the packed buffer (``qkv_layer`` or
+    ``kv_layer``) and constructs the exact layout string from the declaration.
+    The layout enum is truthful by construction, so no pointer-based detection
+    is needed downstream (this also covers thd and FP8 DPA).
+
+    Returns ``(query_layer, key_layer, value_layer, declared_qkv_layout)``;
+    the layout is ``None`` when no packed input is given.
+    """
+    if qkv_layer is None and kv_layer is None:
+        if query_layer is None or key_layer is None or value_layer is None:
+            raise ValueError(
+                "query_layer, key_layer and value_layer are required unless packed"
+                " inputs (qkv_layer or query_layer + kv_layer) are provided."
+            )
+        return query_layer, key_layer, value_layer, None
+
+    if qkv_layer is not None and kv_layer is not None:
+        raise ValueError("qkv_layer and kv_layer are mutually exclusive.")
+    if inference_params is not None:
+        raise ValueError(
+            "Packed inputs (qkv_layer/kv_layer) are not supported with KV caching"
+            " (inference_params); pass separate query/key/value tensors instead."
+        )
+    if qkv_interleave_dim not in (-3, -2):
+        raise ValueError(
+            "qkv_interleave_dim must be -3 (e.g. bs3hd) or -2 (e.g. bsh3d), got"
+            f" {qkv_interleave_dim}."
+        )
+    packed = qkv_layer if qkv_layer is not None else kv_layer
+    # The declared layout describes the packed buffer's memory, so it must have
+    # stride 1 in its last dimension (the check get_qkv_layout would otherwise
+    # perform on the derived q/k/v views).
+    if packed.stride(-1) != 1:
+        raise ValueError(
+            "The packed tensor (qkv_layer/kv_layer) must have stride 1 in its last"
+            f" dimension, got strides {tuple(packed.stride())}."
+        )
+
+    def _packed_layout(fmt: str, num: int) -> str:
+        # bshd + 3 @ -3 -> bs3hd; bshd + 3 @ -2 -> bsh3d; thd + 2 @ -2 -> th2d
+        pos = len(fmt) + qkv_interleave_dim + 1
+        return fmt[:pos] + str(num) + fmt[pos:]
+
+    if qkv_layer is not None:
+        if any(x is not None for x in (query_layer, key_layer, value_layer)):
+            raise ValueError(
+                "qkv_layer already packs Q, K and V: query_layer, key_layer and"
+                " value_layer must be None when qkv_layer is provided."
+            )
+        expected_rank = 4 if qkv_format == "thd" else 5
+        if qkv_layer.dim() != expected_rank:
+            raise ValueError(
+                f"qkv_layer must be a {expected_rank}D tensor for"
+                f" qkv_format={qkv_format!r}, got {qkv_layer.dim()}D."
+            )
+        if qkv_layer.shape[qkv_interleave_dim] != 3:
+            raise ValueError(
+                f"qkv_layer must have size 3 at dim {qkv_interleave_dim}"
+                f" (qkv_interleave_dim), got shape {tuple(qkv_layer.shape)}."
+            )
+        query_layer, key_layer, value_layer = (
+            qkv_layer.select(qkv_interleave_dim, i) for i in range(3)
+        )
+        return query_layer, key_layer, value_layer, _packed_layout(qkv_format, 3)
+
+    if query_layer is None:
+        raise ValueError(
+            "kv_layer packs only K and V: query_layer is required when kv_layer is provided."
+        )
+    if key_layer is not None or value_layer is not None:
+        raise ValueError(
+            "kv_layer already packs K and V: key_layer and value_layer must be"
+            " None when kv_layer is provided."
+        )
+    if kv_layer.dim() != query_layer.dim() + 1:
+        raise ValueError(
+            "kv_layer must have one more dimension than query_layer, got"
+            f" {kv_layer.dim()}D kv_layer and {query_layer.dim()}D query_layer."
+        )
+    if kv_layer.shape[qkv_interleave_dim] != 2:
+        raise ValueError(
+            f"kv_layer must have size 2 at dim {qkv_interleave_dim}"
+            f" (qkv_interleave_dim), got shape {tuple(kv_layer.shape)}."
+        )
+    key_layer, value_layer = (kv_layer.select(qkv_interleave_dim, i) for i in range(2))
+    return (
+        query_layer,
+        key_layer,
+        value_layer,
+        f"{qkv_format}_{_packed_layout(qkv_format, 2)}",
+    )
 
 
 class DotProductAttention(TransformerEngineBaseModule):
@@ -452,25 +556,6 @@ class DotProductAttention(TransformerEngineBaseModule):
             not bool(int(os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1")))
             or torch.are_deterministic_algorithms_enabled()
         )
-        # To use the workspace optimization path for determinism, please
-        # set NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT=1 for cuDNN >=8.9.5 and <9.0.0,
-        # and set NVTE_ALLOW_NONDETERMINISTIC_ALGO=0 for cuDNN >=9.0.0.
-        cudnn_version = get_cudnn_version()
-        if (8, 9, 5) <= cudnn_version < (9, 0, 0):
-            if self.deterministic:
-                os.environ["NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT"] = "1"
-
-            # CUDNN_FRONTEND_ATTN_DP_WORKSPACE_LIMIT
-            # - unset:       enables workspace optimization when required workspace is <= 256MB
-            #                or when bias gradient needs to be computed
-            # - n:           enables workspace optimization when required workspace is <= n bytes
-            # - -1:          enables workspace optimization always
-            # - 0:           disables workspace optimization always
-            if "NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT" in os.environ:
-                if os.environ["NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT"] == "0":
-                    os.environ["CUDNN_FRONTEND_ATTN_DP_WORKSPACE_LIMIT"] = "0"
-                if os.environ["NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT"] == "1":
-                    os.environ["CUDNN_FRONTEND_ATTN_DP_WORKSPACE_LIMIT"] = "-1"
 
         assert attention_type in AttnTypes, f"attention_type {attention_type} not supported"
 
@@ -1008,9 +1093,9 @@ class DotProductAttention(TransformerEngineBaseModule):
     @no_torch_dynamo(recursive=False)
     def forward(
         self,
-        query_layer: torch.Tensor,
-        key_layer: torch.Tensor,
-        value_layer: torch.Tensor,
+        query_layer: Optional[torch.Tensor] = None,
+        key_layer: Optional[torch.Tensor] = None,
+        value_layer: Optional[torch.Tensor] = None,
         attention_mask: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]] = None,
         qkv_format: str = None,
         cu_seqlens_q: torch.Tensor = None,
@@ -1035,6 +1120,9 @@ class DotProductAttention(TransformerEngineBaseModule):
         score_mod_bprop: Optional[Callable] = None,
         score_mod_tensors: Optional[Dict[str, torch.Tensor]] = None,
         score_mod_bprop_tensors: Optional[Dict[str, torch.Tensor]] = None,
+        qkv_layer: Optional[torch.Tensor] = None,
+        kv_layer: Optional[torch.Tensor] = None,
+        qkv_interleave_dim: int = -3,
     ) -> torch.Tensor:
         r"""
         Dot Product Attention Layer.
@@ -1059,16 +1147,17 @@ class DotProductAttention(TransformerEngineBaseModule):
 
             Users can use environment variables :attr:`NVTE_FLASH_ATTN`, :attr:`NVTE_FUSED_ATTN`,
             and :attr:`NVTE_FUSED_ATTN_BACKEND` to control which DotProductAttention backend,
-            and FusedAttention backend if applicable, to use. Transformer Engine prioritizes
-            FlashAttention over FusedAttention and over UnfusedDotProductAttention.
+            and FusedAttention backend if applicable, to use. Transformer Engine first filters
+            backends by support for the runtime environment and input configuration, then applies
+            a performance-based preference order. On supported pre-Hopper GPUs, FlashAttention is
+            preferred over FusedAttention and UnfusedDotProductAttention when both optimized
+            backends are eligible. On Hopper and newer GPUs, including Blackwell, FusedAttention is
+            preferred over FlashAttention and UnfusedDotProductAttention when both optimized
+            backends are eligible.
             If FusedAttention is being used, users can also choose to switch to flash-attn's
             implementation for backward by setting :attr:`NVTE_FUSED_ATTN_USE_FAv2_BWD=1`
             (default: 0), because of the performance differences between various versions of
-            flash-attn and FusedAttention. Further, :attr:`NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT`
-            can be used to enable (:attr:`1`) or disable (:attr:`0`) the workspace related
-            optimizations in FusedAttention. When unset, Transformer Engine determines the code path
-            based on its internal logic. These optimizations trade memory for performance
-            and should be used with care.
+            flash-attn and FusedAttention.
 
         .. note::
             .. _cu_seqlens note:
@@ -1132,12 +1221,15 @@ class DotProductAttention(TransformerEngineBaseModule):
 
         Parameters
         ----------
-        query_layer : torch.Tensor
-                     Query tensor.
-        key_layer : torch.Tensor
-                   Key tensor.
-        value_layer : torch.Tensor
-                     Value tensor.
+        query_layer : Optional[torch.Tensor], default = None
+                     Query tensor. Required unless a packed input (``qkv_layer``, or
+                     ``kv_layer`` together with ``query_layer``) is provided instead.
+        key_layer : Optional[torch.Tensor], default = None
+                   Key tensor. Required unless a packed input (``qkv_layer`` or ``kv_layer``)
+                   is provided instead.
+        value_layer : Optional[torch.Tensor], default = None
+                     Value tensor. Required unless a packed input (``qkv_layer`` or ``kv_layer``)
+                     is provided instead.
         attention_mask: Optional[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]],
              default = None. Boolean tensor(s) used to mask out attention softmax input.
              It should be ``None`` for causal masks and ``"no_mask"``. For padding masks, it should be
@@ -1245,7 +1337,43 @@ class DotProductAttention(TransformerEngineBaseModule):
             Runtime tensors exposed to score_mod_bprop as cuDNN graph tensors. Keys are
             user-defined string names consumed by the callback through ``tensors[name]``;
             there is no predefined set of accepted keys.
+        qkv_layer: Optional[torch.Tensor], default = None
+            Fully packed QKV tensor. When the QKV projection produces one packed buffer
+            (e.g. a fused QKV GEMM), it can be passed here directly instead of slicing
+            it into :attr:`query_layer`/:attr:`key_layer`/:attr:`value_layer` views.
+            For :attr:`qkv_format` = {"bshd", "sbhd"}, it must be a 5D tensor of shape
+            ``[b, s, 3, h, d]``/``[s, b, 3, h, d]`` (:attr:`qkv_interleave_dim` = -3) or
+            ``[b, s, h, 3, d]``/``[s, b, h, 3, d]`` (:attr:`qkv_interleave_dim` = -2);
+            for :attr:`qkv_format` = "thd", a 4D tensor of shape ``[t, 3, h, d]`` or
+            ``[t, h, 3, d]``. Q/K/V are derived as zero-copy views and the memory layout
+            (e.g. ``bs3hd``) is declared from the packing itself, so no pointer-based
+            layout detection runs on this path -- including for "thd" and FP8 attention.
+            Mutually exclusive with :attr:`query_layer`, :attr:`key_layer`,
+            :attr:`value_layer` and :attr:`kv_layer`.
+        kv_layer: Optional[torch.Tensor], default = None
+            Packed KV tensor, used together with :attr:`query_layer`
+            (e.g. ``[b, s, 2, hg, d]`` for :attr:`qkv_interleave_dim` = -3, or
+            ``[b, s, hg, 2, d]`` for :attr:`qkv_interleave_dim` = -2). K/V are derived
+            as zero-copy views and the layout (e.g. ``bshd_bs2hd``) is declared, not
+            detected. Mutually exclusive with :attr:`key_layer`, :attr:`value_layer`
+            and :attr:`qkv_layer`.
+        qkv_interleave_dim: int, default = -3
+            Dimension of :attr:`qkv_layer`/:attr:`kv_layer` where the 3 (QKV) or 2 (KV)
+            interleave sits; must be -3 (e.g. ``bs3hd``) or -2 (e.g. ``bsh3d``,
+            Megatron-style). This is an explicit knob rather than shape inference,
+            since e.g. ``h == 3`` would make the shapes ambiguous.
         """
+
+        query_layer, key_layer, value_layer, declared_qkv_layout = _unpack_packed_qkv(
+            qkv_layer,
+            kv_layer,
+            query_layer,
+            key_layer,
+            value_layer,
+            qkv_format if qkv_format is not None else self.qkv_format,
+            qkv_interleave_dim,
+            inference_params,
+        )
 
         with self.prepare_forward_ctx(
             query_layer,
@@ -1432,7 +1560,15 @@ class DotProductAttention(TransformerEngineBaseModule):
                 cu_seqlens_kv_padded = None
 
             # get qkv's memory layout
-            if all(
+            if declared_qkv_layout is not None:
+                # Packed inputs (qkv_layer/kv_layer) declare the layout: the enum is
+                # truthful by construction, so the pointer-based detection in
+                # get_qkv_layout is skipped entirely -- for dense, thd (t3hd/th3d)
+                # and FP8 DPA alike.
+                qkv_layout = declared_qkv_layout
+                q_format = qkv_format
+                kv_format = qkv_format
+            elif all(
                 isinstance(x, Float8TensorStorage) for x in [query_layer, key_layer, value_layer]
             ):
                 (
@@ -1558,16 +1694,24 @@ class DotProductAttention(TransformerEngineBaseModule):
                         False
                     ), "core_attention_bias must be in one of {bhss, 1hss, b1ss, 11ss, 111s} shapes"
 
-            # check if there is padding between sequences when qkv_format='thd'
+            # Default pad_between_seqs auto-detect. For THD, infer presence of
+            # inter-sequence padding from whether padded cu_seqlens were supplied --
+            # sync-free, and stable across eager and CUDA graph capture (the auto-detect
+            # must return the same value in both modes for backend selection to match).
+            # If padded cu_seqlens are the *same object* as the unpadded ones, no real
+            # inter-sequence padding exists (only THD tail padding) -- treat as False so
+            # FlashAttention v2/v4 remain eligible.
             if pad_between_seqs is None:
                 if qkv_format == "thd":
-                    pad_between_seqs = (
-                        cu_seqlens_q_padded is not None
-                        and not torch.equal(cu_seqlens_q_padded[:-1], cu_seqlens_q[:-1])
-                    ) or (
-                        cu_seqlens_kv_padded is not None
-                        and not torch.equal(cu_seqlens_kv_padded[:-1], cu_seqlens_kv[:-1])
-                    )
+                    if (
+                        cu_seqlens_q_padded is cu_seqlens_q
+                        and cu_seqlens_kv_padded is cu_seqlens_kv
+                    ):
+                        pad_between_seqs = False
+                    else:
+                        pad_between_seqs = (
+                            cu_seqlens_q_padded is not None or cu_seqlens_kv_padded is not None
+                        )
                 else:
                     pad_between_seqs = False
 
@@ -1812,6 +1956,8 @@ class DotProductAttention(TransformerEngineBaseModule):
                         inference_params=inference_params,
                         softmax_offset=softmax_offset,
                         fp8_output=fp8_output,
+                        packed_qkv=qkv_layer,
+                        packed_kv=kv_layer,
                     )
                 return self.fused_attention(
                     query_layer,
@@ -1847,6 +1993,8 @@ class DotProductAttention(TransformerEngineBaseModule):
                     score_mod_bprop=score_mod_bprop,
                     score_mod_tensors=score_mod_tensors,
                     score_mod_bprop_tensors=score_mod_bprop_tensors,
+                    packed_qkv=qkv_layer,
+                    packed_kv=kv_layer,
                 )
 
             if use_unfused_attention:

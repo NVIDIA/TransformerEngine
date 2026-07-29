@@ -280,7 +280,9 @@ def fused_compute_score_for_moe_aux_loss(
 
 class FusedAuxLoss(torch.autograd.Function):
     """
-    Fused MoE aux loss.
+    Fused MoE aux loss. ``total_num_tokens`` may be either a Python int
+    (host-folded coefficient, original fast path) or a 0-dim int64 CUDA
+    tensor (device-folded coefficient, CUDA-graph-safe path).
     """
 
     @staticmethod
@@ -288,7 +290,7 @@ class FusedAuxLoss(torch.autograd.Function):
         ctx,
         probs: torch.Tensor,
         tokens_per_expert: torch.Tensor,
-        total_num_tokens: int,
+        total_num_tokens: Union[int, torch.Tensor],
         num_experts: int,
         topk: int,
         coeff: float,
@@ -296,16 +298,28 @@ class FusedAuxLoss(torch.autograd.Function):
         # pylint: disable=missing-function-docstring
         num_rows = probs.size(0)
         num_cols = probs.size(1)
-        aux_loss, Const_buf = tex.fused_moe_aux_loss_fwd(
-            probs=probs,
-            tokens_per_expert=tokens_per_expert,
-            total_num_tokens=total_num_tokens,
-            num_experts=num_experts,
-            num_rows=num_rows,
-            num_cols=num_cols,
-            topk=topk,
-            coeff=coeff,
-        )
+        if isinstance(total_num_tokens, torch.Tensor):
+            aux_loss, Const_buf = tex.fused_moe_aux_loss_fwd_graph_safe(
+                probs=probs,
+                tokens_per_expert=tokens_per_expert,
+                total_num_tokens=total_num_tokens,
+                num_experts=num_experts,
+                num_rows=num_rows,
+                num_cols=num_cols,
+                topk=topk,
+                coeff=coeff,
+            )
+        else:
+            aux_loss, Const_buf = tex.fused_moe_aux_loss_fwd(
+                probs=probs,
+                tokens_per_expert=tokens_per_expert,
+                total_num_tokens=int(total_num_tokens),
+                num_experts=num_experts,
+                num_rows=num_rows,
+                num_cols=num_cols,
+                topk=topk,
+                coeff=coeff,
+            )
         ctx.save_for_backward(Const_buf, tokens_per_expert)
         ctx.num_rows = num_rows
         ctx.num_cols = num_cols
@@ -328,7 +342,7 @@ class FusedAuxLoss(torch.autograd.Function):
 def fused_moe_aux_loss(
     probs: torch.Tensor,
     tokens_per_expert: torch.Tensor,
-    total_num_tokens: int,
+    total_num_tokens: Union[int, torch.Tensor],
     num_experts: int,
     topk: int,
     coeff: float,
@@ -340,8 +354,12 @@ def fused_moe_aux_loss(
     probs : torch.Tensor in fp32/bf16/fp16
     tokens_per_expert : torch.Tensor in int32/int64/fp32/bf16
         the number of tokens per expert.
-    total_num_tokens : int
-        the total number of tokens used in the aux loss calculation.
+    total_num_tokens : int or 0-dim int64 CUDA torch.Tensor
+        the total number of tokens used in the aux loss calculation. Pass a
+        Python int for the fastest path (coefficient folded on the host).
+        Pass a 0-dim int64 CUDA tensor when the call is captured into a
+        CUDA Graph and the value must stay dynamic across replays; the
+        coefficient is computed on device by the main reduction kernel.
     num_experts : int
     topk : int
     coeff : float

@@ -5,13 +5,13 @@
 """Mixin class holding data specific for Float8Tensor"""
 
 from __future__ import annotations
-import math
 from typing import Any, Dict, Optional, Tuple, Union
 import torch
 
 import transformer_engine_torch as tex
 
 from ...quantized_tensor import QuantizedTensorStorage, Quantizer
+from .._quantization_helpers import safe_quantized_repr
 
 from ...constants import TE_DType as torch_to_transformer_engine_dtype, TE_DType_To_Torch, DType
 
@@ -178,8 +178,16 @@ class Float8TensorStorage(QuantizedTensorStorage):
         # pylint: disable=missing-function-docstring
         if self._data is not None:
             return self._data.size(*args, **kwargs)
-        size = self._transpose.size(*args, **kwargs)
-        return torch.Size([size[-1], math.prod(size[:-1])])
+        # The transpose is stored as [last, *leading], so a dim argument cannot
+        # be forwarded to it: rebuild the logical shape first, then index into
+        # it. This matches the shape property on Float8Tensor.
+        dims = self._transpose.shape
+        if len(dims) == 2:
+            shape = torch.Size((dims[1], dims[0]))
+        else:
+            shape = torch.Size(tuple(dims[1:]) + (dims[0],))
+        dim = args[0] if args else kwargs.get("dim")
+        return shape if dim is None else shape[dim]
 
     @property
     def device(self):
@@ -209,13 +217,16 @@ class Float8TensorStorage(QuantizedTensorStorage):
         )
 
     def __repr__(self):
-        return (
-            "Float8TensorStorage("
-            f"fp8_dtype={self._fp8_dtype}, "
-            f"scale_inv={self._scale_inv.item()}, "
-            f"data={self.dequantize()}"
-            ")"
-        )
+        try:
+            return (
+                "Float8TensorStorage("
+                f"fp8_dtype={self._fp8_dtype}, "
+                f"scale_inv={self._scale_inv.item()}, "
+                f"data={self.dequantize()}"
+                ")"
+            )
+        except Exception as exc:  # pylint: disable=broad-except
+            return safe_quantized_repr(self, "Float8TensorStorage", error=exc)
 
     def _create_transpose(self):
         """Update FP8 transpose cache"""

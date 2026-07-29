@@ -26,13 +26,20 @@ from transformer_engine.pytorch.constants import FP8FwdTensorIdx, FP8BwdTensorId
 from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
 from transformer_engine.pytorch.ops.basic.basic_linear import BasicLinear
 from transformer_engine.pytorch.tensor.float8_tensor import Float8CurrentScalingQuantizer
+from transformer_engine.pytorch.quantization import QuantizerRole
 from transformer_engine.pytorch import (
     is_fp8_available,
     is_mxfp8_available,
     is_fp8_block_scaling_available,
     is_nvfp4_available,
+    Float8BlockQuantizer,
+    MXFP8Quantizer,
+    NVFP4Quantizer,
 )
 from utils import recipe_id
+from transformer_engine.pytorch.attention.dot_product_attention.backends import (
+    UnfusedDotProductAttention,
+)
 
 fp8_available, reason_for_no_fp8 = is_fp8_available(return_reason=True)
 mxfp8_available, reason_for_no_mxfp8 = is_mxfp8_available(return_reason=True)
@@ -123,21 +130,25 @@ if _opaque_available:
     _Q = get_opaque_type_name(ToyQuantizer)
 
     def _make_qfactory(tag: str):
-        """Return a qfactory that produces ToyQuantizer instances tagged with *tag*."""
+        """Return a qfactory that produces ToyQuantizer instances tagged with *tag*.
+
+        The factory dispatches on ``QuantizerRole.tensor_type``; the roles are
+        supplied by :meth:`ToyLinear.get_quantizer_roles`.
+        """
 
         quantizers = {
-            role: ToyQuantizer(tag=f"{tag}:{role}")
-            for role in (
-                "linear_input",
-                "linear_weight",
-                "linear_output",
-                "linear_grad_output",
-                "linear_grad_input",
+            tensor_type: ToyQuantizer(tag=f"{tag}:{tensor_type}")
+            for tensor_type in (
+                "input",
+                "weight",
+                "output",
+                "grad_output",
+                "grad_input",
             )
         }
 
-        def qfactory(role: str):
-            return quantizers[role]
+        def qfactory(role: QuantizerRole):
+            return quantizers[role.tensor_type]
 
         return qfactory
 
@@ -162,6 +173,22 @@ if _opaque_available:
                 torch.empty(out_features, in_features, dtype=dtype, device=device)
             )
             torch.nn.init.normal_(self.weight)
+
+        def get_quantizer_roles(self, *, fwd: bool, num_quantizers: int):
+            # Supplying explicit roles keeps CustomRecipeState from emitting a
+            # warning (which would graph-break under fullgraph=True) and lets the
+            # qfactory dispatch per tensor slot. Order must match the module's
+            # quantizer array (FP8FwdTensorIdx / FP8BwdTensorIdx).
+            if fwd:
+                return [
+                    QuantizerRole(module_type="linear", tensor_type="input"),
+                    QuantizerRole(module_type="linear", tensor_type="weight"),
+                    QuantizerRole(module_type="linear", tensor_type="output"),
+                ]
+            return [
+                QuantizerRole(module_type="linear", tensor_type="grad_output"),
+                QuantizerRole(module_type="linear", tensor_type="grad_input"),
+            ]
 
         def _get_weight_tensors(self):
             return [self.weight]
@@ -363,3 +390,433 @@ def test_autocast_sanity(fp8_recipe):
 
     out = compiled(inp)
     out.sum().backward()
+
+
+_UNFUSED_DPA_CONFIG = dict(
+    batch_size=2,
+    num_heads=4,
+    head_dim=64,
+    max_seqlen_q=128,
+    max_seqlen_kv=128,
+)
+
+
+def _make_unfused_attention(dtype: torch.dtype) -> UnfusedDotProductAttention:
+    cfg = _UNFUSED_DPA_CONFIG
+    softmax_scale = cfg["head_dim"] ** -0.5
+    module = UnfusedDotProductAttention(
+        softmax_scale=softmax_scale,
+        attention_type="self",
+        attention_dropout=0.0,
+        layer_number=1,
+        softmax_type="vanilla",
+        return_max_logit=False,
+    )
+    return module.to(dtype=dtype, device="cuda")
+
+
+_EMPTY_ALIBI_CACHE = {
+    "_num_heads": None,
+    "_alibi_slopes": None,
+    "_max_seqlen_q": None,
+    "_max_seqlen_kv": None,
+    "_bottom_right_alignment": True,
+    "_alibi_bias": None,
+    "_alibi_slopes_require_update": False,
+    "_alibi_bias_require_update": False,
+}
+
+
+def _make_unfused_qkv(qkv_layout: str, dtype: torch.dtype, requires_grad: bool = True):
+    """Build (q, k, v) tensors matching `qkv_layout`. Returns also the
+    extra kwargs (`cu_seqlens_*`, `max_seqlen_*`) that the unfused module
+    needs for `thd` layouts (empty dict otherwise)."""
+    cfg = _UNFUSED_DPA_CONFIG
+    b, s_q, s_kv = cfg["batch_size"], cfg["max_seqlen_q"], cfg["max_seqlen_kv"]
+    h, d = cfg["num_heads"], cfg["head_dim"]
+    qkv_format = "".join(c for c in qkv_layout.split("_")[0] if c.isalpha())
+
+    extra: dict = {}
+
+    def _separate(shape):
+        return tuple(
+            torch.randn(shape, dtype=dtype, device="cuda", requires_grad=requires_grad)
+            for _ in range(3)
+        )
+
+    if qkv_layout == "bshd_bshd_bshd":
+        q, k, v = _separate((b, s_q, h, d))
+    elif qkv_layout == "sbhd_sbhd_sbhd":
+        q, k, v = _separate((s_q, b, h, d))
+    elif qkv_layout == "thd_thd_thd":
+        # All sequences in the batch have the maximum length; no padding.
+        cu = torch.arange(0, (b + 1) * s_q, step=s_q, dtype=torch.int32, device="cuda")
+        q, k, v = _separate((b * s_q, h, d))
+        extra = dict(
+            cu_seqlens_q=cu,
+            cu_seqlens_kv=cu,
+            max_seqlen_q=s_q,
+            max_seqlen_kv=s_kv,
+        )
+    elif qkv_layout == "bs3hd":
+        # Packed: shape (b, s, 3, h, d), q/k/v are views along dim=-3.
+        qkv = torch.randn(
+            (b, s_q, 3, h, d),
+            dtype=dtype,
+            device="cuda",
+            requires_grad=requires_grad,
+        )
+        q, k, v = qkv[:, :, 0], qkv[:, :, 1], qkv[:, :, 2]
+        # q/k/v are non-leaf views; retain their grads so the assertions in
+        # the test (`q.grad is not None` etc.) work for packed layouts.
+        if requires_grad:
+            for t in (q, k, v):
+                t.retain_grad()
+    elif qkv_layout == "sbh3d":
+        # Packed: shape (s, b, h, 3, d), q/k/v are views along dim=-2.
+        qkv = torch.randn(
+            (s_q, b, h, 3, d),
+            dtype=dtype,
+            device="cuda",
+            requires_grad=requires_grad,
+        )
+        q, k, v = qkv[:, :, :, 0], qkv[:, :, :, 1], qkv[:, :, :, 2]
+        if requires_grad:
+            for t in (q, k, v):
+                t.retain_grad()
+    else:
+        raise ValueError(f"Unsupported qkv_layout in test: {qkv_layout}")
+
+    return q, k, v, extra, qkv_format
+
+
+def _call_unfused(
+    module: UnfusedDotProductAttention,
+    qkv_layout: str,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    extra: dict,
+) -> torch.Tensor:
+    return module(
+        _EMPTY_ALIBI_CACHE,
+        q,
+        k,
+        v,
+        qkv_layout=qkv_layout,
+        attn_mask_type="causal",
+        **extra,
+    )
+
+
+@pytest.mark.parametrize(
+    "qkv_layout",
+    [
+        "bshd_bshd_bshd",
+        "sbhd_sbhd_sbhd",
+        "thd_thd_thd",
+        "bs3hd",
+        "sbh3d",
+    ],
+)
+def test_unfused_dpa_torch_compile(qkv_layout):
+    """Compile UnfusedDotProductAttention.forward with
+    `torch.compile(fullgraph=True, mode="reduce-overhead")` for several
+    qkv layouts.
+
+    - `fullgraph=True` makes the test fail on any graph break inside the
+      unfused attention path.
+    - `mode="reduce-overhead"` uses the inductor cudagraphs backend, so
+      forward+backward are captured into CUDA graphs and replayed on
+      subsequent iterations."""
+    dtype = torch.bfloat16
+
+    module = _make_unfused_attention(dtype)
+
+    def fn(q, k, v, extra):
+        return _call_unfused(module, qkv_layout, q, k, v, extra)
+
+    torch._dynamo.reset()
+    compiled = torch.compile(fn, fullgraph=True, mode="reduce-overhead")
+
+    for _ in range(3):
+        q, k, v, extra, _ = _make_unfused_qkv(qkv_layout, dtype, requires_grad=True)
+        out = compiled(q, k, v, extra)
+        out.sum().backward()
+        torch.cuda.synchronize()
+        assert torch.isfinite(out).all()
+        assert q.grad is not None
+        assert k.grad is not None
+        assert v.grad is not None
+
+
+# ---------------------------------------------------------------------------
+# get_attention_backend under torch.compile
+# ---------------------------------------------------------------------------
+
+
+# Scalars in AttentionParams must stay concrete: assume_constant_result cannot
+# convert symbolic scalars (dynamo's automatic dynamic would make changed ints
+# symbolic on recompilation), so pin them static explicitly.
+@torch._dynamo.config.patch(specialize_int=True, specialize_float=True, recompile_limit=32)
+def test_get_attention_backend_traceable(monkeypatch):
+    """get_attention_backend must trace under torch.compile(fullgraph=True)
+    without graph breaks. The compiled selection must stay consistent with
+    eager when NVTE_* env vars flip (dynamo guards on os.environ) and when
+    attention params change, and the baked tex.get_fused_attn_backend result
+    must drive the selection."""
+    from transformer_engine.pytorch.attention.dot_product_attention import utils as dpa_utils
+
+    def fn(x, params):
+        (
+            use_flash_attention,
+            _,
+            use_fused_attention,
+            fused_attention_backend,
+            use_unfused_attention,
+            _,
+        ) = dpa_utils.get_attention_backend(params)
+        # Encode the full selection (enabled backends + fused sub-backend) in
+        # the tensor value: without a tensor op dynamo skips the frame entirely
+        # (nothing gets compiled or guarded), and the output makes compiled vs
+        # eager selection directly comparable.
+        return (
+            x
+            + (1 if use_flash_attention else 0)
+            + (2 if use_fused_attention else 0)
+            + (4 if use_unfused_attention else 0)
+            + (8 * int(fused_attention_backend) if fused_attention_backend is not None else 0)
+        )
+
+    # Dynamo only guards os.environ entries that exist at trace time (reads of
+    # absent keys are not guarded yet), so set the vars explicitly.
+    for env_var, value in (
+        ("NVTE_FLASH_ATTN", "1"),
+        ("NVTE_FUSED_ATTN", "1"),
+        ("NVTE_UNFUSED_ATTN", "1"),
+        ("NVTE_FP8_DPA_BWD", "1"),
+        ("NVTE_DPA_FP8CS_O_in_F16", "1"),
+        ("NVTE_DPA_FP8_RECIPE", ""),
+        ("NVTE_UnfusedDPA_Emulate_FP8", "0"),
+    ):
+        monkeypatch.setenv(env_var, value)
+
+    torch._dynamo.reset()
+    compiled = torch.compile(fn, fullgraph=True)
+    x = torch.zeros(8, device="cuda")
+    params = dpa_utils.AttentionParams()
+
+    torch.testing.assert_close(compiled(x, params), fn(x, params))
+
+    # Flip env vars one by one: the compiled function must recompile (guards
+    # on os.environ) and keep matching eager.
+    for env_var in ("NVTE_FUSED_ATTN", "NVTE_UNFUSED_ATTN", "NVTE_FLASH_ATTN"):
+        monkeypatch.setenv(env_var, "0")
+        torch.testing.assert_close(compiled(x, params), fn(x, params))
+        monkeypatch.setenv(env_var, "1")
+
+    # FP8 attention (fp8_dpa recipe): covers the FP8-only branch (run_config
+    # env reads, recipe filters, get_fp8_te_dtype). Flipping an FP8-only env
+    # var (emulation enables UnfusedDotProductAttention) must recompile too.
+    fp8_params = dpa_utils.AttentionParams(
+        fp8=True, fp8_meta={"recipe": recipe.DelayedScaling(fp8_dpa=True)}
+    )
+    torch.testing.assert_close(compiled(x, fp8_params), fn(x, fp8_params))
+    monkeypatch.setenv("NVTE_UnfusedDPA_Emulate_FP8", "1")
+    torch.testing.assert_close(compiled(x, fp8_params), fn(x, fp8_params))
+    monkeypatch.setenv("NVTE_UnfusedDPA_Emulate_FP8", "0")
+
+    # Changing attention params (ints, layout string, dtype) must recompile
+    # and keep matching eager, still with no graph break.
+    for changed_params in (
+        dpa_utils.AttentionParams(head_dim_qk=128, head_dim_v=128),
+        dpa_utils.AttentionParams(max_seqlen_q=512, max_seqlen_kv=512),
+        dpa_utils.AttentionParams(qkv_layout="bshd_bshd_bshd"),
+        dpa_utils.AttentionParams(qkv_dtype=torch.float16),
+    ):
+        torch.testing.assert_close(compiled(x, changed_params), fn(x, changed_params))
+
+    # The baked probe result must drive the selection: report no fused
+    # sub-backend and expect UnfusedDotProductAttention (flash disabled, so the
+    # outcome is deterministic). Use a fresh frame: already-compiled frames
+    # keep the previously baked constant (assume_constant_result installs no
+    # guard on the wrapped function).
+    monkeypatch.setenv("NVTE_FLASH_ATTN", "0")
+    monkeypatch.setattr(
+        dpa_utils.tex,
+        "get_fused_attn_backend",
+        lambda *args: dpa_utils.FusedAttnBackend["No_Backend"],
+    )
+
+    def fn_no_backend(x, params):
+        return fn(x, params)
+
+    compiled_no_backend = torch.compile(fn_no_backend, fullgraph=True)
+    torch.testing.assert_close(compiled_no_backend(x, params), x + 4.0)
+
+
+# ---------------------------------------------------------------------------
+# Value-opaque quantizers
+# ---------------------------------------------------------------------------
+
+
+def _mxfp8(dtype=tex.DType.kFloat8E4M3):
+    return MXFP8Quantizer(fp8_dtype=dtype)
+
+
+def _blockwise(force_pow_2_scales=True):
+    return Float8BlockQuantizer(
+        fp8_dtype=tex.DType.kFloat8E4M3,
+        rowwise=True,
+        columnwise=True,
+        force_pow_2_scales=force_pow_2_scales,
+    )
+
+
+def _current_scaling(amax_epsilon=0.0):
+    return Float8CurrentScalingQuantizer(
+        fp8_dtype=tex.DType.kFloat8E4M3,
+        device=torch.device("cpu"),
+        amax_epsilon=amax_epsilon,
+    )
+
+
+def _nvfp4(with_rht=True):
+    # Default with_rht=True so the quantize round-trip below exercises the
+    # derived ``rht_matrix`` tensor (the field most likely to be dropped on
+    # value-key reconstruction). Post-RHT amax is required by the kernel
+    # whenever RHT is on (pre-RHT amax is unsupported).
+    return NVFP4Quantizer(
+        fp4_dtype=tex.DType.kFloat4E2M1,
+        rowwise=True,
+        columnwise=True,
+        with_rht=with_rht,
+        with_post_rht_amax=with_rht,
+    )
+
+
+def _hw_available(quantizer):
+    """Whether this HW can actually run the quantize kernel for *quantizer*."""
+    if isinstance(quantizer, MXFP8Quantizer):
+        return mxfp8_available
+    if isinstance(quantizer, NVFP4Quantizer):
+        return nvfp4_available
+    if isinstance(quantizer, Float8BlockQuantizer):
+        return fp8_block_scaling_available
+    return fp8_available  # Float8CurrentScalingQuantizer
+
+
+# (factory, kwargs producing a different-but-valid config)
+_VALUE_QUANTIZERS = [
+    pytest.param(_mxfp8, id="mxfp8"),
+    pytest.param(_blockwise, id="float8_blockwise"),
+    pytest.param(_current_scaling, id="float8_current_scaling"),
+    pytest.param(
+        _nvfp4,
+        id="nvfp4",
+        marks=pytest.mark.skipif(
+            not torch.cuda.is_available(),
+            reason="NVFP4Quantizer requires CUDA to construct",
+        ),
+    ),
+]
+
+
+@pytest.mark.parametrize("factory", _VALUE_QUANTIZERS)
+def test_quantizer_value_object(factory):
+    """Value semantics + ``__fx_repr__`` round-trip via the production FX path."""
+    a = factory()
+
+    # ``__fx_repr__`` (used by torch.compile codegen) rebuilds an equal object.
+    repr_str, globals_ = a.__fx_repr__()
+    rebuilt = eval(repr_str, dict(globals_))  # pylint: disable=eval-used
+    assert rebuilt == a and rebuilt is not a
+    assert hash(rebuilt) == hash(a)
+
+    # The rebuilt quantizer must also *behave* identically, not just compare
+    # equal: equality only looks at the value key, so a field the kernel needs
+    # but that is absent from the key (e.g. NVFP4's derived ``rht_matrix``) would
+    # slip through the checks above and only blow up at quantize time. Run the
+    # real quantize kernel on both and require bit-exact results.
+    if torch.cuda.is_available() and _hw_available(a):
+        x = torch.randn(128, 256, dtype=torch.bfloat16, device="cuda")
+        torch.testing.assert_close(rebuilt(x).dequantize(), a(x).dequantize(), rtol=0.0, atol=0.0)
+
+
+def test_value_quantizer_rejects_process_group():
+    """A value quantizer holding a live ProcessGroup must refuse to be turned
+    into a value key / FX constant (raise), not silently drop the group."""
+    import torch.distributed as dist  # pylint: disable=import-outside-toplevel
+
+    created = not dist.is_initialized()
+    if created:
+        dist.init_process_group(backend="gloo", store=dist.HashStore(), rank=0, world_size=1)
+    try:
+        q = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)
+        q.amax_reduction_group = dist.group.WORLD
+        # Every value-materialization path must reject it (hash, eq, __fx_repr__).
+        with pytest.raises(TypeError):
+            hash(q)
+        with pytest.raises(TypeError):
+            q.__fx_repr__()
+    finally:
+        if created:
+            dist.destroy_process_group()
+
+
+if _opaque_available:
+    # A minimal custom op taking a tensor and a value-opaque quantizer that
+    # quantizes + dequantizes inside it, one per production quantizer class.
+    # ``test_quantizer_value_object_fullgraph`` drives this under
+    # ``torch.compile(fullgraph=True)`` so the quantizer is used *inside* the
+    # graph -- proving the opaque-type registration took effect (a graph break
+    # would make ``fullgraph=True`` raise).
+    _qdq_lib = torch.library.Library("test_te_qdq", "DEF")
+    _QDQ_OPS = {}
+    for _qcls in (
+        MXFP8Quantizer,
+        Float8BlockQuantizer,
+        Float8CurrentScalingQuantizer,
+        NVFP4Quantizer,
+    ):
+        _op = f"qdq_{_qcls.__name__}"
+        _qdq_lib.define(f"{_op}(Tensor x, {get_opaque_type_name(_qcls)} q) -> Tensor")
+
+        @torch.library.impl(f"test_te_qdq::{_op}", "CompositeExplicitAutograd", lib=_qdq_lib)
+        def _qdq_impl(x, q):
+            return q(x).dequantize()
+
+        @torch.library.register_fake(f"test_te_qdq::{_op}", lib=_qdq_lib)
+        def _qdq_fake(x, q):
+            return torch.empty_like(x)
+
+        _QDQ_OPS[_qcls] = getattr(torch.ops.test_te_qdq, _op)
+
+
+@pytest.mark.skipif(
+    not _opaque_available,
+    reason="torch.compile opaque-object support requires PyTorch >= 2.11",
+)
+@pytest.mark.parametrize("factory", _VALUE_QUANTIZERS)
+def test_quantizer_value_object_fullgraph(factory):
+    """Quantizer is usable *inside* a torch.compile(fullgraph=True) graph.
+
+    A custom op quantizes+dequantizes with the (opaque value) quantizer; the
+    compiled result must match eager. ``fullgraph=True`` raises on any graph
+    break, so this proves the opaque-type registration actually took effect --
+    unlike merely passing the quantizer through.
+    """
+    q = factory()
+    if not (torch.cuda.is_available() and _hw_available(q)):
+        pytest.skip("format not supported on this HW")
+
+    op = _QDQ_OPS[type(q)]
+    x = torch.randn(128, 256, dtype=torch.bfloat16, device="cuda")
+
+    def fn(inp):
+        return op(inp, q)
+
+    ref = fn(x)
+    torch._dynamo.reset()
+    out = torch.compile(fn, fullgraph=True)(x)
+    torch.testing.assert_close(out, ref, rtol=0.0, atol=0.0)

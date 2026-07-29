@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from contextlib import contextmanager, AbstractContextManager, ContextDecorator
+from contextlib import contextmanager, AbstractContextManager, ContextDecorator, nullcontext
 from functools import lru_cache
 from dataclasses import dataclass
 import math
@@ -926,7 +926,10 @@ class CudaRNGStatesTracker:
 
 
 def reduce_scatter_along_first_dim(
-    inp: torch.Tensor, tp_group: dist_group_type, async_op: bool = False
+    inp: torch.Tensor,
+    tp_group: dist_group_type,
+    async_op: bool = False,
+    output: torch.Tensor = None,
 ) -> Tuple[torch.Tensor, Optional[torch.distributed.Work]]:
     """Reduce-scatter the input tensor across model parallel group."""
     world_size = get_distributed_world_size(tp_group)
@@ -944,7 +947,8 @@ def reduce_scatter_along_first_dim(
 
     dim_size[0] = dim_size[0] // world_size
 
-    output = torch.empty(dim_size, dtype=inp.dtype, device=torch.cuda.current_device())
+    if output is None:
+        output = torch.empty(dim_size, dtype=inp.dtype, device=torch.cuda.current_device())
     handle = torch.distributed.reduce_scatter_tensor(
         output, inp.contiguous(), group=tp_group, async_op=async_op
     )
@@ -1311,7 +1315,8 @@ class _NVFP4AllGatherAsyncHandle:
         """Wait for the async operation to complete and post-process the tensor."""
         if self._synchronized:
             return
-        self.async_handle.wait()
+        if self.async_handle is not None:
+            self.async_handle.wait()
         _post_process_nvfp4_gather(
             self.output,
             self.columnwise_data_interleaved,
@@ -1328,6 +1333,8 @@ def _all_gather_nvfp4(
     async_op: bool = False,
     quantizer: NVFP4Quantizer,
     out_shape: Optional[list[int]] = None,
+    output_tensor=None,
+    external_coalescing=False,
 ) -> tuple[NVFP4TensorStorage, Optional[torch.distributed.Work]]:
     """All-gather NVFP4 tensor along first dimension."""
 
@@ -1404,15 +1411,23 @@ def _all_gather_nvfp4(
         inp = quantizer(inp.dequantize(dtype=dtype))
 
     # Construct NVFP4 output tensor
-    out = quantizer.make_empty(out_shape, dtype=dtype, device=device)
+    if output_tensor is not None:
+        out = output_tensor
+    else:
+        out = quantizer.make_empty(out_shape, dtype=dtype, device=device)
 
     # Coalesce NCCL collectives for gathering data and scale inverses.
-    with torch.distributed._coalescing_manager(
-        group=process_group,
-        device=device,
-        async_ops=async_op,
-    ) as gather_coalescing_manager:
+    if not external_coalescing:
+        gather_coalescing_manager = torch.distributed._coalescing_manager(
+            group=process_group,
+            device=device,
+            async_ops=async_op,
+        )
+    else:
+        # Caller owns an outer coalescing manager (managers cannot nest); step aside.
+        gather_coalescing_manager = nullcontext()
 
+    with gather_coalescing_manager as coalesced_handle:
         # Gather NVFP4 data for row-wise usage
         if quantizer.rowwise_usage:
 
@@ -1493,10 +1508,10 @@ def _all_gather_nvfp4(
             # Transfer amax to output.
             out._amax_columnwise = inp._amax_columnwise
 
-    handle = gather_coalescing_manager if async_op else None
+    handle = coalesced_handle if async_op else None
 
     # Fixes interleaved data for transposed tensor/scale inv and pads scale inv if needed.
-    if async_op and quantizer.columnwise_usage:
+    if (async_op or external_coalescing) and quantizer.columnwise_usage:
         handle = _NVFP4AllGatherAsyncHandle(
             out, out_columnwise_data, out_scale_inv, world_size, handle
         )
@@ -1513,6 +1528,8 @@ def _all_gather_mxfp8(
     async_op: bool = False,
     quantizer: MXFP8Quantizer,
     out_shape: Optional[list[int]] = None,
+    output_tensor: torch.Tensor = None,
+    external_coalescing: bool = False,
 ) -> tuple[MXFP8TensorStorage, Optional[torch.distributed.Work]]:
     """All-gather MXFP8 tensor along first dimension."""
 
@@ -1578,15 +1595,23 @@ def _all_gather_mxfp8(
         inp = quantizer(inp.dequantize(dtype=dtype))
 
     # Construct MXFP8 output tensor
-    out = quantizer.make_empty(out_shape, dtype=dtype, device=device)
+    if output_tensor is not None:
+        out = output_tensor
+    else:
+        out = quantizer.make_empty(out_shape, dtype=dtype, device=device)
 
-    # Coalesce NCCL collectives
-    with torch.distributed._coalescing_manager(
-        group=process_group,
-        device=device,
-        async_ops=async_op,
-    ) as coalescing_manager:
+    if not external_coalescing:
+        # Coalesce NCCL collectives for gathering data and scale inverses.
+        gather_coalescing_manager = torch.distributed._coalescing_manager(
+            group=process_group,
+            device=device,
+            async_ops=async_op,
+        )
+    else:
+        # Caller owns an outer coalescing manager (managers cannot nest); step aside.
+        gather_coalescing_manager = nullcontext()
 
+    with gather_coalescing_manager as coalesced_handle:
         # Gather MXFP8 data for row-wise usage
         if quantizer.rowwise_usage:
 
@@ -1633,7 +1658,7 @@ def _all_gather_mxfp8(
                 group=process_group,
             )
 
-    handle = coalescing_manager if async_op else None
+    handle = coalesced_handle if async_op else None
     return out, handle
 
 
@@ -1642,9 +1667,17 @@ def gather_along_first_dim(
     process_group: dist_group_type,
     async_op: bool = False,
     quantizer: Optional[Quantizer] = None,
+    output_tensor: torch.Tensor = None,
+    external_coalescing: bool = False,
 ) -> tuple[torch.Tensor, Optional[torch.distributed.Work]]:
     """
     All-gather tensors and concatenate along first dimension.
+
+    ``external_coalescing``: composability flag for callers that batch several gathers into
+    one outer ``torch.distributed._coalescing_manager``. Coalescing managers cannot nest, so
+    when set this call skips opening its own manager and defers any post-gather fixup
+    (e.g. NVFP4 columnwise de-interleave) into the returned handle; ``handle.wait()`` completes
+    it once the outer manager has closed. Leave ``False`` for standalone gathers.
     """
 
     # Return immediately if no communication is required
@@ -1732,6 +1765,8 @@ def gather_along_first_dim(
             async_op=async_op,
             quantizer=quantizer,
             out_shape=out_shape,
+            output_tensor=output_tensor,
+            external_coalescing=external_coalescing,
         )
 
     # NVFP4 case
@@ -1746,6 +1781,8 @@ def gather_along_first_dim(
             async_op=async_op,
             quantizer=quantizer,
             out_shape=out_shape,
+            output_tensor=output_tensor,
+            external_coalescing=external_coalescing,
         )
 
     # High-precision communication for quantized tensors
@@ -1775,19 +1812,20 @@ def gather_along_first_dim(
         inp = inp.dequantize()
 
     # Communication for plain PyTorch tensors
-    out = torch.empty(
-        out_shape,
-        dtype=inp.dtype,
-        device=inp.device,
-        memory_format=torch.contiguous_format,
-    )
+    if output_tensor is None:
+        output_tensor = torch.empty(
+            out_shape,
+            dtype=inp.dtype,
+            device=inp.device,
+            memory_format=torch.contiguous_format,
+        )
     handle = torch.distributed.all_gather_into_tensor(
-        out,
+        output_tensor,
         inp.contiguous(),
         group=process_group,
         async_op=async_op,
     )
-    return out, handle
+    return output_tensor, handle
 
 
 # Global cache to store symmetric memory tensors
@@ -1840,6 +1878,73 @@ def get_symmetric_memory_tensor(tensor_numel, tensor_dtype, tensor_device, tp_gr
         msg = symmetric_mem_cache[cache_key]
 
     return msg
+
+
+_SYMM_MEM_POOL = None
+_SYMM_MEM_POOL_BACKEND = None
+
+
+def _get_symm_mem_pool(device: torch.device, backend: str = "NCCL"):
+    """Process-wide torch MemPool backed by the symmetric-memory allocator, created once (each rank
+    drives one device). The pool/allocator captures the backend at creation and there is no per-pool
+    backend arg, so the (process-global) backend is always set before the pool is created. The
+    collective rendezvous cost is amortized across allocations (paid per new segment, not per buffer).
+    """
+    global _SYMM_MEM_POOL, _SYMM_MEM_POOL_BACKEND
+    if _SYMM_MEM_POOL is None:
+        symm_mem.set_backend(backend)
+        _SYMM_MEM_POOL_BACKEND = backend
+        if hasattr(symm_mem, "get_mem_pool"):
+            _SYMM_MEM_POOL = symm_mem.get_mem_pool(device)
+        elif hasattr(torch.cuda, "MemPool") and hasattr(symm_mem, "get_mempool_allocator"):
+            _SYMM_MEM_POOL = torch.cuda.MemPool(symm_mem.get_mempool_allocator(device))
+        else:
+            raise RuntimeError(
+                "No symmetric-memory MemPool API available (need torch symm-mem get_mem_pool, or "
+                "torch.cuda.MemPool + get_mempool_allocator)."
+            )
+    elif backend != _SYMM_MEM_POOL_BACKEND:
+        raise RuntimeError(
+            f"symm-mem pool already created with backend {_SYMM_MEM_POOL_BACKEND!r}; "
+            f"cannot switch to {backend!r}"
+        )
+    return _SYMM_MEM_POOL
+
+
+def symm_mem_alloc(
+    shape,
+    dtype: torch.dtype,
+    ep_group: dist_group_type,
+    device: Optional[torch.device] = None,
+    use_pool: bool = False,
+    backend: str = "NCCL",
+) -> torch.Tensor:
+    """Allocate a symm-mem buffer on ep_group.
+
+    ``use_pool=False`` (default): freshly allocate and do one explicit collective ``rendezvous`` per
+    buffer, for caller-owned static buffers (fp8 zero-copy). ``use_pool=True``: allocate from a
+    process-wide symm-mem MemPool whose segments are auto-registered (implicit mempool), so no explicit
+    rendezvous is needed and torch manages the tensor lifecycle (freed back to the pool) — for
+    lifecycle-managed zero-copy, e.g. bf16, where the recv buffer is saved for backward and so cannot
+    be a shared static buffer. ``backend`` selects the symm-mem backend (default NCCL; for the pool it
+    is captured at pool creation)."""
+    if device is None:
+        device = torch.device("cuda", torch.cuda.current_device())
+    if not HAS_TORCH_SYMMETRIC:
+        raise RuntimeError(
+            "torch.distributed._symmetric_memory is unavailable; symm_mem_alloc "
+            "requires PyTorch built with NCCL symm-mem support."
+        )
+    if use_pool:
+        pool = _get_symm_mem_pool(device, backend)
+        with torch.cuda.use_mem_pool(pool):
+            t = torch.empty(*shape, dtype=dtype, device=device)
+    else:
+        if symm_mem.get_backend(device) != backend:
+            symm_mem.set_backend(backend)
+        t = symm_mem.empty(*shape, dtype=dtype, device=device)
+        symm_mem.rendezvous(t, group=ep_group)
+    return t
 
 
 def symmetric_all_reduce(

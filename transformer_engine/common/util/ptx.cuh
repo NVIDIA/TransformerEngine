@@ -128,22 +128,22 @@ constexpr bool is_supported_arch() {
 
 // https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#parallel-synchronization-and-communication-instructions-mbarrier-init
 __device__ __forceinline__ void mbarrier_init(uint64_t *mbar, const uint32_t count) {
-#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
   uint32_t mbar_ptr = __cvta_generic_to_shared(mbar);
   asm volatile("mbarrier.init.shared.b64 [%0], %1;" ::"r"(mbar_ptr), "r"(count) : "memory");
 #else
-  NVTE_DEVICE_ERROR("mbarrier_init is only supported on SM 10.0+.");
-#endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+  NVTE_DEVICE_ERROR("mbarrier_init is only supported on SM 9.0+.");
+#endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
 }
 
 // https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#parallel-synchronization-and-communication-instructions-mbarrier-inval
 __device__ __forceinline__ void mbarrier_invalid(uint64_t *mbar) {
-#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
   uint32_t mbar_ptr = __cvta_generic_to_shared(mbar);
   asm volatile("mbarrier.inval.shared.b64 [%0];" ::"r"(mbar_ptr) : "memory");
 #else
-  NVTE_DEVICE_ERROR("mbarrier_invalid is only supported on SM 10.0+.");
-#endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+  NVTE_DEVICE_ERROR("mbarrier_invalid is only supported on SM 9.0+.");
+#endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
 }
 
 // https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#parallel-synchronization-and-communication-instructions-mbarrier-arrive
@@ -158,13 +158,13 @@ __device__ __forceinline__ void mbarrier_arrive(uint64_t *mbar) {
 
 // https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#parallel-synchronization-and-communication-instructions-mbarrier-arrive
 __device__ __forceinline__ void mbarrier_arrive_expect_tx(uint64_t *mbar, const uint32_t tx_count) {
-#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
   uint32_t mbar_ptr = __cvta_generic_to_shared(mbar);
   asm volatile("mbarrier.arrive.expect_tx.shared.b64 _, [%0], %1;" ::"r"(mbar_ptr), "r"(tx_count)
                : "memory");
 #else
-  NVTE_DEVICE_ERROR("mbarrier_arrive_expect_tx is only supported on SM 10.0+.");
-#endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+  NVTE_DEVICE_ERROR("mbarrier_arrive_expect_tx is only supported on SM 9.0+.");
+#endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
 }
 
 __device__ __forceinline__ void mbarrier_arrive_expect_tx_cta_relaxed_shared_cta(
@@ -230,8 +230,26 @@ __device__ __forceinline__ void cp_async_bulk_tensor_2d_global_to_shared(
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
 
+// global -> shared::cta (no cluster; valid on Hopper sm_90+ and Blackwell with
+// cluster size 1). Used by the FP8 block-scaling grouped quantize kernels.
+__device__ __forceinline__ void cp_async_bulk_tensor_2d_global_to_shared_cta(
+    uint64_t *dst_shmem, const uint64_t *tensor_map_ptr, const uint32_t offset_x,
+    const uint32_t offset_y, uint64_t *mbar) {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+  uint32_t dst_shmem_ptr = __cvta_generic_to_shared(dst_shmem);
+  uint32_t mbar_ptr = __cvta_generic_to_shared(mbar);
+  asm volatile(
+      "cp.async.bulk.tensor.2d.shared::cta.global.tile"
+      ".mbarrier::complete_tx::bytes [%0], [%1, {%2, %3}], [%4];" ::"r"(dst_shmem_ptr),
+      "l"(tensor_map_ptr), "r"(offset_x), "r"(offset_y), "r"(mbar_ptr)
+      : "memory");
+#else
+  NVTE_DEVICE_ERROR("cp_async_bulk_tensor_2d_global_to_shared_cta is only supported on SM 9.0+.");
+#endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+}
+
 __device__ __forceinline__ bool mbarrier_try_wait_parity(uint32_t mbar_ptr, const uint32_t parity) {
-#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
   uint32_t waitComplete;
   asm volatile(
       "{\n\t .reg .pred P_OUT; \n\t"
@@ -243,19 +261,19 @@ __device__ __forceinline__ bool mbarrier_try_wait_parity(uint32_t mbar_ptr, cons
       : "memory");
   return static_cast<bool>(waitComplete);
 #else
-  NVTE_DEVICE_ERROR("mbarrier_try_wait_parity is only supported on SM 10.0+.");
-#endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+  NVTE_DEVICE_ERROR("mbarrier_try_wait_parity is only supported on SM 9.0+.");
+#endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
   return true;
 }
 
 __device__ __forceinline__ void mbarrier_wait_parity(uint64_t *mbar, const uint32_t parity) {
-#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
   uint32_t mbar_ptr = __cvta_generic_to_shared(mbar);
   while (!mbarrier_try_wait_parity(mbar_ptr, parity)) {
   }
 #else
-  NVTE_DEVICE_ERROR("mbarrier_wait_parity is only supported on SM 10.0+.");
-#endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+  NVTE_DEVICE_ERROR("mbarrier_wait_parity is only supported on SM 9.0+.");
+#endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
 }
 
 __device__ __forceinline__ void mbarrier_wait_parity_acquire_cta_shared_cta(uint64_t *mbar,

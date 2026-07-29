@@ -412,7 +412,12 @@ class FusedTopkWithScoreFunctionBwdPrimitive(BasePrimitive):
         arg_infos,
         result_infos,
     ):
-        del result_infos, routing_map_format
+        # NOTE: do NOT include ``routing_map_format`` in this ``del``: the
+        # ``sharded_impl`` closure below resolves it by name at call time
+        # (when XLA invokes the partitioned impl), so deleting it here
+        # raises ``NameError: cannot access free variable 'routing_map_format'``
+        # at execution time of the bwd custom_partitioning.
+        del result_infos
         grad_spec = get_padded_spec(arg_infos[2])
         out_sharding = NamedSharding(mesh, PartitionSpec(*grad_spec))
         arg_shardings = (arg_infos[0].sharding, arg_infos[1].sharding, arg_infos[2].sharding)
@@ -645,7 +650,14 @@ class FusedMoEAuxLossBwdPrimitive(BasePrimitive):
         # backward reconstructs the full [num_tokens, num_experts] grad_probs from
         # scalar inputs.  Shardy will leave num_tokens unsharded, which matches the
         # replicated PartitionSpec(None, None) in partition().
-        return "const_buf_one, num_experts, grad_one -> i num_experts"
+        #
+        # grad_aux_loss is the cotangent of a scalar loss and is therefore
+        # rank-0; the third operand entry is empty (no factor labels). Declaring
+        # it with the spurious "grad_one" factor gave it rank-1 and tripped
+        # JAX's custom_partitioning_sharding_rule check once the MoE block
+        # lifted its aux-loss path out of shard_map (the rule is skipped under
+        # shard_map, which is why this surfaces only at global view).
+        return "const_buf_one, num_experts, -> i num_experts"
 
 
 register_primitive(FusedMoEAuxLossBwdPrimitive)
