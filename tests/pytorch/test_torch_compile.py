@@ -767,30 +767,48 @@ def _assert_matches_eager(actual, expected, backend: str, dtype: torch.dtype) ->
     )
 
 
+def _run_and_capture(fn, args, kwargs, grads):
+    """Run `fn` and backward through its output, returning the output and a copy
+    of every input gradient.
+
+    The output is cloned because CUDA graphs hand back tensors owned by their
+    memory pool, which the next replay overwrites, and the gradients are cleared
+    so that the same inputs can be reused for the other run.
+    """
+    out = fn(*args, **kwargs).clone()
+    out.sum().backward()
+    torch.cuda.synchronize()
+    captured = []
+    for tensor in grads:
+        assert tensor.grad is not None
+        captured.append(tensor.grad.clone())
+        tensor.grad = None
+    return out, captured
+
+
+def _assert_run_matches(actual, expected, backend: str, dtype: torch.dtype) -> None:
+    """Compare an (output, gradients) pair produced by `_run_and_capture`."""
+    (out, out_grads), (ref, ref_grads) = actual, expected
+    _assert_matches_eager(out, ref, backend, dtype)
+    for out_grad, ref_grad in zip(out_grads, ref_grads):
+        _assert_matches_eager(out_grad, ref_grad, backend, dtype)
+
+
 def _compare_compiled_to_eager(
     module, args, kwargs, grads, monkeypatch, backend: str, dtype: torch.dtype, **compile_kwargs
 ) -> None:
     """Run the module eagerly and compiled on the same inputs, and compare both
     the output and every input gradient."""
-    ref = module(*args, **kwargs)
-    ref.sum().backward()
-    ref_grads = [t.grad.clone() for t in grads]
-    for tensor in grads:
-        tensor.grad = None
+    eager = _run_and_capture(module, args, kwargs, grads)
 
     torch._dynamo.reset()
     # Force backend selection to be re-run (and traced) inside the compiled
     # region instead of being served from the cache the eager call populated.
     _force_dpa_backend(monkeypatch, backend)
-    out = torch.compile(module, **compile_kwargs)(*args, **kwargs)
-    out.sum().backward()
-    torch.cuda.synchronize()
+    compiled = _run_and_capture(torch.compile(module, **compile_kwargs), args, kwargs, grads)
 
     _assert_dpa_backend(backend)
-    _assert_matches_eager(out, ref, backend, dtype)
-    for tensor, ref_grad in zip(grads, ref_grads):
-        assert tensor.grad is not None
-        _assert_matches_eager(tensor.grad, ref_grad, backend, dtype)
+    _assert_run_matches(compiled, eager, backend, dtype)
 
 
 @pytest.mark.parametrize("backend", ["flash", "fused", "unfused"])
@@ -835,20 +853,9 @@ def test_dpa_torch_compile_cudagraphs(monkeypatch, backend):
         # still produce finite values and non-None gradients, so only comparing
         # against eager catches it.
         args, kwargs, grads = _make_dpa_inputs(spec, dtype)
-        # CUDA graphs hand back tensors owned by their memory pool, which the
-        # next replay overwrites.
-        out = compiled(*args, **kwargs).clone()
-        out.sum().backward()
-        torch.cuda.synchronize()
-        compiled_grads = [t.grad.clone() for t in grads]
-        for tensor in grads:
-            tensor.grad = None
-
-        ref = module(*args, **kwargs)
-        ref.sum().backward()
-        _assert_matches_eager(out, ref, backend, dtype)
-        for compiled_grad, tensor in zip(compiled_grads, grads):
-            _assert_matches_eager(compiled_grad, tensor.grad, backend, dtype)
+        replayed = _run_and_capture(compiled, args, kwargs, grads)
+        eager = _run_and_capture(module, args, kwargs, grads)
+        _assert_run_matches(replayed, eager, backend, dtype)
     _assert_dpa_backend(backend)
 
 
