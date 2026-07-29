@@ -9,10 +9,7 @@ import pytest
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
-from transformer_engine.pytorch import (
-    parallel_cross_entropy,
-    parallel_cross_entropy_recompute,
-)
+from transformer_engine.pytorch import parallel_cross_entropy
 
 from utils import dtype_tols
 
@@ -213,8 +210,8 @@ def test_bfloat16_unreduced_external_grad():
     with torch.autograd.graph.saved_tensors_hooks(pack_hook, lambda tensor: tensor):
         loss = parallel_cross_entropy(logits, target, 0.0, False, None)
 
-    assert len(saved_tensors) == 1
-    assert saved_tensors[0].dtype == torch.float32
+    assert len(saved_tensors) == 4
+    assert saved_tensors[0].dtype == torch.bfloat16
     torch.testing.assert_close(logits, logits_before, rtol=0.0, atol=0.0)
     loss.backward(external_grad)
 
@@ -247,13 +244,13 @@ def test_bfloat16_loss_matches_float32_input():
 @pytest.mark.parametrize("reduce_loss", [False, True], ids=["none", "mean"])
 @pytest.mark.parametrize("label_smoothing", [0.0, 0.1], ids=["plain", "smoothed"])
 @pytest.mark.parametrize("overwrite_input", [False, True], ids=["safe", "destructive"])
-def test_recompute_matches_pytorch_and_existing(
+def test_parallel_cross_entropy_matches_pytorch(
     dtype,
     reduce_loss,
     label_smoothing,
     overwrite_input,
 ):
-    """Check loss and externally-scaled gradients against both reference paths."""
+    """Check loss and externally-scaled gradients against PyTorch."""
 
     torch.manual_seed(1234)
     shape = (2, 5, 37)
@@ -262,21 +259,14 @@ def test_recompute_matches_pytorch_and_existing(
     values = torch.randn(shape, dtype=dtype, device="cuda")
 
     logits = values.clone().requires_grad_()
-    existing_logits = values.clone().requires_grad_()
     ref_logits = values.float().clone().requires_grad_()
 
-    loss = parallel_cross_entropy_recompute(
+    loss = parallel_cross_entropy(
         logits,
         target,
         label_smoothing,
         reduce_loss,
         overwrite_input=overwrite_input,
-    )
-    existing_loss = parallel_cross_entropy(
-        existing_logits,
-        target,
-        label_smoothing,
-        reduce_loss,
     )
     ref_loss = torch.nn.functional.cross_entropy(
         ref_logits.reshape(-1, shape[-1]),
@@ -293,19 +283,16 @@ def test_recompute_matches_pytorch_and_existing(
         torch.full_like(loss, 0.37) if reduce_loss else torch.randn_like(loss, dtype=torch.float32)
     )
     loss.backward(external_grad)
-    existing_loss.backward(external_grad)
     ref_loss.backward(external_grad)
 
     tols = dtype_tols(dtype)
     torch.testing.assert_close(loss, ref_loss, **tols)
-    torch.testing.assert_close(loss, existing_loss, **tols)
     expected_grad = ref_logits.grad.to(dtype)
     torch.testing.assert_close(logits.grad, expected_grad, **tols)
-    torch.testing.assert_close(logits.grad, existing_logits.grad, **tols)
 
 
 @pytest.mark.parametrize("overwrite_input", [False, True], ids=["safe", "destructive"])
-def test_recompute_saved_state_and_buffer_reuse(overwrite_input):
+def test_parallel_cross_entropy_saved_state_and_buffer_reuse(overwrite_input):
     """The saved logits buffer is input-typed and becomes the returned derivative."""
 
     torch.manual_seed(42)
@@ -319,7 +306,7 @@ def test_recompute_saved_state_and_buffer_reuse(overwrite_input):
         return tensor
 
     with torch.autograd.graph.saved_tensors_hooks(pack_hook, lambda tensor: tensor):
-        loss = parallel_cross_entropy_recompute(
+        loss = parallel_cross_entropy(
             logits,
             target,
             label_smoothing=0.1,
@@ -365,7 +352,7 @@ def test_recompute_saved_state_and_buffer_reuse(overwrite_input):
 
 
 @pytest.mark.parametrize("layout", ["transpose", "strided_vocab"])
-def test_recompute_safe_mode_supported_layouts(layout):
+def test_parallel_cross_entropy_safe_mode_supported_layouts(layout):
     """Safe mode copies non-contiguous logical layouts directly into its work buffer."""
 
     torch.manual_seed(17)
@@ -378,7 +365,7 @@ def test_recompute_safe_mode_supported_layouts(layout):
     target = torch.randint(0, values.shape[-1], values.shape[:-1], device="cuda")
     external_grad = torch.randn(values.shape[:-1], device="cuda")
 
-    loss = parallel_cross_entropy_recompute(logits, target)
+    loss = parallel_cross_entropy(logits, target)
     ref_loss = torch.nn.functional.cross_entropy(
         reference.reshape(-1, reference.shape[-1]),
         target.reshape(-1),
@@ -391,33 +378,44 @@ def test_recompute_safe_mode_supported_layouts(layout):
     torch.testing.assert_close(logits.grad, reference.grad, **dtype_tols(torch.float32))
 
 
-def test_recompute_validation_errors():
+def test_parallel_cross_entropy_validation_errors():
     """Reject inputs that violate dtype, shape, device, or overwrite assumptions."""
 
     target = torch.zeros((2, 3), dtype=torch.int64, device="cuda")
     logits = torch.randn(2, 3, 5, device="cuda")
 
     with pytest.raises(ValueError, match="3D"):
-        parallel_cross_entropy_recompute(logits.reshape(6, 5), target)
+        parallel_cross_entropy(logits.reshape(6, 5), target)
     with pytest.raises(TypeError, match="BF16 or FP32"):
-        parallel_cross_entropy_recompute(logits.half(), target)
+        parallel_cross_entropy(logits.half(), target)
     with pytest.raises(TypeError, match="int64"):
-        parallel_cross_entropy_recompute(logits, target.int())
+        parallel_cross_entropy(logits, target.int())
     with pytest.raises(ValueError, match="one target"):
-        parallel_cross_entropy_recompute(logits, target[:, :2])
+        parallel_cross_entropy(logits, target[:, :2])
     with pytest.raises(ValueError, match="\\[0, 1\\]"):
-        parallel_cross_entropy_recompute(logits, target, label_smoothing=1.1)
+        parallel_cross_entropy(logits, target, label_smoothing=1.1)
     with pytest.raises(ValueError, match="contiguous"):
-        parallel_cross_entropy_recompute(
+        parallel_cross_entropy(
             logits.transpose(0, 1),
             target.transpose(0, 1),
             overwrite_input=True,
         )
     with pytest.raises(ValueError, match="CUDA"):
-        parallel_cross_entropy_recompute(logits.cpu(), target.cpu())
+        parallel_cross_entropy(logits.cpu(), target.cpu())
 
 
-def _run_recompute_tensor_parallel(rank, world_size, init_file):
+def test_parallel_cross_entropy_deprecated_input_alias():
+    """The deprecated _input keyword remains compatible with the replaced path."""
+
+    logits = torch.randn(2, 3, 5, device="cuda")
+    target = torch.zeros((2, 3), dtype=torch.int64, device="cuda")
+    with pytest.warns(FutureWarning, match="_input"):
+        alias_loss = parallel_cross_entropy(logits, target, _input=logits)
+    direct_loss = parallel_cross_entropy(logits, target)
+    torch.testing.assert_close(alias_loss, direct_loss)
+
+
+def _run_tensor_parallel(rank, world_size, init_file):
     """Two-rank correctness worker for the tensor-parallel pre/post kernels."""
 
     torch.cuda.set_device(rank)
@@ -451,7 +449,7 @@ def _run_recompute_tensor_parallel(rank, world_size, init_file):
             local_logits = local_values.clone().requires_grad_()
             ref_logits = global_values.float().clone().requires_grad_()
 
-            loss = parallel_cross_entropy_recompute(
+            loss = parallel_cross_entropy(
                 local_logits,
                 target,
                 label_smoothing=0.1,
@@ -474,7 +472,7 @@ def _run_recompute_tensor_parallel(rank, world_size, init_file):
         dist.destroy_process_group()
 
 
-def test_recompute_tensor_parallel():
+def test_parallel_cross_entropy_tensor_parallel():
     """Validate global statistics, smoothed loss, and local gradients on two ranks."""
 
     if torch.cuda.device_count() < 2:
@@ -482,7 +480,7 @@ def test_recompute_tensor_parallel():
     with tempfile.TemporaryDirectory() as temp_dir:
         init_file = os.path.join(temp_dir, "distributed_init")
         mp.spawn(
-            _run_recompute_tensor_parallel,
+            _run_tensor_parallel,
             args=(2, init_file),
             nprocs=2,
             join=True,

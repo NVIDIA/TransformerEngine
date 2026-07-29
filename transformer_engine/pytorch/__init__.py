@@ -69,10 +69,7 @@ from transformer_engine.pytorch.cpu_offload import (
 from transformer_engine.pytorch import ops
 from transformer_engine.pytorch import optimizers
 from transformer_engine.pytorch.export import onnx_export
-from transformer_engine.pytorch.cross_entropy import (
-    parallel_cross_entropy,
-    parallel_cross_entropy_recompute,
-)
+from transformer_engine.pytorch.cross_entropy import parallel_cross_entropy
 from transformer_engine.pytorch.newton_schulz import (
     CusolverMpCtx,
     newton_schulz,

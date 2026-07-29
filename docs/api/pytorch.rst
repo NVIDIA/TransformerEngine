@@ -55,8 +55,6 @@ PyTorch
 
 .. autoapifunction:: transformer_engine.pytorch.parallel_cross_entropy
 
-.. autoapifunction:: transformer_engine.pytorch.parallel_cross_entropy_recompute
-
 .. autoapifunction:: transformer_engine.pytorch.interleave_glu_tensor
 
 .. autoapifunction:: transformer_engine.pytorch.deinterleave_glu_tensor

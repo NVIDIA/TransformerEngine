@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 
-"""Benchmark fused cross entropy saved-state and peak-memory tradeoffs."""
+"""Benchmark fused cross entropy safe-copy and destructive-reuse modes."""
 
 import argparse
 import gc
@@ -10,10 +10,7 @@ from statistics import mean
 
 import torch
 
-from transformer_engine.pytorch import (
-    parallel_cross_entropy,
-    parallel_cross_entropy_recompute,
-)
+from transformer_engine.pytorch import parallel_cross_entropy
 
 MIB = 1024**2
 
@@ -33,14 +30,7 @@ def parse_args():
 
 
 def _operator(implementation, logits, target, label_smoothing):
-    if implementation == "existing":
-        return parallel_cross_entropy(
-            logits,
-            target,
-            label_smoothing=label_smoothing,
-            reduce_loss=True,
-        )
-    return parallel_cross_entropy_recompute(
+    return parallel_cross_entropy(
         logits,
         target,
         label_smoothing=label_smoothing,
@@ -165,7 +155,6 @@ def main():
     input_bytes = n_logits * dtype.itemsize
 
     expected_multipliers = {
-        "existing": dtype.itemsize + 4,
         "safe": 2 * dtype.itemsize,
         "destructive": dtype.itemsize,
     }
@@ -174,16 +163,15 @@ def main():
     for name, bytes_per_logit in expected_multipliers.items():
         print(f"  {name:11s}: {bytes_per_logit}N = {bytes_per_logit * n_logits / MIB:.1f} MiB")
     print(
-        "Recompute saved row metadata: "
+        "Saved row metadata: "
         f"{(n_rows * (2 * 4 + 8) + 8) / MIB:.3f} MiB "
         "(FP32 max/denominator, int64 targets/count)"
     )
-    print(f"Existing forward row temporaries: {(n_rows * (3 * 4 + 4) + 8) / MIB:.3f} MiB")
-    print(f"Recompute forward loss temporary: {n_rows * 4 / MIB:.3f} MiB")
+    print(f"Forward loss temporary: {n_rows * 4 / MIB:.3f} MiB")
     print("Tensor-parallel communication buffers: 0 MiB (single-GPU benchmark)")
     print("Memory cells below are 'absolute / +incremental-from-pre-forward-baseline'.")
 
-    implementations = ("existing", "safe", "destructive")
+    implementations = ("safe", "destructive")
     for implementation in implementations:
         for _ in range(args.warmup):
             _measure_latency(implementation, shape, dtype, args.label_smoothing)
