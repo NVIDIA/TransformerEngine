@@ -8,6 +8,8 @@ Replicates the core logic of quantize_transpose_nvfp4_tuned_1D.cuh: given a 2D t
 values, quantize to NVFP4 (FP4E2M1 data + E4M3 per-block scales) and optionally also emit the
 transposed (columnwise-scaled) output.
 
+Main kernel logic resides in NVFP4QuantizeTransposeTuned1DKernel.
+
 """
 
 import logging
@@ -16,8 +18,7 @@ from typing import Optional
 
 import cutlass
 from cutlass import cute
-from cutlass import Float32, Int64
-from cutlass import Float4E2M1FN, Float8E4M3FN
+from cutlass import Boolean, Float32, Int64, Float4E2M1FN, Float8E4M3FN, BFloat16
 from cuda.bindings.driver import CUstream  # pylint: disable=no-name-in-module
 import tvm_ffi
 
@@ -63,14 +64,58 @@ class NVFP4QuantizeConfig:
 
     __repr__ = __str__
 
+# Runs if CUTE_DSL_ENABLE_ASSERTIONS=1 or --enable-assertions present in cute.compile
+def validate_tensor(tensor: Optional[cute.Tensor], expected_layout: cute.Layout, expected_dtype):
+    if tensor is None:
+        return
+    cute.testing.assert_(tensor.layout == expected_layout, "Tensor layout does not match")
+    cute.testing.assert_(tensor.dtype == expected_dtype, "Tensor dtype does not match")
+
+@cute.jit
+def noop_flag_is_set(mNoop: cute.Pointer) -> Boolean:
+    """Whether the cast_noop flag says this quantization is a no-op and must be skipped.
+
+    mNoop is a pointer rather than a tensor so that one compiled kernel serves both a present and
+    an absent flag, hence the address is checked before it is dereferenced, exactly like the CUDA
+    C++ kernel's `noop != nullptr && noop[0] == 1.0f`. The two checks cannot be joined with `and`,
+    which the DSL lowers to a non-short-circuiting op that would load from the null pointer.
+    """
+    flag_is_set = Boolean(False)
+    if mNoop.toint() != Int64(0):
+        flag_is_set = cute.make_tensor(mNoop, cute.make_layout((1,)))[0] == Float32(1.0)
+    return flag_is_set
 
 class NVFP4QuantizeTransposeTuned1DKernel:
     """Tuned kernel to cast to NVFP4 and transpose"""
 
+    # Each thread block processes a _chunk_ of the input tensor, which is a 2D sub-tensor.
+    # The quantization this kernel performs is almost a pure point-wise operation, except that
+    # NVFP4_BLOCK_SCALING_SIZE elements share a single block scaling factor and the entire tensor
+    # has a global scaling factor.
+    # Therefore, the chunk also correponds to a 2D sub-tensor of all the other tensors.
+    #
+    # A chunk is made of multiple _tiles_, which are processed sequentially by the thread block.
+    # While the tiles are processed sequentially, there may be more than one tile in-flight at a time.
+    # PREFETCH_STAGES specifies how many tiles to prefetch to SMEM, in addition to the current tile.
+    #
+    # Optionally, the kernel can be PERSISTENT, in which case it will use Cluster Launch Control to
+    # achieve dynamic persistent tile scheduling, through work stealing.
+
+    # Tunable config (mirroring the CUDA version)
+    CHUNK_DIM_Y = 128
+    CHUNK_DIM_X = 128
+    PREFETCH_STAGES = 1
+    PERSISTENT = False
+
+    THREADS_NUM = 128
+    ELTS_PER_THREAD = NVFP4_BLOCK_SCALING_SIZE
+    TILE_DIM_Y = 64
+    TILE_DIM_X = 64
+
     def __init__(self, cfg):
         self.cfg = cfg
-        # todo: derive tile / thread / stage constants from the CUDA tuned-1D kernel
 
+    # Host-side kernel launch
     @cute.jit
     def __call__(
         self,
@@ -101,18 +146,79 @@ class NVFP4QuantizeTransposeTuned1DKernel:
                 f" {self.cfg}\n"
             )
 
-        # todo: set up input/output TMA atoms, compute grid/block, and launch self.kernel(...).
-        # The tensor plumbing (which args are present) is fixed by the config; see
-        # compile_cutedsl_function_from_cfg for the matching fake-tensor signature.
+        ## Validation
+
+        # Validate input and output tensor layouts
+        (M, N) = mX.shape
+        mX_layout = cute.make_ordered_layout((M, N), order=(1, 0))
+        mO_row_layout = mX_layout
+        mO_col_layout = cute.make_ordered_layout((N, M), order=(1, 0))
+        validate_tensor(mX, mX_layout, BFloat16)
+        validate_tensor(mO_row, mO_row_layout, Float4E2M1FN)
+        validate_tensor(mO_col, mO_col_layout, Float4E2M1FN)
+        
+        # Validate scaling factor tensor layouts
+        mS_row_layout = cute.make_ordered_layout(
+            (cute.round_up(M, NVFP4_SCALE_PAD_OUTER), cute.round_up(cute.ceil_div(N, NVFP4_BLOCK_SCALING_SIZE), NVFP4_SCALE_PAD_INNER)),
+            order=(1, 0)
+        )
+        mS_col_layout = cute.make_ordered_layout(
+            (cute.round_up(N, NVFP4_SCALE_PAD_OUTER), cute.round_up(cute.ceil_div(M, NVFP4_BLOCK_SCALING_SIZE), NVFP4_SCALE_PAD_INNER)),
+            order=(1, 0)
+        )
+        validate_tensor(mS_row, mS_row_layout, Float8E4M3FN)
+        validate_tensor(mS_col, mS_col_layout, Float8E4M3FN)
+
+        # Validate amax tensor layouts
+        if cutlass.const_expr(self.cfg.row_scaled_nvfp4):
+            mAmaxRow_layout = cute.make_layout((M,))
+            validate_tensor(mAmaxRow, mAmaxRow_layout, Float32)
+        else:
+            mAmaxRow_layout = cute.make_layout((1,))
+            validate_tensor(mAmaxRow, mAmaxRow_layout, Float32)
+        mAmaxCol_layout = cute.make_layout((1,))
+        validate_tensor(mAmaxCol, mAmaxCol_layout, Float32)
+
+        # Validate RNG state tensor layout
+        mRngState_layout = cute.make_layout((2,))
+        validate_tensor(mRngState, mRngState_layout, Int64)
+        
+        ## Grid and block size calculation
+        chunk_shape = (self.CHUNK_DIM_Y, self.CHUNK_DIM_X)
+        grid = cute.ceil_div(mX.shape, chunk_shape)
+        block = (self.THREADS_NUM, 1, 1)
+
+        # todo: setup TMA atoms
+
         self.kernel(
-            # todo
+            mX,
+            mO_row,
+            mS_row,
+            mO_col,
+            mS_col,
+            mAmaxRow,
+            mAmaxCol,
+            mNoop,
+            mRngState,
         ).launch(grid=grid, block=block, stream=stream)
 
     @cute.kernel
-    def kernel(self, *todo):
+    def kernel(
+        self,
+        mX: cute.Tensor,  # (M, N) bf16 input
+        mO_row: cute.Tensor,  # (M, N) fp4 rowwise output
+        mS_row: cute.Tensor,  # (roundup(M, 128), roundup(ceil(N / 16), 4)) e4m3 scales
+        mO_col: Optional[cute.Tensor],  # (N, M) fp4 transposed output
+        mS_col: Optional[cute.Tensor],  # (roundup(N, 128), roundup(ceil(M / 16), 4)) e4m3 scales
+        mAmaxRow: cute.Tensor,  # (M,) f32 per-row amax if ROW_SCALED_NVFP4, else (1,) global amax
+        mAmaxCol: Optional[cute.Tensor],  # (1,) f32 global amax of the transposed output
+        mNoop: cute.Pointer,  # f32 cast-noop flag; may be null, checked on device
+        mRngState: Optional[cute.Tensor],  # (2,) i64 Philox {seed, offset}
+        stream: CUstream,
+    ):
         """Device entry for the NVFP4 tuned-1D quantize-transpose kernel."""
-        # todo
-
+        if not noop_flag_is_set(mNoop):
+            ...
 
 def compile_cutedsl_function_from_cfg(cfg):
     """
@@ -159,7 +265,7 @@ def compile_cutedsl_function_from_cfg(cfg):
     # mX / mO_row / mS_row: (M, N) input, (M, N) rowwise fp4 output and its scales. The fp4
     # extents are logical element counts, so the row stride is N while only N/2 bytes are
     # stored.
-    in_fake = _gmem(cutlass.BFloat16, (sym_M, sym_N), stride_order=(1, 0), align=16)
+    in_fake = _gmem(BFloat16, (sym_M, sym_N), stride_order=(1, 0), align=16)
     out_row_fake = _gmem(Float4E2M1FN, (sym_M, sym_N), stride_order=(1, 0), align=16)
     scale_row_fake = _gmem(Float8E4M3FN, scale_row_shape, stride_order=(1, 0), align=4)
 
