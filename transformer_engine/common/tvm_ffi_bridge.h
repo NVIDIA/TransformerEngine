@@ -245,9 +245,8 @@ struct is_lazyloadable_config<
     T, std::void_t<decltype(std::declval<const T &>().to_key()),
                    decltype(std::declval<const T &>().retrieve_func_from_python(
                        std::declval<const std::string &>())),
-                   std::enable_if_t<std::is_same<
-                       decltype(std::declval<const T &>().get_kernel()),
-                       std::optional<tvm::ffi::Function>>::value>>>
+                   std::enable_if_t<std::is_same<decltype(std::declval<const T &>().get_kernel()),
+                                                 std::optional<tvm::ffi::Function>>::value>>>
     : std::true_type {};
 }  // namespace detail
 
