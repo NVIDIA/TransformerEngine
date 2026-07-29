@@ -885,46 +885,76 @@ def test_dpa_torch_compile_fp8(monkeypatch, fp8_attention):
     assert fell_back == fp8_attention
 
 
-@pytest.mark.parametrize("backend", ["flash", "unfused"])
-@pytest.mark.parametrize("interleave_dim", [-3, -2])
-def test_dpa_torch_compile_packed_views_fall_back(monkeypatch, backend, interleave_dim):
-    """Packed q/k/v passed as plain views cannot be recognized while tracing (the
-    detection reads data pointers), so DotProductAttention runs that detection
-    eagerly instead -- correct results, at the cost of a graph break. Declaring
-    the packing via qkv_layer/kv_layer keeps it on the compiled path, which
-    test_dpa_torch_compile covers."""
-    dtype = torch.bfloat16
-    spec = _DPA_COMPILE_CONFIGS["self_bshd_causal"]
+def _packed_views_inputs(spec, dtype, interleave_dim=-3):
+    """Packed q/k/v handed over as plain views, without declaring the packing."""
     config = spec["model_config"]
-    _force_dpa_backend(monkeypatch, backend)
-
-    module = _make_dpa(spec, dtype)
     b, s = config.batch_size, config.max_seqlen_q
     h, d = config.num_heads, config.head_dim_qk
     shape = (b, s, 3, h, d) if interleave_dim == -3 else (b, s, h, 3, d)
     qkv = torch.randn(shape, dtype=dtype, device="cuda", requires_grad=True)
     q, k, v = [qkv.select(interleave_dim, i) for i in range(3)]
+    return (q, k, v), {}, [qkv]
 
-    ref = module(q, k, v)
+
+def _thd_without_max_seqlen_inputs(spec, dtype):
+    """thd inputs that leave max_seqlen to be derived from cu_seqlens."""
+    args, kwargs, grads = _make_dpa_inputs(spec, dtype)
+    del kwargs["max_seqlen_q"], kwargs["max_seqlen_kv"]
+    return args, kwargs, grads
+
+
+_EAGER_FALLBACK_CASES = {
+    # name: (config name, input builder)
+    "packed_views_bs3hd": (
+        "self_bshd_causal",
+        lambda spec, dtype: _packed_views_inputs(spec, dtype, -3),
+    ),
+    "packed_views_bsh3d": (
+        "self_bshd_causal",
+        lambda spec, dtype: _packed_views_inputs(spec, dtype, -2),
+    ),
+    "thd_without_max_seqlen": ("self_thd_padding_causal", _thd_without_max_seqlen_inputs),
+}
+
+
+@pytest.mark.parametrize("backend", ["flash", "unfused"])
+@pytest.mark.parametrize("case", _EAGER_FALLBACK_CASES.keys())
+def test_dpa_torch_compile_eager_fallback(monkeypatch, backend, case):
+    """Calls that cannot be traced run as an eager island instead, with a
+    warning: recognizing packed q/k/v takes the data pointers dynamo cannot
+    read, and deriving max_seqlen off cu_seqlens is a device synchronization.
+    Both keep working, and both are avoidable -- by declaring the packing via
+    qkv_layer/kv_layer, or by passing max_seqlen."""
+    dtype = torch.bfloat16
+    config_name, make_inputs = _EAGER_FALLBACK_CASES[case]
+    spec = _DPA_COMPILE_CONFIGS[config_name]
+    _force_dpa_backend(monkeypatch, backend)
+
+    module = _make_dpa(spec, dtype)
+    args, kwargs, grads = make_inputs(spec, dtype)
+
+    ref = module(*args, **kwargs)
     ref.sum().backward()
-    ref_grad = qkv.grad.clone()
-    qkv.grad = None
+    ref_grads = [t.grad.clone() for t in grads]
+    for tensor in grads:
+        tensor.grad = None
 
     torch._dynamo.reset()
     _force_dpa_backend(monkeypatch, backend)
     with pytest.warns(UserWarning, match="Falling back to eager execution"):
-        out = torch.compile(module)(q, k, v)
+        out = torch.compile(module)(*args, **kwargs)
     out.sum().backward()
     torch.cuda.synchronize()
 
     _assert_matches_eager(out, ref, backend, dtype)
-    _assert_matches_eager(qkv.grad, ref_grad, backend, dtype)
+    for tensor, ref_grad in zip(grads, ref_grads):
+        _assert_matches_eager(tensor.grad, ref_grad, backend, dtype)
 
-    # The same graph break is an error when the user asked for a full graph.
+    # The same eager island is an error when the user asked for a full graph.
     torch._dynamo.reset()
     _force_dpa_backend(monkeypatch, backend)
     with pytest.raises(Exception, match="torch.compiler.disable"):
-        torch.compile(module, fullgraph=True)(q, k, v)
+        torch.compile(module, fullgraph=True)(*args, **kwargs)
 
 
 # ---------------------------------------------------------------------------
