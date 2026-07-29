@@ -786,6 +786,49 @@ def test_dpa_torch_compile_cudagraphs(monkeypatch, backend):
 
 
 @pytest.mark.parametrize("backend", ["flash", "unfused"])
+def test_dpa_torch_compile_shared_cu_seqlens(monkeypatch, backend):
+    """Self attention on `thd` naturally passes one cu_seqlens tensor for both q
+    and kv, which flash-attn hands to two inputs of the same autograd.Function --
+    something dynamo cannot trace. The other tests build two tensors, so this
+    covers the shape a caller is most likely to write."""
+    dtype = torch.bfloat16
+    cfg = _dpa_config(**_DPA_COMPILE_CONFIGS["self_thd_padding_causal"])
+    _force_dpa_backend(monkeypatch, backend)
+
+    module = _make_dpa(cfg, dtype)
+    b, s = cfg["batch_size"], cfg["max_seqlen_q"]
+    h, d = cfg["num_heads"], cfg["head_dim"]
+    q, k, v = [
+        torch.randn(b * s, h, d, dtype=dtype, device="cuda", requires_grad=True) for _ in range(3)
+    ]
+    cu_seqlens = torch.arange(0, (b + 1) * s, step=s, dtype=torch.int32, device="cuda")
+    kwargs = dict(
+        cu_seqlens_q=cu_seqlens,
+        cu_seqlens_kv=cu_seqlens,  # the same tensor, not a copy
+        max_seqlen_q=s,
+        max_seqlen_kv=s,
+    )
+
+    ref = module(q, k, v, **kwargs)
+    ref.sum().backward()
+    ref_grads = [t.grad.clone() for t in (q, k, v)]
+    for t in (q, k, v):
+        t.grad = None
+
+    torch._dynamo.reset()
+    _force_dpa_backend(monkeypatch, backend)
+    out = torch.compile(module, fullgraph=True)(q, k, v, **kwargs)
+    out.sum().backward()
+    torch.cuda.synchronize()
+
+    _assert_dpa_backend(backend)
+    tols = _dpa_tolerances(backend)
+    torch.testing.assert_close(out, ref, **tols)
+    for tensor, ref_grad in zip((q, k, v), ref_grads):
+        torch.testing.assert_close(tensor.grad, ref_grad, **tols)
+
+
+@pytest.mark.parametrize("backend", ["flash", "unfused"])
 @pytest.mark.parametrize("interleave_dim", [-3, -2])
 def test_dpa_torch_compile_packed_views_fall_back(monkeypatch, backend, interleave_dim):
     """Packed q/k/v passed as plain views cannot be recognized while tracing (the

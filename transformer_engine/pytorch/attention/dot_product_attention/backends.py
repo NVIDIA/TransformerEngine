@@ -1122,12 +1122,15 @@ class FlashAttention(torch.nn.Module):
                     else:
                         func = flash_attn_with_kvcache_v3  # pylint: disable=possibly-used-before-assignment
                     if not use_flash_attn_4 and (not use_flash_attn_3 or inference_params is None):
-                        fa_optional_forward_args_thd.append(
-                            cu_seqlens_q_padded if pad_between_seqs else cu_seqlens_q
-                        )
-                        fa_optional_forward_args_thd.append(
-                            cu_seqlens_kv_padded if pad_between_seqs else cu_seqlens_kv
-                        )
+                        cu_q = cu_seqlens_q_padded if pad_between_seqs else cu_seqlens_q
+                        cu_kv = cu_seqlens_kv_padded if pad_between_seqs else cu_seqlens_kv
+                        if cu_q is cu_kv and torch.compiler.is_compiling():
+                            # Self attention passes one tensor for both, and dynamo
+                            # cannot trace autograd.Function.apply with the same
+                            # tensor on two of its inputs.
+                            cu_kv = cu_kv.clone()
+                        fa_optional_forward_args_thd.append(cu_q)
+                        fa_optional_forward_args_thd.append(cu_kv)
                         fa_optional_forward_args_thd.append(max_seqlen_q)
                         fa_optional_forward_args_thd.append(max_seqlen_kv)
                 if use_flash_attn_4:
