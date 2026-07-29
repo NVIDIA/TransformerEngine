@@ -542,14 +542,13 @@ def test_unfused_dpa_torch_compile(qkv_layout):
     compiled = torch.compile(fn, fullgraph=True, mode="reduce-overhead")
 
     for _ in range(3):
+        # Compared against eager rather than only checked for finiteness: a
+        # replay reusing stale buffers would pass the latter.
         q, k, v, extra, _ = _make_unfused_qkv(qkv_layout, dtype, requires_grad=True)
-        out = compiled(q, k, v, extra)
-        out.sum().backward()
-        torch.cuda.synchronize()
-        assert torch.isfinite(out).all()
-        assert q.grad is not None
-        assert k.grad is not None
-        assert v.grad is not None
+        inputs = (q, k, v, extra)
+        replayed = _run_and_capture(compiled, inputs, {}, [q, k, v])
+        eager = _run_and_capture(fn, inputs, {}, [q, k, v])
+        _assert_run_matches(replayed, eager, "unfused", dtype)
 
 
 # ---------------------------------------------------------------------------
@@ -940,22 +939,13 @@ def test_dpa_torch_compile_eager_fallback(monkeypatch, backend, case):
     module = _make_dpa(spec, dtype)
     args, kwargs, grads = make_inputs(spec, dtype)
 
-    ref = module(*args, **kwargs)
-    ref.sum().backward()
-    ref_grads = [t.grad.clone() for t in grads]
-    for tensor in grads:
-        tensor.grad = None
+    eager = _run_and_capture(module, args, kwargs, grads)
 
     torch._dynamo.reset()
     _force_dpa_backend(monkeypatch, backend)
     with pytest.warns(UserWarning, match="Falling back to eager execution"):
-        out = torch.compile(module)(*args, **kwargs)
-    out.sum().backward()
-    torch.cuda.synchronize()
-
-    _assert_matches_eager(out, ref, backend, dtype)
-    for tensor, ref_grad in zip(grads, ref_grads):
-        _assert_matches_eager(tensor.grad, ref_grad, backend, dtype)
+        fell_back = _run_and_capture(torch.compile(module), args, kwargs, grads)
+    _assert_run_matches(fell_back, eager, backend, dtype)
 
     # The same eager island is an error when the user asked for a full graph.
     torch._dynamo.reset()
