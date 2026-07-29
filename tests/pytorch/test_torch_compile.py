@@ -38,7 +38,7 @@ from transformer_engine.pytorch import (
     MXFP8Quantizer,
     NVFP4Quantizer,
 )
-from utils import ModelConfig, get_available_attention_backends, recipe_id
+from utils import ModelConfig, dtype_tols, get_available_attention_backends, recipe_id
 from transformer_engine.pytorch.attention.dot_product_attention.backends import (
     UnfusedDotProductAttention,
 )
@@ -735,17 +735,26 @@ def _assert_dpa_backend(backend: str) -> None:
     )
 
 
-def _dpa_tolerances(backend: str) -> dict:
-    """How closely the compiled backend has to match eager.
+def _assert_matches_eager(actual, expected, backend: str, dtype: torch.dtype) -> None:
+    """Assert a compiled result matches the eager one.
 
-    FlashAttention calls the same kernel either way, so it has to match exactly.
-    The unfused backend is compiled by inductor, which fuses the softmax chain
-    differently and reassociates its sums: with an off-by-one softmax that costs
-    up to two bfloat16 roundings on individual elements, so it keeps the dtype
-    defaults. A systematic difference -- a wrong mask or scale -- lands far
-    outside them anyway.
+    FlashAttention and FusedAttention run the same kernel either way, so they
+    have to match exactly. Inductor reassociates the unfused backend's softmax
+    sums, and that error scales with the magnitude of those sums rather than
+    with each output element -- so the absolute tolerance comes from the
+    tensor's own scale, an elementwise relative tolerance being meaningless for
+    elements near zero.
     """
-    return {"rtol": 0.0, "atol": 0.0} if backend == "flash" else {}
+    if backend != "unfused":
+        torch.testing.assert_close(actual, expected, rtol=0.0, atol=0.0)
+        return
+    tols = dtype_tols(dtype)
+    torch.testing.assert_close(
+        actual,
+        expected,
+        rtol=tols["rtol"],
+        atol=max(tols["atol"], 1e-3 * expected.abs().max().item()),
+    )
 
 
 @pytest.mark.parametrize("backend", ["flash", "unfused"])
@@ -785,11 +794,10 @@ def test_dpa_torch_compile(monkeypatch, backend, config):
     torch.cuda.synchronize()
 
     _assert_dpa_backend(backend)
-    tols = _dpa_tolerances(backend)
-    torch.testing.assert_close(out, ref, **tols)
+    _assert_matches_eager(out, ref, backend, dtype)
     for tensor, ref_grad in zip(grads, ref_grads):
         assert tensor.grad is not None
-        torch.testing.assert_close(tensor.grad, ref_grad, **tols)
+        _assert_matches_eager(tensor.grad, ref_grad, backend, dtype)
 
 
 @pytest.mark.parametrize("backend", ["flash", "unfused"])
@@ -805,7 +813,6 @@ def test_dpa_torch_compile_cudagraphs(monkeypatch, backend):
     torch._dynamo.reset()
     compiled = torch.compile(module, fullgraph=True, mode="reduce-overhead")
 
-    tols = _dpa_tolerances(backend)
     for _ in range(3):
         # Fresh inputs every iteration: a replay that reuses stale buffers would
         # still produce finite values and non-None gradients, so only comparing
@@ -822,9 +829,9 @@ def test_dpa_torch_compile_cudagraphs(monkeypatch, backend):
 
         ref = module(*args, **kwargs)
         ref.sum().backward()
-        torch.testing.assert_close(out, ref, **tols)
+        _assert_matches_eager(out, ref, backend, dtype)
         for compiled_grad, tensor in zip(compiled_grads, grads):
-            torch.testing.assert_close(compiled_grad, tensor.grad, **tols)
+            _assert_matches_eager(compiled_grad, tensor.grad, backend, dtype)
     _assert_dpa_backend(backend)
 
 
@@ -898,10 +905,9 @@ def test_dpa_torch_compile_shared_cu_seqlens(monkeypatch, backend):
     torch.cuda.synchronize()
 
     _assert_dpa_backend(backend)
-    tols = _dpa_tolerances(backend)
-    torch.testing.assert_close(out, ref, **tols)
+    _assert_matches_eager(out, ref, backend, dtype)
     for tensor, ref_grad in zip((q, k, v), ref_grads):
-        torch.testing.assert_close(tensor.grad, ref_grad, **tols)
+        _assert_matches_eager(tensor.grad, ref_grad, backend, dtype)
 
 
 @pytest.mark.parametrize("backend", ["flash", "unfused"])
@@ -935,9 +941,8 @@ def test_dpa_torch_compile_packed_views_fall_back(monkeypatch, backend, interlea
     out.sum().backward()
     torch.cuda.synchronize()
 
-    tols = _dpa_tolerances(backend)
-    torch.testing.assert_close(out, ref, **tols)
-    torch.testing.assert_close(qkv.grad, ref_grad, **tols)
+    _assert_matches_eager(out, ref, backend, dtype)
+    _assert_matches_eager(qkv.grad, ref_grad, backend, dtype)
 
     # The same graph break is an error when the user asked for a full graph.
     torch._dynamo.reset()
@@ -975,9 +980,9 @@ def test_dpa_torch_compile_fused_backend(monkeypatch):
     torch.cuda.synchronize()
 
     _assert_dpa_backend("fused")
-    torch.testing.assert_close(out, ref, rtol=0.0, atol=0.0)
+    _assert_matches_eager(out, ref, "fused", dtype)
     for tensor, ref_grad in zip(grads, ref_grads):
-        torch.testing.assert_close(tensor.grad, ref_grad, rtol=0.0, atol=0.0)
+        _assert_matches_eager(tensor.grad, ref_grad, "fused", dtype)
 
 
 # ---------------------------------------------------------------------------
