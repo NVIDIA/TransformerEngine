@@ -13,7 +13,7 @@ import torch
 import transformer_engine_torch as tex
 
 from ...quantized_tensor import QuantizedTensorStorage, Quantizer
-from .._quantization_helpers import safe_quantized_repr
+from .._quantization_helpers import cuda_storage_copy, safe_quantized_repr
 
 from ...constants import TE_DType as torch_to_transformer_engine_dtype, DType
 
@@ -38,10 +38,11 @@ class _FromMXFP8Func(torch.autograd.Function):
         if tensor._rowwise_data is None and tensor._columnwise_data is None:
             raise ValueError("Cannot dequantize MXFP8 tensor with no data")
         te_dtype = torch_to_transformer_engine_dtype[dtype]
-        # ``tex.dequantize`` requires CUDA-resident buffers.
+        # ``tex.dequantize`` requires CUDA-resident buffers. If the tensor lives
+        # elsewhere, copy the buffers to CUDA and bring the result back.
         src_device = tensor.device
         if src_device.type != "cuda":
-            cuda_tensor = tensor.to(device=torch.device("cuda"))
+            cuda_tensor = cuda_storage_copy(tensor, MXFP8TensorStorage)
             result = tex.dequantize(cuda_tensor, te_dtype)
             return result.to(device=src_device)
         return tex.dequantize(tensor, te_dtype)

@@ -30,6 +30,29 @@ from transformer_engine.pytorch.tensor._quantization_helpers import (
 _quantized_tensor_passthrough_ops: set = set()
 
 
+# Ops that copy a tensor to another device and/or dtype. The ``aten.to.*``
+# overloads are CompositeImplicitAutograd, so they normally decompose into
+# ``aten._to_copy`` before reaching __torch_dispatch__. That decomposition is
+# skipped when they are called from within another __torch_dispatch__, because
+# autograd keys are excluded there and the CompositeImplicitAutograd alias does
+# not cover the Python dispatch key. Both forms therefore need handling.
+_device_conversion_ops: set = {
+    torch.ops.aten._to_copy.default,
+    torch.ops.aten.to.device,
+    torch.ops.aten.to.dtype,
+    torch.ops.aten.to.dtype_layout,
+    torch.ops.aten.to.other,
+}
+
+
+def _bind_op_args(func, args, kwargs) -> Dict[str, Any]:
+    """Map an op's arguments to the argument names in its schema"""
+    bound_args = dict(zip((arg.name for arg in func._schema.arguments), args))
+    if kwargs:
+        bound_args.update(kwargs)
+    return bound_args
+
+
 class QuantizedTensorStorage:
     r"""Base class for all TensorStorage classes.
 
@@ -676,18 +699,20 @@ class QuantizedTensor(torch.Tensor):
                 dst.copy_(src)
             return None
 
-        # _to_copy op (used by .to(device=...), .cpu(), DCP staging).
+        # Device conversion ops (used by .to(device=...), .cpu(), DCP staging).
         # Preserve the QuantizedTensor subclass and move all internal
         # buffers (data, scales, etc.) to the requested device.
-        if func == torch.ops.aten._to_copy.default:
+        if func in _device_conversion_ops and isinstance(args[0], QuantizedTensor):
             tensor = args[0]
-            kw = dict(kwargs) if kwargs else {}
-            dtype = kw.get("dtype", None)
+            bound_args = _bind_op_args(func, args, kwargs)
+            # ``aten.to.other`` takes the target dtype and device from a tensor
+            other = bound_args.get("other", None)
+            dtype = other.dtype if other is not None else bound_args.get("dtype", None)
+            device = other.device if other is not None else bound_args.get("device", None)
             if dtype is None or dtype == tensor.dtype:
-                target_device = kw.get("device", tensor.device) or tensor.device
-                target_device = torch.device(target_device)
-                pin_memory = bool(kw.get("pin_memory", False))
-                non_blocking = bool(kw.get("non_blocking", False))
+                target_device = torch.device(device) if device is not None else tensor.device
+                pin_memory = bool(bound_args.get("pin_memory", False))
+                non_blocking = bool(bound_args.get("non_blocking", False))
                 new_metadata = {"device": target_device}
                 # Update tensor storage metadata
                 for key, value in tensor.get_metadata().items():

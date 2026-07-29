@@ -671,6 +671,42 @@ class TestQuantizedTensor:
         torch.testing.assert_close(y_cpu, ref_cpu, rtol=0, atol=0)
 
     @pytest.mark.parametrize("quantization", _quantization_list)
+    def test_cpu_torch_ops(
+        self,
+        *,
+        quantization: str,
+        shape: Iterable[int] = (128, 128),
+        dtype: torch.dtype = torch.bfloat16,
+    ) -> None:
+        """Apply plain PyTorch ops to a CPU-resident QuantizedTensor.
+
+        Ops without a quantized implementation dequantize their arguments. For
+        a CPU tensor that dequantization may need to copy the buffers to CUDA,
+        which must not dispatch back through the quantized tensor.
+
+        """
+
+        # Construct a quantized tensor on CUDA and move it to CPU
+        _, x_cuda = make_reference_and_test_tensors(
+            shape=shape,
+            quantization=quantization,
+            test_dtype=dtype,
+            requires_grad=False,
+        )
+        x_cpu = x_cuda.cpu()
+        ref_cpu = x_cuda.dequantize().to(device="cpu")
+
+        # Ops that are dispatched through the dequantizing fallback
+        torch.testing.assert_close(x_cpu + 0, ref_cpu, rtol=0, atol=0)
+        torch.testing.assert_close(x_cpu, ref_cpu, rtol=0, atol=0)
+
+        # Moving back to CUDA preserves the quantized tensor type
+        x_roundtrip = x_cpu.to(device="cuda")
+        assert isinstance(x_roundtrip, QuantizedTensor)
+        assert x_roundtrip.device.type == "cuda"
+        torch.testing.assert_close(x_roundtrip.dequantize(), x_cuda.dequantize(), rtol=0, atol=0)
+
+    @pytest.mark.parametrize("quantization", _quantization_list)
     @pytest.mark.parametrize("dim", [0, 1])
     def test_chunk(
         self,

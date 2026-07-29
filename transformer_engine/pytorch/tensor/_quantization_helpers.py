@@ -13,7 +13,10 @@ from typing import Callable, Optional, Tuple, Any, Dict, TYPE_CHECKING
 import torch
 
 if TYPE_CHECKING:
-    from transformer_engine.pytorch.quantized_tensor import QuantizedTensor
+    from transformer_engine.pytorch.quantized_tensor import (
+        QuantizedTensor,
+        QuantizedTensorStorage,
+    )
 
 
 class _QuantizeFunc(torch.autograd.Function):
@@ -83,6 +86,26 @@ def _stride_from_shape(shape: list[int]):
     for d in reversed(shape[1:]):
         rstride.append(rstride[-1] * d)
     return list(reversed(rstride))
+
+
+def cuda_storage_copy(
+    tensor: QuantizedTensorStorage,
+    storage_class: type,
+) -> QuantizedTensorStorage:
+    """Copy a quantized tensor's buffers to CUDA, as a plain tensor storage.
+
+    ``storage_class`` must be the ``QuantizedTensorStorage`` subclass that
+    matches ``tensor``. The copy is deliberately not a ``QuantizedTensor``:
+    constructing one dispatches through ``__torch_dispatch__``, which
+    dequantizes the arguments of ops it does not recognize and would therefore
+    recurse back into the dequantization that needs this copy.
+
+    """
+    metadata = {
+        key: value.to(device="cuda") if isinstance(value, torch.Tensor) else value
+        for key, value in tensor.get_metadata().items()
+    }
+    return storage_class(**metadata)
 
 
 def safe_quantized_repr(obj, cls_name, extras=None, error=None):
