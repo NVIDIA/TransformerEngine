@@ -77,3 +77,9 @@ Transformer Engine documentation
    :caption: Developer Guide
 
    developer/index
+
+.. toctree::
+   :hidden:
+   :caption: Developer Guide (WIP)
+
+   developer2/index
