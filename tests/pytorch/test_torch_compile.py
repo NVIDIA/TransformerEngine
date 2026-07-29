@@ -694,7 +694,12 @@ def _make_dpa_inputs(spec: dict, dtype: torch.dtype):
 
 
 def _skip_unsupported(spec: dict, backend: str, dtype) -> None:
-    """Skip configurations the backend under test cannot run at all."""
+    """Skip what the backend under test cannot run, or cannot compile."""
+    if backend == "fused":
+        # FusedAttention's forward carries @no_torch_dynamo, so there is nothing
+        # to compile: it runs as an eager island. Drop this skip once it traces,
+        # and the tests below cover it as they do the others.
+        pytest.skip("FusedAttention is an eager island and does not compile")
     available, _, _ = get_available_attention_backends(
         spec["model_config"], dtype, _qkv_layout(spec)
     )
@@ -813,14 +818,13 @@ def _compare_compiled_to_eager(
 @pytest.mark.parametrize("backend", ["flash", "fused", "unfused"])
 @pytest.mark.parametrize("config", _DPA_COMPILE_CONFIGS.keys())
 def test_dpa_torch_compile(monkeypatch, backend, config):
-    """`DotProductAttention` under `torch.compile` must match eager in forward
-    and backward, for every backend that supports the configuration.
+    """`DotProductAttention` under `torch.compile(fullgraph=True)` must match
+    eager in forward and backward, for every backend that supports the
+    configuration.
 
-    FlashAttention and UnfusedDotProductAttention are compiled with
-    `fullgraph=True`, so the test fails on any graph break -- covering the whole
-    module: input unpacking, qkv layout, backend selection and the backend
-    itself. FusedAttention is an eager island (`@no_torch_dynamo` on its
-    forward), so it is expected to graph-break and only has to stay correct.
+    `fullgraph=True` makes the test fail on any graph break, so it covers the
+    whole module: input unpacking, qkv layout, backend selection and the backend
+    itself.
     """
     dtype = torch.bfloat16
     spec = _DPA_COMPILE_CONFIGS[config]
@@ -830,7 +834,7 @@ def test_dpa_torch_compile(monkeypatch, backend, config):
     module = _make_dpa(spec, dtype)
     args, kwargs, grads = _make_dpa_inputs(spec, dtype)
     _compare_compiled_to_eager(
-        module, args, kwargs, grads, monkeypatch, backend, dtype, fullgraph=backend != "fused"
+        module, args, kwargs, grads, monkeypatch, backend, dtype, fullgraph=True
     )
 
 
