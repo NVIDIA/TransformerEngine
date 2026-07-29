@@ -11,6 +11,7 @@
 #include <tvm/ffi/function.h>
 
 #include <cstddef>
+#include <cstdint>
 #include <optional>
 #include <string>
 
@@ -41,6 +42,25 @@ struct MXFP8QuantConfig {
   bool with_act = false;    // If an activation operation is fused
   Activation activation = Activation::kNone;
 
+  constexpr uint32_t to_id() const {
+    static_assert(static_cast<uint32_t>(DType::kNumTypes) <= 256,
+                  "DType no longer fits in the 8 bits to_id() gives it.");
+    static_assert(static_cast<uint32_t>(Activation::kNumTypes) <= 512,
+                  "Activation no longer fits in the 9 bits to_id() gives it.");
+    return static_cast<uint32_t>(dtype) | (static_cast<uint32_t>(fp8_dtype) << 8) |
+           (static_cast<uint32_t>(rowwise) << 16) | (static_cast<uint32_t>(colwise) << 17) |
+           (static_cast<uint32_t>(swizzled) << 18) | (static_cast<uint32_t>(with_amax) << 19) |
+           (static_cast<uint32_t>(with_dbias) << 20) | (static_cast<uint32_t>(with_dact) << 21) |
+           (static_cast<uint32_t>(with_act) << 22) | (static_cast<uint32_t>(activation) << 23);
+  }
+
+  std::optional<tvm::ffi::Function> get_kernel() const {
+    static TVMFFIConfigCache &cache = TVMFFIConfigCache::create();
+    return cache.get_or_load(*this);
+  }
+
+  // Globally unique TVM-FFI registry key used when the CuTeDSL function is
+  // compiled and registered on a cache miss.
   std::string to_key() const {
     std::string key;
     key.reserve(54);
@@ -168,8 +188,7 @@ inline bool mxfp8_quantize_cutedsl(const MXFP8QuantConfig &config, const Tensor 
     return true;
   }
 
-  std::optional<tvm::ffi::Function> mxfp8_quant_func_opt =
-      tvm_ffi_bridge::TVMFFICentral::getInstance().lazyload_function(config);
+  std::optional<tvm::ffi::Function> mxfp8_quant_func_opt = config.get_kernel();
   if (!mxfp8_quant_func_opt.has_value()) {
     return false;
   }

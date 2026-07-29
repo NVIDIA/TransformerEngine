@@ -67,7 +67,8 @@ enum class Activation {
   kDGeLU,
   kDSiLU,
   kDQGeLU,
-  kDSReLU
+  kDSReLU,
+  kNumTypes
 };
 
 inline const char *activation_to_str(Activation act) {
@@ -93,6 +94,7 @@ inline const char *activation_to_str(Activation act) {
     case Activation::kDSReLU:
       return "dsrelu";
     case Activation::kNone:
+    case Activation::kNumTypes:
       return "none";
   }
   return "none";
@@ -208,12 +210,33 @@ namespace tvm_ffi_bridge {
 
 // Compile-time check that a config provides the lazy-loadable kernel API:
 //   - std::string to_key() const
+// Builds the globally unique TVM-FFI registry key used when Python compiles and
+// registers the CuTeDSL function. The cache itself may use a different key.
+//
 //   - bool retrieve_func_from_python(const std::string& key) const
-//       (compiles + globally registers the kernel under `key`; returns whether
-//        a kernel is now registered / the config is supported)
-// Drives the static_assert in TVMFFICentral::lazyload_function so a config that
-// is missing either method fails with a clear message instead of a deref-into-
-// the-template error.
+// This compiles + globally registers the kernel under `key`; returns whether
+// a kernel is now registered / the config is supported
+//
+//   - std::optional<tvm::ffi::Function> get_kernel() const
+// Retrieves the possibly cached function. If the config provides a
+// `uint32_t to_id() const` method, it can reuse TVMFFIConfigCache with the
+// canonical implementation:
+// ```
+// std::optional<tvm::ffi::Function> get_kernel() const {
+//   static TVMFFIConfigCache &cache = TVMFFIConfigCache::create();
+//   return cache.get_or_load(*this);
+// }
+// ```
+// The ID only has to be unique within the config type because the function-local
+// cache belongs to that type. Configs that need a different key type or caching
+// policy may implement get_kernel() themselves.
+//
+// Note: TVMFFIConfigCache::create() intentionally gives its cache process lifetime.
+// This prevents cached tvm::ffi::Function handles from being destroyed during
+// static teardown, when Python or TVM-FFI runtime state may already have been
+// finalized. The OS reclaims the allocation when the process exits.
+class TVMFFIConfigCache;
+
 namespace detail {
 template <typename, typename = void>
 struct is_lazyloadable_config : std::false_type {};
@@ -221,25 +244,26 @@ template <typename T>
 struct is_lazyloadable_config<
     T, std::void_t<decltype(std::declval<const T &>().to_key()),
                    decltype(std::declval<const T &>().retrieve_func_from_python(
-                       std::declval<const std::string &>()))>> : std::true_type {};
+                       std::declval<const std::string &>())),
+                   std::enable_if_t<std::is_same<
+                       decltype(std::declval<const T &>().get_kernel()),
+                       std::optional<tvm::ffi::Function>>::value>>>
+    : std::true_type {};
 }  // namespace detail
 
 class TVMFFICentral {
  public:
   static TVMFFICentral &getInstance() {
-    // Deliberately leaked (never deleted) because cache_ holds Python-backed
-    // tvm::ffi::Function handles whose decref must NOT run at static-destruction
-    // time -- Python / the tvm-ffi registry may already be finalized by then,
-    // which would be a use-after-free crash at process exit.
-    static TVMFFICentral *instance = new TVMFFICentral();
-    return *instance;
+    static TVMFFICentral instance;
+    return instance;
   }
 
   template <typename Config>
-  std::optional<tvm::ffi::Function> lazyload_function(const Config &cfg) {
+  std::optional<tvm::ffi::Function> load_tvm_ffi_function(const Config &cfg) {
     static_assert(detail::is_lazyloadable_config<Config>::value,
-                  "Config must define `std::string to_key() const` and "
-                  "`bool retrieve_func_from_python(const std::string&) const`.");
+                  "Config must define `std::string to_key() const`, "
+                  "`bool retrieve_func_from_python(const std::string&) const`, "
+                  "and `std::optional<tvm::ffi::Function> get_kernel() const`.");
     if (!cutedsl_backend_enabled_.load(std::memory_order_relaxed)) {
       if (warn_cutedsl_backend_not_chosen_) {
         NVTE_WARN("CuTeDSL kernel for config `", cfg.to_key(),
@@ -261,24 +285,8 @@ class TVMFFICentral {
       return std::nullopt;
     }
     const std::string key = cfg.to_key();
-    {
-      std::shared_lock<std::shared_mutex> read_lock(mutex_);
-      auto it = cache_.find(key);
-      if (it != cache_.end()) {
-        // If the key is present, the value is either a valid tvm::ffi::Function or std::nullopt (indicating config not supported)
-        return it->second;
-      }
-    }
-    // First time we see this config since the key isn't present in the cache: ask Python to compile + register the kernel
-    // under `key`, then resolve it once and cache the Function (or nullopt if unsupported)
     std::optional<tvm::ffi::Function> fn =
         cfg.retrieve_func_from_python(key) ? tvm::ffi::Function::GetGlobal(key) : std::nullopt;
-    {
-      std::unique_lock<std::shared_mutex> write_lock(mutex_);
-      // emplace is a no-op if another thread populated this key meanwhile; the
-      // resolved value is identical, so either copy is fine.
-      cache_.emplace(key, fn);
-    }
     if (!fn && warn_cutedsl_backend_not_chosen_) {
       NVTE_WARN("TVM-FFI kernel for config `", key, "` is not supported.");
     }
@@ -327,12 +335,53 @@ class TVMFFICentral {
   const bool tvm_ffi_available_;  // libtvm_ffi.so loaded; false disables the backend
   std::atomic<bool> cutedsl_backend_enabled_;
   const bool warn_cutedsl_backend_not_chosen_;
+};
+
+// A utility class that each Config struct can use to cache the registered TVM-FFI functions
+// via `to_id` method, where an id is a unique integer that represents a specific config.
+// Defined after TVMFFICentral because get_or_load names it.
+//
+class TVMFFIConfigCache {
+ public:
+  static TVMFFIConfigCache &create() { return *new TVMFFIConfigCache(); }
+
+  // Lazy-load the CuTeDSL function for this config and cache the result.
+  // Returns std::nullopt if the config is unsupported or CuTeDSL backend is disabled.
+  // This requires the config to have a `uint32_t to_id() const` method, which returns an unique
+  // identifier among all configs of this type.
+  template <typename Config>
+  std::optional<tvm::ffi::Function> get_or_load(const Config &cfg) {
+    TVMFFICentral &central = TVMFFICentral::getInstance();
+    // Checked ahead of the cache so that toggling the backend off still disables
+    // already-resolved configs; load_tvm_ffi_function emits the "disabled" warning.
+    if (!central.get_cutedsl_backend_enabled()) {
+      return central.load_tvm_ffi_function(cfg);
+    }
+    // Otherwise try the cache first, and ask Python to compile/register the kernel if not found.
+    const uint32_t id = cfg.to_id();
+    {
+      std::shared_lock<std::shared_mutex> read_lock(mutex_);
+      auto it = map_.find(id);
+      if (it != map_.end()) {
+        return it->second;
+      }
+    }
+    std::optional<tvm::ffi::Function> fn = central.load_tvm_ffi_function(cfg);
+    {
+      std::unique_lock<std::shared_mutex> write_lock(mutex_);
+      // emplace is a no-op if another thread resolved this id meanwhile; the
+      // resolved value is identical given the same cfg, so either copy is fine.
+      map_.emplace(id, fn);
+    }
+    return fn;
+  }
+
+ private:
+  TVMFFIConfigCache() = default;
+  ~TVMFFIConfigCache() = default;
+
   std::shared_mutex mutex_;
-  // Per-config resolved kernel: cfg.to_key() -> GetGlobal result (std::nullopt ==
-  // unsupported). Holds Python-backed tvm::ffi::Function handles; safe ONLY because
-  // the singleton is deliberately leaked (see getInstance), so these are never
-  // decref'd at static teardown.
-  std::unordered_map<std::string, std::optional<tvm::ffi::Function>> cache_;
+  std::unordered_map<uint32_t, std::optional<tvm::ffi::Function>> map_;
 };
 
 }  // namespace tvm_ffi_bridge
