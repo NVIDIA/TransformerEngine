@@ -1808,6 +1808,10 @@ class MXFP8QuantizeSpecializedBidimensionalKernel(MXFP8QuantizeKernelBase):
 
     def __init__(self, cfg):
         self.cfg = cfg
+        if cfg.WITH_GEMM_SWIZZLED_SCALES:
+            self._NUM_TILES_X = 2
+            self._NUM_TILES_Y = 2
+            self._NUM_TILES = self._NUM_TILES_X * self._NUM_TILES_Y
 
     @cute.jit
     def __call__(
@@ -1836,6 +1840,11 @@ class MXFP8QuantizeSpecializedBidimensionalKernel(MXFP8QuantizeKernelBase):
         mS_row = as_byte_tensor(mS_row)
         mO_col = as_byte_tensor(mO_col)
         mS_col = as_byte_tensor(mS_col)
+
+        if cutlass.const_expr(self.cfg.WITH_GEMM_SWIZZLED_SCALES):
+            mS_row, mS_col = derive_swizzled_scale_layout(
+                M, N, self.cfg.ROWWISE, self.cfg.COLWISE, mS_row, mS_col
+            )
 
         smem_tile_layout = cute.make_ordered_layout(
             (self._TILE_ROWS, self._TILE_COLS), order=(1, 0)
@@ -2213,7 +2222,7 @@ class MXFP8QuantizeSpecializedBidimensionalKernel(MXFP8QuantizeKernelBase):
             bidy,
             ROWS=self._SCALE_ROWS * self._NUM_TILES_Y,
             COLS=self._TILE_COLS * self._NUM_TILES_X,
-            WIDTH=16,
+            WIDTH=1 if self.cfg.WITH_GEMM_SWIZZLED_SCALES else 16,
         )
 
         # Drain the final stores (their gmem writes must complete before the CTA exits).
@@ -2234,8 +2243,9 @@ class MXFP8QuantizeSpecializedBidimensionalKernel(MXFP8QuantizeKernelBase):
         """Flush a staged (ROWS, COLS) SMEM scale block (a plain row-major 2D tensor) to its (bidy, bidx) slice of the gmem scale tensor,
         where each GMEM slice has the same shape as this SMEM tile. Use `WIDTH` bytes per vectorized store.
         """
-        mS_M = mS.shape[0]
-        mS_N = mS.shape[1]
+        # Use cute.size instead of cute.shape because under the swizzled layout each mode is a nested tuple ((32, 4, num_tiles_M) etc.)
+        mS_M = cute.size(mS, mode=[0])
+        mS_N = cute.size(mS, mode=[1])
         # Obtain the GMEM slice for the output scale factor block of this CTA
         mS_tile = cute.local_tile(mS, (ROWS, COLS), (bidy, bidx))
 
@@ -2266,17 +2276,15 @@ class MXFP8QuantizeSpecializedBidimensionalKernel(MXFP8QuantizeKernelBase):
 def get_kernel_class(cfg):
     """If no fusion is involved and the kernel only quantizes, dispatch to the specialized kernel for better performance."""
     plain_cast_only = (
-        not cfg.WITH_GEMM_SWIZZLED_SCALES
-        and not cfg.WITH_AMAX
-        and not cfg.WITH_DBIAS
-        and not cfg.WITH_DACT
-        and not cfg.WITH_ACT
+        not cfg.WITH_AMAX and not cfg.WITH_DBIAS and not cfg.WITH_DACT and not cfg.WITH_ACT
     )
     # Only dispatch to the specialized kernels for packed16 types (bf16/fp16)
     if plain_cast_only and is_packed16(cfg.DTYPE):
-        if cfg.ROWWISE and not cfg.COLWISE:
+        # The rowwise-only specialized kernel does not handle swizzled scales yet
+        if cfg.ROWWISE and not cfg.COLWISE and not cfg.WITH_GEMM_SWIZZLED_SCALES:
             return MXFP8QuantizeSpecializedRowwiseKernel
-        if cfg.ROWWISE and cfg.COLWISE:
+        # The bidimensional specialized kernel supports swizzled scales but we don't dispatch to it for now
+        if cfg.ROWWISE and cfg.COLWISE and not cfg.WITH_GEMM_SWIZZLED_SCALES:
             return MXFP8QuantizeSpecializedBidimensionalKernel
     return MXFP8QuantizeKernel
 
