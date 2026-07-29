@@ -59,7 +59,7 @@ from transformer_engine.pytorch.utils import (
 )
 from transformer_engine.pytorch.export import is_in_onnx_export_mode
 
-from transformer_engine.pytorch.jit import jit_fuser, no_torch_dynamo
+from transformer_engine.pytorch.jit import jit_fuser
 
 # NVTE_DEBUG = 0/1 # disables/enables debug mode, default = 0
 _NVTE_DEBUG = int(os.getenv("NVTE_DEBUG", "0"))

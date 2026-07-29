@@ -197,21 +197,20 @@ def _trim_output(attn_out, num_attention_heads, padded_head_dim_v, orig_head_dim
     return attn_out[..., :orig_head_dim_v].reshape(*out_shape, -1)
 
 
-def _needs_eager_dpa(
-    _self,
-    query_layer: Optional[torch.Tensor] = None,
-    key_layer: Optional[torch.Tensor] = None,
-    value_layer: Optional[torch.Tensor] = None,
-    *_args,
-    qkv_layer: Optional[torch.Tensor] = None,
-    kv_layer: Optional[torch.Tensor] = None,
-    **_kwargs,
-) -> bool:
+def _needs_eager_dpa(*args, **kwargs) -> bool:
     """Whether this DotProductAttention call has to run outside the graph, i.e.
-    whether it passes packed q/k/v without declaring them."""
-    if qkv_layer is not None or kv_layer is not None:
+    whether it passes packed q/k/v without declaring them.
+
+    Takes `DotProductAttention.forward`'s arguments as they were passed, so q/k/v
+    are read from either side: `args[0]` is `self`, followed by the positional
+    query/key/value.
+    """
+    if kwargs.get("qkv_layer") is not None or kwargs.get("kv_layer") is not None:
         return False
-    return dpa_utils.qkv_layout_needs_detection(query_layer, key_layer, value_layer)
+    qkv = list(args[1:4]) + [
+        kwargs.get(name) for name in ("query_layer", "key_layer", "value_layer")
+    ]
+    return dpa_utils.qkv_layout_needs_detection(*qkv)
 
 
 def _eager_under_compile_if(needs_eager: Callable[..., bool], reason: str):
