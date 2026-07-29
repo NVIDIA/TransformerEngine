@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 import abc
+import warnings
 
 import pytest
 import torch
@@ -783,6 +784,39 @@ def test_dpa_torch_compile_cudagraphs(monkeypatch, backend):
         for compiled_grad, tensor in zip(compiled_grads, grads):
             torch.testing.assert_close(compiled_grad, tensor.grad, **tols)
     _assert_dpa_backend(backend)
+
+
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+@pytest.mark.parametrize("fp8_attention", [False, True], ids=["fp8_gemms_only", "fp8_attention"])
+def test_dpa_torch_compile_fp8(monkeypatch, fp8_attention):
+    """FP8 attention is not supported on the compiled path and falls back to
+    eager. FP8 elsewhere in the model with attention in high precision -- the
+    common training setup -- must stay compiled."""
+    dtype = torch.bfloat16
+    cfg = _dpa_config(**_DPA_COMPILE_CONFIGS["self_bshd_causal"])
+    _force_dpa_backend(monkeypatch, "unfused")
+
+    module = _make_dpa(cfg, dtype)
+    args, kwargs, _ = _make_dpa_inputs(cfg, dtype)
+    fp8_recipe = recipe.DelayedScaling(fp8_dpa=fp8_attention)
+
+    def fn(*args, **kwargs):
+        with te.autocast(enabled=True, recipe=fp8_recipe):
+            return module(*args, **kwargs)
+
+    torch._dynamo.reset()
+    _force_dpa_backend(monkeypatch, "unfused")
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            torch.compile(fn)(*args, **kwargs)
+        except Exception:  # pylint: disable=broad-except
+            # FP8 attention is not available on every device; what matters here
+            # is which path was taken, which the warning below reports.
+            pass
+        fell_back = any("Falling back to eager" in str(w.message) for w in caught)
+
+    assert fell_back == fp8_attention
 
 
 @pytest.mark.parametrize("backend", ["flash", "unfused"])

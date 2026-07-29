@@ -197,31 +197,39 @@ def _trim_output(attn_out, num_attention_heads, padded_head_dim_v, orig_head_dim
     return attn_out[..., :orig_head_dim_v].reshape(*out_shape, -1)
 
 
-def _needs_eager_dpa(*args, **kwargs) -> bool:
-    """Whether this DotProductAttention call has to run outside the graph, i.e.
-    whether it passes packed q/k/v without declaring them.
+def _needs_eager_dpa(*args, **kwargs) -> Optional[str]:
+    """Why this DotProductAttention call has to run outside the graph, or None.
 
     Takes `DotProductAttention.forward`'s arguments as they were passed, so q/k/v
     are read from either side: `args[0]` is `self`, followed by the positional
     query/key/value.
     """
-    if kwargs.get("qkv_layer") is not None or kwargs.get("kv_layer") is not None:
-        return False
-    qkv = list(args[1:4]) + [
-        kwargs.get(name) for name in ("query_layer", "key_layer", "value_layer")
-    ]
-    return dpa_utils.qkv_layout_needs_detection(*qkv)
+    # FP8 GEMMs with the attention itself in high precision -- the common
+    # training setup -- stay on the compiled path; only FP8 attention bails out.
+    qstate = FP8GlobalStateManager.quantization_state
+    fp8_recipe = qstate.fp8_recipe
+    if qstate.fp8_enabled and fp8_recipe is not None:
+        if fp8_recipe.fp8_dpa or fp8_recipe.fp8_mha:
+            return "FP8 attention"
+
+    if kwargs.get("qkv_layer") is None and kwargs.get("kv_layer") is None:
+        qkv = list(args[1:4]) + [
+            kwargs.get(name) for name in ("query_layer", "key_layer", "value_layer")
+        ]
+        if dpa_utils.qkv_layout_needs_detection(*qkv):
+            return "detecting packed q/k/v that were not declared via qkv_layer/kv_layer"
+    return None
 
 
-def _eager_under_compile_if(needs_eager: Callable[..., bool], reason: str):
-    """Decorator running the wrapped method eagerly when `needs_eager` says the
-    call is unsupported on the compiled path."""
+def _eager_under_compile_if(needs_eager: Callable[..., Optional[str]]):
+    """Decorator running the wrapped method eagerly whenever `needs_eager` gives
+    a reason why the call is unsupported on the compiled path."""
 
     def decorator(fn):
         # The warning belongs inside the dynamo-disabled function: warnings.warn
         # graph-breaks on its own, masking the break that matters.
         @no_torch_dynamo()
-        def eager_fn(*args, **kwargs):
+        def eager_fn(reason, *args, **kwargs):
             warnings.warn(
                 f"Falling back to eager execution under torch.compile: {reason} is"
                 " unsupported on the compiled path (graph-breaks under fullgraph=True).",
@@ -231,8 +239,10 @@ def _eager_under_compile_if(needs_eager: Callable[..., bool], reason: str):
 
         @wraps(fn)
         def wrapper(*args, **kwargs):
-            if torch.compiler.is_compiling() and needs_eager(*args, **kwargs):
-                return eager_fn(*args, **kwargs)
+            if torch.compiler.is_compiling():
+                reason = needs_eager(*args, **kwargs)
+                if reason is not None:
+                    return eager_fn(reason, *args, **kwargs)
             return fn(*args, **kwargs)
 
         return wrapper
@@ -1142,9 +1152,7 @@ class DotProductAttention(TransformerEngineBaseModule):
             ]
         return base[:num_quantizers]
 
-    @_eager_under_compile_if(
-        _needs_eager_dpa, "detecting packed q/k/v that were not declared via qkv_layer/kv_layer"
-    )
+    @_eager_under_compile_if(_needs_eager_dpa)
     def forward(
         self,
         query_layer: Optional[torch.Tensor] = None,
