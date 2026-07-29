@@ -34,6 +34,7 @@ enum NVTEDType {
   kNVTEFloat8E5M2 = 8,  /*!< 8-bit float (E5M2) */
   kNVTEFloat8E8M0 = 9,  /*!< 8-bit float (E8M0) */
   kNVTEFloat4E2M1 = 10, /*!< 4-bit float (E2M1) */
+  kNVTEFloat8UE5M3 = 11, /*!< 8-bit float (UE5M3) */
   kNVTENumTypes         /*!< Number of supported types */
 };
 
@@ -687,12 +688,16 @@ enum class DType {
   kFloat8E5M2 = 8,
   kFloat8E8M0 = 9,
   kFloat4E2M1 = 10,
+  kFloat8UE5M3 = 11,
   kNumTypes
 };
 
 /*! \brief Check if TE datatype is FP8
  *
- * Return true if TE datatype is FP8
+ *  Return whether datatype is FP8 E4M3 or FP8 E5M2. Other FP8 formats
+ *  (E8M0, UE5M3) are not used as primary data encoding, but are
+ *  auxiliary types for block scaling formats.
+ *
  *  \param[in] t      TE Datatype of interest
  */
 inline bool is_fp8_dtype(const DType t) {

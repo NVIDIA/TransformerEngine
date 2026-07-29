@@ -61,6 +61,8 @@ inline std::string to_string(const DType type) {
       return "Float8E5M2";
     case DType::kFloat8E8M0:
       return "Float8E8M0";
+    case DType::kFloat8UE5M3:
+      return "Float8UE5M3";
     case DType::kFloat4E2M1:
       return "Float4E2M1";
     case DType::kInt16:
@@ -647,6 +649,9 @@ using fp8e5m2 = __nv_fp8_e5m2;
 #if CUDA_VERSION >= 12080
 using fp8e8m0 = __nv_fp8_e8m0;
 #endif
+#if CUDA_VERSION >= 13040
+using fp8ue5m3 = __nv_fp8_ue5m3;
+#endif
 #if FP4_TYPE_SUPPORTED
 using fp4e2m1 = __nv_fp4_e2m1;
 using fp4e2m1x2 = __nv_fp4x2_e2m1;
@@ -675,6 +680,9 @@ TRANSFORMER_ENGINE_TYPE_NAME(__nv_fp8_e5m2)
 #if CUDA_VERSION >= 12080
 TRANSFORMER_ENGINE_TYPE_NAME(__nv_fp8_e8m0)
 #endif
+#if CUDA_VERSION >= 13040
+TRANSFORMER_ENGINE_TYPE_NAME(__nv_fp8_ue5m3)
+#endif
 #if FP4_TYPE_SUPPORTED
 TRANSFORMER_ENGINE_TYPE_NAME(__nv_fp4_e2m1)
 #endif
@@ -702,6 +710,14 @@ struct TypeExtrema<fp8e5m2> {
   static constexpr float max = 57344.0f;
   static constexpr float max_inverse = 1.0 / max;
 };
+
+#if CUDA_VERSION >= 13040
+template <>
+struct TypeExtrema<fp8ue5m3> {
+  static constexpr float max = 114688.f;
+  static constexpr float max_inverse = 1.0 / max;
+};
+#endif
 
 template <>
 struct TypeExtrema<bf16> {
@@ -745,12 +761,20 @@ struct TypeInfo {
                            ,
                            fp8e8m0
 #endif
+#if CUDA_VERSION >= 13040
+                           ,
+                           fp8ue5m3
+#endif
                            >;
 #else
   using types = std::tuple<byte, int16, int32, int64, fp32, fp16, bf16, fp8e4m3, fp8e5m2
 #if CUDA_VERSION >= 12080
                            ,
                            fp8e8m0
+#endif
+#if CUDA_VERSION >= 13040
+                           ,
+                           fp8ue5m3
 #endif
                            >;
 #endif
@@ -791,6 +815,15 @@ struct TypeInfo {
   } break;
 #else
 #define SWITCH_FP4_TYPE_HANDLE(type, ...)  // do nothing
+#endif
+#if CUDA_VERSION >= 13040
+#define SWITCH_FP8UE5M3_TYPE_HANDLE(type, ...)  \
+  case DType::kFloat8UE5M3: {                   \
+    using type = fp8ue5m3;                      \
+    { __VA_ARGS__ }                             \
+  } break;
+#else
+#define SWITCH_FP8UE5M3_TYPE_HANDLE(type, ...)  // do nothing
 #endif
 
 #define TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(dtype, type, ...)                 \
@@ -837,11 +870,12 @@ struct TypeInfo {
       { __VA_ARGS__ }                                                        \
     } break;                                                                 \
       SWITCH_FP4_TYPE_HANDLE(type, __VA_ARGS__)                              \
+      SWITCH_FP8UE5M3_TYPE_HANDLE(type, __VA_ARGS__)                         \
     default:                                                                 \
       NVTE_ERROR("Unsupported dtype ", to_string(static_cast<DType>(dtype)), \
                  ". Expected one of: Byte, Int16, Int32, Int64, Float32, "   \
                  "Float16, BFloat16, Float8E4M3, Float8E5M2, "               \
-                 "Float8E8M0, Float4E2M1.");                                 \
+                 "Float8E8M0.");                                 \
   }
 
 #define TRANSFORMER_ENGINE_TYPE_SWITCH_FLOAT(dtype, type, ...)               \
