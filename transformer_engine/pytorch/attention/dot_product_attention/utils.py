@@ -2005,21 +2005,21 @@ def get_indices(max_seqlen: int, cu_seqlens: torch.Tensor) -> torch.Tensor:
     tensor of shape [batch_size * max_seqlen, 1, 1] containing the indices for
     the valid tokens in a batch.
     """
+    # Built with device-side ops only: reading the sequence lengths on the host
+    # would synchronize the device once per sequence.
     bs = len(cu_seqlens) - 1
     seqlens = cu_seqlens[1:] - cu_seqlens[:-1]
-    indices = [i * max_seqlen + ii for i, j in enumerate(seqlens) for ii in range(j)]
-    indices = torch.Tensor(indices).unsqueeze(1).unsqueeze(1).to(dtype=torch.int64, device="cuda")
-
-    num_nonzeros = indices.shape[0]
-    pad_amount = bs * max_seqlen - num_nonzeros
-    indices = F.pad(
-        input=indices,
-        pad=(0, 0, 0, 0, 0, pad_amount),
-        mode="constant",
-        value=float(bs * max_seqlen),
+    positions = torch.arange(max_seqlen, device=cu_seqlens.device)
+    valid = (positions.unsqueeze(0) < seqlens.unsqueeze(1)).flatten()
+    # Sorting the mask is stable, so the valid positions come first in order,
+    # and the invalid tail is replaced by the out-of-range padding index.
+    ordered = torch.argsort(~valid, stable=True)
+    indices = torch.where(
+        torch.arange(bs * max_seqlen, device=cu_seqlens.device) < valid.sum(),
+        ordered,
+        bs * max_seqlen,
     )
-
-    return indices
+    return indices.to(dtype=torch.int64, device="cuda").unsqueeze(1).unsqueeze(1)
 
 
 def get_full_cu_seqlens(

@@ -562,68 +562,61 @@ def test_unfused_dpa_torch_compile(qkv_layout):
 # get_available_attention_backends() answers that, so configurations only one
 # backend supports (arbitrary masks, biases, MLA head dims, ...) are covered
 # rather than avoided.
+def _cfg(model_config, qkv_format="bshd", packed=None, share_cu_seqlens=False):
+    return dict(
+        model_config=model_config,
+        qkv_format=qkv_format,
+        packed=packed,
+        share_cu_seqlens=share_cu_seqlens,
+    )
+
+
 _DPA_COMPILE_CONFIGS = {
-    # name: (ModelConfig, qkv_format, packed layout or None)
-    "self_bshd_causal": (ModelConfig(2, 128, 4, 64, attn_mask_type="causal"), "bshd", None),
-    "self_sbhd_no_mask": (ModelConfig(2, 128, 4, 64, attn_mask_type="no_mask"), "sbhd", None),
-    "self_bshd_swa": (
-        ModelConfig(2, 128, 4, 64, attn_mask_type="causal", window_size=(16, 0)),
-        "bshd",
-        None,
+    "self_bshd_causal": _cfg(ModelConfig(2, 128, 4, 64, attn_mask_type="causal")),
+    "self_sbhd_no_mask": _cfg(ModelConfig(2, 128, 4, 64, attn_mask_type="no_mask"), "sbhd"),
+    "self_bshd_swa": _cfg(ModelConfig(2, 128, 4, 64, attn_mask_type="causal", window_size=(16, 0))),
+    "gqa_bshd_causal": _cfg(ModelConfig(2, 128, 8, 64, num_gqa_groups=2, attn_mask_type="causal")),
+    "cross_bshd_no_mask": _cfg(
+        ModelConfig(2, 128, 4, 64, max_seqlen_kv=256, attn_mask_type="no_mask")
     ),
-    "gqa_bshd_causal": (
-        ModelConfig(2, 128, 8, 64, num_gqa_groups=2, attn_mask_type="causal"),
-        "bshd",
-        None,
+    "self_bshd_padding_causal": _cfg(ModelConfig(2, 128, 4, 64, attn_mask_type="padding_causal")),
+    "self_thd_padding_causal": _cfg(
+        ModelConfig(2, 128, 4, 64, attn_mask_type="padding_causal"), "thd"
     ),
-    "cross_bshd_no_mask": (
-        ModelConfig(2, 128, 4, 64, max_seqlen_kv=256, attn_mask_type="no_mask"),
-        "bshd",
-        None,
+    # Self attention naturally passes one cu_seqlens tensor for both q and kv,
+    # which flash-attn hands to two inputs of the same autograd.Function.
+    "self_thd_shared_cu_seqlens": _cfg(
+        ModelConfig(2, 128, 4, 64, attn_mask_type="padding_causal"), "thd", share_cu_seqlens=True
     ),
-    "self_thd_padding_causal": (
-        ModelConfig(2, 128, 4, 64, attn_mask_type="padding_causal"),
-        "thd",
-        None,
-    ),
-    "packed_qkv_bs3hd": (ModelConfig(2, 128, 4, 64, attn_mask_type="causal"), "bshd", "bs3hd"),
+    "packed_qkv_bs3hd": _cfg(ModelConfig(2, 128, 4, 64, attn_mask_type="causal"), packed="bs3hd"),
     # Configurations below are supported by one backend only, or take a code
     # path of their own inside DotProductAttention.
-    "alibi_bshd_causal": (
-        ModelConfig(2, 128, 4, 64, attn_mask_type="causal", attn_bias_type="alibi"),
-        "bshd",
-        None,
+    "alibi_bshd_causal": _cfg(
+        ModelConfig(2, 128, 4, 64, attn_mask_type="causal", attn_bias_type="alibi")
     ),
-    "post_scale_bias_bshd": (
-        ModelConfig(2, 128, 4, 64, attn_bias_type="post_scale_bias", bias_shape="1hss"),
-        "bshd",
-        None,
+    "post_scale_bias_bshd": _cfg(
+        ModelConfig(2, 128, 4, 64, attn_bias_type="post_scale_bias", bias_shape="1hss")
     ),
-    "arbitrary_mask_bshd": (ModelConfig(2, 128, 4, 64, attn_mask_type="arbitrary"), "bshd", None),
-    "mla_bshd_causal": (
-        ModelConfig(2, 128, 4, 128, head_dim_v=64, attn_mask_type="causal"),
-        "bshd",
-        None,
-    ),
-    "sink_softmax_bshd": (
-        ModelConfig(2, 128, 4, 64, attn_mask_type="causal", softmax_type="off-by-one"),
-        "bshd",
-        None,
+    "arbitrary_mask_bshd": _cfg(ModelConfig(2, 128, 4, 64, attn_mask_type="arbitrary")),
+    "mla_bshd_causal": _cfg(ModelConfig(2, 128, 4, 128, head_dim_v=64, attn_mask_type="causal")),
+    "sink_softmax_bshd": _cfg(
+        ModelConfig(2, 128, 4, 64, attn_mask_type="causal", softmax_type="off-by-one")
     ),
 }
 
 
-def _qkv_layout(qkv_format: str, packed: Optional[str]) -> str:
-    return packed if packed is not None else "_".join([qkv_format] * 3)
+def _qkv_layout(spec: dict) -> str:
+    return spec["packed"] or "_".join([spec["qkv_format"]] * 3)
 
 
-def _make_dpa(config: ModelConfig, qkv_format: str, dtype: torch.dtype) -> te.DotProductAttention:
+def _make_dpa(spec: dict, dtype: torch.dtype) -> te.DotProductAttention:
+    config = spec["model_config"]
     return te.DotProductAttention(
         num_attention_heads=config.num_heads,
         kv_channels=config.kv_channels,
         num_gqa_groups=config.num_gqa_groups,
         attention_dropout=config.dropout_p,
-        qkv_format=qkv_format,
+        qkv_format=spec["qkv_format"],
         attn_mask_type=config.attn_mask_type,
         window_size=config.window_size,
         attention_type=config.attn_type,
@@ -631,25 +624,51 @@ def _make_dpa(config: ModelConfig, qkv_format: str, dtype: torch.dtype) -> te.Do
     ).to(dtype=dtype, device="cuda")
 
 
-def _make_dpa_inputs(config: ModelConfig, qkv_format: str, packed: Optional[str], dtype):
+def _cu_seqlens(seqlens: torch.Tensor) -> torch.Tensor:
+    cu = torch.zeros(seqlens.numel() + 1, dtype=torch.int32, device="cuda")
+    cu[1:] = torch.cumsum(seqlens, dim=0)
+    return cu
+
+
+def _make_dpa_inputs(spec: dict, dtype: torch.dtype):
     """Build the (args, kwargs) that `DotProductAttention.forward` is called
     with, plus the list of tensors whose gradients the test compares."""
+    config = spec["model_config"]
+    qkv_format, packed = spec["qkv_format"], spec["packed"]
     b = config.batch_size
     s_q, s_kv = config.max_seqlen_q, config.max_seqlen_kv
     h, g = config.num_heads, config.num_gqa_groups
     d_qk, d_v = config.head_dim_qk, config.head_dim_v
+    padded = "padding" in config.attn_mask_type
 
-    def _shape(s, heads, head_dim):
+    kwargs = {}
+    if padded:
+        # Sequences shorter than the maximum, so the padding mask is not
+        # degenerate: with all sequences full it would be all-False, and any
+        # difference in how masking is compiled would be invisible.
+        seqlens_q = torch.randint(1, s_q, [b], dtype=torch.int32, device="cuda")
+        seqlens_kv = (
+            seqlens_q
+            if config.attn_type == "self"
+            else (torch.randint(1, s_kv, [b], dtype=torch.int32, device="cuda"))
+        )
+        cu_q = _cu_seqlens(seqlens_q)
+        cu_kv = cu_q if spec["share_cu_seqlens"] else _cu_seqlens(seqlens_kv)
+        kwargs.update(cu_seqlens_q=cu_q, cu_seqlens_kv=cu_kv, max_seqlen_q=s_q, max_seqlen_kv=s_kv)
+        t_q, t_kv = int(cu_q[-1]), int(cu_kv[-1])
+    else:
+        t_q, t_kv = b * s_q, b * s_kv
+
+    def _shape(s, t, heads, head_dim):
         return {
             "bshd": (b, s, heads, head_dim),
             "sbhd": (s, b, heads, head_dim),
-            "thd": (b * s, heads, head_dim),
+            "thd": (t, heads, head_dim),
         }[qkv_format]
 
     def _randn(shape):
         return torch.randn(shape, dtype=dtype, device="cuda", requires_grad=True)
 
-    kwargs = {}
     if packed is not None:
         # Declarative packed QKV: q/k/v are derived from one buffer by DPA
         # itself, and the layout comes from the declaration -- the only packed
@@ -658,27 +677,12 @@ def _make_dpa_inputs(config: ModelConfig, qkv_format: str, packed: Optional[str]
         qkv = _randn((b, s_q, 3, h, d_qk))
         kwargs["qkv_layer"] = qkv
         kwargs["qkv_interleave_dim"] = -3
-        grad_tensors = [qkv]
-        args = ()
+        grad_tensors, args = [qkv], ()
     else:
-        q = _randn(_shape(s_q, h, d_qk))
-        k = _randn(_shape(s_kv, g, d_qk))
-        v = _randn(_shape(s_kv, g, d_v))
-        grad_tensors = [q, k, v]
-        args = (q, k, v)
-
-    if qkv_format == "thd":
-        # All sequences have the maximum length, i.e. no padding. max_seqlen_*
-        # is passed explicitly: deriving it from cu_seqlens costs a `.item()`
-        # (a device sync, and an unbacked SymInt under torch.compile).
-        kwargs["cu_seqlens_q"] = torch.arange(
-            0, (b + 1) * s_q, step=s_q, dtype=torch.int32, device="cuda"
-        )
-        kwargs["cu_seqlens_kv"] = torch.arange(
-            0, (b + 1) * s_kv, step=s_kv, dtype=torch.int32, device="cuda"
-        )
-        kwargs["max_seqlen_q"] = s_q
-        kwargs["max_seqlen_kv"] = s_kv
+        q = _randn(_shape(s_q, t_q, h, d_qk))
+        k = _randn(_shape(s_kv, t_kv, g, d_qk))
+        v = _randn(_shape(s_kv, t_kv, g, d_v))
+        grad_tensors, args = [q, k, v], (q, k, v)
 
     if config.attn_mask_type == "arbitrary":
         kwargs["attention_mask"] = torch.zeros(b, 1, s_q, s_kv, dtype=torch.bool, device="cuda")
@@ -690,11 +694,17 @@ def _make_dpa_inputs(config: ModelConfig, qkv_format: str, packed: Optional[str]
     return args, kwargs, grad_tensors
 
 
-def _skip_unsupported(config: ModelConfig, qkv_layout: str, backend: str, dtype) -> None:
+def _skip_unsupported(spec: dict, backend: str, dtype) -> None:
     """Skip configurations the backend under test cannot run at all."""
-    available, _, _ = get_available_attention_backends(config, dtype, qkv_layout)
-    flash_supported, _, unfused_supported = available
-    supported = {"flash": flash_supported, "unfused": unfused_supported}[backend]
+    available, _, _ = get_available_attention_backends(
+        spec["model_config"], dtype, _qkv_layout(spec)
+    )
+    flash_supported, fused_supported, unfused_supported = available
+    supported = {
+        "flash": flash_supported,
+        "fused": fused_supported,
+        "unfused": unfused_supported,
+    }[backend]
     if not supported:
         pytest.skip(f"the {backend} backend does not support this configuration")
 
@@ -757,39 +767,22 @@ def _assert_matches_eager(actual, expected, backend: str, dtype: torch.dtype) ->
     )
 
 
-@pytest.mark.parametrize("backend", ["flash", "unfused"])
-@pytest.mark.parametrize("config", _DPA_COMPILE_CONFIGS.keys())
-def test_dpa_torch_compile(monkeypatch, backend, config):
-    """`DotProductAttention` must trace under `torch.compile(fullgraph=True)`
-    on the FlashAttention and UnfusedDotProductAttention backends, and match
-    eager in forward and backward.
-
-    `fullgraph=True` makes the test fail on any graph break, i.e. it covers the
-    whole module: input unpacking, qkv layout, backend selection and the
-    backend itself. The FusedAttention backend is not covered -- it is an eager
-    island (`@no_torch_dynamo` on `FusedAttention.forward`)."""
-    dtype = torch.bfloat16
-    model_config, qkv_format, packed = _DPA_COMPILE_CONFIGS[config]
-    _skip_unsupported(model_config, _qkv_layout(qkv_format, packed), backend, dtype)
-    _force_dpa_backend(monkeypatch, backend)
-
-    module = _make_dpa(model_config, qkv_format, dtype)
-    args, kwargs, grads = _make_dpa_inputs(model_config, qkv_format, packed, dtype)
-
+def _compare_compiled_to_eager(
+    module, args, kwargs, grads, monkeypatch, backend: str, dtype: torch.dtype, **compile_kwargs
+) -> None:
+    """Run the module eagerly and compiled on the same inputs, and compare both
+    the output and every input gradient."""
     ref = module(*args, **kwargs)
     ref.sum().backward()
-    _assert_dpa_backend(backend)
     ref_grads = [t.grad.clone() for t in grads]
-    for t in grads:
-        t.grad = None
+    for tensor in grads:
+        tensor.grad = None
 
     torch._dynamo.reset()
     # Force backend selection to be re-run (and traced) inside the compiled
     # region instead of being served from the cache the eager call populated.
     _force_dpa_backend(monkeypatch, backend)
-    compiled = torch.compile(module, fullgraph=True)
-
-    out = compiled(*args, **kwargs)
+    out = torch.compile(module, **compile_kwargs)(*args, **kwargs)
     out.sum().backward()
     torch.cuda.synchronize()
 
@@ -800,15 +793,39 @@ def test_dpa_torch_compile(monkeypatch, backend, config):
         _assert_matches_eager(tensor.grad, ref_grad, backend, dtype)
 
 
+@pytest.mark.parametrize("backend", ["flash", "fused", "unfused"])
+@pytest.mark.parametrize("config", _DPA_COMPILE_CONFIGS.keys())
+def test_dpa_torch_compile(monkeypatch, backend, config):
+    """`DotProductAttention` under `torch.compile` must match eager in forward
+    and backward, for every backend that supports the configuration.
+
+    FlashAttention and UnfusedDotProductAttention are compiled with
+    `fullgraph=True`, so the test fails on any graph break -- covering the whole
+    module: input unpacking, qkv layout, backend selection and the backend
+    itself. FusedAttention is an eager island (`@no_torch_dynamo` on its
+    forward), so it is expected to graph-break and only has to stay correct.
+    """
+    dtype = torch.bfloat16
+    spec = _DPA_COMPILE_CONFIGS[config]
+    _skip_unsupported(spec, backend, dtype)
+    _force_dpa_backend(monkeypatch, backend)
+
+    module = _make_dpa(spec, dtype)
+    args, kwargs, grads = _make_dpa_inputs(spec, dtype)
+    _compare_compiled_to_eager(
+        module, args, kwargs, grads, monkeypatch, backend, dtype, fullgraph=backend != "fused"
+    )
+
+
 @pytest.mark.parametrize("backend", ["flash", "unfused"])
 def test_dpa_torch_compile_cudagraphs(monkeypatch, backend):
     """`mode="reduce-overhead"`: forward and backward of DotProductAttention
     are captured into CUDA graphs and replayed on subsequent iterations."""
     dtype = torch.bfloat16
-    model_config, qkv_format, packed = _DPA_COMPILE_CONFIGS["self_bshd_causal"]
+    spec = _DPA_COMPILE_CONFIGS["self_bshd_causal"]
     _force_dpa_backend(monkeypatch, backend)
 
-    module = _make_dpa(model_config, qkv_format, dtype)
+    module = _make_dpa(spec, dtype)
 
     torch._dynamo.reset()
     compiled = torch.compile(module, fullgraph=True, mode="reduce-overhead")
@@ -817,7 +834,7 @@ def test_dpa_torch_compile_cudagraphs(monkeypatch, backend):
         # Fresh inputs every iteration: a replay that reuses stale buffers would
         # still produce finite values and non-None gradients, so only comparing
         # against eager catches it.
-        args, kwargs, grads = _make_dpa_inputs(model_config, qkv_format, packed, dtype)
+        args, kwargs, grads = _make_dpa_inputs(spec, dtype)
         # CUDA graphs hand back tensors owned by their memory pool, which the
         # next replay overwrites.
         out = compiled(*args, **kwargs).clone()
@@ -842,11 +859,11 @@ def test_dpa_torch_compile_fp8(monkeypatch, fp8_attention):
     eager. FP8 elsewhere in the model with attention in high precision -- the
     common training setup -- must stay compiled."""
     dtype = torch.bfloat16
-    model_config, qkv_format, packed = _DPA_COMPILE_CONFIGS["self_bshd_causal"]
+    spec = _DPA_COMPILE_CONFIGS["self_bshd_causal"]
     _force_dpa_backend(monkeypatch, "unfused")
 
-    module = _make_dpa(model_config, qkv_format, dtype)
-    args, kwargs, _ = _make_dpa_inputs(model_config, qkv_format, packed, dtype)
+    module = _make_dpa(spec, dtype)
+    args, kwargs, _ = _make_dpa_inputs(spec, dtype)
     fp8_recipe = recipe.DelayedScaling(fp8_dpa=fp8_attention)
 
     def fn(*args, **kwargs):
@@ -869,48 +886,6 @@ def test_dpa_torch_compile_fp8(monkeypatch, fp8_attention):
 
 
 @pytest.mark.parametrize("backend", ["flash", "unfused"])
-def test_dpa_torch_compile_shared_cu_seqlens(monkeypatch, backend):
-    """Self attention on `thd` naturally passes one cu_seqlens tensor for both q
-    and kv, which flash-attn hands to two inputs of the same autograd.Function --
-    something dynamo cannot trace. The other tests build two tensors, so this
-    covers the shape a caller is most likely to write."""
-    dtype = torch.bfloat16
-    model_config, qkv_format, _ = _DPA_COMPILE_CONFIGS["self_thd_padding_causal"]
-    _force_dpa_backend(monkeypatch, backend)
-
-    module = _make_dpa(model_config, qkv_format, dtype)
-    b, s = model_config.batch_size, model_config.max_seqlen_q
-    h, d = model_config.num_heads, model_config.head_dim_qk
-    q, k, v = [
-        torch.randn(b * s, h, d, dtype=dtype, device="cuda", requires_grad=True) for _ in range(3)
-    ]
-    cu_seqlens = torch.arange(0, (b + 1) * s, step=s, dtype=torch.int32, device="cuda")
-    kwargs = dict(
-        cu_seqlens_q=cu_seqlens,
-        cu_seqlens_kv=cu_seqlens,  # the same tensor, not a copy
-        max_seqlen_q=s,
-        max_seqlen_kv=s,
-    )
-
-    ref = module(q, k, v, **kwargs)
-    ref.sum().backward()
-    ref_grads = [t.grad.clone() for t in (q, k, v)]
-    for t in (q, k, v):
-        t.grad = None
-
-    torch._dynamo.reset()
-    _force_dpa_backend(monkeypatch, backend)
-    out = torch.compile(module, fullgraph=True)(q, k, v, **kwargs)
-    out.sum().backward()
-    torch.cuda.synchronize()
-
-    _assert_dpa_backend(backend)
-    _assert_matches_eager(out, ref, backend, dtype)
-    for tensor, ref_grad in zip((q, k, v), ref_grads):
-        _assert_matches_eager(tensor.grad, ref_grad, backend, dtype)
-
-
-@pytest.mark.parametrize("backend", ["flash", "unfused"])
 @pytest.mark.parametrize("interleave_dim", [-3, -2])
 def test_dpa_torch_compile_packed_views_fall_back(monkeypatch, backend, interleave_dim):
     """Packed q/k/v passed as plain views cannot be recognized while tracing (the
@@ -919,12 +894,13 @@ def test_dpa_torch_compile_packed_views_fall_back(monkeypatch, backend, interlea
     the packing via qkv_layer/kv_layer keeps it on the compiled path, which
     test_dpa_torch_compile covers."""
     dtype = torch.bfloat16
-    model_config, qkv_format, _ = _DPA_COMPILE_CONFIGS["self_bshd_causal"]
+    spec = _DPA_COMPILE_CONFIGS["self_bshd_causal"]
+    config = spec["model_config"]
     _force_dpa_backend(monkeypatch, backend)
 
-    module = _make_dpa(model_config, qkv_format, dtype)
-    b, s = model_config.batch_size, model_config.max_seqlen_q
-    h, d = model_config.num_heads, model_config.head_dim_qk
+    module = _make_dpa(spec, dtype)
+    b, s = config.batch_size, config.max_seqlen_q
+    h, d = config.num_heads, config.head_dim_qk
     shape = (b, s, 3, h, d) if interleave_dim == -3 else (b, s, h, 3, d)
     qkv = torch.randn(shape, dtype=dtype, device="cuda", requires_grad=True)
     q, k, v = [qkv.select(interleave_dim, i) for i in range(3)]
@@ -949,40 +925,6 @@ def test_dpa_torch_compile_packed_views_fall_back(monkeypatch, backend, interlea
     _force_dpa_backend(monkeypatch, backend)
     with pytest.raises(Exception, match="torch.compiler.disable"):
         torch.compile(module, fullgraph=True)(q, k, v)
-
-
-def test_dpa_torch_compile_fused_backend(monkeypatch):
-    """The FusedAttention backend is an eager island, so it graph-breaks rather
-    than compiles; DotProductAttention must still be correct around it."""
-    dtype = torch.bfloat16
-    model_config, qkv_format, packed = _DPA_COMPILE_CONFIGS["self_bshd_causal"]
-    _force_dpa_backend(monkeypatch, "fused")
-
-    module = _make_dpa(model_config, qkv_format, dtype)
-    args, kwargs, grads = _make_dpa_inputs(model_config, qkv_format, packed, dtype)
-
-    ref = module(*args, **kwargs)
-    from transformer_engine.pytorch.attention.dot_product_attention.dot_product_attention import (
-        _attention_backends,
-    )
-
-    if not _attention_backends["use_fused_attention"]:
-        pytest.skip("FusedAttention does not support this config on this device")
-    ref.sum().backward()
-    ref_grads = [t.grad.clone() for t in grads]
-    for t in grads:
-        t.grad = None
-
-    torch._dynamo.reset()
-    _force_dpa_backend(monkeypatch, "fused")
-    out = torch.compile(module)(*args, **kwargs)
-    out.sum().backward()
-    torch.cuda.synchronize()
-
-    _assert_dpa_backend("fused")
-    _assert_matches_eager(out, ref, "fused", dtype)
-    for tensor, ref_grad in zip(grads, ref_grads):
-        _assert_matches_eager(tensor.grad, ref_grad, "fused", dtype)
 
 
 # ---------------------------------------------------------------------------
