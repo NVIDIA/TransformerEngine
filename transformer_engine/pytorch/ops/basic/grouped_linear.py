@@ -27,6 +27,7 @@ from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload, star
 from ...quantization import FP8GlobalStateManager, QuantizerRole, Recipe
 from ...quantized_tensor import QuantizedTensorStorage
 from ...tensor import (
+    Float8BlockQuantizer,
     Float8CurrentScalingQuantizer,
     MXFP8Quantizer,
     MXFP8Tensor,
@@ -226,12 +227,33 @@ class GroupedLinear(BasicOperation):
 
         self._apply_delay_wgrad_param_hooks()
 
+    def register_parameter(
+        self,
+        name: str,
+        param: Optional[torch.nn.Parameter],
+    ) -> None:
+        """Register a parameter and apply delayed-wgrad metadata when needed."""
+        super().register_parameter(name, param)
+
+        # A single-grouped-weight op may be constructed on the meta device and
+        # receive its grouped parent later. Mark that parent at attachment time,
+        # before DDP/FSDP inspects the parameter to install backward hooks.
+        if name == "weight" and param is not None and getattr(self, "single_grouped_weight", False):
+            wgrad_store = getattr(self, "wgrad_store", None)
+            if wgrad_store is not None and wgrad_store.delay_wgrad_compute():
+                param.skip_backward_post_hook = True
+
     def _apply_delay_wgrad_param_hooks(self) -> None:
         """Set ``skip_backward_post_hook`` on weights when delaying wgrad (bias uses main backward)."""
         if not self.wgrad_store.delay_wgrad_compute():
             return
         if self.single_grouped_weight:
-            self.weight.skip_backward_post_hook = True
+            # A meta-device op may be created as a parameterless shell and have its
+            # grouped parent attached after construction. In that case there is no
+            # ``weight`` parameter to mark yet.
+            weight = self._parameters.get("weight")
+            if weight is not None:
+                weight.skip_backward_post_hook = True
         else:
             for group_idx in range(self.num_groups):
                 getattr(self, f"weight{group_idx}").skip_backward_post_hook = True
@@ -791,9 +813,10 @@ class GroupedLinear(BasicOperation):
         * FP8 per-tensor current scaling is backed by grouped current-scaling quantization
           (``tex.group_quantize``) and cuBLASLt grouped GEMM with per-batch scalar FP8 scaling,
           which are supported on Hopper (CC 9.0) and Blackwell (CC 10.x and 11.0).
-          Every other quantization recipe (fp8 delayed scaling, fp8 block scaling, ...)
-          falls back to the legacy flow because the corresponding grouped quantization kernels are
-          missing.
+        * FP8 block scaling uses the grouped-tensor path on Hopper (CC 9.0) with cuBLAS 13.4+;
+          it is Hopper-only (no MXFP8-broadcast emulation), so elsewhere it falls back.
+        * Every other quantization recipe (fp8 delayed scaling, ...) falls back to the legacy flow
+          because the corresponding grouped quantization kernels are missing.
         * Unquantized compute supports BF16/FP16 on Hopper (CC 9.0) and Blackwell (CC 10.x and 11.0)
           -- FP32 is excluded because the cuBLASLt grouped GEMM doesn't support it.
         * Input/weight/grad_output quantizers are assumed to be of the same type, otherwise it
@@ -812,6 +835,12 @@ class GroupedLinear(BasicOperation):
                 ):
                     return False
                 return True
+            if all(isinstance(q, Float8BlockQuantizer) for q in input_quantizers):
+                # Grouped FP8 block scaling is Hopper-only and needs cuBLAS 13.4+; elsewhere
+                # fall back to the split-quantize (MXFP8-emulated) flow.
+                if get_device_compute_capability() >= (10, 0):
+                    return False
+                return tex.get_cublasLt_version() >= 130400
             # MXFP8 and NVFP4 grouped quantization kernels require Blackwell.
             if not (10, 0) <= get_device_compute_capability() <= (11, 0):
                 return False
@@ -1666,11 +1695,12 @@ class GroupedLinear(BasicOperation):
             )
             grad_output_quantizer.optimize_for_gemm = True
 
-            if (
-                has_bias
-                and not self._scale_bias
-                and isinstance(grad_output_quantizer, MXFP8Quantizer)
-            ):
+            # FP8 block scaling computes dbias in the rowwise (dgrad) pass, so only fuse
+            # when dgrad is required.
+            fuse_bgrad = isinstance(grad_output_quantizer, MXFP8Quantizer) or (
+                isinstance(grad_output_quantizer, Float8BlockQuantizer) and ctx.input_requires_grad
+            )
+            if has_bias and not self._scale_bias and fuse_bgrad:
                 grouped_dy, dbias_packed = tex.bgrad_group_quantize(
                     dy_2d, grad_output_quantizer, num_groups, split_sizes
                 )

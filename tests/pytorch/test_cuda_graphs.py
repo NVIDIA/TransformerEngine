@@ -751,6 +751,72 @@ def test_make_graphed_callables_with_kwargs(
     assert_all_equal(outputs, graph_outputs)
 
 
+def _make_capture_time_hooks(
+    modules: Tuple[torch.nn.Module, ...],
+    records: List[Tuple[int, str]],
+) -> List[Dict[str, Dict[int, Callable]]]:
+    """Make capture-time hooks that record call order."""
+
+    def make_hook(module_idx: int, hook_name: str) -> Callable:
+        expected_module = modules[module_idx]
+
+        def hook(module: torch.nn.Module) -> None:
+            assert module is expected_module
+            assert not torch.cuda.is_current_stream_capturing()
+            records.append((module_idx, hook_name))
+
+        return hook
+
+    return [
+        {
+            "forward_pre_hooks": {0: make_hook(module_idx, "forward_pre_hooks")},
+            "forward_hooks": {0: make_hook(module_idx, "forward_hooks")},
+            "backward_pre_hooks": {0: make_hook(module_idx, "backward_pre_hooks")},
+            "backward_hooks": {0: make_hook(module_idx, "backward_hooks")},
+        }
+        for module_idx in range(len(modules))
+    ]
+
+
+@pytest.mark.parametrize("with_order", (False, True))
+def test_make_graphed_callables_with_capture_time_hooks(with_order: bool) -> None:
+    """Test capture-time hooks around warmup and graph capture."""
+    num_warmup_iters = 2
+    modules = (
+        torch.nn.Linear(8, 8, device="cuda"),
+        torch.nn.Linear(8, 8, device="cuda"),
+    )
+    sample_args = tuple((torch.ones(4, 8, device="cuda", requires_grad=True),) for _ in modules)
+    records = []
+    hook_order = [
+        (0, "forward_pre_hooks"),
+        (0, "forward_hooks"),
+        (1, "forward_pre_hooks"),
+        (1, "forward_hooks"),
+        (1, "backward_pre_hooks"),
+        (1, "backward_hooks"),
+        (0, "backward_pre_hooks"),
+        (0, "backward_hooks"),
+    ]
+
+    graphed_callables = make_graphed_callables(
+        modules,
+        sample_args,
+        num_warmup_iters=num_warmup_iters,
+        _order=[1, 2, -2, -1] if with_order else None,
+        capture_time_hooks=_make_capture_time_hooks(modules, records),
+    )
+
+    assert records == hook_order * (num_warmup_iters + 1)
+
+    for graphed in graphed_callables:
+        x = torch.randn(4, 8, device="cuda", requires_grad=True)
+        y = graphed(x)
+        y.backward(torch.ones_like(y))
+    assert records == hook_order * (num_warmup_iters + 1)
+    reset_graphs(graphed_callables)
+
+
 def _test_cuda_graphs_with_interleaved_pipeline_parallelism(
     *,
     with_graph: bool,

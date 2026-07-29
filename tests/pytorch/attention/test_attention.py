@@ -132,6 +132,7 @@ def test_dot_product_attention(
     qkv_layout,
     swa,
     pad_between_seqs,
+    declarative_packed=False,
 ):
     """Test DotProductAttention module"""
 
@@ -149,6 +150,8 @@ def test_dot_product_attention(
             qkv_layout = "bshd_bs2hd" if not is_mla and not is_mqa_gqa else "bshd_bshd_bshd"
     if "3" in qkv_layout and config.attn_type == "cross":
         pytest.skip("No need to test this layout for cross attention")
+    if declarative_packed and not any(c.isdigit() for c in qkv_layout):
+        pytest.skip("Declarative packed inputs only apply to packed qkv layouts.")
 
     if config.window_size == (-1, -1) and swa:
         config.window_size = [2, 2]
@@ -221,6 +224,7 @@ def test_dot_product_attention(
             qkv_layout,
             pad_between_seqs,
             is_training,
+            declarative_packed=declarative_packed,
         )
 
     # FlashAttention backend
@@ -233,6 +237,7 @@ def test_dot_product_attention(
             qkv_layout,
             pad_between_seqs,
             is_training,
+            declarative_packed=declarative_packed,
         )
 
     # Compare results
@@ -924,6 +929,26 @@ def test_dpa_qkv_layout(dtype, model_configs, model, qkv_layout):
     test_dot_product_attention(dtype, model_configs, model, False, qkv_layout, False, False)
 
 
+qkv_layouts_packed = [l for l in qkv_layouts if any(c.isdigit() for c in l)]
+
+
+@pytest.mark.skipif(get_cudnn_version() < (8, 9, 5), reason="cuDNN 8.9.5+ is required.")
+@pytest.mark.parametrize("dtype", param_types_lean)
+@pytest.mark.parametrize("model_configs", [model_configs_layout])
+@pytest.mark.parametrize("model", ["layout_1_1", "layout_1_2"])
+@pytest.mark.parametrize("qkv_layout", qkv_layouts_packed)
+def test_dpa_qkv_layout_declarative(dtype, model_configs, model, qkv_layout):
+    """Declarative packed inputs: the packed buffer is passed to
+    DotProductAttention via qkv_layer/kv_layer (declared layout, gradients read
+    off the packed buffer) instead of q/k/v views + pointer-based detection.
+    Layout coverage is complete; the model-config dimension is trimmed to one
+    self-attention and one cross-attention config, since past the input
+    handling the backend code is identical to test_dpa_qkv_layout."""
+    test_dot_product_attention(
+        dtype, model_configs, model, False, qkv_layout, False, False, declarative_packed=True
+    )
+
+
 qkv_layouts_thd = ["t3hd", "th3d", "thd_t2hd", "thd_th2d", "thd_thd_thd"]
 model_configs_layout_thd = {
     # test: ModelConfig(b, sq, hq, dqk)
@@ -988,7 +1013,7 @@ model_configs_layout_thd = {
 @pytest.mark.parametrize("model_configs", [model_configs_layout_thd])
 @pytest.mark.parametrize("model", model_configs_layout_thd.keys())
 @pytest.mark.parametrize("qkv_layout", qkv_layouts_thd)
-def test_dpa_qkv_layout_thd(dtype, model_configs, model, qkv_layout):
+def test_dpa_qkv_layout_thd(dtype, model_configs, model, qkv_layout, declarative_packed=False):
     """Test DotProductAttention module with different QKV layouts"""
     config = model_configs[model]
     if config.num_heads != config.num_gqa_groups and "3" in qkv_layout:
@@ -996,15 +1021,45 @@ def test_dpa_qkv_layout_thd(dtype, model_configs, model, qkv_layout):
     logging.info("[test_dpa_qkv_layout_thd]: pad_between_seqs = True")
     pad_between_seqs = True
     test_dot_product_attention(
-        dtype, model_configs, model, False, qkv_layout, False, pad_between_seqs
+        dtype,
+        model_configs,
+        model,
+        False,
+        qkv_layout,
+        False,
+        pad_between_seqs,
+        declarative_packed=declarative_packed,
     )
     if get_cudnn_version() >= (9, 3, 0):
         logging.info("[test_dpa_qkv_layout_thd]: pad_between_seqs = False")
         # cuDNN 9.3.0+ is required to run pad_between_seqs = False/True in the same run
         pad_between_seqs = False
         test_dot_product_attention(
-            dtype, model_configs, model, False, qkv_layout, False, pad_between_seqs
+            dtype,
+            model_configs,
+            model,
+            False,
+            qkv_layout,
+            False,
+            pad_between_seqs,
+            declarative_packed=declarative_packed,
         )
+
+
+qkv_layouts_thd_packed = [l for l in qkv_layouts_thd if any(c.isdigit() for c in l)]
+
+
+@pytest.mark.skipif(get_cudnn_version() < (9, 0, 0), reason="cuDNN 9.0.0+ is required.")
+@pytest.mark.skipif(
+    get_device_compute_capability() < (9, 0), reason="THD is only supported on Hopper+."
+)
+@pytest.mark.parametrize("dtype", param_types_lean)
+@pytest.mark.parametrize("model_configs", [model_configs_layout_thd])
+@pytest.mark.parametrize("model", ["layout_0_0"])
+@pytest.mark.parametrize("qkv_layout", qkv_layouts_thd_packed)
+def test_dpa_qkv_layout_thd_declarative(dtype, model_configs, model, qkv_layout):
+    """Declarative packed thd inputs, see test_dpa_qkv_layout_declarative."""
+    test_dpa_qkv_layout_thd(dtype, model_configs, model, qkv_layout, declarative_packed=True)
 
 
 def _run_dot_product_attention(
@@ -1015,8 +1070,14 @@ def _run_dot_product_attention(
     qkv_layout: str,
     pad_between_seqs: bool,
     is_training: bool,
+    declarative_packed: bool = False,
 ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
-    """Run DotProductAttention module with one forward pass and one backward pass"""
+    """Run DotProductAttention module with one forward pass and one backward pass.
+
+    With declarative_packed=True (packed qkv_layout only), the packed buffer is
+    passed to DotProductAttention directly via qkv_layer/kv_layer instead of
+    slicing it into q/k/v views, and input gradients are read off the packed
+    buffer itself."""
     # Set RNG and environment varables
     reset_rng_states()
     os.environ["NVTE_FLASH_ATTN"] = "0"
@@ -1213,6 +1274,12 @@ def _run_dot_product_attention(
                 tensor_count = int(l)
                 split_dim = dim
                 break
+        if declarative_packed and split_dim != 0:
+            # The packed buffer is the autograd leaf; q/k/v below are non-leaf
+            # views of it, and DPA receives the buffer via qkv_layer/kv_layer.
+            tensor.requires_grad_()
+            packed_tensor = tensor
+            packed_interleave_dim = split_dim - tensor.dim()
         tensors = torch.split(tensor, 1, dim=split_dim) if split_dim != 0 else [tensor]
         tensors_orig = (
             torch.split(tensor_orig, 1, dim=split_dim) if split_dim != 0 else [tensor_orig]
@@ -1225,8 +1292,10 @@ def _run_dot_product_attention(
                 inp.append(tensors[j])
                 inp_orig.append(tensors_orig[j])
     for i in range(3):
-        inp[i].requires_grad = True
-        inp_orig[i].requires_grad = True
+        if inp[i].is_leaf:
+            inp[i].requires_grad = True
+        if inp_orig[i].is_leaf:
+            inp_orig[i].requires_grad = True
 
     # Create output gradient
     qkv_format_kv = "_".join(qkv_format)
@@ -1308,10 +1377,21 @@ def _run_dot_product_attention(
         k = inp[1]
         v = inp[2]
         d_out = out_grad
+    packed_kwargs = {}
+    if declarative_packed:
+        assert backend in ["FusedAttention", "FlashAttention"]
+        packed_kwargs["qkv_interleave_dim"] = packed_interleave_dim
+        if len(qkv_layout.split("_")) == 1:
+            packed_kwargs["qkv_layer"] = packed_tensor
+            q, k, v = None, None, None
+        else:
+            packed_kwargs["kv_layer"] = packed_tensor
+            k, v = None, None
     out = block(
         q,
         k,
         v,
+        **packed_kwargs,
         window_size=config.window_size,
         attention_mask=attention_mask,
         qkv_format=qkv_format,
@@ -1341,15 +1421,33 @@ def _run_dot_product_attention(
     if is_training:
         out.backward(d_out)
 
+    q_grad, k_grad, v_grad = None, None, None
+    if is_training:
+        if declarative_packed:
+            # Input gradients live on the packed buffer; slice them back out so
+            # the cross-backend comparisons below stay uniform with the
+            # separate-q/k/v path.
+            assert (
+                packed_tensor.grad is not None and packed_tensor.grad.shape == packed_tensor.shape
+            )
+            packed_grads = [
+                packed_tensor.grad.select(packed_interleave_dim, j)
+                for j in range(packed_tensor.shape[packed_interleave_dim])
+            ]
+            if len(qkv_layout.split("_")) == 1:
+                q_grad, k_grad, v_grad = packed_grads
+            else:
+                q_grad = q.grad
+                k_grad, v_grad = packed_grads
+        else:
+            q_grad, k_grad, v_grad = q.grad, k.grad, v.grad
+
     d_softmax_offset = None
     if is_training and config.softmax_type != "vanilla":
         d_softmax_offset = block.softmax_offset.grad
 
     if backend in ["UnfusedDotProductAttention"]:
-        if is_training:
-            return out, max_logit, (q.grad, k.grad, v.grad, d_softmax_offset)
-        else:
-            return out, max_logit, (None, None, None, d_softmax_offset)
+        return out, max_logit, (q_grad, k_grad, v_grad, d_softmax_offset)
     if backend in ["FusedAttention", "FlashAttention"]:
         if qkv_format == "thd" and pad_between_seqs:
             out_orig = torch.Tensor([]).to(device="cuda", dtype=dtype)
@@ -1369,13 +1467,13 @@ def _run_dot_product_attention(
                 out_orig = torch.cat([out_orig, out[valid_range_q[0] : valid_range_q[1]]], dim=0)
                 if is_training:
                     q_grad_orig = torch.cat(
-                        [q_grad_orig, q.grad[valid_range_q[0] : valid_range_q[1]]], dim=0
+                        [q_grad_orig, q_grad[valid_range_q[0] : valid_range_q[1]]], dim=0
                     )
                     k_grad_orig = torch.cat(
-                        [k_grad_orig, k.grad[valid_range_kv[0] : valid_range_kv[1]]], dim=0
+                        [k_grad_orig, k_grad[valid_range_kv[0] : valid_range_kv[1]]], dim=0
                     )
                     v_grad_orig = torch.cat(
-                        [v_grad_orig, v.grad[valid_range_kv[0] : valid_range_kv[1]]], dim=0
+                        [v_grad_orig, v_grad[valid_range_kv[0] : valid_range_kv[1]]], dim=0
                     )
             if is_training:
                 return (
@@ -1386,10 +1484,7 @@ def _run_dot_product_attention(
             else:
                 return out_orig, max_logit, (None, None, None, d_softmax_offset)
         else:
-            if is_training:
-                return out, max_logit, (q.grad, k.grad, v.grad, d_softmax_offset)
-            else:
-                return out, max_logit, (None, None, None, d_softmax_offset)
+            return out, max_logit, (q_grad, k_grad, v_grad, d_softmax_offset)
 
 
 model_configs_te_layer = {

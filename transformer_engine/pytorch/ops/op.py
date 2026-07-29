@@ -275,11 +275,6 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
                 if num_quantizers == 0:
                     continue
 
-                if recipe.float8_block_scaling():
-                    raise NotImplementedError(
-                        "Fusible operations do not support FP8 block scaling recipe"
-                    )
-
                 # Construct quantization recipe state
                 roles = self.get_quantizer_roles(mode)  # pylint: disable=assignment-from-none
                 if roles is not None:
