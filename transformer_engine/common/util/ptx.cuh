@@ -600,6 +600,35 @@ __device__ __forceinline__ void mul_cvt_4x(fp4e2m1x4 &out, const Tx2 &in01, cons
   out = fp4e2m1x4(make_float4(x0, x1, x2, x3));
 }
 
+// Software stochastic rounding onto the e2m1 grid, for architectures without
+// cvt.rs. Takes 8 random bits per element, which is what
+// cvt.rs.satfinite.e2m1x4.f32 takes from its rbits operand. Follows satfinite
+// for the edges: NaN becomes positive MAX_NORM and larger magnitudes clamp to
+// MAX_NORM with the sign kept. The result is exactly representable in e2m1, so
+// packing it is lossless.
+__device__ __forceinline__ float stochastic_round_fp4_e2m1(const float x, const uint32_t rbits8) {
+  constexpr float max_norm = 6.0f;
+  if (isnan(x)) {
+    return max_norm;
+  }
+  const float u = static_cast<float>(rbits8 & 0xFFu) * (1.0f / 256.0f);
+  const float a = fabsf(x);
+  // Grid step at |x|: 0.5 below 2, 1 in [2, 4), 2 in [4, 6].
+  const float step = (a >= 4.0f) ? 2.0f : ((a >= 2.0f) ? 1.0f : 0.5f);
+  const float t = fmaf(u, step, a);
+  float q;
+  if (t >= max_norm) {
+    q = max_norm;
+  } else if (t >= 4.0f) {
+    q = 4.0f;
+  } else if (t >= 2.0f) {
+    q = 2.0f + floorf(t - 2.0f);
+  } else {
+    q = floorf(t * 2.0f) * 0.5f;
+  }
+  return copysignf(q, x);
+}
+
 __device__ __forceinline__ fp4e2m1x4 mul_cvt_bf16_to_fp4_4x_with_stochastic_rounding(
     const uint64_t in_4x, const float2 scale, const uint32_t rbits) {
   uint16_t out_4x = 0;
@@ -633,9 +662,14 @@ __device__ __forceinline__ fp4e2m1x4 mul_cvt_bf16_to_fp4_4x_with_stochastic_roun
         : "=h"(out_4x)
         : "l"(in_4x), "l"(reinterpret_cast<const uint64_t &>(scale)), "r"(rbits));
   } else {
-    NVTE_DEVICE_ERROR(
-        "FP4 cvt PTX instructions are architecture-specific. "
-        "Try recompiling with sm_XXXa instead of sm_XXX.");
+    // mul.f32x2 above applies scale.x to the even elements and scale.y to the odd ones.
+    const bf16 *vals = reinterpret_cast<const bf16 *>(&in_4x);
+    const float q0 = stochastic_round_fp4_e2m1(static_cast<float>(vals[0]) * scale.x, rbits);
+    const float q1 = stochastic_round_fp4_e2m1(static_cast<float>(vals[1]) * scale.y, rbits >> 8);
+    const float q2 = stochastic_round_fp4_e2m1(static_cast<float>(vals[2]) * scale.x, rbits >> 16);
+    const float q3 = stochastic_round_fp4_e2m1(static_cast<float>(vals[3]) * scale.y, rbits >> 24);
+    const fp4e2m1x4 packed(make_float4(q0, q1, q2, q3));
+    out_4x = *reinterpret_cast<const uint16_t *>(&packed);
   }
   return *reinterpret_cast<fp4e2m1x4 *>(&out_4x);
 }
@@ -725,9 +759,12 @@ __device__ __forceinline__ fp4e2m1x4 mul_cvt_fp32_to_fp4_4x_with_stochastic_roun
           "l"(reinterpret_cast<const uint64_t &>(in23)),
           "l"(reinterpret_cast<const uint64_t &>(scale)), "r"(rbits));
   } else {
-    NVTE_DEVICE_ERROR(
-        "FP4 cvt PTX instructions are architecture-specific. "
-        "Try recompiling with sm_XXXa instead of sm_XXX.");
+    const float q0 = stochastic_round_fp4_e2m1(in01.x * scale.x, rbits);
+    const float q1 = stochastic_round_fp4_e2m1(in01.y * scale.y, rbits >> 8);
+    const float q2 = stochastic_round_fp4_e2m1(in23.x * scale.x, rbits >> 16);
+    const float q3 = stochastic_round_fp4_e2m1(in23.y * scale.y, rbits >> 24);
+    const fp4e2m1x4 packed(make_float4(q0, q1, q2, q3));
+    out_4x = *reinterpret_cast<const uint16_t *>(&packed);
   }
   return *reinterpret_cast<fp4e2m1x4 *>(&out_4x);
 }
@@ -950,9 +987,26 @@ __device__ __forceinline__ uint32_t mul_cvt_bf16_to_fp4_8x_stochastic_rounding(
       NVTE_DEVICE_ERROR("Not supported scaling coefficient type.");
     }
   } else {
-    NVTE_DEVICE_ERROR(
-        "FP4 cvt PTX instructions are architecture-specific. "
-        "Try recompiling with sm_XXXa instead of sm_XXX.");
+    constexpr bool known_coeff = std::is_same<SCALING_COEFFICIENT_TYPE, bf16>::value ||
+                                 std::is_same<SCALING_COEFFICIENT_TYPE, float>::value;
+    if constexpr (known_coeff) {
+      const float coeff = static_cast<float>(scaling_coefficient);
+      const bf16 *vals03 = reinterpret_cast<const bf16 *>(&in03);
+      const bf16 *vals47 = reinterpret_cast<const bf16 *>(&in47);
+      float q[8];
+#pragma unroll
+      for (int i = 0; i < 4; ++i) {
+        q[i] = stochastic_round_fp4_e2m1(static_cast<float>(vals03[i]) * coeff, rbits03 >> (8 * i));
+        q[i + 4] =
+            stochastic_round_fp4_e2m1(static_cast<float>(vals47[i]) * coeff, rbits47 >> (8 * i));
+      }
+      const fp4e2m1x4 lo(make_float4(q[0], q[1], q[2], q[3]));
+      const fp4e2m1x4 hi(make_float4(q[4], q[5], q[6], q[7]));
+      out_8x = static_cast<uint32_t>(*reinterpret_cast<const uint16_t *>(&lo)) |
+               (static_cast<uint32_t>(*reinterpret_cast<const uint16_t *>(&hi)) << 16);
+    } else {
+      NVTE_DEVICE_ERROR("Not supported scaling coefficient type.");
+    }
   }
   return out_8x;
 }
