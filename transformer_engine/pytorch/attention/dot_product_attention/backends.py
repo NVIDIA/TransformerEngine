@@ -793,6 +793,18 @@ class _PrepareQKVForFA(torch.autograd.Function):
         return dq, dk, dv
 
 
+def _distinct_cu_seqlens(cu_q: torch.Tensor, cu_kv: torch.Tensor):
+    """Make q's and kv's cumulative sequence lengths distinct objects.
+
+    Self attention passes one tensor for both, and flash-attn forwards them to
+    two inputs of the same autograd.Function -- which dynamo cannot trace. In
+    eager the duplicate is harmless, so nothing is copied there.
+    """
+    if cu_q is cu_kv and torch.compiler.is_compiling():
+        return cu_q, cu_kv.clone()
+    return cu_q, cu_kv
+
+
 class FlashAttention(torch.nn.Module):
     """Dot product attention, using HazyResearch flash-attn package:
     https://github.com/Dao-AILab/flash-attention
@@ -1122,13 +1134,10 @@ class FlashAttention(torch.nn.Module):
                     else:
                         func = flash_attn_with_kvcache_v3  # pylint: disable=possibly-used-before-assignment
                     if not use_flash_attn_4 and (not use_flash_attn_3 or inference_params is None):
-                        cu_q = cu_seqlens_q_padded if pad_between_seqs else cu_seqlens_q
-                        cu_kv = cu_seqlens_kv_padded if pad_between_seqs else cu_seqlens_kv
-                        if cu_q is cu_kv and torch.compiler.is_compiling():
-                            # Self attention passes one tensor for both, and dynamo
-                            # cannot trace autograd.Function.apply with the same
-                            # tensor on two of its inputs.
-                            cu_kv = cu_kv.clone()
+                        cu_q, cu_kv = _distinct_cu_seqlens(
+                            cu_seqlens_q_padded if pad_between_seqs else cu_seqlens_q,
+                            cu_seqlens_kv_padded if pad_between_seqs else cu_seqlens_kv,
+                        )
                         fa_optional_forward_args_thd.append(cu_q)
                         fa_optional_forward_args_thd.append(cu_kv)
                         fa_optional_forward_args_thd.append(max_seqlen_q)
@@ -1141,8 +1150,9 @@ class FlashAttention(torch.nn.Module):
                     if inference_params is None:
                         fa_4_optional_forward_kwargs["deterministic"] = self.deterministic
                     if func is flash_attn_varlen_func_v4:
-                        fa_4_optional_forward_kwargs["cu_seqlens_q"] = cu_seqlens_q
-                        fa_4_optional_forward_kwargs["cu_seqlens_k"] = cu_seqlens_kv
+                        cu_q, cu_kv = _distinct_cu_seqlens(cu_seqlens_q, cu_seqlens_kv)
+                        fa_4_optional_forward_kwargs["cu_seqlens_q"] = cu_q
+                        fa_4_optional_forward_kwargs["cu_seqlens_k"] = cu_kv
                         fa_4_optional_forward_kwargs["max_seqlen_q"] = max_seqlen_q
                         fa_4_optional_forward_kwargs["max_seqlen_k"] = max_seqlen_kv
                     output = func(
