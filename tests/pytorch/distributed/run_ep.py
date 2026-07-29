@@ -300,9 +300,7 @@ class TestEP(unittest.TestCase):
         (0.5 * (result.float() ** 2).sum()).backward()
         torch.cuda.synchronize()
         torch.testing.assert_close(result.float(), tokens.float(), atol=5e-2, rtol=5e-2)
-        torch.testing.assert_close(
-            tokens_p.grad.float(), tokens.float(), atol=5e-2, rtol=5e-2
-        )
+        torch.testing.assert_close(tokens_p.grad.float(), tokens.float(), atol=5e-2, rtol=5e-2)
 
     @_overflow_test_include
     def test_overflow_drop(self):
