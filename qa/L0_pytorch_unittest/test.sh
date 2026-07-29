@@ -35,7 +35,7 @@ python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_fused_rope.xml $
 python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_nvfp4.xml $TE_PATH/tests/pytorch/nvfp4 || test_fail "test_nvfp4"
 python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_mxfp8.xml $TE_PATH/tests/pytorch/mxfp8 || test_fail "test_mxfp8"
 # TODO(kainingz): remove NVTE_ENABLE_CUTEDSL_QUANT_BACKEND=1 once the cutedsl backend is by default on
-NVTE_ENABLE_CUTEDSL_QUANT_BACKEND=1 python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_mxfp8_cutedsl_backend.xml $TE_PATH/tests/pytorch/mxfp8/test_mxfp8_cutedsl_backend.py || test_fail "test_mxfp8_cutedsl_backend.py"
+NVTE_ENABLE_CUTEDSL_QUANT_BACKEND=1 NVTE_WARN_IF_CUTEDSL_BACKEND_NOT_CHOSEN=1 python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_mxfp8_cutedsl_backend.xml $TE_PATH/tests/pytorch/mxfp8/test_mxfp8_cutedsl_backend.py || test_fail "test_mxfp8_cutedsl_backend.py"
 python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_weight_swizzle_in_layers.xml $TE_PATH/tests/pytorch/test_weight_swizzle_in_layers.py || test_fail "test_weight_swizzle_in_layers.py"
 python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_quantized_tensor.xml $TE_PATH/tests/pytorch/test_quantized_tensor.py || test_fail "test_quantized_tensor.py"
 python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_torch_compile.xml $TE_PATH/tests/pytorch/test_torch_compile.py || test_fail "test_torch_compile.py"
