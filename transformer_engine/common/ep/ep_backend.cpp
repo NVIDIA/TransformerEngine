@@ -11,6 +11,7 @@
 #include "ep_backend.h"
 
 #include <nccl_ep.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <climits>
@@ -18,7 +19,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <unistd.h>
 #include <utility>
 
 #include "../common.h"
@@ -68,10 +68,8 @@ void trace_ep_handle(const char* op, void* handle_mem_ptr, ncclEpHandle_t handle
   const uint64_t sequence = ep_trace_sequence.fetch_add(1, std::memory_order_relaxed);
   const void* routing_ptr = routing == nullptr ? nullptr : routing->data;
   const int routing_ndim = routing == nullptr ? 0 : routing->ndim;
-  const int64_t routing_dim0 =
-      routing == nullptr || routing->ndim < 1 ? 0 : routing->sizes[0];
-  const int64_t routing_dim1 =
-      routing == nullptr || routing->ndim < 2 ? 0 : routing->sizes[1];
+  const int64_t routing_dim0 = routing == nullptr || routing->ndim < 1 ? 0 : routing->sizes[0];
+  const int64_t routing_dim1 = routing == nullptr || routing->ndim < 2 ? 0 : routing->sizes[1];
   const uint64_t routing_fingerprint =
       routing == nullptr ? 0 : fingerprint_routing_descriptor(*routing);
   std::fprintf(stderr,
@@ -81,8 +79,8 @@ void trace_ep_handle(const char* op, void* handle_mem_ptr, ncclEpHandle_t handle
                "routing_descriptor_fingerprint=0x%016lx\n",
                static_cast<int>(getpid()), static_cast<unsigned long>(sequence), op, handle_mem_ptr,
                static_cast<void*>(handle), cache_state, static_cast<void*>(stream),
-               static_cast<unsigned long>(update_id), routing_ptr,
-               static_cast<long>(routing_dim0), static_cast<long>(routing_dim1), routing_ndim,
+               static_cast<unsigned long>(update_id), routing_ptr, static_cast<long>(routing_dim0),
+               static_cast<long>(routing_dim1), routing_ndim,
                static_cast<unsigned long>(routing_fingerprint));
   std::fflush(stderr);
 }
@@ -413,8 +411,7 @@ void EPBackend::prepare(void* handle_mem, const NVTETensor topk_idx,
   std::lock_guard<std::mutex> lock(mutex_);
   NVTE_CHECK(initialized_, "EPBackend not initialized");
   ncclEpHandle_t h = prepare_handle_locked(handle_mem, layer_cfg, stream);
-  const uint64_t update_id =
-      ep_prepare_update_sequence.fetch_add(1, std::memory_order_relaxed) + 1;
+  const uint64_t update_id = ep_prepare_update_sequence.fetch_add(1, std::memory_order_relaxed) + 1;
   auto entry = index_.find(handle_mem);
   NVTE_CHECK(entry != index_.end(), "EP handle cache entry disappeared during prepare");
   entry->second->last_update_id = update_id;
