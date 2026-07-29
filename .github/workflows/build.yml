@@ -16,13 +16,16 @@ jobs:
     name: 'Core'
     runs-on: ubuntu-latest
     container:
-      image: nvcr.io/nvidia/cuda:12.1.0-devel-ubuntu22.04
+      image: nvcr.io/nvidia/cuda:12.9.2-devel-ubuntu22.04
       options: --user root
     steps:
       - name: 'Dependencies'
         run: |
           apt-get update
-          apt-get install -y git python3.9 pip cudnn9-cuda-12
+          apt-mark unhold libnccl2 libnccl-dev
+          apt-get install -y git python3 python3-pip cudnn9-cuda-12 \
+            libnccl2=2.30.7-1+cuda12.9 \
+            libnccl-dev=2.30.7-1+cuda12.9
           pip install cmake==3.21.0 pybind11[global] ninja "nvidia-cudnn-frontend>=1.25.0"
       - name: 'Checkout'
         uses: actions/checkout@v3
@@ -70,13 +73,16 @@ jobs:
 
       - name: Start named container
         run: |
-          docker run -v $(pwd):$(pwd) -w $(pwd) --name builder -d nvcr.io/nvidia/cuda:12.8.0-devel-ubuntu22.04 sleep infinity
+          docker run -v $(pwd):$(pwd) -w $(pwd) --name builder -d nvcr.io/nvidia/cuda:12.9.2-devel-ubuntu22.04 sleep infinity
 
       - name: 'Dependencies'
         run: |
           docker exec builder bash -c '\
             apt-get update && \
-            apt-get install -y git python3.9 pip cudnn9-cuda-12 && \
+            apt-mark unhold libnccl2 libnccl-dev && \
+            apt-get install -y git python3 python3-pip cudnn9-cuda-12 \
+              libnccl2=2.30.7-1+cuda12.9 \
+              libnccl-dev=2.30.7-1+cuda12.9 && \
             pip install cmake torch ninja pydantic importlib-metadata>=1.0 packaging pybind11 numpy einops onnxscript "nvidia-cudnn-frontend>=1.25.0" && \
             apt-get clean \
           '
