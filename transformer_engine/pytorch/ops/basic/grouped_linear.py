@@ -481,6 +481,25 @@ class GroupedLinear(BasicOperation):
         for group_idx in range(self.num_groups):
             self.register_parameter(f"bias{group_idx}", None)
 
+    @staticmethod
+    def _reject_mxfp4_qat(context: str) -> None:
+        """Fail loudly rather than train without the MXFP4 projection.
+
+        This op quantizes its weights itself instead of going through
+        ``module.base.quantize_weight``, which is where the MXFP4 QAT projection is
+        applied. Until the projection is wired in here, an MXFP4 QAT recipe would
+        otherwise run to completion having never touched the MXFP4 grid.
+        """
+        if (
+            FP8GlobalStateManager.is_fp8_enabled()
+            and FP8GlobalStateManager.get_fp8_recipe().mxfp4_qat()
+        ):
+            raise NotImplementedError(
+                f"MXFP4 QAT recipes are not supported by the operations API ({context}): "
+                "grouped weight quantization bypasses the QAT projection. Use "
+                "transformer_engine.pytorch.GroupedLinear instead."
+            )
+
     def _quantize_weights(
         self,
         weights: Sequence[torch.Tensor],
@@ -853,6 +872,8 @@ class GroupedLinear(BasicOperation):
         """Prepare weights for ``general_grouped_gemm_for_grouped_tensor``.
         Supports MXFP8/BF16/FP16 compute paths.
         """
+        if with_quantized_compute:
+            self._reject_mxfp4_qat("single_grouped_weight path")
         num_groups = self.num_groups
         is_weight_quantized = weight_param.quantizer is not None
         if is_weight_quantized and with_quantized_compute:
@@ -909,6 +930,8 @@ class GroupedLinear(BasicOperation):
         """Prepare weights for ``general_grouped_gemm_for_grouped_tensor``.
         Returns a Python list, which dispatches the GEMM to ``discrete_in`` mode.
         """
+        if with_quantized_compute:
+            self._reject_mxfp4_qat("discrete weight path")
         out: list[torch.Tensor] = []
         for w, quantizer in zip(weight_params, weight_quantizers):
             if not with_quantized_compute:

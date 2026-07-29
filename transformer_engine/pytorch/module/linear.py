@@ -197,6 +197,12 @@ class LinearBwdArgs:
     wgrad_use_split_accumulator: bool = _2X_ACC_WGRAD
     backward_override: Optional[str] = None
     is_weight_param_quantized: bool = False
+    # Captured in forward: the weight was projected onto the MXFP4 grid before the
+    # host quantizer encoded it. Backward re-materialization must replay that step,
+    # and it cannot ask the global recipe because backward usually runs outside the
+    # quantization autocast. Independent of ``fp8``, which only says whether the
+    # backward GEMMs themselves are quantized.
+    mxfp4_qat: bool = False
     custom: bool = False
     debug: bool = False
 
@@ -690,6 +696,7 @@ def _linear_setup_ctx(
     bwd_args.dgrad_use_split_accumulator = fwd_args.dgrad_use_split_accumulator
     bwd_args.wgrad_use_split_accumulator = fwd_args.wgrad_use_split_accumulator
     bwd_args.backward_override = backward_override
+    bwd_args.mxfp4_qat = fp8 and FP8GlobalStateManager.get_fp8_recipe().mxfp4_qat()
     bwd_args.is_weight_param_quantized = isinstance(weight, QuantizedTensorStorage)
     bwd_args.custom = fwd_args.custom
     bwd_args.debug = fwd_args.debug
@@ -1004,10 +1011,18 @@ def _linear_backward(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None], ..
                     # fsdp2 quantized-tensor hooks when workspace was not saved.
                     weight_fp8 = saved_weight
                 elif bwd_args.weight_quantizer is not None:
-                    if bwd_args.fp8 and FP8GlobalStateManager.get_fp8_recipe().mxfp4_qat():
-                        saved_weight = mxfp4_fake_quantize(saved_weight)
+                    # Replay what the forward did: MXFP4 projection, then the host
+                    # quantizer. Keyed on the recipe captured in the forward -- not on
+                    # ``bwd_args.fp8`` (which ``backward_override`` forces False even
+                    # though the forward still projected) and not on the global recipe
+                    # (backward usually runs outside the quantization autocast). Assign
+                    # to a fresh local: ``saved_weight`` is the operand the
+                    # high_precision dgrad reads and must stay un-projected.
+                    w_for_encode = saved_weight
+                    if bwd_args.mxfp4_qat:
+                        w_for_encode = mxfp4_fake_quantize(w_for_encode)
                     bwd_args.weight_quantizer.set_usage(rowwise=True, columnwise=True)
-                    weight_fp8 = bwd_args.weight_quantizer(saved_weight)
+                    weight_fp8 = bwd_args.weight_quantizer(w_for_encode)
             elif (
                 is_dist_weight
                 and bwd_args.fp8
@@ -1016,7 +1031,7 @@ def _linear_backward(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None], ..
             ):
                 # Distributed weight re-gathered a BF16 weight: quantize with the layer quantizer
                 # so the dgrad operand isn't cast by the delayed recipe.
-                if FP8GlobalStateManager.get_fp8_recipe().mxfp4_qat():
+                if bwd_args.mxfp4_qat:
                     weight_fp8 = mxfp4_fake_quantize(weight_fp8)
                 bwd_args.weight_quantizer.set_usage(rowwise=True, columnwise=True)
                 weight_fp8 = bwd_args.weight_quantizer(weight_fp8)

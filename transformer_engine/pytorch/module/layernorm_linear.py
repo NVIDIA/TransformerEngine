@@ -811,10 +811,14 @@ class _LayerNormLinear(torch.autograd.Function):
                     # fsdp2 quantized-tensor hooks when workspace was not saved.
                     weight = saved_weight
                 elif ctx.weight_quantizer is not None:
+                    # all-gather -> MXFP4 projection -> host quantizer. Assign to a fresh
+                    # local: ``saved_weight`` is the operand the high_precision dgrad reads
+                    # and must stay the un-projected parameter.
+                    w_for_encode = saved_weight
                     if ctx.fp8_recipe is not None and ctx.fp8_recipe.mxfp4_qat():
-                        saved_weight = mxfp4_fake_quantize(saved_weight)
+                        w_for_encode = mxfp4_fake_quantize(w_for_encode)
                     ctx.weight_quantizer.set_usage(rowwise=True, columnwise=True)
-                    weight = ctx.weight_quantizer(saved_weight)
+                    weight = ctx.weight_quantizer(w_for_encode)
 
             # Make sure required data is available
             if isinstance(grad_output, QuantizedTensorStorage):
