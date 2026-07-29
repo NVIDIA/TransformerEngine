@@ -927,6 +927,32 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         """
         super().__setattr__(name, value)
 
+    def _apply(self, *args, **kwargs):
+        """Re-attach attributes that ``swap_tensors`` moves off a quantized parameter.
+
+        ``_apply`` moves wrapper subclasses by exchanging the parameter's whole
+        ``__dict__``, which carries the inner buffers over but takes externally
+        attached state (``_high_precision_init_val``, ``main_grad``, ...) with it.
+        """
+        snapshots = {
+            name: (param, dict(param.__dict__))
+            for name, param in self._parameters.items()
+            if isinstance(param, QuantizedTensorStorage)
+        }
+        out = super()._apply(*args, **kwargs)
+        for name, (old_param, attrs) in snapshots.items():
+            new_param = self._parameters.get(name)
+            if new_param is None:
+                continue
+            for key, value in attrs.items():
+                # Still present -> tensor state; the post-swap value is the right one.
+                if key in new_param.__dict__:
+                    continue
+                if isinstance(value, MethodType) and value.__self__ is old_param:
+                    value = MethodType(value.__func__, new_param)
+                setattr(new_param, key, value)
+        return out
+
     @property
     def output_quantizer_role(self) -> Optional[QuantizerRole]:
         """Caller-configurable :class:`QuantizerRole` for the forward output quantizer.
