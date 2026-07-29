@@ -11,6 +11,7 @@ from transformer_engine.pytorch import NVFP4Quantizer
 from transformer_engine.pytorch.cpp_extensions import general_gemm, general_grouped_gemm
 from transformer_engine.pytorch.custom_recipes.quantization_ref_nvfp4 import NVFP4QuantizerRef
 from transformer_engine.pytorch.custom_recipes import utils
+from transformer_engine.pytorch.tensor.storage.nvfp4_tensor_storage import NVFP4TensorStorage
 
 
 recipe_available, reason_for_no_recipe = te.is_nvfp4_available(return_reason=True)
@@ -415,6 +416,65 @@ def check_nvfp4_row_scaled_gemm_matches_emulated(
         torch.testing.assert_close(y_row_scaled, y_emulated, atol=0.0, rtol=7.8e-3)
     else:
         torch.testing.assert_close(y_row_scaled, y_emulated, atol=3.0517578125e-5, rtol=0.0)
+
+
+def _dequantize_nvfp4_usage(
+    tensor: NVFP4TensorStorage,
+    *,
+    columnwise: bool,
+) -> torch.Tensor:
+    """Dequantize one independently-quantized tensor orientation."""
+    if not columnwise:
+        return tensor.dequantize(dtype=torch.float32)
+
+    metadata = tensor.get_metadata()
+    metadata["rowwise_data"] = metadata["columnwise_data"]
+    metadata["rowwise_scale_inv"] = metadata["columnwise_scale_inv"]
+    metadata["amax_rowwise"] = metadata["amax_columnwise"]
+    metadata["columnwise_data"] = None
+    metadata["columnwise_scale_inv"] = None
+    metadata["amax_columnwise"] = None
+    return NVFP4TensorStorage(**metadata).dequantize(dtype=torch.float32)
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.parametrize(
+    "layout,a_shape,b_shape",
+    [
+        ("TN", (64, 64), (96, 64)),
+        ("NN", (64, 96), (128, 64)),
+        ("NT", (128, 64), (128, 96)),
+    ],
+)
+def test_nvfp4_bilateral_row_scaled_gemm_matches_dequantized(
+    layout: str,
+    a_shape: tuple[int, int],
+    b_shape: tuple[int, int],
+) -> None:
+    """Check per-tensor GEMM plus bilateral FP32 post-scaling."""
+    torch.manual_seed(41)
+    quantizer = NVFP4Quantizer(
+        fp4_dtype=te.DType.kFloat4E2M1,
+        rowwise=True,
+        columnwise=True,
+        with_amax_reduction=False,
+        amax_reduction_group=None,
+        with_rht=False,
+        with_post_rht_amax=False,
+        row_scaled_nvfp4=True,
+    )
+    a = torch.randn(a_shape, dtype=torch.bfloat16, device="cuda")
+    b = torch.randn(b_shape, dtype=torch.bfloat16, device="cuda")
+    a_nvfp4 = quantizer(a)
+    b_nvfp4 = quantizer(b)
+
+    actual = general_gemm(a_nvfp4, b_nvfp4, out_dtype=torch.float32, layout=layout)[0]
+    transa, transb = layout[0] == "T", layout[1] == "T"
+    a_dequant = _dequantize_nvfp4_usage(a_nvfp4, columnwise=not transa)
+    b_dequant = _dequantize_nvfp4_usage(b_nvfp4, columnwise=transb)
+    expected = b_dequant @ a_dequant.T
+
+    torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
 
 
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)

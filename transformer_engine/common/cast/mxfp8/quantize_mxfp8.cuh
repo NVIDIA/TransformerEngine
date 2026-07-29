@@ -692,7 +692,8 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
                     kernel<<<grid, block, traits::smem, stream>>>(
                         reinterpret_cast<typename traits::IType *>(input.data.dptr),
                         reinterpret_cast<typename traits::OType *>(output->data.dptr),
-                        scales_rowwise_ptr, rows, cols, scale_stride_rowwise, scale_stride_colwise);
+                        scales_rowwise_ptr, noop_ptr, rows, cols, scale_stride_rowwise,
+                        scale_stride_colwise);
 
                     break;
                   }
@@ -729,8 +730,8 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
                               (rows + traits::blockDIM::M - 1) / traits::blockDIM::M);
                     kernel<<<grid, block, traits::smem, stream>>>(
                         tensor_map_input, tensor_map_rowwise_output, tensor_map_colwise_output,
-                        scales_rowwise_ptr, scales_colwise_ptr, rows, cols, scale_stride_rowwise,
-                        scale_stride_colwise);
+                        scales_rowwise_ptr, scales_colwise_ptr, noop_ptr, rows, cols,
+                        scale_stride_rowwise, scale_stride_colwise);
 
                     break;
                   }

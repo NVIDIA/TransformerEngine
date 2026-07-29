@@ -23,8 +23,8 @@ TE_REPO_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
 RESULTS="${SCRIPT_DIR}/results"
 mkdir -p "${RESULTS}"
 
-BIN="${TE_REPO_ROOT}/3rdparty/nccl/build/test/nccl_ep/ep_bench"
-LIB="${TE_REPO_ROOT}/3rdparty/nccl/build/lib"
+BIN="${TE_REPO_ROOT}/3rdparty/nccl-extensions/build/test/nccl_ep/ep_bench"
+LIB="${TE_REPO_ROOT}/3rdparty/nccl-extensions/build/lib"
 [ -x "${BIN}" ] || { echo "ep_bench not built at ${BIN}" >&2; exit 2; }
 
 NUM_GPUS=$(nvidia-smi -L 2>/dev/null | wc -l)
