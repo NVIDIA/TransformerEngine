@@ -15,6 +15,7 @@ import pytest
 import torch
 
 import transformer_engine.pytorch as te
+import transformer_engine.pytorch.ops.fused.grouped_mlp as grouped_mlp_module
 from transformer_engine.pytorch.ops.fused.grouped_mlp import (
     _cudnn_frontend_supports_grouped_gemm_srelu,
     _cudnn_frontend_version_supported,
@@ -738,7 +739,10 @@ class TestGroupedMLPFusedOp:
         """GroupedLinear + scaled activation + GroupedLinear"""
 
         # Split sizes
-        split_sizes = [split_alignment * (i) for i in range(group_size)]
+        if group_size == 1:
+            split_sizes = [split_alignment]
+        else:
+            split_sizes = [split_alignment * i for i in range(group_size)]
         random.shuffle(split_sizes)
         split_sizes = torch.tensor(split_sizes, dtype=torch.int, device=device)
 
@@ -1167,6 +1171,35 @@ class TestGroupedMLPFusedOp:
             quantization=quantization,
             single_grouped_weight=True,
             activation=activation,
+        )
+
+    @pytest.mark.parametrize("bias", (False, True))
+    @pytest.mark.parametrize("runtime_offsets_supported", (False, True))
+    def test_grouped_mlp_single_group_mxfp8(
+        self,
+        monkeypatch,
+        *,
+        bias: bool,
+        runtime_offsets_supported: bool,
+    ) -> None:
+        """Single-group GroupedLinear + ScaledSwiGLU + GroupedLinear with MXFP8."""
+        if (
+            runtime_offsets_supported
+            and not grouped_mlp_module._cudnn_frontend_supports_single_group_runtime_offsets()
+        ):
+            pytest.skip("Requires cuDNN frontend >= 1.27.0")
+        monkeypatch.setattr(
+            grouped_mlp_module,
+            "_cudnn_frontend_supports_single_group_runtime_offsets",
+            lambda: runtime_offsets_supported,
+        )
+        self.test_grouped_mlp(
+            group_size=1,
+            bias=bias,
+            hidden_size=128,
+            quantization="mxfp8",
+            single_grouped_weight=False,
+            activation="scaled_swiglu",
         )
 
     @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
