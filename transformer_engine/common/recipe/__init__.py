@@ -7,7 +7,7 @@ from __future__ import annotations
 import abc
 import os
 from enum import Enum
-from typing import Any, Literal, Optional, Union, Callable, NamedTuple
+from typing import Any, Callable, Hashable, Literal, NamedTuple, Optional, Union
 from dataclasses import field
 from pydantic.dataclasses import dataclass
 
@@ -104,6 +104,73 @@ class QParams:
         return self._cached_repr
 
 
+def _qparams_config(params: QParams) -> tuple:
+    """Return the immutable semantic configuration for quantization parameters."""
+    return (
+        ("power_2_scale", params.power_2_scale),
+        ("amax_epsilon", params.amax_epsilon),
+        ("random_hadamard_transform", params.random_hadamard_transform),
+        ("stochastic_rounding", params.stochastic_rounding),
+        ("fp4_2d_quantization", params.fp4_2d_quantization),
+    )
+
+
+def _mmparams_config(params: MMParams) -> tuple:
+    """Return the immutable semantic configuration for GEMM parameters."""
+    return (("use_split_accumulator", params.use_split_accumulator),)
+
+
+def _algorithm_config(
+    algorithm: Any,
+    semantic_key: Optional[Hashable],
+    *,
+    field_name: str,
+) -> tuple:
+    """Return identity-independent configuration for a literal or callable algorithm."""
+    if not callable(algorithm):
+        return (("literal", algorithm), None)
+    if semantic_key is None:
+        raise ValueError(
+            f"{field_name} is callable, so {field_name}_key must provide an explicit semantic key"
+        )
+    return (("callable",), semantic_key)
+
+
+def _validate_policy_key(key: Any, *, source: str) -> Hashable:
+    """Validate and return an immutable semantic policy key."""
+    if key is None:
+        raise ValueError(f"{source} must not be None")
+    try:
+        hash(key)
+    except TypeError as exc:
+        raise TypeError(f"{source} must be hashable") from exc
+    return key
+
+
+def quantizer_policy(*, key: Hashable) -> Callable:
+    """Attach a semantic policy key to a quantizer factory without wrapping or calling it.
+
+    The key, rather than Python callable identity, represents the factory's behavior in
+    :class:`CustomRecipe` semantic configuration. Change the key whenever the factory's
+    quantizer-selection behavior changes.
+    """
+    policy_key = _validate_policy_key(key, source="quantizer_policy key")
+
+    def decorator(qfactory: Callable) -> Callable:
+        if not callable(qfactory):
+            raise TypeError("quantizer_policy can only decorate a callable")
+        try:
+            setattr(qfactory, "policy_key", policy_key)
+        except (AttributeError, TypeError) as exc:
+            raise TypeError(
+                "quantizer_policy could not attach metadata to this callable; "
+                "pass policy_key directly to CustomRecipe instead"
+            ) from exc
+        return qfactory
+
+    return decorator
+
+
 class Recipe:
     """
     Base recipe class.
@@ -114,11 +181,50 @@ class Recipe:
     # changes. This makes repeated ``str(recipe)`` calls much cheaper
     _cached_repr: Optional[str] = None
 
+    # Cached semantic configuration. Lazily populated by ``quantizer_config``
+    # and invalidated together with the cached repr on recipe mutation.
+    _cached_quantizer_config: Any = None
+    _has_cached_quantizer_config: bool = False
+
     def __setattr__(self, name: str, value: Any) -> None:
-        # Invalidate the cached repr on any attribute mutation.
-        if name != "_cached_repr":
+        # Invalidate derived caches on any recipe mutation. Updating either
+        # cache itself must not invalidate the other cache.
+        if name not in (
+            "_cached_repr",
+            "_cached_quantizer_config",
+            "_has_cached_quantizer_config",
+        ):
             object.__setattr__(self, "_cached_repr", None)
+            object.__setattr__(self, "_cached_quantizer_config", None)
+            object.__setattr__(self, "_has_cached_quantizer_config", False)
         object.__setattr__(self, name, value)
+
+    def quantizer_config(self) -> Hashable:
+        """Return the immutable semantic configuration used to build quantizers.
+
+        Recipe implementations must include every value that affects quantizer construction or
+        quantized execution behavior. The returned value must be hashable and must not depend on
+        recipe object identity, callable identity, or quantizer construction. Subclasses implement
+        :meth:`_make_quantizer_config` rather than overriding this cached accessor.
+        """
+        if not self._has_cached_quantizer_config:
+            config = self._make_quantizer_config()
+            try:
+                hash(config)
+            except TypeError as exc:
+                raise TypeError(
+                    f"{self.__class__.__name__}._make_quantizer_config() "
+                    "must return a hashable value"
+                ) from exc
+            object.__setattr__(self, "_cached_quantizer_config", config)
+            object.__setattr__(self, "_has_cached_quantizer_config", True)
+        return self._cached_quantizer_config
+
+    def _make_quantizer_config(self) -> Hashable:
+        """Build the immutable semantic configuration returned by :meth:`quantizer_config`."""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} must implement Recipe.quantizer_config()"
+        )
 
     @abc.abstractmethod
     def _make_repr(self) -> str:
@@ -235,6 +341,13 @@ class DelayedScaling(Recipe):
             `LayerNormLinear (FP8 output) -> FP8 DPA -> Linear`.
     backward_override : {None, 'high_precision', 'dequantized'}, default = None
             Backward precision mode. Delayed scaling only supports None.
+    amax_compute_algo_key : Hashable, default = None
+                           Required semantic key when ``amax_compute_algo`` is callable.
+                           Callables with equivalent behavior must use the same key, and a
+                           behavior change must use a different key.
+    scaling_factor_compute_algo_key : Hashable, default = None
+                                     Required semantic key when
+                                     ``scaling_factor_compute_algo`` is callable.
 
     Notes
     -----
@@ -259,6 +372,8 @@ class DelayedScaling(Recipe):
     fp8_dpa: bool = False
     fp8_mha: bool = False
     backward_override: Optional[str] = os.getenv("NVTE_BACKWARD_OVERRIDE", None)
+    amax_compute_algo_key: Optional[Hashable] = None
+    scaling_factor_compute_algo_key: Optional[Hashable] = None
 
     def __post_init__(self) -> None:
         assert self.fp8_format != Format.E5M2, "Pure E5M2 training is not supported."
@@ -268,6 +383,32 @@ class DelayedScaling(Recipe):
         assert (
             self.backward_override is None
         ), "Delayed scaling only supports backward_override=None."
+
+    def _make_quantizer_config(self) -> Hashable:
+        amax_compute_algo, amax_compute_algo_key = _algorithm_config(
+            self.amax_compute_algo,
+            self.amax_compute_algo_key,
+            field_name="amax_compute_algo",
+        )
+        scaling_factor_compute_algo, scaling_factor_compute_algo_key = _algorithm_config(
+            self.scaling_factor_compute_algo,
+            self.scaling_factor_compute_algo_key,
+            field_name="scaling_factor_compute_algo",
+        )
+        return (
+            ("recipe_type", "DelayedScaling"),
+            ("margin", self.margin),
+            ("fp8_format", self.fp8_format.name),
+            ("amax_history_len", self.amax_history_len),
+            ("amax_compute_algo", amax_compute_algo),
+            ("scaling_factor_compute_algo", scaling_factor_compute_algo),
+            ("reduce_amax", self.reduce_amax),
+            ("fp8_dpa", self.fp8_dpa),
+            ("fp8_mha", self.fp8_mha),
+            ("backward_override", self.backward_override),
+            ("amax_compute_algo_key", amax_compute_algo_key),
+            ("scaling_factor_compute_algo_key", scaling_factor_compute_algo_key),
+        )
 
     def _make_repr(self) -> str:
         return (
@@ -316,6 +457,22 @@ class Float8CurrentScaling(Recipe):
         assert (
             self.backward_override in _BACKWARD_OVERRIDES
         ), "NVTE_BACKWARD_OVERRIDE must be unset or one of: 'high_precision', 'dequantized'."
+
+    def _make_quantizer_config(self) -> Hashable:
+        return (
+            ("recipe_type", "Float8CurrentScaling"),
+            ("use_power_2_scales", self.use_power_2_scales),
+            ("fp8_format", self.fp8_format.name),
+            ("fp8_quant_fwd_inp", _qparams_config(self.fp8_quant_fwd_inp)),
+            ("fp8_quant_fwd_weight", _qparams_config(self.fp8_quant_fwd_weight)),
+            ("fp8_quant_bwd_grad", _qparams_config(self.fp8_quant_bwd_grad)),
+            ("fp8_gemm_fprop", _mmparams_config(self.fp8_gemm_fprop)),
+            ("fp8_gemm_dgrad", _mmparams_config(self.fp8_gemm_dgrad)),
+            ("fp8_gemm_wgrad", _mmparams_config(self.fp8_gemm_wgrad)),
+            ("fp8_dpa", self.fp8_dpa),
+            ("fp8_mha", self.fp8_mha),
+            ("backward_override", self.backward_override),
+        )
 
     def _make_repr(self) -> str:
         return (
@@ -374,6 +531,16 @@ class MXFP8BlockScaling(Recipe):
         assert (
             self.backward_override in _BACKWARD_OVERRIDES
         ), "NVTE_BACKWARD_OVERRIDE must be unset or one of: 'high_precision', 'dequantized'."
+
+    def _make_quantizer_config(self) -> Hashable:
+        return (
+            ("recipe_type", "MXFP8BlockScaling"),
+            ("margin", self.margin),
+            ("fp8_format", self.fp8_format.name),
+            ("fp8_dpa", self.fp8_dpa),
+            ("fp8_mha", self.fp8_mha),
+            ("backward_override", self.backward_override),
+        )
 
     def _make_repr(self) -> str:
         return (
@@ -461,6 +628,25 @@ class Float8BlockScaling(Recipe):
         assert (
             self.backward_override in _BACKWARD_OVERRIDES
         ), "NVTE_BACKWARD_OVERRIDE must be unset or one of: 'high_precision', 'dequantized'."
+
+    def _make_quantizer_config(self) -> Hashable:
+        return (
+            ("recipe_type", "Float8BlockScaling"),
+            ("use_f32_scales", self.use_f32_scales),
+            ("fp8_format", self.fp8_format.name),
+            ("fp8_quant_fwd_inp", _qparams_config(self.fp8_quant_fwd_inp)),
+            ("fp8_quant_fwd_weight", _qparams_config(self.fp8_quant_fwd_weight)),
+            ("fp8_quant_bwd_grad", _qparams_config(self.fp8_quant_bwd_grad)),
+            ("x_block_scaling_dim", self.x_block_scaling_dim),
+            ("w_block_scaling_dim", self.w_block_scaling_dim),
+            ("grad_block_scaling_dim", self.grad_block_scaling_dim),
+            ("fp8_gemm_fprop", _mmparams_config(self.fp8_gemm_fprop)),
+            ("fp8_gemm_dgrad", _mmparams_config(self.fp8_gemm_dgrad)),
+            ("fp8_gemm_wgrad", _mmparams_config(self.fp8_gemm_wgrad)),
+            ("fp8_dpa", self.fp8_dpa),
+            ("fp8_mha", self.fp8_mha),
+            ("backward_override", self.backward_override),
+        )
 
     def _make_repr(self) -> str:
         return (
@@ -604,6 +790,26 @@ class NVFP4BlockScaling(Recipe):
             fp4_2d_quantization=False,
         )
 
+    def _make_quantizer_config(self) -> Hashable:
+        return (
+            ("recipe_type", "NVFP4BlockScaling"),
+            ("disable_rht", self.disable_rht),
+            ("disable_stochastic_rounding", self.disable_stochastic_rounding),
+            ("disable_2d_quantization", self.disable_2d_quantization),
+            ("row_scaled_activation", self.row_scaled_activation),
+            ("nvfp4_4over6", self.nvfp4_4over6),
+            ("nvfp4_4over6_e4m3_use_256", self.nvfp4_4over6_e4m3_use_256),
+            ("nvfp4_4over6_err_mode", self.nvfp4_4over6_err_mode),
+            ("fp4_format", self.fp4_format.name),
+            ("fp8_format", self.fp8_format.name),
+            ("fp4_quant_fwd_inp", _qparams_config(self.fp4_quant_fwd_inp)),
+            ("fp4_quant_fwd_weight", _qparams_config(self.fp4_quant_fwd_weight)),
+            ("fp4_quant_bwd_grad", _qparams_config(self.fp4_quant_bwd_grad)),
+            ("fp8_dpa", self.fp8_dpa),
+            ("fp8_mha", self.fp8_mha),
+            ("backward_override", self.backward_override),
+        )
+
     def _make_repr(self) -> str:
         return (
             f"recipe_type={self.__class__.__name__}, "
@@ -674,6 +880,11 @@ class CustomRecipe(Recipe):
         formats. It can be lowered when the factory's full output space is known;
         for example, a factory restricted to MXFP8 may use 32.
         Automatic padding reads this value without invoking ``qfactory``.
+    policy_key : Hashable, default = None
+        Semantic identifier for the complete behavior of ``qfactory``. Pass it explicitly or
+        attach it to the factory with ``@quantizer_policy(key=...)``. An explicit value takes
+        precedence over attached factory metadata. Equivalent factory behavior must use equal
+        keys, and any behavior change requires a different key.
     """
 
     qfactory: Callable[..., Any]
@@ -687,6 +898,7 @@ class CustomRecipe(Recipe):
     fp8_mha: bool = False
     backward_override: Optional[str] = os.getenv("NVTE_BACKWARD_OVERRIDE", None)
     quantization_alignment: int = 128
+    policy_key: Optional[Hashable] = None
 
     def __post_init__(self) -> None:
         assert (
@@ -694,11 +906,40 @@ class CustomRecipe(Recipe):
         ), "NVTE_BACKWARD_OVERRIDE must be unset or one of: 'high_precision', 'dequantized'."
         if self.quantization_alignment <= 0:
             raise ValueError("CustomRecipe quantization_alignment must be positive.")
+        if self.policy_key is None:
+            attached_key = getattr(self.qfactory, "policy_key", None)
+            if attached_key is not None:
+                self.policy_key = _validate_policy_key(
+                    attached_key,
+                    source="qfactory.policy_key",
+                )
+        else:
+            self.policy_key = _validate_policy_key(
+                self.policy_key,
+                source="CustomRecipe policy_key",
+            )
+
+    def _make_quantizer_config(self) -> Hashable:
+        if self.policy_key is None:
+            raise ValueError(
+                "CustomRecipe requires a semantic policy key. Pass policy_key=... or decorate "
+                "qfactory with @quantizer_policy(key=...)."
+            )
+        return (
+            ("recipe_type", "CustomRecipe"),
+            ("policy_key", self.policy_key),
+            ("fp8_format", self.fp8_format.name),
+            ("fp8_dpa", self.fp8_dpa),
+            ("fp8_mha", self.fp8_mha),
+            ("backward_override", self.backward_override),
+            ("quantization_alignment", self.quantization_alignment),
+        )
 
     def _make_repr(self) -> str:
         return (
             f"recipe_type={self.__class__.__name__}, "
             f"qfactory={self.qfactory}, "
+            f"policy_key={self.policy_key}, "
             f"backward_override={self.backward_override}, "
             f"quantization_alignment={self.quantization_alignment}"
         )
