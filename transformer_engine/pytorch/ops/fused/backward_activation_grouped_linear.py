@@ -112,14 +112,6 @@ class BackwardScaledActivationGroupedLinear(FusedOperation):
             )
             return None, [(), ()], [(), act_grad_extra_inputs[0]]
 
-        if not activation_ctx.requires_grad:
-            grad_input, grad_params, grad_extra_inputs = linear.fuser_backward(
-                [linear_ctx],
-                grad_output,
-                basic_op_grad_extra_outputs=[basic_op_grad_extra_outputs[0]],
-            )
-            return grad_input, [grad_params[0], ()], [grad_extra_inputs[0], (None,)]
-
         del basic_op_grad_extra_outputs
         input_, scales = activation_ctx.saved_tensors
         input_ = maybe_dequantize(input_, activation_ctx.dtype)
