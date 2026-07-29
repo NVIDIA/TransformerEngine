@@ -1323,6 +1323,99 @@ class DotProductAttention(TransformerEngineBaseModule):
             ]
         return base[:num_quantizers]
 
+    def _forward_mixed_thd(
+        self,
+        query_layer: torch.Tensor,
+        key_layer: torch.Tensor,
+        value_layer: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        thd_sequence_is_causal: torch.Tensor,
+        max_seqlen_q: Optional[int],
+        max_seqlen_kv: Optional[int],
+        *,
+        fast_zero_fill: bool,
+    ) -> torch.Tensor:
+        """Dispatch mixed causal/non-causal THD self-attention.
+
+        Group whole sequences by policy, call the existing scalar-policy path
+        for each non-empty group, and restore the original packed token order.
+        """
+        sequence_lengths = cu_seqlens[1:] - cu_seqlens[:-1]
+        token_count = query_layer.shape[0]
+        output_features = query_layer.shape[-2] * value_layer.shape[-1]
+
+        if token_count == 0:
+            empty_output = query_layer.new_empty((0, output_features))
+            return empty_output + 0 * (query_layer.sum() + key_layer.sum() + value_layer.sum())
+
+        def run_scalar_policy(
+            group_query: torch.Tensor,
+            group_key: torch.Tensor,
+            group_value: torch.Tensor,
+            group_cu_seqlens: torch.Tensor,
+            group_max_seqlen_q: Optional[int],
+            group_max_seqlen_kv: Optional[int],
+            is_causal: bool,
+        ) -> torch.Tensor:
+            return self.forward(
+                group_query,
+                group_key,
+                group_value,
+                qkv_format="thd",
+                cu_seqlens_q=group_cu_seqlens,
+                cu_seqlens_kv=group_cu_seqlens,
+                max_seqlen_q=group_max_seqlen_q,
+                max_seqlen_kv=group_max_seqlen_kv,
+                attn_mask_type="padding_causal" if is_causal else "padding",
+                window_size=(-1, 0) if is_causal else (-1, -1),
+                bottom_right_diagonal=False,
+                fast_zero_fill=fast_zero_fill,
+            )
+
+        first_policy = bool(thd_sequence_is_causal[0].item())
+        if bool(torch.all(thd_sequence_is_causal == first_policy).item()):
+            return run_scalar_policy(
+                query_layer,
+                key_layer,
+                value_layer,
+                cu_seqlens,
+                max_seqlen_q,
+                max_seqlen_kv,
+                is_causal=first_policy,
+            )
+
+        token_is_causal = torch.repeat_interleave(
+            thd_sequence_is_causal,
+            sequence_lengths.to(dtype=torch.long),
+            output_size=token_count,
+        )
+        output = query_layer.new_empty((token_count, output_features))
+        for is_causal in (False, True):
+            sequence_mask = thd_sequence_is_causal == is_causal
+            group_token_indices = torch.nonzero(token_is_causal == is_causal).flatten()
+            if group_token_indices.numel() == 0:
+                continue
+            group_lengths = sequence_lengths[sequence_mask]
+            group_cu_seqlens = torch.cat(
+                (
+                    group_lengths.new_zeros(1),
+                    torch.cumsum(group_lengths, dim=0, dtype=torch.int32),
+                )
+            )
+            group_max_seqlen = int(group_lengths.max().item())
+            group_output = run_scalar_policy(
+                query_layer.index_select(0, group_token_indices),
+                key_layer.index_select(0, group_token_indices),
+                value_layer.index_select(0, group_token_indices),
+                group_cu_seqlens,
+                group_max_seqlen,
+                group_max_seqlen,
+                is_causal=is_causal,
+            )
+            output = output.index_copy(0, group_token_indices, group_output)
+
+        return output
+
     @no_torch_dynamo(recursive=False)
     def forward(
         self,
@@ -1357,6 +1450,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         qkv_layer: Optional[torch.Tensor] = None,
         kv_layer: Optional[torch.Tensor] = None,
         qkv_interleave_dim: int = -3,
+        thd_sequence_is_causal: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         r"""
         Dot Product Attention Layer.
@@ -1596,7 +1690,146 @@ class DotProductAttention(TransformerEngineBaseModule):
             interleave sits; must be -3 (e.g. ``bs3hd``) or -2 (e.g. ``bsh3d``,
             Megatron-style). This is an explicit knob rather than shape inference,
             since e.g. ``h == 3`` would make the shapes ambiguous.
+        thd_sequence_is_causal: Optional[torch.Tensor], default = None
+            Per-sequence causal policy for packed THD self-attention. When supplied,
+            it must be a CUDA ``torch.bool`` tensor of shape ``[batch_size]``, where
+            ``batch_size = cu_seqlens_q.numel() - 1``. ``True`` selects causal
+            attention for that sequence and ``False`` selects full-context
+            attention. Transformer Engine groups the two policies and launches the
+            existing scalar-mask attention path once per non-empty group, then
+            restores the original packed token order. It therefore shares the
+            surrounding encoder computation but is not a single fused-attention
+            kernel. Initial support is limited to FP16/BF16 THD self-attention
+            without attention dropout, context parallelism, cacheing, FP8,
+            arbitrary padding between packed sequences, bias/ALiBi, score-mod, or
+            attention checkpointing.
         """
+
+        if thd_sequence_is_causal is not None:
+            resolved_qkv_format = qkv_format if qkv_format is not None else self.qkv_format
+            if resolved_qkv_format != "thd":
+                raise ValueError("thd_sequence_is_causal is supported only with qkv_format='thd'.")
+            if (
+                qkv_layer is not None
+                or kv_layer is not None
+                or query_layer is None
+                or key_layer is None
+                or value_layer is None
+            ):
+                raise ValueError(
+                    "thd_sequence_is_causal requires separate query_layer, key_layer, and "
+                    "value_layer."
+                )
+            qkv = (query_layer, key_layer, value_layer)
+            if not all(tensor.is_cuda and tensor.device == query_layer.device for tensor in qkv):
+                raise ValueError(
+                    "thd_sequence_is_causal requires CUDA Q, K, and V on the same device."
+                )
+            if query_layer.dtype not in (torch.float16, torch.bfloat16) or not all(
+                tensor.dtype == query_layer.dtype for tensor in qkv
+            ):
+                raise ValueError(
+                    "thd_sequence_is_causal requires FP16 or BF16 Q, K, and V of the same dtype."
+                )
+            if self.attention_type != "self":
+                raise ValueError("thd_sequence_is_causal is supported only for self-attention.")
+            if cu_seqlens_q is None or cu_seqlens_kv is None:
+                raise ValueError("thd_sequence_is_causal requires cu_seqlens_q and cu_seqlens_kv.")
+            if not all(
+                cu_seqlens.ndim == 1
+                and cu_seqlens.numel() >= 1
+                and cu_seqlens.dtype == torch.int32
+                and cu_seqlens.device == query_layer.device
+                for cu_seqlens in (cu_seqlens_q, cu_seqlens_kv)
+            ):
+                raise ValueError(
+                    "thd_sequence_is_causal requires one-dimensional int32 cu_seqlens "
+                    "on the Q/K/V device."
+                )
+            if not torch.equal(cu_seqlens_q, cu_seqlens_kv):
+                raise ValueError(
+                    "thd_sequence_is_causal requires identical Q and KV sequence boundaries."
+                )
+            if thd_sequence_is_causal.dtype != torch.bool or thd_sequence_is_causal.ndim != 1:
+                raise ValueError(
+                    "thd_sequence_is_causal must be a one-dimensional torch.bool tensor."
+                )
+            if thd_sequence_is_causal.device != query_layer.device:
+                raise ValueError(
+                    "thd_sequence_is_causal must be on the same device as query_layer."
+                )
+            if thd_sequence_is_causal.numel() != cu_seqlens_q.numel() - 1:
+                raise ValueError(
+                    "thd_sequence_is_causal must have one value per packed sequence: "
+                    f"got {thd_sequence_is_causal.numel()} values for "
+                    f"{cu_seqlens_q.numel() - 1} sequences."
+                )
+            if not all(
+                tensor.ndim == 3 and tensor.shape[0] == query_layer.shape[0] for tensor in qkv
+            ):
+                raise ValueError(
+                    "thd_sequence_is_causal requires THD Q, K, and V with the same token count."
+                )
+            if int(cu_seqlens_q[-1].item()) != query_layer.shape[0]:
+                raise ValueError("The final cu_seqlens value must equal the THD Q/K/V token count.")
+            unsupported_options = (
+                attention_mask is not None,
+                cu_seqlens_q_padded is not None,
+                cu_seqlens_kv_padded is not None,
+                inference_params is not None,
+                checkpoint_core_attention,
+                core_attention_bias_type != "no_bias",
+                core_attention_bias is not None,
+                alibi_slopes is not None,
+                score_mod is not None,
+                score_mod_bprop is not None,
+                score_mod_tensors is not None,
+                score_mod_bprop_tensors is not None,
+                fp8_output,
+                self.fp8,
+                self.attention_dropout != 0.0,
+                self.softmax_type != "vanilla",
+                self.return_max_logit,
+                self.cp_group is not None,
+                pad_between_seqs not in (None, False),
+                num_splits not in (None, 1),
+            )
+            if any(unsupported_options):
+                raise ValueError(
+                    "thd_sequence_is_causal currently supports only plain THD self-attention "
+                    "without padding gaps, dropout, bias, score-mod, caching, FP8 output, "
+                    "context parallelism, softmax variants, or attention checkpointing."
+                )
+            if FP8GlobalStateManager.is_fp8_enabled() or FP8GlobalStateManager.is_fp8_calibration():
+                raise ValueError("thd_sequence_is_causal does not yet support FP8 attention.")
+            if is_graph_capturing() or is_in_onnx_export_mode():
+                raise ValueError(
+                    "thd_sequence_is_causal does not yet support CUDA graph capture or ONNX export."
+                )
+            effective_window_size = self.window_size if window_size is None else window_size
+            if effective_window_size not in {(-1, -1), (-1, 0)}:
+                raise ValueError(
+                    "thd_sequence_is_causal does not yet support sliding-window attention."
+                )
+            effective_bottom_right_diagonal = (
+                self.bottom_right_diagonal
+                if bottom_right_diagonal is None
+                else bottom_right_diagonal
+            )
+            if effective_bottom_right_diagonal is True:
+                raise ValueError(
+                    "thd_sequence_is_causal requires the standard top-left causal diagonal."
+                )
+            return self._forward_mixed_thd(
+                query_layer,
+                key_layer,
+                value_layer,
+                cu_seqlens_q,
+                thd_sequence_is_causal,
+                max_seqlen_q,
+                max_seqlen_kv,
+                fast_zero_fill=fast_zero_fill,
+            )
 
         query_layer, key_layer, value_layer, declared_qkv_layout = _unpack_packed_qkv(
             qkv_layer,
