@@ -391,9 +391,7 @@ model_configs_d256 = {
     "d256_no_mask": ModelConfig(2, 512, 16, 256),
     "d256_padding": ModelConfig(2, 512, 16, 256, attn_mask_type="padding"),
     # SWA is allowed only together with a causal mask on the D=256 bprop kernel.
-    "d256_causal_swa": ModelConfig(
-        2, 1024, 16, 256, attn_mask_type="causal", window_size=(128, 0)
-    ),
+    "d256_causal_swa": ModelConfig(2, 1024, 16, 256, attn_mask_type="causal", window_size=(128, 0)),
     # GQA variant (num_gqa_groups < num_heads).
     "d256_padding_causal_gqa": ModelConfig(
         2, 1024, 16, 256, num_gqa_groups=4, attn_mask_type="padding_causal"
