@@ -210,6 +210,9 @@ def _needs_eager_dpa(call: Dict[str, Any]) -> Optional[str]:
         if fp8_recipe.fp8_dpa or fp8_recipe.fp8_mha:
             return "FP8 attention"
 
+    if call["self"].cp_group is not None:
+        return "context parallelism"
+
     qkv_format = call.get("qkv_format") or call["self"].qkv_format
     if qkv_format == "thd" and (
         call.get("max_seqlen_q") is None or call.get("max_seqlen_kv") is None
