@@ -561,13 +561,32 @@ def test_unfused_dpa_torch_compile(qkv_layout):
 # get_available_attention_backends() answers that, so configurations only one
 # backend supports (arbitrary masks, biases, MLA head dims, ...) are covered
 # rather than avoided.
-def _cfg(model_config, qkv_format="bshd", packed=None, share_cu_seqlens=False):
+def _cfg(
+    model_config,
+    qkv_format="bshd",
+    packed=None,
+    interleave_dim=-3,
+    share_cu_seqlens=False,
+):
+    """A model configuration plus what DotProductAttention is handed it as.
+
+    `packed` is "qkv" or "kv" for the declarative packed inputs, interleaved at
+    `interleave_dim`, or None for separate q/k/v.
+    """
     return dict(
         model_config=model_config,
         qkv_format=qkv_format,
         packed=packed,
+        interleave_dim=interleave_dim,
         share_cu_seqlens=share_cu_seqlens,
     )
+
+
+def _packed_layout(qkv_format: str, packed_dim: int, interleave_dim: int) -> str:
+    """bshd + 3 @ -3 -> bs3hd; bshd + 2 @ -2 -> bsh2d; as DotProductAttention
+    derives it from the declaration."""
+    position = len(qkv_format) + interleave_dim + 1
+    return qkv_format[:position] + str(packed_dim) + qkv_format[position:]
 
 
 _DPA_COMPILE_CONFIGS = {
@@ -587,7 +606,17 @@ _DPA_COMPILE_CONFIGS = {
     "self_thd_shared_cu_seqlens": _cfg(
         ModelConfig(2, 128, 4, 64, attn_mask_type="padding_causal"), "thd", share_cu_seqlens=True
     ),
-    "packed_qkv_bs3hd": _cfg(ModelConfig(2, 128, 4, 64, attn_mask_type="causal"), packed="bs3hd"),
+    "packed_qkv_bs3hd": _cfg(ModelConfig(2, 128, 4, 64, attn_mask_type="causal"), packed="qkv"),
+    "packed_qkv_bsh3d": _cfg(
+        ModelConfig(2, 128, 4, 64, attn_mask_type="causal"), packed="qkv", interleave_dim=-2
+    ),
+    "packed_kv_bshd_bs2hd": _cfg(ModelConfig(2, 128, 4, 64, attn_mask_type="causal"), packed="kv"),
+    "packed_kv_thd_th2d": _cfg(
+        ModelConfig(2, 128, 4, 64, attn_mask_type="padding_causal"),
+        "thd",
+        packed="kv",
+        interleave_dim=-2,
+    ),
     # Configurations below are supported by one backend only, or take a code
     # path of their own inside DotProductAttention.
     "alibi_bshd_causal": _cfg(
@@ -605,7 +634,12 @@ _DPA_COMPILE_CONFIGS = {
 
 
 def _qkv_layout(spec: dict) -> str:
-    return spec["packed"] or "_".join([spec["qkv_format"]] * 3)
+    qkv_format, packed = spec["qkv_format"], spec["packed"]
+    if packed is None:
+        return "_".join([qkv_format] * 3)
+    if packed == "qkv":
+        return _packed_layout(qkv_format, 3, spec["interleave_dim"])
+    return f"{qkv_format}_{_packed_layout(qkv_format, 2, spec['interleave_dim'])}"
 
 
 def _make_dpa(spec: dict, dtype: torch.dtype) -> te.DotProductAttention:
@@ -669,14 +703,31 @@ def _make_dpa_inputs(spec: dict, dtype: torch.dtype):
         return torch.randn(shape, dtype=dtype, device="cuda", requires_grad=True)
 
     if packed is not None:
-        # Declarative packed QKV: q/k/v are derived from one buffer by DPA
+        # Declarative packed inputs: q/k/v are derived from one buffer by DPA
         # itself, and the layout comes from the declaration -- the only packed
         # layout that torch.compile supports.
-        assert packed == "bs3hd" and qkv_format == "bshd" and h == g and d_qk == d_v
-        qkv = _randn((b, s_q, 3, h, d_qk))
-        kwargs["qkv_layer"] = qkv
-        kwargs["qkv_interleave_dim"] = -3
-        grad_tensors, args = [qkv], ()
+        assert h == g and d_qk == d_v, "packed inputs require uniform heads and head dims"
+        interleave_dim = spec["interleave_dim"]
+
+        def _packed(seqlen, tokens, packed_dim):
+            leading = {
+                "bshd": (b, seqlen),
+                "sbhd": (seqlen, b),
+                "thd": (tokens,),
+            }[qkv_format]
+            trailing = (packed_dim, h, d_qk) if interleave_dim == -3 else (h, packed_dim, d_qk)
+            return _randn(leading + trailing)
+
+        kwargs["qkv_interleave_dim"] = interleave_dim
+        if packed == "qkv":
+            qkv = _packed(s_q, t_q, 3)
+            kwargs["qkv_layer"] = qkv
+            grad_tensors, args = [qkv], ()
+        else:
+            q = _randn(_shape(s_q, t_q, h, d_qk))
+            kv = _packed(s_kv, t_kv, 2)
+            kwargs["kv_layer"] = kv
+            grad_tensors, args = [q, kv], (q,)
     else:
         q = _randn(_shape(s_q, t_q, h, d_qk))
         k = _randn(_shape(s_kv, t_kv, g, d_qk))
