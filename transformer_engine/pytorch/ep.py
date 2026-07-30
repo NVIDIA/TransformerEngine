@@ -242,7 +242,8 @@ class EpBuffer:
         "eager",
         "total_recv_tokens",
         "_host_total_recv_tokens",
-        "dispatch_quant_recipe",
+        "dispatch_fwd_quant_recipe",
+        "combine_bwd_quant_recipe",
         "prepared",
     )
 
@@ -256,7 +257,8 @@ class EpBuffer:
         alignment: int = 0,
         payload_dtype: torch.dtype = torch.bfloat16,
         device: Optional[torch.device] = None,
-        dispatch_quant_recipe: Optional["Recipe"] = None,
+        dispatch_fwd_quant_recipe: Optional["Recipe"] = None,
+        combine_bwd_quant_recipe: Optional["Recipe"] = None,
     ) -> None:
         if not _BOOTSTRAPPED:
             raise RuntimeError("EpBuffer requires ep_bootstrap() to be called first.")
@@ -282,7 +284,8 @@ class EpBuffer:
         self.payload_dtype = payload_dtype
         self.device = device
         self.zero_copy = bool(tex.ep_get_zero_copy())
-        self.dispatch_quant_recipe = dispatch_quant_recipe
+        self.dispatch_fwd_quant_recipe = dispatch_fwd_quant_recipe
+        self.combine_bwd_quant_recipe = combine_bwd_quant_recipe
 
         size_bytes = tex.ep_handle_mem_size(self.top_k, self.alignment)
         self.handle_mem = torch.empty(int(size_bytes), dtype=torch.uint8, device=device)
@@ -689,7 +692,7 @@ class _EpCombine(torch.autograd.Function):
 # Public high-level wrappers
 
 
-# NCCL EP inputs are bfloat16; MXFP8 is applied internally via the buffer's dispatch_quant_recipe.
+# NCCL EP inputs are bfloat16; MXFP8 is applied internally via the buffer's dispatch_fwd_quant_recipe.
 def _require_bf16(name: str, t: torch.Tensor) -> None:
     if t.dtype is not torch.bfloat16:
         raise NotImplementedError(
@@ -831,7 +834,7 @@ def ep_dispatch(
 ):
     """Prepare + dispatch with autograd. ``tokens`` is bfloat16; ``topk_idx`` is int32 or int64.
 
-    When the buffer's ``dispatch_quant_recipe`` is set (``MXFP8BlockScaling`` only for now), tokens
+    When the buffer's ``dispatch_fwd_quant_recipe`` is set (``MXFP8BlockScaling`` only for now), tokens
     are quantized internally and recv is returned as a per-expert ``GroupedTensor``; otherwise recv
     stays bfloat16. A pre-quantized ``tokens`` is not accepted.
 
@@ -854,7 +857,7 @@ def ep_dispatch(
     if isinstance(tokens, QuantizedTensor):
         raise NotImplementedError(
             "NCCL EP dispatch takes a bfloat16 input and quantizes internally when the buffer's "
-            "dispatch_quant_recipe is set; a pre-quantized tensor is not accepted."
+            "dispatch_fwd_quant_recipe is set; a pre-quantized tensor is not accepted."
         )
     _require_bf16("tokens", tokens)
     if buffer.eager and (recv_tokens is not None or recv_topk_weights is not None):
@@ -869,7 +872,7 @@ def ep_dispatch(
     rows = buffer._host_total_recv_tokens if buffer.eager else buffer.recv_capacity_per_rank
 
     tokens_scale_inv = None
-    if buffer.dispatch_quant_recipe is not None:
+    if buffer.dispatch_fwd_quant_recipe is not None:
         # The grouped recv's packed scales only match the grouped layout when each expert slot is
         # 128-aligned.
         if buffer.alignment <= 0 or buffer.alignment % 128 != 0:
@@ -879,7 +882,7 @@ def ep_dispatch(
             )
         # Quantize here (not in forward) so the quantized tensor stays the autograd operand and grad
         # reaches the pre-quant input; forward then carves the recv buffers and routes.
-        tokens, tokens_scale_inv = _quantize(tokens, buffer.dispatch_quant_recipe)
+        tokens, tokens_scale_inv = _quantize(tokens, buffer.dispatch_fwd_quant_recipe)
 
     recv_tokens, recv_topk_weights = _EpDispatch.apply(
         buffer.handle_mem,
@@ -920,18 +923,25 @@ def ep_combine(
         )
     if num_local_tokens is None:
         num_local_tokens = buffer.max_tokens_per_rank
-    # Reuse the dispatch recipe for the backward: when it is set the combine backward sends
-    # the result-grad over the wire as MXFP8 and returns the expert_out grad as a GroupedTensor.
+    # When combine_bwd_quant_recipe is set the combine backward sends the result-grad over the
+    # wire as MXFP8 and returns the expert_out grad as a GroupedTensor.
     bwd_quant_recipe = None
-    if buffer.dispatch_quant_recipe is not None:
+    if buffer.combine_bwd_quant_recipe is not None:
         from ..common.recipe import MXFP8BlockScaling
 
-        if not isinstance(buffer.dispatch_quant_recipe, MXFP8BlockScaling):
+        if not isinstance(buffer.combine_bwd_quant_recipe, MXFP8BlockScaling):
             raise NotImplementedError(
                 "EP combine backward supports MXFP8BlockScaling only; got "
-                f"{type(buffer.dispatch_quant_recipe).__name__}."
+                f"{type(buffer.combine_bwd_quant_recipe).__name__}."
             )
-        bwd_quant_recipe = buffer.dispatch_quant_recipe
+        # The grouped grad's packed scales only match the grouped layout when each expert slot is
+        # 128-aligned.
+        if buffer.alignment <= 0 or buffer.alignment % 128 != 0:
+            raise ValueError(
+                "MXFP8 combine backward requires a per-expert alignment that is a positive"
+                f" multiple of 128; got alignment={buffer.alignment}."
+            )
+        bwd_quant_recipe = buffer.combine_bwd_quant_recipe
     return _EpCombine.apply(
         buffer.handle_mem,
         num_local_tokens,

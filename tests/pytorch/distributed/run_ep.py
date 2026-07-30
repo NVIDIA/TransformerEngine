@@ -217,7 +217,13 @@ class TestEP(unittest.TestCase):
         ):
             self.skipTest("not exercised in overflow mode")
 
-    def _make_buffer(self, alignment=0, top_k=TOP_K, quant_recipe=None):
+    def _make_buffer(
+        self,
+        alignment=0,
+        top_k=TOP_K,
+        dispatch_fwd_quant_recipe=None,
+        combine_bwd_quant_recipe=None,
+    ):
         return EpBuffer(
             top_k=top_k,
             max_tokens_per_rank=TOKENS_PER_RANK,
@@ -225,7 +231,8 @@ class TestEP(unittest.TestCase):
             num_local_experts=NUM_LOCAL_EXPERTS,
             recv_capacity_per_rank=None if EAGER else self.cfg.recv_capacity_per_rank,
             alignment=alignment,
-            dispatch_quant_recipe=quant_recipe,
+            dispatch_fwd_quant_recipe=dispatch_fwd_quant_recipe,
+            combine_bwd_quant_recipe=combine_bwd_quant_recipe,
         )
 
     def _expert_out(self, expert_out):
@@ -439,7 +446,7 @@ class TestEP(unittest.TestCase):
         scales are symm-mem backed."""
         self._require_mxfp8_shapes()
         topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
-        buf = self._make_buffer(quant_recipe=MXFP8BlockScaling(), alignment=128)
+        buf = self._make_buffer(dispatch_fwd_quant_recipe=MXFP8BlockScaling(), alignment=128)
         recv_mx, _rw, tc = ep_dispatch(buf, tokens, topk_idx, w)
         if ZERO_COPY:
             self.assertTrue(is_symm_backed(recv_mx.rowwise_data))
@@ -461,7 +468,7 @@ class TestEP(unittest.TestCase):
             recv_buf = symm_mem_alloc((nbytes,), torch.uint8, self.ep_group)
         else:
             recv_buf = torch.empty(nbytes, dtype=torch.uint8, device=self.cfg.device)
-        buf = self._make_buffer(quant_recipe=MXFP8BlockScaling(), alignment=128)
+        buf = self._make_buffer(dispatch_fwd_quant_recipe=MXFP8BlockScaling(), alignment=128)
         topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
         recv_mx, _rw, tc = ep_dispatch(buf, tokens, topk_idx, w, recv_tokens=recv_buf)
         # the returned GroupedTensor views the caller buffer's data then scale regions
@@ -536,7 +543,7 @@ class TestEP(unittest.TestCase):
             .to(torch.bfloat16)
         )
         # MXFP8 combine backward writes into one caller buffer (data then e8m0 scales)
-        buf_mx = self._make_buffer(quant_recipe=MXFP8BlockScaling(), alignment=128)
+        buf_mx = self._make_buffer(combine_bwd_quant_recipe=MXFP8BlockScaling(), alignment=128)
         _recv, _rw, tc = ep_dispatch(buf_mx, tokens, topk_idx, w)  # seeds the routing
         nbytes = rc * (HIDDEN_DIM + cols)
         grad_buf = torch.empty(nbytes, dtype=torch.uint8, device=self.cfg.device)
