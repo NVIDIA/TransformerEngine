@@ -394,6 +394,21 @@ def _identity_score_mod(_graph, score, _tensors):
     return score
 
 
+# Soft-cap / relative-bias score_mods are idiomatically written as module-level lambdas, which
+# all share __qualname__ == "<lambda>"; keep them in a tuple so the cache key must tell them apart.
+_MODULE_LEVEL_LAMBDA_SCORE_MODS = (
+    lambda graph, score, tensors: graph.mul(a=score, b=tensors["scale"]),
+    lambda graph, score, tensors: graph.add(a=score, b=tensors["scale"]),
+)
+
+# Same body, differing only in a default argument. The constant lives in __defaults__, not in
+# the code object, so keying on __code__ alone is not enough to tell these apart.
+_DEFAULT_ARG_LAMBDA_SCORE_MODS = (
+    lambda graph, score, tensors, cap=10.0: graph.mul(a=score, b=cap),
+    lambda graph, score, tensors, cap=50.0: graph.mul(a=score, b=cap),
+)
+
+
 def _install_fake_flax_fused_attn(monkeypatch, *, kernel_available=True):
     captured = {}
 
@@ -728,6 +743,46 @@ def test_fused_attn_score_mod_config_leaves_unkeyed_bound_methods_uncached():
 
     assert config_1 != config_2
     assert tex_attention._graph_cache_key("fwd", config_1, ()) is None
+
+
+def test_fused_attn_score_mod_config_separates_module_level_lambdas():
+    """Distinct module-level lambdas must not share one compiled cuDNN graph."""
+    first, second = _MODULE_LEVEL_LAMBDA_SCORE_MODS
+    assert first.__qualname__ == second.__qualname__ == "<lambda>"
+
+    key_1 = tex_attention._score_mod_callback_cache_key(first)
+    key_2 = tex_attention._score_mod_callback_cache_key(second)
+    assert key_1 != key_2
+    assert key_1 == tex_attention._score_mod_callback_cache_key(first)
+
+    # Named module-level functions stay cacheable and stable.
+    named_key = tex_attention._score_mod_callback_cache_key(_identity_score_mod)
+    assert not tex_attention._score_mod_key_is_uncacheable(named_key)
+    assert named_key == tex_attention._score_mod_callback_cache_key(_identity_score_mod)
+
+    config_1, _, _ = make_fused_attn_score_mod_config(
+        first, None, {"scale": 1.0}, None, _CONFIG_TEST_SCALING_FACTOR, True
+    )
+    config_2, _, _ = make_fused_attn_score_mod_config(
+        second, None, {"scale": 1.0}, None, _CONFIG_TEST_SCALING_FACTOR, True
+    )
+    assert config_1 != config_2
+    assert tex_attention._graph_cache_key("fwd", config_1, ()) != tex_attention._graph_cache_key(
+        "fwd", config_2, ()
+    )
+
+
+def test_fused_attn_score_mod_config_separates_default_arg_lambdas():
+    """Lambdas differing only in a default argument must not share one compiled graph."""
+    first, second = _DEFAULT_ARG_LAMBDA_SCORE_MODS
+    # Same code object: the differing constant is in __defaults__, not co_consts.
+    assert first.__code__.co_consts == second.__code__.co_consts
+    assert first.__defaults__ != second.__defaults__
+
+    key_1 = tex_attention._score_mod_callback_cache_key(first)
+    key_2 = tex_attention._score_mod_callback_cache_key(second)
+    assert key_1 != key_2
+    assert not tex_attention._score_mod_key_is_uncacheable(key_1)
 
 
 @pytest.mark.skipif(not _has_cudnn_frontend_python(), reason="cuDNN Python frontend is required")

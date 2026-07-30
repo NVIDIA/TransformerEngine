@@ -502,23 +502,25 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
                    "Please upgrade your cuDNN version if possible."
                 << std::endl;
     }
-    if (backend == NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen && sm_arch_ == 120) {
+    // cudnn-frontend gates SDPA on the compute-capability major version, so sm_121 shares these.
+    const bool is_sm12x = (sm_arch_ >= 120 && sm_arch_ < 130);
+    if (backend == NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen && is_sm12x) {
       if (cudnn_runtime_version < 91801) {
         backend = NVTE_Fused_Attn_Backend::NVTE_No_Backend;
-        std::cout << "Warning: Given combination of sm_arch_ == 120 and cudnn_runtime_version < "
+        std::cout << "Warning: Given combination of sm_arch_ == 12x and cudnn_runtime_version < "
                      "91801 is not supported. "
                   << " Please upgrade your cuDNN version if possible." << std::endl;
       } else if (deterministic && is_training) {
         backend = NVTE_Fused_Attn_Backend::NVTE_No_Backend;
-        std::cout << "Warning: Deterministic fused attention on SM120 is not supported."
+        std::cout << "Warning: Deterministic fused attention on SM12x is not supported."
                   << std::endl;
       } else {
-        // Known missing support for T3HD/TH3D layouts on SM120
+        // Known missing support for T3HD/TH3D layouts on SM12x
         const bool is_t3hd_or_th3d =
             (qkv_layout == NVTE_QKV_Layout::NVTE_T3HD || qkv_layout == NVTE_QKV_Layout::NVTE_TH3D);
         if (is_t3hd_or_th3d) {
           backend = NVTE_Fused_Attn_Backend::NVTE_No_Backend;
-          std::cout << "Warning: Given combination of T3HD/TH3D layouts on SM120 is not supported. "
+          std::cout << "Warning: Given combination of T3HD/TH3D layouts on SM12x is not supported. "
                     << " Please consider using other THD layouts if possible." << std::endl;
         }
       }
