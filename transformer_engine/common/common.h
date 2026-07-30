@@ -722,6 +722,27 @@ struct TypeExtrema {
 
 }  // namespace detail
 
+namespace nvfp4 {
+
+/*! \brief Amax that makes NVFP4's global encode scale equal to one.
+ *
+ * NVFP4 computes the global encode scale as
+ * `max(ScaleType) * max(QuantizedType) / amax`. Deriving the sentinel from
+ * the actual types keeps the null-amax path correct if either format changes.
+ */
+template <typename ScaleType, typename QuantizedType>
+__host__ __device__ constexpr float unit_global_scale_amax() {
+  return detail::TypeExtrema<ScaleType>::max * detail::TypeExtrema<QuantizedType>::max;
+}
+
+/*! \brief Unit-global-scale amax when the scale format uses a restricted max. */
+template <int ScaleMax, typename QuantizedType>
+__host__ __device__ constexpr float unit_global_scale_amax() {
+  return static_cast<float>(ScaleMax) * detail::TypeExtrema<QuantizedType>::max;
+}
+
+}  // namespace nvfp4
+
 template <typename T>
 struct BitsNumber;
 

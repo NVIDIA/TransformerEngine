@@ -724,7 +724,10 @@ __global__ void __launch_bounds__(THREADS_NUM)
               scales_offset_Y_rowwise + stage * BUFF_DIM_Y + it * THREADS_Y_ROWWISE;
           const float S_enc_rowwise_block =
               scales_offset_Y < rows
-                  ? compute_global_encode_scaling_factor_FP4(amax_rowwise_ptr[scales_offset_Y])
+                  ? (amax_rowwise_ptr == nullptr
+                         ? 1.0f
+                         : compute_global_encode_scaling_factor_FP4(
+                               amax_rowwise_ptr[scales_offset_Y]))
                   : 1.0f;
           const float S_dec_rowwise_block = 1.0f / S_enc_rowwise_block;
           const nvfp4_scale_t S_dec_b_fp8 =
@@ -1460,8 +1463,6 @@ void quantize_transpose(const Tensor &input, const Tensor *noop, Tensor *output,
     NVTE_CHECK(is_fp4_dtype(output->data.dtype), "Output must have FP4 type.");
     NVTE_CHECK(output->scale_inv.dptr != nullptr, "Scaling tensor must be allocated");
   }
-  NVTE_CHECK(!row_scaled_nvfp4 || output->amax.dptr != nullptr,
-             "Row-scaled NVFP4 quantization requires rowwise amax.");
   NVTE_CHECK(!row_scaled_nvfp4 || !output->has_columnwise_data(),
              "Row-scaled NVFP4 quantization does not produce columnwise output.");
   // In-kernel GEMM-swizzled scale output is only implemented on the 2D quantization

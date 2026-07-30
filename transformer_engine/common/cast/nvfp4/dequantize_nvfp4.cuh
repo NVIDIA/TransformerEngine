@@ -63,9 +63,13 @@ __global__ void __launch_bounds__(512)
   fp4vec value;
   value.vec = input_vectorized[my_index];
   fp8e4m3 scale = scales[my_scale_index];
-  float amax = ROW_SCALED_NVFP4 ? tensor_amax[y] : tensor_amax[0];
   static_assert(E4M3_MAX == 448 || E4M3_MAX == 256, "Unsupported NVFP4 E4M3 max.");
-  constexpr float factor_inv = 1.0f / (6.0f * static_cast<float>(E4M3_MAX));
+  float amax = transformer_engine::nvfp4::unit_global_scale_amax<E4M3_MAX, fp4e2m1>();
+  if (tensor_amax != nullptr) {
+    amax = ROW_SCALED_NVFP4 ? tensor_amax[y] : tensor_amax[0];
+  }
+  constexpr float factor_inv =
+      1.0f / transformer_engine::nvfp4::unit_global_scale_amax<E4M3_MAX, fp4e2m1>();
   float final_scale = static_cast<float>(scale) * amax * factor_inv;
 #pragma unroll
   for (int i = 0; i < 4; i++) {
@@ -105,7 +109,7 @@ inline void dequantize(const Tensor &input, Tensor *output, cudaStream_t stream)
   const size_t threads = 512;
   const size_t blocks = DIVUP(total, threads);
   const size_t num_scale_tiles_X = DIVUP(Mread, static_cast<size_t>(4));
-  NVTE_CHECK(!row_scaled_nvfp4 || input.amax.numel() == N,
+  NVTE_CHECK(!row_scaled_nvfp4 || input.amax.dptr == nullptr || input.amax.numel() == N,
              "Row-scaled NVFP4 dequantization requires one rowwise amax per row.");
 
   TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(

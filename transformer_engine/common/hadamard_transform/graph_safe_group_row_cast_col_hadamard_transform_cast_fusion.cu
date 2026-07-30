@@ -694,7 +694,10 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device_g
         // g2s load all global_d_amax
         CUTLASS_PRAGMA_NO_UNROLL
         for (int g = local_thread_idx; g < num_tensors; g += NumEpilogueColQuantThreadCount) {
-          shared_storage.global_d_amax[g] = __ldg(reinterpret_cast<float *>(amax_colwise + g));
+          shared_storage.global_d_amax[g] =
+              amax_colwise == nullptr
+                  ? transformer_engine::nvfp4::unit_global_scale_amax<fp8e4m3, fp4e2m1>()
+                  : __ldg(amax_colwise + g);
         }
 
         size_t rng_seed = 0;
@@ -747,8 +750,10 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device_g
         cutlass::arch::NamedBarrier::sync(NumEpilogueColQuantThreadCount,
                                           cutlass::arch::ReservedNamedBarriers::EpilogueBarrier);
         // Aligning with TensorEngine's recipe to generate scale factors // {$nv-internal-release}
-        static constexpr float fp4_max = 6.0f;
-        static constexpr float fp8_max = 448.0f;
+        static constexpr float fp4_max =
+            transformer_engine::detail::TypeExtrema<fp4e2m1>::max;
+        static constexpr float fp8_max =
+            transformer_engine::detail::TypeExtrema<fp8e4m3>::max;
         static constexpr float fp4_max_inv = 1.0f / fp4_max;
         float c_global_amax_val = shared_storage.global_d_amax[group_idx];
         float global_encode_scale = c_global_amax_val > 0.0f
@@ -948,7 +953,10 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device_g
         // g2s load all global_a_amax for all groups/tensors
         CUTLASS_PRAGMA_NO_UNROLL
         for (int g = local_thread_idx; g < num_tensors; g += NumEpilogueRowQuantThreadCount) {
-          shared_storage.global_a_amax[g] = __ldg(reinterpret_cast<float *>(amax_rowwise + g));
+          shared_storage.global_a_amax[g] =
+              amax_rowwise == nullptr
+                  ? transformer_engine::nvfp4::unit_global_scale_amax<fp8e4m3, fp4e2m1>()
+                  : __ldg(amax_rowwise + g);
         }
         // RNG for stochastic rounding
         if constexpr (kEnableStochasticRounding) {
@@ -1004,8 +1012,10 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device_g
             packed_N, M, offsets);
         float a_global_amax_val = shared_storage.global_a_amax[group_idx];
         // Aligning with TensorEngine's recipe to generate scale factors // {$nv-internal-release}
-        static constexpr float fp4_max = 6.0f;
-        static constexpr float fp8_max = 448.0f;
+        static constexpr float fp4_max =
+            transformer_engine::detail::TypeExtrema<fp4e2m1>::max;
+        static constexpr float fp8_max =
+            transformer_engine::detail::TypeExtrema<fp8e4m3>::max;
         static constexpr float fp4_max_inv = 1.0f / fp4_max;
         float global_encode_scale = a_global_amax_val > 0.0f
                                         ? cutlass::minimum_with_nan_propagation<float>{}(

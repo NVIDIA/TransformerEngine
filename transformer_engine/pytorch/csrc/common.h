@@ -354,6 +354,8 @@ class NVFP4Quantizer : public Quantizer {
   int nvfp4_e4m3_max;
   // Whether tensors emitted by this quantizer use row-scaled NVFP4 metadata.
   bool row_scaled_nvfp4;
+  // Whether to use only block scaling by fixing the global encode scale to one.
+  bool disable_2d_scaling;
 
   int rht_matrix_random_sign_mask_t;
   at::Tensor rht_matrix;

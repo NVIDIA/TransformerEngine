@@ -90,10 +90,10 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
     _columnwise_scale_inv: torch.Tensor
     # Input absolute maximum value (used to compute tensor scale for
     # row-scaled FP4 data)
-    _amax_rowwise: torch.Tensor
+    _amax_rowwise: Optional[torch.Tensor]
     # Input absolute maximum value (used to compute tensor scale for
     # column-scaled FP4 data)
-    _amax_columnwise: torch.Tensor
+    _amax_columnwise: Optional[torch.Tensor]
 
     # Builder class for casting to MXFP8
     _quantizer: Optional[Quantizer]
@@ -370,13 +370,16 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
             rowwise_usage = self._rowwise_data is not None
         if columnwise_usage is None:
             columnwise_usage = self._columnwise_data is not None
+        requires_amax = not (
+            self._quantizer is not None and self._quantizer.disable_2d_scaling
+        )
 
         # If both rowwise and columnwise are requested, create columnwise from rowwise if needed
         if rowwise_usage and columnwise_usage:
             if (
                 self._rowwise_data is None
                 or self._rowwise_scale_inv is None
-                or self._amax_rowwise is None
+                or (requires_amax and self._amax_rowwise is None)
             ):
                 raise RuntimeError(
                     "Cannot update to rowwise and columnwise usage because rowwise data is None."
@@ -395,7 +398,7 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
                 raise RuntimeError(
                     "Requested row-wise usage, but NVFP4Tensor is missing row-scaled scale-inverses"
                 )
-            if self._amax_rowwise is None:
+            if requires_amax and self._amax_rowwise is None:
                 raise RuntimeError(
                     "Requested row-wise usage, but NVFP4Tensor is missing per tensor"
                     " row-scaled scale-inverse"
@@ -416,7 +419,7 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
                     "Requested column-wise usage, "
                     "but NVFP4Tensor is missing column-scaled scale-inverses"
                 )
-            if self._amax_columnwise is None:
+            if requires_amax and self._amax_columnwise is None:
                 raise RuntimeError(
                     "Requested column-wise usage, "
                     "but NVFP4Tensor is missing per tensor column-scaled scale-inverse"
@@ -479,7 +482,9 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
             K_tiles,
         )
 
-        # Also set columnwise amax (same as rowwise since it's just transposed data)
-        if self._amax_columnwise is None:
-            self._amax_columnwise = torch.empty_like(self._amax_rowwise)
-        self._amax_columnwise.copy_(self._amax_rowwise)
+        # Also set columnwise amax (same as rowwise since it's just transposed data).
+        # A missing amax represents unit global scaling.
+        if not self._quantizer.disable_2d_scaling:
+            if self._amax_columnwise is None:
+                self._amax_columnwise = torch.empty_like(self._amax_rowwise)
+            self._amax_columnwise.copy_(self._amax_rowwise)

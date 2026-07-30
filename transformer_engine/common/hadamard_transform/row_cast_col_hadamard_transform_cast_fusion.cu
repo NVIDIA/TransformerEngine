@@ -405,10 +405,10 @@ __global__ static void row_col_rht_gemm_device(
   bool is_epilogue_col_quant_warp = (warp_idx >= 4 && warp_idx <= 7);
   bool is_epilogue_row_quant_warp = (warp_idx >= 8 && warp_idx <= 15);
 
-  if (is_epilogue_col_quant_warp && elect_one_sync()) {
+  if (is_epilogue_col_quant_warp && elect_one_sync() && c_global_amax != nullptr) {
     cute::prefetch(raw_pointer_cast(c_global_amax));
   }
-  if (is_epilogue_row_quant_warp && elect_one_sync()) {
+  if (is_epilogue_row_quant_warp && elect_one_sync() && a_global_amax != nullptr) {
     cute::prefetch(raw_pointer_cast(a_global_amax));
   }
 
@@ -653,7 +653,10 @@ __global__ static void row_col_rht_gemm_device(
     if constexpr (kEnableRHTColQuant) {
       using TMEM_LOAD_NEW = cute::SM100::TMEM::LOAD::SM100_TMEM_LOAD_32dp32b64x;
 
-      float const c_global_amax_val = *c_global_amax;
+      float const c_global_amax_val =
+          c_global_amax == nullptr
+              ? transformer_engine::nvfp4::unit_global_scale_amax<fp8e4m3, fp4e2m1>()
+              : *c_global_amax;
       auto acc_epilogue_pipelined_shape = append(acc_shape_epilogue, Int<AccumulatorPipelineStageCount / EpilogueUnrollFactor>{});
       auto bulk_tmem_epilogue_layout = make_layout(
         acc_epilogue_pipelined_shape,
@@ -710,8 +713,10 @@ __global__ static void row_col_rht_gemm_device(
       auto thr_r2g = tiled_r2g.get_slice(local_thread_idx);
 
       // Aligning with TensorEngine's recipe to generate scale factors // {$nv-internal-release}
-      static constexpr float fp4_max = 6.0f;
-      static constexpr float fp8_max = 448.0f;
+      static constexpr float fp4_max =
+          transformer_engine::detail::TypeExtrema<fp4e2m1>::max;
+      static constexpr float fp8_max =
+          transformer_engine::detail::TypeExtrema<fp8e4m3>::max;
       float const fp4_max_inv = 1.0f / fp4_max;
       float const global_encode_scale = c_global_amax_val > 0.0f
         ? cutlass::minimum_with_nan_propagation<float>{}(
@@ -860,7 +865,10 @@ __global__ static void row_col_rht_gemm_device(
     cutlass::arch::warpgroup_reg_alloc<136>();
     if constexpr (kEnableRowQuant) {
       using S2RVectorType = uint128_t;
-      float const a_global_amax_val = *a_global_amax;
+      float const a_global_amax_val =
+          a_global_amax == nullptr
+              ? transformer_engine::nvfp4::unit_global_scale_amax<fp8e4m3, fp4e2m1>()
+              : *a_global_amax;
       int global_thread_idx = threadIdx.x;
       int local_thread_idx = global_thread_idx % 256;
       size_t rng_seed = 0;
@@ -906,8 +914,10 @@ __global__ static void row_col_rht_gemm_device(
       cute::Tensor tQApSFA = thr_s2r.partition_D(pSFA_mn);
 
       // Aligning with TensorEngine's recipe to generate scale factors // {$nv-internal-release}
-      static constexpr float fp4_max = 6.0f;
-      static constexpr float fp8_max = 448.0f;
+      static constexpr float fp4_max =
+          transformer_engine::detail::TypeExtrema<fp4e2m1>::max;
+      static constexpr float fp8_max =
+          transformer_engine::detail::TypeExtrema<fp8e4m3>::max;
       float const fp4_max_inv = 1.0f / fp4_max;
       float const global_encode_scale = a_global_amax_val > 0.0f
         ? cutlass::minimum_with_nan_propagation<float>{}(

@@ -17,6 +17,7 @@ from transformer_engine.common.recipe import NVFP4BlockScaling
 
 
 recipe_available, reason_for_no_recipe = te.is_nvfp4_available(return_reason=True)
+NVFP4_AMAX_FOR_UNIT_GLOBAL_SCALE = 448.0 * 6.0
 
 
 @dataclass(frozen=True)
@@ -238,6 +239,63 @@ def check_quantization_nvfp4_versus_reference(
         torch.testing.assert_close(qx_amax_t, ref_amax_t, atol=0.0, rtol=0.0)
 
     torch.testing.assert_close(qx_amax, ref_amax, atol=0.0, rtol=0.0)
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.parametrize(
+    "return_transpose,row_scaled_nvfp4",
+    [
+        pytest.param(False, False, id="rowwise"),
+        pytest.param(True, False, id="rowwise_and_columnwise"),
+        pytest.param(False, True, id="row_scaled"),
+    ],
+)
+@pytest.mark.parametrize("use_4over6", [False, True], ids=["standard", "4over6"])
+def test_disable_2d_scaling_uses_only_block_scale(
+    return_transpose: bool,
+    row_scaled_nvfp4: bool,
+    use_4over6: bool,
+) -> None:
+    """A missing amax makes the global NVFP4 encode scale exactly one."""
+    torch.manual_seed(0)
+    x = torch.randn((128, 128), dtype=torch.bfloat16, device="cuda")
+    if row_scaled_nvfp4:
+        # The reference quantizer computes one global scale per row.
+        x[:, 0] = NVFP4_AMAX_FOR_UNIT_GLOBAL_SCALE
+    else:
+        x[0, 0] = NVFP4_AMAX_FOR_UNIT_GLOBAL_SCALE
+
+    common_kwargs = {
+        "rowwise": True,
+        "columnwise": return_transpose,
+        "with_rht": False,
+        "row_scaled_nvfp4": row_scaled_nvfp4,
+        "nvfp4_use_4over6": use_4over6,
+    }
+    expected = NVFP4Quantizer(**common_kwargs)(x)
+    actual = NVFP4Quantizer(**common_kwargs, disable_2d_scaling=True)(x)
+
+    torch.testing.assert_close(actual._rowwise_data, expected._rowwise_data, atol=0, rtol=0)
+    torch.testing.assert_close(
+        actual._rowwise_scale_inv, expected._rowwise_scale_inv, atol=0, rtol=0
+    )
+    torch.testing.assert_close(actual.dequantize(), expected.dequantize(), atol=0, rtol=0)
+    assert actual._amax_rowwise is None
+    if return_transpose:
+        torch.testing.assert_close(
+            actual._columnwise_data, expected._columnwise_data, atol=0, rtol=0
+        )
+        torch.testing.assert_close(
+            actual._columnwise_scale_inv, expected._columnwise_scale_inv, atol=0, rtol=0
+        )
+        assert actual._amax_columnwise is None
+
+    # Reusing an output previously populated by two-level scaling must remove
+    # its amax buffers so common kernels select the unit-global-scale path.
+    NVFP4Quantizer(**common_kwargs, disable_2d_scaling=True).update_quantized(x / 2, expected)
+    assert expected._amax_rowwise is None
+    if return_transpose:
+        assert expected._amax_columnwise is None
 
 
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)

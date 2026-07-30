@@ -17,6 +17,55 @@ from transformer_engine.pytorch.tensor.storage.nvfp4_tensor_storage import NVFP4
 recipe_available, reason_for_no_recipe = te.is_nvfp4_available(return_reason=True)
 
 
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.parametrize(
+    "disable_x, disable_w",
+    [(True, False), (False, True), (True, True)],
+    ids=["x_unit_global_scale", "w_unit_global_scale", "both_unit_global_scale"],
+)
+def test_gemm_with_missing_nvfp4_amax(disable_x: bool, disable_w: bool) -> None:
+    """A null amax contributes a unit global scale to GEMM alpha."""
+    torch.manual_seed(0)
+    x = torch.randn((128, 128), dtype=torch.bfloat16, device="cuda")
+    w = torch.randn((128, 128), dtype=torch.bfloat16, device="cuda")
+    unit_scale_amax = 448.0 * 6.0
+    x[0, 0] = unit_scale_amax
+    w[0, 0] = unit_scale_amax
+
+    def quantize(tensor: torch.Tensor, disable_2d_scaling: bool):
+        return NVFP4Quantizer(
+            rowwise=True,
+            columnwise=True,
+            disable_2d_scaling=disable_2d_scaling,
+        )(tensor)
+
+    x_ref, w_ref = quantize(x, False), quantize(w, False)
+    x_test, w_test = quantize(x, disable_x), quantize(w, disable_w)
+
+    def gemm(w_q, x_q):
+        workspace = torch.empty(4, dtype=torch.uint8, device="cuda")
+        return tex.generic_gemm(
+            w_q,
+            True,
+            x_q,
+            False,
+            None,
+            None,
+            TE_DType[torch.bfloat16],
+            None,
+            TE_DType[torch.bfloat16],
+            False,
+            None,
+            False,
+            workspace,
+            workspace.numel(),
+            False,
+            False,
+        )[0]
+
+    torch.testing.assert_close(gemm(w_test, x_test), gemm(w_ref, x_ref), atol=0, rtol=0)
+
+
 def check_nvfp4_gemm_versus_reference(
     x_dtype: torch.dtype,
     w_dtype: torch.dtype,
