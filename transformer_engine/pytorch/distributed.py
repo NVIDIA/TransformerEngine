@@ -256,9 +256,12 @@ class activation_recompute_forward(AbstractContextManager, ContextDecorator):
 
     def __enter__(self):
         global _FP8_ACTIVATION_RECOMPUTE_ENABLED, _FP8_ACTIVATION_RECOMPUTE_PHASE
-        _FP8_ACTIVATION_RECOMPUTE_ENABLED = (
-            self.activation_recompute and FP8GlobalStateManager.is_fp8_enabled()
-        )
+        # Track the checkpoint region independently of the FP8 state at entry.
+        # A checkpointed callable may open its own FP8 autocast context (for
+        # example, to select precision per layer). Delayed-scaling modules in
+        # that inner context must still save their scale and amax metadata for
+        # the recompute forward.
+        _FP8_ACTIVATION_RECOMPUTE_ENABLED = self.activation_recompute
         _FP8_ACTIVATION_RECOMPUTE_PHASE = self.recompute_phase
 
         qstate = FP8GlobalStateManager.quantization_state
@@ -275,7 +278,7 @@ class activation_recompute_forward(AbstractContextManager, ContextDecorator):
 
 def is_fp8_activation_recompute_enabled() -> bool:
     """Return global boolean"""
-    return _FP8_ACTIVATION_RECOMPUTE_ENABLED
+    return _FP8_ACTIVATION_RECOMPUTE_ENABLED and FP8GlobalStateManager.is_fp8_enabled()
 
 
 def in_fp8_activation_recompute_phase() -> bool:
