@@ -134,6 +134,7 @@ def test_dot_product_attention(
     swa,
     pad_between_seqs,
     declarative_packed=False,
+    run_backward=True,
 ):
     """Test DotProductAttention module"""
 
@@ -168,10 +169,10 @@ def test_dot_product_attention(
 
     # Get backends
     # For 111s, dbias calculation is not supported as of cuDNN 9.18, hence, test fwd only for 111s.
-    # For all other shapes test fwd+bwd
-    is_training = True
+    # For all other shapes test fwd+bwd unless the caller requests fwd-only coverage.
+    is_training = run_backward
     # TODO(KshitijLakhani): Set is_training to True for all cases once cuDNN supports dbias for 111s.
-    if config.bias_shape == "111s":
+    if is_training and config.bias_shape == "111s":
         is_training = False
         logging.info(
             "Setting is_training to False as cuDNN does not support dbias for"
@@ -374,7 +375,11 @@ model_configs_fa4_hdim256 = {
 @pytest.mark.parametrize("model", model_configs_fa4_hdim256.keys())
 def test_dpa_fa4_hdim256(dtype, model_configs, model):
     """Test DotProductAttention with FA4: head_dim=256 dedicated kernel on SM100"""
-    test_dot_product_attention(dtype, model_configs, model, False, None, False, False)
+    # Keep this FA4 D=256 test forward-only. Before cuDNN D=256 backward support,
+    # the generic helper took this path implicitly because fused-attn training was unavailable.
+    test_dot_product_attention(
+        dtype, model_configs, model, False, None, False, False, run_backward=False
+    )
 
 
 # cuDNN FusedAttention D=256 bprop is supported on sm10x by the dedicated deterministic
