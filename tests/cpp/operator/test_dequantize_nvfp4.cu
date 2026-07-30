@@ -390,6 +390,36 @@ TEST(NVFP4RecipeTest, UE5M3ScaleUtilities)
                         static_cast<float>(fp8ue5m3(6.0f * 114688.0f / 12.0f)));
     }
 }
+
+TEST(NVFP4RecipeTest, UE5M3PerTensorScale)
+{
+    if (getDeviceComputeCapability() < blackwellComputeCapability) {
+        GTEST_SKIP();
+    }
+
+    Tensor input_a("input_a", std::vector<size_t>{16, 16}, DType::kFloat4E2M1,
+                   true, true, NVTE_NVFP4_1D_SCALING, DType::kFloat8UE5M3);
+    Tensor input_b("input_b", std::vector<size_t>{16, 16}, DType::kFloat4E2M1,
+                   true, true, NVTE_NVFP4_1D_SCALING, DType::kFloat8UE5M3);
+    Tensor alpha_out("alpha_out", std::vector<size_t>{1}, DType::kFloat32);
+
+    constexpr float amax_a = 12.0f;
+    constexpr float amax_b = 18.0f;
+    constexpr float alpha_in = 2.0f;
+    constexpr float fp4_max = 6.0f;
+    constexpr float ue5m3_max = 114688.0f;
+    input_a.set_amax(amax_a);
+    input_b.set_tensor_amax_columnwise(amax_b);
+
+    nvte_nvfp4_compute_per_tensor_scale(
+        input_a.data(), true, input_b.data(), false, alpha_in, alpha_out.data(), 0);
+    alpha_out.to_cpu();
+
+    const float factor_inv =
+        1.0f / (fp4_max * fp4_max * ue5m3_max * ue5m3_max);
+    const float expected = alpha_in * amax_a * amax_b * factor_inv;
+    EXPECT_FLOAT_EQ(alpha_out.rowwise_cpu_dptr<float>()[0], expected);
+}
 #endif
 
 class DequantizeNVFP4SwizzledTestSuite : public ::testing::TestWithParam

@@ -71,10 +71,10 @@ constexpr int kThreadsPerBlock = 256;
 
 // Kernel to compute alpha *= amax_A * amax_B / factor
 __global__ void compute_nvfp4_per_tensor_scale_kernel(float alpha_in, const float *amax_A,
-                                                      const float *amax_B, float fp8_max_A,
-                                                      float fp8_max_B, float *alpha_out) {
+                                                      const float *amax_B, float scale_max_A,
+                                                      float scale_max_B, float *alpha_out) {
   constexpr float fp4_max = 6.0f;
-  const float factor_inv = 1.0f / (fp4_max * fp4_max * fp8_max_A * fp8_max_B);
+  const float factor_inv = 1.0f / (fp4_max * fp4_max * scale_max_A * scale_max_B);
   *alpha_out = alpha_in * (*amax_A) * (*amax_B) * factor_inv;
 }
 
@@ -943,8 +943,12 @@ void nvte_nvfp4_compute_per_tensor_scale(const NVTETensor inpA, const bool use_r
   void *amax_A_ptr = use_rowwise_amax_A ? tA->amax.dptr : tA->columnwise_amax.dptr;
   void *amax_B_ptr = use_rowwise_amax_B ? tB->amax.dptr : tB->columnwise_amax.dptr;
   void *alpha_ptr = tOut->data.dptr;
-  const float fp8_max_A = static_cast<float>(tA->nvfp4_e4m3_max);
-  const float fp8_max_B = static_cast<float>(tB->nvfp4_e4m3_max);
+  const DType scale_dtype_A =
+      use_rowwise_amax_A ? tA->scale_inv.dtype : tA->columnwise_scale_inv.dtype;
+  const DType scale_dtype_B =
+      use_rowwise_amax_B ? tB->scale_inv.dtype : tB->columnwise_scale_inv.dtype;
+  const float scale_max_A = dispatch::nvfp4::core::scale_max(scale_dtype_A, tA->nvfp4_e4m3_max);
+  const float scale_max_B = dispatch::nvfp4::core::scale_max(scale_dtype_B, tB->nvfp4_e4m3_max);
 
   // check for not null pointers
   NVTE_CHECK(amax_A_ptr != nullptr, "amax_A_ptr is null");
@@ -953,7 +957,7 @@ void nvte_nvfp4_compute_per_tensor_scale(const NVTETensor inpA, const bool use_r
 
   nvfp4_recipe::compute_nvfp4_per_tensor_scale_kernel<<<1, 1, 0, stream>>>(
       alpha_in, reinterpret_cast<const float *>(amax_A_ptr),
-      reinterpret_cast<const float *>(amax_B_ptr), fp8_max_A, fp8_max_B,
+      reinterpret_cast<const float *>(amax_B_ptr), scale_max_A, scale_max_B,
       reinterpret_cast<float *>(alpha_ptr));
   NVTE_CHECK_CUDA(cudaGetLastError());
 #else

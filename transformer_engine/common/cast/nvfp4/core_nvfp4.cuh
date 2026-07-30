@@ -112,6 +112,15 @@ __host__ __device__ constexpr float scale_max() {
   }
 }
 
+inline float scale_max(const DType scale_dtype, const int e4m3_max) {
+  float result = 0.0f;
+  TRANSFORMER_ENGINE_NVFP4_SCALE_TYPE_SWITCH(
+      scale_dtype, ScaleType,
+      TRANSFORMER_ENGINE_NVFP4_E4M3_MAX_SWITCH(e4m3_max, E4M3_MAX,
+                                               result = scale_max<ScaleType, E4M3_MAX>();))
+  return result;
+}
+
 template <typename ScaleType>
 __device__ __forceinline__ ScaleType
 compute_decoding_scaling_factor(const float block_amax, const float global_encode_scale) {

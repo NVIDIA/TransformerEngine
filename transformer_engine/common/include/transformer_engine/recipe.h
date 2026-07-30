@@ -14,11 +14,7 @@
 #include "transformer_engine.h"
 
 #ifdef __cplusplus
-#if CUDART_VERSION >= 13040
-#define NVTE_NVFP4_SCALE_DTYPE_DEFAULT = kNVTEFloat8UE5M3
-#else
 #define NVTE_NVFP4_SCALE_DTYPE_DEFAULT = kNVTEFloat8E4M3
-#endif
 extern "C" {
 #else
 #define NVTE_NVFP4_SCALE_DTYPE_DEFAULT
