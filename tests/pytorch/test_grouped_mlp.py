@@ -16,6 +16,7 @@ import torch
 
 import transformer_engine.pytorch as te
 from transformer_engine.pytorch.constants import TE_DType
+import transformer_engine.pytorch.ops.fused.grouped_mlp as grouped_mlp_module
 from transformer_engine.pytorch.ops.fused.grouped_mlp import (
     _cudnn_frontend_supports_grouped_gemm_srelu,
     _cudnn_frontend_version_supported,
@@ -249,6 +250,33 @@ class _InjectGrad(torch.autograd.Function):
 
 class TestGroupedLinearOp:
     """Tests for advanced features with grouped linear basic op"""
+
+    def test_meta_single_grouped_weight_with_delayed_wgrad(self, monkeypatch) -> None:
+        """A deferred op shell must not access its grouped parent before it is attached."""
+        monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
+
+        op = te.ops.GroupedLinear(
+            2,
+            16,
+            16,
+            device="meta",
+            dtype=torch.bfloat16,
+            single_grouped_weight=True,
+            delay_wgrad_compute=True,
+        )
+
+        assert op._parameters.get("weight") is None
+        assert op.weight0.device.type == "meta"
+
+        # Mirror an external caller attaching the grouped parent after constructing
+        # the parameterless shell, then verify delayed-wgrad metadata is applied.
+        grouped_weight = torch.nn.Parameter(torch.empty(2, 16, 16, device="meta"))
+        assert not hasattr(grouped_weight, "skip_backward_post_hook")
+        op.register_parameter("weight", grouped_weight)
+        for group_idx in range(op.num_groups):
+            op.register_parameter(f"weight{group_idx}", None)
+
+        assert grouped_weight.skip_backward_post_hook
 
     @pytest.mark.parametrize("bias", (False, True))
     @pytest.mark.parametrize("dtype", _dtypes)
@@ -902,7 +930,10 @@ class TestGroupedMLPFusedOp:
         """GroupedLinear + scaled activation + GroupedLinear"""
 
         # Split sizes
-        split_sizes = [split_alignment * (i) for i in range(group_size)]
+        if group_size == 1:
+            split_sizes = [split_alignment]
+        else:
+            split_sizes = [split_alignment * i for i in range(group_size)]
         random.shuffle(split_sizes)
         split_sizes = torch.tensor(split_sizes, dtype=torch.int, device=device)
 
@@ -1506,6 +1537,93 @@ class TestGroupedMLPFusedOp:
             single_grouped_weight=True,
             activation=activation,
         )
+
+    @pytest.mark.parametrize("bias", (False, True))
+    @pytest.mark.parametrize("runtime_offsets_supported", (False, True))
+    def test_grouped_mlp_single_group_mxfp8(
+        self,
+        monkeypatch,
+        *,
+        bias: bool,
+        runtime_offsets_supported: bool,
+    ) -> None:
+        """Single-group GroupedLinear + ScaledSwiGLU + GroupedLinear with MXFP8."""
+        if (
+            runtime_offsets_supported
+            and not grouped_mlp_module._cudnn_frontend_supports_single_group_runtime_offsets()
+        ):
+            pytest.skip("Requires cuDNN frontend >= 1.27.0")
+        monkeypatch.setattr(
+            grouped_mlp_module,
+            "_cudnn_frontend_supports_single_group_runtime_offsets",
+            lambda: runtime_offsets_supported,
+        )
+        self.test_grouped_mlp(
+            group_size=1,
+            bias=bias,
+            hidden_size=128,
+            quantization="mxfp8",
+            single_grouped_weight=False,
+            activation="scaled_swiglu",
+        )
+
+    @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
+    def test_single_grouped_weight_eval_preserves_columnwise_usage(
+        self,
+        *,
+        dtype: torch.dtype = torch.bfloat16,
+        device: torch.device = "cuda",
+        group_size: int = 2,
+        hidden_size: int = 128,
+    ) -> None:
+        """Eager eval must not drop storage still used by captured training dgrad."""
+
+        if not te.ops.fused.GroupedMLP_CuTeGEMMGLU.is_supported():
+            pytest.skip("MXFP8 fused grouped MLP is not supported on this system")
+
+        split_sizes = torch.full(
+            (group_size,),
+            128,
+            dtype=torch.int64,
+            device=device,
+        )
+        num_tokens = int(split_sizes.sum())
+        recipe = make_recipe("mxfp8")
+
+        with te.quantized_model_init(enabled=True, recipe=recipe):
+            fc1 = te.ops.GroupedLinear(
+                group_size,
+                hidden_size,
+                2 * hidden_size,
+                device=device,
+                dtype=dtype,
+                single_grouped_weight=True,
+            )
+            fc2 = te.ops.GroupedLinear(
+                group_size,
+                hidden_size,
+                hidden_size,
+                device=device,
+                dtype=dtype,
+                single_grouped_weight=True,
+            )
+            module = te.ops.Sequential(
+                fc1,
+                te.ops.ScaledSwiGLU(glu_interleave_size=32),
+                fc2,
+            )
+
+        x = torch.randn(num_tokens, hidden_size, device=device, dtype=dtype, requires_grad=True)
+        probs = torch.ones(num_tokens, device=device, dtype=dtype)
+        with te.autocast(enabled=True, recipe=recipe):
+            module(x, split_sizes, probs, split_sizes)
+        assert fc1.weight.quantizer.columnwise_usage
+        assert fc2.weight.quantizer.columnwise_usage
+
+        with torch.no_grad(), te.autocast(enabled=True, recipe=recipe):
+            module(x.detach(), split_sizes, probs, split_sizes)
+        assert fc1.weight.quantizer.columnwise_usage
+        assert fc2.weight.quantizer.columnwise_usage
 
     @pytest.mark.parametrize("quantization", _grouped_mlp_quantization_list)
     @pytest.mark.parametrize("single_grouped_weight", (False, True))

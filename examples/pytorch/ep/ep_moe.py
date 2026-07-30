@@ -131,8 +131,9 @@ def main():
         ep_group,
         num_experts=num_experts,
         max_tokens_per_rank=T,
-        recv_capacity_per_rank=recv_pr,
         hidden_dim=args.hidden,
+        num_topk=args.top_k,
+        recv_capacity_per_rank=recv_pr,
     )
     try:
         _run_layer(
@@ -182,15 +183,13 @@ def _run_layer(args, rank, world_size, ep_size, num_experts, num_local_experts, 
         recv_capacity_per_rank=recv_pr,
         hidden_dim=args.hidden,
         num_local_experts=num_local_experts,
-        dispatch_recv_tokens=recv_tokens,
-        combine_grad_expert_out=grad_expert_out,
     )
 
-    recv_t, recv_w_out, _tc = ep_dispatch(buffer, tokens, topk_idx, topk_w)
+    recv_t, recv_w_out, _tc = ep_dispatch(buffer, tokens, topk_idx, topk_w, recv_tokens=recv_tokens)
     expert_out = _batched_expert_linear(recv_t, kernels_local, num_local_experts)
     # Apply per-slot topk weighting before combine.
     expert_out = expert_out * recv_w_out.unsqueeze(-1).to(expert_out.dtype)
-    out = ep_combine(buffer, expert_out)
+    out = ep_combine(buffer, expert_out, grad_out=grad_expert_out)
 
     loss = 0.5 * (out.float() ** 2).sum()
     loss.backward()
