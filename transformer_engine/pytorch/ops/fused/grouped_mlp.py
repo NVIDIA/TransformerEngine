@@ -2328,9 +2328,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                 fc1_dgrad_prob_tensor = (
                     None
                     if cudnn_supports_optional_prob
-                    else torch.ones(
-                        (out_shape[0], 1, 1), dtype=torch.float32, device=device
-                    )
+                    else torch.ones((out_shape[0], 1, 1), dtype=torch.float32, device=device)
                 )
                 fc1_dgrad_kwargs = {
                     "a_tensor": fc1_dgrad_a_data,
