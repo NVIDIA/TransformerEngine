@@ -224,7 +224,7 @@ Error_Type EpPrepareFFI(cudaStream_t stream, EpInstanceState* ep_state, Buffer_T
                                   static_cast<size_t>(config.dispatch_output_per_expert_alignment)};
   nvte_ep_prepare(handle_mem_.data(), topk_idx_.data(), recv_tokens_per_expert_.data(),
                   /*total_recv_tokens_per_rank=*/nullptr, &layer_cfg, stream);
-  return ffi_with_cuda_error_check();
+  return ffi_with_cuda_stream_sync_and_error_check(stream, "EpPrepareFFI");
 }
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(EpPrepareHandler, EpPrepareFFI,
@@ -234,8 +234,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(EpPrepareHandler, EpPrepareFFI,
                                   .Arg<Buffer_Type>()                         // topk_idx
                                   .Ret<Buffer_Type>()  // recv_tokens_per_expert
                                   .Ret<Buffer_Type>()  // handle_mem
-                                  .Attrs<EpConfig>(),
-                              FFI_CudaGraph_Traits);
+                                  .Attrs<EpConfig>());
 
 // ── ep_dispatch ───────────────────────────────────────────────────────────────
 
@@ -299,7 +298,7 @@ Error_Type EpDispatchFFI(cudaStream_t stream, EpInstanceState* ep_state, Buffer_
                    topk_weights_.data(), no_win, recv_tokens_.data(), no_win,
                    recv_topk_weights_.data(), no_win, stream);
 
-  return ffi_with_cuda_error_check();
+  return ffi_with_cuda_stream_sync_and_error_check(stream, "EpDispatchFFI");
 }
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(EpDispatchHandler, EpDispatchFFI,
@@ -312,8 +311,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(EpDispatchHandler, EpDispatchFFI,
                                   .Arg<Buffer_Type>()                         // topk_weights
                                   .Ret<Buffer_Type>()                         // recv_tokens
                                   .Ret<Buffer_Type>()                         // recv_topk_weights
-                                  .Attrs<EpConfig>(),
-                              FFI_CudaGraph_Traits);
+                                  .Attrs<EpConfig>());
 
 // ── ep_combine ────────────────────────────────────────────────────────────────
 
@@ -343,7 +341,7 @@ Error_Type EpCombineFFI(cudaStream_t stream, EpInstanceState* ep_state, Buffer_T
   NVTECommWindow no_win{nullptr, 0};
   nvte_ep_combine(handle_mem_.data(), expert_out_.data(), no_win, result_.data(), stream);
 
-  return ffi_with_cuda_error_check();
+  return ffi_with_cuda_stream_sync_and_error_check(stream, "EpCombineFFI");
 }
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(EpCombineHandler, EpCombineFFI,
@@ -353,8 +351,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(EpCombineHandler, EpCombineFFI,
                                   .Arg<Buffer_Type>()                         // handle_mem
                                   .Arg<Buffer_Type>()                         // expert_out
                                   .Ret<Buffer_Type>()                         // result
-                                  .Attrs<EpConfig>(),
-                              FFI_CudaGraph_Traits);
+                                  .Attrs<EpConfig>());
 
 // ── ep_dispatch_bwd ───────────────────────────────────────────────────────────
 
@@ -411,7 +408,7 @@ Error_Type EpDispatchBwdFFI(cudaStream_t stream, EpInstanceState* ep_state, Buff
   nvte_ep_dispatch_bwd(handle_mem_.data(), grad_.data(), no_win, g_recv_topk_weights_.data(),
                        no_win, grad_tokens_.data(), grad_topk_weights_.data(), stream);
 
-  return ffi_with_cuda_error_check();
+  return ffi_with_cuda_stream_sync_and_error_check(stream, "EpDispatchBwdFFI");
 }
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(EpDispatchBwdHandler, EpDispatchBwdFFI,
@@ -423,8 +420,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(EpDispatchBwdHandler, EpDispatchBwdFFI,
                                   .Arg<Buffer_Type>()  // g_recv_topk_weights
                                   .Ret<Buffer_Type>()  // grad_tokens
                                   .Ret<Buffer_Type>()  // grad_topk_weights
-                                  .Attrs<EpConfig>(),
-                              FFI_CudaGraph_Traits);
+                                  .Attrs<EpConfig>());
 
 // ── ep_combine_bwd ────────────────────────────────────────────────────────────
 
@@ -457,7 +453,7 @@ Error_Type EpCombineBwdFFI(cudaStream_t stream, EpInstanceState* ep_state, Buffe
   nvte_ep_combine_bwd(handle_mem_.data(), grad_.data(), no_win, grad_expert_out_.data(), no_win,
                       stream);
 
-  return ffi_with_cuda_error_check();
+  return ffi_with_cuda_stream_sync_and_error_check(stream, "EpCombineBwdFFI");
 }
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(EpCombineBwdHandler, EpCombineBwdFFI,
@@ -467,8 +463,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(EpCombineBwdHandler, EpCombineBwdFFI,
                                   .Arg<Buffer_Type>()                         // handle_mem
                                   .Arg<Buffer_Type>()  // grad (w.r.t. result)
                                   .Ret<Buffer_Type>()  // grad_expert_out
-                                  .Attrs<EpConfig>(),
-                              FFI_CudaGraph_Traits);
+                                  .Attrs<EpConfig>());
 
 }  // namespace jax
 }  // namespace transformer_engine

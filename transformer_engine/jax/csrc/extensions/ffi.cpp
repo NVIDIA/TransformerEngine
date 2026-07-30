@@ -61,5 +61,32 @@ Error_Type ffi_with_cuda_error_check() {
   return Error_Type::Success();
 }
 
+Error_Type ffi_with_cuda_stream_sync_and_error_check(cudaStream_t stream,
+                                                     const char* operation_name) {
+  cudaError_t launch_error = cudaGetLastError();
+  if (launch_error != cudaSuccess) {
+    return Error_Type(XLA_FFI_Error_Code_INTERNAL,
+                      std::string(operation_name) +
+                          " CUDA launch error before stream synchronization: " +
+                          cudaGetErrorString(launch_error));
+  }
+
+  cudaError_t sync_error = cudaStreamSynchronize(stream);
+  if (sync_error != cudaSuccess) {
+    return Error_Type(XLA_FFI_Error_Code_INTERNAL,
+                      std::string(operation_name) + " CUDA stream synchronization error: " +
+                          cudaGetErrorString(sync_error));
+  }
+
+  cudaError_t last_error = cudaGetLastError();
+  if (last_error != cudaSuccess) {
+    return Error_Type(XLA_FFI_Error_Code_INTERNAL,
+                      std::string(operation_name) +
+                          " CUDA error after stream synchronization: " +
+                          cudaGetErrorString(last_error));
+  }
+  return Error_Type::Success();
+}
+
 }  // namespace jax
 }  // namespace transformer_engine

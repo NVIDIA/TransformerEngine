@@ -1017,7 +1017,7 @@ Error_Type GroupedGemmV2FFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Ty
                     alpha_tensor.data(), beta_tensor.data(), workspace_setup.data(),
                     workspace_cublas.data(), gemmConfig, stream);
 
-  return ffi_with_cuda_error_check();
+  return ffi_with_cuda_stream_sync_and_error_check(stream, "GroupedGemmV2FFI");
 }
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(GroupedGemmV2Handler, GroupedGemmV2FFI,
@@ -1040,8 +1040,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(GroupedGemmV2Handler, GroupedGemmV2FFI,
                                   .Ret<Buffer_Type>()      // cublas_workspace
                                   .Ret<Buffer_Type>()      // setup_workspace
                                   .Ret<Buffer_Type>()      // int64_workspace
-                                  .Attrs<GroupedGemmV2Config>(),
-                              FFI_CudaGraph_Traits);
+                                  .Attrs<GroupedGemmV2Config>());
 
 Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type lhs_sinv,
                           Buffer_Type rhs_data, Buffer_Type rhs_sinv, Buffer_Type bias,
@@ -1425,7 +1424,7 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
                          grad, workspace_list.data(), accumulate, use_split_accumulator,
                          num_math_sm, stream);
 
-  return ffi_with_cuda_error_check();
+  return ffi_with_cuda_stream_sync_and_error_check(stream, "GroupedGemmFFI");
 }
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(GroupedGemmHandler, GroupedGemmFFI,

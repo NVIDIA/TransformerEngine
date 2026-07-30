@@ -80,7 +80,8 @@ Error_Type FusedTopkWithScoreFunctionForwardFFI(
         routing_map_tensor.data(), routing_map_format_nvte, intermediate_tensor.data(), stream);
   }
 
-  return ffi_with_cuda_error_check();
+  return ffi_with_cuda_stream_sync_and_error_check(
+      stream, "FusedTopkWithScoreFunctionForwardFFI");
 }
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(FusedTopkWithScoreFunctionForwardHandler,
@@ -99,8 +100,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(FusedTopkWithScoreFunctionForwardHandler,
                                   .Attr<double>("scaling_factor")
                                   .Attr<JAXX_Score_Function>("score_function")
                                   .Attr<int64_t>("compute_aux_scores")
-                                  .Attr<JAXX_Routing_Map_Format>("routing_map_format"),
-                              FFI_CudaGraph_Traits);
+                                  .Attr<JAXX_Routing_Map_Format>("routing_map_format"));
 
 // ============================================================================
 // Fused Top-K with Score Function - Backward
@@ -157,7 +157,8 @@ Error_Type FusedTopkWithScoreFunctionBackwardFFI(
         static_cast<int>(score_function), grad_logits_tensor.data(), stream);
   }
 
-  return ffi_with_cuda_error_check();
+  return ffi_with_cuda_stream_sync_and_error_check(
+      stream, "FusedTopkWithScoreFunctionBackwardFFI");
 }
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(FusedTopkWithScoreFunctionBackwardHandler,
@@ -173,8 +174,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(FusedTopkWithScoreFunctionBackwardHandler,
                                   .Attr<double>("scaling_factor")
                                   .Attr<JAXX_Score_Function>("score_function")
                                   .Attr<int64_t>("compute_aux_scores")
-                                  .Attr<JAXX_Routing_Map_Format>("routing_map_format"),
-                              FFI_CudaGraph_Traits);
+                                  .Attr<JAXX_Routing_Map_Format>("routing_map_format"));
 
 // ============================================================================
 // Fused MoE Aux Loss - Forward

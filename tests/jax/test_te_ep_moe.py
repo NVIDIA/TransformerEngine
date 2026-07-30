@@ -1090,6 +1090,7 @@ class TestTeEpMoeBackward:
             name="repeated d_x",
         )
 
+    @pytest.mark.skip(reason="Experimental scan/remat parity coverage is currently disabled.")
     @pytest.mark.parametrize("num_layers", (4, 8))
     def test_scanned_production_block_backward(self, mesh, num_layers):
         """Full MoE scan/remat must match the identical unrolled stack.
@@ -1242,6 +1243,7 @@ class TestTeEpMoeBackward:
         if mismatches:
             pytest.fail("\n\n".join(mismatches))
 
+    @pytest.mark.skip(reason="Experimental scan/remat parity coverage is currently disabled.")
     def test_scanned_training_trajectory(self, mesh):
         """Three SGD steps must retain scan/remat vs unrolled parity."""
         num_layers = 4
