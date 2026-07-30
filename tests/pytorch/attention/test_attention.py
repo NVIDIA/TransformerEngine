@@ -2249,6 +2249,10 @@ def _run_mha_fp8_vs_f16(
         seqlens_kv = torch.full(
             [config.batch_size], config.max_seqlen_kv, dtype=torch.int32, device="cuda"
         )
+    if qkv_format == "thd":
+        # FP8 Linear flattens THD input to [t, h*d], so align total tokens for cuBLAS.
+        seqlens_q[-1] += -seqlens_q.sum() % 8
+        seqlens_kv[-1] += -seqlens_kv.sum() % 8
     cu_seqlens_q = torch.zeros(config.batch_size + 1, dtype=torch.int32, device="cuda")
     cu_seqlens_kv = torch.zeros(config.batch_size + 1, dtype=torch.int32, device="cuda")
     cu_seqlens_q[1:] = torch.cumsum(seqlens_q, dim=0)
@@ -2287,6 +2291,8 @@ def _run_mha_fp8_vs_f16(
             rotary_pos_emb=rotary_pos_emb,
             cu_seqlens_q=cu_seqlens_q,
             cu_seqlens_kv=cu_seqlens_kv,
+            # The optimized zero-fill path dereferences device memory on the host.
+            fast_zero_fill=False,
         )
     if is_training:
         out.backward(out_grad)
