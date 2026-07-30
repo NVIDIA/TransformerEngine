@@ -21,6 +21,8 @@ try:
 except ImportError:
     _opaque_available = False
 
+from torch._dynamo.utils import counters
+
 import transformer_engine.pytorch as te
 import transformer_engine_torch as tex
 from transformer_engine.common import recipe
@@ -804,12 +806,11 @@ def _assert_dpa_backend(backend: str) -> None:
 def _assert_matches_eager(actual, expected, backend: str, dtype: torch.dtype) -> None:
     """Assert a compiled result matches the eager one.
 
-    FlashAttention and FusedAttention run the same kernel either way, so they
-    have to match exactly. Inductor reassociates the unfused backend's softmax
-    sums, and that error scales with the magnitude of those sums rather than
-    with each output element -- so the absolute tolerance comes from the
-    tensor's own scale, an elementwise relative tolerance being meaningless for
-    elements near zero.
+    A backend that calls the same kernel either way has to match exactly:
+    compiling changes what surrounds it, not its arithmetic. The unfused
+    backend is instead built from PyTorch ops, which inductor fuses and
+    reassociates; that error scales with the softmax sums rather than with each
+    output element, hence an absolute tolerance taken from the tensor's scale.
     """
     if backend != "unfused":
         torch.testing.assert_close(actual, expected, rtol=0.0, atol=0.0)
@@ -918,6 +919,7 @@ def test_dpa_torch_compile_cudagraphs(monkeypatch, backend):
     module = _make_dpa(spec, dtype)
 
     torch._dynamo.reset()
+    counters.clear()
     compiled = torch.compile(module, fullgraph=True, mode="reduce-overhead")
 
     for _ in range(3):
@@ -929,6 +931,9 @@ def test_dpa_torch_compile_cudagraphs(monkeypatch, backend):
         eager = _run_and_capture(module, args, kwargs, grads)
         _assert_run_matches(replayed, eager, backend, dtype)
     _assert_dpa_backend(backend)
+    # Without this, inductor declining to capture -- a mutated input, a CPU
+    # scalar -- would leave the test passing while measuring nothing.
+    assert not counters["inductor"]["cudagraph_skips"], "inductor skipped CUDA graphs"
 
 
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
