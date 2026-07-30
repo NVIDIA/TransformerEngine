@@ -304,7 +304,9 @@ CudnnNormalizationPlan::CudnnNormalizationPlan(NVTE_Norm_Type NormType, NVTE_Nor
 
     if (_training) _rsigma->set_output(true).set_data_type(get_cudnn_fe_dtype(ctype));
 
-    const auto ZDtype = _fp8_out ? ctype : otype;
+    const bool use_input_dtype = cudnnGetVersion() >= 92500 && _fp8_out && _ndim_scale_block == 1 &&
+                                 use_cudnn_mxfp8_norm_output_in_input_dtype();
+    const auto ZDtype = use_input_dtype ? itype : (_fp8_out ? ctype : otype);
     _z->set_output(!_fp8_out).set_data_type(get_cudnn_fe_dtype(ZDtype));
 
     if (_fp8_out) {
@@ -561,6 +563,12 @@ bool& _zero_centered_gamma_in_weight_dtype() {
 }
 
 bool& use_zero_centered_gamma_in_weight_dtype() { return _zero_centered_gamma_in_weight_dtype(); }
+
+bool use_cudnn_mxfp8_norm_output_in_input_dtype() {
+  static bool flag =
+      transformer_engine::getenv<bool>("NVTE_CUDNN_MXFP8_NORM_OUTPUT_IN_INPUT_DTYPE");
+  return flag;
+}
 
 }  //  namespace normalization
 }  // namespace transformer_engine
