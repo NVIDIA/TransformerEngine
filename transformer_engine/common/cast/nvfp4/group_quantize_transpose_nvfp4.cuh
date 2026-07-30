@@ -756,11 +756,11 @@ __global__ void __launch_bounds__(THREADS_NUM)
 #endif  // FP4_TYPE_SUPPORTED
 }  // namespace group_quantize_transpose_kernel
 
-template <typename ScaleType, bool use_2d_quantization>
-void group_quantize_transpose_impl(const Tensor &input, const Tensor *noop,
-                                   std::vector<Tensor *> &output_list, const size_t *split_sections,
-                                   size_t num_tensors, const QuantizationConfig *quant_config,
-                                   cudaStream_t stream) {
+template <bool use_2d_quantization>
+void group_quantize_transpose(const Tensor &input, const Tensor *noop,
+                              std::vector<Tensor *> &output_list, const size_t *split_sections,
+                              size_t num_tensors, const QuantizationConfig *quant_config,
+                              cudaStream_t stream) {
 #if FP4_TYPE_SUPPORTED
   using namespace group_quantize_transpose_kernel;
   using namespace ptx;
@@ -782,6 +782,24 @@ void group_quantize_transpose_impl(const Tensor &input, const Tensor *noop,
   NVTE_CHECK(output != nullptr, "No output tensor found.");
   // also check that the output has not null data pointer
   NVTE_CHECK(output->data.dptr != nullptr, "Output data pointer is null.");
+
+  const DType scale_dtype = output->scale_inv.dtype;
+  for (const Tensor *group_output : output_list) {
+    if (group_output->has_data()) {
+      NVTE_CHECK(group_output->scale_inv.dtype == scale_dtype,
+                 "All grouped NVFP4 scale tensors must have the same dtype (expected ",
+                 to_string(scale_dtype), ", got ", to_string(group_output->scale_inv.dtype), ").");
+    }
+  }
+  NVTE_CHECK(scale_dtype == DType::kFloat8E4M3 || scale_dtype == DType::kFloat8UE5M3,
+             "NVFP4 group quantization requires E4M3 or UE5M3 scale tensors, got ",
+             to_string(scale_dtype), ".");
+#if CUDA_VERSION < 13040
+  NVTE_CHECK(scale_dtype != DType::kFloat8UE5M3,
+             "NVFP4 group quantization with UE5M3 scales requires CUDA 13.4 or newer, "
+             "but compile-time CUDA version is ",
+             CUDA_VERSION, ".");
+#endif
 
   // If transposed output is allocated, return the transposed data. Otherwise, it's not necesary to
   // return the transposed data.
@@ -843,8 +861,6 @@ void group_quantize_transpose_impl(const Tensor &input, const Tensor *noop,
   // const size_t scale_stride_transpose =
   //     return_transpose ? output->columnwise_scale_inv.shape[1] : 0;
 
-  ScaleType *const scales_ptr = reinterpret_cast<ScaleType *>(output->scale_inv.dptr);
-
   const float *noop_ptr = reinterpret_cast<const float *>(noop->data.dptr);
 
   const NVTETensor rng_state_tensor = (quant_config != nullptr) ? quant_config->rng_state : nullptr;
@@ -879,86 +895,55 @@ void group_quantize_transpose_impl(const Tensor &input, const Tensor *noop,
       DIVUP_TO_MULTIPLE(buff_elems_total * sizeof(IType), TMA_SHMEM_ALIGNMENT);
   constexpr size_t buff_size_aligned_out =
       DIVUP_TO_MULTIPLE((buff_elems_total * 4) / 8, TMA_SHMEM_ALIGNMENT);
-  constexpr size_t buff_size_scales = (CHUNK_DIM_Y * CHUNK_DIM_X) / 16 * sizeof(ScaleType);
+  const size_t buff_size_scales = (CHUNK_DIM_Y * CHUNK_DIM_X) / 16 * typeToSize(scale_dtype);
 
   constexpr size_t in_mem = buff_size_aligned_in;
 
   constexpr size_t out_data_mem = buff_size_aligned_out;
   constexpr size_t out_data_transpose_mem = buff_size_aligned_out;
-  constexpr size_t out_scales_transpose_mem = buff_size_scales;
+  const size_t out_scales_transpose_mem = buff_size_scales;
 
   constexpr size_t out_mem = out_data_mem + out_data_transpose_mem;
 
-  constexpr size_t dshmem_size = in_mem + out_mem + out_scales_transpose_mem + TMA_SHMEM_ALIGNMENT;
+  const size_t dshmem_size = in_mem + out_mem + out_scales_transpose_mem + TMA_SHMEM_ALIGNMENT;
 
   TRANSFORMER_ENGINE_SWITCH_CONDITION(
       use_stochastic_rounding, USE_STOCHASTIC_ROUNDING,
 
       TRANSFORMER_ENGINE_SWITCH_CONDITION(return_transpose, RETURN_TRANSPOSE, {
-        auto kernel = group_quantize_transpose_nvfp4_kernel<COMPUTE_ACTIVATIONS, ParamOP, OP, IType,
-                                                            ScaleType, USE_STOCHASTIC_ROUNDING,
-                                                            RETURN_TRANSPOSE>;
-
         if constexpr (use_2d_quantization) {
           NVTE_ERROR("2D quantization is not supported for group quantize transpose.");
         }
 
-        NVTE_CHECK_CUDA(
-            cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size));
-        kernel<<<grid, block_size, dshmem_size, stream>>>(tensor_map_input, tensor_map_output,
-                                                          scales_ptr, noop_ptr, rows, cols,
-                                                          scale_stride, rng_state, kernel_args);
+        if (scale_dtype == DType::kFloat8E4M3) {
+          using ScaleType = fp8e4m3;
+          auto kernel =
+              group_quantize_transpose_nvfp4_kernel<COMPUTE_ACTIVATIONS, ParamOP, OP, IType,
+                                                    ScaleType, USE_STOCHASTIC_ROUNDING,
+                                                    RETURN_TRANSPOSE>;
+          auto *scales_ptr = reinterpret_cast<ScaleType *>(output->scale_inv.dptr);
+          NVTE_CHECK_CUDA(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                               dshmem_size));
+          kernel<<<grid, block_size, dshmem_size, stream>>>(tensor_map_input, tensor_map_output,
+                                                            scales_ptr, noop_ptr, rows, cols,
+                                                            scale_stride, rng_state, kernel_args);
+        } else {
+#if CUDA_VERSION >= 13040
+          using ScaleType = fp8ue5m3;
+          auto kernel =
+              group_quantize_transpose_nvfp4_kernel<COMPUTE_ACTIVATIONS, ParamOP, OP, IType,
+                                                    ScaleType, USE_STOCHASTIC_ROUNDING,
+                                                    RETURN_TRANSPOSE>;
+          auto *scales_ptr = reinterpret_cast<ScaleType *>(output->scale_inv.dptr);
+          NVTE_CHECK_CUDA(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                               dshmem_size));
+          kernel<<<grid, block_size, dshmem_size, stream>>>(tensor_map_input, tensor_map_output,
+                                                            scales_ptr, noop_ptr, rows, cols,
+                                                            scale_stride, rng_state, kernel_args);
+#endif
+        }
         NVTE_CHECK_CUDA(cudaGetLastError());
       }););
-#else
-  NVTE_ERROR("FP4 support requires CUDA 12.8+, but compile-time CUDA version is ", CUDA_VERSION);
-#endif  // FP4_TYPE_SUPPORTED
-}
-
-template <bool use_2d_quantization>
-void group_quantize_transpose(const Tensor &input, const Tensor *noop,
-                              std::vector<Tensor *> &output_list, const size_t *split_sections,
-                              size_t num_tensors, const QuantizationConfig *quant_config,
-                              cudaStream_t stream) {
-#if FP4_TYPE_SUPPORTED
-  Tensor *first_output = nullptr;
-  for (Tensor *output : output_list) {
-    if (output->has_data()) {
-      first_output = output;
-      break;
-    }
-  }
-  NVTE_CHECK(first_output != nullptr, "No output tensor found.");
-  const DType scale_dtype = first_output->scale_inv.dtype;
-  for (const Tensor *output : output_list) {
-    if (output->has_data()) {
-      NVTE_CHECK(output->scale_inv.dtype == scale_dtype,
-                 "All grouped NVFP4 scale tensors must have the same dtype (expected ",
-                 to_string(scale_dtype), ", got ", to_string(output->scale_inv.dtype), ").");
-    }
-  }
-
-  if (scale_dtype == DType::kFloat8E4M3) {
-    group_quantize_transpose_impl<fp8e4m3, use_2d_quantization>(
-        input, noop, output_list, split_sections, num_tensors, quant_config, stream);
-    return;
-  }
-
-  if (scale_dtype == DType::kFloat8UE5M3) {
-#if CUDA_VERSION >= 13040
-    group_quantize_transpose_impl<fp8ue5m3, use_2d_quantization>(
-        input, noop, output_list, split_sections, num_tensors, quant_config, stream);
-    return;
-#else
-    NVTE_ERROR(
-        "NVFP4 group quantization with UE5M3 scales requires CUDA 13.4 or newer, "
-        "but compile-time CUDA version is ",
-        CUDA_VERSION, ".");
-#endif
-  }
-
-  NVTE_ERROR("NVFP4 group quantization requires E4M3 or UE5M3 scale tensors, got ",
-             to_string(scale_dtype), ".");
 #else
   NVTE_ERROR("FP4 support requires CUDA 12.8+, but compile-time CUDA version is ", CUDA_VERSION);
 #endif  // FP4_TYPE_SUPPORTED
