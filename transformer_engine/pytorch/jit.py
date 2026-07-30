@@ -28,6 +28,8 @@ def lazy_compile(func):
     @wraps(func)
     def wrapper(*args, **kwargs):
         nonlocal compiled_func
+        if torch.compiler.is_compiling():
+            return func(*args, **kwargs)
         if compiled_func is None:
             compiled_func = torch.compile(func)
         return compiled_func(*args, **kwargs)
