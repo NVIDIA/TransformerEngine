@@ -1854,22 +1854,25 @@ class DotProductAttention(TransformerEngineBaseModule):
                     _attention_backends["fused_attention_backend"] = fused_attention_backend
                     _attention_backends["use_unfused_attention"] = use_unfused_attention
                     _attention_backends["backend_selection_requires_update"] = False
-                    # Logged in eager only: dynamo graph-breaks on logging.Logger
-                    # methods, and log arguments are evaluated regardless of the
-                    # logger, so a no-op logger would not be enough.
-                    if not torch.compiler.is_compiling():
-                        if use_flash_attention:
-                            self.logger.info(
-                                "Running with FlashAttention backend (version %s)",
-                                flash_attention_backend,
-                            )
-                        elif use_fused_attention:
-                            self.logger.info(
-                                "Running with FusedAttention backend (sub-backend %s)",
-                                int(fused_attention_backend),
-                            )
-                        elif use_unfused_attention:
-                            self.logger.info("Running with UnfusedDotProductAttention backend")
+                    # logging.Logger methods graph-break under torch.compile, so
+                    # selection is only logged in eager -- as in
+                    # get_attention_backend. Note the arguments below are
+                    # evaluated either way, so they have to stay traceable.
+                    logger = (
+                        dpa_utils.no_op_logger if torch.compiler.is_compiling() else self.logger
+                    )
+                    if use_flash_attention:
+                        logger.info(
+                            "Running with FlashAttention backend (version %s)",
+                            flash_attention_backend,
+                        )
+                    elif use_fused_attention:
+                        logger.info(
+                            "Running with FusedAttention backend (sub-backend %s)",
+                            int(fused_attention_backend),
+                        )
+                    elif use_unfused_attention:
+                        logger.info("Running with UnfusedDotProductAttention backend")
                 else:
                     use_flash_attention = _attention_backends["use_flash_attention"]
                     flash_attention_backend = _attention_backends["flash_attention_backend"]

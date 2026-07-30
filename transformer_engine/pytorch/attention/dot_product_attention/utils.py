@@ -346,7 +346,7 @@ class _NoOpLogger:
         """No-op."""
 
 
-_no_op_logger = _NoOpLogger()
+no_op_logger = _NoOpLogger()
 
 
 @torch.compiler.assume_constant_result
@@ -461,7 +461,7 @@ def get_attention_backend(
     if torch.compiler.is_compiling():
         # logging.Logger methods graph-break under torch.compile; backend
         # selection logs are only emitted in eager mode.
-        logger = _no_op_logger
+        logger = no_op_logger
     else:
         logger = logging.getLogger("DotProductAttention")
         logger.setLevel(AttentionLogging._log_level)
