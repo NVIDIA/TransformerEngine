@@ -27,6 +27,7 @@
 #include <transformer_engine/transformer_engine.h>
 
 #include <cstdint>
+#include <type_traits>
 
 #include "../../common.h"
 #include "../../util/math.h"
@@ -97,9 +98,10 @@ struct CandidatePair {
   Candidate map6;
 };
 
+template <typename ScaleType>
 struct ScalePair {
-  nvfp4_scale_t map4;
-  nvfp4_scale_t map6;
+  ScaleType map4;
+  ScaleType map6;
   float inv_map4;
   float inv_map6;
   float global_encode_scale;
@@ -122,19 +124,34 @@ __device__ __forceinline__ float compute_error_rn(const float diff) {
   }
 }
 
-template <int E4M3_MAX>
-__device__ __forceinline__ ScalePair compute_scale_pair(const float block_amax,
-                                                        const float global_amax) {
+template <typename ScaleType, int E4M3_MAX>
+__host__ __device__ constexpr float global_scale_max() {
+  static_assert(E4M3_MAX == 448 || E4M3_MAX == 256, "Unsupported NVFP4 E4M3 max.");
+  if constexpr (std::is_same_v<ScaleType, fp8e4m3>) {
+    return static_cast<float>(E4M3_MAX);
+  } else {
+    return detail::TypeExtrema<ScaleType>::max;
+  }
+}
+
+template <typename ScaleType, int E4M3_MAX>
+__device__ __forceinline__ ScalePair<ScaleType> compute_scale_pair(const float block_amax,
+                                                                   const float global_amax) {
   static_assert(E4M3_MAX == 448 || E4M3_MAX == 256, "Unsupported NVFP4 E4M3 max.");
   constexpr float fp4_max = detail::TypeExtrema<fp4e2m1>::max;  // 6.0f
-  constexpr float fp8_max = detail::TypeExtrema<fp8e4m3>::max;  // 448.0f
+  constexpr float fp8_max = detail::TypeExtrema<ScaleType>::max;
+  constexpr float encode_scale_max = global_scale_max<ScaleType, E4M3_MAX>();
   constexpr float expand_to_map4 = 1.5f;
-  const float S_enc = core::compute_global_encode_scaling_factor_FP4<E4M3_MAX>(global_amax);
+  float S_enc = encode_scale_max * fp4_max / global_amax;
+  S_enc = fminf(S_enc, detail::TypeExtrema<float>::max);
+  if (global_amax == 0.0f || S_enc == 0.0f) {
+    S_enc = 1.0f;
+  }
   const float base = block_amax / fp4_max * S_enc;
 
-  ScalePair scales;
-  scales.map4 = static_cast<nvfp4_scale_t>(fminf(base * expand_to_map4, fp8_max));
-  scales.map6 = static_cast<nvfp4_scale_t>(fminf(base, fp8_max));
+  ScalePair<ScaleType> scales;
+  scales.map4 = static_cast<ScaleType>(fminf(base * expand_to_map4, fp8_max));
+  scales.map6 = static_cast<ScaleType>(fminf(base, fp8_max));
 
   const float S_dec = 1.0f / S_enc;
   scales.inv_map4 =
@@ -187,12 +204,12 @@ __device__ __forceinline__ void load_col_group(const IType *tile, const int row_
   }
 }
 
-template <typename Cfg, int E4M3_MAX, int SHIFT>
+template <typename Cfg, typename ScaleType, int E4M3_MAX, int SHIFT>
 __device__ __forceinline__ void accumulate_dequant_error(const uint32_t dequant_bits, const float x,
                                                          const float sf, const float global_amax,
                                                          float *err) {
   constexpr float fp4_max = detail::TypeExtrema<fp4e2m1>::max;  // 6.0f
-  constexpr float fp8_max = static_cast<float>(E4M3_MAX);
+  constexpr float fp8_max = global_scale_max<ScaleType, E4M3_MAX>();
   constexpr float err_denom = fp4_max * fp8_max;
   const uint16_t half_bits = (dequant_bits >> SHIFT) & 0xFFFF;
   const float dequant = __half2float(__ushort_as_half(half_bits));
@@ -201,27 +218,37 @@ __device__ __forceinline__ void accumulate_dequant_error(const uint32_t dequant_
   *err = __fadd_rn(*err, compute_error_rn<Cfg::mode>(diff));
 }
 
-__device__ __forceinline__ uint8_t fp8_bits(const nvfp4_scale_t sf) {
+template <typename ScaleType>
+__device__ __forceinline__ uint8_t fp8_bits(const ScaleType sf) {
   return *reinterpret_cast<const uint8_t *>(&sf);
 }
 
-__device__ __forceinline__ FP16ErrorScalePair compute_fp16_error_scales(const ScalePair &scales) {
+template <typename ScaleType>
+__device__ __forceinline__ FP16ErrorScalePair
+compute_fp16_error_scales(const ScalePair<ScaleType> &scales) {
   FP16ErrorScalePair result;
-  const uint32_t packed_scales = static_cast<uint32_t>(fp8_bits(scales.map4)) |
-                                 (static_cast<uint32_t>(fp8_bits(scales.map6)) << 8);
-  asm volatile(
-      "{\n"
-      ".reg .b16 fp8_pair;\n"
-      ".reg .b16 map4_h, map6_h;\n"
-      ".reg .b32 scale_h2;\n"
-      "cvt.u16.u32 fp8_pair, %2;\n"
-      "cvt.rn.f16x2.e4m3x2 scale_h2, fp8_pair;\n"
-      "mov.b32 {map4_h, map6_h}, scale_h2;\n"
-      "mov.b32 %0, {map4_h, map4_h};\n"
-      "mov.b32 %1, {map6_h, map6_h};\n"
-      "}"
-      : "=r"(result.map4), "=r"(result.map6)
-      : "r"(packed_scales));
+  if constexpr (std::is_same_v<ScaleType, fp8e4m3>) {
+    const uint32_t packed_scales = static_cast<uint32_t>(fp8_bits(scales.map4)) |
+                                   (static_cast<uint32_t>(fp8_bits(scales.map6)) << 8);
+    asm volatile(
+        "{\n"
+        ".reg .b16 fp8_pair;\n"
+        ".reg .b16 map4_h, map6_h;\n"
+        ".reg .b32 scale_h2;\n"
+        "cvt.u16.u32 fp8_pair, %2;\n"
+        "cvt.rn.f16x2.e4m3x2 scale_h2, fp8_pair;\n"
+        "mov.b32 {map4_h, map6_h}, scale_h2;\n"
+        "mov.b32 %0, {map4_h, map4_h};\n"
+        "mov.b32 %1, {map6_h, map6_h};\n"
+        "}"
+        : "=r"(result.map4), "=r"(result.map6)
+        : "r"(packed_scales));
+  } else {
+    const __half2 map4_h2 = __float2half2_rn(static_cast<float>(scales.map4));
+    const __half2 map6_h2 = __float2half2_rn(static_cast<float>(scales.map6));
+    result.map4 = *reinterpret_cast<const uint32_t *>(&map4_h2);
+    result.map6 = *reinterpret_cast<const uint32_t *>(&map6_h2);
+  }
   return result;
 }
 
@@ -257,9 +284,9 @@ __device__ __forceinline__ void accumulate_fp16_scaled_error_pair(const uint32_t
   *err = __fadd_rn(*err, compute_error_rn<Cfg::mode>(diff1));
 }
 
-template <typename Cfg, int E4M3_MAX>
+template <typename Cfg, typename ScaleType, int E4M3_MAX>
 __device__ __forceinline__ uint32_t cvt_fp32_to_fp4_8x_with_error(
-    const float (&x)[8], const float block_scale_inverse, const nvfp4_scale_t sf,
+    const float (&x)[8], const float block_scale_inverse, const ScaleType sf,
     const uint32_t fp16_error_scale, const float global_amax, const float global_encode_scale,
     float *err) {
   uint32_t out = 0;
@@ -295,7 +322,7 @@ __device__ __forceinline__ uint32_t cvt_fp32_to_fp4_8x_with_error(
         "Try recompiling with sm_XXXa instead of sm_XXX.");
   }
 
-  if constexpr (Cfg::err_use_fast_math) {
+  if constexpr (Cfg::err_use_fast_math && std::is_same_v<ScaleType, fp8e4m3>) {
     accumulate_fp16_scaled_error_pair<Cfg>(out_dequant_1, x[0], x[1], fp16_error_scale,
                                            global_encode_scale, err);
     accumulate_fp16_scaled_error_pair<Cfg>(out_dequant_2, x[2], x[3], fp16_error_scale,
@@ -306,39 +333,47 @@ __device__ __forceinline__ uint32_t cvt_fp32_to_fp4_8x_with_error(
                                            global_encode_scale, err);
   } else {
     const float sf_float = static_cast<float>(sf);
-    accumulate_dequant_error<Cfg, E4M3_MAX, 0>(out_dequant_1, x[0], sf_float, global_amax, err);
-    accumulate_dequant_error<Cfg, E4M3_MAX, 16>(out_dequant_1, x[1], sf_float, global_amax, err);
-    accumulate_dequant_error<Cfg, E4M3_MAX, 0>(out_dequant_2, x[2], sf_float, global_amax, err);
-    accumulate_dequant_error<Cfg, E4M3_MAX, 16>(out_dequant_2, x[3], sf_float, global_amax, err);
-    accumulate_dequant_error<Cfg, E4M3_MAX, 0>(out_dequant_3, x[4], sf_float, global_amax, err);
-    accumulate_dequant_error<Cfg, E4M3_MAX, 16>(out_dequant_3, x[5], sf_float, global_amax, err);
-    accumulate_dequant_error<Cfg, E4M3_MAX, 0>(out_dequant_4, x[6], sf_float, global_amax, err);
-    accumulate_dequant_error<Cfg, E4M3_MAX, 16>(out_dequant_4, x[7], sf_float, global_amax, err);
+    accumulate_dequant_error<Cfg, ScaleType, E4M3_MAX, 0>(out_dequant_1, x[0], sf_float,
+                                                          global_amax, err);
+    accumulate_dequant_error<Cfg, ScaleType, E4M3_MAX, 16>(out_dequant_1, x[1], sf_float,
+                                                           global_amax, err);
+    accumulate_dequant_error<Cfg, ScaleType, E4M3_MAX, 0>(out_dequant_2, x[2], sf_float,
+                                                          global_amax, err);
+    accumulate_dequant_error<Cfg, ScaleType, E4M3_MAX, 16>(out_dequant_2, x[3], sf_float,
+                                                           global_amax, err);
+    accumulate_dequant_error<Cfg, ScaleType, E4M3_MAX, 0>(out_dequant_3, x[4], sf_float,
+                                                          global_amax, err);
+    accumulate_dequant_error<Cfg, ScaleType, E4M3_MAX, 16>(out_dequant_3, x[5], sf_float,
+                                                           global_amax, err);
+    accumulate_dequant_error<Cfg, ScaleType, E4M3_MAX, 0>(out_dequant_4, x[6], sf_float,
+                                                          global_amax, err);
+    accumulate_dequant_error<Cfg, ScaleType, E4M3_MAX, 16>(out_dequant_4, x[7], sf_float,
+                                                           global_amax, err);
   }
   return out;
 }
 
-template <typename Cfg, int E4M3_MAX>
+template <typename Cfg, typename ScaleType, int E4M3_MAX>
 __device__ __forceinline__ CandidatePair make_candidates(const float (&x0)[8], const float (&x1)[8],
-                                                         const ScalePair &scales,
+                                                         const ScalePair<ScaleType> &scales,
                                                          const float global_amax) {
   CandidatePair candidates;
   candidates.map4.err = 0.0f;
   candidates.map6.err = 0.0f;
   FP16ErrorScalePair fp16_error_scales{};
-  if constexpr (Cfg::err_use_fast_math) {
+  if constexpr (Cfg::err_use_fast_math && std::is_same_v<ScaleType, fp8e4m3>) {
     fp16_error_scales = compute_fp16_error_scales(scales);
   }
-  candidates.map4.packed[0] = cvt_fp32_to_fp4_8x_with_error<Cfg, E4M3_MAX>(
+  candidates.map4.packed[0] = cvt_fp32_to_fp4_8x_with_error<Cfg, ScaleType, E4M3_MAX>(
       x0, scales.inv_map4, scales.map4, fp16_error_scales.map4, global_amax,
       scales.global_encode_scale, &candidates.map4.err);
-  candidates.map6.packed[0] = cvt_fp32_to_fp4_8x_with_error<Cfg, E4M3_MAX>(
+  candidates.map6.packed[0] = cvt_fp32_to_fp4_8x_with_error<Cfg, ScaleType, E4M3_MAX>(
       x0, scales.inv_map6, scales.map6, fp16_error_scales.map6, global_amax,
       scales.global_encode_scale, &candidates.map6.err);
-  candidates.map4.packed[1] = cvt_fp32_to_fp4_8x_with_error<Cfg, E4M3_MAX>(
+  candidates.map4.packed[1] = cvt_fp32_to_fp4_8x_with_error<Cfg, ScaleType, E4M3_MAX>(
       x1, scales.inv_map4, scales.map4, fp16_error_scales.map4, global_amax,
       scales.global_encode_scale, &candidates.map4.err);
-  candidates.map6.packed[1] = cvt_fp32_to_fp4_8x_with_error<Cfg, E4M3_MAX>(
+  candidates.map6.packed[1] = cvt_fp32_to_fp4_8x_with_error<Cfg, ScaleType, E4M3_MAX>(
       x1, scales.inv_map6, scales.map6, fp16_error_scales.map6, global_amax,
       scales.global_encode_scale, &candidates.map6.err);
   return candidates;
@@ -380,8 +415,9 @@ __device__ __forceinline__ const uint32_t *select_packed(const CandidatePair &ca
   return candidates.map6.packed;
 }
 
-__device__ __forceinline__ nvfp4_scale_t select_scale(const ScalePair &scales,
-                                                      const bool pick_map4) {
+template <typename ScaleType>
+__device__ __forceinline__ ScaleType select_scale(const ScalePair<ScaleType> &scales,
+                                                  const bool pick_map4) {
   if (pick_map4) {
     return scales.map4;
   }
@@ -449,9 +485,9 @@ __device__ void load_stage_to_shared_async(const IType *input, IType *tile, cons
   }
 }
 
-template <bool USE_2D_QUANTIZATION, bool ROW_SCALED_NVFP4, typename Cfg, int E4M3_MAX,
-          typename IType>
-__device__ void quantize_stage_rowwise(const IType *tile, fp4e2m1x2 *output, nvfp4_scale_t *scales,
+template <bool USE_2D_QUANTIZATION, bool ROW_SCALED_NVFP4, typename Cfg, typename ScaleType,
+          int E4M3_MAX, typename IType>
+__device__ void quantize_stage_rowwise(const IType *tile, fp4e2m1x2 *output, ScaleType *scales,
                                        const float *amax, const size_t rows, const size_t cols,
                                        const size_t stage_row, const size_t tile_col,
                                        const size_t scale_stride) {
@@ -481,8 +517,10 @@ __device__ void quantize_stage_rowwise(const IType *tile, fp4e2m1x2 *output, nvf
       global_amax = amax[global_row];
     }
 
-    const ScalePair scale_pair = compute_scale_pair<E4M3_MAX>(block_amax, global_amax);
-    CandidatePair candidates = make_candidates<Cfg, E4M3_MAX>(x0, x1, scale_pair, global_amax);
+    const ScalePair<ScaleType> scale_pair =
+        compute_scale_pair<ScaleType, E4M3_MAX>(block_amax, global_amax);
+    CandidatePair candidates =
+        make_candidates<Cfg, ScaleType, E4M3_MAX>(x0, x1, scale_pair, global_amax);
 
     float err_map4 = candidates.map4.err;
     float err_map6 = candidates.map6.err;
@@ -492,7 +530,7 @@ __device__ void quantize_stage_rowwise(const IType *tile, fp4e2m1x2 *output, nvf
     }
 
     const bool pick_map4 = err_map4 < err_map6;
-    const nvfp4_scale_t selected_scale = select_scale(scale_pair, pick_map4);
+    const ScaleType selected_scale = select_scale(scale_pair, pick_map4);
     const uint32_t *selected = select_packed(candidates, pick_map4);
 
     const size_t global_col_group = global_col / kGroupSize;
@@ -501,11 +539,11 @@ __device__ void quantize_stage_rowwise(const IType *tile, fp4e2m1x2 *output, nvf
   }
 }
 
-template <bool USE_2D_QUANTIZATION, typename Cfg, int E4M3_MAX, typename IType>
-__device__ void quantize_stage_colwise(const IType *tile, fp4e2m1x2 *output_t,
-                                       nvfp4_scale_t *scales_t, const float *amax,
-                                       const size_t rows, const size_t cols, const size_t stage_row,
-                                       const size_t tile_col, const size_t scale_stride_t) {
+template <bool USE_2D_QUANTIZATION, typename Cfg, typename ScaleType, int E4M3_MAX, typename IType>
+__device__ void quantize_stage_colwise(const IType *tile, fp4e2m1x2 *output_t, ScaleType *scales_t,
+                                       const float *amax, const size_t rows, const size_t cols,
+                                       const size_t stage_row, const size_t tile_col,
+                                       const size_t scale_stride_t) {
   constexpr int groups = kStageRowGroups * kTileCols;
   for (int group = threadIdx.x; group < groups; group += blockDim.x) {
     const int local_row_group = group / kTileCols;
@@ -528,8 +566,10 @@ __device__ void quantize_stage_colwise(const IType *tile, fp4e2m1x2 *output_t,
     }
 
     const float global_amax = amax[0];
-    const ScalePair scale_pair = compute_scale_pair<E4M3_MAX>(block_amax, global_amax);
-    CandidatePair candidates = make_candidates<Cfg, E4M3_MAX>(x0, x1, scale_pair, global_amax);
+    const ScalePair<ScaleType> scale_pair =
+        compute_scale_pair<ScaleType, E4M3_MAX>(block_amax, global_amax);
+    CandidatePair candidates =
+        make_candidates<Cfg, ScaleType, E4M3_MAX>(x0, x1, scale_pair, global_amax);
 
     float err_map4 = candidates.map4.err;
     float err_map6 = candidates.map6.err;
@@ -539,7 +579,7 @@ __device__ void quantize_stage_colwise(const IType *tile, fp4e2m1x2 *output_t,
     }
 
     const bool pick_map4 = err_map4 < err_map6;
-    const nvfp4_scale_t selected_scale = select_scale(scale_pair, pick_map4);
+    const ScaleType selected_scale = select_scale(scale_pair, pick_map4);
     const uint32_t *selected = select_packed(candidates, pick_map4);
 
     const size_t global_row_group = global_row / kGroupSize;
@@ -549,13 +589,13 @@ __device__ void quantize_stage_colwise(const IType *tile, fp4e2m1x2 *output_t,
 }
 
 template <bool USE_2D_QUANTIZATION, bool RETURN_IDENTITY, bool RETURN_TRANSPOSE,
-          bool ROW_SCALED_NVFP4, typename Cfg, int E4M3_MAX, typename IType>
+          bool ROW_SCALED_NVFP4, typename Cfg, typename ScaleType, int E4M3_MAX, typename IType>
 __global__ void __launch_bounds__(kThreads)
     quantize_4over6_kernel(const IType *input, fp4e2m1x2 *output, fp4e2m1x2 *output_t,
-                           nvfp4_scale_t *scales, nvfp4_scale_t *scales_t,
-                           const float *amax_rowwise, const float *amax_colwise, const size_t rows,
-                           const size_t cols, const size_t scale_stride,
-                           const size_t scale_stride_t, const float *noop) {
+                           ScaleType *scales, ScaleType *scales_t, const float *amax_rowwise,
+                           const float *amax_colwise, const size_t rows, const size_t cols,
+                           const size_t scale_stride, const size_t scale_stride_t,
+                           const float *noop) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   if (noop != nullptr && noop[0] == 1.0f) {
     return;
@@ -590,7 +630,7 @@ __global__ void __launch_bounds__(kThreads)
     IType *stage_tile = stage_tiles[stage];
 
     if constexpr (RETURN_IDENTITY) {
-      quantize_stage_rowwise<USE_2D_QUANTIZATION, ROW_SCALED_NVFP4, Cfg, E4M3_MAX>(
+      quantize_stage_rowwise<USE_2D_QUANTIZATION, ROW_SCALED_NVFP4, Cfg, ScaleType, E4M3_MAX>(
           stage_tile, output, scales, amax_rowwise, rows, cols, stage_row, tile_col, scale_stride);
     }
 
@@ -599,7 +639,7 @@ __global__ void __launch_bounds__(kThreads)
       if (columnwise_amax == nullptr) {
         columnwise_amax = amax_rowwise;
       }
-      quantize_stage_colwise<USE_2D_QUANTIZATION, Cfg, E4M3_MAX>(
+      quantize_stage_colwise<USE_2D_QUANTIZATION, Cfg, ScaleType, E4M3_MAX>(
           stage_tile, output_t, scales_t, columnwise_amax, rows, cols, stage_row, tile_col,
           scale_stride_t);
     }
@@ -614,7 +654,7 @@ __global__ void __launch_bounds__(kThreads)
 #endif
 }
 
-template <bool USE_2D_QUANTIZATION, typename Cfg, int E4M3_MAX, typename IType>
+template <bool USE_2D_QUANTIZATION, typename Cfg, typename ScaleType, int E4M3_MAX, typename IType>
 void launch_quantize_4over6(const Tensor &input, const Tensor *noop, Tensor *output,
                             cudaStream_t stream) {
   const size_t rows = input.flat_first_dim();
@@ -626,8 +666,8 @@ void launch_quantize_4over6(const Tensor &input, const Tensor *noop, Tensor *out
   const auto *input_ptr = reinterpret_cast<const IType *>(input.data.dptr);
   auto *output_ptr = reinterpret_cast<fp4e2m1x2 *>(output->data.dptr);
   auto *output_t_ptr = reinterpret_cast<fp4e2m1x2 *>(output->columnwise_data.dptr);
-  auto *scales_ptr = reinterpret_cast<nvfp4_scale_t *>(output->scale_inv.dptr);
-  auto *scales_t_ptr = reinterpret_cast<nvfp4_scale_t *>(output->columnwise_scale_inv.dptr);
+  auto *scales_ptr = reinterpret_cast<ScaleType *>(output->scale_inv.dptr);
+  auto *scales_t_ptr = reinterpret_cast<ScaleType *>(output->columnwise_scale_inv.dptr);
   const auto *amax_rowwise_ptr = reinterpret_cast<const float *>(output->amax.dptr);
   const auto *amax_colwise_ptr = reinterpret_cast<const float *>(output->columnwise_amax.dptr);
   const auto *noop_ptr = reinterpret_cast<const float *>(noop->data.dptr);
@@ -643,7 +683,7 @@ void launch_quantize_4over6(const Tensor &input, const Tensor *noop, Tensor *out
     TRANSFORMER_ENGINE_SWITCH_CONDITION(return_transpose, RETURN_TRANSPOSE, {
       TRANSFORMER_ENGINE_SWITCH_CONDITION(row_scaled_nvfp4, ROW_SCALED_NVFP4, {
         auto kernel = quantize_4over6_kernel<USE_2D_QUANTIZATION, RETURN_IDENTITY, RETURN_TRANSPOSE,
-                                             ROW_SCALED_NVFP4, Cfg, E4M3_MAX, IType>;
+                                             ROW_SCALED_NVFP4, Cfg, ScaleType, E4M3_MAX, IType>;
         cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, shmem);
         kernel<<<grid, block, shmem, stream>>>(input_ptr, output_ptr, output_t_ptr, scales_ptr,
                                                scales_t_ptr, amax_rowwise_ptr, amax_colwise_ptr,
@@ -657,9 +697,9 @@ void launch_quantize_4over6(const Tensor &input, const Tensor *noop, Tensor *out
 
 #endif  // FP4_TYPE_SUPPORTED
 
-template <bool use_2d_quantization>
-void quantize_4over6(const Tensor &input, const Tensor *noop, Tensor *output,
-                     const QuantizationConfig *quant_config, cudaStream_t stream) {
+template <typename ScaleType, bool use_2d_quantization>
+void quantize_4over6_impl(const Tensor &input, const Tensor *noop, Tensor *output,
+                          const QuantizationConfig *quant_config, cudaStream_t stream) {
 #if FP4_TYPE_SUPPORTED
   using namespace quantize_4over6_kernel;
 
@@ -712,11 +752,52 @@ void quantize_4over6(const Tensor &input, const Tensor *noop, Tensor *output,
                 TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
                     input.dtype(), IType,
                     quantize_4over6_kernel::launch_quantize_4over6<use_2d_quantization, Cfg,
-                                                                   E4M3_MAX, IType>(
+                                                                   ScaleType, E4M3_MAX, IType>(
                         input, noop, output, stream););
               });););
 
   NVTE_CHECK_CUDA(cudaGetLastError());
+#else
+  NVTE_ERROR("FP4 support requires CUDA 12.8+, but compile-time CUDA version is ", CUDA_VERSION);
+#endif  // FP4_TYPE_SUPPORTED
+}
+
+template <bool use_2d_quantization>
+void quantize_4over6(const Tensor &input, const Tensor *noop, Tensor *output,
+                     const QuantizationConfig *quant_config, cudaStream_t stream) {
+#if FP4_TYPE_SUPPORTED
+  const bool return_rowwise = output->has_data();
+  const bool return_transpose = output->has_columnwise_data();
+  NVTE_CHECK(return_rowwise || return_transpose,
+             "NVFP4 4over6 output tensor must have rowwise or columnwise data.");
+  const DType scale_dtype =
+      return_rowwise ? output->scale_inv.dtype : output->columnwise_scale_inv.dtype;
+  if (return_rowwise && return_transpose) {
+    NVTE_CHECK(output->scale_inv.dtype == output->columnwise_scale_inv.dtype,
+               "Rowwise and columnwise NVFP4 scale tensors must have the same dtype (got ",
+               to_string(output->scale_inv.dtype), " and ",
+               to_string(output->columnwise_scale_inv.dtype), ").");
+  }
+
+  if (scale_dtype == DType::kFloat8E4M3) {
+    quantize_4over6_impl<fp8e4m3, use_2d_quantization>(input, noop, output, quant_config, stream);
+    return;
+  }
+
+  if (scale_dtype == DType::kFloat8UE5M3) {
+#if CUDA_VERSION >= 13040
+    quantize_4over6_impl<fp8ue5m3, use_2d_quantization>(input, noop, output, quant_config, stream);
+    return;
+#else
+    NVTE_ERROR(
+        "NVFP4 4over6 quantization with UE5M3 scales requires CUDA 13.4 or newer, "
+        "but compile-time CUDA version is ",
+        CUDA_VERSION, ".");
+#endif
+  }
+
+  NVTE_ERROR("NVFP4 4over6 quantization requires E4M3 or UE5M3 scale tensors, got ",
+             to_string(scale_dtype), ".");
 #else
   NVTE_ERROR("FP4 support requires CUDA 12.8+, but compile-time CUDA version is ", CUDA_VERSION);
 #endif  // FP4_TYPE_SUPPORTED
