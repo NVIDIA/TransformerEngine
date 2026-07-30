@@ -155,6 +155,7 @@ def _make_graphed_callables(
     pool: Optional[Tuple[int, ...]] = None,
     retain_graph_in_backward: bool = False,
     _reuse_graph_input_output_buffers: bool = False,
+    clone_param_grads_on_return: bool = True,
     pre_warmup_hook: Optional[Callable] = None,
     post_warmup_hook: Optional[Callable] = None,
     capture_time_hooks: List[Dict[str, Dict]],
@@ -455,6 +456,24 @@ def _make_graphed_callables(
     bwd_dw_graphs = [torch.cuda.CUDAGraph() for _ in range(len(flatten_sample_args))]
     graph_callables = [None for _ in range(len(flatten_sample_args))]
 
+    def _returned_param_grad_clone_slots(static_grad_inputs, module_params):
+        """Snapshot static grad slots that need clones before returning from Graphed.backward."""
+        if not clone_param_grads_on_return:
+            return (False,) * len(static_grad_inputs)
+        module_param_start = len(static_grad_inputs) - len(module_params)
+        # `skip_backward_post_hook` marks parameters whose gradient lifetime is
+        # managed by the delayed-wgrad module hook. With fused accumulation, the
+        # returned weight grad is only a dummy and does not carry the actual wgrad,
+        # which is written directly to `main_grad`. Therefore, these slots do not
+        # need to be cloned.
+        return tuple(
+            idx >= module_param_start
+            and not getattr(
+                module_params[idx - module_param_start], "skip_backward_post_hook", False
+            )
+            for idx in range(len(static_grad_inputs))
+        )
+
     # For cases with multiple active RNG states, e.g. TP.
     if graph_safe_rng_available():
         for _, state in get_all_rng_states().items():
@@ -665,6 +684,7 @@ def _make_graphed_callables(
         per_callable_output_unflatten_spec = [None] * len(flatten_sample_args)
         per_callable_static_grad_outputs = [None] * len(flatten_sample_args)
         per_callable_static_grad_inputs = [None] * len(flatten_sample_args)
+        per_callable_returned_param_grad_clone_slots = [None] * len(flatten_sample_args)
         fwd_idx = [0] * num_model_chunks
         bwd_idx = [0] * num_model_chunks
         static_grad_outputs_dict = {}
@@ -845,6 +865,13 @@ def _make_graphed_callables(
 
                     per_callable_static_grad_outputs[per_callable_bwd_idx] = static_grad_outputs
                     per_callable_static_grad_inputs[per_callable_bwd_idx] = static_grad_inputs
+                    returned_param_grad_clone_slots = _returned_param_grad_clone_slots(
+                        static_grad_inputs,
+                        per_callable_module_params[per_callable_bwd_idx],
+                    )
+                    per_callable_returned_param_grad_clone_slots[per_callable_bwd_idx] = (
+                        returned_param_grad_clone_slots
+                    )
 
                     # Weak ref the static outputs and static grad inputs that are no longer needed
                     # in the following steps. These two type of tensors are both in cudagraph
@@ -855,6 +882,18 @@ def _make_graphed_callables(
                         # no longer needed after the corresponding backward graph is built up.
                         per_callable_static_outputs[per_callable_bwd_idx] = make_weak_ref(
                             static_outputs
+                        )
+
+                        # Parameter grads can be weak-refed here only if they will be cloned
+                        # before returning from Graphed.backward.
+                        static_grad_inputs = per_callable_static_grad_inputs[per_callable_bwd_idx]
+                        per_callable_static_grad_inputs[per_callable_bwd_idx] = tuple(
+                            (
+                                make_weak_ref(grad_input)
+                                if returned_param_grad_clone_slots[idx] and grad_input is not None
+                                else grad_input
+                            )
+                            for idx, grad_input in enumerate(static_grad_inputs)
                         )
 
                         # Weak ref the static grad inputs of the previous backward pass within the
@@ -902,6 +941,7 @@ def _make_graphed_callables(
         # Capture backward graphs in reverse order
         per_callable_static_grad_outputs = []
         per_callable_static_grad_inputs = []
+        per_callable_returned_param_grad_clone_slots = []
         for static_input_surface, static_outputs, bwd_graph, bwd_dw_graph, bwd_idx in zip(
             reversed(per_callable_static_input_surfaces),
             reversed(per_callable_static_outputs),
@@ -960,10 +1000,19 @@ def _make_graphed_callables(
 
             per_callable_static_grad_outputs.append(static_grad_outputs)
             per_callable_static_grad_inputs.append(static_grad_inputs)
+            per_callable_returned_param_grad_clone_slots.append(
+                _returned_param_grad_clone_slots(
+                    static_grad_inputs,
+                    per_callable_module_params[bwd_idx],
+                )
+            )
 
-        # Reverses the most recent two lists
+        # Reverse the most recent per-callable lists.
         per_callable_static_grad_outputs = list(reversed(per_callable_static_grad_outputs))
         per_callable_static_grad_inputs = list(reversed(per_callable_static_grad_inputs))
+        per_callable_returned_param_grad_clone_slots = list(
+            reversed(per_callable_returned_param_grad_clone_slots)
+        )
     # Now for every per_callable list, per_callable_*[i] holds the stuff for the ith callable.
 
     def make_graphed_autograd_function(
@@ -977,6 +1026,7 @@ def _make_graphed_callables(
         static_outputs,
         static_grad_outputs,
         static_grad_inputs,
+        returned_param_grad_clone_slots,
     ):
         class Graphed(torch.autograd.Function):
             """Autograd function for graph replay."""
@@ -1056,9 +1106,17 @@ def _make_graphed_callables(
                         "Expected static_grad_inputs to be a tuple, but got"
                         f" {type(static_grad_inputs).__name__}"
                     )
-                return (None, None, None) + tuple(
-                    b.detach() if b is not None else b for b in static_grad_inputs
-                )
+                grad_inputs = []
+                for idx, grad_input in enumerate(static_grad_inputs):
+                    if grad_input is None:
+                        grad_inputs.append(None)
+                    elif returned_param_grad_clone_slots[idx]:
+                        # Returned parameter grads may be installed directly as param.grad.
+                        # Clone to avoid exposing CUDA graph static buffers to autograd users.
+                        grad_inputs.append(grad_input.detach().clone())
+                    else:
+                        grad_inputs.append(grad_input.detach())
+                return (None, None, None) + tuple(grad_inputs)
 
         def functionalized(*user_args, **user_kwargs):
 
@@ -1153,6 +1211,7 @@ def _make_graphed_callables(
             per_callable_static_outputs[i],
             per_callable_static_grad_outputs[i],
             per_callable_static_grad_inputs[i],
+            per_callable_returned_param_grad_clone_slots[i],
         )
 
         func = graph_callables[i]
@@ -1295,6 +1354,7 @@ def make_graphed_callables(
     pool: Optional[Tuple[int, ...]] = None,
     retain_graph_in_backward: bool = False,
     _reuse_graph_input_output_buffers: bool = False,
+    clone_param_grads_on_return: bool = True,
     pre_warmup_hook: Optional[Callable] = None,
     post_warmup_hook: Optional[Callable] = None,
     capture_time_hooks: Optional[List[Optional[Dict[str, Dict]]]] = None,
@@ -1336,6 +1396,15 @@ def make_graphed_callables(
         graphs. Only supported with Mcore interleaved pipeline parallelism, i.e.
         when `_order` is provided. All callables in `modules` are assumed to have
         inputs and outputs with the same dtype and shape.
+    clone_param_grads_on_return: bool, default = True
+        Clone parameter gradients before returning them from CUDA graph replay.
+        Disabling this avoids the extra clone/copy and may improve performance,
+        but returned parameter gradients will alias CUDA graph static gradient
+        buffers. These tensors no longer have standard PyTorch returned-gradient
+        lifetime semantics: a later replay of the same graph, or reused-buffer
+        replay of another callable, may overwrite retained hook or `.grad`
+        tensors. Only disable this when the caller consumes returned parameter
+        gradients before any such overwrite can occur.
     pre_warmup_hook: callable, default = None
                       A hook function that will be called once before all warmup iterations
                       (not once per callable).
@@ -1552,6 +1621,7 @@ def make_graphed_callables(
         pool=pool,
         retain_graph_in_backward=retain_graph_in_backward,
         _reuse_graph_input_output_buffers=_reuse_graph_input_output_buffers,
+        clone_param_grads_on_return=clone_param_grads_on_return,
         pre_warmup_hook=pre_warmup_hook,
         post_warmup_hook=post_warmup_hook,
         capture_time_hooks=capture_time_hooks,
