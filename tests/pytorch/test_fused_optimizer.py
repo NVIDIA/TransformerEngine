@@ -166,6 +166,19 @@ class TestFusedAdam(TestFusedOptimizer):
 
             torch.testing.assert_close(ref_param, tst_param)
 
+    def test_empty_param_at_end_of_group(self):
+        tensors = [
+            torch.ones(4, dtype=torch.float, device="cuda"),
+            torch.empty(0, dtype=torch.float, device="cuda"),
+        ]
+        ref_param, tst_param, ref_optim, tst_optim = self.gen_param_optim(tensors, self.options)
+
+        self.gen_grad(ref_param, tst_param)
+        ref_optim.step()
+        tst_optim.step()
+
+        torch.testing.assert_close(ref_param, tst_param)
+
     def gen_precision_aware_test(
         self,
         use_fp8_params,
@@ -795,6 +808,19 @@ class TestFusedSGD(TestFusedOptimizer):
 
     def test_half(self):
         self.gen_single_type_test(param_type=torch.float16)
+
+    def test_empty_param_at_end_of_group(self):
+        tensors = [
+            torch.ones(4, dtype=torch.float, device="cuda"),
+            torch.empty(0, dtype=torch.float, device="cuda"),
+        ]
+        ref_param, tst_param, ref_optim, tst_optim = self.gen_param_optim(tensors, self.options)
+
+        self.gen_grad(ref_param, tst_param)
+        ref_optim.step()
+        tst_optim.step()
+
+        torch.testing.assert_close(ref_param, tst_param)
 
 
 class Model(torch.nn.Module):

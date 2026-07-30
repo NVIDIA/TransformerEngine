@@ -127,20 +127,38 @@ class CusolverMpCtx:
     """cuSolverMp context for Newton-Schulz matrix orthogonalization.
 
     Context creation is expensive; create once and reuse across multiple
-    :func:`newton_schulz` calls.  Call :meth:`destroy` when done.
+    :func:`newton_schulz` calls. Creation is collective over ``group`` and
+    must be called by every group member on its intended CUDA device. Call
+    :meth:`destroy` before destroying ``group``.
     """
 
     def __init__(self, group: dist.ProcessGroup) -> None:
+        # The cuSolverMp grid borrows the ProcessGroupNCCL communicator. Keep
+        # the group alive until the native context has released the grid.
+        self._ptr: Optional[int] = None
+        self._group: Optional[dist.ProcessGroup] = group
+
+        if not dist.is_initialized():
+            raise RuntimeError(
+                "torch.distributed must be initialized before creating CusolverMpCtx"
+            )
+
         self.nranks = dist.get_world_size(group)
-        self._ptr = tex.cusolvermp_ctx_create(
-            _get_nccl_comm_ptr(group), dist.get_world_size(group), dist.get_rank(group)
-        )
+        self.rank = dist.get_rank(group)
+        if self.rank < 0:
+            raise RuntimeError("The current process is not a member of the supplied process group")
+
+        comm_ptr = _get_nccl_comm_ptr(group)
+        self._ptr = tex.cusolvermp_ctx_create(comm_ptr, self.nranks, self.rank)
 
     def destroy(self) -> None:
         """Destroy the underlying cuSolverMp context."""
-        if self._ptr is not None:
-            tex.cusolvermp_ctx_destroy(self._ptr)
+        try:
+            if self._ptr is not None:
+                tex.cusolvermp_ctx_destroy(self._ptr)
+        finally:
             self._ptr = None
+            self._group = None
 
     def __del__(self) -> None:
         # Called when the context is manually destroyed or during Python teardown
@@ -148,12 +166,20 @@ class CusolverMpCtx:
 
 
 def _get_nccl_comm_ptr(group: dist.ProcessGroup) -> int:
-    """Extract the raw NCCL communicator pointer from a PyTorch process group."""
+    """Materialize and borrow a raw NCCL communicator from a process group."""
     backend = dist.get_backend(group)
     if backend != "nccl":
         raise RuntimeError(f"Newton-Schulz requires NCCL backend, got '{backend}'")
+
+    # ProcessGroupNCCL creates communicators lazily. This device-specific
+    # collective ensures that the communicator returned by _comm_ptr() exists
+    # and is ready on every group rank before cuSolverMp borrows it.
+    dist.barrier(group=group, device_ids=[torch.cuda.current_device()])
     nccl_backend = group._get_backend(torch.device("cuda"))
-    return nccl_backend._comm_ptr()
+    comm_ptr = nccl_backend._comm_ptr()
+    if not isinstance(comm_ptr, int) or comm_ptr == 0:
+        raise RuntimeError("ProcessGroupNCCL returned an invalid communicator pointer")
+    return comm_ptr
 
 
 def newton_schulz(

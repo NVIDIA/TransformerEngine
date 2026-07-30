@@ -964,8 +964,13 @@ class GemmPrimitive(BasePrimitive):
             # Non-contracting dims of RHS always needs to be gathered, i.e. for TP + activation_hidden
             # No batch-dim check needed as `rhs_non_cspecs` never contains batch-dim.
             # In `rhs_specs`, the batch dim appears only in Wgrad GEMM under `rhs_cspecs`.
+            # Flatten cspecs since a single element can be a tuple of mesh axes (e.g. ("data", "fsdp")).
+            flattened_lhs_non_cspecs = []
+            for spec in lhs_non_cspecs:
+                flattened_lhs_non_cspecs.extend(spec if isinstance(spec, tuple) else [spec])
             rhs_non_cspecs = tuple(
-                None if spec in lhs_non_cspecs else spec for spec in rhs_non_cspecs
+                None if spec in flattened_lhs_non_cspecs or spec in lhs_non_cspecs else spec
+                for spec in rhs_non_cspecs
             )
 
         else:
@@ -992,8 +997,13 @@ class GemmPrimitive(BasePrimitive):
             # Non-contracting dims of LHS to be gathered along the SP axis.
             # Minor note: This causes MaxText TP (= Megatron TP + activation_hidden sharding) gathering x for
             # dW1 = x^T * dY1 which is unexpected. This is a known issue and no solution has found yet.
+            # Flatten cspecs since a single element can be a tuple of mesh axes (e.g. ("data", "fsdp")).
+            flattened_rhs_non_cspecs = []
+            for spec in rhs_non_cspecs:
+                flattened_rhs_non_cspecs.extend(spec if isinstance(spec, tuple) else [spec])
             lhs_non_cspecs = tuple(
-                None if spec in rhs_non_cspecs else spec for spec in lhs_non_cspecs
+                None if spec in flattened_rhs_non_cspecs or spec in rhs_non_cspecs else spec
+                for spec in lhs_non_cspecs
             )
 
         out_specs = lhs_non_cspecs + rhs_non_cspecs

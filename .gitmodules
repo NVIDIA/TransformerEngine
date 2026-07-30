@@ -4,6 +4,6 @@
 [submodule "3rdparty/cutlass"]
 	path = 3rdparty/cutlass
 	url = https://github.com/NVIDIA/cutlass.git
-[submodule "3rdparty/nccl"]
-	path = 3rdparty/nccl
-	url = https://github.com/NVIDIA/nccl.git
+[submodule "3rdparty/nccl-extensions"]
+	path = 3rdparty/nccl-extensions
+	url = https://github.com/NVIDIA/nccl-extensions.git
