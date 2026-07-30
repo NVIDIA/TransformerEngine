@@ -8,9 +8,7 @@ import abc
 import os
 from enum import Enum
 from typing import Any, Literal, Optional, Union, Callable, NamedTuple
-from dataclasses import field
 from pydantic.dataclasses import dataclass
-
 
 _BACKWARD_OVERRIDES = (None, "high_precision", "dequantized")
 _NVFP4_4OVER6_SCOPES = ("none", "weights", "activations", "all")
@@ -470,11 +468,6 @@ class Float8BlockScaling(Recipe):
             self.backward_override in _BACKWARD_OVERRIDES
         ), "NVTE_BACKWARD_OVERRIDE must be unset or one of: 'high_precision', 'dequantized'."
         if self.mxfp4_qat_weights:
-            if self.w_block_scaling_dim != 2:
-                raise ValueError(
-                    "MXFP4 QAT requires 128x128 (2D) weight scaling blocks, got "
-                    f"w_block_scaling_dim={self.w_block_scaling_dim}."
-                )
             if not self.fp8_quant_fwd_weight.power_2_scale:
                 raise ValueError(
                     "MXFP4 QAT requires power-of-two weight scales; "
@@ -520,9 +513,11 @@ class MXFP4QATFloat8BlockScaling(Float8BlockScaling):
     Float8 block-scaling recipe with MXFP4 weight quantization-aware training.
 
     Weights are projected onto the MXFP4 (E2M1, 1x32 power-of-two scale) grid
-    before the regular 128x128 blockwise FP8 weight quantization (lossless
-    within each tile's FP8 dynamic-range headroom). Activations, gradients and
-    ``backward_override`` behave as in the base recipe. bf16/fp32 only.
+    before regular 1x128 or 128x128 blockwise FP8 weight quantization (lossless
+    within each block's FP8 dynamic-range headroom). The default weight block
+    dimensionality remains 2 (128x128); set ``w_block_scaling_dim=1`` for
+    1x128 rowwise and 128x1 columnwise weight blocks. Activations, gradients
+    and ``backward_override`` behave as in the base recipe. bf16/fp32 only.
     """
 
     mxfp4_qat_weights: bool = True

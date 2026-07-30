@@ -23,6 +23,7 @@ from ...module.base import (
     _2X_ACC_DGRAD,
     _2X_ACC_WGRAD,
 )
+from ...mxfp4_qat import mxfp4_fake_quantize
 from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload, start_offload
 from ...quantization import FP8GlobalStateManager, QuantizerRole, Recipe
 from ...quantized_tensor import QuantizedTensorStorage
@@ -64,7 +65,6 @@ from ...triton.grouped_dbias_dscales import (
     compute_grouped_dbias,
     compute_grouped_dbias_dscales,
 )
-
 
 # Keys for passing caller-provided output and grad-input buffers to a grouped
 # linear (or fused grouped MLP) through Sequential's ``op_kwargs``.
@@ -482,23 +482,42 @@ class GroupedLinear(BasicOperation):
             self.register_parameter(f"bias{group_idx}", None)
 
     @staticmethod
-    def _reject_mxfp4_qat(context: str) -> None:
-        """Fail loudly rather than train without the MXFP4 projection.
-
-        This op quantizes its weights itself instead of going through
-        ``module.base.quantize_weight``, which is where the MXFP4 QAT projection is
-        applied. Until the projection is wired in here, an MXFP4 QAT recipe would
-        otherwise run to completion having never touched the MXFP4 grid.
-        """
+    def _mxfp4_qat_recipe() -> Optional[Recipe]:
+        """Return the active MXFP4-QAT recipe, if any."""
         if (
-            FP8GlobalStateManager.is_fp8_enabled()
-            and FP8GlobalStateManager.get_fp8_recipe().mxfp4_qat()
-        ):
+            FP8GlobalStateManager.is_fp8_enabled() or FP8GlobalStateManager.with_fp8_parameters()
+        ) and FP8GlobalStateManager.get_fp8_recipe().mxfp4_qat():
+            return FP8GlobalStateManager.get_fp8_recipe()
+        return None
+
+    @classmethod
+    def _reject_mxfp4_qat(cls, context: str) -> None:
+        """Reject an MXFP4-QAT configuration that this op cannot represent."""
+        if cls._mxfp4_qat_recipe() is not None:
             raise NotImplementedError(
                 f"MXFP4 QAT recipes are not supported by the operations API ({context}): "
-                "grouped weight quantization bypasses the QAT projection. Use "
-                "transformer_engine.pytorch.GroupedLinear instead."
+                "only independent high-precision expert weights with "
+                "backward_override=None are supported."
             )
+
+    @classmethod
+    def _validate_mxfp4_qat_discrete_weights(cls, weights: Sequence[torch.Tensor]) -> bool:
+        """Validate the supported QAT subset and report whether projection is needed."""
+        qat_recipe = cls._mxfp4_qat_recipe()
+        if qat_recipe is None:
+            return False
+        if qat_recipe.backward_override is not None:
+            raise NotImplementedError(
+                "MXFP4 QAT in ops.GroupedLinear only supports backward_override=None, "
+                f"got {qat_recipe.backward_override!r}."
+            )
+        if any(is_quantized_tensor(weight) for weight in weights):
+            raise NotImplementedError(
+                "MXFP4 QAT recipes do not support quantized primary weights in the "
+                "operations API: the high-precision master is required for the QAT "
+                "projection."
+            )
+        return True
 
     def _quantize_weights(
         self,
@@ -507,10 +526,7 @@ class GroupedLinear(BasicOperation):
     ) -> Sequence[torch.Tensor]:
         """Construct quantized weight tensors."""
 
-        if (
-            FP8GlobalStateManager.is_fp8_enabled()
-            and FP8GlobalStateManager.get_fp8_recipe().mxfp4_qat()
-        ):
+        if self._mxfp4_qat_recipe() is not None:
             raise NotImplementedError(
                 "MXFP4 QAT recipes do not support quantized primary weights in the "
                 "operations API: the high-precision master is required for the QAT "
@@ -930,14 +946,25 @@ class GroupedLinear(BasicOperation):
         """Prepare weights for ``general_grouped_gemm_for_grouped_tensor``.
         Returns a Python list, which dispatches the GEMM to ``discrete_in`` mode.
         """
+        with_mxfp4_qat = False
         if with_quantized_compute:
-            self._reject_mxfp4_qat("discrete weight path")
+            with_mxfp4_qat = self._validate_mxfp4_qat_discrete_weights(weight_params)
+        if with_mxfp4_qat and dtype == torch.float16:
+            raise NotImplementedError(
+                "MXFP4 QAT does not support fp16 as the activation/dequantize dtype: "
+                "use bf16 or fp32."
+            )
         out: list[torch.Tensor] = []
         for w, quantizer in zip(weight_params, weight_quantizers):
             if not with_quantized_compute:
                 w = maybe_dequantize(w, dtype)
             elif with_quantized_compute and not is_quantized_tensor(w):
                 quantizer.set_usage(rowwise=True, columnwise=columnwise_usage)
+                if with_mxfp4_qat:
+                    # This custom op returns its manually-computed wgrad to the
+                    # original parameter, which is the identity STE for this
+                    # forward-only projection.
+                    w = mxfp4_fake_quantize(w)
                 w = quantizer(w)
             out.append(w)
         return out
@@ -1036,6 +1063,11 @@ class GroupedLinear(BasicOperation):
         weight_quantizers = [None] * num_groups
         with_quantized_compute = FP8GlobalStateManager.is_fp8_enabled()
         if with_quantized_compute:
+            if self._mxfp4_qat_recipe() is not None and self._is_distributed_weight():
+                raise NotImplementedError(
+                    "MXFP4 QAT in ops.GroupedLinear does not support DistributedWeight "
+                    "materialize/replay. FSDP2-unsharded high-precision weights are supported."
+                )
             for group_idx in range(num_groups):
                 input_quantizers[group_idx] = self.get_quantizer("forward", 2 * group_idx)
                 weight_quantizers[group_idx] = self.get_quantizer("forward", 2 * group_idx + 1)

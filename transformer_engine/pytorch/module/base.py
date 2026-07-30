@@ -731,6 +731,23 @@ def fill_userbuffers_buffer_for_all_gather(
     raise ValueError(f"Unsupported quantizer for Userbuffers ({quantizer})")
 
 
+def _mxfp4_qat_block_recipe_signature(recipe: Optional[Recipe]) -> Optional[tuple]:
+    """Immutable QAT blockwise configuration for detecting recipe mutation/switches."""
+    if recipe is None or not recipe.float8_block_scaling() or not recipe.mxfp4_qat():
+        return None
+    return (
+        recipe.fp8_format,
+        recipe.fp8_quant_fwd_inp,
+        recipe.fp8_quant_fwd_weight,
+        recipe.fp8_quant_bwd_grad,
+        recipe.x_block_scaling_dim,
+        recipe.w_block_scaling_dim,
+        recipe.grad_block_scaling_dim,
+        recipe.backward_override,
+        recipe.mxfp4_qat(),
+    )
+
+
 def _is_weight_workspace_valid(
     workspace: QuantizedTensorStorage,
     quantizer: Quantizer,
@@ -747,6 +764,33 @@ def _is_weight_workspace_valid(
         if quantizer.rowwise_usage and workspace._rowwise_data is None:
             return False
         if quantizer.columnwise_usage and workspace._columnwise_data is None:
+            return False
+    elif isinstance(workspace, Float8BlockwiseQTensorStorage):
+        if not isinstance(quantizer, Float8BlockQuantizer):
+            return False
+        workspace_quantizer = workspace._quantizer
+        if not isinstance(workspace_quantizer, Float8BlockQuantizer):
+            return False
+        if workspace._is_2D_scaled != (quantizer.block_scaling_dim == 2):
+            return False
+        if (
+            workspace._fp8_dtype != quantizer.dtype
+            or workspace_quantizer.block_scaling_dim != quantizer.block_scaling_dim
+            or workspace_quantizer.force_pow_2_scales != quantizer.force_pow_2_scales
+            or workspace_quantizer.amax_epsilon != quantizer.amax_epsilon
+        ):
+            return False
+        if quantizer.rowwise_usage and (
+            not workspace_quantizer.rowwise_usage
+            or workspace._rowwise_data is None
+            or workspace._rowwise_scale_inv is None
+        ):
+            return False
+        if quantizer.columnwise_usage and (
+            not workspace_quantizer.columnwise_usage
+            or workspace._columnwise_data is None
+            or workspace._columnwise_scale_inv is None
+        ):
             return False
     elif isinstance(workspace, NVFP4TensorStorage):
         if quantizer.rowwise_usage and workspace._rowwise_data is None:
@@ -1084,7 +1128,11 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             if recipe.float8_block_scaling() and isinstance(
                 recipe_state, Float8BlockScalingRecipeState
             ):
-                return
+                # QAT block dimensions and scale policy are recipe fields.
+                # Rebuild stateless quantizers when a different QAT recipe is
+                # selected so a 1D/2D switch cannot retain the old layout.
+                if not recipe.mxfp4_qat() or recipe == recipe_state.recipe:
+                    return
             if recipe.nvfp4() and isinstance(recipe_state, NVFP4BlockScalingRecipeState):
                 return
             if recipe.custom() and isinstance(recipe_state, CustomRecipeState):
@@ -1496,13 +1544,29 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         meta["fp8_checkpoint"] = fp8_enabled
 
         _original_recipe = None
+        _current_recipe = FP8GlobalStateManager.get_fp8_recipe()
+        _original_block_signature = meta.get("_mxfp4_qat_block_recipe_signature")
+        _current_block_signature = _mxfp4_qat_block_recipe_signature(_current_recipe)
+        _block_recipe_config_changed = False
 
         if fp8_parameters or fp8_enabled:
             _original_recipe = meta.get("recipe", None)
-            if self.fp8_initialized and FP8GlobalStateManager.get_fp8_recipe() == _original_recipe:
+            _block_recipe_config_changed = (
+                _original_recipe is not None
+                and _original_block_signature != _current_block_signature
+            )
+            if (
+                self.fp8_initialized
+                and _current_recipe == _original_recipe
+                and not _block_recipe_config_changed
+            ):
                 # FP8 init has already been run and recipe is the same, don't do anything.
                 return
-            meta["recipe"] = FP8GlobalStateManager.get_fp8_recipe()
+            meta["recipe"] = _current_recipe
+            if _block_recipe_config_changed:
+                # RecipeState retains the recipe object. A separate immutable
+                # signature is needed to detect in-place dataclass mutation.
+                self.fast_setattr("fp8_meta_tensors_initialized", False)
         else:
             # If fp8 isn't enabled, turn off and return.
             self.fast_setattr("fp8_initialized", False)
@@ -1526,9 +1590,14 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             self.init_fp8_meta_tensors(meta["recipe"])
             self.fast_setattr("fp8_initialized", True)
 
-            meta["recipe"] = FP8GlobalStateManager.get_fp8_recipe()
+            meta["recipe"] = _current_recipe
 
         _current_recipe = meta["recipe"]
+        meta["_mxfp4_qat_block_recipe_signature"] = _current_block_signature
+        if _block_recipe_config_changed:
+            # The cached weight owns buffers and a quantizer for the previous
+            # block layout/scale policy; it cannot be updated in-place safely.
+            self._fp8_workspaces.clear()
         if _original_recipe is not None and (
             not (
                 issubclass(_current_recipe.__class__, _original_recipe.__class__)

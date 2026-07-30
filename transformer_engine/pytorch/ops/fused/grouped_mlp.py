@@ -27,6 +27,7 @@ from ...distributed_weight import (
 )
 from ...module.base import _2X_ACC_WGRAD
 from ...fp8 import FP8GlobalStateManager
+from ...mxfp4_qat import mxfp4_fake_quantize
 from ...quantization import Recipe
 from ...tensor import NVFP4Quantizer, NVFP4Tensor, NVFP4TensorStorage, Quantizer
 from ...tensor.grouped_tensor import GroupedTensor
@@ -961,14 +962,28 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         fc2_input_quantizer = fc2_op.get_quantizer("forward", 0)
         fc2_weight_quantizer = fc2_op.get_quantizer("forward", 1)
         fc2_grad_output_quantizer = fc2_op.get_quantizer("backward", 0)
-        if (
-            FP8GlobalStateManager.is_fp8_enabled()
-            and FP8GlobalStateManager.get_fp8_recipe().mxfp4_qat()
-        ):
-            raise NotImplementedError(
-                "MXFP4 QAT recipes are not implemented for fused grouped-MLP ops: "
-                "weight quantization here bypasses the QAT projection."
-            )
+        fp8_recipe = (
+            FP8GlobalStateManager.get_fp8_recipe()
+            if FP8GlobalStateManager.is_fp8_enabled()
+            else None
+        )
+        mxfp4_qat = fp8_recipe is not None and fp8_recipe.mxfp4_qat()
+        if mxfp4_qat:
+            if fp8_recipe.backward_override is not None:
+                raise NotImplementedError(
+                    "MXFP4 QAT fused grouped-MLP ops support only "
+                    "backward_override=None, matching the pure MXFP8 path."
+                )
+            if fc1_op.single_grouped_weight or fc2_op.single_grouped_weight:
+                raise NotImplementedError(
+                    "MXFP4 QAT fused grouped-MLP ops require independent "
+                    "high-precision expert weights."
+                )
+            if fc1_is_dist:
+                raise NotImplementedError(
+                    "MXFP4 QAT fused grouped-MLP ops do not support DistributedWeight/GTP. "
+                    "FSDP2 high-precision parameters are supported after FSDP2 all-gather."
+                )
 
         # Extract split sizes from extra input
         fc1_split_sizes = basic_op_extra_inputs[0][0]
@@ -1033,8 +1048,14 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                 quantizer = fc1_op.get_quantizer("forward", 2 * idx + 1)
                 if not is_quantized_tensor(weight):
                     quantizer.set_usage(rowwise=True, columnwise=input_requires_grad)
-                    quantized_fc1_weights.append(quantizer(weight))
+                    weight_for_quantize = mxfp4_fake_quantize(weight) if mxfp4_qat else weight
+                    quantized_fc1_weights.append(quantizer(weight_for_quantize))
                 else:
+                    if mxfp4_qat:
+                        raise NotImplementedError(
+                            "MXFP4 QAT fused grouped-MLP ops require high-precision "
+                            "master weights, not primary quantized weights."
+                        )
                     quantized_fc1_weights.append(weight)
             grouped_fc1_weight = quantized_fc1_weights
         if fc1_is_dist:
@@ -1067,8 +1088,14 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                 quantizer = fc2_op.get_quantizer("forward", 2 * idx + 1)
                 if not is_quantized_tensor(weight):
                     quantizer.set_usage(rowwise=True, columnwise=input_requires_grad)
-                    quantized_fc2_weights.append(quantizer(weight))
+                    weight_for_quantize = mxfp4_fake_quantize(weight) if mxfp4_qat else weight
+                    quantized_fc2_weights.append(quantizer(weight_for_quantize))
                 else:
+                    if mxfp4_qat:
+                        raise NotImplementedError(
+                            "MXFP4 QAT fused grouped-MLP ops require high-precision "
+                            "master weights, not primary quantized weights."
+                        )
                     quantized_fc2_weights.append(weight)
             grouped_fc2_weight = quantized_fc2_weights
 

@@ -7,8 +7,8 @@
 Projects weights onto the MXFP4 (E2M1) grid with 1x32 power-of-two block
 scales and returns the dequantized values in the input dtype. The output is
 exact in bf16/fp32, and the host recipe's weight quantization (MXFP8 rowwise;
-128x128 blockwise within the tile scale-spread bound) is DECODED-VALUE exact
-on this finite QAT domain. It is not raw-tuple identical to a direct
+1x128 or 128x128 blockwise within the block scale-spread bound) is
+DECODED-VALUE exact on this finite QAT domain. It is not raw-tuple identical to a direct
 MXFP4->MXFP8 converter: the host encoder re-canonicalizes (payload, scale)
 per block, so equal values may carry different E4M3/UE8M0 bytes, and the
 original MXFP4 scale metadata is not preserved. Scale floor 2^-126 / cap 2^125
