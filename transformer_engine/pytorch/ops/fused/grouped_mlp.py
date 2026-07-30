@@ -52,7 +52,6 @@ from .._common import (
     get_accumulate_flag_in_param,
     get_dummy_wgrads_for_params,
     get_main_grad_from_param,
-    grouped_storage_from_grouped_tensor,
     is_quantized_tensor,
     maybe_dequantize,
     prepare_prequantized_mxfp8_input_for_gemm,
@@ -1091,7 +1090,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             or isinstance(fc1_input_quantizer, NVFP4Quantizer)
             and isinstance(input_quantizer, NVFP4Quantizer)
         ):
-            grouped_fc1_x = grouped_storage_from_grouped_tensor(input_)
+            grouped_fc1_x = input_.copy()
             if (
                 isinstance(fc1_input_quantizer, MXFP8Quantizer)
                 and not grouped_fc1_x._with_gemm_swizzled_scales
@@ -1678,7 +1677,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                 # columnwise copy for wgrad. ``scale_bias`` needs the
                 # high-precision grad below, so it takes the dequantized tensor
                 # instead of the fused dbias.
-                grouped_fc2_dy = grouped_storage_from_grouped_tensor(grad_output)
+                grouped_fc2_dy = grad_output.copy()
                 fc2_dbias_packed, fc2_dy = prepare_prequantized_mxfp8_input_for_gemm(
                     grouped_fc2_dy,
                     fc2_grad_output_quantizer,

@@ -462,7 +462,7 @@ class TestGroupedLinearOp:
     ) -> "GroupedTensor":
         """Rowwise-only MXFP8 GroupedTensor with compact scales (FP8 dispatch wire format)."""
         wire_quantizer = MXFP8Quantizer(
-            fp8_dtype=tex.DType.kFloat8E4M3, rowwise=True, columnwise=False
+            fp8_dtype=TE_DType[torch.float8_e4m3fn], rowwise=True, columnwise=False
         )
         x_wire = tex.group_quantize(
             x_hp, wire_quantizer, group_size, split_sizes.to(dtype=torch.int64)

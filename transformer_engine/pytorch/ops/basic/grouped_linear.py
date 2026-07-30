@@ -47,7 +47,6 @@ from .._common import (
     get_accumulate_flag_in_param,
     get_dummy_wgrads_for_params,
     get_main_grad_from_param,
-    grouped_storage_from_grouped_tensor,
     is_quantized_tensor,
     maybe_dequantize,
     prepare_prequantized_mxfp8_input_for_gemm,
@@ -1336,7 +1335,7 @@ class GroupedLinear(BasicOperation):
             # rowwise data to the forward GEMM as-is, manufacture the
             # columnwise copy needed by the wgrad GEMM, and swizzle the
             # rowwise scales for the GEMM.
-            grouped_x = grouped_storage_from_grouped_tensor(input_)
+            grouped_x = input_.copy()
             prepare_prequantized_mxfp8_input_for_gemm(
                 grouped_x,
                 input_quantizers[0],
@@ -1739,7 +1738,7 @@ class GroupedLinear(BasicOperation):
                 # rowwise data for the dgrad GEMM and manufacture the columnwise copy
                 # for wgrad. ``scale_bias`` needs the high-precision grad below, so it
                 # takes the dequantized tensor instead of the fused dbias.
-                grouped_dy = grouped_storage_from_grouped_tensor(grad_output)
+                grouped_dy = grad_output.copy()
                 dbias_packed, dy_2d = prepare_prequantized_mxfp8_input_for_gemm(
                     grouped_dy,
                     grad_output_quantizer,

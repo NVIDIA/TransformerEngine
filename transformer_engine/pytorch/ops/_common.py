@@ -16,7 +16,6 @@ from ..constants import MXFP8_BLOCK_SCALING_SIZE, TE_DType
 from ..torch_version import torch_version
 from ..quantization import FP8GlobalStateManager
 from ..tensor.float8_tensor import Float8Tensor
-from ..tensor.grouped_tensor import GroupedTensor
 from ..tensor.mxfp8_tensor import MXFP8Quantizer, MXFP8Tensor
 from ..tensor.storage.grouped_tensor_storage import GroupedTensorStorage
 from ..quantized_tensor import QuantizedTensorStorage
@@ -70,42 +69,6 @@ def maybe_dequantize(
     if not tensor.is_contiguous():
         tensor = tensor.contiguous()
     return tensor
-
-
-def grouped_storage_from_grouped_tensor(tensor: GroupedTensor) -> GroupedTensorStorage:
-    """Repack a ``GroupedTensor`` into a ``GroupedTensorStorage``.
-
-    ``GroupedTensor`` is a ``torch.Tensor`` subclass, so the CPU offload
-    infrastructure's ``prepare_for_saving`` treats it as a plain tensor and
-    does not decompose it into its component data tensors. By repacking into
-    a ``GroupedTensorStorage`` (not a ``torch.Tensor``), the fuser's
-    ``prepare_for_saving`` call correctly decomposes the activation before
-    ``save_for_backward``.
-    """
-    return GroupedTensorStorage(
-        shape=tensor.logical_shape,
-        dtype=tensor.fake_dtype,
-        num_tensors=tensor.num_tensors,
-        shapes=tensor.tensor_shapes,
-        quantizer=tensor.quantizer,
-        data=tensor.rowwise_data,
-        columnwise_data=tensor.columnwise_data,
-        scale_inv=tensor.scale_inv,
-        columnwise_scale_inv=tensor.columnwise_scale_inv,
-        amax=tensor.amax,
-        columnwise_amax=tensor.columnwise_amax,
-        scale=tensor.scale,
-        first_dims=tensor.first_dims,
-        last_dims=tensor.last_dims,
-        tensor_offsets=tensor.tensor_offsets,
-        offsets=tensor.offsets,
-        scale_inv_offsets=tensor.scale_inv_offsets,
-        columnwise_scale_inv_offsets=tensor.columnwise_scale_inv_offsets,
-        with_gemm_swizzled_scales=tensor._with_gemm_swizzled_scales,
-        row_scaled_nvfp4=tensor.row_scaled_nvfp4,
-        nvfp4_use_4over6=tensor.nvfp4_use_4over6,
-        nvfp4_e4m3_max=tensor.nvfp4_e4m3_max,
-    )
 
 
 def prepare_prequantized_mxfp8_input_for_gemm(
