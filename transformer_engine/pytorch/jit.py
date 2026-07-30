@@ -7,7 +7,7 @@ import inspect
 import os
 import warnings
 from functools import wraps
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Callable, Optional, Tuple
 import torch
 
 from .torch_version import torch_version
@@ -51,22 +51,58 @@ if torch_version() >= (2, 2, 0) and bool(int(os.getenv("NVTE_TORCH_COMPILE", "1"
 if torch.__version__ >= "2":
     import torch._dynamo
 
-    def no_torch_dynamo(recursive=True):
-        """Decorator to disable Torch Dynamo, except during ONNX export."""
+    def no_torch_dynamo(recursive=True, when=None):
+        """Decorator to disable Torch Dynamo, except during ONNX export.
 
-        def decorator(f):
+        `when` makes it conditional: it is called with the arguments of the call
+        keyed by parameter name, and returns the reason this particular call
+        cannot be traced, or None to have it traced as usual. The reason is
+        reported once per distinct message.
+        """
+
+        def _disable(f):
             # no "recursive" option in pyTorch 2.0 - it acts as if recursive was True
-            disabled_f = (
+            return (
                 torch._dynamo.disable(f, recursive=recursive)
                 if torch.__version__ >= "2.1"
                 else torch._dynamo.disable(f)
             )
 
-            @wraps(f)
-            def wrapper(*args, **kwargs):
-                if is_in_onnx_export_mode():
+        def decorator(f):
+            disabled_f = _disable(f)
+            if when is None:
+
+                @wraps(f)
+                def wrapper(*args, **kwargs):
+                    if is_in_onnx_export_mode():
+                        return f(*args, **kwargs)
+                    return disabled_f(*args, **kwargs)
+
+            else:
+                parameter_names = list(inspect.signature(f).parameters)
+
+                # The warning belongs inside the disabled function: warnings.warn
+                # graph-breaks on its own, which would mask the break that matters.
+                def report_and_run(reason, *args, **kwargs):
+                    warnings.warn(
+                        f"Falling back to eager execution under torch.compile: {reason} is"
+                        " unsupported on the compiled path (graph-breaks under fullgraph=True).",
+                        stacklevel=3,
+                    )
                     return f(*args, **kwargs)
-                return disabled_f(*args, **kwargs)
+
+                disabled_report_and_run = _disable(report_and_run)
+
+                @wraps(f)
+                def wrapper(*args, **kwargs):  # pylint: disable=function-redefined
+                    if is_in_onnx_export_mode() or not torch.compiler.is_compiling():
+                        return f(*args, **kwargs)
+                    call = dict(zip(parameter_names, args))
+                    call.update(kwargs)
+                    reason = when(call)
+                    if reason is None:
+                        return f(*args, **kwargs)
+                    return disabled_report_and_run(reason, *args, **kwargs)
 
             return wrapper
 
@@ -74,47 +110,9 @@ if torch.__version__ >= "2":
 
 else:
     # Fallback for PyTorch < 2.0: no-op decorator
-    def no_torch_dynamo(recursive=True):  # pylint: disable=unused-argument
+    def no_torch_dynamo(recursive=True, when=None):  # pylint: disable=unused-argument
         """No-op decorator for PyTorch < 2.0."""
         return lambda func: func
-
-
-def fallback_to_eager_when(needs_eager: Callable[[Dict[str, Any]], Optional[str]]):
-    """Decorator running the wrapped method eagerly whenever `needs_eager` gives
-    a reason why the call is unsupported on the compiled path.
-
-    `needs_eager` is handed the call's arguments keyed by parameter name, taken
-    from the wrapped signature, so it does not have to care whether the caller
-    passed them by name or by position. Returning None keeps the call compiled.
-    """
-
-    def decorator(fn):
-        parameter_names = list(inspect.signature(fn).parameters)
-
-        # The warning belongs inside the dynamo-disabled function: warnings.warn
-        # graph-breaks on its own, masking the break that matters.
-        @no_torch_dynamo()
-        def eager_fn(reason, *args, **kwargs):
-            warnings.warn(
-                f"Falling back to eager execution under torch.compile: {reason} is"
-                " unsupported on the compiled path (graph-breaks under fullgraph=True).",
-                stacklevel=3,
-            )
-            return fn(*args, **kwargs)
-
-        @wraps(fn)
-        def wrapper(*args, **kwargs):
-            if torch.compiler.is_compiling():
-                call = dict(zip(parameter_names, args))
-                call.update(kwargs)
-                reason = needs_eager(call)
-                if reason is not None:
-                    return eager_fn(reason, *args, **kwargs)
-            return fn(*args, **kwargs)
-
-        return wrapper
-
-    return decorator
 
 
 def set_jit_fusion_options() -> None:

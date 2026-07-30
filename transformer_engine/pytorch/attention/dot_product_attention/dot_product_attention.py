@@ -42,7 +42,7 @@ from transformer_engine.pytorch.distributed import (
     CudaRNGStatesTracker,
     graph_safe_rng_available,
 )
-from transformer_engine.pytorch.jit import fallback_to_eager_when
+from transformer_engine.pytorch.jit import no_torch_dynamo
 from transformer_engine.pytorch.graph import is_graph_capturing
 from transformer_engine.pytorch.attention.inference import InferenceParams
 
@@ -1124,7 +1124,7 @@ class DotProductAttention(TransformerEngineBaseModule):
             ]
         return base[:num_quantizers]
 
-    @fallback_to_eager_when(_needs_eager_dpa)
+    @no_torch_dynamo(when=_needs_eager_dpa)
     def forward(
         self,
         query_layer: Optional[torch.Tensor] = None,
