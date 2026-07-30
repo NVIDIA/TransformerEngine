@@ -2565,7 +2565,11 @@ def get_qkv_layout(
 
         return qkv_layout
 
-    if torch.compiler.is_compiling():
+    if is_in_onnx_export_mode():
+        # Checked first: the ONNX exporter runs through dynamo, so it also sets
+        # is_compiling(), and it has its own handling below.
+        qkv_layout = "not_supported"
+    elif torch.compiler.is_compiling():
         # run_iteratively reads data pointers and storage offsets, which dynamo
         # cannot trace; unpacked q/k/v need no detection anyway.
         assert not qkv_layout_needs_detection(q, k, v), (
@@ -2577,10 +2581,8 @@ def get_qkv_layout(
             qkv_layout = "_".join([qkv_format] * 3)
         else:
             qkv_layout = q_format + "_" + kv_format + "_" + kv_format
-    elif not is_in_onnx_export_mode():
-        qkv_layout = run_iteratively(q, k, v)
     else:
-        qkv_layout = "not_supported"
+        qkv_layout = run_iteratively(q, k, v)
     if qkv_layout == "not_supported":
         # force q,k,v to be contiguous and run get_layout again
         q, k, v = [x.contiguous() for x in [q, k, v]]
