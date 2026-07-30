@@ -65,6 +65,7 @@ const std::string &typeName(DType type) {
     {DType::kBFloat16, "bfloat16"},
     {DType::kFloat8E4M3, "float8e4m3"},
     {DType::kFloat8E5M2, "float8e5m2"},
+    {DType::kFloat8UE5M3, "float8ue5m3"},
     {DType::kFloat8E8M0, "float8e8m0"},
     {DType::kFloat4E2M1, "float4e2m1"}};
   return name_map.at(type);
@@ -278,7 +279,7 @@ void Tensor::Buffer::from_cpu() {
 Tensor::Tensor(const std::string& name,
                const NVTEShape &shape, const DType type,
                const bool rowwise, const bool columnwise,
-               const NVTEScalingMode &scaling_mode)
+               const NVTEScalingMode &scaling_mode, const DType scale_dtype)
   : tensor_(scaling_mode), rowwise_{rowwise}, columnwise_{columnwise}, name_{name} {
   // Initialize RNG
   const size_t seed = create_seed_from_tensor_name(name);
@@ -374,6 +375,14 @@ Tensor::Tensor(const std::string& name,
     {
       // Block scaling factors
       auto [rowwise_scale_meta, colwise_scale_meta] = get_scales(flattened_shape, tensor_.scaling_mode());
+      if (scaling_mode == NVTE_NVFP4_1D_SCALING) {
+        NVTE_CHECK(scale_dtype == DType::kFloat8E4M3 ||
+                   scale_dtype == DType::kFloat8UE5M3);
+        rowwise_scale_meta.type = scale_dtype;
+        rowwise_scale_meta.type_size_bits = typeToNumBits(scale_dtype);
+        colwise_scale_meta.type = scale_dtype;
+        colwise_scale_meta.type_size_bits = typeToNumBits(scale_dtype);
+      }
       if (rowwise) {
         const auto scale_shape = rowwise_scale_meta.shape;
         const auto scale_dtype = rowwise_scale_meta.type;

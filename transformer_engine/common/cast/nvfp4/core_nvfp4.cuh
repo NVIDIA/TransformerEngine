@@ -46,6 +46,16 @@ namespace nvfp4 {
     }                                                                                     \
   }
 
+#define TRANSFORMER_ENGINE_NVFP4_E4M3_MAX_SWITCH(E4M3_MAX_VALUE, E4M3_MAX_CONST, ...) \
+  if ((E4M3_MAX_VALUE) == 256) {                                                      \
+    constexpr int E4M3_MAX_CONST = 256;                                               \
+    { __VA_ARGS__ }                                                                   \
+  } else {                                                                            \
+    NVTE_CHECK((E4M3_MAX_VALUE) == 448, "Unsupported NVFP4 E4M3 max.");               \
+    constexpr int E4M3_MAX_CONST = 448;                                               \
+    { __VA_ARGS__ }                                                                   \
+  }
+
 namespace core {
 
 #if FP4_TYPE_SUPPORTED
@@ -66,6 +76,19 @@ struct NVFP4ScaleTraits<fp8e4m3> {
   static constexpr bool supports_configurable_max = true;
   static constexpr bool supports_fp16_error_path = true;
 };
+
+// Return the effective maximum used to derive the global NVFP4 encode scale.
+// The legacy 256/448 override applies only to E4M3. Other scale formats use
+// their full representable range.
+template <typename ScaleType, int E4M3_MAX = 448>
+__host__ __device__ constexpr float scale_max() {
+  static_assert(E4M3_MAX == 448 || E4M3_MAX == 256, "Unsupported NVFP4 E4M3 max.");
+  if constexpr (NVFP4ScaleTraits<ScaleType>::supports_configurable_max) {
+    return static_cast<float>(E4M3_MAX);
+  } else {
+    return detail::TypeExtrema<ScaleType>::max;
+  }
+}
 
 template <typename ScaleType>
 __device__ __forceinline__ ScaleType

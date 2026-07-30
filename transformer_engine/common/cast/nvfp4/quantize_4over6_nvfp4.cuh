@@ -54,16 +54,6 @@ namespace nvfp4 {
     }                                                                      \
   }
 
-#define TRANSFORMER_ENGINE_NVFP4_4OVER6_E4M3_MAX_SWITCH(E4M3_MAX_VALUE, E4M3_MAX_CONST, ...) \
-  if ((E4M3_MAX_VALUE) == 256) {                                                             \
-    constexpr int E4M3_MAX_CONST = 256;                                                      \
-    { __VA_ARGS__ }                                                                          \
-  } else {                                                                                   \
-    NVTE_CHECK((E4M3_MAX_VALUE) == 448, "Unsupported NVFP4 E4M3 max.");                      \
-    constexpr int E4M3_MAX_CONST = 448;                                                      \
-    { __VA_ARGS__ }                                                                          \
-  }
-
 namespace quantize_4over6_kernel {
 
 constexpr int kThreads = 128;
@@ -124,22 +114,12 @@ __device__ __forceinline__ float compute_error_rn(const float diff) {
 }
 
 template <typename ScaleType, int E4M3_MAX>
-__host__ __device__ constexpr float global_scale_max() {
-  static_assert(E4M3_MAX == 448 || E4M3_MAX == 256, "Unsupported NVFP4 E4M3 max.");
-  if constexpr (core::NVFP4ScaleTraits<ScaleType>::supports_configurable_max) {
-    return static_cast<float>(E4M3_MAX);
-  } else {
-    return detail::TypeExtrema<ScaleType>::max;
-  }
-}
-
-template <typename ScaleType, int E4M3_MAX>
 __device__ __forceinline__ ScalePair<ScaleType> compute_scale_pair(const float block_amax,
                                                                    const float global_amax) {
   static_assert(E4M3_MAX == 448 || E4M3_MAX == 256, "Unsupported NVFP4 E4M3 max.");
   constexpr float fp4_max = detail::TypeExtrema<fp4e2m1>::max;  // 6.0f
   constexpr float fp8_max = detail::TypeExtrema<ScaleType>::max;
-  constexpr int encode_scale_max = static_cast<int>(global_scale_max<ScaleType, E4M3_MAX>());
+  constexpr int encode_scale_max = static_cast<int>(core::scale_max<ScaleType, E4M3_MAX>());
   constexpr float expand_to_map4 = 1.5f;
   const float S_enc =
       core::compute_global_encode_scaling_factor_FP4<ScaleType, encode_scale_max>(global_amax);
@@ -205,7 +185,7 @@ __device__ __forceinline__ void accumulate_dequant_error(const uint32_t dequant_
                                                          const float sf, const float global_amax,
                                                          float *err) {
   constexpr float fp4_max = detail::TypeExtrema<fp4e2m1>::max;  // 6.0f
-  constexpr float fp8_max = global_scale_max<ScaleType, E4M3_MAX>();
+  constexpr float fp8_max = core::scale_max<ScaleType, E4M3_MAX>();
   constexpr float err_denom = fp4_max * fp8_max;
   const uint16_t half_bits = (dequant_bits >> SHIFT) & 0xFFFF;
   const float dequant = __half2float(__ushort_as_half(half_bits));
@@ -743,7 +723,7 @@ void quantize_4over6_impl(const Tensor &input, const Tensor *noop, Tensor *outpu
                "NVFP4 4over6 columnwise quantization requires columnwise amax or rowwise amax.");
   }
 
-  TRANSFORMER_ENGINE_NVFP4_4OVER6_E4M3_MAX_SWITCH(
+  TRANSFORMER_ENGINE_NVFP4_E4M3_MAX_SWITCH(
       output->nvfp4_e4m3_max, E4M3_MAX,
       TRANSFORMER_ENGINE_NVFP4_4OVER6_MODE_SWITCH(
           quant_config->nvfp4_4over6_mode, MODE,

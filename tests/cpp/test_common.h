@@ -151,15 +151,18 @@ class Tensor {
          const NVTEShape &shape, const DType type,
          const bool rowwise = true,
          const bool columnwise = false,
-         const NVTEScalingMode &mode = NVTE_DELAYED_TENSOR_SCALING);
+         const NVTEScalingMode &mode = NVTE_DELAYED_TENSOR_SCALING,
+         const DType scale_dtype = DType::kFloat8E4M3);
 
   Tensor(const std::string& name,
          const std::vector<size_t> &shape,
          const DType type,
          const bool rowwise = true,
          const bool columnwise = false,
-         const NVTEScalingMode &mode = NVTE_DELAYED_TENSOR_SCALING) :
-    Tensor(name, nvte_make_shape(shape.data(), shape.size()), type, rowwise, columnwise, mode) {}
+         const NVTEScalingMode &mode = NVTE_DELAYED_TENSOR_SCALING,
+         const DType scale_dtype = DType::kFloat8E4M3) :
+    Tensor(name, nvte_make_shape(shape.data(), shape.size()), type, rowwise, columnwise, mode,
+           scale_dtype) {}
 
   Tensor() = default;
 
