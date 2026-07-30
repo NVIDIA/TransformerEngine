@@ -27,7 +27,6 @@
 #include <transformer_engine/transformer_engine.h>
 
 #include <cstdint>
-#include <type_traits>
 
 #include "../../common.h"
 #include "../../util/math.h"
@@ -127,7 +126,7 @@ __device__ __forceinline__ float compute_error_rn(const float diff) {
 template <typename ScaleType, int E4M3_MAX>
 __host__ __device__ constexpr float global_scale_max() {
   static_assert(E4M3_MAX == 448 || E4M3_MAX == 256, "Unsupported NVFP4 E4M3 max.");
-  if constexpr (std::is_same_v<ScaleType, fp8e4m3>) {
+  if constexpr (core::NVFP4ScaleTraits<ScaleType>::supports_configurable_max) {
     return static_cast<float>(E4M3_MAX);
   } else {
     return detail::TypeExtrema<ScaleType>::max;
@@ -140,13 +139,10 @@ __device__ __forceinline__ ScalePair<ScaleType> compute_scale_pair(const float b
   static_assert(E4M3_MAX == 448 || E4M3_MAX == 256, "Unsupported NVFP4 E4M3 max.");
   constexpr float fp4_max = detail::TypeExtrema<fp4e2m1>::max;  // 6.0f
   constexpr float fp8_max = detail::TypeExtrema<ScaleType>::max;
-  constexpr float encode_scale_max = global_scale_max<ScaleType, E4M3_MAX>();
+  constexpr int encode_scale_max = static_cast<int>(global_scale_max<ScaleType, E4M3_MAX>());
   constexpr float expand_to_map4 = 1.5f;
-  float S_enc = encode_scale_max * fp4_max / global_amax;
-  S_enc = fminf(S_enc, detail::TypeExtrema<float>::max);
-  if (global_amax == 0.0f || S_enc == 0.0f) {
-    S_enc = 1.0f;
-  }
+  const float S_enc =
+      core::compute_global_encode_scaling_factor_FP4<ScaleType, encode_scale_max>(global_amax);
   const float base = block_amax / fp4_max * S_enc;
 
   ScalePair<ScaleType> scales;
@@ -226,29 +222,23 @@ __device__ __forceinline__ uint8_t fp8_bits(const ScaleType sf) {
 template <typename ScaleType>
 __device__ __forceinline__ FP16ErrorScalePair
 compute_fp16_error_scales(const ScalePair<ScaleType> &scales) {
+  static_assert(core::NVFP4ScaleTraits<ScaleType>::supports_fp16_error_path);
   FP16ErrorScalePair result;
-  if constexpr (std::is_same_v<ScaleType, fp8e4m3>) {
-    const uint32_t packed_scales = static_cast<uint32_t>(fp8_bits(scales.map4)) |
-                                   (static_cast<uint32_t>(fp8_bits(scales.map6)) << 8);
-    asm volatile(
-        "{\n"
-        ".reg .b16 fp8_pair;\n"
-        ".reg .b16 map4_h, map6_h;\n"
-        ".reg .b32 scale_h2;\n"
-        "cvt.u16.u32 fp8_pair, %2;\n"
-        "cvt.rn.f16x2.e4m3x2 scale_h2, fp8_pair;\n"
-        "mov.b32 {map4_h, map6_h}, scale_h2;\n"
-        "mov.b32 %0, {map4_h, map4_h};\n"
-        "mov.b32 %1, {map6_h, map6_h};\n"
-        "}"
-        : "=r"(result.map4), "=r"(result.map6)
-        : "r"(packed_scales));
-  } else {
-    const __half2 map4_h2 = __float2half2_rn(static_cast<float>(scales.map4));
-    const __half2 map6_h2 = __float2half2_rn(static_cast<float>(scales.map6));
-    result.map4 = *reinterpret_cast<const uint32_t *>(&map4_h2);
-    result.map6 = *reinterpret_cast<const uint32_t *>(&map6_h2);
-  }
+  const uint32_t packed_scales = static_cast<uint32_t>(fp8_bits(scales.map4)) |
+                                 (static_cast<uint32_t>(fp8_bits(scales.map6)) << 8);
+  asm volatile(
+      "{\n"
+      ".reg .b16 fp8_pair;\n"
+      ".reg .b16 map4_h, map6_h;\n"
+      ".reg .b32 scale_h2;\n"
+      "cvt.u16.u32 fp8_pair, %2;\n"
+      "cvt.rn.f16x2.e4m3x2 scale_h2, fp8_pair;\n"
+      "mov.b32 {map4_h, map6_h}, scale_h2;\n"
+      "mov.b32 %0, {map4_h, map4_h};\n"
+      "mov.b32 %1, {map6_h, map6_h};\n"
+      "}"
+      : "=r"(result.map4), "=r"(result.map6)
+      : "r"(packed_scales));
   return result;
 }
 
@@ -322,7 +312,8 @@ __device__ __forceinline__ uint32_t cvt_fp32_to_fp4_8x_with_error(
         "Try recompiling with sm_XXXa instead of sm_XXX.");
   }
 
-  if constexpr (Cfg::err_use_fast_math && std::is_same_v<ScaleType, fp8e4m3>) {
+  if constexpr (Cfg::err_use_fast_math &&
+                core::NVFP4ScaleTraits<ScaleType>::supports_fp16_error_path) {
     accumulate_fp16_scaled_error_pair<Cfg>(out_dequant_1, x[0], x[1], fp16_error_scale,
                                            global_encode_scale, err);
     accumulate_fp16_scaled_error_pair<Cfg>(out_dequant_2, x[2], x[3], fp16_error_scale,
@@ -361,7 +352,8 @@ __device__ __forceinline__ CandidatePair make_candidates(const float (&x0)[8], c
   candidates.map4.err = 0.0f;
   candidates.map6.err = 0.0f;
   FP16ErrorScalePair fp16_error_scales{};
-  if constexpr (Cfg::err_use_fast_math && std::is_same_v<ScaleType, fp8e4m3>) {
+  if constexpr (Cfg::err_use_fast_math &&
+                core::NVFP4ScaleTraits<ScaleType>::supports_fp16_error_path) {
     fp16_error_scales = compute_fp16_error_scales(scales);
   }
   candidates.map4.packed[0] = cvt_fp32_to_fp4_8x_with_error<Cfg, ScaleType, E4M3_MAX>(
@@ -779,25 +771,9 @@ void quantize_4over6(const Tensor &input, const Tensor *noop, Tensor *output,
                to_string(output->columnwise_scale_inv.dtype), ").");
   }
 
-  if (scale_dtype == DType::kFloat8E4M3) {
-    quantize_4over6_impl<fp8e4m3, use_2d_quantization>(input, noop, output, quant_config, stream);
-    return;
-  }
-
-  if (scale_dtype == DType::kFloat8UE5M3) {
-#if CUDA_VERSION >= 13040
-    quantize_4over6_impl<fp8ue5m3, use_2d_quantization>(input, noop, output, quant_config, stream);
-    return;
-#else
-    NVTE_ERROR(
-        "NVFP4 4over6 quantization with UE5M3 scales requires CUDA 13.4 or newer, "
-        "but compile-time CUDA version is ",
-        CUDA_VERSION, ".");
-#endif
-  }
-
-  NVTE_ERROR("NVFP4 4over6 quantization requires E4M3 or UE5M3 scale tensors, got ",
-             to_string(scale_dtype), ".");
+  TRANSFORMER_ENGINE_NVFP4_SCALE_TYPE_SWITCH(scale_dtype, ScaleType,
+                                             quantize_4over6_impl<ScaleType, use_2d_quantization>(
+                                                 input, noop, output, quant_config, stream);)
 #else
   NVTE_ERROR("FP4 support requires CUDA 12.8+, but compile-time CUDA version is ", CUDA_VERSION);
 #endif  // FP4_TYPE_SUPPORTED

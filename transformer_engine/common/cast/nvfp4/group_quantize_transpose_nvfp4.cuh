@@ -28,7 +28,6 @@ namespace nvfp4 {
 
 namespace group_quantize_transpose_kernel {
 
-using namespace quantization_and_transposition_SF;
 using namespace core;
 using namespace ptx;
 
@@ -85,30 +84,11 @@ __device__ __forceinline__ int GetTensorIdAndBoundary(
 }
 
 template <typename ScaleType>
-__device__ __forceinline__ float compute_global_encode_scaling_factor(const float global_amax) {
-  constexpr float fp8_max = detail::TypeExtrema<ScaleType>::max;
-  constexpr float fp4_max = detail::TypeExtrema<fp4e2m1>::max;
-  float global_encode_scale = fp8_max * fp4_max / global_amax;
-  global_encode_scale = fminf(global_encode_scale, detail::TypeExtrema<float>::max);
-  if (global_amax == 0.0f || global_encode_scale == 0.0f) {
-    return 1.0f;
-  }
-  return global_encode_scale;
-}
-
-template <typename ScaleType>
-__device__ __forceinline__ ScaleType compute_decoding_scale(const float block_amax,
-                                                            const float global_encode_scale) {
-  constexpr float fp4_max_inv = 1.0f / detail::TypeExtrema<fp4e2m1>::max;
-  const float decode_scale = block_amax * (global_encode_scale * fp4_max_inv);
-  return static_cast<ScaleType>(fminf(decode_scale, detail::TypeExtrema<float>::max));
-}
-
-template <typename ScaleType>
 __device__ __forceinline__ void UpdateEncodeDecodeScaleFP32(float *amax_ptr, float *s_enc_ptr,
                                                             float *s_dec_ptr) {
-  float s_env_value =
-      (amax_ptr == nullptr) ? 1.0f : compute_global_encode_scaling_factor<ScaleType>(*amax_ptr);
+  float s_env_value = (amax_ptr == nullptr)
+                          ? 1.0f
+                          : core::compute_global_encode_scaling_factor_FP4<ScaleType>(*amax_ptr);
   float s_dec_value = 1.0 / s_env_value;
   *s_enc_ptr = s_env_value;
   *s_dec_ptr = s_dec_value;
@@ -451,8 +431,9 @@ __global__ void __launch_bounds__(THREADS_NUM)
             in_compute_colwise[i] = elt;
           }
         }
-        // 2. Compute E4M3 scaling factor
-        const ScaleType S_dec_b_fp8 = compute_decoding_scale<ScaleType>(block_amax, S_enc_colwise);
+        // 2. Compute block scaling factor
+        const ScaleType S_dec_b_fp8 =
+            core::compute_decoding_scaling_factor<ScaleType>(block_amax, S_enc_colwise);
 
         // Store scaling factors through SHMEM
         const size_t scale_idx_sh =
@@ -623,8 +604,9 @@ __global__ void __launch_bounds__(THREADS_NUM)
           }
         }
 
-        // 2. Compute E4M3 scaling factor
-        const ScaleType S_dec_b_fp8 = compute_decoding_scale<ScaleType>(block_amax, S_enc_rowwise);
+        // 2. Compute block scaling factor
+        const ScaleType S_dec_b_fp8 =
+            core::compute_decoding_scaling_factor<ScaleType>(block_amax, S_enc_rowwise);
 
         // Check boundaries
         const size_t scales_offset_Y =
@@ -791,16 +773,6 @@ void group_quantize_transpose(const Tensor &input, const Tensor *noop,
                  to_string(scale_dtype), ", got ", to_string(group_output->scale_inv.dtype), ").");
     }
   }
-  NVTE_CHECK(scale_dtype == DType::kFloat8E4M3 || scale_dtype == DType::kFloat8UE5M3,
-             "NVFP4 group quantization requires E4M3 or UE5M3 scale tensors, got ",
-             to_string(scale_dtype), ".");
-#if CUDA_VERSION < 13040
-  NVTE_CHECK(scale_dtype != DType::kFloat8UE5M3,
-             "NVFP4 group quantization with UE5M3 scales requires CUDA 13.4 or newer, "
-             "but compile-time CUDA version is ",
-             CUDA_VERSION, ".");
-#endif
-
   // If transposed output is allocated, return the transposed data. Otherwise, it's not necesary to
   // return the transposed data.
   bool return_transpose = output->has_columnwise_data();
@@ -915,33 +887,18 @@ void group_quantize_transpose(const Tensor &input, const Tensor *noop,
           NVTE_ERROR("2D quantization is not supported for group quantize transpose.");
         }
 
-        if (scale_dtype == DType::kFloat8E4M3) {
-          using ScaleType = fp8e4m3;
-          auto kernel =
-              group_quantize_transpose_nvfp4_kernel<COMPUTE_ACTIVATIONS, ParamOP, OP, IType,
-                                                    ScaleType, USE_STOCHASTIC_ROUNDING,
-                                                    RETURN_TRANSPOSE>;
-          auto *scales_ptr = reinterpret_cast<ScaleType *>(output->scale_inv.dptr);
-          NVTE_CHECK_CUDA(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                               dshmem_size));
-          kernel<<<grid, block_size, dshmem_size, stream>>>(tensor_map_input, tensor_map_output,
-                                                            scales_ptr, noop_ptr, rows, cols,
-                                                            scale_stride, rng_state, kernel_args);
-        } else {
-#if CUDA_VERSION >= 13040
-          using ScaleType = fp8ue5m3;
-          auto kernel =
-              group_quantize_transpose_nvfp4_kernel<COMPUTE_ACTIVATIONS, ParamOP, OP, IType,
-                                                    ScaleType, USE_STOCHASTIC_ROUNDING,
-                                                    RETURN_TRANSPOSE>;
-          auto *scales_ptr = reinterpret_cast<ScaleType *>(output->scale_inv.dptr);
-          NVTE_CHECK_CUDA(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                               dshmem_size));
-          kernel<<<grid, block_size, dshmem_size, stream>>>(tensor_map_input, tensor_map_output,
-                                                            scales_ptr, noop_ptr, rows, cols,
-                                                            scale_stride, rng_state, kernel_args);
-#endif
-        }
+        TRANSFORMER_ENGINE_NVFP4_SCALE_TYPE_SWITCH(
+            scale_dtype, ScaleType,
+            auto kernel =
+                group_quantize_transpose_nvfp4_kernel<COMPUTE_ACTIVATIONS, ParamOP, OP, IType,
+                                                      ScaleType, USE_STOCHASTIC_ROUNDING,
+                                                      RETURN_TRANSPOSE>;
+            auto *scales_ptr = reinterpret_cast<ScaleType *>(output->scale_inv.dptr);
+            NVTE_CHECK_CUDA(cudaFuncSetAttribute(
+                kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size));
+            kernel<<<grid, block_size, dshmem_size, stream>>>(
+                tensor_map_input, tensor_map_output, scales_ptr, noop_ptr, rows, cols, scale_stride,
+                rng_state, kernel_args);)
         NVTE_CHECK_CUDA(cudaGetLastError());
       }););
 #else

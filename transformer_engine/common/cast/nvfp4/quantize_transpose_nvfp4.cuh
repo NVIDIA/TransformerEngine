@@ -237,7 +237,6 @@ inline void compute_columnwise_amax(const Tensor &input, const Tensor *noop, Ten
 
 namespace quantize_transpose_kernel {
 
-using namespace quantization_and_transposition_SF;
 using namespace core;
 using namespace ptx;
 
@@ -314,26 +313,6 @@ constexpr size_t TOTAL_BANKS_WIDTH = (32 * 4 * 8) / 4;  // 256
 
 // Number of threads (rowwise scaling) that span 32 banks (4-byte banks) of shared memory
 constexpr size_t THREADS_PER_BANK = TOTAL_BANKS_WIDTH / SCALE_DIM;  // 8 = 128 / 16
-
-template <typename ScaleType>
-__device__ __forceinline__ float compute_global_encode_scaling_factor(const float global_amax) {
-  constexpr float fp8_max = detail::TypeExtrema<ScaleType>::max;
-  constexpr float fp4_max = detail::TypeExtrema<fp4e2m1>::max;
-  float global_encode_scale = fp8_max * fp4_max / global_amax;
-  global_encode_scale = fminf(global_encode_scale, detail::TypeExtrema<float>::max);
-  if (global_amax == 0.0f || global_encode_scale == 0.0f) {
-    return 1.0f;
-  }
-  return global_encode_scale;
-}
-
-template <typename ScaleType>
-__device__ __forceinline__ ScaleType compute_decoding_scale(const float block_amax,
-                                                            const float global_encode_scale) {
-  constexpr float fp4_max_inv = 1.0f / detail::TypeExtrema<fp4e2m1>::max;
-  const float decode_scale = block_amax * (global_encode_scale * fp4_max_inv);
-  return static_cast<ScaleType>(fminf(decode_scale, detail::TypeExtrema<float>::max));
-}
 
 template <bool COMPUTE_ACTIVATIONS, typename ParamOP, float (*OP)(float, const ParamOP &),
           typename IType, typename ScaleType, bool USE_STOCHASTIC_ROUNDING, bool RETURN_TRANSPOSE,
@@ -454,14 +433,14 @@ __global__ void __launch_bounds__(THREADS_NUM)
   const float S_enc_rowwise =
       (amax_rowwise_ptr == nullptr)
           ? 1.0f
-          : compute_global_encode_scaling_factor<ScaleType>(*amax_rowwise_ptr);
+          : core::compute_global_encode_scaling_factor_FP4<ScaleType>(*amax_rowwise_ptr);
   // NOTE: This is to match with how emulation code was written.
   const float S_dec_rowwise = 1.0 / S_enc_rowwise;
 
   const float S_enc_colwise =
       (amax_colwise_ptr == nullptr)
           ? S_enc_rowwise
-          : compute_global_encode_scaling_factor<ScaleType>(*amax_colwise_ptr);
+          : core::compute_global_encode_scaling_factor_FP4<ScaleType>(*amax_colwise_ptr);
   const float S_dec_colwise = 1.0 / S_enc_colwise;
 
   float thread_amax = 0.0f;
@@ -565,8 +544,9 @@ __global__ void __launch_bounds__(THREADS_NUM)
             in_compute_colwise[i] = elt;
           }
         }
-        // 2. Compute E4M3 scaling factor
-        const ScaleType S_dec_b_fp8 = compute_decoding_scale<ScaleType>(block_amax, S_enc_colwise);
+        // 2. Compute block scaling factor
+        const ScaleType S_dec_b_fp8 =
+            core::compute_decoding_scaling_factor<ScaleType>(block_amax, S_enc_colwise);
 
         // Store scaling factors through SHMEM
         const size_t scale_idx_sh =
@@ -739,16 +719,16 @@ __global__ void __launch_bounds__(THREADS_NUM)
 
         float block_scale_inverse;
         if constexpr (ROW_SCALED_NVFP4) {
-          // 2. Compute E4M3 scaling factor
+          // 2. Compute block scaling factor
           const size_t scales_offset_Y =
               scales_offset_Y_rowwise + stage * BUFF_DIM_Y + it * THREADS_Y_ROWWISE;
-          const float S_enc_rowwise_block = scales_offset_Y < rows
-                                                ? compute_global_encode_scaling_factor<ScaleType>(
-                                                      amax_rowwise_ptr[scales_offset_Y])
-                                                : 1.0f;
+          const float S_enc_rowwise_block =
+              scales_offset_Y < rows ? core::compute_global_encode_scaling_factor_FP4<ScaleType>(
+                                           amax_rowwise_ptr[scales_offset_Y])
+                                     : 1.0f;
           const float S_dec_rowwise_block = 1.0f / S_enc_rowwise_block;
           const ScaleType S_dec_b_fp8 =
-              compute_decoding_scale<ScaleType>(block_amax, S_enc_rowwise_block);
+              core::compute_decoding_scaling_factor<ScaleType>(block_amax, S_enc_rowwise_block);
 
           // Check boundaries
           const size_t scales_offset_X = scales_offset_X_rowwise;
@@ -766,9 +746,9 @@ __global__ void __launch_bounds__(THREADS_NUM)
               fminf(1.0f / (static_cast<float>(S_dec_b_fp8) * S_dec_rowwise_block),
                     float_max);  // S_enc_b_fp8
         } else {
-          // 2. Compute E4M3 scaling factor
+          // 2. Compute block scaling factor
           const ScaleType S_dec_b_fp8 =
-              compute_decoding_scale<ScaleType>(block_amax, S_enc_rowwise);
+              core::compute_decoding_scaling_factor<ScaleType>(block_amax, S_enc_rowwise);
 
           // Check boundaries
           const size_t scales_offset_Y =
@@ -996,14 +976,14 @@ __global__ void __launch_bounds__(THREADS_NUM)
   const float S_enc_rowwise =
       (amax_rowwise_ptr == nullptr)
           ? 1.0f
-          : compute_global_encode_scaling_factor<ScaleType>(*amax_rowwise_ptr);
+          : core::compute_global_encode_scaling_factor_FP4<ScaleType>(*amax_rowwise_ptr);
   // NOTE: This is to match with how emulation code was written.
   const float S_dec_rowwise = 1.0 / S_enc_rowwise;
 
   const float S_enc_colwise =
       (amax_colwise_ptr == nullptr)
           ? S_enc_rowwise
-          : compute_global_encode_scaling_factor<ScaleType>(*amax_colwise_ptr);
+          : core::compute_global_encode_scaling_factor_FP4<ScaleType>(*amax_colwise_ptr);
   const float S_dec_colwise = 1.0 / S_enc_colwise;
 
   const size_t warp_id = threadIdx.x / 32;
@@ -1176,8 +1156,9 @@ __global__ void __launch_bounds__(THREADS_NUM)
           }
         }
 
-        // 2. Compute E4M3 scaling factor
-        const ScaleType S_dec_b_fp8 = compute_decoding_scale<ScaleType>(block_amax, S_enc_colwise);
+        // 2. Compute block scaling factor
+        const ScaleType S_dec_b_fp8 =
+            core::compute_decoding_scaling_factor<ScaleType>(block_amax, S_enc_colwise);
 
         // // Store scaling factors through SHMEM
         const size_t scale_idx_sh =
@@ -1300,8 +1281,9 @@ __global__ void __launch_bounds__(THREADS_NUM)
           }
         }
 
-        // 2. Compute E4M3 scaling factor
-        const ScaleType S_dec_b_fp8 = compute_decoding_scale<ScaleType>(block_amax, S_enc_rowwise);
+        // 2. Compute block scaling factor
+        const ScaleType S_dec_b_fp8 =
+            core::compute_decoding_scaling_factor<ScaleType>(block_amax, S_enc_rowwise);
 
         // Check boundaries
         const size_t scales_offset_Y =
@@ -1626,27 +1608,10 @@ void quantize_transpose(const Tensor &input, const Tensor *noop, Tensor *output,
                to_string(output->columnwise_scale_inv.dtype), ").");
   }
 
-  if (scale_dtype == DType::kFloat8E4M3) {
-    quantize_transpose_impl<fp8e4m3, use_2d_quantization>(input, noop, output, quant_config,
-                                                          stream);
-    return;
-  }
-
-  if (scale_dtype == DType::kFloat8UE5M3) {
-#if CUDA_VERSION >= 13040
-    quantize_transpose_impl<fp8ue5m3, use_2d_quantization>(input, noop, output, quant_config,
-                                                           stream);
-    return;
-#else
-    NVTE_ERROR(
-        "NVFP4 quantization with UE5M3 scales requires CUDA 13.4 or newer, "
-        "but compile-time CUDA version is ",
-        CUDA_VERSION, ".");
-#endif
-  }
-
-  NVTE_ERROR("NVFP4 quantization requires E4M3 or UE5M3 scale tensors, got ",
-             to_string(scale_dtype), ".");
+  TRANSFORMER_ENGINE_NVFP4_SCALE_TYPE_SWITCH(
+      scale_dtype, ScaleType,
+      quantize_transpose_impl<ScaleType, use_2d_quantization>(input, noop, output, quant_config,
+                                                              stream);)
 #else
   NVTE_ERROR("FP4 support requires CUDA 12.8+, but compile-time CUDA version is ", CUDA_VERSION);
 #endif  // FP4_TYPE_SUPPORTED

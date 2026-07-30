@@ -30,7 +30,6 @@ namespace nvfp4 {
 
 namespace quantize_transpose_tuned_kernel {
 
-using namespace quantization_and_transposition_SF;
 using namespace core;
 using namespace ptx;
 
@@ -164,26 +163,6 @@ __device__ __forceinline__ float get_amax_of_pair(const IType2 pair) {
   return static_cast<float>(__hmax(__habs(pair.x), __habs(pair.y)));
 }
 
-template <typename ScaleType>
-__device__ __forceinline__ float compute_global_encode_scaling_factor(const float global_amax) {
-  constexpr float fp8_max = detail::TypeExtrema<ScaleType>::max;
-  constexpr float fp4_max = detail::TypeExtrema<fp4e2m1>::max;
-  float global_encode_scale = fp8_max * fp4_max / global_amax;
-  global_encode_scale = fminf(global_encode_scale, detail::TypeExtrema<float>::max);
-  if (global_amax == 0.0f || global_encode_scale == 0.0f) {
-    return 1.0f;
-  }
-  return global_encode_scale;
-}
-
-template <typename ScaleType>
-__device__ __forceinline__ ScaleType compute_decoding_scale(const float block_amax,
-                                                            const float global_encode_scale) {
-  constexpr float fp4_max_inv = 1.0f / detail::TypeExtrema<fp4e2m1>::max;
-  const float decode_scale = block_amax * (global_encode_scale * fp4_max_inv);
-  return static_cast<ScaleType>(fminf(decode_scale, detail::TypeExtrema<float>::max));
-}
-
 // Compute "correct" per-block encoding scaling factor.
 template <typename SFType, typename ScaleType>
 __device__ __forceinline__ SFType
@@ -252,11 +231,11 @@ __device__ __forceinline__ void colwise_scaling(
       const size_t col_idx = col_offset + stage_X * TILE_DIM_X + thread_offset_X_colwise + w;
       S_enc_colwise_block =
           col_idx < cols
-              ? compute_global_encode_scaling_factor<ScaleType>(amax_colwise_ptr[col_idx])
+              ? core::compute_global_encode_scaling_factor_FP4<ScaleType>(amax_colwise_ptr[col_idx])
               : 1.0f;
     }
     const ScaleType S_dec_b_fp8 =
-        compute_decoding_scale<ScaleType>(block_amax[w], S_enc_colwise_block);
+        core::compute_decoding_scaling_factor<ScaleType>(block_amax[w], S_enc_colwise_block);
 
     // Store scaling factors to SMEM buffer (R2S)
     sSFcolwise[scale_tr_offset_Y + w][scale_tr_offset_X] = S_dec_b_fp8;
@@ -345,13 +324,14 @@ __device__ __forceinline__ void rowwise_scaling(
       const size_t row_idx = row_offset + stage_Y * TILE_DIM_Y + it_offset_Y_rowwise;
       const float S_enc_rowwise_block =
           row_idx < rows
-              ? compute_global_encode_scaling_factor<ScaleType>(amax_rowwise_ptr[row_idx])
+              ? core::compute_global_encode_scaling_factor_FP4<ScaleType>(amax_rowwise_ptr[row_idx])
               : 1.0f;
-      S_dec_b_fp8 = compute_decoding_scale<ScaleType>(block_amax, S_enc_rowwise_block);
+      S_dec_b_fp8 =
+          core::compute_decoding_scaling_factor<ScaleType>(block_amax, S_enc_rowwise_block);
       SFcoefficient =
           compute_nvfp4_scaling_coefficient<scaling_coeff_type>(S_dec_b_fp8, S_enc_rowwise_block);
     } else {
-      S_dec_b_fp8 = compute_decoding_scale<ScaleType>(block_amax, S_enc_rowwise);
+      S_dec_b_fp8 = core::compute_decoding_scaling_factor<ScaleType>(block_amax, S_enc_rowwise);
       SFcoefficient =
           compute_nvfp4_scaling_coefficient<scaling_coeff_type>(S_dec_b_fp8, S_enc_rowwise);
     }
@@ -456,12 +436,12 @@ __global__ void __launch_bounds__(THREADS_NUM) quantize_transpose_nvfp4_tuned_1D
   const float S_enc_rowwise =
       (amax_rowwise_ptr == nullptr)
           ? 1.0f
-          : compute_global_encode_scaling_factor<ScaleType>(*amax_rowwise_ptr);
+          : core::compute_global_encode_scaling_factor_FP4<ScaleType>(*amax_rowwise_ptr);
 
   const float S_enc_colwise =
       (amax_colwise_ptr == nullptr || ROW_SCALED_NVFP4)
           ? S_enc_rowwise
-          : compute_global_encode_scaling_factor<ScaleType>(*amax_colwise_ptr);
+          : core::compute_global_encode_scaling_factor_FP4<ScaleType>(*amax_colwise_ptr);
 
   __shared__ uint64_t workID_mbar;
   __shared__ __uint128_t workID_response;
