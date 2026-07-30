@@ -5,6 +5,7 @@
  ************************************************************************/
 #include "extensions/ffi.h"
 
+#include <cstdio>
 #include <iostream>
 
 namespace transformer_engine {
@@ -61,29 +62,25 @@ Error_Type ffi_with_cuda_error_check() {
   return Error_Type::Success();
 }
 
-Error_Type ffi_with_cuda_stream_sync_and_error_check(cudaStream_t stream,
-                                                     const char* operation_name) {
-  cudaError_t launch_error = cudaGetLastError();
-  if (launch_error != cudaSuccess) {
-    return Error_Type(XLA_FFI_Error_Code_INTERNAL,
-                      std::string(operation_name) +
-                          " CUDA launch error before stream synchronization: " +
-                          cudaGetErrorString(launch_error));
-  }
-
-  cudaError_t sync_error = cudaStreamSynchronize(stream);
+Error_Type ffi_with_cuda_device_sync_and_error_check(const char* operation_name,
+                                                     const char* synchronization_phase) {
+  cudaError_t sync_error = cudaDeviceSynchronize();
+  std::printf(
+      "[TE FFI device sync] operation=%s phase=%s code=%d name=%s message=%s\n",
+      operation_name, synchronization_phase, static_cast<int>(sync_error),
+      cudaGetErrorName(sync_error), cudaGetErrorString(sync_error));
+  std::fflush(stdout);
   if (sync_error != cudaSuccess) {
     return Error_Type(XLA_FFI_Error_Code_INTERNAL,
-                      std::string(operation_name) + " CUDA stream synchronization error: " +
-                          cudaGetErrorString(sync_error));
+                      std::string(operation_name) + " CUDA device synchronization error at " +
+                          synchronization_phase + ": " + cudaGetErrorString(sync_error));
   }
 
   cudaError_t last_error = cudaGetLastError();
   if (last_error != cudaSuccess) {
     return Error_Type(XLA_FFI_Error_Code_INTERNAL,
-                      std::string(operation_name) +
-                          " CUDA error after stream synchronization: " +
-                          cudaGetErrorString(last_error));
+                      std::string(operation_name) + " CUDA error after device synchronization at " +
+                          synchronization_phase + ": " + cudaGetErrorString(last_error));
   }
   return Error_Type::Success();
 }

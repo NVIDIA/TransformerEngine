@@ -198,6 +198,8 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(EpInstantiateHandler, EpInstantiateImpl, FFI::Bind
 Error_Type EpPrepareFFI(cudaStream_t stream, EpInstanceState* ep_state, Buffer_Type topk_idx,
                         Result_Type recv_tokens_per_expert, Result_Type handle_mem,
                         EpConfig config) {
+  auto sync_error = ffi_with_cuda_device_sync_and_error_check("EpPrepareFFI", "begin");
+  if (sync_error.failure()) return sync_error;
   (void)ep_state;  // lifetime only.
   auto topk_dims = topk_idx.dimensions();
   NVTE_CHECK(topk_dims.size() >= 2,
@@ -224,7 +226,7 @@ Error_Type EpPrepareFFI(cudaStream_t stream, EpInstanceState* ep_state, Buffer_T
                                   static_cast<size_t>(config.dispatch_output_per_expert_alignment)};
   nvte_ep_prepare(handle_mem_.data(), topk_idx_.data(), recv_tokens_per_expert_.data(),
                   /*total_recv_tokens_per_rank=*/nullptr, &layer_cfg, stream);
-  return ffi_with_cuda_stream_sync_and_error_check(stream, "EpPrepareFFI");
+  return ffi_with_cuda_device_sync_and_error_check("EpPrepareFFI", "end");
 }
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(EpPrepareHandler, EpPrepareFFI,
@@ -241,6 +243,8 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(EpPrepareHandler, EpPrepareFFI,
 Error_Type EpDispatchFFI(cudaStream_t stream, EpInstanceState* ep_state, Buffer_Type handle_mem,
                          Buffer_Type topk_idx, Buffer_Type tokens, Buffer_Type topk_weights,
                          Result_Type recv_tokens, Result_Type recv_topk_weights, EpConfig config) {
+  auto sync_error = ffi_with_cuda_device_sync_and_error_check("EpDispatchFFI", "begin");
+  if (sync_error.failure()) return sync_error;
   (void)ep_state;
   auto token_dims = tokens.dimensions();
   NVTE_CHECK(token_dims.size() >= 2,
@@ -298,7 +302,7 @@ Error_Type EpDispatchFFI(cudaStream_t stream, EpInstanceState* ep_state, Buffer_
                    topk_weights_.data(), no_win, recv_tokens_.data(), no_win,
                    recv_topk_weights_.data(), no_win, stream);
 
-  return ffi_with_cuda_stream_sync_and_error_check(stream, "EpDispatchFFI");
+  return ffi_with_cuda_device_sync_and_error_check("EpDispatchFFI", "end");
 }
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(EpDispatchHandler, EpDispatchFFI,
@@ -317,6 +321,8 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(EpDispatchHandler, EpDispatchFFI,
 
 Error_Type EpCombineFFI(cudaStream_t stream, EpInstanceState* ep_state, Buffer_Type handle_mem,
                         Buffer_Type expert_out, Result_Type result, EpConfig config) {
+  auto sync_error = ffi_with_cuda_device_sync_and_error_check("EpCombineFFI", "begin");
+  if (sync_error.failure()) return sync_error;
   (void)ep_state;
   auto eo_dims = expert_out.dimensions();
   NVTE_CHECK(eo_dims.size() >= 2,
@@ -341,7 +347,7 @@ Error_Type EpCombineFFI(cudaStream_t stream, EpInstanceState* ep_state, Buffer_T
   NVTECommWindow no_win{nullptr, 0};
   nvte_ep_combine(handle_mem_.data(), expert_out_.data(), no_win, result_.data(), stream);
 
-  return ffi_with_cuda_stream_sync_and_error_check(stream, "EpCombineFFI");
+  return ffi_with_cuda_device_sync_and_error_check("EpCombineFFI", "end");
 }
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(EpCombineHandler, EpCombineFFI,
@@ -359,6 +365,8 @@ Error_Type EpDispatchBwdFFI(cudaStream_t stream, EpInstanceState* ep_state, Buff
                             Buffer_Type grad, Buffer_Type g_recv_topk_weights,
                             Result_Type grad_tokens, Result_Type grad_topk_weights,
                             EpConfig config) {
+  auto sync_error = ffi_with_cuda_device_sync_and_error_check("EpDispatchBwdFFI", "begin");
+  if (sync_error.failure()) return sync_error;
   (void)ep_state;
   auto grad_dims = grad.dimensions();
   NVTE_CHECK(grad_dims.size() >= 2,
@@ -408,7 +416,7 @@ Error_Type EpDispatchBwdFFI(cudaStream_t stream, EpInstanceState* ep_state, Buff
   nvte_ep_dispatch_bwd(handle_mem_.data(), grad_.data(), no_win, g_recv_topk_weights_.data(),
                        no_win, grad_tokens_.data(), grad_topk_weights_.data(), stream);
 
-  return ffi_with_cuda_stream_sync_and_error_check(stream, "EpDispatchBwdFFI");
+  return ffi_with_cuda_device_sync_and_error_check("EpDispatchBwdFFI", "end");
 }
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(EpDispatchBwdHandler, EpDispatchBwdFFI,
@@ -426,6 +434,8 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(EpDispatchBwdHandler, EpDispatchBwdFFI,
 
 Error_Type EpCombineBwdFFI(cudaStream_t stream, EpInstanceState* ep_state, Buffer_Type handle_mem,
                            Buffer_Type grad, Result_Type grad_expert_out, EpConfig config) {
+  auto sync_error = ffi_with_cuda_device_sync_and_error_check("EpCombineBwdFFI", "begin");
+  if (sync_error.failure()) return sync_error;
   (void)ep_state;
   auto grad_dims = grad.dimensions();
   NVTE_CHECK(grad_dims.size() >= 2,
@@ -453,7 +463,7 @@ Error_Type EpCombineBwdFFI(cudaStream_t stream, EpInstanceState* ep_state, Buffe
   nvte_ep_combine_bwd(handle_mem_.data(), grad_.data(), no_win, grad_expert_out_.data(), no_win,
                       stream);
 
-  return ffi_with_cuda_stream_sync_and_error_check(stream, "EpCombineBwdFFI");
+  return ffi_with_cuda_device_sync_and_error_check("EpCombineBwdFFI", "end");
 }
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(EpCombineBwdHandler, EpCombineBwdFFI,

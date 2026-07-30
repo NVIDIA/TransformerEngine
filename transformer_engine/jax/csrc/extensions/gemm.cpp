@@ -926,6 +926,8 @@ Error_Type GroupedGemmV2FFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Ty
                             Buffer_Type alpha, Buffer_Type beta, Result_Type output,
                             Result_Type cublas_workspace, Result_Type setup_workspace,
                             Result_Type int64_workspace, GroupedGemmV2Config config) {
+  auto sync_error = ffi_with_cuda_device_sync_and_error_check("GroupedGemmV2FFI", "begin");
+  if (sync_error.failure()) return sync_error;
   auto [lhs_is_trans, rhs_is_trans, scaling_mode, lhs_axis_boundary, rhs_axis_boundary,
         lhs_left_size, lhs_right_size, rhs_left_size, rhs_right_size] = config;
 
@@ -1017,7 +1019,7 @@ Error_Type GroupedGemmV2FFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Ty
                     alpha_tensor.data(), beta_tensor.data(), workspace_setup.data(),
                     workspace_cublas.data(), gemmConfig, stream);
 
-  return ffi_with_cuda_stream_sync_and_error_check(stream, "GroupedGemmV2FFI");
+  return ffi_with_cuda_device_sync_and_error_check("GroupedGemmV2FFI", "end");
 }
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(GroupedGemmV2Handler, GroupedGemmV2FFI,
@@ -1049,6 +1051,8 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
                           Buffer_Type out_first_dims, Buffer_Type out_last_dims,
                           Buffer_Type group_offset, Result_Type output, Result_Type workspace,
                           GroupedGemmConfig config) {
+  auto sync_error = ffi_with_cuda_device_sync_and_error_check("GroupedGemmFFI", "begin");
+  if (sync_error.failure()) return sync_error;
   auto [lhs_is_trans, rhs_is_trans, scaling_mode, has_bias, use_async_d2h_group_sizes,
         lhs_axis_boundary, rhs_axis_boundary, lhs_left_size, lhs_right_size, rhs_left_size,
         rhs_right_size] = config;
@@ -1424,7 +1428,7 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
                          grad, workspace_list.data(), accumulate, use_split_accumulator,
                          num_math_sm, stream);
 
-  return ffi_with_cuda_stream_sync_and_error_check(stream, "GroupedGemmFFI");
+  return ffi_with_cuda_device_sync_and_error_check("GroupedGemmFFI", "end");
 }
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(GroupedGemmHandler, GroupedGemmFFI,
