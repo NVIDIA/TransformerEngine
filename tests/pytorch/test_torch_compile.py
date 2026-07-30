@@ -693,9 +693,10 @@ def _make_dpa_inputs(spec: dict, dtype: torch.dtype):
     return args, kwargs, grad_tensors
 
 
-def _skip_unsupported(spec: dict, backend: str, dtype) -> None:
-    """Skip what the backend under test cannot run, or cannot compile."""
-    if backend == "fused":
+def _skip_unsupported(spec: dict, backend: str, dtype, compiled: bool = True) -> None:
+    """Skip what the backend under test cannot run, or -- for a test that
+    compiles it -- cannot be compiled."""
+    if compiled and backend == "fused":
         # FusedAttention's forward carries @no_torch_dynamo, so there is nothing
         # to compile: it runs as an eager island. Drop this skip once it traces,
         # and the tests below cover it as they do the others.
@@ -836,6 +837,23 @@ def test_dpa_torch_compile(monkeypatch, backend, config):
     _compare_compiled_to_eager(
         module, args, kwargs, grads, monkeypatch, backend, dtype, fullgraph=True
     )
+
+
+def test_dpa_torch_compile_around_fused(monkeypatch):
+    """FusedAttention itself is an eager island, but everything around it is
+    compiled: DotProductAttention traces up to the backend call, breaks the
+    graph there and resumes afterwards. What crosses that break has to survive
+    it -- the sub-backend enum did not, and reached cuDNN as the function that
+    produced it."""
+    dtype = torch.bfloat16
+    spec = _DPA_COMPILE_CONFIGS["self_bshd_causal"]
+    _skip_unsupported(spec, "fused", dtype, compiled=False)
+    _force_dpa_backend(monkeypatch, "fused")
+
+    module = _make_dpa(spec, dtype)
+    args, kwargs, grads = _make_dpa_inputs(spec, dtype)
+    # No fullgraph: the graph break at the eager island is the point here.
+    _compare_compiled_to_eager(module, args, kwargs, grads, monkeypatch, "fused", dtype)
 
 
 @pytest.mark.parametrize("backend", ["flash", "unfused"])

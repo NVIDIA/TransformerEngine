@@ -746,9 +746,6 @@ class DotProductAttention(TransformerEngineBaseModule):
 
         qstate = FP8GlobalStateManager.quantization_state
         if not (qstate.fp8_enabled or qstate.fp8_calibration or qstate.fp8_parameters):
-            # Without FP8 the recipe juggling below is a no-op, and its
-            # get_fp8_recipe() call would build a default Recipe -- which
-            # torch.compile cannot trace.
             super().init_fp8_metadata(num_gemms=num_gemms)
             return
 
