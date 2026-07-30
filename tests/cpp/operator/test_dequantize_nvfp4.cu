@@ -8,7 +8,6 @@
 #include <cstring>
 #include <memory>
 #include <random>
-#include <type_traits>
 #include <vector>
 
 #include <cuda_bf16.h>
@@ -159,10 +158,10 @@ void performTest_dequantize_nvfp4(const size_t rows, const size_t cols,
     const size_t scale_stride = scale_shape.data[scale_shape.ndim - 1];
     std::unique_ptr<OutputType[]> ref_output =
       std::make_unique<OutputType[]>(rows * cols);
-    constexpr float full_scale_max =
-      std::is_same_v<ScaleType, fp8ue5m3> ? 114688.0f : 448.0f;
-    const float scale_max =
-      TypeInfo<ScaleType>::dtype == DType::kFloat8E4M3 ? e4m3_max : full_scale_max;
+    constexpr bool ue5m3_scales = TypeInfo<ScaleType>::dtype == DType::kFloat8UE5M3;
+    constexpr float full_scale_max = ue5m3_scales ? 114688.0f : 448.0f;
+    constexpr float headroom_scale_max = ue5m3_scales ? 65536.0f : 256.0f;
+    const float scale_max = e4m3_max == 256 ? headroom_scale_max : full_scale_max;
     compute_ref_dequantize_nvfp4<OutputType, ScaleType>(
       fp4_data, scales, amax_vals, ref_output.get(),
       rows, cols, scale_stride, scale_max);
@@ -349,6 +348,10 @@ TEST(DequantizeNVFP4Test, UE5M3Scales)
         32, 64, false, kNVTENVFP44Over6Disabled, 448);
     performTest_dequantize_nvfp4_swizzled<bf16, fp8ue5m3>(
         32, 64, true, kNVTENVFP44Over6Disabled, 448);
+    performTest_dequantize_nvfp4<fp32, fp8ue5m3>(
+        32, 64, false, kNVTENVFP44Over6MinMAE, 256);
+    performTest_dequantize_nvfp4_swizzled<bf16, fp8ue5m3>(
+        32, 64, true, kNVTENVFP44Over6MinMAE, 256);
 }
 
 TEST(NVFP4RecipeTest, UE5M3ScaleUtilities)
@@ -419,6 +422,18 @@ TEST(NVFP4RecipeTest, UE5M3PerTensorScale)
         1.0f / (fp4_max * fp4_max * ue5m3_max * ue5m3_max);
     const float expected = alpha_in * amax_a * amax_b * factor_inv;
     EXPECT_FLOAT_EQ(alpha_out.rowwise_cpu_dptr<float>()[0], expected);
+
+    input_a.set_nvfp4_e4m3_max(256);
+    input_b.set_nvfp4_e4m3_max(256);
+    nvte_nvfp4_compute_per_tensor_scale(
+        input_a.data(), true, input_b.data(), false, alpha_in, alpha_out.data(), 0);
+    alpha_out.to_cpu();
+
+    constexpr float ue5m3_headroom_max = 65536.0f;
+    const float headroom_factor_inv =
+        1.0f / (fp4_max * fp4_max * ue5m3_headroom_max * ue5m3_headroom_max);
+    const float headroom_expected = alpha_in * amax_a * amax_b * headroom_factor_inv;
+    EXPECT_FLOAT_EQ(alpha_out.rowwise_cpu_dptr<float>()[0], headroom_expected);
 }
 #endif
 

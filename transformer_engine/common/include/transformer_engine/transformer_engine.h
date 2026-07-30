@@ -84,11 +84,12 @@ enum NVTETensorParam {
    *  its values are populated during quantization.
    */
   kNVTERowScaledNVFP4 = 8,
-  /*! Global E4M3 scale bound used by an NVFP4 tensor.
+  /*! Global scale-bound selector used by an NVFP4 tensor.
    *
    *  This is part of the tensor data contract. Downstream dequantization and
    *  GEMM scale consumers must use the same bound used during quantization.
    *  Standard NVFP4 uses 448; 4over6 may use 256 for map-to-4 headroom.
+   *  For UE5M3 scales, these settings map to 114688 and 65536, respectively.
    */
   kNVTENVFP4E4M3Max = 9,
   kNVTENumTensorParams

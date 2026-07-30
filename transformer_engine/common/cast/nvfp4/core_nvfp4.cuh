@@ -65,9 +65,9 @@ using namespace ptx;
 template <typename ScaleType>
 struct NVFP4ScaleTraits {
   static constexpr bool is_supported = false;
-  static constexpr bool supports_configurable_max = false;
   static constexpr bool supports_fp16_error_path = false;
   static constexpr float expected_max = 0.0f;
+  static constexpr float headroom_max = 0.0f;
 };
 
 template <>
@@ -76,24 +76,25 @@ struct NVFP4ScaleTraits<fp8e4m3> {
   // path. UE5M3 scales can exceed the FP16 range, so they retain the generic
   // FP32 error path.
   static constexpr bool is_supported = true;
-  static constexpr bool supports_configurable_max = true;
   static constexpr bool supports_fp16_error_path = true;
   static constexpr float expected_max = 448.0f;
+  static constexpr float headroom_max = 256.0f;
 };
 
 #if CUDA_VERSION >= 13040
 template <>
 struct NVFP4ScaleTraits<fp8ue5m3> {
   static constexpr bool is_supported = true;
-  static constexpr bool supports_configurable_max = false;
   static constexpr bool supports_fp16_error_path = false;
   static constexpr float expected_max = 114688.0f;
+  static constexpr float headroom_max = 65536.0f;
 };
 #endif
 
 // Return the effective maximum used to derive the global NVFP4 encode scale.
-// The legacy 256/448 override applies only to E4M3. Other scale formats use
-// their full representable range.
+// The legacy E4M3 256/448 setting selects the corresponding headroom/full
+// maximum for each scale format. The headroom maximum keeps the 1.5x map-to-4
+// scale used by 4over6 within the scale format's representable range.
 template <typename ScaleType, int E4M3_MAX = 448>
 __host__ __device__ constexpr float scale_max() {
   using ScaleTraits = NVFP4ScaleTraits<ScaleType>;
@@ -101,12 +102,10 @@ __host__ __device__ constexpr float scale_max() {
   if constexpr (ScaleTraits::is_supported) {
     static_assert(detail::TypeExtrema<ScaleType>::max == ScaleTraits::expected_max,
                   "Unexpected NVFP4 scale type maximum.");
-    if constexpr (ScaleTraits::supports_configurable_max) {
-      static_assert(E4M3_MAX == 448 || E4M3_MAX == 256, "Unsupported NVFP4 E4M3 max.");
-      return static_cast<float>(E4M3_MAX);
-    } else {
-      return detail::TypeExtrema<ScaleType>::max;
-    }
+    static_assert(E4M3_MAX == 448 || E4M3_MAX == 256, "Unsupported NVFP4 E4M3 max.");
+    static_assert(ScaleTraits::headroom_max * 1.5f <= ScaleTraits::expected_max,
+                  "NVFP4 4over6 scale headroom exceeds scale type maximum.");
+    return E4M3_MAX == 256 ? ScaleTraits::headroom_max : ScaleTraits::expected_max;
   } else {
     return 0.0f;
   }
