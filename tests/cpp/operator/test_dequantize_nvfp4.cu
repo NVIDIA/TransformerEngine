@@ -8,6 +8,7 @@
 #include <cstring>
 #include <memory>
 #include <random>
+#include <type_traits>
 #include <vector>
 
 #include <cuda_bf16.h>
@@ -158,7 +159,8 @@ void performTest_dequantize_nvfp4(const size_t rows, const size_t cols,
     const size_t scale_stride = scale_shape.data[scale_shape.ndim - 1];
     std::unique_ptr<OutputType[]> ref_output =
       std::make_unique<OutputType[]>(rows * cols);
-    constexpr float full_scale_max = detail::TypeExtrema<ScaleType>::max;
+    constexpr float full_scale_max =
+      std::is_same_v<ScaleType, fp8ue5m3> ? 114688.0f : 448.0f;
     const float scale_max =
       TypeInfo<ScaleType>::dtype == DType::kFloat8E4M3 ? e4m3_max : full_scale_max;
     compute_ref_dequantize_nvfp4<OutputType, ScaleType>(
@@ -379,7 +381,8 @@ TEST(NVFP4RecipeTest, UE5M3ScaleUtilities)
     nvte_nvfp4_expand_scale_to_fp8(
         block_scale.data(), expanded_scale.data(), 1, 2, 16, 16, 0, kNVTEFloat8UE5M3);
     expanded_scale.to_cpu();
-    const auto *scales = expanded_scale.rowwise_cpu_dptr<fp8ue5m3>();
+    const auto *scales = reinterpret_cast<const fp8ue5m3 *>(
+        expanded_scale.rowwise_cpu_dptr<byte>());
     for (size_t row = 0; row < 16; ++row) {
         EXPECT_FLOAT_EQ(static_cast<float>(scales[row * 2]),
                         static_cast<float>(fp8ue5m3(3.0f * 114688.0f / 12.0f)));

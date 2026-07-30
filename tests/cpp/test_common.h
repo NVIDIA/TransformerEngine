@@ -67,6 +67,9 @@ using bf16 = nv_bfloat16;
 using fp8e4m3 = __nv_fp8_e4m3;
 using fp8e5m2 = __nv_fp8_e5m2;
 using fp8e8m0 = uint8_t;
+#if CUDA_VERSION >= 13040
+using fp8ue5m3 = __nv_fp8_ue5m3;
+#endif
 #if FP4_TYPE_SUPPORTED
 using fp4e2m1 = __nv_fp4_e2m1;
 using fp4e2m1x2 = __nv_fp4x2_e2m1;
@@ -91,7 +94,12 @@ struct BitsNumber {
 template <typename T>
 struct TypeInfo {
 #if FP4_TYPE_SUPPORTED
-    using types = std::tuple<byte, int16, int32, int64, fp32, fp16, bf16, fp8e4m3, fp8e5m2, fp8e8m0, fp4e2m1>;
+    using types = std::tuple<byte, int16, int32, int64, fp32, fp16, bf16, fp8e4m3,
+                             fp8e5m2, fp8e8m0, fp4e2m1
+#if CUDA_VERSION >= 13040
+                             , fp8ue5m3
+#endif
+                             >;
 #else
     using types = std::tuple<byte, int16, int32, int64, fp32, fp16, bf16, fp8e4m3, fp8e5m2, fp8e8m0>;
 #endif

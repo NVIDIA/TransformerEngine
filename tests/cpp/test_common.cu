@@ -49,6 +49,9 @@ bool areShapesEqual(const NVTEShape &s1, const NVTEShape &s2) {
 }
 
 size_t typeToNumBits(DType type) {
+  if (type == DType::kFloat8UE5M3) {
+    return 8;
+  }
   TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(type, T,
   {
       return TypeInfo<T>::size;
