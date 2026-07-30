@@ -112,7 +112,7 @@ class FusedAttnBackend(IntEnum):
     the same way as with the dict this used to be.
 
     Members do not survive a graph break, though, so ``get_attention_backend``
-    hands out plain ints while tracing -- ``cast`` normalizes both back to a
+    returns the sub-backend as a plain int and ``cast`` turns it back into a
     member.
     """
 

@@ -401,11 +401,11 @@ def get_attention_backend(
         Whether the `FlashAttention` backend has been selected.
     use_fused_attention : bool
         Whether the `FusedAttention` backend has been selected.
-    fused_attention_backend : FusedAttnBackend
-        If `use_fused_attention = True`, one of `FusedAttention` three sub-backends, else `None`.
-        Under `torch.compile` this is the sub-backend's plain integer value instead of the enum
-        member (see the cast below); `FusedAttnBackend.cast` accepts both, as does every consumer
-        in `transformer_engine.pytorch`.
+    fused_attention_backend : int
+        If `use_fused_attention = True`, the integer value of one of `FusedAttention`'s three
+        sub-backends, else `None`. It is not a `FusedAttnBackend` member because that does not
+        survive a graph break under `torch.compile`; `FusedAttnBackend.cast` turns it into one,
+        and comparing it against a member works either way.
     use_unfused_attention : bool
         Whether the `UnfusedDotProductAttention` backend has been selected.
     available_backends : List[bool]
@@ -1600,13 +1600,6 @@ def get_attention_backend(
         use_flash_attention_4 = False
     use_flash_attention = use_flash_attention_2 or use_flash_attention_3 or use_flash_attention_4
     available_backends = [use_flash_attention, use_fused_attention, use_unfused_attention]
-    if fused_attention_backend is not None and not torch.compiler.is_compiling():
-        # The fused sub-backend is kept as a plain int while tracing: it has to
-        # survive a graph break (DotProductAttention hands it to FusedAttention,
-        # which is an eager island) and an enum member does not -- dynamo
-        # reconstructs the constant-folded member into the resumed frame as the
-        # function that produced it. Eager callers get the enum, as before.
-        fused_attention_backend = FusedAttnBackend.cast(fused_attention_backend)
     if use_flash_attention_2:
         flash_attention_backend = FlashAttentionUtils.version
     if use_flash_attention_3:
