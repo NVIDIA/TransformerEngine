@@ -16,7 +16,7 @@ import torch
 from packaging.version import Version as PkgVersion
 
 import transformer_engine_torch as tex
-from ...constants import MXFP8_BLOCK_SCALING_SIZE, NVFP4_BLOCK_SCALING_SIZE
+from ...constants import MXFP8_BLOCK_SCALING_SIZE, NVFP4_BLOCK_SCALING_SIZE, TE_DType
 from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload, start_offload
 from ...cpp_extensions import general_gemm, general_grouped_gemm_for_grouped_tensor
 from ...distributed_weight import (
@@ -31,7 +31,7 @@ from ...tensor import NVFP4Quantizer, NVFP4Tensor, NVFP4TensorStorage, Quantizer
 from ...tensor.grouped_tensor import GroupedTensor
 from ...tensor.mxfp8_tensor import MXFP8Quantizer, MXFP8Tensor
 from ...tensor.storage.grouped_tensor_storage import GroupedTensorStorage
-from ...triton.grouped_dbias_dscales import compute_grouped_dbias_dscales
+from ...triton.grouped_dbias_dscales import compute_grouped_dbias, compute_grouped_dbias_dscales
 from ...utils import (
     ceil_div,
     clear_tensor_data,
@@ -53,8 +53,8 @@ from .._common import (
     get_dummy_wgrads_for_params,
     get_main_grad_from_param,
     is_quantized_tensor,
+    make_columnwise_gemm_quantizer,
     maybe_dequantize,
-    prepare_prequantized_mxfp8_input_for_gemm,
     validate_or_alloc_output,
     view_main_grad_as_grouped_buffer,
 )
@@ -1224,15 +1224,21 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                 # Rowwise-only MXFP8 input (e.g. FP8 token dispatch):
                 # manufacture the columnwise copy needed by the wgrad GEMM
                 # and swizzle the rowwise scales for the forward GEMM.
-                prepare_prequantized_mxfp8_input_for_gemm(
-                    grouped_fc1_x,
-                    fc1_input_quantizer,
-                    num_groups,
-                    split_sizes,
-                    dtype,
-                    with_columnwise=weight_requires_grad,
-                    tensor_offsets=fc1_x_tensor_offsets,
-                )
+                if weight_requires_grad:
+                    tex.group_requantize_columnwise_and_swizzle_rowwise_(
+                        grouped_fc1_x,
+                        make_columnwise_gemm_quantizer(fc1_input_quantizer),
+                        num_groups,
+                        split_sizes,
+                        TE_DType[dtype],
+                        tensor_offsets=fc1_x_tensor_offsets,
+                    )
+                else:
+                    # No wgrad, so no columnwise copy is needed. The forward GEMM
+                    # still requires swizzled rowwise scales.
+                    tex.grouped_swizzle_for_gemm(
+                        grouped_fc1_x, rowwise=True, columnwise=False
+                    )
         else:
             fc1_x = maybe_dequantize(input_, dtype)
             grouped_fc1_x = _group_quantize_for_grouped_mlp(
@@ -1864,24 +1870,41 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             if prequantized_mxfp8_grad:
                 # Rowwise-only MXFP8 grad output (e.g. FP8 token dispatch): reuse
                 # the rowwise data for the dgrad GEMM and manufacture FC2's
-                # columnwise copy for wgrad. ``scale_bias`` needs the
-                # high-precision grad below, so it takes the dequantized tensor
-                # instead of the fused dbias.
+                # columnwise copy for wgrad. Bias grads are reduced from the
+                # dequantized grad, which is only materialized when one is needed.
                 grouped_fc2_dy = grad_output.copy()
-                fc2_dbias_packed, fc2_dy = prepare_prequantized_mxfp8_input_for_gemm(
-                    grouped_fc2_dy,
-                    fc2_grad_output_quantizer,
-                    num_groups,
-                    split_sizes,
-                    dtype,
-                    with_columnwise=fc2_ctx.weight_requires_grad,
-                    with_dbias=output_fc2_dbias and not scale_bias,
-                    with_dequantized=scale_bias,
-                    tensor_offsets=base_split_offsets * fc2_weight_shape[0],
-                )
-                if not scale_bias:
-                    # Only scale_bias reads the dequantized grad; drop it so the
-                    # buffer is freed instead of living until backward ends.
+                need_dequantized = output_fc2_dbias or scale_bias
+                if fc2_ctx.weight_requires_grad:
+                    fc2_dy = tex.group_requantize_columnwise_and_swizzle_rowwise_(
+                        grouped_fc2_dy,
+                        make_columnwise_gemm_quantizer(fc2_grad_output_quantizer),
+                        num_groups,
+                        split_sizes,
+                        TE_DType[dtype],
+                        tensor_offsets=base_split_offsets * fc2_weight_shape[0],
+                        return_dequantized=need_dequantized,
+                    )
+                else:
+                    # No wgrad, so no columnwise copy is needed. Dequantize before
+                    # swizzling: dequantization reads the unswizzled rowwise scales.
+                    fc2_dy = (
+                        tex.group_dequantize(grouped_fc2_dy, TE_DType[dtype]).rowwise_data.view(
+                            grouped_fc2_dy.logical_shape
+                        )
+                        if need_dequantized
+                        else None
+                    )
+                    tex.grouped_swizzle_for_gemm(
+                        grouped_fc2_dy, rowwise=True, columnwise=False
+                    )
+                if output_fc2_dbias and not scale_bias:
+                    # This path has no quantize kernel to fuse dbias into, and the
+                    # consumer below has no fallback, so reduce it here.
+                    fc2_dbias_packed = compute_grouped_dbias(
+                        fc2_dy, base_split_offsets, num_groups
+                    )
+                    # scale_bias is the only later consumer of the dequantized grad;
+                    # drop it so the buffer is freed rather than held until backward ends.
                     fc2_dy = None
             else:
                 grouped_fc2_dy = grad_output

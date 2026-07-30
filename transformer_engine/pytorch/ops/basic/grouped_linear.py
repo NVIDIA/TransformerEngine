@@ -14,7 +14,7 @@ from typing import Any, Optional
 import torch
 
 import transformer_engine_torch as tex
-from ...constants import DType
+from ...constants import DType, TE_DType
 from ...cpp_extensions import general_grouped_gemm, general_grouped_gemm_for_grouped_tensor
 from ...distributed import CudaRNGStatesTracker
 from ...module._common import WeightGradStore
@@ -48,8 +48,8 @@ from .._common import (
     get_dummy_wgrads_for_params,
     get_main_grad_from_param,
     is_quantized_tensor,
+    make_columnwise_gemm_quantizer,
     maybe_dequantize,
-    prepare_prequantized_mxfp8_input_for_gemm,
     validate_or_alloc_output,
     view_main_grad_as_grouped_buffer,
 )
@@ -1357,15 +1357,19 @@ class GroupedLinear(BasicOperation):
             # columnwise copy needed by the wgrad GEMM, and swizzle the
             # rowwise scales for the GEMM.
             grouped_x = input_.copy()
-            prepare_prequantized_mxfp8_input_for_gemm(
-                grouped_x,
-                input_quantizers[0],
-                num_groups,
-                split_sizes,
-                dtype,
-                with_columnwise=weight_requires_grad,
-                tensor_offsets=base_split_offsets * self.in_features,
-            )
+            if weight_requires_grad:
+                tex.group_requantize_columnwise_and_swizzle_rowwise_(
+                    grouped_x,
+                    make_columnwise_gemm_quantizer(input_quantizers[0]),
+                    num_groups,
+                    split_sizes,
+                    TE_DType[dtype],
+                    tensor_offsets=base_split_offsets * self.in_features,
+                )
+            else:
+                # No wgrad, so no columnwise copy is needed. The forward GEMM
+                # still requires swizzled rowwise scales.
+                tex.grouped_swizzle_for_gemm(grouped_x, rowwise=True, columnwise=False)
         elif with_quantized_compute:
             input_quantizer = input_quantizers[0]
             input_quantizer.set_usage(rowwise=True, columnwise=weight_requires_grad)
@@ -1757,24 +1761,30 @@ class GroupedLinear(BasicOperation):
             if prequantized_mxfp8_grad:
                 # Rowwise-only MXFP8 grad output (e.g. FP8 token dispatch): reuse the
                 # rowwise data for the dgrad GEMM and manufacture the columnwise copy
-                # for wgrad. ``scale_bias`` needs the high-precision grad below, so it
-                # takes the dequantized tensor instead of the fused dbias.
+                # for wgrad. Bias grads are reduced from the dequantized grad below,
+                # which is only kept when there is a bias.
                 grouped_dy = grad_output.copy()
-                dbias_packed, dy_2d = prepare_prequantized_mxfp8_input_for_gemm(
-                    grouped_dy,
-                    grad_output_quantizer,
-                    num_groups,
-                    split_sizes,
-                    dtype,
-                    with_columnwise=ctx.weight_requires_grad,
-                    with_dbias=has_bias and not self._scale_bias,
-                    with_dequantized=has_bias and self._scale_bias,
-                    tensor_offsets=base_split_offsets * self.out_features,
-                )
-                if not (has_bias and self._scale_bias):
-                    # Only scale_bias reads the dequantized grad; drop it so the
-                    # buffer is freed instead of living until backward ends.
-                    dy_2d = None
+                if ctx.weight_requires_grad:
+                    dy_2d = tex.group_requantize_columnwise_and_swizzle_rowwise_(
+                        grouped_dy,
+                        make_columnwise_gemm_quantizer(grad_output_quantizer),
+                        num_groups,
+                        split_sizes,
+                        TE_DType[dtype],
+                        tensor_offsets=base_split_offsets * self.out_features,
+                        return_dequantized=has_bias,
+                    )
+                else:
+                    # No wgrad, so no columnwise copy is needed. Dequantize before
+                    # swizzling: dequantization reads the unswizzled rowwise scales.
+                    dy_2d = (
+                        tex.group_dequantize(grouped_dy, TE_DType[dtype]).rowwise_data.view(
+                            total_tokens, self.out_features
+                        )
+                        if has_bias
+                        else None
+                    )
+                    tex.grouped_swizzle_for_gemm(grouped_dy, rowwise=True, columnwise=False)
             elif has_bias and not self._scale_bias and fuse_bgrad:
                 grouped_dy, dbias_packed = tex.bgrad_group_quantize(
                     dy_2d, grad_output_quantizer, num_groups, split_sizes
@@ -1810,7 +1820,8 @@ class GroupedLinear(BasicOperation):
                     offsets=base_split_offsets,
                 )
             elif dbias_packed is None:
-                # BF16/FP16 path
+                # BF16/FP16 and pre-quantized MXFP8 paths, neither of which fuses dbias
+                # into a quantize kernel.
                 dbias_packed = compute_grouped_dbias(dy_2d, base_split_offsets, num_groups)
             if self.single_grouped_bias:
                 final_bias_grads = [dbias_packed.to(dtype=dtype)]
