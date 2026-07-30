@@ -60,6 +60,9 @@ struct NVFP4ScaleTraits {
 
 template <>
 struct NVFP4ScaleTraits<fp8e4m3> {
+  // E4M3 scales fit in FP16 and can use the packed E4M3-to-FP16 PTX fast
+  // path. UE5M3 scales can exceed the FP16 range, so they retain the generic
+  // FP32 error path.
   static constexpr bool supports_configurable_max = true;
   static constexpr bool supports_fp16_error_path = true;
 };
@@ -67,8 +70,22 @@ struct NVFP4ScaleTraits<fp8e4m3> {
 template <typename ScaleType>
 __device__ __forceinline__ ScaleType
 compute_decoding_scaling_factor(const float block_amax, const float global_encode_scale) {
+  // Compute the per-block decode scale in the selected scale storage type:
+  //
+  //   block_decode_scale = block_amax / fp4_max
+  //   stored_decode_scale = block_decode_scale * global_encode_scale
+  //
+  // An equivalent, more literal implementation is:
+  //
+  //   constexpr float rcp_6f = 1.0f / 6.0f;
+  //   const float block_decode_scale = block_amax * rcp_6f;
+  //   return static_cast<ScaleType>(block_decode_scale * global_encode_scale);
+  //
+  // Keep the multiplication order below to match the emulation code exactly,
+  // while avoiding a direct division by the FP4 maximum.
   using namespace detail;
-  constexpr float fp4_max_inv = 1.0f / TypeExtrema<fp4e2m1>::max;
+  constexpr float fp4_max = TypeExtrema<fp4e2m1>::max;  // 6.0f
+  constexpr float fp4_max_inv = 1.0f / fp4_max;
   const float decode_scale = block_amax * (global_encode_scale * fp4_max_inv);
   return static_cast<ScaleType>(fminf(decode_scale, TypeExtrema<float>::max));
 }

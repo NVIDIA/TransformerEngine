@@ -222,6 +222,10 @@ __device__ __forceinline__ uint8_t fp8_bits(const ScaleType sf) {
 template <typename ScaleType>
 __device__ __forceinline__ FP16ErrorScalePair
 compute_fp16_error_scales(const ScalePair<ScaleType> &scales) {
+  // This fast error path interprets the packed scale bits as E4M3. UE5M3
+  // deliberately does not enable supports_fp16_error_path and instead uses
+  // the scale-format-independent float error path in
+  // cvt_fp32_to_fp4_8x_with_error.
   static_assert(core::NVFP4ScaleTraits<ScaleType>::supports_fp16_error_path);
   FP16ErrorScalePair result;
   const uint32_t packed_scales = static_cast<uint32_t>(fp8_bits(scales.map4)) |
@@ -285,6 +289,11 @@ __device__ __forceinline__ uint32_t cvt_fp32_to_fp4_8x_with_error(
   uint32_t out_dequant_3 = 0;
   uint32_t out_dequant_4 = 0;
 
+  // ScaleType is not consumed by this PTX. block_scale_inverse applies the
+  // selected E4M3 or UE5M3 block scale while forming the FP32 operands. These
+  // instructions only convert the scaled candidates to FP4 E2M1 and back to
+  // FP16 for error evaluation, so their encoding is identical for both scale
+  // storage types.
   constexpr bool is_blackwell = ARCH_BLACKWELL_FAMILY;
   if constexpr (is_blackwell) {
     asm volatile(
