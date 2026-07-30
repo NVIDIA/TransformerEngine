@@ -55,9 +55,11 @@ if torch.__version__ >= "2":
         """Decorator to disable Torch Dynamo, except during ONNX export.
 
         `when` makes it conditional: it is called with the arguments of the call
-        keyed by parameter name, and returns the reason this particular call
-        cannot be traced, or None to have it traced as usual. The reason is
-        reported once per distinct message.
+        keyed by parameter name -- an argument the call left out is absent, so
+        reading it with .get() yields its default as long as that default is
+        None -- and returns the reason this particular call cannot be traced, or
+        None to have it traced as usual. The reason is reported once per
+        distinct message.
         """
 
         def _disable(f):
@@ -79,7 +81,13 @@ if torch.__version__ >= "2":
                     return disabled_f(*args, **kwargs)
 
             else:
-                parameter_names = list(inspect.signature(f).parameters)
+                parameters = inspect.signature(f).parameters
+                # Arguments are matched to names by position, which only holds
+                # without a *args in between.
+                assert not any(
+                    p.kind is inspect.Parameter.VAR_POSITIONAL for p in parameters.values()
+                ), f"no_torch_dynamo(when=...) does not support *args, which {f.__name__} takes"
+                parameter_names = list(parameters)
 
                 # The warning belongs inside the disabled function: warnings.warn
                 # graph-breaks on its own, which would mask the break that matters.
