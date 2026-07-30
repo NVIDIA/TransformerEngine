@@ -111,18 +111,35 @@ def ep_handle_mem_size(cfg: EpLayerConfig) -> int:
     )
 
 
-def _leading_axis_ok(spec):
-    """Validate an EP input spec; return ``(ok, ep_axis, outer_axes)``.
+def _hidden_axis_ok(ax):
+    """Allow the hidden dim of an EP token tensor to be replicated or sharded on
+    tp_resource. Sequence (tpsp_resource) sharding is not supported.
+    """
+    tp_axis = global_mesh_resource().tp_resource
+    if ax is None:
+        return True
+    if tp_axis is None:
+        return False
+    elts = ax if isinstance(ax, tuple) else (ax,)
+    return all(a == tp_axis for a in elts)
 
-    Leading dim is ``ep`` or a tuple ending in ``ep`` (outer dp/fsdp axes
-    first); all other dims must be replicated.
+
+def _leading_axis_ok(spec, hidden_trailing=False):
+    """Validate an EP input spec; return (ok, ep_axis, outer_axes).
+
+    Leading dim is ep or a tuple ending in ep (outer dp/fsdp axes first). Middle
+    dims must be replicated. When hidden_trailing the last dim may also be
+    sharded on tp_resource; otherwise every trailing dim must be replicated.
     """
     gsr = global_mesh_resource()
     ep_axis = gsr.ep_resource
     outer_axes = tuple(a for a in (gsr.dp_resource, gsr.fsdp_resource) if a is not None)
     if len(spec) < 2 or ep_axis is None:
         return False, ep_axis, outer_axes
-    if any(ax is not None for ax in spec[1:]):
+    middle = spec[1:-1] if hidden_trailing else spec[1:]
+    if any(ax is not None for ax in middle):
+        return False, ep_axis, outer_axes
+    if hidden_trailing and not _hidden_axis_ok(spec[-1]):
         return False, ep_axis, outer_axes
     leading = spec[0]
     elts = leading if isinstance(leading, tuple) else (leading,)
@@ -168,17 +185,22 @@ def _ep_output_spec(*trailing):
     return PartitionSpec((outer, gsr.ep_resource), *trailing)
 
 
-def _ep_spec_ok(spec, trailing_count):
-    """Leading dim shards along ep (and outer dp/fsdp when set); trailing dims
-    are replicated. JAX may collapse size-1 mesh axes to ``None`` or drop them,
-    so the leading entry is normalized to a set of named axes before comparing.
+def _ep_spec_ok(spec, trailing_count, hidden_trailing=False):
+    """Leading dim shards along ep (and outer dp/fsdp when set); middle dims are
+    replicated. When hidden_trailing the last dim may be sharded on tp_resource,
+    otherwise all trailing dims are replicated. JAX may collapse size-1 mesh axes
+    to None or drop them, so the leading entry is normalized to a set of named
+    axes before comparing.
     """
     gsr = global_mesh_resource()
     ep_axis = gsr.ep_resource
     outer = _ep_outer_axis()
     if len(spec) != 1 + trailing_count:
         return False
-    if any(ax is not None for ax in spec[1:]):
+    middle = spec[1:-1] if hidden_trailing else spec[1:]
+    if any(ax is not None for ax in middle):
+        return False
+    if hidden_trailing and not _hidden_axis_ok(spec[-1]):
         return False
     leading = spec[0]
     elts = leading if isinstance(leading, tuple) else (leading,)
@@ -404,12 +426,13 @@ class EpDispatchPrimitive(BasePrimitive):
     ):
         del is_outer, result_infos
         tokens_spec = arg_infos[2].sharding.spec
-        ok, ep_axis, outer_axes = _leading_axis_ok(tokens_spec)
+        ok, ep_axis, outer_axes = _leading_axis_ok(tokens_spec, hidden_trailing=True)
         if not ok:
             raise NotImplementedError(
                 "EpDispatch: tokens leading dim must include ep_resource"
-                f" ('{ep_axis}'), optionally tupled with {outer_axes},"
-                f" hidden dim replicated; got spec={tokens_spec}."
+                f" ('{ep_axis}'), optionally tupled with {outer_axes}; the hidden"
+                " dim may be replicated or sharded on tp_resource, middle dims"
+                f" replicated; got spec={tokens_spec}."
             )
         idx_spec = arg_infos[1].sharding.spec
         tw_spec = arg_infos[3].sharding.spec
@@ -418,11 +441,13 @@ class EpDispatchPrimitive(BasePrimitive):
                 "EpDispatch: topk_idx, tokens, topk_weights must share the leading"
                 f" axis; got topk_idx={idx_spec}, tokens={tokens_spec}, topk_weights={tw_spec}."
             )
-        # Recv outputs share the tokens leading-only spec (trailing dims auto-pad to None).
+        # recv_tokens inherits the tokens leading and hidden sharding (recv_pr
+        # replicated); recv_topk_weights carries only the leading axis.
+        hidden_spec = tokens_spec[-1]
         leading_spec = PartitionSpec(tokens_spec[0])
         arg_shardings = tuple(a.sharding for a in arg_infos)
         out_shardings = (
-            NamedSharding(mesh, leading_spec),
+            NamedSharding(mesh, PartitionSpec(tokens_spec[0], None, hidden_spec)),
             NamedSharding(mesh, leading_spec),
         )
 
@@ -578,10 +603,11 @@ class EpCombinePrimitive(BasePrimitive):
     ):
         del result_infos
         eo_spec = arg_infos[1].sharding.spec
-        if not _ep_spec_ok(eo_spec, trailing_count=2):
+        if not _ep_spec_ok(eo_spec, trailing_count=2, hidden_trailing=True):
             raise NotImplementedError(
                 "EpCombine: expert_out must be sharded as PartitionSpec(ep_resource,"
-                " None, None) (or ((dp, ep), None, None) when dp/fsdp is set)"
+                " None, None), with the hidden dim optionally sharded on tp_resource"
+                " (or ((dp, ep), ...) when dp/fsdp is set)"
                 f" over [num_procs, recv_pr, H]; got spec={eo_spec}."
             )
         if out_partition_spec is not None:
@@ -721,10 +747,11 @@ class EpDispatchBwdPrimitive(BasePrimitive):
     ):
         del result_infos
         g_spec = arg_infos[1].sharding.spec
-        if not _ep_spec_ok(g_spec, trailing_count=2):
+        if not _ep_spec_ok(g_spec, trailing_count=2, hidden_trailing=True):
             raise NotImplementedError(
                 "EpDispatchBwd: grad must be sharded as PartitionSpec(ep_resource,"
-                " None, None) (or ((dp, ep), None, None) when dp/fsdp is set)"
+                " None, None), with the hidden dim optionally sharded on tp_resource"
+                " (or ((dp, ep), ...) when dp/fsdp is set)"
                 f" over [num_procs, recv_pr, H]; got spec={g_spec}."
             )
         gw_spec = arg_infos[2].sharding.spec
@@ -742,11 +769,14 @@ class EpDispatchBwdPrimitive(BasePrimitive):
         if out_partition_spec is not None:
             per_shard_leading = _leading_per_shard(out_leading_shape, out_partition_spec[0], mesh)
             out_sharding = NamedSharding(mesh, PartitionSpec(*out_partition_spec))
+            # grad_topk_weights last dim is top_k, not hidden, so keep it replicated.
+            gw_sharding = NamedSharding(mesh, PartitionSpec(*out_partition_spec[:-1], None))
         else:
             per_shard_leading = out_leading_shape
             out_sharding = NamedSharding(mesh, PartitionSpec())
+            gw_sharding = out_sharding
         arg_shardings = tuple(a.sharding for a in arg_infos)
-        out_shardings = [out_sharding, out_sharding]
+        out_shardings = [out_sharding, gw_sharding]
 
         def sharded_impl(handle_mem, grad, g_recv_topk_weights):
             return EpDispatchBwdPrimitive.impl(
@@ -875,9 +905,16 @@ class EpCombineBwdPrimitive(BasePrimitive):
         result_infos,
     ):
         del is_outer, result_infos
+        grad_spec = arg_infos[1].sharding.spec
+        hidden_spec = grad_spec[-1] if len(grad_spec) else None
+        if not _hidden_axis_ok(hidden_spec):
+            raise NotImplementedError(
+                "EpCombineBwd: grad hidden dim must be replicated or sharded on"
+                f" tp_resource; got spec={grad_spec}."
+            )
         arg_shardings = tuple(a.sharding for a in arg_infos)
-        # EP-output leading (trailing dims auto-pad to None).
-        out_sharding = NamedSharding(mesh, _ep_output_spec())
+        # EP output leading; hidden dim inherits the grad sharding, recv_pr replicated.
+        out_sharding = NamedSharding(mesh, _ep_output_spec(None, hidden_spec))
 
         def sharded_impl(handle_mem, grad):
             return EpCombineBwdPrimitive.impl(
