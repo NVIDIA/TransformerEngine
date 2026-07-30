@@ -6,6 +6,7 @@
 import math
 import operator
 import os
+import sys
 from collections.abc import Iterable
 from dataclasses import dataclass
 from functools import partial, reduce, cache
@@ -82,6 +83,16 @@ __all__ = [
 
 
 num_cublas_streams = get_num_compute_streams()
+
+_debug_python_patch = os.getenv("NVTE_DEBUG_PYTHON_PATCH", "0") == "1"
+_debug_grouped_gemm_partition_count = 0
+if _debug_python_patch:
+    print(
+        "[TE patch debug] imported transformer_engine.jax.cpp_extensions.gemm "
+        f"from {__file__} (rank={os.getenv('SLURM_PROCID', 'unknown')})",
+        file=sys.stderr,
+        flush=True,
+    )
 
 # Cache whether the CUDA-graphable grouped GEMM implementation is available at import time.
 # Calling get_grouped_gemm_setup_workspace_size raises a RuntimeError mentioning "cublas" when
@@ -1865,33 +1876,54 @@ class GroupedGemmPrimitive(BasePrimitive):
 
         # A compound leading group dimension may use FSDP as the outer
         # data-parallel axis (for example MoE groups ordered
-        # (fsdp, ep, local_expert)). Normally that means FSDP describes
-        # distinct groups, not a sharded RHS contracting dimension. MoE
-        # model weights are the exception: their global expert-group axis
-        # is smaller than the active token-group array, so FSDP shards a
-        # shared RHS that must be gathered locally. Keep that gather inside
-        # this custom partitioning boundary, after grouped quantization.
+        # (fsdp, ep, local_expert)). Normally FSDP then describes distinct
+        # groups. MoE model weights are the exception: they retain one
+        # global expert set while the active group array has one copy per
+        # FSDP rank. Gather that shared, already-quantized RHS only when the
+        # group-count ratio exactly matches the FSDP mesh size. The exact
+        # ratio prevents unrelated unequal group shapes from selecting this
+        # specialized mapping.
         fsdp_is_group_axis = spec_contains_axis(active_group_spec, fsdp_axis)
         active_group_count = next(
             (info.shape[0] for info in grouped_dim_infos if info.size > 0),
             None,
         )
         rhs_group_count = arg_infos[2].shape[0] if len(arg_infos[2].shape) > 0 else None
-        rhs_has_fewer_groups = (
-            active_group_count is not None
+        rhs_is_fsdp_shared_group_set = (
+            fsdp_axis is not None
+            and active_group_count is not None
             and rhs_group_count is not None
-            and rhs_group_count < active_group_count
+            and rhs_group_count * mesh.shape[fsdp_axis] == active_group_count
         )
         gather_rhs_fsdp = (
             fsdp_axis is not None
             and not rhs_is_ragged
-            and (not fsdp_is_group_axis or rhs_has_fewer_groups)
+            and (not fsdp_is_group_axis or rhs_is_fsdp_shared_group_set)
             and (
                 spec_contains_axis(rhs_data_spec, fsdp_axis)
                 or spec_contains_axis(rhs_scale_spec, fsdp_axis)
                 or spec_contains_axis(bias_spec, fsdp_axis)
             )
         )
+
+        global _debug_grouped_gemm_partition_count
+        if _debug_python_patch and _debug_grouped_gemm_partition_count < 20:
+            _debug_grouped_gemm_partition_count += 1
+            print(
+                "[TE patch debug] GroupedGemmPrimitive._parse_partition_specs "
+                f"call={_debug_grouped_gemm_partition_count} "
+                f"active_group_spec={active_group_spec} "
+                f"active_group_count={active_group_count} "
+                f"rhs_group_count={rhs_group_count} "
+                f"fsdp_axis={fsdp_axis!r} "
+                f"fsdp_mesh_size={mesh.shape.get(fsdp_axis) if fsdp_axis is not None else None} "
+                f"rhs_data_spec_before={rhs_data_spec} "
+                f"rhs_scale_spec_before={rhs_scale_spec} "
+                f"rhs_is_fsdp_shared_group_set={rhs_is_fsdp_shared_group_set} "
+                f"gather_rhs_fsdp={gather_rhs_fsdp}",
+                file=sys.stderr,
+                flush=True,
+            )
 
         if gather_rhs_fsdp:
             rhs_data_spec = strip_axis_from_spec(rhs_data_spec, fsdp_axis)

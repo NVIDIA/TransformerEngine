@@ -13,6 +13,8 @@ Coverage:
   - ``ep_combine`` custom_vjp: ``max|grad_eo| ≈ eo_const / TOP_K`` (closed form).
   - ``ep_dispatch`` custom_vjp: exact per-(t, k) ``grad_topk_weights`` under
     skewed upstream gradients (no k-axis averaging).
+  - ``jax.lax.scan`` over distinct top-1 routing maps matches an unrolled
+    dispatch/combine reference in both forward and backward.
   - HLO reshard guard: compile-only, no XLA collectives outside the EP FFI.
 
 Launch via tests/jax/multi_process_launch_ep.sh (one process per GPU).
@@ -293,6 +295,306 @@ class TestEP(unittest.TestCase):
                 np.asarray(tokens_b.astype(jnp.float32)),
                 atol=5e-2,
                 rtol=5e-2,
+            )
+
+    def _make_scan_inputs(self, num_layers=4):
+        """Top-1 inputs with a distinct random routing map for every layer."""
+        num_layers = int(os.environ.get("NVTE_TEST_EP_SCAN_LAYERS", num_layers))
+        num_tokens = TOKENS_PER_DP_SHARD * self.dp
+        rng = np.random.default_rng(seed=20260728)
+        routes = rng.integers(
+            0,
+            self.num_experts,
+            size=(num_layers, num_tokens, 1),
+            dtype=np.int32,
+        )
+        # A random draw could theoretically repeat a complete map. Make the
+        # invariant explicit so this test never becomes probabilistic.
+        seen = set()
+        for layer in range(num_layers):
+            while routes[layer].tobytes() in seen:
+                routes[layer] = rng.integers(
+                    0, self.num_experts, size=(num_tokens, 1), dtype=np.int32
+                )
+            seen.add(routes[layer].tobytes())
+        tokens = jnp.asarray(
+            rng.standard_normal((num_tokens, HIDDEN_DIM), dtype=np.float32) * 0.25,
+            dtype=jnp.bfloat16,
+        )
+        weights = jnp.ones((num_tokens, 1), dtype=jnp.float32)
+        return jnp.asarray(routes), tokens, weights
+
+    def _scan_ep_layer(self, cfg, route, tokens, weights, slot_dependent_scale):
+        """One dispatch/combine-only layer used by the scan regression tests."""
+        token_spec = PartitionSpec(("dp", "ep"), None)
+        ep_token_spec = PartitionSpec(("dp", "ep"), None, None)
+        ep_weight_spec = PartitionSpec(("dp", "ep"), None)
+
+        recv_tokens, recv_weights, handle_mem, token_counts = ep_dispatch(
+            cfg, route, tokens, weights, self.recv_capacity_per_rank
+        )
+        recv_tokens = jax.lax.with_sharding_constraint(
+            recv_tokens, NamedSharding(self.mesh, ep_token_spec)
+        )
+        recv_weights = jax.lax.with_sharding_constraint(
+            recv_weights, NamedSharding(self.mesh, ep_weight_spec)
+        )
+
+        # A plain top-1 identity round-trip cannot expose a stale handle if
+        # dispatch and combine both use the same stale routing map: the two
+        # wrong permutations cancel. Scaling by packed dispatch slot makes the
+        # result (and its token gradient) depend on the map that was prepared.
+        if slot_dependent_scale:
+            slot = jnp.arange(recv_tokens.shape[-2], dtype=jnp.float32)
+            scale = 0.5 + (slot % 7) * 0.125
+            expert_out = recv_tokens.astype(jnp.float32) * scale[None, :, None]
+        else:
+            expert_out = recv_tokens.astype(jnp.float32)
+        expert_out = jnp.where(
+            recv_weights[..., None] != 0,
+            expert_out * recv_weights[..., None],
+            0.0,
+        ).astype(recv_tokens.dtype)
+        expert_out = jax.lax.with_sharding_constraint(
+            expert_out, NamedSharding(self.mesh, ep_token_spec)
+        )
+        out = ep_combine(
+            cfg,
+            handle_mem,
+            token_counts,
+            expert_out,
+            tokens.shape[0],
+            out_sharding=(("dp", "ep"), None),
+        )
+        return jax.lax.with_sharding_constraint(
+            out, NamedSharding(self.mesh, token_spec)
+        )
+
+    def test_scan_dispatch_combine_top1_identity(self):
+        """Top-1 dispatch/combine remains an exact identity across scan layers."""
+        routes, tokens, weights = self._make_scan_inputs()
+        cfg = EpLayerConfig(top_k=1, dispatch_output_per_expert_alignment=16)
+        route_spec = PartitionSpec(None, ("dp", "ep"), None)
+        token_spec = PartitionSpec(("dp", "ep"), None)
+
+        with self.mesh, global_shard_guard(self.mr):
+            routes = jax.lax.with_sharding_constraint(
+                routes, NamedSharding(self.mesh, route_spec)
+            )
+            tokens_s = jax.lax.with_sharding_constraint(
+                tokens, NamedSharding(self.mesh, token_spec)
+            )
+            weights_s = jax.lax.with_sharding_constraint(
+                weights, NamedSharding(self.mesh, token_spec)
+            )
+
+            @jax.jit
+            def run(route_maps, initial_tokens, topk_weights):
+                def body(current_tokens, route):
+                    out = self._scan_ep_layer(
+                        cfg,
+                        route,
+                        current_tokens,
+                        topk_weights,
+                        slot_dependent_scale=False,
+                    )
+                    return out, None
+
+                return jax.lax.scan(body, initial_tokens, route_maps)[0]
+
+            out = run(routes, tokens_s, weights_s)
+            out.block_until_ready()
+            out_global = jmu.process_allgather(out, tiled=True)
+
+        if self.rank == 0:
+            np.testing.assert_array_equal(np.asarray(out_global), np.asarray(tokens))
+
+    def test_scan_dispatch_only_distinct_routing_maps(self):
+        """Every scan iteration's packed dispatch matches an isolated dispatch.
+
+        This is the direct stale-routing oracle: there is no combine operation
+        whose inverse permutation could hide a reused routing-map handle.
+        """
+        routes, tokens, weights = self._make_scan_inputs()
+        cfg = EpLayerConfig(top_k=1, dispatch_output_per_expert_alignment=16)
+        route_spec = PartitionSpec(None, ("dp", "ep"), None)
+        token_spec = PartitionSpec(("dp", "ep"), None)
+        ep_token_spec = PartitionSpec(("dp", "ep"), None, None)
+        ep_weight_spec = PartitionSpec(("dp", "ep"), None)
+
+        with self.mesh, global_shard_guard(self.mr):
+            routes_s = jax.lax.with_sharding_constraint(
+                routes, NamedSharding(self.mesh, route_spec)
+            )
+            tokens_s = jax.lax.with_sharding_constraint(
+                tokens, NamedSharding(self.mesh, token_spec)
+            )
+            weights_s = jax.lax.with_sharding_constraint(
+                weights, NamedSharding(self.mesh, token_spec)
+            )
+
+            def dispatch_one(route, input_tokens, topk_weights):
+                recv_tokens, recv_weights, _handle_mem, token_counts = ep_dispatch(
+                    cfg,
+                    route,
+                    input_tokens,
+                    topk_weights,
+                    self.recv_capacity_per_rank,
+                )
+                recv_tokens = jax.lax.with_sharding_constraint(
+                    recv_tokens, NamedSharding(self.mesh, ep_token_spec)
+                )
+                recv_weights = jax.lax.with_sharding_constraint(
+                    recv_weights, NamedSharding(self.mesh, ep_weight_spec)
+                )
+                # NCCL EP leaves capacity padding unspecified, including the
+                # weight buffer. Derive the valid prefix from token_counts.
+                align = max(int(cfg.dispatch_output_per_expert_alignment), 1)
+                padded_counts = ((token_counts + align - 1) // align) * align
+                valid_count = jnp.sum(padded_counts, axis=-1, keepdims=True)
+                slot = jnp.arange(self.recv_capacity_per_rank, dtype=jnp.int32)
+                valid = slot[None, :] < valid_count
+                recv_tokens = jnp.where(
+                    valid[..., None], recv_tokens, jnp.zeros_like(recv_tokens)
+                )
+                recv_weights = jnp.where(
+                    valid, recv_weights, jnp.zeros_like(recv_weights)
+                )
+                return recv_tokens, recv_weights
+
+            @jax.jit
+            def scan_dispatch(route_maps, input_tokens, topk_weights):
+                def body(carry, route):
+                    return carry, dispatch_one(route, input_tokens, topk_weights)
+
+                return jax.lax.scan(body, (), route_maps)[1]
+
+            scan_tokens, scan_weights = scan_dispatch(routes_s, tokens_s, weights_s)
+            scan_tokens.block_until_ready()
+            scan_tokens_global = jmu.process_allgather(scan_tokens, tiled=True)
+            scan_weights_global = jmu.process_allgather(scan_weights, tiled=True)
+
+            # Run each route in a separate executable invocation so its
+            # expected packed layout cannot be affected by another layer's
+            # live handle.
+            isolated_dispatch = jax.jit(dispatch_one)
+            ref_tokens = []
+            ref_weights = []
+            for layer in range(routes.shape[0]):
+                layer_tokens, layer_weights = isolated_dispatch(
+                    routes_s[layer], tokens_s, weights_s
+                )
+                layer_tokens.block_until_ready()
+                ref_tokens.append(
+                    np.asarray(jmu.process_allgather(layer_tokens, tiled=True))
+                )
+                ref_weights.append(
+                    np.asarray(jmu.process_allgather(layer_weights, tiled=True))
+                )
+
+        if self.rank == 0:
+            np.testing.assert_array_equal(
+                np.asarray(scan_tokens_global), np.stack(ref_tokens)
+            )
+            np.testing.assert_array_equal(
+                np.asarray(scan_weights_global), np.stack(ref_weights)
+            )
+
+    def test_scan_dispatch_combine_routing_handle_fwd_bwd(self):
+        """Scan must match unrolled layers when every iteration has a new map.
+
+        Slot-dependent scaling prevents a stale dispatch/combine handle from
+        cancelling as it does for an identity expert. Comparing VJPs also
+        exercises ep_combine_bwd and ep_dispatch_bwd through the scan transpose.
+        """
+        routes, tokens, weights = self._make_scan_inputs()
+        num_layers = routes.shape[0]
+        cfg = EpLayerConfig(top_k=1, dispatch_output_per_expert_alignment=16)
+        route_spec = PartitionSpec(None, ("dp", "ep"), None)
+        token_spec = PartitionSpec(("dp", "ep"), None)
+
+        with self.mesh, global_shard_guard(self.mr):
+            routes_s = jax.lax.with_sharding_constraint(
+                routes, NamedSharding(self.mesh, route_spec)
+            )
+            tokens_s = jax.lax.with_sharding_constraint(
+                tokens, NamedSharding(self.mesh, token_spec)
+            )
+            weights_s = jax.lax.with_sharding_constraint(
+                weights, NamedSharding(self.mesh, token_spec)
+            )
+            cotangent = jnp.asarray(
+                np.linspace(
+                    0.25,
+                    1.25,
+                    tokens.size,
+                    dtype=np.float32,
+                ).reshape(tokens.shape),
+                dtype=tokens.dtype,
+            )
+            cotangent = jax.lax.with_sharding_constraint(
+                cotangent, NamedSharding(self.mesh, token_spec)
+            )
+
+            def scan_fwd(route_maps, initial_tokens, topk_weights):
+                def body(current_tokens, route):
+                    out = self._scan_ep_layer(
+                        cfg,
+                        route,
+                        current_tokens,
+                        topk_weights,
+                        slot_dependent_scale=True,
+                    )
+                    return out, None
+
+                return jax.lax.scan(body, initial_tokens, route_maps)[0]
+
+            def unrolled_fwd(route_maps, initial_tokens, topk_weights):
+                out = initial_tokens
+                for layer in range(num_layers):
+                    out = self._scan_ep_layer(
+                        cfg,
+                        route_maps[layer],
+                        out,
+                        topk_weights,
+                        slot_dependent_scale=True,
+                    )
+                return out
+
+            def value_and_token_vjp(
+                fn, route_maps, initial_tokens, topk_weights, out_cotangent
+            ):
+                out, pullback = jax.vjp(
+                    lambda x: fn(route_maps, x, topk_weights), initial_tokens
+                )
+                return out, pullback(out_cotangent)[0]
+
+            scan_run = jax.jit(
+                lambda r, t, w, g: value_and_token_vjp(scan_fwd, r, t, w, g)
+            )
+            unrolled_run = jax.jit(
+                lambda r, t, w, g: value_and_token_vjp(unrolled_fwd, r, t, w, g)
+            )
+            scan_out, scan_grad = scan_run(routes_s, tokens_s, weights_s, cotangent)
+            ref_out, ref_grad = unrolled_run(routes_s, tokens_s, weights_s, cotangent)
+            scan_grad.block_until_ready()
+            ref_grad.block_until_ready()
+
+            scan_out_global = jmu.process_allgather(scan_out, tiled=True)
+            ref_out_global = jmu.process_allgather(ref_out, tiled=True)
+            scan_grad_global = jmu.process_allgather(scan_grad, tiled=True)
+            ref_grad_global = jmu.process_allgather(ref_grad, tiled=True)
+
+        if self.rank == 0:
+            self.assertFalse(
+                np.array_equal(np.asarray(ref_out_global), np.asarray(tokens)),
+                "slot-sensitive reference unexpectedly collapsed to an identity",
+            )
+            np.testing.assert_array_equal(
+                np.asarray(scan_out_global), np.asarray(ref_out_global)
+            )
+            np.testing.assert_array_equal(
+                np.asarray(scan_grad_global), np.asarray(ref_grad_global)
             )
 
     def test_primitive_prepare(self):

@@ -252,14 +252,14 @@ def test_grouped_gemm_rhs_weight_specs_gather_fsdp_but_preserve_ep():
     assert tuple(out_sharding[0].spec) == (None, None, None)
 
 
-def test_grouped_gemm_gathers_smaller_moe_rhs_across_fsdp_group_axis():
-    """A global MoE RHS has E groups while token counts have dp * E groups."""
+def test_grouped_gemm_gathers_fsdp_shared_moe_rhs_with_exact_group_ratio():
+    """A global MoE RHS has E groups while token counts have fsdp * E groups."""
     mesh = _mesh()
     arg_infos = (
         _arg_info(mesh, (8192,), (None,)),
         _arg_info(mesh, (0,), (None,)),
-        _arg_info(mesh, (32, 128, 64), (("fsdp", "expert"), None, None)),
-        _arg_info(mesh, (2048,), (("fsdp", "expert"),)),
+        _arg_info(mesh, (32, 128, 64), (("expert", "fsdp"), None, None)),
+        _arg_info(mesh, (2048,), (("expert", "fsdp"),)),
         _arg_info(mesh, (0,), (None,)),
         _arg_info(mesh, (64,), (("fsdp", "expert"),)),
         _arg_info(mesh, (0,), (None,)),
@@ -512,14 +512,17 @@ def test_grouped_partitioning_shardy_rules_smoke():
 
 
 @pytest.mark.parametrize(
-    "weight_spec",
+    ("group_spec", "weight_spec"),
     [
-        ("expert", "fsdp", None),
-        ("expert", None, "fsdp"),
+        ("expert", ("expert", "fsdp", None)),
+        ("expert", ("expert", None, "fsdp")),
+        (("fsdp", "expert"), (("fsdp", "expert"), None, None)),
     ],
-    ids=("contracting-fsdp", "output-fsdp"),
+    ids=("contracting-fsdp", "output-fsdp", "compound-fsdp-expert-groups"),
 )
-def test_grouped_dense_mxfp8_ep_fsdp_outside_shard_map_single_process(weight_spec):
+def test_grouped_dense_mxfp8_ep_fsdp_outside_shard_map_single_process(
+    group_spec, weight_spec
+):
     mesh = _mesh()
     n_groups = 4
     group_tokens = 128
@@ -528,10 +531,10 @@ def test_grouped_dense_mxfp8_ep_fsdp_outside_shard_map_single_process(weight_spe
     x_shape = (n_groups * group_tokens, hidden)
     w_shape = (n_groups, hidden, out_hidden)
 
-    x_sharding = NamedSharding(mesh, PartitionSpec("expert", None))
+    x_sharding = NamedSharding(mesh, PartitionSpec(group_spec, None))
     w_sharding = NamedSharding(mesh, PartitionSpec(*weight_spec))
-    group_sharding = NamedSharding(mesh, PartitionSpec("expert"))
-    out_sharding = NamedSharding(mesh, PartitionSpec("expert", None))
+    group_sharding = NamedSharding(mesh, PartitionSpec(group_spec))
+    out_sharding = NamedSharding(mesh, PartitionSpec(group_spec, None))
 
     quantizer_set = _mxfp8_grouped_quantizer_set(n_groups)
 
@@ -572,8 +575,8 @@ def test_grouped_dense_mxfp8_ep_fsdp_outside_shard_map_single_process(weight_spe
         )(x, w, group_sizes)
         out, dx, dw = jax.block_until_ready((out, dx, dw))
 
-    assert tuple(out.sharding.spec) == ("expert", None)
-    assert tuple(dx.sharding.spec) == ("expert", None)
+    assert tuple(out.sharding.spec) == (group_spec, None)
+    assert tuple(dx.sharding.spec) == (group_spec, None)
     assert tuple(dw.sharding.spec) == weight_spec
     for value in (out, dx, dw):
         local_value = np.asarray(jax.device_get(value.addressable_data(0)))
