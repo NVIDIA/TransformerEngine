@@ -698,8 +698,10 @@ py::object group_requantize_columnwise_and_swizzle_rowwise_(
 
   // Dequantize first: it reads the rowwise scales, which the swizzle below overwrites.
   auto dequantized_grouped = group_dequantize(grouped_x, otype);
-  auto dequantized = dequantized_grouped.attr("rowwise_data").cast<at::Tensor>().view(
-      {static_cast<int64_t>(total_tokens), static_cast<int64_t>(hidden_dim)});
+  auto dequantized =
+      dequantized_grouped.attr("rowwise_data")
+          .cast<at::Tensor>()
+          .view({static_cast<int64_t>(total_tokens), static_cast<int64_t>(hidden_dim)});
 
   // Rebuild the columnwise copy the wgrad GEMM needs. It cannot be derived from the rowwise
   // data because the two directions scale along perpendicular axes. The caller hands us a

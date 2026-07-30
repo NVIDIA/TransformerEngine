@@ -1236,9 +1236,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                 else:
                     # No wgrad, so no columnwise copy is needed. The forward GEMM
                     # still requires swizzled rowwise scales.
-                    tex.grouped_swizzle_for_gemm(
-                        grouped_fc1_x, rowwise=True, columnwise=False
-                    )
+                    tex.grouped_swizzle_for_gemm(grouped_fc1_x, rowwise=True, columnwise=False)
         else:
             fc1_x = maybe_dequantize(input_, dtype)
             grouped_fc1_x = _group_quantize_for_grouped_mlp(
@@ -1894,15 +1892,11 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                         if need_dequantized
                         else None
                     )
-                    tex.grouped_swizzle_for_gemm(
-                        grouped_fc2_dy, rowwise=True, columnwise=False
-                    )
+                    tex.grouped_swizzle_for_gemm(grouped_fc2_dy, rowwise=True, columnwise=False)
                 if output_fc2_dbias and not scale_bias:
                     # This path has no quantize kernel to fuse dbias into, and the
                     # consumer below has no fallback, so reduce it here.
-                    fc2_dbias_packed = compute_grouped_dbias(
-                        fc2_dy, base_split_offsets, num_groups
-                    )
+                    fc2_dbias_packed = compute_grouped_dbias(fc2_dy, base_split_offsets, num_groups)
                     # scale_bias is the only later consumer of the dequantized grad;
                     # drop it so the buffer is freed rather than held until backward ends.
                     fc2_dy = None
