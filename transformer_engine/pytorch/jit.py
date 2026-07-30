@@ -79,7 +79,7 @@ else:
         return lambda func: func
 
 
-def eager_under_compile_if(needs_eager: Callable[[Dict[str, Any]], Optional[str]]):
+def fallback_to_eager_when(needs_eager: Callable[[Dict[str, Any]], Optional[str]]):
     """Decorator running the wrapped method eagerly whenever `needs_eager` gives
     a reason why the call is unsupported on the compiled path.
 
