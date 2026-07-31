@@ -26,9 +26,7 @@ def test_scale_buffer_info_selects_recipe_metadata(
     monkeypatch.setattr(_common, "get_quantization_recipe_name", lambda _: recipe)
     tensor = SimpleNamespace(
         _scale_inv=torch.tensor([0.25], dtype=torch.float32),
-        _amax_rowwise=torch.tensor(
-            [2688.0 if recipe == "nvfp4" else 1344.0], dtype=torch.float32
-        ),
+        _amax_rowwise=torch.tensor([2688.0 if recipe == "nvfp4" else 1344.0], dtype=torch.float32),
     )
     quantizer = SimpleNamespace(amax=torch.tensor([448.0], dtype=torch.float32))
 
@@ -47,9 +45,7 @@ def test_scale_buffer_info_skips_non_global_scaling_recipes(monkeypatch, recipe)
 
 
 def test_grouped_scale_buffers_are_per_gemm(monkeypatch):
-    monkeypatch.setattr(
-        _common, "get_quantization_recipe_name", lambda _: "fp8_current_scaling"
-    )
+    monkeypatch.setattr(_common, "get_quantization_recipe_name", lambda _: "fp8_current_scaling")
     inputs = [
         SimpleNamespace(_scale_inv=torch.tensor([0.25])),
         SimpleNamespace(_scale_inv=torch.tensor([0.5])),
@@ -76,9 +72,7 @@ def test_grouped_scale_buffers_are_per_gemm(monkeypatch):
         "weight_gemm1_tensor_scale_inv_fp8_current_scaling_te_ptq_calibrated",
     }
     torch.testing.assert_close(
-        scale_buffers[
-            "input_gemm1_tensor_scale_inv_fp8_current_scaling_te_ptq_calibrated"
-        ],
+        scale_buffers["input_gemm1_tensor_scale_inv_fp8_current_scaling_te_ptq_calibrated"],
         torch.tensor([0.5]),
     )
 
