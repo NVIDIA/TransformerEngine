@@ -16,6 +16,7 @@
 #include "../utils.cuh"
 #include "dispatch/dequantize.cuh"
 #include "dispatch/quantize.cuh"
+#include "mxfp4/fake_quantize_mxfp4.cuh"
 #include "transformer_engine/transpose.h"
 
 void nvte_quantize(const NVTETensor input, NVTETensor output, cudaStream_t stream) {
@@ -45,6 +46,38 @@ void nvte_quantize_v2(const NVTETensor input, NVTETensor output,
 
   constexpr bool IS_ACT = false;
   dispatch::quantize_fwd_helper<IS_ACT, Empty, nullptr>(input, output, quant_config, stream);
+}
+
+void nvte_mxfp4_fake_quantize(const NVTETensor input, NVTETensor output, cudaStream_t stream) {
+  NVTE_API_CALL(nvte_mxfp4_fake_quantize);
+  using namespace transformer_engine;
+  const Tensor &input_tensor = *convertNVTETensorCheck(input);
+  Tensor &output_tensor = *convertNVTETensorCheck(output);
+  NVTE_CHECK(input_tensor.dtype() == DType::kBFloat16 || input_tensor.dtype() == DType::kFloat32,
+             "MXFP4 fake-quantize supports BF16/FP32 inputs, got ",
+             to_string(input_tensor.dtype()));
+  NVTE_CHECK(output_tensor.dtype() == input_tensor.dtype(),
+             "MXFP4 fake-quantize output dtype must match the input dtype.");
+  NVTE_CHECK(input_tensor.data.shape == output_tensor.data.shape,
+             "MXFP4 fake-quantize output shape must match the input shape.");
+  const size_t numel = input_tensor.numel();
+  NVTE_CHECK(numel % 32 == 0, "MXFP4 fake-quantize needs the element count divisible by 32.");
+  NVTE_CHECK(!input_tensor.data.shape.empty() && input_tensor.data.shape.back() % 32 == 0,
+             "MXFP4 fake-quantize needs the innermost dimension divisible by 32 "
+             "(1x32 blocks must not cross rows).");
+  if (numel == 0) {
+    return;
+  }
+  if (input_tensor.dtype() == DType::kBFloat16) {
+    dispatch::mxfp4::fake_quantize_mxfp4_launch<bf16>(
+        reinterpret_cast<const bf16 *>(input_tensor.data.dptr),
+        reinterpret_cast<bf16 *>(output_tensor.data.dptr), numel, stream);
+  } else {
+    dispatch::mxfp4::fake_quantize_mxfp4_launch<fp32>(
+        reinterpret_cast<const fp32 *>(input_tensor.data.dptr),
+        reinterpret_cast<fp32 *>(output_tensor.data.dptr), numel, stream);
+  }
+  NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
 void nvte_dequantize(const NVTETensor input, NVTETensor output, cudaStream_t stream) {

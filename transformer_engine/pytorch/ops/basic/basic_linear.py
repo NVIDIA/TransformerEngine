@@ -26,6 +26,7 @@ from ...module.base import (
     _2X_ACC_WGRAD,
 )
 from ...module._common import set_quantizer_amax_reduction_group
+from ...mxfp4_qat import mxfp4_fake_quantize
 from ...tensor import Quantizer
 from ...tensor.float8_tensor import Float8Quantizer
 from ...tensor.storage.float8_tensor_storage import Float8TensorStorage
@@ -558,6 +559,23 @@ class BasicLinear(BasicOperation):
 
         # Check weight tensor
         w = weight
+        mxfp4_qat = (
+            with_quantized_compute
+            and FP8GlobalStateManager.is_fp8_enabled()
+            and FP8GlobalStateManager.get_fp8_recipe().mxfp4_qat()
+        )
+        if mxfp4_qat:
+            if is_quantized_tensor(w):
+                raise NotImplementedError(
+                    "MXFP4 QAT recipes do not support primary quantized weights: the "
+                    "high-precision master weight is required to project onto the "
+                    "MXFP4 grid."
+                )
+            if dtype == torch.float16:
+                raise NotImplementedError(
+                    "MXFP4 QAT does not support fp16 as the activation/dequantize dtype: "
+                    "the MXFP4 grid exceeds fp16 range. Use bf16 or fp32."
+                )
         if not with_quantized_compute:
             w = maybe_dequantize(w, dtype)
         elif with_quantized_compute and not is_quantized_tensor(w):
@@ -567,6 +585,8 @@ class BasicLinear(BasicOperation):
                 rowwise=True,
                 columnwise=input_requires_grad and backward_override is None,
             )
+            if mxfp4_qat:
+                w = mxfp4_fake_quantize(w)
             w = weight_quantizer(w)
 
         # Check output tensor

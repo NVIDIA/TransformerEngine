@@ -200,6 +200,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 
   m.def("quantize", transformer_engine::pytorch::quantize, py::arg("tensor"), py::arg("quantizer"),
         py::arg("output") = py::none(), py::arg("noop") = py::none());
+  m.def("mxfp4_fake_quantize", &transformer_engine::pytorch::mxfp4_fake_quantize,
+        "Project a BF16/FP32 tensor onto the MXFP4 grid (QAT fake-quantization)", py::arg("input"),
+        py::call_guard<py::gil_scoped_release>());
   m.def("dequantize", &transformer_engine::pytorch::dequantize, "Dequantize", py::arg("input"),
         py::arg("otype"));
   m.def("create_empty_quantized_tensor",
