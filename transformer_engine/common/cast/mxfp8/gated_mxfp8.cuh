@@ -124,11 +124,12 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   __shared__ float subamax_colwise_buff[SUBAMAX_BUFF_DIM_Y][CHUNK_DIM_X];
 
   extern __shared__ char dynamic_shmem[];
-  uintptr_t base_shmem_ptr = reinterpret_cast<uintptr_t>(dynamic_shmem);
   // Manually align dynamic SHMEM per TMA requirements using padding
   // __align__(128) Does not guarantee the pointer to be aligned!
-  uintptr_t dshmem = (base_shmem_ptr + TMA_SHMEM_ALIGNMENT - 1) &
-                     ~(static_cast<uintptr_t>(TMA_SHMEM_ALIGNMENT - 1));
+  // Keep the result derived from `dynamic_shmem` by pointer arithmetic: casting an
+  // integer back to a pointer loses the shared-memory provenance, so ptxas emits
+  // generic LD/ST instead of LDS/STS.
+  char *dshmem = align_up(dynamic_shmem, TMA_SHMEM_ALIGNMENT);
 
   constexpr size_t buff_elems = BUFF_DIM_Y * BUFF_DIM_X;
   constexpr size_t buff_elems_total = BUFFS_NUM * buff_elems;
