@@ -25,6 +25,7 @@ from .base import (
     is_ub_initialized,
     using_cublasmp_backend,
     quantize_weight,
+    release_frozen_weight_columnwise,
     TransformerEngineBaseModule,
     _2X_ACC_FPROP,
     _2X_ACC_DGRAD,
@@ -1074,6 +1075,8 @@ def _linear_backward(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None], ..
                 bulk_overlap=bwd_args.ub_bulk_dgrad,
             )
             nvtx_range_pop(f"{nvtx_label}.dgrad_gemm")
+            if not bwd_args.requires_wgrad:
+                release_frozen_weight_columnwise((weight_fp8,))
 
             # FSDP2 only handles deallocation all-gathered weights that it allocates.
             # Columnwise data is derived from rowwise data after allgather for fp8
