@@ -10,7 +10,7 @@ import torch
 
 import transformer_engine_torch as tex
 
-from ...quantized_tensor import Buffer, QuantizedTensorStorage, Quantizer
+from ...quantized_tensor import InnerTensor, QuantizedTensorStorage, Quantizer
 from .._quantization_helpers import safe_quantized_repr
 
 from ...constants import TE_DType as torch_to_transformer_engine_dtype, TE_DType_To_Torch, DType
@@ -66,15 +66,15 @@ class Float8TensorStorage(QuantizedTensorStorage):
 
     """
 
-    _data: Annotated[Optional[torch.Tensor], Buffer("data")]
+    _data: Annotated[Optional[torch.Tensor], InnerTensor("data")]
     _quantizer: Optional[Quantizer]
     _fp8_dtype: DType
 
     # FP8 transpose cache
-    _transpose: Annotated[Optional[torch.Tensor], Buffer("data_transpose")]
+    _transpose: Annotated[Optional[torch.Tensor], InnerTensor("data_transpose")]
     _transpose_invalid: bool
 
-    _scale_inv: Annotated[torch.Tensor, Buffer("fp8_scale_inv")]
+    _scale_inv: Annotated[torch.Tensor, InnerTensor("fp8_scale_inv")]
 
     def __new__(
         cls,

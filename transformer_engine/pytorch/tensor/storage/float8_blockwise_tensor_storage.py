@@ -12,7 +12,7 @@ import torch
 
 import transformer_engine_torch as tex
 
-from ...quantized_tensor import Buffer, QuantizedTensorStorage, Quantizer
+from ...quantized_tensor import InnerTensor, QuantizedTensorStorage, Quantizer
 from .._quantization_helpers import safe_quantized_repr
 
 from ...constants import TE_DType_To_Torch, DType
@@ -119,10 +119,10 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
     be instantiated directly for performance-critical internal usage.
     """
 
-    _rowwise_data: Annotated[Optional[torch.Tensor], Buffer("rowwise_data")]
-    _rowwise_scale_inv: Annotated[Optional[torch.Tensor], Buffer("rowwise_scale_inv")]
-    _columnwise_data: Annotated[Optional[torch.Tensor], Buffer("columnwise_data")]
-    _columnwise_scale_inv: Annotated[Optional[torch.Tensor], Buffer("columnwise_scale_inv")]
+    _rowwise_data: Annotated[Optional[torch.Tensor], InnerTensor("rowwise_data")]
+    _rowwise_scale_inv: Annotated[Optional[torch.Tensor], InnerTensor("rowwise_scale_inv")]
+    _columnwise_data: Annotated[Optional[torch.Tensor], InnerTensor("columnwise_data")]
+    _columnwise_scale_inv: Annotated[Optional[torch.Tensor], InnerTensor("columnwise_scale_inv")]
     _quantizer: Quantizer
     _fp8_dtype: DType
     _is_2D_scaled: bool

@@ -347,7 +347,7 @@ class NVFP4Quantizer(Quantizer):
 
     # ----- TensorProto / pure-Python allocation -----
 
-    def _storage_metadata(self, fake_dtype: torch.dtype) -> Dict[str, Any]:
+    def storage_metadata(self, fake_dtype: torch.dtype) -> Dict[str, Any]:
         return {
             "cls": NVFP4TensorStorage if self.internal else NVFP4Tensor,
             "nontensor_kwargs": {
@@ -361,14 +361,14 @@ class NVFP4Quantizer(Quantizer):
             },
         }
 
-    def _describe_buffers(
+    def inner_tensor_specs(
         self, shape: Tuple[int, ...]
     ) -> Dict[str, Tuple[Tuple[int, ...], torch.dtype]]:
         shape = tuple(shape)
         buffers: Dict[str, Tuple[Tuple[int, ...], torch.dtype]] = {}
         # FP4 data packs 2 values per byte (uint8); block scales are E4M3 stored
         # as uint8; amax buffers are FP32 (per-row when row-scaled, else scalar).
-        # Order matches NVFP4TensorStorage._FLATTEN_TENSOR_BUFFERS (the canonical
+        # Order matches NVFP4TensorStorage._INNER_TENSORS (the canonical
         # __tensor_flatten__ order): data + scale_inv per usage first, amax last.
         # Workaround: call @staticmethods via the class, not the instance --
         # instance access breaks torch.compile guard generation (pytorch #182741).

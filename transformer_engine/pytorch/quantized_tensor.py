@@ -33,23 +33,23 @@ _quantized_tensor_passthrough_ops: set = set()
 _STORAGE_REGISTRY: Dict[str, type] = {}
 
 
-class Buffer(NamedTuple):
+class InnerTensor(NamedTuple):
     """Marks a storage field as a flat tensor buffer.
 
     Annotate the field with it -- ``_scale_inv: Annotated[torch.Tensor,
-    Buffer("fp8_scale_inv")]`` -- and ``__init_subclass__`` collects the
-    declarations into ``_FLATTEN_TENSOR_BUFFERS``, in field order.
+    InnerTensor("fp8_scale_inv")]`` -- and ``__init_subclass__`` collects the
+    declarations into ``_INNER_TENSORS``, in field order.
     """
 
     ctor_kwarg: str
 
 
-def _collect_buffer_fields(cls: type) -> Tuple[Tuple[str, str], ...]:
+def _collect_inner_tensor_fields(cls: type) -> Tuple[Tuple[str, str], ...]:
     """Buffers a storage class declares, as ``(attribute, constructor kwarg)``."""
     fields = []
     for attr, hint in get_type_hints(cls, include_extras=True).items():
         for meta in getattr(hint, "__metadata__", ()):
-            if isinstance(meta, Buffer):
+            if isinstance(meta, InnerTensor):
                 fields.append((attr, meta.ctor_kwarg))
     return tuple(fields)
 
@@ -173,27 +173,25 @@ class QuantizedTensorStorage:
 
     # ----- PyTorch subclass flatten protocol (torch.compile / TensorProto) -----
 
-    # Collected from the subclasses' :class:`Buffer` field annotations; everything
+    # Collected from the subclasses' :class:`InnerTensor` field annotations; everything
     # else returned by :meth:`get_metadata` is treated as non-tensor context.
-    _FLATTEN_TENSOR_BUFFERS: Tuple[Tuple[str, str], ...] = ()
+    _INNER_TENSORS: Tuple[Tuple[str, str], ...] = ()
 
     def __init_subclass__(cls, **kwargs) -> None:
         super().__init_subclass__(**kwargs)
         # Register every storage / wrapper class so ``__tensor_unflatten__`` can
         # resolve the concrete class from its qualname inside an FX graph.
         _STORAGE_REGISTRY[cls.__qualname__] = cls
-        cls._FLATTEN_TENSOR_BUFFERS = _collect_buffer_fields(cls)
+        cls._INNER_TENSORS = _collect_inner_tensor_fields(cls)
 
     def _flatten_nontensor_kwargs(self) -> Dict[str, Any]:
         """Non-tensor constructor kwargs (scalars, dtype, quantizer)."""
-        tensor_kwargs = {kwarg for _, kwarg in self._FLATTEN_TENSOR_BUFFERS}
+        tensor_kwargs = {kwarg for _, kwarg in self._INNER_TENSORS}
         return {k: v for k, v in self.get_metadata().items() if k not in tensor_kwargs}
 
     def __tensor_flatten__(self) -> Tuple[list, Dict[str, Any]]:
         """Return ``(inner_tensor_attr_names, context)``; see class comment."""
-        present = [
-            attr for attr, _ in self._FLATTEN_TENSOR_BUFFERS if getattr(self, attr) is not None
-        ]
+        present = [attr for attr, _ in self._INNER_TENSORS if getattr(self, attr) is not None]
         ctx = {
             "cls": type(self).__qualname__,
             "is_tensor": isinstance(self, QuantizedTensor),
@@ -215,7 +213,7 @@ class QuantizedTensorStorage:
         cls = _STORAGE_REGISTRY[ctx["cls"]]
         kwargs: Dict[str, Any] = dict(ctx["nontensor_kwargs"])
         # Map each declared buffer back to its constructor kwarg (absent -> None).
-        for attr, kwarg in cls._FLATTEN_TENSOR_BUFFERS:
+        for attr, kwarg in cls._INNER_TENSORS:
             kwargs[kwarg] = inner_tensors.get(attr)
         if not ctx["is_tensor"]:
             return cls(**kwargs)
@@ -450,21 +448,21 @@ class Quantizer(abc.ABC):
 
     # ----- Data-free buffer/metadata primitives backing TensorProto -----
 
-    def _describe_buffers(
+    def inner_tensor_specs(
         self, shape: Tuple[int, ...]
     ) -> Dict[str, Tuple[Tuple[int, ...], torch.dtype]]:
         """Return ``{attr_name: (buffer_shape, buffer_dtype)}`` for the buffers
         this quantizer would allocate for a logical tensor of ``shape``.
 
         Keys must match the buffer attribute names declared in the storage's
-        ``_FLATTEN_TENSOR_BUFFERS`` and respect the quantizer's usage flags.
+        ``_INNER_TENSORS`` and respect the quantizer's usage flags.
         """
         raise NotImplementedError(
-            f"{self.__class__.__name__} does not implement _describe_buffers; "
+            f"{self.__class__.__name__} does not implement inner_tensor_specs; "
             "it cannot be used with TensorProto / pure-Python allocation"
         )
 
-    def _storage_metadata(self, fake_dtype: torch.dtype) -> Dict[str, Any]:
+    def storage_metadata(self, fake_dtype: torch.dtype) -> Dict[str, Any]:
         """Non-tensor context for the produced storage.
 
         Returns ``{"cls": <type>, "nontensor_kwargs": {...}}`` where ``cls`` is
@@ -474,7 +472,7 @@ class Quantizer(abc.ABC):
         ``fp8_dtype``, ``quantizer``, ``fake_dtype``).
         """
         raise NotImplementedError(
-            f"{self.__class__.__name__} does not implement _storage_metadata; "
+            f"{self.__class__.__name__} does not implement storage_metadata; "
             "it cannot be used with TensorProto / pure-Python allocation"
         )
 
@@ -492,7 +490,7 @@ class Quantizer(abc.ABC):
         device = torch.device(device if device is not None else "cuda")
         return {
             attr: torch.empty(buf_shape, dtype=buf_dtype, device=device)
-            for attr, (buf_shape, buf_dtype) in self._describe_buffers(tuple(shape)).items()
+            for attr, (buf_shape, buf_dtype) in self.inner_tensor_specs(tuple(shape)).items()
         }
 
     def create_metadata(
@@ -505,7 +503,7 @@ class Quantizer(abc.ABC):
         """Build the data-free ``__tensor_unflatten__`` context describing the
         quantized tensor this quantizer would produce for ``shape`` / ``dtype``.
         """
-        meta = self._storage_metadata(dtype)
+        meta = self.storage_metadata(dtype)
         return {
             "cls": meta["cls"].__qualname__,
             "is_tensor": not self.internal,

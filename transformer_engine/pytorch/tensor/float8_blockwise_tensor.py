@@ -75,7 +75,7 @@ class Float8BlockQuantizer(Quantizer):
 
     # ----- TensorProto / pure-Python allocation -----
 
-    def _storage_metadata(self, fake_dtype: torch.dtype) -> Dict[str, Any]:
+    def storage_metadata(self, fake_dtype: torch.dtype) -> Dict[str, Any]:
         return {
             "cls": Float8BlockwiseQTensorStorage if self.internal else Float8BlockwiseQTensor,
             "nontensor_kwargs": {
@@ -86,7 +86,7 @@ class Float8BlockQuantizer(Quantizer):
             },
         }
 
-    def _describe_buffers(
+    def inner_tensor_specs(
         self, shape: Tuple[int, ...]
     ) -> Dict[str, Tuple[Tuple[int, ...], torch.dtype]]:
         shape = tuple(shape)

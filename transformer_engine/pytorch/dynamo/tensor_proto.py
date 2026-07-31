@@ -63,8 +63,8 @@ class TensorProto:
         """Names of the flat tensor buffers backing this proto, in order.
 
         The real op flattens a quantized output via the storage's
-        ``__tensor_flatten__`` -- i.e. ``_FLATTEN_TENSOR_BUFFERS`` order, keeping
-        only the present buffers. ``_describe_buffers`` may emit the same buffers
+        ``__tensor_flatten__`` -- i.e. ``_INNER_TENSORS`` order, keeping
+        only the present buffers. ``inner_tensor_specs`` may emit the same buffers
         in a different (per-usage) order (e.g. NVFP4 groups each amax right after
         its scale), so reorder to the canonical flatten order here to keep the
         fake layout aligned with the real one slot-for-slot.
@@ -72,14 +72,14 @@ class TensorProto:
         if self.quantizer is None:
             return ("data",)
         # pylint: disable=protected-access
-        described = list(self.quantizer._describe_buffers(tuple(self.shape)).keys())
-        storage_cls = self.quantizer._storage_metadata(self.dtype)["cls"]
-        flatten_order = [attr for attr, _ in storage_cls._FLATTEN_TENSOR_BUFFERS]
+        described = list(self.quantizer.inner_tensor_specs(tuple(self.shape)).keys())
+        storage_cls = self.quantizer.storage_metadata(self.dtype)["cls"]
+        flatten_order = [attr for attr, _ in storage_cls._INNER_TENSORS]
         extra = [name for name in described if name not in flatten_order]
         if extra:
             raise RuntimeError(
                 f"{storage_cls.__name__} describes buffer(s) {extra} absent from its "
-                f"_FLATTEN_TENSOR_BUFFERS {flatten_order}; the fake layout cannot be "
+                f"_INNER_TENSORS {flatten_order}; the fake layout cannot be "
                 "aligned with the real one slot-for-slot."
             )
         return tuple(name for name in flatten_order if name in described)
