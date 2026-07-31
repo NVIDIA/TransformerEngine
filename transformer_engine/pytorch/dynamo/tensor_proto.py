@@ -119,14 +119,10 @@ class TensorProto:
         """
         if self.quantizer is None:
             return inner_tensors[0]
-        from ..quantized_tensor import (  # pylint: disable=import-outside-toplevel
-            _STORAGE_REGISTRY,
-        )
-
         shape = tuple(self.shape)
         ctx = self.create_metadata()
         inner = dict(zip(self.inner_names(), inner_tensors))
-        storage_cls = _STORAGE_REGISTRY[ctx["cls"]]
+        storage_cls = ctx["cls"]
         return storage_cls.__tensor_unflatten__(
             inner, ctx, shape, make_contiguous_strides_for(shape)
         )

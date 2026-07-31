@@ -29,10 +29,6 @@ from transformer_engine.pytorch.tensor._quantization_helpers import (
 _quantized_tensor_passthrough_ops: set = set()
 
 
-#: Maps storage / wrapper class qualname -> class object, for ``__tensor_unflatten__``.
-_STORAGE_REGISTRY: Dict[str, type] = {}
-
-
 class InnerTensor(NamedTuple):
     """Marks a storage field as a flat tensor buffer.
 
@@ -179,9 +175,6 @@ class QuantizedTensorStorage:
 
     def __init_subclass__(cls, **kwargs) -> None:
         super().__init_subclass__(**kwargs)
-        # Register every storage / wrapper class so ``__tensor_unflatten__`` can
-        # resolve the concrete class from its qualname inside an FX graph.
-        _STORAGE_REGISTRY[cls.__qualname__] = cls
         cls._INNER_TENSORS = _collect_inner_tensor_fields(cls)
 
     def _flatten_nontensor_kwargs(self) -> Dict[str, Any]:
@@ -193,7 +186,7 @@ class QuantizedTensorStorage:
         """Return ``(inner_tensor_attr_names, context)``; see class comment."""
         present = [attr for attr, _ in self._INNER_TENSORS if getattr(self, attr) is not None]
         ctx = {
-            "cls": type(self).__qualname__,
+            "cls": type(self),
             "is_tensor": isinstance(self, QuantizedTensor),
             "requires_grad": (
                 bool(self.requires_grad) if isinstance(self, QuantizedTensor) else False
@@ -210,7 +203,7 @@ class QuantizedTensorStorage:
         outer_stride: Optional[Iterable[int]],
     ) -> QuantizedTensorStorage:
         """Rebuild a storage / wrapper from flat tensors + context."""
-        cls = _STORAGE_REGISTRY[ctx["cls"]]
+        cls = ctx["cls"]
         kwargs: Dict[str, Any] = dict(ctx["nontensor_kwargs"])
         # Map each declared buffer back to its constructor kwarg (absent -> None).
         for attr, kwarg in cls._INNER_TENSORS:
@@ -505,7 +498,7 @@ class Quantizer(abc.ABC):
         """
         meta = self.storage_metadata(dtype)
         return {
-            "cls": meta["cls"].__qualname__,
+            "cls": meta["cls"],
             "is_tensor": not self.internal,
             "requires_grad": requires_grad,
             "nontensor_kwargs": meta["nontensor_kwargs"],

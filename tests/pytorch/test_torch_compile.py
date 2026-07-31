@@ -29,11 +29,7 @@ from transformer_engine.pytorch.ops.basic.basic_linear import BasicLinear
 from transformer_engine.pytorch.tensor.float8_tensor import Float8CurrentScalingQuantizer
 from transformer_engine.pytorch.quantization import QuantizerRole
 from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Quantizer
-from transformer_engine.pytorch.quantized_tensor import (
-    QuantizedTensor,
-    Quantizer,
-    _STORAGE_REGISTRY,
-)
+from transformer_engine.pytorch.quantized_tensor import QuantizedTensor, Quantizer
 from transformer_engine.pytorch.dynamo import TensorProto, to_tensor_proto
 from transformer_engine.pytorch import (
     is_fp8_available,
@@ -852,7 +848,7 @@ def _build_from_primitives(quantizer, shape, dtype, device="cpu"):
     ctx = quantizer.create_metadata(shape, dtype=dtype)
     buffers = quantizer.alloc_tensors(shape, device=device)
     inner = {name: buffers[name] for name in names}
-    storage_cls = _STORAGE_REGISTRY[ctx["cls"]]
+    storage_cls = ctx["cls"]
     # Row-major (contiguous) outer stride for ``__tensor_unflatten__``; ``meta``
     # device computes it without allocating storage.
     outer_stride = torch.empty(tuple(shape), device="meta").stride()
