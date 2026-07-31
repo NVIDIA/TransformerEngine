@@ -3,7 +3,7 @@
 # See LICENSE for license information.
 
 """
-Quantizer factory examples using native Transformer Engine quantizers.
+Quantizer factories that mirror Transformer Engine's built-in recipes.
 
 For TE ``Linear`` and ``GroupedLinear`` roles, each factory below mirrors the
 nominal defaults of a built-in recipe through the ``CustomRecipe`` +
@@ -14,11 +14,11 @@ Usage (any factory)::
 
     from transformer_engine.common.recipe import CustomRecipe
     from transformer_engine.pytorch.quantization import autocast
-    from transformer_engine.pytorch.custom_recipes.quantization_factory_base import (
-        nvfp4_quantizer_factory,
+    from transformer_engine.pytorch.custom_recipes.quantizer_factories import (
+        nvfp4_factory,
     )
 
-    recipe = CustomRecipe(qfactory=nvfp4_quantizer_factory)
+    recipe = CustomRecipe(qfactory=nvfp4_factory)
     with autocast(recipe=recipe):
         output = model(input)
 """
@@ -53,7 +53,7 @@ def high_precision_factory(
 
 
 @quantizer_policy(key=("delayed_scaling", 1))
-def delayed_scaling_quantizer_factory(
+def delayed_scaling_factory(
     role: Optional[QuantizerRole],  # pylint: disable=unused-argument
 ) -> "DelayedScalingRequest":
     """Factory that mirrors :class:`DelayedScaling` recipe defaults.
@@ -73,7 +73,7 @@ def delayed_scaling_quantizer_factory(
 
 
 @quantizer_policy(key=("current_scaling", 1))
-def current_scaling_quantizer_factory(
+def current_scaling_factory(
     role: Optional[QuantizerRole],
 ) -> "Float8CurrentScalingQuantizer":
     """Factory that mirrors :class:`Float8CurrentScaling` recipe defaults.
@@ -96,24 +96,8 @@ def current_scaling_quantizer_factory(
     )
 
 
-@quantizer_policy(key=("mxfp8", 1))
-def mxfp8_quantizer_factory(
-    role: Optional[QuantizerRole],  # pylint: disable=unused-argument
-) -> "MXFP8Quantizer":
-    """Factory that mirrors :class:`MXFP8BlockScaling` recipe defaults.
-
-    * E4M3 by default for all tensors
-    * Block size 32, power-of-2 (E8M0) scales
-    """
-    from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
-
-    return MXFP8Quantizer(
-        fp8_dtype=DType.kFloat8E4M3,
-    )
-
-
 @quantizer_policy(key=("float8_block_scaling", 1))
-def float8_block_scaling_quantizer_factory(
+def float8_block_scaling_factory(
     role: Optional[QuantizerRole],
 ) -> "Float8BlockQuantizer":
     """Factory that mirrors :class:`Float8BlockScaling` recipe defaults.
@@ -143,8 +127,24 @@ def float8_block_scaling_quantizer_factory(
     )
 
 
+@quantizer_policy(key=("mxfp8", 1))
+def mxfp8_factory(
+    role: Optional[QuantizerRole],  # pylint: disable=unused-argument
+) -> "MXFP8Quantizer":
+    """Factory that mirrors :class:`MXFP8BlockScaling` recipe defaults.
+
+    * E4M3 by default for all tensors
+    * Block size 32, power-of-2 (E8M0) scales
+    """
+    from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
+
+    return MXFP8Quantizer(
+        fp8_dtype=DType.kFloat8E4M3,
+    )
+
+
 @quantizer_policy(key=("nvfp4", 1))
-def nvfp4_quantizer_factory(
+def nvfp4_factory(
     role: Optional[QuantizerRole],
 ) -> "NVFP4Quantizer":
     """Factory that mirrors :class:`NVFP4BlockScaling` recipe defaults.

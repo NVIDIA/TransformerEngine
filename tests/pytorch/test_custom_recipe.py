@@ -24,33 +24,33 @@ from transformer_engine.pytorch.quantization import (
     get_align_size_for_quantization,
 )
 import transformer_engine.pytorch.ops as te_ops
-from transformer_engine.pytorch.custom_recipes.quantization_factory_base import (
-    current_scaling_quantizer_factory,
-    mxfp8_quantizer_factory,
-    float8_block_scaling_quantizer_factory,
-    nvfp4_quantizer_factory,
-    delayed_scaling_quantizer_factory,
+from transformer_engine.pytorch.custom_recipes.quantizer_factories import (
+    current_scaling_factory,
+    mxfp8_factory,
+    float8_block_scaling_factory,
+    nvfp4_factory,
+    delayed_scaling_factory,
     high_precision_factory,
 )
-from transformer_engine.pytorch.custom_recipes.quantization_factory_zoo import (
-    mxfp8_fwd_nvfp4_bwd_quantizer_factory,
+from transformer_engine.pytorch.custom_recipes.quantizer_factory_zoo import (
+    mxfp8_fwd_nvfp4_bwd_factory,
 )
-from transformer_engine.pytorch.custom_recipes.quantization_ref_nvfp4 import (
-    nvfp4_ref_rht_2d_quantizer_factory,
+from transformer_engine.pytorch.custom_recipes.reference_nvfp4 import (
+    nvfp4_ref_rht_2d_factory,
 )
 
 
 @pytest.mark.parametrize(
     "qfactory",
     [
-        current_scaling_quantizer_factory,
-        mxfp8_quantizer_factory,
-        float8_block_scaling_quantizer_factory,
-        nvfp4_quantizer_factory,
-        delayed_scaling_quantizer_factory,
+        current_scaling_factory,
+        mxfp8_factory,
+        float8_block_scaling_factory,
+        nvfp4_factory,
+        delayed_scaling_factory,
         high_precision_factory,
-        mxfp8_fwd_nvfp4_bwd_quantizer_factory,
-        nvfp4_ref_rht_2d_quantizer_factory,
+        mxfp8_fwd_nvfp4_bwd_factory,
+        nvfp4_ref_rht_2d_factory,
     ],
 )
 def test_first_party_qfactories_have_canonical_policy_keys(qfactory):
@@ -91,7 +91,7 @@ def test_custom_recipe_sanity_modules_nvfp4(module_type):
     inp = torch.randn(batch, in_features, device="cuda", dtype=torch.bfloat16, requires_grad=True)
 
     # Use NVFP4 quantizer factory
-    custom_recipe = recipe.CustomRecipe(qfactory=nvfp4_ref_rht_2d_quantizer_factory)
+    custom_recipe = recipe.CustomRecipe(qfactory=nvfp4_ref_rht_2d_factory)
 
     # Execute with custom recipe
     with autocast(enabled=True, recipe=custom_recipe):
@@ -427,7 +427,7 @@ def _assert_match(out_ref, out_cus, grad_ref, grad_cus, pgrads_ref, pgrads_cus):
 
 
 def test_factory_matches_delayed_scaling():
-    """delayed_scaling_quantizer_factory should produce bit-identical results
+    """delayed_scaling_factory should produce bit-identical results
     to the built-in DelayedScaling recipe."""
     available, reason = te.is_fp8_available(return_reason=True)
     if not torch.cuda.is_available() or not available:
@@ -437,13 +437,13 @@ def test_factory_matches_delayed_scaling():
 
     out_ref, grad_ref, pgrads_ref = _run_linear_fwd_bwd(model_ref, inp_ref, recipe.DelayedScaling())
     out_cus, grad_cus, pgrads_cus = _run_linear_fwd_bwd(
-        model_cus, inp_cus, recipe.CustomRecipe(qfactory=delayed_scaling_quantizer_factory)
+        model_cus, inp_cus, recipe.CustomRecipe(qfactory=delayed_scaling_factory)
     )
     _assert_match(out_ref, out_cus, grad_ref, grad_cus, pgrads_ref, pgrads_cus)
 
 
 def test_factory_matches_current_scaling():
-    """current_scaling_quantizer_factory should produce bit-identical results
+    """current_scaling_factory should produce bit-identical results
     to the built-in Float8CurrentScaling recipe."""
     available, reason = te.is_fp8_available(return_reason=True)
     if not torch.cuda.is_available() or not available:
@@ -455,13 +455,13 @@ def test_factory_matches_current_scaling():
         model_ref, inp_ref, recipe.Float8CurrentScaling()
     )
     out_cus, grad_cus, pgrads_cus = _run_linear_fwd_bwd(
-        model_cus, inp_cus, recipe.CustomRecipe(qfactory=current_scaling_quantizer_factory)
+        model_cus, inp_cus, recipe.CustomRecipe(qfactory=current_scaling_factory)
     )
     _assert_match(out_ref, out_cus, grad_ref, grad_cus, pgrads_ref, pgrads_cus)
 
 
 def test_factory_matches_mxfp8():
-    """mxfp8_quantizer_factory should produce bit-identical results
+    """mxfp8_factory should produce bit-identical results
     to the built-in MXFP8BlockScaling recipe."""
     available, reason = te.is_mxfp8_available(return_reason=True)
     if not torch.cuda.is_available() or not available:
@@ -473,13 +473,13 @@ def test_factory_matches_mxfp8():
         model_ref, inp_ref, recipe.MXFP8BlockScaling()
     )
     out_cus, grad_cus, pgrads_cus = _run_linear_fwd_bwd(
-        model_cus, inp_cus, recipe.CustomRecipe(qfactory=mxfp8_quantizer_factory)
+        model_cus, inp_cus, recipe.CustomRecipe(qfactory=mxfp8_factory)
     )
     _assert_match(out_ref, out_cus, grad_ref, grad_cus, pgrads_ref, pgrads_cus)
 
 
 def test_factory_matches_block_scaling():
-    """float8_block_scaling_quantizer_factory should produce bit-identical results
+    """float8_block_scaling_factory should produce bit-identical results
     to the built-in Float8BlockScaling recipe."""
     available = te.is_fp8_block_scaling_available()
     if not torch.cuda.is_available() or not available:
@@ -491,13 +491,13 @@ def test_factory_matches_block_scaling():
         model_ref, inp_ref, recipe.Float8BlockScaling()
     )
     out_cus, grad_cus, pgrads_cus = _run_linear_fwd_bwd(
-        model_cus, inp_cus, recipe.CustomRecipe(qfactory=float8_block_scaling_quantizer_factory)
+        model_cus, inp_cus, recipe.CustomRecipe(qfactory=float8_block_scaling_factory)
     )
     _assert_match(out_ref, out_cus, grad_ref, grad_cus, pgrads_ref, pgrads_cus)
 
 
 def test_factory_matches_nvfp4():
-    """nvfp4_quantizer_factory should produce bit-identical results
+    """nvfp4_factory should produce bit-identical results
     to the built-in NVFP4BlockScaling recipe."""
     available = te.is_nvfp4_available()
     if not torch.cuda.is_available() or not available:
@@ -509,7 +509,7 @@ def test_factory_matches_nvfp4():
         model_ref, inp_ref, recipe.NVFP4BlockScaling()
     )
     out_cus, grad_cus, pgrads_cus = _run_linear_fwd_bwd(
-        model_cus, inp_cus, recipe.CustomRecipe(qfactory=nvfp4_quantizer_factory)
+        model_cus, inp_cus, recipe.CustomRecipe(qfactory=nvfp4_factory)
     )
 
     _assert_match(out_ref, out_cus, grad_ref, grad_cus, pgrads_ref, pgrads_cus)
@@ -641,30 +641,30 @@ def test_custom_recipe_quantization_targets():
         recorded_roles.append(role)
 
         if role is None:
-            return nvfp4_quantizer_factory(role)
+            return nvfp4_factory(role)
 
         assert isinstance(role, QuantizerRole), f"Expected QuantizerRole, got {type(role)}"
 
         # Layer 0 (tl0.*): all MXFP8
         if role.name.startswith("tl0"):
-            return mxfp8_quantizer_factory(role)
+            return mxfp8_factory(role)
 
         # Layer 1 (tl1.*): NVFP4 default, but fc2 overridden to MXFP8
         if role.name == "tl1.layernorm_mlp.fc2":
-            return mxfp8_quantizer_factory(role)
+            return mxfp8_factory(role)
 
         # Layer 2: block scaling for qkv and fc1, rest falls through to default
         if role.name == "tl2.self_attention.layernorm_linear_qkv":
-            return float8_block_scaling_quantizer_factory(role)
+            return float8_block_scaling_factory(role)
         if role.name == "tl2.layernorm_mlp.fc1":
-            return float8_block_scaling_quantizer_factory(role)
+            return float8_block_scaling_factory(role)
 
         # Layer 3: current-scaling for proj, rest falls through to default
         if role.name == "tl3.proj":
-            return current_scaling_quantizer_factory(role)
+            return current_scaling_factory(role)
 
         # Default: NVFP4
-        return nvfp4_quantizer_factory(role)
+        return nvfp4_factory(role)
 
     custom_recipe = recipe.CustomRecipe(qfactory=targeting_factory)
 
@@ -1168,7 +1168,7 @@ def test_custom_recipe_dpa_fp8():
         Float8Quantizer,
         Float8CurrentScalingQuantizer,
     )
-    from transformer_engine.pytorch.custom_recipes.quantization_factory_zoo import (
+    from transformer_engine.pytorch.custom_recipes.quantizer_factory_zoo import (
         nvfp4_linear_fp8_dpa_factory,
     )
 
@@ -1295,7 +1295,7 @@ def test_custom_recipe_dpa_mxfp8():
     from transformer_engine.pytorch.quantization import CustomRecipeState
     from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
     from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Quantizer
-    from transformer_engine.pytorch.custom_recipes.quantization_factory_zoo import (
+    from transformer_engine.pytorch.custom_recipes.quantizer_factory_zoo import (
         nvfp4_linear_mxfp8_dpa_factory,
     )
 
@@ -1442,7 +1442,7 @@ def test_custom_recipe_debug_tool_compat():
                 in_features, out_features, params_dtype=torch.bfloat16, name="layer"
             ).cuda()
 
-            custom_recipe = recipe.CustomRecipe(qfactory=current_scaling_quantizer_factory)
+            custom_recipe = recipe.CustomRecipe(qfactory=current_scaling_factory)
 
             assert TEDebugState.debug_enabled, "Debug mode should be active"
 
@@ -1941,7 +1941,7 @@ def test_custom_recipe_quantization_alignment_contract():
     @recipe.quantizer_policy(key=("test_quantization_alignment", 1))
     def qfactory(role):
         calls.append(role)
-        return current_scaling_quantizer_factory(role)
+        return current_scaling_factory(role)
 
     custom_recipe = recipe.CustomRecipe(qfactory=qfactory)
     assert get_align_size_for_quantization(custom_recipe) == 128
@@ -1959,7 +1959,7 @@ def test_custom_recipe_quantization_alignment_contract():
     "qfactory",
     [
         pytest.param(
-            current_scaling_quantizer_factory,
+            current_scaling_factory,
             marks=pytest.mark.skipif(
                 not _alignment_fp8_available,
                 reason=_alignment_fp8_reason,
@@ -1967,7 +1967,7 @@ def test_custom_recipe_quantization_alignment_contract():
             id="fp8_current_scaling",
         ),
         pytest.param(
-            mxfp8_quantizer_factory,
+            mxfp8_factory,
             marks=pytest.mark.skipif(
                 not _alignment_mxfp8_available,
                 reason=_alignment_mxfp8_reason,
@@ -1975,7 +1975,7 @@ def test_custom_recipe_quantization_alignment_contract():
             id="mxfp8",
         ),
         pytest.param(
-            nvfp4_quantizer_factory,
+            nvfp4_factory,
             marks=pytest.mark.skipif(
                 not _alignment_nvfp4_available,
                 reason=_alignment_nvfp4_reason,
@@ -1983,7 +1983,7 @@ def test_custom_recipe_quantization_alignment_contract():
             id="nvfp4",
         ),
         pytest.param(
-            mxfp8_fwd_nvfp4_bwd_quantizer_factory,
+            mxfp8_fwd_nvfp4_bwd_factory,
             marks=pytest.mark.skipif(
                 not (_alignment_mxfp8_available and _alignment_nvfp4_available),
                 reason=f"MXFP8: {_alignment_mxfp8_reason}; NVFP4: {_alignment_nvfp4_reason}",

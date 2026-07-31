@@ -12,8 +12,8 @@
 import transformer_engine.pytorch as te
 import transformer_engine_torch as tex
 from transformer_engine.pytorch import NVFP4Quantizer
-from transformer_engine.pytorch.custom_recipes.quantization_ref_nvfp4 import NVFP4QuantizerRef
-from transformer_engine.pytorch.custom_recipes import utils
+from transformer_engine.pytorch.custom_recipes.reference_nvfp4 import NVFP4QuantizerRef
+from transformer_engine.pytorch.custom_recipes import reference_utils
 from transformer_engine.common.recipe import NVFP4BlockScaling
 
 import pytest
@@ -98,7 +98,7 @@ def check_quantization_nvfp4_versus_reference(
 
     # Reference quantization using NVFP4QuantizerRef with built-in RHT
     ref_quantizer = NVFP4QuantizerRef(
-        dtype=utils.Fp4Formats.E2M1,
+        dtype=reference_utils.Fp4Formats.E2M1,
         rowwise=return_rowwise,
         columnwise=return_transpose,
         pow_2_scales=False,

@@ -1456,15 +1456,15 @@ def _mxfp8_all_qfactory(role):  # pylint: disable=unused-argument
 
 
 def _zoo_dequantized_qfactory(case_name):
-    from transformer_engine.pytorch.custom_recipes.quantization_factory_zoo import (
-        mxfp8_fwd_dequantized_bwd_quantizer_factory,
-        nvfp4_row_scaled_fwd_dequantized_bwd_quantizer_factory,
+    from transformer_engine.pytorch.custom_recipes.quantizer_factory_zoo import (
+        mxfp8_fwd_high_precision_bwd_factory,
+        nvfp4_row_scaled_fwd_high_precision_bwd_factory,
     )
 
     if case_name == "mxfp8":
-        return mxfp8_fwd_dequantized_bwd_quantizer_factory
+        return mxfp8_fwd_high_precision_bwd_factory
     if case_name == "nvfp4_row_scaled":
-        return nvfp4_row_scaled_fwd_dequantized_bwd_quantizer_factory
+        return nvfp4_row_scaled_fwd_high_precision_bwd_factory
     raise ValueError(case_name)
 
 
@@ -1523,8 +1523,8 @@ def _assert_zoo_layernorm_mlp_role_semantics(case_name):
         assert isinstance(qfactory(role), IdentityQuantizer)
 
 
-class TestZooDequantizedBackwardFactoryModuleCoverage:
-    """Zoo dequantized-backward recipes should match base recipes across TE modules."""
+class TestZooHighPrecisionBackwardFactoryModuleCoverage:
+    """Zoo high-precision-backward factories should match base recipes across TE modules."""
 
     @pytest.mark.parametrize("case_name", _ZOO_DEQUANTIZED_CASES)
     @pytest.mark.parametrize("module_name", _ZOO_DEQUANTIZED_MODULES)
