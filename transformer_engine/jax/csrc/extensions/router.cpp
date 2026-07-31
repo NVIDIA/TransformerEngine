@@ -26,9 +26,6 @@ Error_Type FusedTopkWithScoreFunctionForwardFFI(
     int64_t topk, int64_t use_pre_softmax, int64_t num_groups, int64_t group_topk,
     double scaling_factor, JAXX_Score_Function score_function, int64_t compute_aux_scores,
     JAXX_Routing_Map_Format routing_map_format) {
-  auto sync_error = ffi_with_cuda_device_sync_and_error_check(
-      "FusedTopkWithScoreFunctionForwardFFI", "begin");
-  if (sync_error.failure()) return sync_error;
   auto dtype = convert_ffi_datatype_to_te_dtype(logits_buf.element_type());
   auto dims = logits_buf.dimensions();
   auto num_tokens = static_cast<int>(product(dims, 0, dims.size() - 1));
@@ -83,8 +80,7 @@ Error_Type FusedTopkWithScoreFunctionForwardFFI(
         routing_map_tensor.data(), routing_map_format_nvte, intermediate_tensor.data(), stream);
   }
 
-  return ffi_with_cuda_device_sync_and_error_check(
-      "FusedTopkWithScoreFunctionForwardFFI", "end");
+  return ffi_with_cuda_error_check();
 }
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(FusedTopkWithScoreFunctionForwardHandler,
@@ -103,7 +99,8 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(FusedTopkWithScoreFunctionForwardHandler,
                                   .Attr<double>("scaling_factor")
                                   .Attr<JAXX_Score_Function>("score_function")
                                   .Attr<int64_t>("compute_aux_scores")
-                                  .Attr<JAXX_Routing_Map_Format>("routing_map_format"));
+                                  .Attr<JAXX_Routing_Map_Format>("routing_map_format"),
+                              FFI_CudaGraph_Traits);
 
 // ============================================================================
 // Fused Top-K with Score Function - Backward
@@ -118,9 +115,6 @@ Error_Type FusedTopkWithScoreFunctionBackwardFFI(
     int64_t topk, int64_t use_pre_softmax, double scaling_factor,
     JAXX_Score_Function score_function, int64_t compute_aux_scores,
     JAXX_Routing_Map_Format routing_map_format) {
-  auto sync_error = ffi_with_cuda_device_sync_and_error_check(
-      "FusedTopkWithScoreFunctionBackwardFFI", "begin");
-  if (sync_error.failure()) return sync_error;
   // intermediate is always float32 (CompType) regardless of logits dtype.
   auto intermediate_dtype = convert_ffi_datatype_to_te_dtype(intermediate_buf.element_type());
   NVTE_CHECK(
@@ -163,8 +157,7 @@ Error_Type FusedTopkWithScoreFunctionBackwardFFI(
         static_cast<int>(score_function), grad_logits_tensor.data(), stream);
   }
 
-  return ffi_with_cuda_device_sync_and_error_check(
-      "FusedTopkWithScoreFunctionBackwardFFI", "end");
+  return ffi_with_cuda_error_check();
 }
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(FusedTopkWithScoreFunctionBackwardHandler,
@@ -180,7 +173,8 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(FusedTopkWithScoreFunctionBackwardHandler,
                                   .Attr<double>("scaling_factor")
                                   .Attr<JAXX_Score_Function>("score_function")
                                   .Attr<int64_t>("compute_aux_scores")
-                                  .Attr<JAXX_Routing_Map_Format>("routing_map_format"));
+                                  .Attr<JAXX_Routing_Map_Format>("routing_map_format"),
+                              FFI_CudaGraph_Traits);
 
 // ============================================================================
 // Fused MoE Aux Loss - Forward

@@ -30,8 +30,6 @@ constexpr auto FFI_CudaGraph_Traits = {xla::ffi::Traits::kCmdBufferCompatible};
 DType convert_ffi_datatype_to_te_dtype(const xla::ffi::DataType& type);
 
 Error_Type ffi_with_cuda_error_check();
-Error_Type ffi_with_cuda_device_sync_and_error_check(const char* operation_name,
-                                                     const char* synchronization_phase);
 
 // source_location is not available in C++17, so we implement it ourselves
 #if defined(__GNUC__) || defined(__clang__)

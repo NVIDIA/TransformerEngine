@@ -5,7 +5,6 @@
  ************************************************************************/
 #include "extensions/ffi.h"
 
-#include <cstdio>
 #include <iostream>
 
 namespace transformer_engine {
@@ -58,29 +57,6 @@ Error_Type ffi_with_cuda_error_check() {
   if (last_error != cudaSuccess) {
     return Error_Type(XLA_FFI_Error_Code_INTERNAL,
                       std::string("CUDA error: ") + cudaGetErrorString(last_error));
-  }
-  return Error_Type::Success();
-}
-
-Error_Type ffi_with_cuda_device_sync_and_error_check(const char* operation_name,
-                                                     const char* synchronization_phase) {
-  cudaError_t sync_error = cudaDeviceSynchronize();
-  std::printf(
-      "[TE FFI device sync] operation=%s phase=%s code=%d name=%s message=%s\n",
-      operation_name, synchronization_phase, static_cast<int>(sync_error),
-      cudaGetErrorName(sync_error), cudaGetErrorString(sync_error));
-  std::fflush(stdout);
-  if (sync_error != cudaSuccess) {
-    return Error_Type(XLA_FFI_Error_Code_INTERNAL,
-                      std::string(operation_name) + " CUDA device synchronization error at " +
-                          synchronization_phase + ": " + cudaGetErrorString(sync_error));
-  }
-
-  cudaError_t last_error = cudaGetLastError();
-  if (last_error != cudaSuccess) {
-    return Error_Type(XLA_FFI_Error_Code_INTERNAL,
-                      std::string(operation_name) + " CUDA error after device synchronization at " +
-                          synchronization_phase + ": " + cudaGetErrorString(last_error));
   }
   return Error_Type::Success();
 }
