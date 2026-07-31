@@ -26,16 +26,30 @@ def _get_scale_buffer_info(
     recipe = get_quantization_recipe_name(quantizer)
     if not recipe:
         return None
-    if recipe == "fp8_current_scaling":
+
+    if recipe == "fp8_delayed_scaling":
+        metadata_name = "amax"
+        metadata = getattr(quantizer, "amax", None)
+    elif recipe == "fp8_current_scaling":
         metadata_name = "scale_inv"
         metadata = getattr(tensor, "_scale_inv", None)
-    else:
+    elif recipe == "nvfp4":
+        metadata_name = "amax"
+        metadata = getattr(tensor, "_amax_rowwise", None)
+    elif recipe == "nvfp4_rowwise":
         metadata_name = "amax_rowwise"
-        metadata = getattr(
-            tensor,
-            "_amax_rowwise",
-            getattr(quantizer, "amax", None),
-        )
+        metadata = getattr(tensor, "_amax_rowwise", None)
+    elif recipe == "mxfp8":
+        # MXFP8 only exposes blockwise E8M0-encoded inverse scales, not a
+        # global FP32 scaling factor suitable for PTQ checkpoint export.
+        return None
+    elif recipe == "fp8_block_scaling":
+        # FP8 block scaling only exposes blockwise inverse scales, not a
+        # global FP32 scaling factor suitable for PTQ checkpoint export.
+        return None
+    else:
+        raise ValueError(f"Unsupported quantization recipe {recipe!r}")
+
     buffer_name = f"{tensor_name}_tensor_{metadata_name}_{recipe}_te_ptq_calibrated"
     return buffer_name, metadata
 
