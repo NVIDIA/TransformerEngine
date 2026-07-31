@@ -306,6 +306,11 @@ CudnnNormalizationPlan::CudnnNormalizationPlan(NVTE_Norm_Type NormType, NVTE_Nor
 
     const bool use_input_dtype = cudnnGetVersion() >= 92500 && _fp8_out && _ndim_scale_block == 1 &&
                                  use_cudnn_mxfp8_norm_output_in_input_dtype();
+    if (use_input_dtype) {
+      NVTE_WARN(
+          "The cuDNN MXFP8 normalization intermediate output uses the input dtype (itype) "
+          "instead of the compute dtype; otype still applies to the final quantized output.");
+    }
     const auto ZDtype = use_input_dtype ? itype : (_fp8_out ? ctype : otype);
     _z->set_output(!_fp8_out).set_data_type(get_cudnn_fe_dtype(ZDtype));
 
