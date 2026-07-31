@@ -3235,7 +3235,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         # is large enough to outlast cp_stream's launch (e.g. bucket128k @ cp=8).
         cp_stream.wait_stream(torch.cuda.current_stream())
 
-        # THD all_gather only reaches this path for f16/bf16 attention today.
+        # Shapes before per-step slicing and FP8 metadata wrapping.
         # q: [b, 2, s//2, h, d] or [2, s//2, b, h, d]
         # k: [s, b, h, d]
         # v: [s, b, h, d]
@@ -3403,6 +3403,13 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                         )
                         max_seqlen_kv_ = kv_range[1]
                         cu_seqlens_kv_per_step[i] = thd_cu_seqlens_kv_per_step[i]
+                        if fp8 and not fp8_recipe.mxfp8():
+                            q_part, k_part, v_part = [
+                                Float8Tensor.make_like(x, data=y, dtype=fwd_nominal_dtype)
+                                for x, y in zip(
+                                    [q_fp8, k_fp8, v_fp8], [q_part, k_part, v_part]
+                                )
+                            ]
                     if use_fused_attention:
                         # Set per-step parameters for THD vs bshd/sbhd
                         if qkv_format == "thd":
@@ -3735,7 +3742,8 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         # v: [s, b, h, d]
         if ctx.fp8 and not ctx.fp8_recipe.mxfp8():
             q, k, v = [x._data for x in [q_fp8, k_fp8, v_fp8]]
-        if not ctx.qkv_reshaped:
+        # BSHD/SBHD split the sequence into two chunks; THD stays token-major [t, h, d].
+        if not ctx.qkv_reshaped and ctx.qkv_format != "thd":
             q = q.view(
                 *q.shape[:seq_dim_qkv], 2, q.shape[seq_dim_qkv] // 2, *q.shape[(seq_dim_qkv + 1) :]
             )

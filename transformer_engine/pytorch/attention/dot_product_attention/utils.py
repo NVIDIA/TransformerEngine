@@ -1212,12 +1212,6 @@ def get_attention_backend(
                 " bias for THD format"
             )
             use_fused_attention = False
-        elif fp8 and fp8_meta["recipe"].fp8_dpa and qkv_format == "thd":
-            logger.debug(
-                "Disabling FusedAttention as it does not support context parallelism with FP8"
-                " attention and THD format"
-            )
-            use_fused_attention = False
         elif fp8 and fp8_meta["recipe"].fp8_dpa and core_attention_bias_type != "no_bias":
             logger.debug(
                 "Disabling FusedAttention as it does not support context parallelism with FP8"
