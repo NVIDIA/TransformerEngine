@@ -47,7 +47,7 @@ namespace transformer_engine {
  */
 __device__ __forceinline__ char *align_up(char *p, uintptr_t align) {
   const uintptr_t misalign = reinterpret_cast<uintptr_t>(p) & (align - 1);
-  // If p is not aligned, (align - misalign) & (align - 1) is the number of bytes to fill the gap between p and 
+  // If p is not aligned, (align - misalign) & (align - 1) is the number of bytes to fill the gap between p and
   // the next aligned address.
   // If p is aligned, misalign is 0 and (align - misalign) is align itself, so we use & (align - 1)
   // to make it 0 and return p itself.
