@@ -224,9 +224,9 @@ def _cudnn_row_scaled_nvfp4_grouped_gemm(
 
     k = int(inputs[0].size(1))
     n = int(weights[0].size(0))
-    if k % 128 != 0 or n % 128 != 0:
+    if k % 64 != 0 or n % 128 != 0:
         raise NotImplementedError(
-            "cuDNN row-scaled NVFP4 grouped GEMM requires K and N multiples of 128."
+            "cuDNN row-scaled NVFP4 grouped GEMM requires K multiples of 64 and N multiples of 128."
         )
     if any(tuple(tensor.size()) != (n, k) for tensor in weights):
         raise ValueError("All grouped GEMM weights must have the same (N, K) shape.")
@@ -241,11 +241,11 @@ def _cudnn_row_scaled_nvfp4_grouped_gemm(
         for output, m in zip(outputs, expected_output_rows)
     ):
         raise ValueError("Grouped GEMM output shapes do not match m_splits and N.")
-    if outputs[0].dtype not in (torch.bfloat16, torch.float16) or any(
+    if outputs[0].dtype not in (torch.float32, torch.bfloat16, torch.float16) or any(
         output.dtype != outputs[0].dtype for output in outputs
     ):
         raise NotImplementedError(
-            "cuDNN row-scaled NVFP4 grouped GEMM supports uniform BF16/FP16 outputs only."
+            "cuDNN row-scaled NVFP4 grouped GEMM supports uniform FP32/BF16/FP16 outputs only."
         )
     if bias is not None and (
         len(bias) != num_gemms

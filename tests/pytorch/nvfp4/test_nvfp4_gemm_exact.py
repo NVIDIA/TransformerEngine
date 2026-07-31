@@ -588,9 +588,21 @@ def test_nvfp4_gemm_versus_reference(
 
 
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.parametrize(
+    "m_splits, k, n, out_dtype",
+    [
+        pytest.param([256, 256, 256, 256], 512, 512, torch.bfloat16, id="default_bf16"),
+        pytest.param([256, 256, 256, 256], 64, 256, torch.bfloat16, id="small_k_bf16"),
+        pytest.param([256, 256, 256, 256], 64, 256, torch.float32, id="small_k_fp32"),
+    ],
+)
 @pytest.mark.parametrize("use_bias", [False, True], ids=["no_bias", "bias"])
 @pytest.mark.parametrize("single_output", [False, True], ids=["list_output", "single_output"])
 def test_nvfp4_row_scaled_grouped_gemm_matches_per_gemm(
+    m_splits: list[int],
+    k: int,
+    n: int,
+    out_dtype: torch.dtype,
     use_bias: bool,
     single_output: bool,
     monkeypatch,
@@ -598,10 +610,10 @@ def test_nvfp4_row_scaled_grouped_gemm_matches_per_gemm(
     if torch.cuda.get_device_capability() < (10, 0):
         pytest.skip("Requires SM100+ for cuDNN grouped GEMM quant kernel.")
     check_nvfp4_row_scaled_grouped_gemm_matches_per_gemm(
-        out_dtype=torch.bfloat16,
-        m_splits=[256, 256, 256, 256],
-        k=512,
-        n=512,
+        out_dtype=out_dtype,
+        m_splits=m_splits,
+        k=k,
+        n=n,
         use_bias=use_bias,
         single_output=single_output,
         monkeypatch=monkeypatch,
@@ -613,8 +625,6 @@ def test_nvfp4_row_scaled_grouped_gemm_matches_per_gemm(
     "m_splits, k, n, out_dtype, use_4over6, expected_error",
     [
         ([128, 256], 128, 128, torch.bfloat16, False, "M multiples of 256"),
-        ([256, 256], 64, 128, torch.bfloat16, False, "K and N multiples of 128"),
-        ([256, 256], 128, 128, torch.float32, False, "BF16/FP16 outputs"),
         ([256, 256], 128, 128, torch.bfloat16, True, "does not support 4over6"),
     ],
 )
