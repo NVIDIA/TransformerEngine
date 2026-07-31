@@ -713,6 +713,14 @@ class TestQuantizedTensor:
             y_test = y_test.to(dtype=torch.float64, device="cpu")
             torch.testing.assert_close(y_test, y_ref, **tols)
 
+    def test_view_not_implemented(self) -> None:
+        """QuantizedTensor base class does not support tensor views."""
+        qt = QuantizedTensor((128, 128), torch.bfloat16)
+        with pytest.raises(
+            NotImplementedError, match="QuantizedTensor class does not support tensor views"
+        ):
+            qt.view(-1)
+
     @pytest.mark.parametrize("quantization", _quantization_list)
     def test_shape_with_none_data(
         self,
