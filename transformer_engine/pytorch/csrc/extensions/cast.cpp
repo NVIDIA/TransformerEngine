@@ -707,6 +707,10 @@ py::object group_requantize_columnwise_and_swizzle_rowwise_(
   // resets columnwise_scale_inv to None, which would strand the columnwise data below with a
   // null scale pointer.
   grouped_swizzle_for_gemm(grouped_x, /*rowwise=*/true, /*columnwise=*/false);
+  // The swizzle hands back a 2D [num_tensors * padded_m, padded_k] scale buffer, but grouped
+  // tensors carry scales as a flat array indexed by element offsets (scale_inv_offsets), so
+  // per-group slicing breaks unless it is flattened back.
+  grouped_x.attr("scale_inv") = grouped_x.attr("scale_inv").attr("reshape")(-1);
 
   // Rebuild the columnwise copy the wgrad GEMM needs. It cannot be derived from the rowwise
   // data because the two directions scale along perpendicular axes. The caller hands us a
