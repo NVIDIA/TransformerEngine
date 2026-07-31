@@ -117,9 +117,18 @@ def _restore_backend_choice_from_env():
 
 def generate_inputs(M, N, in_dtype, seed=0):
     g = torch.Generator(device="cuda").manual_seed(seed)
-    x = torch.empty(M, N, dtype=in_dtype, device="cuda").uniform_(-2.0, 1.0, generator=g)
-    ain = torch.empty(M, N, dtype=in_dtype, device="cuda").uniform_(-2.0, 1.0, generator=g)
-    return x, ain
+
+    def fill():
+        # Mirrors InputsFillCase::uniform in fillCase_special (tests/cpp/test_common.cu) where the uniform range is [-2, 1]
+        # and we apply a random sign flip
+        v = torch.empty(M, N, dtype=torch.float32, device="cuda").uniform_(-2.0, 1.0, generator=g)
+        negate = (
+            torch.empty(M, N, dtype=torch.float32, device="cuda").uniform_(-1.0, 1.0, generator=g)
+            < 0.0
+        )
+        return torch.where(negate, -v, v).to(in_dtype)
+
+    return fill(), fill()
 
 
 def run_quantize(method, act, x, ain, rowwise, columnwise, fp8_dtype, swizzled):
