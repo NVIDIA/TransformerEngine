@@ -14,6 +14,8 @@ from torch.nn import Parameter
 import transformer_engine.pytorch as te
 from transformer_engine.common import recipe
 from transformer_engine.pytorch import (
+    Float8BlockQuantizer,
+    Float8CurrentScalingQuantizer,
     Float8Quantizer,
     Fp8Padding,
     Fp8Unpadding,
@@ -1210,44 +1212,74 @@ def test_grouped_gemm_grouped_tensor_zero_work_bias(use_bias_scale) -> None:
 
 @pytest.mark.parametrize("layout", ["TN", "NN", "NT"])
 @pytest.mark.parametrize("accumulate", [False, True])
-@pytest.mark.parametrize("quant_type", ["bf16", "mxfp8"])
+@pytest.mark.parametrize(
+    "quant_type", ["bf16", "fp8_current_scaling", "mxfp8", "fp8_block_scaling"]
+)
 def test_grouped_gemm_grouped_tensor_zero_work(layout, accumulate, quant_type) -> None:
     """Grouped GEMM with all-zero split sizes (zero total work).
 
     For wgrad (NT layout) the output should be zero when not accumulating,
     or unchanged when accumulating with beta=1.
     """
-    if torch.cuda.get_device_capability() < (10, 0):
-        pytest.skip("Grouped GEMM requires Blackwell (SM100) or newer.")
     if not is_bf16_available():
         pytest.skip("bfloat16 is required for grouped GEMM test.")
-    if quant_type == "mxfp8" and not mxfp8_available:
-        pytest.skip(reason_for_no_mxfp8)
 
     z = 4
     k, n = 256, 256
     dtype = torch.bfloat16
     device = torch.device("cuda")
-    use_mxfp8 = quant_type == "mxfp8"
+
+    test_recipe = {
+        "bf16": None,
+        "fp8_current_scaling": recipe.Float8CurrentScaling(),
+        "mxfp8": recipe.MXFP8BlockScaling(),
+        "fp8_block_scaling": recipe.Float8BlockScaling(),
+    }[quant_type]
+    if not is_module_grouped_tensor_path_supported(
+        test_recipe,
+        dtype,
+        single_grouped_weight=True,
+    ):
+        pytest.skip(f"{quant_type} grouped-tensor GEMM is unavailable")
 
     transa = layout[0] == "T"
     transb = layout[1] == "T"
     zero_first_dims = torch.zeros(z, dtype=torch.int64, device=device)
 
+    def _make_quantizer(fp8_dtype, rowwise, columnwise):
+        if quant_type == "fp8_current_scaling":
+            quantizer = Float8CurrentScalingQuantizer(fp8_dtype=fp8_dtype, device=device)
+            quantizer.set_usage(rowwise=rowwise, columnwise=columnwise)
+        elif quant_type == "mxfp8":
+            quantizer = MXFP8Quantizer(
+                fp8_dtype=fp8_dtype,
+                rowwise=rowwise,
+                columnwise=columnwise,
+            )
+        elif quant_type == "fp8_block_scaling":
+            quantizer = Float8BlockQuantizer(
+                fp8_dtype=fp8_dtype,
+                rowwise=rowwise,
+                columnwise=columnwise,
+                force_pow_2_scales=False,
+                amax_epsilon=0.0,
+                block_scaling_dim=1,
+            )
+        else:
+            raise ValueError(f"Unsupported quantized zero-work test type {quant_type}")
+        quantizer.optimize_for_gemm = True
+        return quantizer
+
     def _make_zero_tokens_grouped_tensor(logical_last_dim, is_a):
         """Create a GroupedTensor with non-zero logical_shape but zero first_dims."""
         buf = torch.randn(0, logical_last_dim, dtype=dtype, device=device)
-        if use_mxfp8:
+        if test_recipe is not None:
             if is_a:
                 rowwise, columnwise = transa, not transa
             else:
                 rowwise, columnwise = not transb, transb
-            quantizer = MXFP8Quantizer(
-                fp8_dtype=tex.DType.kFloat8E4M3,
-                rowwise=rowwise,
-                columnwise=columnwise,
-            )
-            quantizer.optimize_for_gemm = True
+            fp8_dtype = tex.DType.kFloat8E4M3
+            quantizer = _make_quantizer(fp8_dtype, rowwise, columnwise)
             return tex.group_quantize(buf, quantizer, z, zero_first_dims)
         return GroupedTensor.make_grouped_tensor(
             num_tensors=z,
@@ -1262,12 +1294,18 @@ def test_grouped_gemm_grouped_tensor_zero_work(layout, accumulate, quant_type) -
 
     if layout in ("TN", "NN"):
         weight_tensors = [torch.randn(n, k, dtype=dtype, device=device) for _ in range(z)]
-        if use_mxfp8:
-            grouped_A = _make_grouped_tensor_quantized_mxfp8(
-                weight_tensors,
+        if test_recipe is not None:
+            grouped_weight = torch.cat(weight_tensors, dim=0)
+            weight_quantizer = _make_quantizer(
+                tex.DType.kFloat8E4M3,
                 rowwise=transa,
                 columnwise=not transa,
-                device=device,
+            )
+            grouped_A = tex.group_quantize(
+                grouped_weight,
+                weight_quantizer,
+                z,
+                torch.full((z,), n, dtype=torch.int64, device=device),
             )
         else:
             grouped_A = _make_grouped_tensor_uniform(z, n, k, device, dtype)
