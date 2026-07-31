@@ -943,7 +943,10 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         for name, (old_param, attrs) in snapshots.items():
             new_param = self._parameters.get(name)
             if new_param is None:
-                continue
+                raise RuntimeError(
+                    f"{type(self).__name__}.{name} disappeared during _apply; the state"
+                    " attached to it cannot be restored"
+                )
             buffers = {attr for attr, _ in type(old_param)._FLATTEN_TENSOR_BUFFERS}
             for key, value in attrs.items():
                 # Still present -> tensor state; the post-swap value is the right one.
