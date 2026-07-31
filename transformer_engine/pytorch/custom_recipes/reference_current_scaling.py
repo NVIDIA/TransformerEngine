@@ -340,7 +340,9 @@ class CurrentScalingQuantizerRef(Quantizer):
         **kwargs,  # pylint: disable=unused-argument
     ) -> CurrentScalingTensorRef:
         # sanity checks
-        assert tensor.dtype in reference_utils.HIGH_PRECISION_FLOAT_DTYPES, "Unsupported input dtype."
+        assert (
+            tensor.dtype in reference_utils.HIGH_PRECISION_FLOAT_DTYPES
+        ), "Unsupported input dtype."
 
         # Make it work with 3D tensors
         original_shape = tensor.shape
