@@ -63,7 +63,7 @@ def _update_scale_buffers(
     for buffer_name, scale in scale_updates.items():
         if scale is None:
             continue
-        if buffer_name.startswith("input"):
+        if activation_scale_decay > 0.0:
             observed_scale = scale.detach().float()
             scale_buffer = scale_buffers.get(buffer_name)
             if scale_buffer is not None and scale_buffer.shape != observed_scale.shape:
@@ -71,10 +71,6 @@ def _update_scale_buffers(
                     "Quantized scaling-factor buffer shape changed from "
                     f"{tuple(scale_buffer.shape)} to {tuple(observed_scale.shape)}"
                 )
-            if activation_scale_decay == 0.0:
-                # If not using scale decay, just buffer the current scaling.
-                scale_buffers[buffer_name] = observed_scale
-                continue
             if scale_buffer is None:
                 # Initialize the rolling activation scaling factor.
                 # Requires CUDA graph warmup step.
@@ -89,8 +85,8 @@ def _update_scale_buffers(
                 out=scale_buffer,
             )
         else:
-            # Keep a reference to the current weight metadata without
-            # allocating or copying a separate buffer.
+            # Without scale history, keep a reference to the current metadata
+            # without allocating or copying a separate buffer.
             # Requires CUDA graph warmup step.
             scale_buffers[buffer_name] = scale.detach()
 

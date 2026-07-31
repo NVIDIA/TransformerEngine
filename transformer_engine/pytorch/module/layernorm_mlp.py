@@ -697,25 +697,39 @@ class _LayerNormMLP(torch.autograd.Function):
                     fc2_weight_quantizer.calibrate(fc2_weight)
 
             if scale_buffers is not None:
-                scale_updates = {}
+                activation_scale_updates = {}
+                weight_scale_updates = {}
                 if fc1_input_scale_buffer is not None:
-                    scale_updates[fc1_input_scale_buffer[0]] = fc1_input_scale_buffer[1]
+                    activation_scale_updates[fc1_input_scale_buffer[0]] = (
+                        fc1_input_scale_buffer[1]
+                    )
                 if fc1_weight_scale_buffer is not None:
-                    scale_updates[fc1_weight_scale_buffer[0]] = fc1_weight_scale_buffer[1]
+                    weight_scale_updates[fc1_weight_scale_buffer[0]] = (
+                        fc1_weight_scale_buffer[1]
+                    )
                 fc2_input_scale_buffer = _get_scale_buffer_info(
                     "fc2_input", act_out, fc2_input_quantizer
                 )
                 if fc2_input_scale_buffer is not None:
-                    scale_updates[fc2_input_scale_buffer[0]] = fc2_input_scale_buffer[1]
+                    activation_scale_updates[fc2_input_scale_buffer[0]] = (
+                        fc2_input_scale_buffer[1]
+                    )
                 fc2_weight_scale_buffer = _get_scale_buffer_info(
                     "fc2_weight", fc2_weight_final, fc2_weight_quantizer
                 )
                 if fc2_weight_scale_buffer is not None:
-                    scale_updates[fc2_weight_scale_buffer[0]] = fc2_weight_scale_buffer[1]
+                    weight_scale_updates[fc2_weight_scale_buffer[0]] = (
+                        fc2_weight_scale_buffer[1]
+                    )
                 _update_scale_buffers(
                     scale_buffers,
-                    scale_updates,
+                    activation_scale_updates,
                     quantized_scaling_factor_buffering_decay,
+                )
+                _update_scale_buffers(
+                    scale_buffers,
+                    weight_scale_updates,
+                    activation_scale_decay=0.0,
                 )
 
             # Configure Userbuffers reduce-scatter if needed

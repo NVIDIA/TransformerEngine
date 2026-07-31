@@ -92,16 +92,26 @@ def _update_grouped_scale_buffers(
     activation_scale_decay: float,
 ) -> None:
     """Update GroupedLinear PTQ calibration buffers with per-GEMM metadata."""
-    scale_updates = {}
+    activation_scale_updates = {}
     for index, tensor in enumerate(input_tensors):
         scale_buffer = _get_scale_buffer_info(f"input_gemm{index}", tensor, input_quantizer)
         if scale_buffer is not None:
-            scale_updates[scale_buffer[0]] = scale_buffer[1]
+            activation_scale_updates[scale_buffer[0]] = scale_buffer[1]
+    weight_scale_updates = {}
     for index, tensor in enumerate(weight_tensors):
         scale_buffer = _get_scale_buffer_info(f"weight_gemm{index}", tensor, weight_quantizer)
         if scale_buffer is not None:
-            scale_updates[scale_buffer[0]] = scale_buffer[1]
-    _update_scale_buffers(scale_buffers, scale_updates, activation_scale_decay)
+            weight_scale_updates[scale_buffer[0]] = scale_buffer[1]
+    _update_scale_buffers(
+        scale_buffers,
+        activation_scale_updates,
+        activation_scale_decay,
+    )
+    _update_scale_buffers(
+        scale_buffers,
+        weight_scale_updates,
+        activation_scale_decay=0.0,
+    )
 
 
 class _GroupedLinear(torch.autograd.Function):

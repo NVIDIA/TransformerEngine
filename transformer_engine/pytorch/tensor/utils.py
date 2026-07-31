@@ -41,7 +41,9 @@ def get_quantization_recipe_name(quantizer: Optional[Quantizer]) -> str:
         if quantizer.row_scaled_nvfp4:
             return "nvfp4_rowwise"
         return "nvfp4"
-    raise ValueError(f"Unsupported quantizer type: {type(quantizer)}")
+    # Custom recipes may provide arbitrary Quantizer implementations without a
+    # stable recipe name or globally checkpointable scaling metadata.
+    return ""
 
 
 def replace_raw_data(tensor: QuantizedTensor, new_raw_data: torch.Tensor):

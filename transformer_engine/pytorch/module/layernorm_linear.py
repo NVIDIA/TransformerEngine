@@ -384,18 +384,20 @@ class _LayerNormLinear(torch.autograd.Function):
                 weight_quantizer.calibrate(weight)
 
         if scale_buffers is not None:
-            scale_updates = {}
             input_scale_buffer = _get_scale_buffer_info("input", ln_out_total, input_quantizer)
             if input_scale_buffer is not None:
-                scale_updates[input_scale_buffer[0]] = input_scale_buffer[1]
+                _update_scale_buffers(
+                    scale_buffers,
+                    {input_scale_buffer[0]: input_scale_buffer[1]},
+                    quantized_scaling_factor_buffering_decay,
+                )
             weight_scale_buffer = _get_scale_buffer_info("weight", weightmat, weight_quantizer)
             if weight_scale_buffer is not None:
-                scale_updates[weight_scale_buffer[0]] = weight_scale_buffer[1]
-            _update_scale_buffers(
-                scale_buffers,
-                scale_updates,
-                quantized_scaling_factor_buffering_decay,
-            )
+                _update_scale_buffers(
+                    scale_buffers,
+                    {weight_scale_buffer[0]: weight_scale_buffer[1]},
+                    activation_scale_decay=0.0,
+                )
 
         # Choose whether to use GEMM kernel with split accumulator
         use_split_accumulator = _2X_ACC_FPROP

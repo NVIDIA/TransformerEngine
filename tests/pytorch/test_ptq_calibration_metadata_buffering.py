@@ -1,4 +1,4 @@
-# Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -87,7 +87,7 @@ def test_grouped_scale_buffers_are_per_gemm(monkeypatch):
     ),
 )
 def test_activation_scale_buffer_uses_decaying_maximum(observed_scale, expected_scale):
-    name = "input_tensor_scale_inv_fp8_current_scaling_te_ptq_calibrated"
+    name = "fc1_input_tensor_scale_inv_fp8_current_scaling_te_ptq_calibrated"
     scale_buffers = {name: torch.tensor([4.0])}
 
     _common._update_scale_buffers(
