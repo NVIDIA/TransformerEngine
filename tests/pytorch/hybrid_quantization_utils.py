@@ -13,11 +13,11 @@ import torch
 
 import transformer_engine.pytorch as te
 from transformer_engine.common import recipe
-from transformer_engine.pytorch.custom_recipes.quantization_factory_base import (
-    current_scaling_quantizer_factory,
-    float8_block_scaling_quantizer_factory,
-    mxfp8_quantizer_factory,
-    nvfp4_quantizer_factory,
+from transformer_engine.pytorch.custom_recipes.quantizer_factories import (
+    current_scaling_factory,
+    float8_block_scaling_factory,
+    mxfp8_factory,
+    nvfp4_factory,
 )
 
 _LINEAR_MODULE_TYPES = ("linear", "grouped_linear")
@@ -215,10 +215,10 @@ def hybrid_fp8_current_qfactory(role):
     """FP8 current scaling in both hybrid directions for forward tensor roles."""
     if _is_linear_role(role) and role.tensor_type in _FORWARD_TENSOR_TYPES:
         return te.HybridQuantizer(
-            rowwise_quantizer=current_scaling_quantizer_factory(role),
-            columnwise_quantizer=current_scaling_quantizer_factory(role),
+            rowwise_quantizer=current_scaling_factory(role),
+            columnwise_quantizer=current_scaling_factory(role),
         )
-    return current_scaling_quantizer_factory(role)
+    return current_scaling_factory(role)
 
 
 def hybrid_fp8_current_e5m2_grads_qfactory(role):
@@ -237,20 +237,20 @@ def hybrid_mxfp8_qfactory(role):
     """MXFP8 in both hybrid directions for forward tensor roles."""
     if _is_linear_role(role) and role.tensor_type in _FORWARD_TENSOR_TYPES:
         return te.HybridQuantizer(
-            rowwise_quantizer=mxfp8_quantizer_factory(role),
-            columnwise_quantizer=mxfp8_quantizer_factory(role),
+            rowwise_quantizer=mxfp8_factory(role),
+            columnwise_quantizer=mxfp8_factory(role),
         )
-    return mxfp8_quantizer_factory(role)
+    return mxfp8_factory(role)
 
 
 def hybrid_float8_block_qfactory(role):
     """Float8 block scaling in both hybrid directions for forward roles."""
     if _is_linear_role(role) and role.tensor_type in _FORWARD_TENSOR_TYPES:
         return te.HybridQuantizer(
-            rowwise_quantizer=float8_block_scaling_quantizer_factory(role),
-            columnwise_quantizer=float8_block_scaling_quantizer_factory(role),
+            rowwise_quantizer=float8_block_scaling_factory(role),
+            columnwise_quantizer=float8_block_scaling_factory(role),
         )
-    return float8_block_scaling_quantizer_factory(role)
+    return float8_block_scaling_factory(role)
 
 
 def hybrid_block_fp8_e4m3_qfactory(role):
@@ -279,34 +279,34 @@ def hybrid_mixed_mxfp8_fp8_qfactory(role):
     """MXFP8 rowwise plus FP8 current-scaling columnwise."""
     if _is_linear_role(role) and role.tensor_type in _FORWARD_TENSOR_TYPES:
         return te.HybridQuantizer(
-            rowwise_quantizer=mxfp8_quantizer_factory(role),
-            columnwise_quantizer=current_scaling_quantizer_factory(role),
+            rowwise_quantizer=mxfp8_factory(role),
+            columnwise_quantizer=current_scaling_factory(role),
         )
-    return current_scaling_quantizer_factory(role)
+    return current_scaling_factory(role)
 
 
 def hybrid_fp8_current_identity_qfactory(role):
     """FP8 current-scaling forward plus Identity backward."""
     if _is_linear_role(role) and role.tensor_type in _FORWARD_TENSOR_TYPES:
         return te.HybridQuantizer(
-            rowwise_quantizer=current_scaling_quantizer_factory(role),
+            rowwise_quantizer=current_scaling_factory(role),
             columnwise_quantizer=te.IdentityQuantizer(),
         )
     if _is_linear_role(role) and role.tensor_type in _GRAD_TENSOR_TYPES:
         return te.IdentityQuantizer()
-    return current_scaling_quantizer_factory(role)
+    return current_scaling_factory(role)
 
 
 def hybrid_mxfp8_identity_qfactory(role):
     """MXFP8 forward plus Identity backward."""
     if _is_linear_role(role) and role.tensor_type in _FORWARD_TENSOR_TYPES:
         return te.HybridQuantizer(
-            rowwise_quantizer=mxfp8_quantizer_factory(role),
+            rowwise_quantizer=mxfp8_factory(role),
             columnwise_quantizer=te.IdentityQuantizer(),
         )
     if _is_linear_role(role) and role.tensor_type in _GRAD_TENSOR_TYPES:
         return te.IdentityQuantizer()
-    return mxfp8_quantizer_factory(role)
+    return mxfp8_factory(role)
 
 
 def identity_qfactory(role):  # pylint: disable=unused-argument
@@ -318,19 +318,19 @@ def hybrid_nvfp4_qfactory(role):
     """NVFP4 in both hybrid directions for forward tensor roles."""
     if _is_linear_role(role) and role.tensor_type in _FORWARD_TENSOR_TYPES:
         return te.HybridQuantizer(
-            rowwise_quantizer=nvfp4_quantizer_factory(role),
-            columnwise_quantizer=nvfp4_quantizer_factory(role),
+            rowwise_quantizer=nvfp4_factory(role),
+            columnwise_quantizer=nvfp4_factory(role),
         )
-    return nvfp4_quantizer_factory(role)
+    return nvfp4_factory(role)
 
 
 def hybrid_tp_mxfp8_nvfp4_qfactory(role):
     """TP/SP MXFP8 rowwise plus NVFP4 columnwise, including boundary roles."""
     if _is_linear_role(role) and role.tensor_type in _GRAD_TENSOR_TYPES:
-        return nvfp4_quantizer_factory(role)
+        return nvfp4_factory(role)
     return te.HybridQuantizer(
-        rowwise_quantizer=mxfp8_quantizer_factory(role),
-        columnwise_quantizer=nvfp4_quantizer_factory(role),
+        rowwise_quantizer=mxfp8_factory(role),
+        columnwise_quantizer=nvfp4_factory(role),
     )
 
 
@@ -351,8 +351,8 @@ def hybrid_mxfp8_nvfp4_qfactory(role):
     if _is_linear_role(role) and role.tensor_type in _FORWARD_TENSOR_TYPES:
         return te.HybridQuantizer(
             rowwise_quantizer=_make_mxfp8(),
-            columnwise_quantizer=nvfp4_quantizer_factory(role),
+            columnwise_quantizer=nvfp4_factory(role),
         )
     if _is_linear_role(role) and role.tensor_type in _GRAD_TENSOR_TYPES:
-        return nvfp4_quantizer_factory(role)
+        return nvfp4_factory(role)
     return _make_mxfp8()

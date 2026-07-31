@@ -25,7 +25,7 @@ from ..tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
 from ..tensor.storage.nvfp4_tensor_storage import NVFP4TensorStorage
 from ..tensor.utils import is_custom
 from ..custom_recipes.gemm import custom_gemm
-from ...debug.pytorch.debug_quantization import DebugQuantizer
+from ...debug.pytorch.debug_quantization import DebugQuantizedTensor, DebugQuantizer
 
 __all__ = [
     "general_gemm",
@@ -132,6 +132,11 @@ def _unwrap_tensor(
     if not isinstance(tensor, QuantizedTensorStorage):
         return tensor
 
+    # Select the requested representation from a debug wrapper, then process
+    # the wrapped tensor normally (it may itself be hybrid or TE-native).
+    if isinstance(tensor, DebugQuantizedTensor):
+        return _unwrap_tensor(tensor.get_tensor(usage == "columnwise"), usage)
+
     # Select the direction of a hybrid tensor, then process its sub-storage.
     if isinstance(tensor, HybridQuantizedTensorStorage):
         sub_storage = (
@@ -199,6 +204,11 @@ def general_gemm(
     transa = layout[0] == "T"
     transb = layout[1] == "T"
 
+    debug_quantizer = None
+    if isinstance(quantization_params, DebugQuantizer):
+        debug_quantizer = quantization_params
+        quantization_params = quantization_params.parent_quantizer
+
     A = _unwrap_tensor(A, "rowwise" if transa else "columnwise")
     B = _unwrap_tensor(B, "columnwise" if transb else "rowwise")
 
@@ -239,13 +249,6 @@ def general_gemm(
             use_split_accumulator,
             grad,
         )
-
-    debug_quantizer = None
-    if isinstance(quantization_params, DebugQuantizer):
-        debug_quantizer = quantization_params
-        quantization_params = quantization_params.parent_quantizer
-        A = A.get_tensor(not transa)
-        B = B.get_tensor(transb)
 
     _validate_native_gemm_output_quantizer(quantization_params)
 

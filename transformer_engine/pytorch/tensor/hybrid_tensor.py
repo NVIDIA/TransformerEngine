@@ -67,7 +67,7 @@ class HybridQuantizer(Quantizer):
     specialization. For example, a factory can return a ``HybridQuantizer`` only
     for ``role.tensor_type == "weight"`` and use regular quantizers for inputs
     and gradients. See
-    ``custom_recipes.quantization_factory_zoo.nvfp4_1d_double_quantized_weight_quantizer_factory``
+    ``custom_recipes.quantizer_factory_zoo.nvfp4_1d_weight_factory``
     for a weight-only double-quantization example.
 
     """

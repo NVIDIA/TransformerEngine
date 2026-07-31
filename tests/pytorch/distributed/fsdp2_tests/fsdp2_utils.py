@@ -4,6 +4,15 @@
 
 """Shared utility functions for FSDP2 distributed tests."""
 
+import sys
+from pathlib import Path
+
+# FSDP2 files are collected directly by subprocess pytest invocations, which
+# put this directory (rather than tests/pytorch) on sys.path.
+_TEST_ROOT = str(Path(__file__).resolve().parents[2])
+if _TEST_ROOT not in sys.path:
+    sys.path.append(_TEST_ROOT)
+
 import transformer_engine.common.recipe
 from transformer_engine.pytorch import QuantizedTensor
 
@@ -40,7 +49,7 @@ def get_hybrid_recipe_from_string(recipe):
     """Build a CustomRecipe wrapping a module-level (picklable) hybrid qfactory.
 
     Each hybrid qfactory composes one or two role-aware base factories from
-    ``quantization_factory_base`` per direction; per-role behavior is delegated
+    ``quantizer_factories`` per direction; per-role behavior is delegated
     to the base factory and the hybrid layer only decides the direction pairing.
 
     Supported values:

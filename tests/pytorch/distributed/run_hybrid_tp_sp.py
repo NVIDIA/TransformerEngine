@@ -10,6 +10,14 @@ import argparse
 import datetime
 import os
 import sys
+from pathlib import Path
+
+# This file is launched directly with torchrun, so Python only adds the
+# distributed test directory to sys.path. Add tests/pytorch for the shared
+# hybrid recipe helpers used by both local and distributed tests.
+_TEST_ROOT = str(Path(__file__).resolve().parent.parent)
+if _TEST_ROOT not in sys.path:
+    sys.path.append(_TEST_ROOT)
 
 import torch
 import torch.distributed as dist
