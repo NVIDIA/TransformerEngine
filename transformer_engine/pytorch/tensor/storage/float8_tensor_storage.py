@@ -5,7 +5,6 @@
 """Mixin class holding data specific for Float8Tensor"""
 
 from __future__ import annotations
-import math
 from typing import Any, Dict, Optional, Tuple, Union
 import torch
 
@@ -191,15 +190,20 @@ class Float8TensorStorage(QuantizedTensorStorage):
             dtype = self._dtype
         return _FromFloat8Func.forward(None, self, dtype)
 
-    def size(self, dim: Optional[int] = None) -> Union[torch.Size, int]:
+    def size(self, *args, **kwargs):
         # pylint: disable=missing-function-docstring
         if self._data is not None:
-            return self._data.size(dim)
-        transpose_size = self._transpose.size()
-        size = torch.Size([transpose_size[-1], math.prod(transpose_size[:-1])])
-        if dim is None:
-            return size
-        return size[dim]
+            return self._data.size(*args, **kwargs)
+        # The transpose is stored as [last, *leading], so a dim argument cannot
+        # be forwarded to it: rebuild the logical shape first, then index into
+        # it. This matches the shape property on Float8Tensor.
+        dims = self._transpose.shape
+        if len(dims) == 2:
+            shape = torch.Size((dims[1], dims[0]))
+        else:
+            shape = torch.Size(tuple(dims[1:]) + (dims[0],))
+        dim = args[0] if args else kwargs.get("dim")
+        return shape if dim is None else shape[dim]
 
     @property
     def device(self):

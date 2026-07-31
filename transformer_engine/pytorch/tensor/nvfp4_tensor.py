@@ -677,7 +677,9 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
         # View op
         if func == aten.view.default:
             if len(args) != 2:
-                raise RuntimeError("Unexpected args for view op (expected 2 args, got {len(args)})")
+                raise RuntimeError(
+                    f"Unexpected args for view op (expected 2 args, got {len(args)})"
+                )
             tensor = args[0]
             shape = args[1]
             if shape == list(tensor.size()):

@@ -12,10 +12,6 @@ if (CMAKE_BUILD_TYPE STREQUAL "Debug")
   set(CMAKE_CUDA_FLAGS_DEBUG "${CMAKE_CUDA_FLAGS_DEBUG} -g -G")
 endif()
 
-# Hide non-necessary symbols in shared object.
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/libtransformer_engine.version")
-set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/libtransformer_engine.version")
-
 # Transformer Engine library
 project(transformer_engine LANGUAGES CUDA CXX)
 
@@ -103,17 +99,20 @@ set(CUTLASS_TOOLS_INCLUDE_DIR
 # Python
 find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
 
-function(find_nccl_version OUT_VERSION OUT_INCLUDE_DIR)
-  find_path(_nvte_nccl_include_dir
+find_path(NCCL_INCLUDE_DIR
             NAMES nccl.h
+          HINTS "${Python_SITEARCH}/nvidia/nccl"
+                "/opt/nvidia/nccl"
+                "/usr/local/nccl"
             PATH_SUFFIXES include
             REQUIRED)
 
-  file(STRINGS "${_nvte_nccl_include_dir}/nccl.h" _nvte_nccl_major_line
+function(get_nccl_version OUT_VERSION INCLUDE_DIR)
+  file(STRINGS "${INCLUDE_DIR}/nccl.h" _nvte_nccl_major_line
        REGEX "^#define NCCL_MAJOR[ \t]+[0-9]+$")
-  file(STRINGS "${_nvte_nccl_include_dir}/nccl.h" _nvte_nccl_minor_line
+  file(STRINGS "${INCLUDE_DIR}/nccl.h" _nvte_nccl_minor_line
        REGEX "^#define NCCL_MINOR[ \t]+[0-9]+$")
-  file(STRINGS "${_nvte_nccl_include_dir}/nccl.h" _nvte_nccl_patch_line
+  file(STRINGS "${INCLUDE_DIR}/nccl.h" _nvte_nccl_patch_line
        REGEX "^#define NCCL_PATCH[ \t]+[0-9]+$")
 
   string(REGEX REPLACE "^#define NCCL_MAJOR[ \t]+([0-9]+)$" "\\1"
@@ -127,14 +126,15 @@ function(find_nccl_version OUT_VERSION OUT_INCLUDE_DIR)
       OR "${_nvte_nccl_minor}" STREQUAL ""
       OR "${_nvte_nccl_patch}" STREQUAL "")
     message(FATAL_ERROR
-            "Failed to parse NCCL version from ${_nvte_nccl_include_dir}/nccl.h")
+            "Failed to parse NCCL version from ${INCLUDE_DIR}/nccl.h")
   endif()
 
   set(${OUT_VERSION}
       "${_nvte_nccl_major}.${_nvte_nccl_minor}.${_nvte_nccl_patch}"
       PARENT_SCOPE)
-  set(${OUT_INCLUDE_DIR} "${_nvte_nccl_include_dir}" PARENT_SCOPE)
 endfunction()
+
+get_nccl_version(NCCL_VERSION "${NCCL_INCLUDE_DIR}")
 
 function(find_cublasmp_version OUT_VERSION OUT_INCLUDE_DIR SEARCH_DIR)
   find_path(_nvte_cublasmp_include_dir
@@ -329,6 +329,14 @@ foreach(cuda_source IN LISTS transformer_engine_cuda_arch_specific_sources)
 endforeach()
 
 add_library(transformer_engine SHARED ${transformer_engine_SOURCES})
+
+# This is TE-specific and should not apply to all targets
+target_link_options(
+  transformer_engine
+  PRIVATE
+  "LINKER:--version-script=${CMAKE_CURRENT_SOURCE_DIR}/libtransformer_engine.version"
+)
+
 # Disable CMake's automatic architecture flag injection.
 # All architectures are handled explicitly via per-source COMPILE_OPTIONS
 # using NVTE_STANDARD_ARCHS, NVTE_GENERIC_ARCHS, and NVTE_SPECIFIC_ARCHS above.
@@ -363,6 +371,7 @@ target_link_libraries(transformer_engine PUBLIC
 
 target_include_directories(transformer_engine PRIVATE
                            ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
+target_include_directories(transformer_engine PRIVATE ${NCCL_INCLUDE_DIR})
 target_include_directories(transformer_engine SYSTEM PRIVATE
                            ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}/cccl)
 target_include_directories(transformer_engine PRIVATE "${CUDNN_FRONTEND_INCLUDE_DIR}")
@@ -391,7 +400,6 @@ if (NVTE_WITH_CUBLASMP)
 
     target_compile_definitions(transformer_engine PRIVATE NVTE_WITH_CUBLASMP)
     target_include_directories(transformer_engine PRIVATE ${CUBLASMP_DIR}/include)
-    find_nccl_version(NCCL_VERSION NCCL_INCLUDE_DIR)
     find_cublasmp_version(CUBLASMP_VERSION CUBLASMP_INCLUDE_DIR ${CUBLASMP_DIR})
     find_library(CUBLASMP_LIB
                  NAMES cublasmp libcublasmp.so libcublasmp.so.0
@@ -470,15 +478,7 @@ find_file(NCCL_EP_LIB
     NO_DEFAULT_PATH
     REQUIRED)
 
-# -- NCCL core: nccl.h + libnccl.so -----------------------------------------
-# setup.py passes -DNCCL_INCLUDE_DIR; standalone CMake falls back to probing
-# well-known NCCL install prefixes.
-find_path(NCCL_INCLUDE_DIR nccl.h
-    HINTS /opt/nvidia/nccl/include /usr/local/nccl/include)
-if(NOT NCCL_INCLUDE_DIR)
-  message(FATAL_ERROR
-    "nccl.h not found. Pass -DNCCL_INCLUDE_DIR=<prefix>/include.")
-endif()
+# -- NCCL core library -------------------------------------------------------
 if(NOT NCCL_LIB)
   find_library(NCCL_LIB
       NAMES nccl libnccl
@@ -487,8 +487,7 @@ if(NOT NCCL_LIB)
 endif()
 
 target_include_directories(transformer_engine PRIVATE
-    ${NCCL_EP_INCLUDE_DIR}
-    ${NCCL_INCLUDE_DIR})
+    ${NCCL_EP_INCLUDE_DIR})
 
 # libnccl.so direct symbols (ncclGetVersion etc.) come from libnccl_ep.a's
 # DT_NEEDED chain plus this TU's own references. CUDA::cuda_driver must follow
