@@ -844,11 +844,6 @@ def _ffn_bwd_global(
         wi_for_dgrad = _weights_in_dispatch_group_order(wi)
         wo_for_dgrad = _weights_in_dispatch_group_order(wo)
 
-    # cuBLAS grouped_gemm skips size_g == 0 groups without zero-filling
-    # the output slice; mask 0-token-expert wgrads to zero so the
-    # optimizer never sees uninit memory.
-    wgrad_group_active = (group_sizes > 0)[:, None, None]
-
     # wo bwd
     casted_d_eo = tex.grouped_quantize(
         d_eo_2d,
@@ -876,7 +871,6 @@ def _ffn_bwd_global(
         _casted_d_eo_rhs,
         contracting_dims=((0,), (0,)),
     )
-    d_wo = jnp.where(wgrad_group_active, d_wo, jnp.zeros_like(d_wo))
     d_wo = jax.lax.with_sharding_constraint(d_wo, grouped_weight_sharding)
     d_wo_bias = tex.grouped_dbias(d_eo_2d, group_sizes) if has_bias else None
     if has_bias:
@@ -884,20 +878,17 @@ def _ffn_bwd_global(
 
     act_fn = _convert_to_activation_function(activation_type)
     if apply_topk_weights_early:
-        # intermediate' = intermediate * w * mask. Split the cotangent
-        # across both factors before the activation bwd consumes it. Padded
-        # recv slots may still be NaN in the saved activation residuals, so
-        # use zero-filled residuals on inactive rows before the activation VJP.
+        # intermediate' = intermediate * w. The subsequent dgrad and EP
+        # operations consume group_sizes, so they skip padded ragged rows.
         w_b = recv_w_flat[:, None].astype(d_intermediate.dtype)
-        active = (recv_w_flat != 0)[:, None]
-        gate_proj_for_bwd = jnp.where(active, gate_proj_out, jnp.zeros_like(gate_proj_out))
-        up_proj_for_bwd = jnp.where(active, up_proj_out, jnp.zeros_like(up_proj_out))
-        intermediate_unweighted = act_fn(gate_proj_for_bwd) * up_proj_for_bwd
+        gate_proj_for_bwd = gate_proj_out
+        up_proj_for_bwd = up_proj_out
+        intermediate_unweighted = act_fn(gate_proj_out) * up_proj_out
         d_recv_w_from_intermediate = jnp.sum(
             d_intermediate * intermediate_unweighted,
             axis=-1,
         ).astype(recv_w_flat.dtype)
-        d_intermediate = jnp.where(active, d_intermediate * w_b, jnp.zeros_like(d_intermediate))
+        d_intermediate = d_intermediate * w_b
     else:
         gate_proj_for_bwd = gate_proj_out
         up_proj_for_bwd = up_proj_out
@@ -942,7 +933,6 @@ def _ffn_bwd_global(
         casted_d_combined.get_tensor(usage=TensorUsage.RHS),
         contracting_dims=((0,), (0,)),
     )
-    d_wi_combined = jnp.where(wgrad_group_active, d_wi_combined, jnp.zeros_like(d_wi_combined))
     d_wi_combined = jax.lax.with_sharding_constraint(d_wi_combined, grouped_weight_sharding)
     if has_bias:
         d_wi_combined_bias = tex.grouped_dbias(d_combined, group_sizes)
@@ -1639,25 +1629,11 @@ def _moe_bwd_rule(
         d_expert_outputs = grad_pre_combine
         d_recv_w_from_combine = jnp.zeros_like(ctx.recv_topk_weights)
     else:
-        # Reverse the late-weighting multiply. Padded expert-major rows are
-        # part of the physical grouped-GEMM ranges, so write literal zero
-        # cotangents for inactive rows instead of relying on NaN * 0.
-        active_recv_rows_3d = active_recv_rows[..., None]
-        safe_recv_weights = jnp.where(
-            active_recv_rows,
-            ctx.recv_topk_weights,
-            jnp.zeros_like(ctx.recv_topk_weights),
-        )
-        safe_expert_outputs = jnp.where(
-            active_recv_rows_3d,
-            ctx.expert_outputs,
-            jnp.zeros_like(ctx.expert_outputs),
-        )
-        d_expert_outputs = (
-            grad_pre_combine
-            * safe_recv_weights[..., None].astype(grad_pre_combine.dtype)
-        )
-        d_recv_w_from_combine = (grad_pre_combine * safe_expert_outputs).sum(axis=-1)
+        # Reverse the late-weighting multiply. The subsequent dgrad and EP
+        # operations consume group_sizes, so they skip padded ragged rows.
+        w = ctx.recv_topk_weights[..., None].astype(grad_pre_combine.dtype)
+        d_expert_outputs = grad_pre_combine * w
+        d_recv_w_from_combine = (grad_pre_combine * ctx.expert_outputs).sum(axis=-1)
         d_recv_w_from_combine = d_recv_w_from_combine.astype(ctx.recv_topk_weights.dtype)
 
     if _debug_moe_numerics:
