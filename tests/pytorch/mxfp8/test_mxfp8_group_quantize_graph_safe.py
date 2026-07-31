@@ -487,9 +487,7 @@ def test_grouped_tensor_mxfp8_with_paged_stashing(
 
 def make_prequantized_wire_tensor(x: torch.Tensor, split_section_tensor: torch.Tensor):
     """Rowwise-only, unswizzled grouped tensor, as FP8 dispatch delivers it."""
-    wire_quantizer = MXFP8Quantizer(
-        fp8_dtype=te.DType.kFloat8E4M3, rowwise=True, columnwise=False
-    )
+    wire_quantizer = MXFP8Quantizer(fp8_dtype=te.DType.kFloat8E4M3, rowwise=True, columnwise=False)
     # Must stay unswizzled: the requantize path asserts on it and dequantize needs compact scales.
     wire_quantizer.optimize_for_gemm = False
     wire = fused_grouped_quantize(x, split_section_tensor, wire_quantizer)
@@ -575,9 +573,7 @@ def check_prequantized_requantize_versus_reference(
     # The returned dequantized tensor is what bias gradients are reduced from. Compare only the
     # live rows: both this and the reference allocate M rows but write only the covered ones, and
     # their tails are separate uninitialized allocations.
-    torch.testing.assert_close(
-        dequantized[:valid_rows, :], dequantized_ref, atol=0.0, rtol=0.0
-    )
+    torch.testing.assert_close(dequantized[:valid_rows, :], dequantized_ref, atol=0.0, rtol=0.0)
 
     # The rowwise DATA must pass through untouched; only its scales are re-laid-out.
     torch.testing.assert_close(wire.rowwise_data, rowwise_data_before, atol=0.0, rtol=0.0)
