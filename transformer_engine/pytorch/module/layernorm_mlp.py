@@ -2055,9 +2055,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         self.symmetric_ar_type = symmetric_ar_type
         self.checkpoint = checkpoint
         self.buffer_quantized_scaling_factors = buffer_quantized_scaling_factors
-        self.quantized_scaling_factor_buffering_decay = (
-            quantized_scaling_factor_buffering_decay
-        )
+        self.quantized_scaling_factor_buffering_decay = quantized_scaling_factor_buffering_decay
 
         # GEMM-GELU fusion is currently only supported with split GEMM-AG overlap
         self.gemm_gelu_fusion = (

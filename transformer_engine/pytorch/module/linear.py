@@ -496,14 +496,10 @@ def _linear_forward_impl(
     # Capture scaling metadata while it is still available.
     if args.scale_buffers is not None:
         scale_updates = {}
-        input_scale_buffer = _get_scale_buffer_info(
-            "input", inputmat_total, input_quantizer
-        )
+        input_scale_buffer = _get_scale_buffer_info("input", inputmat_total, input_quantizer)
         if input_scale_buffer is not None:
             scale_updates[input_scale_buffer[0]] = input_scale_buffer[1]
-        weight_scale_buffer = _get_scale_buffer_info(
-            "weight", weightmat, weight_quantizer
-        )
+        weight_scale_buffer = _get_scale_buffer_info("weight", weightmat, weight_quantizer)
         if weight_scale_buffer is not None:
             scale_updates[weight_scale_buffer[0]] = weight_scale_buffer[1]
         _update_scale_buffers(

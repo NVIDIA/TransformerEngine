@@ -385,14 +385,10 @@ class _LayerNormLinear(torch.autograd.Function):
 
         if scale_buffers is not None:
             scale_updates = {}
-            input_scale_buffer = _get_scale_buffer_info(
-                "input", ln_out_total, input_quantizer
-            )
+            input_scale_buffer = _get_scale_buffer_info("input", ln_out_total, input_quantizer)
             if input_scale_buffer is not None:
                 scale_updates[input_scale_buffer[0]] = input_scale_buffer[1]
-            weight_scale_buffer = _get_scale_buffer_info(
-                "weight", weightmat, weight_quantizer
-            )
+            weight_scale_buffer = _get_scale_buffer_info("weight", weightmat, weight_quantizer)
             if weight_scale_buffer is not None:
                 scale_updates[weight_scale_buffer[0]] = weight_scale_buffer[1]
             _update_scale_buffers(
@@ -1630,9 +1626,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
                     param.skip_backward_post_hook = True
 
         self.buffer_quantized_scaling_factors = buffer_quantized_scaling_factors
-        self.quantized_scaling_factor_buffering_decay = (
-            quantized_scaling_factor_buffering_decay
-        )
+        self.quantized_scaling_factor_buffering_decay = quantized_scaling_factor_buffering_decay
 
     def set_meta_tensor(self, fwd: bool, recipe: Recipe) -> None:
         """Init scales and amaxes for fwd | bwd."""
