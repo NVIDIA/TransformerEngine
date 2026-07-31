@@ -63,14 +63,25 @@ std::vector<InputType> create_transpose(const InputType* const input, const size
 }
 
 template <typename ScaleType>
-constexpr float nvfp4_scale_max(const int e4m3_max = 448) {
+constexpr float nvfp4_encode_scale_max(const int e4m3_max = 448) {
   static_assert(std::is_same_v<ScaleType, fp8e4m3>
 #if CUDA_VERSION >= 13040
                 || std::is_same_v<ScaleType, fp8ue5m3>
 #endif
                 , "Unsupported NVFP4 scale type.");
+  NVTE_CHECK(e4m3_max == 448 || e4m3_max == 256, "Unsupported NVFP4 E4M3 max.");
   if constexpr (std::is_same_v<ScaleType, fp8e4m3>) {
     return static_cast<float>(e4m3_max);
+  }
+#if CUDA_VERSION >= 13040
+  return e4m3_max == 256 ? 65536.0f : 114688.0f;
+#endif
+}
+
+template <typename ScaleType>
+constexpr float nvfp4_scale_storage_max() {
+  if constexpr (std::is_same_v<ScaleType, fp8e4m3>) {
+    return 448.0f;
   }
 #if CUDA_VERSION >= 13040
   return 114688.0f;
@@ -81,10 +92,7 @@ constexpr float nvfp4_scale_max(const int e4m3_max = 448) {
 template <typename ScaleType>
 float compute_global_encode_scaling_factor_FP4(const float global_amax, const bool use_fast_math,
                                                const int e4m3_max = 448) {
-  if constexpr (std::is_same_v<ScaleType, fp8e4m3>) {
-    NVTE_CHECK(e4m3_max == 448 || e4m3_max == 256, "Unsupported NVFP4 E4M3 max.");
-  }
-  const float fp8_max = nvfp4_scale_max<ScaleType>(e4m3_max);
+  const float fp8_max = nvfp4_encode_scale_max<ScaleType>(e4m3_max);
   constexpr float fp4_max = 6.0f;       // 6.0f;
   float global_encode_scale = fp8_max * fp4_max / global_amax;
   // If scale is infinity, return the max normalized value
@@ -136,7 +144,7 @@ template <typename ScaleType>
 NVFP4FourOverSixQuantization<ScaleType> compute_4over6_quantization_scales(
     const float block_amax, const float global_encode_scale, const int e4m3_max) {
   constexpr float fp4_max = 6.0f;
-  const float fp8_max = nvfp4_scale_max<ScaleType>(e4m3_max);
+  const float fp8_max = nvfp4_scale_storage_max<ScaleType>();
   constexpr float scale_expansion_factor = 1.5f;
   const float base_sf_high_precision = block_amax / fp4_max * global_encode_scale;
   const float sf_high_precision_map4 =
@@ -895,7 +903,8 @@ void performTest(float (*OP)(const float),
     fillCase<fp32>(&input, InputsFillCase::uniform);
 
     if (use_4over6 && row_scaled_nvfp4) {
-        const float target_row_amax = nvfp4_scale_max<ScaleType>(e4m3_max) * 6.0f * 8.0f;
+        const float target_row_amax =
+            nvfp4_encode_scale_max<ScaleType>(e4m3_max) * 6.0f * 8.0f;
         auto *input_vals = input.rowwise_cpu_dptr<InputType>();
         for (size_t row = 0; row < rows; ++row) {
             float row_amax = 0.0f;
@@ -946,7 +955,8 @@ void performTest(float (*OP)(const float),
         output.set_row_scaled_nvfp4(row_scaled_nvfp4);
     } else {
         // Golden value of amax chosen to make the 2nd-stage scaling mantissa zero and avoid rounding issues
-        ref_amax.assign(1, nvfp4_scale_max<ScaleType>(e4m3_max) * 6.0f * 8.0f);
+        ref_amax.assign(
+            1, nvfp4_encode_scale_max<ScaleType>(e4m3_max) * 6.0f * 8.0f);
 
         // Update tensor
         if (rowwise) {
@@ -1588,6 +1598,16 @@ INSTANTIATE_TEST_SUITE_P(
             ActivationType::Identity, {256, 256}, DType::kBFloat16, false,
             NVFP4ScalingMode::Block2D,
             NVFP4FourOverSixTestConfig{kNVTENVFP44Over6MinMSE, 448, false},
+            DType::kFloat8UE5M3},
+        FusedCastTransposeNVFP4TestSuite::ParamType{
+            ActivationType::Identity, {256, 256}, DType::kBFloat16, false,
+            NVFP4ScalingMode::Block1D,
+            NVFP4FourOverSixTestConfig{kNVTENVFP44Over6MinMAE, 256, false},
+            DType::kFloat8UE5M3},
+        FusedCastTransposeNVFP4TestSuite::ParamType{
+            ActivationType::Identity, {256, 256}, DType::kBFloat16, false,
+            NVFP4ScalingMode::Block2D,
+            NVFP4FourOverSixTestConfig{kNVTENVFP44Over6MinMSE, 256, false},
             DType::kFloat8UE5M3},
         FusedCastTransposeNVFP4TestSuite::ParamType{
             ActivationType::Identity, {256, 256}, DType::kFloat32, false,
