@@ -1241,6 +1241,18 @@ def get_attention_backend(
     #                            |                        | converts window_size to an 'arbitrary' mask
     if window_size is None:
         window_size = check_set_window_size(attn_mask_type, window_size)
+    if (
+        use_flash_attention_4
+        and (10, 0) <= device_compute_capability < (12, 0)
+        and head_dim_qk == head_dim_v == 256
+        and (window_size[0] != -1 or window_size[1] not in [-1, 0])
+    ):
+        logger.debug(
+            "Disabling FlashAttention 4 as SM100 head_dim=256 does not support "
+            "sliding-window/local attention yet. Found: window_size = %s.",
+            window_size,
+        )
+        use_flash_attention_4 = False
     if use_fused_attention and (window_size[0] != -1 or window_size[1] not in [-1, 0]):
         if (
             fp8
