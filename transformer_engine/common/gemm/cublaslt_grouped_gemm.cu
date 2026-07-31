@@ -1414,8 +1414,7 @@ __global__ void setup_grouped_gemm_kernel(
       a_amax_val = a_amax[idx];
     }
     if (nvfp4_computed_alpha != nullptr) {
-      constexpr float factor_inv =
-          1.0f / (kUnitGlobalScaleAmax * kUnitGlobalScaleAmax);
+      constexpr float factor_inv = 1.0f / (kUnitGlobalScaleAmax * kUnitGlobalScaleAmax);
       const float b_amax_val = b_amax == nullptr ? kUnitGlobalScaleAmax : b_amax[idx];
       nvfp4_computed_alpha[idx] = alpha_ptr[idx] * a_amax_val * b_amax_val * factor_inv;
       alpha_ptrs[idx] = &nvfp4_computed_alpha[idx];

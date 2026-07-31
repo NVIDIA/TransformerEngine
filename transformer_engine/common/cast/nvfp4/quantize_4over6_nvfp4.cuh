@@ -476,8 +476,7 @@ __device__ void quantize_stage_rowwise(const IType *tile, fp4e2m1x2 *output, nvf
       block_amax = reduce_group_max_16(group_amax);
     }
 
-    float global_amax =
-        transformer_engine::nvfp4::unit_global_scale_amax<E4M3_MAX, fp4e2m1>();
+    float global_amax = transformer_engine::nvfp4::unit_global_scale_amax<E4M3_MAX, fp4e2m1>();
     if (amax != nullptr) {
       global_amax = amax[0];
     }
@@ -534,9 +533,8 @@ __device__ void quantize_stage_colwise(const IType *tile, fp4e2m1x2 *output_t,
     }
 
     const float global_amax =
-        amax == nullptr
-            ? transformer_engine::nvfp4::unit_global_scale_amax<E4M3_MAX, fp4e2m1>()
-            : amax[0];
+        amax == nullptr ? transformer_engine::nvfp4::unit_global_scale_amax<E4M3_MAX, fp4e2m1>()
+                        : amax[0];
     const ScalePair scale_pair = compute_scale_pair<E4M3_MAX>(block_amax, global_amax);
     CandidatePair candidates = make_candidates<Cfg, E4M3_MAX>(x0, x1, scale_pair, global_amax);
 

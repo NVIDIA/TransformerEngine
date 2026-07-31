@@ -63,9 +63,7 @@ def test_grouped_disable_second_level_scale_matches_split_quantize(
 
     grouped = fused_grouped_quantize(x, split_section_tensor, quantizer)
     actual = grouped.split_into_quantized_tensors()
-    expected = tex.split_quantize(
-        x, split_sections, [quantizer.copy() for _ in split_sections]
-    )
+    expected = tex.split_quantize(x, split_sections, [quantizer.copy() for _ in split_sections])
 
     for actual_tensor, expected_tensor in zip(actual, expected):
         torch.testing.assert_close(

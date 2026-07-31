@@ -724,10 +724,9 @@ __global__ void __launch_bounds__(THREADS_NUM)
               scales_offset_Y_rowwise + stage * BUFF_DIM_Y + it * THREADS_Y_ROWWISE;
           const float S_enc_rowwise_block =
               scales_offset_Y < rows
-                  ? (amax_rowwise_ptr == nullptr
-                         ? 1.0f
-                         : compute_global_encode_scaling_factor_FP4(
-                               amax_rowwise_ptr[scales_offset_Y]))
+                  ? (amax_rowwise_ptr == nullptr ? 1.0f
+                                                 : compute_global_encode_scaling_factor_FP4(
+                                                       amax_rowwise_ptr[scales_offset_Y]))
                   : 1.0f;
           const float S_dec_rowwise_block = 1.0f / S_enc_rowwise_block;
           const nvfp4_scale_t S_dec_b_fp8 =

@@ -1876,8 +1876,7 @@ NVFP4Quantizer::NVFP4Quantizer(const py::handle& quantizer) : Quantizer(quantize
     NVTE_ERROR("Unsupported NVFP4 4over6 error mode: ", nvfp4_4over6_err_mode);
   }
   this->row_scaled_nvfp4 = quantizer.attr("row_scaled_nvfp4").cast<bool>();
-  this->disable_second_level_scale =
-      quantizer.attr("disable_second_level_scale").cast<bool>();
+  this->disable_second_level_scale = quantizer.attr("disable_second_level_scale").cast<bool>();
 
   // Get amax reduction group if needed for NVFP4 AG
   const bool with_amax_reduction = quantizer.attr("with_amax_reduction").cast<bool>();
@@ -2017,8 +2016,7 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(
   auto rowwise_scale_inv_py = py_cast(rowwise_scale_inv_tensor, rowwise_usage);
   auto columnwise_data_py = py_cast(columnwise_data_tensor, columnwise_usage);
   auto columnwise_scale_inv_py = py_cast(columnwise_scale_inv_tensor, columnwise_usage);
-  auto amax_rowwise_py =
-      py_cast(amax_rowwise, rowwise_usage && !disable_second_level_scale);
+  auto amax_rowwise_py = py_cast(amax_rowwise, rowwise_usage && !disable_second_level_scale);
   auto amax_columnwise_py =
       py_cast(amax_columnwise, columnwise_usage && !disable_second_level_scale);
 

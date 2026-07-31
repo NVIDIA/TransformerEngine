@@ -999,8 +999,7 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
   const bool nvfp4_use_4over6 =
       quantizer_cpp_list[0]->nvfp4_4over6_mode != kNVTENVFP44Over6Disabled;
   const int nvfp4_e4m3_max = quantizer_cpp_list[0]->nvfp4_e4m3_max;
-  const bool disable_second_level_scale =
-      quantizer_cpp_list[0]->disable_second_level_scale;
+  const bool disable_second_level_scale = quantizer_cpp_list[0]->disable_second_level_scale;
   const auto columnwise_usage = quantizer_cpp_list[0]->columnwise_usage;
   if (row_scaled_nvfp4) {
     NVTE_CHECK(rowwise_usage, "Row-scaled NVFP4 bulk allocation requires rowwise usage.");
@@ -1031,8 +1030,7 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
                "NVFP4 bulk allocation requires all quantizers in the group to share "
                "the same with_rht value (tensor 0=",
                group_with_rht, ", tensor ", i, "=", quantizer_cpp_list[i]->with_rht, ").");
-    NVTE_CHECK(quantizer_cpp_list[i]->disable_second_level_scale ==
-                   disable_second_level_scale,
+    NVTE_CHECK(quantizer_cpp_list[i]->disable_second_level_scale == disable_second_level_scale,
                "NVFP4 bulk allocation requires all quantizers in the group to share "
                "the same disable_second_level_scale value.");
   }
@@ -1185,13 +1183,12 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
         (columnwise_usage ? py::cast(columnwise_data_list[i]) : py::none());
     py::object columnwise_scale =
         (columnwise_usage ? py::cast(columnwise_scale_list[i]) : py::none());
-    py::object amax_rowwise =
-        (rowwise_usage && !disable_second_level_scale) ? py::cast(amax_rowwise_list[i])
-                                                       : py::none();
-    py::object amax_columnwise =
-        (columnwise_usage && !disable_second_level_scale)
-            ? py::cast(amax_columnwise_list[i])
-            : py::none();
+    py::object amax_rowwise = (rowwise_usage && !disable_second_level_scale)
+                                  ? py::cast(amax_rowwise_list[i])
+                                  : py::none();
+    py::object amax_columnwise = (columnwise_usage && !disable_second_level_scale)
+                                     ? py::cast(amax_columnwise_list[i])
+                                     : py::none();
 
     // Construct Python tensor.
     tensor_py_list.emplace_back(NVFP4TensorClass(

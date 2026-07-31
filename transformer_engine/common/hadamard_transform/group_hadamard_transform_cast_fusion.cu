@@ -471,8 +471,7 @@ __global__ static void group_rht_gemm_device(
       auto thr_r2g = tiled_r2g.get_slice(thread_idx);
 
       // NVFP4 non-E8 recipe constants and global scales
-      static constexpr float fp4_max =
-          transformer_engine::detail::TypeExtrema<fp4e2m1>::max;
+      static constexpr float fp4_max = transformer_engine::detail::TypeExtrema<fp4e2m1>::max;
       static constexpr float fp4_max_inv = 1.0f / fp4_max;
 
       // get global amax pointer
@@ -511,8 +510,7 @@ __global__ static void group_rht_gemm_device(
 
       constexpr float kUnitGlobalScaleAmax =
           transformer_engine::nvfp4::unit_global_scale_amax<fp8e4m3, fp4e2m1>();
-      float global_amax_val =
-          global_amax_ptr == nullptr ? kUnitGlobalScaleAmax : *global_amax_ptr;
+      float global_amax_val = global_amax_ptr == nullptr ? kUnitGlobalScaleAmax : *global_amax_ptr;
       float global_encode_scale = ComputeGlobalEncodeScaleFP4(global_amax_val);
 
       // Scaling factor for fast math path
@@ -533,8 +531,7 @@ __global__ static void group_rht_gemm_device(
           // TODO(zhongbo): the math operations are very expensive
           // since the kernel is persistent, we can have a cache for all the possible scaling factors
           if (tensor_id != new_tensor_id) {
-            global_amax_val =
-                global_amax_ptr == nullptr ? kUnitGlobalScaleAmax : *global_amax_ptr;
+            global_amax_val = global_amax_ptr == nullptr ? kUnitGlobalScaleAmax : *global_amax_ptr;
             global_encode_scale = ComputeGlobalEncodeScaleFP4(global_amax_val);
             global_encode_scale_multiplier = global_encode_scale * fp4_max_inv;
             global_decode_scale = 1.0f / global_encode_scale;

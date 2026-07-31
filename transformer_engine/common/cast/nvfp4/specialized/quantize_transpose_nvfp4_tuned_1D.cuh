@@ -232,10 +232,10 @@ __device__ __forceinline__ void colwise_scaling(
     float S_enc_colwise_block = S_enc_colwise;
     if constexpr (ROW_SCALED_NVFP4) {
       const size_t col_idx = col_offset + stage_X * TILE_DIM_X + thread_offset_X_colwise + w;
-      S_enc_colwise_block = col_idx < cols && amax_colwise_ptr != nullptr
-                                ? core::compute_global_encode_scaling_factor_FP4(
-                                      amax_colwise_ptr[col_idx])
-                                : 1.0f;
+      S_enc_colwise_block =
+          col_idx < cols && amax_colwise_ptr != nullptr
+              ? core::compute_global_encode_scaling_factor_FP4(amax_colwise_ptr[col_idx])
+              : 1.0f;
     }
     const nvfp4_scale_t S_dec_b_fp8 =
         compute_decoding_scaling_factor(block_amax[w], S_enc_colwise_block);
