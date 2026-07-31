@@ -5,14 +5,14 @@
 """Mixin class holding data specific for MXFP8Tensor"""
 
 from __future__ import annotations
-from typing import Optional, Dict, Any, Tuple, Union
+from typing import Annotated, Optional, Dict, Any, Tuple, Union
 from collections.abc import Iterable
 import math
 import torch
 
 import transformer_engine_torch as tex
 
-from ...quantized_tensor import QuantizedTensorStorage, Quantizer
+from ...quantized_tensor import Buffer, QuantizedTensorStorage, Quantizer
 from .._quantization_helpers import safe_quantized_repr
 
 from ...constants import TE_DType as torch_to_transformer_engine_dtype, DType
@@ -66,14 +66,12 @@ class MXFP8TensorStorage(QuantizedTensorStorage):
 
     """
 
-    # Row-scaled FP8 data
-    _rowwise_data: Optional[torch.Tensor]
-    # Column-scaled FP8 data
-    _columnwise_data: Optional[torch.Tensor]
-    # Scaling factors for row-scaled FP8 data
-    _rowwise_scale_inv: torch.Tensor
-    # Scaling factors for column-scaled FP8 data
-    _columnwise_scale_inv: torch.Tensor
+    # Row-scaled FP8 data and its scaling factors
+    _rowwise_data: Annotated[Optional[torch.Tensor], Buffer("rowwise_data")]
+    _rowwise_scale_inv: Annotated[torch.Tensor, Buffer("rowwise_scale_inv")]
+    # Column-scaled FP8 data and its scaling factors
+    _columnwise_data: Annotated[Optional[torch.Tensor], Buffer("columnwise_data")]
+    _columnwise_scale_inv: Annotated[torch.Tensor, Buffer("columnwise_scale_inv")]
 
     # Builder class for casting to MXFP8
     _quantizer: Optional[Quantizer]
@@ -82,15 +80,6 @@ class MXFP8TensorStorage(QuantizedTensorStorage):
     # Whether scaling factors are in the swizzled format expected by
     # GEMM
     _with_gemm_swizzled_scales: bool
-
-    # (attribute_name, constructor_kwarg) for each tensor buffer; drives
-    # __tensor_flatten__ / __tensor_unflatten__ (see QuantizedTensorStorage).
-    _FLATTEN_TENSOR_BUFFERS = (
-        ("_rowwise_data", "rowwise_data"),
-        ("_rowwise_scale_inv", "rowwise_scale_inv"),
-        ("_columnwise_data", "columnwise_data"),
-        ("_columnwise_scale_inv", "columnwise_scale_inv"),
-    )
 
     def __new__(
         cls,

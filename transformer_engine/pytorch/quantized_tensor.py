@@ -5,7 +5,7 @@
 """Pure Python base classes for quantization."""
 
 from __future__ import annotations
-from typing import Optional, Tuple, Iterable, Any, Dict, Union
+from typing import NamedTuple, Optional, Tuple, Iterable, Any, Dict, Union, get_type_hints
 import abc
 import warnings
 import math
@@ -23,7 +23,6 @@ from transformer_engine.pytorch.tensor._quantization_helpers import (
     _stride_from_shape,
 )
 
-
 # Custom ops that should pass through __torch_dispatch__ without unwrapping
 # QuantizedTensor subclasses (e.g. Float8Tensor). Register ops here that
 # handle quantized tensors internally.
@@ -32,6 +31,27 @@ _quantized_tensor_passthrough_ops: set = set()
 
 #: Maps storage / wrapper class qualname -> class object, for ``__tensor_unflatten__``.
 _STORAGE_REGISTRY: Dict[str, type] = {}
+
+
+class Buffer(NamedTuple):
+    """Marks a storage field as a flat tensor buffer.
+
+    Annotate the field with it -- ``_scale_inv: Annotated[torch.Tensor,
+    Buffer("fp8_scale_inv")]`` -- and ``__init_subclass__`` collects the
+    declarations into ``_FLATTEN_TENSOR_BUFFERS``, in field order.
+    """
+
+    ctor_kwarg: str
+
+
+def _collect_buffer_fields(cls: type) -> Tuple[Tuple[str, str], ...]:
+    """Buffers a storage class declares, as ``(attribute, constructor kwarg)``."""
+    fields = []
+    for attr, hint in get_type_hints(cls, include_extras=True).items():
+        for meta in getattr(hint, "__metadata__", ()):
+            if isinstance(meta, Buffer):
+                fields.append((attr, meta.ctor_kwarg))
+    return tuple(fields)
 
 
 class QuantizedTensorStorage:
@@ -153,9 +173,8 @@ class QuantizedTensorStorage:
 
     # ----- PyTorch subclass flatten protocol (torch.compile / TensorProto) -----
 
-    # Subclasses declare their tensor buffers once, as ``(attribute_name,
-    # constructor_kwarg)`` pairs in flatten order; everything else returned by
-    # :meth:`get_metadata` is treated as non-tensor context.
+    # Collected from the subclasses' :class:`Buffer` field annotations; everything
+    # else returned by :meth:`get_metadata` is treated as non-tensor context.
     _FLATTEN_TENSOR_BUFFERS: Tuple[Tuple[str, str], ...] = ()
 
     def __init_subclass__(cls, **kwargs) -> None:
@@ -163,6 +182,7 @@ class QuantizedTensorStorage:
         # Register every storage / wrapper class so ``__tensor_unflatten__`` can
         # resolve the concrete class from its qualname inside an FX graph.
         _STORAGE_REGISTRY[cls.__qualname__] = cls
+        cls._FLATTEN_TENSOR_BUFFERS = _collect_buffer_fields(cls)
 
     def _flatten_nontensor_kwargs(self) -> Dict[str, Any]:
         """Non-tensor constructor kwargs (scalars, dtype, quantizer)."""

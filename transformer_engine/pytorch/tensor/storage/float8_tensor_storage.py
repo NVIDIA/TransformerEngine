@@ -5,12 +5,12 @@
 """Mixin class holding data specific for Float8Tensor"""
 
 from __future__ import annotations
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Annotated, Any, Dict, Optional, Tuple, Union
 import torch
 
 import transformer_engine_torch as tex
 
-from ...quantized_tensor import QuantizedTensorStorage, Quantizer
+from ...quantized_tensor import Buffer, QuantizedTensorStorage, Quantizer
 from .._quantization_helpers import safe_quantized_repr
 
 from ...constants import TE_DType as torch_to_transformer_engine_dtype, TE_DType_To_Torch, DType
@@ -66,22 +66,15 @@ class Float8TensorStorage(QuantizedTensorStorage):
 
     """
 
-    _data: Optional[torch.Tensor]
+    _data: Annotated[Optional[torch.Tensor], Buffer("data")]
     _quantizer: Optional[Quantizer]
     _fp8_dtype: DType
-    _scale_inv: torch.Tensor
 
     # FP8 transpose cache
-    _transpose: Optional[torch.Tensor]
+    _transpose: Annotated[Optional[torch.Tensor], Buffer("data_transpose")]
     _transpose_invalid: bool
 
-    # (attribute_name, constructor_kwarg) for each tensor buffer; drives
-    # __tensor_flatten__ / __tensor_unflatten__ (see QuantizedTensorStorage).
-    _FLATTEN_TENSOR_BUFFERS = (
-        ("_data", "data"),
-        ("_transpose", "data_transpose"),
-        ("_scale_inv", "fp8_scale_inv"),
-    )
+    _scale_inv: Annotated[torch.Tensor, Buffer("fp8_scale_inv")]
 
     def __new__(
         cls,

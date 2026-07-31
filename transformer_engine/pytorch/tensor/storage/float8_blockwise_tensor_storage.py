@@ -7,12 +7,12 @@
 from __future__ import annotations
 from collections.abc import Iterable
 import math
-from typing import Optional, Dict, Any, Tuple, Union
+from typing import Annotated, Optional, Dict, Any, Tuple, Union
 import torch
 
 import transformer_engine_torch as tex
 
-from ...quantized_tensor import QuantizedTensorStorage, Quantizer
+from ...quantized_tensor import Buffer, QuantizedTensorStorage, Quantizer
 from .._quantization_helpers import safe_quantized_repr
 
 from ...constants import TE_DType_To_Torch, DType
@@ -119,22 +119,13 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
     be instantiated directly for performance-critical internal usage.
     """
 
-    _rowwise_data: Optional[torch.Tensor]
-    _columnwise_data: Optional[torch.Tensor]
+    _rowwise_data: Annotated[Optional[torch.Tensor], Buffer("rowwise_data")]
+    _rowwise_scale_inv: Annotated[Optional[torch.Tensor], Buffer("rowwise_scale_inv")]
+    _columnwise_data: Annotated[Optional[torch.Tensor], Buffer("columnwise_data")]
+    _columnwise_scale_inv: Annotated[Optional[torch.Tensor], Buffer("columnwise_scale_inv")]
     _quantizer: Quantizer
     _fp8_dtype: DType
-    _rowwise_scale_inv: Optional[torch.Tensor]
-    _columnwise_scale_inv: Optional[torch.Tensor]
     _is_2D_scaled: bool
-
-    # (attribute_name, constructor_kwarg) for each tensor buffer; drives
-    # __tensor_flatten__ / __tensor_unflatten__ (see QuantizedTensorStorage).
-    _FLATTEN_TENSOR_BUFFERS = (
-        ("_rowwise_data", "rowwise_data"),
-        ("_rowwise_scale_inv", "rowwise_scale_inv"),
-        ("_columnwise_data", "columnwise_data"),
-        ("_columnwise_scale_inv", "columnwise_scale_inv"),
-    )
 
     def __new__(
         cls,
