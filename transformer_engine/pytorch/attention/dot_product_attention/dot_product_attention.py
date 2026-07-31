@@ -132,6 +132,8 @@ def _infer_custom_dpa_local_recipes(
             reduce_amax=ds_recipe.reduce_amax,
             fp8_dpa=fp8_recipe.fp8_dpa,
             fp8_mha=fp8_recipe.fp8_mha,
+            amax_compute_algo_key=ds_recipe.amax_compute_algo_key,
+            scaling_factor_compute_algo_key=ds_recipe.scaling_factor_compute_algo_key,
         )
 
     if isinstance(qkv_quantizer, Float8CurrentScalingQuantizer):

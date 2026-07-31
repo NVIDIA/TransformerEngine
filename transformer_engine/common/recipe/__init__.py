@@ -152,7 +152,9 @@ def quantizer_policy(*, key: Hashable) -> Callable:
 
     The key, rather than Python callable identity, represents the factory's behavior in
     :class:`CustomRecipe` semantic configuration. Change the key whenever the factory's
-    quantizer-selection behavior changes.
+    quantizer-selection behavior changes. A recommended convention is
+    ``(policy_name, behavior_revision)``, where ``policy_name`` is a short, stable name and
+    ``behavior_revision`` is incremented only when the factory's behavior changes.
     """
     policy_key = _validate_policy_key(key, source="quantizer_policy key")
 

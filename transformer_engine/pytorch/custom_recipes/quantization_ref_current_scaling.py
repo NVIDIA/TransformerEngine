@@ -10,11 +10,13 @@ from typing import Optional, Tuple, Iterable
 
 import torch
 
+from transformer_engine.common.recipe import quantizer_policy
 from transformer_engine.pytorch.custom_recipes import quantization
 from transformer_engine.pytorch.custom_recipes import utils
 from transformer_engine.pytorch.quantized_tensor import QuantizedTensorStorage, Quantizer
 
 
+@quantizer_policy(key=("current_scaling_reference", 1))
 def current_scaling_ref_quantizer_factory(role):
     """Factory function for current scaling reference quantizer.
 

@@ -12,7 +12,7 @@ import os
 from dataclasses import dataclass, field
 from contextlib import contextmanager
 from collections import deque
-from typing import Callable, List, Optional, Dict, Any, Tuple, Union
+from typing import Callable, Hashable, List, Optional, Dict, Any, Tuple, Union
 
 import torch
 import transformer_engine_torch as tex
@@ -396,6 +396,7 @@ class FP8GlobalState:
     fp8_enabled: bool = False
     fp8_calibration: bool = False
     fp8_recipe: Optional[Recipe] = None
+    quantizer_config: Optional[Hashable] = None
     fp8_distributed_group: Optional[dist_group_type] = None
     fp8_parameters: bool = False
     high_precision_init_val: bool = False
@@ -611,6 +612,23 @@ class FP8GlobalStateManager:
         return get_default_fp8_recipe()
 
     @classmethod
+    def activate_recipe(cls, recipe: Recipe) -> Hashable:
+        """Make a recipe and its semantic quantizer configuration active together."""
+        quantizer_config = recipe.quantizer_config()
+        qstate = cls.quantization_state
+        qstate.fp8_recipe = recipe
+        qstate.quantizer_config = quantizer_config
+        return quantizer_config
+
+    @classmethod
+    def get_quantizer_config(cls) -> Hashable:
+        """Return the active recipe's cached semantic quantizer configuration."""
+        quantizer_config = cls.quantization_state.quantizer_config
+        if quantizer_config is None:
+            return cls.activate_recipe(cls.get_fp8_recipe())
+        return quantizer_config
+
+    @classmethod
     def get_fp8_group(cls) -> Union[dist_group_type, None]:
         """Return the fp8 group for scale/amax comm"""
         return cls.quantization_state.fp8_distributed_group
@@ -623,6 +641,7 @@ class FP8GlobalStateManager:
             qstate.fp8_enabled,
             qstate.fp8_calibration,
             qstate.fp8_recipe,
+            qstate.quantizer_config,
             qstate.fp8_distributed_group,
             qstate.is_first_fp8_module,
             qstate.fp8_graph_capturing,
@@ -636,6 +655,7 @@ class FP8GlobalStateManager:
             qstate.fp8_enabled,
             qstate.fp8_calibration,
             qstate.fp8_recipe,
+            qstate.quantizer_config,
             qstate.fp8_distributed_group,
             qstate.is_first_fp8_module,
             qstate.fp8_graph_capturing,
@@ -747,7 +767,7 @@ class FP8GlobalStateManager:
 
         qstate.fp8_enabled = enabled
         qstate.fp8_calibration = calibrating
-        qstate.fp8_recipe = fp8_recipe
+        cls.activate_recipe(fp8_recipe)
         qstate.fp8_distributed_group = fp8_group
         qstate.fp8_graph_capturing = _graph
 
@@ -926,15 +946,17 @@ def quantized_model_init(
     qstate = FP8GlobalStateManager.quantization_state
     _fp8_parameters = qstate.fp8_parameters
     _fp8_recipe = qstate.fp8_recipe
+    _quantizer_config = qstate.quantizer_config
     _high_precision_init_val = qstate.high_precision_init_val
     qstate.fp8_parameters = enabled
-    qstate.fp8_recipe = get_default_fp8_recipe() if recipe is None else recipe
+    FP8GlobalStateManager.activate_recipe(get_default_fp8_recipe() if recipe is None else recipe)
     qstate.high_precision_init_val = preserve_high_precision_init_val
     try:
         yield
     finally:
         qstate.fp8_parameters = _fp8_parameters
         qstate.fp8_recipe = _fp8_recipe
+        qstate.quantizer_config = _quantizer_config
         qstate.high_precision_init_val = _high_precision_init_val
 
 
