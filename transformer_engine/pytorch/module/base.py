@@ -947,17 +947,10 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     f"{type(self).__name__}.{name} disappeared during _apply; the state"
                     " attached to it cannot be restored"
                 )
-            buffers = {attr for attr, _ in type(old_param)._FLATTEN_TENSOR_BUFFERS}
             for key, value in attrs.items():
                 # Still present -> tensor state; the post-swap value is the right one.
                 if key in new_param.__dict__:
                     continue
-                if key in buffers:
-                    raise RuntimeError(
-                        f"Buffer {key} disappeared from {type(self).__name__}.{name} during"
-                        " _apply; restoring the pre-move value would splice stale storage"
-                        " into the parameter"
-                    )
                 if isinstance(value, MethodType) and value.__self__ is old_param:
                     value = MethodType(value.__func__, new_param)
                 setattr(new_param, key, value)
