@@ -20,6 +20,8 @@ from ...module.base import (
     get_ub,
     using_cublasmp_backend,
 )
+from ...mxfp4_qat import mxfp4_fake_quantize
+from ...quantization import FP8GlobalStateManager
 from ...quantized_tensor import Quantizer
 from ...tensor.mxfp8_tensor import MXFP8Quantizer
 from ...utils import canonicalize_device, canonicalize_dtype, clear_tensor_data
@@ -315,6 +317,13 @@ class UserbuffersBackwardLinear(FusedOperation):
         if with_quantized_compute:
             if not is_quantized_tensor(w):
                 weight_quantizer.set_usage(columnwise=True)
+                if (
+                    FP8GlobalStateManager.is_fp8_enabled()
+                    and FP8GlobalStateManager.get_fp8_recipe().mxfp4_qat()
+                ):
+                    # Only direct ``_functional_backward`` callers land here; the fuser
+                    # path saves the already-projected weight.
+                    w = mxfp4_fake_quantize(w)
                 w = weight_quantizer(w)
         else:
             w = maybe_dequantize(w, dtype)
@@ -659,6 +668,18 @@ class UserbuffersBackwardLinear(FusedOperation):
 
         """
 
+        # Disable Userbuffers for backward overrides, in sync with the forward op: the
+        # fuser fuses forward/backward separately, so a lone UB backward reads unset ctx.
+        recipe = unused.get("recipe", None)
+        if recipe is not None:
+            backward_override = recipe.backward_override
+        elif FP8GlobalStateManager.is_fp8_enabled():
+            backward_override = FP8GlobalStateManager.get_fp8_recipe().backward_override
+        else:
+            backward_override = None
+        if backward_override is not None:
+            return ops
+
         # Return immediately if environment is not distributed
         if not torch.distributed.is_initialized() or torch.distributed.get_world_size() == 1:
             return ops
@@ -696,6 +717,9 @@ class UserbuffersBackwardLinear(FusedOperation):
                 if linear.tensor_parallel_mode is None:
                     continue
                 if linear.tensor_parallel_size == 1:
+                    continue
+                if not linear.sequence_parallel:
+                    # Userbuffers requires SP; don't fuse rather than fail at runtime.
                     continue
                 if linear.tensor_parallel_mode == "row" and bias is not None:
                     continue

@@ -32,6 +32,7 @@ from .base import (
     _2X_ACC_WGRAD,
 )
 from ..quantization import FP8GlobalStateManager, QuantizerRole
+from ..mxfp4_qat import mxfp4_fake_quantize
 from ..utils import (
     assert_dim_for_fp8_exec,
     cast_if_needed,
@@ -318,9 +319,22 @@ class _LayerNormLinear(torch.autograd.Function):
         # ------------------------------------------------------
         origin_weight = weight
         is_dist_weight = is_distributed_weight(origin_weight)
+        if (
+            is_dist_weight
+            and is_grad_enabled
+            and weight_requires_grad
+            and wgrad_store is not None
+            and wgrad_store.delay_wgrad_compute()
+        ):
+            raise NotImplementedError(
+                "Delayed weight grad computation is not supported with distributed"
+                " (GTP) weights: the delayed wgrad closure would skip"
+                " finalize_weight_grads"
+            )
         if is_dist_weight:
             weight = materialize_weight_for_forward(weight)[0]
             out_features = weight.shape[0]
+            # The materialized tensor may drop ``requires_grad``; use ``weight_requires_grad``.
         new_weight_workspace = None
         weightmat = weight
         is_weight_param_quantized = False
@@ -417,7 +431,7 @@ class _LayerNormLinear(torch.autograd.Function):
         # ------------------------------------------------------
 
         # Deallocate GEMM input tensor if no longer needed
-        if not weight.requires_grad and not return_layernorm_output:
+        if not weight_requires_grad and not return_layernorm_output:
             clear_tensor_data(ln_out, ln_out_total)
             ln_out = ln_out_total = None
         elif with_input_all_gather and not return_layernorm_output_gathered:
@@ -464,7 +478,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 ln_out_to_save = ln_out_hp
             ctx.weight_quantizer = weight_quantizer
             ctx.ln_out_needs_gather = (
-                weight.requires_grad and parallel_mode == "column" and sequence_parallel
+                weight_requires_grad and parallel_mode == "column" and sequence_parallel
             )
 
             # Input with column-wise usage is needed for wgrad GEMM.
@@ -492,7 +506,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 mu,
                 rsigma,
                 weightmat if fp8 and not is_weight_param_quantized else None,
-                ln_out_to_save if weight.requires_grad else None,
+                ln_out_to_save if weight_requires_grad else None,
             )
             nvtx_range_pop(f"{nvtx_label}.fsdp_scatter")
 
@@ -529,27 +543,26 @@ class _LayerNormLinear(torch.autograd.Function):
             ctx.save_for_backward(*tensors_to_save)
             ctx.tensor_objects = tensor_objects
             ctx.requires_dgrad = inp_requires_grad
-            ctx.requires_wgrad = weight.requires_grad
+            ctx.requires_wgrad = weight_requires_grad
             ctx.is_weight_param_quantized = is_weight_param_quantized
             ctx.is_fsdp2 = is_fsdp2
-            if fuse_wgrad_accumulation and weight.requires_grad:
-                # Keep weakref to weight to preserve attributes like main_grad
-                # when we need to modify the weight python object
-                ctx.origin_weight_ref = weakref.ref(weight)
+            if fuse_wgrad_accumulation and weight_requires_grad:
+                # Weakref the origin param (not the GTP-materialized ``weight``) to keep main_grad.
+                ctx.origin_weight_ref = weakref.ref(origin_weight)
                 # Save overwrite_main_grad flag now while we have access to weight object
                 ctx.origin_weight_overwrites_main_grad = getattr(
-                    weight, "overwrite_main_grad", False
+                    origin_weight, "overwrite_main_grad", False
                 )
                 # This check is needed to ensure that main_grad is not created
                 # during the forward pass when using MCore FSDP as it creates
                 # the main_grad buffer lazily before backprop
-                if hasattr(weight, "__fsdp_param__"):
+                if hasattr(origin_weight, "__fsdp_param__"):
                     # MCore FSDP creates main_grad lazily before backward
-                    ctx.main_grad_func = weight.get_main_grad
+                    ctx.main_grad_func = origin_weight.get_main_grad
                 elif is_dist_weight:
                     ctx.main_grad_func = origin_weight.grad_buffer
                 else:
-                    ctx.main_grad_func = lambda: weight.main_grad
+                    ctx.main_grad_func = lambda: origin_weight.main_grad
             ctx.grad_input_quantizer = grad_input_quantizer
             ctx.grad_weight_quantizer = grad_weight_quantizer
             ctx.grad_output_quantizer = grad_output_quantizer
@@ -810,8 +823,25 @@ class _LayerNormLinear(torch.autograd.Function):
                     # fsdp2 quantized-tensor hooks when workspace was not saved.
                     weight = saved_weight
                 elif ctx.weight_quantizer is not None:
+                    # Replay the forward's projection + quantization. Keyed on the recipe captured
+                    # in the forward; ``saved_weight`` must stay un-projected for high_precision.
+                    w_for_encode = saved_weight
+                    if ctx.fp8_recipe is not None and ctx.fp8_recipe.mxfp4_qat():
+                        w_for_encode = mxfp4_fake_quantize(w_for_encode)
                     ctx.weight_quantizer.set_usage(rowwise=True, columnwise=True)
-                    weight = ctx.weight_quantizer(saved_weight)
+                    weight = ctx.weight_quantizer(w_for_encode)
+            elif (
+                is_dist_weight
+                and (ctx.fp8 or ctx.backward_override == "dequantized")
+                and ctx.weight_quantizer is not None
+                and not isinstance(weight, QuantizedTensorStorage)
+            ):
+                # Distributed weight re-gathered a BF16 weight: replay the forward's projection
+                # and quantization. ``dequantized`` lands here too: it forces ``ctx.fp8`` False.
+                if ctx.fp8_recipe is not None and ctx.fp8_recipe.mxfp4_qat():
+                    weight = mxfp4_fake_quantize(weight)
+                ctx.weight_quantizer.set_usage(rowwise=True, columnwise=True)
+                weight = ctx.weight_quantizer(weight)
 
             # Make sure required data is available
             if isinstance(grad_output, QuantizedTensorStorage):
@@ -854,7 +884,9 @@ class _LayerNormLinear(torch.autograd.Function):
                 else:
                     weight_for_dgrad = cast_if_needed(weight_for_dgrad, ctx.activation_dtype)
             elif ctx.backward_override == "high_precision":
-                weight_for_dgrad = saved_weight
+                # GTP: ``saved_weight`` is only the local shard, so use the re-gathered master.
+                # It is still un-projected: the quantize branch above skips high_precision.
+                weight_for_dgrad = weight if is_dist_weight else saved_weight
                 if isinstance(weight_for_dgrad, QuantizedTensorStorage):
                     weight_for_dgrad = weight_for_dgrad.dequantize(dtype=ctx.activation_dtype)
             gemm_out, *_, reduce_scatter_out = general_gemm(

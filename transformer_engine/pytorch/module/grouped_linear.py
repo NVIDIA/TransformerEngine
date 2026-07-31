@@ -52,6 +52,7 @@ from ..distributed_weight import (
     materialize_weight_for_backward,
     finalize_weight_grads,
 )
+from ..mxfp4_qat import mxfp4_fake_quantize
 from ..cpp_extensions import (
     general_grouped_gemm,
     general_grouped_gemm_for_grouped_tensor,
@@ -104,6 +105,7 @@ class _GroupedLinear(torch.autograd.Function):
         cpu_offloading: bool,
         backward_override: Optional[str],
         save_original_input: bool,
+        is_dist_weight: bool,
         activation_dtype: torch.dtype,
         input_quantizers: List[Optional[Quantizer]],
         output_quantizers: List[Optional[Quantizer]],
@@ -143,6 +145,9 @@ class _GroupedLinear(torch.autograd.Function):
             or backward_override is not None
             or save_original_input
         ):
+            return False
+        # The fused backward has no materialize/finalize support for GTP weights.
+        if is_dist_weight:
             return False
         # 3. Filter by compute capability and cuBLAS version
         device_capability = get_device_compute_capability()
@@ -533,6 +538,18 @@ class _GroupedLinear(torch.autograd.Function):
         origin_weights = weights
         is_dist_weight = is_distributed_weight(weights[0])
         if is_dist_weight:
+            if (
+                is_grad_enabled
+                and weight_requires_grad
+                and wgrad_store is not None
+                and wgrad_store.delay_wgrad_compute()
+            ):
+                # finalize_weight_grads would reduce-scatter an uninitialized buffer
+                # before the delayed wgrad GEMM runs.
+                raise NotImplementedError(
+                    "GroupedLinear does not support delay_wgrad_compute with"
+                    " distributed weights."
+                )
             weights = materialize_weight_for_forward(weights)
 
         # Configure quantizers
@@ -597,6 +614,7 @@ class _GroupedLinear(torch.autograd.Function):
             cpu_offloading=cpu_offloading,
             backward_override=backward_override,
             save_original_input=save_original_input,
+            is_dist_weight=is_dist_weight,
             activation_dtype=activation_dtype,
             input_quantizers=input_quantizers,
             output_quantizers=output_quantizers,
@@ -762,7 +780,8 @@ class _GroupedLinear(torch.autograd.Function):
             ctx.grad_output_quantizers = grad_output_quantizers
             ctx.grad_weight_quantizers = grad_weight_quantizers
 
-            ctx.weights_requires_grad = weights[0].requires_grad
+            # GTP-materialized ``weights`` may not preserve ``requires_grad``.
+            ctx.weights_requires_grad = weight_requires_grad
             if fuse_wgrad_accumulation and ctx.weights_requires_grad:
                 # Keep weakrefs to weights to preserve attributes like main_grad
                 # when we need to modify the weight python objects
@@ -789,6 +808,8 @@ class _GroupedLinear(torch.autograd.Function):
             ctx.activation_dtype = activation_dtype
             ctx.fp8 = fp8
             ctx.fp8_recipe = FP8GlobalStateManager.get_fp8_recipe() if fp8 else None
+            # Backward usually runs outside the quantization autocast.
+            ctx.mxfp4_qat = fp8 and FP8GlobalStateManager.get_fp8_recipe().mxfp4_qat()
             ctx.backward_override = backward_override
             ctx.fuse_wgrad_accumulation = fuse_wgrad_accumulation
             ctx.cpu_offloading = cpu_offloading
@@ -1135,23 +1156,42 @@ class _GroupedLinear(torch.autograd.Function):
                     ctx.device,
                 )
                 weights_for_dgrad = weights
+                if (
+                    is_dist_weight
+                    and (ctx.fp8 or ctx.backward_override == "dequantized")
+                    and ctx.weight_quantizers[0] is not None
+                ):
+                    # Re-gathered GTP masters are high-precision; replay the forward's
+                    # projection + quantization. ``dequantized`` forces ``ctx.fp8`` False.
+                    weights_for_dgrad = []
+                    for weight, weight_quantizer in zip(weights, ctx.weight_quantizers):
+                        if not isinstance(weight, QuantizedTensorStorage):
+                            if ctx.mxfp4_qat:
+                                weight = mxfp4_fake_quantize(weight)
+                            weight_quantizer.set_usage(rowwise=True, columnwise=True)
+                            weight = weight_quantizer(weight)
+                        weights_for_dgrad.append(weight)
                 if ctx.backward_override == "dequantized":
+                    # Dequantize from the fprop quantized layout (the replay above, for GTP).
                     weights_for_dgrad = [
                         (
                             weight.dequantize(dtype=ctx.activation_dtype)
                             if isinstance(weight, QuantizedTensorStorage)
                             else cast_if_needed(weight, ctx.activation_dtype)
                         )
-                        for weight in weights
+                        for weight in weights_for_dgrad
                     ]
                 elif ctx.backward_override == "high_precision":
+                    # GTP: ``saved_weights`` are only the local shards, so use the re-gathered
+                    # masters. They stay un-projected: the quantize branch above skips this.
+                    hp_weights = weights if is_dist_weight else saved_weights
                     weights_for_dgrad = [
                         (
                             weight.dequantize(dtype=ctx.activation_dtype)
                             if isinstance(weight, QuantizedTensorStorage)
                             else cast_if_needed(weight, ctx.activation_dtype)
                         )
-                        for weight in saved_weights
+                        for weight in hp_weights
                     ]
                 # Make sure weights are available in column-wise format
                 # for dgrad computation.
@@ -1867,21 +1907,20 @@ class GroupedLinear(TransformerEngineBaseModule):
                 f"does not match number of GEMMs ({num_gemms})."
             )
 
-        if FP8GlobalStateManager.fp8_graph_capturing():
-            skip_fp8_weight_update = (
-                FP8GlobalStateManager.quantization_state.skip_fp8_weight_update_tensor
-            )
-        else:
-            skip_fp8_weight_update = None
-        if skip_fp8_weight_update is not None:
-            is_first_microbatch = False
-
         # Preprocess input tensor
         if isinstance(inp, QuantizedTensorStorage):
             raise TypeError("GroupedLinear doesn't support input tensor in FP8.")
         inp = self.prepare_forward(inp, num_gemms=self.num_gemms)
 
         try:
+            grouped_weight = getattr(self, "weight", None)
+            if grouped_weight is not None and is_distributed_weight(grouped_weight):
+                # The per-GEMM member views lose the distributed-weight marker.
+                raise NotImplementedError(
+                    "single_grouped_weight does not support distributed (GTP)"
+                    " weights: the per-GEMM member tensors bypass the"
+                    " materialize/finalize protocol."
+                )
             weight_tensors = self._get_weight_tensors()
             bias_tensors = self._get_bias_tensors()
 

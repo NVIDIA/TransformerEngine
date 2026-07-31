@@ -46,6 +46,7 @@ from ..distributed import (
     _fsdp_gather_tensors,
 )
 from ..constants import dist_group_type
+from ..mxfp4_qat import mxfp4_fake_quantize
 from ..cpp_extensions.gemm import _NUM_MAX_UB_STREAMS
 from ..quantized_tensor import QuantizedTensor, QuantizedTensorStorage, Quantizer
 from ..tensor.float8_tensor import Float8Quantizer, Float8CurrentScalingQuantizer
@@ -730,6 +731,23 @@ def fill_userbuffers_buffer_for_all_gather(
     raise ValueError(f"Unsupported quantizer for Userbuffers ({quantizer})")
 
 
+def _mxfp4_qat_block_recipe_signature(recipe: Optional[Recipe]) -> Optional[tuple]:
+    """Immutable QAT blockwise configuration for detecting recipe mutation/switches."""
+    if recipe is None or not recipe.float8_block_scaling() or not recipe.mxfp4_qat():
+        return None
+    return (
+        recipe.fp8_format,
+        recipe.fp8_quant_fwd_inp,
+        recipe.fp8_quant_fwd_weight,
+        recipe.fp8_quant_bwd_grad,
+        recipe.x_block_scaling_dim,
+        recipe.w_block_scaling_dim,
+        recipe.grad_block_scaling_dim,
+        recipe.backward_override,
+        recipe.mxfp4_qat(),
+    )
+
+
 def _is_weight_workspace_valid(
     workspace: QuantizedTensorStorage,
     quantizer: Quantizer,
@@ -746,6 +764,33 @@ def _is_weight_workspace_valid(
         if quantizer.rowwise_usage and workspace._rowwise_data is None:
             return False
         if quantizer.columnwise_usage and workspace._columnwise_data is None:
+            return False
+    elif isinstance(workspace, Float8BlockwiseQTensorStorage):
+        if not isinstance(quantizer, Float8BlockQuantizer):
+            return False
+        workspace_quantizer = workspace._quantizer
+        if not isinstance(workspace_quantizer, Float8BlockQuantizer):
+            return False
+        if workspace._is_2D_scaled != (quantizer.block_scaling_dim == 2):
+            return False
+        if (
+            workspace._fp8_dtype != quantizer.dtype
+            or workspace_quantizer.block_scaling_dim != quantizer.block_scaling_dim
+            or workspace_quantizer.force_pow_2_scales != quantizer.force_pow_2_scales
+            or workspace_quantizer.amax_epsilon != quantizer.amax_epsilon
+        ):
+            return False
+        if quantizer.rowwise_usage and (
+            not workspace_quantizer.rowwise_usage
+            or workspace._rowwise_data is None
+            or workspace._rowwise_scale_inv is None
+        ):
+            return False
+        if quantizer.columnwise_usage and (
+            not workspace_quantizer.columnwise_usage
+            or workspace._columnwise_data is None
+            or workspace._columnwise_scale_inv is None
+        ):
             return False
     elif isinstance(workspace, NVFP4TensorStorage):
         if quantizer.rowwise_usage and workspace._rowwise_data is None:
@@ -800,8 +845,26 @@ def quantize_weight(
         ``_fp8_workspaces``.
     """
 
+    _mxfp4_qat_active = (
+        FP8GlobalStateManager.get_fp8_recipe().mxfp4_qat()
+        if FP8GlobalStateManager.is_fp8_enabled()
+        else False
+    )
+    if _mxfp4_qat_active and workspace_dtype == torch.float16:
+        raise NotImplementedError(
+            "MXFP4 QAT does not support fp16 as the activation/dequantize dtype: "
+            "the MXFP4 grid (values up to 6*2^125) exceeds fp16 range. Use bf16 "
+            "or fp32."
+        )
+
     # Already-quantized weight (primary FP8 parameters)
     if isinstance(tensor, QuantizedTensor):
+        if _mxfp4_qat_active:
+            raise NotImplementedError(
+                "MXFP4 QAT recipes do not support primary quantized weights: the "
+                "high-precision master weight is required to project onto the "
+                "MXFP4 grid."
+            )
         update_rowwise = True if quantizer.rowwise_usage else None
         update_columnwise = True if quantizer.columnwise_usage else None
         tensor.update_usage(
@@ -833,6 +896,8 @@ def quantize_weight(
         if update_workspace:
             if tensor is None:
                 raise ValueError("tensor kwarg must be provided to update FP8 workspace")
+            if _mxfp4_qat_active:
+                tensor = mxfp4_fake_quantize(tensor)
             if hasattr(workspace, "quantize_"):
                 workspace.quantize_(tensor, noop_flag=skip_update_flag)
             else:
@@ -842,6 +907,8 @@ def quantize_weight(
     # Cache miss — create new workspace
     if tensor is None or quantizer is None:
         raise ValueError("tensor and quantizer kwargs must be provided to construct FP8 workspace")
+    if _mxfp4_qat_active:
+        tensor = mxfp4_fake_quantize(tensor)
     if cache:
         # Ensure the tensor in the cache is an instance of torch.Tensor,
         # as it persists beyond a single forward pass.
@@ -1061,7 +1128,10 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             if recipe.float8_block_scaling() and isinstance(
                 recipe_state, Float8BlockScalingRecipeState
             ):
-                return
+                # Block dims and scale policy are recipe fields, so a 1D/2D switch
+                # within float8_block_scaling still needs fresh quantizers.
+                if not recipe.mxfp4_qat() or recipe == recipe_state.recipe:
+                    return
             if recipe.nvfp4() and isinstance(recipe_state, NVFP4BlockScalingRecipeState):
                 return
             if recipe.custom() and isinstance(recipe_state, CustomRecipeState):
@@ -1473,13 +1543,29 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         meta["fp8_checkpoint"] = fp8_enabled
 
         _original_recipe = None
+        _current_recipe = FP8GlobalStateManager.get_fp8_recipe()
+        _original_block_signature = meta.get("_mxfp4_qat_block_recipe_signature")
+        _current_block_signature = _mxfp4_qat_block_recipe_signature(_current_recipe)
+        _block_recipe_config_changed = False
 
         if fp8_parameters or fp8_enabled:
             _original_recipe = meta.get("recipe", None)
-            if self.fp8_initialized and FP8GlobalStateManager.get_fp8_recipe() == _original_recipe:
+            _block_recipe_config_changed = (
+                _original_recipe is not None
+                and _original_block_signature != _current_block_signature
+            )
+            if (
+                self.fp8_initialized
+                and _current_recipe == _original_recipe
+                and not _block_recipe_config_changed
+            ):
                 # FP8 init has already been run and recipe is the same, don't do anything.
                 return
-            meta["recipe"] = FP8GlobalStateManager.get_fp8_recipe()
+            meta["recipe"] = _current_recipe
+            if _block_recipe_config_changed:
+                # RecipeState holds the same recipe object, so in-place mutation of it
+                # is invisible to ``==``; hence the separate immutable signature.
+                self.fast_setattr("fp8_meta_tensors_initialized", False)
         else:
             # If fp8 isn't enabled, turn off and return.
             self.fast_setattr("fp8_initialized", False)
@@ -1503,12 +1589,19 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             self.init_fp8_meta_tensors(meta["recipe"])
             self.fast_setattr("fp8_initialized", True)
 
-            meta["recipe"] = FP8GlobalStateManager.get_fp8_recipe()
+            meta["recipe"] = _current_recipe
 
         _current_recipe = meta["recipe"]
-        if _original_recipe is not None and not (
-            issubclass(_current_recipe.__class__, _original_recipe.__class__)
-            or issubclass(_original_recipe.__class__, _current_recipe.__class__)
+        meta["_mxfp4_qat_block_recipe_signature"] = _current_block_signature
+        if _block_recipe_config_changed:
+            # Cached workspaces own buffers for the old block layout; not updatable in place.
+            self._fp8_workspaces.clear()
+        if _original_recipe is not None and (
+            not (
+                issubclass(_current_recipe.__class__, _original_recipe.__class__)
+                or issubclass(_original_recipe.__class__, _current_recipe.__class__)
+            )
+            or _current_recipe.mxfp4_qat() != _original_recipe.mxfp4_qat()
         ):
             warnings.warn(
                 f"Recipe type changed from {_original_recipe.__class__.__name__} "

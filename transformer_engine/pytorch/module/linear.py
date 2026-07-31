@@ -15,6 +15,7 @@ import torch
 import transformer_engine_torch as tex
 
 from transformer_engine.common.recipe import Recipe
+from ..mxfp4_qat import mxfp4_fake_quantize
 from transformer_engine.pytorch.torch_version import torch_version
 
 from .base import (
@@ -196,6 +197,9 @@ class LinearBwdArgs:
     wgrad_use_split_accumulator: bool = _2X_ACC_WGRAD
     backward_override: Optional[str] = None
     is_weight_param_quantized: bool = False
+    # Forward projected the weight onto the MXFP4 grid before quantizing; backward must
+    # replay that, and can't infer it (``fp8`` may be forced False, and the autocast has exited).
+    mxfp4_qat: bool = False
     custom: bool = False
     debug: bool = False
 
@@ -272,6 +276,18 @@ def _linear_forward_impl(
 
     weight = args.weight
     is_dist_weight = is_distributed_weight(args.weight)
+    if (
+        is_dist_weight
+        and args.is_grad_enabled
+        and weight.requires_grad
+        and args.wgrad_store is not None
+        and args.wgrad_store.delay_wgrad_compute()
+    ):
+        raise NotImplementedError(
+            "Delayed weight grad computation is not supported with distributed"
+            " (GTP) weights: the delayed wgrad closure would skip"
+            " finalize_weight_grads"
+        )
     inp = args.inp
     bias = args.bias
     input_quantizer = args.input_quantizer
@@ -689,6 +705,7 @@ def _linear_setup_ctx(
     bwd_args.dgrad_use_split_accumulator = fwd_args.dgrad_use_split_accumulator
     bwd_args.wgrad_use_split_accumulator = fwd_args.wgrad_use_split_accumulator
     bwd_args.backward_override = backward_override
+    bwd_args.mxfp4_qat = fp8 and FP8GlobalStateManager.get_fp8_recipe().mxfp4_qat()
     bwd_args.is_weight_param_quantized = isinstance(weight, QuantizedTensorStorage)
     bwd_args.custom = fwd_args.custom
     bwd_args.debug = fwd_args.debug
@@ -1003,16 +1020,24 @@ def _linear_backward(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None], ..
                     # fsdp2 quantized-tensor hooks when workspace was not saved.
                     weight_fp8 = saved_weight
                 elif bwd_args.weight_quantizer is not None:
+                    # Replay the forward's projection + quantization. Keyed on the recipe captured
+                    # in the forward; ``saved_weight`` must stay un-projected for high_precision.
+                    w_for_encode = saved_weight
+                    if bwd_args.mxfp4_qat:
+                        w_for_encode = mxfp4_fake_quantize(w_for_encode)
                     bwd_args.weight_quantizer.set_usage(rowwise=True, columnwise=True)
-                    weight_fp8 = bwd_args.weight_quantizer(saved_weight)
+                    weight_fp8 = bwd_args.weight_quantizer(w_for_encode)
             elif (
                 is_dist_weight
-                and bwd_args.fp8
+                and (bwd_args.fp8 or bwd_args.backward_override == "dequantized")
                 and bwd_args.weight_quantizer is not None
                 and not isinstance(weight_fp8, QuantizedTensorStorage)
             ):
                 # Distributed weight re-gathered a BF16 weight: quantize with the layer quantizer
                 # so the dgrad operand isn't cast by the delayed recipe.
+                # ``dequantized`` lands here too: it forces ``bwd_args.fp8`` False.
+                if bwd_args.mxfp4_qat:
+                    weight_fp8 = mxfp4_fake_quantize(weight_fp8)
                 bwd_args.weight_quantizer.set_usage(rowwise=True, columnwise=True)
                 weight_fp8 = bwd_args.weight_quantizer(weight_fp8)
 
@@ -1056,7 +1081,9 @@ def _linear_backward(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None], ..
                 else:
                     weight_for_dgrad = cast_if_needed(weight_for_dgrad, bwd_args.activation_dtype)
             elif bwd_args.backward_override == "high_precision":
-                weight_for_dgrad = saved_weight
+                # GTP: ``saved_weight`` is only the local shard, so use the re-gathered master.
+                # It is still un-projected: the quantize branch above skips high_precision.
+                weight_for_dgrad = weight_fp8 if is_dist_weight else saved_weight
                 if isinstance(weight_for_dgrad, QuantizedTensorStorage):
                     weight_for_dgrad = weight_for_dgrad.dequantize(dtype=bwd_args.activation_dtype)
             gemm_out, *_, reduce_scatter_out = general_gemm(

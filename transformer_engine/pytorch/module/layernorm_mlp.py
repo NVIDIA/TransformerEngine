@@ -33,6 +33,7 @@ from .base import (
     _2X_ACC_WGRAD,
 )
 from ..quantization import FP8GlobalStateManager, QuantizerRole
+from ..mxfp4_qat import mxfp4_fake_quantize
 from ..jit import (
     bias_gelu_fused,
     bgrad_dgelu_fused,
@@ -63,6 +64,7 @@ from ..distributed import (
     _get_cuda_rng_state,
     _set_cuda_rng_state,
 )
+from ..distributed_weight import is_distributed_weight
 from ..constants import FP8BwdTensorIdx, FP8FwdTensorIdx, dist_group_type
 from ..jit import no_torch_dynamo
 from ..graph import is_graph_capturing
@@ -247,11 +249,20 @@ class _LayerNormMLP(torch.autograd.Function):
             backward_override = FP8GlobalStateManager.get_fp8_recipe().backward_override
         else:
             backward_override = None
-        assert backward_override is None, (
-            "NVTE_BACKWARD_OVERRIDE=high_precision/dequantized is not implemented in LayerNormMLP."
-            " Replace LayerNormMLP with LayerNormLinear + Linear to enable"
-            " high_precision/dequantized backward."
-        )
+        # A no-grad forward saves no backward state, so the override is moot there.
+        if backward_override is not None and is_grad_enabled:
+            raise NotImplementedError(
+                "NVTE_BACKWARD_OVERRIDE=high_precision/dequantized is not implemented in"
+                " LayerNormMLP. Replace LayerNormMLP with LayerNormLinear + Linear to enable"
+                " high_precision/dequantized backward."
+            )
+        # No materialize/finalize wiring here: a shard would be consumed as a full weight.
+        if is_distributed_weight(fc1_weight) or is_distributed_weight(fc2_weight):
+            raise NotImplementedError(
+                "LayerNormMLP does not support distributed (GTP) weights. Replace"
+                " LayerNormMLP with LayerNormLinear + Linear to enable distributed"
+                " weights."
+            )
 
         # if grad is enabled and this is not the bwd stage, we must save this so bwd knows which path to take
         if is_grad_enabled and not recompute_for_bwd:
@@ -1228,6 +1239,8 @@ class _LayerNormMLP(torch.autograd.Function):
                 if isinstance(origin_fc2_weight, QuantizedTensorStorage):
                     fc2_weight = origin_fc2_weight
                 elif ctx.fc2_weight_quantizer is not None:
+                    if ctx.fp8_recipe is not None and ctx.fp8_recipe.mxfp4_qat():
+                        origin_fc2_weight = mxfp4_fake_quantize(origin_fc2_weight)
                     ctx.fc2_weight_quantizer.set_usage(rowwise=True, columnwise=True)
                     fc2_weight = ctx.fc2_weight_quantizer(origin_fc2_weight)
 
@@ -1522,6 +1535,8 @@ class _LayerNormMLP(torch.autograd.Function):
                 if isinstance(origin_fc1_weight, QuantizedTensorStorage):
                     fc1_weight = origin_fc1_weight
                 elif ctx.fc1_weight_quantizer is not None:
+                    if ctx.fp8_recipe is not None and ctx.fp8_recipe.mxfp4_qat():
+                        origin_fc1_weight = mxfp4_fake_quantize(origin_fc1_weight)
                     ctx.fc1_weight_quantizer.set_usage(rowwise=True, columnwise=True)
                     fc1_weight = ctx.fc1_weight_quantizer(origin_fc1_weight)
 

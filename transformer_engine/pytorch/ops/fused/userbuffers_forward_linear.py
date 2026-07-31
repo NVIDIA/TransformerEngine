@@ -14,12 +14,14 @@ from transformer_engine_torch import CommOverlapType
 from ...cpp_extensions import general_gemm
 from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ...distributed import get_distributed_world_size
+from ...distributed_weight import is_distributed_weight
 from ...quantization import FP8GlobalStateManager
 from ...module.base import (
     fill_userbuffers_buffer_for_all_gather,
     get_ub,
     _2X_ACC_FPROP,
 )
+from ...mxfp4_qat import mxfp4_fake_quantize
 from ...quantized_tensor import Quantizer
 from ...tensor.float8_tensor import Float8Quantizer, Float8CurrentScalingQuantizer
 from ...tensor.storage.float8_tensor_storage import Float8TensorStorage
@@ -224,10 +226,36 @@ class UserbuffersForwardLinear(FusedOperation):
 
         # Initialize weight tensor
         w = weight
+        if is_distributed_weight(w):
+            # No materialize/finalize protocol here: the local shard would be
+            # consumed as the full weight.
+            raise NotImplementedError(
+                "Userbuffers linear ops do not support distributed (GTP) weights."
+            )
+        mxfp4_qat = (
+            with_quantized_compute
+            and FP8GlobalStateManager.is_fp8_enabled()
+            and FP8GlobalStateManager.get_fp8_recipe().mxfp4_qat()
+        )
+        if mxfp4_qat:
+            if is_quantized_tensor(w):
+                raise NotImplementedError(
+                    "MXFP4 QAT recipes do not support primary quantized weights: the "
+                    "high-precision master weight is required to project onto the "
+                    "MXFP4 grid."
+                )
+            if dtype == torch.float16:
+                raise NotImplementedError(
+                    "MXFP4 QAT does not support fp16 as the activation/dequantize dtype: "
+                    "the MXFP4 grid exceeds fp16 range. Use bf16 or fp32."
+                )
         if not with_quantized_compute:
             w = maybe_dequantize(w, dtype)
         elif with_quantized_compute and not is_quantized_tensor(w):
             weight_quantizer.set_usage(rowwise=True, columnwise=input_requires_grad)
+            if mxfp4_qat:
+                # The quantized weight is also the one saved for backward.
+                w = mxfp4_fake_quantize(w)
             w = weight_quantizer(w)
 
         # Construct output tensor if needed
@@ -319,6 +347,7 @@ class UserbuffersForwardLinear(FusedOperation):
                 raise RuntimeError(
                     f"Unsupported recipe for Userbuffers ({recipe.__class__.__name__})"
                 )
+            # MXFP4 QAT is handled in _functional_forward, which projects before quantizing.
 
         # Get autocast dtype if needed
         if torch.is_autocast_enabled():
@@ -440,6 +469,9 @@ class UserbuffersForwardLinear(FusedOperation):
                 if linear.tensor_parallel_mode is None:
                     continue
                 if linear.tensor_parallel_size == 1:
+                    continue
+                if not linear.sequence_parallel:
+                    # Userbuffers requires SP; don't fuse rather than fail at runtime.
                     continue
                 if linear.tensor_parallel_mode == "row" and bias is not None:
                     continue

@@ -24,6 +24,34 @@ from ..quantization import (
 from ..tensor import Quantizer
 
 
+def _recipe_fusion_signature(recipe: Optional[Recipe]) -> Optional[tuple]:
+    """Snapshot of the recipe fields that get baked into quantizers.
+
+    Recipe class alone is not enough: same-class fields can change between forward
+    passes, including by in-place mutation. DelayedScaling amax parameters are
+    excluded, since they are handled separately to preserve amax history.
+    """
+    if recipe is None:
+        return None
+    fp8_format = getattr(recipe, "fp8_format", None)
+    return (
+        type(recipe),
+        recipe.mxfp4_qat(),
+        getattr(recipe, "backward_override", None),
+        fp8_format.name if fp8_format is not None else None,
+        # QParams are frozen dataclasses, so they compare by value.
+        getattr(recipe, "fp8_quant_fwd_inp", None),
+        getattr(recipe, "fp8_quant_fwd_weight", None),
+        getattr(recipe, "fp8_quant_bwd_grad", None),
+        getattr(recipe, "fp4_quant_fwd_inp", None),
+        getattr(recipe, "fp4_quant_fwd_weight", None),
+        getattr(recipe, "fp4_quant_bwd_grad", None),
+        getattr(recipe, "x_block_scaling_dim", None),
+        getattr(recipe, "w_block_scaling_dim", None),
+        getattr(recipe, "grad_block_scaling_dim", None),
+    )
+
+
 @dataclasses.dataclass
 class OperationContext:
     """State needed to apply an operation
@@ -190,6 +218,8 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         # Objects for quantization
         self._fp8_metas: Optional[dict[str, dict[str, Any]]] = None
         self._quantizers: Optional[dict[str, list[Quantizer]]] = None
+        # Recipe signature the quantization state was built with.
+        self._recipe_state_signature: Optional[tuple] = None
 
     @property
     def is_fused_op(self) -> bool:
@@ -243,6 +273,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         if recipe is None:
             self._fp8_metas = None
             self._quantizers = None
+            self._recipe_state_signature = None
             return
 
         # Communication group for FP8 amax reductions
@@ -252,7 +283,11 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         # This could happen for example if calling BasicOperation.forward directly, as in that
         # case, the OperationFuser is not persistent, or when loading from a checkpoint
         need_to_reset_recipe_state = False
+        recipe_signature = _recipe_fusion_signature(recipe)
         if self._fp8_metas is None or self._quantizers is None:
+            need_to_reset_recipe_state = True
+        elif recipe_signature != self._recipe_state_signature:
+            # Same-class field changes are baked into the quantizers too.
             need_to_reset_recipe_state = True
         else:
             for mode in ("forward", "backward"):
@@ -270,6 +305,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
             # Construct quantization recipe states
             self._fp8_metas = {"forward": None, "backward": None}
             self._quantizers = {"forward": [], "backward": []}
+            self._recipe_state_signature = recipe_signature
             for mode in ("forward", "backward"):
                 num_quantizers = self.num_quantizers(mode)
                 if num_quantizers == 0:

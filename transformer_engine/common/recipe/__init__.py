@@ -8,9 +8,7 @@ import abc
 import os
 from enum import Enum
 from typing import Any, Literal, Optional, Union, Callable, NamedTuple
-from dataclasses import field
 from pydantic.dataclasses import dataclass
-
 
 _BACKWARD_OVERRIDES = (None, "high_precision", "dequantized")
 _NVFP4_4OVER6_SCOPES = ("none", "weights", "activations", "all")
@@ -167,6 +165,12 @@ class Recipe:
     def custom(cls):
         """Whether the given recipe is custom."""
         return issubclass(cls, CustomRecipe)
+
+    def mxfp4_qat(self):
+        """Whether the recipe applies MXFP4 weight QAT on top of its base recipe."""
+        return bool(getattr(self, "mxfp4_qat_weights", False)) or isinstance(
+            self, (MXFP4QATMXFP8BlockScaling, MXFP4QATFloat8BlockScaling)
+        )
 
 
 @dataclass(repr=False)
@@ -368,6 +372,7 @@ class MXFP8BlockScaling(Recipe):
     fp8_dpa: bool = False
     fp8_mha: bool = False
     backward_override: Optional[str] = os.getenv("NVTE_BACKWARD_OVERRIDE", None)
+    mxfp4_qat_weights: bool = os.getenv("NVTE_MXFP4_QAT", "0") == "1"
 
     def __post_init__(self) -> None:
         assert self.fp8_format != Format.E5M2, "Pure E5M2 training is not supported."
@@ -437,6 +442,7 @@ class Float8BlockScaling(Recipe):
     fp8_dpa: bool = False
     fp8_mha: bool = False
     backward_override: Optional[str] = os.getenv("NVTE_BACKWARD_OVERRIDE", None)
+    mxfp4_qat_weights: bool = os.getenv("NVTE_MXFP4_QAT", "0") == "1"
 
     def __post_init__(self) -> None:
         assert self.x_block_scaling_dim in [1, 2], "Only 1D or 2D blocks supported for x"
@@ -461,6 +467,12 @@ class Float8BlockScaling(Recipe):
         assert (
             self.backward_override in _BACKWARD_OVERRIDES
         ), "NVTE_BACKWARD_OVERRIDE must be unset or one of: 'high_precision', 'dequantized'."
+        if self.mxfp4_qat_weights:
+            if not self.fp8_quant_fwd_weight.power_2_scale:
+                raise ValueError(
+                    "MXFP4 QAT requires power-of-two weight scales; "
+                    "NVTE_FP8_BLOCK_SCALING_FP32_SCALES=1 is incompatible."
+                )
 
     def _make_repr(self) -> str:
         return (
@@ -479,6 +491,34 @@ class Float8BlockScaling(Recipe):
             f"fp8_mha={self.fp8_mha}, "
             f"backward_override={self.backward_override}"
         )
+
+
+@dataclass(repr=False)
+class MXFP4QATMXFP8BlockScaling(MXFP8BlockScaling):
+    """
+    MXFP8 recipe with MXFP4 weight quantization-aware training.
+
+    Weights are projected onto the MXFP4 (E2M1, 1x32 power-of-two scale) grid before
+    the regular MXFP8 weight quantization, whose rowwise encoding of the projected
+    weight is lossless. Everything else follows the base recipe. bf16/fp32 only.
+    """
+
+    mxfp4_qat_weights: bool = True
+
+
+@dataclass(repr=False)
+class MXFP4QATFloat8BlockScaling(Float8BlockScaling):
+    """
+    Float8 block-scaling recipe with MXFP4 weight quantization-aware training.
+
+    Weights are projected onto the MXFP4 (E2M1, 1x32 power-of-two scale) grid before
+    regular blockwise FP8 weight quantization, lossless within each block's FP8
+    dynamic-range headroom. Weight blocks stay 128x128 by default; set
+    ``w_block_scaling_dim=1`` for 1x128 rowwise and 128x1 columnwise blocks.
+    Everything else follows the base recipe. bf16/fp32 only.
+    """
+
+    mxfp4_qat_weights: bool = True
 
 
 @dataclass(repr=False)
