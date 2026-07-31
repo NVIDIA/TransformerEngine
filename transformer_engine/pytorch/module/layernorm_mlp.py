@@ -700,27 +700,19 @@ class _LayerNormMLP(torch.autograd.Function):
                 activation_scale_updates = {}
                 weight_scale_updates = {}
                 if fc1_input_scale_buffer is not None:
-                    activation_scale_updates[fc1_input_scale_buffer[0]] = (
-                        fc1_input_scale_buffer[1]
-                    )
+                    activation_scale_updates[fc1_input_scale_buffer[0]] = fc1_input_scale_buffer[1]
                 if fc1_weight_scale_buffer is not None:
-                    weight_scale_updates[fc1_weight_scale_buffer[0]] = (
-                        fc1_weight_scale_buffer[1]
-                    )
+                    weight_scale_updates[fc1_weight_scale_buffer[0]] = fc1_weight_scale_buffer[1]
                 fc2_input_scale_buffer = _get_scale_buffer_info(
                     "fc2_input", act_out, fc2_input_quantizer
                 )
                 if fc2_input_scale_buffer is not None:
-                    activation_scale_updates[fc2_input_scale_buffer[0]] = (
-                        fc2_input_scale_buffer[1]
-                    )
+                    activation_scale_updates[fc2_input_scale_buffer[0]] = fc2_input_scale_buffer[1]
                 fc2_weight_scale_buffer = _get_scale_buffer_info(
                     "fc2_weight", fc2_weight_final, fc2_weight_quantizer
                 )
                 if fc2_weight_scale_buffer is not None:
-                    weight_scale_updates[fc2_weight_scale_buffer[0]] = (
-                        fc2_weight_scale_buffer[1]
-                    )
+                    weight_scale_updates[fc2_weight_scale_buffer[0]] = fc2_weight_scale_buffer[1]
                 _update_scale_buffers(
                     scale_buffers,
                     activation_scale_updates,
