@@ -32,11 +32,11 @@ def test_gemm_with_missing_nvfp4_amax(disable_x: bool, disable_w: bool) -> None:
     x[0, 0] = unit_scale_amax
     w[0, 0] = unit_scale_amax
 
-    def quantize(tensor: torch.Tensor, disable_2d_scaling: bool):
+    def quantize(tensor: torch.Tensor, disable_second_level_scale: bool):
         return NVFP4Quantizer(
             rowwise=True,
             columnwise=True,
-            disable_2d_scaling=disable_2d_scaling,
+            disable_second_level_scale=disable_second_level_scale,
         )(tensor)
 
     x_ref, w_ref = quantize(x, False), quantize(w, False)

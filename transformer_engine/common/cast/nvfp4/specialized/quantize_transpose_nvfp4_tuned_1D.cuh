@@ -714,11 +714,16 @@ inline void quantize_transpose_tuned_1D(const Tensor &input, const Tensor *noop,
   NVTE_CHECK(output->has_data(), "NVFP4 output tensor must be allocated.");
   NVTE_CHECK(is_fp4_dtype(output->data.dtype), "Output must have FP4 type.");
   NVTE_CHECK(output->scale_inv.dptr != nullptr, "Scaling tensor must be allocated");
+  NVTE_CHECK(!row_scaled_nvfp4 || output->amax.dptr != nullptr,
+             "Row-scaled NVFP4 does not support disabling second-level scaling.");
   if (return_transpose) {
     NVTE_CHECK(is_fp4_dtype(output->columnwise_data.dtype),
                "Transposed output must have FP4 type.");
     NVTE_CHECK(output->columnwise_scale_inv.dptr != nullptr,
                "Transposed scaling tensor must be allocated");
+    NVTE_CHECK(!row_scaled_nvfp4 || output->columnwise_amax.dptr != nullptr,
+               "Row-scaled NVFP4 transpose quantization does not support disabling "
+               "second-level scaling.");
   }
 
   const auto [rows, cols] = input.flat_2d_dims();

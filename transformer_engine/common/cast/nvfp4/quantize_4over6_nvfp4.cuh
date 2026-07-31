@@ -692,6 +692,8 @@ void quantize_4over6(const Tensor &input, const Tensor *noop, Tensor *output,
              ".");
   NVTE_CHECK(!output->row_scaled_nvfp4 || !use_2d_quantization,
              "Row-scaled NVFP4 quantization does not support 2D quantization.");
+  NVTE_CHECK(!output->row_scaled_nvfp4 || output->amax.dptr != nullptr,
+             "Row-scaled NVFP4 does not support disabling second-level scaling.");
   NVTE_CHECK(!output->row_scaled_nvfp4 || !output->has_columnwise_data(),
              "Row-scaled NVFP4 quantization does not produce columnwise output.");
   NVTE_CHECK(!use_2d_quantization || output->has_data(),

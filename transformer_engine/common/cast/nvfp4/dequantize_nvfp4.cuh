@@ -109,7 +109,9 @@ inline void dequantize(const Tensor &input, Tensor *output, cudaStream_t stream)
   const size_t threads = 512;
   const size_t blocks = DIVUP(total, threads);
   const size_t num_scale_tiles_X = DIVUP(Mread, static_cast<size_t>(4));
-  NVTE_CHECK(!row_scaled_nvfp4 || input.amax.dptr == nullptr || input.amax.numel() == N,
+  NVTE_CHECK(!row_scaled_nvfp4 || input.amax.dptr != nullptr,
+             "Row-scaled NVFP4 does not support disabling second-level scaling.");
+  NVTE_CHECK(!row_scaled_nvfp4 || input.amax.numel() == N,
              "Row-scaled NVFP4 dequantization requires one rowwise amax per row.");
 
   TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(

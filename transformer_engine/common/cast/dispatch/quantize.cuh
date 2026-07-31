@@ -111,6 +111,8 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
       if (row_scaled_nvfp4) {
         NVTE_CHECK(!quant_config_cpp.nvfp4_2d_quantization,
                    "Row-scaled NVFP4 quantization does not support 2D quantization.");
+        NVTE_CHECK(output_tensor->amax.dptr != nullptr,
+                   "Row-scaled NVFP4 does not support disabling second-level scaling.");
         NVTE_CHECK(
             !(nvfp4_use_4over6 && output_tensor->has_columnwise_data()),
             "Row-scaled NVFP4 transpose quantization is not supported with 4over6 mode. The 4over6 "
@@ -291,6 +293,8 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
       if (row_scaled_nvfp4) {
         NVTE_CHECK(!quant_config_cpp.nvfp4_2d_quantization,
                    "Row-scaled NVFP4 quantization does not support 2D quantization.");
+        NVTE_CHECK(output_tensor->amax.dptr != nullptr,
+                   "Row-scaled NVFP4 does not support disabling second-level scaling.");
         NVTE_CHECK(
             !(nvfp4_use_4over6 && output_tensor->has_columnwise_data()),
             "Row-scaled NVFP4 transpose quantization is not supported with 4over6 mode. The 4over6 "

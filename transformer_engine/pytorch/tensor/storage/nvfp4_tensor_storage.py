@@ -371,7 +371,7 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
         if columnwise_usage is None:
             columnwise_usage = self._columnwise_data is not None
         requires_amax = not (
-            self._quantizer is not None and self._quantizer.disable_2d_scaling
+            self._quantizer is not None and self._quantizer.disable_second_level_scale
         )
 
         # If both rowwise and columnwise are requested, create columnwise from rowwise if needed
@@ -484,7 +484,7 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
 
         # Also set columnwise amax (same as rowwise since it's just transposed data).
         # A missing amax represents unit global scaling.
-        if not self._quantizer.disable_2d_scaling:
+        if not self._quantizer.disable_second_level_scale:
             if self._amax_columnwise is None:
                 self._amax_columnwise = torch.empty_like(self._amax_rowwise)
             self._amax_columnwise.copy_(self._amax_rowwise)

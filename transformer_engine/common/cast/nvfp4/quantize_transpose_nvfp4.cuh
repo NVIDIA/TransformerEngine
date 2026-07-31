@@ -1463,6 +1463,8 @@ void quantize_transpose(const Tensor &input, const Tensor *noop, Tensor *output,
     NVTE_CHECK(is_fp4_dtype(output->data.dtype), "Output must have FP4 type.");
     NVTE_CHECK(output->scale_inv.dptr != nullptr, "Scaling tensor must be allocated");
   }
+  NVTE_CHECK(!row_scaled_nvfp4 || output->amax.dptr != nullptr,
+             "Row-scaled NVFP4 does not support disabling second-level scaling.");
   NVTE_CHECK(!row_scaled_nvfp4 || !output->has_columnwise_data(),
              "Row-scaled NVFP4 quantization does not produce columnwise output.");
   // In-kernel GEMM-swizzled scale output is only implemented on the 2D quantization
