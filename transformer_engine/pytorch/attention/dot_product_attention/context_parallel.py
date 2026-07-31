@@ -3406,9 +3406,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                         if fp8 and not fp8_recipe.mxfp8():
                             q_part, k_part, v_part = [
                                 Float8Tensor.make_like(x, data=y, dtype=fwd_nominal_dtype)
-                                for x, y in zip(
-                                    [q_fp8, k_fp8, v_fp8], [q_part, k_part, v_part]
-                                )
+                                for x, y in zip([q_fp8, k_fp8, v_fp8], [q_part, k_part, v_part])
                             ]
                     if use_fused_attention:
                         # Set per-step parameters for THD vs bshd/sbhd
