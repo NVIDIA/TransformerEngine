@@ -172,9 +172,7 @@ def _update_grouped_scale_buffers(
         if scale_buffer is not None:
             scale_updates[scale_buffer[0]] = scale_buffer[1]
     for index, tensor in enumerate(weight_tensors):
-        scale_buffer = _get_scale_buffer_info(
-            f"weight_gemm{index}", tensor, weight_quantizer
-        )
+        scale_buffer = _get_scale_buffer_info(f"weight_gemm{index}", tensor, weight_quantizer)
         if scale_buffer is not None:
             scale_updates[scale_buffer[0]] = scale_buffer[1]
     _update_scale_buffers(scale_buffers, scale_updates, activation_scale_decay)
@@ -855,9 +853,7 @@ class _GroupedLinear(torch.autograd.Function):
                 single_grouped_weight=single_grouped_weight,
                 single_grouped_bias=single_grouped_bias,
                 scale_buffers=scale_buffers,
-                quantized_scaling_factor_buffering_decay=(
-                    quantized_scaling_factor_buffering_decay
-                ),
+                quantized_scaling_factor_buffering_decay=(quantized_scaling_factor_buffering_decay),
                 weights=weights,
                 biases=biases,
                 out=out,
@@ -1742,9 +1738,7 @@ class GroupedLinear(TransformerEngineBaseModule):
             )
         self.use_grouped_tensor = use_grouped_tensor
         self.buffer_quantized_scaling_factors = buffer_quantized_scaling_factors
-        self.quantized_scaling_factor_buffering_decay = (
-            quantized_scaling_factor_buffering_decay
-        )
+        self.quantized_scaling_factor_buffering_decay = quantized_scaling_factor_buffering_decay
         single_grouped_weight, single_grouped_bias = resolve_grouped_linear_single_param_flags(
             single_grouped_weight, single_grouped_bias
         )
