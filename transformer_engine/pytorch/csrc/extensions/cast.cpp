@@ -696,23 +696,26 @@ py::object group_requantize_columnwise_and_swizzle_rowwise_(
              "Pre-quantized MXFP8 grouped input requires dims that are multiples of 128, but got (",
              total_tokens, ", ", hidden_dim, ").");
 
-  // Dequantize first: it reads the rowwise scales, which the swizzle below overwrites.
+  // Dequantize first: it reads the rowwise scales, which the swizzle below replaces.
   auto dequantized_grouped = group_dequantize(grouped_x, otype);
   auto dequantized =
       dequantized_grouped.attr("rowwise_data")
           .cast<at::Tensor>()
           .view({static_cast<int64_t>(total_tokens), static_cast<int64_t>(hidden_dim)});
 
+  // Swizzle the rowwise scales before attaching any columnwise data: a rowwise-only swizzle
+  // resets columnwise_scale_inv to None, which would strand the columnwise data below with a
+  // null scale pointer.
+  grouped_swizzle_for_gemm(grouped_x, /*rowwise=*/true, /*columnwise=*/false);
+
   // Rebuild the columnwise copy the wgrad GEMM needs. It cannot be derived from the rowwise
   // data because the two directions scale along perpendicular axes. The caller hands us a
   // columnwise-only, optimize_for_gemm quantizer, so the kernel emits swizzled columnwise
-  // scales directly and only the rowwise scales need the explicit swizzle below.
+  // scales directly.
   auto columnwise = group_quantize(dequantized, columnwise_quantizer, num_tensors, first_dims,
                                    std::nullopt, tensor_offsets, std::nullopt);
   grouped_x.attr("columnwise_data") = columnwise.attr("columnwise_data");
   grouped_x.attr("columnwise_scale_inv") = columnwise.attr("columnwise_scale_inv");
-
-  grouped_swizzle_for_gemm(grouped_x, /*rowwise=*/true, /*columnwise=*/false);
 
   if (return_dequantized) {
     return py::cast(dequantized);
