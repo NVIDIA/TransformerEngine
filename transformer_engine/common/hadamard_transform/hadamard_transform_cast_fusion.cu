@@ -44,8 +44,8 @@ using cute::Shape;  // Avoid conflict with transformer_engine::Shape
 
 // calculate the global encode scale factor for a given global amax.
 __device__ __forceinline__ float ComputeGlobalEncodeScaleFP4(const float global_amax) {
-  constexpr float kFP8E4M3Max = 448.0f;
-  constexpr float kFP4E2M1Max = 6.0f;
+  constexpr float kFP8E4M3Max = transformer_engine::detail::TypeExtrema<fp8e4m3>::max;
+  constexpr float kFP4E2M1Max = transformer_engine::detail::TypeExtrema<fp4e2m1>::max;
   // If scale is infinity, return max value of float32
   float global_encode_scale = cutlass::minimum_with_nan_propagation<float>{}(
     kFP8E4M3Max * kFP4E2M1Max / global_amax, cutlass::platform::numeric_limits<float>::max());
@@ -278,7 +278,7 @@ rht_gemm_device(MShape M, NShape N, KShape K, ClusterTileShape cluster_tile,
   bool is_dma_warp = (warp_idx == 1);
   bool is_epilogue_warp = (warp_idx >= 4 && warp_idx <= 7);
 
-  if (is_epilogue_warp && elect_one_sync()) {
+  if (is_epilogue_warp && elect_one_sync() && global_amax != nullptr) {
     cute::prefetch(raw_pointer_cast(global_amax));
   }
 
@@ -414,7 +414,10 @@ rht_gemm_device(MShape M, NShape N, KShape K, ClusterTileShape cluster_tile,
     accumulator_pipeline.producer_tail(accumulator_pipe_producer_state);
     tmem_allocator.free(tmem_base_ptr, TmemAllocator::Sm100TmemCapacityColumns);
   } else if (is_epilogue_warp) {
-    const float global_amax_val = *global_amax;
+    constexpr float kUnitGlobalScaleAmax =
+        transformer_engine::nvfp4::unit_global_scale_amax<fp8e4m3, fp4e2m1>();
+    const float global_amax_val =
+        global_amax == nullptr ? kUnitGlobalScaleAmax : *global_amax;
     static constexpr int FragmentSize = 256 / sizeof_bits_v<TC>;
 
     tmem_allocation_result_barrier.arrive_and_wait();
@@ -429,7 +432,8 @@ rht_gemm_device(MShape M, NShape N, KShape K, ClusterTileShape cluster_tile,
     auto thr_r2g = tiled_r2g.get_slice(thread_idx);
 
     // NVFP4 non-E8 recipe constants and global scales
-    static constexpr float fp4_max = 6.0f;
+    static constexpr float fp4_max =
+        transformer_engine::detail::TypeExtrema<fp4e2m1>::max;
 
     const float global_encode_scale = ComputeGlobalEncodeScaleFP4(global_amax_val);
     const float global_decode_scale = 1.0f / global_encode_scale;

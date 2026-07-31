@@ -72,9 +72,11 @@ constexpr int kThreadsPerBlock = 256;
 __global__ void compute_nvfp4_per_tensor_scale_kernel(float alpha_in, const float *amax_A,
                                                       const float *amax_B, float fp8_max_A,
                                                       float fp8_max_B, float *alpha_out) {
-  constexpr float fp4_max = 6.0f;
+  constexpr float fp4_max = transformer_engine::detail::TypeExtrema<fp4e2m1>::max;
   const float factor_inv = 1.0f / (fp4_max * fp4_max * fp8_max_A * fp8_max_B);
-  *alpha_out = alpha_in * (*amax_A) * (*amax_B) * factor_inv;
+  const float amax_A_value = amax_A == nullptr ? fp8_max_A * fp4_max : *amax_A;
+  const float amax_B_value = amax_B == nullptr ? fp8_max_B * fp4_max : *amax_B;
+  *alpha_out = alpha_in * amax_A_value * amax_B_value * factor_inv;
 }
 
 template <typename IType>
@@ -616,9 +618,9 @@ void nvfp4_expand_scale_to_fp8(const Tensor input, Tensor output, size_t tile_ro
  * NVFP4 COMPUTE PER-BLOCK DECODE SCALE KERNEL
  *
  * Computes per-block decode scale from block amax and global amax:
- *   global_scale = (fp8_max * fp4_max) / global_amax = 2688 / global_amax
+ *   global_scale = (max(E4M3) * max(E2M1)) / global_amax
  *   per_block_decode_scale = block_amax * (global_scale * (1 / fp4_max))
- *                          = block_amax * 448 / global_amax
+ *                          = block_amax * max(E4M3) / global_amax
  *
  * This matches the CUDA device function compute_decoding_scaling_factor() in core_nvfp4.cuh
  *
@@ -636,8 +638,8 @@ __global__ void nvfp4_compute_per_block_scale_kernel(
   const size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
   if (idx >= numel) return;
 
-  constexpr float fp4_max = 6.0f;
-  constexpr float fp8_max = 448.0f;
+  constexpr float fp4_max = transformer_engine::detail::TypeExtrema<fp4e2m1>::max;
+  constexpr float fp8_max = transformer_engine::detail::TypeExtrema<fp8e4m3>::max;
   constexpr float flt_max = 3.402823466e+38f;
   constexpr float tiny = 1.17549435e-38f;  // FLT_MIN
 
@@ -665,8 +667,8 @@ __global__ void nvfp4_compute_global_scale_kernel(
   const size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
   if (idx >= num_params) return;
 
-  constexpr float fp4_max = 6.0f;
-  constexpr float fp8_max = 448.0f;
+  constexpr float fp4_max = transformer_engine::detail::TypeExtrema<fp4e2m1>::max;
+  constexpr float fp8_max = transformer_engine::detail::TypeExtrema<fp8e4m3>::max;
   constexpr float flt_max = 3.402823466e+38f;
   constexpr float tiny = 1.17549435e-38f;  // FLT_MIN
 
@@ -757,8 +759,8 @@ __global__ void nvfp4_fused_scale_kernel(
   const size_t tile_row = out_row / block_len;
 
   // Compute the scale value
-  constexpr float fp4_max = 6.0f;
-  constexpr float fp8_max = 448.0f;
+  constexpr float fp4_max = transformer_engine::detail::TypeExtrema<fp4e2m1>::max;
+  constexpr float fp8_max = transformer_engine::detail::TypeExtrema<fp8e4m3>::max;
   constexpr float flt_max = 3.402823466e+38f;
   constexpr float tiny = 1.17549435e-38f;
 
@@ -927,9 +929,6 @@ void nvte_nvfp4_compute_per_tensor_scale(const NVTETensor inpA, const bool use_r
   const float fp8_max_A = static_cast<float>(tA->nvfp4_e4m3_max);
   const float fp8_max_B = static_cast<float>(tB->nvfp4_e4m3_max);
 
-  // check for not null pointers
-  NVTE_CHECK(amax_A_ptr != nullptr, "amax_A_ptr is null");
-  NVTE_CHECK(amax_B_ptr != nullptr, "amax_B_ptr is null");
   NVTE_CHECK(alpha_ptr != nullptr, "alpha_ptr is null");
 
   nvfp4_recipe::compute_nvfp4_per_tensor_scale_kernel<<<1, 1, 0, stream>>>(

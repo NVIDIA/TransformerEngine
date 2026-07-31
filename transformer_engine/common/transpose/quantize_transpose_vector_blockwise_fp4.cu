@@ -415,7 +415,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
 
   const int kNumThreadsReduce = kScaleBlockDim / kNVecOut;
   const float global_encode_scale =
-      kIsE8Scaling ? 1.0f : ComputeGlobalEncodeScaleFP4(global_amax[0]);
+      (kIsE8Scaling || global_amax == nullptr) ? 1.0f : ComputeGlobalEncodeScaleFP4(global_amax[0]);
   constexpr float fp4_max_inv = 1.0f / TypeExtrema<fp4e2m1>::max;
   const float global_encode_scale_multiplier = global_encode_scale * fp4_max_inv;
   const float global_decode_scale = 1.0 / global_encode_scale;

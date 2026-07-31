@@ -233,8 +233,9 @@ __device__ __forceinline__ void colwise_scaling(
     if constexpr (ROW_SCALED_NVFP4) {
       const size_t col_idx = col_offset + stage_X * TILE_DIM_X + thread_offset_X_colwise + w;
       S_enc_colwise_block =
-          col_idx < cols ? core::compute_global_encode_scaling_factor_FP4(amax_colwise_ptr[col_idx])
-                         : 1.0f;
+          col_idx < cols && amax_colwise_ptr != nullptr
+              ? core::compute_global_encode_scaling_factor_FP4(amax_colwise_ptr[col_idx])
+              : 1.0f;
     }
     const nvfp4_scale_t S_dec_b_fp8 =
         compute_decoding_scaling_factor(block_amax[w], S_enc_colwise_block);
@@ -324,8 +325,9 @@ __device__ __forceinline__ void rowwise_scaling(
     if constexpr (ROW_SCALED_NVFP4) {
       const size_t row_idx = row_offset + stage_Y * TILE_DIM_Y + it_offset_Y_rowwise;
       const float S_enc_rowwise_block =
-          row_idx < rows ? core::compute_global_encode_scaling_factor_FP4(amax_rowwise_ptr[row_idx])
-                         : 1.0f;
+          row_idx < rows && amax_rowwise_ptr != nullptr
+              ? core::compute_global_encode_scaling_factor_FP4(amax_rowwise_ptr[row_idx])
+              : 1.0f;
       S_dec_b_fp8 = compute_decoding_scaling_factor(block_amax, S_enc_rowwise_block);
       SFcoefficient =
           compute_nvfp4_scaling_coefficient<scaling_coeff_type>(S_dec_b_fp8, S_enc_rowwise_block);
@@ -713,15 +715,15 @@ inline void quantize_transpose_tuned_1D(const Tensor &input, const Tensor *noop,
   NVTE_CHECK(is_fp4_dtype(output->data.dtype), "Output must have FP4 type.");
   NVTE_CHECK(output->scale_inv.dptr != nullptr, "Scaling tensor must be allocated");
   NVTE_CHECK(!row_scaled_nvfp4 || output->amax.dptr != nullptr,
-             "Row-scaled NVFP4 quantization requires rowwise amax.");
-
+             "Row-scaled NVFP4 does not support disabling second-level scaling.");
   if (return_transpose) {
     NVTE_CHECK(is_fp4_dtype(output->columnwise_data.dtype),
                "Transposed output must have FP4 type.");
     NVTE_CHECK(output->columnwise_scale_inv.dptr != nullptr,
                "Transposed scaling tensor must be allocated");
     NVTE_CHECK(!row_scaled_nvfp4 || output->columnwise_amax.dptr != nullptr,
-               "Row-scaled NVFP4 transpose quantization requires columnwise amax.");
+               "Row-scaled NVFP4 transpose quantization does not support disabling "
+               "second-level scaling.");
   }
 
   const auto [rows, cols] = input.flat_2d_dims();

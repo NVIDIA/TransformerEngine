@@ -1401,21 +1401,22 @@ __global__ void setup_grouped_gemm_kernel(
   // For NVFP4 on Blackwell+: compute per-group alpha that includes global scale (amax).
   // A's amax: grouped path indexes a_amax[idx]; discrete path reads amax_ptrs[idx].
   if (use_per_group_alpha_beta) {
-    float a_amax_val = 0.0f;
-    bool has_a_amax = false;
+    constexpr float kUnitGlobalScaleAmax =
+        transformer_engine::nvfp4::unit_global_scale_amax<transformer_engine::fp8e4m3,
+                                                          transformer_engine::fp4e2m1>();
+    float a_amax_val = kUnitGlobalScaleAmax;
     if (has_a_multi_tensor) {
       auto *a_amax_p = static_cast<float *>(a_multi_tensor_args.amax_ptrs[idx]);
       if (a_amax_p != nullptr) {
         a_amax_val = *a_amax_p;
-        has_a_amax = true;
       }
     } else if (a_amax != nullptr) {
       a_amax_val = a_amax[idx];
-      has_a_amax = true;
     }
-    if (has_a_amax && b_amax && nvfp4_computed_alpha) {
-      constexpr float factor_inv = 1.0f / (6.0f * 6.0f * 448.0f * 448.0f);
-      nvfp4_computed_alpha[idx] = alpha_ptr[idx] * a_amax_val * b_amax[idx] * factor_inv;
+    if (nvfp4_computed_alpha != nullptr) {
+      constexpr float factor_inv = 1.0f / (kUnitGlobalScaleAmax * kUnitGlobalScaleAmax);
+      const float b_amax_val = b_amax == nullptr ? kUnitGlobalScaleAmax : b_amax[idx];
+      nvfp4_computed_alpha[idx] = alpha_ptr[idx] * a_amax_val * b_amax_val * factor_inv;
       alpha_ptrs[idx] = &nvfp4_computed_alpha[idx];
     } else {
       alpha_ptrs[idx] = alpha_ptr + idx;
@@ -1544,10 +1545,7 @@ inline void launch_grouped_gemm_setup(
   const bool b_rowwise = B_sel.rowwise;
 
   // NVFP4 alpha needs A's amax from either A_sel.amax (grouped) or amax_ptrs (discrete).
-  const bool a_has_amax = (A_sel.amax != nullptr) ||
-                          (A_sel.dptr == nullptr && a_multi_tensor_args.amax_ptrs[0] != nullptr);
-  const bool needs_nvfp4_alpha = transformer_engine::is_nvfp_scaling(A_sel.scaling_mode) &&
-                                 a_has_amax && (B_sel.amax != nullptr);
+  const bool needs_nvfp4_alpha = transformer_engine::is_nvfp_scaling(A_sel.scaling_mode);
 
   setup_grouped_gemm_kernel<<<num_blocks, threads_per_block, 0, stream>>>(
       ws.A_ptrs, ws.B_ptrs, ws.C_ptrs, ws.D_ptrs, ws.a_rows, ws.a_cols, ws.b_rows, ws.b_cols,
@@ -1618,14 +1616,6 @@ void nvte_grouped_gemm(const NVTEGroupedTensor A, int transa, const NVTEGroupedT
                                       "nvte_grouped_gemm");
   validate_nvfp4_grouped_gemm_support(A_sel, B_sel, use_per_group_alpha_beta);
   validate_fp8_block_grouped_gemm_support(A_sel, B_sel, sm);
-
-  // NVFP4 global-scale alpha requires per-tensor amax for both operands; without it
-  // the kernel silently drops the (amax_A * amax_B / factor) factor and produces
-  // numerically wrong output.
-  if (is_nvfp_scaling(A_sel.scaling_mode)) {
-    NVTE_CHECK(A_sel.amax != nullptr, "Grouped GEMM: NVFP4 A is missing amax.");
-    NVTE_CHECK(B_sel.amax != nullptr, "Grouped GEMM: NVFP4 B is missing amax.");
-  }
 
   // Workspaces: setup (pointer arrays) and cuBLAS
   auto workspace = setup_grouped_gemm_workspace(wspace_setup, wspace_cublas, num_tensors);
@@ -1775,14 +1765,6 @@ void nvte_grouped_gemm_with_discrete_inputA(const NVTETensor *A_list, size_t num
   A_sel.dptr = nullptr;
   A_sel.amax = nullptr;
 
-  if (nvfp4) {
-    for (size_t i = 0; i < num_tensors; ++i) {
-      NVTE_CHECK(a_multi_tensor_args.amax_ptrs[i] != nullptr, "Grouped GEMM: NVFP4 A_list tensor ",
-                 i, " is missing amax.");
-    }
-    NVTE_CHECK(B_sel.amax != nullptr, "Grouped GEMM: NVFP4 B is missing amax.");
-  }
-
   // Workspaces: setup (pointer arrays) and cuBLAS
   auto workspace = setup_grouped_gemm_workspace(wspace_setup, wspace_cublas, num_tensors);
 
@@ -1860,12 +1842,6 @@ void nvte_grouped_gemm_with_discrete_out(const NVTEGroupedTensor A, int transa,
                                       "nvte_grouped_gemm_with_discrete_out");
   validate_nvfp4_grouped_gemm_support(A_sel, B_sel, use_per_group_alpha_beta);
   validate_fp8_block_grouped_gemm_support(A_sel, B_sel, sm);
-
-  // NVFP4 global-scale alpha requires per-tensor amax for both operands.
-  if (is_nvfp_scaling(A_sel.scaling_mode)) {
-    NVTE_CHECK(A_sel.amax != nullptr, "Grouped GEMM: NVFP4 A is missing amax.");
-    NVTE_CHECK(B_sel.amax != nullptr, "Grouped GEMM: NVFP4 B is missing amax.");
-  }
 
   // Workspaces: setup (pointer arrays) and cuBLAS
   auto workspace = setup_grouped_gemm_workspace(wspace_setup, wspace_cublas, num_tensors);

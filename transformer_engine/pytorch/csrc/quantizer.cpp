@@ -1876,6 +1876,7 @@ NVFP4Quantizer::NVFP4Quantizer(const py::handle& quantizer) : Quantizer(quantize
     NVTE_ERROR("Unsupported NVFP4 4over6 error mode: ", nvfp4_4over6_err_mode);
   }
   this->row_scaled_nvfp4 = quantizer.attr("row_scaled_nvfp4").cast<bool>();
+  this->disable_second_level_scale = quantizer.attr("disable_second_level_scale").cast<bool>();
 
   // Get amax reduction group if needed for NVFP4 AG
   const bool with_amax_reduction = quantizer.attr("with_amax_reduction").cast<bool>();
@@ -1960,6 +1961,7 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(
              "NVFP4 requires tensor dims that are divisible by ", NVFP4_BLOCK_SIZE,
              " (got shape=", shape, ")");
   const bool row_scaled_nvfp4 = this->row_scaled_nvfp4;
+  const bool disable_second_level_scale = this->disable_second_level_scale;
   const bool nvfp4_use_4over6 = this->nvfp4_4over6_mode != kNVTENVFP44Over6Disabled;
   const int nvfp4_e4m3_max = this->nvfp4_e4m3_max;
   if (row_scaled_nvfp4) {
@@ -1983,7 +1985,9 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(
     const int64_t amax_rows = row_scaled_nvfp4 ? static_cast<int64_t>(flat_first_dim) : 1;
     // hadamard amax kernel will zero out pointer with ZeroAmaxKernel
     // nvte_compute_amax_with_config will zero out the pointer if needed
-    amax_rowwise = at::empty({amax_rows}, bit32_tensor_opts);
+    if (!disable_second_level_scale) {
+      amax_rowwise = at::empty({amax_rows}, bit32_tensor_opts);
+    }
   }
   if (columnwise_usage) {
     const std::vector<int64_t> scale_inv_shape_int64(columnwise_scale_inv_shape.begin(),
@@ -1999,7 +2003,9 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(
     // hadamard amax kernel will zero out pointer with ZeroAmaxKernel
     // nvte_compute_amax_with_config will zero out the pointer if needed
     const int64_t amax_cols = row_scaled_nvfp4 ? static_cast<int64_t>(flat_last_dim) : 1;
-    amax_columnwise = at::empty({amax_cols}, bit32_tensor_opts);
+    if (!disable_second_level_scale) {
+      amax_columnwise = at::empty({amax_cols}, bit32_tensor_opts);
+    }
   }
 
   // Convert tensors to Python
@@ -2010,8 +2016,9 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(
   auto rowwise_scale_inv_py = py_cast(rowwise_scale_inv_tensor, rowwise_usage);
   auto columnwise_data_py = py_cast(columnwise_data_tensor, columnwise_usage);
   auto columnwise_scale_inv_py = py_cast(columnwise_scale_inv_tensor, columnwise_usage);
-  auto amax_rowwise_py = py_cast(amax_rowwise, rowwise_usage);
-  auto amax_columnwise_py = py_cast(amax_columnwise, columnwise_usage);
+  auto amax_rowwise_py = py_cast(amax_rowwise, rowwise_usage && !disable_second_level_scale);
+  auto amax_columnwise_py =
+      py_cast(amax_columnwise, columnwise_usage && !disable_second_level_scale);
 
   // Construct Python NVFP4 tensor
   py::object out_py;
@@ -2079,7 +2086,9 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(
     out_cpp.set_rowwise_data(rowwise_data_tensor.data_ptr(), DType::kFloat4E2M1, shape);
     out_cpp.set_rowwise_scale_inv(rowwise_scale_inv_tensor.data_ptr(), DType::kFloat8E4M3,
                                   rowwise_scale_inv_shape);
-    out_cpp.set_amax(amax_rowwise.data_ptr(), DType::kFloat32, getTensorShape(amax_rowwise));
+    if (!disable_second_level_scale) {
+      out_cpp.set_amax(amax_rowwise.data_ptr(), DType::kFloat32, getTensorShape(amax_rowwise));
+    }
   }
   if (columnwise_usage) {
     // enforce 2D shape to avoid [S, B, H] shape and B and be 1
@@ -2090,8 +2099,10 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(
                                 col_data_shape_fp4);
     out_cpp.set_columnwise_scale_inv(columnwise_scale_inv_tensor.data_ptr(), DType::kFloat8E4M3,
                                      columnwise_scale_inv_shape);
-    out_cpp.set_columnwise_amax(amax_columnwise.data_ptr(), DType::kFloat32,
-                                getTensorShape(amax_columnwise));
+    if (!disable_second_level_scale) {
+      out_cpp.set_columnwise_amax(amax_columnwise.data_ptr(), DType::kFloat32,
+                                  getTensorShape(amax_columnwise));
+    }
   }
   out_cpp.set_with_gemm_swizzled_scales(with_gemm_swizzled_scales);
   out_cpp.set_row_scaled_nvfp4(row_scaled_nvfp4);
@@ -2127,6 +2138,7 @@ std::pair<GroupedTensorWrapper, py::object> NVFP4Quantizer::create_grouped_tenso
   std::optional<at::Tensor> columnwise_amax;
   const std::vector<size_t> logical_shape_vec = {logical_first_dim, logical_last_dim};
   const bool row_scaled_nvfp4 = this->row_scaled_nvfp4;
+  const bool disable_second_level_scale = this->disable_second_level_scale;
   const bool nvfp4_use_4over6 = this->nvfp4_4over6_mode != kNVTENVFP44Over6Disabled;
   const int nvfp4_e4m3_max = this->nvfp4_e4m3_max;
   if (row_scaled_nvfp4) {
@@ -2144,7 +2156,9 @@ std::pair<GroupedTensorWrapper, py::object> NVFP4Quantizer::create_grouped_tenso
     rowwise_scale_inv = at::empty({total_scale_elements}, uint8_opts);
     const int64_t amax_elements = row_scaled_nvfp4 ? static_cast<int64_t>(logical_first_dim)
                                                    : static_cast<int64_t>(num_tensors);
-    rowwise_amax = at::empty({amax_elements}, float_opts);
+    if (!disable_second_level_scale) {
+      rowwise_amax = at::empty({amax_elements}, float_opts);
+    }
   }
 
   if (columnwise_usage) {
@@ -2152,7 +2166,9 @@ std::pair<GroupedTensorWrapper, py::object> NVFP4Quantizer::create_grouped_tenso
     const auto scale_shape = get_scale_shape(logical_shape_vec, true);
     const int64_t total_scale_elements = static_cast<int64_t>(product(scale_shape));
     columnwise_scale_inv = at::empty({total_scale_elements}, uint8_opts);
-    columnwise_amax = at::empty({static_cast<int64_t>(num_tensors)}, float_opts);
+    if (!disable_second_level_scale) {
+      columnwise_amax = at::empty({static_cast<int64_t>(num_tensors)}, float_opts);
+    }
   }
 
   GroupedTensorWrapper out_cpp(num_tensors, logical_shape, this->get_scaling_mode());
@@ -2160,15 +2176,19 @@ std::pair<GroupedTensorWrapper, py::object> NVFP4Quantizer::create_grouped_tenso
     out_cpp.set_rowwise_data(rowwise_data->data_ptr(), this->dtype, getTensorShape(*rowwise_data));
     out_cpp.set_rowwise_scale_inv(rowwise_scale_inv->data_ptr(), DType::kFloat8E4M3,
                                   getTensorShape(*rowwise_scale_inv));
-    out_cpp.set_amax(rowwise_amax->data_ptr(), DType::kFloat32, getTensorShape(*rowwise_amax));
+    if (rowwise_amax.has_value()) {
+      out_cpp.set_amax(rowwise_amax->data_ptr(), DType::kFloat32, getTensorShape(*rowwise_amax));
+    }
   }
   if (columnwise_usage) {
     out_cpp.set_columnwise_data(columnwise_data->data_ptr(), this->dtype,
                                 getTensorShape(*columnwise_data));
     out_cpp.set_columnwise_scale_inv(columnwise_scale_inv->data_ptr(), DType::kFloat8E4M3,
                                      getTensorShape(*columnwise_scale_inv));
-    out_cpp.set_columnwise_amax(columnwise_amax->data_ptr(), DType::kFloat32,
-                                getTensorShape(*columnwise_amax));
+    if (columnwise_amax.has_value()) {
+      out_cpp.set_columnwise_amax(columnwise_amax->data_ptr(), DType::kFloat32,
+                                  getTensorShape(*columnwise_amax));
+    }
   }
   if (first_dims.has_value()) {
     out_cpp.set_first_dims(first_dims->data_ptr(), DType::kInt64, getTensorShape(*first_dims));
@@ -2286,6 +2306,7 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::convert_and_update_tensor(
   const bool with_gemm_swizzled_scales = nvfp4_emits_gemm_swizzled_scales(*this, shape);
 
   const bool row_scaled_nvfp4 = this->row_scaled_nvfp4;
+  const bool disable_second_level_scale = this->disable_second_level_scale;
   const bool nvfp4_use_4over6 = this->nvfp4_4over6_mode != kNVTENVFP44Over6Disabled;
   const int nvfp4_e4m3_max = this->nvfp4_e4m3_max;
   if (row_scaled_nvfp4) {
@@ -2313,7 +2334,10 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::convert_and_update_tensor(
       tensor.attr("_rowwise_scale_inv") = *rowwise_scale_inv;
     }
     const int64_t amax_rows = row_scaled_nvfp4 ? static_cast<int64_t>(flat_first_dim) : 1;
-    if (!amax_rowwise || amax_rowwise->numel() != amax_rows) {
+    if (disable_second_level_scale) {
+      amax_rowwise.reset();
+      tensor.attr("_amax_rowwise") = py::none();
+    } else if (!amax_rowwise || amax_rowwise->numel() != amax_rows) {
       const auto opts = at::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
       // hadamard amax kernel will zero out pointer with ZeroAmaxKernel
       // nvte_compute_amax_with_config will zero out the pointer if needed
@@ -2356,7 +2380,10 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::convert_and_update_tensor(
       tensor.attr("_columnwise_scale_inv") = *columnwise_scale_inv;
     }
     const int64_t amax_cols = row_scaled_nvfp4 ? static_cast<int64_t>(flat_last_dim) : 1;
-    if (!amax_columnwise || amax_columnwise->numel() != amax_cols) {
+    if (disable_second_level_scale) {
+      amax_columnwise.reset();
+      tensor.attr("_amax_columnwise") = py::none();
+    } else if (!amax_columnwise || amax_columnwise->numel() != amax_cols) {
       const auto opts = at::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
       // hadamard amax kernel will zero out pointer with ZeroAmaxKernel
       // nvte_compute_amax_with_config will zero out the pointer if needed
@@ -2384,7 +2411,9 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::convert_and_update_tensor(
     out_cpp.set_rowwise_data(rowwise_data->data_ptr(), DType::kFloat4E2M1, shape);
     out_cpp.set_rowwise_scale_inv(rowwise_scale_inv->data_ptr(), DType::kFloat8E4M3,
                                   getTensorShape(*rowwise_scale_inv));
-    out_cpp.set_amax(amax_rowwise->data_ptr(), DType::kFloat32, getTensorShape(*amax_rowwise));
+    if (amax_rowwise.has_value()) {
+      out_cpp.set_amax(amax_rowwise->data_ptr(), DType::kFloat32, getTensorShape(*amax_rowwise));
+    }
   }
   if (columnwise_usage) {
     // enforce 2D shape to avoid [S, B, H] shape and B and be 1
@@ -2395,8 +2424,10 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::convert_and_update_tensor(
                                 col_data_shape_fp4);
     out_cpp.set_columnwise_scale_inv(columnwise_scale_inv->data_ptr(), DType::kFloat8E4M3,
                                      getTensorShape(*columnwise_scale_inv));
-    out_cpp.set_columnwise_amax(amax_columnwise->data_ptr(), DType::kFloat32,
-                                getTensorShape(*amax_columnwise));
+    if (amax_columnwise.has_value()) {
+      out_cpp.set_columnwise_amax(amax_columnwise->data_ptr(), DType::kFloat32,
+                                  getTensorShape(*amax_columnwise));
+    }
   }
   out_cpp.set_with_gemm_swizzled_scales(with_gemm_swizzled_scales);
   out_cpp.set_row_scaled_nvfp4(row_scaled_nvfp4);
@@ -2484,7 +2515,7 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
                                    const std::optional<TensorWrapper>& noop_flag,
                                    bool compute_amax) {
   auto reduce_amaxes = [&]() {
-    if (!this->with_amax_reduction) {
+    if (!this->with_amax_reduction || this->disable_second_level_scale) {
       return;
     }
 
@@ -2611,7 +2642,7 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
       // We need:
       // 1. Rowwise amax = amax for input
       // 2. Columnwise amax = amax for RHT(input.t)
-      if (compute_amax) {
+      if (compute_amax && !this->disable_second_level_scale) {
         NVTE_SCOPED_GIL_RELEASE({
           nvte_hadamard_transform_amax(input.data(), out.data(), 0,
                                        this->rht_matrix_random_sign_mask_t, stream);
@@ -2624,7 +2655,7 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
           "Use with_post_rht_amax=true instead.");
     }
   } else {  // Without RHT
-    if (compute_amax && !row_scaled_nvfp4) {
+    if (compute_amax && !row_scaled_nvfp4 && !this->disable_second_level_scale) {
       // Amax pointers
       auto rowwise_amax_ptr = out.get_amax().data_ptr;
       auto columnwise_amax_ptr = out.get_columnwise_amax().data_ptr;

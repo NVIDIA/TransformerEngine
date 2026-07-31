@@ -111,6 +111,8 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
       if (row_scaled_nvfp4) {
         NVTE_CHECK(!quant_config_cpp.nvfp4_2d_quantization,
                    "Row-scaled NVFP4 quantization does not support 2D quantization.");
+        NVTE_CHECK(output_tensor->amax.dptr != nullptr,
+                   "Row-scaled NVFP4 does not support disabling second-level scaling.");
         NVTE_CHECK(
             !(nvfp4_use_4over6 && output_tensor->has_columnwise_data()),
             "Row-scaled NVFP4 transpose quantization is not supported with 4over6 mode. The 4over6 "
@@ -121,8 +123,11 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
                 (dtype == DType::kBFloat16 && rows % 32 == 0 && cols % 32 == 0),
             "Row-scaled NVFP4 transpose quantization requires BF16 input and dimensions that are "
             "multiples of 32.");
-        nvfp4::compute_rowwise_amax(*input_tensor, noop_tensor, output_tensor, stream);
-        if (output_tensor->has_columnwise_data()) {
+        if (output_tensor->amax.dptr != nullptr) {
+          nvfp4::compute_rowwise_amax(*input_tensor, noop_tensor, output_tensor, stream);
+        }
+        if (output_tensor->has_columnwise_data() &&
+            output_tensor->columnwise_amax.dptr != nullptr) {
           nvfp4::compute_columnwise_amax(*input_tensor, noop_tensor, output_tensor, stream);
         }
       }
@@ -288,6 +293,8 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
       if (row_scaled_nvfp4) {
         NVTE_CHECK(!quant_config_cpp.nvfp4_2d_quantization,
                    "Row-scaled NVFP4 quantization does not support 2D quantization.");
+        NVTE_CHECK(output_tensor->amax.dptr != nullptr,
+                   "Row-scaled NVFP4 does not support disabling second-level scaling.");
         NVTE_CHECK(
             !(nvfp4_use_4over6 && output_tensor->has_columnwise_data()),
             "Row-scaled NVFP4 transpose quantization is not supported with 4over6 mode. The 4over6 "
@@ -298,8 +305,11 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
                 (dtype == DType::kBFloat16 && rows % 32 == 0 && cols % 32 == 0),
             "Row-scaled NVFP4 transpose quantization requires BF16 input and dimensions that are "
             "multiples of 32.");
-        nvfp4::compute_rowwise_amax(*grad_tensor, noop_tensor, output_tensor, stream);
-        if (output_tensor->has_columnwise_data()) {
+        if (output_tensor->amax.dptr != nullptr) {
+          nvfp4::compute_rowwise_amax(*grad_tensor, noop_tensor, output_tensor, stream);
+        }
+        if (output_tensor->has_columnwise_data() &&
+            output_tensor->columnwise_amax.dptr != nullptr) {
           nvfp4::compute_columnwise_amax(*grad_tensor, noop_tensor, output_tensor, stream);
         }
       }

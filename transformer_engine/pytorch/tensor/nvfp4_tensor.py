@@ -135,6 +135,8 @@ class NVFP4Quantizer(Quantizer):
     nvfp4_e4m3_max: int
     """NVFP4 4over6 candidate-selection error mode."""
     nvfp4_4over6_err_mode: str
+    """Whether to disable the global (second-level) NVFP4 scale."""
+    disable_second_level_scale: bool
 
     """RHT sign mask (0 when sign randomization is disabled)"""
     rht_matrix_random_sign_mask_t: int
@@ -155,6 +157,7 @@ class NVFP4Quantizer(Quantizer):
         nvfp4_e4m3_max: int = 448,
         nvfp4_4over6_err_mode: str = "MAE",
         with_random_sign_mask: bool = True,
+        disable_second_level_scale: bool = False,
     ) -> None:
         super().__init__(rowwise=rowwise, columnwise=columnwise)
         self.dtype = DType.cast(fp4_dtype)
@@ -164,6 +167,14 @@ class NVFP4Quantizer(Quantizer):
         self.amax_reduction_group = amax_reduction_group
         self.with_2d_quantization = with_2d_quantization
         self.stochastic_rounding = stochastic_rounding
+        if row_scaled_nvfp4 and disable_second_level_scale:
+            warnings.warn(
+                "Row-scaled NVFP4 requires second-level scaling; disabling "
+                "row_scaled_nvfp4 because disable_second_level_scale=True.",
+                UserWarning,
+                stacklevel=2,
+            )
+            row_scaled_nvfp4 = False
         self.row_scaled_nvfp4 = row_scaled_nvfp4
         self.nvfp4_use_4over6 = nvfp4_use_4over6
         self.nvfp4_e4m3_max = nvfp4_e4m3_max if nvfp4_use_4over6 else 448
@@ -172,6 +183,7 @@ class NVFP4Quantizer(Quantizer):
         self.nvfp4_4over6_err_mode = nvfp4_4over6_err_mode.upper()
         if self.nvfp4_4over6_err_mode not in ("MAE", "MSE"):
             raise ValueError("nvfp4_4over6_err_mode must be 'MAE' or 'MSE'.")
+        self.disable_second_level_scale = disable_second_level_scale
         self.rht_matrix_random_sign_mask_t = get_random_sign_mask_for_rht(
             with_random_sign_mask, torch.cuda.current_device()
         )
@@ -244,6 +256,7 @@ class NVFP4Quantizer(Quantizer):
             nvfp4_e4m3_max=self.nvfp4_e4m3_max,
             nvfp4_4over6_err_mode=self.nvfp4_4over6_err_mode,
             with_random_sign_mask=self.rht_matrix_random_sign_mask_t != 0,
+            disable_second_level_scale=self.disable_second_level_scale,
         )
         quantizer.internal = self.internal
         quantizer.optimize_for_gemm = self.optimize_for_gemm
@@ -768,7 +781,11 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
                 rowwise_scale_inv = scale_inv_init_func(
                     tensor._rowwise_scale_inv, *args[1:], **kwargs
                 )
-                amax_rowwise = torch.zeros_like(tensor._amax_rowwise, *args[1:], **kwargs)
+                amax_rowwise = (
+                    None
+                    if tensor._amax_rowwise is None
+                    else torch.zeros_like(tensor._amax_rowwise, *args[1:], **kwargs)
+                )
             else:
                 rowwise_data, rowwise_scale_inv, amax_rowwise = None, None, None
 
@@ -777,7 +794,11 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
                 columnwise_scale_inv = scale_inv_init_func(
                     tensor._columnwise_scale_inv, *args[1:], **kwargs
                 )
-                amax_columnwise = torch.zeros_like(tensor._amax_columnwise, *args[1:], **kwargs)
+                amax_columnwise = (
+                    None
+                    if tensor._amax_columnwise is None
+                    else torch.zeros_like(tensor._amax_columnwise, *args[1:], **kwargs)
+                )
             else:
                 columnwise_data, columnwise_scale_inv, amax_columnwise = (
                     None,
