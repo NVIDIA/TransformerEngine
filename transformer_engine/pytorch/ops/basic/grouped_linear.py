@@ -74,19 +74,15 @@ GRAD_INPUT_BUFFER_KEY = "grad_input"
 def is_op_fuser_grouped_tensor_path_supported(
     recipe: Optional[Recipe],
     dtype: torch.dtype,
-    *,
-    single_grouped_weight: bool,
 ) -> bool:
-    """Whether the op fuser supports this recipe, dtype, and weight layout.
+    """Whether the op-fuser grouped-tensor path supports this recipe and dtype.
 
     * The graph-safe path dispatches to ``general_grouped_gemm_for_grouped_tensor``,
       which is backed by ``nvte_grouped_gemm_with_discrete_inputA`` in the common
       library.
     * MXFP8 and NVFP4 are supported on Blackwell GPUs with Compute Capability
       (CC) 10.x and 11.0. NVFP4 requires RHT because graph-safe grouped
-      quantization currently requires it. NVFP4 is additionally restricted to
-      discrete weights because a single grouped weight uses a non-RHT weight
-      quantizer.
+      quantization currently requires it.
     * FP8 per-tensor current scaling uses grouped current-scaling quantization
       through ``tex.group_quantize`` and cuBLASLt grouped GEMM with per-batch
       scalar FP8 scaling. It is supported on Hopper and Blackwell, with
@@ -128,7 +124,11 @@ def is_op_fuser_grouped_tensor_path_supported(
     if recipe.mxfp8():
         return device_capability >= (10, 0)
     if recipe.nvfp4():
-        return device_capability >= (10, 0) and not recipe.disable_rht and not single_grouped_weight
+        return (
+            device_capability >= (10, 0)
+            and not recipe.disable_rht
+            and not recipe.row_scaled_activation
+        )
     return False
 
 
@@ -1060,7 +1060,6 @@ class GroupedLinear(BasicOperation):
         use_grouped_tensor_path = is_op_fuser_grouped_tensor_path_supported(
             recipe,
             dtype,
-            single_grouped_weight=self.single_grouped_weight,
         )
         if (self.single_grouped_weight or self.single_grouped_bias) and not use_grouped_tensor_path:
             raise RuntimeError(

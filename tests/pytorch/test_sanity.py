@@ -87,11 +87,11 @@ model_configs = {
 
 
 def nvfp4_vanilla():
-    nvfp4_recipe = recipe.NVFP4BlockScaling()
-    nvfp4_recipe.fp4_quant_fwd_inp = recipe.QParams()
-    nvfp4_recipe.fp4_quant_fwd_weight = recipe.QParams()
-    nvfp4_recipe.fp4_quant_bwd_grad = recipe.QParams()
-    return nvfp4_recipe
+    return recipe.NVFP4BlockScaling(
+        disable_rht=True,
+        disable_stochastic_rounding=True,
+        disable_2d_quantization=True,
+    )
 
 
 def nvfp4_row_scaled():
@@ -124,7 +124,7 @@ fp8_recipes = []
 if mxfp8_available:
     fp8_recipes.append(recipe.MXFP8BlockScaling())
 if nvfp4_available:
-    fp8_recipes.append(nvfp4_vanilla())  # TODO: fix check for this
+    fp8_recipes.append(nvfp4_vanilla())
     fp8_recipes.append(nvfp4_4over6())
 if fp8_block_scaling_available:
     fp8_recipes.append(recipe.Float8BlockScaling())
@@ -608,7 +608,6 @@ def test_sanity_grouped_linear(
     if single_param and not is_module_grouped_tensor_path_supported(
         fp8_recipe,
         dtype,
-        single_grouped_weight=True,
     ):
         pytest.skip("Single grouped parameters require the native grouped-tensor path")
     if single_param:
@@ -627,12 +626,13 @@ def test_sanity_grouped_linear(
         if not is_fp8_supported(config):
             pytest.skip("Model config does not support FP8")
         if fp8_recipe.nvfp4():
-            if not getattr(fp8_recipe, "row_scaled_activation", False):
-                pytest.skip("NVFP4 not supported for grouped linear")
-            if single_param:
-                pytest.skip("Row-scaled NVFP4 does not support GroupedTensor grouped linear")
-            if dtype == torch.float16:
-                pytest.skip("FP16 output for NVFP4 not supported")
+            if dtype != torch.bfloat16:
+                pytest.skip("NVFP4 GroupedLinear requires BF16")
+            if single_param and not fp8_model_params:
+                pytest.skip(
+                    "NVFP4 single grouped BF16 primary weights require unsupported non-RHT "
+                    "grouped weight quantization; enable quantized model initialization"
+                )
 
     use_fp8 = fp8_recipe is not None
     with quantized_model_init(enabled=use_fp8 and fp8_model_params, recipe=fp8_recipe):

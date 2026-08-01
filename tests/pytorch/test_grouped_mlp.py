@@ -366,7 +366,6 @@ class TestGroupedLinearOp:
         ) and not is_op_fuser_grouped_tensor_path_supported(
             compute_recipe,
             dtype,
-            single_grouped_weight=single_grouped_weight,
         ):
             # Single grouped parameters intentionally have no split-quantize fallback.
             pytest.skip("Single grouped parameters require the native grouped-tensor path")
@@ -759,7 +758,6 @@ class TestGroupedLinearOp:
         if not is_op_fuser_grouped_tensor_path_supported(
             recipe,
             dtype,
-            single_grouped_weight=single_grouped_weight,
         ):
             pytest.skip("Configuration falls back to the non-CUDA-graph-safe path")
 

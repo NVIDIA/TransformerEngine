@@ -219,12 +219,13 @@ GroupedTensorWrapper GroupedTensorFromPyTorchGroupedTensor(py::handle tensor) {
   }
   auto ret = GroupedTensorWrapper(num_tensors, logical_shape, scaling_mode);
 
-  auto get_initialized_storage_shape = [&logical_shape](const at::Tensor &data) {
+  auto get_initialized_storage_shape = [](const at::Tensor &data) {
     auto shape = getTensorShape(data);
     if (data.numel() == 0) {
-      // PyTorch may use a null pointer for a valid zero-sized allocation. Keep an explicitly
-      // provided empty storage distinguishable from the uninitialized {nullptr, {0}} sentinel.
-      shape = logical_shape;
+      // PyTorch may use a null pointer for a valid zero-sized allocation. TE Common reserves
+      // {nullptr, {0}} for uninitialized storage, so use an orientation-neutral 2D empty shape
+      // to distinguish explicitly provided rowwise or columnwise storage from missing storage.
+      shape = {0, 0};
     }
     return shape;
   };

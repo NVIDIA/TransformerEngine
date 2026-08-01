@@ -1171,7 +1171,6 @@ def test_grouped_gemm_grouped_tensor_zero_work_bias(use_bias_scale) -> None:
     if not is_module_grouped_tensor_path_supported(
         None,
         torch.bfloat16,
-        single_grouped_weight=False,
     ):
         pytest.skip("BF16 GroupedTensor GEMM is unavailable.")
 
@@ -1238,7 +1237,6 @@ def test_grouped_gemm_grouped_tensor_zero_work(layout, accumulate, quant_type) -
     if not is_module_grouped_tensor_path_supported(
         test_recipe,
         dtype,
-        single_grouped_weight=True,
     ):
         pytest.skip(f"{quant_type} grouped-tensor GEMM is unavailable")
 
@@ -1614,7 +1612,6 @@ def test_single_grouped_weight_rejects_host_m_splits(monkeypatch, m_splits, exce
     if not is_module_grouped_tensor_path_supported(
         None,
         torch.bfloat16,
-        single_grouped_weight=True,
     ):
         pytest.skip("Native GroupedTensor GEMM is unavailable on this system.")
 
@@ -1663,7 +1660,6 @@ def test_single_grouped_weight_matches_discrete_grouped_tensor_path(monkeypatch,
     if not is_module_grouped_tensor_path_supported(
         fp8_recipe,
         torch.bfloat16,
-        single_grouped_weight=True,
     ):
         pytest.skip("Recipe is not supported with a single grouped weight on this system.")
 
@@ -1734,7 +1730,6 @@ def test_single_grouped_weight_mxfp8_workspace_cache(monkeypatch):
     if not is_module_grouped_tensor_path_supported(
         mxfp8_recipe,
         torch.bfloat16,
-        single_grouped_weight=True,
     ):
         pytest.skip("MXFP8 single-weight GroupedTensor path is unavailable on this system.")
     monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
@@ -1835,7 +1830,6 @@ def test_single_grouped_primary_mxfp8_bypasses_weight_workspace(monkeypatch):
     if not is_module_grouped_tensor_path_supported(
         mxfp8_recipe,
         torch.bfloat16,
-        single_grouped_weight=True,
     ):
         pytest.skip("MXFP8 single-weight GroupedTensor path is unavailable on this system.")
     monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
@@ -2056,7 +2050,6 @@ def test_grouped_parameter_layout_matches_cpu_m_splits(
     if not is_module_grouped_tensor_path_supported(
         fp8_recipe,
         torch.bfloat16,
-        single_grouped_weight=single_grouped_weight,
     ):
         pytest.skip("Recipe is not supported by the module GroupedTensor path on this system.")
     FP8GlobalStateManager.reset()
@@ -2224,7 +2217,6 @@ def test_grouped_linear_grouped_tensor_path_matches_legacy(
     if not is_module_grouped_tensor_path_supported(
         fp8_recipe,
         dtype,
-        single_grouped_weight=False,
     ):
         pytest.skip("Recipe is not supported by the module GroupedTensor path on this system.")
 
@@ -2290,7 +2282,6 @@ def test_grouped_linear_grouped_tensor_path_single_grouped_bias_delay_wgrad(monk
     if not is_module_grouped_tensor_path_supported(
         None,
         torch.bfloat16,
-        single_grouped_weight=False,
     ):
         pytest.skip("BF16 GroupedTensor path is unavailable on this system.")
 
@@ -2344,7 +2335,6 @@ def test_grouped_linear_returns_single_grouped_bias_parameter(monkeypatch):
     if not is_module_grouped_tensor_path_supported(
         None,
         torch.bfloat16,
-        single_grouped_weight=False,
     ):
         pytest.skip("BF16 GroupedTensor path is unavailable on this system.")
     monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
@@ -2429,7 +2419,6 @@ def test_grouped_linear_caller_output_buffers(use_fused_path, supply, monkeypatc
     if use_fused_path and not is_module_grouped_tensor_path_supported(
         None,
         torch.bfloat16,
-        single_grouped_weight=False,
     ):
         pytest.skip("BF16 GroupedTensor path is unavailable on this system.")
 
@@ -2620,7 +2609,6 @@ def test_grouped_linear_fused_path_cuda_graph_safe(fp8_recipe, bias, monkeypatch
     if not is_module_grouped_tensor_path_supported(
         fp8_recipe,
         dtype,
-        single_grouped_weight=False,
     ):
         pytest.skip("Recipe is not supported by the module GroupedTensor path on this system.")
 

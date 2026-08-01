@@ -450,10 +450,8 @@ __all__ = ["GroupedLinear", "is_module_grouped_tensor_path_supported"]
 def is_module_grouped_tensor_path_supported(
     recipe: Optional[Recipe],
     dtype: torch.dtype,
-    *,
-    single_grouped_weight: bool,
 ) -> bool:
-    """Whether the module supports this recipe, dtype, and weight layout.
+    """Whether the module grouped-tensor path supports this recipe and dtype.
 
     The grouped-tensor path dispatches to ``general_grouped_gemm_for_grouped_tensor``
     and does not inspect split values because they may reside in a CUDA tensor.
@@ -464,7 +462,7 @@ def is_module_grouped_tensor_path_supported(
     * Hopper (CC 9.0): BF16/FP16, FP8 per-tensor current scaling, and FP8
       block scaling.
     * Blackwell (CC 10.x and 11.0): BF16/FP16, FP8 per-tensor current scaling,
-      MXFP8, and NVFP4 with RHT. NVFP4 currently requires discrete weights.
+      MXFP8, and NVFP4 with RHT.
     * Custom recipes are unsupported because they may assign different
       quantizers to input, weight, and grad-output roles. This predicate
       currently supports only built-in recipes with known uniform layouts.
@@ -507,7 +505,11 @@ def is_module_grouped_tensor_path_supported(
     if recipe.mxfp8():
         return device_capability >= (10, 0)
     if recipe.nvfp4():
-        return device_capability >= (10, 0) and not recipe.disable_rht and not single_grouped_weight
+        return (
+            device_capability >= (10, 0)
+            and not recipe.disable_rht
+            and not recipe.row_scaled_activation
+        )
     return False
 
 
@@ -1108,7 +1110,6 @@ class _GroupedLinear(torch.autograd.Function):
         recipe_supports_grouped_tensor = is_module_grouped_tensor_path_supported(
             recipe,
             activation_dtype,
-            single_grouped_weight=single_grouped_weight,
         )
         grouped_tensor_features_supported = (
             not fp8_calibration
