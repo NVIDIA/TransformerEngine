@@ -400,6 +400,9 @@ class FP8GlobalState:
         default_factory=dict
     )
     skip_fp8_weight_update_tensor: Optional[torch.Tensor] = None
+    # Whether the graph capture in progress caches quantized params. Scopes the flag
+    # tensor above, which outlives capture and would otherwise leak into later ones.
+    caching_quantized_params: bool = False
 
 
 class FP8GlobalStateManager:
@@ -419,8 +422,18 @@ class FP8GlobalStateManager:
         cls.quantization_state.skip_fp8_weight_update_tensor.fill_(skip)
 
     @classmethod
+    def set_caching_quantized_params(cls, caching: bool) -> None:
+        """Mark whether the graph capture in progress caches quantized params"""
+        cls.quantization_state.caching_quantized_params = caching
+
+    @classmethod
     def get_skip_fp8_weight_update_tensor(cls) -> Optional[torch.Tensor]:
-        """Get the skip fp8 weight update tensor"""
+        """Get the skip fp8 weight update tensor
+
+        ``None`` unless the capture in progress caches quantized params.
+        """
+        if not cls.quantization_state.caching_quantized_params:
+            return None
         return cls.quantization_state.skip_fp8_weight_update_tensor
 
     @classmethod
