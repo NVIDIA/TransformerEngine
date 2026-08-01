@@ -854,6 +854,10 @@ class GroupedLinear(BasicOperation):
         """
         if not (9, 0) <= get_device_compute_capability() <= (11, 0):
             return False
+        # Every graph-safe flow runs the grouped-GEMM setup workspace query, which
+        # requires cuBLAS 13.3+; fall back to the split-quantize flow on older cuBLAS.
+        if tex.get_cublasLt_version() < 130300:
+            return False
         if with_quantized_compute:
             # FP8 per-tensor current scaling runs on the Hopper and Blackwell grouped GEMM
             # path; the compute-capability range was already checked above. On Hopper it

@@ -127,6 +127,60 @@ def test_fsdp2_mxfp4_qat_ops_tests():
     )
 
 
+@pytest.mark.skipif(NUM_PROCS < 2, reason="Requires 2+ GPUs")
+@pytest.mark.skipif(not te.torch_version() >= (2, 4, 0), reason="Requires PyTorch 2.4.0+")
+def test_fsdp2_mxfp4_qat_module_tests():
+    """MXFP4-QAT parity with pure-recipe module-level support under FSDP2."""
+    mxfp8_available, reason = te.is_mxfp8_available(return_reason=True)
+    if not mxfp8_available:
+        pytest.skip(reason)
+    test_path = _FSDP2_DIR / "run_fsdp2_mxfp4_qat_modules.py"
+    nproc = min(NUM_PROCS, 2)
+    run_distributed(
+        [
+            "torchrun",
+            f"--nproc_per_node={nproc}",
+            "--local-ranks-filter=0",
+            "-m",
+            "pytest",
+            str(test_path),
+            "-v",
+            "-s",
+            "--tb=short",
+        ],
+        valid_returncodes=(0,),
+        env=os.environ,
+        timeout=600,
+    )
+
+
+@pytest.mark.skipif(NUM_PROCS < 2, reason="Requires 2+ GPUs")
+@pytest.mark.skipif(not te.torch_version() >= (2, 4, 0), reason="Requires PyTorch 2.4.0+")
+def test_gtp_mxfp4_qat_tests():
+    """MXFP4-QAT through a real multi-rank DistributedWeight (GTP) implementer."""
+    mxfp8_available, reason = te.is_mxfp8_available(return_reason=True)
+    if not mxfp8_available:
+        pytest.skip(reason)
+    test_path = _FSDP2_DIR / "run_gtp_mxfp4_qat.py"
+    nproc = min(NUM_PROCS, 2)
+    run_distributed(
+        [
+            "torchrun",
+            f"--nproc_per_node={nproc}",
+            "--local-ranks-filter=0",
+            "-m",
+            "pytest",
+            str(test_path),
+            "-v",
+            "-s",
+            "--tb=short",
+        ],
+        valid_returncodes=(0,),
+        env=os.environ,
+        timeout=600,
+    )
+
+
 @pytest.mark.skipif(NUM_PROCS < 4, reason="Requires 4+ GPUs for DP4→DP2 resharding test")
 @pytest.mark.skipif(not te.torch_version() >= (2, 4, 0), reason="Requires PyTorch 2.4.0+")
 @pytest.mark.parametrize("recipe", _parametrize_recipes())
