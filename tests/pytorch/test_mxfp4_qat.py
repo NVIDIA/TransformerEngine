@@ -4,8 +4,10 @@
 
 """Per-step and end-to-end tests for the MXFP4 weight-QAT recipes."""
 import ctypes
+import functools
 import os
 
+# Preload NVRTC so the JIT builds of the in-tree kernels below can link.
 for _n in ("libnvrtc.so.13", "libnvrtc.so.12", "libnvrtc.so"):
     try:
         ctypes.CDLL(_n, mode=ctypes.RTLD_GLOBAL)
@@ -13,6 +15,7 @@ for _n in ("libnvrtc.so.13", "libnvrtc.so.12", "libnvrtc.so"):
     except OSError:
         continue
 
+import pytest
 import torch
 
 import transformer_engine.pytorch as te
@@ -21,21 +24,52 @@ from transformer_engine.common.recipe import (
     MXFP4QATFloat8BlockScaling,
     MXFP4QATMXFP8BlockScaling,
 )
-from transformer_engine.pytorch import fp8_autocast
+from transformer_engine.pytorch import fp8, fp8_autocast
 from transformer_engine.pytorch.mxfp4_qat import mxfp4_fake_quantize
 from references.mxfp4_qat_reference import mxfp4_fake_quantize_reference
 from transformer_engine.pytorch.tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
 
-torch.manual_seed(1234)
 DEV = "cuda"
 RUN_PERF = os.environ.get("NVTE_MXFP4_QAT_PERF", "0") == "1"
-E2M1_GRID = torch.tensor([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], device=DEV)
 SHAPES = [(128, 256), (192, 448), (512, 1024)]
 
 FP8_TOL_1OP = 0.045
 FP8_TOL_2OP = 0.065
 BF16_TOL = 0.005
+
+# The support checks query the device, so guard them to keep CUDA-less collection working.
+if torch.cuda.is_available():
+    mxfp8_available, reason_for_no_mxfp8 = fp8.check_mxfp8_support()
+    fp8_block_scaling_available, reason_for_no_fp8_block_scaling = (
+        fp8.check_fp8_block_scaling_support()
+    )
+else:
+    mxfp8_available = fp8_block_scaling_available = False
+    reason_for_no_mxfp8 = reason_for_no_fp8_block_scaling = "CUDA is not available"
+
+pytestmark = pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
+
+QAT_RECIPES = (
+    pytest.param(MXFP4QATMXFP8BlockScaling, id="mxfp8"),
+    pytest.param(
+        MXFP4QATFloat8BlockScaling,
+        id="fp8_blockwise",
+        marks=pytest.mark.skipif(
+            not fp8_block_scaling_available, reason=reason_for_no_fp8_block_scaling
+        ),
+    ),
+)
+BACKWARD_OVERRIDES = (
+    pytest.param(None, id="none"),
+    pytest.param("dequantized", id="dequantized"),
+    pytest.param("high_precision", id="high_precision"),
+)
+
+
+@functools.lru_cache(maxsize=None)
+def e2m1_grid():
+    return torch.tensor([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], device=DEV)
 
 
 def make_weight(m, n, dtype=torch.bfloat16, zero_blocks=0, outliers=0):
@@ -69,7 +103,7 @@ def fake_quant_ref_fp64(w):
     exp = torch.where(amax > 0, exp, torch.zeros_like(exp))
     scale = torch.ldexp(torch.ones_like(amax), exp)
     y = (w64 / scale).clamp(min=-6.0, max=6.0)
-    grid = E2M1_GRID.to(torch.float64)
+    grid = e2m1_grid().to(torch.float64)
     cand = torch.cat([-grid.flip(0)[:-1], grid])
     d = (y.unsqueeze(-1) - cand).abs()
     near = d.argmin(dim=-1)
@@ -83,6 +117,7 @@ def fake_quant_ref_fp64(w):
 
 
 def test_fake_quant_grid_scale_rtne():
+    torch.manual_seed(1234)
     for m, n in SHAPES:
         w = make_weight(m, n, zero_blocks=4, outliers=4)
         w_hat = mxfp4_fake_quantize(w)
@@ -99,7 +134,7 @@ def test_fake_quant_grid_scale_rtne():
         scale = torch.where(amax > 0, scale, torch.ones_like(scale))
 
         vals = (wh32 / scale).abs()
-        assert torch.isin(vals, E2M1_GRID).all(), "values off the E2M1 grid"
+        assert torch.isin(vals, e2m1_grid()).all(), "values off the E2M1 grid"
         nz = (amax.double() > 6.0 * 2.0**-126) & (amax.double() <= 6.0 * 2.0**125)
         assert ((scale.double() * 6.0)[nz] >= amax.double()[nz]).all()
         assert (((scale.double() / 2.0) * 6.0)[nz] < amax.double()[nz]).all()
@@ -109,6 +144,7 @@ def test_fake_quant_grid_scale_rtne():
 
 
 def test_D_lossless_in_bf16():
+    torch.manual_seed(1234)
     for m, n in SHAPES:
         w = make_weight(m, n, outliers=4)
         w_hat_bf16 = mxfp4_fake_quantize(w)
@@ -119,6 +155,7 @@ def test_D_lossless_in_bf16():
 
 
 def test_E_mxfp8_rowwise_lossless():
+    torch.manual_seed(1234)
     for m, n in SHAPES:
         w = make_weight(m, n, zero_blocks=4, outliers=4)
         w[0, :32] = torch.tensor(2.0**-127, dtype=torch.bfloat16)
@@ -144,6 +181,7 @@ def test_E_mxfp8_rowwise_lossless():
 
 def test_dequantize_e8m0_extreme_codes():
     """Real MXFP8 software dequantize with planted UE8M0 codes 0/255."""
+    torch.manual_seed(1234)
     w = make_weight(32, 64)
     q = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3, columnwise=False).quantize(
         mxfp4_fake_quantize(w)
@@ -160,6 +198,7 @@ def test_dequantize_e8m0_extreme_codes():
 
 
 def test_G_blockwise_lossless_and_transpose():
+    torch.manual_seed(1234)
     for m, n in SHAPES:
         w = make_weight(m, n, zero_blocks=4)
         w_hat = mxfp4_fake_quantize(w)
@@ -183,6 +222,7 @@ def test_G_blockwise_lossless_and_transpose():
 
 def test_lossless_dequant_to_bf16():
     """Both weight encodings dequantize to bf16 bit-exactly (bwd override target dtype)."""
+    torch.manual_seed(1234)
     for m, n in SHAPES:
         w = make_weight(m, n, zero_blocks=4, outliers=4)
         w[0, :32] = torch.tensor(2.0**-127, dtype=torch.bfloat16)
@@ -206,6 +246,7 @@ def test_lossless_dequant_to_bf16():
 
 
 def test_C_mxfp8_colwise_bound():
+    torch.manual_seed(1234)
     for m, n in SHAPES:
         w_hat = mxfp4_fake_quantize(make_weight(m, n, zero_blocks=4, outliers=4))
         q = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3).quantize(w_hat)
@@ -224,7 +265,6 @@ _INTREE_KERNELS = {}
 def _intree_kernel(fast_math=False):
     """JIT-compile the in-tree kernel; fast_math=True rebuilds it with --use_fast_math."""
     if fast_math not in _INTREE_KERNELS:
-        import os
         from torch.utils.cpp_extension import load_inline
 
         src_dir = os.environ.get(
@@ -306,6 +346,7 @@ PARITY_SHAPES = SHAPES + [(3, 416), (1, 32)]
 
 
 def test_kernel_matches_torch_reference():
+    torch.manual_seed(1234)
     for m, n in PARITY_SHAPES:
         for dtype in (torch.bfloat16, torch.float32):
             w = make_weight(m, n, dtype=dtype, zero_blocks=4, outliers=4)
@@ -314,6 +355,7 @@ def test_kernel_matches_torch_reference():
 
 
 def test_edge_value_domains():
+    torch.manual_seed(1234)
     m, n = 64, 128
     w = make_weight(m, n)
 
@@ -361,14 +403,12 @@ def test_edge_value_domains():
         clean_rows[3] = False
         assert torch.isfinite(gk[clean_rows]).all()
 
-    try:
+    with pytest.raises(ValueError):
         mxfp4_fake_quantize(torch.zeros(32, 32, device=DEV, dtype=torch.float16))
-        raise SystemExit("fp16 should be rejected")
-    except ValueError:
-        pass
 
 
 def test_blockwise_recipe_is_128x128():
+    torch.manual_seed(1234)
     r = MXFP4QATFloat8BlockScaling()
     assert r.x_block_scaling_dim == 1 and r.w_block_scaling_dim == 2
     assert r.grad_block_scaling_dim == 1
@@ -386,6 +426,7 @@ def test_blockwise_recipe_is_128x128():
 
 
 def test_blockwise_over_ratio_is_bounded_not_lossless():
+    torch.manual_seed(1234)
     w = make_weight(128, 128)
     w[0, :32] = torch.tensor(2.0**-14, dtype=torch.bfloat16)
     w[64, 0] = 100.0
@@ -404,10 +445,9 @@ def test_blockwise_over_ratio_is_bounded_not_lossless():
     assert err <= tile_amax * 2.0**-9, "over-ratio loss larger than FP8 headroom"
 
 
+@pytest.mark.skipif(not RUN_PERF, reason="set NVTE_MXFP4_QAT_PERF=1 to run benchmarks")
 def test_kernel_perf():
-    if not RUN_PERF:
-        print("  SKIP (set NVTE_MXFP4_QAT_PERF=1 to run benchmarks)")
-        return
+    torch.manual_seed(1234)
     rows, cols = 8192, 8192
     w = make_weight(rows, cols)
     k = _intree_kernel()
@@ -428,15 +468,16 @@ def test_kernel_perf():
     t_kernel = timeit(lambda: k.mxfp4_fake_quantize_intree(w))
     t_torch = timeit(lambda: mxfp4_fake_quantize_reference(w))
     moved = rows * cols * 2 * 2
-    print(
-        f"  kernel: {t_kernel:.1f} us ({moved / t_kernel / 1e3:.0f} GB/s), "
-        f"torch: {t_torch:.1f} us ({moved / t_torch / 1e3:.0f} GB/s)"
+    assert t_kernel < t_torch, (
+        f"kernel slower than the torch reference: kernel {t_kernel:.1f} us "
+        f"({moved / t_kernel / 1e3:.0f} GB/s) vs torch {t_torch:.1f} us "
+        f"({moved / t_torch / 1e3:.0f} GB/s)"
     )
-    assert t_kernel < t_torch, "kernel slower than the torch reference"
 
 
 def test_kernel_fast_math_immune():
     """The kernel stays bit-identical when compiled with --use_fast_math."""
+    torch.manual_seed(1234)
     k = _intree_kernel(fast_math=True)
     for m, n in PARITY_SHAPES:
         for dtype in (torch.bfloat16, torch.float32):
@@ -526,6 +567,7 @@ def test_exp2f_e8m0_all_codes():
 
 def test_ste_identity_gradient():
     """mxfp4_fake_quantize carries an identity (STE) gradient and matches the reference forward."""
+    torch.manual_seed(1234)
     for dtype in (torch.bfloat16, torch.float32):
         w = make_weight(64, 128, dtype=dtype).requires_grad_(True)
         up = torch.randn_like(w)
@@ -537,6 +579,7 @@ def test_ste_identity_gradient():
 
 def test_misaligned_and_noncontiguous():
     """Misaligned storage-offset views and non-contiguous inputs match an aligned copy bitwise."""
+    torch.manual_seed(1234)
     for dtype, off in ((torch.bfloat16, 4), (torch.float32, 2)):
         m, n = 64, 128
         flat = (torch.randn(m * n + off, device=DEV, dtype=torch.float32) * 0.02).to(dtype)
@@ -655,27 +698,44 @@ def test_blockwise_feasibility_enumeration():
     assert (
         boundary is not None and boundary >= 12
     ), f"full-payload exactness should hold at least through spread 2^11, got {boundary}"
-    print(
-        f"  full-grid exact through spread d={boundary - 1}; first loss at d={boundary} "
-        "(E4M3 subnormal lattice bound)"
-    )
 
 
 def test_fp16_pipeline_rejected():
     """fp16 weights and fp16 activation dtypes must fail loudly under MXFP4 QAT."""
-    mod = te.Linear(256, 128, bias=False, params_dtype=torch.float16, device=DEV)
     import transformer_engine.pytorch.ops as te_ops
 
+    torch.manual_seed(1234)
+    mod = te.Linear(256, 128, bias=False, params_dtype=torch.float16, device=DEV)
     ops_mod = te_ops.Linear(256, 128, bias=False, dtype=torch.float16, device=DEV)
     x = torch.randn(64, 256, device=DEV, dtype=torch.float16)
     for qat_mod in (mod, ops_mod):
         for recipe in (MXFP4QATMXFP8BlockScaling(), MXFP4QATFloat8BlockScaling()):
-            try:
+            with pytest.raises((NotImplementedError, ValueError)):
                 with fp8_autocast(enabled=True, fp8_recipe=recipe):
                     qat_mod(x)
-                raise SystemExit(f"fp16 pipeline must be rejected ({recipe.__class__.__name__})")
-            except (NotImplementedError, ValueError):
-                pass
+
+
+def test_input_validation_rejected():
+    """CPU, non-2D, and inner-dim-misaligned weights must fail loudly."""
+    with pytest.raises(ValueError, match="CUDA"):
+        mxfp4_fake_quantize(torch.zeros(2, 32, dtype=torch.bfloat16))
+    with pytest.raises(ValueError, match="2D"):
+        mxfp4_fake_quantize(torch.zeros(2, 2, 32, dtype=torch.bfloat16, device=DEV))
+    with pytest.raises(ValueError, match="divisible"):
+        mxfp4_fake_quantize(torch.zeros(2, 33, dtype=torch.bfloat16, device=DEV))
+
+
+def test_subnormal_tie_2pow128():
+    """2^-128 sits exactly on the 0 vs 0.5 midpoint of the 2^-126 scale; RTNE picks 0."""
+    w = torch.zeros(1, 32, dtype=torch.bfloat16, device=DEV)
+    w[0, 0] = 2.0**-127  # block amax -> scale 2^-126
+    w[0, 1] = 2.0**-128  # 0.25 on the E2M1 grid: tie between 0 and 0.5
+    w[0, 2] = -(2.0**-128)
+    out = mxfp4_fake_quantize(w)
+    assert out[0, 0].item() == 2.0**-127
+    assert out[0, 1].item() == 0.0 and not out[0, 1].signbit()
+    assert out[0, 2].item() == 0.0 and out[0, 2].signbit()
+    _assert_bits_equal(out, mxfp4_fake_quantize_reference(w), "2^-128 tie kernel != reference")
 
 
 def test_recipe_switch_invalidates_cache():
@@ -733,89 +793,79 @@ def test_recipe_field_controls_qat():
     assert blockwise_1d.w_block_scaling_dim == 1
 
 
-def test_ops_linear_backward_overrides():
+@pytest.mark.parametrize("override", BACKWARD_OVERRIDES)
+@pytest.mark.parametrize("recipe_cls", QAT_RECIPES)
+@pytest.mark.parametrize("op_kind", ("basic", "linear"))
+def test_ops_linear_backward_overrides(op_kind, recipe_cls, override):
     """te.ops linear paths apply weight QAT and preserve each backward policy."""
     import transformer_engine.pytorch.ops as te_ops
 
-    for op_kind in ("basic", "linear"):
-        for recipe_cls in (MXFP4QATMXFP8BlockScaling, MXFP4QATFloat8BlockScaling):
-            for override in (None, "dequantized", "high_precision"):
-                torch.manual_seed(13)
-                recipe = recipe_cls(backward_override=override)
-                if op_kind == "basic":
-                    op = te_ops.BasicLinear(
-                        256,
-                        128,
-                        device=DEV,
-                        dtype=torch.bfloat16,
-                    )
-                else:
-                    # Exercise the BasicLinear+Bias forward fusion used by te.ops.Linear.
-                    op = te_ops.Linear(
-                        256,
-                        128,
-                        bias=True,
-                        device=DEV,
-                        dtype=torch.bfloat16,
-                    )
-                    with torch.no_grad():
-                        op.bias.zero_()
+    torch.manual_seed(13)
+    recipe = recipe_cls(backward_override=override)
+    if op_kind == "basic":
+        op = te_ops.BasicLinear(
+            256,
+            128,
+            device=DEV,
+            dtype=torch.bfloat16,
+        )
+    else:
+        # Exercise the BasicLinear+Bias forward fusion used by te.ops.Linear.
+        op = te_ops.Linear(
+            256,
+            128,
+            bias=True,
+            device=DEV,
+            dtype=torch.bfloat16,
+        )
+        with torch.no_grad():
+            op.bias.zero_()
 
-                with torch.no_grad():
-                    op.weight.copy_(
-                        (torch.randn_like(op.weight, dtype=torch.float32) * 0.02).to(
-                            op.weight.dtype
-                        )
-                    )
-                w_master = op.weight.detach().to(torch.float32)
-                w_hat = mxfp4_fake_quantize(op.weight.detach()).to(torch.float32)
+    with torch.no_grad():
+        op.weight.copy_(
+            (torch.randn_like(op.weight, dtype=torch.float32) * 0.02).to(op.weight.dtype)
+        )
+    w_master = op.weight.detach().to(torch.float32)
+    w_hat = mxfp4_fake_quantize(op.weight.detach()).to(torch.float32)
 
-                x = (torch.randn(128, 256, device=DEV, dtype=torch.float32) * 0.5).to(
-                    torch.bfloat16
-                )
-                x.requires_grad_(True)
-                with fp8_autocast(enabled=True, fp8_recipe=recipe):
-                    out = op(x)
+    x = (torch.randn(128, 256, device=DEV, dtype=torch.float32) * 0.5).to(torch.bfloat16)
+    x.requires_grad_(True)
+    with fp8_autocast(enabled=True, fp8_recipe=recipe):
+        out = op(x)
 
-                ref_out_hat = x.detach().to(torch.float32) @ w_hat.t()
-                ref_out_master = x.detach().to(torch.float32) @ w_master.t()
-                e_hat = rel_err(out, ref_out_hat)
-                e_master = rel_err(out, ref_out_master)
-                assert (
-                    e_hat < FP8_TOL_1OP
-                ), f"{op_kind} {recipe_cls.__name__} {override}: fwd err {e_hat}"
-                assert e_hat < e_master, (
-                    f"{op_kind} {recipe_cls.__name__} {override}: "
-                    "forward did not use the MXFP4-projected weight"
-                )
+    ref_out_hat = x.detach().to(torch.float32) @ w_hat.t()
+    ref_out_master = x.detach().to(torch.float32) @ w_master.t()
+    e_hat = rel_err(out, ref_out_hat)
+    e_master = rel_err(out, ref_out_master)
+    assert e_hat < FP8_TOL_1OP, f"{op_kind} {recipe_cls.__name__} {override}: fwd err {e_hat}"
+    assert e_hat < e_master, (
+        f"{op_kind} {recipe_cls.__name__} {override}: "
+        "forward did not use the MXFP4-projected weight"
+    )
 
-                grad = (torch.randn_like(out, dtype=torch.float32) * 0.1).to(torch.bfloat16)
-                out.backward(grad)
+    grad = (torch.randn_like(out, dtype=torch.float32) * 0.1).to(torch.bfloat16)
+    out.backward(grad)
 
-                ref_dx_hat = grad.to(torch.float32) @ w_hat
-                ref_dx_master = grad.to(torch.float32) @ w_master
-                e_hat = rel_err(x.grad, ref_dx_hat)
-                e_master = rel_err(x.grad, ref_dx_master)
-                if override == "high_precision":
-                    assert (
-                        e_master < BF16_TOL
-                    ), f"{op_kind} {recipe_cls.__name__}: high-precision dgrad err {e_master}"
-                    assert e_master < e_hat, "high-precision dgrad did not use the master weight"
-                elif override == "dequantized":
-                    assert (
-                        e_hat < BF16_TOL
-                    ), f"{op_kind} {recipe_cls.__name__}: dequantized dgrad err {e_hat}"
-                    assert e_hat < e_master, "dequantized dgrad did not use the QAT weight"
-                else:
-                    assert (
-                        e_hat < FP8_TOL_1OP
-                    ), f"{op_kind} {recipe_cls.__name__}: quantized dgrad err {e_hat}"
-                    assert e_hat < e_master, "quantized dgrad did not use the QAT weight"
+    ref_dx_hat = grad.to(torch.float32) @ w_hat
+    ref_dx_master = grad.to(torch.float32) @ w_master
+    e_hat = rel_err(x.grad, ref_dx_hat)
+    e_master = rel_err(x.grad, ref_dx_master)
+    if override == "high_precision":
+        assert (
+            e_master < BF16_TOL
+        ), f"{op_kind} {recipe_cls.__name__}: high-precision dgrad err {e_master}"
+        assert e_master < e_hat, "high-precision dgrad did not use the master weight"
+    elif override == "dequantized":
+        assert e_hat < BF16_TOL, f"{op_kind} {recipe_cls.__name__}: dequantized dgrad err {e_hat}"
+        assert e_hat < e_master, "dequantized dgrad did not use the QAT weight"
+    else:
+        assert e_hat < FP8_TOL_1OP, f"{op_kind} {recipe_cls.__name__}: quantized dgrad err {e_hat}"
+        assert e_hat < e_master, "quantized dgrad did not use the QAT weight"
 
-                assert op.weight.grad is not None, "STE did not return wgrad to the master weight"
-                ref_dw = grad.to(torch.float32).t() @ x.detach().to(torch.float32)
-                wgrad_tol = BF16_TOL if override == "high_precision" else FP8_TOL_2OP
-                assert rel_err(op.weight.grad, ref_dw) < wgrad_tol
+    assert op.weight.grad is not None, "STE did not return wgrad to the master weight"
+    ref_dw = grad.to(torch.float32).t() @ x.detach().to(torch.float32)
+    wgrad_tol = BF16_TOL if override == "high_precision" else FP8_TOL_2OP
+    assert rel_err(op.weight.grad, ref_dw) < wgrad_tol
 
 
 def _run_module(module_kind, recipe, override, fuse):
@@ -922,60 +972,10 @@ def _run_module(module_kind, recipe, override, fuse):
             assert e < wgrad_tol, f"wgrad err {e} (G)"
 
 
-def test_e2e_matrix():
-    for module_kind in ("linear", "grouped"):
-        for recipe_cls in (MXFP4QATMXFP8BlockScaling, MXFP4QATFloat8BlockScaling):
-            for override in (None, "dequantized", "high_precision"):
-                for fuse in (False, True):
-                    _run_module(module_kind, recipe_cls(), override, fuse)
-                    print(
-                        f"  e2e OK {module_kind} {recipe_cls.__name__} "
-                        f"override={override} fuse={fuse}"
-                    )
-
-
-TESTS = [
-    test_fake_quant_grid_scale_rtne,
-    test_D_lossless_in_bf16,
-    test_E_mxfp8_rowwise_lossless,
-    test_dequantize_e8m0_extreme_codes,
-    test_G_blockwise_lossless_and_transpose,
-    test_C_mxfp8_colwise_bound,
-    test_lossless_dequant_to_bf16,
-    test_kernel_matches_torch_reference,
-    test_edge_value_domains,
-    test_blockwise_recipe_is_128x128,
-    test_blockwise_over_ratio_is_bounded_not_lossless,
-    test_exp2f_e8m0_all_codes,
-    test_ste_identity_gradient,
-    test_misaligned_and_noncontiguous,
-    test_bf16_exhaustive_bit_patterns,
-    test_fp32_bit_fuzz,
-    test_scale_threshold_and_rtne_midpoints,
-    test_deployment_top_cap_domain,
-    test_blockwise_feasibility_enumeration,
-    test_recipe_switch_invalidates_cache,
-    test_recipe_field_controls_qat,
-    test_ops_linear_backward_overrides,
-    test_fp16_pipeline_rejected,
-    test_kernel_perf,
-    test_kernel_fast_math_immune,
-    test_e2e_matrix,
-]
-
-if __name__ == "__main__":
-    import sys
-    import traceback
-
-    failed = 0
-    for t in TESTS:
-        try:
-            t()
-            torch.cuda.synchronize()
-            print(f"PASS {t.__name__}")
-        except Exception:
-            failed += 1
-            print(f"FAIL {t.__name__}")
-            traceback.print_exc()
-    print(f"{len(TESTS) - failed}/{len(TESTS)} passed")
-    sys.exit(1 if failed else 0)
+@pytest.mark.parametrize("fuse", (False, True), ids=("no_fuse", "fuse"))
+@pytest.mark.parametrize("override", BACKWARD_OVERRIDES)
+@pytest.mark.parametrize("recipe_cls", QAT_RECIPES)
+@pytest.mark.parametrize("module_kind", ("linear", "grouped"))
+def test_e2e(module_kind, recipe_cls, override, fuse):
+    """End-to-end fwd/bwd for te.Linear and te.GroupedLinear under both QAT recipes."""
+    _run_module(module_kind, recipe_cls(), override, fuse)

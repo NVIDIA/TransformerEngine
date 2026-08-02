@@ -6,18 +6,11 @@
 
 """FSDP2 coverage for MXFP4-QAT module-level APIs.
 
-Run with:
-  torchrun --nproc_per_node=2 -m pytest <this_file> -v -s --tb=short
+Run with: torchrun --nproc_per_node=2 -m pytest <this_file> -v -s --tb=short
 
-Module counterpart of ``run_fsdp2_mxfp4_qat_ops.py`` (same reference scheme:
-master vs MXFP4-projected weights discriminate which operand each backward
-override used). Covers only configurations that pure recipes already support:
-
-* te.Linear / te.LayerNormLinear: all backward override modes.
-* te.LayerNormMLP: mode ``None`` (the module rejects overrides).
-* te.GroupedLinear, independent per-expert weights: all override modes.
-
-Both QAT host recipes (MXFP8 and 128x128 blockwise FP8) are parametrized.
+Module counterpart of ``run_fsdp2_mxfp4_qat_ops.py``: Linear/LayerNormLinear with all
+backward overrides, LayerNormMLP with mode ``None``, GroupedLinear (independent expert
+weights) with all overrides; both QAT host recipes (MXFP8, blockwise FP8) parametrized.
 """
 
 from collections.abc import Callable, Sequence
@@ -249,9 +242,7 @@ def _run_module_case(
     expected_dx = dx_master if override == "high_precision" else dx_projected
     torch.testing.assert_close(x.grad, expected_dx, rtol=0, atol=0)
     expected_wgrad_ref = master_ref if override == "high_precision" else projected_ref
-    _assert_fsdp_weight_grads(
-        qat_module, expected_wgrad_ref, rtol=wgrad_rtol, atol=wgrad_atol
-    )
+    _assert_fsdp_weight_grads(qat_module, expected_wgrad_ref, rtol=wgrad_rtol, atol=wgrad_atol)
 
 
 @pytest.mark.parametrize("recipes", _RECIPES)
@@ -273,9 +264,7 @@ def test_fsdp2_module_linear_qat(recipes, override) -> None:
         )
 
     x = _make_input(256, in_features, device)
-    _run_module_case(
-        factory, x, (), qat_cls=qat_cls, pure_cls=pure_cls, override=override
-    )
+    _run_module_case(factory, x, (), qat_cls=qat_cls, pure_cls=pure_cls, override=override)
 
 
 @pytest.mark.parametrize("recipes", _RECIPES)
@@ -297,9 +286,7 @@ def test_fsdp2_module_layernorm_linear_qat(recipes, override) -> None:
         )
 
     x = _make_input(256, in_features, device)
-    _run_module_case(
-        factory, x, (), qat_cls=qat_cls, pure_cls=pure_cls, override=override
-    )
+    _run_module_case(factory, x, (), qat_cls=qat_cls, pure_cls=pure_cls, override=override)
 
 
 @pytest.mark.parametrize("recipes", _RECIPES)
@@ -320,9 +307,7 @@ def test_fsdp2_module_layernorm_mlp_qat_none(recipes) -> None:
         )
 
     x = _make_input(256, hidden_size, device)
-    _run_module_case(
-        factory, x, (), qat_cls=qat_cls, pure_cls=pure_cls, override=None
-    )
+    _run_module_case(factory, x, (), qat_cls=qat_cls, pure_cls=pure_cls, override=None)
 
 
 @pytest.mark.parametrize("recipes", _RECIPES)
@@ -347,6 +332,4 @@ def test_fsdp2_module_grouped_linear_qat(recipes, override) -> None:
         )
 
     x = _make_input(sum(m_splits), in_features, device)
-    _run_module_case(
-        factory, x, (m_splits,), qat_cls=qat_cls, pure_cls=pure_cls, override=override
-    )
+    _run_module_case(factory, x, (m_splits,), qat_cls=qat_cls, pure_cls=pure_cls, override=override)

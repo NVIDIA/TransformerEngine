@@ -6,15 +6,10 @@
 
 """FSDP2 coverage for MXFP4-QAT fusible operations.
 
-Run with:
-  torchrun --nproc_per_node=2 -m pytest <this_file> -v -s --tb=short
+Run with: torchrun --nproc_per_node=2 -m pytest <this_file> -v -s --tb=short
 
-Covers only configurations that pure MXFP8 already supports:
-
-* BasicLinear/Linear: all backward override modes.
-* GroupedLinear, independent high-precision weights: ``None``.
-* Fused GroupedMLP, independent high-precision weights: ``None``, when the CuTe
-  DSL fusion is available.
+Covers only what pure MXFP8 supports: BasicLinear/Linear with all backward override
+modes; GroupedLinear and fused GroupedMLP (independent weights) with mode ``None``.
 """
 
 from collections.abc import Callable, Sequence

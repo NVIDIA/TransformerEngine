@@ -4,12 +4,12 @@
 
 """Pure-PyTorch reference for MXFP4 weight fake-quantization.
 
-Bit-identical specification of transformer_engine.pytorch.mxfp4_qat
-(tex.mxfp4_fake_quantize): per 1x32 block, scale = 2^clamp(ceil(log2(amax/6)), -126,
-125) derived from the amax bit pattern, RTNE onto the E2M1 grid, saturate at 6,
-multiply back. Non-finite values NaN-poison their whole block, -0 keeps its sign, and
-the scale floor/cap keep every grid value representable in bf16/fp32.
+Bit-identical spec of tex.mxfp4_fake_quantize: per 1x32 block, scale =
+2^clamp(ceil(log2(amax/6)), -126, 125) from the amax bit pattern, RTNE onto the E2M1
+grid, saturate at 6, multiply back. Non-finite values NaN-poison their whole block,
+-0 keeps its sign, and the scale floor/cap keep every grid value representable in bf16/fp32.
 """
+
 import torch
 
 _E2M1_MAX = 6.0

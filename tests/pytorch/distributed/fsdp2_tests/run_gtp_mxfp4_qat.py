@@ -6,25 +6,13 @@
 
 """Multi-rank DistributedWeight (GTP) coverage for MXFP4-QAT.
 
-Run with:
-  torchrun --nproc_per_node=2 -m pytest <this_file> -v -s --tb=short
+Run with: torchrun --nproc_per_node=2 -m pytest <this_file> -v -s --tb=short
 
-TE ships no DistributedWeight implementer, so this file provides a real one
-(``_GTPShardedWeight``: dim-0 shards, all-gather materialize, reduce-scatter
-finalize) and drives the module APIs through it end to end. The reference
-scheme mirrors ``run_fsdp2_mxfp4_qat_ops.py``: master vs MXFP4-projected full
-weights discriminate which operand each backward override used.
-
-Covers:
-
-* te.Linear / te.LayerNormLinear / te.GroupedLinear: all override modes
-  (None replays projection + host quantization on the re-gathered master;
-  dequantized dequantizes that replay; high_precision reads the un-projected
-  re-gathered master).
-* Loud rejection of the unsupported GTP surfaces (ops API, single grouped
-  weight, LayerNormMLP, delayed wgrad).
-
-Shares ``conftest.py`` (dist init) with the FSDP2 scripts in this directory.
+A real DistributedWeight implementer (``_GTPShardedWeight``) drives te.Linear /
+LayerNormLinear / GroupedLinear through all backward override modes; unsupported
+GTP surfaces must fail fast. Master vs MXFP4-projected full weights discriminate
+which operand each override used (high_precision reads the master, others the
+projection).
 """
 
 from collections.abc import Callable, Sequence
@@ -75,11 +63,9 @@ def _device() -> torch.device:
 
 
 class _GTPShardedWeight(torch.nn.Parameter):
-    """Real DistributedWeight implementer: dim-0 shards over the default group.
+    """Dim-0 sharded DistributedWeight: all-gather materialize, reduce-scatter finalize.
 
-    materialize all-gathers every member's full weight; finalize reduce-scatters
-    each full wgrad back to its shard with AVG (the test feeds every rank the
-    same batch, so AVG keeps single-rank references bit-comparable).
+    AVG reduce keeps single-rank references bit-comparable (every rank feeds the same batch).
     """
 
     is_distributed_weight = True
@@ -98,9 +84,7 @@ class _GTPShardedWeight(torch.nn.Parameter):
     def _materialize(self) -> list[torch.Tensor]:
         full_weights = []
         for member in self._members():
-            full = torch.empty(
-                member._full_shape, dtype=member.dtype, device=member.device
-            )
+            full = torch.empty(member._full_shape, dtype=member.dtype, device=member.device)
             dist.all_gather_into_tensor(full, member.data.contiguous())
             full_weights.append(full)
         return full_weights
@@ -121,9 +105,7 @@ class _GTPShardedWeight(torch.nn.Parameter):
         shard_grads = []
         for member, wgrad in zip(self._members(), wgrad_list):
             shard_grad = torch.empty_like(member.data, dtype=wgrad.dtype)
-            dist.reduce_scatter_tensor(
-                shard_grad, wgrad.contiguous(), op=dist.ReduceOp.AVG
-            )
+            dist.reduce_scatter_tensor(shard_grad, wgrad.contiguous(), op=dist.ReduceOp.AVG)
             shard_grads.append(shard_grad)
         return shard_grads if self._group is not None else shard_grads[0]
 
@@ -268,7 +250,6 @@ def _run_gtp_case(
     torch.testing.assert_close(y_qat.detach(), y_projected, rtol=0, atol=0)
     assert not torch.equal(y_qat.detach(), y_master)
 
-    # Dgrad operand per override (see module docstring).
     expected_dx = dx_master if override == "high_precision" else dx_projected
     torch.testing.assert_close(x.grad, expected_dx, rtol=0, atol=0)
 
