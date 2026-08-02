@@ -648,7 +648,15 @@ def test_gpt_selective_activation_recompute(dtype, bs, model, fp8, recipe, fp8_m
 
 
 def _test_e2e_full_recompute(
-    bs, dtype, config, fp8, recipe, fp8_model_params=False, recompute=False, use_reentrant=True
+    bs,
+    dtype,
+    config,
+    fp8,
+    recipe,
+    fp8_model_params=False,
+    recompute=False,
+    use_reentrant=True,
+    inner_autocast=False,
 ):
     reset_rng_states()
     FP8GlobalStateManager.reset()
@@ -685,10 +693,17 @@ def _test_e2e_full_recompute(
         te_inp_hidden_states.retain_grad()
     te_inp_attn_mask = get_causal_attn_mask(config.max_seqlen_q)
 
-    with autocast(enabled=fp8, recipe=recipe):
+    forward = block
+    if inner_autocast:
+
+        def forward(*args, **kwargs):
+            with autocast(enabled=fp8, recipe=recipe):
+                return block(*args, **kwargs)
+
+    with autocast(enabled=fp8 and not inner_autocast, recipe=recipe):
         if recompute:
             te_out = te_checkpoint(
-                block,
+                forward,
                 te_inp_hidden_states,
                 attention_mask=te_inp_attn_mask,
                 checkpoint_core_attention=False,
@@ -697,7 +712,7 @@ def _test_e2e_full_recompute(
                 use_reentrant=use_reentrant,
             )
         else:
-            te_out = block(
+            te_out = forward(
                 te_inp_hidden_states,
                 attention_mask=te_inp_attn_mask,
                 checkpoint_core_attention=False,
@@ -784,6 +799,48 @@ def test_gpt_full_activation_recompute(
             ref,
             msg=f"Mismatch in tensor {i}",
             **tols,
+        )
+
+
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+@pytest.mark.parametrize("use_reentrant", all_boolean)
+def test_gpt_full_activation_recompute_with_inner_autocast(use_reentrant, monkeypatch):
+    """Check recompute numerics when FP8 autocast starts inside the checkpointed callable."""
+    if not use_reentrant:
+        # Non-reentrant checkpoint becomes non-deterministic with bias+GELU fusion.
+        monkeypatch.setenv("NVTE_BIAS_GELU_NVFUSION", "0")
+
+    dtype = torch.bfloat16
+    fp8_recipe = recipe.DelayedScaling(fp8_format=recipe.Format.HYBRID)
+    config = model_configs["126m"]
+
+    outputs, names = _test_e2e_full_recompute(
+        1,
+        dtype,
+        config,
+        True,
+        fp8_recipe,
+        recompute=False,
+        use_reentrant=use_reentrant,
+    )
+    outputs_recompute, _ = _test_e2e_full_recompute(
+        1,
+        dtype,
+        config,
+        True,
+        fp8_recipe,
+        recompute=True,
+        use_reentrant=use_reentrant,
+        inner_autocast=True,
+    )
+
+    for name, ref, test in zip(names, outputs, outputs_recompute):
+        torch.testing.assert_close(
+            test,
+            ref,
+            msg=f"Mismatch in tensor {name}",
+            rtol=0.125,
+            atol=0.0675,
         )
 
 

@@ -66,7 +66,6 @@ if [ ! -d "$NVTE_TEST_CHECKPOINT_ARTIFACT_PATH" ]; then
     python3 $TE_PATH/tests/pytorch/test_checkpoint.py --save-checkpoint all || error_exit "Failed to generate checkpoint files"
 fi
 python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_checkpoint.xml $TE_PATH/tests/pytorch/test_checkpoint.py || test_fail "test_checkpoint.py"
-python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_fp8_activation_recompute.xml $TE_PATH/tests/pytorch/test_fp8_activation_recompute.py || test_fail "test_fp8_activation_recompute.py"
 python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_fused_router.xml $TE_PATH/tests/pytorch/test_fused_router.py || test_fail "test_fused_router.py"
 python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_partial_cast.xml $TE_PATH/tests/pytorch/test_partial_cast.py || test_fail "test_partial_cast.py"
 # Disable autotuning to make unittests faster. In addition, disable TF32 path to fully align with the pytorch reference implementation's precision
