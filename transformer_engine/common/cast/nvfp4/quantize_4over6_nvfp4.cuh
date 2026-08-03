@@ -20,6 +20,7 @@
 #ifndef TRANSFORMER_ENGINE_QUANTIZE_4OVER6_NVFP4_CUH_
 #define TRANSFORMER_ENGINE_QUANTIZE_4OVER6_NVFP4_CUH_
 
+#if !defined(__CUDACC_RTC__)
 #include <cuda.h>
 #include <cudaTypedefs.h>
 #include <cuda_fp16.h>
@@ -30,8 +31,17 @@
 
 #include "../../common.h"
 #include "../../util/math.h"
+#include "../../util/rtc.h"
 #include "../../utils.cuh"
 #include "core_nvfp4.cuh"
+#include "rtc_dispatch.cuh"
+#else
+// NVRTC build: the host-only headers above (common.h, transformer_engine.h,
+// rtc.h) are unavailable.
+#include <transformer_engine/nvfp4_4over6.h>
+
+#include "core_nvfp4.cuh"
+#endif  // __CUDACC_RTC__
 
 namespace transformer_engine {
 namespace dispatch {
@@ -548,14 +558,16 @@ __device__ void quantize_stage_colwise(const IType *tile, fp4e2m1x2 *output_t,
   }
 }
 
+// Shared kernel body reused by both the statically-instantiated __global__
+// (quantize_4over6_kernel below) and the NVRTC entry point
+// (rtc/quantize_4over6.cu).
 template <bool USE_2D_QUANTIZATION, bool RETURN_IDENTITY, bool RETURN_TRANSPOSE,
           bool ROW_SCALED_NVFP4, typename Cfg, int E4M3_MAX, typename IType>
-__global__ void __launch_bounds__(kThreads)
-    quantize_4over6_kernel(const IType *input, fp4e2m1x2 *output, fp4e2m1x2 *output_t,
-                           nvfp4_scale_t *scales, nvfp4_scale_t *scales_t,
-                           const float *amax_rowwise, const float *amax_colwise, const size_t rows,
-                           const size_t cols, const size_t scale_stride,
-                           const size_t scale_stride_t, const float *noop) {
+__device__ __forceinline__ void quantize_4over6_body(
+    const IType *input, fp4e2m1x2 *output, fp4e2m1x2 *output_t, nvfp4_scale_t *scales,
+    nvfp4_scale_t *scales_t, const float *amax_rowwise, const float *amax_colwise,
+    const size_t rows, const size_t cols, const size_t scale_stride, const size_t scale_stride_t,
+    const float *noop) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   if (noop != nullptr && noop[0] == 1.0f) {
     return;
@@ -614,6 +626,23 @@ __global__ void __launch_bounds__(kThreads)
 #endif
 }
 
+// Statically-instantiated entry point (NVTE_BUILD_LEGACY_STATIC_NVFP4 fallback).
+template <bool USE_2D_QUANTIZATION, bool RETURN_IDENTITY, bool RETURN_TRANSPOSE,
+          bool ROW_SCALED_NVFP4, typename Cfg, int E4M3_MAX, typename IType>
+__global__ void __launch_bounds__(kThreads)
+    quantize_4over6_kernel(const IType *input, fp4e2m1x2 *output, fp4e2m1x2 *output_t,
+                           nvfp4_scale_t *scales, nvfp4_scale_t *scales_t,
+                           const float *amax_rowwise, const float *amax_colwise, const size_t rows,
+                           const size_t cols, const size_t scale_stride,
+                           const size_t scale_stride_t, const float *noop) {
+  quantize_4over6_body<USE_2D_QUANTIZATION, RETURN_IDENTITY, RETURN_TRANSPOSE, ROW_SCALED_NVFP4, Cfg,
+                       E4M3_MAX, IType>(input, output, output_t, scales, scales_t, amax_rowwise,
+                                        amax_colwise, rows, cols, scale_stride, scale_stride_t,
+                                        noop);
+}
+
+#if !defined(__CUDACC_RTC__)
+
 template <bool USE_2D_QUANTIZATION, typename Cfg, int E4M3_MAX, typename IType>
 void launch_quantize_4over6(const Tensor &input, const Tensor *noop, Tensor *output,
                             cudaStream_t stream) {
@@ -639,23 +668,49 @@ void launch_quantize_4over6(const Tensor &input, const Tensor *noop, Tensor *out
   const size_t scale_stride = return_identity ? output->scale_inv.shape[1] : 0;
   const size_t scale_stride_t = return_transpose ? output->columnwise_scale_inv.shape[1] : 0;
 
-  TRANSFORMER_ENGINE_SWITCH_CONDITION(return_identity, RETURN_IDENTITY, {
-    TRANSFORMER_ENGINE_SWITCH_CONDITION(return_transpose, RETURN_TRANSPOSE, {
-      TRANSFORMER_ENGINE_SWITCH_CONDITION(row_scaled_nvfp4, ROW_SCALED_NVFP4, {
-        auto kernel = quantize_4over6_kernel<USE_2D_QUANTIZATION, RETURN_IDENTITY, RETURN_TRANSPOSE,
-                                             ROW_SCALED_NVFP4, Cfg, E4M3_MAX, IType>;
-        cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, shmem);
-        kernel<<<grid, block, shmem, stream>>>(input_ptr, output_ptr, output_t_ptr, scales_ptr,
-                                               scales_t_ptr, amax_rowwise_ptr, amax_colwise_ptr,
-                                               rows, cols, scale_stride, scale_stride_t, noop_ptr);
+  // Prefer the NVRTC-compiled kernel; fall back to the static instantiation only
+  // when it was compiled in and NVRTC is disabled.
+#if NVTE_BUILD_LEGACY_STATIC_NVFP4
+  const bool use_rtc = transformer_engine::rtc::is_enabled();
+#else
+  constexpr bool use_rtc = true;
+#endif
+  if (use_rtc) {
+    rtc_nvfp4::launch_quantize_4over6_rtc<USE_2D_QUANTIZATION, Cfg, E4M3_MAX, IType>(
+        input_ptr, output_ptr, output_t_ptr, scales_ptr, scales_t_ptr, amax_rowwise_ptr,
+        amax_colwise_ptr, rows, cols, scale_stride, scale_stride_t, noop_ptr, return_identity,
+        return_transpose, row_scaled_nvfp4, grid, block, shmem, stream);
+  } else {
+#if NVTE_BUILD_LEGACY_STATIC_NVFP4
+    TRANSFORMER_ENGINE_SWITCH_CONDITION(return_identity, RETURN_IDENTITY, {
+      TRANSFORMER_ENGINE_SWITCH_CONDITION(return_transpose, RETURN_TRANSPOSE, {
+        TRANSFORMER_ENGINE_SWITCH_CONDITION(row_scaled_nvfp4, ROW_SCALED_NVFP4, {
+          auto kernel = quantize_4over6_kernel<USE_2D_QUANTIZATION, RETURN_IDENTITY,
+                                               RETURN_TRANSPOSE, ROW_SCALED_NVFP4, Cfg, E4M3_MAX,
+                                               IType>;
+          cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, shmem);
+          kernel<<<grid, block, shmem, stream>>>(input_ptr, output_ptr, output_t_ptr, scales_ptr,
+                                                 scales_t_ptr, amax_rowwise_ptr, amax_colwise_ptr,
+                                                 rows, cols, scale_stride, scale_stride_t,
+                                                 noop_ptr);
+        });
       });
     });
-  });
+#else
+    NVTE_ERROR(
+        "NVFP4 4over6 quantize kernel requires NVRTC. Unset NVTE_DISABLE_NVRTC, or rebuild with "
+        "NVTE_BUILD_LEGACY_STATIC_NVFP4=ON for the static fallback.");
+#endif
+  }
 }
+
+#endif  // !__CUDACC_RTC__
 
 }  // namespace quantize_4over6_kernel
 
 #endif  // FP4_TYPE_SUPPORTED
+
+#if !defined(__CUDACC_RTC__)
 
 template <bool use_2d_quantization>
 void quantize_4over6(const Tensor &input, const Tensor *noop, Tensor *output,
@@ -721,6 +776,8 @@ void quantize_4over6(const Tensor &input, const Tensor *noop, Tensor *output,
   NVTE_ERROR("FP4 support requires CUDA 12.8+, but compile-time CUDA version is ", CUDA_VERSION);
 #endif  // FP4_TYPE_SUPPORTED
 }
+
+#endif  // !__CUDACC_RTC__
 
 }  // namespace nvfp4
 }  // namespace dispatch
