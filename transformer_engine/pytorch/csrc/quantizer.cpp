@@ -2652,8 +2652,8 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
             NVTE_CHECK(this->rht_matrix.defined() && this->rht_matrix.numel() > 0,
                        "RHT matrix is not available.");
             auto rht_matrix = this->rht_matrix.to(torch_dtype);
-            auto rht_output = at::matmul(
-                input_torch.transpose(0, 1).contiguous().view({-1, 16}), rht_matrix);
+            auto rht_output =
+                at::matmul(input_torch.transpose(0, 1).contiguous().view({-1, 16}), rht_matrix);
             copy_amax(rht_output, out.get_columnwise_amax().data_ptr);
           }
         } else {
