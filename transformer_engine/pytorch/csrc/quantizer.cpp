@@ -2409,7 +2409,7 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::convert_and_update_tensor(
 void NVFP4Quantizer::quantize_with_rht_unfused_helper(
     const TensorWrapper& input, TensorWrapper& out, TensorWrapper& rht_output_t_cpp,
     QuantizationConfigWrapper& quant_config, QuantizationConfigWrapper& quant_config_columnwise,
-    cudaStream_t stream) {
+    cudaStream_t stream, bool rht_output_is_ready) {
   // The kernels invoked below reject swizzled-SF output, so trip a clear
   // error here before reaching them.
   NVTE_CHECK(!out.get_with_gemm_swizzled_scales(),
@@ -2464,9 +2464,13 @@ void NVFP4Quantizer::quantize_with_rht_unfused_helper(
                            static_cast<DType>(out_columnwise_amax.dtype),
                            out_columnwise_amax.shape);
 
-    // Invoking fallback RHT kernel unfused.
+    // Invoking fallback RHT kernel unfused unless the SM120/SM121 ATen result was already
+    // materialized while computing post-RHT amax.
     const int sm_arch = transformer_engine::cuda::sm_arch();
-    if (sm_arch == 120 || sm_arch == 121) {
+    if (rht_output_is_ready) {
+      NVTE_CHECK(sm_arch == 120 || sm_arch == 121,
+                 "A precomputed unfused RHT output is only supported on SM120/SM121.");
+    } else if (sm_arch == 120 || sm_arch == 121) {
       // Match the PyTorch reference arithmetic on GeForce Blackwell. The BF16 MMA
       // Hadamard kernel uses a different accumulation order and can differ by one
       // BF16 ULP, which is enough to change exact FP4 rounding at ties.
@@ -2482,8 +2486,9 @@ void NVFP4Quantizer::quantize_with_rht_unfused_helper(
           rht_output_t_cpp.get_rowwise_data().data_ptr,
           {static_cast<int64_t>(cols), static_cast<int64_t>(rows)}, [](void*) {}, options);
       auto rht_matrix = this->rht_matrix.to(torch_dtype);
-      at::matmul_out(output_torch.view({-1, 16}),
-                     input_torch.transpose(0, 1).contiguous().view({-1, 16}), rht_matrix);
+      auto output_view = output_torch.view({-1, 16});
+      auto input_view = input_torch.transpose(0, 1).contiguous().view({-1, 16});
+      at::matmul_out(output_view, input_view, rht_matrix);
     } else {
       NVTE_SCOPED_GIL_RELEASE({
         // Perform the RHT(input.t), and write to rht_output_cpp.columnwise.
@@ -2581,6 +2586,19 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
       input.dtype() == DType::kBFloat16 &&
       NVFP4Quantizer::is_eligible_for_rht_cast_fusion(convertShape(input.shape()));
 
+  // The unfused path needs an intermediate in transposed layout. Allocate it before amax
+  // computation so SM120/SM121 can materialize the ATen RHT once, derive post-RHT amax from
+  // that exact buffer, and reuse it for quantization after any distributed amax reduction.
+  at::Tensor rht_output_t;
+  TensorWrapper rht_output_t_cpp;
+  bool rht_output_is_ready = false;
+  if (this->with_rht && !eligible_for_rht_cast_fusion) {
+    rht_output_t =
+        allocateTorchTensor(static_cast<int>(cols), static_cast<int>(rows), input.dtype());
+    rht_output_t_cpp.set_rowwise_data(rht_output_t.data_ptr(), input.dtype(),
+                                      std::vector<size_t>{cols, rows});
+  }
+
   // Stochastic rounding
   // When both rowwise and columnwise quantization are used with RHT,
   // we need separate RNG states for each to ensure they use different random numbers.
@@ -2652,9 +2670,14 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
             NVTE_CHECK(this->rht_matrix.defined() && this->rht_matrix.numel() > 0,
                        "RHT matrix is not available.");
             auto rht_matrix = this->rht_matrix.to(torch_dtype);
-            auto rht_output =
-                at::matmul(input_torch.transpose(0, 1).contiguous().view({-1, 16}), rht_matrix);
+            auto rht_output = at::from_blob(
+                rht_output_t_cpp.get_rowwise_data().data_ptr,
+                {static_cast<int64_t>(cols), static_cast<int64_t>(rows)}, [](void*) {}, options);
+            auto rht_output_view = rht_output.view({-1, 16});
+            auto input_view = input_torch.transpose(0, 1).contiguous().view({-1, 16});
+            at::matmul_out(rht_output_view, input_view, rht_matrix);
             copy_amax(rht_output, out.get_columnwise_amax().data_ptr);
+            rht_output_is_ready = true;
           }
         } else {
           NVTE_SCOPED_GIL_RELEASE({
@@ -2736,18 +2759,9 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
       // are separate kernel launches
       auto& columnwise_quant_config_to_use =
           need_separate_columnwise_rng ? quant_config_columnwise : quant_config;
-      // unfused path also needs memory allocation for intermediate buffer for RHT output
-      at::Tensor rht_output_t;  // The RHT(x_t) output, in columnwise layout
-      // This wrapper is going to be passed as input to the quantization kernel.
-      TensorWrapper rht_output_t_cpp;  // Wrapper to contain the RHT(x) and RHT(x_t) outputs
-      rht_output_t =
-          allocateTorchTensor(static_cast<int>(cols), static_cast<int>(rows), input.dtype());
-      // NOTE (frsun): This is non-intuitive, we are writing the
-      // result of transposed RHT to the output of rowwise.
-      rht_output_t_cpp.set_rowwise_data(rht_output_t.data_ptr(), input.dtype(),
-                                        std::vector<size_t>{cols, rows});
       this->quantize_with_rht_unfused_helper(input, out, rht_output_t_cpp, quant_config,
-                                             columnwise_quant_config_to_use, stream);
+                                             columnwise_quant_config_to_use, stream,
+                                             rht_output_is_ready);
     }
   } else {
     NVTE_SCOPED_GIL_RELEASE({ nvte_quantize_v2(input.data(), out.data(), quant_config, stream); });

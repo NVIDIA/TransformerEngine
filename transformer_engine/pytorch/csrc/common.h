@@ -421,7 +421,7 @@ class NVFP4Quantizer : public Quantizer {
                                         TensorWrapper& rht_output_t_cpp,
                                         QuantizationConfigWrapper& quant_config,
                                         QuantizationConfigWrapper& quant_config_columnwise,
-                                        cudaStream_t stream);
+                                        cudaStream_t stream, bool rht_output_is_ready);
 };
 
 std::unique_ptr<Quantizer> convert_quantizer(py::handle quantizer);
