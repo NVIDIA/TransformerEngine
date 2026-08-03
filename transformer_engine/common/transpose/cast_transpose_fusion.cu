@@ -20,6 +20,10 @@
 #include "common/common.h"
 
 namespace transformer_engine {
+namespace detail {
+using Empty = transformer_engine::Empty;
+__device__ inline float identity(float value, const Empty &) { return value; }
+}  // namespace detail
 
 namespace detail {
 
