@@ -14,6 +14,7 @@ Sharding model:
     compound ``(dp, ep)`` axis on the leading dim.
 """
 
+import functools
 from dataclasses import dataclass
 
 import jax
@@ -32,9 +33,22 @@ def _on_collective_stream(func):
     them with native collectives. No-op on JAX that lacks the annotation."""
     if not is_collective_stream_supported():
         return func
-    from jax.experimental.compute_on import compute_on
+    from jax.experimental.compute_on import compute_on2
 
-    return compute_on("gpu_stream:collective")(func)  # pylint: disable=not-callable
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        # compute_on2 traces its callee and abstract-evals every argument, so it
+        # cannot take the static EpLayerConfig/PartitionSpec args directly. Wrap
+        # a nullary thunk that closes over them; the array operands are captured
+        # as consts and lifted to real operands, outputs stay on device. XLA
+        # async-wraps the resulting call onto the collective stream.
+        annotated = compute_on2(
+            compute_type="gpu_stream:collective",
+            out_memory_spaces=jax.memory.Space.Device,
+        )(lambda: func(*args, **kwargs))
+        return annotated()
+
+    return wrapper
 
 
 __all__ = [
