@@ -2409,7 +2409,7 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::convert_and_update_tensor(
 void NVFP4Quantizer::quantize_with_rht_unfused_helper(
     const TensorWrapper& input, TensorWrapper& out, TensorWrapper& rht_output_t_cpp,
     QuantizationConfigWrapper& quant_config, QuantizationConfigWrapper& quant_config_columnwise,
-    cudaStream_t stream) {
+    bool compute_amax, cudaStream_t stream) {
   // The kernels invoked below reject swizzled-SF output, so trip a clear
   // error here before reaching them.
   NVTE_CHECK(!out.get_with_gemm_swizzled_scales(),
@@ -2484,6 +2484,12 @@ void NVFP4Quantizer::quantize_with_rht_unfused_helper(
       auto rht_matrix = this->rht_matrix.to(torch_dtype);
       at::matmul_out(output_torch.view({-1, 16}),
                      input_torch.transpose(0, 1).contiguous().view({-1, 16}), rht_matrix);
+      if (compute_amax) {
+        auto amax_options = at::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+        auto columnwise_amax = at::from_blob(out_columnwise_amax.data_ptr, {1}, [](void*) {},
+                                             amax_options);
+        columnwise_amax.copy_(output_torch.abs().amax().to(torch::kFloat32).view({1}));
+      }
     } else {
       NVTE_SCOPED_GIL_RELEASE({
         // Perform the RHT(input.t), and write to rht_output_cpp.columnwise.
@@ -2722,7 +2728,7 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
       rht_output_t_cpp.set_rowwise_data(rht_output_t.data_ptr(), input.dtype(),
                                         std::vector<size_t>{cols, rows});
       this->quantize_with_rht_unfused_helper(input, out, rht_output_t_cpp, quant_config,
-                                             columnwise_quant_config_to_use, stream);
+                                             columnwise_quant_config_to_use, compute_amax, stream);
     }
   } else {
     NVTE_SCOPED_GIL_RELEASE({ nvte_quantize_v2(input.data(), out.data(), quant_config, stream); });
