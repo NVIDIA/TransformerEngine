@@ -83,8 +83,7 @@ class CMakeExtension(setuptools.Extension):
                 if all(library.is_file() for library in cuda_libraries.values()):
                     configure_command.append(f"-DCMAKE_CUDA_FLAGS=-L{cuda_lib_dir}")
                     configure_command.extend(
-                        f"-D{variable}={library}"
-                        for variable, library in cuda_libraries.items()
+                        f"-D{variable}={library}" for variable, library in cuda_libraries.items()
                     )
 
         discovered_nvcc_path = nvcc_path()
