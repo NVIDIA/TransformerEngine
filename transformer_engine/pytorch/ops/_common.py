@@ -10,10 +10,13 @@ from typing import Optional
 
 import torch
 
+import transformer_engine_torch as tex
 from transformer_engine_torch import FP8TensorMeta
+from ..constants import TE_DType
 from ..torch_version import torch_version
 from ..quantization import FP8GlobalStateManager
 from ..tensor.float8_tensor import Float8Tensor
+from ..tensor.storage.grouped_tensor_storage import GroupedTensorStorage
 from ..quantized_tensor import QuantizedTensorStorage
 from ..utils import canonicalize_dtype
 
@@ -55,9 +58,25 @@ def is_quantized_tensor(tensor: torch.Tensor | QuantizedTensorStorage) -> bool:
 
 def maybe_dequantize(
     tensor: torch.Tensor | QuantizedTensorStorage, dtype: torch.dtype | None = None
-) -> torch.Tensor:
+) -> torch.Tensor | GroupedTensorStorage:
     """Dequantize tensor to given dtype or just convert if not a quantized tensor"""
-    if is_quantized_tensor(tensor):
+    if isinstance(tensor, GroupedTensorStorage):
+        if tensor.quantizer is not None:
+            output_dtype = dtype if dtype is not None else tensor.fake_dtype
+            return tex.group_dequantize(tensor, TE_DType[output_dtype])
+        if dtype is None or tensor.rowwise_data.dtype == dtype:
+            return tensor
+        return GroupedTensorStorage(
+            tensor.logical_shape,
+            dtype,
+            num_tensors=tensor.num_tensors,
+            quantizer=None,
+            data=tensor.rowwise_data.to(dtype=dtype),
+            first_dims=tensor.first_dims,
+            last_dims=tensor.last_dims,
+            tensor_offsets=tensor.tensor_offsets,
+        )
+    elif is_quantized_tensor(tensor):
         return tensor.dequantize(dtype=dtype)
     if dtype is not None and tensor.dtype != dtype:
         tensor = tensor.to(dtype)

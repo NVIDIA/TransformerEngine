@@ -14,6 +14,7 @@ import transformer_engine_torch as tex
 from ...constants import DType
 from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ...tensor import Float8CurrentScalingQuantizer, Quantizer
+from ...tensor.storage.grouped_tensor_storage import GroupedTensorStorage
 from ...utils import clear_tensor_data
 from ..op import BasicOperation, OperationContext
 from .._common import maybe_dequantize
@@ -391,6 +392,16 @@ class _ScaledGLU(BasicOperation):
         self,
         input_: torch.Tensor,
         scales: torch.Tensor,
+        quantizer: Optional[Quantizer],
+    ) -> torch.Tensor:
+        raise NotImplementedError
+
+    def _grouped_scaled_glu_forward(
+        self,
+        input_: torch.Tensor,
+        scales: torch.Tensor,
+        quantizer: Optional[Quantizer],
+        grouped_input: GroupedTensorStorage,
     ) -> torch.Tensor:
         raise NotImplementedError
 
@@ -399,9 +410,24 @@ class _ScaledGLU(BasicOperation):
         grad_output: torch.Tensor,
         input_: torch.Tensor,
         scales: torch.Tensor,
+        quantizer: Optional[Quantizer],
         *,
         compute_scale_grad: bool,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        raise NotImplementedError
+
+    def _grouped_scaled_glu_backward(
+        self,
+        grad_output: torch.Tensor,
+        input_: torch.Tensor,
+        scales: torch.Tensor,
+        quantizer: Optional[Quantizer],
+        *,
+        num_groups: int,
+        first_dims: torch.Tensor,
+        tensor_offsets: Optional[torch.Tensor],
+        compute_scale_grad: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
         raise NotImplementedError
 
     def op_forward(self, *args, **kwargs) -> None:
@@ -447,9 +473,17 @@ class _ScaledGLU(BasicOperation):
             dtype = extra_input.dtype
 
         # Make sure inputs are in correct dtype
+        grouped_input = input_ if isinstance(input_, GroupedTensorStorage) else None
         input_ = maybe_dequantize(input_, dtype)
+        if isinstance(input_, GroupedTensorStorage):
+            input_ = input_.rowwise_data.reshape(input_.logical_shape)
         scales = maybe_dequantize(extra_input, dtype)
-        out = self._scaled_glu_forward(input_, scales)
+        if grouped_input is None:
+            out = self._scaled_glu_forward(input_, scales, next_op_input_quantizer)
+        else:
+            out = self._grouped_scaled_glu_forward(
+                input_, scales, next_op_input_quantizer, grouped_input
+            )
 
         # Save state for backward pass
         ctx = basic_op_ctxs[0]
@@ -460,9 +494,10 @@ class _ScaledGLU(BasicOperation):
             ctx.extra_input_requires_grad = extra_input.requires_grad
             ctx.dtype = dtype
             ctx.save_for_backward(
-                input_,
+                grouped_input if grouped_input is not None else input_,
                 scales if ctx.input_requires_grad or ctx.extra_input_requires_grad else None,
             )
+            ctx.prev_op_grad_output_quantizer = prev_op_grad_output_quantizer
 
         return out, [()]
 
@@ -485,17 +520,41 @@ class _ScaledGLU(BasicOperation):
 
         ctx = basic_op_ctxs[0]
         input_, scales = ctx.saved_tensors
+        grouped_input = input_ if isinstance(input_, GroupedTensorStorage) else None
+        first_dims = grouped_input.first_dims if grouped_input is not None else None
+        tensor_offsets = grouped_input.tensor_offsets if grouped_input is not None else None
         input_ = maybe_dequantize(input_, ctx.dtype)
+        if isinstance(input_, GroupedTensorStorage):
+            input_ = input_.rowwise_data.reshape(input_.logical_shape)
         if scales is not None:
             scales = maybe_dequantize(scales, ctx.dtype)
         grad_output = maybe_dequantize(grad_output, ctx.dtype)
+        if isinstance(grad_output, GroupedTensorStorage):
+            grad_output = grad_output.rowwise_data.reshape(grad_output.logical_shape)
 
-        grad_input, grad_extra_input = self._scaled_glu_backward(
-            grad_output,
-            input_,
-            scales,
-            compute_scale_grad=ctx.extra_input_requires_grad,
-        )
+        if grouped_input is None:
+            grad_input, grad_extra_input = self._scaled_glu_backward(
+                grad_output,
+                input_,
+                scales,
+                ctx.prev_op_grad_output_quantizer,
+                compute_scale_grad=ctx.extra_input_requires_grad,
+            )
+        else:
+            grad_input, dense_grad_input, grad_extra_input = self._grouped_scaled_glu_backward(
+                grad_output,
+                input_,
+                scales,
+                ctx.prev_op_grad_output_quantizer,
+                num_groups=int(first_dims.numel()),
+                first_dims=first_dims,
+                tensor_offsets=tensor_offsets,
+                compute_scale_grad=ctx.extra_input_requires_grad,
+            )
+            # Preserve the pre-quantize result for the preceding
+            # GroupedLinear's dbias/dscale reduction. ``grad_input`` remains
+            # quantized for its dgrad and wgrad GEMMs.
+            grad_input._dense_for_dbias = dense_grad_input
         if not ctx.input_requires_grad:
             grad_input = None
 
@@ -527,10 +586,28 @@ class ScaledSwiGLU(_ScaledGLU):
         self,
         input_: torch.Tensor,
         scales: torch.Tensor,
+        quantizer: Optional[Quantizer],
     ) -> torch.Tensor:
         return tex.scaled_swiglu(
             input_,
             scales,
+            quantizer,
+            int(self.glu_interleave_size or 0),
+        )
+
+    def _grouped_scaled_glu_forward(
+        self,
+        input_: torch.Tensor,
+        scales: torch.Tensor,
+        quantizer: Optional[Quantizer],
+        grouped_input: GroupedTensorStorage,
+    ) -> torch.Tensor:
+        return tex.grouped_scaled_swiglu(
+            input_,
+            scales.reshape(-1),
+            quantizer,
+            grouped_input.num_tensors,
+            grouped_input.first_dims,
             None,
             int(self.glu_interleave_size or 0),
         )
@@ -540,6 +617,7 @@ class ScaledSwiGLU(_ScaledGLU):
         grad_output: torch.Tensor,
         input_: torch.Tensor,
         scales: torch.Tensor,
+        quantizer: Optional[Quantizer],
         *,
         compute_scale_grad: bool,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
@@ -547,7 +625,31 @@ class ScaledSwiGLU(_ScaledGLU):
             grad_output,
             input_,
             scales,
-            None,
+            quantizer,
+            int(self.glu_interleave_size or 0),
+            compute_scale_grad,
+        )
+
+    def _grouped_scaled_glu_backward(
+        self,
+        grad_output: torch.Tensor,
+        input_: torch.Tensor,
+        scales: torch.Tensor,
+        quantizer: Optional[Quantizer],
+        *,
+        num_groups: int,
+        first_dims: torch.Tensor,
+        tensor_offsets: Optional[torch.Tensor],
+        compute_scale_grad: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+        return tex.grouped_scaled_dswiglu(
+            grad_output,
+            input_,
+            scales.reshape(-1),
+            quantizer,
+            num_groups,
+            first_dims,
+            tensor_offsets,
             int(self.glu_interleave_size or 0),
             compute_scale_grad,
         )
@@ -602,11 +704,33 @@ class ScaledClampedQGeGLU(_ScaledGLU):
         self,
         input_: torch.Tensor,
         scales: torch.Tensor,
+        quantizer: Optional[Quantizer],
     ) -> torch.Tensor:
         clamped = self._clamped
         return tex.scaled_clamped_swiglu(
             input_,
             scales,
+            quantizer,
+            clamped.limit,
+            clamped.alpha,
+            clamped.glu_linear_offset,
+            int(self.glu_interleave_size or 0),
+        )
+
+    def _grouped_scaled_glu_forward(
+        self,
+        input_: torch.Tensor,
+        scales: torch.Tensor,
+        quantizer: Optional[Quantizer],
+        grouped_input: GroupedTensorStorage,
+    ) -> torch.Tensor:
+        clamped = self._clamped
+        return tex.grouped_scaled_clamped_swiglu(
+            input_,
+            scales.reshape(-1),
+            quantizer,
+            grouped_input.num_tensors,
+            grouped_input.first_dims,
             None,
             clamped.limit,
             clamped.alpha,
@@ -619,6 +743,7 @@ class ScaledClampedQGeGLU(_ScaledGLU):
         grad_output: torch.Tensor,
         input_: torch.Tensor,
         scales: torch.Tensor,
+        quantizer: Optional[Quantizer],
         *,
         compute_scale_grad: bool,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
@@ -627,7 +752,35 @@ class ScaledClampedQGeGLU(_ScaledGLU):
             grad_output,
             input_,
             scales,
-            None,
+            quantizer,
+            clamped.limit,
+            clamped.alpha,
+            clamped.glu_linear_offset,
+            int(self.glu_interleave_size or 0),
+            compute_scale_grad,
+        )
+
+    def _grouped_scaled_glu_backward(
+        self,
+        grad_output: torch.Tensor,
+        input_: torch.Tensor,
+        scales: torch.Tensor,
+        quantizer: Optional[Quantizer],
+        *,
+        num_groups: int,
+        first_dims: torch.Tensor,
+        tensor_offsets: Optional[torch.Tensor],
+        compute_scale_grad: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+        clamped = self._clamped
+        return tex.grouped_scaled_clamped_dswiglu(
+            grad_output,
+            input_,
+            scales.reshape(-1),
+            quantizer,
+            num_groups,
+            first_dims,
+            tensor_offsets,
             clamped.limit,
             clamped.alpha,
             clamped.glu_linear_offset,

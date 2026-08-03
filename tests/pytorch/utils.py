@@ -21,6 +21,7 @@ from transformer_engine.common.recipe import Recipe
 from transformer_engine.pytorch import InferenceParams, QuantizedTensor
 from transformer_engine.pytorch import DType
 from transformer_engine.pytorch.attention.dot_product_attention import _attention_backends
+from transformer_engine.pytorch.tensor import GroupedTensorStorage
 from transformer_engine.pytorch.attention.dot_product_attention.utils import (
     get_attention_backend,
     AttentionParams,
@@ -464,6 +465,14 @@ def assert_close(
     it can handle quantized tensors.
 
     """
+    if isinstance(actual, GroupedTensorStorage) and actual.quantizer is None:
+        if actual.rowwise_data is None:
+            raise ValueError("Cannot compare a GroupedTensor without rowwise data")
+        actual = actual.rowwise_data.reshape(actual.logical_shape)
+    if isinstance(expected, GroupedTensorStorage) and expected.quantizer is None:
+        if expected.rowwise_data is None:
+            raise ValueError("Cannot compare a GroupedTensor without rowwise data")
+        expected = expected.rowwise_data.reshape(expected.logical_shape)
     if isinstance(actual, QuantizedTensor):
         actual = actual.dequantize()
     if isinstance(expected, QuantizedTensor):
