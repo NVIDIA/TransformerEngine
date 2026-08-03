@@ -635,10 +635,10 @@ __global__ void __launch_bounds__(kThreads)
                            const float *amax_rowwise, const float *amax_colwise, const size_t rows,
                            const size_t cols, const size_t scale_stride,
                            const size_t scale_stride_t, const float *noop) {
-  quantize_4over6_body<USE_2D_QUANTIZATION, RETURN_IDENTITY, RETURN_TRANSPOSE, ROW_SCALED_NVFP4, Cfg,
-                       E4M3_MAX, IType>(input, output, output_t, scales, scales_t, amax_rowwise,
-                                        amax_colwise, rows, cols, scale_stride, scale_stride_t,
-                                        noop);
+  quantize_4over6_body<USE_2D_QUANTIZATION, RETURN_IDENTITY, RETURN_TRANSPOSE, ROW_SCALED_NVFP4,
+                       Cfg, E4M3_MAX, IType>(input, output, output_t, scales, scales_t,
+                                             amax_rowwise, amax_colwise, rows, cols, scale_stride,
+                                             scale_stride_t, noop);
 }
 
 #if !defined(__CUDACC_RTC__)
@@ -685,14 +685,13 @@ void launch_quantize_4over6(const Tensor &input, const Tensor *noop, Tensor *out
     TRANSFORMER_ENGINE_SWITCH_CONDITION(return_identity, RETURN_IDENTITY, {
       TRANSFORMER_ENGINE_SWITCH_CONDITION(return_transpose, RETURN_TRANSPOSE, {
         TRANSFORMER_ENGINE_SWITCH_CONDITION(row_scaled_nvfp4, ROW_SCALED_NVFP4, {
-          auto kernel = quantize_4over6_kernel<USE_2D_QUANTIZATION, RETURN_IDENTITY,
-                                               RETURN_TRANSPOSE, ROW_SCALED_NVFP4, Cfg, E4M3_MAX,
-                                               IType>;
+          auto kernel =
+              quantize_4over6_kernel<USE_2D_QUANTIZATION, RETURN_IDENTITY, RETURN_TRANSPOSE,
+                                     ROW_SCALED_NVFP4, Cfg, E4M3_MAX, IType>;
           cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, shmem);
-          kernel<<<grid, block, shmem, stream>>>(input_ptr, output_ptr, output_t_ptr, scales_ptr,
-                                                 scales_t_ptr, amax_rowwise_ptr, amax_colwise_ptr,
-                                                 rows, cols, scale_stride, scale_stride_t,
-                                                 noop_ptr);
+          kernel<<<grid, block, shmem, stream>>>(
+              input_ptr, output_ptr, output_t_ptr, scales_ptr, scales_t_ptr, amax_rowwise_ptr,
+              amax_colwise_ptr, rows, cols, scale_stride, scale_stride_t, noop_ptr);
         });
       });
     });

@@ -25,10 +25,10 @@ using uint16_t = unsigned short int;  // NOLINT(*)
 using uint32_t = unsigned int;
 using uint64_t = unsigned long long int;  // NOLINT(*)
 using int8_t = signed char;
-using int16_t = short int;             // NOLINT(*)
-using int32_t = int;                   // NOLINT(*)
-using int64_t = long long int;         // NOLINT(*)
-using intptr_t = long long int;        // NOLINT(*)
+using int16_t = short int;                 // NOLINT(*)
+using int32_t = int;                       // NOLINT(*)
+using int64_t = long long int;             // NOLINT(*)
+using intptr_t = long long int;            // NOLINT(*)
 using uintptr_t = unsigned long long int;  // NOLINT(*)
 static_assert(sizeof(uint8_t) == 1);
 static_assert(sizeof(uint16_t) == 2);
@@ -82,11 +82,11 @@ using enable_if_t = typename enable_if<B, T>::type;
 // <algorithm> is unavailable). Returns by value, which is all the RTC kernel
 // sources need.
 template <class T>
-__host__ __device__ constexpr T min(const T& a, const T& b) {
+__host__ __device__ constexpr T min(const T &a, const T &b) {
   return b < a ? b : a;
 }
 template <class T>
-__host__ __device__ constexpr T max(const T& a, const T& b) {
+__host__ __device__ constexpr T max(const T &a, const T &b) {
   return a < b ? b : a;
 }
 

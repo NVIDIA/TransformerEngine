@@ -31,7 +31,6 @@ void compile_quantize_4over6_rtc(const std::string &kernel_label, const std::str
                                  bool row_scaled, const std::string &mode_name, bool err_fast_math,
                                  int e4m3_max);
 
-
 template <typename T>
 inline const char *rtc_type_name() {
   return detail::type_name<T>();
