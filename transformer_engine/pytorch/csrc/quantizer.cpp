@@ -2465,11 +2465,32 @@ void NVFP4Quantizer::quantize_with_rht_unfused_helper(
                            out_columnwise_amax.shape);
 
     // Invoking fallback RHT kernel unfused.
-    NVTE_SCOPED_GIL_RELEASE({
-      // Perform the RHT(input.t), and write to rht_output_cpp.columnwise.
-      nvte_hadamard_transform(input.data(), rht_output_t_cpp.data(), 0,
-                              this->rht_matrix_random_sign_mask_t, stream);
-    });
+    const int sm_arch = transformer_engine::cuda::sm_arch();
+    if (sm_arch == 120 || sm_arch == 121) {
+      // Match the PyTorch reference arithmetic on GeForce Blackwell. The BF16 MMA
+      // Hadamard kernel uses a different accumulation order and can differ by one
+      // BF16 ULP, which is enough to change exact FP4 rounding at ties.
+      NVTE_CHECK(this->rht_matrix.defined() && this->rht_matrix.numel() > 0,
+                 "RHT matrix is not available.");
+      const auto [rows, cols] = get_2d_dims(input.shape());
+      const auto torch_dtype = GetATenDType(input.dtype());
+      auto options = at::TensorOptions().dtype(torch_dtype).device(torch::kCUDA);
+      auto input_torch = at::from_blob(
+          input.get_rowwise_data().data_ptr,
+          {static_cast<int64_t>(rows), static_cast<int64_t>(cols)}, [](void*) {}, options);
+      auto output_torch = at::from_blob(
+          rht_output_t_cpp.get_rowwise_data().data_ptr,
+          {static_cast<int64_t>(cols), static_cast<int64_t>(rows)}, [](void*) {}, options);
+      auto rht_matrix = this->rht_matrix.to(torch_dtype);
+      at::matmul_out(output_torch.view({-1, 16}),
+                     input_torch.transpose(0, 1).contiguous().view({-1, 16}), rht_matrix);
+    } else {
+      NVTE_SCOPED_GIL_RELEASE({
+        // Perform the RHT(input.t), and write to rht_output_cpp.columnwise.
+        nvte_hadamard_transform(input.data(), rht_output_t_cpp.data(), 0,
+                                this->rht_matrix_random_sign_mask_t, stream);
+      });
+    }
 
     // Quantize kernel will treat everything as rowwise input/output, which is
     // intended.
