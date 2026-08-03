@@ -1430,7 +1430,7 @@ class FusedAttnFunc(torch.autograd.Function):
                 q_fp8, k_fp8, v_fp8 = q, k, v
 
                 if fp8_recipe.mxfp8():
-                    qkv_scale_inv_format = "bhsd" # Same as what combine_and_quantize would give
+                    qkv_scale_inv_format = "bhsd"  # Same as what combine_and_quantize would give
             else:
                 q_fp8, k_fp8, v_fp8, qkv_layout, qkv_scale_inv_format = combine_and_quantize(
                     qkv_layout,

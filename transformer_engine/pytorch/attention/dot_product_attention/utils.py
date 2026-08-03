@@ -2944,9 +2944,10 @@ def mxfp8_quantize_only(tensor_quantizer_pairs, src_format):
     """
     if not tensor_quantizer_pairs:
         return []
-    assert src_format in ("bshd", "sbhd"), (
-        f"mxfp8_quantize_only only supports bshd/sbhd, got {src_format!r}."
-    )
+    assert src_format in (
+        "bshd",
+        "sbhd",
+    ), f"mxfp8_quantize_only only supports bshd/sbhd, got {src_format!r}."
     _s_dim = {"bshd": 1, "sbhd": 0}
     _d_dim = {"bshd": 3, "sbhd": 3}
 
@@ -3020,9 +3021,10 @@ def mxfp8_transpose_swizzle(fp8_tensors, src_format):
     if not fp8_tensors:
         return
 
-    assert src_format in ("bshd", "sbhd"), (
-        f"mxfp8_transpose_swizzle only supports bshd/sbhd, got {src_format!r}."
-    )
+    assert src_format in (
+        "bshd",
+        "sbhd",
+    ), f"mxfp8_transpose_swizzle only supports bshd/sbhd, got {src_format!r}."
 
     rs_list = [t._rowwise_scale_inv for t in fp8_tensors]
     cs_list = [t._columnwise_scale_inv for t in fp8_tensors]

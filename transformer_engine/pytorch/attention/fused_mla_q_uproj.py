@@ -20,9 +20,9 @@ from ..utils import get_device_compute_capability
 class FusedMLAQUpProjRopeQuant:
     """Wrapper for the cuDNN fused MLA Q up-proj + per-head RoPE + MXFP8 quantize kernel (v4).
 
-      - If w is already a QuantizedTensor (primary FP8 parameter in MXFP8BlockScaling recipe),
-        this performs an MXFP8 GEMM within the fusion (and quantizes the input if necessary)
-      - Otherwise (plain BF16 weight), x and w are passed as-is to the BF16 kernel variant.
+    - If w is already a QuantizedTensor (primary FP8 parameter in MXFP8BlockScaling recipe),
+      this performs an MXFP8 GEMM within the fusion (and quantizes the input if necessary)
+    - Otherwise (plain BF16 weight), x and w are passed as-is to the BF16 kernel variant.
     """
 
     @classmethod
@@ -32,6 +32,7 @@ class FusedMLAQUpProjRopeQuant:
         # lazy-import registration (which would require overlaying cudnn/__init__.py and
         # could revert atomicrmw fixes present in the container's version).
         from cudnn import gemm_proj_rope_mxfp8_wrapper_sm100
+
         return gemm_proj_rope_mxfp8_wrapper_sm100
 
     @classmethod
@@ -48,16 +49,33 @@ class FusedMLAQUpProjRopeQuant:
         return True
 
     @classmethod
-    def warmup(cls, *, num_heads: int, q_lora_rank: int, q_head_dim: int, qk_pos_emb_head_dim: int, tokens: int) -> None:
+    def warmup(
+        cls,
+        *,
+        num_heads: int,
+        q_lora_rank: int,
+        q_head_dim: int,
+        qk_pos_emb_head_dim: int,
+        tokens: int,
+    ) -> None:
         """Pre-compile the fused kernel during model init using dummy FP8 tensors."""
         if not cls.is_supported():
             return
         head_dim = q_head_dim + qk_pos_emb_head_dim
         dev = torch.cuda.current_device()
-        x_code  = torch.zeros(tokens, q_lora_rank, dtype=torch.float8_e4m3fn, device=dev)
-        x_scale = torch.zeros(tokens, q_lora_rank // MXFP8_BLOCK_SCALING_SIZE, dtype=torch.uint8, device=dev)
-        w_code  = torch.zeros(num_heads * head_dim, q_lora_rank, dtype=torch.float8_e4m3fn, device=dev)
-        w_scale = torch.zeros(num_heads * head_dim, q_lora_rank // MXFP8_BLOCK_SCALING_SIZE, dtype=torch.uint8, device=dev)
+        x_code = torch.zeros(tokens, q_lora_rank, dtype=torch.float8_e4m3fn, device=dev)
+        x_scale = torch.zeros(
+            tokens, q_lora_rank // MXFP8_BLOCK_SCALING_SIZE, dtype=torch.uint8, device=dev
+        )
+        w_code = torch.zeros(
+            num_heads * head_dim, q_lora_rank, dtype=torch.float8_e4m3fn, device=dev
+        )
+        w_scale = torch.zeros(
+            num_heads * head_dim,
+            q_lora_rank // MXFP8_BLOCK_SCALING_SIZE,
+            dtype=torch.uint8,
+            device=dev,
+        )
         cos = torch.zeros(tokens, qk_pos_emb_head_dim, dtype=torch.bfloat16, device=dev)
         sin = torch.zeros(tokens, qk_pos_emb_head_dim, dtype=torch.bfloat16, device=dev)
         cls._kernel()(x_code, w_code, cos, sin, x_scale=x_scale, w_scale=w_scale, w_out_in=True)
@@ -66,7 +84,7 @@ class FusedMLAQUpProjRopeQuant:
     def run(
         cls,
         x: torch.Tensor,
-        w,              # MXFP8Tensor (primary FP8 param) or bf16 torch.Tensor
+        w,  # MXFP8Tensor (primary FP8 param) or bf16 torch.Tensor
         cos: torch.Tensor,
         sin: torch.Tensor,
         s: int,
@@ -78,6 +96,7 @@ class FusedMLAQUpProjRopeQuant:
         """
 
         from cuda.bindings import driver as cuda
+
         stream = cuda.CUstream(torch.cuda.current_stream().cuda_stream)
         wrapper = cls._kernel()
 
@@ -85,17 +104,28 @@ class FusedMLAQUpProjRopeQuant:
             # ---- FP8 projection: MXFP8-cast x (both usages) + reuse w's fp8 codes -> mxfp8in ----
             # Quantize x with both rowwise (for the forward GEMM) and columnwise (for the FP8
             # wgrad in backward, matching the unfused path).
-            x_quantizer = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3, rowwise=True, columnwise=True)
+            x_quantizer = MXFP8Quantizer(
+                fp8_dtype=tex.DType.kFloat8E4M3, rowwise=True, columnwise=True
+            )
             x_mxfp8 = x_quantizer(x)
-            x_code  = x_mxfp8._rowwise_data.view(torch.float8_e4m3fn)   # [tokens, K]
-            x_scale = x_mxfp8._rowwise_scale_inv                         # [tokens, K//32] uint8
+            x_code = x_mxfp8._rowwise_data.view(torch.float8_e4m3fn)  # [tokens, K]
+            x_scale = x_mxfp8._rowwise_scale_inv  # [tokens, K//32] uint8
 
             # Primary FP8 parameter: already quantized; use its rowwise FP8 codes + E8M0 scales.
             w.update_usage(rowwise_usage=True, columnwise_usage=None)
-            w_code  = w._rowwise_data.view(torch.float8_e4m3fn)          # [N, K]
-            w_scale = w._rowwise_scale_inv                              # [N, K//32] uint8
+            w_code = w._rowwise_data.view(torch.float8_e4m3fn)  # [N, K]
+            w_scale = w._rowwise_scale_inv  # [N, K//32] uint8
 
-            out = wrapper(x_code, w_code, cos, sin, x_scale=x_scale, w_scale=w_scale, w_out_in=True, stream=stream)
+            out = wrapper(
+                x_code,
+                w_code,
+                cos,
+                sin,
+                x_scale=x_scale,
+                w_scale=w_scale,
+                w_out_in=True,
+                stream=stream,
+            )
 
             # Drop rowwise data now.
             # Only columnwise x is needed for the FP8 wgrad in backward.
@@ -107,11 +137,16 @@ class FusedMLAQUpProjRopeQuant:
             x_saved = x
 
         nh = out["out_fp8_row"].shape[1]
-        d  = out["out_fp8_row"].shape[2]
+        d = out["out_fp8_row"].shape[2]
         query = cls.wrap_mxfp8(
-            out["out_fp8_row"], out["out_scales_row"],
-            out["out_fp8_col"], out["out_scales_col"],
-            s, b, nh, d,
+            out["out_fp8_row"],
+            out["out_scales_row"],
+            out["out_fp8_col"],
+            out["out_scales_col"],
+            s,
+            b,
+            nh,
+            d,
         )
         # 2nd return is the activation to save for wgrad: MXFP8 (fp8 path) or bf16 (16-bit path).
         return query, x_saved
@@ -119,9 +154,14 @@ class FusedMLAQUpProjRopeQuant:
     @classmethod
     def wrap_mxfp8(
         cls,
-        fp8_row: torch.Tensor, scales_row: torch.Tensor,
-        fp8_col: torch.Tensor, scales_col: torch.Tensor,
-        s: int, b: int, nh: int, d: int,
+        fp8_row: torch.Tensor,
+        scales_row: torch.Tensor,
+        fp8_col: torch.Tensor,
+        scales_col: torch.Tensor,
+        s: int,
+        b: int,
+        nh: int,
+        d: int,
     ) -> MXFP8Tensor:
         blk = MXFP8_BLOCK_SCALING_SIZE
         # Both rowwise and columnwise Q are required:
