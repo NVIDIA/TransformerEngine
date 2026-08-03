@@ -218,9 +218,8 @@ void KernelManager::compile(const std::string& kernel_label, const std::string& 
 
   // Choose whether to compile to PTX or cubin
   const int sm_arch_ = cuda::sm_arch(device_id);
-  NVTE_CHECK(sm_arch_ >= arch_requirement.min_sm_arch, "RTC kernel ", kernel_label,
-             " requires sm_", arch_requirement.min_sm_arch,
-             " or newer, but the current device is sm_", sm_arch_);
+  NVTE_CHECK(sm_arch_ >= arch_requirement.min_sm_arch, "RTC kernel ", kernel_label, " requires sm_",
+             arch_requirement.min_sm_arch, " or newer, but the current device is sm_", sm_arch_);
 
   int compile_sm_arch = std::min(sm_arch_, max_supported_sm_arch());
   bool compile_ptx = sm_arch_ != compile_sm_arch;

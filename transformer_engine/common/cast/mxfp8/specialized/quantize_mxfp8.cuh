@@ -195,10 +195,9 @@ struct CastTraits<_IType, _OType, /*rowwise=*/true, /*colwise=*/false> {
 // (rtc/quantize_mxfp8_rowwise.cu) can reuse it without duplication.
 template <typename CastTraits>
 __device__ __forceinline__ void quantize_mxfp8_rowwise_cast_only_body(
-    typename CastTraits::IType *__restrict__ input,
-    typename CastTraits::OType *__restrict__ output, e8m0_t *__restrict__ scales_rowwise,
-    const float *noop, int32_t rows, int32_t cols, int32_t scale_stride_rowwise,
-    int32_t scale_stride_colwise) {
+    typename CastTraits::IType *__restrict__ input, typename CastTraits::OType *__restrict__ output,
+    e8m0_t *__restrict__ scales_rowwise, const float *noop, int32_t rows, int32_t cols,
+    int32_t scale_stride_rowwise, int32_t scale_stride_colwise) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   if (noop != nullptr && noop[0] == 1.0f) {
     return;
@@ -526,15 +525,15 @@ __device__ __forceinline__ void quantize_mxfp8_rowwise_cast_only_body(
     constexpr int32_t stride_in_smem = CastTraits::blockDimN / CastTraits::chunkElems;
     using PreferredDataType = detail::conditional_t<
         stride_in_smem % 16 == 0, uint4,
-        detail::conditional_t<
-            stride_in_smem % 8 == 0, uint2,
-            detail::conditional_t<stride_in_smem % 4 == 0, uint32_t,
-                               detail::conditional_t<stride_in_smem % 2 == 0, uint16_t, uint8_t>>>>;
+        detail::conditional_t<stride_in_smem % 8 == 0, uint2,
+                              detail::conditional_t<stride_in_smem % 4 == 0, uint32_t,
+                                                    detail::conditional_t<stride_in_smem % 2 == 0,
+                                                                          uint16_t, uint8_t>>>>;
 
     int2 end_coords;
     end_coords.y = detail::min(block_coords.y + CastTraits::blockDimM, rows);
     end_coords.x = detail::min((block_coords.x + CastTraits::blockDimN) / CastTraits::chunkElems,
-                            scale_stride_rowwise);
+                               scale_stride_rowwise);
     int2 valid_coords;
     valid_coords.y = end_coords.y - block_coords.y;
     valid_coords.x = end_coords.x - (block_coords.x / CastTraits::chunkElems);
@@ -592,9 +591,8 @@ __global__ void quantize_mxfp8_kernel_cast_only(typename CastTraits::IType *__re
                                                 const float *noop, int32_t rows, int32_t cols,
                                                 int32_t scale_stride_rowwise,
                                                 int32_t scale_stride_colwise) {
-  quantize_mxfp8_rowwise_cast_only_body<CastTraits>(
-      input, output, scales_rowwise, noop, rows, cols, scale_stride_rowwise,
-      scale_stride_colwise);
+  quantize_mxfp8_rowwise_cast_only_body<CastTraits>(input, output, scales_rowwise, noop, rows, cols,
+                                                    scale_stride_rowwise, scale_stride_colwise);
 }
 
 // The 32x32 bidimensional (rowwise+colwise) kernels use TMA: CUtensorMap
@@ -711,11 +709,11 @@ struct BidimTraitsImpl {
       _need_smem_for_colwise_reduce ? 32 * warpLayout::num * sizeof(ColwiseReduceDataType) : 0ul;
 
   static constexpr size_t smem_alignment = _tma_swizzle ? 1024ul : 128ul;
-  static constexpr size_t smem = _reuse_input_out_smem
-                                     ? (detail::max(smemInput, smemColwiseOutput) + smemRowwiseOutput +
-                                        smem_alignment + smem_rowwise_scale + smem_colwise_reduce)
-                                     : (smemInput + smemRowwiseOutput + smemColwiseOutput +
-                                        smem_alignment + smem_rowwise_scale + smem_colwise_reduce);
+  static constexpr size_t smem =
+      _reuse_input_out_smem ? (detail::max(smemInput, smemColwiseOutput) + smemRowwiseOutput +
+                               smem_alignment + smem_rowwise_scale + smem_colwise_reduce)
+                            : (smemInput + smemRowwiseOutput + smemColwiseOutput + smem_alignment +
+                               smem_rowwise_scale + smem_colwise_reduce);
 };
 
 // Shipped bidimensional config: BidimTraitsImpl with the default knobs. Keeping
@@ -1150,16 +1148,16 @@ __global__ void quantize_mxfp8_kernel_cast_only(
       constexpr int32_t stride_in_smem = CastTraits::blockDIM::N / CastTraits::rowChunkElems;
       using PreferredDataType = detail::conditional_t<
           stride_in_smem % 16 == 0, uint4,
-          detail::conditional_t<
-              stride_in_smem % 8 == 0, uint2,
-              detail::conditional_t<stride_in_smem % 4 == 0, uint32_t,
-                                 detail::conditional_t<stride_in_smem % 2 == 0, uint16_t, uint8_t>>>>;
+          detail::conditional_t<stride_in_smem % 8 == 0, uint2,
+                                detail::conditional_t<stride_in_smem % 4 == 0, uint32_t,
+                                                      detail::conditional_t<stride_in_smem % 2 == 0,
+                                                                            uint16_t, uint8_t>>>>;
 
       int2 end_coords;
       end_coords.y = detail::min(block_coords.y + CastTraits::blockDIM::M, rows);
       end_coords.x =
           detail::min((block_coords.x + CastTraits::blockDIM::N) / CastTraits::rowChunkElems,
-                   scale_stride_rowwise);
+                      scale_stride_rowwise);
       int2 valid_coords;
       valid_coords.y = end_coords.y - block_coords.y;
       valid_coords.x = end_coords.x - (block_coords.x / CastTraits::rowChunkElems);
@@ -1611,15 +1609,16 @@ __device__ __forceinline__ void quantize_mxfp8_bidimensional_cast_only_body(
     constexpr int32_t stride_in_smem = CastTraits::blockDIM::N / CastTraits::rowChunkElems;
     using PreferredDataType = detail::conditional_t<
         stride_in_smem % 16 == 0, uint4,
-        detail::conditional_t<
-            stride_in_smem % 8 == 0, uint2,
-            detail::conditional_t<stride_in_smem % 4 == 0, uint32_t,
-                               detail::conditional_t<stride_in_smem % 2 == 0, uint16_t, uint8_t>>>>;
+        detail::conditional_t<stride_in_smem % 8 == 0, uint2,
+                              detail::conditional_t<stride_in_smem % 4 == 0, uint32_t,
+                                                    detail::conditional_t<stride_in_smem % 2 == 0,
+                                                                          uint16_t, uint8_t>>>>;
 
     int2 end_coords;
     end_coords.y = detail::min(block_coords.y + CastTraits::blockDIM::M, rows);
-    end_coords.x = detail::min((block_coords.x + CastTraits::blockDIM::N) / CastTraits::rowChunkElems,
-                            scale_stride_rowwise);
+    end_coords.x =
+        detail::min((block_coords.x + CastTraits::blockDIM::N) / CastTraits::rowChunkElems,
+                    scale_stride_rowwise);
     int2 valid_coords;
     valid_coords.y = end_coords.y - block_coords.y;
     valid_coords.x = end_coords.x - (block_coords.x / CastTraits::rowChunkElems);

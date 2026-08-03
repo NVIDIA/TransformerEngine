@@ -23,11 +23,11 @@ using RowwiseTraits = specialized::CastTraits<IType, OType, /*rowwise=*/true, /*
 }  // namespace
 
 // Non-template entry point so the host can request it by a stable name.
-__global__ void __launch_bounds__(RowwiseTraits::numThreads) quantize_mxfp8_rowwise_rtc_kernel(
-    IType *__restrict__ input, OType *__restrict__ output, e8m0_t *__restrict__ scales_rowwise,
-    const float *noop, int32_t rows, int32_t cols, int32_t scale_stride_rowwise,
-    int32_t scale_stride_colwise) {
+__global__ void __launch_bounds__(RowwiseTraits::numThreads)
+    quantize_mxfp8_rowwise_rtc_kernel(IType *__restrict__ input, OType *__restrict__ output,
+                                      e8m0_t *__restrict__ scales_rowwise, const float *noop,
+                                      int32_t rows, int32_t cols, int32_t scale_stride_rowwise,
+                                      int32_t scale_stride_colwise) {
   specialized::quantize_mxfp8_rowwise_cast_only_body<RowwiseTraits>(
-      input, output, scales_rowwise, noop, rows, cols, scale_stride_rowwise,
-      scale_stride_colwise);
+      input, output, scales_rowwise, noop, rows, cols, scale_stride_rowwise, scale_stride_colwise);
 }

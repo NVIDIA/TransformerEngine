@@ -28,7 +28,7 @@ namespace quantize_kernel {
 namespace specialized {
 
 // Compile (if not already cached) the rowwise cast-only RTC kernel for the given
-// element-type spellings. 
+// element-type spellings.
 void compile_rowwise_cast_only_rtc(const std::string &kernel_label, const std::string &itype_name,
                                    const std::string &otype_name);
 void compile_bidimensional_cast_only_rtc(const std::string &kernel_label,
@@ -67,8 +67,8 @@ inline void launch_rowwise_cast_only_rtc(IType *input, OType *output, e8m0_t *sc
   const std::string itype_name = rtc_type_name<IType>();
   const std::string otype_name = rtc_type_name<OType>();
 
-  const std::string kernel_label = std::string("quantize_mxfp8_rowwise_cast_only,itype=") +
-                                   itype_name + ",otype=" + otype_name;
+  const std::string kernel_label =
+      std::string("quantize_mxfp8_rowwise_cast_only,itype=") + itype_name + ",otype=" + otype_name;
 
   auto &mgr = rtc::KernelManager::instance();
   if (!mgr.is_compiled(kernel_label)) {
@@ -84,8 +84,7 @@ inline void launch_rowwise_cast_only_rtc(IType *input, OType *output, e8m0_t *sc
   dim3 grid((cols + traits::blockDimN - 1) / traits::blockDimN,
             (rows + traits::blockDimM - 1) / traits::blockDimM);
   mgr.launch(kernel_label, grid, block, static_cast<unsigned int>(traits::smem), stream, input,
-             output, scales_rowwise, noop, rows, cols, scale_stride_rowwise,
-             scale_stride_colwise);
+             output, scales_rowwise, noop, rows, cols, scale_stride_rowwise, scale_stride_colwise);
 }
 
 // Compile-time config for the bidimensional kernel.
@@ -120,14 +119,15 @@ template <typename IType, typename OType, int32_t NS, int32_t ITN, bool CVT>
 inline void launch_bidim_impl(const CUtensorMap &tensor_map_input,
                               const CUtensorMap &tensor_map_rowwise_output,
                               const CUtensorMap &tensor_map_colwise_output, e8m0_t *scales_rowwise,
-                              e8m0_t *scales_colwise, const float *noop, int32_t rows,
-                              int32_t cols, int32_t scale_stride_rowwise,
-                              int32_t scale_stride_colwise, cudaStream_t stream,
-                              const std::string &itype_name, const std::string &otype_name) {
+                              e8m0_t *scales_colwise, const float *noop, int32_t rows, int32_t cols,
+                              int32_t scale_stride_rowwise, int32_t scale_stride_colwise,
+                              cudaStream_t stream, const std::string &itype_name,
+                              const std::string &otype_name) {
   using traits = BidimTunableTraits<IType, OType, NS, ITN, CVT>;
   const std::string kernel_label = std::string("quantize_mxfp8_bidimensional_cast_only,itype=") +
-                                   itype_name + ",otype=" + otype_name + ",ns=" + std::to_string(NS) +
-                                   ",itn=" + std::to_string(ITN) + ",cvt=" + (CVT ? "4x" : "2x");
+                                   itype_name + ",otype=" + otype_name +
+                                   ",ns=" + std::to_string(NS) + ",itn=" + std::to_string(ITN) +
+                                   ",cvt=" + (CVT ? "4x" : "2x");
   auto &mgr = rtc::KernelManager::instance();
   if (!mgr.is_compiled(kernel_label)) {
     compile_bidimensional_cast_only_rtc(kernel_label, itype_name, otype_name, NS, ITN, CVT);
@@ -148,11 +148,13 @@ inline void launch_bidim_impl(const CUtensorMap &tensor_map_input,
 // NVRTC, selecting the (numStages, iterN, cvt) config for this shape. TMA
 // descriptors are built host-side by the caller (config-independent).
 template <typename IType, typename OType>
-inline void launch_bidimensional_cast_only_rtc(
-    const CUtensorMap &tensor_map_input, const CUtensorMap &tensor_map_rowwise_output,
-    const CUtensorMap &tensor_map_colwise_output, e8m0_t *scales_rowwise, e8m0_t *scales_colwise,
-    const float *noop, int32_t rows, int32_t cols, int32_t scale_stride_rowwise,
-    int32_t scale_stride_colwise, cudaStream_t stream) {
+inline void launch_bidimensional_cast_only_rtc(const CUtensorMap &tensor_map_input,
+                                               const CUtensorMap &tensor_map_rowwise_output,
+                                               const CUtensorMap &tensor_map_colwise_output,
+                                               e8m0_t *scales_rowwise, e8m0_t *scales_colwise,
+                                               const float *noop, int32_t rows, int32_t cols,
+                                               int32_t scale_stride_rowwise,
+                                               int32_t scale_stride_colwise, cudaStream_t stream) {
   const std::string itype_name = rtc_type_name<IType>();
   const std::string otype_name = rtc_type_name<OType>();
   const BidimConfig config = select_bidim_config<IType, OType>(rows, cols);
@@ -160,8 +162,7 @@ inline void launch_bidimensional_cast_only_rtc(
 
   // The static configuration is always supported and is the only configuration
   // selected today.
-  if (config.num_stages == default_config.num_stages &&
-      config.iter_n == default_config.iter_n &&
+  if (config.num_stages == default_config.num_stages && config.iter_n == default_config.iter_n &&
       config.use_cvt_4x == default_config.use_cvt_4x) {
     launch_bidim_impl<IType, OType, default_config.num_stages, default_config.iter_n,
                       default_config.use_cvt_4x>(
@@ -171,13 +172,13 @@ inline void launch_bidimensional_cast_only_rtc(
     return;
   }
 
-#define NVTE_MXFP8_BIDIM_CASE(NS, ITN, CVT)                                                      \
-  if (config.num_stages == (NS) && config.iter_n == (ITN) && config.use_cvt_4x == (CVT)) {       \
-    launch_bidim_impl<IType, OType, NS, ITN, CVT>(                                               \
-        tensor_map_input, tensor_map_rowwise_output, tensor_map_colwise_output, scales_rowwise,  \
-        scales_colwise, noop, rows, cols, scale_stride_rowwise, scale_stride_colwise, stream,    \
-        itype_name, otype_name);                                                                 \
-    return;                                                                                      \
+#define NVTE_MXFP8_BIDIM_CASE(NS, ITN, CVT)                                                     \
+  if (config.num_stages == (NS) && config.iter_n == (ITN) && config.use_cvt_4x == (CVT)) {      \
+    launch_bidim_impl<IType, OType, NS, ITN, CVT>(                                              \
+        tensor_map_input, tensor_map_rowwise_output, tensor_map_colwise_output, scales_rowwise, \
+        scales_colwise, noop, rows, cols, scale_stride_rowwise, scale_stride_colwise, stream,   \
+        itype_name, otype_name);                                                                \
+    return;                                                                                     \
   }
   // Keep candidate configurations available for a future tuning PR. The
   // selector above does not currently choose any of them. cvt is fixed at 4x.

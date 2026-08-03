@@ -26,13 +26,12 @@ using BidimTraits =
 }  // namespace
 
 // Non-template entry point so the host can request it by a stable name.
-__global__ void __launch_bounds__(BidimTraits::numThreads)
-    quantize_mxfp8_bidimensional_rtc_kernel(
-        const __grid_constant__ CUtensorMap tensor_map_input,
-        const __grid_constant__ CUtensorMap tensor_map_rowwise_output,
-        const __grid_constant__ CUtensorMap tensor_map_colwise_output, e8m0_t *scales_rowwise,
-        e8m0_t *scales_colwise, const float *noop, int32_t rows, int32_t cols,
-        int32_t scale_stride_rowwise, int32_t scale_stride_colwise) {
+__global__ void __launch_bounds__(BidimTraits::numThreads) quantize_mxfp8_bidimensional_rtc_kernel(
+    const __grid_constant__ CUtensorMap tensor_map_input,
+    const __grid_constant__ CUtensorMap tensor_map_rowwise_output,
+    const __grid_constant__ CUtensorMap tensor_map_colwise_output, e8m0_t *scales_rowwise,
+    e8m0_t *scales_colwise, const float *noop, int32_t rows, int32_t cols,
+    int32_t scale_stride_rowwise, int32_t scale_stride_colwise) {
   specialized::quantize_mxfp8_bidimensional_cast_only_body<BidimTraits>(
       tensor_map_input, tensor_map_rowwise_output, tensor_map_colwise_output, scales_rowwise,
       scales_colwise, noop, rows, cols, scale_stride_rowwise, scale_stride_colwise);

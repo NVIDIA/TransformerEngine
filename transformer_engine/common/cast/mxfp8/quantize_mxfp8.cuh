@@ -19,8 +19,8 @@
 #include "../../common.h"
 #include "../../util/math.h"
 #include "../../util/ptx.cuh"
-#include "../../utils.cuh"
 #include "../../util/rtc.h"
+#include "../../utils.cuh"
 #include "../core/common.cuh"
 #include "specialized/quantize_mxfp8.cuh"
 #include "specialized/rtc_dispatch.cuh"
@@ -687,8 +687,8 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
                     auto *rowwise_output =
                         reinterpret_cast<typename traits::OType *>(output->data.dptr);
 
-                    // Prefer the NVRTC-compiled kernel; fall back to the static
-                    // instantiation only when it was compiled in and NVRTC is disabled.
+        // Prefer the NVRTC-compiled kernel; fall back to the static
+        // instantiation only when it was compiled in and NVRTC is disabled.
 #if NVTE_BUILD_LEGACY_STATIC_MXFP8
                     const bool use_rtc = rtc::is_enabled();
 #else
