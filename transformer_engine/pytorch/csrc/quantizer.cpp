@@ -2409,7 +2409,7 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::convert_and_update_tensor(
 void NVFP4Quantizer::quantize_with_rht_unfused_helper(
     const TensorWrapper& input, TensorWrapper& out, TensorWrapper& rht_output_t_cpp,
     QuantizationConfigWrapper& quant_config, QuantizationConfigWrapper& quant_config_columnwise,
-    bool compute_amax, cudaStream_t stream) {
+    cudaStream_t stream) {
   // The kernels invoked below reject swizzled-SF output, so trip a clear
   // error here before reaching them.
   NVTE_CHECK(!out.get_with_gemm_swizzled_scales(),
@@ -2484,12 +2484,6 @@ void NVFP4Quantizer::quantize_with_rht_unfused_helper(
       auto rht_matrix = this->rht_matrix.to(torch_dtype);
       at::matmul_out(output_torch.view({-1, 16}),
                      input_torch.transpose(0, 1).contiguous().view({-1, 16}), rht_matrix);
-      if (compute_amax) {
-        auto amax_options = at::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
-        auto columnwise_amax =
-            at::from_blob(out_columnwise_amax.data_ptr, {1}, [](void*) {}, amax_options);
-        columnwise_amax.copy_(output_torch.abs().amax().to(torch::kFloat32).view({1}));
-      }
     } else {
       NVTE_SCOPED_GIL_RELEASE({
         // Perform the RHT(input.t), and write to rht_output_cpp.columnwise.
@@ -2639,10 +2633,35 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
       // 1. Rowwise amax = amax for input
       // 2. Columnwise amax = amax for RHT(input.t)
       if (compute_amax) {
-        NVTE_SCOPED_GIL_RELEASE({
-          nvte_hadamard_transform_amax(input.data(), out.data(), 0,
-                                       this->rht_matrix_random_sign_mask_t, stream);
-        });
+        const int sm_arch = transformer_engine::cuda::sm_arch();
+        if (sm_arch == 120 || sm_arch == 121) {
+          const auto torch_dtype = GetATenDType(input.dtype());
+          auto options = at::TensorOptions().dtype(torch_dtype).device(torch::kCUDA);
+          auto input_torch = at::from_blob(
+              input.get_rowwise_data().data_ptr,
+              {static_cast<int64_t>(rows), static_cast<int64_t>(cols)}, [](void*) {}, options);
+          auto amax_options = at::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+          auto copy_amax = [&amax_options](const at::Tensor& tensor, void* dst) {
+            if (dst != nullptr) {
+              auto amax = at::from_blob(dst, {1}, [](void*) {}, amax_options);
+              amax.copy_(tensor.abs().amax().to(torch::kFloat32).view({1}));
+            }
+          };
+          copy_amax(input_torch, out.get_amax().data_ptr);
+          if (out.get_columnwise_amax().data_ptr != nullptr) {
+            NVTE_CHECK(this->rht_matrix.defined() && this->rht_matrix.numel() > 0,
+                       "RHT matrix is not available.");
+            auto rht_matrix = this->rht_matrix.to(torch_dtype);
+            auto rht_output = at::matmul(
+                input_torch.transpose(0, 1).contiguous().view({-1, 16}), rht_matrix);
+            copy_amax(rht_output, out.get_columnwise_amax().data_ptr);
+          }
+        } else {
+          NVTE_SCOPED_GIL_RELEASE({
+            nvte_hadamard_transform_amax(input.data(), out.data(), 0,
+                                         this->rht_matrix_random_sign_mask_t, stream);
+          });
+        }
       }
     } else {
       // raise error since it's not supported yet
@@ -2728,7 +2747,7 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
       rht_output_t_cpp.set_rowwise_data(rht_output_t.data_ptr(), input.dtype(),
                                         std::vector<size_t>{cols, rows});
       this->quantize_with_rht_unfused_helper(input, out, rht_output_t_cpp, quant_config,
-                                             columnwise_quant_config_to_use, compute_amax, stream);
+                                             columnwise_quant_config_to_use, stream);
     }
   } else {
     NVTE_SCOPED_GIL_RELEASE({ nvte_quantize_v2(input.data(), out.data(), quant_config, stream); });
