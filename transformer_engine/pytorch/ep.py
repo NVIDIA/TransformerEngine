@@ -16,6 +16,7 @@ import transformer_engine_torch as tex
 
 from .cpu_offload import mark_not_offload
 from .distributed import symm_mem_alloc, release_symm_mem_pool
+from .quantized_tensor import QuantizedTensor
 
 # Type-hint-only import; keeps the ``Recipe`` annotation without a runtime import of
 # common.recipe (the concrete recipe classes are imported lazily where used).
@@ -121,7 +122,9 @@ def ep_bootstrap(
 
     ``zero_copy`` opts the EP group into the symm-mem zero-copy IO path; pass
     ``True`` only when payload tensors are allocated via ``symm_mem_alloc``.
-    Requires ``recv_capacity_per_rank``.
+    Requires ``recv_capacity_per_rank``. To capture a CUDA graph, supply
+    persistent recv_tokens / grad_out buffers to dispatch/combine; the pool-based
+    auto-allocation used when they are omitted is not CUDA-graph capturable.
 
     ``num_topk`` is the per-token top-k; it sizes NCCL EP internal buffers.
 
@@ -186,7 +189,9 @@ def ep_finalize() -> None:
     An atexit handler covers normal interpreter shutdown, so most users do not
     need to call this. Call it explicitly only before
     ``dist.destroy_process_group()``, since the borrowed NCCL comm becomes
-    invalid once the PG is destroyed.
+    invalid once the PG is destroyed. This does not release the symm-mem pool;
+    if you used ``symm_mem_alloc(use_pool=True)``, also call
+    ``release_symm_mem_pool()`` before destroying the PG.
     """
     global _BOOTSTRAPPED, _EP_GROUP, _EAGER
     if not _BOOTSTRAPPED:
@@ -244,7 +249,6 @@ class EpBuffer:
         "_host_total_recv_tokens",
         "dispatch_fwd_quant_recipe",
         "combine_bwd_quant_recipe",
-        "prepared",
     )
 
     def __init__(
@@ -301,8 +305,6 @@ class EpBuffer:
         mark_not_offload(self.total_recv_tokens)
         # Host mirror of total_recv_tokens, set by ep_prepare in eager mode.
         self._host_total_recv_tokens: Optional[int] = None
-        # Set by ep_prepare; dispatch/combine read the routing it cached in handle_mem.
-        self.prepared = False
 
 
 # torch.library custom ops (so they don't graph-break under torch.compile)
@@ -443,7 +445,6 @@ def ep_prepare(buffer: "EpBuffer", topk_idx: torch.Tensor) -> torch.Tensor:
     )
     if buffer.eager:
         buffer._host_total_recv_tokens = int(buffer.total_recv_tokens.item())
-    buffer.prepared = True
     return buffer.tokens_per_expert
 
 
@@ -456,8 +457,6 @@ def _ep_dispatch_raw(
     recv_topk_weights: torch.Tensor,
 ) -> None:
     """Raw dispatch; no autograd, no prepare. Caller must run ep_prepare first."""
-    if not buffer.prepared:
-        raise RuntimeError("ep_dispatch requires ep_prepare to have run on this buffer first.")
     tex.ep_dispatch(
         buffer.handle_mem, topk_idx, tokens, topk_weights, recv_tokens, recv_topk_weights
     )
@@ -465,8 +464,6 @@ def _ep_dispatch_raw(
 
 def _ep_combine_raw(buffer: "EpBuffer", expert_out: torch.Tensor, result: torch.Tensor) -> None:
     """Raw combine; no autograd. Caller pre-weights expert_out."""
-    if not buffer.prepared:
-        raise RuntimeError("ep_combine requires ep_prepare to have run on this buffer first.")
     tex.ep_combine(buffer.handle_mem, expert_out, result)
 
 
@@ -487,15 +484,13 @@ class _EpDispatch(torch.autograd.Function):
         topk_weights: torch.Tensor,
         tokens_scale_inv: Optional[torch.Tensor] = None,
         token_counts: Optional[torch.Tensor] = None,
-        rows: int = 0,
+        num_recv_tokens: Optional[int] = None,
         payload_dtype: torch.dtype = torch.bfloat16,
     ):
         """Dispatch fwd; prepare must have run into ``handle_mem`` beforehand. When scales are set
         (MXFP8 for now), ``tokens`` is the quantized tensor kept as the autograd operand so grad
         reaches the pre-quant input. Recv outputs are carved/allocated here: a caller may supply
-        ``recv_tokens`` / ``recv_topk_weights``, else they are sized to ``rows``."""
-        from .quantized_tensor import QuantizedTensor
-
+        ``recv_tokens`` / ``recv_topk_weights``, else they are sized to ``num_recv_tokens``."""
         is_scaled = tokens_scale_inv is not None
         tokens_data = tokens._rowwise_data if isinstance(tokens, QuantizedTensor) else tokens
         assert tokens_data.dim() == 2, "EP dispatch tokens must be 2D [num_tokens, hidden]"
@@ -510,7 +505,7 @@ class _EpDispatch(torch.autograd.Function):
             # recv data + scales share one buffer (data then scales); carve or allocate it here.
             recv_tokens, recv_scale_inv = _scale_alloc_io(
                 recv_tokens,
-                rows,
+                num_recv_tokens,
                 hidden,
                 tokens_scale_inv.shape[-1],
                 tokens_data.dtype,
@@ -523,11 +518,11 @@ class _EpDispatch(torch.autograd.Function):
             dispatch_recv = recv_tokens.view(torch.float8_e4m3fn)
         else:
             if recv_tokens is None:
-                recv_tokens = _alloc_io((rows, hidden), payload_dtype, device, zero_copy)
+                recv_tokens = _alloc_io((num_recv_tokens, hidden), payload_dtype, device, zero_copy)
             dispatch_tokens = tokens_data
             dispatch_recv = recv_tokens
         if recv_topk_weights is None:
-            recv_topk_weights = _alloc_io((rows,), torch.float32, device, zero_copy)
+            recv_topk_weights = _alloc_io((num_recv_tokens,), torch.float32, device, zero_copy)
         torch.ops.transformer_engine_ep.dispatch(
             handle_mem,
             topk_idx,
@@ -592,7 +587,7 @@ class _EpDispatch(torch.autograd.Function):
             grad_topk_weights.view(ctx.topk_weights_shape),
             None,  # tokens_scale_inv (scales; non-differentiable)
             None,  # token_counts (per-expert counts; non-differentiable)
-            None,  # rows (sizing scalar)
+            None,  # num_recv_tokens (sizing scalar)
             None,  # payload_dtype (sizing scalar)
         )
 
@@ -636,7 +631,7 @@ class _EpCombine(torch.autograd.Function):
     def backward(ctx, g_result):  # type: ignore[override]
         """Combine bwd; scatters the result-grad to expert positions. High-precision sends the grad
         as-is; a quantized recipe (MXFP8 today) quantizes it and returns the expert_out grad as a
-        per-expert GroupedTensor. New FP8/NVFP4 recipes plug in via ``_quantize``."""
+        per-expert GroupedTensor."""
         if not g_result.is_contiguous():
             g_result = g_result.contiguous()
         (handle_mem,) = ctx.saved_tensors
@@ -653,7 +648,7 @@ class _EpCombine(torch.autograd.Function):
                 raise NotImplementedError(
                     "Quantized combine backward is not supported under zero-copy"
                 )
-            mx, g_scale_inv = _quantize(g_result, ctx.bwd_quant_recipe)
+            mx, g_scale_inv = _quantize_mxfp8(g_result)
             g_data = mx._rowwise_data
             recv_pr, hidden = ctx.expert_out_shape[0], ctx.expert_out_shape[-1]
             ge_data, ge_scale_inv = _scale_alloc_io(
@@ -703,8 +698,16 @@ def _require_bf16(name: str, t: torch.Tensor) -> None:
 
 def _alloc_io(shape, dtype: torch.dtype, device, zero_copy: bool) -> torch.Tensor:
     """Allocate a dispatch/combine IO tensor the caller did not supply: from the symm-mem pool in
-    zero-copy mode (auto-registered segment, lifecycle managed by torch refcount), else plain."""
+    zero-copy mode (auto-registered segment, lifecycle managed by torch refcount), else plain.
+
+    The zero-copy pool path is not CUDA-graph capturable; supply persistent recv_tokens / grad_out
+    buffers to capture a graph."""
     if zero_copy:
+        if torch.cuda.is_current_stream_capturing():
+            raise RuntimeError(
+                "EP zero-copy pool allocation is not CUDA-graph capturable; supply persistent "
+                "recv_tokens / grad_out buffers (allocated once via symm_mem_alloc) before capture."
+            )
         t = symm_mem_alloc(shape, dtype, _EP_GROUP, device=device, use_pool=True)
         # symm-mem storage is non-resizable; exempt it from CPU activation offloading (which
         # releases via storage.resize_(0)). Matters for bf16 recv_tokens (the saved activation).
@@ -713,26 +716,13 @@ def _alloc_io(shape, dtype: torch.dtype, device, zero_copy: bool) -> torch.Tenso
     return torch.empty(*shape, dtype=dtype, device=device)
 
 
-def _quantize(x: torch.Tensor, recipe):
-    """Quantize a high-precision tensor per a block-scaled ``recipe`` and return
-    ``(quantized_tensor, scale_inv)`` where ``scale_inv`` is the compact ``[T, H/block]`` scale the
-    EP backend routes. The quantized tensor is returned so callers can keep it as the autograd
-    operand; its ``_rowwise_data`` is the fp8 payload and ``scale_inv.shape[-1]`` the scale-column
-    count. Only ``MXFP8BlockScaling`` is supported today; add a recipe branch below for new
-    FP8/NVFP4 recipes."""
-    from ..common.recipe import MXFP8BlockScaling
-
-    if isinstance(recipe, MXFP8BlockScaling):
-        return _quantize_mxfp8(x)
-    raise NotImplementedError(
-        f"EP block-scaled dispatch supports MXFP8BlockScaling only; got {type(recipe).__name__}."
-    )
-
-
 def _quantize_mxfp8(x: torch.Tensor):
-    """MXFP8 implementation of ``_quantize``. EP routes and returns E4M3 data in both directions,
-    so quantize to E4M3 regardless of pass. Strips the GEMM scale row padding to the compact
-    ``[T, H/block]`` layout; requires a 16-byte-aligned scale row."""
+    """Quantize a high-precision tensor to MXFP8 and return ``(quantized_tensor, scale_inv)`` where
+    ``scale_inv`` is the compact ``[T, H/block]`` scale the EP backend routes. The quantized tensor
+    is returned so callers can keep it as the autograd operand; its ``_rowwise_data`` is the fp8
+    payload and ``scale_inv.shape[-1]`` the scale-column count. EP routes and returns E4M3 data in
+    both directions, so quantize to E4M3 regardless of pass. Strips the GEMM scale row padding to
+    the compact ``[T, H/block]`` layout; requires a 16-byte-aligned scale row."""
     from .constants import MXFP8_BLOCK_SCALING_SIZE
     from .tensor.mxfp8_tensor import MXFP8Quantizer
 
@@ -842,13 +832,12 @@ def ep_dispatch(
     (symm-mem-backed under zero-copy) or leave them None to allocate. For MXFP8 the recv data and
     scales share ``recv_tokens`` (data then scales), so size it to at least
     ``recv_capacity_per_rank * (hidden + hidden/block)`` bytes. Eager mode sizes the recv outputs
-    per step and forbids caller-supplied buffers.
+    per step and forbids caller-supplied buffers. Under zero-copy, leaving them None allocates from
+    the symm-mem pool, which is not CUDA-graph capturable; pass persistent buffers to capture a graph.
 
     Returns (recv_tokens, recv_topk_weights, tokens_per_expert); tokens_per_expert is non-diff. See
     ``buffer.total_recv_tokens`` for the per-step recv total.
     """
-    from .quantized_tensor import QuantizedTensor
-
     if topk_weights.dtype is not torch.float32:
         raise TypeError(
             f"topk_weights must be float32; got dtype={topk_weights.dtype}. "
@@ -869,20 +858,22 @@ def ep_dispatch(
     # Prepare (routing AllGather) up front so the recv outputs can be sized; in
     # eager mode ep_prepare also host-syncs this step's recv-token total.
     tokens_per_expert = ep_prepare(buffer, topk_idx)
-    rows = buffer._host_total_recv_tokens if buffer.eager else buffer.recv_capacity_per_rank
+    num_recv_tokens = (
+        buffer._host_total_recv_tokens if buffer.eager else buffer.recv_capacity_per_rank
+    )
 
     tokens_scale_inv = None
     if buffer.dispatch_fwd_quant_recipe is not None:
-        # The grouped recv's packed scales only match the grouped layout when each expert slot is
-        # 128-aligned.
-        if buffer.alignment <= 0 or buffer.alignment % 128 != 0:
-            raise ValueError(
-                "MXFP8 dispatch requires a per-expert alignment that is a positive multiple of "
-                f"128; got alignment={buffer.alignment}."
+        from ..common.recipe import MXFP8BlockScaling
+
+        if not isinstance(buffer.dispatch_fwd_quant_recipe, MXFP8BlockScaling):
+            raise NotImplementedError(
+                "EP block-scaled dispatch supports MXFP8BlockScaling only; got "
+                f"{type(buffer.dispatch_fwd_quant_recipe).__name__}."
             )
         # Quantize here (not in forward) so the quantized tensor stays the autograd operand and grad
         # reaches the pre-quant input; forward then carves the recv buffers and routes.
-        tokens, tokens_scale_inv = _quantize(tokens, buffer.dispatch_fwd_quant_recipe)
+        tokens, tokens_scale_inv = _quantize_mxfp8(tokens)
 
     recv_tokens, recv_topk_weights = _EpDispatch.apply(
         buffer.handle_mem,
@@ -893,7 +884,7 @@ def ep_dispatch(
         topk_weights,
         tokens_scale_inv,
         tokens_per_expert,
-        rows,
+        num_recv_tokens,
         buffer.payload_dtype,
     )
     return recv_tokens, recv_topk_weights, tokens_per_expert
@@ -912,8 +903,10 @@ def ep_combine(
     backward's grad target: pass a caller-owned buffer or leave it None to allocate. For MXFP8 the
     grad data and scales share ``grad_out`` (data then scales), so size it to at least
     ``recv_capacity_per_rank * (hidden + hidden/block)`` bytes (non-zero-copy only). Eager mode sizes
-    the grad target per step and forbids a caller-supplied buffer. Result shape is
-    (num_local_tokens, hidden_dim); num_local_tokens defaults to buffer.max_tokens_per_rank.
+    the grad target per step and forbids a caller-supplied buffer. Under zero-copy, leaving it None
+    allocates from the symm-mem pool, which is not CUDA-graph capturable; pass a persistent buffer to
+    capture a graph. Result shape is (num_local_tokens, hidden_dim); num_local_tokens defaults to
+    buffer.max_tokens_per_rank.
     """
     _require_bf16("expert_out", expert_out)
     if buffer.eager and grad_out is not None:
@@ -933,13 +926,6 @@ def ep_combine(
             raise NotImplementedError(
                 "EP combine backward supports MXFP8BlockScaling only; got "
                 f"{type(buffer.combine_bwd_quant_recipe).__name__}."
-            )
-        # The grouped grad's packed scales only match the grouped layout when each expert slot is
-        # 128-aligned.
-        if buffer.alignment <= 0 or buffer.alignment % 128 != 0:
-            raise ValueError(
-                "MXFP8 combine backward requires a per-expert alignment that is a positive"
-                f" multiple of 128; got alignment={buffer.alignment}."
             )
         bwd_quant_recipe = buffer.combine_bwd_quant_recipe
     return _EpCombine.apply(
