@@ -17,6 +17,17 @@ from utils import assert_allclose, is_devices_enough, is_devices_equal
 
 def generate_configs():
     configs = []
+    if is_devices_enough(8):
+        configs.append(
+            pytest.param(
+                8,
+                (2, 2, 2),
+                ("dp", "fsdp", "tpsp"),
+                MeshResource(dp_resource="dp", fsdp_resource="fsdp", tpsp_resource="tpsp"),
+                id="n8_dp2_fsdp2_tp2",
+            )
+        )
+
     if is_devices_enough(4):
         configs.append(
             pytest.param(
