@@ -7,6 +7,8 @@ import torch
 
 import nvdlfw_inspect.api as debug_api
 import transformer_engine.pytorch as te
+from transformer_engine.debug.pytorch.debug_quantization import DebugQuantizedTensor
+from transformer_engine.pytorch.tensor.identity_tensor import IdentityQuantizer
 
 from test_numerics import create_config_file
 
@@ -57,6 +59,54 @@ fake_quant_config:
       quant_format: FP8E5M2
 """,
 }
+
+
+def test_debug_quantized_tensor_routes_usage_to_distinct_representations():
+    """A usage request should only reach the child for that GEMM direction."""
+    rowwise = IdentityQuantizer()(torch.ones(2, 2))
+    columnwise = IdentityQuantizer()(torch.ones(2, 2))
+    rowwise_calls = []
+    columnwise_calls = []
+
+    def record_rowwise(rowwise_usage=None, columnwise_usage=None):
+        rowwise_calls.append((rowwise_usage, columnwise_usage))
+
+    def record_columnwise(rowwise_usage=None, columnwise_usage=None):
+        columnwise_calls.append((rowwise_usage, columnwise_usage))
+
+    rowwise.update_usage = record_rowwise
+    columnwise.update_usage = record_columnwise
+    tensor = DebugQuantizedTensor(rowwise, columnwise, quantizer=None)
+
+    tensor.update_usage(columnwise_usage=True)
+    assert rowwise_calls == []
+    assert columnwise_calls == [(None, True)]
+
+    tensor.update_usage(rowwise_usage=True)
+    assert rowwise_calls == [(True, None)]
+    assert columnwise_calls == [(None, True)]
+
+    tensor.update_usage(rowwise_usage=False)
+    assert tensor.rowwise_gemm_tensor is None
+    with pytest.raises(RuntimeError, match="Cannot recreate rowwise tensor"):
+        tensor.update_usage(rowwise_usage=True, columnwise_usage=False)
+    assert tensor.columnwise_gemm_tensor is columnwise
+
+
+def test_debug_quantized_tensor_updates_shared_representation_once():
+    """A shared child receives one combined usage update."""
+    shared = IdentityQuantizer()(torch.ones(2, 2))
+    calls = []
+
+    def record_usage(rowwise_usage=None, columnwise_usage=None):
+        calls.append((rowwise_usage, columnwise_usage))
+
+    shared.update_usage = record_usage
+    tensor = DebugQuantizedTensor(shared, shared, quantizer=None)
+
+    tensor.update_usage(rowwise_usage=True, columnwise_usage=False)
+    assert calls == [(True, False)]
+
 
 # Configs that require FP8 to be enabled
 fp8_required_configs = {"log_fp8"}

@@ -128,6 +128,16 @@ def _unwrap_tensor(
     if usage not in ("rowwise", "columnwise"):
         raise ValueError(f"Unsupported GEMM tensor usage ({usage})")
 
+    # Hybrid and debug wrappers may omit a representation that is not needed
+    # by their configured GEMMs. Fail here if a caller requests that missing
+    # direction instead of passing ``None`` deeper into GEMM preparation.
+    if tensor is None:
+        raise RuntimeError(
+            f"GEMM requested the {usage} representation, but it is unavailable. "
+            f"Ensure {usage}_usage is enabled and the representation has not "
+            "been dropped by update_usage()."
+        )
+
     # Plain PyTorch tensor
     if not isinstance(tensor, QuantizedTensorStorage):
         return tensor

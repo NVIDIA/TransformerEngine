@@ -37,6 +37,25 @@ def _make_mxfp8(*, fp8_dtype=te.DType.kFloat8E4M3):
     return te.MXFP8Quantizer(fp8_dtype=fp8_dtype)
 
 
+def nvfp4_linear_mxfp8_dpa_test_factory(role):
+    """Test-local reference for the experimental NVFP4 Linear + MXFP8 DPA example."""
+    is_dpa = role is not None and role.module_type == "dpa"
+    is_dpa_boundary = (
+        role is not None
+        and not role.module_type
+        and ("dpa_output" in role.name or "dpa_grad_input" in role.name)
+    )
+
+    if is_dpa or is_dpa_boundary:
+        is_bwd_role = (is_dpa and role.tensor_type in ("do", "dp", "dqkv")) or (
+            is_dpa_boundary and "dpa_grad_input" in role.name
+        )
+        fp8_dtype = te.DType.kFloat8E5M2 if is_bwd_role else te.DType.kFloat8E4M3
+        return te.MXFP8Quantizer(fp8_dtype=fp8_dtype)
+
+    return nvfp4_factory(role)
+
+
 def fp8_e4m3_factory():
     """Construct the default E4M3 current-scaling test quantizer."""
     return te.Float8CurrentScalingQuantizer(te.DType.kFloat8E4M3, device="cuda")
