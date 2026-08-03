@@ -2486,8 +2486,8 @@ void NVFP4Quantizer::quantize_with_rht_unfused_helper(
                      input_torch.transpose(0, 1).contiguous().view({-1, 16}), rht_matrix);
       if (compute_amax) {
         auto amax_options = at::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
-        auto columnwise_amax = at::from_blob(out_columnwise_amax.data_ptr, {1}, [](void*) {},
-                                             amax_options);
+        auto columnwise_amax =
+            at::from_blob(out_columnwise_amax.data_ptr, {1}, [](void*) {}, amax_options);
         columnwise_amax.copy_(output_torch.abs().amax().to(torch::kFloat32).view({1}));
       }
     } else {
