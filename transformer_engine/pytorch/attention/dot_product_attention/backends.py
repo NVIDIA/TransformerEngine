@@ -1040,6 +1040,18 @@ class FlashAttention(torch.nn.Module):
         use_flash_attn_3 = (
             flash_attention_backend is not None and flash_attention_backend.major == 3
         )
+        if (
+            use_flash_attn_4
+            and (10, 0) <= get_device_compute_capability() < (12, 0)
+            and query_layer.shape[-1] == key_layer.shape[-1] == value_layer.shape[-1] == 256
+            and all(not isinstance(x, Float8Tensor) for x in [query_layer, key_layer, value_layer])
+            and any(not x.is_contiguous() for x in [query_layer, key_layer, value_layer])
+        ):
+            # FA4 D=256 SM10x kernels need packed K/V views materialized, even
+            # when the last dimension is contiguous.
+            query_layer, key_layer, value_layer = [
+                x.contiguous() for x in (query_layer, key_layer, value_layer)
+            ]
         if context_parallel and all(
             not isinstance(x, Float8Tensor) for x in [query_layer, key_layer, value_layer]
         ):

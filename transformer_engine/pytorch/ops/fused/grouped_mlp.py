@@ -1610,11 +1610,16 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                     dtype=dtype,
                 )
             else:
+                cudnn_supports_optional_prob = _cudnn_frontend_version_at_least("1.27.0")
                 fc2_scales_tensor = (
-                    fc2_scales.detach().to(dtype=torch.float32).reshape(-1, 1, 1)
-                    if fc2_scales is not None
+                    None
+                    if cudnn_supports_optional_prob
                     else torch.ones((in_shape[0], 1, 1), dtype=torch.float32, device=device)
                 )
+                if fc2_scales is not None:
+                    fc2_scales_tensor = (
+                        fc2_scales.detach().to(dtype=torch.float32).reshape(-1, 1, 1)
+                    )
                 fc2_quant_kwargs = {
                     "a_tensor": fc1_kernel_out["d_tensor"],
                     "sfa_tensor": fc1_kernel_out["sfd_row_tensor"],
@@ -2319,15 +2324,19 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                 fc1_dgrad_a_data = fc2_dgrad_kernel_out["d_row_tensor"]
                 fc1_dgrad_a_scales = fc2_dgrad_kernel_out["sfd_row_tensor"]
 
+                cudnn_supports_optional_prob = _cudnn_frontend_version_at_least("1.27.0")
+                fc1_dgrad_prob_tensor = (
+                    None
+                    if cudnn_supports_optional_prob
+                    else torch.ones((out_shape[0], 1, 1), dtype=torch.float32, device=device)
+                )
                 fc1_dgrad_kwargs = {
                     "a_tensor": fc1_dgrad_a_data,
                     "sfa_tensor": fc1_dgrad_a_scales,
                     "padded_offsets": split_points,
                     "alpha_tensor": alpha_tensor,
                     "norm_const_tensor": None,
-                    "prob_tensor": torch.ones(
-                        (out_shape[0], 1, 1), dtype=torch.float32, device=device
-                    ),
+                    "prob_tensor": fc1_dgrad_prob_tensor,
                     "acc_dtype": torch.float32,
                     "d_dtype": dtype,
                     "cd_major": "n",

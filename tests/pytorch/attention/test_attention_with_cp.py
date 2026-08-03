@@ -480,6 +480,8 @@ model_configs_fused_attn = {
     "cp_4_3": ModelConfig(
         2, 4096, 64, 64, attn_mask_type="causal", window_size=(128, 0), softmax_type="learnable"
     ),  # GQA
+    "cp_5_0": ModelConfig(2, 1024, 16, 256, attn_mask_type="causal"),
+    "cp_5_1": ModelConfig(2, 1024, 16, 256, attn_mask_type="causal", window_size=(128, 0)),
 }
 
 
@@ -498,6 +500,8 @@ if test_essential:
         "cp_3_4",
         "cp_4_2",
         "cp_4_3",
+        "cp_5_0",
+        "cp_5_1",
     ]
     model_configs_fused_attn = {k: model_configs_fused_attn[k] for k in configs}
     dtypes = ["bf16", "fp8"]
@@ -530,6 +534,23 @@ def test_cp_with_fused_attention(
     config = model_configs_fused_attn[model]
     config.context_parallel = True
     config.cp_comm_type = cp_comm_type
+
+    if config.head_dim_qk == 256 and config.head_dim_v == 256:
+        # D=256 uses this generic CP runner, but only a subset of its axes is supported.
+        if get_device_compute_capability() not in ((10, 0), (10, 3)):
+            pytest.skip("D=256 CP fused attention is only enabled on Blackwell server GPUs.")
+        if dtype == "fp8":
+            pytest.skip("D=256 CP fused attention is covered for BF16/FP16 only.")
+        if cp_comm_type not in ["p2p", "all_gather"]:
+            pytest.skip("D=256 CP fused attention is covered for p2p and all_gather only.")
+
+        required_cudnn_version = (9, 25, 0) if qkv_format == "thd" else (9, 23, 0)
+        required_cudnn_version_label = "9.25" if qkv_format == "thd" else "9.23"
+        if get_cudnn_version() < required_cudnn_version:
+            pytest.skip(
+                f"D=256 CP fused attention with {qkv_format.upper()} requires cuDNN"
+                f" {required_cudnn_version_label} or newer."
+            )
 
     num_gpus = 4 if cp_comm_type == "a2a+p2p" else 2
     pool = cp_pool(num_gpus)
