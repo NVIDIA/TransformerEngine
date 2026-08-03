@@ -19,6 +19,8 @@
 extern "C" {
 #endif
 
+#include <transformer_engine/nvfp4_4over6.h>
+
 /*! \enum NVTEDType
  *  \brief TE datatype.
  */
@@ -116,15 +118,6 @@ enum NVTEScalingMode {
    * rowwise or columnwise direction */
   NVTE_NVFP4_1D_SCALING = 4,
   NVTE_INVALID_SCALING = 100
-};
-
-/*! \enum NVTENVFP44Over6Mode
- * \brief Method for NVFP4 4over6 quantization.
- */
-enum NVTENVFP44Over6Mode {
-  kNVTENVFP44Over6Disabled = 0, /*!< 4over6 is not applied */
-  kNVTENVFP44Over6MinMAE = 1,   /*!< Select the candidate with lower mean absolute error */
-  kNVTENVFP44Over6MinMSE = 2,   /*!< Select the candidate with lower mean squared error */
 };
 
 /*! \brief TE Tensor type
