@@ -317,11 +317,13 @@ constexpr size_t THREADS_PER_BANK = TOTAL_BANKS_WIDTH / SCALE_DIM;  // 8 = 128 /
 
 template <bool COMPUTE_ACTIVATIONS, typename ParamOP, float (*OP)(float, const ParamOP &),
           typename IType, bool USE_STOCHASTIC_ROUNDING, bool RETURN_TRANSPOSE,
-          bool ROW_SCALED_NVFP4>
+          bool ROW_SCALED_NVFP4, bool RETURN_ROWWISE = true,
+          bool APPLY_COLUMNWISE_RHT = false>
 __global__ void __launch_bounds__(THREADS_NUM)
     quantize_transpose_nvfp4_kernel(const __grid_constant__ CUtensorMap tensor_map_input,
                                     const __grid_constant__ CUtensorMap tensor_map_output,
                                     const __grid_constant__ CUtensorMap tensor_map_output_t,
+                                    const __grid_constant__ CUtensorMap tensor_map_rht,
                                     nvfp4_scale_t *const scales_ptr,
                                     nvfp4_scale_t *const scales_t_ptr, const float *noop,
                                     const float *const amax_rowwise_ptr,
@@ -408,6 +410,8 @@ __global__ void __launch_bounds__(THREADS_NUM)
   constexpr size_t out_mem_rowwise_data = buff_size_aligned_out;
   constexpr size_t out_mem_colwise_data = buff_size_aligned_out;
   constexpr size_t out_mem_rowwise_scales = 0;
+  constexpr size_t out_mem_colwise_scales =
+      (CHUNK_DIM_Y * CHUNK_DIM_X) / SCALE_DIM * sizeof(nvfp4_scale_t);
 
   extern __shared__ char dynamic_shmem[];
   uintptr_t base_shmem_ptr = reinterpret_cast<uintptr_t>(dynamic_shmem);
@@ -425,6 +429,9 @@ __global__ void __launch_bounds__(THREADS_NUM)
       dshmem + in_mem + out_mem_rowwise_data + out_mem_colwise_data);
   nvfp4_scale_t *out_colwise_scales_sh = reinterpret_cast<nvfp4_scale_t *>(
       dshmem + in_mem + out_mem_rowwise_data + out_mem_colwise_data + out_mem_rowwise_scales);
+  IType *rht_sh = reinterpret_cast<IType *>(
+      dshmem + in_mem + out_mem_rowwise_data + out_mem_colwise_data +
+      out_mem_rowwise_scales + out_mem_colwise_scales);
   IType *cached_act_sh = in_sh;  // in_sh is used as a cache buffer
 
   constexpr size_t shmem_buff_size = buff_size_aligned_in / BUFFS_NUM;
@@ -448,8 +455,15 @@ __global__ void __launch_bounds__(THREADS_NUM)
 // Initialize shared memory barrier with the number of threads participating in the barrier.
 #pragma nv_diag_suppress static_var_with_dynamic_init
   __shared__ alignas(8) uint64_t mbar[STAGES];
+  __shared__ alignas(8) uint64_t mbar_rht[1];
 
   initialize_barriers<STAGES, THREADS_NUM>(mbar, is_master_thread);
+
+  if constexpr (APPLY_COLUMNWISE_RHT) {
+    initialize_barriers<1, THREADS_NUM>(mbar_rht, is_master_thread);
+    copy_2d_to_shared(rht_sh, &tensor_map_rht, 0, 0, 16 * 16 * sizeof(IType), &mbar_rht[0],
+                      is_master_thread);
+  }
 
   copy_2d_to_shared(&in_sh[0], &tensor_map_input, block_offset_X, block_offset_Y, shmem_buff_size,
                     &mbar[0], is_master_thread);
@@ -483,6 +497,9 @@ __global__ void __launch_bounds__(THREADS_NUM)
 
     // Wait for the data to have arrived
     ptx::mbarrier_wait_parity(&mbar[stage], 0);
+    if constexpr (APPLY_COLUMNWISE_RHT) {
+      ptx::mbarrier_wait_parity(&mbar_rht[0], 0);
+    }
 
     float block_amax = 0.0f;
 
@@ -544,6 +561,47 @@ __global__ void __launch_bounds__(THREADS_NUM)
             in_compute_colwise[i] = elt;
           }
         }
+        if constexpr (APPLY_COLUMNWISE_RHT) {
+          float input_vec[SCALE_DIM];
+#pragma unroll
+          for (int i = 0; i < SCALE_DIM; ++i) {
+            input_vec[i] = static_cast<float>(in_colwise_IType[i]);
+          }
+          block_amax = 0.0f;
+#pragma unroll
+          for (int j = 0; j < SCALE_DIM; ++j) {
+            float value = 0.0f;
+            // ATen selects a reduced-precision BF16 GEMM for at most 1024
+            // K=16 vectors on SM12x. It forms two K=8 FP32 partials, rounds each
+            // partial to BF16, and then adds them. Larger inputs use a normal
+            // FP32 K=16 reduction. Match both orders at the fused-kernel boundary.
+            if (rows * cols <= 1024 * SCALE_DIM) {
+              float partial[2] = {0.0f, 0.0f};
+#pragma unroll
+              for (int group = 0; group < 2; ++group) {
+#pragma unroll
+                for (int k = 0; k < SCALE_DIM / 2; ++k) {
+                  const int rht_k = group * (SCALE_DIM / 2) + k;
+                  partial[group] =
+                      fmaf(input_vec[rht_k],
+                           static_cast<float>(rht_sh[rht_k * SCALE_DIM + j]), partial[group]);
+                }
+                partial[group] = static_cast<float>(static_cast<IType>(partial[group]));
+              }
+              value = partial[0] + partial[1];
+            } else {
+#pragma unroll
+              for (int k = 0; k < SCALE_DIM; ++k) {
+                value =
+                    fmaf(input_vec[k], static_cast<float>(rht_sh[k * SCALE_DIM + j]), value);
+              }
+            }
+            in_colwise_IType[j] = static_cast<IType>(value);
+            value = static_cast<float>(in_colwise_IType[j]);
+            in_compute_colwise[j] = value;
+            block_amax = fmaxf(block_amax, fabsf(value));
+          }
+        }
         // 2. Compute E4M3 scaling factor
         const nvfp4_scale_t S_dec_b_fp8 =
             compute_decoding_scaling_factor(block_amax, S_enc_colwise);
@@ -562,18 +620,38 @@ __global__ void __launch_bounds__(THREADS_NUM)
         // 3. Scale elements
         fp4e2m1x4 regs[SCALE_DIM / 4];
 
+        if constexpr (APPLY_COLUMNWISE_RHT && NO_ACTIVATIONS_NOT_FP32_INPUT) {
+          uint32_t *regs_8x = reinterpret_cast<uint32_t *>(regs);
 #pragma unroll
-        for (int e = 0; e < SCALE_DIM / 4; ++e) {
-          const uint32_t rbits = get_rbits(rng, random_uint4, rnd_idx);
-          if constexpr (NO_ACTIVATIONS_NOT_FP32_INPUT) {
-            const uint64_t elts = *reinterpret_cast<uint64_t *>(&in_colwise_IType[4 * e]);
-            regs[e] = ptx::mul_cvt_bf16_to_fp4_4x<USE_STOCHASTIC_ROUNDING>(
-                elts, block_scale_inverse_2x, rbits);
-          } else {
-            const float2 in01 = *reinterpret_cast<float2 *>(&in_compute_colwise[4 * e]);
-            const float2 in23 = *reinterpret_cast<float2 *>(&in_compute_colwise[4 * e + 2]);
-            regs[e] = ptx::mul_cvt_fp32_to_fp4_4x<USE_STOCHASTIC_ROUNDING>(
-                in01, in23, block_scale_inverse_2x, rbits);
+          for (int e = 0; e < SCALE_DIM / 8; ++e) {
+            const uint64_t elts03 =
+                *reinterpret_cast<uint64_t *>(&in_colwise_IType[8 * e]);
+            const uint64_t elts47 =
+                *reinterpret_cast<uint64_t *>(&in_colwise_IType[8 * e + 4]);
+            if constexpr (USE_STOCHASTIC_ROUNDING) {
+              const uint32_t rbits03 = get_rbits(rng, random_uint4, rnd_idx);
+              const uint32_t rbits47 = get_rbits(rng, random_uint4, rnd_idx);
+              regs_8x[e] = ptx::mul_cvt_bf16_to_fp4_8x_stochastic_rounding<float>(
+                  elts03, elts47, block_scale_inverse, rbits03, rbits47);
+            } else {
+              regs_8x[e] = ptx::mul_cvt_bf16_to_fp4_8x_round_to_nearest<float>(
+                  elts03, elts47, block_scale_inverse);
+            }
+          }
+        } else {
+#pragma unroll
+          for (int e = 0; e < SCALE_DIM / 4; ++e) {
+            const uint32_t rbits = get_rbits(rng, random_uint4, rnd_idx);
+            if constexpr (NO_ACTIVATIONS_NOT_FP32_INPUT) {
+              const uint64_t elts = *reinterpret_cast<uint64_t *>(&in_colwise_IType[4 * e]);
+              regs[e] = ptx::mul_cvt_bf16_to_fp4_4x<USE_STOCHASTIC_ROUNDING>(
+                  elts, block_scale_inverse_2x, rbits);
+            } else {
+              const float2 in01 = *reinterpret_cast<float2 *>(&in_compute_colwise[4 * e]);
+              const float2 in23 = *reinterpret_cast<float2 *>(&in_compute_colwise[4 * e + 2]);
+              regs[e] = ptx::mul_cvt_fp32_to_fp4_4x<USE_STOCHASTIC_ROUNDING>(
+                  in01, in23, block_scale_inverse_2x, rbits);
+            }
           }
         }
 
@@ -601,7 +679,7 @@ __global__ void __launch_bounds__(THREADS_NUM)
     }
 
     // ROWWISE scaling
-    {
+    if constexpr (RETURN_ROWWISE) {
       const size_t stage_rowwise_scales_offset_Y = stage * BUFF_DIM_Y;
 #pragma unroll
       for (size_t it = 0; it < ITERATIONS_NORMAL; ++it) {
@@ -818,9 +896,11 @@ __global__ void __launch_bounds__(THREADS_NUM)
       const size_t global_offset_Y_t = block_offset_Y_t;
       const size_t global_offset_X_t = block_offset_X_t + stage_offset_Y;
 
-      ptx::cp_async_bulk_tensor_2d_shared_to_global(
-          reinterpret_cast<const uint64_t *>(&tensor_map_output), global_offset_X, global_offset_Y,
-          reinterpret_cast<uint64_t *>(&out_data_sh[buff_offset_out]));
+      if constexpr (RETURN_ROWWISE) {
+        ptx::cp_async_bulk_tensor_2d_shared_to_global(
+            reinterpret_cast<const uint64_t *>(&tensor_map_output), global_offset_X,
+            global_offset_Y, reinterpret_cast<uint64_t *>(&out_data_sh[buff_offset_out]));
+      }
 
       if constexpr (RETURN_TRANSPOSE) {
         ptx::cp_async_bulk_tensor_2d_shared_to_global(
@@ -853,6 +933,9 @@ __global__ void __launch_bounds__(THREADS_NUM)
   }
 
   destroy_barriers<STAGES>(mbar, is_master_thread);
+  if constexpr (APPLY_COLUMNWISE_RHT) {
+    destroy_barriers<1>(mbar_rht, is_master_thread);
+  }
 #else
   NVTE_DEVICE_ERROR("sm_100 or higher is required.");
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
@@ -1418,9 +1501,10 @@ __global__ void __launch_bounds__(THREADS_NUM)
 #endif  // FP4_TYPE_SUPPORTED
 }  // namespace quantize_transpose_kernel
 
-template <bool use_2d_quantization>
+template <bool use_2d_quantization, bool apply_columnwise_rht = false>
 void quantize_transpose(const Tensor &input, const Tensor *noop, Tensor *output,
-                        const QuantizationConfig *quant_config, cudaStream_t stream) {
+                        const QuantizationConfig *quant_config, cudaStream_t stream,
+                        const Tensor *rht_matrix = nullptr) {
 #if FP4_TYPE_SUPPORTED
   using namespace quantize_transpose_kernel;
   using namespace ptx;
@@ -1437,6 +1521,15 @@ void quantize_transpose(const Tensor &input, const Tensor *noop, Tensor *output,
   // Columnwise-only (no rowwise output) is supported on the optimized 2D path; the rowwise pass
   // and its store are gated out via the RETURN_ROWWISE template bool.
   const bool return_rowwise = output->has_data();
+  if constexpr (apply_columnwise_rht) {
+    NVTE_CHECK(rht_matrix != nullptr, "Columnwise RHT requires an RHT matrix.");
+    NVTE_CHECK(return_transpose, "Columnwise RHT requires columnwise output.");
+    NVTE_CHECK(rht_matrix->dtype() == DType::kBFloat16,
+               "Columnwise RHT matrix must be BF16.");
+    NVTE_CHECK(rht_matrix->dim() == 2 && rht_matrix->shape()[0] == 16 &&
+                   rht_matrix->shape()[1] == 16,
+               "Columnwise RHT matrix must have shape [16, 16].");
+  }
 
   if (!use_2d_quantization && (input.dtype() == DType::kBFloat16)) {
     quantize_transpose_tuned_1D(input, noop, output, quant_config, stream);
@@ -1453,7 +1546,7 @@ void quantize_transpose(const Tensor &input, const Tensor *noop, Tensor *output,
   CheckOutputTensor(*output, "output", false);
 
   NVTE_CHECK(input.has_data(), "Cannot quantize tensor without rowwise data.");
-  NVTE_CHECK(return_rowwise || (return_transpose && use_2d_quantization),
+  NVTE_CHECK(return_rowwise || (return_transpose && (use_2d_quantization || apply_columnwise_rht)),
              "NVFP4 optimized kernel supports rowwise output (1D or 2D), or columnwise-only output "
              "with 2D quantization.");
   if (return_rowwise) {
@@ -1523,6 +1616,7 @@ void quantize_transpose(const Tensor &input, const Tensor *noop, Tensor *output,
   alignas(64) CUtensorMap tensor_map_input{};
   alignas(64) CUtensorMap tensor_map_output{};
   alignas(64) CUtensorMap tensor_map_output_transpose{};
+  alignas(64) CUtensorMap tensor_map_rht{};
 
   create_2D_tensor_map(tensor_map_input, input.data, rows, cols, BUFF_DIM_Y, BUFF_DIM_X, cols, 0,
                        sizeof(IType) * 8);
@@ -1535,6 +1629,10 @@ void quantize_transpose(const Tensor &input, const Tensor *noop, Tensor *output,
     create_2D_tensor_map(tensor_map_output_transpose, output->columnwise_data, cols, rows,
                          BUFF_DIM_X, BUFF_DIM_Y, rows, 0, 4);
   }
+  if constexpr (apply_columnwise_rht) {
+    create_2D_tensor_map(tensor_map_rht, rht_matrix->data, 16, 16, 16, 16, 16, 0,
+                         sizeof(IType) * 8);
+  }
   constexpr size_t buff_elems = BUFF_DIM_Y * BUFF_DIM_X;
   constexpr size_t buff_elems_total = BUFFS_NUM * buff_elems;
   constexpr size_t buff_size_aligned_in =
@@ -1542,6 +1640,8 @@ void quantize_transpose(const Tensor &input, const Tensor *noop, Tensor *output,
   constexpr size_t buff_size_aligned_out =
       DIVUP_TO_MULTIPLE((buff_elems_total * 4) / 8, TMA_SHMEM_ALIGNMENT);
   constexpr size_t buff_size_scales = (CHUNK_DIM_Y * CHUNK_DIM_X) / 16 * sizeof(nvfp4_scale_t);
+  constexpr size_t rht_mem =
+      DIVUP_TO_MULTIPLE(16 * 16 * sizeof(IType), TMA_SHMEM_ALIGNMENT);
 
   constexpr size_t in_mem = buff_size_aligned_in;
 
@@ -1551,7 +1651,8 @@ void quantize_transpose(const Tensor &input, const Tensor *noop, Tensor *output,
 
   constexpr size_t out_mem = out_data_mem + out_data_transpose_mem;
 
-  constexpr size_t dshmem_size = in_mem + out_mem + out_scales_transpose_mem + TMA_SHMEM_ALIGNMENT;
+  const size_t dshmem_size = in_mem + out_mem + out_scales_transpose_mem +
+                             (apply_columnwise_rht ? rht_mem : 0) + TMA_SHMEM_ALIGNMENT;
 
   TRANSFORMER_ENGINE_SWITCH_CONDITION(
       use_stochastic_rounding, USE_STOCHASTIC_ROUNDING,
@@ -1559,13 +1660,21 @@ void quantize_transpose(const Tensor &input, const Tensor *noop, Tensor *output,
       TRANSFORMER_ENGINE_SWITCH_CONDITION(row_scaled_nvfp4, ROW_SCALED_NVFP4, {
         TRANSFORMER_ENGINE_SWITCH_CONDITION(return_rowwise, RETURN_ROWWISE, {
           TRANSFORMER_ENGINE_SWITCH_CONDITION(return_transpose, RETURN_TRANSPOSE, {
-            // The 1D kernel always produces rowwise output (no RETURN_ROWWISE); the dispatch only
-            // routes columnwise-only requests here when use_2d_quantization is true.
-            auto kernel = quantize_transpose_nvfp4_kernel<COMPUTE_ACTIVATIONS, ParamOP, OP, IType,
-                                                          USE_STOCHASTIC_ROUNDING, RETURN_TRANSPOSE,
-                                                          ROW_SCALED_NVFP4>;
-
-            if constexpr (use_2d_quantization) {
+            if constexpr (apply_columnwise_rht) {
+              auto kernel = quantize_transpose_nvfp4_kernel<
+                  COMPUTE_ACTIVATIONS, ParamOP, OP, IType, USE_STOCHASTIC_ROUNDING,
+                  RETURN_TRANSPOSE, ROW_SCALED_NVFP4, RETURN_ROWWISE,
+                  /*APPLY_COLUMNWISE_RHT=*/true>;
+              cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                   dshmem_size);
+              kernel<<<grid, block_size, dshmem_size, stream>>>(
+                  tensor_map_input, tensor_map_output, tensor_map_output_transpose, tensor_map_rht,
+                  scales_ptr, scales_transpose_ptr, noop_ptr, amax_rowwise_ptr, amax_colwise_ptr,
+                  rows, cols, scale_stride, scale_stride_transpose, rng_state);
+            } else if constexpr (use_2d_quantization) {
+              auto kernel = quantize_transpose_nvfp4_2D_kernel<
+                  COMPUTE_ACTIVATIONS, ParamOP, OP, IType, USE_STOCHASTIC_ROUNDING,
+                  RETURN_ROWWISE, RETURN_TRANSPOSE, false>;
               if (with_gemm_swizzled_scales) {
                 kernel = quantize_transpose_nvfp4_2D_kernel<
                     COMPUTE_ACTIVATIONS, ParamOP, OP, IType, USE_STOCHASTIC_ROUNDING,
@@ -1575,13 +1684,23 @@ void quantize_transpose(const Tensor &input, const Tensor *noop, Tensor *output,
                     COMPUTE_ACTIVATIONS, ParamOP, OP, IType, USE_STOCHASTIC_ROUNDING,
                     RETURN_ROWWISE, RETURN_TRANSPOSE, /*WITH_GEMM_SWIZZLED_SCALES=*/false>;
               }
+              cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                   dshmem_size);
+              kernel<<<grid, block_size, dshmem_size, stream>>>(
+                  tensor_map_input, tensor_map_output, tensor_map_output_transpose, scales_ptr,
+                  scales_transpose_ptr, noop_ptr, amax_rowwise_ptr, amax_colwise_ptr, rows, cols,
+                  scale_stride, scale_stride_transpose, rng_state);
+            } else {
+              auto kernel = quantize_transpose_nvfp4_kernel<
+                  COMPUTE_ACTIVATIONS, ParamOP, OP, IType, USE_STOCHASTIC_ROUNDING,
+                  RETURN_TRANSPOSE, ROW_SCALED_NVFP4>;
+              cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                   dshmem_size);
+              kernel<<<grid, block_size, dshmem_size, stream>>>(
+                  tensor_map_input, tensor_map_output, tensor_map_output_transpose, tensor_map_rht,
+                  scales_ptr, scales_transpose_ptr, noop_ptr, amax_rowwise_ptr, amax_colwise_ptr,
+                  rows, cols, scale_stride, scale_stride_transpose, rng_state);
             }
-
-            cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size);
-            kernel<<<grid, block_size, dshmem_size, stream>>>(
-                tensor_map_input, tensor_map_output, tensor_map_output_transpose, scales_ptr,
-                scales_transpose_ptr, noop_ptr, amax_rowwise_ptr, amax_colwise_ptr, rows, cols,
-                scale_stride, scale_stride_transpose, rng_state);
           });
         });
       }););

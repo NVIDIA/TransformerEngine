@@ -1910,8 +1910,10 @@ bool NVFP4Quantizer::is_eligible_for_rht_cast_fusion(const std::vector<size_t>& 
                                                      bool for_grouped_kernel) {
   const auto [rows, cols] = get_2d_dims(shape);
   const size_t row_align = for_grouped_kernel ? 128 : 64;
-  return rows % row_align == 0 && cols % 128 == 0 && transformer_engine::cuda::sm_arch() >= 100 &&
-         transformer_engine::cuda::sm_arch() <= 110;
+  const int sm_arch = transformer_engine::cuda::sm_arch();
+  const bool supported_arch =
+      (sm_arch >= 100 && sm_arch <= 110) || (!for_grouped_kernel && (sm_arch == 120 || sm_arch == 121));
+  return rows % row_align == 0 && cols % 128 == 0 && supported_arch;
 }
 
 bool NVFP4Quantizer::is_eligible_for_2d_swizzle_fusion(const std::vector<size_t>& shape) {
@@ -1930,6 +1932,12 @@ bool nvfp4_emits_gemm_swizzled_scales(const NVFP4Quantizer& q, const std::vector
     return false;
   }
   if (q.with_rht) {
+    const int sm_arch = transformer_engine::cuda::sm_arch();
+    // The SM12x no-TMEM RHT path reuses the compact-scale 1D TMA quantizer.
+    // Keep the existing post-quantize swizzle until that path gains an in-kernel swizzle epilogue.
+    if (sm_arch == 120 || sm_arch == 121) {
+      return false;
+    }
     return NVFP4Quantizer::is_eligible_for_rht_cast_fusion(shape);
   }
   // Plain (non-RHT) 2D quantize kernel can bake the swizzled layout for aligned shapes.
@@ -2670,14 +2678,20 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
             NVTE_CHECK(this->rht_matrix.defined() && this->rht_matrix.numel() > 0,
                        "RHT matrix is not available.");
             auto rht_matrix = this->rht_matrix.to(torch_dtype);
-            auto rht_output = at::from_blob(
-                rht_output_t_cpp.get_rowwise_data().data_ptr,
-                {static_cast<int64_t>(cols), static_cast<int64_t>(rows)}, [](void*) {}, options);
-            auto rht_output_view = rht_output.view({-1, 16});
             auto input_view = input_torch.transpose(0, 1).contiguous().view({-1, 16});
-            at::matmul_out(rht_output_view, input_view, rht_matrix);
+            at::Tensor rht_output;
+            if (eligible_for_rht_cast_fusion) {
+              rht_output = at::matmul(input_view, rht_matrix)
+                               .view({static_cast<int64_t>(cols), static_cast<int64_t>(rows)});
+            } else {
+              rht_output = at::from_blob(
+                  rht_output_t_cpp.get_rowwise_data().data_ptr,
+                  {static_cast<int64_t>(cols), static_cast<int64_t>(rows)}, [](void*) {}, options);
+              auto rht_output_view = rht_output.view({-1, 16});
+              at::matmul_out(rht_output_view, input_view, rht_matrix);
+              rht_output_is_ready = true;
+            }
             copy_amax(rht_output, out.get_columnwise_amax().data_ptr);
-            rht_output_is_ready = true;
           }
         } else {
           NVTE_SCOPED_GIL_RELEASE({
