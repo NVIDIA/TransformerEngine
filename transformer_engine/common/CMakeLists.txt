@@ -510,6 +510,111 @@ else()
   message(STATUS "NCCL EP disabled (NVTE_WITH_NCCL_EP=OFF) - using nvte_ep_* stubs")
 endif()
 
+# Temporary diagnostics for the secondary nightly build's missing
+# cuda_runtime_api.h. Keep this block self-contained so it can be removed after
+# the failing environment has been characterized.
+message(STATUS "========== NVTE CUDA include diagnostics: begin ==========")
+message(STATUS "CMake version: ${CMAKE_VERSION}")
+message(STATUS "CXX compiler: ${CMAKE_CXX_COMPILER}")
+message(STATUS "CXX compiler ID/version: ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}")
+message(STATUS "CXX compiler launcher: ${CMAKE_CXX_COMPILER_LAUNCHER}")
+message(STATUS "CUDA compiler: ${CMAKE_CUDA_COMPILER}")
+message(STATUS "CUDA compiler ID/version: ${CMAKE_CUDA_COMPILER_ID} ${CMAKE_CUDA_COMPILER_VERSION}")
+message(STATUS "CUDA host compiler: ${CMAKE_CUDA_HOST_COMPILER}")
+message(STATUS "CMAKE_CXX_FLAGS: ${CMAKE_CXX_FLAGS}")
+message(STATUS "CMAKE_CUDA_FLAGS: ${CMAKE_CUDA_FLAGS}")
+message(STATUS "CMAKE_CXX_IMPLICIT_INCLUDE_DIRECTORIES: ${CMAKE_CXX_IMPLICIT_INCLUDE_DIRECTORIES}")
+message(STATUS "CMAKE_CXX_STANDARD_INCLUDE_DIRECTORIES: ${CMAKE_CXX_STANDARD_INCLUDE_DIRECTORIES}")
+message(STATUS "CMAKE_CUDA_IMPLICIT_INCLUDE_DIRECTORIES: ${CMAKE_CUDA_IMPLICIT_INCLUDE_DIRECTORIES}")
+message(STATUS "CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES: ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}")
+message(STATUS "CUDAToolkit_INCLUDE_DIRS: ${CUDAToolkit_INCLUDE_DIRS}")
+message(STATUS "CUDAToolkit_ROOT: ${CUDAToolkit_ROOT}")
+message(STATUS "CUDAToolkit_LIBRARY_DIR: ${CUDAToolkit_LIBRARY_DIR}")
+message(STATUS "CMAKE_CUDA_COMPILER_TOOLKIT_ROOT: ${CMAKE_CUDA_COMPILER_TOOLKIT_ROOT}")
+message(STATUS "CMAKE_INCLUDE_SYSTEM_FLAG_CXX: ${CMAKE_INCLUDE_SYSTEM_FLAG_CXX}")
+message(STATUS "CMAKE_NO_SYSTEM_FROM_IMPORTED: ${CMAKE_NO_SYSTEM_FROM_IMPORTED}")
+message(STATUS "CMAKE_PREFIX_PATH: ${CMAKE_PREFIX_PATH}")
+message(STATUS "CUDNN_INCLUDE_DIR: ${CUDNN_INCLUDE_DIR}")
+message(STATUS "CUDNN_FRONTEND_INCLUDE_DIR: ${CUDNN_FRONTEND_INCLUDE_DIR}")
+message(STATUS "NCCL_INCLUDE_DIR: ${NCCL_INCLUDE_DIR}")
+
+# Print only environment variables that can affect compiler/header discovery.
+# Do not dump the full environment because CI injects credentials into it.
+foreach(env_var IN ITEMS
+        CUDA_HOME CUDA_PATH CUDA_ROOT CUDADIR
+        CPATH CPLUS_INCLUDE_PATH C_INCLUDE_PATH
+        PATH LD_LIBRARY_PATH)
+  message(STATUS "ENV{${env_var}}: $ENV{${env_var}}")
+endforeach()
+
+foreach(cuda_include_dir IN LISTS CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES)
+  file(REAL_PATH "${cuda_include_dir}" cuda_include_dir_real)
+  message(STATUS
+          "CUDA include candidate: ${cuda_include_dir} "
+          "(real: ${cuda_include_dir_real}, "
+          "cuda_runtime_api.h: ${cuda_include_dir}/cuda_runtime_api.h)")
+  if(EXISTS "${cuda_include_dir}/cuda_runtime_api.h")
+    message(STATUS "CUDA include candidate contains cuda_runtime_api.h: YES")
+  else()
+    message(STATUS "CUDA include candidate contains cuda_runtime_api.h: NO")
+  endif()
+endforeach()
+
+function(nvte_print_include_diagnostic_target target_name)
+  if(NOT TARGET "${target_name}")
+    message(STATUS "Target ${target_name}: NOT DEFINED")
+    return()
+  endif()
+  foreach(prop IN ITEMS
+          TYPE IMPORTED IMPORTED_LOCATION SYSTEM NO_SYSTEM_FROM_IMPORTED
+          INCLUDE_DIRECTORIES SYSTEM_INCLUDE_DIRECTORIES
+          INTERFACE_INCLUDE_DIRECTORIES INTERFACE_SYSTEM_INCLUDE_DIRECTORIES
+          LINK_LIBRARIES INTERFACE_LINK_LIBRARIES)
+    get_target_property(prop_value "${target_name}" "${prop}")
+    message(STATUS "Target ${target_name} ${prop}: ${prop_value}")
+  endforeach()
+endfunction()
+
+foreach(target_name IN ITEMS
+        transformer_engine
+        CUDA::toolkit CUDA::cudart CUDA::cublas CUDA::cuda_driver
+        CUDNN::cudnn CUDNN::cudnn_all)
+  nvte_print_include_diagnostic_target("${target_name}")
+endforeach()
+
+if(UNIX)
+  set(cuda_header_probe "${CMAKE_CURRENT_BINARY_DIR}/nvte_cuda_header_probe.cpp")
+  file(WRITE "${cuda_header_probe}"
+       "#include <cudnn.h>\n#include <cuda_runtime_api.h>\n")
+
+  set(cxx_probe_command "${CMAKE_CXX_COMPILER}")
+  if(CMAKE_CXX_COMPILER_LAUNCHER)
+    set(cxx_probe_command
+        ${CMAKE_CXX_COMPILER_LAUNCHER} "${CMAKE_CXX_COMPILER}")
+  endif()
+
+  execute_process(
+    COMMAND ${cxx_probe_command} -E -x c++ -v "${cuda_header_probe}"
+    RESULT_VARIABLE cxx_default_probe_result
+    OUTPUT_QUIET
+    ERROR_VARIABLE cxx_default_probe_stderr)
+  message(STATUS "CXX default CUDA-header probe result: ${cxx_default_probe_result}")
+  message(STATUS "CXX default CUDA-header probe stderr:\n${cxx_default_probe_stderr}")
+
+  set(cxx_explicit_probe_command ${cxx_probe_command})
+  foreach(cuda_include_dir IN LISTS CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES)
+    list(APPEND cxx_explicit_probe_command "-I${cuda_include_dir}")
+  endforeach()
+  execute_process(
+    COMMAND ${cxx_explicit_probe_command} -E -x c++ -v "${cuda_header_probe}"
+    RESULT_VARIABLE cxx_explicit_probe_result
+    OUTPUT_QUIET
+    ERROR_VARIABLE cxx_explicit_probe_stderr)
+  message(STATUS "CXX explicit CUDA-header probe result: ${cxx_explicit_probe_result}")
+  message(STATUS "CXX explicit CUDA-header probe stderr:\n${cxx_explicit_probe_stderr}")
+endif()
+message(STATUS "========== NVTE CUDA include diagnostics: end ==========")
+
 # Number of philox4x32 rounds for stochastic rounding (build-time constant).
 set(NVTE_BUILD_NUM_PHILOX_ROUNDS_STR $ENV{NVTE_BUILD_NUM_PHILOX_ROUNDS})
 if (NOT NVTE_BUILD_NUM_PHILOX_ROUNDS_STR)
