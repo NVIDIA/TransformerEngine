@@ -430,23 +430,14 @@ py::object maybe_quantize(const at::Tensor& tensor, py::handle quantizer) {
   return out_py;
 }
 
-py::object make_grouped_tensor_storage(const at::Tensor& tensor, const size_t num_tensors,
-                                       std::optional<at::Tensor> first_dims,
-                                       std::optional<at::Tensor> tensor_offsets) {
-  py::handle grouped_tensor_storage_class(
-      reinterpret_cast<PyObject*>(GroupedTensorStoragePythonClass));
-  py::dict kwargs;
-  kwargs["shape"] = py::make_tuple(tensor.size(0), tensor.size(1));
-  kwargs["dtype"] = py::cast(GetATenDType(GetTransformerEngineDType(tensor.scalar_type())));
-  kwargs["num_tensors"] = py::cast(num_tensors);
-  kwargs["quantizer"] = py::none();
-  kwargs["data"] = py::cast(tensor.reshape({-1}));
-  kwargs["first_dims"] = first_dims.has_value() ? py::cast(*first_dims) : py::none();
-  kwargs["tensor_offsets"] = tensor_offsets.has_value() ? py::cast(*tensor_offsets) : py::none();
-  PyObject* result =
-      PyObject_Call(grouped_tensor_storage_class.ptr(), py::tuple().ptr(), kwargs.ptr());
-  NVTE_CHECK(result != nullptr, "Failed to construct GroupedTensorStorage");
-  return py::reinterpret_steal<py::object>(result);
+py::object maybe_group_quantize(const at::Tensor& tensor, py::handle quantizer,
+                                const size_t num_tensors, std::optional<at::Tensor> first_dims,
+                                std::optional<at::Tensor> tensor_offsets) {
+  if (quantizer.is_none()) {
+    return py::cast(tensor);
+  }
+  return group_quantize(tensor, quantizer, num_tensors, first_dims, std::nullopt, tensor_offsets,
+                        std::nullopt);
 }
 
 template <auto act_func, typename... Args>
@@ -476,11 +467,7 @@ py::object grouped_scaled_activation_helper(const at::Tensor& input, const at::T
   NVTE_CHECK(input.dim() == 2, "grouped scaled activation input must be 2D");
   auto output = scaled_activation_compute<act_func>(input, act_scales, shape_divisor,
                                                     std::forward<Args>(args)...);
-  if (quantizer.is_none()) {
-    return make_grouped_tensor_storage(output, num_tensors, first_dims, tensor_offsets);
-  }
-  return group_quantize(output, quantizer, num_tensors, first_dims, std::nullopt, tensor_offsets,
-                        std::nullopt);
+  return maybe_group_quantize(output, quantizer, num_tensors, first_dims, tensor_offsets);
 }
 
 template <auto dact_func, typename... Args>
@@ -497,13 +484,9 @@ py::tuple grouped_scaled_dactivation_helper(const at::Tensor& grad, const at::Te
   // Return both the (optionally) grouped-quantized grad input for the next
   // grouped GEMM and the dense high-precision grad input so callers can reuse
   // it (e.g. bias gradient) without a lossy dequantize.
-  auto grouped_grad_input =
-      quantizer.is_none()
-          ? make_grouped_tensor_storage(grad_input, num_tensors, first_dims, tensor_offsets)
-          : group_quantize(grad_input, quantizer, num_tensors, first_dims, std::nullopt,
-                           tensor_offsets, std::nullopt);
-  return py::make_tuple(grouped_grad_input, py::cast(grad_input),
-                        compute_scale_grad ? py::cast(grad_scales) : py::none());
+  return py::make_tuple(
+      maybe_group_quantize(grad_input, quantizer, num_tensors, first_dims, tensor_offsets),
+      py::cast(grad_input), compute_scale_grad ? py::cast(grad_scales) : py::none());
 }
 
 py::object scaled_swiglu(const at::Tensor& input, const at::Tensor& act_scales,

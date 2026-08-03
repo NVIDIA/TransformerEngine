@@ -44,7 +44,6 @@ from transformer_engine.pytorch import (
     QuantizerRole,
     is_bf16_available,
 )
-from transformer_engine.pytorch.tensor import GroupedTensorStorage
 
 # Import utility functions
 from utils import (
@@ -2224,84 +2223,6 @@ class TestBasicOps:
             if bias:
                 assert_close_grads(getattr(op, f"bias{group_idx}"), bs_ref[group_idx], **tols)
 
-    def test_grouped_linear_normalizes_grouped_storage(self, device: torch.device = "cuda") -> None:
-        """Validate grouped-input normalization and the legacy-path rejection."""
-        num_groups, in_features = 2, 16
-        split_sizes = torch.tensor([8, 12], dtype=torch.int64, device=device)
-        tensor_offsets = GroupedTensorStorage.make_tensor_offsets(split_sizes, in_features)
-        data = torch.randn(int(split_sizes.sum()), in_features, dtype=torch.bfloat16, device=device)
-        grouped_input = GroupedTensorStorage(
-            shape=tuple(data.shape),
-            dtype=data.dtype,
-            num_tensors=num_groups,
-            quantizer=None,
-            data=data.reshape(-1),
-            first_dims=split_sizes,
-            tensor_offsets=tensor_offsets,
-        )
-        op = te_ops.GroupedLinear(
-            num_groups, in_features, in_features, bias=False, dtype=data.dtype, device=device
-        )
-
-        normalized = op._prepare_grouped_input(
-            grouped_input,
-            expected_features=in_features,
-            split_sizes=split_sizes,
-            tensor_offsets=tensor_offsets,
-            dtype=data.dtype,
-            quantizer=None,
-        )
-        assert normalized is not grouped_input
-        assert normalized.rowwise_data.data_ptr() == data.data_ptr()
-        assert normalized.first_dims.data_ptr() == split_sizes.data_ptr()
-        assert normalized.tensor_offsets.data_ptr() == tensor_offsets.data_ptr()
-
-        with pytest.raises(ValueError, match="legacy split-quantize path"):
-            op._fuser_forward_split_quantize(
-                input_=grouped_input,
-                split_sizes=split_sizes,
-                scales=None,
-                with_quantized_compute=False,
-                input_quantizers=[None] * num_groups,
-                weight_quantizers=[None] * num_groups,
-                dtype=data.dtype,
-                input_requires_grad=False,
-                weight_requires_grad=False,
-                device=torch.device(device),
-            )
-
-        active_quantizer = object()
-        prequantized = GroupedTensorStorage(
-            shape=tuple(data.shape),
-            dtype=data.dtype,
-            num_tensors=num_groups,
-            quantizer=active_quantizer,
-            data=data.reshape(-1),
-            first_dims=split_sizes,
-            tensor_offsets=tensor_offsets,
-        )
-        assert (
-            op._prepare_grouped_input(
-                prequantized,
-                expected_features=in_features,
-                split_sizes=split_sizes,
-                tensor_offsets=tensor_offsets,
-                dtype=data.dtype,
-                quantizer=active_quantizer,
-            )
-            is prequantized
-        )
-
-        with pytest.raises(ValueError, match="incompatible grouped input"):
-            op._prepare_grouped_input(
-                prequantized,
-                expected_features=in_features,
-                split_sizes=split_sizes,
-                tensor_offsets=tensor_offsets,
-                dtype=data.dtype,
-                quantizer=object(),
-            )
-
     def test_grouped_linear_caller_buffers(
         self,
         *,
@@ -2360,17 +2281,9 @@ class TestBasicOps:
             },
         )
 
-        # The graph-safe path returns grouped storage. Its rowwise backing
-        # buffer aliases the caller-provided output with no copy.
-        assert isinstance(y, GroupedTensorStorage)
-        assert y.rowwise_data.data_ptr() == out_buf.data_ptr()
-        assert isinstance(y_ref, GroupedTensorStorage)
-        torch.testing.assert_close(
-            y.rowwise_data.reshape(y.logical_shape),
-            y_ref.rowwise_data.reshape(y_ref.logical_shape),
-            rtol=0,
-            atol=0,
-        )
+        # Forward output aliases the last op's output buffer with no copy.
+        assert y.data_ptr() == out_buf.data_ptr()
+        torch.testing.assert_close(y, y_ref, rtol=0, atol=0)
 
         y.backward(dy)
 

@@ -695,25 +695,14 @@ class GroupedLinear(BasicOperation):
             )
             weight_requires_grad = requires_grad and weight_requires_grad
 
-            input_quantizers = [
-                self.get_quantizer("forward", 2 * group_idx) for group_idx in range(self.num_groups)
-            ]
-
             # Configure quantizer usages
             for group_idx in range(self.num_groups):
-                input_quantizer = input_quantizers[group_idx]
+                input_quantizer = self.get_quantizer("forward", 2 * group_idx)
                 weight_quantizer = self.get_quantizer("forward", 2 * group_idx + 1)
                 grad_output_quantizer = self.get_quantizer("backward", group_idx)
                 input_quantizer.set_usage(rowwise=True, columnwise=weight_requires_grad)
-                # Activation fusion quantizes with this quantizer before this
-                # GroupedLinear's fuser_forward runs. All quantization paths
-                # support GEMM-optimized scale fusion, so configure it here.
-                input_quantizer.optimize_for_gemm = True
                 weight_quantizer.set_usage(rowwise=True, columnwise=requires_grad)
                 grad_output_quantizer.set_usage(rowwise=True, columnwise=weight_requires_grad)
-                # Activation backward quantizes with this quantizer before
-                # this GroupedLinear's backward path runs.
-                grad_output_quantizer.optimize_for_gemm = True
 
     def reset_recipe_state(self, *, recipe: Optional[Recipe]) -> None:
         super().reset_recipe_state(recipe=recipe)
@@ -1008,7 +997,7 @@ class GroupedLinear(BasicOperation):
     def fuser_forward(
         self,
         basic_op_ctxs: list[OperationContext],
-        input_: torch.Tensor | GroupedTensorStorage,
+        input_: torch.Tensor,
         *,
         basic_op_extra_inputs: list[tuple[torch.Tensor, ...]],
         prev_op_grad_output_quantizer: Optional[Quantizer],
@@ -1202,7 +1191,7 @@ class GroupedLinear(BasicOperation):
     def _fuser_forward_split_quantize(
         self,
         *,
-        input_: torch.Tensor | GroupedTensorStorage,
+        input_: torch.Tensor,
         split_sizes: torch.Tensor,
         scales: Optional[torch.Tensor],
         with_quantized_compute: bool,
@@ -1215,11 +1204,6 @@ class GroupedLinear(BasicOperation):
         out_buffer: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, tuple[Optional[torch.Tensor], ...]]:
         """Legacy ``tex.split_quantize`` + ``general_grouped_gemm`` flow."""
-        if isinstance(input_, GroupedTensorStorage):
-            raise ValueError(
-                "GroupedLinear cannot use GroupedTensorStorage with the legacy "
-                "split-quantize path; use the grouped-tensor path instead."
-            )
         num_groups = self.num_groups
         has_bias = self.has_bias
 
@@ -1343,23 +1327,30 @@ class GroupedLinear(BasicOperation):
             bulk_allocate=True,
         )
         input_tensor_offsets = grouped_tensor_offsets[2]
-        original_shape = (
-            list(input_.logical_shape)
-            if isinstance(input_, GroupedTensorStorage)
-            else list(input_.size())
-        )
-        input_quantizer = input_quantizers[0] if with_quantized_compute else None
-        if input_quantizer is not None:
+        original_shape = list(input_.size())
+        total_tokens = math.prod(original_shape[:-1])
+        x = maybe_dequantize(input_, dtype).reshape(-1, self.in_features)
+        if with_quantized_compute:
+            input_quantizer = input_quantizers[0]
             input_quantizer.set_usage(rowwise=True, columnwise=weight_requires_grad)
             input_quantizer.optimize_for_gemm = True
-        grouped_x = self._prepare_grouped_input(
-            input_,
-            expected_features=self.in_features,
-            split_sizes=split_sizes,
-            tensor_offsets=input_tensor_offsets,
-            dtype=dtype,
-            quantizer=input_quantizer,
-        )
+            grouped_x = tex.group_quantize(
+                x,
+                input_quantizer,
+                num_groups,
+                split_sizes,
+                tensor_offsets=input_tensor_offsets,
+            )
+        else:
+            grouped_x = GroupedTensorStorage(
+                shape=(total_tokens, self.in_features),
+                dtype=dtype,
+                num_tensors=num_groups,
+                quantizer=None,
+                data=x.reshape(-1),
+                first_dims=split_sizes,
+                tensor_offsets=input_tensor_offsets,
+            )
         return self._fuser_forward_grouped_tensor(
             grouped_input=grouped_x,
             split_sizes=split_sizes,
@@ -1377,76 +1368,6 @@ class GroupedLinear(BasicOperation):
             output_tensor_offsets=grouped_tensor_offsets[3],
             out_buffer=out_buffer,
             out_shape=original_shape[:-1] + [self.out_features],
-        )
-
-    def _prepare_grouped_input(
-        self,
-        input_: torch.Tensor | GroupedTensorStorage,
-        *,
-        expected_features: int,
-        split_sizes: torch.Tensor,
-        tensor_offsets: torch.Tensor,
-        dtype: torch.dtype,
-        quantizer: Optional[Quantizer],
-    ) -> GroupedTensorStorage:
-        """Normalize an input to grouped storage for grouped GEMM.
-
-        A dense input is never treated as an already-quantized grouped value.
-        Grouped inputs retain their quantization only when it is compatible with
-        the active quantizer; otherwise their rowwise data is dequantized and
-        converted to the requested high-precision dtype before being rewrapped.
-        """
-        if isinstance(input_, GroupedTensorStorage):
-            if input_.num_tensors != self.num_groups:
-                raise ValueError(
-                    f"GroupedLinear expected {self.num_groups} input groups, "
-                    f"got {input_.num_tensors}."
-                )
-            total_tokens, in_features = input_.logical_shape
-            if in_features != expected_features:
-                raise ValueError(
-                    f"GroupedLinear expected input features={expected_features}, got {in_features}."
-                )
-            input_first_dims = input_.first_dims if input_.first_dims is not None else split_sizes
-            input_offsets = (
-                input_.tensor_offsets if input_.tensor_offsets is not None else tensor_offsets
-            )
-            if quantizer is not None and input_.quantizer is not None:
-                if input_.quantizer is not quantizer:
-                    raise ValueError(
-                        "GroupedLinear received an incompatible grouped input "
-                        f"(quantizer={input_.quantizer}; expected quantizer={quantizer})."
-                    )
-                return input_
-            source = maybe_dequantize(input_, dtype)
-            assert isinstance(source, GroupedTensorStorage)
-            if source.rowwise_data is None:
-                raise RuntimeError("GroupedLinear requires rowwise data for grouped input.")
-            rowwise_data = source.rowwise_data.reshape(source.logical_shape)
-            first_dims = source.first_dims if source.first_dims is not None else input_first_dims
-            offsets = source.tensor_offsets if source.tensor_offsets is not None else input_offsets
-        else:
-            rowwise_data = maybe_dequantize(input_, dtype).reshape(-1, expected_features)
-            total_tokens = rowwise_data.size(0)
-            first_dims = split_sizes
-            offsets = tensor_offsets
-
-        if quantizer is not None:
-            return tex.group_quantize(
-                rowwise_data,
-                quantizer,
-                self.num_groups,
-                first_dims,
-                tensor_offsets=offsets,
-            )
-        return GroupedTensorStorage(
-            shape=(total_tokens, expected_features),
-            dtype=dtype,
-            num_tensors=self.num_groups,
-            quantizer=None,
-            data=rowwise_data.reshape(-1),
-            first_dims=first_dims,
-            tensor_offsets=offsets,
         )
 
     def _fuser_forward_grouped_tensor(
@@ -1507,11 +1428,9 @@ class GroupedLinear(BasicOperation):
                 dtype=dtype,
             )
 
-        # Allocate output buffer and wrap it in a GroupedTensor. This remains
-        # compatible with the fuser/autograd boundary while carrying grouped
-        # layout metadata to a subsequent grouped operation.
+        # Allocate output buffer and wrap as a GroupedTensor view.
         out = validate_or_alloc_output(out_buffer, out_shape, dtype, device)
-        grouped_out = GroupedTensor(
+        grouped_out = GroupedTensorStorage(
             shape=(total_tokens, self.out_features),
             dtype=dtype,
             num_tensors=num_groups,
@@ -1578,12 +1497,12 @@ class GroupedLinear(BasicOperation):
             saved.append(grouped_weights)
         else:
             saved.extend(grouped_weights)
-        return grouped_out, tuple(saved)
+        return out, tuple(saved)
 
     def fuser_backward(
         self,
         basic_op_ctxs: list[OperationContext],
-        grad_output: torch.Tensor | GroupedTensorStorage,
+        grad_output: torch.Tensor,
         *,
         basic_op_grad_extra_outputs: list[tuple[torch.Tensor, ...]],
     ) -> tuple[
@@ -1794,7 +1713,7 @@ class GroupedLinear(BasicOperation):
         self,
         *,
         ctx: OperationContext,
-        grad_output: torch.Tensor | GroupedTensorStorage,
+        grad_output: torch.Tensor,
     ) -> tuple[
         torch.Tensor,
         Iterable[Iterable[Optional[torch.Tensor]]],
@@ -1807,6 +1726,8 @@ class GroupedLinear(BasicOperation):
         with_quantized_compute = bool(getattr(ctx, "with_quantized_compute", False))
         split_sizes = ctx.saved_tensors[0]
         output_tensor_offsets = ctx.saved_tensors[4]
+        dy_2d = grad_output.reshape(-1, self.out_features)
+        total_tokens = dy_2d.size(0)
 
         dbias_packed = None
         if with_quantized_compute:
@@ -1821,13 +1742,7 @@ class GroupedLinear(BasicOperation):
             fuse_bgrad = isinstance(grad_output_quantizer, MXFP8Quantizer) or (
                 isinstance(grad_output_quantizer, Float8BlockQuantizer) and ctx.input_requires_grad
             )
-            if (
-                not isinstance(grad_output, GroupedTensorStorage)
-                and has_bias
-                and not self._scale_bias
-                and fuse_bgrad
-            ):
-                dy_2d = grad_output.reshape(-1, self.out_features)
+            if has_bias and not self._scale_bias and fuse_bgrad:
                 grouped_dy, dbias_packed = tex.bgrad_group_quantize(
                     dy_2d,
                     grad_output_quantizer,
@@ -1836,22 +1751,23 @@ class GroupedLinear(BasicOperation):
                     tensor_offsets=output_tensor_offsets,
                 )
             else:
-                grouped_dy = self._prepare_grouped_input(
-                    grad_output,
-                    expected_features=self.out_features,
-                    split_sizes=split_sizes,
+                grouped_dy = tex.group_quantize(
+                    dy_2d,
+                    grad_output_quantizer,
+                    num_groups,
+                    split_sizes,
                     tensor_offsets=output_tensor_offsets,
-                    dtype=dtype,
-                    quantizer=grad_output_quantizer,
                 )
         else:
-            grouped_dy = self._prepare_grouped_input(
-                grad_output,
-                expected_features=self.out_features,
-                split_sizes=split_sizes,
-                tensor_offsets=output_tensor_offsets,
+            dy_2d = maybe_dequantize(dy_2d, dtype)
+            grouped_dy = GroupedTensorStorage(
+                shape=(total_tokens, self.out_features),
                 dtype=dtype,
+                num_tensors=num_groups,
                 quantizer=None,
+                data=dy_2d.reshape(-1),
+                first_dims=split_sizes,
+                tensor_offsets=output_tensor_offsets,
             )
 
         return self._fuser_backward_grouped_tensor(
@@ -1903,21 +1819,11 @@ class GroupedLinear(BasicOperation):
         else:
             ws, saved_tensors = saved_tensors[:num_groups], saved_tensors[num_groups:]
 
-        # Keep grouped grad output quantized for GEMM. Materialize a dense
-        # high-precision view only when bias-gradient computation needs it.
-        dy_2d = None
-        if isinstance(grad_output, GroupedTensorStorage):
-            total_tokens, out_features = grad_output.logical_shape
-            if out_features != self.out_features:
-                raise ValueError(
-                    f"GroupedLinear expected grad-output features={self.out_features}, "
-                    f"got {out_features}."
-                )
-            grad_input_shape = [total_tokens, self.in_features]
-        else:
-            dy_2d = grad_output.reshape(-1, self.out_features)
-            total_tokens = dy_2d.size(0)
-            grad_input_shape = list(grad_output.size())[:-1] + [self.in_features]
+        # Keep the dense high-precision grad for bias-gradient computation while
+        # optionally using a pre-quantized grouped view for the grouped GEMMs.
+        dy_2d = grad_output.reshape(-1, self.out_features)
+        total_tokens = dy_2d.size(0)
+        grad_input_shape = list(grad_output.size())[:-1] + [self.in_features]
 
         expected_quantizer = ctx.grad_output_quantizers[0] if with_quantized_compute else None
         if grouped_grad_output.quantizer is not expected_quantizer or tuple(
@@ -1936,12 +1842,6 @@ class GroupedLinear(BasicOperation):
         final_bias_grads: Optional[torch.Tensor] = None
         grad_scales: Optional[torch.Tensor] = None
         if has_bias:
-            if dy_2d is None:
-                dy_2d = getattr(grad_output, "_dense_for_dbias", None)
-                if dy_2d is None:
-                    dy_2d = maybe_dequantize(grad_output, dtype)
-                    if isinstance(dy_2d, GroupedTensorStorage):
-                        dy_2d = dy_2d.rowwise_data.reshape(dy_2d.logical_shape)
             if self._scale_bias:
                 bias_packed = torch.stack(self._get_bias_tensors(dtype))
                 scales_f32 = scales.to(dtype=torch.float32)
@@ -1958,8 +1858,6 @@ class GroupedLinear(BasicOperation):
                 final_bias_grads = [dbias_packed.to(dtype=dtype)]
             else:
                 final_bias_grads = [dbias_packed[idx].to(dtype=dtype) for idx in range(num_groups)]
-            if hasattr(grad_output, "_dense_for_dbias"):
-                grad_output._dense_for_dbias = None
 
         # ---- dgrad GEMM ----------------------------------------------------
         grad_input = None
