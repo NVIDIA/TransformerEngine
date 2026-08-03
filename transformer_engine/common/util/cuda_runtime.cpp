@@ -93,10 +93,12 @@ std::filesystem::path python_cuda_directory() {
   }
 
   // CUDA 12 Python wheels use the older nvidia/cuda_runtime layout.
-  error.clear();
-  const Path legacy_cuda_directory = nvidia_directory / "cuda_runtime";
-  if (std::filesystem::is_directory(legacy_cuda_directory, error)) {
-    return legacy_cuda_directory;
+  if (cuda_major_version == "12") {
+    error.clear();
+    const Path legacy_cuda_directory = nvidia_directory / "cuda_runtime";
+    if (std::filesystem::is_directory(legacy_cuda_directory, error)) {
+      return legacy_cuda_directory;
+    }
   }
 
   return {};
