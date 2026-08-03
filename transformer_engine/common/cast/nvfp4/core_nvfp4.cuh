@@ -35,8 +35,8 @@
 // and the fp8 element types. util/type_extrema.h (also injected) provides the
 // transformer_engine-namespace fp4 aliases and detail::TypeExtrema
 // specializations that would otherwise come from common.h.
-#include "util/math.h"
 #include "ptx.cuh"
+#include "util/math.h"
 #include "utils.cuh"
 
 #if FP4_TYPE_SUPPORTED
