@@ -62,25 +62,25 @@ std::string runtime_cuda_major_version() {
 std::filesystem::path python_cuda_directory() {
   using Path = std::filesystem::path;
 
-  // Find the packages directory by traversing up the directory tree until a known package
-  // directory is found.
-  Path directory = shared_library_directory();
+  // Find the Python package root from the installed Transformer Engine package. Do not
+  // assume that the root is named site-packages or dist-packages since valid installs
+  // may use an arbitrary target directory.
+  Path te_package_directory = shared_library_directory();
   while (true) {
-    const auto filename = directory.filename();
-    if (filename == "site-packages" || filename == "dist-packages") {
+    if (te_package_directory.filename() == "transformer_engine") {
       break;
     }
 
-    const Path parent = directory.parent_path();
-    if (parent == directory) {
+    const Path parent = te_package_directory.parent_path();
+    if (parent == te_package_directory) {
       // Root directory reached
       return {};
     }
 
-    directory = parent;
+    te_package_directory = parent;
   }
 
-  const Path nvidia_directory = directory / "nvidia";
+  const Path nvidia_directory = te_package_directory.parent_path() / "nvidia";
   const auto cuda_major_version = runtime_cuda_major_version();
   if (cuda_major_version.empty()) {
     return {};
