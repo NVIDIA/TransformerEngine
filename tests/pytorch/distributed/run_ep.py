@@ -565,6 +565,42 @@ class TestEP(unittest.TestCase):
             _degroup_mxfp8(g_mx).float(), src_bf.grad.float()[:n], atol=5e-2, rtol=5e-2
         )
 
+    @_eager_test_include
+    @_mxfp8_align_test
+    def test_combine_bwd_mxfp8(self):
+        """MXFP8 combine backward with an internally allocated grad target: the returned per-expert
+        GroupedTensor, dequantized, matches a bf16 combine backward reference on the same routing.
+        MXFP8 combine backward runs in the non-zero-copy path, so this test skips the zero-copy pass.
+        """
+        if ZERO_COPY:
+            self.skipTest("MXFP8 combine backward is not supported under zero-copy")
+        self._require_mxfp8_shapes()
+        topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
+        buf_mx = self._make_buffer(combine_bwd_quant_recipe=MXFP8BlockScaling(), alignment=128)
+        _recv, _rw, tc = ep_dispatch(buf_mx, tokens, topk_idx, w)  # seeds the routing
+        # Combine input rows match the recv total (per-step in eager, capacity otherwise).
+        rows = int(buf_mx.total_recv_tokens.item()) if EAGER else self.cfg.recv_capacity_per_rank
+        eo_vals = (
+            torch.linspace(-0.5, 0.5, rows * HIDDEN_DIM, device=self.cfg.device)
+            .reshape(rows, HIDDEN_DIM)
+            .to(torch.bfloat16)
+        )
+        src_mx = eo_vals.detach().clone().requires_grad_(True)
+        out_mx = ep_combine(buf_mx, src_mx)
+        (0.5 * (out_mx.float() ** 2).sum()).backward()
+        g_mx = src_mx.grad  # per-expert GroupedTensor
+        # bf16 reference combine backward on the same routing
+        buf_bf = self._make_buffer(alignment=128)
+        ep_dispatch(buf_bf, tokens, topk_idx, w)
+        src_bf = eo_vals.detach().clone().requires_grad_(True)
+        out_bf = ep_combine(buf_bf, src_bf)
+        (0.5 * (out_bf.float() ** 2).sum()).backward()
+        torch.cuda.synchronize()
+        n = int(tc.sum())
+        torch.testing.assert_close(
+            _degroup_mxfp8(g_mx).float(), src_bf.grad.float()[:n], atol=5e-2, rtol=5e-2
+        )
+
     @_zero_copy_test_include
     def test_zero_copy_pool_auto_alloc(self):
         """Zero-copy with recv/grad left None: ep_dispatch/ep_combine allocate their IO
