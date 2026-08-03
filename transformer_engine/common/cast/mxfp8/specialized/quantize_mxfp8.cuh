@@ -11,11 +11,35 @@
 #ifndef TRANSFORMER_ENGINE_SPECIALIZED_QUANTIZE_MXFP8_CUH_
 #define TRANSFORMER_ENGINE_SPECIALIZED_QUANTIZE_MXFP8_CUH_
 
+#if !defined(__CUDACC_RTC__)
 #include <cstdlib>
 
 #include "../../../util/ptx.cuh"
 #include "state_counter.cuh"
 #include "swizzle.cuh"
+#else
+// NVRTC build: these are provided as in-memory headers (see rtc_dispatch), and
+// common.h-style host includes are unavailable.
+#include "ptx.cuh"
+#include "state_counter.cuh"
+#include "swizzle.cuh"
+
+// CUtensorMap / CUtensorMapSwizzle normally come from <cuda.h>, which NVRTC
+// cannot include. The bidimensional kernels only pass a CUtensorMap by value
+// (__grid_constant__) and never introspect it, and ptx.cuh's TMA ops take a
+// uint64_t*, so an ABI-compatible opaque struct (128 B, 64-B aligned, matching
+// the real CUtensorMap_st) is sufficient. The host builds the real descriptor.
+struct alignas(64) CUtensorMap_st {
+  uint64_t opaque[16];
+};
+using CUtensorMap = CUtensorMap_st;
+enum CUtensorMapSwizzle {
+  CU_TENSOR_MAP_SWIZZLE_NONE = 0,
+  CU_TENSOR_MAP_SWIZZLE_32B = 1,
+  CU_TENSOR_MAP_SWIZZLE_64B = 2,
+  CU_TENSOR_MAP_SWIZZLE_128B = 3,
+};
+#endif
 
 namespace transformer_engine {
 namespace dispatch {
@@ -68,9 +92,9 @@ __device__ __forceinline__ e8m0_t to_e8m0(IType amax) {
   constexpr uint16_t max_norm_rcp = _Quantized_Limits<IType, OType>::max_norm_rcp;
 
   float amax_fp32;
-  if constexpr (std::is_same_v<IType, fp16>) {
+  if constexpr (detail::is_same_v<IType, fp16>) {
     ptx::fma_f32_f16(amax_fp32, reinterpret_cast<uint16_t &>(amax), max_norm_rcp);
-  } else if constexpr (std::is_same_v<IType, bf16>) {
+  } else if constexpr (detail::is_same_v<IType, bf16>) {
     ptx::fma_f32_bf16(amax_fp32, reinterpret_cast<uint16_t &>(amax), max_norm_rcp);
   } else {
     amax_fp32 = 0.0f;
@@ -78,7 +102,7 @@ __device__ __forceinline__ e8m0_t to_e8m0(IType amax) {
   }
   return ptx::float_to_e8m0(amax_fp32);
 #else
-  if constexpr (std::is_same_v<IType, float>) {
+  if constexpr (detail::is_same_v<IType, float>) {
     return ptx::float_to_e8m0(__fmaf_ieee_rn(amax, Quantized_Limits<OType>::max_norm_rcp, 0.0f));
   } else {
     float amax_fp32 = static_cast<float>(amax);
@@ -166,14 +190,15 @@ struct CastTraits<_IType, _OType, /*rowwise=*/true, /*colwise=*/false> {
 };
 
 // 1x32
-template <typename CastTraits,
-          std::enable_if_t<CastTraits::isRowwise && !CastTraits::isColwise, int> = 0>
-__global__ void quantize_mxfp8_kernel_cast_only(typename CastTraits::IType *__restrict__ input,
-                                                typename CastTraits::OType *__restrict__ output,
-                                                e8m0_t *__restrict__ scales_rowwise,
-                                                const float *noop, int32_t rows, int32_t cols,
-                                                int32_t scale_stride_rowwise,
-                                                int32_t scale_stride_colwise) {
+// Shared device body for the 1x32 rowwise cast-only kernel. Extracted so both
+// the statically-instantiated __global__ below and the NVRTC entry point
+// (rtc/quantize_mxfp8_rowwise.cu) can reuse it without duplication.
+template <typename CastTraits>
+__device__ __forceinline__ void quantize_mxfp8_rowwise_cast_only_body(
+    typename CastTraits::IType *__restrict__ input,
+    typename CastTraits::OType *__restrict__ output, e8m0_t *__restrict__ scales_rowwise,
+    const float *noop, int32_t rows, int32_t cols, int32_t scale_stride_rowwise,
+    int32_t scale_stride_colwise) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   if (noop != nullptr && noop[0] == 1.0f) {
     return;
@@ -262,7 +287,7 @@ __global__ void quantize_mxfp8_kernel_cast_only(typename CastTraits::IType *__re
       return;
     }
 
-    if constexpr (std::is_same_v<IType, float>) {
+    if constexpr (detail::is_same_v<IType, float>) {
       float thread_amax = 0.f;
       IType2 *rInput2 = reinterpret_cast<IType2 *>(&rInput[process_iter % CastTraits::numStages]);
 #pragma unroll
@@ -383,7 +408,7 @@ __global__ void quantize_mxfp8_kernel_cast_only(typename CastTraits::IType *__re
       return;
     }
 
-    if constexpr (std::is_same_v<IType, float>) {
+    if constexpr (detail::is_same_v<IType, float>) {
       float thread_amax = 0.f;
       IType2 *rInput2 = reinterpret_cast<IType2 *>(&rInput[process_iter % CastTraits::numStages]);
 #pragma unroll
@@ -499,16 +524,16 @@ __global__ void quantize_mxfp8_kernel_cast_only(typename CastTraits::IType *__re
     block_coords.x = blockIdx.x * CastTraits::blockDimN;
 
     constexpr int32_t stride_in_smem = CastTraits::blockDimN / CastTraits::chunkElems;
-    using PreferredDataType = std::conditional_t<
+    using PreferredDataType = detail::conditional_t<
         stride_in_smem % 16 == 0, uint4,
-        std::conditional_t<
+        detail::conditional_t<
             stride_in_smem % 8 == 0, uint2,
-            std::conditional_t<stride_in_smem % 4 == 0, uint32_t,
-                               std::conditional_t<stride_in_smem % 2 == 0, uint16_t, uint8_t>>>>;
+            detail::conditional_t<stride_in_smem % 4 == 0, uint32_t,
+                               detail::conditional_t<stride_in_smem % 2 == 0, uint16_t, uint8_t>>>>;
 
     int2 end_coords;
-    end_coords.y = std::min(block_coords.y + CastTraits::blockDimM, rows);
-    end_coords.x = std::min((block_coords.x + CastTraits::blockDimN) / CastTraits::chunkElems,
+    end_coords.y = detail::min(block_coords.y + CastTraits::blockDimM, rows);
+    end_coords.x = detail::min((block_coords.x + CastTraits::blockDimN) / CastTraits::chunkElems,
                             scale_stride_rowwise);
     int2 valid_coords;
     valid_coords.y = end_coords.y - block_coords.y;
@@ -558,6 +583,25 @@ __global__ void quantize_mxfp8_kernel_cast_only(typename CastTraits::IType *__re
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
 
+// 1x32 rowwise cast-only kernel (statically-instantiated entry point).
+template <typename CastTraits,
+          detail::enable_if_t<CastTraits::isRowwise && !CastTraits::isColwise, int> = 0>
+__global__ void quantize_mxfp8_kernel_cast_only(typename CastTraits::IType *__restrict__ input,
+                                                typename CastTraits::OType *__restrict__ output,
+                                                e8m0_t *__restrict__ scales_rowwise,
+                                                const float *noop, int32_t rows, int32_t cols,
+                                                int32_t scale_stride_rowwise,
+                                                int32_t scale_stride_colwise) {
+  quantize_mxfp8_rowwise_cast_only_body<CastTraits>(
+      input, output, scales_rowwise, noop, rows, cols, scale_stride_rowwise,
+      scale_stride_colwise);
+}
+
+// The 32x32 bidimensional (rowwise+colwise) kernels use TMA: CUtensorMap
+// grid-constant params and cp_async_bulk_tensor. Under NVRTC, CUtensorMap is
+// provided as an opaque struct (above) and the descriptor is built host-side,
+// so these are NVRTC-capable (the non-warp-specialized variant is the RTC entry
+// point; see rtc/quantize_mxfp8_bidimensional.cu).
 enum class ColwiseReduceMax : int32_t {
   Atom = 0,
   Red = 1,  // it's actually the same to Atom
@@ -566,9 +610,13 @@ enum class ColwiseReduceMax : int32_t {
   Num = 4
 };
 
-// 32x32
-template <typename _IType, typename _OType>
-struct CastTraits<_IType, _OType, /*rowwise=*/true, /*colwise=*/true> {
+// 32x32. Parameterized on the perf-relevant knobs (pipeline stages, per-block
+// iteration width, 4x-vs-2x convert) so they can be autotuned at runtime via
+// NVRTC. Defaults reproduce the shipped configuration; CastTraits<...,true,true>
+// below is exactly this with the defaults, so existing behavior is unchanged.
+template <typename _IType, typename _OType, int32_t _NumStages = 2, int32_t _IterN = 4,
+          bool _UseCvt4x = true>
+struct BidimTraitsImpl {
   static constexpr bool isRowwise = true;
   static constexpr bool isColwise = true;
   using IType = _IType;
@@ -586,7 +634,7 @@ struct CastTraits<_IType, _OType, /*rowwise=*/true, /*colwise=*/true> {
   using rowWarpDim = Layout<rowThreadLayout::M, rowThreadLayout::N * rowChunkElems>;
   using colWarpDim = Layout<colThreadLayout::M * colChunkElems, colThreadLayout::N>;
   using warpDim =
-      Layout<std::max(rowWarpDim::M, colWarpDim::M), std::max(rowWarpDim::N, colWarpDim::N)>;
+      Layout<detail::max(rowWarpDim::M, colWarpDim::M), detail::max(rowWarpDim::N, colWarpDim::N)>;
 
   static constexpr bool _tma_swizzle = true;
   using warpLayout = Layout<1, 2>;
@@ -601,17 +649,17 @@ struct CastTraits<_IType, _OType, /*rowwise=*/true, /*colwise=*/true> {
 
   using blockIterDim = Layout<warpLayout::M * warpDim::M, warpLayout::N * warpDim::N>;
 
-  using iterLayout = Layout<1, 4>;
+  using iterLayout = Layout<1, _IterN>;
   using blockDIM = Layout<iterLayout::M * blockIterDim::M, iterLayout::N * blockIterDim::N>;
 
-  static constexpr int32_t numStages = 2;
+  static constexpr int32_t numStages = _NumStages;
 
   using inputUnitType = uint4;
   static constexpr int32_t rowNumElemsPerUnit = sizeof(inputUnitType) / sizeof(IType);
   static constexpr int32_t rowNumUnitsPerChunk = rowChunkElems / rowNumElemsPerUnit;
   // TODO: set condition for float
-  using inputElemSwz = std::conditional_t<_tma_swizzle, swz::Swizzle<3, 3, 3>, swz::Linear>;
-  using inputUnitSwz = std::conditional_t<_tma_swizzle, swz::Swizzle<3, 0, 3>, swz::Linear>;
+  using inputElemSwz = detail::conditional_t<_tma_swizzle, swz::Swizzle<3, 3, 3>, swz::Linear>;
+  using inputUnitSwz = detail::conditional_t<_tma_swizzle, swz::Swizzle<3, 0, 3>, swz::Linear>;
 
   using colIndexSwz = swz::Swizzle<5, 0, 5>;
 
@@ -620,10 +668,10 @@ struct CastTraits<_IType, _OType, /*rowwise=*/true, /*colwise=*/true> {
       rowChunkElems * sizeof(OType) / sizeof(rowOutputUnitType);
   static constexpr int32_t rowOutNumElemsPerUnit = sizeof(rowOutputUnitType) / sizeof(OType);
 
-  using rowOutputChunkSwz = std::conditional_t<_tma_swizzle, swz::Swizzle<2, 0, 3>, swz::Linear>;
-  using colOutputSwz = std::conditional_t<_tma_swizzle, swz::Swizzle<2, 4, 3>, swz::Linear>;
+  using rowOutputChunkSwz = detail::conditional_t<_tma_swizzle, swz::Swizzle<2, 0, 3>, swz::Linear>;
+  using colOutputSwz = detail::conditional_t<_tma_swizzle, swz::Swizzle<2, 4, 3>, swz::Linear>;
 
-  static constexpr bool _use_cvt_4x = true;
+  static constexpr bool _use_cvt_4x = _UseCvt4x;
   static constexpr bool _use_warp_specialization = false;
   static constexpr bool _need_wait_group = iterLayout::num > numStages;
   static constexpr bool _reuse_input_out_smem = false;
@@ -664,11 +712,23 @@ struct CastTraits<_IType, _OType, /*rowwise=*/true, /*colwise=*/true> {
 
   static constexpr size_t smem_alignment = _tma_swizzle ? 1024ul : 128ul;
   static constexpr size_t smem = _reuse_input_out_smem
-                                     ? (std::max(smemInput, smemColwiseOutput) + smemRowwiseOutput +
+                                     ? (detail::max(smemInput, smemColwiseOutput) + smemRowwiseOutput +
                                         smem_alignment + smem_rowwise_scale + smem_colwise_reduce)
                                      : (smemInput + smemRowwiseOutput + smemColwiseOutput +
                                         smem_alignment + smem_rowwise_scale + smem_colwise_reduce);
 };
+
+// Shipped bidimensional config: BidimTraitsImpl with the default knobs. Keeping
+// this as the CastTraits<...,true,true> specialization means all existing callers
+// and the static kernel are unchanged.
+template <typename _IType, typename _OType>
+struct CastTraits<_IType, _OType, /*rowwise=*/true, /*colwise=*/true>
+    : BidimTraitsImpl<_IType, _OType> {};
+
+// Tunable alias for runtime autotuning over (numStages, iterLayout::N, use_cvt_4x).
+template <typename IType, typename OType, int32_t NumStages = 2, int32_t IterN = 4,
+          bool UseCvt4x = true>
+using BidimTunableTraits = BidimTraitsImpl<IType, OType, NumStages, IterN, UseCvt4x>;
 
 __device__ __forceinline__ intptr_t align_to(intptr_t x, intptr_t align) {
   return (x + align - 1) & ~((align)-1);
@@ -676,8 +736,8 @@ __device__ __forceinline__ intptr_t align_to(intptr_t x, intptr_t align) {
 
 // 32x32
 template <typename CastTraits,
-          std::enable_if_t<CastTraits::isRowwise && CastTraits::isColwise, int> = 0,
-          std::enable_if_t<CastTraits::_use_warp_specialization, int> = 0>
+          detail::enable_if_t<CastTraits::isRowwise && CastTraits::isColwise, int> = 0,
+          detail::enable_if_t<CastTraits::_use_warp_specialization, int> = 0>
 // __launch_bounds__(CastTraits::numThreads)
 __global__ void quantize_mxfp8_kernel_cast_only(
     const __grid_constant__ CUtensorMap tensor_map_input,
@@ -917,7 +977,7 @@ __global__ void quantize_mxfp8_kernel_cast_only(
             ptx::mbarrier_arrive_expect_tx(&ldg_consumer[read_state.index()], 0u);
           }
 
-          if constexpr (std::is_same_v<IType, float>) {
+          if constexpr (detail::is_same_v<IType, float>) {
           } else {
             static_assert(CastTraits::_colwise_reduce_max == ColwiseReduceMax::Redux,
                           "Only Redux is implemented");
@@ -1088,17 +1148,17 @@ __global__ void quantize_mxfp8_kernel_cast_only(
       ptx::numbered_barrier_sync(CastTraits::warpLayout::num * 32, 0u);
 
       constexpr int32_t stride_in_smem = CastTraits::blockDIM::N / CastTraits::rowChunkElems;
-      using PreferredDataType = std::conditional_t<
+      using PreferredDataType = detail::conditional_t<
           stride_in_smem % 16 == 0, uint4,
-          std::conditional_t<
+          detail::conditional_t<
               stride_in_smem % 8 == 0, uint2,
-              std::conditional_t<stride_in_smem % 4 == 0, uint32_t,
-                                 std::conditional_t<stride_in_smem % 2 == 0, uint16_t, uint8_t>>>>;
+              detail::conditional_t<stride_in_smem % 4 == 0, uint32_t,
+                                 detail::conditional_t<stride_in_smem % 2 == 0, uint16_t, uint8_t>>>>;
 
       int2 end_coords;
-      end_coords.y = std::min(block_coords.y + CastTraits::blockDIM::M, rows);
+      end_coords.y = detail::min(block_coords.y + CastTraits::blockDIM::M, rows);
       end_coords.x =
-          std::min((block_coords.x + CastTraits::blockDIM::N) / CastTraits::rowChunkElems,
+          detail::min((block_coords.x + CastTraits::blockDIM::N) / CastTraits::rowChunkElems,
                    scale_stride_rowwise);
       int2 valid_coords;
       valid_coords.y = end_coords.y - block_coords.y;
@@ -1150,15 +1210,18 @@ __global__ void quantize_mxfp8_kernel_cast_only(
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
 
-template <typename CastTraits,
-          std::enable_if_t<CastTraits::isRowwise && CastTraits::isColwise, int> = 0,
-          std::enable_if_t<!CastTraits::_use_warp_specialization, int> = 0>
-__global__ void quantize_mxfp8_kernel_cast_only(
-    const __grid_constant__ CUtensorMap tensor_map_input,
-    const __grid_constant__ CUtensorMap tensor_map_rowwise_output,
-    const __grid_constant__ CUtensorMap tensor_map_colwise_output, e8m0_t *scales_rowwise,
-    e8m0_t *scales_colwise, const float *noop, int32_t rows, int32_t cols,
-    int32_t scale_stride_rowwise, int32_t scale_stride_colwise) {
+// Shared device body for the 32x32 bidimensional (non-warp-specialized)
+// cast-only kernel. Extracted so both the statically-instantiated __global__
+// below and the NVRTC entry point (rtc/quantize_mxfp8_bidimensional.cu) reuse
+// it. __grid_constant__ is only valid on __global__ params, so the maps are
+// passed by const-ref here; __forceinline__ collapses this back into the global
+// so the grid-constant param addresses are preserved.
+template <typename CastTraits>
+__device__ __forceinline__ void quantize_mxfp8_bidimensional_cast_only_body(
+    const CUtensorMap &tensor_map_input, const CUtensorMap &tensor_map_rowwise_output,
+    const CUtensorMap &tensor_map_colwise_output, e8m0_t *scales_rowwise, e8m0_t *scales_colwise,
+    const float *noop, int32_t rows, int32_t cols, int32_t scale_stride_rowwise,
+    int32_t scale_stride_colwise) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   if (noop != nullptr && noop[0] == 1.0f) {
     return;
@@ -1362,7 +1425,7 @@ __global__ void quantize_mxfp8_kernel_cast_only(
         }
       }
 
-      if constexpr (std::is_same_v<IType, float>) {
+      if constexpr (detail::is_same_v<IType, float>) {
         if constexpr (CastTraits::_colwise_reduce_max == ColwiseReduceMax::Atom ||
                       CastTraits::_colwise_reduce_max == ColwiseReduceMax::Red) {
         } else if constexpr (CastTraits::_colwise_reduce_max == ColwiseReduceMax::RedAsync) {
@@ -1546,16 +1609,16 @@ __global__ void quantize_mxfp8_kernel_cast_only(
 
   if constexpr (CastTraits::_cache_rowwise_scale_in_smem) {
     constexpr int32_t stride_in_smem = CastTraits::blockDIM::N / CastTraits::rowChunkElems;
-    using PreferredDataType = std::conditional_t<
+    using PreferredDataType = detail::conditional_t<
         stride_in_smem % 16 == 0, uint4,
-        std::conditional_t<
+        detail::conditional_t<
             stride_in_smem % 8 == 0, uint2,
-            std::conditional_t<stride_in_smem % 4 == 0, uint32_t,
-                               std::conditional_t<stride_in_smem % 2 == 0, uint16_t, uint8_t>>>>;
+            detail::conditional_t<stride_in_smem % 4 == 0, uint32_t,
+                               detail::conditional_t<stride_in_smem % 2 == 0, uint16_t, uint8_t>>>>;
 
     int2 end_coords;
-    end_coords.y = std::min(block_coords.y + CastTraits::blockDIM::M, rows);
-    end_coords.x = std::min((block_coords.x + CastTraits::blockDIM::N) / CastTraits::rowChunkElems,
+    end_coords.y = detail::min(block_coords.y + CastTraits::blockDIM::M, rows);
+    end_coords.x = detail::min((block_coords.x + CastTraits::blockDIM::N) / CastTraits::rowChunkElems,
                             scale_stride_rowwise);
     int2 valid_coords;
     valid_coords.y = end_coords.y - block_coords.y;
@@ -1605,6 +1668,21 @@ __global__ void quantize_mxfp8_kernel_cast_only(
   ptx::cp_async_bulk_wait_group_read<0>();
 
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+}
+
+// 32x32 bidimensional cast-only kernel, non-warp-specialized (static entry point).
+template <typename CastTraits,
+          detail::enable_if_t<CastTraits::isRowwise && CastTraits::isColwise, int> = 0,
+          detail::enable_if_t<!CastTraits::_use_warp_specialization, int> = 0>
+__global__ void quantize_mxfp8_kernel_cast_only(
+    const __grid_constant__ CUtensorMap tensor_map_input,
+    const __grid_constant__ CUtensorMap tensor_map_rowwise_output,
+    const __grid_constant__ CUtensorMap tensor_map_colwise_output, e8m0_t *scales_rowwise,
+    e8m0_t *scales_colwise, const float *noop, int32_t rows, int32_t cols,
+    int32_t scale_stride_rowwise, int32_t scale_stride_colwise) {
+  quantize_mxfp8_bidimensional_cast_only_body<CastTraits>(
+      tensor_map_input, tensor_map_rowwise_output, tensor_map_colwise_output, scales_rowwise,
+      scales_colwise, noop, rows, cols, scale_stride_rowwise, scale_stride_colwise);
 }
 
 }  // namespace specialized

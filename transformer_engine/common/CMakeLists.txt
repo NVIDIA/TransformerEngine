@@ -184,6 +184,7 @@ list(APPEND transformer_engine_cpp_sources
      gemm/config.cpp
      normalization/common.cpp
      normalization/rtc_dispatch.cpp
+     cast/mxfp8/specialized/rtc_dispatch.cpp
      normalization/layernorm/ln_api.cpp
      normalization/rmsnorm/rmsnorm_api.cpp
      util/cuda_driver.cpp
@@ -554,6 +555,21 @@ make_string_header_from_file(transpose/rtc/transpose.cu
                              string_code_transpose_rtc_transpose_cu)
 make_string_header_from_file(transpose/rtc/swap_first_dims.cu
                              string_code_transpose_rtc_swap_first_dims_cu)
+
+# MXFP8 specialized quantize: NVRTC bundled headers + RTC source file
+make_string_header_from_file(util/ptx.cuh
+                             string_code_util_ptx_cuh)
+make_string_header_from_file(cast/mxfp8/specialized/swizzle.cuh
+                             string_code_cast_mxfp8_specialized_swizzle_cuh)
+make_string_header_from_file(cast/mxfp8/specialized/state_counter.cuh
+                             string_code_cast_mxfp8_specialized_state_counter_cuh)
+make_string_header_from_file(cast/mxfp8/specialized/quantize_mxfp8.cuh
+                             string_code_cast_mxfp8_specialized_quantize_mxfp8_cuh)
+make_string_header_from_file(cast/mxfp8/specialized/rtc/quantize_mxfp8_rowwise.cu
+                             string_code_cast_mxfp8_specialized_rtc_quantize_mxfp8_rowwise_cu)
+make_string_header_from_file(cast/mxfp8/specialized/rtc/quantize_mxfp8_bidimensional.cu
+                             string_code_cast_mxfp8_specialized_rtc_quantize_mxfp8_bidimensional_cu)
+
 make_string_header_from_file(fused_softmax/scaled_masked_softmax.cu
                              string_code_fused_softmax_scaled_masked_softmax_cu)
 make_string_header_from_file(fused_softmax/scaled_upper_triang_masked_softmax.cu
@@ -586,6 +602,7 @@ make_string_header_from_file(normalization/rmsnorm/rtc/rmsnorm_fwd_kernel.cu
                              string_code_normalization_rmsnorm_rtc_rmsnorm_fwd_kernel_cu)
 make_string_header_from_file(normalization/rmsnorm/rtc/rmsnorm_bwd_kernel.cu
                              string_code_normalization_rmsnorm_rtc_rmsnorm_bwd_kernel_cu)
+
 target_include_directories(transformer_engine PRIVATE
                            "${CMAKE_CURRENT_BINARY_DIR}/string_headers")
 
@@ -606,6 +623,16 @@ option(NVTE_BUILD_LEGACY_STATIC_NORM
 target_compile_definitions(transformer_engine
                            PRIVATE
                            NVTE_BUILD_LEGACY_STATIC_NORM=$<BOOL:${NVTE_BUILD_LEGACY_STATIC_NORM}>)
+
+# Default OFF: the 1x32 rowwise and 32x32 bidimensional MXFP8 specialized
+# cast-only kernels are compiled via NVRTC at runtime. Set ON to additionally
+# instantiate their static fallbacks for NVTE_DISABLE_NVRTC=1.
+option(NVTE_BUILD_LEGACY_STATIC_MXFP8
+       "Also compile static specialized MXFP8 cast-only kernels for NVTE_DISABLE_NVRTC fallback"
+       OFF)
+target_compile_definitions(transformer_engine
+                           PRIVATE
+                           NVTE_BUILD_LEGACY_STATIC_MXFP8=$<BOOL:${NVTE_BUILD_LEGACY_STATIC_MXFP8}>)
 
 # Compiler options
 set(nvte_sources_with_fast_math)

@@ -11,7 +11,11 @@
 #ifndef TRANSFORMER_ENGINE_SPECIALIZED_STATE_COUNTER_CUH_
 #define TRANSFORMER_ENGINE_SPECIALIZED_STATE_COUNTER_CUH_
 
+#if !defined(__CUDACC_RTC__)
 #include <cstdint>
+#else
+#include "utils.cuh"
+#endif
 
 namespace transformer_engine {
 
