@@ -11,6 +11,7 @@
 #ifndef TRANSFORMER_ENGINE_PTX_CUH_
 #define TRANSFORMER_ENGINE_PTX_CUH_
 
+#if !defined(__CUDACC_RTC__)
 #include <cuda.h>
 #include <cuda_runtime.h>
 
@@ -22,6 +23,23 @@
 #include <cuda_bf16.h>
 
 #include "common/utils.cuh"
+#else
+// NVRTC build: common.h drags in host-only headers (cuDNN etc.) and cannot be
+// compiled by NVRTC.
+#ifndef FP4_TYPE_SUPPORTED
+#define FP4_TYPE_SUPPORTED (CUDA_VERSION >= 12080)
+#endif
+#include <cuda_bf16.h>
+#if FP4_TYPE_SUPPORTED
+#include <cuda_fp4.h>
+#endif  // FP4_TYPE_SUPPORTED
+#include "utils.cuh"
+
+namespace transformer_engine {
+using fp16 = half;
+using bf16 = nv_bfloat16;
+}  // namespace transformer_engine
+#endif  // __CUDACC_RTC__
 
 namespace transformer_engine {
 
@@ -791,7 +809,7 @@ __device__ __forceinline__ uint32_t mul_cvt_bf16_to_fp4_8x_round_to_nearest(
   uint32_t out_8x = 0;
   constexpr bool is_blackwell = ARCH_BLACKWELL_FAMILY;
   if constexpr (is_blackwell) {
-    if constexpr (std::is_same<SCALING_COEFFICIENT_TYPE, bf16>::value) {
+    if constexpr (detail::is_same<SCALING_COEFFICIENT_TYPE, bf16>::value) {
       asm volatile(
           "{\n"
           ".reg.f32 zero; \n\t"
@@ -822,7 +840,7 @@ __device__ __forceinline__ uint32_t mul_cvt_bf16_to_fp4_8x_round_to_nearest(
           "}"
           : "=r"(out_8x)
           : "l"(in03), "l"(in47), "h"(reinterpret_cast<const uint16_t &>(scaling_coefficient)));
-    } else if constexpr (std::is_same<SCALING_COEFFICIENT_TYPE, float>::value) {
+    } else if constexpr (detail::is_same<SCALING_COEFFICIENT_TYPE, float>::value) {
       asm volatile(
           "{\n"
           ".reg.b64 scaling_coeff_2x; \n\t"
@@ -883,7 +901,7 @@ __device__ __forceinline__ uint32_t mul_cvt_bf16_to_fp4_8x_stochastic_rounding(
   uint32_t out_8x = 0;
   constexpr bool has_rs = ARCH_HAS_STOCHASTIC_ROUNDING;
   if constexpr (has_rs) {
-    if constexpr (std::is_same<SCALING_COEFFICIENT_TYPE, bf16>::value) {
+    if constexpr (detail::is_same<SCALING_COEFFICIENT_TYPE, bf16>::value) {
       asm volatile(
           "{\n"
           ".reg.f32 zero; \n\t"
@@ -913,7 +931,7 @@ __device__ __forceinline__ uint32_t mul_cvt_bf16_to_fp4_8x_stochastic_rounding(
           : "=r"(out_8x)
           : "l"(in03), "l"(in47), "h"(reinterpret_cast<const uint16_t &>(scaling_coefficient)),
             "r"(rbits03), "r"(rbits47));
-    } else if constexpr (std::is_same<SCALING_COEFFICIENT_TYPE, float>::value) {
+    } else if constexpr (detail::is_same<SCALING_COEFFICIENT_TYPE, float>::value) {
       asm volatile(
           "{\n"
           ".reg.b16 v0_bf16, v1_bf16, v2_bf16, v3_bf16, v4_bf16, v5_bf16, v6_bf16, v7_bf16; \n\t"
