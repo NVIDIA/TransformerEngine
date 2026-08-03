@@ -6,6 +6,7 @@
 
 #include "../util/rtc.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <iostream>
 #include <utility>
@@ -26,22 +27,80 @@ namespace {
 #include "string_code_util_math_h.h"
 #include "string_code_utils_cuh.h"
 
+/*! \brief Compute capabilities that NVRTC supports */
+const std::vector<int>& supported_sm_archs() {
+  static const std::vector<int> archs_ = [] {
+    int num_archs = 0;
+    NVTE_CHECK_NVRTC(nvrtcGetNumSupportedArchs(&num_archs));
+    NVTE_CHECK(num_archs > 0, "Could not determine SM archs that NVRTC supports");
+    std::vector<int> archs(num_archs);
+    NVTE_CHECK_NVRTC(nvrtcGetSupportedArchs(archs.data()));
+    return archs;
+  }();
+  return archs_;
+}
+
 /*! \brief Latest compute capability that NVRTC supports
  *
  * \return Compute capability as int. Last digit is minor revision,
  *         remaining digits are major revision.
  */
 inline int max_supported_sm_arch() {
-  static int arch_ = -1;
-  if (arch_ < 0) {
-    int num_archs = 0;
-    NVTE_CHECK_NVRTC(nvrtcGetNumSupportedArchs(&num_archs));
-    NVTE_CHECK(num_archs > 0, "Could not determine SM archs that NVRTC supports");
-    std::vector<int> archs(num_archs);
-    NVTE_CHECK_NVRTC(nvrtcGetSupportedArchs(archs.data()));
-    arch_ = archs.back();
+  const auto& archs = supported_sm_archs();
+  return *std::max_element(archs.begin(), archs.end());
+}
+
+/*! \brief Whether NVRTC supports an exact compute capability */
+inline bool is_supported_sm_arch(int sm_arch) {
+  const auto& archs = supported_sm_archs();
+  return std::find(archs.begin(), archs.end(), sm_arch) != archs.end();
+}
+
+/*! \brief Run-time NVRTC version encoded like CUDA_VERSION */
+inline int nvrtc_version() {
+  static const int version_ = [] {
+    int major = 0;
+    int minor = 0;
+    NVTE_CHECK_NVRTC(nvrtcVersion(&major, &minor));
+    return major * 1000 + minor * 10;
+  }();
+  return version_;
+}
+
+/*! \brief Latest supported architecture in the device's architecture family */
+inline int max_supported_family_sm_arch(int sm_arch) {
+  const int family = sm_arch / 10;
+  int target_arch = -1;
+  for (const int candidate : supported_sm_archs()) {
+    if (candidate <= sm_arch && candidate / 10 == family) {
+      target_arch = std::max(target_arch, candidate);
+    }
   }
-  return arch_;
+  return target_arch;
+}
+
+/*! \brief Resolve the static build's Blackwell target policy for NVRTC */
+inline ArchSpecificity resolve_arch_specificity(ArchSpecificity specificity, int sm_arch) {
+  if (specificity != ArchSpecificity::BlackwellSpecific) {
+    return specificity;
+  }
+
+  // Keep this matrix synchronized with NVTE_SPECIFIC_ARCHS in CMakeLists.txt.
+  // The runtime NVRTC version is the JIT equivalent of CUDAToolkit_VERSION.
+  switch (sm_arch) {
+    case 100:
+    case 101:
+    case 103:
+      return ArchSpecificity::ArchitectureSpecific;
+    case 110:
+      return ArchSpecificity::FamilySpecific;
+    default:
+      if (sm_arch / 10 == 12) {
+        return nvrtc_version() >= 12090 ? ArchSpecificity::FamilySpecific
+                                        : ArchSpecificity::ArchitectureSpecific;
+      }
+      NVTE_ERROR("No Blackwell RTC target policy is defined for sm_", sm_arch);
+  }
 }
 
 }  // namespace
@@ -148,7 +207,8 @@ KernelManager& KernelManager::instance() {
 void KernelManager::compile(const std::string& kernel_label, const std::string& kernel_name,
                             const std::string& code, const std::string& filename,
                             const std::vector<std::string>& extra_options,
-                            const std::vector<Header>& extra_headers) {
+                            const std::vector<Header>& extra_headers,
+                            ArchRequirement arch_requirement) {
   const int device_id = cuda::current_device();
   const auto key = get_kernel_cache_key(kernel_label, device_id);
   std::unique_lock<std::shared_mutex> lock_guard_(lock_);
@@ -158,8 +218,40 @@ void KernelManager::compile(const std::string& kernel_label, const std::string& 
 
   // Choose whether to compile to PTX or cubin
   const int sm_arch_ = cuda::sm_arch(device_id);
-  const int compile_sm_arch = std::min(sm_arch_, max_supported_sm_arch());
-  const bool compile_ptx = sm_arch_ != compile_sm_arch;
+  NVTE_CHECK(sm_arch_ >= arch_requirement.min_sm_arch, "RTC kernel ", kernel_label,
+             " requires sm_", arch_requirement.min_sm_arch,
+             " or newer, but the current device is sm_", sm_arch_);
+
+  int compile_sm_arch = std::min(sm_arch_, max_supported_sm_arch());
+  bool compile_ptx = sm_arch_ != compile_sm_arch;
+  const char* arch_suffix = "";
+  const ArchSpecificity arch_specificity =
+      resolve_arch_specificity(arch_requirement.specificity, sm_arch_);
+  if (arch_specificity == ArchSpecificity::ArchitectureSpecific) {
+    NVTE_CHECK(
+        is_supported_sm_arch(sm_arch_), "RTC kernel ", kernel_label,
+        " requires an architecture-specific target for sm_", sm_arch_,
+        ", but the runtime NVRTC does not support that architecture. Use a newer CUDA toolkit, "
+        "or disable NVRTC and rebuild with the corresponding legacy static kernel enabled.");
+    NVTE_CHECK(sm_arch_ >= 90, "Architecture-specific RTC targets require sm_90 or newer");
+    compile_sm_arch = sm_arch_;
+    compile_ptx = false;
+    arch_suffix = "a";
+  } else if (arch_specificity == ArchSpecificity::FamilySpecific) {
+    const int rtc_version = nvrtc_version();
+    NVTE_CHECK(rtc_version >= 12090, "RTC kernel ", kernel_label,
+               " requires a family-specific target, but NVRTC ", rtc_version / 1000, ".",
+               (rtc_version % 1000) / 10, " does not support f-suffixed architectures");
+    compile_sm_arch = max_supported_family_sm_arch(sm_arch_);
+    NVTE_CHECK(
+        compile_sm_arch >= arch_requirement.min_sm_arch, "RTC kernel ", kernel_label,
+        " requires a family-specific target compatible with sm_", sm_arch_,
+        ", but the runtime NVRTC does not support that architecture family. Use a newer CUDA "
+        "toolkit, or disable NVRTC and rebuild with the corresponding legacy static kernel "
+        "enabled.");
+    compile_ptx = compile_sm_arch != sm_arch_;
+    arch_suffix = "f";
+  }
 
   // Compilation flags
   std::vector<std::string> opts = {
@@ -168,9 +260,9 @@ void KernelManager::compile(const std::string& kernel_label, const std::string& 
 #endif
       "--std=c++17"};
   if (compile_ptx) {
-    opts.push_back(concat_strings("--gpu-architecture=compute_", compile_sm_arch));
+    opts.push_back(concat_strings("--gpu-architecture=compute_", compile_sm_arch, arch_suffix));
   } else {
-    opts.push_back(concat_strings("--gpu-architecture=sm_", compile_sm_arch));
+    opts.push_back(concat_strings("--gpu-architecture=sm_", compile_sm_arch, arch_suffix));
   }
   opts.push_back(concat_strings("-I", cuda::include_directory(true)));
   opts.insert(opts.end(), extra_options.begin(), extra_options.end());

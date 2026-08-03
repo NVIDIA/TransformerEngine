@@ -24,10 +24,21 @@ using uint8_t = unsigned char;
 using uint16_t = unsigned short int;  // NOLINT(*)
 using uint32_t = unsigned int;
 using uint64_t = unsigned long long int;  // NOLINT(*)
+using int8_t = signed char;
+using int16_t = short int;             // NOLINT(*)
+using int32_t = int;                   // NOLINT(*)
+using int64_t = long long int;         // NOLINT(*)
+using intptr_t = long long int;        // NOLINT(*)
+using uintptr_t = unsigned long long int;  // NOLINT(*)
 static_assert(sizeof(uint8_t) == 1);
 static_assert(sizeof(uint16_t) == 2);
 static_assert(sizeof(uint32_t) == 4);
 static_assert(sizeof(uint64_t) == 8);
+static_assert(sizeof(int8_t) == 1);
+static_assert(sizeof(int16_t) == 2);
+static_assert(sizeof(int32_t) == 4);
+static_assert(sizeof(int64_t) == 8);
+static_assert(sizeof(intptr_t) == sizeof(void *));
 #endif
 
 // Minimal subset of <type_traits> used by RTC kernel headers. Keep these in a
@@ -57,6 +68,27 @@ struct conditional<false, T, F> {
 };
 template <bool B, class T, class F>
 using conditional_t = typename conditional<B, T, F>::type;
+
+template <bool B, class T = void>
+struct enable_if {};
+template <class T>
+struct enable_if<true, T> {
+  using type = T;
+};
+template <bool B, class T = void>
+using enable_if_t = typename enable_if<B, T>::type;
+
+// Constexpr min/max usable in both host and device (including NVRTC, where
+// <algorithm> is unavailable). Returns by value, which is all the RTC kernel
+// sources need.
+template <class T>
+__host__ __device__ constexpr T min(const T& a, const T& b) {
+  return b < a ? b : a;
+}
+template <class T>
+__host__ __device__ constexpr T max(const T& a, const T& b) {
+  return a < b ? b : a;
+}
 
 }  // namespace detail
 }  // namespace transformer_engine
