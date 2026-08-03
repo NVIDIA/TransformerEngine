@@ -78,9 +78,6 @@ struct enable_if<true, T> {
 template <bool B, class T = void>
 using enable_if_t = typename enable_if<B, T>::type;
 
-// Constexpr min/max usable in both host and device (including NVRTC, where
-// <algorithm> is unavailable). Returns by value, which is all the RTC kernel
-// sources need.
 template <class T>
 __host__ __device__ constexpr T min(const T& a, const T& b) {
   return b < a ? b : a;

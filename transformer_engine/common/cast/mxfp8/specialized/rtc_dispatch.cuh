@@ -19,9 +19,6 @@
 
 #include "../../../util/rtc.h"
 // NB: do not include util/string.h here — it pulls in <regex>, which is heavy
-// enough to ICE the device compiler (cicc) when this header is parsed inside a
-// large .cu TU. Label building uses plain std::string; regex_replace lives in
-// the host-only rtc_dispatch.cpp.
 #include "quantize_mxfp8.cuh"
 
 namespace transformer_engine {
@@ -31,9 +28,7 @@ namespace quantize_kernel {
 namespace specialized {
 
 // Compile (if not already cached) the rowwise cast-only RTC kernel for the given
-// element-type spellings. Defined in rtc_dispatch.cpp, a host-only translation
-// unit, so the large embedded kernel sources are never parsed by the device
-// compiler (cicc) of TUs that merely launch the kernel.
+// element-type spellings. 
 void compile_rowwise_cast_only_rtc(const std::string &kernel_label, const std::string &itype_name,
                                    const std::string &otype_name);
 void compile_bidimensional_cast_only_rtc(const std::string &kernel_label,
@@ -41,11 +36,6 @@ void compile_bidimensional_cast_only_rtc(const std::string &kernel_label,
                                          const std::string &otype_name, int num_stages, int iter_n,
                                          bool use_cvt_4x);
 
-// Element-type spellings used both for the __ITYPE__/__OTYPE__ substitution and
-// as part of the compiled-kernel cache key. The names must resolve inside the
-// NVRTC translation unit (see ptx.cuh / utils.cuh RTC aliases). The generic
-// fallback (via detail::type_name) covers types the switch instantiates but the
-// rowwise path never actually launches (e.g. float).
 template <typename T>
 inline const char *rtc_type_name() {
   return detail::type_name<T>();
@@ -67,9 +57,6 @@ inline const char *rtc_type_name<fp8e5m2>() {
   return "fp8e5m2";
 }
 
-// Compile (on first use) and launch the 1x32 rowwise cast-only kernel via NVRTC.
-// Geometry is derived from CastTraits here (host code, no device sources), while
-// the actual NVRTC compilation lives in the host-only .cpp.
 template <typename IType, typename OType>
 inline void launch_rowwise_cast_only_rtc(IType *input, OType *output, e8m0_t *scales_rowwise,
                                          const float *noop, int32_t rows, int32_t cols,

@@ -726,9 +726,6 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
                   case ScalingType::BIDIMENSIONAL: {
                     using traits = specialized::CastTraits<IType, OType, true, true>;
 
-                    // TMA for loading, so that we don't need STS for transposing.
-                    // The descriptors are built host-side and passed by value to
-                    // the kernel; this is identical for the NVRTC and static paths.
                     alignas(64) CUtensorMap tensor_map_input{};
                     constexpr size_t input_type_bit_size = TypeInfo<IType>::size;
                     create_2D_tensor_map(tensor_map_input, input.data, rows, cols,
