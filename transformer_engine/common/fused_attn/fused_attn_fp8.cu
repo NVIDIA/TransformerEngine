@@ -60,6 +60,24 @@ void fused_attn_fp8_fwd_impl(
   NVTE_CHECK(!is_mxfp8 || cudnn_runtime_version >= 92100,
              "MXFP8 fused attention requires cuDNN 9.21.0 or later!");
 
+  // Newer versions of cuDNN SDPA can accept sequence lengths directly as a cumulative
+  // tensor. Take advantage of this if possible to avoid 1 extra kernel call. (Unlike
+  // the F16 path, the FP8 path has no THD/ragged-offset support, so only the
+  // cu_seqlens_to_actual_seqlens conversion applies here. Also note that the
+  // needed versions of cuDNN backend and frontend are higher than for F16.)
+  const bool use_cu_seqlens_directly =
+      // Frontend 1.26 supports fp8+cu_seqlens (for the C++ API).
+      // Note: For the Python API, 1.27 is required.
+      CUDNN_FRONTEND_VERSION >= 12600 &&
+      // The frontend gates cu_seq_len support on min(compile-time, runtime) cuDNN
+      // version, so we'll do the same.
+      (CUDNN_VERSION >= 92500 && cudnn_runtime_version >= 92500) &&
+      // This extra restriction is needed because cuDNN frontend doesn't yet allow
+      // the combination of dropout and stats generation for the fprop unified engine,
+      // so any such request would always get routed to the old composite SDPA engine
+      // (which doesn't support cu_seqlens). Remove this restriction when possible.
+      !is_dropout;
+
   try {
     FADescriptor_v1 descriptor{b,
                                h,
@@ -262,17 +280,38 @@ void fused_attn_fp8_fwd_impl(
       // }
 
       if (is_padding) {
-        seq_q = mha_graph->tensor(fe::graph::Tensor_attributes()
-                                      .set_name("seq_q")
-                                      .set_dim({b, 1, 1, 1})
-                                      .set_stride({1, 1, 1, 1})
-                                      .set_data_type(fe::DataType_t::INT32));
-        seq_kv = mha_graph->tensor(fe::graph::Tensor_attributes()
-                                       .set_name("seq_kv")
-                                       .set_dim({b, 1, 1, 1})
-                                       .set_stride({1, 1, 1, 1})
-                                       .set_data_type(fe::DataType_t::INT32));
-        sdpa_options.set_padding_mask(is_padding).set_seq_len_q(seq_q).set_seq_len_kv(seq_kv);
+        if (use_cu_seqlens_directly) {
+          // seq_q/seq_kv keep their tuple slots but hold (b+1)-shaped cu_seqlen tensors.
+          seq_q = mha_graph->tensor(fe::graph::Tensor_attributes()
+                                        .set_name("cu_seq_len_q")
+                                        .set_dim({b + 1, 1, 1, 1})
+                                        .set_stride({1, 1, 1, 1})
+                                        .set_data_type(fe::DataType_t::INT32));
+          seq_kv = mha_graph->tensor(fe::graph::Tensor_attributes()
+                                         .set_name("cu_seq_len_kv")
+                                         .set_dim({b + 1, 1, 1, 1})
+                                         .set_stride({1, 1, 1, 1})
+                                         .set_data_type(fe::DataType_t::INT32));
+          sdpa_options.set_padding_mask(is_padding)
+              .set_cu_seq_len_q(seq_q)
+              .set_cu_seq_len_kv(seq_kv);
+          // cu_seq_len (and the ragged offset multiplier) are unified-engine-only.
+          // Pin the implementation so an unsupported config fails with the unified
+          // engine's specific error instead of auto-selection's generic failure.
+          sdpa_options.set_implementation(fe::AttentionImplementation_t::UNIFIED);
+        } else {
+          seq_q = mha_graph->tensor(fe::graph::Tensor_attributes()
+                                        .set_name("seq_q")
+                                        .set_dim({b, 1, 1, 1})
+                                        .set_stride({1, 1, 1, 1})
+                                        .set_data_type(fe::DataType_t::INT32));
+          seq_kv = mha_graph->tensor(fe::graph::Tensor_attributes()
+                                         .set_name("seq_kv")
+                                         .set_dim({b, 1, 1, 1})
+                                         .set_stride({1, 1, 1, 1})
+                                         .set_data_type(fe::DataType_t::INT32));
+          sdpa_options.set_padding_mask(is_padding).set_seq_len_q(seq_q).set_seq_len_kv(seq_kv);
+        }
       }
 
       if (is_dropout) {
@@ -379,8 +418,10 @@ void fused_attn_fp8_fwd_impl(
 
     auto plan_workspace_size = mha_graph->get_workspace_size();
 
-    // Exit to request upper level API to allocate memory if needed
-    size_t actual_seqlen_workspace_size = 2 * b * sizeof(int32_t);
+    // Exit to request upper level API to allocate memory if needed.
+    // When passing cu_seqlens* directly to cuDNN SDPA, no conversion workspace is
+    // needed: cuDNN consumes the user's cu_seqlens buffers as-is.
+    size_t actual_seqlen_workspace_size = use_cu_seqlens_directly ? 0 : 2 * b * sizeof(int32_t);
     if (workspace == nullptr) {
       *workspace_size = plan_workspace_size + actual_seqlen_workspace_size;
       return;
@@ -417,17 +458,22 @@ void fused_attn_fp8_fwd_impl(
     } */
 
     if (is_padding) {
-      constexpr size_t nthreads_per_block = 128;
-      const size_t grid = (b + nthreads_per_block - 1) / nthreads_per_block;
-      void* devActualSeqlenQ = static_cast<int8_t*>(workspace) + plan_workspace_size;
-      void* devActualSeqlenKV = static_cast<int8_t*>(devActualSeqlenQ) + b * sizeof(int32_t);
-      cu_seqlens_to_actual_seqlens<<<grid, nthreads_per_block, 0, stream>>>(
-          b, b, static_cast<const int32_t*>(devPtrcuSeqlensQ),  // TODO(pass max_b)
-          static_cast<const int32_t*>(devPtrcuSeqlensKV), static_cast<int32_t*>(devActualSeqlenQ),
-          static_cast<int32_t*>(devActualSeqlenKV));
-      NVTE_CHECK_CUDA(cudaGetLastError());
-      variant_pack[seq_q] = devActualSeqlenQ;
-      variant_pack[seq_kv] = devActualSeqlenKV;
+      if (use_cu_seqlens_directly) {
+        variant_pack[seq_q] = devPtrcuSeqlensQ;
+        variant_pack[seq_kv] = devPtrcuSeqlensKV;
+      } else {
+        constexpr size_t nthreads_per_block = 128;
+        const size_t grid = (b + nthreads_per_block - 1) / nthreads_per_block;
+        void* devActualSeqlenQ = static_cast<int8_t*>(workspace) + plan_workspace_size;
+        void* devActualSeqlenKV = static_cast<int8_t*>(devActualSeqlenQ) + b * sizeof(int32_t);
+        cu_seqlens_to_actual_seqlens<<<grid, nthreads_per_block, 0, stream>>>(
+            b, b, static_cast<const int32_t*>(devPtrcuSeqlensQ),  // TODO(pass max_b)
+            static_cast<const int32_t*>(devPtrcuSeqlensKV), static_cast<int32_t*>(devActualSeqlenQ),
+            static_cast<int32_t*>(devActualSeqlenKV));
+        NVTE_CHECK_CUDA(cudaGetLastError());
+        variant_pack[seq_q] = devActualSeqlenQ;
+        variant_pack[seq_kv] = devActualSeqlenKV;
+      }
     }
 
     if (is_dropout) {

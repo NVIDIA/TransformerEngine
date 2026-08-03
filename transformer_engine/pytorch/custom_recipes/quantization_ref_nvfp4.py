@@ -363,10 +363,6 @@ class NVFP4QuantizerRef(Quantizer):
         if row_scaled_nvfp4:
             if not rowwise:
                 raise ValueError("Row-scaled NVFP4 reference quantization requires rowwise usage.")
-            if columnwise:
-                raise ValueError(
-                    "Row-scaled NVFP4 reference quantization does not support columnwise usage."
-                )
         if nvfp4_use_4over6:
             if nvfp4_4over6_err_mode not in ("MAE", "MSE"):
                 raise ValueError(f"Unsupported NVFP4 4over6 error mode: {nvfp4_4over6_err_mode}.")
@@ -883,7 +879,14 @@ class NVFP4QuantizerRef(Quantizer):
                         f"got {self.quant_tile_shape}"
                     )
                 global_amax_row = torch.max(torch.abs(row_input), dim=1).values.to(torch.float32)
-                global_amax_col = global_amax_row
+                # Columnwise (transpose) uses per-row-of-transpose amax, i.e. the
+                # per-column amax of the original input. When columnwise output is
+                # not requested, keep it aliased to the rowwise amax as before.
+                global_amax_col = (
+                    torch.max(torch.abs(col_input), dim=1).values.to(torch.float32)
+                    if self.columnwise_usage
+                    else global_amax_row
+                )
             else:
                 # Compute amax for rowwise and columnwise paths separately
                 global_amax_row = torch.max(torch.abs(row_input)).to(torch.float32).view(1)
@@ -936,6 +939,7 @@ class NVFP4QuantizerRef(Quantizer):
                 self.quant_tile_shape[1],
                 self.quant_tile_shape[0],
                 pow_2_scales=self.pow_2_scales,
+                row_scaled_nvfp4=self.row_scaled_nvfp4,
                 nvfp4_use_4over6=self.nvfp4_use_4over6,
                 nvfp4_e4m3_max=self.nvfp4_e4m3_max,
                 nvfp4_4over6_err_mode=self.nvfp4_4over6_err_mode,
@@ -1167,12 +1171,21 @@ class NVFP4QuantizerRef(Quantizer):
 
             if gemm_type == quantization.GEMMType.WGRAD:
                 partial_alpha = qresult_x.global_amax_col * qresult_w.global_amax_col
+                # A row-scaled operand contributes a per-output-column (N) vector
+                # here, so broadcast along the last axis. Selecting the axis from
+                # gemm_type (rather than matching numel against M) avoids the
+                # square-matrix ambiguity where M == N.
+                if partial_alpha.numel() > 1:
+                    partial_alpha = partial_alpha.reshape(1, -1)
+                else:
+                    partial_alpha = partial_alpha.squeeze(-1)
             else:
                 partial_alpha = qresult_x.global_amax_row * qresult_w.global_amax_row
-            if partial_alpha.numel() > 1 and partial_alpha.numel() == high_precision_x.shape[0]:
-                partial_alpha = partial_alpha.view(-1, 1)
-            else:
-                partial_alpha = partial_alpha.squeeze(-1)
+                # A row-scaled operand contributes a per-output-row (M) vector.
+                if partial_alpha.numel() > 1:
+                    partial_alpha = partial_alpha.reshape(-1, 1)
+                else:
+                    partial_alpha = partial_alpha.squeeze(-1)
             alpha = torch.div(partial_alpha, factor)
 
         M, K = high_precision_x.shape
