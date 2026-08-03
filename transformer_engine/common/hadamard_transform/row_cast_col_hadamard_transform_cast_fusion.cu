@@ -17,13 +17,13 @@
 #include <cute/arch/cluster_sm90.hpp>
 #include <cute/tensor.hpp>
 
-#include "common/common.h"
 #include "common/cast/core/common.cuh"
+#include "common/cast/nvfp4/quantize_transpose_nvfp4.cuh"
+#include "common/common.h"
 #include "common/util/cuda_runtime.h"
 #include "common/util/curanddx.hpp"
 #include "common/util/ptx.cuh"
 #include "common/utils.cuh"
-#include "common/cast/nvfp4/quantize_transpose_nvfp4.cuh"
 #include "customized_pipeline.cuh"
 #include "cutlass/arch/barrier.h"
 #include "cutlass/arch/reg_reconfig.h"
@@ -1323,7 +1323,7 @@ void hadamard_transform_cast_fusion(const Tensor &input_, Tensor &output_,
     Tensor noop;
     if (output_.columnwise_data.dptr != nullptr) {
       dispatch::nvfp4::quantize_transpose<true, true>(input_, &noop, &output_, &quant_config,
-                                                       stream, &hadamard_matrix_);
+                                                      stream, &hadamard_matrix_);
     } else {
       // RHT only affects the columnwise result. Keep rowwise-only quantization on
       // the regular 1D scaling path rather than accidentally selecting 2D scaling.

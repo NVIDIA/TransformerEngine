@@ -1911,8 +1911,8 @@ bool NVFP4Quantizer::is_eligible_for_rht_cast_fusion(const std::vector<size_t>& 
   const auto [rows, cols] = get_2d_dims(shape);
   const size_t row_align = for_grouped_kernel ? 128 : 64;
   const int sm_arch = transformer_engine::cuda::sm_arch();
-  const bool supported_arch =
-      (sm_arch >= 100 && sm_arch <= 110) || (!for_grouped_kernel && (sm_arch == 120 || sm_arch == 121));
+  const bool supported_arch = (sm_arch >= 100 && sm_arch <= 110) ||
+                              (!for_grouped_kernel && (sm_arch == 120 || sm_arch == 121));
   return rows % row_align == 0 && cols % 128 == 0 && supported_arch;
 }
 
