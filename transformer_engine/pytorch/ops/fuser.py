@@ -102,7 +102,7 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
         for tensor in (input_,) + params_and_extra_inputs:
             tensor._do_not_clear = True
 
-        # Place public extra inputs into their basic-op slots. Slots bound to
+        # Place user provided extra inputs into their basic-op slots. Slots bound to
         # internal channels are filled lazily as their producers execute.
         extra_inputs = params_and_extra_inputs[len(fuser._flat_basic_op_params) :]
         basic_op_extra_inputs: list[list[Optional[torch.Tensor]]] = [
@@ -183,14 +183,10 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
                             f"Op {idx} ({type(fuser._basic_ops[idx]).__name__}) "
                             f"did not emit extra output {output_idx}"
                         )
-                    if set_output_requires_grad and (
-                        y.is_floating_point() or y.is_complex()
-                    ):
-                        y.requires_grad_(idx >= fuser.first_op_requiring_backward)
                 extra_outputs[idx] = ys
 
         # Validate extra outputs and flatten only public slots. Outputs bound
-        # to channels stay internal to the fuser.
+        # to channels stay internal to the fuser and are not marked.
         extra_outputs_flat = []
         for idx, ys in enumerate(extra_outputs):
             ys = list(ys)
@@ -202,7 +198,11 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
                     f"but got {len(ys)}"
                 )
             for output_idx, y in enumerate(ys):
+                # Output is not bound to a channel consumed by another op,
+                # so it is a public output.
                 if fuser._basic_op_extra_output_channels[idx][output_idx] is None:
+                    if set_output_requires_grad:
+                        y.requires_grad_(idx >= fuser.first_op_requiring_backward)
                     extra_outputs_flat.append(y)
 
         # Save context for backward pass
@@ -228,14 +228,16 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
             if fuser.first_op_requiring_backward < fuser._num_basic_ops:
                 is_first_module = FP8GlobalStateManager.is_first_fp8_module()
 
-            # Other context
+            # Other context. Save only the wiring metadata needed by
+            # backward instead of the whole OperationFuser.
             func_ctx.backward_ops = fuser._backward_ops
             func_ctx.basic_ops = fuser._basic_ops
             func_ctx.basic_op_ctxs = basic_op_ctxs
             func_ctx.basic_op_num_params = fuser._basic_op_num_params
-            func_ctx.num_extra_inputs = fuser.num_extra_inputs
             func_ctx.num_extra_outputs = len(extra_outputs_flat)
-            func_ctx.fuser = fuser
+            func_ctx.external_extra_output_slots = fuser._external_extra_output_slots
+            func_ctx.basic_op_extra_output_channels = fuser._basic_op_extra_output_channels
+            func_ctx.basic_op_extra_input_sources = fuser._basic_op_extra_input_sources
             func_ctx.is_first_module = is_first_module
 
         # Mark output tensors as not deletable in backward
@@ -273,7 +275,10 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
             ctx.saved_tensors = saved_tensors[slice(*ctx._saved_tensors_range)]
             ctx._saved_tensors_range = None
 
-        fuser = func_ctx.fuser
+        # Channel wiring saved from forward
+        external_extra_output_slots = func_ctx.external_extra_output_slots
+        basic_op_extra_output_channels = func_ctx.basic_op_extra_output_channels
+        basic_op_extra_input_sources = func_ctx.basic_op_extra_input_sources
 
         # Place public extra-output grads into their basic-op slots. Internal
         # output grads are accumulated from channel consumers during backward.
@@ -286,7 +291,7 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
             [None] * op.num_extra_outputs for op in basic_ops
         ]
         for grad, (op_idx, output_idx) in zip(
-            grad_extra_outputs, fuser._external_extra_output_slots
+            grad_extra_outputs, external_extra_output_slots
         ):
             basic_op_grad_extra_outputs[op_idx][output_idx] = grad
 
@@ -306,7 +311,7 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
             # each internal channel.
             for idx in basic_op_idxs:
                 for output_idx, channel in enumerate(
-                    fuser._basic_op_extra_output_channels[idx]
+                    basic_op_extra_output_channels[idx]
                 ):
                     if channel is not None:
                         basic_op_grad_extra_outputs[idx][output_idx] = channel_grads.get(
@@ -326,7 +331,7 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
             for idx, dxs in zip(basic_op_idxs, fused_op_grad_extra_inputs):
                 grad_extra_inputs[idx] = dxs
                 for input_idx, grad in enumerate(dxs):
-                    source = fuser._basic_op_extra_input_sources[idx][input_idx]
+                    source = basic_op_extra_input_sources[idx][input_idx]
                     if source is None or grad is None:
                         continue
                     producer_idx, output_idx = source
@@ -334,7 +339,7 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
                     # must apply these grads itself rather than via channel_grads.
                     if producer_idx in basic_op_idxs:
                         continue
-                    channel = fuser._basic_op_extra_output_channels[producer_idx][output_idx]
+                    channel = basic_op_extra_output_channels[producer_idx][output_idx]
                     previous_grad = channel_grads.get(channel)
                     channel_grads[channel] = (
                         grad if previous_grad is None else previous_grad + grad
@@ -370,7 +375,9 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
                     f"but got {len(dxs)}"
                 )
             for input_idx, grad in enumerate(dxs):
-                if fuser._basic_op_extra_input_sources[idx][input_idx] is None:
+                #  Only append public grad extra inputs to the list
+                #  to be returned to the user.
+                if basic_op_extra_input_sources[idx][input_idx] is None:
                     grad_extra_inputs_flat.append(grad)
 
         # Update FP8 scaling factors
