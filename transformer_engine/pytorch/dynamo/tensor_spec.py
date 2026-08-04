@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 
-"""TensorProto: a data-free description of a tensor / quantized tensor."""
+"""TensorSpec: a data-free description of a tensor / quantized tensor."""
 
 from __future__ import annotations
 import copy as _copy
@@ -14,14 +14,14 @@ from torch._prims_common import make_contiguous_strides_for
 
 
 @dataclass
-class TensorProto:
-    """A data-free *prototype* of a tensor or quantized tensor.
+class TensorSpec:
+    """A data-free description of a tensor or quantized tensor.
 
     Captures ``shape`` / ``dtype`` and, for quantized tensors, the
     (value-opaque) ``quantizer`` -- enough to rebuild a tensor without holding
     storage. The common abstraction over plain ``torch.Tensor``,
     ``QuantizedTensorStorage`` and ``QuantizedTensor``, used for custom-op fake
-    impls and for reassembling a quantized tensor from bare buffers.
+    impls and for reassembling a quantized tensor from bare inner tensors.
     """
 
     shape: Tuple[int, ...]
@@ -33,14 +33,14 @@ class TensorProto:
     def __post_init__(self) -> None:
         # Own a private copy of the quantizer so usage changes (update_usage)
         # never touch the shared, value-opaque quantizer. The copy inherits the
-        # quantizer's current row-/column-wise usage as this proto's layout.
+        # quantizer's current row-/column-wise usage as this spec's layout.
         if self.quantizer is not None:
             q = self.quantizer
             self.quantizer = q.copy() if hasattr(q, "copy") else _copy.copy(q)
 
     @property
     def is_quantized(self) -> bool:
-        """Whether this proto describes a quantized tensor."""
+        """Whether this spec describes a quantized tensor."""
         return self.quantizer is not None
 
     def update_usage(
@@ -49,40 +49,41 @@ class TensorProto:
         rowwise_usage: Optional[bool] = None,
         columnwise_usage: Optional[bool] = None,
     ) -> None:
-        """Mirror ``QuantizedTensor.update_usage`` on the proto's buffer layout.
+        """Mirror ``QuantizedTensor.update_usage`` on the spec's inner-tensor layout.
 
-        Applied to the proto's own quantizer copy, so the shared (value-opaque)
-        quantizer is never mutated. Raises on plain (non-quantized) protos --
+        Applied to the spec's own quantizer copy, so the shared (value-opaque)
+        quantizer is never mutated. Raises on plain (non-quantized) specs --
         a real plain ``torch.Tensor`` has no ``update_usage`` either.
         """
         if self.quantizer is None:
-            raise ValueError("update_usage called on a non-quantized TensorProto")
+            raise ValueError("update_usage called on a non-quantized TensorSpec")
         self.quantizer.set_usage(rowwise=rowwise_usage, columnwise=columnwise_usage)
 
     def inner_names(self) -> Tuple[str, ...]:
-        """Names of the flat tensor buffers backing this proto, in order.
+        """Names of the flat inner tensors backing this spec, in order.
 
         The real op flattens a quantized output via the storage's
-        ``__tensor_flatten__`` -- i.e. ``_INNER_TENSORS`` order, keeping
-        only the present buffers. ``inner_tensor_specs`` may emit the same buffers
-        in a different (per-usage) order (e.g. NVFP4 groups each amax right after
-        its scale), so reorder to the canonical flatten order here to keep the
-        fake layout aligned with the real one slot-for-slot.
+        ``__tensor_flatten__`` -- i.e. ``_INNER_TENSORS`` order, keeping only the
+        present inner tensors. ``inner_tensor_specs`` is contracted to emit them
+        in that same order, which keeps the fake layout aligned with the real one
+        slot-for-slot; the contract is checked here rather than papered over by
+        reordering, so a mismatching quantizer fails loudly.
         """
         if self.quantizer is None:
             return ("data",)
         # pylint: disable=protected-access
-        described = list(self.quantizer.inner_tensor_specs(tuple(self.shape)).keys())
+        described = tuple(self.quantizer.inner_tensor_specs(tuple(self.shape)))
         storage_cls = self.quantizer.storage_metadata(self.dtype)["cls"]
-        flatten_order = [attr for attr, _ in storage_cls._INNER_TENSORS]
-        extra = [name for name in described if name not in flatten_order]
-        if extra:
+        flatten_order = tuple(attr for attr, _ in storage_cls._INNER_TENSORS)
+        expected = tuple(name for name in flatten_order if name in described)
+        if described != expected:
             raise RuntimeError(
-                f"{storage_cls.__name__} describes buffer(s) {extra} absent from its "
-                f"_INNER_TENSORS {flatten_order}; the fake layout cannot be "
-                "aligned with the real one slot-for-slot."
+                f"{type(self.quantizer).__name__}.inner_tensor_specs returned {described}, "
+                f"which does not follow {storage_cls.__name__}._INNER_TENSORS order "
+                f"{flatten_order} (expected {expected}); the fake layout would not match "
+                "the real one slot-for-slot."
             )
-        return tuple(name for name in flatten_order if name in described)
+        return described
 
     def create_metadata(self) -> Dict[str, Any]:
         """Data-free ``__tensor_unflatten__`` context describing this tensor."""
@@ -98,7 +99,7 @@ class TensorProto:
         )
 
     def create_inner_tensors(self) -> List[torch.Tensor]:
-        """Materialize the flat inner buffers (in :meth:`inner_names` order).
+        """Materialize the flat inner tensors (in :meth:`inner_names` order).
 
         Under ``register_fake`` the ``torch.empty`` calls produce ``FakeTensor``s;
         ``requires_grad`` is left default (managed by ``register_autograd``).
@@ -111,10 +112,10 @@ class TensorProto:
 
     def assemble(self, inner_tensors: List[torch.Tensor]) -> torch.Tensor:
         """Rebuild the tensor from ready-made ``inner_tensors`` (in :meth:`inner_names`
-        order). Shared by :meth:`create_tensor` (fresh buffers) and the custom-op
-        boundary (buffers arriving from an op's flat ``Tensor[]`` payload).
+        order). Shared by :meth:`create_tensor` (fresh ones) and the custom-op
+        boundary (inner tensors arriving from an op's flat ``Tensor[]`` payload).
 
-        Non-quantized protos are the single inner tensor as-is; quantized protos
+        Non-quantized specs are the single inner tensor as-is; quantized specs
         are reassembled into the storage/wrapper via ``__tensor_unflatten__``.
         """
         if self.quantizer is None:
@@ -128,10 +129,10 @@ class TensorProto:
         )
 
     def create_tensor(self) -> torch.Tensor:
-        """Materialize an (uninitialized) tensor matching this proto (traceable).
+        """Materialize an (uninitialized) tensor matching this spec (traceable).
 
-        Quantized protos reassemble freshly-allocated :meth:`create_inner_tensors`
-        buffers via :meth:`assemble`.
+        Quantized specs reassemble freshly-allocated :meth:`create_inner_tensors`
+        inner tensors via :meth:`assemble`.
         """
         if self.quantizer is None:
             device = self.device if self.device is not None else torch.device("cuda")
@@ -144,8 +145,8 @@ class TensorProto:
         return self.assemble(self.create_inner_tensors())
 
 
-def to_tensor_proto(tensor: Any) -> TensorProto:
-    """Build a :class:`TensorProto` describing ``tensor``.
+def to_tensor_spec(tensor: Any) -> TensorSpec:
+    """Build a :class:`TensorSpec` describing ``tensor``.
 
     Works for plain ``torch.Tensor`` and for ``QuantizedTensorStorage`` /
     ``QuantizedTensor``. A *bare* storage exposes its (fake) dtype via
@@ -155,7 +156,7 @@ def to_tensor_proto(tensor: Any) -> TensorProto:
     dtype = getattr(tensor, "dtype", None)
     if dtype is None:
         dtype = getattr(tensor, "_dtype", None)
-    return TensorProto(
+    return TensorSpec(
         shape=tuple(tensor.shape),
         dtype=dtype,
         quantizer=getattr(tensor, "_quantizer", None),

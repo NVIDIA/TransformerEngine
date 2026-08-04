@@ -73,7 +73,7 @@ class Float8BlockQuantizer(Quantizer):
 
         return quantizer
 
-    # ----- TensorProto / pure-Python allocation -----
+    # ----- TensorSpec / pure-Python allocation -----
 
     def storage_metadata(self, fake_dtype: torch.dtype) -> Dict[str, Any]:
         return {
@@ -90,21 +90,21 @@ class Float8BlockQuantizer(Quantizer):
         self, shape: Tuple[int, ...]
     ) -> Dict[str, Tuple[Tuple[int, ...], torch.dtype]]:
         shape = tuple(shape)
-        buffers: Dict[str, Tuple[Tuple[int, ...], torch.dtype]] = {}
+        specs: Dict[str, Tuple[Tuple[int, ...], torch.dtype]] = {}
         # Blockwise FP8 scales are FP32; columnwise data is stored transposed.
         if self.rowwise_usage:
-            buffers["_rowwise_data"] = (shape, torch.uint8)
-            buffers["_rowwise_scale_inv"] = (
+            specs["_rowwise_data"] = (shape, torch.uint8)
+            specs["_rowwise_scale_inv"] = (
                 tuple(self.get_scale_shape(shape, columnwise=False)),
                 torch.float32,
             )
         if self.columnwise_usage:
-            buffers["_columnwise_data"] = (tuple(self.get_columnwise_shape(shape)), torch.uint8)
-            buffers["_columnwise_scale_inv"] = (
+            specs["_columnwise_data"] = (tuple(self.get_columnwise_shape(shape)), torch.uint8)
+            specs["_columnwise_scale_inv"] = (
                 tuple(self.get_scale_shape(shape, columnwise=True)),
                 torch.float32,
             )
-        return buffers
+        return specs
 
     def update_quantized(
         self,

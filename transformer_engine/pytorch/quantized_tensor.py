@@ -30,7 +30,7 @@ _quantized_tensor_passthrough_ops: set = set()
 
 
 class InnerTensor(NamedTuple):
-    """Marks a storage field as a flat tensor buffer.
+    """Marks a storage field as a flat inner tensor.
 
     Annotate the field with it -- ``_scale_inv: Annotated[torch.Tensor,
     InnerTensor("fp8_scale_inv")]`` -- and ``__init_subclass__`` collects the
@@ -167,7 +167,7 @@ class QuantizedTensorStorage:
             f"{self.__class__.__name__} class does not implement copy_from_storage function"
         )
 
-    # ----- PyTorch subclass flatten protocol (torch.compile / TensorProto) -----
+    # ----- PyTorch subclass flatten protocol (torch.compile / TensorSpec) -----
 
     # Collected from the subclasses' :class:`InnerTensor` field annotations; everything
     # else returned by :meth:`get_metadata` is treated as non-tensor context.
@@ -205,7 +205,7 @@ class QuantizedTensorStorage:
         """Rebuild a storage / wrapper from flat tensors + context."""
         cls = ctx["cls"]
         kwargs: Dict[str, Any] = dict(ctx["nontensor_kwargs"])
-        # Map each declared buffer back to its constructor kwarg (absent -> None).
+        # Map each declared inner tensor back to its constructor kwarg (absent -> None).
         for attr, kwarg in cls._INNER_TENSORS:
             kwargs[kwarg] = inner_tensors.get(attr)
         if not ctx["is_tensor"]:
@@ -439,20 +439,21 @@ class Quantizer(abc.ABC):
             result.requires_grad_(True)
         return result
 
-    # ----- Data-free buffer/metadata primitives backing TensorProto -----
+    # ----- Data-free inner-tensor/metadata primitives backing TensorSpec -----
 
     def inner_tensor_specs(
         self, shape: Tuple[int, ...]
     ) -> Dict[str, Tuple[Tuple[int, ...], torch.dtype]]:
-        """Return ``{attr_name: (buffer_shape, buffer_dtype)}`` for the buffers
+        """Return ``{attr_name: (shape, dtype)}`` for the inner tensors
         this quantizer would allocate for a logical tensor of ``shape``.
 
-        Keys must match the buffer attribute names declared in the storage's
-        ``_INNER_TENSORS`` and respect the quantizer's usage flags.
+        Keys must match the inner-tensor attribute names declared in the storage's
+        ``_INNER_TENSORS``, be emitted in that same order, and respect the
+        quantizer's usage flags.
         """
         raise NotImplementedError(
             f"{self.__class__.__name__} does not implement inner_tensor_specs; "
-            "it cannot be used with TensorProto / pure-Python allocation"
+            "it cannot be used with TensorSpec / pure-Python allocation"
         )
 
     def storage_metadata(self, fake_dtype: torch.dtype) -> Dict[str, Any]:
@@ -466,7 +467,7 @@ class Quantizer(abc.ABC):
         """
         raise NotImplementedError(
             f"{self.__class__.__name__} does not implement storage_metadata; "
-            "it cannot be used with TensorProto / pure-Python allocation"
+            "it cannot be used with TensorSpec / pure-Python allocation"
         )
 
     def alloc_tensors(
@@ -475,7 +476,7 @@ class Quantizer(abc.ABC):
         *,
         device: Optional[Union[torch.device, str]] = None,
     ) -> Dict[str, torch.Tensor]:
-        """Allocate (uninitialized) the flat buffers for ``shape``.
+        """Allocate (uninitialized) the flat inner tensors for ``shape``.
 
         Returns ``{attr_name: torch.Tensor}`` suitable as the ``inner_tensors``
         argument of the storage's ``__tensor_unflatten__``.

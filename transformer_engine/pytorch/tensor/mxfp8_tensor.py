@@ -58,7 +58,7 @@ class MXFP8Quantizer(Quantizer):
 
         return quantizer
 
-    # ----- TensorProto / pure-Python allocation -----
+    # ----- TensorSpec / pure-Python allocation -----
 
     def storage_metadata(self, fake_dtype: torch.dtype) -> Dict[str, Any]:
         return {
@@ -75,20 +75,20 @@ class MXFP8Quantizer(Quantizer):
         self, shape: Tuple[int, ...]
     ) -> Dict[str, Tuple[Tuple[int, ...], torch.dtype]]:
         shape = tuple(shape)
-        buffers: Dict[str, Tuple[Tuple[int, ...], torch.dtype]] = {}
+        specs: Dict[str, Tuple[Tuple[int, ...], torch.dtype]] = {}
         if self.rowwise_usage:
-            buffers["_rowwise_data"] = (shape, torch.uint8)
-            buffers["_rowwise_scale_inv"] = (
+            specs["_rowwise_data"] = (shape, torch.uint8)
+            specs["_rowwise_scale_inv"] = (
                 tuple(self.get_scale_shape(shape, columnwise=False)),
                 torch.uint8,
             )
         if self.columnwise_usage:
-            buffers["_columnwise_data"] = (shape, torch.uint8)
-            buffers["_columnwise_scale_inv"] = (
+            specs["_columnwise_data"] = (shape, torch.uint8)
+            specs["_columnwise_scale_inv"] = (
                 tuple(self.get_scale_shape(shape, columnwise=True)),
                 torch.uint8,
             )
-        return buffers
+        return specs
 
     def update_quantized(
         self,
@@ -895,7 +895,7 @@ def _make_mxfp8_tensor_in_reduce_ex(
     with_gemm_swizzled_scales: bool = False,
 ) -> MXFP8Tensor:
     """Reconstruct an ``MXFP8Tensor`` from its ``__reduce_ex__`` payload."""
-    # Infer device from inner buffers so the wrapper subclass stays
+    # Infer device from inner specs so the wrapper subclass stays
     # consistent with its data (CPU after DCP staging deserialize,
     # CUDA after the usual quantize path).
     device = None
