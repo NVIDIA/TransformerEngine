@@ -7,7 +7,19 @@ import torch
 
 import nvdlfw_inspect.api as debug_api
 import transformer_engine.pytorch as te
-from transformer_engine.debug.pytorch.debug_quantization import DebugQuantizedTensor
+import transformer_engine_torch as tex
+from transformer_engine.debug.pytorch.debug_quantization import (
+    DebugQuantizedTensor,
+    DebugQuantizer,
+    HIGH_PRECISION,
+    STANDARD_QUANTIZE,
+)
+from transformer_engine.pytorch.module._common import (
+    set_quantizer_usage_for_wgrad_all_gather,
+)
+from transformer_engine.pytorch.quantized_tensor import Quantizer
+from transformer_engine.pytorch.tensor.float8_blockwise_tensor import Float8BlockQuantizer
+from transformer_engine.pytorch.tensor.hybrid_tensor import HybridQuantizer
 from transformer_engine.pytorch.tensor.identity_tensor import IdentityQuantizer
 
 from test_numerics import create_config_file
@@ -20,7 +32,8 @@ model_keys = ["linear", "layernorm_linear", "layernorm_mlp", "mha_attention", "t
 
 configs = {
     "": "",
-    "log": """log:
+    "log": (
+        """log:
   layers:
     layer_types: [linear]
   enabled:
@@ -32,8 +45,10 @@ configs = {
       stats: [min, max, mean, std, l1_norm, l2_norm, cur_amax, dynamic_range]
       start_step : 0
       end_step: 1
-""",
-    "log_fp8": """log_fp8:
+"""
+    ),
+    "log_fp8": (
+        """log_fp8:
   layers:
     layer_types: [linear]
   enabled:
@@ -45,8 +60,10 @@ configs = {
       stats: [underflows%]
       start_step : 0
       end_step: 1
-""",
-    "fake_quant": """
+"""
+    ),
+    "fake_quant": (
+        """
 fake_quant_config:
   enabled: True
   layers:
@@ -57,8 +74,68 @@ fake_quant_config:
       gemms: [fprop, dgrad, wgrad]
       tensors: [activation, weight, gradient]
       quant_format: FP8E5M2
-""",
+"""
+    ),
 }
+
+
+def _make_debug_quantizer_for_usage_test(parent_quantizer):
+    """Construct a DebugQuantizer without initializing the debug API."""
+    quantizer = object.__new__(DebugQuantizer)
+    Quantizer.__init__(quantizer, rowwise=True, columnwise=True)
+    quantizer.parent_quantizer = parent_quantizer
+    quantizer.output_tensor = False
+    if parent_quantizer is None:
+        quantizer.rowwise_tensor_plan = HIGH_PRECISION
+        quantizer.columnwise_tensor_plan = HIGH_PRECISION
+    else:
+        quantizer.rowwise_tensor_plan = STANDARD_QUANTIZE
+        quantizer.columnwise_tensor_plan = STANDARD_QUANTIZE
+    return quantizer
+
+
+def test_wgrad_all_gather_usage_handles_debug_quantizer_without_parent():
+    """High-precision debug mode has no parent quantizer to unwrap."""
+    quantizer = _make_debug_quantizer_for_usage_test(None)
+
+    set_quantizer_usage_for_wgrad_all_gather(quantizer)
+
+    assert quantizer.rowwise_usage is False
+    assert quantizer.columnwise_usage is True
+
+
+def test_wgrad_all_gather_usage_updates_debug_wrapper_and_blockwise_parent():
+    """Usage changes must remain synchronized across the debug wrapper and parent."""
+    parent_quantizer = Float8BlockQuantizer(
+        fp8_dtype=tex.DType.kFloat8E4M3,
+        rowwise=True,
+        columnwise=True,
+        block_scaling_dim=1,
+    )
+    quantizer = _make_debug_quantizer_for_usage_test(parent_quantizer)
+
+    set_quantizer_usage_for_wgrad_all_gather(quantizer)
+
+    assert quantizer.rowwise_usage is False
+    assert quantizer.columnwise_usage is True
+    assert parent_quantizer.rowwise_usage is False
+    assert parent_quantizer.columnwise_usage is True
+
+
+def test_wgrad_all_gather_usage_detects_hybrid_through_debug_wrapper():
+    """Hybrid classification may inspect the parent, but usage mutates the wrapper."""
+    parent_quantizer = HybridQuantizer(
+        rowwise_quantizer=IdentityQuantizer(),
+        columnwise_quantizer=IdentityQuantizer(),
+    )
+    quantizer = _make_debug_quantizer_for_usage_test(parent_quantizer)
+
+    set_quantizer_usage_for_wgrad_all_gather(quantizer)
+
+    assert quantizer.rowwise_usage is False
+    assert quantizer.columnwise_usage is True
+    assert parent_quantizer.rowwise_usage is False
+    assert parent_quantizer.columnwise_usage is True
 
 
 def test_debug_quantized_tensor_routes_usage_to_distinct_representations():

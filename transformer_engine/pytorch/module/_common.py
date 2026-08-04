@@ -37,17 +37,22 @@ def set_quantizer_usage_for_wgrad_all_gather(quantizer) -> None:
     if quantizer is None:
         return
 
-    target = getattr(quantizer, "parent_quantizer", quantizer)
+    parent_quantizer = getattr(quantizer, "parent_quantizer", None)
+    target = parent_quantizer if parent_quantizer is not None else quantizer
 
     # Hybrid currently gathers in high precision, then quantizes the full
     # result, so request the columnwise representation consumed by wgrad.
     if isinstance(target, HybridQuantizer):
-        target.set_usage(rowwise=False, columnwise=True)
-    elif target.supports_only_rowwise_all_gather():
+        rowwise_usage, columnwise_usage = False, True
+    elif quantizer.supports_only_rowwise_all_gather():
         # Per-tensor FP8 gathers rowwise data and synthesizes its transpose.
-        target.set_usage(rowwise=True, columnwise=False)
+        rowwise_usage, columnwise_usage = True, False
     else:
-        target.set_usage(rowwise=False, columnwise=True)
+        rowwise_usage, columnwise_usage = False, True
+
+    # Preserve wrapper-specific bookkeeping. In particular, DebugQuantizer
+    # propagates usage to its parent while keeping its own state synchronized.
+    quantizer.set_usage(rowwise=rowwise_usage, columnwise=columnwise_usage)
 
 
 def can_reconstruct_wgrad_input_from_original(quantizer) -> bool:
