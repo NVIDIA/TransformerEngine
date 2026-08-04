@@ -709,18 +709,29 @@ class TestEP(unittest.TestCase):
 
         recv = [None, None, None]
         # Per-microbatch grad-staging buffers, symm-mem under zero-copy and
-        # pre-allocated so nothing is allocated/freed mid-interleave. The recv
-        # outputs are owned by each EpBuffer (symm-mem under zero-copy).
+        # pre-allocated so nothing is allocated/freed mid-interleave.
         recv_w = [None, None, None]
         rc = self.cfg.recv_capacity_per_rank
         if ZERO_COPY:
             gbuf_t = [symm_mem_alloc((rc, H), torch.bfloat16, self.ep_group) for _ in scales]
             gbuf_w = [symm_mem_alloc((rc,), torch.float32, self.ep_group) for _ in scales]
+            # Persistent symm-mem recv buffers per microbatch: leaving recv None
+            # pool-allocates, which is not CUDA-graph capturable.
+            rbuf_t = [symm_mem_alloc((rc, H), torch.bfloat16, self.ep_group) for _ in scales]
+            rbuf_w = [symm_mem_alloc((rc,), torch.float32, self.ep_group) for _ in scales]
         else:
             gbuf_t = gbuf_w = [None, None, None]
+            rbuf_t = rbuf_w = [None, None, None]
 
         def fwd(k):
-            rt, rw, _ = ep_dispatch(buffers[k], tokens_p[k], idx, w)
+            rt, rw, _ = ep_dispatch(
+                buffers[k],
+                tokens_p[k],
+                idx,
+                w,
+                recv_tokens=rbuf_t[k],
+                recv_topk_weights=rbuf_w[k],
+            )
             recv[k] = self._stage_grad_symm(rt, gbuf_t[k])
             recv_w[k] = self._stage_grad_symm(rw, gbuf_w[k])
 
