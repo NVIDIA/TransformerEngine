@@ -153,6 +153,13 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
                              MaybeTensor extra_output = std::nullopt, bool bulk_overlap = false,
                              float alpha = 1.0f, std::optional<float> beta = std::nullopt);
 
+at::Tensor strided_batched_gemm(py::handle A, bool transa, py::handle B, bool transb, at::Tensor D,
+                                at::Tensor workspace, size_t workspaceSize, int64_t m, int64_t n,
+                                int64_t k, int64_t batch_count, int64_t lda, int64_t stridea,
+                                int64_t ldb, int64_t strideb, int64_t ldd, int64_t strided,
+                                bool accumulate, bool use_split_accumulator, int math_sm_count,
+                                float alpha = 1.0f, std::optional<float> beta = std::nullopt);
+
 void te_atomic_gemm(at::Tensor A, at::Tensor A_scale_inverse, DType A_type,
                     std::vector<int64_t> A_scaling_mode, bool transa, at::Tensor B,
                     at::Tensor B_scale_inverse, DType B_type, std::vector<int64_t> B_scaling_mode,
