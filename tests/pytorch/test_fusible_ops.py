@@ -23,6 +23,7 @@ from transformer_engine.pytorch.ops.basic.grouped_linear import (
     OUTPUT_BUFFER_KEY,
     GRAD_INPUT_BUFFER_KEY,
 )
+from transformer_engine.pytorch.ops.fuser import OperationFuser
 from transformer_engine.pytorch._extra_state import UNSAFE_PICKLE_EXTRA_STATE_ENV
 
 from transformer_engine.pytorch.ops.fused import (
@@ -477,6 +478,473 @@ class TestSequentialContainer:
         y.sum().backward()
         torch.testing.assert_close(x.grad, torch.full_like(x, 2))
         torch.testing.assert_close(extra.grad, torch.ones_like(extra))
+
+    def test_moe_style_dispatch_combine_extra_channels(
+        self,
+        *,
+        group_size: int = 4,
+        hidden_size: int = 32,
+        dtype: torch.dtype = torch.float32,
+        device: torch.device = "cuda",
+    ) -> None:
+        """Wire Dispatch-style extras through GroupedLinear / ScaledActivation / Combine.
+
+        Stand-in for ``te.Sequential(Dispatch, GroupedLinear, ScaledActivation,
+        GroupedLinear, Combine)`` once real Dispatch/Combine ops land. ``m_splits``
+        and ``probs`` are produced once and fan out to later consumers via named
+        channels so the public call is ``model(x, m_splits, probs)``.
+        """
+
+        class FakeDispatch(te_ops.BasicOperation):
+            """Stand-in MoE dispatch: passthrough hidden states, emit routing extras.
+
+            Real Dispatch would permute tokens. Extra inputs are the externally
+            provided ``m_splits`` and ``probs``; matching extra outputs are bound
+            to internal channels for later consumers. A third extra output is a
+            stub ``routing_map`` for Combine.
+            """
+
+            num_extra_inputs = 2
+            num_extra_outputs = 3
+
+            def op_forward(self, *args, **kwargs):
+                raise RuntimeError("FakeDispatch uses fuser_forward")
+
+            def op_backward(self, *args, **kwargs):
+                raise RuntimeError("FakeDispatch uses fuser_backward")
+
+            def fuser_forward(
+                self,
+                basic_op_ctxs,
+                input_,
+                *,
+                basic_op_extra_inputs,
+                **unused,
+            ):
+                m_splits, probs = basic_op_extra_inputs[0]
+                # Stub row-id map: real Dispatch would emit permute indices.
+                routing_map = torch.arange(
+                    input_.size(0), device=input_.device, dtype=torch.int64
+                )
+                return input_, [(m_splits, probs, routing_map)]
+
+            def fuser_backward(
+                self,
+                basic_op_ctxs,
+                grad_output,
+                *,
+                basic_op_grad_extra_outputs,
+            ):
+                # Channel grads from GroupedLinear / ScaledActivation land here.
+                return (
+                    grad_output,
+                    [()],
+                    [tuple(basic_op_grad_extra_outputs[0][:2])],
+                )
+
+        class FakeCombine(te_ops.BasicOperation):
+            """Stand-in MoE combine: consumes Dispatch ``routing_map``, identity path.
+
+            Real Combine would unpermute with the routing map.
+            """
+
+            num_extra_inputs = 1
+
+            def op_forward(self, *args, **kwargs):
+                raise RuntimeError("FakeCombine uses fuser_forward")
+
+            def op_backward(self, *args, **kwargs):
+                raise RuntimeError("FakeCombine uses fuser_backward")
+
+            def fuser_forward(
+                self,
+                basic_op_ctxs,
+                input_,
+                *,
+                basic_op_extra_inputs,
+                **unused,
+            ):
+                routing_map = basic_op_extra_inputs[0][0]
+                if routing_map is None:
+                    raise RuntimeError("FakeCombine expected routing_map channel")
+                if int(routing_map.numel()) != int(input_.size(0)):
+                    raise RuntimeError(
+                        "FakeCombine routing_map length does not match tokens"
+                    )
+                return input_, [()]
+
+            def fuser_backward(
+                self,
+                basic_op_ctxs,
+                grad_output,
+                *,
+                basic_op_grad_extra_outputs,
+            ):
+                del basic_op_grad_extra_outputs
+                return grad_output, [()], [(None,)]
+
+        split_sizes = torch.tensor([8, 16, 8, 8], dtype=torch.int64, device=device)[
+            :group_size
+        ]
+        num_tokens = int(split_sizes.sum())
+        in_shape = (num_tokens, hidden_size)
+
+        x_ref, x_test = make_reference_and_test_tensors(
+            in_shape,
+            min=-0.25,
+            max=0.25,
+            test_dtype=dtype,
+            test_device=device,
+        )
+        probs_ref, probs_test = make_reference_and_test_tensors(
+            (num_tokens,),
+            min=-0.25,
+            max=0.25,
+            test_dtype=dtype,
+            test_device=device,
+        )
+        dy_ref, dy_test = make_reference_and_test_tensors(
+            in_shape,
+            min=-0.25,
+            max=0.25,
+            test_dtype=dtype,
+            test_device=device,
+            requires_grad=False,
+        )
+
+        # Reference: GroupedLinear + ScaledSReLU + GroupedLinear (no dispatch permute).
+        # Run the PyTorch reference in the same dtype/device as TE. Cross-device
+        # float32 GEMMs (CPU vs CUDA) differ enough that probs grads — a
+        # reduction over hidden — can miss dtype_tols even when channel wiring
+        # is correct.
+        fc1_w_refs, fc1_w_tests = [], []
+        fc2_w_refs, fc2_w_tests = [], []
+        for _ in range(group_size):
+            w1_ref, w1_test = make_reference_and_test_tensors(
+                (hidden_size, hidden_size),
+                min=-0.25,
+                max=0.25,
+                test_dtype=dtype,
+                test_device=device,
+            )
+            w2_ref, w2_test = make_reference_and_test_tensors(
+                (hidden_size, hidden_size),
+                min=-0.25,
+                max=0.25,
+                test_dtype=dtype,
+                test_device=device,
+            )
+            fc1_w_refs.append(w1_test.detach().clone())
+            fc1_w_tests.append(w1_test)
+            fc2_w_refs.append(w2_test.detach().clone())
+            fc2_w_tests.append(w2_test)
+        x_ref = x_test.detach().clone().requires_grad_(True)
+        probs_ref = probs_test.detach().clone().requires_grad_(True)
+        dy_ref = dy_test.detach().clone()
+        xs = torch.split(x_ref, split_sizes.tolist())
+        probs = torch.split(probs_ref, split_sizes.tolist())
+        ys = []
+        for group_idx in range(group_size):
+            fc1_out = torch.nn.functional.linear(xs[group_idx], fc1_w_refs[group_idx])
+            act_out = torch.nn.functional.relu(fc1_out).square()
+            fc2_in = act_out * probs[group_idx].unsqueeze(-1)
+            ys.append(torch.nn.functional.linear(fc2_in, fc2_w_refs[group_idx]))
+        y_ref = torch.cat(ys)
+        y_ref.backward(dy_ref)
+
+        dispatch = FakeDispatch()
+        fc1 = te_ops.GroupedLinear(
+            group_size, hidden_size, hidden_size, bias=False, device=device, dtype=dtype
+        )
+        activation = te_ops.ScaledSReLU()
+        fc2 = te_ops.GroupedLinear(
+            group_size, hidden_size, hidden_size, bias=False, device=device, dtype=dtype
+        )
+        combine = FakeCombine()
+
+        # Bind channels: Dispatch fans out, consumers bind by name.
+        dispatch.set_extra_output_channel(0, "m_splits")
+        dispatch.set_extra_output_channel(1, "probs")
+        dispatch.set_extra_output_channel(2, "routing_map")
+        fc1.set_extra_input_channel(0, "m_splits")
+        activation.set_extra_input_channel(0, "probs")
+        fc2.set_extra_input_channel(0, "m_splits")
+        combine.set_extra_input_channel(0, "routing_map")
+
+        model = te_ops.Sequential(dispatch, fc1, activation, fc2, combine)
+        with torch.no_grad():
+            for group_idx in range(group_size):
+                getattr(fc1, f"weight{group_idx}").copy_(fc1_w_tests[group_idx])
+                getattr(fc2, f"weight{group_idx}").copy_(fc2_w_tests[group_idx])
+        del fc1_w_tests, fc2_w_tests
+
+        # Only Dispatch's extras remain public: model(x, m_splits, probs).
+        y_test = model(x_test, split_sizes, probs_test)
+        y_test.backward(dy_test)
+
+        tols = dtype_tols(dtype)
+        assert_close(y_test, y_ref, **tols)
+        assert_close_grads(x_test, x_ref, **tols)
+        assert_close_grads(probs_test, probs_ref, **tols)
+
+    def test_fused_op_with_internal_producer_consumer(self, size: int = 16) -> None:
+        """A fused op may contain both a channel producer and its consumer.
+
+        This is the MegaMoE path: Dispatch + MLP + Combine collapse into one
+        fused kernel that wires channels internally instead of via the fuser.
+        """
+
+        class FakeDispatch(te_ops.BasicOperation):
+            num_extra_inputs = 1
+            num_extra_outputs = 1
+
+            def op_forward(self, *args, **kwargs):
+                raise RuntimeError("FakeDispatch uses fuser_forward")
+
+            def op_backward(self, *args, **kwargs):
+                raise RuntimeError("FakeDispatch uses fuser_backward")
+
+            def fuser_forward(
+                self,
+                basic_op_ctxs,
+                input_,
+                *,
+                basic_op_extra_inputs,
+                **unused,
+            ):
+                (route,) = basic_op_extra_inputs[0]
+                return input_, [(route,)]
+
+            def fuser_backward(
+                self,
+                basic_op_ctxs,
+                grad_output,
+                *,
+                basic_op_grad_extra_outputs,
+            ):
+                return (
+                    grad_output,
+                    [()],
+                    [tuple(basic_op_grad_extra_outputs[0])],
+                )
+
+        class MegaMoELike(te_ops.FusedOperation):
+            """Fused stub that owns both producer and consumer of ``route``."""
+
+            _enabled = True
+
+            def __init__(self, dispatch, consumer) -> None:
+                super().__init__((dispatch, consumer))
+
+            def fuser_forward(
+                self,
+                basic_op_ctxs,
+                input_,
+                *,
+                basic_op_extra_inputs,
+                **unused,
+            ):
+                # Consumer slot is intentionally unset: producer is in this fusion.
+                route = basic_op_extra_inputs[0][0]
+                assert basic_op_extra_inputs[1][0] is None
+                out = input_ + route
+                return out, [(route,), ()]
+
+        def fuse_mega_moe_like(ops, **unused):
+            if not MegaMoELike._enabled:
+                return ops
+            MegaMoELike._enabled = False
+            out = []
+            window, ops = ops[:2], ops[2:]
+            while len(window) == 2:
+                if isinstance(window[0], FakeDispatch) and isinstance(
+                    window[1], te_ops.AddExtraInput
+                ):
+                    window = [MegaMoELike(*window)]
+                else:
+                    out.append(window[0])
+                    window = window[1:]
+                window, ops = window + ops[:1], ops[1:]
+            out.extend(window + ops)
+            return out
+
+        dispatch = FakeDispatch()
+        consumer = te_ops.AddExtraInput()
+        dispatch.set_extra_output_channel(0, "route")
+        consumer.set_extra_input_channel(0, "route")
+        model = te_ops.Sequential(dispatch, consumer)
+
+        te_ops.register_forward_fusion(fuse_mega_moe_like)
+        x = torch.rand((size,), requires_grad=True)
+        route = torch.rand((size,), requires_grad=True)
+        y = model(x, route)
+        torch.testing.assert_close(y, x + route)
+        y.sum().backward()
+        torch.testing.assert_close(x.grad, torch.ones_like(x))
+        torch.testing.assert_close(route.grad, torch.ones_like(route))
+
+
+class TestExtraTensorChannels:
+    """Error handling and grad coverage for named extra-tensor channels."""
+
+    def test_consumer_channel_without_producer(self) -> None:
+        """Extra input bound to a channel that no earlier op produces."""
+        consumer = te_ops.AddExtraInput()
+        consumer.set_extra_input_channel(0, "missing")
+        with pytest.raises(ValueError, match="has no earlier producer"):
+            OperationFuser([consumer])
+
+    def test_consumer_before_producer(self) -> None:
+        """Channels only connect forward; a later producer does not satisfy an earlier consumer."""
+        consumer = te_ops.AddExtraInput()
+        producer = te_ops.MakeExtraOutput()
+        consumer.set_extra_input_channel(0, "route")
+        producer.set_extra_output_channel(0, "route")
+        with pytest.raises(ValueError, match="has no earlier producer"):
+            OperationFuser([consumer, producer])
+
+    def test_set_extra_channel_rejects_invalid_index(self) -> None:
+        """Slot indices must be in range; negatives and OOB are rejected at bind time."""
+        producer = te_ops.MakeExtraOutput()
+        consumer = te_ops.AddExtraInput()
+
+        with pytest.raises(IndexError, match="out of range"):
+            producer.set_extra_output_channel(-1, "route")
+        with pytest.raises(IndexError, match="out of range"):
+            producer.set_extra_output_channel(1, "route")
+        with pytest.raises(IndexError, match="out of range"):
+            consumer.set_extra_input_channel(-1, "route")
+        with pytest.raises(IndexError, match="out of range"):
+            consumer.set_extra_input_channel(1, "route")
+
+    def test_set_extra_channel_rejects_invalid_name(self) -> None:
+        """Channel names must be non-empty strings."""
+        producer = te_ops.MakeExtraOutput()
+        consumer = te_ops.AddExtraInput()
+
+        with pytest.raises(ValueError, match="non-empty string"):
+            producer.set_extra_output_channel(0, "")
+        with pytest.raises(ValueError, match="non-empty string"):
+            consumer.set_extra_input_channel(0, "")
+        with pytest.raises(ValueError, match="non-empty string"):
+            producer.set_extra_output_channel(0, 123)  # type: ignore[arg-type]
+
+    def test_duplicate_extra_output_channel_names(self) -> None:
+        """Two extra outputs may not publish the same channel name."""
+        producer1 = te_ops.MakeExtraOutput()
+        producer2 = te_ops.MakeExtraOutput()
+        consumer = te_ops.AddExtraInput()
+        producer1.set_extra_output_channel(0, "route")
+        producer2.set_extra_output_channel(0, "route")
+        consumer.set_extra_input_channel(0, "route")
+        with pytest.raises(ValueError, match="multiple producers"):
+            OperationFuser([producer1, producer2, consumer])
+
+    def test_duplicate_extra_output_channels_on_same_op(self) -> None:
+        """A single op with multiple extras still cannot reuse a channel name."""
+
+        class DualExtraOutput(te_ops.BasicOperation):
+            num_extra_outputs = 2
+
+            def op_forward(self, *args, **kwargs):
+                raise RuntimeError("DualExtraOutput uses fuser_forward")
+
+            def op_backward(self, *args, **kwargs):
+                raise RuntimeError("DualExtraOutput uses fuser_backward")
+
+            def fuser_forward(self, basic_op_ctxs, input_, *, basic_op_extra_inputs, **unused):
+                return input_, [(input_, input_)]
+
+            def fuser_backward(
+                self, basic_op_ctxs, grad_output, *, basic_op_grad_extra_outputs
+            ):
+                g0, g1 = basic_op_grad_extra_outputs[0]
+                grad_extra = torch.zeros_like(grad_output)
+                if g0 is not None:
+                    grad_extra = grad_extra + g0
+                if g1 is not None:
+                    grad_extra = grad_extra + g1
+                return grad_output + grad_extra, [()], [()]
+
+        producer = DualExtraOutput()
+        consumer = te_ops.AddExtraInput()
+        producer.set_extra_output_channel(0, "route")
+        producer.set_extra_output_channel(1, "route")
+        consumer.set_extra_input_channel(0, "route")
+        with pytest.raises(ValueError, match="multiple producers"):
+            OperationFuser([producer, consumer])
+
+    def test_unused_extra_output_channel(self) -> None:
+        """Every produced channel must have at least one consumer."""
+        producer = te_ops.MakeExtraOutput()
+        producer.set_extra_output_channel(0, "orphan")
+        with pytest.raises(ValueError, match="have no consumers"):
+            OperationFuser([producer])
+
+    def test_one_extra_input_has_single_source(self) -> None:
+        """Each extra-input slot binds to one channel / one producer source.
+
+        Rebinding replaces the previous name; the abandoned producer channel
+        then fails as unused rather than attaching two sources to one input.
+        """
+        producer_a = te_ops.MakeExtraOutput()
+        producer_b = te_ops.MakeExtraOutput()
+        consumer = te_ops.AddExtraInput()
+        producer_a.set_extra_output_channel(0, "a")
+        producer_b.set_extra_output_channel(0, "b")
+        consumer.set_extra_input_channel(0, "a")
+        consumer.set_extra_input_channel(0, "b")
+        with pytest.raises(ValueError, match="have no consumers"):
+            OperationFuser([producer_a, producer_b, consumer])
+
+        # Valid single binding: consumer input 0 is fed only by producer_a.
+        consumer.set_extra_input_channel(0, "a")
+        producer_b.set_extra_output_channel(0, None)
+        fuser = OperationFuser([producer_a, producer_b, consumer])
+        assert fuser._basic_op_extra_input_sources[2] == [(0, 0)]
+        assert fuser.num_extra_inputs == 0
+        assert fuser.num_extra_outputs == 1  # producer_b's unbound extra output
+
+    def test_channel_fanout_accumulates_grads(self, size: int = 16) -> None:
+        """Grads from every consumer of a channel are accumulated into the producer."""
+        producer = te_ops.MakeExtraOutput()
+        consumer1 = te_ops.AddExtraInput()
+        consumer2 = te_ops.AddExtraInput()
+        producer.set_extra_output_channel(0, "route")
+        consumer1.set_extra_input_channel(0, "route")
+        consumer2.set_extra_input_channel(0, "route")
+        model = te_ops.Sequential(producer, consumer1, consumer2)
+
+        x = torch.rand((size,), requires_grad=True)
+        y = model(x)
+        # Forward: x -> x+x -> x+x+x
+        torch.testing.assert_close(y, 3 * x)
+
+        dy = torch.rand((size,))
+        y.backward(dy)
+        # Main path contributes dy; each AddExtraInput also routes dy back
+        # through the channel into MakeExtraOutput's extra-output grad, which
+        # is added again into dx. Total: dy (main) + dy + dy (two consumers).
+        torch.testing.assert_close(x.grad, 3 * dy)
+
+    def test_mixed_internal_external_grad(self, size: int = 16) -> None:
+        """Internal channel grads and public extra-input grads both flow correctly."""
+        producer = te_ops.MakeExtraOutput()
+        internal_consumer = te_ops.AddExtraInput()
+        external_consumer = te_ops.AddExtraInput()
+        producer.set_extra_output_channel(0, "route")
+        internal_consumer.set_extra_input_channel(0, "route")
+        model = te_ops.Sequential(producer, internal_consumer, external_consumer)
+
+        x = torch.rand((size,), requires_grad=True)
+        extra = torch.rand((size,), requires_grad=True)
+        y = model(x, extra)
+        torch.testing.assert_close(y, 2 * x + extra)
+
+        dy = torch.rand((size,))
+        y.backward(dy)
+        torch.testing.assert_close(x.grad, 2 * dy)
+        torch.testing.assert_close(extra.grad, dy)
 
 
 class TestFuser:

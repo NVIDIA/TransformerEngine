@@ -123,8 +123,9 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
                 basic_op_ctxs[idx].requires_grad = idx >= fuser.first_op_requiring_backward
 
             # Forward op. Resolve internal channel inputs from outputs of
-            # earlier basic ops. A fusion may consume an earlier channel, but
-            # may not contain both its producer and consumer.
+            # earlier basic ops. When a fusion contains both producer and
+            # consumer, leave the consumer slot unset so the fused op can
+            # wire the channel itself
             for idx in basic_op_idxs:
                 for input_idx, source in enumerate(
                     fuser._basic_op_extra_input_sources[idx]
@@ -133,15 +134,24 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
                         continue
                     producer_idx, output_idx = source
                     if producer_idx in basic_op_idxs:
-                        raise RuntimeError(
-                            "An operation fusion contains both producer and consumer "
-                            f"of extra tensor channel "
-                            f"{fuser._basic_op_extra_output_channels[producer_idx][output_idx]!r}"
-                        )
+                        # fused op will wire the channel itself internally
+                        continue
                     producer_outputs = extra_outputs[producer_idx]
                     if producer_outputs is None:
                         raise RuntimeError(
                             f"Extra tensor channel producer op {producer_idx} has not run"
+                        )
+                    if (
+                        output_idx >= len(producer_outputs)
+                        or producer_outputs[output_idx] is None
+                    ):
+                        raise RuntimeError(
+                            f"Extra tensor channel producer op {producer_idx} "
+                            f"({type(fuser._basic_ops[producer_idx]).__name__}) "
+                            f"did not emit extra output {output_idx} for "
+                            f"consumer op {idx} "
+                            f"({type(fuser._basic_ops[idx]).__name__}) "
+                            f"input {input_idx}"
                         )
                     basic_op_extra_inputs[idx][input_idx] = producer_outputs[output_idx]
             op_extra_inputs = [
@@ -167,7 +177,12 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
                 basic_op_kwargs=[basic_op_kwargs[idx] for idx in basic_op_idxs],
             )
             for idx, ys in zip(basic_op_idxs, fused_op_extra_outputs):
-                for y in ys:
+                for output_idx, y in enumerate(ys):
+                    if y is None:
+                        raise RuntimeError(
+                            f"Op {idx} ({type(fuser._basic_ops[idx]).__name__}) "
+                            f"did not emit extra output {output_idx}"
+                        )
                     if set_output_requires_grad and (
                         y.is_floating_point() or y.is_complex()
                     ):
@@ -315,6 +330,10 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
                     if source is None or grad is None:
                         continue
                     producer_idx, output_idx = source
+                    # Producer already ran inside this fusion; the fused op
+                    # must apply these grads itself rather than via channel_grads.
+                    if producer_idx in basic_op_idxs:
+                        continue
                     channel = fuser._basic_op_extra_output_channels[producer_idx][output_idx]
                     previous_grad = channel_grads.get(channel)
                     channel_grads[channel] = (
@@ -420,7 +439,8 @@ class OperationFuser:
         channel_producers: dict[str, tuple[int, int]] = {}
         consumed_channels: set[str] = set()
         for op_idx, op in enumerate(basic_ops):
-            for input_idx, channel in enumerate(op._extra_input_channels):
+            for input_idx in range(op.num_extra_inputs):
+                channel = op._extra_input_channels[input_idx]
                 if channel is None:
                     self._external_extra_input_slots.append((op_idx, input_idx))
                     continue
@@ -433,7 +453,9 @@ class OperationFuser:
                     channel
                 ]
                 consumed_channels.add(channel)
-            for output_idx, channel in enumerate(op._extra_output_channels):
+            for output_idx, channel in enumerate(
+                self._basic_op_extra_output_channels[op_idx]
+            ):
                 if channel is None:
                     self._external_extra_output_slots.append((op_idx, output_idx))
                     continue
@@ -449,6 +471,38 @@ class OperationFuser:
         if unused_channels:
             channels = ", ".join(repr(channel) for channel in sorted(unused_channels))
             raise ValueError(f"Extra tensor channels have no consumers: {channels}")
+
+        # Every channel-bound extra input must be wired to a matching producer
+        # extra output. External slots remain unbound (source is None).
+        for op_idx, sources in enumerate(self._basic_op_extra_input_sources):
+            op = basic_ops[op_idx]
+            for input_idx, source in enumerate(sources):
+                channel = op._extra_input_channels[input_idx]
+                if channel is None:
+                    if source is not None:
+                        raise RuntimeError(
+                            f"Extra input {input_idx} of op {op_idx} "
+                            f"({type(op).__name__}) is external but has a "
+                            f"producer source {source}"
+                        )
+                    continue
+                if source is None:
+                    raise ValueError(
+                        f"Extra input {input_idx} of op {op_idx} "
+                        f"({type(op).__name__}) is bound to channel {channel!r} "
+                        f"but has no producer"
+                    )
+                producer_idx, output_idx = source
+                producer_channel = self._basic_op_extra_output_channels[producer_idx][
+                    output_idx
+                ]
+                if producer_channel != channel:
+                    raise ValueError(
+                        f"Extra input {input_idx} of op {op_idx} "
+                        f"({type(op).__name__}) is bound to channel {channel!r}, "
+                        f"but producer op {producer_idx} extra output {output_idx} "
+                        f"is bound to {producer_channel!r}"
+                    )
 
         self.num_extra_inputs = len(self._external_extra_input_slots)
         self.num_extra_outputs = len(self._external_extra_output_slots)

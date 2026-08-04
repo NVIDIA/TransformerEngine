@@ -152,6 +152,8 @@ class GroupedLinear(BasicOperation):
         self._scale_bias: bool = scale_bias and bias
         if self._scale_bias:
             self.num_extra_inputs = 2
+            # BasicOperation.__init__ sized channel lists from the class default (1).
+            self._extra_input_channels = [None] * self.num_extra_inputs
 
         self.wgrad_store = WeightGradStore(delay_wgrad_compute)
         self.wgrad_accumulation_and_reduce_hooks: list = []
