@@ -972,11 +972,12 @@ def test_dpa_torch_compile_around_fused(monkeypatch):
 
 
 @pytest.mark.parametrize("backend", ["flash", "unfused"])
-def test_dpa_torch_compile_cudagraphs(monkeypatch, backend):
+@pytest.mark.parametrize("config", ["self_bshd_causal", "kv_cache_bshd"])
+def test_dpa_torch_compile_cudagraphs(monkeypatch, backend, config):
     """`mode="reduce-overhead"`: forward and backward of DotProductAttention
     are captured into CUDA graphs and replayed on subsequent iterations."""
     dtype = torch.bfloat16
-    spec = _DPA_COMPILE_CONFIGS["self_bshd_causal"]
+    spec = _DPA_COMPILE_CONFIGS[config]
     _force_dpa_backend(monkeypatch, backend)
 
     module = _make_dpa(spec, dtype)

@@ -462,6 +462,9 @@ class NonPagedKVCacheManager(KVCacheManager):
             dtype=self.dtype,
             device=torch.cuda.current_device(),
         )
+        # Mutated in place, so CUDA graphs are only captured if the addresses are fixed.
+        torch._dynamo.mark_static_address(k_cache)
+        torch._dynamo.mark_static_address(v_cache)
         self.cache[layer_number] = (k_cache, v_cache)
 
     def pre_step(
@@ -659,6 +662,9 @@ class PagedKVCacheManager(KVCacheManager):
             dtype=self.dtype,
             device=torch.cuda.current_device(),
         )
+        # Mutated in place, so CUDA graphs are only captured if the addresses are fixed.
+        torch._dynamo.mark_static_address(k_cache)
+        torch._dynamo.mark_static_address(v_cache)
         self.cache[layer_number] = (k_cache, v_cache)
 
     def print_cache(self):
