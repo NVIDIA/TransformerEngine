@@ -4,6 +4,7 @@
  * See LICENSE for license information.
  ************************************************************************/
 
+#include <transformer_engine/fused_router.h>
 #include <transformer_engine/transformer_engine.h>
 
 #include <cassert>
@@ -125,6 +126,14 @@ void hash_combine(int64_t &seed, const T &v, Rest... rest) {
 enum class JAXX_Score_Function : int64_t {
   SIGMOID = 0,
   SOFTMAX = 1,
+};
+
+// Mirror of NVTERoutingMapFormat for JAX FFI plumbing. Values are taken
+// directly from the C enum in
+// transformer_engine/common/include/transformer_engine/fused_router.h.
+enum class JAXX_Routing_Map_Format : int64_t {
+  BYTEMAP = NVTE_ROUTING_MAP_FORMAT_BYTEMAP,
+  BITMAP_U8 = NVTE_ROUTING_MAP_FORMAT_BITMAP_U8,
 };
 
 enum class JAXX_Collective_Op : int64_t {

@@ -12,6 +12,16 @@
 namespace transformer_engine {
 namespace pytorch {
 
+/* Allocate multiple PyTorch tensors backed by the same buffer.
+ *
+ * Use with caution and avoid exposing externally.
+ *
+ * In order to reduce CPU overhead, we compute pointer offsets
+ * manually and construct PyTorch tensors with raw pointers. The
+ * backing buffer is deallocated once the final tensor is destroyed.
+ * Stream usage is not recorded, so there may be race conditions if
+ * compute is performed on multiple streams.
+ */
 std::vector<at::Tensor> bulk_allocate(const std::vector<std::vector<size_t>> &shapes,
                                       const std::vector<at::ScalarType> &dtypes,
                                       std::optional<c10::Device> device,

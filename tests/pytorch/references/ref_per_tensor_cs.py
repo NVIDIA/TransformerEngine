@@ -3,9 +3,9 @@
 # See LICENSE for license information.
 
 import torch
-import transformer_engine_torch as tex
 
 from transformer_engine.pytorch.constants import TE_DType_To_Torch
+from transformer_engine.pytorch import DType
 from references.quantize_scale_calc import scale_from_amax_tensor
 
 
@@ -40,7 +40,7 @@ def _multi_dim_transpose(tensor):
 # current scaling reference quantization
 def ref_per_tensor_cs_cast(
     tensor: torch.Tensor,
-    fp8_dtype: tex.DType = tex.DType.kFloat8E4M3,
+    fp8_dtype: DType = DType.kFloat8E4M3,
     return_transpose: bool = False,
     force_pow_2_scales: bool = False,
     amax_epsilon: float = 0.0,

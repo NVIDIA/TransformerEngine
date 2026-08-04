@@ -48,6 +48,9 @@ namespace {
 
 using namespace cute;
 
+using cute::Tensor;  // Avoid conflict with transformer_engine::Tensor
+using cute::Shape;  // Avoid conflict with transformer_engine::Shape
+
 struct CLCResponse { uint32_t data[4] = {0}; };
 
 constexpr int kFp4ConvertChunkElements = 8;
@@ -706,7 +709,7 @@ __global__ static void row_col_rht_gemm_device(
       auto thr_t2r   = tiled_t2r.get_slice(local_thread_idx);
       auto thr_r2g = tiled_r2g.get_slice(local_thread_idx);
 
-      // Aligning with TensorEngine's recipe to generate scale factors // {$nv-internal-release}
+      // Aligning with TensorEngine's recipe to generate scale factors
       static constexpr float fp4_max = 6.0f;
       static constexpr float fp8_max = 448.0f;
       float const fp4_max_inv = 1.0f / fp4_max;
@@ -902,7 +905,7 @@ __global__ static void row_col_rht_gemm_device(
       cute::Tensor tQArSFA = make_tensor_like(tQAgSFA(_, _, _, _0{}, _0{}));
       cute::Tensor tQApSFA = thr_s2r.partition_D(pSFA_mn);
 
-      // Aligning with TensorEngine's recipe to generate scale factors // {$nv-internal-release}
+      // Aligning with TensorEngine's recipe to generate scale factors
       static constexpr float fp4_max = 6.0f;
       static constexpr float fp8_max = 448.0f;
       float const fp4_max_inv = 1.0f / fp4_max;
@@ -1269,7 +1272,7 @@ void hadamard_transform_cast_fusion(const Tensor &input_, Tensor &output_,
     Tensor &rng_state_tensor = *convertNVTETensor(quant_config.rng_state);
     NVTE_CHECK(rng_state_tensor.dtype() == DType::kInt64,
                "RNG state should contain 2 64-bit values.");
-    NVTE_CHECK(rng_state_tensor.data.shape == std::vector<size_t>{2},
+    NVTE_CHECK(rng_state_tensor.data.shape == Shape{2},
                "Shape of the RNG state should be [2], but got ", rng_state_tensor.data.shape);
     rng_state = reinterpret_cast<const size_t *>(rng_state_tensor.data.dptr);
   }
@@ -1293,11 +1296,9 @@ void hadamard_transform_cast_fusion(const Tensor &input_, Tensor &output_,
              "Hadamard matrix must be BF16 tensor, but dtype is ",
              to_string(hadamard_matrix_.dtype()), ".");
   const SimpleTensor &hadamard_matrix = hadamard_matrix_.data;
-  NVTE_CHECK(
-      (hadamard_matrix_.shape() == std::vector<size_t>{kHadamardDimension, kHadamardDimension}),
-      "Hadamard matrix must have shape=",
-      std::vector<size_t>{kHadamardDimension, kHadamardDimension},
-      ", but got shape=", hadamard_matrix_.shape(), ".");
+  NVTE_CHECK((hadamard_matrix_.shape() == Shape{kHadamardDimension, kHadamardDimension}),
+             "Hadamard matrix must have shape=", Shape{kHadamardDimension, kHadamardDimension},
+             ", but got shape=", hadamard_matrix_.shape(), ".");
   const size_t hadamard_dimension = hadamard_matrix.shape[0];
 
   const size_t ndim = input.shape.size();
@@ -1315,8 +1316,11 @@ void hadamard_transform_cast_fusion(const Tensor &input_, Tensor &output_,
 
   int k_tile_size = 1024;
 
-  // TODO: add support for swizzle sf output
-  const bool use_swizzle_sf_output = false;
+  // Honor the output tensor's GEMM-swizzled-scales flag: when set, emit
+  // scale factors directly in the layout that the downstream cuBLAS LT NVFP4
+  // GEMM consumes, eliminating the otherwise-required
+  // nvte_swizzle_scaling_factors pass between quantize and GEMM.
+  const bool use_swizzle_sf_output = output_.with_gemm_swizzled_scales;
 
   TRANSFORMER_ENGINE_SWITCH_CONDITION(
       use_stochastic_rounding, kEnableStochasticRounding,

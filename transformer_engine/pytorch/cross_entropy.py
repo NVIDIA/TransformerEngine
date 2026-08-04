@@ -18,9 +18,9 @@ __all__ = [
 
 class CrossEntropyFunction(torch.autograd.Function):
     """
-    This class implements a custom autograd function for the Cross Entropy loss. The input tensor can be in BF16/FP32, the
-    loss and gradient calculation happens in FP32 only. The returned loss is always in FP32, the input gradients are upcasted
-    to the dataype of the input.
+    This class implements a custom autograd function for the Cross Entropy loss. The input
+    tensor can be in BF16/FP32, and loss and gradient calculations happen in FP32. The
+    returned loss is always in FP32.
     """
 
     @staticmethod
@@ -50,7 +50,7 @@ class CrossEntropyFunction(torch.autograd.Function):
         Returns:
         tensor: The computed loss.
         """
-        loss, inp = triton_cross_entropy.cross_entropy_forward(
+        loss, grad_input = triton_cross_entropy.cross_entropy_forward(
             inp,
             target,
             label_smoothing,
@@ -59,7 +59,7 @@ class CrossEntropyFunction(torch.autograd.Function):
             ignore_idx,
         )
 
-        ctx.save_for_backward(inp.detach())
+        ctx.save_for_backward(grad_input.detach())
         ctx.is_cg_capturable = is_cg_capturable
         return loss
 
@@ -75,10 +75,12 @@ class CrossEntropyFunction(torch.autograd.Function):
         Returns:
         tuple: A tuple with the gradients with respect to the inputs. The elements are tensors or None.
         """
-        (inp,) = ctx.saved_tensors
-        inp = triton_cross_entropy.cross_entropy_backward(inp, grad_output, ctx.is_cg_capturable)
+        (grad_input,) = ctx.saved_tensors
+        grad_input = triton_cross_entropy.cross_entropy_backward(
+            grad_input, grad_output, ctx.is_cg_capturable
+        )
         return (
-            inp,
+            grad_input,
             None,
             None,
             None,
@@ -102,9 +104,8 @@ def parallel_cross_entropy(
     """
     Cross Entropy loss with optional distributed reduction.
 
-    The input tensor can be in BF16/FP32, the loss and gradient calculation happens in
-    FP32 only. The returned loss is always in FP32, the input gradients are upcasted
-    to the datatype of the input.
+    The input tensor can be in BF16/FP32, and loss and gradient calculations happen in
+    FP32. The returned loss is always in FP32.
 
     If ``dist_process_group`` is passed for distributed loss calculation, the input to each
     distributed rank should be ``(*, V/world_size)``. Note that each of the ranks should

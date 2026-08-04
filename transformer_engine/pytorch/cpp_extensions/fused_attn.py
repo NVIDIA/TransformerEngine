@@ -3,7 +3,9 @@
 # See LICENSE for license information.
 
 """Python interface for fused attention extensions"""
+
 import math
+from enum import IntEnum
 from typing import Tuple, List, Union, Optional
 import torch
 import transformer_engine_torch as tex
@@ -16,8 +18,7 @@ from transformer_engine_torch import (
     NVTE_Fused_Attn_Backend,
 )
 from ..quantized_tensor import Quantizer
-from ..constants import FP8BwdTensorIdx, FP8FwdTensorIdx
-
+from ..constants import FP8BwdTensorIdx, FP8FwdTensorIdx, DType
 
 __all__ = [
     "fused_attn_fwd",
@@ -26,12 +27,12 @@ __all__ = [
 
 
 TORCH_DType = {
-    tex.DType.kFloat8E4M3: torch.uint8,
-    tex.DType.kFloat8E5M2: torch.uint8,
-    tex.DType.kFloat16: torch.half,
-    tex.DType.kBFloat16: torch.bfloat16,
-    tex.DType.kFloat32: torch.float32,
-    tex.DType.kInt32: torch.int32,
+    DType.kFloat8E4M3: torch.uint8,
+    DType.kFloat8E5M2: torch.uint8,
+    DType.kFloat16: torch.half,
+    DType.kBFloat16: torch.bfloat16,
+    DType.kFloat32: torch.float32,
+    DType.kInt32: torch.int32,
 }
 
 QKVFormat = {
@@ -97,11 +98,65 @@ SoftmaxType = {
     "learnable": NVTE_Softmax_Type.NVTE_LEARNABLE_SOFTMAX,
 }
 
-FusedAttnBackend = {
-    "F16_arbitrary_seqlen": NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
-    "FP8": NVTE_Fused_Attn_Backend.NVTE_FP8,
-    "No_Backend": NVTE_Fused_Attn_Backend.NVTE_No_Backend,
-}
+
+class FusedAttnBackend(IntEnum):
+    """Fused attention sub-backends.
+
+    This is the canonical fused-attention backend enum for
+    ``transformer_engine.pytorch``. It mirrors the backend
+    ``transformer_engine_torch.NVTE_Fused_Attn_Backend`` (pybind11) enum
+    value-for-value, and instances of the two enums compare equal when they
+    share the same integer value. Unlike the pybind enum, a plain-python
+    ``IntEnum`` is traceable by ``torch.compile``: comparisons constant-fold
+    cleanly and instances safely cross the ``assume_constant_result`` boundary
+    in ``get_attention_backend``. Lookup by name (``FusedAttnBackend["FP8"]``)
+    works the same way as with the dict this used to be.
+    """
+
+    No_Backend = int(NVTE_Fused_Attn_Backend.NVTE_No_Backend)
+    F16_arbitrary_seqlen = int(NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen)
+    FP8 = int(NVTE_Fused_Attn_Backend.NVTE_FP8)
+
+    @classmethod
+    def cast(
+        cls, backend: "Union[FusedAttnBackend, NVTE_Fused_Attn_Backend]"
+    ) -> "FusedAttnBackend":
+        """Normalize a backend value to the canonical ``FusedAttnBackend`` member.
+
+        The pybind ``transformer_engine_torch.NVTE_Fused_Attn_Backend`` enum is
+        accepted as input for backward compatibility and mapped to the matching
+        ``FusedAttnBackend`` member.
+        """
+        if isinstance(backend, cls):
+            return backend
+        return cls(int(backend))
+
+    def __eq__(self, other: object) -> bool:
+        # ``FusedAttnBackend`` is an ``IntEnum`` while ``NVTE_Fused_Attn_Backend``
+        # is a pybind11 enum. Compare by integer value so the two enums stay
+        # equivalent regardless of the pybind11 version (the pybind ``__eq__``
+        # handles the reverse order).
+        if isinstance(other, NVTE_Fused_Attn_Backend):
+            return int(self) == int(other)
+        return int.__eq__(self, other)
+
+    def __ne__(self, other: object) -> bool:
+        result = self.__eq__(other)
+        if result is NotImplemented:
+            return result
+        return not result
+
+    def __hash__(self) -> int:
+        return int.__hash__(self)
+
+
+# Fail fast at import time if a new enumerator is added on the C++ side
+# without being mirrored above.
+assert {f"NVTE_{m.name}" for m in FusedAttnBackend} == set(NVTE_Fused_Attn_Backend.__members__), (
+    "FusedAttnBackend in python is out of sync with"
+    " transformer_engine_torch.NVTE_Fused_Attn_Backend defined on the C++ side."
+    " Please make sure TE C++ and python are in sync."
+)
 
 BACKEND_FP8_THREADS_PER_CTA = 128
 BACKEND_F16arb_ELTS_PER_THREADS = 16
@@ -124,7 +179,7 @@ def fused_attn_fwd(
     k: torch.Tensor,
     v: torch.Tensor,
     fake_dtype: torch.dtype,
-    fused_attention_backend: tex.NVTE_Fused_Attn_Backend,
+    fused_attention_backend: FusedAttnBackend,
     attn_bias: torch.Tensor = None,
     cu_seqlens_q_padded: torch.Tensor = None,
     cu_seqlens_kv_padded: torch.Tensor = None,
@@ -173,10 +228,10 @@ def fused_attn_fwd(
                 input tensor K; shape sbhd, bshd or thd (see `qkv_layout` for details)
     v : torch.Tensor
                 input tensor V; shape sbhd, bshd or thd (see `qkv_layout` for details)
-    fake_dtype : tex.DType
+    fake_dtype : DType
                 data type of Q, K and V - in case of high precision, fake dtype in case of FP8;
                 in torch.dtype
-    fused_attention_backend : tex.NVTE_Fused_Attn_Backend
+    fused_attention_backend : FusedAttnBackend
                 please see FusedAttention module for details on supported backends.
     attn_bias : torch.Tensor, default = None
                 input tensor Bias when attn_bias_type is "pre_scale_bias" or "post_scale_bias";
@@ -285,6 +340,8 @@ def fused_attn_fwd(
                 f"attn_bias.dtype={attn_bias.dtype} but q.dtype={q.dtype}."
             )
 
+    # Accept the pybind enum for backward compatibility.
+    fused_attention_backend = FusedAttnBackend.cast(fused_attention_backend)
     if fused_attention_backend == FusedAttnBackend["No_Backend"]:
         raise ValueError(
             "Fused attention does not support this input combination:"
@@ -304,7 +361,6 @@ def fused_attn_fwd(
         raise ValueError(f"Unsupported backend {fused_attention_backend}")
 
     # execute kernel
-
     output_tensors = tex.fused_attn_fwd(
         max_seqlen_q,
         max_seqlen_kv,
@@ -364,25 +420,18 @@ def fused_attn_fwd(
                 max_tensor = max_tensor.masked_fill(~valid, float("-inf"))
             elif max_tensor.ndim == 3:
                 if cu_seqlens_q_padded is not None:
-                    # For THD + pad_between_seqs=True + non-sm120 + cuDNN>9.6, Max tensor is [tq, h, 1]
-                    # and padding positions could be uninitialized. Exclude those padded positions when
-                    # computing max_logit.
+                    # Exclude padding; CP may pass nonzero padded offsets.
                     actual_seqlens = (cu_seqlens_q[1:] - cu_seqlens_q[:-1]).to(
                         device=max_tensor.device
                     )
-                    padded_seqlens = (cu_seqlens_q_padded[1:] - cu_seqlens_q_padded[:-1]).to(
-                        device=max_tensor.device
-                    )
-                    pad_lens = (padded_seqlens - actual_seqlens).to(device=max_tensor.device)
-                    b = pad_lens.shape[0]
-
-                    # Stack [actual, pad] per batch into counts: e.g. [3,1, 3,1, 2,2, 7,1]
-                    counts = torch.stack([actual_seqlens, pad_lens], dim=1).flatten()
-                    # Tile [T, F] per sequence: [T,F, T,F, T,F, T,F]
-                    values = torch.tensor([True, False], device=max_tensor.device).repeat(b)
-                    # Expand: T×3, F×1, T×3, F×1, T×2, F×2, T×7, F×1 → TTTF|TTTF|TTFF|TTTTTTTF
-                    valid = torch.repeat_interleave(values, counts)
-                    # Finally, replace invalid (F) positions with -inf
+                    tq = max_tensor.shape[0]
+                    starts = cu_seqlens_q_padded[:-1].to(device=max_tensor.device)
+                    ends = (starts + actual_seqlens).clamp(max=tq)
+                    delta = torch.zeros(tq + 1, dtype=torch.int32, device=max_tensor.device)
+                    updates = torch.ones_like(starts, dtype=torch.int32)
+                    delta.scatter_add_(0, starts.clamp(max=tq), updates)
+                    delta.scatter_add_(0, ends, -updates)
+                    valid = delta[:-1].cumsum(0) > 0
                     max_tensor = max_tensor.masked_fill(~valid.view(-1, 1, 1), float("-inf"))
 
         # Max -> max_logit [h]
@@ -405,7 +454,7 @@ def fused_attn_bwd(
     d_o: torch.Tensor,
     fake_dtype: torch.dtype,
     aux_ctx_tensors: List[torch.Tensor],
-    fused_attention_backend: tex.NVTE_Fused_Attn_Backend,
+    fused_attention_backend: FusedAttnBackend,
     cu_seqlens_q_padded: torch.Tensor = None,
     cu_seqlens_kv_padded: torch.Tensor = None,
     s_quantizer: Quantizer = None,
@@ -455,13 +504,13 @@ def fused_attn_bwd(
     d_o : torch.Tensor
                 input tensor dO (gradient of O); same data type as Q, K and V;
                 same shape as Q
-    fake_dtype : tex.DType
+    fake_dtype : DType
                 data type of Q, K and V - in case of high precision, fake dtype in case of FP8;
                 in torch.dtype
     aux_ctx_tensors : List[torch.Tensor]
                 auxiliary output tensors of the forward pass when its is_training is True,
                 e.g. aux_ctx_tensors = [S, Max, rng_state]
-    fused_attention_backend : tex.NVTE_Fused_Attn_Backend
+    fused_attention_backend : FusedAttnBackend
                 please see FusedAttention module for details on supported backends.
     cu_seqlens_q_padded : torch.Tensor, default = None
                 cumulative sequence offsets for Q; shape [batch_size + 1]
@@ -546,6 +595,8 @@ def fused_attn_bwd(
         d = q.size(-1)
         attn_scale = 1.0 / math.sqrt(d)
 
+    # Accept the pybind enum for backward compatibility.
+    fused_attention_backend = FusedAttnBackend.cast(fused_attention_backend)
     if fused_attention_backend == FusedAttnBackend["No_Backend"]:
         raise ValueError(
             "Fused attention backward does not support this input combination:"

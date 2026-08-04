@@ -4,6 +4,8 @@
 
 from typing import Optional
 
+import pickle
+
 import pytest
 import torch
 import warnings
@@ -26,14 +28,24 @@ import transformer_engine_torch as tex
 from transformer_engine.pytorch.quantization import (
     FP8GlobalStateManager,
     NVFP4BlockScalingRecipeState,
+    QuantizerRole,
     _amax_and_scale_update,
 )
 import transformer_engine.pytorch.ops as te_ops
 from transformer_engine.common.recipe import (
+    CustomRecipe,
     DelayedScaling,
+    Float8CurrentScaling,
     Float8BlockScaling,
     MXFP8BlockScaling,
     NVFP4BlockScaling,
+    Recipe,
+)
+from transformer_engine.pytorch._extra_state import (
+    CheckpointExtraStatePolicy,
+    UNSAFE_PICKLE_EXTRA_STATE_ENV,
+    _RECIPE_POLICIES,
+    should_load_extra_state_pickle,
 )
 
 # Check if FP8 is supported
@@ -296,14 +308,16 @@ class TestFP8Recipe:
     @pytest.mark.parametrize("amax_case", ["zero", "tiny", "normal", "inf", "nan"])
     @pytest.mark.parametrize("fused_update", [True, False], ids=["fused", "non-fused"])
     @pytest.mark.parametrize(
-        "fp8_dtype", [tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2], ids=["E4M3", "E5M2"]
+        "fp8_dtype",
+        [te.DType.kFloat8E4M3, te.DType.kFloat8E5M2],
+        ids=["E4M3", "E5M2"],
     )
     def test_scale_update_numeric_scenarios(self, amax_case, fused_update, fp8_dtype):
 
-        if fp8_dtype == tex.DType.kFloat8E4M3:
+        if fp8_dtype == te.DType.kFloat8E4M3:
             fp8_format = transformer_engine.common.recipe.Format.E4M3
             fp8_max = fp8_format.value.max_fwd
-        elif fp8_dtype == tex.DType.kFloat8E5M2:
+        elif fp8_dtype == te.DType.kFloat8E5M2:
             fp8_format = transformer_engine.common.recipe.Format.HYBRID
             fp8_max = fp8_format.value.max_bwd
         else:
@@ -514,8 +528,52 @@ class TestFP8Recipe:
 
 
 @pytest.mark.skipif(not fp4_available, reason=reason_for_no_fp4)
-def test_nvfp4_row_scaled_quantizer_roles():
-    recipe = NVFP4BlockScaling(row_scaled_activation=True)
+@pytest.mark.parametrize(
+    "nvfp4_4over6",
+    ["none", "weights", "activations", "all"],
+    ids=["disabled", "weights", "activations", "all"],
+)
+@pytest.mark.parametrize(
+    "nvfp4_4over6_e4m3_use_256",
+    ["none", "weights", "activations", "all"],
+    ids=["e4m3_448", "e4m3_256_weights", "e4m3_256_activations", "e4m3_256_all"],
+)
+@pytest.mark.parametrize("nvfp4_4over6_err_mode", ["MAE", "MSE"], ids=["mae_err", "mse_err"])
+def test_nvfp4_row_scaled_quantizer_roles(
+    nvfp4_4over6, nvfp4_4over6_e4m3_use_256, nvfp4_4over6_err_mode
+):
+    recipe = NVFP4BlockScaling(
+        disable_rht=True,
+        disable_2d_quantization=True,
+        nvfp4_4over6=nvfp4_4over6,
+        nvfp4_4over6_e4m3_use_256=nvfp4_4over6_e4m3_use_256,
+        nvfp4_4over6_err_mode=nvfp4_4over6_err_mode,
+        row_scaled_activation=True,
+    )
+
+    def expected_use_4over6(tensor_type):
+        if tensor_type in ("grad_output", "grad_input"):
+            return False
+        if nvfp4_4over6 == "all":
+            return True
+        if nvfp4_4over6 == "weights":
+            return tensor_type == "weight"
+        if nvfp4_4over6 == "activations":
+            return tensor_type != "weight"
+        return False
+
+    def expected_e4m3_max(tensor_type):
+        if not expected_use_4over6(tensor_type):
+            return 448
+        if nvfp4_4over6_e4m3_use_256 == "all":
+            return 256
+        if nvfp4_4over6_e4m3_use_256 == "weights":
+            if tensor_type == "weight":
+                return 256
+        if nvfp4_4over6_e4m3_use_256 == "activations":
+            if tensor_type != "weight":
+                return 256
+        return 448
 
     forward_quantizers = NVFP4BlockScalingRecipeState(
         recipe,
@@ -523,20 +581,85 @@ def test_nvfp4_row_scaled_quantizer_roles():
         num_quantizers=3,
     ).make_quantizers()
     assert [q.row_scaled_nvfp4 for q in forward_quantizers] == [True, False, True]
+    assert [q.stochastic_rounding for q in forward_quantizers] == [False, False, False]
+    assert [q.with_rht for q in forward_quantizers] == [False, False, False]
+    assert [q.nvfp4_use_4over6 for q in forward_quantizers] == [
+        expected_use_4over6(tensor_type) for tensor_type in ("input", "weight", "output")
+    ]
+    assert [q.nvfp4_e4m3_max for q in forward_quantizers] == [
+        expected_e4m3_max(tensor_type) for tensor_type in ("input", "weight", "output")
+    ]
+    assert [q.nvfp4_4over6_err_mode for q in forward_quantizers] == [nvfp4_4over6_err_mode] * 3
     assert not forward_quantizers[0].is_quantizable(torch.empty(16, 16))
     assert forward_quantizers[1].is_quantizable(torch.empty(16, 16))
+
+    role_quantizers = NVFP4BlockScalingRecipeState(
+        recipe,
+        mode="forward",
+        num_quantizers=4,
+        roles=[
+            QuantizerRole(module_type="linear", tensor_type="weight"),
+            QuantizerRole(module_type="linear", tensor_type="input"),
+            QuantizerRole(module_type="linear", tensor_type="output"),
+            None,
+        ],
+    ).make_quantizers()
+    assert [q.row_scaled_nvfp4 for q in role_quantizers] == [False, True, True, True]
+    assert [q.nvfp4_use_4over6 for q in role_quantizers] == [
+        expected_use_4over6(tensor_type) for tensor_type in ("weight", "input", "output", "input")
+    ]
+    assert [q.nvfp4_e4m3_max for q in role_quantizers] == [
+        expected_e4m3_max(tensor_type) for tensor_type in ("weight", "input", "output", "input")
+    ]
+    assert [q.nvfp4_4over6_err_mode for q in role_quantizers] == [nvfp4_4over6_err_mode] * 4
 
     backward_quantizers = NVFP4BlockScalingRecipeState(
         recipe,
         mode="backward",
         num_quantizers=2,
+        roles=[
+            QuantizerRole(module_type="linear", tensor_type="grad_output"),
+            QuantizerRole(module_type="linear", tensor_type="grad_input"),
+        ],
     ).make_quantizers()
     assert [q.row_scaled_nvfp4 for q in backward_quantizers] == [False, False]
+    assert [q.nvfp4_use_4over6 for q in backward_quantizers] == [False, False]
+    assert [q.nvfp4_e4m3_max for q in backward_quantizers] == [448, 448]
+    assert [q.nvfp4_4over6_err_mode for q in backward_quantizers] == [nvfp4_4over6_err_mode] * 2
+    assert [q.stochastic_rounding for q in backward_quantizers] == [True, True]
+    assert [q.with_rht for q in backward_quantizers] == [False, False]
+
+    backward_operand_quantizers = NVFP4BlockScalingRecipeState(
+        recipe,
+        mode="backward",
+        num_quantizers=4,
+        roles=[
+            QuantizerRole(module_type="linear", tensor_type="input"),
+            QuantizerRole(module_type="linear", tensor_type="weight"),
+            QuantizerRole(module_type="linear", tensor_type="grad_output"),
+            QuantizerRole(module_type="linear", tensor_type="grad_input"),
+        ],
+    ).make_quantizers()
+    assert [q.nvfp4_use_4over6 for q in backward_operand_quantizers] == [
+        expected_use_4over6(tensor_type)
+        for tensor_type in ("input", "weight", "grad_output", "grad_input")
+    ]
+    assert [q.nvfp4_e4m3_max for q in backward_operand_quantizers] == [
+        expected_e4m3_max(tensor_type)
+        for tensor_type in ("input", "weight", "grad_output", "grad_input")
+    ]
+    assert [q.stochastic_rounding for q in backward_operand_quantizers] == [
+        False,
+        False,
+        True,
+        True,
+    ]
 
 
 @pytest.mark.skipif(not fp4_available, reason=reason_for_no_fp4)
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=str)
 @pytest.mark.parametrize("row_scaled_nvfp4", [False, True], ids=["nvfp4", "nvfp4_row_scaled"])
+@pytest.mark.parametrize("use_4over6", [False, True], ids=["default", "4over6"])
 @pytest.mark.parametrize(
     "M, N",
     [
@@ -552,24 +675,108 @@ def test_nvfp4_row_scaled_quantizer_roles():
         (8192, 8192),
     ],
 )
-def test_fp4_dequantize(dtype, row_scaled_nvfp4, M, N):
+def test_fp4_dequantize(dtype, row_scaled_nvfp4, use_4over6, M, N):
     q = NVFP4Quantizer(
         columnwise=not row_scaled_nvfp4,
         row_scaled_nvfp4=row_scaled_nvfp4,
+        nvfp4_use_4over6=use_4over6,
     )
     a = torch.rand((M, N)).cuda().to(dtype=dtype)
     starting_tensor = q(a)
     assert starting_tensor._row_scaled_nvfp4 == row_scaled_nvfp4
+    assert starting_tensor._nvfp4_use_4over6 == use_4over6
     assert starting_tensor._amax_rowwise.numel() == (M if row_scaled_nvfp4 else 1)
     dequantized_tensor = starting_tensor.dequantize()
     new_tensor = q(dequantized_tensor)
     assert new_tensor._row_scaled_nvfp4 == row_scaled_nvfp4
+    assert new_tensor._nvfp4_use_4over6 == use_4over6
     assert new_tensor._amax_rowwise.numel() == (M if row_scaled_nvfp4 else 1)
-    torch.testing.assert_close(
-        new_tensor._rowwise_data,
-        starting_tensor._rowwise_data,
-        rtol=0,
-        atol=0,
-    )
+    # 4over6 can re-encode a dequantized block with the alternate 4/6 scale
+    # choice while preserving the dequantized values.
+    if not use_4over6:
+        torch.testing.assert_close(
+            new_tensor._rowwise_data,
+            starting_tensor._rowwise_data,
+            rtol=0,
+            atol=0,
+        )
     new_dequantized_tensor = new_tensor.dequantize()
     torch.testing.assert_close(dequantized_tensor, new_dequantized_tensor)
+
+
+def _custom_recipe_qfactory(_role):
+    return None
+
+
+def _recipe_subclasses(cls):
+    for subcls in cls.__subclasses__():
+        yield subcls
+        yield from _recipe_subclasses(subcls)
+
+
+def _pickled_extra_state_payload(recipe_obj, *, include_delayed_state=False):
+    state = {"recipe": recipe_obj, "extra_fp8_variables": {}}
+    if include_delayed_state:
+        state.update(
+            {
+                "scale_fwd": torch.ones(1),
+                "amax_history_fwd": torch.zeros(1, 1),
+                "scale_bwd": torch.ones(1),
+                "amax_history_bwd": torch.zeros(1, 1),
+            }
+        )
+    return pickle.dumps(state)
+
+
+def test_checkpoint_extra_state_policy_classifier_map_covers_all_recipes():
+    for cls in _recipe_subclasses(Recipe):
+        key = ("transformer_engine.common.recipe", cls.__name__)
+        assert key in _RECIPE_POLICIES
+        assert _RECIPE_POLICIES[key] in CheckpointExtraStatePolicy
+
+
+@pytest.mark.parametrize(
+    "recipe_obj",
+    [
+        Float8CurrentScaling(),
+        MXFP8BlockScaling(),
+        Float8BlockScaling(),
+        NVFP4BlockScaling(),
+    ],
+)
+def test_stateless_pickled_extra_state_is_ignored(recipe_obj):
+    payload = _pickled_extra_state_payload(recipe_obj)
+    assert not should_load_extra_state_pickle(payload, "test")
+
+
+def test_stateless_custom_pickled_extra_state_is_ignored():
+    payload = _pickled_extra_state_payload(CustomRecipe(qfactory=_custom_recipe_qfactory))
+    assert not should_load_extra_state_pickle(payload, "test")
+
+
+@pytest.mark.parametrize("payload", [pickle.dumps({}), pickle.dumps({"extra_fp8_variables": {}})])
+def test_global_free_pickled_extra_state_is_ignored(payload):
+    # Older stateless checkpoints serialized an empty dict. Such a payload
+    # resolves no globals and cannot execute code, so it must load without the
+    # unsafe opt-in.
+    assert not should_load_extra_state_pickle(payload, "test")
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        _pickled_extra_state_payload(DelayedScaling(), include_delayed_state=True),
+        _pickled_extra_state_payload(
+            CustomRecipe(qfactory=_custom_recipe_qfactory), include_delayed_state=True
+        ),
+        pickle.dumps({"scale_inv_fwd": torch.ones(1), "extra_fp8_variables": {}}),
+        pickle.dumps({"recipe": object(), "extra_fp8_variables": {}}),
+        b"not a pickle",
+    ],
+)
+def test_stateful_unknown_or_malformed_pickled_extra_state_requires_opt_in(payload, monkeypatch):
+    with pytest.raises(RuntimeError, match=UNSAFE_PICKLE_EXTRA_STATE_ENV):
+        should_load_extra_state_pickle(payload, "test")
+
+    monkeypatch.setenv(UNSAFE_PICKLE_EXTRA_STATE_ENV, "1")
+    assert should_load_extra_state_pickle(payload, "test")

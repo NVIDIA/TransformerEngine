@@ -56,9 +56,11 @@ Transformer Engine documentation
    examples/advanced_optimizations.ipynb
    examples/te_llama/tutorial_accelerate_hf_llama_with_te.ipynb
    examples/te_gemma/tutorial_generation_gemma_with_te.ipynb
+   examples/te_mixtral/tutorial_accelerate_hf_mixtral_with_te.ipynb
    examples/onnx/onnx_export.ipynb
-   examples/te_jax_integration.ipynb
+   examples/te_jax_integration.rst
    examples/op_fuser/op_fuser.rst
+   examples/gemm_profiling/gemm_profiling.rst
 
 .. toctree::
    :hidden:

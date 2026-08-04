@@ -38,7 +38,7 @@ __device__ __forceinline__ float get_scale_value(float scale) { return scale; }
 __device__ __forceinline__ float get_scale_value(const float *scale_ptr) { return *scale_ptr; }
 
 template <typename in_t, typename out_t, typename scale_t>
-__device__ __forceinline__ void scale_chunk(int chunk_size, volatile int *is_infinite_gmem,
+__device__ __forceinline__ void scale_chunk(int64_t chunk_size, volatile int *is_infinite_gmem,
                                             TensorListMetadata<2> &tl, scale_t scale_arg) {
   // I'd like this kernel to propagate infs/nans.
   // if(*noop_gmem == 1)
@@ -46,7 +46,7 @@ __device__ __forceinline__ void scale_chunk(int chunk_size, volatile int *is_inf
   const float scale = get_scale_value(scale_arg);
   int tensor_loc = tl.block_to_tensor[blockIdx.x];
   int chunk_idx = tl.block_to_chunk[blockIdx.x];
-  int n = tl.sizes[tensor_loc];
+  int64_t n = tl.sizes[tensor_loc];
 
   in_t *in = reinterpret_cast<in_t *>(tl.addresses[0][tensor_loc]);
   in += chunk_idx * chunk_size;
@@ -104,7 +104,7 @@ __device__ __forceinline__ void scale_chunk(int chunk_size, volatile int *is_inf
 
 template <typename in_t, typename out_t>
 struct ScaleFunctor {
-  __device__ __forceinline__ void operator()(int chunk_size, volatile int *is_infinite_gmem,
+  __device__ __forceinline__ void operator()(int64_t chunk_size, volatile int *is_infinite_gmem,
                                              TensorListMetadata<2> &tl,  // NOLINT(*)
                                              float scale) {
     scale_chunk<in_t, out_t>(chunk_size, is_infinite_gmem, tl, scale);
@@ -113,7 +113,7 @@ struct ScaleFunctor {
 
 template <typename in_t, typename out_t>
 struct ScalePtrFunctor {
-  __device__ __forceinline__ void operator()(int chunk_size, volatile int *is_infinite_gmem,
+  __device__ __forceinline__ void operator()(int64_t chunk_size, volatile int *is_infinite_gmem,
                                              TensorListMetadata<2> &tl,  // NOLINT(*)
                                              float *scale_ptr) {
     scale_chunk<in_t, out_t>(chunk_size, is_infinite_gmem, tl, scale_ptr);

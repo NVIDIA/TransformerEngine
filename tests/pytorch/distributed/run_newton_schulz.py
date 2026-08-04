@@ -77,15 +77,17 @@ def main():
     else:
         A = torch.empty(m, n, device="cuda", dtype=dtype)
 
-    # Broadcast the full matrix to all ranks
-    dist.broadcast(A, src=0)
-
-    # Scatter columns to each rank
-    local_cols = n // world_size
-    x_local = A[:, rank * local_cols : (rank + 1) * local_cols].contiguous()
-
+    # Context creation is the first collective, exercising lazy NCCL
+    # communicator materialization in CusolverMpCtx.
     ctx = CusolverMpCtx(dist.group.WORLD)
     try:
+        # Broadcast the full matrix to all ranks
+        dist.broadcast(A, src=0)
+
+        # Scatter columns to each rank
+        local_cols = n // world_size
+        x_local = A[:, rank * local_cols : (rank + 1) * local_cols].contiguous()
+
         newton_schulz(x_local, ctx, args.num_iterations, coefficients=coefficients)
     finally:
         ctx.destroy()
