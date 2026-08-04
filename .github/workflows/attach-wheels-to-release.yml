@@ -32,11 +32,11 @@ on:
       torch-version:
         description: 'Torch version'
         required: true
-        default: '2.11.0'
+        default: '2.8.0'
       cuda-version:
         description: 'CUDA version'
         required: true
-        default: '13.0.0'
+        default: '12.9.1'
       cudnn-version:
         description: 'CUDNN version'
         required: true
@@ -75,10 +75,30 @@ jobs:
               "os": ["ubuntu-22.04", "ubuntu-22.04-arm"],
               "release-version": ["${{ github.event.release.tag_name }}"],
               "python-version": ["3.12"], 
-              "torch-version": ["2.11.0"],
-              "cuda-version": ["13.0.0"],
+              "torch-version": ["2.8.0"], 
+              "cuda-version": ["12.9.1"], 
               "cudnn-version": ["9"], 
-              "cxx11_abi": ["TRUE"]
+              "cxx11_abi": ["TRUE"],
+              "include": [
+                {
+                  "os": "ubuntu-22.04",
+                  "release-version": "${{ github.event.release.tag_name }}",
+                  "python-version": "3.12",
+                  "torch-version": "2.11.0",
+                  "cuda-version": "13.0.0",
+                  "cudnn-version": "9",
+                  "cxx11_abi": "TRUE"
+                },
+                {
+                  "os": "ubuntu-22.04-arm",
+                  "release-version": "${{ github.event.release.tag_name }}",
+                  "python-version": "3.12",
+                  "torch-version": "2.11.0",
+                  "cuda-version": "13.0.0",
+                  "cudnn-version": "9",
+                  "cxx11_abi": "TRUE"
+                }
+              ]
             }' | jq -rc)
           else
             MATRIX=$(echo '{
@@ -173,7 +193,7 @@ jobs:
     if: ${{ github.event_name == 'release' || inputs.ngc-image == '' }}
     steps:
       - name: 'Checkout'
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.release-version }}
           submodules: recursive
@@ -222,7 +242,7 @@ jobs:
           echo "wheel_name=$(basename "$wheel_path")" | tee -a "$GITHUB_OUTPUT"
 
       - name: Upload release asset
-        uses: actions/upload-release-asset@v1
+        uses: actions/upload-release-asset@e8f9f06c4b078e705bd2ea027f0926603fc9b4d5 # v1.0.2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
