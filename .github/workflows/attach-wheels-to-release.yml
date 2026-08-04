@@ -32,11 +32,11 @@ on:
       torch-version:
         description: 'Torch version'
         required: true
-        default: '2.8.0'
+        default: '2.11.0'
       cuda-version:
         description: 'CUDA version'
         required: true
-        default: '12.9.1'
+        default: '13.0.0'
       cudnn-version:
         description: 'CUDNN version'
         required: true
@@ -75,8 +75,8 @@ jobs:
               "os": ["ubuntu-22.04", "ubuntu-22.04-arm"],
               "release-version": ["${{ github.event.release.tag_name }}"],
               "python-version": ["3.12"], 
-              "torch-version": ["2.8.0"], 
-              "cuda-version": ["12.9.1"], 
+              "torch-version": ["2.11.0"],
+              "cuda-version": ["13.0.0"],
               "cudnn-version": ["9"], 
               "cxx11_abi": ["TRUE"]
             }' | jq -rc)
@@ -164,6 +164,71 @@ jobs:
           upload_url: ${{ needs.pre-flight.outputs.release-assets-url }}
           asset_path: ./transformer_engine/pytorch/dist/${{ steps.build-pytorch-wheel.outputs.wheel_name }}
           asset_name: ${{ steps.build-pytorch-wheel.outputs.wheel_name }}
+          asset_content_type: application/*
+
+  build_core_wheel:
+    name: Build Core Wheel (ubuntu-22.04-arm, CUDA 13)
+    runs-on: ubuntu-22.04-arm
+    needs: pre-flight
+    if: ${{ github.event_name == 'release' || inputs.ngc-image == '' }}
+    steps:
+      - name: 'Checkout'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.release-version }}
+          submodules: recursive
+
+      - name: Move /var/lib/docker/
+        run: sudo mv /var/lib/docker/ "${GITHUB_WORKSPACE}/docker"
+
+      - name: Maximize build space
+        uses: easimon/maximize-build-space@c28619d8999a147d5e09c1199f84ff6af6ad5794
+        with:
+          root-reserve-mb: 5120
+          temp-reserve-mb: 32
+          swap-size-mb: 10240
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+          build-mount-path: '/var/lib/docker/'
+
+      - name: Restore /var/lib/docker/
+        run: sudo sh -c "mv ${GITHUB_WORKSPACE}/docker/* /var/lib/docker"
+
+      - name: Build CUDA 13 core wheel
+        id: build-core-wheel
+        run: |
+          docker build \
+            --build-arg CUDA_MAJOR=13 \
+            --build-arg CUDA_MINOR=0 \
+            --build-arg BUILD_METAPACKAGE=false \
+            --build-arg BUILD_COMMON=true \
+            --build-arg BUILD_PYTORCH=false \
+            --build-arg BUILD_JAX=false \
+            --tag transformer-engine-core-wheel \
+            --file build_tools/wheel_utils/Dockerfile.aarch \
+            .
+
+          mkdir -p dist
+          docker run --rm \
+            --volume "$(pwd)/dist:/wheelhouse" \
+            transformer-engine-core-wheel
+
+          wheel_path=$(find dist -maxdepth 1 -type f \
+            -name 'transformer_engine_cu13-*-manylinux_2_28_aarch64.whl' \
+            -print -quit)
+          test -n "$wheel_path"
+          echo "wheel_name=$(basename "$wheel_path")" | tee -a "$GITHUB_OUTPUT"
+
+      - name: Upload release asset
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ needs.pre-flight.outputs.release-assets-url }}
+          asset_path: ./dist/${{ steps.build-core-wheel.outputs.wheel_name }}
+          asset_name: ${{ steps.build-core-wheel.outputs.wheel_name }}
           asset_content_type: application/*
 
   build_wheels_for_ngc:
