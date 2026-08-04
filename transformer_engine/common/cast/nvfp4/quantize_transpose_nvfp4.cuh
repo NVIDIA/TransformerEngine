@@ -412,9 +412,6 @@ __global__ void __launch_bounds__(THREADS_NUM)
   extern __shared__ char dynamic_shmem[];
   // Manually align dynamic SHMEM per TMA requirements using padding
   // __align__(128) Does not guarantee the pointer to be aligned!
-  // Keep the result derived from `dynamic_shmem` by pointer arithmetic: casting an
-  // integer back to a pointer loses the shared-memory provenance, so ptxas emits
-  // generic LD/ST instead of LDS/STS.
   char *dshmem = align_up(dynamic_shmem, TMA_SHMEM_ALIGNMENT);
 
   // The destination shared memory buffer of a bulk tensor operation should be 16-byte aligned
@@ -955,9 +952,6 @@ __global__ void __launch_bounds__(THREADS_NUM)
   extern __shared__ char dynamic_shmem[];
   // Manually align dynamic SHMEM per TMA requirements using padding
   // __align__(128) Does not guarantee the pointer to be aligned!
-  // Keep the result derived from `dynamic_shmem` by pointer arithmetic: casting an
-  // integer back to a pointer loses the shared-memory provenance, so ptxas emits
-  // generic LD/ST instead of LDS/STS.
   char *dshmem = align_up(dynamic_shmem, TMA_SHMEM_ALIGNMENT);
 
   // The destination shared memory buffer of a bulk tensor operation should be 16-byte aligned

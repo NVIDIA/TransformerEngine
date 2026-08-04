@@ -702,10 +702,6 @@ __global__ void quantize_mxfp8_kernel_cast_only(
   block_coords.x = blockIdx.x * CastTraits::blockDIM::N;
 
   extern __shared__ char smem[];
-  // Derive the aligned base from `smem` by pointer arithmetic. Round-tripping it
-  // through an integer and casting back loses the link to the `extern __shared__`
-  // object, so ptxas can no longer prove the address lives in the shared window
-  // and falls back to generic LD/ST instead of LDS/STS.
   char *smemAligned = align_up(smem, CastTraits::smem_alignment);
 
   IType *sInput = reinterpret_cast<IType *>(smemAligned);
@@ -1178,10 +1174,6 @@ __global__ void quantize_mxfp8_kernel_cast_only(
   block_coords.x = blockIdx.x * CastTraits::blockDIM::N;
 
   extern __shared__ char smem[];
-  // Derive the aligned base from `smem` by pointer arithmetic. Round-tripping it
-  // through an integer and casting back loses the link to the `extern __shared__`
-  // object, so ptxas can no longer prove the address lives in the shared window
-  // and falls back to generic LD/ST instead of LDS/STS.
   char *smemAligned = align_up(smem, CastTraits::smem_alignment);
   IType *sInput = reinterpret_cast<IType *>(smemAligned);
   inputUnitType *sInputUnit = reinterpret_cast<inputUnitType *>(sInput);
