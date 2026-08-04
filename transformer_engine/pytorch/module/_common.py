@@ -6,14 +6,89 @@
 
 import dataclasses
 import queue
-from typing import Any, Callable, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import torch
 
 from .. import cpp_extensions as tex
 from ..constants import TE_DType
 from ..export import is_in_onnx_export_mode
+from ..tensor.utils import get_quantization_recipe_name
 from ..utils import get_default_init_method
+
+
+def _get_scale_buffer_info(
+    tensor_name: str,
+    tensor: Any,
+    quantizer: Any,
+) -> Optional[Tuple[str, Optional[torch.Tensor]]]:
+    """Get the calibration buffer name and value for a quantized tensor."""
+    recipe = get_quantization_recipe_name(quantizer)
+    if not recipe:
+        return None
+
+    if recipe == "fp8_delayed_scaling":
+        metadata_name = "amax"
+        metadata = getattr(quantizer, "amax", None)
+    elif recipe == "fp8_current_scaling":
+        metadata_name = "scale_inv"
+        metadata = getattr(tensor, "_scale_inv", None)
+    elif recipe == "nvfp4":
+        metadata_name = "amax"
+        metadata = getattr(tensor, "_amax_rowwise", None)
+    elif recipe == "nvfp4_rowwise":
+        metadata_name = "amax_rowwise"
+        metadata = getattr(tensor, "_amax_rowwise", None)
+    elif recipe == "mxfp8":
+        # MXFP8 only exposes blockwise E8M0-encoded inverse scales, not a
+        # global FP32 scaling factor suitable for PTQ checkpoint export.
+        return None
+    elif recipe == "fp8_block_scaling":
+        # FP8 block scaling only exposes blockwise inverse scales, not a
+        # global FP32 scaling factor suitable for PTQ checkpoint export.
+        return None
+    else:
+        raise ValueError(f"Unsupported quantization recipe {recipe!r}")
+
+    buffer_name = f"{tensor_name}_tensor_{metadata_name}_{recipe}_te_ptq_calibrated"
+    return buffer_name, metadata
+
+
+def _update_scale_buffers(
+    scale_buffers: Dict[str, Optional[torch.Tensor]],
+    scale_updates: Dict[str, Optional[torch.Tensor]],
+    activation_scale_decay: float = 0.0,
+) -> None:
+    """Merge observed scaling factors into checkpoint buffers."""
+    for buffer_name, scale in scale_updates.items():
+        if scale is None:
+            continue
+        if activation_scale_decay > 0.0:
+            observed_scale = scale.detach().float()
+            scale_buffer = scale_buffers.get(buffer_name)
+            if scale_buffer is not None and scale_buffer.shape != observed_scale.shape:
+                raise RuntimeError(
+                    "Quantized scaling-factor buffer shape changed from "
+                    f"{tuple(scale_buffer.shape)} to {tuple(observed_scale.shape)}"
+                )
+            if scale_buffer is None:
+                # Initialize the rolling activation scaling factor.
+                # Requires CUDA graph warmup step.
+                scale_buffer = torch.zeros_like(observed_scale)
+                scale_buffers[buffer_name] = scale_buffer
+            # Track a decaying maximum so early-training activation
+            # outliers do not permanently determine the inference scale.
+            scale_buffer.mul_(activation_scale_decay)
+            torch.maximum(
+                scale_buffer,
+                observed_scale,
+                out=scale_buffer,
+            )
+        else:
+            # Without scale history, keep a reference to the current metadata
+            # without allocating or copying a separate buffer.
+            # Requires CUDA graph warmup step.
+            scale_buffers[buffer_name] = scale.detach()
 
 
 def set_quantizer_amax_reduction_group(quantizer, amax_reduction_group) -> None:
