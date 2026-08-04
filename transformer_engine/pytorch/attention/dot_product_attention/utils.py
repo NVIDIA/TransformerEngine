@@ -1615,8 +1615,24 @@ def get_attention_backend(
         bool(available_backends[2]),
     )
 
-    # Select FusedAttention for performance
-    if use_flash_attention and use_fused_attention and device_compute_capability >= (9, 0):
+    # Prefer FA2 for THD training with dropout on SM100/103, where FusedAttention has a known
+    # performance issue. At this point use_flash_attention_2 confirms a usable installation.
+    if (
+        is_training
+        and qkv_format == "thd"
+        and attention_dropout != 0.0
+        and device_compute_capability in ((10, 0), (10, 3))
+        and use_flash_attention_2
+        and use_fused_attention
+    ):
+        logger.debug(
+            "Disabling FusedAttention to give FlashAttention 2 preference for THD with dropout"
+            " on SM100/103"
+        )
+        use_fused_attention = False
+        fused_attention_backend = None
+    # Select FusedAttention for performance in all other Hopper+ configurations.
+    elif use_flash_attention and use_fused_attention and device_compute_capability >= (9, 0):
         logger.debug(
             "Disabling FlashAttention to give FusedAttention preference on Hopper+ "
             "for performance reasons"

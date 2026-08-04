@@ -28,8 +28,10 @@ from transformer_engine.pytorch.attention.dot_product_attention import (
     _attention_backends,
 )
 from transformer_engine.pytorch.attention.dot_product_attention.utils import (
+    AttentionParams,
     FlashAttentionUtils,
     check_set_window_size,
+    get_attention_backend,
 )
 from transformer_engine.pytorch.attention import RotaryPositionEmbedding
 import transformer_engine.pytorch.cpp_extensions as ext
@@ -320,6 +322,62 @@ def test_dpa_num_splits(dtype, model_configs, model):
         False,
         False,
     )
+
+
+@pytest.mark.skipif(
+    device_compute_capability not in ((10, 0), (10, 3)),
+    reason="This backend preference applies only to SM100/SM103.",
+)
+@pytest.mark.skipif(
+    not FlashAttentionUtils.is_installed,
+    reason="A supported FlashAttention 2 installation is required.",
+)
+@pytest.mark.skipif(
+    get_cudnn_version() < (9, 0, 0),
+    reason="cuDNN 9.0.0+ is required for THD FusedAttention.",
+)
+def test_thd_dropout_prefers_flash_attention_2(monkeypatch):
+    """THD training with dropout must select FA2 over FusedAttention on SM100/103.
+
+    cuDNN's dropout kernels for this combination are far slower than FA2's and are not on
+    the roadmap, so the choice is made here rather than left to the generic Hopper+ rule
+    that prefers FusedAttention.
+    """
+    monkeypatch.setenv("NVTE_FLASH_ATTN", "1")
+    monkeypatch.setenv("NVTE_FUSED_ATTN", "1")
+
+    attention_params = AttentionParams(
+        qkv_dtype=torch.bfloat16,
+        qkv_layout="thd_thd_thd",
+        batch_size=4,
+        num_heads=16,
+        num_gqa_groups=16,
+        max_seqlen_q=1024,
+        max_seqlen_kv=1024,
+        head_dim_qk=128,
+        head_dim_v=128,
+        attn_mask_type="padding_causal",
+        core_attention_bias_shape=None,
+        attention_dropout=0.1,
+        is_training=True,
+    )
+    (
+        use_flash_attention,
+        flash_attention_backend,
+        use_fused_attention,
+        fused_attention_backend,
+        _,
+        available_backends,
+    ) = get_attention_backend(attention_params)
+
+    # Assert availability first: without both candidates the preference is not exercised.
+    assert available_backends[0], "FlashAttention is unavailable for this configuration"
+    assert available_backends[1], "FusedAttention is unavailable for this configuration"
+
+    assert use_flash_attention
+    assert flash_attention_backend == FlashAttentionUtils.version
+    assert not use_fused_attention
+    assert fused_attention_backend is None
 
 
 # ==============================
