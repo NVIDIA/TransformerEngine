@@ -63,7 +63,7 @@ _MODEL_PARALLEL_ATTRIBUTE_DEFAULTS = {
 _USE_REENTRANT_ACTIVATION_RECOMPUTE = True
 
 _IN_ACTIVATION_RECOMPUTE_REGION = False
-_FP8_ACTIVATION_RECOMPUTE_PHASE = False
+_ACTIVATION_RECOMPUTE_PHASE = False
 
 
 _ALL_ACTIVE_RNG_STATES = {}
@@ -255,14 +255,14 @@ class activation_recompute_forward(AbstractContextManager, ContextDecorator):
         self.recompute_phase = recompute_phase
 
     def __enter__(self):
-        global _IN_ACTIVATION_RECOMPUTE_REGION, _FP8_ACTIVATION_RECOMPUTE_PHASE
+        global _IN_ACTIVATION_RECOMPUTE_REGION, _ACTIVATION_RECOMPUTE_PHASE
         # Track the checkpoint region independently of the FP8 state at entry.
         # A checkpointed callable may open its own FP8 autocast context (for
         # example, to select precision per layer). Delayed-scaling modules in
         # that inner context must still save their scale and amax metadata for
         # the recompute forward.
         _IN_ACTIVATION_RECOMPUTE_REGION = self.activation_recompute
-        _FP8_ACTIVATION_RECOMPUTE_PHASE = self.recompute_phase
+        _ACTIVATION_RECOMPUTE_PHASE = self.recompute_phase
 
         qstate = FP8GlobalStateManager.quantization_state
         if self.activation_recompute and not self.recompute_phase:
@@ -271,9 +271,9 @@ class activation_recompute_forward(AbstractContextManager, ContextDecorator):
             qstate.is_first_fp8_module = activation_recompute_forward._is_first_fp8_module.pop(0)
 
     def __exit__(self, *exc_details):
-        global _IN_ACTIVATION_RECOMPUTE_REGION, _FP8_ACTIVATION_RECOMPUTE_PHASE
+        global _IN_ACTIVATION_RECOMPUTE_REGION, _ACTIVATION_RECOMPUTE_PHASE
         _IN_ACTIVATION_RECOMPUTE_REGION = False
-        _FP8_ACTIVATION_RECOMPUTE_PHASE = False
+        _ACTIVATION_RECOMPUTE_PHASE = False
 
 
 def is_fp8_activation_recompute_enabled() -> bool:
@@ -283,7 +283,7 @@ def is_fp8_activation_recompute_enabled() -> bool:
 
 def in_fp8_activation_recompute_phase() -> bool:
     """Return global boolean"""
-    return _FP8_ACTIVATION_RECOMPUTE_PHASE
+    return _ACTIVATION_RECOMPUTE_PHASE
 
 
 def _get_active_autocast_contexts():
