@@ -12,6 +12,7 @@ import logging
 
 import torch
 import torch.nn.functional as F
+from torch.fx.experimental.symbolic_shapes import guard_scalar
 from torch.nn.parameter import Parameter
 
 from transformer_engine.common.recipe import (
@@ -1535,6 +1536,9 @@ class DotProductAttention(TransformerEngineBaseModule):
                     batch_size = query_layer.shape[0]
                     max_seqlen_q = query_layer.shape[1] if max_seqlen_q is None else max_seqlen_q
                     max_seqlen_kv = key_layer.shape[1] if max_seqlen_kv is None else max_seqlen_kv
+                # Backend selection bakes these in, which it cannot do symbolically.
+                max_seqlen_q = guard_scalar(max_seqlen_q)
+                max_seqlen_kv = guard_scalar(max_seqlen_kv)
             if qkv_format == "thd":
                 assert all(
                     len(x.shape) == 3 for x in (query_layer, key_layer, value_layer)
