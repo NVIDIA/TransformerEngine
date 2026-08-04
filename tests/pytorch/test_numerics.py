@@ -42,6 +42,10 @@ from transformer_engine.pytorch import (
     is_nvfp4_available,
 )
 from transformer_engine.pytorch import checkpoint as te_checkpoint
+from transformer_engine.pytorch.distributed import (
+    is_fp8_activation_recompute_enabled,
+    in_fp8_activation_recompute_phase,
+)
 from transformer_engine.pytorch.cpp_extensions import general_gemm
 from transformer_engine.common import recipe
 from transformer_engine.pytorch import DType
@@ -81,6 +85,9 @@ if is_bf16_available():  # bf16 requires sm_80 or higher
 batch_sizes = [1, 2]
 
 all_boolean = [True, False]
+
+# fp8_meta key written by FP8GlobalStateManager.copy_forward_fp8_meta_tensors_for_recompute
+_FP8_RECOMPUTE_KEY = "global_fp8_buffer_pos_fwd_recompute"
 
 all_activations = [
     "gelu",
@@ -802,9 +809,6 @@ def test_gpt_full_activation_recompute(
         )
 
 
-_FP8_RECOMPUTE_KEY = "global_fp8_buffer_pos_fwd_recompute"
-
-
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
 @pytest.mark.parametrize("use_reentrant", all_boolean)
 def test_gpt_full_activation_recompute_with_inner_autocast(use_reentrant, monkeypatch):
@@ -830,11 +834,8 @@ def test_gpt_full_activation_recompute_with_inner_autocast(use_reentrant, monkey
         inner_autocast=True,
     )
 
-    # The outputs cannot see a bad stash: the outer autocast is disabled, so the forward scale is
-    # never updated between the two forward phases, and a wrong scale would only perturb FP8
-    # rounding anyway because scale_inv is derived from the same scale at cast time. What is worth
-    # asserting is that the stash happened at all - before the fix, phase 1 skipped it while the
-    # recompute still restored, which surfaced as a KeyError on the recompute buffer lookup.
+    # Before the fix, phase 1 skipped the stash while the recompute still restored it, which
+    # surfaced as a KeyError on the recompute buffer lookup. Count both sides to pin that down.
     stash_counts, restore_counts = {}, {}
     stash_fn = FP8GlobalStateManager.copy_forward_fp8_meta_tensors_for_recompute
     restore_fn = FP8GlobalStateManager.get_old_fp8_meta_tensors_for_recompute
@@ -905,16 +906,33 @@ def _checkpointed_linear_backward(body, use_reentrant, *layers):
         assert torch.isfinite(layer.weight.grad).all()
 
 
-@pytest.mark.skipif(not is_bf16_available(), reason="bf16 requires sm_80 or higher")
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
 @pytest.mark.parametrize("use_reentrant", all_boolean)
-def test_checkpoint_without_fp8_does_not_save_fp8_recompute_state(use_reentrant):
-    """A checkpointed non-FP8 module does not save FP8 recompute metadata."""
+def test_checkpoint_inner_autocast_is_an_fp8_recompute_region(use_reentrant):
+    """An FP8 autocast opened inside a checkpointed callable is an FP8 recompute region."""
     FP8GlobalStateManager.reset()
+    fp8_recipe = recipe.DelayedScaling(fp8_format=recipe.Format.HYBRID)
     layer = Linear(16, 16, bias=False, params_dtype=torch.float32).cuda()
 
-    _checkpointed_linear_backward(layer, use_reentrant, layer)
+    observed = []
 
-    assert _FP8_RECOMPUTE_KEY not in layer.fp8_meta
+    def body(value):
+        outside = is_fp8_activation_recompute_enabled()
+        with autocast(enabled=True, recipe=fp8_recipe):
+            observed.append(
+                (
+                    outside,
+                    is_fp8_activation_recompute_enabled(),
+                    in_fp8_activation_recompute_phase(),
+                )
+            )
+            return layer(value)
+
+    _checkpointed_linear_backward(body, use_reentrant, layer)
+
+    # One entry for the checkpointed forward, one for the recompute during backward. The
+    # query is only an FP8 recompute region inside the autocast, in both phases.
+    assert observed == [(False, True, False), (False, True, True)]
 
 
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
