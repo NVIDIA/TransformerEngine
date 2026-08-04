@@ -395,6 +395,90 @@ class DotProductAttention(TransformerEngineBaseModule):
         As the FP8 attention support expands from one backend to multiple backends, the location
         of that key has also shifted (see `FP8 checkpoint compatibility <https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/faq.html#fp8-checkpoint-compatibility>`_).
 
+    .. rubric:: Fine-grained Linear and attention recipes
+
+    .. warning::
+
+        Fine-grained attention configuration through ``CustomRecipe`` and a quantizer factory is
+        experimental and subject to change.
+
+    A quantizer factory can select different recipes for Linear and DotProductAttention tensors
+    using ``QuantizerRole``. DotProductAttention itself supports only its fixed recipe families:
+    FP8 delayed scaling, FP8 current scaling, and MXFP8 block scaling. In particular, a factory may
+    return NVFP4 quantizers for Linear roles, but it must not return NVFP4 quantizers for DPA roles.
+
+    .. list-table:: Example Linear and attention combinations
+        :header-rows: 1
+
+        * - Linear
+          - Attention
+          - Configuration
+          - Status
+        * - NVFP4
+          - FP8 current scaling for QKV/O and delayed scaling for S/dP
+          - ``nvfp4_linear_fp8_dpa_factory``
+          - Validated factory provided by Transformer Engine
+        * - NVFP4
+          - MXFP8
+          - User-defined factory shown below
+          - Experimental example; not broadly validated
+
+    The validated NVFP4 Linear + FP8 attention combination is available from the quantizer factory
+    zoo::
+
+        from transformer_engine.common.recipe import CustomRecipe
+        from transformer_engine.pytorch.quantization import autocast
+        from transformer_engine.pytorch.custom_recipes.quantizer_factory_zoo import (
+            nvfp4_linear_fp8_dpa_factory,
+        )
+
+        recipe = CustomRecipe(
+            qfactory=nvfp4_linear_fp8_dpa_factory,
+            fp8_dpa=True,
+        )
+        with autocast(recipe=recipe):
+            output = model(input)
+
+    The following factory demonstrates the experimental NVFP4 Linear + MXFP8 attention
+    combination. With ``CustomRecipe``, the per-role selection is expressed directly in the
+    factory, so ``NVTE_DPA_FP8_RECIPE`` is not needed. DPA also issues hint-only roles for its
+    output boundaries; these must resolve to a DPA-supported quantizer even when the boundary
+    tensor remains in BF16. For MXFP8 attention, the fused kernel handles the S/dP slots
+    internally, so their factory-provided quantizers are not consumed::
+
+        from transformer_engine.common.recipe import CustomRecipe
+        from transformer_engine.pytorch.constants import DType
+        from transformer_engine.pytorch.custom_recipes.quantizer_factories import nvfp4_factory
+        from transformer_engine.pytorch.quantization import autocast
+        from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
+
+        def nvfp4_linear_mxfp8_dpa_factory(role):
+            # NVFP4 for Linear roles and MXFP8 for supported DPA roles.
+            is_dpa = role is not None and role.module_type == "dpa"
+            is_dpa_boundary = (
+                role is not None
+                and not role.module_type
+                and ("dpa_output" in role.name or "dpa_grad_input" in role.name)
+            )
+
+            if is_dpa or is_dpa_boundary:
+                is_bwd_role = (
+                    is_dpa and role.tensor_type in ("do", "dp", "dqkv")
+                ) or (
+                    is_dpa_boundary and "dpa_grad_input" in role.name
+                )
+                fp8_dtype = DType.kFloat8E5M2 if is_bwd_role else DType.kFloat8E4M3
+                return MXFP8Quantizer(fp8_dtype=fp8_dtype)
+
+            return nvfp4_factory(role)
+
+        recipe = CustomRecipe(
+            qfactory=nvfp4_linear_mxfp8_dpa_factory,
+            fp8_dpa=True,
+        )
+        with autocast(recipe=recipe):
+            output = model(input)
+
 
     Parameters
     ----------

@@ -49,7 +49,7 @@ Usage::
     from transformer_engine.pytorch.quantization import autocast
     from transformer_engine.pytorch.custom_recipes.quantizer_factory_zoo import (
         mxfp8_fwd_nvfp4_bwd_factory,
-        nvfp4_linear_mxfp8_dpa_factory,
+        nvfp4_linear_fp8_dpa_factory,
     )
 
     # Linear-only recipe (no attention quantization): the qfactory is the only knob.
@@ -59,7 +59,7 @@ Usage::
 
     # Recipe that also quantizes DotProductAttention: set ``fp8_dpa=True`` so the
     # attention GEMMs request quantizers from the factory (DPA roles) too.
-    recipe = CustomRecipe(qfactory=nvfp4_linear_mxfp8_dpa_factory, fp8_dpa=True)
+    recipe = CustomRecipe(qfactory=nvfp4_linear_fp8_dpa_factory, fp8_dpa=True)
     with autocast(recipe=recipe):
         output = model(input)
 
@@ -135,24 +135,26 @@ def mxfp8_fwd_nvfp4_bwd_factory(
     representations consumed by wgrad, and gradients use stochastic rounding.
     The dgrad weight uses plain 1D NVFP4 without RHT or stochastic rounding.
 
-    The backward input and weight representations are quantized to NVFP4
-    directly from the original high-precision tensors rather than from the
-    dequantized MXFP8 forward representations. In ``HybridQuantizer`` terms,
-    this source choice is expressed with ``columnwise_source="original"``,
-    which is the default. To derive them from the forward representations
-    instead, use ``columnwise_source="rowwise_dequantized"``.
+    The backward weight representation consumed by dgrad is quantized to
+    NVFP4 from the dequantized MXFP8 forward weight. In ``HybridQuantizer``
+    terms, the weight uses ``columnwise_source="rowwise_dequantized"``. The
+    backward input representation consumed by wgrad remains quantized directly
+    from the original high-precision input with ``columnwise_source="original"``.
     """
     from transformer_engine.pytorch.tensor.hybrid_tensor import HybridQuantizer
 
     is_linear = role is not None and role.module_type in ("linear", "grouped_linear")
-    if is_linear and role.tensor_type in ("input", "weight"):
-        if role.tensor_type == "weight":
-            backward_quantizer = _plain_nvfp4_quantizer()
-        else:
-            backward_quantizer = nvfp4_factory(role)
+    if is_linear and role.tensor_type == "input":
         return HybridQuantizer(
             rowwise_quantizer=mxfp8_factory(role),
-            columnwise_quantizer=backward_quantizer,
+            columnwise_quantizer=nvfp4_factory(role),
+            columnwise_source="original",
+        )
+    if is_linear and role.tensor_type == "weight":
+        return HybridQuantizer(
+            rowwise_quantizer=mxfp8_factory(role),
+            columnwise_quantizer=_plain_nvfp4_quantizer(),
+            columnwise_source="rowwise_dequantized",
         )
     if is_linear and role.tensor_type == "grad_output":
         return nvfp4_factory(role)
@@ -433,76 +435,5 @@ def nvfp4_linear_fp8_dpa_factory(
         )
         fp8_dtype = DType.kFloat8E5M2 if is_bwd_role else DType.kFloat8E4M3
         return Float8CurrentScalingQuantizer(fp8_dtype=fp8_dtype, device="cuda")
-
-    return nvfp4_factory(role)
-
-
-@quantizer_policy(key=("nvfp4_linear_mxfp8_dpa", 1))
-def nvfp4_linear_mxfp8_dpa_factory(
-    role: Optional[QuantizerRole],
-):
-    """Quantizer factory: NVFP4 for ``Linear``, MXFP8 for ``DotProductAttention``.
-
-    Mirrors the documented "NVFP4 linear + MXFP8 attention" combo from
-    :mod:`transformer_engine.pytorch.attention.dot_product_attention.dot_product_attention`
-    (see the recipe-combination table at the top of that module). With
-    ``CustomRecipe`` the per-tensor decision is made directly here, so the
-    ``NVTE_DPA_FP8_RECIPE="MXFP8BlockScaling"`` env override that the
-    built-in recipes would otherwise need is unnecessary.
-
-    DPA-owned tensor types (``role.module_type == "dpa"``):
-
-    =========== ============================================================
-    tensor_type Description
-    =========== ============================================================
-    ``"qkv"``  Query, Key, Value inputs to the first attention GEMM
-    ``"s"``    Softmax output (S = softmax(Q·K^T)), fed into the second GEMM
-    ``"do"``   Gradient of the attention output (dO), backward input
-    ``"dp"``   Gradient of the softmax output (dP = dO·V^T), backward
-    =========== ============================================================
-
-    Dispatch logic:
-        * ``role.module_type == "dpa"`` -> MXFP8
-          (``Format.HYBRID``: E4M3 fwd, E5M2 bwd)
-          The MXFP8 fused-attention kernel handles the S/dP slots
-          internally, so any quantizer returned for those roles is later
-          nulled out by ``get_attention_quantizers``.  Returning MXFP8 is
-          the simplest valid choice.
-        * DPA boundary hints (``"dpa_output"`` / ``"dpa_grad_input"`` in
-          ``role.name``) -> MXFP8 placeholder.  The fused attention kernel
-          requires FP8-compatible quantizers in all DPA slots.
-        * everything else (``"linear"`` / ``"grouped_linear"`` / ``None``)
-          -> NVFP4 (E2M1), configured per tensor role.
-
-    Usage::
-
-        from transformer_engine.common.recipe import CustomRecipe
-        from transformer_engine.pytorch.quantization import autocast
-        from transformer_engine.pytorch.custom_recipes.quantizer_factory_zoo import (
-            nvfp4_linear_mxfp8_dpa_factory,
-        )
-
-        recipe = CustomRecipe(
-            qfactory=nvfp4_linear_mxfp8_dpa_factory,
-            fp8_dpa=True,
-        )
-        with autocast(recipe=recipe):
-            output = model(input)
-    """
-    from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
-
-    is_dpa = role is not None and role.module_type == "dpa"
-    is_dpa_boundary = (
-        role is not None
-        and not role.module_type
-        and ("dpa_output" in role.name or "dpa_grad_input" in role.name)
-    )
-
-    if is_dpa or is_dpa_boundary:
-        is_bwd_role = (is_dpa and role.tensor_type in ("do", "dp", "dqkv")) or (
-            is_dpa_boundary and "dpa_grad_input" in role.name
-        )
-        fp8_dtype = DType.kFloat8E5M2 if is_bwd_role else DType.kFloat8E4M3
-        return MXFP8Quantizer(fp8_dtype=fp8_dtype)
 
     return nvfp4_factory(role)

@@ -271,7 +271,9 @@ def _split_quantize_non_hybrid(
     tensor = cast_if_needed(tensor, activation_dtype)
     if (
         allow_identity_views
-        and type(reference) is IdentityQuantizer
+        # Only the base IdentityQuantizer can bypass quantization; subclasses
+        # may override its behavior and must go through their normal call path.
+        and type(reference) is IdentityQuantizer  # pylint: disable=unidiomatic-typecheck
         and (reference.dtype is None or reference.dtype == activation_dtype)
     ):
         return torch.split(tensor, m_splits)

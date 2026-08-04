@@ -7,6 +7,9 @@ import torch
 
 import transformer_engine.pytorch as te
 import transformer_engine_torch as tex
+from hybrid_quantization_utils import (
+    nvfp4_linear_mxfp8_dpa_test_factory as _nvfp4_linear_mxfp8_dpa_factory,
+)
 from transformer_engine.common import recipe
 from transformer_engine.pytorch.constants import FP8BwdTensorIdx, FP8FwdTensorIdx
 from transformer_engine.pytorch import (
@@ -1268,15 +1271,15 @@ def test_custom_recipe_dpa_fp8():
 def test_custom_recipe_dpa_mxfp8():
     """DotProductAttention forward+backward with CustomRecipe and MXFP8 attention.
 
-    Uses the nvfp4_linear_mxfp8_dpa_factory which dispatches:
+    Uses a test-local reference factory which dispatches:
       * DPA roles (QKV/O/S/dO/dP/dQKV) -> MXFP8Quantizer (S/dP later nulled
         out by ``get_attention_quantizers`` since the MXFP8 fused-attention
         kernel handles those slots internally)
       * DPA boundary hints -> MXFP8Quantizer
       * Linear slots -> NVFP4Quantizer
 
-    Mirrors the documented "NVFP4 linear + MXFP8 attention" combo from
-    ``dot_product_attention.py``'s recipe-combination table.
+    Mirrors the documented experimental "NVFP4 Linear + MXFP8 attention"
+    configuration.
     """
     available, reason = te.is_fp8_available(return_reason=True)
     if not torch.cuda.is_available() or not available:
@@ -1295,9 +1298,6 @@ def test_custom_recipe_dpa_mxfp8():
     from transformer_engine.pytorch.quantization import CustomRecipeState
     from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
     from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Quantizer
-    from transformer_engine.pytorch.custom_recipes.quantizer_factory_zoo import (
-        nvfp4_linear_mxfp8_dpa_factory,
-    )
 
     torch.manual_seed(42)
 
@@ -1317,7 +1317,7 @@ def test_custom_recipe_dpa_mxfp8():
     out_proj = Linear(H, H, params_dtype=torch.bfloat16, bias=False, name="proj").cuda()
 
     custom_recipe = recipe.CustomRecipe(
-        qfactory=nvfp4_linear_mxfp8_dpa_factory,
+        qfactory=_nvfp4_linear_mxfp8_dpa_factory,
         fp8_dpa=True,
     )
 

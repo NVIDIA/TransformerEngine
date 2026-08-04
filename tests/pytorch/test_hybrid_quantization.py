@@ -27,6 +27,7 @@ from hybrid_quantization_utils import (
     make_nvfp4_quantizer as _make_nvfp4_quantizer,
     make_role_aware_quantizer as _make_role_aware_quantizer,
     mxfp8_e4m3_factory as _mxfp8_factory,
+    nvfp4_linear_mxfp8_dpa_test_factory as _nvfp4_linear_mxfp8_dpa_factory,
     snapshot_storage_tensor_metadata as _snapshot_storage_tensor_metadata,
 )
 from transformer_engine.common import recipe
@@ -35,6 +36,7 @@ from transformer_engine.pytorch.custom_recipes.quantizer_factories import (
 )
 from transformer_engine.pytorch.custom_recipes.quantizer_factory_zoo import (
     mxfp8_fwd_nvfp4_bwd_factory,
+    nvfp4_linear_fp8_dpa_factory,
 )
 from transformer_engine.pytorch import (
     autocast,
@@ -2335,17 +2337,17 @@ class TestAttentionFactoryNativeRecipeParity:
         )
 
     @pytest.mark.parametrize(
-        "case_name,native_dpa_recipe,qfactory_name",
+        "case_name,native_dpa_recipe,qfactory",
         [
             (
                 "fp8_dpa",
                 "Float8CurrentScaling",
-                "nvfp4_linear_fp8_dpa_factory",
+                nvfp4_linear_fp8_dpa_factory,
             ),
             (
                 "mxfp8_dpa",
                 "MXFP8BlockScaling",
-                "nvfp4_linear_mxfp8_dpa_factory",
+                _nvfp4_linear_mxfp8_dpa_factory,
             ),
         ],
     )
@@ -2354,12 +2356,11 @@ class TestAttentionFactoryNativeRecipeParity:
         monkeypatch,
         case_name,
         native_dpa_recipe,
-        qfactory_name,
+        qfactory,
     ):
         if case_name == "mxfp8_dpa" and not mxfp8_available:
             pytest.skip(f"MXFP8: {reason_for_no_mxfp8}")
 
-        from transformer_engine.pytorch.custom_recipes import quantizer_factory_zoo
         from transformer_engine.pytorch.utils import get_device_compute_capability
 
         cc = get_device_compute_capability()
@@ -2392,7 +2393,6 @@ class TestAttentionFactoryNativeRecipeParity:
         grad = torch.randn_like(base_inp)
 
         native_recipe = recipe.NVFP4BlockScaling(fp8_dpa=True)
-        qfactory = getattr(quantizer_factory_zoo, qfactory_name)
         qfactory_recipe = recipe.CustomRecipe(qfactory=qfactory, fp8_dpa=True)
 
         native_out, native_dx, native_grads, native_local_recipes = self._run_model(
@@ -2449,18 +2449,18 @@ class TestAttentionFactoryNativeRecipeParity:
         )
 
     @pytest.mark.parametrize(
-        "case_name,native_dpa_recipe,qfactory_name,expected_flags",
+        "case_name,native_dpa_recipe,qfactory,expected_flags",
         [
             (
                 "fp8_dpa",
                 "Float8CurrentScaling",
-                "nvfp4_linear_fp8_dpa_factory",
+                nvfp4_linear_fp8_dpa_factory,
                 (False, False, False),
             ),
             (
                 "mxfp8_dpa",
                 "MXFP8BlockScaling",
-                "nvfp4_linear_mxfp8_dpa_factory",
+                _nvfp4_linear_mxfp8_dpa_factory,
                 (False, False, False),
             ),
         ],
@@ -2470,14 +2470,13 @@ class TestAttentionFactoryNativeRecipeParity:
         monkeypatch,
         case_name,
         native_dpa_recipe,
-        qfactory_name,
+        qfactory,
         expected_flags,
     ):
         if case_name == "mxfp8_dpa" and not mxfp8_available:
             pytest.skip(f"MXFP8: {reason_for_no_mxfp8}")
 
         from transformer_engine.pytorch.attention import multi_head_attention as mha_module
-        from transformer_engine.pytorch.custom_recipes import quantizer_factory_zoo
         from transformer_engine.pytorch.utils import get_device_compute_capability
 
         cc = get_device_compute_capability()
@@ -2535,7 +2534,6 @@ class TestAttentionFactoryNativeRecipeParity:
         grad = torch.randn_like(base_inp)
 
         native_recipe = recipe.NVFP4BlockScaling(fp8_dpa=True)
-        qfactory = getattr(quantizer_factory_zoo, qfactory_name)
         qfactory_recipe = recipe.CustomRecipe(qfactory=qfactory, fp8_dpa=True)
 
         native_out, native_dx, native_grads = self._run_mha_model(
@@ -2633,9 +2631,6 @@ class TestAttentionFactoryNativeRecipeParity:
         from transformer_engine.pytorch.attention.dot_product_attention import (
             backends as dpa_backends,
         )
-        from transformer_engine.pytorch.custom_recipes.quantizer_factory_zoo import (
-            nvfp4_linear_mxfp8_dpa_factory,
-        )
         from transformer_engine.pytorch.utils import get_device_compute_capability
 
         cc = get_device_compute_capability()
@@ -2731,7 +2726,7 @@ class TestAttentionFactoryNativeRecipeParity:
         )
         grad = torch.randn_like(inp)
         qfactory_recipe = recipe.CustomRecipe(
-            qfactory=nvfp4_linear_mxfp8_dpa_factory,
+            qfactory=_nvfp4_linear_mxfp8_dpa_factory,
             fp8_dpa=True,
         )
         try:
@@ -3074,6 +3069,27 @@ class TestUnwrapTensor:
 
     def test_hybrid_columnwise_returns_columnwise_sub_storage(self, hybrid_tensor):
         assert _unwrap_tensor(hybrid_tensor, "columnwise") is hybrid_tensor.columnwise_sub_storage
+
+    @pytest.mark.parametrize(
+        "available_usage,missing_usage",
+        [("rowwise", "columnwise"), ("columnwise", "rowwise")],
+    )
+    def test_missing_hybrid_representation_raises(self, available_usage, missing_usage):
+        inp = torch.randn(128, 256, dtype=torch.bfloat16, device="cuda")
+        quantizer = _make_hybrid_quantizer_fp8_row_fp4_col()
+        quantizer.set_usage(
+            rowwise=available_usage == "rowwise",
+            columnwise=available_usage == "columnwise",
+        )
+        hybrid_tensor = quantizer.quantize(inp)
+
+        assert getattr(hybrid_tensor, f"{available_usage}_sub_storage") is not None
+        assert getattr(hybrid_tensor, f"{missing_usage}_sub_storage") is None
+        with pytest.raises(
+            RuntimeError,
+            match=rf"GEMM requested the {missing_usage} representation, but it is unavailable",
+        ):
+            _unwrap_tensor(hybrid_tensor, missing_usage)
 
     def test_rowwise_sub_storage_type(self, hybrid_tensor):
         assert isinstance(
