@@ -63,7 +63,7 @@ struct MXFP8QuantConfig {
   // compiled and registered on a cache miss.
   std::string to_key() const {
     std::string key;
-    key.reserve(54);
+    key.reserve(64);  // longest: cutedsl_mxfp8_bf16_fp8_e4m3fn_..._dqgelu
     key.append("cutedsl_mxfp8_")
         .append(te_dtype_to_str(dtype))
         .append("_")

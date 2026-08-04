@@ -90,7 +90,12 @@ FP8_DTYPES = [tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2]
 
 # Description strings for pytest case ids and the CuTeDSL config key.
 DTYPE_TO_STR = {torch.float32: "fp32", torch.bfloat16: "bf16", torch.float16: "fp16"}
-FP8_TO_STR = {tex.DType.kFloat8E4M3: "e4m3", tex.DType.kFloat8E5M2: "e5m2"}
+FP8_TO_STR = {tex.DType.kFloat8E4M3: "e4m3", tex.DType.kFloat8E5M2: "e5m2"}  # pytest ids
+# Wire token in the TVM-FFI registry key; must match C++ te_dtype_to_str().
+FP8_TO_KEY = {
+    tex.DType.kFloat8E4M3: "fp8_e4m3fn",
+    tex.DType.kFloat8E5M2: "fp8_e5m2",
+}
 
 # Scale layout: linear, or the GEMM-swizzled layout cuBLAS consumes
 # (quantizer.optimize_for_gemm -> MXFP8QuantConfig::swizzled).
@@ -100,7 +105,7 @@ get_shape_id = lambda s: f"{s[0]}x{s[1]}"
 get_block_id = lambda b: f"{b[0]}x{b[1]}"
 get_dtype_id = DTYPE_TO_STR.get
 get_fp8_id = FP8_TO_STR.get
-get_swizzle_id = lambda s: "swizzled" if s else "linear"
+get_swizzle_id = lambda s: "swizzled" if s else "non-swizzled"
 
 
 def set_cutedsl_backend(enabled):
@@ -169,7 +174,7 @@ def get_cfg_key(method, act, in_dtype, fp8_dtype, rowwise, colwise, swizzled):
         "cutedsl_mxfp8_"
         + DTYPE_TO_STR[in_dtype]
         + "_"
-        + FP8_TO_STR[fp8_dtype]
+        + FP8_TO_KEY[fp8_dtype]
         + "_"
         + "_".join("1" if f else "0" for f in flags)
         + "_"

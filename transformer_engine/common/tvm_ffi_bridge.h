@@ -42,9 +42,11 @@ inline const char *te_dtype_to_str(DType dtype) {
     case DType::kBFloat16:
       return "bf16";
     case DType::kFloat8E4M3:
-      return "e4m3";
+      return "fp8_e4m3fn";
     case DType::kFloat8E5M2:
-      return "e5m2";
+      return "fp8_e5m2";
+    case DType::kFloat8E8M0:
+      return "fp8_e8m0fnu";
     default:
       return "";
   }
@@ -114,9 +116,6 @@ inline DLDataType convert_to_dltype(NVTEDType type) {
       return DLDataType{kDLInt, 32, 1};
     case kNVTEInt64:
       return DLDataType{kDLInt, 64, 1};
-    // Native DLPack (>= 1.1) FP8 codes. TE's E4M3 is CUDA's finite __nv_fp8_e4m3,
-    // i.e. the "fn" variant (kDLFloat8_e4m3 would be the IEEE-style type with
-    // infinities); E8M0 scales are the unsigned, finite, single-NaN MX format.
     case kNVTEFloat8E4M3:
       return DLDataType{kDLFloat8_e4m3fn, 8, 1};
     case kNVTEFloat8E5M2:

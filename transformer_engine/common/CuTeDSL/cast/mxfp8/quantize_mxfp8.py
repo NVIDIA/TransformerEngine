@@ -28,7 +28,7 @@ from typing import Optional, Type
 import cutlass
 from cutlass import cute
 from cutlass import pipeline
-from cutlass import Boolean, Float32, Int16, Int32, Int64, Uint16, Uint32, Uint8
+from cutlass import Boolean, Float32, Float8E8M0FNU, Int16, Int32, Int64, Uint16, Uint32, Uint8
 from cuda.bindings.driver import CUstream  # pylint: disable=no-name-in-module
 import tvm_ffi
 
@@ -56,9 +56,8 @@ from transformer_engine.common.CuTeDSL.activations import (
     dact_dgelu,
 )
 from transformer_engine.common.CuTeDSL.utils_fp8 import (
-    as_byte_tensor,
     get_cvt_f32x2_to_fp8x2_func,
-    cvt_f32_to_fp8e8m0,
+    cvt_f32_to_fp8e8m0fnu,
     mul_f32x2_cvt_f32x4_to_fp8x4,
     mul_f32x4_cvt_f32x4_to_fp8x4,
     mul_f32x2_cvt_packed16x4_to_fp8x4,
@@ -138,7 +137,7 @@ def derive_swizzled_scale_layout(
 def quantize_rowwise_mxfp8(
     sX_tile,  # (TILE_Y, TILE_X) bf16/fp16 smem view, post-TMA
     sA_tile,  # (TILE_Y, TILE_X) activation-input smem tile (dact only)
-    sO_row_tile,  # (TILE_Y, TILE_X) uint8 smem view (rowwise FP8 output)
+    sO_row_tile,  # (TILE_Y, TILE_X) fp8 smem view (rowwise FP8 output)
     mS_row_stage,  # rowwise scale tensor (1D swizzled, or 2D linear)
     max_norm_rcp,
     tile_row_start,  # Int32 — global row index of this stage's row 0
@@ -178,10 +177,9 @@ def quantize_rowwise_mxfp8(
 
     # I/O Elements that belong to this thread
     sX_thread = sX_tv[tidx, None]  # shape (32,) bf16
-    sO_thread = sO_tv[tidx, None]  # shape (32,) uint8
+    sO_thread = sO_tv[tidx, None]  # shape (32,) fp8
 
     sO_thread_u32_ptr = cute.recast_ptr(sO_thread.iterator, dtype=Uint32)
-    # Each wave it writes 32 bytes = 8 uint32s, so in 4 waves we write all 32 quantized elements.
     sO_thread_u32 = cute.make_tensor(
         sO_thread_u32_ptr,
         cute.make_layout(
@@ -294,7 +292,7 @@ def quantize_rowwise_mxfp8(
         if cutlass.const_expr(FUSE_RELU):
             amax_r = cute.arch.fmax(amax_r, Float32(0.0))  # If relu, the amax is at least 0
 
-    biased_exp_r = cvt_f32_to_fp8e8m0(amax_r * max_norm_rcp)
+    biased_exp_r = cvt_f32_to_fp8e8m0fnu(amax_r * max_norm_rcp)
 
     # mS_row_stage has logical shape (32, 2) and we have 64 threads where each is mapped to one scale factor
     # The TV layout is equivalent to TV layout with thr_layout=(32, 2):(2, 1), val_layout=(1,)
@@ -307,7 +305,7 @@ def quantize_rowwise_mxfp8(
     scale_row = tile_row_start + tidx // CTA_THREADS_X
     scale_col_first_elt = tile_col_start + (tidx % CTA_THREADS_X) * MXFP8_BLOCK_SCALING_SIZE
     if scale_row < M and scale_col_first_elt < N:
-        mS_row_stage[(tidx // CTA_THREADS_X, tidx % CTA_THREADS_X)] = Uint8(biased_exp_r)
+        mS_row_stage[(tidx // CTA_THREADS_X, tidx % CTA_THREADS_X)] = biased_exp_r
 
     inv_scale_r = exp2f_rcp(biased_exp_r)  # f32 reciprocal of the scale
     scale_2x = pack_f32x2(inv_scale_r, inv_scale_r)
@@ -324,9 +322,7 @@ def quantize_rowwise_mxfp8(
             sO_thread_u32[idx] = mul_cvt_x4_func(in_r[w][0], in_r[w][1], scale_2x)
         else:
             # Convert 4 f32 to 4 fp8 in one fused op
-            sO_thread_u32[idx] = mul_cvt_x4_func(
-                in_r[w][0], in_r[w][1], in_r[w][2], in_r[w][3], scale_2x
-            )
+            sO_thread_u32[idx] = mul_cvt_x4_func(in_r[w][0], in_r[w][1], in_r[w][2], in_r[w][3], scale_2x)
 
     return amax_r
 
@@ -334,7 +330,7 @@ def quantize_rowwise_mxfp8(
 @cute.jit
 def quantize_colwise_mxfp8(
     sX_tile,  # (TILE_Y, TILE_X) bf16/fp16 smem view, post-TMA
-    sO_col_tile,  # (TILE_Y, TILE_X) uint8 smem view (colwise FP8 output)
+    sO_col_tile,  # (TILE_Y, TILE_X) fp8 smem view (colwise FP8 output)
     mS_col_stage,  # colwise scale tensor (1D swizzled, or 2D linear)
     max_norm_rcp,
     tile_row_start,  # Int32 — global row index of this stage's row 0
@@ -393,50 +389,57 @@ def quantize_colwise_mxfp8(
         amax_c = fabs_f32(kit.bits_to_f32(amax_bits))
     else:
         # Otherwise we need to case input values to fp32. Allocate the register tensor and load from SMEM input tiles.
-        sX_thread_f32 = cute.make_rmem_tensor(
+        rX_thread_f32 = cute.make_rmem_tensor(
             layout_or_shape=cute.make_layout((MXFP8_BLOCK_SCALING_SIZE,), stride=(1,)),
             dtype=Float32,
         )
         for i in cutlass.range_constexpr(MXFP8_BLOCK_SCALING_SIZE):
-            sX_thread_f32[i] = Float32(sX_thread[i])
+            rX_thread_f32[i] = Float32(sX_thread[i])
         # Apply activation (fwd) or grad·act'(act_input) (bwd dact) in f32.
         if cutlass.const_expr(WITH_DACT):
             dop = SUPPORTED_DACTIVATIONS[ACTIVATION]
             sA_thread = cute.composition(sA_tile, tv_layout)[tidx, None]
             for i in cutlass.range_constexpr(MXFP8_BLOCK_SCALING_SIZE):
-                sX_thread_f32[i] = sX_thread_f32[i] * dop(Float32(sA_thread[i]))
+                rX_thread_f32[i] = rX_thread_f32[i] * dop(Float32(sA_thread[i]))
         elif cutlass.const_expr(WITH_ACT):
             op = SUPPORTED_ACTIVATIONS[ACTIVATION]
             for i in cutlass.range_constexpr(MXFP8_BLOCK_SCALING_SIZE):
-                sX_thread_f32[i] = op(sX_thread_f32[i])
+                rX_thread_f32[i] = op(rX_thread_f32[i])
+        # Accumulate fp32 activations to DBIAS before we truncate to half precision when the input is half precision
+        if cutlass.const_expr(WITH_DBIAS):
+            for i in cutlass.range_constexpr(MXFP8_BLOCK_SCALING_SIZE):
+                dbias_partial += rX_thread_f32[i]
         # Truncate the activation (after we apply op) back to the half precision type if input is also half precision.
         if cutlass.const_expr(is_packed16(DTYPE) and ACTIVATION is not None):
             kit_act = packed16_kit(DTYPE)
             for i in cutlass.range_constexpr(MXFP8_BLOCK_SCALING_SIZE):
-                sX_thread_f32[i] = kit_act.truncate_f32(sX_thread_f32[i])
+                rX_thread_f32[i] = kit_act.truncate_f32(rX_thread_f32[i])
         # Columnwise is the preferred direction so it runs first. If it needs to cache the activation in the input tile
         # to let the rowwise pass read it, we need to cast and overwrite the input data in-place here
         if cutlass.const_expr(CACHE_ACTIVATION):
             for i in cutlass.range_constexpr(MXFP8_BLOCK_SCALING_SIZE):
-                sX_thread[i] = DTYPE(sX_thread_f32[i])
+                sX_thread[i] = DTYPE(rX_thread_f32[i])
         amax_c = Float32(0.0)
         for i in cutlass.range_constexpr(MXFP8_BLOCK_SCALING_SIZE):
-            amax_c = cute.arch.fmax(amax_c, fabs_f32(sX_thread_f32[i]))
+            amax_c = cute.arch.fmax(amax_c, fabs_f32(rX_thread_f32[i]))
 
     # Irregular shapes: skip when this stage's row range or this thread's
     # column lies past the input extents. TILE_Y == MXFP8_BLOCK_SCALING_SIZE so each stage
     # is exactly one scale-row; valid iff `tile_row_start < M`.
-    biased_exp_c = cvt_f32_to_fp8e8m0(amax_c * max_norm_rcp)
+    biased_exp_c = cvt_f32_to_fp8e8m0fnu(amax_c * max_norm_rcp)
     scale_col = tile_col_start + tidx
     if tile_row_start < M and scale_col < N:
         if cutlass.const_expr(SWIZZLE):
-            mS_col_stage[(0, tidx % 32, tidx // 32)] = Uint8(biased_exp_c)
+            mS_col_stage[(0, tidx % 32, tidx // 32)] = biased_exp_c
         else:
-            mS_col_stage[(0, tidx)] = Uint8(biased_exp_c)
+            mS_col_stage[(0, tidx)] = biased_exp_c
 
     inv_scale_c = exp2f_rcp(biased_exp_c)
     # cvt.rn.satfinite can be vectorized to convert 2 f32 to 2 fp8 in one instruction
     cvt_x2_func = get_cvt_f32x2_to_fp8x2_func(FP8_DTYPE)
+    sO_thread_fp8 = cute.make_tensor(
+        cute.recast_ptr(sO_thread.iterator, dtype=FP8_DTYPE), sO_thread.layout
+    )
     if cutlass.const_expr(USE_HALF_PRECISION):
         kit_cast = packed16_kit(DTYPE)
         for j in cutlass.range_constexpr(MXFP8_BLOCK_SCALING_SIZE // 2):
@@ -449,19 +452,14 @@ def quantize_colwise_mxfp8(
                 dbias_partial += v_lo
                 dbias_partial += v_hi
             pair = cvt_x2_func(v_hi * inv_scale_c, v_lo * inv_scale_c)
-            sO_thread[lo] = Uint8(pair & Uint16(0xFF))
-            sO_thread[hi] = Uint8(pair >> Uint16(8))
+            sO_thread_fp8[lo] = Uint8(pair & Uint16(0xFF)).bitcast(FP8_DTYPE)
+            sO_thread_fp8[hi] = Uint8(pair >> Uint16(8)).bitcast(FP8_DTYPE)
     else:
         for j in cutlass.range_constexpr(MXFP8_BLOCK_SCALING_SIZE // 2):
             lo, hi = 2 * j, 2 * j + 1
-            # Accumulate the per-thread column partial for dbias if WITH_DBIAS.
-            # Kept as two adds in element order: f32 addition is not associative
-            if cutlass.const_expr(WITH_DBIAS):
-                dbias_partial += sX_thread_f32[lo]
-                dbias_partial += sX_thread_f32[hi]
-            pair = cvt_x2_func(sX_thread_f32[hi] * inv_scale_c, sX_thread_f32[lo] * inv_scale_c)
-            sO_thread[lo] = Uint8(pair & Uint16(0xFF))
-            sO_thread[hi] = Uint8(pair >> Uint16(8))
+            pair = cvt_x2_func(rX_thread_f32[hi] * inv_scale_c, rX_thread_f32[lo] * inv_scale_c)
+            sO_thread_fp8[lo] = Uint8(pair & Uint16(0xFF)).bitcast(FP8_DTYPE)
+            sO_thread_fp8[hi] = Uint8(pair >> Uint16(8)).bitcast(FP8_DTYPE)
 
     # Return this stage's per-column partial alongside amax; the caller accumulates
     # it across stages (a scalar can't be updated in-place through the arg).
@@ -519,8 +517,8 @@ def quantize_bidimensional_mxfp8_swizzled(
     tSsS_row_tile = cute.composition(sS_row_tile, tv_layout_rowwise_scale)[tidx, None]  # (1,)
     tSsS_col_tile = cute.composition(sS_col_tile, tv_layout_colwise_scale)[tidx, None]  # (1,)
 
-    rO_row = cute.make_rmem_tensor(MXFP8_BLOCK_SCALING_SIZE, Uint8)
-    rO_col = cute.make_rmem_tensor(MXFP8_BLOCK_SCALING_SIZE, Uint8)
+    rO_row = cute.make_rmem_tensor(MXFP8_BLOCK_SCALING_SIZE, fp8_dtype)
+    rO_col = cute.make_rmem_tensor(MXFP8_BLOCK_SCALING_SIZE, fp8_dtype)
     rO_row_u32 = cute.make_tensor(
         cute.recast_ptr(rO_row.iterator, dtype=Uint32),
         cute.make_layout((MXFP8_BLOCK_SCALING_SIZE // 4,), stride=(1,)),
@@ -564,14 +562,14 @@ def quantize_bidimensional_mxfp8_swizzled(
         row_amax = cute.arch.fmax(
             fabs_f32(kit.x2_lo_to_f32(row_amax2)), fabs_f32(kit.x2_hi_to_f32(row_amax2))
         )
-        row_exp = cvt_f32_to_fp8e8m0(row_amax * max_norm_rcp)
+        row_exp = cvt_f32_to_fp8e8m0fnu(row_amax * max_norm_rcp)
         row_inv = exp2f_rcp(row_exp)
-        tSsS_row_tile[0] = Uint8(row_exp)
+        tSsS_row_tile[0] = row_exp
         cute.arch.sync_warp()
 
         # Compute the colwise scale factor (only handle the one that belongs to this thread / lane)
-        col_exp = cvt_f32_to_fp8e8m0(sColReduce_warp[lane] * max_norm_rcp)
-        tSsS_col_tile[0] = Uint8(col_exp)
+        col_exp = cvt_f32_to_fp8e8m0fnu(sColReduce_warp[lane] * max_norm_rcp)
+        tSsS_col_tile[0] = col_exp
         sColReduce_warp[lane] = exp2f_rcp(col_exp)
         cute.arch.sync_warp()
 
@@ -611,14 +609,14 @@ def quantize_bidimensional_mxfp8_swizzled(
                 sColReduce_warp[c] = col_amax
 
         # Compute the rowwise scale factor
-        row_exp = cvt_f32_to_fp8e8m0(row_amax * max_norm_rcp)
+        row_exp = cvt_f32_to_fp8e8m0fnu(row_amax * max_norm_rcp)
         row_inv = exp2f_rcp(row_exp)
-        tSsS_row_tile[0] = Uint8(row_exp)  # rowwise scale (this row-block, staged in smem)
+        tSsS_row_tile[0] = row_exp  # rowwise scale (this row-block, staged in smem)
         cute.arch.sync_warp()
 
         # Compute the colwise scale factor (only handle the one that belongs to this thread / lane)
-        col_exp = cvt_f32_to_fp8e8m0(sColReduce_warp[lane] * max_norm_rcp)
-        tSsS_col_tile[0] = Uint8(col_exp)  # colwise scale (this thread's column)
+        col_exp = cvt_f32_to_fp8e8m0fnu(sColReduce_warp[lane] * max_norm_rcp)
+        tSsS_col_tile[0] = col_exp  # colwise scale (this thread's column)
         sColReduce_warp[lane] = exp2f_rcp(col_exp)
         cute.arch.sync_warp()
 
@@ -687,9 +685,12 @@ class MXFP8QuantizeConfig:
             raise ValueError(f"unknown input dtype {dtype!r}; expected fp32|fp16|bf16")
         self.DTYPE = str_to_cutlass_dtype(dtype)
         self.DTYPE_STR = dtype  # readable input-dtype token, for __str__
-        if fp8_dtype not in ("e4m3", "e5m2"):
-            raise ValueError(f"unknown FP8 dtype {fp8_dtype!r}; expected 'e4m3' or 'e5m2'")
-        self.FP8_DTYPE = fp8_dtype
+        if fp8_dtype not in ("fp8_e4m3fn", "fp8_e5m2"):
+            raise ValueError(
+                f"unknown FP8 dtype {fp8_dtype!r}; expected 'fp8_e4m3fn' or 'fp8_e5m2'"
+            )
+        self.FP8_DTYPE = str_to_cutlass_dtype(fp8_dtype)
+        self.FP8_DTYPE_STR = fp8_dtype  # readable token, for __str__
         self.ROWWISE = rowwise
         self.COLWISE = colwise
         if not (rowwise or colwise):
@@ -732,11 +733,13 @@ class MXFP8QuantizeConfig:
         # uses a cross-thread smem reduction over THREADS_Y. Both mirror the CUDA
         # kernel's COLWISE_SCALING / rowwise dbias branches.
         self.WITH_DBIAS = with_dbias
-        self.MAX_NORM_RCP = FP8E4M3_MAX_NORM_RCP if fp8_dtype == "e4m3" else FP8E5M2_MAX_NORM_RCP
+        self.MAX_NORM_RCP = (
+            FP8E4M3_MAX_NORM_RCP if fp8_dtype == "fp8_e4m3fn" else FP8E5M2_MAX_NORM_RCP
+        )
 
     def __str__(self):
         return (
-            f"MXFP8QuantizeConfig(dtype={self.DTYPE_STR}, fp8_dtype={self.FP8_DTYPE}, "
+            f"MXFP8QuantizeConfig(dtype={self.DTYPE_STR}, fp8_dtype={self.FP8_DTYPE_STR}, "
             f"rowwise={self.ROWWISE}, colwise={self.COLWISE}, "
             f"swizzled={self.WITH_GEMM_SWIZZLED_SCALES}, with_amax={self.WITH_AMAX}, "
             f"with_dbias={self.WITH_DBIAS}, with_dact={self.WITH_DACT}, "
@@ -780,7 +783,7 @@ class MXFP8QuantizeKernel(MXFP8QuantizeKernelBase):
     _PACK_SIZE = 4  # Elements per vector load
     # Each thread reads 8 waves with each wave reads 4 packed bf16, so it reads a whole MXFP8 block in total
     _WAVES = MXFP8_BLOCK_SCALING_SIZE // _PACK_SIZE
-    _TOTAL_BANKS_WIDTH = (32 * 4) // 1  # 32 banks × 4 bytes, in bytes (uint8 stride)
+    _TOTAL_BANKS_WIDTH = (32 * 4) // 1  # 32 banks × 4 bytes, in bytes
     _THREADS_PER_BANK = _TOTAL_BANKS_WIDTH // MXFP8_BLOCK_SCALING_SIZE  # 4 threads per bank
     _NUM_STAGES = 2  # The pipeline depth is always 2
 
@@ -848,14 +851,6 @@ class MXFP8QuantizeKernel(MXFP8QuantizeKernelBase):
         N = mX.shape[1]
         cfg = self.cfg
         max_norm_rcp = cfg.MAX_NORM_RCP
-
-        # The FFI boundary carries native FP8/E8M0 dtypes; the kernel works on bytes.
-        if cutlass.const_expr(cfg.ROWWISE):
-            mO_row = as_byte_tensor(mO_row)
-            mS_row = as_byte_tensor(mS_row)
-        if cutlass.const_expr(cfg.COLWISE):
-            mO_col = as_byte_tensor(mO_col)
-            mS_col = as_byte_tensor(mS_col)
 
         # If WITH_GEMM_SWIZZLED_SCALES is enabled, the output must satisfy cublas's swizzled layout
         # This is expressed as a CuTe layout applied to the output tensor so it can be transparent throughout the kernel implementation.
@@ -1026,6 +1021,8 @@ class MXFP8QuantizeKernel(MXFP8QuantizeKernelBase):
             )
 
         # Allocate shared memory for the input and rowwise / columnwise outputs
+        FP8_DTYPE = cfg.FP8_DTYPE
+
         if cutlass.const_expr(cfg.ROWWISE and cfg.COLWISE):
 
             @cute.struct
@@ -1039,13 +1036,13 @@ class MXFP8QuantizeKernel(MXFP8QuantizeKernelBase):
                 ]
                 sO_row: cute.struct.Align[
                     cute.struct.MemRange[
-                        Uint8, self._TILE_ROWS * self._TILE_COLS * self._NUM_STAGES
+                        FP8_DTYPE, self._TILE_ROWS * self._TILE_COLS * self._NUM_STAGES
                     ],
                     128,
                 ]
                 sO_col: cute.struct.Align[
                     cute.struct.MemRange[
-                        Uint8, self._TILE_ROWS * self._TILE_COLS * self._NUM_STAGES
+                        FP8_DTYPE, self._TILE_ROWS * self._TILE_COLS * self._NUM_STAGES
                     ],
                     128,
                 ]
@@ -1064,7 +1061,7 @@ class MXFP8QuantizeKernel(MXFP8QuantizeKernelBase):
                 ]
                 sO_row: cute.struct.Align[
                     cute.struct.MemRange[
-                        Uint8, self._TILE_ROWS * self._TILE_COLS * self._NUM_STAGES
+                        FP8_DTYPE, self._TILE_ROWS * self._TILE_COLS * self._NUM_STAGES
                     ],
                     128,
                 ]
@@ -1083,7 +1080,7 @@ class MXFP8QuantizeKernel(MXFP8QuantizeKernelBase):
                 ]
                 sO_row: cute.struct.Align[
                     cute.struct.MemRange[
-                        Uint8, self._TILE_ROWS * self._TILE_COLS * self._NUM_STAGES
+                        FP8_DTYPE, self._TILE_ROWS * self._TILE_COLS * self._NUM_STAGES
                     ],
                     128,
                 ]
@@ -1102,7 +1099,7 @@ class MXFP8QuantizeKernel(MXFP8QuantizeKernelBase):
                 ]
                 sO_col: cute.struct.Align[
                     cute.struct.MemRange[
-                        Uint8, self._TILE_ROWS * self._TILE_COLS * self._NUM_STAGES
+                        FP8_DTYPE, self._TILE_ROWS * self._TILE_COLS * self._NUM_STAGES
                     ],
                     128,
                 ]
@@ -1521,7 +1518,7 @@ class MXFP8QuantizeKernel(MXFP8QuantizeKernelBase):
     def _process_rowwise(
         self,
         sX_tile,  # (TILE_Y, TILE_X) bf16/fp16 smem view, post-TMA
-        sO_row_tile,  # (TILE_Y, TILE_X) uint8 smem view (rowwise FP8 output)
+        sO_row_tile,  # (TILE_Y, TILE_X) fp8 smem view (rowwise FP8 output)
         mS_row_stage,  # rowwise scale tensor (1D swizzled, or 2D linear)
         max_norm_rcp,
         tile_row_start,  # Int32 — global row of this stage's row 0
@@ -1560,7 +1557,7 @@ class MXFP8QuantizeKernel(MXFP8QuantizeKernelBase):
     def _process_colwise(
         self,
         sX_tile,  # (TILE_Y, TILE_X) bf16/fp16 smem view, post-TMA
-        sO_col_tile,  # (TILE_Y, TILE_X) uint8 smem view (colwise FP8 output)
+        sO_col_tile,  # (TILE_Y, TILE_X) fp8 smem view (colwise FP8 output)
         mS_col_stage,  # colwise scale tensor (1D swizzled, or 2D linear)
         max_norm_rcp,
         tile_row_start,  # Int32 — global row of this stage's row 0
@@ -1632,10 +1629,6 @@ class MXFP8QuantizeSpecializedRowwiseKernel(MXFP8QuantizeKernelBase):
         M = mX.shape[0]
         N = mX.shape[1]
 
-        # The FFI boundary carries native FP8/E8M0 dtypes; the kernel works on bytes.
-        mO_row = as_byte_tensor(mO_row)
-        mS_row = as_byte_tensor(mS_row)
-
         grid = [
             cute.ceil_div(Int32(N), self._TILE_COLS),
             cute.ceil_div(M, self._TILE_ROWS),
@@ -1693,16 +1686,20 @@ class MXFP8QuantizeSpecializedRowwiseKernel(MXFP8QuantizeKernelBase):
             cute.make_layout((1, MXFP8_BLOCK_SCALING_SIZE), stride=(MXFP8_BLOCK_SCALING_SIZE, 1)),
             dtype=DTYPE,
         )
-        # Inputs widened to f32 once (reused by amax and the fused cvt). The FP8
-        # output stays a uint8 fragment; we write it through a uint32 view so the
-        # 4-wide mul_cvt drops one packed word per call (see the cvt loop).
-        rX_f32 = cute.make_rmem_tensor(
-            cute.make_layout((1, MXFP8_BLOCK_SCALING_SIZE), stride=(MXFP8_BLOCK_SCALING_SIZE, 1)),
-            dtype=Float32,
+        kit = packed16_kit(DTYPE)
+        abs_max_x2, x2_lo_to_f32, x2_hi_to_f32 = (
+            kit.abs_max_x2,
+            kit.x2_lo_to_f32,
+            kit.x2_hi_to_f32,
+        )
+        mul_cvt4 = mul_f32x2_cvt_packed16x4_to_fp8x4(DTYPE, self.cfg.FP8_DTYPE)
+        rX_i32 = cute.make_tensor(
+            cute.recast_ptr(rX_thread.iterator, dtype=Int32),
+            cute.make_layout((MXFP8_BLOCK_SCALING_SIZE // 2,), stride=(1,)),
         )
         rO_thread = cute.make_rmem_tensor(
             cute.make_layout((1, MXFP8_BLOCK_SCALING_SIZE), stride=(MXFP8_BLOCK_SCALING_SIZE, 1)),
-            dtype=Uint8,
+            dtype=self.cfg.FP8_DTYPE,
         )
         rO_u32 = cute.make_tensor(
             cute.recast_ptr(rO_thread.iterator, dtype=Uint32),
@@ -1716,50 +1713,40 @@ class MXFP8QuantizeSpecializedRowwiseKernel(MXFP8QuantizeKernelBase):
 
             @cute.struct
             class SharedStorage:
-                buf: cute.struct.Align[cute.struct.MemRange[Uint8, CTA_Y * CTA_X], 16]
+                buf: cute.struct.Align[cute.struct.MemRange[Float8E8M0FNU, CTA_Y * CTA_X], 16]
 
             storage = cutlass.utils.SmemAllocator().allocate(SharedStorage)
             sScale = storage.buf.get_tensor(cute.make_layout((CTA_Y, CTA_X), stride=(CTA_X, 1)))
             # sScale is (CTA_Y, CTA_X):(CTA_X, 1), which is the same layout as tv_layout_scale
-            # so sS_thread is really just an 1 Uint8 buffer for this thread's scale byte.
+            # so sS_thread is really just a 1-element e8m0 buffer for this thread's scale.
             sS_thread = cute.composition(sScale, tv_layout_scale)[tidx, None]
             # Zero first so padding columns (cols past N/32 in the padded scale
             # matrix) flush as 0 and we never read uninitialized smem.
-            sS_thread[0] = Uint8(0)
+            # Raw 0x00: e8m0 has no zero value to convert from.
+            sS_thread[0] = Uint8(0).bitcast(Float8E8M0FNU)
             cute.arch.sync_threads()
 
         row = bidy * self._TILE_ROWS + tidx // CTA_X
         col = bidx * self._TILE_COLS + (tidx % CTA_X) * MXFP8_BLOCK_SCALING_SIZE
         if row < M and col < N:
             cute.autovec_copy(mX_thread, rX_thread)
+            amax_2x = Int32(0)
+            for i in cutlass.range_constexpr(MXFP8_BLOCK_SCALING_SIZE // 2):
+                amax_2x = abs_max_x2(amax_2x, rX_i32[i])
+            amax = cute.arch.fmax(fabs_f32(x2_lo_to_f32(amax_2x)), fabs_f32(x2_hi_to_f32(amax_2x)))
 
-            # Widen once and reduce. bf16/fp16 -> f32 widening is exact, so the
-            # amax matches the CUDA 16-bit abs_max path bit-for-bit.
-            amax = Float32(0.0)
-            for i in cutlass.range_constexpr(MXFP8_BLOCK_SCALING_SIZE):
-                rX_f32[0, i] = Float32(rX_thread[0, i])
-                amax = cute.arch.fmax(amax, fabs_f32(rX_f32[0, i]))
-
-            biased_exp = cvt_f32_to_fp8e8m0(amax * max_norm_rcp)
+            biased_exp = cvt_f32_to_fp8e8m0fnu(amax * max_norm_rcp)
             if cutlass.const_expr(self._STASH_SCALE_TO_SMEM):
-                sS_thread[0] = Uint8(biased_exp)
+                sS_thread[0] = biased_exp
             else:
-                mS_thread[0] = Uint8(biased_exp)
+                mS_thread[0] = biased_exp
 
             # Rescale + FP8 cast, 4 elements per fused mul_cvt (one uint32 out),
             # then a vectorized store. Mirrors CUDA's _use_cvt_4x path.
             inv_scale = exp2f_rcp(biased_exp)
             scale_2x = pack_f32x2(inv_scale, inv_scale)
-            mul_cvt4 = mul_f32x2_cvt_f32x4_to_fp8x4(self.cfg.FP8_DTYPE)
             for i in cutlass.range_constexpr(MXFP8_BLOCK_SCALING_SIZE // 4):
-                offset = 4 * i
-                rO_u32[i] = mul_cvt4(
-                    rX_f32[0, offset],
-                    rX_f32[0, offset + 1],
-                    rX_f32[0, offset + 2],
-                    rX_f32[0, offset + 3],
-                    scale_2x,
-                )
+                rO_u32[i] = mul_cvt4(rX_i32[2 * i], rX_i32[2 * i + 1], scale_2x)
             cute.autovec_copy(rO_thread, mO_thread)
 
         # Cooperative wide flush of the staged scales where padding columns flush as 0.
@@ -1847,12 +1834,6 @@ class MXFP8QuantizeSpecializedBidimensionalKernel(MXFP8QuantizeKernelBase):
             )
         M = mX.shape[0]
         N = mX.shape[1]
-
-        # The FFI boundary carries native FP8/E8M0 dtypes; the kernel works on bytes.
-        mO_row = as_byte_tensor(mO_row)
-        mS_row = as_byte_tensor(mS_row)
-        mO_col = as_byte_tensor(mO_col)
-        mS_col = as_byte_tensor(mS_col)
 
         if cutlass.const_expr(self.cfg.WITH_GEMM_SWIZZLED_SCALES):
             mS_row, mS_col = derive_swizzled_scale_layout(
@@ -1986,6 +1967,8 @@ class MXFP8QuantizeSpecializedBidimensionalKernel(MXFP8QuantizeKernelBase):
         )
         num_tiles = num_tiles_x * num_tiles_y
 
+        FP8_DTYPE = self.cfg.FP8_DTYPE
+
         @cute.struct
         class SharedStorage:
             mbar_storage: cute.struct.MemRange[
@@ -1996,11 +1979,15 @@ class MXFP8QuantizeSpecializedBidimensionalKernel(MXFP8QuantizeKernelBase):
                 128,
             ]
             sO_row: cute.struct.Align[
-                cute.struct.MemRange[Uint8, self._TILE_ROWS * self._TILE_COLS * self._NUM_STAGES],
+                cute.struct.MemRange[
+                    FP8_DTYPE, self._TILE_ROWS * self._TILE_COLS * self._NUM_STAGES
+                ],
                 128,
             ]
             sO_col: cute.struct.Align[
-                cute.struct.MemRange[Uint8, self._TILE_ROWS * self._TILE_COLS * self._NUM_STAGES],
+                cute.struct.MemRange[
+                    FP8_DTYPE, self._TILE_ROWS * self._TILE_COLS * self._NUM_STAGES
+                ],
                 128,
             ]
             # Per-warp colwise-reduce scratchpad
@@ -2010,14 +1997,14 @@ class MXFP8QuantizeSpecializedBidimensionalKernel(MXFP8QuantizeKernelBase):
             # Staged rowwise scales for the whole CTA
             sScaleRow: cute.struct.Align[
                 cute.struct.MemRange[
-                    Uint8,
+                    Float8E8M0FNU,
                     self._TILE_ROWS * self._NUM_TILES * self._TILE_COLS // MXFP8_BLOCK_SCALING_SIZE,
                 ],
                 16,
             ]
             # Staged colwise scales for the whole CTA
             sScaleCol: cute.struct.Align[
-                cute.struct.MemRange[Uint8, self._NUM_TILES * self._TILE_COLS], 16
+                cute.struct.MemRange[Float8E8M0FNU, self._NUM_TILES * self._TILE_COLS], 16
             ]
 
         smem = cutlass.utils.SmemAllocator()
@@ -2327,8 +2314,8 @@ def compile_cutedsl_function_from_cfg(cfg):
     scale_colwise_shape = (cute.sym_int32(divisibility=4), cute.sym_int32(divisibility=128))
     ws_shape = (cute.sym_int32(), sym_N)  # (blocks_Y, N); N ties to input N
     # Native FP8/E8M0 dtypes at the FFI boundary (matches the DLPack dtype the C++
-    # bridge sends); the kernels view these buffers as raw bytes internally.
-    out_dtype = cutlass.Float8E4M3FN if cfg.FP8_DTYPE == "e4m3" else cutlass.Float8E5M2
+    # bridge sends).
+    out_dtype = cfg.FP8_DTYPE
     scale_dtype = cutlass.Float8E8M0FNU
 
     in_fake = cute.runtime.make_fake_compact_tensor(

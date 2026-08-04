@@ -18,6 +18,9 @@ _CUTLASS_DTYPE_FROM_STR = {
     "fp32": cutlass.Float32,
     "fp16": cutlass.Float16,
     "bf16": cutlass.BFloat16,
+    "fp8_e4m3fn": cutlass.Float8E4M3FN,
+    "fp8_e5m2": cutlass.Float8E5M2,
+    "fp8_e8m0fnu": cutlass.Float8E8M0FNU,
 }
 _STR_FROM_CUTLASS_DTYPE = {v: k for k, v in _CUTLASS_DTYPE_FROM_STR.items()}
 
@@ -93,8 +96,9 @@ def fma_f32(a: Float32, b: Float32, c: Float32, *, loc=None, ip=None) -> Float32
 
 
 @dsl_user_op
-def exp2f_rcp(biased_exp: Int32, *, loc=None, ip=None) -> Float32:
-    """2^(127 - biased_exp) with special-case handling."""
+def exp2f_rcp(scale_e8m0, *, loc=None, ip=None) -> Float32:
+    """2^(127 - biased_exp) with special-case handling, for an e8m0 scale."""
+    biased_exp = Int32(scale_e8m0.bitcast(cutlass.Uint8, loc=loc, ip=ip))
     new_exp = (Int32(254) - biased_exp) << Int32(FP32_MANTISSA_BITS)
     result = _bitcast_i32_to_f32(new_exp, loc=loc, ip=ip)
     for cmp_val, repl_bits in [(255, 0x7FFFFFFF), (254, 0x00400000), (0, 0x7F000000)]:

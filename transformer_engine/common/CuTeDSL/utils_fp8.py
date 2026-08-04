@@ -8,49 +8,29 @@ import logging
 from typing import Callable
 
 import cutlass
-from cutlass import Uint8, cute
+from cutlass import Uint8
 from cutlass import Float32, Int64, Int32, Int16, Uint16, Uint32
+from cutlass import Float8E5M2, Float8E8M0FNU, Float8E4M3FN
 from cutlass._mlir.dialects import arith as mlir_arith
 from cutlass._mlir.dialects import llvm
 from cutlass.cutlass_dsl import T, dsl_user_op
 
-from transformer_engine.common.CuTeDSL.utils import (
-    FP32_MANTISSA_BITS,
-    _bitcast_f32_to_i32,
-    device_is_blackwell,
-)
-
 logger = logging.getLogger("transformer_engine.cutedsl.utils_fp8")
 
 
-def as_byte_tensor(t):
-    """View an FP8/E8M0 gmem tensor as raw bytes (the kernels build/store the bit patterns)."""
-    return cute.make_tensor(cute.recast_ptr(t.iterator, dtype=Uint8), t.layout)
-
-
 @dsl_user_op
-def cvt_f32_to_fp8e8m0_non_blackwell(val: Float32, *, loc=None, ip=None) -> Int32:
-    """float32 -> fp8e8m0 conversion (generic, pre-Blackwell).
-
-    Software round-up of the biased exponent, mirroring ptx::float_to_e8m0's
-    non-Blackwell branch (transformer_engine/common/util/ptx.cuh)."""
-    val_i32 = _bitcast_f32_to_i32(val, loc=loc, ip=ip)
-    rounded = val_i32 + Int32(0x7FFFFF)
-    exponent = (rounded >> Int32(FP32_MANTISSA_BITS)) & Int32(0xFF)
-    return Int32(
-        mlir_arith.minsi(
-            exponent.ir_value(loc=loc, ip=ip), Int32(254).ir_value(loc=loc, ip=ip), loc=loc, ip=ip
-        )
-    )
-
-
-@dsl_user_op
-def cvt_f32_to_fp8e8m0_blackwell(val: Float32, *, loc=None, ip=None) -> Int32:
-    """float32 -> fp8e8m0 conversion (Blackwell, SM >= 100).
+def cvt_f32_to_fp8e8m0fnu(val: Float32, *, loc=None, ip=None) -> Float8E8M0FNU:
+    """float32 -> fp8e8m0fnu conversion (Blackwell, SM >= 100).
 
     Uses the hardware cvt.rp.satfinite.ue8m0x2.f32 instruction, mirroring
     ptx::float_to_e8m0's Blackwell branch. The x2 form packs two e8m0 bytes;
-    we feed (0.0, val) so the low byte is e8m0(val) and mask it out."""
+    we feed (0.0, val) so the low byte is e8m0(val) and mask it out.
+
+    There is deliberately no pre-Blackwell software fallback: the backend refuses
+    to dispatch below cc 10.0 (see get_mxfp8_quantization_function) and hands the
+    work to the CUDA kernel, so such a path would be unreachable -- and getting its
+    NaN/inf/subnormal edges to match ptx::float_to_e8m0 exactly is fiddly enough
+    that an untested copy is a liability."""
     zero = Float32(0.0)
     result_i16 = Int16(
         llvm.inline_asm(
@@ -66,10 +46,10 @@ def cvt_f32_to_fp8e8m0_blackwell(val: Float32, *, loc=None, ip=None) -> Int32:
     result_i32 = Int32(
         mlir_arith.extui(T.i32(), result_i16.ir_value(loc=loc, ip=ip), loc=loc, ip=ip)
     )
-    return result_i32 & Int32(0xFF)
+    return Uint8(result_i32 & Int32(0xFF)).bitcast(Float8E8M0FNU, loc=loc, ip=ip)
 
 
-def _build_mul_f32x2_cvt_f32x4_to_fp8x4(out_fmt: str, relu: bool = False) -> Callable[..., Uint32]:
+def _build_mul_f32x2_cvt_f32x4_to_fp8x4(fp8_dtype, relu: bool = False) -> Callable[..., Uint32]:
     """Build a fused 4-wide `f32x4 * f32x2 -> fp8x4` PTX wrapper.
 
     Multiplies four f32 inputs by a broadcast inverse scale -- an f32x2 pair (s, s),
@@ -79,7 +59,7 @@ def _build_mul_f32x2_cvt_f32x4_to_fp8x4(out_fmt: str, relu: bool = False) -> Cal
     `cvt...x2.f32` — the f32-input form of this op family (CUDA ptx::mul_cvt_4x).
     fma (not mul) so a -0 product flushes to +0, matching the CUDA reference.
     """
-    out_op = "e4m3x2" if out_fmt == "e4m3" else "e5m2x2"
+    out_op = "e5m2x2" if fp8_dtype is Float8E5M2 else "e4m3x2"
     asm = (
         "{\n"
         ".reg.b64 vp0; .reg.b64 vp1; .reg.b64 vp2; .reg.b64 vp3; .reg.b64 zeros;\n\t"
@@ -125,22 +105,22 @@ def _build_mul_f32x2_cvt_f32x4_to_fp8x4(out_fmt: str, relu: bool = False) -> Cal
     return fn
 
 
-def mul_f32x2_cvt_f32x4_to_fp8x4(fp8_dtype: str, relu: bool = False) -> Callable[..., Uint32]:
+def mul_f32x2_cvt_f32x4_to_fp8x4(fp8_dtype, relu: bool = False) -> Callable[..., Uint32]:
     """Return the fused 4-wide f32->FP8 multiply+cast op for the given FP8 format.
 
     The op takes (v0, v1, v2, v3, scale_2x) and returns a uint32 of four packed
     fp8 bytes, byte i = fp8(v_i * scale). `scale_2x` is pack_f32x2(s, s)."""
-    return _build_mul_f32x2_cvt_f32x4_to_fp8x4("e5m2" if fp8_dtype == "e5m2" else "e4m3", relu)
+    return _build_mul_f32x2_cvt_f32x4_to_fp8x4(fp8_dtype, relu)
 
 
-def _build_mul_f32x4_cvt_f32x4_to_fp8x4(out_fmt: str, relu: bool = False) -> Callable[..., Uint32]:
+def _build_mul_f32x4_cvt_f32x4_to_fp8x4(fp8_dtype, relu: bool = False) -> Callable[..., Uint32]:
     """Build a fused elementwise `f32x4 * f32x4 -> fp8x4` PTX wrapper.
 
     General elementwise multiply-and-convert: byte i = fp8(a_i * b_i). Two
     fma.rn.f32x2 against packed zeros + two cvt...x2.f32 (same sequence as
     CUDA's mul_cvt_4x(out, floatx4, floatx4) in ptx.cuh). fma (not mul) so a
     -0 product flushes to +0."""
-    out_op = "e4m3x2" if out_fmt == "e4m3" else "e5m2x2"
+    out_op = "e4m3x2" if fp8_dtype is Float8E4M3FN else "e5m2x2"
     asm = (
         "{\n"
         ".reg.b64 va0; .reg.b64 va1; .reg.b64 vb0; .reg.b64 vb1;\n\t"
@@ -202,16 +182,16 @@ def _build_mul_f32x4_cvt_f32x4_to_fp8x4(out_fmt: str, relu: bool = False) -> Cal
     return fn
 
 
-def mul_f32x4_cvt_f32x4_to_fp8x4(fp8_dtype: str, relu: bool = False) -> Callable[..., Uint32]:
+def mul_f32x4_cvt_f32x4_to_fp8x4(fp8_dtype, relu: bool = False) -> Callable[..., Uint32]:
     """Return the fused elementwise f32x4*f32x4 -> FP8x4 op for the given FP8 format.
 
     The op takes (a0..a3, b0..b3) and returns a uint32 of four packed fp8
     bytes, byte i = fp8(a_i * b_i)."""
-    return _build_mul_f32x4_cvt_f32x4_to_fp8x4("e5m2" if fp8_dtype == "e5m2" else "e4m3", relu)
+    return _build_mul_f32x4_cvt_f32x4_to_fp8x4(fp8_dtype, relu)
 
 
 def _build_mul_f32x2_cvt_packed16x4_to_fp8x4(
-    in_fmt: str, out_fmt: str, relu: bool = False
+    in_dtype, fp8_dtype, relu: bool = False
 ) -> Callable[..., Uint32]:
     """Build a fused `2x <in_fmt>x2 * f32x2 -> fp8x4` PTX wrapper.
 
@@ -219,7 +199,8 @@ def _build_mul_f32x2_cvt_packed16x4_to_fp8x4(
     bf16/f16 elements to f32 inside the asm, multiplies by the broadcast
     (s, s) pair, and converts: byte i = fp8(elt_i * s). The two u16 cvt
     results combine into the u32 via a register-pair mov (free)."""
-    out_op = "e4m3x2" if out_fmt == "e4m3" else "e5m2x2"
+    in_fmt = "f16" if in_dtype is cutlass.Float16 else "bf16"
+    out_op = "e4m3x2" if fp8_dtype is Float8E4M3FN else "e5m2x2"
     if in_fmt == "bf16":
         # bf16 -> fp32 conversion can be performed with a bitwise permute with zeros
         vb_decl = ""
@@ -284,24 +265,14 @@ def _build_mul_f32x2_cvt_packed16x4_to_fp8x4(
 
 
 def mul_f32x2_cvt_packed16x4_to_fp8x4(
-    dtype, fp8_dtype: str, relu: bool = False
+    dtype, fp8_dtype, relu: bool = False
 ) -> Callable[..., Uint32]:
     """Return the fused packed16x4 * broadcast-scale -> FP8x4 op.
 
     The op takes (lo_2x, hi_2x, scale_2x): two i32s of packed bf16/f16 pairs
     (elements 0-1, 2-3) and a pack_f32x2(s, s) pair; returns a uint32 of four
     packed fp8 bytes, byte i = fp8(elt_i * s)."""
-    in_fmt = "f16" if dtype is cutlass.Float16 else "bf16"
-    return _build_mul_f32x2_cvt_packed16x4_to_fp8x4(
-        in_fmt, "e5m2" if fp8_dtype == "e5m2" else "e4m3", relu
-    )
-
-
-# Pick the appropriate float32 -> fp8e8m0 conversion function based on the target architecture.
-# Blackwell (SM >= 100) has a hardware instruction for this, while older architectures require a software implementation.
-cvt_f32_to_fp8e8m0 = (
-    cvt_f32_to_fp8e8m0_blackwell if device_is_blackwell() else cvt_f32_to_fp8e8m0_non_blackwell
-)
+    return _build_mul_f32x2_cvt_packed16x4_to_fp8x4(dtype, fp8_dtype, relu)
 
 
 @dsl_user_op
@@ -310,9 +281,8 @@ def cvt_f32x2_to_fp8e4m3x2(
 ) -> Uint16:
     """Convert two float32 values to two packed fp8e4m3fn bytes in one instruction.
 
-    Returns a uint16 where bits [7:0] = fp8(val_lo), bits [15:8] = fp8(val_hi). The
-    instruction already produces 16 bits; widening to i32 here only makes the caller's
-    byte extraction emit a cvt.u32.u16 per element.
+    Returns a uint16 where bits [7:0] = fp8(val_lo), bits [15:8] = fp8(val_hi), which
+    is the instruction's own result width.
     """
     return Uint16(
         llvm.inline_asm(
@@ -333,9 +303,8 @@ def cvt_f32x2_to_fp8e5m2x2(
 ) -> Uint16:
     """Convert two float32 values to two packed fp8e5m2 bytes in one instruction.
 
-    Returns a uint16 where bits [7:0] = fp8(val_lo), bits [15:8] = fp8(val_hi). The
-    instruction already produces 16 bits; widening to i32 here only makes the caller's
-    byte extraction emit a cvt.u32.u16 per element.
+    Returns a uint16 where bits [7:0] = fp8(val_lo), bits [15:8] = fp8(val_hi), which
+    is the instruction's own result width.
     """
     return Uint16(
         llvm.inline_asm(
@@ -350,8 +319,8 @@ def cvt_f32x2_to_fp8e5m2x2(
     )
 
 
-def get_cvt_f32x2_to_fp8x2_func(fp8_dtype: str) -> Callable[..., Uint16]:
-    """Returns the float32x2 -> float8x2 conversion function for the given FP8 format."""
-    if fp8_dtype == "e5m2":
+def get_cvt_f32x2_to_fp8x2_func(fp8_dtype) -> Callable[..., Uint16]:
+    """Returns the float32x2 -> float8x2 conversion function for the given FP8 type."""
+    if fp8_dtype is Float8E5M2:
         return cvt_f32x2_to_fp8e5m2x2
     return cvt_f32x2_to_fp8e4m3x2
