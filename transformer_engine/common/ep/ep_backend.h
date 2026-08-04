@@ -57,6 +57,16 @@ class EPBackend {
                 const NVTECommWindow& recv_tokens_win, NVTETensor recv_topk_weights,
                 const NVTECommWindow& recv_topk_weights_win, cudaStream_t stream);
 
+  // Fused prepare + dispatch: seeds routing then dispatches in one call.
+  // Per-expert recv counts are written to recv_tokens_per_expert by the dispatch.
+  void prepare_and_dispatch(void* handle_mem, const NVTETensor topk_idx, const NVTETensor tokens,
+                            const NVTECommWindow& tokens_win, const NVTETensor topk_weights,
+                            const NVTECommWindow& topk_weights_win, NVTETensor recv_tokens,
+                            const NVTECommWindow& recv_tokens_win, NVTETensor recv_topk_weights,
+                            const NVTECommWindow& recv_topk_weights_win,
+                            NVTETensor recv_tokens_per_expert, NVTEEpLayerConfig layer_cfg,
+                            cudaStream_t stream);
+
   void combine(void* handle_mem, const NVTETensor expert_out, const NVTECommWindow& expert_out_win,
                NVTETensor result, cudaStream_t stream);
 
@@ -109,6 +119,18 @@ class EPBackend {
   ncclEpHandle_t prepare_handle_locked(void* handle_mem, NVTEEpLayerConfig layer_cfg);
   ncclEpHandle_t lookup_handle_locked(void* handle_mem);
   size_t cache_cap_locked();
+
+  // Build the dispatch in/out structs and issue ncclEpDispatch on the resolved
+  // handle. When recv_tokens_per_expert != nullptr (count mode), it is wired to
+  // layout_info.expert_counters so the dispatch writes per-expert recv counts.
+  // Caller must hold mutex_.
+  void issue_dispatch_locked(ncclEpHandle_t handle, const NVTETensor topk_idx,
+                             const NVTETensor tokens, const NVTECommWindow& tokens_win,
+                             const NVTETensor topk_weights, const NVTECommWindow& topk_weights_win,
+                             NVTETensor recv_tokens, const NVTECommWindow& recv_tokens_win,
+                             NVTETensor recv_topk_weights,
+                             const NVTECommWindow& recv_topk_weights_win,
+                             NVTETensor recv_tokens_per_expert, cudaStream_t stream);
 };
 
 }  // namespace ep

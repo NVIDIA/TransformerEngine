@@ -693,6 +693,11 @@ void ep_prepare(at::Tensor handle_mem, at::Tensor topk_idx, at::Tensor tokens_pe
 void ep_dispatch(at::Tensor handle_mem, at::Tensor topk_idx, at::Tensor tokens,
                  at::Tensor topk_weights, at::Tensor recv_tokens, at::Tensor recv_topk_weights);
 
+void ep_prepare_and_dispatch(at::Tensor handle_mem, at::Tensor topk_idx, at::Tensor tokens,
+                             at::Tensor topk_weights, at::Tensor recv_tokens,
+                             at::Tensor recv_topk_weights, at::Tensor token_counts, int64_t top_k,
+                             int64_t dispatch_output_per_expert_alignment);
+
 void ep_combine(at::Tensor handle_mem, at::Tensor expert_out, at::Tensor result);
 
 void ep_dispatch_bwd(at::Tensor handle_mem, at::Tensor grad, at::Tensor g_recv_topk_weights,

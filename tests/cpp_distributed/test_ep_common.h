@@ -184,6 +184,24 @@ static void ep_reinitialize(int zero_copy) {
   nvte_ep_initialize(static_cast<void*>(g_ep_comm), &group_config);
 }
 
+// Re-initialize the EP backend with a small recv budget and drop-on-overflow,
+// to exercise the count-mode overflow-drop path. HT requires the recv budget to
+// be at least the send budget, so both are passed in. Restore the default group
+// with ep_reinitialize(0).
+static void ep_reinitialize_drop(int max_tokens_per_rank, int max_recv_tokens_per_rank) {
+  if (!g_ep_initialized) return;
+  nvte_ep_shutdown();
+  NVTEEpGroupConfig group_config = NVTE_EP_GROUP_CONFIG_INIT;
+  group_config.ep_size                  = g_ep_size;
+  group_config.num_experts              = g_num_experts;
+  group_config.max_tokens_per_rank      = max_tokens_per_rank;
+  group_config.max_recv_tokens_per_rank = max_recv_tokens_per_rank;
+  group_config.hidden_dim               = g_hidden_dim;
+  group_config.max_token_dtype          = g_max_token_dtype;
+  group_config.drop_on_overflow         = 1;
+  nvte_ep_initialize(static_cast<void*>(g_ep_comm), &group_config);
+}
+
 // Tear down in dependency order: backend's ep_group reads from ep_comm,
 // so destroy the group first, then the comm.
 static void ep_teardown() {
