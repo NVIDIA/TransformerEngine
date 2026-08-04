@@ -521,7 +521,6 @@ __global__ void __launch_bounds__(THREADS_NUM)
       const int lane = threadIdx.x % THREADS_PER_WARP;
       IType *warp_a = rht_mma_a_sh + warp * SCALE_DIM * SCALE_DIM;
       float *warp_acc = rht_mma_acc_sh + warp * SCALE_DIM * SCALE_DIM;
-      const bool reduced_precision_rht = rows * cols <= 1024 * SCALE_DIM;
 
       for (int tile = warp; tile < kMmaTiles; tile += kWarps) {
         const int tile_y = tile / kTilesX;
@@ -535,74 +534,29 @@ __global__ void __launch_bounds__(THREADS_NUM)
         nvcuda::wmma::fragment<nvcuda::wmma::accumulator, 16, 16, 16, float> acc_frag;
         nvcuda::wmma::load_matrix_sync(b_frag, reinterpret_cast<__nv_bfloat16 *>(rht_sh),
                                        SCALE_DIM);
-
-        if (!reduced_precision_rht) {
-          // cuBLAS uses two K=8 MMA steps with an FP32 accumulator for larger
-          // RHT batches. Mask the opposite half of K in each step to reproduce
-          // that accumulation order with the K=16 WMMA primitive available here.
-          nvcuda::wmma::fill_fragment(acc_frag, 0.0f);
-          for (int mma_pass = 0; mma_pass < 2; ++mma_pass) {
 #pragma unroll
-            for (int idx = lane; idx < SCALE_DIM * SCALE_DIM; idx += THREADS_PER_WARP) {
-              const int vector = idx / SCALE_DIM;
-              const int k = idx % SCALE_DIM;
-              warp_a[idx] = k / (SCALE_DIM / 2) == mma_pass
-                                ? in_sh[buff_offset_in + (tile_y * SCALE_DIM + k) * BUFF_IN_DIM_X +
-                                        tile_x * SCALE_DIM + vector]
-                                : static_cast<IType>(0.0f);
-            }
-            __syncwarp();
-            nvcuda::wmma::load_matrix_sync(a_frag, reinterpret_cast<__nv_bfloat16 *>(warp_a),
-                                           SCALE_DIM);
-            nvcuda::wmma::mma_sync(acc_frag, a_frag, b_frag, acc_frag);
-          }
-          nvcuda::wmma::store_matrix_sync(warp_acc, acc_frag, SCALE_DIM,
-                                          nvcuda::wmma::mem_row_major);
-          __syncwarp();
-#pragma unroll
-          for (int idx = lane; idx < SCALE_DIM * SCALE_DIM; idx += THREADS_PER_WARP) {
-            const int vector = idx / SCALE_DIM;
-            const int out = idx % SCALE_DIM;
-            IType *dst = &stage_rht_result_sh[(tile_y * SCALE_DIM + out) * BUFF_IN_DIM_X +
-                                              tile_x * SCALE_DIM + vector];
-            *dst = static_cast<IType>(warp_acc[idx]);
-          }
-          __syncwarp();
-        } else {
-          // Small ATen GEMMs round two independent K=8 partials to BF16 before
-          // adding them. Keep the same boundary while still using MMA for both halves.
-          for (int mma_pass = 0; mma_pass < 2; ++mma_pass) {
-#pragma unroll
-            for (int idx = lane; idx < SCALE_DIM * SCALE_DIM; idx += THREADS_PER_WARP) {
-              const int vector = idx / SCALE_DIM;
-              const int k = idx % SCALE_DIM;
-              warp_a[idx] = k / (SCALE_DIM / 2) == mma_pass
-                                ? in_sh[buff_offset_in + (tile_y * SCALE_DIM + k) * BUFF_IN_DIM_X +
-                                        tile_x * SCALE_DIM + vector]
-                                : static_cast<IType>(0.0f);
-            }
-            __syncwarp();
-            nvcuda::wmma::load_matrix_sync(a_frag, reinterpret_cast<__nv_bfloat16 *>(warp_a),
-                                           SCALE_DIM);
-            nvcuda::wmma::fill_fragment(acc_frag, 0.0f);
-            nvcuda::wmma::mma_sync(acc_frag, a_frag, b_frag, acc_frag);
-            nvcuda::wmma::store_matrix_sync(warp_acc, acc_frag, SCALE_DIM,
-                                            nvcuda::wmma::mem_row_major);
-            __syncwarp();
-#pragma unroll
-            for (int idx = lane; idx < SCALE_DIM * SCALE_DIM; idx += THREADS_PER_WARP) {
-              const int vector = idx / SCALE_DIM;
-              const int out = idx % SCALE_DIM;
-              IType *dst = &stage_rht_result_sh[(tile_y * SCALE_DIM + out) * BUFF_IN_DIM_X +
-                                                tile_x * SCALE_DIM + vector];
-              const IType rounded_partial = static_cast<IType>(warp_acc[idx]);
-              *dst = mma_pass == 0 ? rounded_partial
-                                   : static_cast<IType>(static_cast<float>(*dst) +
-                                                        static_cast<float>(rounded_partial));
-            }
-            __syncwarp();
-          }
+        for (int idx = lane; idx < SCALE_DIM * SCALE_DIM; idx += THREADS_PER_WARP) {
+          const int vector = idx / SCALE_DIM;
+          const int k = idx % SCALE_DIM;
+          warp_a[idx] = in_sh[buff_offset_in + (tile_y * SCALE_DIM + k) * BUFF_IN_DIM_X +
+                              tile_x * SCALE_DIM + vector];
         }
+        __syncwarp();
+        nvcuda::wmma::load_matrix_sync(a_frag, reinterpret_cast<__nv_bfloat16 *>(warp_a),
+                                       SCALE_DIM);
+        nvcuda::wmma::fill_fragment(acc_frag, 0.0f);
+        nvcuda::wmma::mma_sync(acc_frag, a_frag, b_frag, acc_frag);
+        nvcuda::wmma::store_matrix_sync(warp_acc, acc_frag, SCALE_DIM, nvcuda::wmma::mem_row_major);
+        __syncwarp();
+#pragma unroll
+        for (int idx = lane; idx < SCALE_DIM * SCALE_DIM; idx += THREADS_PER_WARP) {
+          const int vector = idx / SCALE_DIM;
+          const int out = idx % SCALE_DIM;
+          IType *dst = &stage_rht_result_sh[(tile_y * SCALE_DIM + out) * BUFF_IN_DIM_X +
+                                            tile_x * SCALE_DIM + vector];
+          *dst = static_cast<IType>(warp_acc[idx]);
+        }
+        __syncwarp();
       }
       __syncthreads();
     }
