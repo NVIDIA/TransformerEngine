@@ -830,23 +830,23 @@ def test_gpt_full_activation_recompute_with_inner_autocast(use_reentrant, monkey
         inner_autocast=True,
     )
 
-    # The outer autocast is disabled here, so the forward scale is never updated between
-    # the two forward phases and the comparison below cannot observe a missing stash.
-    # Record the stash/restore of the forward scale and assert the bookkeeping directly.
-    forward_key = FP8GlobalStateManager.get_meta_tensor_key(forward=True)
-    stashed_scales, restored_scales = [], []
+    # The outer autocast is disabled here, so the forward scale is never updated between the
+    # two forward phases: a missing stash cannot change any number, it can only crash. Count
+    # the stash and restore per module instead, and check a module was stashed before the real
+    # restore runs, so a regression reports that rather than a KeyError on the buffer lookup.
+    stash_counts, restore_counts = {}, {}
     stash_fn = FP8GlobalStateManager.copy_forward_fp8_meta_tensors_for_recompute
     restore_fn = FP8GlobalStateManager.get_old_fp8_meta_tensors_for_recompute
 
     def record_stash(fp8_meta):
         stash_fn(fp8_meta)
         if _FP8_RECOMPUTE_KEY in fp8_meta:
-            stashed_scales.append(fp8_meta[forward_key].scale.clone())
+            stash_counts[id(fp8_meta)] = stash_counts.get(id(fp8_meta), 0) + 1
 
     def record_restore(fp8_meta):
+        assert id(fp8_meta) in stash_counts, "Recompute restored a scale that was never stashed"
+        restore_counts[id(fp8_meta)] = restore_counts.get(id(fp8_meta), 0) + 1
         restore_fn(fp8_meta)
-        if _FP8_RECOMPUTE_KEY in fp8_meta:
-            restored_scales.append(fp8_meta[forward_key].scale.clone())
 
     monkeypatch.setattr(
         FP8GlobalStateManager,
@@ -870,14 +870,8 @@ def test_gpt_full_activation_recompute_with_inner_autocast(use_reentrant, monkey
         inner_autocast=True,
     )
 
-    assert stashed_scales, "No FP8 module stashed a forward scale for the recompute phase"
-    assert len(restored_scales) == len(
-        stashed_scales
-    ), "Every stashed forward scale must be restored exactly once in the recompute phase"
-    for i, (stashed, restored) in enumerate(zip(stashed_scales, restored_scales)):
-        torch.testing.assert_close(
-            restored, stashed, rtol=0.0, atol=0.0, msg=f"Recompute scale differs for module {i}"
-        )
+    assert stash_counts, "No FP8 module stashed a forward scale for the recompute phase"
+    assert restore_counts == stash_counts, "Stash and restore of forward scales are unbalanced"
 
     for name, ref, test in zip(names, outputs, outputs_recompute):
         torch.testing.assert_close(
@@ -905,6 +899,7 @@ def _checkpointed_linear_backward(body, use_reentrant, *layers):
         assert torch.isfinite(layer.weight.grad).all()
 
 
+@pytest.mark.skipif(not is_bf16_available(), reason="bf16 requires sm_80 or higher")
 @pytest.mark.parametrize("use_reentrant", all_boolean)
 def test_checkpoint_without_fp8_does_not_save_fp8_recompute_state(use_reentrant):
     """A checkpointed non-FP8 module does not save FP8 recompute metadata."""

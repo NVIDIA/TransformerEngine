@@ -277,7 +277,7 @@ class activation_recompute_forward(AbstractContextManager, ContextDecorator):
 
 
 def is_fp8_activation_recompute_enabled() -> bool:
-    """Return global boolean"""
+    """Whether we are in an activation recompute region with FP8 currently enabled"""
     return _IN_ACTIVATION_RECOMPUTE_REGION and FP8GlobalStateManager.is_fp8_enabled()
 
 
