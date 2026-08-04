@@ -21,6 +21,7 @@
 #include "../fp8/quantize_fp8.cuh"
 #include "../fp8_blockwise/group_quantize_fp8_blockwise.cuh"
 #include "../mxfp8/group_quantize_mxfp8.cuh"
+#include "../mxfp8/group_swiglu_quantize_mxfp8.cuh"
 #include "../mxfp8/quantize_mxfp8.cuh"
 #include "../nvfp4/group_quantize_transpose_nvfp4.cuh"
 #include "../nvfp4/quantize_4over6_nvfp4.cuh"
@@ -495,6 +496,46 @@ void group_quantize_fwd_helper(const NVTEGroupedTensor input, NVTEGroupedTensor 
     }
     default:
       NVTE_ERROR("Not implemented scaling mode: " + to_string(scaling_mode) + ".");
+  }
+}
+
+// Grouped weighted-SwiGLU recompute: input [T, 2F] ([act|gate]) + prob [T]
+// -> columnwise MXFP8 of (silu(act) * gate) * prob.
+template <typename ParamOP, float (*OP)(float, const ParamOP &)>
+void group_swiglu_quantize_fwd_helper(const NVTEGroupedTensor input, const NVTETensor prob,
+                                      NVTEGroupedTensor output,
+                                      const NVTEQuantizationConfig quant_config,
+                                      cudaStream_t stream) {
+  using namespace detail;
+
+  NVTEScalingMode scaling_mode = nvte_grouped_tensor_scaling_mode(output);
+
+  const GroupedTensor *input_tensor = convertNVTEGroupedTensorCheck(input);
+  GroupedTensor *output_tensor = convertNVTEGroupedTensorCheck(output);
+  const Tensor *prob_tensor = convertNVTETensorCheck(prob);
+
+  // Quantization config
+  QuantizationConfig quant_config_cpp;
+  if (quant_config != nullptr) {
+    quant_config_cpp = *reinterpret_cast<QuantizationConfig *>(quant_config);
+  }
+
+  // Noop flag (graph-safe skip)
+  Tensor dummy_tensor;
+  Tensor *noop_tensor = &dummy_tensor;
+  if (quant_config_cpp.noop_tensor != nullptr) {
+    noop_tensor = convertNVTETensorCheck(quant_config_cpp.noop_tensor);
+  }
+
+  switch (scaling_mode) {
+    case NVTE_MXFP8_1D_SCALING: {
+      mxfp8::group_swiglu_quantize<ParamOP, OP>(input_tensor, prob_tensor, noop_tensor,
+                                                output_tensor, &quant_config_cpp, stream);
+      break;
+    }
+    default:
+      NVTE_ERROR("group_swiglu_quantize only supports NVTE_MXFP8_1D_SCALING, got: " +
+                 to_string(scaling_mode) + ".");
   }
 }
 

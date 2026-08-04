@@ -209,6 +209,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("quantizer"), py::arg("num_tensors"), py::arg("first_dims"),
         py::arg("last_dims") = py::none(), py::arg("tensor_offsets") = py::none(),
         py::arg("noop_flag") = py::none());
+  m.def("group_swiglu_quantize", transformer_engine::pytorch::group_swiglu_quantize,
+        "Grouped weighted-SwiGLU recompute fused with columnwise MXFP8 quantization",
+        py::arg("input_2f"), py::arg("prob"), py::arg("quantizer"), py::arg("num_tensors"),
+        py::arg("first_dims") = py::none(), py::arg("last_dims") = py::none(),
+        py::arg("tensor_offsets") = py::none());
   transformer_engine::pytorch::bind_quantize_with_amax_extensions(m);
   m.def("group_dequantize", transformer_engine::pytorch::group_dequantize,
         "Dequantize group tensor", py::arg("input"), py::arg("otype"));

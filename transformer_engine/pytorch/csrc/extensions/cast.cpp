@@ -6,6 +6,8 @@
 
 #include "transformer_engine/cast.h"
 
+#include "transformer_engine/activation.h"
+
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -393,6 +395,64 @@ py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const 
           "Float8Blockwise quantizer.");
       break;
   }
+
+  return py::reinterpret_borrow<py::object>(grouped_output_py);
+}
+
+py::object group_swiglu_quantize(const at::Tensor &input_2f, const at::Tensor &prob,
+                                 py::handle quantizer, const size_t num_tensors,
+                                 std::optional<at::Tensor> first_dims,
+                                 std::optional<at::Tensor> last_dims,
+                                 std::optional<at::Tensor> tensor_offsets) {
+  using namespace transformer_engine::pytorch::detail;
+  init_extension();
+
+  // Grouped weighted-SwiGLU recompute of the MoE FC2 input:
+  //   input_2f : [T, 2F] ([act|gate]) in model dtype (bf16).
+  //   prob     : [T] per-token weights, model dtype (matches TE fc1_prob_tensor).
+  //   output   : columnwise MXFP8 of (silu(act) * gate) * prob, logical [T, F].
+  NVTE_CHECK(input_2f.dim() == 2, "group_swiglu_quantize input must be 2D [T, 2F].");
+  const auto T = static_cast<size_t>(input_2f.size(0));
+  const auto two_f = static_cast<size_t>(input_2f.size(1));
+  NVTE_CHECK(two_f % 2 == 0, "group_swiglu_quantize input last dim must be even (=2F).");
+  const size_t F = two_f / 2;
+
+  NVTE_CHECK(IsMXFP8Quantizers(quantizer.ptr()),
+             "group_swiglu_quantize only supports MXFP8 quantizers.");
+  NVTE_CHECK(prob.is_cuda(), "group_swiglu_quantize prob must be a CUDA tensor.");
+  NVTE_CHECK(prob.numel() >= static_cast<int64_t>(T),
+             "group_swiglu_quantize prob must have at least T elements.");
+  NVTE_CHECK(prob.scalar_type() == input_2f.scalar_type(),
+             "group_swiglu_quantize prob must have the same dtype as the input (model dtype).");
+
+  const bool empty_input_buffer = (T == 0 || F == 0);
+
+  auto quantizer_cpp = convert_quantizer(quantizer);
+
+  // Input GroupedTensor: [T, 2F].
+  std::vector<size_t> in_logical_shape = {T, two_f};
+  auto grouped_input_tensor = GroupedTensorWrapper(num_tensors, in_logical_shape);
+  grouped_input_tensor.set_rowwise_data(
+      input_2f.data_ptr(), GetTransformerEngineDType(input_2f.scalar_type()),
+      std::vector<size_t>{static_cast<size_t>(input_2f.numel())});
+
+  // Output GroupedTensor: [T, F] (columnwise MXFP8). Driving logical_last_dim = F
+  // makes the allocated data/scales and the tensor_offsets F-based.
+  std::vector<size_t> out_logical_shape = {T, F};
+  auto [grouped_output_tensor_cpp, grouped_output_py] = quantizer_cpp->create_grouped_tensor(
+      num_tensors, out_logical_shape, GetTransformerEngineDType(input_2f.scalar_type()),
+      py::reinterpret_borrow<py::object>(quantizer), first_dims, last_dims, tensor_offsets, T, F);
+
+  if (empty_input_buffer) {
+    return py::reinterpret_borrow<py::object>(grouped_output_py);
+  }
+
+  auto prob_te = makeTransformerEngineTensor(prob);
+
+  NVTE_SCOPED_GIL_RELEASE({
+    nvte_group_swiglu_quantize(grouped_input_tensor.data(), prob_te.data(),
+                               grouped_output_tensor_cpp.data(), at::cuda::getCurrentCUDAStream());
+  });
 
   return py::reinterpret_borrow<py::object>(grouped_output_py);
 }

@@ -15,6 +15,15 @@ void nvte_group_silu(const NVTEGroupedTensor input, NVTEGroupedTensor output, cu
                                                                        stream);
 }
 
+void nvte_group_swiglu_quantize(const NVTEGroupedTensor input, const NVTETensor prob,
+                                NVTEGroupedTensor output, cudaStream_t stream) {
+  NVTE_API_CALL(nvte_group_swiglu_quantize);
+  using namespace transformer_engine;
+  // Weighted-SwiGLU recompute: (silu(act) * gate) * prob -> columnwise MXFP8.
+  dispatch::group_swiglu_quantize_fwd_helper<Empty, silu<fp32, fp32>>(input, prob, output, nullptr,
+                                                                      stream);
+}
+
 void nvte_group_dsilu(const NVTEGroupedTensor grad, const NVTEGroupedTensor input,
                       NVTEGroupedTensor output, cudaStream_t stream) {
   NVTE_API_CALL(nvte_group_dsilu);

@@ -85,6 +85,27 @@ void nvte_silu(const NVTETensor input, NVTETensor output, cudaStream_t stream);
  */
 void nvte_group_silu(const NVTEGroupedTensor input, NVTEGroupedTensor output, cudaStream_t stream);
 
+/*! \brief Grouped weighted-SwiGLU "recompute" fused with MXFP8 columnwise quantization.
+ *
+ *  Computes, per token t and feature f:
+ *      output[t, f] = ( silu(input[t, f]) * input[t, F + f] ) * prob[t]
+ *  where the grouped input has logical shape [T, 2F] (last dim = [act | gate]) and
+ *  the grouped output has logical shape [T, F]. Only the columnwise MXFP8 output is
+ *  produced (it feeds the MoE FC2 weight-gradient GEMM). Restrictions:
+ *  NVTE_MXFP8_1D_SCALING output, uniform F across experts (SAME_BOTH_DIMS /
+ *  VARYING_FIRST_DIM), per-expert token counts divisible by 128. Scales may be
+ *  compact or in the cuBLAS GEMM-swizzled layout; the swizzled layout additionally
+ *  requires F divisible by 128 and, for multiple experts, VARYING_FIRST_DIM.
+ *
+ *  \param[in]     input     Grouped input tensor [T, 2F] ([act|gate]).
+ *  \param[in]     prob      Per-token weights, at least T elements, in the same
+ *                           dtype as \p input.
+ *  \param[in,out] output    Grouped output tensor [T, F] (columnwise MXFP8).
+ *  \param[in]     stream    CUDA stream used for the operation.
+ */
+void nvte_group_swiglu_quantize(const NVTEGroupedTensor input, const NVTETensor prob,
+                                NVTEGroupedTensor output, cudaStream_t stream);
+
 /*! \brief Computes the ReLU activation of the input.
  *         If the scaling mode of the output tensor is set to NVTE_MXFP8_1D_SCALING,
  *         the block quantization (MXFP8) of the specified shape of the block will be used.
