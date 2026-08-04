@@ -6,8 +6,6 @@
 
 #include "transformer_engine/cast.h"
 
-#include "transformer_engine/activation.h"
-
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -23,6 +21,7 @@
 #include "common/common.h"
 #include "common/util/system.h"
 #include "pybind.h"
+#include "transformer_engine/activation.h"
 #include "transformer_engine/multi_tensor.h"
 #include "transformer_engine/recipe.h"
 #include "transformer_engine/transformer_engine.h"
@@ -432,9 +431,9 @@ py::object group_swiglu_quantize(const at::Tensor &input_2f, const at::Tensor &p
   // Input GroupedTensor: [T, 2F].
   std::vector<size_t> in_logical_shape = {T, two_f};
   auto grouped_input_tensor = GroupedTensorWrapper(num_tensors, in_logical_shape);
-  grouped_input_tensor.set_rowwise_data(
-      input_2f.data_ptr(), GetTransformerEngineDType(input_2f.scalar_type()),
-      std::vector<size_t>{static_cast<size_t>(input_2f.numel())});
+  grouped_input_tensor.set_rowwise_data(input_2f.data_ptr(),
+                                        GetTransformerEngineDType(input_2f.scalar_type()),
+                                        std::vector<size_t>{static_cast<size_t>(input_2f.numel())});
 
   // Output GroupedTensor: [T, F] (columnwise MXFP8). Driving logical_last_dim = F
   // makes the allocated data/scales and the tensor_offsets F-based.

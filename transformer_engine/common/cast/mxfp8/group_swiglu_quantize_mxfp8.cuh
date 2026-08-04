@@ -176,167 +176,169 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_swiglu_quantize_mxfp8
   } else {
     const bool leading_thread = (threadIdx.x == 0);
 
-  const size_t tid_X_colwise = threadIdx.x;
+    const size_t tid_X_colwise = threadIdx.x;
 
-  constexpr size_t buff_elems = BUFF_DIM_Y * BUFF_DIM_X;
-  constexpr size_t buff_elems_total = BUFFS_NUM * buff_elems;
-  constexpr size_t buff_size_aligned_in =
-      DIVUP_TO_MULTIPLE(buff_elems_total * sizeof(IType), TMA_SHMEM_ALIGNMENT);
-  constexpr size_t buff_size_aligned_out =
-      DIVUP_TO_MULTIPLE(buff_elems_total * sizeof(OType), TMA_SHMEM_ALIGNMENT);
+    constexpr size_t buff_elems = BUFF_DIM_Y * BUFF_DIM_X;
+    constexpr size_t buff_elems_total = BUFFS_NUM * buff_elems;
+    constexpr size_t buff_size_aligned_in =
+        DIVUP_TO_MULTIPLE(buff_elems_total * sizeof(IType), TMA_SHMEM_ALIGNMENT);
+    constexpr size_t buff_size_aligned_out =
+        DIVUP_TO_MULTIPLE(buff_elems_total * sizeof(OType), TMA_SHMEM_ALIGNMENT);
 
-  // shmem layout: [act input][gate input][colwise output]
-  extern __shared__ unsigned char dynamic_shmem[];
-  unsigned char *dshmem = align_smem_ptr_per_TMA_requirements(dynamic_shmem);
+    // shmem layout: [act input][gate input][colwise output]
+    extern __shared__ unsigned char dynamic_shmem[];
+    unsigned char *dshmem = align_smem_ptr_per_TMA_requirements(dynamic_shmem);
 
-  IType *sInAct_ptr = reinterpret_cast<IType *>(dshmem);
-  IType *sInGate_ptr = reinterpret_cast<IType *>(dshmem + buff_size_aligned_in);
-  OType *sOutColwise_ptr = reinterpret_cast<OType *>(dshmem + 2 * buff_size_aligned_in);
+    IType *sInAct_ptr = reinterpret_cast<IType *>(dshmem);
+    IType *sInGate_ptr = reinterpret_cast<IType *>(dshmem + buff_size_aligned_in);
+    OType *sOutColwise_ptr = reinterpret_cast<OType *>(dshmem + 2 * buff_size_aligned_in);
 
-  // Per-buffer byte count transferred by TMA (act + gate) into one slice.
-  constexpr size_t shmem_buff_size = buff_size_aligned_in / BUFFS_NUM;
+    // Per-buffer byte count transferred by TMA (act + gate) into one slice.
+    constexpr size_t shmem_buff_size = buff_size_aligned_in / BUFFS_NUM;
 
-  const size_t total_work_blocks = work_blocks_X * work_blocks_Y;
-  const size_t launch_block_id = blockIdx.y * gridDim.x + blockIdx.x;
+    const size_t total_work_blocks = work_blocks_X * work_blocks_Y;
+    const size_t launch_block_id = blockIdx.y * gridDim.x + blockIdx.x;
 
-  int IN_buff_readable_parity[BUFFS_NUM] = {0};
+    int IN_buff_readable_parity[BUFFS_NUM] = {0};
 
-  if (launch_block_id >= total_work_blocks) {
-    return;
-  }
-  int32_t ctaid_X = static_cast<int32_t>(launch_block_id % work_blocks_X);
-  int32_t ctaid_Y = static_cast<int32_t>(launch_block_id / work_blocks_X);
-  size_t static_block_stride = gridDim.x * gridDim.y;
-  size_t static_next_block_id = launch_block_id + static_block_stride;
-
-  bool job_finished = false;
-
-  __shared__ uint64_t IN_buff_readable_mbar[BUFFS_NUM];
-  initialize_barriers<BUFFS_NUM, 1>(IN_buff_readable_mbar, leading_thread);
-
-  while (!job_finished) {
-    const JobDescriptor current_job = decode_job<SHAPE_REP, CHUNK_DIM_Y, CHUNK_DIM_X>(
-        num_tensors, first_logical_dim, last_logical_dim, work_blocks_X, ctaid_X, ctaid_Y,
-        offsets_ptr, first_dims_ptr, last_dims_ptr);
-    const bool current_job_is_valid =
-        is_job_valid<SHAPE_REP>(current_job, total_work_blocks, offsets_ptr);
-    if (!current_job_is_valid) {
-      break;
+    if (launch_block_id >= total_work_blocks) {
+      return;
     }
-    if (!job_has_work(current_job)) {
-      advance_to_next_job(job_finished, ctaid_X, ctaid_Y, static_next_block_id, static_block_stride,
-                          total_work_blocks, work_blocks_X);
-      continue;
-    }
+    int32_t ctaid_X = static_cast<int32_t>(launch_block_id % work_blocks_X);
+    int32_t ctaid_Y = static_cast<int32_t>(launch_block_id / work_blocks_X);
+    size_t static_block_stride = gridDim.x * gridDim.y;
+    size_t static_next_block_id = launch_block_id + static_block_stride;
 
-    const size_t rows = current_job.rows;
-    const size_t cols = current_job.cols;
-    const BlockDescriptor current_block =
-        decode_block<SHAPE_REP, CHUNK_DIM_Y, CHUNK_DIM_X>(current_job, offsets_ptr);
+    bool job_finished = false;
 
-    const size_t scale_alignment_X_colwise = static_cast<size_t>(scale_tensor_alignment_X_colwise);
-    const size_t scale_stride_colwise = DIVUP_TO_MULTIPLE(cols, scale_alignment_X_colwise);
+    __shared__ uint64_t IN_buff_readable_mbar[BUFFS_NUM];
+    initialize_barriers<BUFFS_NUM, 1>(IN_buff_readable_mbar, leading_thread);
 
-    // Only the swizzled layout needs the per-expert base; offsets_ptr may be null
-    // otherwise (SAME_BOTH_DIMS), so keep the read inside the constexpr branch.
-    size_t tensor_base_for_scales = 0;
-    if constexpr (WITH_GEMM_SWIZZLED_SCALES) {
-      tensor_base_for_scales = (num_tensors > 1)
-                                   ? static_cast<size_t>(offsets_ptr[current_job.tensor_id])
-                                   : current_block.tensor_base;
-    }
+    while (!job_finished) {
+      const JobDescriptor current_job = decode_job<SHAPE_REP, CHUNK_DIM_Y, CHUNK_DIM_X>(
+          num_tensors, first_logical_dim, last_logical_dim, work_blocks_X, ctaid_X, ctaid_Y,
+          offsets_ptr, first_dims_ptr, last_dims_ptr);
+      const bool current_job_is_valid =
+          is_job_valid<SHAPE_REP>(current_job, total_work_blocks, offsets_ptr);
+      if (!current_job_is_valid) {
+        break;
+      }
+      if (!job_has_work(current_job)) {
+        advance_to_next_job(job_finished, ctaid_X, ctaid_Y, static_next_block_id,
+                            static_block_stride, total_work_blocks, work_blocks_X);
+        continue;
+      }
 
-    const size_t block_id_Y = current_block.block_id_Y;
-    const size_t block_id_X = current_block.block_id_X;
-    const size_t block_offset_Y = current_block.block_offset_Y;
-    const size_t block_offset_X = current_block.block_offset_X;
+      const size_t rows = current_job.rows;
+      const size_t cols = current_job.cols;
+      const BlockDescriptor current_block =
+          decode_block<SHAPE_REP, CHUNK_DIM_Y, CHUNK_DIM_X>(current_job, offsets_ptr);
 
-    const size_t scales_block_offset_Y_colwise = block_id_Y * CHUNK_DIM_Y / SCALE_DIM_Y;
-    const size_t scales_block_offset_X_colwise = block_id_X * CHUNK_DIM_X;
-    const size_t scales_offset_Y_colwise = scales_block_offset_Y_colwise;
-    const size_t scales_offset_X_colwise = scales_block_offset_X_colwise + tid_X_colwise;
+      const size_t scale_alignment_X_colwise =
+          static_cast<size_t>(scale_tensor_alignment_X_colwise);
+      const size_t scale_stride_colwise = DIVUP_TO_MULTIPLE(cols, scale_alignment_X_colwise);
 
-    __syncthreads();
+      // Only the swizzled layout needs the per-expert base; offsets_ptr may be null
+      // otherwise (SAME_BOTH_DIMS), so keep the read inside the constexpr branch.
+      size_t tensor_base_for_scales = 0;
+      if constexpr (WITH_GEMM_SWIZZLED_SCALES) {
+        tensor_base_for_scales = (num_tensors > 1)
+                                     ? static_cast<size_t>(offsets_ptr[current_job.tensor_id])
+                                     : current_block.tensor_base;
+      }
 
-    int buff_in = 0;
+      const size_t block_id_Y = current_block.block_id_Y;
+      const size_t block_id_X = current_block.block_id_X;
+      const size_t block_offset_Y = current_block.block_offset_Y;
+      const size_t block_offset_X = current_block.block_offset_X;
+
+      const size_t scales_block_offset_Y_colwise = block_id_Y * CHUNK_DIM_Y / SCALE_DIM_Y;
+      const size_t scales_block_offset_X_colwise = block_id_X * CHUNK_DIM_X;
+      const size_t scales_offset_Y_colwise = scales_block_offset_Y_colwise;
+      const size_t scales_offset_X_colwise = scales_block_offset_X_colwise + tid_X_colwise;
+
+      __syncthreads();
+
+      int buff_in = 0;
 
 // Prime the pipeline with the first PREFETCH_STAGES slices (act + gate).
 #pragma unroll
-    for (int stage = 0; stage < PREFETCH_STAGES; ++stage) {
-      const size_t buff = stage;
-      const size_t stage_offset_Y = stage * BUFF_DIM_Y;
-      const size_t global_offset_Y = block_offset_Y + stage_offset_Y;
-      const size_t global_offset_X = block_offset_X;
-      const size_t buff_offset = buff * BUFF_DIM;
-      uint64_t *barrier = &IN_buff_readable_mbar[buff];
-      if (leading_thread) {
-        ptx::mbarrier_arrive_expect_tx(barrier, 2 * shmem_buff_size);
-        ptx::cp_async_bulk_tensor_2d_global_to_shared(
-            reinterpret_cast<uint64_t *>(&sInAct_ptr[buff_offset]),
-            reinterpret_cast<const uint64_t *>(&tensor_map_input_act_static), global_offset_X,
-            global_offset_Y, barrier);
-        ptx::cp_async_bulk_tensor_2d_global_to_shared(
-            reinterpret_cast<uint64_t *>(&sInGate_ptr[buff_offset]),
-            reinterpret_cast<const uint64_t *>(&tensor_map_input_gate_static), global_offset_X,
-            global_offset_Y, barrier);
-      }
-    }
-
-#pragma unroll
-    for (int stage = 0; stage < STAGES; ++stage) {
-      const size_t stage_offset_Y = stage * BUFF_DIM_Y;
-      if (stage < STAGES - PREFETCH_STAGES) {
-        const size_t next_prefetch_buff = (buff_in + PREFETCH_STAGES) % BUFFS_NUM;
-        const size_t next_prefetch_stage = stage + PREFETCH_STAGES;
-        const size_t next_prefetch_stage_offset_Y = next_prefetch_stage * BUFF_DIM_Y;
-        const size_t global_offset_Y = block_offset_Y + next_prefetch_stage_offset_Y;
+      for (int stage = 0; stage < PREFETCH_STAGES; ++stage) {
+        const size_t buff = stage;
+        const size_t stage_offset_Y = stage * BUFF_DIM_Y;
+        const size_t global_offset_Y = block_offset_Y + stage_offset_Y;
         const size_t global_offset_X = block_offset_X;
-        const size_t next_prefetch_buff_offset = next_prefetch_buff * BUFF_DIM;
-        uint64_t *barrier = &IN_buff_readable_mbar[next_prefetch_buff];
+        const size_t buff_offset = buff * BUFF_DIM;
+        uint64_t *barrier = &IN_buff_readable_mbar[buff];
         if (leading_thread) {
           ptx::mbarrier_arrive_expect_tx(barrier, 2 * shmem_buff_size);
           ptx::cp_async_bulk_tensor_2d_global_to_shared(
-              reinterpret_cast<uint64_t *>(&sInAct_ptr[next_prefetch_buff_offset]),
+              reinterpret_cast<uint64_t *>(&sInAct_ptr[buff_offset]),
               reinterpret_cast<const uint64_t *>(&tensor_map_input_act_static), global_offset_X,
               global_offset_Y, barrier);
           ptx::cp_async_bulk_tensor_2d_global_to_shared(
-              reinterpret_cast<uint64_t *>(&sInGate_ptr[next_prefetch_buff_offset]),
+              reinterpret_cast<uint64_t *>(&sInGate_ptr[buff_offset]),
               reinterpret_cast<const uint64_t *>(&tensor_map_input_gate_static), global_offset_X,
               global_offset_Y, barrier);
         }
       }
 
-      ptx::mbarrier_wait_parity_acquire_cta_shared_cta(&IN_buff_readable_mbar[buff_in],
-                                                       IN_buff_readable_parity[buff_in]);
-      IN_buff_readable_parity[buff_in] ^= 1;
-      ptx::cp_async_bulk_wait_group_read<PREFETCH_STAGES>();
+#pragma unroll
+      for (int stage = 0; stage < STAGES; ++stage) {
+        const size_t stage_offset_Y = stage * BUFF_DIM_Y;
+        if (stage < STAGES - PREFETCH_STAGES) {
+          const size_t next_prefetch_buff = (buff_in + PREFETCH_STAGES) % BUFFS_NUM;
+          const size_t next_prefetch_stage = stage + PREFETCH_STAGES;
+          const size_t next_prefetch_stage_offset_Y = next_prefetch_stage * BUFF_DIM_Y;
+          const size_t global_offset_Y = block_offset_Y + next_prefetch_stage_offset_Y;
+          const size_t global_offset_X = block_offset_X;
+          const size_t next_prefetch_buff_offset = next_prefetch_buff * BUFF_DIM;
+          uint64_t *barrier = &IN_buff_readable_mbar[next_prefetch_buff];
+          if (leading_thread) {
+            ptx::mbarrier_arrive_expect_tx(barrier, 2 * shmem_buff_size);
+            ptx::cp_async_bulk_tensor_2d_global_to_shared(
+                reinterpret_cast<uint64_t *>(&sInAct_ptr[next_prefetch_buff_offset]),
+                reinterpret_cast<const uint64_t *>(&tensor_map_input_act_static), global_offset_X,
+                global_offset_Y, barrier);
+            ptx::cp_async_bulk_tensor_2d_global_to_shared(
+                reinterpret_cast<uint64_t *>(&sInGate_ptr[next_prefetch_buff_offset]),
+                reinterpret_cast<const uint64_t *>(&tensor_map_input_gate_static), global_offset_X,
+                global_offset_Y, barrier);
+          }
+        }
 
-      const size_t buff = buff_in;
-      const size_t data_row_base = block_offset_Y + stage_offset_Y;
-      process_colwise_gated_stage<ParamOP, OP, IType, OType, WITH_GEMM_SWIZZLED_SCALES>(
-          buff, stage, tid_X_colwise, scales_offset_Y_colwise, scales_offset_X_colwise,
-          scale_stride_colwise, tensor_base_for_scales, rows, cols, data_row_base, prob_ptr,
-          sInAct_ptr, sInGate_ptr, sOutColwise_ptr, scales_colwise_ptr);
+        ptx::mbarrier_wait_parity_acquire_cta_shared_cta(&IN_buff_readable_mbar[buff_in],
+                                                         IN_buff_readable_parity[buff_in]);
+        IN_buff_readable_parity[buff_in] ^= 1;
+        ptx::cp_async_bulk_wait_group_read<PREFETCH_STAGES>();
 
-      ptx::fence_proxy_async_shared_cta();
-      __syncthreads();
+        const size_t buff = buff_in;
+        const size_t data_row_base = block_offset_Y + stage_offset_Y;
+        process_colwise_gated_stage<ParamOP, OP, IType, OType, WITH_GEMM_SWIZZLED_SCALES>(
+            buff, stage, tid_X_colwise, scales_offset_Y_colwise, scales_offset_X_colwise,
+            scale_stride_colwise, tensor_base_for_scales, rows, cols, data_row_base, prob_ptr,
+            sInAct_ptr, sInGate_ptr, sOutColwise_ptr, scales_colwise_ptr);
 
-      const size_t global_offset_Y = block_offset_Y + stage_offset_Y;
-      const size_t global_offset_X = block_offset_X;
-      const size_t buff_offset = buff * BUFF_DIM;
-      if (leading_thread) {
-        ptx::cp_async_bulk_tensor_2d_shared_to_global(
-            reinterpret_cast<const uint64_t *>(&tensor_map_output_colwise_static), global_offset_X,
-            global_offset_Y, reinterpret_cast<uint64_t *>(&sOutColwise_ptr[buff_offset]));
-        ptx::cp_async_bulk_commit_group();
+        ptx::fence_proxy_async_shared_cta();
+        __syncthreads();
+
+        const size_t global_offset_Y = block_offset_Y + stage_offset_Y;
+        const size_t global_offset_X = block_offset_X;
+        const size_t buff_offset = buff * BUFF_DIM;
+        if (leading_thread) {
+          ptx::cp_async_bulk_tensor_2d_shared_to_global(
+              reinterpret_cast<const uint64_t *>(&tensor_map_output_colwise_static),
+              global_offset_X, global_offset_Y,
+              reinterpret_cast<uint64_t *>(&sOutColwise_ptr[buff_offset]));
+          ptx::cp_async_bulk_commit_group();
+        }
+
+        buff_in = (buff_in + 1) % BUFFS_NUM;
       }
 
-      buff_in = (buff_in + 1) % BUFFS_NUM;
+      advance_to_next_job(job_finished, ctaid_X, ctaid_Y, static_next_block_id, static_block_stride,
+                          total_work_blocks, work_blocks_X);
     }
-
-    advance_to_next_job(job_finished, ctaid_X, ctaid_Y, static_next_block_id, static_block_stride,
-                        total_work_blocks, work_blocks_X);
-  }
 
     destroy_barriers<BUFFS_NUM>(IN_buff_readable_mbar, leading_thread);
   }  // if constexpr (is_single_tensor)
@@ -383,9 +385,9 @@ void group_swiglu_quantize(const GroupedTensor *input, const Tensor *prob, const
   const bool with_gemm_swizzled_scales = output->with_gemm_swizzled_scales;
 
   // Output logical shape drives the schedule ([T, F]); input is [T, 2F].
-  const size_t first_logical_dim = output->logical_shape.data[0];   // T
+  const size_t first_logical_dim = output->logical_shape.data[0];     // T
   const size_t out_last_logical_dim = output->logical_shape.data[1];  // F
-  const size_t in_last_logical_dim = input->logical_shape.data[1];   // 2F
+  const size_t in_last_logical_dim = input->logical_shape.data[1];    // 2F
 
   NVTE_CHECK(in_last_logical_dim == 2 * out_last_logical_dim,
              "group_swiglu_quantize input last dim must be 2x the output last dim ([act|gate]).");
@@ -448,7 +450,8 @@ void group_swiglu_quantize(const GroupedTensor *input, const Tensor *prob, const
           TRANSFORMER_ENGINE_SWITCH_CONDITION(
               with_gemm_swizzled_scales, WITH_GEMM_SWIZZLED_SCALES,
               TRANSFORMER_ENGINE_GROUP_TENSOR_SHAPE_REPRESENTATION_SWITCH(
-                  shape_rep, SHAPE_REP, {
+                  shape_rep, SHAPE_REP,
+                  {
                     alignas(64) CUtensorMap tensor_map_input_act{};
                     alignas(64) CUtensorMap tensor_map_input_gate{};
                     alignas(64) CUtensorMap tensor_map_output_colwise{};
@@ -456,8 +459,7 @@ void group_swiglu_quantize(const GroupedTensor *input, const Tensor *prob, const
                     constexpr size_t input_type_bit_size = TypeInfo<IType>::size;
                     constexpr size_t output_type_bit_size = TypeInfo<OType>::size;
 
-                    const IType *const prob_dptr =
-                        reinterpret_cast<const IType *>(prob->data.dptr);
+                    const IType *const prob_dptr = reinterpret_cast<const IType *>(prob->data.dptr);
 
                     // act half: [T, F] view of the [T, 2F] buffer, stride 2F, offset 0.
                     create_2D_tensor_map(tensor_map_input_act, input->data, T, F, BUFF_DIM_Y,
@@ -471,8 +473,7 @@ void group_swiglu_quantize(const GroupedTensor *input, const Tensor *prob, const
 
                     constexpr size_t buff_elems = BUFF_DIM_Y * BUFF_DIM_X;
                     constexpr size_t buff_elems_total = BUFFS_NUM * buff_elems;
-                    constexpr size_t input_buff_size =
-                        (buff_elems_total * input_type_bit_size) / 8;
+                    constexpr size_t input_buff_size = (buff_elems_total * input_type_bit_size) / 8;
                     constexpr size_t output_buff_size =
                         (buff_elems_total * output_type_bit_size) / 8;
                     constexpr size_t buff_size_aligned_in =
@@ -498,9 +499,9 @@ void group_swiglu_quantize(const GroupedTensor *input, const Tensor *prob, const
 
                     NVTE_CHECK_CUDA(cudaGetLastError());
                   });  // NOLINT(*)
-              );        // NOLINT(*)
-          );            // NOLINT(*)
-      );                // NOLINT(*)
+          );           // NOLINT(*)
+      );               // NOLINT(*)
+  );                   // NOLINT(*)
 }
 
 }  // namespace mxfp8
