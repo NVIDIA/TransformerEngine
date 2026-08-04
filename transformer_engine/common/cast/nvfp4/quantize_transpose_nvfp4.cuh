@@ -14,6 +14,7 @@
 #include <cuda.h>
 #include <cudaTypedefs.h>
 #include <cuda_runtime.h>
+#include <mma.h>
 #include <transformer_engine/transformer_engine.h>
 
 #include <type_traits>
@@ -411,6 +412,9 @@ __global__ void __launch_bounds__(THREADS_NUM)
   constexpr size_t out_mem_rowwise_scales = 0;
   constexpr size_t out_mem_colwise_scales =
       (CHUNK_DIM_Y * CHUNK_DIM_X) / SCALE_DIM * sizeof(nvfp4_scale_t);
+  constexpr size_t rht_matrix_mem = 16 * 16 * sizeof(IType);
+  constexpr size_t rht_result_mem = BUFF_DIM_Y * BUFF_IN_DIM_X * sizeof(IType);
+  constexpr size_t rht_mma_a_mem = (THREADS_NUM / THREADS_PER_WARP) * 16 * 16 * sizeof(IType);
 
   extern __shared__ char dynamic_shmem[];
   uintptr_t base_shmem_ptr = reinterpret_cast<uintptr_t>(dynamic_shmem);
@@ -431,6 +435,12 @@ __global__ void __launch_bounds__(THREADS_NUM)
   IType *rht_sh =
       reinterpret_cast<IType *>(dshmem + in_mem + out_mem_rowwise_data + out_mem_colwise_data +
                                 out_mem_rowwise_scales + out_mem_colwise_scales);
+  IType *rht_result_sh =
+      reinterpret_cast<IType *>(reinterpret_cast<char *>(rht_sh) + rht_matrix_mem);
+  IType *rht_mma_a_sh =
+      reinterpret_cast<IType *>(reinterpret_cast<char *>(rht_result_sh) + rht_result_mem);
+  float *rht_mma_acc_sh =
+      reinterpret_cast<float *>(reinterpret_cast<char *>(rht_mma_a_sh) + rht_mma_a_mem);
   IType *cached_act_sh = in_sh;  // in_sh is used as a cache buffer
 
   constexpr size_t shmem_buff_size = buff_size_aligned_in / BUFFS_NUM;
@@ -498,6 +508,103 @@ __global__ void __launch_bounds__(THREADS_NUM)
     ptx::mbarrier_wait_parity(&mbar[stage], 0);
     if constexpr (APPLY_COLUMNWISE_RHT) {
       ptx::mbarrier_wait_parity(&mbar_rht[0], 0);
+      IType *stage_rht_result_sh = rht_result_sh;
+
+      // SM120/121 have legacy warp MMA but no TMEM. Form sixteen 16x16 tiles from
+      // the TMA input stage, transpose each tile into WMMA A layout, and compute
+      // A @ H in registers. Four warps independently process four tiles each.
+      constexpr int kWarps = THREADS_NUM / THREADS_PER_WARP;
+      constexpr int kTilesX = BUFF_IN_DIM_X / SCALE_DIM;
+      constexpr int kTilesY = BUFF_DIM_Y / SCALE_DIM;
+      constexpr int kMmaTiles = kTilesX * kTilesY;
+      const int warp = threadIdx.x / THREADS_PER_WARP;
+      const int lane = threadIdx.x % THREADS_PER_WARP;
+      IType *warp_a = rht_mma_a_sh + warp * SCALE_DIM * SCALE_DIM;
+      float *warp_acc = rht_mma_acc_sh + warp * SCALE_DIM * SCALE_DIM;
+      const bool reduced_precision_rht = rows * cols <= 1024 * SCALE_DIM;
+
+      for (int tile = warp; tile < kMmaTiles; tile += kWarps) {
+        const int tile_y = tile / kTilesX;
+        const int tile_x = tile % kTilesX;
+        nvcuda::wmma::fragment<nvcuda::wmma::matrix_a, 16, 16, 16, __nv_bfloat16,
+                               nvcuda::wmma::row_major>
+            a_frag;
+        nvcuda::wmma::fragment<nvcuda::wmma::matrix_b, 16, 16, 16, __nv_bfloat16,
+                               nvcuda::wmma::row_major>
+            b_frag;
+        nvcuda::wmma::fragment<nvcuda::wmma::accumulator, 16, 16, 16, float> acc_frag;
+        nvcuda::wmma::load_matrix_sync(b_frag, reinterpret_cast<__nv_bfloat16 *>(rht_sh),
+                                       SCALE_DIM);
+
+        if (!reduced_precision_rht) {
+          // cuBLAS uses two K=8 MMA steps with an FP32 accumulator for larger
+          // RHT batches. Mask the opposite half of K in each step to reproduce
+          // that accumulation order with the K=16 WMMA primitive available here.
+          nvcuda::wmma::fill_fragment(acc_frag, 0.0f);
+          for (int mma_pass = 0; mma_pass < 2; ++mma_pass) {
+#pragma unroll
+            for (int idx = lane; idx < SCALE_DIM * SCALE_DIM; idx += THREADS_PER_WARP) {
+              const int vector = idx / SCALE_DIM;
+              const int k = idx % SCALE_DIM;
+              warp_a[idx] = k / (SCALE_DIM / 2) == mma_pass
+                                ? in_sh[buff_offset_in + (tile_y * SCALE_DIM + k) * BUFF_IN_DIM_X +
+                                        tile_x * SCALE_DIM + vector]
+                                : static_cast<IType>(0.0f);
+            }
+            __syncwarp();
+            nvcuda::wmma::load_matrix_sync(a_frag, reinterpret_cast<__nv_bfloat16 *>(warp_a),
+                                           SCALE_DIM);
+            nvcuda::wmma::mma_sync(acc_frag, a_frag, b_frag, acc_frag);
+          }
+          nvcuda::wmma::store_matrix_sync(warp_acc, acc_frag, SCALE_DIM,
+                                          nvcuda::wmma::mem_row_major);
+          __syncwarp();
+#pragma unroll
+          for (int idx = lane; idx < SCALE_DIM * SCALE_DIM; idx += THREADS_PER_WARP) {
+            const int vector = idx / SCALE_DIM;
+            const int out = idx % SCALE_DIM;
+            IType *dst = &stage_rht_result_sh[(tile_y * SCALE_DIM + out) * BUFF_IN_DIM_X +
+                                              tile_x * SCALE_DIM + vector];
+            *dst = static_cast<IType>(warp_acc[idx]);
+          }
+          __syncwarp();
+        } else {
+          // Small ATen GEMMs round two independent K=8 partials to BF16 before
+          // adding them. Keep the same boundary while still using MMA for both halves.
+          for (int mma_pass = 0; mma_pass < 2; ++mma_pass) {
+#pragma unroll
+            for (int idx = lane; idx < SCALE_DIM * SCALE_DIM; idx += THREADS_PER_WARP) {
+              const int vector = idx / SCALE_DIM;
+              const int k = idx % SCALE_DIM;
+              warp_a[idx] = k / (SCALE_DIM / 2) == mma_pass
+                                ? in_sh[buff_offset_in + (tile_y * SCALE_DIM + k) * BUFF_IN_DIM_X +
+                                        tile_x * SCALE_DIM + vector]
+                                : static_cast<IType>(0.0f);
+            }
+            __syncwarp();
+            nvcuda::wmma::load_matrix_sync(a_frag, reinterpret_cast<__nv_bfloat16 *>(warp_a),
+                                           SCALE_DIM);
+            nvcuda::wmma::fill_fragment(acc_frag, 0.0f);
+            nvcuda::wmma::mma_sync(acc_frag, a_frag, b_frag, acc_frag);
+            nvcuda::wmma::store_matrix_sync(warp_acc, acc_frag, SCALE_DIM,
+                                            nvcuda::wmma::mem_row_major);
+            __syncwarp();
+#pragma unroll
+            for (int idx = lane; idx < SCALE_DIM * SCALE_DIM; idx += THREADS_PER_WARP) {
+              const int vector = idx / SCALE_DIM;
+              const int out = idx % SCALE_DIM;
+              IType *dst = &stage_rht_result_sh[(tile_y * SCALE_DIM + out) * BUFF_IN_DIM_X +
+                                                tile_x * SCALE_DIM + vector];
+              const IType rounded_partial = static_cast<IType>(warp_acc[idx]);
+              *dst = mma_pass == 0 ? rounded_partial
+                                   : static_cast<IType>(static_cast<float>(*dst) +
+                                                        static_cast<float>(rounded_partial));
+            }
+            __syncwarp();
+          }
+        }
+      }
+      __syncthreads();
     }
 
     float block_amax = 0.0f;
@@ -561,41 +668,14 @@ __global__ void __launch_bounds__(THREADS_NUM)
           }
         }
         if constexpr (APPLY_COLUMNWISE_RHT) {
-          float input_vec[SCALE_DIM];
-#pragma unroll
-          for (int i = 0; i < SCALE_DIM; ++i) {
-            input_vec[i] = static_cast<float>(in_colwise_IType[i]);
-          }
+          IType *stage_rht_result_sh = rht_result_sh;
           block_amax = 0.0f;
 #pragma unroll
           for (int j = 0; j < SCALE_DIM; ++j) {
-            float value = 0.0f;
-            // ATen selects a reduced-precision BF16 GEMM for at most 1024
-            // K=16 vectors on SM12x. It forms two K=8 FP32 partials, rounds each
-            // partial to BF16, and then adds them. Larger inputs use a normal
-            // FP32 K=16 reduction. Match both orders at the fused-kernel boundary.
-            if (rows * cols <= 1024 * SCALE_DIM) {
-              float partial[2] = {0.0f, 0.0f};
-#pragma unroll
-              for (int group = 0; group < 2; ++group) {
-#pragma unroll
-                for (int k = 0; k < SCALE_DIM / 2; ++k) {
-                  const int rht_k = group * (SCALE_DIM / 2) + k;
-                  partial[group] =
-                      fmaf(input_vec[rht_k], static_cast<float>(rht_sh[rht_k * SCALE_DIM + j]),
-                           partial[group]);
-                }
-                partial[group] = static_cast<float>(static_cast<IType>(partial[group]));
-              }
-              value = partial[0] + partial[1];
-            } else {
-#pragma unroll
-              for (int k = 0; k < SCALE_DIM; ++k) {
-                value = fmaf(input_vec[k], static_cast<float>(rht_sh[k * SCALE_DIM + j]), value);
-              }
-            }
-            in_colwise_IType[j] = static_cast<IType>(value);
-            value = static_cast<float>(in_colwise_IType[j]);
+            const int rht_offset = in_thread_offset_Y + j;
+            in_colwise_IType[j] =
+                stage_rht_result_sh[rht_offset * BUFF_IN_DIM_X + in_thread_offset_X];
+            float value = static_cast<float>(in_colwise_IType[j]);
             in_compute_colwise[j] = value;
             block_amax = fmaxf(block_amax, fabsf(value));
           }
@@ -1635,7 +1715,12 @@ void quantize_transpose(const Tensor &input, const Tensor *noop, Tensor *output,
   constexpr size_t buff_size_aligned_out =
       DIVUP_TO_MULTIPLE((buff_elems_total * 4) / 8, TMA_SHMEM_ALIGNMENT);
   constexpr size_t buff_size_scales = (CHUNK_DIM_Y * CHUNK_DIM_X) / 16 * sizeof(nvfp4_scale_t);
-  constexpr size_t rht_mem = DIVUP_TO_MULTIPLE(16 * 16 * sizeof(IType), TMA_SHMEM_ALIGNMENT);
+  constexpr size_t rht_matrix_mem = 16 * 16 * sizeof(IType);
+  constexpr size_t rht_result_mem = BUFF_DIM_Y * BUFF_DIM_X * sizeof(IType);
+  constexpr size_t rht_mma_a_mem = (THREADS_NUM / THREADS_PER_WARP) * 16 * 16 * sizeof(IType);
+  constexpr size_t rht_mma_acc_mem = (THREADS_NUM / THREADS_PER_WARP) * 16 * 16 * sizeof(float);
+  const size_t rht_mem = DIVUP_TO_MULTIPLE(
+      rht_matrix_mem + rht_result_mem + rht_mma_a_mem + rht_mma_acc_mem, TMA_SHMEM_ALIGNMENT);
 
   constexpr size_t in_mem = buff_size_aligned_in;
 
