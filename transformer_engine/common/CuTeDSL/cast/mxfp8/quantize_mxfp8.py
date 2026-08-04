@@ -322,7 +322,9 @@ def quantize_rowwise_mxfp8(
             sO_thread_u32[idx] = mul_cvt_x4_func(in_r[w][0], in_r[w][1], scale_2x)
         else:
             # Convert 4 f32 to 4 fp8 in one fused op
-            sO_thread_u32[idx] = mul_cvt_x4_func(in_r[w][0], in_r[w][1], in_r[w][2], in_r[w][3], scale_2x)
+            sO_thread_u32[idx] = mul_cvt_x4_func(
+                in_r[w][0], in_r[w][1], in_r[w][2], in_r[w][3], scale_2x
+            )
 
     return amax_r
 

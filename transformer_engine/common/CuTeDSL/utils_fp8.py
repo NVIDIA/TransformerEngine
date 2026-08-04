@@ -55,21 +55,25 @@ def _build_mul_f32x2_cvt_f32x4_to_fp8x4(fp8_dtype, relu: bool = False) -> Callab
     Multiplies four f32 inputs by a broadcast inverse scale -- an f32x2 pair (s, s),
     which the DSL transports in an Int64 register -- and converts to FP8, packing
     the four bytes into one
-    uint32: byte i = fp8(v_i * s). Two `fma.rn.f32x2` against packed zeros + two
-    `cvt...x2.f32` — the f32-input form of this op family (CUDA ptx::mul_cvt_4x).
-    fma (not mul) so a -0 product flushes to +0, matching the CUDA reference.
+    uint32: byte i = fp8(v_i * s). Two `mul.f32x2` + two `cvt...x2.f32` — the
+    f32-input form of this op family (CUDA ptx::mul_cvt_4x).
+
+    mul, not fma-against-zeros. CUDA's specialized/grouped kernels use ptx::mul_cvt_4x
+    (fma, so a -0 product becomes +0) while its general kernel multiplies scalars
+    (keeping -0); we use mul throughout, so a -0 product keeps its sign everywhere.
+    That is the one input on which these ops can disagree with CUDA, and only in the
+    encoding of zero -- the value is the same.
     """
     out_op = "e5m2x2" if fp8_dtype is Float8E5M2 else "e4m3x2"
     asm = (
         "{\n"
-        ".reg.b64 vp0; .reg.b64 vp1; .reg.b64 vp2; .reg.b64 vp3; .reg.b64 zeros;\n\t"
+        ".reg.b64 vp0; .reg.b64 vp1; .reg.b64 vp2; .reg.b64 vp3;\n\t"
         ".reg.b32 vs0; .reg.b32 vs1; .reg.b32 vs2; .reg.b32 vs3;\n\t"
         ".reg.b16 vo0; .reg.b16 vo1;\n\t"
         "mov.b64 vp0, {$1, $2};\n\t"
         "mov.b64 vp2, {$3, $4};\n\t"
-        "mov.b64 zeros, {0x0, 0x0};\n\t"
-        "fma.rn.f32x2 vp1, vp0, $5, zeros;\n\t"
-        "fma.rn.f32x2 vp3, vp2, $5, zeros;\n\t"
+        "mul.f32x2 vp1, vp0, $5;\n\t"
+        "mul.f32x2 vp3, vp2, $5;\n\t"
         "mov.b64 {vs0, vs1}, vp1;\n\t"
         "mov.b64 {vs2, vs3}, vp3;\n\t"
         # cvt d, a, b => d[15:8]=fp8(a), d[7:0]=fp8(b); feed (hi, lo) so the low
@@ -223,16 +227,15 @@ def _build_mul_f32x2_cvt_packed16x4_to_fp8x4(
         )
     asm = (
         "{\n"
-        ".reg.b64 vp0; .reg.b64 vp1; .reg.b64 vq0; .reg.b64 vq1; .reg.b64 zeros;\n\t"
+        ".reg.b64 vp0; .reg.b64 vp1; .reg.b64 vq0; .reg.b64 vq1;\n\t"
         ".reg.b32 v1; .reg.b32 v2; .reg.b32 v3; .reg.b32 v4;\n\t"
         f"{vb_decl}"
         ".reg.b16 vo0; .reg.b16 vo1;\n\t"
         f"{widen}"
         "mov.b64 vp0, {v1, v2};\n\t"
         "mov.b64 vq0, {v3, v4};\n\t"
-        "mov.b64 zeros, {0x0, 0x0};\n\t"
-        "fma.rn.f32x2 vp1, vp0, $3, zeros;\n\t"
-        "fma.rn.f32x2 vq1, vq0, $3, zeros;\n\t"
+        "mul.f32x2 vp1, vp0, $3;\n\t"
+        "mul.f32x2 vq1, vq0, $3;\n\t"
         "mov.b64 {v2, v1}, vp1;\n\t"
         "mov.b64 {v4, v3}, vq1;\n\t"
         # cvt d, a, b => d[15:8]=fp8(a), d[7:0]=fp8(b); feed (hi, lo) so the
