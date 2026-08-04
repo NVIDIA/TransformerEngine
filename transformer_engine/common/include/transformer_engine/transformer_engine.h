@@ -19,7 +19,7 @@
 extern "C" {
 #endif
 
-#include <transformer_engine/nvfp4_4over6.h>
+#include <transformer_engine/nvfp4/4over6.h>
 
 /*! \enum NVTEDType
  *  \brief TE datatype.

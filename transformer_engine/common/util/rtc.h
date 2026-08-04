@@ -46,10 +46,6 @@ enum class ArchSpecificity {
   Generic,
   /*! Compile for the exact architecture-specific target (e.g. sm_100a) */
   ArchitectureSpecific,
-  /*! Compile for a family-specific target (e.g. sm_120f) */
-  FamilySpecific,
-  /*! Match the static build's Blackwell a/f target policy */
-  BlackwellSpecific,
 };
 
 /*! \brief Architecture requirements for an RTC kernel */

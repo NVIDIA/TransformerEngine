@@ -4,7 +4,7 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-/*! \file nvfp4_4over6.h
+/*! \file 4over6.h
  *  \brief Device-safe NVFP4 4over6 mode enum.
  *
  *  Kept free of host-only dependencies so the same definition can be used by

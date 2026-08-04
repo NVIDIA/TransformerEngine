@@ -11,11 +11,9 @@
 #include "../../util/string.h"
 
 // Generated string headers: raw source of the RTC kernel and the device headers
-// it needs as in-memory includes. These are large; keeping this in a host-only
-// .cpp (never compiled by cicc) avoids blowing up the device compiler in every
-// TU that merely launches the kernel.
+// it needs as in-memory includes
 #include "string_code_cast_nvfp4_core_nvfp4_cuh.h"
-#include "string_code_cast_nvfp4_quantize_4over6_nvfp4_cuh.h"
+#include "string_code_cast_nvfp4_quantize_4over6_kernel_cuh.h"
 #include "string_code_cast_nvfp4_rtc_quantize_4over6_cu.h"
 #include "string_code_transformer_engine_nvfp4_4over6_h.h"
 #include "string_code_util_ptx_cuh.h"
@@ -48,11 +46,11 @@ void compile_quantize_4over6_rtc(const std::string &kernel_label, const std::str
   code = regex_replace(code, "__E4M3_MAX__", std::to_string(e4m3_max));
 
   const std::vector<rtc::Header> headers = {
-      {string_code_cast_nvfp4_quantize_4over6_nvfp4_cuh, "quantize_4over6_nvfp4.cuh"},
+      {string_code_cast_nvfp4_quantize_4over6_kernel_cuh, "quantize_4over6_kernel.cuh"},
       {string_code_cast_nvfp4_core_nvfp4_cuh, "core_nvfp4.cuh"},
       {string_code_util_ptx_cuh, "ptx.cuh"},
       {string_code_util_type_extrema_h, "util/type_extrema.h"},
-      {string_code_transformer_engine_nvfp4_4over6_h, "transformer_engine/nvfp4_4over6.h"},
+      {string_code_transformer_engine_nvfp4_4over6_h, "transformer_engine/nvfp4/4over6.h"},
   };
 
   // --device-int128: ptx.cuh uses __uint128_t; -default-device: treat the
@@ -62,7 +60,7 @@ void compile_quantize_4over6_rtc(const std::string &kernel_label, const std::str
   // and <cuda_fp4.h>; forward the build's CUDA version so those are enabled.
   const std::vector<std::string> options = {"--device-int128", "-default-device",
                                             "-DCUDA_VERSION=" + std::to_string(CUDA_VERSION)};
-  constexpr rtc::ArchRequirement arch_requirement{100, rtc::ArchSpecificity::BlackwellSpecific};
+  constexpr rtc::ArchRequirement arch_requirement{100, rtc::ArchSpecificity::ArchitectureSpecific};
 
   mgr.compile(kernel_label, "quantize_4over6_rtc_kernel", code,
               "transformer_engine/common/cast/nvfp4/rtc/quantize_4over6.cu", options, headers,

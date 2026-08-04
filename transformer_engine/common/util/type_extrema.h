@@ -8,9 +8,8 @@
  *  \brief Device-safe FP4 aliases and TypeExtrema specializations.
  *
  *  Include from inside namespace transformer_engine after fp8e4m3 / fp8e5m2 /
- *  bf16 / fp16 aliases are available. Kept free of host-only dependencies
- *  (no STL) so the same definitions can be used by static builds and by
- *  NVRTC-compiled device kernels.
+ *  bf16 / fp16 aliases are available. The NVRTC path only uses the explicit
+ *  device-safe specializations below.
  *
  *  Requires FP4_TYPE_SUPPORTED to be defined (as in common.h / ptx.cuh) and,
  *  when it is true, <cuda_fp4.h> to be visible.
@@ -27,8 +26,15 @@ using fp4e2m1x4 = __nv_fp4x4_e2m1;
 
 namespace detail {
 
+#if !defined(__CUDACC_RTC__)
+template <typename T>
+struct TypeExtrema {
+  static constexpr float max = std::numeric_limits<T>::max();
+};
+#else
 template <typename T>
 struct TypeExtrema;
+#endif
 
 #if FP4_TYPE_SUPPORTED
 template <>
