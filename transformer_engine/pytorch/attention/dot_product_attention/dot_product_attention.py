@@ -213,6 +213,9 @@ def _needs_eager_dpa(call: Dict[str, Any]) -> Optional[str]:
     if call["self"].cp_group is not None:
         return "context parallelism"
 
+    if call.get("checkpoint_core_attention", False):
+        return "activation checkpointing of the attention"
+
     qkv_format = call.get("qkv_format") or call["self"].qkv_format
     if qkv_format == "thd" and (
         call.get("max_seqlen_q") is None or call.get("max_seqlen_kv") is None
