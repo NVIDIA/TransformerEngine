@@ -32,8 +32,7 @@ model_keys = ["linear", "layernorm_linear", "layernorm_mlp", "mha_attention", "t
 
 configs = {
     "": "",
-    "log": (
-        """log:
+    "log": """log:
   layers:
     layer_types: [linear]
   enabled:
@@ -45,10 +44,8 @@ configs = {
       stats: [min, max, mean, std, l1_norm, l2_norm, cur_amax, dynamic_range]
       start_step : 0
       end_step: 1
-"""
-    ),
-    "log_fp8": (
-        """log_fp8:
+""",
+    "log_fp8": """log_fp8:
   layers:
     layer_types: [linear]
   enabled:
@@ -60,10 +57,8 @@ configs = {
       stats: [underflows%]
       start_step : 0
       end_step: 1
-"""
-    ),
-    "fake_quant": (
-        """
+""",
+    "fake_quant": """
 fake_quant_config:
   enabled: True
   layers:
@@ -74,8 +69,7 @@ fake_quant_config:
       gemms: [fprop, dgrad, wgrad]
       tensors: [activation, weight, gradient]
       quant_format: FP8E5M2
-"""
-    ),
+""",
 }
 
 
