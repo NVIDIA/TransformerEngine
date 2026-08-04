@@ -13,7 +13,6 @@ import torch
 import transformer_engine.pytorch as te
 from transformer_engine.common.recipe import MXFP8BlockScaling, NVFP4BlockScaling
 
-
 mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available(return_reason=True)
 nvfp4_available, reason_for_no_nvfp4 = te.is_nvfp4_available(return_reason=True)
 

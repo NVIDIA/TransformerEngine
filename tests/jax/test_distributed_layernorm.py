@@ -20,7 +20,6 @@ from transformer_engine.common import recipe
 from transformer_engine.jax.layernorm import layernorm
 from transformer_engine.jax.quantize import QuantizerFactory, ScalingMode, is_fp8_available
 
-
 DTYPES = [jnp.bfloat16, jnp.float32]
 
 NORM_INPUT_SHAPES = {

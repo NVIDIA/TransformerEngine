@@ -38,7 +38,6 @@ sys.path = [str(_current_file.parent.parent)] + sys.path
 from utils import ModelConfig, compare_and_assert, get_available_attention_backends
 from mla_rope_utils import apply_mla_rope, build_rope_tables
 
-
 try:
     from transformer_engine.common.recipe import MXFP8BlockScaling
 

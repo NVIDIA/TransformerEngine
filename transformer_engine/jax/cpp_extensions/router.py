@@ -2,6 +2,7 @@
 #
 # See LICENSE for license information.
 """JAX/TE custom ops for fused MoE router"""
+
 from enum import IntEnum
 
 import jax.numpy as jnp

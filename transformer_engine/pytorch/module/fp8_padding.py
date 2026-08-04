@@ -13,7 +13,6 @@ import transformer_engine_torch as tex
 from ..quantization import FP8GlobalStateManager, get_align_size_for_quantization
 from ..jit import no_torch_dynamo
 
-
 __all__ = ["Fp8Padding"]
 
 
@@ -30,7 +29,7 @@ class _Fp8Padding(torch.autograd.Function):
 
         # Reduce number of arguments to autograd function in order
         # to reduce CPU overhead due to pytorch arg checking.
-        (m_splits, padded_m_splits, is_grad_enabled) = non_tensor_args
+        m_splits, padded_m_splits, is_grad_enabled = non_tensor_args
 
         # Make sure input dimensions are compatible
         in_features = inp.shape[-1]

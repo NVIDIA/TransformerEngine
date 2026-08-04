@@ -42,7 +42,6 @@ from .sharding import MeshResource
 from ..common.utils import deprecate_wrapper
 from ..common.utils import DeprecatedEnum
 
-
 __all__ = [
     "NVTE_FP8_COLLECTION_NAME",
     "autocast",

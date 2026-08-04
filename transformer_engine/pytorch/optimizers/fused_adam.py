@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 """Fused Adam optimizer."""
+
 from __future__ import annotations
 from collections.abc import Iterable
 from copy import deepcopy

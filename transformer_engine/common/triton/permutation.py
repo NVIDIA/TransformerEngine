@@ -11,7 +11,6 @@ from triton.language import core
 from triton.language.standard import _log2
 from packaging import version
 
-
 _PERMUTATION_AUTOTUNE_BLOCK_SIZES = (64, 128, 256, 512, 1024, 2048, 4096)
 
 

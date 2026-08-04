@@ -2,6 +2,7 @@
 #
 # See LICENSE for license information.
 """Tests for the softmax primitives"""
+
 from contextlib import nullcontext
 from dataclasses import dataclass
 from functools import wraps

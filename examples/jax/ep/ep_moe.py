@@ -17,7 +17,6 @@ from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from transformer_engine.jax.ep import EpLayerConfig, ep_bootstrap, ep_dispatch, ep_combine
 from transformer_engine.jax.sharding import MeshResource, global_shard_guard
 
-
 # ── Setup ───────────────────────────────────────────────────────────────────
 
 

@@ -9,7 +9,6 @@ This module provides JAX checkpoint policies that are compatible with Transforme
 import jax
 from .cpp_extensions.gemm import GemmPrimitive, GroupedGemmPrimitive
 
-
 __all__ = [
     "te_gemms_saveable",
     "dots_and_te_gemms_with_no_batch_dims",

@@ -12,7 +12,6 @@ import transformer_engine.jax as te
 from transformer_engine.jax.flax import DenseGeneral
 from transformer_engine.common.recipe import DelayedScaling
 
-
 key = jax.random.PRNGKey(0)
 recipe = DelayedScaling()
 jax.clear_caches()

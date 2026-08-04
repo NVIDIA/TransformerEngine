@@ -4,6 +4,7 @@
 """
 This module provides additional enum and utilities for quantizing tensors in JAX.
 """
+
 from dataclasses import dataclass
 from enum import Enum
 

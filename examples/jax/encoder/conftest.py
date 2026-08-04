@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 """config for test_multiprocessing_encoder"""
+
 import pytest
 
 

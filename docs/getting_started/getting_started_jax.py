@@ -22,7 +22,6 @@ from transformer_engine.common.recipe import Format, DelayedScaling
 
 from getting_started_utils_jax import speedometer
 
-
 # Configuration
 hidden_size = 4096
 sequence_length = 2048

@@ -13,7 +13,6 @@ from transformer_engine.pytorch.custom_recipes.quantization_ref_nvfp4 import NVF
 from transformer_engine.pytorch.custom_recipes import utils
 from transformer_engine.pytorch.tensor.storage.nvfp4_tensor_storage import NVFP4TensorStorage
 
-
 recipe_available, reason_for_no_recipe = te.is_nvfp4_available(return_reason=True)
 
 

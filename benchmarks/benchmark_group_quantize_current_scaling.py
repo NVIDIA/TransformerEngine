@@ -30,7 +30,6 @@ from transformer_engine.pytorch import Float8CurrentScalingQuantizer
 import transformer_engine_torch as tex
 import torch
 
-
 MODES = ("rowwise", "columnwise", "both")
 SHAPE_CASES = (
     "same-shape",
