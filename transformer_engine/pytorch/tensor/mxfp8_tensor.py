@@ -895,7 +895,7 @@ def _make_mxfp8_tensor_in_reduce_ex(
     with_gemm_swizzled_scales: bool = False,
 ) -> MXFP8Tensor:
     """Reconstruct an ``MXFP8Tensor`` from its ``__reduce_ex__`` payload."""
-    # Infer device from inner specs so the wrapper subclass stays
+    # Infer device from inner buffers so the wrapper subclass stays
     # consistent with its data (CPU after DCP staging deserialize,
     # CUDA after the usual quantize path).
     device = None

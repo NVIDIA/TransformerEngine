@@ -191,7 +191,7 @@ class Float8CurrentScalingQuantizer(Quantizer):
     high-precision tensor, without the need of any history window.
 
     Unlike delayed scaling, scale and amax tensors are not needed to initialize the
-    quantizer, because they are simply GPU specs that will be filled by current
+    quantizer, because they are simply GPU buffers that will be filled by current
     scaling quantization kernels, instead of using values taken from delayed scaling
     history window.
 
@@ -951,7 +951,7 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
     def __reduce_ex__(self, protocol: int) -> tuple:
         """Custom pickling to remove references to FP8 metadata objects.
 
-        Always serializes the underlying FP8 specs (no dequantization
+        Always serializes the underlying FP8 buffers (no dequantization
         fallback for CPU tensors) so that DCP async-staging round-trips
         preserve bitwise-identical data. ``Float8Tensor`` is registered
         with ``torch.serialization.add_safe_globals`` to keep
