@@ -473,8 +473,7 @@ void EPBackend::dispatch(void* handle_mem, const NVTETensor topk_idx, const NVTE
   ncclEpDispatchConfig_t dispatch_cfg = NCCL_EP_DISPATCH_CONFIG_INIT;
   dispatch_cfg.pass_direction = is_forward ? NCCL_EP_FWD_PASS : NCCL_EP_BWD_PASS;
   // Block-scaled payloads forward the per-token scale-inverse; select the matching recipe.
-  dispatch_cfg.quantization_recipe =
-      is_scaled ? NCCL_EP_DISPATCH_QUANT_SCALES_FORWARD : NCCL_EP_DISPATCH_QUANT_NONE;
+  dispatch_cfg.quant_recipe = is_scaled ? NCCL_EP_DISP_QUANT_FWD : NCCL_EP_DISP_QUANT_NONE;
 
   std::lock_guard<std::mutex> lock(mutex_);
   NVTE_CHECK(initialized_, "EPBackend not initialized");
