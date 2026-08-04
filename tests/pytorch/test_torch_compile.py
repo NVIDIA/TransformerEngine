@@ -646,9 +646,7 @@ _DPA_COMPILE_CONFIGS = {
     # A decoding step against a KV cache. FlashAttention 2 wants the non-paged
     # cache length divisible by 256.
     "kv_cache_bshd": _cfg(
-        ModelConfig(
-            2, 8, 4, 64, max_seqlen_kv=256, attn_mask_type="padding_causal_bottom_right"
-        ),
+        ModelConfig(2, 8, 4, 64, max_seqlen_kv=256, attn_mask_type="padding_causal_bottom_right"),
         kv_cache=True,
     ),
 }
