@@ -1000,6 +1000,80 @@ def test_dpa_torch_compile_cudagraphs(monkeypatch, backend, config):
     assert not counters["inductor"]["cudagraph_skips"], "inductor skipped CUDA graphs"
 
 
+@pytest.mark.parametrize("backend", ["flash", "unfused"])
+@pytest.mark.parametrize("paged", [False, True], ids=["non_paged", "paged"])
+@pytest.mark.parametrize("cuda_graphs", [False, True], ids=["default", "cudagraphs"])
+def test_dpa_torch_compile_kv_cache_decoding(monkeypatch, backend, paged, cuda_graphs):
+    """Generation against a KV cache, one prefill and three single-token steps.
+
+    The cache carries state from one step to the next, so a step that updates it
+    wrongly is only visible in the step after -- hence comparing every step, and
+    a cache of its own for each of the two runs.
+    """
+    from collections import OrderedDict
+    from transformer_engine.pytorch.attention import InferenceParams
+
+    dtype = torch.bfloat16
+    spec = _DPA_COMPILE_CONFIGS["kv_cache_bshd"]
+    config = spec["model_config"]
+    b, ctx_len = config.batch_size, config.max_seqlen_q
+    h, g, d = config.num_heads, config.num_gqa_groups, config.head_dim_qk
+
+    def make_cache():
+        kwargs = dict(
+            max_batch_size=b,
+            max_sequence_length=config.max_seqlen_kv,
+            num_heads_kv=g,
+            head_dim_k=d,
+            dtype=dtype,
+            qkv_format=spec["qkv_format"],
+        )
+        if paged:
+            # One page per sequence, and FlashAttention 2 wants it divisible by 256.
+            kwargs.update(is_paged=True, page_size=config.max_seqlen_kv, total_num_pages=b)
+        inference_params = InferenceParams(**kwargs)
+        inference_params.allocate_memory(1)
+        return inference_params
+
+    _skip_unsupported(spec, backend, dtype, inference_params=make_cache())
+
+    gen = torch.Generator(device="cuda").manual_seed(1234)
+    steps = [
+        [
+            torch.randn(b, seqlen, heads, d, device="cuda", dtype=dtype, generator=gen)
+            for heads in (h, g, g)
+        ]
+        for seqlen in (ctx_len, 1, 1, 1)
+    ]
+
+    _force_dpa_backend(monkeypatch, backend)
+    module = _make_dpa(spec, dtype)
+
+    def generate(fn):
+        inference_params = make_cache()
+        outputs = []
+        with torch.no_grad():
+            for args in steps:
+                inference_params.pre_step(OrderedDict((i, args[0].shape[1]) for i in range(b)))
+                _force_dpa_backend(monkeypatch, backend)
+                # Cloned because a CUDA graph replay overwrites what it returned.
+                outputs.append(fn(*args, inference_params=inference_params).clone())
+        return outputs
+
+    eager = generate(module)
+
+    torch._dynamo.reset()
+    counters.clear()
+    compile_kwargs = {"mode": "reduce-overhead"} if cuda_graphs else {}
+    compiled = generate(torch.compile(module, fullgraph=True, **compile_kwargs))
+
+    _assert_dpa_backend(backend)
+    for out, ref in zip(compiled, eager):
+        _assert_matches_eager(out, ref, backend, dtype)
+    if cuda_graphs:
+        assert not counters["inductor"]["cudagraph_skips"], "inductor skipped CUDA graphs"
+
+
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
 @pytest.mark.parametrize("fp8_attention", [False, True], ids=["fp8_gemms_only", "fp8_attention"])
 def test_dpa_torch_compile_fp8(monkeypatch, fp8_attention):
