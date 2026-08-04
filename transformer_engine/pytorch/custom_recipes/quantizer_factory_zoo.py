@@ -71,7 +71,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from transformer_engine.common.recipe import quantizer_policy
+from transformer_engine.common.recipe import quantizer_factory
 from transformer_engine.pytorch.quantization import QuantizerRole
 from ..constants import DType
 from .quantizer_factories import mxfp8_factory, nvfp4_factory
@@ -81,7 +81,7 @@ from .quantizer_factories import mxfp8_factory, nvfp4_factory
 # -----------------------------------------------------------------------------
 
 
-@quantizer_policy(key=("high_precision_fwd_mxfp8_bwd", 1))
+@quantizer_factory(key=("high_precision_fwd_mxfp8_bwd", 1))
 def high_precision_fwd_mxfp8_bwd_factory(
     role: Optional[QuantizerRole],
 ):
@@ -119,7 +119,7 @@ def _plain_nvfp4_quantizer(*, row_scaled_nvfp4: bool = False):
     )
 
 
-@quantizer_policy(key=("mxfp8_fwd_nvfp4_bwd", 1))
+@quantizer_factory(key=("mxfp8_fwd_nvfp4_bwd", 1))
 def mxfp8_fwd_nvfp4_bwd_factory(
     role: Optional[QuantizerRole],
 ):
@@ -161,7 +161,7 @@ def mxfp8_fwd_nvfp4_bwd_factory(
     return mxfp8_factory(role)
 
 
-@quantizer_policy(key=("nvfp4_1d_weight", 1))
+@quantizer_factory(key=("nvfp4_1d_weight", 1))
 def nvfp4_1d_weight_factory(
     role: Optional[QuantizerRole],
 ):
@@ -200,7 +200,7 @@ def nvfp4_1d_weight_factory(
 # -----------------------------------------------------------------------------
 
 
-@quantizer_policy(key=("mxfp8_fwd_high_precision_bwd", 1))
+@quantizer_factory(key=("mxfp8_fwd_high_precision_bwd", 1))
 def mxfp8_fwd_high_precision_bwd_factory(
     role: Optional[QuantizerRole],
 ):
@@ -240,7 +240,7 @@ def mxfp8_fwd_high_precision_bwd_factory(
     return mxfp8_factory(role)
 
 
-@quantizer_policy(key=("composer2", 1))
+@quantizer_factory(key=("composer2", 1))
 def nvfp4_row_scaled_fwd_mxfp8_bwd_factory(
     role: Optional[QuantizerRole],
 ):
@@ -302,7 +302,7 @@ def nvfp4_row_scaled_fwd_mxfp8_bwd_factory(
     return mxfp8_factory(role)
 
 
-@quantizer_policy(key=("nvfp4_row_scaled_fwd_high_precision_bwd", 1))
+@quantizer_factory(key=("nvfp4_row_scaled_fwd_high_precision_bwd", 1))
 def nvfp4_row_scaled_fwd_high_precision_bwd_factory(
     role: Optional[QuantizerRole],
 ):
@@ -360,7 +360,7 @@ def nvfp4_row_scaled_fwd_high_precision_bwd_factory(
 # -----------------------------------------------------------------------------
 
 
-@quantizer_policy(key=("nvfp4_linear_fp8_dpa", 1))
+@quantizer_factory(key=("nvfp4_linear_fp8_dpa", 1))
 def nvfp4_linear_fp8_dpa_factory(
     role: Optional[QuantizerRole],
 ):

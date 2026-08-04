@@ -41,7 +41,7 @@ from transformer_engine.common.recipe import (
     MXFP8BlockScaling,
     NVFP4BlockScaling,
     Recipe,
-    quantizer_policy,
+    quantizer_factory,
 )
 from transformer_engine.pytorch._extra_state import (
     CheckpointExtraStatePolicy,
@@ -210,25 +210,25 @@ def test_delayed_scaling_callable_config_uses_explicit_key(algorithm_field):
         missing_key.quantizer_config()
 
 
-def test_quantizer_policy_contract():
+def test_quantizer_factory_contract():
     """The decorator validates and attaches metadata without wrapping or calling."""
     calls = []
 
     def factory(role):
         calls.append(role)
 
-    decorated = quantizer_policy(key=("test_policy", 1))(factory)
+    decorated = quantizer_factory(key=("test_policy", 1))(factory)
 
     assert decorated is factory
-    assert getattr(decorated, "policy_key") == ("test_policy", 1)
+    assert getattr(decorated, "qfactory_key") == ("test_policy", 1)
     assert calls == []
-    assert te.quantizer_policy is quantizer_policy
+    assert te.quantizer_factory is quantizer_factory
 
-    with pytest.raises(TypeError, match="quantizer_policy key must be hashable"):
-        quantizer_policy(key=["mutable"])
+    with pytest.raises(TypeError, match="quantizer_factory key must be hashable"):
+        quantizer_factory(key=["mutable"])
 
 
-def test_custom_recipe_policy_key_contract():
+def test_custom_recipe_qfactory_key_contract():
     """Custom recipes resolve semantic keys without calling their factories."""
     calls = []
 
@@ -238,14 +238,14 @@ def test_custom_recipe_policy_key_contract():
     def second_factory(role):
         calls.append(("second", role))
 
-    policy_key = ("hybrid_policy", 2, ("double_quantization", True))
-    first = CustomRecipe(qfactory=first_factory, policy_key=policy_key)
-    second = CustomRecipe(qfactory=second_factory, policy_key=policy_key)
+    qfactory_key = ("hybrid_policy", 2, ("double_quantization", True))
+    first = CustomRecipe(qfactory=first_factory, qfactory_key=qfactory_key)
+    second = CustomRecipe(qfactory=second_factory, qfactory_key=qfactory_key)
 
     assert first.quantizer_config() == second.quantizer_config()
     assert set(dict(first.quantizer_config())) == {
         "recipe_type",
-        "policy_key",
+        "qfactory_key",
         "fp8_format",
         "fp8_dpa",
         "fp8_mha",
@@ -254,24 +254,24 @@ def test_custom_recipe_policy_key_contract():
     }
     assert calls == []
 
-    @quantizer_policy(key=("attached_policy", 1))
+    @quantizer_factory(key=("attached_policy", 1))
     def factory(role):  # pylint: disable=unused-argument
         calls.append(("attached", role))
 
     attached = CustomRecipe(qfactory=factory)
-    assert attached.policy_key == ("attached_policy", 1)
-    assert dict(attached.quantizer_config())["policy_key"] == ("attached_policy", 1)
+    assert attached.qfactory_key == ("attached_policy", 1)
+    assert dict(attached.quantizer_config())["qfactory_key"] == ("attached_policy", 1)
 
-    explicit = CustomRecipe(qfactory=factory, policy_key=("explicit_policy", 2))
-    assert explicit.policy_key == ("explicit_policy", 2)
-    assert dict(explicit.quantizer_config())["policy_key"] == ("explicit_policy", 2)
+    explicit = CustomRecipe(qfactory=factory, qfactory_key=("explicit_policy", 2))
+    assert explicit.qfactory_key == ("explicit_policy", 2)
+    assert dict(explicit.quantizer_config())["qfactory_key"] == ("explicit_policy", 2)
 
     def unkeyed_factory(role):
         calls.append(("unkeyed", role))
 
     with pytest.raises(
         ValueError,
-        match=r"Pass policy_key=.*@quantizer_policy",
+        match=r"Pass qfactory_key=.*@quantizer_factory",
     ):
         CustomRecipe(qfactory=unkeyed_factory).quantizer_config()
     assert calls == []
@@ -302,7 +302,7 @@ def test_recipe_activation_does_not_call_qfactory_and_is_atomic_on_config_error(
     FP8GlobalStateManager.reset()
     calls = []
 
-    @quantizer_policy(key=("activation_test", 1))
+    @quantizer_factory(key=("activation_test", 1))
     def keyed_factory(role):
         calls.append(role)
 
@@ -316,7 +316,7 @@ def test_recipe_activation_does_not_call_qfactory_and_is_atomic_on_config_error(
     def unkeyed_factory(role):
         calls.append(role)
 
-    with pytest.raises(ValueError, match="requires a semantic policy key"):
+    with pytest.raises(ValueError, match="requires a semantic qfactory key"):
         FP8GlobalStateManager.activate_recipe(CustomRecipe(qfactory=unkeyed_factory))
     assert FP8GlobalStateManager.get_fp8_recipe() is keyed_recipe
     assert FP8GlobalStateManager.get_quantizer_config() is keyed_config

@@ -56,15 +56,15 @@ from transformer_engine.pytorch.custom_recipes.reference_nvfp4 import (
         nvfp4_ref_rht_2d_factory,
     ],
 )
-def test_first_party_qfactories_have_canonical_policy_keys(qfactory):
-    """First-party factories can be used without repeating policy_key in CustomRecipe."""
-    policy_key = getattr(qfactory, "policy_key")
-    hash(policy_key)
-    assert isinstance(policy_key, tuple)
-    assert len(policy_key) == 2
-    assert isinstance(policy_key[0], str) and policy_key[0]
-    assert isinstance(policy_key[1], int) and policy_key[1] > 0
-    assert recipe.CustomRecipe(qfactory=qfactory).policy_key == policy_key
+def test_first_party_qfactories_have_canonical_qfactory_keys(qfactory):
+    """First-party factories can be used without repeating qfactory_key in CustomRecipe."""
+    qfactory_key = getattr(qfactory, "qfactory_key")
+    hash(qfactory_key)
+    assert isinstance(qfactory_key, tuple)
+    assert len(qfactory_key) == 2
+    assert isinstance(qfactory_key[0], str) and qfactory_key[0]
+    assert isinstance(qfactory_key[1], int) and qfactory_key[1] > 0
+    assert recipe.CustomRecipe(qfactory=qfactory).qfactory_key == qfactory_key
 
 
 @pytest.mark.parametrize("module_type", ["Linear", "LayerNormLinear", "OpsLinear"])
@@ -134,7 +134,7 @@ def test_custom_recipe_sanity(module_type):
     inp = torch.randn(batch, in_features, device="cuda", dtype=torch.bfloat16, requires_grad=True)
 
     # Single factory: map roles to quantizers
-    @recipe.quantizer_policy(key=("test_current_scaling_sanity", 1))
+    @recipe.quantizer_factory(key=("test_current_scaling_sanity", 1))
     def quantizer_factory(role):
         if role is None:
             return Float8CurrentScalingQuantizer(te.DType.kFloat8E4M3, device="cuda")
@@ -172,7 +172,7 @@ def test_custom_recipe_grouped_linear_sanity():
     model = GroupedLinear(num_gemms, in_features, out_features, params_dtype=torch.bfloat16).cuda()
     inp = torch.randn(batch, in_features, device="cuda", dtype=torch.bfloat16, requires_grad=True)
 
-    @recipe.quantizer_policy(key=("test_current_scaling_grouped_linear", 1))
+    @recipe.quantizer_factory(key=("test_current_scaling_grouped_linear", 1))
     def quantizer_factory(role):
         if role is None:
             return Float8CurrentScalingQuantizer(te.DType.kFloat8E4M3, device="cuda")
@@ -235,7 +235,7 @@ def test_custom_recipe_matches_current_scaling():
     loss_ref.backward()
 
     # Custom: single factory returning quantizers per role to match Float8CurrentScaling
-    @recipe.quantizer_policy(key=("test_current_scaling_parity", 1))
+    @recipe.quantizer_factory(key=("test_current_scaling_parity", 1))
     def quantizer_factory(role):
         if role is None:
             return Float8CurrentScalingQuantizer(te.DType.kFloat8E4M3, device="cuda")
@@ -293,7 +293,7 @@ def test_custom_recipe_ops_linear_2_1_layout():
     op = te_ops.Linear(in_features, out_features, device="cuda", dtype=torch.bfloat16)
     inp = torch.randn(batch, in_features, device="cuda", dtype=torch.bfloat16, requires_grad=True)
 
-    @recipe.quantizer_policy(key=("test_current_scaling_ops_linear", 1))
+    @recipe.quantizer_factory(key=("test_current_scaling_ops_linear", 1))
     def quantizer_factory(role):
         if role is None:
             return Float8CurrentScalingQuantizer(te.DType.kFloat8E4M3, device="cuda")
@@ -337,7 +337,7 @@ def test_custom_recipe_factory_invocation_counts_and_cycling():
         None: 0,
     }
 
-    @recipe.quantizer_policy(key=("test_factory_invocation_counts", 1))
+    @recipe.quantizer_factory(key=("test_factory_invocation_counts", 1))
     def quantizer_factory(role):
         if role is None:
             counts[None] += 1
@@ -639,7 +639,7 @@ def test_custom_recipe_quantization_targets():
     # ------------------------------------------------------------------
     recorded_roles = []
 
-    @recipe.quantizer_policy(key=("test_per_module_targeting", 1))
+    @recipe.quantizer_factory(key=("test_per_module_targeting", 1))
     def targeting_factory(role):
         recorded_roles.append(role)
 
@@ -797,7 +797,7 @@ def test_grouped_linear_module_type_dispatch():
 
     recorded_roles = []
 
-    @recipe.quantizer_policy(key=("test_grouped_linear_role_recording", 1))
+    @recipe.quantizer_factory(key=("test_grouped_linear_role_recording", 1))
     def recording_factory(role):
         recorded_roles.append(role)
         return Float8CurrentScalingQuantizer(te.DType.kFloat8E4M3, device="cuda")
@@ -838,7 +838,7 @@ def test_delayed_scaling_request_wiring():
     from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
     from transformer_engine.common.recipe import Format
 
-    @recipe.quantizer_policy(key=("test_delayed_scaling_request", 1))
+    @recipe.quantizer_factory(key=("test_delayed_scaling_request", 1))
     def ds_factory(role):
         return DelayedScalingRequest(fp8_format=Format.HYBRID, amax_history_len=16)
 
@@ -899,7 +899,7 @@ def test_custom_recipe_mixed_ds_and_stateless():
     from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
     from transformer_engine.common.recipe import Format
 
-    @recipe.quantizer_policy(key=("test_mixed_delayed_current_scaling", 1))
+    @recipe.quantizer_factory(key=("test_mixed_delayed_current_scaling", 1))
     def mixed_factory(role):
         # Only weight gets delayed scaling, rest get current scaling
         if role is not None and role.tensor_type == "weight":
@@ -944,7 +944,7 @@ def test_custom_recipe_ds_multi_step():
     from transformer_engine.pytorch.quantization import DelayedScalingRequest
     from transformer_engine.common.recipe import Format
 
-    @recipe.quantizer_policy(key=("test_delayed_scaling_multi_step", 1))
+    @recipe.quantizer_factory(key=("test_delayed_scaling_multi_step", 1))
     def ds_factory(role):
         return DelayedScalingRequest(fp8_format=Format.HYBRID)
 
@@ -1068,7 +1068,7 @@ def test_role_change_preserves_custom_delayed_scaling_state():
     )
     from transformer_engine.common.recipe import Format
 
-    @recipe.quantizer_policy(key=("test_delayed_scaling_role_rebuild", 1))
+    @recipe.quantizer_factory(key=("test_delayed_scaling_role_rebuild", 1))
     def ds_factory(role):
         return DelayedScalingRequest(fp8_format=Format.HYBRID, amax_history_len=8)
 
@@ -1938,7 +1938,7 @@ def test_custom_recipe_quantization_alignment_contract():
     """The alignment contract is safe, configurable, and does not invoke qfactory."""
     calls = []
 
-    @recipe.quantizer_policy(key=("test_quantization_alignment", 1))
+    @recipe.quantizer_factory(key=("test_quantization_alignment", 1))
     def qfactory(role):
         calls.append(role)
         return current_scaling_factory(role)

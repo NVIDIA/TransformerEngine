@@ -28,12 +28,12 @@ from __future__ import annotations
 from typing import Optional
 
 import torch
-from transformer_engine.common.recipe import quantizer_policy
+from transformer_engine.common.recipe import quantizer_factory
 from transformer_engine.pytorch.quantization import QuantizerRole
 from ..constants import DType
 
 
-@quantizer_policy(key=("high_precision", 1))
+@quantizer_factory(key=("high_precision", 1))
 def high_precision_factory(
     role: Optional[QuantizerRole],  # pylint: disable=unused-argument
 ) -> "IdentityQuantizer":
@@ -52,7 +52,7 @@ def high_precision_factory(
     return IdentityQuantizer()
 
 
-@quantizer_policy(key=("delayed_scaling", 1))
+@quantizer_factory(key=("delayed_scaling", 1))
 def delayed_scaling_factory(
     role: Optional[QuantizerRole],  # pylint: disable=unused-argument
 ) -> "DelayedScalingRequest":
@@ -72,7 +72,7 @@ def delayed_scaling_factory(
     return DelayedScalingRequest(fp8_format=Format.HYBRID)
 
 
-@quantizer_policy(key=("current_scaling", 1))
+@quantizer_factory(key=("current_scaling", 1))
 def current_scaling_factory(
     role: Optional[QuantizerRole],
 ) -> "Float8CurrentScalingQuantizer":
@@ -96,7 +96,7 @@ def current_scaling_factory(
     )
 
 
-@quantizer_policy(key=("float8_block_scaling", 1))
+@quantizer_factory(key=("float8_block_scaling", 1))
 def float8_block_scaling_factory(
     role: Optional[QuantizerRole],
 ) -> "Float8BlockQuantizer":
@@ -127,7 +127,7 @@ def float8_block_scaling_factory(
     )
 
 
-@quantizer_policy(key=("mxfp8", 1))
+@quantizer_factory(key=("mxfp8", 1))
 def mxfp8_factory(
     role: Optional[QuantizerRole],  # pylint: disable=unused-argument
 ) -> "MXFP8Quantizer":
@@ -143,7 +143,7 @@ def mxfp8_factory(
     )
 
 
-@quantizer_policy(key=("nvfp4", 1))
+@quantizer_factory(key=("nvfp4", 1))
 def nvfp4_factory(
     role: Optional[QuantizerRole],
 ) -> "NVFP4Quantizer":

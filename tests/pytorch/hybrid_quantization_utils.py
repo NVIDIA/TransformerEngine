@@ -211,7 +211,7 @@ def make_role_aware_quantizer(factory, role):
     return quantizer
 
 
-def hybrid_custom_recipe(row_factory, col_factory, grad_factory=None, *, policy_key):
+def hybrid_custom_recipe(row_factory, col_factory, grad_factory=None, *, qfactory_key):
     """Build a CustomRecipe with hybrid forward and configurable grad quantizers."""
     if grad_factory is None:
         grad_factory = col_factory
@@ -227,7 +227,7 @@ def hybrid_custom_recipe(row_factory, col_factory, grad_factory=None, *, policy_
             return make_role_aware_quantizer(grad_factory, role)
         return make_role_aware_quantizer(row_factory, role)
 
-    return recipe.CustomRecipe(qfactory=qfactory, policy_key=policy_key)
+    return recipe.CustomRecipe(qfactory=qfactory, qfactory_key=qfactory_key)
 
 
 def hybrid_fp8_current_qfactory(role):

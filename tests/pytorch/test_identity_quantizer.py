@@ -15,7 +15,7 @@ import torch
 
 import transformer_engine.pytorch as te
 import transformer_engine_torch as tex
-from transformer_engine.common.recipe import CustomRecipe, quantizer_policy
+from transformer_engine.common.recipe import CustomRecipe, quantizer_factory
 from transformer_engine.pytorch import (
     Float8BlockQuantizer,
     Float8CurrentScalingQuantizer,
@@ -56,7 +56,7 @@ _XFAIL_HOPPER_COLUMNWISE_PER_TENSOR_FP8 = pytest.mark.xfail(
 # ── Module-level qfactories (picklable / autocast-friendly) ──────────
 
 
-@quantizer_policy(key=("test_identity_all", 1))
+@quantizer_factory(key=("test_identity_all", 1))
 def identity_all_factory(role):  # pylint: disable=unused-argument
     """Whole layer in high precision: Identity for every slot."""
     return IdentityQuantizer()
@@ -135,7 +135,7 @@ def _format_quantizer(format_name):
 
 
 def _hybrid_quantized_fwd_identity_bwd_factory(format_name):
-    @quantizer_policy(key=(f"test_{format_name}_fwd_identity_bwd", 1))
+    @quantizer_factory(key=(f"test_{format_name}_fwd_identity_bwd", 1))
     def qfactory(role):
         is_linear = role is not None and role.module_type in ("linear", "grouped_linear")
         if is_linear and role.tensor_type in ("grad_output", "grad_input"):
@@ -148,7 +148,7 @@ def _hybrid_quantized_fwd_identity_bwd_factory(format_name):
     return qfactory
 
 
-@quantizer_policy(key=("test_high_precision_fwd_fp8_bwd", 1))
+@quantizer_factory(key=("test_high_precision_fwd_fp8_bwd", 1))
 def fwd_hp_bwd_fp8_factory(role):
     """High-precision forward, FP8 backward (per-direction via hybrid)."""
     is_linear = role is not None and role.module_type in ("linear", "grouped_linear")
@@ -160,7 +160,7 @@ def fwd_hp_bwd_fp8_factory(role):
     )
 
 
-@quantizer_policy(key=("test_fp8_fwd_high_precision_bwd", 1))
+@quantizer_factory(key=("test_fp8_fwd_high_precision_bwd", 1))
 def fwd_fp8_bwd_hp_factory(role):
     """FP8 forward, high-precision backward (per-direction via hybrid)."""
     is_linear = role is not None and role.module_type in ("linear", "grouped_linear")
@@ -172,7 +172,7 @@ def fwd_fp8_bwd_hp_factory(role):
     )
 
 
-@quantizer_policy(key=("test_fp8_fwd_dequantized_high_precision_bwd", 1))
+@quantizer_factory(key=("test_fp8_fwd_dequantized_high_precision_bwd", 1))
 def fwd_fp8_bwd_rowwise_dequantized_hp_factory(role):
     """FP8 forward, high-precision backward from dequantized fprop values."""
     is_linear = role is not None and role.module_type in ("linear", "grouped_linear")
@@ -185,7 +185,7 @@ def fwd_fp8_bwd_rowwise_dequantized_hp_factory(role):
     )
 
 
-@quantizer_policy(key=("test_hybrid_identity_all", 1))
+@quantizer_factory(key=("test_hybrid_identity_all", 1))
 def hybrid_all_identity_factory(role):
     """All directions high precision, expressed through the hybrid container.
 
@@ -202,7 +202,7 @@ def hybrid_all_identity_factory(role):
     )
 
 
-@quantizer_policy(key=("test_fp8_all", 1))
+@quantizer_factory(key=("test_fp8_all", 1))
 def fp8_fwd_factory(role):
     """Plain FP8 current scaling for every slot (E4M3 fwd, E5M2 grad).
 
@@ -397,7 +397,7 @@ class TestIdentityQuantizerUnit:
                 enabled=True,
                 recipe=CustomRecipe(
                     qfactory=qfactory,
-                    policy_key=("test_grouped_linear_cpu_offload_hybrid", 1),
+                    qfactory_key=("test_grouped_linear_cpu_offload_hybrid", 1),
                 ),
             ):
                 model(x, m_splits=m_splits)
@@ -427,7 +427,7 @@ class TestIdentityQuantizerUnit:
                 enabled=True,
                 recipe=CustomRecipe(
                     qfactory=qfactory,
-                    policy_key=("test_grouped_linear_mixed_identity_weights", 1),
+                    qfactory_key=("test_grouped_linear_mixed_identity_weights", 1),
                 ),
             ):
                 model(x, m_splits=m_splits)
@@ -519,7 +519,7 @@ class TestIdentityQuantizerUnit:
         ref = te_ops.BasicLinear(16, 16, device="cuda", dtype=torch.bfloat16)
         custom_recipe = CustomRecipe(
             qfactory=qfactory,
-            policy_key=("test_ops_basic_linear_hybrid_identity_weight", 1),
+            qfactory_key=("test_ops_basic_linear_hybrid_identity_weight", 1),
         )
         torch.manual_seed(1702)
         with te.quantized_model_init(enabled=True, recipe=custom_recipe):
@@ -575,7 +575,7 @@ class TestIdentityQuantizerUnit:
             enabled=True,
             recipe=CustomRecipe(
                 qfactory=qfactory,
-                policy_key=("test_ops_quantize_gelu_identity_backed", 1),
+                qfactory_key=("test_ops_quantize_gelu_identity_backed", 1),
             ),
         ):
             y_test = test(x_test)
@@ -1191,7 +1191,7 @@ class TestIdentityTEModuleCoverage:
         x = _identity_module_input(module_name)
         recipe = CustomRecipe(
             qfactory=qfactory,
-            policy_key=("test_quantized_primary_hybrid_identity", 1),
+            qfactory_key=("test_quantized_primary_hybrid_identity", 1),
         )
 
         y_ref, dx_ref, wg_ref = _fwd_bwd_module(module_name, ref, x, recipe=None)
@@ -1237,7 +1237,7 @@ class TestIdentityTEModuleCoverage:
             x,
             CustomRecipe(
                 qfactory=mxfp8_all_factory,
-                policy_key=("test_mxfp8_all", 1),
+                qfactory_key=("test_mxfp8_all", 1),
                 backward_override="high_precision",
             ),
         )
@@ -1450,7 +1450,7 @@ def _fwd_bwd_zoo_dequantized_module(module_name, module, inp, recipe):
     return out.detach().clone(), inp.grad.detach().clone(), param_grads
 
 
-@quantizer_policy(key=("test_mxfp8_all", 1))
+@quantizer_factory(key=("test_mxfp8_all", 1))
 def _mxfp8_all_qfactory(role):  # pylint: disable=unused-argument
     return _mxfp8(tex.DType.kFloat8E4M3)
 

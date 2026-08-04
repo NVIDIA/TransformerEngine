@@ -821,7 +821,7 @@ class TestHybridSaveOriginalInputPolicy:
 
         return recipe.CustomRecipe(
             qfactory=factory,
-            policy_key=(
+            qfactory_key=(
                 "test_counting_identity_hybrid",
                 1,
                 columnwise_source,
@@ -1707,7 +1707,7 @@ class TestHybridUsageFlagsRespected:
         hybrid_recipe = _hybrid_custom_recipe(
             row_factory=lambda: Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda"),
             col_factory=lambda: Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda"),
-            policy_key=("test_inference_workspace_hybrid_fp8", 1),
+            qfactory_key=("test_inference_workspace_hybrid_fp8", 1),
         )
         torch.manual_seed(2026)
         model = Linear(128, 256, bias=False, params_dtype=torch.bfloat16).cuda()
@@ -1855,7 +1855,7 @@ class TestHybridGemmBitwiseIdentical:
 
         hybrid_recipe = recipe.CustomRecipe(
             qfactory=hybrid_fp8_factory,
-            policy_key=("test_hybrid_fp8_parity", 1),
+            qfactory_key=("test_hybrid_fp8_parity", 1),
         )
         with autocast(enabled=True, recipe=hybrid_recipe):
             out_hybrid = model_hybrid(inp_hybrid)
@@ -1924,7 +1924,7 @@ class TestHybridGemmBitwiseIdenticalMXFP8:
 
         hybrid_recipe = recipe.CustomRecipe(
             qfactory=hybrid_mxfp8_factory,
-            policy_key=("test_hybrid_mxfp8_parity", 1),
+            qfactory_key=("test_hybrid_mxfp8_parity", 1),
         )
         with autocast(enabled=True, recipe=hybrid_recipe):
             out_hybrid = model_hybrid(inp_hybrid)
@@ -2019,7 +2019,7 @@ class TestCustomDPALocalRecipeCache:
 
         custom_recipe = recipe.CustomRecipe(
             qfactory=lambda _role: IdentityQuantizer(),
-            policy_key=("test_dpa_identity", 1),
+            qfactory_key=("test_dpa_identity", 1),
         )
         monkeypatch.setattr(
             FP8GlobalStateManager,
@@ -2109,7 +2109,7 @@ class TestCustomDPALocalRecipeCache:
             qfactory=counting_qfactory,
             fp8_dpa=True,
             fp8_mha=True,
-            policy_key=("test_dpa_capability_counting", factory_name, 1),
+            qfactory_key=("test_dpa_capability_counting", factory_name, 1),
         )
         dpa = te.DotProductAttention(
             num_attention_heads=2,
@@ -2138,7 +2138,7 @@ class TestCustomDPALocalRecipeCache:
             qfactory=rebuilt_qfactory,
             fp8_dpa=True,
             fp8_mha=True,
-            policy_key=("test_dpa_capability_rebuilt", factory_name, 1),
+            qfactory_key=("test_dpa_capability_rebuilt", factory_name, 1),
         )
         with autocast(enabled=True, recipe=rebuilt_recipe):
             rebuilt = dpa.get_qkv_quantization_capabilities()
@@ -2194,7 +2194,7 @@ class TestCustomDPALocalRecipeCache:
             qfactory=counting_qfactory,
             fp8_dpa=True,
             fp8_mha=fp8_mha,
-            policy_key=("test_mha_factory_invocation_count", fp8_mha, 1),
+            qfactory_key=("test_mha_factory_invocation_count", fp8_mha, 1),
         )
         model = te.MultiheadAttention(
             hidden_size=128,
@@ -2802,7 +2802,7 @@ class TestHybridGemmBitwiseIdenticalBlockFP8:
 
         hybrid_recipe = recipe.CustomRecipe(
             qfactory=hybrid_block_fp8_factory,
-            policy_key=("test_hybrid_block_fp8_parity", 1),
+            qfactory_key=("test_hybrid_block_fp8_parity", 1),
         )
         with autocast(enabled=True, recipe=hybrid_recipe):
             out_hybrid = model_hybrid(inp_hybrid)
@@ -2866,7 +2866,7 @@ class TestHybridGemmBitwiseIdenticalNVFP4:
 
         hybrid_recipe = recipe.CustomRecipe(
             qfactory=hybrid_nvfp4_factory,
-            policy_key=("test_hybrid_nvfp4_parity", 1),
+            qfactory_key=("test_hybrid_nvfp4_parity", 1),
         )
         torch.manual_seed(1202)
         torch.cuda.manual_seed_all(1202)
@@ -2919,7 +2919,7 @@ class TestHybridGemmBitwiseIdenticalNVFP4:
 
         hybrid_recipe = recipe.CustomRecipe(
             qfactory=hybrid_nvfp4_all_roles_factory,
-            policy_key=("test_hybrid_nvfp4_all_roles", 1),
+            qfactory_key=("test_hybrid_nvfp4_all_roles", 1),
         )
         torch.manual_seed(1203)
         torch.cuda.manual_seed_all(1203)
@@ -2984,7 +2984,7 @@ class TestHybridGemmMixedFormat:
 
         mixed_recipe = recipe.CustomRecipe(
             qfactory=mixed_factory,
-            policy_key=("test_mixed_fp8_nvfp4", 1),
+            qfactory_key=("test_mixed_fp8_nvfp4", 1),
         )
 
         with autocast(enabled=True, recipe=mixed_recipe):
@@ -3037,7 +3037,7 @@ class TestHybridGemmMixedFormat:
 
         mixed_recipe = recipe.CustomRecipe(
             qfactory=mixed_factory,
-            policy_key=("test_mixed_fp8_nvfp4_numerics", 1),
+            qfactory_key=("test_mixed_fp8_nvfp4_numerics", 1),
         )
         with torch.no_grad():
             with autocast(enabled=True, recipe=mixed_recipe):
@@ -3169,7 +3169,7 @@ class TestHybridBiasGradient:
                 ),
             )
 
-        return recipe.quantizer_policy(key=("test_uniform_hybrid_fp8", 1))(factory)
+        return recipe.quantizer_factory(key=("test_uniform_hybrid_fp8", 1))(factory)
 
     def test_bias_grad_matches_vanilla_fp8(self):
         torch.manual_seed(456)
@@ -3264,7 +3264,7 @@ class TestHybridScalingModeCompatibility:
             enabled=True,
             recipe=recipe.CustomRecipe(
                 qfactory=factory,
-                policy_key=("test_matching_columnwise_formats", 1),
+                qfactory_key=("test_matching_columnwise_formats", 1),
             ),
         ):
             out = model(inp)
@@ -3302,7 +3302,7 @@ class TestHybridScalingModeCompatibility:
             enabled=True,
             recipe=recipe.CustomRecipe(
                 qfactory=factory,
-                policy_key=("test_mismatched_columnwise_formats", 1),
+                qfactory_key=("test_mismatched_columnwise_formats", 1),
             ),
         ):
             out = model(inp)
@@ -3341,7 +3341,7 @@ class TestHybridReversedDirection:
 
         mixed_recipe = recipe.CustomRecipe(
             qfactory=factory,
-            policy_key=("test_nvfp4_row_fp8_column_forward", 1),
+            qfactory_key=("test_nvfp4_row_fp8_column_forward", 1),
         )
         with torch.no_grad():
             with autocast(enabled=True, recipe=mixed_recipe):
@@ -3381,7 +3381,7 @@ class TestHybridReversedDirection:
 
         mixed_recipe = recipe.CustomRecipe(
             qfactory=factory,
-            policy_key=("test_nvfp4_row_fp8_column", 1),
+            qfactory_key=("test_nvfp4_row_fp8_column", 1),
         )
         with autocast(enabled=True, recipe=mixed_recipe):
             out = model(inp)
@@ -3441,7 +3441,7 @@ class TestHybridMixedWithNonHybrid:
             grad_output,
             recipe.CustomRecipe(
                 qfactory=mixed_factory,
-                policy_key=("test_single_hybrid_role", hybrid_role, 1),
+                qfactory_key=("test_single_hybrid_role", hybrid_role, 1),
             ),
             seed=seed + 100,
         )
@@ -3616,7 +3616,7 @@ def _plain_linear_qfactory(operand_factory, grad_factory):
             return _make_role_aware_quantizer(grad_factory, role)
         return _make_role_aware_quantizer(operand_factory, role)
 
-    return recipe.quantizer_policy(
+    return recipe.quantizer_factory(
         key=("test_plain_linear", operand_factory.__name__, grad_factory.__name__, 1)
     )(factory)
 
@@ -3679,7 +3679,7 @@ class TestHybridCrossFormatParametrized:
 
         hybrid_recipe = recipe.CustomRecipe(
             qfactory=hybrid_factory,
-            policy_key=("test_cross_format", row_name, col_name, 1),
+            qfactory_key=("test_cross_format", row_name, col_name, 1),
         )
         fprop_ref_recipe = recipe.CustomRecipe(
             qfactory=_plain_linear_qfactory(make_row_operand, make_row_grad)
@@ -3954,7 +3954,7 @@ class TestHybridThreeFormats:
             grad_output,
             recipe.CustomRecipe(
                 qfactory=hybrid_factory,
-                policy_key=(
+                qfactory_key=(
                     "test_three_format",
                     make_fprop.__name__,
                     make_dgrad.__name__,
@@ -4062,7 +4062,7 @@ def _make_hybrid_fp8_factory():
             device="cuda",
         )
 
-    return recipe.quantizer_policy(key=("test_hybrid_fp8_all_modules", 1))(factory)
+    return recipe.quantizer_factory(key=("test_hybrid_fp8_all_modules", 1))(factory)
 
 
 @requires_fp8
@@ -4098,7 +4098,7 @@ def test_fusible_norm_hybrid_output_falls_back_to_explicit_quantize(norm_cls):
         enabled=True,
         recipe=recipe.CustomRecipe(
             qfactory=qfactory,
-            policy_key=("test_fusible_norm_hybrid_output", 1),
+            qfactory_key=("test_fusible_norm_hybrid_output", 1),
         ),
     ):
         out = forward(inp)
@@ -4616,7 +4616,7 @@ class TestHybridGroupedLinearValidation:
                     columnwise_source=columnwise_source,
                 )
 
-            return recipe.quantizer_policy(
+            return recipe.quantizer_factory(
                 key=("test_grouped_linear_columnwise_source", columnwise_source, 1)
             )(qfactory)
 
@@ -4673,7 +4673,7 @@ class TestHybridGroupedLinearValidation:
 
         mixed_recipe = recipe.CustomRecipe(
             qfactory=mixed_source_qfactory,
-            policy_key=("test_mixed_columnwise_sources", 1),
+            qfactory_key=("test_mixed_columnwise_sources", 1),
         )
         # A failed generation is never marked validated. Base metadata can then
         # early-return on retry, so the O(1) guard must validate it again.
@@ -4746,7 +4746,7 @@ class TestHybridQuantizedModelInit:
             grad_factory=lambda: Float8CurrentScalingQuantizer(
                 tex.DType.kFloat8E5M2, device="cuda"
             ),
-            policy_key=("test_quantized_model_init_hybrid_fp8", 1),
+            qfactory_key=("test_quantized_model_init_hybrid_fp8", 1),
         )
 
     def test_linear_weight_is_hybrid_quantized_tensor(self):
@@ -4850,7 +4850,7 @@ class TestHybridWeightWorkspaceCache:
             grad_factory=lambda: Float8CurrentScalingQuantizer(
                 tex.DType.kFloat8E5M2, device="cuda"
             ),
-            policy_key=("test_weight_workspace_hybrid_fp8", 1),
+            qfactory_key=("test_weight_workspace_hybrid_fp8", 1),
         )
 
     @_XFAIL_HOPPER_COLUMNWISE_PER_TENSOR_FP8
@@ -4956,7 +4956,7 @@ class TestHybridUpdateWeightQuantizers:
             grad_factory=lambda: Float8CurrentScalingQuantizer(
                 tex.DType.kFloat8E5M2, device="cuda"
             ),
-            policy_key=("test_weight_quantizer_update_hybrid_fp8", 1),
+            qfactory_key=("test_weight_quantizer_update_hybrid_fp8", 1),
         )
 
     def test_quantized_param_survives_multiple_forward_passes(self):
@@ -5023,7 +5023,7 @@ def _hybrid_recipe_fp8_current():
         row_factory=lambda: Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda"),
         col_factory=lambda: Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda"),
         grad_factory=lambda: Float8CurrentScalingQuantizer(tex.DType.kFloat8E5M2, device="cuda"),
-        policy_key=("test_hybrid_fp8_current", 1),
+        qfactory_key=("test_hybrid_fp8_current", 1),
     )
 
 
@@ -5056,7 +5056,7 @@ def _hybrid_recipe_fp8_delayed():
         row_factory=lambda: _make_delayed_quantizer(tex.DType.kFloat8E4M3),
         col_factory=lambda: _make_delayed_quantizer(tex.DType.kFloat8E4M3),
         grad_factory=lambda: _make_delayed_quantizer(tex.DType.kFloat8E5M2),
-        policy_key=("test_hybrid_fp8_delayed", 1),
+        qfactory_key=("test_hybrid_fp8_delayed", 1),
     )
 
 
@@ -5073,7 +5073,7 @@ def _hybrid_recipe_fp8_delayed_row_current_col():
         # grad_factory matches the columnwise direction so the wgrad GEMM's
         # grad_output sub-quantizer pairs with the input/weight col format.
         grad_factory=lambda: Float8CurrentScalingQuantizer(tex.DType.kFloat8E5M2, device="cuda"),
-        policy_key=("test_hybrid_fp8_delayed_row_current_column", 1),
+        qfactory_key=("test_hybrid_fp8_delayed_row_current_column", 1),
     )
 
 
@@ -5087,7 +5087,7 @@ def _hybrid_recipe_fp8_current_row_delayed_col():
         row_factory=lambda: Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda"),
         col_factory=lambda: _make_delayed_quantizer(tex.DType.kFloat8E4M3),
         grad_factory=lambda: _make_delayed_quantizer(tex.DType.kFloat8E5M2),
-        policy_key=("test_hybrid_fp8_current_row_delayed_column", 1),
+        qfactory_key=("test_hybrid_fp8_current_row_delayed_column", 1),
     )
 
 
@@ -5097,7 +5097,7 @@ def _hybrid_recipe_mxfp8():
         row_factory=lambda: MXFP8Quantizer(tex.DType.kFloat8E4M3),
         col_factory=lambda: MXFP8Quantizer(tex.DType.kFloat8E4M3),
         grad_factory=lambda: MXFP8Quantizer(tex.DType.kFloat8E5M2),
-        policy_key=("test_hybrid_mxfp8", 1),
+        qfactory_key=("test_hybrid_mxfp8", 1),
     )
 
 
@@ -5113,7 +5113,7 @@ def _hybrid_recipe_blockwise():
         grad_factory=lambda: Float8BlockQuantizer(
             fp8_dtype=tex.DType.kFloat8E5M2, rowwise=True, columnwise=True
         ),
-        policy_key=("test_hybrid_blockwise", 1),
+        qfactory_key=("test_hybrid_blockwise", 1),
     )
 
 
@@ -5673,7 +5673,7 @@ class TestHybridQuantizeMasterWeights:
             grad_factory=lambda: Float8CurrentScalingQuantizer(
                 tex.DType.kFloat8E5M2, device="cuda"
             ),
-            policy_key=("test_master_weight_mxfp8_columnwise", 1),
+            qfactory_key=("test_master_weight_mxfp8_columnwise", 1),
         )
         # Shape must be a multiple of MXFP8 block size (32) on both axes.
         weight, hp_master = _build_hybrid_linear_weight(64, 128, hybrid_recipe)
@@ -5707,7 +5707,7 @@ class TestHybridQuantizeMasterWeights:
             grad_factory=lambda: NVFP4Quantizer(
                 fp4_dtype=tex.DType.kFloat4E2M1, with_2d_quantization=False
             ),
-            policy_key=("test_master_weight_nvfp4_rowwise", 1),
+            qfactory_key=("test_master_weight_nvfp4_rowwise", 1),
         )
         weight, hp_master = _build_hybrid_linear_weight(64, 128, hybrid_recipe)
         master_flat = hp_master.view(-1).contiguous()
@@ -5729,7 +5729,7 @@ class TestHybridQuantizeMasterWeights:
             grad_factory=lambda: Float8CurrentScalingQuantizer(
                 tex.DType.kFloat8E5M2, device="cuda"
             ),
-            policy_key=("test_master_weight_nvfp4_columnwise", 1),
+            qfactory_key=("test_master_weight_nvfp4_columnwise", 1),
         )
         weight, hp_master = _build_hybrid_linear_weight(64, 128, hybrid_recipe)
         master_flat = hp_master.view(-1).contiguous()
@@ -5775,7 +5775,7 @@ class TestHybridQuantizeMasterWeights:
             grad_factory=lambda: Float8CurrentScalingQuantizer(
                 tex.DType.kFloat8E5M2, device="cuda"
             ),
-            policy_key=("test_master_weight_blockwise_columnwise", 1),
+            qfactory_key=("test_master_weight_blockwise_columnwise", 1),
         )
         weight, hp_master = _build_hybrid_linear_weight(128, 128, hybrid_recipe)
         master_flat = hp_master.view(-1).contiguous()
@@ -5934,7 +5934,7 @@ class TestHybridRecipeCorrespondence:
             grad_factory=lambda: Float8CurrentScalingQuantizer(
                 tex.DType.kFloat8E5M2, device="cuda"
             ),
-            policy_key=("test_recipe_correspondence_hybrid_fp8", 1),
+            qfactory_key=("test_recipe_correspondence_hybrid_fp8", 1),
         )
 
     def test_hybrid_param_with_matching_recipe_does_not_raise(self):
@@ -6034,7 +6034,7 @@ class TestHybridFusedAdam:
             grad_factory=lambda: Float8CurrentScalingQuantizer(
                 tex.DType.kFloat8E5M2, device="cuda"
             ),
-            policy_key=("test_fused_adam_hybrid_fp8", 1),
+            qfactory_key=("test_fused_adam_hybrid_fp8", 1),
         )
         with quantized_model_init(enabled=True, recipe=hybrid_recipe):
             model = Linear(256, 256, params_dtype=torch.bfloat16).cuda()
@@ -6138,7 +6138,7 @@ class TestHybridQuantizedParamsEndToEnd:
             grad_factory=lambda: Float8CurrentScalingQuantizer(
                 tex.DType.kFloat8E5M2, device="cuda"
             ),
-            policy_key=("test_end_to_end_hybrid_fp8", 1),
+            qfactory_key=("test_end_to_end_hybrid_fp8", 1),
         )
         with quantized_model_init(enabled=True, recipe=hybrid_recipe):
             model = Linear(256, 256, params_dtype=torch.bfloat16).cuda()
@@ -6264,7 +6264,7 @@ class TestHybridMixedFormatQuantizedParams:
 
         hybrid_recipe = recipe.CustomRecipe(
             qfactory=qfactory,
-            policy_key=("test_mxfp8_nvfp4_quantized_params", 1),
+            qfactory_key=("test_mxfp8_nvfp4_quantized_params", 1),
         )
         with quantized_model_init(enabled=True, recipe=hybrid_recipe):
             model = Linear(in_features, out_features, params_dtype=torch.bfloat16).cuda()
@@ -6555,7 +6555,7 @@ class TestQuantizedParamsEquivalenceFP8CurrentScaling(_QuantizedParamsEquivalenc
     def _hybrid_recipe(self):
         return recipe.CustomRecipe(
             qfactory=_hybrid_fp8_current_qfactory,
-            policy_key=("test_hybrid_fp8_current", 1),
+            qfactory_key=("test_hybrid_fp8_current", 1),
         )
 
     def test_equivalence(self):
@@ -6572,7 +6572,7 @@ class TestQuantizedParamsEquivalenceMXFP8(_QuantizedParamsEquivalenceBase):
     def _hybrid_recipe(self):
         return recipe.CustomRecipe(
             qfactory=_hybrid_mxfp8_qfactory,
-            policy_key=("test_hybrid_mxfp8", 1),
+            qfactory_key=("test_hybrid_mxfp8", 1),
         )
 
     def test_equivalence(self):
@@ -6589,7 +6589,7 @@ class TestQuantizedParamsEquivalenceBlockFP8(_QuantizedParamsEquivalenceBase):
     def _hybrid_recipe(self):
         return recipe.CustomRecipe(
             qfactory=_hybrid_block_fp8_qfactory,
-            policy_key=("test_hybrid_block_fp8", 1),
+            qfactory_key=("test_hybrid_block_fp8", 1),
         )
 
     def test_equivalence(self):
@@ -6609,7 +6609,7 @@ class TestQuantizedParamsEquivalenceNVFP4(_QuantizedParamsEquivalenceBase):
     def _hybrid_recipe(self):
         return recipe.CustomRecipe(
             qfactory=_hybrid_nvfp4_qfactory,
-            policy_key=("test_hybrid_nvfp4", 1),
+            qfactory_key=("test_hybrid_nvfp4", 1),
         )
 
     def test_equivalence(self):
@@ -6916,7 +6916,7 @@ class TestHybridActivationRecompute:
             row_factory=_fp8_row_factory,
             col_factory=_fp8_col_factory,
             grad_factory=_fp8_grad_factory,
-            policy_key=("test_recompute_hybrid_fp8", 1),
+            qfactory_key=("test_recompute_hybrid_fp8", 1),
         )
 
     def _same_format_mxfp8_recipe(self):
@@ -6926,7 +6926,7 @@ class TestHybridActivationRecompute:
             row_factory=_mxfp8_factory,
             col_factory=_mxfp8_factory,
             grad_factory=lambda: MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E5M2),
-            policy_key=("test_recompute_hybrid_mxfp8", 1),
+            qfactory_key=("test_recompute_hybrid_mxfp8", 1),
         )
 
     def _cross_format_fp8_mxfp8_recipe(self):
@@ -6938,7 +6938,7 @@ class TestHybridActivationRecompute:
             row_factory=_fp8_row_factory,
             col_factory=_mxfp8_factory,
             grad_factory=_mxfp8_factory,
-            policy_key=("test_recompute_fp8_mxfp8", 1),
+            qfactory_key=("test_recompute_fp8_mxfp8", 1),
         )
 
     def _run_linear(self, recipe_obj, *, checkpoint_fn=None):
@@ -7465,7 +7465,7 @@ class TestHybridActivationRecompute:
             row_factory=row_factory,
             col_factory=row_factory,
             grad_factory=grad_factory,
-            policy_key=("test_checkpoint_hybrid", format_name, 1),
+            qfactory_key=("test_checkpoint_hybrid", format_name, 1),
         )
 
         def fn(model, inp):

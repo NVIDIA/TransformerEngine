@@ -136,8 +136,8 @@ def _algorithm_config(
     return (("callable",), semantic_key)
 
 
-def _validate_policy_key(key: Any, *, source: str) -> Hashable:
-    """Validate and return an immutable semantic policy key."""
+def _validate_qfactory_key(key: Any, *, source: str) -> Hashable:
+    """Validate and return an immutable semantic quantizer-factory key."""
     if key is None:
         raise ValueError(f"{source} must not be None")
     try:
@@ -147,26 +147,26 @@ def _validate_policy_key(key: Any, *, source: str) -> Hashable:
     return key
 
 
-def quantizer_policy(*, key: Hashable) -> Callable:
-    """Attach a semantic policy key to a quantizer factory without wrapping or calling it.
+def quantizer_factory(*, key: Hashable) -> Callable:
+    """Attach a semantic key to a quantizer factory without wrapping or calling it.
 
     The key, rather than Python callable identity, represents the factory's behavior in
     :class:`CustomRecipe` semantic configuration. Change the key whenever the factory's
     quantizer-selection behavior changes. A recommended convention is
-    ``(policy_name, behavior_revision)``, where ``policy_name`` is a short, stable name and
+    ``(factory_name, behavior_revision)``, where ``factory_name`` is a short, stable name and
     ``behavior_revision`` is incremented only when the factory's behavior changes.
     """
-    policy_key = _validate_policy_key(key, source="quantizer_policy key")
+    qfactory_key = _validate_qfactory_key(key, source="quantizer_factory key")
 
     def decorator(qfactory: Callable) -> Callable:
         if not callable(qfactory):
-            raise TypeError("quantizer_policy can only decorate a callable")
+            raise TypeError("quantizer_factory can only decorate a callable")
         try:
-            setattr(qfactory, "policy_key", policy_key)
+            setattr(qfactory, "qfactory_key", qfactory_key)
         except (AttributeError, TypeError) as exc:
             raise TypeError(
-                "quantizer_policy could not attach metadata to this callable; "
-                "pass policy_key directly to CustomRecipe instead"
+                "quantizer_factory could not attach metadata to this callable; "
+                "pass qfactory_key directly to CustomRecipe instead"
             ) from exc
         return qfactory
 
@@ -882,9 +882,9 @@ class CustomRecipe(Recipe):
         formats. It can be lowered when the factory's full output space is known;
         for example, a factory restricted to MXFP8 may use 32.
         Automatic padding reads this value without invoking ``qfactory``.
-    policy_key : Hashable, default = None
+    qfactory_key : Hashable, default = None
         Semantic identifier for the complete behavior of ``qfactory``. Pass it explicitly or
-        attach it to the factory with ``@quantizer_policy(key=...)``. An explicit value takes
+        attach it to the factory with ``@quantizer_factory(key=...)``. An explicit value takes
         precedence over attached factory metadata. Equivalent factory behavior must use equal
         keys, and any behavior change requires a different key.
     """
@@ -900,7 +900,7 @@ class CustomRecipe(Recipe):
     fp8_mha: bool = False
     backward_override: Optional[str] = os.getenv("NVTE_BACKWARD_OVERRIDE", None)
     quantization_alignment: int = 128
-    policy_key: Optional[Hashable] = None
+    qfactory_key: Optional[Hashable] = None
 
     def __post_init__(self) -> None:
         assert (
@@ -908,28 +908,28 @@ class CustomRecipe(Recipe):
         ), "NVTE_BACKWARD_OVERRIDE must be unset or one of: 'high_precision', 'dequantized'."
         if self.quantization_alignment <= 0:
             raise ValueError("CustomRecipe quantization_alignment must be positive.")
-        if self.policy_key is None:
-            attached_key = getattr(self.qfactory, "policy_key", None)
+        if self.qfactory_key is None:
+            attached_key = getattr(self.qfactory, "qfactory_key", None)
             if attached_key is not None:
-                self.policy_key = _validate_policy_key(
+                self.qfactory_key = _validate_qfactory_key(
                     attached_key,
-                    source="qfactory.policy_key",
+                    source="qfactory.qfactory_key",
                 )
         else:
-            self.policy_key = _validate_policy_key(
-                self.policy_key,
-                source="CustomRecipe policy_key",
+            self.qfactory_key = _validate_qfactory_key(
+                self.qfactory_key,
+                source="CustomRecipe qfactory_key",
             )
 
     def _make_quantizer_config(self) -> Hashable:
-        if self.policy_key is None:
+        if self.qfactory_key is None:
             raise ValueError(
-                "CustomRecipe requires a semantic policy key. Pass policy_key=... or decorate "
-                "qfactory with @quantizer_policy(key=...)."
+                "CustomRecipe requires a semantic qfactory key. Pass qfactory_key=... or decorate "
+                "qfactory with @quantizer_factory(key=...)."
             )
         return (
             ("recipe_type", "CustomRecipe"),
-            ("policy_key", self.policy_key),
+            ("qfactory_key", self.qfactory_key),
             ("fp8_format", self.fp8_format.name),
             ("fp8_dpa", self.fp8_dpa),
             ("fp8_mha", self.fp8_mha),
@@ -941,7 +941,7 @@ class CustomRecipe(Recipe):
         return (
             f"recipe_type={self.__class__.__name__}, "
             f"qfactory={self.qfactory}, "
-            f"policy_key={self.policy_key}, "
+            f"qfactory_key={self.qfactory_key}, "
             f"backward_override={self.backward_override}, "
             f"quantization_alignment={self.quantization_alignment}"
         )
