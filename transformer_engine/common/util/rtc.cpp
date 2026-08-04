@@ -56,53 +56,6 @@ inline bool is_supported_sm_arch(int sm_arch) {
   return std::find(archs.begin(), archs.end(), sm_arch) != archs.end();
 }
 
-/*! \brief Run-time NVRTC version encoded like CUDA_VERSION */
-inline int nvrtc_version() {
-  static const int version_ = [] {
-    int major = 0;
-    int minor = 0;
-    NVTE_CHECK_NVRTC(nvrtcVersion(&major, &minor));
-    return major * 1000 + minor * 10;
-  }();
-  return version_;
-}
-
-/*! \brief Latest supported architecture in the device's architecture family */
-inline int max_supported_family_sm_arch(int sm_arch) {
-  const int family = sm_arch / 10;
-  int target_arch = -1;
-  for (const int candidate : supported_sm_archs()) {
-    if (candidate <= sm_arch && candidate / 10 == family) {
-      target_arch = std::max(target_arch, candidate);
-    }
-  }
-  return target_arch;
-}
-
-/*! \brief Resolve the static build's Blackwell target policy for NVRTC */
-inline ArchSpecificity resolve_arch_specificity(ArchSpecificity specificity, int sm_arch) {
-  if (specificity != ArchSpecificity::BlackwellSpecific) {
-    return specificity;
-  }
-
-  // Keep this matrix synchronized with NVTE_SPECIFIC_ARCHS in CMakeLists.txt.
-  // The runtime NVRTC version is the JIT equivalent of CUDAToolkit_VERSION.
-  switch (sm_arch) {
-    case 100:
-    case 101:
-    case 103:
-      return ArchSpecificity::ArchitectureSpecific;
-    case 110:
-      return ArchSpecificity::FamilySpecific;
-    default:
-      if (sm_arch / 10 == 12) {
-        return nvrtc_version() >= 12090 ? ArchSpecificity::FamilySpecific
-                                        : ArchSpecificity::ArchitectureSpecific;
-      }
-      NVTE_ERROR("No Blackwell RTC target policy is defined for sm_", sm_arch);
-  }
-}
-
 }  // namespace
 
 bool is_enabled() {
@@ -224,9 +177,7 @@ void KernelManager::compile(const std::string& kernel_label, const std::string& 
   int compile_sm_arch = std::min(sm_arch_, max_supported_sm_arch());
   bool compile_ptx = sm_arch_ != compile_sm_arch;
   const char* arch_suffix = "";
-  const ArchSpecificity arch_specificity =
-      resolve_arch_specificity(arch_requirement.specificity, sm_arch_);
-  if (arch_specificity == ArchSpecificity::ArchitectureSpecific) {
+  if (arch_requirement.specificity == ArchSpecificity::ArchitectureSpecific) {
     NVTE_CHECK(
         is_supported_sm_arch(sm_arch_), "RTC kernel ", kernel_label,
         " requires an architecture-specific target for sm_", sm_arch_,
@@ -236,20 +187,6 @@ void KernelManager::compile(const std::string& kernel_label, const std::string& 
     compile_sm_arch = sm_arch_;
     compile_ptx = false;
     arch_suffix = "a";
-  } else if (arch_specificity == ArchSpecificity::FamilySpecific) {
-    const int rtc_version = nvrtc_version();
-    NVTE_CHECK(rtc_version >= 12090, "RTC kernel ", kernel_label,
-               " requires a family-specific target, but NVRTC ", rtc_version / 1000, ".",
-               (rtc_version % 1000) / 10, " does not support f-suffixed architectures");
-    compile_sm_arch = max_supported_family_sm_arch(sm_arch_);
-    NVTE_CHECK(
-        compile_sm_arch >= arch_requirement.min_sm_arch, "RTC kernel ", kernel_label,
-        " requires a family-specific target compatible with sm_", sm_arch_,
-        ", but the runtime NVRTC does not support that architecture family. Use a newer CUDA "
-        "toolkit, or disable NVRTC and rebuild with the corresponding legacy static kernel "
-        "enabled.");
-    compile_ptx = compile_sm_arch != sm_arch_;
-    arch_suffix = "f";
   }
 
   // Compilation flags

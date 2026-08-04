@@ -680,12 +680,6 @@ TRANSFORMER_ENGINE_TYPE_NAME(__nv_fp4_e2m1)
 #endif
 #undef TRANSFORMER_ENGINE_TYPE_NAME
 
-// Host-only fallback for types without an explicit specialization above.
-template <typename T>
-struct TypeExtrema {
-  static constexpr float max = std::numeric_limits<T>::max();
-};
-
 }  // namespace detail
 
 template <typename T>

@@ -6,7 +6,7 @@
 
 // NVRTC source file for the NVFP4 4over6 quantize kernel
 
-#include "quantize_4over6_nvfp4.cuh"
+#include "quantize_4over6_kernel.cuh"
 
 using namespace transformer_engine;
 using namespace transformer_engine::dispatch::nvfp4;

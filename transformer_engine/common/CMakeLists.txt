@@ -572,14 +572,14 @@ make_string_header_from_file(util/math.h
                              string_code_util_math_h)
 
 # NVFP4 4over6 quantize: NVRTC bundled headers + RTC source file
-make_string_header_from_file(include/transformer_engine/nvfp4_4over6.h
+make_string_header_from_file(include/transformer_engine/nvfp4/4over6.h
                              string_code_transformer_engine_nvfp4_4over6_h)
 make_string_header_from_file(util/type_extrema.h
                              string_code_util_type_extrema_h)
 make_string_header_from_file(cast/nvfp4/core_nvfp4.cuh
                              string_code_cast_nvfp4_core_nvfp4_cuh)
-make_string_header_from_file(cast/nvfp4/quantize_4over6_nvfp4.cuh
-                             string_code_cast_nvfp4_quantize_4over6_nvfp4_cuh)
+make_string_header_from_file(cast/nvfp4/quantize_4over6_kernel.cuh
+                             string_code_cast_nvfp4_quantize_4over6_kernel_cuh)
 make_string_header_from_file(cast/nvfp4/rtc/quantize_4over6.cu
                              string_code_cast_nvfp4_rtc_quantize_4over6_cu)
 
