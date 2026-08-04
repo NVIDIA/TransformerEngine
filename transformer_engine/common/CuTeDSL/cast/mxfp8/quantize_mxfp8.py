@@ -28,7 +28,7 @@ from typing import Optional, Type
 import cutlass
 from cutlass import cute
 from cutlass import pipeline
-from cutlass import Boolean, Float32, Int16, Int32, Int64, Uint32, Uint8
+from cutlass import Boolean, Float32, Int16, Int32, Int64, Uint16, Uint32, Uint8
 from cuda.bindings.driver import CUstream  # pylint: disable=no-name-in-module
 import tvm_ffi
 
@@ -57,11 +57,11 @@ from transformer_engine.common.CuTeDSL.activations import (
 )
 from transformer_engine.common.CuTeDSL.utils_fp8 import (
     as_byte_tensor,
-    get_cvt_f32_to_fp8_func,
+    get_cvt_f32x2_to_fp8x2_func,
     cvt_f32_to_fp8e8m0,
-    mul_i64_cvt_f32x4_to_fp8x4,
+    mul_f32x2_cvt_f32x4_to_fp8x4,
     mul_f32x4_cvt_f32x4_to_fp8x4,
-    mul_i64_cvt_packed16x4_to_fp8x4,
+    mul_f32x2_cvt_packed16x4_to_fp8x4,
 )
 
 CUTEDSL_DEBUG_LOGGING = os.environ.get("CUTEDSL_DEBUG_LOGGING", "0") == "1"
@@ -193,7 +193,7 @@ def quantize_rowwise_mxfp8(
     FUSE_RELU = cutlass.const_expr(ACTIVATION == "relu")
     # For this fast path we can read in pack of 2 instead of reading individual f16 / bf16 element.
     # dbias needs the per-element fp32 values to accumulate, so it forces the slow path.
-    _row_fast = is_packed16(DTYPE) and (ACTIVATION is None or FUSE_RELU) and not WITH_DBIAS
+    ROW_FAST = is_packed16(DTYPE) and (ACTIVATION is None or FUSE_RELU) and not WITH_DBIAS
 
     amax_r = Float32(0.0)
 
@@ -202,7 +202,7 @@ def quantize_rowwise_mxfp8(
     bank_group = (tidx % THREADS_PER_WARP) // THREADS_PER_BANK
     # The offset this thread should start reading from based on what's its first bank to access.
     offset = bank_group * PACK_SIZE
-    if cutlass.const_expr(_row_fast):
+    if cutlass.const_expr(ROW_FAST):
         # If no activation, f16 / bf16 and rowwise quantization, we can read 2 f16 / bf16 at once in a pack
         # and use max.xorsign.abs.f16x2 / max.xorsign.abs.bf16x2 to compute
         kit = packed16_kit(DTYPE)
@@ -311,15 +311,15 @@ def quantize_rowwise_mxfp8(
 
     inv_scale_r = exp2f_rcp(biased_exp_r)  # f32 reciprocal of the scale
     scale_2x = pack_f32x2(inv_scale_r, inv_scale_r)
-    if cutlass.const_expr(_row_fast):
-        mul_cvt_x4_func = mul_i64_cvt_packed16x4_to_fp8x4(DTYPE, FP8_DTYPE, FUSE_RELU)
+    if cutlass.const_expr(ROW_FAST):
+        mul_cvt_x4_func = mul_f32x2_cvt_packed16x4_to_fp8x4(DTYPE, FP8_DTYPE, FUSE_RELU)
     else:
-        mul_cvt_x4_func = mul_i64_cvt_f32x4_to_fp8x4(FP8_DTYPE, FUSE_RELU)
+        mul_cvt_x4_func = mul_f32x2_cvt_f32x4_to_fp8x4(FP8_DTYPE, FUSE_RELU)
 
     for w in cutlass.range_constexpr(WAVES):
         idx = (w * 4 + offset) % MXFP8_BLOCK_SCALING_SIZE
         idx = idx // 4
-        if cutlass.const_expr(_row_fast):
+        if cutlass.const_expr(ROW_FAST):
             # Convert 2 packed f16/bf16 pairs to 4 fp8 in one fused op
             sO_thread_u32[idx] = mul_cvt_x4_func(in_r[w][0], in_r[w][1], scale_2x)
         else:
@@ -435,20 +435,33 @@ def quantize_colwise_mxfp8(
             mS_col_stage[(0, tidx)] = Uint8(biased_exp_c)
 
     inv_scale_c = exp2f_rcp(biased_exp_c)
-    cvt_to_fp8_func = get_cvt_f32_to_fp8_func(FP8_DTYPE)
+    # cvt.rn.satfinite can be vectorized to convert 2 f32 to 2 fp8 in one instruction
+    cvt_x2_func = get_cvt_f32x2_to_fp8x2_func(FP8_DTYPE)
     if cutlass.const_expr(USE_HALF_PRECISION):
         kit_cast = packed16_kit(DTYPE)
-        for i in cutlass.range_constexpr(MXFP8_BLOCK_SCALING_SIZE):
-            v_f32 = kit_cast.bits_to_f32(in_c[i])
-            if cutlass.const_expr(WITH_DBIAS):
-                dbias_partial += v_f32
-            sO_thread[i] = Uint8(cvt_to_fp8_func(v_f32 * inv_scale_c))
-    else:
-        for i in cutlass.range_constexpr(MXFP8_BLOCK_SCALING_SIZE):
+        for j in cutlass.range_constexpr(MXFP8_BLOCK_SCALING_SIZE // 2):
+            lo, hi = 2 * j, 2 * j + 1
+            v_lo = kit_cast.bits_to_f32(in_c[lo])
+            v_hi = kit_cast.bits_to_f32(in_c[hi])
             # Accumulate the per-thread column partial for dbias if WITH_DBIAS.
+            # Kept as two adds in element order: f32 addition is not associative
             if cutlass.const_expr(WITH_DBIAS):
-                dbias_partial += sX_thread_f32[i]
-            sO_thread[i] = Uint8(cvt_to_fp8_func(sX_thread_f32[i] * inv_scale_c))
+                dbias_partial += v_lo
+                dbias_partial += v_hi
+            pair = cvt_x2_func(v_hi * inv_scale_c, v_lo * inv_scale_c)
+            sO_thread[lo] = Uint8(pair & Uint16(0xFF))
+            sO_thread[hi] = Uint8(pair >> Uint16(8))
+    else:
+        for j in cutlass.range_constexpr(MXFP8_BLOCK_SCALING_SIZE // 2):
+            lo, hi = 2 * j, 2 * j + 1
+            # Accumulate the per-thread column partial for dbias if WITH_DBIAS.
+            # Kept as two adds in element order: f32 addition is not associative
+            if cutlass.const_expr(WITH_DBIAS):
+                dbias_partial += sX_thread_f32[lo]
+                dbias_partial += sX_thread_f32[hi]
+            pair = cvt_x2_func(sX_thread_f32[hi] * inv_scale_c, sX_thread_f32[lo] * inv_scale_c)
+            sO_thread[lo] = Uint8(pair & Uint16(0xFF))
+            sO_thread[hi] = Uint8(pair >> Uint16(8))
 
     # Return this stage's per-column partial alongside amax; the caller accumulates
     # it across stages (a scalar can't be updated in-place through the arg).
@@ -479,7 +492,7 @@ def quantize_bidimensional_mxfp8_swizzled(
     (rowwise and colwise alike) go to staging slots whose flush targets are past-N
     padding columns of the respective scale tensors.
     """
-    mul_cvt4 = mul_i64_cvt_f32x4_to_fp8x4(fp8_dtype)
+    mul_cvt4 = mul_f32x2_cvt_f32x4_to_fp8x4(fp8_dtype)
     mul_cvt4_elemwise = mul_f32x4_cvt_f32x4_to_fp8x4(fp8_dtype)
 
     _, tv_layout = cute.make_layout_tv(
@@ -1737,7 +1750,7 @@ class MXFP8QuantizeSpecializedRowwiseKernel(MXFP8QuantizeKernelBase):
             # then a vectorized store. Mirrors CUDA's _use_cvt_4x path.
             inv_scale = exp2f_rcp(biased_exp)
             scale_2x = pack_f32x2(inv_scale, inv_scale)
-            mul_cvt4 = mul_i64_cvt_f32x4_to_fp8x4(self.cfg.FP8_DTYPE)
+            mul_cvt4 = mul_f32x2_cvt_f32x4_to_fp8x4(self.cfg.FP8_DTYPE)
             for i in cutlass.range_constexpr(MXFP8_BLOCK_SCALING_SIZE // 4):
                 offset = 4 * i
                 rO_u32[i] = mul_cvt4(
