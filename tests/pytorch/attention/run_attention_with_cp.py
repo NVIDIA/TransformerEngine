@@ -15,7 +15,10 @@ from transformer_engine.pytorch.attention.dot_product_attention.context_parallel
 from transformer_engine.pytorch.attention.dot_product_attention.utils import combine_and_quantize
 import transformer_engine_torch as tex
 from transformer_engine.pytorch import DType
-from test_attention_with_cp import model_configs_flash_attn, model_configs_fused_attn
+from test_attention_with_cp import (
+    model_configs_flash_attn,
+    model_configs_fused_attn,
+)
 from transformer_engine.pytorch import (
     autocast,
     DotProductAttention,
@@ -209,6 +212,11 @@ def run_dpa_with_cp(
     logging.root.setLevel(log_level)
     # When is_training is False, gradient outputs are None.
     is_training = is_training == "True"
+    pad_between_seqs = None
+    if qkv_format == "thd":
+        # Keep this in sync with generate_input_shapes so DPA gets the explicit
+        # padding state without a GPU-to-CPU sync.
+        pad_between_seqs = kernel_backend == "FusedAttention" or fa_pad_between_seqs == "True"
 
     # set up environment variables and config
     if deterministic == "True":
@@ -231,7 +239,10 @@ def run_dpa_with_cp(
         config = copy.deepcopy(model_configs_flash_attn[model])
     if kernel_backend == "FusedAttention":
         os.environ["NVTE_FUSED_ATTN"] = "1"
-        config = copy.deepcopy(model_configs_fused_attn[model])
+        if model in model_configs_fused_attn:
+            config = copy.deepcopy(model_configs_fused_attn[model])
+        else:
+            assert False, f"{model=} is not a known FusedAttention CP config!"
     assert config.attn_mask_type in [
         "causal",
         "no_mask",
@@ -411,13 +422,7 @@ def run_dpa_with_cp(
             cu_seqlens_kv=cu_seqlens_kv,
             cu_seqlens_q_padded=cu_seqlens_q_padded,
             cu_seqlens_kv_padded=cu_seqlens_kv_padded,
-            # Test runner sets cu_seqlens_q == cu_seqlens_q_padded for the
-            # FlashAttention path, i.e. no inter-sequence padding. Declare this
-            # explicitly so the sync-free auto-detect (which conservatively
-            # picks True when padded cu_seqlens are present) does not disable FA.
-            pad_between_seqs=(
-                (kernel_backend != "FlashAttention") if qkv_format == "thd" else None
-            ),
+            pad_between_seqs=pad_between_seqs,
             fp8_output=fp8_mha,
         )
         if config.return_max_logit:
@@ -535,12 +540,7 @@ def run_dpa_with_cp(
             cu_seqlens_kv=cu_seqlens_kv,
             cu_seqlens_q_padded=cu_seqlens_q_padded,
             cu_seqlens_kv_padded=cu_seqlens_kv_padded,
-            # See note above (non-CP branch): same explicit declaration so
-            # FlashAttention isn't disabled by the conservative sync-free
-            # auto-detect when this test path constructs no inter-seq padding.
-            pad_between_seqs=(
-                (kernel_backend != "FlashAttention") if qkv_format == "thd" else None
-            ),
+            pad_between_seqs=pad_between_seqs,
             fp8_output=fp8_mha,
         )
         if config.return_max_logit:

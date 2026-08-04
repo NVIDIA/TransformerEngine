@@ -13,8 +13,6 @@
 #include <transformer_engine/hadamard_transform.h>
 
 #include <cuda/barrier>
-#include <cute/algorithm/gemm.hpp>
-#include <cute/arch/cluster_sm90.hpp>
 #include <cute/tensor.hpp>
 
 #include "common/common.h"
@@ -746,7 +744,7 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device_g
 
         cutlass::arch::NamedBarrier::sync(NumEpilogueColQuantThreadCount,
                                           cutlass::arch::ReservedNamedBarriers::EpilogueBarrier);
-        // Aligning with TensorEngine's recipe to generate scale factors // {$nv-internal-release}
+        // Aligning with TensorEngine's recipe to generate scale factors
         static constexpr float fp4_max = 6.0f;
         static constexpr float fp8_max = 448.0f;
         static constexpr float fp4_max_inv = 1.0f / fp4_max;
@@ -1003,7 +1001,7 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device_g
             shape_rep, num_tensors, (scheduler.tile_n_base() * size<1>(epilogue_tiler)) * M,
             packed_N, M, offsets);
         float a_global_amax_val = shared_storage.global_a_amax[group_idx];
-        // Aligning with TensorEngine's recipe to generate scale factors // {$nv-internal-release}
+        // Aligning with TensorEngine's recipe to generate scale factors
         static constexpr float fp4_max = 6.0f;
         static constexpr float fp8_max = 448.0f;
         static constexpr float fp4_max_inv = 1.0f / fp4_max;

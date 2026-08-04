@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 
-"""Utility functions for experimental middleware between Transformer Engine and Kitchen."""
+"""Shared utilities for custom recipe reference implementations."""
 
 import enum
 
