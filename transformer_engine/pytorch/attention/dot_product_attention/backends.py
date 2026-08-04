@@ -50,9 +50,11 @@ from transformer_engine.pytorch.cpp_extensions.fused_attn import (
 )
 from transformer_engine.pytorch.quantization import get_fp8_torch_dtype, FP8GlobalStateManager
 from transformer_engine.pytorch.distributed import get_distributed_world_size
-from transformer_engine.pytorch.attention.kv_cache_ops import (
+from transformer_engine.pytorch.attention.custom_ops import (
     convert_bshd_to_thd,
     convert_thd_to_bshd,
+    fa_prepare_bwd,
+    fa_prepare_fwd,
 )
 from transformer_engine.pytorch.jit import no_torch_dynamo
 from transformer_engine.pytorch.attention.dot_product_attention.context_parallel import (
@@ -777,7 +779,7 @@ class _PrepareQKVForFA(torch.autograd.Function):
         # All inputs received are non-contiguous tensors.
         # The `query_layer` tensor is used to access the
         # full memory region of the QKV tensor.
-        qkv = tex.fa_prepare_fwd(query_layer)
+        qkv = fa_prepare_fwd(query_layer)
         q, k, v = split_tensor_along_dim(qkv, 0, 3)
         query_layer = torch.squeeze(q, 0)
         key_layer = torch.squeeze(k, 0)
@@ -792,7 +794,7 @@ class _PrepareQKVForFA(torch.autograd.Function):
         dv: torch.Tensor,
     ) -> Tuple[Union[torch.Tensor, None], ...]:
         # pylint: disable=missing-function-docstring
-        dqkv = tex.fa_prepare_bwd(dq, dk, dv)
+        dqkv = fa_prepare_bwd(dq, dk, dv)
         dq, dk, dv = split_tensor_along_dim(dqkv, -1, 3)
         return dq, dk, dv
 

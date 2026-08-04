@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 
-"""KV cache kernels wrapped as custom ops, so they don't graph-break under torch.compile."""
+"""Attention kernels wrapped as custom ops, so they don't graph-break under torch.compile."""
 
 import torch
 import transformer_engine_torch as tex
@@ -86,3 +86,29 @@ def _convert_thd_to_bshd_fake(
 ) -> torch.Tensor:
     del cu_seqlens
     return tensor.new_empty((b, max_seq_len, *tensor.shape[1:]))
+
+
+@torch.library.custom_op("te_attention::fa_prepare_fwd", mutates_args=(), device_types="cuda")
+def fa_prepare_fwd(qkvi: torch.Tensor) -> torch.Tensor:
+    """Split interleaved sbh3d QKV into bshd q/k/v."""
+    return tex.fa_prepare_fwd(qkvi)
+
+
+@fa_prepare_fwd.register_fake
+def _fa_prepare_fwd_fake(qkvi: torch.Tensor) -> torch.Tensor:
+    # qkvi is the q view into the packed buffer, and its strides cover all of it.
+    s, b, n, h = qkvi.shape
+    return qkvi.new_empty((3, b, s, n, h))
+
+
+@torch.library.custom_op("te_attention::fa_prepare_bwd", mutates_args=(), device_types="cuda")
+def fa_prepare_bwd(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+    """Pack bshd gradients back into an interleaved sbh3d buffer."""
+    return tex.fa_prepare_bwd(q, k, v)
+
+
+@fa_prepare_bwd.register_fake
+def _fa_prepare_bwd_fake(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+    del k, v
+    b, s, n, h = q.shape
+    return q.new_empty((s, b, n, 3 * h))

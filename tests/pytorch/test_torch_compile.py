@@ -635,6 +635,14 @@ _DPA_COMPILE_CONFIGS = {
     "sink_softmax_bshd": _cfg(
         ModelConfig(2, 128, 4, 64, attn_mask_type="causal", softmax_type="off-by-one")
     ),
+    # FlashAttention takes a fused sbhd->bshd split for sbh3d with a head
+    # dimension of 128 and at least 512 tokens, and a plain transpose otherwise.
+    "packed_qkv_sbh3d_fused_split": _cfg(
+        ModelConfig(4, 128, 4, 128, attn_mask_type="no_mask"),
+        "sbhd",
+        packed="qkv",
+        interleave_dim=-2,
+    ),
     # A decoding step against a KV cache. FlashAttention 2 wants the non-paged
     # cache length divisible by 256.
     "kv_cache_bshd": _cfg(
