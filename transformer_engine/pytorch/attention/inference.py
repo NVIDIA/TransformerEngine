@@ -10,7 +10,6 @@ from einops import rearrange
 
 import torch
 
-import transformer_engine_torch as tex
 from transformer_engine.pytorch.attention.custom_ops import (
     copy_to_kv_cache,
     QKV_FORMAT_VALUE,
