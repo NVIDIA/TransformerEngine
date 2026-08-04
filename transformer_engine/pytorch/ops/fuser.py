@@ -510,9 +510,9 @@ class OperationFuser:
                         f"but producer op {producer_idx} extra output {output_idx} "
                         f"is bound to {producer_channel!r}"
                     )
-
+        # Used by Sequential to determine the number of extra inputs
+        # needed for each OperationFuser module in the sequence.
         self.num_extra_inputs = len(self._external_extra_input_slots)
-        self.num_extra_outputs = len(self._external_extra_output_slots)
 
         # Ops for forward and backward pass, will be populated in maybe_fuse_ops
         self._forward_ops: list[tuple[FusibleOperation, list[int]]]

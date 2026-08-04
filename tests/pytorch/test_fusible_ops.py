@@ -903,7 +903,8 @@ class TestExtraTensorChannels:
         fuser = OperationFuser([producer_a, producer_b, consumer])
         assert fuser._basic_op_extra_input_sources[2] == [(0, 0)]
         assert fuser.num_extra_inputs == 0
-        assert fuser.num_extra_outputs == 1  # producer_b's unbound extra output
+        # producer_b's unbound extra output remains public
+        assert fuser._external_extra_output_slots == [(1, 0)]
 
     def test_channel_fanout_accumulates_grads(self, size: int = 16) -> None:
         """Grads from every consumer of a channel are accumulated into the producer."""
