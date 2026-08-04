@@ -20,6 +20,7 @@ from transformer_engine.pytorch import (
     Float8Tensor,
     Float8BlockwiseQTensor,
     MXFP8Tensor,
+    MXFP8TensorStorage,
     NVFP4Tensor,
     QuantizedTensor,
 )
@@ -670,6 +671,31 @@ class TestQuantizedTensor:
         assert y_cpu.shape == ref_cpu.shape
         torch.testing.assert_close(y_cpu, ref_cpu, rtol=0, atol=0)
 
+    def test_mxfp8_fsdp_extract_keeps_partial_columnwise_scale_block(self) -> None:
+        """FSDP extraction must retain the scale for a partial final 32-row block."""
+        rows, cols = 48, 64
+        columnwise_scale_inv = torch.arange(4 * 128, dtype=torch.float32).reshape(4, 128)
+        storage = MXFP8TensorStorage(
+            rowwise_data=None,
+            rowwise_scale_inv=None,
+            columnwise_data=torch.zeros((rows, cols), dtype=torch.uint8),
+            columnwise_scale_inv=columnwise_scale_inv,
+            fp8_dtype=te.DType.kFloat8E4M3,
+            quantizer=None,
+            with_gemm_swizzled_scales=False,
+            fake_dtype=torch.bfloat16,
+        )
+
+        buffers, metadata = storage.fsdp_extract_buffers()
+
+        assert metadata == {"field_names": ("_columnwise_data", "_columnwise_scale_inv")}
+        assert len(buffers) == 2
+        assert buffers[0] is storage._columnwise_data
+        extracted_scale_inv = buffers[1]
+        assert extracted_scale_inv is not None
+        assert extracted_scale_inv.shape == (2, 128)
+        torch.testing.assert_close(extracted_scale_inv, columnwise_scale_inv[:2], rtol=0, atol=0)
+
     @pytest.mark.parametrize("quantization", _quantization_list)
     @pytest.mark.parametrize("dim", [0, 1])
     def test_chunk(
@@ -712,6 +738,14 @@ class TestQuantizedTensor:
             tols = dict(rtol=0, atol=0)  # Chunking is exact
             y_test = y_test.to(dtype=torch.float64, device="cpu")
             torch.testing.assert_close(y_test, y_ref, **tols)
+
+    def test_view_not_implemented(self) -> None:
+        """QuantizedTensor base class does not support tensor views."""
+        qt = QuantizedTensor((128, 128), torch.bfloat16)
+        with pytest.raises(
+            NotImplementedError, match="QuantizedTensor class does not support tensor views"
+        ):
+            qt.view(-1)
 
     @pytest.mark.parametrize("quantization", _quantization_list)
     def test_shape_with_none_data(
@@ -756,6 +790,58 @@ class TestQuantizedTensor:
             f"Expected shape {shape} but got {x_test.shape} "
             f"after setting data to None on {type(x_test).__name__}"
         )
+
+    @pytest.mark.parametrize("quantization", _quantization_list)
+    @pytest.mark.parametrize(
+        "rowwise, columnwise",
+        [(True, True), (True, False), (False, True)],
+        ids=["rowwise_columnwise", "rowwise_only", "columnwise_only"],
+    )
+    @pytest.mark.parametrize("shape", [(128, 256), (4, 128, 256)], ids=["2d", "3d"])
+    def test_shape_matches_size(
+        self,
+        *,
+        quantization: str,
+        rowwise: bool,
+        columnwise: bool,
+        shape: Iterable[int],
+        dtype: torch.dtype = torch.bfloat16,
+        device: torch.device = "cuda",
+    ) -> None:
+        """shape, size() and size(dim) stay consistent for every usage combination.
+
+        Both shape and size() are derived from whichever data buffer is present,
+        and classes that store columnwise data transposed have to undo that. A
+        columnwise-only tensor is where they can drift apart -- from each other,
+        and from the shape the tensor was allocated with.
+        """
+        quantizer = make_quantizer(quantization, device=device)
+        # Row-scaled NVFP4 accepts set_usage(rowwise=False) but rejects the
+        # allocation itself, so it has to be filtered out up front.
+        if getattr(quantizer, "row_scaled_nvfp4", False) and not rowwise:
+            pytest.skip(f"{quantization} requires rowwise usage")
+        quantizer.set_usage(rowwise=rowwise, columnwise=columnwise)
+        if (quantizer.rowwise_usage, quantizer.columnwise_usage) != (rowwise, columnwise):
+            pytest.skip(f"{quantization} does not support this usage combination")
+
+        x = quantizer.make_empty(shape, dtype=dtype, device=device)
+        name = type(x).__name__
+
+        # shape and size() must describe the same tensor, whichever buffer they
+        # end up reading.
+        assert tuple(x.shape) == tuple(x.size()), f"{name}: {tuple(x.shape)} vs {tuple(x.size())}"
+
+        # size(dim) must agree with the full shape, including negative indices.
+        # It cannot be served by forwarding dim to a transposed buffer.
+        for dim in range(len(x.shape)):
+            assert x.size(dim) == x.shape[dim], f"{name}.size({dim}) is {x.size(dim)}"
+            neg = dim - len(x.shape)
+            assert x.size(neg) == x.shape[neg], f"{name}.size({neg}) is {x.size(neg)}"
+
+        # NVFP4 deliberately reports columnwise-only tensors flattened to 2D and
+        # warns about it, so only the ranks it preserves are checked here.
+        if not (isinstance(quantizer, NVFP4Quantizer) and not rowwise and len(shape) > 2):
+            assert tuple(x.shape) == tuple(shape), f"{name}.shape is {tuple(x.shape)}"
 
     @pytest.mark.parametrize(
         "quantization",

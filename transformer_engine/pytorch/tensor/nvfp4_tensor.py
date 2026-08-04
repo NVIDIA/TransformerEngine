@@ -254,6 +254,10 @@ class NVFP4Quantizer(Quantizer):
         """Quantize tensor implementation"""
         return tex.quantize(tensor, self)
 
+    def is_requantization_safe(self) -> bool:
+        """NVFP4 quantization is replay-safe unless stochastic rounding is enabled."""
+        return not self.stochastic_rounding
+
     def is_quantizable(self, inp: torch.Tensor) -> bool:
         """Returns whether or not given inp can be quantized"""
         if self.row_scaled_nvfp4:
@@ -673,7 +677,9 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
         # View op
         if func == aten.view.default:
             if len(args) != 2:
-                raise RuntimeError("Unexpected args for view op (expected 2 args, got {len(args)})")
+                raise RuntimeError(
+                    f"Unexpected args for view op (expected 2 args, got {len(args)})"
+                )
             tensor = args[0]
             shape = args[1]
             if shape == list(tensor.size()):

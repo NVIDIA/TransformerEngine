@@ -9,9 +9,13 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cerrno>
 #include <climits>
+#include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <limits>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -393,6 +397,47 @@ void CheckOutputGroupedTensor(const GroupedTensor &t, std::string_view name, boo
   CheckGroupedTensorShapeArrays(t, name);
 }
 
+namespace {
+
+constexpr size_t kDefaultTensorHandlePoolSizeMB = 20;
+constexpr size_t kBytesPerMB = 1024 * 1024;
+
+size_t GetTensorHandlePoolSizeMB(const char *env_var) {
+  const char *env_value = std::getenv(env_var);
+  if (env_value == nullptr || env_value[0] == '\0') {
+    return kDefaultTensorHandlePoolSizeMB;
+  }
+
+  const std::string value(env_value);
+  constexpr const char *kWhitespace = " \t\n\r\f\v";
+  const size_t first = value.find_first_not_of(kWhitespace);
+  const size_t last = value.find_last_not_of(kWhitespace);
+  NVTE_CHECK(first != std::string::npos, env_var, " must be a positive integer.");
+
+  const char *begin = value.c_str() + first;
+  const char *expected_end = value.c_str() + last + 1;
+  errno = 0;
+  char *end = nullptr;
+  const uint64_t pool_size_mb = std::strtoul(begin, &end, 10);
+
+  NVTE_CHECK(value[first] >= '0' && value[first] <= '9' && end == expected_end && pool_size_mb > 0,
+             env_var, " must be a positive integer, got \"", value, "\".");
+  NVTE_CHECK(errno != ERANGE, env_var, " is too large.");
+  NVTE_CHECK(pool_size_mb <= std::numeric_limits<size_t>::max() / kBytesPerMB, env_var,
+             " is too large.");
+  return static_cast<size_t>(pool_size_mb);
+}
+
+size_t GetTensorHandlePoolCapacity(size_t pool_size_mb, size_t handle_size, const char *handle_name,
+                                   const char *env_var) {
+  const size_t pool_size_bytes = pool_size_mb * kBytesPerMB;
+  NVTE_CHECK(pool_size_bytes >= handle_size, env_var, "=", pool_size_mb,
+             " MiB is too small for one ", handle_name, " handle of size ", handle_size, " bytes.");
+  return pool_size_bytes / handle_size;
+}
+
+}  // namespace
+
 class TensorAllocator {
  public:
   static TensorAllocator &instance() {
@@ -406,8 +451,10 @@ class TensorAllocator {
     std::lock_guard<std::mutex> lock(mutex);
     const size_t available = free_list.size() + (memory.capacity() - memory.size());
     NVTE_CHECK(available >= N, "Cannot allocate ", N,
-               " new NVTETensors. Maximum number of tensors reached: ", MAX_TENSOR_NUM,
-               ". There is probably a memory leak in your application.");
+               " new NVTETensors. Maximum number of tensors reached: ", MAX_TENSOR_NUM, " (",
+               TENSOR_HANDLE_POOL_SIZE_MB,
+               " MiB handle pool). If your application legitimately needs more tensor handles, "
+               "increase NVTE_TENSOR_HANDLE_POOL_SIZE_MB.");
     for (size_t i = 0; i < N; ++i) {
       uintptr_t index;
       if (!free_list.empty()) {
@@ -479,9 +526,11 @@ class TensorAllocator {
 
   std::mutex mutex;
   std::atomic<size_t> size;
-  // Allocate at most 20 MB for tensors
   // Should be replaced by virtual memory allocation
-  const size_t MAX_TENSOR_NUM = 20 * 1024 * 1024 / sizeof(Tensor);
+  const size_t TENSOR_HANDLE_POOL_SIZE_MB =
+      GetTensorHandlePoolSizeMB("NVTE_TENSOR_HANDLE_POOL_SIZE_MB");
+  const size_t MAX_TENSOR_NUM = GetTensorHandlePoolCapacity(
+      TENSOR_HANDLE_POOL_SIZE_MB, sizeof(Tensor), "NVTETensor", "NVTE_TENSOR_HANDLE_POOL_SIZE_MB");
   std::vector<uintptr_t> free_list;
   std::vector<Tensor> memory;
   bool debug = false;
@@ -532,7 +581,9 @@ class GroupedTensorAllocator {
     }
     NVTE_ERROR(
         "Cannot allocate a new NVTEGroupedTensor. Maximum number of grouped tensors reached: ",
-        MAX_GROUPED_TENSOR_NUM, ". There is probably a memory leak in your application.");
+        MAX_GROUPED_TENSOR_NUM, " (", GROUPED_TENSOR_HANDLE_POOL_SIZE_MB,
+        " MiB handle pool). If your application legitimately needs more grouped tensor handles, "
+        "increase NVTE_GROUPED_TENSOR_HANDLE_POOL_SIZE_MB.");
   }
 
   void Free(NVTEGroupedTensor t) {
@@ -564,8 +615,11 @@ class GroupedTensorAllocator {
 
   std::mutex mutex;
   std::atomic<size_t> size;
-  // Allocate at most 20 MB for grouped tensors
-  const size_t MAX_GROUPED_TENSOR_NUM = 20 * 1024 * 1024 / sizeof(GroupedTensor);
+  const size_t GROUPED_TENSOR_HANDLE_POOL_SIZE_MB =
+      GetTensorHandlePoolSizeMB("NVTE_GROUPED_TENSOR_HANDLE_POOL_SIZE_MB");
+  const size_t MAX_GROUPED_TENSOR_NUM =
+      GetTensorHandlePoolCapacity(GROUPED_TENSOR_HANDLE_POOL_SIZE_MB, sizeof(GroupedTensor),
+                                  "NVTEGroupedTensor", "NVTE_GROUPED_TENSOR_HANDLE_POOL_SIZE_MB");
   std::vector<uintptr_t> free_list;
   std::vector<GroupedTensor> memory;
 };
