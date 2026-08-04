@@ -830,23 +830,42 @@ def test_gpt_full_activation_recompute_with_inner_autocast(use_reentrant, monkey
         inner_autocast=True,
     )
 
-    # The outer autocast is disabled here, so the forward scale is never updated between the
-    # two forward phases: a missing stash cannot change any number, it can only crash. Count
-    # the stash and restore per module instead, and check a module was stashed before the real
-    # restore runs, so a regression reports that rather than a KeyError on the buffer lookup.
-    stash_counts, restore_counts = {}, {}
+    # The outputs cannot see a bad stash: the outer autocast is disabled, so the forward scale is
+    # never updated between the two forward phases, and a wrong scale would only perturb FP8
+    # rounding anyway because scale_inv is derived from the same scale at cast time. Assert on the
+    # stashed state instead - each restore must reinstall exactly what was stashed before the
+    # phase-1 forward - and check a module was stashed before the real restore runs, so a missing
+    # stash reports that rather than a KeyError on the buffer lookup.
+    forward_key = FP8GlobalStateManager.get_meta_tensor_key(forward=True)
+    stash_counts, restore_counts, stashed_state, restore_moved = {}, {}, {}, []
     stash_fn = FP8GlobalStateManager.copy_forward_fp8_meta_tensors_for_recompute
     restore_fn = FP8GlobalStateManager.get_old_fp8_meta_tensors_for_recompute
 
     def record_stash(fp8_meta):
         stash_fn(fp8_meta)
-        if _FP8_RECOMPUTE_KEY in fp8_meta:
-            stash_counts[id(fp8_meta)] = stash_counts.get(id(fp8_meta), 0) + 1
+        if _FP8_RECOMPUTE_KEY not in fp8_meta:
+            return
+        key = id(fp8_meta)
+        stash_counts[key] = stash_counts.get(key, 0) + 1
+        scaling = fp8_meta[forward_key]
+        stashed_state.setdefault(key, []).append(
+            (scaling.scale.clone(), scaling.amax_history.clone())
+        )
 
     def record_restore(fp8_meta):
-        assert id(fp8_meta) in stash_counts, "Recompute restored a scale that was never stashed"
-        restore_counts[id(fp8_meta)] = restore_counts.get(id(fp8_meta), 0) + 1
+        key = id(fp8_meta)
+        assert key in stash_counts, "Recompute restored a scale that was never stashed"
+        restore_counts[key] = restore_counts.get(key, 0) + 1
+        scaling = fp8_meta[forward_key]
+        amax_before = scaling.amax_history.clone()
         restore_fn(fp8_meta)
+        want_scale, want_amax = stashed_state[key].pop(0)
+        assert torch.equal(scaling.scale, want_scale), "Recompute got a different forward scale"
+        assert torch.equal(
+            scaling.amax_history, want_amax
+        ), "Recompute got a different amax history"
+        # Phase 1 writes amax, so a real restore has to move the live state back.
+        restore_moved.append(not torch.equal(amax_before, want_amax))
 
     monkeypatch.setattr(
         FP8GlobalStateManager,
@@ -872,6 +891,9 @@ def test_gpt_full_activation_recompute_with_inner_autocast(use_reentrant, monkey
 
     assert stash_counts, "No FP8 module stashed a forward scale for the recompute phase"
     assert restore_counts == stash_counts, "Stash and restore of forward scales are unbalanced"
+    assert any(
+        restore_moved
+    ), "No restore moved the live FP8 state, so the checks above are vacuous"
 
     for name, ref, test in zip(names, outputs, outputs_recompute):
         torch.testing.assert_close(
