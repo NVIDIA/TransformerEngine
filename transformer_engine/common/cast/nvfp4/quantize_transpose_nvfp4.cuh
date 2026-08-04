@@ -14,12 +14,12 @@
 #include <cuda.h>
 #include <cudaTypedefs.h>
 #include <cuda_runtime.h>
-#include <mma.h>
 #include <transformer_engine/transformer_engine.h>
 
 #include <type_traits>
 
 #include "../../common.h"
+#include "../../hadamard_transform/hadamard_transform_utils.cuh"
 #include "../../util/math.h"
 #include "../../util/ptx.cuh"
 #include "../../utils.cuh"
@@ -30,6 +30,16 @@
 namespace transformer_engine {
 namespace dispatch {
 namespace nvfp4 {
+
+__device__ __forceinline__ void load_matrix_b_16x16_from_shared(uint32_t &b0, uint32_t &b1,
+                                                                uint32_t &b2, uint32_t &b3,
+                                                                const void *addr, uint32_t stride) {
+  asm volatile(
+      "wmma.load.b.sync.aligned.row.m16n16k16.shared::cta.bf16 "
+      "{%0,%1,%2,%3}, [%4], %5;\n"
+      : "=r"(b0), "=r"(b1), "=r"(b2), "=r"(b3)
+      : "l"(addr), "r"(stride));
+}
 
 namespace rowwise_amax_kernel {
 
@@ -412,9 +422,6 @@ __global__ void __launch_bounds__(THREADS_NUM)
   constexpr size_t out_mem_rowwise_scales = 0;
   constexpr size_t out_mem_colwise_scales =
       (CHUNK_DIM_Y * CHUNK_DIM_X) / SCALE_DIM * sizeof(nvfp4_scale_t);
-  constexpr size_t rht_matrix_mem = 16 * 16 * sizeof(IType);
-  constexpr size_t rht_result_mem = BUFF_DIM_Y * BUFF_IN_DIM_X * sizeof(IType);
-  constexpr size_t rht_mma_a_mem = (THREADS_NUM / THREADS_PER_WARP) * 16 * 16 * sizeof(IType);
 
   extern __shared__ char dynamic_shmem[];
   uintptr_t base_shmem_ptr = reinterpret_cast<uintptr_t>(dynamic_shmem);
@@ -435,12 +442,6 @@ __global__ void __launch_bounds__(THREADS_NUM)
   IType *rht_sh =
       reinterpret_cast<IType *>(dshmem + in_mem + out_mem_rowwise_data + out_mem_colwise_data +
                                 out_mem_rowwise_scales + out_mem_colwise_scales);
-  IType *rht_result_sh =
-      reinterpret_cast<IType *>(reinterpret_cast<char *>(rht_sh) + rht_matrix_mem);
-  IType *rht_mma_a_sh =
-      reinterpret_cast<IType *>(reinterpret_cast<char *>(rht_result_sh) + rht_result_mem);
-  float *rht_mma_acc_sh =
-      reinterpret_cast<float *>(reinterpret_cast<char *>(rht_mma_a_sh) + rht_mma_a_mem);
   IType *cached_act_sh = in_sh;  // in_sh is used as a cache buffer
 
   constexpr size_t shmem_buff_size = buff_size_aligned_in / BUFFS_NUM;
@@ -508,63 +509,77 @@ __global__ void __launch_bounds__(THREADS_NUM)
     ptx::mbarrier_wait_parity(&mbar[stage], 0);
     if constexpr (APPLY_COLUMNWISE_RHT) {
       ptx::mbarrier_wait_parity(&mbar_rht[0], 0);
-      IType *stage_rht_result_sh = rht_result_sh;
 
       // SM120/121 have legacy warp MMA but no TMEM. Form sixteen 16x16 tiles from
-      // the TMA input stage, transpose each tile into WMMA A layout, and compute
-      // A @ H in registers. Four warps independently process four tiles each.
+      // the TMA input stage and compute A @ H in registers. The col-major A load
+      // consumes the transposed TMA layout directly, avoiding an operand staging copy.
       constexpr int kWarps = THREADS_NUM / THREADS_PER_WARP;
       constexpr int kTilesX = BUFF_IN_DIM_X / SCALE_DIM;
       constexpr int kTilesY = BUFF_DIM_Y / SCALE_DIM;
       constexpr int kMmaTiles = kTilesX * kTilesY;
       const int warp = threadIdx.x / THREADS_PER_WARP;
-      const int lane = threadIdx.x % THREADS_PER_WARP;
-      IType *warp_a = rht_mma_a_sh + warp * SCALE_DIM * SCALE_DIM;
-      float *warp_acc = rht_mma_acc_sh + warp * SCALE_DIM * SCALE_DIM;
+      uint32_t b_frag[4];
+      load_matrix_b_16x16_from_shared(b_frag[0], b_frag[1], b_frag[2], b_frag[3], rht_sh,
+                                      SCALE_DIM);
 
       for (int tile = warp; tile < kMmaTiles; tile += kWarps) {
         const int tile_y = tile / kTilesX;
         const int tile_x = tile % kTilesX;
-        nvcuda::wmma::fragment<nvcuda::wmma::matrix_a, 16, 16, 16, __nv_bfloat16,
-                               nvcuda::wmma::row_major>
-            a_frag;
-        nvcuda::wmma::fragment<nvcuda::wmma::matrix_b, 16, 16, 16, __nv_bfloat16,
-                               nvcuda::wmma::row_major>
-            b_frag;
-        nvcuda::wmma::fragment<nvcuda::wmma::accumulator, 16, 16, 16, float> acc_frag;
-        nvcuda::wmma::load_matrix_sync(b_frag, reinterpret_cast<__nv_bfloat16 *>(rht_sh),
-                                       SCALE_DIM);
+        uint32_t a_frag[4];
+        uint32_t c_frag[4];
+        uint32_t unused_amax = 0;
+        IType *tile_in =
+            &in_sh[buff_offset_in + tile_y * SCALE_DIM * BUFF_IN_DIM_X + tile_x * SCALE_DIM];
+        load_matrix_16x16_from_shared<true>(a_frag[0], a_frag[1], a_frag[2], a_frag[3], tile_in,
+                                            BUFF_IN_DIM_X);
+        mma_m16_n16_k16_b16_b16_b16_noacc<false>(
+            a_frag[0], a_frag[1], a_frag[2], a_frag[3], b_frag[0], b_frag[1], b_frag[2], b_frag[3],
+            c_frag[0], c_frag[1], c_frag[2], c_frag[3], unused_amax);
+
+        // A WMMA lane owns two adjacent pairs in each of two rows. Quantize
+        // those fragments in registers and write both packed FP4 pairs
+        // directly to the transposed-output staging buffer.
+        const int lane = threadIdx.x % THREADS_PER_WARP;
+        const int lane_in_quad = lane & 3;
+        const int row_in_half = lane >> 2;
 #pragma unroll
-        for (int idx = lane; idx < SCALE_DIM * SCALE_DIM; idx += THREADS_PER_WARP) {
-          const int vector = idx / SCALE_DIM;
-          const int k = idx % SCALE_DIM;
-          warp_a[idx] = in_sh[buff_offset_in + (tile_y * SCALE_DIM + k) * BUFF_IN_DIM_X +
-                              tile_x * SCALE_DIM + vector];
+        for (int row_half = 0; row_half < 2; ++row_half) {
+          const uint32_t c_lo = c_frag[row_half * 2];
+          const uint32_t c_hi = c_frag[row_half * 2 + 1];
+          __nv_bfloat162 lo = *reinterpret_cast<const __nv_bfloat162 *>(&c_lo);
+          __nv_bfloat162 hi = *reinterpret_cast<const __nv_bfloat162 *>(&c_hi);
+          float row_amax =
+              fmaxf(fmaxf(fabsf(__bfloat162float(lo.x)), fabsf(__bfloat162float(lo.y))),
+                    fmaxf(fabsf(__bfloat162float(hi.x)), fabsf(__bfloat162float(hi.y))));
+          row_amax = fmaxf(row_amax, __shfl_xor_sync(0xffffffff, row_amax, 1));
+          row_amax = fmaxf(row_amax, __shfl_xor_sync(0xffffffff, row_amax, 2));
+          const nvfp4_scale_t scale = compute_decoding_scaling_factor(row_amax, S_enc_colwise);
+          const float scale_inverse = fminf(1.0f / (static_cast<float>(scale) * S_dec_colwise),
+                                            detail::TypeExtrema<float>::max);
+          const float2 scale_inverse_2x{scale_inverse, scale_inverse};
+          const uint64_t values = static_cast<uint64_t>(c_lo) | (static_cast<uint64_t>(c_hi) << 32);
+          const uint32_t rbits = get_rbits(rng, random_uint4, rnd_idx);
+          const fp4e2m1x4 packed =
+              ptx::mul_cvt_bf16_to_fp4_4x<USE_STOCHASTIC_ROUNDING>(values, scale_inverse_2x, rbits);
+          const uint16_t packed_bits = *reinterpret_cast<const uint16_t *>(&packed);
+          const int output_row = tile_x * SCALE_DIM + row_in_half + row_half * 8;
+          uint8_t *output_bytes = reinterpret_cast<uint8_t *>(out_t_data_sh) + buff_offset_out_t +
+                                  output_row * BUFF_OUT_T_DIM_X + tile_y * (SCALE_DIM / 2);
+          output_bytes[lane_in_quad] = static_cast<uint8_t>(packed_bits);
+          output_bytes[lane_in_quad + 4] = static_cast<uint8_t>(packed_bits >> 8);
+          if (lane_in_quad == 0) {
+            const size_t scale_idx =
+                output_row * SCALES_PER_CHUNK_Y + stage * ITERATIONS_TRANSPOSE + tile_y;
+            out_colwise_scales_sh[scale_idx] = scale;
+          }
         }
-        __syncwarp();
-        nvcuda::wmma::load_matrix_sync(a_frag, reinterpret_cast<__nv_bfloat16 *>(warp_a),
-                                       SCALE_DIM);
-        nvcuda::wmma::fill_fragment(acc_frag, 0.0f);
-        nvcuda::wmma::mma_sync(acc_frag, a_frag, b_frag, acc_frag);
-        nvcuda::wmma::store_matrix_sync(warp_acc, acc_frag, SCALE_DIM, nvcuda::wmma::mem_row_major);
-        __syncwarp();
-#pragma unroll
-        for (int idx = lane; idx < SCALE_DIM * SCALE_DIM; idx += THREADS_PER_WARP) {
-          const int vector = idx / SCALE_DIM;
-          const int out = idx % SCALE_DIM;
-          IType *dst = &stage_rht_result_sh[(tile_y * SCALE_DIM + out) * BUFF_IN_DIM_X +
-                                            tile_x * SCALE_DIM + vector];
-          *dst = static_cast<IType>(warp_acc[idx]);
-        }
-        __syncwarp();
       }
-      __syncthreads();
     }
 
     float block_amax = 0.0f;
 
     // COLWISE scaling
-    if constexpr (RETURN_TRANSPOSE) {
+    if constexpr (RETURN_TRANSPOSE && !APPLY_COLUMNWISE_RHT) {
 #pragma unroll
       for (size_t it = 0; it < ITERATIONS_TRANSPOSE; ++it) {
         const size_t in_thread_offset_Y = 0 + it * SCALE_DIM;
@@ -619,19 +634,6 @@ __global__ void __launch_bounds__(THREADS_NUM)
               block_amax = fmaxf(block_amax, fabsf(elt));
             }
             in_compute_colwise[i] = elt;
-          }
-        }
-        if constexpr (APPLY_COLUMNWISE_RHT) {
-          IType *stage_rht_result_sh = rht_result_sh;
-          block_amax = 0.0f;
-#pragma unroll
-          for (int j = 0; j < SCALE_DIM; ++j) {
-            const int rht_offset = in_thread_offset_Y + j;
-            in_colwise_IType[j] =
-                stage_rht_result_sh[rht_offset * BUFF_IN_DIM_X + in_thread_offset_X];
-            float value = static_cast<float>(in_colwise_IType[j]);
-            in_compute_colwise[j] = value;
-            block_amax = fmaxf(block_amax, fabsf(value));
           }
         }
         // 2. Compute E4M3 scaling factor
@@ -1670,11 +1672,7 @@ void quantize_transpose(const Tensor &input, const Tensor *noop, Tensor *output,
       DIVUP_TO_MULTIPLE((buff_elems_total * 4) / 8, TMA_SHMEM_ALIGNMENT);
   constexpr size_t buff_size_scales = (CHUNK_DIM_Y * CHUNK_DIM_X) / 16 * sizeof(nvfp4_scale_t);
   constexpr size_t rht_matrix_mem = 16 * 16 * sizeof(IType);
-  constexpr size_t rht_result_mem = BUFF_DIM_Y * BUFF_DIM_X * sizeof(IType);
-  constexpr size_t rht_mma_a_mem = (THREADS_NUM / THREADS_PER_WARP) * 16 * 16 * sizeof(IType);
-  constexpr size_t rht_mma_acc_mem = (THREADS_NUM / THREADS_PER_WARP) * 16 * 16 * sizeof(float);
-  const size_t rht_mem = DIVUP_TO_MULTIPLE(
-      rht_matrix_mem + rht_result_mem + rht_mma_a_mem + rht_mma_acc_mem, TMA_SHMEM_ALIGNMENT);
+  constexpr size_t rht_mem = DIVUP_TO_MULTIPLE(rht_matrix_mem, TMA_SHMEM_ALIGNMENT);
 
   constexpr size_t in_mem = buff_size_aligned_in;
 
