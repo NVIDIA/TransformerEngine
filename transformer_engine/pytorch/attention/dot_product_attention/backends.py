@@ -50,6 +50,10 @@ from transformer_engine.pytorch.cpp_extensions.fused_attn import (
 )
 from transformer_engine.pytorch.quantization import get_fp8_torch_dtype, FP8GlobalStateManager
 from transformer_engine.pytorch.distributed import get_distributed_world_size
+from transformer_engine.pytorch.attention.kv_cache_ops import (
+    convert_bshd_to_thd,
+    convert_thd_to_bshd,
+)
 from transformer_engine.pytorch.jit import no_torch_dynamo
 from transformer_engine.pytorch.attention.dot_product_attention.context_parallel import (
     attn_forward_func_with_cp,
@@ -437,7 +441,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
 
         if qkv_format == "thd_2bshd":
             batch_size = key_layer.shape[0]
-            query_layer = tex.convert_thd_to_bshd(
+            query_layer = convert_thd_to_bshd(
                 query_layer,
                 cu_seqlens_q,
                 batch_size,
@@ -1029,7 +1033,7 @@ class FlashAttention(torch.nn.Module):
                 # convert from bshd to thd_2bshd for flash_attn_varlen_func/_with_kvcache;
                 # kernel assumes tensor is contiguous
                 if isinstance(query_layer, Float8Tensor):
-                    query_layer._data = tex.convert_bshd_to_thd(
+                    query_layer._data = convert_bshd_to_thd(
                         query_layer._data,
                         cu_seqlens_q,
                         batch_size * context_len,
@@ -1038,7 +1042,7 @@ class FlashAttention(torch.nn.Module):
                         query_layer, data=query_layer._data, shape=query_layer._data.shape
                     )
                 else:
-                    query_layer = tex.convert_bshd_to_thd(
+                    query_layer = convert_bshd_to_thd(
                         query_layer,
                         cu_seqlens_q,
                         batch_size * context_len,
@@ -1287,7 +1291,7 @@ class FlashAttention(torch.nn.Module):
             # all KV caching cases use thd_2bshd for calculation
             # convert results back to bshd from thd_2bshd
             if isinstance(query_layer, Float8Tensor):
-                output._data = tex.convert_thd_to_bshd(
+                output._data = convert_thd_to_bshd(
                     output._data,
                     cu_seqlens_q,
                     batch_size,
@@ -1295,7 +1299,7 @@ class FlashAttention(torch.nn.Module):
                 )
                 output = Float8Tensor.make_like(output, data=output._data, shape=output._data.shape)
             else:
-                output = tex.convert_thd_to_bshd(
+                output = convert_thd_to_bshd(
                     output,
                     cu_seqlens_q,
                     batch_size,

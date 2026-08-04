@@ -569,11 +569,13 @@ def _cfg(
     packed=None,
     interleave_dim=-3,
     share_cu_seqlens=False,
+    kv_cache=False,
 ):
     """A model configuration plus what DotProductAttention is handed it as.
 
     `packed` is "qkv" or "kv" for the declarative packed inputs, interleaved at
-    `interleave_dim`, or None for separate q/k/v.
+    `interleave_dim`, or None for separate q/k/v. `kv_cache` runs the call as a
+    decoding step against an InferenceParams KV cache.
     """
     return dict(
         model_config=model_config,
@@ -581,6 +583,7 @@ def _cfg(
         packed=packed,
         interleave_dim=interleave_dim,
         share_cu_seqlens=share_cu_seqlens,
+        kv_cache=kv_cache,
     )
 
 
@@ -632,6 +635,14 @@ _DPA_COMPILE_CONFIGS = {
     "sink_softmax_bshd": _cfg(
         ModelConfig(2, 128, 4, 64, attn_mask_type="causal", softmax_type="off-by-one")
     ),
+    # A decoding step against a KV cache. FlashAttention 2 wants the non-paged
+    # cache length divisible by 256.
+    "kv_cache_bshd": _cfg(
+        ModelConfig(
+            2, 8, 4, 64, max_seqlen_kv=256, attn_mask_type="padding_causal_bottom_right"
+        ),
+        kv_cache=True,
+    ),
 }
 
 
@@ -646,6 +657,21 @@ def _qkv_layout(spec: dict) -> str:
 
 def _make_dpa(spec: dict, dtype: torch.dtype) -> te.DotProductAttention:
     config = spec["model_config"]
+    if spec["kv_cache"]:
+        # KV caching addresses the cache by layer number, and a decoding step
+        # runs in inference mode.
+        return (
+            te.DotProductAttention(
+                num_attention_heads=config.num_heads,
+                kv_channels=config.kv_channels,
+                num_gqa_groups=config.num_gqa_groups,
+                qkv_format=spec["qkv_format"],
+                attn_mask_type=config.attn_mask_type,
+                layer_number=1,
+            )
+            .to(dtype=dtype, device="cuda")
+            .eval()
+        )
     return te.DotProductAttention(
         num_attention_heads=config.num_heads,
         kv_channels=config.kv_channels,
@@ -704,6 +730,28 @@ def _make_dpa_inputs(spec: dict, dtype: torch.dtype):
     def _randn(shape):
         return torch.randn(shape, dtype=dtype, device="cuda", requires_grad=True)
 
+    if spec["kv_cache"]:
+        from collections import OrderedDict
+        from transformer_engine.pytorch.attention import InferenceParams
+
+        inference_params = InferenceParams(
+            max_batch_size=b,
+            max_sequence_length=s_kv,
+            num_heads_kv=g,
+            head_dim_k=d_qk,
+            dtype=dtype,
+            qkv_format=qkv_format,
+        )
+        inference_params.allocate_memory(1)
+        inference_params.pre_step(OrderedDict((i, s_q) for i in range(b)))
+        qkv = [
+            torch.randn(_shape(s_q, t_q, heads, d_qk), dtype=dtype, device="cuda")
+            for heads in (h, g, g)
+        ]
+        # The sequence lengths come from the cache, not from cu_seqlens, and a
+        # decoding step has no gradients to compare.
+        return tuple(qkv), {"inference_params": inference_params}, []
+
     if packed is not None:
         # Declarative packed inputs: q/k/v are derived from one buffer by DPA
         # itself, and the layout comes from the declaration -- the only packed
@@ -746,7 +794,9 @@ def _make_dpa_inputs(spec: dict, dtype: torch.dtype):
     return args, kwargs, grad_tensors
 
 
-def _skip_unsupported(spec: dict, backend: str, dtype, compiled: bool = True) -> None:
+def _skip_unsupported(
+    spec: dict, backend: str, dtype, compiled: bool = True, inference_params=None
+) -> None:
     """Skip what the backend under test cannot run, or -- for a test that
     compiles it -- cannot be compiled."""
     if compiled and backend == "fused":
@@ -755,7 +805,11 @@ def _skip_unsupported(spec: dict, backend: str, dtype, compiled: bool = True) ->
         # and the tests below cover it as they do the others.
         pytest.skip("FusedAttention is an eager island and does not compile")
     available, _, _ = get_available_attention_backends(
-        spec["model_config"], dtype, _qkv_layout(spec)
+        spec["model_config"],
+        dtype,
+        _qkv_layout(spec),
+        inference_params=inference_params,
+        is_training=inference_params is None,
     )
     flash_supported, fused_supported, unfused_supported = available
     supported = {
@@ -833,7 +887,8 @@ def _run_and_capture(fn, args, kwargs, grads):
     so that the same inputs can be reused for the other run.
     """
     out = fn(*args, **kwargs).clone()
-    out.sum().backward()
+    if grads:
+        out.sum().backward()
     torch.cuda.synchronize()
     captured = []
     for tensor in grads:
@@ -881,11 +936,11 @@ def test_dpa_torch_compile(monkeypatch, backend, config):
     """
     dtype = torch.bfloat16
     spec = _DPA_COMPILE_CONFIGS[config]
-    _skip_unsupported(spec, backend, dtype)
-    _force_dpa_backend(monkeypatch, backend)
-
     module = _make_dpa(spec, dtype)
     args, kwargs, grads = _make_dpa_inputs(spec, dtype)
+    _skip_unsupported(spec, backend, dtype, inference_params=kwargs.get("inference_params"))
+    _force_dpa_backend(monkeypatch, backend)
+
     _compare_compiled_to_eager(
         module, args, kwargs, grads, monkeypatch, backend, dtype, fullgraph=True
     )
