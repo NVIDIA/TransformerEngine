@@ -582,8 +582,8 @@ class TestTeEpMoeForward:
         out_ref, _ = _pure_jax_moe_reference(
             jnp.asarray(x_np),
             jnp.asarray(params_np["gate_kernel"]),
-            jnp.asarray(params_np["wi_0"]),
-            jnp.asarray(params_np["wi_1"]),
+            jnp.asarray(params_np["wi"])[..., :INTER],
+            jnp.asarray(params_np["wi"])[..., INTER:],
             jnp.asarray(params_np["wo"]),
             num_experts=NUM_EXPERTS,
             num_experts_per_tok=TOPK,
@@ -621,8 +621,8 @@ class TestTeEpMoeBackward:
             out, _ = _pure_jax_moe_reference(
                 x,
                 params["gate_kernel"],
-                params["wi_0"],
-                params["wi_1"],
+                params["wi"][..., :INTER],
+                params["wi"][..., INTER:],
                 params["wo"],
                 ref_expert_bias,
                 num_experts=NUM_EXPERTS,
@@ -638,7 +638,7 @@ class TestTeEpMoeBackward:
         grads_ref_np = {k: np.asarray(jax.device_get(v)) for k, v in grads_ref.items()}
         grad_x_ref_np = np.asarray(jax.device_get(grad_x_ref))
 
-        for name in ("gate_kernel", "wi_0", "wi_1", "wo"):
+        for name in ("gate_kernel", "wi", "wo"):
             # Per-tensor: finite + non-zero + parity in one pass.
             g_te = _to_global_numpy(_unwrap(grads_te["params"][name]), mesh)
             assert np.all(np.isfinite(g_te)), f"{name} grad has NaN/Inf [config={config}]"
@@ -708,8 +708,8 @@ class TestTeEpMoeAuxLoss:
         _, aux_ref = _pure_jax_moe_reference(
             jnp.asarray(x_np),
             jnp.asarray(params_np["gate_kernel"]),
-            jnp.asarray(params_np["wi_0"]),
-            jnp.asarray(params_np["wi_1"]),
+            jnp.asarray(params_np["wi"])[..., :INTER],
+            jnp.asarray(params_np["wi"])[..., INTER:],
             jnp.asarray(params_np["wo"]),
             num_experts=NUM_EXPERTS,
             num_experts_per_tok=TOPK,
@@ -739,7 +739,7 @@ class TestTeEpMoeAuxLoss:
         x = _make_inputs(jax.random.PRNGKey(22))
         variables, _, _ = _init_apply(block, mesh, x, jax.random.PRNGKey(23))
         grads, _ = _grad_step(block, variables, mesh, x, include_aux=True)
-        for name in ("gate_kernel", "wi_0", "wi_1", "wo"):
+        for name in ("gate_kernel", "wi", "wo"):
             g_local = np.asarray(jax.device_get(_unwrap(grads["params"][name]).addressable_data(0)))
             assert np.all(np.isfinite(g_local)), f"{name} grad NaN/Inf under main+aux"
             assert np.any(g_local != 0.0), f"{name} grad zero under main+aux"

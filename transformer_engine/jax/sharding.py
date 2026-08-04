@@ -12,6 +12,7 @@ and collective operations.
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Callable, Optional
+import math
 import warnings
 
 import jax
@@ -133,8 +134,8 @@ def with_sharding_constraint(x: jnp.array, pspec: PartitionSpec):
     """
     A wrapper function to jax.lax.with_sharding_constraint
         1. Does nothing if mesh is empty.
-        2. If all mesh axes are manual axes, replaces pspec with all Nones.
-        3. Otherwise, strips only the manual axes.
+        2. Keeps only auto axes in pspec.
+        3. Returns x unchanged if no auto axes remain.
     """
     if pspec is None:
         return x
@@ -143,22 +144,21 @@ def with_sharding_constraint(x: jnp.array, pspec: PartitionSpec):
     if mesh.empty:
         return x
 
-    # We want to exclude the axes that already used by shard_map and shard_map
-    # only sets those in the abstract_mesh, not the physical one
-    manual_axis_names = get_abstract_mesh().manual_axes
+    # with_sharding_constraint can only refer to auto axes. Explicit axes are
+    # already fixed by the active mesh, and manual axes are managed by shard_map.
+    abstract_mesh = get_abstract_mesh()
+    auto_axis_names = set(abstract_mesh.auto_axes)
 
     # Multiple mesh axes can be mapped to a single shape axis, so we need to unpack and process tuples here too
-    def filter_manual_axes(name_or_tuple):
+    def filter_non_auto_axes(name_or_tuple):
         if isinstance(name_or_tuple, tuple):
-            out = tuple(n for n in name_or_tuple if n not in manual_axis_names)
+            out = tuple(n for n in name_or_tuple if n in auto_axis_names)
             if len(out) == 0:
                 return None
             return out
-        if name_or_tuple in manual_axis_names:
-            return None
-        return name_or_tuple
+        return name_or_tuple if name_or_tuple in auto_axis_names else None
 
-    cleaned_axis_names = tuple(filter_manual_axes(name_or_tuple) for name_or_tuple in pspec)
+    cleaned_axis_names = tuple(filter_non_auto_axes(name_or_tuple) for name_or_tuple in pspec)
 
     if cleaned_axis_names == (None,) * len(cleaned_axis_names):
         return x
@@ -231,6 +231,155 @@ def get_padded_spec(spec, ndim):
         return (None,) * ndim
     assert len(spec) <= ndim
     return spec + (None,) * (ndim - len(spec))
+
+
+def spec_axes(spec):
+    """Return unique non-None mesh axes used by a PartitionSpec-like tuple."""
+    axes = []
+    for axis_spec in spec:
+        if axis_spec is None:
+            continue
+        axis_tuple = axis_spec if isinstance(axis_spec, tuple) else (axis_spec,)
+        for axis in axis_tuple:
+            if axis is not None and axis not in axes:
+                axes.append(axis)
+    return axes
+
+
+def axis_spec_contains(axis_spec, axis):
+    """Return whether one dimension's axis spec contains a mesh axis."""
+    if axis is None or axis_spec is None:
+        return False
+    if isinstance(axis_spec, tuple):
+        return axis in axis_spec
+    return axis_spec == axis
+
+
+def spec_contains_axis(spec, axis):
+    """Return whether a PartitionSpec-like tuple contains a mesh axis."""
+    return any(axis_spec_contains(axis_spec, axis) for axis_spec in spec)
+
+
+def filter_axis_spec(axis_spec, allowed_axes):
+    """Keep only allowed axes in one dimension's axis spec."""
+    if axis_spec is None:
+        return None
+    axis_tuple = axis_spec if isinstance(axis_spec, tuple) else (axis_spec,)
+    axes = tuple(axis for axis in axis_tuple if axis in allowed_axes)
+    if len(axes) == 0:
+        return None
+    return axes[0] if len(axes) == 1 else axes
+
+
+def filter_spec_axes(spec, allowed_axes):
+    """Keep only allowed axes in a PartitionSpec-like tuple."""
+    return tuple(filter_axis_spec(axis_spec, allowed_axes) for axis_spec in spec)
+
+
+def supported_grouped_partition_axes(mesh):
+    """Return mesh axes supported by grouped quantize/GEMM custom partitioning."""
+    gsr = global_mesh_resource(validate=False)
+    return {
+        axis
+        for axis in (gsr.ep_resource, gsr.dp_resource, gsr.fsdp_resource)
+        if axis is not None and axis in mesh.axis_names
+    }
+
+
+def strip_axis_from_axis_spec(axis_spec, axis):
+    """Remove one mesh axis from one dimension's axis spec."""
+    if axis is None or axis_spec is None:
+        return axis_spec
+    if isinstance(axis_spec, tuple):
+        stripped = tuple(a for a in axis_spec if a != axis)
+        if len(stripped) == 0:
+            return None
+        return stripped[0] if len(stripped) == 1 else stripped
+    return None if axis_spec == axis else axis_spec
+
+
+def strip_axis_from_spec(spec, axis):
+    """Remove one mesh axis from a PartitionSpec-like tuple."""
+    return tuple(strip_axis_from_axis_spec(axis_spec, axis) for axis_spec in spec)
+
+
+def merge_axis_specs(*axis_specs):
+    """Merge dimension axis specs while preserving first-seen axis order."""
+    axes = []
+    for axis_spec in axis_specs:
+        if axis_spec is None:
+            continue
+        axis_tuple = axis_spec if isinstance(axis_spec, tuple) else (axis_spec,)
+        for axis in axis_tuple:
+            if axis is not None and axis not in axes:
+                axes.append(axis)
+    if len(axes) == 0:
+        return None
+    return axes[0] if len(axes) == 1 else tuple(axes)
+
+
+def common_spec_axis(spec_a, spec_b, allowed_axes=None):
+    """Return the first mesh axis that appears in both specs."""
+    axes = []
+    for spec in (spec_a, spec_b):
+        for axis in spec_axes(spec):
+            if axis not in axes:
+                axes.append(axis)
+    for axis in axes:
+        if allowed_axes is not None and axis not in allowed_axes:
+            continue
+        if spec_contains_axis(spec_a, axis) and spec_contains_axis(spec_b, axis):
+            return axis
+    return None
+
+
+def axis_spec_size(axis_spec, mesh):
+    """Return the device count represented by one dimension's axis spec."""
+    axis_tuple = axis_spec if isinstance(axis_spec, tuple) else (axis_spec,)
+    axis_size = 1
+    for axis in axis_tuple:
+        if axis is not None:
+            axis_size *= mesh.shape[axis]
+    return axis_size
+
+
+def spec_size(spec, mesh):
+    """Return the total device count represented by a PartitionSpec-like tuple."""
+    axis_size = 1
+    for axis_spec in spec:
+        axis_size *= axis_spec_size(axis_spec, mesh)
+    return axis_size
+
+
+def local_shape_from_spec(global_shape, spec, mesh):
+    """Derive a local shape from a global shape and PartitionSpec-like tuple."""
+    local_shape = []
+    for dim, axis_spec in zip(global_shape, spec):
+        local_shape.append(dim // axis_spec_size(axis_spec, mesh))
+    return tuple(local_shape)
+
+
+def local_2d_sizes_from_spec(shape, spec, axis_boundary, left_size, right_size, mesh):
+    """Derive local collapsed 2D dimensions from a global shape and sharding spec."""
+    if len(shape) == len(spec) and len(shape) > 1:
+        local_shape = local_shape_from_spec(shape, spec, mesh)
+        return (
+            math.prod(local_shape[:axis_boundary]),
+            math.prod(local_shape[axis_boundary:]),
+        )
+
+    size = spec_size(spec, mesh)
+    if size == 1:
+        return left_size, right_size
+    if left_size % size == 0:
+        return left_size // size, right_size
+    if right_size % size == 0:
+        return left_size, right_size // size
+    raise ValueError(
+        "Cannot derive local 2D sizes from sharding spec. "
+        f"shape={shape}, spec={spec}, axis_boundary={axis_boundary}, "
+        f"left_size={left_size}, right_size={right_size}, spec_size={size}"
+    )
 
 
 def lax_paral_op(
@@ -329,6 +478,7 @@ class MeshResource:
         tp_resource: Axis name for tensor parallelism (hidden dimension sharding), default is None
         tpsp_resource: Axis name for tensor sequence parallelism (hidden and sequence sharding), default is None
         fsdp_resource: Axis name for full-sharded data parallelism, default is None
+        ep_resource: Axis name for expert parallelism (expert sharding), default is None
         pp_resource: Axis name for pipeline parallelism (layer sharding), default is None
         cp_resource: Axis name for context parallelism (sequence sharding), default is None
         ep_resource: Axis name for expert parallelism. Dispatch input tokens
@@ -343,6 +493,7 @@ class MeshResource:
     tp_resource: str = None
     tpsp_resource: str = None
     fsdp_resource: str = None
+    ep_resource: str = None
     pp_resource: str = None
     cp_resource: str = None
     ep_resource: str = None
@@ -370,7 +521,7 @@ def global_shard_guard(resource: MeshResource):
         _GLOBAL_MESH_RESOURCE = old_resources
 
 
-def global_mesh_resource() -> MeshResource:
+def global_mesh_resource(validate: bool = True) -> MeshResource:
     """Get the current global mesh resource configuration.
 
     Returns:
@@ -381,7 +532,8 @@ def global_mesh_resource() -> MeshResource:
         " context. If you are not using multiple GPUs, you can use an empty MeshResource by"
         " wrapping your program in 'with global_shard_guard(MeshResource()):'"
     )
-    _validate_mesh_resource_configuration(_GLOBAL_MESH_RESOURCE)
+    if validate:
+        _validate_mesh_resource_configuration(_GLOBAL_MESH_RESOURCE)
     return _GLOBAL_MESH_RESOURCE
 
 

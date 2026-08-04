@@ -6,12 +6,13 @@ import operator
 from functools import reduce
 from typing import Tuple, Optional, Union
 import math
+import warnings
 
 
 import jax
 import jax.numpy as jnp
 from jax import dtypes, ffi
-from jax.experimental.custom_partitioning import SdyShardingRule, BATCHING
+from jax.experimental.custom_partitioning import SdyShardingRule, BATCHING, CompoundFactor
 from jax.sharding import PartitionSpec
 
 import transformer_engine_jax
@@ -31,7 +32,15 @@ from .misc import (
 from ..sharding import (
     all_reduce_max_along_all_axes_except_PP,
     all_reduce_sum_along_dp_fsdp,
+    axis_spec_size,
+    filter_spec_axes,
     get_num_devices_in_mesh,
+    global_mesh_resource,
+    lax_paral_op,
+    local_shape_from_spec,
+    merge_axis_specs,
+    spec_axes,
+    supported_grouped_partition_axes,
 )
 from ..quantize import (
     ScaledTensor2x,
@@ -50,6 +59,90 @@ from ..quantize import (
 
 
 __all__ = ["quantize", "quantize_dbias", "grouped_quantize", "grouped_dbias"]
+
+
+def _flat_data_spec(input_spec):
+    return (merge_axis_specs(*input_spec),)
+
+
+def _grouped_data_spec(input_spec, flatten_axis):
+    return _contiguous_flat_input_spec(input_spec, flatten_axis)
+
+
+def _uniform_mxfp8_scale_carrier_shapes(x_shape, n_groups, flatten_axis):
+    """Return sharding-friendly scale carriers for uniform 3D MXFP8 kernels."""
+    flatten_axis = _normalize_flatten_axis(flatten_axis, len(x_shape))
+    if len(x_shape) != 3 or flatten_axis != 2 or x_shape[0] != n_groups:
+        return None
+
+    group_rows = x_shape[1]
+    columns = x_shape[2]
+    if group_rows % 128 != 0 or columns % 128 != 0:
+        return None
+
+    # The fused MXFP8 swizzle groups scales in 128-row/column tiles. These
+    # carriers expose group and column ownership as separate dimensions while
+    # preserving the exact contiguous byte order consumed by grouped GEMM.
+    rowwise_shape = (n_groups, group_rows // 128, columns * 4)
+    colwise_shape = (n_groups, columns // 128, group_rows * 4)
+    return rowwise_shape, colwise_shape
+
+
+def _uniform_mxfp8_scale_carrier_specs(x_spec, flatten_axis):
+    """Map a uniform 3D kernel's data sharding onto its scale carriers."""
+    flatten_axis = _normalize_flatten_axis(flatten_axis, len(x_spec))
+    assert len(x_spec) == 3 and flatten_axis == 2
+    group_spec = x_spec[0]
+    row_spec = merge_axis_specs(*x_spec[1:flatten_axis])
+    column_spec = merge_axis_specs(*x_spec[flatten_axis:])
+    return (
+        (group_spec, row_spec, column_spec),
+        (group_spec, column_spec, row_spec),
+    )
+
+
+def _normalize_flatten_axis(flatten_axis, ndim):
+    return flatten_axis + ndim if flatten_axis < 0 else flatten_axis
+
+
+def _contiguous_flat_input_spec(input_spec, flatten_axis):
+    flatten_axis = _normalize_flatten_axis(flatten_axis, len(input_spec))
+    if flatten_axis <= 0 or len(input_spec) == 0:
+        return (None,) * len(input_spec)
+    return (*input_spec[:flatten_axis], *((None,) * (len(input_spec) - flatten_axis)))
+
+
+def _warn_if_axes_ignored(arg_name, original_spec, partition_spec):
+    ignored_axes = tuple(
+        axis for axis in spec_axes(original_spec) if axis not in spec_axes(partition_spec)
+    )
+    if ignored_axes:
+        warnings.warn(
+            "Grouped quantize custom partitioning will ignore/replicate sharding "
+            f"axes {ignored_axes} from {arg_name}; only supported packed grouped "
+            "data axes are preserved.",
+            RuntimeWarning,
+            stacklevel=3,
+        )
+
+
+def _pad_or_slice_to_shape(x, target_shape):
+    if target_shape is None or x.shape == target_shape:
+        return x
+    target_size = math.prod(target_shape)
+    current_size = math.prod(x.shape)
+    x = x.reshape(-1)
+    if current_size > target_size:
+        return x[:target_size].reshape(target_shape)
+    return jnp.pad(x, (0, target_size - current_size)).reshape(target_shape)
+
+
+def _all_reduce_grouped_amax_along_dp_fsdp(amax, mesh):
+    gsr = global_mesh_resource()
+    for axis in (gsr.dp_resource, gsr.fsdp_resource):
+        if axis is not None and axis in mesh.axis_names:
+            amax = lax_paral_op(amax, jax.lax.pmax, axis, mesh)
+    return amax
 
 
 class BaseDBiasQuantizePrimitive(BasePrimitive):
@@ -1003,7 +1096,8 @@ class GroupedQuantizePrimitive(BasePrimitive):
         5,
         6,
         7,
-    )  # out_dtype, scaling_mode, q_layout, flatten_axis, scale_dtype
+        8,
+    )  # out_dtype, scaling_mode, q_layout, flatten_axis, scale_dtype, uniform_groups
     inner_primitive = None
     outer_primitive = None
 
@@ -1066,13 +1160,16 @@ class GroupedQuantizePrimitive(BasePrimitive):
         q_layout,
         flatten_axis,
         scale_dtype,
+        uniform_groups,
     ):
         """
         te_dbias_quantize_p abstract
         """
         dtype = dtypes.canonicalize_dtype(x_aval.dtype)
         assert dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
-        out_shape = math.prod(x_aval.shape)
+        # Preserve logical rank for custom partitioning. The FFI still consumes
+        # the same contiguous buffer, while avoiding oversized flat Shardy dims.
+        out_shape = x_aval.shape
         # TODO(Phuong): can scale_aval be None?
         assert scale_aval is None or scale_aval.dtype == jnp.float32
 
@@ -1081,14 +1178,22 @@ class GroupedQuantizePrimitive(BasePrimitive):
             f" be one of {ScalingMode(scaling_mode).get_compatible_q_dtypes()}"
         )
 
-        rowwise_scale_inv_shape, colwise_scale_inv_shape = ScalingMode(
-            scaling_mode
-        ).get_grouped_scale_shape_2x(
-            x_aval.shape,
-            group_sizes_aval.size,
-            is_padded=True,
-            flatten_axis=flatten_axis,
-        )
+        scale_carrier_shapes = None
+        if uniform_groups and ScalingMode(scaling_mode) == ScalingMode.MXFP8_1D_SCALING:
+            scale_carrier_shapes = _uniform_mxfp8_scale_carrier_shapes(
+                x_aval.shape, group_sizes_aval.size, flatten_axis
+            )
+        if scale_carrier_shapes is None:
+            rowwise_scale_inv_shape, colwise_scale_inv_shape = ScalingMode(
+                scaling_mode
+            ).get_grouped_scale_shape_2x(
+                x_aval.shape,
+                group_sizes_aval.size,
+                is_padded=True,
+                flatten_axis=flatten_axis,
+            )
+        else:
+            rowwise_scale_inv_shape, colwise_scale_inv_shape = scale_carrier_shapes
 
         if q_layout.has_rowwise:
             rowwise_out_shape = out_shape
@@ -1168,11 +1273,12 @@ class GroupedQuantizePrimitive(BasePrimitive):
         q_layout,
         flatten_axis,
         scale_dtype,
+        uniform_groups,
     ):
         """
         te_dbias_quantize_p lowering rules
         """
-        del out_dtype, scale_dtype
+        del out_dtype, scale_dtype, uniform_groups
         x_aval, scale_aval, group_sizes_aval = ctx.avals_in
         assert x_aval.dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
         assert scale_aval.dtype == jnp.float32
@@ -1212,6 +1318,7 @@ class GroupedQuantizePrimitive(BasePrimitive):
         q_layout,
         flatten_axis,
         scale_dtype,
+        uniform_groups,
     ):
         """
         te_dbias_quantize_p implementation
@@ -1233,8 +1340,295 @@ class GroupedQuantizePrimitive(BasePrimitive):
             q_layout=q_layout,
             flatten_axis=flatten_axis,
             scale_dtype=scale_dtype,
+            uniform_groups=uniform_groups,
         )
         return rowwise_out, colwise_out, rowwise_scale_inv, colwise_scale_inv, updated_amax
+
+    @staticmethod
+    def _parse_partition_specs(
+        scaling_mode, q_layout, flatten_axis, uniform_groups, mesh, arg_infos
+    ):
+        allowed_axes = supported_grouped_partition_axes(mesh)
+        original_x_spec = get_padded_spec(arg_infos[0])
+        x_spec = filter_spec_axes(original_x_spec, allowed_axes)
+        use_scale_carrier = (
+            uniform_groups
+            and ScalingMode(scaling_mode) == ScalingMode.MXFP8_1D_SCALING
+            and _uniform_mxfp8_scale_carrier_shapes(
+                arg_infos[0].shape, arg_infos[2].size, flatten_axis
+            )
+            is not None
+        )
+        if use_scale_carrier:
+            x_spec = list(x_spec)
+            for dim in (1, 2):
+                local_dim = arg_infos[0].shape[dim] // axis_spec_size(x_spec[dim], mesh)
+                if local_dim % 128 != 0:
+                    x_spec[dim] = None
+            x_spec = tuple(x_spec)
+        else:
+            x_spec = _contiguous_flat_input_spec(x_spec, flatten_axis)
+        _warn_if_axes_ignored("x", original_x_spec, x_spec)
+
+        original_group_spec = get_padded_spec(arg_infos[2])
+        group_spec = filter_spec_axes(original_group_spec, allowed_axes)
+        if group_spec == (None,) and len(x_spec) > 0:
+            group_spec = (x_spec[0],)
+        _warn_if_axes_ignored("group_sizes", original_group_spec, group_spec)
+        flat_spec = _flat_data_spec(x_spec)
+        data_spec = tuple(x_spec) if use_scale_carrier else _grouped_data_spec(x_spec, flatten_axis)
+        replicated_spec = (None,)
+
+        rowwise_out_spec = data_spec if q_layout.has_rowwise else replicated_spec
+        colwise_out_spec = data_spec if q_layout.has_colwise else replicated_spec
+
+        rowwise_scale_inv_spec = replicated_spec
+        colwise_scale_inv_spec = replicated_spec
+        if ScalingMode(scaling_mode).is_block_scaling:
+            if use_scale_carrier:
+                rowwise_carrier_spec, colwise_carrier_spec = _uniform_mxfp8_scale_carrier_specs(
+                    x_spec, flatten_axis
+                )
+                rowwise_scale_inv_spec = (
+                    rowwise_carrier_spec if q_layout.has_rowwise else replicated_spec
+                )
+                colwise_scale_inv_spec = (
+                    colwise_carrier_spec if q_layout.has_colwise else replicated_spec
+                )
+            else:
+                rowwise_scale_inv_spec = flat_spec if q_layout.has_rowwise else replicated_spec
+                colwise_scale_inv_spec = flat_spec if q_layout.has_colwise else replicated_spec
+        elif ScalingMode(scaling_mode).is_tensor_scaling():
+            rowwise_scale_inv_spec = group_spec if q_layout.has_rowwise else replicated_spec
+            colwise_scale_inv_spec = group_spec if q_layout.has_colwise else replicated_spec
+
+        updated_amax_spec = group_spec
+        return (
+            x_spec,
+            group_spec,
+            (
+                rowwise_out_spec,
+                colwise_out_spec,
+                rowwise_scale_inv_spec,
+                colwise_scale_inv_spec,
+                updated_amax_spec,
+            ),
+        )
+
+    @staticmethod
+    def partition(
+        out_dtype,
+        scaling_mode,
+        q_layout,
+        flatten_axis,
+        scale_dtype,
+        uniform_groups,
+        mesh,
+        arg_infos,
+        result_infos,
+    ):
+        x_spec, group_spec, out_specs = GroupedQuantizePrimitive._parse_partition_specs(
+            scaling_mode, q_layout, flatten_axis, uniform_groups, mesh, arg_infos
+        )
+        use_scale_carrier = (
+            uniform_groups
+            and ScalingMode(scaling_mode) == ScalingMode.MXFP8_1D_SCALING
+            and _uniform_mxfp8_scale_carrier_shapes(
+                arg_infos[0].shape, arg_infos[2].size, flatten_axis
+            )
+            is not None
+        )
+        local_out_shapes = (
+            tuple(
+                local_shape_from_spec(info.shape, spec, mesh)
+                for info, spec in zip(result_infos, out_specs)
+            )
+            if result_infos
+            else (None,) * len(out_specs)
+        )
+
+        arg_shardings = (
+            NamedSharding(mesh, PartitionSpec(*x_spec)),
+            NamedSharding(mesh, PartitionSpec(*group_spec)),
+            NamedSharding(mesh, PartitionSpec(*group_spec)),
+        )
+        out_shardings = tuple(NamedSharding(mesh, PartitionSpec(*spec)) for spec in out_specs)
+
+        def sharded_impl(x, scale, group_sizes):
+            (
+                rowwise_out,
+                colwise_out,
+                rowwise_scale_inv,
+                colwise_scale_inv,
+                updated_amax,
+            ) = GroupedQuantizePrimitive.impl(
+                x,
+                scale,
+                group_sizes,
+                out_dtype=out_dtype,
+                scaling_mode=scaling_mode,
+                q_layout=q_layout,
+                flatten_axis=flatten_axis,
+                scale_dtype=scale_dtype,
+                # The rank-3 carrier is a partitioning-only representation. Keep
+                # the inner FFI contract flat and reshape its local scale buffers
+                # after quantization.
+                uniform_groups=False if use_scale_carrier else uniform_groups,
+            )
+            if ScalingMode(scaling_mode).is_block_scaling:
+                rowwise_scale_inv = _pad_or_slice_to_shape(rowwise_scale_inv, local_out_shapes[2])
+                colwise_scale_inv = _pad_or_slice_to_shape(colwise_scale_inv, local_out_shapes[3])
+            if ScalingMode(scaling_mode).is_tensor_scaling():
+                updated_amax = _all_reduce_grouped_amax_along_dp_fsdp(updated_amax, mesh)
+            return (
+                rowwise_out,
+                colwise_out,
+                rowwise_scale_inv,
+                colwise_scale_inv,
+                updated_amax,
+            )
+
+        return mesh, sharded_impl, out_shardings, arg_shardings
+
+    @staticmethod
+    def shardy_sharding_rule(
+        out_dtype,
+        scaling_mode,
+        q_layout,
+        flatten_axis,
+        scale_dtype,
+        uniform_groups,
+        mesh,
+        value_types,
+        result_types,
+    ):
+        del out_dtype, scale_dtype, mesh
+
+        prefix = "GroupedQuantize"
+        input_shape = value_types[0].shape
+        input_spec = tuple(f"{prefix}_x_{i}" for i in range(len(input_shape)))
+        normalized_flatten_axis = _normalize_flatten_axis(flatten_axis, len(input_spec))
+        use_scale_carrier = (
+            uniform_groups
+            and ScalingMode(scaling_mode) == ScalingMode.MXFP8_1D_SCALING
+            and _uniform_mxfp8_scale_carrier_shapes(
+                input_shape, value_types[2].shape[0], flatten_axis
+            )
+            is not None
+        )
+        if use_scale_carrier:
+            group_factor = f"{prefix}_kernel_group"
+            row_factor = f"{prefix}_kernel_row_tiles"
+            column_factor = f"{prefix}_kernel_column_tiles"
+            row_block_factor = f"{prefix}_kernel_row_block"
+            column_block_factor = f"{prefix}_kernel_column_block"
+            row_pack_factor = f"{prefix}_kernel_row_pack"
+            column_pack_factor = f"{prefix}_kernel_column_pack"
+            row_unit_factor = f"{prefix}_kernel_row_unit"
+            column_unit_factor = f"{prefix}_kernel_column_unit"
+
+            row_tiles = input_shape[1] // 128
+            column_tiles = input_shape[2] // 128
+            factor_sizes = {}
+            if row_tiles == 1:
+                row_input_factor = f"{prefix}_kernel_row"
+                row_scale_factor = row_unit_factor
+                row_packed_factors = (row_input_factor,)
+            else:
+                row_input_factor = CompoundFactor(row_factor, row_block_factor)
+                row_scale_factor = row_factor
+                row_packed_factors = (row_factor, row_block_factor)
+                factor_sizes[row_block_factor] = 128
+            if column_tiles == 1:
+                column_input_factor = f"{prefix}_kernel_column"
+                column_scale_factor = column_unit_factor
+                column_packed_factors = (column_input_factor,)
+            else:
+                column_input_factor = CompoundFactor(column_factor, column_block_factor)
+                column_scale_factor = column_factor
+                column_packed_factors = (column_factor, column_block_factor)
+                factor_sizes[column_block_factor] = 128
+
+            input_spec = (
+                group_factor,
+                row_input_factor,
+                column_input_factor,
+            )
+            data_spec = input_spec
+            rowwise_scale_spec = (
+                (
+                    group_factor,
+                    row_scale_factor,
+                    CompoundFactor(*column_packed_factors, row_pack_factor),
+                )
+                if q_layout.has_rowwise
+                else (BATCHING + f"{prefix}_scalar",)
+            )
+            colwise_scale_spec = (
+                (
+                    group_factor,
+                    column_scale_factor,
+                    CompoundFactor(*row_packed_factors, column_pack_factor),
+                )
+                if q_layout.has_colwise
+                else (BATCHING + f"{prefix}_scalar",)
+            )
+            if q_layout.has_rowwise:
+                factor_sizes[row_pack_factor] = 4
+            elif row_tiles > 1:
+                factor_sizes[row_factor] = input_shape[1] // 128
+            if q_layout.has_colwise:
+                factor_sizes[column_pack_factor] = 4
+            elif column_tiles > 1:
+                factor_sizes[column_factor] = input_shape[2] // 128
+
+            scalar_spec = (BATCHING + f"{prefix}_scalar",)
+            rowwise_out_spec = data_spec if q_layout.has_rowwise else scalar_spec
+            colwise_out_spec = data_spec if q_layout.has_colwise else scalar_spec
+            group_spec = (BATCHING + f"{prefix}_group",)
+            return SdyShardingRule(
+                operand_mappings=(input_spec, group_spec, group_spec),
+                result_mappings=(
+                    rowwise_out_spec,
+                    colwise_out_spec,
+                    rowwise_scale_spec,
+                    colwise_scale_spec,
+                    group_spec,
+                ),
+                **factor_sizes,
+            )
+
+        data_spec = tuple(
+            input_spec[i] if i < normalized_flatten_axis else f"{prefix}_data_{i}"
+            for i in range(len(input_spec))
+        )
+        flat_spec = (f"{prefix}_flat",)
+        group_spec = (BATCHING + f"{prefix}_group",)
+        scalar_spec = (BATCHING + f"{prefix}_scalar",)
+
+        rowwise_out_spec = data_spec if q_layout.has_rowwise else scalar_spec
+        colwise_out_spec = data_spec if q_layout.has_colwise else scalar_spec
+
+        if ScalingMode(scaling_mode).is_block_scaling:
+            rowwise_scale_spec = flat_spec if q_layout.has_rowwise else scalar_spec
+            colwise_scale_spec = flat_spec if q_layout.has_colwise else scalar_spec
+        elif ScalingMode(scaling_mode).is_tensor_scaling():
+            rowwise_scale_spec = group_spec if q_layout.has_rowwise else scalar_spec
+            colwise_scale_spec = group_spec if q_layout.has_colwise else scalar_spec
+        else:
+            rowwise_scale_spec = scalar_spec
+            colwise_scale_spec = scalar_spec
+
+        return SdyShardingRule(
+            operand_mappings=(input_spec, group_spec, group_spec),
+            result_mappings=(
+                rowwise_out_spec,
+                colwise_out_spec,
+                rowwise_scale_spec,
+                colwise_scale_spec,
+                group_spec,
+            ),
+        )
 
 
 register_primitive(GroupedQuantizePrimitive)
@@ -1245,6 +1639,7 @@ def grouped_quantize(
     quantizer: GroupedQuantizer,
     group_sizes: jnp.ndarray = None,
     flatten_axis: int = -1,
+    ragged_scale_sharding: NamedSharding | None = None,
 ) -> Union[GroupedScaledTensor1x, GroupedNoScaleTensor]:
     """Quantize a tensor in grouped manner.
 
@@ -1257,6 +1652,8 @@ def grouped_quantize(
         quantizer: The quantizer to use for quantization
         group_sizes: Array of ints containing the size of each group (default: None)
         flatten_axis: The axis along which the tensor could be flattened to 2D (default: -1)
+        ragged_scale_sharding: Data sharding to preserve for flat ragged scale buffers.
+            Its first partition-spec entry is applied to each scale buffer.
 
     Returns:
         A GroupedScaledTensor1x containing the quantized data
@@ -1286,6 +1683,7 @@ def grouped_quantize(
     ), f"Only flatten_axis = -1 is supported for now, got {flatten_axis}"
 
     ragged_first_dims = group_sizes  # None if no explicit group_sizes (kernel case)
+    uniform_groups = group_sizes is None
     if group_sizes is None:
         group_sizes = jnp.ones(x.shape[0], dtype=jnp.int32)
 
@@ -1333,12 +1731,30 @@ def grouped_quantize(
         q_layout=q_layout,
         flatten_axis=flatten_axis,
         scale_dtype=quantizer.get_scale_dtype(),
+        uniform_groups=uniform_groups,
     )
 
     # For DelayedScaling2x and CurrentScaling2x, the scale buffer
     # is shared between rowwise and colwise
     if is_tensor_scaling and quantizer.q_layout.is_rowwise_colwise or apply_colwise_war:
         colwise_scale_inv = rowwise_scale_inv
+
+    if ragged_scale_sharding is not None:
+        if ragged_first_dims is None:
+            raise ValueError("ragged_scale_sharding requires explicit group_sizes")
+        if not quantizer.scaling_mode.is_block_scaling:
+            raise ValueError("ragged_scale_sharding requires block scaling")
+        data_spec = ragged_scale_sharding.spec
+        if len(data_spec) == 0:
+            raise ValueError("ragged_scale_sharding must have a token/group dimension")
+        scale_sharding = NamedSharding(
+            ragged_scale_sharding.mesh,
+            PartitionSpec(data_spec[0]),
+        )
+        if q_layout.has_rowwise:
+            rowwise_scale_inv = jax.lax.with_sharding_constraint(rowwise_scale_inv, scale_sharding)
+        if q_layout.has_colwise:
+            colwise_scale_inv = jax.lax.with_sharding_constraint(colwise_scale_inv, scale_sharding)
 
     # TODO(Phuong): store the whole updated_amax in the grouped_quantize instead?
     if quantizer.scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING:
