@@ -24,6 +24,8 @@ namespace dispatch {
 namespace nvfp4 {
 namespace rtc_nvfp4 {
 
+#if FP4_TYPE_SUPPORTED
+
 void compile_quantize_4over6_rtc(const std::string &kernel_label, const std::string &itype_name,
                                  bool use_2d, bool return_identity, bool return_transpose,
                                  bool row_scaled, const std::string &mode_name, bool err_fast_math,
@@ -90,6 +92,8 @@ inline void launch_quantize_4over6_rtc(const IType *input, fp4e2m1x2 *output, fp
              output_t, scales, scales_t, amax_rowwise, amax_colwise, rows, cols, scale_stride,
              scale_stride_t, noop);
 }
+
+#endif  // FP4_TYPE_SUPPORTED
 
 }  // namespace rtc_nvfp4
 }  // namespace nvfp4
