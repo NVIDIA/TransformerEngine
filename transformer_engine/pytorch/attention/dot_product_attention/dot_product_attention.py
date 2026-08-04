@@ -225,6 +225,11 @@ def _needs_eager_dpa(call: Dict[str, Any]) -> Optional[str]:
         qkv = [call.get(name) for name in ("query_layer", "key_layer", "value_layer")]
         if dpa_utils.qkv_layout_needs_detection(*qkv):
             return "detecting packed q/k/v that were not declared via qkv_layer/kv_layer"
+
+    if call["self"].rng_states_tracker is not None and call["self"].attention_dropout > 0:
+        # Forking the tracker swaps the global CUDA generator state, which Dynamo
+        # refuses to trace. With no dropout there is nothing to fork for.
+        return "attention dropout under a CUDA RNG states tracker"
     return None
 
 
@@ -577,7 +582,10 @@ class DotProductAttention(TransformerEngineBaseModule):
         else:
             self.rng_states_tracker = get_rng_state_tracker()
             set_all_rng_states(self.rng_states_tracker.get_states())
-            attention_dropout_ctx = self.rng_states_tracker.fork
+            # Forking only matters if the dropout actually draws from the generator.
+            attention_dropout_ctx = (
+                self.rng_states_tracker.fork if attention_dropout > 0 else nullcontext
+            )
 
         if softmax_scale is None:
             softmax_scale = 1.0 / math.sqrt(
