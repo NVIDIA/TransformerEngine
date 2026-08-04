@@ -345,6 +345,10 @@ py::object nvfp4_quantize_with_amax(const at::Tensor &tensor, py::handle quantiz
                                     const at::Tensor &rowwise_amax,
                                     const at::Tensor &columnwise_amax);
 
+std::vector<py::object> nvfp4_quantize_4over6_multi(const std::vector<at::Tensor> &tensors,
+                                                    py::handle quantizer,
+                                                    const py::object &outputs_py);
+
 py::object dequantize(const py::handle &input, DType otype);
 
 py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const size_t num_tensors,

@@ -635,15 +635,37 @@ class _GroupedLinear(torch.autograd.Function):
         inp_view = inp.reshape(-1, in_features)
         inputmats: list
         if fp8 and not debug:
-            # Disable bulk allocation when CPU offloading is active: offloading skips small
-            # tensors (like scales), but bulk allocation shares storage across all tensors,
-            # so if scales can't be offloaded, nothing in the group can be offloaded.
-            inputmats = tex.split_quantize(
-                inp_view,
-                m_splits,
-                input_quantizers,
-                disable_bulk_allocation=cpu_offloading,
-            )
+            q0 = input_quantizers[0]
+            if (
+                isinstance(q0, NVFP4Quantizer)
+                and q0.row_scaled_nvfp4
+                and not cpu_offloading
+                and q0.rowwise_usage
+                and not q0.columnwise_usage
+                and os.getenv("NVTE_ROW_SCALED_FUSED_QUANTIZE", "1") == "1"
+            ):
+                # Row-scaled NVFP4 quantization is row-local (per-row amax,
+                # block scales and 4/6 selection never cross row boundaries),
+                # so quantizing the whole buffer in one kernel launch is
+                # bit-identical to quantizing each expert split separately.
+                xq = q0(inp_view)
+                inputmats = []
+                offset = 0
+                for m in m_splits:
+                    # Rowwise scale layout requires 128-row alignment (cuBLAS
+                    # block-scaling), matching tex.split_quantize's allocation.
+                    inputmats.append(xq.slice_rows(offset, offset + m, scale_row_multiple=128))
+                    offset += m
+            else:
+                # Disable bulk allocation when CPU offloading is active: offloading skips small
+                # tensors (like scales), but bulk allocation shares storage across all tensors,
+                # so if scales can't be offloaded, nothing in the group can be offloaded.
+                inputmats = tex.split_quantize(
+                    inp_view,
+                    m_splits,
+                    input_quantizers,
+                    disable_bulk_allocation=cpu_offloading,
+                )
         elif debug:
             inputmats = DebugQuantizer.multi_tensor_quantize(
                 inp_view, input_quantizers, m_splits, activation_dtype
@@ -660,17 +682,50 @@ class _GroupedLinear(torch.autograd.Function):
         if fp8 or debug:
             weights_fp8 = []
             update_ws = is_first_microbatch is None or is_first_microbatch
-            for i in range(num_gemms):
-                weight_fp8, new_workspaces[i] = quantize_weight(
-                    tensor=weights[i],
-                    quantizer=weight_quantizers[i],
-                    workspace=weight_workspaces[i] if weight_workspaces else None,
-                    update_workspace=update_ws,
-                    skip_update_flag=skip_fp8_weight_update,
-                    workspace_dtype=activation_dtype,
-                    cache=cache_weight,
+            wq0 = weight_quantizers[0]
+            batched_weight_quantize = (
+                fp8
+                and not debug
+                and num_gemms > 1
+                and cache_weight
+                and skip_fp8_weight_update is None
+                and isinstance(wq0, NVFP4Quantizer)
+                and wq0.nvfp4_use_4over6
+                and not wq0.row_scaled_nvfp4
+                and wq0.rowwise_usage
+                and not wq0.columnwise_usage
+                and all(w.shape == weights[0].shape for w in weights)
+                and all(
+                    isinstance(q, NVFP4Quantizer) and q.nvfp4_use_4over6 for q in weight_quantizers
                 )
-                weights_fp8.append(weight_fp8)
+                and os.getenv("NVTE_NVFP4_BATCHED_WEIGHT_QUANTIZE", "1") == "1"
+            )
+            if batched_weight_quantize and update_ws:
+                # Batched 4over6: quantize all expert weights in two kernel
+                # launches instead of two launches per expert. Each expert keeps
+                # its own scalar amax, so results are bit-identical to the loop.
+                ws_in = list(weight_workspaces) if weight_workspaces else [None] * num_gemms
+                weights_fp8 = tex.nvfp4_quantize_4over6_multi(weights, wq0, ws_in)
+                for i in range(num_gemms):
+                    if ws_in[i] is None:
+                        new_workspaces[i] = weights_fp8[i]
+            elif batched_weight_quantize and all(
+                ws is not None for ws in (weight_workspaces or [])
+            ):
+                # Cache hit: weights unchanged, reuse workspaces without quantizing.
+                weights_fp8 = list(weight_workspaces)
+            else:
+                for i in range(num_gemms):
+                    weight_fp8, new_workspaces[i] = quantize_weight(
+                        tensor=weights[i],
+                        quantizer=weight_quantizers[i],
+                        workspace=weight_workspaces[i] if weight_workspaces else None,
+                        update_workspace=update_ws,
+                        skip_update_flag=skip_fp8_weight_update,
+                        workspace_dtype=activation_dtype,
+                        cache=cache_weight,
+                    )
+                    weights_fp8.append(weight_fp8)
 
         else:
             weights_fp8 = [cast_if_needed(weight, activation_dtype) for weight in weights]

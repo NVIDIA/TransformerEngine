@@ -125,6 +125,24 @@ void nvte_quantize_noop(const NVTETensor input, NVTETensor output, NVTETensor no
 void nvte_quantize_v2(const NVTETensor input, NVTETensor output,
                       const NVTEQuantizationConfig quant_config, cudaStream_t stream);
 
+/*! \brief Batched NVFP4 4over6 quantization of multiple same-shaped tensors.
+ *
+ *  Quantizes `num_tensors` tensors in two kernel launches (one batched amax
+ *  pass and one batched quantize pass) instead of two launches per tensor.
+ *  All tensors must share the same shape, dtype and NVFP4 4over6 configuration;
+ *  each output keeps its own scalar amax / global scale, so results are
+ *  bit-identical to calling the single-tensor path in a loop.
+ *
+ *  \param[in]      inputs          List of input tensors to be cast.
+ *  \param[in,out]  outputs         List of output quantized tensors.
+ *  \param[in]      quant_config    Quantization configuration.
+ *  \param[in]      num_tensors     Number of input and output tensors.
+ *  \param[in]      stream          CUDA stream used for the operation.
+ */
+void nvte_nvfp4_quantize_4over6_multi(const NVTETensor *inputs, NVTETensor *outputs,
+                                      const NVTEQuantizationConfig quant_config,
+                                      const size_t num_tensors, cudaStream_t stream);
+
 /*! \brief Casts input tensor to MXFP8. Additionally, reduces the input along columns.
  *         If the scaling mode of the output tensor is set to NVTE_MXFP8_1D_SCALING,
  *         the block quantization (MXFP8) of the specified shape of the block will be used.
