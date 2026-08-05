@@ -67,7 +67,8 @@ inline ncclEpTensor_t make_nccl_ep_tensor(const NVTETensor t, NVTEShape& shape_o
     desc.win_offset = win.offset;
   } else {
     desc.data = nvte_tensor_data(t);
-    NVTE_CHECK(desc.data != nullptr, "tensor data must not be null");
+    NVTE_CHECK(desc.data != nullptr || nvte_tensor_numel(t) == 0,
+               "non-empty tensor data must not be null");
   }
   return desc;
 }
