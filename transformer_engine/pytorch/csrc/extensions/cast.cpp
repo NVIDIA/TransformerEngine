@@ -1657,9 +1657,24 @@ void split_quantize_nvfp4_impl(const TensorWrapper &input,
         // Input bytes per launch pair. Sized against L2 so the quantize pass reuses
         // what the amax pass just pulled in.
         constexpr size_t kChunkBytes = 8u << 20;
-        bool use_grouped = quantizer.with_post_rht_amax && quantizer.rowwise_usage &&
-                           quantizer.columnwise_usage && !quantizer.with_2d_quantization &&
-                           !quantizer.row_scaled_nvfp4 &&
+        // The grouped launch configures every split from quantizers.front() alone.
+        // GroupedLinear builds one independent NVFP4Quantizer per expert, and the
+        // Python-side cross-expert validator does not cover these fields for NVFP4,
+        // so require them to agree here or take the per-split loop below instead of
+        // silently applying the first split's settings to the rest.
+        const bool grouped_quantizers_uniform =
+            std::all_of(quantizers.begin(), quantizers.end(), [&](const NVFP4Quantizer *q) {
+              return q->with_post_rht_amax == quantizer.with_post_rht_amax &&
+                     q->rowwise_usage == quantizer.rowwise_usage &&
+                     q->columnwise_usage == quantizer.columnwise_usage &&
+                     q->row_scaled_nvfp4 == quantizer.row_scaled_nvfp4 &&
+                     q->nvfp4_4over6_mode == quantizer.nvfp4_4over6_mode &&
+                     q->stochastic_rounding == quantizer.stochastic_rounding &&
+                     q->rht_matrix_random_sign_mask_t == quantizer.rht_matrix_random_sign_mask_t;
+            });
+        bool use_grouped = grouped_quantizers_uniform && quantizer.with_post_rht_amax &&
+                           quantizer.rowwise_usage && quantizer.columnwise_usage &&
+                           !quantizer.with_2d_quantization && !quantizer.row_scaled_nvfp4 &&
                            quantizer.nvfp4_4over6_mode == kNVTENVFP44Over6Disabled &&
                            !transformer_engine::getenv<bool>("NVTE_NVFP4_DISABLE_GROUPED_RHT");
         for (size_t i = 0; use_grouped && i < num_tensors; ++i) {

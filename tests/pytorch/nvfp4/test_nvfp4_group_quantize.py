@@ -348,3 +348,57 @@ def test_rht_split_quantize_grouped_matches_unfused(monkeypatch, split_sections,
                 atol=0.0,
                 rtol=0.0,
             )
+
+
+def _grouped_kernel_names(split_sections, N, columnwise_per_split):
+    # Kernel names, not output bytes: TE allocates every split's columnwise buffer
+    # regardless of that split's own columnwise_usage flag, and rowwise output does
+    # not depend on columnwise_usage, so a heterogeneous list that wrongly takes the
+    # grouped path can still produce byte-identical rowwise output to the per-split
+    # path on some shapes. Which kernel launched is the property that actually
+    # distinguishes the two routes; see the launch-count table in the PR body.
+    x = torch.randn((sum(split_sections), N), dtype=torch.bfloat16, device="cuda")
+    quantizers = [
+        NVFP4Quantizer(
+            fp4_dtype=te.DType.kFloat4E2M1,
+            rowwise=True,
+            columnwise=columnwise_per_split[i],
+            with_rht=True,
+            with_post_rht_amax=True,
+        )
+        for i in range(len(split_sections))
+    ]
+    torch.cuda.synchronize()
+    with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CUDA]) as prof:
+        tex.split_quantize(x, split_sections, quantizers)
+        torch.cuda.synchronize()
+    return {e.key for e in prof.key_averages() if e.count > 0}
+
+
+def _launched_grouped_kernel(names):
+    return any("GroupHadamardAmaxTma" in n or "group_quantize_transpose_nvfp4_kernel" in n
+               for n in names)
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+def test_rht_split_quantize_grouped_kernel_engages_when_uniform() -> None:
+    # Positive control for the test below: with every split asking for the same
+    # usage, the grouped path is eligible and must be the one that runs.
+    split_sections = [128, 128, 128, 128]
+    names = _grouped_kernel_names(split_sections, 256, [True] * len(split_sections))
+    assert _launched_grouped_kernel(names)
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+def test_rht_split_quantize_declines_grouped_on_mismatched_quantizers() -> None:
+    # The grouped launch reads its usage flags, with_post_rht_amax, row_scaled_nvfp4,
+    # nvfp4_4over6_mode, stochastic_rounding and the RHT sign mask from quantizers[0]
+    # alone, and GroupedLinear builds one independent NVFP4Quantizer per expert.
+    # rowwise_usage and columnwise_usage are the one axis TE's own cross-expert
+    # validator explicitly allows to differ, so this is the realistic case: split 1
+    # asks for rowwise only, the rest ask for both. The grouped path must decline to
+    # the per-split loop, which reads each split's own quantizer.
+    split_sections = [128, 128, 128, 128]
+    columnwise = [i != 1 for i in range(len(split_sections))]
+    names = _grouped_kernel_names(split_sections, 256, columnwise)
+    assert not _launched_grouped_kernel(names)
