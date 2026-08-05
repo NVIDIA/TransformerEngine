@@ -131,6 +131,7 @@ def _row_id_map_pass_2_kernel(
     workspace_ptr,
     # sizes
     num_tokens,
+    num_out_tokens,
     # strides
     stride_row_id_map_token,
     stride_row_id_map_expert,
@@ -155,6 +156,9 @@ def _row_id_map_pass_2_kernel(
         -1,
         row_id_within_token_block + tl.sum(n_tokens_per_chunk) - 1,
     )
+    # capacity limit: destinations at or past num_out_tokens are dropped, matching
+    # the `idx >= num_out_tokens` branch of moe_permute_row_map in permutation.cu
+    row_id = tl.where(row_id >= num_out_tokens, -1, row_id)
     tl.store(
         row_id_map_ptr + pid_m * stride_row_id_map_expert + offset * stride_row_id_map_token,
         row_id,

@@ -1739,6 +1739,43 @@ def test_permutation_mask_map(
     )
 
 
+@pytest.mark.parametrize("torch_dtype", [torch.float32, torch.float16, torch.bfloat16])
+def test_permutation_mask_map_capacity_drop(torch_dtype):
+    """num_out_tokens smaller than routing_map.sum(): over-capacity entries must be
+    dropped (as the CUDA index-map path does), not written past the output buffer."""
+    num_tokens, num_expert, hidden_size = 64, 8, 128
+    torch.manual_seed(1234)
+
+    routing_map = (torch.rand(num_tokens, num_expert) > 0.5).bool().cuda()
+    total_routed = int(routing_map.sum())
+    capacity = total_routed - 17
+    assert capacity > 0
+
+    inp = torch.randn((num_tokens, hidden_size)).cuda().to(torch_dtype)
+
+    out, row_id_map = te_permute(inp, routing_map, num_out_tokens=capacity, map_type="mask")
+
+    # reference: expert-major order of routed (expert, token) pairs, first
+    # `capacity` destination rows kept
+    token_idx = torch.nonzero(routing_map.T.contiguous(), as_tuple=False)[:, 1]
+    ref = inp[token_idx[:capacity]]
+    assert out.shape[0] == capacity
+    torch.testing.assert_close(out.float(), ref.float(), atol=0, rtol=0)
+
+    # the row map must mark exactly the over-capacity entries as dropped
+    n_routed = row_id_map[:, 2 * num_expert]
+    assert int(n_routed.sum()) == capacity
+
+    # unpermute consumes the same map: each token gets the sum of its kept copies
+    unperm = te_unpermute(out, row_id_map, restore_shape=inp.shape, map_type="mask")
+    kept_flat = torch.zeros(num_expert * num_tokens, dtype=torch.bool, device=inp.device)
+    routed_flat_idx = torch.nonzero(routing_map.T.contiguous().flatten(), as_tuple=False)[:, 0]
+    kept_flat[routed_flat_idx[:capacity]] = True
+    kept_map = kept_flat.view(num_expert, num_tokens).T.contiguous()
+    ref_unperm = (inp.float().unsqueeze(1) * kept_map.unsqueeze(-1).float()).sum(1)
+    torch.testing.assert_close(unperm.float(), ref_unperm, atol=1e-2, rtol=1e-2)
+
+
 @pytest.mark.parametrize("te_dtype", _te_dtypes)
 @pytest.mark.parametrize("num_out_tokens", [None])
 @pytest.mark.parametrize(

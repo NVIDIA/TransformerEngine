@@ -251,6 +251,9 @@ class RowIdMapPass2Primitive(BasePrimitive):
             input_output_aliases={0: 0, 1: 1},
             constexprs={
                 "num_tokens": num_tokens,
+                # the JAX path sizes its buffers from num_out_tokens up front, so
+                # disable the kernel's capacity drop here (no entry can reach INT32_MAX)
+                "num_out_tokens": 2**31 - 1,
                 "stride_row_id_map_token": row_id_stride_token,
                 "stride_row_id_map_expert": row_id_stride_expert,
                 "WORKSPACE_LOAD_WIDTH": workspace_load_width,

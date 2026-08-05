@@ -318,7 +318,9 @@ def moe_permute_mask_map_forward(
     num_tokens, hidden_size = inp.size()
     num_experts = routing_map.size(1)
 
-    row_id_map = triton_permutation.make_row_id_map(routing_map, num_tokens, num_experts)
+    row_id_map = triton_permutation.make_row_id_map(
+        routing_map, num_tokens, num_experts, num_out_tokens
+    )
 
     # FP8 handling
     fp8 = isinstance(inp, QuantizedTensor)
