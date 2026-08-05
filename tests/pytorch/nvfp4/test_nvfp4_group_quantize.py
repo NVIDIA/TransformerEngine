@@ -376,8 +376,9 @@ def _grouped_kernel_names(split_sections, N, columnwise_per_split):
 
 
 def _launched_grouped_kernel(names):
-    return any("GroupHadamardAmaxTma" in n or "group_quantize_transpose_nvfp4_kernel" in n
-               for n in names)
+    return any(
+        "GroupHadamardAmaxTma" in n or "group_quantize_transpose_nvfp4_kernel" in n for n in names
+    )
 
 
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
