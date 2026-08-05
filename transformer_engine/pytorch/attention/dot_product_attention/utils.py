@@ -1231,13 +1231,6 @@ def get_attention_backend(
                 cp_comm_type,
             )
             use_fused_attention = False
-        elif qkv_format == "thd" and cp_comm_type in ["a2a+p2p"]:
-            logger.debug(
-                "Disabling FusedAttention as it does not support context parallelism with THD"
-                " format and cp_comm_type = %s",
-                cp_comm_type,
-            )
-            use_fused_attention = False
         elif (
             window_size is not None
             and (window_size[0] != -1 or window_size[1] not in [-1, 0])
@@ -2686,14 +2679,15 @@ def get_attention_quantizers(fp8, quantizers):
     ]:
         if _q is None and _name in _allow_none:
             continue
-        assert isinstance(_q, _fp8_types), (
-            "FP8 attention requires FP8-compatible quantizers for all DPA tensor slots, "
-            f"but {_name} quantizer is {type(_q).__name__}. "
-            "When using CustomRecipe with fp8_dpa=True, ensure the factory returns an "
-            "FP8 quantizer (Float8Quantizer, Float8CurrentScalingQuantizer, or "
-            "MXFP8Quantizer) for all DPA roles (module_type='dpa') and for None roles "
-            "(boundary slots like O output and dQKV grad-input)."
-        )
+        if not isinstance(_q, _fp8_types):
+            raise TypeError(
+                "FP8 attention requires FP8-compatible quantizers for all DPA tensor slots, "
+                f"but {_name} quantizer is {type(_q).__name__}. "
+                "When using CustomRecipe with fp8_dpa=True, ensure the factory returns an "
+                "FP8 quantizer (Float8Quantizer, Float8CurrentScalingQuantizer, or "
+                "MXFP8Quantizer) for all DPA roles (module_type='dpa') and for None roles "
+                "(boundary slots like O output and dQKV grad-input)."
+            )
 
     return QKV_quantizer, O_quantizer, S_quantizer, dQKV_quantizer, dO_quantizer, dP_quantizer
 

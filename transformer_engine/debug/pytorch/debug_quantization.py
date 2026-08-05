@@ -676,20 +676,31 @@ class DebugQuantizedTensor(QuantizedTensorStorage):
 
     def update_usage(self, rowwise_usage: bool = None, columnwise_usage: bool = None):
         """Update usage of the tensor."""
-        if self.rowwise_gemm_tensor is not self.columnwise_gemm_tensor:
-            # If the same object is used both for rowwise and columnwise gemms,
-            # there is no benefit in erasing the usage of one of them.
-            # And there are scenarios when not deleting the usage of one of them is needed.
-            # For example when we want to recreate columnwise from rowwise.
+        if self.rowwise_gemm_tensor is self.columnwise_gemm_tensor:
+            if isinstance(self.rowwise_gemm_tensor, QuantizedTensor):
+                self.rowwise_gemm_tensor.update_usage(rowwise_usage, columnwise_usage)
+        else:
+            # Each tensor owns only the representation for its GEMM direction.
+            # Validate requests before dropping either representation so a failed
+            # mixed drop/enable request does not partially mutate this wrapper.
+            if rowwise_usage and self.rowwise_gemm_tensor is None:
+                raise RuntimeError(
+                    "Cannot recreate rowwise tensor from columnwise tensor in debug mode."
+                )
+            if columnwise_usage and self.columnwise_gemm_tensor is None:
+                raise RuntimeError(
+                    "Cannot recreate columnwise tensor from rowwise tensor in debug mode."
+                )
+
             if rowwise_usage is False:
                 self.rowwise_gemm_tensor = None
+            elif rowwise_usage and isinstance(self.rowwise_gemm_tensor, QuantizedTensor):
+                self.rowwise_gemm_tensor.update_usage(rowwise_usage=True)
+
             if columnwise_usage is False:
                 self.columnwise_gemm_tensor = None
-
-        if isinstance(self.rowwise_gemm_tensor, QuantizedTensor):
-            self.rowwise_gemm_tensor.update_usage(rowwise_usage, columnwise_usage)
-        if isinstance(self.columnwise_gemm_tensor, QuantizedTensor):
-            self.columnwise_gemm_tensor.update_usage(rowwise_usage, columnwise_usage)
+            elif columnwise_usage and isinstance(self.columnwise_gemm_tensor, QuantizedTensor):
+                self.columnwise_gemm_tensor.update_usage(columnwise_usage=True)
 
         if rowwise_usage and self.rowwise_gemm_tensor is None:
             raise RuntimeError(
@@ -698,7 +709,7 @@ class DebugQuantizedTensor(QuantizedTensorStorage):
 
         if columnwise_usage and self.columnwise_gemm_tensor is None:
             raise RuntimeError(
-                "Cannot recreate columnwise tensor from rowwise tensor is debug mode."
+                "Cannot recreate columnwise tensor from rowwise tensor in debug mode."
             )
 
     @property
