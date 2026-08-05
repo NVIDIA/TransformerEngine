@@ -164,10 +164,11 @@ inline bool mxfp8_quantize_cutedsl(const MXFP8QuantConfig &config, const Tensor 
                                    const Tensor *act_input_tensor, const Tensor *noop_tensor,
                                    Tensor *output_tensor, Tensor *dbias_tensor,
                                    Tensor *workspace_tensor, cudaStream_t stream) {
-  constexpr size_t kCuTeDSLMXFP8ShapeAlignment = 32;
   const size_t flat_m = input_tensor->flat_first_dim();
   const size_t flat_n = input_tensor->flat_last_dim();
-  if (flat_m % kCuTeDSLMXFP8ShapeAlignment != 0 || flat_n % kCuTeDSLMXFP8ShapeAlignment != 0) {
+  // This is the same divisibility assumption we make when we compile the CuTeDSL kernel using fake tensors
+  // If the divisibility assumption is not met, we fall back to the CUDA kernel which can handle irregular shapes
+  if (flat_m % 32 != 0 || flat_n % 32 != 0) {
     return false;
   }
 

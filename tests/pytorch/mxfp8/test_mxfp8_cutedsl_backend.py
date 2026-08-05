@@ -6,7 +6,6 @@
 
 import ctypes
 import os
-from typing import Callable, NamedTuple, Optional
 
 import pytest
 import torch
@@ -23,6 +22,7 @@ recipe_available, reason_for_no_recipe = te.is_mxfp8_available(return_reason=Tru
 # The already-loaded core lib (dlopen refcounts: this returns the same handle,
 # so the call mutates the same dispatcher singleton the quantize ops read).
 CORE_LIB = ctypes.CDLL(str(_get_shared_object_file("core")))
+# We need this API to manually enable & disable the CuTeDSL backend for the tests
 if not hasattr(CORE_LIB, "nvte_set_cutedsl_quant_backend"):
     raise RuntimeError(
         "libtransformer_engine.so lacks nvte_set_cutedsl_quant_backend -- rebuild the "
@@ -38,25 +38,8 @@ pytestmark = pytest.mark.skipif(
     reason=reason_for_no_recipe or "NVTE_ENABLE_CUTEDSL_QUANT_BACKEND is not set",
 )
 
-
-class Fusion(NamedTuple):
-    """An ActivationType from the C++ test: its tex ops per ProcessingMethod and
-    the activation desc used in the CuTeDSL config key."""
-
-    name: str
-    act: Optional[Callable]  # CAST_ACT:        act(x, quantizer)
-    dact: Optional[Callable]  # CAST_DACT:       dact(grad, act_input, quantizer)
-    dbias_dact: Optional[Callable]  # CAST_DBIAS_DACT: dbias_dact(grad, act_input, quantizer)
-    desc: str
-
-
-# --- Case matrix, mirroring test_cast_mxfp8.cu ---
-# The C++ multi-dim sizes flattened to the 2D (rows, cols) the kernels see:
-# {8,32,1024} -> (256, 1024), {16,8,4,512} -> (512, 512). The C++ list also has
-# non-32-divisible shapes ({1,16}, {16,48}, {993,512}, {1024}) that exercise the
-# CUDA kernels' partial-block edges; the CuTeDSL backend's contract is
-# 32-divisible flat dims (the dispatcher falls back to CUDA otherwise), so those
-# cases are omitted here rather than vacuously comparing CUDA against CUDA.
+# We reject irregular shapes in transformer_engine/pytorch/csrc/quantizer.cpp's MXFP8Quantizer::get_scale_shape
+# and CuTeDSL's divisibility assumption also strictly requires 32x32 alignment.
 MATRIX_SIZES = [
     (128, 128),
     (256, 1024),
@@ -65,18 +48,17 @@ MATRIX_SIZES = [
 ]
 # (block_rows, block_cols): (1,32)=rowwise, (32,1)=colwise, (32,32)=both.
 BLOCK_SIZES = [(1, 32), (32, 1), (32, 32)]
+
 # Only GeLU activation tests are used (SiLU/ReLU/QGeLU/SReLU commented out
 # in the C++ test as well).
-IDENTITY = Fusion("Identity", None, None, None, "none")
-GELU = Fusion("GeLU", tex.gelu, tex.dgelu, tex.dbias_dgelu, "gelu")
-# SILU = Fusion("SiLU", tex.silu, tex.dsilu, tex.dbias_dsilu, "silu")
-# RELU = Fusion("ReLU", tex.relu, tex.drelu, tex.dbias_drelu, "relu")
-# QGELU = Fusion("QGeLU", tex.qgelu, tex.dqgelu, tex.dbias_dqgelu, "qgelu")
-# SRELU = Fusion("SReLU", tex.srelu, tex.dsrelu, tex.dbias_dsrelu, "srelu")
-
-# Valid (ProcessingMethod, ActivationType) pairs. The C++ test crosses the two
-# axes and GTEST_SKIPs the mismatched half; only the meaningful pairs are
-# generated here. A newly enabled activation adds its ACT/DACT/DBIAS_DACT pairs.
+IDENTITY = {"name": "Identity", "act": None, "dact": None, "dbias_dact": None, "desc": "none"}
+GELU = {
+    "name": "GeLU",
+    "act": tex.gelu,
+    "dact": tex.dgelu,
+    "dbias_dact": tex.dbias_dgelu,
+    "desc": "gelu",
+}
 METHOD_FUSION_CASES = [
     ("CAST_ONLY", IDENTITY),
     ("CAST_DBIAS", IDENTITY),
@@ -84,26 +66,22 @@ METHOD_FUSION_CASES = [
     ("CAST_DACT", GELU),
     ("CAST_DBIAS_DACT", GELU),
 ]
-METHOD_FUSION_IDS = [f"{m}X{f.name}" for m, f in METHOD_FUSION_CASES]
+METHOD_FUSION_IDS = [f"{m}X{f['name']}" for m, f in METHOD_FUSION_CASES]
+
 IN_DTYPES = [torch.float32, torch.bfloat16, torch.float16]
 FP8_DTYPES = [tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2]
-
-# Description strings for pytest case ids and the CuTeDSL config key.
-DTYPE_TO_STR = {torch.float32: "fp32", torch.bfloat16: "bf16", torch.float16: "fp16"}
-FP8_TO_STR = {tex.DType.kFloat8E4M3: "e4m3", tex.DType.kFloat8E5M2: "e5m2"}  # pytest ids
-# Wire token in the TVM-FFI registry key; must match C++ te_dtype_to_str().
 FP8_TO_KEY = {
     tex.DType.kFloat8E4M3: "fp8_e4m3fn",
     tex.DType.kFloat8E5M2: "fp8_e5m2",
 }
 
-# Scale layout: linear, or the GEMM-swizzled layout cuBLAS consumes
-# (quantizer.optimize_for_gemm -> MXFP8QuantConfig::swizzled).
 SWIZZLE_MODES = [False, True]
 
 get_shape_id = lambda s: f"{s[0]}x{s[1]}"
 get_block_id = lambda b: f"{b[0]}x{b[1]}"
+DTYPE_TO_STR = {torch.float32: "fp32", torch.bfloat16: "bf16", torch.float16: "fp16"}
 get_dtype_id = DTYPE_TO_STR.get
+FP8_TO_STR = {tex.DType.kFloat8E4M3: "e4m3", tex.DType.kFloat8E5M2: "e5m2"}
 get_fp8_id = FP8_TO_STR.get
 get_swizzle_id = lambda s: "swizzled" if s else "non-swizzled"
 
@@ -147,11 +125,11 @@ def run_quantize(method, act, x, ain, rowwise, columnwise, fp8_dtype, swizzled):
         db, out = tex.bgrad_quantize(x, q)
         return out, db
     if method == "CAST_ACT":
-        return act.act(x, q), None
+        return act["act"](x, q), None
     if method == "CAST_DACT":
-        return act.dact(x, ain, q), None
+        return act["dact"](x, ain, q), None
     if method == "CAST_DBIAS_DACT":
-        db, out = act.dbias_dact(x, ain, q)
+        db, out = act["dbias_dact"](x, ain, q)
         return out, db
     raise ValueError(f"unknown method {method!r}")
 
@@ -165,9 +143,9 @@ def get_cfg_key(method, act, in_dtype, fp8_dtype, rowwise, colwise, swizzled):
     with_act = method == "CAST_ACT"
     desc = "none"
     if with_act:
-        desc = act.desc
+        desc = act["desc"]
     elif with_dact:
-        desc = f"d{act.desc}"
+        desc = f"d{act['desc']}"
     # with_amax is hardcoded to False for now because there is no way to obtain this value and validate in python
     flags = (rowwise, colwise, swizzled, False, with_dbias, with_dact, with_act)
     return (
@@ -241,7 +219,7 @@ def run_test_case(method, act, shape, block_size, in_dtype, fp8_dtype, swizzled=
     )
 
     layout = "swizzled" if swizzled else "linear"
-    tag = f"{method}/{act.name}/{M}x{N}/{DTYPE_TO_STR[in_dtype]}/{FP8_TO_STR[fp8_dtype]}/{layout}"
+    tag = f"{method}/{act["name"]}/{M}x{N}/{DTYPE_TO_STR[in_dtype]}/{FP8_TO_STR[fp8_dtype]}/{layout}"
     for name, cuda_bytes in cuda_output.items():
         assert torch.equal(
             cutedsl_output[name], cuda_bytes
