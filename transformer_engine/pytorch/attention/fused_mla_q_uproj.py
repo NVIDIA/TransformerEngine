@@ -7,14 +7,28 @@
 from __future__ import annotations
 import functools
 import os
+from importlib.metadata import PackageNotFoundError, version as get_pkg_version
 
 import torch
 import transformer_engine_torch as tex
+from packaging.version import Version as PkgVersion
 
 from ..constants import MXFP8_BLOCK_SCALING_SIZE
 from ..quantized_tensor import QuantizedTensor
 from ..tensor.mxfp8_tensor import MXFP8Quantizer, MXFP8Tensor
 from ..utils import get_device_compute_capability
+
+_CUDNN_FRONTEND_MIN_VERSION = "1.27.0"
+
+
+def _cudnn_frontend_version_supported() -> bool:
+    """Check that the installed nvidia-cudnn-frontend meets the minimum version."""
+    try:
+        return PkgVersion(get_pkg_version("nvidia-cudnn-frontend")) >= PkgVersion(
+            _CUDNN_FRONTEND_MIN_VERSION
+        )
+    except PackageNotFoundError:
+        return False
 
 
 class FusedMLAQUpProjRopeQuant:
@@ -42,6 +56,8 @@ class FusedMLAQUpProjRopeQuant:
     @functools.lru_cache(maxsize=None)
     def is_supported(cls) -> bool:
         if int(os.environ.get("NVTE_FUSED_MLA_Q_UPROJ", "1")) <= 0:
+            return False
+        if not _cudnn_frontend_version_supported():
             return False
         if get_device_compute_capability()[0] < 10:
             return False
