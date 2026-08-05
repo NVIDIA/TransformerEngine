@@ -18,7 +18,7 @@ from ..utils import get_device_compute_capability
 
 
 class FusedMLAQUpProjRopeQuant:
-    """Wrapper for the cuDNN fused MLA Q up-proj + per-head RoPE + MXFP8 quantize kernel (v4).
+    """Wrapper for the cuDNN fused MLA Q up-proj + per-head RoPE + MXFP8 quantize kernel.
 
     - If w is already a QuantizedTensor (primary FP8 parameter in MXFP8BlockScaling recipe),
       this performs an MXFP8 GEMM within the fusion (and quantizes the input if necessary)
@@ -31,9 +31,12 @@ class FusedMLAQUpProjRopeQuant:
         # Import directly from the subpackage to avoid depending on cudnn/__init__.py
         # lazy-import registration (which would require overlaying cudnn/__init__.py and
         # could revert atomicrmw fixes present in the container's version).
-        from cudnn import gemm_proj_rope_mxfp8_wrapper_sm100
+        try:
+            from cudnn import gemm_proj_rope_mxfp8_wrapper_sm100
 
-        return gemm_proj_rope_mxfp8_wrapper_sm100
+            return gemm_proj_rope_mxfp8_wrapper_sm100
+        except ImportError:
+            return None
 
     @classmethod
     @functools.lru_cache(maxsize=None)
@@ -42,43 +45,9 @@ class FusedMLAQUpProjRopeQuant:
             return False
         if get_device_compute_capability()[0] < 10:
             return False
-        try:
-            cls._kernel()
-        except ImportError:
+        if cls._kernel() is None:
             return False
         return True
-
-    @classmethod
-    def warmup(
-        cls,
-        *,
-        num_heads: int,
-        q_lora_rank: int,
-        q_head_dim: int,
-        qk_pos_emb_head_dim: int,
-        tokens: int,
-    ) -> None:
-        """Pre-compile the fused kernel during model init using dummy FP8 tensors."""
-        if not cls.is_supported():
-            return
-        head_dim = q_head_dim + qk_pos_emb_head_dim
-        dev = torch.cuda.current_device()
-        x_code = torch.zeros(tokens, q_lora_rank, dtype=torch.float8_e4m3fn, device=dev)
-        x_scale = torch.zeros(
-            tokens, q_lora_rank // MXFP8_BLOCK_SCALING_SIZE, dtype=torch.uint8, device=dev
-        )
-        w_code = torch.zeros(
-            num_heads * head_dim, q_lora_rank, dtype=torch.float8_e4m3fn, device=dev
-        )
-        w_scale = torch.zeros(
-            num_heads * head_dim,
-            q_lora_rank // MXFP8_BLOCK_SCALING_SIZE,
-            dtype=torch.uint8,
-            device=dev,
-        )
-        cos = torch.zeros(tokens, qk_pos_emb_head_dim, dtype=torch.bfloat16, device=dev)
-        sin = torch.zeros(tokens, qk_pos_emb_head_dim, dtype=torch.bfloat16, device=dev)
-        cls._kernel()(x_code, w_code, cos, sin, x_scale=x_scale, w_scale=w_scale, w_out_in=True)
 
     @classmethod
     def run(
@@ -101,6 +70,10 @@ class FusedMLAQUpProjRopeQuant:
         wrapper = cls._kernel()
 
         if isinstance(w, QuantizedTensor):
+            assert isinstance(w, MXFP8Tensor), (
+                f"FusedMLAQUpProjRopeQuant expects an MXFP8Tensor weight (MXFP8BlockScaling recipe), "
+                f"got {type(w).__name__}. Use the unfused path for other quantization recipes."
+            )
             # ---- FP8 projection: MXFP8-cast x (both usages) + reuse w's fp8 codes -> mxfp8in ----
             # Quantize x with both rowwise (for the forward GEMM) and columnwise (for the FP8
             # wgrad in backward, matching the unfused path).
