@@ -437,6 +437,7 @@ class TestSequentialContainer:
         torch.testing.assert_close(x3, x3_orig + x2 + b)
         torch.testing.assert_close(x4, x4_orig + x3)
 
+
 class TestExtraTensorChannels:
     """Error handling and grad coverage for named extra-tensor channels."""
 
