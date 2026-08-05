@@ -209,7 +209,8 @@ XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedMoEAuxLossBackwardHandler);
 // the group will dispatch.
 void SetEpBootstrapParams(pybind11::bytes unique_id_bytes, int ep_size, int rank_within_group,
                           int num_experts, int max_tokens_per_rank, int max_recv_tokens_per_rank,
-                          int hidden_dim, int max_num_sms, int max_token_dtype);
+                          int hidden_dim, int max_num_sms, int max_token_dtype,
+                          bool drop_on_overflow);
 void ReleaseEpResources();
 // Return the handle_mem byte size for a layer config.
 size_t EpHandleMemSize(int top_k, size_t dispatch_output_per_expert_alignment);
