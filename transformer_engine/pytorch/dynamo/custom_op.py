@@ -1261,7 +1261,7 @@ def _make_slot_forwarder(
 
 
 def _make_dispatch_rule(
-    forward: Callable[[Sequence[Any]], List[torch.Tensor]]
+    forward: Callable[[Sequence[Any]], List[torch.Tensor]],
 ) -> Callable[..., Any]:
     """Adapt a slot forwarder to the ``register_torch_dispatch`` signature."""
 
