@@ -543,7 +543,7 @@ message(STATUS "NCCL_INCLUDE_DIR: ${NCCL_INCLUDE_DIR}")
 foreach(env_var IN ITEMS
         CUDA_HOME CUDA_PATH CUDA_ROOT CUDADIR
         CPATH CPLUS_INCLUDE_PATH C_INCLUDE_PATH
-        PATH LD_LIBRARY_PATH)
+        PATH LD_LIBRARY_PATH CUDA_BASE_IMAGE NVIDIA_BUILD_ID)
   message(STATUS "ENV{${env_var}}: $ENV{${env_var}}")
 endforeach()
 
@@ -559,6 +559,12 @@ foreach(cuda_include_dir IN LISTS CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES)
     message(STATUS "CUDA include candidate contains cuda_runtime_api.h: NO")
   endif()
 endforeach()
+if(EXISTS "/usr/local/cuda/include")
+  file(REAL_PATH "/usr/local/cuda/include" cuda_compat_include_real)
+  message(STATUS
+          "CUDA compatibility include real path: "
+          "/usr/local/cuda/include -> ${cuda_compat_include_real}")
+endif()
 
 function(nvte_print_include_diagnostic_target target_name)
   if(NOT TARGET "${target_name}")
@@ -612,6 +618,195 @@ if(UNIX)
     ERROR_VARIABLE cxx_explicit_probe_stderr)
   message(STATUS "CXX explicit CUDA-header probe result: ${cxx_explicit_probe_result}")
   message(STATUS "CXX explicit CUDA-header probe stderr:\n${cxx_explicit_probe_stderr}")
+
+  # The failing nightly uses a shared remote sccache for CMake's compiler ABI
+  # probe. Run controlled child configures to distinguish a bad cache entry
+  # from launcher behavior and from the version-script flag move.
+  set(cxx_launcher_command ${CMAKE_CXX_COMPILER_LAUNCHER})
+  if(cxx_launcher_command)
+    list(GET cxx_launcher_command 0 cxx_launcher_executable)
+    get_filename_component(cxx_launcher_name
+                           "${cxx_launcher_executable}" NAME)
+  endif()
+  if(cxx_launcher_name MATCHES "sccache")
+    set(abi_probe_source_dir
+        "${CMAKE_CURRENT_BINARY_DIR}/nvte_cmake_abi_probe")
+    file(MAKE_DIRECTORY "${abi_probe_source_dir}")
+    file(WRITE "${abi_probe_source_dir}/CMakeLists.txt"
+         "cmake_minimum_required(VERSION 3.21)\n"
+         "set(CMAKE_CXX_STANDARD 17)\n"
+         "set(CMAKE_CUDA_STANDARD 17)\n"
+         "set(CMAKE_CUDA_STANDARD_REQUIRED ON)\n"
+         "if(NVTE_PROBE_USE_OLD_GLOBAL_FLAGS)\n"
+         "  set(CMAKE_CXX_FLAGS \"\${CMAKE_CXX_FLAGS} "
+         "-Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/libtransformer_engine.version\")\n"
+         "  set(CMAKE_CUDA_FLAGS \"\${CMAKE_CUDA_FLAGS} "
+         "-Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/libtransformer_engine.version\")\n"
+         "endif()\n"
+         "project(nvte_cmake_abi_probe LANGUAGES CUDA CXX)\n"
+         "message(STATUS \"NVTE ABI probe CXX implicit: "
+         "\${CMAKE_CXX_IMPLICIT_INCLUDE_DIRECTORIES}\")\n"
+         "message(STATUS \"NVTE ABI probe CXX flags: \${CMAKE_CXX_FLAGS}\")\n"
+         "message(STATUS \"NVTE ABI probe CXX launcher: "
+         "\${CMAKE_CXX_COMPILER_LAUNCHER}\")\n")
+
+    function(nvte_run_cmake_abi_probe
+             probe_name use_old_global_flags use_launcher cache_buster cpath)
+      set(probe_build_dir
+          "${CMAKE_CURRENT_BINARY_DIR}/nvte_cmake_abi_probe_${probe_name}")
+      file(REMOVE_RECURSE "${probe_build_dir}")
+
+      execute_process(
+        COMMAND ${cxx_launcher_command} --zero-stats
+        RESULT_VARIABLE zero_stats_result
+        OUTPUT_VARIABLE zero_stats_stdout
+        ERROR_VARIABLE zero_stats_stderr)
+
+      set(probe_command
+          "${CMAKE_COMMAND}" -E env
+          "--unset=SCCACHE_C_CUSTOM_CACHE_BUSTER"
+          "--unset=CPATH")
+      if(cache_buster)
+        list(APPEND probe_command
+             "SCCACHE_C_CUSTOM_CACHE_BUSTER=${cache_buster}")
+      endif()
+      if(cpath)
+        list(APPEND probe_command "CPATH=${cpath}")
+      endif()
+      if(use_launcher)
+        list(APPEND probe_command
+             "CMAKE_CXX_COMPILER_LAUNCHER=${CMAKE_CXX_COMPILER_LAUNCHER}")
+      else()
+        list(APPEND probe_command
+             "--unset=CMAKE_CXX_COMPILER_LAUNCHER")
+      endif()
+      list(APPEND probe_command
+           "${CMAKE_COMMAND}"
+           -S "${abi_probe_source_dir}"
+           -B "${probe_build_dir}"
+           -G "${CMAKE_GENERATOR}"
+           "-DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER}"
+           "-DCMAKE_CUDA_COMPILER=${CMAKE_CUDA_COMPILER}"
+           "-DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}"
+           "-DNVTE_PROBE_USE_OLD_GLOBAL_FLAGS=${use_old_global_flags}")
+      if(use_launcher)
+        list(APPEND probe_command
+             "-DCMAKE_CXX_COMPILER_LAUNCHER=${CMAKE_CXX_COMPILER_LAUNCHER}")
+      else()
+        list(APPEND probe_command "-DCMAKE_CXX_COMPILER_LAUNCHER=")
+      endif()
+      if(CMAKE_GENERATOR_PLATFORM)
+        list(APPEND probe_command -A "${CMAKE_GENERATOR_PLATFORM}")
+      endif()
+      if(CMAKE_GENERATOR_TOOLSET)
+        list(APPEND probe_command -T "${CMAKE_GENERATOR_TOOLSET}")
+      endif()
+
+      execute_process(
+        COMMAND ${probe_command}
+        RESULT_VARIABLE probe_result
+        OUTPUT_VARIABLE probe_stdout
+        ERROR_VARIABLE probe_stderr)
+      execute_process(
+        COMMAND ${cxx_launcher_command} --show-stats
+        RESULT_VARIABLE stats_result
+        OUTPUT_VARIABLE stats_stdout
+        ERROR_VARIABLE stats_stderr)
+
+      message(STATUS
+              "========== NVTE CMake ABI probe ${probe_name}: begin ==========")
+      message(STATUS "ABI probe result: ${probe_result}")
+      message(STATUS "ABI probe cache buster: ${cache_buster}")
+      message(STATUS "ABI probe CPATH: ${cpath}")
+      message(STATUS "ABI probe stdout:\n${probe_stdout}")
+      message(STATUS "ABI probe stderr:\n${probe_stderr}")
+      message(STATUS
+              "ABI probe sccache zero-stats result: ${zero_stats_result}")
+      message(STATUS
+              "ABI probe sccache zero-stats stdout:\n${zero_stats_stdout}")
+      message(STATUS
+              "ABI probe sccache zero-stats stderr:\n${zero_stats_stderr}")
+      message(STATUS "ABI probe sccache stats result: ${stats_result}")
+      message(STATUS "ABI probe sccache stats stdout:\n${stats_stdout}")
+      message(STATUS "ABI probe sccache stats stderr:\n${stats_stderr}")
+
+      set(probe_configure_log
+          "${probe_build_dir}/CMakeFiles/CMakeConfigureLog.yaml")
+      if(EXISTS "${probe_configure_log}")
+        file(STRINGS "${probe_configure_log}" probe_configure_log_lines
+             REGEX
+             "CMakeCXXCompilerABI|implicit include|/usr/local/cuda/(include|targets)|sccache")
+        list(JOIN probe_configure_log_lines "\n" probe_configure_log_filtered)
+        message(STATUS
+                "ABI probe filtered CMakeConfigureLog.yaml:\n"
+                "${probe_configure_log_filtered}")
+      else()
+        message(STATUS "ABI probe CMakeConfigureLog.yaml: NOT FOUND")
+      endif()
+      message(STATUS
+              "========== NVTE CMake ABI probe ${probe_name}: end ==========")
+    endfunction()
+
+    set(abi_probe_cache_buster
+        "nvte-${CMAKE_CURRENT_BINARY_DIR}-$ENV{CI_JOB_ID}")
+    execute_process(
+      COMMAND ${cxx_launcher_command} --show-stats
+      RESULT_VARIABLE parent_stats_result
+      OUTPUT_VARIABLE parent_stats_stdout
+      ERROR_VARIABLE parent_stats_stderr)
+    message(STATUS
+            "========== NVTE parent configure sccache stats ==========")
+    message(STATUS "Parent sccache stats result: ${parent_stats_result}")
+    message(STATUS "Parent sccache stats stdout:\n${parent_stats_stdout}")
+    message(STATUS "Parent sccache stats stderr:\n${parent_stats_stderr}")
+
+    set(parent_configure_log
+        "${CMAKE_BINARY_DIR}/CMakeFiles/CMakeConfigureLog.yaml")
+    if(EXISTS "${parent_configure_log}")
+      file(STRINGS "${parent_configure_log}" parent_configure_log_lines
+           REGEX
+           "CMakeCXXCompilerABI|implicit include|/usr/local/cuda/(include|targets)|sccache")
+      list(JOIN parent_configure_log_lines "\n"
+           parent_configure_log_filtered)
+      message(STATUS
+              "Parent filtered CMakeConfigureLog.yaml:\n"
+              "${parent_configure_log_filtered}")
+    else()
+      message(STATUS "Parent CMakeConfigureLog.yaml: NOT FOUND")
+    endif()
+
+    set(abi_probe_cpath_cache_buster
+        "nvte-cpath-${CMAKE_CURRENT_BINARY_DIR}-$ENV{CI_JOB_ID}")
+    nvte_run_cmake_abi_probe(baseline OFF ON "" "")
+    nvte_run_cmake_abi_probe(cache_buster OFF ON
+                             "${abi_probe_cache_buster}" "")
+    nvte_run_cmake_abi_probe(old_global_flags ON ON "" "")
+    nvte_run_cmake_abi_probe(no_launcher OFF OFF "" "")
+    nvte_run_cmake_abi_probe(cpath_seed OFF ON
+                             "${abi_probe_cpath_cache_buster}"
+                             "/usr/local/cuda/include")
+    nvte_run_cmake_abi_probe(cpath_reuse OFF ON
+                             "${abi_probe_cpath_cache_buster}" "")
+    nvte_run_cmake_abi_probe(cpath_reuse_old_global_flags ON ON
+                             "${abi_probe_cpath_cache_buster}" "")
+
+    # Validate a TE-side workaround in this same expensive CI run. A raw
+    # compiler option bypasses CMake's implicit-include elision, unlike another
+    # target_include_directories call.
+    foreach(cuda_include_dir IN LISTS
+            CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES)
+      target_compile_options(
+        transformer_engine PRIVATE
+        "$<$<COMPILE_LANGUAGE:CXX>:-I${cuda_include_dir}>")
+      message(STATUS
+              "NVTE diagnostic forced CXX CUDA include: "
+              "-I${cuda_include_dir}")
+    endforeach()
+  else()
+    message(STATUS
+            "NVTE CMake ABI probe matrix skipped: "
+            "CXX launcher is not sccache")
+  endif()
 endif()
 message(STATUS "========== NVTE CUDA include diagnostics: end ==========")
 
