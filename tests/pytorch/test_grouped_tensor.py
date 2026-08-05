@@ -676,6 +676,18 @@ class TestGroupedTensor:
         with pytest.raises(RuntimeError):
             tex.group_swiglu_quantize(input_2f, prob.float(), quantizer, num_tensors, first_dims)
 
+        # Both operands reach the kernel as raw pointers over a densely packed range, so a
+        # strided view must be rejected instead of being read as if it were contiguous.
+        wide = torch.randn(total_tokens, 4 * last_dim, dtype=torch.bfloat16, device="cuda")
+        with pytest.raises(RuntimeError):
+            tex.group_swiglu_quantize(
+                wide[:, : 2 * last_dim], prob, quantizer, num_tensors, first_dims
+            )
+
+        strided_prob = torch.rand(2 * total_tokens, dtype=torch.bfloat16, device="cuda")[::2]
+        with pytest.raises(RuntimeError):
+            tex.group_swiglu_quantize(input_2f, strided_prob, quantizer, num_tensors, first_dims)
+
     @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
     def test_bgrad_group_quantize_zero_size_tensor(self) -> None:
         """Test bgrad_group_quantize handles zero-row input without error."""

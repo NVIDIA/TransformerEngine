@@ -418,11 +418,21 @@ py::object group_swiglu_quantize(const at::Tensor &input_2f, const at::Tensor &p
 
   NVTE_CHECK(IsMXFP8Quantizers(quantizer.ptr()),
              "group_swiglu_quantize only supports MXFP8 quantizers.");
-  NVTE_CHECK(prob.is_cuda(), "group_swiglu_quantize prob must be a CUDA tensor.");
+  NVTE_CHECK(input_2f.is_cuda(), "group_swiglu_quantize input must be a CUDA tensor.");
+  // Both operands are handed to the kernel as raw pointers over a densely packed
+  // range, so a strided view would be read as if it were contiguous.
+  NVTE_CHECK(input_2f.is_contiguous(), "group_swiglu_quantize input must be contiguous.");
+  NVTE_CHECK(prob.is_contiguous(), "group_swiglu_quantize prob must be contiguous.");
+  NVTE_CHECK(prob.device() == input_2f.device(),
+             "group_swiglu_quantize prob must be on the same device as the input.");
   NVTE_CHECK(prob.numel() >= static_cast<int64_t>(T),
              "group_swiglu_quantize prob must have at least T elements.");
   NVTE_CHECK(prob.scalar_type() == input_2f.scalar_type(),
              "group_swiglu_quantize prob must have the same dtype as the input (model dtype).");
+
+  // Allocate the output and launch on the operands' device rather than on whatever
+  // torch.cuda.set_device last selected.
+  at::cuda::CUDAGuard device_guard(input_2f.device());
 
   const bool empty_input_buffer = (T == 0 || F == 0);
 
