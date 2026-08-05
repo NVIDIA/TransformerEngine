@@ -23,6 +23,7 @@ from ._quantization_helpers import (
     _IdentityFunc,
     _resolve_view_shape,
     safe_quantized_repr,
+    tensor_can_be_materialized,
 )
 from ..constants import dist_group_type, DType
 
@@ -473,6 +474,11 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
     amax_reduction_group: Optional[dist_group_type] = None
 
     def __repr__(self, *, tensor_contents=None):
+        # A fake/meta/functional scale_inv cannot be materialized without leaking
+        # an unbacked symbol into the ShapeEnv (see tensor_can_be_materialized);
+        # fall back to a metadata-only repr under tracing.
+        if not tensor_can_be_materialized(self._scale_inv):
+            return safe_quantized_repr(self, "Float8Tensor")
         try:
             return (
                 "Float8Tensor("

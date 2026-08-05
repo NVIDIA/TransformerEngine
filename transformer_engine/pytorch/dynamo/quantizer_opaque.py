@@ -6,9 +6,32 @@
 
 from __future__ import annotations
 import enum
+import warnings
 from typing import Any, Dict, Tuple, get_type_hints
 
 from ..constants import DType
+
+
+_warned_compile_unsupported = False
+
+
+def warn_compile_unsupported(reason: str) -> None:
+    """Warn once per process that TE's torch.compile path is off.
+
+    The registrations below all work or all fail together, so one message is
+    enough.
+    """
+    global _warned_compile_unsupported  # pylint: disable=global-statement
+    if _warned_compile_unsupported:
+        return
+    _warned_compile_unsupported = True
+    warnings.warn(
+        "Transformer Engine torch.compile support is disabled: "
+        f"{reason}. Modules will fall back to eager execution under "
+        "torch.compile, i.e. a graph break, which is incompatible with "
+        "fullgraph=True. Use a newer PyTorch build.",
+        stacklevel=3,
+    )
 
 
 # Qualnames of the registered quantizer classes. The set holds strings rather
@@ -117,18 +140,20 @@ def register_value_opaque_quantizer(cls: type) -> None:
             register_opaque_type,
             is_opaque_value_type,
         )
-    except (ImportError, AttributeError):
+    except (ImportError, AttributeError) as e:
         # Older PyTorch without the opaque-object API: eager value semantics
         # still work; torch.compile specialization on the quantizer does not.
+        warn_compile_unsupported(f"this PyTorch build has no opaque-object API ({e})")
         return
 
     try:
         if not is_opaque_value_type(cls):
             register_opaque_type(cls, typ="value")
-    except (RuntimeError, TypeError):
+    except (RuntimeError, TypeError) as e:
         # Keep TE importable: neither the opaque-type query nor the registration
         # must crash the import, e.g. on PyTorch versions with only partial /
         # experimental opaque-object support.
+        warn_compile_unsupported(f"could not register {cls.__name__} as an opaque type ({e})")
         return
 
     _VALUE_OPAQUE_QUALNAMES.add(cls.__qualname__)

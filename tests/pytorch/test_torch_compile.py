@@ -7,6 +7,7 @@ import contextlib
 
 import pytest
 import torch
+from torch._dynamo.utils import counters
 from torch._subclasses.fake_tensor import FakeTensor, FakeTensorMode
 
 try:
@@ -26,9 +27,9 @@ import transformer_engine_torch as tex
 from transformer_engine.common import recipe
 from transformer_engine.pytorch.constants import FP8FwdTensorIdx, FP8BwdTensorIdx
 from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
+from transformer_engine.pytorch.quantization import QuantizerRole
 from transformer_engine.pytorch.ops.basic.basic_linear import BasicLinear
 from transformer_engine.pytorch.tensor.float8_tensor import Float8CurrentScalingQuantizer
-from transformer_engine.pytorch.quantization import QuantizerRole
 from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Quantizer
 from transformer_engine.pytorch.quantized_tensor import QuantizedTensor, Quantizer
 from transformer_engine.pytorch.dynamo import TensorSpec, to_tensor_spec
@@ -37,9 +38,9 @@ from transformer_engine.pytorch import (
     is_mxfp8_available,
     is_fp8_block_scaling_available,
     is_nvfp4_available,
+    Float8Quantizer,
     Float8BlockQuantizer,
     MXFP8Quantizer,
-    NVFP4Quantizer,
 )
 from utils import recipe_id
 from transformer_engine.pytorch.attention.dot_product_attention.backends import (
@@ -91,6 +92,75 @@ if nvfp4_available:
     _all_recipes.append(recipe.NVFP4BlockScaling())
     _all_recipes.append(nvfp4_4over6())
     _all_recipes.append(nvfp4_row_scaled())
+
+
+# torch.compile modes exercised by the te.Linear tests: the default backend and
+# "reduce-overhead" (CUDA-graph trees), to ensure the custom-op path is
+# CUDA-graph capturable.
+_compile_modes = ["default", "reduce-overhead"]
+
+
+def _cudagraph_warmup(fn, inp, *, backward: bool) -> None:
+    """
+    Force TE's lazily-created global scratch to be allocated before capture.
+    """
+    out = fn(inp)
+    if backward:
+        out.sum().backward()
+
+
+@contextlib.contextmanager
+def _assert_no_cudagraph_skips(enabled: bool):
+    """Assert ``torch.compile(mode="reduce-overhead")`` actually captured CUDA
+    graphs for every graph instead of silently running it eagerly.
+
+    Inductor bumps ``counters["inductor"]["cudagraph_skips"]`` whenever it
+    declines to capture a cudagraph (input mutation, CPU scalars, cudagraph-unsafe
+    ops, ...) and falls back to eager for that graph. ``fullgraph=True`` only rules
+    out *dynamo* graph breaks, not these *inductor*-level skips, so this guards that
+    the reduce-overhead path didn't degrade to eager. No-op when ``enabled`` is
+    False (e.g. the default backend, where cudagraphs don't apply).
+    """
+    before = counters["inductor"]["cudagraph_skips"]
+    yield
+    if enabled:
+        skipped = counters["inductor"]["cudagraph_skips"] - before
+        assert skipped == 0, (
+            f"reduce-overhead fell back to eager: {skipped} cudagraph skip(s); "
+            "see the 'skipping cudagraphs due to ...' log for the reason"
+        )
+
+
+# bf16 output tolerance: eager and compiled run the same kernels, so they should
+# agree closely; the slack only absorbs reduction-order / cuda-graph differences.
+_EAGER_ATOL, _EAGER_RTOL = 1e-2, 1.6e-2
+
+
+def _assert_close_eager_compiled(fn, compiled, model, base):
+    """Run ``fn`` eagerly and ``compiled`` on identical inputs; assert the
+    forward output and the input / weight gradients match.
+
+    Guards the compiled custom-op path against silently diverging from eager
+    execution -- a wrong-but-same-shape result would slip past shape / grad
+    presence checks alone.
+    """
+    inp_eager = base.detach().clone().requires_grad_(True)
+    model.zero_grad(set_to_none=True)
+    out_eager = fn(inp_eager)
+    out_eager.sum().backward()
+    ref_out = out_eager.detach().clone()
+    ref_wgrad = model.weight.grad.detach().clone()
+    ref_igrad = inp_eager.grad.detach().clone()
+
+    inp_compiled = base.detach().clone().requires_grad_(True)
+    model.zero_grad(set_to_none=True)
+    # Clone before a later cuda-graph replay overwrites the static output buffer.
+    out_compiled = compiled(inp_compiled).clone()
+    out_compiled.sum().backward()
+
+    torch.testing.assert_close(out_compiled, ref_out, atol=_EAGER_ATOL, rtol=_EAGER_RTOL)
+    torch.testing.assert_close(inp_compiled.grad, ref_igrad, atol=_EAGER_ATOL, rtol=_EAGER_RTOL)
+    torch.testing.assert_close(model.weight.grad, ref_wgrad, atol=_EAGER_ATOL, rtol=_EAGER_RTOL)
 
 
 # ---------------------------------------------------------------------------
@@ -715,17 +785,32 @@ def _hw_available(quantizer):
 
 # (factory, kwargs producing a different-but-valid config)
 _VALUE_QUANTIZERS = [
-    pytest.param(_mxfp8, id="mxfp8"),
-    pytest.param(_blockwise, id="float8_blockwise"),
-    pytest.param(_current_scaling, id="float8_current_scaling"),
-    pytest.param(_nvfp4, id="nvfp4"),
+    pytest.param(_mxfp8, {"dtype": tex.DType.kFloat8E5M2}, id="mxfp8"),
+    pytest.param(_blockwise, {"force_pow_2_scales": False}, id="float8_blockwise"),
+    pytest.param(_current_scaling, {"amax_epsilon": 1e-4}, id="float8_current_scaling"),
+    pytest.param(
+        _nvfp4,
+        {"with_rht": False},
+        id="nvfp4",
+        marks=pytest.mark.skipif(
+            not torch.cuda.is_available(),
+            reason="NVFP4Quantizer requires CUDA to construct",
+        ),
+    ),
 ]
 
 
-@pytest.mark.parametrize("factory", _VALUE_QUANTIZERS)
-def test_quantizer_value_object(factory):
+@pytest.mark.parametrize("factory, other_kwargs", _VALUE_QUANTIZERS)
+def test_quantizer_value_object(factory, other_kwargs):
     """Value semantics + ``__fx_repr__`` round-trip via the production FX path."""
-    a = factory()
+    a, b = factory(), factory()
+    # Same config -> equal, same hash, interchangeable as a dict/set key.
+    assert a is not b
+    assert a == b
+    assert hash(a) == hash(b)
+    assert {a: "x"}[b] == "x"
+    # Different config -> not equal.
+    assert a != factory(**other_kwargs)
 
     # ``__fx_repr__`` (used by torch.compile codegen) rebuilds an equal object.
     repr_str, globals_ = a.__fx_repr__()
@@ -799,8 +884,8 @@ if _opaque_available:
     not _opaque_available,
     reason="torch.compile opaque-object support requires PyTorch >= 2.11",
 )
-@pytest.mark.parametrize("factory", _VALUE_QUANTIZERS)
-def test_quantizer_value_object_fullgraph(factory):
+@pytest.mark.parametrize("factory, other_kwargs", _VALUE_QUANTIZERS)
+def test_quantizer_value_object_fullgraph(factory, other_kwargs):
     """Quantizer is usable *inside* a torch.compile(fullgraph=True) graph.
 
     A custom op quantizes+dequantizes with the (opaque value) quantizer; the
@@ -1085,9 +1170,13 @@ def test_tensor_spec_matches_primitives(factory, shape):
     # Metadata matches the quantizer's.
     assert spec.create_metadata() == q.create_metadata(shape, dtype=torch.bfloat16)
 
-    # inner_names + create_inner_tensors match inner_tensor_specs.
+    # inner_names follows the storage's canonical __tensor_flatten__ order (the
+    # order the real op flattens its outputs to), while create_inner_tensors
+    # matches the inner_tensor_specs geometry (a name->shape/dtype mapping).
     specs = q.inner_tensor_specs(shape)
-    names = tuple(specs)
+    direct = _build_from_primitives(q, shape, torch.bfloat16)
+    names = tuple(direct.__tensor_flatten__()[0])
+    assert set(names) == set(specs)
     assert spec.inner_names() == names
     inner_tensors = spec.create_inner_tensors()
     assert len(inner_tensors) == len(names)
@@ -1097,7 +1186,6 @@ def test_tensor_spec_matches_primitives(factory, shape):
         assert inner.dtype == exp_dtype
 
     # The assembled tensor matches one built directly from the primitives.
-    direct = _build_from_primitives(q, shape, torch.bfloat16)
     assert _signature(spec.create_tensor(), names) == _signature(direct, names)
 
 
@@ -1163,4 +1251,272 @@ def test_to_tensor_spec_quantized(factory, shape):
     # Rebuilding from the derived spec matches the original tensor's structure.
     assert _signature(spec.create_tensor(), spec.inner_names()) == _signature(
         tensor, spec.inner_names()
+    )
+
+
+# ---------------------------------------------------------------------------
+# te.Linear
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
+@pytest.mark.parametrize("compile_mode", _compile_modes)
+@pytest.mark.parametrize(
+    "fp8_recipe",
+    [None, *_all_recipes],
+    ids=lambda r: "bf16" if r is None else type(r).__name__,
+)
+def test_te_linear_compiles(fp8_recipe, compile_mode):
+    """
+    torch.compile(fullgraph=True) of ``te.Linear`` under every built-in
+    recipe (plus the bf16-only baseline with no autocast), for both the default
+    backend and ``mode="reduce-overhead"`` (CUDA-graph trees).
+    """
+    if fp8_recipe is not None and not fp8_available:
+        pytest.skip(reason_for_no_fp8)
+
+    dtype = torch.bfloat16
+    device = "cuda"
+
+    # FP8 GEMMs require leading dimensions divisible by 16.
+    model = te.Linear(64, 32, params_dtype=dtype, device=device)
+
+    def fn(inp):
+        if fp8_recipe is None:
+            return model(inp)
+        with te.autocast(recipe=fp8_recipe):
+            return model(inp)
+
+    torch._dynamo.reset()
+    if compile_mode == "reduce-overhead":
+        _cudagraph_warmup(
+            fn,
+            torch.randn(32, 64, dtype=dtype, device=device, requires_grad=True),
+            backward=True,
+        )
+        model.zero_grad(set_to_none=True)
+    compiled = torch.compile(fn, fullgraph=True, mode=compile_mode)
+
+    # ``reduce-overhead`` warms up on the first call(s) and replays a captured
+    # CUDA graph afterwards, so iterate a few times to actually exercise replay.
+    n_iters = 3 if compile_mode == "reduce-overhead" else 1
+    with _assert_no_cudagraph_skips(compile_mode == "reduce-overhead"):
+        for _ in range(n_iters):
+            base = torch.randn(32, 64, dtype=dtype, device=device)
+            _assert_close_eager_compiled(fn, compiled, model, base)
+
+
+@pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+@pytest.mark.parametrize("compile_mode", _compile_modes)
+def test_te_linear_compile_with_quantized_fp8_weight(compile_mode):
+    """torch.compile should handle Linear weights initialized as FP8 tensors,
+    for both the default backend and ``mode="reduce-overhead"``.
+
+    Exercises the two-tier op + ``register_torch_dispatch`` flattening of a
+    ``Float8Tensor`` weight *input* in
+    :mod:`transformer_engine.pytorch.dynamo`.
+    """
+    dtype = torch.bfloat16
+    device = "cuda"
+    fp8_recipe = recipe.Float8CurrentScaling()
+
+    with te.quantized_model_init(enabled=True, recipe=fp8_recipe):
+        model = te.Linear(64, 32, params_dtype=dtype, device=device)
+
+    assert isinstance(model.weight, te.Float8Tensor)
+
+    def fn(inp):
+        with te.autocast(recipe=fp8_recipe):
+            return model(inp)
+
+    torch._dynamo.reset()
+    if compile_mode == "reduce-overhead":
+        _cudagraph_warmup(
+            fn,
+            torch.randn(32, 64, dtype=dtype, device=device, requires_grad=True),
+            backward=True,
+        )
+        model.zero_grad(set_to_none=True)
+    compiled = torch.compile(fn, fullgraph=True, mode=compile_mode)
+
+    n_iters = 3 if compile_mode == "reduce-overhead" else 1
+    with _assert_no_cudagraph_skips(compile_mode == "reduce-overhead"):
+        for _ in range(n_iters):
+            base = torch.randn(32, 64, dtype=dtype, device=device)
+            _assert_close_eager_compiled(fn, compiled, model, base)
+
+
+@pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+@pytest.mark.parametrize("compile_mode", _compile_modes)
+def test_te_linear_compile_with_fp8_output(compile_mode):
+    """torch.compile of ``te.Linear(..., fp8_output=True)`` without gradient:
+    forward returns a :class:`Float8Tensor`. Covers the default backend and
+    ``mode="reduce-overhead"``.
+
+    Exercises the output-rewrap path in
+    :mod:`transformer_engine.pytorch.dynamo`: when an output quantizer is
+    active, the op returns the flat inner data tensors and the framework
+    rewraps them into a ``Float8Tensor`` via ``__tensor_unflatten__``. A
+    differentiable FP8 output is unsupported under compile (``Linear.forward``
+    falls back to eager), so this test covers the supported case: an FP8 output
+    that does not require grad (inference / ``torch.no_grad``).
+    """
+    dtype = torch.bfloat16
+    device = "cuda"
+    fp8_recipe = recipe.Float8CurrentScaling()
+
+    model = te.Linear(64, 32, params_dtype=dtype, device=device)
+
+    def fn(inp):
+        with te.autocast(recipe=fp8_recipe):
+            return model(inp, fp8_output=True)
+
+    torch._dynamo.reset()
+    if compile_mode == "reduce-overhead":
+        with torch.no_grad():
+            _cudagraph_warmup(fn, torch.randn(32, 64, dtype=dtype, device=device), backward=False)
+    compiled = torch.compile(fn, fullgraph=True, mode=compile_mode)
+
+    n_iters = 3 if compile_mode == "reduce-overhead" else 1
+    with _assert_no_cudagraph_skips(compile_mode == "reduce-overhead"):
+        for _ in range(n_iters):
+            inp = torch.randn(32, 64, dtype=dtype, device=device)
+            with torch.no_grad():
+                out_eager = fn(inp)
+                out = compiled(inp)
+            assert isinstance(
+                out, te.Float8Tensor
+            ), f"expected Float8Tensor output, got {type(out).__name__}"
+            assert out.shape == (32, 32)
+            assert (
+                out._quantizer is not None
+            ), "FP8 output lost its quantizer on the torch.compile path"
+            # The rewrap rebuilt a fully-functional Float8Tensor: dequantizing it
+            # outside the compiled region exercises scale + data + dtype wiring.
+            deq = out.dequantize()
+            assert deq.shape == (32, 32)
+            assert deq.dtype == dtype
+            # Compiled FP8 output must match the eager FP8 output value-wise.
+            torch.testing.assert_close(
+                deq, out_eager.dequantize(), atol=_EAGER_ATOL, rtol=_EAGER_RTOL
+            )
+
+
+@pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+@pytest.mark.parametrize("compile_mode", _compile_modes)
+def test_te_linear_compile_is_first_microbatch(compile_mode):
+    """torch.compile of ``te.Linear`` across a multi-step microbatch schedule that
+    drives FP8 weight caching via ``is_first_microbatch``, for the default backend
+    and ``mode="reduce-overhead"`` (CUDA-graph trees).
+
+    ``is_first_microbatch=True`` quantizes and caches the FP8 weight; subsequent
+    ``False`` steps must reuse the cached FP8 weight instead of re-quantizing. This
+    exercises that cache path under compile and checks it stays numerically aligned
+    with eager. ``is_first_microbatch`` is a Python bool, so each distinct value is
+    its own dynamo guard/graph.
+    """
+    dtype = torch.bfloat16
+    device = "cuda"
+    fp8_recipe = recipe.Float8CurrentScaling()
+    model = te.Linear(64, 32, params_dtype=dtype, device=device)
+
+    # First microbatch caches the FP8 weight, the rest reuse the cache.
+    schedule = [True, False, False]
+    is_first = schedule[0]  # rebound each step; closed over by ``fn``.
+
+    def fn(inp):
+        with te.autocast(recipe=fp8_recipe):
+            return model(inp, is_first_microbatch=is_first)
+
+    torch._dynamo.reset()
+    if compile_mode == "reduce-overhead":
+        _cudagraph_warmup(
+            fn,
+            torch.randn(32, 64, dtype=dtype, device=device, requires_grad=True),
+            backward=True,
+        )
+        model.zero_grad(set_to_none=True)
+    compiled = torch.compile(fn, fullgraph=True, mode=compile_mode)
+
+    with _assert_no_cudagraph_skips(compile_mode == "reduce-overhead"):
+        for is_first in schedule:
+            base = torch.randn(32, 64, dtype=dtype, device=device)
+            _assert_close_eager_compiled(fn, compiled, model, base)
+
+
+@pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
+def test_te_linear_dynamic_shapes():
+    """torch.compile(dynamic=True) of ``te.Linear`` with varying batch sizes.
+
+    Verifies that the compiled graph handles symbolic (dynamic) leading
+    dimensions without graph breaks or recompilations after the initial trace.
+    Key correctness property: a graph compiled for batch=16 must produce
+    numerically correct results for batch=32 without triggering a recompile.
+
+    This exercises two fixes for dynamic shapes:
+    1. ``_linear_setup_ctx`` no longer stores ``inp_shape`` in the value bundle
+       (torch.Size with SymInt dims is not hashable in OpaqueValueBundle).
+    2. ``_linear_backward_impl_fake`` derives dgrad shape from grad_output +
+       weight + SP config instead of relying on the stored ``inp_shape``.
+    3. ``_linear_backward`` reconstructs ``inp_shape`` on-the-fly from the same
+       tensor sources when it is None (compiled mode).
+
+    FP8 + dynamic=True is tracked separately (requires resolving
+    ``UnsafeScriptObjectError`` for TorchScript quantizer objects with Dynamo).
+    """
+    dtype = torch.bfloat16
+    device = "cuda"
+    in_features, out_features = 64, 32
+    model = te.Linear(in_features, out_features, params_dtype=dtype, device=device)
+
+    def fn(inp):
+        return model(inp)
+
+    torch._dynamo.reset()
+    compiled = torch.compile(fn, fullgraph=True)
+
+    batch_sizes = [16, 32, 48]
+
+    for i, batch in enumerate(batch_sizes):
+        inp = torch.randn(batch, in_features, dtype=dtype, device=device, requires_grad=True)
+        # Mark batch dim as dynamic so Dynamo traces once and reuses across batch sizes.
+        torch._dynamo.mark_dynamic(inp, 0)
+        out = compiled(inp)
+        assert out.shape == (batch, out_features), f"wrong output shape for batch={batch}"
+        out.sum().backward()
+        assert inp.grad is not None, f"no input gradient for batch={batch}"
+        assert inp.grad.shape == inp.shape, f"wrong grad shape for batch={batch}"
+
+        # Verify numerics against eager on each distinct batch size.
+        inp_eager = inp.detach().clone().requires_grad_(True)
+        model.zero_grad(set_to_none=True)
+        out_eager = model(inp_eager)
+        out_eager.sum().backward()
+        torch.testing.assert_close(
+            out.detach(),
+            out_eager.detach(),
+            atol=_EAGER_ATOL,
+            rtol=_EAGER_RTOL,
+            msg=f"forward mismatch at batch={batch}",
+        )
+        torch.testing.assert_close(
+            inp.grad,
+            inp_eager.grad,
+            atol=_EAGER_ATOL,
+            rtol=_EAGER_RTOL,
+            msg=f"dgrad mismatch at batch={batch}",
+        )
+
+        if i == 0:
+            # After the first (tracing) call, record the recompile counter
+            # baseline -- subsequent batch sizes must not trigger recompiles.
+            recompile_count_baseline = counters["stats"].get("recompile_reasons", 0)
+
+    recompile_count_after = counters["stats"].get("recompile_reasons", 0)
+    assert recompile_count_after == recompile_count_baseline, (
+        "Unexpected recompilation(s) across different batch sizes: "
+        f"{recompile_count_after - recompile_count_baseline} recompile(s) detected"
     )

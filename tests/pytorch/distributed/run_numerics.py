@@ -310,22 +310,45 @@ def _copy_params(model_distributed, model_single):
 
 
 def _apply_models(
-    model_single_node, model_distributed, input_single_node, input_distributed, **kwargs
+    model_single_node,
+    model_distributed,
+    input_single_node,
+    input_distributed,
+    use_compile=False,
+    compile_mode="default",
+    **kwargs,
 ):
     _alloc_main_grad(model_single_node, model_distributed)  # for fuse_wgrad_accumulation=True
     input_single_node.requires_grad_()
     input_distributed.requires_grad_()
+    forward_single_node = model_single_node
+    forward_distributed = model_distributed
+    if use_compile:
+        # Each parametrized case compiles the same module.forward code object with
+        # a different shape/recipe; with dynamic=False those guards accumulate and
+        # eventually trip Dynamo's recompile_limit. Reset so every case starts from
+        # a clean compile cache (mirrors the single-GPU torch.compile tests).
+        torch._dynamo.reset()
+        # dynamic=False for now: a symbolic shape would land in an OpaqueValueBundle
+        # (value-opaque op arg) whose hash chokes on non-nested SymInt. Force static
+        # shapes (recompile per shape) until the bundle handles symbolic shapes.
+        forward_single_node = torch.compile(
+            model_single_node, fullgraph=True, mode=compile_mode, dynamic=False
+        )
+        forward_distributed = torch.compile(
+            model_distributed, fullgraph=True, mode=compile_mode, dynamic=False
+        )
     with te.autocast(
         enabled=QUANTIZATION is not None,
         recipe=quantization_recipe(),
     ):
-        output_single_node = model_single_node(input_single_node, **kwargs)
+        output_single_node = forward_single_node(input_single_node, **kwargs)
     with te.autocast(
         enabled=QUANTIZATION is not None,
         recipe=quantization_recipe(),
         amax_reduction_group=NCCL_WORLD,
     ):
-        output_distributed = model_distributed(input_distributed, **kwargs)
+        output_distributed = forward_distributed(input_distributed, **kwargs)
     return output_single_node, output_distributed
 
 
@@ -641,12 +664,20 @@ def test_quantized_all_gather():
 #                   Linear                 #
 ############################################
 @run_distributed_test()
-def _test_linear(parallel_mode=None, sequence_parallel=False, **kwargs):
+def _test_linear(
+    parallel_mode=None,
+    sequence_parallel=False,
+    use_compile=False,
+    compile_mode="default",
+    **kwargs,
+):
     """Test the linear layer with specified parallel mode and sequence parallelization.
 
     Args:
         parallel_mode (str): 'row' or 'column' parallelism.
         sequence_parallel (bool): Enable sequence parallelism if True.
+        use_compile (bool): Wrap the modules in ``torch.compile`` before running.
+        compile_mode (str): ``torch.compile`` mode ("default" or "reduce-overhead").
         kwargs (dict): Additional arguments for the linear layer.
     """
     # Set parameter data type
@@ -696,7 +727,12 @@ def _test_linear(parallel_mode=None, sequence_parallel=False, **kwargs):
 
     # Apply models
     output_single_node, output_distributed = _apply_models(
-        model_single_node, model_distributed, input_single_node, input_distributed
+        model_single_node,
+        model_distributed,
+        input_single_node,
+        input_distributed,
+        use_compile=use_compile,
+        compile_mode=compile_mode,
     )
 
     if "return_bias" in kwargs:
@@ -740,12 +776,17 @@ def test_linear():
         {"params_dtype": torch.float16 if QUANTIZATION != "nvfp4" else torch.bfloat16},
         {"delay_wgrad_compute": True},
         {"save_original_input": True},
+        {"use_compile": True},
+        {"use_compile": True, "compile_mode": "reduce-overhead"},
     ]
 
     for kwargs in kwargs_list:
         if kwargs.get("save_original_input", False) and QUANTIZATION == "fp8":
             continue
         if kwargs.get("delay_wgrad_compute", False) and NVTE_TEST_NVINSPECT_ENABLED:
+            continue
+        # debug instrumentation forces the eager fallback, so compile is a no-op there.
+        if kwargs.get("use_compile", False) and NVTE_TEST_NVINSPECT_ENABLED:
             continue
         for parallel_mode in ["column", "row"]:
             for sequence_parallel in [False, True]:

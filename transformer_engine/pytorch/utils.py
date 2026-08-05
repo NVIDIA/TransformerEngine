@@ -26,6 +26,20 @@ __all__ = [
 ]
 
 
+def warn_compile_eager_fallback(reason: str) -> None:
+    """Warn that a TE module is running eagerly under ``torch.compile``.
+
+    Emitted when ``reason`` is unsupported on the module's compiled custom-op
+    path. Python's default warning filter dedups identical messages, so each
+    distinct ``reason`` is surfaced once.
+    """
+    warnings.warn(
+        f"Falling back to eager execution under torch.compile: {reason} is "
+        "unsupported on the compiled path (graph-breaks under fullgraph=True).",
+        stacklevel=2,
+    )
+
+
 @functools.lru_cache(maxsize=None)
 def get_cached_ones_tensor(
     num_elements: int,

@@ -201,6 +201,19 @@ def _parse_args(argv=None, namespace=None):
         "--use-cuda-graphs", action="store_true", default=False, help="Use CUDA Graphs."
     )
     parser.add_argument(
+        "--compile",
+        action="store_true",
+        default=False,
+        help="Wrap each layer in torch.compile (tests Userbuffers on the compiled path).",
+    )
+    parser.add_argument(
+        "--compile-mode",
+        type=str,
+        default="default",
+        choices=["default", "reduce-overhead"],
+        help="torch.compile mode used when --compile is set.",
+    )
+    parser.add_argument(
         "--ub-cfg", type=str, default=None, help="Optional TP config yaml file input."
     )
     parser.add_argument("--ub-name", type=str, default=None, help="Optional TP layer name.")
@@ -485,6 +498,9 @@ def _train(opts):
         torch.testing.assert_close(test_param, ref_param, rtol=0.0, atol=0.0)
     dist_print("Copied parameters from test model to reference model...", debug=True)
 
+    if opts.compile and opts.use_cuda_graphs:
+        raise ValueError("--compile and --use-cuda-graphs are mutually exclusive.")
+
     # Fp8 recipe setup
     fp8_format = Format.HYBRID
     fp8_recipe = None
@@ -534,6 +550,18 @@ def _train(opts):
             loss = out.sum()
             loss.backward()
         return out
+
+    if opts.compile:
+        for i, layer in enumerate(test_model.layers):
+            # dynamic=False for now: symbolic shapes would land in an OpaqueValueBundle
+            # op arg whose hash chokes on non-nested SymInt (see run_numerics).
+            test_model.layers[i] = torch.compile(
+                layer, fullgraph=True, mode=opts.compile_mode, dynamic=False
+            )
+        dist_print(
+            f"Compiled test model layers with torch.compile (mode={opts.compile_mode})...",
+            debug=True,
+        )
 
     torch_rng_state = torch.get_rng_state()
     cuda_rng_state = torch.cuda.get_rng_state(torch.device(f"cuda:{LOCAL_RANK}"))
