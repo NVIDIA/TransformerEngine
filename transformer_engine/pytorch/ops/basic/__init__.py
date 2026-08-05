@@ -23,8 +23,6 @@ from .all_reduce import AllReduce
 from .basic_linear import BasicLinear
 from .bias import Bias
 from .constant_scale import ConstantScale
-from .combine import Combine
-from .dispatch import Dispatch
 from .dropout import Dropout
 from .grouped_linear import GroupedLinear
 from .identity import Identity
