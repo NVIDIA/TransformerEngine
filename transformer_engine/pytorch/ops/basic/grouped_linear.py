@@ -1330,8 +1330,10 @@ class GroupedLinear(BasicOperation):
         input_tensor_offsets = grouped_tensor_offsets[2]
         output_tensor_offsets = grouped_tensor_offsets[3]
         original_shape = list(input_.size())
+        # Flatten to 2D so the first dim is the total token count.
         x = maybe_dequantize(input_, dtype).reshape(-1, self.in_features)
         total_tokens = x.size(0)
+        # Build the input GroupedTensorStorage for input.
         if with_quantized_compute:
             input_quantizer = input_quantizers[0]
             input_quantizer.set_usage(rowwise=True, columnwise=weight_requires_grad)
@@ -1344,6 +1346,7 @@ class GroupedLinear(BasicOperation):
                 tensor_offsets=input_tensor_offsets,
             )
         else:
+            # No quantize: wrap the contiguous high-precision buffer.
             grouped_x = GroupedTensorStorage(
                 shape=(total_tokens, self.in_features),
                 dtype=dtype,
@@ -1658,6 +1661,9 @@ class GroupedLinear(BasicOperation):
         grad_extra = (None, grad_scales) if self._scale_bias else (None,)
         return grad_input, [grad_params], [grad_extra]
 
+    # ==================================================================
+    # Graph-safe backward: counterpart of `_fuser_forward_grouped_tensor`.
+    # ==================================================================
     def _fuser_backward_grouped_tensor(
         self,
         *,
@@ -1695,10 +1701,14 @@ class GroupedLinear(BasicOperation):
         else:
             ws, saved_tensors = saved_tensors[:num_groups], saved_tensors[num_groups:]
 
+        # Flatten grad_output to 2D (total_tokens, out_features)
+        # to figure out total tokens.
         dy_2d = grad_output.reshape(-1, self.out_features)
         total_tokens = dy_2d.size(0)
         grad_input_shape = list(grad_output.size())[:-1] + [self.in_features]
 
+        # Build the grad_output GroupedTensor.
+        # Optionally get dbias is fusion available with bgrad_group_quantize
         dbias_packed = None
         if with_quantized_compute:
             grad_output_quantizer = ctx.grad_output_quantizers[0]
