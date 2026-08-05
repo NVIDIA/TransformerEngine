@@ -243,8 +243,8 @@ def test_fused_mla_q_uproj_backward(tokens: int) -> None:
     w_dq = w.dequantize().to(torch.bfloat16)
     gy_dq = gy.dequantize().to(torch.bfloat16)
 
-    ref_grad_x = gy_dq @ w_dq           # [tokens, Q_LORA_RANK]
-    ref_grad_w = gy_dq.t() @ x_dq       # [PROJ_DIM, Q_LORA_RANK]
+    ref_grad_x = gy_dq @ w_dq  # [tokens, Q_LORA_RANK]
+    ref_grad_w = gy_dq.t() @ x_dq  # [PROJ_DIM, Q_LORA_RANK]
 
     torch.testing.assert_close(grad_x, ref_grad_x, atol=0.5, rtol=0.1)
     torch.testing.assert_close(grad_w, ref_grad_w, atol=0.5, rtol=0.1)
