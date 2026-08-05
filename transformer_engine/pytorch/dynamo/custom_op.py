@@ -307,9 +307,8 @@ try:
 
     register_opaque_type(OpaqueValueBundle, typ="value")
     _OPAQUE_VALUE_BUNDLE_TYPE_NAME: Optional[str] = get_opaque_type_name(OpaqueValueBundle)
-except (
-    Exception
-) as e:  # pylint: disable=broad-exception-caught  # pragma: no cover - older torch without opaque_object
+# Older torch without opaque_object support.
+except Exception as e:  # pylint: disable=broad-exception-caught  # pragma: no cover
     warn_compile_unsupported(f"could not register OpaqueValueBundle as an opaque type ({e})")
     _is_opaque_value_type = None
     _is_opaque_reference_type = None
