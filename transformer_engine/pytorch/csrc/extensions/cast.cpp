@@ -430,6 +430,19 @@ py::object group_swiglu_quantize(const at::Tensor &input_2f, const at::Tensor &p
   NVTE_CHECK(prob.scalar_type() == input_2f.scalar_type(),
              "group_swiglu_quantize prob must have the same dtype as the input (model dtype).");
 
+  // The grouped metadata is turned into offsets by a kernel on the guarded device below,
+  // and the fused kernel then indexes the input with those offsets.
+  auto check_metadata_device = [&input_2f](const std::optional<at::Tensor> &metadata,
+                                           const char *name) {
+    if (metadata.has_value()) {
+      NVTE_CHECK(metadata->device() == input_2f.device(), "group_swiglu_quantize ", name,
+                 " must be on the same device as the input.");
+    }
+  };
+  check_metadata_device(first_dims, "first_dims");
+  check_metadata_device(last_dims, "last_dims");
+  check_metadata_device(tensor_offsets, "tensor_offsets");
+
   // Allocate the output and launch on the operands' device rather than on whatever
   // torch.cuda.set_device last selected.
   at::cuda::CUDAGuard device_guard(input_2f.device());
