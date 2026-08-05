@@ -33,30 +33,6 @@ static_assert(sizeof(uint64_t) == 8);
 // Minimal subset of <type_traits> used by RTC kernel headers. Keep these in a
 // project-owned namespace because adding primary templates to std is undefined.
 namespace transformer_engine {
-
-/*! \brief Align a shared-memory base pointer up to `align` bytes.
- *
- * The result is derived from `p` by pointer arithmetic on purpose, without losing its
- * identity as a pointer in between, so the address is never rounded through an integer
- * -- in which case the compiler would lose the link back to the `extern __shared__`
- * object, and ptxas could no longer prove the address lives in the shared window and
- * would fall back to generic address-space accesses (`LD.E`/`ST.E`) instead of
- * `LDS`/`STS`.
- *
- * `align` must be a power of two.
- */
-__device__ __forceinline__ char *align_up(char *p, uintptr_t align) {
-  const uintptr_t misalign = reinterpret_cast<uintptr_t>(p) & (align - 1);
-  // If p is not aligned, (align - misalign) & (align - 1) is the number of bytes to fill the gap between p and
-  // the next aligned address.
-  // If p is aligned, misalign is 0 and (align - misalign) is align itself, so we use & (align - 1)
-  // to make it 0 and return p itself.
-  return p + ((align - misalign) & (align - 1));
-}
-
-}  // namespace transformer_engine
-
-namespace transformer_engine {
 namespace detail {
 
 template <class T, class U>
