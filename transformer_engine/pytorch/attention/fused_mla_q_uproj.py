@@ -55,6 +55,7 @@ class FusedMLAQUpProjRopeQuant:
     @classmethod
     @functools.lru_cache(maxsize=None)
     def is_supported(cls) -> bool:
+        """Whether the cuDNN FE fused gemm rope quant wrapper is available"""
         if int(os.environ.get("NVTE_FUSED_MLA_Q_UPROJ", "1")) <= 0:
             return False
         if not _cudnn_frontend_version_supported():
@@ -153,6 +154,8 @@ class FusedMLAQUpProjRopeQuant:
         nh: int,
         d: int,
     ) -> MXFP8Tensor:
+        """Wrap raw data and scale tensors into an MXFP8Tensor"""
+
         blk = MXFP8_BLOCK_SCALING_SIZE
         # Both rowwise and columnwise Q are required:
         # - Forward QK^T uses rowwise
