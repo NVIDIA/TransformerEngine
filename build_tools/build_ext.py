@@ -117,8 +117,12 @@ def get_build_ext(
 
                 print(f"Building CMake extension {ext.name}")
                 configured_build_dir = os.getenv("NVTE_CMAKE_BUILD_DIR")
+                if not configured_build_dir and self.inplace:
+                    root_dir = Path(__file__).resolve().parent.parent
+                    configured_build_dir = root_dir / "build" / "cmake"
+
                 if configured_build_dir:
-                    # An explicit build directory enables incremental builds.
+                    # A persistent build directory enables incremental builds.
                     build_dir = Path(configured_build_dir).resolve()
                     build_dir.mkdir(parents=True, exist_ok=True)
                     ext._build_cmake(
