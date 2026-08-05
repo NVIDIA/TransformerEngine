@@ -73,6 +73,7 @@ if mxfp8_available:
 if nvfp4_available:
     _grouped_mlp_quantization_list.append("nvfp4_rht")
 
+
 @pytest.fixture(autouse=True, scope="function")
 def _reset_rng_states_per_test():
     """Restore torch, CUDA, and Python ``random`` before each test in this module."""
