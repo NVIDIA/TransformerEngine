@@ -903,6 +903,9 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self.fp8_meta["fp8_checkpoint"] = False
         self.fp8_meta["fp8_group"] = None
         self.fp8_meta_tensors_initialized = False
+        # Pending FP8 recompute stashes, and whether this forward call swapped them in.
+        self.fp8_recompute_stashes = 0
+        self.fp8_recompute_meta_restored = False
         self.quantizers = {"scaling_fwd": [], "scaling_bwd": []}
         self.tp_group = None
         self.tp_size = 1
@@ -1458,6 +1461,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self.fp8_meta["recipe"] = state["recipe"]
         if "global_fp8_buffer_pos_fwd_recompute" in self.fp8_meta:
             del self.fp8_meta["global_fp8_buffer_pos_fwd_recompute"]
+            # Dropping the position orphans any pending stashes; do not try to pop them.
+            self.fast_setattr("fp8_recompute_stashes", 0)
 
         # Initialize before loading
         self.init_fp8_meta_tensors(self.fp8_meta["recipe"])
@@ -1597,10 +1602,17 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         )
         self.fast_setattr("forwarded_at_least_once", True)
 
+        # Whether this call swapped in the stashed recompute state; `end_forward` pairs on it.
+        restored = False
+
         # Activation recomputation is used and this is the second forward phase.
         if self.fp8 and in_fp8_activation_recompute_phase():
-            delayed_scaling_recipe = _has_delayed_scaling_state(self.fp8_meta)
-            FP8GlobalStateManager.get_old_fp8_meta_tensors_for_recompute(self.fp8_meta)
+            # Restore only what this module stashed. `self.training` is re-read here in a
+            # different autograd phase than the stash, so the two can disagree; the count cannot.
+            if self.fp8_recompute_stashes > 0:
+                FP8GlobalStateManager.get_old_fp8_meta_tensors_for_recompute(self.fp8_meta)
+                self.fast_setattr("fp8_recompute_stashes", self.fp8_recompute_stashes - 1)
+                restored = True
         else:
             if not inp.is_cuda:
                 raise RuntimeError(
@@ -1632,8 +1644,15 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     FP8GlobalStateManager.add_fp8_tensors_to_global_buffer(self.fp8_meta)
 
                 # Activation recomputation is used and this is the first forward phase.
-                if self.training and is_fp8_activation_recompute_enabled():
+                # Every module in the first checkpoint phase must stash. In reentrant
+                # checkpointing that phase runs under `no_grad`, so an eval module receiving
+                # an intermediate tensor has no module-local autograd signal even though it
+                # will be replayed during backward.
+                if is_fp8_activation_recompute_enabled():
                     FP8GlobalStateManager.copy_forward_fp8_meta_tensors_for_recompute(self.fp8_meta)
+                    self.fast_setattr("fp8_recompute_stashes", self.fp8_recompute_stashes + 1)
+
+        self.fast_setattr("fp8_recompute_meta_restored", restored)
 
         nvtx_range_push(self.__class__.__name__ + " forward")
         if not allow_non_contiguous and not inp.is_contiguous():
@@ -1645,8 +1664,10 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         Required to be called at the end of the forward function to properly handle
         DelayedScaling metadata handling and the NVTX ranges.
         """
-        delayed_scaling_recipe = self.fp8 and _has_delayed_scaling_state(self.fp8_meta)
-        if delayed_scaling_recipe and self.fp8 and in_fp8_activation_recompute_phase():
+        # Pairs one-to-one with the restore in `prepare_forward`. Re-deriving the condition
+        # here could disagree with it and reinstate stale `updated_*_fwd` values.
+        if self.fp8_recompute_meta_restored:
+            self.fast_setattr("fp8_recompute_meta_restored", False)
             FP8GlobalStateManager.restore_fp8_meta_tensors(self.fp8_meta)
         nvtx_range_pop()
 
