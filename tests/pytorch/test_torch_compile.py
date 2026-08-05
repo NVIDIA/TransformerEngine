@@ -1459,9 +1459,9 @@ def test_te_linear_dynamic_shapes():
     This exercises two fixes for dynamic shapes:
     1. ``_linear_setup_ctx`` no longer stores ``inp_shape`` in the value bundle
        (torch.Size with SymInt dims is not hashable in OpaqueValueBundle).
-    2. ``_linear_backward_impl_fake`` derives dgrad shape from grad_output +
+    2. ``_linear_backward_fake`` derives dgrad shape from grad_output +
        weight + SP config instead of relying on the stored ``inp_shape``.
-    3. ``_linear_backward`` reconstructs ``inp_shape`` on-the-fly from the same
+    3. ``_linear_backward_impl`` reconstructs ``inp_shape`` on-the-fly from the same
        tensor sources when it is None (compiled mode).
 
     FP8 + dynamic=True is tracked separately (requires resolving

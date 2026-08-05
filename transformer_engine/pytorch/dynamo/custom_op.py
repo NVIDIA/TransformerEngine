@@ -12,7 +12,7 @@ is the first user. Internal framework API -- exported from
 ``transformer_engine.pytorch.dynamo``, not re-exported at the top level.
 
 A TE op's forward/backward is written as a plain impl over a single *args
-dataclass* (``fwd_arg_type`` / ``backward_arg_type``, e.g. ``LinearFwdArgs``): its
+dataclass* (``fwd_arg_type`` / ``bwd_arg_type``, e.g. ``LinearFwdArgs``): its
 fields are a mix of tensors, quantized tensors, quantizers, process groups,
 scalars and other Python values. The forward impl returns a tuple (user outputs +
 saved-for-backward tensors + ctx metadata); the backward impl returns one gradient
@@ -59,8 +59,8 @@ call through it:
   * calls the *forward op* -- which runs the real ``fwd_impl`` -- for a flat
     ``Tensor[]`` payload;
   * rebuilds the structured user outputs from that payload, sliced and reassembled
-    per the fake's output descriptors (``_spec_reassemble``;
-    ``_value_to_flat_tensors`` is the pack-side inverse).
+    per the fake's output descriptors (``_unflatten_value``;
+    ``_flatten_value`` is the pack-side inverse).
 
 Autograd, registered on the op, drives backward:
 
@@ -71,7 +71,7 @@ Autograd, registered on the op, drives backward:
     aliases) and return the tensors to persist;
   * on ``backward()`` the backward args container's optional ``setup_saved_tensors``
     hook restores those saved tensors, then the *backward op* runs the real
-    ``backward_impl`` and returns the flat grads (``bwd_fake_impl`` is its
+    ``bwd_impl`` and returns the flat grads (``bwd_fake_impl`` is its
     data-free fake).
 
 Two-tier op (``base`` + ``wrapper``), so a ``QuantizedTensor`` subclass can be an
@@ -84,7 +84,7 @@ the wrapper a pass-through (plain / bf16 calls go straight through).
 
 from __future__ import annotations
 import dataclasses
-import types as _types
+import types as _types  # aliased: torch_dispatch rules take a ``types`` param
 from enum import Enum
 from typing import (
     Any,
@@ -104,7 +104,6 @@ import torch
 
 from torch._prims_common import make_contiguous_strides_for
 
-from .quantizer_opaque import warn_compile_unsupported
 from .tensor_spec import TensorSpec, to_tensor_spec
 from ..quantized_tensor import (
     QuantizedTensor,
@@ -113,8 +112,14 @@ from ..quantized_tensor import (
     _quantized_tensor_passthrough_ops,
     prepare_for_saving,
 )
+from ..utils import warn_compile_disabled
 
 _TE_OP_NAMESPACE = "transformer_engine_compile"
+
+# Annotation for an op arg field that may hold a plain tensor, a quantized
+# tensor subclass or a *bare* ``QuantizedTensorStorage`` (the internal-quantizer
+# optimization). Matched exactly by ``_TensorOrQuantizedAdapter``.
+TensorOrQuantized = Union[torch.Tensor, QuantizedTensorStorage]
 
 
 # ``None`` entries in an op's flat ``Tensor[]`` return are smuggled through a
@@ -309,7 +314,7 @@ try:
     _OPAQUE_VALUE_BUNDLE_TYPE_NAME: Optional[str] = get_opaque_type_name(OpaqueValueBundle)
 # Older torch without opaque_object support.
 except Exception as e:  # pylint: disable=broad-exception-caught  # pragma: no cover
-    warn_compile_unsupported(f"could not register OpaqueValueBundle as an opaque type ({e})")
+    warn_compile_disabled(f"could not register OpaqueValueBundle as an opaque type ({e})")
     _is_opaque_value_type = None
     _is_opaque_reference_type = None
     _OPAQUE_VALUE_BUNDLE_TYPE_NAME = None
@@ -519,30 +524,29 @@ class _TensorOrQuantizedAdapter(_Adapter):
     def __init__(self, name: str) -> None:
         self.name = name
 
-    def slot_name(self) -> str:
+    def tensor_slot(self) -> str:
         """Primary slot name for a plain / subclass tensor."""
         return self.name
 
-    def slot_tensors(self) -> str:
+    def inner_slot(self) -> str:
         """Flat inner-tensor slot name."""
         return self.name + "__tensors"
 
-    def slot_meta(self) -> str:
+    def meta_slot(self) -> str:
         """Flatten-metadata slot name."""
         return self.name + "__meta"
 
     def schema_slots(self) -> List[Tuple[str, str]]:
         return [
-            (self.slot_name(), "Tensor?"),
-            (self.slot_tensors(), "Tensor[]"),
-            (self.slot_meta(), _OPAQUE_VALUE_BUNDLE_TYPE_NAME),
+            (self.tensor_slot(), "Tensor?"),
+            (self.inner_slot(), "Tensor[]"),
+            (self.meta_slot(), _OPAQUE_VALUE_BUNDLE_TYPE_NAME),
         ]
 
-    # Canonical "plain tensor or quantized tensor" field annotation (the
-    # ``TensorOrQuantized`` alias in module code). Matched by exact member set,
-    # so a bare quantized annotation or an accidental extra union member is
-    # rejected rather than silently taken as a tensor-or-quantized field.
-    _MEMBERS = frozenset({torch.Tensor, QuantizedTensorStorage})
+    # Matched by exact member set, so a bare quantized annotation or an
+    # accidental extra union member is rejected rather than silently taken as a
+    # tensor-or-quantized field.
+    _MEMBERS = frozenset(get_args(TensorOrQuantized))
 
     @classmethod
     def _is_tensor_storage_union(cls, annot: Any) -> bool:
@@ -561,25 +565,25 @@ class _TensorOrQuantizedAdapter(_Adapter):
         value = getattr(owner, self.name)
         if value is None:
             return {
-                self.slot_name(): None,
-                self.slot_tensors(): [],
-                self.slot_meta(): OpaqueValueBundle({self.KIND_KEY: _TensorOrQuantizedKind.NONE}),
+                self.tensor_slot(): None,
+                self.inner_slot(): [],
+                self.meta_slot(): OpaqueValueBundle({self.KIND_KEY: _TensorOrQuantizedKind.NONE}),
             }
         if isinstance(value, torch.Tensor):
             # Plain tensor *and* subclass (e.g. Float8Tensor) pass through the
             # ``Tensor?`` slot; subclass flattening (if any) is done by the
             # wrapper op's ``register_torch_dispatch`` rule.
             return {
-                self.slot_name(): value,
-                self.slot_tensors(): [],
-                self.slot_meta(): OpaqueValueBundle({self.KIND_KEY: _TensorOrQuantizedKind.TENSOR}),
+                self.tensor_slot(): value,
+                self.inner_slot(): [],
+                self.meta_slot(): OpaqueValueBundle({self.KIND_KEY: _TensorOrQuantizedKind.TENSOR}),
             }
         if isinstance(value, QuantizedTensorStorage):
             meta, tensors = _storage_flatten(value, {self.KIND_KEY: _TensorOrQuantizedKind.STORAGE})
             return {
-                self.slot_name(): None,
-                self.slot_tensors(): tensors,
-                self.slot_meta(): meta,
+                self.tensor_slot(): None,
+                self.inner_slot(): tensors,
+                self.meta_slot(): meta,
             }
         raise TypeError(
             f"field {self.name!r} expected None, torch.Tensor, or "
@@ -587,14 +591,14 @@ class _TensorOrQuantizedAdapter(_Adapter):
         )
 
     def from_slots(self, args: Dict[str, Any], kwargs: Dict[str, Any]) -> None:
-        meta = args[self.slot_meta()]
+        meta = args[self.meta_slot()]
         kind = meta.get(self.KIND_KEY)
         if kind == _TensorOrQuantizedKind.NONE:
             kwargs[self.name] = None
         elif kind == _TensorOrQuantizedKind.TENSOR:
-            kwargs[self.name] = args[self.slot_name()]
+            kwargs[self.name] = args[self.tensor_slot()]
         else:
-            kwargs[self.name] = _storage_unflatten(meta, args[self.slot_tensors()])
+            kwargs[self.name] = _storage_unflatten(meta, args[self.inner_slot()])
 
     def grad_slot(self) -> Optional[int]:
         # Gradient flows to the plain / subclass tensor slot (``slot_name``,
@@ -637,12 +641,12 @@ class _QuantizerAdapter(_Adapter):
     bundle would not claim it.
     """
 
-    KEY = "q"
+    QUANTIZER_KEY = "q"
 
     def __init__(self, name: str) -> None:
         self.name = name
 
-    def slot(self) -> str:
+    def meta_slot(self) -> str:
         """Opaque quantizer metadata slot name."""
         return self.name + "__q"
 
@@ -654,13 +658,15 @@ class _QuantizerAdapter(_Adapter):
         return None
 
     def schema_slots(self) -> List[Tuple[str, str]]:
-        return [(self.slot(), _OPAQUE_VALUE_BUNDLE_TYPE_NAME)]
+        return [(self.meta_slot(), _OPAQUE_VALUE_BUNDLE_TYPE_NAME)]
 
     def to_slots(self, owner: Any) -> Dict[str, Any]:
-        return {self.slot(): OpaqueValueBundle({self.KEY: getattr(owner, self.name)})}
+        return {
+            self.meta_slot(): OpaqueValueBundle({self.QUANTIZER_KEY: getattr(owner, self.name)})
+        }
 
     def from_slots(self, args: Dict[str, Any], kwargs: Dict[str, Any]) -> None:
-        kwargs[self.name] = args[self.slot()][self.KEY]
+        kwargs[self.name] = args[self.meta_slot()][self.QUANTIZER_KEY]
 
 
 class _ReferenceOpaqueAdapter(_Adapter):
@@ -712,7 +718,7 @@ class _SimpleBundleAdapter(_Adapter):
     simple-typed field names collected across the dataclass.
     """
 
-    SLOT = "_simple_meta"
+    META_SLOT = "_simple_meta"
 
     def __init__(self, names: List[str]) -> None:
         self.names = list(names)
@@ -737,15 +743,15 @@ class _SimpleBundleAdapter(_Adapter):
         return False
 
     def schema_slots(self) -> List[Tuple[str, str]]:
-        return [(self.SLOT, _OPAQUE_VALUE_BUNDLE_TYPE_NAME)]
+        return [(self.META_SLOT, _OPAQUE_VALUE_BUNDLE_TYPE_NAME)]
 
     def to_slots(self, owner: Any) -> Dict[str, Any]:
-        return {self.SLOT: OpaqueValueBundle({n: getattr(owner, n) for n in self.names})}
+        return {self.META_SLOT: OpaqueValueBundle({n: getattr(owner, n) for n in self.names})}
 
     def from_slots(self, args: Dict[str, Any], kwargs: Dict[str, Any]) -> None:
-        if self.SLOT not in args:
+        if self.META_SLOT not in args:
             return
-        meta = args[self.SLOT]
+        meta = args[self.META_SLOT]
         for n in self.names:
             kwargs[n] = meta[n]
 
@@ -787,7 +793,7 @@ class _UnsupportedAdapter(_Adapter):
                 f"{self.owner_cls_name} field {self.name!r} has a type not "
                 "supported by torch.compile (not Tensor, simple, Quantizer, or a "
                 "reference-opaque type such as ProcessGroup) and carries a "
-                "non-trivial value; add a matching adapter in dynamo.py to handle it."
+                "non-trivial value; add a matching adapter in custom_op.py to handle it."
             )
         return {}
 
@@ -852,7 +858,7 @@ def _tensor_field_names(adapters: List[_Adapter]) -> List[str]:
 
 
 def _build_schema(adapters: List[_Adapter]) -> Tuple[str, List[str]]:
-    """Return ``(schema_arg_str, slot_names)`` for a adapter list."""
+    """Return ``(schema_arg_str, slot_names)`` for an adapter list."""
     spec = [slot for b in adapters for slot in b.schema_slots()]
     names = [name for name, _ in spec]
     schema_str = "(" + ", ".join(f"{type_str} {name}" for name, type_str in spec) + ")"
@@ -917,7 +923,7 @@ def _spec_slot_count(spec: Optional[TensorSpec]) -> int:
     return len(spec.inner_names())
 
 
-def _spec_reassemble(
+def _unflatten_value(
     spec: Optional[TensorSpec],
     chunk: List[Optional[torch.Tensor]],
 ) -> Optional[Union[torch.Tensor, QuantizedTensorStorage]]:
@@ -932,12 +938,31 @@ def _spec_reassemble(
     return spec.assemble(chunk)
 
 
-def _value_to_flat_tensors(
+def _unflatten_values(
+    specs: Sequence[Optional[TensorSpec]],
+    flat: Sequence[Optional[torch.Tensor]],
+    cursor: int = 0,
+) -> Tuple[List[Any], int]:
+    """Rebuild one group of values from an op's flat return, starting at ``cursor``.
+
+    Returns the values and the new cursor, so consecutive groups (user outputs,
+    then saved tensors) can walk the same payload.
+    """
+    values: List[Any] = []
+    for spec in specs:
+        n = _spec_slot_count(spec)
+        chunk = [_decode_none(t) for t in flat[cursor : cursor + n]]
+        cursor += n
+        values.append(_unflatten_value(spec, chunk))
+    return values, cursor
+
+
+def _flatten_value(
     value: Optional[Union[torch.Tensor, QuantizedTensorStorage, TensorSpec]],
 ) -> List[torch.Tensor]:
     """Return the flat ``Tensor[]`` slots that represent one op output ``value``.
 
-    Inverse of :func:`_spec_reassemble`; the slot count matches
+    Inverse of :func:`_unflatten_value`; the slot count matches
     :func:`_spec_slot_count`.
     """
     if value is None:
@@ -964,9 +989,9 @@ def _check_fwd_result(result: Any) -> None:
     """Validate a fwd-impl return against the
     ``(*user_outputs, tensors_to_save, ctx_attrs)`` contract, with a clear
     message for op authors (user-output *types* are checked later, by
-    :func:`_value_to_flat_tensors`).
+    :func:`_flatten_value`).
 
-    Only called on the fake path (:func:`_split_fwd_fake_result`), which runs at
+    Only called on the fake path (:func:`_unpack_fwd_fake_result`), which runs at
     trace/compile time -- so this is a compile-time check with no per-call cost.
     The real impl must return the same shape as the fake, so validating the fake
     covers both.
@@ -984,7 +1009,7 @@ def _check_fwd_result(result: Any) -> None:
         raise TypeError("fwd impl 'ctx_attrs' slot must be a dict or None")
 
 
-def _format_fwd_result(result: Any) -> List[torch.Tensor]:
+def _pack_fwd_result(result: Any) -> List[torch.Tensor]:
     """Pack a fwd-impl return tuple into the op's ``Tensor[]`` payload.
 
     User outputs first, then saved-for-backward tensors in declaration order.
@@ -992,15 +1017,15 @@ def _format_fwd_result(result: Any) -> List[torch.Tensor]:
     num_outputs = len(result) - _FWD_TRAILING_SLOTS
     flat: List[torch.Tensor] = []
     for value in result[:num_outputs]:
-        flat.extend(_value_to_flat_tensors(value))
+        flat.extend(_flatten_value(value))
     saved = result[num_outputs]
     if saved is not None:
         for value in saved:
-            flat.extend(_value_to_flat_tensors(value))
+            flat.extend(_flatten_value(value))
     return flat
 
 
-def _format_bwd_result(grads: Any, num_grad_inputs: int, op_qualname: str) -> List[torch.Tensor]:
+def _pack_bwd_result(grads: Any, num_grad_inputs: int, op_qualname: str) -> List[torch.Tensor]:
     """Pack a backward-impl return tuple into the op's ``Tensor[]`` payload.
 
     Each grad occupies exactly one slot (validated against ``num_grad_inputs``);
@@ -1009,7 +1034,7 @@ def _format_bwd_result(grads: Any, num_grad_inputs: int, op_qualname: str) -> Li
     grads = list(grads)
     if len(grads) != num_grad_inputs:
         raise RuntimeError(
-            f"{op_qualname} expected backward_impl to return {num_grad_inputs} grads "
+            f"{op_qualname} expected bwd_impl to return {num_grad_inputs} grads "
             f"(one per input_tensors_for_grad entry), got {len(grads)}"
         )
     out: List[torch.Tensor] = []
@@ -1021,7 +1046,7 @@ def _format_bwd_result(grads: Any, num_grad_inputs: int, op_qualname: str) -> Li
     return out
 
 
-def _split_fwd_fake_result(
+def _unpack_fwd_fake_result(
     result: Tuple[Any, ...],
 ) -> Tuple[List[Any], List[Any], Dict[str, Any]]:
     """Slice a fwd fake-impl return into ``(user_fakes, saved_fakes, ctx_attrs)``."""
@@ -1071,7 +1096,7 @@ def _resolve_grad_targets(
     return slot_offset, grad_targets
 
 
-def _register_kernel(
+def _register_base_op(
     *,
     op_name: str,
     schema_str: str,
@@ -1081,26 +1106,26 @@ def _register_kernel(
     tensor_field_names: List[str],
     impl: Callable[[Any], Any],
     fake_impl: Callable[[Any], Any],
-    format_result: Callable[[Any], List[torch.Tensor]],
+    pack_result: Callable[[Any], List[torch.Tensor]],
 ) -> Any:
     """Define the op via ``torch.library.custom_op`` with the real ``impl`` + the
     ``fake_impl`` (spec), returning the ``CustomOpDef``.
 
     The real kernel rebuilds the dataclass and runs ``impl``; the fake kernel
     runs the spec fake impl on the :func:`_spec_view`. Both go through
-    ``format_result``.
+    ``pack_result``.
     """
 
     def _impl(*flat: Any) -> List[torch.Tensor]:
         kwargs = dict(zip(arg_names, flat))
         obj = _args_from_slots(arg_type, kwargs, adapters)
-        return format_result(impl(obj))
+        return pack_result(impl(obj))
 
     def _fake(*flat: Any) -> List[torch.Tensor]:
         kwargs = dict(zip(arg_names, flat))
         obj = _args_from_slots(arg_type, kwargs, adapters)
         spec_obj = _spec_view(obj, tensor_field_names)
-        return format_result(fake_impl(spec_obj))
+        return pack_result(fake_impl(spec_obj))
 
     op = torch.library.custom_op(
         f"{_TE_OP_NAMESPACE}::{op_name}", _impl, mutates_args=(), schema=schema_str
@@ -1122,7 +1147,7 @@ def _register_autograd_for_op(
     slot_count: int,
     grad_targets: List[int],
     setup_context_user: Callable[..., Any],
-    backward_obj_type: type,
+    bwd_arg_type: type,
     fwd_fake_impl: Callable[[Any], Tuple[Any, ...]],
 ) -> None:
     """Wire ``register_autograd`` on a forward op so its backward calls ``bwd_op``.
@@ -1133,31 +1158,19 @@ def _register_autograd_for_op(
     """
 
     def _setup_context(ctx, inputs, output):
-        ctx._te_fwd_tensor_list_lengths = {
+        ctx.fwd_tensor_list_lengths = {
             i: len(value) for i, value in enumerate(inputs) if isinstance(value, list)
         }
         kwargs = dict(zip(fwd_arg_names, inputs))
         fwd_obj = _args_from_slots(fwd_arg_type, kwargs, fwd_adapters)
         spec_obj = _spec_view(fwd_obj, fwd_tensor_field_names)
 
-        user_fakes, saved_fakes, ctx_attrs = _split_fwd_fake_result(fwd_fake_impl(spec_obj))
+        user_fakes, saved_fakes, ctx_attrs = _unpack_fwd_fake_result(fwd_fake_impl(spec_obj))
 
-        cursor = 0
-        user_outputs: List[Any] = []
-        for spec in user_fakes:
-            n = _spec_slot_count(spec)
-            chunk = [_decode_none(t) for t in output[cursor : cursor + n]]
-            cursor += n
-            user_outputs.append(_spec_reassemble(spec, chunk))
+        user_outputs, cursor = _unflatten_values(user_fakes, output)
+        saved_list, _ = _unflatten_values(saved_fakes, output, cursor)
 
-        saved_list: List[Any] = []
-        for spec in saved_fakes:
-            n = _spec_slot_count(spec)
-            chunk = [_decode_none(t) for t in output[cursor : cursor + n]]
-            cursor += n
-            saved_list.append(_spec_reassemble(spec, chunk))
-
-        bwd_obj = backward_obj_type()
+        bwd_obj = bwd_arg_type()
         tensors_to_save_from_setup = setup_context_user(
             bwd_obj,
             fwd_obj,
@@ -1168,24 +1181,23 @@ def _register_autograd_for_op(
         tensors_to_save, tensor_objects = prepare_for_saving(*(tensors_to_save_from_setup or ()))
         ctx.tensor_objects = tensor_objects
         ctx.save_for_backward(*tensors_to_save)
-        ctx.bwd_obj = bwd_obj
+        ctx.backward_objects = bwd_obj
 
     def _autograd_backward(ctx, *grad_outputs):
-        bwd_obj = ctx.bwd_obj
+        bwd_obj = ctx.backward_objects
         if hasattr(bwd_obj, "setup_saved_tensors"):
             bwd_obj.setup_saved_tensors(ctx)
         ctx.tensor_objects = None
-        per_output_grads = grad_outputs[0]
-        bwd_obj.grad_output = _decode_none(per_output_grads[0])
+        flat_grads = grad_outputs[0]
+        bwd_obj.grad_output = _decode_none(flat_grads[0])
         kwargs = _args_to_slots(bwd_obj, bwd_adapters)
         bwd_args_flat = [kwargs[name] for name in bwd_arg_names]
         grads = [_decode_none(g) for g in bwd_op(*bwd_args_flat)]
         # One grad per input schema slot: default None, but a ``Tensor[]`` slot
-        # (always recorded in ``_te_fwd_tensor_list_lengths``) needs a
+        # (always recorded in ``fwd_tensor_list_lengths``) needs a
         # list-shaped no-grad of matching length.
         out: List[Any] = [None] * slot_count
-        tensor_list_lengths = getattr(ctx, "_te_fwd_tensor_list_lengths", {})
-        for pos, length in tensor_list_lengths.items():
+        for pos, length in ctx.fwd_tensor_list_lengths.items():
             out[pos] = [None] * length
         for pos, g in zip(grad_targets, grads):
             out[pos] = g
@@ -1194,7 +1206,7 @@ def _register_autograd_for_op(
     fwd_op.register_autograd(_autograd_backward, setup_context=_setup_context)
 
 
-def _collect_tensor_or_quantized_slot_offsets(adapters: List[_Adapter]) -> List[int]:
+def _tensor_or_quantized_offsets(adapters: List[_Adapter]) -> List[int]:
     """Start index of each ``_TensorOrQuantizedAdapter`` group in the flat args."""
     offsets: List[int] = []
     pos = 0
@@ -1223,44 +1235,64 @@ def _flatten_subclass_into_slots(
         new_args[offset + 2] = meta
 
 
+def _make_slot_forwarder(
+    base_op: Any, slot_offsets: Sequence[int], subclasses: Sequence[type]
+) -> Callable[[Sequence[Any]], List[torch.Tensor]]:
+    """Return ``call(args)`` forwarding to ``base_op``, first flattening any
+    ``subclasses`` instance sitting in the tensor-or-quantized slot groups at
+    ``slot_offsets``.
+
+    A ``torch.library`` op cannot take a tensor subclass directly, so the wrapper
+    op body and its ``register_torch_dispatch`` rules all funnel through this one
+    path -- see the two-tier op note in the module docstring. With no slots or no
+    subclasses to flatten it is a plain pass-through.
+    """
+    enabled = bool(slot_offsets) and bool(subclasses)
+
+    def call(args: Sequence[Any]) -> List[torch.Tensor]:
+        if not enabled:
+            return base_op(*args)
+        new_args = list(args)
+        for sub in subclasses:
+            _flatten_subclass_into_slots(new_args, slot_offsets, sub)
+        return base_op(*new_args)
+
+    return call
+
+
+def _make_dispatch_rule(
+    forward: Callable[[Sequence[Any]], List[torch.Tensor]]
+) -> Callable[..., Any]:
+    """Adapt a slot forwarder to the ``register_torch_dispatch`` signature."""
+
+    def _rule(mode, func, types, args, kwargs):
+        del mode, func, types, kwargs
+        return forward(args)
+
+    return _rule
+
+
 def _register_wrapper_op(
     *,
     wrapper_op_name: str,
     schema_str: str,
     base_op: Any,
-    adapters: Optional[List[_Adapter]] = None,
+    slot_offsets: Sequence[int] = (),
+    subclasses: Sequence[type] = (),
 ) -> Any:
     """Define the wrapper op via ``torch.library.custom_op``: forward to the base
-    op, first flattening any ``QuantizedTensor`` subclass input into the base op's
-    slots.
-
-    A ``torch.library`` op cannot take a tensor subclass directly, so each such
-    input is unpacked into its tensor-or-quantized slots
-    (``_flatten_subclass_into_slots``) before forwarding to the base op -- see the
-    two-tier op note in the module docstring. The subclasses to flatten are the
-    live ``QuantizedTensor`` wrappers (e.g. ``Float8Tensor``), obtained from the
-    registry via ``_all_quantized_tensor_subclasses()``. With no adapters the
-    wrapper is a plain pass-through. Returns the ``CustomOpDef``.
+    op through :func:`_make_slot_forwarder`. Returns the ``CustomOpDef``.
     """
-    subclass_list = _all_quantized_tensor_subclasses()
-    input_flatten_enabled = bool(subclass_list) and adapters is not None
-    slot_offsets = (
-        _collect_tensor_or_quantized_slot_offsets(adapters) if input_flatten_enabled else []
-    )
+    forward = _make_slot_forwarder(base_op, slot_offsets, subclasses)
 
     def _forward(*flat: Any) -> List[torch.Tensor]:
-        if not input_flatten_enabled:
-            return base_op(*flat)
-        new_args = list(flat)
-        for sub in subclass_list:
-            _flatten_subclass_into_slots(new_args, slot_offsets, sub)
-        return base_op(*new_args)
+        return forward(flat)
 
-    op = torch.library.custom_op(
+    op_def = torch.library.custom_op(
         f"{_TE_OP_NAMESPACE}::{wrapper_op_name}", _forward, mutates_args=(), schema=schema_str
     )
-    op.register_fake(_forward)
-    return op
+    op_def.register_fake(_forward)
+    return op_def
 
 
 def _all_quantized_tensor_subclasses() -> List[type]:
@@ -1284,15 +1316,15 @@ def register_custom_op(
     fwd_arg_type: type,
     fwd_impl: Callable[[Any], Any],
     setup_context: Callable[..., Any],
-    backward_arg_type: type,
-    backward_impl: Callable[[Any], Any],
+    bwd_arg_type: type,
+    bwd_impl: Callable[[Any], Any],
     fwd_fake_impl: Callable[[Any], Tuple[Any, ...]],
     bwd_fake_impl: Callable[[Any], Tuple[Any, ...]],
 ) -> Optional[Callable[..., Any]]:
     """Register a TE module's forward + backward as torch custom ops.
 
-    Always two-tier: an base ``<op>_base`` op carries the real schema /
-    autograd, and an wrapper ``<op>`` op forwards to it, flattening any
+    Always two-tier: a base ``<op>_base`` op carries the real schema /
+    autograd, and a wrapper ``<op>`` op forwards to it, flattening any
     quantized-tensor wrapper inputs first via ``register_torch_dispatch`` (an
     empty subclass list simply makes the wrapper op a pass-through, so a pure
     plain-tensor / bf16 call goes straight through).
@@ -1301,7 +1333,7 @@ def register_custom_op(
     ``Function.apply`` under ``torch.compiler.is_compiling()`` that dispatches
     through the wrapper op and returns the user-facing outputs.
 
-    Arg containers. ``fwd_arg_type`` and ``backward_arg_type`` are ``@dataclass``es
+    Arg containers. ``fwd_arg_type`` and ``bwd_arg_type`` are ``@dataclass``es
     whose *field annotations* define the op schema: each field maps to one or more
     flat schema slots (tensor fields cross the boundary as tensors, quantizers ride
     as value-opaque objects, simple values are bundled -- see the ``_Adapter``
@@ -1309,13 +1341,13 @@ def register_custom_op(
     returned ``forward_fn``.
 
     How the backward container is populated. ``setup_context`` fills the
-    ``backward_arg_type`` instance's non-tensor fields (quantizers, config) from
+    ``bwd_arg_type`` instance's non-tensor fields (quantizers, config) from
     forward state and returns the tensors to persist; the framework saves them
-    (``ctx.save_for_backward``). Before ``backward_impl`` runs, the framework
+    (``ctx.save_for_backward``). Before ``bwd_impl`` runs, the framework
     restores those tensors into the container's *tensor* fields by calling its
     optional ``setup_saved_tensors(self, ctx)`` hook (invoked only if defined),
-    and sets ``grad_output`` directly. So ``backward_impl`` receives a
-    fully-populated ``backward_arg_type``.
+    and sets ``grad_output`` directly. So ``bwd_impl`` receives a
+    fully-populated ``bwd_arg_type``.
 
     Callable contracts:
 
@@ -1331,17 +1363,17 @@ def register_custom_op(
     * ``setup_context(bwd_obj, fwd_args, user_outputs, ctx_attrs, saved)
       -> tensors_to_save`` -- populate ``bwd_obj`` from forward state; return the
       tensors to persist across the boundary.
-    * ``backward_impl(bwd_args) -> grads`` -- exactly one grad per
+    * ``bwd_impl(bwd_args) -> grads`` -- exactly one grad per
       ``input_tensors_for_grad`` entry, in that order (``None`` for a
       non-differentiable input).
-    * ``bwd_fake_impl(bwd_args)`` -- data-free twin of ``backward_impl`` returning
+    * ``bwd_fake_impl(bwd_args)`` -- data-free twin of ``bwd_impl`` returning
       :class:`TensorSpec` grads.
-    * ``backward_arg_type.setup_saved_tensors(ctx)`` -- optional hook on the backward
+    * ``bwd_arg_type.setup_saved_tensors(ctx)`` -- optional hook on the backward
       container (see above); skipped if absent.
 
     ``input_tensors_for_grad`` lists the ``fwd_arg_type`` fields that receive
-    gradients (this fixes the backward grad order). ``backward_arg_type`` is both
-    the schema source and the type instantiated (``backward_arg_type()``) to hold
+    gradients (this fixes the backward grad order). ``bwd_arg_type`` is both
+    the schema source and the type instantiated (``bwd_arg_type()``) to hold
     the backward args, so it must be constructible with no arguments.
 
     Registration touches experimental ``torch.library`` / opaque-object APIs
@@ -1356,13 +1388,13 @@ def register_custom_op(
             fwd_arg_type=fwd_arg_type,
             fwd_impl=fwd_impl,
             setup_context=setup_context,
-            backward_arg_type=backward_arg_type,
-            backward_impl=backward_impl,
+            bwd_arg_type=bwd_arg_type,
+            bwd_impl=bwd_impl,
             fwd_fake_impl=fwd_fake_impl,
             bwd_fake_impl=bwd_fake_impl,
         )
     except (ImportError, AttributeError, RuntimeError, TypeError) as e:
-        warn_compile_unsupported(
+        warn_compile_disabled(
             f"could not register the custom op '{op_name}' ({type(e).__name__}: {e})"
         )
         return None
@@ -1375,8 +1407,8 @@ def _register_custom_op_impl(
     fwd_arg_type: type,
     fwd_impl: Callable[[Any], Any],
     setup_context: Callable[..., Any],
-    backward_arg_type: type,
-    backward_impl: Callable[[Any], Any],
+    bwd_arg_type: type,
+    bwd_impl: Callable[[Any], Any],
     fwd_fake_impl: Callable[[Any], Tuple[Any, ...]],
     bwd_fake_impl: Callable[[Any], Tuple[Any, ...]],
 ) -> Callable[..., Any]:
@@ -1397,7 +1429,7 @@ def _register_custom_op_impl(
     subclass_list = _all_quantized_tensor_subclasses()
 
     fwd_adapters = _get_adapters(fwd_arg_type)
-    bwd_adapters = _get_adapters(backward_arg_type)
+    bwd_adapters = _get_adapters(bwd_arg_type)
     fwd_tensor_field_names = _tensor_field_names(fwd_adapters)
     bwd_tensor_field_names = _tensor_field_names(bwd_adapters)
 
@@ -1412,7 +1444,7 @@ def _register_custom_op_impl(
 
     base_bwd_qualname = f"{_TE_OP_NAMESPACE}::{base_bwd_name}"
 
-    base_fwd_def = _register_kernel(
+    base_fwd_def = _register_base_op(
         op_name=base_fwd_name,
         schema_str=fwd_schema,
         arg_type=fwd_arg_type,
@@ -1421,29 +1453,35 @@ def _register_custom_op_impl(
         tensor_field_names=fwd_tensor_field_names,
         impl=fwd_impl,
         fake_impl=fwd_fake_impl,
-        format_result=_format_fwd_result,
+        pack_result=_pack_fwd_result,
     )
-    _register_kernel(
+    _register_base_op(
         op_name=base_bwd_name,
         schema_str=bwd_schema,
-        arg_type=backward_arg_type,
+        arg_type=bwd_arg_type,
         arg_names=bwd_arg_names,
         adapters=bwd_adapters,
         tensor_field_names=bwd_tensor_field_names,
-        impl=backward_impl,
+        impl=bwd_impl,
         fake_impl=bwd_fake_impl,
-        format_result=lambda g: _format_bwd_result(g, num_grad_inputs, base_bwd_qualname),
+        pack_result=lambda g: _pack_bwd_result(g, num_grad_inputs, base_bwd_qualname),
     )
 
     base_fwd_op = getattr(getattr(torch.ops, _TE_OP_NAMESPACE), base_fwd_name)
     base_bwd_op = getattr(getattr(torch.ops, _TE_OP_NAMESPACE), base_bwd_name)
 
+    fwd_slot_offsets = _tensor_or_quantized_offsets(fwd_adapters)
+    bwd_slot_offsets = _tensor_or_quantized_offsets(bwd_adapters)
+
     wrapper_fwd_def = _register_wrapper_op(
         wrapper_op_name=wrapper_fwd_name,
         schema_str=fwd_schema,
         base_op=base_fwd_op,
-        adapters=fwd_adapters,
+        slot_offsets=fwd_slot_offsets,
+        subclasses=subclass_list,
     )
+    # Pass-through: a subclass input reaches the base op through the dispatch
+    # rule below, never through the wrapper body.
     wrapper_bwd_def = _register_wrapper_op(
         wrapper_op_name=wrapper_bwd_name, schema_str=bwd_schema, base_op=base_bwd_op
     )
@@ -1458,7 +1496,7 @@ def _register_custom_op_impl(
         "slot_count": slot_count,
         "grad_targets": grad_targets,
         "setup_context_user": setup_context,
-        "backward_obj_type": backward_arg_type,
+        "bwd_arg_type": bwd_arg_type,
         "fwd_fake_impl": fwd_fake_impl,
     }
     wrapper_fwd_op = getattr(getattr(torch.ops, _TE_OP_NAMESPACE), wrapper_fwd_name)
@@ -1467,22 +1505,12 @@ def _register_custom_op_impl(
     _register_autograd_for_op(fwd_op=base_fwd_def, bwd_op=base_bwd_op, **autograd_common)
     _register_autograd_for_op(fwd_op=wrapper_fwd_def, bwd_op=wrapper_bwd_op, **autograd_common)
 
-    fwd_slot_offsets = _collect_tensor_or_quantized_slot_offsets(fwd_adapters)
-    bwd_slot_offsets = _collect_tensor_or_quantized_slot_offsets(bwd_adapters)
-
-    def _fwd_rule(mode, func, types, args, kwargs):
-        del mode, func, types, kwargs
-        new_args = list(args)
-        for sub in subclass_list:
-            _flatten_subclass_into_slots(new_args, fwd_slot_offsets, sub)
-        return base_fwd_op(*new_args)
-
-    def _bwd_rule(mode, func, types, args, kwargs):
-        del mode, func, types, kwargs
-        new_args = list(args)
-        for sub in subclass_list:
-            _flatten_subclass_into_slots(new_args, bwd_slot_offsets, sub)
-        return base_bwd_op(*new_args)
+    _fwd_rule = _make_dispatch_rule(
+        _make_slot_forwarder(base_fwd_op, fwd_slot_offsets, subclass_list)
+    )
+    _bwd_rule = _make_dispatch_rule(
+        _make_slot_forwarder(base_bwd_op, bwd_slot_offsets, subclass_list)
+    )
 
     for sub in subclass_list:
         wrapper_fwd_def.register_torch_dispatch(sub, _fwd_rule)
@@ -1495,19 +1523,12 @@ def _register_custom_op_impl(
 
     def forward_fn(fwd_args):
         spec_obj = _spec_view(fwd_args, fwd_tensor_field_names)
-        user_fakes, _saved_fakes, _ctx_attrs = _split_fwd_fake_result(fwd_fake_impl(spec_obj))
+        user_fakes, _saved_fakes, _ctx_attrs = _unpack_fwd_fake_result(fwd_fake_impl(spec_obj))
         kwargs = _args_to_slots(fwd_args, fwd_adapters)
         flat_in = [kwargs[name] for name in fwd_arg_names]
         result = wrapper_fwd_op(*flat_in)
 
-        cursor = 0
-        outputs: List[Any] = []
-        for spec in user_fakes:
-            n = _spec_slot_count(spec)
-            chunk = [_decode_none(t) for t in result[cursor : cursor + n]]
-            cursor += n
-            outputs.append(_spec_reassemble(spec, chunk))
-
+        outputs, _ = _unflatten_values(user_fakes, result)
         if len(outputs) == 1:
             return outputs[0]
         return tuple(outputs)

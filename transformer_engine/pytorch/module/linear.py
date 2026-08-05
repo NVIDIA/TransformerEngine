@@ -8,7 +8,6 @@ from dataclasses import dataclass, replace as dataclass_replace
 from typing import Any, Callable, Dict, Optional, Tuple, Union, List
 from functools import reduce
 from operator import mul as multiply_op
-import math
 import warnings
 import weakref
 
@@ -50,6 +49,7 @@ from ..utils import (
     nvtx_range_push,
     get_nvtx_range_context,
     warn_compile_eager_fallback,
+    check_gemm_dims,
 )
 from ..distributed import (
     set_tensor_model_parallel_attributes,
@@ -83,7 +83,12 @@ from ..quantized_tensor import (
     prepare_for_saving,
     restore_from_func_ctx,
 )
-from ..dynamo import TensorSpec, register_custom_op, is_value_opaque_quantizer
+from ..dynamo import (
+    TensorSpec,
+    TensorOrQuantized,
+    register_custom_op,
+    is_value_opaque_quantizer,
+)
 from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantizer
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor.utils import clear_columnwise_cache, is_custom
@@ -97,12 +102,6 @@ from ..cpu_offload import (
 from ...debug.pytorch.debug_state import TEDebugState
 
 __all__ = ["Linear"]
-
-
-# Fields with this union may hold a *bare* ``QuantizedTensorStorage`` (the
-# internal-quantizer optimization; see its docstring), not just a plain /
-# subclass tensor -- hence the union rather than a plain ``torch.Tensor``.
-TensorOrQuantized = Union[torch.Tensor, QuantizedTensorStorage]
 
 
 @dataclass(slots=True)
@@ -294,7 +293,7 @@ class LinearBwdArgs:
     cpu_offloading: bool = False
     owns_input: bool = False
 
-    # --- Per-backward scratch state (populated inside _linear_backward) ---
+    # --- Per-backward scratch state (populated inside _linear_backward_impl) ---
     ub_obj_gradout: Optional[Any] = None
 
     def setup_saved_tensors(self, ctx: torch.autograd.function.FunctionCtx) -> None:
@@ -317,6 +316,35 @@ def _check_fp8_reduce_and_update():
     if in_fp8_activation_recompute_phase():
         qstate.is_first_fp8_module = _first_fp8_module
     return result
+
+
+def _sp_out_leading(leading: int, args: Union[LinearFwdArgs, LinearBwdArgs]) -> int:
+    """Leading (sequence) dim of the output, given the input's.
+
+    Under sequence parallelism a column-parallel layer gathers that dim and a
+    row-parallel one scatters it; without SP it passes through.
+    """
+    if not args.sequence_parallel:
+        return leading
+    if args.parallel_mode == "column":
+        return leading * args.tp_size
+    if args.parallel_mode == "row":
+        return leading // args.tp_size
+    return leading
+
+
+def _sp_inp_leading(leading: int, args: Union[LinearFwdArgs, LinearBwdArgs]) -> int:
+    """Inverse of :func:`_sp_out_leading`: input's leading dim from the output's.
+
+    Used by backward, which reconstructs the input geometry from ``grad_output``.
+    """
+    if not args.sequence_parallel:
+        return leading
+    if args.parallel_mode == "column":
+        return leading // args.tp_size
+    if args.parallel_mode == "row":
+        return leading * args.tp_size
+    return leading
 
 
 def _linear_forward_impl(
@@ -354,7 +382,7 @@ def _linear_forward_impl(
     debug = args.debug
     backward_override = args.backward_override
     is_fsdp2 = args.is_fsdp2
-    backward_needs_input = is_grad_enabled and weight.requires_grad
+    backward_needs_input = is_grad_enabled and args.weight_requires_grad
     if backward_override == "high_precision":
         save_original_input = True
     elif backward_override == "dequantized":
@@ -396,7 +424,6 @@ def _linear_forward_impl(
 
     # Configure tensor-parallel communication
     tp_world_size = get_distributed_world_size(tp_group)
-    backward_needs_input = is_grad_enabled and args.weight_requires_grad
     with_input_all_gather_nccl = (
         parallel_mode == "column" and sequence_parallel and not ub_overlap_ag_fprop
     )
@@ -708,7 +735,7 @@ def _linear_forward_impl(
         elif wt_save is weight:
             wt_alias = "weight"
         elif new_weight_workspace is not None and wt_save is new_weight_workspace:
-            wt_alias = "new_workspace"
+            wt_alias = "new_weight_workspace"
         elif args.weight_workspace is not None and wt_save is args.weight_workspace:
             wt_alias = "weight_workspace"
         else:
@@ -734,7 +761,7 @@ def _linear_forward_impl(
     return out, new_weight_workspace, tensors_to_save_from_forward, ctx_attrs
 
 
-def _linear_forward_impl_fake(
+def _linear_forward_fake(
     args: LinearFwdArgs,
 ) -> Tuple[TensorSpec, Optional[TensorSpec], Optional[Tuple[Any, ...]], Optional[Dict]]:
     """Shape/metadata-only twin of :func:`_linear_forward_impl` for torch.compile,
@@ -853,11 +880,7 @@ def _linear_forward_impl_fake(
     # ------------------------------------------------------
     # Output tensor: y = x @ w^T (quantized iff an output quantizer is set).
     # ------------------------------------------------------
-    out_leading = inp.shape[0]
-    if args.parallel_mode == "column" and args.sequence_parallel:
-        out_leading = out_leading * args.tp_size
-    elif args.parallel_mode == "row" and args.sequence_parallel:
-        out_leading = out_leading // args.tp_size
+    out_leading = _sp_out_leading(inp.shape[0], args)
     out = TensorSpec(
         shape=(out_leading, *tuple(inp.shape[1:-1]), out_features),
         dtype=activation_dtype,
@@ -917,7 +940,7 @@ def _linear_forward_impl_fake(
         elif args.is_fsdp2:
             pass  # FSDP2 re-quantizes from the gathered weight in backward.
         elif weightmat_is_storage and new_weight_workspace is not None:
-            wt_alias = "new_workspace"
+            wt_alias = "new_weight_workspace"
         elif weightmat_is_storage and args.weight_workspace is not None:
             wt_alias = "weight_workspace"
         elif weightmat_is_storage:
@@ -1056,7 +1079,7 @@ def _linear_setup_ctx(
         saved_inputmat = inp
     if wt_save_alias == "weight":
         wt_save = weight
-    elif wt_save_alias == "new_workspace":
+    elif wt_save_alias == "new_weight_workspace":
         wt_save = fwd_outputs[1]
     elif wt_save_alias == "weight_workspace":
         wt_save = fwd_args.weight_workspace
@@ -1067,7 +1090,7 @@ def _linear_setup_ctx(
     return (saved_inputmat, wt_save, saved_weight, saved_bias)
 
 
-def _linear_backward(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None], ...]:
+def _linear_backward_impl(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None], ...]:
     """Backward implementation for the linear layer.
 
     Caller must have populated ``args.grad_output`` and run
@@ -1142,13 +1165,7 @@ def _linear_backward(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None], ..
         # Reconstruct inp_shape when not stored (compiled mode with dynamic shapes).
         if bwd_args.inp_shape is None:
             in_features = saved_weight.shape[-1]
-            go_leading = grad_output.shape[0]
-            if bwd_args.parallel_mode == "column" and bwd_args.sequence_parallel:
-                inp_leading = go_leading // bwd_args.tp_size
-            elif bwd_args.parallel_mode == "row" and bwd_args.sequence_parallel:
-                inp_leading = go_leading * bwd_args.tp_size
-            else:
-                inp_leading = go_leading
+            inp_leading = _sp_inp_leading(grad_output.shape[0], bwd_args)
             bwd_args.inp_shape = torch.Size([inp_leading, *grad_output.shape[1:-1], in_features])
 
         # Configure Userbuffers communication (comm+GEMM overlap)
@@ -1680,10 +1697,10 @@ def _linear_backward(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None], ..
     )
 
 
-def _linear_backward_impl_fake(
+def _linear_backward_fake(
     args: LinearBwdArgs,
 ) -> Tuple[Optional[TensorSpec], Optional[TensorSpec], Optional[TensorSpec]]:
-    """Allocation-free fake of :func:`_linear_backward` on ``TensorSpec``.
+    """Allocation-free fake of :func:`_linear_backward_impl` on ``TensorSpec``.
 
     The saved-tensor fields of ``args`` carry
     :class:`~transformer_engine.pytorch.dynamo.TensorSpec` instances. Returns
@@ -1705,7 +1722,7 @@ def _linear_backward_impl_fake(
     out_dtype = args.activation_dtype
     out_features, in_features = weight.shape
 
-    # Mirror ``_linear_backward``: ``set_usage`` on ``grad_input_quantizer``
+    # Mirror ``_linear_backward_impl``: ``set_usage`` on ``grad_input_quantizer``
     # influences ``dgrad``'s buffer layout.
     if args.grad_input_quantizer is not None:
         args.grad_input_quantizer.set_usage(rowwise=True, columnwise=False)
@@ -1716,13 +1733,7 @@ def _linear_backward_impl_fake(
         # Derive shape from grad_output + weight + SP config instead of args.inp_shape:
         # inp_shape is not stored in the value bundle under dynamic shapes (SymInt is
         # not hashable in OpaqueValueBundle), so we reconstruct it here.
-        go_leading = args.grad_output.shape[0]
-        if args.parallel_mode == "column" and args.sequence_parallel:
-            dgrad_leading = go_leading // args.tp_size
-        elif args.parallel_mode == "row" and args.sequence_parallel:
-            dgrad_leading = go_leading * args.tp_size
-        else:
-            dgrad_leading = go_leading
+        dgrad_leading = _sp_inp_leading(args.grad_output.shape[0], args)
         dgrad = TensorSpec(
             shape=(dgrad_leading, *args.grad_output.shape[1:-1], in_features),
             dtype=out_dtype,
@@ -1758,11 +1769,11 @@ _linear_op = register_custom_op(
     input_tensors_for_grad=["weight", "inp", "bias"],
     fwd_arg_type=LinearFwdArgs,
     fwd_impl=_linear_forward_impl,
-    fwd_fake_impl=_linear_forward_impl_fake,
+    fwd_fake_impl=_linear_forward_fake,
     setup_context=_linear_setup_ctx,
-    backward_arg_type=LinearBwdArgs,
-    backward_impl=_linear_backward,
-    bwd_fake_impl=_linear_backward_impl_fake,
+    bwd_arg_type=LinearBwdArgs,
+    bwd_impl=_linear_backward_impl,
+    bwd_fake_impl=_linear_backward_fake,
 )
 
 
@@ -1836,7 +1847,7 @@ class _Linear(torch.autograd.Function):
         nvtx_label = "transformer_engine._Linear.backward"
         if bwd_args.ub_name is not None:
             nvtx_label = f"{nvtx_label}.{bwd_args.ub_name}"
-        result = _linear_backward(bwd_args) + (None,)  # fwd_args grad slot
+        result = _linear_backward_impl(bwd_args) + (None,)  # fwd_args grad slot
         reduce_and_update_bwd_fp8_tensors = bwd_args.reduce_and_update_bwd_fp8_tensors
         # Drop all references held by bwd_args (saved tensors, quantizers, weakrefs,
         # main_grad closure) so they don't outlive backward via ctx under retain_graph.
@@ -2379,30 +2390,7 @@ class Linear(TransformerEngineBaseModule):
                 ub_bulk_dgrad = self.ub_bulk_dgrad
                 ub_bulk_wgrad = self.ub_bulk_wgrad
 
-            torch._check(
-                inp.shape[-1] == weight_tensor.shape[-1],
-                lambda: "GEMM not possible: input last dim must equal in_features",
-            )
-            if self.fp8:
-                torch._check(
-                    math.prod(inp.shape[:-1]) % 8 == 0,
-                    lambda: (
-                        "FP8 execution requires the product of all input dimensions except"
-                        " the last to be divisible by 8"
-                    ),
-                )
-                torch._check(
-                    inp.shape[-1] % 16 == 0,
-                    lambda: "FP8 execution requires the input last dimension to be divisible by 16",
-                )
-                torch._check(
-                    weight_tensor.shape[0] % 16 == 0,
-                    lambda: "FP8 execution requires out_features to be divisible by 16",
-                )
-                torch._check(
-                    weight_tensor.shape[1] % 16 == 0,
-                    lambda: "FP8 execution requires in_features to be divisible by 16",
-                )
+            check_gemm_dims(inp, weight_tensor, self.fp8)
 
             linear_bias_tensor = (
                 bias_tensor if (self.apply_bias and not self.gemm_bias_unfused_add) else None

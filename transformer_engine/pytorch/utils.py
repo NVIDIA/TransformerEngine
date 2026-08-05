@@ -26,6 +26,30 @@ __all__ = [
 ]
 
 
+_warned_compile_disabled = False
+
+
+def warn_compile_disabled(reason: str) -> None:
+    """Warn once per process that TE's torch.compile custom-op path is off.
+
+    Registration of the torch.compile machinery either works or fails as a
+    whole, so one message is enough. Distinct from
+    :func:`warn_compile_eager_fallback`, which reports a single *configuration*
+    falling back while the path itself is available.
+    """
+    global _warned_compile_disabled  # pylint: disable=global-statement
+    if _warned_compile_disabled:
+        return
+    _warned_compile_disabled = True
+    warnings.warn(
+        "Transformer Engine torch.compile support is disabled: "
+        f"{reason}. Modules will fall back to eager execution under "
+        "torch.compile, i.e. a graph break, which is incompatible with "
+        "fullgraph=True. Use a newer PyTorch build.",
+        stacklevel=3,
+    )
+
+
 def warn_compile_eager_fallback(reason: str) -> None:
     """Warn that a TE module is running eagerly under ``torch.compile``.
 
@@ -636,6 +660,32 @@ def assert_dim_for_fp8_exec(*tensors: List[torch.Tensor]) -> None:
                 f" with dims={list(tensor.size())} (product of leading dims ="
                 f" {math.prod(tensor.shape[:-1])}, last dim = {tensor.shape[-1]})"
             )
+
+
+def check_gemm_dims(inp: torch.Tensor, weight: torch.Tensor, fp8: bool) -> None:
+    """Validate the dims of a TN GEMM pair (``y = x @ w^T``) for ``inp``/``weight``.
+
+    The torch.compile-friendly counterpart of :func:`assert_dim_for_fp8_exec`:
+    uses ``torch._check`` so under dynamic shapes the constraints become guards
+    instead of being silently baked into the trace.
+    """
+    # pylint: disable=protected-access
+    torch._check(
+        inp.shape[-1] == weight.shape[-1],
+        lambda: "GEMM not possible: input last dim must equal in_features",
+    )
+    if not fp8:
+        return
+    for ok, requirement in (
+        (
+            math.prod(inp.shape[:-1]) % 8 == 0,
+            "the product of all input dims except the last to be divisible by 8",
+        ),
+        (inp.shape[-1] % 16 == 0, "the input last dim to be divisible by 16"),
+        (weight.shape[0] % 16 == 0, "out_features to be divisible by 16"),
+        (weight.shape[1] % 16 == 0, "in_features to be divisible by 16"),
+    ):
+        torch._check(ok, lambda r=requirement: f"FP8 execution requires {r}")
 
 
 def is_bf16_compatible() -> bool:
