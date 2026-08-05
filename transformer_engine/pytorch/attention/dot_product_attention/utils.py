@@ -2966,7 +2966,7 @@ def mxfp8_quantize_only(tensor_quantizer_pairs, src_format):
         quantizer.optimize_for_gemm = False
         fp8_2d = quantizer(t2d)
         quantizer.optimize_for_gemm = orig_optimize
-        # Re-wrap with the original 4D SBHD shape so that shape[-1] equals the per-head
+        # Re-wrap with the original 4D SBHD/BSHD shape so that shape[-1] equals the per-head
         # dimension (matching Q's wrapper shape) and fused_attn_bwd produces 4D dkv that
         # matches key/value's expected gradient shape in _KFQuantizeKVForAttn.backward.
         fp8_t = MXFP8Tensor(
