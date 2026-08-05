@@ -1358,7 +1358,7 @@ class GroupedLinear(BasicOperation):
             # rowwise scales for the GEMM.
             grouped_x = input_.copy()
             if weight_requires_grad:
-                tex.group_requantize_columnwise_and_swizzle_rowwise_(
+                tex.group_requantize(
                     grouped_x,
                     make_columnwise_gemm_quantizer(input_quantizers[0]),
                     num_groups,
@@ -1765,7 +1765,7 @@ class GroupedLinear(BasicOperation):
                 # which is only kept when there is a bias.
                 grouped_dy = grad_output.copy()
                 if ctx.weight_requires_grad:
-                    dy_2d = tex.group_requantize_columnwise_and_swizzle_rowwise_(
+                    dy_2d = tex.group_requantize(
                         grouped_dy,
                         make_columnwise_gemm_quantizer(grad_output_quantizer),
                         num_groups,

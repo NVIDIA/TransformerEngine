@@ -1225,7 +1225,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                 # manufacture the columnwise copy needed by the wgrad GEMM
                 # and swizzle the rowwise scales for the forward GEMM.
                 if weight_requires_grad:
-                    tex.group_requantize_columnwise_and_swizzle_rowwise_(
+                    tex.group_requantize(
                         grouped_fc1_x,
                         make_columnwise_gemm_quantizer(fc1_input_quantizer),
                         num_groups,
@@ -1878,7 +1878,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                 grouped_fc2_dy = grad_output.copy()
                 need_dequantized = output_fc2_dbias or scale_bias
                 if fc2_ctx.weight_requires_grad:
-                    fc2_dy = tex.group_requantize_columnwise_and_swizzle_rowwise_(
+                    fc2_dy = tex.group_requantize(
                         grouped_fc2_dy,
                         make_columnwise_gemm_quantizer(fc2_grad_output_quantizer),
                         num_groups,
