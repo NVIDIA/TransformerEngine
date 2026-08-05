@@ -1154,6 +1154,41 @@ def test_quantized_model_init_high_precision_init_val():
     ), "clear_high_precision_init_val() not work"
 
 
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+@pytest.mark.parametrize("move", ["cuda", "cpu", "half"])
+def test_quantized_param_attrs_survive_apply(move):
+    """Attributes attached to a quantized parameter survive nn.Module._apply.
+
+    Quantized parameters implement the flatten protocol, so ``_apply`` moves them
+    with ``swap_tensors``, which exchanges the parameter's whole ``__dict__``.
+    Anything attached from the outside rides out on the discarded tensor unless
+    the module re-attaches it.
+    """
+    with quantized_model_init(preserve_high_precision_init_val=True):
+        model = Linear(64, 64)
+
+    weight = model.weight
+    expected = weight.get_high_precision_init_val()
+    weight.probe_attr = "attached-from-outside"
+
+    if move == "cuda":
+        model = model.cuda()
+    elif move == "cpu":
+        model = model.cpu()
+    else:
+        model = model.half()
+
+    weight = model.weight
+    assert hasattr(weight, "get_high_precision_init_val"), f"accessor lost by .{move}()"
+    assert hasattr(weight, "clear_high_precision_init_val"), f"accessor lost by .{move}()"
+    torch.testing.assert_close(weight.get_high_precision_init_val(), expected, rtol=0, atol=0)
+    assert weight.probe_attr == "attached-from-outside", f"custom attr lost by .{move}()"
+
+    # The accessor must read the surviving parameter, not the discarded one.
+    weight.clear_high_precision_init_val()
+    assert weight.get_high_precision_init_val() is None
+
+
 @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
 def test_grouped_linear_single_param_preserves_high_precision_init(monkeypatch):
     """Grouped MXFP8 and discrete weights produce identical FP32 master initialization."""
