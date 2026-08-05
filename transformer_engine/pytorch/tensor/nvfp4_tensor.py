@@ -7,7 +7,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 import math
 import warnings
-from typing import Dict, Optional, Tuple, Union
+from typing import Any, Dict, Optional, Tuple, Union
 import functools
 
 import torch
@@ -254,6 +254,10 @@ class NVFP4Quantizer(Quantizer):
         """Quantize tensor implementation"""
         return tex.quantize(tensor, self)
 
+    def is_requantization_safe(self) -> bool:
+        """NVFP4 quantization is replay-safe unless stochastic rounding is enabled."""
+        return not self.stochastic_rounding
+
     def is_quantizable(self, inp: torch.Tensor) -> bool:
         """Returns whether or not given inp can be quantized"""
         if self.row_scaled_nvfp4:
@@ -344,6 +348,55 @@ class NVFP4Quantizer(Quantizer):
 
     def _get_compatible_recipe(self) -> Union[type[Recipe], None]:
         return NVFP4BlockScaling
+
+    # ----- TensorSpec / pure-Python allocation -----
+
+    def storage_metadata(self, fake_dtype: torch.dtype) -> Dict[str, Any]:
+        return {
+            "cls": NVFP4TensorStorage if self.internal else NVFP4Tensor,
+            "nontensor_kwargs": {
+                "fp4_dtype": self.dtype,
+                "quantizer": self,
+                "with_gemm_swizzled_scales": self.optimize_for_gemm,
+                "row_scaled_nvfp4": self.row_scaled_nvfp4,
+                "nvfp4_use_4over6": self.nvfp4_use_4over6,
+                "nvfp4_e4m3_max": self.nvfp4_e4m3_max,
+                "fake_dtype": fake_dtype,
+            },
+        }
+
+    def inner_tensor_specs(
+        self, shape: Tuple[int, ...]
+    ) -> Dict[str, Tuple[Tuple[int, ...], torch.dtype]]:
+        shape = tuple(shape)
+        specs: Dict[str, Tuple[Tuple[int, ...], torch.dtype]] = {}
+        # FP4 data packs 2 values per byte (uint8); block scales are E4M3 stored
+        # as uint8; amax inner tensors are FP32 (per-row when row-scaled, else scalar).
+        # Order matches NVFP4TensorStorage._INNER_TENSORS (the canonical
+        # __tensor_flatten__ order): data + scale_inv per usage first, amax last.
+        # Workaround: call @staticmethods via the class, not the instance --
+        # instance access breaks torch.compile guard generation (pytorch #182741).
+        if self.rowwise_usage:
+            specs["_rowwise_data"] = (type(self).convert_shape_for_fp4(shape), torch.uint8)
+            specs["_rowwise_scale_inv"] = (
+                tuple(self.get_scale_shape(shape, columnwise=False)),
+                torch.uint8,
+            )
+        if self.columnwise_usage:
+            specs["_columnwise_data"] = (
+                type(self).convert_shape_for_fp4(type(self).get_columnwise_shape(shape)),
+                torch.uint8,
+            )
+            specs["_columnwise_scale_inv"] = (
+                tuple(self.get_scale_shape(shape, columnwise=True)),
+                torch.uint8,
+            )
+        if self.rowwise_usage:
+            amax_rowwise_shape = (math.prod(shape[:-1]),) if self.row_scaled_nvfp4 else (1,)
+            specs["_amax_rowwise"] = (amax_rowwise_shape, torch.float32)
+        if self.columnwise_usage:
+            specs["_amax_columnwise"] = ((1,), torch.float32)
+        return specs
 
 
 register_value_opaque_quantizer(NVFP4Quantizer)
