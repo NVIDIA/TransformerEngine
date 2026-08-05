@@ -19,6 +19,7 @@ import torch
 import transformer_engine.pytorch as te
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.attention import FusedMLAQUpProjRopeQuant
+from transformer_engine.pytorch.cpp_extensions import general_gemm
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer, MXFP8Tensor
 
 # DSv3 671B MLA dims
@@ -190,6 +191,63 @@ def test_fused_mla_q_uproj_x_saved_is_mxfp8() -> None:
     ), f"x_saved should be MXFP8Tensor for MXFP8 weight path, got {type(x_saved)}"
     assert x_saved._columnwise_data is not None, "x_saved must retain columnwise data for wgrad"
     assert x_saved._rowwise_data is None, "x_saved rowwise data should be dropped after forward"
+
+
+@pytest.mark.skipif(not fused_supported, reason=reason_not_supported)
+@pytest.mark.parametrize("tokens", [128, 256], ids=["tokens128", "tokens256"])
+def test_fused_mla_q_uproj_backward(tokens: int) -> None:
+    """Backward pass (dgrad + wgrad) via general_gemm must match a bf16 reference.
+
+    Mirrors the exact backward path in _FusedMLAQUpProjFunction.backward():
+      - grad_output quantized to MXFP8 with optimize_for_gemm=True
+      - dgrad: general_gemm(w[colwise], gy[rowwise], layout="NN")
+      - wgrad: general_gemm(x_saved[colwise], gy[colwise], layout="NT")
+    """
+    s, b = tokens, 1
+    device = torch.device("cuda")
+    torch.manual_seed(SEED)
+    torch.cuda.manual_seed(SEED)
+
+    x = torch.randn(tokens, Q_LORA_RANK, dtype=torch.bfloat16, device=device)
+    # Backward needs columnwise data on w for the dgrad GEMM (general_gemm layout="NN"
+    # unwraps A via the columnwise direction), so quantize with both directions here.
+    w_bf16 = torch.randn(PROJ_DIM, Q_LORA_RANK, dtype=torch.bfloat16, device=device)
+    w = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3, rowwise=True, columnwise=True)(w_bf16)
+    cos, sin = _build_rope_tables(tokens, device)
+
+    _, x_saved = FusedMLAQUpProjRopeQuant.run(x, w, cos, sin, s, b)
+
+    # Synthetic grad output [tokens, PROJ_DIM] matching the post-RoPE GEMM output shape.
+    grad_output = torch.randn(tokens, PROJ_DIM, dtype=torch.bfloat16, device=device)
+
+    # Quantize grad output with optimize_for_gemm=True (pre-swizzled scales), matching
+    # the backward path in _FusedMLAQUpProjFunction.backward().
+    grad_output_quantizer = MXFP8Quantizer(
+        fp8_dtype=tex.DType.kFloat8E4M3, rowwise=True, columnwise=True
+    )
+    grad_output_quantizer.optimize_for_gemm = True
+    gy = grad_output_quantizer(grad_output)
+
+    # dgrad: grad_input = grad_output @ W  (A=W[colwise], B=gy[rowwise], NN)
+    grad_x = general_gemm(
+        w, gy, layout="NN", grad=True, out_dtype=torch.bfloat16, use_split_accumulator=True
+    )[0]
+
+    # wgrad: grad_weight = x_saved^T @ grad_output  (A=x_saved[colwise], B=gy[colwise], NT)
+    grad_w = general_gemm(
+        x_saved, gy, layout="NT", grad=True, out_dtype=torch.bfloat16, use_split_accumulator=True
+    )[0]
+
+    # bf16 reference (dequantized inputs, no FP8 GEMM noise)
+    x_dq = x_saved.dequantize().to(torch.bfloat16)
+    w_dq = w.dequantize().to(torch.bfloat16)
+    gy_dq = gy.dequantize().to(torch.bfloat16)
+
+    ref_grad_x = gy_dq @ w_dq           # [tokens, Q_LORA_RANK]
+    ref_grad_w = gy_dq.t() @ x_dq       # [PROJ_DIM, Q_LORA_RANK]
+
+    torch.testing.assert_close(grad_x, ref_grad_x, atol=0.5, rtol=0.1)
+    torch.testing.assert_close(grad_w, ref_grad_w, atol=0.5, rtol=0.1)
 
 
 def _build_rope_tables(tokens: int, device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
