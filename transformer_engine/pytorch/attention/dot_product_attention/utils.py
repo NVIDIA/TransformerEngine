@@ -1231,13 +1231,6 @@ def get_attention_backend(
                 cp_comm_type,
             )
             use_fused_attention = False
-        elif qkv_format == "thd" and cp_comm_type in ["a2a+p2p"]:
-            logger.debug(
-                "Disabling FusedAttention as it does not support context parallelism with THD"
-                " format and cp_comm_type = %s",
-                cp_comm_type,
-            )
-            use_fused_attention = False
         elif (
             window_size is not None
             and (window_size[0] != -1 or window_size[1] not in [-1, 0])
