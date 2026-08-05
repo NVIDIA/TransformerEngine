@@ -219,7 +219,9 @@ def run_test_case(method, act, shape, block_size, in_dtype, fp8_dtype, swizzled=
     )
 
     layout = "swizzled" if swizzled else "linear"
-    tag = f"{method}/{act["name"]}/{M}x{N}/{DTYPE_TO_STR[in_dtype]}/{FP8_TO_STR[fp8_dtype]}/{layout}"
+    tag = (
+        f"{method}/{act["name"]}/{M}x{N}/{DTYPE_TO_STR[in_dtype]}/{FP8_TO_STR[fp8_dtype]}/{layout}"
+    )
     for name, cuda_bytes in cuda_output.items():
         assert torch.equal(
             cutedsl_output[name], cuda_bytes
