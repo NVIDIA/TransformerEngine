@@ -71,7 +71,6 @@ from ..tensor import (
     HybridQuantizer,
     IdentityQuantizer,
     MXFP8Quantizer,
-    NVFP4Quantizer,
 )
 from ..quantized_tensor import (
     QuantizedTensorStorage,
@@ -81,7 +80,6 @@ from ..quantized_tensor import (
 )
 from ...debug.pytorch.debug_quantization import DebugQuantizer
 from ...debug.pytorch.debug_state import TEDebugState
-
 
 _NATIVE_SPLIT_QUANTIZER_TYPES = frozenset(
     {
@@ -446,7 +444,69 @@ def _split_quantize_and_bias(
     return outputs, grad_biases
 
 
-__all__ = ["GroupedLinear"]
+__all__ = ["GroupedLinear", "is_module_grouped_tensor_path_supported"]
+
+
+def is_module_grouped_tensor_path_supported(
+    recipe: Optional[Recipe],
+    dtype: torch.dtype,
+    *,
+    single_grouped_weight: bool,
+) -> bool:
+    """Whether the module supports this recipe, dtype, and weight layout.
+
+    The grouped-tensor path dispatches to ``general_grouped_gemm_for_grouped_tensor``
+    and does not inspect split values because they may reside in a CUDA tensor.
+    Inspecting them on the host would add synchronization and break CUDA Graph safety.
+
+    Supported Compute Capability (CC) and precisions:
+
+    * Hopper (CC 9.0): BF16/FP16, FP8 per-tensor current scaling, and FP8
+      block scaling.
+    * Blackwell (CC 10.x and 11.0): BF16/FP16, FP8 per-tensor current scaling,
+      MXFP8, and NVFP4 with RHT. NVFP4 currently requires discrete weights.
+    * Custom recipes are unsupported because they may assign different
+      quantizers to input, weight, and grad-output roles. This predicate
+      currently supports only built-in recipes with known uniform layouts.
+    * FP8 delayed scaling is unsupported because the required grouped
+      quantization kernels are unavailable.
+    * FP8 block scaling is unsupported by this path on Blackwell because it
+      does not implement the legacy path's MXFP8-broadcast emulation.
+    * Grouped GEMM requires cuBLASLt 13.3+, with 13.4+ required on Hopper and
+      13.5+ required for FP8 per-tensor current scaling on Hopper.
+    * FP32 is unsupported by the cuBLASLt grouped GEMM.
+
+    Runtime-only restrictions such as debug mode, CPU offloading, calibration,
+    output quantization, and backend selection are checked separately by
+    ``GroupedLinear``.
+    """
+    if dtype not in (torch.bfloat16, torch.float16):
+        return False
+
+    device_capability = get_device_compute_capability()
+    if not (9, 0) <= device_capability <= (11, 0):
+        return False
+    cublaslt_version = tex.get_cublasLt_version()
+    if cublaslt_version < 130300:
+        return False
+    if device_capability < (10, 0) and cublaslt_version < 130400:
+        return False
+
+    if recipe is None:
+        return True
+    if recipe.custom():
+        return False
+    if recipe.backward_override is not None:
+        return False
+    if recipe.float8_current_scaling():
+        return device_capability >= (10, 0) or cublaslt_version >= 130500
+    if recipe.float8_block_scaling():
+        return device_capability < (10, 0)
+    if recipe.mxfp8():
+        return device_capability >= (10, 0)
+    if recipe.nvfp4():
+        return device_capability >= (10, 0) and not recipe.disable_rht and not single_grouped_weight
+    return False
 
 
 class _GroupedLinear(torch.autograd.Function):
@@ -463,98 +523,6 @@ class _GroupedLinear(torch.autograd.Function):
         if isinstance(tensor, QuantizedTensorStorage):
             return tensor.dequantize(dtype=dtype)
         return cast_if_needed(tensor, dtype)
-
-    @staticmethod
-    def _is_grouped_tensor_path_supported(
-        *,
-        grouped_gemm_backend: str,
-        fp8: bool,
-        fp8_calibration: bool,
-        debug: bool,
-        cpu_offloading: bool,
-        backward_override: Optional[str],
-        save_original_input: bool,
-        activation_dtype: torch.dtype,
-        input_quantizers: List[Optional[Quantizer]],
-        output_quantizers: List[Optional[Quantizer]],
-    ) -> bool:
-        """Whether to use cuBLASLt grouped GEMM through GroupedTensor metadata.
-
-        There are no checks whether split sizes are supported. Splits
-        may be in a CUDA tensor, so checking would hurt performance
-        and be incompatible with CUDA Graphs.
-
-        Supported Compute Capability (CC) and precisions:
-        * Hopper (CC 9.0): BF16/FP16, FP8 per-tensor current scaling, and FP8
-          block scaling (1D/2D, including power-of-2 scales).
-        * Blackwell (CC 10.x and 11.0): BF16/FP16/MXFP8/NVFP4 with RHT and FP8
-          per-tensor current scaling.
-        FP8 delayed scaling is not supported because the corresponding grouped
-        quantization kernels are missing. FP8 block scaling on Blackwell (SM100 and
-        SM110) raises instead of falling back: the fused path is Hopper-only and has
-        no MXFP8-broadcast emulation. Architectures outside the fused-path window
-        (e.g. SM120) fall back to the legacy path like every other recipe.
-        Grouped GEMM requires cuBLAS 13.3+ (13.4+ on Hopper, 13.5+ for FP8
-        per-tensor current scaling on Hopper); otherwise the legacy path is used.
-        Non-RHT NVFP4 falls back to the legacy path because graph-safe grouped quantization
-        currently requires RHT.
-
-        Input/weight/grad_output quantizers are assumed to be of the same type, otherwise it would
-        trigger a fatal error in the cuBLASLt grouped GEMM check.
-        """
-        # 1. Filter by the explicitly selected backend.
-        if grouped_gemm_backend != "grouped_tensor":
-            return False
-        # 2. Filter out advanced features
-        if (
-            debug
-            or cpu_offloading
-            or fp8_calibration
-            or backward_override is not None
-            or save_original_input
-        ):
-            return False
-        # 3. Filter by compute capability and cuBLAS version
-        device_capability = get_device_compute_capability()
-        if not (9, 0) <= device_capability <= (11, 0):
-            return False
-        cublaslt_version = tex.get_cublasLt_version()
-        if cublaslt_version < 130300:
-            return False
-        if device_capability < (10, 0) and cublaslt_version < 130400:
-            return False
-        # 4. Output quantization is not supported.
-        if any(q is not None for q in output_quantizers):
-            return False
-        # 5. Filter by quantization recipes.
-        if fp8:
-            if all(isinstance(q, Float8CurrentScalingQuantizer) for q in input_quantizers):
-                # FP8 per-tensor scaling grouped GEMM on Hopper requires cuBLAS 13.5+.
-                if device_capability < (10, 0) and cublaslt_version < 130500:
-                    return False
-                return True
-            if all(isinstance(q, Float8BlockQuantizer) for q in input_quantizers):
-                # Grouped FP8 block-scaling quantize kernels and cuBLASLt grouped GEMM
-                # scale modes are Hopper-only, and the fused path has no MXFP8-broadcast
-                # emulation. On Blackwell (SM100/SM110, the only other arch that reaches
-                # this branch) fail loudly rather than silently falling back to the
-                # unfused path the user explicitly opted out of.
-                if get_device_compute_capability() >= (10, 0):
-                    raise RuntimeError(
-                        "NVTE_GROUPED_LINEAR_USE_FUSED_GROUPED_GEMM=1 does not support the"
-                        " FP8 block-scaling recipe on Blackwell GPUs: the fused grouped"
-                        " FP8 block-scaling path is Hopper-only. Unset"
-                        " NVTE_GROUPED_LINEAR_USE_FUSED_GROUPED_GEMM to use the unfused"
-                        " path (emulated via MXFP8 GEMM on Blackwell)."
-                    )
-                return True
-            # MXFP8 and NVFP4 require Blackwell+.
-            if not (10, 0) <= device_capability <= (11, 0):
-                return False
-            return all(isinstance(q, MXFP8Quantizer) for q in input_quantizers) or all(
-                isinstance(q, NVFP4Quantizer) and q.with_rht for q in input_quantizers
-            )
-        return activation_dtype in (torch.bfloat16, torch.float16)
 
     @staticmethod
     def _make_grouped_tensor(
@@ -1045,10 +1013,8 @@ class _GroupedLinear(torch.autograd.Function):
             single_grouped_bias,
             grouped_gemm_backend,
         ) = non_tensor_args
-        if fp8:
-            backward_override = FP8GlobalStateManager.get_fp8_recipe().backward_override
-        else:
-            backward_override = None
+        recipe = FP8GlobalStateManager.get_fp8_recipe() if fp8 else None
+        backward_override = recipe.backward_override if recipe is not None else None
         if backward_override == "high_precision":
             save_original_input = True
         elif backward_override == "dequantized":
@@ -1136,17 +1102,32 @@ class _GroupedLinear(torch.autograd.Function):
                 f"weight tensor (shape={tuple(weights[0].size())})"
             )
 
-        use_grouped_tensor_path = _GroupedLinear._is_grouped_tensor_path_supported(
-            grouped_gemm_backend=grouped_gemm_backend,
-            fp8=fp8,
-            fp8_calibration=fp8_calibration,
-            debug=debug,
-            cpu_offloading=cpu_offloading,
-            backward_override=backward_override,
-            save_original_input=save_original_input,
-            activation_dtype=activation_dtype,
-            input_quantizers=input_quantizers,
-            output_quantizers=output_quantizers,
+        recipe_supports_grouped_tensor = is_module_grouped_tensor_path_supported(
+            recipe,
+            activation_dtype,
+            single_grouped_weight=single_grouped_weight,
+        )
+        grouped_tensor_features_supported = (
+            grouped_gemm_backend == "grouped_tensor"
+            and not fp8_calibration
+            and not debug
+            and not cpu_offloading
+            and not save_original_input
+            and not any(q is not None for q in output_quantizers)
+        )
+        if (
+            grouped_tensor_features_supported
+            and fp8
+            and recipe.float8_block_scaling()
+            and (10, 0) <= get_device_compute_capability() <= (11, 0)
+        ):
+            raise RuntimeError(
+                "grouped_gemm_backend='grouped_tensor' does not support the FP8 "
+                "block-scaling recipe on Blackwell GPUs. Select grouped_gemm_backend='legacy' "
+                "to use the MXFP8-emulated path."
+            )
+        use_grouped_tensor_path = (
+            grouped_tensor_features_supported and recipe_supports_grouped_tensor
         )
         if (
             grouped_gemm_backend == "grouped_tensor"

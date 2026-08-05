@@ -37,6 +37,7 @@ from transformer_engine.pytorch import (
 from transformer_engine.common import recipe
 from transformer_engine.pytorch.cpp_extensions import general_gemm
 from transformer_engine.pytorch.tensor.utils import replace_raw_data
+from transformer_engine.pytorch.module import is_module_grouped_tensor_path_supported
 from utils import ModelConfig, recipe_id, skip_unsupported_backward_override
 
 # Only run FP8 tests on supported devices.
@@ -603,6 +604,12 @@ def test_sanity_grouped_linear(
     if fp8_recipe is not None:
         fp8_recipe = copy.deepcopy(fp8_recipe)
         fp8_recipe.backward_override = backward_override
+    if single_param and not is_module_grouped_tensor_path_supported(
+        fp8_recipe,
+        dtype,
+        single_grouped_weight=True,
+    ):
+        pytest.skip("Single grouped parameters require the native grouped-tensor path")
 
     if fp8_recipe is not None:
         if not is_fp8_supported(config):
@@ -625,6 +632,7 @@ def test_sanity_grouped_linear(
             params_dtype=dtype,
             single_grouped_weight=single_param,
             single_grouped_bias=single_param,
+            grouped_gemm_backend="grouped_tensor" if single_param else "legacy",
         ).cuda()
 
     # Verify grouped linear exposes a single grouped weight parameter(and bias when applicable).
@@ -644,6 +652,8 @@ def test_sanity_grouped_linear(
         m_splits[-1] = 0
     elif empty_split == "middle":
         m_splits[num_gemms // 2] = 0
+    if single_param:
+        m_splits = torch.tensor(m_splits, dtype=torch.int64, device="cuda")
 
     with autocast(enabled=use_fp8, recipe=fp8_recipe):
         out = te_grouped_linear(inp_hidden_states, m_splits)

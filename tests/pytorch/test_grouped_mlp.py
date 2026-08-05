@@ -24,8 +24,8 @@ from transformer_engine.pytorch.ops.fused.grouped_mlp import (
 from transformer_engine.pytorch.ops.basic.grouped_linear import (
     OUTPUT_BUFFER_KEY,
     GRAD_INPUT_BUFFER_KEY,
+    is_op_fuser_grouped_tensor_path_supported,
 )
-from transformer_engine.pytorch.utils import get_device_compute_capability
 from transformer_engine.pytorch import (
     QuantizedTensor,
     Float8CurrentScalingQuantizer,
@@ -130,28 +130,6 @@ def maybe_skip_quantization(
             and dtype != torch.bfloat16
         ):
             pytest.skip("NVFP4 quantization is only supported with BF16 data")
-
-
-def grouped_tensor_path_supported(
-    *,
-    quantized_compute: bool,
-    quantization: Optional[str],
-    dtype: torch.dtype,
-    single_grouped_weight: bool,
-) -> bool:
-    """Mirror GroupedLinear's native grouped-tensor backend selection."""
-    compute_capability = get_device_compute_capability()
-    if not (9, 0) <= compute_capability <= (11, 0):
-        return False
-    if not quantized_compute:
-        return dtype in (torch.bfloat16, torch.float16)
-    if quantization == "fp8_current_scaling":
-        return compute_capability >= (10, 0) or tex.get_cublasLt_version() >= 130500
-    if quantization == "mxfp8":
-        return compute_capability >= (10, 0)
-    if quantization == "nvfp4_rht":
-        return compute_capability >= (10, 0) and not single_grouped_weight
-    return False
 
 
 @torch.no_grad()
@@ -381,10 +359,13 @@ class TestGroupedLinearOp:
 
         if single_grouped_bias and not bias:
             pytest.skip("single_grouped_bias requires bias=True")
-        if (single_grouped_weight or single_grouped_bias) and not grouped_tensor_path_supported(
-            quantized_compute=quantized_compute,
-            quantization=quantization,
-            dtype=dtype,
+        recipe = make_recipe(quantization)
+        compute_recipe = recipe if quantized_compute else None
+        if (
+            single_grouped_weight or single_grouped_bias
+        ) and not is_op_fuser_grouped_tensor_path_supported(
+            compute_recipe,
+            dtype,
             single_grouped_weight=single_grouped_weight,
         ):
             # Single grouped parameters intentionally have no split-quantize fallback.
@@ -444,7 +425,6 @@ class TestGroupedLinearOp:
             y_ref.backward(dy_ref)
 
         # Construct fusible operation
-        recipe = make_recipe(quantization)
         with te.quantized_model_init(enabled=quantized_weight, recipe=recipe):
             op = te.ops.GroupedLinear(
                 group_size,
