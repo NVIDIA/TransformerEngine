@@ -94,6 +94,13 @@ void check_grouped_metadata_tensor(const at::Tensor& metadata_tensor, const char
   NVTE_CHECK(metadata_tensor.is_contiguous(), metadata_name, " must be contiguous.");
   NVTE_CHECK(static_cast<size_t>(metadata_tensor.numel()) == expected_len, metadata_name,
              " must have length ", expected_len, ".");
+  // The offsets are built and consumed by kernels on the current device's stream, and the
+  // grouped data is allocated there too, so metadata on another device would be read
+  // through a foreign pointer.
+  const int current_device = static_cast<int>(at::cuda::current_device());
+  const int metadata_device = static_cast<int>(metadata_tensor.get_device());
+  NVTE_CHECK(metadata_device == current_device, metadata_name, " must be on the current CUDA ",
+             "device (cuda:", current_device, "), but is on cuda:", metadata_device, ".");
 }
 
 std::optional<at::Tensor> build_grouped_tensor_offsets(const size_t num_tensors,
