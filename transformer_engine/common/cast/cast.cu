@@ -47,6 +47,34 @@ void nvte_quantize_v2(const NVTETensor input, NVTETensor output,
   dispatch::quantize_fwd_helper<IS_ACT, Empty, nullptr>(input, output, quant_config, stream);
 }
 
+void nvte_group_quantize_with_colwise_rht(const NVTETensor input, const NVTETensor *outputs,
+                                          const size_t *split_sections, const size_t num_tensors,
+                                          const uint16_t rht_sign_mask_t,
+                                          const NVTEQuantizationConfig quant_config,
+                                          cudaStream_t stream) {
+  NVTE_API_CALL(nvte_group_quantize_with_colwise_rht);
+  using namespace transformer_engine;
+
+  QuantizationConfig config_with_rht;
+  if (quant_config != nullptr) {
+    config_with_rht = *reinterpret_cast<const QuantizationConfig *>(quant_config);
+  }
+  config_with_rht.nvfp4_colwise_rht = true;
+  config_with_rht.nvfp4_rht_sign_mask_t = rht_sign_mask_t;
+
+  auto *input_tensor = convertNVTETensorCheck(input);
+  std::vector<Tensor *> output_list(num_tensors);
+  for (size_t i = 0; i < num_tensors; ++i) {
+    output_list[i] = convertNVTETensorCheck(outputs[i]);
+  }
+  Tensor dummy_noop;
+  Tensor *noop = config_with_rht.noop_tensor != nullptr
+                     ? convertNVTETensorCheck(config_with_rht.noop_tensor)
+                     : &dummy_noop;
+  dispatch::nvfp4::group_quantize_transpose</*use_2d_quantization=*/false>(
+      *input_tensor, noop, output_list, split_sections, num_tensors, &config_with_rht, stream);
+}
+
 void nvte_dequantize(const NVTETensor input, NVTETensor output, cudaStream_t stream) {
   NVTE_API_CALL(nvte_dequantize);
   using namespace transformer_engine;

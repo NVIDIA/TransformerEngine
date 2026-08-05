@@ -606,6 +606,11 @@ struct QuantizationConfig {
   bool use_fast_math = false;
   NVTENVFP44Over6Mode nvfp4_4over6_mode = kNVTENVFP44Over6Disabled;
   bool nvfp4_4over6_err_use_fast_math = false;
+  // Not exposed through the attribute API. Folds the random Hadamard transform
+  // into the columnwise NVFP4 quantization pass, for architectures without the
+  // SM100-family RHT cast-fusion kernels.
+  bool nvfp4_colwise_rht = false;
+  uint16_t nvfp4_rht_sign_mask_t = 0;
 
   static constexpr size_t attr_sizes[] = {
       sizeof(uint8_t),                       // force_pow_2_scales

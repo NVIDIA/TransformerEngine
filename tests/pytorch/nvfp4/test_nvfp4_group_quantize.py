@@ -274,3 +274,77 @@ def test_rht_split_quantize_matches_per_tensor_reference(quantize_mode: str) -> 
         split_sections=split_sections,
         with_rht=True,
     )
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.parametrize("N", [512, 2048])
+@pytest.mark.parametrize(
+    "split_sections",
+    [
+        [128, 128, 128, 128],
+        [256, 512, 128, 384],
+        [0, 256, 256, 0],
+        [0, 128, 0, 256, 128, 0, 384, 128],
+        [192, 320],
+        [64, 64, 192, 192],
+    ],
+    ids=[
+        "aligned",
+        "mixed_aligned",
+        "empty_ends",
+        "empty_mixed",
+        "unaligned",
+        "small_unaligned",
+    ],
+)
+def test_rht_split_quantize_grouped_matches_unfused(monkeypatch, split_sections, N) -> None:
+    # split_quantize folds the RHT into the columnwise pass in one grouped launch when
+    # every split is a multiple of 128 rows, and quantizes each split on its own
+    # otherwise. Empty splits are dropped from the grouped launch. Both routes have to
+    # produce the same bytes.
+    x = torch.randn((sum(split_sections), N), dtype=torch.bfloat16, device="cuda")
+
+    def run(disable_grouped: bool):
+        monkeypatch.setenv("NVTE_NVFP4_DISABLE_GROUPED_RHT", "1" if disable_grouped else "0")
+        quantizers = [
+            NVFP4Quantizer(
+                fp4_dtype=te.DType.kFloat4E2M1,
+                rowwise=True,
+                columnwise=True,
+                with_rht=True,
+                with_post_rht_amax=True,
+            )
+            for _ in split_sections
+        ]
+        return [
+            {
+                "rowwise_data": out._rowwise_data.view(dtype=torch.uint8).clone(),
+                "columnwise_data": out._columnwise_data.view(dtype=torch.uint8).clone(),
+                "amax_rowwise": out._amax_rowwise.clone(),
+                "amax_columnwise": out._amax_columnwise.clone(),
+                "rowwise_scale_inv": out._rowwise_scale_inv.clone(),
+                "columnwise_scale_inv": out._columnwise_scale_inv.clone(),
+            }
+            for out in tex.split_quantize(x, split_sections, quantizers)
+        ]
+
+    torch.manual_seed(0)
+    unfused = run(True)
+    fused = run(False)
+
+    x_splits = torch.split(x, split_sections)
+    for i, rows in enumerate(split_sections):
+        if rows == 0:
+            continue
+        for key in ("rowwise_data", "columnwise_data", "amax_rowwise", "amax_columnwise"):
+            torch.testing.assert_close(fused[i][key], unfused[i][key], atol=0.0, rtol=0.0)
+        # Scale buffers are allocated with padded shapes and neither route writes the
+        # padding, so compare only the region both of them define.
+        for key, columnwise in (("rowwise_scale_inv", False), ("columnwise_scale_inv", True)):
+            valid = get_nvfp4_scale_shape_no_padding(x_splits[i].shape, columnwise)
+            torch.testing.assert_close(
+                fused[i][key][: valid[0], : valid[1]],
+                unfused[i][key][: valid[0], : valid[1]],
+                atol=0.0,
+                rtol=0.0,
+            )

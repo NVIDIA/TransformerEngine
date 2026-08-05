@@ -125,6 +125,28 @@ void nvte_quantize_noop(const NVTETensor input, NVTETensor output, NVTETensor no
 void nvte_quantize_v2(const NVTETensor input, NVTETensor output,
                       const NVTEQuantizationConfig quant_config, cudaStream_t stream);
 
+/*! \brief Grouped NVFP4 quantization with the random Hadamard transform folded
+ *         into the columnwise pass.
+ *
+ *  One launch quantizes up to 64 row-splits of a contiguous input. Rowwise
+ *  outputs are quantized from the raw input, columnwise outputs from
+ *  RHT(split^T). Every output must already hold its rowwise amax and its
+ *  post-RHT columnwise amax, and every split must be a multiple of 128 rows.
+ *
+ *  \param[in]      input            Input BF16 tensor, splits stacked on rows.
+ *  \param[in,out]  outputs          Output NVFP4 tensors, one per split.
+ *  \param[in]      split_sections   Row count of each split.
+ *  \param[in]      num_tensors      Number of splits.
+ *  \param[in]      rht_sign_mask_t  Random sign mask of the transposed RHT.
+ *  \param[in]      quant_config     Quantization configuration.
+ *  \param[in]      stream           CUDA stream used for the operation.
+ */
+void nvte_group_quantize_with_colwise_rht(const NVTETensor input, const NVTETensor *outputs,
+                                          const size_t *split_sections, const size_t num_tensors,
+                                          const uint16_t rht_sign_mask_t,
+                                          const NVTEQuantizationConfig quant_config,
+                                          cudaStream_t stream);
+
 /*! \brief Casts input tensor to MXFP8. Additionally, reduces the input along columns.
  *         If the scaling mode of the output tensor is set to NVTE_MXFP8_1D_SCALING,
  *         the block quantization (MXFP8) of the specified shape of the block will be used.
