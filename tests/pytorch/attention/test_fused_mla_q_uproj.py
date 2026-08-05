@@ -32,8 +32,10 @@ fused_supported, reason_not_supported = (
     if FusedMLAQUpProjRopeQuant.is_supported()
     else (
         False,
-        "FusedMLAQUpProjRopeQuant.is_supported() returned False "
-        "(SM100+, cudnn-frontend >= 1.27.0, and NVTE_FUSED_MLA_Q_UPROJ=1 required)",
+        (
+            "FusedMLAQUpProjRopeQuant.is_supported() returned False "
+            "(SM100+, cudnn-frontend >= 1.27.0, and NVTE_FUSED_MLA_Q_UPROJ=1 required)"
+        ),
     )
 )
 
@@ -83,8 +85,11 @@ def _reference_q_uproj(
     half = HEAD_DIM_ROPE // 2
     x1, x2 = q_rope[..., 0::2], q_rope[..., 1::2]
     q_rope_out = torch.cat(
-        [x1 * cos_[..., :half] - x2 * sin_[..., :half],
-         x2 * cos_[..., half:] + x1 * sin_[..., half:]], dim=-1
+        [
+            x1 * cos_[..., :half] - x2 * sin_[..., :half],
+            x2 * cos_[..., half:] + x1 * sin_[..., half:],
+        ],
+        dim=-1,
     )
     return torch.cat([q_nope, q_rope_out], dim=-1)
 
@@ -148,9 +153,9 @@ def test_fused_mla_q_uproj(tokens: int) -> None:
         x_saved, gy, layout="NT", grad=True, out_dtype=torch.bfloat16, use_split_accumulator=True
     )[0]
 
-    x_dq  = x_saved.dequantize().to(torch.bfloat16)
-    w_dq  = w.dequantize().to(torch.bfloat16)
+    x_dq = x_saved.dequantize().to(torch.bfloat16)
+    w_dq = w.dequantize().to(torch.bfloat16)
     gy_dq = gy.dequantize().to(torch.bfloat16)
 
-    torch.testing.assert_close(grad_x, gy_dq @ w_dq,     atol=0.5, rtol=0.1)
+    torch.testing.assert_close(grad_x, gy_dq @ w_dq, atol=0.5, rtol=0.1)
     torch.testing.assert_close(grad_w, gy_dq.t() @ x_dq, atol=0.5, rtol=0.1)
