@@ -596,7 +596,10 @@ def compile_cutedsl_function_from_cfg(cfg):
 
     # mX / mO_row / mS_row: (M, N) input, (M, N) rowwise fp4 output and its scales. The fp4
     # extents are logical element counts, so the row stride is N while only N/2 bytes are
-    # stored.
+    # stored. That is the kernel's view of it; the compiled ABI is not, because the DSL rewrites
+    # every Float4E2M1FN argument into the packed float4_e2m1fnx2 form DLPack can express, with
+    # the contiguous extent and the strides above it halved. What the caller hands over is
+    # therefore the packed tensor, which is what tvm_ffi_bridge.h builds for an FP4 TE tensor.
     in_fake = _gmem(BFloat16, (sym_M, sym_N), stride_order=(1, 0), align=16)
     out_row_fake = _gmem(Float4E2M1FN, (sym_M, sym_N), stride_order=(1, 0), align=16)
     scale_row_fake = _gmem(Float8E4M3FN, scale_row_shape, stride_order=(1, 0), align=4)

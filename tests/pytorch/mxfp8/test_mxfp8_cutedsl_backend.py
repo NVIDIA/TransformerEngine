@@ -14,7 +14,11 @@ import torch
 import transformer_engine.pytorch as te
 import transformer_engine_torch as tex
 import tvm_ffi
-from transformer_engine.common import _get_shared_object_file
+from transformer_engine.common import (
+    _get_shared_object_file,
+    _load_tvm_ffi_library,
+    _register_cutedsl_backends,
+)
 from transformer_engine.pytorch import MXFP8Quantizer
 
 recipe_available, reason_for_no_recipe = te.is_mxfp8_available(return_reason=True)
@@ -28,7 +32,19 @@ if not hasattr(CORE_LIB, "nvte_set_cutedsl_quant_backend"):
         "Transformer Engine core library."
     )
 
-pytestmark = pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+# TE loads tvm-ffi and registers the CuTeDSL entrypoints at import time, but only when
+# NVTE_ENABLE_CUTEDSL_QUANT_BACKEND is set. These tests choose the backend through the C++ setter
+# instead, so they have to make sure the Python side is wired up regardless of the environment;
+# without this every case fails on its registration check rather than on anything it means to
+# test. Both calls are idempotent and report whether they succeeded.
+backend_available = _load_tvm_ffi_library() and _register_cutedsl_backends()
+
+pytestmark = [
+    pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe),
+    pytest.mark.skipif(
+        not backend_available, reason="the CuTeDSL backend could not be registered via tvm-ffi"
+    ),
+]
 
 
 class Fusion(NamedTuple):

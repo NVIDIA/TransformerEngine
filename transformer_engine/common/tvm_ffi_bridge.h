@@ -121,9 +121,11 @@ inline DLDataType convert_to_dltype(NVTEDType type) {
       return DLDataType{kDLFloat8_e5m2, 8, 1};
     case kNVTEFloat8E8M0:
       return DLDataType{kDLFloat8_e8m0fnu, 8, 1};
-    // FP4
+    // FP4. DLPack has no 4-bit storage unit, so E2M1 travels the way tvm-ffi and torch spell it,
+    // as float4_e2m1fnx2: two values to a storage element, i.e. lanes == 2. The extents are
+    // packed to match (see DLTensorWrapper), because a TE tensor carries logical element counts.
     case kNVTEFloat4E2M1:
-      return DLDataType{kDLFloat4_e2m1fn, 4, 1};
+      return DLDataType{kDLFloat4_e2m1fn, 4, 2};
     default:
       NVTE_ERROR("unsupported NVTEDType: ", static_cast<int>(type));
   }
@@ -165,6 +167,20 @@ class DLTensorWrapper : public DLTensor {
     this->shape = shape_buf_.get();
     this->strides = strides_buf_.get();
     this->byte_offset = 0;
+
+    // A sub-byte dtype is carried packed (dtype.lanes values to a storage element), so its
+    // extents have to be the packed ones: the innermost extent divides by the packing factor and
+    // so does every stride above it, which is exactly what the receiving side undoes to get the
+    // logical FP4 tensor back. Skipped for an absent buffer, whose shape is empty and which packs
+    // as TVM-FFI None anyway.
+    const int64_t packing = static_cast<int64_t>(this->dtype.lanes);
+    if (packing > 1 && this->ndim > 0) {
+      int64_t &innermost = shape_buf_[this->ndim - 1];
+      NVTE_CHECK(innermost % packing == 0, "Innermost extent of a ", static_cast<int>(dtype.bits),
+                 "-bit tensor must be a multiple of ", packing, ", but got ", innermost);
+      innermost /= packing;
+      for (int i = 0; i + 1 < this->ndim; ++i) strides_buf_[i] /= packing;
+    }
   }
 
   ~DLTensorWrapper() = default;

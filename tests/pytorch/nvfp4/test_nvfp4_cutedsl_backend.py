@@ -18,6 +18,15 @@ without being allowed to let anything escape, but it says nothing about the CuTe
 What pins the kernel's coverage down is `test_kernel_coverage`, which asks the entrypoint
 directly; a config moves between the two categories by editing `kernel_implements`.
 
+Which backend ran is therefore never inferred, it is observed: every kernel the CuTeDSL backend
+can serve is wrapped in a counting proxy at import (see `_install_call_counters`), and every case
+states how many times the dispatcher must call into one. A comparison that silently ran the CUDA
+kernel twice would otherwise pass while testing nothing, which is the one failure this file cannot
+afford -- and it is not hypothetical: a kernel that fails to compile, a dispatcher check that
+rejects the config, and a backend switch that does not take effect all produce exactly that.
+Counting catches all three, including the last, since the run that is meant to be the CUDA
+reference asserts that no CuTeDSL kernel ran either.
+
 Stochastic rounding is deliberately not compared byte for byte, and should not be even once the
 kernel implements it: which random bits an element gets follows from the work decomposition, and
 the CUDA kernel seeds Philox from the chunk coordinate a CTA starts on without reseeding when it
@@ -29,6 +38,7 @@ RHT is out of scope: it is a pre-transform with kernels and tests of its own, an
 quantization into per-direction calls, so "which backend ran" stops being one fact per case.
 """
 
+import collections
 import ctypes
 import itertools
 import math
@@ -177,6 +187,84 @@ def set_cutedsl_backend(enabled):
     CORE_LIB.nvte_set_cutedsl_quant_backend(1 if enabled else 0)
 
 
+# --- Observing which backend ran ---
+
+# How many times the C++ dispatcher has called into a CuTeDSL kernel, per config key.
+_cutedsl_calls_by_key = collections.Counter()
+
+
+def _install_call_counters():
+    """Replace every kernel the CuTeDSL backend can serve with a proxy that counts its calls.
+
+    A registered key says a kernel exists, not that the dispatcher reached it, and a key another
+    case registered answers for every case after it; counting invocations is what makes "the
+    CuTeDSL backend produced this output" a fact rather than an inference. The proxies have to go
+    in before the first quantization of the process: the C++ side resolves each key once through
+    `TVMFFICentral::lazyload_function` and caches the handle for good, so a proxy installed after
+    that is never seen. Compiling the kernels here rather than letting the dispatcher trigger it
+    is what makes that possible, and costs one compilation per supported config at import.
+    """
+    from transformer_engine.common.CuTeDSL.cast.nvfp4.quantize_transpose_nvfp4 import (
+        get_nvfp4_quantization_function,
+    )
+
+    def counting_proxy(key, kernel):
+        def proxy(*args):
+            _cutedsl_calls_by_key[key] += 1
+            return kernel(*args)
+
+        return proxy
+
+    for flags in itertools.product([False, True], repeat=4):
+        if not kernel_implements(flags):
+            continue
+        key = cutedsl_key(flags)
+        # A config kernel_implements() claims is served but that does not compile is left alone:
+        # test_kernel_coverage is where that contradiction is reported.
+        if not get_nvfp4_quantization_function(key, *flags):
+            continue
+        tvm_ffi.register_global_func(
+            key, counting_proxy(key, tvm_ffi.get_global_func(key)), override=True
+        )
+
+
+@contextmanager
+def cutedsl_calls(expected, tag, key=None):
+    """Require exactly `expected` CuTeDSL kernel invocations inside the block, all of them of the
+    kernel compiled for `key` when one is named.
+
+    Which key ran matters as much as whether any did: the flags are what a compiled kernel is, so
+    a case served by the kernel for another flag combination -- exact math answering for fast
+    math, say -- is testing something other than what it says.
+    """
+    before = collections.Counter(_cutedsl_calls_by_key)
+    yield
+    made = _cutedsl_calls_by_key - before
+    actual = sum(made.values())
+    if actual != expected:
+        if expected == 0:
+            raise AssertionError(
+                f"{tag}: the CuTeDSL backend ran {actual} time(s) ({dict(made)}) where it was "
+                "expected to stay out of the way, so this case did not exercise the backend it "
+                "names"
+            )
+        raise AssertionError(
+            f"{tag}: the CuTeDSL backend ran {actual} time(s) instead of {expected}, so the CUDA "
+            "kernel served a config this case is about. Either the dispatcher declined it, or a "
+            "quantization earlier in this pytest session made the C++ side cache the kernel "
+            "handle before the counting proxies were installed"
+        )
+    if key is not None and expected > 0 and set(made) != {key}:
+        raise AssertionError(
+            f"{tag}: the CuTeDSL kernels that ran were {dict(made)}, not {expected} call(s) of "
+            f"{key}, so this case was served by a kernel compiled for another config"
+        )
+
+
+if backend_available and recipe_available:
+    _install_call_counters()
+
+
 @pytest.fixture(scope="module", autouse=True)
 def _restore_backend_choice_from_env():
     """Restore the flag that decides the CuTeDSL / CUDA backend choice when this pytest module is done."""
@@ -305,20 +393,22 @@ def run_case(case, x=None):
 
     with fast_math(case.fast_math):
         set_cutedsl_backend(False)
-        cuda_parts = quantized_parts(quantize(case, x), case)
+        # The reference run has to be CUDA, which is only true if the backend switch took effect.
+        with cutedsl_calls(0, f"{case.id} (CUDA reference run)"):
+            cuda_parts = quantized_parts(quantize(case, x), case)
 
+        key = cutedsl_key(cutedsl_flags(case))
         set_cutedsl_backend(True)
         try:
-            cutedsl_parts = quantized_parts(quantize(case, x), case)
+            with cutedsl_calls(1 if expect_cutedsl(case) else 0, case.id, key):
+                cutedsl_parts = quantized_parts(quantize(case, x), case)
         finally:
             set_cutedsl_backend(False)
 
-    key = cutedsl_key(cutedsl_flags(case))
     registered = tvm_ffi.get_global_func(key, allow_missing=True) is not None
     if expect_cutedsl(case):
-        # Guard against a silent fallback: a config this test expects the CuTeDSL backend to
-        # serve must have a kernel compiled and registered under its key, or the comparison below
-        # is CUDA against itself.
+        # Redundant with the call count above, but it separates a kernel that failed to compile
+        # from a dispatcher that declined a kernel it has.
         assert registered, (
             f"{case.id}: nothing is registered under {key}, so the CuTeDSL backend fell back to "
             "CUDA and this case compared CUDA against itself"
@@ -490,7 +580,8 @@ def test_stochastic_rounding_falls_back(columnwise):
     x = make_input(case)
     set_cutedsl_backend(True)
     try:
-        out = quantize(case, x)
+        with cutedsl_calls(0, case.id):
+            out = quantize(case, x)
     finally:
         set_cutedsl_backend(False)
 
@@ -553,23 +644,20 @@ def test_cast_noop_flag(flag_is_set):
 
     set_cutedsl_backend(True)
     try:
-        # Quantizing x with the flag clear is what the flag has to suppress, and the state the
-        # output is left in beforehand is the quantization of a different tensor.
-        quantized_x = quantized_parts(quantize(case, x), case, with_amax=False)
+        # Every one of the three quantizations has to be the CuTeDSL kernel's, the suppressed one
+        # included: a kernel that is not launched at all also leaves the output untouched.
+        with cutedsl_calls(3, case.id, cutedsl_key(cutedsl_flags(case))):
+            # Quantizing x with the flag clear is what the flag has to suppress, and the state the
+            # output is left in beforehand is the quantization of a different tensor.
+            quantized_x = quantized_parts(quantize(case, x), case, with_amax=False)
 
-        out = make_output(case)
-        quantize_into(out, previous_x)
-        before = quantized_parts(out, case, with_amax=False)
-        quantize_into(out, x, noop_flag=flag)
-        after = quantized_parts(out, case, with_amax=False)
+            out = make_output(case)
+            quantize_into(out, previous_x)
+            before = quantized_parts(out, case, with_amax=False)
+            quantize_into(out, x, noop_flag=flag)
+            after = quantized_parts(out, case, with_amax=False)
     finally:
         set_cutedsl_backend(False)
-
-    key = cutedsl_key(cutedsl_flags(case))
-    assert tvm_ffi.get_global_func(key, allow_missing=True) is not None, (
-        f"{case.id}: nothing is registered under {key}, so this case exercised the CUDA kernel's "
-        "noop handling rather than the CuTeDSL kernel's"
-    )
 
     if flag_is_set:
         # Both halves matter: nothing changed, and something would have changed.
@@ -597,14 +685,10 @@ def test_dequantized_output_tracks_input(use_fast_math):
     with fast_math(use_fast_math):
         set_cutedsl_backend(True)
         try:
-            out = quantize(case, x)
+            with cutedsl_calls(1, case.id, cutedsl_key(cutedsl_flags(case))):
+                out = quantize(case, x)
         finally:
             set_cutedsl_backend(False)
-
-    key = cutedsl_key(cutedsl_flags(case))
-    assert (
-        tvm_ffi.get_global_func(key, allow_missing=True) is not None
-    ), f"{case.id}: nothing is registered under {key}, so this measured the CUDA kernel instead"
 
     # NVFP4 keeps about two mantissa bits per element, so a few percent of relative error is
     # expected; an order of magnitude more than that means the output is not a quantization of x.

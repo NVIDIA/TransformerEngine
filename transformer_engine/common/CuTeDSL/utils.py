@@ -35,13 +35,12 @@ def device_compute_capability() -> tuple:
 
 @functools.lru_cache(maxsize=None)
 def device_is_blackwell() -> bool:
-    """Return True for the Blackwell family (SM 10.0 / 11.0 / 12.0)
+    """Return True for the Blackwell family (SM 10.x / 11.x / 12.x)
     This is a run-time check, not a compile-time check. It check if the current device is Blackwell architecture.
+    The minor version is deliberately not pinned: SM 10.3 (GB300) is Blackwell as much as 10.0 is.
     """
-    major, minor = device_compute_capability()
-    return (
-        (major == 10 and minor == 0) or (major == 11 and minor == 0) or (major == 12 and minor == 0)
-    )
+    major, _ = device_compute_capability()
+    return major in (10, 11, 12)
 
 
 def str_to_cutlass_dtype(dtype_str: str):
