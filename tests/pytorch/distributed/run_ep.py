@@ -265,6 +265,43 @@ class TestEP(unittest.TestCase):
         self.assertGreaterEqual(total, int(tokens_per_expert.sum().item()))
         self.assertLessEqual(total, self.cfg.recv_capacity_per_rank)
 
+    @_eager_test_include
+    def test_eager_rank_with_zero_recv_tokens(self):
+        """Empty recv tensors remain valid through the forward and backward pipeline."""
+        if not EAGER:
+            self.skipTest("eager-only assertions")
+        buf = self._make_buffer()
+        _topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
+        # Experts [0, TOP_K) are local to rank 0, so every other rank receives
+        # no tokens and PyTorch gives its eager recv tensors null data pointers.
+        topk_idx = torch.arange(TOP_K, dtype=torch.int64, device=self.cfg.device).repeat(
+            TOKENS_PER_RANK, 1
+        )
+        tokens_p = tokens.detach().clone().requires_grad_(True)
+
+        recv_t, recv_w, tokens_per_expert = ep_dispatch(buf, tokens_p, topk_idx, w)
+        recv_rows = int(buf.total_recv_tokens.item())
+        self.assertEqual(recv_t.shape, (recv_rows, HIDDEN_DIM))
+        self.assertEqual(recv_w.shape, (recv_rows,))
+        if self.cfg.rank == 0:
+            self.assertGreater(recv_rows, 0)
+            self.assertEqual(
+                int(tokens_per_expert.sum().item()),
+                self.cfg.world_size * TOKENS_PER_RANK * TOP_K,
+            )
+        else:
+            self.assertEqual(recv_rows, 0)
+            self.assertEqual(int(tokens_per_expert.sum().item()), 0)
+            self.assertEqual(recv_t.data_ptr(), 0)
+            self.assertEqual(recv_w.data_ptr(), 0)
+
+        expert_out = self._weighted(recv_t, recv_w)
+        result = ep_combine(buf, expert_out, num_local_tokens=TOKENS_PER_RANK)
+        (0.5 * (result.float() ** 2).sum()).backward()
+        torch.cuda.synchronize()
+        torch.testing.assert_close(result.float(), tokens.float(), atol=5e-2, rtol=5e-2)
+        torch.testing.assert_close(tokens_p.grad.float(), tokens.float(), atol=5e-2, rtol=5e-2)
+
     @_overflow_test_include
     def test_overflow_drop(self):
         """drop_on_overflow: recv past capacity is dropped and dispatch continues
