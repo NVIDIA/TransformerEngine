@@ -315,43 +315,6 @@ py::tuple scaled_dsrelu(const at::Tensor &grad, const at::Tensor &input,
                         const at::Tensor &act_scales, py::handle quantizer,
                         bool compute_scale_grad);
 
-/* Scaled activation + grouped quantize */
-py::object grouped_scaled_swiglu(const at::Tensor &input, const at::Tensor &act_scales,
-                                 py::handle quantizer, const size_t num_tensors,
-                                 std::optional<at::Tensor> first_dims,
-                                 std::optional<at::Tensor> tensor_offsets,
-                                 int64_t glu_interleave_size);
-
-py::object grouped_scaled_clamped_swiglu(const at::Tensor &input, const at::Tensor &act_scales,
-                                         py::handle quantizer, const size_t num_tensors,
-                                         std::optional<at::Tensor> first_dims,
-                                         std::optional<at::Tensor> tensor_offsets, float limit,
-                                         float alpha, float glu_linear_offset,
-                                         int64_t glu_interleave_size);
-
-py::object grouped_scaled_srelu(const at::Tensor &input, const at::Tensor &act_scales,
-                                py::handle quantizer, const size_t num_tensors,
-                                std::optional<at::Tensor> first_dims,
-                                std::optional<at::Tensor> tensor_offsets);
-
-py::tuple grouped_scaled_dswiglu(const at::Tensor &grad, const at::Tensor &input,
-                                 const at::Tensor &act_scales, py::handle quantizer,
-                                 const size_t num_tensors, std::optional<at::Tensor> first_dims,
-                                 std::optional<at::Tensor> tensor_offsets,
-                                 int64_t glu_interleave_size, bool compute_scale_grad);
-
-py::tuple grouped_scaled_clamped_dswiglu(const at::Tensor &grad, const at::Tensor &input,
-                                         const at::Tensor &act_scales, py::handle quantizer,
-                                         const size_t num_tensors,
-                                         std::optional<at::Tensor> first_dims,
-                                         std::optional<at::Tensor> tensor_offsets, float limit,
-                                         float alpha, float glu_linear_offset,
-                                         int64_t glu_interleave_size, bool compute_scale_grad);
-
-py::tuple grouped_scaled_dsrelu(const at::Tensor &grad, const at::Tensor &input,
-                                const at::Tensor &act_scales, py::handle quantizer,
-                                const size_t num_tensors, std::optional<at::Tensor> first_dims,
-                                std::optional<at::Tensor> tensor_offsets, bool compute_scale_grad);
 /***************************************************************************************************
  * LayerNorm
  **************************************************************************************************/

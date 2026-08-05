@@ -342,11 +342,7 @@ py::object clamped_dswiglu(const at::Tensor& grad, const at::Tensor& input, py::
                                                               glu_linear_offset);
 }
 
-/* Scaled activation helpers (activation + per-row scale via nvte_scaled_*).
- *
- * Grouped variants reuse the dense compute helpers, then optionally apply
- * group_quantize. Keep the nvte_scaled_* launch path in one place.
- */
+/* Scaled activation helpers (activation + per-row scale via nvte_scaled_*). */
 
 template <auto act_func, typename... Args>
 at::Tensor scaled_activation_compute(const at::Tensor& input, const at::Tensor& act_scales,
@@ -430,16 +426,6 @@ py::object maybe_quantize(const at::Tensor& tensor, py::handle quantizer) {
   return out_py;
 }
 
-py::object maybe_group_quantize(const at::Tensor& tensor, py::handle quantizer,
-                                const size_t num_tensors, std::optional<at::Tensor> first_dims,
-                                std::optional<at::Tensor> tensor_offsets) {
-  if (quantizer.is_none()) {
-    return py::cast(tensor);
-  }
-  return group_quantize(tensor, quantizer, num_tensors, first_dims, std::nullopt, tensor_offsets,
-                        std::nullopt);
-}
-
 template <auto act_func, typename... Args>
 py::object scaled_activation_helper(const at::Tensor& input, const at::Tensor& act_scales,
                                     py::handle quantizer, int shape_divisor, Args&&... args) {
@@ -456,37 +442,6 @@ py::tuple scaled_dactivation_helper(const at::Tensor& grad, const at::Tensor& in
       grad, input, act_scales, compute_scale_grad, std::forward<Args>(args)...);
   return py::make_tuple(maybe_quantize(grad_input, quantizer),
                         compute_scale_grad ? py::cast(grad_scales) : py::none());
-}
-
-template <auto act_func, typename... Args>
-py::object grouped_scaled_activation_helper(const at::Tensor& input, const at::Tensor& act_scales,
-                                            py::handle quantizer, const size_t num_tensors,
-                                            std::optional<at::Tensor> first_dims,
-                                            std::optional<at::Tensor> tensor_offsets,
-                                            int shape_divisor, Args&&... args) {
-  NVTE_CHECK(input.dim() == 2, "grouped scaled activation input must be 2D");
-  auto output = scaled_activation_compute<act_func>(input, act_scales, shape_divisor,
-                                                    std::forward<Args>(args)...);
-  return maybe_group_quantize(output, quantizer, num_tensors, first_dims, tensor_offsets);
-}
-
-template <auto dact_func, typename... Args>
-py::tuple grouped_scaled_dactivation_helper(const at::Tensor& grad, const at::Tensor& input,
-                                            const at::Tensor& act_scales, py::handle quantizer,
-                                            const size_t num_tensors,
-                                            std::optional<at::Tensor> first_dims,
-                                            std::optional<at::Tensor> tensor_offsets,
-                                            bool compute_scale_grad, Args&&... args) {
-  NVTE_CHECK(input.dim() == 2 && grad.dim() == 2,
-             "grouped scaled dactivation input and grad must be 2D");
-  auto [grad_input, grad_scales] = scaled_dactivation_compute<dact_func>(
-      grad, input, act_scales, compute_scale_grad, std::forward<Args>(args)...);
-  // Return both the (optionally) grouped-quantized grad input for the next
-  // grouped GEMM and the dense high-precision grad input so callers can reuse
-  // it (e.g. bias gradient) without a lossy dequantize.
-  return py::make_tuple(
-      maybe_group_quantize(grad_input, quantizer, num_tensors, first_dims, tensor_offsets),
-      py::cast(grad_input), compute_scale_grad ? py::cast(grad_scales) : py::none());
 }
 
 py::object scaled_swiglu(const at::Tensor& input, const at::Tensor& act_scales,
@@ -530,67 +485,6 @@ py::tuple scaled_dsrelu(const at::Tensor& grad, const at::Tensor& input,
                         bool compute_scale_grad) {
   return scaled_dactivation_helper<nvte_scaled_dsrelu>(grad, input, act_scales, quantizer,
                                                        compute_scale_grad);
-}
-
-py::object grouped_scaled_swiglu(const at::Tensor& input, const at::Tensor& act_scales,
-                                 py::handle quantizer, const size_t num_tensors,
-                                 std::optional<at::Tensor> first_dims,
-                                 std::optional<at::Tensor> tensor_offsets,
-                                 int64_t glu_interleave_size) {
-  return grouped_scaled_activation_helper<nvte_scaled_swiglu>(
-      input, act_scales, quantizer, num_tensors, first_dims, tensor_offsets, /*shape_divisor=*/2,
-      glu_interleave_size);
-}
-
-py::object grouped_scaled_clamped_swiglu(const at::Tensor& input, const at::Tensor& act_scales,
-                                         py::handle quantizer, const size_t num_tensors,
-                                         std::optional<at::Tensor> first_dims,
-                                         std::optional<at::Tensor> tensor_offsets, float limit,
-                                         float alpha, float glu_linear_offset,
-                                         int64_t glu_interleave_size) {
-  return grouped_scaled_activation_helper<nvte_scaled_clamped_swiglu>(
-      input, act_scales, quantizer, num_tensors, first_dims, tensor_offsets, /*shape_divisor=*/2,
-      limit, alpha, glu_linear_offset, glu_interleave_size);
-}
-
-py::object grouped_scaled_srelu(const at::Tensor& input, const at::Tensor& act_scales,
-                                py::handle quantizer, const size_t num_tensors,
-                                std::optional<at::Tensor> first_dims,
-                                std::optional<at::Tensor> tensor_offsets) {
-  return grouped_scaled_activation_helper<nvte_scaled_srelu>(
-      input, act_scales, quantizer, num_tensors, first_dims, tensor_offsets,
-      /*shape_divisor=*/1);
-}
-
-py::tuple grouped_scaled_dswiglu(const at::Tensor& grad, const at::Tensor& input,
-                                 const at::Tensor& act_scales, py::handle quantizer,
-                                 const size_t num_tensors, std::optional<at::Tensor> first_dims,
-                                 std::optional<at::Tensor> tensor_offsets,
-                                 int64_t glu_interleave_size, bool compute_scale_grad) {
-  return grouped_scaled_dactivation_helper<nvte_scaled_dswiglu>(
-      grad, input, act_scales, quantizer, num_tensors, first_dims, tensor_offsets,
-      compute_scale_grad, glu_interleave_size);
-}
-
-py::tuple grouped_scaled_clamped_dswiglu(const at::Tensor& grad, const at::Tensor& input,
-                                         const at::Tensor& act_scales, py::handle quantizer,
-                                         const size_t num_tensors,
-                                         std::optional<at::Tensor> first_dims,
-                                         std::optional<at::Tensor> tensor_offsets, float limit,
-                                         float alpha, float glu_linear_offset,
-                                         int64_t glu_interleave_size, bool compute_scale_grad) {
-  return grouped_scaled_dactivation_helper<nvte_scaled_clamped_dswiglu>(
-      grad, input, act_scales, quantizer, num_tensors, first_dims, tensor_offsets,
-      compute_scale_grad, limit, alpha, glu_linear_offset, glu_interleave_size);
-}
-
-py::tuple grouped_scaled_dsrelu(const at::Tensor& grad, const at::Tensor& input,
-                                const at::Tensor& act_scales, py::handle quantizer,
-                                const size_t num_tensors, std::optional<at::Tensor> first_dims,
-                                std::optional<at::Tensor> tensor_offsets, bool compute_scale_grad) {
-  return grouped_scaled_dactivation_helper<nvte_scaled_dsrelu>(grad, input, act_scales, quantizer,
-                                                               num_tensors, first_dims,
-                                                               tensor_offsets, compute_scale_grad);
 }
 
 }  // namespace pytorch

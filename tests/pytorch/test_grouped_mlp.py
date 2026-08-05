@@ -24,12 +24,6 @@ from transformer_engine.pytorch.ops.basic.grouped_linear import (
     OUTPUT_BUFFER_KEY,
     GRAD_INPUT_BUFFER_KEY,
 )
-from transformer_engine.pytorch.ops.fused.backward_activation_grouped_linear import (
-    BackwardScaledActivationGroupedLinear,
-)
-from transformer_engine.pytorch.ops.fused.forward_activation_grouped_linear import (
-    ForwardScaledActivationGroupedLinear,
-)
 from transformer_engine.pytorch import (
     QuantizedTensor,
     Float8CurrentScalingQuantizer,
@@ -78,11 +72,6 @@ if mxfp8_available:
     _grouped_mlp_quantization_list.append("mxfp8")
 if nvfp4_available:
     _grouped_mlp_quantization_list.append("nvfp4_rht")
-
-# Quantization recipes supported by ScaledActivation + GroupedLinear fusion
-if fp8_available:
-    _grouped_mlp_quantization_list.append("fp8_current_scaling")
-
 
 @pytest.fixture(autouse=True, scope="function")
 def _reset_rng_states_per_test():
@@ -1049,15 +1038,14 @@ class TestGroupedMLPFusedOp:
                 )
             )
         )
-        forward_ops = module._module_groups[0]._forward_ops
-        backward_ops = module._module_groups[0]._backward_ops
-        full_grouped_mlp_fusion = False
         if expected_grouped_mlp_fusion:
             if activation_is_glu:
                 fused_cls = te.ops.fused.GroupedMLP_CuTeGEMMGLU
             else:
                 fused_cls = te.ops.fused.GroupedMLP_CuTeGEMMUnary
             if fused_cls.is_supported():
+                forward_ops = module._module_groups[0]._forward_ops
+                backward_ops = module._module_groups[0]._backward_ops
                 assert len(forward_ops) == 1
                 assert len(backward_ops) == 1
                 assert isinstance(
@@ -1065,24 +1053,6 @@ class TestGroupedMLPFusedOp:
                     fused_cls,
                 )
                 assert backward_ops[0][0] is forward_ops[0][0]
-                full_grouped_mlp_fusion = True
-
-        # When the full FC1 + activation + FC2 fusion is unavailable, verify
-        # that ScaledActivation + GroupedLinear fusions cover both boundaries
-        # whenever grouped quantized compute is supported.
-        act_grouped_linear_fusion_expected = (
-            not full_grouped_mlp_fusion
-            and te.ops.fused.act_grouped_linear_fusion_supported(fc2, module[1], recipe)
-            and te.ops.fused.act_grouped_linear_fusion_supported(fc1, module[1], recipe)
-        )
-        assert (
-            any(isinstance(op, ForwardScaledActivationGroupedLinear) for op, _ in forward_ops)
-            == act_grouped_linear_fusion_expected
-        )
-        assert (
-            any(isinstance(op, BackwardScaledActivationGroupedLinear) for op, _ in backward_ops)
-            == act_grouped_linear_fusion_expected
-        )
 
         # Loose tols for sanity checking
         tols = {"rtol": 0.125, "atol": 0.25}
