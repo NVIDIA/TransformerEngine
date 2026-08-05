@@ -584,13 +584,9 @@ class TestEP(unittest.TestCase):
     def test_fusible_dispatch_combine_moe(self):
         """Fusible NCCL EP MoE matches the PyTorch all-to-all reference."""
         if not EAGER:
-            self.skipTest(
-                "variable grouped-linear splits require eager EP output sizing"
-            )
+            self.skipTest("variable grouped-linear splits require eager EP output sizing")
 
-        topk_idx, tokens, topk_weights = _make_moe_inputs(
-            self.cfg.rank, self.cfg.ep_size
-        )
+        topk_idx, tokens, topk_weights = _make_moe_inputs(self.cfg.rank, self.cfg.ep_size)
         num_experts = NUM_LOCAL_EXPERTS
         intermediate_dim = HIDDEN_DIM
 
@@ -626,24 +622,14 @@ class TestEP(unittest.TestCase):
         generator.manual_seed(1234 + self.cfg.rank)
         with torch.no_grad():
             for expert_idx in range(num_experts):
-                getattr(fc1, f"weight{expert_idx}").uniform_(
-                    -0.1, 0.1, generator=generator
-                )
-                getattr(fc2, f"weight{expert_idx}").uniform_(
-                    -0.1, 0.1, generator=generator
-                )
+                getattr(fc1, f"weight{expert_idx}").uniform_(-0.1, 0.1, generator=generator)
+                getattr(fc2, f"weight{expert_idx}").uniform_(-0.1, 0.1, generator=generator)
 
         ref_fc1_weights = torch.stack(
-            [
-                getattr(fc1, f"weight{idx}").detach().transpose(0, 1)
-                for idx in range(num_experts)
-            ]
+            [getattr(fc1, f"weight{idx}").detach().transpose(0, 1) for idx in range(num_experts)]
         )
         ref_fc2_weights = torch.stack(
-            [
-                getattr(fc2, f"weight{idx}").detach().transpose(0, 1)
-                for idx in range(num_experts)
-            ]
+            [getattr(fc2, f"weight{idx}").detach().transpose(0, 1) for idx in range(num_experts)]
         )
         reference = MoeEpReference(
             num_experts=self.cfg.num_experts,
@@ -688,12 +674,8 @@ class TestEP(unittest.TestCase):
         test_output.backward(grad_output)
         torch.cuda.synchronize()
 
-        torch.testing.assert_close(
-            test_output.float(), ref_output.float(), atol=5e-2, rtol=5e-2
-        )
-        torch.testing.assert_close(
-            test_tokens.grad.float(), ref_grads[0], atol=5e-2, rtol=5e-2
-        )
+        torch.testing.assert_close(test_output.float(), ref_output.float(), atol=5e-2, rtol=5e-2)
+        torch.testing.assert_close(test_tokens.grad.float(), ref_grads[0], atol=5e-2, rtol=5e-2)
         torch.testing.assert_close(
             test_topk_weights.grad,
             ref_grads[3],
@@ -718,13 +700,9 @@ class TestEP(unittest.TestCase):
     def test_fusible_dispatch_combine_moe(self):
         """Fusible NCCL EP MoE matches the PyTorch all-to-all reference."""
         if not EAGER:
-            self.skipTest(
-                "variable grouped-linear splits require eager EP output sizing"
-            )
+            self.skipTest("variable grouped-linear splits require eager EP output sizing")
 
-        topk_idx, tokens, topk_weights = _make_moe_inputs(
-            self.cfg.rank, self.cfg.ep_size
-        )
+        topk_idx, tokens, topk_weights = _make_moe_inputs(self.cfg.rank, self.cfg.ep_size)
         num_experts = NUM_LOCAL_EXPERTS
         intermediate_dim = HIDDEN_DIM
 
@@ -760,24 +738,14 @@ class TestEP(unittest.TestCase):
         generator.manual_seed(1234 + self.cfg.rank)
         with torch.no_grad():
             for expert_idx in range(num_experts):
-                getattr(fc1, f"weight{expert_idx}").uniform_(
-                    -0.1, 0.1, generator=generator
-                )
-                getattr(fc2, f"weight{expert_idx}").uniform_(
-                    -0.1, 0.1, generator=generator
-                )
+                getattr(fc1, f"weight{expert_idx}").uniform_(-0.1, 0.1, generator=generator)
+                getattr(fc2, f"weight{expert_idx}").uniform_(-0.1, 0.1, generator=generator)
 
         ref_fc1_weights = torch.stack(
-            [
-                getattr(fc1, f"weight{idx}").detach().transpose(0, 1)
-                for idx in range(num_experts)
-            ]
+            [getattr(fc1, f"weight{idx}").detach().transpose(0, 1) for idx in range(num_experts)]
         )
         ref_fc2_weights = torch.stack(
-            [
-                getattr(fc2, f"weight{idx}").detach().transpose(0, 1)
-                for idx in range(num_experts)
-            ]
+            [getattr(fc2, f"weight{idx}").detach().transpose(0, 1) for idx in range(num_experts)]
         )
         reference = MoeEpReference(
             num_experts=self.cfg.num_experts,
@@ -822,12 +790,8 @@ class TestEP(unittest.TestCase):
         test_output.backward(grad_output)
         torch.cuda.synchronize()
 
-        torch.testing.assert_close(
-            test_output.float(), ref_output.float(), atol=5e-2, rtol=5e-2
-        )
-        torch.testing.assert_close(
-            test_tokens.grad.float(), ref_grads[0], atol=5e-2, rtol=5e-2
-        )
+        torch.testing.assert_close(test_output.float(), ref_output.float(), atol=5e-2, rtol=5e-2)
+        torch.testing.assert_close(test_tokens.grad.float(), ref_grads[0], atol=5e-2, rtol=5e-2)
         torch.testing.assert_close(
             test_topk_weights.grad,
             ref_grads[3],

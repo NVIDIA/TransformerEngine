@@ -108,9 +108,7 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
         basic_op_extra_inputs: list[list[Optional[torch.Tensor]]] = [
             [None] * op.num_extra_inputs for op in fuser._basic_ops
         ]
-        for tensor, (op_idx, input_idx) in zip(
-            extra_inputs, fuser._external_extra_input_slots
-        ):
+        for tensor, (op_idx, input_idx) in zip(extra_inputs, fuser._external_extra_input_slots):
             basic_op_extra_inputs[op_idx][input_idx] = tensor
 
         # Apply forward ops
@@ -127,9 +125,7 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
             # consumer, leave the consumer slot unset so the fused op can
             # wire the channel itself
             for idx in basic_op_idxs:
-                for input_idx, source in enumerate(
-                    fuser._basic_op_extra_input_sources[idx]
-                ):
+                for input_idx, source in enumerate(fuser._basic_op_extra_input_sources[idx]):
                     if source is None:
                         continue
                     producer_idx, output_idx = source
@@ -141,10 +137,7 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
                         raise RuntimeError(
                             f"Extra tensor channel producer op {producer_idx} has not run"
                         )
-                    if (
-                        output_idx >= len(producer_outputs)
-                        or producer_outputs[output_idx] is None
-                    ):
+                    if output_idx >= len(producer_outputs) or producer_outputs[output_idx] is None:
                         raise RuntimeError(
                             f"Extra tensor channel producer op {producer_idx} "
                             f"({type(fuser._basic_ops[producer_idx]).__name__}) "
@@ -154,9 +147,7 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
                             f"input {input_idx}"
                         )
                     basic_op_extra_inputs[idx][input_idx] = producer_outputs[output_idx]
-            op_extra_inputs = [
-                tuple(basic_op_extra_inputs[idx]) for idx in basic_op_idxs
-            ]
+            op_extra_inputs = [tuple(basic_op_extra_inputs[idx]) for idx in basic_op_idxs]
             prev_op_idx = basic_op_idxs[0] - 1
             prev_op = fuser._basic_ops[prev_op_idx] if prev_op_idx >= 0 else None
             prev_op_grad_output_quantizer = None
@@ -290,9 +281,7 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
         basic_op_grad_extra_outputs: list[list[Optional[torch.Tensor]]] = [
             [None] * op.num_extra_outputs for op in basic_ops
         ]
-        for grad, (op_idx, output_idx) in zip(
-            grad_extra_outputs, external_extra_output_slots
-        ):
+        for grad, (op_idx, output_idx) in zip(grad_extra_outputs, external_extra_output_slots):
             basic_op_grad_extra_outputs[op_idx][output_idx] = grad
 
         # Apply backward ops
@@ -310,13 +299,9 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
             # Backward op. Supply gradients accumulated from every consumer of
             # each internal channel.
             for idx in basic_op_idxs:
-                for output_idx, channel in enumerate(
-                    basic_op_extra_output_channels[idx]
-                ):
+                for output_idx, channel in enumerate(basic_op_extra_output_channels[idx]):
                     if channel is not None:
-                        basic_op_grad_extra_outputs[idx][output_idx] = channel_grads.get(
-                            channel
-                        )
+                        basic_op_grad_extra_outputs[idx][output_idx] = channel_grads.get(channel)
             op_grad_extra_outputs = [
                 tuple(basic_op_grad_extra_outputs[idx]) for idx in basic_op_idxs
             ]
@@ -341,9 +326,7 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
                         continue
                     channel = basic_op_extra_output_channels[producer_idx][output_idx]
                     previous_grad = channel_grads.get(channel)
-                    channel_grads[channel] = (
-                        grad if previous_grad is None else previous_grad + grad
-                    )
+                    channel_grads[channel] = grad if previous_grad is None else previous_grad + grad
 
         # Flatten list of parameter gradients
         grad_params_flat = []
@@ -456,13 +439,9 @@ class OperationFuser:
                         f"Extra tensor channel {channel!r} consumed by op {op_idx} "
                         f"({type(op).__name__}) has no earlier producer"
                     )
-                self._basic_op_extra_input_sources[op_idx][input_idx] = channel_producers[
-                    channel
-                ]
+                self._basic_op_extra_input_sources[op_idx][input_idx] = channel_producers[channel]
                 consumed_channels.add(channel)
-            for output_idx, channel in enumerate(
-                self._basic_op_extra_output_channels[op_idx]
-            ):
+            for output_idx, channel in enumerate(self._basic_op_extra_output_channels[op_idx]):
                 if channel is None:
                     self._external_extra_output_slots.append((op_idx, output_idx))
                     continue
@@ -497,12 +476,10 @@ class OperationFuser:
                     raise ValueError(
                         f"Extra input {input_idx} of op {op_idx} "
                         f"({type(op).__name__}) is bound to channel {channel!r} "
-                        f"but has no producer"
+                        "but has no producer"
                     )
                 producer_idx, output_idx = source
-                producer_channel = self._basic_op_extra_output_channels[producer_idx][
-                    output_idx
-                ]
+                producer_channel = self._basic_op_extra_output_channels[producer_idx][output_idx]
                 if producer_channel != channel:
                     raise ValueError(
                         f"Extra input {input_idx} of op {op_idx} "
@@ -602,9 +579,7 @@ class OperationFuser:
             first_op_requiring_backward = self._num_basic_ops
             for op_idx in range(self._num_basic_ops):
                 op_inputs = itertools.chain(self._basic_op_params[op_idx], extra_inputs[op_idx])
-                if any(
-                    tensor is not None and tensor.requires_grad for tensor in op_inputs
-                ):
+                if any(tensor is not None and tensor.requires_grad for tensor in op_inputs):
                     first_op_requiring_backward = op_idx
                     break
 
@@ -694,9 +669,7 @@ class OperationFuser:
         basic_op_extra_inputs: list[list[Optional[torch.Tensor]]] = [
             [None] * op.num_extra_inputs for op in self._basic_ops
         ]
-        for tensor, (op_idx, input_idx) in zip(
-            extra_inputs, self._external_extra_input_slots
-        ):
+        for tensor, (op_idx, input_idx) in zip(extra_inputs, self._external_extra_input_slots):
             basic_op_extra_inputs[op_idx][input_idx] = tensor
 
         # Get environment state

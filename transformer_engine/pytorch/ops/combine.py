@@ -25,9 +25,7 @@ def _validate_grad_buffer(
     if tensor is None:
         return None
     if tuple(tensor.shape) != shape:
-        raise ValueError(
-            f"grad_out shape {tuple(tensor.shape)} does not match {shape}."
-        )
+        raise ValueError(f"grad_out shape {tuple(tensor.shape)} does not match {shape}.")
     if tensor.dtype is not dtype:
         raise TypeError(f"grad_out must have dtype {dtype}, got {tensor.dtype}.")
     if tensor.device != device:
@@ -46,15 +44,11 @@ class Combine(BasicOperation):
     same :class:`EpBuffer`.
     """
 
-    def __init__(
-        self, buffer: EpBuffer, *, num_local_tokens: Optional[int] = None
-    ) -> None:
+    def __init__(self, buffer: EpBuffer, *, num_local_tokens: Optional[int] = None) -> None:
         super().__init__()
         self.buffer = buffer
         self.num_local_tokens = (
-            buffer.max_tokens_per_rank
-            if num_local_tokens is None
-            else int(num_local_tokens)
+            buffer.max_tokens_per_rank if num_local_tokens is None else int(num_local_tokens)
         )
         if self.num_local_tokens < 0:
             raise ValueError("num_local_tokens must be non-negative.")
@@ -70,9 +64,7 @@ class Combine(BasicOperation):
     ) -> torch.Tensor:
         del prev_op_grad_output_quantizer, next_op_input_quantizer
         if input_.dtype is not torch.bfloat16:
-            raise NotImplementedError(
-                f"NCCL EP requires BF16 combine input, got {input_.dtype}."
-            )
+            raise NotImplementedError(f"NCCL EP requires BF16 combine input, got {input_.dtype}.")
         if input_.ndim != 2 or input_.shape[-1] != self.buffer.hidden_dim:
             raise ValueError(
                 f"Combine input must have shape (R, {self.buffer.hidden_dim}), "
@@ -114,14 +106,8 @@ class Combine(BasicOperation):
                 dtype=input_.dtype,
                 device=input_.device,
             )
-            if (
-                self.buffer.zero_copy
-                and grad_out is not None
-                and not is_symm_backed(grad_out)
-            ):
-                raise ValueError(
-                    "zero-copy Combine grad_out must be symmetric-memory-backed."
-                )
+            if self.buffer.zero_copy and grad_out is not None and not is_symm_backed(grad_out):
+                raise ValueError("zero-copy Combine grad_out must be symmetric-memory-backed.")
             ctx.grad_out = grad_out
             ctx.input_shape = tuple(input_.shape)
             ctx.input_dtype = input_.dtype
@@ -150,4 +136,3 @@ class Combine(BasicOperation):
             grad_input,
         )
         return grad_input, ()
-

@@ -73,9 +73,7 @@ class Dispatch(BasicOperation):
         kwargs = basic_op_kwargs[0]
 
         if input_.dtype is not torch.bfloat16:
-            raise NotImplementedError(
-                f"NCCL EP requires BF16 dispatch input, got {input_.dtype}."
-            )
+            raise NotImplementedError(f"NCCL EP requires BF16 dispatch input, got {input_.dtype}.")
         if input_.ndim != 2 or input_.shape[-1] != self.buffer.hidden_dim:
             raise ValueError(
                 f"Dispatch input must have shape (T, {self.buffer.hidden_dim}), "
@@ -97,15 +95,11 @@ class Dispatch(BasicOperation):
             raise TypeError(f"topk_weights must be float32, got {topk_weights.dtype}.")
         for name, tensor in (("topk_idx", topk_idx), ("topk_weights", topk_weights)):
             if tensor.device != input_.device:
-                raise ValueError(
-                    f"{name} must be on {input_.device}, got {tensor.device}."
-                )
+                raise ValueError(f"{name} must be on {input_.device}, got {tensor.device}.")
 
         recv_tokens = kwargs.get("recv_tokens")
         recv_topk_weights = kwargs.get("recv_topk_weights")
-        if self.buffer.eager and (
-            recv_tokens is not None or recv_topk_weights is not None
-        ):
+        if self.buffer.eager and (recv_tokens is not None or recv_topk_weights is not None):
             raise ValueError(
                 "eager mode sizes dispatch outputs per step and cannot use "
                 "caller-supplied receive buffers"
@@ -211,4 +205,3 @@ class Dispatch(BasicOperation):
             grad_topk_weights,
         )
         return grad_input, [()], [(None, grad_topk_weights)]
-

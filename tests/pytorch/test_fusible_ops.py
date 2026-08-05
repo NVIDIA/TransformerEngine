@@ -523,9 +523,7 @@ class TestSequentialContainer:
             ):
                 m_splits, probs = basic_op_extra_inputs[0]
                 # Stub row-id map: real Dispatch would emit permute indices.
-                routing_map = torch.arange(
-                    input_.size(0), device=input_.device, dtype=torch.int64
-                )
+                routing_map = torch.arange(input_.size(0), device=input_.device, dtype=torch.int64)
                 return input_, [(m_splits, probs, routing_map)]
 
             def fuser_backward(
@@ -568,9 +566,7 @@ class TestSequentialContainer:
                 if routing_map is None:
                     raise RuntimeError("FakeCombine expected routing_map channel")
                 if int(routing_map.numel()) != int(input_.size(0)):
-                    raise RuntimeError(
-                        "FakeCombine routing_map length does not match tokens"
-                    )
+                    raise RuntimeError("FakeCombine routing_map length does not match tokens")
                 return input_, [()]
 
             def fuser_backward(
@@ -583,9 +579,7 @@ class TestSequentialContainer:
                 del basic_op_grad_extra_outputs
                 return grad_output, [()], [(None,)]
 
-        split_sizes = torch.tensor([8, 16, 8, 8], dtype=torch.int64, device=device)[
-            :group_size
-        ]
+        split_sizes = torch.tensor([8, 16, 8, 8], dtype=torch.int64, device=device)[:group_size]
         num_tokens = int(split_sizes.sum())
         in_shape = (num_tokens, hidden_size)
 
@@ -855,9 +849,7 @@ class TestExtraTensorChannels:
             def fuser_forward(self, basic_op_ctxs, input_, *, basic_op_extra_inputs, **unused):
                 return input_, [(input_, input_)]
 
-            def fuser_backward(
-                self, basic_op_ctxs, grad_output, *, basic_op_grad_extra_outputs
-            ):
+            def fuser_backward(self, basic_op_ctxs, grad_output, *, basic_op_grad_extra_outputs):
                 g0, g1 = basic_op_grad_extra_outputs[0]
                 grad_extra = torch.zeros_like(grad_output)
                 if g0 is not None:
