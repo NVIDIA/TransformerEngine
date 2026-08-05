@@ -26,15 +26,21 @@ NUM_HEADS = 128
 HEAD_DIM_NOPE = 128
 HEAD_DIM_ROPE = 64
 HEAD_DIM = HEAD_DIM_NOPE + HEAD_DIM_ROPE  # 192
-Q_LORA_RANK = 1536                         # K dimension of the up-proj GEMM
-PROJ_DIM = NUM_HEADS * HEAD_DIM            # 24576
+Q_LORA_RANK = 1536  # K dimension of the up-proj GEMM
+PROJ_DIM = NUM_HEADS * HEAD_DIM  # 24576
 
 SEED = 42
 
 fused_supported, reason_not_supported = (
-    (True, "") if FusedMLAQUpProjRopeQuant.is_supported()
-    else (False, "FusedMLAQUpProjRopeQuant.is_supported() returned False "
-                 "(SM100+, cudnn-frontend >= 1.27.0, and NVTE_FUSED_MLA_Q_UPROJ=1 required)")
+    (True, "")
+    if FusedMLAQUpProjRopeQuant.is_supported()
+    else (
+        False,
+        (
+            "FusedMLAQUpProjRopeQuant.is_supported() returned False "
+            "(SM100+, cudnn-frontend >= 1.27.0, and NVTE_FUSED_MLA_Q_UPROJ=1 required)"
+        ),
+    )
 )
 
 
@@ -98,7 +104,7 @@ def _reference_q_uproj(
     half = HEAD_DIM_ROPE // 2
     x1 = q_rope[..., 0::2]
     x2 = q_rope[..., 1::2]
-    x_left  = x1 * cos_[..., :half] - x2 * sin_[..., :half]
+    x_left = x1 * cos_[..., :half] - x2 * sin_[..., :half]
     x_right = x2 * cos_[..., half:] + x1 * sin_[..., half:]
     q_rope_out = torch.cat([x_left, x_right], dim=-1)
     return torch.cat([q_nope, q_rope_out], dim=-1)
@@ -108,7 +114,7 @@ def _reference_q_uproj(
 @pytest.mark.parametrize(
     "s, b",
     [
-        (128, 1),   # minimum tile (TILE_M=128)
+        (128, 1),  # minimum tile (TILE_M=128)
         (256, 1),
         (128, 2),
     ],
@@ -127,14 +133,17 @@ def test_fused_mla_q_uproj_output_shapes(s: int, b: int) -> None:
     query, x_saved = FusedMLAQUpProjRopeQuant.run(x, w, cos, sin, s, b)
 
     assert isinstance(query, MXFP8Tensor), f"Expected MXFP8Tensor, got {type(query)}"
-    assert query.shape == (s, b, NUM_HEADS, HEAD_DIM), (
-        f"Expected query shape {(s, b, NUM_HEADS, HEAD_DIM)}, got {query.shape}"
-    )
-    assert query._rowwise_data is not None,    "Missing rowwise data"
+    assert query.shape == (
+        s,
+        b,
+        NUM_HEADS,
+        HEAD_DIM,
+    ), f"Expected query shape {(s, b, NUM_HEADS, HEAD_DIM)}, got {query.shape}"
+    assert query._rowwise_data is not None, "Missing rowwise data"
     assert query._columnwise_data is not None, "Missing columnwise data"
 
     blk = 32
-    assert query._rowwise_scale_inv.shape    == (s, b, NUM_HEADS, HEAD_DIM // blk)
+    assert query._rowwise_scale_inv.shape == (s, b, NUM_HEADS, HEAD_DIM // blk)
     assert query._columnwise_scale_inv.shape == (s // blk, b, NUM_HEADS, HEAD_DIM)
 
 
@@ -176,20 +185,18 @@ def test_fused_mla_q_uproj_x_saved_is_mxfp8() -> None:
 
     _, x_saved = FusedMLAQUpProjRopeQuant.run(x, w, cos, sin, s, b)
 
-    assert isinstance(x_saved, MXFP8Tensor), (
-        f"x_saved should be MXFP8Tensor for MXFP8 weight path, got {type(x_saved)}"
-    )
+    assert isinstance(
+        x_saved, MXFP8Tensor
+    ), f"x_saved should be MXFP8Tensor for MXFP8 weight path, got {type(x_saved)}"
     assert x_saved._columnwise_data is not None, "x_saved must retain columnwise data for wgrad"
     assert x_saved._rowwise_data is None, "x_saved rowwise data should be dropped after forward"
 
 
-def _build_rope_tables(
-    tokens: int, device: torch.device
-) -> tuple[torch.Tensor, torch.Tensor]:
+def _build_rope_tables(tokens: int, device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
     """Plain cos/sin tables for HEAD_DIM_ROPE, interleaved [tokens, rope_dim] bf16."""
     inv_freq = 1.0 / (
-        10000 ** (torch.arange(0, HEAD_DIM_ROPE, 2, dtype=torch.float32, device=device)
-                  / HEAD_DIM_ROPE)
+        10000
+        ** (torch.arange(0, HEAD_DIM_ROPE, 2, dtype=torch.float32, device=device) / HEAD_DIM_ROPE)
     )
     t = torch.arange(tokens, dtype=torch.float32, device=device)
     freqs = torch.outer(t, inv_freq)
