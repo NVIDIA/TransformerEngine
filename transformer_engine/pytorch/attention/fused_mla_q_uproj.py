@@ -71,8 +71,9 @@ class FusedMLAQUpProjRopeQuant:
 
         if isinstance(w, QuantizedTensor):
             assert isinstance(w, MXFP8Tensor), (
-                f"FusedMLAQUpProjRopeQuant expects an MXFP8Tensor weight (MXFP8BlockScaling recipe), "
-                f"got {type(w).__name__}. Use the unfused path for other quantization recipes."
+                "FusedMLAQUpProjRopeQuant expects an MXFP8Tensor weight (MXFP8BlockScaling"
+                f" recipe), got {type(w).__name__}. Use the unfused path for other quantization"
+                " recipes."
             )
             # ---- FP8 projection: MXFP8-cast x (both usages) + reuse w's fp8 codes -> mxfp8in ----
             # Quantize x with both rowwise (for the forward GEMM) and columnwise (for the FP8
