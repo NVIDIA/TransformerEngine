@@ -1918,18 +1918,17 @@ def _get_symm_mem_pool(device: torch.device, backend: str = "NCCL"):
     return _SYMM_MEM_POOL
 
 
-def release_symm_mem_pool(device: Optional[torch.device] = None) -> None:
+def release_symm_mem_pool() -> None:
     """Free the process-wide symm-mem pool's segments, deregistering their NCCL windows.
 
     Call before ``dist.destroy_process_group()``: the pool's windows are registered on
     the group's NCCL comm, which becomes invalid once the group is destroyed. No-op if
-    no pool was created. ``device`` is ignored; the pool's creation device is used.
+    no pool was created.
     """
     global _SYMM_MEM_POOL, _SYMM_MEM_POOL_BACKEND, _SYMM_MEM_POOL_DEVICE, _SYMM_MEM_POOL_TORCH_CACHED
     if _SYMM_MEM_POOL is None:
         return
-    # Key the cache lookup on the device the pool was created for, not the caller's current
-    # device, so teardown works even when they differ.
+    # The torch symm_mem._symm_mem_pools cache is keyed by the pool's creation device.
     device = _SYMM_MEM_POOL_DEVICE
     _SYMM_MEM_POOL = None
     _SYMM_MEM_POOL_BACKEND = None
