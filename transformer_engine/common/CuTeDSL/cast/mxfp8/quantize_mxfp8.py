@@ -968,7 +968,9 @@ class MXFP8QuantizeKernel(MXFP8QuantizeKernelBase):
         """Device entry: no-op the CTA when the noop flag is set, else run the quantize main loop."""
 
         # Only honor the noop flag when no activation or dbias is fused to match CUDA C++'s implementation
-        CHECK_NOOP_FLAG: cutlass.const_expr = not self.cfg.WITH_ACT and not self.cfg.WITH_DACT and not self.cfg.WITH_DBIAS
+        CHECK_NOOP_FLAG: cutlass.const_expr = (
+            not self.cfg.WITH_ACT and not self.cfg.WITH_DACT and not self.cfg.WITH_DBIAS
+        )
         skip_execution = False
         if cutlass.const_expr(CHECK_NOOP_FLAG):
             skip_execution = noop_flag_is_set(mNoop)
