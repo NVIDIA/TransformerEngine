@@ -227,6 +227,8 @@ def run_test_case(method, act, shape, block_size, in_dtype, fp8_dtype, swizzled=
             cutedsl_output[name], cuda_bytes
         ), f"{tag}: {name} differ between backends"
     if dbias_cuda is not None:
+        # CuTeDSL kernel does dbias reduction in a slightly different order than the CUDA kernel,
+        # due to the non-associativity of floating-point addition, this will not be bit-identical.
         torch.testing.assert_close(dbias_cutedsl, dbias_cuda)
 
 
