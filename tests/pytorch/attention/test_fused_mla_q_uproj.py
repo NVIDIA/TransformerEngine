@@ -14,7 +14,6 @@ import torch
 import transformer_engine.pytorch  # registers transformer_engine_torch
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.attention import FusedMLAQUpProjRopeQuant
-from transformer_engine.pytorch.cpp_extensions import general_gemm
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer, MXFP8Tensor
 
 # DSv3 671B MLA dims
@@ -109,9 +108,10 @@ def _build_rope_tables(tokens: int, device: torch.device) -> tuple[torch.Tensor,
 @pytest.mark.skipif(not fused_supported, reason=reason_not_supported)
 @pytest.mark.parametrize("tokens", [256])
 def test_fused_mla_q_uproj(tokens: int) -> None:
-    """Forward numerics + x_saved properties + backward dgrad/wgrad numerics.
+    """Forward numerics and x_saved properties for FusedMLAQUpProjRopeQuant.run().
 
-    Forward is checked first so a broken kernel is caught before the backward assertions.
+    Full forward+backward autograd testing (via _FusedMLAQUpProjFunction) lives in
+    Megatron-Core.
     """
     s, b = tokens, 1
     device = torch.device("cuda")
@@ -119,43 +119,19 @@ def test_fused_mla_q_uproj(tokens: int) -> None:
     torch.cuda.manual_seed(SEED)
 
     x = torch.randn(tokens, Q_LORA_RANK, dtype=torch.bfloat16, device=device)
-    # Backward needs columnwise data on w for the dgrad GEMM (general_gemm layout="NN"
-    # unwraps A via the columnwise direction).
-    w = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3, rowwise=True, columnwise=True)(
+    w = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3, rowwise=True, columnwise=False)(
         torch.randn(PROJ_DIM, Q_LORA_RANK, dtype=torch.bfloat16, device=device)
     )
     cos, sin = _build_rope_tables(tokens, device)
 
     query, x_saved = FusedMLAQUpProjRopeQuant.run(x, w, cos, sin, s, b)
 
-    # --- Forward numerics ---
+    # Forward numerics: FP8 GEMM + output quantize introduce ~10% relative error.
     fused_dq = _dequantize_fused_output(query, s, b)
     ref_dq = _reference_q_uproj(x, w, cos, sin, s, b)
     torch.testing.assert_close(fused_dq, ref_dq, atol=0.5, rtol=0.1)
 
-    # --- x_saved properties ---
+    # x_saved: must be MXFP8 with only columnwise data retained for wgrad.
     assert isinstance(x_saved, MXFP8Tensor)
     assert x_saved._columnwise_data is not None, "x_saved must retain columnwise data for wgrad"
     assert x_saved._rowwise_data is None, "x_saved rowwise data should be dropped after forward"
-
-    # --- Backward: dgrad + wgrad ---
-    grad_output = torch.randn(tokens, PROJ_DIM, dtype=torch.bfloat16, device=device)
-    grad_output_quantizer = MXFP8Quantizer(
-        fp8_dtype=tex.DType.kFloat8E4M3, rowwise=True, columnwise=True
-    )
-    grad_output_quantizer.optimize_for_gemm = True
-    gy = grad_output_quantizer(grad_output)
-
-    grad_x = general_gemm(
-        w, gy, layout="NN", grad=True, out_dtype=torch.bfloat16, use_split_accumulator=True
-    )[0]
-    grad_w = general_gemm(
-        x_saved, gy, layout="NT", grad=True, out_dtype=torch.bfloat16, use_split_accumulator=True
-    )[0]
-
-    x_dq = x_saved.dequantize().to(torch.bfloat16)
-    w_dq = w.dequantize().to(torch.bfloat16)
-    gy_dq = gy.dequantize().to(torch.bfloat16)
-
-    torch.testing.assert_close(grad_x, gy_dq @ w_dq, atol=0.5, rtol=0.1)
-    torch.testing.assert_close(grad_w, gy_dq.t() @ x_dq, atol=0.5, rtol=0.1)

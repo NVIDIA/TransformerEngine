@@ -83,7 +83,7 @@ class FusedMLAQUpProjRopeQuant:
 
         from cuda.bindings import driver as cuda
 
-        stream = cuda.CUstream(torch.cuda.current_stream().cuda_stream)
+        stream = cuda.CUstream(torch.cuda.current_stream(x.device).cuda_stream)
         wrapper = cls._kernel()
 
         if isinstance(w, QuantizedTensor):
