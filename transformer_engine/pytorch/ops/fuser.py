@@ -506,6 +506,11 @@ class OperationFuser:
         self._basic_op_num_params = list(map(len, self._basic_op_params))
         self._flat_basic_op_params = sum(self._basic_op_params, [])
 
+        # Channel routing is structural fuser state. Prevent the basic ops from
+        # changing their bindings after this fuser captures them.
+        for op in self._basic_ops:
+            op._lock_extra_channels()
+
     @staticmethod
     def _apply_fusions(
         ops: Iterable[FusibleOperation],

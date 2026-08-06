@@ -597,6 +597,19 @@ class TestExtraTensorChannels:
         with pytest.raises(ValueError, match="non-empty string"):
             producer.set_extra_output_channel(0, 123)  # type: ignore[arg-type]
 
+    def test_set_extra_channel_rejects_mutation_after_fuser_construction(self) -> None:
+        """Channel routing is immutable after it has been captured by a fuser."""
+        producer = te_ops.MakeExtraOutput()
+        consumer = te_ops.AddExtraInput()
+        producer.set_extra_output_channel(0, "route")
+        consumer.set_extra_input_channel(0, "route")
+        fuser = OperationFuser([producer, consumer])
+        assert fuser.num_extra_inputs == 0
+        with pytest.raises(RuntimeError, match="cannot be changed"):
+            producer.set_extra_output_channel(0, None)
+        with pytest.raises(RuntimeError, match="cannot be changed"):
+            consumer.set_extra_input_channel(0, None)
+
     def test_duplicate_extra_output_channel_names(self) -> None:
         """Two extra outputs may not publish the same channel name."""
         producer1 = te_ops.MakeExtraOutput()

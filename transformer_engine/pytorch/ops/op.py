@@ -191,6 +191,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         # Unbound slots remain public inputs/outputs, preserving the original API.
         self._extra_input_channels: list[Optional[str]] = [None] * self.num_extra_inputs
         self._extra_output_channels: list[Optional[str]] = [None] * self.num_extra_outputs
+        self._extra_channels_locked = False
 
         # Objects for quantization
         self._fp8_metas: Optional[dict[str, dict[str, Any]]] = None
@@ -201,7 +202,8 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
 
         A bound slot receives the matching extra output from an earlier
         operation in the same fuser instead of consuming a public extra input.
-        Passing ``None`` removes the binding.
+        Passing ``None`` removes the binding. Bindings cannot be changed after
+        the operation has been attached to an ``OperationFuser``.
         """
         if not 0 <= index < self.num_extra_inputs:
             raise IndexError(
@@ -210,6 +212,9 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
             )
         if channel is not None and (not isinstance(channel, str) or not channel):
             raise ValueError("Extra input channel must be a non-empty string or None")
+        if self._extra_input_channels[index] == channel:
+            return self
+        self._assert_extra_channels_mutable()
         self._extra_input_channels[index] = channel
         return self
 
@@ -217,7 +222,9 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         """Bind an extra output slot to an internal fuser channel.
 
         A bound slot can feed one or more later operations and is not returned
-        as a public extra output. Passing ``None`` removes the binding.
+        as a public extra output. Passing ``None`` removes the binding. Bindings
+        cannot be changed after the operation has been attached to an
+        ``OperationFuser``.
         """
         if not 0 <= index < self.num_extra_outputs:
             raise IndexError(
@@ -226,8 +233,23 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
             )
         if channel is not None and (not isinstance(channel, str) or not channel):
             raise ValueError("Extra output channel must be a non-empty string or None")
+        if self._extra_output_channels[index] == channel:
+            return self
+        self._assert_extra_channels_mutable()
         self._extra_output_channels[index] = channel
         return self
+
+    def _assert_extra_channels_mutable(self) -> None:
+        """Check that channel routing has not been captured by a fuser."""
+        if self._extra_channels_locked:
+            raise RuntimeError(
+                "Extra tensor channels cannot be changed after an operation has been "
+                "attached to an OperationFuser"
+            )
+
+    def _lock_extra_channels(self) -> None:
+        """Prevent changes after a fuser has captured the channel routing."""
+        self._extra_channels_locked = True
 
     @property
     def is_fused_op(self) -> bool:
