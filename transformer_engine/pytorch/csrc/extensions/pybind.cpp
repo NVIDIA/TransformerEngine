@@ -216,8 +216,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("bgrad_group_quantize", transformer_engine::pytorch::bgrad_group_quantize,
         py::arg("tensor"), py::arg("quantizer"), py::arg("num_tensors"), py::arg("first_dims"),
         py::arg("last_dims") = py::none(), py::arg("tensor_offsets") = py::none());
-  m.def("group_requantize",
-        transformer_engine::pytorch::group_requantize,
+  m.def("group_requantize_inplace",
+        transformer_engine::pytorch::group_requantize_inplace,
         "Rebuild the columnwise copy of a rowwise-prequantized MXFP8 grouped tensor and swizzle "
         "its rowwise scales for GEMM, in place",
         py::arg("grouped_x"), py::arg("quantizer"), py::arg("num_tensors"),

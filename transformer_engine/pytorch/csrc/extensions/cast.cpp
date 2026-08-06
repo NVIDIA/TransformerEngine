@@ -664,7 +664,7 @@ py::object group_dequantize(const py::handle &input, transformer_engine::DType o
   return py::reinterpret_borrow<py::object>(out_py);
 }
 
-py::object group_requantize(
+py::object group_requantize_inplace(
     py::handle grouped_x, py::handle quantizer, const size_t num_tensors,
     std::optional<at::Tensor> first_dims, DType otype, std::optional<at::Tensor> tensor_offsets,
     bool return_dequantized) {
@@ -674,7 +674,7 @@ py::object group_requantize(
   // for rowwise output would silently overwrite it with a fresh quantization.
   NVTE_CHECK(quantizer.attr("columnwise_usage").cast<bool>() &&
                  !quantizer.attr("rowwise_usage").cast<bool>(),
-             "group_requantize expects a columnwise-only quantizer.");
+             "group_requantize_inplace expects a columnwise-only quantizer.");
   NVTE_CHECK(!grouped_x.attr("rowwise_data").is_none(),
              "Pre-quantized MXFP8 grouped input is missing rowwise data.");
   NVTE_CHECK(!grouped_x.attr("scale_inv").is_none(),

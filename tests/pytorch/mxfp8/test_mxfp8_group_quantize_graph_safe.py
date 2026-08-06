@@ -474,7 +474,7 @@ def test_grouped_tensor_mxfp8_with_paged_stashing(
 # ---------------------------------------------------------------------------------------------
 # Pre-quantized MXFP8 input (FP8 token dispatch)
 #
-# tex.group_requantize takes a grouped tensor that arrives
+# tex.group_requantize_inplace takes a grouped tensor that arrives
 # ALREADY rowwise-quantized (its high-precision form no longer exists), and makes it GEMM-ready
 # in both directions: the rowwise data passes through verbatim with its scales swizzled, and the
 # columnwise copy is rebuilt via dequantize + columnwise-only requantize.
@@ -558,7 +558,7 @@ def check_prequantized_requantize_versus_reference(
     )
     colwise_quantizer.optimize_for_gemm = True
     colwise_quantizer.internal = True
-    dequantized = tex.group_requantize(
+    dequantized = tex.group_requantize_inplace(
         wire,
         colwise_quantizer,
         num_groups,
