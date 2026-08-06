@@ -91,15 +91,6 @@ def maybe_dequantize(
     return tensor
 
 
-def make_columnwise_gemm_quantizer(quantizer: MXFP8Quantizer) -> MXFP8Quantizer:
-    """Copy of ``quantizer`` configured to emit only GEMM-swizzled columnwise data."""
-    columnwise_quantizer = quantizer.copy()
-    columnwise_quantizer.set_usage(rowwise=False, columnwise=True)
-    columnwise_quantizer.optimize_for_gemm = True
-    columnwise_quantizer.internal = True
-    return columnwise_quantizer
-
-
 def maybe_autocast_dtype(
     *,
     device_type: str = "cuda",

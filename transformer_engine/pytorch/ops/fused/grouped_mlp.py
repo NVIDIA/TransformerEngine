@@ -53,7 +53,6 @@ from .._common import (
     get_dummy_wgrads_for_params,
     get_main_grad_from_param,
     is_quantized_tensor,
-    make_columnwise_gemm_quantizer,
     maybe_dequantize,
     validate_or_alloc_output,
     view_main_grad_as_grouped_buffer,
@@ -1209,34 +1208,19 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         )
         fc1_input_quantizer.optimize_for_gemm = True
         fc1_input_quantizer.internal = True
-        input_quantizer = getattr(input_, "quantizer", None)
-        if isinstance(input_, GroupedTensor) and (
-            isinstance(fc1_input_quantizer, MXFP8Quantizer)
-            and isinstance(input_quantizer, MXFP8Quantizer)
-            or isinstance(fc1_input_quantizer, NVFP4Quantizer)
-            and isinstance(input_quantizer, NVFP4Quantizer)
-        ):
+        if isinstance(input_, GroupedTensor):
+            # Input arrived already quantized (e.g. FP8 token dispatch): reuse its rowwise data
+            # for the GEMM and let the helper supply whatever else the GEMMs need. An input that
+            # is already GEMM-ready in both directions passes through untouched.
             grouped_fc1_x = input_.copy()
-            if (
-                isinstance(fc1_input_quantizer, MXFP8Quantizer)
-                and not grouped_fc1_x._with_gemm_swizzled_scales
-            ):
-                # Rowwise-only MXFP8 input (e.g. FP8 token dispatch):
-                # manufacture the columnwise copy needed by the wgrad GEMM
-                # and swizzle the rowwise scales for the forward GEMM.
-                if weight_requires_grad:
-                    tex.group_requantize_inplace(
-                        grouped_fc1_x,
-                        make_columnwise_gemm_quantizer(fc1_input_quantizer),
-                        num_groups,
-                        split_sizes,
-                        TE_DType[dtype],
-                        tensor_offsets=fc1_x_tensor_offsets,
-                    )
-                else:
-                    # No wgrad, so no columnwise copy is needed. The forward GEMM
-                    # still requires swizzled rowwise scales.
-                    tex.grouped_swizzle_for_gemm(grouped_fc1_x, rowwise=True, columnwise=False)
+            tex.group_requantize_inplace(
+                grouped_fc1_x,
+                fc1_input_quantizer,
+                num_groups,
+                split_sizes,
+                TE_DType[dtype],
+                tensor_offsets=fc1_x_tensor_offsets,
+            )
         else:
             fc1_x = maybe_dequantize(input_, dtype)
             grouped_fc1_x = _group_quantize_for_grouped_mlp(
@@ -1856,57 +1840,28 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         output_fc2_dbias = fc2_op.has_bias
         fc2_dbias_packed = None
         fc2_dy = None
-        grad_output_quantizer = getattr(grad_output, "quantizer", None)
-        fc2_grad_output_quantizer_matches = (
-            isinstance(fc2_grad_output_quantizer, MXFP8Quantizer)
-            and isinstance(grad_output_quantizer, MXFP8Quantizer)
-        ) or (
-            isinstance(fc2_grad_output_quantizer, NVFP4Quantizer)
-            and isinstance(grad_output_quantizer, NVFP4Quantizer)
-        )
-        prequantized_mxfp8_grad = isinstance(fc2_grad_output_quantizer, MXFP8Quantizer)
-        if (
-            (not output_fc2_dbias or prequantized_mxfp8_grad)
-            and isinstance(grad_output, GroupedTensor)
-            and fc2_grad_output_quantizer_matches
-        ):
-            if prequantized_mxfp8_grad:
-                # Rowwise-only MXFP8 grad output (e.g. FP8 token dispatch): reuse
-                # the rowwise data for the dgrad GEMM and manufacture FC2's
-                # columnwise copy for wgrad. Bias grads are reduced from the
-                # dequantized grad, which is only materialized when one is needed.
-                grouped_fc2_dy = grad_output.copy()
-                need_dequantized = output_fc2_dbias or scale_bias
-                if fc2_ctx.weight_requires_grad:
-                    fc2_dy = tex.group_requantize_inplace(
-                        grouped_fc2_dy,
-                        make_columnwise_gemm_quantizer(fc2_grad_output_quantizer),
-                        num_groups,
-                        split_sizes,
-                        TE_DType[dtype],
-                        tensor_offsets=base_split_offsets * fc2_weight_shape[0],
-                        return_dequantized=need_dequantized,
-                    )
-                else:
-                    # No wgrad, so no columnwise copy is needed. Dequantize before
-                    # swizzling: dequantization reads the unswizzled rowwise scales.
-                    fc2_dy = (
-                        tex.group_dequantize(grouped_fc2_dy, TE_DType[dtype]).rowwise_data.view(
-                            grouped_fc2_dy.logical_shape
-                        )
-                        if need_dequantized
-                        else None
-                    )
-                    tex.grouped_swizzle_for_gemm(grouped_fc2_dy, rowwise=True, columnwise=False)
-                if output_fc2_dbias and not scale_bias:
-                    # This path has no quantize kernel to fuse dbias into, and the
-                    # consumer below has no fallback, so reduce it here.
-                    fc2_dbias_packed = compute_grouped_dbias(fc2_dy, base_split_offsets, num_groups)
-                    # scale_bias is the only later consumer of the dequantized grad;
-                    # drop it so the buffer is freed rather than held until backward ends.
-                    fc2_dy = None
-            else:
-                grouped_fc2_dy = grad_output
+        if isinstance(grad_output, GroupedTensor):
+            # Grad output arrived already quantized (e.g. FP8 token dispatch): reuse its rowwise
+            # data for the dgrad GEMM. Bias grads are reduced from the dequantized grad, which is
+            # only materialized when one is needed. A grad that is already GEMM-ready in both
+            # directions passes through untouched.
+            grouped_fc2_dy = grad_output.copy()
+            fc2_dy = tex.group_requantize_inplace(
+                grouped_fc2_dy,
+                fc2_grad_output_quantizer,
+                num_groups,
+                split_sizes,
+                TE_DType[dtype],
+                tensor_offsets=base_split_offsets * fc2_weight_shape[0],
+                return_dequantized=output_fc2_dbias or scale_bias,
+            )
+            if output_fc2_dbias and not scale_bias:
+                # This path has no quantize kernel to fuse dbias into, and the consumer below
+                # has no fallback, so reduce it here.
+                fc2_dbias_packed = compute_grouped_dbias(fc2_dy, base_split_offsets, num_groups)
+                # scale_bias is the only later consumer of the dequantized grad; drop it so the
+                # buffer is freed rather than held until backward ends.
+                fc2_dy = None
         else:
             fc2_dy = maybe_dequantize(grad_output, dtype)
             if output_fc2_dbias and not scale_bias:

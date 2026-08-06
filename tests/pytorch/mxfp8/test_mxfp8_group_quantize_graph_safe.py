@@ -496,6 +496,28 @@ def make_prequantized_wire_tensor(x: torch.Tensor, split_section_tensor: torch.T
     return wire
 
 
+def make_op_quantizer(columnwise: bool):
+    """The op's input quantizer, configured the way the ops layer configures it.
+
+    ``columnwise`` mirrors ``weight_requires_grad``: it tells the helper whether a wgrad GEMM
+    will consume a columnwise copy.
+    """
+    quantizer = MXFP8Quantizer(
+        fp8_dtype=te.DType.kFloat8E4M3, rowwise=True, columnwise=columnwise
+    )
+    quantizer.optimize_for_gemm = True
+    return quantizer
+
+
+def make_gemm_ready_tensor(x: torch.Tensor, split_section_tensor: torch.Tensor):
+    """Grouped tensor already GEMM-ready in both directions (swizzled scales)."""
+    quantizer = make_op_quantizer(columnwise=True)
+    tensor = fused_grouped_quantize(x, split_section_tensor, quantizer)
+    assert tensor.columnwise_data is not None
+    assert tensor._with_gemm_swizzled_scales
+    return tensor
+
+
 def check_prequantized_requantize_versus_reference(
     x_dtype: torch.dtype,
     M: int,
@@ -553,14 +575,11 @@ def check_prequantized_requantize_versus_reference(
     )
 
     # ---- the code under test ----
-    colwise_quantizer = MXFP8Quantizer(
-        fp8_dtype=te.DType.kFloat8E4M3, rowwise=False, columnwise=True
-    )
-    colwise_quantizer.optimize_for_gemm = True
-    colwise_quantizer.internal = True
+    # The op's quantizer, configured as the ops layer does: columnwise_usage says a wgrad GEMM
+    # will consume the columnwise copy, so the helper builds it and switches rowwise off itself.
     dequantized = tex.group_requantize_inplace(
         wire,
-        colwise_quantizer,
+        make_op_quantizer(columnwise=True),
         num_groups,
         split_section_tensor,
         te.DType.kBFloat16,
@@ -702,3 +721,89 @@ def test_prequantized_requantize_with_paged_stashing(
         N=N,
         split_sections=split_sections,
     )
+
+
+def _requantize_setup(M: int = 1024, N: int = 256):
+    """Common inputs for the state-dispatch tests below."""
+    torch.manual_seed(0)
+    split_sections = [M // 4] * 4
+    x = torch.randn((M, N), dtype=torch.bfloat16, device="cuda")
+    return x, torch.tensor(split_sections, dtype=torch.int64, device="cuda"), len(split_sections)
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+def test_prequantized_requantize_passes_through_gemm_ready_input():
+    """A tensor already GEMM-ready in both directions is left untouched."""
+    x, splits, num_groups = _requantize_setup()
+    tensor = make_gemm_ready_tensor(x, splits)
+    rowwise_before = tensor.rowwise_data.clone()
+    columnwise_before = tensor.columnwise_data.clone()
+    scale_before = tensor.scale_inv.clone()
+
+    out = tex.group_requantize_inplace(
+        tensor, make_op_quantizer(columnwise=True), num_groups, splits, te.DType.kBFloat16
+    )
+
+    assert out is None
+    assert tensor._with_gemm_swizzled_scales
+    torch.testing.assert_close(tensor.rowwise_data, rowwise_before, atol=0.0, rtol=0.0)
+    torch.testing.assert_close(tensor.columnwise_data, columnwise_before, atol=0.0, rtol=0.0)
+    torch.testing.assert_close(tensor.scale_inv, scale_before, atol=0.0, rtol=0.0)
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+def test_prequantized_requantize_skips_columnwise_when_not_needed():
+    """columnwise_usage=False (frozen weights) swizzles rowwise without building columnwise."""
+    x, splits, num_groups = _requantize_setup()
+    wire = make_prequantized_wire_tensor(x, splits)
+
+    out = tex.group_requantize_inplace(
+        wire, make_op_quantizer(columnwise=False), num_groups, splits, te.DType.kBFloat16
+    )
+
+    assert out is None
+    assert wire._with_gemm_swizzled_scales, "the GEMM still needs swizzled rowwise scales"
+    assert wire.columnwise_data is None, "no wgrad GEMM, so no columnwise copy should be built"
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+def test_prequantized_requantize_rejects_dequantized_from_gemm_ready_input():
+    """Bias grads cannot be served from an already-swizzled input, so this must raise."""
+    x, splits, num_groups = _requantize_setup()
+    tensor = make_gemm_ready_tensor(x, splits)
+
+    with pytest.raises(RuntimeError, match="compact format"):
+        tex.group_requantize_inplace(
+            tensor,
+            make_op_quantizer(columnwise=True),
+            num_groups,
+            splits,
+            te.DType.kBFloat16,
+            return_dequantized=True,
+        )
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+def test_prequantized_requantize_rejects_swizzled_without_columnwise():
+    """Swizzled rowwise scales with no columnwise copy: it can no longer be rebuilt."""
+    x, splits, num_groups = _requantize_setup()
+    wire = make_prequantized_wire_tensor(x, splits)
+    # Swizzle in place, leaving the tensor rowwise-only.
+    tex.grouped_swizzle_for_gemm(wire, True, False)
+
+    with pytest.raises(RuntimeError, match="columnwise copy"):
+        tex.group_requantize_inplace(
+            wire, make_op_quantizer(columnwise=True), num_groups, splits, te.DType.kBFloat16
+        )
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+def test_prequantized_requantize_rejects_dtype_mismatch():
+    """The helper keeps the input's format; it does not convert between formats."""
+    x, splits, num_groups = _requantize_setup()
+    wire = make_prequantized_wire_tensor(x, splits)
+    mismatched = MXFP8Quantizer(fp8_dtype=te.DType.kFloat8E5M2, rowwise=True, columnwise=True)
+    mismatched.optimize_for_gemm = True
+
+    with pytest.raises(RuntimeError, match="dtype"):
+        tex.group_requantize_inplace(wire, mismatched, num_groups, splits, te.DType.kBFloat16)

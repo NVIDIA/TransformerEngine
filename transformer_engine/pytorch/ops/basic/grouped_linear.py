@@ -48,7 +48,6 @@ from .._common import (
     get_dummy_wgrads_for_params,
     get_main_grad_from_param,
     is_quantized_tensor,
-    make_columnwise_gemm_quantizer,
     maybe_dequantize,
     validate_or_alloc_output,
     view_main_grad_as_grouped_buffer,
@@ -1331,13 +1330,12 @@ class GroupedLinear(BasicOperation):
 
         # Flatten to 2D so the first dim is the total token count.
         original_shape = list(input_.size())
-        prequantized_mxfp8_input = (
-            with_quantized_compute
-            and isinstance(input_, GroupedTensor)
-            and isinstance(input_quantizers[0], MXFP8Quantizer)
-            and isinstance(input_.quantizer, MXFP8Quantizer)
-        )
-        if prequantized_mxfp8_input:
+        prequantized_input = with_quantized_compute and isinstance(input_, GroupedTensor)
+        if with_quantized_compute:
+            input_quantizer = input_quantizers[0]
+            input_quantizer.set_usage(rowwise=True, columnwise=weight_requires_grad)
+            input_quantizer.optimize_for_gemm = True
+        if prequantized_input:
             # GroupedTensor forbids reshape and is already in the canonical
             # (total_tokens, in_features) layout; just validate the shape.
             if input_.dim() != 2 or input_.size(-1) != self.in_features:
@@ -1351,29 +1349,19 @@ class GroupedLinear(BasicOperation):
             total_tokens = x.size(0)
 
         # Build the input GroupedTensor.
-        if prequantized_mxfp8_input:
-            # Rowwise-only MXFP8 input (e.g. FP8 token dispatch): feed the
-            # rowwise data to the forward GEMM as-is, manufacture the
-            # columnwise copy needed by the wgrad GEMM, and swizzle the
-            # rowwise scales for the GEMM.
+        if prequantized_input:
+            # Input arrived already quantized (e.g. FP8 token dispatch): reuse its rowwise data
+            # for the GEMM and let the helper supply whatever else the GEMMs need.
             grouped_x = input_.copy()
-            if weight_requires_grad:
-                tex.group_requantize_inplace(
-                    grouped_x,
-                    make_columnwise_gemm_quantizer(input_quantizers[0]),
-                    num_groups,
-                    split_sizes,
-                    TE_DType[dtype],
-                    tensor_offsets=base_split_offsets * self.in_features,
-                )
-            else:
-                # No wgrad, so no columnwise copy is needed. The forward GEMM
-                # still requires swizzled rowwise scales.
-                tex.grouped_swizzle_for_gemm(grouped_x, rowwise=True, columnwise=False)
+            tex.group_requantize_inplace(
+                grouped_x,
+                input_quantizer,
+                num_groups,
+                split_sizes,
+                TE_DType[dtype],
+                tensor_offsets=base_split_offsets * self.in_features,
+            )
         elif with_quantized_compute:
-            input_quantizer = input_quantizers[0]
-            input_quantizer.set_usage(rowwise=True, columnwise=weight_requires_grad)
-            input_quantizer.optimize_for_gemm = True
             grouped_x = tex.group_quantize(x, input_quantizer, num_groups, split_sizes)
         else:
             # No quantize: wrap the contiguous high-precision buffer.
@@ -1723,13 +1711,8 @@ class GroupedLinear(BasicOperation):
 
         # Flatten grad_output to 2D (total_tokens, out_features)
         # to figure out total tokens.
-        prequantized_mxfp8_grad = (
-            with_quantized_compute
-            and isinstance(grad_output, GroupedTensor)
-            and isinstance(ctx.grad_output_quantizers[0], MXFP8Quantizer)
-            and isinstance(grad_output.quantizer, MXFP8Quantizer)
-        )
-        if prequantized_mxfp8_grad:
+        prequantized_grad = with_quantized_compute and isinstance(grad_output, GroupedTensor)
+        if prequantized_grad:
             # GroupedTensor forbids reshape and is already in the canonical
             # (total_tokens, out_features) layout; just validate the shape.
             if grad_output.dim() != 2 or grad_output.size(-1) != self.out_features:
@@ -1758,33 +1741,20 @@ class GroupedLinear(BasicOperation):
             fuse_bgrad = isinstance(grad_output_quantizer, MXFP8Quantizer) or (
                 isinstance(grad_output_quantizer, Float8BlockQuantizer) and ctx.input_requires_grad
             )
-            if prequantized_mxfp8_grad:
-                # Rowwise-only MXFP8 grad output (e.g. FP8 token dispatch): reuse the
-                # rowwise data for the dgrad GEMM and manufacture the columnwise copy
-                # for wgrad. Bias grads are reduced from the dequantized grad below,
-                # which is only kept when there is a bias.
+            if prequantized_grad:
+                # Grad output arrived already quantized (e.g. FP8 token dispatch): reuse its
+                # rowwise data for the dgrad GEMM. Bias grads are reduced from the dequantized
+                # grad below, which is only kept when there is a bias.
                 grouped_dy = grad_output.copy()
-                if ctx.weight_requires_grad:
-                    dy_2d = tex.group_requantize_inplace(
-                        grouped_dy,
-                        make_columnwise_gemm_quantizer(grad_output_quantizer),
-                        num_groups,
-                        split_sizes,
-                        TE_DType[dtype],
-                        tensor_offsets=base_split_offsets * self.out_features,
-                        return_dequantized=has_bias,
-                    )
-                else:
-                    # No wgrad, so no columnwise copy is needed. Dequantize before
-                    # swizzling: dequantization reads the unswizzled rowwise scales.
-                    dy_2d = (
-                        tex.group_dequantize(grouped_dy, TE_DType[dtype]).rowwise_data.view(
-                            total_tokens, self.out_features
-                        )
-                        if has_bias
-                        else None
-                    )
-                    tex.grouped_swizzle_for_gemm(grouped_dy, rowwise=True, columnwise=False)
+                dy_2d = tex.group_requantize_inplace(
+                    grouped_dy,
+                    grad_output_quantizer,
+                    num_groups,
+                    split_sizes,
+                    TE_DType[dtype],
+                    tensor_offsets=base_split_offsets * self.out_features,
+                    return_dequantized=has_bias,
+                )
             elif has_bias and not self._scale_bias and fuse_bgrad:
                 grouped_dy, dbias_packed = tex.bgrad_group_quantize(
                     dy_2d, grad_output_quantizer, num_groups, split_sizes
