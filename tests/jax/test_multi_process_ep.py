@@ -22,6 +22,7 @@ Launch via tests/jax/multi_process_launch_ep.sh (one process per GPU).
 """
 
 import os
+import re
 import sys
 import unittest
 
@@ -689,9 +690,9 @@ class TestEP(unittest.TestCase):
         "JAX/XLA lacks the gpu_stream:collective annotation (openxla/xla#39604)",
     )
     def test_z_dispatch_combine_on_collective_stream(self):
-        """Every EP FFI custom call must carry the collective-stream annotation
-        so XLA schedules them on the collective stream instead of overlapping
-        them with other collectives."""
+        """Every EP FFI custom call must run on the collective stream. compute_on
+        puts the annotation on the async wrapper XLA generates, so assert each EP
+        call is reachable from a wrapper that carries it."""
         T_dp, tokens, topk_idx, topk_w = self._make_random_inputs()
         dp_spec = PartitionSpec(("dp", "ep"), None)
         ep_spec_3d = PartitionSpec(("dp", "ep"), None, None)
@@ -719,18 +720,50 @@ class TestEP(unittest.TestCase):
 
             hlo = run.lower(topk_idx, tokens, topk_w).compile().as_text()
 
-        # Every te_ep_* FFI custom call must carry the collective-stream
-        # annotation so XLA places it on the collective stream.
-        ep_lines = [l for l in hlo.splitlines() if 'custom_call_target="te_ep_' in l]
-        self.assertTrue(ep_lines, f"no te_ep_* custom calls in compiled HLO:\n{hlo}")
+        # Parse the HLO into computations and follow the call graph: a call
+        # carrying the collective-stream annotation places its callee (and every
+        # nested callee) on the collective stream.
+        comps = {}
+        cur = None
+        for line in hlo.splitlines():
+            stripped = line.strip()
+            header = re.match(r"(?:ENTRY\s+)?(%[\w.\-]+)\s*\(", stripped)
+            if header and stripped.endswith("{"):
+                cur = header.group(1)
+                comps[cur] = []
+            elif stripped == "}":
+                cur = None
+            elif cur is not None:
+                comps[cur].append(line)
+
+        callees = lambda l: re.findall(r"(?:calls|to_apply)=(%[\w.\-]+)", l)
+        edges = {c: {x for l in ls for x in callees(l)} for c, ls in comps.items()}
+
+        collective = set()
+        for ls in comps.values():
+            for l in ls:
+                if '_xla_stream_annotation="collective"' in l.replace(" ", ""):
+                    collective.update(callees(l))
+        stack = list(collective)
+        while stack:
+            for callee in edges.get(stack.pop(), ()):
+                if callee not in collective:
+                    collective.add(callee)
+                    stack.append(callee)
+
+        ep_calls = [
+            (c, l) for c, ls in comps.items() for l in ls if 'custom_call_target="te_ep_' in l
+        ]
+        self.assertTrue(ep_calls, f"no te_ep_* custom calls in compiled HLO:\n{hlo}")
         missing = [
             l.strip()[:200]
-            for l in ep_lines
-            if '_xla_stream_annotation="collective"' not in l.replace(" ", "")
+            for c, l in ep_calls
+            if c not in collective
+            and '_xla_stream_annotation="collective"' not in l.replace(" ", "")
         ]
         self.assertFalse(
             missing,
-            "te_ep_* custom calls missing collective-stream annotation:\n" + "\n".join(missing),
+            "te_ep_* custom calls not on the collective stream:\n" + "\n".join(missing),
         )
 
     def test_z_no_unexpected_reshard_in_hlo_bwd(self):

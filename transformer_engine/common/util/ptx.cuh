@@ -380,6 +380,10 @@ __device__ __forceinline__ bf16 exp2f_rcp<bf16>(e8m0_t biased_exp) {
 }
 
 __device__ __forceinline__ float exp2f(e8m0_t biased_exp) {
+  // Handle the special case of NaN.
+  if (biased_exp == 255) return __int_as_float(0x7fffffff);
+  // 2^-127 is subnormal, so it cannot be built by shifting into the exponent field.
+  if (biased_exp == 0) return __int_as_float(0x00400000);
   return __int_as_float(biased_exp << FP32_MANTISSA_BITS);
 }
 
