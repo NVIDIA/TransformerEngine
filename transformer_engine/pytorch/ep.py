@@ -189,14 +189,16 @@ def ep_finalize() -> None:
     An atexit handler covers normal interpreter shutdown, so most users do not
     need to call this. Call it explicitly only before
     ``dist.destroy_process_group()``, since the borrowed NCCL comm becomes
-    invalid once the PG is destroyed. This does not release the symm-mem pool;
-    if you used ``symm_mem_alloc(use_pool=True)``, also call
+    invalid once the PG is destroyed. This also releases the symm-mem pool, so
+    a caller that used ``symm_mem_alloc(use_pool=True)`` does not need a separate
     ``release_symm_mem_pool()`` before destroying the PG.
     """
     global _BOOTSTRAPPED, _EP_GROUP, _EAGER
     if not _BOOTSTRAPPED:
         return
     try:
+        # Deregister pooled symm-mem windows while the group's comm is still valid.
+        release_symm_mem_pool()
         tex.ep_finalize()
     finally:
         _BOOTSTRAPPED = False
