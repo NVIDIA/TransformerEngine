@@ -751,6 +751,8 @@ def _moe_fwd_rule(
             num_local_tokens=(B, S),
             out_partition_spec=out_partition_spec,
         )
+    # output of MLP should be sharded the same way as the activation input
+    output = with_sharding_constraint_by_logical_axes(output, input_axes)
 
     (
         casted_sorted_x_lhs_trans,
