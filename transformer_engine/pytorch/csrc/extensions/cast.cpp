@@ -676,8 +676,7 @@ py::object group_requantize_inplace(py::handle grouped_x, py::handle quantizer,
                               !grouped_x.attr("columnwise_scale_inv").is_none();
   const bool swizzled = grouped_x.attr("_with_gemm_swizzled_scales").cast<bool>();
 
-  NVTE_CHECK(has_rowwise,
-             "Grouped input has no rowwise data and scales for the GEMM to consume.");
+  NVTE_CHECK(has_rowwise, "Grouped input has no rowwise data and scales for the GEMM to consume.");
 
   // The tensor's own quantization must match what the op expects on every path: even a
   // pass-through hands its data straight to the GEMM. This keeps the input's format rather than

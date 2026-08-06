@@ -502,9 +502,7 @@ def make_op_quantizer(columnwise: bool):
     ``columnwise`` mirrors ``weight_requires_grad``: it tells the helper whether a wgrad GEMM
     will consume a columnwise copy.
     """
-    quantizer = MXFP8Quantizer(
-        fp8_dtype=te.DType.kFloat8E4M3, rowwise=True, columnwise=columnwise
-    )
+    quantizer = MXFP8Quantizer(fp8_dtype=te.DType.kFloat8E4M3, rowwise=True, columnwise=columnwise)
     quantizer.optimize_for_gemm = True
     return quantizer
 
