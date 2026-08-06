@@ -1136,14 +1136,17 @@ class GroupedLinear(BasicOperation):
         # temporary workspaces freshly created in each forward pass.
         if is_cpu_offload_enabled():
             saved = tensors_to_save[0]
-            offset = 4 if self._scale_bias else 3
+            # Metadata prefix:
+            # [split_sizes, base_split_offsets, split_points,
+            #  input_tensor_offsets, output_tensor_offsets, (scales?)]
+            offset = 6 if self._scale_bias else 5
             if use_grouped_tensor_path:
-                # Layout: [split_sizes, base_split_offsets, split_points, (scales?), grouped_x, *weights]
+                # Layout: [..., grouped_x, *weights]
                 grouped_x = saved[offset]
                 if grouped_x is not None:
                     mark_activation_offload(grouped_x)
             else:
-                # Layout: [split_sizes, None, None, (scales?), *xs, *ws]
+                # Layout: [..., *xs, *ws]
                 live_xs = [t for t in saved[offset : offset + self.num_groups] if t is not None]
                 if live_xs:
                     mark_activation_offload(*live_xs)
@@ -1169,9 +1172,9 @@ class GroupedLinear(BasicOperation):
         ctx.weight_quantizers = weight_quantizers
         ctx.grad_output_quantizers = grad_output_quantizers
         ctx.grad_input_quantizers = None
-        # ``split_sizes`` and ``base_split_offsets`` are routed through
-        # ``save_for_backward`` (see ``_fuser_forward_split_quantize`` and
-        # ``_fuser_forward_grouped_tensor`` for the saved-tensor layout).
+        # ``split_sizes``, offset metadata, and related tensors are routed
+        # through ``save_for_backward`` (see ``_fuser_forward_split_quantize``
+        # and ``_fuser_forward_grouped_tensor`` for the saved-tensor layout).
         if torch.is_autocast_enabled():
             ctx.dtype = torch.get_autocast_dtype("cuda")
         else:
@@ -1290,12 +1293,12 @@ class GroupedLinear(BasicOperation):
 
         # Build the tuple of tensors to save for backward. Layout:
         #   [split_sizes, base_split_offsets, split_points,
+        #    input_tensor_offsets, output_tensor_offsets,
         #    (scales if scale_bias), *xs, *ws]
-        # ``base_split_offsets`` and ``split_points`` are unused on the
-        # split-quantize backward path but are included as ``None`` so the
-        # saved-tensor layout matches the graph-safe
-        # ``_fuser_forward_grouped_tensor`` path (and the fused MLP forward).
-        saved: list[Optional[torch.Tensor]] = [split_sizes, None, None]
+        # Offset metadata slots are unused on the split-quantize backward path
+        # but are included as ``None`` so the saved-tensor layout matches the
+        # graph-safe ``_fuser_forward_grouped_tensor`` path.
+        saved: list[Optional[torch.Tensor]] = [split_sizes, None, None, None, None]
         if self._scale_bias:
             saved.append(scales)
         saved.extend(xs)
@@ -1317,18 +1320,20 @@ class GroupedLinear(BasicOperation):
         device: torch.device,
         out_buffer: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, tuple[Optional[torch.Tensor], ...]]:
-        """Graph-safe GroupedTensor forward path (pure compute).
-        Returns ``(output, tensors_to_save)``. ``split_sizes``,
-        ``base_split_offsets`` and ``split_points`` are returned so that
-        ``fuser_forward_save_ctx`` can call ``save_for_backward`` on them.
-        """
+        """Build graph-safe grouped input storage and run grouped GEMM."""
         num_groups = self.num_groups
-        has_bias = self.has_bias
-
-        base_split_offsets = tex.splits_to_offsets(split_sizes, 1)
-        split_points = base_split_offsets[1:].to(dtype=torch.int)
-
-        # Flatten to 2D so the first dim is the total token count.
+        split_sizes, grouped_tensor_offsets = tex.splits_to_offsets_multi(
+            split_sizes,
+            device,
+            strides=[1, 1, self.in_features, self.out_features],
+            include_leading_zero=[False, True, True, True],
+            dtypes=[torch.int32, torch.int64, torch.int64, torch.int64],
+            bulk_allocate=True,
+        )
+        split_points = grouped_tensor_offsets[0]
+        base_split_offsets = grouped_tensor_offsets[1]
+        input_tensor_offsets = grouped_tensor_offsets[2]
+        output_tensor_offsets = grouped_tensor_offsets[3]
         original_shape = list(input_.size())
         prequantized_input = with_quantized_compute and isinstance(input_, GroupedTensor)
         if with_quantized_compute:
@@ -1345,10 +1350,11 @@ class GroupedLinear(BasicOperation):
                 )
             total_tokens = input_.size(0)
         else:
+            # Flatten to 2D so the first dim is the total token count.
             x = maybe_dequantize(input_, dtype).reshape(-1, self.in_features)
             total_tokens = x.size(0)
 
-        # Build the input GroupedTensor.
+        # Build the input GroupedTensorStorage for input.
         if prequantized_input:
             # Input arrived already quantized (e.g. FP8 token dispatch): reuse its rowwise data
             # for the GEMM and let the helper supply whatever else the GEMMs need.
@@ -1359,10 +1365,16 @@ class GroupedLinear(BasicOperation):
                 num_groups,
                 split_sizes,
                 TE_DType[dtype],
-                tensor_offsets=base_split_offsets * self.in_features,
+                tensor_offsets=input_tensor_offsets,
             )
         elif with_quantized_compute:
-            grouped_x = tex.group_quantize(x, input_quantizer, num_groups, split_sizes)
+            grouped_x = tex.group_quantize(
+                x,
+                input_quantizer,
+                num_groups,
+                split_sizes,
+                tensor_offsets=input_tensor_offsets,
+            )
         else:
             # No quantize: wrap the contiguous high-precision buffer.
             grouped_x = GroupedTensorStorage(
@@ -1372,8 +1384,9 @@ class GroupedLinear(BasicOperation):
                 quantizer=None,
                 data=x.reshape(-1),
                 first_dims=split_sizes,
-                tensor_offsets=base_split_offsets * self.in_features,
+                tensor_offsets=input_tensor_offsets,
             )
+        has_bias = self.has_bias
 
         if is_cpu_offload_enabled() and grouped_x is not None:
             start_offload(grouped_x)
@@ -1408,7 +1421,7 @@ class GroupedLinear(BasicOperation):
             quantizer=None,
             data=out.reshape(-1),
             first_dims=split_sizes,
-            tensor_offsets=base_split_offsets * self.out_features,
+            tensor_offsets=output_tensor_offsets,
         )
 
         # Bias: hand off to the grouped GEMM (graph-safe, fused). Plain bias
@@ -1443,14 +1456,23 @@ class GroupedLinear(BasicOperation):
 
         # Build the tuple of tensors to save for backward. Layout:
         #   [split_sizes, base_split_offsets, split_points,
+        #    input_tensor_offsets, output_tensor_offsets,
         #    (scales if _scale_bias), grouped_x, *weights]
+        # ``output_tensor_offsets`` matches the linear output row layout and is
+        # reused as ``grad_output`` offsets in backward.
         if grouped_x is not None:
             # (For FP8 per tensor current scaling on Hopper --> Free Rowwise Data
             # in backward pass)
             if with_quantized_compute and grouped_x.columnwise_data is not None:
                 grouped_x.rowwise_data = None
                 grouped_x.scale_inv = None
-        saved: list[Optional[torch.Tensor]] = [split_sizes, base_split_offsets, split_points]
+        saved: list[Optional[torch.Tensor]] = [
+            split_sizes,
+            base_split_offsets,
+            split_points,
+            input_tensor_offsets,
+            output_tensor_offsets,
+        ]
         if self._scale_bias:
             saved.append(scales)
         saved.append(grouped_x)
@@ -1500,13 +1522,13 @@ class GroupedLinear(BasicOperation):
 
         # Saved tensors from forward pass. Layout:
         #   [split_sizes, base_split_offsets, split_points,
+        #    input_tensor_offsets, output_tensor_offsets,
         #    (scales if _scale_bias), *xs, *ws]
-        # ``base_split_offsets`` and ``split_points`` are unused on this path
-        # but are present so the saved-tensor layout matches the graph-safe
-        # path (and the fused MLP forward).
+        # Offset metadata beyond ``split_sizes`` is unused on this path but is
+        # present so the saved-tensor layout matches the graph-safe path.
         saved_tensors = ctx.saved_tensors
         split_sizes = saved_tensors[0]
-        saved_tensors = saved_tensors[3:]
+        saved_tensors = saved_tensors[5:]
         scales = None
         if self._scale_bias:
             scales, saved_tensors = saved_tensors[0], saved_tensors[1:]
@@ -1682,24 +1704,24 @@ class GroupedLinear(BasicOperation):
         Iterable[Iterable[Optional[torch.Tensor]]],
         Iterable[Iterable[Optional[torch.Tensor]]],
     ]:
+        """Graph-safe GroupedTensor backward path."""
         num_groups = self.num_groups
         has_bias = self.has_bias
         weights, is_dist_weight, dist_dgrad_weights = self._backward_weight_setup()
         device = weights[0].device
         dtype = ctx.dtype
-
         with_quantized_compute = bool(getattr(ctx, "with_quantized_compute", False))
 
-        # Saved tensors from forward pass
-        # Layout: [split_sizes, base_split_offsets, split_points,
-        #          (scales if _scale_bias), grouped_x, *weights]
-        # ``split_points`` is unused on this path but is present so the
-        # saved-tensor layout matches the fused MLP forward (which needs it
-        # for the cuDNN grouped GEMM kernel).
+        # Saved tensors from forward pass. Layout:
+        # [split_sizes, base_split_offsets, split_points,
+        #  input_tensor_offsets, output_tensor_offsets,
+        #  (scales if _scale_bias), grouped_x, *weights]
         saved_tensors = ctx.saved_tensors
         split_sizes = saved_tensors[0]
         base_split_offsets = saved_tensors[1]
-        saved_tensors = saved_tensors[3:]
+        input_tensor_offsets = saved_tensors[3]
+        output_tensor_offsets = saved_tensors[4]
+        saved_tensors = saved_tensors[5:]
         scales = None
         if self._scale_bias:
             scales, saved_tensors = saved_tensors[0], saved_tensors[1:]
@@ -1725,6 +1747,7 @@ class GroupedLinear(BasicOperation):
         else:
             dy_2d = grad_output.reshape(-1, self.out_features)
             total_tokens = dy_2d.size(0)
+        grad_input_shape = list(grad_output.size())[:-1] + [self.in_features]
 
         # Build the grad_output GroupedTensor.
         # Optionally get dbias is fusion available with bgrad_group_quantize
@@ -1732,10 +1755,10 @@ class GroupedLinear(BasicOperation):
         if with_quantized_compute:
             grad_output_quantizer = ctx.grad_output_quantizers[0]
             grad_output_quantizer.set_usage(
-                rowwise=ctx.input_requires_grad, columnwise=ctx.weight_requires_grad
+                rowwise=ctx.input_requires_grad,
+                columnwise=ctx.weight_requires_grad,
             )
             grad_output_quantizer.optimize_for_gemm = True
-
             # FP8 block scaling computes dbias in the rowwise (dgrad) pass, so only fuse
             # when dgrad is required.
             fuse_bgrad = isinstance(grad_output_quantizer, MXFP8Quantizer) or (
@@ -1752,20 +1775,27 @@ class GroupedLinear(BasicOperation):
                     num_groups,
                     split_sizes,
                     TE_DType[dtype],
-                    tensor_offsets=base_split_offsets * self.out_features,
+                    tensor_offsets=output_tensor_offsets,
                     return_dequantized=has_bias,
                 )
             elif has_bias and not self._scale_bias and fuse_bgrad:
                 grouped_dy, dbias_packed = tex.bgrad_group_quantize(
-                    dy_2d, grad_output_quantizer, num_groups, split_sizes
+                    dy_2d,
+                    grad_output_quantizer,
+                    num_groups,
+                    split_sizes,
+                    tensor_offsets=output_tensor_offsets,
                 )
             else:
                 grouped_dy = tex.group_quantize(
-                    dy_2d, grad_output_quantizer, num_groups, split_sizes
+                    dy_2d,
+                    grad_output_quantizer,
+                    num_groups,
+                    split_sizes,
+                    tensor_offsets=output_tensor_offsets,
                 )
         else:
             dy_2d = maybe_dequantize(dy_2d, dtype)
-            # Wrap BF16/FP16 buffer as a GroupedTensor for grouped gemm
             grouped_dy = GroupedTensorStorage(
                 shape=(total_tokens, self.out_features),
                 dtype=dtype,
@@ -1773,7 +1803,7 @@ class GroupedLinear(BasicOperation):
                 quantizer=None,
                 data=dy_2d.reshape(-1),
                 first_dims=split_sizes,
-                tensor_offsets=base_split_offsets * self.out_features,
+                tensor_offsets=output_tensor_offsets,
             )
 
         # Bias Grads compute if not already computed in bgrad_group_quantize
@@ -1801,7 +1831,6 @@ class GroupedLinear(BasicOperation):
         # ---- dgrad GEMM ----------------------------------------------------
         grad_input = None
         if ctx.input_requires_grad:
-            grad_input_shape = list(grad_output.size())[:-1] + [self.in_features]
             grad_input = validate_or_alloc_output(
                 getattr(ctx, "dgrad_out", None), grad_input_shape, dtype, device
             )
@@ -1812,7 +1841,7 @@ class GroupedLinear(BasicOperation):
                 quantizer=None,
                 data=grad_input.reshape(-1),
                 first_dims=split_sizes,
-                tensor_offsets=base_split_offsets * self.in_features,
+                tensor_offsets=input_tensor_offsets,
             )
             general_grouped_gemm_for_grouped_tensor(
                 dist_dgrad_weights if is_dist_weight else ws,
