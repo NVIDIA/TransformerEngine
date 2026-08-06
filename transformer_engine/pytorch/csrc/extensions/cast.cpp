@@ -664,10 +664,9 @@ py::object group_dequantize(const py::handle &input, transformer_engine::DType o
   return py::reinterpret_borrow<py::object>(out_py);
 }
 
-py::object group_requantize(
-    py::handle grouped_x, py::handle quantizer, const size_t num_tensors,
-    std::optional<at::Tensor> first_dims, DType otype, std::optional<at::Tensor> tensor_offsets,
-    bool return_dequantized) {
+py::object group_requantize(py::handle grouped_x, py::handle quantizer, const size_t num_tensors,
+                            std::optional<at::Tensor> first_dims, DType otype,
+                            std::optional<at::Tensor> tensor_offsets, bool return_dequantized) {
   init_extension();
 
   // The rowwise data is reused verbatim and only its scales are swizzled, so a quantizer asking
@@ -722,8 +721,8 @@ py::object group_requantize(
   // data because the two directions scale along perpendicular axes. The caller hands us a
   // columnwise-only, optimize_for_gemm quantizer, so the kernel emits swizzled columnwise
   // scales directly.
-  auto columnwise = group_quantize(dequantized, quantizer, num_tensors, first_dims,
-                                   std::nullopt, tensor_offsets, std::nullopt);
+  auto columnwise = group_quantize(dequantized, quantizer, num_tensors, first_dims, std::nullopt,
+                                   tensor_offsets, std::nullopt);
   grouped_x.attr("columnwise_data") = columnwise.attr("columnwise_data");
   grouped_x.attr("columnwise_scale_inv") = columnwise.attr("columnwise_scale_inv");
 

@@ -367,10 +367,9 @@ py::object bgrad_group_quantize(const at::Tensor &tensor, py::handle quantizer,
                                 std::optional<at::Tensor> last_dims,
                                 std::optional<at::Tensor> tensor_offsets);
 
-py::object group_requantize(
-    py::handle grouped_x, py::handle quantizer, const size_t num_tensors,
-    std::optional<at::Tensor> first_dims, DType otype, std::optional<at::Tensor> tensor_offsets,
-    bool return_dequantized);
+py::object group_requantize(py::handle grouped_x, py::handle quantizer, const size_t num_tensors,
+                            std::optional<at::Tensor> first_dims, DType otype,
+                            std::optional<at::Tensor> tensor_offsets, bool return_dequantized);
 
 std::vector<py::object> multi_tensor_quantize(const std::vector<at::Tensor> &tensor_list,
                                               std::vector<py::handle> quantizer_list);
