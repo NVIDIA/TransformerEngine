@@ -14,6 +14,9 @@ Coverage:
   - ``ep_dispatch`` custom_vjp: exact per-(t, k) ``grad_topk_weights`` under
     skewed upstream gradients (no k-axis averaging).
   - HLO reshard guard: compile-only, no XLA collectives outside the EP FFI.
+  - Drop-on-overflow: ``ep_finalize`` + re-bootstrap with a small recv capacity
+    drops the overflow instead of trapping; ``total_recv_tokens`` reports the
+    pre-drop demand.
 
 Launch via tests/jax/multi_process_launch_ep.sh (one process per GPU).
 """
@@ -34,6 +37,7 @@ from transformer_engine.jax.sharding import MeshResource, global_shard_guard
 from transformer_engine.jax.ep import (
     EpLayerConfig,
     ep_bootstrap,
+    ep_finalize,
     ep_dispatch,
     ep_combine,
     _ep_domain_for_rank,
@@ -239,8 +243,8 @@ class TestEP(unittest.TestCase):
 
             @jax.jit
             def run(idx):
-                _tc_a, ha = ep_prepare(ka, idx)
-                _tc_b, hb = ep_prepare(kb, idx)
+                _tc_a, _trt_a, ha = ep_prepare(ka, idx)
+                _tc_b, _trt_b, hb = ep_prepare(kb, idx)
                 return ha, hb
 
             hm_a, hm_b = run(idx_s)
@@ -267,7 +271,9 @@ class TestEP(unittest.TestCase):
             w = jax.lax.with_sharding_constraint(topk_w, NamedSharding(self.mesh, dp_spec))
 
             def one_layer(hk, idx, toks, w_):
-                recv_t, recv_w, hm, tc = ep_dispatch(hk, idx, toks, w_, self.recv_capacity_per_rank)
+                recv_t, recv_w, hm, tc, _trt = ep_dispatch(
+                    hk, idx, toks, w_, self.recv_capacity_per_rank
+                )
                 recv_t = jax.lax.with_sharding_constraint(
                     recv_t, NamedSharding(self.mesh, ep_spec_3d)
                 )
@@ -305,23 +311,33 @@ class TestEP(unittest.TestCase):
             )
 
     def test_primitive_prepare(self):
-        """ep_prepare returns token_counts and handle_mem of the expected shapes."""
+        """ep_prepare returns token_counts, total_recv_tokens and handle_mem.
+
+        total_recv_tokens is the per-rank pre-drop recv-slot total; with no
+        overflow it equals the padded per-expert count sum that dispatch fills.
+        """
         T_global, topk_idx, _tokens, _w = self._make_identity_inputs()
         del T_global
         dp_spec = PartitionSpec(("dp", "ep"), None)
+        align = max(int(self.hk.dispatch_output_per_expert_alignment), 1)
         with self.mesh, global_shard_guard(self.mr):
             idx_s = jax.lax.with_sharding_constraint(topk_idx, NamedSharding(self.mesh, dp_spec))
 
             @jax.jit
             def run(idx):
-                tc, hm = ep_prepare(self.hk, idx)
-                return tc, hm
+                tc, trt, hm = ep_prepare(self.hk, idx)
+                return tc, trt, hm
 
-            tc, hm = run(idx_s)
-            tc.block_until_ready()
+            tc, trt, hm = run(idx_s)
+            trt.block_until_ready()
         self.assertEqual(tc.shape, (self.dp * self.ep, NUM_LOCAL_EXPERTS))
         self.assertEqual(hm.shape[0], self.dp * self.ep)
         self.assertGreater(hm.shape[1], 0)
+        self.assertEqual(trt.shape, (self.dp * self.ep, 1))
+        self.assertEqual(trt.dtype, jnp.int32)
+        padded = ((np.asarray(tc).astype(np.int64) + align - 1) // align) * align
+        expected = padded.sum(axis=-1, keepdims=True)
+        np.testing.assert_array_equal(np.asarray(trt).astype(np.int64), expected)
 
     def _run_identity_round_trip(self, nonuniform):
         T_global, topk_idx, tokens, topk_w = self._make_identity_inputs(nonuniform=nonuniform)
@@ -336,7 +352,7 @@ class TestEP(unittest.TestCase):
 
             @jax.jit
             def run(idx, toks, w):
-                _tc, hm = ep_prepare(self.hk, idx)
+                _tc, _trt, hm = ep_prepare(self.hk, idx)
                 recv_t, recv_w = ep_dispatch_fwd(
                     self.hk, hm, idx, toks, w, self.recv_capacity_per_rank
                 )
@@ -402,7 +418,7 @@ class TestEP(unittest.TestCase):
                 toks = jax.lax.with_sharding_constraint(toks, NamedSharding(self.mesh, dp_spec))
                 idx = jax.lax.with_sharding_constraint(topk_idx, NamedSharding(self.mesh, dp_spec))
                 w = jax.lax.with_sharding_constraint(topk_w, NamedSharding(self.mesh, dp_spec))
-                recv_t, recv_w, hm, tc = ep_dispatch(
+                recv_t, recv_w, hm, tc, _trt = ep_dispatch(
                     self.hk, idx, toks, w, self.recv_capacity_per_rank
                 )
                 recv_t = jax.lax.with_sharding_constraint(
@@ -453,7 +469,7 @@ class TestEP(unittest.TestCase):
 
             @jax.jit
             def run(idx, toks, w):
-                recv_t, recv_w, hm, _tc = ep_dispatch(
+                recv_t, recv_w, hm, _tc, _trt = ep_dispatch(
                     self.hk, idx, toks, w, self.recv_capacity_per_rank
                 )
                 recv_t = jax.lax.with_sharding_constraint(recv_t, NamedSharding(self.mesh, ep_t))
@@ -504,7 +520,7 @@ class TestEP(unittest.TestCase):
                 toks = jax.lax.with_sharding_constraint(toks, NamedSharding(self.mesh, dp_spec))
                 idx = jax.lax.with_sharding_constraint(topk_idx, NamedSharding(self.mesh, dp_spec))
                 w = jax.lax.with_sharding_constraint(topk_w, NamedSharding(self.mesh, dp_spec))
-                recv_tokens, _recv_w, _hm, tc = ep_dispatch(
+                recv_tokens, _recv_w, _hm, tc, _trt = ep_dispatch(
                     self.hk, idx, toks, w, self.recv_capacity_per_rank
                 )
                 recv_tokens = jax.lax.with_sharding_constraint(
@@ -558,7 +574,7 @@ class TestEP(unittest.TestCase):
                 toks = jax.lax.with_sharding_constraint(tokens, NamedSharding(self.mesh, dp_spec))
                 idx = jax.lax.with_sharding_constraint(topk_idx, NamedSharding(self.mesh, dp_spec))
                 w = jax.lax.with_sharding_constraint(topk_w, NamedSharding(self.mesh, dp_spec))
-                _recv_tokens, recv_w, hm, tc = ep_dispatch(
+                _recv_tokens, recv_w, hm, tc, _trt = ep_dispatch(
                     self.hk, idx, toks, w, self.recv_capacity_per_rank
                 )
                 recv_w = jax.lax.with_sharding_constraint(
@@ -604,7 +620,7 @@ class TestEP(unittest.TestCase):
                 idx_in = jax.lax.with_sharding_constraint(idx_in, NamedSharding(self.mesh, dp_spec))
                 tok_in = jax.lax.with_sharding_constraint(tok_in, NamedSharding(self.mesh, dp_spec))
                 w_in = jax.lax.with_sharding_constraint(w_in, NamedSharding(self.mesh, dp_spec))
-                _recv_t, recv_w, _h, _tc = ep_dispatch(
+                _recv_t, recv_w, _h, _tc, _trt = ep_dispatch(
                     self.hk, idx_in, tok_in, w_in, self.recv_capacity_per_rank
                 )
                 # Per-slot index scale ⇒ each slot's contribution differs.
@@ -645,7 +661,7 @@ class TestEP(unittest.TestCase):
                 idx = jax.lax.with_sharding_constraint(idx, NamedSharding(self.mesh, dp_spec))
                 toks = jax.lax.with_sharding_constraint(toks, NamedSharding(self.mesh, dp_spec))
                 w = jax.lax.with_sharding_constraint(w, NamedSharding(self.mesh, dp_spec))
-                recv_t, recv_w, hm, tc = ep_dispatch(
+                recv_t, recv_w, hm, tc, _trt = ep_dispatch(
                     self.hk, idx, toks, w, self.recv_capacity_per_rank
                 )
                 recv_t = jax.lax.with_sharding_constraint(
@@ -689,7 +705,7 @@ class TestEP(unittest.TestCase):
                 idx = jax.lax.with_sharding_constraint(idx, NamedSharding(self.mesh, dp_spec))
                 toks = jax.lax.with_sharding_constraint(toks, NamedSharding(self.mesh, dp_spec))
                 w = jax.lax.with_sharding_constraint(w, NamedSharding(self.mesh, dp_spec))
-                recv_t, recv_w, hm, tc = ep_dispatch(
+                recv_t, recv_w, hm, tc, _trt = ep_dispatch(
                     self.hk, idx, toks, w, self.recv_capacity_per_rank
                 )
                 recv_t = jax.lax.with_sharding_constraint(
@@ -772,7 +788,9 @@ class TestEP(unittest.TestCase):
                 toks = jax.lax.with_sharding_constraint(toks, NamedSharding(self.mesh, dp_spec))
                 idx = jax.lax.with_sharding_constraint(idx, NamedSharding(self.mesh, dp_spec))
                 w = jax.lax.with_sharding_constraint(w, NamedSharding(self.mesh, dp_spec))
-                _rt, rw, hm, tc = ep_dispatch(self.hk, idx, toks, w, self.recv_capacity_per_rank)
+                _rt, rw, hm, tc, _trt = ep_dispatch(
+                    self.hk, idx, toks, w, self.recv_capacity_per_rank
+                )
                 rw = jax.lax.with_sharding_constraint(rw, NamedSharding(self.mesh, ep_spec_2d))
                 weighted = self._preweight_expert_out(eo, rw)
                 combined = ep_combine(
@@ -800,6 +818,117 @@ class TestEP(unittest.TestCase):
             hlo = compiled.as_text()
             for op in ("all-gather-start", "all-to-all", "collective-permute"):
                 self.assertEqual(hlo.count(op), 0, f"unexpected XLA {op} in bwd HLO:\n{hlo}")
+
+
+# ── Drop-on-overflow ─────────────────────────────────────────────────────────
+
+
+class TestEPOverflowDrop(unittest.TestCase):
+    """Re-bootstraps with drop_on_overflow=True and a small recv capacity.
+
+    ``ep_finalize`` tears down the default TestEP communicator so this class can
+    re-bootstrap with its own config in the same process. Every token routes its
+    top-1 slot to expert 0, so the rank owning it demands more than the recv
+    capacity; the dispatch drops the excess instead of trapping, while
+    total_recv_tokens still reports the pre-drop demand.
+    """
+
+    ALIGN = 16
+    # Each EP group routes all OVF_TOKENS_PER_DP_SHARD top-1 slots to expert 0,
+    # whose padded count then exceeds the recv capacity. HT mode requires the
+    # recv capacity to be >= the per-rank dispatch count (tokens // ep), so the
+    # capacity sits between that floor and the concentrated expert-0 demand.
+    OVF_TOKENS_PER_DP_SHARD = 48
+    OVF_RECV_CAPACITY = NUM_LOCAL_EXPERTS * ALIGN  # 32 slots per rank
+
+    @classmethod
+    def setUpClass(cls):
+        sm = _local_device_sm()
+        if sm is not None and sm < 90:
+            raise unittest.SkipTest(f"NCCL EP requires SM>=90 (got SM{sm})")
+        cls.num_procs = jax.process_count()
+        cls.rank = jax.process_index()
+        cls.dp, cls.ep = _factor_dp_ep(cls.num_procs)
+        cls.num_experts = NUM_LOCAL_EXPERTS * cls.ep
+        cls.recv_capacity_per_rank = cls.OVF_RECV_CAPACITY
+        # True per-rank dispatch count; HT mode needs recv_capacity >= this.
+        cls.max_tokens_per_rank = cls.OVF_TOKENS_PER_DP_SHARD // cls.ep
+        cls.mesh = _build_mesh(cls.dp, cls.ep)
+        cls.mr = MeshResource(dp_resource="dp", ep_resource="ep")
+        # Drop any communicator a prior test class bootstrapped, then re-init.
+        ep_finalize()
+        with cls.mesh, global_shard_guard(cls.mr):
+            ep_bootstrap(
+                world_size=cls.num_procs,
+                rank=cls.rank,
+                num_experts=cls.num_experts,
+                max_tokens_per_rank=cls.max_tokens_per_rank,
+                recv_capacity_per_rank=cls.recv_capacity_per_rank,
+                hidden_dim=HIDDEN_DIM,
+                drop_on_overflow=True,
+            )
+        cls.hk = EpLayerConfig(top_k=TOP_K, dispatch_output_per_expert_alignment=cls.ALIGN)
+
+    @classmethod
+    def tearDownClass(cls):
+        # Leave a clean slate so another class can bootstrap after us.
+        ep_finalize()
+
+    def _make_concentrated_inputs(self):
+        """All top-1 routes to expert 0; top-2 spread over the rest, so the rank
+        owning expert 0 overloads beyond recv_capacity_per_rank."""
+        T_global = self.OVF_TOKENS_PER_DP_SHARD * self.dp
+        E = self.num_experts
+        topk_idx = np.empty((T_global, TOP_K), dtype=np.int32)
+        for t in range(T_global):
+            topk_idx[t, 0] = 0
+            for k in range(1, TOP_K):
+                topk_idx[t, k] = 1 + (t % (E - 1))
+        topk_idx = jnp.asarray(topk_idx)
+        topk_w = jnp.full((T_global, TOP_K), 1.0 / TOP_K, dtype=jnp.float32)
+        tokens = jnp.asarray(
+            np.linspace(0.1, 0.9, T_global * HIDDEN_DIM, dtype=np.float32).reshape(
+                T_global, HIDDEN_DIM
+            ),
+            dtype=jnp.bfloat16,
+        )
+        return T_global, topk_idx, tokens, topk_w
+
+    def test_overflow_drops_without_trap(self):
+        """Dispatch drops the overflow instead of trapping; total_recv_tokens
+        reports the pre-drop demand, which exceeds recv_capacity_per_rank."""
+        _T, topk_idx, tokens, topk_w = self._make_concentrated_inputs()
+        dp_spec = PartitionSpec(("dp", "ep"), None)
+        ep_spec_3d = PartitionSpec(("dp", "ep"), None, None)
+        with self.mesh, global_shard_guard(self.mr):
+
+            @jax.jit
+            def run(idx, toks, w):
+                idx = jax.lax.with_sharding_constraint(idx, NamedSharding(self.mesh, dp_spec))
+                toks = jax.lax.with_sharding_constraint(toks, NamedSharding(self.mesh, dp_spec))
+                w = jax.lax.with_sharding_constraint(w, NamedSharding(self.mesh, dp_spec))
+                _tc, trt_prep, _hm = ep_prepare(self.hk, idx)
+                recv_t, _rw, _hm2, _tc2, trt_disp = ep_dispatch(
+                    self.hk, idx, toks, w, self.recv_capacity_per_rank
+                )
+                recv_t = jax.lax.with_sharding_constraint(
+                    recv_t, NamedSharding(self.mesh, ep_spec_3d)
+                )
+                return trt_prep, trt_disp, recv_t
+
+            trt_prep, trt_disp, recv_t = run(topk_idx, tokens, topk_w)
+            recv_t.block_until_ready()
+
+        # Reaching here means the dispatch dropped the overflow rather than
+        # trapping (an overflow trap is a device-side abort).
+        self.assertEqual(recv_t.shape[1], self.recv_capacity_per_rank)
+        # total_recv_tokens is sharded across processes; gather before host reads.
+        trt_prep = np.asarray(jmu.process_allgather(trt_prep, tiled=True)).reshape(-1)
+        trt_disp = np.asarray(jmu.process_allgather(trt_disp, tiled=True)).reshape(-1)
+        # prepare and dispatch see the same routing -> identical pre-drop totals.
+        np.testing.assert_array_equal(trt_prep, trt_disp)
+        # The rank owning expert 0 demands more than it can receive.
+        self.assertGreater(int(trt_prep.max()), self.recv_capacity_per_rank)
 
 
 # ── EP domain grouping (single-process; runs under plain pytest) ─────────────
@@ -852,7 +981,7 @@ if __name__ == "__main__":
     )
 
     loader = unittest.TestLoader()
-    test_cases = (TestEP, TestEpDomainGrouping)
+    test_cases = (TestEP, TestEPOverflowDrop, TestEpDomainGrouping)
     target = os.environ.get("TARGET_TEST")
     if target:
         name = target.split(".")[-1]

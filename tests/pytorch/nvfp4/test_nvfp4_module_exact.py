@@ -6,8 +6,8 @@ import pytest
 import torch
 import transformer_engine.pytorch as te
 from transformer_engine.common import recipe
-from transformer_engine.pytorch.custom_recipes import quantization_ref_nvfp4
-from transformer_engine.pytorch.custom_recipes import utils
+from transformer_engine.pytorch.custom_recipes import reference_nvfp4
+from transformer_engine.pytorch.custom_recipes import reference_utils
 
 
 recipe_available, reason_for_no_recipe = te.is_nvfp4_available(return_reason=True)
@@ -103,8 +103,8 @@ def get_nvfp4_quantizer_factory(
     # qfactory, so we return a valid quantizer for those slots; it is harmless because
     # the GEMM outputs in the high-precision activation dtype, not in NVFP4.
     def _default_quantizer():
-        return quantization_ref_nvfp4.NVFP4QuantizerRef(
-            dtype=utils.Fp4Formats.E2M1,
+        return reference_nvfp4.NVFP4QuantizerRef(
+            dtype=reference_utils.Fp4Formats.E2M1,
             quant_tile_shape=(1, 16),
             pow_2_scales=False,
             with_rht=with_rht,
@@ -116,16 +116,16 @@ def get_nvfp4_quantizer_factory(
         if role.tensor_type == "input":
             # Only the forward activation is row-scaled, mirroring the production
             # wiring in quantization.py (mode == "forward" and tensor_type != "weight").
-            return quantization_ref_nvfp4.NVFP4QuantizerRef(
-                dtype=utils.Fp4Formats.E2M1,
+            return reference_nvfp4.NVFP4QuantizerRef(
+                dtype=reference_utils.Fp4Formats.E2M1,
                 quant_tile_shape=(1, 16),
                 pow_2_scales=False,
                 with_rht=with_rht,
                 row_scaled_nvfp4=row_scaled,
             )
         if role.tensor_type == "weight":
-            return quantization_ref_nvfp4.NVFP4QuantizerRef(
-                dtype=utils.Fp4Formats.E2M1,
+            return reference_nvfp4.NVFP4QuantizerRef(
+                dtype=reference_utils.Fp4Formats.E2M1,
                 quant_tile_shape=(16, 16) if with_2d_quantization else (1, 16),
                 pow_2_scales=False,
                 with_rht=False,
