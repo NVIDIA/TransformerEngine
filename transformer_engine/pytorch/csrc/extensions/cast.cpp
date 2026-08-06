@@ -665,9 +665,8 @@ py::object group_dequantize(const py::handle &input, transformer_engine::DType o
 }
 
 py::object group_requantize_inplace(py::handle grouped_x, py::handle quantizer,
-                                    const size_t num_tensors,
-                                    std::optional<at::Tensor> first_dims, DType otype,
-                                    std::optional<at::Tensor> tensor_offsets,
+                                    const size_t num_tensors, std::optional<at::Tensor> first_dims,
+                                    DType otype, std::optional<at::Tensor> tensor_offsets,
                                     bool return_dequantized) {
   init_extension();
 
