@@ -33,16 +33,16 @@ def _on_collective_stream(func):
     them with native collectives. No-op on JAX that lacks the annotation."""
     if not is_collective_stream_supported():
         return func
-    from jax.experimental.compute_on import compute_on2
+    from jax.experimental.compute_on import compute_on
 
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
-        # compute_on2 traces its callee and abstract-evals every argument, so it
+        # compute_on traces its callee and abstract-evals every argument, so it
         # cannot take the static EpLayerConfig/PartitionSpec args directly. Wrap
         # a nullary thunk that closes over them; the array operands are captured
         # as consts and lifted to real operands, outputs stay on device. XLA
         # async-wraps the resulting call onto the collective stream.
-        annotated = compute_on2(
+        annotated = compute_on(
             compute_type="gpu_stream:collective",
             out_memory_spaces=jax.memory.Space.Device,
         )(lambda: func(*args, **kwargs))

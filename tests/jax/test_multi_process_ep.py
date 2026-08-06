@@ -674,7 +674,7 @@ class TestEP(unittest.TestCase):
         "JAX/XLA lacks the gpu_stream:collective annotation (openxla/xla#39604)",
     )
     def test_z_dispatch_combine_on_collective_stream(self):
-        """Every EP FFI custom call must run on the collective stream. compute_on2
+        """Every EP FFI custom call must run on the collective stream. compute_on
         puts the annotation on the async wrapper XLA generates, so assert each EP
         call is reachable from a wrapper that carries it."""
         T_dp, tokens, topk_idx, topk_w = self._make_random_inputs()
