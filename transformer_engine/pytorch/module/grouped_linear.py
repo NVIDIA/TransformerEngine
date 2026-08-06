@@ -71,6 +71,7 @@ from ..tensor import (
     HybridQuantizer,
     IdentityQuantizer,
     MXFP8Quantizer,
+    NVFP4Quantizer,
 )
 from ..quantized_tensor import (
     QuantizedTensorStorage,
