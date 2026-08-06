@@ -9,12 +9,12 @@ from typing import Optional, Tuple, Union
 
 import torch
 
-from transformer_engine.pytorch.custom_recipes import quantization
-from transformer_engine.pytorch.custom_recipes import utils
+from transformer_engine.pytorch.custom_recipes import gemm
+from transformer_engine.pytorch.custom_recipes import reference_utils
 from transformer_engine.pytorch.quantized_tensor import QuantizedTensorStorage, Quantizer
 
 
-def nvfp4_ref_rht_2d_quantizer_factory(role):
+def nvfp4_ref_rht_2d_factory(role):
     """
     Quantizer factory for NVFP4 recipe reference implementation (RHT and 2D quantization for weights).
 
@@ -22,7 +22,7 @@ def nvfp4_ref_rht_2d_quantizer_factory(role):
 
     Usage with CustomRecipe and autocast::
 
-        custom_recipe = recipe.CustomRecipe(qfactory=nvfp4_ref_rht_2d_quantizer_factory)
+        custom_recipe = recipe.CustomRecipe(qfactory=nvfp4_ref_rht_2d_factory)
         with autocast(recipe=custom_recipe):
             output = model(input)
     """
@@ -33,13 +33,13 @@ def nvfp4_ref_rht_2d_quantizer_factory(role):
     )
     if is_weight_tensor_in_gemm:  # 2D quantization for weights in GEMM-based modules
         return NVFP4QuantizerRef(
-            dtype=utils.Fp4Formats.E2M1,
+            dtype=reference_utils.Fp4Formats.E2M1,
             quant_tile_shape=(16, 16),
             pow_2_scales=False,
             with_rht=False,
         )
     return NVFP4QuantizerRef(
-        dtype=utils.Fp4Formats.E2M1,
+        dtype=reference_utils.Fp4Formats.E2M1,
         quant_tile_shape=(1, 16),
         pow_2_scales=False,
         with_rht=True,
@@ -207,7 +207,7 @@ class NVFP4TensorRef(QuantizedTensorStorage):
         nominal tensor datatype.
     device: torch.device
         device of the tensor.
-    quant_dtype: Union[utils.Fp4Formats, torch.dtype]
+    quant_dtype: Union[reference_utils.Fp4Formats, torch.dtype]
         low precision tensor datatype.
     original_shape: Tuple[int, ...]
         original shape of the tensor.
@@ -226,7 +226,7 @@ class NVFP4TensorRef(QuantizedTensorStorage):
 
     dtype: Optional[torch.dtype] = None
     device: Optional[torch.device] = None
-    quant_dtype: Optional[Union[utils.Fp4Formats, torch.dtype]] = None
+    quant_dtype: Optional[Union[reference_utils.Fp4Formats, torch.dtype]] = None
     original_shape: Optional[Tuple[int, ...]] = None
     _quantizer: Optional[Quantizer] = None
 
@@ -345,7 +345,7 @@ class NVFP4QuantizerRef(Quantizer):
 
     def __init__(
         self,
-        dtype: utils.Fp4Formats,
+        dtype: reference_utils.Fp4Formats,
         rowwise: bool = True,
         columnwise: bool = True,
         pow_2_scales: bool = False,
@@ -452,9 +452,9 @@ class NVFP4QuantizerRef(Quantizer):
     ) -> torch.Tensor:
         if not swizzled_scale:
             return scale
-        rounded_m = utils.roundup_div(m, 128) * 128
-        scale_n = utils.roundup_div(n, block_length)
-        rounded_n = utils.roundup_div(scale_n, 4) * 4
+        rounded_m = reference_utils.roundup_div(m, 128) * 128
+        scale_n = reference_utils.roundup_div(n, block_length)
+        rounded_n = reference_utils.roundup_div(scale_n, 4) * 4
         # Recover swizzled scaling factor layout -> linear layout
         tmp = torch.reshape(scale, (rounded_m // 128, rounded_n // 4, 32, 4, 4))
         # after permutation, the layout is [rounded_m // 128, 4, 32, rounded_n // 4, 4]
@@ -963,10 +963,10 @@ class NVFP4QuantizerRef(Quantizer):
         **kwargs,  # pylint: disable=unused-argument
     ) -> NVFP4TensorRef:
         # sanity checks
-        if tensor.dtype not in utils.HIGH_PRECISION_FLOAT_DTYPES:
+        if tensor.dtype not in reference_utils.HIGH_PRECISION_FLOAT_DTYPES:
             raise TypeError(
                 f"Unsupported input dtype {tensor.dtype}, expected one of"
-                f" {utils.HIGH_PRECISION_FLOAT_DTYPES}"
+                f" {reference_utils.HIGH_PRECISION_FLOAT_DTYPES}"
             )
 
         # Make it work with 3D tensors
@@ -1076,14 +1076,14 @@ class NVFP4QuantizerRef(Quantizer):
         self,
         qx: torch.Tensor,
         qw: torch.Tensor,
-        m_params: quantization.MMParams,  # pylint: disable=unused-argument
+        m_params: gemm.MMParams,  # pylint: disable=unused-argument
         out_dtype: torch.dtype,
         sx: torch.Tensor,
         sw: torch.Tensor,
         bias: torch.Tensor | None = None,
         out: torch.Tensor | None = None,
         accumulate: bool = False,
-        gemm_type: quantization.GEMMType = quantization.GEMMType.FPROP,
+        gemm_type: gemm.GEMMType = gemm.GEMMType.FPROP,
         qresult_x: QuantizedTensorStorage | None = None,
         qresult_w: QuantizedTensorStorage | None = None,
     ) -> torch.Tensor:
@@ -1169,7 +1169,7 @@ class NVFP4QuantizerRef(Quantizer):
                 fp8_max_w = 448.0
             factor = 6.0 * 6.0 * fp8_max_x * fp8_max_w
 
-            if gemm_type == quantization.GEMMType.WGRAD:
+            if gemm_type == gemm.GEMMType.WGRAD:
                 partial_alpha = qresult_x.global_amax_col * qresult_w.global_amax_col
                 # A row-scaled operand contributes a per-output-column (N) vector
                 # here, so broadcast along the last axis. Selecting the axis from

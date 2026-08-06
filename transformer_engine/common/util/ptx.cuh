@@ -124,7 +124,7 @@ constexpr bool is_supported_arch() {
   NVTE_CUDA_ARCH_MATCHES(ptx::FamilySpecific<100>, ptx::FamilySpecific<110>, \
                          ptx::FamilySpecific<120>)
 #define ARCH_HAS_STOCHASTIC_ROUNDING \
-  NVTE_CUDA_ARCH_MATCHES(ptx::ArchSpecific<100>, ptx::ArchSpecific<103>)
+  NVTE_CUDA_ARCH_MATCHES(ptx::ArchSpecific<100>, ptx::ArchSpecific<103>, ptx::ArchSpecific<107>)
 
 // https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#parallel-synchronization-and-communication-instructions-mbarrier-init
 __device__ __forceinline__ void mbarrier_init(uint64_t *mbar, const uint32_t count) {
@@ -380,6 +380,10 @@ __device__ __forceinline__ bf16 exp2f_rcp<bf16>(e8m0_t biased_exp) {
 }
 
 __device__ __forceinline__ float exp2f(e8m0_t biased_exp) {
+  // Handle the special case of NaN.
+  if (biased_exp == 255) return __int_as_float(0x7fffffff);
+  // 2^-127 is subnormal, so it cannot be built by shifting into the exponent field.
+  if (biased_exp == 0) return __int_as_float(0x00400000);
   return __int_as_float(biased_exp << FP32_MANTISSA_BITS);
 }
 
