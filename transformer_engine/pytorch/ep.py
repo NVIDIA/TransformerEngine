@@ -644,10 +644,6 @@ class _EpCombine(torch.autograd.Function):
                 )
             torch.ops.transformer_engine_ep.combine_bwd(handle_mem, g_result, grad_expert_out)
         else:
-            if tex.ep_get_zero_copy():
-                raise NotImplementedError(
-                    "Quantized combine backward is not supported under zero-copy"
-                )
             mx, g_scale_inv = _quantize_mxfp8(g_result)
             g_data = mx._rowwise_data
             recv_pr, hidden = ctx.expert_out_shape[0], ctx.expert_out_shape[-1]
@@ -659,7 +655,7 @@ class _EpCombine(torch.autograd.Function):
                 g_data.dtype,
                 g_scale_inv.dtype,
                 ctx.device,
-                False,
+                tex.ep_get_zero_copy(),
             )
             # The backend keys on the fp8 scaling mode; reinterpret the byte-backed data as fp8.
             torch.ops.transformer_engine_ep.combine_bwd(

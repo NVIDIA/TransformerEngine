@@ -239,7 +239,9 @@ class TestEP(unittest.TestCase):
         """Stage the combine input into symm-mem under zero-copy (combine requires it)."""
         if not ZERO_COPY:
             return expert_out
-        symm_buf = symm_mem_alloc(tuple(expert_out.shape), expert_out.dtype, self.ep_group)
+        symm_buf = symm_mem_alloc(
+            tuple(expert_out.shape), expert_out.dtype, self.ep_group, use_pool=True
+        )
         return _StageToSymm.apply(expert_out, symm_buf)
 
     def _stage_grad_symm(self, x, symm_buf=None):
@@ -523,14 +525,13 @@ class TestEP(unittest.TestCase):
         # the caller-owned buffer was used as the combine-bwd scatter target
         self.assertGreater(gbuf.abs().sum().item(), 0.0)
 
+    @_zero_copy_test_include
     @_mxfp8_align_test
     def test_combine_bwd_mxfp8_caller_grad_out(self):
         """MXFP8 combine backward into a single caller buffer sliced into data + e8m0 scales: the
         returned per-expert GroupedTensor views those regions and, dequantized, matches a bf16
-        combine backward reference on the same routing. MXFP8 combine backward runs in the
-        non-zero-copy path, so this test skips the zero-copy pass."""
-        if ZERO_COPY:
-            self.skipTest("MXFP8 combine backward is not supported under zero-copy")
+        combine backward reference on the same routing. Under zero-copy the caller buffer and combine
+        input are symm-mem backed."""
         self._require_mxfp8_shapes()
         from transformer_engine.pytorch.constants import MXFP8_BLOCK_SCALING_SIZE
 
@@ -546,9 +547,12 @@ class TestEP(unittest.TestCase):
         buf_mx = self._make_buffer(combine_bwd_quant_recipe=MXFP8BlockScaling(), alignment=128)
         _recv, _rw, tc = ep_dispatch(buf_mx, tokens, topk_idx, w)  # seeds the routing
         nbytes = rc * (HIDDEN_DIM + cols)
-        grad_buf = torch.empty(nbytes, dtype=torch.uint8, device=self.cfg.device)
+        if ZERO_COPY:
+            grad_buf = symm_mem_alloc((nbytes,), torch.uint8, self.ep_group)
+        else:
+            grad_buf = torch.empty(nbytes, dtype=torch.uint8, device=self.cfg.device)
         src_mx = eo_vals.detach().clone().requires_grad_(True)
-        out_mx = ep_combine(buf_mx, src_mx, grad_out=grad_buf)
+        out_mx = ep_combine(buf_mx, self._expert_out(src_mx), grad_out=grad_buf)
         (0.5 * (out_mx.float() ** 2).sum()).backward()
         g_mx = src_mx.grad  # per-expert GroupedTensor viewing grad_buf
         self.assertEqual(g_mx.rowwise_data.data_ptr(), grad_buf.data_ptr())
@@ -557,7 +561,7 @@ class TestEP(unittest.TestCase):
         buf_bf = self._make_buffer(alignment=128)
         ep_dispatch(buf_bf, tokens, topk_idx, w)
         src_bf = eo_vals.detach().clone().requires_grad_(True)
-        out_bf = ep_combine(buf_bf, src_bf)
+        out_bf = ep_combine(buf_bf, self._expert_out(src_bf))
         (0.5 * (out_bf.float() ** 2).sum()).backward()
         torch.cuda.synchronize()
         n = int(tc.sum())
@@ -566,14 +570,13 @@ class TestEP(unittest.TestCase):
         )
 
     @_eager_test_include
+    @_zero_copy_test_include
     @_mxfp8_align_test
     def test_combine_bwd_mxfp8(self):
         """MXFP8 combine backward with an internally allocated grad target: the returned per-expert
         GroupedTensor, dequantized, matches a bf16 combine backward reference on the same routing.
-        MXFP8 combine backward runs in the non-zero-copy path, so this test skips the zero-copy pass.
+        Under zero-copy the combine input is symm-mem backed.
         """
-        if ZERO_COPY:
-            self.skipTest("MXFP8 combine backward is not supported under zero-copy")
         self._require_mxfp8_shapes()
         topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
         buf_mx = self._make_buffer(combine_bwd_quant_recipe=MXFP8BlockScaling(), alignment=128)
@@ -586,14 +589,14 @@ class TestEP(unittest.TestCase):
             .to(torch.bfloat16)
         )
         src_mx = eo_vals.detach().clone().requires_grad_(True)
-        out_mx = ep_combine(buf_mx, src_mx)
+        out_mx = ep_combine(buf_mx, self._expert_out(src_mx))
         (0.5 * (out_mx.float() ** 2).sum()).backward()
         g_mx = src_mx.grad  # per-expert GroupedTensor
         # bf16 reference combine backward on the same routing
         buf_bf = self._make_buffer(alignment=128)
         ep_dispatch(buf_bf, tokens, topk_idx, w)
         src_bf = eo_vals.detach().clone().requires_grad_(True)
-        out_bf = ep_combine(buf_bf, src_bf)
+        out_bf = ep_combine(buf_bf, self._expert_out(src_bf))
         (0.5 * (out_bf.float() ** 2).sum()).backward()
         torch.cuda.synchronize()
         n = int(tc.sum())
