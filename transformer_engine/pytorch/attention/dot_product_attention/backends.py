@@ -1062,6 +1062,18 @@ class FlashAttention(torch.nn.Module):
         use_flash_attn_3 = (
             flash_attention_backend is not None and flash_attention_backend.major == 3
         )
+        if (
+            use_flash_attn_4
+            and (10, 0) <= get_device_compute_capability() < (12, 0)
+            and query_layer.shape[-1] == key_layer.shape[-1] == value_layer.shape[-1] == 256
+            and all(not isinstance(x, Float8Tensor) for x in [query_layer, key_layer, value_layer])
+            and any(not x.is_contiguous() for x in [query_layer, key_layer, value_layer])
+        ):
+            # FA4 D=256 SM10x kernels need packed K/V views materialized, even
+            # when the last dimension is contiguous.
+            query_layer, key_layer, value_layer = [
+                x.contiguous() for x in (query_layer, key_layer, value_layer)
+            ]
         if context_parallel and all(
             not isinstance(x, Float8Tensor) for x in [query_layer, key_layer, value_layer]
         ):
@@ -1374,6 +1386,7 @@ class FusedAttnFunc(torch.autograd.Function):
         deterministic,
         softmax_offset,
         fp8_output,
+        bf16_backward,
         layer_number,
         return_max_logit,
         packed_qkv=None,
@@ -1438,6 +1451,9 @@ class FusedAttnFunc(torch.autograd.Function):
             #                      fp8_dtype = tex.DType.kFloat8E4M3
             if is_input_fp8:
                 q_fp8, k_fp8, v_fp8 = q, k, v
+
+                if fp8_recipe.mxfp8():
+                    qkv_scale_inv_format = "bhsd"  # Same as what combine_and_quantize would give
             else:
                 q_fp8, k_fp8, v_fp8, qkv_layout, qkv_scale_inv_format = combine_and_quantize(
                     qkv_layout,
@@ -1613,6 +1629,8 @@ class FusedAttnFunc(torch.autograd.Function):
 
         ctx.is_input_fp8 = is_input_fp8
         ctx.is_output_fp8 = is_output_fp8
+        # Return dQ/dK/dV in bf16 even if is_input_fp8
+        ctx.bf16_backward = bf16_backward
 
         tensors_to_save, tensor_objects = prepare_for_saving(
             *fp8_tensors,
@@ -1871,7 +1889,8 @@ class FusedAttnFunc(torch.autograd.Function):
                     # dq, dk, dv:             torch.Tensor; dtype = torch.float16 or torch.bfloat16
                     dq, dk, dv = dq_, dk_, dv_
                     is_quantized_tensor = isinstance(dq_, QuantizedTensorStorage)
-                    if is_quantized_tensor and not ctx.is_input_fp8:
+
+                    if is_quantized_tensor and (not ctx.is_input_fp8 or ctx.bf16_backward):
                         # return in F16
                         dq, dk, dv = combine_and_dequantize(
                             ctx.dqkv_layout,
@@ -1880,7 +1899,7 @@ class FusedAttnFunc(torch.autograd.Function):
                             dv_,
                             src_nominal_dtype=dq_.dtype,
                         )
-                    if not is_quantized_tensor and ctx.is_input_fp8:
+                    if not is_quantized_tensor and ctx.is_input_fp8 and not ctx.bf16_backward:
                         # return in FP8
                         dq, dk, dv, _, _ = combine_and_quantize(
                             ctx.dqkv_layout, dq_, dk_, dv_, ctx.dQKV_quantizer
@@ -1979,6 +1998,7 @@ class FusedAttnFunc(torch.autograd.Function):
             None,
             None,  # packed_qkv
             None,  # packed_kv
+            None,
         )
 
 
@@ -2075,6 +2095,7 @@ class FusedAttention(torch.nn.Module):
         score_mod_bprop_tensors: Optional[Dict[str, torch.Tensor]] = None,
         packed_qkv: Optional[torch.Tensor] = None,
         packed_kv: Optional[torch.Tensor] = None,
+        bf16_backward: bool = False,
     ) -> torch.Tensor:
         """fused attention fprop"""
         assert (
@@ -2291,6 +2312,7 @@ class FusedAttention(torch.nn.Module):
                     self.deterministic,
                     softmax_offset,
                     fp8_output,
+                    bf16_backward,
                     self.layer_number,
                     self.return_max_logit,
                     packed_qkv,

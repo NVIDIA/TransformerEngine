@@ -20,6 +20,7 @@ from transformer_engine.pytorch import (
     Float8Tensor,
     Float8BlockwiseQTensor,
     MXFP8Tensor,
+    MXFP8TensorStorage,
     NVFP4Tensor,
     QuantizedTensor,
 )
@@ -669,6 +670,31 @@ class TestQuantizedTensor:
         assert y_cpu.dtype == ref_cpu.dtype
         assert y_cpu.shape == ref_cpu.shape
         torch.testing.assert_close(y_cpu, ref_cpu, rtol=0, atol=0)
+
+    def test_mxfp8_fsdp_extract_keeps_partial_columnwise_scale_block(self) -> None:
+        """FSDP extraction must retain the scale for a partial final 32-row block."""
+        rows, cols = 48, 64
+        columnwise_scale_inv = torch.arange(4 * 128, dtype=torch.float32).reshape(4, 128)
+        storage = MXFP8TensorStorage(
+            rowwise_data=None,
+            rowwise_scale_inv=None,
+            columnwise_data=torch.zeros((rows, cols), dtype=torch.uint8),
+            columnwise_scale_inv=columnwise_scale_inv,
+            fp8_dtype=te.DType.kFloat8E4M3,
+            quantizer=None,
+            with_gemm_swizzled_scales=False,
+            fake_dtype=torch.bfloat16,
+        )
+
+        buffers, metadata = storage.fsdp_extract_buffers()
+
+        assert metadata == {"field_names": ("_columnwise_data", "_columnwise_scale_inv")}
+        assert len(buffers) == 2
+        assert buffers[0] is storage._columnwise_data
+        extracted_scale_inv = buffers[1]
+        assert extracted_scale_inv is not None
+        assert extracted_scale_inv.shape == (2, 128)
+        torch.testing.assert_close(extracted_scale_inv, columnwise_scale_inv[:2], rtol=0, atol=0)
 
     @pytest.mark.parametrize("quantization", _quantization_list)
     @pytest.mark.parametrize("dim", [0, 1])
