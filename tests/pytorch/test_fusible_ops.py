@@ -649,6 +649,140 @@ class TestFuser:
             assert x.grad.dtype == model_dtype
             assert op.weight.grad.dtype == model_dtype
 
+    @pytest.mark.parametrize(
+        "op_type",
+        (
+            "basic_linear",
+            "bias",
+            "layer_norm",
+            "rmsnorm",
+            "grouped_linear",
+            "grouped_linear_single_param",
+            "linear",
+            "sequential",
+        ),
+    )
+    @pytest.mark.parametrize("dtype", _dtypes)
+    def test_deferred_param_init(
+        self,
+        monkeypatch,
+        *,
+        op_type: str,
+        size: int = 32,
+        dtype: torch.dtype,
+        device: torch.device = "cuda",
+    ) -> None:
+        """Test ops constructed on the meta device
+
+        Ops replace their params when materializing them on the first
+        forward pass. See
+        https://github.com/NVIDIA/TransformerEngine/issues/3322.
+
+        """
+
+        # Construct operation on meta device
+        kwargs = {"device": "meta", "dtype": dtype}
+        num_groups = 2
+        if op_type == "basic_linear":
+            op = te_ops.BasicLinear(size, size, **kwargs)
+        elif op_type == "bias":
+            op = te_ops.Bias(size, **kwargs)
+        elif op_type == "layer_norm":
+            op = te_ops.LayerNorm(size, **kwargs)
+        elif op_type == "rmsnorm":
+            op = te_ops.RMSNorm(size, **kwargs)
+        elif op_type == "grouped_linear":
+            op = te_ops.GroupedLinear(num_groups, size, size, bias=True, **kwargs)
+        elif op_type == "grouped_linear_single_param":
+            # Materializing params also changes how many there are
+            monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
+            op = te_ops.GroupedLinear(
+                num_groups,
+                size,
+                size,
+                bias=True,
+                single_grouped_weight=True,
+                single_grouped_bias=True,
+                **kwargs,
+            )
+        elif op_type == "linear":
+            op = te_ops.Linear(size, size, bias=True, **kwargs)
+        elif op_type == "sequential":
+            op = te_ops.Sequential(
+                te_ops.LayerNorm(size, **kwargs),
+                te_ops.Linear(size, size, bias=True, **kwargs),
+            )
+        else:
+            raise ValueError(f"Unsupported op type ({op_type})")
+        for param in op.parameters():
+            assert param.device.type == "meta"
+
+        # Forward and backward pass
+        in_shape = (size, size)
+        extra_inputs = []
+        if op_type.startswith("grouped_linear"):
+            in_shape = (size * num_groups, size)
+            extra_inputs.append(torch.tensor([size] * num_groups, dtype=torch.int, device=device))
+        x = torch.randn(in_shape, dtype=dtype, device=device, requires_grad=True)
+        y = op(x, *extra_inputs)
+        y.backward(torch.randn_like(y))
+
+        # Check that params have been materialized
+        params = dict(op.named_parameters())
+        assert params
+        for name, param in params.items():
+            assert param.device.type == device, f"{name} was not materialized on {device}"
+            assert param.grad is not None, f"{name} did not get a grad"
+            assert param.grad.device.type == device, f"{name} got a grad on {param.grad.device}"
+        assert x.grad is not None and x.grad.device.type == device
+
+        # Check that fused ops do not alias stale params
+        for module in op.modules():
+            if isinstance(module, te_ops.Linear):
+                assert module.weight is module.basic_ops[module._linear_idx].weight
+                assert module.bias is module.basic_ops[module._bias_idx].bias
+
+    @pytest.mark.parametrize("quantization", _quantization_list)
+    @pytest.mark.parametrize("quantized_weight", (False, True))
+    def test_deferred_param_init_quantized(
+        self,
+        *,
+        size: int = 128,
+        dtype: torch.dtype = torch.bfloat16,
+        device: torch.device = "cuda",
+        quantization: Optional[str],
+        quantized_weight: bool,
+    ) -> None:
+        """Test quantized op constructed on the meta device"""
+
+        # Skip invalid configurations
+        in_shape = (size, size)
+        if quantization is None:
+            pytest.skip("Quantization scheme is not specified")
+        maybe_skip_quantization(quantization, dims=in_shape, device=device, dtype=dtype)
+
+        # Construct operation on meta device
+        recipe = make_recipe(quantization)
+        with te.quantized_model_init(enabled=quantized_weight, recipe=recipe):
+            op = te_ops.Linear(size, size, bias=True, device="meta", dtype=dtype)
+
+        # Forward and backward pass
+        x = torch.randn(in_shape, dtype=dtype, device=device, requires_grad=True)
+        with te.autocast(recipe=recipe):
+            y = op(x)
+        y.backward(torch.randn_like(y))
+
+        # Check that params have been materialized
+        assert op.weight is op.basic_ops[op._linear_idx].weight
+        assert op.bias is op.basic_ops[op._bias_idx].bias
+        if quantized_weight:
+            assert isinstance(op.weight, QuantizedTensor)
+        for name, param in op.named_parameters():
+            assert param.device.type == device, f"{name} was not materialized on {device}"
+            assert param.grad is not None, f"{name} did not get a grad"
+            assert param.grad.device.type == device, f"{name} got a grad on {param.grad.device}"
+        assert x.grad is not None and x.grad.device.type == device
+
 
 class TestBasicOps:
     """Tests for individual operations"""

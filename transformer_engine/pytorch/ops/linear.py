@@ -166,6 +166,27 @@ class Linear(FusedOperation):
         elif name == "bias" and self._bias_idx is not None:
             self.basic_ops[self._bias_idx].bias = param
 
+    def _sync_parameters(self) -> None:
+        """Update the params registered in this op to match the basic ops
+
+        Only re-registers changed params since this may run on every
+        forward pass.
+
+        """
+        weight = self.basic_ops[self._linear_idx].weight
+        if weight is not self._parameters["weight"]:
+            self.register_parameter("weight", weight)
+        if self._bias_idx is not None:
+            bias = self.basic_ops[self._bias_idx].bias
+            if bias is not self._parameters["bias"]:
+                self.register_parameter("bias", bias)
+
+    def pre_first_fuser_forward(self) -> None:
+        super().pre_first_fuser_forward()
+
+        # Basic ops replace their params during deferred initialization
+        self._sync_parameters()
+
     def state_dict(self, *, prefix: str = "", **kwargs) -> dict[str, Any]:
         """Save state"""
         state_dict = super().state_dict(prefix=prefix, **kwargs)

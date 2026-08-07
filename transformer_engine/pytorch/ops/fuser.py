@@ -330,9 +330,12 @@ class OperationFuser:
         ops: list[FusibleOperation],
     ) -> None:
 
+        # Ops before flattening out fused ops
+        self._ops: list[FusibleOperation] = list(ops)
+
         # Get list of basic operations
         basic_ops = []
-        for op in ops:
+        for op in self._ops:
             if op.is_fused_op:
                 basic_ops.extend(op.basic_ops)
             else:
@@ -354,7 +357,19 @@ class OperationFuser:
         self.backward_override = None
         self._last_amax_history_len = 0
 
-        # Flatten list of parameters
+        # Flattened list of params, populated on the first forward pass
+        self._basic_op_params: list[list[torch.nn.Parameter]]
+        self._basic_op_num_params: list[int]
+        self._flat_basic_op_params: list[torch.nn.Parameter]
+
+    def _cache_parameters(self) -> None:
+        """Cache the basic ops' params
+
+        Walking the ops' params is expensive, so it is kept out of the
+        steady-state forward pass. Must be called again whenever an op
+        may have replaced its params.
+
+        """
         self._basic_op_params = [list(op.parameters()) for op in self._basic_ops]
         self._basic_op_num_params = list(map(len, self._basic_op_params))
         self._flat_basic_op_params = sum(self._basic_op_params, [])
@@ -423,6 +438,20 @@ class OperationFuser:
     ):
         """Attempt to fuse operations if neccesary"""
 
+        # Initialize ops before the first forward pass
+        # Note: Recipe state must be reset first since params may be
+        # quantized. Ops are initialized top-down so fused ops can sync
+        # params aliased from their basic ops.
+        is_first_forward = self.recipe_type is None
+        if is_first_forward:
+            for op in self._basic_ops:
+                op.reset_recipe_state(recipe=recipe)
+            for op in self._ops:
+                op.pre_first_fuser_forward()
+
+            # Cache params now that ops have initialized them
+            self._cache_parameters()
+
         # Determine which basic ops require backward
         if not is_grad_enabled:
             first_op_requiring_backward = self._num_basic_ops
@@ -437,7 +466,7 @@ class OperationFuser:
                     break
 
         # Early exit if fusion parameters haven't changed
-        need_reset = False
+        need_reset = is_first_forward
         recipe_type = type(recipe)
         backward_override = recipe.backward_override if recipe is not None else None
         fusion_params = (recipe_type, first_op_requiring_backward, backward_override)
@@ -459,13 +488,10 @@ class OperationFuser:
             return
 
         # Reset recipe state
-        for op in self._basic_ops:
-            op.reset_recipe_state(recipe=recipe)
-
-        # Check if this is the first iteration
-        if self.recipe_type is None:
+        # Note: Already done above on the first forward pass.
+        if not is_first_forward:
             for op in self._basic_ops:
-                op.pre_first_fuser_forward()
+                op.reset_recipe_state(recipe=recipe)
 
         # Apply joint forward-backward fusions first
         joint_ops = OperationFuser._apply_fusions(
