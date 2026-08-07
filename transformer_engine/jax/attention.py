@@ -323,6 +323,88 @@ def canonicalize_attn_mask_type(attn_mask_type: str):
     )
 
 
+def check_set_window_size(
+    attn_mask_type: Union[str, AttnMaskType],
+    window_size: Optional[Tuple[int, int]] = None,
+    *,
+    warn: bool = True,
+) -> Tuple[int, int]:
+    """Check if sliding window size is compliant with attention mask type.
+    If not, set it to the appropriate size.
+
+         attn_mask_type                                      |   window_size
+    ----------------------------------------------------------------------------
+    no_mask, padding                                         | (-1, -1) or (>=0, >=0)
+    causal, padding_causal                                   | (-1,  0) or (>=0,  0)
+    causal_bottom_right, padding_causal_bottom_right         | (-1,  0) or (>=0,  0)
+
+    ``(-1, -1)`` and ``(-1, 0)`` are sentinels meaning "no window" (full attention) and
+    "infinite-left causal" respectively. Negative entries are otherwise rejected.
+
+    Args:
+        attn_mask_type: Either a canonical ``attn_mask_type`` string (e.g. ``"no_mask"``,
+            ``"padding"``, ``"causal"``, ``"padding_causal"``, ``"causal_bottom_right"``,
+            ``"padding_causal_bottom_right"``) or an :class:`AttnMaskType` enum value.
+        window_size: ``(left, right)`` tuple, or ``None`` to use the natural default for the
+            given mask type.
+        warn: When ``True`` (default), emit a :class:`UserWarning` whenever the supplied
+            ``window_size`` is silently coerced to the canonical form for ``attn_mask_type``
+            Set to ``False`` for internal call sites that do not need to emit warnings.
+            Hard-error branches (negative bounds outside the recognized sentinels) are not gated by this flag
+            and always raise.
+
+    Returns:
+        The canonicalized ``(left, right)`` tuple.
+    """
+    if isinstance(attn_mask_type, str):
+        attn_mask_type_enum = canonicalize_attn_mask_type(attn_mask_type)
+        attn_mask_type_str = attn_mask_type
+    else:
+        attn_mask_type_enum = attn_mask_type
+        attn_mask_type_str = attn_mask_type.name
+
+    orig_window_size = window_size
+    if attn_mask_type_enum.is_causal():
+        if orig_window_size is None:
+            window_size = (-1, 0)
+        # Coerce the right side window to 0.
+        elif orig_window_size == (-1, -1) or (orig_window_size[0] >= 0 and orig_window_size[1] > 0):
+            window_size = (orig_window_size[0], 0)
+            if warn:
+                warnings.warn(
+                    "window_size should be (-1, 0) or (>=0, 0) for "
+                    f"attn_mask_type={attn_mask_type_str}, got {orig_window_size}; "
+                    f"coercing to {window_size}."
+                )
+        # Assert if invalid window size is provided.
+        elif orig_window_size != (-1, 0) and (orig_window_size[0] < 0 or orig_window_size[1] != 0):
+            raise AssertionError(
+                "window_size should be (-1, 0) or (>=0, 0) for "
+                f"attn_mask_type={attn_mask_type_str}, got {orig_window_size}."
+            )
+    elif attn_mask_type_enum in (AttnMaskType.NO_MASK, AttnMaskType.PADDING_MASK):
+        if orig_window_size is None:
+            window_size = (-1, -1)
+        # Coerce the right side window to -1.
+        elif orig_window_size == (-1, 0):
+            window_size = (-1, -1)
+            if warn:
+                warnings.warn(
+                    "window_size should be (-1, -1) or (>=0, >=0) for "
+                    f"attn_mask_type={attn_mask_type_str}, got {orig_window_size}; "
+                    f"coercing to {window_size}."
+                )
+        # Assert if invalid window size is provided.
+        elif orig_window_size != (-1, -1) and (orig_window_size[0] < 0 or orig_window_size[1] < 0):
+            raise AssertionError(
+                "window_size should be (-1, -1) or (>=0, >=0) for "
+                f"attn_mask_type={attn_mask_type_str}, got {orig_window_size}."
+            )
+    else:
+        raise AssertionError(f"Invalid attn_mask_type: {attn_mask_type_str}")
+    return window_size
+
+
 def is_fused_attn_kernel_available(
     is_training,
     q_dtype,
@@ -343,7 +425,9 @@ def is_fused_attn_kernel_available(
     """
     To check whether the fused attention kernel is supported
     """
-    window_size_tuple = (-1, -1) if window_size is None else window_size
+    # Canonicalize at the CPP-extension boundary so direct callers see the same
+    # canonical encoding as users of DPA/MHA API to ensure consistency.
+    window_size_tuple = check_set_window_size(attn_mask_type, window_size)
 
     def make_helper(attn_mask_type):
         return tex.FusedAttnHelper(
@@ -688,9 +772,9 @@ def _segment_ids_pos_to_seqlens_offsets(
     segment_ids_kv,
     segment_pos_q,
     segment_pos_kv,
-    attn_mask_type,
-    window_size,
-    max_segments_per_seq,
+    attn_mask_type: AttnMaskType,
+    window_size: Tuple[int, int],
+    max_segments_per_seq: int,
 ):
     """Compute per-segment seqlens and start offsets(currently only used for THD)
     Given segment-id and segment-position tensors for Q and KV,
@@ -708,8 +792,9 @@ def _segment_ids_pos_to_seqlens_offsets(
         attn_mask_type: AttnMaskType. Selects the mask predicate used to decide
                         which positions are valid (top-left causal vs
                         bottom-right causal vs. padding-only)
-        window_size:    Optional sliding-window tuple ``(left, right)`` or None
-                        Used here only as a fast-path eligibility hint
+        window_size:    Sliding-window tuple ``(left, right)``. Required (not
+                        Optional): Tuple[int, int]. Window size received should be
+                        already canonicalized by check_set_window_size.
         max_segments_per_seq: maximum number of segments expected per row
                               Used to size the bincount / argwhere outputs
 
@@ -717,12 +802,14 @@ def _segment_ids_pos_to_seqlens_offsets(
         1. Fast path -- ``_segment_ids_pos_to_seqlens_offsets_fast_causal_path``.
            O(T) per row. Counts all segment tokens via bincount on
            segment_ids and trims at most one token per segment at the
-           boundary. Used for:
-             - top-left CAUSAL / PADDING_CAUSAL with ``window_size is None``
-             - SWA with ``window_size == (-1, -1)`` and not bottom-right
-           Bottom-right causal cross-attention is excluded: the boundary
-           trim leaves kv_seqlen short by one per active segment, which
-           shifts the BRCM bottom-right alignment by one KV per Q row.
+           boundary. Used for any non-bottom-right mask with no finite
+           sliding window, i.e. ``window_size`` in
+           ``{(-1, -1), (-1, 0)}``. ``window_size`` is guaranteed to be
+           non-``None`` here because it is already canonicalized by check_set_window_size.
+           Bottom-right causal cross-attention is excluded:
+           the boundary trim leaves kv_seqlen short by one per active
+           segment, which shifts the BRCM bottom-right alignment by one KV
+           per Q row.
 
         2. Slow path -- ``_get_seqlens_offsets_thd``.
            O(T * max_segments_per_seq) per row. Per-segment min/max
@@ -755,9 +842,11 @@ def _segment_ids_pos_to_seqlens_offsets(
     # must route bottom-right masks to the slow path.
 
     # Fast path: O(T) per row.
-    if (
-        attn_mask_type.is_causal() and not attn_mask_type.is_bottom_right() and window_size is None
-    ) or (window_size == (-1, -1) and not attn_mask_type.is_bottom_right()):
+    # "No finite window" is encoded as (-1, -1) for non-causal masks and (-1, 0) for
+    # causal-family masks; both share window_size[0] == -1, which is therefore the
+    # mask-type-agnostic SWA-presence sentinel.
+    no_finite_window = window_size[0] == -1
+    if no_finite_window and not attn_mask_type.is_bottom_right():
         return _segment_ids_pos_to_seqlens_offsets_fast_causal_path(
             segment_ids_q, segment_ids_kv, segment_pos_q, segment_pos_kv, max_segments_per_seq
         )
@@ -825,10 +914,17 @@ class SequenceDescriptor:
         return cls(*children)
 
     def get_seqlens_and_offsets(
-        self, attn_mask_type, qkv_layout, window_size, max_segments_per_seq
+        self,
+        attn_mask_type: "AttnMaskType",
+        qkv_layout: "QKVLayout",
+        window_size: Tuple[int, int],
+        max_segments_per_seq: int,
     ):
         """
         Acquire the seqlens/offsets for cuDNN backend.
+
+        ``window_size`` must be a ``Tuple[int, int]`` (never ``None``)
+        and already canonicalized by check_set_window_size.
         """
         q_segment_ids, kv_segment_ids = self.segment_ids
         q_segment_pos, kv_segment_pos = self.segment_pos
