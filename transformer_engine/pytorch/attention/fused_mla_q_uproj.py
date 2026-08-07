@@ -143,6 +143,34 @@ class FusedMLAQUpProjRopeQuant:
         return query, x_saved
 
     @classmethod
+    def backward_linear(
+        cls,
+        grad_output,
+        x_saved,
+        w_q,
+        act_dtype,
+        wgrad_store,
+        fuse_wgrad_accumulation,
+        tp_group,
+        sequence_parallel,
+        **kwargs,
+    ):
+        """Linear backward for the fused Q up-proj — delegates to :func:`~transformer_engine.pytorch.module.linear.backward_linear`."""
+        from ..module.linear import backward_linear as _bwd
+
+        return _bwd(
+            grad_output,
+            x_saved,
+            w_q,
+            act_dtype,
+            wgrad_store,
+            fuse_wgrad_accumulation,
+            tp_group,
+            sequence_parallel,
+            **kwargs,
+        )
+
+    @classmethod
     def wrap_mxfp8(
         cls,
         fp8_row: torch.Tensor,
