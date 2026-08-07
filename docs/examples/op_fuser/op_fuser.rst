@@ -114,19 +114,60 @@ Branching operations
 ^^^^^^^^^^^^^^^^^^^^
 
 The operation fuser supports limited branching behavior. While the
-operations must be in sequential order, basic operations may declare
-extra tensor inputs and outputs. By default, an extra tensor slot has
-no channel assigned and is part of the public ``Sequential`` interface:
-the caller provides extra inputs as arguments, and extra outputs are
-returned after the main output. Assigning the same channel name to an
-output slot and a later input slot connects them internally instead.
+operations must be in sequential order, some operations can accept
+extra inputs or produce extra outputs. For example, ``AddExtraInput``
+adds an extra input tensor to the intermediate tensor, and
+``MakeExtraOutput`` returns the intermediate tensor as an extra output.
+When calling a ``Sequential`` that contains any of these branching
+operations, the extra inputs should be passed as arguments and the
+extra outputs will be returned after the main output.
 
 .. code-block:: python
 
     import torch
     import transformer_engine.pytorch as te
 
-    # Keep a residual connection inside one Sequential.
+    # Construct an MLP with a residual connection.
+    fc1 = te.ops.Sequential(
+        te.ops.LayerNorm(4096),
+        te.ops.MakeExtraOutput(),  # Output the residual.
+        te.ops.Linear(4096, 28672),
+        te.ops.SwiGLU(),
+    )
+    fc2 = te.ops.Sequential(
+        te.ops.Linear(14336, 4096),
+        te.ops.AddExtraInput(),  # Add the residual.
+    )
+
+    # Pass the extra output from fc1 as the extra input to fc2.
+    x = torch.randn(16384, 4096, device="cuda")
+    y, residual = fc1(x)
+    y = fc2(y, residual)
+
+.. figure:: ./residual_layernorm_mlp.png
+   :align: center
+
+   Operations for an MLP block with a residual connection. The block
+   is split into two sections so that the caller can pass the extra
+   output from the first section to the second.
+
+Extra tensor channels
+"""""""""""""""""""""
+
+Extra inputs and outputs may optionally specify a channel. Assigning
+the same channel name to an extra output and one or more later extra
+inputs routes the tensor internally within the same
+``OperationFuser``. Slots bound to channels are removed from the public
+``Sequential`` interface.
+
+With a channel, the residual block above can be expressed using one
+``Sequential``:
+
+.. code-block:: python
+
+    import torch
+    import transformer_engine.pytorch as te
+
     make_residual = te.ops.MakeExtraOutput()
     add_residual = te.ops.AddExtraInput()
     make_residual.set_extra_output_channel(0, "residual")
@@ -141,23 +182,9 @@ output slot and a later input slot connects them internally instead.
         add_residual,
     )
 
+    # The residual is routed internally, so the caller receives only y.
     x = torch.randn(16384, 4096, device="cuda")
     y = block(x)
-
-.. figure:: ./residual_layernorm_mlp.png
-   :align: center
-
-   Operations for an MLP block with a residual connection.
-
-Extra tensor channels
-"""""""""""""""""""""
-
-An extra output and one or more later extra inputs can be assigned the
-same channel name. This routes the tensor inside the
-``OperationFuser`` and removes the bound slots from the public
-``Sequential`` interface. In the residual example above, the caller
-therefore receives only ``y`` and does not need to pass the residual
-back into the block.
 
 Channels are also useful for mixture-of-experts blocks. The following
 example assumes custom ``Dispatch`` and ``Combine`` basic operations.
@@ -200,6 +227,29 @@ routing map. ``Combine`` consumes the routing map.
     # Dispatch's extra input has no channel, so the caller passes router_probs.
     # Channels supply all later extra inputs internally.
     y = moe(x, router_probs)
+
+Channels cannot connect operations in different ``OperationFuser``
+instances. In particular, an ordinary PyTorch module inside a
+``Sequential`` splits the fusible operations on either side into
+separate fusers. The following channel connection is therefore not
+supported:
+
+.. code-block:: python
+
+    make_residual = te.ops.MakeExtraOutput()
+    add_residual = te.ops.AddExtraInput()
+    make_residual.set_extra_output_channel(0, "residual")
+    add_residual.set_extra_input_channel(0, "residual")
+
+    block = te.ops.Sequential(
+        make_residual,
+        torch.nn.Identity(),  # Splits the operations into separate fusers.
+        add_residual,
+    )
+
+Use the public extra output and extra input interfaces, as in the
+two-``Sequential`` example above, when the producer and consumer cannot
+be placed in the same ``OperationFuser``.
 
 The following conditions apply to extra tensor channels:
 
