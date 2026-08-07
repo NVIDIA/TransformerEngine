@@ -828,8 +828,6 @@ def backward_linear(
         ``(dgrad, wgrad)`` — ``wgrad`` is a typed dummy when
         ``fuse_wgrad_accumulation=True``.
     """
-    import weakref
-
     tp_size = get_distributed_world_size(tp_group) if tp_group is not None else 1
     fp8 = isinstance(w_q, QuantizedTensor)
 
