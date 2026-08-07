@@ -2311,9 +2311,7 @@ class GroupedLinear(TransformerEngineBaseModule):
         num_gemms = self.num_gemms
 
         if FP8GlobalStateManager.fp8_graph_capturing():
-            skip_fp8_weight_update = (
-                FP8GlobalStateManager.quantization_state.skip_fp8_weight_update_tensor
-            )
+            skip_fp8_weight_update = FP8GlobalStateManager.get_skip_fp8_weight_update_tensor()
         else:
             skip_fp8_weight_update = None
         if skip_fp8_weight_update is not None:
@@ -2332,9 +2330,7 @@ class GroupedLinear(TransformerEngineBaseModule):
             )
 
         if FP8GlobalStateManager.fp8_graph_capturing():
-            skip_fp8_weight_update = (
-                FP8GlobalStateManager.quantization_state.skip_fp8_weight_update_tensor
-            )
+            skip_fp8_weight_update = FP8GlobalStateManager.get_skip_fp8_weight_update_tensor()
         else:
             skip_fp8_weight_update = None
         if skip_fp8_weight_update is not None:
