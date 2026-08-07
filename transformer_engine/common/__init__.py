@@ -407,8 +407,8 @@ if "NVTE_PROJECT_BUILDING" not in os.environ or bool(int(os.getenv("NVTE_RELEASE
     _TE_LIB_CTYPES = _load_core_library()
 
     # Needed to find the correct headers for NVRTC kernels.
-    cuda_major_version = _cuda_runtime_major(_TE_LIB_CTYPES)
-    if not os.getenv("NVTE_CUDA_INCLUDE_DIR") and cuda_major_version is not None:
-        cuda_include_dir = _nvidia_cudart_include_dir(cuda_major_version)
+    _cuda_major_version = _cuda_runtime_major(_TE_LIB_CTYPES)
+    if not os.getenv("NVTE_CUDA_INCLUDE_DIR") and _cuda_major_version is not None:
+        cuda_include_dir = _nvidia_cudart_include_dir(_cuda_major_version)
         if cuda_include_dir:
             os.environ["NVTE_CUDA_INCLUDE_DIR"] = cuda_include_dir
