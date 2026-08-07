@@ -99,18 +99,13 @@ __launch_bounds__(BLOCK_SIZE)
 #endif
 }
 
+// This is a general amax reduction, so it is not restricted to SM 10.0+. 
 template <typename IType, int BLOCK_SIZE>
-__global__ void
-#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
-__launch_bounds__(BLOCK_SIZE)
-#endif
+__global__ void __launch_bounds__(BLOCK_SIZE)
     compute_columnwise_amax_kernel(const int num_rows, const int num_cols,
                                    const IType *__restrict__ input,
                                    float *__restrict__ output_columnwise_amax,
                                    const float *__restrict__ noop) {
-#if !defined(__CUDA_ARCH__) || (__CUDA_ARCH__ < 1000)
-  NVTE_DEVICE_ERROR("SM 10.0+ is required.");
-#else
   if (noop != nullptr && noop[0] == 1.0f) {
     return;
   }
@@ -128,7 +123,6 @@ __launch_bounds__(BLOCK_SIZE)
   if (threadIdx.x == 0) {
     output_columnwise_amax[col_idx] = col_amax;
   }
-#endif
 }
 
 template <typename IType>

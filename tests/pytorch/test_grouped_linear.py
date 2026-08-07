@@ -97,6 +97,23 @@ def nvfp4_row_scaled():
     return nvfp4_recipe
 
 
+def nvfp4_row_scaled_quantized_backward():
+    # Same row-scaled activation recipe as nvfp4_row_scaled(), but with
+    # backward_override=None so the backward runs in NVFP4 instead of falling back
+    # to high precision. 
+    nvfp4_recipe = recipe.NVFP4BlockScaling(
+        disable_rht=True,
+        disable_stochastic_rounding=True,
+        disable_2d_quantization=True,
+        row_scaled_activation=True,
+        backward_override=None,
+    )
+    nvfp4_recipe.fp4_quant_fwd_inp = recipe.QParams()
+    nvfp4_recipe.fp4_quant_fwd_weight = recipe.QParams()
+    nvfp4_recipe.fp4_quant_bwd_grad = recipe.QParams()
+    return nvfp4_recipe
+
+
 def nvfp4_4over6():
     nvfp4_recipe = recipe.NVFP4BlockScaling(
         disable_rht=True,
@@ -375,6 +392,84 @@ def test_grouped_linear_accuracy(
         else:
             # cuBLAS implementation should be bit-wise match
             torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not nvfp4_available, reason=reason_for_no_nvfp4)
+@pytest.mark.parametrize("dtype", [torch.bfloat16], ids=str)
+@pytest.mark.parametrize("num_gemms", [1, 3])
+@pytest.mark.parametrize("bs", [2])
+@pytest.mark.parametrize("bias", all_boolean)
+def test_grouped_linear_row_scaled_quantized_backward(dtype, num_gemms, bs, bias, model="126m"):
+    """Row-scaled NVFP4 GroupedLinear with quantized (non-fallback) NVFP4 backward.
+
+    With ``backward_override=None`` the wgrad is computed in NVFP4: the row-scaled
+    activation becomes operand A of the ``NT`` grouped GEMM, which this PR routes
+    through the per-expert dense ``general_gemm`` loop. GroupedLinear must then
+    match a stack of independent dense ``Linear`` layers bit-for-bit, since both
+    execute the exact same per-expert quantize + GEMM kernels.
+    """
+    recipe_row_scaled = nvfp4_row_scaled_quantized_backward()
+    config = model_configs[model]
+    if dtype not in get_nvfp4_inp_supported_dtypes(recipe_row_scaled, dtype):
+        pytest.skip(f"Input dtype {dtype} not supported for row-scaled NVFP4.")
+
+    grouped_linear = (
+        GroupedLinear(
+            num_gemms,
+            config.hidden_size,
+            4 * config.hidden_size,
+            bias=bias,
+            params_dtype=dtype,
+            device="cuda",
+        )
+        .cuda()
+        .eval()
+    )
+    sequential_linear = torch.nn.ModuleList(
+        [
+            Linear(
+                config.hidden_size,
+                4 * config.hidden_size,
+                bias=bias,
+                params_dtype=dtype,
+                device="cuda",
+            ).eval()
+            for _ in range(num_gemms)
+        ]
+    )
+
+    # Share weights/biases so the two paths are numerically comparable.
+    with torch.no_grad():
+        for i in range(num_gemms):
+            sequential_linear[i].weight = Parameter(getattr(grouped_linear, f"weight{i}").clone())
+            if bias:
+                sequential_linear[i].bias = Parameter(getattr(grouped_linear, f"bias{i}").clone())
+
+    outputs_ref = _test_grouped_linear_accuracy(
+        sequential_linear,
+        num_gemms,
+        bs,
+        dtype,
+        config,
+        recipe_row_scaled,
+        fp8=True,
+        fuse_wgrad_accumulation=False,
+    )
+    outputs = _test_grouped_linear_accuracy(
+        grouped_linear,
+        num_gemms,
+        bs,
+        dtype,
+        config,
+        recipe_row_scaled,
+        fp8=True,
+        fuse_wgrad_accumulation=False,
+    )
+
+    # GroupedLinear is a per-expert loop over the same dense kernels, so the
+    # forward output, dgrad, and (row-scaled) wgrad must match bit-for-bit.
+    for o, o_ref in zip(outputs, outputs_ref):
+        torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
 
 
 @pytest.mark.skipif(
