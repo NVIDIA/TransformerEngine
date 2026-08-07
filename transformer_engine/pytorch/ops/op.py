@@ -187,9 +187,72 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
     def __init__(self) -> None:
         super().__init__()
 
+        # Optional names for extra-tensor channels internal to an OperationFuser.
+        # Unbound slots remain public inputs/outputs, preserving the original API.
+        self._extra_input_channels: list[Optional[str]] = [None] * self.num_extra_inputs
+        self._extra_output_channels: list[Optional[str]] = [None] * self.num_extra_outputs
+        self._extra_channels_locked = False
+
         # Objects for quantization
         self._fp8_metas: Optional[dict[str, dict[str, Any]]] = None
         self._quantizers: Optional[dict[str, list[Quantizer]]] = None
+
+    def set_extra_input_channel(self, index: int, channel: Optional[str]) -> BasicOperation:
+        """Assign a channel name to an extra input slot.
+
+        The slot receives the matching extra output from an earlier operation
+        in the same fuser. If there is no producer in the fuser, the slot
+        remains public; one public tensor fans out to all input slots with the
+        same channel name. Passing ``None`` removes the name. Channels cannot
+        be changed after the operation has been attached to a persistent
+        ``OperationFuser``.
+        """
+        if not 0 <= index < self.num_extra_inputs:
+            raise IndexError(
+                f"Extra input index {index} is out of range for "
+                f"{type(self).__name__} with {self.num_extra_inputs} extra inputs"
+            )
+        if channel is not None and (not isinstance(channel, str) or not channel):
+            raise ValueError("Extra input channel must be a non-empty string or None")
+        if self._extra_input_channels[index] == channel:
+            return self
+        self._assert_extra_channels_mutable()
+        self._extra_input_channels[index] = channel
+        return self
+
+    def set_extra_output_channel(self, index: int, channel: Optional[str]) -> BasicOperation:
+        """Assign a channel name to an extra output slot.
+
+        The slot feeds matching extra inputs on later operations in the same
+        fuser. If there are no consumers in the fuser, the slot remains a
+        public extra output. Passing ``None`` removes the name. Channels cannot
+        be changed after the operation has been attached to a persistent
+        ``OperationFuser``.
+        """
+        if not 0 <= index < self.num_extra_outputs:
+            raise IndexError(
+                f"Extra output index {index} is out of range for "
+                f"{type(self).__name__} with {self.num_extra_outputs} extra outputs"
+            )
+        if channel is not None and (not isinstance(channel, str) or not channel):
+            raise ValueError("Extra output channel must be a non-empty string or None")
+        if self._extra_output_channels[index] == channel:
+            return self
+        self._assert_extra_channels_mutable()
+        self._extra_output_channels[index] = channel
+        return self
+
+    def _assert_extra_channels_mutable(self) -> None:
+        """Check that channel routing has not been captured by a fuser."""
+        if self._extra_channels_locked:
+            raise RuntimeError(
+                "Extra tensor channels cannot be changed after an operation has been "
+                "attached to an OperationFuser"
+            )
+
+    def _lock_extra_channels(self) -> None:
+        """Prevent changes after a fuser has captured the channel routing."""
+        self._extra_channels_locked = True
 
     @property
     def is_fused_op(self) -> bool:
@@ -535,7 +598,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         """Apply operation"""
         from .fuser import OperationFuser
 
-        return OperationFuser([self])(
+        return OperationFuser([self], lock_extra_channels=False)(
             input,
             *extra_inputs,
             basic_op_kwargs=[kwargs],
@@ -770,7 +833,7 @@ class FusedOperation(FusibleOperation):
             basic_op_kwargs = [{} for _ in range(len(self.basic_ops))]
         from .fuser import OperationFuser
 
-        return OperationFuser([self])(
+        return OperationFuser([self], lock_extra_channels=False)(
             input,
             *extra_inputs,
             basic_op_kwargs=basic_op_kwargs,

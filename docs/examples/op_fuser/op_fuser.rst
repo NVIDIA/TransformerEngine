@@ -113,33 +113,33 @@ quantized compute.
 Branching operations
 ^^^^^^^^^^^^^^^^^^^^
 
-The operation fuser supports very limited branching behavior. While
-the operations must be in sequential order, some operations can accept
+The operation fuser supports limited branching behavior. While the
+operations must be in sequential order, some operations can accept
 extra inputs or produce extra outputs. For example, ``AddExtraInput``
-will add an extra input tensor to the intermediate tensor and
-``MakeExtraOutput`` will return the intermediate tensor as an extra
-output. When calling a ``Sequential`` that contains any of these
-branching operations, the extra inputs should be passed in as
-arguments and the extra outputs will be returned.
+adds an extra input tensor to the intermediate tensor, and
+``MakeExtraOutput`` returns the intermediate tensor as an extra output.
+When calling a ``Sequential`` that contains any of these branching
+operations, the extra inputs should be passed as arguments and the
+extra outputs will be returned after the main output.
 
 .. code-block:: python
 
     import torch
     import transformer_engine.pytorch as te
 
-    # Construct MLP with residual connection
+    # Construct an MLP with a residual connection.
     fc1 = te.ops.Sequential(
         te.ops.LayerNorm(4096),
-        te.ops.MakeExtraOutput(),  # Output residual
+        te.ops.MakeExtraOutput(),  # Output the residual.
         te.ops.Linear(4096, 28672),
         te.ops.SwiGLU(),
     )
     fc2 = te.ops.Sequential(
         te.ops.Linear(14336, 4096),
-        te.ops.AddExtraInput(),  # Add residual
+        te.ops.AddExtraInput(),  # Add the residual.
     )
 
-    # Forward pass
+    # Pass the extra output from fc1 as the extra input to fc2.
     x = torch.randn(16384, 4096, device="cuda")
     y, residual = fc1(x)
     y = fc2(y, residual)
@@ -147,9 +147,131 @@ arguments and the extra outputs will be returned.
 .. figure:: ./residual_layernorm_mlp.png
    :align: center
 
-   Operations for an MLP block with a residual connection. Note that
-   the block has been split into two sections, each with one branching
-   operation.
+   Operations for an MLP block with a residual connection. The block
+   is split into two sections so that the caller can pass the extra
+   output from the first section to the second.
+
+Extra tensor channels
+"""""""""""""""""""""
+
+Extra inputs and outputs may optionally specify a channel. Assigning
+the same channel name to an extra output and one or more later extra
+inputs routes the tensor internally within the same
+``OperationFuser``. Slots bound to channels are removed from the public
+``Sequential`` interface.
+
+With a channel, the residual block above can be expressed using one
+``Sequential``:
+
+.. code-block:: python
+
+    import torch
+    import transformer_engine.pytorch as te
+
+    make_residual = te.ops.MakeExtraOutput()
+    add_residual = te.ops.AddExtraInput()
+    make_residual.set_extra_output_channel(0, "residual")
+    add_residual.set_extra_input_channel(0, "residual")
+
+    block = te.ops.Sequential(
+        te.ops.LayerNorm(4096),
+        make_residual,
+        te.ops.Linear(4096, 28672),
+        te.ops.SwiGLU(),
+        te.ops.Linear(14336, 4096),
+        add_residual,
+    )
+
+    # The residual is routed internally, so the caller receives only y.
+    x = torch.randn(16384, 4096, device="cuda")
+    y = block(x)
+
+Channels are also useful for mixture-of-experts blocks. The following
+example assumes custom ``Dispatch`` and ``Combine`` basic operations.
+``Dispatch`` has one public extra input containing router probabilities
+and three extra outputs: split sizes, token probabilities, and a
+routing map. ``Combine`` consumes the routing map.
+
+.. code-block:: python
+
+    import transformer_engine.pytorch as te
+    from my_ops import Dispatch, Combine
+
+    num_experts = 8
+    hidden_size = 4096
+    ffn_size = 14336
+
+    dispatch = Dispatch(num_experts)
+    fc1 = te.ops.GroupedLinear(
+        num_experts, hidden_size, 2 * ffn_size, bias=False
+    )
+    activation = te.ops.ScaledSwiGLU()
+    fc2 = te.ops.GroupedLinear(
+        num_experts, ffn_size, hidden_size, bias=False
+    )
+    combine = Combine(num_experts)
+
+    # Dispatch extra outputs:
+    #   0: split sizes, 1: token probabilities, 2: routing map
+    dispatch.set_extra_output_channel(0, "m_splits")
+    dispatch.set_extra_output_channel(1, "probs")
+    dispatch.set_extra_output_channel(2, "routing_map")
+
+    fc1.set_extra_input_channel(0, "m_splits")
+    activation.set_extra_input_channel(0, "probs")
+    fc2.set_extra_input_channel(0, "m_splits")
+    combine.set_extra_input_channel(0, "routing_map")
+
+    moe = te.ops.Sequential(dispatch, fc1, activation, fc2, combine)
+
+    # Dispatch's extra input has no channel, so the caller passes router_probs.
+    # Channels supply all later extra inputs internally.
+    y = moe(x, router_probs)
+
+Channels cannot connect operations in different ``OperationFuser``
+instances. In particular, an ordinary PyTorch module inside a
+``Sequential`` splits the fusible operations on either side into
+separate fusers. The following channel connection is therefore not
+supported:
+
+.. code-block:: python
+
+    make_residual = te.ops.MakeExtraOutput()
+    add_residual = te.ops.AddExtraInput()
+    make_residual.set_extra_output_channel(0, "residual")
+    add_residual.set_extra_input_channel(0, "residual")
+
+    block = te.ops.Sequential(
+        make_residual,
+        torch.nn.Identity(),  # Splits the operations into separate fusers.
+        add_residual,
+    )
+
+Use the public extra output and extra input interfaces, as in the
+two-``Sequential`` example above, when the producer and consumer cannot
+be placed in the same ``OperationFuser``.
+
+The following conditions apply to extra tensor channels:
+
+- A producer must appear before all of its consumers. Backward edges
+  and cycles are not supported.
+- A channel has exactly one producer, but its output may fan out to
+  multiple consumers.
+- Every named output channel must have at least one consumer, and the
+  channel names on the producer and consumers must match.
+- A channel is scoped to one ``OperationFuser``. In a ``Sequential``,
+  ordinary PyTorch modules split adjacent fusible operations into
+  separate fusers, and channels cannot cross that boundary.
+- The caller passes extra inputs that have no channel assigned and
+  receives extra outputs that have no channel assigned. Slots assigned
+  to channels are internal and do not appear in the ``Sequential``
+  arguments or return value.
+
+Channel-connected basic operations may still be replaced by registered
+``FusedOperation`` implementations. If a fused operation contains both
+the producer and consumer of a channel, its ``fuser_forward`` and
+``fuser_backward`` implementations are responsible for routing the
+tensor and its gradient between those basic operations.
 
 Developer guide
 ---------------
