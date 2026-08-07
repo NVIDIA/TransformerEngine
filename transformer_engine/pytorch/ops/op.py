@@ -198,12 +198,14 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         self._quantizers: Optional[dict[str, list[Quantizer]]] = None
 
     def set_extra_input_channel(self, index: int, channel: Optional[str]) -> BasicOperation:
-        """Bind an extra input slot to an internal fuser channel.
+        """Assign a channel name to an extra input slot.
 
-        A bound slot receives the matching extra output from an earlier
-        operation in the same fuser instead of consuming a public extra input.
-        Passing ``None`` removes the binding. Bindings cannot be changed after
-        the operation has been attached to an ``OperationFuser``.
+        The slot receives the matching extra output from an earlier operation
+        in the same fuser. If there is no producer in the fuser, the slot
+        remains public; one public tensor fans out to all input slots with the
+        same channel name. Passing ``None`` removes the name. Channels cannot
+        be changed after the operation has been attached to a persistent
+        ``OperationFuser``.
         """
         if not 0 <= index < self.num_extra_inputs:
             raise IndexError(
@@ -219,11 +221,12 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         return self
 
     def set_extra_output_channel(self, index: int, channel: Optional[str]) -> BasicOperation:
-        """Bind an extra output slot to an internal fuser channel.
+        """Assign a channel name to an extra output slot.
 
-        A bound slot can feed one or more later operations and is not returned
-        as a public extra output. Passing ``None`` removes the binding. Bindings
-        cannot be changed after the operation has been attached to an
+        The slot feeds matching extra inputs on later operations in the same
+        fuser. If there are no consumers in the fuser, the slot remains a
+        public extra output. Passing ``None`` removes the name. Channels cannot
+        be changed after the operation has been attached to a persistent
         ``OperationFuser``.
         """
         if not 0 <= index < self.num_extra_outputs:
@@ -595,7 +598,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         """Apply operation"""
         from .fuser import OperationFuser
 
-        return OperationFuser([self])(
+        return OperationFuser([self], lock_extra_channels=False)(
             input,
             *extra_inputs,
             basic_op_kwargs=[kwargs],
@@ -830,7 +833,7 @@ class FusedOperation(FusibleOperation):
             basic_op_kwargs = [{} for _ in range(len(self.basic_ops))]
         from .fuser import OperationFuser
 
-        return OperationFuser([self])(
+        return OperationFuser([self], lock_extra_channels=False)(
             input,
             *extra_inputs,
             basic_op_kwargs=basic_op_kwargs,
