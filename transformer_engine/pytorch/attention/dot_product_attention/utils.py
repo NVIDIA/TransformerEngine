@@ -1082,6 +1082,13 @@ def get_attention_backend(
         if use_flash_attention_4 and FlashAttentionUtils.v4_is_installed:
             logger.debug("Disabling FlashAttention 4 for dropout")
             use_flash_attention_4 = False
+        if use_fused_attention and qkv_format == "thd":
+            # Dropout keeps thd off cuDNN's unified engine, so it falls to the much slower
+            # composite one. Nothing else reports this.
+            logger.debug(
+                "FusedAttention with dropout and qkv_format = thd uses the composite cuDNN"
+                " engine, which is much slower than the unified engine"
+            )
 
     # Filter: Softmax type
     # context_parallel | softmax_type | supported backends
