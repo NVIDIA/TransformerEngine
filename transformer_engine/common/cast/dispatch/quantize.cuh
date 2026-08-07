@@ -104,13 +104,18 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
       auto dtype = input_tensor->dtype();
       const bool row_scaled_nvfp4 = output_tensor->row_scaled_nvfp4;
       const bool nvfp4_use_4over6 = quant_config_cpp.nvfp4_4over6_mode != kNVTENVFP44Over6Disabled;
-      NVTE_CHECK(nvfp4_use_4over6 || output_tensor->nvfp4_e4m3_max == 448,
-                 "Non-4over6 NVFP4 quantization requires E4M3 max 448.");
+      NVTE_CHECK(
+          nvfp4_use_4over6 ||
+            output_tensor->get_nvfp4_scale_max() ==
+                  static_cast<int>(nvfp4::core::scale_max(output_tensor->scale_inv.dtype)),
+          "NVFP4 quantization with non-default scale max is only supported with 4over6.");
       NVTE_CHECK(!nvfp4_use_4over6 || !quant_config_cpp.stochastic_rounding,
                  "NVFP4 4over6 quantization does not support stochastic rounding.");
       if (row_scaled_nvfp4) {
         NVTE_CHECK(!quant_config_cpp.nvfp4_2d_quantization,
                    "Row-scaled NVFP4 quantization does not support 2D quantization.");
+        NVTE_CHECK(output_tensor->amax.dptr != nullptr,
+                   "Row-scaled NVFP4 does not support disabling second-level scaling.");
         NVTE_CHECK(
             !(nvfp4_use_4over6 && output_tensor->has_columnwise_data()),
             "Row-scaled NVFP4 transpose quantization is not supported with 4over6 mode. The 4over6 "
@@ -121,8 +126,11 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
                 (dtype == DType::kBFloat16 && rows % 32 == 0 && cols % 32 == 0),
             "Row-scaled NVFP4 transpose quantization requires BF16 input and dimensions that are "
             "multiples of 32.");
-        nvfp4::compute_rowwise_amax(*input_tensor, noop_tensor, output_tensor, stream);
-        if (output_tensor->has_columnwise_data()) {
+        if (output_tensor->amax.dptr != nullptr) {
+          nvfp4::compute_rowwise_amax(*input_tensor, noop_tensor, output_tensor, stream);
+        }
+        if (output_tensor->has_columnwise_data() &&
+            output_tensor->columnwise_amax.dptr != nullptr) {
           nvfp4::compute_columnwise_amax(*input_tensor, noop_tensor, output_tensor, stream);
         }
       }
@@ -281,13 +289,17 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
       auto dtype = grad_tensor->dtype();
       const bool row_scaled_nvfp4 = output_tensor->row_scaled_nvfp4;
       const bool nvfp4_use_4over6 = quant_config_cpp.nvfp4_4over6_mode != kNVTENVFP44Over6Disabled;
-      NVTE_CHECK(nvfp4_use_4over6 || output_tensor->nvfp4_e4m3_max == 448,
-                 "Non-4over6 NVFP4 quantization requires E4M3 max 448.");
+      NVTE_CHECK(nvfp4_use_4over6 ||
+                 output_tensor->get_nvfp4_scale_max() ==
+                     static_cast<int>(nvfp4::core::scale_max(output_tensor->scale_inv.dtype)),
+                 "NVFP4 quantization with non-default scale max is only supported with 4over6.");
       NVTE_CHECK(!nvfp4_use_4over6 || !quant_config_cpp.stochastic_rounding,
                  "NVFP4 4over6 quantization does not support stochastic rounding.");
       if (row_scaled_nvfp4) {
         NVTE_CHECK(!quant_config_cpp.nvfp4_2d_quantization,
                    "Row-scaled NVFP4 quantization does not support 2D quantization.");
+        NVTE_CHECK(output_tensor->amax.dptr != nullptr,
+                   "Row-scaled NVFP4 does not support disabling second-level scaling.");
         NVTE_CHECK(
             !(nvfp4_use_4over6 && output_tensor->has_columnwise_data()),
             "Row-scaled NVFP4 transpose quantization is not supported with 4over6 mode. The 4over6 "
@@ -298,8 +310,11 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
                 (dtype == DType::kBFloat16 && rows % 32 == 0 && cols % 32 == 0),
             "Row-scaled NVFP4 transpose quantization requires BF16 input and dimensions that are "
             "multiples of 32.");
-        nvfp4::compute_rowwise_amax(*grad_tensor, noop_tensor, output_tensor, stream);
-        if (output_tensor->has_columnwise_data()) {
+        if (output_tensor->amax.dptr != nullptr) {
+          nvfp4::compute_rowwise_amax(*grad_tensor, noop_tensor, output_tensor, stream);
+        }
+        if (output_tensor->has_columnwise_data() &&
+            output_tensor->columnwise_amax.dptr != nullptr) {
           nvfp4::compute_columnwise_amax(*grad_tensor, noop_tensor, output_tensor, stream);
         }
       }
@@ -438,9 +453,12 @@ void group_quantize_fwd_host_aware_helper(const NVTETensor input, NVTETensor *ou
       auto dtype = input_tensor->dtype();
 
       const bool nvfp4_use_4over6 = quant_config_cpp.nvfp4_4over6_mode != kNVTENVFP44Over6Disabled;
-      for (const auto *output_tensor : output_tensors) {
-        NVTE_CHECK(nvfp4_use_4over6 || output_tensor->nvfp4_e4m3_max == 448,
-                   "Non-4over6 NVFP4 quantization requires E4M3 max 448.");
+      if (!nvfp4_use_4over6) {
+        for (const auto *output_tensor : output_tensors) {
+          NVTE_CHECK(output_tensor->get_nvfp4_scale_max()
+                         == static_cast<int>(nvfp4::core::scale_max(output_tensors[0]->scale_inv.dtype)),
+                     "NVFP4 quantization with non-default scale max is only supported with 4over6.");
+        }
       }
       NVTE_CHECK(!quant_config_cpp.nvfp4_2d_quantization,
                  "2D quantization is not supported for group quantize.");

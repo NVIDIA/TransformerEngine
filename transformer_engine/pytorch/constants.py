@@ -28,8 +28,12 @@ class DType(enum.IntEnum):
       bits (``torch.float8_e4m3fn``).
     * ``kFloat8E5M2`` -- 8-bit floating point with 5 exponent and 2 mantissa
       bits (``torch.float8_e5m2``).
+    * ``kFloat8E8M0`` -- 8-bit unsigned floating point with 8 exponent and 0
+      mantissa bits.
     * ``kFloat4E2M1`` -- 4-bit floating point with 2 exponent and 1 mantissa
       bits.
+    * ``kFloat8UE4M3`` -- 8-bit unsigned floating point with 5 exponent and 3
+      mantissa bits.
 
     The enum mirrors the backend ``transformer_engine_torch.DType`` (pybind11)
     enum value-for-value, and instances of the two enums compare equal when
@@ -43,7 +47,9 @@ class DType(enum.IntEnum):
     kBFloat16 = int(tex.DType.kBFloat16)
     kFloat8E4M3 = int(tex.DType.kFloat8E4M3)
     kFloat8E5M2 = int(tex.DType.kFloat8E5M2)
+    kFloat8E8M0 = int(tex.DType.kFloat8E8M0)
     kFloat4E2M1 = int(tex.DType.kFloat4E2M1)
+    kFloat8UE5M3 = int(tex.DType.kFloat8UE5M3)
 
     @classmethod
     def cast(cls, dtype: "Union[DType, tex.DType]") -> "DType":

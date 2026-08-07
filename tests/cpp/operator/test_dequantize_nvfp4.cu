@@ -20,6 +20,7 @@
 #endif
 
 #include <transformer_engine/cast.h>
+#include <transformer_engine/recipe.h>
 #include <transformer_engine/swizzle.h>
 #include "../test_common.h"
 #include "transformer_engine/transformer_engine.h"
@@ -39,23 +40,23 @@ float2 cvt_fp4x2_to_float2(fp4e2m1x2 fp4_pair) {
     return {static_cast<float>(h2.x), static_cast<float>(h2.y)};
 }
 
-template <typename OType>
+template <typename OType, typename ScaleType>
 void compute_ref_dequantize_nvfp4(const uint8_t *packed_data,
-                                  const fp8e4m3 *scales,
+                                  const ScaleType *scales,
                                   const std::vector<float> &amax,
                                   OType *output,
                                   size_t rows,
                                   size_t cols,
                                   size_t scale_stride,
-                                  int e4m3_max) {
-    const float factor_inv = 1.0f / (6.0f * static_cast<float>(e4m3_max));
+                                  float scale_max) {
+    const float factor_inv = 1.0f / (6.0f * scale_max);
     constexpr size_t BLOCK_SIZE = 16;
     const size_t Mread = cols / BLOCK_SIZE;
     const size_t bytes_per_block = BLOCK_SIZE / 2;
 
     for (size_t row = 0; row < rows; ++row) {
         for (size_t block = 0; block < Mread; ++block) {
-            const fp8e4m3 scale = scales[row * scale_stride + block];
+            const ScaleType scale = scales[row * scale_stride + block];
             const float final_scale =
                 static_cast<float>(scale) * (amax.size() == 1 ? amax[0] : amax[row]) * factor_inv;
 
@@ -94,7 +95,7 @@ struct NVFP4DequantizeTestConfig {
 
 // Quantize a high-precision input to NVFP4, then dequantize and compare
 // against a CPU reference computed from the quantized data.
-template <typename OutputType>
+template <typename OutputType, typename ScaleType = fp8e4m3>
 void performTest_dequantize_nvfp4(const size_t rows, const size_t cols,
                                   const bool row_scaled_nvfp4,
                                   const NVTENVFP44Over6Mode mode,
@@ -105,7 +106,8 @@ void performTest_dequantize_nvfp4(const size_t rows, const size_t cols,
     // Tensors
     Tensor input("input", std::vector<size_t>{rows, cols}, otype);
     Tensor quantized("quantized", std::vector<size_t>{rows, cols},
-                     DType::kFloat4E2M1, true, false, NVTE_NVFP4_1D_SCALING);
+                     DType::kFloat4E2M1, true, false, NVTE_NVFP4_1D_SCALING,
+                     TypeInfo<ScaleType>::dtype);
     Tensor output("output", std::vector<size_t>{rows, cols}, otype, true, false);
 
     // Fill input with random data
@@ -149,16 +151,17 @@ void performTest_dequantize_nvfp4(const size_t rows, const size_t cols,
     quantized.to_cpu();
     const uint8_t *fp4_data =
       reinterpret_cast<const uint8_t *>(quantized.rowwise_cpu_dptr<fp4e2m1>());
-    const fp8e4m3 *scales = quantized.rowwise_cpu_scale_inv_ptr<fp8e4m3>();
+    const ScaleType *scales = quantized.rowwise_cpu_scale_inv_ptr<ScaleType>();
     const auto *amax = quantized.cpu_rowwise_amax_ptr<float>();
     const std::vector<float> amax_vals(amax, amax + amax_size);
     const NVTEShape scale_shape = quantized.rowwise_scale_inv_shape();
     const size_t scale_stride = scale_shape.data[scale_shape.ndim - 1];
     std::unique_ptr<OutputType[]> ref_output =
       std::make_unique<OutputType[]>(rows * cols);
-    compute_ref_dequantize_nvfp4<OutputType>(
+    const float scale_max = static_cast<float>(e4m3_max);
+    compute_ref_dequantize_nvfp4<OutputType, ScaleType>(
       fp4_data, scales, amax_vals, ref_output.get(),
-      rows, cols, scale_stride, e4m3_max);
+      rows, cols, scale_stride, scale_max);
 
     // Compare results from TE and reference impls
     auto [atol, rtol] = getTolerances(otype);
@@ -166,7 +169,7 @@ void performTest_dequantize_nvfp4(const size_t rows, const size_t cols,
 }
 
 // Dequantize NVFP4 with GEMM-swizzled scales and compare against compact path.
-template <typename OutputType>
+template <typename OutputType, typename ScaleType = fp8e4m3>
 void performTest_dequantize_nvfp4_swizzled(const size_t rows, const size_t cols,
                                            const bool row_scaled_nvfp4,
                                            const NVTENVFP44Over6Mode mode,
@@ -178,7 +181,8 @@ void performTest_dequantize_nvfp4_swizzled(const size_t rows, const size_t cols,
     fillCase<fp32>(&input, InputsFillCase::uniform);
 
     Tensor quantized_compact("quantized_compact", std::vector<size_t>{rows, cols},
-                             DType::kFloat4E2M1, true, false, NVTE_NVFP4_1D_SCALING);
+                             DType::kFloat4E2M1, true, false, NVTE_NVFP4_1D_SCALING,
+                             TypeInfo<ScaleType>::dtype);
     quantized_compact.set_nvfp4_e4m3_max(e4m3_max);
     ASSERT_EQ(quantized_compact.nvfp4_e4m3_max(), e4m3_max);
     if (row_scaled_nvfp4) {
@@ -203,7 +207,8 @@ void performTest_dequantize_nvfp4_swizzled(const size_t rows, const size_t cols,
 
     // Create tensor with same FP4 data but swizzled scales
     Tensor quantized_swizzled("quantized_swizzled", std::vector<size_t>{rows, cols},
-                              DType::kFloat4E2M1, true, false, NVTE_NVFP4_1D_SCALING);
+                              DType::kFloat4E2M1, true, false, NVTE_NVFP4_1D_SCALING,
+                              TypeInfo<ScaleType>::dtype);
     quantized_swizzled.set_nvfp4_e4m3_max(e4m3_max);
     ASSERT_EQ(quantized_swizzled.nvfp4_e4m3_max(), e4m3_max);
     if (row_scaled_nvfp4) {
@@ -324,6 +329,112 @@ INSTANTIATE_TEST_SUITE_P(
         return name;
     }
 );
+
+#if CUDA_VERSION >= 13040
+TEST(DequantizeNVFP4Test, UE5M3Scales)
+{
+    if (getDeviceComputeCapability() < blackwellComputeCapability) {
+        GTEST_SKIP();
+    }
+
+    performTest_dequantize_nvfp4<fp32, fp8ue5m3>(
+        32, 64, false, kNVTENVFP44Over6Disabled, 114688);
+    performTest_dequantize_nvfp4<bf16, fp8ue5m3>(
+        32, 64, true, kNVTENVFP44Over6Disabled, 114688);
+    performTest_dequantize_nvfp4_swizzled<fp32, fp8ue5m3>(
+        32, 64, false, kNVTENVFP44Over6Disabled, 114688);
+    performTest_dequantize_nvfp4_swizzled<bf16, fp8ue5m3>(
+        32, 64, true, kNVTENVFP44Over6Disabled, 114688);
+    performTest_dequantize_nvfp4<fp32, fp8ue5m3>(
+        32, 64, false, kNVTENVFP44Over6MinMAE, 65536);
+    performTest_dequantize_nvfp4_swizzled<bf16, fp8ue5m3>(
+        32, 64, true, kNVTENVFP44Over6MinMAE, 65536);
+}
+
+TEST(NVFP4RecipeTest, UE5M3ScaleUtilities)
+{
+    if (getDeviceComputeCapability() < blackwellComputeCapability) {
+        GTEST_SKIP();
+    }
+
+    Tensor global_amax("global_amax", std::vector<size_t>{1}, DType::kFloat32);
+    Tensor global_scale("global_scale", std::vector<size_t>{1}, DType::kFloat32);
+    global_amax.rowwise_cpu_dptr<float>()[0] = 12.0f;
+    global_amax.from_cpu();
+    nvte_nvfp4_compute_global_scale(
+        global_amax.data(), global_scale.data(), 0, kNVTEFloat8UE5M3);
+    global_scale.to_cpu();
+    EXPECT_FLOAT_EQ(global_scale.rowwise_cpu_dptr<float>()[0], 6.0f * 114688.0f / 12.0f);
+
+    Tensor block_amax("block_amax", std::vector<size_t>{1, 2}, DType::kFloat32);
+    Tensor block_scale("block_scale", std::vector<size_t>{1, 2}, DType::kFloat32);
+    block_amax.rowwise_cpu_dptr<float>()[0] = 3.0f;
+    block_amax.rowwise_cpu_dptr<float>()[1] = 6.0f;
+    block_amax.from_cpu();
+    nvte_nvfp4_compute_per_block_scale(
+        block_amax.data(), block_scale.data(), global_amax.data(), 0, kNVTEFloat8UE5M3);
+    block_scale.to_cpu();
+    EXPECT_FLOAT_EQ(block_scale.rowwise_cpu_dptr<float>()[0], 3.0f * 114688.0f / 12.0f);
+    EXPECT_FLOAT_EQ(block_scale.rowwise_cpu_dptr<float>()[1], 6.0f * 114688.0f / 12.0f);
+
+    Tensor expanded_scale("expanded_scale", std::vector<size_t>{16, 2}, DType::kByte);
+    nvte_nvfp4_expand_scale_to_fp8(
+        block_scale.data(), expanded_scale.data(), 1, 2, 16, 16, 0, kNVTEFloat8UE5M3);
+    expanded_scale.to_cpu();
+    const auto *scales = reinterpret_cast<const fp8ue5m3 *>(
+        expanded_scale.rowwise_cpu_dptr<byte>());
+    for (size_t row = 0; row < 16; ++row) {
+        EXPECT_FLOAT_EQ(static_cast<float>(scales[row * 2]),
+                        static_cast<float>(fp8ue5m3(3.0f * 114688.0f / 12.0f)));
+        EXPECT_FLOAT_EQ(static_cast<float>(scales[row * 2 + 1]),
+                        static_cast<float>(fp8ue5m3(6.0f * 114688.0f / 12.0f)));
+    }
+}
+
+TEST(NVFP4RecipeTest, UE5M3PerTensorScale)
+{
+    if (getDeviceComputeCapability() < blackwellComputeCapability) {
+        GTEST_SKIP();
+    }
+
+    Tensor input_a("input_a", std::vector<size_t>{32, 32}, DType::kFloat4E2M1,
+                   true, true, NVTE_NVFP4_1D_SCALING, DType::kFloat8UE5M3);
+    Tensor input_b("input_b", std::vector<size_t>{32, 32}, DType::kFloat4E2M1,
+                   true, true, NVTE_NVFP4_1D_SCALING, DType::kFloat8UE5M3);
+    Tensor alpha_out("alpha_out", std::vector<size_t>{1}, DType::kFloat32);
+
+    constexpr float amax_a = 12.0f;
+    constexpr float amax_b = 18.0f;
+    constexpr float alpha_in = 2.0f;
+    constexpr float fp4_max = 6.0f;
+    constexpr float ue5m3_max = 114688.0f;
+    input_a.set_nvfp4_e4m3_max(static_cast<int>(ue5m3_max));
+    input_b.set_nvfp4_e4m3_max(static_cast<int>(ue5m3_max));
+    input_a.set_amax(amax_a);
+    input_b.set_tensor_amax_columnwise(amax_b);
+
+    nvte_nvfp4_compute_per_tensor_scale(
+        input_a.data(), true, input_b.data(), false, alpha_in, alpha_out.data(), 0);
+    alpha_out.to_cpu();
+
+    const float factor_inv =
+        1.0f / (fp4_max * fp4_max * ue5m3_max * ue5m3_max);
+    const float expected = alpha_in * amax_a * amax_b * factor_inv;
+    EXPECT_FLOAT_EQ(alpha_out.rowwise_cpu_dptr<float>()[0], expected);
+
+    input_a.set_nvfp4_e4m3_max(65536);
+    input_b.set_nvfp4_e4m3_max(65536);
+    nvte_nvfp4_compute_per_tensor_scale(
+        input_a.data(), true, input_b.data(), false, alpha_in, alpha_out.data(), 0);
+    alpha_out.to_cpu();
+
+    constexpr float ue5m3_headroom_max = 65536.0f;
+    const float headroom_factor_inv =
+        1.0f / (fp4_max * fp4_max * ue5m3_headroom_max * ue5m3_headroom_max);
+    const float headroom_expected = alpha_in * amax_a * amax_b * headroom_factor_inv;
+    EXPECT_FLOAT_EQ(alpha_out.rowwise_cpu_dptr<float>()[0], headroom_expected);
+}
+#endif
 
 class DequantizeNVFP4SwizzledTestSuite : public ::testing::TestWithParam
     <std::tuple<std::pair<size_t, size_t>,

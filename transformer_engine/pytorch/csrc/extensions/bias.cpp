@@ -156,6 +156,9 @@ std::vector<py::object> dact_dbias(
         (nvfp4_quantizer_cpp->with_rht && nvfp4_quantizer_cpp->with_post_rht_amax)) {
       // Amax is handled within NVFP4 quantizer
       impl = Impl::UNFUSED;
+    } else if (nvfp4_quantizer_cpp->disable_second_level_scale) {
+      // No need for amax
+      impl = Impl::UNFUSED;
     } else {
       impl = Impl::FUSED_DACT_AMAX_NVFP4;
     }

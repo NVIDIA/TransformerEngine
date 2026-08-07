@@ -31,58 +31,132 @@ namespace transformer_engine {
 namespace dispatch {
 namespace nvfp4 {
 
-using nvfp4_scale_t = fp8e4m3;
-
-namespace quantization_and_transposition_SF {
-#if FP4_TYPE_SUPPORTED
-// Used in transpose variant
-// Compute per-block E4M3 encoding/decoding scaling factor
-__device__ __forceinline__ nvfp4_scale_t compute_decoding_scaling_factor(const float block_amax,
-                                                                         const float S_enc) {
-  // constexpr float rcp_6f = 1.0f / 6.0f;
-  // const float S_dec_b = block_amax * rcp_6f;
-  // const nvfp4_scale_t S_dec_b_fp8 = static_cast<nvfp4_scale_t>(S_dec_b * S_enc);
-  // return S_dec_b_fp8;
-  // NOTE: Divide by 6.0f is not elegant and not efficient.
-  // However, this is part of the emulation code to ensure exact match.
-  using namespace detail;
-  constexpr float fp4_max = TypeExtrema<fp4e2m1>::max;  // 6.0f;
-  constexpr float fp4_max_inv = 1.0f / fp4_max;
-  const float S_dec_b = block_amax * (S_enc * fp4_max_inv);
-  return static_cast<nvfp4_scale_t>(fminf(S_dec_b, TypeExtrema<float>::max));
-}
-#endif  // FP4_TYPE_SUPPORTED
-}  // namespace quantization_and_transposition_SF
-
-namespace quantization_SF {
-#if FP4_TYPE_SUPPORTED
-// Used in non-transpose variant
-// Compute per-block E4M3 encoding/decoding scaling factor
-__device__ __forceinline__ fp8e4m3 compute_decoding_scaling_factor(const float block_amax,
-                                                                   const float S_enc) {
-  using namespace detail;
-  constexpr float fp4_max_inv = 1.0f / TypeExtrema<fp4e2m1>::max;  // 1 / 6.0f
-  // const float S_dec_b = block_amax * rcp_6f;
-  // const fp8e4m3 S_dec_b_fp8 = static_cast<fp8e4m3>(S_dec_b * S_enc);
-  // return S_dec_b_fp8;
-  return static_cast<fp8e4m3>(block_amax * (S_enc * fp4_max_inv));
-}
-#endif  // FP4_TYPE_SUPPORTED
-}  // namespace quantization_SF
+// Central runtime-to-compile-time dispatch for NVFP4 scale storage types.
+// SWITCH_FP8UE5M3_TYPE_HANDLE adds UE5M3 when the CUDA toolkit supports it.
+#define TRANSFORMER_ENGINE_NVFP4_SCALE_TYPE_SWITCH(SCALE_DTYPE, SCALE_TYPE, ...)          \
+  switch (SCALE_DTYPE) {                                                                  \
+    case DType::kFloat8E4M3: {                                                            \
+      using SCALE_TYPE = fp8e4m3;                                                         \
+      { __VA_ARGS__ }                                                                     \
+    } break;                                                                              \
+      SWITCH_FP8UE5M3_TYPE_HANDLE(SCALE_TYPE, __VA_ARGS__)                                \
+    default: {                                                                            \
+      NVTE_ERROR("Unsupported NVFP4 scale dtype ", to_string(SCALE_DTYPE),                \
+                 ". Expected Float8E4M3, or Float8UE5M3 when compiled with CUDA 13.4+."); \
+    }                                                                                     \
+  }
 
 namespace core {
 
 #if FP4_TYPE_SUPPORTED
 using namespace ptx;
 
+// Scale-format-specific behavior belongs here rather than in individual kernels.
+template <typename ScaleType>
+struct NVFP4ScaleTraits {
+  static constexpr bool is_supported = false;
+  static constexpr bool supports_fp16_error_path = false;
+  static constexpr float expected_max = 0.0f;
+  static constexpr float headroom_max = 0.0f;
+};
+
+template <>
+struct NVFP4ScaleTraits<fp8e4m3> {
+  // E4M3 scales fit in FP16 and can use the packed E4M3-to-FP16 PTX fast
+  // path. UE5M3 scales can exceed the FP16 range, so they retain the generic
+  // FP32 error path.
+  static constexpr bool is_supported = true;
+  static constexpr bool supports_fp16_error_path = true;
+  static constexpr float expected_max = 448.0f;
+  static constexpr float headroom_max = 256.0f;
+};
+
+#if CUDA_VERSION >= 13040
+template <>
+struct NVFP4ScaleTraits<fp8ue5m3> {
+  static constexpr bool is_supported = true;
+  static constexpr bool supports_fp16_error_path = false;
+  static constexpr float expected_max = 114688.0f;
+  static constexpr float headroom_max = 65536.0f;
+};
+#endif
+
+// Return the effective maximum used to derive the global NVFP4 encode scale.
+// SCALE_TYPE_MAX is the resolved maximum for ScaleType (e.g., 448 for E4M3
+// or 114688 for UE5M3). The headroom maximum keeps the 1.5x map-to-4 scale
+// used by 4over6 within the scale format's representable range.
+template <typename ScaleType,
+          int SCALE_TYPE_MAX = static_cast<int>(NVFP4ScaleTraits<ScaleType>::expected_max)>
+__host__ __device__ constexpr float scale_max() {
+  using ScaleTraits = NVFP4ScaleTraits<ScaleType>;
+  static_assert(ScaleTraits::is_supported, "Unsupported NVFP4 scale type.");
+  if constexpr (ScaleTraits::is_supported) {
+    static_assert(detail::TypeExtrema<ScaleType>::max == ScaleTraits::expected_max,
+                  "Unexpected NVFP4 scale type maximum.");
+    static_assert(SCALE_TYPE_MAX == static_cast<int>(ScaleTraits::expected_max) ||
+                      SCALE_TYPE_MAX == static_cast<int>(ScaleTraits::headroom_max),
+                  "Unsupported NVFP4 scale type maximum.");
+    static_assert(ScaleTraits::headroom_max * 1.5f <= ScaleTraits::expected_max,
+                  "NVFP4 4over6 scale headroom exceeds scale type maximum.");
+    return static_cast<float>(SCALE_TYPE_MAX);
+  } else {
+    return 0.0f;
+  }
+}
+
+// Return the full-range maximum for a runtime scale dtype.
+inline float scale_max(const DType scale_dtype) {
+  float result = 0.0f;
+  TRANSFORMER_ENGINE_NVFP4_SCALE_TYPE_SWITCH(
+      scale_dtype, ScaleType, result = scale_max<ScaleType>();)
+  return result;
+}
+
+// Return and validate a user-provided maximum for a runtime scale dtype.
+inline float scale_max(const DType scale_dtype, const int scale_type_max) {
+  float result = 0.0f;
+  TRANSFORMER_ENGINE_NVFP4_SCALE_TYPE_SWITCH(
+      scale_dtype, ScaleType, {
+        using ScaleTraits = NVFP4ScaleTraits<ScaleType>;
+        NVTE_CHECK(scale_type_max == static_cast<int>(ScaleTraits::expected_max) ||
+                       scale_type_max == static_cast<int>(ScaleTraits::headroom_max),
+                   "Unsupported maximum for NVFP4 scale dtype.");
+        result = static_cast<float>(scale_type_max);
+      })
+  return result;
+}
+
+template <typename ScaleType>
+__device__ __forceinline__ ScaleType
+compute_decoding_scaling_factor(const float block_amax, const float global_encode_scale) {
+  // Compute the per-block decode scale in the selected scale storage type:
+  //
+  //   block_decode_scale = block_amax / fp4_max
+  //   stored_decode_scale = block_decode_scale * global_encode_scale
+  //
+  // An equivalent, more literal implementation is:
+  //
+  //   constexpr float rcp_6f = 1.0f / 6.0f;
+  //   const float block_decode_scale = block_amax * rcp_6f;
+  //   return static_cast<ScaleType>(block_decode_scale * global_encode_scale);
+  //
+  // Keep the multiplication order below to match the emulation code exactly,
+  // while avoiding a direct division by the FP4 maximum.
+  using namespace detail;
+  constexpr float fp4_max = TypeExtrema<fp4e2m1>::max;  // 6.0f
+  constexpr float fp4_max_inv = 1.0f / fp4_max;
+  const float decode_scale = block_amax * (global_encode_scale * fp4_max_inv);
+  return static_cast<ScaleType>(fminf(decode_scale, TypeExtrema<float>::max));
+}
+
 // Compute the global encode scale factor for a given global amax.
-// NVFP4 uses the full E4M3 range by default. Some 4over6 tensors dispatch
-// E4M3_MAX=256 to leave room for map-to-4 scale expansion.
-template <int E4M3_MAX = 448>
+// NVFP4 uses the full scale-type range by default. The explicit SCALE_MAX
+// template argument lets recipes such as 4over6 reserve encoding headroom.
+template <typename ScaleType, int SCALE_MAX = static_cast<int>(detail::TypeExtrema<ScaleType>::max)>
 __device__ __forceinline__ float compute_global_encode_scaling_factor_FP4(const float global_amax) {
   using namespace detail;
-  static_assert(E4M3_MAX == 448 || E4M3_MAX == 256, "Unsupported NVFP4 E4M3 max.");
-  constexpr float fp8_max = static_cast<float>(E4M3_MAX);
+  static_assert(SCALE_MAX > 0, "NVFP4 scale maximum must be positive.");
+  constexpr float fp8_max = static_cast<float>(SCALE_MAX);
   constexpr float fp4_max = TypeExtrema<fp4e2m1>::max;  // 6.0f;
   float global_encode_scale = fp8_max * fp4_max / global_amax;
   // If scale is infinity, return max value of float32

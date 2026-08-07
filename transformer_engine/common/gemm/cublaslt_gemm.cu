@@ -87,6 +87,8 @@ struct GemmParam {
   transformer_engine::DType Atype = transformer_engine::DType::kNumTypes;
   transformer_engine::DType Btype = transformer_engine::DType::kNumTypes;
   void *A_scale_inv = nullptr;
+  transformer_engine::DType A_scale_inv_type = transformer_engine::DType::kNumTypes;
+  transformer_engine::DType B_scale_inv_type = transformer_engine::DType::kNumTypes;
   void *B_scale_inv = nullptr;
   int lda = 0;  // A column strides
   int ldb = 0;  // B column strides
@@ -132,6 +134,7 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
     ret.transA = transA;
     ret.Atype = A.data.dtype;
     ret.A_scale_inv = A.scale_inv.dptr;
+    ret.A_scale_inv_type = A.scale_inv.dtype;
     ret.lda = is_A_transposed ? k : m;
     if (!is_nvte_non_tn_fp8_gemm_supported && !is_A_transposed) {
       // Hopper only supports TN GEMMs for FP8. "Column-wise data" is transpose of data.
@@ -140,6 +143,7 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
         ret.transA = CUBLAS_OP_T;
         ret.Atype = A.columnwise_data.dtype;
         ret.A_scale_inv = A.columnwise_scale_inv.dptr;
+        ret.A_scale_inv_type = A.columnwise_scale_inv.dtype;
         ret.lda = k;
       } else {
         NVTE_CHECK(!is_fp8_dtype(ret.Atype), "Input A is missing column-wise usage");
@@ -153,6 +157,7 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
       ret.transA = is_A_transposed ? CUBLAS_OP_N : CUBLAS_OP_T;
       ret.Atype = A.columnwise_data.dtype;
       ret.A_scale_inv = A.columnwise_scale_inv.dptr;
+      ret.A_scale_inv_type = A.columnwise_scale_inv.dtype;
       ret.lda = is_A_transposed ? m : k;
     }
 
@@ -175,6 +180,7 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
     ret.transA = CUBLAS_OP_T;  // NVFP4 gemm is only supported in TN layout.
     ret.Atype = is_A_transposed ? A.data.dtype : A.columnwise_data.dtype;
     ret.A_scale_inv = is_A_transposed ? A.scale_inv.dptr : A.columnwise_scale_inv.dptr;
+    ret.A_scale_inv_type = is_A_transposed ? A.scale_inv.dtype : A.columnwise_scale_inv.dtype;
     ret.lda = k;
   } else if (mxfp8) {
     // MXFP8 GEMM. Either for pure MXFP8 recipe or backward of Hybrid NVFP4 recipe.
@@ -190,6 +196,7 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
     ret.transA = transA;
     ret.Atype = is_A_transposed ? A.data.dtype : A.columnwise_data.dtype;
     ret.A_scale_inv = is_A_transposed ? A.scale_inv.dptr : A.columnwise_scale_inv.dptr;
+    ret.A_scale_inv_type = is_A_transposed ? A.scale_inv.dtype : A.columnwise_scale_inv.dtype;
     ret.lda = is_A_transposed ? k : m;
   } else if (A.scaling_mode == NVTE_BLOCK_SCALING_1D || A.scaling_mode == NVTE_BLOCK_SCALING_2D) {
     // FP8 block scaling
@@ -203,6 +210,7 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
     ret.transA = CUBLAS_OP_T;
     ret.Atype = is_A_transposed ? A.data.dtype : A.columnwise_data.dtype;
     ret.A_scale_inv = is_A_transposed ? A.scale_inv.dptr : A.columnwise_scale_inv.dptr;
+    ret.A_scale_inv_type = is_A_transposed ? A.scale_inv.dtype : A.columnwise_scale_inv.dtype;
     ret.lda = k;
 
     // Requirements from https://docs.nvidia.com/cuda/cublas/#tensor-core-usage
@@ -223,6 +231,7 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
     ret.transB = transB;
     ret.Btype = B.data.dtype;
     ret.B_scale_inv = B.scale_inv.dptr;
+    ret.B_scale_inv_type = B.scale_inv.dtype;
     ret.ldb = is_B_transposed ? n : k;
     if (!is_nvte_non_tn_fp8_gemm_supported && is_B_transposed) {
       // Hopper only supports TN GEMMs for FP8. "Column-wise data" is transpose of data.
@@ -231,6 +240,7 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
         ret.transB = CUBLAS_OP_N;
         ret.Btype = B.columnwise_data.dtype;
         ret.B_scale_inv = B.columnwise_scale_inv.dptr;
+        ret.B_scale_inv_type = B.columnwise_scale_inv.dtype;
         ret.ldb = k;
       } else {
         NVTE_CHECK(!is_fp8_dtype(ret.Btype), "Input B is missing column-wise usage");
@@ -244,6 +254,7 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
       ret.transB = is_B_transposed ? CUBLAS_OP_N : CUBLAS_OP_T;
       ret.Btype = B.columnwise_data.dtype;
       ret.B_scale_inv = B.columnwise_scale_inv.dptr;
+      ret.B_scale_inv_type = B.columnwise_scale_inv.dtype;
       ret.ldb = is_B_transposed ? k : n;
     }
 
@@ -264,6 +275,7 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
     ret.transB = CUBLAS_OP_N;  // NVFP4 gemm is only supported in TN layout.
     ret.Btype = is_B_transposed ? B.columnwise_data.dtype : B.data.dtype;
     ret.B_scale_inv = is_B_transposed ? B.columnwise_scale_inv.dptr : B.scale_inv.dptr;
+    ret.B_scale_inv_type = is_B_transposed ? B.columnwise_scale_inv.dtype : B.scale_inv.dtype;
     ret.ldb = k;
   } else if (mxfp8) {
     if (is_B_transposed) {
@@ -275,6 +287,7 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
     ret.transB = transB;
     ret.Btype = is_B_transposed ? B.columnwise_data.dtype : B.data.dtype;
     ret.B_scale_inv = is_B_transposed ? B.columnwise_scale_inv.dptr : B.scale_inv.dptr;
+    ret.B_scale_inv_type = is_B_transposed ? B.columnwise_scale_inv.dtype : B.scale_inv.dtype;
     ret.ldb = is_B_transposed ? n : k;
   } else if (B.scaling_mode == NVTE_BLOCK_SCALING_1D || B.scaling_mode == NVTE_BLOCK_SCALING_2D) {
     // FP8 block scaling
@@ -288,6 +301,7 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
     ret.transB = CUBLAS_OP_N;
     ret.Btype = is_B_transposed ? B.columnwise_data.dtype : B.data.dtype;
     ret.B_scale_inv = is_B_transposed ? B.columnwise_scale_inv.dptr : B.scale_inv.dptr;
+    ret.B_scale_inv_type = is_B_transposed ? B.columnwise_scale_inv.dtype : B.scale_inv.dtype;
     ret.ldb = k;
 
     // Requirements from
@@ -553,17 +567,25 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
       NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(
           operationDesc, CUBLASLT_MATMUL_DESC_POINTER_MODE, &pointer_mode, sizeof(pointer_mode)));
 
-      // Configure cuBLAS scales
-      fp8e4m3 *A_scale_inverse = reinterpret_cast<fp8e4m3 *>(param.A_scale_inv);
-      fp8e4m3 *B_scale_inverse = reinterpret_cast<fp8e4m3 *>(param.B_scale_inv);
+      // Configure cuBLAS scale pointers
+      void *A_scale_inverse = param.A_scale_inv;
+      void *B_scale_inverse = param.B_scale_inv;
       NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc,
                                                        CUBLASLT_MATMUL_DESC_A_SCALE_POINTER,
                                                        &A_scale_inverse, sizeof(A_scale_inverse)));
       NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc,
                                                        CUBLASLT_MATMUL_DESC_B_SCALE_POINTER,
                                                        &B_scale_inverse, sizeof(B_scale_inverse)));
-      scaling_mode_a = CUBLASLT_MATMUL_MATRIX_SCALE_VEC16_UE4M3;
-      scaling_mode_b = CUBLASLT_MATMUL_MATRIX_SCALE_VEC16_UE4M3;
+
+      // Deduce cuBLAS scale mode based on scale dtype
+      auto get_scale_mode = [] (DType dtype) -> cublasLtMatmulMatrixScale_t {
+        if (dtype == DType::kFloat8E4M3) {
+          return CUBLASLT_MATMUL_MATRIX_SCALE_VEC16_UE4M3;
+        }
+        NVTE_ERROR("Unsupported dtype for NVFP4 scales (", to_string(dtype), ").");
+      };
+      scaling_mode_a = get_scale_mode(param.A_scale_inv_type);
+      scaling_mode_b = get_scale_mode(param.B_scale_inv_type);
 #else
       NVTE_ERROR("FP4 requires cuBLAS 12.8+, but compile-time cuBLAS version is ", CUBLAS_VERSION);
 #endif  // CUBLAS_VERSION >= 120800
