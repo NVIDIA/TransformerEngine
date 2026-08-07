@@ -320,21 +320,29 @@ def check_nvfp4_row_scaled_grouped_gemm_matches_per_gemm(
     else:
         out = [torch.empty((m, n), dtype=out_dtype, device=device) for m in m_splits]
 
-    try:
-        import cudnn
-    except ImportError as exc:
-        pytest.skip(f"cudnn frontend unavailable: {exc}")
-    if not hasattr(cudnn, "grouped_gemm_quant_wrapper_sm100"):
-        pytest.skip("grouped_gemm_quant_wrapper_sm100 unavailable")
-
     calls = []
-    original_wrapper = cudnn.grouped_gemm_quant_wrapper_sm100
+    compute_capability = torch.cuda.get_device_capability()
+    use_cudnn = compute_capability[0] == 10 and compute_capability != (10, 7)
+    if use_cudnn:
+        try:
+            import cudnn
+        except ImportError as exc:
+            pytest.skip(f"cudnn frontend unavailable: {exc}")
+        if not hasattr(cudnn, "grouped_gemm_quant_wrapper_sm100"):
+            pytest.skip("grouped_gemm_quant_wrapper_sm100 unavailable")
 
-    def traced_wrapper(*args, **kwargs):
-        calls.append(kwargs)
-        return original_wrapper(*args, **kwargs)
+        original_wrapper = cudnn.grouped_gemm_quant_wrapper_sm100
 
-    monkeypatch.setattr(cudnn, "grouped_gemm_quant_wrapper_sm100", traced_wrapper)
+        def traced_wrapper(*args, **kwargs):
+            calls.append(kwargs)
+            return original_wrapper(*args, **kwargs)
+
+        monkeypatch.setattr(cudnn, "grouped_gemm_quant_wrapper_sm100", traced_wrapper)
+    else:
+        monkeypatch.setattr(
+            "transformer_engine.pytorch.cpp_extensions.gemm._cudnn_row_scaled_nvfp4_grouped_gemm",
+            lambda *args, **kwargs: pytest.fail("cuDNN row-scaled GEMM dispatched on fallback"),
+        )
     grouped_out, _, _ = general_grouped_gemm(
         w_nvfp4,
         x_nvfp4,
@@ -348,9 +356,7 @@ def check_nvfp4_row_scaled_grouped_gemm_matches_per_gemm(
         single_output=single_output,
     )
 
-    if torch.cuda.get_device_capability() == (10, 7):
-        assert not calls
-    else:
+    if use_cudnn:
         assert len(calls) == 1
         call = calls[0]
         padded_m_splits = [((m + 255) // 256) * 256 if m > 0 else 0 for m in m_splits]
@@ -647,7 +653,7 @@ def test_nvfp4_row_scaled_grouped_gemm_matches_per_gemm(
     monkeypatch,
 ):
     if torch.cuda.get_device_capability() < (10, 0):
-        pytest.skip("Requires SM100+ for cuDNN grouped GEMM quant kernel.")
+        pytest.skip("Requires SM100+ for NVFP4 grouped GEMM.")
     check_nvfp4_row_scaled_grouped_gemm_matches_per_gemm(
         x_dtype=x_dtype,
         w_dtype=w_dtype,

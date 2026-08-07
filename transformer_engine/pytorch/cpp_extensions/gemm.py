@@ -188,7 +188,16 @@ def _validate_native_gemm_output_quantizer(quantization_params):
         )
 
 
-def _cudnn_row_scaled_nvfp4_grouped_gemm(
+_CUDNN_ROW_SCALED_NVFP4_M_ALIGNMENT = 256
+
+
+def _use_cudnn_row_scaled_nvfp4_gemm(device: torch.device) -> bool:
+    """Whether cuDNN supports row-scaled NVFP4 GEMM on this architecture."""
+    compute_capability = torch.cuda.get_device_capability(device)
+    return compute_capability[0] == 10 and compute_capability != (10, 7)
+
+
+def _validate_cudnn_row_scaled_nvfp4_grouped_gemm(
     weights: List[NVFP4TensorStorage],
     inputs: List[NVFP4TensorStorage],
     outputs: List[torch.Tensor],
@@ -196,9 +205,8 @@ def _cudnn_row_scaled_nvfp4_grouped_gemm(
     m_splits: Optional[List[int]],
     bias: Optional[List[torch.Tensor]],
     single_output: bool,
-) -> Union[torch.Tensor, List[torch.Tensor]]:
-    """Run tensor-scaled weights and row-scaled inputs with the cuDNN MoE kernel."""
-    m_alignment = 256
+) -> Tuple[List[int], int, int, torch.device]:
+    """Validate operands and return normalized split sizes, N, K, and device."""
     num_gemms = len(weights)
     if num_gemms == 0 or len(inputs) != num_gemms:
         raise ValueError("Grouped GEMM requires matching non-empty weight and input lists.")
@@ -304,41 +312,43 @@ def _cudnn_row_scaled_nvfp4_grouped_gemm(
     ):
         raise ValueError("Grouped GEMM biases must have a uniform BF16/FP16 dtype and device.")
 
-    from cudnn import (  # pylint: disable=import-outside-toplevel,no-name-in-module
-        grouped_gemm_quant_wrapper_sm100,
-    )
+    return m_splits_list, n, k, device
 
+
+def _pack_cudnn_row_scaled_nvfp4_inputs(
+    inputs: List[NVFP4TensorStorage],
+    m_splits: List[int],
+    k: int,
+    device: torch.device,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, List[int], torch.Tensor]:
+    """Pack discrete row-scaled inputs into the padded cuDNN grouped-GEMM layout."""
     padded_m_splits = [
-        round_up_to_nearest_multiple(m, m_alignment) if m > 0 else 0 for m in m_splits_list
+        round_up_to_nearest_multiple(m, _CUDNN_ROW_SCALED_NVFP4_M_ALIGNMENT) if m > 0 else 0
+        for m in m_splits
     ]
     total_padded_m = sum(padded_m_splits)
+    scale_cols = 4 * ceil_div(k, 4 * NVFP4_BLOCK_SCALING_SIZE)
     a_data = torch.zeros(
         (total_padded_m, k // 2),
         dtype=inputs[0]._rowwise_data.dtype,
         device=device,
     )
     a_scales = torch.zeros(
-        (total_padded_m, expected_scale_cols),
+        (total_padded_m, scale_cols),
         dtype=inputs[0]._rowwise_scale_inv.dtype,
         device=device,
     )
-    row_scale_tensor = torch.zeros(total_padded_m, dtype=torch.float32, device=device)
-    padded_offset = 0
-    for tensor, amax, m, padded_m in zip(
-        inputs,
-        input_amaxes,
-        m_splits_list,
-        padded_m_splits,
-    ):
-        a_data[padded_offset : padded_offset + m].copy_(tensor._rowwise_data)
-        a_scales[padded_offset : padded_offset + m].copy_(tensor._rowwise_scale_inv[:m])
-        row_scale_tensor[padded_offset : padded_offset + m].copy_(
-            amax.view(-1) / (6.0 * tensor._nvfp4_e4m3_max)
+    row_scales = torch.zeros(total_padded_m, dtype=torch.float32, device=device)
+    offset = 0
+    for tensor, m, padded_m in zip(inputs, m_splits, padded_m_splits):
+        a_data[offset : offset + m].copy_(tensor._rowwise_data)
+        a_scales[offset : offset + m].copy_(tensor._rowwise_scale_inv[:m])
+        row_scales[offset : offset + m].copy_(
+            tensor._amax_rowwise.view(-1) / (6.0 * tensor._nvfp4_e4m3_max)
         )
-        padded_offset += padded_m
+        offset += padded_m
 
     a_tensor = a_data.view(torch.float4_e2m1fn_x2).unsqueeze(0).permute(1, 2, 0)
-
     sfa_tensor = (
         a_scales.view(dtype=torch.float8_e4m3fn)
         .view(
@@ -353,11 +363,24 @@ def _cudnn_row_scaled_nvfp4_grouped_gemm(
         .contiguous()
         .permute(3, 4, 1, 5, 2, 0)
     )
+    padded_offsets = torch.tensor(padded_m_splits, dtype=torch.int32, device=device).cumsum(
+        0, dtype=torch.int32
+    )
+    return a_tensor, sfa_tensor, row_scales, padded_m_splits, padded_offsets
 
-    weight_scales_swizzled = {bool(tensor._with_gemm_swizzled_scales) for tensor in weights}
-    if len(weight_scales_swizzled) != 1:
+
+def _pack_cudnn_nvfp4_weights(
+    weights: List[NVFP4TensorStorage],
+    device: torch.device,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+    """Pack tensor-scaled weights and return their global scales."""
+    num_gemms = len(weights)
+    scale_layouts = {bool(tensor._with_gemm_swizzled_scales) for tensor in weights}
+    if len(scale_layouts) != 1:
         raise ValueError("Grouped GEMM weights must use a uniform scale layout.")
-    if weight_scales_swizzled.pop():
+
+    scale_buffer = None
+    if scale_layouts.pop():
         packed_ptrs = tex.copy_data_ptrs_to_device(
             [tensor._rowwise_data for tensor in weights]
             + [tensor._rowwise_scale_inv for tensor in weights],
@@ -366,7 +389,7 @@ def _cudnn_row_scaled_nvfp4_grouped_gemm(
         b_ptrs = packed_ptrs[:num_gemms]
         sfb_ptrs = packed_ptrs[num_gemms:]
     else:
-        b_ptrs, sfb_ptrs, _sfb_buffer = (
+        b_ptrs, sfb_ptrs, scale_buffer = (
             tex.grouped_mlp_experimental.swizzle_scales_and_pack_ptrs_for_discrete_weights(
                 [tensor._rowwise_data for tensor in weights],
                 [tensor._rowwise_scale_inv for tensor in weights],
@@ -376,20 +399,46 @@ def _cudnn_row_scaled_nvfp4_grouped_gemm(
         )
 
     alpha_tensor = torch.cat(
-        [
-            amax.view(-1) / (6.0 * tensor._nvfp4_e4m3_max)
-            for tensor, amax in zip(weights, weight_amaxes)
-        ]
+        [tensor._amax_rowwise.view(-1) / (6.0 * tensor._nvfp4_e4m3_max) for tensor in weights]
+    )
+    return b_ptrs, sfb_ptrs, alpha_tensor, scale_buffer
+
+
+def _cudnn_row_scaled_nvfp4_grouped_gemm(
+    weights: List[NVFP4TensorStorage],
+    inputs: List[NVFP4TensorStorage],
+    outputs: List[torch.Tensor],
+    *,
+    m_splits: Optional[List[int]],
+    bias: Optional[List[torch.Tensor]],
+    single_output: bool,
+) -> Union[torch.Tensor, List[torch.Tensor]]:
+    """Run tensor-scaled weights and row-scaled inputs with the cuDNN MoE kernel."""
+    m_splits, n, k, device = _validate_cudnn_row_scaled_nvfp4_grouped_gemm(
+        weights,
+        inputs,
+        outputs,
+        m_splits=m_splits,
+        bias=bias,
+        single_output=single_output,
     )
 
+    from cudnn import (  # pylint: disable=import-outside-toplevel,no-name-in-module
+        grouped_gemm_quant_wrapper_sm100,
+    )
+
+    a_tensor, sfa_tensor, row_scale_tensor, padded_m_splits, padded_offsets = (
+        _pack_cudnn_row_scaled_nvfp4_inputs(inputs, m_splits, k, device)
+    )
+    b_ptrs, sfb_ptrs, alpha_tensor, _weight_scale_buffer = _pack_cudnn_nvfp4_weights(
+        weights, device
+    )
+
+    total_padded_m = sum(padded_m_splits)
     bias_tensor = None if bias is None else torch.stack(bias, dim=0).transpose(0, 1)
 
-    padded_offsets = torch.tensor(padded_m_splits, dtype=torch.int32, device=device).cumsum(
-        0, dtype=torch.int32
-    )
-
     cudnn_output = None
-    if single_output and padded_m_splits == m_splits_list:
+    if single_output and padded_m_splits == m_splits:
         cudnn_output = outputs[0].as_strided(
             (total_padded_m, n, 1),
             (n, 1, total_padded_m * n),
@@ -411,7 +460,7 @@ def _cudnn_row_scaled_nvfp4_grouped_gemm(
         d_tensor=cudnn_output,
         cd_major="n",
         sf_vec_size=NVFP4_BLOCK_SCALING_SIZE,
-        m_aligned=m_alignment,
+        m_aligned=_CUDNN_ROW_SCALED_NVFP4_M_ALIGNMENT,
         discrete_col_sfd=False,
         b_dtype=torch.float4_e2m1fn_x2,
         b_major="k",
@@ -424,16 +473,10 @@ def _cudnn_row_scaled_nvfp4_grouped_gemm(
     if cudnn_output is not None:
         return outputs[0]
 
-    padded_offset = 0
-    output_offset = 0
-    for i, (m, padded_m) in enumerate(zip(m_splits_list, padded_m_splits)):
-        output = outputs[0][output_offset : output_offset + m] if single_output else outputs[i]
-        output.copy_(d_tensor[padded_offset : padded_offset + m])
-        padded_offset += padded_m
-        output_offset += m
-    if single_output:
-        return outputs[0]
-    return outputs
+    output_views = torch.split(outputs[0], m_splits) if single_output else outputs
+    for output, padded_output in zip(output_views, torch.split(d_tensor, padded_m_splits)):
+        output.copy_(padded_output[: output.size(0)])
+    return outputs[0] if single_output else outputs
 
 
 def general_gemm(
@@ -567,7 +610,7 @@ def general_gemm(
         ), "Row-scaled NVFP4 GEMM currently requires NVFP4 B."
 
         cudnn_output_dtype = out.dtype if out is not None else out_dtype
-        if (
+        if (  # pylint: disable=too-many-boolean-expressions
             layout == "TN"
             and not _is_nvfp4_row_scaled_tensor(A)
             and _is_nvfp4_row_scaled_tensor(B)
@@ -580,7 +623,7 @@ def general_gemm(
             and not accumulate
             and not use_split_accumulator
             and not grad
-            and torch.cuda.get_device_capability(A.device) != (10, 7)
+            and _use_cudnn_row_scaled_nvfp4_gemm(A.device)
         ):
             if out is None:
                 out = torch.empty(
@@ -713,7 +756,7 @@ def general_grouped_gemm(
     if any(_is_nvfp4_row_scaled_tensor(tensor) for tensor in A):
         raise NotImplementedError("Row-scaled NVFP4 grouped GEMM does not support row-scaled A.")
     if any(_is_nvfp4_row_scaled_tensor(tensor) for tensor in B):
-        if torch.cuda.get_device_capability(A[0].device) != (10, 7):
+        if _use_cudnn_row_scaled_nvfp4_gemm(A[0].device):
             if len(B) != num_gemms or len(quantization_params) != num_gemms:
                 raise ValueError(
                     "Grouped GEMM operands and output quantizers must have matching lengths."
