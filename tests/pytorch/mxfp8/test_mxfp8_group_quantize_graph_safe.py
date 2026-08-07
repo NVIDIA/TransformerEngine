@@ -789,7 +789,7 @@ def test_prequantized_requantize_rejects_swizzled_without_columnwise():
     # Swizzle in place, leaving the tensor rowwise-only.
     tex.grouped_swizzle_for_gemm(wire, True, False)
 
-    with pytest.raises(RuntimeError, match="columnwise copy"):
+    with pytest.raises(RuntimeError, match="cannot be rebuilt"):
         tex.group_requantize_inplace(
             wire, make_op_quantizer(columnwise=True), num_groups, splits, te.DType.kBFloat16
         )
