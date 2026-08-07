@@ -814,7 +814,6 @@ class TestExtraTensorChannels:
         y_test.backward(dy)
         torch.testing.assert_close(x_test.grad, x_ref.grad)
 
-
     def test_grouped_linear_scale_bias_channels(self) -> None:
         """Both GroupedLinear extra inputs can be supplied by channels."""
 
@@ -870,8 +869,7 @@ class TestExtraTensorChannels:
             weight = getattr(linear, f"weight{group_idx}")
             bias = getattr(linear, f"bias{group_idx}")
             ys_ref.append(
-                torch.nn.functional.linear(x_group, weight)
-                + scale_group.unsqueeze(-1) * bias
+                torch.nn.functional.linear(x_group, weight) + scale_group.unsqueeze(-1) * bias
             )
         y_ref = torch.cat(ys_ref)
         y_test = model(x, split_sizes, scales)

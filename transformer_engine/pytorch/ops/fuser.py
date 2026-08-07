@@ -236,9 +236,7 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
             func_ctx.external_extra_input_slots = fuser._external_extra_input_slots
             func_ctx.external_extra_output_slots = fuser._external_extra_output_slots
             func_ctx.basic_op_extra_output_channels = fuser._basic_op_extra_output_channels
-            func_ctx.basic_op_extra_output_is_internal = (
-                fuser._basic_op_extra_output_is_internal
-            )
+            func_ctx.basic_op_extra_output_is_internal = fuser._basic_op_extra_output_is_internal
             func_ctx.basic_op_extra_input_sources = fuser._basic_op_extra_input_sources
             func_ctx.is_first_module = is_first_module
 
@@ -323,9 +321,7 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
                 basic_op_grad_extra_outputs=op_grad_extra_outputs,
             )
             fused_op_grad_params = tuple(tuple(grads) for grads in fused_op_grad_params)
-            fused_op_grad_extra_inputs = tuple(
-                tuple(grads) for grads in fused_op_grad_extra_inputs
-            )
+            fused_op_grad_extra_inputs = tuple(tuple(grads) for grads in fused_op_grad_extra_inputs)
             if len(fused_op_grad_params) != len(basic_op_idxs):
                 raise RuntimeError(
                     f"Expected {type(op).__name__} to generate parameter grads for "
