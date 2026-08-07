@@ -4,6 +4,7 @@
 
 from collections import OrderedDict
 from typing import List
+import copy
 import os
 import sys
 import pathlib
@@ -472,8 +473,11 @@ def test_kv_cache(dtype, model, qkv_format, is_paged, backend, module, is_cuda_g
     qkv_layout = qkv_format + "_" + "_".join([inference_params_qkv_format] * 2)
     if is_paged:
         qkv_layout = "paged_kv_" + qkv_layout
-    available_backends, _, fused_attn_backends = get_available_attention_backends(
-        config,
+    # probe inference configs only; reference configs are widely supported
+    probe_config = copy.deepcopy(config)
+    probe_config.attn_mask_type = "padding_causal"
+    available_backends, _, _ = get_available_attention_backends(
+        probe_config,
         qkv_dtype=dtype,
         qkv_layout=qkv_layout,
         pad_between_seqs=False,

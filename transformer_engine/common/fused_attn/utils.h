@@ -4,12 +4,8 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#ifndef TRANSFORMER_ENGINE_FUSED_ATTN_UTILS_H_
-#define TRANSFORMER_ENGINE_FUSED_ATTN_UTILS_H_
-
-#include <cudnn.h>
-#include <cudnn_frontend.h>
-#include <cudnn_frontend_utils.h>
+#ifndef TRANSFORMER_ENGINE_COMMON_FUSED_ATTN_UTILS_H_
+#define TRANSFORMER_ENGINE_COMMON_FUSED_ATTN_UTILS_H_
 
 #include <cstdint>
 #include <mutex>
@@ -223,92 +219,6 @@ inline void generateMatrixStridesWithLayout(int64_t b, int64_t h, int64_t hg, in
 void generateMatrixStrides(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int64_t d,
                            int64_t *strideA, NVTE_QKV_Layout layout, NVTE_QKV_Matrix matrix);
 
-bool allowAllConfig(cudnnBackendDescriptor_t engine_config);
-
-cudnn_frontend::Tensor tensor_create(cudnnDataType_t type, int64_t id, int64_t const *dim,
-                                     int64_t const *stride, bool is_virtual, bool is_value);
-
-cudnn_frontend::Tensor tensor_create_with_offset(
-    cudnnDataType_t type, int64_t id, int64_t const *dim, int64_t const *stride, bool is_virtual,
-    bool is_value, std::shared_ptr<cudnn_frontend::Tensor> raggedOffset);
-
-cudnn_frontend::PointWiseDesc pw_desc_create(cudnnDataType_t type, cudnnPointwiseMode_t mode);
-
-cudnn_frontend::Operation unary_pw_op_create(cudnn_frontend::Tensor const &xDesc,
-                                             cudnn_frontend::Tensor const &yDesc,
-                                             cudnn_frontend::PointWiseDesc const &pwDesc);
-
-cudnn_frontend::Operation binary_pw_op_create(cudnn_frontend::Tensor const &xDesc,
-                                              cudnn_frontend::Tensor const &bDesc,
-                                              cudnn_frontend::Tensor const &yDesc,
-                                              cudnn_frontend::PointWiseDesc const &pwDesc);
-
-cudnn_frontend::Operation ternary_pw_op_create(cudnn_frontend::Tensor const &xDesc,
-                                               cudnn_frontend::Tensor const &bDesc,
-                                               cudnn_frontend::Tensor const &tDesc,
-                                               cudnn_frontend::Tensor const &yDesc,
-                                               cudnn_frontend::PointWiseDesc const &pwDesc);
-
-struct FADescriptor_v1 {
-  std::int64_t b;
-  std::int64_t h;
-  std::int64_t hg;
-  std::int64_t s_q;
-  std::int64_t s_kv;
-  std::int64_t d_qk;
-  std::int64_t d_v;
-  std::int64_t num_pages_k;
-  std::int64_t num_pages_v;
-  std::int64_t page_size_k;
-  std::int64_t page_size_v;
-  std::int64_t max_pages_per_seq_k;
-  std::int64_t max_pages_per_seq_v;
-  std::int64_t bias_b;
-  std::int64_t bias_h;
-  std::int64_t bias_sq;
-  std::int64_t bias_skv;
-  float attnScale;
-  bool isTraining;
-  float dropoutProbability;
-  NVTE_QKV_Layout qkv_layout;
-  NVTE_QKV_Format o_format;
-  NVTE_QKV_Format do_format;
-  NVTE_QKV_Layout dqkv_layout;
-  NVTE_QKV_Format qkv_scale_inv_format;
-  NVTE_QKV_Format do_scale_inv_format;
-  NVTE_Bias_Type bias_type;
-  NVTE_Mask_Type mask_type;
-  NVTE_Softmax_Type softmax_type;
-  std::int64_t window_size_left;
-  std::int64_t window_size_right;
-  bool bottom_right_diagonal;
-  bool deterministic;
-  cudnn_frontend::DataType_t qkv_tensor_type;
-  cudnn_frontend::DataType_t o_tensor_type;
-  cudnn_frontend::DataType_t do_tensor_type;
-  cudnn_frontend::DataType_t dqkv_tensor_type;
-  bool return_max_logit;
-
-  bool operator<(const FADescriptor_v1 &rhs) const {
-    return std::tie(b, h, hg, s_q, s_kv, d_qk, d_v, num_pages_k, num_pages_v, page_size_k,
-                    page_size_v, max_pages_per_seq_k, max_pages_per_seq_v, bias_b, bias_h, bias_sq,
-                    bias_skv, attnScale, isTraining, dropoutProbability, qkv_layout, o_format,
-                    do_format, dqkv_layout, qkv_scale_inv_format, do_scale_inv_format, mask_type,
-                    softmax_type, window_size_left, window_size_right, bottom_right_diagonal,
-                    deterministic, bias_type, qkv_tensor_type, o_tensor_type, do_tensor_type,
-                    dqkv_tensor_type, return_max_logit) <
-           std::tie(rhs.b, rhs.h, rhs.hg, rhs.s_q, rhs.s_kv, rhs.d_qk, rhs.d_v, rhs.num_pages_k,
-                    rhs.num_pages_v, rhs.page_size_k, rhs.page_size_v, rhs.max_pages_per_seq_k,
-                    rhs.max_pages_per_seq_v, rhs.bias_b, rhs.bias_h, rhs.bias_sq, rhs.bias_skv,
-                    rhs.attnScale, rhs.isTraining, rhs.dropoutProbability, rhs.qkv_layout,
-                    rhs.o_format, rhs.do_format, rhs.dqkv_layout, rhs.qkv_scale_inv_format,
-                    rhs.do_scale_inv_format, rhs.mask_type, rhs.softmax_type, rhs.window_size_left,
-                    rhs.window_size_right, rhs.bottom_right_diagonal, rhs.deterministic,
-                    rhs.bias_type, rhs.qkv_tensor_type, rhs.o_tensor_type, rhs.do_tensor_type,
-                    rhs.dqkv_tensor_type, rhs.return_max_logit);
-  }
-};
-
 // Per-tensor scale factors relating cu_seqlens_padded (token units) to tensor-element
 // ragged offsets, as a function of the QKV layout group. Single source of truth shared
 // by the cu_seqlens_padded_to_offsets conversion kernel and the direct-seqlens path
@@ -394,4 +304,4 @@ uint32_t GetRuntimeNumSegments(void *cu_seqlen, void *workspace, size_t len, cud
 }  // namespace fused_attn
 }  // namespace transformer_engine
 
-#endif
+#endif  // TRANSFORMER_ENGINE_COMMON_FUSED_ATTN_UTILS_H_

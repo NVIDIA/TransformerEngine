@@ -45,6 +45,7 @@ from utils import recipe_id
 from transformer_engine.pytorch.attention.dot_product_attention.backends import (
     UnfusedDotProductAttention,
 )
+from transformer_engine.pytorch.cpp_extensions.fused_attn import FusedAttnBackend
 
 fp8_available, reason_for_no_fp8 = is_fp8_available(return_reason=True)
 mxfp8_available, reason_for_no_mxfp8 = is_mxfp8_available(return_reason=True)
@@ -652,7 +653,7 @@ def test_get_attention_backend_traceable(monkeypatch):
     monkeypatch.setattr(
         dpa_utils.tex,
         "get_fused_attn_backend",
-        lambda *args: dpa_utils.FusedAttnBackend["No_Backend"],
+        lambda *args: (tex.NVTE_Fused_Attn_Backend.NVTE_No_Backend, "disabled by test"),
     )
 
     def fn_no_backend(x, params):

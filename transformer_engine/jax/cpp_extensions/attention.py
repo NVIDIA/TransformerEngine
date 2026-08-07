@@ -2,6 +2,7 @@
 #
 # See LICENSE for license information.
 """JAX/TE custom ops for attention"""
+import logging
 import operator
 import os
 import warnings
@@ -16,7 +17,12 @@ from jax.sharding import PartitionSpec, NamedSharding
 from jax.experimental.custom_partitioning import SdyShardingRule
 
 import transformer_engine_jax
-from transformer_engine_jax import NVTE_Fused_Attn_Backend
+from transformer_engine_jax import (
+    JAXX_Scaling_Mode,
+    NVTE_Fused_Attn_Backend,
+    NVTE_QKV_Format,
+    NVTE_QKV_Layout,
+)
 from transformer_engine.jax.attention import (
     AttnBiasType,
     AttnMaskType,
@@ -55,6 +61,37 @@ __all__ = [
     "fused_attn_fwd",
     "fused_attn_bwd",
 ]
+
+
+# NVTE_DEBUG = 0/1 # disables/enables debug mode, default = 0
+_NVTE_DEBUG = int(os.getenv("NVTE_DEBUG", "0"))
+# NVTE_DEBUG_LEVEL = 0/1/2 # enables increasingly verbose debug messages, default = 0
+_NVTE_DEBUG_LEVEL = int(os.getenv("NVTE_DEBUG_LEVEL", "0"))
+
+
+class AttentionLogging:
+    """Logging for the JAX attention module"""
+
+    _log_level = _NVTE_DEBUG * _NVTE_DEBUG_LEVEL
+    _formatter = logging.Formatter("[%(levelname)-8s | %(name)-19s]: %(message)s")
+    _stream_handler = logging.StreamHandler()
+    logger = logging.getLogger(__name__)
+    _is_logging_setup = False
+
+    @staticmethod
+    def setup_logging():
+        """Set up log levels, logger and handlers (idempotent)."""
+        if AttentionLogging._is_logging_setup:
+            return
+        _log_levels = {0: logging.WARNING, 1: logging.INFO, 2: logging.DEBUG}
+        AttentionLogging._log_level = _log_levels[
+            AttentionLogging._log_level if AttentionLogging._log_level in [0, 1, 2] else 2
+        ]
+        AttentionLogging._stream_handler.setFormatter(AttentionLogging._formatter)
+        AttentionLogging.logger.setLevel(AttentionLogging._log_level)
+        if not AttentionLogging.logger.hasHandlers():
+            AttentionLogging.logger.addHandler(AttentionLogging._stream_handler)
+        AttentionLogging._is_logging_setup = True
 
 
 @partial(
@@ -108,6 +145,7 @@ class FusedAttnHelper:
     """
 
     is_training: bool
+    batch_size: int
     q_dtype: jnp.dtype
     kv_dtype: jnp.dtype
     qkv_layout: QKVLayout
@@ -122,21 +160,54 @@ class FusedAttnHelper:
     head_dim_qk: int
     head_dim_v: int
     window_size: Tuple[int, int]
+    bottom_right_diagonal: bool
+    attn_scale: float = 1.0
+    bias_batch: Optional[int] = None
+    bias_heads: Optional[int] = None
+    bias_seqlen_q: Optional[int] = None
+    bias_seqlen_kv: Optional[int] = None
 
     def is_fused_attn_kernel_available(self):
         """Check if there is available fused attention kernel"""
-        return self.get_fused_attn_backend() != NVTE_Fused_Attn_Backend.NVTE_No_Backend
+        backend, _ = self.get_fused_attn_backend()
+        return backend != NVTE_Fused_Attn_Backend.NVTE_No_Backend
 
     def get_fused_attn_backend(self):
-        """Get the fused attention kernel backend"""
-        return transformer_engine_jax.get_fused_attn_backend(
+        """Get the fused attention kernel backend.
+
+        Returns a ``(backend, message)`` tuple. ``message`` is empty on success, otherwise a
+        diagnostic string explaining why the configuration was rejected.
+
+        When ``NVTE_DEBUG=1``, ``NVTE_DEBUG_LEVEL=1`` logs the outcome (the selected backend, or
+        that no fused backend is available), and ``NVTE_DEBUG_LEVEL=2`` additionally logs the
+        resolved config and the reason fused attention was rejected.
+        """
+        q_type = jax_dtype_to_te_dtype(self.q_dtype)
+        bias_batch = bias_heads = bias_seqlen_q = bias_seqlen_kv = 0
+        if self.attn_bias_type == AttnBiasType.POST_SCALE_BIAS:
+            bias_batch = self.bias_batch or 0
+            bias_heads = self.bias_heads or 0
+            bias_seqlen_q = self.bias_seqlen_q or 0
+            bias_seqlen_kv = self.bias_seqlen_kv or 0
+        backend, message = transformer_engine_jax.get_fused_attn_backend(
             self.is_training,
-            jax_dtype_to_te_dtype(self.q_dtype),
+            self.batch_size,
+            q_type,
             jax_dtype_to_te_dtype(self.kv_dtype),
+            q_type,
+            q_type,
+            q_type,
+            JAXX_Scaling_Mode.NO_SCALING,
             self.qkv_layout.value,
+            NVTE_QKV_Format.NVTE_QKV_Format_NOT_SET,
+            NVTE_QKV_Format.NVTE_QKV_Format_NOT_SET,
+            NVTE_QKV_Layout.NVTE_QKV_Layout_NOT_SET,
+            NVTE_QKV_Format.NVTE_QKV_Format_NOT_SET,
+            NVTE_QKV_Format.NVTE_QKV_Format_NOT_SET,
             self.attn_bias_type.value,
             self.attn_mask_type.value,
             self.softmax_type.value,
+            self.attn_scale,
             self.dropout_probability,
             self.q_num_heads,
             self.kv_num_heads,
@@ -146,8 +217,28 @@ class FusedAttnHelper:
             self.head_dim_v,
             self.window_size[0],
             self.window_size[1],
+            self.bottom_right_diagonal,
             not self.is_non_deterministic_allowed(),
+            bias_batch,
+            bias_heads,
+            bias_seqlen_q,
+            bias_seqlen_kv,
         )
+
+        AttentionLogging.setup_logging()
+        logger = AttentionLogging.logger
+        logger.debug("Running fused attention backend selection with config=%s", self)
+        if backend == NVTE_Fused_Attn_Backend.NVTE_No_Backend:
+            logger.info("No fused attention backend available; falling back to unfused attention.")
+            logger.debug(
+                "Reason fused attention was rejected: %s",
+                message or "(no diagnostic message available)",
+            )
+        else:
+            logger.info("Selected fused attention backend: %s", backend)
+            if message:
+                logger.debug("Fused attention backend diagnostic message: %s", message)
+        return backend, message
 
     @staticmethod
     def is_non_deterministic_allowed():
@@ -335,8 +426,14 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         out_aval = q_aval.update(shape=output_shape, dtype=q_dtype)
 
         # backend determines the softmax buffer shape/dtype
-        backend = FusedAttnHelper(
+        input_batch = reduce(operator.mul, batch_shape)
+        bias_batch = bias_heads = bias_seqlen_q = bias_seqlen_kv = None
+        if config.attn_bias_type == AttnBiasType.POST_SCALE_BIAS:
+            *bias_batch_shape, bias_heads, bias_seqlen_q, bias_seqlen_kv = bias_aval.shape
+            bias_batch = reduce(operator.mul, bias_batch_shape)
+        backend, message = FusedAttnHelper(
             config.is_training,
+            input_batch,
             q_dtype,
             k_dtype,
             config.qkv_layout,
@@ -351,6 +448,12 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             q_head_dim,
             v_head_dim,
             config.window_size,
+            config.bottom_right_diagonal,
+            attn_scale=float(config.scaling_factor),
+            bias_batch=bias_batch,
+            bias_heads=bias_heads,
+            bias_seqlen_q=bias_seqlen_q,
+            bias_seqlen_kv=bias_seqlen_kv,
         ).get_fused_attn_backend()
 
         if backend == NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen:
@@ -369,7 +472,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
                 )
             softmax_dtype = dtypes.canonicalize_dtype(jnp.float32)
         else:
-            raise ValueError(f"Unsupported {backend=}")
+            raise ValueError(f"Unsupported backend: {message}")
         softmax_aux_aval = q_aval.update(shape=softmax_shape, dtype=softmax_dtype)
 
         # JAX does not enable 64-bit int by default so we get XLA to allocate x8 memory with

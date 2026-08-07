@@ -1,6 +1,7 @@
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
+import copy
 import logging
 import os
 import sys
@@ -608,6 +609,9 @@ def test_dpa_softmax(dtype, model_configs, model):
 @pytest.mark.parametrize("model", model_configs_softmax.keys())
 def test_dpa_softmax_thd(dtype, model_configs, model):
     """Test DotProductAttention module with different softmax types"""
+    config = model_configs[model]
+    if "padding" not in config.attn_mask_type:
+        pytest.skip(f"Duplicate test to others with THD and padding mask.")
     test_dot_product_attention(dtype, model_configs, model, True, "thd_thd_thd", False, False)
 
 
@@ -878,6 +882,9 @@ model_configs_swa = {
 @pytest.mark.parametrize("qkv_layout", ["thd_thd_thd", "sbhd_sbhd_sbhd"])
 def test_dpa_sliding_window(dtype, model_configs, model, qkv_layout):
     """Test DotProductAttention module with sliding window attention"""
+    config = model_configs[model]
+    if qkv_layout == "thd_thd_thd" and "padding" not in config.attn_mask_type:
+        pytest.skip(f"Duplicate test to others with THD and padding mask.")
     test_dot_product_attention(dtype, model_configs, model, False, qkv_layout, True, False)
 
 
@@ -1920,12 +1927,24 @@ def test_dpa_fp8_extra_state(model, dtype):
     config = model_configs_fp8_extra_state[model]
     # Test backend availability
     is_training = True
+    fp8_recipe = recipe.DelayedScaling(
+        margin=0,
+        fp8_format=recipe.Format.HYBRID,
+        amax_history_len=1,
+        amax_compute_algo="most_recent",
+        fp8_dpa=True,
+    )
+    fp8_meta = {}
+    fp8_meta["recipe"] = fp8_recipe
     available_backends, _, fused_attn_backends = get_available_attention_backends(
         config,
         qkv_dtype=torch.float8_e4m3fn,
+        nominal_dtype=dtype,
         qkv_layout="sb3hd",
         is_training=is_training,
         deterministic=_deterministic,
+        fp8=True,
+        fp8_meta=fp8_meta,
     )
     flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
     if not fused_attn_supported and not flash_attn_supported:
@@ -2121,6 +2140,9 @@ def test_mha_fp8_vs_f16(
     scaling_mode,
 ):
     """Test MultiHeadAttention module in FP8"""
+    if not is_training and fp8_dpa_bwd:
+        pytest.skip("fp8_dpa_bwd=True not applicable for inference")
+
     os.environ["NVTE_FP8_DPA_BWD"] = "1" if fp8_dpa_bwd else "0"
     config = model_configs_fp8_vs_f16[model]
 
@@ -2151,6 +2173,7 @@ def test_mha_fp8_vs_f16(
     available_backends, _, _ = get_available_attention_backends(
         config,
         qkv_dtype=torch.float8_e4m3fn,
+        nominal_dtype=dtype,
         qkv_layout=qkv_format.replace("hd", "h3d"),
         fp8=True,
         fp8_meta=fp8_meta,
@@ -2369,6 +2392,10 @@ def _run_mha_fp8_vs_f16(
 def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training, scaling_mode):
     """Test DotProductAttention module in FP8"""
     config = model_configs_fp8_vs_f16[model]
+    if config.num_heads != config.num_gqa_groups and "3" in qkv_layout:
+        pytest.skip("qkv_layout not applicable for MQA/GQA")
+    if not is_training and fp8_dpa_bwd:
+        pytest.skip("fp8_dpa_bwd=True not applicable for inference")
 
     # TODO(cyang): think of another way to verify dropout results
     # test cuDNN FP8 dropout
@@ -2408,6 +2435,7 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training, scal
     available_backends, _, _ = get_available_attention_backends(
         config,
         qkv_dtype=torch.float8_e4m3fn,
+        nominal_dtype=dtype,
         qkv_layout=qkv_layout,
         fp8=True,
         fp8_meta=fp8_meta,
@@ -2427,8 +2455,6 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training, scal
         pytest.skip("No FP8 attention backend available.")
     if not fused_attn_supported_f16:
         pytest.skip("No reference backend available.")
-    if config.num_heads != config.num_gqa_groups and "3" in qkv_layout:
-        pytest.skip("qkv_layout not applicable for MQA/GQA")
 
     if flash_attn_supported:
         os.environ["NVTE_FLASH_ATTN"] = "1"
@@ -2717,10 +2743,22 @@ def test_custom_mha_fp8_vs_f16(dtype, model):
 
     # Test backend availability
     is_training = True
+    fp8_meta = {}
+    fp8_recipe = recipe.DelayedScaling(
+        margin=0,
+        fp8_format=recipe.Format.HYBRID,
+        amax_history_len=1,
+        amax_compute_algo="most_recent",
+        fp8_dpa=True,
+    )
+    fp8_meta["recipe"] = fp8_recipe
     available_backends, _, fused_attn_backends = get_available_attention_backends(
         config,
         qkv_dtype=torch.float8_e4m3fn,
+        nominal_dtype=dtype,
         qkv_layout="bs3hd",
+        fp8=True,
+        fp8_meta=fp8_meta,
         is_training=is_training,
         deterministic=_deterministic,
     )
@@ -2798,6 +2836,7 @@ def _run_custom_mha_fp8(dtype, config, backend):
         fp8_format=recipe.Format.HYBRID,
         amax_history_len=1,
         amax_compute_algo="most_recent",
+        fp8_dpa=True,
     )
 
     mha = Custom_MHA_FP8(config).to(dtype=dtype, device="cuda")
