@@ -1342,9 +1342,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                 torch.cumsum(sequence_lengths, dim=0, dtype=torch.int32),
             )
         )
-        selected_cu_seqlens_padded = torch.cat(
-            (physical_starts, physical_cu_seqlens[-1:])
-        )
+        selected_cu_seqlens_padded = torch.cat((physical_starts, physical_cu_seqlens[-1:]))
         return selected_cu_seqlens, selected_cu_seqlens_padded
 
     def _forward_thd_mask_types(
@@ -1746,9 +1744,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         """
 
         if window_size_per_mask_type is not None and attn_mask_type_per_seq is None:
-            raise ValueError(
-                "window_size_per_mask_type requires attn_mask_type_per_seq."
-            )
+            raise ValueError("window_size_per_mask_type requires attn_mask_type_per_seq.")
         if attn_mask_type_per_seq is not None:
             if not isinstance(attn_mask_type_per_seq, dict) or not attn_mask_type_per_seq:
                 raise ValueError("attn_mask_type_per_seq must be a non-empty dictionary.")
@@ -1960,18 +1956,14 @@ class DotProductAttention(TransformerEngineBaseModule):
                         "attn_mask_type_per_seq does not yet support attention bias or ALiBi."
                     )
                 if inference_params is not None:
-                    raise ValueError(
-                        "attn_mask_type_per_seq does not support KV caching."
-                    )
+                    raise ValueError("attn_mask_type_per_seq does not support KV caching.")
                 if (
                     score_mod is not None
                     or score_mod_bprop is not None
                     or score_mod_tensors is not None
                     or score_mod_bprop_tensors is not None
                 ):
-                    raise ValueError(
-                        "attn_mask_type_per_seq does not support score modification."
-                    )
+                    raise ValueError("attn_mask_type_per_seq does not support score modification.")
                 if fp8_output or self.fp8 or self.return_max_logit:
                     raise ValueError(
                         "attn_mask_type_per_seq does not yet support FP8 or max-logit output."

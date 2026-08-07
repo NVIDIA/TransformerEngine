@@ -62,9 +62,7 @@ def _per_sequence_scalar_reference(
     for mask_type, sequence_ids in mask_type_per_seq.items():
         for sequence_id in sequence_ids.tolist():
             q_length = int((cu_seqlens_q[sequence_id + 1] - cu_seqlens_q[sequence_id]).item())
-            kv_length = int(
-                (cu_seqlens_kv[sequence_id + 1] - cu_seqlens_kv[sequence_id]).item()
-            )
+            kv_length = int((cu_seqlens_kv[sequence_id + 1] - cu_seqlens_kv[sequence_id]).item())
             q_start = int(q_physical[sequence_id].item())
             kv_start = int(kv_physical[sequence_id].item())
             q_end = q_start + q_length
@@ -231,9 +229,7 @@ def test_thd_mask_types_support_cross_attention_and_per_policy_windows():
     dtype = torch.float16
     cu_seqlens_q = _make_cu_seqlens((5, 3, 4))
     cu_seqlens_kv = _make_cu_seqlens((7, 2, 5))
-    mask_type_per_seq = _make_policy(
-        {"padding": (0, 2), "padding_causal_bottom_right": (1,)}
-    )
+    mask_type_per_seq = _make_policy({"padding": (0, 2), "padding_causal_bottom_right": (1,)})
     windows = {"padding": (-1, -1), "padding_causal_bottom_right": (2, 0)}
 
     query = (
