@@ -1,0 +1,71 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="600" height="520" viewBox="0 0 600 520">
+  <defs>
+    <style>
+      text { font-family: Arial, Helvetica, sans-serif; }
+      .box-text { font-size: 14px; font-weight: bold; fill: #ffffff; }
+      .label-text { font-size: 12px; fill: #555555; }
+      .sub-label { font-size: 11px; fill: #999999; font-style: italic; }
+    </style>
+    <!-- Arrow marker -->
+    <marker id="arrow-blue" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#3b82f6" />
+    </marker>
+    <marker id="arrow-green" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#22c55e" />
+    </marker>
+    <marker id="arrow-gray" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#6b7280" />
+    </marker>
+  </defs>
+
+  <!-- White background -->
+  <rect width="600" height="520" fill="#ffffff" rx="4" />
+
+  <!-- ===== LEFT PATH (PyTorch - Blue) ===== -->
+
+  <!-- PyTorch nn.Module box -->
+  <rect x="40" y="40" width="220" height="50" rx="8" fill="#3b82f6" />
+  <text x="150" y="70" text-anchor="middle" class="box-text">PyTorch nn.Module</text>
+
+  <!-- Arrow down with label "torch.Tensor" -->
+  <line x1="150" y1="90" x2="150" y2="170" stroke="#3b82f6" stroke-width="2" marker-end="url(#arrow-blue)" />
+  <text x="158" y="138" class="label-text">torch.Tensor</text>
+
+  <!-- pybind11 Extensions box -->
+  <rect x="40" y="175" width="220" height="50" rx="8" fill="#60a5fa" />
+  <text x="150" y="205" text-anchor="middle" class="box-text">pybind11 Extensions</text>
+
+  <!-- Arrow down -->
+  <line x1="150" y1="225" x2="150" y2="320" stroke="#3b82f6" stroke-width="2" marker-end="url(#arrow-blue)" />
+
+  <!-- ===== RIGHT PATH (JAX - Green) ===== -->
+
+  <!-- JAX Flax nn.Module box -->
+  <rect x="340" y="40" width="220" height="50" rx="8" fill="#22c55e" />
+  <text x="450" y="70" text-anchor="middle" class="box-text">JAX Flax nn.Module</text>
+
+  <!-- Arrow down with label "jax.Array" -->
+  <line x1="450" y1="90" x2="450" y2="170" stroke="#22c55e" stroke-width="2" marker-end="url(#arrow-green)" />
+  <text x="458" y="138" class="label-text">jax.Array</text>
+
+  <!-- XLA FFI Custom Calls box -->
+  <rect x="340" y="175" width="220" height="50" rx="8" fill="#4ade80" />
+  <text x="450" y="205" text-anchor="middle" class="box-text">XLA FFI Custom Calls</text>
+
+  <!-- Arrow down -->
+  <line x1="450" y1="225" x2="450" y2="320" stroke="#22c55e" stroke-width="2" marker-end="url(#arrow-green)" />
+
+  <!-- ===== SHARED BOTTOM (Gray) ===== -->
+
+  <!-- C++ Core Library box (spanning both paths) -->
+  <rect x="40" y="325" width="520" height="65" rx="8" fill="#6b7280" />
+  <text x="300" y="355" text-anchor="middle" class="box-text" font-size="15">C++ Core Library</text>
+  <text x="300" y="377" text-anchor="middle" class="sub-label" fill="#d1d5db">transformer_engine/common/</text>
+
+  <!-- Arrow down to CUDA Kernels -->
+  <line x1="300" y1="390" x2="300" y2="430" stroke="#6b7280" stroke-width="2" marker-end="url(#arrow-gray)" />
+
+  <!-- CUDA Kernels box -->
+  <rect x="40" y="435" width="520" height="50" rx="8" fill="#4b5563" />
+  <text x="300" y="465" text-anchor="middle" class="box-text" font-size="15">CUDA Kernels</text>
+</svg>

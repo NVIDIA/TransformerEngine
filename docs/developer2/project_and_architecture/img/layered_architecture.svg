@@ -1,0 +1,87 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="720" viewBox="0 0 1200 720" role="img" aria-labelledby="title description">
+  <title id="title">Transformer Engine layered architecture</title>
+  <desc id="description">PyTorch and JAX users enter framework-aware integrations that own public Python APIs, composite operations, framework state and memory, and internal C++ bindings. Those integrations call the public C API and import the shared Python API in the framework-independent common layer. Standalone clients can call the C API directly. The common layer owns focused operations, kernel selection, C++ and CUDA kernels, CUDA library integrations, and Triton or other framework-independent kernel implementations.</desc>
+  <defs>
+    <style>
+      text { font-family: Arial, Helvetica, sans-serif; fill: #1a1a1a; }
+      .title { font-size: 22px; font-weight: 700; }
+      .layer-title { font-size: 18px; font-weight: 700; }
+      .box-title { font-size: 16px; font-weight: 700; }
+      .body { font-size: 14px; }
+      .small { font-size: 13px; fill: #4a4a4a; }
+      .white { fill: #ffffff; }
+      .arrow { stroke: #555555; stroke-width: 2.2; fill: none; marker-end: url(#arrowhead); }
+      .dashed-arrow { stroke: #666666; stroke-width: 2; fill: none; stroke-dasharray: 7 5; marker-end: url(#arrowhead); }
+    </style>
+    <marker id="arrowhead" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto">
+      <polygon points="0 0, 10 4, 0 8" fill="#555555"/>
+    </marker>
+  </defs>
+
+  <rect width="1200" height="720" fill="#ffffff"/>
+  <text x="600" y="32" text-anchor="middle" class="title">Transformer Engine layered architecture</text>
+
+  <!-- Entry points -->
+  <rect x="90" y="55" width="300" height="50" rx="8" fill="#f4f4f4" stroke="#777777" stroke-width="1.5"/>
+  <text x="240" y="86" text-anchor="middle" class="box-title">PyTorch users</text>
+
+  <rect x="430" y="55" width="300" height="50" rx="8" fill="#f4f4f4" stroke="#777777" stroke-width="1.5"/>
+  <text x="580" y="86" text-anchor="middle" class="box-title">JAX users</text>
+
+  <rect x="875" y="55" width="250" height="50" rx="8" fill="#f4f4f4" stroke="#777777" stroke-width="1.5"/>
+  <text x="1000" y="77" text-anchor="middle" class="box-title">Standalone</text>
+  <text x="1000" y="95" text-anchor="middle" class="body">C API users</text>
+
+  <!-- Framework-aware layer -->
+  <rect x="60" y="130" width="740" height="250" rx="12" fill="#e8eef6" stroke="#557fa8" stroke-width="2"/>
+  <text x="82" y="160" class="layer-title">Framework-aware layer</text>
+
+  <line x1="240" y1="105" x2="240" y2="172" class="arrow"/>
+  <line x1="580" y1="105" x2="580" y2="172" class="arrow"/>
+
+  <rect x="90" y="178" width="325" height="165" rx="10" fill="#4a7ab5" stroke="#315e8d" stroke-width="1.5"/>
+  <text x="252" y="208" text-anchor="middle" class="box-title white">PyTorch integration</text>
+  <text x="112" y="239" class="body white">Public Python API</text>
+  <text x="112" y="265" class="body white">Modules and composite operations</text>
+  <text x="112" y="291" class="body white">Framework state and memory</text>
+  <text x="112" y="317" class="body white">Internal C++ bindings (pybind11)</text>
+
+  <rect x="445" y="178" width="325" height="165" rx="10" fill="#4a7ab5" stroke="#315e8d" stroke-width="1.5"/>
+  <text x="607" y="208" text-anchor="middle" class="box-title white">JAX integration</text>
+  <text x="467" y="239" class="body white">Public Python API</text>
+  <text x="467" y="265" class="body white">Primitives and composite operations</text>
+  <text x="467" y="291" class="body white">Framework state and memory</text>
+  <text x="467" y="317" class="body white">Internal C++ bindings (XLA FFI)</text>
+
+  <!-- Common layer -->
+  <rect x="60" y="430" width="1080" height="250" rx="12" fill="#eaf3e4" stroke="#5d8f3e" stroke-width="2"/>
+  <text x="82" y="462" class="layer-title">Framework-independent common layer</text>
+
+  <!-- Framework-to-common relationships -->
+  <path d="M 250 343 L 250 475" class="dashed-arrow"/>
+  <text x="112" y="412" class="small">Shared Python imports</text>
+
+  <path d="M 607 343 L 607 405 L 975 405 L 975 475" class="arrow"/>
+  <text x="700" y="398" class="small">C API calls</text>
+
+  <path d="M 1000 105 L 1000 475" class="arrow"/>
+
+  <rect x="90" y="480" width="280" height="72" rx="9" fill="#6d9f4a" stroke="#4f7d32" stroke-width="1.5"/>
+  <text x="230" y="510" text-anchor="middle" class="box-title white">Shared Python API</text>
+  <text x="230" y="535" text-anchor="middle" class="body white">Recipes and shared utilities</text>
+
+  <rect x="400" y="480" width="400" height="72" rx="9" fill="#6d9f4a" stroke="#4f7d32" stroke-width="1.5"/>
+  <text x="600" y="510" text-anchor="middle" class="box-title white">Focused operations and kernel selection</text>
+  <text x="600" y="535" text-anchor="middle" class="body white">Quantize, GEMM, normalization, attention, ...</text>
+
+  <rect x="840" y="480" width="270" height="72" rx="9" fill="#6d9f4a" stroke="#4f7d32" stroke-width="1.5"/>
+  <text x="975" y="510" text-anchor="middle" class="box-title white">Public C API</text>
+  <text x="975" y="535" text-anchor="middle" class="body white">Internal and standalone use</text>
+
+  <line x1="840" y1="516" x2="805" y2="516" class="arrow"/>
+  <line x1="600" y1="552" x2="600" y2="590" class="arrow"/>
+
+  <rect x="190" y="595" width="820" height="58" rx="9" fill="#4f7d32" stroke="#3c6525" stroke-width="1.5"/>
+  <text x="600" y="620" text-anchor="middle" class="box-title white">Framework-independent kernel implementations</text>
+  <text x="600" y="643" text-anchor="middle" class="body white">C++ / CUDA  ·  cuBLASLt / cuDNN  ·  Triton and other kernel technologies</text>
+</svg>
