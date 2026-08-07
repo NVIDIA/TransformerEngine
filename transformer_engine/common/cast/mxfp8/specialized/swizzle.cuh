@@ -11,8 +11,12 @@
 #ifndef TRANSFORMER_ENGINE_SPECIALIZED_SWIZZLE_CUH_
 #define TRANSFORMER_ENGINE_SPECIALIZED_SWIZZLE_CUH_
 
+#if !defined(__CUDACC_RTC__)
 #include <cmath>
 #include <cstdint>
+#else
+#include "utils.cuh"
+#endif
 
 namespace transformer_engine {
 namespace swz {
@@ -33,9 +37,9 @@ using constant = C<v>;
 
 template <class T, typename Ts, Ts s>
 __host__ __device__ __forceinline__ constexpr T shiftr(T x) {
-  if constexpr (std::is_same_v<Ts, uint32_t>) {
+  if constexpr (detail::is_same_v<Ts, uint32_t>) {
     return x >> s;
-  } else if constexpr (std::is_same_v<Ts, int32_t>) {
+  } else if constexpr (detail::is_same_v<Ts, int32_t>) {
     if constexpr (s >= 0) {
       return x >> s;
     } else {
@@ -44,6 +48,7 @@ __host__ __device__ __forceinline__ constexpr T shiftr(T x) {
   }
 }
 
+// avoid use of standard math lib to preserve NVRTC compatibility
 template <int32_t BBits, int32_t MBase, int32_t SShift>
 struct Swizzle {
   static constexpr int32_t num_bits = BBits;   // number of rows
@@ -52,13 +57,12 @@ struct Swizzle {
 
   static_assert(num_base >= 0, "MBase must be non-negative");
   static_assert(num_bits >= 0, "BBits must be non-negative");
-  static_assert(abs(num_shft) >= num_bits, "abs(SShift) must be greater than or equal to num_bits");
+  static_assert((num_shft < 0 ? -num_shft : num_shft) >= num_bits,
+                "abs(SShift) must be greater than or equal to num_bits");
 
   using bit_mask = constant<int32_t, (1 << num_bits) - 1>;
-  using yyy_mask =
-      constant<int32_t, bit_mask{} << (num_base + std::max(decltype(num_shft){0}, num_shft))>;
-  using zzz_mask =
-      constant<int32_t, bit_mask{} << (num_base - std::min(decltype(num_shft){0}, num_shft))>;
+  using yyy_mask = constant<int32_t, bit_mask{} << (num_base + (num_shft > 0 ? num_shft : 0))>;
+  using zzz_mask = constant<int32_t, bit_mask{} << (num_base - (num_shft < 0 ? num_shft : 0))>;
   using msk_shft = constant<int32_t, num_shft>;
   static constexpr int32_t swz_code = int32_t(yyy_mask{} | zzz_mask{});
 
