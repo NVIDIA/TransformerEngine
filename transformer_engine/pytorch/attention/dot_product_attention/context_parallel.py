@@ -1616,11 +1616,11 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         softmax_lse_in_packed_format = False
         if qkv_format == "thd":
             if use_fused_attention:
-                softmax_lse_in_packed_format = get_cudnn_version() >= (
-                    9,
-                    6,
-                    0,
-                ) and get_device_compute_capability() != (12, 0)
+                # sm12x (sm_120, sm_121, ...) keeps the dense BHS1 stats layout; cuDNN
+                # classifies by compute-capability family, so match on the major version.
+                softmax_lse_in_packed_format = (
+                    get_cudnn_version() >= (9, 6, 0) and get_device_compute_capability()[0] != 12
+                )
             else:
                 softmax_lse_in_packed_format = fa_utils.v2_6_0_plus or use_flash_attn_3
 
