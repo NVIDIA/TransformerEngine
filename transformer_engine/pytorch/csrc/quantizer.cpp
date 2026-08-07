@@ -1929,10 +1929,15 @@ void NVFP4Quantizer::set_quantization_params(TensorWrapper* tensor) const {
 
 bool NVFP4Quantizer::is_eligible_for_rht_cast_fusion(const std::vector<size_t>& shape,
                                                      bool for_grouped_kernel) {
+  if (transformer_engine::getenv<bool>("NVTE_NVFP4_DISABLE_RHT_CAST_FUSION")) {
+    return false;
+  }
   const auto [rows, cols] = get_2d_dims(shape);
   const size_t row_align = for_grouped_kernel ? 128 : 64;
-  return rows % row_align == 0 && cols % 128 == 0 && transformer_engine::cuda::sm_arch() >= 100 &&
-         transformer_engine::cuda::sm_arch() <= 110;
+  const int sm_arch = transformer_engine::cuda::sm_arch();
+  const bool supported_arch = (sm_arch >= 100 && sm_arch <= 110) ||
+                              (!for_grouped_kernel && (sm_arch == 120 || sm_arch == 121));
+  return rows % row_align == 0 && cols % 128 == 0 && supported_arch;
 }
 
 bool NVFP4Quantizer::is_eligible_for_2d_swizzle_fusion(const std::vector<size_t>& shape) {
@@ -1951,6 +1956,12 @@ bool nvfp4_emits_gemm_swizzled_scales(const NVFP4Quantizer& q, const std::vector
     return false;
   }
   if (q.with_rht) {
+    const int sm_arch = transformer_engine::cuda::sm_arch();
+    // The SM12x no-TMEM RHT path reuses the compact-scale 1D TMA quantizer.
+    // Keep the existing post-quantize swizzle until that path gains an in-kernel swizzle epilogue.
+    if (sm_arch == 120 || sm_arch == 121) {
+      return false;
+    }
     return NVFP4Quantizer::is_eligible_for_rht_cast_fusion(shape);
   }
   // Plain (non-RHT) 2D quantize kernel can bake the swizzled layout for aligned shapes.
