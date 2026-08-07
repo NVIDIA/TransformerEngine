@@ -8,13 +8,18 @@ import torch
 import torch.utils.benchmark as benchmark
 import pandas as pd
 
+import transformer_engine.pytorch as te
 from transformer_engine.pytorch.module import GroupedLinear
 from transformer_engine.common.recipe import (
     Float8BlockScaling,
     MXFP8BlockScaling,
     NVFP4BlockScaling,
 )
-from transformer_engine.pytorch.quantization import autocast, FP8GlobalStateManager
+from transformer_engine.pytorch.quantization import (
+    autocast,
+    FP8GlobalStateManager,
+    get_align_size_for_quantization,
+)
 from contextlib import nullcontext
 
 """
@@ -70,6 +75,257 @@ fp8_block_scaling_available, reason_for_no_fp8_block_scaling = (
     FP8GlobalStateManager.is_fp8_block_scaling_available()
 )
 nvfp4_available, reason_for_no_nvfp4 = FP8GlobalStateManager.is_nvfp4_available()
+
+
+# ---------------------------------------------------------------------------
+# CUTLASS-vs-cuBLAS single-launch grouped GEMM comparison (NVFP4, SM100).
+#
+# Both backends run through the same graph-safe grouped-tensor path
+# (general_grouped_gemm_for_grouped_tensor); NVTE_NVFP4_CUTLASS_GROUPED_GEMM only
+# flips which single-launch kernel it dispatches to. We isolate fprop / dgrad /
+# wgrad and report cuBLAS ms, CUTLASS ms and speedup, one line per config.
+# wgrad is routed through CUTLASS by enabling fuse_wgrad_accumulation (fp32
+# main_grad), which mirrors Megatron training.
+# ---------------------------------------------------------------------------
+
+# (num_gemms, tokens, hidden, out) MoE-shaped configs, each run balanced + imbalanced.
+COMPARE_SWEEP_CONFIGS = [
+    (8, 8192, 4096, 4096),
+    (8, 16384, 7168, 2048),  # DeepSeek-V3-ish FC (wide K, narrow N)
+    (16, 16384, 4096, 4096),
+    (32, 16384, 2048, 2048),  # many small experts (launch-bound)
+    (8, 65536, 7168, 2048),  # large batch
+]
+
+
+def _compare_set_backend(use_cutlass):
+    os.environ["NVTE_NVFP4_CUTLASS_GROUPED_GEMM"] = "1" if use_cutlass else "0"
+
+
+def _compare_make_m_splits(total_tokens, num_gemms, align, dist, seed=0):
+    """Per-group token counts, each a multiple of ``align``, summing to total_tokens."""
+    assert total_tokens % align == 0, f"tokens must be divisible by {align}"
+    units = total_tokens // align
+    assert units >= num_gemms, "increase tokens or lower num_gemms"
+    if dist == "balanced":
+        base, rem = divmod(units, num_gemms)
+        u = [base + (1 if i < rem else 0) for i in range(num_gemms)]
+    else:  # imbalanced: seeded skew in ~[0.25x, 1.75x] the mean (real MoE routing)
+        g = torch.Generator().manual_seed(seed)
+        w = (0.25 + 1.5 * torch.rand(num_gemms, generator=g)).tolist()
+        s = sum(w)
+        u = [max(1, int(round(units * wi / s))) for wi in w]
+        i, diff = 0, units - sum(u)
+        while diff != 0:
+            j = i % num_gemms
+            if diff > 0:
+                u[j] += 1
+                diff -= 1
+            elif u[j] > 1:
+                u[j] -= 1
+                diff += 1
+            i += 1
+    return [x * align for x in u]
+
+
+def _compare_build(num_gemms, hidden, out, dtype, fuse_wgrad=False):
+    torch.manual_seed(1234)
+    block = GroupedLinear(
+        num_gemms,
+        hidden,
+        out,
+        bias=False,
+        params_dtype=dtype,
+        device="cuda",
+        fuse_wgrad_accumulation=fuse_wgrad,
+    ).eval()
+    if fuse_wgrad:
+        for i in range(num_gemms):
+            w = getattr(block, f"weight{i}")
+            w.main_grad = torch.zeros_like(w, dtype=torch.float32)
+    return block
+
+
+def _compare_run_gemm_iter(block, x, m_splits, nvfp4_recipe, role, timed):
+    """One iteration isolating a single GEMM role. Returns ms (0 if untimed)."""
+    num = len(m_splits)
+    if role == "wgrad":
+        for i in range(num):
+            getattr(block, f"weight{i}").main_grad.zero_()
+
+    if role == "fprop":
+        start, end = torch.cuda.Event(True), torch.cuda.Event(True)
+        if timed:
+            torch.cuda.synchronize()
+            start.record()
+        with autocast(enabled=True, recipe=nvfp4_recipe):
+            block(x, m_splits)
+        if timed:
+            end.record()
+            torch.cuda.synchronize()
+            return start.elapsed_time(end)
+        return 0.0
+
+    # dgrad / wgrad: forward is untimed; only the backward GEMM is measured.
+    with autocast(enabled=True, recipe=nvfp4_recipe):
+        out = block(x, m_splits)
+    grad = torch.ones_like(out)
+    if x.grad is not None:
+        x.grad = None
+    start, end = torch.cuda.Event(True), torch.cuda.Event(True)
+    if timed:
+        torch.cuda.synchronize()
+        start.record()
+    out.backward(grad)
+    if timed:
+        end.record()
+        torch.cuda.synchronize()
+        return start.elapsed_time(end)
+    return 0.0
+
+
+def _compare_measure_per_gemm(num_gemms, hidden, out, dtype, m_splits, nvfp4_recipe, iters, warmup):
+    """Isolated per-GEMM timing. Returns {role: (cublas_ms, cutlass_ms)}."""
+    inp = torch.randn(sum(m_splits), hidden, dtype=dtype, device="cuda")
+    m_splits_t = torch.tensor(m_splits, dtype=torch.int64, device="cuda")
+    res = {}
+    for role in ("fprop", "dgrad", "wgrad"):
+        block = _compare_build(num_gemms, hidden, out, dtype, fuse_wgrad=(role == "wgrad"))
+        # dgrad needs input grad; wgrad needs weight grad; freeze the other side.
+        x = inp.detach().clone().requires_grad_(role in ("fprop", "dgrad"))
+        for i in range(num_gemms):
+            getattr(block, f"weight{i}").requires_grad_(role == "wgrad")
+
+        def timed_backend(use_cutlass):
+            FP8GlobalStateManager.reset()
+            _compare_set_backend(use_cutlass)
+            for _ in range(warmup):
+                _compare_run_gemm_iter(block, x, m_splits_t, nvfp4_recipe, role, timed=False)
+            torch.cuda.synchronize()
+            total = 0.0
+            for _ in range(iters):
+                total += _compare_run_gemm_iter(
+                    block, x, m_splits_t, nvfp4_recipe, role, timed=True
+                )
+            return total / iters
+
+        res[role] = (timed_backend(False), timed_backend(True))
+    return res
+
+
+def run_backend_compare_sweep(dtype, iters, warmup, seed):
+    """Print one line per config with per-GEMM cuBLAS/CUTLASS ms + speedup."""
+    os.environ["NVTE_GROUPED_LINEAR_USE_FUSED_GROUPED_GEMM"] = "1"
+    nvfp4_recipe = NVFP4BlockScaling()
+    align = get_align_size_for_quantization(nvfp4_recipe)
+
+    print(
+        "per-GEMM ms/iter -- each cell is  cuBLAS / CUTLASS / speedup  (single-launch, lower ms is"
+        " better)"
+    )
+    gcol = 30
+    hdr = (
+        f"{'experts':<8}{'tokens':<8}{'hidden':<8}{'out':<7}{'dist':<12}"
+        f"{'fprop(ms) cuBLAS/CUTLASS/x':>{gcol}}"
+        f"{'dgrad(ms) cuBLAS/CUTLASS/x':>{gcol}}"
+        f"{'wgrad(ms) cuBLAS/CUTLASS/x':>{gcol}}"
+    )
+    print(hdr)
+    print("-" * len(hdr))
+    for num_gemms, tokens, hidden, out in COMPARE_SWEEP_CONFIGS:
+        for dist in ("balanced", "imbalanced"):
+            m_splits = _compare_make_m_splits(tokens, num_gemms, align, dist, seed)
+            res = _compare_measure_per_gemm(
+                num_gemms, hidden, out, dtype, m_splits, nvfp4_recipe, iters, warmup
+            )
+
+            def cell(role):
+                cub, cut = res[role]
+                return f"{cub:.3f}/{cut:.3f}/{cub / cut:.2f}x"
+
+            print(
+                f"{num_gemms:<8}{tokens:<8}{hidden:<8}{out:<7}{dist:<12}"
+                f"{cell('fprop'):>{gcol}}{cell('dgrad'):>{gcol}}{cell('wgrad'):>{gcol}}"
+            )
+
+
+def _compare_graph_step_time(
+    num_gemms, hidden, out, dtype, m_splits, nvfp4_recipe, iters, warmup, use_cutlass
+):
+    """Time one CUDA-graphed fwd+bwd training step for a single backend.
+
+    The whole GroupedLinear step (fprop + dgrad + wgrad) is captured with
+    make_graphed_callables under the selected backend, so the kernel choice is
+    baked into the graph; we then time graph replay. fuse_wgrad_accumulation
+    (fp32 main_grad) routes wgrad through CUTLASS, mirroring Megatron."""
+    _compare_set_backend(use_cutlass)
+    FP8GlobalStateManager.reset()
+    total_m = sum(m_splits)
+    m_splits_t = torch.tensor(m_splits, dtype=torch.int64, device="cuda")
+    block = _compare_build(num_gemms, hidden, out, dtype, fuse_wgrad=True)
+    # make_graphed_callables only captures the backward graph in training mode
+    # (is_training = all(c.training ...)); eval() would skip bwd capture.
+    block.train()
+    x = torch.randn(total_m, hidden, dtype=dtype, device="cuda", requires_grad=True)
+    dy = torch.randn(total_m, out, dtype=dtype, device="cuda")
+
+    graphed = te.make_graphed_callables(
+        block,
+        (x, m_splits_t),
+        num_warmup_iters=3,
+        enabled=True,
+        recipe=nvfp4_recipe,
+    )
+
+    def step():
+        for i in range(num_gemms):
+            getattr(block, f"weight{i}").main_grad.zero_()
+        if x.grad is not None:
+            x.grad = None
+        y = graphed(x, m_splits_t)
+        y.backward(dy)
+
+    for _ in range(warmup):
+        step()
+    torch.cuda.synchronize()
+    start, end = torch.cuda.Event(True), torch.cuda.Event(True)
+    start.record()
+    for _ in range(iters):
+        step()
+    end.record()
+    torch.cuda.synchronize()
+    return start.elapsed_time(end) / iters
+
+
+def run_backend_compare_graph_sweep(dtype, iters, warmup, seed):
+    """Print one line per config with whole-step (fwd+bwd) CUDA-graph replay
+    timing: cuBLAS vs CUTLASS single-launch."""
+    os.environ["NVTE_GROUPED_LINEAR_USE_FUSED_GROUPED_GEMM"] = "1"
+    nvfp4_recipe = NVFP4BlockScaling()
+    align = get_align_size_for_quantization(nvfp4_recipe)
+
+    print(
+        "CUDA-graphed fwd+bwd ms/iter -- each cell is  cuBLAS / CUTLASS / speedup  "
+        "(single-launch, lower ms is better)"
+    )
+    scol = 34
+    hdr = (
+        f"{'experts':<8}{'tokens':<8}{'hidden':<8}{'out':<7}{'dist':<12}"
+        f"{'fwd+bwd(ms) cuBLAS/CUTLASS/speedup':>{scol}}"
+    )
+    print(hdr)
+    print("-" * len(hdr))
+    for num_gemms, tokens, hidden, out in COMPARE_SWEEP_CONFIGS:
+        for dist in ("balanced", "imbalanced"):
+            m_splits = _compare_make_m_splits(tokens, num_gemms, align, dist, seed)
+            t_cublas = _compare_graph_step_time(
+                num_gemms, hidden, out, dtype, m_splits, nvfp4_recipe, iters, warmup, False
+            )
+            t_cutlass = _compare_graph_step_time(
+                num_gemms, hidden, out, dtype, m_splits, nvfp4_recipe, iters, warmup, True
+            )
+            cell = f"{t_cublas:.3f}/{t_cutlass:.3f}/{t_cublas / t_cutlass:.2f}x"
+            print(f"{num_gemms:<8}{tokens:<8}{hidden:<8}{out:<7}{dist:<12}{cell:>{scol}}")
 
 
 def run_linear_multiple_steps(layer, x, m_splits, mode, gradient, run_num_steps=1, recipe=None):
@@ -279,7 +535,40 @@ if __name__ == "__main__":
         default=False,
         help="Run forward pass only, default is both forward and backward passes",
     )
+    parser.add_argument(
+        "--compare-backends",
+        action="store_true",
+        default=False,
+        help=(
+            "NVFP4 only: sweep MoE shapes x {balanced, imbalanced} and report per-GEMM "
+            "(fprop/dgrad/wgrad) cuBLAS vs CUTLASS single-launch timing through the "
+            "graph-safe grouped-tensor path (NVTE_NVFP4_CUTLASS_GROUPED_GEMM)."
+        ),
+    )
+    parser.add_argument("--iters", type=int, default=30, help="Timed iters for --compare-backends")
+    parser.add_argument(
+        "--warmup", type=int, default=10, help="Warmup iters for --compare-backends"
+    )
+    parser.add_argument("--seed", type=int, default=0, help="Seed for imbalanced splits")
+    parser.add_argument(
+        "--graph",
+        action="store_true",
+        default=False,
+        help=(
+            "With --compare-backends, time a CUDA-graphed whole-step (fwd+bwd) replay "
+            "instead of eager per-GEMM timing."
+        ),
+    )
     args = parser.parse_args()
+
+    if args.compare_backends:
+        if not nvfp4_available:
+            raise SystemExit(f"NVFP4 is not available: {reason_for_no_nvfp4}")
+        if args.graph:
+            run_backend_compare_graph_sweep(torch.bfloat16, args.iters, args.warmup, args.seed)
+        else:
+            run_backend_compare_sweep(torch.bfloat16, args.iters, args.warmup, args.seed)
+        raise SystemExit(0)
 
     jagged_input_splits = None
     if args.jagged_input is not None:
