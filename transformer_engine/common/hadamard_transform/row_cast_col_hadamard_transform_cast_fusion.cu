@@ -15,6 +15,7 @@
 #include <cuda/barrier>
 #include <cute/tensor.hpp>
 
+#include "common/cast/nvfp4/core_nvfp4.cuh"
 #include "common/common.h"
 #include "common/util/cuda_runtime.h"
 #include "common/util/curanddx.hpp"
@@ -403,10 +404,10 @@ __global__ static void row_col_rht_gemm_device(
   bool is_epilogue_col_quant_warp = (warp_idx >= 4 && warp_idx <= 7);
   bool is_epilogue_row_quant_warp = (warp_idx >= 8 && warp_idx <= 15);
 
-  if (is_epilogue_col_quant_warp && elect_one_sync()) {
+  if (is_epilogue_col_quant_warp && elect_one_sync() && c_global_amax != nullptr) {
     cute::prefetch(raw_pointer_cast(c_global_amax));
   }
-  if (is_epilogue_row_quant_warp && elect_one_sync()) {
+  if (is_epilogue_row_quant_warp && elect_one_sync() && a_global_amax != nullptr) {
     cute::prefetch(raw_pointer_cast(a_global_amax));
   }
 
@@ -651,7 +652,10 @@ __global__ static void row_col_rht_gemm_device(
     if constexpr (kEnableRHTColQuant) {
       using TMEM_LOAD_NEW = cute::SM100::TMEM::LOAD::SM100_TMEM_LOAD_32dp32b64x;
 
-      float const c_global_amax_val = *c_global_amax;
+      float const c_global_amax_val =
+          c_global_amax == nullptr
+              ? dispatch::nvfp4::core::scale_max<TSFD>() * TypeExtrema<fp4e2m1>::max
+              : *c_global_amax;
       auto acc_epilogue_pipelined_shape = append(acc_shape_epilogue, Int<AccumulatorPipelineStageCount / EpilogueUnrollFactor>{});
       auto bulk_tmem_epilogue_layout = make_layout(
         acc_epilogue_pipelined_shape,
@@ -708,14 +712,12 @@ __global__ static void row_col_rht_gemm_device(
       auto thr_r2g = tiled_r2g.get_slice(local_thread_idx);
 
       // Aligning with TensorEngine's recipe to generate scale factors
-      static constexpr float fp4_max = 6.0f;
-      static constexpr float fp8_max = 448.0f;
+      static constexpr float fp4_max =
+          transformer_engine::detail::TypeExtrema<fp4e2m1>::max;
       float const fp4_max_inv = 1.0f / fp4_max;
-      float const global_encode_scale = c_global_amax_val > 0.0f
-        ? cutlass::minimum_with_nan_propagation<float>{}(
-          (fp8_max * fp4_max) / c_global_amax_val,
-          cutlass::platform::numeric_limits<float>::max())
-        : 1.0f;
+      float const global_encode_scale =
+          dispatch::nvfp4::core::compute_global_encode_scaling_factor_FP4<TSFD>(
+              c_global_amax_val);
 
       float const global_decode_scale = 1.0f / global_encode_scale;
       // Scaling factor for fast math path
@@ -858,7 +860,10 @@ __global__ static void row_col_rht_gemm_device(
     cutlass::arch::warpgroup_reg_alloc<136>();
     if constexpr (kEnableRowQuant) {
       using S2RVectorType = uint128_t;
-      float const a_global_amax_val = *a_global_amax;
+      float const a_global_amax_val =
+          a_global_amax == nullptr
+              ? dispatch::nvfp4::core::scale_max<TSFA>() * TypeExtrema<fp4e2m1>::max
+              : *a_global_amax;
       int global_thread_idx = threadIdx.x;
       int local_thread_idx = global_thread_idx % 256;
       size_t rng_seed = 0;
@@ -904,14 +909,12 @@ __global__ static void row_col_rht_gemm_device(
       cute::Tensor tQApSFA = thr_s2r.partition_D(pSFA_mn);
 
       // Aligning with TensorEngine's recipe to generate scale factors
-      static constexpr float fp4_max = 6.0f;
-      static constexpr float fp8_max = 448.0f;
+      static constexpr float fp4_max =
+          transformer_engine::detail::TypeExtrema<fp4e2m1>::max;
       float const fp4_max_inv = 1.0f / fp4_max;
-      float const global_encode_scale = a_global_amax_val > 0.0f
-        ? cutlass::minimum_with_nan_propagation<float>{}(
-          (fp8_max * fp4_max) / a_global_amax_val,
-          cutlass::platform::numeric_limits<float>::max())
-        : 1.0f;
+      float const global_encode_scale =
+          dispatch::nvfp4::core::compute_global_encode_scaling_factor_FP4<TSFA>(
+              a_global_amax_val);
 
       float const global_decode_scale = 1.0f / global_encode_scale;
       // Scaling factor for fast math path
@@ -1262,6 +1265,12 @@ void hadamard_transform_cast_fusion(const Tensor &input_, Tensor &output_,
 
   NVTE_CHECK(has_rowwise_quant || has_columnwise_quant,
              "Output tensor must have rowwise or columnwise quant.");
+  const DType scale_dtype =
+      has_rowwise_quant ? output_.scale_inv.dtype : output_.columnwise_scale_inv.dtype;
+  if (has_rowwise_quant && has_columnwise_quant) {
+    NVTE_CHECK(output_.columnwise_scale_inv.dtype == scale_dtype,
+               "Rowwise and columnwise NVFP4 scales must use the same dtype.");
+  }
 
   // Stochastic rounding config
   const bool use_stochastic_rounding = quant_config.stochastic_rounding;
@@ -1279,9 +1288,7 @@ void hadamard_transform_cast_fusion(const Tensor &input_, Tensor &output_,
   using TA = cute::bfloat16_t;
   using TB = cute::bfloat16_t;
   using TD = cutlass::float_e2m1_t;
-  using TSFD = cutlass::float_ue4m3_t;
   using TQA = TD;
-  using TSFA = TSFD;
 
   checkCuDriverContext(stream);
 
@@ -1320,38 +1327,43 @@ void hadamard_transform_cast_fusion(const Tensor &input_, Tensor &output_,
   // nvte_swizzle_scaling_factors pass between quantize and GEMM.
   const bool use_swizzle_sf_output = output_.with_gemm_swizzled_scales;
 
-  TRANSFORMER_ENGINE_SWITCH_CONDITION(
-      use_stochastic_rounding, kEnableStochasticRounding,
+  TRANSFORMER_ENGINE_NVFP4_SCALE_TYPE_SWITCH(
+      scale_dtype, ScaleType,
       TRANSFORMER_ENGINE_SWITCH_CONDITION(
-          has_columnwise_quant, kEnableRhtColQuant,
+          use_stochastic_rounding, kEnableStochasticRounding,
           TRANSFORMER_ENGINE_SWITCH_CONDITION(
-              has_rowwise_quant, kEnableRowQuant,
+              has_columnwise_quant, kEnableRhtColQuant,
               TRANSFORMER_ENGINE_SWITCH_CONDITION(
-                  use_swizzle_sf_output, kEnableSwizzleSFOutput,
+                  has_rowwise_quant, kEnableRowQuant,
                   TRANSFORMER_ENGINE_SWITCH_CONDITION(
-                      quant_config.use_fast_math, kUseFastMath,
+                      use_swizzle_sf_output, kEnableSwizzleSFOutput,
+                      TRANSFORMER_ENGINE_SWITCH_CONDITION(
+                          quant_config.use_fast_math, kUseFastMath,
 
-                      if constexpr (kEnableRhtColQuant || kEnableRowQuant) {
-                        detail::row_col_rht_gemm_ntt_w_sfc<
-                            kEnableStochasticRounding, kEnableRhtColQuant, kEnableRowQuant,
-                            kEnableSwizzleSFOutput, TA, TB, TD, TSFD, TQA, TSFA, kUseFastMath>(
-                            /*sequence_length=*/m, /*hidden_size=*/n,
-                            /*A=*/reinterpret_cast<TA const *>(input.dptr),
-                            /*B=*/reinterpret_cast<TB const *>(hadamard_matrix.dptr),
-                            /*D=*/reinterpret_cast<TD *>(columnwise_data_ptr),
-                            /*SFD=*/reinterpret_cast<TSFD *>(columnwise_scale_inv_ptr),
-                            /*QA=*/reinterpret_cast<TQA *>(rowwise_data_ptr),
-                            /*SFA=*/reinterpret_cast<TSFA *>(rowwise_scale_inv_ptr),
-                            /*a_global_amax=*/reinterpret_cast<float const *>(rowwise_amax_ptr),
-                            /*d_global_amax=*/reinterpret_cast<float const *>(columnwise_amax_ptr),
-                            /*rng_state=*/rng_state, /*sm_count=*/sm_count,
-                            /*stream=*/stream, /*k_tile_size=*/k_tile_size);
-                      } else {
-                        NVTE_ERROR("Invalid kernel configuration (kEnableRHTColQuant=",
-                                   kEnableRhtColQuant, ", kEnableRowQuant=", kEnableRowQuant, ").");
-                      }
+                          if constexpr (kEnableRhtColQuant || kEnableRowQuant) {
+                            detail::row_col_rht_gemm_ntt_w_sfc<
+                                kEnableStochasticRounding, kEnableRhtColQuant, kEnableRowQuant,
+                                kEnableSwizzleSFOutput, TA, TB, TD, ScaleType, TQA, ScaleType,
+                                kUseFastMath>(
+                                /*sequence_length=*/m, /*hidden_size=*/n,
+                                /*A=*/reinterpret_cast<TA const *>(input.dptr),
+                                /*B=*/reinterpret_cast<TB const *>(hadamard_matrix.dptr),
+                                /*D=*/reinterpret_cast<TD *>(columnwise_data_ptr),
+                                /*SFD=*/reinterpret_cast<ScaleType *>(columnwise_scale_inv_ptr),
+                                /*QA=*/reinterpret_cast<TQA *>(rowwise_data_ptr),
+                                /*SFA=*/reinterpret_cast<ScaleType *>(rowwise_scale_inv_ptr),
+                                /*a_global_amax=*/reinterpret_cast<float const *>(rowwise_amax_ptr),
+                                /*d_global_amax=*/
+                                reinterpret_cast<float const *>(columnwise_amax_ptr),
+                                /*rng_state=*/rng_state, /*sm_count=*/sm_count,
+                                /*stream=*/stream, /*k_tile_size=*/k_tile_size);
+                          } else {
+                            NVTE_ERROR("Invalid kernel configuration (kEnableRHTColQuant=",
+                                       kEnableRhtColQuant, ", kEnableRowQuant=", kEnableRowQuant,
+                                       ").");
+                          }
 
-                  );););););
+                      );););););)
 }
 
 }  // namespace transformer_engine

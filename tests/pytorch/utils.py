@@ -17,6 +17,7 @@ import pytest
 import torch
 
 import transformer_engine
+from transformer_engine.common.recipe import Format as RecipeFormat
 from transformer_engine.common.recipe import Recipe
 from transformer_engine.pytorch import InferenceParams, QuantizedTensor
 from transformer_engine.pytorch import DType
@@ -29,6 +30,17 @@ from transformer_engine.pytorch.attention.dot_product_attention.utils import (
 )
 from transformer_engine.pytorch.cpp_extensions.fused_attn import FusedAttnBackend
 from transformer_engine.pytorch.module.base import get_dummy_wgrad
+
+
+# NVFP4 recipe names
+nvfp4_variant_names: Tuple[str, ...] = (
+    "nvfp4",
+    "nvfp4_row_scaled",
+    "nvfp4_4over6",
+    "nvfp4_rht",
+    "nvfp4_ue5m3",
+    "nvfp4_rht_ue5m3",
+)
 
 
 def str_to_dtype(dtype: str | torch.dtype) -> torch.dtype:
@@ -119,7 +131,7 @@ def quantization_tols(name: str) -> dict[str, float]:
         "mxfp8_block_scaling",
     ):
         return dtype_tols(DType.kFloat8E4M3)
-    if name in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6", "nvfp4_rht"):
+    if name in nvfp4_variant_names:
         return dtype_tols(DType.kFloat4E2M1)
     raise ValueError(f"Unsupported quantization scheme ({name})")
 
@@ -130,30 +142,35 @@ def make_recipe(name: Optional[str], **recipe_kwargs: Any) -> Optional[Recipe]:
         return None
     if name in ("fp8", "fp8_delayed_scaling"):
         return transformer_engine.common.recipe.DelayedScaling(
-            fp8_format=transformer_engine.common.recipe.Format.E4M3,
+            fp8_format=RecipeFormat.E4M3,
             amax_history_len=8,
             **recipe_kwargs,
         )
     if name == "fp8_current_scaling":
         return transformer_engine.common.recipe.Float8CurrentScaling(
-            fp8_format=transformer_engine.common.recipe.Format.E4M3,
+            fp8_format=RecipeFormat.E4M3,
             **recipe_kwargs,
         )
     if name == "mxfp8":
         return transformer_engine.common.recipe.MXFP8BlockScaling(
-            fp8_format=transformer_engine.common.recipe.Format.E4M3,
+            fp8_format=RecipeFormat.E4M3,
             **recipe_kwargs,
         )
     if name == "fp8_block_scaling":
         return transformer_engine.common.recipe.Float8BlockScaling(**recipe_kwargs)
-    if name in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6", "nvfp4_rht"):
+    if name in nvfp4_variant_names:
+        with_rht = name in ("nvfp4_rht", "nvfp4_rht_ue5m3")
         use_4over6 = name == "nvfp4_4over6"
+        scale_format = (
+            RecipeFormat.UE5M3 if name in ("nvfp4_ue5m3", "nvfp4_rht_ue5m3") else RecipeFormat.E4M3
+        )
         kwargs = {
-            "disable_rht": name != "nvfp4_rht",
+            "disable_rht": not with_rht,
             "disable_stochastic_rounding": True,
             "disable_2d_quantization": not use_4over6,
             "row_scaled_activation": name == "nvfp4_row_scaled",
             "nvfp4_4over6": "all" if use_4over6 else "none",
+            "fp8_format": scale_format,
         }
         kwargs.update(recipe_kwargs)
         return transformer_engine.common.recipe.NVFP4BlockScaling(**kwargs)
@@ -172,6 +189,8 @@ def recipe_id(recipe: Optional[Recipe]) -> str:
             nvfp4_features.append("4Over6")
         if not recipe.disable_rht:
             nvfp4_features.append("RHT")
+        if recipe.fp8_format == RecipeFormat.UE5M3:
+            nvfp4_features.append("UE5M3")
         if nvfp4_features:
             return f"NVFP4{''.join(nvfp4_features)}BlockScaling"
     return type(recipe).__name__

@@ -15,6 +15,7 @@
 #include <cuda/barrier>
 #include <cute/tensor.hpp>
 
+#include "common/cast/nvfp4/core_nvfp4.cuh"
 #include "common/common.h"
 #include "common/util/cuda_runtime.h"
 #include "common/util/curanddx.hpp"
@@ -79,17 +80,6 @@ __device__ __forceinline__ int GetTensorId(MultiAmaxHadamardCastFusionArgs *kern
     ++tensor_id;
   }
   return tensor_id;
-}
-
-// calculate the global encode scale factor for a given global amax.
-__device__ __forceinline__ float ComputeGlobalEncodeScaleFP4(const float global_amax) {
-  constexpr float kFP8E4M3Max = 448.0f;
-  constexpr float kFP4E2M1Max = 6.0f;
-  // If scale is infinity, return max value of float32
-  float global_encode_scale = cutlass::minimum_with_nan_propagation<float>{}(
-      kFP8E4M3Max * kFP4E2M1Max / global_amax, cutlass::platform::numeric_limits<float>::max());
-  // If global amax is 0 or infinity, return 1
-  return (global_amax == 0.f || global_encode_scale == 0.f) ? 1.f : global_encode_scale;
 }
 
 template <class ElementA, class ElementB, class ASmemLayout, class BSmemLayout>
@@ -469,7 +459,7 @@ __global__ static void group_rht_gemm_device(
       auto thr_r2g = tiled_r2g.get_slice(thread_idx);
 
       // NVFP4 non-E8 recipe constants and global scales
-      static constexpr float fp4_max = 6.0f;
+      static constexpr float fp4_max = transformer_engine::detail::TypeExtrema<fp4e2m1>::max;
       static constexpr float fp4_max_inv = 1.0f / fp4_max;
 
       // get global amax pointer
@@ -506,8 +496,11 @@ __global__ static void group_rht_gemm_device(
 
       Tensor tCgC = thr_mma_epilogue.partition_C(cur_gC_mn);
 
-      float global_amax_val = *global_amax_ptr;
-      float global_encode_scale = ComputeGlobalEncodeScaleFP4(global_amax_val);
+      constexpr float kUnitGlobalScaleAmax =
+          dispatch::nvfp4::core::scale_max<TSFC>() * TypeExtrema<fp4e2m1>::max;
+      float global_amax_val = global_amax_ptr == nullptr ? kUnitGlobalScaleAmax : *global_amax_ptr;
+      float global_encode_scale =
+          dispatch::nvfp4::core::compute_global_encode_scaling_factor_FP4<TSFC>(global_amax_val);
 
       // Scaling factor for fast math path
       float global_encode_scale_multiplier = global_encode_scale * fp4_max_inv;
@@ -527,8 +520,10 @@ __global__ static void group_rht_gemm_device(
           // TODO(zhongbo): the math operations are very expensive
           // since the kernel is persistent, we can have a cache for all the possible scaling factors
           if (tensor_id != new_tensor_id) {
-            global_amax_val = *global_amax_ptr;
-            global_encode_scale = ComputeGlobalEncodeScaleFP4(global_amax_val);
+            global_amax_val = global_amax_ptr == nullptr ? kUnitGlobalScaleAmax : *global_amax_ptr;
+            global_encode_scale =
+                dispatch::nvfp4::core::compute_global_encode_scaling_factor_FP4<TSFC>(
+                    global_amax_val);
             global_encode_scale_multiplier = global_encode_scale * fp4_max_inv;
             global_decode_scale = 1.0f / global_encode_scale;
             tensor_id = new_tensor_id;
@@ -864,11 +859,19 @@ void group_hadamard_transform_cast_fusion_columnwise(
   MultiAmaxHadamardCastFusionArgs kernel_args;
   kernel_args.num_tensors = 0;
   kernel_args.split_sections_range[0] = 0;
+  DType scale_dtype = DType::kNumTypes;
   for (size_t i = 0; i < num_tensors; ++i) {
     NVTE_CHECK(split_sections[i] % 64 == 0, "component ", i,
                " of split_sections should be 64 multiple");
     if (split_sections[i] == 0) {
       continue;
+    }
+    const DType output_scale_dtype = output_list[i]->scale_inv.dtype;
+    if (scale_dtype == DType::kNumTypes) {
+      scale_dtype = output_scale_dtype;
+    } else {
+      NVTE_CHECK(output_scale_dtype == scale_dtype,
+                 "All grouped NVFP4 outputs must use the same scale dtype.");
     }
     kernel_args.global_amax_list[kernel_args.num_tensors] =
         reinterpret_cast<void *>(output_list[i]->amax.dptr);
@@ -899,7 +902,6 @@ void group_hadamard_transform_cast_fusion_columnwise(
   using TA = cute::bfloat16_t;
   using TB = cute::bfloat16_t;
   using TC = cutlass::float_e2m1_t;
-  using TSFC = cutlass::float_ue4m3_t;
 
   checkCuDriverContext(stream);
 
@@ -958,16 +960,18 @@ void group_hadamard_transform_cast_fusion_columnwise(
     k_tile_size = 512;
   }
 
-  TRANSFORMER_ENGINE_SWITCH_CONDITION(
-      use_stochastic_rounding, kUseStochasticRounding,
+  TRANSFORMER_ENGINE_NVFP4_SCALE_TYPE_SWITCH(
+      scale_dtype, TSFC,
       TRANSFORMER_ENGINE_SWITCH_CONDITION(
-          quant_config.use_fast_math, kUseFastMath,
-          detail::group_rht_gemm_ttt_wrapper<TA, TB, TC, TSFC, kUseStochasticRounding,
-                                             kUseFastMath>(
-              /*m=*/m, /*n=*/n, /*A=*/reinterpret_cast<TA const *>(input.dptr),
-              /*B=*/reinterpret_cast<TB const *>(hadamard_matrix.dptr),
-              /*kernel_args_ptr=*/&kernel_args, /*rng_state=*/rng_state, /*sm_count=*/sm_count,
-              /*stream=*/stream, /*k_tile_size=*/k_tile_size);););
+          use_stochastic_rounding, kUseStochasticRounding,
+          TRANSFORMER_ENGINE_SWITCH_CONDITION(
+              quant_config.use_fast_math, kUseFastMath,
+              detail::group_rht_gemm_ttt_wrapper<TA, TB, TC, TSFC, kUseStochasticRounding,
+                                                 kUseFastMath>(
+                  /*m=*/m, /*n=*/n, /*A=*/reinterpret_cast<TA const *>(input.dptr),
+                  /*B=*/reinterpret_cast<TB const *>(hadamard_matrix.dptr),
+                  /*kernel_args_ptr=*/&kernel_args, /*rng_state=*/rng_state, /*sm_count=*/sm_count,
+                  /*stream=*/stream, /*k_tile_size=*/k_tile_size);););)
 }
 
 }  // namespace transformer_engine

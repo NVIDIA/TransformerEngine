@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "../cast/mxfp8/swizzle.cuh"
+#include "../cast/nvfp4/core_nvfp4.cuh"
 #include "../common.h"
 #include "../util/cuda_runtime.h"
 #include "../util/handle_manager.h"
@@ -371,6 +372,7 @@ struct GroupedOperandSelection {
   void *scale_inv = nullptr;  // Contiguous array of scales (input)
   void *amax = nullptr;       // Per-tensor amax values (NVFP4 only)
   transformer_engine::DType dtype = transformer_engine::DType::kNumTypes;
+  transformer_engine::DType scale_inv_dtype = transformer_engine::DType::kNumTypes;
   NVTEScalingMode scaling_mode = NVTE_DELAYED_TENSOR_SCALING;
   bool with_gemm_swizzled_scales = false;
   bool trans = false;
@@ -776,6 +778,7 @@ inline GroupedOperandSelection select_grouped_operand(const transformer_engine::
   auto use_columnwise = [&](bool storage_transposed = true) {
     sel.dptr = static_cast<char *>(t->columnwise_data.dptr);
     sel.scale_inv = t->columnwise_scale_inv.dptr;
+    sel.scale_inv_dtype = t->columnwise_scale_inv.dtype;
     sel.amax = t->columnwise_amax.dptr;
     sel.dtype = col_dtype;
     sel.rowwise = false;
@@ -787,6 +790,7 @@ inline GroupedOperandSelection select_grouped_operand(const transformer_engine::
   auto use_rowwise = [&]() {
     sel.dptr = static_cast<char *>(t->data.dptr);
     sel.scale_inv = t->scale_inv.dptr;
+    sel.scale_inv_dtype = t->scale_inv.dtype;
     sel.amax = t->amax.dptr;
     sel.dtype = row_dtype;
     sel.rowwise = true;
@@ -889,25 +893,38 @@ inline void set_mxfp8_scale_pointers(cublasLtMatmulDescOpaque_t &matmulDesc,
 #endif  // CUBLAS_VERSION >= CUBLAS_MXFP8_GROUPED_GEMM_VERSION
 }
 
-// Configures cuBLAS for NVFP4 grouped GEMM: sets VEC16_UE4M3 scale mode and scale pointers
-// for both A and B. Requires cuBLAS 13.4+.
+// Configures cuBLAS for NVFP4 grouped GEMM: sets VEC16_UE4M3 or VEC16_UE5M3 scale mode
+// and scale pointers for both A and B. Requires cuBLAS 13.4+.
 inline void set_nvfp4_scale_pointers(cublasLtMatmulDescOpaque_t &matmulDesc,
-                                     void **a_scale_inv_ptrs, void **b_scale_inv_ptrs) {
+                                     void **a_scale_inv_ptrs, void **b_scale_inv_ptrs,
+                                     transformer_engine::DType a_scale_inv_dtype,
+                                     transformer_engine::DType b_scale_inv_dtype) {
 #if CUBLAS_VERSION >= CUBLAS_NVFP4_GROUPED_GEMM_VERSION
   NVTE_CHECK(transformer_engine::cuda::cublas_version() >= CUBLAS_NVFP4_GROUPED_GEMM_VERSION,
              "NVFP4 grouped GEMM requires cuBLAS 13.4+, but run-time cuBLAS version is ",
              transformer_engine::cuda::cublas_version());
-  const cublasLtMatmulMatrixScale_t scale_mode = CUBLASLT_MATMUL_MATRIX_SCALE_VEC16_UE4M3;
-  NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(&matmulDesc, CUBLASLT_MATMUL_DESC_A_SCALE_MODE,
-                                                   &scale_mode, sizeof(scale_mode)));
-  NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(&matmulDesc, CUBLASLT_MATMUL_DESC_B_SCALE_MODE,
-                                                   &scale_mode, sizeof(scale_mode)));
+
+  // Configure scale pointers
   NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(&matmulDesc,
                                                    CUBLASLT_MATMUL_DESC_A_SCALE_POINTER,
                                                    &a_scale_inv_ptrs, sizeof(a_scale_inv_ptrs)));
   NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(&matmulDesc,
                                                    CUBLASLT_MATMUL_DESC_B_SCALE_POINTER,
                                                    &b_scale_inv_ptrs, sizeof(b_scale_inv_ptrs)));
+
+  // Configure scale mode based on dtype
+  auto get_scale_mode = [](transformer_engine::DType dtype) -> cublasLtMatmulMatrixScale_t {
+    if (dtype == transformer_engine::DType::kFloat8E4M3) {
+      return CUBLASLT_MATMUL_MATRIX_SCALE_VEC16_UE4M3;
+    }
+    NVTE_ERROR("Unsupported dtype for NVFP4 scales (", transformer_engine::to_string(dtype), ").");
+  };
+  const cublasLtMatmulMatrixScale_t scale_mode_a = get_scale_mode(a_scale_inv_dtype);
+  const cublasLtMatmulMatrixScale_t scale_mode_b = get_scale_mode(b_scale_inv_dtype);
+  NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(&matmulDesc, CUBLASLT_MATMUL_DESC_A_SCALE_MODE,
+                                                   &scale_mode_a, sizeof(scale_mode_a)));
+  NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(&matmulDesc, CUBLASLT_MATMUL_DESC_B_SCALE_MODE,
+                                                   &scale_mode_b, sizeof(scale_mode_b)));
 #else
   NVTE_CHECK(false,
              "NVFP4 grouped GEMM requires cuBLAS 13.4+, but compile-time "
@@ -1052,7 +1069,8 @@ inline void execute_grouped_gemm(const GroupedGemmSetupWorkspace &setup_workspac
                              setup_workspace.b_scale_inv_ptrs);
   } else if (transformer_engine::is_nvfp_scaling(A_sel.scaling_mode)) {
     set_nvfp4_scale_pointers(matmulDesc, setup_workspace.a_scale_inv_ptrs,
-                             setup_workspace.b_scale_inv_ptrs);
+                             setup_workspace.b_scale_inv_ptrs, A_sel.scale_inv_dtype,
+                             B_sel.scale_inv_dtype);
   } else if (transformer_engine::is_fp8_block_scaling(A_sel.scaling_mode)) {
     set_fp8_block_scaling_scale_pointers(matmulDesc, setup_workspace.a_scale_inv_ptrs,
                                          setup_workspace.b_scale_inv_ptrs, A_sel.scaling_mode,
@@ -1334,7 +1352,8 @@ __global__ void setup_grouped_gemm_kernel(
     MultiTensorGroupGemmOutputArgs c_multi_tensor_args,
     MultiTensorGroupGemmOutputArgs d_multi_tensor_args,
     // NVFP4: per-group amax values and output buffer for computed alpha
-    float *a_amax, float *b_amax, float *nvfp4_computed_alpha) {
+    float *a_amax, float *b_amax, float *nvfp4_computed_alpha, float a_unit_global_scale_amax,
+    float b_unit_global_scale_amax) {
   size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
   if (idx >= num_tensors) return;
 
@@ -1401,21 +1420,20 @@ __global__ void setup_grouped_gemm_kernel(
   // For NVFP4 on Blackwell+: compute per-group alpha that includes global scale (amax).
   // A's amax: grouped path indexes a_amax[idx]; discrete path reads amax_ptrs[idx].
   if (use_per_group_alpha_beta) {
-    float a_amax_val = 0.0f;
-    bool has_a_amax = false;
+    float a_amax_val = a_unit_global_scale_amax;
     if (has_a_multi_tensor) {
       auto *a_amax_p = static_cast<float *>(a_multi_tensor_args.amax_ptrs[idx]);
       if (a_amax_p != nullptr) {
         a_amax_val = *a_amax_p;
-        has_a_amax = true;
       }
     } else if (a_amax != nullptr) {
       a_amax_val = a_amax[idx];
-      has_a_amax = true;
     }
-    if (has_a_amax && b_amax && nvfp4_computed_alpha) {
-      constexpr float factor_inv = 1.0f / (6.0f * 6.0f * 448.0f * 448.0f);
-      nvfp4_computed_alpha[idx] = alpha_ptr[idx] * a_amax_val * b_amax[idx] * factor_inv;
+    if (nvfp4_computed_alpha != nullptr) {
+      const float b_amax_val = b_amax == nullptr ? b_unit_global_scale_amax : b_amax[idx];
+      const float nvfp4_alpha_factor_inv =
+          1.0f / (a_unit_global_scale_amax * b_unit_global_scale_amax);
+      nvfp4_computed_alpha[idx] = alpha_ptr[idx] * a_amax_val * b_amax_val * nvfp4_alpha_factor_inv;
       alpha_ptrs[idx] = &nvfp4_computed_alpha[idx];
     } else {
       alpha_ptrs[idx] = alpha_ptr + idx;
@@ -1544,10 +1562,17 @@ inline void launch_grouped_gemm_setup(
   const bool b_rowwise = B_sel.rowwise;
 
   // NVFP4 alpha needs A's amax from either A_sel.amax (grouped) or amax_ptrs (discrete).
-  const bool a_has_amax = (A_sel.amax != nullptr) ||
-                          (A_sel.dptr == nullptr && a_multi_tensor_args.amax_ptrs[0] != nullptr);
-  const bool needs_nvfp4_alpha = transformer_engine::is_nvfp_scaling(A_sel.scaling_mode) &&
-                                 a_has_amax && (B_sel.amax != nullptr);
+  const bool needs_nvfp4_alpha = transformer_engine::is_nvfp_scaling(A_sel.scaling_mode);
+  float a_unit_global_scale_amax = 1.0f;
+  float b_unit_global_scale_amax = 1.0f;
+  if (needs_nvfp4_alpha) {
+    constexpr float kFP4Max =
+        transformer_engine::detail::TypeExtrema<transformer_engine::fp4e2m1>::max;
+    a_unit_global_scale_amax =
+        transformer_engine::dispatch::nvfp4::core::scale_max(A_sel.scale_inv_dtype) * kFP4Max;
+    b_unit_global_scale_amax =
+        transformer_engine::dispatch::nvfp4::core::scale_max(B_sel.scale_inv_dtype) * kFP4Max;
+  }
 
   setup_grouped_gemm_kernel<<<num_blocks, threads_per_block, 0, stream>>>(
       ws.A_ptrs, ws.B_ptrs, ws.C_ptrs, ws.D_ptrs, ws.a_rows, ws.a_cols, ws.b_rows, ws.b_cols,
@@ -1560,7 +1585,8 @@ inline void launch_grouped_gemm_setup(
       B_sel.scaling_mode, num_tensors, a_multi_tensor_args, c_multi_tensor_args,
       d_multi_tensor_args, A_sel.amax ? static_cast<float *>(A_sel.amax) : nullptr,
       B_sel.amax ? static_cast<float *>(B_sel.amax) : nullptr,
-      needs_nvfp4_alpha ? ws.nvfp4_computed_alpha : nullptr);
+      needs_nvfp4_alpha ? ws.nvfp4_computed_alpha : nullptr, a_unit_global_scale_amax,
+      b_unit_global_scale_amax);
 
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
@@ -1618,14 +1644,6 @@ void nvte_grouped_gemm(const NVTEGroupedTensor A, int transa, const NVTEGroupedT
                                       "nvte_grouped_gemm");
   validate_nvfp4_grouped_gemm_support(A_sel, B_sel, use_per_group_alpha_beta);
   validate_fp8_block_grouped_gemm_support(A_sel, B_sel, sm);
-
-  // NVFP4 global-scale alpha requires per-tensor amax for both operands; without it
-  // the kernel silently drops the (amax_A * amax_B / factor) factor and produces
-  // numerically wrong output.
-  if (is_nvfp_scaling(A_sel.scaling_mode)) {
-    NVTE_CHECK(A_sel.amax != nullptr, "Grouped GEMM: NVFP4 A is missing amax.");
-    NVTE_CHECK(B_sel.amax != nullptr, "Grouped GEMM: NVFP4 B is missing amax.");
-  }
 
   // Workspaces: setup (pointer arrays) and cuBLAS
   auto workspace = setup_grouped_gemm_workspace(wspace_setup, wspace_cublas, num_tensors);
@@ -1776,11 +1794,9 @@ void nvte_grouped_gemm_with_discrete_inputA(const NVTETensor *A_list, size_t num
   A_sel.amax = nullptr;
 
   if (nvfp4) {
-    for (size_t i = 0; i < num_tensors; ++i) {
-      NVTE_CHECK(a_multi_tensor_args.amax_ptrs[i] != nullptr, "Grouped GEMM: NVFP4 A_list tensor ",
-                 i, " is missing amax.");
-    }
-    NVTE_CHECK(B_sel.amax != nullptr, "Grouped GEMM: NVFP4 B is missing amax.");
+    const auto &A_tensor0 = *transformer_engine::convertNVTETensorCheck(A_list[0]);
+    A_sel.scale_inv_dtype =
+        transa ? A_tensor0.scale_inv.dtype : A_tensor0.columnwise_scale_inv.dtype;
   }
 
   // Workspaces: setup (pointer arrays) and cuBLAS
@@ -1860,12 +1876,6 @@ void nvte_grouped_gemm_with_discrete_out(const NVTEGroupedTensor A, int transa,
                                       "nvte_grouped_gemm_with_discrete_out");
   validate_nvfp4_grouped_gemm_support(A_sel, B_sel, use_per_group_alpha_beta);
   validate_fp8_block_grouped_gemm_support(A_sel, B_sel, sm);
-
-  // NVFP4 global-scale alpha requires per-tensor amax for both operands.
-  if (is_nvfp_scaling(A_sel.scaling_mode)) {
-    NVTE_CHECK(A_sel.amax != nullptr, "Grouped GEMM: NVFP4 A is missing amax.");
-    NVTE_CHECK(B_sel.amax != nullptr, "Grouped GEMM: NVFP4 B is missing amax.");
-  }
 
   // Workspaces: setup (pointer arrays) and cuBLAS
   auto workspace = setup_grouped_gemm_workspace(wspace_setup, wspace_cublas, num_tensors);

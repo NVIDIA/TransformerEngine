@@ -8,6 +8,9 @@
 #include <pybind11/pybind11.h>
 #include <transformer_engine/transformer_engine.h>
 
+#include <optional>
+#include <vector>
+
 #include "common.h"
 #include "pybind.h"
 
@@ -135,7 +138,8 @@ TensorWrapper NVTETensorFromNVFP4Tensor(py::handle tensor, Quantizer *quantizer)
   const bool columnwise_usage = !(tensor.attr("_columnwise_data").is_none());
   const bool with_gemm_swizzled_scales = tensor.attr("_with_gemm_swizzled_scales").cast<bool>();
   const bool row_scaled_nvfp4 = tensor.attr("_row_scaled_nvfp4").cast<bool>();
-  const int nvfp4_e4m3_max = tensor.attr("_nvfp4_e4m3_max").cast<int>();
+  const auto nvfp4_e4m3_max = tensor.attr("_nvfp4_e4m3_max").cast<std::optional<int>>();
+  const DType scale_inv_dtype = tensor.attr("_scale_dtype").cast<DType>();
 
   NVTE_CHECK(rowwise_usage || columnwise_usage, "No data found for NVFP4 Tensor.");
 
@@ -143,30 +147,36 @@ TensorWrapper NVTETensorFromNVFP4Tensor(py::handle tensor, Quantizer *quantizer)
   if (rowwise_usage) {
     const auto &data = tensor.attr("_rowwise_data").cast<at::Tensor>();
     const auto &scale_inv = tensor.attr("_rowwise_scale_inv").cast<at::Tensor>();
-    const auto &amax_rowwise = tensor.attr("_amax_rowwise").cast<at::Tensor>();
     ret.set_rowwise_data(data.data_ptr(), dtype,
                          convert_shape_back_from_fp4(getTensorShape(data), false));
-    ret.set_rowwise_scale_inv(scale_inv.data_ptr(), DType::kFloat8E4M3, getTensorShape(scale_inv));
-    ret.set_amax(amax_rowwise.data_ptr(), DType::kFloat32, getTensorShape(amax_rowwise));
+    ret.set_rowwise_scale_inv(scale_inv.data_ptr(), scale_inv_dtype, getTensorShape(scale_inv));
+    const auto amax_rowwise = tensor.attr("_amax_rowwise");
+    if (!amax_rowwise.is_none()) {
+      const auto &amax = amax_rowwise.cast<at::Tensor>();
+      ret.set_amax(amax.data_ptr(), DType::kFloat32, getTensorShape(amax));
+    }
   }
 
   // Column-scaled data
   if (columnwise_usage) {
     const auto &data = tensor.attr("_columnwise_data").cast<at::Tensor>();
     const auto &scale_inv = tensor.attr("_columnwise_scale_inv").cast<at::Tensor>();
-    const auto &amax_columnwise = tensor.attr("_amax_columnwise").cast<at::Tensor>();
     ret.set_columnwise_data(data.data_ptr(), DType::kFloat4E2M1,
                             convert_shape_back_from_fp4(getTensorShape(data), false));
-    ret.set_columnwise_scale_inv(scale_inv.data_ptr(), DType::kFloat8E4M3,
-                                 getTensorShape(scale_inv));
-    ret.set_columnwise_amax(amax_columnwise.data_ptr(), DType::kFloat32,
-                            getTensorShape(amax_columnwise));
+    ret.set_columnwise_scale_inv(scale_inv.data_ptr(), scale_inv_dtype, getTensorShape(scale_inv));
+    const auto amax_columnwise = tensor.attr("_amax_columnwise");
+    if (!amax_columnwise.is_none()) {
+      const auto &amax = amax_columnwise.cast<at::Tensor>();
+      ret.set_columnwise_amax(amax.data_ptr(), DType::kFloat32, getTensorShape(amax));
+    }
   }
 
   // Scale layout
   ret.set_with_gemm_swizzled_scales(with_gemm_swizzled_scales);
   ret.set_row_scaled_nvfp4(row_scaled_nvfp4);
-  ret.set_nvfp4_e4m3_max(nvfp4_e4m3_max);
+  if (nvfp4_e4m3_max) {
+    ret.set_nvfp4_e4m3_max(*nvfp4_e4m3_max);
+  }
 
   // Quantizer state
   quantizer->set_quantization_params(&ret);
@@ -198,7 +208,7 @@ DType GetTransformerEngineDTypeForScaleInv(py::handle quantizer, at::Tensor scal
     return DType::kFloat32;
   }
   if (IsNVFP4Quantizers(quantizer_ptr)) {
-    return DType::kFloat8E4M3;
+    return quantizer.attr("scale_dtype").cast<DType>();
   }
   return GetTransformerEngineDType(scale_inv.scalar_type());
 }
@@ -258,18 +268,20 @@ GroupedTensorWrapper GroupedTensorFromPyTorchGroupedTensor(py::handle tensor) {
                             getTensorShape(amax));
   }
 
+  // Scale inverse dtype
+  py::object py_scale_inv_dtype = tensor.attr("scale_inv_dtype");
+  const std::optional<DType> scale_inv_dtype = py_scale_inv_dtype.cast<std::optional<DType>>();
+
   // Scale inverse
   if (!tensor.attr("scale_inv").is_none()) {
     const auto &scale_inv = tensor.attr("scale_inv").cast<at::Tensor>();
-    ret.set_rowwise_scale_inv(scale_inv.data_ptr(),
-                              GetTransformerEngineDTypeForScaleInv(quantizer, scale_inv),
-                              getTensorShape(scale_inv));
+    NVTE_CHECK(scale_inv_dtype, "Could not determine dtype of scale_inv buffer.");
+    ret.set_rowwise_scale_inv(scale_inv.data_ptr(), *scale_inv_dtype, getTensorShape(scale_inv));
   }
   if (!tensor.attr("columnwise_scale_inv").is_none()) {
     const auto &scale_inv = tensor.attr("columnwise_scale_inv").cast<at::Tensor>();
-    ret.set_columnwise_scale_inv(scale_inv.data_ptr(),
-                                 GetTransformerEngineDTypeForScaleInv(quantizer, scale_inv),
-                                 getTensorShape(scale_inv));
+    NVTE_CHECK(scale_inv_dtype, "Could not determine dtype of scale_inv buffer.");
+    ret.set_columnwise_scale_inv(scale_inv.data_ptr(), *scale_inv_dtype, getTensorShape(scale_inv));
   }
 
   // Shape metadata

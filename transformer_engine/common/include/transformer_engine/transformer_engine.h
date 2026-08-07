@@ -23,18 +23,19 @@ extern "C" {
  *  \brief TE datatype.
  */
 enum NVTEDType {
-  kNVTEByte = 0,        /*!< Byte */
-  kNVTEInt16 = 1,       /*!< 16-bit integer */
-  kNVTEInt32 = 2,       /*!< 32-bit integer */
-  kNVTEInt64 = 3,       /*!< 64-bit integer */
-  kNVTEFloat32 = 4,     /*!< 32-bit float */
-  kNVTEFloat16 = 5,     /*!< 16-bit float (E5M10) */
-  kNVTEBFloat16 = 6,    /*!< 16-bit bfloat (E8M7) */
-  kNVTEFloat8E4M3 = 7,  /*!< 8-bit float (E4M3) */
-  kNVTEFloat8E5M2 = 8,  /*!< 8-bit float (E5M2) */
-  kNVTEFloat8E8M0 = 9,  /*!< 8-bit float (E8M0) */
-  kNVTEFloat4E2M1 = 10, /*!< 4-bit float (E2M1) */
-  kNVTENumTypes         /*!< Number of supported types */
+  kNVTEByte = 0,         /*!< Byte */
+  kNVTEInt16 = 1,        /*!< 16-bit integer */
+  kNVTEInt32 = 2,        /*!< 32-bit integer */
+  kNVTEInt64 = 3,        /*!< 64-bit integer */
+  kNVTEFloat32 = 4,      /*!< 32-bit float */
+  kNVTEFloat16 = 5,      /*!< 16-bit float (E5M10) */
+  kNVTEBFloat16 = 6,     /*!< 16-bit bfloat (E8M7) */
+  kNVTEFloat8E4M3 = 7,   /*!< 8-bit float (E4M3) */
+  kNVTEFloat8E5M2 = 8,   /*!< 8-bit float (E5M2) */
+  kNVTEFloat8E8M0 = 9,   /*!< 8-bit float (E8M0) */
+  kNVTEFloat4E2M1 = 10,  /*!< 4-bit float (E2M1) */
+  kNVTEFloat8UE5M3 = 11, /*!< 8-bit float (UE5M3) */
+  kNVTENumTypes          /*!< Number of supported types */
 };
 
 /*! \struct NVTEShape
@@ -83,11 +84,12 @@ enum NVTETensorParam {
    *  its values are populated during quantization.
    */
   kNVTERowScaledNVFP4 = 8,
-  /*! Global E4M3 scale bound used by an NVFP4 tensor.
+  /*! Global scale-bound selector used by an NVFP4 tensor.
    *
    *  This is part of the tensor data contract. Downstream dequantization and
    *  GEMM scale consumers must use the same bound used during quantization.
    *  Standard NVFP4 uses 448; 4over6 may use 256 for map-to-4 headroom.
+   *  For UE5M3 scales, these settings map to 114688 and 65536, respectively.
    */
   kNVTENVFP4E4M3Max = 9,
   kNVTENumTensorParams
@@ -687,12 +689,16 @@ enum class DType {
   kFloat8E5M2 = 8,
   kFloat8E8M0 = 9,
   kFloat4E2M1 = 10,
+  kFloat8UE5M3 = 11,
   kNumTypes
 };
 
 /*! \brief Check if TE datatype is FP8
  *
- * Return true if TE datatype is FP8
+ *  Return whether datatype is FP8 E4M3 or FP8 E5M2. Other FP8 formats
+ *  (E8M0, UE5M3) are not used as primary data encoding, but are
+ *  auxiliary types for block scaling formats.
+ *
  *  \param[in] t      TE Datatype of interest
  */
 inline bool is_fp8_dtype(const DType t) {

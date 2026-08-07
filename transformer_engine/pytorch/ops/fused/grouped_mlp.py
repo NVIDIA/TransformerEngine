@@ -16,6 +16,7 @@ import torch
 from packaging.version import Version as PkgVersion
 
 import transformer_engine_torch as tex
+from ....common.recipe import Format as RecipeFormat
 from ...constants import MXFP8_BLOCK_SCALING_SIZE, NVFP4_BLOCK_SCALING_SIZE, TE_DType
 from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload, start_offload
 from ...cpp_extensions import general_gemm, general_grouped_gemm_for_grouped_tensor
@@ -808,14 +809,33 @@ def fuse_grouped_mlp_ops(
     """
     if not fused_op_cls.is_supported():
         return ops
-    if recipe is None or not (recipe.mxfp8() or recipe.nvfp4()):
+
+    # Fused kernels are only supported for MXFP8 and NVFP4
+    if recipe is None:
         return ops
-    # NVFP4 fused grouped MLP uses graph-safe grouped quantize, which currently requires RHT.
-    if recipe.nvfp4() and recipe.disable_rht:
+    elif recipe.custom():
+        # Check if custom recipe explicitly enables fusion
+        if not getattr(recipe, "enable_cutedsl_fused_grouped_mlp", False):
+            return ops
+    elif not (recipe.mxfp8() or recipe.nvfp4()):
         return ops
+
+    # Check for unsupported NVFP4 recipe configs
+    if recipe.nvfp4():
+        if recipe.disable_rht:
+            # Graph-safe grouped quantize is only supported with RHT
+            return ops
+        if (
+            recipe.row_scaled_activation
+            or recipe.nvfp4_4over6
+            or recipe.fp8_format == RecipeFormat.UE5M3
+        ):
+            return ops
+
     if activation_op_types is None:
         activation_op_types = (ScaledSwiGLU, ScaledClampedQGeGLU)
 
+    # Scan ops through with sliding window
     out = []
     window, ops = ops[:3], ops[3:]
     while len(window) == 3:
