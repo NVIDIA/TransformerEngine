@@ -87,6 +87,20 @@ _alibi_cache = {
 }
 
 
+class _IdentityWithMaskedGradient(torch.autograd.Function):
+    """Preserve tensor storage in forward and zero unselected backward lanes."""
+
+    @staticmethod
+    def forward(ctx, tensor: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        ctx.save_for_backward(mask)
+        return tensor
+
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor) -> Tuple[torch.Tensor, None]:
+        (mask,) = ctx.saved_tensors
+        return torch.where(mask, grad_output, 0.0), None
+
+
 def _infer_custom_dpa_local_recipes(
     fp8_recipe: Recipe,
     fp8_meta: Dict[str, Any],
@@ -1345,6 +1359,30 @@ class DotProductAttention(TransformerEngineBaseModule):
         selected_cu_seqlens_padded = torch.cat((physical_starts, physical_cu_seqlens[-1:]))
         return selected_cu_seqlens, selected_cu_seqlens_padded
 
+    @staticmethod
+    def _selected_thd_token_mask(
+        token_count: int,
+        cu_seqlens: torch.Tensor,
+        cu_seqlens_padded: Optional[torch.Tensor],
+        sequence_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        """Return a sync-free mask for selected tokens in physical THD storage."""
+        sequence_ids = sequence_ids.to(dtype=torch.long)
+        physical_cu_seqlens = cu_seqlens if cu_seqlens_padded is None else cu_seqlens_padded
+        starts = physical_cu_seqlens.index_select(0, sequence_ids)
+        lengths = cu_seqlens.index_select(0, sequence_ids + 1) - cu_seqlens.index_select(
+            0, sequence_ids
+        )
+        ends = starts + lengths
+        boundaries = torch.cat((starts, ends)).to(dtype=torch.long)
+        deltas = torch.cat((torch.ones_like(starts), -torch.ones_like(ends)))
+        token_deltas = torch.zeros(
+            token_count + 1,
+            dtype=deltas.dtype,
+            device=cu_seqlens.device,
+        ).index_add(0, boundaries, deltas)
+        return torch.cumsum(token_deltas[:-1], dim=0, dtype=torch.int32).ne(0)
+
     def _forward_thd_mask_types(
         self,
         query_layer: torch.Tensor,
@@ -1370,8 +1408,9 @@ class DotProductAttention(TransformerEngineBaseModule):
 
         Each scalar-mask call sees the original Q/K/V storage. Sequences assigned
         to other mask types are represented as inter-sequence padding, so the
-        backend leaves zeros at those positions. The disjoint outputs can then be
-        added without a token gather or scatter.
+        backend is allowed to leave unspecified values at those positions. Each
+        policy output is masked to its selected physical tokens before the
+        disjoint outputs are added, without a token gather or scatter.
         """
         output_features = query_layer.shape[-2] * value_layer.shape[-1]
         if query_layer.shape[0] == 0:
@@ -1415,6 +1454,27 @@ class DotProductAttention(TransformerEngineBaseModule):
         output = None
         for mask_type in nonempty_mask_types:
             sequence_ids = attn_mask_type_per_seq[mask_type]
+            policy_q_token_mask = self._selected_thd_token_mask(
+                query_layer.shape[0],
+                cu_seqlens_q,
+                cu_seqlens_q_padded,
+                sequence_ids,
+            )
+            policy_kv_token_mask = self._selected_thd_token_mask(
+                key_layer.shape[0],
+                cu_seqlens_kv,
+                cu_seqlens_kv_padded,
+                sequence_ids,
+            )
+            policy_query = _IdentityWithMaskedGradient.apply(
+                query_layer, policy_q_token_mask[:, None, None]
+            )
+            policy_key = _IdentityWithMaskedGradient.apply(
+                key_layer, policy_kv_token_mask[:, None, None]
+            )
+            policy_value = _IdentityWithMaskedGradient.apply(
+                value_layer, policy_kv_token_mask[:, None, None]
+            )
             selected_cu_seqlens_q, selected_cu_seqlens_q_padded = self._select_thd_sequences(
                 cu_seqlens_q,
                 cu_seqlens_q_padded,
@@ -1429,9 +1489,9 @@ class DotProductAttention(TransformerEngineBaseModule):
             if window_size_per_mask_type is not None:
                 policy_window_size = window_size_per_mask_type.get(mask_type, window_size)
             policy_output = self.forward(
-                query_layer,
-                key_layer,
-                value_layer,
+                policy_query,
+                policy_key,
+                policy_value,
                 qkv_format="thd",
                 cu_seqlens_q=selected_cu_seqlens_q,
                 cu_seqlens_kv=selected_cu_seqlens_kv,
@@ -1447,6 +1507,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                 bf16_backward=bf16_backward,
                 num_splits=num_splits,
             )
+            policy_output = torch.where(policy_q_token_mask.unsqueeze(-1), policy_output, 0.0)
             output = policy_output if output is None else output + policy_output
         if output is None:
             raise ValueError("attn_mask_type_per_seq must assign at least one sequence.")
