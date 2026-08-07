@@ -649,6 +649,254 @@ class TestFuser:
             assert x.grad.dtype == model_dtype
             assert op.weight.grad.dtype == model_dtype
 
+    _deferred_init_op_types = (
+        "basic_linear",
+        "bias",
+        "layer_norm",
+        "rmsnorm",
+        "grouped_linear",
+        "grouped_linear_single_param",
+        "linear",
+        "sequential",
+    )
+
+    @staticmethod
+    def _make_deferred_init_op(
+        op_type: str,
+        *,
+        size: int,
+        num_groups: int,
+        dtype: torch.dtype,
+        device: torch.device | str,
+    ) -> torch.nn.Module:
+        """Construct an op for the deferred initialization tests"""
+        kwargs = {"device": device, "dtype": dtype}
+        if op_type == "basic_linear":
+            return te_ops.BasicLinear(size, size, **kwargs)
+        if op_type == "bias":
+            return te_ops.Bias(size, **kwargs)
+        if op_type == "layer_norm":
+            return te_ops.LayerNorm(size, **kwargs)
+        if op_type == "rmsnorm":
+            return te_ops.RMSNorm(size, **kwargs)
+        if op_type == "grouped_linear":
+            return te_ops.GroupedLinear(num_groups, size, size, bias=True, **kwargs)
+        if op_type == "grouped_linear_single_param":
+            return te_ops.GroupedLinear(
+                num_groups,
+                size,
+                size,
+                bias=True,
+                single_grouped_weight=True,
+                single_grouped_bias=True,
+                **kwargs,
+            )
+        if op_type == "linear":
+            return te_ops.Linear(size, size, bias=True, **kwargs)
+        if op_type == "sequential":
+            return te_ops.Sequential(
+                te_ops.LayerNorm(size, **kwargs),
+                te_ops.Linear(size, size, bias=True, **kwargs),
+            )
+        raise ValueError(f"Unsupported op type ({op_type})")
+
+    @staticmethod
+    def _check_materialized_params(
+        op: torch.nn.Module,
+        device: torch.device | str,
+        *,
+        expect_grads: bool = True,
+    ) -> dict[str, torch.nn.Parameter]:
+        """Check that an op's params are on the device, and return them"""
+        params = dict(op.named_parameters())
+        assert params
+        for name, param in params.items():
+            assert param.device.type == device, f"{name} was not materialized on {device}"
+            if expect_grads:
+                assert param.grad is not None, f"{name} did not get a grad"
+                assert param.grad.device.type == device, f"{name} got a grad on {param.grad.device}"
+
+        # Fused ops must not alias stale params
+        for module in op.modules():
+            if isinstance(module, te_ops.Linear):
+                assert module.weight is module.basic_ops[module._linear_idx].weight
+                assert module.bias is module.basic_ops[module._bias_idx].bias
+        return params
+
+    @pytest.mark.parametrize("op_type", _deferred_init_op_types)
+    @pytest.mark.parametrize("dtype", _dtypes)
+    @pytest.mark.parametrize("input_requires_grad", (False, True))
+    def test_deferred_param_init(
+        self,
+        monkeypatch,
+        *,
+        op_type: str,
+        size: int = 32,
+        num_groups: int = 2,
+        dtype: torch.dtype,
+        input_requires_grad: bool,
+        device: torch.device = "cuda",
+    ) -> None:
+        """Test ops constructed on the meta device
+
+        Ops replace their params when materializing them on the first
+        forward pass. See
+        https://github.com/NVIDIA/TransformerEngine/issues/3322.
+
+        """
+        if op_type == "grouped_linear_single_param":
+            # Materializing params also changes how many there are
+            monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
+
+        # Construct operation on meta device
+        op_kwargs = {"size": size, "num_groups": num_groups, "dtype": dtype}
+        op = self._make_deferred_init_op(op_type, device="meta", **op_kwargs)
+        for param in op.parameters():
+            assert param.device.type == "meta"
+
+        # Forward and backward pass
+        in_shape = (size, size)
+        extra_inputs = []
+        if op_type.startswith("grouped_linear"):
+            in_shape = (size * num_groups, size)
+            extra_inputs.append(torch.tensor([size] * num_groups, dtype=torch.int, device=device))
+        x = torch.randn(in_shape, dtype=dtype, device=device, requires_grad=input_requires_grad)
+        y = op(x, *extra_inputs)
+        dy = torch.randn_like(y)
+        y.backward(dy)
+
+        # Check that params have been materialized
+        params = self._check_materialized_params(op, device)
+        if input_requires_grad:
+            assert x.grad is not None and x.grad.device.type == device
+        else:
+            assert x.grad is None
+
+        # Check against an op that was constructed on the device
+        ref_op = self._make_deferred_init_op(op_type, device=device, **op_kwargs)
+        ref_params = dict(ref_op.named_parameters())
+        assert ref_params.keys() == params.keys()
+        with torch.no_grad():
+            for name, ref_param in ref_params.items():
+                ref_param.copy_(params[name])
+        x_ref = x.clone().detach().requires_grad_(input_requires_grad)
+        y_ref = ref_op(x_ref, *extra_inputs)
+        y_ref.backward(dy)
+        tols = dtype_tols(dtype)
+        assert_close(y, y_ref, **tols)
+        if input_requires_grad:
+            assert_close_grads(x, x_ref, **tols)
+        for name, ref_param in ref_params.items():
+            assert_close(params[name].grad, ref_param.grad, **tols)
+
+    @pytest.mark.parametrize("op_type", _deferred_init_op_types)
+    def test_deferred_param_init_explicit(
+        self,
+        monkeypatch,
+        *,
+        op_type: str,
+        size: int = 32,
+        num_groups: int = 2,
+        dtype: torch.dtype = torch.bfloat16,
+        device: torch.device = "cuda",
+    ) -> None:
+        """Test ops materialized with reset_parameters before the first forward pass"""
+        if op_type == "grouped_linear_single_param":
+            monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
+
+        # Construct operation on meta device and materialize it
+        op = self._make_deferred_init_op(
+            op_type, size=size, num_groups=num_groups, dtype=dtype, device="meta"
+        )
+        with torch.no_grad():
+            op.reset_parameters()
+        self._check_materialized_params(op, device, expect_grads=False)
+
+        # Forward and backward pass
+        in_shape = (size, size)
+        extra_inputs = []
+        if op_type.startswith("grouped_linear"):
+            in_shape = (size * num_groups, size)
+            extra_inputs.append(torch.tensor([size] * num_groups, dtype=torch.int, device=device))
+        x = torch.randn(in_shape, dtype=dtype, device=device, requires_grad=True)
+        y = op(x, *extra_inputs)
+        y.backward(torch.randn_like(y))
+        self._check_materialized_params(op, device)
+        assert x.grad is not None and x.grad.device.type == device
+
+    @pytest.mark.parametrize("op_type", ("linear", "grouped_linear"))
+    @pytest.mark.parametrize("quantization", _quantization_list)
+    @pytest.mark.parametrize("quantized_weight", (False, True))
+    def test_deferred_param_init_quantized(
+        self,
+        *,
+        op_type: str,
+        size: int = 128,
+        num_groups: int = 2,
+        dtype: torch.dtype = torch.bfloat16,
+        device: torch.device = "cuda",
+        quantization: Optional[str],
+        quantized_weight: bool,
+    ) -> None:
+        """Test quantized op constructed on the meta device"""
+
+        # Skip invalid configurations
+        in_shape = (size, size)
+        extra_inputs = []
+        if op_type == "grouped_linear":
+            in_shape = (size * num_groups, size)
+            extra_inputs.append(torch.tensor([size] * num_groups, dtype=torch.int, device=device))
+        if quantization is None:
+            pytest.skip("Quantization scheme is not specified")
+        maybe_skip_quantization(quantization, dims=in_shape, device=device, dtype=dtype)
+
+        # Construct operation on meta device
+        recipe = make_recipe(quantization)
+        with te.quantized_model_init(enabled=quantized_weight, recipe=recipe):
+            op = self._make_deferred_init_op(
+                op_type, size=size, num_groups=num_groups, dtype=dtype, device="meta"
+            )
+
+        # Forward and backward pass
+        x = torch.randn(in_shape, dtype=dtype, device=device, requires_grad=True)
+        with te.autocast(recipe=recipe):
+            y = op(x, *extra_inputs)
+        y.backward(torch.randn_like(y))
+
+        # Check that params have been materialized
+        params = self._check_materialized_params(op, device)
+        if quantized_weight:
+            weights = [param for name, param in params.items() if "weight" in name]
+            assert weights
+            for weight in weights:
+                assert isinstance(weight, QuantizedTensor)
+        assert x.grad is not None and x.grad.device.type == device
+
+    def test_param_replaced_after_first_forward(
+        self,
+        *,
+        size: int = 32,
+        dtype: torch.dtype = torch.float32,
+        device: torch.device = "cuda",
+    ) -> None:
+        """Test replacing an op's params after the fuser has cached them"""
+
+        # Forward and backward pass to populate the fuser's param cache
+        model = te_ops.Sequential(te_ops.BasicLinear(size, size, device=device, dtype=dtype))
+        x = torch.randn((size, size), dtype=dtype, device=device, requires_grad=True)
+        y = model(x)
+        y.backward(torch.randn_like(y))
+
+        # Replace the param and check that grads follow it
+        weight = torch.nn.Parameter(torch.randn((size, size), dtype=dtype, device=device))
+        model[0].register_parameter("weight", weight)
+        y = model(x)
+        dy = torch.randn_like(y)
+        y.backward(dy)
+        assert weight.grad is not None
+        assert_close(y, x @ weight.t(), **dtype_tols(dtype))
+        assert_close(weight.grad, dy.t() @ x, **dtype_tols(dtype))
+
 
 class TestBasicOps:
     """Tests for individual operations"""
