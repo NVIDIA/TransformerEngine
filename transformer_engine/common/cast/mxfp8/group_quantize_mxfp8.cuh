@@ -528,8 +528,10 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
   if (launch_block_id >= total_work_blocks) {
     return;
   }
-  int32_t ctaid_X = static_cast<int32_t>(launch_block_id % work_blocks_X);
-  int32_t ctaid_Y = static_cast<int32_t>(launch_block_id / work_blocks_X);
+  int32_t ctaid_X = 0;
+  int32_t ctaid_Y = 0;
+  linear_block_id_to_reverse_y_cta_coords(launch_block_id, work_blocks_X, work_blocks_Y, ctaid_X,
+                                          ctaid_Y);
   size_t static_block_stride = gridDim.x * gridDim.y;
   size_t static_next_block_id = launch_block_id + static_block_stride;
 
@@ -555,7 +557,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
     if (!job_has_work(current_job)) {
       // Zero-sized tensors are valid grouped-tensor entries; skip them and keep scheduling work.
       advance_to_next_job(job_finished, ctaid_X, ctaid_Y, static_next_block_id, static_block_stride,
-                          total_work_blocks, work_blocks_X);
+                          total_work_blocks, work_blocks_X, work_blocks_Y);
       continue;
     }
 
@@ -632,7 +634,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
 #pragma unroll
     for (int stage = 0; stage < PREFETCH_STAGES; ++stage) {
       const size_t buff = stage;
-      const size_t stage_offset_Y = stage * BUFF_DIM_Y;
+      const int logical_stage = static_cast<int>(STAGES) - 1 - stage;
+      const size_t stage_offset_Y = logical_stage * BUFF_DIM_Y;
       const size_t global_offset_Y = block_offset_Y + stage_offset_Y;
       const size_t global_offset_X = block_offset_X;
       const size_t buff_offset = buff * BUFF_DIM;
@@ -654,11 +657,13 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
 // Process one [CHUNK_DIM_Y x CHUNK_DIM_X] block in STAGES slices (32 rows each).
 #pragma unroll
     for (int stage = 0; stage < STAGES; ++stage) {
-      const size_t stage_offset_Y = stage * BUFF_DIM_Y;
+      const int logical_stage = static_cast<int>(STAGES) - 1 - stage;
+      const size_t stage_offset_Y = logical_stage * BUFF_DIM_Y;
       if (stage < STAGES - PREFETCH_STAGES) {
         const size_t next_prefetch_buff = (buff_in + PREFETCH_STAGES) % BUFFS_NUM;
         const size_t next_prefetch_stage = stage + PREFETCH_STAGES;
-        const size_t next_prefetch_stage_offset_Y = next_prefetch_stage * BUFF_DIM_Y;
+        const int next_logical_stage = static_cast<int>(STAGES) - 1 - next_prefetch_stage;
+        const size_t next_prefetch_stage_offset_Y = next_logical_stage * BUFF_DIM_Y;
 
         const size_t global_offset_Y = block_offset_Y + next_prefetch_stage_offset_Y;
         const size_t global_offset_X = block_offset_X;
@@ -679,7 +684,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
       if constexpr (COLWISE_SCALING) {
         process_colwise_stage<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType, ROWWISE_SCALING,
                               WITH_GEMM_SWIZZLED_SCALES>(
-            buff, stage, tid_X_colwise, scales_offset_Y_colwise, scales_offset_X_colwise,
+            buff, logical_stage, tid_X_colwise, scales_offset_Y_colwise, scales_offset_X_colwise,
             scale_stride_colwise, tensor_base_for_scales, rows, cols, sIn_ptr, sActIn_ptr,
             sCachedAct_ptr, sOutColwise_ptr, scales_colwise, partial_dbias_colwise);
       }
@@ -750,7 +755,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
     }
 
     advance_to_next_job(job_finished, ctaid_X, ctaid_Y, static_next_block_id, static_block_stride,
-                        total_work_blocks, work_blocks_X);
+                        total_work_blocks, work_blocks_X, work_blocks_Y);
   }
 
   destroy_barriers<BUFFS_NUM>(IN_buff_readable_mbar, leading_thread);
