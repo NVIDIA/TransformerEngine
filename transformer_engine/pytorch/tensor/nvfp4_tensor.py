@@ -184,7 +184,9 @@ class NVFP4Quantizer(Quantizer):
         self.row_scaled_nvfp4 = row_scaled_nvfp4
         self.nvfp4_use_4over6 = nvfp4_use_4over6
         if nvfp4_use_4over6 and self.scale_dtype == DType.kFloat8UE5M3:
-            raise ValueError("nvfp4_use_4over6 is incompatible with scale_dtype=DType.kFloat8UE5M3.")
+            raise ValueError(
+                "nvfp4_use_4over6 is incompatible with scale_dtype=DType.kFloat8UE5M3."
+            )
         self.nvfp4_e4m3_max = nvfp4_e4m3_max if nvfp4_e4m3_max is not None else -1
         self.nvfp4_4over6_err_mode = nvfp4_4over6_err_mode.upper()
         if self.nvfp4_4over6_err_mode not in ("MAE", "MSE"):

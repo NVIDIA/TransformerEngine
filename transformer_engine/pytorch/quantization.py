@@ -228,12 +228,14 @@ def check_fp8_ue5m3_support() -> Tuple[bool, str]:
     """Return if the FP8 UE5M3 format is available."""
     global _FP8_UE5M3_SUPPORT
     if _FP8_UE5M3_SUPPORT is None:
+
         def _check_support() -> Tuple[bool, str]:
             if get_device_compute_capability() != (10, 7):  # Rubin
                 return False, "Device compute capability 10.7 is required for FP8 UE5M3 support."
             if float(torch.version.cuda) < 13.4:
                 return False, "CUDA 13.4 is required for FP8 UE5M3 support."
             return True, ""
+
         _FP8_UE5M3_SUPPORT = _check_support()
     return _FP8_UE5M3_SUPPORT
 
@@ -1719,9 +1721,7 @@ class NVFP4BlockScalingRecipeState(RecipeState):
             return self.recipe.fp4_quant_fwd_inp
 
         scale_dtype = (
-            DType.kFloat8UE5M3
-            if self.recipe.fp8_format == Format.UE5M3
-            else DType.kFloat8E4M3
+            DType.kFloat8UE5M3 if self.recipe.fp8_format == Format.UE5M3 else DType.kFloat8E4M3
         )
 
         def _make(tensor_type: str) -> NVFP4Quantizer:
@@ -1746,9 +1746,7 @@ class NVFP4BlockScalingRecipeState(RecipeState):
                         "NVFP4 4over6 quantization does not support stochastic rounding."
                     )
                 if scale_dtype == DType.kFloat8UE5M3:
-                    raise ValueError(
-                        "NVFP4 4over6 quantization is incompatible with UE5M3 scales."
-                    )
+                    raise ValueError("NVFP4 4over6 quantization is incompatible with UE5M3 scales.")
 
             # Scale max for 4over6
             nvfp4_e4m3_max = None

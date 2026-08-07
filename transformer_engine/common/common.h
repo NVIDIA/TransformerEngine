@@ -474,12 +474,12 @@ struct Tensor {
       dtype = scale_inv.dtype;
     }
     switch (dtype) {
-    case DType::kFloat8E4M3:
-      return 448;
-    case DType::kFloat8UE5M3:
-      return 114688;
-    default:
-      NVTE_ERROR("Unsupported scale dtype for NVFP4 tensor (", to_string(dtype), ")");
+      case DType::kFloat8E4M3:
+        return 448;
+      case DType::kFloat8UE5M3:
+        return 114688;
+      default:
+        NVTE_ERROR("Unsupported scale dtype for NVFP4 tensor (", to_string(dtype), ")");
     }
   }
 };
@@ -850,10 +850,10 @@ struct TypeInfo {
 #define SWITCH_FP4_TYPE_HANDLE(type, ...)  // do nothing
 #endif
 #if CUDA_VERSION >= 13040
-#define SWITCH_FP8UE5M3_TYPE_HANDLE(type, ...)  \
-  case DType::kFloat8UE5M3: {                   \
-    using type = fp8ue5m3;                      \
-    { __VA_ARGS__ }                             \
+#define SWITCH_FP8UE5M3_TYPE_HANDLE(type, ...) \
+  case DType::kFloat8UE5M3: {                  \
+    using type = fp8ue5m3;                     \
+    { __VA_ARGS__ }                            \
   } break;
 #else
 #define SWITCH_FP8UE5M3_TYPE_HANDLE(type, ...)  // do nothing
@@ -908,7 +908,7 @@ struct TypeInfo {
       NVTE_ERROR("Unsupported dtype ", to_string(static_cast<DType>(dtype)), \
                  ". Expected one of: Byte, Int16, Int32, Int64, Float32, "   \
                  "Float16, BFloat16, Float8E4M3, Float8E5M2, "               \
-                 "Float8E8M0.");                                 \
+                 "Float8E8M0.");                                             \
   }
 
 #define TRANSFORMER_ENGINE_TYPE_SWITCH_FLOAT(dtype, type, ...)               \

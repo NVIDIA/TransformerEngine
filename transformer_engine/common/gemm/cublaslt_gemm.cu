@@ -578,7 +578,7 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
                                                        &B_scale_inverse, sizeof(B_scale_inverse)));
 
       // Deduce cuBLAS scale mode based on scale dtype
-      auto get_scale_mode = [] (DType dtype) -> cublasLtMatmulMatrixScale_t {
+      auto get_scale_mode = [](DType dtype) -> cublasLtMatmulMatrixScale_t {
         if (dtype == DType::kFloat8E4M3) {
           return CUBLASLT_MATMUL_MATRIX_SCALE_VEC16_UE4M3;
         }

@@ -4,12 +4,12 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include <optional>
-#include <vector>
-
 #include <ATen/ATen.h>
 #include <pybind11/pybind11.h>
 #include <transformer_engine/transformer_engine.h>
+
+#include <optional>
+#include <vector>
 
 #include "common.h"
 #include "pybind.h"
@@ -163,8 +163,7 @@ TensorWrapper NVTETensorFromNVFP4Tensor(py::handle tensor, Quantizer *quantizer)
     const auto &scale_inv = tensor.attr("_columnwise_scale_inv").cast<at::Tensor>();
     ret.set_columnwise_data(data.data_ptr(), DType::kFloat4E2M1,
                             convert_shape_back_from_fp4(getTensorShape(data), false));
-    ret.set_columnwise_scale_inv(scale_inv.data_ptr(), scale_inv_dtype,
-                                 getTensorShape(scale_inv));
+    ret.set_columnwise_scale_inv(scale_inv.data_ptr(), scale_inv_dtype, getTensorShape(scale_inv));
     const auto amax_columnwise = tensor.attr("_amax_columnwise");
     if (!amax_columnwise.is_none()) {
       const auto &amax = amax_columnwise.cast<at::Tensor>();
@@ -282,8 +281,7 @@ GroupedTensorWrapper GroupedTensorFromPyTorchGroupedTensor(py::handle tensor) {
   if (!tensor.attr("columnwise_scale_inv").is_none()) {
     const auto &scale_inv = tensor.attr("columnwise_scale_inv").cast<at::Tensor>();
     NVTE_CHECK(scale_inv_dtype, "Could not determine dtype of scale_inv buffer.");
-    ret.set_columnwise_scale_inv(scale_inv.data_ptr(), *scale_inv_dtype,
-                                 getTensorShape(scale_inv));
+    ret.set_columnwise_scale_inv(scale_inv.data_ptr(), *scale_inv_dtype, getTensorShape(scale_inv));
   }
 
   // Shape metadata

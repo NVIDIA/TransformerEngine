@@ -16,6 +16,7 @@ _BACKWARD_OVERRIDES = (None, "high_precision", "dequantized")
 _NVFP4_4OVER6_SCOPES = ("none", "weights", "activations", "all")
 _NVFP4_4OVER6_ERR_MODES = ("MAE", "MSE")
 
+
 class _FormatHelper(NamedTuple):
     """
     Stores max FP8 values for fprop and bprop a `Format`.
@@ -573,7 +574,10 @@ class NVFP4BlockScaling(Recipe):
 
     def __post_init__(self) -> None:
         assert self.fp4_format == Format.E2M1, "Only E2M1 is supported for NVFP4 scaling"
-        assert self.fp8_format in (Format.E4M3, Format.UE5M3), "Unsupported format for NVFP4 scaling."
+        assert self.fp8_format in (
+            Format.E4M3,
+            Format.UE5M3,
+        ), "Unsupported format for NVFP4 scaling."
         assert (
             self.backward_override in _BACKWARD_OVERRIDES
         ), "NVTE_BACKWARD_OVERRIDE must be unset or one of: 'high_precision', 'dequantized'."

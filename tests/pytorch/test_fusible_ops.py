@@ -206,16 +206,19 @@ def make_reference_and_test_tensors(
             columnwise=True,
             block_scaling_dim=2 if tensor_type == "weight" else 1,
         )(test)
-    elif quantization in ("nvfp4", "nvfp4_row_scaled", "nvfp4_rht", "nvfp4_ue5m3", "nvfp4_rht_ue5m3"):
+    elif quantization in (
+        "nvfp4",
+        "nvfp4_row_scaled",
+        "nvfp4_rht",
+        "nvfp4_ue5m3",
+        "nvfp4_rht_ue5m3",
+    ):
         tensor_type = "input"
         if quantizer_role is not None:
             tensor_type = quantizer_role.tensor_type
-        with_rht = (
-            quantization in ("nvfp4_rht", "nvfp4_rht_ue5m3") and tensor_type != "weight"
-        )
+        with_rht = quantization in ("nvfp4_rht", "nvfp4_rht_ue5m3") and tensor_type != "weight"
         scale_dtype = (
-            te.DType.kFloat8UE5M3 if quantization == "nvfp4_rht_ue5m3"
-            else te.DType.kFloat8E4M3
+            te.DType.kFloat8UE5M3 if quantization == "nvfp4_rht_ue5m3" else te.DType.kFloat8E4M3
         )
         test = NVFP4Quantizer(
             scale_dtype=scale_dtype,

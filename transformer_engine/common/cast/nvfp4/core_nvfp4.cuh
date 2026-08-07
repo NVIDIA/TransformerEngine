@@ -107,22 +107,21 @@ __host__ __device__ constexpr float scale_max() {
 // Return the full-range maximum for a runtime scale dtype.
 inline float scale_max(const DType scale_dtype) {
   float result = 0.0f;
-  TRANSFORMER_ENGINE_NVFP4_SCALE_TYPE_SWITCH(
-      scale_dtype, ScaleType, result = scale_max<ScaleType>();)
+  TRANSFORMER_ENGINE_NVFP4_SCALE_TYPE_SWITCH(scale_dtype, ScaleType,
+                                             result = scale_max<ScaleType>();)
   return result;
 }
 
 // Return and validate a user-provided maximum for a runtime scale dtype.
 inline float scale_max(const DType scale_dtype, const int scale_type_max) {
   float result = 0.0f;
-  TRANSFORMER_ENGINE_NVFP4_SCALE_TYPE_SWITCH(
-      scale_dtype, ScaleType, {
-        using ScaleTraits = NVFP4ScaleTraits<ScaleType>;
-        NVTE_CHECK(scale_type_max == static_cast<int>(ScaleTraits::expected_max) ||
-                       scale_type_max == static_cast<int>(ScaleTraits::headroom_max),
-                   "Unsupported maximum for NVFP4 scale dtype.");
-        result = static_cast<float>(scale_type_max);
-      })
+  TRANSFORMER_ENGINE_NVFP4_SCALE_TYPE_SWITCH(scale_dtype, ScaleType, {
+    using ScaleTraits = NVFP4ScaleTraits<ScaleType>;
+    NVTE_CHECK(scale_type_max == static_cast<int>(ScaleTraits::expected_max) ||
+                   scale_type_max == static_cast<int>(ScaleTraits::headroom_max),
+               "Unsupported maximum for NVFP4 scale dtype.");
+    result = static_cast<float>(scale_type_max);
+  })
   return result;
 }
 

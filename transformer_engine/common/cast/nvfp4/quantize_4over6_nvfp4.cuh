@@ -556,10 +556,9 @@ __device__ void quantize_stage_colwise(const IType *tile, fp4e2m1x2 *output_t, S
       block_amax = reduce_group_max_16(group_amax);
     }
 
-    const float global_amax =
-        amax == nullptr
-            ? core::scale_max<ScaleType, SCALE_TYPE_MAX>() * detail::TypeExtrema<fp4e2m1>::max
-            : amax[0];
+    const float global_amax = amax == nullptr ? core::scale_max<ScaleType, SCALE_TYPE_MAX>() *
+                                                    detail::TypeExtrema<fp4e2m1>::max
+                                              : amax[0];
     const ScalePair<ScaleType> scale_pair =
         compute_scale_pair<ScaleType, SCALE_TYPE_MAX>(block_amax, global_amax);
     CandidatePair candidates =
@@ -678,9 +677,9 @@ void launch_quantize_4over6(const Tensor &input, const Tensor *noop, Tensor *out
   TRANSFORMER_ENGINE_SWITCH_CONDITION(return_identity, RETURN_IDENTITY, {
     TRANSFORMER_ENGINE_SWITCH_CONDITION(return_transpose, RETURN_TRANSPOSE, {
       TRANSFORMER_ENGINE_SWITCH_CONDITION(row_scaled_nvfp4, ROW_SCALED_NVFP4, {
-        auto kernel = quantize_4over6_kernel<USE_2D_QUANTIZATION, RETURN_IDENTITY, RETURN_TRANSPOSE,
-                                             ROW_SCALED_NVFP4, Cfg, ScaleType, SCALE_TYPE_MAX,
-                                             IType>;
+        auto kernel =
+            quantize_4over6_kernel<USE_2D_QUANTIZATION, RETURN_IDENTITY, RETURN_TRANSPOSE,
+                                   ROW_SCALED_NVFP4, Cfg, ScaleType, SCALE_TYPE_MAX, IType>;
         cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, shmem);
         kernel<<<grid, block, shmem, stream>>>(input_ptr, output_ptr, output_t_ptr, scales_ptr,
                                                scales_t_ptr, amax_rowwise_ptr, amax_colwise_ptr,
@@ -740,14 +739,12 @@ void quantize_4over6_impl(const Tensor &input, const Tensor *noop, Tensor *outpu
   using ScaleTraits = core::NVFP4ScaleTraits<ScaleType>;
   const int scale_type_max = output->get_nvfp4_scale_max();
   NVTE_CHECK(scale_type_max == static_cast<int>(ScaleTraits::expected_max) ||
-             scale_type_max == static_cast<int>(ScaleTraits::headroom_max),
+                 scale_type_max == static_cast<int>(ScaleTraits::headroom_max),
              "Unsupported maximum for NVFP4 scale dtype.");
   TRANSFORMER_ENGINE_SWITCH_CONDITION(
-      scale_type_max == static_cast<int>(ScaleTraits::headroom_max),
-      USE_SCALE_HEADROOM, {
-        constexpr int SCALE_TYPE_MAX =
-            static_cast<int>(USE_SCALE_HEADROOM ? ScaleTraits::headroom_max
-                                                : ScaleTraits::expected_max);
+      scale_type_max == static_cast<int>(ScaleTraits::headroom_max), USE_SCALE_HEADROOM, {
+        constexpr int SCALE_TYPE_MAX = static_cast<int>(
+            USE_SCALE_HEADROOM ? ScaleTraits::headroom_max : ScaleTraits::expected_max);
         TRANSFORMER_ENGINE_NVFP4_4OVER6_MODE_SWITCH(
             quant_config->nvfp4_4over6_mode, MODE,
             TRANSFORMER_ENGINE_SWITCH_CONDITION(
@@ -755,10 +752,9 @@ void quantize_4over6_impl(const Tensor &input, const Tensor *noop, Tensor *outpu
                   using Cfg = quantize_4over6_kernel::Config<MODE, ERR_USE_FAST_MATH>;
                   TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
                       input.dtype(), IType,
-                      quantize_4over6_kernel::launch_quantize_4over6<use_2d_quantization, Cfg,
-                                                                     ScaleType, SCALE_TYPE_MAX,
-                                                                     IType>(input, noop, output,
-                                                                            stream););
+                      quantize_4over6_kernel::launch_quantize_4over6<
+                          use_2d_quantization, Cfg, ScaleType, SCALE_TYPE_MAX, IType>(
+                          input, noop, output, stream););
                 }););
       })
 

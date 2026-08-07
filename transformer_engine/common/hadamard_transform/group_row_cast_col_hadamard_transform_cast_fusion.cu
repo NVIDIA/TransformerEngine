@@ -1331,8 +1331,8 @@ void group_hadamard_transform_cast_fusion(const Tensor &input_, std::vector<Tens
     // sanity check, the two bool flags cannot be both false
     NVTE_CHECK(has_row_quant || has_col_quant,
                "At least one of the output tensors must have row or column quant.");
-    const DType output_scale_dtype =
-        has_row_quant ? output_list[i]->scale_inv.dtype : output_list[i]->columnwise_scale_inv.dtype;
+    const DType output_scale_dtype = has_row_quant ? output_list[i]->scale_inv.dtype
+                                                   : output_list[i]->columnwise_scale_inv.dtype;
     if (has_row_quant && has_col_quant) {
       NVTE_CHECK(output_list[i]->columnwise_scale_inv.dtype == output_scale_dtype,
                  "Rowwise and columnwise NVFP4 scales must use the same dtype.");

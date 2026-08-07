@@ -104,11 +104,10 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
       auto dtype = input_tensor->dtype();
       const bool row_scaled_nvfp4 = output_tensor->row_scaled_nvfp4;
       const bool nvfp4_use_4over6 = quant_config_cpp.nvfp4_4over6_mode != kNVTENVFP44Over6Disabled;
-      NVTE_CHECK(
-          nvfp4_use_4over6 ||
-            output_tensor->get_nvfp4_scale_max() ==
-                  static_cast<int>(nvfp4::core::scale_max(output_tensor->scale_inv.dtype)),
-          "NVFP4 quantization with non-default scale max is only supported with 4over6.");
+      NVTE_CHECK(nvfp4_use_4over6 ||
+                     output_tensor->get_nvfp4_scale_max() ==
+                         static_cast<int>(nvfp4::core::scale_max(output_tensor->scale_inv.dtype)),
+                 "NVFP4 quantization with non-default scale max is only supported with 4over6.");
       NVTE_CHECK(!nvfp4_use_4over6 || !quant_config_cpp.stochastic_rounding,
                  "NVFP4 4over6 quantization does not support stochastic rounding.");
       if (row_scaled_nvfp4) {
@@ -290,8 +289,8 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
       const bool row_scaled_nvfp4 = output_tensor->row_scaled_nvfp4;
       const bool nvfp4_use_4over6 = quant_config_cpp.nvfp4_4over6_mode != kNVTENVFP44Over6Disabled;
       NVTE_CHECK(nvfp4_use_4over6 ||
-                 output_tensor->get_nvfp4_scale_max() ==
-                     static_cast<int>(nvfp4::core::scale_max(output_tensor->scale_inv.dtype)),
+                     output_tensor->get_nvfp4_scale_max() ==
+                         static_cast<int>(nvfp4::core::scale_max(output_tensor->scale_inv.dtype)),
                  "NVFP4 quantization with non-default scale max is only supported with 4over6.");
       NVTE_CHECK(!nvfp4_use_4over6 || !quant_config_cpp.stochastic_rounding,
                  "NVFP4 4over6 quantization does not support stochastic rounding.");
@@ -455,9 +454,10 @@ void group_quantize_fwd_host_aware_helper(const NVTETensor input, NVTETensor *ou
       const bool nvfp4_use_4over6 = quant_config_cpp.nvfp4_4over6_mode != kNVTENVFP44Over6Disabled;
       if (!nvfp4_use_4over6) {
         for (const auto *output_tensor : output_tensors) {
-          NVTE_CHECK(output_tensor->get_nvfp4_scale_max()
-                         == static_cast<int>(nvfp4::core::scale_max(output_tensors[0]->scale_inv.dtype)),
-                     "NVFP4 quantization with non-default scale max is only supported with 4over6.");
+          NVTE_CHECK(
+              output_tensor->get_nvfp4_scale_max() ==
+                  static_cast<int>(nvfp4::core::scale_max(output_tensors[0]->scale_inv.dtype)),
+              "NVFP4 quantization with non-default scale max is only supported with 4over6.");
         }
       }
       NVTE_CHECK(!quant_config_cpp.nvfp4_2d_quantization,

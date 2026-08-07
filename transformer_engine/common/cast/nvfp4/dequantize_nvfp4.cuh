@@ -66,8 +66,7 @@ __global__ void __launch_bounds__(512)
   value.vec = input_vectorized[my_index];
   ScaleType scale = scales[my_scale_index];
   constexpr float fp4_max = detail::TypeExtrema<fp4e2m1>::max;
-  constexpr float unit_global_scale_amax =
-      fp4_max * core::scale_max<ScaleType, SCALE_TYPE_MAX>();
+  constexpr float unit_global_scale_amax = fp4_max * core::scale_max<ScaleType, SCALE_TYPE_MAX>();
   float amax = unit_global_scale_amax;
   if (tensor_amax != nullptr) {
     amax = ROW_SCALED_NVFP4 ? tensor_amax[y] : tensor_amax[0];
@@ -91,10 +90,10 @@ __global__ void __launch_bounds__(512)
 #if FP4_TYPE_SUPPORTED
 template <typename ScaleType, int SCALE_TYPE_MAX>
 inline void launch_dequantize(const Tensor &input, Tensor *output,
-                              const bool with_gemm_swizzled_scales,
-                              const bool row_scaled_nvfp4, const size_t N, const size_t Mread,
-                              const size_t blocks, const size_t threads,
-                              const size_t num_scale_tiles_X, cudaStream_t stream) {
+                              const bool with_gemm_swizzled_scales, const bool row_scaled_nvfp4,
+                              const size_t N, const size_t Mread, const size_t blocks,
+                              const size_t threads, const size_t num_scale_tiles_X,
+                              cudaStream_t stream) {
   using namespace dequantize_kernel;
   TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
       output->data.dtype, OType,
@@ -102,9 +101,8 @@ inline void launch_dequantize(const Tensor &input, Tensor *output,
           with_gemm_swizzled_scales, WITH_GEMM_SWIZZLED_SCALES,
           TRANSFORMER_ENGINE_SWITCH_CONDITION(
               row_scaled_nvfp4, ROW_SCALED_NVFP4,
-              dequantize_fp4_kernel<OType, ScaleType, WITH_GEMM_SWIZZLED_SCALES,
-                                    ROW_SCALED_NVFP4, SCALE_TYPE_MAX>
-              <<<blocks, threads, 0, stream>>>(
+              dequantize_fp4_kernel<OType, ScaleType, WITH_GEMM_SWIZZLED_SCALES, ROW_SCALED_NVFP4,
+                                    SCALE_TYPE_MAX><<<blocks, threads, 0, stream>>>(
                   input.data.dptr, reinterpret_cast<OType *>(output->data.dptr),
                   reinterpret_cast<const ScaleType *>(input.scale_inv.dptr),
                   reinterpret_cast<const float *>(input.amax.dptr), N, Mread,
@@ -141,21 +139,20 @@ inline void dequantize(const Tensor &input, Tensor *output, cudaStream_t stream)
              "Row-scaled NVFP4 does not support disabling second-level scaling.");
   NVTE_CHECK(!row_scaled_nvfp4 || input.amax.numel() == N,
              "Row-scaled NVFP4 dequantization requires one rowwise amax per row.");
-  TRANSFORMER_ENGINE_NVFP4_SCALE_TYPE_SWITCH(
-      scale_dtype, ScaleType, {
-        using ScaleTraits = core::NVFP4ScaleTraits<ScaleType>;
-        if (e4m3_max == static_cast<int>(ScaleTraits::expected_max)) {
-          launch_dequantize<ScaleType, static_cast<int>(ScaleTraits::expected_max)>(
-              input, output, with_gemm_swizzled_scales, row_scaled_nvfp4, N, Mread, blocks,
-              threads, num_scale_tiles_X, stream);
-        } else {
-          NVTE_CHECK(e4m3_max == static_cast<int>(ScaleTraits::headroom_max),
-                     "Unsupported maximum for NVFP4 scale dtype.");
-          launch_dequantize<ScaleType, static_cast<int>(ScaleTraits::headroom_max)>(
-              input, output, with_gemm_swizzled_scales, row_scaled_nvfp4, N, Mread, blocks,
-              threads, num_scale_tiles_X, stream);
-        }
-      })
+  TRANSFORMER_ENGINE_NVFP4_SCALE_TYPE_SWITCH(scale_dtype, ScaleType, {
+    using ScaleTraits = core::NVFP4ScaleTraits<ScaleType>;
+    if (e4m3_max == static_cast<int>(ScaleTraits::expected_max)) {
+      launch_dequantize<ScaleType, static_cast<int>(ScaleTraits::expected_max)>(
+          input, output, with_gemm_swizzled_scales, row_scaled_nvfp4, N, Mread, blocks, threads,
+          num_scale_tiles_X, stream);
+    } else {
+      NVTE_CHECK(e4m3_max == static_cast<int>(ScaleTraits::headroom_max),
+                 "Unsupported maximum for NVFP4 scale dtype.");
+      launch_dequantize<ScaleType, static_cast<int>(ScaleTraits::headroom_max)>(
+          input, output, with_gemm_swizzled_scales, row_scaled_nvfp4, N, Mread, blocks, threads,
+          num_scale_tiles_X, stream);
+    }
+  })
   NVTE_CHECK_CUDA(cudaGetLastError());
 #else
   NVTE_ERROR("CUDA 12.8 or higher is needed for FP4 calculation!");

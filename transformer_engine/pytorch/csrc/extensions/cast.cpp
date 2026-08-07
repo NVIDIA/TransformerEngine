@@ -1287,13 +1287,13 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
                                      : py::none();
 
     // Construct Python tensor.
-    tensor_py_list.emplace_back(NVFP4TensorClass(
-        rowwise_data, rowwise_scale, columnwise_data, columnwise_scale, amax_rowwise,
-        amax_columnwise, MakePythonDType(fp4_dtype), MakePythonDType(scale_dtype),
-        quantizer_py_list[i], with_gemm_swizzled_scales,
-        py::arg("row_scaled_nvfp4") = row_scaled_nvfp4,
-        py::arg("nvfp4_use_4over6") = nvfp4_use_4over6,
-        py::arg("nvfp4_e4m3_max") = nvfp4_e4m3_max));
+    tensor_py_list.emplace_back(
+        NVFP4TensorClass(rowwise_data, rowwise_scale, columnwise_data, columnwise_scale,
+                         amax_rowwise, amax_columnwise, MakePythonDType(fp4_dtype),
+                         MakePythonDType(scale_dtype), quantizer_py_list[i],
+                         with_gemm_swizzled_scales, py::arg("row_scaled_nvfp4") = row_scaled_nvfp4,
+                         py::arg("nvfp4_use_4over6") = nvfp4_use_4over6,
+                         py::arg("nvfp4_e4m3_max") = nvfp4_e4m3_max));
 
     // Construct C++ tensor
     // Use a TensorWrapper variable to hold the output of makeTransformerEngineTensor,
@@ -1301,20 +1301,20 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
     {
       TensorWrapper tensor_wrapper(NVTE_NVFP4_1D_SCALING);
       if (rowwise_usage) {
-        tensor_wrapper.set_rowwise_data(rowwise_data_list[i].data_ptr(),
-                                        fp4_dtype, rowwise_data_shapes[i]);
-        tensor_wrapper.set_rowwise_scale_inv(rowwise_scale_list[i].data_ptr(),
-                                             scale_dtype, rowwise_scale_shapes[i]);
+        tensor_wrapper.set_rowwise_data(rowwise_data_list[i].data_ptr(), fp4_dtype,
+                                        rowwise_data_shapes[i]);
+        tensor_wrapper.set_rowwise_scale_inv(rowwise_scale_list[i].data_ptr(), scale_dtype,
+                                             rowwise_scale_shapes[i]);
         if (!disable_second_level_scale) {
           tensor_wrapper.set_amax(amax_rowwise_list[i].data_ptr(), DType::kFloat32,
                                   getTensorShape(amax_rowwise_list[i]));
         }
       }
       if (columnwise_usage) {
-        tensor_wrapper.set_columnwise_data(columnwise_data_list[i].data_ptr(),
-                                           fp4_dtype, columnwise_data_shapes[i]);
-        tensor_wrapper.set_columnwise_scale_inv(columnwise_scale_list[i].data_ptr(),
-                                                scale_dtype, columnwise_scale_shapes[i]);
+        tensor_wrapper.set_columnwise_data(columnwise_data_list[i].data_ptr(), fp4_dtype,
+                                           columnwise_data_shapes[i]);
+        tensor_wrapper.set_columnwise_scale_inv(columnwise_scale_list[i].data_ptr(), scale_dtype,
+                                                columnwise_scale_shapes[i]);
         if (!disable_second_level_scale) {
           tensor_wrapper.set_columnwise_amax(amax_columnwise_list[i].data_ptr(), DType::kFloat32,
                                              std::vector<size_t>{1});

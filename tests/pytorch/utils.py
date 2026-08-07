@@ -162,8 +162,7 @@ def make_recipe(name: Optional[str], **recipe_kwargs: Any) -> Optional[Recipe]:
         with_rht = name in ("nvfp4_rht", "nvfp4_rht_ue5m3")
         use_4over6 = name == "nvfp4_4over6"
         scale_format = (
-            RecipeFormat.UE5M3 if name in ("nvfp4_ue5m3", "nvfp4_rht_ue5m3")
-            else RecipeFormat.E4M3
+            RecipeFormat.UE5M3 if name in ("nvfp4_ue5m3", "nvfp4_rht_ue5m3") else RecipeFormat.E4M3
         )
         kwargs = {
             "disable_rht": not with_rht,
