@@ -803,7 +803,7 @@ class _PrepareQKVForFA(torch.autograd.Function):
         return dq, dk, dv
 
 
-def _maybe_unshare_cu_seqlens(cu_q: torch.Tensor, cu_kv: torch.Tensor):
+def _unalias_cu_seqlens(cu_q: torch.Tensor, cu_kv: torch.Tensor):
     """Copy kv's cumulative sequence lengths when they are q's as well.
 
     Self attention passes one tensor for both, and flash-attn forwards them to
@@ -1144,7 +1144,7 @@ class FlashAttention(torch.nn.Module):
                     else:
                         func = flash_attn_with_kvcache_v3  # pylint: disable=possibly-used-before-assignment
                     if not use_flash_attn_4 and (not use_flash_attn_3 or inference_params is None):
-                        cu_q, cu_kv = _maybe_unshare_cu_seqlens(
+                        cu_q, cu_kv = _unalias_cu_seqlens(
                             cu_seqlens_q_padded if pad_between_seqs else cu_seqlens_q,
                             cu_seqlens_kv_padded if pad_between_seqs else cu_seqlens_kv,
                         )
@@ -1160,7 +1160,7 @@ class FlashAttention(torch.nn.Module):
                     if inference_params is None:
                         fa_4_optional_forward_kwargs["deterministic"] = self.deterministic
                     if func is flash_attn_varlen_func_v4:
-                        cu_q, cu_kv = _maybe_unshare_cu_seqlens(cu_seqlens_q, cu_seqlens_kv)
+                        cu_q, cu_kv = _unalias_cu_seqlens(cu_seqlens_q, cu_seqlens_kv)
                         fa_4_optional_forward_kwargs["cu_seqlens_q"] = cu_q
                         fa_4_optional_forward_kwargs["cu_seqlens_k"] = cu_kv
                         fa_4_optional_forward_kwargs["max_seqlen_q"] = max_seqlen_q
