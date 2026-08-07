@@ -4,6 +4,8 @@
  * See LICENSE for license information.
  ************************************************************************/
 
+#include <algorithm>
+
 #include <cuda_bf16.h>
 #include <cuda_fp8.h>
 #include <cuda_runtime.h>
@@ -34,6 +36,12 @@ enum ActivationType {
     ReLU,
     QGeLU,
     SReLU
+};
+
+enum MXFP82DScalingDirection {
+    RowwiseOnly,
+    ColwiseOnly,
+    Bidirectional
 };
 
 template <typename InputType, typename OutputType>
@@ -162,6 +170,70 @@ void compute_ref(const ProcessingMethod processing_method,
     }
     for (size_t j = 0; j < cols; ++j) {
         output_dbias[j] = static_cast<InputType>(output_dbias_fp32[j]);
+    }
+}
+
+template <typename InputType, typename OutputType>
+void compute_ref_2d_quantize(const bool rowwise,
+                             const bool colwise,
+                             const InputType* input,
+                             OutputType* output_rowwise,
+                             OutputType* output_colwise,
+                             fp8e8m0* output_scales_rowwise,
+                             fp8e8m0* output_scales_colwise,
+                             const size_t rows,
+                             const size_t cols,
+                             const size_t scales_stride_rowwise,
+                             const size_t scales_stride_colwise) {
+    const size_t tile_size_Y = 32;
+    const size_t tile_size_X = 32;
+    const size_t tiles_num_Y = (rows + tile_size_Y - 1) / tile_size_Y;
+    const size_t tiles_num_X = (cols + tile_size_X - 1) / tile_size_X;
+
+    #pragma omp parallel for collapse(2) proc_bind(spread)
+    for (size_t tile_Y = 0; tile_Y < tiles_num_Y; ++tile_Y) {
+        for (size_t tile_X = 0; tile_X < tiles_num_X; ++tile_X) {
+            const size_t i_min = tile_Y * tile_size_Y;
+            const size_t i_max = std::min(i_min + tile_size_Y, rows);
+            const size_t j_min = tile_X * tile_size_X;
+            const size_t j_max = std::min(j_min + tile_size_X, cols);
+
+            float block_amax = 0.0f;
+            for (size_t i = i_min; i < i_max; ++i) {
+                for (size_t j = j_min; j < j_max; ++j) {
+                    const size_t idx = i * cols + j;
+                    block_amax = std::max(block_amax, std::abs(static_cast<float>(input[idx])));
+                }
+            }
+
+            const fp8e8m0 biased_exponent =
+                float_to_e8m0(block_amax * Quantized_Limits<OutputType>::max_reciprocal());
+            const float scale_reciprocal = exp2f_rcp(biased_exponent);
+
+            if (rowwise) {
+                for (size_t i = i_min; i < i_max; ++i) {
+                    output_scales_rowwise[i * scales_stride_rowwise + tile_X] = biased_exponent;
+                    for (size_t j = j_min; j < j_max; ++j) {
+                        const size_t idx = i * cols + j;
+                        output_rowwise[idx] =
+                            static_cast<OutputType>(static_cast<float>(input[idx]) *
+                                                    scale_reciprocal);
+                    }
+                }
+            }
+
+            if (colwise) {
+                for (size_t j = j_min; j < j_max; ++j) {
+                    output_scales_colwise[tile_Y * scales_stride_colwise + j] = biased_exponent;
+                    for (size_t i = i_min; i < i_max; ++i) {
+                        const size_t idx = i * cols + j;
+                        output_colwise[idx] =
+                            static_cast<OutputType>(static_cast<float>(input[idx]) *
+                                                    scale_reciprocal);
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -521,12 +593,124 @@ void performTest_x2(const ProcessingMethod processing_method,
     }
 }
 
+template <typename InputType, typename OutputType>
+void performTest_2d_quantize(const std::vector<size_t>& shape,
+                             const MXFP82DScalingDirection scaling_direction,
+                             InputsFillCase fill_case) {
+    using namespace test;
+    using EncodingType = fp32;
+    DType itype = TypeInfo<InputType>::dtype;
+    DType otype = TypeInfo<OutputType>::dtype;
+
+    if (shape.size() < 2) {
+      GTEST_SKIP();
+    }
+
+    const size_t rows = first_dimension(shape);
+    const size_t cols = last_dimension(shape);
+
+    const bool rowwise = scaling_direction != MXFP82DScalingDirection::ColwiseOnly;
+    const bool colwise = scaling_direction != MXFP82DScalingDirection::RowwiseOnly;
+
+    const std::array<size_t,4> scale_dims_rowwise = get_scale_tensor_dims(rows, cols, 1, 32);
+    const std::array<size_t,4> scale_dims_colwise = get_scale_tensor_dims(rows, cols, 32, 1);
+
+    const size_t unpadded_blocks_Y_rowwise = scale_dims_rowwise[0];
+    const size_t unpadded_blocks_X_rowwise = scale_dims_rowwise[1];
+    const size_t blocks_Y_rowwise = scale_dims_rowwise[2];
+    const size_t blocks_X_rowwise = scale_dims_rowwise[3];
+    const size_t scales_stride_rowwise = blocks_X_rowwise;
+
+    const size_t unpadded_blocks_Y_colwise = scale_dims_colwise[0];
+    const size_t unpadded_blocks_X_colwise = scale_dims_colwise[1];
+    const size_t blocks_Y_colwise = scale_dims_colwise[2];
+    const size_t blocks_X_colwise = scale_dims_colwise[3];
+    const size_t scales_stride_colwise = blocks_X_colwise;
+
+    Tensor input("input", shape, itype);
+    Tensor output("output", shape, otype, rowwise, colwise, NVTE_MXFP8_1D_SCALING);
+
+    std::unique_ptr<OutputType[]> ref_output_rowwise = std::make_unique<OutputType[]>(rows * cols);
+    std::unique_ptr<OutputType[]> ref_output_colwise = std::make_unique<OutputType[]>(rows * cols);
+    std::unique_ptr<fp8e8m0[]> ref_scales_rowwise =
+        std::make_unique<fp8e8m0[]>(blocks_Y_rowwise * blocks_X_rowwise);
+    std::unique_ptr<fp8e8m0[]> ref_scales_colwise =
+        std::make_unique<fp8e8m0[]>(blocks_Y_colwise * blocks_X_colwise);
+    std::fill_n(ref_scales_rowwise.get(), blocks_Y_rowwise * blocks_X_rowwise, 0);
+    std::fill_n(ref_scales_colwise.get(), blocks_Y_colwise * blocks_X_colwise, 0);
+
+    fillCase<EncodingType>(&input, fill_case);
+
+    QuantizationConfigWrapper quant_config;
+    quant_config.set_mxfp8_2d_quantization(true);
+    nvte_quantize_v2(input.data(), output.data(), quant_config, 0);
+
+    cudaDeviceSynchronize();
+    auto err = cudaGetLastError();
+    ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
+
+    compute_ref_2d_quantize<InputType, OutputType>(
+        rowwise,
+        colwise,
+        input.rowwise_cpu_dptr<InputType>(),
+        ref_output_rowwise.get(),
+        ref_output_colwise.get(),
+        ref_scales_rowwise.get(),
+        ref_scales_colwise.get(),
+        rows,
+        cols,
+        scales_stride_rowwise,
+        scales_stride_colwise);
+
+    const size_t scale_diff_abs_tolerance = 0;
+    const double abs_tolerable_mismatches_limit = 0.0;
+    const double rel_tolerable_mismatches_limit = 0.0;
+
+    auto [atol, rtol] = getTolerances(otype);
+
+    if (rowwise) {
+        size_t mismatches_scales_rowwise = 0;
+        compare_scaling_factors("scales_rowwise", output.rowwise_cpu_scale_inv_ptr<fp8e8m0>(),
+                                ref_scales_rowwise.get(), unpadded_blocks_Y_rowwise,
+                                unpadded_blocks_X_rowwise, scales_stride_rowwise,
+                                mismatches_scales_rowwise,
+                                scale_diff_abs_tolerance,
+                                abs_tolerable_mismatches_limit,
+                                rel_tolerable_mismatches_limit);
+        compareResults("output_rowwise", output, ref_output_rowwise.get(), true, atol, rtol, true);
+    }
+
+    if (colwise) {
+        size_t mismatches_scales_colwise = 0;
+        compare_scaling_factors("scales_colwise", output.columnwise_cpu_scale_inv_ptr<fp8e8m0>(),
+                                ref_scales_colwise.get(), unpadded_blocks_Y_colwise,
+                                unpadded_blocks_X_colwise, scales_stride_colwise,
+                                mismatches_scales_colwise,
+                                scale_diff_abs_tolerance,
+                                abs_tolerable_mismatches_limit,
+                                rel_tolerable_mismatches_limit);
+        compareResults("output_colwise", output, ref_output_colwise.get(), false, atol, rtol, true);
+    }
+}
+
 std::vector<std::vector<size_t>> matrix_sizes = {
     {1, 16},
     {16, 48},
     {128, 128},
     {993, 512},
     {1024},
+    {8, 32, 1024},
+    {16, 8, 4, 512},
+    {8192, 7168},
+};
+
+std::vector<std::vector<size_t>> matrix_sizes_2d_quantize = {
+    {1, 16},
+    {16, 48},
+    {65, 80},
+    {127, 400},
+    {128, 128},
+    {993, 512},
     {8, 32, 1024},
     {16, 8, 4, 512},
     {8192, 7168},
@@ -554,6 +738,12 @@ std::vector<ProcessingMethod> processing_methods = {
     ProcessingMethod::CAST_ACT,
 };
 
+std::vector<MXFP82DScalingDirection> scaling_directions_2d_quantize = {
+    MXFP82DScalingDirection::RowwiseOnly,
+    MXFP82DScalingDirection::ColwiseOnly,
+    MXFP82DScalingDirection::Bidirectional,
+};
+
 // Only GeLU activation tests are supported
 std::vector<ActivationType> Activation_types = {
     ActivationType::Identity,
@@ -569,6 +759,13 @@ class FusedCastMXFP8TestSuite : public ::testing::TestWithParam
                 ActivationType,
                 std::vector<size_t>,
                 std::pair<size_t, size_t>,
+                transformer_engine::DType,
+                transformer_engine::DType,
+                InputsFillCase>> {};
+
+class CastMXFP82DQuantizationTestSuite : public ::testing::TestWithParam
+    <std::tuple<MXFP82DScalingDirection,
+                std::vector<size_t>,
                 transformer_engine::DType,
                 transformer_engine::DType,
                 InputsFillCase>> {};
@@ -653,6 +850,29 @@ TEST_P(FusedCastMXFP8TestSuite, TestFusedCastMXFP8) {
     }
 }
 
+TEST_P(CastMXFP82DQuantizationTestSuite, TestCastMXFP82DQuantization) {
+    // Skip tests for pre-Blackwell architectures
+    if (getDeviceComputeCapability() < blackwellComputeCapability) {
+        GTEST_SKIP();
+    }
+
+    using namespace transformer_engine;
+    using namespace test;
+
+    const auto scaling_direction = std::get<0>(GetParam());
+    const auto matrix_size = std::get<1>(GetParam());
+    const DType input_type = std::get<2>(GetParam());
+    const DType output_type = std::get<3>(GetParam());
+    const InputsFillCase fill_case = std::get<4>(GetParam());
+
+    TRANSFORMER_ENGINE_TYPE_SWITCH_FP16_FP32_ONLY(input_type, InputType,
+        TRANSFORMER_ENGINE_TYPE_SWITCH_FP8_ONLY(output_type, OutputType,
+            performTest_2d_quantize<InputType, OutputType>(
+                matrix_size, scaling_direction, fill_case);
+        );
+    );
+}
+
 std::string to_string(const ProcessingMethod method) {
     switch (method) {
         case ProcessingMethod::CAST_ONLY:       return "CAST_ONLY";
@@ -676,6 +896,15 @@ std::string to_string(const ActivationType Act_type) {
     }
 }
 
+std::string to_string(const MXFP82DScalingDirection scaling_direction) {
+    switch (scaling_direction) {
+        case MXFP82DScalingDirection::RowwiseOnly:   return "RowwiseOnly";
+        case MXFP82DScalingDirection::ColwiseOnly:   return "ColwiseOnly";
+        case MXFP82DScalingDirection::Bidirectional: return "Bidirectional";
+        default: return "";
+    }
+}
+
 std::string test_name_generator(
     const testing::TestParamInfo<FusedCastMXFP8TestSuite::ParamType>& info) {
     std::string name = to_string(std::get<0>(info.param)) + "X" +
@@ -689,6 +918,19 @@ std::string test_name_generator(
             "X" + test::typeName(std::get<4>(info.param)) +
             "X" + test::typeName(std::get<5>(info.param)) +
             "X" + test::caseName(std::get<6>(info.param));
+    return name;
+}
+
+std::string mxfp8_2d_quantization_test_name_generator(
+    const testing::TestParamInfo<CastMXFP82DQuantizationTestSuite::ParamType>& info) {
+    std::string name = to_string(std::get<0>(info.param));
+    const auto& shape = std::get<1>(info.param);
+    for ( const auto& s: shape) {
+        name += "X" + std::to_string(s);
+    }
+    name += "X" + test::typeName(std::get<2>(info.param)) +
+            "X" + test::typeName(std::get<3>(info.param)) +
+            "X" + test::caseName(std::get<4>(info.param));
     return name;
 }
 
@@ -707,6 +949,18 @@ INSTANTIATE_TEST_SUITE_P(
         ::testing::Values(DType::kFloat8E4M3, DType::kFloat8E5M2),
         ::testing::ValuesIn(input_scenarios)),
     test_name_generator);
+
+// Test cases for MXFP8 2D block scaling through the common C++ API.
+INSTANTIATE_TEST_SUITE_P(
+    OperatorTest_CastMXFP8_2DQuantization,
+    CastMXFP82DQuantizationTestSuite,
+    ::testing::Combine(
+        ::testing::ValuesIn(scaling_directions_2d_quantize),
+        ::testing::ValuesIn(matrix_sizes_2d_quantize),
+        ::testing::Values(DType::kFloat32, DType::kBFloat16),
+        ::testing::Values(DType::kFloat8E4M3, DType::kFloat8E5M2),
+        ::testing::Values(InputsFillCase::uniform)),
+    mxfp8_2d_quantization_test_name_generator);
 
 // Test cases with varying matrix shapes and block shapes
 INSTANTIATE_TEST_SUITE_P(
