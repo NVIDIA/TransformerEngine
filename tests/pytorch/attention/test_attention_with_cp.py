@@ -402,6 +402,8 @@ model_configs_fused_attn = {
         2, 4096, 12, 128, attn_bias_type="post_scale_bias", bias_shape="bhss"
     ),  # MHA
     "cp_1_5": ModelConfig(2, 4096, 12, 128, attn_mask_type="causal", window_size=(512, 512)),  # MHA
+    # Noncausal MHA without bias/max-logit provides an FP8+THD+CP backend-compatible row.
+    "cp_1_6": ModelConfig(2, 4096, 12, 128),
     "cp_2_0": ModelConfig(
         2,
         4096,
@@ -486,6 +488,7 @@ cp_comm_types = ["p2p", "all_gather", "a2a", "a2a+p2p"]
 if test_essential:
     configs = [
         "cp_1_0",
+        "cp_1_6",
         "cp_2_0",
         "cp_2_1",
         "cp_2_2",
@@ -564,8 +567,6 @@ def test_cp_with_fused_attention(
     if dtype != "fp8" and (fp8_mha or fp8_dpa):
         pytest.skip("dtype!=fp8 requires fp8_dpa=False and fp8_mha=False!")
 
-    if dtype == "fp8" and qkv_format == "thd":
-        pytest.skip("No support for FP8 attention with THD format!")
     if dtype == "fp8" and config.attn_bias_type != "no_bias":
         pytest.skip("No support for FP8 attention with bias!")
 
@@ -607,6 +608,8 @@ def test_cp_with_fused_attention(
         pytest.skip("scaling_mode=delayed requires f16_O=False!")
     if scaling_mode == "mxfp8" and not f16_O:
         pytest.skip("scaling_mode=mxfp8 requires f16_O=True!")
+    if scaling_mode == "mxfp8" and qkv_format == "thd":
+        pytest.skip("MXFP8 quantization does not support THD format!")
     if scaling_mode == "mxfp8" and fp8_mha:
         pytest.skip("No support for scaling_mode=mxfp8 with fp8_mha=True!")
 

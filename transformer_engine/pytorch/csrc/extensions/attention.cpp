@@ -12,27 +12,9 @@ namespace {
 
 constexpr int block_size = 512;
 
-// fast zero-fills of tensors
-void mha_fill(const transformer_engine::TensorWrapper &self, const at::Tensor &start_index) {
-  std::vector<size_t> shape = transformer_engine::pytorch::convertShape(self.shape());
-
-  auto max_tokens = shape[0];
-  auto fcd_size = 1;
-  for (size_t i = 1; i <= shape.size(); i++) {
-    fcd_size *= shape[i];
-  }
-
-  NVTE_CHECK(fcd_size % block_size == 0, "input size not aligned to block size");
-
-  size_t element_size_bits = transformer_engine::pytorch::typeToNumBits(self.dtype());
-  int32_t start_row = start_index.data_ptr<int32_t>()[0];
-  void *base_ptr = static_cast<char *>(self.get_rowwise_data().data_ptr) +
-                   static_cast<size_t>(start_row) * fcd_size * element_size_bits / 8;
-  size_t num_rows_to_zero = max_tokens - start_row;
-  size_t total_bytes = num_rows_to_zero * fcd_size * element_size_bits / 8;
-
-  NVTE_SCOPED_GIL_RELEASE(
-      { nvte_memset(base_ptr, 0, total_bytes, at::cuda::getCurrentCUDAStream()); });
+// Keep zeroing stream-ordered; deriving a suffix offset from CUDA cu_seqlens on the host is unsafe.
+void mha_fill(transformer_engine::TensorWrapper &self) {
+  self.zero_(at::cuda::getCurrentCUDAStream());
 }
 
 }  // namespace
@@ -165,7 +147,7 @@ std::vector<py::object> fused_attn_fwd(
     // FP8
     if (set_zero && (o_format == NVTE_QKV_Format::NVTE_THD)) {
       if ((h * d) % block_size == 0) {
-        mha_fill(te_O, cu_seqlens_q.index({torch::indexing::Slice(-1, torch::indexing::None)}));
+        mha_fill(te_O);
       } else {
         te_O.zero_(at::cuda::getCurrentCUDAStream());
       }
@@ -470,7 +452,7 @@ std::vector<py::object> fused_attn_bwd(
     if (set_zero) {
       if (dq_format == NVTE_QKV_Format::NVTE_THD) {
         if (((h_q * d_qk) % block_size == 0) && dQ.is_contiguous()) {
-          mha_fill(te_dQ, cu_seqlens_q.index({torch::indexing::Slice(-1, torch::indexing::None)}));
+          mha_fill(te_dQ);
         } else {
           dQ.fill_(0);
         }
@@ -478,8 +460,8 @@ std::vector<py::object> fused_attn_bwd(
       if (dkv_format == NVTE_QKV_Format::NVTE_THD) {
         if (((h_kv * d_qk) % block_size == 0) && ((h_kv * d_v) % block_size == 0) &&
             dK.is_contiguous() && dV.is_contiguous()) {
-          mha_fill(te_dK, cu_seqlens_kv.index({torch::indexing::Slice(-1, torch::indexing::None)}));
-          mha_fill(te_dV, cu_seqlens_kv.index({torch::indexing::Slice(-1, torch::indexing::None)}));
+          mha_fill(te_dK);
+          mha_fill(te_dV);
         } else {
           dK.fill_(0);
           dV.fill_(0);
