@@ -20,6 +20,8 @@ import setuptools
 
 from .utils import (
     cmake_bin,
+    cuda_home_path,
+    cuda_version,
     debug_build_enabled,
     found_ninja,
     get_frameworks,
@@ -62,6 +64,33 @@ class CMakeExtension(setuptools.Extension):
             f"-DCMAKE_BUILD_TYPE={build_type}",
             f"-DCMAKE_INSTALL_PREFIX={install_dir}",
         ]
+
+        discovered_cuda_home = cuda_home_path()
+        if discovered_cuda_home is not None:
+            configure_command.append(f"-DCUDAToolkit_ROOT={discovered_cuda_home}")
+
+            # CUDA wheels use `lib`, while toolkit installations typically use
+            # `lib64`. Only override CMake's library discovery for a wheel-style
+            # layout with the expected libraries present.
+            cuda_lib_dir = discovered_cuda_home / "lib"
+            if cuda_lib_dir.is_dir() and (cuda_full_version := cuda_version()):
+                cuda_major_version = cuda_full_version[0]
+                cuda_libraries = {
+                    "CUDA_CUDART": cuda_lib_dir / f"libcudart.so.{cuda_major_version}",
+                    "CUDA_cudart_LIBRARY": cuda_lib_dir / f"libcudart.so.{cuda_major_version}",
+                    "CUDA_cublas_LIBRARY": cuda_lib_dir / f"libcublas.so.{cuda_major_version}",
+                    "CUDA_cublasLt_LIBRARY": cuda_lib_dir / f"libcublasLt.so.{cuda_major_version}",
+                }
+                if all(library.is_file() for library in cuda_libraries.values()):
+                    configure_command.append(f"-DCMAKE_CUDA_FLAGS=-L{cuda_lib_dir}")
+                    configure_command.extend(
+                        f"-D{variable}={library}" for variable, library in cuda_libraries.items()
+                    )
+
+        discovered_nvcc_path = nvcc_path()
+        if discovered_nvcc_path is not None:
+            configure_command.append(f"-DCMAKE_CUDA_COMPILER={discovered_nvcc_path}")
+
         if bool(int(os.getenv("NVTE_USE_CCACHE", "0"))):
             ccache_bin = os.getenv("NVTE_CCACHE_BIN", "ccache")
             configure_command += [
@@ -200,6 +229,11 @@ def get_build_ext(
                             and not framework_extension_only
                         ):
                             nvcc_bin = nvcc_path()
+                            if nvcc_bin is None:
+                                raise RuntimeError(
+                                    f"NVCC not found and is required for building CUDA source {src}"
+                                )
+
                             self.compiler.set_executable("compiler_so", str(nvcc_bin))
                             if isinstance(cflags, dict):
                                 cflags = cflags["nvcc"]
