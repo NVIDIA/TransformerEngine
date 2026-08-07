@@ -670,10 +670,6 @@ struct CastTraits<_IType, _OType, /*rowwise=*/true, /*colwise=*/true> {
                                         smem_alignment + smem_rowwise_scale + smem_colwise_reduce);
 };
 
-__device__ __forceinline__ intptr_t align_to(intptr_t x, intptr_t align) {
-  return (x + align - 1) & ~((align)-1);
-}
-
 // 32x32
 template <typename CastTraits,
           std::enable_if_t<CastTraits::isRowwise && CastTraits::isColwise, int> = 0,
@@ -706,8 +702,7 @@ __global__ void quantize_mxfp8_kernel_cast_only(
   block_coords.x = blockIdx.x * CastTraits::blockDIM::N;
 
   extern __shared__ char smem[];
-  char *smemAligned = reinterpret_cast<char *>(
-      align_to(reinterpret_cast<intptr_t>(smem), CastTraits::smem_alignment));
+  char *smemAligned = align_up(smem, CastTraits::smem_alignment);
 
   IType *sInput = reinterpret_cast<IType *>(smemAligned);
   inputUnitType *sInputUnit = reinterpret_cast<inputUnitType *>(sInput);
@@ -1179,8 +1174,7 @@ __global__ void quantize_mxfp8_kernel_cast_only(
   block_coords.x = blockIdx.x * CastTraits::blockDIM::N;
 
   extern __shared__ char smem[];
-  char *smemAligned = reinterpret_cast<char *>(
-      align_to(reinterpret_cast<intptr_t>(smem), CastTraits::smem_alignment));
+  char *smemAligned = align_up(smem, CastTraits::smem_alignment);
   IType *sInput = reinterpret_cast<IType *>(smemAligned);
   inputUnitType *sInputUnit = reinterpret_cast<inputUnitType *>(sInput);
 
