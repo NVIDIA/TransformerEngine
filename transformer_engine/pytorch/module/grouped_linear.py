@@ -795,6 +795,7 @@ class _GroupedLinear(torch.autograd.Function):
         weight_workspaces: List[Optional[QuantizedTensorStorage]],
         cache_weight: bool,
         skip_fp8_weight_update: Optional[torch.Tensor],
+        save_original_input: bool,
         single_grouped_weight: bool,
         single_grouped_bias: bool,
         weights: Tuple[torch.Tensor, ...],
@@ -808,6 +809,7 @@ class _GroupedLinear(torch.autograd.Function):
         in_features = weights[0].size(-1)
         out_features = weights[0].size(-2)
         weight_requires_grad = weights[0].requires_grad
+        save_original_input = save_original_input and weight_requires_grad
 
         split_sizes, (
             base_split_offsets,
@@ -828,7 +830,7 @@ class _GroupedLinear(torch.autograd.Function):
             input_quantizer = input_quantizers[0]
             input_quantizer.set_usage(
                 rowwise=True,
-                columnwise=is_grad_enabled and weight_requires_grad,
+                columnwise=(is_grad_enabled and weight_requires_grad and not save_original_input),
             )
             input_quantizer.optimize_for_gemm = True
             grouped_x = tex.group_quantize(
@@ -905,20 +907,25 @@ class _GroupedLinear(torch.autograd.Function):
         )
 
         if is_grad_enabled:
+            input_to_save = grouped_x
             if weight_requires_grad:
-                # (For FP8 per tensor current scaling on Hopper --> Free Rowwise Data
-                # in backward pass)
-                if fp8 and grouped_x.columnwise_data is not None:
+                if save_original_input:
+                    # Save the high-precision input and reconstruct the grouped columnwise
+                    # operand in backward instead of retaining a second quantized copy.
+                    input_to_save = inp
+                elif fp8 and grouped_x.columnwise_data is not None:
+                    # Wgrad only consumes the columnwise representation.
                     grouped_x.rowwise_data = None
                     grouped_x.scale_inv = None
             else:
-                grouped_x = None
+                input_to_save = None
 
             weights_to_save = [weights_for_gemm] if single_grouped_weight else weights_for_gemm
             if not inp.requires_grad:
                 weights_to_save = [None] * len(weights_to_save)
+
             tensors_to_save, tensor_objects = prepare_for_saving(
-                grouped_x,
+                input_to_save,
                 *weights_to_save,
                 split_sizes,
                 base_split_offsets,
@@ -928,7 +935,7 @@ class _GroupedLinear(torch.autograd.Function):
             ctx.save_for_backward(*tensors_to_save)
             ctx.tensor_objects = tensor_objects
 
-            ctx.use_grouped_tensor_path = True
+            ctx.grouped_tensor_supported = True
             ctx.weight_quantizers = weight_quantizers
             ctx.weights_shape_0 = out_features
             ctx.weights_shape_1 = in_features
@@ -971,7 +978,7 @@ class _GroupedLinear(torch.autograd.Function):
                 )
             ctx.wgrad_store = wgrad_store
             ctx.debug = False
-            ctx.save_original_input = False
+            ctx.save_original_input = save_original_input
             ctx.input_quantizers = input_quantizers
 
         return out.view(-1, *inp.shape[1:-1], out.shape[-1]), new_workspaces
@@ -1108,39 +1115,32 @@ class _GroupedLinear(torch.autograd.Function):
                 f"weight tensor (shape={tuple(weights[0].size())})"
             )
 
-        recipe_supports_grouped_tensor = is_module_grouped_tensor_path_supported(
-            recipe,
-            activation_dtype,
-        )
-        grouped_tensor_features_supported = (
-            not fp8_calibration
-            and not debug
-            and not cpu_offloading
-            and not save_original_input
-            and not any(q is not None for q in output_quantizers)
-        )
-        if (
-            use_grouped_tensor
-            and grouped_tensor_features_supported
-            and fp8
-            and recipe.float8_block_scaling()
-            and (10, 0) <= get_device_compute_capability() <= (11, 0)
+        grouped_tensor_supported = False
+        if use_grouped_tensor and not (
+            fp8_calibration
+            or debug
+            or cpu_offloading
+            or any(q is not None for q in output_quantizers)
         ):
-            raise RuntimeError(
-                "use_grouped_tensor=True does not support the FP8 block-scaling recipe on "
-                "Blackwell GPUs: the native grouped FP8 block-scaling path is Hopper-only. "
-                "Set use_grouped_tensor=False, or unset "
-                "NVTE_GROUPED_LINEAR_USE_FUSED_GROUPED_GEMM if it enabled this path, to use "
-                "the MXFP8-emulated path on Blackwell."
+            if (
+                fp8
+                and recipe.float8_block_scaling()
+                and (10, 0) <= get_device_compute_capability() <= (11, 0)
+            ):
+                raise RuntimeError(
+                    "use_grouped_tensor=True does not support the FP8 block-scaling recipe on "
+                    "Blackwell GPUs: the native grouped FP8 block-scaling path is Hopper-only. "
+                    "Set use_grouped_tensor=False, or unset "
+                    "NVTE_GROUPED_LINEAR_USE_FUSED_GROUPED_GEMM if it enabled this path, to use "
+                    "the MXFP8-emulated path on Blackwell."
+                )
+            grouped_tensor_supported = is_module_grouped_tensor_path_supported(
+                recipe,
+                activation_dtype,
             )
-        use_grouped_tensor_path = (
-            use_grouped_tensor
-            and grouped_tensor_features_supported
-            and recipe_supports_grouped_tensor
-        )
         if (
             use_grouped_tensor
-            and not use_grouped_tensor_path
+            and not grouped_tensor_supported
             and (single_grouped_weight or single_grouped_bias)
         ):
             raise RuntimeError(
@@ -1149,7 +1149,7 @@ class _GroupedLinear(torch.autograd.Function):
                 "configuration does not support it. Disable single_grouped_weight and "
                 "single_grouped_bias to allow the split-quantize fallback."
             )
-        if use_grouped_tensor_path:
+        if grouped_tensor_supported:
             if m_splits.device.type != "cuda":
                 raise ValueError(
                     "The native grouped_tensor path requires CUDA m_splits. Pass a CUDA int64 "
@@ -1174,6 +1174,7 @@ class _GroupedLinear(torch.autograd.Function):
                 weight_workspaces=weight_workspaces,
                 cache_weight=cache_weight,
                 skip_fp8_weight_update=skip_fp8_weight_update,
+                save_original_input=save_original_input,
                 single_grouped_weight=single_grouped_weight,
                 single_grouped_bias=single_grouped_bias,
                 weights=weights,
@@ -1267,7 +1268,7 @@ class _GroupedLinear(torch.autograd.Function):
             mark_not_offload(*weights_fp8, *weights)
 
         if is_grad_enabled:
-            ctx.use_grouped_tensor_path = False
+            ctx.grouped_tensor_supported = False
             ctx.weight_quantizers = weight_quantizers
             ctx.weights_shape_1 = weights[0].shape[1]
 
@@ -1384,7 +1385,7 @@ class _GroupedLinear(torch.autograd.Function):
         """Backward path paired with ``_forward_grouped_tensor``."""
         saved_tensors = restore_from_func_ctx(ctx)
         N = ctx.num_gemms
-        grouped_x = saved_tensors[0]
+        saved_input = saved_tensors[0]
         if ctx.single_grouped_weight:
             weights_for_gemm = saved_tensors[1]
             weight_tensors = [weights_for_gemm]
@@ -1399,6 +1400,28 @@ class _GroupedLinear(torch.autograd.Function):
             base_split_offsets = saved_tensors[2 + N]
             input_tensor_offsets = saved_tensors[3 + N]
             output_tensor_offsets = saved_tensors[4 + N]
+
+        if ctx.save_original_input:
+            x = cast_if_needed(
+                saved_input.reshape(-1, ctx.weights_shape_1),
+                ctx.activation_dtype,
+            )
+            if ctx.fp8:
+                input_quantizer = ctx.input_quantizers[0]
+                input_quantizer.set_usage(rowwise=False, columnwise=True)
+                input_quantizer.optimize_for_gemm = True
+                grouped_x = tex.group_quantize(x, input_quantizer, N, split_sizes)
+            else:
+                grouped_x = _GroupedLinear._make_grouped_tensor(
+                    x,
+                    num_gemms=N,
+                    split_sizes=split_sizes,
+                    tensor_offsets=input_tensor_offsets,
+                    last_dim=ctx.weights_shape_1,
+                    dtype=ctx.activation_dtype,
+                )
+        else:
+            grouped_x = saved_input
 
         num_weight_args = 1 if ctx.single_grouped_weight else N
         origin_weights = [None] * num_weight_args
@@ -1619,7 +1642,7 @@ class _GroupedLinear(torch.autograd.Function):
     ) -> Tuple[Union[torch.Tensor, None], ...]:
         # pylint: disable=missing-function-docstring
         with get_nvtx_range_context("_GroupedLinear_backward"):
-            if ctx.use_grouped_tensor_path:
+            if ctx.grouped_tensor_supported:
                 return _GroupedLinear._backward_grouped_tensor(ctx, grad_output)
 
             saved_tensors = restore_from_func_ctx(ctx)
@@ -2704,8 +2727,11 @@ class GroupedLinear(TransformerEngineBaseModule):
             if self.use_bias and any(has_grad_biases):
                 if self.use_grouped_tensor:
                     raise RuntimeError(
-                        "Delayed wgrad unexpectedly produced bias gradients; the grouped-tensor "
-                        "path computes them during the main backward."
+                        "GroupedLinear(use_grouped_tensor=True) fell back to the split-quantize "
+                        "path, which produced per-expert bias gradients during delayed wgrad. "
+                        "This implicit fallback is unsupported with delay_wgrad_compute=True. "
+                        "Use a configuration supported by the grouped-tensor path, or set "
+                        "use_grouped_tensor=False to select the legacy path explicitly."
                     )
                 bias_params = [getattr(self, f"bias{i}") for i in range(self.num_gemms)]
                 for i in range(self.num_gemms):

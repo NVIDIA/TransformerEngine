@@ -1886,6 +1886,7 @@ def _run_grouped_parameter_layout(
     weights,
     biases,
     m_splits,
+    save_original_input=False,
 ):
     """Run one layout and return all numerically observable forward/backward results."""
     FP8GlobalStateManager.reset()
@@ -1902,6 +1903,7 @@ def _run_grouped_parameter_layout(
         single_grouped_weight=single_grouped_weight,
         single_grouped_bias=single_grouped_bias,
         use_grouped_tensor=use_grouped_tensor,
+        save_original_input=save_original_input,
     )
 
     with torch.no_grad():
@@ -2118,6 +2120,112 @@ def test_grouped_parameter_layout_matches_cpu_m_splits(
                 **tolerances,
                 msg=f"Mismatch for {name}",
             )
+
+
+@pytest.mark.parametrize(
+    "fp8_recipe",
+    [
+        pytest.param(None, id="bf16"),
+        pytest.param(
+            recipe.Float8CurrentScaling(),
+            marks=pytest.mark.skipif(not _fp8_available, reason=_reason_for_no_fp8),
+            id="fp8-current-scaling",
+        ),
+        pytest.param(
+            recipe.MXFP8BlockScaling(),
+            marks=pytest.mark.skipif(not _mxfp8_available, reason=_reason_for_no_mxfp8),
+            id="mxfp8",
+        ),
+        pytest.param(
+            recipe.Float8BlockScaling(),
+            marks=pytest.mark.skipif(
+                not _fp8_block_scaling_available,
+                reason=_reason_for_no_fp8_block_scaling,
+            ),
+            id="fp8-block-scaling",
+        ),
+        pytest.param(
+            recipe.NVFP4BlockScaling(disable_stochastic_rounding=True),
+            marks=pytest.mark.skipif(not _nvfp4_available, reason=_reason_for_no_nvfp4),
+            id="nvfp4",
+        ),
+    ],
+)
+@pytest.mark.parametrize("single_grouped_weight", _ALL_BOOLEAN)
+def test_grouped_tensor_save_original_input_matches_saved_grouped_input(
+    monkeypatch,
+    fp8_recipe,
+    single_grouped_weight,
+):
+    """Saving raw input must preserve native grouped forward, dgrad, and wgrad numerics."""
+    if not is_module_grouped_tensor_path_supported(fp8_recipe, torch.bfloat16):
+        pytest.skip("Recipe is not supported by the module GroupedTensor path on this system.")
+    if single_grouped_weight and fp8_recipe is not None and fp8_recipe.nvfp4():
+        pytest.skip(
+            "NVFP4 grouped GEMM with single_grouped_weight is not supported yet; "
+            "only discrete weights are supported."
+        )
+
+    def reject_split_fallback(*_args, **_kwargs):
+        pytest.fail("save_original_input unexpectedly selected the split-quantize path")
+
+    monkeypatch.setattr(
+        "transformer_engine.pytorch.module.grouped_linear._split_quantize",
+        reject_split_fallback,
+    )
+    monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
+
+    torch.manual_seed(1234)
+    num_gemms = 2
+    in_features = 256
+    out_features = 256
+    m_splits = [256, 512]
+    total_tokens = sum(m_splits)
+    x_base = (0.1 * torch.randn(total_tokens, in_features, device="cuda")).to(torch.bfloat16)
+    dy = (0.1 * torch.randn(total_tokens, out_features, device="cuda")).to(torch.bfloat16)
+    weights = (0.1 * torch.randn(num_gemms, out_features, in_features, device="cuda")).to(
+        torch.bfloat16
+    )
+
+    saved_grouped = _run_grouped_parameter_layout(
+        use_grouped_tensor=True,
+        fp8_recipe=fp8_recipe,
+        single_grouped_weight=single_grouped_weight,
+        single_grouped_bias=False,
+        use_bias=False,
+        delay_wgrad_compute=False,
+        fuse_wgrad_accumulation=False,
+        x_base=x_base,
+        dy=dy,
+        weights=weights,
+        biases=None,
+        m_splits=m_splits,
+        save_original_input=False,
+    )
+    saved_original = _run_grouped_parameter_layout(
+        use_grouped_tensor=True,
+        fp8_recipe=fp8_recipe,
+        single_grouped_weight=single_grouped_weight,
+        single_grouped_bias=False,
+        use_bias=False,
+        delay_wgrad_compute=False,
+        fuse_wgrad_accumulation=False,
+        x_base=x_base,
+        dy=dy,
+        weights=weights,
+        biases=None,
+        m_splits=m_splits,
+        save_original_input=True,
+    )
+
+    for name in ("output", "dgrad", "wgrad"):
+        torch.testing.assert_close(
+            saved_original[name].float(),
+            saved_grouped[name].float(),
+            rtol=1e-2,
+            atol=5e-3,
+            msg=f"Mismatch for {name}",
+        )
 
 
 def _run_grouped_linear_path(
@@ -2574,6 +2682,33 @@ def test_grouped_linear_grouped_tensor_path_skips_non_rht_nvfp4():
             ref_linears[i].weight.grad.float(),
             **tols,
         )
+
+
+def test_grouped_linear_delay_wgrad_rejects_implicit_fallback(monkeypatch):
+    """Delayed wgrad reports when a grouped-tensor request used the legacy path."""
+    monkeypatch.setattr(
+        "transformer_engine.pytorch.module.grouped_linear.is_module_grouped_tensor_path_supported",
+        lambda *_args, **_kwargs: False,
+    )
+    grouped_linear = GroupedLinear(
+        2,
+        64,
+        64,
+        bias=True,
+        params_dtype=torch.bfloat16,
+        device="cuda",
+        delay_wgrad_compute=True,
+        use_grouped_tensor=True,
+    )
+    x = torch.randn(16, 64, dtype=torch.bfloat16, device="cuda", requires_grad=True)
+    m_splits = torch.tensor([8, 8], dtype=torch.int64, device="cuda")
+
+    grouped_linear(x, m_splits).sum().backward()
+    with pytest.raises(
+        RuntimeError,
+        match="implicit fallback is unsupported with delay_wgrad_compute=True",
+    ):
+        grouped_linear.backward_dw()
 
 
 @pytest.mark.parametrize(
