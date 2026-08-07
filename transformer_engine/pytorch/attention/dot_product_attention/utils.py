@@ -2036,9 +2036,12 @@ def get_full_cu_seqlens(
             device=device,
         )
 
-    if is_in_onnx_export_mode() or torch.compiler.is_compiling():
-        # The cache only saves an allocation, and its key -- is_inference_mode_enabled()
-        # -- is a fundamental graph break.
+    if is_in_onnx_export_mode():
+        # A tensor cached by an earlier call would be baked into the exported graph.
+        return _get_cu_seqlens(batch_size, max_seqlen, device)
+    if torch.compiler.is_compiling():
+        # torch.is_inference_mode_enabled(), part of the cache key, graph-breaks, and the
+        # cache only saves one arange.
         return _get_cu_seqlens(batch_size, max_seqlen, device)
 
     is_inference = torch.is_inference_mode_enabled()
