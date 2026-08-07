@@ -340,7 +340,7 @@ def general_grouped_gemm(
         bias_dtype = TE_DType[torch.bfloat16]
 
     # TODO: Row-scaled NVFP4 grouped GEMM is handled by looping over the per-expert
-    # dense general_gemm, fprop and wgrad without a dedicated grouped kernel. 
+    # dense general_gemm, fprop and wgrad without a dedicated grouped kernel.
     # The per-expert loop is not CUDA-graph-safe and will be fixed in a future work
     if any(_is_nvfp4_row_scaled_tensor(tensor) for tensor in A) or any(
         _is_nvfp4_row_scaled_tensor(tensor) for tensor in B

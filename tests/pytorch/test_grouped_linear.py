@@ -100,7 +100,7 @@ def nvfp4_row_scaled():
 def nvfp4_row_scaled_quantized_backward():
     # Same row-scaled activation recipe as nvfp4_row_scaled(), but with
     # backward_override=None so the backward runs in NVFP4 instead of falling back
-    # to high precision. 
+    # to high precision.
     nvfp4_recipe = recipe.NVFP4BlockScaling(
         disable_rht=True,
         disable_stochastic_rounding=True,
