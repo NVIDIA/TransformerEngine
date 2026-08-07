@@ -775,7 +775,7 @@ py::object group_requantize_inplace(py::handle grouped_x, py::handle quantizer,
     // optimize_for_gemm, which makes the kernel emit swizzled columnwise scales directly.
     quantizer.attr("set_usage")(py::arg("rowwise") = false, py::arg("columnwise") = true);
     auto columnwise = group_quantize(dequantized, quantizer, num_tensors, first_dims, std::nullopt,
-                                     tensor_offsets, std::nullopt);
+                                     tensor_offsets, std::nullopt, py::none());
     grouped_x.attr("columnwise_data") = columnwise.attr("columnwise_data");
     grouped_x.attr("columnwise_scale_inv") = columnwise.attr("columnwise_scale_inv");
   }
