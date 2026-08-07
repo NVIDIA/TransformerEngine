@@ -138,6 +138,43 @@ def _stride_from_shape(shape: list[int]):
     return list(reversed(rstride))
 
 
+def tensor_can_be_materialized(t) -> bool:
+    """Whether ``t`` holds concrete data that ``.item()`` / ``.tolist()`` can read
+    without side effects.
+
+    A ``__repr__`` must never mutate tracing state. On a fake / meta / functional
+    tensor (torch.compile / export tracing) ``.item()`` does *not* raise -- it
+    silently allocates an *unbacked* SymInt/SymFloat into the active ShapeEnv,
+    which later crashes inductor with ``PendingUnbackedSymbolNotFound``. (torch's
+    AOTAutograd repr's the fake quantized tensor while logging graph metadata, so
+    a scalar-materializing ``__repr__`` leaks an unbacked symbol during compile.)
+    So detect those tensors and fall back to a metadata-only repr instead.
+    """
+    if not isinstance(t, torch.Tensor):
+        return False
+    if getattr(t, "is_meta", False):
+        return False
+    try:
+        from torch._subclasses.fake_tensor import (  # pylint: disable=import-outside-toplevel
+            FakeTensor,
+        )
+
+        if isinstance(t, FakeTensor):
+            return False
+    except Exception:  # pylint: disable=broad-except
+        pass
+    try:
+        from torch._subclasses.functional_tensor import (  # pylint: disable=import-outside-toplevel
+            FunctionalTensor,
+        )
+
+        if isinstance(t, FunctionalTensor):
+            return False
+    except Exception:  # pylint: disable=broad-except
+        pass
+    return True
+
+
 def safe_quantized_repr(obj, cls_name, extras=None, error=None):
     """Metadata-only repr fallback for quantized tensors whose data cannot be
     materialized for any reason.

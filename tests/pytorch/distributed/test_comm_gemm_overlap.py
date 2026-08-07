@@ -111,6 +111,8 @@ def _run_layer_with_overlap(
     quantization,
     num_layers=1,
     use_cublasmp=False,
+    compile=False,
+    compile_mode="default",
 ):
     test_path = TEST_ROOT / "run_layer_with_overlap.py"
     test_cmd = LAUNCH_CMD + [
@@ -128,6 +130,10 @@ def _run_layer_with_overlap(
 
     if overlap_rs_dgrad:
         test_cmd.append("--overlap-rs-dgrad")
+
+    if compile:
+        test_cmd.append("--compile")
+        test_cmd.append(f"--compile-mode={compile_mode}")
 
     if fp8:
         if quantization in ("fp8_delayed_scaling", "fp8_current_scaling") and not fp8_available:
@@ -278,6 +284,40 @@ def test_layers_with_overlap_bf16(
     """
     _run_layer_with_overlap(
         layer_type, linear_parallel_mode, overlap_rs_dgrad, fp8, None, use_cublasmp=use_cublasmp
+    )
+
+
+@pytest.mark.parametrize("compile_mode", ["default", "reduce-overhead"])
+@pytest.mark.parametrize(
+    "linear_parallel_mode,overlap_rs_dgrad",
+    [
+        ("row", False),
+        ("column", False),
+        ("column", True),
+    ],
+    ids=[
+        "ROW-PARALLEL",
+        "COL-PARALLEL - BULK DGRAD/WGRAD",
+        "COL-PARALLEL - DGRAD+RS",
+    ],
+)
+def test_linear_with_overlap_compile(linear_parallel_mode, overlap_rs_dgrad, compile_mode):
+    """te.Linear comm+GEMM overlap (Userbuffers) under torch.compile (BF16).
+
+    Userbuffers is expected to stay on Linear's compiled custom-op path (the
+    collective lives inside the opaque op), so this checks that torch.compile +
+    Userbuffers stays numerically correct against the eager, non-overlap reference.
+    ``compile_mode="reduce-overhead"`` additionally exercises CUDA-graph trees on
+    top of the Userbuffers collectives.
+    """
+    _run_layer_with_overlap(
+        te.Linear.__name__,
+        linear_parallel_mode,
+        overlap_rs_dgrad,
+        False,
+        None,
+        compile=True,
+        compile_mode=compile_mode,
     )
 
 
