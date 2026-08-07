@@ -561,7 +561,7 @@ class _GroupedLinear(torch.autograd.Function):
         *,
         num_gemms: int,
         split_sizes: torch.Tensor,
-        base_split_offsets: torch.Tensor,
+        tensor_offsets: torch.Tensor,
         last_dim: int,
         dtype: torch.dtype,
     ) -> GroupedTensorStorage:
@@ -573,7 +573,7 @@ class _GroupedLinear(torch.autograd.Function):
             quantizer=None,
             data=data.reshape(-1),
             first_dims=split_sizes,
-            tensor_offsets=base_split_offsets * last_dim,
+            tensor_offsets=tensor_offsets,
         )
 
     @staticmethod
@@ -704,8 +704,18 @@ class _GroupedLinear(torch.autograd.Function):
         out_features = weights[0].size(0)
         weight_requires_grad = weights[0].requires_grad
 
-        split_sizes = m_splits.to(device=device)
-        base_split_offsets = tex.splits_to_offsets(split_sizes, 1)
+        split_sizes, (
+            base_split_offsets,
+            input_tensor_offsets,
+            output_tensor_offsets,
+        ) = tex.splits_to_offsets_multi(
+            m_splits,
+            device,
+            strides=[1, in_features, out_features],
+            include_leading_zero=[True, True, True],
+            dtypes=[torch.int64, torch.int64, torch.int64],
+            bulk_allocate=True,
+        )
 
         inp_view = inp.reshape(-1, in_features)
         x = cast_if_needed(inp_view, activation_dtype)
@@ -716,13 +726,19 @@ class _GroupedLinear(torch.autograd.Function):
                 columnwise=is_grad_enabled and weight_requires_grad,
             )
             input_quantizer.optimize_for_gemm = True
-            grouped_x = tex.group_quantize(x, input_quantizer, num_gemms, split_sizes)
+            grouped_x = tex.group_quantize(
+                x,
+                input_quantizer,
+                num_gemms,
+                split_sizes,
+                tensor_offsets=input_tensor_offsets,
+            )
         else:
             grouped_x = _GroupedLinear._make_grouped_tensor(
                 x,
                 num_gemms=num_gemms,
                 split_sizes=split_sizes,
-                base_split_offsets=base_split_offsets,
+                tensor_offsets=input_tensor_offsets,
                 last_dim=in_features,
                 dtype=activation_dtype,
             )
@@ -751,7 +767,7 @@ class _GroupedLinear(torch.autograd.Function):
             out,
             num_gemms=num_gemms,
             split_sizes=split_sizes,
-            base_split_offsets=base_split_offsets,
+            tensor_offsets=output_tensor_offsets,
             last_dim=out_features,
             dtype=activation_dtype,
         )
@@ -796,6 +812,8 @@ class _GroupedLinear(torch.autograd.Function):
                 *weights_to_save,
                 split_sizes,
                 base_split_offsets,
+                input_tensor_offsets,
+                output_tensor_offsets,
             )
             ctx.save_for_backward(*tensors_to_save)
             ctx.tensor_objects = tensor_objects
@@ -1217,6 +1235,8 @@ class _GroupedLinear(torch.autograd.Function):
         weights = saved_tensors[1 : 1 + N]
         split_sizes = saved_tensors[1 + N]
         base_split_offsets = saved_tensors[2 + N]
+        input_tensor_offsets = saved_tensors[3 + N]
+        output_tensor_offsets = saved_tensors[4 + N]
 
         origin_weights = [None] * N
         main_grads = [None] * N
@@ -1253,6 +1273,7 @@ class _GroupedLinear(torch.autograd.Function):
                     grad_output_quantizer,
                     N,
                     split_sizes,
+                    tensor_offsets=output_tensor_offsets,
                 )
             else:
                 grouped_dy = tex.group_quantize(
@@ -1260,13 +1281,14 @@ class _GroupedLinear(torch.autograd.Function):
                     grad_output_quantizer,
                     N,
                     split_sizes,
+                    tensor_offsets=output_tensor_offsets,
                 )
         else:
             grouped_dy = _GroupedLinear._make_grouped_tensor(
                 dy_2d,
                 num_gemms=N,
                 split_sizes=split_sizes,
-                base_split_offsets=base_split_offsets,
+                tensor_offsets=output_tensor_offsets,
                 last_dim=ctx.weights_shape_0,
                 dtype=ctx.activation_dtype,
             )
@@ -1298,7 +1320,7 @@ class _GroupedLinear(torch.autograd.Function):
                 dgrad,
                 num_gemms=N,
                 split_sizes=split_sizes,
-                base_split_offsets=base_split_offsets,
+                tensor_offsets=input_tensor_offsets,
                 last_dim=ctx.weights_shape_1,
                 dtype=ctx.activation_dtype,
             )

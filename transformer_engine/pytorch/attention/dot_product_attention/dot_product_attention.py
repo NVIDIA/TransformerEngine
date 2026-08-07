@@ -32,6 +32,7 @@ from transformer_engine.pytorch.quantization import (
     Float8BlockScalingRecipeState,
 )
 from transformer_engine.pytorch.tensor.storage.float8_tensor_storage import Float8TensorStorage
+from transformer_engine.pytorch.tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
 from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
 from transformer_engine.pytorch.export import is_in_onnx_export_mode
 from transformer_engine.pytorch.constants import AttnMaskTypes, AttnTypes, dist_group_type, DType
@@ -1347,6 +1348,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         inference_params: Optional[InferenceParams] = None,
         pad_between_seqs: Optional[bool] = None,
         fp8_output: Optional[bool] = False,
+        bf16_backward: Optional[bool] = False,
         num_splits: Optional[int] = 1,
         score_mod: Optional[Callable] = None,
         score_mod_bprop: Optional[Callable] = None,
@@ -1817,6 +1819,25 @@ class DotProductAttention(TransformerEngineBaseModule):
                     qkv_format=qkv_format,
                     inference_params=inference_params,
                 )
+            elif all(
+                isinstance(x, MXFP8TensorStorage) for x in [query_layer, key_layer, value_layer]
+            ):
+                # Pre-quantized MXFP8 q/k/v: the wrapper has no real storage, so run
+                # layout detection on the underlying rowwise data (mirrors the Float8 path).
+                (
+                    qkv_layout,
+                    query_layer._rowwise_data,
+                    key_layer._rowwise_data,
+                    value_layer._rowwise_data,
+                    q_format,
+                    kv_format,
+                ) = dpa_utils.get_qkv_layout(
+                    query_layer._rowwise_data,
+                    key_layer._rowwise_data,
+                    value_layer._rowwise_data,
+                    qkv_format=qkv_format,
+                    inference_params=inference_params,
+                )
             else:
                 (
                     qkv_layout,
@@ -2190,6 +2211,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                         fp8_output=fp8_output,
                         packed_qkv=qkv_layer,
                         packed_kv=kv_layer,
+                        bf16_backward=bf16_backward,
                     )
                 return self.fused_attention(
                     query_layer,
@@ -2227,6 +2249,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                     score_mod_bprop_tensors=score_mod_bprop_tensors,
                     packed_qkv=qkv_layer,
                     packed_kv=kv_layer,
+                    bf16_backward=bf16_backward,
                 )
 
             if use_unfused_attention:
