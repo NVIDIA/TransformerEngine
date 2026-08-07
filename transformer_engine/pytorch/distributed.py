@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 """Methods needed for distributed training (DP/TP)."""
+
 from __future__ import annotations
 
 from collections.abc import Iterable
@@ -49,7 +50,6 @@ from .tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
 from .tensor.storage.nvfp4_tensor_storage import NVFP4TensorStorage
 from .tensor.storage.float8_blockwise_tensor_storage import Float8BlockwiseQTensorStorage
 from ..debug.pytorch.debug_quantization import DebugQuantizedTensor
-
 
 __all__ = ["checkpoint", "CudaRNGStatesTracker"]
 
@@ -1882,6 +1882,11 @@ def get_symmetric_memory_tensor(tensor_numel, tensor_dtype, tensor_device, tp_gr
 
 _SYMM_MEM_POOL = None
 _SYMM_MEM_POOL_BACKEND = None
+# Device the pool was created for; the torch symm_mem._symm_mem_pools cache is keyed by it.
+_SYMM_MEM_POOL_DEVICE = None
+# True when the pool was created via torch's get_mem_pool, which caches it in the private
+# symm_mem._symm_mem_pools dict; release then has to drop that cached reference.
+_SYMM_MEM_POOL_TORCH_CACHED = False
 
 
 def _get_symm_mem_pool(device: torch.device, backend: str = "NCCL"):
@@ -1890,12 +1895,14 @@ def _get_symm_mem_pool(device: torch.device, backend: str = "NCCL"):
     backend arg, so the (process-global) backend is always set before the pool is created. The
     collective rendezvous cost is amortized across allocations (paid per new segment, not per buffer).
     """
-    global _SYMM_MEM_POOL, _SYMM_MEM_POOL_BACKEND
+    global _SYMM_MEM_POOL, _SYMM_MEM_POOL_BACKEND, _SYMM_MEM_POOL_DEVICE, _SYMM_MEM_POOL_TORCH_CACHED
     if _SYMM_MEM_POOL is None:
         symm_mem.set_backend(backend)
         _SYMM_MEM_POOL_BACKEND = backend
+        _SYMM_MEM_POOL_DEVICE = device
         if hasattr(symm_mem, "get_mem_pool"):
             _SYMM_MEM_POOL = symm_mem.get_mem_pool(device)
+            _SYMM_MEM_POOL_TORCH_CACHED = True
         elif hasattr(torch.cuda, "MemPool") and hasattr(symm_mem, "get_mempool_allocator"):
             _SYMM_MEM_POOL = torch.cuda.MemPool(symm_mem.get_mempool_allocator(device))
         else:
@@ -1909,6 +1916,40 @@ def _get_symm_mem_pool(device: torch.device, backend: str = "NCCL"):
             f"cannot switch to {backend!r}"
         )
     return _SYMM_MEM_POOL
+
+
+def release_symm_mem_pool() -> None:
+    """Free the process-wide symm-mem pool's segments, deregistering their NCCL windows.
+
+    Call before ``dist.destroy_process_group()``: the pool's windows are registered on
+    the group's NCCL comm, which becomes invalid once the group is destroyed. No-op if
+    no pool was created.
+    """
+    global _SYMM_MEM_POOL, _SYMM_MEM_POOL_BACKEND, _SYMM_MEM_POOL_DEVICE, _SYMM_MEM_POOL_TORCH_CACHED
+    if _SYMM_MEM_POOL is None:
+        return
+    # The torch symm_mem._symm_mem_pools cache is keyed by the pool's creation device.
+    device = _SYMM_MEM_POOL_DEVICE
+    _SYMM_MEM_POOL = None
+    _SYMM_MEM_POOL_BACKEND = None
+    _SYMM_MEM_POOL_DEVICE = None
+    torch_cached = _SYMM_MEM_POOL_TORCH_CACHED
+    _SYMM_MEM_POOL_TORCH_CACHED = False
+    # A pool from torch's get_mem_pool is also cached in the private module dict
+    # symm_mem._symm_mem_pools; drop that reference so the segments' refcount reaches zero
+    # and their NCCL windows deregister. Fail loudly if this internal has changed shape,
+    # otherwise the windows would silently leak past destroy_process_group().
+    if torch_cached:
+        pools = getattr(symm_mem, "_symm_mem_pools", None)
+        if not isinstance(pools, dict) or device not in pools:
+            raise RuntimeError(
+                "torch symmetric-memory pool cache (symm_mem._symm_mem_pools) is missing or "
+                "has changed layout; cannot release the pooled segments and their NCCL windows "
+                "would leak past destroy_process_group(). This torch version needs an updated "
+                "release_symm_mem_pool()."
+            )
+        pools.pop(device, None)
+    torch.cuda.empty_cache()
 
 
 def symm_mem_alloc(
