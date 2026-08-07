@@ -252,6 +252,8 @@ def check_nvfp4_row_scaled_grouped_gemm_matches_per_gemm(
     single_output: bool,
     use_4over6: bool = False,
     nvfp4_4over6_err_mode: str = "MAE",
+    weight_scales_swizzled: bool = False,
+    monkeypatch=None,
 ):
     te_dtype = te.DType.kFloat4E2M1
     device = "cuda"
@@ -283,6 +285,7 @@ def check_nvfp4_row_scaled_grouped_gemm_matches_per_gemm(
         nvfp4_use_4over6=use_4over6,
         nvfp4_4over6_err_mode=nvfp4_4over6_err_mode,
     )
+    w_quantizer.optimize_for_gemm = weight_scales_swizzled
 
     x_nvfp4 = []
     w_nvfp4 = []
@@ -317,6 +320,29 @@ def check_nvfp4_row_scaled_grouped_gemm_matches_per_gemm(
     else:
         out = [torch.empty((m, n), dtype=out_dtype, device=device) for m in m_splits]
 
+    calls = []
+    compute_capability = torch.cuda.get_device_capability()
+    use_cudnn = compute_capability[0] == 10 and compute_capability != (10, 7)
+    if use_cudnn:
+        try:
+            import cudnn
+        except ImportError as exc:
+            pytest.skip(f"cudnn frontend unavailable: {exc}")
+        if not hasattr(cudnn, "grouped_gemm_quant_wrapper_sm100"):
+            pytest.skip("grouped_gemm_quant_wrapper_sm100 unavailable")
+
+        original_wrapper = cudnn.grouped_gemm_quant_wrapper_sm100
+
+        def traced_wrapper(*args, **kwargs):
+            calls.append(kwargs)
+            return original_wrapper(*args, **kwargs)
+
+        monkeypatch.setattr(cudnn, "grouped_gemm_quant_wrapper_sm100", traced_wrapper)
+    else:
+        monkeypatch.setattr(
+            "transformer_engine.pytorch.cpp_extensions.gemm._cudnn_row_scaled_nvfp4_grouped_gemm",
+            lambda *args, **kwargs: pytest.fail("cuDNN row-scaled GEMM dispatched on fallback"),
+        )
     grouped_out, _, _ = general_grouped_gemm(
         w_nvfp4,
         x_nvfp4,
@@ -329,6 +355,40 @@ def check_nvfp4_row_scaled_grouped_gemm_matches_per_gemm(
         use_bias=use_bias,
         single_output=single_output,
     )
+
+    if use_cudnn:
+        assert len(calls) == 1
+        call = calls[0]
+        padded_m_splits = [((m + 255) // 256) * 256 if m > 0 else 0 for m in m_splits]
+        expected_alpha = torch.cat(
+            [tensor._amax_rowwise.view(-1) / (6.0 * tensor._nvfp4_e4m3_max) for tensor in w_nvfp4]
+        )
+        expected_row_scale = torch.zeros(sum(padded_m_splits), dtype=torch.float32, device=device)
+        offset = 0
+        for tensor, m, padded_m in zip(x_nvfp4, m_splits, padded_m_splits):
+            expected_row_scale[offset : offset + m].copy_(
+                tensor._amax_rowwise.view(-1) / (6.0 * tensor._nvfp4_e4m3_max)
+            )
+            offset += padded_m
+        torch.testing.assert_close(call["alpha_tensor"], expected_alpha, atol=0.0, rtol=0.0)
+        torch.testing.assert_close(call["row_scale_tensor"], expected_row_scale, atol=0.0, rtol=0.0)
+        torch.testing.assert_close(
+            call["padded_offsets"],
+            torch.tensor(padded_m_splits, dtype=torch.int32, device=device).cumsum(
+                0, dtype=torch.int32
+            ),
+            atol=0,
+            rtol=0,
+        )
+        assert call["sf_vec_size"] == 16
+        assert call["b_major"] == "k"
+        assert call["m_aligned"] == 256
+        assert call["prob_tensor"] is None
+        assert (call["bias_tensor"] is not None) == use_bias
+        direct_output = single_output and padded_m_splits == m_splits
+        assert (call["d_tensor"] is not None) == direct_output
+        if direct_output:
+            assert call["d_tensor"].data_ptr() == out[0].data_ptr()
 
     if single_output:
         grouped_slices = torch.split(grouped_out, m_splits, dim=0)
@@ -573,6 +633,11 @@ def test_nvfp4_gemm_versus_reference(
 @pytest.mark.parametrize("single_output", [False, True], ids=["list_output", "single_output"])
 @pytest.mark.parametrize("use_4over6", [False, True], ids=["default", "4over6"])
 @pytest.mark.parametrize("nvfp4_4over6_err_mode", ["MAE", "MSE"], ids=["mae_err", "mse_err"])
+@pytest.mark.parametrize(
+    "weight_scales_swizzled",
+    [False, True],
+    ids=["compact_weight_scales", "swizzled_weight_scales"],
+)
 def test_nvfp4_row_scaled_grouped_gemm_matches_per_gemm(
     m_splits: list[int],
     k: int,
@@ -584,7 +649,11 @@ def test_nvfp4_row_scaled_grouped_gemm_matches_per_gemm(
     single_output: bool,
     use_4over6: bool,
     nvfp4_4over6_err_mode: str,
+    weight_scales_swizzled: bool,
+    monkeypatch,
 ):
+    if torch.cuda.get_device_capability() < (10, 0):
+        pytest.skip("Requires SM100+ for NVFP4 grouped GEMM.")
     check_nvfp4_row_scaled_grouped_gemm_matches_per_gemm(
         x_dtype=x_dtype,
         w_dtype=w_dtype,
@@ -596,6 +665,8 @@ def test_nvfp4_row_scaled_grouped_gemm_matches_per_gemm(
         single_output=single_output,
         use_4over6=use_4over6,
         nvfp4_4over6_err_mode=nvfp4_4over6_err_mode,
+        weight_scales_swizzled=weight_scales_swizzled,
+        monkeypatch=monkeypatch,
     )
 
 
