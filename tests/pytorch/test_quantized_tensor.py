@@ -1014,3 +1014,91 @@ class TestMXFP8Tensor:
         # Make sure we are not trivially passing the test
         with pytest.raises(AssertionError):
             torch.testing.assert_close(x_deq, -x_ref, **_tols[fp8_dtype])
+
+
+@pytest.mark.parametrize("quantization", _quantization_list)
+@pytest.mark.parametrize("usage", ["rowwise", "columnwise", "both"])
+@pytest.mark.parametrize("shape", [(256, 512), (128, 320)], ids=lambda s: f"{s[0]}x{s[1]}")
+def test_skip_quantization_with_noop_flag(
+    quantization: str, usage: str, shape: Tuple[int, int]
+) -> None:
+    """
+    Test if the quantization honors the noop flag and skips quantization.
+    This test only verifies that the kernel skips quantization where it's expected to do so.
+    It doesn't verify otherwise (kernel correctly quantizes when noop is false) since that is already covered by other tests.
+
+    Parametrized over output usage and shape so that every kernel reachable from
+    dispatch/quantize.cuh with a noop flag gets exercised, not just the ones recently fixed.
+    """
+    if usage == "columnwise" and quantization in ("fp8", "fp8_delayed_scaling"):
+        pytest.skip("Delayed scaling does not support columnwise-only quantization")
+    if usage != "rowwise" and quantization == "nvfp4_row_scaled":
+        pytest.skip("Row-scaled NVFP4 does not produce columnwise output")
+
+    quantizer = make_quantizer(quantization)
+    quantizer.set_usage(
+        rowwise=usage in ("rowwise", "both"),
+        columnwise=usage in ("columnwise", "both"),
+    )
+
+    first_batch = torch.rand(shape, dtype=torch.bfloat16, device="cuda")
+    second_batch = torch.rand_like(first_batch)
+    x = first_batch.clone()
+
+    noop = torch.zeros(1, dtype=torch.float32, device="cuda")
+
+    # Allocate and populate the destination outside the graph
+    quantized = quantizer(x)
+
+    # CUDA graph capture requires the work to be warmed up on a side stream first.
+    side_stream = torch.cuda.Stream()
+    side_stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(side_stream):
+        for _ in range(3):
+            quantized.quantize_(x, noop_flag=noop)
+    torch.cuda.current_stream().wait_stream(side_stream)
+
+    # Capture the CUDA graph
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        quantized.quantize_(x, noop_flag=noop)
+
+    # Clone the underlying buffers of the quantized tensor's output so we can compare them later.
+    # Note that we can't clone the quantized tensor, but its underlying buffers are torch tensors and can be cloned.
+    def clone_quantized_output():
+        output_buffers = {}
+        for attr in (
+            "_data",
+            "_transpose",
+            "_rowwise_data",
+            "_columnwise_data",
+            "_scale_inv",
+            "_rowwise_scale_inv",
+            "_columnwise_scale_inv",
+        ):
+            buf = getattr(quantized, attr, None)
+            if buf is not None:
+                output_buffers[attr] = buf.clone()
+        assert output_buffers, f"{quantization}: quantized tensor exposes no data buffer"
+        return output_buffers
+
+    # Obtain the quantized x by setting the noop flag to false (zero)
+    noop.zero_()
+    graph.replay()
+    torch.cuda.synchronize()
+    quantized_without_noop = clone_quantized_output()
+
+    # Reset x to different values and set the noop flag to true (one).
+    # The quantization should be skipped so the output should not be different.
+    x.copy_(second_batch)
+    noop.fill_(1.0)
+    graph.replay()
+    torch.cuda.synchronize()
+    quantized_with_noop = clone_quantized_output()
+
+    for attr in quantized_without_noop:
+        buf_without_noop = quantized_without_noop[attr]
+        buf_with_noop = quantized_with_noop[attr]
+        assert torch.equal(
+            buf_without_noop, buf_with_noop
+        ), f"{quantization}/{usage}: noop flag fails to take effect because {attr} changed."
