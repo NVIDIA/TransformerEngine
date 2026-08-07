@@ -1745,11 +1745,115 @@ void split_quantize_nvfp4_impl(const TensorWrapper &input,
         split_quantize_nvfp4_impl_with_rht_helper(input, input_list, output_list, split_sections,
                                                   quantizers, stream);
       } else {
-        for (size_t i = 0; i < num_tensors; ++i) {
-          if (input_list[i].numel() == 0) {
-            continue;
+        // Grouped path: one grouped post-RHT amax launch plus one grouped
+        // RHT-quantize launch per chunk, instead of two launches per split. It needs
+        // both usages, per-split post-RHT amaxes, and splits that are multiples of
+        // 128 rows, so ragged or rowwise-only cases take the per-split loop below.
+        constexpr size_t kMaxTensorsPerLaunch = 64;
+        // Input bytes per launch pair. Sized against L2 so the quantize pass reuses
+        // what the amax pass just pulled in.
+        constexpr size_t kChunkBytes = 8u << 20;
+        // The grouped launch configures every split from quantizers.front() alone.
+        // GroupedLinear builds one independent NVFP4Quantizer per expert, and the
+        // Python-side cross-expert validator does not cover these fields for NVFP4,
+        // so require them to agree here or take the per-split loop below instead of
+        // silently applying the first split's settings to the rest.
+        const bool grouped_quantizers_uniform =
+            std::all_of(quantizers.begin(), quantizers.end(), [&](const NVFP4Quantizer *q) {
+              return q->with_post_rht_amax == quantizer.with_post_rht_amax &&
+                     q->rowwise_usage == quantizer.rowwise_usage &&
+                     q->columnwise_usage == quantizer.columnwise_usage &&
+                     q->row_scaled_nvfp4 == quantizer.row_scaled_nvfp4 &&
+                     q->nvfp4_4over6_mode == quantizer.nvfp4_4over6_mode &&
+                     q->stochastic_rounding == quantizer.stochastic_rounding &&
+                     q->rht_matrix_random_sign_mask_t == quantizer.rht_matrix_random_sign_mask_t;
+            });
+        bool use_grouped = grouped_quantizers_uniform && quantizer.with_post_rht_amax &&
+                           quantizer.rowwise_usage && quantizer.columnwise_usage &&
+                           !quantizer.with_2d_quantization && !quantizer.row_scaled_nvfp4 &&
+                           quantizer.nvfp4_4over6_mode == kNVTENVFP44Over6Disabled &&
+                           !transformer_engine::getenv<bool>("NVTE_NVFP4_DISABLE_GROUPED_RHT");
+        for (size_t i = 0; use_grouped && i < num_tensors; ++i) {
+          use_grouped = split_sections[i] % 128 == 0;
+        }
+
+        // Empty splits hold no allocation, so they stay out of the grouped launch.
+        // They occupy no rows either, so dropping them does not move any offset.
+        std::vector<size_t> grouped_idx;
+        if (use_grouped) {
+          grouped_idx.reserve(num_tensors);
+          for (size_t i = 0; i < num_tensors; ++i) {
+            if (split_sections[i] != 0) {
+              grouped_idx.push_back(i);
+            }
           }
-          quantizers[i]->quantize(input_list[i], output_list[i], std::nullopt);
+        }
+
+        if (use_grouped && !grouped_idx.empty()) {
+          const size_t cols = input.size(input.ndim() - 1);
+          auto *input_base = reinterpret_cast<uint8_t *>(input.get_rowwise_data().data_ptr);
+
+          QuantizationConfigWrapper grouped_config;
+          TensorWrapper te_rng_state;
+          if (quantizer.stochastic_rounding) {
+            grouped_config.set_stochastic_rounding(true);
+            constexpr size_t rng_elts_per_thread = 1024;
+            auto gen = at::get_generator_or_default<at::CUDAGeneratorImpl>(
+                std::nullopt, at::cuda::detail::getDefaultCUDAGenerator());
+            at::PhiloxCudaState philox_args = init_philox_state(gen, rng_elts_per_thread);
+            auto opts = at::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA);
+            auto rng_state = torch::empty({2}, opts);
+            philox_unpack(philox_args, static_cast<int64_t *>(rng_state.data_ptr()));
+            te_rng_state = makeTransformerEngineTensor(rng_state);
+            grouped_config.set_rng_state(te_rng_state.data());
+          }
+
+          const size_t row_bytes = cols * sizeof(uint16_t);
+          const size_t rows_per_chunk =
+              std::max<size_t>(1, kChunkBytes / std::max<size_t>(1, row_bytes));
+
+          size_t chunk_start = 0;
+          size_t chunk_row0 = 0;
+          while (chunk_start < grouped_idx.size()) {
+            size_t chunk_n = 0;
+            size_t budget = 0;
+            while (chunk_start + chunk_n < grouped_idx.size() && chunk_n < kMaxTensorsPerLaunch) {
+              const size_t next = split_sections[grouped_idx[chunk_start + chunk_n]];
+              if (chunk_n > 0 && budget + next > rows_per_chunk) {
+                break;
+              }
+              budget += next;
+              ++chunk_n;
+            }
+            size_t chunk_rows = 0;
+            std::vector<NVTETensor> chunk_outputs(chunk_n);
+            std::vector<size_t> chunk_splits(chunk_n);
+            for (size_t i = 0; i < chunk_n; ++i) {
+              const size_t idx = grouped_idx[chunk_start + i];
+              chunk_outputs[i] = output_list[idx].data();
+              chunk_splits[i] = split_sections[idx];
+              chunk_rows += chunk_splits[i];
+            }
+            TensorWrapper input_chunk;
+            input_chunk.set_rowwise_data(input_base + chunk_row0 * cols * sizeof(uint16_t),
+                                         DType::kBFloat16, std::vector<size_t>{chunk_rows, cols});
+
+            nvte_group_hadamard_transform_amax(input_chunk.data(), chunk_outputs.data(),
+                                               chunk_splits.data(), chunk_n, 0,
+                                               quantizer.rht_matrix_random_sign_mask_t, stream);
+            nvte_group_quantize_with_colwise_rht(
+                input_chunk.data(), chunk_outputs.data(), chunk_splits.data(), chunk_n,
+                quantizer.rht_matrix_random_sign_mask_t, grouped_config, stream);
+            chunk_start += chunk_n;
+            chunk_row0 += chunk_rows;
+          }
+        } else {
+          for (size_t i = 0; i < num_tensors; ++i) {
+            if (input_list[i].numel() == 0) {
+              continue;
+            }
+            quantizers[i]->quantize(input_list[i], output_list[i], std::nullopt);
+          }
         }
       }
     } else {  // NVFP4 quantize
