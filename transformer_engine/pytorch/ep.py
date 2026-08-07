@@ -21,6 +21,7 @@ from .distributed import symm_mem_alloc
 __all__ = [
     "EpBuffer",
     "ep_bootstrap",
+    "is_ep_bootstrapped",
     "ep_finalize",
     "ep_dispatch",
     "ep_combine",
@@ -167,6 +168,11 @@ def ep_bootstrap(
     if not _ATEXIT_REGISTERED:
         atexit.register(_atexit_finalize)
         _ATEXIT_REGISTERED = True
+
+
+def is_ep_bootstrapped() -> bool:
+    """Whether EP has been initialized in this process."""
+    return _BOOTSTRAPPED
 
 
 def ep_finalize() -> None:
