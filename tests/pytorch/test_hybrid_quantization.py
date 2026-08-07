@@ -10,6 +10,7 @@ import pytest
 import torch
 
 import transformer_engine.pytorch as te
+import transformer_engine.pytorch.module._grouped_quantization as grouped_quantization
 import transformer_engine_torch as tex
 
 from hybrid_quantization_utils import (
@@ -769,30 +770,63 @@ class TestHybridSaveOriginalInputPolicy:
             with autocast(enabled=True, recipe=recipe.DelayedScaling()):
                 model(inp)
 
-    def test_grouped_linear_classifies_requantization_safety_once_per_generation(self):
+    def test_grouped_linear_unsafe_custom_input_disables_save_original_input(self):
         counters = [{"calls": 0}, {"calls": 0}]
-        input_quantizers = [_CountingUnsafeIdentityQuantizer(counter) for counter in counters]
-        generation = []
-        for input_quantizer in input_quantizers:
-            generation.extend((input_quantizer, IdentityQuantizer(), IdentityQuantizer()))
+        input_index = 0
+
+        def qfactory(role):
+            nonlocal input_index
+            if (
+                role is not None
+                and role.module_type == "grouped_linear"
+                and role.tensor_type == "input"
+            ):
+                counter = counters[input_index % len(counters)]
+                input_index += 1
+                return _CountingUnsafeIdentityQuantizer(counter)
+            return IdentityQuantizer()
 
         module = GroupedLinear(
             2,
-            16,
-            16,
+            128,
+            128,
             bias=False,
-            device="meta",
-        )
-        module.quantizers["scaling_fwd"] = generation
+            params_dtype=torch.bfloat16,
+            save_original_input=True,
+        ).cuda()
+        reference = GroupedLinear(
+            2,
+            128,
+            128,
+            bias=False,
+            params_dtype=torch.bfloat16,
+        ).cuda()
+        reference.load_state_dict(module.state_dict())
+        inp = torch.randn(128, 128, dtype=torch.bfloat16, device="cuda", requires_grad=True)
+        reference_inp = inp.detach().clone().requires_grad_()
+        custom_recipe = recipe.CustomRecipe(qfactory=qfactory)
 
-        module._validate_quantizer_generation(fwd=True)
-        assert module._unsafe_requantization_input_quantizer is input_quantizers[0]
-        assert [counter.get("safety_calls", 0) for counter in counters] == [1, 0]
+        with pytest.warns(UserWarning, match="Ignoring save_original_input=True"):
+            with autocast(enabled=True, recipe=custom_recipe):
+                out = module(inp, [64, 64])
+        reference_out = reference(reference_inp, [64, 64])
 
-        # The generation list is stable between forwards, so the O(1) identity
-        # guard must avoid re-running capability checks.
-        module._validate_quantizer_generation(fwd=True)
+        calls_after_forward = [counter["calls"] for counter in counters]
+        out.float().sum().backward()
+        reference_out.float().sum().backward()
+
+        # Group compatibility is established when the CustomRecipe generation
+        # is constructed. Runtime policy reads only expert 0.
         assert [counter.get("safety_calls", 0) for counter in counters] == [1, 0]
+        assert [counter["calls"] for counter in counters] == calls_after_forward
+        reference_parameters = dict(reference.named_parameters())
+        for name, parameter in module.named_parameters():
+            torch.testing.assert_close(
+                parameter.grad,
+                reference_parameters[name].grad,
+                rtol=0.0,
+                atol=0.0,
+            )
 
     @staticmethod
     def _counting_identity_hybrid_recipe(
@@ -4200,8 +4234,8 @@ class TestHybridAllModules:
 class TestHybridGroupedLinearValidation:
     """GroupedLinear generation-validation and split-dispatch coverage.
 
-    Structural compatibility is validated once per real quantizer generation.
-    Steady-state dispatch reads the first expert after that uniformity check."""
+    CustomRecipe compatibility is validated once per real quantizer generation.
+    Built-in recipes skip that validation and steady-state generation processing."""
 
     @pytest.mark.parametrize(
         "quantizers",
@@ -4215,17 +4249,14 @@ class TestHybridGroupedLinearValidation:
         ],
     )
     def test_uniform_lists_validate(self, quantizers):
-        from transformer_engine.pytorch.module.grouped_linear import (
-            _validate_grouped_quantizer_list,
+        grouped_quantization.validate_grouped_quantizer_list(
+            quantizers,
+            operand_name="input",
         )
 
-        _validate_grouped_quantizer_list(quantizers, operand_name="input")
-
     def test_plain_custom_quantizer_uses_python_split_fallback(self, monkeypatch):
-        import transformer_engine.pytorch.module.grouped_linear as grouped_linear
-
         monkeypatch.setattr(
-            grouped_linear.tex,
+            grouped_quantization.tex,
             "split_quantize",
             lambda *args, **kwargs: pytest.fail("entered native split_quantize"),
         )
@@ -4233,16 +4264,139 @@ class TestHybridGroupedLinearValidation:
         tensor = torch.randn((4, 8))
         quantizers = [_CountingPythonQuantizer(calls) for _ in range(2)]
 
-        out = grouped_linear._split_quantize_non_hybrid(
+        out, dbiases = grouped_quantization._split_quantize(
             tensor,
             [2, 2],
             quantizers,
             tensor.dtype,
+            compute_dbias=True,
         )
 
+        expected_parts = torch.split(tensor, [2, 2])
+        assert dbiases is not None
+        for actual, expected in zip(dbiases, expected_parts):
+            torch.testing.assert_close(actual, expected.sum(dim=0), rtol=0.0, atol=0.0)
         assert len(calls) == 2
-        for actual, expected in zip(out, torch.split(tensor, [2, 2])):
+        for actual, expected in zip(out, expected_parts):
             torch.testing.assert_close(actual.dequantize(), expected, rtol=0.0, atol=0.0)
+
+    def test_native_bgrad_dispatch_is_quantizer_driven(self, monkeypatch):
+        tensor = torch.randn((4, 8))
+        split_sizes = [2, 2]
+        quantizers = [_make_fp8_quantizer() for _ in split_sizes]
+        calls = []
+
+        def fake_bgrad_quantize(tensor_part, quantizer):
+            calls.append((tensor_part, quantizer))
+            return tensor_part.sum(dim=0), tensor_part.clone()
+
+        monkeypatch.setattr(
+            grouped_quantization.tex,
+            "bgrad_quantize",
+            fake_bgrad_quantize,
+        )
+        monkeypatch.setattr(
+            grouped_quantization.tex,
+            "split_quantize",
+            lambda *args, **kwargs: pytest.fail("entered split_quantize instead of bgrad_quantize"),
+        )
+
+        outputs, dbiases = grouped_quantization._split_quantize(
+            tensor,
+            split_sizes,
+            quantizers,
+            tensor.dtype,
+            compute_dbias=True,
+        )
+
+        expected_parts = torch.split(tensor, split_sizes)
+        assert [quantizer for _, quantizer in calls] == quantizers
+        assert dbiases is not None
+        for output, dbias, expected in zip(outputs, dbiases, expected_parts):
+            torch.testing.assert_close(output, expected, rtol=0.0, atol=0.0)
+            torch.testing.assert_close(dbias, expected.sum(dim=0), rtol=0.0, atol=0.0)
+
+    def test_native_split_without_dbias_uses_bulk_path(self, monkeypatch):
+        tensor = torch.randn((4, 8))
+        split_sizes = [2, 2]
+        quantizers = [_make_fp8_quantizer() for _ in split_sizes]
+        calls = []
+
+        def fake_split_quantize(
+            tensor_arg,
+            split_sizes_arg,
+            quantizers_arg,
+            *,
+            disable_bulk_allocation=False,
+        ):
+            calls.append((tensor_arg, split_sizes_arg, quantizers_arg, disable_bulk_allocation))
+            return torch.split(tensor_arg, split_sizes_arg)
+
+        monkeypatch.setattr(
+            grouped_quantization.tex,
+            "bgrad_quantize",
+            lambda *args, **kwargs: pytest.fail("entered bgrad_quantize without a dbias request"),
+        )
+        monkeypatch.setattr(
+            grouped_quantization.tex,
+            "split_quantize",
+            fake_split_quantize,
+        )
+
+        outputs, dbiases = grouped_quantization._split_quantize(
+            tensor,
+            split_sizes,
+            quantizers,
+            tensor.dtype,
+            disable_bulk_allocation=True,
+        )
+
+        assert dbiases is None
+        assert len(calls) == 1
+        actual_tensor, actual_splits, actual_quantizers, actual_disable_bulk = calls[0]
+        assert actual_tensor is tensor
+        assert actual_splits is split_sizes
+        assert actual_quantizers is quantizers
+        assert actual_disable_bulk is True
+        for output, expected in zip(outputs, torch.split(tensor, split_sizes)):
+            torch.testing.assert_close(output, expected, rtol=0.0, atol=0.0)
+
+    def test_native_bgrad_quantize_matches_individual_quantization_exactly(self):
+        tensor = torch.randn(32, 128, dtype=torch.bfloat16, device="cuda")
+        split_sizes = [16, 16]
+        quantizers = [_make_fp8_quantizer() for _ in split_sizes]
+        for quantizer in quantizers:
+            quantizer.internal = True
+            quantizer.set_usage(rowwise=True, columnwise=False)
+        reference_quantizers = [quantizer.copy() for quantizer in quantizers]
+
+        outputs, dbiases = grouped_quantization._split_quantize(
+            tensor,
+            split_sizes,
+            quantizers,
+            tensor.dtype,
+            compute_dbias=True,
+        )
+
+        tensor_parts = torch.split(tensor, split_sizes)
+        reference_outputs = [
+            quantizer.quantize(tensor_part)
+            for quantizer, tensor_part in zip(reference_quantizers, tensor_parts)
+        ]
+        for index, (output, reference_output) in enumerate(zip(outputs, reference_outputs)):
+            _assert_storage_data_exact(
+                output,
+                reference_output,
+                context=f"native grouped split {index}",
+            )
+        assert dbiases is not None
+        for dbias, tensor_part in zip(dbiases, tensor_parts):
+            torch.testing.assert_close(
+                dbias,
+                tensor_part.sum(dim=0),
+                rtol=0.0,
+                atol=0.0,
+            )
 
     @pytest.mark.parametrize("direction", ("rowwise", "columnwise"))
     def test_hybrid_custom_child_uses_python_split_fallback(
@@ -4250,12 +4404,15 @@ class TestHybridGroupedLinearValidation:
         monkeypatch,
         direction,
     ):
-        import transformer_engine.pytorch.module.grouped_linear as grouped_linear
-
         monkeypatch.setattr(
-            grouped_linear.tex,
+            grouped_quantization.tex,
             "split_quantize",
             lambda *args, **kwargs: pytest.fail("entered native split_quantize"),
+        )
+        monkeypatch.setattr(
+            grouped_quantization.tex,
+            "bgrad_quantize",
+            lambda *args, **kwargs: pytest.fail("hybrid quantization entered bgrad_quantize"),
         )
         calls = []
         quantizers = []
@@ -4272,63 +4429,79 @@ class TestHybridGroupedLinearValidation:
             )
             quantizers.append(quantizer)
 
-        out = grouped_linear._split_quantize_hybrid(
-            torch.randn((4, 8)),
+        tensor = torch.randn((4, 8))
+        out, dbiases = grouped_quantization._split_quantize(
+            tensor,
             [2, 2],
             quantizers,
+            tensor.dtype,
+            compute_dbias=True,
         )
 
+        expected_parts = torch.split(tensor, [2, 2])
+        assert dbiases is not None
+        for actual, expected in zip(dbiases, expected_parts):
+            torch.testing.assert_close(actual, expected.sum(dim=0), rtol=0.0, atol=0.0)
         assert len(calls) == 2
         assert all(result.rowwise_sub_storage is not None for result in out)
         assert all(result.columnwise_sub_storage is not None for result in out)
+        for result, expected in zip(out, expected_parts):
+            torch.testing.assert_close(
+                result.rowwise_sub_storage.dequantize(),
+                expected,
+                rtol=0.0,
+                atol=0.0,
+            )
+            torch.testing.assert_close(
+                result.columnwise_sub_storage.dequantize(),
+                expected,
+                rtol=0.0,
+                atol=0.0,
+            )
 
     def test_mixed_hybrid_and_plain_raises(self):
-        from transformer_engine.pytorch.module.grouped_linear import (
-            _validate_grouped_quantizer_list,
-        )
-
         quantizers = [
             _make_hybrid_quantizer_fp8_row_fp4_col(),
             _make_fp8_quantizer(),
             _make_hybrid_quantizer_fp8_row_fp4_col(),
         ]
         with pytest.raises(ValueError, match="mix HybridQuantizer and non-hybrid"):
-            _validate_grouped_quantizer_list(quantizers, operand_name="input")
+            grouped_quantization.validate_grouped_quantizer_list(
+                quantizers,
+                operand_name="input",
+            )
 
     def test_none_plus_hybrid_raises(self):
-        from transformer_engine.pytorch.module.grouped_linear import (
-            _validate_grouped_quantizer_list,
-        )
-
         quantizers = [
             _make_hybrid_quantizer_fp8_row_fp4_col(),
             None,
             _make_hybrid_quantizer_fp8_row_fp4_col(),
         ]
         with pytest.raises(ValueError, match="mix None and concrete quantizers"):
-            _validate_grouped_quantizer_list(quantizers, operand_name="input")
+            grouped_quantization.validate_grouped_quantizer_list(
+                quantizers,
+                operand_name="input",
+            )
 
     def test_mixed_identity_dtype_raises(self):
-        from transformer_engine.pytorch.module.grouped_linear import (
-            _validate_grouped_quantizer_list,
-        )
-
         quantizers = [
             IdentityQuantizer(dtype=torch.bfloat16),
             IdentityQuantizer(dtype=torch.float16),
         ]
         with pytest.raises(ValueError, match="incompatible plain backend configurations"):
-            _validate_grouped_quantizer_list(quantizers, operand_name="input")
+            grouped_quantization.validate_grouped_quantizer_list(
+                quantizers,
+                operand_name="input",
+            )
 
     def test_distinct_delayed_scaling_state_is_allowed(self):
-        from transformer_engine.pytorch.module.grouped_linear import (
-            _validate_grouped_quantizer_list,
-        )
-
         quantizers = [_make_delayed_quantizer(), _make_delayed_quantizer()]
         quantizers[1].scale.fill_(2.0)
         quantizers[1].amax.fill_(3.0)
-        _validate_grouped_quantizer_list(quantizers, operand_name="input")
+        grouped_quantization.validate_grouped_quantizer_list(
+            quantizers,
+            operand_name="input",
+        )
 
     @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
     @pytest.mark.parametrize(
@@ -4350,10 +4523,6 @@ class TestHybridGroupedLinearValidation:
         ],
     )
     def test_hybrid_split_quantize_respects_parent_usage_flags(self, usage, expected):
-        from transformer_engine.pytorch.module.grouped_linear import (
-            _split_quantize_hybrid,
-        )
-
         tensor = torch.randn(32, 128, dtype=torch.bfloat16, device="cuda")
         quantizers = [
             HybridQuantizer(
@@ -4365,15 +4534,34 @@ class TestHybridGroupedLinearValidation:
         for quantizer in quantizers:
             quantizer.set_usage(rowwise=usage[0], columnwise=usage[1])
 
-        out = _split_quantize_hybrid(tensor, [16, 16], quantizers)
+        out, dbiases = grouped_quantization._split_quantize(
+            tensor,
+            [16, 16],
+            quantizers,
+            tensor.dtype,
+        )
 
+        assert dbiases is None
         assert [storage.get_usages() for storage in out] == [expected, expected]
+        for index, (storage, tensor_part, quantizer) in enumerate(
+            zip(out, torch.split(tensor, [16, 16]), quantizers)
+        ):
+            if usage[0]:
+                _assert_storage_data_exact(
+                    storage.rowwise_sub_storage,
+                    quantizer.rowwise_quantizer.quantize(tensor_part),
+                    context=f"grouped split {index} rowwise",
+                )
+            if usage[1]:
+                _assert_storage_data_exact(
+                    storage.columnwise_sub_storage,
+                    quantizer.columnwise_quantizer.quantize(tensor_part),
+                    context=f"grouped split {index} columnwise",
+                )
 
     @_XFAIL_HOPPER_COLUMNWISE_PER_TENSOR_FP8
     def test_columnwise_only_rowwise_dequantized_uses_transient_grouped_row(self, monkeypatch):
-        import transformer_engine.pytorch.module.grouped_linear as grouped_linear
-
-        real_split_quantize = grouped_linear.tex.split_quantize
+        real_split_quantize = grouped_quantization.tex.split_quantize
         calls = []
 
         def tracked_split_quantize(tensor, m_splits, quantizers, **kwargs):
@@ -4381,7 +4569,7 @@ class TestHybridGroupedLinearValidation:
             calls.append((tensor, result))
             return result
 
-        monkeypatch.setattr(grouped_linear.tex, "split_quantize", tracked_split_quantize)
+        monkeypatch.setattr(grouped_quantization.tex, "split_quantize", tracked_split_quantize)
         tensor = torch.randn(32, 128, dtype=torch.bfloat16, device="cuda")
         quantizers = [
             HybridQuantizer(
@@ -4394,8 +4582,14 @@ class TestHybridGroupedLinearValidation:
         for quantizer in quantizers:
             quantizer.set_usage(rowwise=False, columnwise=True)
 
-        out = grouped_linear._split_quantize_hybrid(tensor, [16, 16], quantizers)
+        out, dbiases = grouped_quantization._split_quantize(
+            tensor,
+            [16, 16],
+            quantizers,
+            tensor.dtype,
+        )
 
+        assert dbiases is None
         assert len(calls) == 2
         expected_columnwise_source = torch.cat(
             [result.dequantize(dtype=tensor.dtype) for result in calls[0][1]], dim=0
@@ -4404,20 +4598,25 @@ class TestHybridGroupedLinearValidation:
         assert calls[1][0] is not tensor
         assert all(storage.rowwise_sub_storage is None for storage in out)
         assert all(storage.columnwise_sub_storage is not None for storage in out)
+        for index, (storage, reference_columnwise) in enumerate(zip(out, calls[1][1])):
+            _assert_storage_data_exact(
+                storage.columnwise_sub_storage,
+                reference_columnwise,
+                context=f"transient-row grouped split {index} columnwise",
+            )
 
     @requires_nvfp4
     @pytest.mark.parametrize("m_splits", ([128, 128], [0, 128]))
     def test_nvfp4_rowwise_dequantized_preserves_source_dtype(self, monkeypatch, m_splits):
-        import transformer_engine.pytorch.module.grouped_linear as grouped_linear
-
-        real_split_quantize = grouped_linear.tex.split_quantize
-        input_dtypes = []
+        real_split_quantize = grouped_quantization.tex.split_quantize
+        calls = []
 
         def tracked_split_quantize(tensor, splits, quantizers, **kwargs):
-            input_dtypes.append(tensor.dtype)
-            return real_split_quantize(tensor, splits, quantizers, **kwargs)
+            result = real_split_quantize(tensor, splits, quantizers, **kwargs)
+            calls.append((tensor, result))
+            return result
 
-        monkeypatch.setattr(grouped_linear.tex, "split_quantize", tracked_split_quantize)
+        monkeypatch.setattr(grouped_quantization.tex, "split_quantize", tracked_split_quantize)
         tensor = torch.randn(
             sum(m_splits),
             128,
@@ -4433,22 +4632,49 @@ class TestHybridGroupedLinearValidation:
             for _ in m_splits
         ]
 
-        out = grouped_linear._split_quantize_hybrid(tensor, m_splits, quantizers)
+        out, dbiases = grouped_quantization._split_quantize(
+            tensor,
+            m_splits,
+            quantizers,
+            tensor.dtype,
+        )
 
-        assert input_dtypes == [tensor.dtype, tensor.dtype]
+        assert dbiases is None
+        assert [call[0].dtype for call in calls] == [tensor.dtype, tensor.dtype]
         assert len(out) == len(m_splits)
+        expected_columnwise_source = torch.cat(
+            [result.dequantize(dtype=tensor.dtype) for result in calls[0][1]], dim=0
+        )
+        torch.testing.assert_close(
+            calls[1][0],
+            expected_columnwise_source,
+            rtol=0.0,
+            atol=0.0,
+        )
+        for index, (storage, reference_rowwise, reference_columnwise) in enumerate(
+            zip(out, calls[0][1], calls[1][1])
+        ):
+            _assert_storage_data_exact(
+                storage.rowwise_sub_storage,
+                reference_rowwise,
+                context=f"NVFP4 grouped split {index} rowwise",
+            )
+            _assert_storage_data_exact(
+                storage.columnwise_sub_storage,
+                reference_columnwise,
+                context=f"NVFP4 grouped split {index} columnwise",
+            )
 
     def test_rowwise_only_skips_columnwise_quantization(self, monkeypatch):
-        import transformer_engine.pytorch.module.grouped_linear as grouped_linear
-
-        real_split_quantize = grouped_linear.tex.split_quantize
+        real_split_quantize = grouped_quantization.tex.split_quantize
         calls = []
 
         def tracked_split_quantize(tensor, m_splits, quantizers, **kwargs):
-            calls.append(tensor)
-            return real_split_quantize(tensor, m_splits, quantizers, **kwargs)
+            result = real_split_quantize(tensor, m_splits, quantizers, **kwargs)
+            calls.append((tensor, result))
+            return result
 
-        monkeypatch.setattr(grouped_linear.tex, "split_quantize", tracked_split_quantize)
+        monkeypatch.setattr(grouped_quantization.tex, "split_quantize", tracked_split_quantize)
         tensor = torch.randn(32, 128, dtype=torch.bfloat16, device="cuda")
         quantizers = [
             HybridQuantizer(
@@ -4461,24 +4687,36 @@ class TestHybridGroupedLinearValidation:
         for quantizer in quantizers:
             quantizer.set_usage(rowwise=True, columnwise=False)
 
-        out = grouped_linear._split_quantize_hybrid(tensor, [16, 16], quantizers)
+        out, dbiases = grouped_quantization._split_quantize(
+            tensor,
+            [16, 16],
+            quantizers,
+            tensor.dtype,
+        )
 
-        assert calls == [tensor]
+        assert dbiases is None
+        assert len(calls) == 1
+        assert calls[0][0] is tensor
         assert all(storage.rowwise_sub_storage is not None for storage in out)
         assert all(storage.columnwise_sub_storage is None for storage in out)
+        for index, (storage, reference_rowwise) in enumerate(zip(out, calls[0][1])):
+            _assert_storage_data_exact(
+                storage.rowwise_sub_storage,
+                reference_rowwise,
+                context=f"rowwise-only grouped split {index}",
+            )
 
     @_XFAIL_HOPPER_COLUMNWISE_PER_TENSOR_FP8
     def test_original_source_preserves_two_bulk_call_fast_path(self, monkeypatch):
-        import transformer_engine.pytorch.module.grouped_linear as grouped_linear
-
-        real_split_quantize = grouped_linear.tex.split_quantize
+        real_split_quantize = grouped_quantization.tex.split_quantize
         calls = []
 
         def tracked_split_quantize(tensor, m_splits, quantizers, **kwargs):
-            calls.append(tensor)
-            return real_split_quantize(tensor, m_splits, quantizers, **kwargs)
+            result = real_split_quantize(tensor, m_splits, quantizers, **kwargs)
+            calls.append((tensor, result))
+            return result
 
-        monkeypatch.setattr(grouped_linear.tex, "split_quantize", tracked_split_quantize)
+        monkeypatch.setattr(grouped_quantization.tex, "split_quantize", tracked_split_quantize)
         tensor = torch.randn(32, 128, dtype=torch.bfloat16, device="cuda")
         quantizers = [
             HybridQuantizer(
@@ -4489,17 +4727,34 @@ class TestHybridGroupedLinearValidation:
             for _ in range(2)
         ]
 
-        out = grouped_linear._split_quantize_hybrid(tensor, [16, 16], quantizers)
-
-        assert calls == [tensor, tensor]
-        assert all(storage.rowwise_sub_storage is not None for storage in out)
-        assert all(storage.columnwise_sub_storage is not None for storage in out)
-
-    def test_validation_rejects_mixed_columnwise_source_policies(self):
-        from transformer_engine.pytorch.module.grouped_linear import (
-            _validate_grouped_quantizer_list,
+        out, dbiases = grouped_quantization._split_quantize(
+            tensor,
+            [16, 16],
+            quantizers,
+            tensor.dtype,
         )
 
+        assert dbiases is None
+        assert len(calls) == 2
+        assert calls[0][0] is tensor
+        assert calls[1][0] is tensor
+        assert all(storage.rowwise_sub_storage is not None for storage in out)
+        assert all(storage.columnwise_sub_storage is not None for storage in out)
+        for index, (storage, reference_rowwise, reference_columnwise) in enumerate(
+            zip(out, calls[0][1], calls[1][1])
+        ):
+            _assert_storage_data_exact(
+                storage.rowwise_sub_storage,
+                reference_rowwise,
+                context=f"original-source grouped split {index} rowwise",
+            )
+            _assert_storage_data_exact(
+                storage.columnwise_sub_storage,
+                reference_columnwise,
+                context=f"original-source grouped split {index} columnwise",
+            )
+
+    def test_validation_rejects_mixed_columnwise_source_policies(self):
         quantizers = [
             HybridQuantizer(
                 rowwise_quantizer=_make_fp8_quantizer(),
@@ -4510,13 +4765,12 @@ class TestHybridGroupedLinearValidation:
         ]
 
         with pytest.raises(ValueError, match="mixed columnwise source policies"):
-            _validate_grouped_quantizer_list(quantizers, operand_name="input")
+            grouped_quantization.validate_grouped_quantizer_list(
+                quantizers,
+                operand_name="input",
+            )
 
     def test_validation_rejects_same_family_config_mismatch(self):
-        from transformer_engine.pytorch.module.grouped_linear import (
-            _validate_grouped_quantizer_list,
-        )
-
         quantizers = [_make_fp8_quantizer(), _make_fp8_quantizer()]
         quantizers[1].force_pow_2_scales = True
 
@@ -4524,11 +4778,45 @@ class TestHybridGroupedLinearValidation:
             ValueError,
             match="incompatible plain backend configurations",
         ):
-            _validate_grouped_quantizer_list(quantizers, operand_name="input")
+            grouped_quantization.validate_grouped_quantizer_list(
+                quantizers,
+                operand_name="input",
+            )
+
+    def test_builtin_recipe_skips_custom_grouped_validation(self, monkeypatch):
+        def unexpected_validation(*_args, **_kwargs):
+            pytest.fail("built-in recipes must not run custom grouped-quantizer validation")
+
+        monkeypatch.setattr(
+            grouped_quantization,
+            "validate_grouped_quantizer_list",
+            unexpected_validation,
+        )
+        model = GroupedLinear(
+            2,
+            128,
+            128,
+            bias=False,
+            params_dtype=torch.bfloat16,
+        ).cuda()
+        tensor = torch.randn(128, 128, dtype=torch.bfloat16, device="cuda")
+        m_splits = torch.tensor([64, 64], dtype=torch.int64)
+
+        with torch.no_grad(), autocast(enabled=True, recipe=recipe.DelayedScaling()):
+            model(tensor, m_splits)
+            assert model._custom_quantizer_cache == {}
+
+            def unexpected_custom_validation(*_args, **_kwargs):
+                pytest.fail("built-in recipes must not validate custom quantizers per forward")
+
+            monkeypatch.setattr(
+                model,
+                "_validate_custom_recipe_quantizers",
+                unexpected_custom_validation,
+            )
+            model(tensor, m_splits)
 
     def test_validation_runs_only_with_quantizer_generation(self, monkeypatch):
-        import transformer_engine.pytorch.module.grouped_linear as grouped_linear
-
         def make_qfactory(columnwise_source):
             def qfactory(_role):
                 return HybridQuantizer(
@@ -4544,7 +4832,7 @@ class TestHybridGroupedLinearValidation:
         m_splits = torch.tensor([64, 64], dtype=torch.int64)
         original_recipe = recipe.CustomRecipe(qfactory=make_qfactory("original"))
 
-        real_validate = grouped_linear._validate_grouped_quantizer_list
+        real_validate = grouped_quantization.validate_grouped_quantizer_list
         validation_calls = []
 
         def tracked_validate(quantizers, *, operand_name="operand"):
@@ -4552,26 +4840,26 @@ class TestHybridGroupedLinearValidation:
             return real_validate(quantizers, operand_name=operand_name)
 
         monkeypatch.setattr(
-            grouped_linear,
-            "_validate_grouped_quantizer_list",
+            grouped_quantization,
+            "validate_grouped_quantizer_list",
             tracked_validate,
         )
 
         with torch.no_grad(), autocast(enabled=True, recipe=original_recipe):
             model(tensor, m_splits)
         first_call_count = len(validation_calls)
-        first_generation = model._validated_quantizer_generations["scaling_fwd"]
+        first_generation = model._custom_quantizer_cache["scaling_fwd"]
         assert first_call_count > 0
 
         with torch.no_grad(), autocast(enabled=True, recipe=original_recipe):
             model(tensor, m_splits)
         assert len(validation_calls) == first_call_count
-        assert model._validated_quantizer_generations["scaling_fwd"] is first_generation
+        assert model._custom_quantizer_cache["scaling_fwd"] is first_generation
 
         rebuilt_recipe = recipe.CustomRecipe(qfactory=make_qfactory("rowwise_dequantized"))
         with torch.no_grad(), autocast(enabled=True, recipe=rebuilt_recipe):
             model(tensor, m_splits)
-        rebuilt_generation = model._validated_quantizer_generations["scaling_fwd"]
+        rebuilt_generation = model._custom_quantizer_cache["scaling_fwd"]
         assert len(validation_calls) > first_call_count
         assert rebuilt_generation is not first_generation
         assert rebuilt_generation[0].columnwise_source == "rowwise_dequantized"
@@ -4597,7 +4885,7 @@ class TestHybridGroupedLinearValidation:
             with pytest.raises(ValueError, match="mixed columnwise source policies"):
                 with torch.no_grad(), autocast(enabled=True, recipe=mixed_recipe):
                     model(tensor, m_splits)
-            assert model._validated_quantizer_generations["scaling_fwd"] is rebuilt_generation
+            assert model._custom_quantizer_cache["scaling_fwd"] is rebuilt_generation
 
         # Stale invalid recipe metadata must not affect the non-quantized path.
         with torch.no_grad():
@@ -4606,10 +4894,6 @@ class TestHybridGroupedLinearValidation:
     @requires_fp8_and_nvfp4
     def test_hybrid_split_quantize_honors_rowwise_dequantized_source(self):
         """NVFP4 column data must derive from the actual grouped row result."""
-        from transformer_engine.pytorch.module.grouped_linear import (
-            _split_quantize_hybrid,
-        )
-
         torch.manual_seed(3598)
         # NVFP4 grouped split-quantize requires each M split to be a multiple
         # of 64.
@@ -4623,12 +4907,14 @@ class TestHybridGroupedLinearValidation:
             )
 
         quantizers = [make_quantizer(), make_quantizer()]
-        actual = _split_quantize_hybrid(
+        actual, dbiases = grouped_quantization._split_quantize(
             tensor,
             [64, 64],
             quantizers,
+            tensor.dtype,
         )
 
+        assert dbiases is None
         for index, (actual_part, quantizer) in enumerate(zip(actual, quantizers)):
             expected_columnwise = quantizer.columnwise_quantizer.quantize(
                 actual_part.rowwise_sub_storage.dequantize()
@@ -7132,12 +7418,12 @@ class TestHybridActivationRecompute:
     def _run_grouped_linear(self, recipe_obj, *, checkpoint_fn=None):
         """Build a GroupedLinear, run forward+backward with optional
         activation checkpointing around the module. Exercises the
-        ``_split_quantize_hybrid`` code path under recompute.
+        hybrid ``_split_quantize`` code path under recompute.
 
         GroupedLinear is the MoE token-dispatch kernel: a single batch
         is split along dim-0 into ``num_gemms`` chunks and each chunk
         goes through its own weight matrix. Under hybrid quantization,
-        ``_split_quantize_hybrid`` (``module/grouped_linear.py``) runs
+        ``_split_quantize`` (``module/_grouped_quantization.py``) runs
         ``tex.split_quantize`` twice (once per sub-quantizer direction)
         and zips the results into a list of ``HybridQuantizedTensor``
         chunks — save-for-backward then receives a *list* of hybrid
@@ -7168,7 +7454,7 @@ class TestHybridActivationRecompute:
     @_XFAIL_HOPPER_COLUMNWISE_PER_TENSOR_FP8
     def test_te_checkpoint_reentrant_grouped_linear_fp8_bitwise(self):
         """GroupedLinear + te.checkpoint(reentrant) under same-format FP8
-        hybrid. Exercises the MoE ``_split_quantize_hybrid`` + list-of-
+        hybrid. Exercises the MoE ``_split_quantize`` + list-of-
         hybrid-tensors save-for-backward path under recompute."""
         import transformer_engine.pytorch as te_pytorch
 
