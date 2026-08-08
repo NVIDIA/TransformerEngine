@@ -1549,6 +1549,16 @@ class DotProductAttention(TransformerEngineBaseModule):
         pad_between_seqs: Optional[bool], default = None
             If ``None``, inferred from qkv_format, cu_seqlens and cu_seqlens_padded.
             If ``True``, there are padding tokens between individual sequences in a packed batch.
+            With context parallelism, this must be ``True`` whenever the packed batch
+            contains ANY padding — including tail padding after the last sequence
+            (e.g. a sequence whose real length is not a multiple of 2*cp_size). The
+            ``False`` CP path assumes padding-free uniform chunking and silently
+            mislabels boundary rows otherwise (see
+            https://github.com/NVIDIA/TransformerEngine/issues/3331). The ``None``
+            auto-detect returns ``True`` only when padded cu_seqlens are supplied as
+            tensors distinct from their unpadded counterparts; callers with
+            tail-only padding who pass the same tensor for both must set this flag
+            explicitly.
         fp8_output: Optional[bool], default = False
             Whether to enforce output to be in FP8 or not.
         num_splits: Optional[int], default = 1
@@ -1954,6 +1964,15 @@ class DotProductAttention(TransformerEngineBaseModule):
             # If padded cu_seqlens are the *same object* as the unpadded ones, no real
             # inter-sequence padding exists (only THD tail padding) -- treat as False so
             # FlashAttention v2/v4 remain eligible.
+            # NOTE: under context parallelism, tail padding is NOT benign on the
+            # pad_between_seqs=False path, which approximates per-step seqlens as
+            # cu_seqlens // cp_size and mislabels chunk-boundary rows whenever a
+            # sequence's real length is not divisible by 2*cp_size (nondeterministic
+            # boundary-row outputs, silently dropped real keys/queries; see
+            # https://github.com/NVIDIA/TransformerEngine/issues/3331). THD+CP callers
+            # with tail-padded sequences must pass pad_between_seqs=True explicitly
+            # (or supply padded cu_seqlens as tensors distinct from the unpadded
+            # ones) so the exact per-rank path is taken.
             if pad_between_seqs is None:
                 if qkv_format == "thd":
                     if (
