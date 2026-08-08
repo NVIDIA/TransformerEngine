@@ -8,6 +8,9 @@ import pytest
 import torch
 
 from transformer_engine.pytorch import DotProductAttention
+from transformer_engine.pytorch.attention.dot_product_attention import (
+    dot_product_attention as dpa_module,
+)
 
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
@@ -277,8 +280,40 @@ def test_thd_mask_types_support_cross_attention_and_per_policy_windows():
         torch.testing.assert_close(actual_grad, reference_grad, atol=1.0e-3, rtol=1.0e-3)
 
 
+@pytest.mark.parametrize(
+    ("compute_capability", "fa3_installed", "flash_enabled", "fa3_enabled", "expected"),
+    (
+        ((9, 0), True, "1", "1", True),
+        ((8, 0), True, "1", "1", False),
+        ((9, 0), False, "1", "1", False),
+        ((9, 0), True, "0", "1", False),
+        ((9, 0), True, "1", "0", False),
+    ),
+)
+def test_thd_mask_type_runtime_dispatch(
+    monkeypatch,
+    compute_capability,
+    fa3_installed,
+    flash_enabled,
+    fa3_enabled,
+    expected,
+):
+    """Only Hopper with enabled FA3 uses the inter-sequence-padding implementation."""
+    monkeypatch.setattr(
+        dpa_module.dpa_utils, "get_device_compute_capability", lambda: compute_capability
+    )
+    monkeypatch.setattr(dpa_module.FlashAttentionUtils, "v3_is_installed", fa3_installed)
+    monkeypatch.setenv("NVTE_FLASH_ATTN", flash_enabled)
+    monkeypatch.setenv("NVTE_FLASH_ATTN_V3", fa3_enabled)
+
+    assert DotProductAttention._use_thd_mask_type_padding_dispatch() is expected
+
+
 def test_thd_mask_types_support_cuda_graph_capture():
     """The sync-free policy metadata path must be replayable in a CUDA graph."""
+    if not DotProductAttention._use_thd_mask_type_padding_dispatch():
+        pytest.skip("CUDA graph capture requires the Hopper/FA3 padding implementation")
+
     torch.manual_seed(1234)
     dtype = torch.float16
     cu_seqlens = _make_cu_seqlens((7, 3, 5, 4))
