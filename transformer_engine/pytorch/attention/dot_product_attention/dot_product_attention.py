@@ -1383,15 +1383,6 @@ class DotProductAttention(TransformerEngineBaseModule):
         ).index_add(0, boundaries, deltas)
         return torch.cumsum(token_deltas[:-1], dim=0, dtype=torch.int32).ne(0)
 
-    @staticmethod
-    def _use_thd_mask_type_padding_dispatch() -> bool:
-        return (
-            dpa_utils.get_device_compute_capability() == (9, 0)
-            and FlashAttentionUtils.v3_is_installed
-            and bool(int(os.environ.get("NVTE_FLASH_ATTN", "1")))
-            and bool(int(os.environ.get("NVTE_FLASH_ATTN_V3", "1")))
-        )
-
     def _forward_thd_mask_types_with_padding(
         self,
         query_layer: torch.Tensor,
@@ -1616,7 +1607,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         if not nonempty_mask_types:
             raise ValueError("attn_mask_type_per_seq must assign at least one sequence.")
 
-        if self._use_thd_mask_type_padding_dispatch():
+        if dpa_utils.is_thd_mask_type_padding_supported():
             return self._forward_thd_mask_types_with_padding(
                 query_layer,
                 key_layer,

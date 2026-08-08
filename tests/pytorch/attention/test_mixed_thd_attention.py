@@ -285,6 +285,7 @@ def test_thd_mask_types_support_cross_attention_and_per_policy_windows():
     (
         ((9, 0), True, "1", "1", True),
         ((8, 0), True, "1", "1", False),
+        ((10, 0), True, "1", "1", False),
         ((9, 0), False, "1", "1", False),
         ((9, 0), True, "0", "1", False),
         ((9, 0), True, "1", "0", False),
@@ -306,12 +307,12 @@ def test_thd_mask_type_runtime_dispatch(
     monkeypatch.setenv("NVTE_FLASH_ATTN", flash_enabled)
     monkeypatch.setenv("NVTE_FLASH_ATTN_V3", fa3_enabled)
 
-    assert DotProductAttention._use_thd_mask_type_padding_dispatch() is expected
+    assert dpa_module.dpa_utils.is_thd_mask_type_padding_supported() is expected
 
 
 def test_thd_mask_types_support_cuda_graph_capture():
     """The sync-free policy metadata path must be replayable in a CUDA graph."""
-    if not DotProductAttention._use_thd_mask_type_padding_dispatch():
+    if not dpa_module.dpa_utils.is_thd_mask_type_padding_supported():
         pytest.skip("CUDA graph capture requires the Hopper/FA3 padding implementation")
 
     torch.manual_seed(1234)
