@@ -32,6 +32,7 @@ from transformer_engine.pytorch.cpp_extensions import (
     general_grouped_gemm,
     general_grouped_gemm_for_grouped_tensor,
 )
+from transformer_engine.pytorch.constants import TE_DType
 from transformer_engine.pytorch.module.grouped_linear import (
     _GroupedLinear,
     is_module_grouped_tensor_path_supported,
@@ -1276,7 +1277,7 @@ def test_grouped_gemm_grouped_tensor_zero_work(layout, accumulate, quant_type) -
                 rowwise, columnwise = transa, not transa
             else:
                 rowwise, columnwise = not transb, transb
-            fp8_dtype = tex.DType.kFloat8E4M3
+            fp8_dtype = TE_DType[torch.float8_e4m3fn]
             quantizer = _make_quantizer(fp8_dtype, rowwise, columnwise)
             return tex.group_quantize(buf, quantizer, z, zero_first_dims)
         return GroupedTensor.make_grouped_tensor(
@@ -1295,7 +1296,7 @@ def test_grouped_gemm_grouped_tensor_zero_work(layout, accumulate, quant_type) -
         if test_recipe is not None:
             grouped_weight = torch.cat(weight_tensors, dim=0)
             weight_quantizer = _make_quantizer(
-                tex.DType.kFloat8E4M3,
+                TE_DType[torch.float8_e4m3fn],
                 rowwise=transa,
                 columnwise=not transa,
             )

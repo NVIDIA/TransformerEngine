@@ -657,21 +657,13 @@ class _GroupedLinear(torch.autograd.Function):
                 )
                 if cache_weight:
                     weight_quantizer.internal = saved_internal
-            elif skip_fp8_weight_update is not None:
+            elif skip_fp8_weight_update is not None or update_workspace:
                 grouped_weight = tex.group_quantize(
                     source,
                     weight_quantizer,
                     num_gemms,
                     None,
                     noop_flag=skip_fp8_weight_update,
-                    output=workspace,
-                )
-            elif update_workspace:
-                grouped_weight = tex.group_quantize(
-                    source,
-                    weight_quantizer,
-                    num_gemms,
-                    None,
                     output=workspace,
                 )
             else:
