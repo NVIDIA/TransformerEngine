@@ -4,8 +4,8 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-/*! \file group_swiglu_quantize_mxfp8.cuh
- *  \brief Grouped weighted-SwiGLU fused with columnwise MXFP8 quantization.
+/*! \file group_scaled_swiglu_mxfp8.cuh
+ *  \brief Grouped scaled SwiGLU fused with columnwise MXFP8 quantization.
  *
  *  MoE backward recompute of the FC2 input, without re-running the FC1 GEMM:
  *
@@ -15,12 +15,12 @@
  *
  *  "SwiGLU" is TE's gated convention (same as gated_mxfp8.cuh): the first half of
  *  the last dim is the activation input, the second half is the gate, i.e.
- *  swiglu(x) = silu(x[:, :F]) * x[:, F:]. "weighted" is the per-token prob factor,
+ *  swiglu(x) = silu(x[:, :F]) * x[:, F:]. "scaled" is the per-token prob factor,
  *  applied after the activation.
  */
 
-#ifndef TRANSFORMER_ENGINE_GROUP_SWIGLU_QUANTIZE_MXFP8_CUH_
-#define TRANSFORMER_ENGINE_GROUP_SWIGLU_QUANTIZE_MXFP8_CUH_
+#ifndef TRANSFORMER_ENGINE_GROUP_SCALED_SWIGLU_MXFP8_CUH_
+#define TRANSFORMER_ENGINE_GROUP_SCALED_SWIGLU_MXFP8_CUH_
 
 #include <cuda.h>
 #include <cudaTypedefs.h>
@@ -38,7 +38,7 @@
 namespace transformer_engine {
 namespace dispatch {
 namespace mxfp8 {
-namespace group_swiglu_quantize_kernel {
+namespace group_scaled_swiglu_kernel {
 
 using namespace dispatch::common;
 
@@ -55,6 +55,13 @@ constexpr size_t SCALE_DIM_X = 32;
 
 constexpr uint PREFETCH_STAGES = 1;
 constexpr uint BUFFS_NUM = PREFETCH_STAGES + 1;
+
+// Holding both the act and the gate input slice already costs this kernel 1.7x the
+// shared memory of the plain quantize kernel, which is what caps resident blocks per
+// SM. Single-buffering the (1 byte per element) output slice buys one more block back
+// at the cost of overlapping the TMA store with the next stage's compute.
+constexpr uint OUT_BUFFS_NUM = 1;
+static_assert(OUT_BUFFS_NUM >= 1 && OUT_BUFFS_NUM <= BUFFS_NUM);
 
 constexpr uint CHUNK_DIM_Y = TunableConfig::CHUNK_DIM_Y;
 constexpr uint CHUNK_DIM_X = TunableConfig::CHUNK_DIM_X;
@@ -76,19 +83,40 @@ static_assert(CHUNK_DIM_Y % BUFF_DIM_Y == 0);
 static_assert(CHUNK_DIM_Y % SCALE_DIM_Y == 0);
 static_assert(CHUNK_DIM_X % SCALE_DIM_X == 0);
 
-// Columnwise weighted-SwiGLU + MXFP8 quantization of one 32-row buffer slice.
+// silu(x) = x / (1 + exp(-x)), evaluated directly on the MUFU units.
+//
+// Both operations are deliberately approximate. The generic path pays a full-precision
+// expf and a correctly rounded reciprocal, each a range-reduction / Newton-refinement
+// chain costing an order of magnitude more than the MUFU op it wraps, and none of that
+// precision survives rounding to an MXFP8 output whose mantissa is at most 3 bits wide.
+//
+// The exp is written as inline PTX rather than `__expf` to reach the ftz variant of
+// ex2. Because the non-ftz variant has to return a denormal when the result underflows,
+// nvcc guards every MUFU.EX2 with a compare plus two predicated multiplies that
+// evaluate ex2(arg/2)^2 in that range. That guard cannot affect this expression:
+// exp(-x) only underflows for x greater than about 87, where it is below 1e-38 and is
+// then added to 1.0f, whose fp32 ulp is 1.2e-7. The sum is exactly 1.0f either way, so
+// flushing to zero is bit-identical here and drops three instructions per element.
+__device__ __forceinline__ float silu_approx(const float x) {
+  constexpr float LOG2_E = 1.4426950408889634f;
+  float exp_neg_x;
+  asm("ex2.approx.ftz.f32 %0, %1;" : "=f"(exp_neg_x) : "f"(-x * LOG2_E));
+  return __fdividef(x, 1.0f + exp_neg_x);
+}
+
+// Columnwise scaled SwiGLU + MXFP8 quantization of one 32-row buffer slice.
 // Each thread owns one column j and reduces amax over the BUFF_DIM_Y rows, then
 // writes the e8m0 block scale and the scaled FP8 column.
 template <typename ParamOP, float (*OP)(float, const ParamOP &), typename IType, typename OType,
           bool WITH_GEMM_SWIZZLED_SCALES>
 __device__ __forceinline__ void process_colwise_gated_stage(
-    const size_t buff, const int stage, const size_t tid_X_colwise,
+    const size_t buff, const size_t out_buff, const int stage, const size_t tid_X_colwise,
     const size_t scales_offset_Y_colwise, const size_t scales_offset_X_colwise,
     const size_t scale_stride_colwise, const size_t tensor_base_for_scales, const size_t rows,
-    const size_t cols, const size_t data_row_base, const IType *const __restrict__ prob_ptr,
-    IType *sInAct_ptr, IType *sInGate_ptr, OType *sOutColwise_ptr, e8m0_t *scales_colwise) {
+    const size_t cols, const float *const sProb, IType *sInAct_ptr, IType *sInGate_ptr,
+    OType *sOutColwise_ptr, e8m0_t *scales_colwise) {
   using IType3D = IType[BUFFS_NUM][BUFF_DIM_Y][BUFF_DIM_X];
-  using OType3D = OType[BUFFS_NUM][BUFF_DIM_Y][BUFF_DIM_X];
+  using OType3D = OType[OUT_BUFFS_NUM][BUFF_DIM_Y][BUFF_DIM_X];
 
   const auto &sInAct = *reinterpret_cast<const IType3D *>(sInAct_ptr);
   const auto &sInGate = *reinterpret_cast<const IType3D *>(sInGate_ptr);
@@ -124,12 +152,19 @@ __device__ __forceinline__ void process_colwise_gated_stage(
   for (int i = 0; i < BUFF_DIM_Y; ++i) {
     const float act_elt = static_cast<float>(sInAct[buff][i][j]);
     const float gate_elt = static_cast<float>(sInGate[buff][i][j]);
-    // is_job_valid guarantees every row of a valid 128-aligned block is a real
-    // token of this expert, so the absolute token index is always in [0, T).
-    // prob rides along in the input (model) dtype, matching cuDNN fc1_prob_tensor.
-    const float prob = static_cast<float>(prob_ptr[data_row_base + i]);
+    // Staged in shared memory for the whole chunk by the caller: every thread needs
+    // all rows, so reading it from global here would issue one broadcast load per
+    // row per warp on the critical path.
+    const float prob = sProb[stage * BUFF_DIM_Y + i];
 
-    float elt = OP(act_elt, {}) * gate_elt * prob;
+    float act_x;
+    if constexpr (OP == &silu<fp32, fp32>) {
+      act_x = silu_approx(act_elt);
+    } else {
+      act_x = OP(act_elt, {});
+    }
+
+    float elt = act_x * gate_elt * prob;
 
     // Match round-trip precision of the plain quantize path (cast through IType).
     if constexpr (!std::is_same_v<IType, float>) {
@@ -147,13 +182,13 @@ __device__ __forceinline__ void process_colwise_gated_stage(
   const float block_scale_inverse = ptx::exp2f_rcp<float>(biased_exponent);
 #pragma unroll
   for (int i = 0; i < SCALE_DIM_Y; ++i) {
-    sOutColwise[buff][i][j] = static_cast<OType>(rInCompute[i] * block_scale_inverse);
+    sOutColwise[out_buff][i][j] = static_cast<OType>(rInCompute[i] * block_scale_inverse);
   }
 }
 
 template <typename ParamOP, float (*OP)(float, const ParamOP &), typename IType, typename OType,
           bool WITH_GEMM_SWIZZLED_SCALES, ShapeRepresentation SHAPE_REP>
-__global__ void __launch_bounds__(THREADS_PER_CHUNK) group_swiglu_quantize_mxfp8_kernel(
+__global__ void __launch_bounds__(THREADS_PER_CHUNK) group_scaled_swiglu_mxfp8_kernel(
     const __grid_constant__ CUtensorMap tensor_map_input_act_static,
     const __grid_constant__ CUtensorMap tensor_map_input_gate_static,
     const __grid_constant__ CUtensorMap tensor_map_output_colwise_static, const size_t num_tensors,
@@ -182,16 +217,21 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_swiglu_quantize_mxfp8
     constexpr size_t buff_elems_total = BUFFS_NUM * buff_elems;
     constexpr size_t buff_size_aligned_in =
         DIVUP_TO_MULTIPLE(buff_elems_total * sizeof(IType), TMA_SHMEM_ALIGNMENT);
+    constexpr size_t out_buff_elems_total = OUT_BUFFS_NUM * buff_elems;
     constexpr size_t buff_size_aligned_out =
-        DIVUP_TO_MULTIPLE(buff_elems_total * sizeof(OType), TMA_SHMEM_ALIGNMENT);
+        DIVUP_TO_MULTIPLE(out_buff_elems_total * sizeof(OType), TMA_SHMEM_ALIGNMENT);
+    constexpr size_t prob_buff_size =
+        DIVUP_TO_MULTIPLE(CHUNK_DIM_Y * sizeof(float), TMA_SHMEM_ALIGNMENT);
 
-    // shmem layout: [act input][gate input][colwise output]
+    // shmem layout: [act input][gate input][colwise output][prob]
     extern __shared__ unsigned char dynamic_shmem[];
     unsigned char *dshmem = align_smem_ptr_per_TMA_requirements(dynamic_shmem);
 
     IType *sInAct_ptr = reinterpret_cast<IType *>(dshmem);
     IType *sInGate_ptr = reinterpret_cast<IType *>(dshmem + buff_size_aligned_in);
     OType *sOutColwise_ptr = reinterpret_cast<OType *>(dshmem + 2 * buff_size_aligned_in);
+    float *sProb_ptr =
+        reinterpret_cast<float *>(dshmem + 2 * buff_size_aligned_in + buff_size_aligned_out);
 
     // Per-buffer byte count transferred by TMA (act + gate) into one slice.
     constexpr size_t shmem_buff_size = buff_size_aligned_in / BUFFS_NUM;
@@ -257,6 +297,14 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_swiglu_quantize_mxfp8
       const size_t scales_offset_Y_colwise = scales_block_offset_Y_colwise;
       const size_t scales_offset_X_colwise = scales_block_offset_X_colwise + tid_X_colwise;
 
+      // Stage this chunk's per-token prob once. is_job_valid guarantees every row of a
+      // valid 128-aligned block is a real token of this expert, so the absolute token
+      // index is always in [0, T). prob rides along in the input (model) dtype,
+      // matching cuDNN fc1_prob_tensor.
+      for (size_t row = threadIdx.x; row < CHUNK_DIM_Y; row += THREADS_PER_CHUNK) {
+        sProb_ptr[row] = static_cast<float>(prob_ptr[block_offset_Y + row]);
+      }
+
       __syncthreads();
 
       int buff_in = 0;
@@ -310,26 +358,31 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_swiglu_quantize_mxfp8
         ptx::mbarrier_wait_parity_acquire_cta_shared_cta(&IN_buff_readable_mbar[buff_in],
                                                          IN_buff_readable_parity[buff_in]);
         IN_buff_readable_parity[buff_in] ^= 1;
-        ptx::cp_async_bulk_wait_group_read<PREFETCH_STAGES>();
+        // Wait until the store groups still holding an output slice have drained. Only
+        // the leading thread commits those groups, so the wait is a no-op on the other
+        // threads and the barrier is what stops them from overwriting a slice the TMA
+        // unit has not finished reading.
+        ptx::cp_async_bulk_wait_group_read<OUT_BUFFS_NUM - 1>();
+        __syncthreads();
 
         const size_t buff = buff_in;
-        const size_t data_row_base = block_offset_Y + stage_offset_Y;
+        const size_t out_buff = buff_in % OUT_BUFFS_NUM;
         process_colwise_gated_stage<ParamOP, OP, IType, OType, WITH_GEMM_SWIZZLED_SCALES>(
-            buff, stage, tid_X_colwise, scales_offset_Y_colwise, scales_offset_X_colwise,
-            scale_stride_colwise, tensor_base_for_scales, rows, cols, data_row_base, prob_ptr,
-            sInAct_ptr, sInGate_ptr, sOutColwise_ptr, scales_colwise_ptr);
+            buff, out_buff, stage, tid_X_colwise, scales_offset_Y_colwise, scales_offset_X_colwise,
+            scale_stride_colwise, tensor_base_for_scales, rows, cols, sProb_ptr, sInAct_ptr,
+            sInGate_ptr, sOutColwise_ptr, scales_colwise_ptr);
 
         ptx::fence_proxy_async_shared_cta();
         __syncthreads();
 
         const size_t global_offset_Y = block_offset_Y + stage_offset_Y;
         const size_t global_offset_X = block_offset_X;
-        const size_t buff_offset = buff * BUFF_DIM;
+        const size_t out_buff_offset = out_buff * BUFF_DIM;
         if (leading_thread) {
           ptx::cp_async_bulk_tensor_2d_shared_to_global(
               reinterpret_cast<const uint64_t *>(&tensor_map_output_colwise_static),
               global_offset_X, global_offset_Y,
-              reinterpret_cast<uint64_t *>(&sOutColwise_ptr[buff_offset]));
+              reinterpret_cast<uint64_t *>(&sOutColwise_ptr[out_buff_offset]));
           ptx::cp_async_bulk_commit_group();
         }
 
@@ -345,25 +398,25 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_swiglu_quantize_mxfp8
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
 
-}  // namespace group_swiglu_quantize_kernel
+}  // namespace group_scaled_swiglu_kernel
 
-// Host launcher: grouped weighted-SwiGLU -> columnwise MXFP8.
+// Host launcher: grouped scaled SwiGLU -> columnwise MXFP8.
 //   input  : GroupedTensor [T, 2F] ([act|gate]) in a floating input dtype.
 //   prob   : Tensor [T] per-token weights, in the input (model) dtype.
 //   output : GroupedTensor with columnwise_data / columnwise_scale_inv for [T, F].
 template <typename ParamOP, float (*OP)(float, const ParamOP &)>
-void group_swiglu_quantize(const GroupedTensor *input, const Tensor *prob, const Tensor *noop,
-                           GroupedTensor *output, const QuantizationConfig *quant_config,
-                           cudaStream_t stream) {
-  using namespace group_swiglu_quantize_kernel;
+void group_scaled_swiglu(const GroupedTensor *input, const Tensor *prob, const Tensor *noop,
+                         GroupedTensor *output, const QuantizationConfig *quant_config,
+                         cudaStream_t stream) {
+  using namespace group_scaled_swiglu_kernel;
 
   checkCuDriverContext(stream);
   CheckNoopTensor(*noop, "cast_noop");
 
   NVTE_CHECK(output->has_columnwise_data(),
-             "group_swiglu_quantize requires columnwise output data to be allocated.");
+             "group_scaled_swiglu requires columnwise output data to be allocated.");
   NVTE_CHECK(!output->has_data(),
-             "group_swiglu_quantize produces a columnwise output only; "
+             "group_scaled_swiglu produces a columnwise output only; "
              "rowwise is not implemented.");
   NVTE_CHECK(is_fp8_dtype(output->dtype()), "Output must have FP8 type.");
   NVTE_CHECK(input->num_tensors == output->num_tensors,
@@ -378,7 +431,7 @@ void group_swiglu_quantize(const GroupedTensor *input, const Tensor *prob, const
     shape_rep = ShapeRepresentation::VARYING_FIRST_DIM;
   } else {
     NVTE_CHECK(false,
-               "group_swiglu_quantize requires all experts to share the same last dim F "
+               "group_scaled_swiglu requires all experts to share the same last dim F "
                "(grouped layout SAME_BOTH_DIMS or VARYING_FIRST_DIM).");
   }
 
@@ -390,9 +443,9 @@ void group_swiglu_quantize(const GroupedTensor *input, const Tensor *prob, const
   const size_t in_last_logical_dim = input->logical_shape.data[1];    // 2F
 
   NVTE_CHECK(in_last_logical_dim == 2 * out_last_logical_dim,
-             "group_swiglu_quantize input last dim must be 2x the output last dim ([act|gate]).");
+             "group_scaled_swiglu input last dim must be 2x the output last dim ([act|gate]).");
   NVTE_CHECK(input->logical_shape.data[0] == first_logical_dim,
-             "group_swiglu_quantize input/output must share the token dimension T.");
+             "group_scaled_swiglu input/output must share the token dimension T.");
 
   const size_t T = first_logical_dim;
   const size_t F = out_last_logical_dim;
@@ -408,7 +461,7 @@ void group_swiglu_quantize(const GroupedTensor *input, const Tensor *prob, const
   const size_t work_blocks_Y = DIVUP(T, static_cast<size_t>(CHUNK_DIM_Y));
   const size_t work_blocks_X = DIVUP(F, static_cast<size_t>(CHUNK_DIM_X));
 
-  NVTE_CHECK(T % 128 == 0, "group_swiglu_quantize requires T divisible by 128.");
+  NVTE_CHECK(T % 128 == 0, "group_scaled_swiglu requires T divisible by 128.");
 
   const size_t sm_num = static_cast<size_t>(transformer_engine::cuda::sm_count());
   const size_t static_grid_size = sm_num * TunableConfig::STATIC_PERSISTENT_BLOCKS_PER_SM;
@@ -424,17 +477,17 @@ void group_swiglu_quantize(const GroupedTensor *input, const Tensor *prob, const
     // The swizzled block is tiled 128x4 over the transposed [F, rows/32] scale
     // matrix, so a partial F tile would not map onto a whole number of tiles.
     NVTE_CHECK(F % 128 == 0,
-               "group_swiglu_quantize with GEMM-swizzled scales requires the output "
+               "group_scaled_swiglu with GEMM-swizzled scales requires the output "
                "last dim (F) to be divisible by 128, got ",
                F, ".");
     if (num_tensors > 1) {
       // Each expert owns a separate swizzled block whose extent depends on its
       // own token count, so per-expert first dims and offsets are mandatory.
       NVTE_CHECK(shape_rep == ShapeRepresentation::VARYING_FIRST_DIM,
-                 "group_swiglu_quantize with GEMM-swizzled scales and multiple experts "
+                 "group_scaled_swiglu with GEMM-swizzled scales and multiple experts "
                  "requires per-expert first dims (pass first_dims / split_sections).");
       NVTE_CHECK(offsets_ptr != nullptr,
-                 "group_swiglu_quantize with GEMM-swizzled scales requires tensor_offsets "
+                 "group_scaled_swiglu with GEMM-swizzled scales requires tensor_offsets "
                  "to locate each expert's swizzled scale block.");
     }
   }
@@ -474,20 +527,24 @@ void group_swiglu_quantize(const GroupedTensor *input, const Tensor *prob, const
                     constexpr size_t buff_elems = BUFF_DIM_Y * BUFF_DIM_X;
                     constexpr size_t buff_elems_total = BUFFS_NUM * buff_elems;
                     constexpr size_t input_buff_size = (buff_elems_total * input_type_bit_size) / 8;
+                    constexpr size_t out_buff_elems_total = OUT_BUFFS_NUM * buff_elems;
                     constexpr size_t output_buff_size =
-                        (buff_elems_total * output_type_bit_size) / 8;
+                        (out_buff_elems_total * output_type_bit_size) / 8;
                     constexpr size_t buff_size_aligned_in =
                         DIVUP_TO_MULTIPLE(input_buff_size, TMA_SHMEM_ALIGNMENT);
                     constexpr size_t buff_size_aligned_out =
                         DIVUP_TO_MULTIPLE(output_buff_size, TMA_SHMEM_ALIGNMENT);
 
-                    // [act][gate][colwise out]
-                    const size_t dshmem_size =
-                        2 * buff_size_aligned_in + buff_size_aligned_out + TMA_SHMEM_ALIGNMENT;
+                    constexpr size_t prob_buff_size =
+                        DIVUP_TO_MULTIPLE(CHUNK_DIM_Y * sizeof(float), TMA_SHMEM_ALIGNMENT);
+
+                    // [act][gate][colwise out][prob]
+                    const size_t dshmem_size = 2 * buff_size_aligned_in + buff_size_aligned_out +
+                                               prob_buff_size + TMA_SHMEM_ALIGNMENT;
 
                     auto kernel =
-                        group_swiglu_quantize_mxfp8_kernel<ParamOP, OP, IType, OType,
-                                                           WITH_GEMM_SWIZZLED_SCALES, SHAPE_REP>;
+                        group_scaled_swiglu_mxfp8_kernel<ParamOP, OP, IType, OType,
+                                                         WITH_GEMM_SWIZZLED_SCALES, SHAPE_REP>;
 
                     NVTE_CHECK_CUDA(cudaFuncSetAttribute(
                         kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size));
@@ -507,4 +564,4 @@ void group_swiglu_quantize(const GroupedTensor *input, const Tensor *prob, const
 }  // namespace mxfp8
 }  // namespace dispatch
 }  // namespace transformer_engine
-#endif  // TRANSFORMER_ENGINE_GROUP_SWIGLU_QUANTIZE_MXFP8_CUH_
+#endif  // TRANSFORMER_ENGINE_GROUP_SCALED_SWIGLU_MXFP8_CUH_

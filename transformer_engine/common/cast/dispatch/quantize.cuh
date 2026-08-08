@@ -21,7 +21,7 @@
 #include "../fp8/quantize_fp8.cuh"
 #include "../fp8_blockwise/group_quantize_fp8_blockwise.cuh"
 #include "../mxfp8/group_quantize_mxfp8.cuh"
-#include "../mxfp8/group_swiglu_quantize_mxfp8.cuh"
+#include "../mxfp8/group_scaled_swiglu_mxfp8.cuh"
 #include "../mxfp8/quantize_mxfp8.cuh"
 #include "../nvfp4/group_quantize_transpose_nvfp4.cuh"
 #include "../nvfp4/quantize_4over6_nvfp4.cuh"
@@ -499,13 +499,13 @@ void group_quantize_fwd_helper(const NVTEGroupedTensor input, NVTEGroupedTensor 
   }
 }
 
-// Grouped weighted-SwiGLU recompute: input [T, 2F] ([act|gate]) + prob [T]
+// Grouped scaled SwiGLU recompute: input [T, 2F] ([act|gate]) + prob [T]
 // -> columnwise MXFP8 of (silu(act) * gate) * prob.
 template <typename ParamOP, float (*OP)(float, const ParamOP &)>
-void group_swiglu_quantize_fwd_helper(const NVTEGroupedTensor input, const NVTETensor prob,
-                                      NVTEGroupedTensor output,
-                                      const NVTEQuantizationConfig quant_config,
-                                      cudaStream_t stream) {
+void group_scaled_swiglu_fwd_helper(const NVTEGroupedTensor input, const NVTETensor prob,
+                                    NVTEGroupedTensor output,
+                                    const NVTEQuantizationConfig quant_config,
+                                    cudaStream_t stream) {
   using namespace detail;
 
   NVTEScalingMode scaling_mode = nvte_grouped_tensor_scaling_mode(output);
@@ -529,12 +529,12 @@ void group_swiglu_quantize_fwd_helper(const NVTEGroupedTensor input, const NVTET
 
   switch (scaling_mode) {
     case NVTE_MXFP8_1D_SCALING: {
-      mxfp8::group_swiglu_quantize<ParamOP, OP>(input_tensor, prob_tensor, noop_tensor,
-                                                output_tensor, &quant_config_cpp, stream);
+      mxfp8::group_scaled_swiglu<ParamOP, OP>(input_tensor, prob_tensor, noop_tensor, output_tensor,
+                                              &quant_config_cpp, stream);
       break;
     }
     default:
-      NVTE_ERROR("group_swiglu_quantize only supports NVTE_MXFP8_1D_SCALING, got: " +
+      NVTE_ERROR("group_scaled_swiglu only supports NVTE_MXFP8_1D_SCALING, got: " +
                  to_string(scaling_mode) + ".");
   }
 }

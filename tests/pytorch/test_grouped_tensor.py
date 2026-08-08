@@ -639,10 +639,10 @@ class TestGroupedTensor:
 
     @pytest.mark.parametrize("optimize_for_gemm", [False, True])
     @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
-    def test_group_swiglu_quantize_shapes(self, optimize_for_gemm: bool) -> None:
-        """Test the grouped weighted-SwiGLU MXFP8 recompute binding plumbs shapes/dtypes.
+    def test_group_scaled_swiglu_shapes(self, optimize_for_gemm: bool) -> None:
+        """Test the grouped scaled SwiGLU MXFP8 recompute binding plumbs shapes/dtypes.
 
-        Numerics live in tests/cpp/operator/test_cast_mxfp8_grouped_swiglu.cu; this only
+        Numerics live in tests/cpp/operator/test_cast_mxfp8_grouped_scaled_swiglu.cu; this only
         covers the pybind layer: a [T, 2F] input plus a [T] prob must come back as a
         columnwise-MXFP8 [T, F] grouped output.
         """
@@ -660,9 +660,7 @@ class TestGroupedTensor:
         quantizer.set_usage(rowwise=False, columnwise=True)
         quantizer.optimize_for_gemm = optimize_for_gemm
 
-        grouped_output = tex.group_swiglu_quantize(
-            input_2f, prob, quantizer, num_tensors, first_dims
-        )
+        grouped_output = tex.group_scaled_swiglu(input_2f, prob, quantizer, num_tensors, first_dims)
 
         outputs = grouped_output.split_into_quantized_tensors()
         assert len(outputs) == num_tensors
@@ -674,19 +672,19 @@ class TestGroupedTensor:
             assert output._columnwise_scale_inv.numel() == (rows // 32) * last_dim
 
         with pytest.raises(RuntimeError):
-            tex.group_swiglu_quantize(input_2f, prob.float(), quantizer, num_tensors, first_dims)
+            tex.group_scaled_swiglu(input_2f, prob.float(), quantizer, num_tensors, first_dims)
 
         # Both operands reach the kernel as raw pointers over a densely packed range, so a
         # strided view must be rejected instead of being read as if it were contiguous.
         wide = torch.randn(total_tokens, 4 * last_dim, dtype=torch.bfloat16, device="cuda")
         with pytest.raises(RuntimeError):
-            tex.group_swiglu_quantize(
+            tex.group_scaled_swiglu(
                 wide[:, : 2 * last_dim], prob, quantizer, num_tensors, first_dims
             )
 
         strided_prob = torch.rand(2 * total_tokens, dtype=torch.bfloat16, device="cuda")[::2]
         with pytest.raises(RuntimeError):
-            tex.group_swiglu_quantize(input_2f, strided_prob, quantizer, num_tensors, first_dims)
+            tex.group_scaled_swiglu(input_2f, strided_prob, quantizer, num_tensors, first_dims)
 
     @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
     def test_bgrad_group_quantize_zero_size_tensor(self) -> None:

@@ -85,7 +85,7 @@ void nvte_silu(const NVTETensor input, NVTETensor output, cudaStream_t stream);
  */
 void nvte_group_silu(const NVTEGroupedTensor input, NVTEGroupedTensor output, cudaStream_t stream);
 
-/*! \brief Grouped weighted-SwiGLU "recompute" fused with MXFP8 columnwise quantization.
+/*! \brief Grouped scaled SwiGLU "recompute" fused with MXFP8 columnwise quantization.
  *
  *  Computes, per token t and feature f:
  *      output[t, f] = ( silu(input[t, f]) * input[t, F + f] ) * prob[t]
@@ -103,8 +103,8 @@ void nvte_group_silu(const NVTEGroupedTensor input, NVTEGroupedTensor output, cu
  *  \param[in,out] output    Grouped output tensor [T, F] (columnwise MXFP8).
  *  \param[in]     stream    CUDA stream used for the operation.
  */
-void nvte_group_swiglu_quantize(const NVTEGroupedTensor input, const NVTETensor prob,
-                                NVTEGroupedTensor output, cudaStream_t stream);
+void nvte_group_scaled_swiglu(const NVTEGroupedTensor input, const NVTETensor prob,
+                              NVTEGroupedTensor output, cudaStream_t stream);
 
 /*! \brief Computes the ReLU activation of the input.
  *         If the scaling mode of the output tensor is set to NVTE_MXFP8_1D_SCALING,

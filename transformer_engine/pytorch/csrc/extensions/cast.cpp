@@ -398,44 +398,44 @@ py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const 
   return py::reinterpret_borrow<py::object>(grouped_output_py);
 }
 
-py::object group_swiglu_quantize(const at::Tensor &input_2f, const at::Tensor &prob,
-                                 py::handle quantizer, const size_t num_tensors,
-                                 std::optional<at::Tensor> first_dims,
-                                 std::optional<at::Tensor> last_dims,
-                                 std::optional<at::Tensor> tensor_offsets) {
+py::object group_scaled_swiglu(const at::Tensor &input_2f, const at::Tensor &prob,
+                               py::handle quantizer, const size_t num_tensors,
+                               std::optional<at::Tensor> first_dims,
+                               std::optional<at::Tensor> last_dims,
+                               std::optional<at::Tensor> tensor_offsets) {
   using namespace transformer_engine::pytorch::detail;
   init_extension();
 
-  // Grouped weighted-SwiGLU recompute of the MoE FC2 input:
+  // Grouped scaled SwiGLU recompute of the MoE FC2 input:
   //   input_2f : [T, 2F] ([act|gate]) in model dtype (bf16).
   //   prob     : [T] per-token weights, model dtype (matches TE fc1_prob_tensor).
   //   output   : columnwise MXFP8 of (silu(act) * gate) * prob, logical [T, F].
-  NVTE_CHECK(input_2f.dim() == 2, "group_swiglu_quantize input must be 2D [T, 2F].");
+  NVTE_CHECK(input_2f.dim() == 2, "group_scaled_swiglu input must be 2D [T, 2F].");
   const auto T = static_cast<size_t>(input_2f.size(0));
   const auto two_f = static_cast<size_t>(input_2f.size(1));
-  NVTE_CHECK(two_f % 2 == 0, "group_swiglu_quantize input last dim must be even (=2F).");
+  NVTE_CHECK(two_f % 2 == 0, "group_scaled_swiglu input last dim must be even (=2F).");
   const size_t F = two_f / 2;
 
   NVTE_CHECK(IsMXFP8Quantizers(quantizer.ptr()),
-             "group_swiglu_quantize only supports MXFP8 quantizers.");
-  NVTE_CHECK(input_2f.is_cuda(), "group_swiglu_quantize input must be a CUDA tensor.");
+             "group_scaled_swiglu only supports MXFP8 quantizers.");
+  NVTE_CHECK(input_2f.is_cuda(), "group_scaled_swiglu input must be a CUDA tensor.");
   // Both operands are handed to the kernel as raw pointers over a densely packed
   // range, so a strided view would be read as if it were contiguous.
-  NVTE_CHECK(input_2f.is_contiguous(), "group_swiglu_quantize input must be contiguous.");
-  NVTE_CHECK(prob.is_contiguous(), "group_swiglu_quantize prob must be contiguous.");
+  NVTE_CHECK(input_2f.is_contiguous(), "group_scaled_swiglu input must be contiguous.");
+  NVTE_CHECK(prob.is_contiguous(), "group_scaled_swiglu prob must be contiguous.");
   NVTE_CHECK(prob.device() == input_2f.device(),
-             "group_swiglu_quantize prob must be on the same device as the input.");
+             "group_scaled_swiglu prob must be on the same device as the input.");
   NVTE_CHECK(prob.numel() >= static_cast<int64_t>(T),
-             "group_swiglu_quantize prob must have at least T elements.");
+             "group_scaled_swiglu prob must have at least T elements.");
   NVTE_CHECK(prob.scalar_type() == input_2f.scalar_type(),
-             "group_swiglu_quantize prob must have the same dtype as the input (model dtype).");
+             "group_scaled_swiglu prob must have the same dtype as the input (model dtype).");
 
   // The grouped metadata is turned into offsets by a kernel on the guarded device below,
   // and the fused kernel then indexes the input with those offsets.
   auto check_metadata_device = [&input_2f](const std::optional<at::Tensor> &metadata,
                                            const char *name) {
     if (metadata.has_value()) {
-      NVTE_CHECK(metadata->device() == input_2f.device(), "group_swiglu_quantize ", name,
+      NVTE_CHECK(metadata->device() == input_2f.device(), "group_scaled_swiglu ", name,
                  " must be on the same device as the input.");
     }
   };
@@ -472,8 +472,8 @@ py::object group_swiglu_quantize(const at::Tensor &input_2f, const at::Tensor &p
   auto prob_te = makeTransformerEngineTensor(prob);
 
   NVTE_SCOPED_GIL_RELEASE({
-    nvte_group_swiglu_quantize(grouped_input_tensor.data(), prob_te.data(),
-                               grouped_output_tensor_cpp.data(), at::cuda::getCurrentCUDAStream());
+    nvte_group_scaled_swiglu(grouped_input_tensor.data(), prob_te.data(),
+                             grouped_output_tensor_cpp.data(), at::cuda::getCurrentCUDAStream());
   });
 
   return py::reinterpret_borrow<py::object>(grouped_output_py);

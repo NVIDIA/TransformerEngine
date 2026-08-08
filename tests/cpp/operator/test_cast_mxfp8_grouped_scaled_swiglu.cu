@@ -74,7 +74,7 @@ void compute_ref(const InputType* input,
 
     #pragma omp parallel proc_bind(spread)
     {
-        // Buffer to cache the weighted activation of one 32-element block
+        // Buffer to cache the scaled activation of one 32-element block
         std::vector<float> cache(SCALE_DIM_Y);
         #pragma omp for schedule(static)
         for (size_t block_Y = 0; block_Y < blocks_Y; ++block_Y) {
@@ -87,7 +87,7 @@ void compute_ref(const InputType* input,
                     const float act_elt = static_cast<float>(input[i * input_stride + j]);
                     const float gate_elt = static_cast<float>(input[i * input_stride + cols + j]);
                     const float prob_elt = static_cast<float>(prob[i]);
-                    // Numerical truncation: the kernel rounds the weighted activation back
+                    // Numerical truncation: the kernel rounds the scaled activation back
                     // through InputType before quantizing, so the reference must too.
                     const float elt = static_cast<float>(
                         static_cast<InputType>(silu(act_elt) * gate_elt * prob_elt));
@@ -280,7 +280,7 @@ void performTest(const ShapeRepresentation shape_rep,
     }
 
     if (expect_rejection) {
-        EXPECT_THROW(nvte_group_swiglu_quantize(in_group_tensor, prob.data(), out_group_tensor, 0),
+        EXPECT_THROW(nvte_group_scaled_swiglu(in_group_tensor, prob.data(), out_group_tensor, 0),
                      std::runtime_error);
         nvte_destroy_grouped_tensor(in_group_tensor);
         nvte_destroy_grouped_tensor(out_group_tensor);
@@ -307,7 +307,7 @@ void performTest(const ShapeRepresentation shape_rep,
     }
 
     // GPU
-    nvte_group_swiglu_quantize(in_group_tensor, prob.data(), out_group_tensor, 0);
+    nvte_group_scaled_swiglu(in_group_tensor, prob.data(), out_group_tensor, 0);
     NVTE_CHECK_CUDA(cudaDeviceSynchronize());
     auto err = cudaGetLastError();
     ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
@@ -360,14 +360,14 @@ std::vector<std::vector<size_t>> input_configs_small = {
 
 }  // namespace
 
-class GroupedSwigluQuantizeMXFP8TestSuite : public ::testing::TestWithParam
+class GroupedScaledSwigluMXFP8TestSuite : public ::testing::TestWithParam
     <std::tuple<std::vector<size_t>,        // Config
                 bool,                       // GEMM-swizzled scales
                 transformer_engine::DType,  // InputType
                 transformer_engine::DType   // OutputType
                 >> {};
 
-TEST_P(GroupedSwigluQuantizeMXFP8TestSuite, Test) {
+TEST_P(GroupedScaledSwigluMXFP8TestSuite, Test) {
     // Skip tests for pre-Blackwell architectures
     if (getDeviceComputeCapability() < blackwellComputeCapability) {
         GTEST_SKIP();
@@ -403,8 +403,8 @@ TEST_P(GroupedSwigluQuantizeMXFP8TestSuite, Test) {
 
 namespace {
 
-std::string MakeGroupedSwigluQuantizeMXFP8TestName(
-    const testing::TestParamInfo<GroupedSwigluQuantizeMXFP8TestSuite::ParamType>& info) {
+std::string MakeGroupedScaledSwigluMXFP8TestName(
+    const testing::TestParamInfo<GroupedScaledSwigluMXFP8TestSuite::ParamType>& info) {
     const std::vector<size_t> config = std::get<0>(info.param);
 
     std::string name;
@@ -429,21 +429,21 @@ std::string MakeGroupedSwigluQuantizeMXFP8TestName(
 }  // namespace
 
 INSTANTIATE_TEST_SUITE_P(
-    OperatorTest_GroupedSwigluQuantizeMXFP8_Shapes,
-    GroupedSwigluQuantizeMXFP8TestSuite,
+    OperatorTest_GroupedScaledSwigluMXFP8_Shapes,
+    GroupedScaledSwigluMXFP8TestSuite,
     ::testing::Combine(
         ::testing::ValuesIn(input_configs),
         ::testing::Values(false, true),
         ::testing::Values(DType::kBFloat16),
         ::testing::Values(DType::kFloat8E4M3)),
-    MakeGroupedSwigluQuantizeMXFP8TestName);
+    MakeGroupedScaledSwigluMXFP8TestName);
 
 INSTANTIATE_TEST_SUITE_P(
-    OperatorTest_GroupedSwigluQuantizeMXFP8_Dtypes,
-    GroupedSwigluQuantizeMXFP8TestSuite,
+    OperatorTest_GroupedScaledSwigluMXFP8_Dtypes,
+    GroupedScaledSwigluMXFP8TestSuite,
     ::testing::Combine(
         ::testing::ValuesIn(input_configs_small),
         ::testing::Values(false, true),
         ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16),
         ::testing::Values(DType::kFloat8E4M3, DType::kFloat8E5M2)),
-    MakeGroupedSwigluQuantizeMXFP8TestName);
+    MakeGroupedScaledSwigluMXFP8TestName);
