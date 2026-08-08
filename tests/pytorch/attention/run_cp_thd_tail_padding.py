@@ -144,22 +144,22 @@ def main() -> int:
     q_loc, k_loc, v_loc = (x[idx].to(dev) for x in (q_full, k_full, v_full))
     dout_loc = dout_full[idx].to(dev)
 
-    # No-CP reference: full padded buffer, exact path, computed identically per rank.
+    # No-CP reference on the UNPADDED buffer (ground truth for the real tokens):
+    # no padding anywhere, so no pad_between_seqs involvement at all. Real token i
+    # occupies row i in both the padded and unpadded layouts, so global_real indexes
+    # the reference directly.
     attn_ref = make_attn(dev, with_cp=False)
-    qr, kr, vr = (x.to(dev).requires_grad_(True) for x in (q_full, k_full, v_full))
+    qr, kr, vr = (x[:SEQ_REAL].to(dev).requires_grad_(True) for x in (q_full, k_full, v_full))
     out_ref = attn_ref(
         qr,
         kr,
         vr,
         cu_seqlens_q=cu,
         cu_seqlens_kv=cu,
-        cu_seqlens_q_padded=cu_padded,
-        cu_seqlens_kv_padded=cu_padded,
-        max_seqlen_q=t_total,
-        max_seqlen_kv=t_total,
-        pad_between_seqs=True,
+        max_seqlen_q=SEQ_REAL,
+        max_seqlen_kv=SEQ_REAL,
     )
-    out_ref.backward(dout_full.to(dev))
+    out_ref.backward(dout_full[:SEQ_REAL].to(dev))
 
     failures = []
     for pad_mode in ["explicit", "auto"]:
