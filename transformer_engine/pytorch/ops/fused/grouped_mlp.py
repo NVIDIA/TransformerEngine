@@ -101,9 +101,13 @@ def _nvidia_cudnn_frontend_supports_wgrad() -> bool:
     return _cudnn_frontend_version_supported()
 
 
-def _cudnn_frontend_supports_single_group_runtime_offsets() -> bool:
-    """Check cuDNN FE min version for single-group runtime offsets."""
-    return _cudnn_frontend_version_at_least("1.27.0")
+def _cudnn_frontend_supports_single_group_runtime_offsets(
+    activation_type: type[FusibleOperation],
+) -> bool:
+    """Check cuDNN FE support for single-group runtime offsets."""
+    return not issubclass(activation_type, ScaledSReLU) and _cudnn_frontend_version_at_least(
+        "1.27.0"
+    )
 
 
 def _wrap_single_quantized_as_grouped(
@@ -1073,7 +1077,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
 
         activation_kernel = self.grouped_gemm_activation_kernel()
         supports_single_group_runtime_offsets = (
-            _cudnn_frontend_supports_single_group_runtime_offsets()
+            _cudnn_frontend_supports_single_group_runtime_offsets(type(activation_op))
         )
 
         # Shared experts have one dense group and all optimized kernels derive M
@@ -2032,7 +2036,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             "use_dynamic_sched": True,
         }
         dactivation_kernel = self.grouped_gemm_dactivation_kernel()
-        if _cudnn_frontend_supports_single_group_runtime_offsets():
+        if _cudnn_frontend_supports_single_group_runtime_offsets(type(activation_op)):
             fc2_dactivation_kwargs["use_single_group_runtime_offsets"] = num_groups == 1
         if self._cudnn_dact_func is not None:
             fc2_dactivation_kwargs["beta_tensor"] = fc2_beta_tensor
@@ -2213,8 +2217,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         fc2_bias_grads: Optional[list[Optional[torch.Tensor]]] = None
         fc2_bias_grad_packed: Optional[torch.Tensor] = None
         if scale_bias:
-            fc2_biases = fc2_op._get_bias_tensors(dtype)
-            bias_packed = torch.stack(fc2_biases)
+            bias_packed = fc2_op._get_packed_bias_tensor(dtype)
             fc2_dbias_packed_result, grad_scales = compute_grouped_dbias_dscales(
                 fc2_dy,
                 scales_f32,
@@ -2377,7 +2380,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                     "use_dynamic_sched": True,
                 }
                 fc1_dgrad_kernel = self.grouped_gemm_quant_kernel()
-                if _cudnn_frontend_supports_single_group_runtime_offsets():
+                if _cudnn_frontend_supports_single_group_runtime_offsets(type(activation_op)):
                     fc1_dgrad_kwargs["use_single_group_runtime_offsets"] = num_groups == 1
 
                 if fc1_op.single_grouped_weight:
