@@ -16,9 +16,7 @@ sys.path.append(str(_current_file.parent.parent))
 from utils import run_distributed
 
 
-@pytest.mark.skipif(
-    get_device_compute_capability() < (9, 0), reason="THD format requires sm90+."
-)
+@pytest.mark.skipif(get_device_compute_capability() < (9, 0), reason="THD format requires sm90+.")
 @pytest.mark.parametrize("world_size", [2, 4])
 def test_cp_thd_tail_padding(world_size):
     """THD + CP(p2p) with tail padding: deterministic and matches no-CP reference.

@@ -214,7 +214,7 @@ def main() -> int:
                 print(f"  {f}", flush=True)
         else:
             print(
-                f"PASS: THD+CP(p2p) tail padding deterministic and correct "
+                "PASS: THD+CP(p2p) tail padding deterministic and correct "
                 f"(cp={cp}, real={SEQ_REAL}, padded={t_total}, modes=explicit,auto)",
                 flush=True,
             )
