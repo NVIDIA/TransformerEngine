@@ -205,8 +205,7 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
             if fuser.first_op_requiring_backward < fuser._num_basic_ops:
                 is_first_module = FP8GlobalStateManager.is_first_fp8_module()
 
-            # Other context. Save only the wiring metadata needed by
-            # backward instead of the whole OperationFuser.
+            # Other context
             func_ctx.backward_ops = fuser._backward_ops
             func_ctx.basic_ops = fuser._basic_ops
             func_ctx.basic_op_ctxs = basic_op_ctxs
@@ -264,11 +263,10 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
                 f"Expected grads for {func_ctx.num_extra_outputs} extra tensor outputs, "
                 f"but got {len(grad_extra_outputs)}"
             )
-        remaining_grad_extra_outputs = grad_extra_outputs
         basic_op_grad_extra_outputs: list[list[Optional[torch.Tensor]]] = []
         for op in basic_ops:
-            grads, remaining_grad_extra_outputs = _split_tuple(
-                remaining_grad_extra_outputs,
+            grads, grad_extra_outputs = _split_tuple(
+                grad_extra_outputs,
                 op.num_extra_outputs,
             )
             basic_op_grad_extra_outputs.append(list(grads))
