@@ -438,6 +438,38 @@ class TestSequentialContainer:
         torch.testing.assert_close(x4, x4_orig + x3)
 
 
+class _DualExtraOutput(te_ops.BasicOperation):
+    """Test helper: one op with two scaled extra outputs."""
+
+    num_extra_outputs = 2
+
+    def __init__(self, scales: tuple[float, float] = (1.0, 1.0)) -> None:
+        super().__init__()
+        self._scales = scales
+
+    def op_forward(self, *args, **kwargs):
+        raise RuntimeError("_DualExtraOutput uses fuser_forward")
+
+    def op_backward(self, *args, **kwargs):
+        raise RuntimeError("_DualExtraOutput uses fuser_backward")
+
+    def fuser_forward(self, basic_op_ctxs, input_, *, basic_op_extra_inputs, **unused):
+        del basic_op_ctxs, basic_op_extra_inputs
+        s0, s1 = self._scales
+        return input_, [(s0 * input_, s1 * input_)]
+
+    def fuser_backward(self, basic_op_ctxs, grad_output, *, basic_op_grad_extra_outputs):
+        del basic_op_ctxs
+        s0, s1 = self._scales
+        g0, g1 = basic_op_grad_extra_outputs[0]
+        grad_extra = torch.zeros_like(grad_output)
+        if g0 is not None:
+            grad_extra = grad_extra + s0 * g0
+        if g1 is not None:
+            grad_extra = grad_extra + s1 * g1
+        return grad_output + grad_extra, [()], [()]
+
+
 class TestExtraTensorChannels:
     """Error handling and grad coverage for named extra-tensor channels."""
 
@@ -530,6 +562,7 @@ class TestExtraTensorChannels:
                 and isinstance(ops[1], te_ops.Bias)
                 and isinstance(ops[2], te_ops.AddExtraInput)
             ):
+                # We want to enable this fusion just for this test.
                 FusedResidual._enabled = False
                 return [FusedResidual(*ops)]
             return ops
@@ -750,48 +783,24 @@ class TestExtraTensorChannels:
         torch.testing.assert_close(y, x + extra)
         torch.testing.assert_close(route, x)
 
-    def test_duplicate_extra_output_channel_names(self) -> None:
-        """Two extra outputs may not publish the same channel name."""
-        producer1 = te_ops.MakeExtraOutput()
-        producer2 = te_ops.MakeExtraOutput()
+    @pytest.mark.parametrize("layout", ("two_ops", "same_op"))
+    def test_duplicate_extra_output_channel_names(self, layout: str) -> None:
+        """A channel name may have at most one producer, across ops or slots."""
         consumer = te_ops.AddExtraInput()
-        producer1.set_extra_output_channel(0, "route")
-        producer2.set_extra_output_channel(0, "route")
         consumer.set_extra_input_channel(0, "route")
+        if layout == "two_ops":
+            producer1 = te_ops.MakeExtraOutput()
+            producer2 = te_ops.MakeExtraOutput()
+            producer1.set_extra_output_channel(0, "route")
+            producer2.set_extra_output_channel(0, "route")
+            ops = [producer1, producer2, consumer]
+        else:
+            producer = _DualExtraOutput()
+            producer.set_extra_output_channel(0, "route")
+            producer.set_extra_output_channel(1, "route")
+            ops = [producer, consumer]
         with pytest.raises(ValueError, match="multiple producers"):
-            OperationFuser([producer1, producer2, consumer])
-
-    def test_duplicate_extra_output_channels_on_same_op(self) -> None:
-        """A single op with multiple extras still cannot reuse a channel name."""
-
-        class DualExtraOutput(te_ops.BasicOperation):
-            num_extra_outputs = 2
-
-            def op_forward(self, *args, **kwargs):
-                raise RuntimeError("DualExtraOutput uses fuser_forward")
-
-            def op_backward(self, *args, **kwargs):
-                raise RuntimeError("DualExtraOutput uses fuser_backward")
-
-            def fuser_forward(self, basic_op_ctxs, input_, *, basic_op_extra_inputs, **unused):
-                return input_, [(input_, input_)]
-
-            def fuser_backward(self, basic_op_ctxs, grad_output, *, basic_op_grad_extra_outputs):
-                g0, g1 = basic_op_grad_extra_outputs[0]
-                grad_extra = torch.zeros_like(grad_output)
-                if g0 is not None:
-                    grad_extra = grad_extra + g0
-                if g1 is not None:
-                    grad_extra = grad_extra + g1
-                return grad_output + grad_extra, [()], [()]
-
-        producer = DualExtraOutput()
-        consumer = te_ops.AddExtraInput()
-        producer.set_extra_output_channel(0, "route")
-        producer.set_extra_output_channel(1, "route")
-        consumer.set_extra_input_channel(0, "route")
-        with pytest.raises(ValueError, match="multiple producers"):
-            OperationFuser([producer, consumer])
+            OperationFuser(ops)
 
     def test_named_extra_output_without_consumer_is_public(self, size: int = 16) -> None:
         """A named output remains public when its fuser has no consumer."""
@@ -823,30 +832,7 @@ class TestExtraTensorChannels:
 
     def test_mixed_channel_outputs_are_public(self, size: int = 16) -> None:
         """Both internally consumed and unconsumed channel outputs are public."""
-
-        class DualExtraOutput(te_ops.BasicOperation):
-            num_extra_outputs = 2
-
-            def op_forward(self, *args, **kwargs):
-                raise RuntimeError("DualExtraOutput uses fuser_forward")
-
-            def op_backward(self, *args, **kwargs):
-                raise RuntimeError("DualExtraOutput uses fuser_backward")
-
-            def fuser_forward(self, basic_op_ctxs, input_, *, basic_op_extra_inputs, **unused):
-                del basic_op_ctxs, basic_op_extra_inputs
-                return input_, [(2 * input_, 3 * input_)]
-
-            def fuser_backward(self, basic_op_ctxs, grad_output, *, basic_op_grad_extra_outputs):
-                del basic_op_ctxs
-                grad_internal, grad_public = basic_op_grad_extra_outputs[0]
-                return (
-                    grad_output + 2 * grad_internal + 3 * grad_public,
-                    [()],
-                    [()],
-                )
-
-        producer = DualExtraOutput()
+        producer = _DualExtraOutput(scales=(2.0, 3.0))
         consumer = te_ops.AddExtraInput()
         producer.set_extra_output_channel(0, "internal")
         producer.set_extra_output_channel(1, "public")

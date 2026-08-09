@@ -179,8 +179,7 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
                         y.requires_grad_(True)
                 extra_outputs[idx] = ys
 
-        # Flatten all extra outputs in basic-operation order. Channel-bound
-        # outputs remain visible even when they are also consumed internally.
+        # Flatten list of extra outputs
         extra_outputs_flat = [y for ys in extra_outputs for y in ys]
 
         # Save context for backward pass
