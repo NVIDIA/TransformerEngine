@@ -441,7 +441,12 @@ class TestSequentialContainer:
 class TestExtraTensorChannels:
     """Error handling and grad coverage for named extra-tensor channels."""
 
-    def test_internal_residual_connection(self, size: int = 16) -> None:
+    @pytest.mark.parametrize("with_extra_grad", (True, False))
+    def test_internal_residual_connection(
+        self,
+        with_extra_grad: bool,
+        size: int = 16,
+    ) -> None:
         """A channel can keep a residual connection inside a Sequential."""
         residual = te_ops.MakeExtraOutput()
         body = te_ops.Bias(size=size, device="cpu")
@@ -456,15 +461,22 @@ class TestExtraTensorChannels:
         torch.testing.assert_close(y, 2 * x + body.bias)
         torch.testing.assert_close(residual_out, x)
         dy = torch.rand_like(y)
-        dresidual = torch.rand_like(residual_out)
-        torch.autograd.backward((y, residual_out), (dy, dresidual))
-        torch.testing.assert_close(x.grad, 2 * dy + dresidual)
+        if with_extra_grad:
+            dresidual = torch.rand_like(residual_out)
+            torch.autograd.backward((y, residual_out), (dy, dresidual))
+            expected_dx = 2 * dy + dresidual
+        else:
+            y.backward(dy)
+            expected_dx = 2 * dy
+        torch.testing.assert_close(x.grad, expected_dx)
         torch.testing.assert_close(body.bias.grad, dy)
 
     @pytest.mark.parametrize("fusion_kind", ("forward", "backward", "forward_backward"))
+    @pytest.mark.parametrize("with_extra_grad", (True, False))
     def test_fused_internal_residual_connection(
         self,
         fusion_kind: str,
+        with_extra_grad: bool,
         size: int = 16,
     ) -> None:
         """Forward, backward, and joint fusions can own an internal channel."""
@@ -554,9 +566,14 @@ class TestExtraTensorChannels:
             assert backward_ops[0][0] is forward_ops[0][0]
         torch.testing.assert_close(y, 2 * x + body.bias)
         dy = torch.rand_like(y)
-        dresidual = torch.rand_like(residual_out)
-        torch.autograd.backward((y, residual_out), (dy, dresidual))
-        torch.testing.assert_close(x.grad, 2 * dy + dresidual)
+        if with_extra_grad:
+            dresidual = torch.rand_like(residual_out)
+            torch.autograd.backward((y, residual_out), (dy, dresidual))
+            expected_dx = 2 * dy + dresidual
+        else:
+            y.backward(dy)
+            expected_dx = 2 * dy
+        torch.testing.assert_close(x.grad, expected_dx)
         torch.testing.assert_close(body.bias.grad, dy)
 
     def test_internal_extra_tensor_channel_fanout(self, size: int = 16) -> None:

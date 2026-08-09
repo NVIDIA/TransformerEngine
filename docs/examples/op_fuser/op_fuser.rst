@@ -113,33 +113,33 @@ quantized compute.
 Branching operations
 ^^^^^^^^^^^^^^^^^^^^
 
-The operation fuser supports limited branching behavior. While the
-operations must be in sequential order, some operations can accept
+The operation fuser supports very limited branching behavior. While
+the operations must be in sequential order, some operations can accept
 extra inputs or produce extra outputs. For example, ``AddExtraInput``
-adds an extra input tensor to the intermediate tensor, and
-``MakeExtraOutput`` returns the intermediate tensor as an extra output.
-When calling a ``Sequential`` that contains any of these branching
-operations, the extra inputs should be passed as arguments and the
-extra outputs will be returned after the main output.
+will add an extra input tensor to the intermediate tensor and
+``MakeExtraOutput`` will return the intermediate tensor as an extra
+output. When calling a ``Sequential`` that contains any of these
+branching operations, the extra inputs should be passed in as
+arguments and the extra outputs will be returned.
 
 .. code-block:: python
 
     import torch
     import transformer_engine.pytorch as te
 
-    # Construct an MLP with a residual connection.
+    # Construct MLP with residual connection
     fc1 = te.ops.Sequential(
         te.ops.LayerNorm(4096),
-        te.ops.MakeExtraOutput(),  # Output the residual.
+        te.ops.MakeExtraOutput(),  # Output residual
         te.ops.Linear(4096, 28672),
         te.ops.SwiGLU(),
     )
     fc2 = te.ops.Sequential(
         te.ops.Linear(14336, 4096),
-        te.ops.AddExtraInput(),  # Add the residual.
+        te.ops.AddExtraInput(),  # Add residual
     )
 
-    # Pass the extra output from fc1 as the extra input to fc2.
+    # Forward pass
     x = torch.randn(16384, 4096, device="cuda")
     y, residual = fc1(x)
     y = fc2(y, residual)
@@ -147,9 +147,9 @@ extra outputs will be returned after the main output.
 .. figure:: ./residual_layernorm_mlp.png
    :align: center
 
-   Operations for an MLP block with a residual connection. The block
-   is split into two sections so that the caller can pass the extra
-   output from the first section to the second.
+   Operations for an MLP block with a residual connection. Note that
+   the block has been split into two sections, each with one branching
+   operation.
 
 Extra tensor channels
 """""""""""""""""""""

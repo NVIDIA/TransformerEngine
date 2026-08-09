@@ -293,8 +293,11 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
                     if basic_op_extra_output_is_internal[idx][output_idx]:
                         channel_grad = channel_grads.get(channel)
                         if channel_grad is not None:
+                            output_grad = basic_op_grad_extra_outputs[idx][output_idx]
                             basic_op_grad_extra_outputs[idx][output_idx] = (
-                                basic_op_grad_extra_outputs[idx][output_idx] + channel_grad
+                                channel_grad
+                                if output_grad is None
+                                else output_grad + channel_grad
                             )
             op_grad_extra_outputs = [
                 tuple(basic_op_grad_extra_outputs[idx]) for idx in basic_op_idxs
