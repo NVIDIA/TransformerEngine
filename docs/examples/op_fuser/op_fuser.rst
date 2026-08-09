@@ -157,8 +157,11 @@ Extra tensor channels
 Extra inputs and outputs may optionally specify a channel. Assigning
 the same channel name to an extra output and one or more later extra
 inputs routes the tensor internally within the same
-``OperationFuser``. Slots bound to channels are removed from the public
-``Sequential`` interface.
+``OperationFuser``. An extra input connected to an earlier producer is
+removed from the public ``Sequential`` arguments because the channel
+supplies it.
+Extra outputs remain in the public ``Sequential`` return value,
+including outputs that are also consumed through a channel.
 
 With a channel, the residual block above can be expressed using one
 ``Sequential``:
@@ -182,9 +185,9 @@ With a channel, the residual block above can be expressed using one
         add_residual,
     )
 
-    # The residual is routed internally, so the caller receives only y.
+    # The residual is routed internally and is also returned to the caller.
     x = torch.randn(16384, 4096, device="cuda")
-    y = block(x)
+    y, residual = block(x)
 
 Channels are also useful for mixture-of-experts blocks. The following
 example assumes custom ``Dispatch`` and ``Combine`` basic operations.
@@ -225,8 +228,9 @@ routing map. ``Combine`` consumes the routing map.
     moe = te.ops.Sequential(dispatch, fc1, activation, fc2, combine)
 
     # Dispatch's extra input has no channel, so the caller passes router_probs.
-    # Channels supply all later extra inputs internally.
-    y = moe(x, router_probs)
+    # Channels supply all later extra inputs internally, while Dispatch's
+    # extra outputs are still returned in their original order.
+    y, m_splits, probs, routing_map = moe(x, router_probs)
 
 Channels cannot connect operations in different ``OperationFuser``
 instances. In particular, an ordinary PyTorch module inside a
@@ -255,17 +259,20 @@ The following conditions apply to extra tensor channels:
 
 - A producer must appear before all of its consumers. Backward edges
   and cycles are not supported.
-- A channel has exactly one producer, but its output may fan out to
-  multiple consumers.
-- Every named output channel must have at least one consumer, and the
-  channel names on the producer and consumers must match.
+- An output channel name has at most one producer, but its output may
+  fan out to multiple consumers.
+- A named output does not require a consumer. It is still returned as
+  a public extra output.
 - A channel is scoped to one ``OperationFuser``. In a ``Sequential``,
   ordinary PyTorch modules split adjacent fusible operations into
   separate fusers, and channels cannot cross that boundary.
-- The caller passes extra inputs that have no channel assigned and
-  receives extra outputs that have no channel assigned. Slots assigned
-  to channels are internal and do not appear in the ``Sequential``
-  arguments or return value.
+- The caller passes extra inputs that are not connected to an earlier
+  producer in the same fuser. Channel-connected extra input slots do
+  not appear in the ``Sequential`` arguments.
+- The caller receives every extra output in the original basic-operation
+  and slot order. This includes channel-bound outputs that are also
+  consumed internally. Gradients supplied for a returned output are
+  combined with gradients from its internal channel consumers.
 
 Channel-connected basic operations may still be replaced by registered
 ``FusedOperation`` implementations. If a fused operation contains both
