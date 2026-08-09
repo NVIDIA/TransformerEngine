@@ -294,13 +294,11 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
                             basic_op_grad_extra_outputs[idx][output_idx] = (
                                 channel_grad if output_grad is None else output_grad + channel_grad
                             )
-            op_grad_extra_outputs = [
-                tuple(basic_op_grad_extra_outputs[idx]) for idx in basic_op_idxs
-            ]
+            grad_extra_outputs = [basic_op_grad_extra_outputs[idx] for idx in basic_op_idxs]
             dx, fused_op_grad_params, fused_op_grad_extra_inputs = op.fuser_backward(
                 [basic_op_ctxs[idx] for idx in basic_op_idxs],
                 dx,
-                basic_op_grad_extra_outputs=op_grad_extra_outputs,
+                basic_op_grad_extra_outputs=grad_extra_outputs,
             )
             fused_op_grad_params = tuple(tuple(grads) for grads in fused_op_grad_params)
             fused_op_grad_extra_inputs = tuple(tuple(grads) for grads in fused_op_grad_extra_inputs)
