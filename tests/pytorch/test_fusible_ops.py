@@ -806,7 +806,8 @@ class TestExtraTensorChannels:
 
     def test_fresh_internal_output_preserves_grad_requirement(self) -> None:
         """A fresh internal tensor requests its gradient from a scaled activation."""
-        # A BasicOperation with one extra output that is freshly computed instead of 
+
+        # A BasicOperation with one extra output that is freshly computed instead of
         # retrieved from a previous op's tensor.
         class MakeScale(te_ops.BasicOperation):
             num_extra_outputs = 1
