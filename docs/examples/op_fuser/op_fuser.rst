@@ -273,6 +273,10 @@ The following conditions apply to extra tensor channels:
   and slot order. This includes channel-bound outputs that are also
   consumed internally. Gradients supplied for a returned output are
   combined with gradients from its internal channel consumers.
+- Channel bindings are captured when an ``OperationFuser`` (or the
+  fusers inside a ``Sequential``) is first constructed. Changing
+  ``set_extra_input_channel`` / ``set_extra_output_channel`` afterward
+  requires constructing a new ``OperationFuser`` or ``Sequential``.
 
 Channel-connected basic operations may still be replaced by registered
 ``FusedOperation`` implementations. If a fused operation contains both

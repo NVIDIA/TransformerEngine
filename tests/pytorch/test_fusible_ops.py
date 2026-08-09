@@ -735,8 +735,8 @@ class TestExtraTensorChannels:
         torch.testing.assert_close(y, x + extra)
         torch.testing.assert_close(route, x)
 
-    def test_extra_channel_change_rebuilds_sequential(self, size: int = 16) -> None:
-        """Sequential rebuilds its routing after a channel configuration change."""
+    def test_extra_channel_change_requires_new_sequential(self, size: int = 16) -> None:
+        """Sequential does not auto-rebuild after a channel configuration change."""
         producer = te_ops.MakeExtraOutput()
         consumer = te_ops.AddExtraInput()
         producer.set_extra_output_channel(0, "route")
@@ -750,6 +750,10 @@ class TestExtraTensorChannels:
 
         consumer.set_extra_input_channel(0, None)
         extra = torch.rand_like(x)
+        with pytest.raises(RuntimeError, match="Construct a new OperationFuser"):
+            model(x, extra)
+
+        model = te_ops.Sequential(producer, consumer)
         y, route = model(x, extra)
         torch.testing.assert_close(y, x + extra)
         torch.testing.assert_close(route, x)
