@@ -171,11 +171,6 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
                         f"but got {len(ys)}"
                     )
                 for output_idx, y in enumerate(ys):
-                    if y is None:
-                        raise RuntimeError(
-                            f"Op {idx} ({type(fuser._basic_ops[idx]).__name__}) "
-                            f"did not emit extra output {output_idx}"
-                        )
                     if (
                         set_output_requires_grad
                         and idx >= fuser.first_op_requiring_backward
