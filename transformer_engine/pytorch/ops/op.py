@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 import abc
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 import dataclasses
 import pickle
 from typing import Any, Optional
@@ -89,7 +89,7 @@ class FusibleOperation(torch.nn.Module, metaclass=abc.ABCMeta):
         prev_op_grad_output_quantizer: Optional[Quantizer],
         next_op_input_quantizer: Optional[Quantizer],
         basic_op_kwargs: list[dict[str, Any]],
-    ) -> tuple[torch.Tensor, Iterable[Iterable[torch.Tensor]]]:
+    ) -> tuple[torch.Tensor, Sequence[Sequence[torch.Tensor]]]:
         """Forward pass
 
         This op is either a basic op or the fusion of basic ops, so
@@ -118,7 +118,7 @@ class FusibleOperation(torch.nn.Module, metaclass=abc.ABCMeta):
         -------
         torch.Tensor:
             Output tensor.
-        Iterable of torch.Tensor:
+        Sequence of torch.Tensor:
             Extra tensor outputs from basic operations.
 
         """
@@ -198,14 +198,11 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         self._quantizers: Optional[dict[str, list[Quantizer]]] = None
 
     def set_extra_input_channel(self, index: int, channel: Optional[str]) -> BasicOperation:
-        """Assign a channel name to an extra input slot.
+        """Bind an extra input slot to an internal fuser channel.
 
-        The slot receives the matching extra output from an earlier operation
-        in the same fuser. If there is no producer in the fuser, the slot
-        remains public; one public tensor fans out to all input slots with the
-        same channel name. Passing ``None`` removes the name. Channels cannot
-        be changed after the operation has been attached to a persistent
-        ``OperationFuser``.
+        A bound slot receives the matching extra output from an earlier
+        operation in the same fuser instead of consuming a public extra input.
+        Passing ``None`` removes the binding.
         """
         if not 0 <= index < self.num_extra_inputs:
             raise IndexError(
@@ -221,13 +218,10 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         return self
 
     def set_extra_output_channel(self, index: int, channel: Optional[str]) -> BasicOperation:
-        """Assign a channel name to an extra output slot.
+        """Bind an extra output slot to an internal fuser channel.
 
-        The slot feeds matching extra inputs on later operations in the same
-        fuser. If there are no consumers in the fuser, the slot remains a
-        public extra output. Passing ``None`` removes the name. Channels cannot
-        be changed after the operation has been attached to a persistent
-        ``OperationFuser``.
+        A bound slot can feed one or more later operations and is not returned
+        as a public extra output. Passing ``None`` removes the binding.
         """
         if not 0 <= index < self.num_extra_outputs:
             raise IndexError(

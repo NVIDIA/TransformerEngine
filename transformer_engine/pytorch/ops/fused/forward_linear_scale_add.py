@@ -5,7 +5,7 @@
 """Fused operation for forward GEMM + scale + add."""
 
 from __future__ import annotations
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from typing import Any, Optional
 
 import torch
@@ -47,7 +47,7 @@ class ForwardLinearScaleAdd(FusedOperation):
         prev_op_grad_output_quantizer: Optional[Quantizer],
         next_op_input_quantizer: Optional[Quantizer],
         basic_op_kwargs: list[dict[str, Any]],
-    ) -> tuple[torch.Tensor, Iterable[Iterable[torch.Tensor]]]:
+    ) -> tuple[torch.Tensor, Sequence[Sequence[torch.Tensor]]]:
 
         # Get basic operations
         linear_op = self.basic_ops[0]

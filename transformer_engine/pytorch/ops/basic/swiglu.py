@@ -5,7 +5,7 @@
 """Fusible operation for SwiGLU and variants."""
 
 from __future__ import annotations
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from typing import Any, Optional
 
 import torch
@@ -422,7 +422,7 @@ class _ScaledGLU(BasicOperation):
         prev_op_grad_output_quantizer: Optional[Quantizer],
         next_op_input_quantizer: Optional[Quantizer],
         basic_op_kwargs: list[dict[str, Any]],
-    ) -> tuple[torch.Tensor, Iterable[Iterable[torch.Tensor]]]:
+    ) -> tuple[torch.Tensor, Sequence[Sequence[torch.Tensor]]]:
         if self.activation_recompute_in_mlp:
             raise RuntimeError(
                 f"{self.__class__.__name__}(activation_recompute_in_mlp=True) requires the "

@@ -1003,7 +1003,7 @@ class GroupedLinear(BasicOperation):
         prev_op_grad_output_quantizer: Optional[Quantizer],
         next_op_input_quantizer: Optional[Quantizer],
         basic_op_kwargs: list[dict[str, Any]],
-    ) -> tuple[torch.Tensor, Iterable[Iterable[torch.Tensor]]]:
+    ) -> tuple[torch.Tensor, Sequence[Sequence[torch.Tensor]]]:
         num_groups = self.num_groups
         weight_param = self.weight if self.single_grouped_weight else self.weight0
         device = weight_param.device

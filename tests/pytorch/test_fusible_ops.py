@@ -451,11 +451,15 @@ class TestExtraTensorChannels:
 
         model = te_ops.Sequential(residual, body, add_residual)
         x = torch.rand((size,), requires_grad=True)
-        y = model(x)
+        y, residual_out = model(x)
 
         torch.testing.assert_close(y, 2 * x + body.bias)
-        y.sum().backward()
-        torch.testing.assert_close(x.grad, torch.full_like(x, 2))
+        torch.testing.assert_close(residual_out, x)
+        dy = torch.rand_like(y)
+        dresidual = torch.rand_like(residual_out)
+        torch.autograd.backward((y, residual_out), (dy, dresidual))
+        torch.testing.assert_close(x.grad, 2 * dy + dresidual)
+        torch.testing.assert_close(body.bias.grad, dy)
 
     @pytest.mark.parametrize("fusion_kind", ("forward", "backward", "forward_backward"))
     def test_fused_internal_residual_connection(
@@ -495,11 +499,12 @@ class TestExtraTensorChannels:
                 basic_op_grad_extra_outputs,
             ):
                 del basic_op_ctxs
-                # The fusion owns the internal residual edge, including its
-                # contribution to the input gradient.
-                assert basic_op_grad_extra_outputs[0][0] is None
+                # The fusion owns the internal residual edge. The fuser also
+                # supplies the gradient from the public residual output.
+                grad_residual = basic_op_grad_extra_outputs[0][0]
                 return (
-                    2 * grad_output,
+                    2 * grad_output
+                    + (torch.zeros_like(grad_output) if grad_residual is None else grad_residual),
                     [(), (grad_output,), ()],
                     [(), (), (grad_output,)],
                 )
@@ -531,7 +536,7 @@ class TestExtraTensorChannels:
         else:
             te_ops.register_forward_backward_fusion(fuse_residual, prepend=True)
         x = torch.rand((size,), requires_grad=True)
-        y = model(x)
+        y, residual_out = model(x)
 
         forward_ops = model._module_groups[0]._forward_ops
         backward_ops = model._module_groups[0]._backward_ops
@@ -549,8 +554,9 @@ class TestExtraTensorChannels:
             assert backward_ops[0][0] is forward_ops[0][0]
         torch.testing.assert_close(y, 2 * x + body.bias)
         dy = torch.rand_like(y)
-        y.backward(dy)
-        torch.testing.assert_close(x.grad, 2 * dy)
+        dresidual = torch.rand_like(residual_out)
+        torch.autograd.backward((y, residual_out), (dy, dresidual))
+        torch.testing.assert_close(x.grad, 2 * dy + dresidual)
         torch.testing.assert_close(body.bias.grad, dy)
 
     def test_internal_extra_tensor_channel_fanout(self, size: int = 16) -> None:
@@ -564,19 +570,23 @@ class TestExtraTensorChannels:
         model = te_ops.Sequential(producer, consumer1, consumer2)
 
         x = torch.rand((size,), requires_grad=True)
-        y = model(x)
+        y, route = model(x)
 
         # Main path: x -> x + route -> x + route + route.
         torch.testing.assert_close(y, 3 * x)
+        torch.testing.assert_close(route, x)
         dy = torch.rand_like(y)
-        y.backward(dy)
+        droute = torch.rand_like(route)
+        torch.autograd.backward((y, route), (dy, droute))
         # The channel fan-out contributes two independent gradient paths.
-        torch.testing.assert_close(x.grad, 3 * dy)
+        torch.testing.assert_close(x.grad, 3 * dy + droute)
 
         # Internal slots are unavailable before forward, so grad discovery
         # must tolerate them when no public input requires gradients.
         x_no_grad = x.detach()
-        torch.testing.assert_close(model(x_no_grad), 3 * x_no_grad)
+        y_no_grad, route_no_grad = model(x_no_grad)
+        torch.testing.assert_close(y_no_grad, 3 * x_no_grad)
+        torch.testing.assert_close(route_no_grad, x_no_grad)
 
     def test_internal_and_external_extra_tensor_inputs(self, size: int = 16) -> None:
         """Unbound slots remain public when other slots use internal channels."""
@@ -589,16 +599,17 @@ class TestExtraTensorChannels:
 
         x = torch.rand((size,), requires_grad=True)
         extra = torch.rand((size,), requires_grad=True)
-        y = model(x, extra)
+        y, route = model(x, extra)
 
         torch.testing.assert_close(y, 2 * x + extra)
+        torch.testing.assert_close(route, x)
         dy = torch.rand_like(y)
         y.backward(dy)
         torch.testing.assert_close(x.grad, 2 * dy)
         torch.testing.assert_close(extra.grad, dy)
 
-    def test_external_named_extra_input_fanout(self, size: int = 16) -> None:
-        """One public tensor supplies every unmatched input with the same channel."""
+    def test_external_named_extra_inputs_remain_separate(self, size: int = 16) -> None:
+        """Unmatched inputs with the same channel require separate public tensors."""
         consumer1 = te_ops.AddExtraInput()
         consumer2 = te_ops.AddExtraInput()
         consumer1.set_extra_input_channel(0, "external")
@@ -606,14 +617,18 @@ class TestExtraTensorChannels:
         model = te_ops.Sequential(consumer1, consumer2)
 
         x = torch.rand((size,), requires_grad=True)
-        extra = torch.rand((size,), requires_grad=True)
-        y = model(x, extra)
-        torch.testing.assert_close(y, x + 2 * extra)
+        extra1 = torch.rand((size,), requires_grad=True)
+        extra2 = torch.rand((size,), requires_grad=True)
+        with pytest.raises(ValueError, match="Expected 2 extra inputs but got 1"):
+            model(x, extra1)
+        y = model(x, extra1, extra2)
+        torch.testing.assert_close(y, x + extra1 + extra2)
 
         dy = torch.rand_like(y)
         y.backward(dy)
         torch.testing.assert_close(x.grad, dy)
-        torch.testing.assert_close(extra.grad, 2 * dy)
+        torch.testing.assert_close(extra1.grad, dy)
+        torch.testing.assert_close(extra2.grad, dy)
 
     def test_consumer_before_producer(self) -> None:
         """Channels only connect forward; a later producer does not satisfy an earlier consumer."""
@@ -715,7 +730,7 @@ class TestExtraTensorChannels:
         torch.testing.assert_close(y, x)
         torch.testing.assert_close(extra, x)
 
-    def test_one_extra_input_has_single_source(self) -> None:
+    def test_one_extra_input_has_single_source(self, size: int = 16) -> None:
         """Rebinding selects one source and leaves the other output public."""
         producer_a = te_ops.MakeExtraOutput()
         producer_b = te_ops.MakeExtraOutput()
@@ -727,10 +742,15 @@ class TestExtraTensorChannels:
         fuser = OperationFuser([producer_a, producer_b, consumer])
         assert fuser._basic_op_extra_input_sources[2] == [(1, 0)]
         assert fuser.num_extra_inputs == 0
-        assert fuser._external_extra_output_slots == [(0, 0)]
 
-    def test_mixed_channel_outputs_accept_generators(self, size: int = 16) -> None:
-        """Generator outputs support mixed internal and public channel slots."""
+        x = torch.rand((size,))
+        y, output_a, output_b = fuser(x)
+        torch.testing.assert_close(y, 2 * x)
+        torch.testing.assert_close(output_a, x)
+        torch.testing.assert_close(output_b, x)
+
+    def test_mixed_channel_outputs_are_public(self, size: int = 16) -> None:
+        """Both internally consumed and unconsumed channel outputs are public."""
 
         class DualExtraOutput(te_ops.BasicOperation):
             num_extra_outputs = 2
@@ -743,16 +763,15 @@ class TestExtraTensorChannels:
 
             def fuser_forward(self, basic_op_ctxs, input_, *, basic_op_extra_inputs, **unused):
                 del basic_op_ctxs, basic_op_extra_inputs
-                outputs = (2 * input_, 3 * input_)
-                return input_, (iter(outputs) for _ in range(1))
+                return input_, [(2 * input_, 3 * input_)]
 
             def fuser_backward(self, basic_op_ctxs, grad_output, *, basic_op_grad_extra_outputs):
                 del basic_op_ctxs
                 grad_internal, grad_public = basic_op_grad_extra_outputs[0]
                 return (
                     grad_output + 2 * grad_internal + 3 * grad_public,
-                    (iter(()) for _ in range(1)),
-                    (iter(()) for _ in range(1)),
+                    [()],
+                    [()],
                 )
 
         producer = DualExtraOutput()
@@ -763,14 +782,16 @@ class TestExtraTensorChannels:
         model = te_ops.Sequential(producer, consumer)
 
         x = torch.rand((size,), requires_grad=True)
-        y, public = model(x)
+        y, internal, public = model(x)
         torch.testing.assert_close(y, 3 * x)
+        torch.testing.assert_close(internal, 2 * x)
         torch.testing.assert_close(public, 3 * x)
 
         dy = torch.rand_like(y)
+        dinternal = torch.rand_like(internal)
         dpublic = torch.rand_like(public)
-        torch.autograd.backward((y, public), (dy, dpublic))
-        torch.testing.assert_close(x.grad, 3 * dy + 3 * dpublic)
+        torch.autograd.backward((y, internal, public), (dy, dinternal, dpublic))
+        torch.testing.assert_close(x.grad, 3 * dy + 2 * dinternal + 3 * dpublic)
 
     def test_fresh_internal_output_preserves_grad_requirement(self) -> None:
         """A fresh internal tensor requests its gradient from a scaled activation."""
@@ -806,7 +827,7 @@ class TestExtraTensorChannels:
         x_test = x_ref.detach().clone().requires_grad_(True)
         scale_ref = x_ref.square().mean(dim=-1)
         y_ref = torch.nn.functional.relu(x_ref).square() * scale_ref.unsqueeze(-1)
-        y_test = model(x_test)
+        y_test, _scale_test = model(x_test)
         torch.testing.assert_close(y_test, y_ref)
 
         dy = torch.rand_like(y_ref)
@@ -872,7 +893,7 @@ class TestExtraTensorChannels:
                 torch.nn.functional.linear(x_group, weight) + scale_group.unsqueeze(-1) * bias
             )
         y_ref = torch.cat(ys_ref)
-        y_test = model(x, split_sizes, scales)
+        y_test, _split_sizes_test, _scales_test = model(x, split_sizes, scales)
         dy = torch.rand_like(y_test)
         grads_ref = torch.autograd.grad(
             y_ref,

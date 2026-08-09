@@ -108,9 +108,11 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
         basic_op_extra_inputs: list[list[Optional[torch.Tensor]]] = [
             [None] * op.num_extra_inputs for op in fuser._basic_ops
         ]
-        for tensor, slots in zip(extra_inputs, fuser._external_extra_input_slots):
-            for op_idx, input_idx in slots:
-                basic_op_extra_inputs[op_idx][input_idx] = tensor
+        for tensor, (op_idx, input_idx) in zip(
+            extra_inputs,
+            fuser._external_extra_input_slots,
+        ):
+            basic_op_extra_inputs[op_idx][input_idx] = tensor
 
         # Apply forward ops
         x = input_
@@ -134,21 +136,8 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
                         # fused op will wire the channel itself internally
                         continue
                     producer_outputs = extra_outputs[producer_idx]
-                    if producer_outputs is None:
-                        raise RuntimeError(
-                            f"Extra tensor channel producer op {producer_idx} has not run"
-                        )
-                    if output_idx >= len(producer_outputs) or producer_outputs[output_idx] is None:
-                        raise RuntimeError(
-                            f"Extra tensor channel producer op {producer_idx} "
-                            f"({type(fuser._basic_ops[producer_idx]).__name__}) "
-                            f"did not emit extra output {output_idx} for "
-                            f"consumer op {idx} "
-                            f"({type(fuser._basic_ops[idx]).__name__}) "
-                            f"input {input_idx}"
-                        )
                     basic_op_extra_inputs[idx][input_idx] = producer_outputs[output_idx]
-            op_extra_inputs = [tuple(basic_op_extra_inputs[idx]) for idx in basic_op_idxs]
+            extra_inputs = [basic_op_extra_inputs[idx] for idx in basic_op_idxs]
             prev_op_idx = basic_op_idxs[0] - 1
             prev_op = fuser._basic_ops[prev_op_idx] if prev_op_idx >= 0 else None
             prev_op_grad_output_quantizer = None
@@ -163,12 +152,11 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
             x, fused_op_extra_outputs = op.fuser_forward(
                 [basic_op_ctxs[idx] for idx in basic_op_idxs],
                 x,
-                basic_op_extra_inputs=op_extra_inputs,
+                basic_op_extra_inputs=extra_inputs,
                 prev_op_grad_output_quantizer=prev_op_grad_output_quantizer,
                 next_op_input_quantizer=next_op_input_quantizer,
                 basic_op_kwargs=[basic_op_kwargs[idx] for idx in basic_op_idxs],
             )
-            fused_op_extra_outputs = tuple(tuple(ys) for ys in fused_op_extra_outputs)
             if len(fused_op_extra_outputs) != len(basic_op_idxs):
                 raise RuntimeError(
                     f"Expected {type(op).__name__} to generate extra outputs for "
@@ -196,12 +184,9 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
                         y.requires_grad_(True)
                 extra_outputs[idx] = ys
 
-        # Flatten public extra outputs. Matched channels stay internal, while
-        # unnamed slots and named channels without consumers remain public.
-        extra_outputs_flat = [
-            extra_outputs[op_idx][output_idx]
-            for op_idx, output_idx in fuser._external_extra_output_slots
-        ]
+        # Flatten all extra outputs in basic-operation order. Channel-bound
+        # outputs remain visible even when they are also consumed internally.
+        extra_outputs_flat = [y for ys in extra_outputs for y in ys]
 
         # Save context for backward pass
         if func_ctx is not None:
@@ -234,15 +219,13 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
             func_ctx.basic_op_num_params = fuser._basic_op_num_params
             func_ctx.num_extra_outputs = len(extra_outputs_flat)
             func_ctx.external_extra_input_slots = fuser._external_extra_input_slots
-            func_ctx.external_extra_output_slots = fuser._external_extra_output_slots
             func_ctx.basic_op_extra_output_channels = fuser._basic_op_extra_output_channels
             func_ctx.basic_op_extra_output_is_internal = fuser._basic_op_extra_output_is_internal
             func_ctx.basic_op_extra_input_sources = fuser._basic_op_extra_input_sources
             func_ctx.is_first_module = is_first_module
 
         # Mark output tensors as not deletable in backward
-        all_extra_outputs = [y for ys in extra_outputs for y in ys]
-        for tensor in [x] + all_extra_outputs:
+        for tensor in [x] + extra_outputs_flat:
             tensor._do_not_clear = True
 
         if set_output_requires_grad:
@@ -276,23 +259,25 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
             ctx._saved_tensors_range = None
 
         # Channel wiring saved from forward
-        external_extra_output_slots = func_ctx.external_extra_output_slots
         basic_op_extra_output_channels = func_ctx.basic_op_extra_output_channels
         basic_op_extra_output_is_internal = func_ctx.basic_op_extra_output_is_internal
         basic_op_extra_input_sources = func_ctx.basic_op_extra_input_sources
 
-        # Place public extra-output grads into their basic-op slots. Internal
-        # output grads are accumulated from channel consumers during backward.
+        # Place caller-provided extra-output grads into their basic-op slots.
+        # Gradients from internal channel consumers are added during backward.
         if len(grad_extra_outputs) != func_ctx.num_extra_outputs:
             raise ValueError(
                 f"Expected grads for {func_ctx.num_extra_outputs} extra tensor outputs, "
                 f"but got {len(grad_extra_outputs)}"
             )
-        basic_op_grad_extra_outputs: list[list[Optional[torch.Tensor]]] = [
-            [None] * op.num_extra_outputs for op in basic_ops
-        ]
-        for grad, (op_idx, output_idx) in zip(grad_extra_outputs, external_extra_output_slots):
-            basic_op_grad_extra_outputs[op_idx][output_idx] = grad
+        remaining_grad_extra_outputs = grad_extra_outputs
+        basic_op_grad_extra_outputs: list[list[Optional[torch.Tensor]]] = []
+        for op in basic_ops:
+            grads, remaining_grad_extra_outputs = _split_tuple(
+                remaining_grad_extra_outputs,
+                op.num_extra_outputs,
+            )
+            basic_op_grad_extra_outputs.append(list(grads))
 
         # Apply backward ops
         dx = grad_output
@@ -311,7 +296,12 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
             for idx in basic_op_idxs:
                 for output_idx, channel in enumerate(basic_op_extra_output_channels[idx]):
                     if basic_op_extra_output_is_internal[idx][output_idx]:
-                        basic_op_grad_extra_outputs[idx][output_idx] = channel_grads.get(channel)
+                        channel_grad = channel_grads.get(channel)
+                        if channel_grad is not None:
+                            output_grad = basic_op_grad_extra_outputs[idx][output_idx]
+                            basic_op_grad_extra_outputs[idx][output_idx] = (
+                                channel_grad if output_grad is None else output_grad + channel_grad
+                            )
             op_grad_extra_outputs = [
                 tuple(basic_op_grad_extra_outputs[idx]) for idx in basic_op_idxs
             ]
@@ -379,16 +369,11 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
                     f"but got {len(dxs)}"
                 )
 
-        # One public tensor may fan out to several unmatched slots sharing a
-        # channel name, so sum their gradients before returning to autograd.
-        grad_extra_inputs_flat = []
-        for slots in func_ctx.external_extra_input_slots:
-            grad = None
-            for op_idx, input_idx in slots:
-                slot_grad = grad_extra_inputs[op_idx][input_idx]
-                if slot_grad is not None:
-                    grad = slot_grad if grad is None else grad + slot_grad
-            grad_extra_inputs_flat.append(grad)
+        # Collect the gradient for each public extra input.
+        grad_extra_inputs_flat = [
+            grad_extra_inputs[op_idx][input_idx]
+            for op_idx, input_idx in func_ctx.external_extra_input_slots
+        ]
 
         # Update FP8 scaling factors
         if func_ctx.is_first_module and not _is_graph_capturing():
@@ -453,8 +438,7 @@ class OperationFuser:
         self._basic_op_extra_output_is_internal: list[list[bool]] = [
             [False] * op.num_extra_outputs for op in basic_ops
         ]
-        self._external_extra_input_slots: list[list[tuple[int, int]]] = []
-        self._external_extra_output_slots: list[tuple[int, int]] = []
+        self._external_extra_input_slots: list[tuple[int, int]] = []
 
         # Find channel producers and reject ambiguous names.
         channel_producers: dict[str, tuple[int, int]] = {}
@@ -470,24 +454,18 @@ class OperationFuser:
                     )
                 channel_producers[channel] = (op_idx, output_idx)
 
-        # Resolve inputs. A channel with an earlier producer is internal. A
-        # channel without a producer is public, with one positional tensor
-        # fanning out to every public slot that shares the channel name.
-        external_input_channels: dict[str, int] = {}
+        # Resolve inputs. A channel with an earlier producer is internal.
+        # Every input without an earlier producer is a separate public input.
         consumed_channels: set[str] = set()
         for op_idx, op in enumerate(basic_ops):
             for input_idx, channel in enumerate(op._extra_input_channels):
                 if channel is None:
-                    self._external_extra_input_slots.append([(op_idx, input_idx)])
+                    self._external_extra_input_slots.append((op_idx, input_idx))
                     continue
                 producer = channel_producers.get(channel)
+                # If no producer for named channel, this is a public input.
                 if producer is None:
-                    group_idx = external_input_channels.get(channel)
-                    if group_idx is None:
-                        group_idx = len(self._external_extra_input_slots)
-                        external_input_channels[channel] = group_idx
-                        self._external_extra_input_slots.append([])
-                    self._external_extra_input_slots[group_idx].append((op_idx, input_idx))
+                    self._external_extra_input_slots.append((op_idx, input_idx))
                     continue
                 producer_idx, _ = producer
                 if producer_idx >= op_idx:
@@ -498,13 +476,11 @@ class OperationFuser:
                 self._basic_op_extra_input_sources[op_idx][input_idx] = producer
                 consumed_channels.add(channel)
 
-        # Unnamed outputs and named outputs without local consumers are public.
+        # All extra outputs remain public, including outputs consumed internally.
         for op_idx, op in enumerate(basic_ops):
             for output_idx, channel in enumerate(self._basic_op_extra_output_channels[op_idx]):
                 if channel is not None and channel in consumed_channels:
                     self._basic_op_extra_output_is_internal[op_idx][output_idx] = True
-                else:
-                    self._external_extra_output_slots.append((op_idx, output_idx))
 
         # Every channel-bound extra input must be wired to a matching producer
         # extra output. External slots remain unbound (source is None).
@@ -718,9 +694,8 @@ class OperationFuser:
         basic_op_extra_inputs: list[list[Optional[torch.Tensor]]] = [
             [None] * op.num_extra_inputs for op in self._basic_ops
         ]
-        for tensor, slots in zip(extra_inputs, self._external_extra_input_slots):
-            for op_idx, input_idx in slots:
-                basic_op_extra_inputs[op_idx][input_idx] = tensor
+        for tensor, (op_idx, input_idx) in zip(extra_inputs, self._external_extra_input_slots):
+            basic_op_extra_inputs[op_idx][input_idx] = tensor
 
         # Get environment state
         recipe = None
