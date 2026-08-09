@@ -154,7 +154,7 @@ arguments and the extra outputs will be returned.
 Extra tensor channels
 """""""""""""""""""""
 
-Extra inputs and outputs may optionally specify a channel. Assigning
+Extra inputs and Extra outputs may optionally specify a channel. Assigning
 the same channel name to an extra output and one or more later extra
 inputs routes the tensor internally within the same
 ``OperationFuser``. An extra input connected to an earlier producer is
