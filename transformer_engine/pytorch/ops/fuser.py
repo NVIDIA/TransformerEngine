@@ -300,20 +300,6 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
                 dx,
                 basic_op_grad_extra_outputs=grad_extra_outputs,
             )
-            fused_op_grad_params = tuple(tuple(grads) for grads in fused_op_grad_params)
-            fused_op_grad_extra_inputs = tuple(tuple(grads) for grads in fused_op_grad_extra_inputs)
-            if len(fused_op_grad_params) != len(basic_op_idxs):
-                raise RuntimeError(
-                    f"Expected {type(op).__name__} to generate parameter grads for "
-                    f"{len(basic_op_idxs)} basic operations, but got "
-                    f"{len(fused_op_grad_params)}"
-                )
-            if len(fused_op_grad_extra_inputs) != len(basic_op_idxs):
-                raise RuntimeError(
-                    f"Expected {type(op).__name__} to generate extra-input grads for "
-                    f"{len(basic_op_idxs)} basic operations, but got "
-                    f"{len(fused_op_grad_extra_inputs)}"
-                )
             for idx, dparams in zip(basic_op_idxs, fused_op_grad_params):
                 grad_params[idx] = dparams
                 basic_op_ctxs[idx].saved_tensors = None
