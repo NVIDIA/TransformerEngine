@@ -665,18 +665,73 @@ class TestExtraTensorChannels:
         with pytest.raises(ValueError, match="non-empty string"):
             producer.set_extra_output_channel(0, 123)  # type: ignore[arg-type]
 
-    def test_set_extra_channel_rejects_mutation_after_fuser_construction(self) -> None:
-        """Channel routing is immutable after it has been captured by a fuser."""
+    def test_extra_channel_change_invalidates_existing_fuser(self, size: int = 16) -> None:
+        """Channel changes invalidate an existing fuser but allow constructing another."""
         producer = te_ops.MakeExtraOutput()
         consumer = te_ops.AddExtraInput()
         producer.set_extra_output_channel(0, "route")
         consumer.set_extra_input_channel(0, "route")
         fuser = OperationFuser([producer, consumer])
         assert fuser.num_extra_inputs == 0
-        with pytest.raises(RuntimeError, match="cannot be changed"):
-            producer.set_extra_output_channel(0, None)
-        with pytest.raises(RuntimeError, match="cannot be changed"):
-            consumer.set_extra_input_channel(0, None)
+
+        consumer.set_extra_input_channel(0, None)
+        x = torch.rand((size,))
+        extra = torch.rand_like(x)
+        with pytest.raises(RuntimeError, match="Construct a new OperationFuser"):
+            fuser(x)
+
+        new_fuser = OperationFuser([producer, consumer])
+        y, route = new_fuser(x, extra)
+        torch.testing.assert_close(y, x + extra)
+        torch.testing.assert_close(route, x)
+
+    def test_extra_channel_change_rebuilds_sequential(self, size: int = 16) -> None:
+        """Sequential rebuilds its routing after a channel configuration change."""
+        producer = te_ops.MakeExtraOutput()
+        consumer = te_ops.AddExtraInput()
+        producer.set_extra_output_channel(0, "route")
+        consumer.set_extra_input_channel(0, "route")
+        model = te_ops.Sequential(producer, consumer)
+
+        x = torch.rand((size,))
+        y, route = model(x)
+        torch.testing.assert_close(y, 2 * x)
+        torch.testing.assert_close(route, x)
+
+        consumer.set_extra_input_channel(0, None)
+        extra = torch.rand_like(x)
+        y, route = model(x, extra)
+        torch.testing.assert_close(y, x + extra)
+        torch.testing.assert_close(route, x)
+
+    @pytest.mark.parametrize("mutation", ("insert", "replace", "delete"))
+    def test_sequential_structure_change_does_not_leave_channel_locks(
+        self,
+        mutation: str,
+        size: int = 16,
+    ) -> None:
+        """Discarding cached fusers does not prevent channel reconfiguration."""
+        producer = te_ops.MakeExtraOutput()
+        middle = te_ops.Identity()
+        consumer = te_ops.AddExtraInput()
+        producer.set_extra_output_channel(0, "route")
+        consumer.set_extra_input_channel(0, "route")
+        model = te_ops.Sequential(producer, middle, consumer)
+
+        x = torch.rand((size,))
+        model(x)
+        if mutation == "insert":
+            model.insert(1, te_ops.Identity())
+        elif mutation == "replace":
+            model[1] = te_ops.Identity()
+        else:
+            del model[1]
+
+        consumer.set_extra_input_channel(0, None)
+        extra = torch.rand_like(x)
+        y, route = model(x, extra)
+        torch.testing.assert_close(y, x + extra)
+        torch.testing.assert_close(route, x)
 
     def test_duplicate_extra_output_channel_names(self) -> None:
         """Two extra outputs may not publish the same channel name."""

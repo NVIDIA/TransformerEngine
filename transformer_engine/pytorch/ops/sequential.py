@@ -179,6 +179,14 @@ class Sequential(torch.nn.Module):
             or grouped MLP.
         """
 
+        # Channel routing is captured when an OperationFuser is constructed.
+        # Rebuild groups if a contained operation's channel configuration changed.
+        if self._module_groups is not None and any(
+            isinstance(group, OperationFuser) and group.has_stale_op_channels()
+            for group in self._module_groups
+        ):
+            self._module_groups = None
+
         # Create module groups if needed
         if self._module_groups is None:
             self._module_groups = self._make_module_groups(self._modules.values())

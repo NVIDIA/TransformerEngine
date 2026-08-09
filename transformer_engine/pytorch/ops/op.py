@@ -191,7 +191,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         # Unbound slots remain public inputs/outputs, preserving the original API.
         self._extra_input_channels: list[Optional[str]] = [None] * self.num_extra_inputs
         self._extra_output_channels: list[Optional[str]] = [None] * self.num_extra_outputs
-        self._extra_channels_locked = False
+        self._extra_channels_version = 0
 
         # Objects for quantization
         self._fp8_metas: Optional[dict[str, dict[str, Any]]] = None
@@ -213,8 +213,8 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
             raise ValueError("Extra input channel must be a non-empty string or None")
         if self._extra_input_channels[index] == channel:
             return self
-        self._assert_extra_channels_mutable()
         self._extra_input_channels[index] = channel
+        self._extra_channels_version += 1
         return self
 
     def set_extra_output_channel(self, index: int, channel: Optional[str]) -> BasicOperation:
@@ -232,21 +232,9 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
             raise ValueError("Extra output channel must be a non-empty string or None")
         if self._extra_output_channels[index] == channel:
             return self
-        self._assert_extra_channels_mutable()
         self._extra_output_channels[index] = channel
+        self._extra_channels_version += 1
         return self
-
-    def _assert_extra_channels_mutable(self) -> None:
-        """Check that channel routing has not been captured by a fuser."""
-        if self._extra_channels_locked:
-            raise RuntimeError(
-                "Extra tensor channels cannot be changed after an operation has been "
-                "attached to an OperationFuser"
-            )
-
-    def _lock_extra_channels(self) -> None:
-        """Prevent changes after a fuser has captured the channel routing."""
-        self._extra_channels_locked = True
 
     @property
     def is_fused_op(self) -> bool:
@@ -592,7 +580,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         """Apply operation"""
         from .fuser import OperationFuser
 
-        return OperationFuser([self], lock_extra_channels=False)(
+        return OperationFuser([self])(
             input,
             *extra_inputs,
             basic_op_kwargs=[kwargs],
@@ -827,7 +815,7 @@ class FusedOperation(FusibleOperation):
             basic_op_kwargs = [{} for _ in range(len(self.basic_ops))]
         from .fuser import OperationFuser
 
-        return OperationFuser([self], lock_extra_channels=False)(
+        return OperationFuser([self])(
             input,
             *extra_inputs,
             basic_op_kwargs=basic_op_kwargs,
