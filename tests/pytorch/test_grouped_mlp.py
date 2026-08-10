@@ -15,6 +15,7 @@ import pytest
 import torch
 
 import transformer_engine.pytorch as te
+from transformer_engine.pytorch.constants import TE_DType
 import transformer_engine.pytorch.ops.fused.grouped_mlp as grouped_mlp_module
 from transformer_engine.pytorch.ops.fused.grouped_mlp import (
     _cudnn_frontend_supports_grouped_gemm_srelu,
@@ -228,6 +229,23 @@ def make_reference_and_test_tensors(
     ref.requires_grad_(requires_grad)
     test.requires_grad_(requires_grad)
     return ref, test
+
+
+class _InjectGrad(torch.autograd.Function):
+    """Replace the gradient flowing into ``x`` with ``grad``.
+
+    Mirrors how an FP8 token dispatch delivers a pre-quantized ``GroupedTensor``
+    grad output: the downstream op simply returns one as its grad input.
+    """
+
+    @staticmethod
+    def forward(ctx, x, grad):  # pylint: disable=arguments-differ
+        ctx.injected_grad = grad
+        return x
+
+    @staticmethod
+    def backward(ctx, grad_output):  # pylint: disable=arguments-differ
+        return ctx.injected_grad, None
 
 
 class TestGroupedLinearOp:
@@ -463,6 +481,189 @@ class TestGroupedLinearOp:
                         torch.testing.assert_close(db_test, bs_ref[group_idx].grad, **tols)
                     else:
                         assert b_test.grad is None
+
+    @staticmethod
+    def _make_rowwise_mxfp8_wire_input(
+        x_hp: torch.Tensor,
+        group_size: int,
+        split_sizes: torch.Tensor,
+    ) -> "GroupedTensor":
+        """Rowwise-only MXFP8 GroupedTensor with compact scales (FP8 dispatch wire format)."""
+        wire_quantizer = MXFP8Quantizer(
+            fp8_dtype=TE_DType[torch.float8_e4m3fn], rowwise=True, columnwise=False
+        )
+        x_wire = tex.group_quantize(
+            x_hp, wire_quantizer, group_size, split_sizes.to(dtype=torch.int64)
+        )
+        # Sanity: the wire tensor is rowwise-only with unswizzled scales.
+        assert x_wire.columnwise_data is None
+        assert not x_wire._with_gemm_swizzled_scales
+        return x_wire
+
+    @pytest.mark.parametrize("weight_requires_grad", (False, True))
+    def test_grouped_linear_prequantized_mxfp8_input(
+        self,
+        *,
+        group_size: int = 4,
+        weight_shape: tuple[int, int] = (256, 256),
+        split_alignment: int = 128,
+        dtype: torch.dtype = torch.bfloat16,
+        device: torch.device = "cuda",
+        weight_requires_grad: bool,
+    ) -> None:
+        """Rowwise-only MXFP8 GroupedTensor input (FP8 token dispatch wire format).
+
+        The input arrives already rowwise-quantized with compact scales. The op
+        must feed the rowwise data to the forward GEMM as-is and manufacture the
+        columnwise copy for the wgrad GEMM. The reference run consumes the
+        *dequantized* wire tensor (the only data a layer can see after FP8
+        dispatch) on the normal quantize-from-BF16 path; because MXFP8 requant
+        is idempotent along the rowwise axis and both paths derive the
+        columnwise copy from the same dequantized data, the two runs must match
+        bit-for-bit.
+        """
+        if not mxfp8_available:
+            pytest.skip(reason_for_no_mxfp8)
+        maybe_skip_quantization("mxfp8", dims=weight_shape, device=device, dtype=dtype)
+
+        # Split sizes (including an empty group)
+        split_sizes = [split_alignment * i for i in range(group_size)]
+        random.shuffle(split_sizes)
+        split_sizes = torch.tensor(split_sizes, dtype=torch.int, device=device)
+
+        out_features, in_features = weight_shape
+        total_tokens = int(split_sizes.sum().item())
+        in_shape = (total_tokens, in_features)
+
+        # Wire-format input and its exact dequantization (the reference input).
+        x_hp = torch.rand(in_shape, dtype=dtype, device=device) - 0.5
+        x_wire = self._make_rowwise_mxfp8_wire_input(x_hp, group_size, split_sizes)
+        x_ref = tex.group_dequantize(x_wire, TE_DType[dtype]).rowwise_data.view(in_shape)
+
+        dy = torch.rand((total_tokens, out_features), dtype=dtype, device=device) - 0.5
+        recipe = make_recipe("mxfp8")
+        op = te.ops.GroupedLinear(
+            group_size, in_features, out_features, bias=False, device=device, dtype=dtype
+        )
+        with torch.no_grad():
+            for param in op.parameters():
+                param.requires_grad_(requires_grad=weight_requires_grad)
+
+        def _run(x):
+            with te.autocast(enabled=True, recipe=recipe):
+                y = op(x, split_sizes)
+            wgrads = []
+            if weight_requires_grad:
+                y.backward(dy)
+                for group_idx in range(group_size):
+                    weight = getattr(op, f"weight{group_idx}")
+                    wgrads.append(weight.grad.detach().clone())
+                    weight.grad = None
+            return y.detach(), wgrads
+
+        y_ref, wgrads_ref = _run(x_ref)
+        y_test, wgrads_test = _run(x_wire)
+
+        # Bit-exact match expected (identical quantized inputs and kernels).
+        torch.testing.assert_close(y_test, y_ref, rtol=0, atol=0)
+        for wgrad_test, wgrad_ref in zip(wgrads_test, wgrads_ref):
+            torch.testing.assert_close(wgrad_test, wgrad_ref, rtol=0, atol=0)
+
+    @pytest.mark.parametrize("bias_mode", ("none", "plain", "scaled"))
+    @pytest.mark.parametrize("weight_requires_grad", (False, True))
+    def test_grouped_linear_prequantized_mxfp8_grad(
+        self,
+        *,
+        group_size: int = 4,
+        weight_shape: tuple[int, int] = (256, 256),
+        split_alignment: int = 128,
+        dtype: torch.dtype = torch.bfloat16,
+        device: torch.device = "cuda",
+        bias_mode: str,
+        weight_requires_grad: bool,
+    ) -> None:
+        """Rowwise-only MXFP8 GroupedTensor grad output (FP8 token dispatch, backward).
+
+        Mirrors ``test_grouped_linear_prequantized_mxfp8_input`` on the backward
+        side: the rowwise data feeds the dgrad GEMM and the columnwise copy is
+        manufactured for wgrad. Covers all three bias gradient sources: none,
+        ``plain`` (fused into the columnwise stage of the quantize kernel, or
+        reduced from the dequantized grad when frozen weights leave no columnwise
+        stage), and ``scaled`` (``scale_bias``, whose dbias/dscales need the
+        dequantized grad because they depend on the routing probabilities).
+
+        With frozen weights TE also requires frozen biases, so bias gradients are
+        not observable there; ``dscales`` still is, since the probabilities are an
+        input rather than a parameter.
+        """
+        if not mxfp8_available:
+            pytest.skip(reason_for_no_mxfp8)
+        maybe_skip_quantization("mxfp8", dims=weight_shape, device=device, dtype=dtype)
+
+        has_bias = bias_mode != "none"
+        use_scale_bias = bias_mode == "scaled"
+
+        # Split sizes (including an empty group)
+        split_sizes = [split_alignment * i for i in range(group_size)]
+        random.shuffle(split_sizes)
+        split_sizes = torch.tensor(split_sizes, dtype=torch.int, device=device)
+
+        out_features, in_features = weight_shape
+        total_tokens = int(split_sizes.sum().item())
+
+        x = torch.rand((total_tokens, in_features), dtype=dtype, device=device) - 0.5
+        dy_hp = torch.rand((total_tokens, out_features), dtype=dtype, device=device) - 0.5
+        probs = torch.rand((total_tokens,), dtype=dtype, device=device)
+
+        # Wire-format grad output and its exact dequantization (the reference grad).
+        dy_wire = self._make_rowwise_mxfp8_wire_input(dy_hp, group_size, split_sizes)
+        dy_ref = tex.group_dequantize(dy_wire, TE_DType[dtype]).rowwise_data.view(
+            total_tokens, out_features
+        )
+
+        recipe = make_recipe("mxfp8")
+        op = te.ops.GroupedLinear(
+            group_size,
+            in_features,
+            out_features,
+            bias=has_bias,
+            device=device,
+            dtype=dtype,
+            scale_bias=use_scale_bias,
+        )
+        if not weight_requires_grad:
+            # TE requires bias.requires_grad to match weight.requires_grad.
+            for param in op.parameters():
+                param.requires_grad_(False)
+
+        def _run(grad):
+            x_in = x.detach().clone().requires_grad_()
+            probs_in = probs.detach().clone().requires_grad_(use_scale_bias)
+            extra_inputs = (split_sizes, probs_in) if use_scale_bias else (split_sizes,)
+            with te.autocast(enabled=True, recipe=recipe):
+                y = op(x_in, *extra_inputs)
+            # Deliver ``grad`` as the op's grad output, as FP8 dispatch would.
+            _InjectGrad.apply(y, grad).backward(torch.ones_like(y))
+            grads = [("dx", x_in.grad)]
+            if use_scale_bias:
+                grads.append(("dprobs", probs_in.grad))
+            if weight_requires_grad:
+                for group_idx in range(group_size):
+                    weight = getattr(op, f"weight{group_idx}")
+                    grads.append((f"w{group_idx}", weight.grad.detach().clone()))
+                    weight.grad = None
+                    if has_bias:
+                        bias_param = getattr(op, f"bias{group_idx}")
+                        grads.append((f"b{group_idx}", bias_param.grad.detach().clone()))
+                        bias_param.grad = None
+            return grads
+
+        grads_ref = _run(dy_ref)
+        grads_test = _run(dy_wire)
+
+        # Bit-exact match expected (identical quantized grads and kernels).
+        for (_, grad_test), (_, grad_ref) in zip(grads_test, grads_ref):
+            torch.testing.assert_close(grad_test, grad_ref, rtol=0, atol=0)
 
     @pytest.mark.parametrize("dtype", (torch.bfloat16, torch.float16))
     @pytest.mark.parametrize(
@@ -755,6 +956,13 @@ class TestGroupedMLPFusedOp:
         maybe_skip_quantization(quantization, dims=in_shape, device=device, dtype=dtype)
         if dtype == torch.bfloat16 and not is_bf16_available():
             pytest.skip("BF16 requires SM 8.0+")
+        if os.environ.get("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "0") == "0" and (
+            single_grouped_weight or single_grouped_bias
+        ):
+            pytest.skip(
+                "single_grouped_weight/single_grouped_bias requires"
+                " NVTE_GROUPED_LINEAR_SINGLE_PARAM=1"
+            )
         if single_grouped_weight and quantization != "mxfp8":
             pytest.skip("single_grouped_weight is only supported for MXFP8 quantization")
         if single_grouped_bias and not bias:
@@ -1026,8 +1234,10 @@ class TestGroupedMLPFusedOp:
             or (
                 quantization == "nvfp4_rht"
                 and dtype == torch.bfloat16
-                and activation == "scaled_srelu"
-                and glu_interleave_size is None
+                and (
+                    (not activation_is_glu and glu_interleave_size is None)
+                    or (activation_is_glu and glu_interleave_size == 32)
+                )
             )
         )
         if expected_grouped_mlp_fusion:
@@ -1107,6 +1317,208 @@ class TestGroupedMLPFusedOp:
             assert_close(fc1.weight.grad, fc1_w_ref_grad, **tols)
             assert_close(fc2.weight.grad, fc2_w_ref_grad, **tols)
 
+    @pytest.mark.parametrize("weight_requires_grad", (False, True))
+    def test_grouped_mlp_prequantized_mxfp8_input(
+        self,
+        *,
+        group_size: int = 4,
+        hidden_size: int = 256,
+        split_alignment: int = 256,
+        dtype: torch.dtype = torch.bfloat16,
+        device: torch.device = "cuda",
+        weight_requires_grad: bool,
+    ) -> None:
+        """Fused grouped MLP with a rowwise-only MXFP8 GroupedTensor input.
+
+        Production (FP8 token dispatch) path: FC1 receives an already
+        rowwise-quantized input with compact scales. The fused op must feed the
+        rowwise data to the forward GEMM and manufacture FC1's columnwise copy
+        for wgrad. Compared bit-for-bit against a run on the dequantized wire
+        input (see ``test_grouped_linear_prequantized_mxfp8_input``).
+        """
+        if not mxfp8_available:
+            pytest.skip(reason_for_no_mxfp8)
+        if not te.ops.fused.GroupedMLP_CuTeGEMMGLU.is_supported():
+            pytest.skip("Fused grouped MLP (CuTeDSL) is not supported on this system")
+        maybe_skip_quantization(
+            "mxfp8", dims=(hidden_size, hidden_size), device=device, dtype=dtype
+        )
+
+        # Split sizes (including an empty group); sum is a multiple of 128.
+        split_sizes = [split_alignment * i for i in range(group_size)]
+        random.shuffle(split_sizes)
+        split_sizes = torch.tensor(split_sizes, dtype=torch.int, device=device)
+        total_tokens = int(split_sizes.sum().item())
+        glu_interleave_size = 32
+
+        # Wire-format FC1 input and its exact dequantization (reference input).
+        x_hp = torch.rand((total_tokens, hidden_size), dtype=dtype, device=device) - 0.5
+        x_wire = TestGroupedLinearOp._make_rowwise_mxfp8_wire_input(x_hp, group_size, split_sizes)
+        x_ref = tex.group_dequantize(x_wire, TE_DType[dtype]).rowwise_data.view(
+            total_tokens, hidden_size
+        )
+
+        probs = torch.rand((total_tokens,), dtype=dtype, device=device)
+        dy = torch.rand((total_tokens, hidden_size), dtype=dtype, device=device) - 0.5
+
+        recipe = make_recipe("mxfp8")
+        with te.quantized_model_init(enabled=True, recipe=recipe):
+            fc1 = te.ops.GroupedLinear(
+                group_size, hidden_size, 2 * hidden_size, bias=False, device=device, dtype=dtype
+            )
+            fc2 = te.ops.GroupedLinear(
+                group_size, hidden_size, hidden_size, bias=False, device=device, dtype=dtype
+            )
+            module = te.ops.Sequential(
+                fc1, te.ops.ScaledSwiGLU(glu_interleave_size=glu_interleave_size), fc2
+            )
+        with torch.no_grad():
+            for param in module.parameters():
+                param.requires_grad_(requires_grad=weight_requires_grad)
+
+        def _run(x):
+            with te.autocast(enabled=True, recipe=recipe):
+                y = module(x, split_sizes, probs, split_sizes)
+            fc1_wgrads, fc2_wgrads = [], []
+            if weight_requires_grad:
+                y.backward(dy)
+                for group_idx in range(group_size):
+                    fc1_w = getattr(fc1, f"weight{group_idx}")
+                    fc2_w = getattr(fc2, f"weight{group_idx}")
+                    fc1_wgrads.append(fc1_w.grad.detach().clone())
+                    fc2_wgrads.append(fc2_w.grad.detach().clone())
+                    fc1_w.grad = None
+                    fc2_w.grad = None
+            return y.detach(), fc1_wgrads, fc2_wgrads
+
+        y_ref, fc1_wgrads_ref, fc2_wgrads_ref = _run(x_ref)
+        y_test, fc1_wgrads_test, fc2_wgrads_test = _run(x_wire)
+
+        # Confirm the CuTeDSL fused op was actually formed (not the fallback).
+        forward_ops = module._module_groups[0]._forward_ops
+        assert len(forward_ops) == 1
+        assert isinstance(forward_ops[0][0], te.ops.fused.GroupedMLP_CuTeGEMMGLU)
+
+        # Bit-exact match expected (identical quantized inputs and kernels).
+        torch.testing.assert_close(y_test, y_ref, rtol=0, atol=0)
+        for wgrad_test, wgrad_ref in zip(fc1_wgrads_test, fc1_wgrads_ref):
+            torch.testing.assert_close(wgrad_test, wgrad_ref, rtol=0, atol=0)
+        for wgrad_test, wgrad_ref in zip(fc2_wgrads_test, fc2_wgrads_ref):
+            torch.testing.assert_close(wgrad_test, wgrad_ref, rtol=0, atol=0)
+
+    @pytest.mark.parametrize("bias", (False, True))
+    @pytest.mark.parametrize("weight_requires_grad", (False, True))
+    def test_grouped_mlp_prequantized_mxfp8_grad(
+        self,
+        *,
+        group_size: int = 4,
+        hidden_size: int = 256,
+        split_alignment: int = 256,
+        dtype: torch.dtype = torch.bfloat16,
+        device: torch.device = "cuda",
+        bias: bool,
+        weight_requires_grad: bool,
+    ) -> None:
+        """Fused grouped MLP with a rowwise-only MXFP8 GroupedTensor grad output.
+
+        FC2 receives the pre-quantized grad, as an FP8 token dispatch delivers it
+        on the backward pass. With ``bias`` FC2 uses ``scale_bias``, whose
+        dbias/dscales need the dequantized grad rather than the fused dbias.
+        """
+        if not mxfp8_available:
+            pytest.skip(reason_for_no_mxfp8)
+        if not te.ops.fused.GroupedMLP_CuTeGEMMGLU.is_supported():
+            pytest.skip("Fused grouped MLP (CuTeDSL) is not supported on this system")
+        if not weight_requires_grad:
+            # Independent of pre-quantization: the fused forward saves the input
+            # activations whenever anything requires grad, then asserts they carry
+            # columnwise data -- which is only built when the weights need grads.
+            pytest.skip("Fused grouped MLP does not support frozen weights")
+        maybe_skip_quantization(
+            "mxfp8", dims=(hidden_size, hidden_size), device=device, dtype=dtype
+        )
+
+        # Split sizes (including an empty group); sum is a multiple of 128.
+        split_sizes = [split_alignment * i for i in range(group_size)]
+        random.shuffle(split_sizes)
+        split_sizes = torch.tensor(split_sizes, dtype=torch.int, device=device)
+        total_tokens = int(split_sizes.sum().item())
+        glu_interleave_size = 32
+
+        x = torch.rand((total_tokens, hidden_size), dtype=dtype, device=device) - 0.5
+        probs = torch.rand((total_tokens,), dtype=dtype, device=device)
+        dy_hp = torch.rand((total_tokens, hidden_size), dtype=dtype, device=device) - 0.5
+
+        # Wire-format grad output and its exact dequantization (the reference grad).
+        dy_wire = TestGroupedLinearOp._make_rowwise_mxfp8_wire_input(dy_hp, group_size, split_sizes)
+        dy_ref = tex.group_dequantize(dy_wire, TE_DType[dtype]).rowwise_data.view(
+            total_tokens, hidden_size
+        )
+
+        recipe = make_recipe("mxfp8")
+        with te.quantized_model_init(enabled=True, recipe=recipe):
+            fc1 = te.ops.GroupedLinear(
+                group_size, hidden_size, 2 * hidden_size, bias=bias, device=device, dtype=dtype
+            )
+            fc2 = te.ops.GroupedLinear(
+                group_size,
+                hidden_size,
+                hidden_size,
+                bias=bias,
+                device=device,
+                dtype=dtype,
+                scale_bias=bias,
+            )
+            module = te.ops.Sequential(
+                fc1, te.ops.ScaledSwiGLU(glu_interleave_size=glu_interleave_size), fc2
+            )
+
+        # Frozen experts (weights) with a still-training bias/router is the case
+        # where the dequantized grad is needed but is not a byproduct of wgrad.
+        if not weight_requires_grad:
+            for fc in (fc1, fc2):
+                for group_idx in range(group_size):
+                    getattr(fc, f"weight{group_idx}").requires_grad_(False)
+
+        def _run(grad):
+            x_in = x.detach().clone().requires_grad_()
+            fc2_extra = (split_sizes, probs) if bias else (split_sizes,)
+            with te.autocast(enabled=True, recipe=recipe):
+                y = module(x_in, split_sizes, probs, *fc2_extra)
+            _InjectGrad.apply(y, grad).backward(torch.ones_like(y))
+            grads = [("dx", x_in.grad)]
+            for name, fc in (("fc1", fc1), ("fc2", fc2)):
+                for group_idx in range(group_size):
+                    if weight_requires_grad:
+                        weight = getattr(fc, f"weight{group_idx}")
+                        grads.append((f"{name}_w{group_idx}", weight.grad.detach().clone()))
+                        weight.grad = None
+                    if bias:
+                        bias_param = getattr(fc, f"bias{group_idx}")
+                        grads.append((f"{name}_b{group_idx}", bias_param.grad.detach().clone()))
+                        bias_param.grad = None
+            return grads
+
+        grads_ref = _run(dy_ref)
+        grads_test = _run(dy_wire)
+
+        # Confirm the CuTeDSL fused op was actually formed (not the fallback).
+        forward_ops = module._module_groups[0]._forward_ops
+        assert len(forward_ops) == 1
+        assert isinstance(forward_ops[0][0], te.ops.fused.GroupedMLP_CuTeGEMMGLU)
+
+        # Bit-exact match expected (identical quantized grads and kernels), except
+        # bias gradients: the fused kernels generate them with an accumulation
+        # that is not reproducible run to run (two runs on identical inputs differ
+        # by one BF16 ulp). Same tolerances as
+        # ``test_grouped_mlp_single_weight_numerics``.
+        bias_tols = {"rtol": 0.05, "atol": 0.015625}
+        for (name, grad_test), (_, grad_ref) in zip(grads_test, grads_ref):
+            if "_b" in name:
+                torch.testing.assert_close(grad_test, grad_ref, **bias_tols)
+            else:
+                torch.testing.assert_close(grad_test, grad_ref, rtol=0, atol=0)
+
     @pytest.mark.parametrize("bias", (False, True))
     @pytest.mark.parametrize("quantization", _grouped_mlp_quantization_list)
     @pytest.mark.parametrize(
@@ -1147,13 +1559,15 @@ class TestGroupedMLPFusedOp:
         """Single-group GroupedLinear + ScaledSwiGLU + GroupedLinear with MXFP8."""
         if (
             runtime_offsets_supported
-            and not grouped_mlp_module._cudnn_frontend_supports_single_group_runtime_offsets()
+            and not grouped_mlp_module._cudnn_frontend_supports_single_group_runtime_offsets(
+                te.ops.ScaledSwiGLU
+            )
         ):
             pytest.skip("Requires cuDNN frontend >= 1.27.0")
         monkeypatch.setattr(
             grouped_mlp_module,
             "_cudnn_frontend_supports_single_group_runtime_offsets",
-            lambda: runtime_offsets_supported,
+            lambda _activation_type: runtime_offsets_supported,
         )
         self.test_grouped_mlp(
             group_size=1,
@@ -1266,6 +1680,8 @@ class TestGroupedMLPFusedOp:
     ) -> None:
         """single_grouped_weight=True/False should match exactly for fused MXFP8 grouped MLP."""
 
+        if os.environ.get("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "0") == "0":
+            pytest.skip("single_grouped_weight requires NVTE_GROUPED_LINEAR_SINGLE_PARAM=1")
         if not te.ops.fused.GroupedMLP_CuTeGEMMGLU.is_supported():
             pytest.skip("MXFP8 fused grouped MLP is not supported on this system")
 
@@ -1584,6 +2000,8 @@ class TestGroupedMLPFusedOp:
         that read ``.grad`` don't see stale bytes from the cached dummy).
         """
 
+        if os.environ.get("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "0") == "0" and single_grouped_weight:
+            pytest.skip("single_grouped_weight requires NVTE_GROUPED_LINEAR_SINGLE_PARAM=1")
         if not te.ops.fused.GroupedMLP_CuTeGEMMGLU.is_supported():
             pytest.skip("MXFP8 fused grouped MLP is not supported on this system")
 
@@ -1715,6 +2133,8 @@ class TestGroupedMLPFusedOp:
     ) -> None:
         """Grouped MLP forward+backward should be CUDA graph capturable (MXFP8)."""
 
+        if os.environ.get("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "0") == "0" and single_grouped_weight:
+            pytest.skip("single_grouped_weight requires NVTE_GROUPED_LINEAR_SINGLE_PARAM=1")
         if not te.ops.fused.GroupedMLP_CuTeGEMMGLU.is_supported():
             pytest.skip("MXFP8 fused grouped MLP is not supported on this system")
         if dtype not in (torch.bfloat16, torch.float16):

@@ -5026,9 +5026,6 @@ def attn_forward_func_with_cp(
             isinstance(cp_group, list) and len(cp_group) == 2
         ), "CP implementation a2a+p2p requires cp_group = [a2a_cp_group, p2p_cp_group]!"
         assert (
-            qkv_format != "thd"
-        ), f"{qkv_format} format is not supported with hierarchical CP implementation yet!"
-        assert (
             attn_bias_type == "no_bias"
         ), f"{attn_bias_type} bias type is not supported with hierarchical CP implementation yet!"
         if get_distributed_world_size(cp_group[0]) == 1:
