@@ -89,6 +89,11 @@ def test_should_pad_qkv_head_dim(monkeypatch, native_unfused, padded_fused, expe
         return padded if is_padded else native
 
     monkeypatch.setattr(dpa_utils, "get_attention_backend", fake_backend)
+    # The decision is memoized on `attention_params` (see
+    # `_should_pad_qkv_head_dim_cache`); reset the cache so each parametrization
+    # re-probes the freshly monkeypatched backend instead of returning a stale result.
+    dpa_utils._should_pad_qkv_head_dim_cache["attention_params"] = None
+    dpa_utils._should_pad_qkv_head_dim_cache["result"] = None
     assert dpa_utils.should_pad_qkv_head_dim(params) is expected
 
 
@@ -101,6 +106,44 @@ def test_should_pad_qkv_head_dim_equal_dims():
         attn_mask_type="padding_causal", is_training=True, qkv_dtype=torch.bfloat16,
     )
     assert dpa_utils.should_pad_qkv_head_dim(params) is False
+
+
+def test_should_pad_qkv_head_dim_is_memoized(monkeypatch):
+    """`should_pad_qkv_head_dim` memoizes on the native (pre-pad) params: a second call
+    with an equal config skips the `get_attention_backend` probes entirely, even if the
+    caller mutated the first params object in place -- as the production forward does when
+    it pads `head_dim_qk`/`head_dim_v` after this returns."""
+    base = dict(
+        qkv_layout="thd_thd_thd", num_heads=4, num_gqa_groups=4,
+        max_seqlen_q=13, max_seqlen_kv=13,
+        attn_mask_type="padding_causal", is_training=True, qkv_dtype=torch.bfloat16,
+    )
+    calls = {"n": 0}
+
+    def fake_backend(p):
+        calls["n"] += 1
+        # native probe has head_dim_qk=96; padded probe has head_dim_qk=128.
+        if p.head_dim_qk != 96:
+            return (False, None, True, None, False, [False, True, False])  # fused -> pad
+        return (False, None, False, None, True, [False, False, True])  # unfused native
+
+    monkeypatch.setattr(dpa_utils, "get_attention_backend", fake_backend)
+    dpa_utils._should_pad_qkv_head_dim_cache["attention_params"] = None
+    dpa_utils._should_pad_qkv_head_dim_cache["result"] = None
+
+    params = dpa_utils.AttentionParams(head_dim_qk=96, head_dim_v=128, **base)
+    assert dpa_utils.should_pad_qkv_head_dim(params) is True
+    assert calls["n"] == 2  # one native + one padded probe
+
+    # Simulate the production forward mutating the live params in place after the call.
+    params.head_dim_qk = 128
+    params.head_dim_v = 128
+
+    # A fresh native params with the same config must still hit the memo (the key is a
+    # copy, not the mutated live object) and must not re-probe.
+    params2 = dpa_utils.AttentionParams(head_dim_qk=96, head_dim_v=128, **base)
+    assert dpa_utils.should_pad_qkv_head_dim(params2) is True
+    assert calls["n"] == 2  # cache hit: no new probes
 
 
 # v > qk end-to-end

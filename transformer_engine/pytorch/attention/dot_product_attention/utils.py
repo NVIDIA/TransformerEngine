@@ -72,6 +72,12 @@ _print_rank = int(os.getenv("NVTE_PRINT_RANK", "0"))
 
 _cu_seqlens_cache = {}
 
+# Global var for MLA padding cache.
+_should_pad_qkv_head_dim_cache: Dict[str, Any] = {
+    "attention_params": None,
+    "result": None,
+}
+
 
 class AttentionLogging:
     """
@@ -1650,7 +1656,7 @@ def get_attention_backend(
 
 @torch.no_grad()
 def should_pad_qkv_head_dim(
-    attention_params: "AttentionParams",
+    attention_params: AttentionParams,
 ) -> bool:
     """Decide whether padding Q/K/V to a common head dim upgrades the attention backend.
 
@@ -1660,6 +1666,11 @@ def should_pad_qkv_head_dim(
     native mismatched shape selects the slow `UnfusedDotProductAttention` while the padded equal
     shape selects a fused backend (`FlashAttention` or `FusedAttention`), i.e. the only case in
     which the pad actually upgrades the kernel instead of being pure overhead.
+
+    The decision depends only on `attention_params` (and the process-global backend availability,
+    which is fixed for the lifetime of the process), so it is memoized across calls: only the first
+    call with a given native config pays for the two `get_attention_backend` probes; subsequent
+    calls with an equal config return the cached result.
 
     Parameters
     ----------
@@ -1673,23 +1684,32 @@ def should_pad_qkv_head_dim(
     """
     if attention_params.head_dim_qk == attention_params.head_dim_v:
         return False
+    cached_params = _should_pad_qkv_head_dim_cache["attention_params"]
+    if cached_params is not None and cached_params == attention_params:
+        return _should_pad_qkv_head_dim_cache["result"]
     native_backend = get_attention_backend(attention_params)
     native_use_unfused_attention = native_backend[4]
     # No point padding if native path is already fused.
     if not native_use_unfused_attention:
-        return False
-    # Probe on a copy so the caller's `attention_params` are never mutated, even if
-    # `get_attention_backend` raises.
-    padded_head_dim = max(attention_params.head_dim_qk, attention_params.head_dim_v)
-    padded_params = replace(
-        attention_params,
-        head_dim_qk=padded_head_dim,
-        head_dim_v=padded_head_dim,
-    )
-    padded_backend = get_attention_backend(padded_params)
-    padded_use_flash_attention = padded_backend[0]
-    padded_use_fused_attention = padded_backend[2]
-    return bool(padded_use_flash_attention or padded_use_fused_attention)
+        result = False
+    else:
+        # Probe on a copy so the caller's `attention_params` are never mutated, even if
+        # `get_attention_backend` raises.
+        padded_head_dim = max(attention_params.head_dim_qk, attention_params.head_dim_v)
+        padded_params = replace(
+            attention_params,
+            head_dim_qk=padded_head_dim,
+            head_dim_v=padded_head_dim,
+        )
+        padded_backend = get_attention_backend(padded_params)
+        padded_use_flash_attention = padded_backend[0]
+        padded_use_fused_attention = padded_backend[2]
+        result = bool(padded_use_flash_attention or padded_use_fused_attention)
+    # Store a shallow copy as the key: the caller pads `attention_params` in place after this
+    # returns, so storing the live object would make every subsequent call a miss.
+    _should_pad_qkv_head_dim_cache["attention_params"] = replace(attention_params)
+    _should_pad_qkv_head_dim_cache["result"] = result
+    return result
 
 
 @torch.no_grad()
