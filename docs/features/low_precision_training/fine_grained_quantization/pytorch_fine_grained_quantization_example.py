@@ -9,7 +9,7 @@ The factory assigns one precision to each ``demo.fc1`` Linear GEMM:
 
 * fprop: ``weight.row(MXFP8) x input.row(MXFP8)``
 * dgrad: ``weight.col(NVFP4) x grad_output.row(NVFP4)``
-* wgrad: ``input.col(MXFP8-dequantized BF16) x grad_output.col(original BF16)``
+* wgrad: ``input.col(original BF16) x grad_output.col(original BF16)``
 
 ``demo.fc2`` runs every GEMM in high precision. ``demo.output`` is not
 special-cased and therefore exercises the MXFP8 base-factory fallback.
