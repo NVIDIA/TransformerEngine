@@ -11,11 +11,7 @@ import torch
 import transformer_engine_torch as tex
 
 from ...quantized_tensor import InnerTensor, QuantizedTensorStorage, Quantizer
-from .._quantization_helpers import (
-    _resolve_view_shape,
-    safe_quantized_repr,
-    tensor_can_be_materialized,
-)
+from .._quantization_helpers import _resolve_view_shape, safe_quantized_repr
 
 from ...constants import TE_DType as torch_to_transformer_engine_dtype, TE_DType_To_Torch, DType
 
@@ -257,10 +253,10 @@ class Float8TensorStorage(QuantizedTensorStorage):
         )
 
     def __repr__(self):
-        # A fake/meta/functional scale_inv cannot be materialized without leaking
-        # an unbacked symbol into the ShapeEnv (see tensor_can_be_materialized);
-        # fall back to a metadata-only repr under tracing.
-        if not tensor_can_be_materialized(self._scale_inv):
+        # Data-free repr for a fake/meta scale_inv (exact class check: fake /
+        # functional tensors subclass Tensor); materializing it under tracing
+        # would leak an unbacked symbol into the ShapeEnv.
+        if self._scale_inv.__class__ is not torch.Tensor or self._scale_inv.is_meta:
             return safe_quantized_repr(self, "Float8TensorStorage")
         try:
             return (
