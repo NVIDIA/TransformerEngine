@@ -469,7 +469,7 @@ class FusedAttnRunner:
             return 1
 
     def _check_configs(self):
-        # TODO(rewang): probably adds this in is_fused_attn_available
+        # TODO(KshitijLakhani): probably add/move this to is_fused_attn_available
         if self.qkv_layout.is_thd() and not self.attn_mask_type.is_padding():
             pytest.skip("THD format requires padding masks.")
 
@@ -493,11 +493,62 @@ class FusedAttnRunner:
             pytest.skip(
                 "seqlen_q > seqlen_kv is not supported with sliding window attention in cuDNN"
             )
+        compute_capability = get_device_compute_capability(0)
+        cudnn_version = get_cudnn_version()
+        # D=256 bprop on SM10x uses the deterministic algorithm path only. BSHD support
+        # starts with cuDNN FE 1.24 / BE 9.23; THD execution-plan support starts with
+        # cuDNN FE 1.26 / BE 9.25. The kernel rejects dBias, dropout, and ALiBi, supports vanilla
+        # softmax only, and allows SWA together with a causal mask only.
+        is_sm10x = 100 <= compute_capability < 110
+        if self.is_training and is_sm10x and (self.head_dim_qk == 256 or self.head_dim_v == 256):
+            if self.head_dim_qk != 256 or self.head_dim_v != 256:
+                pytest.skip(
+                    "D=256 BWD on Blackwell only supports d_qk == d_v == 256;"
+                    f" got d_qk={self.head_dim_qk}, d_v={self.head_dim_v}."
+                )
+            required_cudnn_version = 92500 if self.qkv_layout.is_thd() else 92300
+            required_cudnn_version_label = "9.25" if self.qkv_layout.is_thd() else "9.23"
+            if cudnn_version < required_cudnn_version:
+                pytest.skip(
+                    f"D=256 BWD on Blackwell with {self.qkv_layout} requires cuDNN"
+                    f" {required_cudnn_version_label} or newer; got cuDNN {cudnn_version}."
+                )
+            # TODO(KshitijLakhani): cuDNN FE can model bias input separately from dBias,
+            # but TE does not yet plumb whether dBias is requested into the common backend selector.
+            # Until that distinction is available, the D=256 SM10x gate requires no bias.
+            unsupported = None
+            if self.attn_bias_type == AttnBiasType.PRE_SCALE_BIAS:
+                unsupported = "pre-scale bias"
+            elif self.attn_bias_type != AttnBiasType.NO_BIAS:
+                unsupported = (
+                    "post-scale bias in TE's D=256 backend gate; bias-input-only"
+                    " support needs TE to distinguish between bias input and dBias"
+                )
+            elif self.dropout_prob != 0.0:
+                unsupported = "dropout"
+            elif self.softmax_type != AttnSoftmaxType.VANILLA_SOFTMAX:
+                unsupported = "non-vanilla softmax"
+            if unsupported is not None:
+                pytest.skip(
+                    "D=256 BWD on Blackwell uses the deterministic SM100 D=256 SDPA BWD"
+                    f" kernel which does not support {unsupported}."
+                )
+            if self.window_size is not None and self.window_size != (-1, -1):
+                if not self.attn_mask_type.is_causal():
+                    pytest.skip(
+                        "D=256 BWD on Blackwell uses the SM100 D=256 SDPA BWD kernel"
+                        " which requires window_size=(-1, -1) for non-causal masks."
+                    )
+                if self.window_size[1] not in (-1, 0):
+                    pytest.skip(
+                        "D=256 BWD on Blackwell only supports right window -1 or 0"
+                        " for causal masks."
+                    )
 
-        if get_device_compute_capability(0) >= 100 and self.is_training:
+        if compute_capability >= 100 and self.is_training:
             if FusedAttnHelper.is_non_deterministic_allowed() and (
                 (self.dropout_prob != 0.0 and self.attn_bias_type != AttnBiasType.NO_BIAS)
-                or get_cudnn_version() < 90700
+                or cudnn_version < 90700
             ):
                 pytest.skip(
                     "For sm100+, non-deterministic bprop (cuDNN 9.7+) does not support bias with"
@@ -506,7 +557,7 @@ class FusedAttnRunner:
             if not FusedAttnHelper.is_non_deterministic_allowed() and (
                 self.dropout_prob != 0.0
                 or self.attn_bias_type != AttnBiasType.NO_BIAS
-                or get_cudnn_version() < 91801
+                or cudnn_version < 91801
             ):
                 pytest.skip(
                     "For sm100+, deterministic bprop (cuDNN 9.18.1+) does not support bias or"
@@ -1641,6 +1692,32 @@ class TestFusedAttn:
             jnp.bfloat16,
             QKVLayout.THD_THD_THD,
             id="2-1024-2048-12-6-128-64-BF16-CROSS-GQA-RAGGED_SEPARATE",
+        ),
+        # D=256 deterministic backward on the SM100 dedicated SDPA bprop kernel.
+        # BSHD requires cuDNN FE 1.24 / BE 9.23+; THD requires cuDNN FE 1.26 / BE 9.25+.
+        pytest.param(
+            4,
+            128,
+            128,
+            16,
+            16,
+            256,
+            256,
+            jnp.float16,
+            QKVLayout.BSHD_BS2HD,
+            id="4-128-128-16-16-256-256-FP16-SELF-KV_PACKED",
+        ),
+        pytest.param(
+            4,
+            128,
+            128,
+            16,
+            16,
+            256,
+            256,
+            jnp.float16,
+            QKVLayout.THD_T2HD,
+            id="4-128-128-16-16-256-256-FP16-SELF-RAGGED_KV_PACKED",
         ),
     ],
 )

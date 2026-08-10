@@ -290,6 +290,31 @@ py::object clamped_swiglu(const at::Tensor &input, py::handle quantizer, float l
 
 py::object clamped_dswiglu(const at::Tensor &grad, const at::Tensor &input, py::handle quantizer,
                            float limit, float alpha, float glu_linear_offset);
+
+/* Scaled activation */
+py::object scaled_swiglu(const at::Tensor &input, const at::Tensor &act_scales,
+                         py::handle quantizer, int64_t glu_interleave_size);
+
+py::object scaled_clamped_swiglu(const at::Tensor &input, const at::Tensor &act_scales,
+                                 py::handle quantizer, float limit, float alpha,
+                                 float glu_linear_offset, int64_t glu_interleave_size);
+
+py::object scaled_srelu(const at::Tensor &input, const at::Tensor &act_scales,
+                        py::handle quantizer);
+
+py::tuple scaled_dswiglu(const at::Tensor &grad, const at::Tensor &input,
+                         const at::Tensor &act_scales, py::handle quantizer,
+                         int64_t glu_interleave_size, bool compute_scale_grad);
+
+py::tuple scaled_clamped_dswiglu(const at::Tensor &grad, const at::Tensor &input,
+                                 const at::Tensor &act_scales, py::handle quantizer, float limit,
+                                 float alpha, float glu_linear_offset, int64_t glu_interleave_size,
+                                 bool compute_scale_grad);
+
+py::tuple scaled_dsrelu(const at::Tensor &grad, const at::Tensor &input,
+                        const at::Tensor &act_scales, py::handle quantizer,
+                        bool compute_scale_grad);
+
 /***************************************************************************************************
  * LayerNorm
  **************************************************************************************************/
@@ -366,6 +391,11 @@ py::object bgrad_group_quantize(const at::Tensor &tensor, py::handle quantizer,
                                 const size_t num_tensors, std::optional<at::Tensor> first_dims,
                                 std::optional<at::Tensor> last_dims,
                                 std::optional<at::Tensor> tensor_offsets);
+
+py::object group_requantize_inplace(py::handle grouped_x, py::handle quantizer,
+                                    const size_t num_tensors, std::optional<at::Tensor> first_dims,
+                                    DType otype, std::optional<at::Tensor> tensor_offsets,
+                                    bool return_dequantized);
 
 std::vector<py::object> multi_tensor_quantize(const std::vector<at::Tensor> &tensor_list,
                                               std::vector<py::handle> quantizer_list);
@@ -676,7 +706,7 @@ void grouped_swizzle_for_gemm(py::handle &tensor, bool rowwise, bool columnwise)
 void ep_initialize(uintptr_t comm_ptr, const std::string &group_name, int64_t num_experts,
                    int64_t max_tokens_per_rank, int64_t max_recv_tokens_per_rank,
                    int64_t hidden_dim, int64_t max_num_sms, pybind11::object max_token_dtype,
-                   bool zero_copy);
+                   bool zero_copy, int64_t num_topk, bool drop_on_overflow);
 
 void ep_finalize();
 
@@ -686,8 +716,9 @@ bool ep_get_zero_copy();
 // Returns the handle_mem byte size for the given layer config.
 int64_t ep_handle_mem_size(int64_t top_k, int64_t dispatch_output_per_expert_alignment);
 
-void ep_prepare(at::Tensor handle_mem, at::Tensor topk_idx, at::Tensor token_counts, int64_t top_k,
-                int64_t dispatch_output_per_expert_alignment);
+void ep_prepare(at::Tensor handle_mem, at::Tensor topk_idx, at::Tensor tokens_per_expert,
+                int64_t top_k, int64_t dispatch_output_per_expert_alignment,
+                at::Tensor total_recv_tokens);
 
 void ep_dispatch(at::Tensor handle_mem, at::Tensor topk_idx, at::Tensor tokens,
                  at::Tensor topk_weights, at::Tensor recv_tokens, at::Tensor recv_topk_weights);

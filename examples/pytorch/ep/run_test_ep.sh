@@ -17,7 +17,6 @@ if [ "${NUM_GPUS}" -gt 8 ]; then NUM_GPUS=8; fi
 : ${TEST_TIMEOUT_S:=120}
 
 SCRIPT="${TE_PATH}/examples/pytorch/ep/ep_moe.py"
-export PYTHONPATH="${TE_PATH}${PYTHONPATH:+:${PYTHONPATH}}"
 
 # Stage JIT cubins on tmpfs for fast iteration.
 : ${NCCL_EP_JIT_CACHE_DIR:="${TMPDIR:-/tmp}/nccl_ep_jit_cache_$(id -u)"}

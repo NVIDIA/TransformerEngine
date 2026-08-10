@@ -1237,7 +1237,7 @@ def _moe_fwd_rule(
         top_k=K,
         dispatch_output_per_expert_alignment=_ALIGN_SIZE,
     )
-    token_counts, handle_mem = tex.ep_prepare(cfg, topk_idx_3d)
+    token_counts, total_recv_tokens, handle_mem = tex.ep_prepare(cfg, topk_idx_3d)
     _print_handle_mem_value("forward_prepare", handle_mem, topk_idx_3d)
     token_counts = jax.lax.with_sharding_constraint(token_counts, NamedSharding(mesh, ep2_spec))
     recv_tokens, recv_topk_weights = tex.ep_dispatch_fwd(
@@ -1319,6 +1319,8 @@ def _moe_fwd_rule(
             num_local_tokens=(B, S),
             out_partition_spec=out_partition_spec,
         )
+    # output of MLP should be sharded the same way as the activation input
+    output = with_sharding_constraint_by_logical_axes(output, input_axes)
 
     if _validate_ep_forward_roundtrip:
         # This validates more than the synthetic expert-code probe below:
@@ -1468,7 +1470,8 @@ def _moe_fwd_rule(
         "x_shape": x.shape,
         "recv_pr": recv_pr,
     }
-    return (output, aux_loss), (ctx, static)
+    # total_recv_tokens is a non-differentiable overflow signal (see moe()).
+    return (output, aux_loss, total_recv_tokens), (ctx, static)
 
 
 def _moe_bwd_rule(
@@ -1495,7 +1498,8 @@ def _moe_bwd_rule(
     """Backward mirror of :func:`_moe_fwd_rule`."""
     del num_groups, group_topk, dtype  # captured in residuals / unused in bwd
 
-    d_output, d_aux_loss = cotangents
+    # total_recv_tokens is a non-differentiable output; its cotangent is unused.
+    d_output, d_aux_loss, _d_total_recv_tokens = cotangents
 
     ctx, static = residuals
     has_bias = static["has_bias"]
@@ -2082,11 +2086,13 @@ def moe(
     wi_kernel_axes: Tuple[Optional[str], ...] = ("exp", "embed", "mlp"),
     wo_kernel_axes: Tuple[Optional[str], ...] = ("exp", "mlp", "embed"),
     dtype: jnp.dtype = jnp.float32,
-) -> Tuple[jnp.ndarray, Optional[jnp.ndarray]]:
+) -> Tuple[jnp.ndarray, Optional[jnp.ndarray], jnp.ndarray]:
     """Run a full MoE block under a single fused custom_vjp on the TE EP path.
 
-    Returns ``(output, aux_loss)``. ``aux_loss`` is ``None`` when
-    ``aux_loss_coeff == 0`` and a 0-d scalar otherwise.
+    Returns ``(output, aux_loss, total_recv_tokens)``. ``aux_loss`` is ``None``
+    when ``aux_loss_coeff == 0``, else a 0-d scalar. ``total_recv_tokens`` is a
+    non-differentiable pre-drop recv-slot total (grad ``None``); see
+    ``ep_dispatch`` for using it to detect overflow.
 
     Parameters
     ----------
@@ -2168,7 +2174,7 @@ def moe(
     else:
         expert_bias_arg = expert_bias.astype(jnp.float32)
 
-    output, aux_loss = _moe(
+    output, aux_loss, total_recv_tokens = _moe(
         x,
         gate_kernel,
         wi,
@@ -2199,4 +2205,4 @@ def moe(
     if aux_loss_coeff <= 0.0:
         aux_loss = None
     assert output.dtype == x.dtype, f"moe() output dtype {output.dtype} != input dtype {x.dtype}"
-    return output, aux_loss
+    return output, aux_loss, total_recv_tokens

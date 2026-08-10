@@ -4,7 +4,7 @@
 
 """GroupedLinear API"""
 
-from typing import Union, Optional, Callable, Tuple, List
+from typing import Union, Optional, Callable, Tuple, List, Sequence
 from itertools import chain
 import os
 import warnings
@@ -27,8 +27,11 @@ from .base import (
     _2X_ACC_FPROP,
     _2X_ACC_DGRAD,
     _2X_ACC_WGRAD,
+    _attach_high_precision_init_val,
+    _clear_high_precision_init_val,
+    _get_high_precision_init_val,
 )
-from ._common import WeightGradStore
+from ._common import can_reconstruct_wgrad_input_from_original, WeightGradStore
 from ..quantization import FP8GlobalStateManager, QuantizerRole
 from ..utils import (
     divide,
@@ -46,6 +49,12 @@ from ..distributed import (
     is_fp8_activation_recompute_enabled,
     in_fp8_activation_recompute_phase,
 )
+from ..distributed_weight import (
+    is_distributed_weight,
+    materialize_weight_for_forward,
+    materialize_weight_for_backward,
+    finalize_weight_grads,
+)
 from ..cpp_extensions import (
     general_grouped_gemm,
     general_grouped_gemm_for_grouped_tensor,
@@ -55,7 +64,15 @@ from ..jit import no_torch_dynamo
 from ..cpu_offload import is_cpu_offload_enabled, mark_not_offload, start_offload
 from ..triton.grouped_dbias_dscales import compute_grouped_dbias
 
-from ..tensor import Float8CurrentScalingQuantizer, Float8Quantizer, MXFP8Quantizer, NVFP4Quantizer
+from ..tensor import (
+    Float8BlockQuantizer,
+    Float8CurrentScalingQuantizer,
+    Float8Quantizer,
+    HybridQuantizer,
+    IdentityQuantizer,
+    MXFP8Quantizer,
+    NVFP4Quantizer,
+)
 from ..quantized_tensor import (
     QuantizedTensorStorage,
     Quantizer,
@@ -64,6 +81,370 @@ from ..quantized_tensor import (
 )
 from ...debug.pytorch.debug_quantization import DebugQuantizer
 from ...debug.pytorch.debug_state import TEDebugState
+
+
+_NATIVE_SPLIT_QUANTIZER_TYPES = frozenset(
+    {
+        Float8Quantizer,
+        Float8CurrentScalingQuantizer,
+        Float8BlockQuantizer,
+        MXFP8Quantizer,
+        NVFP4Quantizer,
+    }
+)
+
+
+def _supports_native_split_quantize(quantizer):
+    """Whether ``tex.split_quantize`` has an exact converter for this quantizer."""
+    return type(quantizer) in _NATIVE_SPLIT_QUANTIZER_TYPES
+
+
+def _uses_identity_quantizer(quantizer):
+    """Whether a quantizer, including a hybrid sub-quantizer, is Identity-backed."""
+    if quantizer is None:
+        return False
+    if isinstance(quantizer, IdentityQuantizer):
+        return True
+    if isinstance(quantizer, HybridQuantizer):
+        return _uses_identity_quantizer(quantizer.rowwise_quantizer) or _uses_identity_quantizer(
+            quantizer.columnwise_quantizer
+        )
+    return False
+
+
+def _identity_quantizer_signature(quantizer):
+    """Identity usage per GEMM direction: (rowwise, columnwise)."""
+    if isinstance(quantizer, HybridQuantizer):
+        return (
+            _uses_identity_quantizer(quantizer.rowwise_quantizer),
+            _uses_identity_quantizer(quantizer.columnwise_quantizer),
+        )
+    identity = isinstance(quantizer, IdentityQuantizer)
+    return (identity, identity)
+
+
+_DYNAMIC_QUANTIZER_SIGNATURE_FIELDS = frozenset(
+    {
+        "rowwise_usage",
+        "columnwise_usage",
+        "internal",
+        "optimize_for_gemm",
+    }
+)
+
+
+def _backend_quantizer_signature(quantizer):
+    """Return backend configuration that grouped kernels require to be uniform."""
+    if quantizer is None:
+        return None
+
+    # Identity is not registered as a torch.compile value quantizer, but its
+    # dtype changes the grouped GEMM input type and therefore must be uniform.
+    if isinstance(quantizer, IdentityQuantizer):
+        return (type(quantizer), (("dtype", quantizer.dtype),))
+
+    fields = quantizer._value_fields()
+    if fields is None:
+        # Delayed-scaling Float8Quantizer carries per-expert scale/amax tensors,
+        # which are intentionally different, but its emitted FP8 dtype is a
+        # group-wide backend choice. Other unregistered/custom quantizers retain
+        # the conservative exact-family behavior until they expose value fields.
+        fields = ("dtype",) if isinstance(quantizer, Float8Quantizer) else ()
+
+    config = []
+    for name in fields:
+        if name in _DYNAMIC_QUANTIZER_SIGNATURE_FIELDS:
+            continue
+        value = getattr(quantizer, name)
+        if name == "dtype":
+            value = int(value)
+        config.append((name, value))
+    return (type(quantizer), tuple(config))
+
+
+def _validate_backend_match(reference, quantizer, operand_name, direction, expert_index):
+    """Validate one expert against the group's reference backend."""
+    if type(quantizer) is not type(reference):
+        raise ValueError(
+            f"GroupedLinear {operand_name} quantizers use incompatible {direction} backend"
+            f" families across experts: expert 0 uses {type(reference).__name__}, but expert"
+            f" {expert_index} uses {type(quantizer).__name__}. Grouped operands require one"
+            " quantizer family per direction."
+        )
+    reference_signature = _backend_quantizer_signature(reference)
+    quantizer_signature = _backend_quantizer_signature(quantizer)
+    if quantizer_signature != reference_signature:
+        raise ValueError(
+            f"GroupedLinear {operand_name} quantizers use incompatible {direction} backend"
+            f" configurations across experts: expert 0 uses {reference_signature}, but expert"
+            f" {expert_index} uses {quantizer_signature}. Grouped operands require the same"
+            " backend-relevant configuration per direction."
+        )
+
+
+def _validate_grouped_quantizer_list(quantizers, *, operand_name="operand") -> None:
+    """Validate one grouped operand once when its quantizer generation changes."""
+    if not quantizers:
+        return
+
+    reference = quantizers[0]
+    reference_is_hybrid = isinstance(reference, HybridQuantizer)
+    reference_identity = _identity_quantizer_signature(reference)
+
+    for expert_index, quantizer in enumerate(quantizers[1:], start=1):
+        if (quantizer is None) != (reference is None):
+            raise ValueError(
+                f"GroupedLinear {operand_name} quantizers mix None and concrete quantizers"
+                f" across experts: expert 0 is {type(reference).__name__}, but expert"
+                f" {expert_index} is {type(quantizer).__name__}."
+            )
+        if reference is None:
+            continue
+
+        quantizer_is_hybrid = isinstance(quantizer, HybridQuantizer)
+        if quantizer_is_hybrid != reference_is_hybrid:
+            raise ValueError(
+                f"GroupedLinear {operand_name} quantizers mix HybridQuantizer and non-hybrid"
+                f" quantizers across experts: expert 0 is {type(reference).__name__}, but expert"
+                f" {expert_index} is {type(quantizer).__name__}."
+            )
+
+        identity = _identity_quantizer_signature(quantizer)
+        if identity != reference_identity:
+            raise ValueError(
+                f"GroupedLinear {operand_name} quantizers mix Identity-backed and quantized"
+                f" directions across experts: expert 0 uses {reference_identity}, but expert"
+                f" {expert_index} uses {identity}."
+            )
+
+        if reference_is_hybrid:
+            _validate_backend_match(
+                reference.rowwise_quantizer,
+                quantizer.rowwise_quantizer,
+                operand_name,
+                "rowwise",
+                expert_index,
+            )
+            _validate_backend_match(
+                reference.columnwise_quantizer,
+                quantizer.columnwise_quantizer,
+                operand_name,
+                "columnwise",
+                expert_index,
+            )
+            if quantizer.columnwise_source != reference.columnwise_source:
+                raise ValueError(
+                    f"GroupedLinear {operand_name} HybridQuantizer list has mixed columnwise"
+                    " source policies across experts: expert 0 uses"
+                    f" {reference.columnwise_source!r}, but expert {expert_index} uses"
+                    f" {quantizer.columnwise_source!r}."
+                )
+        else:
+            _validate_backend_match(
+                reference,
+                quantizer,
+                operand_name,
+                "plain",
+                expert_index,
+            )
+
+
+def _split_quantize_non_hybrid(
+    tensor,
+    m_splits,
+    quantizers,
+    activation_dtype,
+    *,
+    disable_bulk_allocation=False,
+    allow_identity_views=True,
+):
+    """Split and quantize one homogeneous, non-Hybrid quantizer list."""
+    reference = quantizers[0]
+    if _supports_native_split_quantize(reference):
+        return tex.split_quantize(
+            tensor,
+            m_splits,
+            quantizers,
+            disable_bulk_allocation=disable_bulk_allocation,
+        )
+
+    tensor = cast_if_needed(tensor, activation_dtype)
+    if (
+        allow_identity_views
+        # Only the base IdentityQuantizer can bypass quantization; subclasses
+        # may override its behavior and must go through their normal call path.
+        and type(reference) is IdentityQuantizer  # pylint: disable=unidiomatic-typecheck
+        and (reference.dtype is None or reference.dtype == activation_dtype)
+    ):
+        return torch.split(tensor, m_splits)
+
+    return [
+        quantizer(tensor_part) if quantizer is not None else tensor_part
+        for tensor_part, quantizer in zip(torch.split(tensor, m_splits), quantizers)
+    ]
+
+
+def _split_quantize_hybrid(
+    tensor,
+    m_splits,
+    quantizers,
+    *,
+    disable_bulk_allocation=False,
+):
+    """Grouped split+quantize for an all-hybrid, generation-validated operand."""
+    from ..tensor.storage.hybrid_tensor_storage import HybridQuantizedTensorStorage as HybridStorage
+
+    reference = quantizers[0]
+    rowwise_enabled = reference.rowwise_usage
+    columnwise_enabled = reference.columnwise_usage
+    columnwise_source = reference.columnwise_source
+    rowwise_quantizers = [quantizer.rowwise_quantizer for quantizer in quantizers]
+    columnwise_quantizers = [quantizer.columnwise_quantizer for quantizer in quantizers]
+
+    needs_rowwise_result = rowwise_enabled or (
+        columnwise_enabled and columnwise_source == "rowwise_dequantized"
+    )
+    row_results = (
+        _split_quantize_non_hybrid(
+            tensor,
+            m_splits,
+            rowwise_quantizers,
+            tensor.dtype,
+            disable_bulk_allocation=disable_bulk_allocation,
+            allow_identity_views=False,
+        )
+        if needs_rowwise_result
+        else [None] * len(quantizers)
+    )
+
+    columnwise_src = tensor
+    if columnwise_enabled and columnwise_source == "rowwise_dequantized":
+        # Assemble the exact grouped row results in split order. NVFP4 padding
+        # and scale layout can differ from independently quantizing each split.
+        columnwise_src = torch.cat(
+            [result.dequantize(dtype=tensor.dtype) for result in row_results],
+            dim=0,
+        )
+    col_results = (
+        _split_quantize_non_hybrid(
+            columnwise_src,
+            m_splits,
+            columnwise_quantizers,
+            tensor.dtype,
+            disable_bulk_allocation=disable_bulk_allocation,
+            allow_identity_views=False,
+        )
+        if columnwise_enabled
+        else [None] * len(quantizers)
+    )
+
+    return [
+        HybridStorage(
+            rowwise_storage=row if rowwise_enabled else None,
+            columnwise_storage=col,
+            quantizer=q,
+            fake_dtype=tensor.dtype,
+        )
+        for row, col, q in zip(
+            row_results,
+            col_results,
+            quantizers,
+        )
+    ]
+
+
+def _split_quantize(
+    tensor: torch.Tensor,
+    split_sizes: List[int],
+    with_quantized_output: bool,
+    quantizers: Optional[List[Quantizer]],
+    dtype: torch.dtype,
+    with_debug_quantizers: bool,
+    disable_bulk_allocation: bool,
+) -> Sequence[Union[torch.Tensor, QuantizedTensorStorage]]:
+    """Split a tensor and quantize each part if needed."""
+    if not with_quantized_output:
+        return torch.split(cast_if_needed(tensor, dtype), split_sizes)
+
+    if quantizers is None or quantizers[0] is None:
+        raise ValueError("Quantizers are required for quantized split output")
+
+    if with_debug_quantizers:
+        return DebugQuantizer.multi_tensor_quantize(tensor, quantizers, split_sizes, dtype)
+
+    reference = quantizers[0]
+    if isinstance(reference, HybridQuantizer):
+        return _split_quantize_hybrid(
+            tensor,
+            split_sizes,
+            quantizers,
+            disable_bulk_allocation=disable_bulk_allocation,
+        )
+
+    return _split_quantize_non_hybrid(
+        tensor,
+        split_sizes,
+        quantizers,
+        dtype,
+        disable_bulk_allocation=disable_bulk_allocation,
+    )
+
+
+def _split_quantize_and_bias(
+    tensor: torch.Tensor,
+    split_sizes: List[int],
+    *,
+    fp8: bool,
+    debug: bool,
+    quantizers: Optional[List[Quantizer]],
+    dtype: torch.dtype,
+    use_bias: bool,
+    recipe: Recipe,
+    disable_bulk_allocation: bool,
+) -> Tuple[
+    Sequence[Union[torch.Tensor, QuantizedTensorStorage]],
+    List[Optional[torch.Tensor]],
+]:
+    """Split grad output, quantize if needed, and compute unfused bias gradients."""
+    num_splits = len(split_sizes)
+    grad_biases = [None] * num_splits
+    reference = quantizers[0]
+    identity = _uses_identity_quantizer(reference)
+    hybrid = isinstance(reference, HybridQuantizer) and not identity
+
+    use_native_bgrad_quantize = (
+        fp8
+        and not debug
+        and not hybrid
+        and use_bias
+        and not identity
+        and (recipe.delayed() or recipe.float8_current_scaling() or recipe.mxfp8())
+    )
+    if use_native_bgrad_quantize:
+        outputs = [None] * num_splits
+        for i, tensor_part in enumerate(torch.split(tensor, split_sizes)):
+            grad_biases[i], outputs[i] = tex.bgrad_quantize(tensor_part, quantizers[i])
+        return outputs, grad_biases
+
+    with_quantized_output = fp8 or debug
+    if with_quantized_output and (use_bias or debug):
+        for i, tensor_part in enumerate(torch.split(tensor, split_sizes)):
+            grad_biases[i] = tensor_part.sum(dim=0)
+
+    # Preserve the existing CPU-offload policy: only Hybrid split-quantize
+    # disables bulk allocation in backward.
+    disable_bulk_allocation = disable_bulk_allocation if hybrid else False
+    outputs = _split_quantize(
+        tensor,
+        split_sizes,
+        with_quantized_output=with_quantized_output,
+        quantizers=quantizers,
+        dtype=dtype,
+        with_debug_quantizers=debug,
+        disable_bulk_allocation=disable_bulk_allocation,
+    )
+    return outputs, grad_biases
+
 
 __all__ = ["GroupedLinear"]
 
@@ -103,11 +484,15 @@ class _GroupedLinear(torch.autograd.Function):
         and be incompatible with CUDA Graphs.
 
         Supported Compute Capability (CC) and precisions:
-        * Hopper (CC 9.0): BF16/FP16 and FP8 per-tensor current scaling.
+        * Hopper (CC 9.0): BF16/FP16, FP8 per-tensor current scaling, and FP8
+          block scaling (1D/2D, including power-of-2 scales).
         * Blackwell (CC 10.x and 11.0): BF16/FP16/MXFP8/NVFP4 with RHT and FP8
           per-tensor current scaling.
-        FP8 delayed scaling and FP8 block scaling are not supported because the
-        corresponding grouped quantization kernels are missing.
+        FP8 delayed scaling is not supported because the corresponding grouped
+        quantization kernels are missing. FP8 block scaling on Blackwell (SM100 and
+        SM110) raises instead of falling back: the fused path is Hopper-only and has
+        no MXFP8-broadcast emulation. Architectures outside the fused-path window
+        (e.g. SM120) fall back to the legacy path like every other recipe.
         Grouped GEMM requires cuBLAS 13.3+ (13.4+ on Hopper, 13.5+ for FP8
         per-tensor current scaling on Hopper); otherwise the legacy path is used.
         Non-RHT NVFP4 falls back to the legacy path because graph-safe grouped quantization
@@ -147,6 +532,21 @@ class _GroupedLinear(torch.autograd.Function):
                 if device_capability < (10, 0) and cublaslt_version < 130500:
                     return False
                 return True
+            if all(isinstance(q, Float8BlockQuantizer) for q in input_quantizers):
+                # Grouped FP8 block-scaling quantize kernels and cuBLASLt grouped GEMM
+                # scale modes are Hopper-only, and the fused path has no MXFP8-broadcast
+                # emulation. On Blackwell (SM100/SM110, the only other arch that reaches
+                # this branch) fail loudly rather than silently falling back to the
+                # unfused path the user explicitly opted out of.
+                if get_device_compute_capability() >= (10, 0):
+                    raise RuntimeError(
+                        "NVTE_GROUPED_LINEAR_USE_FUSED_GROUPED_GEMM=1 does not support the"
+                        " FP8 block-scaling recipe on Blackwell GPUs: the fused grouped"
+                        " FP8 block-scaling path is Hopper-only. Unset"
+                        " NVTE_GROUPED_LINEAR_USE_FUSED_GROUPED_GEMM to use the unfused"
+                        " path (emulated via MXFP8 GEMM on Blackwell)."
+                    )
+                return True
             # MXFP8 and NVFP4 require Blackwell+.
             if not (10, 0) <= device_capability <= (11, 0):
                 return False
@@ -161,7 +561,7 @@ class _GroupedLinear(torch.autograd.Function):
         *,
         num_gemms: int,
         split_sizes: torch.Tensor,
-        base_split_offsets: torch.Tensor,
+        tensor_offsets: torch.Tensor,
         last_dim: int,
         dtype: torch.dtype,
     ) -> GroupedTensorStorage:
@@ -173,7 +573,7 @@ class _GroupedLinear(torch.autograd.Function):
             quantizer=None,
             data=data.reshape(-1),
             first_dims=split_sizes,
-            tensor_offsets=base_split_offsets * last_dim,
+            tensor_offsets=tensor_offsets,
         )
 
     @staticmethod
@@ -237,6 +637,41 @@ class _GroupedLinear(torch.autograd.Function):
         return weights_for_gemm, new_workspaces
 
     @staticmethod
+    def _validate_or_alloc_output(
+        buffer: Optional[torch.Tensor],
+        rows: int,
+        cols: int,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> torch.Tensor:
+        """Validate and return the caller's output buffer, or allocate one if it is None.
+
+        The buffer must be a 2D, contiguous, non-grad tensor matching the required shape,
+        dtype, and device. Validation reads host-side metadata only, with no device sync.
+        """
+        if buffer is None:
+            return torch.empty((rows, cols), dtype=dtype, device=device)
+        if buffer.dim() != 2:
+            raise ValueError(f"Output buffer must be 2D, got {buffer.dim()}D.")
+        if buffer.size(0) != rows:
+            raise ValueError(f"Output buffer rows {buffer.size(0)} must match input rows {rows}.")
+        if buffer.size(1) != cols:
+            raise ValueError(
+                f"Output buffer last dim {buffer.size(1)} does not match required {cols}."
+            )
+        if buffer.dtype != dtype:
+            raise ValueError(f"Output buffer dtype {buffer.dtype} does not match required {dtype}.")
+        if buffer.device != device:
+            raise ValueError(
+                f"Output buffer device {buffer.device} does not match required {device}."
+            )
+        if not buffer.is_contiguous():
+            raise ValueError("Output buffer must be contiguous.")
+        if buffer.requires_grad:
+            raise ValueError("Output buffer must not require gradient.")
+        return buffer
+
+    @staticmethod
     def _forward_grouped_tensor(
         ctx,
         *,
@@ -259,6 +694,8 @@ class _GroupedLinear(torch.autograd.Function):
         skip_fp8_weight_update: Optional[torch.Tensor],
         weights: Tuple[torch.Tensor, ...],
         biases: Tuple[torch.Tensor, ...],
+        out: Optional[torch.Tensor] = None,
+        dgrad_out: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, list]:
         """Forward path backed by GroupedTensor + cuBLASLt grouped GEMM."""
         num_gemms = len(m_splits)
@@ -267,8 +704,18 @@ class _GroupedLinear(torch.autograd.Function):
         out_features = weights[0].size(0)
         weight_requires_grad = weights[0].requires_grad
 
-        split_sizes = m_splits.to(device=device)
-        base_split_offsets = tex.splits_to_offsets(split_sizes, 1)
+        split_sizes, (
+            base_split_offsets,
+            input_tensor_offsets,
+            output_tensor_offsets,
+        ) = tex.splits_to_offsets_multi(
+            m_splits,
+            device,
+            strides=[1, in_features, out_features],
+            include_leading_zero=[True, True, True],
+            dtypes=[torch.int64, torch.int64, torch.int64],
+            bulk_allocate=True,
+        )
 
         inp_view = inp.reshape(-1, in_features)
         x = cast_if_needed(inp_view, activation_dtype)
@@ -279,13 +726,19 @@ class _GroupedLinear(torch.autograd.Function):
                 columnwise=is_grad_enabled and weight_requires_grad,
             )
             input_quantizer.optimize_for_gemm = True
-            grouped_x = tex.group_quantize(x, input_quantizer, num_gemms, split_sizes)
+            grouped_x = tex.group_quantize(
+                x,
+                input_quantizer,
+                num_gemms,
+                split_sizes,
+                tensor_offsets=input_tensor_offsets,
+            )
         else:
             grouped_x = _GroupedLinear._make_grouped_tensor(
                 x,
                 num_gemms=num_gemms,
                 split_sizes=split_sizes,
-                base_split_offsets=base_split_offsets,
+                tensor_offsets=input_tensor_offsets,
                 last_dim=in_features,
                 dtype=activation_dtype,
             )
@@ -303,16 +756,18 @@ class _GroupedLinear(torch.autograd.Function):
             cache_weight=cache_weight,
         )
 
-        out = torch.empty(
-            [x.size(0), out_features],
-            dtype=activation_dtype,
-            device=device,
+        out = _GroupedLinear._validate_or_alloc_output(
+            out,
+            x.size(0),
+            out_features,
+            activation_dtype,
+            device,
         )
         grouped_out = _GroupedLinear._make_grouped_tensor(
             out,
             num_gemms=num_gemms,
             split_sizes=split_sizes,
-            base_split_offsets=base_split_offsets,
+            tensor_offsets=output_tensor_offsets,
             last_dim=out_features,
             dtype=activation_dtype,
         )
@@ -357,6 +812,8 @@ class _GroupedLinear(torch.autograd.Function):
                 *weights_to_save,
                 split_sizes,
                 base_split_offsets,
+                input_tensor_offsets,
+                output_tensor_offsets,
             )
             ctx.save_for_backward(*tensors_to_save)
             ctx.tensor_objects = tensor_objects
@@ -381,6 +838,7 @@ class _GroupedLinear(torch.autograd.Function):
                         lambda j=i: weights[j].main_grad for i in range(num_gemms)
                     ]
             ctx.device = device
+            ctx.dgrad_out = dgrad_out
             ctx.m_splits = None
             ctx.num_gemms = num_gemms
             ctx.activation_dtype = activation_dtype
@@ -413,6 +871,8 @@ class _GroupedLinear(torch.autograd.Function):
         inp: torch.Tensor,
         m_splits: torch.Tensor,
         non_tensor_args: Tuple,
+        out: Optional[torch.Tensor],
+        dgrad_out: Optional[torch.Tensor],
         *weights_and_biases,
     ) -> Tuple[torch.Tensor, list]:
         # pylint: disable=missing-function-docstring
@@ -440,6 +900,8 @@ class _GroupedLinear(torch.autograd.Function):
             cache_weight,
             skip_fp8_weight_update,
             save_original_input,
+            delayed_scaling_input_quantizer,
+            unsafe_requantization_input_quantizer,
             debug,
         ) = non_tensor_args
         if fp8:
@@ -457,20 +919,39 @@ class _GroupedLinear(torch.autograd.Function):
         device = inp.device
         weight_requires_grad = weights[0].requires_grad
 
-        # Configure quantizers
-        if save_original_input and isinstance(input_quantizers[0], Float8Quantizer):
-            if FP8GlobalStateManager.get_fp8_recipe().custom():
-                # Custom recipe factory may produce DS quantizers unknown to caller.
-                # TODO(negvet): fix on Megatron side — guard should also exclude 'custom', or
-                # better: check at runtime whether quantizers are DS-based.
+        origin_weights = weights
+        is_dist_weight = is_distributed_weight(weights[0])
+        if is_dist_weight:
+            weights = materialize_weight_for_forward(weights)
+
+        backward_needs_input = is_grad_enabled and weight_requires_grad
+        if backward_override is None and save_original_input and backward_needs_input:
+            if delayed_scaling_input_quantizer is not None:
+                if FP8GlobalStateManager.get_fp8_recipe().custom():
+                    warnings.warn(
+                        "save_original_input is incompatible with delayed-scaling quantizers "
+                        "(Float8Quantizer). Disabling save_original_input for this module.",
+                        stacklevel=2,
+                    )
+                    save_original_input = False
+                else:
+                    raise ValueError(
+                        "DelayedScaling recipe is not supported with save_original_input"
+                    )
+
+            # Megatron-Core may enable this automatically to reuse an activation
+            # already retained by an upstream operation. The resolved quantizer
+            # generation is classified once in ``_validate_quantizer_generation``.
+            if save_original_input and unsafe_requantization_input_quantizer is not None:
                 warnings.warn(
-                    "save_original_input is incompatible with delayed-scaling quantizers "
-                    "(Float8Quantizer). Disabling save_original_input for this module.",
+                    "Ignoring save_original_input=True because the input quantizer cannot "
+                    "safely reconstruct the backward operand from the original input "
+                    f"({unsafe_requantization_input_quantizer}).",
                     stacklevel=2,
                 )
                 save_original_input = False
-            else:
-                raise ValueError("DelayedScaling recipe is not supported with save_original_input")
+
+        # Configure quantizers
         if input_quantizers[0] is not None:
             for input_quantizer in input_quantizers:
                 input_quantizer.set_usage(
@@ -544,29 +1025,26 @@ class _GroupedLinear(torch.autograd.Function):
                 skip_fp8_weight_update=skip_fp8_weight_update,
                 weights=weights,
                 biases=biases,
+                out=out,
+                dgrad_out=dgrad_out,
             )
 
         # Convert splits to list of ints for compatibility with split functions
         m_splits = m_splits.tolist()
 
         inp_view = inp.reshape(-1, in_features)
-        inputmats: list
-        if fp8 and not debug:
-            # Disable bulk allocation when CPU offloading is active: offloading skips small
-            # tensors (like scales), but bulk allocation shares storage across all tensors,
-            # so if scales can't be offloaded, nothing in the group can be offloaded.
-            inputmats = tex.split_quantize(
-                inp_view,
-                m_splits,
-                input_quantizers,
-                disable_bulk_allocation=cpu_offloading,
-            )
-        elif debug:
-            inputmats = DebugQuantizer.multi_tensor_quantize(
-                inp_view, input_quantizers, m_splits, activation_dtype
-            )
-        else:
-            inputmats = torch.split(cast_if_needed(inp_view, activation_dtype), m_splits)
+        # Disable bulk allocation when CPU offloading is active: offloading skips small
+        # tensors (like scales), but bulk allocation shares storage across all tensors,
+        # so if scales can't be offloaded, nothing in the group can be offloaded.
+        inputmats = _split_quantize(
+            inp_view,
+            m_splits,
+            with_quantized_output=fp8 or debug,
+            quantizers=input_quantizers,
+            dtype=activation_dtype,
+            with_debug_quantizers=debug,
+            disable_bulk_allocation=cpu_offloading,
+        )
 
         if cpu_offloading:
             start_offload(*inputmats)
@@ -598,10 +1076,12 @@ class _GroupedLinear(torch.autograd.Function):
             bias_dtype = torch.bfloat16  # FP8 GEMM only supports BF16/FP16 bias
         biases = [cast_if_needed(bias, bias_dtype) for bias in biases] if use_bias else biases
         # Initialize output tensor
-        out = torch.empty(
-            [sum(m_splits), weights_fp8[0].size(0)],
-            dtype=activation_dtype,
-            device=device,
+        out = _GroupedLinear._validate_or_alloc_output(
+            out,
+            sum(m_splits),
+            weights_fp8[0].size(0),
+            activation_dtype,
+            device,
         )
 
         # Choose whether to use split accumulator
@@ -663,6 +1143,10 @@ class _GroupedLinear(torch.autograd.Function):
                 if backward_override == "high_precision" and inp.requires_grad
                 else [None] * num_gemms
             )
+            if is_dist_weight:
+                # GTP: gathered workspace is transient (re-gathered in backward), don't save it.
+                weights_fp8 = [None] * num_gemms
+                saved_weights = origin_weights
             tensors_to_save, tensor_objects = prepare_for_saving(
                 *inputmats,
                 *weights_fp8,
@@ -690,6 +1174,8 @@ class _GroupedLinear(torch.autograd.Function):
                 if hasattr(weights[0], "__fsdp_param__"):
                     # MCore FSDP creates main_grad lazily before backward
                     ctx.main_grad_funcs = [weights[i].get_main_grad for i in range(num_gemms)]
+                elif is_dist_weight:
+                    ctx.main_grad_funcs = [origin_weights[i].grad_buffer for i in range(num_gemms)]
                 else:
                     ctx.main_grad_funcs = [
                         lambda j=i: weights[j].main_grad for i in range(num_gemms)
@@ -719,6 +1205,7 @@ class _GroupedLinear(torch.autograd.Function):
             ctx.debug = debug
             ctx.save_original_input = save_original_input
             ctx.input_quantizers = input_quantizers
+            ctx.dgrad_out = dgrad_out
 
             # backward overrides
             if backward_override is not None:
@@ -748,6 +1235,8 @@ class _GroupedLinear(torch.autograd.Function):
         weights = saved_tensors[1 : 1 + N]
         split_sizes = saved_tensors[1 + N]
         base_split_offsets = saved_tensors[2 + N]
+        input_tensor_offsets = saved_tensors[3 + N]
+        output_tensor_offsets = saved_tensors[4 + N]
 
         origin_weights = [None] * N
         main_grads = [None] * N
@@ -773,12 +1262,18 @@ class _GroupedLinear(torch.autograd.Function):
                 columnwise=ctx.weights_requires_grad,
             )
             grad_output_quantizer.optimize_for_gemm = True
-            if ctx.use_bias and isinstance(grad_output_quantizer, MXFP8Quantizer):
+            # The grouped FP8 block-scaling bgrad kernel computes dbias in the rowwise
+            # pass, so the fusion needs rowwise output (i.e. dgrad required).
+            fuse_bgrad = isinstance(grad_output_quantizer, MXFP8Quantizer) or (
+                isinstance(grad_output_quantizer, Float8BlockQuantizer) and ctx.requires_dgrad
+            )
+            if ctx.use_bias and fuse_bgrad:
                 grouped_dy, dbias_packed = tex.bgrad_group_quantize(
                     dy_2d,
                     grad_output_quantizer,
                     N,
                     split_sizes,
+                    tensor_offsets=output_tensor_offsets,
                 )
             else:
                 grouped_dy = tex.group_quantize(
@@ -786,13 +1281,14 @@ class _GroupedLinear(torch.autograd.Function):
                     grad_output_quantizer,
                     N,
                     split_sizes,
+                    tensor_offsets=output_tensor_offsets,
                 )
         else:
             grouped_dy = _GroupedLinear._make_grouped_tensor(
                 dy_2d,
                 num_gemms=N,
                 split_sizes=split_sizes,
-                base_split_offsets=base_split_offsets,
+                tensor_offsets=output_tensor_offsets,
                 last_dim=ctx.weights_shape_0,
                 dtype=ctx.activation_dtype,
             )
@@ -813,16 +1309,18 @@ class _GroupedLinear(torch.autograd.Function):
             for weight in weights:
                 if isinstance(weight, QuantizedTensorStorage):
                     weight.update_usage(columnwise_usage=True)
-            dgrad = torch.empty(
-                (dy_2d.size(0), ctx.weights_shape_1),
-                dtype=ctx.activation_dtype,
-                device=ctx.device,
+            dgrad = _GroupedLinear._validate_or_alloc_output(
+                ctx.dgrad_out,
+                dy_2d.size(0),
+                ctx.weights_shape_1,
+                ctx.activation_dtype,
+                ctx.device,
             )
             grouped_dgrad = _GroupedLinear._make_grouped_tensor(
                 dgrad,
                 num_gemms=N,
                 split_sizes=split_sizes,
-                base_split_offsets=base_split_offsets,
+                tensor_offsets=input_tensor_offsets,
                 last_dim=ctx.weights_shape_1,
                 dtype=ctx.activation_dtype,
             )
@@ -918,6 +1416,8 @@ class _GroupedLinear(torch.autograd.Function):
             dgrad.view(ctx.inp_shape) if ctx.requires_dgrad else None,
             None,  # m_splits
             None,  # non_tensor_args
+            None,  # out
+            None,  # dgrad_out
             *wgrad_list,
             *grad_biases,
         )
@@ -943,7 +1443,12 @@ class _GroupedLinear(torch.autograd.Function):
             # Only needed when fuse_wgrad_accumulation is enabled.
             origin_weights = [None] * N
             main_grads = [None] * N
-            if ctx.fuse_wgrad_accumulation and ctx.weights_requires_grad:
+            is_dist_weight = is_distributed_weight(saved_weights[0])
+            if is_dist_weight:
+                origin_weights = saved_weights
+                if ctx.fuse_wgrad_accumulation and ctx.weights_requires_grad:
+                    main_grads = [main_grad_func() for main_grad_func in ctx.main_grad_funcs]
+            elif ctx.fuse_wgrad_accumulation and ctx.weights_requires_grad:
                 origin_weight_refs = ctx.origin_weight_refs
                 ctx.origin_weight_refs = None
                 origin_weights = [ref() if ref is not None else None for ref in origin_weight_refs]
@@ -957,59 +1462,39 @@ class _GroupedLinear(torch.autograd.Function):
 
             # Preprocess grad output
             grad_output_view = grad_output.contiguous().view(-1, grad_output.shape[-1])
-            grad_output = [None] * ctx.num_gemms
-            grad_biases = [None] * ctx.num_gemms
-            if ctx.fp8 and not ctx.debug:
-                if ctx.use_bias:
-                    grad_output_mats = torch.split(grad_output_view, ctx.m_splits)
-                    recipe = ctx.fp8_recipe
-                    if recipe.delayed() or recipe.float8_current_scaling() or recipe.mxfp8():
-                        # Fused bias grad + quantize kernel
-                        for i in range(ctx.num_gemms):
-                            grad_biases[i], grad_output[i] = tex.bgrad_quantize(
-                                grad_output_mats[i],
-                                ctx.grad_output_quantizers[i],
-                            )
-                    else:
-                        # Unfused bias grad and multi-tensor quantize
-                        for i in range(ctx.num_gemms):
-                            grad_biases[i] = grad_output_mats[i].sum(dim=0)
-                        grad_output = tex.split_quantize(
-                            grad_output_view,
-                            ctx.m_splits,
-                            ctx.grad_output_quantizers,
-                        )
-                else:
-                    # Multi-tensor quantize
-                    grad_output = tex.split_quantize(
-                        grad_output_view,
-                        ctx.m_splits,
-                        ctx.grad_output_quantizers,
+            grad_output_reference = ctx.grad_output_quantizers[0]
+            if ctx.fp8 and isinstance(grad_output_reference, HybridQuantizer):
+                # Usage is a runtime decision, not part of generation validation.
+                # Apply it uniformly so dispatch can read the first parent without
+                # rescanning every expert.
+                for grad_output_quantizer in ctx.grad_output_quantizers:
+                    grad_output_quantizer.set_usage(
+                        rowwise=ctx.requires_dgrad,
+                        columnwise=ctx.weights_requires_grad,
                     )
-            elif ctx.debug:
-                grad_output_mats = torch.split(grad_output_view, ctx.m_splits)
-                for i in range(ctx.num_gemms):
-                    grad_biases[i] = grad_output_mats[i].sum(dim=0)
-                grad_output = DebugQuantizer.multi_tensor_quantize(
-                    grad_output_view,
-                    ctx.grad_output_quantizers,
-                    ctx.m_splits,
-                    ctx.activation_dtype,
-                )
-            else:
-                # Only split grad output. Grad bias is fused with
-                # wgrad GEMM.
-                grad_output = torch.split(
-                    cast_if_needed(grad_output_view, ctx.activation_dtype),
-                    ctx.m_splits,
-                )
+            grad_output, grad_biases = _split_quantize_and_bias(
+                grad_output_view,
+                ctx.m_splits,
+                fp8=ctx.fp8,
+                debug=ctx.debug,
+                quantizers=ctx.grad_output_quantizers,
+                dtype=ctx.activation_dtype,
+                use_bias=ctx.use_bias,
+                recipe=ctx.fp8_recipe,
+                disable_bulk_allocation=ctx.cpu_offloading,
+            )
 
-            if ctx.is_first_microbatch is not None:
+            if is_dist_weight:
+                accumulate_wgrad_into_param_main_grad = False
+            elif ctx.is_first_microbatch is not None:
                 accumulate_wgrad_into_param_main_grad = (
                     ctx.fuse_wgrad_accumulation and not ctx.is_first_microbatch
                 )
             else:
                 accumulate_wgrad_into_param_main_grad = ctx.fuse_wgrad_accumulation
+
+            if is_dist_weight:
+                weights = materialize_weight_for_backward(origin_weights)
 
             if ctx.requires_dgrad:
                 dgrad_gemm_use_split_accumulator = _2X_ACC_DGRAD
@@ -1019,10 +1504,12 @@ class _GroupedLinear(torch.autograd.Function):
                         dgrad_gemm_use_split_accumulator = (
                             recipe.fp8_gemm_dgrad.use_split_accumulator
                         )
-                dgrad = torch.empty(
-                    (sum(ctx.m_splits), ctx.weights_shape_1),
-                    dtype=ctx.activation_dtype,
-                    device=ctx.device,
+                dgrad = _GroupedLinear._validate_or_alloc_output(
+                    ctx.dgrad_out,
+                    sum(ctx.m_splits),
+                    ctx.weights_shape_1,
+                    ctx.activation_dtype,
+                    ctx.device,
                 )
                 weights_for_dgrad = weights
                 if ctx.backward_override == "dequantized":
@@ -1079,6 +1566,9 @@ class _GroupedLinear(torch.autograd.Function):
                         device=ctx.device,
                     )
                     wgrad_list = [wgrad_packed[i] for i in range(ctx.num_gemms)]
+                    if is_dist_weight:
+                        # Gathered weights are no longer needed after dgrad GEMM.
+                        del weights
 
                 if ctx.save_original_input:
                     inp = inputmats[0]
@@ -1093,20 +1583,15 @@ class _GroupedLinear(torch.autograd.Function):
                                 input_quantizer.set_usage(rowwise=True, columnwise=True)
                             else:
                                 input_quantizer.set_usage(rowwise=False, columnwise=True)
-                    inputmats: list
-                    if ctx.fp8 and not ctx.debug:
-                        inputmats = tex.split_quantize(inp_view, ctx.m_splits, ctx.input_quantizers)
-                    elif ctx.debug:
-                        inputmats = DebugQuantizer.multi_tensor_quantize(
-                            inp_view,
-                            ctx.input_quantizers,
-                            ctx.m_splits,
-                            ctx.activation_dtype,
-                        )
-                    else:
-                        inputmats = torch.split(
-                            cast_if_needed(inp_view, ctx.activation_dtype), ctx.m_splits
-                        )
+                    inputmats = _split_quantize(
+                        inp_view,
+                        ctx.m_splits,
+                        with_quantized_output=ctx.fp8 or ctx.debug,
+                        quantizers=ctx.input_quantizers,
+                        dtype=ctx.activation_dtype,
+                        with_debug_quantizers=ctx.debug,
+                        disable_bulk_allocation=ctx.cpu_offloading,
+                    )
                 elif ctx.backward_override == "dequantized":
                     inputmats_dequant = []
                     for inputmat in inputmats:
@@ -1129,7 +1614,8 @@ class _GroupedLinear(torch.autograd.Function):
                     use_split_accumulator=wgrad_gemm_use_split_accumulator,
                     accumulate=(
                         accumulate_wgrad_into_param_main_grad
-                        if not getattr(ctx, "origin_weights_overwrite_main_grad", False)
+                        if not is_dist_weight
+                        and not getattr(ctx, "origin_weights_overwrite_main_grad", False)
                         else False
                     ),
                 )
@@ -1171,10 +1657,13 @@ class _GroupedLinear(torch.autograd.Function):
                         wgrad = None
                     return wgrad
 
-                wgrad_list = [
-                    handle_custom_ddp_from_mcore(weight, main_grad, wgrad)
-                    for weight, main_grad, wgrad in zip(origin_weights, main_grads, wgrad_list)
-                ]
+                if is_dist_weight:
+                    wgrad_list = finalize_weight_grads(origin_weights, wgrad_list)
+                else:
+                    wgrad_list = [
+                        handle_custom_ddp_from_mcore(weight, main_grad, wgrad)
+                        for weight, main_grad, wgrad in zip(origin_weights, main_grads, wgrad_list)
+                    ]
             else:
                 wgrad_list = [None] * ctx.num_gemms
 
@@ -1191,6 +1680,8 @@ class _GroupedLinear(torch.autograd.Function):
             dgrad.view(ctx.inp_shape) if ctx.requires_dgrad else None,
             None,  # m_splits
             None,  # non_tensor_args
+            None,  # out
+            None,  # dgrad_out
             *wgrad_list,
             *grad_biases,
         )
@@ -1247,7 +1738,8 @@ class GroupedLinear(TransformerEngineBaseModule):
                        If set to ``True``, always saves the original input tensor rather than the
                        cast tensor. In some scenarios, the input tensor is used by multiple modules,
                        and saving the original input tensor may reduce the memory usage.
-                       Cannot work with FP8 DelayedScaling recipe.
+                       Requires input quantizers that can safely reproduce their results from the
+                       original input. Cannot work with FP8 DelayedScaling recipe.
     single_grouped_weight : bool, default = False
                        If set to ``True``, grouped weights are stored as a single grouped parameter
                        instead of one parameter per GEMM.
@@ -1332,6 +1824,9 @@ class GroupedLinear(TransformerEngineBaseModule):
             "fwd": 3,
             "bwd": 2,
         }
+        self._validated_quantizer_generations = {}
+        self._delayed_scaling_input_quantizer = None
+        self._unsafe_requantization_input_quantizer = None
 
         if tp_group is None:
             self.tp_size = tp_size
@@ -1420,6 +1915,57 @@ class GroupedLinear(TransformerEngineBaseModule):
         if recipe.float8_current_scaling():
             self._customize_quantizers_float8_current_scaling(fwd, recipe)
 
+        self._validate_quantizer_generation(fwd)
+
+    def _validate_quantizer_generation(self, fwd: bool) -> None:
+        """Validate grouped-kernel invariants once per quantizer generation."""
+        # Recipe state replaces this list object only when it constructs a new
+        # quantizer generation. The O(1) identity guard keeps validation off the
+        # steady-state forward path. Record a generation only after all of its
+        # operand roles pass, so a failed recipe transition is retried.
+        meta_key = "scaling_fwd" if fwd else "scaling_bwd"
+        generation = self.quantizers.get(meta_key)
+        if generation is None:
+            return
+        if self._validated_quantizer_generations.get(meta_key) is generation:
+            return
+
+        if fwd:
+            stride = self._num_fp8_tensors_per_gemm["fwd"]
+            input_quantizers = tuple(
+                generation[self._offsets["input"] + i * stride] for i in range(self.num_gemms)
+            )
+            weight_quantizers = tuple(
+                generation[self._offsets["weight"] + i * stride] for i in range(self.num_gemms)
+            )
+            _validate_grouped_quantizer_list(input_quantizers, operand_name="input")
+            _validate_grouped_quantizer_list(weight_quantizers, operand_name="weight")
+            delayed_scaling_input_quantizer = next(
+                (q for q in input_quantizers if isinstance(q, Float8Quantizer)),
+                None,
+            )
+            unsafe_requantization_input_quantizer = next(
+                (
+                    q
+                    for q in input_quantizers
+                    if q is not None and not can_reconstruct_wgrad_input_from_original(q)
+                ),
+                None,
+            )
+            self._delayed_scaling_input_quantizer = delayed_scaling_input_quantizer
+            self._unsafe_requantization_input_quantizer = unsafe_requantization_input_quantizer
+        else:
+            stride = self._num_fp8_tensors_per_gemm["bwd"]
+            grad_output_quantizers = tuple(
+                generation[self._offsets["grad_output"] + i * stride] for i in range(self.num_gemms)
+            )
+            _validate_grouped_quantizer_list(
+                grad_output_quantizers,
+                operand_name="grad_output",
+            )
+
+        self._validated_quantizer_generations[meta_key] = generation
+
     def get_quantizer_roles(
         self,
         *,
@@ -1456,6 +2002,21 @@ class GroupedLinear(TransformerEngineBaseModule):
             return
 
         weight_quantizers = self._get_weight_quantizers()
+        # TODO(#3158): Support Identity/Hybrid single grouped weights.
+        unsupported_quantizers = tuple(
+            type(quantizer).__name__
+            for quantizer in weight_quantizers
+            if isinstance(quantizer, (IdentityQuantizer, HybridQuantizer))
+        )
+        if unsupported_quantizers:
+            quantizer_names = ", ".join(dict.fromkeys(unsupported_quantizers))
+            raise NotImplementedError(
+                "GroupedLinear(single_grouped_weight=True) does not support "
+                f"{quantizer_names} weight quantizers yet. Set "
+                "single_grouped_weight=False or unset "
+                "NVTE_GROUPED_LINEAR_SINGLE_PARAM. See #3158."
+            )
+
         recipe = (
             weight_quantizers[0]._get_compatible_recipe()
             if weight_quantizers and weight_quantizers[0] is not None
@@ -1466,6 +2027,19 @@ class GroupedLinear(TransformerEngineBaseModule):
             return
 
         weights = [getattr(self, f"weight{i}") for i in range(self.num_gemms)]
+
+        # TE preserves the original BF16/FP16 initialization on each quantized
+        # parameter so distributed optimizers can construct lossless FP32 masters.
+        # Packing the parameters must transfer those values to the new registered
+        # grouped parameter; otherwise its master is initialized by dequantizing
+        # MXFP8 and starts from a different value than the discrete-weight layout.
+        high_precision_init_vals = [_get_high_precision_init_val(weight) for weight in weights]
+        if any(value is not None for value in high_precision_init_vals) and not all(
+            value is not None for value in high_precision_init_vals
+        ):
+            raise RuntimeError(
+                "Grouped weights have inconsistent high-precision initialization state"
+            )
 
         # Create the weight storage.
         grouped_weights = GroupedTensor.make_grouped_tensor_with_shapes(
@@ -1490,9 +2064,18 @@ class GroupedLinear(TransformerEngineBaseModule):
             and (weight_quantizers[0] is None or not weight_quantizers[0].internal)
         ):
             raise RuntimeError("Found internal quantizer with `single_grouped_weight=True`.")
+        grouped_parameter = torch.nn.Parameter(grouped_weights)
+        if all(value is not None for value in high_precision_init_vals):
+            _attach_high_precision_init_val(
+                grouped_parameter,
+                torch.stack(high_precision_init_vals, dim=0),
+            )
+            for weight in weights:
+                _clear_high_precision_init_val(weight)
+
         self.register_parameter(
             "weight",
-            torch.nn.Parameter(grouped_weights),
+            grouped_parameter,
             init_fn=self.init_method,
             get_rng_state_tracker=self.get_rng_state_tracker,
             fp8_meta_index=self._offsets["weight"],
@@ -1684,6 +2267,8 @@ class GroupedLinear(TransformerEngineBaseModule):
         inp: torch.Tensor,
         m_splits: torch.Tensor,
         is_first_microbatch: Optional[bool] = None,
+        out: Optional[torch.Tensor] = None,
+        dgrad_out: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, ...]]:
         """
         Apply the linear transformation to the input.
@@ -1707,6 +2292,19 @@ class GroupedLinear(TransformerEngineBaseModule):
                              * it also allows skipping gradient accumulation during the
                                first microbatch (since it is the first gradient being
                                produced)
+        out : torch.Tensor, default = None
+             Optional preallocated buffer for the forward output; the returned tensor
+             aliases it with no copy. Must be a 2D, contiguous, non-grad tensor of shape
+             [num_tokens, out_features] in the activation dtype. Only the first
+             sum(m_splits) rows are written; any padded trailing rows are left unchanged.
+             Can be given independently of dgrad_out. If the buffer is reused across
+             iterations, pass ``buffer.detach()`` so autograd does not set its
+             ``requires_grad`` (which would trip the non-grad check on the next call).
+        dgrad_out : torch.Tensor, default = None
+             Optional preallocated buffer for the backward input gradient, of shape
+             [num_tokens, in_features] with the same constraints as out. Receives the
+             final gradient only when inp has a single consumer in the autograd graph;
+             otherwise autograd accumulates into a new tensor.
         """
         debug = self.is_debug_iter()
         is_grad_enabled = torch.is_grad_enabled()
@@ -1766,6 +2364,13 @@ class GroupedLinear(TransformerEngineBaseModule):
                 grad_weight_quantizers,
                 grad_output_quantizers,
             ) = quantizers
+            if not debug and weight_quantizers[0] is not None:
+                # Experts share shape and recipe settings: compute once and broadcast.
+                optimize_for_gemm = self._enable_weight_preswizzle(
+                    weight_quantizers[0], weight_tensors[0]
+                )
+                for q in weight_quantizers:
+                    q.optimize_for_gemm = optimize_for_gemm
 
             if is_grad_enabled:
                 linear_fn = _GroupedLinear.apply
@@ -1802,10 +2407,19 @@ class GroupedLinear(TransformerEngineBaseModule):
                 cache_weight,
                 skip_fp8_weight_update,
                 self.save_original_input,
+                self._delayed_scaling_input_quantizer,
+                self._unsafe_requantization_input_quantizer,
                 debug,
             )
             out, new_workspaces = linear_fn(
-                *autograd_ctx, inp, m_splits, non_tensor_args, *weight_tensors, *bias_tensors
+                *autograd_ctx,
+                inp,
+                m_splits,
+                non_tensor_args,
+                out,
+                dgrad_out,
+                *weight_tensors,
+                *bias_tensors,
             )
 
             if cache_weight:
@@ -1937,19 +2551,19 @@ class GroupedLinear(TransformerEngineBaseModule):
             ]
             for i in range(self.num_gemms)
         ]
-        # Preswizzle the weights during quantization instead of lazily inside every GEMM.
-        # This wont work when primay weights are in fp8 because of 2 reasons
-        # 1. optimizer step updates would need to dequantize the weights. But swizzled weights
-        # currently dont support dequantization.
-        # 2. For FSDP2, quantized weight all-gather would need to be done in the
-        # unswizzled layout.
         for i in range(self.num_gemms):
             weight_quantizers[i].internal = not self.primary_weights_in_fp8
-            if not self.primary_weights_in_fp8:
-                weight_quantizers[i].optimize_for_gemm = True
         return weight_quantizers
 
     def _get_quantizers(self):
+        if self.fp8:
+            # Normally validated while installing recipe metadata. Keep this
+            # O(1) generation guard so failed transitions cannot reuse stale
+            # validation state if base metadata takes an early return on retry.
+            self._validate_quantizer_generation(True)
+            if torch.is_grad_enabled():
+                self._validate_quantizer_generation(False)
+
         weight_quantizers = self._get_weight_quantizers()
         input_quantizers, output_quantizers = (
             [None] * self.num_gemms,

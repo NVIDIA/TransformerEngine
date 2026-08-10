@@ -32,6 +32,7 @@ from transformer_engine.pytorch.quantization import (
     Float8BlockScalingRecipeState,
 )
 from transformer_engine.pytorch.tensor.storage.float8_tensor_storage import Float8TensorStorage
+from transformer_engine.pytorch.tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
 from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
 from transformer_engine.pytorch.export import is_in_onnx_export_mode
 from transformer_engine.pytorch.constants import AttnMaskTypes, AttnTypes, dist_group_type, DType
@@ -84,6 +85,75 @@ _alibi_cache = {
     "_alibi_slopes_require_update": False,
     "_alibi_bias_require_update": False,
 }
+
+
+def _infer_custom_dpa_local_recipes(
+    fp8_recipe: Recipe,
+    fp8_meta: Dict[str, Any],
+    quantizers: Dict[str, Any],
+) -> Optional[List[Recipe]]:
+    """Infer native-equivalent DPA recipe labels for CustomRecipe control-flow.
+
+    CustomRecipe owns quantizer construction, but DPA backend selection and a
+    few fused-attention branches still dispatch on recipe predicates. Attach
+    local recipe labels that match the qfactory DPA quantizer family while
+    keeping the actual qfactory-created quantizers untouched.
+    """
+    try:
+        qkv_quantizer = quantizers["scaling_fwd"][dpa_utils.META_QKV]
+    except (KeyError, IndexError, TypeError):
+        return None
+
+    from transformer_engine.pytorch.tensor.float8_tensor import (
+        Float8CurrentScalingQuantizer,
+        Float8Quantizer,
+    )
+    from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
+
+    if isinstance(qkv_quantizer, MXFP8Quantizer):
+        return [
+            MXFP8BlockScaling(
+                fp8_format=fp8_recipe.fp8_format,
+                fp8_dpa=fp8_recipe.fp8_dpa,
+                fp8_mha=fp8_recipe.fp8_mha,
+            )
+        ]
+
+    def _delayed_scaling_recipe() -> Optional[DelayedScaling]:
+        fwd_state = fp8_meta.get("scaling_fwd")
+        ds_recipe = getattr(fwd_state, "_inner_delayed_scaling_recipe", None)
+        if ds_recipe is None:
+            return None
+        return DelayedScaling(
+            fp8_format=ds_recipe.fp8_format,
+            margin=ds_recipe.margin,
+            amax_history_len=ds_recipe.amax_history_len,
+            amax_compute_algo=ds_recipe.amax_compute_algo,
+            scaling_factor_compute_algo=ds_recipe.scaling_factor_compute_algo,
+            reduce_amax=ds_recipe.reduce_amax,
+            fp8_dpa=fp8_recipe.fp8_dpa,
+            fp8_mha=fp8_recipe.fp8_mha,
+        )
+
+    if isinstance(qkv_quantizer, Float8CurrentScalingQuantizer):
+        ds_recipe = _delayed_scaling_recipe()
+        if ds_recipe is not None:
+            return [
+                Float8CurrentScaling(
+                    fp8_format=fp8_recipe.fp8_format,
+                    fp8_dpa=fp8_recipe.fp8_dpa,
+                    fp8_mha=fp8_recipe.fp8_mha,
+                ),
+                ds_recipe,
+            ]
+
+    if isinstance(qkv_quantizer, Float8Quantizer):
+        ds_recipe = _delayed_scaling_recipe()
+        if ds_recipe is not None:
+            return [ds_recipe]
+
+    return None
+
 
 """
 This feature is **experimental** and subject to change.
@@ -196,6 +266,111 @@ def _trim_output(attn_out, num_attention_heads, padded_head_dim_v, orig_head_dim
     return attn_out[..., :orig_head_dim_v].reshape(*out_shape, -1)
 
 
+def _unpack_packed_qkv(
+    qkv_layer: Optional[torch.Tensor],
+    kv_layer: Optional[torch.Tensor],
+    query_layer: Optional[torch.Tensor],
+    key_layer: Optional[torch.Tensor],
+    value_layer: Optional[torch.Tensor],
+    qkv_format: str,
+    qkv_interleave_dim: int,
+    inference_params: Optional[InferenceParams],
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[str]]:
+    """Resolve declarative packed inputs into q/k/v.
+
+    Derives q/k/v as zero-copy views of the packed buffer (``qkv_layer`` or
+    ``kv_layer``) and constructs the exact layout string from the declaration.
+    The layout enum is truthful by construction, so no pointer-based detection
+    is needed downstream (this also covers thd and FP8 DPA).
+
+    Returns ``(query_layer, key_layer, value_layer, declared_qkv_layout)``;
+    the layout is ``None`` when no packed input is given.
+    """
+    if qkv_layer is None and kv_layer is None:
+        if query_layer is None or key_layer is None or value_layer is None:
+            raise ValueError(
+                "query_layer, key_layer and value_layer are required unless packed"
+                " inputs (qkv_layer or query_layer + kv_layer) are provided."
+            )
+        return query_layer, key_layer, value_layer, None
+
+    if qkv_layer is not None and kv_layer is not None:
+        raise ValueError("qkv_layer and kv_layer are mutually exclusive.")
+    if inference_params is not None:
+        raise ValueError(
+            "Packed inputs (qkv_layer/kv_layer) are not supported with KV caching"
+            " (inference_params); pass separate query/key/value tensors instead."
+        )
+    if qkv_interleave_dim not in (-3, -2):
+        raise ValueError(
+            "qkv_interleave_dim must be -3 (e.g. bs3hd) or -2 (e.g. bsh3d), got"
+            f" {qkv_interleave_dim}."
+        )
+    packed = qkv_layer if qkv_layer is not None else kv_layer
+    # The declared layout describes the packed buffer's memory, so it must have
+    # stride 1 in its last dimension (the check get_qkv_layout would otherwise
+    # perform on the derived q/k/v views).
+    if packed.stride(-1) != 1:
+        raise ValueError(
+            "The packed tensor (qkv_layer/kv_layer) must have stride 1 in its last"
+            f" dimension, got strides {tuple(packed.stride())}."
+        )
+
+    def _packed_layout(fmt: str, num: int) -> str:
+        # bshd + 3 @ -3 -> bs3hd; bshd + 3 @ -2 -> bsh3d; thd + 2 @ -2 -> th2d
+        pos = len(fmt) + qkv_interleave_dim + 1
+        return fmt[:pos] + str(num) + fmt[pos:]
+
+    if qkv_layer is not None:
+        if any(x is not None for x in (query_layer, key_layer, value_layer)):
+            raise ValueError(
+                "qkv_layer already packs Q, K and V: query_layer, key_layer and"
+                " value_layer must be None when qkv_layer is provided."
+            )
+        expected_rank = 4 if qkv_format == "thd" else 5
+        if qkv_layer.dim() != expected_rank:
+            raise ValueError(
+                f"qkv_layer must be a {expected_rank}D tensor for"
+                f" qkv_format={qkv_format!r}, got {qkv_layer.dim()}D."
+            )
+        if qkv_layer.shape[qkv_interleave_dim] != 3:
+            raise ValueError(
+                f"qkv_layer must have size 3 at dim {qkv_interleave_dim}"
+                f" (qkv_interleave_dim), got shape {tuple(qkv_layer.shape)}."
+            )
+        query_layer, key_layer, value_layer = (
+            qkv_layer.select(qkv_interleave_dim, i) for i in range(3)
+        )
+        return query_layer, key_layer, value_layer, _packed_layout(qkv_format, 3)
+
+    if query_layer is None:
+        raise ValueError(
+            "kv_layer packs only K and V: query_layer is required when kv_layer is provided."
+        )
+    if key_layer is not None or value_layer is not None:
+        raise ValueError(
+            "kv_layer already packs K and V: key_layer and value_layer must be"
+            " None when kv_layer is provided."
+        )
+    if kv_layer.dim() != query_layer.dim() + 1:
+        raise ValueError(
+            "kv_layer must have one more dimension than query_layer, got"
+            f" {kv_layer.dim()}D kv_layer and {query_layer.dim()}D query_layer."
+        )
+    if kv_layer.shape[qkv_interleave_dim] != 2:
+        raise ValueError(
+            f"kv_layer must have size 2 at dim {qkv_interleave_dim}"
+            f" (qkv_interleave_dim), got shape {tuple(kv_layer.shape)}."
+        )
+    key_layer, value_layer = (kv_layer.select(qkv_interleave_dim, i) for i in range(2))
+    return (
+        query_layer,
+        key_layer,
+        value_layer,
+        f"{qkv_format}_{_packed_layout(qkv_format, 2)}",
+    )
+
+
 class DotProductAttention(TransformerEngineBaseModule):
     r"""Allows the model to jointly attend to information from different
     representation subspaces as described in the paper:
@@ -218,6 +393,90 @@ class DotProductAttention(TransformerEngineBaseModule):
         Transformer Engine stores the FP8 metadata under a ``._extra_state`` key when checkpointing.
         As the FP8 attention support expands from one backend to multiple backends, the location
         of that key has also shifted (see `FP8 checkpoint compatibility <https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/faq.html#fp8-checkpoint-compatibility>`_).
+
+    .. rubric:: Fine-grained Linear and attention recipes
+
+    .. warning::
+
+        Fine-grained attention configuration through ``CustomRecipe`` and a quantizer factory is
+        experimental and subject to change.
+
+    A quantizer factory can select different recipes for Linear and DotProductAttention tensors
+    using ``QuantizerRole``. DotProductAttention itself supports only its fixed recipe families:
+    FP8 delayed scaling, FP8 current scaling, and MXFP8 block scaling. In particular, a factory may
+    return NVFP4 quantizers for Linear roles, but it must not return NVFP4 quantizers for DPA roles.
+
+    .. list-table:: Example Linear and attention combinations
+        :header-rows: 1
+
+        * - Linear
+          - Attention
+          - Configuration
+          - Status
+        * - NVFP4
+          - FP8 current scaling for QKV/O and delayed scaling for S/dP
+          - ``nvfp4_linear_fp8_dpa_factory``
+          - Validated factory provided by Transformer Engine
+        * - NVFP4
+          - MXFP8
+          - User-defined factory shown below
+          - Experimental example; not broadly validated
+
+    The validated NVFP4 Linear + FP8 attention combination is available from the quantizer factory
+    zoo::
+
+        from transformer_engine.common.recipe import CustomRecipe
+        from transformer_engine.pytorch.quantization import autocast
+        from transformer_engine.pytorch.custom_recipes.quantizer_factory_zoo import (
+            nvfp4_linear_fp8_dpa_factory,
+        )
+
+        recipe = CustomRecipe(
+            qfactory=nvfp4_linear_fp8_dpa_factory,
+            fp8_dpa=True,
+        )
+        with autocast(recipe=recipe):
+            output = model(input)
+
+    The following factory demonstrates the experimental NVFP4 Linear + MXFP8 attention
+    combination. With ``CustomRecipe``, the per-role selection is expressed directly in the
+    factory, so ``NVTE_DPA_FP8_RECIPE`` is not needed. DPA also issues hint-only roles for its
+    output boundaries; these must resolve to a DPA-supported quantizer even when the boundary
+    tensor remains in BF16. For MXFP8 attention, the fused kernel handles the S/dP slots
+    internally, so their factory-provided quantizers are not consumed::
+
+        from transformer_engine.common.recipe import CustomRecipe
+        from transformer_engine.pytorch.constants import DType
+        from transformer_engine.pytorch.custom_recipes.quantizer_factories import nvfp4_factory
+        from transformer_engine.pytorch.quantization import autocast
+        from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
+
+        def nvfp4_linear_mxfp8_dpa_factory(role):
+            # NVFP4 for Linear roles and MXFP8 for supported DPA roles.
+            is_dpa = role is not None and role.module_type == "dpa"
+            is_dpa_boundary = (
+                role is not None
+                and not role.module_type
+                and ("dpa_output" in role.name or "dpa_grad_input" in role.name)
+            )
+
+            if is_dpa or is_dpa_boundary:
+                is_bwd_role = (
+                    is_dpa and role.tensor_type in ("do", "dp", "dqkv")
+                ) or (
+                    is_dpa_boundary and "dpa_grad_input" in role.name
+                )
+                fp8_dtype = DType.kFloat8E5M2 if is_bwd_role else DType.kFloat8E4M3
+                return MXFP8Quantizer(fp8_dtype=fp8_dtype)
+
+            return nvfp4_factory(role)
+
+        recipe = CustomRecipe(
+            qfactory=nvfp4_linear_mxfp8_dpa_factory,
+            fp8_dpa=True,
+        )
+        with autocast(recipe=recipe):
+            output = model(input)
 
 
     Parameters
@@ -393,6 +652,14 @@ class DotProductAttention(TransformerEngineBaseModule):
         name: Optional[str] = None,
     ) -> None:
         super().__init__(name=name)
+
+        # Cache the native recipe labels inferred from custom DPA quantizers.
+        # ``init_fp8_metadata`` runs on every forward, while the quantizers only
+        # change when their recipe state is rebuilt.
+        self._custom_dpa_local_recipes_cache_key: Optional[Tuple[Any, ...]] = None
+        self._custom_dpa_local_recipes_cache: Optional[List[Recipe]] = None
+        self._qkv_capabilities_quantizer: Optional[Any] = None
+        self._qkv_capabilities_cache: Optional[Tuple[bool, bool]] = None
 
         self.logger = logging.getLogger("DotProductAttention")
         self.logger.setLevel(attn_log._log_level)
@@ -614,6 +881,26 @@ class DotProductAttention(TransformerEngineBaseModule):
         fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
         if fp8_recipe.custom():
             super().init_fp8_metadata(num_gemms=num_gemms)
+            fwd_quantizers = self.quantizers.get("scaling_fwd", ())
+            cache_key = (
+                id(self.fp8_meta.get("scaling_fwd")),
+                tuple(id(quantizer) for quantizer in fwd_quantizers),
+                fp8_recipe.fp8_format,
+                fp8_recipe.fp8_dpa,
+                fp8_recipe.fp8_mha,
+            )
+            if cache_key != self._custom_dpa_local_recipes_cache_key:
+                self._custom_dpa_local_recipes_cache = _infer_custom_dpa_local_recipes(
+                    fp8_recipe, self.fp8_meta, self.quantizers
+                )
+                self._custom_dpa_local_recipes_cache_key = cache_key
+
+            if self._custom_dpa_local_recipes_cache is None:
+                # Do not leave labels from an earlier supported quantizer
+                # family attached after a rebuild to an unsupported family.
+                self.fp8_meta.pop("local_recipes", None)
+            else:
+                self.fp8_meta["local_recipes"] = self._custom_dpa_local_recipes_cache
             return
 
         # switch/append recipe: fp8_recipe stays unchanged, but DPA.fp8_meta["recipe"] may be set to
@@ -820,6 +1107,57 @@ class DotProductAttention(TransformerEngineBaseModule):
             # Clear cached workspaces as they were created with the old recipe/quantizer type
             self._fp8_workspaces.clear()
 
+    def get_qkv_quantization_capabilities(self) -> Tuple[bool, bool]:
+        """Return MHA boundary capabilities from the canonical QKV quantizer.
+
+        The returned flags are ``(float8_current_scaling, mxfp8_scaling)``.
+        """
+        self.init_fp8_metadata(num_gemms=3)
+        try:
+            qkv_quantizer = self.quantizers["scaling_fwd"][dpa_utils.META_QKV]
+        except (KeyError, IndexError, TypeError) as exc:
+            role = QuantizerRole(
+                module_type="dpa",
+                tensor_type="qkv",
+                name=self.name or "",
+            )
+            raise RuntimeError(
+                f"DotProductAttention did not materialize the canonical QKV quantizer for {role}."
+            ) from exc
+
+        if qkv_quantizer is self._qkv_capabilities_quantizer:
+            assert self._qkv_capabilities_cache is not None
+            return self._qkv_capabilities_cache
+
+        from transformer_engine.pytorch.tensor.float8_tensor import (
+            Float8CurrentScalingQuantizer,
+            Float8Quantizer,
+        )
+        from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
+
+        if isinstance(qkv_quantizer, Float8CurrentScalingQuantizer):
+            capabilities = (True, False)
+        elif isinstance(qkv_quantizer, MXFP8Quantizer):
+            capabilities = (False, True)
+        elif isinstance(qkv_quantizer, Float8Quantizer):
+            capabilities = (False, False)
+        else:
+            capabilities = None
+
+        if capabilities is not None:
+            self._qkv_capabilities_quantizer = qkv_quantizer
+            self._qkv_capabilities_cache = capabilities
+            return capabilities
+
+        role = QuantizerRole(
+            module_type="dpa",
+            tensor_type="qkv",
+            name=self.name or "",
+        )
+        raise TypeError(
+            f"Unsupported CustomRecipe quantizer for {role}: {type(qkv_quantizer).__name__}."
+        )
+
     def set_meta_tensor(self, fwd: bool, recipe: Union[Recipe, List[Recipe]]) -> None:
         """Override to allow multiple recipes. Init scales and amaxes for fwd | bwd."""
         if isinstance(recipe, Recipe) and recipe.custom():
@@ -988,9 +1326,9 @@ class DotProductAttention(TransformerEngineBaseModule):
     @no_torch_dynamo(recursive=False)
     def forward(
         self,
-        query_layer: torch.Tensor,
-        key_layer: torch.Tensor,
-        value_layer: torch.Tensor,
+        query_layer: Optional[torch.Tensor] = None,
+        key_layer: Optional[torch.Tensor] = None,
+        value_layer: Optional[torch.Tensor] = None,
         attention_mask: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]] = None,
         qkv_format: str = None,
         cu_seqlens_q: torch.Tensor = None,
@@ -1010,11 +1348,15 @@ class DotProductAttention(TransformerEngineBaseModule):
         inference_params: Optional[InferenceParams] = None,
         pad_between_seqs: Optional[bool] = None,
         fp8_output: Optional[bool] = False,
+        bf16_backward: Optional[bool] = False,
         num_splits: Optional[int] = 1,
         score_mod: Optional[Callable] = None,
         score_mod_bprop: Optional[Callable] = None,
         score_mod_tensors: Optional[Dict[str, torch.Tensor]] = None,
         score_mod_bprop_tensors: Optional[Dict[str, torch.Tensor]] = None,
+        qkv_layer: Optional[torch.Tensor] = None,
+        kv_layer: Optional[torch.Tensor] = None,
+        qkv_interleave_dim: int = -3,
     ) -> torch.Tensor:
         r"""
         Dot Product Attention Layer.
@@ -1113,12 +1455,15 @@ class DotProductAttention(TransformerEngineBaseModule):
 
         Parameters
         ----------
-        query_layer : torch.Tensor
-                     Query tensor.
-        key_layer : torch.Tensor
-                   Key tensor.
-        value_layer : torch.Tensor
-                     Value tensor.
+        query_layer : Optional[torch.Tensor], default = None
+                     Query tensor. Required unless a packed input (``qkv_layer``, or
+                     ``kv_layer`` together with ``query_layer``) is provided instead.
+        key_layer : Optional[torch.Tensor], default = None
+                   Key tensor. Required unless a packed input (``qkv_layer`` or ``kv_layer``)
+                   is provided instead.
+        value_layer : Optional[torch.Tensor], default = None
+                     Value tensor. Required unless a packed input (``qkv_layer`` or ``kv_layer``)
+                     is provided instead.
         attention_mask: Optional[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]],
              default = None. Boolean tensor(s) used to mask out attention softmax input.
              It should be ``None`` for causal masks and ``"no_mask"``. For padding masks, it should be
@@ -1226,7 +1571,43 @@ class DotProductAttention(TransformerEngineBaseModule):
             Runtime tensors exposed to score_mod_bprop as cuDNN graph tensors. Keys are
             user-defined string names consumed by the callback through ``tensors[name]``;
             there is no predefined set of accepted keys.
+        qkv_layer: Optional[torch.Tensor], default = None
+            Fully packed QKV tensor. When the QKV projection produces one packed buffer
+            (e.g. a fused QKV GEMM), it can be passed here directly instead of slicing
+            it into :attr:`query_layer`/:attr:`key_layer`/:attr:`value_layer` views.
+            For :attr:`qkv_format` = {"bshd", "sbhd"}, it must be a 5D tensor of shape
+            ``[b, s, 3, h, d]``/``[s, b, 3, h, d]`` (:attr:`qkv_interleave_dim` = -3) or
+            ``[b, s, h, 3, d]``/``[s, b, h, 3, d]`` (:attr:`qkv_interleave_dim` = -2);
+            for :attr:`qkv_format` = "thd", a 4D tensor of shape ``[t, 3, h, d]`` or
+            ``[t, h, 3, d]``. Q/K/V are derived as zero-copy views and the memory layout
+            (e.g. ``bs3hd``) is declared from the packing itself, so no pointer-based
+            layout detection runs on this path -- including for "thd" and FP8 attention.
+            Mutually exclusive with :attr:`query_layer`, :attr:`key_layer`,
+            :attr:`value_layer` and :attr:`kv_layer`.
+        kv_layer: Optional[torch.Tensor], default = None
+            Packed KV tensor, used together with :attr:`query_layer`
+            (e.g. ``[b, s, 2, hg, d]`` for :attr:`qkv_interleave_dim` = -3, or
+            ``[b, s, hg, 2, d]`` for :attr:`qkv_interleave_dim` = -2). K/V are derived
+            as zero-copy views and the layout (e.g. ``bshd_bs2hd``) is declared, not
+            detected. Mutually exclusive with :attr:`key_layer`, :attr:`value_layer`
+            and :attr:`qkv_layer`.
+        qkv_interleave_dim: int, default = -3
+            Dimension of :attr:`qkv_layer`/:attr:`kv_layer` where the 3 (QKV) or 2 (KV)
+            interleave sits; must be -3 (e.g. ``bs3hd``) or -2 (e.g. ``bsh3d``,
+            Megatron-style). This is an explicit knob rather than shape inference,
+            since e.g. ``h == 3`` would make the shapes ambiguous.
         """
+
+        query_layer, key_layer, value_layer, declared_qkv_layout = _unpack_packed_qkv(
+            qkv_layer,
+            kv_layer,
+            query_layer,
+            key_layer,
+            value_layer,
+            qkv_format if qkv_format is not None else self.qkv_format,
+            qkv_interleave_dim,
+            inference_params,
+        )
 
         with self.prepare_forward_ctx(
             query_layer,
@@ -1413,7 +1794,15 @@ class DotProductAttention(TransformerEngineBaseModule):
                 cu_seqlens_kv_padded = None
 
             # get qkv's memory layout
-            if all(
+            if declared_qkv_layout is not None:
+                # Packed inputs (qkv_layer/kv_layer) declare the layout: the enum is
+                # truthful by construction, so the pointer-based detection in
+                # get_qkv_layout is skipped entirely -- for dense, thd (t3hd/th3d)
+                # and FP8 DPA alike.
+                qkv_layout = declared_qkv_layout
+                q_format = qkv_format
+                kv_format = qkv_format
+            elif all(
                 isinstance(x, Float8TensorStorage) for x in [query_layer, key_layer, value_layer]
             ):
                 (
@@ -1427,6 +1816,25 @@ class DotProductAttention(TransformerEngineBaseModule):
                     query_layer._data,
                     key_layer._data,
                     value_layer._data,
+                    qkv_format=qkv_format,
+                    inference_params=inference_params,
+                )
+            elif all(
+                isinstance(x, MXFP8TensorStorage) for x in [query_layer, key_layer, value_layer]
+            ):
+                # Pre-quantized MXFP8 q/k/v: the wrapper has no real storage, so run
+                # layout detection on the underlying rowwise data (mirrors the Float8 path).
+                (
+                    qkv_layout,
+                    query_layer._rowwise_data,
+                    key_layer._rowwise_data,
+                    value_layer._rowwise_data,
+                    q_format,
+                    kv_format,
+                ) = dpa_utils.get_qkv_layout(
+                    query_layer._rowwise_data,
+                    key_layer._rowwise_data,
+                    value_layer._rowwise_data,
                     qkv_format=qkv_format,
                     inference_params=inference_params,
                 )
@@ -1801,6 +2209,9 @@ class DotProductAttention(TransformerEngineBaseModule):
                         inference_params=inference_params,
                         softmax_offset=softmax_offset,
                         fp8_output=fp8_output,
+                        packed_qkv=qkv_layer,
+                        packed_kv=kv_layer,
+                        bf16_backward=bf16_backward,
                     )
                 return self.fused_attention(
                     query_layer,
@@ -1836,6 +2247,9 @@ class DotProductAttention(TransformerEngineBaseModule):
                     score_mod_bprop=score_mod_bprop,
                     score_mod_tensors=score_mod_tensors,
                     score_mod_bprop_tensors=score_mod_bprop_tensors,
+                    packed_qkv=qkv_layer,
+                    packed_kv=kv_layer,
+                    bf16_backward=bf16_backward,
                 )
 
             if use_unfused_attention:

@@ -181,8 +181,9 @@ def main():
         ep_group,
         num_experts=E,
         max_tokens_per_rank=T,
-        recv_capacity_per_rank=recv_pr,
         hidden_dim=H,
+        num_topk=K,
+        recv_capacity_per_rank=recv_pr,
         max_num_sms=args.max_num_sms,
     )
 
@@ -207,8 +208,6 @@ def main():
         recv_capacity_per_rank=recv_pr,
         hidden_dim=H,
         num_local_experts=num_local_experts,
-        dispatch_recv_tokens=caller_recv_tokens,
-        combine_grad_expert_out=caller_grad_expert_out,
     )
 
     tokens = tokens_hbm
@@ -235,8 +234,13 @@ def main():
     eo_p = recv_tokens.detach().clone().requires_grad_(True)
 
     # Stand-in callables; the cuda-graph branch below swaps in graphed versions.
-    fwd_bwd_dispatch_fn = lambda x: ep_dispatch(buffer, x, topk_idx, topk_w)[0]  # noqa: E731
-    fwd_bwd_combine_fn = lambda expert_out: ep_combine(buffer, expert_out)  # noqa: E731
+    # caller_* are None unless the caller opted in, matching ep_dispatch/ep_combine defaults.
+    fwd_bwd_dispatch_fn = lambda x: ep_dispatch(  # noqa: E731
+        buffer, x, topk_idx, topk_w, recv_tokens=caller_recv_tokens
+    )[0]
+    fwd_bwd_combine_fn = lambda expert_out: ep_combine(  # noqa: E731
+        buffer, expert_out, grad_out=caller_grad_expert_out
+    )
 
     def _dispatch_raw():
         _ep_dispatch_raw(buffer, topk_idx, tokens, topk_w, recv_tokens, recv_w)
@@ -246,7 +250,7 @@ def main():
         _ep_combine_raw(buffer, expert_out, out_buf)
 
     def _ep_dispatch_fwd():
-        ep_dispatch(buffer, tokens.detach(), topk_idx, topk_w)
+        ep_dispatch(buffer, tokens.detach(), topk_idx, topk_w, recv_tokens=caller_recv_tokens)
 
     def _ep_dispatch_fwd_bwd():
         tokens_p.grad = None
@@ -288,11 +292,11 @@ def main():
         # Graph fwd+bwd of the autograd-wrapped ops via make_graphed_callables.
         class _DispatchMod(torch.nn.Module):
             def forward(self, x):
-                return ep_dispatch(buffer, x, topk_idx, topk_w)[0]
+                return ep_dispatch(buffer, x, topk_idx, topk_w, recv_tokens=caller_recv_tokens)[0]
 
         class _CombineMod(torch.nn.Module):
             def forward(self, expert_out):
-                return ep_combine(buffer, expert_out)
+                return ep_combine(buffer, expert_out, grad_out=caller_grad_expert_out)
 
         disp_mod = _DispatchMod().cuda()
         comb_mod = _CombineMod().cuda()

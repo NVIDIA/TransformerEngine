@@ -19,12 +19,15 @@ from transformer_engine.pytorch.ep import (
     ep_dispatch,
     ep_combine,
     symm_mem_alloc,
+    is_symm_backed,
     _ep_combine_raw,
     _ep_dispatch_raw,
 )
 
 
 ZERO_COPY = os.environ.get("NVTE_EP_ZERO_COPY", "0") == "1"
+EAGER = os.environ.get("NVTE_EP_EAGER", "0") == "1"
+OVERFLOW = os.environ.get("NVTE_EP_OVERFLOW", "0") == "1"
 
 # Must come after the transformer_engine import so libtransformer_engine.so is loaded.
 import transformer_engine_torch as tex  # noqa: F401
@@ -39,6 +42,18 @@ TOKENS_PER_RANK = 4
 def _zero_copy_test_include(fn):
     """Mark a test to also run in the zero-copy pass; others skip there."""
     fn._zero_copy_test_include = True
+    return fn
+
+
+def _eager_test_include(fn):
+    """Mark a test to run in the eager pass; others skip there."""
+    fn._eager_test_include = True
+    return fn
+
+
+def _overflow_test_include(fn):
+    """Mark a test to run in the overflow (drop-on-overflow) pass; others skip there."""
+    fn._overflow_test_include = True
     return fn
 
 
@@ -125,6 +140,10 @@ def _make_cfg() -> _Cfg:
     active = min(cfg.num_experts, T * cfg.ep_size * TOP_K)
     overconc = cfg.num_experts // active
     cfg.recv_capacity_per_rank = NUM_LOCAL_EXPERTS * max(T * cfg.ep_size * TOP_K, 16) * overconc * 2
+    if OVERFLOW:
+        # Undersize recv capacity so identity routing overflows a rank's budget;
+        # HT requires capacity >= max_tokens_per_rank.
+        cfg.recv_capacity_per_rank = TOKENS_PER_RANK
     cfg.device = torch.device("cuda", torch.cuda.current_device())
     return cfg
 
@@ -143,9 +162,12 @@ class TestEP(unittest.TestCase):
             cls.ep_group,
             num_experts=cls.cfg.num_experts,
             max_tokens_per_rank=TOKENS_PER_RANK,
-            recv_capacity_per_rank=cls.cfg.recv_capacity_per_rank,
             hidden_dim=HIDDEN_DIM,
+            num_topk=TOP_K,
+            # Omit recv_capacity_per_rank to select eager mode.
+            recv_capacity_per_rank=None if EAGER else cls.cfg.recv_capacity_per_rank,
             zero_copy=ZERO_COPY,
+            drop_on_overflow=OVERFLOW,
         )
 
     def setUp(self):
@@ -154,23 +176,23 @@ class TestEP(unittest.TestCase):
             getattr(self, self._testMethodName), "_zero_copy_test_include", False
         ):
             self.skipTest("not exercised in zero-copy mode")
+        # Only the eager-capable tests run in the eager pass.
+        if EAGER and not getattr(getattr(self, self._testMethodName), "_eager_test_include", False):
+            self.skipTest("not exercised in eager mode")
+        # Only the overflow-capable tests run in the overflow pass.
+        if OVERFLOW and not getattr(
+            getattr(self, self._testMethodName), "_overflow_test_include", False
+        ):
+            self.skipTest("not exercised in overflow mode")
 
-    def _make_buffer(
-        self,
-        alignment=0,
-        top_k=TOP_K,
-        dispatch_recv_tokens=None,
-        combine_grad_expert_out=None,
-    ):
+    def _make_buffer(self, alignment=0, top_k=TOP_K):
         return EpBuffer(
             top_k=top_k,
             max_tokens_per_rank=TOKENS_PER_RANK,
-            recv_capacity_per_rank=self.cfg.recv_capacity_per_rank,
             hidden_dim=HIDDEN_DIM,
             num_local_experts=NUM_LOCAL_EXPERTS,
+            recv_capacity_per_rank=None if EAGER else self.cfg.recv_capacity_per_rank,
             alignment=alignment,
-            dispatch_recv_tokens=dispatch_recv_tokens,
-            combine_grad_expert_out=combine_grad_expert_out,
         )
 
     def _expert_out(self, expert_out):
@@ -191,12 +213,12 @@ class TestEP(unittest.TestCase):
         return _GradToSymm.apply(x, symm_buf)
 
     def _make_raw_recv(self, dtype=torch.bfloat16):
-        """Raw recv tensors + token_counts for the primitive tests."""
+        """Raw recv tensors + tokens_per_expert for the primitive tests."""
         rc = self.cfg.recv_capacity_per_rank
         return (
             torch.empty(rc, HIDDEN_DIM, dtype=dtype, device=self.cfg.device),
             torch.empty(rc, dtype=torch.float32, device=self.cfg.device),
-            torch.empty(NUM_LOCAL_EXPERTS, dtype=torch.int32, device=self.cfg.device),
+            torch.empty(NUM_LOCAL_EXPERTS, dtype=torch.int64, device=self.cfg.device),
         )
 
     @staticmethod
@@ -212,16 +234,99 @@ class TestEP(unittest.TestCase):
 
     # Prepare
 
+    @_eager_test_include
     def test_primitive_prepare(self):
         buf = self._make_buffer()
         topk_idx, _toks, _w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
-        token_counts = ep_prepare(buf, topk_idx)
+        tokens_per_expert = ep_prepare(buf, topk_idx)
         torch.cuda.synchronize()
-        self.assertEqual(token_counts.shape, (NUM_LOCAL_EXPERTS,))
-        local = int(token_counts.sum().item())
+        self.assertEqual(tokens_per_expert.shape, (NUM_LOCAL_EXPERTS,))
+        local = int(tokens_per_expert.sum().item())
         total = torch.tensor([local], dtype=torch.int64, device=self.cfg.device)
         dist.all_reduce(total, op=dist.ReduceOp.SUM, group=self.ep_group)
         self.assertEqual(int(total.item()), self.cfg.world_size * TOKENS_PER_RANK * TOP_K)
+
+    @_eager_test_include
+    def test_eager_recv_sizing(self):
+        """Eager mode sizes dispatch outputs to the exact per-step recv-token total."""
+        if not EAGER:
+            self.skipTest("eager-only assertions")
+        buf = self._make_buffer()
+        topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
+        recv_t, recv_w, tokens_per_expert = ep_dispatch(buf, tokens, topk_idx, w)
+        torch.cuda.synchronize()
+        # The per-step recv-token total is exposed on the buffer (int64 [1]).
+        self.assertEqual(buf.total_recv_tokens.dtype, torch.int64)
+        total = int(buf.total_recv_tokens.item())
+        # recv outputs are sized to the recv total, not recv_capacity_per_rank.
+        self.assertEqual(recv_t.shape[0], total)
+        self.assertEqual(recv_w.shape[0], total)
+        # padded total is at least the unpadded per-expert sum and within capacity.
+        self.assertGreaterEqual(total, int(tokens_per_expert.sum().item()))
+        self.assertLessEqual(total, self.cfg.recv_capacity_per_rank)
+
+    @_eager_test_include
+    def test_eager_rank_with_zero_recv_tokens(self):
+        """Empty recv tensors remain valid through the forward and backward pipeline."""
+        if not EAGER:
+            self.skipTest("eager-only assertions")
+        buf = self._make_buffer()
+        _topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
+        # Experts [0, TOP_K) are local to rank 0, so every other rank receives
+        # no tokens and PyTorch gives its eager recv tensors null data pointers.
+        topk_idx = torch.arange(TOP_K, dtype=torch.int64, device=self.cfg.device).repeat(
+            TOKENS_PER_RANK, 1
+        )
+        tokens_p = tokens.detach().clone().requires_grad_(True)
+
+        recv_t, recv_w, tokens_per_expert = ep_dispatch(buf, tokens_p, topk_idx, w)
+        recv_rows = int(buf.total_recv_tokens.item())
+        self.assertEqual(recv_t.shape, (recv_rows, HIDDEN_DIM))
+        self.assertEqual(recv_w.shape, (recv_rows,))
+        if self.cfg.rank == 0:
+            self.assertGreater(recv_rows, 0)
+            self.assertEqual(
+                int(tokens_per_expert.sum().item()),
+                self.cfg.world_size * TOKENS_PER_RANK * TOP_K,
+            )
+        else:
+            self.assertEqual(recv_rows, 0)
+            self.assertEqual(int(tokens_per_expert.sum().item()), 0)
+            self.assertEqual(recv_t.data_ptr(), 0)
+            self.assertEqual(recv_w.data_ptr(), 0)
+
+        expert_out = self._weighted(recv_t, recv_w)
+        result = ep_combine(buf, expert_out, num_local_tokens=TOKENS_PER_RANK)
+        (0.5 * (result.float() ** 2).sum()).backward()
+        torch.cuda.synchronize()
+        torch.testing.assert_close(result.float(), tokens.float(), atol=5e-2, rtol=5e-2)
+        torch.testing.assert_close(tokens_p.grad.float(), tokens.float(), atol=5e-2, rtol=5e-2)
+
+    @_overflow_test_include
+    def test_overflow_drop(self):
+        """drop_on_overflow: recv past capacity is dropped and dispatch continues
+        instead of trapping; the pre-drop recv total exceeds recv_capacity."""
+        if not OVERFLOW:
+            self.skipTest("overflow-only assertions")
+        buf = self._make_buffer()
+        topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
+        # Identity routing sends TOKENS_PER_RANK * TOP_K tokens to each rank, which
+        # overflows the deliberately undersized capacity.
+        expected_recv = TOKENS_PER_RANK * TOP_K
+        self.assertGreater(expected_recv, self.cfg.recv_capacity_per_rank)
+        # total_recv_tokens reports the true (pre-drop) recv total, counting the
+        # tokens that will be dropped; the per-expert counts exclude them and sum
+        # to the kept tokens (capped at recv_capacity_per_rank).
+        tokens_per_expert = ep_prepare(buf, topk_idx)
+        torch.cuda.synchronize()
+        self.assertEqual(int(buf.total_recv_tokens.item()), expected_recv)
+        self.assertEqual(int(tokens_per_expert.sum().item()), self.cfg.recv_capacity_per_rank)
+        # Dispatch drops overflowing tokens and completes (no trap); recv outputs
+        # stay capped at recv_capacity_per_rank.
+        recv_t, recv_w, _ = ep_dispatch(buf, tokens, topk_idx, w)
+        torch.cuda.synchronize()
+        self.assertEqual(recv_t.shape[0], self.cfg.recv_capacity_per_rank)
+        self.assertEqual(recv_w.shape[0], self.cfg.recv_capacity_per_rank)
 
     # Identity round-trip via raw primitives
 
@@ -253,10 +358,10 @@ class TestEP(unittest.TestCase):
             ]
         for label, recv_tokens in cases:
             with self.subTest(case=label):
-                buf = self._make_buffer(dispatch_recv_tokens=recv_tokens)
+                buf = self._make_buffer()
                 topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
                 tokens_p = tokens.detach().clone().requires_grad_(True)
-                rt, rw, _tc = ep_dispatch(buf, tokens_p, topk_idx, w)
+                rt, rw, _tc = ep_dispatch(buf, tokens_p, topk_idx, w, recv_tokens=recv_tokens)
                 if recv_tokens is not None:  # caller-supplied recv_tokens must be used in place
                     self.assertEqual(rt.data_ptr(), recv_tokens.data_ptr())
                 rt = self._stage_grad_symm(rt)
@@ -269,20 +374,17 @@ class TestEP(unittest.TestCase):
 
     @_zero_copy_test_include
     def test_caller_provides_dispatch_recv_tokens(self):
-        """Caller-supplied recv_tokens: EpBuffer adopts it (recv_topk_weights stays
-        owned) and ep_dispatch returns a view of the caller's buffer."""
+        """Caller-supplied recv_tokens (symm-mem-backed in zero-copy): ep_dispatch
+        writes into it and returns a view of the caller's buffer."""
         if ZERO_COPY:
             rc = self.cfg.recv_capacity_per_rank
             rt_buf = symm_mem_alloc((rc, HIDDEN_DIM), torch.bfloat16, self.ep_group)
         else:
             rt_buf, _rw_buf, _ = self._make_raw_recv()
-        buf = self._make_buffer(dispatch_recv_tokens=rt_buf)
-        self.assertEqual(buf.recv_tokens_symm_buf.data_ptr(), rt_buf.data_ptr())
-        if ZERO_COPY:  # recv_topk_weights is always buffer-owned in zero-copy
-            self.assertIsNotNone(buf.recv_topk_weights_symm_buf)
+        buf = self._make_buffer()
         topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
         tokens_p = tokens.detach().clone().requires_grad_(True)
-        rt, rw, _ = ep_dispatch(buf, tokens_p, topk_idx, w)
+        rt, rw, _ = ep_dispatch(buf, tokens_p, topk_idx, w, recv_tokens=rt_buf)
         self.assertEqual(rt.data_ptr(), rt_buf.data_ptr())
         rt = self._stage_grad_symm(rt)
         rw = self._stage_grad_symm(rw)
@@ -294,22 +396,45 @@ class TestEP(unittest.TestCase):
 
     @_zero_copy_test_include
     def test_caller_provides_grad_expert_out(self):
-        """Caller-supplied grad_expert_out: EpBuffer adopts it as the combine
-        backward grad target (symm-mem under zero-copy)."""
+        """Caller-supplied grad_out (symm-mem-backed in zero-copy): ep_combine's
+        backward scatters the expert-out grad into it."""
         rc = self.cfg.recv_capacity_per_rank
         if ZERO_COPY:
             gbuf = symm_mem_alloc((rc, HIDDEN_DIM), torch.bfloat16, self.ep_group)
         else:
             gbuf = torch.empty(rc, HIDDEN_DIM, dtype=torch.bfloat16, device=self.cfg.device)
-        buf = self._make_buffer(combine_grad_expert_out=gbuf)
-        self.assertEqual(buf.grad_expert_out_symm_buf.data_ptr(), gbuf.data_ptr())
+        gbuf.zero_()
+        buf = self._make_buffer()
         topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
         tokens_p = tokens.detach().clone().requires_grad_(True)
         recv_t, recv_w, _ = ep_dispatch(buf, tokens_p, topk_idx, w)
         recv_t = self._stage_grad_symm(recv_t)
         recv_w = self._stage_grad_symm(recv_w)
         expert_out = self._expert_out(self._weighted(recv_t, recv_w))
-        out = ep_combine(buf, expert_out)
+        out = ep_combine(buf, expert_out, grad_out=gbuf)
+        (0.5 * (out.float() ** 2).sum()).backward()
+        torch.cuda.synchronize()
+        torch.testing.assert_close(out.float(), tokens.float(), atol=5e-2, rtol=5e-2)
+        torch.testing.assert_close(tokens_p.grad.float(), tokens.float(), atol=5e-2, rtol=5e-2)
+        # the caller-owned buffer was used as the combine-bwd scatter target
+        self.assertGreater(gbuf.abs().sum().item(), 0.0)
+
+    @_zero_copy_test_include
+    def test_zero_copy_pool_auto_alloc(self):
+        """Zero-copy with recv/grad left None: ep_dispatch/ep_combine allocate their IO
+        tensors from the symm-mem pool (is_symm_backed). This is the primary mcore
+        path — mcore hands no caller buffers, TE pools them on the fly."""
+        if not ZERO_COPY:
+            self.skipTest("zero-copy pool auto-alloc only")
+        buf = self._make_buffer()
+        topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
+        tokens_p = tokens.detach().clone().requires_grad_(True)
+        recv_t, recv_w, _ = ep_dispatch(buf, tokens_p, topk_idx, w)  # recv_tokens=None -> pool
+        self.assertTrue(is_symm_backed(recv_t))  # dispatch recv came from the symm-mem pool
+        recv_t = self._stage_grad_symm(recv_t)
+        recv_w = self._stage_grad_symm(recv_w)
+        expert_out = self._expert_out(self._weighted(recv_t, recv_w))
+        out = ep_combine(buf, expert_out)  # grad_out=None -> bwd allocs the grad from the pool
         (0.5 * (out.float() ** 2).sum()).backward()
         torch.cuda.synchronize()
         torch.testing.assert_close(out.float(), tokens.float(), atol=5e-2, rtol=5e-2)
@@ -317,6 +442,7 @@ class TestEP(unittest.TestCase):
 
     # Multi-iter stability
 
+    @_eager_test_include
     def test_dispatch_autograd_multiple_iterations(self):
         """5 fwd+bwd iters on the same EpBuffer must be bit-stable."""
         buf = self._make_buffer()
@@ -466,6 +592,7 @@ class TestEP(unittest.TestCase):
             )
 
     @_zero_copy_test_include
+    @_eager_test_include
     def test_combine_autograd(self):
         """ep_combine fwd+bwd; bwd grad target is the EpBuffer symm buffer (zc) or in-flight."""
         buf = self._make_buffer()

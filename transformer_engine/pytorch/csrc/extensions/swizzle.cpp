@@ -389,6 +389,23 @@ std::optional<SwizzledGroupedScales> maybe_swizzle_grouped_tensor(GroupedTensorW
         tensor_offsets.data_ptr, static_cast<DType>(tensor_offsets.dtype), tensor_offsets.shape);
   }
 
+  // Varying per-tensor dimensions. Leaving these unset declares the grouped tensor uniform,
+  // which selects the uniform-shape swizzle kernel.
+  const auto first_dims = input.get_first_dims();
+  if (first_dims.data_ptr != nullptr) {
+    swizzle_input.set_first_dims(first_dims.data_ptr, static_cast<DType>(first_dims.dtype),
+                                 first_dims.shape);
+    swizzle_output.set_first_dims(first_dims.data_ptr, static_cast<DType>(first_dims.dtype),
+                                  first_dims.shape);
+  }
+  const auto last_dims = input.get_last_dims();
+  if (last_dims.data_ptr != nullptr) {
+    swizzle_input.set_last_dims(last_dims.data_ptr, static_cast<DType>(last_dims.dtype),
+                                last_dims.shape);
+    swizzle_output.set_last_dims(last_dims.data_ptr, static_cast<DType>(last_dims.dtype),
+                                 last_dims.shape);
+  }
+
   // Per-tensor logical dimensions (uniform-shape grouped tensor).
   const size_t num_tensors = input.num_tensors();
   const auto logical_shape_nvte = input.logical_shape();

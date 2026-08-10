@@ -149,7 +149,7 @@ LOGICAL_AXIS_RULES = (
     ("embed", FSDP_AXIS),
     ("embed_replicated", None),
     ("mlp", None),
-    ("batch", (EP_AXIS, FSDP_AXIS)),
+    ("batch", (FSDP_AXIS, EP_AXIS)),
 )
 
 # Small shapes so the parity tests stay tight on bf16. The block still
@@ -407,6 +407,7 @@ def _make_block(
     score_function="softmax",
     expert_bias_init=None,
     compound_expert_sharding=False,
+    input_axes=("batch", None, None),
 ):
     kwargs = dict(
         num_experts=NUM_EXPERTS,
@@ -418,6 +419,7 @@ def _make_block(
         use_expert_routing_bias=use_expert_routing_bias,
         score_function=score_function,
         dtype=DTYPE,
+        input_axes=input_axes,
     )
     if compound_expert_sharding:
         # Match MaxText shard_exp_on_fsdp=True: FSDP and EP both shard the
@@ -477,7 +479,7 @@ def _init_apply(block, mesh, x, key):
         x_sh = _shard_inputs(x, mesh)
         variables = jax.jit(block.init)(key, x_sh)
         jax.block_until_ready(jax.tree_util.tree_leaves(variables)[0])
-        output, aux = jax.jit(block.apply)(variables, x_sh)
+        output, aux, _trt = jax.jit(block.apply)(variables, x_sh)
         jax.block_until_ready(output)
     return variables, output, aux
 
@@ -493,7 +495,7 @@ def _grad_step(block, variables, mesh, x, *, include_aux=False):
         x_sh = _shard_inputs(x, mesh)
 
         def loss_fn(variables, x):
-            output, aux = block.apply(variables, x)
+            output, aux, _trt = block.apply(variables, x)
             loss = jnp.mean(output.astype(jnp.float32) ** 2)
             if include_aux and aux is not None:
                 loss = loss + aux.astype(jnp.float32)
@@ -512,7 +514,7 @@ def _grad_aux_only(block, variables, mesh, x):
         x_sh = _shard_inputs(x, mesh)
 
         def aux_only(variables, x):
-            _, aux = block.apply(variables, x)
+            _, aux, _trt = block.apply(variables, x)
             return aux.astype(jnp.float32)
 
         grads = jax.jit(jax.grad(aux_only))(variables, x_sh)
