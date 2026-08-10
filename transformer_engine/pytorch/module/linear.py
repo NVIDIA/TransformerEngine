@@ -826,8 +826,6 @@ def _linear_forward_fake(
 
     # ------------------------------------------------------
     # Weight pipeline -- mirror ``quantize_weight`` / ``cast_if_needed``.
-    # ``new_weight_workspace`` is a fresh fake storage only on the
-    # cache-miss + ``cache_weight`` path, else ``None``.
     # ------------------------------------------------------
     new_weight_workspace = None
     weightmat = None
@@ -913,9 +911,7 @@ def _linear_forward_fake(
                     quantizer=input_quantizer,
                     device=inp.device,
                 )
-                # Mirror ``_linear_forward_impl``'s post-quantization
-                # ``inputmat.update_usage(...)`` so the saved input's buffer layout
-                # matches -- driven by the same conditions as the real impl.
+                # Mirror the impl's post-quantization ``update_usage``.
                 if own_quantized_input and not save_original_input:
                     if args.backward_override is not None:
                         saved_inputmat.update_usage(rowwise_usage=True, columnwise_usage=False)
@@ -932,10 +928,8 @@ def _linear_forward_fake(
                     shape=tuple(inp.shape), dtype=activation_dtype, device=inp.device
                 )
 
-        # Slot 1 -- ``wt_save``. Mirror the real impl's alias dedup: the cached
-        # FP8 weight is shared with ``new_weight_workspace`` (a return, on a cache
-        # miss) or the ``weight_workspace`` input (on a cache hit), so it is
-        # reconstructed in ``_linear_setup_ctx`` rather than saved twice.
+        # Slot 1 -- ``wt_save``, with the impl's alias dedup (rebuilt in
+        # ``_linear_setup_ctx`` instead of being saved twice).
         wt_alias = None
         wt_save = None
         if weightmat_aliases_weight:
@@ -1705,15 +1699,8 @@ def _linear_backward_fake(
 ) -> Tuple[Optional[TensorSpec], Optional[TensorSpec], Optional[TensorSpec]]:
     """Allocation-free fake of :func:`_linear_backward_impl` on ``TensorSpec``.
 
-    The saved-tensor fields of ``args`` carry
-    :class:`~transformer_engine.pytorch.dynamo.TensorSpec` instances. Returns
-    ``(wgrad, dgrad, grad_bias)`` specs describing the nature of the gradients,
-    mirroring the real backward's return contract without allocating storage.
-
-    Tensor-/sequence-parallel gather/scatter happens inside the eager backward
-    custom op and is opaque to ``torch.compile``: ``dgrad`` always carries the
-    rank-local input shape and ``wgrad`` the local weight shape, so no extra
-    shape modeling is needed here.
+    Returns ``(wgrad, dgrad, grad_bias)`` specs. TP/SP gather/scatter happens
+    inside the eager op, so the specs carry rank-local shapes.
     """
     if args.fsdp_group is not None:
         raise NotImplementedError(
@@ -1725,17 +1712,14 @@ def _linear_backward_fake(
     out_dtype = args.activation_dtype
     out_features, in_features = weight.shape
 
-    # Mirror ``_linear_backward_impl``: ``set_usage`` on ``grad_input_quantizer``
-    # influences ``dgrad``'s buffer layout.
+    # Mirrors the impl; affects dgrad's buffer layout.
     if args.grad_input_quantizer is not None:
         args.grad_input_quantizer.set_usage(rowwise=True, columnwise=False)
 
     dgrad = None
     if args.requires_dgrad:
-        # dgrad has the logical input shape and may be quantized for the next op.
-        # Derive shape from grad_output + weight + SP config instead of args.inp_shape:
-        # inp_shape is not stored in the value bundle under dynamic shapes (SymInt is
-        # not hashable in OpaqueValueBundle), so we reconstruct it here.
+        # Input shape rederived from grad_output + SP config (inp_shape is not
+        # stored: torch.Size with SymInt cannot cross in OpaqueValueBundle).
         dgrad_leading = _sp_inp_leading(args.grad_output.shape[0], args)
         dgrad = TensorSpec(
             shape=(dgrad_leading, *args.grad_output.shape[1:-1], in_features),
@@ -1745,11 +1729,8 @@ def _linear_backward_fake(
         )
 
     wgrad = None
+    # Under fuse_wgrad_accumulation the grad goes into main_grad in place.
     if args.requires_wgrad and not args.fuse_wgrad_accumulation:
-        # wgrad has the weight's shape; quantized iff an fp8 wgrad output is
-        # requested (mirrors ``quantization_params=grad_weight_quantizer``),
-        # otherwise high precision. Under fuse_wgrad_accumulation the grad is
-        # written into ``main_grad`` in place and no wgrad tensor is returned.
         wgrad = TensorSpec(
             shape=(out_features, in_features),
             dtype=out_dtype,
