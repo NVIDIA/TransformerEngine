@@ -1112,7 +1112,8 @@ class _GroupedLinear(torch.autograd.Function):
                 with_quantized_output=ctx.fp8 or ctx.debug,
                 compute_dbias=(ctx.fp8 or ctx.debug) and ctx.use_bias,
                 disable_bulk_allocation=(
-                    ctx.cpu_offloading and isinstance(grad_output_reference, HybridQuantizer)
+                    ctx.cpu_offloading
+                    and isinstance(grad_output_reference, HybridQuantizer)
                     and not _split_quantization._uses_identity_quantizer(grad_output_reference)
                 ),
             )
