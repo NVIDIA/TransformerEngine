@@ -45,6 +45,7 @@ from ..utils import (
     divide,
     init_method_constant,
     needs_quantized_gemm,
+    assert_dim_for_fp8_exec,
     nvtx_range_pop,
     nvtx_range_push,
     get_nvtx_range_context,
@@ -418,7 +419,9 @@ def _linear_forward_impl(
     if ub_name is not None:
         nvtx_label = f"{nvtx_label}.{ub_name}"
 
-    out_features = weight.shape[0]
+    # Make sure input dimensions are compatible
+    out_features, in_features = weight.shape
+    assert inp.shape[-1] == in_features, "GEMM not possible"
 
     # Configure tensor-parallel communication
     tp_world_size = get_distributed_world_size(tp_group)
@@ -450,6 +453,8 @@ def _linear_forward_impl(
     inputmat = inp  # Input tensor to save for backward (maybe sharded)
     inputmat_total = None  # Input tensor to pass to GEMM (gathered)
     own_quantized_input = False
+    if fp8:
+        assert_dim_for_fp8_exec(inputmat, weight)
 
     if with_input_all_gather_nccl or ub_overlap_ag_fprop:  # All-gather input tensor
 
@@ -2388,8 +2393,6 @@ class Linear(TransformerEngineBaseModule):
                 ub_bulk_dgrad = self.ub_bulk_dgrad
                 ub_bulk_wgrad = self.ub_bulk_wgrad
 
-            check_gemm_dims(inp, weight_tensor, self.fp8)
-
             linear_bias_tensor = (
                 bias_tensor if (self.apply_bias and not self.gemm_bias_unfused_add) else None
             )
@@ -2469,6 +2472,7 @@ class Linear(TransformerEngineBaseModule):
                     use_compiled_op = False
 
             if use_compiled_op:
+                check_gemm_dims(inp, weight_tensor, self.fp8)
                 # See LinearFwdArgs.cublas_workspace.
                 fwd_args.cublas_workspace = get_cublas_workspace(inp.device.index, False, False)
                 out, new_weight_workspace = _linear_op(fwd_args)

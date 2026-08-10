@@ -663,23 +663,13 @@ def assert_dim_for_fp8_exec(*tensors: List[torch.Tensor]) -> None:
 
 
 def check_gemm_dims(inp: torch.Tensor, weight: torch.Tensor, fp8: bool) -> None:
-    """Validate the dims of a TN GEMM pair (``y = x @ w^T``) for ``inp``/``weight``.
-
-    The torch.compile-friendly counterpart of :func:`assert_dim_for_fp8_exec`:
-    under compile it uses ``torch._check`` so with dynamic shapes the
-    constraints become guards instead of being silently baked into the trace.
-    Dynamo forbids tensor closures in ``torch._check`` message lambdas, so the
-    compiled-path messages omit the dims; eager keeps the full messages.
+    """Emit the TN GEMM (``y = x @ w^T``) dim constraints as ``torch._check``
+    guards at trace time, so dynamic shapes stay constrained instead of being
+    silently baked into the graph. Call only on the torch.compile path; eager
+    validation (with the offending dims in the message) lives in the op impl
+    (:func:`assert_dim_for_fp8_exec`). Messages here are constant strings --
+    Dynamo forbids tensor closures in ``torch._check`` message lambdas.
     """
-    if not torch.compiler.is_compiling():
-        if inp.shape[-1] != weight.shape[-1]:
-            raise ValueError(
-                "GEMM not possible: input last dim must equal in_features, but got "
-                f"input dims={list(inp.shape)} and weight dims={list(weight.shape)}"
-            )
-        if fp8:
-            assert_dim_for_fp8_exec(inp, weight)
-        return
     # pylint: disable=protected-access
     torch._check(
         inp.shape[-1] == weight.shape[-1],

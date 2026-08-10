@@ -553,8 +553,7 @@ def _train(opts):
 
     if opts.compile:
         for i, layer in enumerate(test_model.layers):
-            # dynamic=False for now: symbolic shapes would land in an OpaqueValueBundle
-            # op arg whose hash chokes on non-nested SymInt (see run_numerics).
+            # Static shapes; dynamic-shape coverage lives in tests/pytorch/test_torch_compile.py.
             test_model.layers[i] = torch.compile(
                 layer, fullgraph=True, mode=opts.compile_mode, dynamic=False
             )

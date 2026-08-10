@@ -324,14 +324,9 @@ def _apply_models(
     forward_single_node = model_single_node
     forward_distributed = model_distributed
     if use_compile:
-        # Each parametrized case compiles the same module.forward code object with
-        # a different shape/recipe; with dynamic=False those guards accumulate and
-        # eventually trip Dynamo's recompile_limit. Reset so every case starts from
-        # a clean compile cache (mirrors the single-GPU torch.compile tests).
+        # Reset the compile cache so parametrized cases don't trip recompile_limit.
         torch._dynamo.reset()
-        # dynamic=False for now: a symbolic shape would land in an OpaqueValueBundle
-        # (value-opaque op arg) whose hash chokes on non-nested SymInt. Force static
-        # shapes (recompile per shape) until the bundle handles symbolic shapes.
+        # Static shapes; dynamic-shape coverage lives in tests/pytorch/test_torch_compile.py.
         forward_single_node = torch.compile(
             model_single_node, fullgraph=True, mode=compile_mode, dynamic=False
         )
