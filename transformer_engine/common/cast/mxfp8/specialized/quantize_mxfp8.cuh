@@ -14,8 +14,9 @@
 #include <cstdlib>
 
 #include "../../../util/ptx.cuh"
+#include "../swizzle.cuh"  // gemm_swizzled_scale_idx (parent dir, GEMM scale swizzle)
 #include "state_counter.cuh"
-#include "swizzle.cuh"
+#include "swizzle.cuh"  // specialized/swizzle.cuh (TMA input bank-conflict swizzle)
 
 namespace transformer_engine {
 namespace dispatch {
@@ -24,6 +25,10 @@ namespace quantize_kernel {
 namespace specialized {
 
 namespace ptx = transformer_engine::ptx;
+
+// Bring in the GEMM-swizzled scale index helper (from ../swizzle.cuh).
+// Used only when the kernel is instantiated with CastTraits::_with_swizzled_scales=true.
+using transformer_engine::dispatch::mxfp8::swizzle::gemm_swizzled_scale_idx;
 namespace {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 
@@ -122,19 +127,21 @@ struct Layout {
   static constexpr int32_t num = M * N;
 };
 
-template <typename IType, typename OType, bool rowwise, bool colwise>
+template <typename IType, typename OType, bool rowwise, bool colwise,
+          bool with_swizzled_scales = false>
 struct CastTraits;
 
 // 1x32
-template <typename _IType, typename _OType>
-struct CastTraits<_IType, _OType, /*rowwise=*/true, /*colwise=*/false> {
+template <typename _IType, typename _OType, bool _kSwizzled>
+struct CastTraits<_IType, _OType, /*rowwise=*/true, /*colwise=*/false,
+                  _kSwizzled> {
   static constexpr bool isRowwise = true;
   static constexpr bool isColwise = false;
   using IType = _IType;
   using OType = _OType;
 
   static constexpr int32_t chunkElems = 32;
-  using threadLayout = Layout<1, 32>;
+  using threadLayout = Layout<1, THREADS_PER_WARP>;
   static constexpr int32_t numThreadsPerChunk = 1;
   static constexpr int32_t warpDimM = threadLayout::M;
   static constexpr int32_t warpDimN = threadLayout::N * chunkElems;
@@ -151,14 +158,22 @@ struct CastTraits<_IType, _OType, /*rowwise=*/true, /*colwise=*/false> {
   using iterLayout = Layout<1, 1>;
   static constexpr int32_t blockDimM = iterLayout::M * blockIterDimM;
   static constexpr int32_t blockDimN = iterLayout::N * blockIterDimN;
+  static constexpr int32_t rowwiseScaleStride = blockDimN / chunkElems;
+  using PreferredDataType = std::conditional_t<
+      rowwiseScaleStride % 16 == 0, uint4,
+      std::conditional_t<
+          rowwiseScaleStride % 8 == 0, uint2,
+          std::conditional_t<rowwiseScaleStride % 4 == 0, uint32_t,
+                             std::conditional_t<rowwiseScaleStride % 2 == 0, uint16_t, uint8_t>>>>;
 
   static constexpr int32_t numStages = 1;
   static constexpr int32_t numPrefetch = numStages - 1;
 
   static constexpr bool _use_cvt_4x = true;
   static constexpr bool _cache_rowwise_scale_in_smem = true;
+  static constexpr bool _with_swizzled_scales = _kSwizzled;
 
-  static constexpr int32_t numThreads = warpLayout::num * 32;
+  static constexpr int32_t numThreads = warpLayout::num * THREADS_PER_WARP;
 
   static constexpr size_t smem_rowwise_scale =
       _cache_rowwise_scale_in_smem ? (blockDimM * (blockDimN / chunkElems) * sizeof(e8m0_t)) : 0ul;
@@ -498,13 +513,8 @@ __global__ void quantize_mxfp8_kernel_cast_only(typename CastTraits::IType *__re
     block_coords.y = blockIdx.y * CastTraits::blockDimM;
     block_coords.x = blockIdx.x * CastTraits::blockDimN;
 
-    constexpr int32_t stride_in_smem = CastTraits::blockDimN / CastTraits::chunkElems;
-    using PreferredDataType = std::conditional_t<
-        stride_in_smem % 16 == 0, uint4,
-        std::conditional_t<
-            stride_in_smem % 8 == 0, uint2,
-            std::conditional_t<stride_in_smem % 4 == 0, uint32_t,
-                               std::conditional_t<stride_in_smem % 2 == 0, uint16_t, uint8_t>>>>;
+    constexpr int32_t stride_in_smem = CastTraits::rowwiseScaleStride;
+    using PreferredDataType = typename CastTraits::PreferredDataType;
 
     int2 end_coords;
     end_coords.y = std::min(block_coords.y + CastTraits::blockDimM, rows);
@@ -514,7 +524,40 @@ __global__ void quantize_mxfp8_kernel_cast_only(typename CastTraits::IType *__re
     valid_coords.y = end_coords.y - block_coords.y;
     valid_coords.x = end_coords.x - (block_coords.x / CastTraits::chunkElems);
 
-    if (scale_stride_rowwise % sizeof(PreferredDataType) != 0) {
+    if constexpr (CastTraits::_with_swizzled_scales) {
+      // Four adjacent rowwise scale columns are contiguous in the GEMM scale
+      // layout, so write them as one uint32_t whenever possible.
+      constexpr int32_t cols_per_group = 4;
+      const int32_t groups_per_row = valid_coords.x / cols_per_group;
+      const int32_t total_groups = valid_coords.y * groups_per_row;
+      const int32_t base_col = block_coords.x / CastTraits::chunkElems;
+      const size_t num_tiles_x = DIVUP(cols, static_cast<int32_t>(128));
+
+      for (int32_t i = threadIdx.x + warpId * THREADS_PER_WARP; i < total_groups;
+           i += CastTraits::warpLayout::num * THREADS_PER_WARP) {
+        const int32_t row = i / groups_per_row;
+        const int32_t col = (i % groups_per_row) * cols_per_group;
+        const uint32_t value =
+            *reinterpret_cast<const uint32_t *>(&sRowwiseScale[row * stride_in_smem + col]);
+        const size_t idx =
+            gemm_swizzled_scale_idx(block_coords.y + row, base_col + col, num_tiles_x);
+        *reinterpret_cast<uint32_t *>(&scales_rowwise[idx]) = value;
+      }
+
+      const int32_t remaining_start = groups_per_row * cols_per_group;
+      const int32_t remaining_per_row = valid_coords.x - remaining_start;
+      if (remaining_per_row > 0) {
+        const int32_t total_remaining = valid_coords.y * remaining_per_row;
+        for (int32_t i = threadIdx.x + warpId * THREADS_PER_WARP; i < total_remaining;
+             i += CastTraits::warpLayout::num * THREADS_PER_WARP) {
+          const int32_t row = i / remaining_per_row;
+          const int32_t col = remaining_start + (i % remaining_per_row);
+          const size_t idx =
+              gemm_swizzled_scale_idx(block_coords.y + row, base_col + col, num_tiles_x);
+          scales_rowwise[idx] = sRowwiseScale[row * stride_in_smem + col];
+        }
+      }
+    } else if (scale_stride_rowwise % sizeof(PreferredDataType) != 0) {
       using DataType = int32_t;
       constexpr int32_t num_elems_per_group = sizeof(DataType) / sizeof(e8m0_t);
       constexpr int32_t num_groups_per_row_in_smem = stride_in_smem / num_elems_per_group;
@@ -527,8 +570,9 @@ __global__ void quantize_mxfp8_kernel_cast_only(typename CastTraits::IType *__re
           reinterpret_cast<DataType *>(scales_rowwise + block_coords.y * scale_stride_rowwise +
                                        block_coords.x / CastTraits::chunkElems);
 
-      for (int32_t i = threadIdx.x + warpId * 32; i < (valid_coords.y * num_threads_per_row);
-           i += CastTraits::warpLayout::num * 32) {
+      for (int32_t i = threadIdx.x + warpId * THREADS_PER_WARP;
+           i < (valid_coords.y * num_threads_per_row);
+           i += CastTraits::warpLayout::num * THREADS_PER_WARP) {
         int32_t row = i / num_threads_per_row;
         int32_t col = i % num_threads_per_row;
         gScales[row * gmem_stride_in_group + col] = sScales[row * num_groups_per_row_in_smem + col];
@@ -546,8 +590,9 @@ __global__ void quantize_mxfp8_kernel_cast_only(typename CastTraits::IType *__re
           reinterpret_cast<DataType *>(scales_rowwise + block_coords.y * scale_stride_rowwise +
                                        block_coords.x / CastTraits::chunkElems);
 
-      for (int32_t i = threadIdx.x + warpId * 32; i < (valid_coords.y * num_threads_per_row);
-           i += CastTraits::warpLayout::num * 32) {
+      for (int32_t i = threadIdx.x + warpId * THREADS_PER_WARP;
+           i < (valid_coords.y * num_threads_per_row);
+           i += CastTraits::warpLayout::num * THREADS_PER_WARP) {
         int32_t row = i / num_threads_per_row;
         int32_t col = i % num_threads_per_row;
         gScales[row * gmem_stride_in_group + col] = sScales[row * num_groups_per_row_in_smem + col];
@@ -577,11 +622,12 @@ struct CastTraits<_IType, _OType, /*rowwise=*/true, /*colwise=*/true> {
   static constexpr int32_t rowChunkElems = 32;
   static constexpr int32_t colChunkElems = 32;
 
-  using rowThreadLayout = Layout<32, 1>;                                   // 32x1
+  using rowThreadLayout = Layout<THREADS_PER_WARP, 1>;                     // 32x1
   using colThreadLayout = Layout<rowThreadLayout::N, rowThreadLayout::M>;  // 1x32
   static_assert(rowThreadLayout::num == colThreadLayout::num,
                 "rowThreadLayout::num must be equal to colThreadLayout::num");
-  static_assert(rowThreadLayout::num == 32, "rowThreadLayout::num must be 32");
+  static_assert(rowThreadLayout::num == THREADS_PER_WARP,
+                "rowThreadLayout::num must match the warp size");
 
   using rowWarpDim = Layout<rowThreadLayout::M, rowThreadLayout::N * rowChunkElems>;
   using colWarpDim = Layout<colThreadLayout::M * colChunkElems, colThreadLayout::N>;
@@ -603,6 +649,13 @@ struct CastTraits<_IType, _OType, /*rowwise=*/true, /*colwise=*/true> {
 
   using iterLayout = Layout<1, 4>;
   using blockDIM = Layout<iterLayout::M * blockIterDim::M, iterLayout::N * blockIterDim::N>;
+  static constexpr int32_t rowwiseScaleStride = blockDIM::N / rowChunkElems;
+  using PreferredDataType = std::conditional_t<
+      rowwiseScaleStride % 16 == 0, uint4,
+      std::conditional_t<
+          rowwiseScaleStride % 8 == 0, uint2,
+          std::conditional_t<rowwiseScaleStride % 4 == 0, uint32_t,
+                             std::conditional_t<rowwiseScaleStride % 2 == 0, uint16_t, uint8_t>>>>;
 
   static constexpr int32_t numStages = 2;
 
@@ -636,7 +689,7 @@ struct CastTraits<_IType, _OType, /*rowwise=*/true, /*colwise=*/true> {
                 "It requires aligned smem pointer");
 
   static constexpr int32_t numWarps = warpLayout::num + 2 * (int32_t)_use_warp_specialization;
-  static constexpr int32_t numThreads = numWarps * 32;
+  static constexpr int32_t numThreads = numWarps * THREADS_PER_WARP;
   static_assert(numThreads <= 1024, "numThreads must be less than or equal to 1024");
 
   static constexpr size_t smemInputPerWarp = warpDim::num * sizeof(IType);
@@ -660,7 +713,9 @@ struct CastTraits<_IType, _OType, /*rowwise=*/true, /*colwise=*/true> {
   static constexpr bool _need_smem_for_colwise_reduce =
       _colwise_source_coming_from_rowwise;  // && _colwise_reduce_max != ColwiseReduceMax::Redux;
   static constexpr size_t smem_colwise_reduce =
-      _need_smem_for_colwise_reduce ? 32 * warpLayout::num * sizeof(ColwiseReduceDataType) : 0ul;
+      _need_smem_for_colwise_reduce
+          ? THREADS_PER_WARP * warpLayout::num * sizeof(ColwiseReduceDataType)
+          : 0ul;
 
   static constexpr size_t smem_alignment = _tma_swizzle ? 1024ul : 128ul;
   static constexpr size_t smem = _reuse_input_out_smem
@@ -668,6 +723,146 @@ struct CastTraits<_IType, _OType, /*rowwise=*/true, /*colwise=*/true> {
                                         smem_alignment + smem_rowwise_scale + smem_colwise_reduce)
                                      : (smemInput + smemRowwiseOutput + smemColwiseOutput +
                                         smem_alignment + smem_rowwise_scale + smem_colwise_reduce);
+};
+
+// Standalone trait for the non-warp-specialized rowwise+colwise cast_only kernel.
+// Exposes numStages, iterM, iterN, and the two colwise-scale features as
+// caller-controllable template axes. Both colwise flags default to true,
+// giving callers the swizzled + colwise-scale-cached fast path by default.
+//
+// This trait duck-types the same interface CastTraits<_, _, true, true> exposes,
+// so it drops into quantize_mxfp8_kernel_cast_only<traits, ...> without any
+// changes to the kernel signature. Kernel #1 (rowwise-only) and Kernel #2
+// (warp-specialized row+col) don't accept it: kernel #1 requires isColwise=false,
+// kernel #2 requires _use_warp_specialization=true - both are wrong here.
+template <typename _IType, typename _OType,
+          int  _NumStages     = 2,
+          int  _IterM         = 1,
+          int  _IterN         = 4,
+          bool _kCacheColwise = true,
+          bool _kSwizzled     = true>
+struct CastTraitsSwizzle {
+  static constexpr bool isRowwise = true;
+  static constexpr bool isColwise = true;
+  using IType = _IType;
+  using OType = _OType;
+
+  static constexpr int32_t rowChunkElems = 32;
+  static constexpr int32_t colChunkElems = 32;
+
+  using rowThreadLayout = Layout<THREADS_PER_WARP, 1>;                     // 32x1
+  using colThreadLayout = Layout<rowThreadLayout::N, rowThreadLayout::M>;  // 1x32
+  static_assert(rowThreadLayout::num == colThreadLayout::num,
+                "rowThreadLayout::num must be equal to colThreadLayout::num");
+  static_assert(rowThreadLayout::num == THREADS_PER_WARP,
+                "rowThreadLayout::num must match the warp size");
+
+  using rowWarpDim = Layout<rowThreadLayout::M, rowThreadLayout::N * rowChunkElems>;
+  using colWarpDim = Layout<colThreadLayout::M * colChunkElems, colThreadLayout::N>;
+  using warpDim =
+      Layout<std::max(rowWarpDim::M, colWarpDim::M), std::max(rowWarpDim::N, colWarpDim::N)>;
+
+  static constexpr bool _tma_swizzle = true;
+  using warpLayout = Layout<1, 2>;
+  static_assert(_tma_swizzle ? (warpLayout::N == 2) : true);
+  static constexpr CUtensorMapSwizzle input_swizzle_pattern =
+      _tma_swizzle ? CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_128B
+                   : CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_NONE;
+
+  static constexpr CUtensorMapSwizzle output_swizzle_pattern =
+      _tma_swizzle ? CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_64B
+                   : CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_NONE;
+
+  using blockIterDim = Layout<warpLayout::M * warpDim::M, warpLayout::N * warpDim::N>;
+
+  using iterLayout = Layout<_IterM, _IterN>;
+  using blockDIM = Layout<iterLayout::M * blockIterDim::M, iterLayout::N * blockIterDim::N>;
+  static constexpr int32_t rowwiseScaleStride = blockDIM::N / rowChunkElems;
+  using PreferredDataType = std::conditional_t<
+      rowwiseScaleStride % 16 == 0, uint4,
+      std::conditional_t<
+          rowwiseScaleStride % 8 == 0, uint2,
+          std::conditional_t<rowwiseScaleStride % 4 == 0, uint32_t,
+                             std::conditional_t<rowwiseScaleStride % 2 == 0, uint16_t, uint8_t>>>>;
+
+  static constexpr int32_t numStages = _NumStages;
+
+  using inputUnitType = uint4;
+  static constexpr int32_t rowNumElemsPerUnit = sizeof(inputUnitType) / sizeof(IType);
+  static constexpr int32_t rowNumUnitsPerChunk = rowChunkElems / rowNumElemsPerUnit;
+  using inputElemSwz = std::conditional_t<_tma_swizzle, swz::Swizzle<3, 3, 3>, swz::Linear>;
+  using inputUnitSwz = std::conditional_t<_tma_swizzle, swz::Swizzle<3, 0, 3>, swz::Linear>;
+
+  using colIndexSwz = swz::Swizzle<5, 0, 5>;
+
+  using rowOutputUnitType = uint4;
+  static constexpr int32_t rowNumOutUnitsPerChunk =
+      rowChunkElems * sizeof(OType) / sizeof(rowOutputUnitType);
+  static constexpr int32_t rowOutNumElemsPerUnit = sizeof(rowOutputUnitType) / sizeof(OType);
+
+  using rowOutputChunkSwz = std::conditional_t<_tma_swizzle, swz::Swizzle<2, 0, 3>, swz::Linear>;
+  using colOutputSwz = std::conditional_t<_tma_swizzle, swz::Swizzle<2, 4, 3>, swz::Linear>;
+
+  static constexpr bool _use_cvt_4x = true;
+  static constexpr bool _use_warp_specialization = false;
+  static constexpr bool _need_wait_group = iterLayout::num > numStages;
+  static constexpr bool _reuse_input_out_smem = false;
+  static_assert(_reuse_input_out_smem == false, "Just don't use it");
+  static constexpr bool _cache_rowwise_scale_in_smem = true;
+
+  static constexpr bool _colwise_source_coming_from_rowwise = true;
+  static constexpr ColwiseReduceMax _colwise_reduce_max = ColwiseReduceMax::Redux;
+  static_assert(_colwise_reduce_max != ColwiseReduceMax::RedAsync,
+                "It requires aligned smem pointer");
+
+  // The two colwise-scale features exposed as caller-controllable trait axes.
+  // Both default to true so callers get the vectorized swizzled path by default.
+  static constexpr bool _cache_colwise_scale_in_smem = _kCacheColwise;
+  static constexpr bool _with_swizzled_scales        = _kSwizzled;
+
+  static constexpr int32_t numWarps = warpLayout::num + 2 * (int32_t)_use_warp_specialization;
+  static constexpr int32_t numThreads = numWarps * THREADS_PER_WARP;
+  static_assert(numThreads <= 1024, "numThreads must be less than or equal to 1024");
+
+  static constexpr size_t smemInputPerWarp = warpDim::num * sizeof(IType);
+  static constexpr size_t smemInputPerBlock = smemInputPerWarp * warpLayout::num;
+
+  static constexpr size_t smemRowwiseOutputPerWarp = warpDim::num * sizeof(OType);
+  static constexpr size_t smemRowwiseOutputPerBlock = smemRowwiseOutputPerWarp * warpLayout::num;
+
+  static constexpr size_t smemColwiseOutputPerWarp = warpDim::num * sizeof(OType);
+  static constexpr size_t smemColwiseOutputPerBlock = smemColwiseOutputPerWarp * warpLayout::num;
+
+  static constexpr size_t smemInput = smemInputPerBlock * numStages;
+  static constexpr size_t smemRowwiseOutput = smemRowwiseOutputPerBlock * numStages;
+  static constexpr size_t smemColwiseOutput = smemColwiseOutputPerBlock * numStages;
+
+  static constexpr size_t smem_rowwise_scale =
+      _cache_rowwise_scale_in_smem ? (blockDIM::M * (blockDIM::N / rowChunkElems) * sizeof(e8m0_t))
+                                   : 0ul;
+
+  // Extra shmem for cached colwise scales - only when the flag is on.
+  static constexpr size_t smem_colwise_scale =
+      _cache_colwise_scale_in_smem
+          ? (blockDIM::M / colChunkElems) * blockDIM::N * sizeof(e8m0_t)
+          : 0ul;
+
+  using ColwiseReduceDataType = float;
+  static constexpr bool _need_smem_for_colwise_reduce =
+      _colwise_source_coming_from_rowwise;
+  static constexpr size_t smem_colwise_reduce =
+      _need_smem_for_colwise_reduce
+          ? THREADS_PER_WARP * warpLayout::num * sizeof(ColwiseReduceDataType)
+          : 0ul;
+
+  static constexpr size_t smem_alignment = _tma_swizzle ? 1024ul : 128ul;
+  static constexpr size_t smem = _reuse_input_out_smem
+                                     ? (std::max(smemInput, smemColwiseOutput) + smemRowwiseOutput +
+                                        smem_alignment + smem_rowwise_scale +
+                                        smem_colwise_scale + smem_colwise_reduce)
+                                     : (smemInput + smemRowwiseOutput + smemColwiseOutput +
+                                        smem_alignment + smem_rowwise_scale +
+                                        smem_colwise_scale + smem_colwise_reduce);
 };
 
 __device__ __forceinline__ intptr_t align_to(intptr_t x, intptr_t align) {
@@ -728,12 +923,12 @@ __global__ void quantize_mxfp8_kernel_cast_only(
     if constexpr (CastTraits::_need_smem_for_colwise_reduce) {
       sColwiseReduce = reinterpret_cast<ColwiseReduceDataType *>(
           sRowwiseScale + CastTraits::smem_rowwise_scale / sizeof(e8m0_t));
-      sColwiseReduce += warpId * 32;
+      sColwiseReduce += warpId * THREADS_PER_WARP;
     }
   } else if constexpr (CastTraits::_need_smem_for_colwise_reduce) {
     sColwiseReduce = reinterpret_cast<ColwiseReduceDataType *>(
         sColOutput + CastTraits::blockIterDim::num * CastTraits::numStages);
-    sColwiseReduce += warpId * 32;
+    sColwiseReduce += warpId * THREADS_PER_WARP;
   }
 
   // TODO: maybe we can assign a different barrier for each warp
@@ -744,8 +939,10 @@ __global__ void quantize_mxfp8_kernel_cast_only(
 #pragma unroll
     for (int32_t i = 0; i < CastTraits::numStages; i++) {
       ptx::mbarrier_init(&ldg_producer[i], 1);
-      ptx::mbarrier_init(&ldg_consumer[i], CastTraits::warpLayout::num * 32);
-      ptx::mbarrier_init(&stg_producer[i], CastTraits::warpLayout::num * 32);
+      ptx::mbarrier_init(&ldg_consumer[i],
+                         CastTraits::warpLayout::num * THREADS_PER_WARP);
+      ptx::mbarrier_init(&stg_producer[i],
+                         CastTraits::warpLayout::num * THREADS_PER_WARP);
       ptx::mbarrier_init(&stg_consumer[i], 1);
     }
     ptx::fence_mbarrier_init_release_cluster();
@@ -1085,15 +1282,10 @@ __global__ void quantize_mxfp8_kernel_cast_only(
     }
 
     if constexpr (CastTraits::_cache_rowwise_scale_in_smem) {
-      ptx::numbered_barrier_sync(CastTraits::warpLayout::num * 32, 0u);
+      ptx::numbered_barrier_sync(CastTraits::warpLayout::num * THREADS_PER_WARP, 0u);
 
-      constexpr int32_t stride_in_smem = CastTraits::blockDIM::N / CastTraits::rowChunkElems;
-      using PreferredDataType = std::conditional_t<
-          stride_in_smem % 16 == 0, uint4,
-          std::conditional_t<
-              stride_in_smem % 8 == 0, uint2,
-              std::conditional_t<stride_in_smem % 4 == 0, uint32_t,
-                                 std::conditional_t<stride_in_smem % 2 == 0, uint16_t, uint8_t>>>>;
+      constexpr int32_t stride_in_smem = CastTraits::rowwiseScaleStride;
+      using PreferredDataType = typename CastTraits::PreferredDataType;
 
       int2 end_coords;
       end_coords.y = std::min(block_coords.y + CastTraits::blockDIM::M, rows);
@@ -1117,8 +1309,9 @@ __global__ void quantize_mxfp8_kernel_cast_only(
             reinterpret_cast<DataType *>(scales_rowwise + block_coords.y * scale_stride_rowwise +
                                          block_coords.x / CastTraits::rowChunkElems);
 
-        for (int32_t i = threadIdx.x + warpId * 32; i < (valid_coords.y * num_threads_per_row);
-             i += CastTraits::warpLayout::num * 32) {
+        for (int32_t i = threadIdx.x + warpId * THREADS_PER_WARP;
+             i < (valid_coords.y * num_threads_per_row);
+             i += CastTraits::warpLayout::num * THREADS_PER_WARP) {
           int32_t row = i / num_threads_per_row;
           int32_t col = i % num_threads_per_row;
           gScales[row * gmem_stride_in_group + col] =
@@ -1137,8 +1330,9 @@ __global__ void quantize_mxfp8_kernel_cast_only(
             reinterpret_cast<DataType *>(scales_rowwise + block_coords.y * scale_stride_rowwise +
                                          block_coords.x / CastTraits::rowChunkElems);
 
-        for (int32_t i = threadIdx.x + warpId * 32; i < (valid_coords.y * num_threads_per_row);
-             i += CastTraits::warpLayout::num * 32) {
+        for (int32_t i = threadIdx.x + warpId * THREADS_PER_WARP;
+             i < (valid_coords.y * num_threads_per_row);
+             i += CastTraits::warpLayout::num * THREADS_PER_WARP) {
           int32_t row = i / num_threads_per_row;
           int32_t col = i % num_threads_per_row;
           gScales[row * gmem_stride_in_group + col] =
@@ -1181,6 +1375,9 @@ __global__ void quantize_mxfp8_kernel_cast_only(
   extern __shared__ char smem[];
   char *smemAligned = reinterpret_cast<char *>(
       align_to(reinterpret_cast<intptr_t>(smem), CastTraits::smem_alignment));
+  // Re-assert .shared address space lost by the intptr_t round-trip in
+  // align_to() so NVVM InferAddressSpaces emits LDS/STS instead of LD.E/ST.E.
+  __builtin_assume(__isShared(smemAligned));
   IType *sInput = reinterpret_cast<IType *>(smemAligned);
   inputUnitType *sInputUnit = reinterpret_cast<inputUnitType *>(sInput);
 
@@ -1191,15 +1388,20 @@ __global__ void quantize_mxfp8_kernel_cast_only(
   // colwise output will reuse input buffer
   OType *sColOutput;
   e8m0_t *sRowwiseScale = nullptr;
+  e8m0_t *sColwiseScale = nullptr;
   ColwiseReduceDataType *sColwiseReduce = nullptr;
   if constexpr (CastTraits::_reuse_input_out_smem) {
     sColOutput = reinterpret_cast<OType *>(sInput);
     if constexpr (CastTraits::_cache_rowwise_scale_in_smem) {
       sRowwiseScale = reinterpret_cast<e8m0_t *>(sRowOutput + CastTraits::blockIterDim::num *
                                                                   CastTraits::numStages);
+      if constexpr (CastTraits::_cache_colwise_scale_in_smem) {
+        sColwiseScale = sRowwiseScale + CastTraits::smem_rowwise_scale / sizeof(e8m0_t);
+      }
       if constexpr (CastTraits::_need_smem_for_colwise_reduce) {
         sColwiseReduce = reinterpret_cast<ColwiseReduceDataType *>(
-            sRowwiseScale + CastTraits::smem_rowwise_scale / sizeof(e8m0_t));
+            sRowwiseScale + CastTraits::smem_rowwise_scale / sizeof(e8m0_t) +
+            CastTraits::smem_colwise_scale);
       }
     } else if constexpr (CastTraits::_need_smem_for_colwise_reduce) {
       sColwiseReduce = reinterpret_cast<ColwiseReduceDataType *>(
@@ -1211,9 +1413,13 @@ __global__ void quantize_mxfp8_kernel_cast_only(
     if constexpr (CastTraits::_cache_rowwise_scale_in_smem) {
       sRowwiseScale = reinterpret_cast<e8m0_t *>(sColOutput + CastTraits::blockIterDim::num *
                                                                   CastTraits::numStages);
+      if constexpr (CastTraits::_cache_colwise_scale_in_smem) {
+        sColwiseScale = sRowwiseScale + CastTraits::smem_rowwise_scale / sizeof(e8m0_t);
+      }
       if constexpr (CastTraits::_need_smem_for_colwise_reduce) {
         sColwiseReduce = reinterpret_cast<ColwiseReduceDataType *>(
-            sRowwiseScale + CastTraits::smem_rowwise_scale / sizeof(e8m0_t));
+            sRowwiseScale + CastTraits::smem_rowwise_scale / sizeof(e8m0_t) +
+            CastTraits::smem_colwise_scale);
       }
     } else if constexpr (CastTraits::_need_smem_for_colwise_reduce) {
       sColwiseReduce = reinterpret_cast<ColwiseReduceDataType *>(
@@ -1223,7 +1429,7 @@ __global__ void quantize_mxfp8_kernel_cast_only(
   rowOutputUnitType *sColOutputUnit = reinterpret_cast<rowOutputUnitType *>(sColOutput);
 
   if constexpr (CastTraits::_need_smem_for_colwise_reduce) {
-    sColwiseReduce += warpId * 32;
+    sColwiseReduce += warpId * THREADS_PER_WARP;
   }
 
   __shared__ uint64_t producer[CastTraits::numStages];
@@ -1243,7 +1449,7 @@ __global__ void quantize_mxfp8_kernel_cast_only(
     }
     if constexpr (CastTraits::_colwise_source_coming_from_rowwise &&
                   CastTraits::_colwise_reduce_max == ColwiseReduceMax::RedAsync) {
-      ptx::mbarrier_init(colwise_reduce_barrier, 32);
+      ptx::mbarrier_init(colwise_reduce_barrier, THREADS_PER_WARP);
     }
 
     ptx::fence_mbarrier_init_release_cluster();
@@ -1263,18 +1469,35 @@ __global__ void quantize_mxfp8_kernel_cast_only(
                                (threadIdx.x % CastTraits::rowThreadLayout::N) *
                                    (CastTraits::rowChunkElems / CastTraits::rowNumElemsPerUnit);
 
-  size_t rowwise_scale_base_offset =
-      (block_coords.y + warp_coords.y + (threadIdx.x / CastTraits::rowThreadLayout::N)) *
-          static_cast<size_t>(scale_stride_rowwise) +
+  // Scale coordinates in absolute (compact) scale-tensor space. Shared by both
+  // compact-layout offsets and by the CastTraits::_with_swizzled_scales branches below.
+  const int32_t row_scale_row_base =
+      block_coords.y + warp_coords.y + (threadIdx.x / CastTraits::rowThreadLayout::N);
+  const int32_t row_scale_col_base =
       (block_coords.x + warp_coords.x +
        (threadIdx.x % CastTraits::rowThreadLayout::N) * CastTraits::rowChunkElems) /
-          CastTraits::rowChunkElems;
+      CastTraits::rowChunkElems;
+  const int32_t col_scale_row_base =
+      (block_coords.y + warp_coords.y +
+       (threadIdx.x / CastTraits::colThreadLayout::N) * CastTraits::colChunkElems) /
+      CastTraits::colChunkElems;
+  const int32_t col_scale_col_base =
+      block_coords.x + warp_coords.x + (threadIdx.x % CastTraits::colThreadLayout::N);
+
+  size_t rowwise_scale_base_offset =
+      static_cast<size_t>(row_scale_row_base) * static_cast<size_t>(scale_stride_rowwise) +
+      row_scale_col_base;
   size_t colwise_scale_base_offset =
-      ((block_coords.y + warp_coords.y +
-        (threadIdx.x / CastTraits::colThreadLayout::N) * CastTraits::colChunkElems) /
-       CastTraits::colChunkElems) *
-          static_cast<size_t>(scale_stride_colwise) +
-      (block_coords.x + warp_coords.x + (threadIdx.x % CastTraits::colThreadLayout::N));
+      static_cast<size_t>(col_scale_row_base) * static_cast<size_t>(scale_stride_colwise) +
+      col_scale_col_base;
+
+  // Precomputed swizzle constants (each swizzle tile is 128 rows x 4 cols in scale space).
+  // Rowwise scale tensor has DIVUP(cols, 128) tiles across;
+  // colwise scale tensor has DIVUP(rows, 128) tiles across (X/Y axes are transposed).
+  const size_t row_swz_num_tiles_X =
+      CastTraits::_with_swizzled_scales ? DIVUP(cols, static_cast<int32_t>(128)) : 0;
+  const size_t col_swz_num_tiles_X =
+      CastTraits::_with_swizzled_scales ? DIVUP(rows, static_cast<int32_t>(128)) : 0;
 
   constexpr int32_t rowwise_scale_stride_in_smem =
       CastTraits::blockDIM::N / CastTraits::rowChunkElems;
@@ -1401,6 +1624,14 @@ __global__ void quantize_mxfp8_kernel_cast_only(
                   iter_m * CastTraits::blockIterDim::M * rowwise_scale_stride_in_smem +
                   iter_n * (CastTraits::blockIterDim::N / CastTraits::rowChunkElems);
               sRowwiseScale[rowwise_scale_offset] = row_biased_exponent;
+            } else if constexpr (CastTraits::_with_swizzled_scales) {
+              int32_t abs_row =
+                  row_scale_row_base + iter_m * CastTraits::blockIterDim::M;
+              int32_t abs_col = row_scale_col_base +
+                                iter_n * (CastTraits::blockIterDim::N / CastTraits::rowChunkElems);
+              size_t idx =
+                  gemm_swizzled_scale_idx(abs_row, abs_col, row_swz_num_tiles_X);
+              scales_rowwise[idx] = row_biased_exponent;
             } else {
               size_t rowwise_scale_offset =
                   rowwise_scale_base_offset +
@@ -1416,12 +1647,36 @@ __global__ void quantize_mxfp8_kernel_cast_only(
             e8m0_t col_biased_exponent = to_e8m0<OType>(col_amax);
             float col_scale_inverse = ptx::exp2f_rcp<float>(col_biased_exponent);
             sColwiseReduce[threadIdx.x] = col_scale_inverse;
-            size_t colwise_scale_offset =
-                colwise_scale_base_offset +
-                iter_m * (CastTraits::blockIterDim::M / CastTraits::colChunkElems) *
-                    static_cast<size_t>(scale_stride_colwise) +
-                iter_n * CastTraits::blockIterDim::N;
-            scales_colwise[colwise_scale_offset] = col_biased_exponent;
+            if constexpr (CastTraits::_cache_colwise_scale_in_smem) {
+              // Cache in shmem; end-of-kernel flush handles gmem indexing.
+              int32_t smem_row =
+                  (warp_coords.y + (threadIdx.x / CastTraits::colThreadLayout::N) *
+                                       CastTraits::colChunkElems) /
+                      CastTraits::colChunkElems +
+                  iter_m * (CastTraits::blockIterDim::M / CastTraits::colChunkElems);
+              int32_t smem_col =
+                  warp_coords.x + (threadIdx.x % CastTraits::colThreadLayout::N) +
+                  iter_n * CastTraits::blockIterDim::N;
+              sColwiseScale[smem_row * CastTraits::blockDIM::N + smem_col] =
+                  col_biased_exponent;
+            } else if constexpr (CastTraits::_with_swizzled_scales) {
+              int32_t abs_row = col_scale_row_base +
+                                iter_m * (CastTraits::blockIterDim::M / CastTraits::colChunkElems);
+              int32_t abs_col = col_scale_col_base + iter_n * CastTraits::blockIterDim::N;
+              // Colwise scale tensor's X/Y axes are transposed vs rowwise
+              // (see col_swz_num_tiles_X = DIVUP(rows, 128)), so pass
+              // (abs_col, abs_row) - abs_col is the swizzle "row" dim.
+              size_t idx =
+                  gemm_swizzled_scale_idx(abs_col, abs_row, col_swz_num_tiles_X);
+              scales_colwise[idx] = col_biased_exponent;
+            } else {
+              size_t colwise_scale_offset =
+                  colwise_scale_base_offset +
+                  iter_m * (CastTraits::blockIterDim::M / CastTraits::colChunkElems) *
+                      static_cast<size_t>(scale_stride_colwise) +
+                  iter_n * CastTraits::blockIterDim::N;
+              scales_colwise[colwise_scale_offset] = col_biased_exponent;
+            }
             __syncwarp();
           }
         }
@@ -1546,58 +1801,203 @@ __global__ void quantize_mxfp8_kernel_cast_only(
 
   if constexpr (CastTraits::_cache_rowwise_scale_in_smem) {
     constexpr int32_t stride_in_smem = CastTraits::blockDIM::N / CastTraits::rowChunkElems;
-    using PreferredDataType = std::conditional_t<
-        stride_in_smem % 16 == 0, uint4,
-        std::conditional_t<
-            stride_in_smem % 8 == 0, uint2,
-            std::conditional_t<stride_in_smem % 4 == 0, uint32_t,
-                               std::conditional_t<stride_in_smem % 2 == 0, uint16_t, uint8_t>>>>;
 
     int2 end_coords;
     end_coords.y = std::min(block_coords.y + CastTraits::blockDIM::M, rows);
     end_coords.x = std::min((block_coords.x + CastTraits::blockDIM::N) / CastTraits::rowChunkElems,
-                            scale_stride_rowwise);
+                            DIVUP(cols, static_cast<int32_t>(CastTraits::rowChunkElems)));
     int2 valid_coords;
     valid_coords.y = end_coords.y - block_coords.y;
     valid_coords.x = end_coords.x - (block_coords.x / CastTraits::rowChunkElems);
 
-    if (scale_stride_rowwise % sizeof(PreferredDataType) != 0) {
-      using DataType = int32_t;
-      constexpr int32_t num_elems_per_group = sizeof(DataType) / sizeof(e8m0_t);
-      constexpr int32_t num_groups_per_row_in_smem = stride_in_smem / num_elems_per_group;
+    if constexpr (CastTraits::_with_swizzled_scales) {
+      // Swizzled flush: within a 128x4 swizzle tile, 4 consecutive column entries
+      // for the same row live at 4 consecutive gmem bytes. Group by 4 so each
+      // thread writes a uint32_t when col%4 == 0, then scalar tail for remainder.
+      constexpr int32_t cols_per_group = 4;
+      const int32_t groups_per_row = valid_coords.x / cols_per_group;
+      const int32_t total_groups = valid_coords.y * groups_per_row;
+      const int32_t base_col = block_coords.x / CastTraits::rowChunkElems;
 
-      int32_t num_threads_per_row = (valid_coords.x / num_elems_per_group);
-      int32_t gmem_stride_in_group = scale_stride_rowwise / num_elems_per_group;
+      for (int32_t i = threadIdx.x + warpId * THREADS_PER_WARP; i < total_groups;
+           i += CastTraits::warpLayout::num * THREADS_PER_WARP) {
+        int32_t row = i / groups_per_row;
+        int32_t group = i % groups_per_row;
+        int32_t col = group * cols_per_group;
 
-      DataType *sScales = reinterpret_cast<DataType *>(sRowwiseScale);
-      DataType *gScales =
-          reinterpret_cast<DataType *>(scales_rowwise + block_coords.y * scale_stride_rowwise +
-                                       block_coords.x / CastTraits::rowChunkElems);
+        uint32_t val4 = *reinterpret_cast<const uint32_t *>(
+            &sRowwiseScale[row * stride_in_smem + col]);
 
-      for (int32_t i = threadIdx.x + warpId * 32; i < (valid_coords.y * num_threads_per_row);
-           i += CastTraits::warpLayout::num * 32) {
-        int32_t row = i / num_threads_per_row;
-        int32_t col = i % num_threads_per_row;
-        gScales[row * gmem_stride_in_group + col] = sScales[row * num_groups_per_row_in_smem + col];
+        int32_t abs_row = block_coords.y + row;
+        int32_t abs_col = base_col + col;
+        size_t idx = gemm_swizzled_scale_idx(abs_row, abs_col, row_swz_num_tiles_X);
+        *reinterpret_cast<uint32_t *>(&scales_rowwise[idx]) = val4;
+      }
+
+      // Tail (valid_coords.x % 4 != 0)
+      const int32_t remaining_start = groups_per_row * cols_per_group;
+      const int32_t remaining_per_row = valid_coords.x - remaining_start;
+      if (remaining_per_row > 0) {
+        const int32_t total_remaining = valid_coords.y * remaining_per_row;
+        for (int32_t i = threadIdx.x + warpId * THREADS_PER_WARP; i < total_remaining;
+             i += CastTraits::warpLayout::num * THREADS_PER_WARP) {
+          int32_t row = i / remaining_per_row;
+          int32_t col = remaining_start + (i % remaining_per_row);
+          e8m0_t val = sRowwiseScale[row * stride_in_smem + col];
+          int32_t abs_row = block_coords.y + row;
+          int32_t abs_col = base_col + col;
+          size_t idx = gemm_swizzled_scale_idx(abs_row, abs_col, row_swz_num_tiles_X);
+          scales_rowwise[idx] = val;
+        }
       }
     } else {
-      using DataType = PreferredDataType;
-      constexpr int32_t num_elems_per_group = sizeof(DataType) / sizeof(e8m0_t);
-      constexpr int32_t num_groups_per_row_in_smem = stride_in_smem / num_elems_per_group;
+      using PreferredDataType = typename CastTraits::PreferredDataType;
 
-      int32_t num_threads_per_row = (valid_coords.x / num_elems_per_group);
-      int32_t gmem_stride_in_group = scale_stride_rowwise / num_elems_per_group;
+      if (scale_stride_rowwise % sizeof(PreferredDataType) != 0) {
+        using DataType = int32_t;
+        constexpr int32_t num_elems_per_group = sizeof(DataType) / sizeof(e8m0_t);
+        constexpr int32_t num_groups_per_row_in_smem = stride_in_smem / num_elems_per_group;
 
-      DataType *sScales = reinterpret_cast<DataType *>(sRowwiseScale);
-      DataType *gScales =
-          reinterpret_cast<DataType *>(scales_rowwise + block_coords.y * scale_stride_rowwise +
-                                       block_coords.x / CastTraits::rowChunkElems);
+        int32_t num_threads_per_row = (valid_coords.x / num_elems_per_group);
+        int32_t gmem_stride_in_group = scale_stride_rowwise / num_elems_per_group;
 
-      for (int32_t i = threadIdx.x + warpId * 32; i < (valid_coords.y * num_threads_per_row);
-           i += CastTraits::warpLayout::num * 32) {
-        int32_t row = i / num_threads_per_row;
-        int32_t col = i % num_threads_per_row;
-        gScales[row * gmem_stride_in_group + col] = sScales[row * num_groups_per_row_in_smem + col];
+        DataType *sScales = reinterpret_cast<DataType *>(sRowwiseScale);
+        DataType *gScales =
+            reinterpret_cast<DataType *>(scales_rowwise + block_coords.y * scale_stride_rowwise +
+                                         block_coords.x / CastTraits::rowChunkElems);
+
+        for (int32_t i = threadIdx.x + warpId * THREADS_PER_WARP;
+             i < (valid_coords.y * num_threads_per_row);
+             i += CastTraits::warpLayout::num * THREADS_PER_WARP) {
+          int32_t row = i / num_threads_per_row;
+          int32_t col = i % num_threads_per_row;
+          gScales[row * gmem_stride_in_group + col] = sScales[row * num_groups_per_row_in_smem + col];
+        }
+      } else {
+        using DataType = PreferredDataType;
+        constexpr int32_t num_elems_per_group = sizeof(DataType) / sizeof(e8m0_t);
+        constexpr int32_t num_groups_per_row_in_smem = stride_in_smem / num_elems_per_group;
+
+        int32_t num_threads_per_row = (valid_coords.x / num_elems_per_group);
+        int32_t gmem_stride_in_group = scale_stride_rowwise / num_elems_per_group;
+
+        DataType *sScales = reinterpret_cast<DataType *>(sRowwiseScale);
+        DataType *gScales =
+            reinterpret_cast<DataType *>(scales_rowwise + block_coords.y * scale_stride_rowwise +
+                                         block_coords.x / CastTraits::rowChunkElems);
+
+        for (int32_t i = threadIdx.x + warpId * THREADS_PER_WARP;
+             i < (valid_coords.y * num_threads_per_row);
+             i += CastTraits::warpLayout::num * THREADS_PER_WARP) {
+          int32_t row = i / num_threads_per_row;
+          int32_t col = i % num_threads_per_row;
+          gScales[row * gmem_stride_in_group + col] = sScales[row * num_groups_per_row_in_smem + col];
+        }
+      }
+    }
+  }
+
+  // Cached colwise scale flush (swizzled path only). Same barrier semantics as
+  // the rowwise flush above: the last-iter __syncthreads already ordered every
+  // in-loop sColwiseScale byte store before this block reads them.
+  if constexpr (CastTraits::_cache_colwise_scale_in_smem && CastTraits::_with_swizzled_scales) {
+    const int32_t scale_row_base = block_coords.y / CastTraits::colChunkElems;
+    // DIVUP so a partial last block (e.g. rows=993, colChunkElems=32 -> last CTA
+    // has 1 valid input row) still emits its scale row. Truncating divison here
+    // drops the last partial scale row, causing the fast path to diverge from
+    // nvte_swizzle_scaling_factors on non-multiple-of-32-rows inputs.
+    const int32_t valid_rows =
+        DIVUP(std::min(block_coords.y + CastTraits::blockDIM::M, rows) - block_coords.y,
+              static_cast<int32_t>(CastTraits::colChunkElems));
+    const int32_t valid_cols =
+        std::min(block_coords.x + CastTraits::blockDIM::N, cols) - block_coords.x;
+
+    // In GEMM swizzle, contiguous bytes run over four scale-row indices for a
+    // fixed logical column. A 64-row CTA owns two such rows; pack them as a
+    // uint16 store only when the pair stays inside the same 4-row swizzle group.
+    const int32_t row_pairs = valid_rows / 2;
+    const int32_t total_pairs = row_pairs * valid_cols;
+    for (int32_t i = threadIdx.x + warpId * THREADS_PER_WARP; i < total_pairs;
+         i += CastTraits::warpLayout::num * THREADS_PER_WARP) {
+      int32_t row = (i / valid_cols) * 2;
+      int32_t col = i % valid_cols;
+      const int32_t abs_col = block_coords.x + col;
+      const int32_t abs_row = scale_row_base + row;
+      e8m0_t val0 = sColwiseScale[row * CastTraits::blockDIM::N + col];
+      e8m0_t val1 = sColwiseScale[(row + 1) * CastTraits::blockDIM::N + col];
+      size_t idx = gemm_swizzled_scale_idx(abs_col, abs_row, col_swz_num_tiles_X);
+      if (((abs_row & 3) != 3) &&
+          ((reinterpret_cast<uintptr_t>(&scales_colwise[idx]) & (alignof(uint16_t) - 1)) == 0)) {
+        uint16_t val2 =
+            static_cast<uint16_t>(val0) | (static_cast<uint16_t>(val1) << 8);
+        *reinterpret_cast<uint16_t *>(&scales_colwise[idx]) = val2;
+      } else {
+        scales_colwise[idx] = val0;
+        size_t idx1 =
+            gemm_swizzled_scale_idx(abs_col, abs_row + 1, col_swz_num_tiles_X);
+        scales_colwise[idx1] = val1;
+      }
+    }
+    // Odd-row tail.
+    if ((valid_rows & 1) != 0) {
+      const int32_t row = valid_rows - 1;
+      for (int32_t i = threadIdx.x + warpId * THREADS_PER_WARP; i < valid_cols;
+           i += CastTraits::warpLayout::num * THREADS_PER_WARP) {
+        const int32_t col = i;
+        e8m0_t val = sColwiseScale[row * CastTraits::blockDIM::N + col];
+        size_t idx = gemm_swizzled_scale_idx(block_coords.x + col,
+                                             scale_row_base + row,
+                                             col_swz_num_tiles_X);
+        scales_colwise[idx] = val;
+      }
+    }
+  }
+
+  // Cached colwise scale flush (non-swizzled linear layout).
+  // Rows in scales_colwise are indexed by (block_coords.y / colChunkElems),
+  // columns are logical input columns; 4 adjacent columns for the same scale
+  // row live at 4 consecutive gmem bytes, so pack as uint32 stores.
+  if constexpr (CastTraits::_cache_colwise_scale_in_smem && !CastTraits::_with_swizzled_scales) {
+    const int32_t scale_row_base = block_coords.y / CastTraits::colChunkElems;
+    // DIVUP so a partial last block (e.g. rows=993, colChunkElems=32 -> last CTA
+    // has 1 valid input row) still emits its scale row. Truncating divison here
+    // drops the last partial scale row, causing the fast path to diverge from
+    // nvte_swizzle_scaling_factors on non-multiple-of-32-rows inputs.
+    const int32_t valid_rows =
+        DIVUP(std::min(block_coords.y + CastTraits::blockDIM::M, rows) - block_coords.y,
+              static_cast<int32_t>(CastTraits::colChunkElems));
+    const int32_t valid_cols =
+        std::min(block_coords.x + CastTraits::blockDIM::N, cols) - block_coords.x;
+
+    constexpr int32_t cols_per_group = 4;
+    const int32_t groups_per_row = valid_cols / cols_per_group;
+    const int32_t total_groups = valid_rows * groups_per_row;
+    for (int32_t i = threadIdx.x + warpId * THREADS_PER_WARP; i < total_groups;
+         i += CastTraits::warpLayout::num * THREADS_PER_WARP) {
+      int32_t row = i / groups_per_row;
+      int32_t group = i % groups_per_row;
+      int32_t col = group * cols_per_group;
+      uint32_t val4 = *reinterpret_cast<const uint32_t *>(
+          &sColwiseScale[row * CastTraits::blockDIM::N + col]);
+      size_t idx = static_cast<size_t>(scale_row_base + row) *
+                       static_cast<size_t>(scale_stride_colwise) +
+                   static_cast<size_t>(block_coords.x + col);
+      *reinterpret_cast<uint32_t *>(&scales_colwise[idx]) = val4;
+    }
+    // Column tail (valid_cols not multiple of 4).
+    const int32_t remaining_start = groups_per_row * cols_per_group;
+    if (remaining_start < valid_cols) {
+      const int32_t remaining_cols = valid_cols - remaining_start;
+      const int32_t total_remaining = valid_rows * remaining_cols;
+      for (int32_t i = threadIdx.x + warpId * THREADS_PER_WARP; i < total_remaining;
+           i += CastTraits::warpLayout::num * THREADS_PER_WARP) {
+        int32_t row = i / remaining_cols;
+        int32_t col = remaining_start + (i % remaining_cols);
+        e8m0_t val = sColwiseScale[row * CastTraits::blockDIM::N + col];
+        size_t idx = static_cast<size_t>(scale_row_base + row) *
+                         static_cast<size_t>(scale_stride_colwise) +
+                     static_cast<size_t>(block_coords.x + col);
+        scales_colwise[idx] = val;
       }
     }
   }
@@ -1605,7 +2005,7 @@ __global__ void quantize_mxfp8_kernel_cast_only(
   ptx::cp_async_bulk_wait_group_read<0>();
 
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
-}
+}  // NOLINT(readability/fn_size)
 
 }  // namespace specialized
 }  // namespace quantize_kernel
