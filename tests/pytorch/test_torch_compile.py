@@ -101,9 +101,7 @@ _compile_modes = ["default", "reduce-overhead"]
 
 
 def _cudagraph_warmup(fn, inp, *, backward: bool) -> None:
-    """
-    Force TE's lazily-created global scratch to be allocated before capture.
-    """
+    """Force TE's lazily-created global scratch to be allocated before capture."""
     out = fn(inp)
     if backward:
         out.sum().backward()
@@ -1449,14 +1447,14 @@ def test_te_linear_compile_is_first_microbatch(compile_mode):
 
 @pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
 def test_te_linear_dynamic_shapes():
-    """torch.compile(dynamic=True) of ``te.Linear`` with varying batch sizes.
+    """torch.compile of ``te.Linear`` with a ``mark_dynamic`` batch dimension.
 
     Verifies that the compiled graph handles symbolic (dynamic) leading
     dimensions without graph breaks or recompilations after the initial trace.
     Key correctness property: a graph compiled for batch=16 must produce
     numerically correct results for batch=32 without triggering a recompile.
 
-    This exercises two fixes for dynamic shapes:
+    This exercises three fixes for dynamic shapes:
     1. ``_linear_setup_ctx`` no longer stores ``inp_shape`` in the value bundle
        (torch.Size with SymInt dims is not hashable in OpaqueValueBundle).
     2. ``_linear_backward_fake`` derives dgrad shape from grad_output +
@@ -1480,7 +1478,19 @@ def test_te_linear_dynamic_shapes():
 
     batch_sizes = [16, 32, 48]
 
-    for i, batch in enumerate(batch_sizes):
+    # Warm up with two calls at the first batch size: the first call traces; the
+    # second absorbs the one-time recompile caused by module attributes lazily
+    # created during call one (the cached ``is_fsdp2``), which flip a ``hasattr``
+    # guard and are unrelated to dynamic shapes. Baseline the graph count after
+    # that -- any further recompile across batch sizes is a real failure.
+    for _ in range(2):
+        warm = torch.randn(batch_sizes[0], in_features, dtype=dtype, device=device)
+        torch._dynamo.mark_dynamic(warm, 0)
+        compiled(warm.requires_grad_(True)).sum().backward()
+    model.zero_grad(set_to_none=True)
+    unique_graphs_baseline = counters["stats"]["unique_graphs"]
+
+    for batch in batch_sizes:
         inp = torch.randn(batch, in_features, dtype=dtype, device=device, requires_grad=True)
         # Mark batch dim as dynamic so Dynamo traces once and reuses across batch sizes.
         torch._dynamo.mark_dynamic(inp, 0)
@@ -1510,13 +1520,8 @@ def test_te_linear_dynamic_shapes():
             msg=f"dgrad mismatch at batch={batch}",
         )
 
-        if i == 0:
-            # After the first (tracing) call, record the recompile counter
-            # baseline -- subsequent batch sizes must not trigger recompiles.
-            recompile_count_baseline = counters["stats"].get("recompile_reasons", 0)
-
-    recompile_count_after = counters["stats"].get("recompile_reasons", 0)
-    assert recompile_count_after == recompile_count_baseline, (
+    unique_graphs_after = counters["stats"]["unique_graphs"]
+    assert unique_graphs_after == unique_graphs_baseline, (
         "Unexpected recompilation(s) across different batch sizes: "
-        f"{recompile_count_after - recompile_count_baseline} recompile(s) detected"
+        f"{unique_graphs_after - unique_graphs_baseline} extra graph(s) compiled"
     )

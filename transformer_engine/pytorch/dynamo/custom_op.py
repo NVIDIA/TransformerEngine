@@ -84,6 +84,7 @@ the wrapper a pass-through (plain / bf16 calls go straight through).
 
 from __future__ import annotations
 import dataclasses
+import math
 import types as _types  # aliased: torch_dispatch rules take a ``types`` param
 from enum import Enum
 from typing import (
@@ -123,17 +124,21 @@ TensorOrQuantized = Union[torch.Tensor, QuantizedTensorStorage]
 
 
 # ``None`` entries in an op's flat ``Tensor[]`` return are smuggled through a
-# 0-element uint8 tensor: a non-nullable ``Tensor[]`` schema is required for
-# ``register_autograd`` to attach a ``grad_fn`` to the outputs.
+# 0-element sentinel tensor: a non-nullable ``Tensor[]`` schema is required for
+# ``register_autograd`` to attach a ``grad_fn`` to the outputs. The sentinel is
+# recognized by (numel == 0, dtype), so its dtype must be one no real payload
+# tensor can have -- complex is never a TE payload (quantized data / scales are
+# uint8 / fp32, outputs are float), while e.g. a uint8 sentinel would collide
+# with a genuinely empty FP8 data buffer (empty batch).
 #
 # Once https://github.com/pytorch/pytorch/pull/187434 lands, a nullable
 # ``Tensor?[]`` return schema will let ``None`` pass through directly and this
 # sentinel encoding (``_encode_none`` / ``_decode_none``) can be removed.
-_NONE_SENTINEL_DTYPE = torch.uint8
+_NONE_SENTINEL_DTYPE = torch.complex32
 
 
 def _encode_none(t: Optional[torch.Tensor]) -> torch.Tensor:
-    """Replace ``None`` with a 0-element uint8 sentinel tensor."""
+    """Replace ``None`` with a 0-element sentinel tensor."""
     if t is None:
         return torch.empty(0, dtype=_NONE_SENTINEL_DTYPE)
     return t
@@ -195,11 +200,13 @@ class OpaqueValueBundle:
 
     @classmethod
     def _to_hashable(cls, value: Any) -> Any:
+        # Tag with the concrete type so e.g. [1] / (1,) / Size([1]) or True / 1
+        # stay distinct under __eq__ / __hash__ (graph guards compare bundles).
         if isinstance(value, dict):
-            return tuple(sorted((k, cls._to_hashable(v)) for k, v in value.items()))
-        if isinstance(value, (list, tuple, torch.Size)):
-            return tuple(cls._to_hashable(v) for v in value)
-        return value
+            return ("dict", tuple(sorted((k, cls._to_hashable(v)) for k, v in value.items())))
+        if isinstance(value, (list, tuple)):  # incl. torch.Size
+            return (type(value).__name__, tuple(cls._to_hashable(v) for v in value))
+        return (type(value).__name__, value)
 
     @classmethod
     def _fmt_simple(cls, value: Any) -> str:
@@ -228,6 +235,9 @@ class OpaqueValueBundle:
             return f"({body},)" if len(value) == 1 else f"({body})"
         if _is_opaque_value_type(type(value)):
             return value.__fx_repr__()[0]
+        # repr(float('inf')) is 'inf', which is not an evaluable literal.
+        if isinstance(value, float) and not math.isfinite(value):
+            return f"float({str(value)!r})"
         return repr(value)
 
     def __init__(self, data: Optional[Dict[str, Any]] = None) -> None:
@@ -249,6 +259,10 @@ class OpaqueValueBundle:
         return self._data[key]
 
     def __getattr__(self, name: str) -> Any:
+        # Underscored names raise cleanly: copy/pickle probe dunders on a clone
+        # created without __init__, where reading ``self._data`` would recurse.
+        if name.startswith("_"):
+            raise AttributeError(name)
         try:
             return self._data[name]
         except KeyError as e:
@@ -303,7 +317,7 @@ class OpaqueValueBundle:
 
 
 try:
-    from torch._library.opaque_object import (  # pylint: disable=import-outside-toplevel
+    from torch._library.opaque_object import (
         get_opaque_type_name,
         is_opaque_value_type as _is_opaque_value_type,
         is_opaque_reference_type as _is_opaque_reference_type,
@@ -314,14 +328,16 @@ try:
     _OPAQUE_VALUE_BUNDLE_TYPE_NAME: Optional[str] = get_opaque_type_name(OpaqueValueBundle)
 # Older torch without opaque_object support.
 except Exception as e:  # pylint: disable=broad-exception-caught  # pragma: no cover
-    warn_compile_disabled(f"could not register OpaqueValueBundle as an opaque type ({e})")
+    warn_compile_disabled(
+        f"could not register OpaqueValueBundle as an opaque type ({e}); use a newer PyTorch build"
+    )
     _is_opaque_value_type = None
     _is_opaque_reference_type = None
     _OPAQUE_VALUE_BUNDLE_TYPE_NAME = None
 
 
 def _pg_pickle_stub(*args: Any) -> None:  # pragma: no cover
-    raise RuntimeError("ProcessGroup cannot be unpickled — cache-key use only")
+    raise RuntimeError("ProcessGroup cannot be unpickled -- cache-key use only")
 
 
 def _ensure_distributed_opaque_types() -> None:
@@ -337,16 +353,18 @@ def _ensure_distributed_opaque_types() -> None:
     process-group field simply falls back to eager under torch.compile.
 
     Also registers a ``copyreg`` reducer that lets ``FxGraphCachePickler`` hash
-    graphs containing a ``ProcessGroup`` input without crashing.  Without this,
+    graphs containing a ``ProcessGroup`` input without crashing. Without this,
     inductor logs "Failed to pickle cache key" warnings and bypasses the FX
-    graph disk cache for every distributed compiled call.  The reducer encodes
-    the group as (world_size, rank, backend) — enough to distinguish configs —
+    graph disk cache for every distributed compiled call. The reducer encodes
+    the group as (world_size, rank, backend) -- enough to distinguish configs --
     and raises on reconstruct since deserialization is never needed for hashing.
     """
     if _is_opaque_reference_type is None:
         return
-    try:  # pylint: disable=import-outside-toplevel
-        from torch.distributed.device_mesh import _register_distributed_opaque_types
+    try:
+        from torch.distributed.device_mesh import (  # pylint: disable=import-outside-toplevel
+            _register_distributed_opaque_types,
+        )
 
         _register_distributed_opaque_types()
     except Exception:  # pylint: disable=broad-exception-caught
@@ -354,11 +372,14 @@ def _ensure_distributed_opaque_types() -> None:
 
     # Workaround for PyTorch issue: FxGraphCachePickler handles FakeScriptObject
     # but not the real ProcessGroup that appears in example_inputs at inductor
-    # compile time.  Register a copyreg reducer so the pickler can hash the key.
-    try:  # pylint: disable=import-outside-toplevel
+    # compile time. Register a copyreg reducer so the pickler can hash the key.
+    try:
+        # pylint: disable=import-outside-toplevel
         import copyreg
         import torch.distributed as dist
         from torch._C._distributed_c10d import ProcessGroup
+
+        # pylint: enable=import-outside-toplevel
 
         if ProcessGroup not in copyreg.dispatch_table:
 
@@ -460,8 +481,9 @@ class _Adapter:
         type annotation ``annot``; return a configured adapter if so, else
         ``None`` so the next candidate is tried.
 
-        Called once per field at registration, in :data:`_FIELD_ADAPTERS`
-        priority order.
+        Called once per field at registration, iterating :data:`_FIELD_ADAPTERS`
+        (adapters are mutually exclusive on annotations, so the order is not a
+        ranking).
         """
         raise NotImplementedError
 
@@ -601,7 +623,7 @@ class _TensorOrQuantizedAdapter(_Adapter):
             kwargs[self.name] = _storage_unflatten(meta, args[self.inner_slot()])
 
     def grad_slot(self) -> Optional[int]:
-        # Gradient flows to the plain / subclass tensor slot (``slot_name``,
+        # Gradient flows to the plain / subclass tensor slot (``tensor_slot()``,
         # the first of the three).
         return 0
 

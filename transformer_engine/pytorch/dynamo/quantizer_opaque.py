@@ -121,7 +121,9 @@ def register_value_opaque_quantizer(cls: type) -> None:
     except (ImportError, AttributeError) as e:
         # Older PyTorch without the opaque-object API: eager value semantics
         # still work; torch.compile specialization on the quantizer does not.
-        warn_compile_disabled(f"this PyTorch build has no opaque-object API ({e})")
+        warn_compile_disabled(
+            f"this PyTorch build has no opaque-object API ({e}); use a newer build"
+        )
         return
 
     try:

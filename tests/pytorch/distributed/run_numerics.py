@@ -783,10 +783,11 @@ def test_linear():
     for kwargs in kwargs_list:
         if kwargs.get("save_original_input", False) and QUANTIZATION == "fp8":
             continue
-        if kwargs.get("delay_wgrad_compute", False) and NVTE_TEST_NVINSPECT_ENABLED:
-            continue
-        # debug instrumentation forces the eager fallback, so compile is a no-op there.
-        if kwargs.get("use_compile", False) and NVTE_TEST_NVINSPECT_ENABLED:
+        # use_compile: debug instrumentation forces the eager fallback, so
+        # compile is a no-op there.
+        if NVTE_TEST_NVINSPECT_ENABLED and (
+            kwargs.get("delay_wgrad_compute", False) or kwargs.get("use_compile", False)
+        ):
             continue
         for parallel_mode in ["column", "row"]:
             for sequence_parallel in [False, True]:

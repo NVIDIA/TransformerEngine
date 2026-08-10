@@ -111,7 +111,7 @@ def _run_layer_with_overlap(
     quantization,
     num_layers=1,
     use_cublasmp=False,
-    compile=False,
+    use_compile=False,
     compile_mode="default",
 ):
     test_path = TEST_ROOT / "run_layer_with_overlap.py"
@@ -131,7 +131,7 @@ def _run_layer_with_overlap(
     if overlap_rs_dgrad:
         test_cmd.append("--overlap-rs-dgrad")
 
-    if compile:
+    if use_compile:
         test_cmd.append("--compile")
         test_cmd.append(f"--compile-mode={compile_mode}")
 
@@ -316,7 +316,7 @@ def test_linear_with_overlap_compile(linear_parallel_mode, overlap_rs_dgrad, com
         overlap_rs_dgrad,
         False,
         None,
-        compile=True,
+        use_compile=True,
         compile_mode=compile_mode,
     )
 

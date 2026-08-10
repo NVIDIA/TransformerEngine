@@ -71,8 +71,8 @@ from ..distributed_weight import (
 )
 from ..cpp_extensions import (
     general_gemm,
+    get_cublas_workspace,
 )
-from ..cpp_extensions.gemm import get_cublas_workspace
 from ..constants import FP8BwdTensorIdx, FP8FwdTensorIdx, GemmParallelModes, dist_group_type
 from ..graph import is_graph_capturing
 from ..jit import no_torch_dynamo
@@ -120,11 +120,9 @@ class LinearFwdArgs:
     # across the torch.compile custom-op boundary.
     weight_workspace: Optional[TensorOrQuantized]
 
-    # Workspace pinning (torch.compile). The process-global, lru_cached cuBLAS
-    # workspace is fetched in the traced forward and threaded in as an op input so
-    # it is allocated at trace time rather than lazily inside the op. The op body
-    # never reads it (general_gemm fetches the same global by address). None on
-    # eager / non-compiled paths.
+    # Process-global cuBLAS workspace, fetched at trace time so it isn't first
+    # allocated during CUDA-graph capture. The op never reads it (general_gemm
+    # fetches the same global); None outside the compiled path.
     cublas_workspace: Optional[torch.Tensor]
 
     # --- requires_grad flags (cached so backward does not re-query) ---
@@ -2397,20 +2395,13 @@ class Linear(TransformerEngineBaseModule):
             )
             wgrad_store = self.wgrad_store if self.wgrad_store.delay_wgrad_compute() else None
 
-            # Pin the lazily-cached cuBLAS workspace as an op input so it is
-            # materialized at trace time (external to the cudagraph pool) rather
-            # than inside the op during capture. See LinearFwdArgs for details.
-            cublas_workspace = None
-            if use_compiled_op:
-                cublas_workspace = get_cublas_workspace(inp.device.index, False, False)
-
             fwd_args = LinearFwdArgs(
                 # tensors
                 weight=weight_tensor,
                 inp=inp,
                 bias=linear_bias_tensor,
                 weight_workspace=weight_workspace,
-                cublas_workspace=cublas_workspace,
+                cublas_workspace=None,  # set below, only on the compiled path
                 # requires_grad flags
                 input_requires_grad=inp.requires_grad,
                 weight_requires_grad=weight_tensor.requires_grad,
@@ -2469,10 +2460,17 @@ class Linear(TransformerEngineBaseModule):
             if use_compiled_op:
                 fallback_reason = fwd_args.compile_unsupported_reason()
                 if fallback_reason is not None:
+                    # Explicit break so fullgraph=True errors show the reason
+                    # (warnings.warn below would break the graph inscrutably).
+                    torch._dynamo.graph_break(
+                        msg=f"te.Linear falling back to eager: {fallback_reason}"
+                    )
                     warn_compile_eager_fallback(fallback_reason)
                     use_compiled_op = False
 
             if use_compiled_op:
+                # See LinearFwdArgs.cublas_workspace.
+                fwd_args.cublas_workspace = get_cublas_workspace(inp.device.index, False, False)
                 out, new_weight_workspace = _linear_op(fwd_args)
             else:
                 out, new_weight_workspace = _linear_eager(

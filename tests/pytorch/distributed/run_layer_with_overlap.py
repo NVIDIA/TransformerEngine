@@ -298,6 +298,9 @@ def _parse_args(argv=None, namespace=None):
     )
     args = parser.parse_args(argv, namespace)
 
+    if args.compile and args.use_cuda_graphs:
+        parser.error("--compile and --use-cuda-graphs are mutually exclusive.")
+
     if args.use_cuda_graphs and args.layer_type in [te.MultiheadAttention, te.TransformerLayer]:
         warnings.warn(f"{args.layer_type.__name__} does not support CUDA Graphs!")
         args.use_cuda_graphs = False
@@ -497,9 +500,6 @@ def _train(opts):
             ref_param.copy_(test_param)
         torch.testing.assert_close(test_param, ref_param, rtol=0.0, atol=0.0)
     dist_print("Copied parameters from test model to reference model...", debug=True)
-
-    if opts.compile and opts.use_cuda_graphs:
-        raise ValueError("--compile and --use-cuda-graphs are mutually exclusive.")
 
     # Fp8 recipe setup
     fp8_format = Format.HYBRID
