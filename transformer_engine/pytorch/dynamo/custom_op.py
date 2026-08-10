@@ -330,23 +330,14 @@ def _pg_pickle_stub(*args: Any) -> None:  # pragma: no cover
 
 
 def _ensure_distributed_opaque_types() -> None:
-    """Register ``torch.distributed.ProcessGroup`` as a *reference* opaque type.
+    """Register ``ProcessGroup`` as a *reference* opaque type: live state carried
+    as a graph input, not baked in as a constant. PyTorch runs this registration
+    only when DTensor is imported, so trigger it here too; best-effort no-op on
+    builds without the APIs (the field then falls back to eager).
 
-    A process group is live distributed state: unlike a value-opaque quantizer
-    (which Dynamo bakes into the graph as a constant), it must be carried through
-    the custom op as a graph *input*. PyTorch supports this via
-    ``register_opaque_type(ProcessGroup, typ="reference")`` but only auto-runs it
-    when ``torch.distributed.tensor`` (DTensor) is imported; TE may not import
-    that, so trigger the same idempotent registration here. Best-effort: on
-    builds without the opaque-object / distributed APIs this is a no-op and the
-    process-group field simply falls back to eager under torch.compile.
-
-    Also registers a ``copyreg`` reducer that lets ``FxGraphCachePickler`` hash
-    graphs containing a ``ProcessGroup`` input without crashing. Without this,
-    inductor logs "Failed to pickle cache key" warnings and bypasses the FX
-    graph disk cache for every distributed compiled call. The reducer encodes
-    the group as (world_size, rank, backend) -- enough to distinguish configs --
-    and raises on reconstruct since deserialization is never needed for hashing.
+    Also register a ``copyreg`` reducer so ``FxGraphCachePickler`` can hash a
+    graph with a ``ProcessGroup`` input -- without it, inductor bypasses the FX
+    disk cache for every distributed compiled call. Hash-only, never unpickled.
     """
     if _is_opaque_reference_type is None:
         return
@@ -359,9 +350,8 @@ def _ensure_distributed_opaque_types() -> None:
     except Exception:  # pylint: disable=broad-exception-caught
         pass
 
-    # Workaround for PyTorch issue: FxGraphCachePickler handles FakeScriptObject
-    # but not the real ProcessGroup that appears in example_inputs at inductor
-    # compile time. Register a copyreg reducer so the pickler can hash the key.
+    # Workaround for a PyTorch gap: its cache-key pickler handles
+    # FakeScriptObject but not the real ProcessGroup in example_inputs.
     try:
         # pylint: disable=import-outside-toplevel
         import copyreg
