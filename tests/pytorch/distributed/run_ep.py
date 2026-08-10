@@ -11,6 +11,7 @@ import numpy as np
 import torch
 import torch.distributed as dist
 
+from transformer_engine.pytorch import ops as te_ops
 from transformer_engine.pytorch.ep import (
     EpBuffer,
     ep_bootstrap,
@@ -23,6 +24,7 @@ from transformer_engine.pytorch.ep import (
     _ep_combine_raw,
     _ep_dispatch_raw,
 )
+from transformer_engine.pytorch.ops.fused.moe_ep import FusedMoeEp
 
 
 ZERO_COPY = os.environ.get("NVTE_EP_ZERO_COPY", "0") == "1"
@@ -37,6 +39,7 @@ NUM_LOCAL_EXPERTS = 2
 HIDDEN_DIM = 32
 TOP_K = 2
 TOKENS_PER_RANK = 4
+INTERMEDIATE_DIM = 16
 
 
 def _zero_copy_test_include(fn):
@@ -119,6 +122,31 @@ def _make_identity_inputs(rank, ep_size, device="cuda"):
         torch.from_numpy(tokens_np).to(device=device, dtype=torch.bfloat16),
         torch.from_numpy(topk_weights).to(device),
     )
+
+
+def _make_moe_inputs(rank, ep_size, device="cuda"):
+    """Deterministic BF16 activations and FP32 top-k router weights."""
+    generator = torch.Generator(device=device)
+    generator.manual_seed(2026 + rank)
+    tokens = (
+        torch.randn(
+            TOKENS_PER_RANK,
+            HIDDEN_DIM,
+            generator=generator,
+            dtype=torch.float32,
+            device=device,
+        )
+        * 0.25
+    ).to(torch.bfloat16)
+    router_logits = torch.randn(
+        TOKENS_PER_RANK,
+        ep_size * NUM_LOCAL_EXPERTS,
+        generator=generator,
+        dtype=torch.float32,
+        device=device,
+    )
+    topk_logits, topk_idx = torch.topk(router_logits, TOP_K, dim=-1)
+    return topk_idx, tokens, torch.softmax(topk_logits, dim=-1)
 
 
 class _Cfg:
@@ -231,6 +259,39 @@ class TestEP(unittest.TestCase):
         recv_t, recv_w_out, _tc = ep_dispatch(buffer, tokens, topk_idx, w)
         expert_out = self._weighted(recv_t, recv_w_out)
         return ep_combine(buffer, expert_out)
+
+    def _make_moe_model(self, *, fusion_barrier=False):
+        buffer = self._make_buffer()
+        dispatch = te_ops.Dispatch(buffer)
+        fc1 = te_ops.GroupedLinear(
+            NUM_LOCAL_EXPERTS,
+            HIDDEN_DIM,
+            2 * INTERMEDIATE_DIM,
+            bias=False,
+            device=self.cfg.device,
+            dtype=torch.bfloat16,
+        )
+        activation = te_ops.ScaledSwiGLU()
+        fc2 = te_ops.GroupedLinear(
+            NUM_LOCAL_EXPERTS,
+            INTERMEDIATE_DIM,
+            HIDDEN_DIM,
+            bias=False,
+            device=self.cfg.device,
+            dtype=torch.bfloat16,
+        )
+        combine = te_ops.Combine(buffer, num_local_tokens=TOKENS_PER_RANK)
+
+        dispatch.set_extra_output_channel(0, "tokens_per_expert")
+        dispatch.set_extra_output_channel(1, "routing_weights")
+        fc1.set_extra_input_channel(0, "tokens_per_expert")
+        activation.set_extra_input_channel(0, "routing_weights")
+        fc2.set_extra_input_channel(0, "tokens_per_expert")
+        ops = [dispatch, fc1, activation, fc2]
+        if fusion_barrier:
+            ops.append(te_ops.Identity())
+        ops.append(combine)
+        return te_ops.Sequential(*ops), fc1, fc2
 
     # Prepare
 
@@ -418,6 +479,95 @@ class TestEP(unittest.TestCase):
         torch.testing.assert_close(tokens_p.grad.float(), tokens.float(), atol=5e-2, rtol=5e-2)
         # the caller-owned buffer was used as the combine-bwd scatter target
         self.assertGreater(gbuf.abs().sum().item(), 0.0)
+
+    @_eager_test_include
+    def test_bf16_moe_sequential_fusion(self):
+        """Reference-backed fusion matches the unfused BF16 EP MoE sequence."""
+        if not EAGER:
+            self.skipTest("variable-size reference comparison requires eager EP mode")
+
+        fused, fused_fc1, fused_fc2 = self._make_moe_model()
+        unfused, unfused_fc1, unfused_fc2 = self._make_moe_model(fusion_barrier=True)
+        generator = torch.Generator(device=self.cfg.device)
+        generator.manual_seed(3100 + self.cfg.rank)
+        with torch.no_grad():
+            for fused_op, unfused_op in ((fused_fc1, unfused_fc1), (fused_fc2, unfused_fc2)):
+                for expert in range(NUM_LOCAL_EXPERTS):
+                    weight = (
+                        torch.randn(
+                            getattr(fused_op, f"weight{expert}").shape,
+                            generator=generator,
+                            dtype=torch.float32,
+                            device=self.cfg.device,
+                        )
+                        * 0.1
+                    ).to(torch.bfloat16)
+                    getattr(fused_op, f"weight{expert}").copy_(weight)
+                    getattr(unfused_op, f"weight{expert}").copy_(weight)
+
+        topk_idx, tokens, topk_weights = _make_moe_inputs(
+            self.cfg.rank,
+            self.cfg.ep_size,
+            self.cfg.device,
+        )
+        fused_tokens = tokens.detach().clone().requires_grad_(True)
+        unfused_tokens = tokens.detach().clone().requires_grad_(True)
+        fused_topk_weights = topk_weights.detach().clone().requires_grad_(True)
+        unfused_topk_weights = topk_weights.detach().clone().requires_grad_(True)
+
+        fused_out, fused_counts, fused_recv_weights = fused(
+            fused_tokens,
+            topk_idx,
+            fused_topk_weights,
+        )
+        unfused_out, unfused_counts, unfused_recv_weights = unfused(
+            unfused_tokens,
+            topk_idx,
+            unfused_topk_weights,
+        )
+
+        fused_forward_ops = fused._module_groups[0]._forward_ops
+        unfused_forward_ops = unfused._module_groups[0]._forward_ops
+        self.assertEqual(len(fused_forward_ops), 1)
+        self.assertIsInstance(fused_forward_ops[0][0], FusedMoeEp)
+        self.assertFalse(any(isinstance(op, FusedMoeEp) for op, _ in unfused_forward_ops))
+        self.assertEqual(fused_out.dtype, torch.bfloat16)
+        self.assertEqual(unfused_out.dtype, torch.bfloat16)
+        torch.testing.assert_close(fused_counts, unfused_counts, rtol=0, atol=0)
+        self.assertEqual(fused_recv_weights.dtype, torch.float32)
+        self.assertEqual(unfused_recv_weights.dtype, torch.float32)
+
+        dy = (
+            torch.randn(
+                fused_out.shape,
+                generator=generator,
+                dtype=torch.float32,
+                device=self.cfg.device,
+            )
+            * 0.1
+        ).to(torch.bfloat16)
+        fused_out.backward(dy)
+        unfused_out.backward(dy)
+        torch.cuda.synchronize()
+
+        # The two BF16 paths use different grouped-GEMM and reduction orders.
+        # Their largest observed forward absolute error is ~3.1e-5, at values
+        # close enough to zero that the relative tolerance does not apply.
+        tolerances = {"rtol": 1.6e-2, "atol": 5e-5}
+        torch.testing.assert_close(fused_out, unfused_out, **tolerances)
+        torch.testing.assert_close(fused_tokens.grad, unfused_tokens.grad, **tolerances)
+        torch.testing.assert_close(
+            fused_topk_weights.grad,
+            unfused_topk_weights.grad,
+            **tolerances,
+        )
+        for fused_op, unfused_op in ((fused_fc1, unfused_fc1), (fused_fc2, unfused_fc2)):
+            for expert in range(NUM_LOCAL_EXPERTS):
+                fused_grad = getattr(fused_op, f"weight{expert}").grad
+                unfused_grad = getattr(unfused_op, f"weight{expert}").grad
+                self.assertEqual(fused_grad.dtype, torch.bfloat16)
+                self.assertEqual(unfused_grad.dtype, torch.bfloat16)
+                torch.testing.assert_close(fused_grad, unfused_grad, **tolerances)
 
     @_zero_copy_test_include
     def test_zero_copy_pool_auto_alloc(self):

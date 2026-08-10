@@ -21,6 +21,7 @@ from .distributed import symm_mem_alloc
 __all__ = [
     "EpBuffer",
     "ep_bootstrap",
+    "get_ep_group",
     "is_ep_bootstrapped",
     "ep_finalize",
     "ep_dispatch",
@@ -173,6 +174,11 @@ def ep_bootstrap(
 def is_ep_bootstrapped() -> bool:
     """Whether EP has been initialized in this process."""
     return _BOOTSTRAPPED
+
+
+def get_ep_group() -> Optional[dist.ProcessGroup]:
+    """Return the process group registered by :func:`ep_bootstrap`."""
+    return _EP_GROUP
 
 
 def ep_finalize() -> None:
