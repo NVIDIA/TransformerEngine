@@ -4,12 +4,9 @@
 
 """torch.compile custom-op framework for Transformer Engine.
 
-Turns a TE module's eager forward/backward into ``torch.library`` custom ops so
-``torch.compile(fullgraph=True)`` traces them as single graph nodes -- no graph
-break into the eager ``autograd.Function``. ``register_custom_op`` is the entry
-point (its docstring documents the per-callable contract); ``module/linear.py``
-is the first user. Internal framework API -- exported from
-``transformer_engine.pytorch.dynamo``, not re-exported at the top level.
+Registers TE modules' eager forward/backward as ``torch.library`` custom ops so
+``torch.compile(fullgraph=True)`` traces them as single graph nodes.
+``register_custom_op`` is the entry point; ``module/linear.py`` is the first user.
 
 A TE op's forward/backward is written as a plain impl over a single *args
 dataclass* (``fwd_arg_type`` / ``bwd_arg_type``, e.g. ``LinearFwdArgs``): its
