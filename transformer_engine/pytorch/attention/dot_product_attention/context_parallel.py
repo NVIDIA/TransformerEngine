@@ -100,11 +100,7 @@ def _zero_thd_padding(tensor, cu_seqlens, cu_seqlens_padded):
     rows = torch.arange(tensor.shape[0], device=tensor.device)
     padding_mask = torch.zeros(tensor.shape[0], dtype=torch.bool, device=tensor.device)
     for batch_idx in range(cu_seqlens.numel() - 1):
-        valid_end = (
-            cu_seqlens_padded[batch_idx]
-            + cu_seqlens[batch_idx + 1]
-            - cu_seqlens[batch_idx]
-        )
+        valid_end = cu_seqlens_padded[batch_idx] + cu_seqlens[batch_idx + 1] - cu_seqlens[batch_idx]
         padding_mask |= (rows >= valid_end) & (rows < cu_seqlens_padded[batch_idx + 1])
     tensor[padding_mask] = 0
 
