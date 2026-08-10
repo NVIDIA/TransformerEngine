@@ -123,10 +123,6 @@ TensorOrQuantized = Union[torch.Tensor, QuantizedTensorStorage]
 # tensor can have -- complex is never a TE payload (quantized data / scales are
 # uint8 / fp32, outputs are float), while e.g. a uint8 sentinel would collide
 # with a genuinely empty FP8 data buffer (empty batch).
-#
-# Once https://github.com/pytorch/pytorch/pull/187434 lands, a nullable
-# ``Tensor?[]`` return schema will let ``None`` pass through directly and this
-# sentinel encoding (``_encode_none`` / ``_decode_none``) can be removed.
 _NONE_SENTINEL_DTYPE = torch.complex32
 
 
