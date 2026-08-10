@@ -900,7 +900,12 @@ class EpCombineBwdPrimitive(BasePrimitive):
         result_infos,
     ):
         del is_outer, result_infos
-        arg_shardings = tuple(a.sharding for a in arg_infos)
+        # The combine cotangent must have the same token sharding as the
+        # forward combine output. Transpose propagation can otherwise infer a
+        # replicated grad and pass the global token count to a handle prepared
+        # for only the rank-local tokens.
+        grad_sharding = NamedSharding(mesh, _ep_output_spec())
+        arg_shardings = (arg_infos[0].sharding, grad_sharding)
         # EP-output leading (trailing dims auto-pad to None).
         out_sharding = NamedSharding(mesh, _ep_output_spec())
 

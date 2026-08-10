@@ -385,6 +385,7 @@ class TestEP(unittest.TestCase):
             out, NamedSharding(self.mesh, token_spec)
         )
 
+    @unittest.skip("Branch-only scan experiment; superseded by MaxText integration coverage.")
     def test_scan_dispatch_combine_top1_identity(self):
         """Top-1 dispatch/combine remains an exact identity across scan layers."""
         routes, tokens, weights = self._make_scan_inputs()
@@ -424,6 +425,7 @@ class TestEP(unittest.TestCase):
         if self.rank == 0:
             np.testing.assert_array_equal(np.asarray(out_global), np.asarray(tokens))
 
+    @unittest.skip("Branch-only scan experiment; superseded by MaxText integration coverage.")
     def test_scan_dispatch_only_distinct_routing_maps(self):
         """Every scan iteration's packed dispatch matches an isolated dispatch.
 
@@ -515,6 +517,7 @@ class TestEP(unittest.TestCase):
                 np.asarray(scan_weights_global), np.stack(ref_weights)
             )
 
+    @unittest.skip("Branch-only scan experiment; superseded by MaxText integration coverage.")
     def test_scan_dispatch_combine_routing_handle_fwd_bwd(self):
         """Scan must match unrolled layers when every iteration has a new map.
 

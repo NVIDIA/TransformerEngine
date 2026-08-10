@@ -1045,7 +1045,7 @@ class TestTeEpMoeBackward:
 
             def te_loss_fn(variables, value):
                 for _ in range(repeats):
-                    branch, _ = block.apply(variables, value)
+                    branch, _, _ = block.apply(variables, value)
                     value = value + branch
                 return jnp.mean(value.astype(jnp.float32) ** 2)
 
