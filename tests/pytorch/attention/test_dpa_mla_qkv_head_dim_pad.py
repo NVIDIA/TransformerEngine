@@ -20,7 +20,9 @@ import pytest
 import torch
 
 from transformer_engine.pytorch.attention.dot_product_attention import DotProductAttention
-from transformer_engine.pytorch.attention.dot_product_attention import dot_product_attention as dpa_module
+from transformer_engine.pytorch.attention.dot_product_attention import (
+    dot_product_attention as dpa_module,
+)
 import transformer_engine.pytorch.attention.dot_product_attention.utils as dpa_utils
 
 _current_file = pathlib.Path(__file__).resolve()
@@ -28,8 +30,9 @@ sys.path = [str(_current_file.parent.parent)] + sys.path
 from utils import reset_rng_states
 
 
-def _build_dpa(qk, v, num_heads=4, qkv_format="thd", attn_mask_type="padding_causal",
-               softmax_scale=None):
+def _build_dpa(
+    qk, v, num_heads=4, qkv_format="thd", attn_mask_type="padding_causal", softmax_scale=None
+):
     return DotProductAttention(
         num_attention_heads=num_heads,
         kv_channels=(qk, v),
@@ -50,26 +53,36 @@ def _thd_inputs(qk, v, t=32, h=4):
 
 def _run_dpa(dpa, q, k, v, cu, max_seqlen=13):
     return dpa(
-        q, k, v,
-        cu_seqlens_q=cu, cu_seqlens_kv=cu,
-        max_seqlen_q=max_seqlen, max_seqlen_kv=max_seqlen,
+        q,
+        k,
+        v,
+        cu_seqlens_q=cu,
+        cu_seqlens_kv=cu,
+        max_seqlen_q=max_seqlen,
+        max_seqlen_kv=max_seqlen,
         attn_mask_type="padding_causal",
     )
 
 
 # should_pad_qkv_head_dim
-@pytest.mark.parametrize("native_unfused,padded_fused,expected", [
-    (False, False, False),   # native already fused -> no pad
-    (True, False, False),    # both unfused -> no upgrade -> no pad
-    (True, True, True),      # native unfused, padded fused -> pad
-])
+@pytest.mark.parametrize(
+    "native_unfused,padded_fused,expected",
+    [
+        (False, False, False),  # native already fused -> no pad
+        (True, False, False),  # both unfused -> no upgrade -> no pad
+        (True, True, True),  # native unfused, padded fused -> pad
+    ],
+)
 def test_should_pad_qkv_head_dim(monkeypatch, native_unfused, padded_fused, expected):
     """`should_pad_qkv_head_dim` returns True iff native is unfused and padded is fused."""
     params = dpa_utils.AttentionParams(
         qkv_layout="thd_thd_thd",
-        num_heads=4, num_gqa_groups=4,
-        max_seqlen_q=13, max_seqlen_kv=13,
-        head_dim_qk=96, head_dim_v=128,
+        num_heads=4,
+        num_gqa_groups=4,
+        max_seqlen_q=13,
+        max_seqlen_kv=13,
+        head_dim_qk=96,
+        head_dim_v=128,
         attn_mask_type="padding_causal",
         is_training=True,
         qkv_dtype=torch.bfloat16,
@@ -77,10 +90,22 @@ def test_should_pad_qkv_head_dim(monkeypatch, native_unfused, padded_fused, expe
 
     # get_attention_backend returns
     # (use_flash, flash_backend, use_fused, fused_backend, use_unfused, available)
-    native = (False, None, not native_unfused, None, native_unfused,
-               [False, not native_unfused, native_unfused])
-    padded = (False, None, padded_fused, None, not padded_fused,
-               [False, padded_fused, not padded_fused])
+    native = (
+        False,
+        None,
+        not native_unfused,
+        None,
+        native_unfused,
+        [False, not native_unfused, native_unfused],
+    )
+    padded = (
+        False,
+        None,
+        padded_fused,
+        None,
+        not padded_fused,
+        [False, padded_fused, not padded_fused],
+    )
 
     def fake_backend(p):
         # native probe: real (mismatched) head_dim_qk/v; padded probe: both = max(qk, v).
@@ -100,10 +125,16 @@ def test_should_pad_qkv_head_dim(monkeypatch, native_unfused, padded_fused, expe
 def test_should_pad_qkv_head_dim_equal_dims():
     """No pad when head_dim_qk == head_dim_v."""
     params = dpa_utils.AttentionParams(
-        qkv_layout="thd_thd_thd", num_heads=4, num_gqa_groups=4,
-        max_seqlen_q=13, max_seqlen_kv=13,
-        head_dim_qk=128, head_dim_v=128,
-        attn_mask_type="padding_causal", is_training=True, qkv_dtype=torch.bfloat16,
+        qkv_layout="thd_thd_thd",
+        num_heads=4,
+        num_gqa_groups=4,
+        max_seqlen_q=13,
+        max_seqlen_kv=13,
+        head_dim_qk=128,
+        head_dim_v=128,
+        attn_mask_type="padding_causal",
+        is_training=True,
+        qkv_dtype=torch.bfloat16,
     )
     assert dpa_utils.should_pad_qkv_head_dim(params) is False
 
@@ -114,9 +145,14 @@ def test_should_pad_qkv_head_dim_is_memoized(monkeypatch):
     caller mutated the first params object in place -- as the production forward does when
     it pads `head_dim_qk`/`head_dim_v` after this returns."""
     base = dict(
-        qkv_layout="thd_thd_thd", num_heads=4, num_gqa_groups=4,
-        max_seqlen_q=13, max_seqlen_kv=13,
-        attn_mask_type="padding_causal", is_training=True, qkv_dtype=torch.bfloat16,
+        qkv_layout="thd_thd_thd",
+        num_heads=4,
+        num_gqa_groups=4,
+        max_seqlen_q=13,
+        max_seqlen_kv=13,
+        attn_mask_type="padding_causal",
+        is_training=True,
+        qkv_dtype=torch.bfloat16,
     )
     calls = {"n": 0}
 
