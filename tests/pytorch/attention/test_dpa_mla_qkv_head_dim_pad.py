@@ -7,11 +7,12 @@
 Covers:
   * `should_pad_qkv_head_dim` decides correctly (native unfused vs padded fused).
   * DPA with `head_dim_v > head_dim_qk` runs and produces a V-width output.
-  * The pad-then-trim is an identity for both `qk > v` and `v > qk`: padding Q/K/V
-    to a common width and trimming back yields the same result as running with the equal
-    (padded) shape directly.
+  * The pad-then-trim is an identity for both `qk > v` and `v > qk`: padding Q/K/V to the
+    wider head dim, running with the equal (padded) shape, and trimming back equals the
+    native mismatched-dim run.
 """
 
+import math
 import pathlib
 import sys
 
@@ -27,13 +28,15 @@ sys.path = [str(_current_file.parent.parent)] + sys.path
 from utils import reset_rng_states
 
 
-def _build_dpa(qk, v, num_heads=4, qkv_format="thd", attn_mask_type="padding_causal"):
+def _build_dpa(qk, v, num_heads=4, qkv_format="thd", attn_mask_type="padding_causal",
+               softmax_scale=None):
     return DotProductAttention(
         num_attention_heads=num_heads,
         kv_channels=(qk, v),
         attention_type="self",
         attn_mask_type=attn_mask_type,
         qkv_format=qkv_format,
+        softmax_scale=softmax_scale,
     ).to(dtype=torch.bfloat16, device="cuda")
 
 
@@ -115,26 +118,30 @@ def test_dpa_v_gt_qk_runs(qk, v):
 # pad-then-trim is an identity (both directions)
 @pytest.mark.parametrize("qk,v", [(192, 128), (64, 192)])
 def test_dpa_mla_pad_is_identity(qk, v):
-    """Padding Q/K/V to a common width and trimming back equals running with the
-    equal (padded) shape directly -- for both qk > v and v > qk."""
+    """Pad-then-trim is an identity: padding Q/K/V to the wider head dim, running with the equal
+    (padded) shape, and trimming back equals the native mismatched-dim run -- for both qk > v and v
+    > qk. Both runs use the same `softmax_scale` (`1/sqrt(qk)`) that the production forward keeps
+    when padding.
+    """
     reset_rng_states()
     m = max(qk, v)
-    # Reference: run with Q/K/V already at the common width (no pad needed).
-    dpa_ref = _build_dpa(m, m)
-    q_ref = torch.randn(32, 4, m, device="cuda", dtype=torch.bfloat16, requires_grad=True)
-    k_ref = torch.randn(32, 4, m, device="cuda", dtype=torch.bfloat16)
-    v_ref = torch.randn(32, 4, m, device="cuda", dtype=torch.bfloat16)
+    scale = 1.0 / math.sqrt(qk)
     cu = torch.IntTensor([0, 6, 19, 22, 32]).cuda()
-    out_ref = _run_dpa(dpa_ref, q_ref, k_ref, v_ref, cu)
-    out_ref.float().sum().backward()
 
-    # Test: run with mismatched QK/V, force the pad, then trim.
-    dpa = _build_dpa(qk, v)
+    # Reference: native mismatched-dim run (the production forward; it pads internally
+    # only when should_pad_qkv_head_dim upgrades the selected backend).
+    dpa_ref = _build_dpa(qk, v)  # softmax_scale defaults to 1/sqrt(qk)
     q, k, v_t, _ = _thd_inputs(qk, v)
-    # Force the pad by calling the same path the forward uses.
+    out_ref = _run_dpa(dpa_ref, q, k, v_t, cu)
+    assert tuple(out_ref.shape) == (32, 4 * v), out_ref.shape
+
+    # Test: manually pad to the common width, run with the equal (padded) shape, trim.
+    # Same softmax_scale as the reference so pad-then-trim is a true identity.
+    dpa = _build_dpa(m, m, softmax_scale=scale)
     q_p, k_p, v_p, _, _ = dpa_module._pad_qkv_head_dim(q, k, v_t)
     assert q_p.shape[-1] == k_p.shape[-1] == v_p.shape[-1] == m
     out = _run_dpa(dpa, q_p, k_p, v_p, cu)
     # Trim back to the original V width.
     out = dpa_module._trim_output(out, 4, m, v)
     torch.testing.assert_close(out, out_ref, atol=1e-2, rtol=1e-2)
+    out.float().sum().backward()  # padded path backward must not crash
