@@ -62,6 +62,7 @@ NVTEShape convertTorchShape(const c10::IntArrayRef torch_shape) {
   return ret;
 }
 
+#ifdef NVTE_WITH_TORCH_STABLE
 NVTEShape convertTorchShape(const torch::headeronly::IntHeaderOnlyArrayRef torch_shape) {
   NVTEShape ret;
   ret.ndim = torch_shape.size();
@@ -74,6 +75,7 @@ NVTEShape convertTorchShape(const torch::headeronly::IntHeaderOnlyArrayRef torch
   }
   return ret;
 }
+#endif
 
 std::unique_ptr<Quantizer> convert_quantizer(py::handle quantizer) {
   init_extension();
@@ -178,13 +180,14 @@ transformer_engine::TensorWrapper makeTransformerEngineTensor(at::Tensor tensor)
   return makeTransformerEngineTensor(tensor.data_ptr(), shape, dtype);
 }
 
-transformer_engine::TensorWrapper makeTransformerEngineTensor(
-    const torch::stable::Tensor& tensor) {
+#ifdef NVTE_WITH_TORCH_STABLE
+transformer_engine::TensorWrapper makeTransformerEngineTensor(const torch_compat::Tensor& tensor) {
   transformer_engine::DType dtype = GetTransformerEngineDType(tensor.scalar_type());
   const auto sizes = tensor.sizes();
   std::vector<size_t> shape(sizes.begin(), sizes.end());
   return makeTransformerEngineTensor(tensor.data_ptr(), shape, dtype);
 }
+#endif
 
 std::tuple<std::vector<transformer_engine::TensorWrapper>, std::vector<std::vector<NVTETensor>>,
            std::vector<NVTETensor*>, size_t, size_t>

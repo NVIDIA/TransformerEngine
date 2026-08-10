@@ -546,7 +546,9 @@ transformer_engine::TensorWrapper makeTransformerEngineTensor(void* data_ptr,
 
 transformer_engine::TensorWrapper makeTransformerEngineTensor(at::Tensor tensor);
 
-transformer_engine::TensorWrapper makeTransformerEngineTensor(const torch::stable::Tensor& tensor);
+#ifdef NVTE_WITH_TORCH_STABLE
+transformer_engine::TensorWrapper makeTransformerEngineTensor(const torch_compat::Tensor& tensor);
+#endif
 
 std::tuple<std::vector<transformer_engine::TensorWrapper>, std::vector<std::vector<NVTETensor>>,
            std::vector<NVTETensor*>, size_t, size_t>
@@ -585,7 +587,9 @@ size_t ceildiv(size_t numer, size_t denom);
 
 NVTEShape convertTorchShape(const c10::IntArrayRef torch_shape);
 
+#ifdef NVTE_WITH_TORCH_STABLE
 NVTEShape convertTorchShape(const torch::headeronly::IntHeaderOnlyArrayRef torch_shape);
+#endif
 
 std::vector<size_t> convert_shape_back_from_fp4(const std::vector<size_t>& shape, bool transpose);
 

@@ -7,62 +7,38 @@
 #ifndef TRANSFORMER_ENGINE_PYTORCH_CSRC_TORCH_COMPAT_H_
 #define TRANSFORMER_ENGINE_PYTORCH_CSRC_TORCH_COMPAT_H_
 
-#include <Python.h>
 #include <cuda_runtime.h>
-#include <torch/csrc/stable/ops.h>
-#include <torch/csrc/stable/tensor.h>
 
 #ifdef NVTE_WITH_TORCH_STABLE
 #include <torch/csrc/stable/accelerator.h>
+#include <torch/csrc/stable/ops.h>
 #include <torch/csrc/stable/pyobject.h>
+#include <torch/csrc/stable/tensor.h>
 #else
+#include <ATen/ATen.h>
 #include <ATen/cuda/CUDAContext.h>
-#include <torch/csrc/autograd/python_variable.h>
-#include <torch/csrc/inductor/aoti_torch/utils.h>
 #endif
-
-#include "common/util/logging.h"
 
 /* Compatibility layer for the incremental migration to the torch stable ABI.
- * Code is written against the torch::stable surface. With NVTE_WITH_TORCH_STABLE
- * these helpers forward to the stable shims (torch >= 2.14); without it the same
- * functionality is polyfilled with the full torch ABI, so the non-stable build
- * keeps supporting older torch versions. */
+ * Migrated code is written against this surface, which is restricted to what
+ * torch::stable provides. With NVTE_WITH_TORCH_STABLE it maps to torch::stable
+ * (requires torch >= 2.14); without it (the default) it maps to the full torch
+ * ABI, keeping support for older torch versions intact. */
 namespace transformer_engine::pytorch::torch_compat {
 
-inline bool is_tensor_pyobject(PyObject *obj) {
 #ifdef NVTE_WITH_TORCH_STABLE
-  static PyObject *tensor_type = [] {
-    PyObject *mod = PyImport_ImportModule("torch");
-    NVTE_CHECK(mod != nullptr, "Could not import torch");
-    PyObject *type = PyObject_GetAttrString(mod, "Tensor");
-    Py_DECREF(mod);
-    NVTE_CHECK(type != nullptr, "Could not get torch.Tensor");
-    return type;
-  }();
-  return PyObject_IsInstance(obj, tensor_type) == 1;
+using Tensor = torch::stable::Tensor;
+using ScalarType = torch::headeronly::ScalarType;
 #else
-  return THPVariable_Check(obj);
+using Tensor = at::Tensor;
+using ScalarType = at::ScalarType;
 #endif
-}
 
-/* Borrowed torch.Tensor PyObject -> stable Tensor sharing the TensorImpl.
- * The GIL must be held. */
-inline torch::stable::Tensor tensor_from_pyobject(PyObject *obj) {
+inline Tensor contiguous(const Tensor &tensor) {
 #ifdef NVTE_WITH_TORCH_STABLE
-  return torch::stable::tensor_from_pyobject(obj);
+  return torch::stable::contiguous(tensor);
 #else
-  return torch::stable::Tensor(
-      torch::aot_inductor::new_tensor_handle(at::Tensor(THPVariable_Unpack(obj))));
-#endif
-}
-
-/* Stable Tensor -> new-reference torch.Tensor PyObject. The GIL must be held. */
-inline PyObject *tensor_to_pyobject(const torch::stable::Tensor &tensor) {
-#ifdef NVTE_WITH_TORCH_STABLE
-  return static_cast<PyObject *>(torch::stable::tensor_to_pyobject(tensor));
-#else
-  return THPVariable_Wrap(*torch::aot_inductor::tensor_handle_to_tensor_pointer(tensor.get()));
+  return tensor.contiguous();
 #endif
 }
 

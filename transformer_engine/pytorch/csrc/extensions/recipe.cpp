@@ -12,11 +12,11 @@
 
 namespace transformer_engine::pytorch {
 
-void compute_amax(const torch::stable::Tensor& tensor, torch::stable::Tensor& amax) {
-  auto input_tensor = torch::stable::contiguous(tensor);
+void compute_amax(const torch_compat::Tensor& tensor, torch_compat::Tensor& amax) {
+  auto input_tensor = torch_compat::contiguous(tensor);
   const TensorWrapper& te_input = makeTransformerEngineTensor(input_tensor);
 
-  NVTE_CHECK(amax.scalar_type() == torch::headeronly::ScalarType::Float,
+  NVTE_CHECK(amax.scalar_type() == torch_compat::ScalarType::Float,
              "amax must be a float tensor");
   NVTE_CHECK(amax.numel() == 1, "amax must have exactly one element");
   auto* amax_ptr = static_cast<float*>(amax.data_ptr());
@@ -29,8 +29,8 @@ void compute_amax(const torch::stable::Tensor& tensor, torch::stable::Tensor& am
 }
 
 void fused_amax_and_scale_update_after_reduction(
-    const torch::stable::Tensor& amax_reduction_buffer,
-    std::vector<torch::stable::Tensor> amax_histories, std::vector<torch::stable::Tensor> scales,
+    const torch_compat::Tensor& amax_reduction_buffer,
+    std::vector<torch_compat::Tensor> amax_histories, std::vector<torch_compat::Tensor> scales,
     const std::string& amax_compute_algo, DType fp8_dtype, float margin) {
   size_t num_tensors = amax_histories.size();
 

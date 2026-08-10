@@ -437,11 +437,11 @@ at::Tensor scaled_aligned_causal_masked_softmax_backward(at::Tensor output_grads
  * FP8 recipe
  **************************************************************************************************/
 
-void compute_amax(const torch::stable::Tensor &tensor, torch::stable::Tensor &amax);
+void compute_amax(const torch_compat::Tensor &tensor, torch_compat::Tensor &amax);
 
 void fused_amax_and_scale_update_after_reduction(
-    const torch::stable::Tensor &amax_reduction_buffer,
-    std::vector<torch::stable::Tensor> amax_histories, std::vector<torch::stable::Tensor> scales,
+    const torch_compat::Tensor &amax_reduction_buffer,
+    std::vector<torch_compat::Tensor> amax_histories, std::vector<torch_compat::Tensor> scales,
     const std::string &amax_compute_algo, DType fp8_dtype, float margin);
 
 // Note that the start_offset is the logical offset along the tensor dimension.

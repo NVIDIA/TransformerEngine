@@ -7,9 +7,15 @@
 #ifndef TRANSFORMER_ENGINE_PYTORCH_CSRC_EXTENSIONS_STABLE_TENSOR_CASTER_H_
 #define TRANSFORMER_ENGINE_PYTORCH_CSRC_EXTENSIONS_STABLE_TENSOR_CASTER_H_
 
+/* In the default (non-stable) build torch_compat::Tensor is at::Tensor and
+ * torch's own pybind caster applies; this caster exists only in stable mode. */
+#ifdef NVTE_WITH_TORCH_STABLE
+
+#include <Python.h>
 #include <pybind11/pybind11.h>
 
 #include "../torch_compat.h"
+#include "common/util/logging.h"
 
 namespace pybind11 {
 namespace detail {
@@ -31,20 +37,34 @@ struct type_caster<torch::stable::Tensor> {
  public:
   PYBIND11_TYPE_CASTER(torch::stable::Tensor, const_name("torch.Tensor"));
 
+  static bool is_tensor(PyObject *obj) {
+    static PyObject *tensor_type = [] {
+      PyObject *mod = PyImport_ImportModule("torch");
+      NVTE_CHECK(mod != nullptr, "Could not import torch");
+      PyObject *type = PyObject_GetAttrString(mod, "Tensor");
+      Py_DECREF(mod);
+      NVTE_CHECK(type != nullptr, "Could not get torch.Tensor");
+      return type;
+    }();
+    return PyObject_IsInstance(obj, tensor_type) == 1;
+  }
+
   bool load(handle src, bool) {
-    if (!src || !transformer_engine::pytorch::torch_compat::is_tensor_pyobject(src.ptr())) {
+    if (!src || !is_tensor(src.ptr())) {
       return false;
     }
-    value = transformer_engine::pytorch::torch_compat::tensor_from_pyobject(src.ptr());
+    value = torch::stable::tensor_from_pyobject(src.ptr());
     return true;
   }
 
   static handle cast(const torch::stable::Tensor &src, return_value_policy, handle) {
-    return handle(transformer_engine::pytorch::torch_compat::tensor_to_pyobject(src));
+    return handle(static_cast<PyObject *>(torch::stable::tensor_to_pyobject(src)));
   }
 };
 
 }  // namespace detail
 }  // namespace pybind11
+
+#endif  // NVTE_WITH_TORCH_STABLE
 
 #endif  // TRANSFORMER_ENGINE_PYTORCH_CSRC_EXTENSIONS_STABLE_TENSOR_CASTER_H_
