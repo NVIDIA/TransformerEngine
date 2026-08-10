@@ -13,7 +13,7 @@ import warnings
 import logging
 import functools
 
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, replace
 import numpy as np
 from packaging.version import Version as PkgVersion
 
@@ -1646,6 +1646,50 @@ def get_attention_backend(
         use_unfused_attention,
         available_backends,
     )
+
+
+@torch.no_grad()
+def should_pad_qkv_head_dim(
+    attention_params: "AttentionParams",
+) -> bool:
+    """Decide whether padding Q/K/V to a common head dim upgrades the attention backend.
+
+    Padding Q, K, and V to the wider of the QK and V head dims is an identity -- the padded head
+    dims contribute zero to the Q*K dot product (so scores and softmax are unchanged) and the padded
+    V columns are sums of zeros (so trimming them back changes nothing). This returns `True` iff the
+    native mismatched shape selects the slow `UnfusedDotProductAttention` while the padded equal
+    shape selects a fused backend (`FlashAttention` or `FusedAttention`), i.e. the only case in
+    which the pad actually upgrades the kernel instead of being pure overhead.
+
+    Parameters
+    ----------
+    attention_params : AttentionParams
+        Attention parameters for the native (unpadded) QK and V head dimensions.
+
+    Returns
+    -------
+    bool
+        Whether Q/K/V should be padded to a common (the wider) head dim.
+    """
+    if attention_params.head_dim_qk == attention_params.head_dim_v:
+        return False
+    native_backend = get_attention_backend(attention_params)
+    native_use_unfused_attention = native_backend[4]
+    # No point padding if native path is already fused.
+    if not native_use_unfused_attention:
+        return False
+    # Probe on a copy so the caller's `attention_params` are never mutated, even if
+    # `get_attention_backend` raises.
+    padded_head_dim = max(attention_params.head_dim_qk, attention_params.head_dim_v)
+    padded_params = replace(
+        attention_params,
+        head_dim_qk=padded_head_dim,
+        head_dim_v=padded_head_dim,
+    )
+    padded_backend = get_attention_backend(padded_params)
+    padded_use_flash_attention = padded_backend[0]
+    padded_use_fused_attention = padded_backend[2]
+    return bool(padded_use_flash_attention or padded_use_fused_attention)
 
 
 @torch.no_grad()
