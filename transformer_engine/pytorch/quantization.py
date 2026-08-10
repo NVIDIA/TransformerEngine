@@ -1528,10 +1528,7 @@ class MXFP8BlockScalingRecipeState(RecipeState):
 
         def _use_2d_quantization(idx: int) -> bool:
             role = self._slot_role(idx)
-            return (
-                role.module_type in ("linear", "grouped_linear")
-                and role.tensor_type == "weight"
-            )
+            return role.module_type in ("linear", "grouped_linear") and role.tensor_type == "weight"
 
         return [
             MXFP8Quantizer(

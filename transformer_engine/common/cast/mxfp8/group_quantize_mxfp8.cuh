@@ -403,8 +403,7 @@ __device__ __forceinline__ void process_rowwise_stage(
     using AMax2DType = std::conditional_t<NON_FP32_CAST_ONLY, IType, float>;
     __shared__ e8m0_t block_scales_2d[THREADS_X];
     __shared__ AMax2DType block_amax_2d[THREADS_X * THREADS_Y];
-    block_amax_2d[tid_X_rowwise * THREADS_Y + tid_Y_rowwise] =
-        static_cast<AMax2DType>(thread_amax);
+    block_amax_2d[tid_X_rowwise * THREADS_Y + tid_Y_rowwise] = static_cast<AMax2DType>(thread_amax);
     __syncthreads();
     if (tid_Y_rowwise == 0) {
       AMax2DType amax_2d = static_cast<AMax2DType>(0.0f);
@@ -416,14 +415,13 @@ __device__ __forceinline__ void process_rowwise_stage(
           amax_2d = __hmax(amax_2d, block_amax_2d[tid_X_rowwise * THREADS_Y + i]);
         }
       }
-      block_scales_2d[tid_X_rowwise] = ptx::float_to_e8m0(
-          static_cast<float>(amax_2d) * Quantized_Limits<OType>::max_norm_rcp);
+      block_scales_2d[tid_X_rowwise] =
+          ptx::float_to_e8m0(static_cast<float>(amax_2d) * Quantized_Limits<OType>::max_norm_rcp);
     }
     __syncthreads();
     biased_exponent = block_scales_2d[tid_X_rowwise];
   } else {
-    biased_exponent =
-        ptx::float_to_e8m0(thread_amax * Quantized_Limits<OType>::max_norm_rcp);
+    biased_exponent = ptx::float_to_e8m0(thread_amax * Quantized_Limits<OType>::max_norm_rcp);
   }
   const size_t stage_scales_offset_Y = scales_offset_Y_rowwise + stage_offset_Y;
   const size_t stage_scales_offset_X = scales_offset_X_rowwise;
@@ -872,8 +870,7 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
   const size_t block_size = THREADS_PER_CHUNK;
 
   const bool with_gemm_swizzled_scales = output->with_gemm_swizzled_scales;
-  const bool use_2d_quantization =
-      quant_config != nullptr && quant_config->mxfp8_2d_quantization;
+  const bool use_2d_quantization = quant_config != nullptr && quant_config->mxfp8_2d_quantization;
 
   // Logical shape of a tensor with varying all dims is [1, M*K]
   if (shape_rep != ShapeRepresentation::VARYING_BOTH_DIMS) {
@@ -1012,10 +1009,11 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
 
                         TRANSFORMER_ENGINE_SWITCH_CONDITION(
                             use_2d_quantization, kIs2DBlockScaling, {
-                              auto kernel = group_quantize_mxfp8_kernel<
-                                  IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType,
-                                  SCALING_TYPE, WITH_GEMM_SWIZZLED_SCALES, kIs2DBlockScaling,
-                                  SHAPE_REP>;
+                              auto kernel =
+                                  group_quantize_mxfp8_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP,
+                                                              OP, IType, OType, SCALING_TYPE,
+                                                              WITH_GEMM_SWIZZLED_SCALES,
+                                                              kIs2DBlockScaling, SHAPE_REP>;
 
                               NVTE_CHECK_CUDA(cudaFuncSetAttribute(
                                   kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
