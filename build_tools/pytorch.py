@@ -111,6 +111,13 @@ def setup_pytorch_extension(
     if bool(int(os.getenv("NVTE_WITH_CUBLASMP", 0))):
         cxx_flags.append("-DNVTE_WITH_CUBLASMP")
 
+    # Experimental: build the torch_compat layer against the torch stable ABI
+    # (requires torch >= 2.14). Without the flag the same code compiles against
+    # the full torch ABI. See csrc/torch_compat.h.
+    if bool(int(os.getenv("NVTE_TORCH_STABLE_ABI", "0"))):
+        cxx_flags.append("-DNVTE_WITH_TORCH_STABLE")
+        cxx_flags.append("-DTORCH_TARGET_VERSION=0x020e000000000000")
+
     # Construct PyTorch CUDA extension
     sources = [str(path) for path in sources]
     include_dirs = [str(path) for path in include_dirs]
