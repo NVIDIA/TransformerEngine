@@ -902,12 +902,25 @@ def _ffn_bwd_global(
     d_up_proj_out = d_intermediate * act_gp
     (d_gate_proj_out,) = dact_pullback(d_intermediate * up_proj_for_bwd)
 
-    # wi bwd (fused gate/up via concat). Mirror the fused fwd: pack the
-    # gate/up cotangents along the trailing axis, run a single
-    # grouped_quantize + two grouped_gemm pair (one dgrad, one wgrad)
-    # against the fused casted_wi_rhs_trans residual, then split the
-    # wgrad result remains in the contiguous gated-SwiGLU ``wi`` layout.
-    d_combined = jnp.concatenate([d_gate_proj_out, d_up_proj_out], axis=-1)
+    # wi bwd (fused gate/up). Mirror the fused fwd: pack the gate/up
+    # cotangents along the trailing axis, run a single grouped_quantize +
+    # two grouped_gemm pair (one dgrad, one wgrad) against the fused
+    # casted_wi_rhs_trans residual, then split the wgrad result. Padding
+    # the two halves into disjoint regions and adding them is equivalent
+    # to concatenate, but lowers substantially faster for this large
+    # activation-gradient buffer on GPU.
+    intermediate_dim = d_gate_proj_out.shape[-1]
+    d_gate_padded = jax.lax.pad(
+        d_gate_proj_out,
+        jnp.array(0, dtype=d_gate_proj_out.dtype),
+        ((0, 0, 0), (0, intermediate_dim, 0)),
+    )
+    d_up_padded = jax.lax.pad(
+        d_up_proj_out,
+        jnp.array(0, dtype=d_up_proj_out.dtype),
+        ((0, 0, 0), (intermediate_dim, 0, 0)),
+    )
+    d_combined = d_gate_padded + d_up_padded
     d_combined = jax.lax.with_sharding_constraint(d_combined, flat_token_sharding)
     casted_d_combined = tex.grouped_quantize(
         d_combined,
