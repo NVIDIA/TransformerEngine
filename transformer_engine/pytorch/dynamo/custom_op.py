@@ -10,9 +10,10 @@ Registers TE modules' eager forward/backward as ``torch.library`` custom ops so
 
 A TE forward/backward implementation takes one dataclass argument
 (``fwd_arg_type`` / ``bwd_arg_type``, e.g. ``LinearFwdArgs``) whose fields mix
-tensors, quantized tensors, quantizers, process groups and plain Python values,
-while a ``torch.library`` custom op only accepts flat schema slots (tensors plus
-opaque objects) and returns a flat ``Tensor[]``.
+tensors, quantized tensors, quantizers, process groups and plain Python values.
+
+A ``torch.library`` custom op is narrower: it only accepts flat schema slots
+(tensors plus opaque objects) and returns a flat ``Tensor[]``.
 
 Bridging the two takes three parts (below): per-field *adapters* map the args
 dataclass onto the op's input slots; *fake impls* on data-free specs give the
