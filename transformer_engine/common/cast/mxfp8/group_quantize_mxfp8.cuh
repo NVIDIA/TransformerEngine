@@ -119,7 +119,8 @@ inline size_t get_tile_dim_y(const ShapeRepresentation shape_rep) {
       return CastTraits<ShapeRepresentation::VARYING_LAST_DIM>::TILE_DIM_Y;
     case ShapeRepresentation::VARYING_BOTH_DIMS:
       return CastTraits<ShapeRepresentation::VARYING_BOTH_DIMS>::TILE_DIM_Y;
-    default: NVTE_ERROR("Unsupported grouped tensor shape representation.");
+    default:
+      NVTE_ERROR("Unsupported grouped tensor shape representation.");
   }
 }
 
@@ -177,8 +178,7 @@ LaunchConfig get_launch_config(const size_t first_logical_dim, const size_t last
     NVTE_CHECK(static_grid_size > 0, "Static persistent grid size must be greater than zero.");
 
     size_t estimated_work_blocks = config.work_blocks_X * config.work_blocks_Y;
-    estimated_work_blocks =
-        DIVUP(estimated_work_blocks, static_cast<size_t>(CastTraits::STAGES_X));
+    estimated_work_blocks = DIVUP(estimated_work_blocks, static_cast<size_t>(CastTraits::STAGES_X));
     const size_t requested_workers_per_tensor =
         std::max<size_t>(size_t{1}, static_grid_size / num_tensors);
     const size_t average_work_blocks_per_tensor =
@@ -659,8 +659,7 @@ __global__ void __launch_bounds__(CastTraits::THREADS_PER_CHUNK) group_quantize_
   constexpr ShapeRepresentation shape_rep = CastTraits::SHAPE_REPRESENTATION;
   constexpr bool use_direct_same_both_mapper = (shape_rep == SAME_BOTH_DIMS);
   constexpr bool use_direct_varying_first_mapper = (shape_rep == VARYING_FIRST_DIM);
-  constexpr bool use_direct_mapper =
-      use_direct_same_both_mapper || use_direct_varying_first_mapper;
+  constexpr bool use_direct_mapper = use_direct_same_both_mapper || use_direct_varying_first_mapper;
   constexpr bool is_single_tensor = (shape_rep == SAME_BOTH_DIMS || shape_rep == VARYING_FIRST_DIM);
 
   const bool leading_thread = (threadIdx.x == 0);
@@ -842,8 +841,8 @@ __global__ void __launch_bounds__(CastTraits::THREADS_PER_CHUNK) group_quantize_
     const size_t scale_alignment_X_rowwise = static_cast<size_t>(scale_tensor_alignment_X_rowwise);
     const size_t scale_alignment_X_colwise = static_cast<size_t>(scale_tensor_alignment_X_colwise);
 
-    const size_t scale_stride_rowwise = DIVUP_TO_MULTIPLE(
-        DIVUP(cols, static_cast<size_t>(SCALE_DIM_X)), scale_alignment_X_rowwise);
+    const size_t scale_stride_rowwise =
+        DIVUP_TO_MULTIPLE(DIVUP(cols, static_cast<size_t>(SCALE_DIM_X)), scale_alignment_X_rowwise);
     const size_t scale_stride_colwise = DIVUP_TO_MULTIPLE(cols, scale_alignment_X_colwise);
 
     const size_t tensor_base_for_scales = is_single_tensor ? tensor_start_offset : tensor_base;
@@ -853,8 +852,7 @@ __global__ void __launch_bounds__(CastTraits::THREADS_PER_CHUNK) group_quantize_
         scales_colwise_ptr + (is_single_tensor ? 0 : tensor_base / SCALE_DIM_Y);
 
     const size_t scales_block_offset_Y_rowwise = block_offset_Y;
-    const size_t scales_block_offset_X_rowwise =
-        block_id_X * CHUNK_DIM_X / SCALE_DIM_X;
+    const size_t scales_block_offset_X_rowwise = block_id_X * CHUNK_DIM_X / SCALE_DIM_X;
     const size_t scales_block_offset_Y_colwise = block_offset_Y / SCALE_DIM_Y;
     const size_t scales_block_offset_X_colwise = block_id_X * CHUNK_DIM_X;
 
@@ -896,8 +894,7 @@ __global__ void __launch_bounds__(CastTraits::THREADS_PER_CHUNK) group_quantize_
     if constexpr (CHUNK_DIM_Y > TILE_DIM_Y) {
       chunk_rows = min(static_cast<size_t>(CHUNK_DIM_Y), rows - tensor_offset_Y);
     }
-    const size_t chunk_cols =
-        min(static_cast<size_t>(CHUNK_DIM_X), cols - block_offset_X);
+    const size_t chunk_cols = min(static_cast<size_t>(CHUNK_DIM_X), cols - block_offset_X);
     const int stages_Y = static_cast<int>(DIVUP(chunk_rows, static_cast<size_t>(BUFF_DIM_Y)));
     const int stages_X = static_cast<int>(DIVUP(chunk_cols, static_cast<size_t>(TILE_DIM_X)));
     const int stages = stages_X * stages_Y;
@@ -965,15 +962,13 @@ __global__ void __launch_bounds__(CastTraits::THREADS_PER_CHUNK) group_quantize_
       const size_t buff = buff_in;
       const size_t stage_scales_offset_X_rowwise =
           scales_offset_X_rowwise + stage_X * TILE_DIM_X / SCALE_DIM_X;
-      const size_t stage_scales_offset_X_colwise =
-          scales_offset_X_colwise + stage_X * TILE_DIM_X;
+      const size_t stage_scales_offset_X_colwise = scales_offset_X_colwise + stage_X * TILE_DIM_X;
       const bool rowwise_scale_is_within_bounds =
           stage_scales_offset_X_rowwise * SCALE_DIM_X < cols;
       if constexpr (COLWISE_SCALING) {
         process_colwise_stage<CastTraits, IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType,
                               ROWWISE_SCALING, WITH_GEMM_SWIZZLED_SCALES, kIs2DBlockScaling>(
-            buff, stage_Y, tid_X_colwise, scales_offset_Y_colwise,
-            stage_scales_offset_X_colwise,
+            buff, stage_Y, tid_X_colwise, scales_offset_Y_colwise, stage_scales_offset_X_colwise,
             scale_stride_colwise, tensor_base_for_scales, rows, cols, sIn_ptr, sActIn_ptr,
             sCachedAct_ptr, sOutColwise_ptr, scales_colwise, partial_dbias_colwise[stage_X]);
       }
@@ -1038,8 +1033,7 @@ __global__ void __launch_bounds__(CastTraits::THREADS_PER_CHUNK) group_quantize_
             }
             __syncthreads();
           }
-          const size_t dbias_offset_X =
-              block_offset_X + stage_X * TILE_DIM_X + threadIdx.x;
+          const size_t dbias_offset_X = block_offset_X + stage_X * TILE_DIM_X + threadIdx.x;
           const size_t dbias_idx = dbias_offset_Y * cols + dbias_offset_X;
           if (dbias_offset_X < cols) {
             dbias_workspace[dbias_idx] = thread_partial_dbias;
@@ -1257,13 +1251,11 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
                           const IType *const input_dptr =
                               reinterpret_cast<const IType *>(input->data.dptr);
                           const IType *const act_input_dptr =
-                              IS_DACT
-                                  ? reinterpret_cast<const IType *>(activations->data.dptr)
-                                  : nullptr;
+                              IS_DACT ? reinterpret_cast<const IType *>(activations->data.dptr)
+                                      : nullptr;
                           OType *const output_rowwise_dptr =
-                              use_rowwise_scaling
-                                  ? reinterpret_cast<OType *>(output->data.dptr)
-                                  : nullptr;
+                              use_rowwise_scaling ? reinterpret_cast<OType *>(output->data.dptr)
+                                                  : nullptr;
                           OType *const output_colwise_dptr =
                               use_colwise_scaling
                                   ? reinterpret_cast<OType *>(output->columnwise_data.dptr)
