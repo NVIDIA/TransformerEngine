@@ -1340,31 +1340,17 @@ def register_custom_op(
 ) -> Optional[Callable[..., Any]]:
     """Register a TE module's forward + backward as torch custom ops.
 
-    Always two-tier: a base ``<op>_base`` op carries the real schema /
-    autograd, and a wrapper ``<op>`` op forwards to it, flattening any
-    quantized-tensor wrapper inputs first via ``register_torch_dispatch`` (an
-    empty subclass list simply makes the wrapper op a pass-through, so a pure
-    plain-tensor / bf16 call goes straight through).
-
     Returns ``forward_fn(fwd_arg_type_instance)`` -- a drop-in for
     ``Function.apply`` under ``torch.compiler.is_compiling()`` that dispatches
-    through the wrapper op and returns the user-facing outputs.
+    through the op and returns the user-facing outputs.
 
-    Arg containers. ``fwd_arg_type`` and ``bwd_arg_type`` are ``@dataclass``es
-    whose *field annotations* define the op schema: each field maps to one or more
-    flat schema slots (tensor fields cross the boundary as tensors, quantizers ride
-    as value-opaque objects, simple values are bundled -- see the ``_Adapter``
-    classes). The caller builds a ``fwd_arg_type`` instance and passes it to the
-    returned ``forward_fn``.
-
-    How the backward container is populated. ``setup_context`` fills the
-    ``bwd_arg_type`` instance's non-tensor fields (quantizers, config) from
-    forward state and returns the tensors to persist; the framework saves them
-    (``ctx.save_for_backward``). Before ``bwd_impl`` runs, the framework
-    restores those tensors into the container's *tensor* fields by calling its
-    optional ``setup_saved_tensors(self, ctx)`` hook (invoked only if defined),
-    and sets ``grad_output`` directly. So ``bwd_impl`` receives a
-    fully-populated ``bwd_arg_type``.
+    ``fwd_arg_type`` and ``bwd_arg_type`` are ``@dataclass``es whose *field
+    annotations* define the op schema (see the module docstring for the
+    field <-> slot mapping). The caller builds a ``fwd_arg_type`` instance and
+    passes it to ``forward_fn``. ``input_tensors_for_grad`` lists the
+    ``fwd_arg_type`` fields that receive gradients and fixes the backward grad
+    order. ``bwd_arg_type`` is also instantiated by the framework
+    (``bwd_arg_type()``), so it must be constructible with no arguments.
 
     Callable contracts:
 
@@ -1385,13 +1371,16 @@ def register_custom_op(
       non-differentiable input).
     * ``bwd_fake_impl(bwd_args)`` -- data-free twin of ``bwd_impl`` returning
       :class:`TensorSpec` grads.
-    * ``bwd_arg_type.setup_saved_tensors(ctx)`` -- optional hook on the backward
-      container (see above); skipped if absent.
+    * ``bwd_arg_type.setup_saved_tensors(ctx)`` -- optional hook; skipped if
+      absent.
 
-    ``input_tensors_for_grad`` lists the ``fwd_arg_type`` fields that receive
-    gradients (this fixes the backward grad order). ``bwd_arg_type`` is both
-    the schema source and the type instantiated (``bwd_arg_type()``) to hold
-    the backward args, so it must be constructible with no arguments.
+    How the backward container is populated: ``setup_context`` fills the
+    ``bwd_arg_type`` instance's non-tensor fields (quantizers, config) from
+    forward state and returns the tensors to persist; the framework saves them
+    via ``ctx.save_for_backward``. Before ``bwd_impl`` runs, the framework
+    restores them into the container's tensor fields through the
+    ``setup_saved_tensors`` hook and sets ``grad_output`` directly, so
+    ``bwd_impl`` receives a fully-populated ``bwd_arg_type``.
 
     Registration touches experimental ``torch.library`` / opaque-object APIs
     that may be missing on older PyTorch. If it fails, this warns once and
