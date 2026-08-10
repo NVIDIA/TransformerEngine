@@ -8,16 +8,11 @@ Registers TE modules' eager forward/backward as ``torch.library`` custom ops so
 ``torch.compile(fullgraph=True)`` traces them as single graph nodes.
 ``register_custom_op`` is the entry point; ``module/linear.py`` is the first user.
 
-A TE op's forward/backward is written as a plain impl over a single *args
-dataclass* (``fwd_arg_type`` / ``bwd_arg_type``, e.g. ``LinearFwdArgs``): its
-fields are a mix of tensors, quantized tensors, quantizers, process groups,
-scalars and other Python values. The forward impl returns a tuple (user outputs +
-saved-for-backward tensors + ctx metadata); the backward impl returns one gradient
-per differentiable input.
-
-A ``torch.library`` custom op is narrower: it takes a flat list of schema slots
--- tensors / ``Tensor[]`` plus, via torch's opaque-object support, value-opaque
-and reference-opaque objects -- and returns a flat ``Tensor[]``.
+A TE forward/backward implementation takes one dataclass argument
+(``fwd_arg_type`` / ``bwd_arg_type``, e.g. ``LinearFwdArgs``) whose fields mix
+tensors, quantized tensors, quantizers, process groups and plain Python values,
+while a ``torch.library`` custom op only accepts flat schema slots (tensors plus
+opaque objects) and returns a flat ``Tensor[]``.
 
 Bridging the two takes three parts (below): per-field *adapters* map the args
 dataclass onto the op's input slots; *fake impls* on data-free specs give the
