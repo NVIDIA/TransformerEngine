@@ -385,31 +385,6 @@ def test_mxfp8_2d_quantize_bidirectional_scales_match(
     )
 
 
-def test_mxfp8_recipe_default_2d_quantization_disabled(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """MXFP8 2D quantization is opt-in."""
-    monkeypatch.setenv("NVTE_MXFP8_ENABLE_2D_QUANTIZATION", "0")
-    mxfp8_recipe = MXFP8BlockScaling()
-    assert mxfp8_recipe.enable_2d_quantization is False
-
-    state = MXFP8BlockScalingRecipeState(
-        recipe=mxfp8_recipe,
-        mode="forward",
-        num_quantizers=3,
-        roles=[
-            QuantizerRole(module_type="linear", tensor_type="input"),
-            QuantizerRole(module_type="linear", tensor_type="weight"),
-            QuantizerRole(module_type="linear", tensor_type="output"),
-        ],
-    )
-    assert [q.with_2d_quantization for q in state.make_quantizers()] == [
-        False,
-        False,
-        False,
-    ]
-
-
 def test_mxfp8_recipe_state_uses_2d_only_for_forward_weights() -> None:
     """Only forward weight quantizers should inherit MXFP8 2D quantization."""
     recipe = MXFP8BlockScaling(enable_2d_quantization=True)
@@ -451,11 +426,31 @@ def test_mxfp8_recipe_state_2d_requires_explicit_weight_role() -> None:
     ]
 
 
-def test_mxfp8_recipe_state_2d_ignores_unsupported_roles() -> None:
-    """MXFP8 2D is limited to regular Linear weight quantizers."""
+def test_mxfp8_recipe_state_uses_2d_for_grouped_linear_weights() -> None:
+    """GroupedLinear weight quantizers should inherit MXFP8 2D quantization."""
     recipe = MXFP8BlockScaling(enable_2d_quantization=True)
     roles = [
+        QuantizerRole(module_type="grouped_linear", tensor_type="input"),
         QuantizerRole(module_type="grouped_linear", tensor_type="weight"),
+        QuantizerRole(module_type="grouped_linear", tensor_type="output"),
+    ]
+    state = MXFP8BlockScalingRecipeState(
+        recipe=recipe,
+        mode="forward",
+        num_quantizers=len(roles),
+        roles=roles,
+    )
+    assert [q.with_2d_quantization for q in state.make_quantizers()] == [
+        False,
+        True,
+        False,
+    ]
+
+
+def test_mxfp8_recipe_state_2d_ignores_unsupported_roles() -> None:
+    """MXFP8 2D is limited to supported Linear weight quantizers."""
+    recipe = MXFP8BlockScaling(enable_2d_quantization=True)
+    roles = [
         QuantizerRole(module_type="dpa", tensor_type="qkv"),
         QuantizerRole(module_type="dpa", tensor_type="weight"),
         QuantizerRole(module_type="", tensor_type="weight"),
@@ -467,7 +462,6 @@ def test_mxfp8_recipe_state_2d_ignores_unsupported_roles() -> None:
         roles=roles,
     )
     assert [q.with_2d_quantization for q in state.make_quantizers()] == [
-        False,
         False,
         False,
         False,
