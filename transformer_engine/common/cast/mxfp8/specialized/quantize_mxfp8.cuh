@@ -133,8 +133,7 @@ struct CastTraits;
 
 // 1x32
 template <typename _IType, typename _OType, bool _kSwizzled>
-struct CastTraits<_IType, _OType, /*rowwise=*/true, /*colwise=*/false,
-                  _kSwizzled> {
+struct CastTraits<_IType, _OType, /*rowwise=*/true, /*colwise=*/false, _kSwizzled> {
   static constexpr bool isRowwise = true;
   static constexpr bool isColwise = false;
   using IType = _IType;
@@ -735,12 +734,8 @@ struct CastTraits<_IType, _OType, /*rowwise=*/true, /*colwise=*/true> {
 // changes to the kernel signature. Kernel #1 (rowwise-only) and Kernel #2
 // (warp-specialized row+col) don't accept it: kernel #1 requires isColwise=false,
 // kernel #2 requires _use_warp_specialization=true - both are wrong here.
-template <typename _IType, typename _OType,
-          int  _NumStages     = 2,
-          int  _IterM         = 1,
-          int  _IterN         = 4,
-          bool _kCacheColwise = true,
-          bool _kSwizzled     = true>
+template <typename _IType, typename _OType, int _NumStages = 2, int _IterM = 1, int _IterN = 4,
+          bool _kCacheColwise = true, bool _kSwizzled = true>
 struct CastTraitsSwizzle {
   static constexpr bool isRowwise = true;
   static constexpr bool isColwise = true;
@@ -818,7 +813,7 @@ struct CastTraitsSwizzle {
   // The two colwise-scale features exposed as caller-controllable trait axes.
   // Both default to true so callers get the vectorized swizzled path by default.
   static constexpr bool _cache_colwise_scale_in_smem = _kCacheColwise;
-  static constexpr bool _with_swizzled_scales        = _kSwizzled;
+  static constexpr bool _with_swizzled_scales = _kSwizzled;
 
   static constexpr int32_t numWarps = warpLayout::num + 2 * (int32_t)_use_warp_specialization;
   static constexpr int32_t numThreads = numWarps * THREADS_PER_WARP;
@@ -843,26 +838,23 @@ struct CastTraitsSwizzle {
 
   // Extra shmem for cached colwise scales - only when the flag is on.
   static constexpr size_t smem_colwise_scale =
-      _cache_colwise_scale_in_smem
-          ? (blockDIM::M / colChunkElems) * blockDIM::N * sizeof(e8m0_t)
-          : 0ul;
+      _cache_colwise_scale_in_smem ? (blockDIM::M / colChunkElems) * blockDIM::N * sizeof(e8m0_t)
+                                   : 0ul;
 
   using ColwiseReduceDataType = float;
-  static constexpr bool _need_smem_for_colwise_reduce =
-      _colwise_source_coming_from_rowwise;
+  static constexpr bool _need_smem_for_colwise_reduce = _colwise_source_coming_from_rowwise;
   static constexpr size_t smem_colwise_reduce =
       _need_smem_for_colwise_reduce
           ? THREADS_PER_WARP * warpLayout::num * sizeof(ColwiseReduceDataType)
           : 0ul;
 
   static constexpr size_t smem_alignment = _tma_swizzle ? 1024ul : 128ul;
-  static constexpr size_t smem = _reuse_input_out_smem
-                                     ? (std::max(smemInput, smemColwiseOutput) + smemRowwiseOutput +
-                                        smem_alignment + smem_rowwise_scale +
-                                        smem_colwise_scale + smem_colwise_reduce)
-                                     : (smemInput + smemRowwiseOutput + smemColwiseOutput +
-                                        smem_alignment + smem_rowwise_scale +
-                                        smem_colwise_scale + smem_colwise_reduce);
+  static constexpr size_t smem =
+      _reuse_input_out_smem
+          ? (std::max(smemInput, smemColwiseOutput) + smemRowwiseOutput + smem_alignment +
+             smem_rowwise_scale + smem_colwise_scale + smem_colwise_reduce)
+          : (smemInput + smemRowwiseOutput + smemColwiseOutput + smem_alignment +
+             smem_rowwise_scale + smem_colwise_scale + smem_colwise_reduce);
 };
 
 __device__ __forceinline__ intptr_t align_to(intptr_t x, intptr_t align) {
@@ -939,10 +931,8 @@ __global__ void quantize_mxfp8_kernel_cast_only(
 #pragma unroll
     for (int32_t i = 0; i < CastTraits::numStages; i++) {
       ptx::mbarrier_init(&ldg_producer[i], 1);
-      ptx::mbarrier_init(&ldg_consumer[i],
-                         CastTraits::warpLayout::num * THREADS_PER_WARP);
-      ptx::mbarrier_init(&stg_producer[i],
-                         CastTraits::warpLayout::num * THREADS_PER_WARP);
+      ptx::mbarrier_init(&ldg_consumer[i], CastTraits::warpLayout::num * THREADS_PER_WARP);
+      ptx::mbarrier_init(&stg_producer[i], CastTraits::warpLayout::num * THREADS_PER_WARP);
       ptx::mbarrier_init(&stg_consumer[i], 1);
     }
     ptx::fence_mbarrier_init_release_cluster();
@@ -1625,12 +1615,10 @@ __global__ void quantize_mxfp8_kernel_cast_only(
                   iter_n * (CastTraits::blockIterDim::N / CastTraits::rowChunkElems);
               sRowwiseScale[rowwise_scale_offset] = row_biased_exponent;
             } else if constexpr (CastTraits::_with_swizzled_scales) {
-              int32_t abs_row =
-                  row_scale_row_base + iter_m * CastTraits::blockIterDim::M;
+              int32_t abs_row = row_scale_row_base + iter_m * CastTraits::blockIterDim::M;
               int32_t abs_col = row_scale_col_base +
                                 iter_n * (CastTraits::blockIterDim::N / CastTraits::rowChunkElems);
-              size_t idx =
-                  gemm_swizzled_scale_idx(abs_row, abs_col, row_swz_num_tiles_X);
+              size_t idx = gemm_swizzled_scale_idx(abs_row, abs_col, row_swz_num_tiles_X);
               scales_rowwise[idx] = row_biased_exponent;
             } else {
               size_t rowwise_scale_offset =
@@ -1649,16 +1637,13 @@ __global__ void quantize_mxfp8_kernel_cast_only(
             sColwiseReduce[threadIdx.x] = col_scale_inverse;
             if constexpr (CastTraits::_cache_colwise_scale_in_smem) {
               // Cache in shmem; end-of-kernel flush handles gmem indexing.
-              int32_t smem_row =
-                  (warp_coords.y + (threadIdx.x / CastTraits::colThreadLayout::N) *
-                                       CastTraits::colChunkElems) /
-                      CastTraits::colChunkElems +
-                  iter_m * (CastTraits::blockIterDim::M / CastTraits::colChunkElems);
-              int32_t smem_col =
-                  warp_coords.x + (threadIdx.x % CastTraits::colThreadLayout::N) +
-                  iter_n * CastTraits::blockIterDim::N;
-              sColwiseScale[smem_row * CastTraits::blockDIM::N + smem_col] =
-                  col_biased_exponent;
+              int32_t smem_row = (warp_coords.y + (threadIdx.x / CastTraits::colThreadLayout::N) *
+                                                      CastTraits::colChunkElems) /
+                                     CastTraits::colChunkElems +
+                                 iter_m * (CastTraits::blockIterDim::M / CastTraits::colChunkElems);
+              int32_t smem_col = warp_coords.x + (threadIdx.x % CastTraits::colThreadLayout::N) +
+                                 iter_n * CastTraits::blockIterDim::N;
+              sColwiseScale[smem_row * CastTraits::blockDIM::N + smem_col] = col_biased_exponent;
             } else if constexpr (CastTraits::_with_swizzled_scales) {
               int32_t abs_row = col_scale_row_base +
                                 iter_m * (CastTraits::blockIterDim::M / CastTraits::colChunkElems);
@@ -1666,8 +1651,7 @@ __global__ void quantize_mxfp8_kernel_cast_only(
               // Colwise scale tensor's X/Y axes are transposed vs rowwise
               // (see col_swz_num_tiles_X = DIVUP(rows, 128)), so pass
               // (abs_col, abs_row) - abs_col is the swizzle "row" dim.
-              size_t idx =
-                  gemm_swizzled_scale_idx(abs_col, abs_row, col_swz_num_tiles_X);
+              size_t idx = gemm_swizzled_scale_idx(abs_col, abs_row, col_swz_num_tiles_X);
               scales_colwise[idx] = col_biased_exponent;
             } else {
               size_t colwise_scale_offset =
@@ -1825,8 +1809,8 @@ __global__ void quantize_mxfp8_kernel_cast_only(
         int32_t group = i % groups_per_row;
         int32_t col = group * cols_per_group;
 
-        uint32_t val4 = *reinterpret_cast<const uint32_t *>(
-            &sRowwiseScale[row * stride_in_smem + col]);
+        uint32_t val4 =
+            *reinterpret_cast<const uint32_t *>(&sRowwiseScale[row * stride_in_smem + col]);
 
         int32_t abs_row = block_coords.y + row;
         int32_t abs_col = base_col + col;
@@ -1871,7 +1855,8 @@ __global__ void quantize_mxfp8_kernel_cast_only(
              i += CastTraits::warpLayout::num * THREADS_PER_WARP) {
           int32_t row = i / num_threads_per_row;
           int32_t col = i % num_threads_per_row;
-          gScales[row * gmem_stride_in_group + col] = sScales[row * num_groups_per_row_in_smem + col];
+          gScales[row * gmem_stride_in_group + col] =
+              sScales[row * num_groups_per_row_in_smem + col];
         }
       } else {
         using DataType = PreferredDataType;
@@ -1891,7 +1876,8 @@ __global__ void quantize_mxfp8_kernel_cast_only(
              i += CastTraits::warpLayout::num * THREADS_PER_WARP) {
           int32_t row = i / num_threads_per_row;
           int32_t col = i % num_threads_per_row;
-          gScales[row * gmem_stride_in_group + col] = sScales[row * num_groups_per_row_in_smem + col];
+          gScales[row * gmem_stride_in_group + col] =
+              sScales[row * num_groups_per_row_in_smem + col];
         }
       }
     }
@@ -1928,13 +1914,11 @@ __global__ void quantize_mxfp8_kernel_cast_only(
       size_t idx = gemm_swizzled_scale_idx(abs_col, abs_row, col_swz_num_tiles_X);
       if (((abs_row & 3) != 3) &&
           ((reinterpret_cast<uintptr_t>(&scales_colwise[idx]) & (alignof(uint16_t) - 1)) == 0)) {
-        uint16_t val2 =
-            static_cast<uint16_t>(val0) | (static_cast<uint16_t>(val1) << 8);
+        uint16_t val2 = static_cast<uint16_t>(val0) | (static_cast<uint16_t>(val1) << 8);
         *reinterpret_cast<uint16_t *>(&scales_colwise[idx]) = val2;
       } else {
         scales_colwise[idx] = val0;
-        size_t idx1 =
-            gemm_swizzled_scale_idx(abs_col, abs_row + 1, col_swz_num_tiles_X);
+        size_t idx1 = gemm_swizzled_scale_idx(abs_col, abs_row + 1, col_swz_num_tiles_X);
         scales_colwise[idx1] = val1;
       }
     }
@@ -1945,8 +1929,7 @@ __global__ void quantize_mxfp8_kernel_cast_only(
            i += CastTraits::warpLayout::num * THREADS_PER_WARP) {
         const int32_t col = i;
         e8m0_t val = sColwiseScale[row * CastTraits::blockDIM::N + col];
-        size_t idx = gemm_swizzled_scale_idx(block_coords.x + col,
-                                             scale_row_base + row,
+        size_t idx = gemm_swizzled_scale_idx(block_coords.x + col, scale_row_base + row,
                                              col_swz_num_tiles_X);
         scales_colwise[idx] = val;
       }
@@ -1977,11 +1960,11 @@ __global__ void quantize_mxfp8_kernel_cast_only(
       int32_t row = i / groups_per_row;
       int32_t group = i % groups_per_row;
       int32_t col = group * cols_per_group;
-      uint32_t val4 = *reinterpret_cast<const uint32_t *>(
-          &sColwiseScale[row * CastTraits::blockDIM::N + col]);
-      size_t idx = static_cast<size_t>(scale_row_base + row) *
-                       static_cast<size_t>(scale_stride_colwise) +
-                   static_cast<size_t>(block_coords.x + col);
+      uint32_t val4 =
+          *reinterpret_cast<const uint32_t *>(&sColwiseScale[row * CastTraits::blockDIM::N + col]);
+      size_t idx =
+          static_cast<size_t>(scale_row_base + row) * static_cast<size_t>(scale_stride_colwise) +
+          static_cast<size_t>(block_coords.x + col);
       *reinterpret_cast<uint32_t *>(&scales_colwise[idx]) = val4;
     }
     // Column tail (valid_cols not multiple of 4).
@@ -1994,9 +1977,9 @@ __global__ void quantize_mxfp8_kernel_cast_only(
         int32_t row = i / remaining_cols;
         int32_t col = remaining_start + (i % remaining_cols);
         e8m0_t val = sColwiseScale[row * CastTraits::blockDIM::N + col];
-        size_t idx = static_cast<size_t>(scale_row_base + row) *
-                         static_cast<size_t>(scale_stride_colwise) +
-                     static_cast<size_t>(block_coords.x + col);
+        size_t idx =
+            static_cast<size_t>(scale_row_base + row) * static_cast<size_t>(scale_stride_colwise) +
+            static_cast<size_t>(block_coords.x + col);
         scales_colwise[idx] = val;
       }
     }

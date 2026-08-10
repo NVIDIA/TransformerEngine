@@ -701,8 +701,7 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
               const bool scaling_type_has_specialized_support =
                   (scaling_type == ScalingType::ROWWISE && is_full_rowwise_chunk &&
                    rowwise_specialized_grid_fits) ||
-                  (scaling_type == ScalingType::BIDIMENSIONAL &&
-                   has_full_bidimensional_chunks &&
+                  (scaling_type == ScalingType::BIDIMENSIONAL && has_full_bidimensional_chunks &&
                    bidimensional_specialized_grid_fits);
 
               // Specialized cast-only kernels do not consume the device noop flag.
@@ -712,8 +711,8 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
                   scaling_type_has_specialized_support) {
                 switch (scaling_type) {
                   case ScalingType::ROWWISE: {
-                    using traits = specialized::CastTraits<
-                        IType, OType, true, false, WITH_GEMM_SWIZZLED_SCALES>;
+                    using traits = specialized::CastTraits<IType, OType, true, false,
+                                                           WITH_GEMM_SWIZZLED_SCALES>;
                     auto kernel = specialized::quantize_mxfp8_kernel_cast_only<traits>;
 
                     NVTE_CHECK_CUDA(cudaFuncSetAttribute(
@@ -732,11 +731,11 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
                     break;
                   }
                   case ScalingType::BIDIMENSIONAL: {
-                    using traits = specialized::CastTraitsSwizzle<
-                        IType, OType,
-                        /*NumStages=*/2, /*IterM=*/1, /*IterN=*/4,
-                        /*kCacheColwise=*/WITH_GEMM_SWIZZLED_SCALES,
-                        /*kSwizzled=*/WITH_GEMM_SWIZZLED_SCALES>;
+                    using traits =
+                        specialized::CastTraitsSwizzle<IType, OType,
+                                                       /*NumStages=*/2, /*IterM=*/1, /*IterN=*/4,
+                                                       /*kCacheColwise=*/WITH_GEMM_SWIZZLED_SCALES,
+                                                       /*kSwizzled=*/WITH_GEMM_SWIZZLED_SCALES>;
                     auto kernel = specialized::quantize_mxfp8_kernel_cast_only<traits>;
 
                     NVTE_CHECK_CUDA(cudaFuncSetAttribute(
