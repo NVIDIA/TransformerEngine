@@ -348,24 +348,33 @@ class SReLU(_ActivationOperation):
         return tex.dsrelu(*args, **kwargs)
 
 
-class ScaledSReLU(BasicOperation):
-    r"""Squared ReLU with per-row post-scaling.
-
-    If the SReLU output has shape ``(d_1, ..., d_n)``, it is multiplied
-    with an extra input tensor of shape ``(d_1, ..., d_{n-1})``.
-
-    Parameters
-    ----------
-    activation_recompute_in_mlp : bool, default = ``False``
-        Enable fused grouped MLP kernels to recompute activation outputs
-        during backward when supported instead of saving them.
-    """
+class _ScaledUnary(BasicOperation, metaclass=abc.ABCMeta):
+    """Unary activation with per-row scales (fused grouped MLP middle op)."""
 
     num_extra_inputs: int = 1
 
     def __init__(self, *, activation_recompute_in_mlp: bool = False) -> None:
         super().__init__()
         self.activation_recompute_in_mlp: bool = activation_recompute_in_mlp
+
+    @abc.abstractmethod
+    def _scaled_unary_forward(
+        self,
+        input_: torch.Tensor,
+        scales: torch.Tensor,
+    ) -> torch.Tensor:
+        """Apply the scaled unary activation."""
+
+    @abc.abstractmethod
+    def _scaled_unary_backward(
+        self,
+        grad_output: torch.Tensor,
+        input_: torch.Tensor,
+        scales: torch.Tensor,
+        *,
+        compute_scale_grad: bool,
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """Apply the scaled unary activation backward pass."""
 
     def op_forward(self, *args, **kwargs) -> None:
         raise RuntimeError(
@@ -410,7 +419,7 @@ class ScaledSReLU(BasicOperation):
 
         x = maybe_dequantize(input_.contiguous(), dtype)
         scales = maybe_dequantize(extra_input, dtype)
-        y = tex.srelu(x, None) * scales.unsqueeze(-1)
+        y = self._scaled_unary_forward(x, scales)
 
         ctx = basic_op_ctxs[0]
         if ctx.requires_grad:
@@ -448,19 +457,55 @@ class ScaledSReLU(BasicOperation):
         scales = maybe_dequantize(scales, ctx.dtype)
         grad_output = maybe_dequantize(grad_output.contiguous(), ctx.dtype)
 
-        grad_input = None
-        if ctx.input_requires_grad:
-            grad_srelu_out = grad_output * scales.unsqueeze(-1)
-            grad_input = tex.dsrelu(grad_srelu_out, x, None)
-
-        grad_extra_input = None
-        if ctx.extra_input_requires_grad:
-            srelu_out = tex.srelu(x, None)
-            grad_extra_input = torch.linalg.vecdot(srelu_out, grad_output)
+        grad_input, grad_extra_input = self._scaled_unary_backward(
+            grad_output,
+            x,
+            scales,
+            compute_scale_grad=ctx.extra_input_requires_grad,
+        )
+        if not ctx.input_requires_grad:
+            grad_input = None
 
         clear_tensor_data(ctx.saved_tensors[0])
 
         return grad_input, [()], [(grad_extra_input,)]
+
+
+class ScaledSReLU(_ScaledUnary):
+    r"""Squared ReLU with per-row post-scaling.
+
+    If the SReLU output has shape ``(d_1, ..., d_n)``, it is multiplied
+    with an extra input tensor of shape ``(d_1, ..., d_{n-1})``.
+
+    Parameters
+    ----------
+    activation_recompute_in_mlp : bool, default = ``False``
+        Enable fused grouped MLP kernels to recompute activation outputs
+        during backward when supported instead of saving them.
+    """
+
+    def _scaled_unary_forward(
+        self,
+        input_: torch.Tensor,
+        scales: torch.Tensor,
+    ) -> torch.Tensor:
+        return tex.scaled_srelu(input_, scales, None)
+
+    def _scaled_unary_backward(
+        self,
+        grad_output: torch.Tensor,
+        input_: torch.Tensor,
+        scales: torch.Tensor,
+        *,
+        compute_scale_grad: bool,
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        return tex.scaled_dsrelu(
+            grad_output,
+            input_,
+            scales,
+            None,
+            compute_scale_grad,
+        )
 
 
 class SReGLU(_ActivationOperation):
