@@ -380,6 +380,25 @@ def _ensure_distributed_opaque_types() -> None:
 _ensure_distributed_opaque_types()
 
 
+def _compute_pg_reference_opaque() -> bool:
+    if _is_opaque_reference_type is None:
+        return False
+    try:
+        from torch._C._distributed_c10d import (  # pylint: disable=import-outside-toplevel
+            ProcessGroup,
+        )
+
+        return bool(_is_opaque_reference_type(ProcessGroup))
+    except Exception:  # pylint: disable=broad-exception-caught
+        return False
+
+
+# Whether ProcessGroup ended up registered as a reference-opaque type, i.e.
+# whether a process group can cross the op boundary as a live graph input.
+# Process-global and fixed at import, so a plain constant (Dynamo-friendly).
+PG_REFERENCE_OPAQUE: bool = _compute_pg_reference_opaque()
+
+
 # --------------------------------------------------------------------------- #
 # Storage flatten / unflatten (value-opaque quantizer; no ProcessGroup)
 # --------------------------------------------------------------------------- #
