@@ -120,10 +120,11 @@ if get_device_compute_capability(0) < 100:
 from transformer_engine.jax.flax import _MoEBlock as MoEBlock
 from transformer_engine.jax.moe import (
     _ALIGN_SIZE,
+    get_moe_recv_capacity_per_rank,
     moe,
     record_ep_bootstrap_signature_for_moe,
 )
-from transformer_engine.jax.ep import ep_bootstrap
+from transformer_engine.jax.ep import ep_bootstrap, ep_finalize
 from transformer_engine.jax.sharding import MeshResource, global_shard_guard
 
 
@@ -208,34 +209,6 @@ AUX_RTOL = 1e-3
 # -----------------------------------------------------------------------------
 
 
-def _compute_worst_case_recv_pr():
-    """Per-rank recv buffer the bootstrap must reserve.
-
-    NCCL EP HT expert-major uses one flat recv buffer with variable
-    per-expert zones. Each non-empty expert zone is padded to
-    ``_ALIGN_SIZE`` slots, so the reserve must cover the worst-case
-    total assignments plus independent per-zone padding.
-    """
-    num_procs = jax.device_count()
-    num_local_experts = NUM_EXPERTS // EP_SIZE
-    max_tokens_per_rank = (BATCH // num_procs) * SEQ
-    tokens_per_ep_group = EP_SIZE * max_tokens_per_rank
-    max_local_assignments = tokens_per_ep_group * min(TOPK, num_local_experts)
-    max_nonempty_experts = min(num_local_experts, max_local_assignments)
-    padded_total_bound = (
-        max_local_assignments + (_ALIGN_SIZE - 1) * max_nonempty_experts
-    )
-    aligned_total_bound = (
-        (padded_total_bound + _ALIGN_SIZE - 1) // _ALIGN_SIZE
-    ) * _ALIGN_SIZE
-    per_expert_bound = (
-        num_local_experts
-        * ((tokens_per_ep_group + _ALIGN_SIZE - 1) // _ALIGN_SIZE)
-        * _ALIGN_SIZE
-    )
-    return min(per_expert_bound, aligned_total_bound)
-
-
 @pytest.fixture(scope="module")
 def mesh():
     if jax.device_count() < NUM_DEVICES_REQUIRED:
@@ -251,7 +224,13 @@ def mesh():
 
     num_procs = jax.process_count()
     max_tokens_per_rank = (BATCH // num_procs) * SEQ
-    recv_capacity_per_rank = _compute_worst_case_recv_pr()
+    recv_capacity_per_rank = get_moe_recv_capacity_per_rank(
+        num_experts=NUM_EXPERTS,
+        num_experts_per_tok=TOPK,
+        max_tokens_per_rank=max_tokens_per_rank,
+        ep_size=EP_SIZE,
+        recv_capacity_factor=2.0,
+    )
 
     # Eager bootstrap: ep_bootstrap does a host-side NCCL UID allgather
     # and cannot run from inside jax.jit. Sized to the worst-case recv_pr
@@ -267,6 +246,7 @@ def mesh():
             recv_capacity_per_rank=recv_capacity_per_rank,
             hidden_dim=HIDDEN,
             max_token_dtype=DTYPE,
+            drop_on_overflow=True,
         )
     record_ep_bootstrap_signature_for_moe(
         num_experts=NUM_EXPERTS,
@@ -408,7 +388,16 @@ def _make_block(
     expert_bias_init=None,
     compound_expert_sharding=False,
     input_axes=("batch", None, None),
+    recv_capacity_per_rank=None,
 ):
+    if recv_capacity_per_rank is None:
+        recv_capacity_per_rank = get_moe_recv_capacity_per_rank(
+            num_experts=NUM_EXPERTS,
+            num_experts_per_tok=TOPK,
+            max_tokens_per_rank=(BATCH // jax.process_count()) * SEQ,
+            ep_size=EP_SIZE,
+            recv_capacity_factor=2.0,
+        )
     kwargs = dict(
         num_experts=NUM_EXPERTS,
         num_experts_per_tok=TOPK,
@@ -420,6 +409,7 @@ def _make_block(
         score_function=score_function,
         dtype=DTYPE,
         input_axes=input_axes,
+        recv_capacity_per_rank=recv_capacity_per_rank,
     )
     if compound_expert_sharding:
         # Match MaxText shard_exp_on_fsdp=True: FSDP and EP both shard the
@@ -443,6 +433,13 @@ def _strong_expert_bias_init(key, shape, dtype):
             jnp.full((n - n // 2,), -5.0, dtype=dtype),
         ]
     )
+
+
+def _cross_rank_expert_bias_init(key, shape, dtype):
+    """Select one expert on each EP rank for a balanced reduced-capacity test."""
+    del key
+    bias = jnp.full(shape, -5.0, dtype=dtype)
+    return bias.at[jnp.asarray((0, shape[0] // EP_SIZE))].set(5.0)
 
 
 def _shard_inputs(x, mesh):
@@ -890,6 +887,45 @@ def _reference_kwargs_from_config(config, params_np):
             else None
         ),
     )
+
+
+class TestTeEpMoeReceiveCapacity:
+    """Reduced receive buffers preserve valid results and report overflow."""
+
+    def test_capacity_helper(self):
+        # Use a production-like token count where alignment does not collapse
+        # balanced and worst-case capacities to the same small test buffer.
+        max_tpr = 256
+        worst = get_moe_recv_capacity_per_rank(
+            num_experts=NUM_EXPERTS,
+            num_experts_per_tok=TOPK,
+            max_tokens_per_rank=max_tpr,
+            ep_size=EP_SIZE,
+        )
+        balanced = get_moe_recv_capacity_per_rank(
+            num_experts=NUM_EXPERTS,
+            num_experts_per_tok=TOPK,
+            max_tokens_per_rank=max_tpr,
+            ep_size=EP_SIZE,
+            recv_capacity_factor=1.0,
+        )
+        headroom = get_moe_recv_capacity_per_rank(
+            num_experts=NUM_EXPERTS,
+            num_experts_per_tok=TOPK,
+            max_tokens_per_rank=max_tpr,
+            ep_size=EP_SIZE,
+            recv_capacity_factor=2.0,
+        )
+        assert balanced < headroom < worst
+        assert balanced % _ALIGN_SIZE == 0
+        with pytest.raises(ValueError, match="finite and >= 1.0"):
+            get_moe_recv_capacity_per_rank(
+                num_experts=NUM_EXPERTS,
+                num_experts_per_tok=TOPK,
+                max_tokens_per_rank=max_tpr,
+                ep_size=EP_SIZE,
+                recv_capacity_factor=0.5,
+            )
 
 
 class TestTeEpMoeForward:
@@ -1378,3 +1414,76 @@ class TestTeEpMoeAuxLoss:
             )
             assert np.all(np.isfinite(g_local)), f"{name} grad NaN/Inf under main+aux"
             assert np.any(g_local != 0.0), f"{name} grad zero under main+aux"
+
+
+class TestZZTeEpMoeOverflow:
+    """Run last with a small exact capacity: valid routing then overflow."""
+
+    @pytest.fixture(scope="class", autouse=True)
+    @classmethod
+    def reduced_capacity_bootstrap(cls, mesh):
+        del cls
+        max_tpr = (BATCH // jax.process_count()) * SEQ
+        capacity = _ALIGN_SIZE
+        ep_finalize()
+        with mesh, global_shard_guard(
+            MeshResource(ep_resource=EP_AXIS, fsdp_resource=FSDP_AXIS)
+        ):
+            ep_bootstrap(
+                world_size=jax.process_count(),
+                rank=jax.process_index(),
+                num_experts=NUM_EXPERTS,
+                max_tokens_per_rank=max_tpr,
+                recv_capacity_per_rank=capacity,
+                hidden_dim=HIDDEN,
+                max_token_dtype=DTYPE,
+                drop_on_overflow=True,
+            )
+        record_ep_bootstrap_signature_for_moe(
+            num_experts=NUM_EXPERTS,
+            max_tokens_per_rank=max_tpr,
+            recv_capacity_per_rank=capacity,
+            hidden_dim=HIDDEN,
+            ep_size=EP_SIZE,
+        )
+        yield capacity
+
+    @pytest.mark.parametrize(
+        ("expert_bias_init", "expect_overflow"),
+        (
+            pytest.param(_cross_rank_expert_bias_init, False, id="within-capacity"),
+            pytest.param(_strong_expert_bias_init, True, id="overflow"),
+        ),
+    )
+    def test_reduced_capacity_vjp(
+        self, mesh, reduced_capacity_bootstrap, expert_bias_init, expect_overflow
+    ):
+        capacity = reduced_capacity_bootstrap
+
+        x = jax.random.normal(jax.random.PRNGKey(72), (BATCH, SEQ, HIDDEN), dtype=DTYPE)
+        block = _make_block(
+            score_function="sigmoid",
+            use_expert_routing_bias=True,
+            expert_bias_init=expert_bias_init,
+            recv_capacity_per_rank=capacity,
+        )
+        with _ctx(mesh):
+            x_sh = _shard_inputs(x, mesh)
+            variables = jax.jit(block.init)(jax.random.PRNGKey(73), x_sh)
+
+            def loss_fn(variables, inputs):
+                output, _aux, totals = block.apply(variables, inputs)
+                return jnp.mean(output.astype(jnp.float32) ** 2), totals
+
+            (loss, totals), grads = jax.jit(
+                jax.value_and_grad(loss_fn, has_aux=True)
+            )(variables, x_sh)
+            jax.block_until_ready((loss, totals, grads))
+
+        observed = int(_to_global_numpy(totals, mesh).max())
+        assert (observed > capacity) is expect_overflow
+        assert np.isfinite(float(jax.device_get(loss)))
+        assert all(
+            np.all(np.isfinite(np.asarray(jax.device_get(leaf.addressable_data(0)))))
+            for leaf in jax.tree_util.tree_leaves(grads)
+        )

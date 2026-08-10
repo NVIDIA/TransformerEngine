@@ -104,6 +104,9 @@ class _MoEBlock(TransformerEngineBase):
         If ``True``, multiply expert outputs by their top-k weights
         *inside* each shard before ``ep_combine`` (saves one global
         reduction at the cost of an extra broadcast). Default ``False``.
+    recv_capacity_per_rank : Optional[int]
+        Exact aligned receive capacity per EP rank. ``None`` reserves the
+        dropless worst case.
 
     The per-expert dispatch-slot alignment is fixed internally at 128
     tokens (see ``moe._ALIGN_SIZE``) -- the value required by NCCL EP
@@ -149,6 +152,7 @@ class _MoEBlock(TransformerEngineBase):
 
     # MoE knobs forwarded to ``moe()``
     apply_topk_weights_early: bool = False
+    recv_capacity_per_rank: Optional[int] = None
 
     # Dtypes / init / misc
     dtype: DType = jnp.float32
@@ -271,6 +275,7 @@ class _MoEBlock(TransformerEngineBase):
             scaling_factor=self.scaling_factor,
             aux_loss_coeff=self.aux_loss_coeff,
             apply_topk_weights_early=self.apply_topk_weights_early,
+            recv_capacity_per_rank=self.recv_capacity_per_rank,
             ep_axis=ep_axis,
             data_parallelism_axes=self.data_parallelism_axes,
             input_axes=self.input_axes,

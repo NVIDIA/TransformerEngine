@@ -30,6 +30,7 @@ stateful recipes follow the same update semantics as the other TE MLPs.
 ``aux_loss_coeff`` and ``expert_bias`` are also supported.
 """
 
+import math
 import os
 import sys
 import warnings
@@ -52,7 +53,7 @@ from .flax.module import _convert_to_activation_function
 from .router import ScoreFunction, _validate_score_function
 from .sharding import _get_mesh
 
-__all__ = ["moe"]
+__all__ = ["get_moe_recv_capacity_per_rank", "moe"]
 
 
 # Per-expert dispatch-slot alignment fed to ``tex.ep_prepare`` as
@@ -61,6 +62,69 @@ __all__ = ["moe"]
 # TE grouped-GEMM recipes (bf16/fp16/fp8/mxfp8) are satisfied by the
 # same 128-token tile, so a single constant covers every supported path.
 _ALIGN_SIZE = 128
+
+
+def get_moe_recv_capacity_per_rank(
+    *,
+    num_experts: int,
+    num_experts_per_tok: int,
+    max_tokens_per_rank: int,
+    ep_size: int,
+    recv_capacity_factor: Optional[float] = None,
+    alignment: int = _ALIGN_SIZE,
+) -> int:
+    """Return the aligned receive capacity for one EP rank.
+
+    ``recv_capacity_factor=None`` reserves the dropless worst case. A finite
+    factor >= 1 scales the capacity needed by perfectly balanced routing and
+    is capped at the worst case. The balanced baseline includes the independent
+    per-local-expert alignment required by NCCL EP.
+    """
+    if num_experts <= 0 or num_experts_per_tok <= 0 or max_tokens_per_rank <= 0:
+        raise ValueError("num_experts, num_experts_per_tok, and max_tokens_per_rank must be positive")
+    if ep_size <= 0 or num_experts % ep_size != 0:
+        raise ValueError(f"num_experts={num_experts} must be divisible by ep_size={ep_size}")
+    if alignment <= 0:
+        raise ValueError(f"alignment must be positive, got {alignment}")
+    if recv_capacity_factor is not None:
+        recv_capacity_factor = float(recv_capacity_factor)
+        if not math.isfinite(recv_capacity_factor) or recv_capacity_factor < 1.0:
+            raise ValueError(
+                "recv_capacity_factor must be finite and >= 1.0, or None for worst-case capacity; "
+                f"got {recv_capacity_factor}"
+            )
+
+    num_local_experts = num_experts // ep_size
+    tokens_per_ep_group = ep_size * max_tokens_per_rank
+    max_local_assignments = tokens_per_ep_group * min(
+        num_experts_per_tok, num_local_experts
+    )
+    max_nonempty_experts = min(num_local_experts, max_local_assignments)
+    padded_total_bound = max_local_assignments + (alignment - 1) * max_nonempty_experts
+    aligned_total_bound = (
+        (padded_total_bound + alignment - 1) // alignment
+    ) * alignment
+    per_expert_bound = (
+        num_local_experts
+        * ((tokens_per_ep_group + alignment - 1) // alignment)
+        * alignment
+    )
+    worst_case = min(per_expert_bound, aligned_total_bound)
+    if recv_capacity_factor is None:
+        return worst_case
+
+    balanced_per_expert = (
+        max_tokens_per_rank * num_experts_per_tok + num_local_experts - 1
+    ) // num_local_experts
+    balanced_aligned = (
+        num_local_experts
+        * ((balanced_per_expert + alignment - 1) // alignment)
+        * alignment
+    )
+    requested = math.ceil(balanced_aligned * recv_capacity_factor)
+    requested = ((requested + alignment - 1) // alignment) * alignment
+    return min(requested, worst_case)
+
 
 _debug_python_patch = os.getenv("NVTE_DEBUG_PYTHON_PATCH", "0") == "1"
 _debug_moe_numerics = os.getenv("NVTE_DEBUG_MOE_NUMERICS", "0") == "1"
@@ -449,9 +513,9 @@ def _with_sharding_constraint_cast_bwd(x: jnp.ndarray, sharding) -> jnp.ndarray:
 # cannot run from inside a jit-traced function. The caller must bootstrap
 # eagerly once per process before any jitted MoE call, then record the
 # bootstrap signature via ``record_ep_bootstrap_signature_for_moe``. The
-# per-call check below verifies the recorded signature is wide enough for
-# the current MoE invocation (smaller per-call usage is fine since the C++
-# backend reserves worst-case buffers at bootstrap time).
+# per-call check below verifies the recorded signature matches the current
+# MoE invocation. NCCL EP permits a smaller token count than the bootstrap
+# maximum, but the dispatch receive capacity itself must match exactly.
 
 _te_ep_bootstrap_signature: Optional[Tuple[int, int, int, int, int]] = None
 
@@ -484,7 +548,7 @@ def _te_ep_assert_compatible_bootstrap(
     hidden_dim: int,
     ep_size: int,
 ) -> None:
-    """Verify a prior eager ``ep_bootstrap`` is wide enough for this call."""
+    """Verify a prior eager ``ep_bootstrap`` is compatible with this call."""
     if _te_ep_bootstrap_signature is None:
         raise RuntimeError(
             "TE EP was not bootstrapped. Call"
@@ -499,7 +563,7 @@ def _te_ep_assert_compatible_bootstrap(
         or hidden_dim != b_hidden
         or ep_size != b_ep_size
         or max_tokens_per_rank > b_max_tpr
-        or recv_capacity_per_rank > b_recv_pr
+        or recv_capacity_per_rank != b_recv_pr
     ):
         raise ValueError(
             "TE EP was already bootstrapped with signature"
@@ -509,7 +573,7 @@ def _te_ep_assert_compatible_bootstrap(
             f" (num_experts={num_experts}, max_tokens_per_rank={max_tokens_per_rank},"
             f" recv_capacity_per_rank={recv_capacity_per_rank}, hidden_dim={hidden_dim},"
             f" ep_size={ep_size}). Re-bootstrap with wider params (or matching exact"
-            " sizes) is required."
+            " sizes) is required. NCCL EP dispatch capacity must exactly match bootstrap."
         )
 
 
@@ -1029,6 +1093,7 @@ def _moe_fwd_rule(
     wo_kernel_axes,
     dtype,
     apply_topk_weights_early,
+    recv_capacity_per_rank,
 ):
     """Forward: gate -> topk -> ep_dispatch -> FFN -> ep_combine.
 
@@ -1080,6 +1145,7 @@ def _moe_fwd_rule(
         return (
             jnp.zeros_like(x),
             jnp.zeros((), dtype=x.dtype),
+            jnp.zeros((1,), dtype=jnp.int32),
         ), (ctx, static)
 
     mesh = _get_mesh()
@@ -1104,18 +1170,20 @@ def _moe_fwd_rule(
 
     # Per-rank send capacity: B/num_procs rows x S tokens per rank.
     max_tokens_per_rank = (B // num_procs) * S
-    # Per-rank receive capacity. NCCL EP HT expert-major lays out variable
-    # per-expert zones in one flat recv buffer, with each non-empty zone padded
-    # to ``dispatch_output_per_expert_alignment``.
-    tokens_per_ep_group = num_ep * max_tokens_per_rank
-    max_local_assignments = tokens_per_ep_group * min(K, num_local_experts)
-    max_nonempty_experts = min(num_local_experts, max_local_assignments)
-    padded_total_bound = max_local_assignments + (_ALIGN_SIZE - 1) * max_nonempty_experts
-    aligned_total_bound = ((padded_total_bound + _ALIGN_SIZE - 1) // _ALIGN_SIZE) * _ALIGN_SIZE
-    per_expert_bound = (
-        num_local_experts * ((tokens_per_ep_group + _ALIGN_SIZE - 1) // _ALIGN_SIZE) * _ALIGN_SIZE
+    worst_case_recv_pr = get_moe_recv_capacity_per_rank(
+        num_experts=num_experts,
+        num_experts_per_tok=K,
+        max_tokens_per_rank=max_tokens_per_rank,
+        ep_size=num_ep,
     )
-    recv_pr = min(per_expert_bound, aligned_total_bound)
+    if recv_capacity_per_rank is None:
+        recv_pr = worst_case_recv_pr
+    else:
+        recv_pr = int(recv_capacity_per_rank)
+        if recv_pr <= 0 or recv_pr % _ALIGN_SIZE != 0:
+            raise ValueError(
+                f"recv_capacity_per_rank must be a positive multiple of {_ALIGN_SIZE}, got {recv_pr}"
+            )
 
     _te_ep_assert_compatible_bootstrap(
         num_experts=num_experts,
@@ -1492,11 +1560,12 @@ def _moe_bwd_rule(
     wo_kernel_axes,
     dtype,
     apply_topk_weights_early,
+    recv_capacity_per_rank,
     residuals,
     cotangents,
 ):
     """Backward mirror of :func:`_moe_fwd_rule`."""
-    del num_groups, group_topk, dtype  # captured in residuals / unused in bwd
+    del num_groups, group_topk, dtype, recv_capacity_per_rank  # captured / unused in bwd
 
     # total_recv_tokens is a non-differentiable output; its cotangent is unused.
     d_output, d_aux_loss, _d_total_recv_tokens = cotangents
@@ -1992,7 +2061,7 @@ def _moe_bwd_rule(
 # =============================================================================
 
 
-@partial(jax.custom_vjp, nondiff_argnums=tuple(range(9, 26)))
+@partial(jax.custom_vjp, nondiff_argnums=tuple(range(9, 27)))
 def _moe(
     x,
     gate_kernel,
@@ -2020,6 +2089,7 @@ def _moe(
     wo_kernel_axes,
     dtype,
     apply_topk_weights_early,
+    recv_capacity_per_rank,
 ):
     primal, _ = _moe_fwd_rule(
         x,
@@ -2048,6 +2118,7 @@ def _moe(
         wo_kernel_axes,
         dtype,
         apply_topk_weights_early,
+        recv_capacity_per_rank,
     )
     return primal
 
@@ -2086,6 +2157,7 @@ def moe(
     wi_kernel_axes: Tuple[Optional[str], ...] = ("exp", "embed", "mlp"),
     wo_kernel_axes: Tuple[Optional[str], ...] = ("exp", "mlp", "embed"),
     dtype: jnp.dtype = jnp.float32,
+    recv_capacity_per_rank: Optional[int] = None,
 ) -> Tuple[jnp.ndarray, Optional[jnp.ndarray], jnp.ndarray]:
     """Run a full MoE block under a single fused custom_vjp on the TE EP path.
 
@@ -2111,6 +2183,11 @@ def moe(
     quantizer_sets : Tuple[QuantizerSet, QuantizerSet]
         Independent FC1 and FC2 quantizer sets. They are differentiable
         custom-VJP arguments so recipe state is threaded through backward.
+    recv_capacity_per_rank : Optional[int]
+        Exact aligned receive-buffer capacity for each EP rank. ``None``
+        (default) reserves the dropless aligned worst case. The value must match
+        the capacity used by ``ep_bootstrap``. Overflow is reported through
+        ``total_recv_tokens`` when bootstrap used ``drop_on_overflow=True``.
 
     Note that the per-expert dispatch-slot alignment is fixed internally
     at 128 tokens (``_ALIGN_SIZE``); see that constant's docstring for
@@ -2201,6 +2278,7 @@ def moe(
         wo_kernel_axes,
         dtype,
         apply_topk_weights_early,
+        recv_capacity_per_rank,
     )
     if aux_loss_coeff <= 0.0:
         aux_loss = None
