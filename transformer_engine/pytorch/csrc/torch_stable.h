@@ -4,8 +4,8 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#ifndef TRANSFORMER_ENGINE_PYTORCH_CSRC_TORCH_COMPAT_H_
-#define TRANSFORMER_ENGINE_PYTORCH_CSRC_TORCH_COMPAT_H_
+#ifndef TRANSFORMER_ENGINE_PYTORCH_CSRC_TORCH_STABLE_H_
+#define TRANSFORMER_ENGINE_PYTORCH_CSRC_TORCH_STABLE_H_
 
 #include <cuda_runtime.h>
 
@@ -24,7 +24,7 @@
  * torch::stable provides. With NVTE_WITH_TORCH_STABLE it maps to torch::stable
  * (requires torch >= 2.14); without it (the default) it maps to the full torch
  * ABI, keeping support for older torch versions intact. */
-namespace transformer_engine::pytorch::torch_compat {
+namespace transformer_engine::pytorch::torch_stable {
 
 #ifdef NVTE_WITH_TORCH_STABLE
 using Tensor = torch::stable::Tensor;
@@ -53,6 +53,6 @@ inline cudaStream_t getCurrentCUDAStream() {
 #endif
 }
 
-}  // namespace transformer_engine::pytorch::torch_compat
+}  // namespace transformer_engine::pytorch::torch_stable
 
-#endif  // TRANSFORMER_ENGINE_PYTORCH_CSRC_TORCH_COMPAT_H_
+#endif  // TRANSFORMER_ENGINE_PYTORCH_CSRC_TORCH_STABLE_H_

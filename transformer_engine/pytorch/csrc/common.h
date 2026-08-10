@@ -57,7 +57,7 @@
 #include "common/util/logging.h"
 #include "extensions/pybind_dtype_caster.h"
 #include "extensions/stable_tensor_caster.h"
-#include "torch_compat.h"
+#include "torch_stable.h"
 
 namespace transformer_engine::pytorch {
 
@@ -547,7 +547,7 @@ transformer_engine::TensorWrapper makeTransformerEngineTensor(void* data_ptr,
 transformer_engine::TensorWrapper makeTransformerEngineTensor(at::Tensor tensor);
 
 #ifdef NVTE_WITH_TORCH_STABLE
-transformer_engine::TensorWrapper makeTransformerEngineTensor(const torch_compat::Tensor& tensor);
+transformer_engine::TensorWrapper makeTransformerEngineTensor(const torch_stable::Tensor& tensor);
 #endif
 
 std::tuple<std::vector<transformer_engine::TensorWrapper>, std::vector<std::vector<NVTETensor>>,

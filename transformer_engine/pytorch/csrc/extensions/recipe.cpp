@@ -7,16 +7,16 @@
 #include <string>
 
 #include "../extensions.h"
-#include "../torch_compat.h"
+#include "../torch_stable.h"
 #include "transformer_engine/transformer_engine.h"
 
 namespace transformer_engine::pytorch {
 
-void compute_amax(const torch_compat::Tensor& tensor, torch_compat::Tensor& amax) {
-  auto input_tensor = torch_compat::contiguous(tensor);
+void compute_amax(const torch_stable::Tensor& tensor, torch_stable::Tensor& amax) {
+  auto input_tensor = torch_stable::contiguous(tensor);
   const TensorWrapper& te_input = makeTransformerEngineTensor(input_tensor);
 
-  NVTE_CHECK(amax.scalar_type() == torch_compat::ScalarType::Float,
+  NVTE_CHECK(amax.scalar_type() == torch_stable::ScalarType::Float,
              "amax must be a float tensor");
   NVTE_CHECK(amax.numel() == 1, "amax must have exactly one element");
   auto* amax_ptr = static_cast<float*>(amax.data_ptr());
@@ -25,12 +25,12 @@ void compute_amax(const torch_compat::Tensor& tensor, torch_compat::Tensor& amax
       DType::kFloat32,  // It doesn't matter because we only compute amax.
       amax_ptr);
 
-  nvte_compute_amax(te_input.data(), fake_te_output.data(), torch_compat::getCurrentCUDAStream());
+  nvte_compute_amax(te_input.data(), fake_te_output.data(), torch_stable::getCurrentCUDAStream());
 }
 
 void fused_amax_and_scale_update_after_reduction(
-    const torch_compat::Tensor& amax_reduction_buffer,
-    std::vector<torch_compat::Tensor> amax_histories, std::vector<torch_compat::Tensor> scales,
+    const torch_stable::Tensor& amax_reduction_buffer,
+    std::vector<torch_stable::Tensor> amax_histories, std::vector<torch_stable::Tensor> scales,
     const std::string& amax_compute_algo, DType fp8_dtype, float margin) {
   size_t num_tensors = amax_histories.size();
 
@@ -56,7 +56,7 @@ void fused_amax_and_scale_update_after_reduction(
       makeTransformerEngineTensor(amax_reduction_buffer).data(),
       std::vector<NVTETensor>(te_amax_histories.begin(), te_amax_histories.end()),
       std::vector<NVTETensor>(te_scales.begin(), te_scales.end()), amax_compute_algo.c_str(),
-      static_cast<NVTEDType>(fp8_dtype), margin, torch_compat::getCurrentCUDAStream());
+      static_cast<NVTEDType>(fp8_dtype), margin, torch_stable::getCurrentCUDAStream());
 }
 
 }  // namespace transformer_engine::pytorch

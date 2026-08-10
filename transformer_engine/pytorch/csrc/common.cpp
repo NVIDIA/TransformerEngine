@@ -181,7 +181,7 @@ transformer_engine::TensorWrapper makeTransformerEngineTensor(at::Tensor tensor)
 }
 
 #ifdef NVTE_WITH_TORCH_STABLE
-transformer_engine::TensorWrapper makeTransformerEngineTensor(const torch_compat::Tensor& tensor) {
+transformer_engine::TensorWrapper makeTransformerEngineTensor(const torch_stable::Tensor& tensor) {
   transformer_engine::DType dtype = GetTransformerEngineDType(tensor.scalar_type());
   const auto sizes = tensor.sizes();
   std::vector<size_t> shape(sizes.begin(), sizes.end());
