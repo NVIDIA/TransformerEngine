@@ -93,6 +93,22 @@ def get_bsh_dims(tensor_format):
     return batch_dim, seq_dim, head_dim
 
 
+def _zero_thd_padding(tensor, cu_seqlens, cu_seqlens_padded):
+    """Zero inter-sequence padding without copying CUDA cu-seqlens to the host."""
+    if tensor is None or cu_seqlens is None or cu_seqlens_padded is None:
+        return
+    rows = torch.arange(tensor.shape[0], device=tensor.device)
+    padding_mask = torch.zeros(tensor.shape[0], dtype=torch.bool, device=tensor.device)
+    for batch_idx in range(cu_seqlens.numel() - 1):
+        valid_end = (
+            cu_seqlens_padded[batch_idx]
+            + cu_seqlens[batch_idx + 1]
+            - cu_seqlens[batch_idx]
+        )
+        padding_mask |= (rows >= valid_end) & (rows < cu_seqlens_padded[batch_idx + 1])
+    tensor[padding_mask] = 0
+
+
 def flash_attn_p2p_communicate(
     rank, send_tensor, send_dst, recv_tensor, recv_src, cp_group, batch_p2p_comm
 ):
@@ -2923,22 +2939,11 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
 
         nvtx_range_pop(f"{nvtx_label}")
 
-        # Zero-fill dQ/dK/dV at positions beyond the actual sequence end (THD CUDA Graph).
-        # cu_seqlens_*_padded are already local to this CP rank in the THD path.
-        # Use Q's padded boundary for dQ and KV's padded boundary for dK/dV.
-        # Skip the corresponding zero-fill when its padded cu_seqlens is absent.
-        if ctx.qkv_format == "thd":
-            if cu_seqlens_q_padded is not None and isinstance(dq, torch.Tensor) and dq.shape[0] > 0:
-                q_pad_mask = torch.arange(dq.shape[0], device=dq.device) >= cu_seqlens_q_padded[-1]
-                dq[q_pad_mask] = 0
-            if cu_seqlens_kv_padded is not None:
-                kv_actual_t = cu_seqlens_kv_padded[-1]
-                for d_tensor in [dk, dv]:
-                    if isinstance(d_tensor, torch.Tensor) and d_tensor.shape[0] > 0:
-                        kv_pad_mask = (
-                            torch.arange(d_tensor.shape[0], device=d_tensor.device) >= kv_actual_t
-                        )
-                        d_tensor[kv_pad_mask] = 0
+        # FP8 partial-gradient reduction can write THD inter-sequence padding.
+        if ctx.qkv_format == "thd" and ctx.fp8:
+            _zero_thd_padding(dq, cu_seqlens_q_per_step[0], cu_seqlens_q_padded)
+            _zero_thd_padding(dk, cu_seqlens_kv_per_step[0], cu_seqlens_kv_padded)
+            _zero_thd_padding(dv, cu_seqlens_kv_per_step[0], cu_seqlens_kv_padded)
 
         return (
             None,
