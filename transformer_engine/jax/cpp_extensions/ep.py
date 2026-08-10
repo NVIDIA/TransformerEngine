@@ -42,7 +42,7 @@ def _on_collective_stream(func):
         # a nullary thunk that closes over them; the array operands are captured
         # as consts and lifted to real operands, outputs stay on device. XLA
         # async-wraps the resulting call onto the collective stream.
-        annotated = compute_on(
+        annotated = compute_on(  # pylint: disable=not-callable
             compute_type="gpu_stream:collective",
             out_memory_spaces=jax.memory.Space.Device,
         )(lambda: func(*args, **kwargs))
