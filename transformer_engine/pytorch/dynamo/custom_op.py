@@ -821,11 +821,8 @@ class _UnsupportedAdapter(_Adapter):
         kwargs[self.name] = None
 
 
-# Adapters, in priority order, owning ``try_build`` for a single field.
-# These adapters are mutually exclusive on annotations (a plain ``torch.Tensor``
-# matches only ``_TensorAdapter``; the ``TensorOrQuantized`` union only
-# ``_TensorOrQuantizedAdapter``; etc.), so the order is just iteration, not a
-# priority ranking -- no annotation can be claimed by more than one.
+# Adapter candidates for a single field, tried via ``try_build``. Mutually
+# exclusive on annotations, so the order is not a ranking.
 _FIELD_ADAPTERS: Tuple[type, ...] = (
     _TensorOrQuantizedAdapter,
     _TensorAdapter,
