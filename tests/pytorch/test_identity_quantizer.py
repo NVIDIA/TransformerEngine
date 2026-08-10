@@ -25,7 +25,7 @@ from transformer_engine.pytorch import (
     MXFP8Quantizer,
     NVFP4Quantizer,
 )
-from transformer_engine.pytorch.module import _grouped_quantization
+from transformer_engine.pytorch.module import _split_quantization
 from transformer_engine.pytorch.tensor.identity_tensor import IdentityTensor
 from transformer_engine.pytorch.tensor.storage.identity_tensor_storage import (
     IdentityTensorStorage,
@@ -262,7 +262,7 @@ class TestIdentityQuantizerUnit:
         m_splits = [3, 5]
         quantizers = [IdentityQuantizer(), IdentityQuantizer()]
 
-        out, dbiases = _grouped_quantization._split_quantize(
+        out, dbiases = _split_quantization._split_quantize(
             x,
             m_splits,
             quantizers,
@@ -283,7 +283,7 @@ class TestIdentityQuantizerUnit:
             IdentityQuantizer(dtype=torch.float32),
             IdentityQuantizer(dtype=torch.float32),
         ]
-        cast_out, cast_dbiases = _grouped_quantization._split_quantize(
+        cast_out, cast_dbiases = _split_quantization._split_quantize(
             x,
             m_splits,
             cast_quantizers,
@@ -318,7 +318,7 @@ class TestIdentityQuantizerUnit:
 
         for quantizers in cases:
             with pytest.raises(ValueError, match="mix Identity-backed and quantized"):
-                _grouped_quantization.validate_grouped_quantizer_list(
+                _split_quantization.validate_grouped_quantizer_list(
                     quantizers, operand_name="input"
                 )
 
@@ -332,9 +332,9 @@ class TestIdentityQuantizerUnit:
                 for tensor_part, quantizer in zip(torch.split(tensor, m_splits), quantizers)
             ]
 
-        monkeypatch.setattr(_grouped_quantization.tex, "split_quantize", fake_split_quantize)
+        monkeypatch.setattr(_split_quantization.tex, "split_quantize", fake_split_quantize)
         monkeypatch.setattr(
-            _grouped_quantization,
+            _split_quantization,
             "_supports_native_split_quantize",
             lambda quantizer: True,
         )
@@ -348,7 +348,7 @@ class TestIdentityQuantizerUnit:
             for _ in m_splits
         ]
 
-        out, dbiases = _grouped_quantization._split_quantize(
+        out, dbiases = _split_quantization._split_quantize(
             x,
             m_splits,
             quantizers,
@@ -394,7 +394,7 @@ class TestIdentityQuantizerUnit:
 
         monkeypatch.setattr(grouped_linear, "is_cpu_offload_enabled", lambda: True)
         monkeypatch.setattr(
-            _grouped_quantization,
+            _split_quantization,
             "_split_quantize",
             fake_split_quantize,
         )

@@ -316,6 +316,7 @@ def _split_quantize(
     quantizers: Optional[Sequence[Optional[Quantizer]]],
     activation_dtype: torch.dtype,
     *,
+    with_quantized_output: bool = True,
     compute_dbias: bool = False,
     disable_bulk_allocation: bool = False,
 ) -> Tuple[
@@ -335,7 +336,7 @@ def _split_quantize(
             f"({len(quantizers)} != {len(split_sizes)})"
         )
 
-    reference = quantizers[0] if quantizers else None
+    reference = quantizers[0] if with_quantized_output and quantizers else None
     if reference is None:
         outputs = torch.split(cast_if_needed(tensor, activation_dtype), split_sizes)
         dbiases = (

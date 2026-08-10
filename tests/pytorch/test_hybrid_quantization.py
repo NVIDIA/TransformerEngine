@@ -10,7 +10,7 @@ import pytest
 import torch
 
 import transformer_engine.pytorch as te
-import transformer_engine.pytorch.module._grouped_quantization as grouped_quantization
+import transformer_engine.pytorch.module._split_quantization as grouped_quantization
 import transformer_engine_torch as tex
 
 from hybrid_quantization_utils import (
@@ -7423,7 +7423,7 @@ class TestHybridActivationRecompute:
         GroupedLinear is the MoE token-dispatch kernel: a single batch
         is split along dim-0 into ``num_gemms`` chunks and each chunk
         goes through its own weight matrix. Under hybrid quantization,
-        ``_split_quantize`` (``module/_grouped_quantization.py``) runs
+        ``_split_quantize`` (``module/_split_quantization.py``) runs
         ``tex.split_quantize`` twice (once per sub-quantizer direction)
         and zips the results into a list of ``HybridQuantizedTensor``
         chunks — save-for-backward then receives a *list* of hybrid

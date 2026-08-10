@@ -32,7 +32,7 @@ from .base import (
     _get_high_precision_init_val,
 )
 from ._common import can_reconstruct_wgrad_input_from_original, WeightGradStore
-from . import _grouped_quantization
+from . import _split_quantization
 from ..quantization import FP8GlobalStateManager, QuantizerRole
 from ..utils import (
     divide,
@@ -669,11 +669,12 @@ class _GroupedLinear(torch.autograd.Function):
         # Disable bulk allocation when CPU offloading is active: offloading skips small
         # tensors (like scales), but bulk allocation shares storage across all tensors,
         # so if scales can't be offloaded, nothing in the group can be offloaded.
-        inputmats, _ = _grouped_quantization._split_quantize(
+        inputmats, _ = _split_quantization._split_quantize(
             inp_view,
             m_splits,
             input_quantizers,
             activation_dtype,
+            with_quantized_output=fp8 or debug,
             disable_bulk_allocation=cpu_offloading,
         )
 
@@ -1103,14 +1104,16 @@ class _GroupedLinear(torch.autograd.Function):
                         rowwise=ctx.requires_dgrad,
                         columnwise=ctx.weights_requires_grad,
                     )
-            grad_output, grad_biases = _grouped_quantization._split_quantize(
+            grad_output, grad_biases = _split_quantization._split_quantize(
                 grad_output_view,
                 ctx.m_splits,
                 ctx.grad_output_quantizers,
                 ctx.activation_dtype,
+                with_quantized_output=ctx.fp8 or ctx.debug,
                 compute_dbias=(ctx.fp8 or ctx.debug) and ctx.use_bias,
                 disable_bulk_allocation=(
                     ctx.cpu_offloading and isinstance(grad_output_reference, HybridQuantizer)
+                    and not _split_quantization._uses_identity_quantizer(grad_output_reference)
                 ),
             )
             if grad_biases is None:
@@ -1215,11 +1218,12 @@ class _GroupedLinear(torch.autograd.Function):
                                 input_quantizer.set_usage(rowwise=True, columnwise=True)
                             else:
                                 input_quantizer.set_usage(rowwise=False, columnwise=True)
-                    inputmats, _ = _grouped_quantization._split_quantize(
+                    inputmats, _ = _split_quantization._split_quantize(
                         inp_view,
                         ctx.m_splits,
                         ctx.input_quantizers,
                         ctx.activation_dtype,
+                        with_quantized_output=ctx.fp8 or ctx.debug,
                         disable_bulk_allocation=ctx.cpu_offloading,
                     )
                 elif ctx.backward_override == "dequantized":
@@ -1570,10 +1574,10 @@ class GroupedLinear(TransformerEngineBaseModule):
             weight_quantizers = tuple(
                 generation[self._offsets["weight"] + i * stride] for i in range(self.num_gemms)
             )
-            _grouped_quantization.validate_grouped_quantizer_list(
+            _split_quantization.validate_grouped_quantizer_list(
                 input_quantizers, operand_name="input"
             )
-            _grouped_quantization.validate_grouped_quantizer_list(
+            _split_quantization.validate_grouped_quantizer_list(
                 weight_quantizers, operand_name="weight"
             )
         else:
@@ -1581,7 +1585,7 @@ class GroupedLinear(TransformerEngineBaseModule):
             grad_output_quantizers = tuple(
                 generation[self._offsets["grad_output"] + i * stride] for i in range(self.num_gemms)
             )
-            _grouped_quantization.validate_grouped_quantizer_list(
+            _split_quantization.validate_grouped_quantizer_list(
                 grad_output_quantizers,
                 operand_name="grad_output",
             )
