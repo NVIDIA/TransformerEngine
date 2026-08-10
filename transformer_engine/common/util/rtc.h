@@ -40,6 +40,26 @@ struct Header {
   const char *include_name;
 };
 
+/*! \brief Architecture specificity required by an RTC kernel */
+enum class ArchSpecificity {
+  /*! Compile for a generic architecture, preserving PTX forward compatibility */
+  Generic,
+  /*! Compile for the exact architecture-specific target (e.g. sm_100a) */
+  ArchitectureSpecific,
+  /*! Compile for a family-specific target (e.g. sm_120f) */
+  FamilySpecific,
+  /*! Match the static build's Blackwell a/f target policy */
+  BlackwellSpecific,
+};
+
+/*! \brief Architecture requirements for an RTC kernel */
+struct ArchRequirement {
+  /*! Minimum compute capability, encoded as major * 10 + minor */
+  int min_sm_arch = 0;
+  /*! Target-specificity policy for the kernel */
+  ArchSpecificity specificity = ArchSpecificity::Generic;
+};
+
 /*! \brief Wrapper class for a runtime-compiled CUDA kernel */
 class Kernel {
  public:
@@ -145,11 +165,14 @@ class KernelManager {
    *                         primarily for debugging
    * \param[in] extra_options Additional NVRTC compiler options
    * \param[in] extra_headers Additional in-memory headers available to the program
+   * \param[in] arch_requirement Minimum and specificity requirements for the
+   *                            compilation target
    */
   void compile(const std::string &kernel_label, const std::string &kernel_name,
                const std::string &code, const std::string &filename,
                const std::vector<std::string> &extra_options = {},
-               const std::vector<Header> &extra_headers = {});
+               const std::vector<Header> &extra_headers = {},
+               ArchRequirement arch_requirement = {});
 
   /*! \brief Whether CUDA kernel has been compiled for CUDA device
    *
