@@ -13,7 +13,7 @@ import tvm_ffi
 from transformer_engine.common.CuTeDSL.cast.mxfp8.quantize_mxfp8 import (
     get_mxfp8_quantization_function,
 )
-from transformer_engine.common.CuTeDSL.cast.nvfp4.quantize_transpose_nvfp4 import (
+from transformer_engine.common.CuTeDSL.cast.nvfp4.quantize_transpose import (
     get_nvfp4_quantization_function,
 )
 

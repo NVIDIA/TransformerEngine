@@ -2,6 +2,6 @@
 #
 # See LICENSE for license information.
 
-"""CuTeDSL NVFP4 quantization kernels."""
+"""CuTeDSL NVFP4 quantize transpose fused kernel."""
 
-from . import quantize_transpose
+from .launcher import get_nvfp4_quantization_function

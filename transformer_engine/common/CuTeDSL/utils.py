@@ -6,10 +6,13 @@
 
 import functools
 import logging
+import os
 from types import SimpleNamespace
+from typing import Optional
 
 import cutlass
-from cutlass import Float32, Int64, Int32, Int16
+from cutlass import cute
+from cutlass import Boolean, Float32, Int64, Int32, Int16, Uint32, Uint64
 from cutlass._mlir.dialects import arith as mlir_arith
 from cutlass._mlir.dialects import llvm
 from cutlass.cutlass_dsl import T, dsl_user_op
@@ -22,6 +25,8 @@ _CUTLASS_DTYPE_FROM_STR = {
 _STR_FROM_CUTLASS_DTYPE = {v: k for k, v in _CUTLASS_DTYPE_FROM_STR.items()}
 
 logger = logging.getLogger("transformer_engine.cutedsl.utils")
+
+CUTEDSL_DEBUG_LOGGING = os.environ.get("CUTEDSL_DEBUG_LOGGING", "0") == "1"
 
 
 @functools.lru_cache(maxsize=None)
@@ -53,7 +58,35 @@ def cutlass_dtype_to_str(dtype):
     return _STR_FROM_CUTLASS_DTYPE.get(dtype, None)
 
 
+
+# Runs if CUTE_DSL_ENABLE_ASSERTIONS=1 or --enable-assertions present in cute.compile
+def validate_tensor(tensor: Optional[cute.Tensor], expected_layout: cute.Layout, expected_dtype):
+    if tensor is None:
+        return
+    cute.testing.assert_(tensor.layout == expected_layout, "Tensor layout does not match")
+    cute.testing.assert_(tensor.element_type == expected_dtype, "Tensor dtype does not match")
+
+
+@cute.jit
+def noop_flag_is_set(mNoop: cute.Pointer) -> Boolean:
+    """Whether the cast_noop flag says this quantization is a no-op and must be skipped.
+
+    mNoop is a pointer rather than a tensor so that one compiled kernel serves both a present and
+    an absent flag, hence the address is checked before it is dereferenced, exactly like the CUDA
+    C++ kernel's `noop != nullptr && noop[0] == 1.0f`. The two checks cannot be joined with `and`,
+    which the DSL lowers to a non-short-circuiting op that would load from the null pointer.
+    """
+    flag_is_set = Boolean(False)
+    if mNoop.toint() != Int64(0):
+        flag_is_set = cute.make_tensor(mNoop, cute.make_layout((1,)))[0] == Float32(1.0)
+    return flag_is_set
+
+
 FP32_MANTISSA_BITS = 23
+FLOAT32_MAX = 3.4028234663852886e38
+BFLOAT16_MAX = 3.3895313892515355e38
+FLOAT8E4M3_MAX = 448.0
+FLOAT4E2M1_MAX = 6.0
 
 
 @dsl_user_op
@@ -93,6 +126,19 @@ def fma_f32(a: Float32, b: Float32, c: Float32, *, loc=None, ip=None) -> Float32
 
 
 @dsl_user_op
+def select_f32(cond: Boolean, if_true: Float32, if_false: Float32, *, loc=None, ip=None) -> Float32:
+    return Float32(
+        mlir_arith.select(
+            cond.ir_value(loc=loc, ip=ip),
+            if_true.ir_value(loc=loc, ip=ip),
+            if_false.ir_value(loc=loc, ip=ip),
+            loc=loc,
+            ip=ip,
+        )
+    )
+
+
+@dsl_user_op
 def exp2f_rcp(biased_exp: Int32, *, loc=None, ip=None) -> Float32:
     """2^(127 - biased_exp) with special-case handling."""
     new_exp = (Int32(254) - biased_exp) << Int32(FP32_MANTISSA_BITS)
@@ -112,6 +158,40 @@ def exp2f_rcp(biased_exp: Int32, *, loc=None, ip=None) -> Float32:
             )
         )
     return result
+
+
+@dsl_user_op
+def umulhi_u32(a: Uint32, b: Uint32, *, loc=None, ip=None) -> Uint32:
+    """High 32 bits of the unsigned 32x32 product (`__umulhi`)."""
+    return Uint32(
+        llvm.inline_asm(
+            T.i32(),
+            [a.ir_value(loc=loc, ip=ip), b.ir_value(loc=loc, ip=ip)],
+            "mul.hi.u32 $0, $1, $2;",
+            "=r,r,r",
+            has_side_effects=False,
+            is_align_stack=False,
+            asm_dialect=llvm.AsmDialect.AD_ATT,
+        )
+    )
+
+
+@dsl_user_op
+def u64_lo32(v: Uint64, *, loc=None, ip=None) -> Uint32:
+    return Uint32(mlir_arith.trunci(T.i32(), v.ir_value(loc=loc, ip=ip), loc=loc, ip=ip))
+
+
+@dsl_user_op
+def u64_hi32(v: Uint64, *, loc=None, ip=None) -> Uint32:
+    shifted = mlir_arith.shrui(
+        v.ir_value(loc=loc, ip=ip), Uint64(32).ir_value(loc=loc, ip=ip), loc=loc, ip=ip
+    )
+    return Uint32(mlir_arith.trunci(T.i32(), shifted, loc=loc, ip=ip))
+
+
+@dsl_user_op
+def bool_to_u64(b: Boolean, *, loc=None, ip=None) -> Uint64:
+    return Uint64(mlir_arith.extui(T.i64(), b.ir_value(loc=loc, ip=ip), loc=loc, ip=ip))
 
 
 @dsl_user_op
@@ -135,6 +215,22 @@ def pack_f32x2(lo: Float32, hi: Float32, *, loc=None, ip=None) -> Int64:
 
 
 @dsl_user_op
+def pack_u32x2(lo: Uint32, hi: Uint32, *, loc=None, ip=None) -> Int64:
+    """Pack two u32 into one 64-bit register (register-pair move, no real instruction)."""
+    return Int64(
+        llvm.inline_asm(
+            T.i64(),
+            [lo.ir_value(loc=loc, ip=ip), hi.ir_value(loc=loc, ip=ip)],
+            "mov.b64 $0, {$1, $2};",
+            "=l,r,r",
+            has_side_effects=False,
+            is_align_stack=False,
+            asm_dialect=llvm.AsmDialect.AD_ATT,
+        )
+    )
+
+
+@dsl_user_op
 def unpack_i64_to_i32x2(v: Int64, *, loc=None, ip=None):
     """Split a 64-bit value into (lo, hi) 32-bit halves.
 
@@ -147,6 +243,31 @@ def unpack_i64_to_i32x2(v: Int64, *, loc=None, ip=None):
     )
     hi = Int32(mlir_arith.trunci(T.i32(), hi_64, loc=loc, ip=ip))
     return lo, hi
+
+
+def make_prmt_u32(selector: int):
+    """A byte-permute op with the 16-bit selector baked in as an immediate.
+
+    prmt.b32 indexes the eight source bytes {a0..a3, b0..b7} and each selector nibble picks the
+    byte for one destination position, low nibble first. 0x5410 interleaves the low halves of a
+    and b (a0 a1 b0 b1), 0x7632 the high halves.
+    """
+
+    @dsl_user_op
+    def prmt_u32(a: Uint32, b: Uint32, *, loc=None, ip=None) -> Uint32:
+        return Uint32(
+            llvm.inline_asm(
+                T.i32(),
+                [a.ir_value(loc=loc, ip=ip), b.ir_value(loc=loc, ip=ip)],
+                f"prmt.b32 $0, $1, $2, {selector:#x};",
+                "=r,r,r",
+                has_side_effects=False,
+                is_align_stack=False,
+                asm_dialect=llvm.AsmDialect.AD_ATT,
+            )
+        )
+
+    return prmt_u32
 
 
 def _build_packed16_kit(in_fmt: str):

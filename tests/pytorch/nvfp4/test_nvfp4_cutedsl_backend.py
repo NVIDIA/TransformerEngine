@@ -27,12 +27,14 @@ rejects the config, and a backend switch that does not take effect all produce e
 Counting catches all three, including the last, since the run that is meant to be the CUDA
 reference asserts that no CuTeDSL kernel ran either.
 
-Stochastic rounding is deliberately not compared byte for byte, and should not be even once the
-kernel implements it: which random bits an element gets follows from the work decomposition, and
-the CUDA kernel seeds Philox from the chunk coordinate a CTA starts on without reseeding when it
-steals a chunk through cluster launch control, so two implementations, or even two launches, may
-disagree without either being wrong. test_nvfp4_sr_quantize.py is where the rounding itself is
-checked.
+Stochastic rounding is deliberately not compared byte for byte, even though the CuTeDSL kernel
+implements it (and, as it happens, currently matches the CUDA kernel bit for bit, having
+replicated its Philox seeding, thread arrangement and draw order): which random bits an element
+gets follows from the work decomposition, and the CUDA kernel seeds Philox from the chunk
+coordinate a CTA starts on without reseeding when it steals a chunk through cluster launch
+control, so two implementations, or even two launches, may legitimately disagree without either
+being wrong. test_stochastic_rounding checks the property that defines the rounding instead,
+and test_nvfp4_sr_quantize.py checks the rounding itself on the CUDA side.
 
 RHT is out of scope: it is a pre-transform with kernels and tests of its own, and it splits the
 quantization into per-direction calls, so "which backend ran" stops being one fact per case.
@@ -153,12 +155,12 @@ def cutedsl_key(flags):
 
 
 def kernel_implements(flags):
-    """Whether the CuTeDSL kernel compiles a kernel for these flags, i.e. everything except the
-    three NotImplementedError guards at the top of
-    NVFP4QuantizeTransposeTuned1DKernel.__call__. Fast math is implemented (it only picks the
-    bf16 scaling coefficient), so it is the one flag that does not disable the backend."""
-    stochastic_rounding, _, row_scaled, return_transpose = flags
-    return not (stochastic_rounding or row_scaled or return_transpose)
+    """Whether the CuTeDSL kernel compiles a kernel for these flags. Every feature of the CUDA
+    tuned-1D kernel is implemented; the one refusal left is the flag combination that is not a
+    real configuration (NVFP4QuantizeConfig raises for it): row-scaled quantization has no
+    transposed output."""
+    _, _, row_scaled, return_transpose = flags
+    return not (row_scaled and return_transpose)
 
 
 def dispatcher_offers(case):
@@ -204,7 +206,7 @@ def _install_call_counters():
     that is never seen. Compiling the kernels here rather than letting the dispatcher trigger it
     is what makes that possible, and costs one compilation per supported config at import.
     """
-    from transformer_engine.common.CuTeDSL.cast.nvfp4.quantize_transpose_nvfp4 import (
+    from transformer_engine.common.CuTeDSL.cast.nvfp4.quantize_transpose import (
         get_nvfp4_quantization_function,
     )
 
@@ -442,7 +444,7 @@ def test_kernel_coverage(flags):
     registration check pass by proxy.
     """
     # Imports cleanly only with the CuTeDSL stack present, which the module-level skip guarantees.
-    from transformer_engine.common.CuTeDSL.cast.nvfp4.quantize_transpose_nvfp4 import (
+    from transformer_engine.common.CuTeDSL.cast.nvfp4.quantize_transpose import (
         get_nvfp4_quantization_function,
     )
 
@@ -521,9 +523,10 @@ def test_input_dtypes(dtype):
 # --- Quantizer variations ---
 
 # The NVFP4 quantize configurations reachable from the PyTorch API whose output is deterministic,
-# minus RHT and amax reduction. Only the plain and fast-math ones are served by the CuTeDSL kernel
-# today; the rest check that enabling the backend is inert for a config it declines or is never
-# offered. Stochastic rounding is not here, since its bytes are not a cross-backend contract.
+# minus RHT and amax reduction. The tuned-1D configs (plain, fast-math, columnwise, row-scaled)
+# are served by the CuTeDSL kernel; the 2D and 4over6 ones check that enabling the backend is
+# inert for a config it is never offered. Stochastic rounding is not here, since its bytes are
+# not a cross-backend contract.
 VARIANT_CASES = [
     ROWWISE,
     replace(ROWWISE, id="rowwise-fastmath", fast_math=True),
@@ -561,12 +564,28 @@ def test_transpose_shapes(shape):
 # --- Stochastic rounding, which is not a byte-for-byte contract ---
 
 
+def nibble_counts(data_bytes, probe_mask):
+    """Count E2M1 nibbles over the probe positions of a packed FP4 tensor."""
+    lo = data_bytes & 0xF
+    hi = data_bytes >> 4
+    nibbles = torch.stack([lo, hi], dim=-1).flatten()  # element order: (byte, low-then-high nibble)
+    picked = nibbles[probe_mask.flatten()]
+    return torch.bincount(picked.long(), minlength=16), picked.numel()
+
+
 @pytest.mark.parametrize("columnwise", [False, True], ids=["rowwise", "rowwise-columnwise"])
-def test_stochastic_rounding_falls_back(columnwise):
-    """What the backend owes for stochastic rounding is to decline the config and stay out of the
-    way, so that is all this checks, plus that the CUDA result is a plausible quantization. When
-    the CuTeDSL kernel does implement stochastic rounding, this has to become a distributional
-    test rather than a stricter one: see the module docstring on why its bytes are not portable.
+def test_stochastic_rounding(columnwise):
+    """The CuTeDSL kernel serves stochastic rounding, but per the module docstring its bytes are
+    deliberately not compared against CUDA's, even though the current implementation happens to
+    match it byte for byte (same Philox seeding, thread arrangement and draw order): that
+    equality would not survive either kernel legitimately reorganizing its work. What is checked
+    instead is the property that defines stochastic rounding. The input is built so every scaling
+    block carries one exact 6.0 (making the encode coefficient exactly 1.0 in both directions)
+    and probe values of 2.75, which sit at 3/4 of the way from 2 to 3 on the E2M1 lattice, so a
+    correct rounder must send them to 3 with probability 0.75, and to 2 otherwise. With ~200k
+    probes the tolerance below is dozens of standard deviations, yet fails a round-to-nearest
+    (would give 1.0) or wrongly-seeded implementation outright. Determinism for a fixed Philox
+    seed is also asserted, since TE draws the seed from the framework RNG.
     """
     case = replace(
         ROWWISE,
@@ -575,24 +594,51 @@ def test_stochastic_rounding_falls_back(columnwise):
         stochastic_rounding=True,
         columnwise=columnwise,
     )
-    assert not expect_cutedsl(case)
+    assert expect_cutedsl(case)
+    rows, cols = flat_dims(case.shape)
 
-    x = make_input(case)
+    # 6.0 on every 16th row and column anchors every scaling block of both directions; the rest
+    # are probes. The global amax 6.0 makes the global encode scale 448/6 . 6/448-exact, the
+    # anchored block amaxes make every block decode scale exactly 448 (an E4M3 lattice point),
+    # and the encode coefficient works out to exactly 1.0, so probes arrive at the converter
+    # as exactly 2.75.
+    x = torch.full((rows, cols), 2.75, dtype=torch.bfloat16, device="cuda")
+    x[::NVFP4_BLOCK_SIZE, :] = 6.0
+    x[:, ::NVFP4_BLOCK_SIZE] = 6.0
+    probe = torch.ones(rows, cols, dtype=torch.bool, device="cuda")
+    probe[::NVFP4_BLOCK_SIZE, :] = False
+    probe[:, ::NVFP4_BLOCK_SIZE] = False
+
+    key = cutedsl_key(cutedsl_flags(case))
     set_cutedsl_backend(True)
     try:
-        with cutedsl_calls(0, case.id):
+        with cutedsl_calls(2, case.id, key):
             out = quantize(case, x)
+            out_again = quantize(case, x)
     finally:
         set_cutedsl_backend(False)
 
-    key = cutedsl_key(cutedsl_flags(case))
-    assert tvm_ffi.get_global_func(key, allow_missing=True) is None, (
-        f"{case.id}: a kernel is registered under {key}, so the CuTeDSL backend now rounds "
-        "stochastically and this test needs to become a distributional one"
+    assert_parts_equal(
+        quantized_parts(out, case),
+        quantized_parts(out_again, case),
+        f"{case.id} (same seed must give the same bytes)",
     )
 
-    # Stochastic rounding picks either of the two representable values around the exact one, so its
-    # error is larger than round-to-nearest's but of the same order.
+    checked = {"rowwise data": probe}
+    if columnwise:
+        checked["columnwise data"] = probe.T.contiguous()
+    for name, mask in checked.items():
+        counts, total = nibble_counts(quantized_parts(out, case)[name].view(torch.uint8), mask)
+        # E2M1 codes: 4 -> 2.0, 5 -> 3.0. Everything else means the scales are wrong.
+        assert counts[4] + counts[5] == total, (
+            f"{case.id}: {name} probes landed outside {{2.0, 3.0}}:"
+            f" {dict(enumerate(counts.tolist()))}"
+        )
+        up_fraction = counts[5].item() / total
+        assert (
+            abs(up_fraction - 0.75) < 0.02
+        ), f"{case.id}: {name} rounded 2.75 up with frequency {up_fraction:.4f}, expected 0.75"
+
     error = relative_dequantize_error(out, x)
     assert (
         error < 0.3
