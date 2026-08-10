@@ -115,10 +115,7 @@ class LinearFwdArgs:
     bias: Optional[torch.Tensor]
 
     # --- Non-differentiable cached tensors ---
-    # Same union as ``weight`` so a cached quantized workspace is flattened to its
-    # inner tensors on the way into the op (symmetric with ``new_weight_workspace``
-    # on the way out); a plain ``Tensor?`` slot can't carry a quantized subclass
-    # across the torch.compile custom-op boundary.
+    # TensorOrQuantized so a cached quantized workspace can cross the op boundary.
     weight_workspace: Optional[TensorOrQuantized]
 
     # Process-global cuBLAS workspace, fetched at trace time so it isn't first
@@ -317,12 +314,9 @@ def _check_fp8_reduce_and_update():
     return result
 
 
-def _sp_out_leading(leading: int, args: Union[LinearFwdArgs, LinearBwdArgs]) -> int:
-    """Leading (sequence) dim of the output, given the input's.
-
-    Under sequence parallelism a column-parallel layer gathers that dim and a
-    row-parallel one scatters it; without SP it passes through.
-    """
+def _out_leading_from_inp(leading: int, args: Union[LinearFwdArgs, LinearBwdArgs]) -> int:
+    """Output's leading (sequence) dim from the input's: sequence parallelism
+    gathers it (column-parallel) or scatters it (row-parallel)."""
     if not args.sequence_parallel:
         return leading
     if args.parallel_mode == "column":
@@ -332,11 +326,8 @@ def _sp_out_leading(leading: int, args: Union[LinearFwdArgs, LinearBwdArgs]) -> 
     return leading
 
 
-def _sp_inp_leading(leading: int, args: Union[LinearFwdArgs, LinearBwdArgs]) -> int:
-    """Inverse of :func:`_sp_out_leading`: input's leading dim from the output's.
-
-    Used by backward, which reconstructs the input geometry from ``grad_output``.
-    """
+def _inp_leading_from_out(leading: int, args: Union[LinearFwdArgs, LinearBwdArgs]) -> int:
+    """Inverse of :func:`_out_leading_from_inp`."""
     if not args.sequence_parallel:
         return leading
     if args.parallel_mode == "column":
@@ -881,7 +872,7 @@ def _linear_forward_fake(
     # ------------------------------------------------------
     # Output tensor: y = x @ w^T (quantized iff an output quantizer is set).
     # ------------------------------------------------------
-    out_leading = _sp_out_leading(inp.shape[0], args)
+    out_leading = _out_leading_from_inp(inp.shape[0], args)
     out = TensorSpec(
         shape=(out_leading, *tuple(inp.shape[1:-1]), out_features),
         dtype=activation_dtype,
@@ -1162,7 +1153,7 @@ def _linear_backward_impl(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None
         # Reconstruct inp_shape when not stored (compiled mode with dynamic shapes).
         if bwd_args.inp_shape is None:
             in_features = saved_weight.shape[-1]
-            inp_leading = _sp_inp_leading(grad_output.shape[0], bwd_args)
+            inp_leading = _inp_leading_from_out(grad_output.shape[0], bwd_args)
             bwd_args.inp_shape = torch.Size([inp_leading, *grad_output.shape[1:-1], in_features])
 
         # Configure Userbuffers communication (comm+GEMM overlap)
@@ -1720,7 +1711,7 @@ def _linear_backward_fake(
     if args.requires_dgrad:
         # Input shape rederived from grad_output + SP config (inp_shape is not
         # stored: torch.Size with SymInt cannot cross in OpaqueValueBundle).
-        dgrad_leading = _sp_inp_leading(args.grad_output.shape[0], args)
+        dgrad_leading = _inp_leading_from_out(args.grad_output.shape[0], args)
         dgrad = TensorSpec(
             shape=(dgrad_leading, *args.grad_output.shape[1:-1], in_features),
             dtype=out_dtype,

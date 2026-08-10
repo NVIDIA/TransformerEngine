@@ -151,11 +151,6 @@ def to_tensor_spec(tensor: Any) -> TensorSpec:
     Works for plain ``torch.Tensor`` and for ``QuantizedTensorStorage`` /
     ``QuantizedTensor``. A *bare* storage exposes its (fake) dtype via
     ``_dtype`` rather than ``.dtype``.
-
-    Not for re-describing a ``TensorSpec``: a spec holds its quantizer as
-    ``quantizer``, not ``_quantizer``, so it would come back unquantized. Fake
-    impls already receive specs from ``_spec_view`` -- copy those with
-    ``dataclasses.replace``.
     """
     requires_grad = bool(getattr(tensor, "requires_grad", False))
     dtype = getattr(tensor, "dtype", None)
