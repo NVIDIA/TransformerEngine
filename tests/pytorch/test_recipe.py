@@ -2,7 +2,8 @@
 #
 # See LICENSE for license information.
 
-from dataclasses import fields
+from dataclasses import fields, replace
+from types import SimpleNamespace
 from typing import Optional
 
 import pickle
@@ -28,8 +29,12 @@ from transformer_engine.pytorch import (
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.quantization import (
     FP8GlobalStateManager,
+    Float8CurrentScalingRecipeState,
     NVFP4BlockScalingRecipeState,
     QuantizerRole,
+    RecipeState,
+    _QuantizationRuntimeKey,
+    _QuantizationRuntime,
     _amax_and_scale_update,
 )
 import transformer_engine.pytorch.ops as te_ops
@@ -107,6 +112,65 @@ def test_recipe_quantizer_config_must_be_hashable():
         UnhashableConfigRecipe().quantizer_config()
 
 
+def test_quantization_runtime_key_is_semantic_and_normalizes_slot_roles():
+    """Runtime-key equality includes recipe config and each ordered role slot."""
+    input_role = QuantizerRole(module_type="linear", tensor_type="input", name="qkv")
+    weight_role = QuantizerRole(module_type="linear", tensor_type="weight", name="qkv")
+    grad_role = QuantizerRole(module_type="linear", tensor_type="grad_output", name="qkv")
+
+    key = _QuantizationRuntimeKey(
+        recipe_config=("recipe", "fp8"),
+        forward_roles=[input_role, None, weight_role],
+        backward_roles=[grad_role],
+    )
+    same_request = _QuantizationRuntimeKey(
+        recipe_config=("recipe", "fp8"),
+        forward_roles=(input_role, None, weight_role),
+        backward_roles=(grad_role,),
+    )
+
+    assert key == same_request
+    assert hash(key) == hash(same_request)
+    assert key.forward_roles == (input_role, None, weight_role)
+    assert key != _QuantizationRuntimeKey(
+        recipe_config=("recipe", "fp8"),
+        forward_roles=(input_role, weight_role),
+        backward_roles=(grad_role,),
+    )
+    assert key != _QuantizationRuntimeKey(
+        recipe_config=("recipe", "new-fp8"),
+        forward_roles=(input_role, None, weight_role),
+        backward_roles=(grad_role,),
+    )
+
+
+def test_quantization_runtime_bundles_both_quantization_directions():
+    """A runtime retains the complete active-or-candidate quantizer bundle."""
+    runtime_key = _QuantizationRuntimeKey(
+        recipe_config=("recipe", "fp8"),
+        forward_roles=(),
+        backward_roles=(),
+    )
+    forward_quantizers = []
+    backward_quantizers = []
+    runtime = _QuantizationRuntime(
+        key=runtime_key,
+        num_gemms=1,
+        recipe_config_revision=3,
+        role_revision=2,
+        forward_states=(),
+        backward_states=(),
+        forward_quantizers=forward_quantizers,
+        backward_quantizers=backward_quantizers,
+        delayed_registration_handles=("forward-handle", "backward-handle"),
+    )
+
+    assert runtime.key is runtime_key
+    assert runtime.forward_quantizers is forward_quantizers
+    assert runtime.backward_quantizers is backward_quantizers
+    assert runtime.delayed_registration_handles == ("forward-handle", "backward-handle")
+
+
 @pytest.mark.parametrize(
     "recipe_type,derived_fields",
     [
@@ -175,6 +239,301 @@ def test_equal_builtin_recipes_have_equal_quantizer_configs(recipe_type):
     first = recipe_type().quantizer_config()
     second = recipe_type().quantizer_config()
     assert first == second
+
+
+def test_same_recipe_mutation_invalidates_config_for_direct_and_nested_parameters():
+    """Built-in recipe config changes for same-object and nested-qparam updates."""
+    recipe = Float8CurrentScaling()
+    original_config = recipe.quantizer_config()
+
+    recipe.fp8_dpa = True
+    direct_mutation_config = recipe.quantizer_config()
+    assert direct_mutation_config != original_config
+    assert dict(direct_mutation_config)["fp8_dpa"] is True
+
+    recipe.fp8_quant_fwd_inp = replace(recipe.fp8_quant_fwd_inp, amax_epsilon=0.25)
+    nested_mutation_config = recipe.quantizer_config()
+    assert nested_mutation_config != direct_mutation_config
+    assert dict(nested_mutation_config)["fp8_quant_fwd_inp"] == (
+        ("power_2_scale", recipe.fp8_quant_fwd_inp.power_2_scale),
+        ("amax_epsilon", 0.25),
+        ("random_hadamard_transform", recipe.fp8_quant_fwd_inp.random_hadamard_transform),
+        ("stochastic_rounding", recipe.fp8_quant_fwd_inp.stochastic_rounding),
+        ("fp4_2d_quantization", recipe.fp8_quant_fwd_inp.fp4_2d_quantization),
+    )
+
+
+def test_current_scaling_recipe_state_configures_roles_and_preserves_boundary_defaults():
+    """Current-scaling construction follows role dispatch and legacy boundary defaults."""
+    recipe = Float8CurrentScaling()
+    recipe.fp8_quant_fwd_inp = replace(
+        recipe.fp8_quant_fwd_inp, power_2_scale=True, amax_epsilon=0.1
+    )
+    recipe.fp8_quant_fwd_weight = replace(
+        recipe.fp8_quant_fwd_weight, power_2_scale=False, amax_epsilon=0.2
+    )
+    recipe.fp8_quant_bwd_grad = replace(
+        recipe.fp8_quant_bwd_grad, power_2_scale=True, amax_epsilon=0.3
+    )
+
+    forward_quantizers = Float8CurrentScalingRecipeState(
+        recipe,
+        mode="forward",
+        num_quantizers=4,
+        device=torch.device("cpu"),
+        roles=[
+            QuantizerRole(tensor_type="input"),
+            QuantizerRole(tensor_type="weight"),
+            None,
+            QuantizerRole(tensor_type="unknown"),
+        ],
+    ).make_quantizers()
+    backward_quantizers = Float8CurrentScalingRecipeState(
+        recipe,
+        mode="backward",
+        num_quantizers=3,
+        device=torch.device("cpu"),
+        roles=[
+            QuantizerRole(tensor_type="grad_output"),
+            None,
+            QuantizerRole(tensor_type="grad_input"),
+        ],
+    ).make_quantizers()
+
+    assert [(q.force_pow_2_scales, q.amax_epsilon) for q in forward_quantizers] == [
+        (True, 0.1),
+        (False, 0.2),
+        (recipe.use_power_2_scales, 0.0),
+        (True, 0.1),
+    ]
+    assert [(q.force_pow_2_scales, q.amax_epsilon) for q in backward_quantizers] == [
+        (True, 0.3),
+        (recipe.use_power_2_scales, 0.0),
+        (recipe.use_power_2_scales, 0.0),
+    ]
+
+
+@pytest.mark.parametrize(
+    "recipe",
+    [
+        DelayedScaling(),
+        Float8CurrentScaling(),
+        MXFP8BlockScaling(),
+        Float8BlockScaling(),
+        NVFP4BlockScaling(),
+        CustomRecipe(qfactory=lambda role: role, qfactory_key=("invalid-mode-test", 1)),
+    ],
+)
+def test_recipe_state_rejects_invalid_mode(recipe):
+    """Every RecipeState implementation uses the same mode validation."""
+    with pytest.raises(ValueError, match=r"Unexpected recipe mode \(invalid\)"):
+        RecipeState.create(recipe, mode="invalid", device=torch.device("cpu"))
+
+
+def test_current_scaling_role_layouts_cover_module_and_basic_op_families():
+    """Every Phase 2 owner supplies roles that select the expected per-slot qparams."""
+    recipe = Float8CurrentScaling()
+    recipe.fp8_quant_fwd_inp = replace(
+        recipe.fp8_quant_fwd_inp, power_2_scale=True, amax_epsilon=0.1
+    )
+    recipe.fp8_quant_fwd_weight = replace(
+        recipe.fp8_quant_fwd_weight, power_2_scale=False, amax_epsilon=0.2
+    )
+    recipe.fp8_quant_bwd_grad = replace(
+        recipe.fp8_quant_bwd_grad, power_2_scale=True, amax_epsilon=0.3
+    )
+
+    boundary = (recipe.use_power_2_scales, 0.0)
+    inp = (True, 0.1)
+    weight = (False, 0.2)
+    grad = (True, 0.3)
+
+    def settings(mode, roles):
+        quantizers = Float8CurrentScalingRecipeState(
+            recipe,
+            mode=mode,
+            num_quantizers=len(roles),
+            device=torch.device("cpu"),
+            roles=roles,
+        ).make_quantizers()
+        return [(q.force_pow_2_scales, q.amax_epsilon) for q in quantizers]
+
+    module_owner = SimpleNamespace(
+        name="test",
+        _output_quantizer_role=None,
+        _grad_input_quantizer_role=None,
+    )
+    for module_type in (Linear, LayerNormLinear):
+        forward_roles = module_type.get_quantizer_roles(module_owner, fwd=True, num_quantizers=3)
+        backward_roles = module_type.get_quantizer_roles(module_owner, fwd=False, num_quantizers=2)
+        assert settings("forward", forward_roles) == [inp, weight, boundary]
+        assert settings("backward", backward_roles) == [grad, boundary]
+
+    mlp_forward_roles = LayerNormMLP.get_quantizer_roles(
+        module_owner, fwd=True, num_quantizers=6
+    )
+    mlp_backward_roles = LayerNormMLP.get_quantizer_roles(
+        module_owner, fwd=False, num_quantizers=4
+    )
+    assert settings("forward", mlp_forward_roles) == [
+        inp,
+        weight,
+        inp,
+        inp,
+        weight,
+        boundary,
+    ]
+    assert settings("backward", mlp_backward_roles) == [grad, boundary, grad, grad]
+
+    grouped_forward_roles = GroupedLinear.get_quantizer_roles(
+        module_owner, fwd=True, num_quantizers=6
+    )
+    grouped_backward_roles = GroupedLinear.get_quantizer_roles(
+        module_owner, fwd=False, num_quantizers=4
+    )
+    assert settings("forward", grouped_forward_roles) == [
+        inp,
+        weight,
+        boundary,
+        inp,
+        weight,
+        boundary,
+    ]
+    assert settings("backward", grouped_backward_roles) == [grad, boundary, grad, boundary]
+
+    basic_owner = SimpleNamespace(name="test", num_groups=2)
+    basic_forward_roles = te_ops.BasicLinear.get_quantizer_roles(basic_owner, "forward")
+    basic_backward_roles = te_ops.BasicLinear.get_quantizer_roles(basic_owner, "backward")
+    assert settings("forward", basic_forward_roles) == [inp, weight]
+    assert settings("backward", basic_backward_roles) == [grad]
+
+    basic_grouped_forward_roles = te_ops.GroupedLinear.get_quantizer_roles(
+        basic_owner, "forward"
+    )
+    basic_grouped_backward_roles = te_ops.GroupedLinear.get_quantizer_roles(
+        basic_owner, "backward"
+    )
+    assert settings("forward", basic_grouped_forward_roles) == [inp, weight, inp, weight]
+    assert settings("backward", basic_grouped_backward_roles) == [grad, grad]
+
+
+def test_current_scaling_owner_configuration_paths_preserve_numerics_and_traits():
+    """Owner initialization paths publish identical qparams and retain non-numerical traits."""
+    recipe = Float8CurrentScaling()
+    recipe.fp8_quant_fwd_inp = replace(
+        recipe.fp8_quant_fwd_inp, power_2_scale=True, amax_epsilon=0.1
+    )
+    recipe.fp8_quant_fwd_weight = replace(
+        recipe.fp8_quant_fwd_weight, power_2_scale=False, amax_epsilon=0.2
+    )
+    recipe.fp8_quant_bwd_grad = replace(
+        recipe.fp8_quant_bwd_grad, power_2_scale=True, amax_epsilon=0.3
+    )
+
+    boundary = (recipe.use_power_2_scales, 0.0)
+    inp = (True, 0.1)
+    weight = (False, 0.2)
+    grad = (True, 0.3)
+
+    def settings(quantizers):
+        return [(q.force_pow_2_scales, q.amax_epsilon) for q in quantizers]
+
+    def make_module_owner(module_type, num_gemms):
+        owner = object.__new__(module_type)
+        owner.__dict__.update(
+            name="test",
+            num_gemms=num_gemms,
+            fp8_meta={"num_gemms": num_gemms},
+            fp8_meta_tensors_initialized=False,
+            quantizers={"scaling_fwd": [], "scaling_bwd": []},
+            _output_quantizer_role=None,
+            _grad_input_quantizer_role=None,
+        )
+        return owner
+
+    FP8GlobalStateManager.reset()
+    FP8GlobalStateManager.activate_recipe(recipe)
+    try:
+        for module_type in (Linear, LayerNormLinear):
+            owner = make_module_owner(module_type, 1)
+            module_type.set_meta_tensor(owner, True, recipe)
+            module_type.set_meta_tensor(owner, False, recipe)
+            assert settings(owner.quantizers["scaling_fwd"]) == [inp, weight, boundary]
+            assert settings(owner.quantizers["scaling_bwd"]) == [grad, boundary]
+
+        mlp = make_module_owner(LayerNormMLP, 2)
+        LayerNormMLP.set_meta_tensor(mlp, True, recipe)
+        LayerNormMLP.set_meta_tensor(mlp, False, recipe)
+        assert settings(mlp.quantizers["scaling_fwd"]) == [
+            inp,
+            weight,
+            inp,
+            inp,
+            weight,
+            boundary,
+        ]
+        assert settings(mlp.quantizers["scaling_bwd"]) == [grad, boundary, grad, grad]
+
+        grouped = make_module_owner(GroupedLinear, 2)
+        grouped.__dict__.update(
+            tp_size=1,
+            _offsets={
+                "input": 0,
+                "weight": 1,
+                "output": 2,
+                "grad_output": 0,
+                "grad_input": 1,
+            },
+            _num_fp8_tensors_per_gemm={"fwd": 3, "bwd": 2},
+            _validated_quantizer_generations={},
+            _delayed_scaling_input_quantizer=None,
+            _unsafe_requantization_input_quantizer=None,
+        )
+        GroupedLinear.set_meta_tensor(grouped, True, recipe)
+        GroupedLinear.set_meta_tensor(grouped, False, recipe)
+        assert settings(grouped.quantizers["scaling_fwd"]) == [
+            inp,
+            weight,
+            boundary,
+            inp,
+            weight,
+            boundary,
+        ]
+        assert settings(grouped.quantizers["scaling_bwd"]) == [
+            grad,
+            boundary,
+            grad,
+            boundary,
+        ]
+
+        grouped_tp = make_module_owner(GroupedLinear, 2)
+        grouped_tp.__dict__["tp_size"] = 2
+        with pytest.raises(
+            ValueError,
+            match="GroupedLinear doesn't support TP > 1 with Float8 current scaling",
+        ):
+            GroupedLinear.set_meta_tensor(grouped_tp, True, recipe)
+
+        basic_linear = te_ops.BasicLinear(4, 4, device="meta")
+        basic_linear.reset_recipe_state(recipe=recipe)
+        assert settings(basic_linear._quantizers["forward"]) == [inp, weight]
+        assert settings(basic_linear._quantizers["backward"]) == [grad]
+        assert basic_linear.get_quantizer("forward", 0).internal
+        assert basic_linear.get_quantizer("forward", 0).optimize_for_gemm
+        assert basic_linear.get_quantizer("forward", 1).internal
+        assert basic_linear.get_quantizer("backward", 0).internal
+        assert basic_linear.get_quantizer("backward", 0).optimize_for_gemm
+
+        basic_grouped = te_ops.GroupedLinear(2, 4, 4, device="meta")
+        basic_grouped.reset_recipe_state(recipe=recipe)
+        assert settings(basic_grouped._quantizers["forward"]) == [inp, weight, inp, weight]
+        assert settings(basic_grouped._quantizers["backward"]) == [grad, grad]
+        for quantizer in basic_grouped._quantizers["forward"]:
+            assert quantizer.internal
+        for quantizer in basic_grouped._quantizers["backward"]:
+            assert quantizer.internal
+    finally:
+        FP8GlobalStateManager.reset()
 
 
 @pytest.mark.parametrize(
@@ -277,23 +636,50 @@ def test_custom_recipe_qfactory_key_contract():
     assert calls == []
 
 
-def test_global_state_caches_active_quantizer_config():
-    """Recipe activation publishes the recipe and its semantic configuration together."""
+def test_custom_recipe_qfactory_key_mutation_changes_semantic_configuration():
+    """Changing a CustomRecipe policy key invalidates its cached config without probing."""
+    calls = []
+
+    def factory(role):
+        calls.append(role)
+
+    recipe = CustomRecipe(qfactory=factory, qfactory_key=("test-policy", 1))
+    original_config = recipe.quantizer_config()
+    recipe.qfactory_key = ("test-policy", 2)
+
+    assert recipe.quantizer_config() != original_config
+    assert dict(recipe.quantizer_config())["qfactory_key"] == ("test-policy", 2)
+    assert calls == []
+
+
+def test_global_state_caches_active_quantizer_config_and_revision():
+    """Recipe activation publishes semantic configuration with a manager-owned revision."""
     FP8GlobalStateManager.reset()
     active_recipe = Float8CurrentScaling()
+    assert FP8GlobalStateManager.get_quantizer_config_revision() == 0
 
     FP8GlobalStateManager.activate_recipe(active_recipe)
     original_config = active_recipe.quantizer_config()
     assert FP8GlobalStateManager.get_fp8_recipe() is active_recipe
     assert FP8GlobalStateManager.get_quantizer_config() is original_config
+    assert FP8GlobalStateManager.get_quantizer_config_revision() == 1
+
+    # Equivalent recipe objects update the requested recipe without advancing the revision.
+    equivalent_recipe = Float8CurrentScaling()
+    FP8GlobalStateManager.activate_recipe(equivalent_recipe)
+    assert FP8GlobalStateManager.get_fp8_recipe() is equivalent_recipe
+    assert FP8GlobalStateManager.get_quantizer_config() is original_config
+    assert FP8GlobalStateManager.get_quantizer_config_revision() == 1
 
     # Recipe mutation is requested state until the recipe is activated again.
     active_recipe.fp8_dpa = True
     assert FP8GlobalStateManager.get_quantizer_config() is original_config
+    assert FP8GlobalStateManager.get_quantizer_config_revision() == 1
 
     FP8GlobalStateManager.activate_recipe(active_recipe)
     assert FP8GlobalStateManager.get_quantizer_config() == active_recipe.quantizer_config()
     assert FP8GlobalStateManager.get_quantizer_config() != original_config
+    assert FP8GlobalStateManager.get_quantizer_config_revision() == 2
     FP8GlobalStateManager.reset()
 
 
@@ -309,6 +695,7 @@ def test_recipe_activation_does_not_call_qfactory_and_is_atomic_on_config_error(
     keyed_recipe = CustomRecipe(qfactory=keyed_factory)
     FP8GlobalStateManager.activate_recipe(keyed_recipe)
     keyed_config = keyed_recipe.quantizer_config()
+    keyed_revision = FP8GlobalStateManager.get_quantizer_config_revision()
     assert FP8GlobalStateManager.get_fp8_recipe() is keyed_recipe
     assert FP8GlobalStateManager.get_quantizer_config() is keyed_config
     assert calls == []
@@ -320,6 +707,7 @@ def test_recipe_activation_does_not_call_qfactory_and_is_atomic_on_config_error(
         FP8GlobalStateManager.activate_recipe(CustomRecipe(qfactory=unkeyed_factory))
     assert FP8GlobalStateManager.get_fp8_recipe() is keyed_recipe
     assert FP8GlobalStateManager.get_quantizer_config() is keyed_config
+    assert FP8GlobalStateManager.get_quantizer_config_revision() == keyed_revision
     assert calls == []
     FP8GlobalStateManager.reset()
 
@@ -331,13 +719,40 @@ def test_autocast_restores_recipe_and_quantizer_config_together():
     inner_recipe = MXFP8BlockScaling()
     FP8GlobalStateManager.activate_recipe(outer_recipe)
     outer_config = FP8GlobalStateManager.get_quantizer_config()
+    outer_revision = FP8GlobalStateManager.get_quantizer_config_revision()
+
+    # Equal independent configurations do not advance the revision on entry or restoration.
+    with te.autocast(enabled=False, recipe=Float8CurrentScaling()):
+        assert FP8GlobalStateManager.get_quantizer_config_revision() == outer_revision
+    assert FP8GlobalStateManager.get_quantizer_config_revision() == outer_revision
 
     with te.autocast(enabled=False, recipe=inner_recipe):
         assert FP8GlobalStateManager.get_fp8_recipe() is inner_recipe
         assert FP8GlobalStateManager.get_quantizer_config() == inner_recipe.quantizer_config()
+        assert FP8GlobalStateManager.get_quantizer_config_revision() == outer_revision + 1
 
     assert FP8GlobalStateManager.get_fp8_recipe() is outer_recipe
     assert FP8GlobalStateManager.get_quantizer_config() is outer_config
+    assert FP8GlobalStateManager.get_quantizer_config_revision() == outer_revision + 2
+    FP8GlobalStateManager.reset()
+
+
+def test_quantized_model_init_restores_recipe_config_with_monotonic_revision():
+    """Model-init recipe restoration republishes config rather than reusing an old revision."""
+    FP8GlobalStateManager.reset()
+    outer_recipe = Float8CurrentScaling()
+    inner_recipe = MXFP8BlockScaling()
+    FP8GlobalStateManager.activate_recipe(outer_recipe)
+    outer_config = FP8GlobalStateManager.get_quantizer_config()
+    outer_revision = FP8GlobalStateManager.get_quantizer_config_revision()
+
+    with te.quantized_model_init(enabled=False, recipe=inner_recipe):
+        assert FP8GlobalStateManager.get_fp8_recipe() is inner_recipe
+        assert FP8GlobalStateManager.get_quantizer_config_revision() == outer_revision + 1
+
+    assert FP8GlobalStateManager.get_fp8_recipe() is outer_recipe
+    assert FP8GlobalStateManager.get_quantizer_config() is outer_config
+    assert FP8GlobalStateManager.get_quantizer_config_revision() == outer_revision + 2
     FP8GlobalStateManager.reset()
 
 
@@ -790,7 +1205,7 @@ class TestFP8Recipe:
             GroupedLinear,
         ],
     )
-    def test_quantizer_update(self, module_class):
+    def test_quantized_primary_recipe_update_is_rejected(self, module_class):
         in_features = 32
         out_features = 32
         batch_size = 32
@@ -805,8 +1220,7 @@ class TestFP8Recipe:
         x = torch.randn(batch_size, in_features, device="cuda")
         recipe = DelayedScaling(amax_history_len=1)
         with te.autocast(enabled=True, recipe=recipe):
-            warn_msg = "Quantizer is being updated, this may affect model behavior"
-            with pytest.warns(UserWarning, match=warn_msg):
+            with pytest.raises(RuntimeError, match="Recipe mismatch for quantized primary weights"):
                 if module_class == GroupedLinear:
                     y = module(x, [batch_size])
                 else:

@@ -10,7 +10,7 @@ import pickle
 import warnings
 from enum import Enum
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Generator, List, Optional, Tuple, Union
+from typing import Any, Dict, Generator, Hashable, List, Optional, Tuple, Union
 from contextlib import contextmanager
 from types import MethodType
 
@@ -28,15 +28,11 @@ from .._extra_state import (
     unsafe_pickle_extra_state_enabled,
 )
 from ..quantization import (
-    MXFP8BlockScalingRecipeState,
-    DelayedScalingRecipeState,
-    Float8CurrentScalingRecipeState,
-    Float8BlockScalingRecipeState,
-    NVFP4BlockScalingRecipeState,
-    CustomRecipeState,
     FP8GlobalStateManager,
     QuantizerRole,
     RecipeState,
+    _QuantizationRuntime,
+    _QuantizationRuntimeKey,
     _has_delayed_scaling_state,
 )
 from ..distributed import (
@@ -918,6 +914,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self.wgrad_store = None
         self._output_quantizer_role: Optional[QuantizerRole] = None
         self._grad_input_quantizer_role: Optional[QuantizerRole] = None
+        self._role_revision = 0
+        self._quantization_runtime: Optional[_QuantizationRuntime] = None
 
         if not TEDebugState.debug_enabled:
             TEDebugState.initialize()
@@ -954,11 +952,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
     @output_quantizer_role.setter
     def output_quantizer_role(self, role: Optional[QuantizerRole]) -> None:
-        if role == self._output_quantizer_role:
-            return
-        self._output_quantizer_role = role
-        if self.fp8_meta_tensors_initialized:
-            self.fp8_meta_tensors_initialized = False
+        self._set_quantizer_role("_output_quantizer_role", role)
 
     @property
     def grad_input_quantizer_role(self) -> Optional[QuantizerRole]:
@@ -970,11 +964,20 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
     @grad_input_quantizer_role.setter
     def grad_input_quantizer_role(self, role: Optional[QuantizerRole]) -> None:
-        if role == self._grad_input_quantizer_role:
+        self._set_quantizer_role("_grad_input_quantizer_role", role)
+
+    def _set_quantizer_role(
+        self,
+        attribute: str,
+        role: Optional[QuantizerRole],
+    ) -> None:
+        """Update a requested boundary role without mutating the active runtime."""
+        if role is not None and not isinstance(role, QuantizerRole):
+            raise TypeError(f"{attribute} must be a QuantizerRole or None")
+        if getattr(self, attribute) == role:
             return
-        self._grad_input_quantizer_role = role
-        if self.fp8_meta_tensors_initialized:
-            self.fp8_meta_tensors_initialized = False
+        self.fast_setattr(attribute, role)
+        self.fast_setattr("_role_revision", getattr(self, "_role_revision", 0) + 1)
 
     def _warn_missing_output_quantizer_role(
         self,
@@ -1074,76 +1077,230 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                             meta_key
                         ].amax_history[0]
 
-    def set_meta_tensor(self, fwd: bool, recipe: Recipe) -> None:
-        """Init scales and amaxes for fwd | bwd."""
-        fp8_meta_tensor_key = "scaling_fwd" if fwd else "scaling_bwd"
-
-        # Return early if recipe state matches recipe
-        if self.fp8_meta_tensors_initialized:
-            recipe_state = self.fp8_meta[fp8_meta_tensor_key]
-            # TODO(#3157): Match built-in recipes by full config, not just RecipeState type, so
-            # same-class mid-training changes rebuild quantizers/workspaces correctly.
-            if recipe.delayed() and isinstance(recipe_state, DelayedScalingRecipeState):
-                self.adjust_amax_history_length(recipe.amax_history_len, fwd=fwd)
-                return
-            if recipe.mxfp8() and isinstance(recipe_state, MXFP8BlockScalingRecipeState):
-                return
-            if recipe.float8_current_scaling() and isinstance(
-                recipe_state, Float8CurrentScalingRecipeState
-            ):
-                return
-            if recipe.float8_block_scaling() and isinstance(
-                recipe_state, Float8BlockScalingRecipeState
-            ):
-                return
-            if recipe.nvfp4() and isinstance(recipe_state, NVFP4BlockScalingRecipeState):
-                return
-            if recipe.custom() and isinstance(recipe_state, CustomRecipeState):
-                # TODO(#3157): Compare CustomRecipe/qfactory config here. qfactory changes made
-                # mid-training on the same recipe object currently do not take effect because
-                # stale quantizers are reused.
-                if recipe_state.recipe is recipe:
-                    return
-
-        # Max. number of fp8 tensors per GEMM = 3 (input, weight, output) for fwd and
-        # 2 (grad_output and grad_input) for bwd
-        num_fp8_tensors = self.fp8_meta["num_gemms"] * 3 if fwd else self.fp8_meta["num_gemms"] * 2
-
-        # Initialize recipe state and quantizers
+    def _resolve_quantizer_roles(
+        self,
+        *,
+        fwd: bool,
+        num_quantizers: int,
+    ) -> Tuple[
+        Tuple[Optional[QuantizerRole], ...],
+        Optional[List[Optional[QuantizerRole]]],
+    ]:
+        """Resolve semantic key roles and the role list passed to ``RecipeState``."""
         roles = self.get_quantizer_roles(  # pylint: disable=assignment-from-none
-            fwd=fwd, num_quantizers=num_fp8_tensors
+            fwd=fwd,
+            num_quantizers=num_quantizers,
         )
-        if roles is not None:
-            assert (
-                len(roles) == num_fp8_tensors
-            ), f"Recipe roles must match number of quantizers ({len(roles)=} vs {num_fp8_tensors=})"
-        recipe_state = RecipeState.create(  # pylint: disable=assignment-from-none
+        if roles is None:
+            # ``RecipeState`` treats a missing role list as one bare role per
+            # slot. Encode that effective behavior in the runtime key while
+            # preserving ``None`` for the state so CustomRecipe keeps its
+            # existing missing-role warning.
+            return tuple(QuantizerRole() for _ in range(num_quantizers)), None
+        if len(roles) != num_quantizers:
+            raise ValueError(
+                "Recipe roles must match number of quantizers "
+                f"({len(roles)=} vs {num_quantizers=})"
+            )
+        state_roles = list(roles)
+        return tuple(state_roles), state_roles
+
+    def _prepare_quantization_runtime(
+        self,
+        *,
+        recipe: Recipe,
+        key: _QuantizationRuntimeKey,
+        num_gemms: int,
+        recipe_config_revision: int,
+        role_revision: int,
+        forward_state_roles: Optional[List[Optional[QuantizerRole]]],
+        backward_state_roles: Optional[List[Optional[QuantizerRole]]],
+    ) -> _QuantizationRuntime:
+        """Build both quantization directions without changing live module state."""
+        num_forward_quantizers = num_gemms * 3
+        num_backward_quantizers = num_gemms * 2
+
+        forward_state = RecipeState.create(  # pylint: disable=assignment-from-none
             recipe,
-            mode=("forward" if fwd else "backward"),
-            num_quantizers=num_fp8_tensors,
-            roles=roles,
+            mode="forward",
+            num_quantizers=num_forward_quantizers,
+            roles=forward_state_roles,
+        )
+        backward_state = RecipeState.create(  # pylint: disable=assignment-from-none
+            recipe,
+            mode="backward",
+            num_quantizers=num_backward_quantizers,
+            roles=backward_state_roles,
         )
 
-        # Reached the rebuild path because ``fp8_meta_tensors_initialized``
-        # was flipped to False after first init — most commonly because the
-        # ``output_quantizer_role`` / ``grad_input_quantizer_role`` setter
-        # invalidated state when a parent module (e.g. ``MultiheadAttention``)
-        # wired boundary roles. That setter is recipe-agnostic, so this code
-        # fires even for built-in recipes that don't consume role information
-        # in ``make_quantizers``.
-        #
-        # Rebuilding the recipe state must preserve persistent training
-        # buffers (delayed-scaling ``scale`` / ``amax_history``) so the new
-        # quantizer instances and the ``FP8GlobalStateManager`` reduction
-        # buffers end up viewing the SAME tensor objects, and so any
-        # checkpoint-loaded state isn't silently destroyed on the first
-        # forward after ``load_state_dict``.
-        old_state = self.fp8_meta.get(fp8_meta_tensor_key)
-        if old_state is not None:
-            recipe_state.inherit_state_from(old_state)
+        active = getattr(self, "_quantization_runtime", None)
+        if active is not None:
+            old_forward_state = active.forward_states[0]
+            old_backward_state = active.backward_states[0]
+        else:
+            # Checkpoint loading and legacy direct initialization can populate
+            # compatibility metadata before the first runtime is active.
+            old_forward_state = self.fp8_meta.get("scaling_fwd")
+            old_backward_state = self.fp8_meta.get("scaling_bwd")
+        if old_forward_state is not None:
+            forward_state.inherit_state_from(old_forward_state)
+        if old_backward_state is not None:
+            backward_state.inherit_state_from(old_backward_state)
 
-        self.fp8_meta[fp8_meta_tensor_key] = recipe_state
-        self.quantizers[fp8_meta_tensor_key] = recipe_state.make_quantizers()
+        # A failure in either direction discards this entire local candidate.
+        forward_quantizers = forward_state.make_quantizers()
+        backward_quantizers = backward_state.make_quantizers()
+
+        return _QuantizationRuntime(
+            key=key,
+            num_gemms=num_gemms,
+            recipe_config_revision=recipe_config_revision,
+            role_revision=role_revision,
+            forward_states=(forward_state,),
+            backward_states=(backward_state,),
+            forward_quantizers=forward_quantizers,
+            backward_quantizers=backward_quantizers,
+            delayed_registration_handles=(),
+        )
+
+    def _validate_quantization_runtime(self, candidate: _QuantizationRuntime) -> Any:
+        """Validate a candidate and return optional transient commit data."""
+        return None
+
+    def _commit_quantization_runtime(
+        self,
+        candidate: _QuantizationRuntime,
+        *,
+        recipe: Recipe,
+        validation_result: Any = None,
+    ) -> None:
+        """Publish a fully prepared and validated runtime as one unit."""
+        del validation_result
+        forward_state = candidate.forward_states[0]
+        backward_state = candidate.backward_states[0]
+
+        # ``fp8_meta`` and ``quantizers`` remain compatibility views. Only
+        # update them after both directions have been built and validated.
+        self.fp8_meta["recipe"] = recipe
+        self.fp8_meta["num_gemms"] = candidate.num_gemms
+        self.fp8_meta["scaling_fwd"] = forward_state
+        self.fp8_meta["scaling_bwd"] = backward_state
+        if hasattr(recipe, "fp8_format"):
+            self.fp8_meta["fp8_max_fwd"] = recipe.fp8_format.value.max_fwd
+            self.fp8_meta["fp8_max_bwd"] = recipe.fp8_format.value.max_bwd
+        self.quantizers["scaling_fwd"] = candidate.forward_quantizers
+        self.quantizers["scaling_bwd"] = candidate.backward_quantizers
+        self.fast_setattr("_quantization_runtime", candidate)
+        self.fast_setattr("fp8_meta_tensors_initialized", True)
+
+        # Clear cached weight workspaces only after the replacement runtime has
+        # committed fully. A later forward will recreate them with its quantizers.
+        workspaces = getattr(self, "_fp8_workspaces", None)
+        if workspaces is not None:
+            workspaces.clear()
+
+    def _ensure_active_quantization_runtime(
+        self,
+        *,
+        recipe: Recipe,
+        recipe_config: Hashable,
+        recipe_config_revision: int,
+        num_gemms: int,
+    ) -> bool:
+        """Ensure the active runtime matches the requested recipe, roles, and slot layout.
+
+        Return whether a new runtime was committed.
+        """
+        active = getattr(self, "_quantization_runtime", None)
+        role_revision = getattr(self, "_role_revision", 0)
+
+        # Constant-time steady-state path: no role construction, factory
+        # calls, recipe traversal, or candidate validation.
+        if (
+            active is not None
+            and active.recipe_config_revision == recipe_config_revision
+            and active.role_revision == role_revision
+            and active.num_gemms == num_gemms
+        ):
+            return False
+
+        num_forward_quantizers = num_gemms * 3
+        num_backward_quantizers = num_gemms * 2
+        forward_key_roles, forward_state_roles = self._resolve_quantizer_roles(
+            fwd=True,
+            num_quantizers=num_forward_quantizers,
+        )
+        backward_key_roles, backward_state_roles = self._resolve_quantizer_roles(
+            fwd=False,
+            num_quantizers=num_backward_quantizers,
+        )
+        requested_key = _QuantizationRuntimeKey(
+            recipe_config=recipe_config,
+            forward_roles=forward_key_roles,
+            backward_roles=backward_key_roles,
+        )
+
+        # A module can miss an A -> B -> A sequence. Synchronize its cheap
+        # revision markers without rebuilding an equal semantic runtime.
+        if (
+            active is not None
+            and active.key == requested_key
+            and active.num_gemms == num_gemms
+        ):
+            active.recipe_config_revision = recipe_config_revision
+            active.role_revision = role_revision
+            return False
+
+        # Until per-weight semantic keys are available, a recipe change may
+        # not retarget already-quantized primary storage. Role-only changes
+        # are safe here because the module's weight-slot roles are fixed; the
+        # requested setters only affect output/grad-input boundary slots.
+        if (
+            active is not None
+            and getattr(self, "primary_weights_in_fp8", False)
+            and (
+                active.key.recipe_config != requested_key.recipe_config
+                or active.num_gemms != num_gemms
+            )
+        ):
+            raise RuntimeError(
+                "Recipe mismatch for quantized primary weights: mid-training recipe "
+                "configuration changes require per-weight semantic compatibility and "
+                "are not supported yet."
+            )
+
+        candidate = self._prepare_quantization_runtime(
+            recipe=recipe,
+            key=requested_key,
+            num_gemms=num_gemms,
+            recipe_config_revision=recipe_config_revision,
+            role_revision=role_revision,
+            forward_state_roles=forward_state_roles,
+            backward_state_roles=backward_state_roles,
+        )
+        validation_result = self._validate_quantization_runtime(candidate)
+        self._commit_quantization_runtime(
+            candidate,
+            recipe=recipe,
+            validation_result=validation_result,
+        )
+        return True
+
+    def set_meta_tensor(self, fwd: bool, recipe: Recipe) -> None:
+        """Initialize both quantization directions atomically.
+
+        ``fwd`` is retained for API compatibility. A runtime is never prepared
+        or published one direction at a time.
+        """
+        # TODO(negvet): Remove set_meta_tensor after checkpoint, GroupedLinear, and DPA migration.
+        del fwd
+        num_gemms = self.fp8_meta.get("num_gemms", 1)
+        self._ensure_active_quantization_runtime(
+            recipe=recipe,
+            recipe_config=recipe.quantizer_config(),
+            recipe_config_revision=-1,
+            num_gemms=num_gemms,
+        )
 
     def get_quantizer_roles(
         self,
@@ -1509,51 +1666,36 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         fp8_enabled = fp8 or fp8_calibration
         meta["fp8_checkpoint"] = fp8_enabled
 
-        _original_recipe = None
-
-        if fp8_parameters or fp8_enabled:
-            _original_recipe = meta.get("recipe", None)
-            if self.fp8_initialized and FP8GlobalStateManager.get_fp8_recipe() == _original_recipe:
-                # FP8 init has already been run and recipe is the same, don't do anything.
-                return
-            meta["recipe"] = FP8GlobalStateManager.get_fp8_recipe()
-        else:
+        if not (fp8_parameters or fp8_enabled):
             # If fp8 isn't enabled, turn off and return.
             self.fast_setattr("fp8_initialized", False)
             return
 
-        if fp8_parameters and not self.fp8_initialized:
-            meta["num_gemms"] = num_gemms
-            self.init_fp8_meta_tensors(meta["recipe"])
-
+        original_recipe = meta.get("recipe")
+        recipe = FP8GlobalStateManager.get_fp8_recipe()
+        recipe_config = FP8GlobalStateManager.get_quantizer_config()
+        recipe_config_revision = FP8GlobalStateManager.get_quantizer_config_revision()
         if fp8_enabled:
-            # Set FP8 and other FP8 metadata
-            meta["num_gemms"] = num_gemms
             meta["fp8_group"] = FP8GlobalStateManager.get_fp8_group()
 
-            # Set FP8_MAX per tensor according to recipe
-            if hasattr(meta["recipe"], "fp8_format"):
-                meta["fp8_max_fwd"] = meta["recipe"].fp8_format.value.max_fwd
-                meta["fp8_max_bwd"] = meta["recipe"].fp8_format.value.max_bwd
-
-            # Allocate scales and amaxes
-            self.init_fp8_meta_tensors(meta["recipe"])
+        runtime_changed = self._ensure_active_quantization_runtime(
+            recipe=recipe,
+            recipe_config=recipe_config,
+            recipe_config_revision=recipe_config_revision,
+            num_gemms=num_gemms,
+        )
+        if fp8_enabled:
             self.fast_setattr("fp8_initialized", True)
 
-            meta["recipe"] = FP8GlobalStateManager.get_fp8_recipe()
-
-        _current_recipe = meta["recipe"]
-        if _original_recipe is not None and not (
-            issubclass(_current_recipe.__class__, _original_recipe.__class__)
-            or issubclass(_original_recipe.__class__, _current_recipe.__class__)
+        if runtime_changed and original_recipe is not None and not (
+            issubclass(recipe.__class__, original_recipe.__class__)
+            or issubclass(original_recipe.__class__, recipe.__class__)
         ):
             warnings.warn(
-                f"Recipe type changed from {_original_recipe.__class__.__name__} "
-                f"to {_current_recipe.__class__.__name__}. "
+                f"Recipe type changed from {original_recipe.__class__.__name__} "
+                f"to {recipe.__class__.__name__}. "
                 "This may affect model behavior."
             )
-            # Clear cached workspaces as they were created with the old recipe/quantizer type
-            self._fp8_workspaces.clear()
 
     def prepare_forward(
         self,

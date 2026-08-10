@@ -982,9 +982,9 @@ def test_custom_recipe_ds_multi_step():
 # ----------------------------------------------------------------------
 #
 # Setting ``output_quantizer_role`` / ``grad_input_quantizer_role`` to a
-# different value flips ``fp8_meta_tensors_initialized = False`` so the
-# next ``set_meta_tensor`` call rebuilds the recipe state and quantizers
-# with up-to-date roles. That rebuild MUST preserve persistent training
+# different value advances the requested role revision without mutating the
+# active runtime. The next runtime update rebuilds the recipe state and
+# quantizers with up-to-date roles. That rebuild MUST preserve persistent training
 # buffers (delayed scaling's ``scale`` / ``amax_history``); otherwise
 # checkpointed amax history is silently destroyed on the first forward
 # pass after ``load_state_dict`` (when MHA wires boundary roles for the
@@ -1023,13 +1023,17 @@ def test_role_change_preserves_delayed_scaling_state():
     scale_data_ptr = state_before.scale.data_ptr()
     amax_data_ptr = state_before.amax_history.data_ptr()
 
-    # Trigger role-driven invalidation. Setting a non-None role flips
-    # ``fp8_meta_tensors_initialized = False`` so the next ``set_meta_tensor``
-    # falls through and creates a fresh ``RecipeState``.
+    # Change the requested role. The active compatibility views remain live
+    # until the next runtime update commits a complete replacement.
+    runtime_before = model._quantization_runtime
+    role_revision_before = model._role_revision
     model.output_quantizer_role = QuantizerRole(
         module_type="dpa", tensor_type="qkv", name="downstream"
     )
-    assert not model.fp8_meta_tensors_initialized
+    assert model.fp8_meta_tensors_initialized
+    assert model._quantization_runtime is runtime_before
+    assert model._role_revision == role_revision_before + 1
+    assert model.fp8_meta["scaling_fwd"] is state_before
 
     # Trigger the rebuild directly (no forward, so we can compare buffers exactly).
     model.init_fp8_meta_tensors(fp8_recipe)
@@ -1091,11 +1095,16 @@ def test_role_change_preserves_custom_delayed_scaling_state():
     scale_obj_id = id(inner_before.scale)
     amax_obj_id = id(inner_before.amax_history)
 
-    # Trigger role-driven invalidation.
+    # Change the requested role without invalidating the active runtime.
+    runtime_before = model._quantization_runtime
+    role_revision_before = model._role_revision
     model.output_quantizer_role = QuantizerRole(
         module_type="dpa", tensor_type="qkv", name="downstream"
     )
-    assert not model.fp8_meta_tensors_initialized
+    assert model.fp8_meta_tensors_initialized
+    assert model._quantization_runtime is runtime_before
+    assert model._role_revision == role_revision_before + 1
+    assert model.fp8_meta["scaling_fwd"] is state_before
 
     # Rebuild.
     model.init_fp8_meta_tensors(custom_recipe)
@@ -1318,6 +1327,7 @@ def test_custom_recipe_dpa_mxfp8():
 
     custom_recipe = recipe.CustomRecipe(
         qfactory=_nvfp4_linear_mxfp8_dpa_factory,
+        qfactory_key=("test_nvfp4_linear_mxfp8_dpa", 1),
         fp8_dpa=True,
     )
 

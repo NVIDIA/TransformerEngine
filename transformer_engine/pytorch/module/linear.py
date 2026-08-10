@@ -1839,15 +1839,6 @@ class Linear(TransformerEngineBaseModule):
             ]
         return [base[i % len(base)] for i in range(num_quantizers)]
 
-    def set_meta_tensor(self, fwd: bool, recipe: Recipe) -> None:
-        """Init scales and amaxes for fwd | bwd."""
-        super().set_meta_tensor(fwd, recipe)
-
-        # Recipe-specific quantizer configuration
-        recipe = FP8GlobalStateManager.get_fp8_recipe()
-        if recipe.float8_current_scaling():
-            self._customize_quantizers_float8_current_scaling(fwd, recipe)
-
     def reset_parameters(self, defer_init=False):
         super().reset_parameters(defer_init=defer_init)
 
@@ -2198,35 +2189,6 @@ class Linear(TransformerEngineBaseModule):
             return output, bias_tensor
 
         return output
-
-    def _customize_quantizers_float8_current_scaling(self, fwd: bool, recipe: Recipe) -> None:
-        """Customize quantizers based on current scaling recipe + linear."""
-        assert (
-            recipe.float8_current_scaling()
-        ), "current scaling recipe quantizer customization here"
-        if fwd:
-            # set configs about amax epsilon and power_2_scale
-            self.quantizers["scaling_fwd"][
-                FP8FwdTensorIdx.GEMM1_INPUT
-            ].force_pow_2_scales = recipe.fp8_quant_fwd_inp.power_2_scale
-            self.quantizers["scaling_fwd"][
-                FP8FwdTensorIdx.GEMM1_INPUT
-            ].amax_epsilon = recipe.fp8_quant_fwd_inp.amax_epsilon
-            # also set weight quantizer with same amax_epsilon & power_2_scale
-            self.quantizers["scaling_fwd"][
-                FP8FwdTensorIdx.GEMM1_WEIGHT
-            ].force_pow_2_scales = recipe.fp8_quant_fwd_weight.power_2_scale
-            self.quantizers["scaling_fwd"][
-                FP8FwdTensorIdx.GEMM1_WEIGHT
-            ].amax_epsilon = recipe.fp8_quant_fwd_weight.amax_epsilon
-        else:
-            # set grad_output_quantizer with amax epsilon and power_2_scale
-            self.quantizers["scaling_bwd"][
-                FP8BwdTensorIdx.GRAD_OUTPUT1
-            ].force_pow_2_scales = recipe.fp8_quant_bwd_grad.power_2_scale
-            self.quantizers["scaling_bwd"][
-                FP8BwdTensorIdx.GRAD_OUTPUT1
-            ].amax_epsilon = recipe.fp8_quant_bwd_grad.amax_epsilon
 
     def _get_weight_quantizers(self) -> List[Quantizer]:
         """Get the weight quantizers of the module."""

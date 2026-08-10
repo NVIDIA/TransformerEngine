@@ -391,18 +391,6 @@ class BasicLinear(BasicOperation):
                 or is_quantized_tensor(weight)
             )
 
-        # Recipe-specific configuration
-        # Note: This function may be called in base class constructor,
-        # before any basic linear attrs have been set.
-        if recipe is not None:
-            if recipe.float8_current_scaling():
-                input_quantizer.force_pow_2_scales = recipe.fp8_quant_fwd_inp.power_2_scale
-                input_quantizer.amax_epsilon_scales = recipe.fp8_quant_fwd_inp.amax_epsilon
-                weight_quantizer.force_pow_2_scales = recipe.fp8_quant_fwd_weight.power_2_scale
-                weight_quantizer.amax_epsilon_scales = recipe.fp8_quant_fwd_weight.amax_epsilon
-                grad_output_quantizer.force_pow_2_scales = recipe.fp8_quant_bwd_grad.power_2_scale
-                grad_output_quantizer.amax_epsilon_scales = recipe.fp8_quant_bwd_grad.amax_epsilon
-
         # Update quantizer in quantized weight tensor
         if weight_quantizer is not None and is_quantized_tensor(weight):
             if weight._quantizer is not None:

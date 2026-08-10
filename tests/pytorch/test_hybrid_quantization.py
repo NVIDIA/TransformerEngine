@@ -4663,7 +4663,7 @@ class TestHybridGroupedLinearValidation:
             nonlocal input_count
             source = "original"
             if role is not None and role.tensor_type == "input":
-                source = "original" if input_count == 0 else "rowwise_dequantized"
+                source = "original" if input_count % 2 == 0 else "rowwise_dequantized"
                 input_count += 1
             return HybridQuantizer(
                 rowwise_quantizer=_make_fp8_quantizer(),
@@ -4675,13 +4675,28 @@ class TestHybridGroupedLinearValidation:
             qfactory=mixed_source_qfactory,
             qfactory_key=("test_mixed_columnwise_sources", 1),
         )
-        # A failed generation is never marked validated. Base metadata can then
-        # early-return on retry, so the O(1) guard must validate it again.
+        # A failed candidate is neither committed nor marked validated. The
+        # active runtime stays behind the requested revision, so each retry
+        # prepares and validates a fresh candidate.
+        rebuilt_runtime = model._quantization_runtime
+        rebuilt_backward_generation = model._validated_quantizer_generations["scaling_bwd"]
+        rebuilt_delayed_quantizer = model._delayed_scaling_input_quantizer
+        rebuilt_unsafe_quantizer = model._unsafe_requantization_input_quantizer
+        failed_validation_call_count = len(validation_calls)
         for _ in range(2):
             with pytest.raises(ValueError, match="mixed columnwise source policies"):
                 with torch.no_grad(), autocast(enabled=True, recipe=mixed_recipe):
                     model(tensor, m_splits)
+            assert model._quantization_runtime is rebuilt_runtime
             assert model._validated_quantizer_generations["scaling_fwd"] is rebuilt_generation
+            assert (
+                model._validated_quantizer_generations["scaling_bwd"]
+                is rebuilt_backward_generation
+            )
+            assert model._delayed_scaling_input_quantizer is rebuilt_delayed_quantizer
+            assert model._unsafe_requantization_input_quantizer is rebuilt_unsafe_quantizer
+            assert len(validation_calls) > failed_validation_call_count
+            failed_validation_call_count = len(validation_calls)
 
         # Stale invalid recipe metadata must not affect the non-quantized path.
         with torch.no_grad():

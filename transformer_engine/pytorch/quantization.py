@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 """Quantization utilities for TransformerEngine"""
+
 from __future__ import annotations
 
 import abc
@@ -12,12 +13,13 @@ import os
 from dataclasses import dataclass, field
 from contextlib import contextmanager
 from collections import deque
-from typing import Callable, Hashable, List, Optional, Dict, Any, Tuple, Union
+from typing import Callable, Hashable, List, Optional, Dict, Any, Tuple, TYPE_CHECKING, Union
 
 import torch
 import transformer_engine_torch as tex
 from transformer_engine.common.recipe import (
     Recipe,
+    QParams,
     DelayedScaling,
     Format,
     MXFP8BlockScaling,
@@ -31,6 +33,8 @@ from .constants import dist_group_type, DType
 from .utils import get_device_compute_capability
 from .jit import jit_fuser
 
+if TYPE_CHECKING:
+    from .quantized_tensor import Quantizer
 
 __all__ = [
     "autocast",
@@ -94,6 +98,68 @@ class QuantizerRole:
         if self.name:
             parts.append(f"name={self.name}")
         return "|".join(parts) if parts else "QuantizerRole()"
+
+
+@dataclass(frozen=True)
+class _QuantizationRuntimeKey:
+    """Immutable semantic request for one module or operation's quantizers.
+
+    ``recipe_config`` is the recipe-owned semantic configuration cached by
+    :class:`FP8GlobalStateManager`.  The role tuples preserve the ordered
+    forward and backward quantizer-slot layouts for this particular runtime
+    owner.  ``None`` is a meaningful boundary slot and is therefore retained
+    rather than filtered out.
+
+    This is intentionally private: runtime owners use it to decide whether a
+    candidate runtime would construct the same quantizers as the active one.
+    It must contain only immutable semantic values, never recipe, factory,
+    state, or quantizer object identity.
+    """
+
+    recipe_config: Hashable
+    forward_roles: Tuple[Optional[QuantizerRole], ...]
+    backward_roles: Tuple[Optional[QuantizerRole], ...]
+
+    def __post_init__(self) -> None:
+        """Canonicalize role containers and reject non-semantic slot values."""
+        try:
+            hash(self.recipe_config)
+        except TypeError as exc:
+            raise TypeError("_QuantizationRuntimeKey.recipe_config must be hashable") from exc
+
+        for attribute in ("forward_roles", "backward_roles"):
+            roles = tuple(getattr(self, attribute))
+            if any(role is not None and not isinstance(role, QuantizerRole) for role in roles):
+                raise TypeError(
+                    f"_QuantizationRuntimeKey.{attribute} entries must be QuantizerRole or None"
+                )
+            object.__setattr__(self, attribute, roles)
+
+
+@dataclass
+class _QuantizationRuntime:
+    """Complete active-or-candidate quantization state for one runtime owner.
+
+    A module or operation prepares this bundle away from its active state,
+    validates it, and then publishes it as one unit.  Keeping forward and
+    backward states and quantizers together prevents a failed update from
+    exposing a new forward configuration with stale backward state.
+
+    ``delayed_registration_handles`` is intentionally opaque because delayed
+    scaling registration is owned by :class:`FP8GlobalStateManager`.  Runtime
+    owners replace or unregister those handles only during a successful
+    lifecycle transition.
+    """
+
+    key: _QuantizationRuntimeKey
+    num_gemms: int
+    recipe_config_revision: int
+    role_revision: int
+    forward_states: Tuple["RecipeState", ...]
+    backward_states: Tuple["RecipeState", ...]
+    forward_quantizers: List["Quantizer"]
+    backward_quantizers: List["Quantizer"]
+    delayed_registration_handles: Tuple[Any, ...]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -397,6 +463,7 @@ class FP8GlobalState:
     fp8_calibration: bool = False
     fp8_recipe: Optional[Recipe] = None
     quantizer_config: Optional[Hashable] = None
+    quantizer_config_revision: int = 0
     fp8_distributed_group: Optional[dist_group_type] = None
     fp8_parameters: bool = False
     high_precision_init_val: bool = False
@@ -612,12 +679,24 @@ class FP8GlobalStateManager:
         return get_default_fp8_recipe()
 
     @classmethod
+    def _set_recipe_config(
+        cls,
+        recipe: Optional[Recipe],
+        quantizer_config: Optional[Hashable],
+    ) -> None:
+        """Publish a recipe/configuration pair and advance its monotonic revision."""
+        qstate = cls.quantization_state
+        config_changed = quantizer_config != qstate.quantizer_config
+        if config_changed:
+            qstate.quantizer_config_revision += 1
+            qstate.quantizer_config = quantizer_config
+        qstate.fp8_recipe = recipe
+
+    @classmethod
     def activate_recipe(cls, recipe: Recipe) -> Hashable:
         """Make a recipe and its semantic quantizer configuration active together."""
         quantizer_config = recipe.quantizer_config()
-        qstate = cls.quantization_state
-        qstate.fp8_recipe = recipe
-        qstate.quantizer_config = quantizer_config
+        cls._set_recipe_config(recipe, quantizer_config)
         return quantizer_config
 
     @classmethod
@@ -627,6 +706,11 @@ class FP8GlobalStateManager:
         if quantizer_config is None:
             return cls.activate_recipe(cls.get_fp8_recipe())
         return quantizer_config
+
+    @classmethod
+    def get_quantizer_config_revision(cls) -> int:
+        """Return the manager-owned active recipe-configuration revision."""
+        return cls.quantization_state.quantizer_config_revision
 
     @classmethod
     def get_fp8_group(cls) -> Union[dist_group_type, None]:
@@ -649,17 +733,23 @@ class FP8GlobalStateManager:
 
     @classmethod
     def set_autocast_state(cls, state: tuple) -> None:
-        """Restore a previously saved autocast state snapshot."""
+        """Restore an autocast snapshot without restoring its old configuration revision."""
         qstate = cls.quantization_state
         (
-            qstate.fp8_enabled,
-            qstate.fp8_calibration,
-            qstate.fp8_recipe,
-            qstate.quantizer_config,
-            qstate.fp8_distributed_group,
-            qstate.is_first_fp8_module,
-            qstate.fp8_graph_capturing,
+            fp8_enabled,
+            fp8_calibration,
+            fp8_recipe,
+            quantizer_config,
+            fp8_distributed_group,
+            is_first_fp8_module,
+            fp8_graph_capturing,
         ) = state
+        cls._set_recipe_config(fp8_recipe, quantizer_config)
+        qstate.fp8_enabled = fp8_enabled
+        qstate.fp8_calibration = fp8_calibration
+        qstate.fp8_distributed_group = fp8_distributed_group
+        qstate.is_first_fp8_module = is_first_fp8_module
+        qstate.fp8_graph_capturing = fp8_graph_capturing
 
     @staticmethod
     def reduce_tensor_across_group_op_max(tensor: torch.Tensor, group: dist_group_type) -> None:
@@ -955,8 +1045,7 @@ def quantized_model_init(
         yield
     finally:
         qstate.fp8_parameters = _fp8_parameters
-        qstate.fp8_recipe = _fp8_recipe
-        qstate.quantizer_config = _quantizer_config
+        FP8GlobalStateManager._set_recipe_config(_fp8_recipe, _quantizer_config)
         qstate.high_precision_init_val = _high_precision_init_val
 
 
@@ -1236,6 +1325,12 @@ class RecipeState(abc.ABC):
     _BWD_DEFAULT_TENSOR_TYPES = ("grad_output", "grad_input")
 
     @staticmethod
+    def _validate_mode(mode: str) -> None:
+        """Validate the quantization direction shared by every recipe state."""
+        if mode not in ("forward", "backward"):
+            raise ValueError(f"Unexpected recipe mode ({mode})")
+
+    @staticmethod
     def _validate_roles(
         roles: Optional[List[QuantizerRole]],
         num_quantizers: int,
@@ -1312,6 +1407,29 @@ class RecipeState(abc.ABC):
             else self._BWD_DEFAULT_TENSOR_TYPES
         )
         return default_tensor_types[idx % len(default_tensor_types)]
+
+    @staticmethod
+    def _qparams_for_tensor_type(
+        tensor_type: str,
+        *,
+        input_qparams: QParams,
+        weight_qparams: QParams,
+        grad_qparams: QParams,
+        output_uses_input_qparams: bool = True,
+        grad_input_uses_grad_qparams: bool = True,
+    ) -> Optional[QParams]:
+        """Select a recipe qparam bundle for a canonical tensor type."""
+        if tensor_type == "weight":
+            return weight_qparams
+        if tensor_type == "input" or (
+            tensor_type == "output" and output_uses_input_qparams
+        ):
+            return input_qparams
+        if tensor_type == "grad_output" or (
+            tensor_type == "grad_input" and grad_input_uses_grad_qparams
+        ):
+            return grad_qparams
+        return None
 
     @staticmethod
     def create(
@@ -1445,6 +1563,7 @@ class DelayedScalingRecipeState(RecipeState):
         device: Optional[torch.device] = None,
         roles: Optional[List[QuantizerRole]] = None,
     ) -> None:
+        self._validate_mode(mode)
         self._validate_roles(roles, num_quantizers)
         self.recipe = recipe
         self.mode = mode
@@ -1494,6 +1613,7 @@ class Float8CurrentScalingRecipeState(RecipeState):
         device: Optional[torch.device] = None,
         roles: Optional[List[QuantizerRole]] = None,
     ) -> None:
+        self._validate_mode(mode)
         self._validate_roles(roles, num_quantizers)
         self.recipe = recipe
         self.mode = mode
@@ -1507,14 +1627,38 @@ class Float8CurrentScalingRecipeState(RecipeState):
         self.device = device
 
     def make_quantizers(self) -> list:
+        """Build one current-scaling quantizer per slot, dispatched by tensor type.
+
+        Input, weight, and grad-output slots use their corresponding recipe
+        qparams. Output and grad-input boundary slots retain the legacy
+        constructor defaults. Missing or non-canonical roles use the common
+        positional fallback provided by :meth:`RecipeState._slot_tensor_type`.
+        """
         from .tensor.float8_tensor import Float8CurrentScalingQuantizer
 
-        return [
-            Float8CurrentScalingQuantizer(
-                self.dtype, device=self.device, force_pow_2_scales=self.recipe.use_power_2_scales
+        def _make(tensor_type: str) -> Float8CurrentScalingQuantizer:
+            qparams = self._qparams_for_tensor_type(
+                tensor_type,
+                input_qparams=self.recipe.fp8_quant_fwd_inp,
+                weight_qparams=self.recipe.fp8_quant_fwd_weight,
+                grad_qparams=self.recipe.fp8_quant_bwd_grad,
+                output_uses_input_qparams=False,
+                grad_input_uses_grad_qparams=False,
             )
-            for i in range(self.num_quantizers)
-        ]
+
+            force_pow_2_scales = self.recipe.use_power_2_scales
+            amax_epsilon = 0.0
+            if qparams is not None:
+                force_pow_2_scales = qparams.power_2_scale
+                amax_epsilon = qparams.amax_epsilon
+            return Float8CurrentScalingQuantizer(
+                self.dtype,
+                device=self.device,
+                force_pow_2_scales=force_pow_2_scales,
+                amax_epsilon=amax_epsilon,
+            )
+
+        return [_make(self._slot_tensor_type(idx)) for idx in range(self.num_quantizers)]
 
 
 class MXFP8BlockScalingRecipeState(RecipeState):
@@ -1537,6 +1681,7 @@ class MXFP8BlockScalingRecipeState(RecipeState):
         device: Optional[torch.device] = None,
         roles: Optional[List[QuantizerRole]] = None,
     ) -> None:
+        self._validate_mode(mode)
         self._validate_roles(roles, num_quantizers)
         self.recipe = recipe
         self.mode = mode
@@ -1577,6 +1722,7 @@ class Float8BlockScalingRecipeState(RecipeState):
         device: Optional[torch.device] = None,
         roles: Optional[List[QuantizerRole]] = None,
     ) -> None:
+        self._validate_mode(mode)
         self._validate_roles(roles, num_quantizers)
         self.recipe = recipe
         self.mode = mode
@@ -1615,18 +1761,22 @@ class Float8BlockScalingRecipeState(RecipeState):
         from .tensor.float8_blockwise_tensor import Float8BlockQuantizer
 
         def _make(tensor_type: str) -> Float8BlockQuantizer:
+            qparams = self._qparams_for_tensor_type(
+                tensor_type,
+                input_qparams=self.recipe.fp8_quant_fwd_inp,
+                weight_qparams=self.recipe.fp8_quant_fwd_weight,
+                grad_qparams=self.recipe.fp8_quant_bwd_grad,
+            )
+            assert qparams is not None
             if tensor_type == "weight":
-                qparams = self.recipe.fp8_quant_fwd_weight
                 fp8_dtype = self.qw_dtype
                 block_scaling_dim = self.recipe.w_block_scaling_dim
             elif tensor_type in ("grad_output", "grad_input"):
-                qparams = self.recipe.fp8_quant_bwd_grad
                 fp8_dtype = self.qgrad_dtype
                 block_scaling_dim = self.recipe.grad_block_scaling_dim
             else:
                 # "input", "output", or any unknown forward type fall back to
                 # the input config, matching the legacy positional behavior.
-                qparams = self.recipe.fp8_quant_fwd_inp
                 fp8_dtype = self.qx_dtype
                 block_scaling_dim = self.recipe.x_block_scaling_dim
             return Float8BlockQuantizer(
@@ -1638,7 +1788,6 @@ class Float8BlockScalingRecipeState(RecipeState):
                 block_scaling_dim=block_scaling_dim,
             )
 
-        assert self.mode in ("forward", "backward"), f"Unexpected mode {self.mode}"
         return [_make(self._slot_tensor_type(idx)) for idx in range(self.num_quantizers)]
 
 
@@ -1662,6 +1811,7 @@ class NVFP4BlockScalingRecipeState(RecipeState):
         device: Optional[torch.device] = None,
         roles: Optional[List[QuantizerRole]] = None,
     ) -> None:
+        self._validate_mode(mode)
         self._validate_roles(roles, num_quantizers)
         self.recipe = recipe
         self.mode = mode
@@ -1696,15 +1846,14 @@ class NVFP4BlockScalingRecipeState(RecipeState):
         """
         from .tensor.nvfp4_tensor import NVFP4Quantizer
 
-        def _qparams(tensor_type: str):
-            if tensor_type in ("grad_output", "grad_input"):
-                return self.recipe.fp4_quant_bwd_grad
-            if tensor_type == "weight":
-                return self.recipe.fp4_quant_fwd_weight
-            return self.recipe.fp4_quant_fwd_inp
-
         def _make(tensor_type: str) -> NVFP4Quantizer:
-            qparams = _qparams(tensor_type)
+            qparams = self._qparams_for_tensor_type(
+                tensor_type,
+                input_qparams=self.recipe.fp4_quant_fwd_inp,
+                weight_qparams=self.recipe.fp4_quant_fwd_weight,
+                grad_qparams=self.recipe.fp4_quant_bwd_grad,
+            )
+            assert qparams is not None
             nvfp4_use_4over6 = False
             if tensor_type not in ("grad_output", "grad_input"):
                 if self.recipe.nvfp4_4over6 == "all":
@@ -1750,9 +1899,6 @@ class NVFP4BlockScalingRecipeState(RecipeState):
                 nvfp4_e4m3_max=nvfp4_e4m3_max,
                 nvfp4_4over6_err_mode=self.recipe.nvfp4_4over6_err_mode,
             )
-
-        if self.mode not in ("forward", "backward"):
-            raise RuntimeError(f"Unexpected recipe mode ({self.mode})")
 
         return [_make(self._slot_tensor_type(idx)) for idx in range(self.num_quantizers)]
 
@@ -1896,6 +2042,7 @@ class CustomRecipeState(RecipeState):
         device: Optional[torch.device] = None,
         roles: Optional[List[QuantizerRole]] = None,
     ) -> None:
+        self._validate_mode(mode)
         self._validate_roles(roles, num_quantizers)
         self.recipe = recipe
         self.mode = mode
