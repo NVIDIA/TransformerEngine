@@ -44,10 +44,9 @@ inline Tensor contiguous(const Tensor &tensor) {
 
 inline cudaStream_t getCurrentCUDAStream() {
 #ifdef NVTE_WITH_TORCH_STABLE
-  return static_cast<cudaStream_t>(
-      torch::stable::accelerator::getCurrentStream(
-          torch::stable::accelerator::getCurrentDeviceIndex())
-          .nativeHandle());
+  return static_cast<cudaStream_t>(torch::stable::accelerator::getCurrentStream(
+                                       torch::stable::accelerator::getCurrentDeviceIndex())
+                                       .nativeHandle());
 #else
   return at::cuda::getCurrentCUDAStream();
 #endif

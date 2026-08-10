@@ -16,8 +16,7 @@ void compute_amax(const torch_stable::Tensor& tensor, torch_stable::Tensor& amax
   auto input_tensor = torch_stable::contiguous(tensor);
   const TensorWrapper& te_input = makeTransformerEngineTensor(input_tensor);
 
-  NVTE_CHECK(amax.scalar_type() == torch_stable::ScalarType::Float,
-             "amax must be a float tensor");
+  NVTE_CHECK(amax.scalar_type() == torch_stable::ScalarType::Float, "amax must be a float tensor");
   NVTE_CHECK(amax.numel() == 1, "amax must have exactly one element");
   auto* amax_ptr = static_cast<float*>(amax.data_ptr());
   TensorWrapper fake_te_output(
@@ -28,10 +27,11 @@ void compute_amax(const torch_stable::Tensor& tensor, torch_stable::Tensor& amax
   nvte_compute_amax(te_input.data(), fake_te_output.data(), torch_stable::getCurrentCUDAStream());
 }
 
-void fused_amax_and_scale_update_after_reduction(
-    const torch_stable::Tensor& amax_reduction_buffer,
-    std::vector<torch_stable::Tensor> amax_histories, std::vector<torch_stable::Tensor> scales,
-    const std::string& amax_compute_algo, DType fp8_dtype, float margin) {
+void fused_amax_and_scale_update_after_reduction(const torch_stable::Tensor& amax_reduction_buffer,
+                                                 std::vector<torch_stable::Tensor> amax_histories,
+                                                 std::vector<torch_stable::Tensor> scales,
+                                                 const std::string& amax_compute_algo,
+                                                 DType fp8_dtype, float margin) {
   size_t num_tensors = amax_histories.size();
 
   // Allocate amax history and scale NVTETensors as batches
