@@ -801,7 +801,7 @@ def backward_linear(
     requires_wgrad: bool = True,
     parallel_mode: str = "column",
     backward_input_needs_gather: bool = False,
-) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
     """Linear backward for fused operations that bypass TE's autograd chain.
 
     Wraps :func:`_linear_backward` with a simplified interface for callers
@@ -825,8 +825,9 @@ def backward_linear(
             GEMM (default ``False`` — assumes fused forward pre-gathers).
 
     Returns:
-        ``(dgrad, wgrad)`` — ``wgrad`` is a typed dummy when
-        ``fuse_wgrad_accumulation=True``.
+        ``(dgrad, wgrad, grad_bias)`` — ``wgrad`` is a typed dummy when
+        ``fuse_wgrad_accumulation=True``; ``grad_bias`` is ``None`` when
+        ``use_bias=False``.
     """
     tp_size = get_distributed_world_size(tp_group) if tp_group is not None else 1
     fp8 = isinstance(w_q, QuantizedTensor)
@@ -867,8 +868,8 @@ def backward_linear(
         main_grad_func=(lambda: w_q.main_grad) if fuse_wgrad_accumulation else None,
     )
 
-    wgrad, dgrad, _ = _linear_backward(bwd_args)
-    return dgrad, wgrad
+    wgrad, dgrad, grad_bias = _linear_backward(bwd_args)
+    return dgrad, wgrad, grad_bias
 
 
 def _linear_backward(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None], ...]:
