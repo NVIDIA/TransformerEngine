@@ -2,9 +2,6 @@
 #
 # See LICENSE for license information.
 
-import pathlib
-import tempfile
-
 import pytest
 import torch
 
@@ -15,18 +12,20 @@ from transformer_engine.pytorch.tensor.utils import quantize_master_weights
 recipe_available, reason_for_no_recipe = te.is_mxfp8_available(return_reason=True)
 
 
-def _single_rank_group():
-    if not torch.distributed.is_initialized():
+@pytest.fixture
+def single_rank_group():
+    # Only tear down a group this fixture owns; another test may have set one up.
+    created = not torch.distributed.is_initialized()
+    if created:
         torch.cuda.set_device(0)
-        with tempfile.NamedTemporaryFile(delete=False) as f:
-            rendezvous_file = pathlib.Path(f.name)
         torch.distributed.init_process_group(
-            backend="nccl",
-            init_method=rendezvous_file.resolve().as_uri(),
-            rank=0,
-            world_size=1,
+            backend="nccl", store=torch.distributed.HashStore(), rank=0, world_size=1
         )
-    return torch.distributed.GroupMember.WORLD
+    try:
+        yield torch.distributed.GroupMember.WORLD
+    finally:
+        if created:
+            torch.distributed.destroy_process_group()
 
 
 def _make_weight(dtype):
@@ -38,14 +37,12 @@ def _make_weight(dtype):
 
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
-def test_empty_master_shard_agrees_with_populated_rank(monkeypatch, dtype):
+def test_empty_master_shard_agrees_with_populated_rank(monkeypatch, single_rank_group, dtype):
     """A rank owning no shard must reduce the same amax dtype as one that owns data.
 
     Wide FSDP sharding pads the parameter bucket, so the tail ranks can end up with an
     empty shard of every weight. Those ranks still join the amax all-reduce.
     """
-    group = _single_rank_group()
-
     amax_dtypes = []
     real_all_reduce = torch.distributed.all_reduce
 
@@ -57,10 +54,10 @@ def test_empty_master_shard_agrees_with_populated_rank(monkeypatch, dtype):
 
     populated = _make_weight(dtype)
     master = torch.randn(populated.numel(), dtype=torch.float32, device="cuda")
-    quantize_master_weights([populated], [master], [0], group=group)
+    quantize_master_weights([populated], [master], [0], group=single_rank_group)
 
     # Used to raise UnboundLocalError instead of reaching the all-reduce.
-    quantize_master_weights([_make_weight(dtype)], [None], [None], group=group)
+    quantize_master_weights([_make_weight(dtype)], [None], [None], group=single_rank_group)
 
     assert len(amax_dtypes) == 2
     assert amax_dtypes[0] == amax_dtypes[1]
