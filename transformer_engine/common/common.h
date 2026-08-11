@@ -1153,6 +1153,26 @@ inline bool is_aligned_ptr(const void *ptr, size_t alignment) {
   return reinterpret_cast<uintptr_t>(ptr) % alignment == 0;
 }
 
+/*! \brief Align a shared-memory base pointer up to `align` bytes.
+ *
+ * The result is derived from `p` by pointer arithmetic on purpose, without losing its
+ * identity as a pointer in between, so the address is never rounded through an integer
+ * -- in which case the compiler would lose the link back to the `extern __shared__`
+ * object, and ptxas could no longer prove the address lives in the shared window and
+ * would fall back to generic address-space accesses (`LD.E`/`ST.E`) instead of
+ * `LDS`/`STS`.
+ *
+ * `align` must be a power of two.
+ */
+__device__ __forceinline__ char *align_up(char *p, uintptr_t align) {
+  const uintptr_t misalign = reinterpret_cast<uintptr_t>(p) & (align - 1);
+  // If p is not aligned, (align - misalign) & (align - 1) is the number of bytes to fill the gap between p and
+  // the next aligned address.
+  // If p is aligned, misalign is 0 and (align - misalign) is align itself, so we use & (align - 1)
+  // to make it 0 and return p itself.
+  return p + ((align - misalign) & (align - 1));
+}
+
 inline bool is_aligned_tensor_data(const Tensor &t, size_t alignment) {
   return is_aligned_ptr(static_cast<const void *>(t.data.dptr), alignment);
 }
