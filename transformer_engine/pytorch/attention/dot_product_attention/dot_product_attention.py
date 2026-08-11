@@ -2055,6 +2055,11 @@ class DotProductAttention(TransformerEngineBaseModule):
                 and head_dim_qk != head_dim_v
                 and value_layer is not None
                 and not isinstance(value_layer, Float8TensorStorage)
+                # Skip padding when packed inputs are used with the FP8 fused path, which would lead
+                # to using unpadded data with a kernel that assumes padded data.
+                and not dpa_utils.fp8_packed_skips_qkv_head_dim_pad(
+                    attention_params, qkv_layer is not None or kv_layer is not None
+                )
                 and dpa_utils.should_pad_qkv_head_dim(attention_params)
             ):
                 # Pad Q/K/V to the wider head dim so a fused backend can run.

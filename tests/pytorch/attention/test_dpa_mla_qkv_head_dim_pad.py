@@ -19,6 +19,8 @@ import sys
 import pytest
 import torch
 
+import transformer_engine.pytorch as te
+from transformer_engine.common import recipe
 from transformer_engine.pytorch.attention.dot_product_attention import DotProductAttention
 from transformer_engine.pytorch.attention.dot_product_attention import (
     dot_product_attention as dpa_module,
@@ -224,3 +226,62 @@ def test_dpa_mla_pad_is_identity(qk, v):
     out = dpa_module._trim_output(out, 4, m, v)
     torch.testing.assert_close(out, out_ref, atol=1e-2, rtol=1e-2)
     out.float().sum().backward()  # padded path backward must not crash
+
+
+def test_fp8_packed_skips_qkv_head_dim_pad():
+    """`fp8_packed_skips_qkv_head_dim_pad` returns True (skip the pad) only in the one
+    unsafe combination -- FP8 DPA active AND packed inputs -- and False (allow the pad)
+    in every safe combination (bf16 regardless of packing; FP8 DPA + unpacked)."""
+    fp8_dpa_on = {"recipe": recipe.DelayedScaling(fp8_dpa=True)}
+    fp8_dpa_off = {"recipe": recipe.DelayedScaling(fp8_dpa=False)}
+
+    def params(fp8, fp8_meta):
+        return dpa_utils.AttentionParams(
+            qkv_layout="thd_thd_thd", num_heads=4, num_gqa_groups=4,
+            max_seqlen_q=13, max_seqlen_kv=13,
+            head_dim_qk=96, head_dim_v=128,
+            attn_mask_type="padding_causal", is_training=True,
+            qkv_dtype=torch.bfloat16, fp8=fp8, fp8_meta=fp8_meta,
+        )
+
+    # bf16 (fp8=False): pad is safe & beneficial regardless of packing.
+    assert dpa_utils.fp8_packed_skips_qkv_head_dim_pad(params(False, None), False) is False
+    assert dpa_utils.fp8_packed_skips_qkv_head_dim_pad(params(False, None), True) is False
+    # FP8 autocast but fp8_dpa=False (attention itself runs in bf16): pad is safe.
+    assert dpa_utils.fp8_packed_skips_qkv_head_dim_pad(params(True, fp8_dpa_off), False) is False
+    assert dpa_utils.fp8_packed_skips_qkv_head_dim_pad(params(True, fp8_dpa_off), True) is False
+    # FP8 DPA + unpacked: pad is safe (combine_and_quantize re-derives from padded views).
+    assert dpa_utils.fp8_packed_skips_qkv_head_dim_pad(params(True, fp8_dpa_on), False) is False
+    # FP8 DPA + packed: the only unsafe combination -> skip the pad.
+    assert dpa_utils.fp8_packed_skips_qkv_head_dim_pad(params(True, fp8_dpa_on), True) is True
+    # Defensive: fp8=True but no recipe -> treat as "do not skip" (pad allowed).
+    assert dpa_utils.fp8_packed_skips_qkv_head_dim_pad(params(True, {}), True) is False
+    assert dpa_utils.fp8_packed_skips_qkv_head_dim_pad(params(True, None), True) is False
+
+
+# FP8 DPA + unpacked MLA: the guard must not over-block the safe beneficial case.
+@pytest.mark.parametrize("qk,v", [(192, 128), (64, 192)])
+def test_dpa_mla_pad_fp8_dpa_unpacked(qk, v, monkeypatch):
+    """Regression test for the FP8+packed guard: under FP8 DPA with *unpacked* mismatched MLA
+    inputs, the pad is safe and beneficial (`combine_and_quantize` re-derives from the padded
+    views, so the kernel sees the equal padded dims), so the guard must NOT skip it. Force
+    the conditions that make `should_pad_qkv_head_dim` return True (native unfused via
+    the `NVTE_UnfusedDPA_Emulate_FP8` env) and assert the forward runs and yields a
+    correct V-width output."""
+    monkeypatch.setenv("NVTE_UnfusedDPA_Emulate_FP8", "1")
+    reset_rng_states()
+    fp8_recipe = recipe.DelayedScaling(
+        margin=0,
+        fp8_format=recipe.Format.HYBRID,
+        amax_history_len=1,
+        amax_compute_algo="most_recent",
+        fp8_dpa=True,
+        fp8_mha=False,
+    )
+    dpa = _build_dpa(qk, v)
+    q, k, v_t, cu = _thd_inputs(qk, v)
+    with te.fp8_autocast(enabled=True, fp8_recipe=fp8_recipe):
+        out = _run_dpa(dpa, q, k, v_t, cu)
+    assert tuple(out.shape) == (32, 4 * v), out.shape
+    with te.fp8_autocast(enabled=True, fp8_recipe=fp8_recipe):
+        out.float().sum().backward()  # FP8 padded path backward must not crash

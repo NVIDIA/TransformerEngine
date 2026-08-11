@@ -1712,6 +1712,41 @@ def should_pad_qkv_head_dim(
     return result
 
 
+def fp8_packed_skips_qkv_head_dim_pad(
+    attention_params: AttentionParams,
+    has_packed_qkv: bool,
+) -> bool:
+    """Whether the optional QKV head-dim pad must be skipped because FP8 DPA is active and the
+    caller passed packed QKV/KV buffers.
+
+    The pad in `DotProductAttention.forward` pads only the unpacked q/k/v views, not the packed
+    `qkv_layer`/`kv_layer` buffers. In the FP8 fused path, `combine_and_quantize` consumes those
+    packed buffers directly, bypassing the padded views -- so padding would feed the kernel the
+    original mismatched-dim packed data while the backend was selected for the equal padded dims.
+    This is only unsafe when FP8 DPA is active AND packed inputs are present; every other
+    combination is safe (FP8 DPA + unpacked re-derives from the padded views; bf16 + packed ignores
+    the packed buffers in `fused_attn_fwd`).
+
+    Parameters
+    ----------
+    attention_params : AttentionParams
+        Attention parameters for the native (unpadded) QK and V head dimensions.
+    has_packed_qkv : bool
+        Whether the caller passed a packed `qkv_layer` or `kv_layer` buffer.
+
+    Returns
+    -------
+    bool
+        True iff the pad should be skipped (not applied).
+    """
+    if not attention_params.fp8:
+        return False
+    recipe = (attention_params.fp8_meta or {}).get("recipe", None)
+    if recipe is None or not getattr(recipe, "fp8_dpa", False):
+        return False
+    return has_packed_qkv
+
+
 @torch.no_grad()
 def get_padding_mask(
     batch_size: int,
