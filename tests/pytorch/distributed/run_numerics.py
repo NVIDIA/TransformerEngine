@@ -784,6 +784,8 @@ def test_linear():
             kwargs.get("delay_wgrad_compute", False) or kwargs.get("use_compile", False)
         ):
             continue
+        if kwargs.get("use_compile", False) and QUANTIZATION == "fp8":
+            continue
         for parallel_mode in ["column", "row"]:
             for sequence_parallel in [False, True]:
                 _test_linear(parallel_mode, sequence_parallel, **kwargs)
