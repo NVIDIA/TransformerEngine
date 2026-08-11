@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 """Base modules and utilities for TransformerEngine PyTorch API"""
+import copy
 import io
 import math
 import os
@@ -35,6 +36,7 @@ from ..quantization import (
     _QuantizationRuntime,
     _QuantizationRuntimeKey,
     _has_delayed_scaling_state,
+    _is_delayed_scaling_state,
 )
 from ..distributed import (
     gather_along_first_dim,
@@ -1149,14 +1151,20 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         num_forward_quantizers = num_gemms * 3
         num_backward_quantizers = num_gemms * 2
 
+        # Recipe objects are caller-owned and mutable. States and delayed
+        # reduction buckets must retain the exact configuration that this
+        # candidate validated, even if the caller later mutates and reuses the
+        # same recipe instance.
+        runtime_recipe = copy.copy(recipe)
+
         forward_state = RecipeState.create(  # pylint: disable=assignment-from-none
-            recipe,
+            runtime_recipe,
             mode="forward",
             num_quantizers=num_forward_quantizers,
             roles=forward_state_roles,
         )
         backward_state = RecipeState.create(  # pylint: disable=assignment-from-none
-            recipe,
+            runtime_recipe,
             mode="backward",
             num_quantizers=num_backward_quantizers,
             roles=backward_state_roles,
@@ -1180,6 +1188,12 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         forward_quantizers = forward_state.make_quantizers()
         backward_quantizers = backward_state.make_quantizers()
 
+        if _is_delayed_scaling_state(forward_state) != _is_delayed_scaling_state(backward_state):
+            FP8GlobalStateManager.abort_current_amax_reduction()
+            raise RuntimeError(
+                "This hybrid quantization configuration with delayed scaling is not supported."
+            )
+
         return _QuantizationRuntime(
             key=key,
             num_gemms=num_gemms,
@@ -1189,7 +1203,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             backward_states=(backward_state,),
             forward_quantizers=forward_quantizers,
             backward_quantizers=backward_quantizers,
-            delayed_registration_handles=(),
         )
 
     def _validate_quantization_runtime(self, candidate: _QuantizationRuntime) -> Any:
@@ -1276,10 +1289,17 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             active.role_revision = role_revision
             return False
 
+        def has_delayed_scaling(runtime: _QuantizationRuntime) -> bool:
+            return any(
+                _is_delayed_scaling_state(state)
+                for state in runtime.forward_states + runtime.backward_states
+            )
+
+        active_has_delayed_scaling = active is not None and has_delayed_scaling(active)
+
         # Until per-weight semantic keys are available, a recipe change may
-        # not retarget already-quantized primary storage. Role-only changes
-        # are safe here because the module's weight-slot roles are fixed; the
-        # requested setters only affect output/grad-input boundary slots.
+        # not retarget already-quantized primary storage. Keep this more
+        # specific diagnostic ahead of the general delayed-scaling boundary.
         if (
             active is not None
             and getattr(self, "primary_weights_in_fp8", False)
@@ -1288,11 +1308,30 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 or active.num_gemms != num_gemms
             )
         ):
+            if active_has_delayed_scaling or recipe.delayed():
+                FP8GlobalStateManager.abort_current_amax_reduction()
             raise RuntimeError(
                 "Recipe mismatch for quantized primary weights: mid-training recipe "
                 "configuration changes require per-weight semantic compatibility and "
                 "are not supported yet."
             )
+
+        def reject_delayed_scaling_update() -> None:
+            FP8GlobalStateManager.abort_current_amax_reduction()
+            raise RuntimeError(
+                "Mid-training recipe updates do not support delayed scaling. "
+                "A delayed-scaling runtime is frozen after initialization; only "
+                "unchanged execution is supported."
+            )
+
+        # Delayed state participates in global reduction registration and is
+        # intentionally outside this round's migration contract. Reject any
+        # effective update before invoking a CustomRecipe factory or preparing
+        # replacement tensors.
+        if active_has_delayed_scaling:
+            reject_delayed_scaling_update()
+        if active is not None and not active_has_delayed_scaling and recipe.delayed():
+            reject_delayed_scaling_update()
 
         candidate = self._prepare_quantization_runtime(
             recipe=recipe,
@@ -1303,13 +1342,15 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             forward_state_roles=forward_state_roles,
             backward_state_roles=backward_state_roles,
         )
+        if active is not None and has_delayed_scaling(candidate):
+            reject_delayed_scaling_update()
         # Subclasses may return transient commit data even though the base implementation
         # returns None, which pylint cannot infer through dynamic dispatch.
         # pylint: disable-next=assignment-from-no-return
         validation_result = self._validate_quantization_runtime(candidate)
         self._commit_quantization_runtime(
             candidate,
-            recipe=recipe,
+            recipe=candidate.forward_states[0].recipe,
             validation_result=validation_result,
         )
         return True

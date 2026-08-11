@@ -16,8 +16,8 @@ import transformer_engine.common.recipe
 import transformer_engine.pytorch as te
 from transformer_engine.pytorch import (
     Float8BlockQuantizer,
+    Float8CurrentScalingQuantizer,
     MXFP8Quantizer,
-    Float8Quantizer,
     NVFP4Quantizer,
     quantized_model_init,
     Linear,
@@ -162,13 +162,11 @@ def test_quantization_runtime_bundles_both_quantization_directions():
         backward_states=(),
         forward_quantizers=forward_quantizers,
         backward_quantizers=backward_quantizers,
-        delayed_registration_handles=("forward-handle", "backward-handle"),
     )
 
     assert runtime.key is runtime_key
     assert runtime.forward_quantizers is forward_quantizers
     assert runtime.backward_quantizers is backward_quantizers
-    assert runtime.delayed_registration_handles == ("forward-handle", "backward-handle")
 
 
 @pytest.mark.parametrize(
@@ -1128,14 +1126,14 @@ class TestFP8Recipe:
                 MXFP8Quantizer,
                 mxfp8_available,
                 reason_for_no_mxfp8,
-                id="DelayedScaling->MXFP8BlockScaling",
+                id="Float8CurrentScaling->MXFP8BlockScaling",
             ),
             pytest.param(
                 Float8BlockScaling,
                 Float8BlockQuantizer,
                 fp8_block_scaling_available,
                 reason_for_no_fp8_block_scaling,
-                id="DelayedScaling->Float8BlockScaling",
+                id="Float8CurrentScaling->Float8BlockScaling",
             ),
         ],
     )
@@ -1149,9 +1147,11 @@ class TestFP8Recipe:
         out_features = 32
         batch_size = 32
         linear = Linear(in_features, out_features).cuda()
-        initial_recipe = DelayedScaling()
+        initial_recipe = Float8CurrentScaling()
 
-        # Run initial iterations with DelayedScaling
+        # Run initial iterations with a stateless recipe. Delayed-scaling
+        # enter/leave transitions are intentionally rejected by the lazy
+        # module-local update path and covered separately.
         for _ in range(3):
             x = torch.randn(batch_size, in_features, device="cuda")
             with te.autocast(enabled=True, recipe=initial_recipe):
@@ -1160,7 +1160,7 @@ class TestFP8Recipe:
             loss.backward()
 
         for quantizer in linear.quantizers["scaling_fwd"]:
-            assert isinstance(quantizer, Float8Quantizer)
+            assert isinstance(quantizer, Float8CurrentScalingQuantizer)
 
         # Change recipe
         target_recipe = target_recipe_class()

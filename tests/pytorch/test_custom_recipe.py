@@ -978,29 +978,18 @@ def test_custom_recipe_ds_multi_step():
 
 
 # ----------------------------------------------------------------------
-# State preservation across role-driven rebuilds
+# Stateful recipe boundary for role-driven updates
 # ----------------------------------------------------------------------
 #
 # Setting ``output_quantizer_role`` / ``grad_input_quantizer_role`` to a
 # different value advances the requested role revision without mutating the
-# active runtime. The next runtime update rebuilds the recipe state and
-# quantizers with up-to-date roles. That rebuild MUST preserve persistent training
-# buffers (delayed scaling's ``scale`` / ``amax_history``); otherwise
-# checkpointed amax history is silently destroyed on the first forward
-# pass after ``load_state_dict`` (when MHA wires boundary roles for the
-# first time on the freshly-loaded module). The buffers must also be
-# preserved by tensor-object identity, not just by value: the
-# ``FP8GlobalStateManager`` reduction buffer holds a direct reference to
-# the tensor created at first init, so any rebuild that allocates fresh
-# tensors would break amax all-reduce.
+# active runtime. Stateless recipes rebuild on the next update. Delayed-scaling
+# runtimes are frozen in round one, so the update must reject and leave all
+# persistent buffers and global registration references untouched.
 
 
-def test_role_change_preserves_delayed_scaling_state():
-    """Built-in DelayedScaling: role-driven rebuild preserves scale / amax_history.
-
-    Stashes sentinel values into the buffers, forces a rebuild via the role
-    setter, and verifies values + tensor-object identity survive.
-    """
+def test_role_change_rejects_delayed_scaling_runtime_update():
+    """Built-in DelayedScaling rejects a role-driven runtime rebuild."""
     available, reason = te.is_fp8_available(return_reason=True)
     if not torch.cuda.is_available() or not available:
         pytest.skip(f"FP8 unsupported: {reason}")
@@ -1035,33 +1024,23 @@ def test_role_change_preserves_delayed_scaling_state():
     assert model._role_revision == role_revision_before + 1
     assert model.fp8_meta["scaling_fwd"] is state_before
 
-    # Trigger the rebuild directly (no forward, so we can compare buffers exactly).
-    model.init_fp8_meta_tensors(fp8_recipe)
+    with pytest.raises(RuntimeError, match="do not support delayed scaling"):
+        model.init_fp8_meta_tensors(fp8_recipe)
     assert model.fp8_meta_tensors_initialized
 
     state_after = model.fp8_meta["scaling_fwd"]
-    assert state_after is not state_before, "state should have been rebuilt"
-    # Tensor objects must be inherited (not freshly allocated) so the
-    # FP8GlobalStateManager reduction buffer's reference stays valid.
-    assert (
-        id(state_after.scale) == scale_obj_id
-    ), "scale tensor object replaced by rebuild; global reduction buffer would dangle"
+    assert model._quantization_runtime is runtime_before
+    assert state_after is state_before
+    assert id(state_after.scale) == scale_obj_id
     assert id(state_after.amax_history) == amax_obj_id
     assert state_after.scale.data_ptr() == scale_data_ptr
     assert state_after.amax_history.data_ptr() == amax_data_ptr
-    # Sentinel values must be preserved.
-    assert state_after.scale.eq(3.14).all(), "scale was wiped by role-driven rebuild"
-    assert state_after.amax_history.eq(2.71).all(), "amax_history was wiped"
+    assert state_after.scale.eq(3.14).all()
+    assert state_after.amax_history.eq(2.71).all()
 
 
-def test_role_change_preserves_custom_delayed_scaling_state():
-    """CustomRecipe + DelayedScalingRequest: role-driven rebuild preserves inner DSRS.
-
-    Same property as the built-in case, but for the
-    ``CustomRecipeState`` -> composed ``DelayedScalingRecipeState`` path.
-    The inner DS state must be re-used across the rebuild so its
-    accumulated buffers (and any external references to them) survive.
-    """
+def test_role_change_rejects_custom_delayed_scaling_runtime_update():
+    """CustomRecipe with delayed requests rejects a role-driven rebuild."""
     available, reason = te.is_fp8_available(return_reason=True)
     if not torch.cuda.is_available() or not available:
         pytest.skip(f"FP8 unsupported: {reason}")
@@ -1106,20 +1085,17 @@ def test_role_change_preserves_custom_delayed_scaling_state():
     assert model._role_revision == role_revision_before + 1
     assert model.fp8_meta["scaling_fwd"] is state_before
 
-    # Rebuild.
-    model.init_fp8_meta_tensors(custom_recipe)
+    with pytest.raises(RuntimeError, match="do not support delayed scaling"):
+        model.init_fp8_meta_tensors(custom_recipe)
     assert model.fp8_meta_tensors_initialized
 
     state_after = model.fp8_meta["scaling_fwd"]
     assert isinstance(state_after, CustomRecipeState)
-    assert state_after is not state_before, "outer CustomRecipeState should have been rebuilt"
-    assert state_after._has_delayed_scaling, "rebuild lost the inner DS state"
+    assert model._quantization_runtime is runtime_before
+    assert state_after is state_before
+    assert state_after._has_delayed_scaling
     inner_after = state_after._ds_state
-    # Inner DSRS object identity is preserved (we reuse the existing inner state),
-    # which means its buffers' tensor objects are also preserved.
-    assert (
-        inner_after is inner_before
-    ), "inner DSRS replaced; FP8GlobalStateManager reduction buffer would dangle"
+    assert inner_after is inner_before
     assert id(inner_after.scale) == scale_obj_id
     assert id(inner_after.amax_history) == amax_obj_id
     # Sentinel values preserved.

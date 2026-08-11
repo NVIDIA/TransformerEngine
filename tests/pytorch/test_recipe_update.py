@@ -7,15 +7,19 @@
 import pytest
 import torch
 
-from transformer_engine.common.recipe import CustomRecipe
+from transformer_engine.common.recipe import CustomRecipe, DelayedScaling, Float8CurrentScaling
 from transformer_engine.pytorch import (
     GroupedLinear,
     LayerNormLinear,
     LayerNormMLP,
     Linear,
     autocast,
+    is_fp8_available,
 )
-from transformer_engine.pytorch.quantization import QuantizerRole
+from transformer_engine.pytorch.quantization import (
+    DelayedScalingRequest,
+    QuantizerRole,
+)
 from transformer_engine.pytorch.tensor.identity_tensor import IdentityQuantizer
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
@@ -42,7 +46,195 @@ def _ensure_runtime(module, recipe, revision, *, num_gemms=1):
     )
 
 
-def test_equal_runtime_key_synchronizes_revision_without_factory_calls():
+def _mixed_delayed_factory(role):
+    """Mix delayed/plain slots while keeping delayed state in both directions."""
+    if role is not None and role.tensor_type in ("input", "weight", "grad_output"):
+        return DelayedScalingRequest(amax_history_len=4)
+    return IdentityQuantizer()
+
+
+def _forward_only_delayed_factory(role):
+    """Request delayed state only in the forward direction."""
+    if role is not None and role.tensor_type in ("input", "weight"):
+        return DelayedScalingRequest(amax_history_len=4)
+    return IdentityQuantizer()
+
+
+def _runtime_views(module):
+    """Return identity-bearing views that a rejected update must preserve."""
+    runtime = module._quantization_runtime  # pylint: disable=protected-access
+    return (
+        runtime,
+        module.fp8_meta["recipe"],
+        module.fp8_meta["scaling_fwd"],
+        module.fp8_meta["scaling_bwd"],
+        module.quantizers["scaling_fwd"],
+        module.quantizers["scaling_bwd"],
+    )
+
+
+@pytest.mark.parametrize(
+    "replacement",
+    (
+        pytest.param(DelayedScaling(margin=1), id="margin"),
+        pytest.param(DelayedScaling(amax_history_len=8), id="history-length"),
+        pytest.param(Float8CurrentScaling(), id="leave-delayed-scaling"),
+    ),
+)
+def test_delayed_runtime_rejects_effective_recipe_updates_atomically(replacement):
+    """Delayed state is frozen once a module runtime has been initialized."""
+    module = Linear(16, 16, bias=False, device="cuda", name="linear")
+    recipe = DelayedScaling(amax_history_len=4)
+    assert _ensure_runtime(module, recipe, revision=1)
+    old_views = _runtime_views(module)
+
+    with pytest.raises(
+        RuntimeError,
+        match="Mid-training recipe updates do not support delayed scaling",
+    ):
+        _ensure_runtime(module, replacement, revision=2)
+
+    assert all(current is old for current, old in zip(_runtime_views(module), old_views))
+    assert old_views[0].recipe_config_revision == 1
+
+
+def test_delayed_runtime_rejects_role_and_slot_layout_updates():
+    """Role and GEMM-layout changes cannot rebuild a delayed runtime."""
+    module = Linear(16, 16, bias=False, device="cuda", name="linear")
+    recipe = DelayedScaling(amax_history_len=4)
+    assert _ensure_runtime(module, recipe, revision=1)
+    old_views = _runtime_views(module)
+
+    module.output_quantizer_role = QuantizerRole(
+        module_type="linear",
+        tensor_type="input",
+        name="consumer",
+    )
+    with pytest.raises(RuntimeError, match="do not support delayed scaling"):
+        _ensure_runtime(module, recipe, revision=1)
+    assert all(current is old for current, old in zip(_runtime_views(module), old_views))
+
+    with pytest.raises(RuntimeError, match="do not support delayed scaling"):
+        _ensure_runtime(module, recipe, revision=1, num_gemms=2)
+    assert all(current is old for current, old in zip(_runtime_views(module), old_views))
+
+    """An active stateless runtime cannot acquire delayed state mid-training."""
+    module = Linear(16, 16, bias=False, device="cuda", name="linear")
+    assert _ensure_runtime(module, Float8CurrentScaling(), revision=1)
+    old_views = _runtime_views(module)
+
+    with pytest.raises(RuntimeError, match="do not support delayed scaling"):
+        _ensure_runtime(module, DelayedScaling(amax_history_len=4), revision=2)
+    assert all(current is old for current, old in zip(_runtime_views(module), old_views))
+
+
+def test_custom_recipe_cannot_introduce_delayed_state():
+    """A delayed request discovered in a CustomRecipe candidate cannot commit."""
+    calls = []
+    active_recipe = _make_counting_recipe(("custom-enter-delayed", 1), calls)
+    replacement = CustomRecipe(
+        qfactory=_mixed_delayed_factory,
+        qfactory_key=("custom-enter-delayed", 2),
+    )
+    module = Linear(16, 16, bias=False, device="cuda", name="linear")
+    assert _ensure_runtime(module, active_recipe, revision=1)
+    old_views = _runtime_views(module)
+
+    with pytest.raises(RuntimeError, match="do not support delayed scaling"):
+        _ensure_runtime(module, replacement, revision=2)
+    assert all(current is old for current, old in zip(_runtime_views(module), old_views))
+
+
+def test_asymmetric_custom_delayed_scaling_is_rejected_clearly():
+    """This PR does not add a delayed topology unsupported on main."""
+    recipe = CustomRecipe(
+        qfactory=_forward_only_delayed_factory,
+        qfactory_key=("forward-only-delayed", 1),
+    )
+    module = Linear(16, 16, bias=False, device="cuda", name="linear")
+
+    with pytest.raises(
+        RuntimeError,
+        match="This hybrid quantization configuration with delayed scaling is not supported",
+    ):
+        _ensure_runtime(module, recipe, revision=1)
+    assert module._quantization_runtime is None  # pylint: disable=protected-access
+
+
+def test_mixed_custom_recipe_is_frozen_when_it_contains_delayed_state():
+    """Even a nominally non-delayed CustomRecipe edit is outside the contract."""
+    calls = []
+
+    def active_factory(role):
+        calls.append(role)
+        return _mixed_delayed_factory(role)
+
+    active_recipe = CustomRecipe(qfactory=active_factory, qfactory_key=("mixed", 1))
+    module = Linear(16, 16, bias=False, device="cuda", name="linear")
+    assert _ensure_runtime(module, active_recipe, revision=1)
+    old_views = _runtime_views(module)
+    active_call_count = len(calls)
+
+    def replacement_factory(_role):
+        raise AssertionError("frozen delayed runtime invoked the replacement factory")
+
+    replacement = CustomRecipe(qfactory=replacement_factory, qfactory_key=("mixed", 2))
+    with pytest.raises(RuntimeError, match="do not support delayed scaling"):
+        _ensure_runtime(module, replacement, revision=2)
+
+    assert len(calls) == active_call_count
+    assert all(current is old for current, old in zip(_runtime_views(module), old_views))
+
+
+def test_same_delayed_recipe_object_mutation_keeps_committed_snapshot():
+    """Rejecting caller mutation must not mutate the active reduction recipe."""
+    module = Linear(16, 16, bias=False, device="cuda", name="linear")
+    recipe = DelayedScaling(amax_history_len=4, margin=0)
+    assert _ensure_runtime(module, recipe, revision=1)
+    committed_recipe = module.fp8_meta["recipe"]
+    assert committed_recipe is not recipe
+
+    recipe.margin = 1
+    with pytest.raises(RuntimeError, match="do not support delayed scaling"):
+        _ensure_runtime(module, recipe, revision=2)
+
+    assert module.fp8_meta["recipe"] is committed_recipe
+    assert committed_recipe.margin == 0
+
+
+def test_rejected_delayed_update_aborts_autocast_reduction():
+    """A caught activation failure cannot update the old delayed tensors on exit."""
+    available, reason = is_fp8_available(return_reason=True)
+    if not available:
+        pytest.skip(reason)
+
+    module = Linear(
+        16,
+        16,
+        bias=False,
+        params_dtype=torch.bfloat16,
+        device="cuda",
+        name="linear",
+    )
+    inp = torch.randn(8, 16, device="cuda", dtype=torch.bfloat16)
+    recipe = DelayedScaling(amax_history_len=4, margin=0)
+    with autocast(enabled=True, recipe=recipe):
+        module(inp)
+
+    state = module.fp8_meta["scaling_fwd"]
+    state.scale.fill_(3)
+    state.amax_history.fill_(7)
+    expected_scale = state.scale.clone()
+    expected_history = state.amax_history.clone()
+
+    recipe.margin = 1
+    with autocast(enabled=True, recipe=recipe):
+        with pytest.raises(RuntimeError, match="do not support delayed scaling"):
+            module(inp)
+
+    assert torch.equal(state.scale, expected_scale)
+    assert torch.equal(state.amax_history, expected_history)
+
     """Equal independent recipes and missed A -> B -> A updates reuse the runtime."""
     calls = []
     first_recipe = _make_counting_recipe(("runtime-reuse", 1), calls)

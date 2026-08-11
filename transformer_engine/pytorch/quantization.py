@@ -145,11 +145,6 @@ class _QuantizationRuntime:
     validates it, and then publishes it as one unit.  Keeping forward and
     backward states and quantizers together prevents a failed update from
     exposing a new forward configuration with stale backward state.
-
-    ``delayed_registration_handles`` is intentionally opaque because delayed
-    scaling registration is owned by :class:`FP8GlobalStateManager`.  Runtime
-    owners replace or unregister those handles only during a successful
-    lifecycle transition.
     """
 
     key: _QuantizationRuntimeKey
@@ -160,7 +155,6 @@ class _QuantizationRuntime:
     backward_states: Tuple["RecipeState", ...]
     forward_quantizers: List["Quantizer"]
     backward_quantizers: List["Quantizer"]
-    delayed_registration_handles: Tuple[Any, ...]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -471,6 +465,7 @@ class FP8GlobalState:
     is_first_fp8_module: bool = False
     fp8_graph_capturing: bool = False
     autocast_depth: int = 0
+    abort_amax_reduction: bool = False
     global_amax_buffer: Dict[str, list] = field(default_factory=dict)
     global_amax_history_buffer: Dict[str, list] = field(default_factory=dict)
     global_scale_buffer: Dict[str, list] = field(default_factory=dict)
@@ -591,6 +586,17 @@ class FP8GlobalStateManager:
         if not _has_delayed_scaling_state(fp8_meta):
             return
 
+        forward_key = cls.get_meta_tensor_key(forward=True)
+        backward_key = cls.get_meta_tensor_key(forward=False)
+        if forward_key in fp8_meta and backward_key in fp8_meta:
+            forward_delayed = _is_delayed_scaling_state(fp8_meta[forward_key])
+            backward_delayed = _is_delayed_scaling_state(fp8_meta[backward_key])
+            if forward_delayed != backward_delayed:
+                cls.abort_current_amax_reduction()
+                raise RuntimeError(
+                    "This hybrid quantization configuration with delayed scaling is not supported."
+                )
+
         # Every module must call this function exactly once since
         # the amax tensors are static. Ensures that compatibility
         # with non-graphed modules is maintained.
@@ -608,15 +614,25 @@ class FP8GlobalStateManager:
 
             state = fp8_meta[fp8_meta_tensor_key]
 
-            # Determine recipe + buffers: built-in DS or custom with DS requests
+            # Determine recipe + buffers: built-in DS or custom with DS requests.
             if isinstance(state, CustomRecipeState) and state._has_delayed_scaling:
-                inner_recipe = state._inner_delayed_scaling_recipe
-                key = cls.get_key_in_buffer(forward, inner_recipe, fp8_meta["fp8_group"])
-                # Register inner recipe in autocast_arguments for reduction
-                autocast_key = cls.get_unique_autocast_key(inner_recipe, fp8_meta["fp8_group"])
-                qstate.autocast_arguments[autocast_key] = (inner_recipe, fp8_meta["fp8_group"])
+                committed_recipe = state._inner_delayed_scaling_recipe
             else:
-                key = cls.get_key_in_buffer(forward, fp8_meta["recipe"], fp8_meta["fp8_group"])
+                # The state owns the committed recipe snapshot. Register that
+                # snapshot rather than the caller-owned object installed by
+                # ``autocast_enter`` so later caller mutation cannot change an
+                # existing bucket's reduction behavior.
+                committed_recipe = state.recipe
+
+            key = cls.get_key_in_buffer(forward, committed_recipe, fp8_meta["fp8_group"])
+            autocast_key = cls.get_unique_autocast_key(
+                committed_recipe,
+                fp8_meta["fp8_group"],
+            )
+            qstate.autocast_arguments[autocast_key] = (
+                committed_recipe,
+                fp8_meta["fp8_group"],
+            )
 
             if key not in qstate.global_amax_buffer:
                 qstate.global_amax_buffer[key] = [fp8_meta[fp8_meta_tensor_key].amax_history[0]]
@@ -771,6 +787,8 @@ class FP8GlobalStateManager:
         """Delayed scaling only. Concatenate, reduce, and split amaxes in the global buffer."""
         # global_amax_buffer should only be non-empty for fp8 delayed scaling
         qstate = cls.quantization_state
+        if qstate.abort_amax_reduction:
+            return
         for (
             buffer_key,
             amax_buffer,
@@ -851,9 +869,12 @@ class FP8GlobalStateManager:
         fp8_recipe = get_default_fp8_recipe() if fp8_recipe is None else fp8_recipe
         autocast_key = cls.get_unique_autocast_key(fp8_recipe, fp8_group)
         qstate = cls.quantization_state
-        qstate.autocast_arguments[autocast_key] = (
-            fp8_recipe,
-            fp8_group,
+        # Once a delayed bucket is registered, its committed recipe snapshot
+        # owns the reduction semantics for this key. Do not replace it with a
+        # caller-owned recipe object merely by entering another autocast.
+        qstate.autocast_arguments.setdefault(
+            autocast_key,
+            (fp8_recipe, fp8_group),
         )
 
         qstate.fp8_enabled = enabled
@@ -863,6 +884,7 @@ class FP8GlobalStateManager:
         qstate.fp8_graph_capturing = _graph
 
         if qstate.autocast_depth == 0:
+            qstate.abort_amax_reduction = False
             qstate.is_first_fp8_module = True
         qstate.autocast_depth += 1
 
@@ -880,16 +902,33 @@ class FP8GlobalStateManager:
                 assert nvfp4_available, reason_for_no_nvfp4
 
     @classmethod
+    def abort_current_amax_reduction(cls) -> None:
+        """Prevent delayed-state updates when the active autocast has failed."""
+        qstate = cls.quantization_state
+        if qstate.autocast_depth > 0:
+            qstate.abort_amax_reduction = True
+
+    @classmethod
     def autocast_exit(cls, enabled: bool, _graph: bool) -> None:
         """Set state and tracking variables for exit from FP8 region."""
         qstate = cls.quantization_state
         qstate.autocast_depth -= 1
+        outermost = qstate.autocast_depth == 0
         # Reduce only the non-FP8 weight modules here.
         # FP8 weight modules are reduced at the end of the optimizer
         # step after the weight amax is populated.
-        if enabled and qstate.autocast_depth == 0 and not _graph and torch.is_grad_enabled():
-            # delayed scaling only function, for other recipes (current scaling with any granularity),
-            # this is noop for other recipes because cls.global_amax_buffer is empty list
+        should_reduce = (
+            enabled
+            and outermost
+            and not qstate.abort_amax_reduction
+            and not _graph
+            and torch.is_grad_enabled()
+        )
+        if outermost:
+            qstate.abort_amax_reduction = False
+        if should_reduce:
+            # Delayed scaling only function. For other recipes this is a
+            # no-op because the global amax buffer is empty.
             cls.reduce_and_update_fp8_tensors(forward=True)
 
     @classmethod
@@ -1987,6 +2026,13 @@ def _handle_delayed_scaling_requests(
         raw[idx] = quantizers[j]
 
     return dsrs
+
+
+def _is_delayed_scaling_state(state: Any) -> bool:
+    """Return whether one direction owns delayed scale/history tensors."""
+    return isinstance(state, DelayedScalingRecipeState) or (
+        isinstance(state, CustomRecipeState) and state._has_delayed_scaling
+    )
 
 
 def _has_delayed_scaling_state(fp8_meta: Dict[str, Any]) -> bool:

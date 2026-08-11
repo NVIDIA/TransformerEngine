@@ -2129,8 +2129,9 @@ class TestCustomDPALocalRecipeCache:
         assert dpa._qkv_capabilities_quantizer is canonical_qkv
         assert len(calls) == calls_after_first
 
-        # A recipe-state rebuild creates a new canonical slot and must
-        # invalidate the capability cache automatically.
+        # A supported recipe-state rebuild creates a new canonical slot and
+        # must invalidate the capability cache automatically. Delayed state is
+        # frozen and rejects the rebuild before invoking the new factory.
         def rebuilt_qfactory(role):
             return counting_qfactory(role)
 
@@ -2140,6 +2141,14 @@ class TestCustomDPALocalRecipeCache:
             fp8_mha=True,
             qfactory_key=("test_dpa_capability_rebuilt", factory_name, 1),
         )
+        if factory_name == "delayed_scaling_factory":
+            with autocast(enabled=True, recipe=rebuilt_recipe):
+                with pytest.raises(RuntimeError, match="do not support delayed scaling"):
+                    dpa.get_qkv_quantization_capabilities()
+            assert dpa._qkv_capabilities_quantizer is canonical_qkv
+            assert len(calls) == calls_after_first
+            return
+
         with autocast(enabled=True, recipe=rebuilt_recipe):
             rebuilt = dpa.get_qkv_quantization_capabilities()
         rebuilt_qkv = dpa._qkv_capabilities_quantizer
