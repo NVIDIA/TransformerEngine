@@ -29,7 +29,7 @@ from transformer_engine.common.recipe import (
 from transformer_engine.pytorch.attention.dot_product_attention.utils import FlashAttentionUtils
 
 _current_file = pathlib.Path(__file__).resolve()
-sys.path.append(str(_current_file.parent.parent))
+sys.path = [str(_current_file.parent.parent)] + sys.path
 from utils import ModelConfig, get_available_attention_backends
 
 pytest_logging_level = logging.getLevelName(logging.root.level)
