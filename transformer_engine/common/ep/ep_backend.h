@@ -87,6 +87,12 @@ class EPBackend {
   ncclEpHandle_t open_handle(void* handle_mem, size_t handle_mem_size, int num_topk,
                              size_t dispatch_output_per_expert_alignment);
 
+  struct HandleMemLayout {
+    size_t nccl_bytes;
+    size_t routing_snapshot_offset;
+    size_t total_bytes;
+  };
+
   // LRU cache: most-recently-used at the front of lru_, evict from the back.
   struct HandleEntry {
     void* handle_mem;
@@ -104,10 +110,14 @@ class EPBackend {
   std::unordered_map<void*, std::list<HandleEntry>::iterator> index_;
   size_t handle_cache_cap_{0};  // set lazily from NVTE_EP_HANDLE_CACHE_SIZE
   std::optional<NVTEEpLayerConfig> fallback_layer_cfg_;
+  std::optional<size_t> fallback_num_tokens_;
 
   // Caller must hold mutex_.
   ncclEpHandle_t prepare_handle_locked(void* handle_mem, NVTEEpLayerConfig layer_cfg);
-  ncclEpHandle_t lookup_handle_locked(void* handle_mem);
+  ncclEpHandle_t lookup_handle_locked(void* handle_mem, cudaStream_t stream);
+  HandleMemLayout handle_mem_layout_locked(NVTEEpLayerConfig layer_cfg);
+  void restore_handle_locked(ncclEpHandle_t handle, void* handle_mem, NVTEEpLayerConfig layer_cfg,
+                             size_t num_tokens, cudaStream_t stream);
   size_t cache_cap_locked();
 };
 

@@ -503,6 +503,100 @@ def _make_inputs(key):
     return jax.random.normal(key, (BATCH, SEQ, HIDDEN), dtype=DTYPE)
 
 
+def _make_scan_params(mesh, num_layers):
+    """Create distinct MoE parameters whose leading axis is scanned."""
+    gate_key, wi_0_key, wi_1_key, wo_key = jax.random.split(jax.random.PRNGKey(101), 4)
+
+    with _ctx(mesh):
+
+        @jax.jit
+        def initialize():
+            params = {
+                "gate_kernel": jax.random.normal(
+                    gate_key, (num_layers, HIDDEN, NUM_EXPERTS), dtype=DTYPE
+                )
+                / np.sqrt(HIDDEN),
+                "wi_0": jax.random.normal(
+                    wi_0_key,
+                    (num_layers, NUM_EXPERTS, HIDDEN, INTER),
+                    dtype=DTYPE,
+                )
+                / np.sqrt(HIDDEN),
+                "wi_1": jax.random.normal(
+                    wi_1_key,
+                    (num_layers, NUM_EXPERTS, HIDDEN, INTER),
+                    dtype=DTYPE,
+                )
+                / np.sqrt(HIDDEN),
+                "wo": jax.random.normal(
+                    wo_key,
+                    (num_layers, NUM_EXPERTS, INTER, HIDDEN),
+                    dtype=DTYPE,
+                )
+                / np.sqrt(INTER),
+            }
+            shardings = {
+                "gate_kernel": P(None, FSDP_AXIS, EP_AXIS),
+                "wi_0": P(None, EP_AXIS, FSDP_AXIS, None),
+                "wi_1": P(None, EP_AXIS, FSDP_AXIS, None),
+                "wo": P(None, EP_AXIS, None, FSDP_AXIS),
+            }
+            return {
+                name: jax.lax.with_sharding_constraint(value, NamedSharding(mesh, shardings[name]))
+                for name, value in params.items()
+            }
+
+        params = initialize()
+        jax.block_until_ready(params)
+    return params
+
+
+def _scan_moe_layer(params, x):
+    """One residual TE-EP layer used by both scan and unrolled controls."""
+    branch, _aux, _total_recv_tokens = moe(
+        x,
+        params["gate_kernel"],
+        params["wi_0"],
+        params["wi_1"],
+        params["wo"],
+        num_experts=NUM_EXPERTS,
+        num_experts_per_tok=TOPK,
+        score_function="softmax",
+        ep_axis=EP_AXIS,
+        data_parallelism_axes=(FSDP_AXIS,),
+        input_axes=("batch", None, None),
+        gate_kernel_axes=("embed", "exp"),
+        wi_kernel_axes=("exp", "embed", "mlp"),
+        wo_kernel_axes=("exp", "mlp", "embed"),
+        dtype=DTYPE,
+    )
+    return x + branch
+
+
+def _run_scan_layers(params, x, *, scan_layers):
+    """Execute identical layer parameters with lax.scan or Python unrolling."""
+    if scan_layers:
+
+        def body(carry, layer_params):
+            return _scan_moe_layer(layer_params, carry), None
+
+        return jax.lax.scan(body, x, params)[0]
+
+    value = x
+    for layer in range(params["gate_kernel"].shape[0]):
+        layer_params = jax.tree_util.tree_map(lambda p: p[layer], params)
+        value = _scan_moe_layer(layer_params, value)
+    return value
+
+
+def _scan_value_and_grad(params, x, *, scan_layers):
+    def loss_fn(layer_params, inputs):
+        output = _run_scan_layers(layer_params, inputs, scan_layers=scan_layers)
+        return jnp.mean(output.astype(jnp.float32) ** 2), output
+
+    return jax.value_and_grad(loss_fn, argnums=(0, 1), has_aux=True)(params, x)
+
+
 # -----------------------------------------------------------------------------
 # Tests
 # -----------------------------------------------------------------------------
@@ -679,6 +773,42 @@ class TestTeEpMoeBackward:
             rtol=GRAD_FFN_RTOL,
             err_msg=f"d_x parity breach [config={config}]",
         )
+
+    def test_scan_layers_match_unrolled(self, mesh):
+        """Relocated scan residuals must preserve int32 EP routing in backward."""
+        params = _make_scan_params(mesh, num_layers=4)
+        x = _make_inputs(jax.random.PRNGKey(102))
+
+        with _ctx(mesh):
+            x_sh = _shard_inputs(x, mesh)
+            unrolled = jax.jit(partial(_scan_value_and_grad, scan_layers=False))(params, x_sh)
+            jax.block_until_ready(unrolled)
+            scanned = jax.jit(partial(_scan_value_and_grad, scan_layers=True))(params, x_sh)
+            jax.block_until_ready(scanned)
+
+        (unrolled_loss, unrolled_output), (unrolled_grads, unrolled_grad_x) = unrolled
+        (scanned_loss, scanned_output), (scanned_grads, scanned_grad_x) = scanned
+
+        np.testing.assert_allclose(
+            np.asarray(jax.device_get(scanned_loss), dtype=np.float32),
+            np.asarray(jax.device_get(unrolled_loss), dtype=np.float32),
+            atol=TE_TO_TE_ATOL,
+            rtol=TE_TO_TE_RTOL,
+            err_msg="scan_layers=True loss differs from scan_layers=False",
+        )
+        comparisons = {
+            "output": (scanned_output, unrolled_output),
+            "d_x": (scanned_grad_x, unrolled_grad_x),
+            **{f"d_{name}": (scanned_grads[name], unrolled_grads[name]) for name in scanned_grads},
+        }
+        for name, (actual, expected) in comparisons.items():
+            np.testing.assert_allclose(
+                _to_global_numpy(actual, mesh).astype(np.float32),
+                _to_global_numpy(expected, mesh).astype(np.float32),
+                atol=TE_TO_TE_ATOL,
+                rtol=TE_TO_TE_RTOL,
+                err_msg=f"scan_layers=True {name} differs from scan_layers=False",
+            )
 
 
 class TestTeEpMoeAuxLoss:

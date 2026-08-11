@@ -81,6 +81,9 @@ typedef struct {
    *  When > 1, each expert's slab in recv_tokens is zero-padded up to a
    *  multiple of this for downstream per-expert GEMM alignment. */
   size_t dispatch_output_per_expert_alignment;
+  /*! Dtype of topk_idx (kNVTEInt32 or kNVTEInt64). kNVTEByte means
+   *  unspecified and is filled from topk_idx by nvte_ep_prepare. */
+  NVTEDType topk_dtype;
 } NVTEEpLayerConfig;
 
 /* Zero-init a config with struct_size set to the current layout:
