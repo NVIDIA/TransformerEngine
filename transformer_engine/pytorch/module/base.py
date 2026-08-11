@@ -8,9 +8,10 @@ import math
 import os
 import pickle
 import warnings
+from collections.abc import Hashable
 from enum import Enum
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Generator, Hashable, List, Optional, Tuple, Union
+from typing import Any, Dict, Generator, List, Optional, Tuple, Union
 from contextlib import contextmanager
 from types import MethodType
 
@@ -1193,7 +1194,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
     def _validate_quantization_runtime(self, candidate: _QuantizationRuntime) -> Any:
         """Validate a candidate and return optional transient commit data."""
-        return None
+        del candidate
 
     def _commit_quantization_runtime(
         self,
@@ -1302,6 +1303,9 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             forward_state_roles=forward_state_roles,
             backward_state_roles=backward_state_roles,
         )
+        # Subclasses may return transient commit data even though the base implementation
+        # returns None, which pylint cannot infer through dynamic dispatch.
+        # pylint: disable-next=assignment-from-no-return
         validation_result = self._validate_quantization_runtime(candidate)
         self._commit_quantization_runtime(
             candidate,

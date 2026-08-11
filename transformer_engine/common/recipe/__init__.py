@@ -6,8 +6,9 @@
 from __future__ import annotations
 import abc
 import os
+from collections.abc import Hashable
 from enum import Enum
-from typing import Any, Callable, Hashable, Literal, NamedTuple, Optional, Union
+from typing import Any, Callable, Literal, NamedTuple, Optional, Union
 from dataclasses import field
 from pydantic.dataclasses import dataclass
 

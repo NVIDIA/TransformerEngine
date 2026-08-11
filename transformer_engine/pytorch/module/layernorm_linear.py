@@ -15,7 +15,6 @@ from torch.nn import init
 
 import transformer_engine_torch as tex
 
-from transformer_engine.common.recipe import Recipe
 from transformer_engine.pytorch.torch_version import torch_version
 from transformer_engine.pytorch.tensor.utils import clear_columnwise_cache, is_custom
 from .base import (

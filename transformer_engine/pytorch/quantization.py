@@ -10,10 +10,11 @@ import abc
 import dataclasses
 import warnings
 import os
+from collections import deque
+from collections.abc import Hashable
 from dataclasses import dataclass, field
 from contextlib import contextmanager
-from collections import deque
-from typing import Callable, Hashable, List, Optional, Dict, Any, Tuple, TYPE_CHECKING, Union
+from typing import Callable, List, Optional, Dict, Any, Tuple, TYPE_CHECKING, Union
 
 import torch
 import transformer_engine_torch as tex
