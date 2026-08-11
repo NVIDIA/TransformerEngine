@@ -193,6 +193,8 @@ class LinearFwdArgs:
             return "debug instrumentation (nvidia-dlfw-inspect)"
         if is_distributed_weight(self.weight):
             return "a DistributedWeight (custom weight parallelism, e.g. GTP)"
+        if isinstance(self.inp, (QuantizedTensor, QuantizedTensorStorage)):
+            return "a quantized input tensor"
         if self.fsdp_group is not None:
             return "manual TE FSDP (fsdp_group); use FSDP2 or MCore FSDP"
         if (
