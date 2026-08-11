@@ -123,7 +123,7 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
             for idx in basic_op_idxs:
                 basic_op_ctxs[idx].requires_grad = idx >= fuser.first_op_requiring_backward
 
-            # Forward op. Resolve internal channel inputs from outputs of
+            # Resolve internal channel inputs from outputs of
             # earlier basic ops. When a fusion contains both producer and
             # consumer, leave the consumer slot unset so the fused op can
             # wire the channel itself
@@ -137,6 +137,8 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
                         continue
                     producer_outputs = extra_outputs[producer_idx]
                     basic_op_extra_inputs[idx][input_idx] = producer_outputs[output_idx]
+
+            # Prepare args for op forward
             extra_inputs = [basic_op_extra_inputs[idx] for idx in basic_op_idxs]
             prev_op_idx = basic_op_idxs[0] - 1
             prev_op = fuser._basic_ops[prev_op_idx] if prev_op_idx >= 0 else None
