@@ -290,6 +290,31 @@ py::object clamped_swiglu(const at::Tensor &input, py::handle quantizer, float l
 
 py::object clamped_dswiglu(const at::Tensor &grad, const at::Tensor &input, py::handle quantizer,
                            float limit, float alpha, float glu_linear_offset);
+
+/* Scaled activation */
+py::object scaled_swiglu(const at::Tensor &input, const at::Tensor &act_scales,
+                         py::handle quantizer, int64_t glu_interleave_size);
+
+py::object scaled_clamped_swiglu(const at::Tensor &input, const at::Tensor &act_scales,
+                                 py::handle quantizer, float limit, float alpha,
+                                 float glu_linear_offset, int64_t glu_interleave_size);
+
+py::object scaled_srelu(const at::Tensor &input, const at::Tensor &act_scales,
+                        py::handle quantizer);
+
+py::tuple scaled_dswiglu(const at::Tensor &grad, const at::Tensor &input,
+                         const at::Tensor &act_scales, py::handle quantizer,
+                         int64_t glu_interleave_size, bool compute_scale_grad);
+
+py::tuple scaled_clamped_dswiglu(const at::Tensor &grad, const at::Tensor &input,
+                                 const at::Tensor &act_scales, py::handle quantizer, float limit,
+                                 float alpha, float glu_linear_offset, int64_t glu_interleave_size,
+                                 bool compute_scale_grad);
+
+py::tuple scaled_dsrelu(const at::Tensor &grad, const at::Tensor &input,
+                        const at::Tensor &act_scales, py::handle quantizer,
+                        bool compute_scale_grad);
+
 /***************************************************************************************************
  * LayerNorm
  **************************************************************************************************/
@@ -366,6 +391,11 @@ py::object bgrad_group_quantize(const at::Tensor &tensor, py::handle quantizer,
                                 const size_t num_tensors, std::optional<at::Tensor> first_dims,
                                 std::optional<at::Tensor> last_dims,
                                 std::optional<at::Tensor> tensor_offsets);
+
+py::object group_requantize_inplace(py::handle grouped_x, py::handle quantizer,
+                                    const size_t num_tensors, std::optional<at::Tensor> first_dims,
+                                    DType otype, std::optional<at::Tensor> tensor_offsets,
+                                    bool return_dequantized);
 
 std::vector<py::object> multi_tensor_quantize(const std::vector<at::Tensor> &tensor_list,
                                               std::vector<py::handle> quantizer_list);
