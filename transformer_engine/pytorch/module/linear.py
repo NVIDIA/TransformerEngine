@@ -341,6 +341,17 @@ def _inp_leading_from_out(leading: int, args: Union[LinearFwdArgs, LinearBwdArgs
     return leading
 
 
+def _fake_workspace_valid(workspace: TensorSpec, quantizer: Optional[Quantizer]) -> bool:
+    """Spec-level mirror of ``_is_weight_workspace_valid``: the cached workspace
+    must already hold every inner buffer the quantizer's current usage needs."""
+    if quantizer is None:
+        return True
+    required = TensorSpec(
+        shape=workspace.shape, dtype=workspace.dtype, quantizer=quantizer, device=workspace.device
+    ).inner_names()
+    return set(required) <= set(workspace.inner_names())
+
+
 def _linear_forward_impl(
     args: LinearFwdArgs,
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple], Optional[Dict]]:
@@ -823,6 +834,7 @@ def _linear_forward_fake(
     # Weight pipeline -- mirror ``quantize_weight`` / ``cast_if_needed``.
     # ------------------------------------------------------
     new_weight_workspace = None
+    workspace = None  # args.weight_workspace after validation
     weightmat = None
     weightmat_is_storage = False
     weightmat_aliases_weight = False
@@ -848,6 +860,9 @@ def _linear_forward_fake(
         else:
             weightmat_is_storage = True
             workspace = args.weight_workspace
+            if workspace is not None and not _fake_workspace_valid(workspace, weight_quantizer):
+                # quantize_weight drops a stale workspace and builds a new one.
+                workspace = None
             if workspace is not None:
                 # Copy, so the ``update_usage`` below stays off the input spec.
                 weightmat = dataclass_replace(workspace)
@@ -933,7 +948,7 @@ def _linear_forward_fake(
             pass  # FSDP2 re-quantizes from the gathered weight in backward.
         elif weightmat_is_storage and new_weight_workspace is not None:
             wt_alias = "new_weight_workspace"
-        elif weightmat_is_storage and args.weight_workspace is not None:
+        elif weightmat_is_storage and workspace is not None:
             wt_alias = "weight_workspace"
         elif weightmat_is_storage:
             wt_save = weightmat
@@ -1734,7 +1749,11 @@ def _linear_backward_fake(
         )
 
     grad_bias = None
-    if args.use_bias and args.requires_wgrad:
+    # FP8 backward computes bgrad in grad_output_preprocess whenever bias is
+    # used; in high precision it is fused into the wgrad GEMM, so it only
+    # exists when wgrad runs.
+    fp8_bwd = args.fp8 and args.backward_override is None
+    if args.use_bias and (args.requires_wgrad or fp8_bwd):
         grad_bias = TensorSpec(
             shape=(out_features,), dtype=out_dtype, device=args.grad_output.device
         )
