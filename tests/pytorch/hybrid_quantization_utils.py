@@ -37,6 +37,7 @@ def _make_mxfp8(*, fp8_dtype=te.DType.kFloat8E4M3):
     return te.MXFP8Quantizer(fp8_dtype=fp8_dtype)
 
 
+@recipe.quantizer_factory(key=("test_nvfp4_linear_mxfp8_dpa", 1))
 def nvfp4_linear_mxfp8_dpa_test_factory(role):
     """Test-local reference for the experimental NVFP4 Linear + MXFP8 DPA example."""
     is_dpa = role is not None and role.module_type == "dpa"

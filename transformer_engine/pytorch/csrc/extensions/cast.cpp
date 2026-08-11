@@ -19,6 +19,7 @@
 #include "../extensions.h"
 #include "common.h"
 #include "common/common.h"
+#include "common/util/cuda_runtime.h"
 #include "common/util/system.h"
 #include "pybind.h"
 #include "transformer_engine/multi_tensor.h"
@@ -661,6 +662,102 @@ py::object group_dequantize(const py::handle &input, transformer_engine::DType o
   });
 
   return py::reinterpret_borrow<py::object>(out_py);
+}
+
+py::object group_requantize_inplace(py::handle grouped_x, py::handle quantizer,
+                                    const size_t num_tensors, std::optional<at::Tensor> first_dims,
+                                    DType otype, std::optional<at::Tensor> tensor_offsets,
+                                    bool return_dequantized) {
+  init_extension();
+
+  const bool has_rowwise =
+      !grouped_x.attr("rowwise_data").is_none() && !grouped_x.attr("scale_inv").is_none();
+  const bool has_columnwise = !grouped_x.attr("columnwise_data").is_none() &&
+                              !grouped_x.attr("columnwise_scale_inv").is_none();
+  const bool swizzled = grouped_x.attr("_with_gemm_swizzled_scales").cast<bool>();
+
+  NVTE_CHECK(has_rowwise, "Grouped input has no rowwise data and scales for the GEMM to consume.");
+
+  // The tensor's own quantization must match what the op expects on every path: even a
+  // pass-through hands its data straight to the GEMM. This keeps the input's format rather than
+  // converting between formats.
+  const auto input_quantizer = grouped_x.attr("quantizer");
+  NVTE_CHECK(!input_quantizer.is_none(), "Grouped input has no quantizer.");
+  NVTE_CHECK(Py_TYPE(input_quantizer.ptr()) == Py_TYPE(quantizer.ptr()),
+             "Grouped input and the op disagree on quantization format.");
+  NVTE_CHECK(input_quantizer.attr("dtype").cast<DType>() == quantizer.attr("dtype").cast<DType>(),
+             "Grouped input and the quantizer disagree on the FP8 dtype.");
+
+  // The columnwise copy is only worth building when a wgrad GEMM will consume it. Read this
+  // before the usage is overridden below.
+  const bool need_columnwise = quantizer.attr("columnwise_usage").cast<bool>();
+
+  if (swizzled) {
+    // Already GEMM-ready. Nothing can be derived from here, since dequantization requires scales
+    // in compact format, so the input must already carry everything that will be consumed. No
+    // quantization kernel runs, which makes this path format-agnostic.
+    NVTE_CHECK(has_columnwise || !need_columnwise,
+               "Grouped input has swizzled scales but no columnwise data for the wgrad GEMM. It "
+               "cannot be rebuilt, because dequantization requires scales in compact format.");
+    NVTE_CHECK(!return_dequantized,
+               "Cannot return a dequantized tensor for an already-swizzled grouped input: "
+               "dequantization requires scales in compact format.");
+    return py::none();
+  }
+
+  NVTE_CHECK(!has_columnwise,
+             "Grouped input already has columnwise data but unswizzled scales; requantizing "
+             "from it is not supported.");
+
+  // Everything below runs quantization kernels, so it is MXFP8-only.
+  NVTE_CHECK(detail::IsMXFP8Quantizers(quantizer.ptr()),
+             "Requantizing a grouped input is only supported for MXFP8.");
+
+  const auto logical_shape = grouped_x.attr("logical_shape").cast<py::tuple>();
+  const auto total_tokens = logical_shape[0].cast<size_t>();
+  const auto hidden_dim = logical_shape[1].cast<size_t>();
+  // Each group's token count must be a multiple of 128 too, so that every group's scales start
+  // on a swizzle-tile boundary. Those counts live on the device (host reads would break CUDA
+  // graph capture), so that half is the caller's contract rather than an assertion.
+  NVTE_CHECK(total_tokens % 128 == 0 && hidden_dim % 128 == 0,
+             "Requantizing a grouped input requires dims that are multiples of 128, but got (",
+             total_tokens, ", ", hidden_dim, ").");
+
+  // Dequantize first: it reads the rowwise scales, which the swizzle below replaces. Left
+  // undefined when nothing consumes it, which skips the pass entirely.
+  at::Tensor dequantized;
+  if (need_columnwise || return_dequantized) {
+    dequantized = group_dequantize(grouped_x, otype)
+                      .attr("rowwise_data")
+                      .cast<at::Tensor>()
+                      .view({static_cast<int64_t>(total_tokens), static_cast<int64_t>(hidden_dim)});
+  }
+
+  // Swizzle the rowwise scales before attaching any columnwise data: a rowwise-only swizzle
+  // resets columnwise_scale_inv to None, which would strand the columnwise data below with a
+  // null scale pointer.
+  grouped_swizzle_for_gemm(grouped_x, /*rowwise=*/true, /*columnwise=*/false);
+  // The swizzle hands back a 2D [num_tensors * padded_m, padded_k] scale buffer, but grouped
+  // tensors carry scales as a flat array indexed by element offsets (scale_inv_offsets), so
+  // per-group slicing breaks unless it is flattened back.
+  grouped_x.attr("scale_inv") = grouped_x.attr("scale_inv").attr("reshape")(-1);
+
+  if (need_columnwise) {
+    // Rebuild the columnwise copy the wgrad GEMM needs. It cannot be derived from the rowwise
+    // data because the two directions scale along perpendicular axes. Quantizing rowwise as well
+    // would redo work we already have, so that direction is switched off; the caller sets
+    // optimize_for_gemm, which makes the kernel emit swizzled columnwise scales directly.
+    quantizer.attr("set_usage")(py::arg("rowwise") = false, py::arg("columnwise") = true);
+    auto columnwise = group_quantize(dequantized, quantizer, num_tensors, first_dims, std::nullopt,
+                                     tensor_offsets, std::nullopt);
+    grouped_x.attr("columnwise_data") = columnwise.attr("columnwise_data");
+    grouped_x.attr("columnwise_scale_inv") = columnwise.attr("columnwise_scale_inv");
+  }
+
+  if (return_dequantized) {
+    return py::cast(dequantized);
+  }
+  return py::none();
 }
 
 namespace {
@@ -1631,14 +1728,30 @@ void split_quantize_nvfp4_impl(const TensorWrapper &input,
   // CUDA stream
   auto stream = at::cuda::getCurrentCUDAStream();
 
+  // The grouped Hadamard transform kernels are implemented for the SM100 family
+  // only. On other architectures, where
+  // NVFP4Quantizer::is_eligible_for_rht_cast_fusion is false as well, quantize
+  // each split on its own instead. That takes the generic unfused RHT path.
+  const int sm = transformer_engine::cuda::sm_arch();
+  const bool grouped_rht_supported = sm >= 100 && sm <= 110;
+
   // Perform multi-tensor quantization
   NVTE_SCOPED_GIL_RELEASE({
     if (quantizer.with_rht) {  // Quantize row-wise data, RHT+quantize column-wise data
       // Check that config is supported
       NVTE_CHECK(input.dtype() == DType::kBFloat16, "RHT is only supported for bfloat16 input");
-      // Fuse the rowwise and colwise into one when the kernel is ready
-      split_quantize_nvfp4_impl_with_rht_helper(input, input_list, output_list, split_sections,
-                                                quantizers, stream);
+      if (grouped_rht_supported) {
+        // Fuse the rowwise and colwise into one when the kernel is ready
+        split_quantize_nvfp4_impl_with_rht_helper(input, input_list, output_list, split_sections,
+                                                  quantizers, stream);
+      } else {
+        for (size_t i = 0; i < num_tensors; ++i) {
+          if (input_list[i].numel() == 0) {
+            continue;
+          }
+          quantizers[i]->quantize(input_list[i], output_list[i], std::nullopt);
+        }
+      }
     } else {  // NVFP4 quantize
       // Fuse the rowwise and colwise into one when the kernel is ready
       split_quantize_nvfp4_impl_helper(input, input_list, output_list, split_sections, quantizers,

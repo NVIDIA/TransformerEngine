@@ -35,6 +35,7 @@ struct EpBootstrapParams {
   int hidden_dim = 0;
   int max_num_sms = 0;
   NVTEDType max_token_dtype = kNVTEBFloat16;
+  bool drop_on_overflow = false;
 };
 
 class EpResources {
@@ -53,7 +54,8 @@ class EpResources {
                           .hidden_dim = p.hidden_dim,
                           .num_comm_sms = p.max_num_sms,
                           .max_token_dtype = p.max_token_dtype,
-                          .zero_copy = 0};
+                          .zero_copy = 0,
+                          .drop_on_overflow = p.drop_on_overflow};
     try {
       nvte_ep_initialize(static_cast<void*>(comm_), &cfg);
     } catch (...) {
@@ -125,7 +127,8 @@ struct EpConfig {
 // synchronize via the UID broadcast).
 void SetEpBootstrapParams(pybind11::bytes unique_id_bytes_obj, int ep_size, int rank_within_group,
                           int num_experts, int max_tokens_per_rank, int max_recv_tokens_per_rank,
-                          int hidden_dim, int max_num_sms, int max_token_dtype) {
+                          int hidden_dim, int max_num_sms, int max_token_dtype,
+                          bool drop_on_overflow) {
   std::string uid_str = unique_id_bytes_obj;
   NVTE_CHECK(static_cast<int>(uid_str.size()) >= 128,
              "unique_id_bytes must be at least 128 bytes (ncclUniqueId size).");
@@ -143,6 +146,7 @@ void SetEpBootstrapParams(pybind11::bytes unique_id_bytes_obj, int ep_size, int 
     g_ep_params.hidden_dim = hidden_dim;
     g_ep_params.max_num_sms = max_num_sms;
     g_ep_params.max_token_dtype = static_cast<NVTEDType>(max_token_dtype);
+    g_ep_params.drop_on_overflow = drop_on_overflow;
     g_ep_params_set = true;
   }
   // Acquire outside the lock: EpResources ctor runs ncclCommInitRank which is
@@ -196,8 +200,8 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(EpInstantiateHandler, EpInstantiateImpl, FFI::Bind
 // ── ep_prepare ────────────────────────────────────────────────────────────────
 
 Error_Type EpPrepareFFI(cudaStream_t stream, EpInstanceState* ep_state, Buffer_Type topk_idx,
-                        Result_Type recv_tokens_per_expert, Result_Type handle_mem,
-                        EpConfig config) {
+                        Result_Type recv_tokens_per_expert, Result_Type total_recv_tokens,
+                        Result_Type handle_mem, EpConfig config) {
   (void)ep_state;  // lifetime only.
   auto topk_dims = topk_idx.dimensions();
   NVTE_CHECK(topk_dims.size() >= 2,
@@ -215,6 +219,10 @@ Error_Type EpPrepareFFI(cudaStream_t stream, EpInstanceState* ep_state, Buffer_T
   auto recv_tokens_per_expert_ =
       TensorWrapper(recv_tokens_per_expert->untyped_data(), tc_shape, DType::kInt32);
 
+  std::vector<size_t> trt_shape = {static_cast<size_t>(total_recv_tokens->element_count())};
+  auto total_recv_tokens_ =
+      TensorWrapper(total_recv_tokens->untyped_data(), trt_shape, DType::kInt32);
+
   std::vector<size_t> hm_shape = {static_cast<size_t>(handle_mem->element_count())};
   auto handle_mem_ = TensorWrapper(handle_mem->untyped_data(), hm_shape, DType::kByte);
 
@@ -223,7 +231,7 @@ Error_Type EpPrepareFFI(cudaStream_t stream, EpInstanceState* ep_state, Buffer_T
                               .dispatch_output_per_expert_alignment =
                                   static_cast<size_t>(config.dispatch_output_per_expert_alignment)};
   nvte_ep_prepare(handle_mem_.data(), topk_idx_.data(), recv_tokens_per_expert_.data(),
-                  /*total_recv_tokens_per_rank=*/nullptr, &layer_cfg, stream);
+                  total_recv_tokens_.data(), &layer_cfg, stream);
   return ffi_with_cuda_error_check();
 }
 
@@ -233,6 +241,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(EpPrepareHandler, EpPrepareFFI,
                                   .Ctx<::xla::ffi::State<EpInstanceState>>()  // EP state
                                   .Arg<Buffer_Type>()                         // topk_idx
                                   .Ret<Buffer_Type>()  // recv_tokens_per_expert
+                                  .Ret<Buffer_Type>()  // total_recv_tokens
                                   .Ret<Buffer_Type>()  // handle_mem
                                   .Attrs<EpConfig>(),
                               FFI_CudaGraph_Traits);

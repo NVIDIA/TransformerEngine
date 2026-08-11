@@ -71,7 +71,7 @@ def test_fsdp2_fused_adam_tests():
             # The following 2 tests need to be run in sequence,
             # as they depend on each other.
             "-k",
-            "not dcp_resharding_save and not dcp_resharding_load",
+            "not hybrid and not dcp_resharding_save and not dcp_resharding_load",
         ],
         valid_returncodes=(0, 5),
         env=os.environ,

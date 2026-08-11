@@ -216,6 +216,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("bgrad_group_quantize", transformer_engine::pytorch::bgrad_group_quantize,
         py::arg("tensor"), py::arg("quantizer"), py::arg("num_tensors"), py::arg("first_dims"),
         py::arg("last_dims") = py::none(), py::arg("tensor_offsets") = py::none());
+  m.def("group_requantize_inplace", transformer_engine::pytorch::group_requantize_inplace,
+        "Rebuild the columnwise copy of a rowwise-prequantized MXFP8 grouped tensor and swizzle "
+        "its rowwise scales for GEMM, in place",
+        py::arg("grouped_x"), py::arg("quantizer"), py::arg("num_tensors"), py::arg("first_dims"),
+        py::arg("otype"), py::arg("tensor_offsets") = py::none(),
+        py::arg("return_dequantized") = false);
   m.def("bgrad_quantize", transformer_engine::pytorch::bgrad_quantize,
         "Compute bias gradient and quantize", py::arg("input"), py::arg("quantizer"));
   m.def("generic_gemm", transformer_engine::pytorch::gemm, "Compute GEMM (matrix-matrix multiply)",
@@ -285,6 +291,27 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Backward of SwiGLU used in GPT OSS", py::arg("grad"), py::arg("fwd_input"),
         py::arg("quantizer"), py::arg("limit") = 7.0f, py::arg("alpha") = 1.702f,
         py::arg("glu_linear_offset") = 1.0f);
+  /* Scaled activation */
+  m.def("scaled_swiglu", transformer_engine::pytorch::scaled_swiglu, "Scaled SwiGLU activation",
+        py::arg("input"), py::arg("act_scales"), py::arg("quantizer"),
+        py::arg("glu_interleave_size") = 0);
+  m.def("scaled_clamped_swiglu", transformer_engine::pytorch::scaled_clamped_swiglu,
+        "Scaled clamped SwiGLU activation", py::arg("input"), py::arg("act_scales"),
+        py::arg("quantizer"), py::arg("limit") = 7.0f, py::arg("alpha") = 1.702f,
+        py::arg("glu_linear_offset") = 1.0f, py::arg("glu_interleave_size") = 0);
+  m.def("scaled_srelu", transformer_engine::pytorch::scaled_srelu, "Scaled SReLU activation",
+        py::arg("input"), py::arg("act_scales"), py::arg("quantizer"));
+  m.def("scaled_dswiglu", transformer_engine::pytorch::scaled_dswiglu, "Scaled SwiGLU backward",
+        py::arg("grad"), py::arg("fwd_input"), py::arg("act_scales"), py::arg("quantizer"),
+        py::arg("glu_interleave_size") = 0, py::arg("compute_scale_grad") = true);
+  m.def("scaled_clamped_dswiglu", transformer_engine::pytorch::scaled_clamped_dswiglu,
+        "Scaled clamped SwiGLU backward", py::arg("grad"), py::arg("fwd_input"),
+        py::arg("act_scales"), py::arg("quantizer"), py::arg("limit") = 7.0f,
+        py::arg("alpha") = 1.702f, py::arg("glu_linear_offset") = 1.0f,
+        py::arg("glu_interleave_size") = 0, py::arg("compute_scale_grad") = true);
+  m.def("scaled_dsrelu", transformer_engine::pytorch::scaled_dsrelu, "Scaled SReLU backward",
+        py::arg("grad"), py::arg("fwd_input"), py::arg("act_scales"), py::arg("quantizer"),
+        py::arg("compute_scale_grad") = true);
   /* DBias + DAct fusions*/
   m.def("dbias_dgelu", transformer_engine::pytorch::dbias_dgelu, "DGeLU + DBias + Quantize",
         py::arg("grad"), py::arg("fwd_input"), py::arg("quantizer"));

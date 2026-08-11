@@ -65,13 +65,20 @@ def is_triton_autotuned_alias_safe() -> bool:
 
 
 # XLA gained the ``gpu_stream:collective`` stream annotation in openxla/xla#39604,
-# which ships in the JAX 0.10.0 release. Older XLA fatally fails on it.
-_COLLECTIVE_STREAM_MIN_JAX_VERSION = "0.10.0"
+# first shipping in JAX 0.10.1. Older XLA fatally fails on it.
+_COLLECTIVE_STREAM_MIN_JAX_VERSION = "0.10.1"
 
 
+@lru_cache(maxsize=None)
 def is_collective_stream_supported() -> bool:
     """Return True if the installed JAX supports the gpu_stream:collective annotation."""
-    return jax_version_meet_requirement(_COLLECTIVE_STREAM_MIN_JAX_VERSION)
+    if not jax_version_meet_requirement(_COLLECTIVE_STREAM_MIN_JAX_VERSION):
+        return False
+    try:
+        from jax.experimental.compute_on import compute_on  # pylint: disable=unused-import
+    except ImportError:
+        return False
+    return True
 
 
 def is_triton_extension_supported() -> bool:

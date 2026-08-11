@@ -566,7 +566,7 @@ class _GroupedLinear(torch.autograd.Function):
         *,
         num_gemms: int,
         split_sizes: torch.Tensor,
-        base_split_offsets: torch.Tensor,
+        tensor_offsets: torch.Tensor,
         last_dim: int,
         dtype: torch.dtype,
     ) -> GroupedTensorStorage:
@@ -578,7 +578,7 @@ class _GroupedLinear(torch.autograd.Function):
             quantizer=None,
             data=data.reshape(-1),
             first_dims=split_sizes,
-            tensor_offsets=base_split_offsets * last_dim,
+            tensor_offsets=tensor_offsets,
         )
 
     @staticmethod
@@ -709,8 +709,18 @@ class _GroupedLinear(torch.autograd.Function):
         out_features = weights[0].size(0)
         weight_requires_grad = weights[0].requires_grad
 
-        split_sizes = m_splits.to(device=device)
-        base_split_offsets = tex.splits_to_offsets(split_sizes, 1)
+        split_sizes, (
+            base_split_offsets,
+            input_tensor_offsets,
+            output_tensor_offsets,
+        ) = tex.splits_to_offsets_multi(
+            m_splits,
+            device,
+            strides=[1, in_features, out_features],
+            include_leading_zero=[True, True, True],
+            dtypes=[torch.int64, torch.int64, torch.int64],
+            bulk_allocate=True,
+        )
 
         inp_view = inp.reshape(-1, in_features)
         x = cast_if_needed(inp_view, activation_dtype)
@@ -721,13 +731,19 @@ class _GroupedLinear(torch.autograd.Function):
                 columnwise=is_grad_enabled and weight_requires_grad,
             )
             input_quantizer.optimize_for_gemm = True
-            grouped_x = tex.group_quantize(x, input_quantizer, num_gemms, split_sizes)
+            grouped_x = tex.group_quantize(
+                x,
+                input_quantizer,
+                num_gemms,
+                split_sizes,
+                tensor_offsets=input_tensor_offsets,
+            )
         else:
             grouped_x = _GroupedLinear._make_grouped_tensor(
                 x,
                 num_gemms=num_gemms,
                 split_sizes=split_sizes,
-                base_split_offsets=base_split_offsets,
+                tensor_offsets=input_tensor_offsets,
                 last_dim=in_features,
                 dtype=activation_dtype,
             )
@@ -756,7 +772,7 @@ class _GroupedLinear(torch.autograd.Function):
             out,
             num_gemms=num_gemms,
             split_sizes=split_sizes,
-            base_split_offsets=base_split_offsets,
+            tensor_offsets=output_tensor_offsets,
             last_dim=out_features,
             dtype=activation_dtype,
         )
@@ -801,6 +817,8 @@ class _GroupedLinear(torch.autograd.Function):
                 *weights_to_save,
                 split_sizes,
                 base_split_offsets,
+                input_tensor_offsets,
+                output_tensor_offsets,
             )
             ctx.save_for_backward(*tensors_to_save)
             ctx.tensor_objects = tensor_objects
@@ -1222,6 +1240,8 @@ class _GroupedLinear(torch.autograd.Function):
         weights = saved_tensors[1 : 1 + N]
         split_sizes = saved_tensors[1 + N]
         base_split_offsets = saved_tensors[2 + N]
+        input_tensor_offsets = saved_tensors[3 + N]
+        output_tensor_offsets = saved_tensors[4 + N]
 
         origin_weights = [None] * N
         main_grads = [None] * N
@@ -1258,6 +1278,7 @@ class _GroupedLinear(torch.autograd.Function):
                     grad_output_quantizer,
                     N,
                     split_sizes,
+                    tensor_offsets=output_tensor_offsets,
                 )
             else:
                 grouped_dy = tex.group_quantize(
@@ -1265,13 +1286,14 @@ class _GroupedLinear(torch.autograd.Function):
                     grad_output_quantizer,
                     N,
                     split_sizes,
+                    tensor_offsets=output_tensor_offsets,
                 )
         else:
             grouped_dy = _GroupedLinear._make_grouped_tensor(
                 dy_2d,
                 num_gemms=N,
                 split_sizes=split_sizes,
-                base_split_offsets=base_split_offsets,
+                tensor_offsets=output_tensor_offsets,
                 last_dim=ctx.weights_shape_0,
                 dtype=ctx.activation_dtype,
             )
@@ -1303,7 +1325,7 @@ class _GroupedLinear(torch.autograd.Function):
                 dgrad,
                 num_gemms=N,
                 split_sizes=split_sizes,
-                base_split_offsets=base_split_offsets,
+                tensor_offsets=input_tensor_offsets,
                 last_dim=ctx.weights_shape_1,
                 dtype=ctx.activation_dtype,
             )
@@ -2029,6 +2051,57 @@ class GroupedLinear(TransformerEngineBaseModule):
             self._validate_backward_quantizer_generation(
                 generation,
                 num_gemms=self.num_gemms,
+            )
+
+        self._validated_quantizer_generations[meta_key] = generation
+
+        self._validate_quantizer_generation(fwd)
+
+    def _validate_quantizer_generation(self, fwd: bool) -> None:
+        """Validate grouped-kernel invariants once per quantizer generation."""
+        # Recipe state replaces this list object only when it constructs a new
+        # quantizer generation. The O(1) identity guard keeps validation off the
+        # steady-state forward path. Record a generation only after all of its
+        # operand roles pass, so a failed recipe transition is retried.
+        meta_key = "scaling_fwd" if fwd else "scaling_bwd"
+        generation = self.quantizers.get(meta_key)
+        if generation is None:
+            return
+        if self._validated_quantizer_generations.get(meta_key) is generation:
+            return
+
+        if fwd:
+            stride = self._num_fp8_tensors_per_gemm["fwd"]
+            input_quantizers = tuple(
+                generation[self._offsets["input"] + i * stride] for i in range(self.num_gemms)
+            )
+            weight_quantizers = tuple(
+                generation[self._offsets["weight"] + i * stride] for i in range(self.num_gemms)
+            )
+            _validate_grouped_quantizer_list(input_quantizers, operand_name="input")
+            _validate_grouped_quantizer_list(weight_quantizers, operand_name="weight")
+            delayed_scaling_input_quantizer = next(
+                (q for q in input_quantizers if isinstance(q, Float8Quantizer)),
+                None,
+            )
+            unsafe_requantization_input_quantizer = next(
+                (
+                    q
+                    for q in input_quantizers
+                    if q is not None and not can_reconstruct_wgrad_input_from_original(q)
+                ),
+                None,
+            )
+            self._delayed_scaling_input_quantizer = delayed_scaling_input_quantizer
+            self._unsafe_requantization_input_quantizer = unsafe_requantization_input_quantizer
+        else:
+            stride = self._num_fp8_tensors_per_gemm["bwd"]
+            grad_output_quantizers = tuple(
+                generation[self._offsets["grad_output"] + i * stride] for i in range(self.num_gemms)
+            )
+            _validate_grouped_quantizer_list(
+                grad_output_quantizers,
+                operand_name="grad_output",
             )
 
         self._validated_quantizer_generations[meta_key] = generation
