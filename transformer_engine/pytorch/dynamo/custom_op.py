@@ -106,7 +106,7 @@ from ..quantized_tensor import (
     _quantized_tensor_passthrough_ops,
     prepare_for_saving,
 )
-from ..utils import warn_compile_disabled
+from ..utils import record_compile_disabled
 
 _TE_OP_NAMESPACE = "transformer_engine_compile"
 
@@ -317,7 +317,7 @@ try:
     _OPAQUE_VALUE_BUNDLE_TYPE_NAME: Optional[str] = get_opaque_type_name(OpaqueValueBundle)
 # Older torch without opaque_object support.
 except Exception as e:  # pylint: disable=broad-exception-caught  # pragma: no cover
-    warn_compile_disabled(
+    record_compile_disabled(
         f"could not register OpaqueValueBundle as an opaque type ({e}); use a newer PyTorch build"
     )
     _is_opaque_value_type = None
@@ -1371,7 +1371,7 @@ def register_custom_op(
             bwd_fake_impl=bwd_fake_impl,
         )
     except (ImportError, AttributeError, RuntimeError, TypeError) as e:
-        warn_compile_disabled(
+        record_compile_disabled(
             f"could not register the custom op '{op_name}' ({type(e).__name__}: {e})"
         )
         return None

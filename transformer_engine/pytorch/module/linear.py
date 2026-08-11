@@ -50,6 +50,7 @@ from ..utils import (
     nvtx_range_push,
     get_nvtx_range_context,
     warn_compile_eager_fallback,
+    warn_if_compile_disabled,
     check_gemm_dims,
 )
 from ..distributed import (
@@ -2354,6 +2355,8 @@ class Linear(TransformerEngineBaseModule):
                 )
 
             use_compiled_op = torch.compiler.is_compiling() and _linear_op is not None
+            if _linear_op is None and torch.compiler.is_compiling():
+                warn_if_compile_disabled()
 
             cache_name = None if (is_first_microbatch is None or self.is_fsdp2) else "weight"
             weight_workspace = (

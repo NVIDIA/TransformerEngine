@@ -26,27 +26,36 @@ __all__ = [
 ]
 
 
-_warned_compile_disabled = False
+_compile_disabled_reason: Optional[str] = None
+_compile_disabled_warned = False
 
 
-def warn_compile_disabled(reason: str) -> None:
-    """Warn once per process that TE's torch.compile custom-op path is off.
-
-    Registration of the torch.compile machinery either works or fails as a
-    whole, so one message is enough. Distinct from
+def record_compile_disabled(reason: str) -> None:
+    """Record why TE's torch.compile custom-op path is off; the warning is
+    emitted only when a compiled TE module actually runs (see
+    :func:`warn_if_compile_disabled`), so a plain import stays silent.
+    The first recorded reason wins. Distinct from
     :func:`warn_compile_eager_fallback`, which reports a single *configuration*
     falling back while the path itself is available.
     """
-    global _warned_compile_disabled  # pylint: disable=global-statement
-    if _warned_compile_disabled:
+    global _compile_disabled_reason  # pylint: disable=global-statement
+    if _compile_disabled_reason is None:
+        _compile_disabled_reason = reason
+
+
+@torch._dynamo.disable  # graph-breaks cleanly so the warning actually fires
+def warn_if_compile_disabled() -> None:
+    """Warn once, at the first compile attempt, that the path is off."""
+    global _compile_disabled_warned  # pylint: disable=global-statement
+    if _compile_disabled_warned:
         return
-    _warned_compile_disabled = True
+    _compile_disabled_warned = True
     warnings.warn(
         "Transformer Engine torch.compile support is disabled: "
-        f"{reason}. Modules will fall back to eager execution under "
-        "torch.compile, i.e. a graph break, which is incompatible with "
-        "fullgraph=True.",
-        stacklevel=3,
+        f"{_compile_disabled_reason or 'custom-op registration unavailable'}. "
+        "Modules will fall back to eager execution under torch.compile, i.e. "
+        "a graph break, which is incompatible with fullgraph=True.",
+        stacklevel=2,
     )
 
 
