@@ -804,6 +804,16 @@ def _linear_forward_fake(
 
     out_features, _ = weight.shape
     backward_needs_input = is_grad_enabled and args.weight_requires_grad
+    if (
+        args.backward_override is None
+        and save_original_input
+        and backward_needs_input
+        and input_quantizer is not None
+    ):
+        if not isinstance(
+            input_quantizer, Float8Quantizer
+        ) and not can_reconstruct_wgrad_input_from_original(input_quantizer):
+            save_original_input = False
 
     own_quantized_input = False
     inputmat_is_storage = False
