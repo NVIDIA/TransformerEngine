@@ -190,6 +190,8 @@ class LinearFwdArgs:
         """Reason this config can't use the torch.compile custom-op path (else None)."""
         if self.debug:
             return "debug instrumentation (nvidia-dlfw-inspect)"
+        if is_distributed_weight(self.weight):
+            return "a DistributedWeight (custom weight parallelism, e.g. GTP)"
         if self.fsdp_group is not None and self.is_grad_enabled:
             return "manual TE FSDP (fsdp_group); use FSDP2 or MCore FSDP"
         if (
