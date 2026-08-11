@@ -18,6 +18,11 @@ from functools import partial
 import torch
 import torch.distributed as dist
 
+try:
+    from torch._dynamo.utils import counters as dynamo_counters
+except ImportError:  # pragma: no cover
+    dynamo_counters = None
+
 import transformer_engine.pytorch as te
 from transformer_engine.common.recipe import (
     DelayedScaling,
@@ -572,7 +577,16 @@ def _train(opts):
         if not opts.benchmark:
             del test_graph
     else:
+        if opts.compile and opts.compile_mode == "reduce-overhead":
+            # Warm up so the measured run below replays captured CUDA graphs.
+            for _ in range(2):
+                run_fwd_bwd(test_model, test_x)
+            test_model.zero_grad(set_to_none=True)
+            test_x.grad = None
         test_out = run_fwd_bwd(test_model, test_x)
+        if opts.compile and opts.compile_mode == "reduce-overhead" and dynamo_counters is not None:
+            skips = dynamo_counters["inductor"]["cudagraph_skips"]
+            assert skips == 0, f"reduce-overhead fell back to eager: {skips} cudagraph skip(s)"
     test_grads = [test_out, test_x.grad]
     names = ["output", "input.grad"]
     for test_name, test_param in test_model.named_parameters():

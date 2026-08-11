@@ -292,6 +292,15 @@ def _check_gradients(model_distributed, model_single, main_grad_check=False):
         assert not bool(numerics_failed.item())
 
 
+def _check_input_grads(input_single_node, input_distributed, parallel_mode, sequence_parallel):
+    grad_d = input_distributed.grad
+    if parallel_mode == "row":
+        grad_d = _gather(grad_d, dim=1)
+    elif sequence_parallel:
+        grad_d = _gather(grad_d, dim=0)
+    _check_outputs(input_single_node.grad, grad_d)
+
+
 def _copy_params(model_distributed, model_single):
     for dist_param, single_param in zip(model_distributed.parameters(), model_single.parameters()):
         with torch.no_grad():
@@ -758,6 +767,8 @@ def _test_linear(
             model_single_node,
             main_grad_check=("fuse_wgrad_accumulation" in kwargs),
         )
+
+    _check_input_grads(input_single_node, input_distributed, parallel_mode, sequence_parallel)
 
 
 def test_linear():
