@@ -598,9 +598,9 @@ def check_prequantized_requantize_versus_reference(
     # The rowwise swizzle is size-preserving; the per-group content checks below cannot catch a
     # wrongly sized buffer because they read through offsets derived from the splits, so the
     # capacity must be checked explicitly.
-    assert wire.scale_inv.shape == rowwise_scale_shape_before, (
-        "the swizzled rowwise scale buffer must keep the compact buffer's capacity"
-    )
+    assert (
+        wire.scale_inv.shape == rowwise_scale_shape_before
+    ), "the swizzled rowwise scale buffer must keep the compact buffer's capacity"
 
     # The returned dequantized tensor is what bias gradients are reduced from. Compare only the
     # live rows: both this and the reference allocate M rows but write only the covered ones, and
@@ -874,9 +874,9 @@ def test_grouped_swizzle_variable_shape_preserves_scale_capacity(
     tex.grouped_swizzle_for_gemm(tensor, not columnwise, columnwise)
 
     assert tensor._with_gemm_swizzled_scales
-    assert getattr(tensor, scale_attr).shape == compact_shape, (
-        "grouped swizzle must preserve the scale buffer's shape for variable-shape tensors"
-    )
+    assert (
+        getattr(tensor, scale_attr).shape == compact_shape
+    ), "grouped swizzle must preserve the scale buffer's shape for variable-shape tensors"
 
     # The swizzled content of each group must match a per-group dense swizzle of the compact
     # scales it arrived with.

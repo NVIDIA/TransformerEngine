@@ -415,8 +415,7 @@ std::optional<SwizzledGroupedScales> maybe_swizzle_grouped_tensor(GroupedTensorW
   const size_t per_tensor_last_dim = logical_shape_nvte.data[logical_shape_nvte.ndim - 1];
   constexpr size_t kMxfp8BlockSize = 32;
 
-  const bool variable_shape =
-      first_dims.data_ptr != nullptr || last_dims.data_ptr != nullptr;
+  const bool variable_shape = first_dims.data_ptr != nullptr || last_dims.data_ptr != nullptr;
 
   // Output is allocated in the layout the swizzle kernel writes so its consumer sees the
   // correct stride between experts.
