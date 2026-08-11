@@ -608,25 +608,19 @@ __device__ __forceinline__ void mul_cvt_4x(fp4e2m1x4 &out, const Tx2 &in01, cons
 // packing it is lossless.
 __device__ __forceinline__ float stochastic_round_fp4_e2m1(const float x, const uint32_t rbits8) {
   constexpr float max_norm = 6.0f;
-  if (isnan(x)) {
-    return max_norm;
-  }
   const float u = static_cast<float>(rbits8 & 0xFFu) * (1.0f / 256.0f);
   const float a = fabsf(x);
   // Grid step at |x|: 0.5 below 2, 1 in [2, 4), 2 in [4, 6].
   const float step = (a >= 4.0f) ? 2.0f : ((a >= 2.0f) ? 1.0f : 0.5f);
   const float t = fmaf(u, step, a);
-  float q;
-  if (t >= max_norm) {
-    q = max_norm;
-  } else if (t >= 4.0f) {
-    q = 4.0f;
-  } else if (t >= 2.0f) {
-    q = 2.0f + floorf(t - 2.0f);
-  } else {
-    q = floorf(t * 2.0f) * 0.5f;
-  }
-  return copysignf(q, x);
+  // The jitter can carry t across one region boundary, so the rounding step
+  // derives from t. Flooring in units of that step lands on the e2m1 grid in
+  // every region, and the saturation also maps a NaN t to max_norm, which the
+  // sign select keeps positive.
+  const float step_t = (t >= 4.0f) ? 2.0f : ((t >= 2.0f) ? 1.0f : 0.5f);
+  const float inv_step_t = (t >= 4.0f) ? 0.5f : ((t >= 2.0f) ? 1.0f : 2.0f);
+  const float q = fminf(floorf(t * inv_step_t) * step_t, max_norm);
+  return copysignf(q, (x != x) ? 1.0f : x);
 }
 
 __device__ __forceinline__ fp4e2m1x4 mul_cvt_bf16_to_fp4_4x_with_stochastic_rounding(
