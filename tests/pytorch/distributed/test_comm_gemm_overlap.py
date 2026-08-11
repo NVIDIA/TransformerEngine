@@ -289,6 +289,11 @@ def test_layers_with_overlap_bf16(
 
 @pytest.mark.parametrize("compile_mode", ["default", "reduce-overhead"])
 @pytest.mark.parametrize(
+    "quantization",
+    [None, "fp8_current_scaling", "mxfp8"],
+    ids=["bf16", "fp8_current_scaling", "mxfp8"],
+)
+@pytest.mark.parametrize(
     "linear_parallel_mode,overlap_rs_dgrad",
     [
         ("row", False),
@@ -301,15 +306,21 @@ def test_layers_with_overlap_bf16(
         "COL-PARALLEL - DGRAD+RS",
     ],
 )
-def test_linear_with_overlap_compile(linear_parallel_mode, overlap_rs_dgrad, compile_mode):
-    """te.Linear comm+GEMM overlap (Userbuffers) under torch.compile (BF16),
+def test_linear_with_overlap_compile(
+    linear_parallel_mode, overlap_rs_dgrad, quantization, compile_mode
+):
+    """te.Linear comm+GEMM overlap (Userbuffers) under torch.compile,
     checked numerically against the eager, non-overlap reference."""
+    if quantization is not None and linear_parallel_mode == "row":
+        pytest.skip(
+            "FP8 row-parallel UB forces differentiable fp8_output, unsupported under compile."
+        )
     _run_layer_with_overlap(
         te.Linear.__name__,
         linear_parallel_mode,
         overlap_rs_dgrad,
-        False,
-        None,
+        quantization is not None,
+        quantization,
         use_compile=True,
         compile_mode=compile_mode,
     )
