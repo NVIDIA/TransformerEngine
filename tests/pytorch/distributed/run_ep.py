@@ -260,7 +260,14 @@ class TestEP(unittest.TestCase):
         expert_out = self._weighted(recv_t, recv_w_out)
         return ep_combine(buffer, expert_out)
 
-    def _make_moe_model(self, *, fusion_barrier=False):
+    def _make_moe_model(self, *, fuse_ops=True):
+        """Build a BF16 EP MoE Sequential.
+
+        With ``fuse_ops=True``, dispatch routing extras stay internal
+        (``output_to_caller=False``) so :class:`FusedMoeEp` can claim the
+        sequence. With ``fuse_ops=False``, those extras are returned to the
+        caller, which blocks fusion.
+        """
         buffer = self._make_buffer()
         dispatch = te_ops.Dispatch(buffer)
         fc1 = te_ops.GroupedLinear(
@@ -282,16 +289,16 @@ class TestEP(unittest.TestCase):
         )
         combine = te_ops.Combine(buffer, num_local_tokens=TOKENS_PER_RANK)
 
-        dispatch.set_extra_output_channel(0, "tokens_per_expert", output_to_caller=False)
-        dispatch.set_extra_output_channel(1, "routing_weights", output_to_caller=False)
+        dispatch.set_extra_output_channel(
+            0, "tokens_per_expert", output_to_caller=not fuse_ops
+        )
+        dispatch.set_extra_output_channel(
+            1, "routing_weights", output_to_caller=not fuse_ops
+        )
         fc1.set_extra_input_channel(0, "tokens_per_expert")
         activation.set_extra_input_channel(0, "routing_weights")
         fc2.set_extra_input_channel(0, "tokens_per_expert")
-        ops = [dispatch, fc1, activation, fc2]
-        if fusion_barrier:
-            ops.append(te_ops.Identity())
-        ops.append(combine)
-        return te_ops.Sequential(*ops), fc1, fc2
+        return te_ops.Sequential(dispatch, fc1, activation, fc2, combine), fc1, fc2
 
     # Prepare
 
@@ -482,12 +489,16 @@ class TestEP(unittest.TestCase):
 
     @_eager_test_include
     def test_bf16_moe_sequential_fusion(self):
-        """Reference-backed fusion matches the unfused BF16 EP MoE sequence."""
+        """Reference-backed fusion matches the unfused BF16 EP MoE sequence.
+
+        ``fuse_ops=True`` keeps dispatch routing extras internal so fusion
+        fires; ``fuse_ops=False`` returns them to the caller and blocks it.
+        """
         if not EAGER:
             self.skipTest("variable-size reference comparison requires eager EP mode")
 
-        fused, fused_fc1, fused_fc2 = self._make_moe_model()
-        unfused, unfused_fc1, unfused_fc2 = self._make_moe_model(fusion_barrier=True)
+        fused, fused_fc1, fused_fc2 = self._make_moe_model(fuse_ops=True)
+        unfused, unfused_fc1, unfused_fc2 = self._make_moe_model(fuse_ops=False)
         generator = torch.Generator(device=self.cfg.device)
         generator.manual_seed(3100 + self.cfg.rank)
         with torch.no_grad():
@@ -520,7 +531,7 @@ class TestEP(unittest.TestCase):
             topk_idx,
             fused_topk_weights,
         )
-        unfused_out = unfused(
+        unfused_out, tokens_per_expert, recv_topk_weights = unfused(
             unfused_tokens,
             topk_idx,
             unfused_topk_weights,
@@ -531,8 +542,12 @@ class TestEP(unittest.TestCase):
         self.assertEqual(len(fused_forward_ops), 1)
         self.assertIsInstance(fused_forward_ops[0][0], FusedMoeEp)
         self.assertFalse(any(isinstance(op, FusedMoeEp) for op, _ in unfused_forward_ops))
+        self.assertIsInstance(fused_out, torch.Tensor)
         self.assertEqual(fused_out.dtype, torch.bfloat16)
         self.assertEqual(unfused_out.dtype, torch.bfloat16)
+        self.assertEqual(tokens_per_expert.shape, (NUM_LOCAL_EXPERTS,))
+        self.assertEqual(tokens_per_expert.dtype, torch.int64)
+        self.assertEqual(recv_topk_weights.dtype, torch.float32)
 
         dy = (
             torch.randn(
@@ -548,8 +563,8 @@ class TestEP(unittest.TestCase):
         torch.cuda.synchronize()
 
         # The two BF16 paths use different grouped-GEMM and reduction orders.
-        # Their largest observed forward absolute error is ~3.1e-5, at values
-        # close enough to zero that the relative tolerance does not apply.
+        # Observed forward abs error reaches ~3e-5 on near-zero values where
+        # rtol does not apply, so atol must stay above that (1e-5 is too tight).
         tolerances = {"rtol": 1.6e-2, "atol": 5e-5}
         torch.testing.assert_close(fused_out, unfused_out, **tolerances)
         torch.testing.assert_close(fused_tokens.grad, unfused_tokens.grad, **tolerances)

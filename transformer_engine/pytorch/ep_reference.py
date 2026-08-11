@@ -527,11 +527,7 @@ class MoeEpReference:
                 gate = gate.clamp(max=self.gate_up_clamp)
                 up = up.clamp(min=-self.gate_up_clamp, max=self.gate_up_clamp)
             intermediate = F.silu(gate) * up
-            weights = (
-                route_weight.index_select(0, positions)
-                .to(dtype=self.compute_dtype)
-                .unsqueeze(-1)
-            )
+            weights = route_weight.index_select(0, positions).unsqueeze(-1)
             if self.apply_topk_in_fc1:
                 intermediate = intermediate * weights
             expert_output = intermediate @ fc2_weight[expert]
@@ -642,7 +638,9 @@ class MoeEpReference:
 
         recv_tokens = self._all_to_all(send_tokens, send_counts, recv_counts)
         recv_expert = self._all_to_all(plan.send_expert, send_counts, recv_counts)
-        recv_weight = self._all_to_all(plan.send_weight, send_counts, recv_counts)
+        recv_weight = self._all_to_all(plan.send_weight, send_counts, recv_counts).to(
+            dtype=self.compute_dtype
+        )
 
         route_metadata = None
         if self.generate_c:
@@ -714,7 +712,9 @@ class MoeEpReference:
 
         Returns ``(grad_activation, grad_fc1_weight, grad_fc2_weight,
         grad_topk_weights)``. Activation and expert weight gradients use
-        ``compute_dtype``; router-weight gradients remain float32.
+        ``compute_dtype``. Router weights are cast to ``compute_dtype`` for the
+        activation scaling path; the returned
+        ``grad_topk_weights`` remain float32.
         """
 
         if not self.generate_c:
@@ -767,7 +767,10 @@ class MoeEpReference:
         recv_tokens = self._all_to_all(
             activation_float.index_select(0, plan.send_token_idx), send_counts, recv_counts
         )
-        recv_weight = self._all_to_all(plan.send_weight, send_counts, recv_counts)
+        # Same FP32-on-wire / compute_dtype-for-activation cast as forward.
+        recv_weight = self._all_to_all(plan.send_weight, send_counts, recv_counts).to(
+            dtype=self.compute_dtype
+        )
         recv_grad = self._all_to_all(
             grad_output_float.index_select(0, plan.send_token_idx), send_counts, recv_counts
         )
@@ -806,11 +809,7 @@ class MoeEpReference:
                 continue
             c = c_rows.index_select(0, positions)
             x = x_rows.index_select(0, positions)
-            w = (
-                w_rows.index_select(0, positions)
-                .to(dtype=self.compute_dtype)
-                .unsqueeze(-1)
-            )
+            w = w_rows.index_select(0, positions).unsqueeze(-1)
             d_y = dy_rows.index_select(0, positions)
 
             gate, up = c.split(self.intermediate_size, dim=-1)
@@ -833,12 +832,17 @@ class MoeEpReference:
             d_h_fc2 = d_y_pre @ fc2_float[expert].transpose(0, 1)
             if self.apply_topk_in_fc1:
                 d_h = d_h_fc2 * w
-                d_w_rows[positions] = (d_h_fc2 * h).sum(dim=-1).float()
+                d_w_rows[positions] = (
+                    (d_h_fc2 * h).sum(dim=-1).to(dtype=self.compute_dtype).float()
+                )
             else:
                 d_h = d_h_fc2
                 d_w_rows[positions] = (
-                    d_y * (h @ fc2_float[expert])
-                ).sum(dim=-1).float()
+                    (d_y * (h @ fc2_float[expert]))
+                    .sum(dim=-1)
+                    .to(dtype=self.compute_dtype)
+                    .float()
+                )
 
             d_g = d_h * u * (sig * (1 + g * (1 - sig)))
             d_u = d_h * s
