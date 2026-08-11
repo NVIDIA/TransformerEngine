@@ -38,9 +38,11 @@ void fused_attn_fp8_fwd_impl(
   bool is_bias = (bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS);
   bool is_alibi = (bias_type == NVTE_Bias_Type::NVTE_ALIBI);
   bool is_causal = ((mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK) ||
-                    (mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK));
+                    (mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK) ||
+                    (mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK));
   bool is_padding = ((mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK) ||
-                     (mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK));
+                     (mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK) ||
+                     (mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK));
   bool is_dropout = (is_training && dropout_probability != 0.0f);
   bool is_softmax_offset = (softmax_type != NVTE_Softmax_Type::NVTE_VANILLA_SOFTMAX);
   auto bias_b = b;
@@ -655,9 +657,11 @@ void fused_attn_fp8_bwd_impl(
   bool is_bias = (bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS);
   bool is_alibi = (bias_type == NVTE_Bias_Type::NVTE_ALIBI);
   bool is_causal = ((mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK) ||
-                    (mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK));
+                    (mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK) ||
+                    (mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK));
   bool is_padding = ((mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK) ||
-                     (mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK));
+                     (mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK) ||
+                     (mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK));
   bool is_dropout = (dropout_probability != 0.0f);
   bool is_softmax_offset = (softmax_type != NVTE_Softmax_Type::NVTE_VANILLA_SOFTMAX);
   auto bias_b = b;

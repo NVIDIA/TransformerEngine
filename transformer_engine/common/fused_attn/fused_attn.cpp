@@ -274,7 +274,9 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
            (attn_mask_type == NVTE_Mask_Type::NVTE_NO_MASK ||
             attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK ||
             attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK ||
-            attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK)) ||
+            attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK ||
+            (sm_arch_ >= 100 &&
+             attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK))) ||
           // 9.21: d_qk=192, d_v=128
           (cudnn_runtime_version >= 92100 && sm_arch_ >= 100 && head_dim_qk <= 192 &&
            head_dim_v <= 128 && head_dim_qk % 16 == 0 && head_dim_v % 16 == 0 &&
@@ -294,7 +296,9 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
          (cudnn_runtime_version >= 92500 && !is_training)) &&
         qkv_format == NVTE_QKV_Format::NVTE_THD && supported_ragged_offset_size &&
         (attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK ||
-         attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK))) &&
+         attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK ||
+         (sm_arch_ >= 100 &&
+          attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK)))) &&
       // 9.10.0: known bugs with SDPA FP8
       (cudnn_runtime_version != 91000) && !return_max_logit) {
     backend = NVTE_Fused_Attn_Backend::NVTE_FP8;

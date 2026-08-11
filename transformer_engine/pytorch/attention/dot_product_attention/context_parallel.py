@@ -105,6 +105,23 @@ def _zero_thd_padding(tensor, cu_seqlens, cu_seqlens_padded):
     tensor[padding_mask] = 0
 
 
+def _copy_fp8_thd_half(dst, src, cu_seqlens, half_idx):
+    """Place a raw FP8 THD half-gradient and zero the inactive half."""
+    seq_dim = 0 if dst.dim() == 3 else 1
+    half_cu_seqlens = cu_seqlens // 2
+    src_rows = torch.arange(src.shape[seq_dim], device=src.device)
+    seq_ids = torch.searchsorted(half_cu_seqlens[1:], src_rows, right=True)
+    first_half_rows = src_rows + half_cu_seqlens[seq_ids]
+    second_half_rows = src_rows + half_cu_seqlens[seq_ids + 1]
+    copy_rows, zero_rows = (
+        (first_half_rows, second_half_rows)
+        if half_idx == 0
+        else (second_half_rows, first_half_rows)
+    )
+    dst.index_copy_(seq_dim, copy_rows, src)
+    dst.index_fill_(seq_dim, zero_rows, 0)
+
+
 def flash_attn_p2p_communicate(
     rank, send_tensor, send_dst, recv_tensor, recv_src, cp_group, batch_p2p_comm
 ):
@@ -2672,8 +2689,8 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                     elif ctx.qkv_format == "sbhd":
                         dq[0].fill_(0)
                         dq[1].copy_(dq_)
-                    else:
-                        dq.copy_(dq_)
+                    elif ctx.qkv_format == "thd":
+                        _copy_fp8_thd_half(dq, dq_, cu_seqlens_q_padded, 1)
             elif causal:
                 if i > (cp_size - rank - 1):
                     dq.add_(dq_)
@@ -2759,9 +2776,9 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                         dk[1].fill_(0)
                         dv[0].copy_(dv_)
                         dv[1].fill_(0)
-                    else:
-                        dk.copy_(dk_)
-                        dv.copy_(dv_)
+                    elif ctx.qkv_format == "thd":
+                        _copy_fp8_thd_half(dk, dk_, cu_seqlens_kv_padded, 0)
+                        _copy_fp8_thd_half(dv, dv_, cu_seqlens_kv_padded, 0)
                 else:
                     dk.copy_(dk_)
                     dv.copy_(dv_)
