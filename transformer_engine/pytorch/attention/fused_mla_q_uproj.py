@@ -7,6 +7,7 @@
 from __future__ import annotations
 import functools
 import os
+import weakref
 from importlib.metadata import PackageNotFoundError, version as get_pkg_version
 
 import torch
@@ -14,6 +15,7 @@ import transformer_engine_torch as tex
 from packaging.version import Version as PkgVersion
 
 from ..constants import MXFP8_BLOCK_SCALING_SIZE
+from ..distributed import get_distributed_world_size
 from ..quantized_tensor import QuantizedTensor
 from ..tensor.mxfp8_tensor import MXFP8Quantizer, MXFP8Tensor
 from ..utils import get_device_compute_capability
@@ -153,22 +155,46 @@ class FusedMLAQUpProjRopeQuant:
         fuse_wgrad_accumulation,
         tp_group,
         sequence_parallel,
-        **kwargs,
     ):
-        """Linear backward for the fused Q up-proj — delegates to :func:`~transformer_engine.pytorch.module.linear.backward_linear`."""
-        from ..module.linear import backward_linear as _bwd
+        """Linear backward for the fused Q up-proj."""
+        from ..module.linear import LinearBwdArgs, _linear_backward, _2X_ACC_DGRAD, _2X_ACC_WGRAD
 
-        return _bwd(
-            grad_output,
-            x_saved,
-            w_q,
-            act_dtype,
-            wgrad_store,
-            fuse_wgrad_accumulation,
-            tp_group,
-            sequence_parallel,
-            **kwargs,
+        tp_size = get_distributed_world_size(tp_group) if tp_group is not None else 1
+        fp8 = isinstance(w_q, QuantizedTensor)
+
+        grad_output_quantizer = None
+        if fp8:
+            grad_output_quantizer = MXFP8Quantizer(
+                fp8_dtype=tex.DType.kFloat8E4M3, rowwise=True, columnwise=True
+            )
+            grad_output_quantizer.optimize_for_gemm = True
+
+        bwd_args = LinearBwdArgs(
+            grad_output=grad_output,
+            inputmat=x_saved,
+            weight_fp8=w_q,
+            saved_weight=w_q,
+            grad_output_quantizer=grad_output_quantizer,
+            inp_shape=x_saved.shape,
+            activation_dtype=act_dtype,
+            fp8=fp8,
+            dgrad_use_split_accumulator=_2X_ACC_DGRAD,
+            wgrad_use_split_accumulator=_2X_ACC_WGRAD,
+            is_weight_param_quantized=fp8,
+            parallel_mode="column",
+            tp_group=tp_group,
+            tp_size=tp_size,
+            tensor_parallel=tp_size > 1,
+            sequence_parallel=sequence_parallel,
+            is_fsdp2=False,
+            fuse_wgrad_accumulation=fuse_wgrad_accumulation,
+            wgrad_store=wgrad_store,
+            origin_weight_ref=weakref.ref(w_q) if fuse_wgrad_accumulation else None,
+            main_grad_func=(lambda: w_q.main_grad) if fuse_wgrad_accumulation else None,
         )
+
+        wgrad, dgrad, grad_bias = _linear_backward(bwd_args)
+        return dgrad, wgrad, grad_bias
 
     @classmethod
     def wrap_mxfp8(
