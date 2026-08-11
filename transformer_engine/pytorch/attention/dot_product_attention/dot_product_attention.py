@@ -246,6 +246,24 @@ _dpa_fp8ds_reduce_amax = os.getenv("NVTE_DPA_FP8DS_REDUCE_AMAX", "1") == "1"
 __all__ = ["DotProductAttention"]
 
 
+def _should_pad_qkv_head_dim(head_dim_qk, head_dim_v, value_layer, qkv_layer, kv_layer, attention_params):
+    has_packed_inputs = qkv_layer is not None or kv_layer is not None
+    is_shape_pad_eligible = (
+        not is_in_onnx_export_mode()
+        and head_dim_qk != head_dim_v
+        and value_layer is not None
+        and not isinstance(value_layer, Float8TensorStorage)
+    )
+    # Skip padding when packed inputs are used with the FP8 fused path, which would lead to using
+    # unpadded data with a kernel that assumes padded data.
+    return (
+        is_shape_pad_eligible
+        and not dpa_utils.fp8_packed_skips_qkv_head_dim_pad(attention_params, has_packed_inputs)
+        and dpa_utils.should_pad_qkv_head_dim(attention_params)
+    )
+
+
+
 def _pad_qkv_head_dim(query_layer, key_layer, value_layer):
     """Pad Q/K/V to the same head dimension for FlashAttention 2 MLA."""
     orig_head_dim_qk = query_layer.shape[-1]
@@ -2050,18 +2068,7 @@ class DotProductAttention(TransformerEngineBaseModule):
             # never changes the result, only which kernel runs.
             qkv_head_pad = False
             orig_head_dim_v = head_dim_v
-            if (
-                not is_in_onnx_export_mode()
-                and head_dim_qk != head_dim_v
-                and value_layer is not None
-                and not isinstance(value_layer, Float8TensorStorage)
-                # Skip padding when packed inputs are used with the FP8 fused path, which would lead
-                # to using unpadded data with a kernel that assumes padded data.
-                and not dpa_utils.fp8_packed_skips_qkv_head_dim_pad(
-                    attention_params, qkv_layer is not None or kv_layer is not None
-                )
-                and dpa_utils.should_pad_qkv_head_dim(attention_params)
-            ):
+            if _should_pad_qkv_head_dim(head_dim_qk, head_dim_v, value_layer, qkv_layer, kv_layer, attention_params):
                 # Pad Q/K/V to the wider head dim so a fused backend can run.
                 query_layer, key_layer, value_layer, _, _ = _pad_qkv_head_dim(
                     query_layer, key_layer, value_layer
