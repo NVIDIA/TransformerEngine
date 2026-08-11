@@ -542,6 +542,127 @@ TYPED_TEST(EPDispatchBwdTest, DispatchBwdCheck) {
   NVTE_CHECK_CUDA(cudaStreamDestroy(stream));
 }
 
+// A scan carry may preserve the bytes of handle_mem while assigning them a new
+// device address. Backward must rebuild NCCL's host handle from those bytes,
+// including the native top-k index dtype and routing state.
+TYPED_TEST(EPDispatchBwdTest, RelocatedHandleMem) {
+  using Tok = TypeParam;
+  EP_PULL_FIXTURE();
+  // The rest of this suite uses int64 routing. Reset the process-wide fallback
+  // config before and after this int32 regression so it is independent of test
+  // order while preserving the existing coverage.
+  ep_reinitialize(/*zero_copy=*/0);
+  EPBuffers<Tok> buf;
+  buf.alloc(num_tokens_, top_k_, hidden_dim_, num_local_experts_,
+            ep_size_, max_tokens_per_rank_);
+  this->template upload_inputs<Tok>(buf);
+  EPTensors<Tok> t(buf, num_tokens_, top_k_, hidden_dim_, num_local_experts_);
+
+  const auto h_topk_idx_int64 = routing_balanced(
+      g_process_id, num_tokens_, top_k_, num_experts_, num_local_experts_);
+  const std::vector<int32_t> h_topk_idx(h_topk_idx_int64.begin(), h_topk_idx_int64.end());
+  DevBuf<int32_t> topk_idx;
+  topk_idx.alloc(h_topk_idx.size());
+  NVTE_CHECK_CUDA(cudaMemcpy(topk_idx.get(), h_topk_idx.data(),
+                             h_topk_idx.size() * sizeof(int32_t), cudaMemcpyHostToDevice));
+  TensorWrapper topk_idx_tensor(
+      topk_idx.get(), std::vector<size_t>{static_cast<size_t>(num_tokens_),
+                                          static_cast<size_t>(top_k_)}, DType::kInt32);
+
+  std::vector<float> h_topk_weights(num_tokens_ * top_k_);
+  for (int tok = 0; tok < num_tokens_; ++tok) {
+    for (int k = 0; k < top_k_; ++k) {
+      h_topk_weights[tok * top_k_ + k] = static_cast<float>(
+          (g_process_id * num_tokens_ + tok) * top_k_ + k + 1);
+    }
+  }
+  NVTE_CHECK_CUDA(cudaMemcpy(buf.topk_weights.get(), h_topk_weights.data(),
+                             h_topk_weights.size() * sizeof(float), cudaMemcpyHostToDevice));
+
+  DevBuf<uint8_t> relocated_handle_mem;
+  relocated_handle_mem.alloc(buf.handle_mem_size);
+  ASSERT_NE(relocated_handle_mem.get(), buf.handle_mem.get());
+  TensorWrapper relocated_handle(
+      relocated_handle_mem.get(), std::vector<size_t>{buf.handle_mem_size}, DType::kByte);
+
+  cudaStream_t stream;
+  NVTE_CHECK_CUDA(cudaStreamCreate(&stream));
+
+  ASSERT_NO_THROW(nvte_ep_prepare(t.handle_mem.data(), topk_idx_tensor.data(),
+                                  t.recv_tokens_per_expert.data(), nullptr,
+                                  &t.layer_cfg_, stream));
+  ASSERT_NO_THROW(nvte_ep_dispatch(t.handle_mem.data(), topk_idx_tensor.data(),
+                                   t.tokens.data(), NVTECommWindow{}, t.topk_weights.data(),
+                                   NVTECommWindow{}, t.recv_tokens.data(), NVTECommWindow{},
+                                   t.recv_topk_weights.data(), NVTECommWindow{}, stream));
+  ASSERT_NO_THROW(nvte_ep_combine(t.handle_mem.data(), t.recv_tokens.data(), NVTECommWindow{},
+                                  t.result.data(), stream));
+
+  std::vector<Tok> h_grad(num_tokens_ * hidden_dim_, tok_from_float<Tok>(0.1f));
+  NVTE_CHECK_CUDA(cudaMemcpyAsync(buf.grad_result.get(), h_grad.data(),
+                                  h_grad.size() * sizeof(Tok), cudaMemcpyHostToDevice, stream));
+  NVTE_CHECK_CUDA(cudaMemsetAsync(buf.grad_expert.get(), 0, buf.grad_expert.bytes(), stream));
+  NVTE_CHECK_CUDA(cudaMemsetAsync(buf.g_recv_topk_weights.get(), 0,
+                                  buf.g_recv_topk_weights.bytes(), stream));
+  NVTE_CHECK_CUDA(cudaMemsetAsync(buf.grad_topk_weights.get(), 0,
+                                  buf.grad_topk_weights.bytes(), stream));
+
+  NVTE_CHECK_CUDA(cudaMemcpyAsync(relocated_handle_mem.get(), buf.handle_mem.get(),
+                                  buf.handle_mem_size, cudaMemcpyDeviceToDevice, stream));
+  NVTE_CHECK_CUDA(cudaMemcpyAsync(buf.g_recv_topk_weights.get(),
+                                  buf.recv_topk_weights.get(),
+                                  buf.g_recv_topk_weights.bytes(),
+                                  cudaMemcpyDeviceToDevice, stream));
+  ASSERT_NO_THROW(nvte_ep_combine_bwd(relocated_handle.data(), t.grad_result.data(),
+                                      NVTECommWindow{}, t.grad_expert.data(), NVTECommWindow{},
+                                      stream));
+  ASSERT_NO_THROW(nvte_ep_dispatch_bwd(relocated_handle.data(), t.grad_expert.data(),
+                                       NVTECommWindow{}, t.g_recv_topk_weights.data(),
+                                       NVTECommWindow{}, t.grad_tokens.data(),
+                                       t.grad_topk_weights.data(), stream));
+  NVTE_CHECK_CUDA(cudaStreamSynchronize(stream));
+
+  std::vector<Tok> h_grad_tokens(num_tokens_ * hidden_dim_);
+  NVTE_CHECK_CUDA(cudaMemcpy(h_grad_tokens.data(), buf.grad_tokens.get(),
+                             h_grad_tokens.size() * sizeof(Tok), cudaMemcpyDeviceToHost));
+  const float expected =
+      static_cast<float>(top_k_) * tok_to_float(tok_from_float<Tok>(0.1f));
+  for (int tok = 0; tok < num_tokens_; ++tok) {
+    for (int hidden = 0; hidden < hidden_dim_; ++hidden) {
+      EXPECT_NEAR(tok_to_float(h_grad_tokens[tok * hidden_dim_ + hidden]), expected,
+                  bf16_tol(expected))
+          << "relocated handle_mem token " << tok << " hidden " << hidden;
+    }
+  }
+
+  std::vector<float> h_grad_topk_weights(num_tokens_ * top_k_);
+  NVTE_CHECK_CUDA(cudaMemcpy(h_grad_topk_weights.data(), buf.grad_topk_weights.get(),
+                             h_grad_topk_weights.size() * sizeof(float),
+                             cudaMemcpyDeviceToHost));
+  int topk_weight_errors = 0;
+  for (int tok = 0; tok < num_tokens_; ++tok) {
+    for (int k = 0; k < top_k_; ++k) {
+      const float got = h_grad_topk_weights[tok * top_k_ + k];
+      const float expected_weight = h_topk_weights[tok * top_k_ + k];
+      if (std::fabs(got - expected_weight) > 1e-5f) {
+        if (topk_weight_errors < 8) {
+          ADD_FAILURE() << "relocated handle_mem top-k gradient token " << tok
+                        << " k " << k << ": got " << got
+                        << ", expected " << expected_weight;
+        }
+        ++topk_weight_errors;
+      }
+    }
+  }
+  EXPECT_EQ(topk_weight_errors, 0);
+
+  if (g_process_id == 0 && topk_weight_errors == 0)
+    printf("  RelocatedHandleMem: passed (int32 routing restored after memcpy)\n");
+
+  NVTE_CHECK_CUDA(cudaStreamDestroy(stream));
+  ep_reinitialize(/*zero_copy=*/0);
+}
+
 // =============================================================================
 // EPDispatchBwdGradWeightsTest: round-trip per-(t, k) weights.
 // =============================================================================
