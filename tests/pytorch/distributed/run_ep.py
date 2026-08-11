@@ -203,6 +203,9 @@ class TestEP(unittest.TestCase):
             self.skipTest("only alignment=128 MXFP8 tests run in the MXFP8 pass")
         if not MXFP8_PASS and is_mxfp8_align:
             self.skipTest("alignment=128 MXFP8 tests run in the dedicated MXFP8 pass")
+        # MXFP8 quantization requires Blackwell (SM 10.0) or newer.
+        if is_mxfp8_align and torch.cuda.get_device_capability() < (10, 0):
+            self.skipTest("MXFP8 EP tests require Blackwell (SM 10.0) or newer")
         # Only the zero-copy-capable tests run in the zero-copy pass.
         if ZERO_COPY and not getattr(
             getattr(self, self._testMethodName), "_zero_copy_test_include", False
