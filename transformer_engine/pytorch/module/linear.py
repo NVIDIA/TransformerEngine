@@ -192,12 +192,12 @@ class LinearFwdArgs:
             return "debug instrumentation (nvidia-dlfw-inspect)"
         if is_distributed_weight(self.weight):
             return "a DistributedWeight (custom weight parallelism, e.g. GTP)"
-        if self.fsdp_group is not None and self.is_grad_enabled:
+        if self.fsdp_group is not None:
             return "manual TE FSDP (fsdp_group); use FSDP2 or MCore FSDP"
         if (
             self.fp8_output
             and self.is_grad_enabled
-            and (self.input_requires_grad or self.weight_requires_grad)
+            and (self.input_requires_grad or self.weight_requires_grad or self.bias_requires_grad)
         ):
             return "differentiable fp8_output=True"
         if self.cpu_offloading:
