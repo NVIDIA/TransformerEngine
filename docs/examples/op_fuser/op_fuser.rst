@@ -154,14 +154,12 @@ arguments and the extra outputs will be returned.
 Extra tensor channels
 """""""""""""""""""""
 
-Extra inputs and Extra outputs may optionally specify a channel. Assigning
-the same channel name to an extra output and one or more later extra
-inputs routes the tensor internally within the same
-``OperationFuser``. An extra input connected to an earlier producer is
-removed from the public ``Sequential`` arguments because the channel
-supplies it.
-Extra outputs remain in the public ``Sequential`` return value,
-including outputs that are also consumed through a channel.
+Branching operations can also route their extra inputs and outputs within
+the same ``Sequential`` via named channels. Extra output tensors with a
+specified channel can be consumed by later operations in the same ``Sequential``
+and may optionally be returned to the caller. Extra input tensors with a specified
+channel are accessed internally instead of being provided as arguments
+to ``Sequential``.
 
 With a channel, the residual block above can be expressed using one
 ``Sequential``:
@@ -173,7 +171,9 @@ With a channel, the residual block above can be expressed using one
 
     make_residual = te.ops.MakeExtraOutput()
     add_residual = te.ops.AddExtraInput()
-    make_residual.set_extra_output_channel(0, "residual")
+    make_residual.set_extra_output_channel(
+        0, "residual", output_to_caller=False
+    )
     add_residual.set_extra_input_channel(0, "residual")
 
     block = te.ops.Sequential(
@@ -185,9 +185,9 @@ With a channel, the residual block above can be expressed using one
         add_residual,
     )
 
-    # The residual is routed internally and is also returned to the caller.
+    # The residual is routed internally and omitted from the public outputs.
     x = torch.randn(16384, 4096, device="cuda")
-    y, residual = block(x)
+    y = block(x)
 
 Channels are also useful for mixture-of-experts blocks. The following
 example assumes custom ``Dispatch`` and ``Combine`` basic operations.
@@ -216,9 +216,15 @@ routing map. ``Combine`` consumes the routing map.
 
     # Dispatch extra outputs:
     #   0: split sizes, 1: token probabilities, 2: routing map
-    dispatch.set_extra_output_channel(0, "m_splits")
-    dispatch.set_extra_output_channel(1, "probs")
-    dispatch.set_extra_output_channel(2, "routing_map")
+    dispatch.set_extra_output_channel(
+        0, "m_splits", output_to_caller=False
+    )
+    dispatch.set_extra_output_channel(
+        1, "probs", output_to_caller=False
+    )
+    dispatch.set_extra_output_channel(
+        2, "routing_map", output_to_caller=False
+    )
 
     fc1.set_extra_input_channel(0, "m_splits")
     activation.set_extra_input_channel(0, "probs")
@@ -228,9 +234,9 @@ routing map. ``Combine`` consumes the routing map.
     moe = te.ops.Sequential(dispatch, fc1, activation, fc2, combine)
 
     # Dispatch's extra input has no channel, so the caller passes router_probs.
-    # Channels supply all later extra inputs internally, while Dispatch's
-    # extra outputs are still returned in their original order.
-    y, m_splits, probs, routing_map = moe(x, router_probs)
+    # Channels supply all later extra inputs internally. The channel outputs
+    # are not returned because output_to_caller=False.
+    y = moe(x, router_probs)
 
 Channels cannot connect operations in different ``OperationFuser``
 instances. In particular, an ordinary PyTorch module inside a
@@ -257,22 +263,24 @@ be placed in the same ``OperationFuser``.
 
 The following conditions apply to extra tensor channels:
 
-- A producer must appear before all of its consumers. Backward edges
-  and cycles are not supported.
+- Every named extra input must have a matching producer earlier in the
+  same fuser. Leave an extra input unnamed when the caller should provide it.
 - An output channel name has at most one producer, but its output may
   fan out to multiple consumers.
-- A named output does not require a consumer. It is still returned as
-  a public extra output.
+- A named output does not require a consumer. It is returned as a public
+  extra output by default.
 - A channel is scoped to one ``OperationFuser``. In a ``Sequential``,
   ordinary PyTorch modules split adjacent fusible operations into
   separate fusers, and channels cannot cross that boundary.
-- The caller passes extra inputs that are not connected to an earlier
-  producer in the same fuser. Channel-connected extra input slots do
-  not appear in the ``Sequential`` arguments.
-- The caller receives every extra output in the original basic-operation
-  and slot order. This includes channel-bound outputs that are also
-  consumed internally. Gradients supplied for a returned output are
-  combined with gradients from its internal channel consumers.
+- The caller passes unnamed extra inputs. Named, channel-connected extra
+  input slots do not appear in the ``Sequential`` arguments.
+- ``set_extra_output_channel`` accepts ``output_to_caller`` (``True`` by
+  default). Public extra outputs are returned in their original
+  basic-operation and slot order. Gradients supplied for a returned output
+  are combined with gradients from its internal channel consumers.
+- Set ``output_to_caller=False`` for a channel tensor that should remain
+  internal. Removing a channel binding with ``channel=None`` restores that
+  output as public.
 - Channel bindings are captured when an ``OperationFuser`` (or the
   fusers inside a ``Sequential``) is first constructed. Changing
   ``set_extra_input_channel`` / ``set_extra_output_channel`` afterward
@@ -282,7 +290,11 @@ Channel-connected basic operations may still be replaced by registered
 ``FusedOperation`` implementations. If a fused operation contains both
 the producer and consumer of a channel, its ``fuser_forward`` and
 ``fuser_backward`` implementations are responsible for routing the
-tensor and its gradient between those basic operations.
+tensor and its gradient between those basic operations. For a non-public
+channel fully owned by one forward fusion, ``fuser_forward`` may return
+``None`` in the corresponding basic-operation output slot. A tensor is
+still required when the output is public or when a consumer is outside
+that forward fusion.
 
 Developer guide
 ---------------

@@ -5,7 +5,7 @@
 """Linear layer forward with Userbuffers communication."""
 
 from __future__ import annotations
-from collections.abc import Iterable, Sequence
+from collections.abc import Sequence
 from typing import Any, Optional
 
 import torch

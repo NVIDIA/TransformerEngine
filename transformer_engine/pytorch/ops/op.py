@@ -85,11 +85,11 @@ class FusibleOperation(torch.nn.Module, metaclass=abc.ABCMeta):
         basic_op_ctxs: list[OperationContext],
         input_: torch.Tensor,
         *,
-        basic_op_extra_inputs: list[tuple[torch.Tensor, ...]],
+        basic_op_extra_inputs: Sequence[Sequence[Optional[torch.Tensor]]],
         prev_op_grad_output_quantizer: Optional[Quantizer],
         next_op_input_quantizer: Optional[Quantizer],
         basic_op_kwargs: list[dict[str, Any]],
-    ) -> tuple[torch.Tensor, Sequence[Sequence[torch.Tensor]]]:
+    ) -> tuple[torch.Tensor, Sequence[Sequence[Optional[torch.Tensor]]]]:
         """Forward pass
 
         This op is either a basic op or the fusion of basic ops, so
@@ -104,8 +104,9 @@ class FusibleOperation(torch.nn.Module, metaclass=abc.ABCMeta):
             Contexts for basic operations
         input_: torch.Tensor
             Input tensor
-        basic_op_extra_inputs: list of torch.Tensor
-            Extra tensor inputs to basic operations
+        basic_op_extra_inputs: sequence of sequences of torch.Tensor
+            Extra tensor inputs to basic operations. An internal input
+            owned by this fused operation may be ``None``.
         prev_op_grad_output_quantizer: Quantizer, optional
             The grad_output_quantizer of the preceeding operation
         next_op_input_quantizer: Quantizer, optional
@@ -118,8 +119,9 @@ class FusibleOperation(torch.nn.Module, metaclass=abc.ABCMeta):
         -------
         torch.Tensor:
             Output tensor.
-        Sequence of torch.Tensor:
-            Extra tensor outputs from basic operations.
+        Sequence of sequences of torch.Tensor:
+            Extra tensor outputs from basic operations. A non-public
+            channel owned by this fused operation may be ``None``.
 
         """
         raise NotImplementedError(
@@ -131,7 +133,7 @@ class FusibleOperation(torch.nn.Module, metaclass=abc.ABCMeta):
         basic_op_ctxs: list[OperationContext],
         grad_output: torch.Tensor,
         *,
-        basic_op_grad_extra_outputs: list[tuple[torch.Tensor, ...]],
+        basic_op_grad_extra_outputs: Sequence[Sequence[Optional[torch.Tensor]]],
     ) -> tuple[
         torch.Tensor,
         Iterable[Iterable[Optional[torch.Tensor]]],
@@ -191,6 +193,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         # Unbound slots remain public inputs/outputs, preserving the original API.
         self._extra_input_channels: list[Optional[str]] = [None] * self.num_extra_inputs
         self._extra_output_channels: list[Optional[str]] = [None] * self.num_extra_outputs
+        self._extra_output_to_caller: list[bool] = [True] * self.num_extra_outputs
         self._extra_channels_version = 0
 
         # Objects for quantization
@@ -217,11 +220,19 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         self._extra_channels_version += 1
         return self
 
-    def set_extra_output_channel(self, index: int, channel: Optional[str]) -> BasicOperation:
+    def set_extra_output_channel(
+        self,
+        index: int,
+        channel: Optional[str],
+        *,
+        output_to_caller: bool = True,
+    ) -> BasicOperation:
         """Bind an extra output slot to an internal fuser channel.
 
-        A bound slot can feed one or more later operations and is not returned
-        as a public extra output. Passing ``None`` removes the binding.
+        A bound slot can feed one or more later operations. By default, the
+        output is also returned to the caller. Set ``output_to_caller=False``
+        to keep it internal to the fuser. Passing ``channel=None`` removes the
+        binding and restores the output as public.
         """
         if not 0 <= index < self.num_extra_outputs:
             raise IndexError(
@@ -230,9 +241,17 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
             )
         if channel is not None and (not isinstance(channel, str) or not channel):
             raise ValueError("Extra output channel must be a non-empty string or None")
-        if self._extra_output_channels[index] == channel:
+        if not isinstance(output_to_caller, bool):
+            raise TypeError("output_to_caller must be a bool")
+        if channel is None:
+            output_to_caller = True
+        if (
+            self._extra_output_channels[index] == channel
+            and self._extra_output_to_caller[index] == output_to_caller
+        ):
             return self
         self._extra_output_channels[index] = channel
+        self._extra_output_to_caller[index] = output_to_caller
         self._extra_channels_version += 1
         return self
 
