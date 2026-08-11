@@ -1006,8 +1006,7 @@ def get_attention_backend(
             and head_dim_qk == head_dim_v == 512
         ):
             logger.debug(
-                "Disabling FlashAttention 4 for unsupported symmetric head_dim=512 "
-                "on SM100/SM110."
+                "Disabling FlashAttention 4 for unsupported symmetric head_dim=512 on SM100/SM110."
             )
             use_flash_attention_4 = False
         # flash-attn-4 4.0.0b11 validates (256, 256) on SM100, but its dedicated
