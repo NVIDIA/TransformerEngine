@@ -4690,8 +4690,7 @@ class TestHybridGroupedLinearValidation:
             assert model._quantization_runtime is rebuilt_runtime
             assert model._validated_quantizer_generations["scaling_fwd"] is rebuilt_generation
             assert (
-                model._validated_quantizer_generations["scaling_bwd"]
-                is rebuilt_backward_generation
+                model._validated_quantizer_generations["scaling_bwd"] is rebuilt_backward_generation
             )
             assert model._delayed_scaling_input_quantizer is rebuilt_delayed_quantizer
             assert model._unsafe_requantization_input_quantizer is rebuilt_unsafe_quantizer

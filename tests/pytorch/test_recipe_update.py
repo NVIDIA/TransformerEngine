@@ -18,9 +18,7 @@ from transformer_engine.pytorch import (
 from transformer_engine.pytorch.quantization import QuantizerRole
 from transformer_engine.pytorch.tensor.identity_tensor import IdentityQuantizer
 
-pytestmark = pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="CUDA is required"
-)
+pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
 
 
 def _make_counting_recipe(key, calls, *, fail_on_grad_output=False):
@@ -28,11 +26,7 @@ def _make_counting_recipe(key, calls, *, fail_on_grad_output=False):
 
     def qfactory(role):
         calls.append(role)
-        if (
-            fail_on_grad_output
-            and role is not None
-            and role.tensor_type == "grad_output"
-        ):
+        if fail_on_grad_output and role is not None and role.tensor_type == "grad_output":
             raise RuntimeError("backward factory failure")
         return IdentityQuantizer()
 
@@ -40,13 +34,11 @@ def _make_counting_recipe(key, calls, *, fail_on_grad_output=False):
 
 
 def _ensure_runtime(module, recipe, revision, *, num_gemms=1):
-    return (
-        module._ensure_active_quantization_runtime(  # pylint: disable=protected-access
-            recipe=recipe,
-            recipe_config=recipe.quantizer_config(),
-            recipe_config_revision=revision,
-            num_gemms=num_gemms,
-        )
+    return module._ensure_active_quantization_runtime(  # pylint: disable=protected-access
+        recipe=recipe,
+        recipe_config=recipe.quantizer_config(),
+        recipe_config_revision=revision,
+        num_gemms=num_gemms,
     )
 
 
@@ -102,26 +94,16 @@ def test_unchanged_forward_uses_revision_hot_path(monkeypatch):
             raise AssertionError("unchanged forward entered the runtime cold path")
 
         monkeypatch.setattr(module, "get_quantizer_roles", unexpected_cold_path)
-        monkeypatch.setattr(
-            module, "_prepare_quantization_runtime", unexpected_cold_path
-        )
-        monkeypatch.setattr(
-            module, "_validate_quantization_runtime", unexpected_cold_path
-        )
-        monkeypatch.setattr(
-            module, "_commit_quantization_runtime", unexpected_cold_path
-        )
+        monkeypatch.setattr(module, "_prepare_quantization_runtime", unexpected_cold_path)
+        monkeypatch.setattr(module, "_validate_quantization_runtime", unexpected_cold_path)
+        monkeypatch.setattr(module, "_commit_quantization_runtime", unexpected_cold_path)
 
         workspace_sentinel = object()
-        module._fp8_workspaces["sentinel"] = (
-            workspace_sentinel  # pylint: disable=protected-access
-        )
+        module._fp8_workspaces["sentinel"] = workspace_sentinel  # pylint: disable=protected-access
         module(inp)
         module(inp)
 
-        assert (
-            module._quantization_runtime is active
-        )  # pylint: disable=protected-access
+        assert module._quantization_runtime is active  # pylint: disable=protected-access
         assert len(calls) == factory_call_count
         assert (
             module._fp8_workspaces["sentinel"] is workspace_sentinel
@@ -138,9 +120,7 @@ def test_same_recipe_object_semantic_mutation_rebuilds_runtime():
 
     recipe.qfactory_key = ("same-object-update", 2)
     assert _ensure_runtime(module, recipe, revision=2)
-    assert (
-        module._quantization_runtime is not old_runtime
-    )  # pylint: disable=protected-access
+    assert module._quantization_runtime is not old_runtime  # pylint: disable=protected-access
     assert len(calls) == 10
 
 
@@ -158,12 +138,8 @@ def test_role_revision_is_requested_until_atomic_runtime_commit():
     role = QuantizerRole(module_type="linear", tensor_type="input", name="consumer")
 
     module.output_quantizer_role = role
-    assert (
-        module._role_revision == old_role_revision + 1
-    )  # pylint: disable=protected-access
-    assert (
-        module._quantization_runtime is old_runtime
-    )  # pylint: disable=protected-access
+    assert module._role_revision == old_role_revision + 1  # pylint: disable=protected-access
+    assert module._quantization_runtime is old_runtime  # pylint: disable=protected-access
     assert module.fp8_meta["scaling_fwd"] is old_forward_state
     assert module.quantizers["scaling_fwd"] is old_forward_quantizers
 
@@ -179,9 +155,7 @@ def test_role_revision_is_requested_until_atomic_runtime_commit():
     module.output_quantizer_role = QuantizerRole(
         module_type="linear", tensor_type="input", name="consumer"
     )
-    assert (
-        module._role_revision == old_role_revision + 1
-    )  # pylint: disable=protected-access
+    assert module._role_revision == old_role_revision + 1  # pylint: disable=protected-access
     assert not _ensure_runtime(module, recipe, revision=1)
     assert len(calls) == 10
 
@@ -208,9 +182,7 @@ def test_backward_factory_failure_keeps_complete_active_runtime():
     with pytest.raises(RuntimeError, match="backward factory failure"):
         _ensure_runtime(module, failing_recipe, revision=2)
 
-    assert (
-        module._quantization_runtime is old_runtime
-    )  # pylint: disable=protected-access
+    assert module._quantization_runtime is old_runtime  # pylint: disable=protected-access
     assert module.fp8_meta["recipe"] is old_recipe
     assert module.fp8_meta["scaling_fwd"] is old_forward_state
     assert module.fp8_meta["scaling_bwd"] is old_backward_state
@@ -295,26 +267,18 @@ def test_runtime_update_workspace_lifecycle(
     )
     workspaces = {cache_name: object() for cache_name in cache_names}
     for cache_name, workspace in workspaces.items():
-        module._fp8_workspaces[cache_name] = (
-            workspace  # pylint: disable=protected-access
-        )
+        module._fp8_workspaces[cache_name] = workspace  # pylint: disable=protected-access
 
     # A global revision change with an equal semantic runtime preserves caches.
     assert not _ensure_runtime(module, equal_recipe, revision=2, num_gemms=num_gemms)
-    assert (
-        module._quantization_runtime is active_runtime
-    )  # pylint: disable=protected-access
+    assert module._quantization_runtime is active_runtime  # pylint: disable=protected-access
     for cache_name, workspace in workspaces.items():
-        assert (
-            module._fp8_workspaces[cache_name] is workspace
-        )  # pylint: disable=protected-access
+        assert module._fp8_workspaces[cache_name] is workspace  # pylint: disable=protected-access
 
     # Candidate construction failure preserves both compatibility views and caches.
     with pytest.raises(RuntimeError, match="backward factory failure"):
         _ensure_runtime(module, failing_recipe, revision=3, num_gemms=num_gemms)
-    assert (
-        module._quantization_runtime is active_runtime
-    )  # pylint: disable=protected-access
+    assert module._quantization_runtime is active_runtime  # pylint: disable=protected-access
     current_views = (
         module.fp8_meta["recipe"],
         module.fp8_meta["scaling_fwd"],
@@ -322,19 +286,13 @@ def test_runtime_update_workspace_lifecycle(
         module.quantizers["scaling_fwd"],
         module.quantizers["scaling_bwd"],
     )
-    assert all(
-        current is active for current, active in zip(current_views, active_views)
-    )
+    assert all(current is active for current, active in zip(current_views, active_views))
     for cache_name, workspace in workspaces.items():
-        assert (
-            module._fp8_workspaces[cache_name] is workspace
-        )  # pylint: disable=protected-access
+        assert module._fp8_workspaces[cache_name] is workspace  # pylint: disable=protected-access
 
     # Only a fully committed replacement clears cached workspaces.
     assert _ensure_runtime(module, replacement_recipe, revision=4, num_gemms=num_gemms)
-    replacement_runtime = (
-        module._quantization_runtime
-    )  # pylint: disable=protected-access
+    replacement_runtime = module._quantization_runtime  # pylint: disable=protected-access
     assert replacement_runtime is not active_runtime
     assert not module._fp8_workspaces  # pylint: disable=protected-access
 
@@ -354,18 +312,14 @@ def test_candidate_validation_failure_keeps_complete_active_runtime(monkeypatch)
     old_backward_quantizers = module.quantizers["scaling_bwd"]
 
     def reject_candidate(_candidate):
-        assert (
-            module._quantization_runtime is old_runtime
-        )  # pylint: disable=protected-access
+        assert module._quantization_runtime is old_runtime  # pylint: disable=protected-access
         raise RuntimeError("candidate validation failure")
 
     monkeypatch.setattr(module, "_validate_quantization_runtime", reject_candidate)
     with pytest.raises(RuntimeError, match="candidate validation failure"):
         _ensure_runtime(module, candidate_recipe, revision=2)
 
-    assert (
-        module._quantization_runtime is old_runtime
-    )  # pylint: disable=protected-access
+    assert module._quantization_runtime is old_runtime  # pylint: disable=protected-access
     assert module.fp8_meta["scaling_fwd"] is old_forward_state
     assert module.fp8_meta["scaling_bwd"] is old_backward_state
     assert module.quantizers["scaling_fwd"] is old_forward_quantizers
@@ -393,9 +347,7 @@ def test_grouped_candidate_validation_is_atomic(mismatched_tensor_type):
             nonlocal matching_role_count
             quantizer_dtype = dtype
             if role is not None and role.tensor_type == mismatched_role:
-                quantizer_dtype = (
-                    torch.bfloat16 if matching_role_count % 2 == 0 else torch.float16
-                )
+                quantizer_dtype = torch.bfloat16 if matching_role_count % 2 == 0 else torch.float16
                 matching_role_count += 1
             quantizer_type = (
                 UnsafeIdentityQuantizer
@@ -426,9 +378,7 @@ def test_grouped_candidate_validation_is_atomic(mismatched_tensor_type):
     with pytest.raises(ValueError, match="incompatible plain backend configurations"):
         _ensure_runtime(module, invalid_recipe, revision=2, num_gemms=2)
 
-    assert (
-        module._quantization_runtime is old_runtime
-    )  # pylint: disable=protected-access
+    assert module._quantization_runtime is old_runtime  # pylint: disable=protected-access
     assert module.fp8_meta["scaling_fwd"] is old_forward_state
     assert module.fp8_meta["scaling_bwd"] is old_backward_state
     assert module.quantizers["scaling_fwd"] is old_forward_quantizers
@@ -443,9 +393,7 @@ def test_grouped_candidate_validation_is_atomic(mismatched_tensor_type):
         unsafe_inputs=True,
     )
     assert _ensure_runtime(module, replacement_recipe, revision=3, num_gemms=2)
-    replacement_runtime = (
-        module._quantization_runtime
-    )  # pylint: disable=protected-access
+    replacement_runtime = module._quantization_runtime  # pylint: disable=protected-access
     assert replacement_runtime is not old_runtime
     assert (
         module._validated_quantizer_generations["scaling_fwd"]
@@ -457,6 +405,5 @@ def test_grouped_candidate_validation_is_atomic(mismatched_tensor_type):
     )
     assert module._delayed_scaling_input_quantizer is None
     assert (
-        module._unsafe_requantization_input_quantizer
-        is replacement_runtime.forward_quantizers[0]
+        module._unsafe_requantization_input_quantizer is replacement_runtime.forward_quantizers[0]
     )

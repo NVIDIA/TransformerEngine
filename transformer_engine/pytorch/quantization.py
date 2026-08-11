@@ -1421,9 +1421,7 @@ class RecipeState(abc.ABC):
         """Select a recipe qparam bundle for a canonical tensor type."""
         if tensor_type == "weight":
             return weight_qparams
-        if tensor_type == "input" or (
-            tensor_type == "output" and output_uses_input_qparams
-        ):
+        if tensor_type == "input" or (tensor_type == "output" and output_uses_input_qparams):
             return input_qparams
         if tensor_type == "grad_output" or (
             tensor_type == "grad_input" and grad_input_uses_grad_qparams

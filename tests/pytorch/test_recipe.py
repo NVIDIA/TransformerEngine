@@ -369,12 +369,8 @@ def test_current_scaling_role_layouts_cover_module_and_basic_op_families():
         assert settings("forward", forward_roles) == [inp, weight, boundary]
         assert settings("backward", backward_roles) == [grad, boundary]
 
-    mlp_forward_roles = LayerNormMLP.get_quantizer_roles(
-        module_owner, fwd=True, num_quantizers=6
-    )
-    mlp_backward_roles = LayerNormMLP.get_quantizer_roles(
-        module_owner, fwd=False, num_quantizers=4
-    )
+    mlp_forward_roles = LayerNormMLP.get_quantizer_roles(module_owner, fwd=True, num_quantizers=6)
+    mlp_backward_roles = LayerNormMLP.get_quantizer_roles(module_owner, fwd=False, num_quantizers=4)
     assert settings("forward", mlp_forward_roles) == [
         inp,
         weight,
@@ -407,12 +403,8 @@ def test_current_scaling_role_layouts_cover_module_and_basic_op_families():
     assert settings("forward", basic_forward_roles) == [inp, weight]
     assert settings("backward", basic_backward_roles) == [grad]
 
-    basic_grouped_forward_roles = te_ops.GroupedLinear.get_quantizer_roles(
-        basic_owner, "forward"
-    )
-    basic_grouped_backward_roles = te_ops.GroupedLinear.get_quantizer_roles(
-        basic_owner, "backward"
-    )
+    basic_grouped_forward_roles = te_ops.GroupedLinear.get_quantizer_roles(basic_owner, "forward")
+    basic_grouped_backward_roles = te_ops.GroupedLinear.get_quantizer_roles(basic_owner, "backward")
     assert settings("forward", basic_grouped_forward_roles) == [inp, weight, inp, weight]
     assert settings("backward", basic_grouped_backward_roles) == [grad, grad]
 

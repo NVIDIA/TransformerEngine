@@ -1128,8 +1128,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             return tuple(QuantizerRole() for _ in range(num_quantizers)), None
         if len(roles) != num_quantizers:
             raise ValueError(
-                "Recipe roles must match number of quantizers "
-                f"({len(roles)=} vs {num_quantizers=})"
+                f"Recipe roles must match number of quantizers ({len(roles)=} vs {num_quantizers=})"
             )
         state_roles = list(roles)
         return tuple(state_roles), state_roles
@@ -1271,11 +1270,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
         # A module can miss an A -> B -> A sequence. Synchronize its cheap
         # revision markers without rebuilding an equal semantic runtime.
-        if (
-            active is not None
-            and active.key == requested_key
-            and active.num_gemms == num_gemms
-        ):
+        if active is not None and active.key == requested_key and active.num_gemms == num_gemms:
             active.recipe_config_revision = recipe_config_revision
             active.role_revision = role_revision
             return False
@@ -1716,9 +1711,13 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         if fp8_enabled:
             self.fast_setattr("fp8_initialized", True)
 
-        if runtime_changed and original_recipe is not None and not (
-            issubclass(recipe.__class__, original_recipe.__class__)
-            or issubclass(original_recipe.__class__, recipe.__class__)
+        if (
+            runtime_changed
+            and original_recipe is not None
+            and not (
+                issubclass(recipe.__class__, original_recipe.__class__)
+                or issubclass(original_recipe.__class__, recipe.__class__)
+            )
         ):
             warnings.warn(
                 f"Recipe type changed from {original_recipe.__class__.__name__} "
