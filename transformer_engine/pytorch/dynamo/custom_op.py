@@ -325,19 +325,16 @@ except Exception as e:  # pylint: disable=broad-exception-caught  # pragma: no c
     _OPAQUE_VALUE_BUNDLE_TYPE_NAME = None
 
 
-def _pg_pickle_stub(*args: Any) -> None:  # pragma: no cover
-    raise RuntimeError("ProcessGroup cannot be unpickled -- cache-key use only")
-
-
 def _ensure_distributed_opaque_types() -> None:
     """Register ``ProcessGroup`` as a *reference* opaque type: live state carried
     as a graph input, not baked in as a constant. PyTorch runs this registration
     only when DTensor is imported, so trigger it here too; best-effort no-op on
     builds without the APIs (the field then falls back to eager).
 
-    Also register a ``copyreg`` reducer so ``FxGraphCachePickler`` can hash a
-    graph with a ``ProcessGroup`` input -- without it, inductor bypasses the FX
-    disk cache for every distributed compiled call. Hash-only, never unpickled.
+    Note: PyTorch's cache-key pickler (``FxGraphCachePickler``) cannot hash the
+    real ``ProcessGroup`` in ``example_inputs`` yet, so inductor bypasses the FX
+    disk cache for compiled distributed calls (it logs a warning). Fixing that
+    belongs upstream; keeping TE free of process-wide pickle overrides.
     """
     if _is_opaque_reference_type is None:
         return
@@ -347,32 +344,6 @@ def _ensure_distributed_opaque_types() -> None:
         )
 
         _register_distributed_opaque_types()
-    except Exception:  # pylint: disable=broad-exception-caught
-        pass
-
-    # Workaround for a PyTorch gap: its cache-key pickler handles
-    # FakeScriptObject but not the real ProcessGroup in example_inputs.
-    try:
-        # pylint: disable=import-outside-toplevel
-        import copyreg
-        import torch.distributed as dist
-        from torch._C._distributed_c10d import ProcessGroup
-
-        # pylint: enable=import-outside-toplevel
-
-        if ProcessGroup not in copyreg.dispatch_table:
-
-            def _pg_reduce(pg: ProcessGroup) -> tuple:  # type: ignore[valid-type]
-                try:
-                    return _pg_pickle_stub, (
-                        dist.get_world_size(pg),
-                        dist.get_rank(pg),
-                        dist.get_backend(pg),
-                    )
-                except Exception:  # pylint: disable=broad-exception-caught
-                    return _pg_pickle_stub, (id(pg),)
-
-            copyreg.pickle(ProcessGroup, _pg_reduce)
     except Exception:  # pylint: disable=broad-exception-caught
         pass
 
