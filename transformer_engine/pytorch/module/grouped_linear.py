@@ -1999,7 +1999,6 @@ class GroupedLinear(TransformerEngineBaseModule):
         self,
         candidate: _QuantizationRuntime,
         *,
-        recipe: Recipe,
         validation_result: Tuple[Optional[Quantizer], Optional[Quantizer]],
     ) -> None:
         """Publish validated grouped-derived state with the candidate runtime."""
@@ -2011,7 +2010,6 @@ class GroupedLinear(TransformerEngineBaseModule):
 
         super()._commit_quantization_runtime(
             candidate,
-            recipe=recipe,
             validation_result=validation_result,
         )
         self.fast_setattr(

@@ -144,10 +144,13 @@ class _QuantizationRuntime:
     A module or operation prepares this bundle away from its active state,
     validates it, and then publishes it as one unit.  Keeping forward and
     backward states and quantizers together prevents a failed update from
-    exposing a new forward configuration with stale backward state.
+    exposing a new forward configuration with stale backward state. ``recipe``
+    is the runtime-owned snapshot used to construct those states; it is not the
+    mutable recipe object owned by the caller.
     """
 
     key: _QuantizationRuntimeKey
+    recipe: Recipe
     num_gemms: int
     recipe_config_revision: int
     role_revision: int

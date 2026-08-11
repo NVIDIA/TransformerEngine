@@ -153,8 +153,10 @@ def test_quantization_runtime_bundles_both_quantization_directions():
     )
     forward_quantizers = []
     backward_quantizers = []
+    runtime_recipe = Float8CurrentScaling()
     runtime = _QuantizationRuntime(
         key=runtime_key,
+        recipe=runtime_recipe,
         num_gemms=1,
         recipe_config_revision=3,
         role_revision=2,
@@ -165,6 +167,7 @@ def test_quantization_runtime_bundles_both_quantization_directions():
     )
 
     assert runtime.key is runtime_key
+    assert runtime.recipe is runtime_recipe
     assert runtime.forward_quantizers is forward_quantizers
     assert runtime.backward_quantizers is backward_quantizers
 

@@ -134,6 +134,136 @@ def test_native_gemm_output_quantizer_support_is_opt_in():
         _validate_native_gemm_output_quantizer(unknown_quantizer)
 
 
+@requires_fp8
+class TestDPARuntimeRecipeUpdate:
+    """CustomRecipe DPA uses the normal module runtime update path."""
+
+    @staticmethod
+    def _make_dpa():
+        return te.DotProductAttention(
+            num_attention_heads=2,
+            kv_channels=16,
+            attention_dropout=0.0,
+            name="recipe_update_dpa",
+        ).cuda()
+
+    def test_custom_recipe_update_replaces_both_directions(self):
+        """A qfactory change commits one complete DPA runtime."""
+        from transformer_engine.pytorch.custom_recipes.quantizer_factories import (
+            current_scaling_factory,
+        )
+
+        dpa = self._make_dpa()
+
+        def first_factory(role):
+            return current_scaling_factory(role)
+
+        first_recipe = recipe.CustomRecipe(
+            qfactory=first_factory,
+            qfactory_key=("dpa-runtime-update", 1),
+            fp8_dpa=True,
+        )
+
+        with autocast(enabled=True, recipe=first_recipe):
+            first_capabilities = dpa.get_qkv_quantization_capabilities()
+            first_runtime = dpa._quantization_runtime
+            first_forward_quantizers = dpa.quantizers["scaling_fwd"]
+            first_backward_quantizers = dpa.quantizers["scaling_bwd"]
+            first_capabilities_quantizer = dpa._qkv_capabilities_quantizer
+            assert dpa.get_qkv_quantization_capabilities() == first_capabilities
+
+        assert dpa._quantization_runtime is first_runtime
+        assert len(first_runtime.forward_quantizers) == 9
+        assert len(first_runtime.backward_quantizers) == 6
+        assert first_runtime.forward_quantizers is first_forward_quantizers
+        assert first_runtime.backward_quantizers is first_backward_quantizers
+
+        dpa._fp8_workspaces["old"] = object()
+
+        def second_factory(role):
+            return current_scaling_factory(role)
+
+        second_recipe = recipe.CustomRecipe(
+            qfactory=second_factory,
+            qfactory_key=("dpa-runtime-update", 2),
+            fp8_dpa=True,
+        )
+        with autocast(enabled=True, recipe=second_recipe):
+            second_capabilities = dpa.get_qkv_quantization_capabilities()
+
+        second_runtime = dpa._quantization_runtime
+        assert second_runtime is not first_runtime
+        assert dpa.fp8_meta["scaling_fwd"] is second_runtime.forward_states[0]
+        assert dpa.fp8_meta["scaling_bwd"] is second_runtime.backward_states[0]
+        assert dpa.quantizers["scaling_fwd"] is second_runtime.forward_quantizers
+        assert dpa.quantizers["scaling_bwd"] is second_runtime.backward_quantizers
+        assert second_capabilities == first_capabilities == (True, False)
+        assert dpa._qkv_capabilities_quantizer is not first_capabilities_quantizer
+        assert any(
+            dpa._qkv_capabilities_quantizer is quantizer
+            for quantizer in second_runtime.forward_quantizers
+        )
+        assert not dpa._fp8_workspaces
+
+    def test_candidate_failure_preserves_active_runtime_and_caches(self):
+        """A failed candidate validation does not partially update DPA."""
+        from transformer_engine.pytorch.custom_recipes.quantizer_factories import (
+            current_scaling_factory,
+        )
+
+        dpa = self._make_dpa()
+        active_recipe = recipe.CustomRecipe(
+            qfactory=current_scaling_factory,
+            qfactory_key=("dpa-runtime-valid", 1),
+            fp8_dpa=True,
+        )
+        with autocast(enabled=True, recipe=active_recipe):
+            dpa.get_qkv_quantization_capabilities()
+
+        old_runtime = dpa._quantization_runtime
+        old_views = (
+            dpa.fp8_meta["recipe"],
+            dpa.fp8_meta["scaling_fwd"],
+            dpa.fp8_meta["scaling_bwd"],
+            dpa.quantizers["scaling_fwd"],
+            dpa.quantizers["scaling_bwd"],
+            dpa._qkv_capabilities_quantizer,
+            dpa._qkv_capabilities_cache,
+        )
+        workspace = object()
+        dpa._fp8_workspaces["old"] = workspace
+
+        invalid_recipe = recipe.CustomRecipe(
+            qfactory=lambda _role: IdentityQuantizer(),
+            qfactory_key=("invalid-dpa-update", 1),
+            fp8_dpa=True,
+        )
+        with autocast(
+            enabled=True,
+            recipe=invalid_recipe,
+        ):
+            with pytest.raises(TypeError, match="FP8 attention requires FP8-compatible quantizers"):
+                dpa.get_qkv_quantization_capabilities()
+
+        assert dpa._quantization_runtime is old_runtime
+        assert all(
+            current is old
+            for current, old in zip(
+                (
+                    dpa.fp8_meta["recipe"],
+                    dpa.fp8_meta["scaling_fwd"],
+                    dpa.fp8_meta["scaling_bwd"],
+                    dpa.quantizers["scaling_fwd"],
+                    dpa.quantizers["scaling_bwd"],
+                    dpa._qkv_capabilities_quantizer,
+                    dpa._qkv_capabilities_cache,
+                ),
+                old_views,
+            )
+        )
+        assert dpa._fp8_workspaces["old"] is workspace
+
+
 def test_hybrid_storage_snapshots_parent_quantizer():
     """Caller mutations must not change an existing Hybrid tensor's behavior."""
     quantizer = HybridQuantizer(

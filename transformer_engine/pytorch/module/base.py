@@ -1196,6 +1196,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
         return _QuantizationRuntime(
             key=key,
+            recipe=runtime_recipe,
             num_gemms=num_gemms,
             recipe_config_revision=recipe_config_revision,
             role_revision=role_revision,
@@ -1213,11 +1214,11 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self,
         candidate: _QuantizationRuntime,
         *,
-        recipe: Recipe,
         validation_result: Any = None,
     ) -> None:
         """Publish a fully prepared and validated runtime as one unit."""
         del validation_result
+        recipe = candidate.recipe
         forward_state = candidate.forward_states[0]
         backward_state = candidate.backward_states[0]
 
@@ -1350,7 +1351,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         validation_result = self._validate_quantization_runtime(candidate)
         self._commit_quantization_runtime(
             candidate,
-            recipe=candidate.forward_states[0].recipe,
             validation_result=validation_result,
         )
         return True

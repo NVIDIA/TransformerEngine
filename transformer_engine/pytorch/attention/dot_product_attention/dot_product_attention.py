@@ -30,6 +30,7 @@ from transformer_engine.pytorch.quantization import (
     MXFP8BlockScalingRecipeState,
     Float8CurrentScalingRecipeState,
     Float8BlockScalingRecipeState,
+    _QuantizationRuntime,
 )
 from transformer_engine.pytorch.tensor.storage.float8_tensor_storage import Float8TensorStorage
 from transformer_engine.pytorch.tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
@@ -882,7 +883,10 @@ class DotProductAttention(TransformerEngineBaseModule):
         # global recipe set in autocast()
         fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
         if fp8_recipe.custom():
+            old_runtime = getattr(self, "_quantization_runtime", None)
             super().init_fp8_metadata(num_gemms=num_gemms)
+            if self._quantization_runtime is not old_runtime:
+                self._invalidate_dpa_runtime_caches()
             fwd_quantizers = self.quantizers.get("scaling_fwd", ())
             cache_key = (
                 id(self.fp8_meta.get("scaling_fwd")),
@@ -1108,6 +1112,32 @@ class DotProductAttention(TransformerEngineBaseModule):
             )
             # Clear cached workspaces as they were created with the old recipe/quantizer type
             self._fp8_workspaces.clear()
+
+    def _invalidate_dpa_runtime_caches(self) -> None:
+        """Invalidate DPA caches after a committed quantizer replacement."""
+        self._custom_dpa_local_recipes_cache_key = None
+        self._custom_dpa_local_recipes_cache = None
+        self._qkv_capabilities_quantizer = None
+        self._qkv_capabilities_cache = None
+        _attention_backends["backend_selection_requires_update"] = True
+
+    def _validate_quantization_runtime(self, candidate: _QuantizationRuntime) -> Any:
+        """Validate an FP8-attention candidate before publishing it."""
+        super()._validate_quantization_runtime(candidate)
+        if not candidate.recipe.fp8_dpa:
+            return None
+        if len(candidate.forward_quantizers) != 9 or len(candidate.backward_quantizers) != 6:
+            raise ValueError(
+                "FP8 DotProductAttention requires 9 forward and 6 backward quantizer slots."
+            )
+        dpa_utils.get_attention_quantizers(
+            True,
+            {
+                "scaling_fwd": candidate.forward_quantizers,
+                "scaling_bwd": candidate.backward_quantizers,
+            },
+        )
+        return None
 
     def get_qkv_quantization_capabilities(self) -> Tuple[bool, bool]:
         """Return MHA boundary capabilities from the canonical QKV quantizer.
