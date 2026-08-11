@@ -6,7 +6,7 @@ import copy
 import os
 import sys
 import logging
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 import torch
 import torch.distributed as dist
 from transformer_engine.pytorch.attention.dot_product_attention.context_parallel import (
@@ -44,6 +44,24 @@ _pool_cp_comm_group = None
 _pool_cp_comm_sub_groups: list = []
 
 dtypes = {"fp16": torch.float16, "bf16": torch.bfloat16, "fp8": torch.bfloat16}
+
+
+@contextmanager
+def _use_supported_flash_attention_for_cp():
+    """Keep the reference and CP runs on the same supported FA generation."""
+    # The CP implementation currently supports FA2/FA3, but the reference run
+    # happens before the CP group is attached and can otherwise select FA4.
+    # Restore the caller's setting because pool workers reuse this process.
+    env_var = "NVTE_FLASH_ATTN_V4"
+    previous = os.environ.get(env_var)
+    os.environ[env_var] = "0"
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop(env_var, None)
+        else:
+            os.environ[env_var] = previous
 
 
 def generate_input_shapes(
@@ -192,6 +210,7 @@ def get_tols(config, dtype):
     return atol, rtol, rmse_tol
 
 
+@_use_supported_flash_attention_for_cp()
 def run_dpa_with_cp(
     dtype="bf16",
     model=None,

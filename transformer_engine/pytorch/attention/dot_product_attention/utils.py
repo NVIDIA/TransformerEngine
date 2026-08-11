@@ -996,6 +996,20 @@ def get_attention_backend(
                 device_compute_capability[0] * 10 + device_compute_capability[1],
             )
             use_flash_attention_4 = False
+        # FA4's validator currently accepts symmetric (512, 512) on SM100/SM110,
+        # but the generic forward kernel exceeds its TMEM allocation for that shape.
+        # Preserve the supported asymmetric (64, 512) MLA path while D512 support
+        # is completed upstream.
+        if (
+            use_flash_attention_4
+            and (10, 0) <= device_compute_capability < (12, 0)
+            and head_dim_qk == head_dim_v == 512
+        ):
+            logger.debug(
+                "Disabling FlashAttention 4 for unsupported symmetric head_dim=512 "
+                "on SM100/SM110."
+            )
+            use_flash_attention_4 = False
         # flash-attn-4 4.0.0b11 validates (256, 256) on SM100, but its dedicated
         # hd256 kernel diverges from the reference for cross-attention/decode-like
         # shapes such as sq=1, skv=2048. Keep FA4 enabled for the self-attention

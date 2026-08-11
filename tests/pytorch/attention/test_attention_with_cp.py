@@ -300,7 +300,10 @@ if test_essential:
     qkv_formats = ["sbhd", "thd"]
 
 
-@pytest.mark.skipif(not FlashAttentionUtils.v2_plus, reason="Flash-attn 2.0+ is required.")
+@pytest.mark.skipif(
+    not (FlashAttentionUtils.v2_plus or FlashAttentionUtils.v3_is_installed),
+    reason="Flash-attn v2 or v3 is required.",
+)
 @pytest.mark.skipif(get_device_compute_capability() < (8, 0), reason="CP tests require sm80+.")
 @pytest.mark.parametrize("dtype", dtypes)
 @pytest.mark.parametrize("model", model_configs_flash_attn.keys())

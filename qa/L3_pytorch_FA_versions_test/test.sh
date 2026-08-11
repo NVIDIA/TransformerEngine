@@ -33,12 +33,12 @@ sm_arch=`python3 -c "import torch; sm = torch.cuda.get_device_capability(0); pri
 export FLASH_ATTN_CUDA_ARCHS=$sm_arch
 # CP tests are expensive and run only once per arch:
 #   - sm90 (H100):  FA3 (3.0.0b1) - context_parallel.py only supports FA3 on Hopper
-#   - sm>90 (B200): latest FA4    - FA3 is not built/installed for sm>90
+#   - sm>90 (B200): FA2 (2.8.3) - FA4 CP remains disabled until its CP path is supported
 # Non-CP tests still run for every FA version in the array.
 if [ $sm_arch -gt 90 ]
 then
   FA_versions=(2.8.3 4.0.0b11)
-  CP_FA_VERSION="${FA_versions[-1]}"
+  CP_FA_VERSION="${FA_versions[0]}"
 elif [ $sm_arch -eq 90 ]
 then
   FA_versions=(2.8.3 3.0.0b1 4.0.0b11)
@@ -48,20 +48,40 @@ fi
 for fa_version in "${FA_versions[@]}"
 do
 
+  # The FA distributions share the flash_attn namespace. Keep exactly one
+  # installed so import-time discovery and the iteration label cannot disagree.
+  pip3 uninstall -y flash-attn flash-attn-3 flash-attn-4 \
+    || error_exit "Failed to isolate Flash Attention $fa_version"
+  export NVTE_FLASH_ATTN_V2=0
+  export NVTE_FLASH_ATTN_V3=0
+  export NVTE_FLASH_ATTN_V4=0
+
   # Build Flash Attention
   if [ "${fa_version}" \< "3.0.0" ]
   then
-    pip3 install flash-attn==${fa_version} --no-build-isolation
+    export NVTE_FLASH_ATTN_V2=1
+    pip3 install flash-attn==${fa_version} --no-build-isolation \
+      || error_exit "Failed to install Flash Attention $fa_version"
   elif [[ "${fa_version}" == 4.* ]]
   then
-    pip3 install flash-attn-4==${fa_version} nvidia-cutlass-dsl[cu13]==4.4.2 --no-build-isolation
+    export NVTE_FLASH_ATTN_V4=1
+    # FA4 is intentionally last in every version array. Its b11 test pin needs
+    # CUTLASS DSL 4.4.2, so replace the image-matched stack only for this final
+    # iteration; later iterations would otherwise need that stack restored.
+    pip3 uninstall -y nvidia-cutlass-dsl nvidia-cutlass-dsl-libs-base \
+      nvidia-cutlass-dsl-libs-cu12 nvidia-cutlass-dsl-libs-cu13 \
+      || error_exit "Failed to isolate CUTLASS DSL for Flash Attention $fa_version"
+    pip3 install flash-attn-4==${fa_version} nvidia-cutlass-dsl[cu13]==4.4.2 \
+      --no-build-isolation || error_exit "Failed to install Flash Attention $fa_version"
   else
+    export NVTE_FLASH_ATTN_V3=1
     # FA3 source build (~20 min). Skip if FA3 is already installed.
     if python3 -c "import flash_attn_3" 2>/dev/null; then
       echo "FA3 already installed (from base image); skipping source build"
     else
       git clone https://github.com/Dao-AILab/flash-attention.git
-      cd flash-attention/hopper && python setup.py install
+      cd flash-attention/hopper && python setup.py install \
+        || error_exit "Failed to install Flash Attention $fa_version"
       cd ../../
     fi
   fi
