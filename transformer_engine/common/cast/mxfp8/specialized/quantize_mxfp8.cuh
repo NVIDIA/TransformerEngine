@@ -1788,8 +1788,16 @@ __global__ void quantize_mxfp8_kernel_cast_only(
 
     int2 end_coords;
     end_coords.y = std::min(block_coords.y + CastTraits::blockDIM::M, rows);
-    end_coords.x = std::min((block_coords.x + CastTraits::blockDIM::N) / CastTraits::rowChunkElems,
-                            DIVUP(cols, static_cast<int32_t>(CastTraits::rowChunkElems)));
+    if constexpr (CastTraits::_with_swizzled_scales) {
+      end_coords.x =
+          std::min((block_coords.x + CastTraits::blockDIM::N) / CastTraits::rowChunkElems,
+                   DIVUP(cols, static_cast<int32_t>(CastTraits::rowChunkElems)));
+    } else {
+      // The compact layout's padded entries are consumed by a later swizzle.
+      end_coords.x =
+          std::min((block_coords.x + CastTraits::blockDIM::N) / CastTraits::rowChunkElems,
+                   scale_stride_rowwise);
+    }
     int2 valid_coords;
     valid_coords.y = end_coords.y - block_coords.y;
     valid_coords.x = end_coords.x - (block_coords.x / CastTraits::rowChunkElems);
