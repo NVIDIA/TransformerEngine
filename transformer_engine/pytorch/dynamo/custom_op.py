@@ -1181,6 +1181,7 @@ def _register_autograd_for_op(
         kwargs = _args_to_slots(bwd_obj, bwd_adapters)
         bwd_args_flat = [kwargs[name] for name in bwd_arg_names]
         grads = [_decode_none(g) for g in bwd_op(*bwd_args_flat)]
+        ctx.backward_objects = None
         # One grad per input schema slot: default None, but a ``Tensor[]`` slot
         # (always recorded in ``fwd_tensor_list_lengths``) needs a
         # list-shaped no-grad of matching length.
