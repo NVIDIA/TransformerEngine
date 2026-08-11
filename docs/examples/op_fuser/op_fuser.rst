@@ -154,14 +154,7 @@ arguments and the extra outputs will be returned.
 Extra tensor channels
 """""""""""""""""""""
 
-Extra inputs and Extra outputs may optionally specify a channel. Assigning
-the same channel name to an extra output and one or more later extra
-inputs routes the tensor internally within the same
-``OperationFuser``. An extra input connected to an earlier producer is
-removed from the public ``Sequential`` arguments because the channel
-supplies it.
-Extra outputs remain in the public ``Sequential`` return value,
-including outputs that are also consumed through a channel.
+Branching operations can also route their extra inputs and outputs within the same ``Sequential`` via named channels. Extra output tensors with a specified channel can be consumed by other operations, in addition to being returned from the ``Sequential``. Extra input tensors with a specified channel are accessed internally instead of being provided as arguments to ``Seqential``.
 
 With a channel, the residual block above can be expressed using one
 ``Sequential``:
