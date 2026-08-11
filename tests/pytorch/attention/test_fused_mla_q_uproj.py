@@ -14,6 +14,8 @@ import torch
 import transformer_engine.pytorch  # registers transformer_engine_torch
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.attention import FusedMLAQUpProjRopeQuant
+from transformer_engine.pytorch.attention.fused_mla_q_uproj import _FusedMLAQUpProjFunction
+from transformer_engine.pytorch.cpp_extensions import general_gemm as _fused_general_gemm
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer, MXFP8Tensor
 
 # DSv3 671B MLA dims
@@ -108,11 +110,7 @@ def _build_rope_tables(tokens: int, device: torch.device) -> tuple[torch.Tensor,
 @pytest.mark.skipif(not fused_supported, reason=reason_not_supported)
 @pytest.mark.parametrize("tokens", [256])
 def test_fused_mla_q_uproj(tokens: int) -> None:
-    """Forward numerics and x_saved properties for FusedMLAQUpProjRopeQuant.run().
-
-    Full forward+backward autograd testing (via _FusedMLAQUpProjFunction) lives in
-    Megatron-Core.
-    """
+    """Forward numerics and x_saved properties for FusedMLAQUpProjRopeQuant.run()."""
     s, b = tokens, 1
     device = torch.device("cuda")
     torch.manual_seed(SEED)
@@ -135,3 +133,87 @@ def test_fused_mla_q_uproj(tokens: int) -> None:
     assert isinstance(x_saved, MXFP8Tensor)
     assert x_saved._columnwise_data is not None, "x_saved must retain columnwise data for wgrad"
     assert x_saved._rowwise_data is None, "x_saved rowwise data should be dropped after forward"
+
+
+@pytest.mark.skipif(not fused_supported, reason=reason_not_supported)
+def test_fused_mla_q_uproj_autograd() -> None:
+    """The real autograd path must produce correct input and weight gradients."""
+    import triton
+
+    from transformer_engine.pytorch.attention.fused_mla_q_uproj import rotary_bwd_q_kernel
+
+    tokens, s, b = 256, 256, 1
+    device = torch.device("cuda")
+    torch.manual_seed(SEED)
+
+    x = torch.randn(s, b, Q_LORA_RANK, dtype=torch.bfloat16, device=device, requires_grad=True)
+    w_bf16 = torch.randn(
+        PROJ_DIM, Q_LORA_RANK, dtype=torch.bfloat16, device=device, requires_grad=True
+    )
+    w = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3, rowwise=True, columnwise=True)(w_bf16)
+    cos, sin = _build_rope_tables(tokens, device)
+    cos_flat = cos.reshape(s, -1).contiguous()
+    sin_flat = sin.reshape(s, -1).contiguous()
+    _, x_saved = FusedMLAQUpProjRopeQuant.run(
+        x.detach().reshape(tokens, Q_LORA_RANK), w.detach(), cos_flat, sin_flat, s, b
+    )
+    grad_out = torch.randn(s, b, NUM_HEADS, HEAD_DIM, dtype=torch.bfloat16, device=device)
+
+    query = _FusedMLAQUpProjFunction.apply(
+        x,
+        w,
+        cos[:, None, None, :],
+        sin[:, None, None, :],
+        None,
+        False,
+        NUM_HEADS,
+        HEAD_DIM,
+        HEAD_DIM_NOPE,
+        HEAD_DIM_ROPE,
+        s,
+        b,
+        None,
+        False,
+    )
+    assert query.requires_grad
+    assert query.grad_fn is not None
+    torch.autograd.backward(query, grad_out.clone())
+    assert x.grad is not None
+    assert w_bf16.grad is not None
+
+    dq3 = grad_out.reshape(tokens, NUM_HEADS, HEAD_DIM).clone().contiguous()
+    grid = lambda META: (tokens, triton.cdiv(NUM_HEADS, META["BLOCK_H"]))
+    rotary_bwd_q_kernel[grid](
+        dq3,
+        cos_flat,
+        sin_flat,
+        HEAD_DIM_NOPE,
+        HEAD_DIM_ROPE,
+        NUM_HEADS,
+        1,
+        None,
+        None,
+        dq3.stride(0),
+        dq3.stride(1),
+        0,
+        1,
+    )
+    dq2d = dq3.reshape(tokens, PROJ_DIM).contiguous()
+    gy_quantizer = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3, rowwise=True, columnwise=True)
+    gy_quantizer.optimize_for_gemm = True
+    gy = gy_quantizer(dq2d)
+
+    w.update_usage(rowwise_usage=True, columnwise_usage=True)
+    grad_x_ref = _fused_general_gemm(
+        w, gy, layout="NN", grad=True, out_dtype=torch.bfloat16, use_split_accumulator=True
+    )[0]
+    grad_w_ref = _fused_general_gemm(
+        x_saved,
+        gy,
+        layout="NT",
+        grad=True,
+        out_dtype=torch.bfloat16,
+        use_split_accumulator=True,
+    )[0]
+    torch.testing.assert_close(x.grad.reshape(tokens, Q_LORA_RANK), grad_x_ref, atol=0.5, rtol=0.1)
+    torch.testing.assert_close(w_bf16.grad, grad_w_ref, atol=0.5, rtol=0.1)

@@ -14,6 +14,13 @@ import torch
 import transformer_engine_torch as tex
 from packaging.version import Version as PkgVersion
 
+try:
+    import triton
+    import triton.language as tl
+except ImportError:
+    triton = None
+    tl = None
+
 from ..constants import MXFP8_BLOCK_SCALING_SIZE
 from ..distributed import get_distributed_world_size
 from ..quantized_tensor import QuantizedTensor
@@ -31,6 +38,110 @@ def _cudnn_frontend_version_supported() -> bool:
         )
     except PackageNotFoundError:
         return False
+
+
+if triton is not None:
+
+    @triton.jit
+    def _get_thd_token_idx(cu_seqlens, pid_m, seq_num, cp_rank, cp_size):
+        token_idx = -1
+        this_seq_len = 0
+        seq_idx = 0
+        last_cum_seqlen = tl.load(cu_seqlens) // cp_size
+        while seq_idx < seq_num:
+            cur_cum_seqlen = tl.load(cu_seqlens + seq_idx + 1) // cp_size
+            if token_idx == -1 and cur_cum_seqlen > pid_m:
+                token_idx = pid_m - last_cum_seqlen
+                this_seq_len = cur_cum_seqlen - last_cum_seqlen
+            last_cum_seqlen = cur_cum_seqlen
+            seq_idx += 1
+        if cp_size > 1:
+            if token_idx < this_seq_len // 2:
+                token_idx = token_idx + cp_rank * this_seq_len // 2
+            else:
+                token_idx = (token_idx - this_seq_len // 2) + (
+                    2 * cp_size - cp_rank - 1
+                ) * this_seq_len // 2
+        return token_idx
+
+    @triton.autotune(
+        configs=[
+            triton.Config({"BLOCK_H": 1}),
+            triton.Config({"BLOCK_H": 2}),
+            triton.Config({"BLOCK_H": 4}),
+            triton.Config({"BLOCK_H": 8}),
+            triton.Config({"BLOCK_H": 16}),
+            triton.Config({"BLOCK_H": 32}),
+            triton.Config({"BLOCK_H": 64}),
+            triton.Config({"BLOCK_H": 128}),
+        ],
+        key=["emb_dim", "head_num"],
+        restore_value=["DO"],
+    )
+    @triton.jit
+    def rotary_bwd_q_kernel(
+        DO,
+        COS,
+        SIN,
+        qk_head_dim,
+        emb_dim: tl.constexpr,
+        head_num: tl.constexpr,
+        batch_size,
+        seq_num,
+        cu_seqlens_q,
+        stride_x_seq,
+        stride_x_nheads,
+        cp_rank,
+        cp_size,
+        BLOCK_H: tl.constexpr,
+    ):
+        """
+        Triton kernel of the backward pass for applying YARN RoPE to MLA's query.
+        This kernel inplace modifies the input tensor DO.
+
+        Input:
+            DO: [seq_len, batch_size, head_num, qk_head_dim + emb_dim]
+                or [total_seq_len, head_num, qk_head_dim + emb_dim]
+            COS/SIN: [max_seq_len, emb_dim]
+
+            batch_size, seq_num, and cu_seqlens_q are the same as in the forward pass
+        """
+        pid_m = tl.program_id(axis=0)
+        pid_head = tl.program_id(axis=1)
+
+        if cu_seqlens_q is None:
+            token_idx = pid_m // batch_size
+        else:
+            token_idx = _get_thd_token_idx(cu_seqlens_q, pid_m, seq_num, cp_rank, cp_size)
+
+        cos_left = tl.load(COS + token_idx * emb_dim + tl.arange(0, emb_dim // 2))
+        sin_left = tl.load(SIN + token_idx * emb_dim + tl.arange(0, emb_dim // 2))
+        cos_right = tl.load(COS + token_idx * emb_dim + emb_dim // 2 + tl.arange(0, emb_dim // 2))
+        sin_right = tl.load(SIN + token_idx * emb_dim + emb_dim // 2 + tl.arange(0, emb_dim // 2))
+        cos_left = cos_left.expand_dims(0).broadcast_to(BLOCK_H, emb_dim // 2)
+        sin_left = sin_left.expand_dims(0).broadcast_to(BLOCK_H, emb_dim // 2)
+        cos_right = cos_right.expand_dims(0).broadcast_to(BLOCK_H, emb_dim // 2)
+        sin_right = sin_right.expand_dims(0).broadcast_to(BLOCK_H, emb_dim // 2)
+
+        DO = DO + pid_m * stride_x_seq + pid_head * BLOCK_H * stride_x_nheads
+
+        x_off = tl.arange(0, BLOCK_H)[:, None] * stride_x_nheads + qk_head_dim
+        mask = x_off < head_num * stride_x_nheads
+        x_left_off = x_off + tl.arange(0, emb_dim // 2)[None, :]
+        x_right_off = x_left_off + emb_dim // 2
+        x_left = tl.load(DO + x_left_off, mask=mask)
+        x_right = tl.load(DO + x_right_off, mask=mask)
+
+        x_1 = x_left * cos_left + x_right * sin_right
+        x_2 = -x_left * sin_left + x_right * cos_right
+
+        x_1_off = x_off + tl.arange(0, emb_dim // 2)[None, :] * 2
+        x_2_off = x_1_off + 1
+        tl.store(DO + x_1_off, x_1, mask=mask)
+        tl.store(DO + x_2_off, x_2, mask=mask)
+
+else:
+    rotary_bwd_q_kernel = None
 
 
 class FusedMLAQUpProjRopeQuant:
@@ -178,6 +289,9 @@ class FusedMLAQUpProjRopeQuant:
             inp_shape=x_saved.shape,
             activation_dtype=act_dtype,
             fp8=fp8,
+            # This temporary fused API always computes both projection gradients.
+            requires_dgrad=True,
+            requires_wgrad=True,
             dgrad_use_split_accumulator=_2X_ACC_DGRAD,
             wgrad_use_split_accumulator=_2X_ACC_WGRAD,
             is_weight_param_quantized=fp8,
@@ -226,4 +340,114 @@ class FusedMLAQUpProjRopeQuant:
             requires_grad=False,
             fp8_dtype=tex.DType.kFloat8E4M3,
             with_gemm_swizzled_scales=False,
+        )
+
+
+class _FusedMLAQUpProjFunction(torch.autograd.Function):
+    """Fused Q up-proj: q_normed -> (GEMM + per-head RoPE + MXFP8) -> MXFP8Tensor Q."""
+
+    @staticmethod
+    def forward(
+        ctx,
+        q_normed,  # [s, b, q_lora_rank] bf16 (post-layernorm)
+        w_q,  # [nh*q_head_dim, q_lora_rank] FP8 QuantizedTensor or bf16 (TE out×in layout)
+        cos,  # [s, 1, 1, rope_dim]
+        sin,  # [s, 1, 1, rope_dim]
+        wgrad_store,
+        fuse_wgrad_accumulation,
+        nh,
+        q_head_dim,
+        qk_head_dim,
+        qk_pos_emb_head_dim,
+        s,
+        b,
+        tp_group,  # tensor-parallel process group
+        sequence_parallel,  # True if sequence parallelism is active
+    ):
+        """Run the fused gemm + rope + mxfp8 quantization"""
+
+        tokens = s * b
+        x = q_normed.detach().reshape(tokens, -1).contiguous()
+
+        # Reshape [s, 1, 1, rope_dim] -> [s*b, rope_dim] bf16 as required by the KF kernel.
+        def _flat(t):
+            t = t.reshape(s, -1)
+            if b > 1:
+                t = t.unsqueeze(1).expand(s, b, t.shape[-1]).reshape(tokens, -1)
+            return t.to(torch.bfloat16).contiguous()
+
+        cos, sin = _flat(cos), _flat(sin)
+        query, x_saved = FusedMLAQUpProjRopeQuant.run(x, w_q.detach(), cos, sin, s, b)
+
+        ctx.save_for_backward(x_saved, w_q, cos, sin)
+        ctx.wgrad_store = wgrad_store
+        ctx.fuse_wgrad_accumulation = fuse_wgrad_accumulation
+        ctx.act_dtype = q_normed.dtype
+        ctx.dims = (nh, q_head_dim, qk_head_dim, qk_pos_emb_head_dim, s, b)
+        ctx.tp_group = tp_group
+        ctx.sequence_parallel = sequence_parallel
+        return query
+
+    @staticmethod
+    def backward(ctx, dq):
+        """Backward is unfused and matches the typical backward pass"""
+        if rotary_bwd_q_kernel is None:
+            raise RuntimeError("Fused MLA Q up-projection backward requires Triton")
+
+        x_saved, w_q, cos, sin = ctx.saved_tensors
+        nh, q_head_dim, qk_head_dim, qk_pos_emb_head_dim, s, b = ctx.dims
+        tokens = s * b
+        act_dtype = ctx.act_dtype
+
+        # --- RoPE backward (unchanged: bf16, same rotary_bwd_q_kernel as the unfused path) ---
+        dq3 = dq.reshape(tokens, nh, q_head_dim).contiguous()
+        grid = lambda META: (tokens, triton.cdiv(nh, META["BLOCK_H"]))
+        rotary_bwd_q_kernel[grid](
+            dq3,
+            cos.contiguous(),
+            sin.contiguous(),
+            qk_head_dim,
+            qk_pos_emb_head_dim,
+            nh,
+            1,
+            None,
+            None,
+            dq3.stride(0),
+            dq3.stride(1),
+            0,
+            1,
+        )
+        # grad w.r.t. the (pre-RoPE) up-proj GEMM output; bf16.
+        dq2d = dq3.reshape(tokens, nh * q_head_dim).contiguous()
+
+        # Delegate the projection backward to TE's _linear_backward (via backward_linear)
+        grad_x, ret_grad_w, _ = FusedMLAQUpProjRopeQuant.backward_linear(
+            grad_output=dq2d,
+            x_saved=x_saved,
+            w_q=w_q,
+            act_dtype=act_dtype,
+            wgrad_store=ctx.wgrad_store,
+            fuse_wgrad_accumulation=ctx.fuse_wgrad_accumulation,
+            tp_group=ctx.tp_group,
+            sequence_parallel=ctx.sequence_parallel,
+        )
+        grad_x = grad_x.reshape(s, b, -1)
+
+        # grads for: q_normed, w_q, cos, sin, then 10 non-tensor args
+        # (including tp_group, sequence_parallel)
+        return (
+            grad_x,
+            ret_grad_w,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
         )
