@@ -5,6 +5,7 @@
 """Utility functions for Transformer Engine modules"""
 from __future__ import annotations
 import functools
+import logging
 import math
 import os
 import warnings
@@ -41,6 +42,9 @@ def record_compile_disabled(reason: str) -> None:
     global _compile_disabled_reason  # pylint: disable=global-statement
     if _compile_disabled_reason is None:
         _compile_disabled_reason = reason
+        logging.getLogger("TransformerEngine").info(
+            "torch.compile custom-op path disabled: %s", reason
+        )
 
 
 @torch._dynamo.disable  # graph-breaks cleanly so the warning actually fires
