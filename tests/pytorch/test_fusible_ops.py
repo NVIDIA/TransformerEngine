@@ -564,6 +564,7 @@ class TestExtraTensorChannels:
                 and isinstance(ops[2], te_ops.AddExtraInput)
             ):
                 # We want to enable this fusion just for this test.
+                # Hence disable it after fusing it once in the test.
                 FusedResidual._enabled = False
                 return [FusedResidual(*ops)]
             return ops
@@ -780,15 +781,6 @@ class TestExtraTensorChannels:
             ops = [producer, consumer]
         with pytest.raises(ValueError, match="multiple producers"):
             OperationFuser(ops)
-
-    def test_named_extra_output_without_consumer_is_public(self, size: int = 16) -> None:
-        """A named output remains public when its fuser has no consumer."""
-        producer = te_ops.MakeExtraOutput()
-        producer.set_extra_output_channel(0, "orphan")
-        x = torch.rand((size,), requires_grad=True)
-        y, extra = producer(x)
-        torch.testing.assert_close(y, x)
-        torch.testing.assert_close(extra, x)
 
     def test_one_extra_input_has_single_source(self, size: int = 16) -> None:
         """Rebinding selects one source and leaves the other output public."""

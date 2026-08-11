@@ -156,8 +156,8 @@ Extra tensor channels
 
 Branching operations can also route their extra inputs and outputs within
 the same ``Sequential`` via named channels. Extra output tensors with a
-specified channel can be consumed by other operations and may optionally
-be returned from the ``Sequential``. Extra input tensors with a specified
+specified channel can be consumed by later operations in the same ``Sequential``
+and may optionally be returned to the caller. Extra input tensors with a specified
 channel are accessed internally instead of being provided as arguments
 to ``Sequential``.
 
@@ -264,8 +264,7 @@ be placed in the same ``OperationFuser``.
 The following conditions apply to extra tensor channels:
 
 - Every named extra input must have a matching producer earlier in the
-  same fuser. Missing producers, backward edges, and cycles are not
-  supported. Leave an extra input unnamed when the caller should provide it.
+  same fuser. Leave an extra input unnamed when the caller should provide it.
 - An output channel name has at most one producer, but its output may
   fan out to multiple consumers.
 - A named output does not require a consumer. It is returned as a public
