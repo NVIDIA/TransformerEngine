@@ -884,12 +884,8 @@ class TestTHDKernels(unittest.TestCase):
     def test_thd_grad_correction_copies_byte_half_and_zeros_inactive_half(self):
         cu_seqlens = torch.tensor([0, 8, 20], dtype=torch.int32, device="cuda")
         grad_per_step = torch.arange(10 * 2 * 8, dtype=torch.uint8, device="cuda").view(10, 2, 8)
-        first_half_rows = torch.tensor(
-            [0, 1, 2, 3, 8, 9, 10, 11, 12, 13], device="cuda"
-        )
-        second_half_rows = torch.tensor(
-            [4, 5, 6, 7, 14, 15, 16, 17, 18, 19], device="cuda"
-        )
+        first_half_rows = torch.tensor([0, 1, 2, 3, 8, 9, 10, 11, 12, 13], device="cuda")
+        second_half_rows = torch.tensor([4, 5, 6, 7, 14, 15, 16, 17, 18, 19], device="cuda")
 
         grad = torch.full((20, 2, 8), 255, dtype=torch.uint8, device="cuda")
         tex.thd_grad_correction(grad, grad_per_step, cu_seqlens, "copy", "zero")
