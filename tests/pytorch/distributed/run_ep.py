@@ -282,8 +282,8 @@ class TestEP(unittest.TestCase):
         )
         combine = te_ops.Combine(buffer, num_local_tokens=TOKENS_PER_RANK)
 
-        dispatch.set_extra_output_channel(0, "tokens_per_expert")
-        dispatch.set_extra_output_channel(1, "routing_weights")
+        dispatch.set_extra_output_channel(0, "tokens_per_expert", output_to_caller=False)
+        dispatch.set_extra_output_channel(1, "routing_weights", output_to_caller=False)
         fc1.set_extra_input_channel(0, "tokens_per_expert")
         activation.set_extra_input_channel(0, "routing_weights")
         fc2.set_extra_input_channel(0, "tokens_per_expert")
@@ -515,12 +515,12 @@ class TestEP(unittest.TestCase):
         fused_topk_weights = topk_weights.detach().clone().requires_grad_(True)
         unfused_topk_weights = topk_weights.detach().clone().requires_grad_(True)
 
-        fused_out, fused_counts, fused_recv_weights = fused(
+        fused_out = fused(
             fused_tokens,
             topk_idx,
             fused_topk_weights,
         )
-        unfused_out, unfused_counts, unfused_recv_weights = unfused(
+        unfused_out = unfused(
             unfused_tokens,
             topk_idx,
             unfused_topk_weights,
@@ -533,9 +533,6 @@ class TestEP(unittest.TestCase):
         self.assertFalse(any(isinstance(op, FusedMoeEp) for op, _ in unfused_forward_ops))
         self.assertEqual(fused_out.dtype, torch.bfloat16)
         self.assertEqual(unfused_out.dtype, torch.bfloat16)
-        torch.testing.assert_close(fused_counts, unfused_counts, rtol=0, atol=0)
-        self.assertEqual(fused_recv_weights.dtype, torch.float32)
-        self.assertEqual(unfused_recv_weights.dtype, torch.float32)
 
         dy = (
             torch.randn(

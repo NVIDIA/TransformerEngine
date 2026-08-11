@@ -83,8 +83,8 @@ def test_single_rank_bf16_moe_fusion_forward_backward():
     activation = te_ops.ScaledSwiGLU()
     fc2 = te_ops.GroupedLinear(2, 4, 8, bias=False, device="cpu", dtype=torch.bfloat16)
     combine = te_ops.Combine(buffer, num_local_tokens=4)
-    dispatch.set_extra_output_channel(0, "tokens_per_expert")
-    dispatch.set_extra_output_channel(1, "routing_weights")
+    dispatch.set_extra_output_channel(0, "tokens_per_expert", output_to_caller=False)
+    dispatch.set_extra_output_channel(1, "routing_weights", output_to_caller=False)
     fc1.set_extra_input_channel(0, "tokens_per_expert")
     activation.set_extra_input_channel(0, "routing_weights")
     fc2.set_extra_input_channel(0, "tokens_per_expert")
@@ -93,14 +93,10 @@ def test_single_rank_bf16_moe_fusion_forward_backward():
     x = torch.randn(4, 8, dtype=torch.bfloat16, requires_grad=True)
     topk_idx = torch.tensor([[0], [1], [0], [1]], dtype=torch.int64)
     topk_weights = torch.ones(4, 1, dtype=torch.float32, requires_grad=True)
-    output, counts, recv_weights = model(x, topk_idx, topk_weights)
-    torch.autograd.backward(
-        (output, recv_weights),
-        (torch.ones_like(output), torch.ones_like(recv_weights)),
-    )
+    output = model(x, topk_idx, topk_weights)
+    output.backward(torch.ones_like(output))
 
     assert isinstance(model._module_groups[0]._forward_ops[0][0], FusedMoeEp)
-    assert counts.dtype is torch.int64
     assert output.dtype is torch.bfloat16
     assert x.grad.dtype is torch.bfloat16
     assert topk_weights.grad.dtype is torch.float32

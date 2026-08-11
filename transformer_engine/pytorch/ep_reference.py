@@ -297,6 +297,7 @@ def _decode_tensor(
     name: str,
     expected_shape: Tuple[int, ...],
     quantized_axis: int,
+    dtype: torch.dtype,
 ) -> torch.Tensor:
     if isinstance(tensor, BlockScaledTensor):
         if tensor.logical_shape != expected_shape:
@@ -305,19 +306,24 @@ def _decode_tensor(
             )
         if tensor.axis != _normalize_axis(quantized_axis, len(expected_shape)):
             raise ValueError(f"{name} must be block-scaled along axis {quantized_axis}")
-        return tensor.dequantize()
+        return tensor.dequantize(dtype=dtype)
 
     if tuple(tensor.shape) != expected_shape:
         raise ValueError(f"{name} shape must be {expected_shape}, got {tuple(tensor.shape)}")
     if not tensor.is_floating_point():
         raise TypeError(f"{name} must be floating point or BlockScaledTensor, got {tensor.dtype}")
-    return tensor.float()
+    return tensor.to(dtype=dtype)
 
 
-def _format_round_trip(tensor: torch.Tensor, format: MoeFormat) -> torch.Tensor:
+def _format_round_trip(
+    tensor: torch.Tensor,
+    format: MoeFormat,
+    *,
+    dtype: torch.dtype,
+) -> torch.Tensor:
     if format is MoeFormat.BF16:
-        return tensor.to(torch.bfloat16).float()
-    return quantize_blockwise(tensor, format, axis=-1).dequantize()
+        return tensor.to(torch.bfloat16).to(dtype)
+    return quantize_blockwise(tensor, format, axis=-1).dequantize(dtype=dtype)
 
 
 class MoeEpReference:
@@ -343,6 +349,7 @@ class MoeEpReference:
         apply_topk_in_fc1: bool = True,
         gate_up_clamp: Optional[float] = None,
         generate_c: bool = False,
+        compute_dtype: torch.dtype = torch.float32,
     ) -> None:
         for name, value in (
             ("num_experts", num_experts),
@@ -356,6 +363,11 @@ class MoeEpReference:
             raise ValueError(f"top_k ({top_k}) cannot exceed num_experts ({num_experts})")
         if max_tokens_per_rank is not None and max_tokens_per_rank < 0:
             raise ValueError("max_tokens_per_rank must be non-negative")
+        if compute_dtype not in (torch.float32, torch.bfloat16):
+            raise ValueError(
+                "compute_dtype must be torch.float32 or torch.bfloat16, "
+                f"got {compute_dtype}"
+            )
 
         if ep_group is None:
             ep_size, ep_rank = 1, 0
@@ -385,6 +397,7 @@ class MoeEpReference:
         self.apply_topk_in_fc1 = bool(apply_topk_in_fc1)
         self.gate_up_clamp = None if gate_up_clamp is None else abs(float(gate_up_clamp))
         self.generate_c = bool(generate_c)
+        self.compute_dtype = compute_dtype
 
         for name, fmt in (
             ("output_format", self.output_format),
@@ -405,7 +418,8 @@ class MoeEpReference:
             f"experts={self.num_experts}, local_experts={self.experts_per_rank}, "
             f"hidden={self.hidden_size}, intermediate={self.intermediate_size}, "
             f"top_k={self.top_k}, ep_rank={self.ep_rank}/{self.ep_size}, "
-            f"output={self.output_format.value}, combine={self.combine_format.value})"
+            f"output={self.output_format.value}, combine={self.combine_format.value}, "
+            f"compute_dtype={self.compute_dtype})"
         )
 
     def _collective_device(self, device: torch.device) -> torch.device:
@@ -495,7 +509,7 @@ class MoeEpReference:
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         output = torch.empty(
             (tokens.shape[0], self.hidden_size),
-            dtype=torch.float32,
+            dtype=self.compute_dtype,
             device=tokens.device,
         )
         fc1_c_rows = [] if self.generate_c else None
@@ -513,13 +527,21 @@ class MoeEpReference:
                 gate = gate.clamp(max=self.gate_up_clamp)
                 up = up.clamp(min=-self.gate_up_clamp, max=self.gate_up_clamp)
             intermediate = F.silu(gate) * up
-            weights = route_weight.index_select(0, positions).unsqueeze(-1)
+            weights = (
+                route_weight.index_select(0, positions)
+                .to(dtype=self.compute_dtype)
+                .unsqueeze(-1)
+            )
             if self.apply_topk_in_fc1:
                 intermediate = intermediate * weights
             expert_output = intermediate @ fc2_weight[expert]
             if not self.apply_topk_in_fc1:
                 expert_output = expert_output * weights
-            expert_output = _format_round_trip(expert_output, self.combine_format)
+            expert_output = _format_round_trip(
+                expert_output,
+                self.combine_format,
+                dtype=self.compute_dtype,
+            )
             output.index_copy_(0, positions, expert_output)
         fc1_c = None
         if fc1_c_rows is not None:
@@ -595,18 +617,21 @@ class MoeEpReference:
             name="activation",
             expected_shape=(token_count, self.hidden_size),
             quantized_axis=1,
+            dtype=self.compute_dtype,
         )
         fc1_float = _decode_tensor(
             fc1_weight,
             name="fc1_weight",
             expected_shape=(self.experts_per_rank, self.hidden_size, 2 * self.intermediate_size),
             quantized_axis=1,
+            dtype=self.compute_dtype,
         )
         fc2_float = _decode_tensor(
             fc2_weight,
             name="fc2_weight",
             expected_shape=(self.experts_per_rank, self.intermediate_size, self.hidden_size),
             quantized_axis=1,
+            dtype=self.compute_dtype,
         )
 
         plan = self._dispatch_plan(topk_idx, topk_weights)
@@ -649,7 +674,7 @@ class MoeEpReference:
         returned = self._all_to_all(recv_output, recv_counts, send_counts)
         combine_plane = torch.zeros(
             (token_count * self.top_k, self.hidden_size),
-            dtype=torch.float32,
+            dtype=self.compute_dtype,
             device=device,
         )
         send_flat_slot = send_token_idx * self.top_k + send_slot_idx
@@ -688,7 +713,8 @@ class MoeEpReference:
         ``grad_output`` is the ``(T, H)`` gradient of the dequantized output.
 
         Returns ``(grad_activation, grad_fc1_weight, grad_fc2_weight,
-        grad_topk_weights)`` in float32.
+        grad_topk_weights)``. Activation and expert weight gradients use
+        ``compute_dtype``; router-weight gradients remain float32.
         """
 
         if not self.generate_c:
@@ -711,18 +737,21 @@ class MoeEpReference:
             name="activation",
             expected_shape=(token_count, self.hidden_size),
             quantized_axis=1,
+            dtype=self.compute_dtype,
         )
         fc1_float = _decode_tensor(
             fc1_weight,
             name="fc1_weight",
             expected_shape=(self.experts_per_rank, self.hidden_size, two_i),
             quantized_axis=1,
+            dtype=self.compute_dtype,
         )
         fc2_float = _decode_tensor(
             fc2_weight,
             name="fc2_weight",
             expected_shape=(self.experts_per_rank, self.intermediate_size, self.hidden_size),
             quantized_axis=1,
+            dtype=self.compute_dtype,
         )
         if fc1_c.shape != (int(route_metadata.shape[0]), two_i):
             raise ValueError(
@@ -734,7 +763,7 @@ class MoeEpReference:
         # along the identical forward routes.
         plan = self._dispatch_plan(topk_idx, topk_weights)
         send_counts, recv_counts = plan.send_counts, plan.recv_counts
-        grad_output_float = grad_output.float()
+        grad_output_float = grad_output.to(dtype=self.compute_dtype)
         recv_tokens = self._all_to_all(
             activation_float.index_select(0, plan.send_token_idx), send_counts, recv_counts
         )
@@ -761,9 +790,13 @@ class MoeEpReference:
         dy_rows = torch.empty_like(recv_grad)
         dy_rows.index_copy_(0, perm, recv_grad)
 
-        c_rows = fc1_c.float()
+        c_rows = fc1_c.to(dtype=self.compute_dtype)
         expert_rows = metadata[:, 0]
-        d_x_rows = torch.zeros((local_routes, self.hidden_size), dtype=torch.float32, device=device)
+        d_x_rows = torch.zeros(
+            (local_routes, self.hidden_size),
+            dtype=self.compute_dtype,
+            device=device,
+        )
         d_w_rows = torch.zeros((local_routes,), dtype=torch.float32, device=device)
         grad_fc1 = torch.zeros_like(fc1_float)
         grad_fc2 = torch.zeros_like(fc2_float)
@@ -773,7 +806,11 @@ class MoeEpReference:
                 continue
             c = c_rows.index_select(0, positions)
             x = x_rows.index_select(0, positions)
-            w = w_rows.index_select(0, positions).unsqueeze(-1)
+            w = (
+                w_rows.index_select(0, positions)
+                .to(dtype=self.compute_dtype)
+                .unsqueeze(-1)
+            )
             d_y = dy_rows.index_select(0, positions)
 
             gate, up = c.split(self.intermediate_size, dim=-1)
@@ -796,10 +833,12 @@ class MoeEpReference:
             d_h_fc2 = d_y_pre @ fc2_float[expert].transpose(0, 1)
             if self.apply_topk_in_fc1:
                 d_h = d_h_fc2 * w
-                d_w_rows[positions] = (d_h_fc2 * h).sum(dim=-1)
+                d_w_rows[positions] = (d_h_fc2 * h).sum(dim=-1).float()
             else:
                 d_h = d_h_fc2
-                d_w_rows[positions] = (d_y * (h @ fc2_float[expert])).sum(dim=-1)
+                d_w_rows[positions] = (
+                    d_y * (h @ fc2_float[expert])
+                ).sum(dim=-1).float()
 
             d_g = d_h * u * (sig * (1 + g * (1 - sig)))
             d_u = d_h * s
@@ -816,7 +855,9 @@ class MoeEpReference:
         returned_dx = self._all_to_all(d_x_rows.index_select(0, perm), recv_counts, send_counts)
         returned_dw = self._all_to_all(d_w_rows.index_select(0, perm), recv_counts, send_counts)
         grad_activation = torch.zeros(
-            (token_count, self.hidden_size), dtype=torch.float32, device=device
+            (token_count, self.hidden_size),
+            dtype=self.compute_dtype,
+            device=device,
         )
         grad_activation.index_add_(0, plan.send_token_idx, returned_dx)
         grad_topk_weights = torch.zeros(

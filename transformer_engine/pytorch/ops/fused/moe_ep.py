@@ -123,7 +123,7 @@ class FusedMoeEp(FusedOperation):
         prev_op_grad_output_quantizer: Optional[Quantizer],
         next_op_input_quantizer: Optional[Quantizer],
         basic_op_kwargs: list[dict[str, Any]],
-    ) -> tuple[torch.Tensor, Sequence[Sequence[torch.Tensor]]]:
+    ) -> tuple[torch.Tensor, Sequence[Sequence[Optional[torch.Tensor]]]]:
         del prev_op_grad_output_quantizer, next_op_input_quantizer
         if input_.dtype is not torch.bfloat16:
             raise NotImplementedError(f"FusedMoeEp requires BF16 input, got {input_.dtype}.")
@@ -135,13 +135,12 @@ class FusedMoeEp(FusedOperation):
             raise TypeError(f"topk_weights must be float32, got {topk_weights.dtype}.")
         fc1_weight = _reference_weights(self.fc1)
         fc2_weight = _reference_weights(self.fc2)
-        output, fc1_c, route_metadata, tokens_per_expert, recv_topk_weights = self._reference(
+        output, fc1_c, route_metadata = self._reference(
             input_,
             fc1_weight,
             fc2_weight,
             topk_idx,
             topk_weights,
-            return_dispatch_metadata=True,
         )
 
         if any(ctx.requires_grad for ctx in basic_op_ctxs):
@@ -155,8 +154,10 @@ class FusedMoeEp(FusedOperation):
                 route_metadata,
             )
 
+        # Dispatch extras are channel-bound with output_to_caller=False and are
+        # only consumed by ops inside this fusion, so they need not be materialized.
         return output, [
-            (tokens_per_expert, recv_topk_weights),
+            (None, None),
             (),
             (),
             (),
@@ -174,6 +175,7 @@ class FusedMoeEp(FusedOperation):
         Iterable[Iterable[Optional[torch.Tensor]]],
         Iterable[Iterable[Optional[torch.Tensor]]],
     ]:
+        del basic_op_grad_extra_outputs
         (
             input_,
             fc1_weight,
@@ -183,7 +185,6 @@ class FusedMoeEp(FusedOperation):
             fc1_c,
             route_metadata,
         ) = basic_op_ctxs[0].saved_tensors
-        grad_recv_topk_weights = basic_op_grad_extra_outputs[0][1]
         grad_input, grad_fc1, grad_fc2, grad_topk_weights = self._reference.backward(
             grad_output,
             input_,
@@ -193,7 +194,6 @@ class FusedMoeEp(FusedOperation):
             topk_weights,
             fc1_c,
             route_metadata,
-            grad_recv_topk_weights=grad_recv_topk_weights,
         )
 
         fc1_param_grads = [
