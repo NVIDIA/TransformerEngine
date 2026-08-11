@@ -1693,8 +1693,6 @@ def should_pad_qkv_head_dim(
     if not native_use_unfused_attention:
         result = False
     else:
-        # Probe on a copy so the caller's `attention_params` are never mutated, even if
-        # `get_attention_backend` raises.
         padded_head_dim = max(attention_params.head_dim_qk, attention_params.head_dim_v)
         padded_params = replace(
             attention_params,
@@ -1705,8 +1703,8 @@ def should_pad_qkv_head_dim(
         padded_use_flash_attention = padded_backend[0]
         padded_use_fused_attention = padded_backend[2]
         result = bool(padded_use_flash_attention or padded_use_fused_attention)
-    # Store a shallow copy as the key: the caller pads `attention_params` in place after this
-    # returns, so storing the live object would make every subsequent call a miss.
+    # Store a shallow copy as the key to avoid later `attention_params` in-place modifications
+    # resulting in subsequent cache misses.
     _should_pad_qkv_head_dim_cache["attention_params"] = replace(attention_params)
     _should_pad_qkv_head_dim_cache["result"] = result
     return result

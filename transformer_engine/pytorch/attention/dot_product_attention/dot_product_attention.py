@@ -2062,11 +2062,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                 has_score_mod_bprop=score_mod_bprop is not None,
             )
 
-            # Optional MLA head-dim pad: padding Q/K/V to a common (the wider) head dim can upgrade
-            # the selected backend off the slow `UnfusedDotProductAttention` for certain setups.
-            # Probe both shapes and pad only when padding escapes the unfused path (and leaving the
-            # dims native would land on the unfused path). The pad-then-trim is an identity, so this
-            # never changes the result, only which kernel runs.
+            # Optionally pad inputs when it leads to faster kernel selection.
             qkv_head_pad = False
             orig_head_dim_v = head_dim_v
             orig_qk_dim = None
@@ -2074,7 +2070,6 @@ class DotProductAttention(TransformerEngineBaseModule):
             if _should_pad_qkv_head_dim(
                 head_dim_qk, head_dim_v, value_layer, qkv_layer, kv_layer, attention_params
             ):
-                # Pad Q/K/V to the wider head dim so a fused backend can run.
                 query_layer, key_layer, value_layer, _, _ = _pad_qkv_head_dim(
                     query_layer, key_layer, value_layer
                 )
@@ -2348,10 +2343,8 @@ class DotProductAttention(TransformerEngineBaseModule):
                         fp8_output=fp8_output,
                     )
             else:
-                attn_out = None
+                return None
 
-            if attn_out is not None and (
-                orig_qk_dim is not None and orig_qk_dim > orig_v_dim or qkv_head_pad
-            ):
+            if orig_qk_dim is not None and orig_qk_dim > orig_v_dim or qkv_head_pad:
                 attn_out = _trim_output(attn_out, num_attention_heads, head_dim_qk, orig_head_dim_v)
             return attn_out
