@@ -42,6 +42,12 @@ struct CopyFunctor {
   }
 };
 
+struct ZeroFunctor {
+  __forceinline__ __device__ static void run(void *token, void *token_per_step, int idx) {
+    reinterpret_cast<float4 *>(token)[idx] = make_float4(0.f, 0.f, 0.f, 0.f);
+  }
+};
+
 template <typename dtype>
 struct AddFunctor {
   __forceinline__ __device__ static void run(dtype *token, dtype *token_per_step, int idx) {
@@ -357,24 +363,27 @@ __global__ void thd_grad_correction_kernel(dtype *grad, dtype *grad_per_step, in
   for (int token_id = group_id; token_id < num_total_tokens; token_id += num_groups) {
     int seq_id = binary_search(token_id, cu_seqlens_s, batch + 1);
 
-    int token_offset;
-    bool is_first_half;
     if constexpr (functor_idx < 2) {
-      token_offset = cu_seqlens_s[seq_id + functor_idx];
-      is_first_half = (functor_idx == 0);
+      dtype *first_half_token =
+          &grad[(token_id + cu_seqlens_s[seq_id]) * static_cast<size_t>(hidden_size)];
+      dtype *second_half_token =
+          &grad[(token_id + cu_seqlens_s[seq_id + 1]) * static_cast<size_t>(hidden_size)];
+      dtype *token_per_step = &grad_per_step[token_id * static_cast<size_t>(hidden_size)];
+      for (int idx = lane_id; idx < num_inner_loops; idx += group_size) {
+        Functor_0::run(first_half_token, token_per_step, idx);
+        Functor_1::run(second_half_token, token_per_step, idx);
+      }
     } else {
-      token_offset = 0;
       int len = cu_seqlens_s[seq_id + 1] - cu_seqlens_s[seq_id];
-      is_first_half = (token_id - cu_seqlens_s[seq_id]) < (len / 2);
-    }
-
-    dtype *token = &grad[(token_id + token_offset) * static_cast<size_t>(hidden_size)];
-    dtype *token_per_step = &grad_per_step[token_id * static_cast<size_t>(hidden_size)];
-    for (int idx = lane_id; idx < num_inner_loops; idx += group_size) {
-      if (is_first_half) {
-        Functor_0::run(token, token_per_step, idx);
-      } else {
-        Functor_1::run(token, token_per_step, idx);
+      bool is_first_half = (token_id - cu_seqlens_s[seq_id]) < (len / 2);
+      dtype *token = &grad[token_id * static_cast<size_t>(hidden_size)];
+      dtype *token_per_step = &grad_per_step[token_id * static_cast<size_t>(hidden_size)];
+      for (int idx = lane_id; idx < num_inner_loops; idx += group_size) {
+        if (is_first_half) {
+          Functor_0::run(token, token_per_step, idx);
+        } else {
+          Functor_1::run(token, token_per_step, idx);
+        }
       }
     }
   }
@@ -707,6 +716,12 @@ static void thd_grad_dispatcher(Tensor grad, const Tensor &grad_per_step, const 
   } else if (first_half == "none" && second_half == "copy") {
     thd_grad_correction_helper<dtype, EmptyFunctor, CopyFunctor, 1>(grad, grad_per_step, cu_seqlens,
                                                                     stream);
+  } else if (first_half == "copy" && second_half == "zero") {
+    thd_grad_correction_helper<dtype, CopyFunctor, ZeroFunctor, 0>(grad, grad_per_step, cu_seqlens,
+                                                                   stream);
+  } else if (first_half == "zero" && second_half == "copy") {
+    thd_grad_correction_helper<dtype, ZeroFunctor, CopyFunctor, 1>(grad, grad_per_step, cu_seqlens,
+                                                                   stream);
   } else if (first_half == "add" && second_half == "copy") {
     thd_grad_correction_helper<dtype, AddFunctor<dtype>, CopyFunctor, 2>(grad, grad_per_step,
                                                                          cu_seqlens, stream);
@@ -722,6 +737,18 @@ void thd_grad_correction(Tensor grad, const Tensor &grad_per_step, const Tensor 
                          const std::string &first_half, const std::string &second_half,
                          cudaStream_t stream) {
   using namespace transformer_engine;
+  if (grad.dtype() == DType::kByte) {
+    if (first_half == "copy" && second_half == "zero") {
+      thd_grad_correction_helper<byte, CopyFunctor, ZeroFunctor, 0>(grad, grad_per_step, cu_seqlens,
+                                                                    stream);
+    } else if (first_half == "zero" && second_half == "copy") {
+      thd_grad_correction_helper<byte, ZeroFunctor, CopyFunctor, 1>(grad, grad_per_step, cu_seqlens,
+                                                                    stream);
+    } else {
+      NVTE_ERROR("Byte gradients require copy/zero or zero/copy correction\n");
+    }
+    return;
+  }
   TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
       grad.dtype(), dtype,
       thd_grad_dispatcher<dtype>(grad, grad_per_step, cu_seqlens, first_half, second_half,

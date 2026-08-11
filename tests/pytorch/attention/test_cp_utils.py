@@ -881,6 +881,26 @@ class TestTHDKernels(unittest.TestCase):
             torch.equal(kv_second, torch.stack([expected_second, expected_second + 128]))
         )
 
+    def test_thd_grad_correction_copies_byte_half_and_zeros_inactive_half(self):
+        cu_seqlens = torch.tensor([0, 8, 20], dtype=torch.int32, device="cuda")
+        grad_per_step = torch.arange(10 * 2 * 8, dtype=torch.uint8, device="cuda").view(10, 2, 8)
+        first_half_rows = torch.tensor(
+            [0, 1, 2, 3, 8, 9, 10, 11, 12, 13], device="cuda"
+        )
+        second_half_rows = torch.tensor(
+            [4, 5, 6, 7, 14, 15, 16, 17, 18, 19], device="cuda"
+        )
+
+        grad = torch.full((20, 2, 8), 255, dtype=torch.uint8, device="cuda")
+        tex.thd_grad_correction(grad, grad_per_step, cu_seqlens, "copy", "zero")
+        self.assertTrue(torch.equal(grad[first_half_rows], grad_per_step))
+        self.assertEqual(torch.count_nonzero(grad[second_half_rows]).item(), 0)
+
+        grad.fill_(255)
+        tex.thd_grad_correction(grad, grad_per_step, cu_seqlens, "zero", "copy")
+        self.assertEqual(torch.count_nonzero(grad[first_half_rows]).item(), 0)
+        self.assertTrue(torch.equal(grad[second_half_rows], grad_per_step))
+
     def test_thd_read_second_half_lse_handles_packed_and_batch_major_lse(self):
         cu_seqlens = torch.tensor([0, 8, 16], dtype=torch.int32, device="cuda")
         lse = torch.arange(2 * 2 * 8, dtype=torch.float32, device="cuda").view(2, 2, 8)

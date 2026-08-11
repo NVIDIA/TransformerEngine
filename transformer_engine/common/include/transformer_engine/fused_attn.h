@@ -509,9 +509,11 @@ void nvte_cp_thd_out_correction(NVTETensor out, const NVTETensor &out_per_step,
  *  \param[out]    grad                Output tensor.
  *  \param[in]     grad_per_step       THD format gradient of context parallelism.
  *  \param[in]     cu_seqlens          Cumulative sequence lengths, [batch_size + 1].
- *  \param[in]     first_half          One of ("add", "copy", "none") correction op for first half.
- *  \param[in]     second_half         One of ("add", "copy", "none") correction op for second half.
-                                       Must be different from first_half.
+ *  \param[in]     first_half          One of ("add", "copy", "none", "zero") correction op for
+ *                                     first half.
+ *  \param[in]     second_half         One of ("add", "copy", "none", "zero") correction op for
+ *                                     second half. Byte gradients support copy/zero pairs only.
+ *                                     Must be different from first_half.
  *  \param[in]     stream              CUDA stream used for this operation.
  */
 void nvte_cp_thd_grad_correction(NVTETensor grad, const NVTETensor &grad_per_step,
