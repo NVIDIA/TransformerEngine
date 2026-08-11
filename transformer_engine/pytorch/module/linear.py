@@ -786,7 +786,6 @@ def _linear_setup_ctx(
     return (saved_inputmat, wt_save, saved_weight, saved_bias)
 
 
-
 def _linear_backward(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None], ...]:
     """Backward implementation for the linear layer.
 
