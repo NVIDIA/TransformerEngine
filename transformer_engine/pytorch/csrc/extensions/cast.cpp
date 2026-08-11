@@ -1001,9 +1001,6 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
   const auto columnwise_usage = quantizer_cpp_list[0]->columnwise_usage;
   if (row_scaled_nvfp4) {
     NVTE_CHECK(rowwise_usage, "Row-scaled NVFP4 bulk allocation requires rowwise usage.");
-    // Columnwise (transpose) output is supported for row-scaled NVFP4: the
-    // columnwise amax is sized per-column below so the per-expert dense cast can
-    // emit the row-scaled transpose consumed by the wgrad GEMM.
   }
   const auto scaling_mode = quantizer_cpp_list[0]->get_scaling_mode();
   const auto fp4_dtype = quantizer_cpp_list[0]->dtype;

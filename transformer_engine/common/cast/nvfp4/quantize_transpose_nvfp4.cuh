@@ -99,7 +99,6 @@ __launch_bounds__(BLOCK_SIZE)
 #endif
 }
 
-// This is a general amax reduction, so it is not restricted to SM 10.0+.
 template <typename IType, int BLOCK_SIZE>
 __global__ void __launch_bounds__(BLOCK_SIZE)
     compute_columnwise_amax_kernel(const int num_rows, const int num_cols,
