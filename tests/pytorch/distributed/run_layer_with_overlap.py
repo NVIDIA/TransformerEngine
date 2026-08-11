@@ -580,9 +580,11 @@ def _train(opts):
         if opts.compile and opts.compile_mode == "reduce-overhead":
             # Warm up so the measured run below replays captured CUDA graphs.
             for _ in range(2):
+                torch.compiler.cudagraph_mark_step_begin()
                 run_fwd_bwd(test_model, test_x)
-            test_model.zero_grad(set_to_none=True)
-            test_x.grad = None
+                test_model.zero_grad(set_to_none=True)
+                test_x.grad = None
+            torch.compiler.cudagraph_mark_step_begin()
         test_out = run_fwd_bwd(test_model, test_x)
         if opts.compile and opts.compile_mode == "reduce-overhead" and dynamo_counters is not None:
             skips = dynamo_counters["inductor"]["cudagraph_skips"]
