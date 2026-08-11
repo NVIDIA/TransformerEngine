@@ -365,8 +365,7 @@ class MoeEpReference:
             raise ValueError("max_tokens_per_rank must be non-negative")
         if compute_dtype not in (torch.float32, torch.bfloat16):
             raise ValueError(
-                "compute_dtype must be torch.float32 or torch.bfloat16, "
-                f"got {compute_dtype}"
+                f"compute_dtype must be torch.float32 or torch.bfloat16, got {compute_dtype}"
             )
 
         if ep_group is None:
@@ -832,16 +831,11 @@ class MoeEpReference:
             d_h_fc2 = d_y_pre @ fc2_float[expert].transpose(0, 1)
             if self.apply_topk_in_fc1:
                 d_h = d_h_fc2 * w
-                d_w_rows[positions] = (
-                    (d_h_fc2 * h).sum(dim=-1).to(dtype=self.compute_dtype).float()
-                )
+                d_w_rows[positions] = (d_h_fc2 * h).sum(dim=-1).to(dtype=self.compute_dtype).float()
             else:
                 d_h = d_h_fc2
                 d_w_rows[positions] = (
-                    (d_y * (h @ fc2_float[expert]))
-                    .sum(dim=-1)
-                    .to(dtype=self.compute_dtype)
-                    .float()
+                    (d_y * (h @ fc2_float[expert])).sum(dim=-1).to(dtype=self.compute_dtype).float()
                 )
 
             d_g = d_h * u * (sig * (1 + g * (1 - sig)))

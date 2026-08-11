@@ -289,12 +289,8 @@ class TestEP(unittest.TestCase):
         )
         combine = te_ops.Combine(buffer, num_local_tokens=TOKENS_PER_RANK)
 
-        dispatch.set_extra_output_channel(
-            0, "tokens_per_expert", output_to_caller=not fuse_ops
-        )
-        dispatch.set_extra_output_channel(
-            1, "routing_weights", output_to_caller=not fuse_ops
-        )
+        dispatch.set_extra_output_channel(0, "tokens_per_expert", output_to_caller=not fuse_ops)
+        dispatch.set_extra_output_channel(1, "routing_weights", output_to_caller=not fuse_ops)
         fc1.set_extra_input_channel(0, "tokens_per_expert")
         activation.set_extra_input_channel(0, "routing_weights")
         fc2.set_extra_input_channel(0, "tokens_per_expert")
