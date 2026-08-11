@@ -2069,6 +2069,8 @@ class DotProductAttention(TransformerEngineBaseModule):
             # never changes the result, only which kernel runs.
             qkv_head_pad = False
             orig_head_dim_v = head_dim_v
+            orig_qk_dim = None
+            orig_v_dim = None
             if _should_pad_qkv_head_dim(
                 head_dim_qk, head_dim_v, value_layer, qkv_layer, kv_layer, attention_params
             ):
@@ -2199,13 +2201,8 @@ class DotProductAttention(TransformerEngineBaseModule):
                     cu_seqlens_q_padded=cu_seqlens_q_padded,
                     cu_seqlens_kv_padded=cu_seqlens_kv_padded,
                 )
-                if (orig_qk_dim is not None and orig_qk_dim > orig_v_dim) or qkv_head_pad:
-                    attn_out = _trim_output(
-                        attn_out, num_attention_heads, head_dim_qk, orig_head_dim_v
-                    )
-                return attn_out
 
-            if use_fused_attention:
+            elif use_fused_attention:
                 fu_core_attention_bias_type = core_attention_bias_type
                 fu_core_attention_bias = core_attention_bias
                 if core_attention_bias_type == "alibi" and (alibi_slopes is not None):
@@ -2294,13 +2291,8 @@ class DotProductAttention(TransformerEngineBaseModule):
                         packed_kv=kv_layer,
                         bf16_backward=bf16_backward,
                     )
-                if qkv_head_pad:
-                    attn_out = _trim_output(
-                        attn_out, num_attention_heads, head_dim_qk, orig_head_dim_v
-                    )
-                return attn_out
 
-            if use_unfused_attention:
+            elif use_unfused_attention:
                 allow_emulation = (
                     os.getenv("NVTE_UnfusedDPA_Emulate_FP8", "0") == "1" or is_in_onnx_export_mode()
                 )
@@ -2355,9 +2347,11 @@ class DotProductAttention(TransformerEngineBaseModule):
                         quantizers=self.quantizers,
                         fp8_output=fp8_output,
                     )
-                if qkv_head_pad:
-                    attn_out = _trim_output(
-                        attn_out, num_attention_heads, head_dim_qk, orig_head_dim_v
-                    )
-                return attn_out
-            return None
+            else:
+                attn_out = None
+
+            if attn_out is not None and (
+                orig_qk_dim is not None and orig_qk_dim > orig_v_dim or qkv_head_pad
+            ):
+                attn_out = _trim_output(attn_out, num_attention_heads, head_dim_qk, orig_head_dim_v)
+            return attn_out
