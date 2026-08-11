@@ -176,7 +176,7 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
                     if (
                         set_output_requires_grad
                         and idx >= fuser.first_op_requiring_backward
-                        and (y.is_floating_point() or y.is_complex())
+                        and y.is_floating_point()
                     ):
                         y.requires_grad_(True)
                 extra_outputs[idx] = ys
