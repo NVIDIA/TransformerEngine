@@ -283,10 +283,10 @@ The following conditions apply to extra tensor channels:
   internal. Removing a channel binding with ``channel=None`` restores that
   output as public.
 - Channel bindings are captured when an ``OperationFuser`` (or the
-  fusers inside a ``Sequential``) is constructed. Rebinding a channel with
-  ``set_extra_input_channel`` / ``set_extra_output_channel`` afterward
-  invalidates any fuser that captured it, so a new ``OperationFuser`` or
-  ``Sequential`` must be constructed before the next forward pass.
+  fusers inside a ``Sequential``) is constructed, which locks them.
+  Later ``set_extra_input_channel`` / ``set_extra_output_channel`` calls
+  raise an error, so different routing requires constructing new
+  operations.
 
 Channel-connected basic operations may still be replaced by registered
 ``FusedOperation`` implementations. If a fused operation contains both

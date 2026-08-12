@@ -432,11 +432,6 @@ class OperationFuser:
                 basic_ops.append(op)
         self._num_basic_ops: int = len(basic_ops)
         self._basic_ops: list[BasicOperation] = basic_ops
-        # Capture channel routing from each basic op. If any op later rebinds a
-        # channel it flips this flag, essentially invalidating this fuser's forward pass.
-        self._channels_stale: bool = False
-        for op in self._basic_ops:
-            op._capturing_op_fusers.add(self)
 
         # Number of extra tensor inputs
         self._basic_op_num_extra_inputs: list[int] = list(op.num_extra_inputs for op in basic_ops)
@@ -530,6 +525,11 @@ class OperationFuser:
         # Used by Sequential to determine the number of extra inputs
         # needed for each OperationFuser module in the sequence.
         self.num_extra_inputs = len(self._external_extra_input_slots)
+
+        # This fuser's routing is derived from the channel bindings above, so
+        # freeze them. Changing them requires constructing new operations.
+        for op in self._basic_ops:
+            op._lock_extra_tensor_channels()
 
         # Ops for forward and backward pass, will be populated in maybe_fuse_ops
         self._forward_ops: list[tuple[FusibleOperation, list[int]]]
@@ -694,11 +694,6 @@ class OperationFuser:
         *extra_inputs: torch.Tensor,
         basic_op_kwargs: Optional[list[dict[str, Any]]] = None,
     ) -> torch.Tensor | tuple[torch.Tensor, ...]:
-        if self._channels_stale:
-            raise RuntimeError(
-                "Extra tensor channels changed after this OperationFuser captured "
-                "its routing. Construct a new OperationFuser."
-            )
 
         # Verify extra input count
         if len(extra_inputs) != self.num_extra_inputs:

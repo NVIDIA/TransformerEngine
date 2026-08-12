@@ -10,7 +10,6 @@ from collections.abc import Iterable, Sequence
 import dataclasses
 import pickle
 from typing import Any, Optional
-import weakref
 
 import torch
 
@@ -195,37 +194,26 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         self._extra_input_channels: list[Optional[str]] = [None] * self.num_extra_inputs
         self._extra_output_channels: list[Optional[str]] = [None] * self.num_extra_outputs
         self._extra_output_to_caller: list[bool] = [True] * self.num_extra_outputs
-        # OperationFusers that have captured this op's channel routing. Weak
-        # refs avoid cycles and drop automatically when a fuser is discarded.
-        self._capturing_op_fusers: weakref.WeakSet = weakref.WeakSet()
+        # Channel routing is captured by an OperationFuser when it is
+        # constructed, so it is frozen once that happens.
+        self._extra_tensor_channels_locked: bool = False
 
         # Objects for quantization
         self._fp8_metas: Optional[dict[str, dict[str, Any]]] = None
         self._quantizers: Optional[dict[str, list[Quantizer]]] = None
 
-    def __getstate__(self):
-        # weakref.WeakSet is not picklable (even when empty). Drop it so
-        # torch.save(model) / pickle of modules containing TE ops still work.
-        # Capturing fusers are runtime bookkeeping and are reattached on the
-        # next fuse after load.
-        state = super().__getstate__()
-        state.pop("_capturing_op_fusers", None)
-        return state
+    def _lock_extra_tensor_channels(self) -> None:
+        """Freeze channel routing after an OperationFuser has captured it."""
+        self._extra_tensor_channels_locked = True
 
-    def __setstate__(self, state):
-        super().__setstate__(state)
-        self._capturing_op_fusers = weakref.WeakSet()
-
-    def _invalidate_capturing_op_fusers(self) -> None:
-        """Mark fusers that captured this op's channels as stale.
-
-        Channel routing is cheap to change, but any OperationFuser that
-        already captured it must be rebuilt. Flipping a flag here keeps the
-        per-call check O(1) instead of rescanning versions every forward.
-        """
-        for fuser in self._capturing_op_fusers:
-            fuser._channels_stale = True
-        self._capturing_op_fusers.clear()
+    def _check_extra_tensor_channels_unlocked(self) -> None:
+        """Reject channel rebinding after an OperationFuser has captured it."""
+        if self._extra_tensor_channels_locked:
+            raise RuntimeError(
+                f"Cannot change extra tensor channels of {type(self).__name__} because an "
+                "OperationFuser has already captured its channel routing. Construct new "
+                "operations, bind their channels, and build a new OperationFuser or Sequential."
+            )
 
     def set_extra_input_channel(self, index: int, channel: Optional[str]) -> BasicOperation:
         """Bind an extra input slot to an internal fuser channel.
@@ -233,6 +221,9 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         A bound slot receives the matching extra output from an earlier
         operation in the same fuser instead of consuming a public extra input.
         Passing ``None`` removes the binding.
+
+        Channels must be bound before an ``OperationFuser`` or ``Sequential``
+        captures them, i.e. before the first forward pass.
         """
         if not 0 <= index < self.num_extra_inputs:
             raise IndexError(
@@ -241,10 +232,8 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
             )
         if channel is not None and (not isinstance(channel, str) or not channel):
             raise ValueError("Extra input channel must be a non-empty string or None")
-        if self._extra_input_channels[index] == channel:
-            return self
+        self._check_extra_tensor_channels_unlocked()
         self._extra_input_channels[index] = channel
-        self._invalidate_capturing_op_fusers()
         return self
 
     def set_extra_output_channel(
@@ -260,6 +249,9 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         output is also returned to the caller. Set ``output_to_caller=False``
         to keep it internal to the fuser. Passing ``channel=None`` removes the
         binding and restores the output as public.
+
+        Channels must be bound before an ``OperationFuser`` or ``Sequential``
+        captures them, i.e. before the first forward pass.
         """
         if not 0 <= index < self.num_extra_outputs:
             raise IndexError(
@@ -272,14 +264,9 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
             raise TypeError("output_to_caller must be a bool")
         if channel is None:
             output_to_caller = True
-        if (
-            self._extra_output_channels[index] == channel
-            and self._extra_output_to_caller[index] == output_to_caller
-        ):
-            return self
+        self._check_extra_tensor_channels_unlocked()
         self._extra_output_channels[index] = channel
         self._extra_output_to_caller[index] = output_to_caller
-        self._invalidate_capturing_op_fusers()
         return self
 
     @property
