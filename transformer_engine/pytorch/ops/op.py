@@ -195,7 +195,8 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         self._extra_output_channels: list[Optional[str]] = [None] * self.num_extra_outputs
         self._extra_output_to_caller: list[bool] = [True] * self.num_extra_outputs
         # Channel routing is captured by an OperationFuser when it is
-        # constructed, so it is frozen once that happens.
+        # constructed (including the transient fuser created by a
+        # standalone op(x) call), so it is frozen once that happens.
         self._extra_tensor_channels_locked: bool = False
 
         # Objects for quantization
@@ -222,8 +223,10 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         operation in the same fuser instead of consuming a public extra input.
         Passing ``None`` removes the binding.
 
-        Channels must be bound before an ``OperationFuser`` or ``Sequential``
-        captures them, i.e. before the first forward pass.
+        Channels must be bound before any ``OperationFuser`` captures
+        them. That includes constructing an ``OperationFuser`` or
+        ``Sequential``, and also calling the op directly (``op(x)``),
+        which builds a transient fuser and locks channels permanently.
         """
         if not 0 <= index < self.num_extra_inputs:
             raise IndexError(
@@ -250,8 +253,10 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         to keep it internal to the fuser. Passing ``channel=None`` removes the
         binding and restores the output as public.
 
-        Channels must be bound before an ``OperationFuser`` or ``Sequential``
-        captures them, i.e. before the first forward pass.
+        Channels must be bound before any ``OperationFuser`` captures
+        them. That includes constructing an ``OperationFuser`` or
+        ``Sequential``, and also calling the op directly (``op(x)``),
+        which builds a transient fuser and locks channels permanently.
         """
         if not 0 <= index < self.num_extra_outputs:
             raise IndexError(
@@ -610,7 +615,12 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         *extra_inputs: torch.Tensor,
         **kwargs: Any,
     ) -> torch.Tensor | tuple[torch.Tensor, ...]:
-        """Apply operation"""
+        """Apply operation.
+
+        Builds a transient ``OperationFuser([self])``, which captures and
+        locks this op's extra-tensor channel bindings. Bind channels before
+        the first call if they will be used later in a multi-op fuser.
+        """
         from .fuser import OperationFuser
 
         return OperationFuser([self])(
@@ -843,7 +853,11 @@ class FusedOperation(FusibleOperation):
         *extra_inputs: torch.Tensor,
         basic_op_kwargs: Optional[list[dict[str, Any]]] = None,
     ) -> torch.Tensor:
-        """Apply operation"""
+        """Apply operation.
+
+        Builds a transient ``OperationFuser([self])``, which captures and
+        locks every basic op's extra-tensor channel bindings.
+        """
         if basic_op_kwargs is None:
             basic_op_kwargs = [{} for _ in range(len(self.basic_ops))]
         from .fuser import OperationFuser

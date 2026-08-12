@@ -527,7 +527,10 @@ class OperationFuser:
         self.num_extra_inputs = len(self._external_extra_input_slots)
 
         # This fuser's routing is derived from the channel bindings above, so
-        # freeze them. Changing them requires constructing new operations.
+        # freeze them for every covered basic op. That includes transient
+        # fusers from BasicOperation.forward / FusedOperation.forward
+        # (op(x)), not only persistent OperationFuser / Sequential usage.
+        # Changing bindings afterward requires constructing new operations.
         for op in self._basic_ops:
             op._lock_extra_tensor_channels()
 

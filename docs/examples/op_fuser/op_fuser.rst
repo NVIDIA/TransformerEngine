@@ -282,11 +282,17 @@ The following conditions apply to extra tensor channels:
 - Set ``output_to_caller=False`` for a channel tensor that should remain
   internal. Removing a channel binding with ``channel=None`` restores that
   output as public.
-- Channel bindings are captured when an ``OperationFuser`` (or the
-  fusers inside a ``Sequential``) is constructed, which locks them.
+- Channel bindings are captured when an ``OperationFuser`` is
+  constructed, which locks them on every covered basic op. That includes:
+
+  - constructing an ``OperationFuser`` or ``Sequential`` explicitly
+  - calling an op directly (``op(x)``), or a ``FusedOperation``, because
+    those paths build a transient ``OperationFuser([self])``
+
   Later ``set_extra_input_channel`` / ``set_extra_output_channel`` calls
   raise an error, so different routing requires constructing new
-  operations.
+  operations. Bind channels before the first forward call if the op will
+  later participate in a multi-op fuser.
 
 Channel-connected basic operations may still be replaced by registered
 ``FusedOperation`` implementations. If a fused operation contains both
