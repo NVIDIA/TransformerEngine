@@ -2062,7 +2062,9 @@ class DotProductAttention(TransformerEngineBaseModule):
                 has_score_mod_bprop=score_mod_bprop is not None,
             )
 
-            # Optionally pad inputs when it leads to faster kernel selection.
+            # Optionally pad inputs to `max(head_dim_qk, head_dim_v)` when it leads to faster kernel
+            # selection. Note that the padded tensors could still be unsupported inputs shapes by
+            # {Flash,Fused}Attention.
             qkv_head_pad = False
             orig_head_dim_v = head_dim_v
             orig_qk_dim = None
