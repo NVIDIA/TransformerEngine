@@ -203,6 +203,19 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         self._fp8_metas: Optional[dict[str, dict[str, Any]]] = None
         self._quantizers: Optional[dict[str, list[Quantizer]]] = None
 
+    def __getstate__(self):
+        # weakref.WeakSet is not picklable (even when empty). Drop it so
+        # torch.save(model) / pickle of modules containing TE ops still work.
+        # Capturing fusers are runtime bookkeeping and are reattached on the
+        # next fuse after load.
+        state = super().__getstate__()
+        state.pop("_capturing_op_fusers", None)
+        return state
+
+    def __setstate__(self, state):
+        super().__setstate__(state)
+        self._capturing_op_fusers = weakref.WeakSet()
+
     def _invalidate_capturing_op_fusers(self) -> None:
         """Mark fusers that captured this op's channels as stale.
 
