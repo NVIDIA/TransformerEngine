@@ -8,11 +8,10 @@
  *  \brief Fused grouped MXFP8 requantization: rowwise wire tensor -> GEMM-ready.
  */
 
-#include <transformer_engine/cast.h>
-
 #include <cuda.h>
 #include <cudaTypedefs.h>
 #include <cuda_runtime.h>
+#include <transformer_engine/cast.h>
 
 #include <limits>
 #include <type_traits>
@@ -48,8 +47,8 @@ __device__ __forceinline__ uint16_t e8m0_to_bf16_bits(const e8m0_t biased_exp) {
 }
 
 template <typename IType>
-__device__ __forceinline__ ptx::bf16x2 dequantize_mxfp8_2x(
-    const ptx::FPx2<IType> &values, const e8m0_t scale_code) {
+__device__ __forceinline__ ptx::bf16x2 dequantize_mxfp8_2x(const ptx::FPx2<IType> &values,
+                                                           const e8m0_t scale_code) {
   ptx::bf16x2 result;
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 #if (defined CUDA_VERSION) && (CUDA_VERSION >= 13020)
@@ -57,19 +56,17 @@ __device__ __forceinline__ ptx::bf16x2 dequantize_mxfp8_2x(
   // to BF16x2. Arch-specific Blackwell targets (sm_100a) include these family features.
   constexpr bool kHasScaledFP8ToBF16 = ARCH_BLACKWELL_FAMILY;
   if constexpr (kHasScaledFP8ToBF16) {
-    const uint16_t scale_x2 = static_cast<uint16_t>(scale_code) |
-                              (static_cast<uint16_t>(scale_code) << 8);
+    const uint16_t scale_x2 =
+        static_cast<uint16_t>(scale_code) | (static_cast<uint16_t>(scale_code) << 8);
     if constexpr (std::is_same_v<IType, fp8e4m3>) {
-      asm volatile(
-          "cvt.rn.scaled::n2::ue8m0.bf16x2.e4m3x2 %0, %1, %2;"
-          : "=r"(reinterpret_cast<uint32_t &>(result))
-          : "h"(reinterpret_cast<const uint16_t &>(values)), "h"(scale_x2));
+      asm volatile("cvt.rn.scaled::n2::ue8m0.bf16x2.e4m3x2 %0, %1, %2;"
+                   : "=r"(reinterpret_cast<uint32_t &>(result))
+                   : "h"(reinterpret_cast<const uint16_t &>(values)), "h"(scale_x2));
     } else {
       static_assert(std::is_same_v<IType, fp8e5m2>);
-      asm volatile(
-          "cvt.rn.scaled::n2::ue8m0.bf16x2.e5m2x2 %0, %1, %2;"
-          : "=r"(reinterpret_cast<uint32_t &>(result))
-          : "h"(reinterpret_cast<const uint16_t &>(values)), "h"(scale_x2));
+      asm volatile("cvt.rn.scaled::n2::ue8m0.bf16x2.e5m2x2 %0, %1, %2;"
+                   : "=r"(reinterpret_cast<uint32_t &>(result))
+                   : "h"(reinterpret_cast<const uint16_t &>(values)), "h"(scale_x2));
     }
     return result;
   }
@@ -78,8 +75,8 @@ __device__ __forceinline__ ptx::bf16x2 dequantize_mxfp8_2x(
   // CUDA 12.8-compatible fallback. Every E4M3/E5M2 value is exactly representable in
   // FP16, so the FP16 bridge does not lose information before rounding to BF16.
   const uint16_t scale_bits = e8m0_to_bf16_bits(scale_code);
-  const uint32_t scale_x2 = static_cast<uint32_t>(scale_bits) |
-                            (static_cast<uint32_t>(scale_bits) << 16);
+  const uint32_t scale_x2 =
+      static_cast<uint32_t>(scale_bits) | (static_cast<uint32_t>(scale_bits) << 16);
   if constexpr (std::is_same_v<IType, fp8e4m3>) {
     asm volatile(
         "{\n\t"
@@ -183,11 +180,9 @@ __device__ __forceinline__ void store_colwise_2x_to_shared(OType *const output,
 template <typename IType, typename OType, bool kUseFastMath, bool kReturnDequantized>
 __global__ void __launch_bounds__(kThreads)
     fused_group_requantize_kernel(const __grid_constant__ CUtensorMap output_tensor_map,
-                                  const IType *const input,
-                                  const e8m0_t *const input_scale_inv,
+                                  const IType *const input, const e8m0_t *const input_scale_inv,
                                   e8m0_t *const rowwise_scale_inv_swizzled,
-                                  e8m0_t *const colwise_scale_inv,
-                                  bf16 *const dequantized_out,
+                                  e8m0_t *const colwise_scale_inv, bf16 *const dequantized_out,
                                   const int64_t *const tensor_offsets, const int num_groups,
                                   const int num_cols, const int input_scale_stride) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
@@ -258,11 +253,9 @@ __global__ void __launch_bounds__(kThreads)
     int scale_code = 0;
     if ((local_chunk % 2) == 0) {
       const int scale_col = col / MXFP8_SCALE_DIM;
-      const size_t input_scale_idx =
-          static_cast<size_t>(row) * input_scale_stride + scale_col;
+      const size_t input_scale_idx = static_cast<size_t>(row) * input_scale_stride + scale_col;
       scale_code = static_cast<int>(input_scale_inv[input_scale_idx]);
-      rowwise_scale_inv_swizzled[gemm_swizzled_scale_idx(row, scale_col,
-                                                         rowwise_scale_tiles_x)] =
+      rowwise_scale_inv_swizzled[gemm_swizzled_scale_idx(row, scale_col, rowwise_scale_tiles_x)] =
           static_cast<e8m0_t>(scale_code);
     }
     scale_code = __shfl_sync(0xffffffff, scale_code, lane & ~1);
@@ -281,8 +274,7 @@ __global__ void __launch_bounds__(kThreads)
         *reinterpret_cast<ptx::bf16x2 *>(&dequantized[local_row][shared_col + i]) = result;
         if constexpr (kReturnDequantized) {
           *reinterpret_cast<ptx::bf16x2 *>(
-              &dequantized_vec[i / kDequantizedVecSize].data.elt[i % kDequantizedVecSize]) =
-              result;
+              &dequantized_vec[i / kDequantizedVecSize].data.elt[i % kDequantizedVecSize]) = result;
         }
       }
     } else {
@@ -298,8 +290,7 @@ __global__ void __launch_bounds__(kThreads)
       }
     }
     if constexpr (kReturnDequantized) {
-      bf16 *const dequantized_out_ptr =
-          dequantized_out + static_cast<size_t>(row) * num_cols + col;
+      bf16 *const dequantized_out_ptr = dequantized_out + static_cast<size_t>(row) * num_cols + col;
       dequantized_vec[0].store_to(dequantized_out_ptr);
       dequantized_vec[1].store_to(dequantized_out_ptr + kDequantizedVecSize);
     }
@@ -345,16 +336,15 @@ __global__ void __launch_bounds__(kThreads)
     // WITH_GEMM_SWIZZLED_SCALES emission (group_quantize_mxfp8.cuh) and the
     // grouped-GEMM consumer's padded cumsum: under the /128 contract the
     // per-group base is exactly group_start/32 * num_cols.
-    const size_t colwise_scale_base =
-        static_cast<size_t>(group_start) / MXFP8_SCALE_DIM * num_cols;
+    const size_t colwise_scale_base = static_cast<size_t>(group_start) / MXFP8_SCALE_DIM * num_cols;
     const int local_scale_row = (row_base - group_start) / kTileRows;
     const int scale_col = col_base + tid;
     // One swizzle tile spans GEMM_SWIZZLED_SCALE_TILE_DIM_X = 4 scale rows =
     // 128 data rows, so this matches the producer's DIVUP(rows, 128).
     const int colwise_scale_tiles_x = group_rows / 128;
     colwise_scale_inv[colwise_scale_base +
-                      gemm_swizzled_scale_idx(scale_col, local_scale_row,
-                                              colwise_scale_tiles_x)] = biased_exponent;
+                      gemm_swizzled_scale_idx(scale_col, local_scale_row, colwise_scale_tiles_x)] =
+        biased_exponent;
 
     if constexpr (kUseFastMath) {
       const bf16 quant_multiplier = ptx::exp2f_rcp<bf16>(biased_exponent);
@@ -442,8 +432,7 @@ void fused_group_requantize(const Tensor &input, Tensor *output, const Tensor &t
              "Input rowwise scales must be unswizzled (compact); dequantization reads them "
              "row-indexed.");
   NVTE_CHECK(output->has_columnwise_data(), "Output must have columnwise MXFP8 data.");
-  NVTE_CHECK(output->columnwise_data.dptr != nullptr,
-             "Output columnwise data must be allocated.");
+  NVTE_CHECK(output->columnwise_data.dptr != nullptr, "Output columnwise data must be allocated.");
   NVTE_CHECK(output->columnwise_data.dtype == DType::kFloat8E4M3,
              "Output columnwise data must have E4M3 type.");
   NVTE_CHECK(output->columnwise_scale_inv.dptr != nullptr,
@@ -458,8 +447,7 @@ void fused_group_requantize(const Tensor &input, Tensor *output, const Tensor &t
   NVTE_CHECK(tensor_offsets.has_data(), "tensor_offsets must be allocated.");
   NVTE_CHECK(tensor_offsets.data.dptr != nullptr, "tensor_offsets data must be allocated.");
   NVTE_CHECK(tensor_offsets.data.dtype == DType::kInt64, "tensor_offsets must have Int64 type.");
-  NVTE_CHECK(tensor_offsets.data.numel() >= 2,
-             "tensor_offsets must hold num_groups + 1 entries.");
+  NVTE_CHECK(tensor_offsets.data.numel() >= 2, "tensor_offsets must hold num_groups + 1 entries.");
 
   const int num_groups = static_cast<int>(tensor_offsets.data.numel()) - 1;
 
@@ -503,14 +491,14 @@ void fused_group_requantize(const Tensor &input, Tensor *output, const Tensor &t
                  static_cast<size_t>(num_rows) / MXFP8_SCALE_DIM * num_cols,
              "Output columnwise scale tensor is smaller than rows / 32 x cols.");
 
-  const bool return_dequantized = dequantized != nullptr && dequantized->has_data() &&
-                                  dequantized->data.dptr != nullptr;
+  const bool return_dequantized =
+      dequantized != nullptr && dequantized->has_data() && dequantized->data.dptr != nullptr;
   if (return_dequantized) {
     NVTE_CHECK(dequantized->data.dtype == DType::kBFloat16,
                "The dequantized output must have BF16 type.");
-    NVTE_CHECK(dequantized->data.numel() ==
-                   static_cast<size_t>(num_rows) * static_cast<size_t>(num_cols),
-               "The dequantized output must have rows x cols elements.");
+    NVTE_CHECK(
+        dequantized->data.numel() == static_cast<size_t>(num_rows) * static_cast<size_t>(num_cols),
+        "The dequantized output must have rows x cols elements.");
     NVTE_CHECK(is_aligned_ptr(dequantized->data.dptr, 16),
                "The dequantized output pointer must be 16B aligned.");
   }
@@ -549,9 +537,9 @@ void fused_group_requantize(const Tensor &input, Tensor *output, const Tensor &t
 }  // namespace transformer_engine
 
 void nvte_fused_group_requantize_mxfp8(const NVTETensor input, NVTETensor output,
-                                        const NVTETensor tensor_offsets, NVTETensor dequantized,
-                                        const NVTEQuantizationConfig quant_config,
-                                        cudaStream_t stream) {
+                                       const NVTETensor tensor_offsets, NVTETensor dequantized,
+                                       const NVTEQuantizationConfig quant_config,
+                                       cudaStream_t stream) {
   using namespace transformer_engine;
   NVTE_API_CALL(nvte_fused_group_requantize_mxfp8);
 
