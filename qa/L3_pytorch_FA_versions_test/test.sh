@@ -33,12 +33,12 @@ sm_arch=`python3 -c "import torch; sm = torch.cuda.get_device_capability(0); pri
 export FLASH_ATTN_CUDA_ARCHS=$sm_arch
 # CP tests are expensive and run only once per arch:
 #   - sm90 (H100):  FA3 (3.0.0b1) - context_parallel.py only supports FA3 on Hopper
-#   - sm>90 (B200): FA2 (2.8.3) - FA4 CP remains disabled until its CP path is supported
+#   - sm>90 (B200): latest FA4    - FA3 is not built/installed for sm>90
 # Non-CP tests still run for every FA version in the array.
 if [ $sm_arch -gt 90 ]
 then
   FA_versions=(2.8.3 4.0.0b11)
-  CP_FA_VERSION="${FA_versions[0]}"
+  CP_FA_VERSION="${FA_versions[-1]}"
 elif [ $sm_arch -eq 90 ]
 then
   FA_versions=(2.8.3 3.0.0b1 4.0.0b11)
