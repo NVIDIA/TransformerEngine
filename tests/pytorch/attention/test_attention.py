@@ -8,6 +8,7 @@ import pathlib
 import copy
 from typing import Any, Dict, Tuple, Union
 
+from packaging.version import Version as PkgVersion
 import pytest
 import torch
 
@@ -29,6 +30,7 @@ from transformer_engine.pytorch.attention.dot_product_attention import (
 )
 from transformer_engine.pytorch.attention.dot_product_attention.utils import (
     FlashAttentionUtils,
+    _get_supported_versions,
     check_set_window_size,
 )
 from transformer_engine.pytorch.attention import RotaryPositionEmbedding
@@ -92,6 +94,39 @@ reset_rng_states()
 def reset_global_fp8_state():
     yield
     FP8GlobalStateManager.reset()
+
+
+@pytest.mark.parametrize(
+    "version,expected",
+    (
+        ("2.1.0", False),
+        ("2.1.1", True),
+        ("2.8.3", True),
+        ("2.8.3+local_version", True),
+        ("2.8.3.post1", True),
+        ("2.8.4", False),
+        ("2.8.4+local_version", False),
+        ("2.9.0", False),
+    ),
+)
+def test_flash_attention_version_support(version, expected):
+    """Test the supported Flash Attention v2 version range."""
+    assert (
+        FlashAttentionUtils.is_version_supported(
+            PkgVersion(version), FlashAttentionUtils.version_required
+        )
+        is expected
+    )
+
+
+def test_flash_attention_supported_version_message():
+    """Test that the supported version range describes an exclusive upper bound."""
+    assert (
+        _get_supported_versions(
+            FlashAttentionUtils.version_required, FlashAttentionUtils.max_version
+        )
+        == ">= 2.1.1, < 2.8.4"
+    )
 
 
 # Define F16 data types to test
