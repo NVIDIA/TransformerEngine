@@ -341,9 +341,14 @@ model_configs_fa4_base = {
 }
 
 
+fa4_enabled = bool(int(os.getenv("NVTE_FLASH_ATTN", "1"))) and bool(
+    int(os.getenv("NVTE_FLASH_ATTN_V4", "1"))
+)
 requires_fa4 = pytest.mark.skipif(
-    not FlashAttentionUtils.v4_is_installed or device_compute_capability < (9, 0),
-    reason="Flash-attn v4 and compute capability >= SM90 are required.",
+    not fa4_enabled
+    or not FlashAttentionUtils.v4_is_installed
+    or device_compute_capability < (9, 0),
+    reason="Enabled Flash-attn v4 and compute capability >= SM90 are required.",
 )
 
 

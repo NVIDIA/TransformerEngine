@@ -31,18 +31,18 @@ export NVTE_ALLOW_UNSAFE_PICKLE_EXTRA_STATE=1
 # Iterate over Flash Attention versions
 sm_arch=`python3 -c "import torch; sm = torch.cuda.get_device_capability(0); print(sm[0]*10+sm[1])"`
 export FLASH_ATTN_CUDA_ARCHS=$sm_arch
-# CP tests are expensive and run only once per arch:
-#   - sm90 (H100):  FA3 (3.0.0b1) - context_parallel.py only supports FA3 on Hopper
-#   - sm>90 (B200): latest FA4    - FA3 is not built/installed for sm>90
-# Non-CP tests still run for every FA version in the array.
+# Run one architecture-owned FlashAttention generation. CP remains FA3-only
+# until the production selector and runner support FA4 CP end to end.
+CP_FA_VERSION=""
 if [ $sm_arch -gt 90 ]
 then
-  FA_versions=(2.8.3 4.0.0b11)
-  CP_FA_VERSION="${FA_versions[-1]}"
+  FA_versions=(4.0.0b11)
 elif [ $sm_arch -eq 90 ]
 then
-  FA_versions=(2.8.3 3.0.0b1 4.0.0b11)
+  FA_versions=(3.0.0b1)
   CP_FA_VERSION="3.0.0b1"
+else
+  error_exit "No L3 FlashAttention generation is defined for sm${sm_arch}"
 fi
 
 for fa_version in "${FA_versions[@]}"
@@ -102,7 +102,7 @@ do
 
   # test_attention.py reloads its own trusted delayed-scaling FP8 checkpoint,
   # whose legacy extra state requires an explicit pickle opt-in.
-  if [ "$fa_version" = "$CP_FA_VERSION" ]; then
+  if [ -n "$CP_FA_VERSION" ] && [ "$fa_version" = "$CP_FA_VERSION" ]; then
     echo "Running CP tests with FA $fa_version (CP version for sm$sm_arch)"
     if [ "$NUM_GPUS" -ge 5 ]; then
       CP_NUM_GPUS=$(( NUM_GPUS - 1 > 4 ? 4 : NUM_GPUS - 1 ))
@@ -127,7 +127,11 @@ do
       NVTE_TORCH_COMPILE=0 python3 -m pytest -v -s --junitxml=$XML_CP $TE_PATH/tests/pytorch/attention/test_attention_with_cp.py || test_fail "test_attention_with_cp.py (FA $fa_version)"
     fi
   else
-    echo "Skipping CP tests for FA $fa_version (CP only runs with FA $CP_FA_VERSION on sm$sm_arch)"
+    if [ -n "$CP_FA_VERSION" ]; then
+      echo "Skipping CP tests for FA $fa_version (CP uses FA $CP_FA_VERSION on sm$sm_arch)"
+    else
+      echo "CP tests are not scheduled for the FA generation on sm$sm_arch"
+    fi
     NVTE_TORCH_COMPILE=0 NVTE_ALLOW_UNSAFE_PICKLE_EXTRA_STATE=1 python3 -m pytest -v -s --junitxml=$XML_ATTN $TE_PATH/tests/pytorch/attention/test_attention.py || test_fail "test_attention.py (FA $fa_version)"
   fi
 done
