@@ -1316,3 +1316,52 @@ class GroupedTensorStorage:
         for i in range(self.num_tensors):
             self.quantizer.update_quantized(tensors[i], quantized_tensors[i], noop_flag=noop_flag)
         return quantized_tensors
+
+
+def has_grouped_storage(tensor: torch.Tensor) -> bool:
+    """Whether a grouped parameter carries grouped storage rather than plain storage.
+
+    High-precision grouped parameters are plain ``(num_tensors, *tensor_shape)``
+    tensors, so this is False for them.
+    """
+    return isinstance(tensor, GroupedTensorStorage)
+
+
+def grouped_param_members(tensor: torch.Tensor) -> List[torch.Tensor]:
+    """Split a grouped parameter into its per-group member tensors.
+
+    Members are views into the shared buffer in both representations, so this
+    does not copy.
+    """
+    if not isinstance(tensor, GroupedTensorStorage):
+        return list(tensor.unbind(0))
+    members = tensor.quantized_tensors
+    if members is None:
+        members = tensor.split_into_quantized_tensors()
+    return members
+
+
+def grouped_storage_for_gemm(
+    tensor: torch.Tensor,
+    *,
+    num_tensors: int,
+    shapes: List[Tuple[int, int]],
+    dtype: torch.dtype,
+) -> GroupedTensorStorage:
+    """Describe a grouped parameter as a GroupedTensorStorage for the grouped GEMM.
+
+    Returns ``tensor`` unchanged when it already carries grouped storage.
+    Otherwise wraps the plain buffer. For uniform member shapes this only builds
+    a Python object, since first_dims/last_dims/tensor_offsets all stay None.
+    """
+    if isinstance(tensor, GroupedTensorStorage):
+        return tensor
+    data = tensor if tensor.dtype == dtype else tensor.to(dtype=dtype)
+    return GroupedTensorStorage(
+        shape=(sum(s[0] for s in shapes), shapes[0][1]),
+        dtype=dtype,
+        num_tensors=num_tensors,
+        shapes=list(shapes),
+        quantizer=None,
+        data=data.reshape(-1),
+    )

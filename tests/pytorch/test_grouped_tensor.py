@@ -9,7 +9,12 @@ import os
 import pytest
 import torch
 import transformer_engine.pytorch as te
+import transformer_engine.pytorch.ops as te_ops
+from transformer_engine.common.recipe import Float8CurrentScaling, MXFP8BlockScaling
 from transformer_engine.pytorch.tensor.grouped_tensor import GroupedTensor
+from transformer_engine.pytorch.tensor.storage.grouped_tensor_storage import (
+    grouped_param_members,
+)
 from transformer_engine.pytorch import (
     Quantizer,
     Float8Quantizer,
@@ -1441,3 +1446,144 @@ class TestGroupedTensor:
             assert torch.equal(getattr(dst, f"weight{i}"), expected_weight)
         for i, expected_bias in enumerate(expected_biases):
             assert torch.equal(getattr(dst, f"bias{i}"), expected_bias.reshape(-1))
+
+
+def _skip_without_single_param_env() -> None:
+    """Skip when the experimental single grouped parameter is not enabled."""
+    if os.environ.get("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "0") == "0":
+        pytest.skip("single_grouped_weight requires NVTE_GROUPED_LINEAR_SINGLE_PARAM=1")
+
+
+def _make_grouped_linear_op(
+    *,
+    num_groups: int,
+    in_features: int,
+    out_features: int,
+    dtype: torch.dtype,
+    single_grouped: bool,
+) -> te_ops.GroupedLinear:
+    """Build a fusible GroupedLinear op on CUDA."""
+    return te_ops.GroupedLinear(
+        num_groups,
+        in_features,
+        out_features,
+        bias=True,
+        device="cuda",
+        dtype=dtype,
+        single_grouped_weight=single_grouped,
+        single_grouped_bias=single_grouped,
+    )
+
+
+class TestGroupedLinearHighPrecisionParam:
+    """High-precision grouped parameters are plain tensors, not GroupedTensor.
+
+    A GroupedTensor is only needed when the grouped scale/amax buffers have to
+    travel with the data. Without a quantizer there are none, so the parameter
+    stays a plain stacked tensor and keeps torch.save/DCP and generic tensor ops
+    working.
+    """
+
+    num_groups = 3
+    in_features = 64
+    out_features = 32
+
+    def _op(self, dtype: torch.dtype, single_grouped: bool = True) -> te_ops.GroupedLinear:
+        return _make_grouped_linear_op(
+            num_groups=self.num_groups,
+            in_features=self.in_features,
+            out_features=self.out_features,
+            dtype=dtype,
+            single_grouped=single_grouped,
+        )
+
+    @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16, torch.float32])
+    def test_param_is_plain_tensor(self, dtype: torch.dtype) -> None:
+        """High-precision grouped weight/bias are plain stacked parameters."""
+        _skip_without_single_param_env()
+        op = self._op(dtype)
+
+        assert not isinstance(op.weight, GroupedTensor)
+        assert op.weight.shape == (self.num_groups, self.out_features, self.in_features)
+        assert op.weight.dtype == dtype
+        assert not isinstance(op.bias, GroupedTensor)
+        assert op.bias.shape == (self.num_groups, self.out_features)
+
+        # The per-group members must still be views into the one buffer.
+        members = grouped_param_members(op.weight)
+        assert len(members) == self.num_groups
+        for member in members:
+            assert member.shape == (self.out_features, self.in_features)
+            assert member.data_ptr() >= op.weight.data_ptr()
+
+    def test_matches_per_group_params(self) -> None:
+        """Forward and backward match the per-group parameter layout."""
+        _skip_without_single_param_env()
+        dtype = torch.bfloat16
+        split_sizes = torch.tensor([8, 16, 8], dtype=torch.int64)
+        total_tokens = int(split_sizes.sum())
+
+        grouped = self._op(dtype, single_grouped=True)
+        discrete = self._op(dtype, single_grouped=False)
+
+        # Give both layouts identical parameter values.
+        with torch.no_grad():
+            for idx in range(self.num_groups):
+                getattr(discrete, f"weight{idx}").copy_(grouped.weight[idx])
+                getattr(discrete, f"bias{idx}").copy_(grouped.bias[idx])
+
+        x = torch.randn(
+            total_tokens, self.in_features, dtype=dtype, device="cuda", requires_grad=True
+        )
+        x_ref = x.detach().clone().requires_grad_(True)
+        dy = torch.randn(total_tokens, self.out_features, dtype=dtype, device="cuda")
+
+        y = grouped(x, split_sizes)
+        y.backward(dy)
+        y_ref = discrete(x_ref, split_sizes)
+        y_ref.backward(dy)
+
+        assert_close(y, y_ref)
+        assert_close(x.grad, x_ref.grad)
+        for idx in range(self.num_groups):
+            assert_close(grouped.weight.grad[idx], getattr(discrete, f"weight{idx}").grad)
+            assert_close(grouped.bias.grad[idx], getattr(discrete, f"bias{idx}").grad)
+
+    def test_state_dict_round_trip(self, tmp_path) -> None:
+        """A plain grouped parameter survives torch.save/torch.load.
+
+        GroupedTensor has no ``__reduce_ex__``/``untyped_storage``, which is the
+        capability this representation restores.
+        """
+        _skip_without_single_param_env()
+        dtype = torch.bfloat16
+        src = self._op(dtype)
+        expected_weight = src.weight.detach().clone()
+        expected_bias = src.bias.detach().clone()
+
+        ckpt_path = tmp_path / "grouped_linear_op.pt"
+        torch.save(src.state_dict(), ckpt_path)
+        state_dict = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+
+        assert not isinstance(state_dict["weight"], GroupedTensor)
+        assert state_dict["weight"].shape == expected_weight.shape
+
+        dst = self._op(dtype)
+        dst.load_state_dict(state_dict)
+        assert torch.equal(dst.weight, expected_weight)
+        assert torch.equal(dst.bias, expected_bias)
+
+    def test_quantized_param_stays_grouped(self) -> None:
+        """Quantized weights keep GroupedTensor, which owns their scale buffers."""
+        _skip_without_single_param_env()
+        if mxfp8_available:
+            recipe = MXFP8BlockScaling()
+        elif fp8_available:
+            recipe = Float8CurrentScaling()
+        else:
+            pytest.skip(reason_for_no_fp8)
+        with te.quantized_model_init(enabled=True, recipe=recipe):
+            op = self._op(torch.bfloat16)
+
+        assert isinstance(op.weight, GroupedTensor)
+        assert op.weight.quantizer is not None

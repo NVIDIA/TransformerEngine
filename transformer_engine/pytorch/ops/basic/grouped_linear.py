@@ -9,7 +9,7 @@ from collections.abc import Callable, Iterable, Sequence
 import contextlib
 import functools
 import math
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 import torch
 
@@ -59,7 +59,13 @@ from ...distributed_weight import (
     materialize_weight_for_backward,
     materialize_weight_for_forward,
 )
-from ...tensor import GroupedTensor, GroupedTensorStorage
+from ...tensor import (
+    GroupedTensor,
+    GroupedTensorStorage,
+    grouped_param_members,
+    grouped_storage_for_gemm,
+    has_grouped_storage,
+)
 from ...triton.grouped_dbias_dscales import (
     compute_grouped_dbias,
     compute_grouped_dbias_dscales,
@@ -319,9 +325,7 @@ class GroupedLinear(BasicOperation):
     def _get_bias_tensors(self, dtype: torch.dtype) -> list[torch.Tensor]:
         """Retrieve per-group bias tensors in the given dtype."""
         if self.single_grouped_bias:
-            bias_parts = self.bias.quantized_tensors
-            if bias_parts is None:
-                bias_parts = self.bias.split_into_quantized_tensors()
+            bias_parts = grouped_param_members(self.bias)
             return [maybe_dequantize(p.reshape(-1), dtype) for p in bias_parts]
         return [
             maybe_dequantize(getattr(self, f"bias{idx}"), dtype) for idx in range(self.num_groups)
@@ -451,7 +455,7 @@ class GroupedLinear(BasicOperation):
 
     def make_grouped_weights(self) -> None:
         """
-        Convert parameters into a GroupedTensor and re-register them as parameters.
+        Pack the per-group weights into one parameter and re-register it.
         """
 
         weights = [getattr(self, f"weight{idx}") for idx in range(self.num_groups)]
@@ -460,6 +464,20 @@ class GroupedLinear(BasicOperation):
         recipe = None if quantizer is None else quantizer._get_compatible_recipe()
         if recipe is not None and recipe.delayed():
             raise RuntimeError("Delayed scaling is not supported with single_grouped_weight=True")
+
+        if quantizer is None:
+            # High-precision weights need none of GroupedTensor's machinery: with
+            # uniform member shapes and no scales, the grouped GEMM only reads a
+            # data pointer, num_tensors and the logical shape, all of which a plain
+            # stacked tensor already carries. Keeping it plain preserves
+            # serialization (torch.save/DCP) and generic tensor ops.
+            with torch.no_grad():
+                grouped_weights = torch.stack([w.detach() for w in weights], dim=0).contiguous()
+            self.register_parameter("weight", torch.nn.Parameter(grouped_weights))
+            for group_idx in range(self.num_groups):
+                self.register_parameter(f"weight{group_idx}", None)
+            self._apply_delay_wgrad_param_hooks()
+            return
 
         grouped_weights = GroupedTensor.make_grouped_tensor_with_shapes(
             num_tensors=self.num_groups,
@@ -489,16 +507,13 @@ class GroupedLinear(BasicOperation):
         self._apply_delay_wgrad_param_hooks()
 
     def _make_grouped_biases_from_packed(self, packed_biases: torch.Tensor) -> None:
-        """Replace per-group bias parameters with one ``GroupedTensor`` (``single_grouped_bias``)."""
+        """Replace per-group bias parameters with one packed parameter (``single_grouped_bias``).
+
+        Biases are never quantized, so this is always a plain
+        ``(num_groups, out_features)`` tensor.
+        """
         bias_data = packed_biases.detach().clone().contiguous()
-        grouped_bias = GroupedTensor.make_grouped_tensor_from_rowwise_data(
-            num_tensors=self.num_groups,
-            tensor_shape=(self.out_features,),
-            rowwise_data=bias_data,
-            dtype=bias_data.dtype,
-        )
-        grouped_bias.requires_grad_(True)
-        self.register_parameter("bias", torch.nn.Parameter(grouped_bias))
+        self.register_parameter("bias", torch.nn.Parameter(bias_data))
         for group_idx in range(self.num_groups):
             self.register_parameter(f"bias{group_idx}", None)
 
@@ -723,7 +738,10 @@ class GroupedLinear(BasicOperation):
             weight_is_quantized = False
             if getattr(self, "single_grouped_weight", False):
                 weight = getattr(self, "weight", None)
-                weight_is_quantized = weight is not None and weight.quantizer is not None
+                # A high-precision grouped weight is a plain tensor with no quantizer.
+                weight_is_quantized = (
+                    weight is not None and getattr(weight, "quantizer", None) is not None
+                )
             else:
                 weight = getattr(self, f"weight{group_idx}", None)
                 weight_is_quantized = is_quantized_tensor(weight)
@@ -855,7 +873,7 @@ class GroupedLinear(BasicOperation):
 
     def _get_grouped_weight_for_gemm(
         self,
-        weight_param: GroupedTensor,
+        weight_param: Union[GroupedTensor, torch.Tensor],
         weight_quantizers: list[Optional[Quantizer]],
         columnwise_usage: bool,
         with_quantized_compute: bool,
@@ -865,6 +883,25 @@ class GroupedLinear(BasicOperation):
         Supports MXFP8/BF16/FP16 compute paths.
         """
         num_groups = self.num_groups
+        weight_shapes = [(self.out_features, self.in_features)] * num_groups
+        if not has_grouped_storage(weight_param):
+            # High-precision weights are a plain stacked parameter; describe them
+            # for the GEMM without copying.
+            if not with_quantized_compute:
+                return grouped_storage_for_gemm(
+                    weight_param,
+                    num_tensors=num_groups,
+                    shapes=weight_shapes,
+                    dtype=dtype,
+                )
+            weight_quantizer = weight_quantizers[0]
+            weight_quantizer.set_usage(rowwise=True, columnwise=columnwise_usage)
+            return tex.group_quantize(
+                weight_param.reshape(num_groups * self.out_features, self.in_features),
+                weight_quantizer,
+                num_groups,
+                None,
+            )
         is_weight_quantized = weight_param.quantizer is not None
         if is_weight_quantized and with_quantized_compute:
             # GGEMM can use it as it is
@@ -881,7 +918,7 @@ class GroupedLinear(BasicOperation):
                 shape=(num_groups * self.out_features, self.in_features),
                 dtype=dtype,
                 num_tensors=num_groups,
-                shapes=[(self.out_features, self.in_features)] * num_groups,
+                shapes=weight_shapes,
                 quantizer=None,
                 data=weight_data.reshape(-1),
             )
@@ -895,7 +932,7 @@ class GroupedLinear(BasicOperation):
                 shape=(num_groups * self.out_features, self.in_features),
                 dtype=dtype,
                 num_tensors=num_groups,
-                shapes=[(self.out_features, self.in_features)] * num_groups,
+                shapes=weight_shapes,
                 quantizer=None,
                 data=weight_data.reshape(-1),
             )
@@ -976,7 +1013,7 @@ class GroupedLinear(BasicOperation):
 
         if self.single_grouped_bias:
             # Already a contiguous (num_groups * out_features) buffer.
-            bias_data = self.bias.rowwise_data
+            bias_data = self.bias.rowwise_data if has_grouped_storage(self.bias) else self.bias
             if bias_data.dtype != dtype:
                 bias_data = bias_data.to(dtype=dtype)
         else:
@@ -1217,9 +1254,7 @@ class GroupedLinear(BasicOperation):
 
         # Extract params
         if self.single_grouped_weight:
-            weights = self.weight.quantized_tensors
-            if weights is None:
-                weights = self.weight.split_into_quantized_tensors()
+            weights = grouped_param_members(self.weight)
         else:
             weights = self._forward_weight_list()  # materialized when distributed
         bs = None
