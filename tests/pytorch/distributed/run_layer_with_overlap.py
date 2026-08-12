@@ -558,10 +558,7 @@ def _train(opts):
 
     if opts.compile:
         for i, layer in enumerate(test_model.layers):
-            # Static shapes; dynamic-shape coverage lives in tests/pytorch/test_torch_compile.py.
-            test_model.layers[i] = torch.compile(
-                layer, fullgraph=True, mode=opts.compile_mode, dynamic=False
-            )
+            test_model.layers[i] = torch.compile(layer, fullgraph=True, mode=opts.compile_mode)
         dist_print(
             f"Compiled test model layers with torch.compile (mode={opts.compile_mode})...",
             debug=True,

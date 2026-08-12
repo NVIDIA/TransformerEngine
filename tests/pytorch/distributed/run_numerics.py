@@ -335,13 +335,8 @@ def _apply_models(
     if use_compile:
         # Reset the compile cache so parametrized cases don't trip recompile_limit.
         torch._dynamo.reset()
-        # Static shapes; dynamic-shape coverage lives in tests/pytorch/test_torch_compile.py.
-        forward_single_node = torch.compile(
-            model_single_node, fullgraph=True, mode=compile_mode, dynamic=False
-        )
-        forward_distributed = torch.compile(
-            model_distributed, fullgraph=True, mode=compile_mode, dynamic=False
-        )
+        forward_single_node = torch.compile(model_single_node, fullgraph=True, mode=compile_mode)
+        forward_distributed = torch.compile(model_distributed, fullgraph=True, mode=compile_mode)
     with te.autocast(
         enabled=QUANTIZATION is not None,
         recipe=quantization_recipe(),
