@@ -150,6 +150,12 @@ void nvte_ep_prepare(NVTETensor handle_mem, NVTETensor topk_idx, NVTETensor recv
  *  *_win arguments enable zero-copy via symmem windows; pass NVTECommWindow{}
  *  when unused. Requires a prior nvte_ep_prepare on this handle_mem.
  *
+ *  tokens/recv_tokens may be high-precision (bf16/fp16) or FP8:
+ *  for the latter, set rowwise data and rowwise scale-inverse (unswizzled
+ *  [T, hidden_dim/block]) on the tensor and the scales are routed alongside the
+ *  data. tokens and recv_tokens must share a scaling mode. For now, only MXFP8
+ *  (NVTE_MXFP8_1D_SCALING, e4m3 data + e8m0 scales) is supported.
+ *
  *  \param[in]     handle_mem             uint8 routing-state buffer (from prepare).
  *  \param[in]     topk_idx               [T, top_k] int64 sparse routing indices.
  *  \param[in]     tokens                 [T, hidden_dim] input tokens.
