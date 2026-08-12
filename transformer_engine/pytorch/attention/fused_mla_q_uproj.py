@@ -2,7 +2,11 @@
 #
 # See LICENSE for license information.
 
-"""Fused MLA Q up-projection + per-head RoPE + MXFP8 quantize."""
+"""Fused MLA Q up-projection + per-head RoPE + MXFP8 quantize.
+
+The MLA RoPE Triton kernels are taken from:
+Megatron-LM megatron/core/fusions/fused_mla_yarn_rope_apply.py
+"""
 
 from __future__ import annotations
 import functools
