@@ -1658,19 +1658,14 @@ def get_attention_backend(
 def should_pad_qkv_head_dim(
     attention_params: AttentionParams,
 ) -> bool:
-    """Decide whether padding Q/K/V to a common head dim upgrades the attention backend.
+    """Decide whether to pad Q/K/V to a common head dim.
 
-    Padding Q, K, and V to the wider of the QK and V head dims is an identity -- the padded head
-    dims contribute zero to the Q*K dot product (so scores and softmax are unchanged) and the padded
-    V columns are sums of zeros (so trimming them back changes nothing). This returns `True` iff the
-    native mismatched shape selects the slow `UnfusedDotProductAttention` while the padded equal
-    shape selects a fused backend (`FlashAttention` or `FusedAttention`), i.e. the only case in
-    which the pad actually upgrades the kernel instead of being pure overhead.
+    This returns `True` in two cases:
+    1. when the native mismatched shape would otherwise land on a backend that cannot take
+       mismatched head dims (FlashAttention-2).
+    2. when padding results in a faster kernel
 
-    The decision depends only on `attention_params` (and the process-global backend availability,
-    which is fixed for the lifetime of the process), so it is memoized across calls: only the first
-    call with a given native config pays for the two `get_attention_backend` probes; subsequent
-    calls with an equal config return the cached result.
+    The selection is memoized for the given `attention_params`.
 
     Parameters
     ----------
@@ -1688,10 +1683,13 @@ def should_pad_qkv_head_dim(
     if cached_params is not None and cached_params == attention_params:
         return _should_pad_qkv_head_dim_cache["result"]
     native_backend = get_attention_backend(attention_params)
+    native_flash_attention_backend = native_backend[1]
     native_use_unfused_attention = native_backend[4]
     # No point padding if native path is already fused.
     if not native_use_unfused_attention:
-        result = False
+        # Native already lands on FlashAttention or FusedAttention, so no need to pad. However,
+        # FlashAttention-2 cannot take mismatched QK/V head dims, so we still pad in that case.
+        result = native_flash_attention_backend == FlashAttentionUtils.version
     else:
         padded_head_dim = max(attention_params.head_dim_qk, attention_params.head_dim_v)
         padded_params = replace(
@@ -1702,7 +1700,7 @@ def should_pad_qkv_head_dim(
         padded_backend = get_attention_backend(padded_params)
         padded_use_flash_attention = padded_backend[0]
         padded_use_fused_attention = padded_backend[2]
-        result = bool(padded_use_flash_attention or padded_use_fused_attention)
+        result = padded_use_flash_attention or padded_use_fused_attention
     # Store a shallow copy as the key to avoid later `attention_params` in-place modifications
     # resulting in subsequent cache misses.
     _should_pad_qkv_head_dim_cache["attention_params"] = replace(attention_params)

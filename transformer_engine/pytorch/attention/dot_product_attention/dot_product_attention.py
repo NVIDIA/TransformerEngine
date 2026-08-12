@@ -51,7 +51,6 @@ from transformer_engine.pytorch.attention.inference import InferenceParams
 import transformer_engine.pytorch.attention.dot_product_attention.utils as dpa_utils
 from transformer_engine.pytorch.attention.dot_product_attention.utils import (
     AttentionLogging as attn_log,
-    FlashAttentionUtils,
 )
 
 from transformer_engine.pytorch.attention.dot_product_attention.backends import (
@@ -2062,13 +2061,11 @@ class DotProductAttention(TransformerEngineBaseModule):
                 has_score_mod_bprop=score_mod_bprop is not None,
             )
 
-            # Optionally pad inputs to `max(head_dim_qk, head_dim_v)` when it leads to faster kernel
-            # selection. Note that the padded tensors could still be unsupported inputs shapes by
-            # {Flash,Fused}Attention.
+            # Optionally pad inputs to `max(head_dim_qk, head_dim_v)` when it's required by the
+            # kernel or when it leads to faster kernel selection. Note that the padded tensors could
+            # still be unsupported inputs shapes by `{Flash,Fused}Attention`.
             qkv_head_pad = False
             orig_head_dim_v = head_dim_v
-            orig_qk_dim = None
-            orig_v_dim = None
             if _should_pad_qkv_head_dim(
                 head_dim_qk, head_dim_v, value_layer, qkv_layer, kv_layer, attention_params
             ):
@@ -2147,21 +2144,6 @@ class DotProductAttention(TransformerEngineBaseModule):
             )
 
             if use_flash_attention:
-                orig_qk_dim = None
-                orig_v_dim = None
-                if (
-                    flash_attention_backend == FlashAttentionUtils.version
-                    and not isinstance(value_layer, Float8TensorStorage)
-                    and head_dim_qk != head_dim_v
-                ):
-                    (
-                        query_layer,
-                        key_layer,
-                        value_layer,
-                        orig_qk_dim,
-                        orig_v_dim,
-                    ) = _pad_qkv_head_dim(query_layer, key_layer, value_layer)
-
                 if core_attention_bias_type == "alibi":
                     alibi_slopes, _ = dpa_utils.get_alibi(
                         _alibi_cache,
@@ -2347,6 +2329,6 @@ class DotProductAttention(TransformerEngineBaseModule):
             else:
                 return None
 
-            if orig_qk_dim is not None and orig_qk_dim > orig_v_dim or qkv_head_pad:
+            if qkv_head_pad:
                 attn_out = _trim_output(attn_out, num_attention_heads, head_dim_qk, orig_head_dim_v)
             return attn_out
