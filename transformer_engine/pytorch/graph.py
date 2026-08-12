@@ -13,10 +13,10 @@ from math import ceil
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, TypeVar, Union
 
 import torch
-import transformer_engine_torch as tex
 from torch.utils._pytree import tree_flatten as _tree_flatten
 from torch.utils._pytree import tree_unflatten as _tree_unflatten
 from torch._C import _graph_pool_handle
+import transformer_engine_torch as tex
 
 from transformer_engine.common.recipe import DelayedScaling, Recipe
 from transformer_engine.pytorch.constants import dist_group_type
@@ -93,7 +93,7 @@ def _align_up(value: int, alignment: int = 256) -> int:
 def _io_tensor_plan(tensor: Any, kind: str) -> Optional[Tuple[Any, ...]]:
     """Return an arena plan for plain CUDA tensors exposed across graph boundaries."""
     if (
-        type(tensor) is not torch.Tensor
+        tensor.__class__ is not torch.Tensor
         or not tensor.is_cuda
         or tensor.layout != torch.strided
         or any(stride < 0 for stride in tensor.stride())
@@ -659,7 +659,7 @@ def _make_graphed_callables(
         ]
         per_callable_snapshot_input_storage_ptrs = []
         for func_idx, args in enumerate(sample_args):
-            if not args or type(args[0]) is not torch.Tensor or not args[0].is_cuda:
+            if not args or args[0].__class__ is not torch.Tensor or not args[0].is_cuda:
                 raise RuntimeError(
                     "Slot user-input snapshots require the first positional argument for "
                     f"graph input {func_idx} to be a plain CUDA tensor."
@@ -813,6 +813,51 @@ def _make_graphed_callables(
             )
         return aliases
 
+    def make_saved_tensor_recorder(
+        func_idx,
+        observed_saved_tensors,
+        observed_saved_versions,
+        copied_storages,
+        observed_saved_tensor_plan,
+    ):
+        """Bind one warmup iteration's saved-tensor observation state."""
+
+        def record_saved_tensor(tensor):
+            observed_saved_tensors.append(tensor)
+            observed_saved_versions.append(_tensor_version(tensor))
+            storage_ptr = _tensor_storage_ptr(tensor)
+            signature = _saved_tensor_signature(tensor)
+            snapshot_user_input = (
+                tensor.is_cuda and storage_ptr == per_callable_snapshot_input_storage_ptrs[func_idx]
+            )
+            is_external = not tensor.is_cuda or (
+                storage_ptr in per_callable_external_storage_ptrs[func_idx]
+                and not snapshot_user_input
+            )
+            if not is_external and tensor.__class__ is not torch.Tensor:
+                raise RuntimeError(
+                    "CUDA graph saved-tensor arenas do not yet support tensor "
+                    f"subclass {type(tensor).__name__}."
+                )
+            storage_group = None
+            storage_offset_bytes = None
+            if not is_external:
+                storage_identity = (storage_ptr, _tensor_version(tensor))
+                storage_group = copied_storages.setdefault(storage_identity, len(copied_storages))
+                storage_offset_bytes = tensor.storage_offset() * tensor.element_size()
+            observed_saved_tensor_plan.append(
+                (
+                    "external" if is_external else "native",
+                    storage_ptr if is_external else None,
+                    *signature,
+                    storage_group,
+                    storage_offset_bytes,
+                )
+            )
+            return tensor
+
+        return record_saved_tensor
+
     # Run warmup and do the above filtering.
     with torch.cuda.stream(torch.cuda.Stream()):
         for func_idx, func in zip(warmup_func_idx, warmup_func):
@@ -862,43 +907,13 @@ def _make_graphed_callables(
                     observed_saved_tensors = []
                     observed_saved_versions = []
                     copied_storages = {}
-
-                    def record_saved_tensor(tensor):
-                        observed_saved_tensors.append(tensor)
-                        observed_saved_versions.append(_tensor_version(tensor))
-                        storage_ptr = _tensor_storage_ptr(tensor)
-                        signature = _saved_tensor_signature(tensor)
-                        snapshot_user_input = (
-                            tensor.is_cuda
-                            and storage_ptr == per_callable_snapshot_input_storage_ptrs[func_idx]
-                        )
-                        is_external = not tensor.is_cuda or (
-                            storage_ptr in per_callable_external_storage_ptrs[func_idx]
-                            and not snapshot_user_input
-                        )
-                        if not is_external and type(tensor) is not torch.Tensor:
-                            raise RuntimeError(
-                                "CUDA graph saved-tensor arenas do not yet support tensor "
-                                f"subclass {type(tensor).__name__}."
-                            )
-                        storage_group = None
-                        storage_offset_bytes = None
-                        if not is_external:
-                            storage_identity = (storage_ptr, _tensor_version(tensor))
-                            storage_group = copied_storages.setdefault(
-                                storage_identity, len(copied_storages)
-                            )
-                            storage_offset_bytes = tensor.storage_offset() * tensor.element_size()
-                        observed_saved_tensor_plan.append(
-                            (
-                                "external" if is_external else "native",
-                                storage_ptr if is_external else None,
-                                *signature,
-                                storage_group,
-                                storage_offset_bytes,
-                            )
-                        )
-                        return tensor
+                    record_saved_tensor = make_saved_tensor_recorder(
+                        func_idx,
+                        observed_saved_tensors,
+                        observed_saved_versions,
+                        copied_storages,
+                        observed_saved_tensor_plan,
+                    )
 
                     with torch.autograd.graph.saved_tensors_hooks(record_saved_tensor, lambda x: x):
                         outputs, _ = _tree_flatten(func(*args, **kwargs))
@@ -1326,7 +1341,7 @@ def _make_graphed_callables(
             copied_grad_inputs.append(grad_input)
         return tuple(copied_grad_inputs)
 
-    per_callable_native_saved_storages = [dict() for _ in flatten_sample_args]
+    per_callable_native_saved_storages = [{} for _ in flatten_sample_args]
     per_callable_native_saved_intervals = [[] for _ in flatten_sample_args]
     per_callable_native_saved_capture_targets = [None] * len(flatten_sample_args)
 
@@ -2098,7 +2113,7 @@ def _make_graphed_callables(
             raise RuntimeError("CUDA graph slot checkpoint live-storage owner set changed.")
         for block_ptr, storage in owners.items():
             storage_ptr = storage.data_ptr()
-            if not (block_ptr <= storage_ptr < block_ptr + expected_blocks[block_ptr]):
+            if not block_ptr <= storage_ptr < block_ptr + expected_blocks[block_ptr]:
                 raise RuntimeError(
                     "CUDA graph slot checkpoint live storage changed its allocation."
                 )
@@ -2131,7 +2146,7 @@ def _make_graphed_callables(
                     "CUDA graph slot checkpoint did not restore the live-storage deleter."
                 )
             storage_ptr = storage.data_ptr()
-            if not (block_ptr <= storage_ptr < block_ptr + expected_blocks[block_ptr]):
+            if not block_ptr <= storage_ptr < block_ptr + expected_blocks[block_ptr]:
                 raise RuntimeError(
                     "CUDA graph slot checkpoint restored a live storage at the wrong address."
                 )
@@ -2172,20 +2187,20 @@ def _make_graphed_callables(
             captured_branch_func_indices = []
             branch_stale_storages = {}
             branch_boundary_values = []
-            if (
-                branch_group is not None
-                and branch_group[0] == 0
-                and (
-                    branch_checkpoint_state is not None
-                    or branch_pre_checkpoint_state is not None
-                    or current_storage_owners is not None
-                    or branch_canonical_native_saved_intervals is not None
-                    or branch_canonical_native_saved_targets is not None
-                    or branch_canonical_native_saved_excluded_storages is not None
-                    or branch_canonical_native_saved_preassigned_targets is not None
-                    or native_saved_alias_targets is not None
+            branch_checkpoint_active = any(
+                value is not None
+                for value in (
+                    branch_checkpoint_state,
+                    branch_pre_checkpoint_state,
+                    current_storage_owners,
+                    branch_canonical_native_saved_intervals,
+                    branch_canonical_native_saved_targets,
+                    branch_canonical_native_saved_excluded_storages,
+                    branch_canonical_native_saved_preassigned_targets,
+                    native_saved_alias_targets,
                 )
-            ):
+            )
+            if branch_group is not None and branch_group[0] == 0 and branch_checkpoint_active:
                 raise RuntimeError("CUDA graph slot checkpoint groups overlap.")
             if branch_group is not None:
                 if branch_group[0] == 0:
