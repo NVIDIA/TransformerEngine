@@ -34,6 +34,7 @@ import math
 import os
 import sys
 import warnings
+from dataclasses import replace
 from functools import partial
 from typing import Any, Optional, Tuple, Union
 
@@ -44,6 +45,7 @@ from jax.sharding import NamedSharding, PartitionSpec as P
 
 from . import cpp_extensions as tex
 from .quantize import (
+    GroupedQuantizer,
     QuantizerSet,
     TensorUsage,
     noop_quantizer_set,
@@ -626,6 +628,39 @@ class _Ctx:
 # =============================================================================
 
 
+def _localize_grouped_quantizer_set(
+    quantizer_set: QuantizerSet, num_local_groups: int
+) -> QuantizerSet:
+    """Resize stateless grouped quantizers for one shard-local FFN.
+
+    The public MoE API receives quantizers sized for the global dispatch and
+    expert layouts. Under ``shard_map``, however, grouped quantize/GEMM sees
+    only the local experts. MXFP8 block quantizers are stateless and identical
+    per group, so selecting the corresponding number of entries preserves the
+    recipe while matching the local grouped operation.
+    """
+
+    def _localize(quantizer):
+        if quantizer is None or not isinstance(quantizer, GroupedQuantizer):
+            return quantizer
+        if len(quantizer.quantizers) < num_local_groups:
+            raise ValueError(
+                "MoE grouped quantizer has fewer entries than the shard-local "
+                f"FFN requires: {len(quantizer.quantizers)} < {num_local_groups}."
+            )
+        return replace(
+            quantizer,
+            n_groups=num_local_groups,
+            quantizers=quantizer.quantizers[:num_local_groups],
+        )
+
+    return QuantizerSet(
+        x=_localize(quantizer_set.x),
+        kernel=_localize(quantizer_set.kernel),
+        dgrad=_localize(quantizer_set.dgrad),
+    )
+
+
 def _ffn_fwd_per_shard(
     recv_tokens_local: jnp.ndarray,
     recv_topk_weights_local: jnp.ndarray,
@@ -660,7 +695,10 @@ def _ffn_fwd_per_shard(
         jnp.concatenate([wi_0_bias, wi_1_bias], axis=-1) if wi_0_bias is not None else None
     )
 
-    fc1_quantizer_set, fc2_quantizer_set = quantizer_sets
+    fc1_quantizer_set, fc2_quantizer_set = (
+        _localize_grouped_quantizer_set(qset, num_local_experts)
+        for qset in quantizer_sets
+    )
     casted_sorted_x = tex.grouped_quantize(
         sorted_x,
         fc1_quantizer_set.x,
@@ -678,12 +716,6 @@ def _ffn_fwd_per_shard(
             bias=wi_combined_bias,
         )
     gate_proj_out, up_proj_out = jnp.split(combined_out, 2, axis=-1)
-    casted_sorted_x_lhs_trans = casted_sorted_x.get_tensor(usage=TensorUsage.LHS_TRANS).checkpoint(
-        fc1_quantizer_set.x
-    )
-    casted_wi_rhs_trans = casted_wi.get_tensor(usage=TensorUsage.RHS_TRANS).checkpoint(
-        fc1_quantizer_set.kernel
-    )
 
     # Activation inputs (gate_proj_out, up_proj_out) stay in the wi GEMM
     # output dtype; the activation output (`intermediate`) stays in the
@@ -714,22 +746,15 @@ def _ffn_fwd_per_shard(
             contracting_dims=((1,), (1,)),
             bias=wo_bias,
         )
-    casted_intermediate_lhs_trans = casted_intermediate.get_tensor(
-        usage=TensorUsage.LHS_TRANS
-    ).checkpoint(fc2_quantizer_set.x)
-    casted_wo_rhs_trans = casted_wo.get_tensor(usage=TensorUsage.RHS_TRANS).checkpoint(
-        fc2_quantizer_set.kernel
-    )
-
     expert_outputs_3d = expert_outputs.reshape(1, expert_outputs.shape[0], expert_outputs.shape[1])
     group_sizes_2d = group_sizes.reshape(1, num_local_experts)
     residuals = (
-        casted_sorted_x_lhs_trans,
-        casted_wi_rhs_trans,
+        sorted_x,
+        wi,
         gate_proj_out,
         up_proj_out,
-        casted_intermediate_lhs_trans,
-        casted_wo_rhs_trans,
+        intermediate,
+        wo,
         group_sizes_2d,
     )
     return expert_outputs_3d, residuals
@@ -737,28 +762,49 @@ def _ffn_fwd_per_shard(
 
 def _ffn_bwd_per_shard(
     d_expert_outputs_local: jnp.ndarray,
-    casted_sorted_x_lhs_trans,
-    casted_wi_rhs_trans,
+    sorted_x: jnp.ndarray,
+    wi: jnp.ndarray,
     gate_proj_out: jnp.ndarray,
     up_proj_out: jnp.ndarray,
-    casted_intermediate_lhs_trans,
-    casted_wo_rhs_trans,
+    intermediate: jnp.ndarray,
+    wo: jnp.ndarray,
     local_group_sizes: jnp.ndarray,
     recv_topk_weights_local: jnp.ndarray,
-    wi: jnp.ndarray,
-    wo: jnp.ndarray,
     quantizer_sets: Tuple[QuantizerSet, QuantizerSet],
     *,
     activation_type: str,
     apply_topk_weights_early: bool,
     has_bias: bool,
+    num_local_experts: int,
 ):
     """Backward mirror of :func:`_ffn_fwd_per_shard`."""
     group_sizes = local_group_sizes.reshape(-1).astype(jnp.int32)
     d_eo_2d = d_expert_outputs_local.reshape(-1, d_expert_outputs_local.shape[-1])
     recv_w_flat = recv_topk_weights_local.reshape(-1)
-    fc1_quantizer_set, fc2_quantizer_set = quantizer_sets
+    fc1_quantizer_set, fc2_quantizer_set = (
+        _localize_grouped_quantizer_set(qset, num_local_experts)
+        for qset in quantizer_sets
+    )
     wgrad_group_active = (group_sizes > 0)[:, None, None]
+
+    # Recompute stateless grouped quantization inside backward. Besides being
+    # natural rematerialization for MXFP8BlockScaling, this keeps shard_map
+    # residuals in their logical BF16 shapes instead of exposing flattened
+    # quantized data and scale layouts to partition specs.
+    casted_sorted_x = tex.grouped_quantize(
+        sorted_x, fc1_quantizer_set.x, group_sizes, flatten_axis=-1
+    )
+    casted_wi = tex.grouped_quantize(wi, fc1_quantizer_set.kernel, flatten_axis=-1)
+    casted_intermediate = tex.grouped_quantize(
+        intermediate, fc2_quantizer_set.x, group_sizes, flatten_axis=-1
+    )
+    casted_wo = tex.grouped_quantize(wo, fc2_quantizer_set.kernel, flatten_axis=-1)
+    casted_sorted_x_lhs_trans = casted_sorted_x.get_tensor(usage=TensorUsage.LHS_TRANS)
+    casted_wi_rhs_trans = casted_wi.get_tensor(usage=TensorUsage.RHS_TRANS)
+    casted_intermediate_lhs_trans = casted_intermediate.get_tensor(
+        usage=TensorUsage.LHS_TRANS
+    )
+    casted_wo_rhs_trans = casted_wo.get_tensor(usage=TensorUsage.RHS_TRANS)
 
     # wo bwd
     casted_d_eo = tex.grouped_quantize(
@@ -1583,24 +1629,14 @@ def _moe_bwd_rule(
         ctx.local_group_sizes,
         ctx.recv_topk_weights,
     ]
-    if _use_reference_dgrad:
-        bwd_in_specs += (kernel_spec, kernel_spec)
-        bwd_in_args.extend([ctx.wi, ctx.wo])
-
     def _ffn_bwd_body(*args):
-        if _use_reference_dgrad:
-            *common_args, local_wi, local_wo = args
-        else:
-            common_args = args
-            local_wi = local_wo = None
         grads = _ffn_bwd_per_shard(
-            *common_args,
-            local_wi,
-            local_wo,
+            *args,
             ctx.quantizer_sets,
             activation_type=activation_type,
             apply_topk_weights_early=apply_topk_weights_early,
             has_bias=has_bias,
+            num_local_experts=num_local_experts,
         )
         (
             d_sorted_x_local,
