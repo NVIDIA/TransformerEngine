@@ -695,7 +695,9 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
   NVTE_QKV_Format kv_format = nvte_get_kv_format(qkv_layout);
   auto *q_dims = input_Q->data.shape.data();
   auto *k_dims = input_K->data.shape.data();
-  auto *v_dims = input_V->data.shape.data();
+  auto *v_dims = input_V->scaling_mode != NVTE_MXFP8_1D_SCALING
+                     ? input_V->data.shape.data()
+                     : input_V->columnwise_data.shape.data();
   AttentionShape q_shape(q_format, q_dims);
   AttentionShape k_shape(kv_format, k_dims);
   AttentionShape v_shape(kv_format, v_dims);
