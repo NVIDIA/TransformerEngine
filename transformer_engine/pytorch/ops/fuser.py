@@ -18,6 +18,7 @@ from .op import (
     FusibleOperation,
     FusedOperation,
     OperationContext,
+    _only_delayed_history_length_changed,
 )
 
 
@@ -350,6 +351,7 @@ class OperationFuser:
 
         # Cache and detect change of state relevant for fusing operations
         self.recipe_type = None
+        self.recipe_config = None
         self.first_op_requiring_backward = 0
         self.backward_override = None
         self._last_amax_history_len = 0
@@ -439,6 +441,20 @@ class OperationFuser:
         # Early exit if fusion parameters haven't changed
         need_reset = False
         recipe_type = type(recipe)
+        recipe_config = recipe.quantizer_config() if recipe is not None else None
+        if (
+            recipe_type is self.recipe_type
+            and self.recipe_config != recipe_config
+            and not (
+                isinstance(recipe, DelayedScaling)
+                and _only_delayed_history_length_changed(self.recipe_config, recipe_config)
+            )
+        ):
+            FP8GlobalStateManager.abort_current_amax_reduction()
+            raise RuntimeError(
+                "Mid-training recipe updates are not supported for fusible operations. "
+                "Recreate the fusible operation or operation pipeline with the new recipe."
+            )
         backward_override = recipe.backward_override if recipe is not None else None
         fusion_params = (recipe_type, first_op_requiring_backward, backward_override)
         if fusion_params != (
@@ -494,6 +510,7 @@ class OperationFuser:
 
         # Save current fusion params
         self.recipe_type, self.first_op_requiring_backward, self.backward_override = fusion_params
+        self.recipe_config = recipe_config
 
         # Save amax history length
         if isinstance(recipe, DelayedScaling):

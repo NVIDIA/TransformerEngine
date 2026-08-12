@@ -1146,6 +1146,12 @@ class autocast:
         module more than once inside an `autocast` region overrides the amax tensors
         before reduction can occur.
 
+    .. note::
+
+        Mid-training recipe changes are not supported within an existing ``torch.compile``
+        graph. Change the recipe outside the compiled region and reset or recompile the callable
+        before continuing.
+
     Parameters
     ----------
     enabled : bool, default = True

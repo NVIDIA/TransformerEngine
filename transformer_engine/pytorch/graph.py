@@ -159,6 +159,8 @@ def _make_graphed_callables(
     pre_warmup_hook: Optional[Callable] = None,
     post_warmup_hook: Optional[Callable] = None,
     capture_time_hooks: List[Dict[str, Dict]],
+    module_uses_fp8: Dict[int, bool],
+    captured_recipe_config: Any,
 ) -> SingleOrTuple[Callable]:
     """
     Helper method for `make_graphed_callables`
@@ -1197,6 +1199,23 @@ def _make_graphed_callables(
 
         return backward_dw, reset
 
+    # Cache CUDA-graph recipe validation by the manager-owned configuration
+    # revision. Semantic configuration equality is only evaluated when recipe
+    # activation advances the revision, while unchanged replays only compare
+    # integers.
+    checked_recipe_config_revision = None
+    checked_recipe_config_matches = False
+
+    def active_recipe_config_matches_capture() -> bool:
+        nonlocal checked_recipe_config_revision, checked_recipe_config_matches
+        recipe_config_revision = FP8GlobalStateManager.get_quantizer_config_revision()
+        if recipe_config_revision != checked_recipe_config_revision:
+            checked_recipe_config_matches = (
+                FP8GlobalStateManager.get_quantizer_config() == captured_recipe_config
+            )
+            checked_recipe_config_revision = recipe_config_revision
+        return checked_recipe_config_matches
+
     # Put together the final graphed callables
     ret = []
     for i in range(len(sample_args)):
@@ -1223,6 +1242,15 @@ def _make_graphed_callables(
                     # If the module's training-or-eval state matches what we graphed,
                     # run the graph, otherwise run the original forward method
                     if func.training == graph_training_state:
+                        if (
+                            module_uses_fp8.get(id(func), False)
+                            and FP8GlobalStateManager.is_fp8_enabled()
+                            and not active_recipe_config_matches_capture()
+                        ):
+                            raise RuntimeError(
+                                "The active quantization recipe differs from the CUDA graph "
+                                "capture recipe. Recapture the graph with the new recipe."
+                            )
                         # Set the FP8 group from global amax reduction.
                         if FP8GlobalStateManager.is_fp8_enabled():
                             fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
@@ -1552,6 +1580,7 @@ def make_graphed_callables(
         recipe = get_default_fp8_recipe()
     elif not any(enabled):
         recipe = None
+    captured_recipe_config = recipe.quantizer_config() if recipe is not None else None
     module_uses_fp8 = dict(zip((id(m) for m in modules), enabled))
 
     # Canonicalize capture_time_hooks kwarg.
@@ -1625,6 +1654,8 @@ def make_graphed_callables(
         pre_warmup_hook=pre_warmup_hook,
         post_warmup_hook=post_warmup_hook,
         capture_time_hooks=capture_time_hooks,
+        module_uses_fp8=module_uses_fp8,
+        captured_recipe_config=captured_recipe_config,
     )
 
     # Ensures warmup does not affect numerics for ops such as dropout.

@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
+import copy
 import io
 import os
 import math
@@ -24,6 +25,7 @@ from transformer_engine.pytorch.ops.basic.grouped_linear import (
     GRAD_INPUT_BUFFER_KEY,
 )
 from transformer_engine.pytorch._extra_state import UNSAFE_PICKLE_EXTRA_STATE_ENV
+from transformer_engine.pytorch.quantization import FP8GlobalStateManager
 
 from transformer_engine.pytorch.ops.fused import (
     BackwardActivationBias,
@@ -143,6 +145,51 @@ def maybe_skip_quantization(
             and dtype != torch.bfloat16
         ):
             pytest.skip("NVFP4 quantization is only supported with BF16 data")
+
+
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+@pytest.mark.parametrize("persistent_fuser", (False, True))
+def test_fusible_operation_rejects_unsupported_same_class_recipe_update(
+    persistent_fuser: bool,
+) -> None:
+    """Fusible ops must not silently retain stale same-class quantizers."""
+    op = te_ops.Quantize()
+    model = te_ops.Sequential(op) if persistent_fuser else op
+    x = torch.randn(16, 16, dtype=torch.bfloat16, device="cuda")
+    initial_recipe = transformer_engine.common.recipe.Float8CurrentScaling()
+    equal_recipe = copy.deepcopy(initial_recipe)
+    changed_recipe = copy.deepcopy(initial_recipe)
+    changed_recipe.fp8_quant_fwd_inp = transformer_engine.common.recipe.QParams(amax_epsilon=0.25)
+
+    try:
+        with torch.no_grad(), te.autocast(recipe=initial_recipe):
+            model(x)
+        with torch.no_grad(), te.autocast(recipe=equal_recipe):
+            model(x)
+        with pytest.raises(RuntimeError, match="not supported for fusible operations"):
+            with torch.no_grad(), te.autocast(recipe=changed_recipe):
+                model(x)
+    finally:
+        FP8GlobalStateManager.reset()
+
+
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+def test_fusible_operation_preserves_delayed_history_resize() -> None:
+    """The explicit legacy delayed-history update remains supported."""
+    op = te_ops.Quantize()
+    model = te_ops.Sequential(op)
+    x = torch.randn(16, 16, dtype=torch.bfloat16, device="cuda")
+    initial_recipe = transformer_engine.common.recipe.DelayedScaling(amax_history_len=2)
+    resized_recipe = transformer_engine.common.recipe.DelayedScaling(amax_history_len=4)
+
+    try:
+        with torch.no_grad(), te.autocast(recipe=initial_recipe):
+            model(x)
+        with torch.no_grad(), te.autocast(recipe=resized_recipe):
+            model(x)
+        assert op._fp8_metas["forward"]["scaling_fwd"].amax_history.shape[0] == 4
+    finally:
+        FP8GlobalStateManager.reset()
 
 
 @torch.no_grad()
