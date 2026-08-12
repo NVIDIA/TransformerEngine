@@ -16,7 +16,7 @@ import torch
 from packaging.version import Version as PkgVersion
 
 import transformer_engine_torch as tex
-from ...constants import MXFP8_BLOCK_SCALING_SIZE, NVFP4_BLOCK_SCALING_SIZE, TE_DType
+from ...constants import DType, MXFP8_BLOCK_SCALING_SIZE, NVFP4_BLOCK_SCALING_SIZE, TE_DType
 from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload, start_offload
 from ...cpp_extensions import general_gemm, general_grouped_gemm_for_grouped_tensor
 from ...distributed_weight import (
@@ -26,7 +26,7 @@ from ...distributed_weight import (
     finalize_weight_grads,
 )
 from ...module.base import _2X_ACC_WGRAD
-from ...quantization import Recipe
+from ...quantization import Recipe, get_fp8_torch_dtype
 from ...tensor import NVFP4Quantizer, NVFP4Tensor, NVFP4TensorStorage, Quantizer
 from ...tensor.grouped_tensor import GroupedTensor
 from ...tensor.mxfp8_tensor import MXFP8Quantizer, MXFP8Tensor
@@ -816,6 +816,11 @@ def fuse_grouped_mlp_ops(
         return ops
     # NVFP4 fused grouped MLP uses graph-safe grouped quantize, which currently requires RHT.
     if recipe.nvfp4() and recipe.disable_rht:
+        return ops
+    # The fused backward reinterprets the grad output's storage as E4M3, so a recipe with an
+    # E5M2 backward format would have its gradients misread rather than converted. NVFP4 pins
+    # fp8_format to E4M3, so in practice this declines MXFP8 with Format.HYBRID.
+    if get_fp8_torch_dtype(recipe, fprop_tensor=False) != torch.float8_e4m3fn:
         return ops
     if activation_op_types is None:
         activation_op_types = (ScaledSwiGLU, ScaledClampedQGeGLU)
@@ -1923,6 +1928,13 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             or isinstance(fc1_weight_param, NVFP4Tensor)
             or isinstance(fc2_weight_param, NVFP4Tensor)
         )
+        if not use_nvfp4 and fc2_grad_output_quantizer.dtype != DType.kFloat8E4M3:
+            # The pack below reinterprets the grad output's storage as E4M3 rather than
+            # converting it, so anything else would be read as the wrong format.
+            raise RuntimeError(
+                "Fused grouped MLP backward requires an E4M3 grad output, but the recipe "
+                f"produced {fc2_grad_output_quantizer.dtype}."
+            )
         data_dtype = torch.float4_e2m1fn_x2 if use_nvfp4 else torch.float8_e4m3fn
         scale_view_dtype = torch.float8_e4m3fn if use_nvfp4 else torch.float8_e8m0fnu
         sf_vec_size = NVFP4_BLOCK_SCALING_SIZE if use_nvfp4 else MXFP8_BLOCK_SCALING_SIZE
