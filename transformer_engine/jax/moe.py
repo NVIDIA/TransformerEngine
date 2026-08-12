@@ -743,7 +743,6 @@ def _ffn_fwd_global(
         fc1_quantizer_set.x,
         group_sizes,
         flatten_axis=-1,
-        ragged_scale_sharding=flat_token_sharding,
     )
     casted_wi = tex.grouped_quantize(wi, fc1_quantizer_set.kernel, flatten_axis=-1)
     if _use_reference_fwd:
@@ -784,7 +783,6 @@ def _ffn_fwd_global(
         fc2_quantizer_set.x,
         group_sizes,
         flatten_axis=-1,
-        ragged_scale_sharding=flat_token_sharding,
     )
     casted_wo = tex.grouped_quantize(wo, fc2_quantizer_set.kernel, flatten_axis=-1)
     if _use_reference_fwd:
@@ -914,7 +912,6 @@ def _ffn_bwd_global(
         fc2_quantizer_set.dgrad,
         group_sizes,
         flatten_axis=-1,
-        ragged_scale_sharding=flat_token_sharding,
     )
     _casted_d_eo_lhs = casted_d_eo.get_tensor(usage=TensorUsage.LHS)
     _casted_d_eo_rhs = casted_d_eo.get_tensor(usage=TensorUsage.RHS)
@@ -978,7 +975,6 @@ def _ffn_bwd_global(
         fc1_quantizer_set.dgrad,
         group_sizes,
         flatten_axis=-1,
-        ragged_scale_sharding=flat_token_sharding,
     )
     if _use_reference_dgrad:
         d_sorted_x = _reference_ragged_dot(
