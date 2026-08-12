@@ -259,9 +259,7 @@ def test_gdn_dense_layout_and_grouped_value_heads(qkv_format):
         )
 
     if qkv_format == "sbhd":
-        q, k, v, g, beta = (
-            tensor.transpose(0, 1).contiguous() for tensor in (q, k, v, g, beta)
-        )
+        q, k, v, g, beta = (tensor.transpose(0, 1).contiguous() for tensor in (q, k, v, g, beta))
         expected = output_ref.reshape(batch, sequence, -1).transpose(0, 1).contiguous()
     else:
         expected = output_ref.reshape(batch, sequence, -1)

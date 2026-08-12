@@ -112,8 +112,7 @@ class GatedDeltaNetAttention(torch.nn.Module):
             raise ValueError("GDN requires Q, K, and V to have the same token dimensions.")
         if query_layer.shape[-2] != self.num_q_heads:
             raise ValueError(
-                f"GDN Q and K must have {self.num_q_heads} heads, "
-                f"got {query_layer.shape[-2]}."
+                f"GDN Q and K must have {self.num_q_heads} heads, got {query_layer.shape[-2]}."
             )
         if query_layer.shape[-1] != self.qk_head_dim:
             raise ValueError(
@@ -194,8 +193,7 @@ class GatedDeltaNetAttention(torch.nn.Module):
                 )
             if initial_state.dtype != torch.float32:
                 raise TypeError(
-                    "GDN initial_state must have dtype torch.float32, "
-                    f"got {initial_state.dtype}."
+                    f"GDN initial_state must have dtype torch.float32, got {initial_state.dtype}."
                 )
             if initial_state.shape != expected_state_shape:
                 raise ValueError(
