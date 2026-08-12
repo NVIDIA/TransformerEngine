@@ -39,7 +39,7 @@ from transformer_engine.jax.attention import (
 DTYPES = [jnp.bfloat16]
 
 DISTRIBUTED_SELF_ATTN_DATA_SHAPES = {
-    "L0": [()],
+    "L0": [],
     "L1": [(32, 1024, 16, 128)],
     "L2": [(32, 512, 12, 64)],
 }
@@ -188,7 +188,7 @@ class TestDistributedSelfAttn:
 
 
 DISTRIBUTED_CROSS_ATTN_DATA_SHAPES = {
-    "L0": [()],
+    "L0": [],
     "L1": [[32, 512, 16, 64]],
     "L2": [[32, 128, 12, 64]],
 }
@@ -640,7 +640,7 @@ class TestDistributedContextParallelSelfAttn:
 
 
 REORDER_CAUSAL_LOAD_BALANCING_DATA_SHAPES = {
-    "L0": [[]],
+    "L0": [],
     "L1": [[3, 32, 8, 64]],
     "L2": [[4, 32, 12, 32], [1, 16, 1, 1]],
 }
@@ -681,3 +681,10 @@ class TestReorderCausalLoadBalancing:
         inversed = inverse(reordered, reorder_strategy, cp_size, seq_dim, stripe_size)
 
         assert jnp.array_equal(inversed, ref)
+
+
+def test_l0_shape_placeholders_are_empty():
+    """Ensure L0 placeholders are empty collections and not invalid empty shapes."""
+    assert DISTRIBUTED_SELF_ATTN_DATA_SHAPES.get("L0") == []
+    assert DISTRIBUTED_CROSS_ATTN_DATA_SHAPES.get("L0") == []
+    assert REORDER_CAUSAL_LOAD_BALANCING_DATA_SHAPES.get("L0") == []
