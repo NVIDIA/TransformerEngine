@@ -1231,6 +1231,14 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         )
         fc1_input_quantizer.optimize_for_gemm = True
         fc1_input_quantizer.internal = True
+        if getattr(fc1_op, "ep_mxfp8_carrier_input", False) and not isinstance(
+            input_, GroupedTensor
+        ):
+            # Input is an opaque MXFP8 EP-dispatch carrier (data + scales packed in a plain
+            # tensor's storage); rebuild the per-expert grouped view before the prequant path.
+            from ...ep import mxfp8_carrier_to_grouped
+
+            input_ = mxfp8_carrier_to_grouped(input_, split_sizes)
         if isinstance(input_, GroupedTensor):
             # Input arrived already quantized (e.g. FP8 token dispatch): reuse its rowwise data
             # for the GEMM and let the helper supply whatever else the GEMMs need. An input that
@@ -1877,6 +1885,15 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         output_fc2_dbias = fc2_op.has_bias
         fc2_dbias_packed = None
         fc2_dy = None
+        if getattr(fc2_op, "ep_mxfp8_carrier_grad", False) and not isinstance(
+            grad_output, GroupedTensor
+        ):
+            # Grad arrived as an opaque MXFP8 EP combine-backward carrier (data + scales packed
+            # in a plain tensor's storage); rebuild the per-expert grouped view before the
+            # prequant grad path.
+            from ...ep import mxfp8_carrier_to_grouped
+
+            grad_output = mxfp8_carrier_to_grouped(grad_output.contiguous(), split_sizes)
         if isinstance(grad_output, GroupedTensor):
             # Grad output arrived already quantized (e.g. FP8 token dispatch): reuse its rowwise
             # data for the dgrad GEMM. Bias grads are reduced from the dequantized grad, which is
