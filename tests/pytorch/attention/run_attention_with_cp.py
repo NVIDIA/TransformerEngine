@@ -451,7 +451,7 @@ def run_dpa_with_cp(
         for x in [q_orig, k_orig, v_orig, dout_orig] + ([] if bias is None else [bias])
     ]
     bias_ = rest[0] if len(rest) else None
-    if qkv_format == "bshd" or qkv_format == "sbhd":
+    if qkv_format in ("bshd", "sbhd"):
         seq_dim = qkv_format.index("s")
         q_, k_, v_, dout_ = [
             x.view(
@@ -584,7 +584,7 @@ def run_dpa_with_cp(
     out, dq, dk, dv, dbias, out_, dq_, dk_, dv_, dbias_ = tensors
 
     ############  compare results between CP and no-CP ############
-    if qkv_format == "bshd" or qkv_format == "sbhd":
+    if qkv_format in ("bshd", "sbhd"):
         if is_training:
             dq, dk, dv, out = [
                 x.view(
