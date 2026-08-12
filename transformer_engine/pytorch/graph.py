@@ -371,6 +371,9 @@ def _make_graphed_callables(
                     consumed_sample_q[sample_keys].append(per_callable_fwd_idx)
                 fwd_sample_qs[m_chunk] = fwd_sample_qs[m_chunk][num_consumed_samples:]
 
+    # Scope caching to this capture: the flag tensor below outlives it (replay fills
+    # it in place), so a later capture must not bake in this one's leftover flag.
+    FP8GlobalStateManager.set_caching_quantized_params(cache_quantized_params)
     if cache_quantized_params:
         # Initialize flag that controls FP8 weight updates
         FP8GlobalStateManager.set_skip_fp8_weight_update_tensor(False)
@@ -1609,23 +1612,26 @@ def make_graphed_callables(
     else:
         original_rng_states = torch.cuda.get_rng_state()
 
-    graphed_callables = _make_graphed_callables(
-        forward_funcs,
-        sample_args,
-        num_warmup_iters=num_warmup_iters,
-        allow_unused_input=allow_unused_input,
-        cache_quantized_params=cache_quantized_params,
-        sample_kwargs=sample_kwargs,
-        _order=_order,
-        _num_layers_per_chunk=_num_layers_per_chunk,
-        pool=pool,
-        retain_graph_in_backward=retain_graph_in_backward,
-        _reuse_graph_input_output_buffers=_reuse_graph_input_output_buffers,
-        clone_param_grads_on_return=clone_param_grads_on_return,
-        pre_warmup_hook=pre_warmup_hook,
-        post_warmup_hook=post_warmup_hook,
-        capture_time_hooks=capture_time_hooks,
-    )
+    try:
+        graphed_callables = _make_graphed_callables(
+            forward_funcs,
+            sample_args,
+            num_warmup_iters=num_warmup_iters,
+            allow_unused_input=allow_unused_input,
+            cache_quantized_params=cache_quantized_params,
+            sample_kwargs=sample_kwargs,
+            _order=_order,
+            _num_layers_per_chunk=_num_layers_per_chunk,
+            pool=pool,
+            retain_graph_in_backward=retain_graph_in_backward,
+            _reuse_graph_input_output_buffers=_reuse_graph_input_output_buffers,
+            clone_param_grads_on_return=clone_param_grads_on_return,
+            pre_warmup_hook=pre_warmup_hook,
+            post_warmup_hook=post_warmup_hook,
+            capture_time_hooks=capture_time_hooks,
+        )
+    finally:
+        FP8GlobalStateManager.set_caching_quantized_params(False)
 
     # Ensures warmup does not affect numerics for ops such as dropout.
     if graph_safe_rng_available():

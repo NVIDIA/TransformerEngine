@@ -1209,3 +1209,69 @@ def test_make_graphed_callables_with_interleaved_pipeline_parallelism_reused_buf
     )
     assert_all_equal(outputs, graph_outputs)
     assert_all_equal(weights, graph_weights)
+
+
+@pytest.mark.skipif(not fp8_available, reason="FP8 is not supported")
+@pytest.mark.parametrize("fp8_recipe", fp8_recipes, ids=recipe_id)
+def test_make_graphed_callables_weight_caching_does_not_leak(
+    *,
+    fp8_recipe: recipe.Recipe,
+    dtype: torch.dtype = torch.bfloat16,
+) -> None:
+    """A capture with quantized-param caching must not affect later captures.
+
+    The flag tensor gating quantized weight updates is process-global, so a capture
+    without caching that picks it up bakes in a flag nothing ever writes, and then
+    silently reuses a stale quantized weight.
+    """
+    reset_rng_states()
+    FP8GlobalStateManager.reset()
+    hidden, seqlen = 32, 32  # MXFP8 needs both dims divisible by 32
+
+    def build() -> torch.nn.Module:
+        torch.manual_seed(0)
+        model = Linear(hidden, hidden, bias=False, params_dtype=dtype, device="cuda")
+        for param in model.parameters():
+            param.grad = torch.empty_like(param)
+        return model
+
+    def data() -> torch.Tensor:
+        return torch.randn((seqlen, hidden), dtype=dtype, device="cuda")
+
+    def capture(model: torch.nn.Module, caching: bool) -> torch.nn.Module:
+        return make_graphed_callables(
+            model,
+            (data(),),
+            num_warmup_iters=3,
+            enabled=True,
+            recipe=fp8_recipe,
+            cache_quantized_params=caching,
+        )
+
+    def train(model: torch.nn.Module) -> List[torch.Tensor]:
+        outputs = []
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.05)
+        for step in range(2):
+            optimizer.zero_grad(set_to_none=False)
+            for microbatch in range(2):
+                torch.manual_seed(step * 10 + microbatch)
+                with autocast(enabled=True, recipe=fp8_recipe):
+                    out = model(data())
+                out.backward(torch.ones_like(out))
+                outputs.append(out.detach().clone())
+            optimizer.step()
+        return outputs
+
+    # Leave the global flag asking for the weight update to be skipped. Each
+    # microbatch needs its own autocast: the flag is only written for the first
+    # module of a context.
+    cached_model = capture(build(), caching=True)
+    for is_first_microbatch in (True, False):
+        with autocast(enabled=True, recipe=fp8_recipe):
+            out = cached_model(data(), is_first_microbatch=is_first_microbatch)
+        out.backward(torch.ones_like(out))
+
+    # A later capture without caching must still refresh its quantized weight.
+    graphed = train(capture(build(), caching=False))
+    ungraphed = train(build())
+    assert_all_equal(graphed, ungraphed)
