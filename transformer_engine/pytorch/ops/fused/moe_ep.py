@@ -70,6 +70,31 @@ def _routing_extras_internal(
     )
 
 
+def _routing_extras_internal(
+    dispatch: Dispatch,
+    fc1: GroupedLinear,
+    activation: ScaledSwiGLU,
+    fc2: GroupedLinear,
+) -> bool:
+    """Whether the dispatch routing extras stay inside the fusion.
+
+    The fused op keeps tokens-per-expert and the received routing weights
+    internal to :class:`MoeEpReference`, so it can only replace the sequence
+    when those two outputs feed exactly these ops and are not returned to the
+    caller.
+    """
+    tokens_per_expert, routing_weights = dispatch._extra_output_channels
+    if tokens_per_expert is None or routing_weights is None:
+        return False
+    if any(dispatch._extra_output_to_caller):
+        return False
+    return (
+        fc1._extra_input_channels[0] == tokens_per_expert
+        and fc2._extra_input_channels[0] == tokens_per_expert
+        and activation._extra_input_channels[0] == routing_weights
+    )
+
+
 def _matches(window: Sequence[FusibleOperation], recipe: Optional[Recipe]) -> bool:
     if recipe is not None or len(window) != 5:
         return False
