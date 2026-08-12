@@ -401,7 +401,10 @@ class _FusedMLAQUpProjFunction(torch.autograd.Function):
 
         # --- RoPE backward (unchanged: bf16, same rotary_bwd_q_kernel as the unfused path) ---
         dq3 = dq.reshape(tokens, nh, q_head_dim).contiguous()
-        grid = lambda META: (tokens, triton.cdiv(nh, META["BLOCK_H"]))
+
+        def grid(META):
+            return (tokens, triton.cdiv(nh, META["BLOCK_H"]))
+
         rotary_bwd_q_kernel[grid](
             dq3,
             cos.contiguous(),
