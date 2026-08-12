@@ -12,6 +12,9 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
+#include <c10/core/Allocator.h>
+#include <c10/core/StorageImpl.h>
+
 #include <memory>
 #include <optional>
 #include <vector>
@@ -135,6 +138,13 @@ void init_extension() {
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   NVTE_DECLARE_COMMON_PYBIND11_HANDLES(m)
+  m.def("_graph_checkpoint_detach_storage", [](uintptr_t storage_impl_ptr) {
+    auto *storage = reinterpret_cast<c10::StorageImpl *>(storage_impl_ptr);
+    const auto &data_ptr = storage->data_ptr();
+    NVTE_CHECK(data_ptr.get_deleter() == &c10::detail::deleteNothing,
+               "CUDA graph checkpoint storage must have a no-op deleter before detaching");
+    storage->set_data_ptr_noswap(at::DataPtr(data_ptr.get(), data_ptr.device()));
+  });
   m.def("quantize", transformer_engine::pytorch::quantize, py::arg("tensor"), py::arg("quantizer"),
         py::arg("output") = py::none(), py::arg("noop") = py::none());
   m.def("dequantize", &transformer_engine::pytorch::dequantize, "Dequantize", py::arg("input"),

@@ -2,6 +2,8 @@
 #
 # See LICENSE for license information.
 
+import gc
+import weakref
 from typing import Callable, Dict, Iterable, List, Tuple, Union
 import pytest
 
@@ -22,6 +24,10 @@ from transformer_engine.pytorch import (
     is_bf16_available,
 )
 from transformer_engine.pytorch.quantization import FP8GlobalStateManager
+from transformer_engine.pytorch.attention.dot_product_attention.context_parallel import (
+    _get_cp_p2p_transport_group,
+    set_cp_p2p_transport_group,
+)
 import transformer_engine.pytorch.ops as te_ops
 from transformer_engine.common import recipe
 from utils import ModelConfig, reset_rng_states
@@ -37,6 +43,33 @@ reset_rng_states()
 model_configs = {
     "small": ModelConfig(2, 32, 2, 32),
 }
+
+
+def test_cp_p2p_transport_group_override():
+    class Group:
+        pass
+
+    logical_group = Group()
+    transport_group = Group()
+
+    assert _get_cp_p2p_transport_group(logical_group) == (logical_group, False)
+    set_cp_p2p_transport_group(logical_group, transport_group)
+    assert _get_cp_p2p_transport_group(logical_group) == (transport_group, True)
+    set_cp_p2p_transport_group(logical_group, None)
+    assert _get_cp_p2p_transport_group(logical_group) == (logical_group, False)
+
+    set_cp_p2p_transport_group(logical_group, transport_group)
+    logical_group_ref = weakref.ref(logical_group)
+    del logical_group
+    gc.collect()
+    assert logical_group_ref() is None
+
+    self_transport_group = Group()
+    self_transport_group_ref = weakref.ref(self_transport_group)
+    set_cp_p2p_transport_group(self_transport_group, self_transport_group)
+    del self_transport_group
+    gc.collect()
+    assert self_transport_group_ref() is None
 
 
 def nvfp4_vanilla():
@@ -740,3 +773,651 @@ def test_make_graphed_callables_with_interleaved_pipeline_parallelism(
         **kwargs,
     )
     assert_all_equal(outputs, graph_outputs)
+
+
+def _slot(saved_arena, branch, io_arena, overlap=0, frame=0, warmup=0):
+    """Build one private graph-memory slot used by the focused tests below."""
+    return (saved_arena, branch, io_arena, branch, overlap, frame, warmup, 0, 0)
+
+
+@pytest.mark.parametrize("elements", (0, 4096), ids=("empty", "nonempty"))
+def test_slot_memory_variants_share_one_backing(elements: int) -> None:
+    """Mutually exclusive variants must use identical slot storage and output addresses."""
+
+    class Module(torch.nn.Module):
+        def forward(self, inp):
+            return inp.square().sum().unsqueeze(0) * 3.0
+
+    variants = 5
+    module = Module().cuda()
+    samples = tuple(
+        (torch.ones(elements, device="cuda", requires_grad=True),) for _ in range(variants)
+    )
+    order = [
+        value for variant in reversed(range(variants)) for value in (variant + 1, -variant - 1)
+    ]
+    graphed = make_graphed_callables(
+        (module,) * variants,
+        samples,
+        num_warmup_iters=2,
+        allow_unused_input=True,
+        _order=order,
+        _num_layers_per_chunk=[1] * variants,
+        _reuse_graph_input_output_buffers=True,
+        _graph_memory_slots=tuple(
+            _slot(0, variant, 1, warmup=variant) for variant in range(variants)
+        ),
+    )
+
+    try:
+        pool = graphed[0]._te_cuda_graph_allocator_pool
+        assert all(graph._te_cuda_graph_allocator_pool is pool for graph in graphed)
+        output_ptrs = []
+        for graph in graphed:
+            # A physical slot is replayed by later logical microbatches after its matching
+            # backward has drained, so exercise two complete lifetimes per callable.
+            for _ in range(2):
+                inp = torch.randn(elements, device="cuda", requires_grad=True)
+                output = graph(inp)
+                output_ptrs.append(output.data_ptr())
+                output.sum().backward()
+                torch.testing.assert_close(inp.grad, 6.0 * inp.detach())
+        assert len(set(output_ptrs)) == 1
+    finally:
+        reset_graphs(graphed)
+
+
+def test_slot_memory_input_staging_respects_overlapping_liveness() -> None:
+    """Live microbatches must not overwrite inputs still needed by backward."""
+
+    class Module(torch.nn.Module):
+        def forward(self, inp):
+            return inp.square()
+
+    module = Module().cuda()
+    samples = tuple((torch.ones(4096, device="cuda", requires_grad=True),) for _ in range(2))
+    graphed = make_graphed_callables(
+        (module,),
+        samples,
+        num_warmup_iters=2,
+        _order=[1, 1, -1, -1],
+        _num_layers_per_chunk=[1],
+        _reuse_graph_input_output_buffers=True,
+        _graph_memory_slots=(
+            _slot(0, 0, 0, warmup=0),
+            _slot(1, 1, 1, warmup=0),
+        ),
+    )
+
+    try:
+        inp0 = torch.full((4096,), 2.0, device="cuda", requires_grad=True)
+        inp1 = torch.full((4096,), 3.0, device="cuda", requires_grad=True)
+        out0 = graphed[0](inp0)
+        out1 = graphed[1](inp1)
+        out0.sum().backward()
+        out1.sum().backward()
+        torch.testing.assert_close(inp0.grad, 2.0 * inp0.detach())
+        torch.testing.assert_close(inp1.grad, 2.0 * inp1.detach())
+    finally:
+        reset_graphs(graphed)
+
+
+@pytest.mark.parametrize("reverse_replay", (False, True), ids=("forward", "reverse"))
+def test_slot_memory_checkpoint_reuses_lockstep_branches(reverse_replay) -> None:
+    """Lockstep CP branches must restore one live slot boundary between captures."""
+
+    class Module(torch.nn.Module):
+        def forward(self, inp):
+            transient = torch.cat((inp.square(), inp.sin(), inp.cos()), dim=0)
+            return transient[: inp.numel()] * 3.0
+
+    variants = 5
+    elements = 4096
+    module = Module().cuda()
+    samples = tuple(
+        (torch.ones(elements, device="cuda", requires_grad=True),) for _ in range(variants)
+    )
+    graphed = make_graphed_callables(
+        (module,) * variants,
+        samples,
+        num_warmup_iters=2,
+        allow_unused_input=True,
+        _order=[
+            *(variant + 1 for variant in range(variants)),
+            *(-variant - 1 for variant in range(variants)),
+        ],
+        _num_layers_per_chunk=[1] * variants,
+        _reuse_graph_input_output_buffers=True,
+        _graph_memory_slots=tuple(
+            _slot(0, variant, 1, warmup=variant) for variant in range(variants)
+        ),
+    )
+
+    try:
+        pool = graphed[0]._te_cuda_graph_allocator_pool
+        assert all(graph._te_cuda_graph_allocator_pool is pool for graph in graphed)
+        replay_order = [1, 0, 2, 3, 4] if reverse_replay else range(variants)
+        for variant in replay_order:
+            graph = graphed[variant]
+            inp = torch.randn(elements, device="cuda", requires_grad=True)
+            output = graph(inp)
+            output.sum().backward()
+            expected = 6.0 * inp.detach()
+            if not torch.allclose(inp.grad, expected):
+                print(
+                    "CHECKPOINT_GRAD_MISMATCH",
+                    {
+                        "reverse_replay": reverse_replay,
+                        "variant": variant,
+                        "input_ptr": inp.data_ptr(),
+                        "output_ptr": output.data_ptr(),
+                        "grad_ptr": inp.grad.data_ptr(),
+                        "grad_head": inp.grad[:4].tolist(),
+                        "expected_head": expected[:4].tolist(),
+                        "grad_head_i64": inp.grad[:4].view(torch.int64).tolist(),
+                    },
+                    flush=True,
+                )
+            torch.testing.assert_close(
+                inp.grad,
+                expected,
+                msg=lambda message: f"variant={variant}: {message}",
+            )
+    finally:
+        reset_graphs(graphed)
+
+
+def test_slot_memory_checkpoint_reclaims_retained_branch_outputs() -> None:
+    """A module-held source output must not pin a mutually exclusive branch allocation."""
+
+    class Module(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.retained_output = None
+
+        def forward(self, inp):
+            self.retained_output = inp.square() * 3.0
+            return self.retained_output
+
+    variants = 5
+    elements = 4096
+    module = Module().cuda()
+    samples = tuple(
+        (torch.ones(elements, device="cuda", requires_grad=True),) for _ in range(variants)
+    )
+    graphed = make_graphed_callables(
+        (module,) * variants,
+        samples,
+        num_warmup_iters=2,
+        allow_unused_input=True,
+        _order=[
+            *(variant + 1 for variant in range(variants)),
+            *(-variant - 1 for variant in range(variants)),
+        ],
+        _num_layers_per_chunk=[1] * variants,
+        _reuse_graph_input_output_buffers=True,
+        _graph_memory_slots=tuple(
+            _slot(0, variant, 1, warmup=variant) for variant in range(variants)
+        ),
+    )
+
+    try:
+        output_ptrs = []
+        for graph in graphed:
+            inp = torch.randn(elements, device="cuda", requires_grad=True)
+            output = graph(inp)
+            output_ptrs.append(output.data_ptr())
+            output.sum().backward()
+            torch.testing.assert_close(inp.grad, 6.0 * inp.detach())
+        assert len(set(output_ptrs)) == 1
+    finally:
+        module.retained_output = None
+        reset_graphs(graphed)
+
+
+def test_slot_memory_checkpoint_tracks_native_saved_storage() -> None:
+    """Checkpoint branches must retain allocator owners hidden in autograd saved tensors."""
+
+    class Module(torch.nn.Module):
+        def forward(self, inp):
+            hidden = inp * 2.0
+            return hidden.square()
+
+    variants = 5
+    module = Module().cuda()
+    samples = tuple((torch.ones(4096, device="cuda", requires_grad=True),) for _ in range(variants))
+    graphed = make_graphed_callables(
+        (module,) * variants,
+        samples,
+        num_warmup_iters=2,
+        _order=[
+            *(variant + 1 for variant in range(variants)),
+            *(-variant - 1 for variant in range(variants)),
+        ],
+        _num_layers_per_chunk=[1] * variants,
+        _reuse_graph_input_output_buffers=True,
+        _graph_memory_slots=tuple(
+            _slot(0, variant, 1, warmup=variant) for variant in range(variants)
+        ),
+    )
+
+    try:
+        for graph in graphed:
+            inp = torch.randn(4096, device="cuda", requires_grad=True)
+            graph(inp).sum().backward()
+            torch.testing.assert_close(inp.grad, 8.0 * inp.detach())
+    finally:
+        reset_graphs(graphed)
+
+
+def test_slot_memory_fork_reuses_native_saved_allocations() -> None:
+    """Forked branches must reuse native saved-tensor allocations, not grow the pool."""
+
+    class Module(torch.nn.Module):
+        def __init__(self, canonical):
+            super().__init__()
+            self.canonical = canonical
+
+        def forward(self, inp):
+            if self.canonical:
+                return inp.square()
+            hidden = inp.sin()
+            return hidden.square()
+
+    def capture(variants):
+        microbatches = 2
+        modules = tuple(Module(variant == 0).cuda() for variant in range(variants))
+        samples = tuple(
+            (torch.ones(4096, device="cuda", requires_grad=True),)
+            for _ in range(variants * microbatches)
+        )
+        variant_group = [variant + 1 for variant in range(variants)]
+        graphed = make_graphed_callables(
+            modules,
+            samples,
+            num_warmup_iters=2,
+            _order=[
+                *variant_group,
+                *(-value for value in variant_group),
+                *variant_group,
+                *(-value for value in variant_group),
+            ],
+            _num_layers_per_chunk=[1] * variants,
+            _reuse_graph_input_output_buffers=True,
+            _graph_memory_slots=tuple(
+                _slot(
+                    microbatch,
+                    variant * microbatches + microbatch,
+                    microbatch,
+                    warmup=variant,
+                )
+                for variant in range(variants)
+                for microbatch in range(microbatches)
+            ),
+        )
+        pool = graphed[0]._te_cuda_graph_allocator_pool
+        snapshot = pool.snapshot(include_traces=False)
+        segments = snapshot["segments"] if isinstance(snapshot, dict) else snapshot
+        return graphed, sum(segment["total_size"] for segment in segments)
+
+    baseline, baseline_pool_bytes = capture(2)
+    try:
+        for graph_idx, graph in enumerate(baseline):
+            inp = torch.randn(4096, device="cuda", requires_grad=True)
+            graph(inp).sum().backward()
+            expected = (
+                2.0 * inp.detach()
+                if graph_idx // 2 == 0
+                else 2.0 * inp.detach().sin() * inp.detach().cos()
+            )
+            torch.testing.assert_close(inp.grad, expected)
+    finally:
+        reset_graphs(baseline)
+
+    graphed, forked_pool_bytes = capture(5)
+    try:
+        for graph_idx, graph in enumerate(graphed):
+            inp = torch.randn(4096, device="cuda", requires_grad=True)
+            graph(inp).sum().backward()
+            expected = (
+                2.0 * inp.detach()
+                if graph_idx // 2 == 0
+                else 2.0 * inp.detach().sin() * inp.detach().cos()
+            )
+            torch.testing.assert_close(inp.grad, expected)
+        assert forked_pool_bytes == baseline_pool_bytes
+    finally:
+        reset_graphs(graphed)
+
+
+def test_slot_memory_checkpoint_aliases_parameter_gradients() -> None:
+    """Mutually exclusive branches must return parameter grads from one slot address."""
+
+    class Module(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.randn(4096, device="cuda"))
+
+        def forward(self, inp):
+            return inp * self.weight
+
+    variants = 5
+    module = Module()
+    samples = tuple((torch.ones_like(module.weight, requires_grad=True),) for _ in range(variants))
+    graphed = make_graphed_callables(
+        (module,) * variants,
+        samples,
+        num_warmup_iters=2,
+        allow_unused_input=True,
+        _order=[
+            *(variant + 1 for variant in range(variants)),
+            *(-variant - 1 for variant in range(variants)),
+        ],
+        _num_layers_per_chunk=[1] * variants,
+        _reuse_graph_input_output_buffers=True,
+        _graph_memory_slots=tuple(
+            _slot(0, variant, 1, warmup=variant) for variant in range(variants)
+        ),
+    )
+
+    try:
+        for graph in graphed:
+            module.weight.grad = None
+            inp = torch.randn_like(module.weight, requires_grad=True)
+            graph(inp).sum().backward()
+            torch.testing.assert_close(inp.grad, module.weight.detach())
+            torch.testing.assert_close(module.weight.grad, inp.detach())
+    finally:
+        module.weight.grad = None
+        reset_graphs(graphed)
+
+
+def test_slot_memory_native_io_aliases_graph_pool_storage() -> None:
+    """Nine-field DCP slots default to forked graph-pool I/O aliases."""
+
+    class Module(torch.nn.Module):
+        def forward(self, inp):
+            return inp.square() * 3.0
+
+    variants = 5
+    elements = 4096
+    module = Module().cuda()
+    samples = tuple(
+        (torch.ones(elements, device="cuda", requires_grad=True),) for _ in range(variants)
+    )
+    graphed = make_graphed_callables(
+        (module,) * variants,
+        samples,
+        num_warmup_iters=2,
+        allow_unused_input=True,
+        _order=[
+            *(variant + 1 for variant in range(variants)),
+            *(-variant - 1 for variant in range(variants)),
+        ],
+        _num_layers_per_chunk=[1] * variants,
+        _reuse_graph_input_output_buffers=True,
+        _graph_memory_slots=tuple(
+            _slot(0, variant, 1, warmup=variant) for variant in range(variants)
+        ),
+    )
+
+    try:
+        assert not hasattr(graphed[0], "_te_cuda_graph_slot_memory_pool")
+        output_ptrs = []
+        for graph in graphed:
+            inp = torch.randn(elements, device="cuda", requires_grad=True)
+            output = graph(inp)
+            output_ptrs.append(output.data_ptr())
+            output.sum().backward()
+            torch.testing.assert_close(inp.grad, 6.0 * inp.detach())
+        assert len(set(output_ptrs)) == 1
+    finally:
+        reset_graphs(graphed)
+
+
+def test_slot_memory_releases_outputs_before_next_forward_group() -> None:
+    """A completed backward group must not pin frame-local outputs into the next forward."""
+
+    class Module(torch.nn.Module):
+        def forward(self, inp):
+            return inp.square() * 3.0
+
+    variants = 3
+    microbatches = 2
+    elements = 4096
+    module = Module().cuda()
+    samples = tuple(
+        (torch.ones(elements, device="cuda", requires_grad=True),)
+        for _ in range(variants * microbatches)
+    )
+    variant_group = [variant + 1 for variant in range(variants)]
+    order = [
+        *variant_group,
+        *(-value for value in variant_group),
+        *variant_group,
+        *(-value for value in variant_group),
+    ]
+    slots = tuple(
+        _slot(
+            microbatch,
+            variant * microbatches + microbatch,
+            microbatch,
+            warmup=variant,
+        )
+        for variant in range(variants)
+        for microbatch in range(microbatches)
+    )
+    graphed = make_graphed_callables(
+        (module,) * variants,
+        samples,
+        num_warmup_iters=2,
+        allow_unused_input=True,
+        _order=order,
+        _num_layers_per_chunk=[1] * variants,
+        _reuse_graph_input_output_buffers=True,
+        _graph_memory_slots=slots,
+    )
+
+    try:
+        for graph in graphed:
+            inp = torch.randn(elements, device="cuda", requires_grad=True)
+            graph(inp).sum().backward()
+            torch.testing.assert_close(inp.grad, 6.0 * inp.detach())
+    finally:
+        reset_graphs(graphed)
+
+
+def test_slot_memory_releases_transients_across_vpp_tail_backward() -> None:
+    """PP/VPP tail backward groups must not inherit transient owners from prior events."""
+
+    class Module(torch.nn.Module):
+        def forward(self, inp):
+            return inp.square() * 3.0
+
+    variants = 3
+    model_chunks = 2
+    microbatches = 4
+    elements = 4096
+    module = Module().cuda()
+    samples = tuple(
+        (torch.ones(elements, device="cuda", requires_grad=True),)
+        for _ in range(variants * model_chunks * microbatches)
+    )
+    slots = []
+    for variant in range(variants):
+        for model_chunk in range(model_chunks):
+            logical_chunk = variant * model_chunks + model_chunk
+            for microbatch in range(microbatches):
+                frame = model_chunk * microbatches + microbatch
+                branch = variant * model_chunks * microbatches + frame
+                slots.append(
+                    _slot(
+                        frame,
+                        branch,
+                        microbatch,
+                        overlap=model_chunk,
+                        frame=0,
+                        warmup=logical_chunk,
+                    )
+                )
+
+    # PP=2, VPP=2, rank 0, four-microbatch schedule with lockstep CP branches.
+    base_order = [1, 1, 2, 2, 1, -2, 1, -2, 2, -1, 2, -1, -2, -2, -1, -1]
+    order = []
+    for chunk_id in base_order:
+        for variant in range(variants):
+            remapped = abs(chunk_id) + variant * model_chunks
+            order.append(remapped if chunk_id > 0 else -remapped)
+
+    graphed = make_graphed_callables(
+        (module,) * (variants * model_chunks),
+        samples,
+        num_warmup_iters=2,
+        allow_unused_input=True,
+        _order=order,
+        _num_layers_per_chunk=[1] * (variants * model_chunks),
+        _reuse_graph_input_output_buffers=True,
+        _graph_memory_slots=tuple(slots),
+    )
+
+    try:
+        inp = torch.randn(elements, device="cuda", requires_grad=True)
+        graphed[0](inp).sum().backward()
+        torch.testing.assert_close(inp.grad, 6.0 * inp.detach())
+    finally:
+        reset_graphs(graphed)
+
+
+def test_slot_memory_snapshots_live_inputs_across_slot_wrap() -> None:
+    """A drained slot can wrap while another slot's forward remains live."""
+
+    class Module(torch.nn.Module):
+        def forward(self, inp):
+            return inp.square() * 3.0
+
+    module = Module().cuda()
+    samples = tuple((torch.ones(4096, device="cuda", requires_grad=True),) for _ in range(2))
+    graphed = make_graphed_callables(
+        (module,),
+        samples,
+        num_warmup_iters=2,
+        allow_unused_input=True,
+        _order=[1, 1, -1, -1],
+        _num_layers_per_chunk=[1],
+        _reuse_graph_input_output_buffers=True,
+        _graph_memory_slots=(_slot(0, 0, 2), _slot(1, 0, 3)),
+    )
+
+    try:
+        inp0 = torch.randn(4096, device="cuda", requires_grad=True)
+        inp1 = torch.randn(4096, device="cuda", requires_grad=True)
+        out0 = graphed[0](inp0)
+        out1 = graphed[1](inp1)
+        out0.sum().backward()
+        # Returned input-grad surfaces are valid until their physical slot wraps.
+        torch.testing.assert_close(inp0.grad, 6.0 * inp0.detach())
+
+        inp2 = torch.randn(4096, device="cuda", requires_grad=True)
+        out2 = graphed[0](inp2)
+        out1.sum().backward()
+        torch.testing.assert_close(inp1.grad, 6.0 * inp1.detach())
+        out2.sum().backward()
+        torch.testing.assert_close(inp2.grad, 6.0 * inp2.detach())
+    finally:
+        reset_graphs(graphed)
+
+
+def test_slot_memory_coalesces_overlapping_saved_views() -> None:
+    """Saved views of one storage should occupy only their byte union in each live slot."""
+
+    class OverlappingSaves(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx, inp):
+            backing = torch.cat(tuple(inp + value for value in (1.0, 2.0, 3.0, 4.0)))
+            ctx.save_for_backward(backing[: 3 * inp.numel()], backing[inp.numel() :])
+            ctx.input_elements = inp.numel()
+            return inp + 0.25
+
+        @staticmethod
+        def backward(ctx, grad_output):
+            first, second = ctx.saved_tensors
+            saved = (first[: ctx.input_elements] + second[: ctx.input_elements]) / 2.0
+            return grad_output * saved
+
+    class Module(torch.nn.Module):
+        def forward(self, inp):
+            return OverlappingSaves.apply(inp)
+
+    elements = 4096
+    module = Module().cuda()
+    samples = tuple((torch.ones(elements, device="cuda", requires_grad=True),) for _ in range(2))
+    graphed = make_graphed_callables(
+        (module,),
+        samples,
+        num_warmup_iters=2,
+        allow_unused_input=True,
+        _order=[1, 1, -1, -1],
+        _num_layers_per_chunk=[1],
+        _reuse_graph_input_output_buffers=True,
+        _graph_memory_slots=(_slot(0, 0, 2), _slot(1, 0, 3)),
+    )
+
+    try:
+        inp0 = torch.randn(elements, device="cuda", requires_grad=True)
+        inp1 = torch.randn(elements, device="cuda", requires_grad=True)
+        out0 = graphed[0](inp0)
+        out1 = graphed[1](inp1)
+        out1.sum().backward()
+        out0.sum().backward()
+        torch.testing.assert_close(inp0.grad, inp0.detach() + 1.5)
+        torch.testing.assert_close(inp1.grad, inp1.detach() + 1.5)
+    finally:
+        reset_graphs(graphed)
+
+
+def test_slot_memory_preserves_fused_wgrad_hook() -> None:
+    """Fused wgrad must retain the parameter's autograd edge during replay."""
+    dtype = torch.bfloat16
+    module = Linear(
+        32,
+        32,
+        params_dtype=dtype,
+        fuse_wgrad_accumulation=True,
+        device="cuda",
+    )
+    module.weight.main_grad = torch.zeros_like(module.weight)
+    module.weight.grad_added_to_main_grad = False
+    samples = tuple(
+        (torch.randn(8, 32, device="cuda", dtype=dtype, requires_grad=True),) for _ in range(2)
+    )
+    graphed = make_graphed_callables(
+        (module, module),
+        samples,
+        allow_unused_input=True,
+        _order=[2, -2, 1, -1],
+        _num_layers_per_chunk=[1, 1],
+        _reuse_graph_input_output_buffers=True,
+        _graph_memory_slots=(_slot(0, 0, 1), _slot(0, 1, 1, warmup=1)),
+    )
+
+    hook_calls = 0
+
+    def count_hook(grad):
+        nonlocal hook_calls
+        hook_calls += 1
+        return grad
+
+    hook = module.weight.register_hook(count_hook)
+    try:
+        for graph in graphed:
+            hook_calls = 0
+            module.weight.grad = None
+            module.weight.main_grad.zero_()
+            inp = torch.randn(8, 32, device="cuda", dtype=dtype, requires_grad=True)
+            graph(inp).sum().backward()
+            torch.cuda.synchronize()
+            assert hook_calls == 1
+            assert torch.count_nonzero(module.weight.main_grad) > 0
+    finally:
+        hook.remove()
+        reset_graphs(graphed)

@@ -3,14 +3,17 @@
 # See LICENSE for license information.
 
 """Functions for CUDA Graphs support in FP8"""
+
 from collections.abc import Iterable
 import contextlib
 import gc
+import os
 import warnings
 from math import ceil
-from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar, Union
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, TypeVar, Union
 
 import torch
+import transformer_engine_torch as tex
 from torch.utils._pytree import tree_flatten as _tree_flatten
 from torch.utils._pytree import tree_unflatten as _tree_unflatten
 from torch._C import _graph_pool_handle
@@ -23,7 +26,7 @@ from .quantization import (
     get_default_fp8_recipe,
 )
 from .distributed import get_all_rng_states, graph_safe_rng_available
-from .module.base import TransformerEngineBaseModule
+from .module.base import TransformerEngineBaseModule, get_dummy_wgrad
 from .ops.op import BasicOperation
 from .ops import Sequential
 from .ops.fuser import OperationFuser
@@ -36,6 +39,78 @@ _IS_GRAPH_CAPTURING = False
 
 _T = TypeVar("_T")
 SingleOrTuple = Union[_T, Tuple[_T, ...]]
+
+
+def _tensor_storage_ptr(tensor: torch.Tensor) -> int:
+    """Return the base storage pointer used to recognize static graph inputs."""
+    return tensor.untyped_storage().data_ptr()
+
+
+def _tensor_version(tensor: torch.Tensor) -> Optional[int]:
+    """Return the mutation version when the tensor tracks one."""
+    try:
+        return tensor._version
+    except RuntimeError:
+        return None
+
+
+def _saved_tensor_signature(tensor: torch.Tensor) -> Tuple[Any, ...]:
+    """Describe the layout needed to reproduce a tensor in a static arena."""
+    if tensor.layout != torch.strided:
+        raise RuntimeError(
+            "CUDA graph saved-tensor arenas only support strided tensors, "
+            f"but got layout={tensor.layout}."
+        )
+    if any(stride < 0 for stride in tensor.stride()):
+        raise RuntimeError("CUDA graph saved-tensor arenas do not support negative strides.")
+
+    if tensor.numel() == 0:
+        storage_numel = 0
+    else:
+        storage_numel = 1 + sum(
+            (size - 1) * stride for size, stride in zip(tensor.shape, tensor.stride())
+        )
+    return (
+        tuple(tensor.shape),
+        tuple(tensor.stride()),
+        tensor.dtype,
+        tensor.device,
+        tensor.requires_grad,
+        storage_numel * tensor.element_size(),
+    )
+
+
+def _input_staging_key(tensor: torch.Tensor) -> Tuple[Any, ...]:
+    """Describe user inputs that can use one forward-only staging surface."""
+    return (tensor.layout, tensor.storage_offset(), *_saved_tensor_signature(tensor))
+
+
+def _align_up(value: int, alignment: int = 256) -> int:
+    """Align byte offsets for typed tensor views into a uint8 arena."""
+    return (value + alignment - 1) // alignment * alignment
+
+
+def _io_tensor_plan(tensor: Any, kind: str) -> Optional[Tuple[Any, ...]]:
+    """Return an arena plan for plain CUDA tensors exposed across graph boundaries."""
+    if (
+        type(tensor) is not torch.Tensor
+        or not tensor.is_cuda
+        or tensor.layout != torch.strided
+        or any(stride < 0 for stride in tensor.stride())
+    ):
+        return None
+    return (kind, None, *_saved_tensor_signature(tensor))
+
+
+def _arena_view(arena: torch.Tensor, offset: int, spec: Tuple[Any, ...]) -> torch.Tensor:
+    """Materialize a typed tensor view at a byte offset in an arena."""
+    target = torch.empty((0,), dtype=spec[4], device=spec[5])
+    return target.set_(
+        arena.untyped_storage(),
+        (arena.storage_offset() + offset) // target.element_size(),
+        spec[2],
+        spec[3],
+    )
 
 
 def set_capture_start() -> None:
@@ -108,6 +183,7 @@ def _make_graphed_callables(
     pool: Optional[Tuple[int, ...]] = None,
     retain_graph_in_backward: bool = False,
     _reuse_graph_input_output_buffers: bool = False,
+    _graph_memory_slots: Optional[Sequence[Tuple[int, ...]]] = None,
     pre_warmup_hook: Optional[Callable] = None,
     post_warmup_hook: Optional[Callable] = None,
 ) -> SingleOrTuple[Callable]:
@@ -251,10 +327,29 @@ def _make_graphed_callables(
                 f"for {len(sample_args)} sample_args"
             )
 
-    # Check reuse graph conditions and reorganize sample_args and sample_kwargs.
-    # Note: When capturing a graph, we hold onto the args and kwargs so we have static buffers
-    # when the graph is replayed. If two model chunk microbatches have no overlap between their
-    # forward and backward, then we can reduce memory usage by reusing the same static buffers.
+    use_slot_memory = _graph_memory_slots is not None
+    if use_slot_memory:
+        required_checkpoint_apis = (
+            "_cuda_getCheckpointState",
+            "_cuda_setCheckpointPoolState",
+            "_cuda_checkPoolLiveAllocations",
+            "_free_And_Remove_DeleterFn",
+        )
+        missing_checkpoint_apis = [
+            name for name in required_checkpoint_apis if not hasattr(torch._C, name)
+        ]
+        if missing_checkpoint_apis:
+            raise RuntimeError(
+                "CUDA graph slot-branch checkpointing requires PyTorch allocator APIs "
+                f"{missing_checkpoint_apis}."
+            )
+        if not hasattr(tex, "_graph_checkpoint_detach_storage"):
+            raise RuntimeError(
+                "CUDA graph slot-branch checkpointing requires "
+                "transformer_engine_torch._graph_checkpoint_detach_storage."
+            )
+
+    _reuse_graph_input_buffers = _reuse_graph_input_output_buffers and not use_slot_memory
     if _reuse_graph_input_output_buffers:
         if _order is None:
             raise ValueError(
@@ -264,6 +359,43 @@ def _make_graphed_callables(
             raise RuntimeError(
                 "`_reuse_graph_input_output_buffers` is only available in training mode."
             )
+
+    saved_tensor_memory_alias_groups = None
+    saved_tensor_memory_families = None
+    slot_io_memory_alias_groups = None
+    slot_io_liveness_groups = None
+    warmup_plan_alias_groups = None
+    if use_slot_memory:
+        if _order is None or not is_training or not _reuse_graph_input_output_buffers:
+            raise RuntimeError(
+                "Graph-memory slots require a training graph with `_order` and graph buffer reuse."
+            )
+        if pool is not None:
+            raise ValueError("Graph-memory slots create and own their CUDA graph memory pool.")
+        if not hasattr(torch.cuda, "MemPool"):
+            raise RuntimeError("Graph-memory slots require torch.cuda.MemPool support.")
+        if len(_graph_memory_slots) != len(sample_args):
+            raise ValueError(
+                f"Expected {len(sample_args)} graph-memory slots, got {len(_graph_memory_slots)}."
+            )
+        if any(
+            not isinstance(slot, tuple)
+            or len(slot) != 9
+            or not all(isinstance(value, int) for value in slot)
+            for slot in _graph_memory_slots
+        ):
+            raise TypeError("Each graph-memory slot must be a tuple of nine integers.")
+        saved_tensor_memory_alias_groups = [(slot[0], slot[1]) for slot in _graph_memory_slots]
+        saved_tensor_memory_families = [(slot[2], slot[4], slot[5]) for slot in _graph_memory_slots]
+        slot_io_memory_alias_groups = [(slot[2], slot[3]) for slot in _graph_memory_slots]
+        slot_io_liveness_groups = [(slot[4], slot[5]) for slot in _graph_memory_slots]
+        warmup_plan_alias_groups = [slot[6] for slot in _graph_memory_slots]
+
+    # Check reuse graph conditions and reorganize sample_args and sample_kwargs.
+    # Note: When capturing a graph, we hold onto the args and kwargs so we have static buffers
+    # when the graph is replayed. If two model chunk microbatches have no overlap between their
+    # forward and backward, then we can reduce memory usage by reusing the same static buffers.
+    if _reuse_graph_input_buffers:
         if isinstance(sample_args, tuple):
             sample_args = list(sample_args)
         if isinstance(sample_kwargs, tuple):
@@ -403,14 +535,50 @@ def _make_graphed_callables(
     graph_callables = [None for _ in range(len(flatten_sample_args))]
 
     # For cases with multiple active RNG states, e.g. TP.
-    if graph_safe_rng_available():
+    if graph_safe_rng_available() and not bool(
+        int(os.getenv("NVTE_DISABLE_GRAPH_SAFE_RNG_REGISTRATION", "0"))
+    ):
         for _, state in get_all_rng_states().items():
             for fwd_graph, bwd_graph, bwd_dw_graph in zip(fwd_graphs, bwd_graphs, bwd_dw_graphs):
                 fwd_graph.register_generator_state(state)
                 bwd_graph.register_generator_state(state)
                 bwd_dw_graph.register_generator_state(state)
 
-    mempool = graph_pool_handle() if pool is None else pool
+    allocator_settings_to_apply = None
+    allocator_settings_to_restore = None
+    if use_slot_memory:
+        allocator_conf = os.getenv("PYTORCH_CUDA_ALLOC_CONF") or os.getenv("PYTORCH_ALLOC_CONF", "")
+        allocator_parts = [part.strip() for part in allocator_conf.split(",") if part.strip()]
+        expandable_enabled = any(
+            part.split(":", 1)[0].strip() == "expandable_segments"
+            and part.split(":", 1)[1].strip().lower() == "true"
+            for part in allocator_parts
+            if ":" in part
+        )
+        if expandable_enabled:
+            allocator_settings_setter = getattr(torch._C, "_accelerator_setAllocatorSettings", None)
+            if allocator_settings_setter is None:
+                raise RuntimeError(
+                    "Temporarily disabling expandable segments during CUDA graph capture "
+                    "requires torch._C._accelerator_setAllocatorSettings."
+                )
+            disabled_parts = [
+                (
+                    "expandable_segments:False"
+                    if part.split(":", 1)[0].strip() == "expandable_segments"
+                    else part
+                )
+                for part in allocator_parts
+            ]
+            allocator_settings_to_apply = ",".join(disabled_parts)
+            allocator_settings_to_restore = allocator_conf
+
+    if use_slot_memory:
+        slot_allocator_pool = torch.cuda.MemPool()
+        mempool = slot_allocator_pool.id
+    else:
+        slot_allocator_pool = None
+        mempool = graph_pool_handle() if pool is None else pool
 
     # Warmup
     # Hopefully prevents cudnn benchmarking and other lazy-initialization cuda work
@@ -444,9 +612,206 @@ def _make_graphed_callables(
             f"Warmup runs {len(warmup_func)} but only {len(set(warmup_func_idx))} are unique."
         )
 
+    warmup_plan_aliases = {}
+    if warmup_plan_alias_groups is not None:
+        templates = {}
+        unique_warmups = []
+        for func_idx, func in zip(warmup_func_idx, warmup_func):
+            group = warmup_plan_alias_groups[func_idx]
+            template = templates.get(group)
+            if template is None:
+                templates[group] = (func_idx, func)
+                warmup_plan_aliases[func_idx] = []
+                unique_warmups.append((func_idx, func))
+            else:
+                template_idx, template_func = template
+                if template_func is not func:
+                    raise RuntimeError(
+                        f"Warmup-plan alias group {group} spans different callable objects."
+                    )
+                warmup_plan_aliases[template_idx].append(func_idx)
+        # Alias-group IDs also define the communicator warmup order. Dynamic-CP captures use
+        # variant 0 for the largest CP group, even though mutually exclusive smaller branches
+        # must appear first in the formal graph order for memory liveness. Warm the largest
+        # group first so its P2P ring is fully initialized before switching among subgroups.
+        ordered_warmups = sorted(unique_warmups, key=lambda item: warmup_plan_alias_groups[item[0]])
+        warmup_func_idx = [func_idx for func_idx, _ in ordered_warmups]
+        warmup_func = [func for _, func in ordered_warmups]
+
     # Filter the TE modules that cudagraph can access.
     visited_te_modules = {}
     need_bwd_dw_graph = {}
+    per_callable_fused_wgrad_params = {}
+    if use_slot_memory:
+        num_graph_inputs = len(flatten_sample_args)
+        per_callable_saved_tensor_plans = [None] * num_graph_inputs
+        per_callable_saved_tensor_boundary_aliases = [None] * num_graph_inputs
+        per_callable_output_tensor_plans = [None] * num_graph_inputs
+        per_callable_user_grad_tensor_plans = [None] * num_graph_inputs
+        per_callable_param_grad_tensor_targets = None
+        per_callable_external_storage_ptrs = [
+            {
+                _tensor_storage_ptr(tensor)
+                for tensor in static_input_surface
+                if isinstance(tensor, torch.Tensor)
+            }
+            for static_input_surface in per_callable_static_input_surfaces
+        ]
+        per_callable_snapshot_input_storage_ptrs = []
+        for func_idx, args in enumerate(sample_args):
+            if not args or type(args[0]) is not torch.Tensor or not args[0].is_cuda:
+                raise RuntimeError(
+                    "Slot user-input snapshots require the first positional argument for "
+                    f"graph input {func_idx} to be a plain CUDA tensor."
+                )
+            if flatten_sample_args[func_idx][0] is not args[0]:
+                raise RuntimeError(
+                    "Slot user-input snapshots require the first positional tensor to be the "
+                    "first flattened graph input."
+                )
+            per_callable_snapshot_input_storage_ptrs.append(_tensor_storage_ptr(args[0]))
+    else:
+        per_callable_saved_tensor_plans = None
+        per_callable_saved_tensor_boundary_aliases = None
+        per_callable_output_tensor_plans = None
+        per_callable_user_grad_tensor_plans = None
+        per_callable_param_grad_tensor_targets = None
+        per_callable_external_storage_ptrs = None
+        per_callable_snapshot_input_storage_ptrs = None
+
+    def clone_warmup_plan(template_idx, target_idx):
+        """Clone one shape-identical warmup observation onto another static slot."""
+        source_args = flatten_sample_args[template_idx]
+        target_args = flatten_sample_args[target_idx]
+        if len(source_args) != len(target_args):
+            raise RuntimeError(
+                f"Warmup-plan aliases {template_idx} and {target_idx} expose different "
+                "numbers of user tensors."
+            )
+
+        external_storage_map = {}
+        for source, target in zip(source_args, target_args):
+            if _input_staging_key(source) != _input_staging_key(target):
+                raise RuntimeError(
+                    f"Warmup-plan aliases {template_idx} and {target_idx} have incompatible "
+                    "user tensor surfaces."
+                )
+            source_ptr = _tensor_storage_ptr(source)
+            target_ptr = _tensor_storage_ptr(target)
+            previous_target = external_storage_map.setdefault(source_ptr, target_ptr)
+            if previous_target != target_ptr:
+                raise RuntimeError(
+                    f"Warmup-plan alias {target_idx} changes an input storage alias from "
+                    f"{previous_target} to {target_ptr}."
+                )
+
+        source_plan = per_callable_saved_tensor_plans[template_idx]
+        if source_plan is None:
+            raise RuntimeError(f"Warmup template {template_idx} has no saved-tensor plan.")
+        per_callable_saved_tensor_plans[target_idx] = [
+            (
+                (spec[0], external_storage_map.get(spec[1], spec[1]), *spec[2:])
+                if spec[0] == "external"
+                else spec
+            )
+            for spec in source_plan
+        ]
+        per_callable_saved_tensor_boundary_aliases[target_idx] = list(
+            per_callable_saved_tensor_boundary_aliases[template_idx]
+        )
+        for plans in (
+            per_callable_output_tensor_plans,
+            per_callable_user_grad_tensor_plans,
+        ):
+            plans[target_idx] = list(plans[template_idx])
+
+        per_callable_module_params[target_idx] = per_callable_module_params[template_idx]
+        per_callable_static_input_surfaces[target_idx] = (
+            target_args + per_callable_module_params[target_idx]
+        )
+        visited_te_modules[target_idx] = set(visited_te_modules.get(template_idx, set()))
+        per_callable_fused_wgrad_params[target_idx] = set(
+            per_callable_fused_wgrad_params.get(template_idx, set())
+        )
+        need_bwd_dw_graph[target_idx] = need_bwd_dw_graph.get(template_idx, False)
+
+    def update_warmup_plan(plans, func_idx, observed_plan, phase):
+        """Record a stable slot-memory plan across warmup iterations."""
+        expected_plan = plans[func_idx]
+        if expected_plan is None:
+            plans[func_idx] = observed_plan
+        elif expected_plan != observed_plan:
+            raise RuntimeError(
+                f"{phase} saved tensors changed across CUDA graph warmup iterations "
+                f"for graph input {func_idx}."
+            )
+
+    def observe_saved_tensor_boundary_aliases(
+        func_idx, saved_tensors, saved_versions, outputs, saved_plan
+    ):
+        """Record native saves that are byte ranges of public graph boundaries."""
+        boundaries = []
+        for kind, tensors in (
+            (
+                "input",
+                per_callable_static_input_surfaces[func_idx][
+                    : per_callable_len_user_args[func_idx]
+                ],
+            ),
+            ("output", outputs),
+        ):
+            for tensor_idx, tensor in enumerate(tensors):
+                if not isinstance(tensor, torch.Tensor) or not tensor.is_cuda:
+                    continue
+                span_bytes = _saved_tensor_signature(tensor)[-1]
+                start = tensor.storage_offset() * tensor.element_size()
+                boundaries.append(
+                    (
+                        tensor.untyped_storage()._cdata,
+                        start,
+                        start + span_bytes,
+                        span_bytes,
+                        kind,
+                        tensor_idx,
+                        _tensor_version(tensor),
+                    )
+                )
+
+        aliases = []
+        for tensor, saved_version, spec in zip(saved_tensors, saved_versions, saved_plan):
+            if spec[0] != "native" or spec[7] == 0:
+                aliases.append(None)
+                continue
+            saved_start = tensor.storage_offset() * tensor.element_size()
+            saved_end = saved_start + spec[7]
+            storage_id = tensor.untyped_storage()._cdata
+            candidates = [
+                (
+                    span_bytes,
+                    kind,
+                    tensor_idx,
+                    saved_start - boundary_start,
+                    saved_version is not None and saved_version == boundary_version,
+                )
+                for (
+                    boundary_storage_id,
+                    boundary_start,
+                    boundary_end,
+                    span_bytes,
+                    kind,
+                    tensor_idx,
+                    boundary_version,
+                ) in boundaries
+                if boundary_storage_id == storage_id
+                and boundary_start <= saved_start
+                and saved_end <= boundary_end
+            ]
+            aliases.append(
+                min(candidates, key=lambda candidate: (not candidate[4], candidate[:4]))
+                if candidates
+                else None
+            )
+        return aliases
 
     # Run warmup and do the above filtering.
     with torch.cuda.stream(torch.cuda.Stream()):
@@ -454,6 +819,10 @@ def _make_graphed_callables(
             args = sample_args[func_idx]
             kwargs = sample_kwargs[func_idx]
             static_input_surface = per_callable_static_input_surfaces[func_idx]
+            if per_callable_external_storage_ptrs is not None and isinstance(func, torch.nn.Module):
+                per_callable_external_storage_ptrs[func_idx].update(
+                    _tensor_storage_ptr(buffer) for buffer in func.buffers()
+                )
 
             def hook_fn(
                 module, inputs, outputs, func_idx=func_idx
@@ -487,7 +856,79 @@ def _make_graphed_callables(
                 for module in func.modules():
                     hook = module.register_forward_hook(hook_fn)
                     hooks.append(hook)
-                outputs, _ = _tree_flatten(func(*args, **kwargs))
+
+                if use_slot_memory:
+                    observed_saved_tensor_plan = []
+                    observed_saved_tensors = []
+                    observed_saved_versions = []
+                    copied_storages = {}
+
+                    def record_saved_tensor(tensor):
+                        observed_saved_tensors.append(tensor)
+                        observed_saved_versions.append(_tensor_version(tensor))
+                        storage_ptr = _tensor_storage_ptr(tensor)
+                        signature = _saved_tensor_signature(tensor)
+                        snapshot_user_input = (
+                            tensor.is_cuda
+                            and storage_ptr == per_callable_snapshot_input_storage_ptrs[func_idx]
+                        )
+                        is_external = not tensor.is_cuda or (
+                            storage_ptr in per_callable_external_storage_ptrs[func_idx]
+                            and not snapshot_user_input
+                        )
+                        if not is_external and type(tensor) is not torch.Tensor:
+                            raise RuntimeError(
+                                "CUDA graph saved-tensor arenas do not yet support tensor "
+                                f"subclass {type(tensor).__name__}."
+                            )
+                        storage_group = None
+                        storage_offset_bytes = None
+                        if not is_external:
+                            storage_identity = (storage_ptr, _tensor_version(tensor))
+                            storage_group = copied_storages.setdefault(
+                                storage_identity, len(copied_storages)
+                            )
+                            storage_offset_bytes = tensor.storage_offset() * tensor.element_size()
+                        observed_saved_tensor_plan.append(
+                            (
+                                "external" if is_external else "native",
+                                storage_ptr if is_external else None,
+                                *signature,
+                                storage_group,
+                                storage_offset_bytes,
+                            )
+                        )
+                        return tensor
+
+                    with torch.autograd.graph.saved_tensors_hooks(record_saved_tensor, lambda x: x):
+                        outputs, _ = _tree_flatten(func(*args, **kwargs))
+                    observed_boundary_aliases = observe_saved_tensor_boundary_aliases(
+                        func_idx,
+                        observed_saved_tensors,
+                        observed_saved_versions,
+                        outputs,
+                        observed_saved_tensor_plan,
+                    )
+                    update_warmup_plan(
+                        per_callable_saved_tensor_plans,
+                        func_idx,
+                        observed_saved_tensor_plan,
+                        "Forward",
+                    )
+                    update_warmup_plan(
+                        per_callable_saved_tensor_boundary_aliases,
+                        func_idx,
+                        observed_boundary_aliases,
+                        "Forward boundary alias",
+                    )
+                    update_warmup_plan(
+                        per_callable_output_tensor_plans,
+                        func_idx,
+                        [_io_tensor_plan(output, "output") for output in outputs],
+                        "Output",
+                    )
+                else:
+                    outputs, _ = _tree_flatten(func(*args, **kwargs))
                 for hook in hooks:
                     hook.remove()
                 if is_training:
@@ -501,6 +942,27 @@ def _make_graphed_callables(
                             grad_tensors=tuple(torch.empty_like(o) for o in outputs_requiring_grad),
                         )
                         grad_inputs = tuple(input.grad for input in inputs)
+                    if use_slot_memory:
+                        observed_user_grad_tensor_plan = []
+                        grad_idx = 0
+                        for input_idx, input_tensor in enumerate(static_input_surface):
+                            grad_input = None
+                            if (
+                                isinstance(input_tensor, torch.Tensor)
+                                and input_tensor.requires_grad
+                            ):
+                                grad_input = grad_inputs[grad_idx]
+                                grad_idx += 1
+                            if input_idx < per_callable_len_user_args[func_idx]:
+                                observed_user_grad_tensor_plan.append(
+                                    _io_tensor_plan(grad_input, "user_grad")
+                                )
+                        update_warmup_plan(
+                            per_callable_user_grad_tensor_plans,
+                            func_idx,
+                            observed_user_grad_tensor_plan,
+                            "User-gradient output",
+                        )
 
                     # Filter module params that get None grad from grad_inputs and remove them
                     # from static_input_surface. This is to ensure that the backward hooks
@@ -512,8 +974,27 @@ def _make_graphed_callables(
                     for i, arg in enumerate(static_input_surface):
                         if arg.requires_grad:
                             required_grad_input_idx.append(i)
+                    fused_wgrad_params = set()
+                    if use_slot_memory:
+                        for module in visited_te_modules.get(func_idx, set()):
+                            if not (
+                                isinstance(module, TransformerEngineBaseModule)
+                                and getattr(module, "fuse_wgrad_accumulation", False)
+                            ):
+                                continue
+                            for name in getattr(module, "weight_names", ()):
+                                param = getattr(module, name, None)
+                                if isinstance(param, torch.nn.Parameter) and param.requires_grad:
+                                    fused_wgrad_params.add(param)
+                                    get_dummy_wgrad(
+                                        list(param.shape),
+                                        param.dtype,
+                                        zero=getattr(param, "zero_out_wgrad", False),
+                                    )
+                    per_callable_fused_wgrad_params[func_idx] = fused_wgrad_params
                     module_params_with_grad = []
                     for grad_inputs_idx, inputs_idx in enumerate(required_grad_input_idx):
+                        input_tensor = static_input_surface[inputs_idx]
                         if (
                             grad_inputs[grad_inputs_idx] is None
                             and grad_inputs_idx < num_required_grad_sample_args
@@ -523,11 +1004,14 @@ def _make_graphed_callables(
                                     "The input tensor requires grad, but the grad is None after"
                                     " backward pass."
                                 )
-                        elif (
+                        elif grad_inputs_idx >= num_required_grad_sample_args and (
                             grad_inputs[grad_inputs_idx] is not None
-                            and grad_inputs_idx >= num_required_grad_sample_args
+                            or input_tensor in fused_wgrad_params
                         ):
-                            module_params_with_grad.append(static_input_surface[inputs_idx])
+                            # Fused wgrad writes directly into main_grad. Keep its parameter as
+                            # an autograd input even when no ordinary param.grad was materialized,
+                            # so replay can still trigger AccumulateGrad/DDP hooks.
+                            module_params_with_grad.append(input_tensor)
                     if len(module_params_with_grad) != len(per_callable_module_params[func_idx]):
                         if warmup_iter != 0:
                             raise RuntimeError(
@@ -551,13 +1035,1125 @@ def _make_graphed_callables(
                 else:
                     grad_inputs = None
                 del outputs, grad_inputs
+                if is_training:
+                    del outputs_requiring_grad
+                    if use_slot_memory:
+                        grad_input = None
             if post_warmup_hook is not None:
                 post_warmup_hook()
+            if warmup_plan_alias_groups is not None:
+                # Dynamic-CP warmup callables can replace the CP process group while TE still
+                # has asynchronous CP/TP work queued on auxiliary streams. Drain every observed
+                # callable before changing groups; otherwise one TP peer can enter the next
+                # variant while the other is still completing the previous CP ring.
+                torch.cuda.synchronize()
+            for target_idx in warmup_plan_aliases.get(func_idx, ()):
+                clone_warmup_plan(func_idx, target_idx)
     torch.cuda.synchronize()
+
+    if use_slot_memory:
+        per_callable_param_grad_tensor_targets = [
+            [None] * len(static_input_surface)
+            for static_input_surface in per_callable_static_input_surfaces
+        ]
+
+    if allocator_settings_to_apply is not None:
+        torch._C._accelerator_setAllocatorSettings(allocator_settings_to_apply)
+
+    if use_slot_memory:
+        if isinstance(sample_args, tuple):
+            sample_args = list(sample_args)
+
+        staging_group_by_key = {}
+        staging_groups = []
+        for func_idx, args in enumerate(sample_args):
+            old_input = args[0]
+            saved_arena_id, _ = saved_tensor_memory_alias_groups[func_idx]
+            staging_key = (saved_arena_id, _input_staging_key(old_input))
+            group_idx = staging_group_by_key.get(staging_key)
+            if group_idx is None:
+                group_idx = len(staging_groups)
+                staging_group_by_key[staging_key] = group_idx
+                staging_groups.append({"members": [], "candidates": {}})
+            group = staging_groups[group_idx]
+            group["members"].append(func_idx)
+            group["candidates"].setdefault(old_input.untyped_storage()._cdata, old_input)
+
+        # MCore's sample-input plan and the union liveness coloring are each safe in
+        # isolation, but reusing an arbitrary representative can transitively merge two
+        # conflicting colors. Match colors onto distinct existing storages first, then
+        # allocate only when the original CP-variant plans do not provide enough choices.
+        storage_owner = {}
+        staging_targets = {}
+
+        def match_staging_group(group_idx, seen_storages):
+            for storage_id, tensor in staging_groups[group_idx]["candidates"].items():
+                if storage_id in seen_storages:
+                    continue
+                seen_storages.add(storage_id)
+                previous_group = storage_owner.get(storage_id)
+                if previous_group is None or match_staging_group(previous_group, seen_storages):
+                    storage_owner[storage_id] = group_idx
+                    staging_targets[group_idx] = tensor
+                    return True
+            return False
+
+        for group_idx in sorted(
+            range(len(staging_groups)),
+            key=lambda index: len(staging_groups[index]["candidates"]),
+        ):
+            match_staging_group(group_idx, set())
+
+        for group_idx, group in enumerate(staging_groups):
+            input_target = staging_targets.get(group_idx)
+            if input_target is None:
+                source = next(iter(group["candidates"].values()))
+                signature = _saved_tensor_signature(source)
+                storage_numel = signature[-1] // source.element_size()
+                backing = torch.empty(
+                    (source.storage_offset() + storage_numel,),
+                    dtype=source.dtype,
+                    device=source.device,
+                )
+                input_target = torch.empty((0,), dtype=source.dtype, device=source.device).set_(
+                    backing.untyped_storage(),
+                    source.storage_offset(),
+                    source.shape,
+                    source.stride(),
+                )
+                with torch.no_grad():
+                    input_target.copy_(source)
+                input_target.requires_grad_(source.requires_grad)
+                staging_targets[group_idx] = input_target
+
+            for func_idx in group["members"]:
+                args = sample_args[func_idx]
+                old_input = args[0]
+                if input_target is old_input:
+                    continue
+
+                args = list(args)
+                args[0] = input_target
+                sample_args[func_idx] = tuple(args)
+                flattened_args = list(flatten_sample_args[func_idx])
+                flattened_args[0] = input_target
+                flatten_sample_args[func_idx] = tuple(flattened_args)
+                static_input_surface = list(per_callable_static_input_surfaces[func_idx])
+                static_input_surface[0] = input_target
+                per_callable_static_input_surfaces[func_idx] = tuple(static_input_surface)
+
+    def prepare_native_io_targets(per_callable_plans, kind):
+        """Validate same-slot CP branches and create their lazy alias targets."""
+        if per_callable_plans is None:
+            return None
+
+        plans_by_family = {}
+        for func_idx, plan in enumerate(per_callable_plans):
+            arena_id, branch_id = slot_io_memory_alias_groups[func_idx]
+            family = (arena_id, *slot_io_liveness_groups[func_idx])
+            branch_plans = plans_by_family.setdefault(family, {})
+            if branch_id in branch_plans:
+                raise RuntimeError(
+                    f"CUDA graph {kind} family {family} has duplicate branch {branch_id}."
+                )
+            branch_plans[branch_id] = plan
+
+        for family, branch_plans in plans_by_family.items():
+            plans = list(branch_plans.values())
+            if len({len(plan) for plan in plans}) != 1:
+                raise RuntimeError(
+                    f"CUDA graph {kind} family {family} exposes different tensor counts."
+                )
+            for tensor_idx, specs in enumerate(zip(*plans)):
+                if all(spec is None for spec in specs):
+                    continue
+                if any(spec is None for spec in specs):
+                    raise RuntimeError(
+                        f"CUDA graph {kind} family {family} has an incompatible tensor "
+                        f"at position {tensor_idx}."
+                    )
+                layout_keys = {(spec[0], spec[4], spec[5], spec[6]) for spec in specs}
+                if layout_keys != {(kind, specs[0][4], specs[0][5], specs[0][6])}:
+                    raise RuntimeError(
+                        f"CUDA graph {kind} family {family} has incompatible dtype, device, "
+                        f"or autograd state at position {tensor_idx}."
+                    )
+
+        return [[None] * len(plan) for plan in per_callable_plans]
+
+    per_callable_output_tensor_targets = prepare_native_io_targets(
+        per_callable_output_tensor_plans, "output"
+    )
+    per_callable_user_grad_tensor_targets = prepare_native_io_targets(
+        per_callable_user_grad_tensor_plans, "user_grad"
+    )
+
+    native_io_family_sizes = {}
+    if use_slot_memory:
+        for func_idx in range(len(flatten_sample_args)):
+            arena_id, _ = slot_io_memory_alias_groups[func_idx]
+            family = (arena_id, *slot_io_liveness_groups[func_idx])
+            native_io_family_sizes[family] = native_io_family_sizes.get(family, 0) + 1
+    native_io_anchors = {"output": {}, "user_grad": {}, "param_grad": {}}
+    native_io_capture_counts = {"output": {}, "user_grad": {}, "param_grad": {}}
+    release_native_io_targets = use_slot_memory
+
+    def native_io_alias_target(func_idx, tensor_idx, tensor, spec, kind):
+        """Alias one CP branch onto the first branch's graph-pool I/O storage."""
+        arena_id, _ = slot_io_memory_alias_groups[func_idx]
+        family = (arena_id, *slot_io_liveness_groups[func_idx])
+        key = (*family, tensor_idx)
+        anchors = native_io_anchors[kind]
+        counts = native_io_capture_counts[kind]
+        anchor = anchors.get(key)
+        if anchor is None:
+            target = tensor
+            anchors[key] = tensor
+        else:
+            available_bytes = anchor.untyped_storage().nbytes() - (
+                anchor.storage_offset() * anchor.element_size()
+            )
+            if spec[7] > available_bytes:
+                raise RuntimeError(
+                    f"CUDA graph native {kind} alias {key} needs {spec[7]} bytes, "
+                    f"but its first CP branch exposes only {available_bytes} bytes."
+                )
+            target = _arena_view(anchor, 0, spec)
+
+        captured = counts.get(key, 0) + 1
+        expected = native_io_family_sizes[family]
+        if captured > expected:
+            raise RuntimeError(
+                f"CUDA graph native {kind} alias {key} captured {captured} of "
+                f"{expected} CP branches."
+            )
+        if captured == expected:
+            anchors.pop(key)
+            counts.pop(key, None)
+        else:
+            counts[key] = captured
+        return target
+
+    def clear_native_io_target_rows(func_indices, clear_outputs=False, clear_grads=False):
+        """Drop capture-only I/O aliases after the corresponding TE value dies."""
+        if not release_native_io_targets:
+            return
+        for func_idx in func_indices:
+            if clear_outputs:
+                per_callable_output_tensor_targets[func_idx] = [None] * len(
+                    per_callable_output_tensor_targets[func_idx]
+                )
+            if clear_grads:
+                per_callable_user_grad_tensor_targets[func_idx] = [None] * len(
+                    per_callable_user_grad_tensor_targets[func_idx]
+                )
+
+    def copy_outputs_to_slot_arena(func_idx, flatten_outputs):
+        """Copy public forward outputs to the fixed surface for their physical slot."""
+        if per_callable_output_tensor_targets is None:
+            return flatten_outputs
+        plan = per_callable_output_tensor_plans[func_idx]
+        targets = per_callable_output_tensor_targets[func_idx]
+        if len(flatten_outputs) != len(plan):
+            raise RuntimeError(
+                f"CUDA graph input {func_idx} changed its output count during capture."
+            )
+        copied_outputs = []
+        for tensor_idx, (output, spec, target) in enumerate(zip(flatten_outputs, plan, targets)):
+            if spec != _io_tensor_plan(output, "output"):
+                raise RuntimeError(
+                    f"CUDA graph input {func_idx} changed its output tensor surface during capture."
+                )
+            if target is None:
+                if spec is None:
+                    copied_outputs.append(output)
+                    continue
+                target = native_io_alias_target(func_idx, tensor_idx, output, spec, "output")
+                targets[tensor_idx] = target
+            if target is not output:
+                target.copy_(output)
+            copied_outputs.append(target)
+        return copied_outputs
+
+    def copy_user_grads_to_slot_arena(func_idx, static_input_surface, grad_inputs):
+        """Copy returned gradients to the fixed surface for their physical slot."""
+        if per_callable_user_grad_tensor_targets is None:
+            return grad_inputs
+        plan = per_callable_user_grad_tensor_plans[func_idx]
+        targets = per_callable_user_grad_tensor_targets[func_idx]
+        copied_grad_inputs = []
+        grad_idx = 0
+        for input_idx, input_tensor in enumerate(static_input_surface):
+            if not (isinstance(input_tensor, torch.Tensor) and input_tensor.requires_grad):
+                continue
+            grad_input = grad_inputs[grad_idx]
+            grad_idx += 1
+            if input_idx < per_callable_len_user_args[func_idx]:
+                spec = plan[input_idx]
+                target = targets[input_idx]
+                if spec != _io_tensor_plan(grad_input, "user_grad"):
+                    raise RuntimeError(
+                        f"CUDA graph input {func_idx} changed its user-gradient tensor "
+                        "surface during capture."
+                    )
+                if target is None and spec is not None:
+                    target = native_io_alias_target(
+                        func_idx, input_idx, grad_input, spec, "user_grad"
+                    )
+                    targets[input_idx] = target
+                if target is not None:
+                    if target is not grad_input:
+                        with torch.no_grad():
+                            target.copy_(grad_input)
+                    grad_input = target
+            elif per_callable_param_grad_tensor_targets is not None and grad_input is not None:
+                spec = _io_tensor_plan(grad_input, "param_grad")
+                if spec is None:
+                    raise RuntimeError(
+                        f"CUDA graph input {func_idx} produced an unsupported parameter-gradient "
+                        f"tensor at input position {input_idx}."
+                    )
+                target = per_callable_param_grad_tensor_targets[func_idx][input_idx]
+                if target is None:
+                    target = native_io_alias_target(
+                        func_idx, input_idx, grad_input, spec, "param_grad"
+                    )
+                    per_callable_param_grad_tensor_targets[func_idx][input_idx] = target
+                if target is not grad_input:
+                    with torch.no_grad():
+                        target.copy_(grad_input)
+                grad_input = target
+            copied_grad_inputs.append(grad_input)
+        return tuple(copied_grad_inputs)
+
+    per_callable_native_saved_storages = [dict() for _ in flatten_sample_args]
+    per_callable_native_saved_intervals = [[] for _ in flatten_sample_args]
+    per_callable_native_saved_capture_targets = [None] * len(flatten_sample_args)
+
+    def plan_native_saved_alias_targets(
+        plan,
+        canonical_targets,
+        measure_spill=False,
+        protected_storage_ranges=None,
+        preassigned_targets=None,
+    ):
+        """Pack one CP branch's native saved tensors into canonical live storages."""
+        protected_storage_ranges = protected_storage_ranges or {}
+        if preassigned_targets is None:
+            target_views = [None] * len(plan)
+        else:
+            if len(preassigned_targets) != len(plan):
+                raise RuntimeError("Native saved preassignment does not match its plan.")
+            target_views = list(preassigned_targets)
+        storage_banks = []
+        seen_storages = set()
+        for target in canonical_targets:
+            if target is None:
+                continue
+            storage = target.untyped_storage()
+            if storage._cdata in seen_storages:
+                continue
+            seen_storages.add(storage._cdata)
+            cursor = 0
+            for protected_start, protected_end in protected_storage_ranges.get(storage._cdata, ()):
+                if cursor < protected_start:
+                    storage_banks.append(
+                        {
+                            "storage": storage,
+                            "base_offset": cursor,
+                            "capacity": protected_start - cursor,
+                            "cursor": 0,
+                        }
+                    )
+                cursor = max(cursor, protected_end)
+            if cursor < storage.nbytes():
+                storage_banks.append(
+                    {
+                        "storage": storage,
+                        "base_offset": cursor,
+                        "capacity": storage.nbytes() - cursor,
+                        "cursor": 0,
+                    }
+                )
+        records_by_storage_group = {}
+        for saved_idx, spec in enumerate(plan):
+            if spec[0] != "native":
+                continue
+            if target_views[saved_idx] is not None:
+                continue
+            if spec[7] == 0:
+                target = torch.empty_strided(spec[2], spec[3], dtype=spec[4], device=spec[5])
+                target.requires_grad_(spec[6])
+                target_views[saved_idx] = target
+                continue
+            storage_group = spec[8]
+            storage_offset_bytes = spec[9]
+            if storage_group is None or storage_offset_bytes is None:
+                raise RuntimeError(f"Native saved tensor {saved_idx} has no backing-storage plan.")
+            records_by_storage_group.setdefault(storage_group, []).append(
+                (storage_offset_bytes, storage_offset_bytes + spec[7], saved_idx)
+            )
+
+        components = []
+        for records in records_by_storage_group.values():
+            records.sort()
+            group_components = []
+            for start, end, saved_idx in records:
+                if not group_components or start >= group_components[-1][1]:
+                    group_components.append([start, end, [(start, saved_idx)]])
+                else:
+                    group_components[-1][1] = max(group_components[-1][1], end)
+                    group_components[-1][2].append((start, saved_idx))
+            components.extend(group_components)
+
+        packed_components = []
+        for component_start, component_end, component_records in components:
+            component_alignment = max(
+                plan[saved_idx][4].itemsize for _, saved_idx in component_records
+            )
+            component_origin = component_start // component_alignment * component_alignment
+            packed_components.append(
+                (
+                    component_end - component_origin,
+                    component_origin,
+                    component_records,
+                )
+            )
+
+        banks = list(storage_banks)
+        spill_bank = None
+        if measure_spill:
+            spill_bank = {
+                "storage": None,
+                "base_offset": 0,
+                "capacity": sum(_align_up(item[0]) for item in packed_components),
+                "cursor": 0,
+            }
+            banks.append(spill_bank)
+        for component_size, component_origin, component_records in sorted(
+            packed_components, key=lambda item: item[0], reverse=True
+        ):
+            candidates = []
+            for bank_idx, bank in enumerate(banks):
+                if bank["storage"] is None:
+                    continue
+                offset = _align_up(bank["cursor"])
+                if offset + component_size <= bank["capacity"]:
+                    candidates.append(
+                        (bank["capacity"] - offset - component_size, bank_idx, offset)
+                    )
+            if not candidates and spill_bank is not None:
+                spill_bank_idx = len(banks) - 1
+                spill_offset = _align_up(spill_bank["cursor"])
+                if spill_offset + component_size <= spill_bank["capacity"]:
+                    candidates.append((0, spill_bank_idx, spill_offset))
+            if not candidates:
+                raise RuntimeError(
+                    "CUDA graph CP branch native saved tensors do not fit in canonical "
+                    "live storages: "
+                    f"component_bytes={component_size}, "
+                    f"component_sizes={sorted((item[0] for item in packed_components), reverse=True)}, "
+                    f"storage_capacities={sorted((bank['capacity'] for bank in banks), reverse=True)}."
+                )
+            _, bank_idx, component_target_offset = min(candidates)
+            bank = banks[bank_idx]
+            bank["cursor"] = component_target_offset + component_size
+            for source_offset, saved_idx in component_records:
+                if bank["storage"] is None:
+                    target_views[saved_idx] = True
+                    continue
+                spec = plan[saved_idx]
+                target_offset = (
+                    bank["base_offset"] + component_target_offset + source_offset - component_origin
+                )
+                itemsize = spec[4].itemsize
+                if target_offset % itemsize:
+                    raise RuntimeError(
+                        f"Native saved tensor {saved_idx} has an unaligned canonical offset."
+                    )
+                target = torch.empty((0,), dtype=spec[4], device=spec[5]).set_(
+                    bank["storage"],
+                    target_offset // itemsize,
+                    spec[2],
+                    spec[3],
+                )
+                target.requires_grad_(spec[6])
+                target_views[saved_idx] = target
+
+        if measure_spill:
+            return _align_up(spill_bank["cursor"])
+
+        missing = [
+            saved_idx
+            for saved_idx, spec in enumerate(plan)
+            if spec[0] == "native" and target_views[saved_idx] is None
+        ]
+        if missing:
+            raise RuntimeError(f"Native saved tensors have no canonical targets: {missing}.")
+        return tuple(target_views)
+
+    def semantic_boundary_alias_targets(canonical_func_idx, sibling_func_idx):
+        """Map boundary-backed sibling saves onto the boundary address used at replay."""
+        plan = per_callable_saved_tensor_plans[sibling_func_idx]
+        aliases = per_callable_saved_tensor_boundary_aliases[sibling_func_idx]
+        targets = [None] * len(plan)
+        records_by_storage_group = {}
+        for saved_idx, spec in enumerate(plan):
+            if spec[0] != "native" or spec[7] == 0:
+                continue
+            records_by_storage_group.setdefault(spec[8], []).append(
+                (spec[9], spec[9] + spec[7], saved_idx)
+            )
+
+        components = []
+        for records in records_by_storage_group.values():
+            records.sort()
+            group_components = []
+            for start, end, saved_idx in records:
+                if not group_components or start >= group_components[-1][1]:
+                    group_components.append([start, end, [saved_idx]])
+                else:
+                    group_components[-1][1] = max(group_components[-1][1], end)
+                    group_components[-1][2].append(saved_idx)
+            components.extend(group_components)
+
+        for component_start, component_end, component_saved_indices in components:
+            candidate_aliases = [
+                (saved_idx, aliases[saved_idx])
+                for saved_idx in component_saved_indices
+                if aliases[saved_idx] is not None
+            ]
+            if not candidate_aliases:
+                continue
+
+            # An alias only proves that one saved view is a graph-boundary view.  Reusing
+            # the boundary for its whole overlapping storage component is safe only when
+            # every byte in that component is part of the same logical boundary tensor.
+            component_aliases = []
+            for saved_idx, alias in candidate_aliases:
+                boundary_span_bytes, _, _, relative_offset, version_matches = alias
+                if not version_matches:
+                    continue
+                source_boundary_start = plan[saved_idx][9] - relative_offset
+                source_boundary_end = source_boundary_start + boundary_span_bytes
+                if (
+                    source_boundary_start <= component_start
+                    and component_end <= source_boundary_end
+                ):
+                    component_aliases.append((saved_idx, alias))
+            if not component_aliases:
+                continue
+
+            anchor_storage = None
+            anchor_shift = None
+            for saved_idx, alias in component_aliases:
+                _, kind, boundary_idx, relative_offset, _ = alias
+                if kind == "input":
+                    boundary = per_callable_static_input_surfaces[sibling_func_idx][boundary_idx]
+                else:
+                    boundary = per_callable_static_outputs[canonical_func_idx][boundary_idx]
+                if not isinstance(boundary, torch.Tensor) or not boundary.is_cuda:
+                    raise RuntimeError(
+                        f"CUDA graph {kind} boundary {boundary_idx} is not a CUDA tensor."
+                    )
+
+                spec = plan[saved_idx]
+                storage = boundary.untyped_storage()
+                boundary_start = boundary.storage_offset() * boundary.element_size()
+                shift = boundary_start + relative_offset - spec[9]
+                if anchor_storage is None:
+                    anchor_storage = storage
+                    anchor_shift = shift
+                elif anchor_storage._cdata != storage._cdata or anchor_shift != shift:
+                    raise RuntimeError(
+                        "CUDA graph overlapping saved tensors have inconsistent boundary "
+                        f"aliases: func={sibling_func_idx}, saved={component_saved_indices}."
+                    )
+
+            for saved_idx in component_saved_indices:
+                spec = plan[saved_idx]
+                target_offset = spec[9] + anchor_shift
+                if target_offset < 0 or target_offset + spec[7] > anchor_storage.nbytes():
+                    raise RuntimeError(
+                        "CUDA graph boundary-backed saved component does not fit its replay "
+                        f"storage: func={sibling_func_idx}, saved={saved_idx}, "
+                        f"offset={target_offset}, bytes={spec[7]}, "
+                        f"storage_bytes={anchor_storage.nbytes()}."
+                    )
+                itemsize = spec[4].itemsize
+                if target_offset % itemsize:
+                    raise RuntimeError(
+                        f"CUDA graph boundary-backed saved tensor {saved_idx} is unaligned."
+                    )
+                target = torch.empty((0,), dtype=spec[4], device=spec[5]).set_(
+                    anchor_storage,
+                    target_offset // itemsize,
+                    spec[2],
+                    spec[3],
+                )
+                target.requires_grad_(spec[6])
+                targets[saved_idx] = target
+        return tuple(targets)
+
+    def materialize_native_saved_spill_targets(canonical_func_indices):
+        """Complete canonical saved-tensor storage for every same-slot CP branch."""
+        completed_targets = []
+        protected_ranges = {}
+        preassigned_targets = {}
+
+        for func_idx in canonical_func_indices:
+            targets = per_callable_native_saved_capture_targets[func_idx]
+            if targets is None:
+                raise RuntimeError("CUDA graph canonical CP branch did not retain saved targets.")
+
+            storage_ranges = {}
+            boundary_tensors = (
+                *per_callable_static_input_surfaces[func_idx][
+                    : per_callable_len_user_args[func_idx]
+                ],
+                *per_callable_static_outputs[func_idx],
+            )
+            for tensor in boundary_tensors:
+                if not isinstance(tensor, torch.Tensor) or not tensor.is_cuda:
+                    continue
+                storage = tensor.untyped_storage()
+                storage_ranges.setdefault(storage._cdata, []).append((0, storage.nbytes()))
+            for storage_id, ranges in storage_ranges.items():
+                merged = []
+                for start, end in sorted(ranges):
+                    if not merged or start > merged[-1][1]:
+                        merged.append([start, end])
+                    else:
+                        merged[-1][1] = max(merged[-1][1], end)
+                storage_ranges[storage_id] = tuple(map(tuple, merged))
+
+            family = saved_tensor_memory_families[func_idx]
+            sibling_indices = [
+                sibling_idx
+                for sibling_idx, sibling_family in enumerate(saved_tensor_memory_families)
+                if sibling_family == family
+            ]
+            for sibling_idx in sibling_indices:
+                protected_ranges[sibling_idx] = storage_ranges
+                preassigned_targets[sibling_idx] = (
+                    semantic_boundary_alias_targets(func_idx, sibling_idx)
+                    if sibling_idx != func_idx
+                    else None
+                )
+
+            spill_bytes = max(
+                (
+                    plan_native_saved_alias_targets(
+                        per_callable_saved_tensor_plans[sibling_idx],
+                        targets,
+                        measure_spill=True,
+                        protected_storage_ranges=storage_ranges,
+                        preassigned_targets=preassigned_targets[sibling_idx],
+                    )
+                    for sibling_idx in sibling_indices
+                    if sibling_idx != func_idx
+                ),
+                default=0,
+            )
+            if spill_bytes:
+                with torch.cuda.use_mem_pool(slot_allocator_pool):
+                    spill = torch.empty(
+                        (spill_bytes,),
+                        dtype=torch.uint8,
+                        device=torch.cuda.current_device(),
+                    )
+                storage = spill.untyped_storage()
+                per_callable_native_saved_storages[func_idx].setdefault(
+                    storage._cdata, (storage, storage.data_ptr())
+                )
+                targets = (*targets, spill)
+            completed_targets.append(tuple(targets))
+        return tuple(completed_targets), protected_ranges, preassigned_targets
+
+    @contextlib.contextmanager
+    def capture_saved_tensors(func_idx, alias_targets=None):
+        """Capture forward tensors that cross the graph's F/B boundary."""
+        if per_callable_saved_tensor_plans is None:
+            yield
+            return
+
+        plan = per_callable_saved_tensor_plans[func_idx]
+        saved_idx = 0
+        captured_targets = [None] * len(plan)
+        per_callable_native_saved_intervals[func_idx].clear()
+        if alias_targets is not None and len(alias_targets) != len(plan):
+            raise RuntimeError(
+                f"CUDA graph input {func_idx} changed its canonical saved-target count."
+            )
+
+        def pack_saved_tensor(tensor):
+            nonlocal saved_idx
+            if saved_idx >= len(plan):
+                raise RuntimeError(
+                    f"CUDA graph input {func_idx} saved more forward tensors during capture "
+                    "than warmup."
+                )
+            current_saved_idx = saved_idx
+            spec = plan[current_saved_idx]
+            saved_idx += 1
+            if spec[2:8] != _saved_tensor_signature(tensor):
+                raise RuntimeError(
+                    f"CUDA graph input {func_idx} changed forward saved-tensor layout "
+                    "during capture."
+                )
+            if spec[0] == "external":
+                if spec[1] != _tensor_storage_ptr(tensor):
+                    raise RuntimeError(
+                        f"CUDA graph input {func_idx} changed an external saved tensor."
+                    )
+                return tensor
+            if spec[0] != "native":
+                raise RuntimeError(
+                    f"CUDA graph input {func_idx} has unsupported saved-tensor mode {spec[0]}."
+                )
+
+            if alias_targets is None:
+                target = torch.empty((0,), dtype=tensor.dtype, device=tensor.device).set_(
+                    tensor.untyped_storage(),
+                    tensor.storage_offset(),
+                    tensor.shape,
+                    tensor.stride(),
+                )
+                target.requires_grad_(tensor.requires_grad)
+            else:
+                target = alias_targets[current_saved_idx]
+                if target is None:
+                    raise RuntimeError(
+                        f"CUDA graph input {func_idx} has no canonical target for native "
+                        f"saved tensor {current_saved_idx}."
+                    )
+                same_view = (
+                    target.data_ptr() == tensor.data_ptr()
+                    and target.shape == tensor.shape
+                    and target.stride() == tensor.stride()
+                    and target.dtype == tensor.dtype
+                )
+                if not same_view:
+                    with torch.no_grad():
+                        target.copy_(tensor)
+                tensor = target
+
+            captured_targets[current_saved_idx] = target
+            storage = tensor.untyped_storage()
+            per_callable_native_saved_storages[func_idx].setdefault(
+                storage._cdata, (storage, storage.data_ptr())
+            )
+            if spec[7]:
+                start = _tensor_storage_ptr(tensor) + (
+                    tensor.storage_offset() * tensor.element_size()
+                )
+                per_callable_native_saved_intervals[func_idx].append(
+                    (current_saved_idx, start, start + spec[7])
+                )
+            return tensor
+
+        with torch.autograd.graph.saved_tensors_hooks(pack_saved_tensor, lambda x: x):
+            yield
+        if saved_idx != len(plan):
+            raise RuntimeError(
+                f"CUDA graph input {func_idx} saved {saved_idx} forward tensors during "
+                f"capture, but saved {len(plan)} during warmup."
+            )
+        if alias_targets is None:
+            per_callable_native_saved_capture_targets[func_idx] = tuple(captured_targets)
+
+    def validate_captured_module_grads(func_idx, static_grad_inputs):
+        """Require capture to preserve every parameter gradient observed during warmup."""
+        if per_callable_saved_tensor_plans is None:
+            return
+        module_params = per_callable_module_params[func_idx]
+        module_grad_inputs = static_grad_inputs[per_callable_len_user_args[func_idx] :]
+        if len(module_grad_inputs) != len(module_params):
+            raise RuntimeError(
+                f"CUDA graph input {func_idx} captured {len(module_grad_inputs)} parameter "
+                f"gradient slots for {len(module_params)} parameters."
+            )
+        missing_params = [
+            param for param, grad in zip(module_params, module_grad_inputs) if grad is None
+        ]
+        if not missing_params:
+            return
+
+        func = graph_callables[func_idx]
+        param_names = {}
+        if isinstance(func, torch.nn.Module):
+            param_names = {id(param): name for name, param in func.named_parameters()}
+        missing_names = [
+            param_names.get(id(param), f"<unnamed shape={tuple(param.shape)}>")
+            for param in missing_params
+        ]
+        raise RuntimeError(
+            f"CUDA graph input {func_idx} lost parameter gradients during capture: {missing_names}."
+        )
 
     # All captures here share a mempool. To avoid replays corrupting each other's memory,
     # the safest approach is to capture all passes in the same order they'll run:
     # fwd 1, fwd 2, ... fwd N, then bwd N, bwd N-1, ... bwd 1.
+
+    branch_capture_groups = None
+    branch_checkpoint_state = None
+    branch_checkpoint_live_blocks = None
+    branch_checkpoint_pool_layout = None
+    branch_checkpoint_storage_owners = None
+    branch_pre_checkpoint_state = None
+    branch_pre_checkpoint_live_blocks = None
+    branch_pre_checkpoint_storage_owners = None
+    current_storage_owners = None
+    branch_canonical_native_saved_intervals = None
+    branch_canonical_native_saved_targets = None
+    branch_canonical_native_saved_excluded_storages = None
+    branch_canonical_native_saved_preassigned_targets = None
+    native_saved_alias_targets = None
+    if use_slot_memory:
+        branch_capture_groups = [None] * len(_order)
+        group_records = []
+        group_fwd_idx = [0] * num_model_chunks
+        group_bwd_idx = [0] * num_model_chunks
+        for order_idx, c_id in enumerate(_order):
+            if ceil(c_id) != c_id:
+                group_records.append(None)
+                continue
+            m_chunk = abs(int(c_id)) - 1
+            logical_idx = group_fwd_idx[m_chunk] if c_id > 0 else group_bwd_idx[m_chunk]
+            first_func_idx = (_prefix_num_layers[m_chunk] * num_microbatches) + (
+                logical_idx * _num_layers_per_chunk[m_chunk]
+            )
+            slot = _graph_memory_slots[first_func_idx]
+            event_key = (
+                c_id > 0,
+                slot[4],
+                logical_idx,
+                slot[2],
+                _num_layers_per_chunk[m_chunk],
+            )
+            group_records.append((event_key, slot[3]))
+            if c_id > 0:
+                group_fwd_idx[m_chunk] += 1
+            else:
+                group_bwd_idx[m_chunk] += 1
+
+        group_start = 0
+        while group_start < len(group_records):
+            record = group_records[group_start]
+            group_stop = group_start + 1
+            while (
+                record is not None
+                and group_stop < len(group_records)
+                and group_records[group_stop] is not None
+                and group_records[group_stop][0] == record[0]
+            ):
+                group_stop += 1
+            group_size = group_stop - group_start
+            if group_size > 1:
+                branch_ids = [group_records[idx][1] for idx in range(group_start, group_stop)]
+                if len(set(branch_ids)) != group_size:
+                    raise RuntimeError(
+                        "CUDA graph slot checkpoint group contains duplicate branch IDs: "
+                        f"{branch_ids}."
+                    )
+                for position, order_idx in enumerate(range(group_start, group_stop)):
+                    branch_capture_groups[order_idx] = (position, group_size)
+            group_start = group_stop
+
+    def slot_pool_active_blocks():
+        """Return active allocation addresses and sizes in the graph-private pool."""
+        snapshot = slot_allocator_pool.snapshot(include_traces=False)
+        segments = snapshot["segments"] if isinstance(snapshot, dict) else snapshot
+        return {
+            block["address"]: block["size"]
+            for segment in segments
+            for block in segment["blocks"]
+            if block["state"] == "active_allocated"
+        }
+
+    def slot_pool_layout():
+        """Return the allocator block topology for checkpoint diagnostics."""
+        snapshot = slot_allocator_pool.snapshot(include_traces=False)
+        segments = snapshot["segments"] if isinstance(snapshot, dict) else snapshot
+        return {
+            segment["address"]: {
+                "total_size": segment["total_size"],
+                "blocks": [
+                    (block["address"], block["size"], block["state"]) for block in segment["blocks"]
+                ],
+            }
+            for segment in segments
+        }
+
+    def native_saved_pool_intervals(func_indices, layout, full_storage=False):
+        """Return native saved-tensor intervals that belong to the slot pool."""
+        segment_ranges = tuple(
+            (address, address + segment["total_size"]) for address, segment in layout.items()
+        )
+        output = []
+        for func_idx in func_indices:
+            intervals = []
+            if full_storage:
+                candidates = (
+                    (storage_idx, storage_ptr, storage_ptr + storage.nbytes())
+                    for storage_idx, (storage, storage_ptr) in enumerate(
+                        per_callable_native_saved_storages[func_idx].values()
+                    )
+                )
+            else:
+                candidates = iter(per_callable_native_saved_intervals[func_idx])
+            for saved_idx, start, end in candidates:
+                containing = [
+                    (segment_start, segment_end)
+                    for segment_start, segment_end in segment_ranges
+                    if segment_start <= start and end <= segment_end
+                ]
+                if containing:
+                    intervals.append((saved_idx, start, end))
+                    continue
+                if any(
+                    start < segment_end and segment_start < end
+                    for segment_start, segment_end in segment_ranges
+                ):
+                    raise RuntimeError(
+                        "CUDA graph native saved tensor crosses a slot-pool segment boundary: "
+                        f"func={func_idx}, saved={saved_idx}, interval=({start}, {end})."
+                    )
+            output.append(tuple(intervals))
+        return tuple(output)
+
+    def assert_native_saved_interval_coverage(canonical, current, func_indices, phase):
+        """Require alternate saved tensors to stay inside canonical live allocations."""
+        if len(canonical) != len(current):
+            raise RuntimeError("CUDA graph CP branch changed its captured layer count.")
+        for position, (canonical_intervals, current_intervals) in enumerate(
+            zip(canonical, current)
+        ):
+            merged = []
+            for _, start, end in sorted(canonical_intervals, key=lambda item: item[1:]):
+                if merged and start <= merged[-1][1]:
+                    merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+                else:
+                    merged.append((start, end))
+            for saved_idx, start, end in current_intervals:
+                if any(left <= start and end <= right for left, right in merged):
+                    continue
+                raise RuntimeError(
+                    "CUDA graph CP branch placed a native saved tensor outside the "
+                    "canonical slot/layer live range: "
+                    f"phase={phase}, func={func_indices[position]}, saved={saved_idx}, "
+                    f"interval=({start}, {end}), canonical={merged}."
+                )
+
+    def drain_slot_pool_pending_frees():
+        """Poll completed cross-stream frees before restoring allocator state."""
+        layout = slot_pool_layout()
+        if not any(
+            state == "active_pending_free"
+            for segment in layout.values()
+            for _, _, state in segment["blocks"]
+        ):
+            return
+
+        # A non-capturing allocator request runs process_events(). The request stays in
+        # the default pool, so polling cannot split or merge the slot-private pool.
+        event_poll = torch.empty((1,), dtype=torch.uint8, device=torch.cuda.current_device())
+        del event_poll
+        remaining = [
+            (address, size)
+            for segment in slot_pool_layout().values()
+            for address, size, state in segment["blocks"]
+            if state == "active_pending_free"
+        ]
+        if remaining:
+            raise RuntimeError(
+                f"CUDA graph slot checkpoint could not drain pending allocator frees: {remaining}."
+            )
+
+    def assert_slot_pool_liveness(expected_blocks, phase):
+        expected_ptrs = set(expected_blocks)
+        if torch._C._cuda_checkPoolLiveAllocations(
+            torch.cuda.current_device(), mempool, expected_ptrs
+        ):
+            return
+        actual_blocks = slot_pool_active_blocks()
+        added = set(actual_blocks).difference(expected_ptrs)
+        removed = expected_ptrs.difference(actual_blocks)
+        raise RuntimeError(
+            f"CUDA graph slot checkpoint changed live allocations during {phase}: "
+            f"added={len(added)} ({sum(actual_blocks[ptr] for ptr in added)} bytes), "
+            f"added_sizes={sorted(actual_blocks[ptr] for ptr in added)}, "
+            f"removed={len(removed)} ({sum(expected_blocks[ptr] for ptr in removed)} bytes), "
+            f"removed_sizes={sorted(expected_blocks[ptr] for ptr in removed)}."
+        )
+
+    def record_replaced_io_storages(sources, targets, stale_storages):
+        """Keep source storages whose graph-boundary tensors now use canonical storage."""
+        for source, target in zip(sources, targets):
+            if not (
+                isinstance(source, torch.Tensor)
+                and isinstance(target, torch.Tensor)
+                and source.is_cuda
+                and target.is_cuda
+            ):
+                continue
+            source_storage = source.untyped_storage()
+            target_storage = target.untyped_storage()
+            if (
+                source_storage.data_ptr() == target_storage.data_ptr()
+                and torch._C._has_Standard_Deleter(target_storage._cdata)
+            ):
+                continue
+            stale_storages[source_storage._cdata] = (
+                source_storage,
+                source_storage.data_ptr(),
+            )
+
+    def checkpoint_live_storage_owners(expected_blocks, phase, extra_values=()):
+        """Resolve every checkpoint-live allocation to its owning StorageImpl."""
+        owners = {}
+        visited = set()
+
+        def visit(value):
+            if value is None or id(value) in visited:
+                return
+            if isinstance(value, torch.UntypedStorage):
+                if value.device.type != "cuda":
+                    return
+                storage_ptr = value.data_ptr()
+                for block_ptr, block_size in expected_blocks.items():
+                    if block_ptr <= storage_ptr < block_ptr + block_size:
+                        if torch._C._has_Standard_Deleter(value._cdata):
+                            previous = owners.setdefault(block_ptr, value)
+                            if previous._cdata != value._cdata:
+                                raise RuntimeError(
+                                    "CUDA graph slot checkpoint found multiple owning storages "
+                                    f"for allocation {block_ptr}."
+                                )
+                        break
+                return
+            visited.add(id(value))
+            if isinstance(value, torch.Tensor):
+                if not value.is_cuda:
+                    return
+                storage = value.untyped_storage()
+                storage_ptr = storage.data_ptr()
+                for block_ptr, block_size in expected_blocks.items():
+                    if block_ptr <= storage_ptr < block_ptr + block_size:
+                        if torch._C._has_Standard_Deleter(storage._cdata):
+                            previous = owners.setdefault(block_ptr, storage)
+                            if previous._cdata != storage._cdata:
+                                raise RuntimeError(
+                                    "CUDA graph slot checkpoint found multiple owning storages "
+                                    f"for allocation {block_ptr}."
+                                )
+                        break
+                if value.is_leaf:
+                    visit(value.grad)
+                for child in vars(value).values():
+                    visit(child)
+                return
+            if isinstance(value, dict):
+                for child in value.values():
+                    visit(child)
+                return
+            if isinstance(value, (list, tuple, set)):
+                for child in value:
+                    visit(child)
+
+        for value in (
+            sample_args,
+            flatten_sample_args,
+            per_callable_static_input_surfaces,
+            per_callable_static_outputs,
+            per_callable_static_grad_outputs,
+            per_callable_static_grad_inputs,
+            per_callable_native_saved_storages,
+            per_callable_output_tensor_targets,
+            per_callable_user_grad_tensor_targets,
+            per_callable_param_grad_tensor_targets,
+            static_grad_outputs_dict,
+            native_io_anchors,
+            *extra_values,
+        ):
+            visit(value)
+        for func in graph_callables:
+            if isinstance(func, torch.nn.Module):
+                for module in func.modules():
+                    visit(vars(module))
+
+        missing = set(expected_blocks).difference(owners)
+        if missing:
+            raise RuntimeError(
+                f"CUDA graph slot checkpoint could not resolve owning storages during {phase} "
+                "for "
+                f"{len(missing)} live allocations with sizes "
+                f"{sorted(expected_blocks[ptr] for ptr in missing)}."
+            )
+        return owners
+
+    def release_checkpoint_live_storages(expected_blocks, owners, phase):
+        """Make checkpoint-live blocks free before allocator topology restoration."""
+        if set(owners) != set(expected_blocks):
+            raise RuntimeError("CUDA graph slot checkpoint live-storage owner set changed.")
+        for block_ptr, storage in owners.items():
+            storage_ptr = storage.data_ptr()
+            if not (block_ptr <= storage_ptr < block_ptr + expected_blocks[block_ptr]):
+                raise RuntimeError(
+                    "CUDA graph slot checkpoint live storage changed its allocation."
+                )
+            if not torch._C._has_Standard_Deleter(storage._cdata):
+                raise RuntimeError(
+                    "CUDA graph slot checkpoint live storage lost its allocator deleter."
+                )
+            torch._C._free_And_Remove_DeleterFn(storage._cdata)
+            tex._graph_checkpoint_detach_storage(storage._cdata)
+            if storage.data_ptr() != storage_ptr or torch._C._has_Standard_Deleter(storage._cdata):
+                raise RuntimeError(
+                    "CUDA graph slot checkpoint could not detach live-storage ownership."
+                )
+
+        torch.cuda.synchronize()
+        drain_slot_pool_pending_frees()
+        remaining = slot_pool_active_blocks()
+        if remaining:
+            raise RuntimeError(
+                f"CUDA graph slot checkpoint retained {len(remaining)} active allocations "
+                f"during {phase}."
+            )
+        return [storage._cdata for storage in owners.values()]
+
+    def verify_checkpoint_live_storages(expected_blocks, owners):
+        """Verify allocator ownership was restored onto the original StorageImpls."""
+        for block_ptr, storage in owners.items():
+            if not torch._C._has_Standard_Deleter(storage._cdata):
+                raise RuntimeError(
+                    "CUDA graph slot checkpoint did not restore the live-storage deleter."
+                )
+            storage_ptr = storage.data_ptr()
+            if not (block_ptr <= storage_ptr < block_ptr + expected_blocks[block_ptr]):
+                raise RuntimeError(
+                    "CUDA graph slot checkpoint restored a live storage at the wrong address."
+                )
+
+    def restore_slot_pool_boundary(
+        current_blocks,
+        current_owners,
+        target_state,
+        target_blocks,
+        target_owners,
+        phase,
+    ):
+        """Switch between two allocator boundaries while preserving their StorageImpls."""
+        release_checkpoint_live_storages(current_blocks, current_owners, phase)
+        torch._C._cuda_setCheckpointPoolState(
+            torch.cuda.current_device(),
+            target_state,
+            [],
+            [storage._cdata for storage in target_owners.values()],
+        )
+        verify_checkpoint_live_storages(target_blocks, target_owners)
+        assert_slot_pool_liveness(target_blocks, phase)
 
     if _order is not None:  # pylint: disable=too-many-nested-blocks
         per_callable_static_outputs = [None] * len(flatten_sample_args)
@@ -570,6 +2166,51 @@ def _make_graphed_callables(
         wgrad_validation_list = [None] * len(_order)
         previous_chunk_last_callable_bwd_idx = None
         for i, c_id in enumerate(_order):
+            branch_group = branch_capture_groups[i] if branch_capture_groups is not None else None
+            deferred_native_output_target_releases = set()
+            deferred_native_grad_target_releases = set()
+            captured_branch_func_indices = []
+            branch_stale_storages = {}
+            branch_boundary_values = []
+            if (
+                branch_group is not None
+                and branch_group[0] == 0
+                and (
+                    branch_checkpoint_state is not None
+                    or branch_pre_checkpoint_state is not None
+                    or current_storage_owners is not None
+                    or branch_canonical_native_saved_intervals is not None
+                    or branch_canonical_native_saved_targets is not None
+                    or branch_canonical_native_saved_excluded_storages is not None
+                    or branch_canonical_native_saved_preassigned_targets is not None
+                    or native_saved_alias_targets is not None
+                )
+            ):
+                raise RuntimeError("CUDA graph slot checkpoint groups overlap.")
+            if branch_group is not None:
+                if branch_group[0] == 0:
+                    gc.collect()
+                    torch.cuda.synchronize()
+                    drain_slot_pool_pending_frees()
+                    branch_pre_checkpoint_state = torch._C._cuda_getCheckpointState(
+                        torch.cuda.current_device(), mempool
+                    )
+                    branch_pre_checkpoint_live_blocks = slot_pool_active_blocks()
+                    branch_pre_checkpoint_storage_owners = checkpoint_live_storage_owners(
+                        branch_pre_checkpoint_live_blocks,
+                        f"{'forward' if c_id > 0 else 'backward'} pre-branch "
+                        f"boundary at order index {i}",
+                    )
+                elif branch_group[0] > 1 and c_id < 0:
+                    restore_slot_pool_boundary(
+                        branch_checkpoint_live_blocks,
+                        branch_checkpoint_storage_owners,
+                        branch_pre_checkpoint_state,
+                        branch_pre_checkpoint_live_blocks,
+                        branch_pre_checkpoint_storage_owners,
+                        f"{'forward' if c_id > 0 else 'backward'} branch "
+                        f"{branch_group[0] + 1}/{branch_group[1]} restore pre-boundary",
+                    )
             if c_id > 0:
                 if not isinstance(c_id, int):
                     raise TypeError(
@@ -582,15 +2223,57 @@ def _make_graphed_callables(
                     per_callable_fwd_idx = (_prefix_num_layers[m_chunk] * num_microbatches) + (
                         fwd_idx[m_chunk] * _num_layers_per_chunk[m_chunk] + l_no
                     )
+                    captured_branch_func_indices.append(per_callable_fwd_idx)
                     args = sample_args[per_callable_fwd_idx]
                     kwargs = sample_kwargs[per_callable_fwd_idx]
                     fwd_graph = fwd_graphs[per_callable_fwd_idx]
+                    native_saved_alias_targets = None
+                    if branch_group is not None and branch_group[0] > 0:
+                        if (
+                            branch_canonical_native_saved_targets is None
+                            or branch_canonical_native_saved_excluded_storages is None
+                            or branch_canonical_native_saved_preassigned_targets is None
+                        ):
+                            raise RuntimeError(
+                                "CUDA graph CP branch has no canonical saved-tensor targets."
+                            )
+                        native_saved_alias_targets = plan_native_saved_alias_targets(
+                            per_callable_saved_tensor_plans[per_callable_fwd_idx],
+                            branch_canonical_native_saved_targets[l_no],
+                            protected_storage_ranges=branch_canonical_native_saved_excluded_storages[
+                                per_callable_fwd_idx
+                            ],
+                            preassigned_targets=branch_canonical_native_saved_preassigned_targets[
+                                per_callable_fwd_idx
+                            ],
+                        )
                     with _graph_context_wrapper(fwd_graph, pool=mempool):
-                        outputs = func(*args, **kwargs)
-                    flatten_outputs, spec = _tree_flatten(outputs)
+                        with capture_saved_tensors(
+                            per_callable_fwd_idx, native_saved_alias_targets
+                        ):
+                            outputs = func(*args, **kwargs)
+                        flatten_outputs, spec = _tree_flatten(outputs)
+                        original_flatten_outputs = flatten_outputs
+                        flatten_outputs = copy_outputs_to_slot_arena(
+                            per_callable_fwd_idx, flatten_outputs
+                        )
+                        if branch_group is not None and branch_group[0] > 0:
+                            record_replaced_io_storages(
+                                original_flatten_outputs,
+                                flatten_outputs,
+                                branch_stale_storages,
+                            )
+                            branch_stale_storages.update(
+                                per_callable_native_saved_storages[per_callable_fwd_idx]
+                            )
+                        del original_flatten_outputs
+                    native_saved_alias_targets = None
                     per_callable_static_outputs[per_callable_fwd_idx] = tuple(flatten_outputs)
                     per_callable_output_unflatten_spec[per_callable_fwd_idx] = spec
                     graph_callables[per_callable_fwd_idx] = func
+                    if use_slot_memory:
+                        del outputs
+                    del flatten_outputs
                 fwd_idx[m_chunk] += 1
             else:
                 # Capture backward graph for model chunk c_id, microbatch bwd_idx[-c_id-1]
@@ -600,6 +2283,7 @@ def _make_graphed_callables(
                     per_callable_bwd_idx = (_prefix_num_layers[m_chunk] * num_microbatches) + (
                         bwd_idx[m_chunk] * _num_layers_per_chunk[m_chunk] + l_no
                     )
+                    captured_branch_func_indices.append(per_callable_bwd_idx)
                     if ceil(c_id) == c_id and need_bwd_dw_graph[per_callable_bwd_idx]:
                         # Check if bwd graph has corresponding wgrad graph:
                         # Number of dgrad backward graphs should be equal to number of
@@ -673,13 +2357,13 @@ def _make_graphed_callables(
                             static_grad_outputs = static_grad_outputs_dict[static_grad_outputs_keys]
                         else:
                             static_grad_outputs = tuple(
-                                torch.empty_like(o) if o is not None and o.requires_grad else None
+                                (torch.empty_like(o) if o is not None and o.requires_grad else None)
                                 for o in static_outputs
                             )
                             static_grad_outputs_dict[static_grad_outputs_keys] = static_grad_outputs
                     else:
                         static_grad_outputs = tuple(
-                            torch.empty_like(o) if o is not None and o.requires_grad else None
+                            (torch.empty_like(o) if o is not None and o.requires_grad else None)
                             for o in static_outputs
                         )
                     if is_training:
@@ -695,33 +2379,61 @@ def _make_graphed_callables(
                                 retain_graph=retain_graph_in_backward,
                             )
                             grad_inputs = tuple(input.grad for input in inputs)
+                            original_grad_inputs = grad_inputs
+                            grad_inputs = copy_user_grads_to_slot_arena(
+                                per_callable_bwd_idx, static_input_surface, grad_inputs
+                            )
+                            if branch_group is not None and branch_group[0] > 0:
+                                record_replaced_io_storages(
+                                    original_grad_inputs,
+                                    grad_inputs,
+                                    branch_stale_storages,
+                                )
+                            del original_grad_inputs
 
                     # Constructs a tuple suitable for returning from Graphed.backward:
                     # Pads out the actually-needed grads with Nones in gradient slots for inputs
                     # that don't require grad. I couldn't think of a one-liner for this pattern.
                     static_grad_inputs = []
                     grad_idx = 0
+                    fused_wgrad_params = per_callable_fused_wgrad_params.get(
+                        per_callable_bwd_idx, set()
+                    )
                     for arg in static_input_surface:
                         if is_training and isinstance(arg, torch.Tensor) and arg.requires_grad:
-                            static_grad_inputs.append(grad_inputs[grad_idx])
+                            grad_input = grad_inputs[grad_idx]
                             grad_idx += 1
+                            if grad_input is None and arg in fused_wgrad_params:
+                                main_grad = getattr(arg, "main_grad", arg)
+                                grad_input = get_dummy_wgrad(
+                                    list(main_grad.shape),
+                                    arg.dtype,
+                                    zero=getattr(arg, "zero_out_wgrad", False),
+                                )
+                            static_grad_inputs.append(grad_input)
                         else:
                             static_grad_inputs.append(None)  # type: ignore[arg-type]
                     static_grad_inputs = tuple(static_grad_inputs)  # type: ignore[assignment]
+                    validate_captured_module_grads(per_callable_bwd_idx, static_grad_inputs)
 
                     per_callable_static_grad_outputs[per_callable_bwd_idx] = static_grad_outputs
                     per_callable_static_grad_inputs[per_callable_bwd_idx] = static_grad_inputs
+                    if branch_group is not None:
+                        branch_boundary_values.append(static_grad_inputs)
 
-                    # Weak ref the static outputs and static grad inputs that are no longer needed
-                    # in the following steps. These two type of tensors are both in cudagraph
-                    # mempool, so we just deallocate them and let PyTorch's memory allocator
-                    # reuse them elsewhere.
+                    # Weak-ref static output and gradient objects after their capture lifetime.
+                    # Their backing storage remains alive either in the graph pool or an explicit
+                    # slot arena, while transient graph-pool references can be reclaimed.
                     if _reuse_graph_input_output_buffers:
                         # Weak ref the static outputs of the forward pass of this backward. It's
                         # no longer needed after the corresponding backward graph is built up.
                         per_callable_static_outputs[per_callable_bwd_idx] = make_weak_ref(
                             static_outputs
                         )
+                        if branch_group is None:
+                            clear_native_io_target_rows((per_callable_bwd_idx,), clear_outputs=True)
+                        else:
+                            deferred_native_output_target_releases.add(per_callable_bwd_idx)
 
                         # Weak ref the static grad inputs of the previous backward pass within the
                         # same chunk.
@@ -730,6 +2442,10 @@ def _make_graphed_callables(
                             per_callable_static_grad_inputs[idx] = make_weak_ref(
                                 per_callable_static_grad_inputs[idx]
                             )
+                            if branch_group is None:
+                                clear_native_io_target_rows((idx,), clear_grads=True)
+                            else:
+                                deferred_native_grad_target_releases.add(idx)
                         previous_per_callable_bwd_idx = per_callable_bwd_idx
 
                         # Weak ref the static grad inputs of the previous chunk's last backward
@@ -743,9 +2459,117 @@ def _make_graphed_callables(
                                 per_callable_static_grad_inputs[idx] = make_weak_ref(
                                     per_callable_static_grad_inputs[idx]
                                 )
+                                if branch_group is None:
+                                    clear_native_io_target_rows((idx,), clear_grads=True)
+                                else:
+                                    deferred_native_grad_target_releases.add(idx)
                             previous_chunk_last_callable_bwd_idx = per_callable_bwd_idx
+                    if use_slot_memory and branch_group is None:
+                        per_callable_native_saved_storages[per_callable_bwd_idx].clear()
+                    del static_outputs
                 if ceil(c_id) == c_id:
                     bwd_idx[m_chunk] += 1
+
+            if branch_group is not None:
+                if c_id < 0:
+                    for captured_func_idx in captured_branch_func_indices:
+                        per_callable_static_grad_inputs[captured_func_idx] = make_weak_ref(
+                            per_callable_static_grad_inputs[captured_func_idx]
+                        )
+                gc.collect()
+                torch.cuda.synchronize()
+                drain_slot_pool_pending_frees()
+                if branch_group[0] == 0:
+                    if c_id > 0:
+                        (
+                            branch_canonical_native_saved_targets,
+                            branch_canonical_native_saved_excluded_storages,
+                            branch_canonical_native_saved_preassigned_targets,
+                        ) = materialize_native_saved_spill_targets(captured_branch_func_indices)
+                        for func_idx in captured_branch_func_indices:
+                            per_callable_native_saved_capture_targets[func_idx] = None
+                    branch_checkpoint_state = torch._C._cuda_getCheckpointState(
+                        torch.cuda.current_device(), mempool
+                    )
+                    branch_checkpoint_live_blocks = slot_pool_active_blocks()
+                    branch_checkpoint_pool_layout = slot_pool_layout()
+                    if c_id > 0:
+                        branch_canonical_native_saved_intervals = native_saved_pool_intervals(
+                            captured_branch_func_indices,
+                            branch_checkpoint_pool_layout,
+                            full_storage=True,
+                        )
+                    branch_checkpoint_storage_owners = checkpoint_live_storage_owners(
+                        branch_checkpoint_live_blocks,
+                        f"{'forward' if c_id > 0 else 'backward'} branch "
+                        f"1/{branch_group[1]} at order index {i}",
+                        (branch_stale_storages, branch_boundary_values),
+                    )
+                    if c_id < 0:
+                        restore_slot_pool_boundary(
+                            branch_checkpoint_live_blocks,
+                            branch_checkpoint_storage_owners,
+                            branch_pre_checkpoint_state,
+                            branch_pre_checkpoint_live_blocks,
+                            branch_pre_checkpoint_storage_owners,
+                            f"backward branch 1/{branch_group[1]} restore pre-boundary",
+                        )
+                else:
+                    current_live_blocks = slot_pool_active_blocks()
+                    current_layout = slot_pool_layout()
+                    if c_id > 0:
+                        assert_native_saved_interval_coverage(
+                            branch_canonical_native_saved_intervals,
+                            native_saved_pool_intervals(
+                                captured_branch_func_indices, current_layout
+                            ),
+                            captured_branch_func_indices,
+                            f"branch {branch_group[0] + 1}/{branch_group[1]} at order index {i}",
+                        )
+                    current_storage_owners = checkpoint_live_storage_owners(
+                        current_live_blocks,
+                        f"{'forward' if c_id > 0 else 'backward'} branch "
+                        f"{branch_group[0] + 1}/{branch_group[1]} before post-boundary restore",
+                        (
+                            branch_stale_storages,
+                            branch_boundary_values,
+                            branch_pre_checkpoint_storage_owners,
+                            branch_checkpoint_storage_owners,
+                        ),
+                    )
+                    restore_slot_pool_boundary(
+                        current_live_blocks,
+                        current_storage_owners,
+                        branch_checkpoint_state,
+                        branch_checkpoint_live_blocks,
+                        branch_checkpoint_storage_owners,
+                        f"{'forward' if c_id > 0 else 'backward'} branch "
+                        f"{branch_group[0] + 1}/{branch_group[1]} restore post-boundary",
+                    )
+                    current_storage_owners = None
+                clear_native_io_target_rows(
+                    deferred_native_output_target_releases, clear_outputs=True
+                )
+                clear_native_io_target_rows(deferred_native_grad_target_releases, clear_grads=True)
+                if c_id < 0:
+                    for captured_func_idx in captured_branch_func_indices:
+                        per_callable_native_saved_storages[captured_func_idx].clear()
+                if branch_group[0] == branch_group[1] - 1:
+                    branch_checkpoint_state = None
+                    branch_checkpoint_live_blocks = None
+                    branch_checkpoint_pool_layout = None
+                    branch_checkpoint_storage_owners = None
+                    branch_pre_checkpoint_state = None
+                    branch_pre_checkpoint_live_blocks = None
+                    branch_pre_checkpoint_storage_owners = None
+                    branch_canonical_native_saved_intervals = None
+                    branch_canonical_native_saved_targets = None
+                    branch_canonical_native_saved_excluded_storages = None
+                    branch_canonical_native_saved_preassigned_targets = None
+                    gc.collect()
+                    torch.cuda.synchronize()
+                    drain_slot_pool_pending_frees()
+
     else:
         # Capture forward graphs
         per_callable_static_outputs = []
@@ -764,7 +2588,13 @@ def _make_graphed_callables(
         # Capture backward graphs in reverse order
         per_callable_static_grad_outputs = []
         per_callable_static_grad_inputs = []
-        for static_input_surface, static_outputs, bwd_graph, bwd_dw_graph, bwd_idx in zip(
+        for (
+            static_input_surface,
+            static_outputs,
+            bwd_graph,
+            bwd_dw_graph,
+            bwd_idx,
+        ) in zip(
             reversed(per_callable_static_input_surfaces),
             reversed(per_callable_static_outputs),
             reversed(bwd_graphs),
@@ -812,6 +2642,21 @@ def _make_graphed_callables(
         # Reverses the most recent two lists
         per_callable_static_grad_outputs = list(reversed(per_callable_static_grad_outputs))
         per_callable_static_grad_inputs = list(reversed(per_callable_static_grad_inputs))
+
+    if branch_checkpoint_state is not None or branch_pre_checkpoint_state is not None:
+        raise RuntimeError("CUDA graph capture ended inside a slot checkpoint group.")
+
+    if allocator_settings_to_restore is not None:
+        torch._C._accelerator_setAllocatorSettings(allocator_settings_to_restore)
+
+    if use_slot_memory and (
+        any(native_io_anchors.values()) or any(native_io_capture_counts.values())
+    ):
+        raise RuntimeError(
+            "CUDA graph capture ended with incomplete native I/O aliases: "
+            f"anchors={native_io_anchors}, counts={native_io_capture_counts}."
+        )
+
     # Now for every per_callable list, per_callable_*[i] holds the stuff for the ith callable.
 
     def make_graphed_autograd_function(
@@ -830,7 +2675,13 @@ def _make_graphed_callables(
             """Autograd function for graph replay."""
 
             @staticmethod
-            def forward(ctx, skip_fp8_weight_update, cuda_graph_stream, cuda_graph_event, *inputs):
+            def forward(
+                ctx,
+                skip_fp8_weight_update,
+                cuda_graph_stream,
+                cuda_graph_event,
+                *inputs,
+            ):
                 # pylint: disable=missing-function-docstring
 
                 # Set flag for whether to update FP8 weight updates
@@ -1065,6 +2916,8 @@ def _make_graphed_callables(
         backward_dw_func, reset_func = make_graphed_attribute_functions(i)
         setattr(ret[-1], "backward_dw", backward_dw_func)
         setattr(ret[-1], "reset", reset_func)
+        if slot_allocator_pool is not None:
+            setattr(ret[-1], "_te_cuda_graph_allocator_pool", slot_allocator_pool)
 
     if just_one_callable:
         return ret[0]
@@ -1143,6 +2996,7 @@ def make_graphed_callables(
     pool: Optional[Tuple[int, ...]] = None,
     retain_graph_in_backward: bool = False,
     _reuse_graph_input_output_buffers: bool = False,
+    _graph_memory_slots: Optional[Sequence[Tuple[int, ...]]] = None,
     pre_warmup_hook: Optional[Callable] = None,
     post_warmup_hook: Optional[Callable] = None,
 ) -> Union[Callable, Tuple[Callable, ...]]:
@@ -1183,6 +3037,13 @@ def make_graphed_callables(
         graphs. Only supported with Mcore interleaved pipeline parallelism, i.e.
         when `_order` is provided. All callables in `modules` are assumed to have
         inputs and outputs with the same dtype and shape.
+    _graph_memory_slots: sequence of 7- or 9-int tuples, default = None
+        Private liveness plan for mutually exclusive graph variants. Each tuple describes
+        saved-tensor, graph-I/O, and warmup alias groups for one graph input. Nine-field plans
+        additionally provide a frame ID and conflict mask for cross-slot validation. Requires the
+        first positional sample argument of every graph input to be a plain CUDA tensor; it
+        is snapshotted into the slot arenas whenever forward saves it for backward, so
+        shape-identical graph inputs can share one input staging surface.
     pre_warmup_hook: callable, default = None
                       A hook function that will be called before the warmup iterations.
     post_warmup_hook: callable, default = None
@@ -1378,6 +3239,7 @@ def make_graphed_callables(
         pool=pool,
         retain_graph_in_backward=retain_graph_in_backward,
         _reuse_graph_input_output_buffers=_reuse_graph_input_output_buffers,
+        _graph_memory_slots=_graph_memory_slots,
         pre_warmup_hook=pre_warmup_hook,
         post_warmup_hook=post_warmup_hook,
     )
