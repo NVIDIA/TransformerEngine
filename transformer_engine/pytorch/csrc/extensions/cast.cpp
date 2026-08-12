@@ -731,13 +731,16 @@ py::object group_requantize_inplace(py::handle grouped_x, py::handle quantizer,
   // falls through to the unfused chain.
   // The kernel takes the grouped tensor's cached element-based tensor_offsets;
   // a prefix-sum over first_dims is only the fallback when they are absent.
-  const bool has_usable_offsets =
-      (tensor_offsets.has_value() && tensor_offsets->scalar_type() == at::kLong &&
-       tensor_offsets->numel() == static_cast<int64_t>(num_tensors) + 1) ||
-      first_dims.has_value();
+  const bool tensor_offsets_usable =
+      tensor_offsets.has_value() && tensor_offsets->scalar_type() == at::kLong &&
+      tensor_offsets->numel() == static_cast<int64_t>(num_tensors) + 1;
+  const bool has_usable_offsets = tensor_offsets_usable || first_dims.has_value();
+  // total_tokens > 0: an empty grouped tensor carries null data pointers, which the
+  // unfused chain's dedicated empty-input handling accepts and the kernel's pointer
+  // validation (correctly) rejects.
   const bool use_fused_kernel =
       transformer_engine::getenv<bool>("NVTE_FUSED_GROUP_REQUANTIZE", true) && need_columnwise &&
-      has_usable_offsets && otype == DType::kBFloat16 &&
+      has_usable_offsets && total_tokens > 0 && otype == DType::kBFloat16 &&
       quantizer.attr("dtype").cast<DType>() == DType::kFloat8E4M3 &&
       transformer_engine::cuda::sm_arch() >= 100;
   if (use_fused_kernel) {
@@ -751,8 +754,7 @@ py::object group_requantize_inplace(py::handle grouped_x, py::handle quantizer,
     // Element-based exclusive-cumsum offsets ([num_tensors + 1], device) for the
     // per-group columnwise scale bases and the live-row bound.
     at::Tensor element_offsets;
-    if (tensor_offsets.has_value() && tensor_offsets->scalar_type() == at::kLong &&
-        tensor_offsets->numel() == static_cast<int64_t>(num_tensors) + 1) {
+    if (tensor_offsets_usable) {
       element_offsets = *tensor_offsets;
     } else {
       const at::Tensor first_dims_i64 =
