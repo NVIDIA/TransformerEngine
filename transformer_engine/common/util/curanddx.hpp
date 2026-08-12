@@ -7,6 +7,8 @@
 #ifndef TRANSFORMER_ENGINE_COMMON_UTIL_CURANDDX_HPP_
 #define TRANSFORMER_ENGINE_COMMON_UTIL_CURANDDX_HPP_
 
+#include <cstdint>
+
 namespace transformer_engine {
 namespace curanddx {
 namespace detail {
@@ -18,8 +20,11 @@ inline constexpr unsigned int philox4x32_m4x32_1 = 0xCD9E8D57U;
 
 __forceinline__ __device__ unsigned int mulhilo32(unsigned int a, unsigned int b,
                                                   unsigned int* hip) {
-  *hip = __umulhi(a, b);
-  return a * b;
+  // Returns uint64_t(a) * b in two uint32 halves
+  uint64_t product;
+  asm("mul.wide.u32 %0, %1, %2;" : "=l"(product) : "r"(a), "r"(b));
+  *hip = static_cast<unsigned int>(product >> 32);
+  return static_cast<unsigned int>(product);
 }
 
 __forceinline__ __device__ uint4 single_round(uint4 ctr, uint2 key) {
