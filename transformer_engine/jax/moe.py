@@ -389,12 +389,20 @@ def _ffn_fwd_per_shard(
     expert_outputs_3d = expert_outputs.reshape(1, expert_outputs.shape[0], expert_outputs.shape[1])
     group_sizes_2d = group_sizes.reshape(1, num_local_experts)
     residuals = (
-        sorted_x,
-        wi,
+        casted_sorted_x.get_tensor(usage=TensorUsage.LHS_TRANS).checkpoint(
+            fc1_quantizer_set.x
+        ),
+        casted_wi.get_tensor(usage=TensorUsage.RHS_TRANS).checkpoint(
+            fc1_quantizer_set.kernel
+        ),
         gate_proj_out,
         up_proj_out,
-        intermediate,
-        wo,
+        casted_intermediate.get_tensor(usage=TensorUsage.LHS_TRANS).checkpoint(
+            fc2_quantizer_set.x
+        ),
+        casted_wo.get_tensor(usage=TensorUsage.RHS_TRANS).checkpoint(
+            fc2_quantizer_set.kernel
+        ),
         group_sizes_2d,
     )
     return expert_outputs_3d, residuals
@@ -402,12 +410,12 @@ def _ffn_fwd_per_shard(
 
 def _ffn_bwd_per_shard(
     d_expert_outputs_local: jnp.ndarray,
-    sorted_x: jnp.ndarray,
-    wi: jnp.ndarray,
+    casted_sorted_x_lhs_trans,
+    casted_wi_rhs_trans,
     gate_proj_out: jnp.ndarray,
     up_proj_out: jnp.ndarray,
-    intermediate: jnp.ndarray,
-    wo: jnp.ndarray,
+    casted_intermediate_lhs_trans,
+    casted_wo_rhs_trans,
     local_group_sizes: jnp.ndarray,
     recv_topk_weights_local: jnp.ndarray,
     quantizer_sets: Tuple[QuantizerSet, QuantizerSet],
@@ -426,25 +434,6 @@ def _ffn_bwd_per_shard(
         for qset in quantizer_sets
     )
     wgrad_group_active = (group_sizes > 0)[:, None, None]
-
-    # Recompute stateless grouped quantization inside backward. Besides being
-    # natural rematerialization for MXFP8BlockScaling, this keeps shard_map
-    # residuals in their logical BF16 shapes instead of exposing flattened
-    # quantized data and scale layouts to partition specs.
-    casted_sorted_x = tex.grouped_quantize(
-        sorted_x, fc1_quantizer_set.x, group_sizes, flatten_axis=-1
-    )
-    casted_wi = tex.grouped_quantize(wi, fc1_quantizer_set.kernel, flatten_axis=-1)
-    casted_intermediate = tex.grouped_quantize(
-        intermediate, fc2_quantizer_set.x, group_sizes, flatten_axis=-1
-    )
-    casted_wo = tex.grouped_quantize(wo, fc2_quantizer_set.kernel, flatten_axis=-1)
-    casted_sorted_x_lhs_trans = casted_sorted_x.get_tensor(usage=TensorUsage.LHS_TRANS)
-    casted_wi_rhs_trans = casted_wi.get_tensor(usage=TensorUsage.RHS_TRANS)
-    casted_intermediate_lhs_trans = casted_intermediate.get_tensor(
-        usage=TensorUsage.LHS_TRANS
-    )
-    casted_wo_rhs_trans = casted_wo.get_tensor(usage=TensorUsage.RHS_TRANS)
 
     # wo bwd
     casted_d_eo = tex.grouped_quantize(
@@ -756,13 +745,21 @@ def _moe_fwd_rule(
         ffn_in_specs += (bias_spec, bias_spec, bias_spec)
         ffn_in_args.extend([wi_0_bias, wi_1_bias, wo_bias])
 
+    # Quantized grouped tensors store their data, scales, and group metadata
+    # as physical buffers rather than in the source tensor's logical shape.
+    # A PartitionSpec used as a pytree prefix applies the same ownership to
+    # every array leaf of the grouped tensor: dispatched-token buffers belong
+    # to the compound batch shard, while expert-weight buffers belong to EP.
+    token_buffer_spec = P(batch_pspec_axis)
+    token_matrix_spec = P(batch_pspec_axis, None)
+    expert_buffer_spec = P(ep_axis)
     residuals_spec = (
-        P(),
-        P(ep_axis, None, None),
-        P(),
-        P(),
-        P(),
-        P(ep_axis, None, None),
+        token_buffer_spec,
+        expert_buffer_spec,
+        token_matrix_spec,
+        token_matrix_spec,
+        token_buffer_spec,
+        expert_buffer_spec,
         ep2_spec,
     )
 
@@ -951,13 +948,16 @@ def _moe_bwd_rule(
     # ---------------- FFN bwd (per-shard via shard_map) ----------------
     kernel_spec = P(ep_axis, None, None)
     bias_spec = P(ep_axis, None)
+    token_buffer_spec = P(batch_pspec_axis)
+    token_matrix_spec = P(batch_pspec_axis, None)
+    expert_buffer_spec = P(ep_axis)
     residuals_specs = (
-        P(),
-        P(ep_axis, None, None),
-        P(),
-        P(),
-        P(),
-        P(ep_axis, None, None),
+        token_buffer_spec,
+        expert_buffer_spec,
+        token_matrix_spec,
+        token_matrix_spec,
+        token_buffer_spec,
+        expert_buffer_spec,
         ep2_spec,
     )
     bwd_in_specs = (ep3_spec, *residuals_specs, ep2_spec)
