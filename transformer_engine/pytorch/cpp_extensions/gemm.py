@@ -50,6 +50,10 @@ def get_cublas_workspace_size_bytes() -> None:
 def get_cublas_workspace(device: int, ub: bool, grouped_gemm: bool) -> torch.Tensor:
     """Returns workspace for cublas GEMM."""
     assert not (ub and grouped_gemm), "UB is unsupported for grouped GEMM."
+    assert not torch.cuda.is_current_stream_capturing(), (
+        "cuBLAS workspace would be first allocated during CUDA-graph capture and would live in"
+        " the graph's memory pool; run a warmup iteration outside the graph first."
+    )
 
     if ub:
         return torch.empty(

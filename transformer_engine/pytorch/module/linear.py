@@ -119,11 +119,6 @@ class LinearFwdArgs:
     # TensorOrQuantized so a cached quantized workspace can cross the op boundary.
     weight_workspace: Optional[TensorOrQuantized]
 
-    # Process-global cuBLAS workspace, fetched at trace time so it isn't first
-    # allocated during CUDA-graph capture. The op never reads it (general_gemm
-    # fetches the same global); None outside the compiled path.
-    cublas_workspace: Optional[torch.Tensor]
-
     # --- requires_grad flags (cached so backward does not re-query) ---
     input_requires_grad: bool
     weight_requires_grad: bool
@@ -2283,6 +2278,15 @@ class Linear(TransformerEngineBaseModule):
                     elif self.parallel_mode == "column":
                         set_tensor_model_parallel_attributes(getattr(self, bias), True, 0, 1)
 
+            # Allocate the process-global cuBLAS workspaces eagerly: under
+            # torch.compile the first GEMM can run inside CUDA-graph capture,
+            # and a workspace first allocated there would live in the graph pool.
+            device = getattr(self, self.weight_names[0]).device
+            if device.type == "cuda":
+                get_cublas_workspace(device.index, False, False)
+                if self.ub_name is not None:
+                    get_cublas_workspace(device.index, True, False)
+
     def forward(
         self,
         inp: torch.Tensor,
@@ -2414,7 +2418,6 @@ class Linear(TransformerEngineBaseModule):
                 inp=inp,
                 bias=linear_bias_tensor,
                 weight_workspace=weight_workspace,
-                cublas_workspace=None,  # set below, only on the compiled path
                 # requires_grad flags
                 input_requires_grad=inp.requires_grad,
                 weight_requires_grad=weight_tensor.requires_grad,
@@ -2483,8 +2486,6 @@ class Linear(TransformerEngineBaseModule):
 
             if use_compiled_op:
                 check_gemm_dims(inp, weight_tensor, self.fp8)
-                # See LinearFwdArgs.cublas_workspace.
-                fwd_args.cublas_workspace = get_cublas_workspace(inp.device.index, False, False)
                 out, new_weight_workspace = _linear_op(fwd_args)
             else:
                 out, new_weight_workspace = _linear_eager(
