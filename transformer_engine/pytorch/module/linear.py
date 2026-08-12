@@ -90,7 +90,6 @@ from ..dynamo import (
     TensorOrQuantized,
     register_custom_op,
     is_value_opaque_quantizer,
-    PG_REFERENCE_OPAQUE,
 )
 from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantizer
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
@@ -157,8 +156,7 @@ class LinearFwdArgs:
 
     # --- Tensor / sequence parallelism ---
     parallel_mode: Optional[str]
-    # ProcessGroup is a *reference*-opaque type: carried through the torch.compile
-    # custom op as a graph input (never baked into the graph as a constant).
+    # Crosses the op boundary as its c10d registry name, re-resolved in the op.
     tp_group: Optional[dist_group_type]
     tp_size: int
     tensor_parallel: bool
@@ -210,9 +208,6 @@ class LinearFwdArgs:
             return "delayed wgrad compute (wgrad_store)"
         if self.fuse_wgrad_accumulation:
             return "fuse_wgrad_accumulation (main_grad)"
-        if self.tp_group is not None and not PG_REFERENCE_OPAQUE:
-            # ProcessGroup's reference-opaque registration failed at import.
-            return "a tp_group not registered as a torch.compile reference-opaque type"
         for quantizer in (
             self.input_quantizer,
             self.weight_quantizer,
@@ -264,7 +259,7 @@ class LinearBwdArgs:
 
     # --- Tensor / sequence parallelism ---
     parallel_mode: Optional[str] = None
-    # Reference-opaque ProcessGroup (graph input), see LinearFwdArgs.tp_group.
+    # See LinearFwdArgs.tp_group.
     tp_group: Optional[dist_group_type] = None
     tp_size: int = 1
     tensor_parallel: bool = False

@@ -34,8 +34,8 @@ as op inputs:
     buffers, and a ``__kind__`` tag) so a quantized tensor crosses as its buffers.
   * ``_QuantizerAdapter`` -- a quantizer, baked into the graph as a value-opaque
     constant.
-  * ``_ReferenceOpaqueAdapter`` -- a ProcessGroup, carried as a live opaque graph
-    input.
+  * ``_ProcessGroupAdapter`` -- a ProcessGroup, carried as its c10d registry
+    name and re-resolved inside the op.
   * ``_SimpleBundleAdapter`` -- every remaining simple value (scalars, enums,
     sizes, nested collections of them), gathered into one ``OpaqueValueBundle``
     slot.
@@ -309,7 +309,6 @@ try:
     from torch._library.opaque_object import (
         get_opaque_type_name,
         is_opaque_value_type as _is_opaque_value_type,
-        is_opaque_reference_type as _is_opaque_reference_type,
         register_opaque_type,
     )
 
@@ -321,53 +320,14 @@ except Exception as e:  # pylint: disable=broad-exception-caught  # pragma: no c
         f"could not register OpaqueValueBundle as an opaque type ({e}); use a newer PyTorch build"
     )
     _is_opaque_value_type = None
-    _is_opaque_reference_type = None
     _OPAQUE_VALUE_BUNDLE_TYPE_NAME = None
 
-
-def _ensure_distributed_opaque_types() -> None:
-    """Register ``ProcessGroup`` as a *reference* opaque type: live state carried
-    as a graph input, not baked in as a constant. PyTorch runs this registration
-    only when DTensor is imported, so trigger it here too; best-effort no-op on
-    builds without the APIs (the field then falls back to eager).
-
-    Note: PyTorch's cache-key pickler (``FxGraphCachePickler``) cannot hash the
-    real ``ProcessGroup`` in ``example_inputs`` yet, so inductor bypasses the FX
-    disk cache for compiled distributed calls (it logs a warning). Fixing that
-    belongs upstream; keeping TE free of process-wide pickle overrides.
-    """
-    if _is_opaque_reference_type is None:
-        return
-    try:
-        from torch.distributed.device_mesh import (  # pylint: disable=import-outside-toplevel
-            _register_distributed_opaque_types,
-        )
-
-        _register_distributed_opaque_types()
-    except Exception:  # pylint: disable=broad-exception-caught
-        pass
-
-
-_ensure_distributed_opaque_types()
-
-
-def _compute_pg_reference_opaque() -> bool:
-    if _is_opaque_reference_type is None:
-        return False
-    try:
-        from torch._C._distributed_c10d import (  # pylint: disable=import-outside-toplevel
-            ProcessGroup,
-        )
-
-        return bool(_is_opaque_reference_type(ProcessGroup))
-    except Exception:  # pylint: disable=broad-exception-caught
-        return False
-
-
-# Whether ProcessGroup ended up registered as a reference-opaque type, i.e.
-# whether a process group can cross the op boundary as a live graph input.
-# Process-global and fixed at import, so a plain constant (Dynamo-friendly).
-PG_REFERENCE_OPAQUE: bool = _compute_pg_reference_opaque()
+try:
+    from torch._C._distributed_c10d import ProcessGroup as _PROCESS_GROUP_TYPE
+    from torch._C._distributed_c10d import _resolve_process_group
+except ImportError:  # pragma: no cover
+    _PROCESS_GROUP_TYPE = None
+    _resolve_process_group = None
 
 
 # --------------------------------------------------------------------------- #
@@ -660,44 +620,45 @@ class _QuantizerAdapter(_Adapter):
         kwargs[self.name] = args[self.meta_slot()][self.QUANTIZER_KEY]
 
 
-class _ReferenceOpaqueAdapter(_Adapter):
-    """``ProcessGroup`` (or any reference-opaque type) -> one own opaque slot.
+class _ProcessGroupAdapter(_Adapter):
+    """``ProcessGroup`` -> its c10d registry name in one ``OpaqueValueBundle`` slot.
 
-    A reference-opaque object is live, stateful black-box data (e.g. a
-    ``torch.distributed.ProcessGroup``): it cannot be specialized on or baked
-    into the graph as a constant the way a value-opaque quantizer is. torch.compile
-    instead carries it through as a graph *input*, so it passes straight through
-    its own schema slot (no ``OpaqueValueBundle`` wrapper). The field is annotated
-    with a concrete type registered via ``register_opaque_type(..., typ="reference")``.
-
-    On the fake / setup-context path the slot holds a ``FakeScriptObject`` (or
-    ``None``); it is assigned to the field verbatim, so the fake impl must never
-    read the object's contents.
+    Mirrors traceable functional collectives: the graph carries the group's
+    *name* (a plain string, so guards and the FX cache key are trivial) and the
+    live group is re-resolved from the registry inside the op, in the same
+    process -- ``from_slots(to_slots(pg))`` returns the very group the caller
+    passed. Groups created outside the c10d registry fail the resolve loudly.
     """
 
-    def __init__(self, name: str, type_name: str, is_optional: bool) -> None:
+    NAME_KEY = "group_name"
+
+    def __init__(self, name: str) -> None:
         self.name = name
-        self.type_str = f"{type_name}?" if is_optional else type_name
+
+    def meta_slot(self) -> str:
+        """Group-name slot name."""
+        return self.name + "__pg"
 
     @classmethod
-    def try_build(cls, name: str, annot: Any) -> Optional["_ReferenceOpaqueAdapter"]:
-        if _is_opaque_reference_type is None:
+    def try_build(cls, name: str, annot: Any) -> Optional["_ProcessGroupAdapter"]:
+        if _PROCESS_GROUP_TYPE is None:
             return None
-        stripped, is_optional = _strip_optional(annot)
-        if not isinstance(stripped, type):
-            return None
-        if _is_opaque_reference_type(stripped):
-            return cls(name, get_opaque_type_name(stripped), is_optional)
+        stripped, _ = _strip_optional(annot)
+        if stripped is _PROCESS_GROUP_TYPE:
+            return cls(name)
         return None
 
     def schema_slots(self) -> List[Tuple[str, str]]:
-        return [(self.name, self.type_str)]
+        return [(self.meta_slot(), _OPAQUE_VALUE_BUNDLE_TYPE_NAME)]
 
     def to_slots(self, owner: Any) -> Dict[str, Any]:
-        return {self.name: getattr(owner, self.name)}
+        pg = getattr(owner, self.name)
+        name = None if pg is None else pg.group_name
+        return {self.meta_slot(): OpaqueValueBundle({self.NAME_KEY: name})}
 
     def from_slots(self, args: Dict[str, Any], kwargs: Dict[str, Any]) -> None:
-        kwargs[self.name] = args[self.name]
+        name = args[self.meta_slot()][self.NAME_KEY]
+        kwargs[self.name] = None if name is None else _resolve_process_group(name)
 
 
 class _SimpleBundleAdapter(_Adapter):
@@ -782,8 +743,8 @@ class _UnsupportedAdapter(_Adapter):
         if not self._is_trivial(value):
             raise TypeError(
                 f"{self.owner_cls_name} field {self.name!r} has a type not "
-                "supported by torch.compile (not Tensor, simple, Quantizer, or a "
-                "reference-opaque type such as ProcessGroup) and carries a "
+                "supported by torch.compile (not Tensor, simple, Quantizer, or "
+                "ProcessGroup) and carries a "
                 "non-trivial value; add a matching adapter in custom_op.py to handle it."
             )
         return {}
@@ -797,7 +758,7 @@ class _UnsupportedAdapter(_Adapter):
 _FIELD_ADAPTERS: Tuple[type, ...] = (
     _TensorOrQuantizedAdapter,
     _TensorAdapter,
-    _ReferenceOpaqueAdapter,
+    _ProcessGroupAdapter,
     _QuantizerAdapter,
 )
 
