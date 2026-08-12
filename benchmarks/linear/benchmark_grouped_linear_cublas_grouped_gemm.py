@@ -202,8 +202,7 @@ def _run_correctness_step(
     )
     input_grad = None if x.grad is None else x.grad.detach().clone()
     parameter_grads = [
-        None if param.grad is None else param.grad.detach().clone()
-        for param in layer.parameters()
+        None if param.grad is None else param.grad.detach().clone() for param in layer.parameters()
     ]
     return output.detach().clone(), input_grad, parameter_grads
 
@@ -365,9 +364,7 @@ def main() -> None:
 
     if args.m_splits is None:
         num_local_experts = QWEN_NUM_EXPERTS // QWEN_EXPERT_PARALLEL_SIZE
-        rows_per_expert = (
-            QWEN_SEQUENCE_LENGTH * QWEN_TOP_K // num_local_experts
-        )
+        rows_per_expert = QWEN_SEQUENCE_LENGTH * QWEN_TOP_K // num_local_experts
         split_sizes = [rows_per_expert] * num_local_experts
     else:
         split_sizes = [int(value) for value in args.m_splits.split(",") if value]
@@ -423,9 +420,7 @@ def main() -> None:
                 )
                 for path in EXECUTION_PATHS
             }
-            layers["cublas_grouped_gemm"].load_state_dict(
-                layers["multistream"].state_dict()
-            )
+            layers["cublas_grouped_gemm"].load_state_dict(layers["multistream"].state_dict())
 
             base_x = torch.randn(
                 total_rows,
@@ -502,9 +497,7 @@ def main() -> None:
                             mode=args.mode,
                             time_ms=timing_ms,
                         ),
-                        "speedup_vs_multistream": (
-                            1.0 if path.name == "multistream" else speedup
-                        ),
+                        "speedup_vs_multistream": (1.0 if path.name == "multistream" else speedup),
                     }
                 )
 

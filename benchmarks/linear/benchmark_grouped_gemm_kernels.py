@@ -317,9 +317,9 @@ def _assert_mxfp8_operands_are_gemm_ready(prepared: PreparedGemm) -> None:
     )
     for operand_group in operands:
         for operand in _iter_operands(operand_group):
-            assert getattr(operand, "_with_gemm_swizzled_scales", False), (
-                "MXFP8 operand was not prepared with GEMM-swizzled scales"
-            )
+            assert getattr(
+                operand, "_with_gemm_swizzled_scales", False
+            ), "MXFP8 operand was not prepared with GEMM-swizzled scales"
 
 
 def _use_split_accumulator(spec: GemmSpec) -> bool:
@@ -428,13 +428,11 @@ def _shape_description(spec: GemmSpec, rows_per_expert: str) -> str:
     """Format the actual per-expert operands passed to TE."""
     if spec.gemm == "fwd":
         return (
-            f"A[{spec.n},{spec.k}] B[{rows_per_expert},{spec.k}] "
-            f"-> D[{rows_per_expert},{spec.n}]"
+            f"A[{spec.n},{spec.k}] B[{rows_per_expert},{spec.k}] -> D[{rows_per_expert},{spec.n}]"
         )
     if spec.gemm == "dgrad":
         return (
-            f"A[{spec.n},{spec.k}] B[{rows_per_expert},{spec.n}] "
-            f"-> D[{rows_per_expert},{spec.k}]"
+            f"A[{spec.n},{spec.k}] B[{rows_per_expert},{spec.n}] -> D[{rows_per_expert},{spec.k}]"
         )
     return f"A[{rows_per_expert},{spec.k}] B[{rows_per_expert},{spec.n}] -> D[{spec.n},{spec.k}]"
 
