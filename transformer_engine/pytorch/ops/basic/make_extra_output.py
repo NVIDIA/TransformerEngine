@@ -80,14 +80,17 @@ class MakeExtraOutput(BasicOperation):
         basic_op_ctxs: list[OperationContext],
         grad_output: torch.Tensor,
         *,
-        basic_op_grad_extra_outputs: list[tuple[torch.Tensor, ...]],
+        basic_op_grad_extra_outputs: list[tuple[Optional[torch.Tensor], ...]],
     ) -> tuple[
         torch.Tensor,
         Iterable[Iterable[Optional[torch.Tensor]]],
         Iterable[Iterable[Optional[torch.Tensor]]],
     ]:
         grad_extra_output = basic_op_grad_extra_outputs[0][0]
-        if self._in_place:
+        if grad_extra_output is None:
+            # Extra output is not consumed, so its gradient is zero
+            grad_input = grad_output
+        elif self._in_place:
             grad_extra_output += grad_output
             grad_input = grad_extra_output
         else:

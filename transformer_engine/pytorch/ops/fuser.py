@@ -432,9 +432,11 @@ class OperationFuser:
                 basic_ops.append(op)
         self._num_basic_ops: int = len(basic_ops)
         self._basic_ops: list[BasicOperation] = basic_ops
-        self._basic_op_extra_channels_versions = [
-            op._extra_channels_version for op in self._basic_ops
-        ]
+        # Capture channel routing from each basic op. If any op later rebinds a
+        # channel it flips this flag, essentially invalidating this fuser's forward pass.
+        self._channels_stale: bool = False
+        for op in self._basic_ops:
+            op._capturing_op_fusers.add(self)
 
         # Number of extra tensor inputs
         self._basic_op_num_extra_inputs: list[int] = list(op.num_extra_inputs for op in basic_ops)
@@ -543,16 +545,6 @@ class OperationFuser:
         self._basic_op_params = [list(op.parameters()) for op in self._basic_ops]
         self._basic_op_num_params = list(map(len, self._basic_op_params))
         self._flat_basic_op_params = sum(self._basic_op_params, [])
-
-    def has_stale_op_channels(self) -> bool:
-        """Whether an operation's extra tensor channels have changed."""
-        return any(
-            op._extra_channels_version != version
-            for op, version in zip(
-                self._basic_ops,
-                self._basic_op_extra_channels_versions,
-            )
-        )
 
     @staticmethod
     def _apply_fusions(
@@ -702,7 +694,7 @@ class OperationFuser:
         *extra_inputs: torch.Tensor,
         basic_op_kwargs: Optional[list[dict[str, Any]]] = None,
     ) -> torch.Tensor | tuple[torch.Tensor, ...]:
-        if self.has_stale_op_channels():
+        if self._channels_stale:
             raise RuntimeError(
                 "Extra tensor channels changed after this OperationFuser captured "
                 "its routing. Construct a new OperationFuser."

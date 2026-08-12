@@ -10,6 +10,7 @@ from collections.abc import Iterable, Sequence
 import dataclasses
 import pickle
 from typing import Any, Optional
+import weakref
 
 import torch
 
@@ -136,8 +137,8 @@ class FusibleOperation(torch.nn.Module, metaclass=abc.ABCMeta):
         basic_op_grad_extra_outputs: Sequence[Sequence[Optional[torch.Tensor]]],
     ) -> tuple[
         torch.Tensor,
-        Iterable[Iterable[Optional[torch.Tensor]]],
-        Iterable[Iterable[Optional[torch.Tensor]]],
+        Sequence[Sequence[Optional[torch.Tensor]]],
+        Sequence[Sequence[Optional[torch.Tensor]]],
     ]:
         """Backward pass
 
@@ -161,9 +162,9 @@ class FusibleOperation(torch.nn.Module, metaclass=abc.ABCMeta):
         -------
         torch.Tensor:
             Loss gradient w.r.t. operation input
-        Iterable of iterable of torch.Tensor:
+        Sequence of sequences of torch.Tensor:
             Loss gradients w.r.t. parameters for basic operations
-        Iterable of iterable of torch.Tensor:
+        Sequence of sequences of torch.Tensor:
             Loss gradients w.r.t. extra tensor inputs to basic
             operations
 
@@ -194,11 +195,24 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         self._extra_input_channels: list[Optional[str]] = [None] * self.num_extra_inputs
         self._extra_output_channels: list[Optional[str]] = [None] * self.num_extra_outputs
         self._extra_output_to_caller: list[bool] = [True] * self.num_extra_outputs
-        self._extra_channels_version = 0
+        # OperationFusers that have captured this op's channel routing. Weak
+        # refs avoid cycles and drop automatically when a fuser is discarded.
+        self._capturing_op_fusers: weakref.WeakSet = weakref.WeakSet()
 
         # Objects for quantization
         self._fp8_metas: Optional[dict[str, dict[str, Any]]] = None
         self._quantizers: Optional[dict[str, list[Quantizer]]] = None
+
+    def _invalidate_capturing_op_fusers(self) -> None:
+        """Mark fusers that captured this op's channels as stale.
+
+        Channel routing is cheap to change, but any OperationFuser that
+        already captured it must be rebuilt. Flipping a flag here keeps the
+        per-call check O(1) instead of rescanning versions every forward.
+        """
+        for fuser in self._capturing_op_fusers:
+            fuser._channels_stale = True
+        self._capturing_op_fusers.clear()
 
     def set_extra_input_channel(self, index: int, channel: Optional[str]) -> BasicOperation:
         """Bind an extra input slot to an internal fuser channel.
@@ -217,7 +231,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         if self._extra_input_channels[index] == channel:
             return self
         self._extra_input_channels[index] = channel
-        self._extra_channels_version += 1
+        self._invalidate_capturing_op_fusers()
         return self
 
     def set_extra_output_channel(
@@ -252,7 +266,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
             return self
         self._extra_output_channels[index] = channel
         self._extra_output_to_caller[index] = output_to_caller
-        self._extra_channels_version += 1
+        self._invalidate_capturing_op_fusers()
         return self
 
     @property

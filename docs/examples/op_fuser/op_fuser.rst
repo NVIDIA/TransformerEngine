@@ -277,14 +277,16 @@ The following conditions apply to extra tensor channels:
 - ``set_extra_output_channel`` accepts ``output_to_caller`` (``True`` by
   default). Public extra outputs are returned in their original
   basic-operation and slot order. Gradients supplied for a returned output
-  are combined with gradients from its internal channel consumers.
+  are combined with gradients from its internal channel consumers. An
+  unused extra-output gradient may be ``None`` and is treated as zero.
 - Set ``output_to_caller=False`` for a channel tensor that should remain
   internal. Removing a channel binding with ``channel=None`` restores that
   output as public.
 - Channel bindings are captured when an ``OperationFuser`` (or the
-  fusers inside a ``Sequential``) is first constructed. Changing
+  fusers inside a ``Sequential``) is constructed. Rebinding a channel with
   ``set_extra_input_channel`` / ``set_extra_output_channel`` afterward
-  requires constructing a new ``OperationFuser`` or ``Sequential``.
+  invalidates any fuser that captured it, so a new ``OperationFuser`` or
+  ``Sequential`` must be constructed before the next forward pass.
 
 Channel-connected basic operations may still be replaced by registered
 ``FusedOperation`` implementations. If a fused operation contains both

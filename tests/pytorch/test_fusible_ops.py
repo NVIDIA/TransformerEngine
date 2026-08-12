@@ -503,6 +503,34 @@ class TestExtraTensorChannels:
         torch.testing.assert_close(x.grad, expected_dx)
         torch.testing.assert_close(body.bias.grad, dy)
 
+    @pytest.mark.parametrize("output_to_caller", (True, False))
+    def test_unconsumed_extra_output(
+        self,
+        output_to_caller: bool,
+        size: int = 16,
+    ) -> None:
+        """Unused public or hidden-unconsumed MakeExtraOutput treats None grad as zero."""
+        residual = te_ops.MakeExtraOutput()
+        body = te_ops.Bias(size=size, device="cpu")
+        if not output_to_caller:
+            residual.set_extra_output_channel(0, "unused", output_to_caller=False)
+
+        model = te_ops.Sequential(residual, body)
+        x = torch.rand((size,), requires_grad=True)
+        outputs = model(x)
+        if output_to_caller:
+            y, residual_out = outputs
+            torch.testing.assert_close(residual_out, x)
+        else:
+            assert isinstance(outputs, torch.Tensor)
+            y = outputs
+
+        torch.testing.assert_close(y, x + body.bias)
+        dy = torch.rand_like(y)
+        y.backward(dy)
+        torch.testing.assert_close(x.grad, dy)
+        torch.testing.assert_close(body.bias.grad, dy)
+
     @pytest.mark.parametrize("fusion_kind", ("forward", "backward", "forward_backward"))
     @pytest.mark.parametrize("output_to_caller", (True, False))
     def test_fused_internal_residual_connection(
@@ -737,7 +765,7 @@ class TestExtraTensorChannels:
             )
 
     def test_extra_channel_change_requires_new_sequential(self, size: int = 16) -> None:
-        """Sequential does not auto-rebuild after a channel configuration change."""
+        """Rebinding a channel invalidates the fuser that captured it."""
         producer = te_ops.MakeExtraOutput()
         consumer = te_ops.AddExtraInput()
         producer.set_extra_output_channel(0, "route")
@@ -902,14 +930,21 @@ class TestExtraTensorChannels:
 
             def fuser_forward(self, basic_op_ctxs, input_, *, basic_op_extra_inputs, **unused):
                 scale = basic_op_extra_inputs[0][0]
-                basic_op_ctxs[0].save_for_backward(input_, scale)
+                ctx = basic_op_ctxs[0]
+                # Match scaled activations: only compute scale grads when the
+                # fuser marked this fresh internal channel as requiring grad.
+                ctx.extra_input_requires_grad = scale.requires_grad
+                ctx.save_for_backward(input_, scale)
                 return input_ * scale.unsqueeze(-1), [()]
 
             def fuser_backward(self, basic_op_ctxs, grad_output, *, basic_op_grad_extra_outputs):
                 del basic_op_grad_extra_outputs
-                input_, scale = basic_op_ctxs[0].saved_tensors
+                ctx = basic_op_ctxs[0]
+                input_, scale = ctx.saved_tensors
                 grad_input = grad_output * scale.unsqueeze(-1)
-                grad_scale = (grad_output * input_).sum(dim=-1)
+                grad_scale = (
+                    (grad_output * input_).sum(dim=-1) if ctx.extra_input_requires_grad else None
+                )
                 return grad_input, [()], [(grad_scale,)]
 
         producer = MakeScale()
@@ -3456,6 +3491,7 @@ class TestFusedOps:
     @pytest.mark.parametrize("in_shape", ((-1,), (6, 16, -1)))
     @pytest.mark.parametrize("dtype", _dtypes)
     @pytest.mark.parametrize("zero_centered_gamma", (False, True))
+    @pytest.mark.parametrize("with_extra_grad", (True, False))
     def test_backward_add_rmsnorm(
         self,
         *,
@@ -3465,6 +3501,7 @@ class TestFusedOps:
         device: torch.device = "cuda",
         eps: float = 0.3,
         zero_centered_gamma: bool,
+        with_extra_grad: bool,
     ) -> None:
         """Fused backward RMNorm + add"""
 
@@ -3503,7 +3540,10 @@ class TestFusedOps:
         else:
             y1_ref = x_ref / torch.sqrt(eps + var_ref) * w_ref
         y2_ref = x_ref
-        (y1_ref * dy1_ref + y2_ref * dy2_ref).sum().backward()
+        if with_extra_grad:
+            (y1_ref * dy1_ref + y2_ref * dy2_ref).sum().backward()
+        else:
+            (y1_ref * dy1_ref).sum().backward()
 
         # Implementation with fusible operations
         model = te_ops.Sequential(
@@ -3520,7 +3560,10 @@ class TestFusedOps:
             model[1].weight.copy_(w_test)
             del w_test
         y1_test, y2_test = model(x_test)
-        (y1_test * dy1_test + y2_test * dy2_test).sum().backward()
+        if with_extra_grad:
+            (y1_test * dy1_test + y2_test * dy2_test).sum().backward()
+        else:
+            (y1_test * dy1_test).sum().backward()
 
         # Check that backward operations have been fused
         backward_ops = model._module_groups[0]._backward_ops
@@ -3542,6 +3585,7 @@ class TestFusedOps:
 
     @pytest.mark.parametrize("dtype", _dtypes)
     @pytest.mark.parametrize("quantization", _quantization_list)
+    @pytest.mark.parametrize("with_extra_grad", (True, False))
     def test_backward_linear_add(
         self,
         *,
@@ -3551,6 +3595,7 @@ class TestFusedOps:
         device: torch.device = "cuda",
         quantization: Optional[str],
         quantized_weight: bool = False,
+        with_extra_grad: bool,
     ) -> None:
         """Backward dgrad GEMM + add"""
 
@@ -3598,7 +3643,10 @@ class TestFusedOps:
         # Plain PyTorch implementation
         y1_ref = torch.nn.functional.linear(x_ref, w_ref)
         y2_ref = x_ref
-        (y1_ref * dy1_ref + y2_ref * dy2_ref).sum().backward()
+        if with_extra_grad:
+            (y1_ref * dy1_ref + y2_ref * dy2_ref).sum().backward()
+        else:
+            (y1_ref * dy1_ref).sum().backward()
 
         # Implementation with fusible operations
         recipe = make_recipe(quantization)
@@ -3618,7 +3666,10 @@ class TestFusedOps:
             del w_test
         with te.autocast(enabled=quantized_compute, recipe=recipe):
             y1_test, y2_test = model(x_test)
-        (y1_test * dy1_test + y2_test * dy2_test).sum().backward()
+        if with_extra_grad:
+            (y1_test * dy1_test + y2_test * dy2_test).sum().backward()
+        else:
+            (y1_test * dy1_test).sum().backward()
 
         # Check that backward operations have been fused
         backward_ops = model._module_groups[0]._backward_ops
