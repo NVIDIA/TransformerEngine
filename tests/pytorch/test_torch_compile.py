@@ -1448,6 +1448,50 @@ def test_te_linear_compile_is_first_microbatch(compile_mode):
 
 
 @pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+@pytest.mark.xfail(reason="waiting for a PyTorch fix", strict=False)
+def test_te_linear_compile_train_eval_switch():
+    """train -> eval -> train on the same compiled ``te.Linear``, vs eager."""
+    dtype = torch.bfloat16
+    device = "cuda"
+    fp8_recipe = recipe.Float8CurrentScaling()
+    model = te.Linear(64, 32, params_dtype=dtype, device=device)
+
+    def fn(inp):
+        with te.autocast(recipe=fp8_recipe):
+            return model(inp, is_first_microbatch=True)
+
+    torch._dynamo.reset()
+    compiled = torch.compile(fn, fullgraph=True)
+
+    def train_step():
+        inp = torch.randn(16, 64, dtype=dtype, device=device, requires_grad=True)
+        out = compiled(inp)
+        out.sum().backward()
+        inp_ref = inp.detach().clone().requires_grad_(True)
+        model.zero_grad(set_to_none=True)
+        out_ref = fn(inp_ref)
+        out_ref.sum().backward()
+        torch.testing.assert_close(
+            out.detach(), out_ref.detach(), atol=_EAGER_ATOL, rtol=_EAGER_RTOL
+        )
+        torch.testing.assert_close(inp.grad, inp_ref.grad, atol=_EAGER_ATOL, rtol=_EAGER_RTOL)
+        model.zero_grad(set_to_none=True)
+
+    train_step()
+
+    model.eval()
+    x = torch.randn(16, 64, dtype=dtype, device=device)
+    with torch.no_grad():
+        out_eval = compiled(x)
+        ref_eval = fn(x)
+    torch.testing.assert_close(out_eval, ref_eval, atol=_EAGER_ATOL, rtol=_EAGER_RTOL)
+
+    model.train()
+    train_step()
+
+
+@pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
 def test_te_linear_dynamic_shapes():
     """torch.compile of ``te.Linear`` with a ``mark_dynamic`` batch dimension:
     one graph must serve all batch sizes -- no recompiles -- and match eager
