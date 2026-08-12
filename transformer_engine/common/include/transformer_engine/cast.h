@@ -465,9 +465,9 @@ void nvte_group_dequantize(const NVTEGroupedTensor input, NVTEGroupedTensor outp
  *  \param[in]     stream          CUDA stream used for the operation.
  */
 void nvte_fused_group_requantize_mxfp8(const NVTETensor input, NVTETensor output,
-                                        const NVTETensor tensor_offsets, NVTETensor dequantized,
-                                        const NVTEQuantizationConfig quant_config,
-                                        cudaStream_t stream);
+                                       const NVTETensor tensor_offsets, NVTETensor dequantized,
+                                       const NVTEQuantizationConfig quant_config,
+                                       cudaStream_t stream);
 
 /*! \brief Casts multiple input tensors to quantized output tensors.
  *

@@ -789,8 +789,7 @@ py::object group_requantize_inplace(py::handle grouped_x, py::handle quantizer,
     // Grouped tensors carry data and scales as flat 1D buffers.
     at::Tensor columnwise_data = at::empty({tokens_i64 * hidden_i64}, options);
     at::Tensor columnwise_scale_inv = at::empty({tokens_i64 / 32 * hidden_i64}, options);
-    at::Tensor swizzled_rowwise_scale_inv =
-        at::empty({static_cast<int64_t>(num_scales)}, options);
+    at::Tensor swizzled_rowwise_scale_inv = at::empty({static_cast<int64_t>(num_scales)}, options);
     at::Tensor dequantized;
     if (return_dequantized) {
       dequantized =
@@ -809,13 +808,12 @@ py::object group_requantize_inplace(py::handle grouped_x, py::handle quantizer,
     TensorWrapper output_nvte(NVTE_MXFP8_1D_SCALING);
     output_nvte.set_rowwise_data(rowwise_data.data_ptr(), wire_dtype,
                                  std::vector<size_t>{total_tokens, hidden_dim});
-    output_nvte.set_rowwise_scale_inv(swizzled_rowwise_scale_inv.data_ptr(),
-                                      DType::kFloat8E8M0, std::vector<size_t>{num_scales});
+    output_nvte.set_rowwise_scale_inv(swizzled_rowwise_scale_inv.data_ptr(), DType::kFloat8E8M0,
+                                      std::vector<size_t>{num_scales});
     output_nvte.set_columnwise_data(columnwise_data.data_ptr(), DType::kFloat8E4M3,
                                     std::vector<size_t>{total_tokens, hidden_dim});
-    output_nvte.set_columnwise_scale_inv(
-        columnwise_scale_inv.data_ptr(), DType::kFloat8E8M0,
-        std::vector<size_t>{total_tokens / 32 * hidden_dim});
+    output_nvte.set_columnwise_scale_inv(columnwise_scale_inv.data_ptr(), DType::kFloat8E8M0,
+                                         std::vector<size_t>{total_tokens / 32 * hidden_dim});
 
     TensorWrapper element_offsets_nvte;
     element_offsets_nvte.set_rowwise_data(element_offsets.data_ptr(), DType::kInt64,
@@ -832,10 +830,10 @@ py::object group_requantize_inplace(py::handle grouped_x, py::handle quantizer,
     quant_config.set_use_fast_math(true);
 
     NVTE_SCOPED_GIL_RELEASE({
-      nvte_fused_group_requantize_mxfp8(
-          input_nvte.data(), output_nvte.data(), element_offsets_nvte.data(),
-          return_dequantized ? dequantized_nvte.data() : nullptr, quant_config,
-          at::cuda::getCurrentCUDAStream());
+      nvte_fused_group_requantize_mxfp8(input_nvte.data(), output_nvte.data(),
+                                        element_offsets_nvte.data(),
+                                        return_dequantized ? dequantized_nvte.data() : nullptr,
+                                        quant_config, at::cuda::getCurrentCUDAStream());
     });
 
     grouped_x.attr("scale_inv") = swizzled_rowwise_scale_inv;
