@@ -9,10 +9,12 @@
 #include <cuda_bf16.h>
 #include <cuda_fp8.h>
 #include <cuda_runtime.h>
+#include <cstring>
 #include <gtest/gtest.h>
 
 #include <transformer_engine/cast.h>
 #include <transformer_engine/activation.h>
+#include <transformer_engine/swizzle.h>
 #include "../test_common.h"
 #include "transformer_engine/transformer_engine.h"
 
@@ -989,3 +991,239 @@ INSTANTIATE_TEST_SUITE_P(
         ::testing::Values(DType::kFloat8E4M3, DType::kFloat8E5M2),
         ::testing::ValuesIn(input_scenarios)),
     test_name_generator);
+
+// ============================================================================
+// Swizzled-scales cast-only tests
+//
+// Validate the WITH_GEMM_SWIZZLED_SCALES=true code path added by the
+// CastTraitsSwizzle port. The specialized kernel dispatches to
+// CastTraitsSwizzle<..., kCacheColwise=true, kSwizzled=true> whenever the
+// output tensor has set_with_gemm_swizzled_scales(true), producing scales
+// directly in GEMM-swizzled layout.
+//
+// Reference construction: run the well-tested linear-scale path, then apply
+// nvte_swizzle_scaling_factors (independently tested by SwizzleTestSuite) to
+// transform the linear scales into the swizzled layout. Byte-compare the
+// direct swizzled cast output against this reference for both scale tensors
+// and the FP8 output data itself.
+//
+// Pass criteria per test:
+//   1. FP8 rowwise data byte-identical between linear and swizzled paths.
+//   2. FP8 colwise data byte-identical between linear and swizzled paths.
+//   3. Swizzled rowwise scale bytes match linear->swizzle reference.
+//   4. Swizzled colwise scale bytes match linear->swizzle reference.
+//   5. Rowwise-only FP8 data and swizzled scales match the same reference.
+//   6. No CUDA errors from any launch.
+// ============================================================================
+
+class SwizzledScalesFusedCastMXFP8TestSuite : public ::testing::TestWithParam<
+    std::tuple<std::vector<size_t>,
+               transformer_engine::DType,
+               transformer_engine::DType>> {};
+
+TEST_P(SwizzledScalesFusedCastMXFP8TestSuite, TestSwizzledCastMXFP8) {
+    if (getDeviceComputeCapability() < blackwellComputeCapability) {
+        GTEST_SKIP();
+    }
+
+    using namespace transformer_engine;
+    using namespace test;
+
+    const auto shape = std::get<0>(GetParam());
+    const DType itype = std::get<1>(GetParam());
+    const DType otype = std::get<2>(GetParam());
+
+    // BIDIMENSIONAL scaling needs a 2D+ input.
+    if (shape.size() < 2) {
+        GTEST_SKIP();
+    }
+
+    const size_t rows = first_dimension(shape);
+    const size_t cols = last_dimension(shape);
+    const size_t out_bytes = rows * cols;  // fp8 = 1 byte/elem
+
+    // Input filled with the same values for all casts.
+    Tensor input("input", shape, itype);
+    fillUniform(&input);
+
+    // Target: swizzled-scale cast. Dispatcher routes to
+    // CastTraitsSwizzle<..., kCacheColwise=true, kSwizzled=true> on kernel #3.
+    Tensor output_swizzled("output_swizzled", shape, otype, true, true, NVTE_MXFP8_1D_SCALING);
+    output_swizzled.set_with_gemm_swizzled_scales(true);
+    nvte_quantize(input.data(), output_swizzled.data(), 0);
+
+    // Rowwise-only activations take the pointer-based cast-only kernel. This
+    // directly exercises its WITH_GEMM_SWIZZLED_SCALES trait specialization
+    // for shapes whose column count is a multiple of 128.
+    Tensor output_rowwise_swizzled("output_rowwise_swizzled", shape, otype,
+                                   /*rowwise=*/true, /*colwise=*/false,
+                                   NVTE_MXFP8_1D_SCALING);
+    output_rowwise_swizzled.set_with_gemm_swizzled_scales(true);
+    nvte_quantize(input.data(), output_rowwise_swizzled.data(), 0);
+
+    cudaDeviceSynchronize();
+    ASSERT_EQ(cudaGetLastError(), cudaSuccess) << "swizzled-scale nvte_quantize failed";
+
+    // Reference construction: nvte_swizzle_scaling_factors accepts tensors with
+    // exactly one scale direction, so we build the rowwise and colwise references
+    // independently. Each is a single-direction linear cast followed by a
+    // single-direction swizzle transform, using the same input as the target.
+    // MXFP8 is a deterministic per-direction operation, so a rowwise-only cast
+    // produces the same rowwise fp8 bytes and scales as a rowwise+colwise cast.
+
+    // Rowwise reference.
+    Tensor linear_row("linear_row", shape, otype, /*rowwise=*/true, /*colwise=*/false,
+                      NVTE_MXFP8_1D_SCALING);
+    nvte_quantize(input.data(), linear_row.data(), 0);
+    Tensor ref_row_swz("ref_row_swz", shape, otype, /*rowwise=*/true, /*colwise=*/false,
+                       NVTE_MXFP8_1D_SCALING);
+    ref_row_swz.set_with_gemm_swizzled_scales(true);
+    if (out_bytes > 0) {
+        cudaMemcpy(ref_row_swz.rowwise_dptr(), linear_row.rowwise_dptr(),
+                   out_bytes, cudaMemcpyDeviceToDevice);
+        nvte_swizzle_scaling_factors(linear_row.data(), ref_row_swz.data(), 0);
+    }
+
+    // Colwise reference.
+    Tensor linear_col("linear_col", shape, otype, /*rowwise=*/false, /*colwise=*/true,
+                      NVTE_MXFP8_1D_SCALING);
+    nvte_quantize(input.data(), linear_col.data(), 0);
+    Tensor ref_col_swz("ref_col_swz", shape, otype, /*rowwise=*/false, /*colwise=*/true,
+                       NVTE_MXFP8_1D_SCALING);
+    ref_col_swz.set_with_gemm_swizzled_scales(true);
+    if (out_bytes > 0) {
+        cudaMemcpy(ref_col_swz.columnwise_dptr(), linear_col.columnwise_dptr(),
+                   out_bytes, cudaMemcpyDeviceToDevice);
+        nvte_swizzle_scaling_factors(linear_col.data(), ref_col_swz.data(), 0);
+    }
+
+    cudaDeviceSynchronize();
+    ASSERT_EQ(cudaGetLastError(), cudaSuccess) << "reference construction failed";
+
+    // ---- Comparisons ----
+
+    // (1) & (2): FP8 output data byte-identical to single-direction linear casts.
+    TRANSFORMER_ENGINE_TYPE_SWITCH_FP8_ONLY(otype, OutputType,
+        {
+            const uint8_t *test_row = reinterpret_cast<const uint8_t *>(
+                output_swizzled.rowwise_cpu_dptr<OutputType>());
+            const uint8_t *ref_row = reinterpret_cast<const uint8_t *>(
+                linear_row.rowwise_cpu_dptr<OutputType>());
+            for (size_t i = 0; i < out_bytes; ++i) {
+                ASSERT_EQ(test_row[i], ref_row[i])
+                    << "rowwise fp8 data mismatch at index " << i
+                    << " (swizzled=" << static_cast<int>(test_row[i])
+                    << " linear=" << static_cast<int>(ref_row[i]) << ")";
+            }
+            const uint8_t *test_col = reinterpret_cast<const uint8_t *>(
+                output_swizzled.columnwise_cpu_dptr<OutputType>());
+            const uint8_t *ref_col = reinterpret_cast<const uint8_t *>(
+                linear_col.columnwise_cpu_dptr<OutputType>());
+            for (size_t i = 0; i < out_bytes; ++i) {
+                ASSERT_EQ(test_col[i], ref_col[i])
+                    << "colwise fp8 data mismatch at index " << i
+                    << " (swizzled=" << static_cast<int>(test_col[i])
+                    << " linear=" << static_cast<int>(ref_col[i]) << ")";
+            }
+        }
+    );
+
+    // (3): Swizzled rowwise scale bytes — directly-written vs linear-then-transform.
+    {
+        const size_t n = product(output_swizzled.rowwise_scale_inv_shape());
+        const fp8e8m0 *test = output_swizzled.rowwise_cpu_scale_inv_ptr<fp8e8m0>();
+        const fp8e8m0 *ref  = ref_row_swz.rowwise_cpu_scale_inv_ptr<fp8e8m0>();
+        for (size_t i = 0; i < n; ++i) {
+            ASSERT_EQ(test[i], ref[i])
+                << "swizzled rowwise scale byte mismatch at offset " << i
+                << " (test=" << static_cast<int>(test[i])
+                << " ref=" << static_cast<int>(ref[i]) << ")";
+        }
+    }
+
+    // (4): Swizzled colwise scale bytes — exercises the uint16-pair-packed flush
+    // path added by CACHE_COLWISE_SCALE_IN_SMEM + WITH_SWIZZLED_SCALES.
+    {
+        const size_t n = product(output_swizzled.columnwise_scale_inv_shape());
+        const fp8e8m0 *test = output_swizzled.columnwise_cpu_scale_inv_ptr<fp8e8m0>();
+        const fp8e8m0 *ref  = ref_col_swz.columnwise_cpu_scale_inv_ptr<fp8e8m0>();
+        for (size_t i = 0; i < n; ++i) {
+            ASSERT_EQ(test[i], ref[i])
+                << "swizzled colwise scale byte mismatch at offset " << i
+                << " (test=" << static_cast<int>(test[i])
+                << " ref=" << static_cast<int>(ref[i]) << ")";
+        }
+    }
+
+    // (5) & (6): The rowwise-only swizzled path matches the same independently
+    // constructed linear-then-swizzle reference.
+    TRANSFORMER_ENGINE_TYPE_SWITCH_FP8_ONLY(otype, OutputType,
+        {
+            const uint8_t *test = reinterpret_cast<const uint8_t *>(
+                output_rowwise_swizzled.rowwise_cpu_dptr<OutputType>());
+            const uint8_t *ref = reinterpret_cast<const uint8_t *>(
+                linear_row.rowwise_cpu_dptr<OutputType>());
+            for (size_t i = 0; i < out_bytes; ++i) {
+                ASSERT_EQ(test[i], ref[i])
+                    << "rowwise-only fp8 data mismatch at index " << i;
+            }
+        }
+    );
+    {
+        const size_t n = product(output_rowwise_swizzled.rowwise_scale_inv_shape());
+        const fp8e8m0 *test =
+            output_rowwise_swizzled.rowwise_cpu_scale_inv_ptr<fp8e8m0>();
+        const fp8e8m0 *ref = ref_row_swz.rowwise_cpu_scale_inv_ptr<fp8e8m0>();
+        for (size_t i = 0; i < n; ++i) {
+            ASSERT_EQ(test[i], ref[i])
+                << "rowwise-only swizzled scale mismatch at offset " << i;
+        }
+    }
+
+}
+
+std::string swizzled_test_name_generator(
+    const testing::TestParamInfo<SwizzledScalesFusedCastMXFP8TestSuite::ParamType>& info) {
+    std::string name;
+    const auto &shape = std::get<0>(info.param);
+    for (size_t i = 0; i < shape.size(); ++i) {
+        if (i > 0) name += "x";
+        name += std::to_string(shape[i]);
+    }
+    name += "X" + test::typeName(std::get<1>(info.param))
+          + "X" + test::typeName(std::get<2>(info.param));
+    return name;
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    OperatorTest_FusedCastMXFP8_SwizzledCastOnly,
+    SwizzledScalesFusedCastMXFP8TestSuite,
+    ::testing::Values(
+        // 1. Aligned, small — sanity.
+        std::make_tuple(std::vector<size_t>{128, 128}, DType::kBFloat16, DType::kFloat8E4M3),
+        // 2. Aligned, small — second dtype pair.
+        std::make_tuple(std::vector<size_t>{128, 128}, DType::kFloat32, DType::kFloat8E5M2),
+        // 3. Aligned, medium.
+        std::make_tuple(std::vector<size_t>{256, 384}, DType::kBFloat16, DType::kFloat8E4M3),
+        // 4. Odd number of scale rows (96/32 = 3) - exercises colwise flush
+        //    odd-row scalar tail.
+        std::make_tuple(std::vector<size_t>{96, 512}, DType::kBFloat16, DType::kFloat8E4M3),
+        // 5. cols/32 not a multiple of 4 - exercises rowwise flush scalar tail
+        //    (need cols multiple of 8 for TMA-alignment on 16-bit input).
+        std::make_tuple(std::vector<size_t>{256, 160}, DType::kBFloat16, DType::kFloat8E4M3),
+        // 6. Odd colwise scale rows + rowwise tail cols - combined tail paths.
+        std::make_tuple(std::vector<size_t>{96, 160}, DType::kBFloat16, DType::kFloat8E4M3),
+        // 7. Small but tile-aligned.
+        std::make_tuple(std::vector<size_t>{32, 64}, DType::kBFloat16, DType::kFloat8E4M3),
+        // 8. Minimum aligned size - single 32x32 tile.
+        std::make_tuple(std::vector<size_t>{32, 32}, DType::kBFloat16, DType::kFloat8E4M3),
+        // 9. Multi-CTA at scale — stresses gmem writes across many CTAs.
+        std::make_tuple(std::vector<size_t>{4096, 32768}, DType::kBFloat16, DType::kFloat8E4M3),
+        // 10. 4D input — matches the existing suite's rank coverage.
+        std::make_tuple(std::vector<size_t>{16, 8, 4, 512}, DType::kBFloat16, DType::kFloat8E4M3),
+        // 11. Third input dtype.
+        std::make_tuple(std::vector<size_t>{128, 128}, DType::kFloat16, DType::kFloat8E4M3),
+        // 12. Larger fp32.
+        std::make_tuple(std::vector<size_t>{1024, 1024}, DType::kFloat32, DType::kFloat8E4M3)
+    ),
+    swizzled_test_name_generator);

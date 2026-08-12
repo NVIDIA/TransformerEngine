@@ -130,11 +130,9 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   constexpr size_t out_mem_rowwise = (ROWWISE_SCALING ? buff_size_aligned_out : 0);
 
   extern __shared__ char dynamic_shmem[];
-  uintptr_t base_shmem_ptr = reinterpret_cast<uintptr_t>(dynamic_shmem);
   // Manually align dynamic SHMEM per TMA requirements using padding
   // __align__(128) Does not guarantee the pointer to be aligned!
-  uintptr_t dshmem = (base_shmem_ptr + TMA_SHMEM_ALIGNMENT - 1) &
-                     ~(static_cast<uintptr_t>(TMA_SHMEM_ALIGNMENT - 1));
+  char *dshmem = align_up(dynamic_shmem, TMA_SHMEM_ALIGNMENT);
 
   // The destination shared memory buffer of a bulk tensor operation should be 16-byte aligned
   IType *in_sh = reinterpret_cast<IType *>(dshmem);
@@ -679,6 +677,30 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
   float *const amax_ptr = reinterpret_cast<float *>(output->amax.dptr);
   const float *noop_ptr = reinterpret_cast<const float *>(noop->data.dptr);
 
+  // Clear padding before either the generic or specialized kernel writes
+  // directly into the GEMM-swizzled scale layout.
+  if (with_gemm_swizzled_scales && (cols % 128 != 0 || rows % 128 != 0)) {
+    constexpr size_t zero_threads = 256;
+    if (use_rowwise_scaling) {
+      const size_t size_bytes = output->scale_inv.buffer_size_bytes();
+      if (size_bytes > 0) {
+        const size_t zero_blocks = DIVUP(size_bytes, zero_threads);
+        zero_scales_kernel<<<zero_blocks, zero_threads, 0, stream>>>(
+            reinterpret_cast<uint8_t *>(output->scale_inv.dptr), size_bytes, noop_ptr);
+        NVTE_CHECK_CUDA(cudaGetLastError());
+      }
+    }
+    if (use_colwise_scaling) {
+      const size_t size_bytes = output->columnwise_scale_inv.buffer_size_bytes();
+      if (size_bytes > 0) {
+        const size_t zero_blocks = DIVUP(size_bytes, zero_threads);
+        zero_scales_kernel<<<zero_blocks, zero_threads, 0, stream>>>(
+            reinterpret_cast<uint8_t *>(output->columnwise_scale_inv.dptr), size_bytes, noop_ptr);
+        NVTE_CHECK_CUDA(cudaGetLastError());
+      }
+    }
+  }
+
   TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
       input.dtype(), IType,
       TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
@@ -700,18 +722,26 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
                    bidimensional_traits::blockDIM::M) <= max_grid_dim_y;
 
               const bool is_full_rowwise_chunk = (cols % 128 == 0);
+              const bool has_full_bidimensional_chunks =
+                  (rows % bidimensional_traits::colChunkElems == 0) &&
+                  (cols % bidimensional_traits::rowChunkElems == 0);
+              // Both rowwise and bidimensional cast-only kernels select their
+              // scale layout from WITH_GEMM_SWIZZLED_SCALES.
               const bool scaling_type_has_specialized_support =
                   (scaling_type == ScalingType::ROWWISE && is_full_rowwise_chunk &&
                    rowwise_specialized_grid_fits) ||
-                  (scaling_type == ScalingType::BIDIMENSIONAL &&
+                  (scaling_type == ScalingType::BIDIMENSIONAL && has_full_bidimensional_chunks &&
                    bidimensional_specialized_grid_fits);
 
-              if (specialized::hasSpec<IS_DBIAS, IS_DACT, IS_ACT, IType, OType>() &&
-                  !WITH_GEMM_SWIZZLED_SCALES && !use_2d_quantization &&
-                  scaling_type_has_specialized_support) {
+              // Specialized cast-only kernels do not consume the device noop flag.
+              // Preserve cached outputs by keeping noop-aware calls on the generic path.
+              if (noop_ptr == nullptr &&
+                  specialized::hasSpec<IS_DBIAS, IS_DACT, IS_ACT, IType, OType>() &&
+                  !use_2d_quantization && scaling_type_has_specialized_support) {
                 switch (scaling_type) {
                   case ScalingType::ROWWISE: {
-                    using traits = specialized::CastTraits<IType, OType, true, false>;
+                    using traits = specialized::CastTraits<IType, OType, true, false,
+                                                           WITH_GEMM_SWIZZLED_SCALES>;
                     auto kernel = specialized::quantize_mxfp8_kernel_cast_only<traits>;
 
                     NVTE_CHECK_CUDA(cudaFuncSetAttribute(
@@ -730,7 +760,11 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
                     break;
                   }
                   case ScalingType::BIDIMENSIONAL: {
-                    using traits = specialized::CastTraits<IType, OType, true, true>;
+                    using traits =
+                        specialized::CastTraitsSwizzle<IType, OType,
+                                                       /*NumStages=*/2, /*IterM=*/1, /*IterN=*/4,
+                                                       /*kCacheColwise=*/WITH_GEMM_SWIZZLED_SCALES,
+                                                       /*kSwizzled=*/WITH_GEMM_SWIZZLED_SCALES>;
                     auto kernel = specialized::quantize_mxfp8_kernel_cast_only<traits>;
 
                     NVTE_CHECK_CUDA(cudaFuncSetAttribute(
@@ -819,38 +853,6 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
               const size_t out_mem = out_rowwise_mem + out_colwise_mem;
 
               const size_t dshmem_size = in_mem + out_mem + TMA_SHMEM_ALIGNMENT;
-
-              // Zero out swizzled scales if padding is needed
-              /// TODO (tmoon) Handle this within the cast kernel
-              if (with_gemm_swizzled_scales) {
-                constexpr size_t TILE_DIM_X = 128;  // Tile dim in data buffer
-                constexpr size_t TILE_DIM_Y = 128;
-                if (cols % TILE_DIM_X != 0 || rows % TILE_DIM_Y != 0) {
-                  // Use a noop-aware zero kernel so that the clear is skipped
-                  // when quantization is a noop (e.g. FP8 weight caching).
-                  constexpr size_t zero_threads = 256;
-                  if (use_rowwise_scaling) {
-                    const size_t size_bytes = output->scale_inv.buffer_size_bytes();
-                    if (size_bytes > 0) {
-                      const size_t zero_blocks = DIVUP(size_bytes, zero_threads);
-                      zero_scales_kernel<<<zero_blocks, zero_threads, 0, stream>>>(
-                          reinterpret_cast<uint8_t *>(output->scale_inv.dptr), size_bytes,
-                          noop_ptr);
-                      NVTE_CHECK_CUDA(cudaGetLastError());
-                    }
-                  }
-                  if (use_colwise_scaling) {
-                    const size_t size_bytes = output->columnwise_scale_inv.buffer_size_bytes();
-                    if (size_bytes > 0) {
-                      const size_t zero_blocks = DIVUP(size_bytes, zero_threads);
-                      zero_scales_kernel<<<zero_blocks, zero_threads, 0, stream>>>(
-                          reinterpret_cast<uint8_t *>(output->columnwise_scale_inv.dptr),
-                          size_bytes, noop_ptr);
-                      NVTE_CHECK_CUDA(cudaGetLastError());
-                    }
-                  }
-                }
-              }
 
               switch (scaling_type) {
                 case ScalingType::ROWWISE: {
