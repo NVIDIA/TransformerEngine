@@ -303,13 +303,8 @@ def _grouped_dequantize(grouped_scaled_tensor):
     Returns:
         List of dequantized tensors for each group
     """
-    # Group offsets are scalar-element offsets even though grouped quantization
-    # preserves the logical N-D carrier shape to avoid oversized 1-D dimensions.
-    data = grouped_scaled_tensor.data.reshape(-1)
-    # Uniform grouped kernels may use a multidimensional carrier so expert and
-    # FSDP ownership survive custom partitioning. Group offsets still address
-    # the same contiguous pre-swizzled byte stream.
-    scale_inv = grouped_scaled_tensor.scale_inv.reshape(-1)
+    data = grouped_scaled_tensor.data
+    scale_inv = grouped_scaled_tensor.scale_inv
     group_sizes = (
         grouped_scaled_tensor.first_dims
         if grouped_scaled_tensor.first_dims is not None

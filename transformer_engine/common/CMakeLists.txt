@@ -475,10 +475,6 @@ message(STATUS "NCCL EP headers: ${NCCL_EP_INCLUDE_DIR}")
 # imports stay unresolved (and harmless) under default ELF lazy binding when
 # the gate trips. LD_BIND_NOW environments lose this property.
 set(NCCL_EP_LIB_DIR "${NCCL_EP_SUBMODULE_ROOT}/build/lib")
-# Editable builds reuse their CMake directory. Clear a library path cached by
-# an older checkout so headers and the static archive always come from the
-# same nccl-extensions build.
-unset(NCCL_EP_LIB CACHE)
 find_file(NCCL_EP_LIB
     NAMES libnccl_ep.a
     HINTS ${NCCL_EP_LIB_DIR}

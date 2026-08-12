@@ -93,7 +93,6 @@ class EPBackend {
     ncclEpHandle_t handle;
     NVTEEpLayerConfig layer_cfg;
     size_t handle_mem_size;
-    uint64_t last_update_id;
   };
 
   ncclEpGroup_t ep_group_{nullptr};
@@ -107,10 +106,8 @@ class EPBackend {
   std::optional<NVTEEpLayerConfig> fallback_layer_cfg_;
 
   // Caller must hold mutex_.
-  ncclEpHandle_t prepare_handle_locked(void* handle_mem, NVTEEpLayerConfig layer_cfg,
-                                       cudaStream_t stream);
-  ncclEpHandle_t lookup_handle_locked(void* handle_mem, cudaStream_t stream,
-                                      uint64_t* last_update_id);
+  ncclEpHandle_t prepare_handle_locked(void* handle_mem, NVTEEpLayerConfig layer_cfg);
+  ncclEpHandle_t lookup_handle_locked(void* handle_mem);
   size_t cache_cap_locked();
 };
 

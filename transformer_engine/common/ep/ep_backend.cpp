@@ -18,7 +18,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <unistd.h>
 #include <utility>
 
 #include "../common.h"
@@ -29,63 +28,6 @@ namespace transformer_engine {
 namespace ep {
 
 namespace {
-
-std::atomic<uint64_t> ep_trace_sequence{0};
-std::atomic<uint64_t> ep_prepare_update_sequence{0};
-
-bool trace_ep_handles() {
-  static const bool enabled = [] {
-    const char* value = std::getenv("NVTE_EP_TRACE_HANDLES");
-    return value != nullptr && std::strcmp(value, "0") != 0;
-  }();
-  return enabled;
-}
-
-uint64_t fingerprint_routing_descriptor(const ncclEpTensor_t& routing) {
-  // This intentionally fingerprints only host-visible descriptor metadata.
-  // Reading routing values would require extra device work or host completion
-  // and could perturb CUDA graph capture or EP stream ordering.
-  constexpr uint64_t kFnvOffset = 1469598103934665603ULL;
-  constexpr uint64_t kFnvPrime = 1099511628211ULL;
-  uint64_t hash = kFnvOffset;
-  const auto mix = [&hash](uint64_t value) {
-    hash ^= value;
-    hash *= kFnvPrime;
-  };
-  mix(static_cast<uint64_t>(reinterpret_cast<uintptr_t>(routing.data)));
-  mix(static_cast<uint64_t>(routing.ndim));
-  mix(static_cast<uint64_t>(routing.datatype));
-  for (int i = 0; i < routing.ndim; ++i) {
-    mix(static_cast<uint64_t>(routing.sizes[i]));
-  }
-  return hash;
-}
-
-void trace_ep_handle(const char* op, void* handle_mem_ptr, ncclEpHandle_t handle,
-                     cudaStream_t stream, const char* cache_state = "",
-                     const ncclEpTensor_t* routing = nullptr, uint64_t update_id = 0) {
-  if (!trace_ep_handles()) return;
-  const uint64_t sequence = ep_trace_sequence.fetch_add(1, std::memory_order_relaxed);
-  const void* routing_ptr = routing == nullptr ? nullptr : routing->data;
-  const int routing_ndim = routing == nullptr ? 0 : routing->ndim;
-  const int64_t routing_dim0 =
-      routing == nullptr || routing->ndim < 1 ? 0 : routing->sizes[0];
-  const int64_t routing_dim1 =
-      routing == nullptr || routing->ndim < 2 ? 0 : routing->sizes[1];
-  const uint64_t routing_fingerprint =
-      routing == nullptr ? 0 : fingerprint_routing_descriptor(*routing);
-  std::fprintf(stderr,
-               "NVTE_EP_HANDLE_TRACE pid=%d seq=%lu op=%s handle_mem_ptr=%p "
-               "nccl_ep_handle=%p cache=%s stream=%p update_id=%lu "
-               "routing_ptr=%p routing_shape=[%ld,%ld] routing_ndim=%d "
-               "routing_descriptor_fingerprint=0x%016lx\n",
-               static_cast<int>(getpid()), static_cast<unsigned long>(sequence), op, handle_mem_ptr,
-               static_cast<void*>(handle), cache_state, static_cast<void*>(stream),
-               static_cast<unsigned long>(update_id), routing_ptr,
-               static_cast<long>(routing_dim0), static_cast<long>(routing_dim1), routing_ndim,
-               static_cast<unsigned long>(routing_fingerprint));
-  std::fflush(stderr);
-}
 
 ncclDataType_t te_dtype_to_nccl_dtype(NVTEDType dtype) {
   switch (dtype) {
@@ -317,8 +259,7 @@ size_t EPBackend::cache_cap_locked() {
   return handle_cache_cap_;
 }
 
-ncclEpHandle_t EPBackend::prepare_handle_locked(void* handle_mem, NVTEEpLayerConfig layer_cfg,
-                                                cudaStream_t stream) {
+ncclEpHandle_t EPBackend::prepare_handle_locked(void* handle_mem, NVTEEpLayerConfig layer_cfg) {
   // Update the program-wide fallback cfg so dispatch/combine/_bwd can
   // reconstruct the handle on a pointer-cache miss (WAR for XLA buffer reloc
   // between runs; one cfg per process). Remove this once XLA preserves the
@@ -338,8 +279,6 @@ ncclEpHandle_t EPBackend::prepare_handle_locked(void* handle_mem, NVTEEpLayerCon
   auto it = index_.find(handle_mem);
   if (it != index_.end()) {
     lru_.splice(lru_.begin(), lru_, it->second);
-    trace_ep_handle("prepare_handle", handle_mem, it->second->handle, stream, "hit", nullptr,
-                    it->second->last_update_id);
     return it->second->handle;
   }
   ncclEpHandleConfig_t hcfg = NCCL_EP_HANDLE_CONFIG_INIT;
@@ -349,8 +288,7 @@ ncclEpHandle_t EPBackend::prepare_handle_locked(void* handle_mem, NVTEEpLayerCon
                                       layer_cfg.top_k));
   ncclEpHandle_t h = open_handle(handle_mem, hm_size, layer_cfg.top_k,
                                  layer_cfg.dispatch_output_per_expert_alignment);
-  trace_ep_handle("prepare_handle", handle_mem, h, stream, "miss");
-  lru_.push_front(HandleEntry{handle_mem, h, layer_cfg, hm_size, 0});
+  lru_.push_front(HandleEntry{handle_mem, h, layer_cfg, hm_size});
   index_.emplace(handle_mem, lru_.begin());
   while (lru_.size() > cache_cap_locked()) {
     HandleEntry& victim = lru_.back();
@@ -361,14 +299,10 @@ ncclEpHandle_t EPBackend::prepare_handle_locked(void* handle_mem, NVTEEpLayerCon
   return h;
 }
 
-ncclEpHandle_t EPBackend::lookup_handle_locked(void* handle_mem, cudaStream_t stream,
-                                               uint64_t* last_update_id) {
+ncclEpHandle_t EPBackend::lookup_handle_locked(void* handle_mem) {
   auto it = index_.find(handle_mem);
   if (it != index_.end()) {
     lru_.splice(lru_.begin(), lru_, it->second);
-    *last_update_id = it->second->last_update_id;
-    trace_ep_handle("lookup_handle", handle_mem, it->second->handle, stream, "hit", nullptr,
-                    *last_update_id);
     return it->second->handle;
   }
   // Miss: reconstruct from the process-wide cached cfg. XLA may relocate
@@ -378,9 +312,7 @@ ncclEpHandle_t EPBackend::lookup_handle_locked(void* handle_mem, cudaStream_t st
   const uintptr_t hm_addr = reinterpret_cast<uintptr_t>(handle_mem);
   NVTE_CHECK(fallback_layer_cfg_.has_value(), "ep op on handle_mem=0x", hm_addr,
              " with no cached entry and no prior nvte_ep_prepare; call prepare first.");
-  ncclEpHandle_t handle = prepare_handle_locked(handle_mem, *fallback_layer_cfg_, stream);
-  *last_update_id = 0;
-  return handle;
+  return prepare_handle_locked(handle_mem, *fallback_layer_cfg_);
 }
 
 // ---------------------------------------------------------------------------
@@ -430,13 +362,7 @@ void EPBackend::prepare(void* handle_mem, const NVTETensor topk_idx,
 
   std::lock_guard<std::mutex> lock(mutex_);
   NVTE_CHECK(initialized_, "EPBackend not initialized");
-  ncclEpHandle_t h = prepare_handle_locked(handle_mem, layer_cfg, stream);
-  const uint64_t update_id =
-      ep_prepare_update_sequence.fetch_add(1, std::memory_order_relaxed) + 1;
-  auto entry = index_.find(handle_mem);
-  NVTE_CHECK(entry != index_.end(), "EP handle cache entry disappeared during prepare");
-  entry->second->last_update_id = update_id;
-  trace_ep_handle("prepare_update", handle_mem, h, stream, "", &nccl_topk_idx, update_id);
+  ncclEpHandle_t h = prepare_handle_locked(handle_mem, layer_cfg);
   NVTE_CHECK_NCCL(ncclEpUpdateHandle(h, &nccl_topk_idx, &layout_info, stream));
 }
 
@@ -499,10 +425,7 @@ void EPBackend::dispatch(void* handle_mem, const NVTETensor topk_idx, const NVTE
 
   std::lock_guard<std::mutex> lock(mutex_);
   NVTE_CHECK(initialized_, "EPBackend not initialized");
-  uint64_t update_id = 0;
-  ncclEpHandle_t h = lookup_handle_locked(handle_mem, stream, &update_id);
-  trace_ep_handle(is_forward ? "dispatch_fwd" : "combine_bwd", handle_mem, h, stream, "", nullptr,
-                  update_id);
+  ncclEpHandle_t h = lookup_handle_locked(handle_mem);
   NVTE_CHECK_NCCL(ncclEpDispatch(h, &in_struct, &out_struct,
                                  /*layout_info=*/nullptr, &dispatch_cfg, stream));
 }
@@ -526,9 +449,7 @@ void EPBackend::combine(void* handle_mem, const NVTETensor expert_out,
 
   std::lock_guard<std::mutex> lock(mutex_);
   NVTE_CHECK(initialized_, "EPBackend not initialized");
-  uint64_t update_id = 0;
-  ncclEpHandle_t h = lookup_handle_locked(handle_mem, stream, &update_id);
-  trace_ep_handle("combine_fwd", handle_mem, h, stream, "", nullptr, update_id);
+  ncclEpHandle_t h = lookup_handle_locked(handle_mem);
   NVTE_CHECK_NCCL(ncclEpCombine(h, &in_struct, &out_struct, /*config=*/nullptr, stream));
 }
 
@@ -566,9 +487,7 @@ void EPBackend::dispatch_bwd(void* handle_mem, const NVTETensor grad,
 
   std::lock_guard<std::mutex> lock(mutex_);
   NVTE_CHECK(initialized_, "EPBackend not initialized");
-  uint64_t update_id = 0;
-  ncclEpHandle_t h = lookup_handle_locked(handle_mem, stream, &update_id);
-  trace_ep_handle("dispatch_bwd", handle_mem, h, stream, "", nullptr, update_id);
+  ncclEpHandle_t h = lookup_handle_locked(handle_mem);
   NVTE_CHECK_NCCL(ncclEpCombine(h, &in_struct, &out_struct, &cfg, stream));
 }
 
