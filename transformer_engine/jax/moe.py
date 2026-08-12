@@ -31,8 +31,6 @@ stateful recipes follow the same update semantics as the other TE MLPs.
 """
 
 import math
-import os
-import sys
 import warnings
 from dataclasses import replace
 from functools import partial
@@ -126,348 +124,6 @@ def get_moe_recv_capacity_per_rank(
     requested = math.ceil(balanced_aligned * recv_capacity_factor)
     requested = ((requested + alignment - 1) // alignment) * alignment
     return min(requested, worst_case)
-
-
-_debug_python_patch = os.getenv("NVTE_DEBUG_PYTHON_PATCH", "0") == "1"
-_debug_moe_numerics = os.getenv("NVTE_DEBUG_MOE_NUMERICS", "0") == "1"
-_debug_moe_input_grad = os.getenv("NVTE_DEBUG_MOE_INPUT_GRAD", "0") == "1"
-_use_reference_fwd = os.getenv("NVTE_MOE_REFERENCE_FWD", "0") == "1"
-_use_reference_dgrad = os.getenv("NVTE_MOE_REFERENCE_DGRAD", "0") == "1"
-_zero_dispatch_weight_grad = os.getenv("NVTE_MOE_ZERO_DISPATCH_WEIGHT_GRAD", "0") == "1"
-_refresh_ep_handle_in_bwd = os.getenv("NVTE_MOE_REFRESH_EP_HANDLE_IN_BWD", "0") == "1"
-_refresh_ep_handle_before_combine = (
-    os.getenv("NVTE_MOE_REFRESH_EP_HANDLE_BEFORE_COMBINE", "0") == "1"
-)
-_validate_ep_routing = os.getenv("NVTE_MOE_VALIDATE_EP_ROUTING", "0") == "1"
-_debug_moe_fwd_recompute = os.getenv("NVTE_MOE_DEBUG_FWD_RECOMPUTE", "0") == "1"
-_validate_ep_token_roundtrip = (
-    os.getenv("NVTE_MOE_VALIDATE_EP_TOKEN_ROUNDTRIP", "0") == "1"
-)
-_zero_moe_input_grad = os.getenv("NVTE_MOE_ZERO_INPUT_GRAD", "0") == "1"
-_skip_moe_backward = os.getenv("NVTE_MOE_SKIP_BACKWARD", "0") == "1"
-_debug_handle_mem = os.getenv("NVTE_MOE_DEBUG_HANDLE_MEM", "0") == "1"
-_validate_ep_forward_roundtrip = (
-    os.getenv("NVTE_MOE_VALIDATE_EP_FORWARD_ROUNDTRIP", "0") == "1"
-)
-_zero_moe_output = os.getenv("NVTE_MOE_ZERO_OUTPUT", "0") == "1"
-_skip_moe_forward = os.getenv("NVTE_MOE_SKIP_FORWARD", "0") == "1"
-_EP_ROUTING_PROBE_WIDTH = 16
-_debug_ffn_fwd_global_count = 0
-_debug_reference_dgrad_count = 0
-if _debug_python_patch:
-    print(
-        "[TE patch debug] imported transformer_engine.jax.moe "
-        f"from {__file__} (rank={os.getenv('SLURM_PROCID', 'unknown')}, "
-        f"reference_fwd={_use_reference_fwd}, reference_dgrad={_use_reference_dgrad})",
-        file=sys.stderr,
-        flush=True,
-    )
-if _use_reference_dgrad:
-    print(
-        "[TE reference dgrad] enabled: activation dgrad uses jax.lax.ragged_dot; "
-        "forward and weight gradients remain on the TE grouped-GEMM path",
-        file=sys.stderr,
-        flush=True,
-    )
-if _use_reference_fwd:
-    print(
-        "[TE reference fwd] enabled: FFN forward uses shard-local "
-        "jax.lax.ragged_dot; weight gradients remain on the TE grouped-GEMM path",
-        file=sys.stderr,
-        flush=True,
-    )
-if _zero_dispatch_weight_grad:
-    print(
-        "[TE dispatch diagnostic] routing-weight cotangent into ep_dispatch_bwd "
-        "is forced to zero; token dgrad remains enabled",
-        file=sys.stderr,
-        flush=True,
-    )
-if _refresh_ep_handle_in_bwd:
-    print(
-        "[TE EP handle diagnostic] backward refreshes the NCCL EP routing "
-        "handle from the saved routing map before combine/dispatch",
-        file=sys.stderr,
-        flush=True,
-    )
-if _refresh_ep_handle_before_combine:
-    print(
-        "[TE EP handle diagnostic] forward refreshes the NCCL EP routing "
-        "handle immediately before combine",
-        file=sys.stderr,
-        flush=True,
-    )
-if _validate_ep_routing:
-    print(
-        "[TE EP routing probe] enabled: validates effective combine-fwd and "
-        "dispatch-bwd handle mappings with deterministic expert codes",
-        file=sys.stderr,
-        flush=True,
-    )
-if _debug_moe_fwd_recompute:
-    print(
-        "[TE MoE fwd recompute debug] enabled: logs order-sensitive input/output "
-        "statistics keyed by the routing signature",
-        file=sys.stderr,
-        flush=True,
-    )
-if _validate_ep_token_roundtrip:
-    print(
-        "[TE EP token roundtrip] enabled: validates intra-expert token ordering "
-        "across dispatch-fwd and dispatch-bwd",
-        file=sys.stderr,
-        flush=True,
-    )
-if _zero_moe_input_grad:
-    print(
-        "[TE MoE input-grad diagnostic] the complete MoE input cotangent is "
-        "forced to zero after routing and gate gradients are combined",
-        file=sys.stderr,
-        flush=True,
-    )
-if _skip_moe_backward:
-    print(
-        "[TE MoE backward diagnostic] bypassing the complete TE MoE backward "
-        "body and returning zero activation/parameter cotangents",
-        file=sys.stderr,
-        flush=True,
-    )
-if _debug_handle_mem:
-    print(
-        "[TE EP handle-value diagnostic] logging each handle_mem's complete-byte "
-        "signatures and exact head/tail byte samples after ep_prepare",
-        file=sys.stderr,
-        flush=True,
-    )
-if _validate_ep_forward_roundtrip:
-    print(
-        "[TE EP forward roundtrip] validating real dispatched token values and "
-        "ordering through combine_fwd",
-        file=sys.stderr,
-        flush=True,
-    )
-if _zero_moe_output:
-    print(
-        "[TE MoE output diagnostic] forcing the routed-MoE forward output to "
-        "zero after all TE forward operations and validation probes",
-        file=sys.stderr,
-        flush=True,
-    )
-if _skip_moe_forward:
-    print(
-        "[TE MoE forward diagnostic] bypassing the complete TE routed-MoE "
-        "forward body and returning a zero output",
-        file=sys.stderr,
-        flush=True,
-    )
-
-
-def _debug_stable_stats(value, row_active=None):
-    """Return bounded sampled stats without materializing a full float32 copy."""
-    value = jnp.asarray(value)
-    # A dispatch tensor is commonly [num_procs, recv_capacity, hidden] while
-    # its activity mask is [num_procs, recv_capacity]. Treat every mask entry
-    # as one logical row; using only value.shape[0] here would accidentally
-    # apply the first few token-mask entries to whole process-sized slabs.
-    if row_active is None:
-        matrix = value.reshape(value.shape[0], -1)
-    else:
-        row_active = jnp.asarray(row_active, jnp.bool_).reshape(-1)
-        if value.size % row_active.size != 0:
-            raise ValueError(
-                "Debug row mask must divide the sampled tensor size, but got "
-                f"value.shape={value.shape} and row_active.shape={row_active.shape}."
-            )
-        matrix = value.reshape(row_active.size, -1)
-    max_samples = 65536
-    stride = max((matrix.size + max_samples - 1) // max_samples, 1)
-    sample = matrix.reshape(-1)[::stride][:max_samples].astype(jnp.float32)
-    # Avoid forming flattened indices that can exceed int32 for production
-    # dispatch buffers (>180B logical elements).
-    stride_rows, stride_remainder = divmod(stride, matrix.shape[1])
-    sample_indices = jnp.arange(sample.size, dtype=jnp.int32)
-    sampled_rows = (
-        sample_indices * stride_rows
-        + (sample_indices * stride_remainder) // matrix.shape[1]
-    )
-    if row_active is None:
-        active = jnp.ones(sample.shape, dtype=jnp.bool_)
-    else:
-        active = row_active[sampled_rows]
-    finite = jnp.isfinite(sample) & active
-    finite_value = jnp.where(finite, sample, 0.0)
-    absmax = jnp.max(jnp.abs(finite_value))
-    safe_scale = jnp.where(absmax > 0, absmax, 1.0)
-    scaled = finite_value / safe_scale
-    element_count = jnp.maximum(jnp.sum(active, dtype=jnp.float32), 1.0)
-    scaled_mean = jnp.sum(scaled) / element_count
-    scaled_square_mean = jnp.sum(jnp.square(scaled)) / element_count
-    mean = absmax * scaled_mean
-    abs_mean = absmax * (jnp.sum(jnp.abs(scaled)) / element_count)
-    stddev = absmax * jnp.sqrt(jnp.maximum(scaled_square_mean - jnp.square(scaled_mean), 0.0))
-    finite_fraction = jnp.sum(finite, dtype=jnp.float32) / element_count
-    return mean, abs_mean, stddev, absmax, finite_fraction
-
-
-def _ep_routing_probe_code_table(num_experts, dtype):
-    """Return deterministic ±1 codes that identify experts across 16 channels."""
-    expert = jnp.arange(num_experts, dtype=jnp.uint32)[:, None]
-    channel = jnp.arange(_EP_ROUTING_PROBE_WIDTH, dtype=jnp.uint32)[None, :]
-    value = (expert + jnp.uint32(1)) * jnp.uint32(0x9E3779B1)
-    value ^= (channel + jnp.uint32(1)) * jnp.uint32(0x85EBCA77)
-    value ^= value >> jnp.uint32(16)
-    value *= jnp.uint32(0xC2B2AE3D)
-    value ^= value >> jnp.uint32(13)
-    return jnp.where((value & jnp.uint32(1)) != 0, 1, -1).astype(dtype)
-
-
-def _ep_routing_probe_packed_codes(
-    token_counts,
-    recv_capacity_per_rank,
-    num_ep,
-    num_local_experts,
-    dtype,
-):
-    """Build expert-major probe rows matching the native EP receive layout."""
-    leading_size = token_counts.shape[0]
-    ep_rank = jnp.arange(leading_size, dtype=jnp.int32) % num_ep
-    local_expert = jnp.arange(num_local_experts, dtype=jnp.int32)
-    global_expert = ep_rank[:, None] * num_local_experts + local_expert[None, :]
-    code_table = _ep_routing_probe_code_table(num_ep * num_local_experts, dtype)
-    codes_by_group = code_table[global_expert]
-
-    def _repeat_one_leading_group(group_codes, group_counts):
-        return jnp.repeat(
-            group_codes,
-            group_counts.astype(jnp.int32),
-            axis=0,
-            total_repeat_length=recv_capacity_per_rank,
-        )
-
-    packed = jax.vmap(_repeat_one_leading_group)(codes_by_group, token_counts)
-    active_rows = (
-        jnp.arange(recv_capacity_per_rank, dtype=jnp.int32)[None, :]
-        < jnp.sum(token_counts, axis=-1, dtype=jnp.int32)[:, None]
-    )
-    return jnp.where(active_rows[..., None], packed, jnp.zeros_like(packed))
-
-
-def _ep_routing_probe_signature(topk_idx):
-    """Return two order-sensitive uint32 signatures for the intended map."""
-    flat = topk_idx.reshape(-1).astype(jnp.uint32)
-    position = jnp.arange(flat.size, dtype=jnp.uint32)
-    signature_0 = jnp.sum(
-        (flat + jnp.uint32(1))
-        * (position * jnp.uint32(0x9E3779B1) + jnp.uint32(0x85EBCA77)),
-        dtype=jnp.uint32,
-    )
-    signature_1 = jnp.sum(
-        (flat + jnp.uint32(17))
-        * (position * jnp.uint32(0xC2B2AE3D) + jnp.uint32(0x27D4EB2F)),
-        dtype=jnp.uint32,
-    )
-    return signature_0, signature_1
-
-
-def _print_handle_mem_value(label, handle_mem, topk_idx):
-    """Log exact handle bytes plus full-buffer fingerprints after ep_prepare.
-
-    ``handle_mem`` is an opaque uint8 tensor with one row per global EP/DP
-    rank. Printing every byte for every scanned layer would make the
-    multi-host log impractically large, so the exact first/last 64 bytes are
-    printed and two order-sensitive signatures cover every byte in each row.
-    The routing-map signature in the same record makes repeated-forward
-    comparisons unambiguous.
-    """
-    if not _debug_handle_mem:
-        return
-    rows = handle_mem.reshape(-1, handle_mem.shape[-1]).astype(jnp.uint32)
-    position = jnp.arange(rows.shape[-1], dtype=jnp.uint32)
-    signature_0 = jnp.sum(
-        (rows + jnp.uint32(1))
-        * (position * jnp.uint32(0x9E3779B1) + jnp.uint32(0x85EBCA77)),
-        axis=-1,
-        dtype=jnp.uint32,
-    )
-    signature_1 = jnp.sum(
-        (rows + jnp.uint32(17))
-        * (position * jnp.uint32(0xC2B2AE3D) + jnp.uint32(0x27D4EB2F)),
-        axis=-1,
-        dtype=jnp.uint32,
-    )
-    byte_sum = jnp.sum(rows, axis=-1, dtype=jnp.uint32)
-    route_signature_0, route_signature_1 = _ep_routing_probe_signature(topk_idx)
-    sample_width = min(64, handle_mem.shape[-1])
-    jax.debug.print(
-        f"[TE EP handle value] label={label} "
-        f"shape={handle_mem.shape} "
-        "route_sig=({route_sig0},{route_sig1}) "
-        "byte_sum={byte_sum} handle_sig0={handle_sig0} "
-        "handle_sig1={handle_sig1} head={head} tail={tail}",
-        route_sig0=route_signature_0,
-        route_sig1=route_signature_1,
-        byte_sum=byte_sum,
-        handle_sig0=signature_0,
-        handle_sig1=signature_1,
-        head=handle_mem[..., :sample_width],
-        tail=handle_mem[..., -sample_width:],
-        ordered=False,
-    )
-
-
-def _debug_ordered_tensor_stats(value):
-    """Return stable scalar stats plus two order-sensitive sampled projections."""
-    value = jnp.asarray(value)
-    max_samples = 65536
-    stride = max((value.size + max_samples - 1) // max_samples, 1)
-    sample = value.reshape(-1)[::stride][:max_samples].astype(jnp.float32)
-    finite = jnp.isfinite(sample)
-    finite_value = jnp.where(finite, sample, 0.0)
-    absmax = jnp.max(jnp.abs(finite_value))
-    safe_scale = jnp.where(absmax > 0, absmax, 1.0)
-    scaled = finite_value / safe_scale
-    count = jnp.maximum(jnp.sum(finite, dtype=jnp.float32), 1.0)
-    mean = absmax * jnp.sum(scaled) / count
-    square_mean = jnp.sum(jnp.square(scaled)) / count
-    stddev = absmax * jnp.sqrt(
-        jnp.maximum(square_mean - jnp.square(jnp.sum(scaled) / count), 0.0)
-    )
-    position = jnp.arange(sample.size, dtype=jnp.uint32)
-    sign_0 = jnp.where(
-        ((position * jnp.uint32(0x9E3779B1) + jnp.uint32(0x85EBCA77)) >> 31) != 0,
-        1.0,
-        -1.0,
-    )
-    sign_1 = jnp.where(
-        ((position * jnp.uint32(0xC2B2AE3D) + jnp.uint32(0x27D4EB2F)) >> 31) != 0,
-        1.0,
-        -1.0,
-    )
-    projection_0 = jnp.sum(scaled * sign_0) / count
-    projection_1 = jnp.sum(scaled * sign_1) / count
-    return mean, stddev, absmax, projection_0, projection_1, jnp.mean(finite)
-
-
-def _print_ep_routing_probe_result(label, topk_idx, actual, expected, tolerance):
-    """Print an elementwise comparison for an expert-code routing probe."""
-    difference = actual.astype(jnp.float32) - expected.astype(jnp.float32)
-    abs_difference = jnp.abs(difference)
-    mismatch = abs_difference > tolerance
-    signature_0, signature_1 = _ep_routing_probe_signature(topk_idx)
-    jax.debug.print(
-        "[TE EP routing probe] {label} route_sig=({signature_0},{signature_1}) "
-        "match={match} "
-        "mismatch_fraction={mismatch_fraction:.6e} "
-        "absmean={absmean:.6e} absmax={absmax:.6e}",
-        label=label,
-        signature_0=signature_0,
-        signature_1=signature_1,
-        match=jnp.all(~mismatch),
-        mismatch_fraction=jnp.mean(mismatch.astype(jnp.float32)),
-        absmean=jnp.mean(abs_difference),
-        absmax=jnp.max(abs_difference),
-        ordered=False,
-    )
 
 
 def _with_sharding_constraint_cast_bwd(x: jnp.ndarray, sharding) -> jnp.ndarray:
@@ -603,18 +259,12 @@ class _Ctx:
     handle_mem: jnp.ndarray
     token_counts: jnp.ndarray
     recv_topk_weights: jnp.ndarray
-    recv_token_probe: Any
     casted_sorted_x_lhs_trans: Any
     casted_wi_rhs_trans: Any
     gate_proj_out: jnp.ndarray
     up_proj_out: jnp.ndarray
     casted_intermediate_lhs_trans: Any
     casted_wo_rhs_trans: Any
-    wi: Any
-    wo: Any
-    wi_0_bias: Any
-    wi_1_bias: Any
-    wo_bias: Any
     expert_outputs: jnp.ndarray
     local_group_sizes: jnp.ndarray
     quantizer_sets: Any
@@ -685,10 +335,6 @@ def _ffn_fwd_per_shard(
     wi = wi.astype(sorted_x.dtype)
     wo = wo.astype(sorted_x.dtype)
 
-    if _use_reference_fwd:
-        if wi_0_bias is not None:
-            raise ValueError("NVTE_MOE_REFERENCE_FWD does not support expert biases.")
-
     # ``wi`` is stored in its gated-SwiGLU layout [expert, hidden, 2*mlp].
     # Keeping it contiguous lets grouped quantize/GEMM consume it directly.
     wi_combined_bias = (
@@ -706,15 +352,12 @@ def _ffn_fwd_per_shard(
         flatten_axis=-1,
     )
     casted_wi = tex.grouped_quantize(wi, fc1_quantizer_set.kernel, flatten_axis=-1)
-    if _use_reference_fwd:
-        combined_out = jax.lax.ragged_dot(sorted_x, wi, group_sizes)
-    else:
-        combined_out = tex.grouped_gemm(
-            casted_sorted_x.get_tensor(usage=TensorUsage.LHS),
-            casted_wi.get_tensor(usage=TensorUsage.RHS),
-            contracting_dims=((1,), (1,)),
-            bias=wi_combined_bias,
-        )
+    combined_out = tex.grouped_gemm(
+        casted_sorted_x.get_tensor(usage=TensorUsage.LHS),
+        casted_wi.get_tensor(usage=TensorUsage.RHS),
+        contracting_dims=((1,), (1,)),
+        bias=wi_combined_bias,
+    )
     gate_proj_out, up_proj_out = jnp.split(combined_out, 2, axis=-1)
 
     # Activation inputs (gate_proj_out, up_proj_out) stay in the wi GEMM
@@ -737,15 +380,12 @@ def _ffn_fwd_per_shard(
         flatten_axis=-1,
     )
     casted_wo = tex.grouped_quantize(wo, fc2_quantizer_set.kernel, flatten_axis=-1)
-    if _use_reference_fwd:
-        expert_outputs = jax.lax.ragged_dot(intermediate, wo, group_sizes)
-    else:
-        expert_outputs = tex.grouped_gemm(
-            casted_intermediate.get_tensor(usage=TensorUsage.LHS),
-            casted_wo.get_tensor(usage=TensorUsage.RHS),
-            contracting_dims=((1,), (1,)),
-            bias=wo_bias,
-        )
+    expert_outputs = tex.grouped_gemm(
+        casted_intermediate.get_tensor(usage=TensorUsage.LHS),
+        casted_wo.get_tensor(usage=TensorUsage.RHS),
+        contracting_dims=((1,), (1,)),
+        bias=wo_bias,
+    )
     expert_outputs_3d = expert_outputs.reshape(1, expert_outputs.shape[0], expert_outputs.shape[1])
     group_sizes_2d = group_sizes.reshape(1, num_local_experts)
     residuals = (
@@ -815,14 +455,11 @@ def _ffn_bwd_per_shard(
     )
     _casted_d_eo_lhs = casted_d_eo.get_tensor(usage=TensorUsage.LHS)
     _casted_d_eo_rhs = casted_d_eo.get_tensor(usage=TensorUsage.RHS)
-    if _use_reference_dgrad:
-        d_intermediate = jax.lax.ragged_dot(d_eo_2d, jnp.swapaxes(wo, -1, -2), group_sizes)
-    else:
-        d_intermediate = tex.grouped_gemm(
-            _casted_d_eo_lhs,
-            casted_wo_rhs_trans,
-            contracting_dims=((1,), (2,)),
-        )
+    d_intermediate = tex.grouped_gemm(
+        _casted_d_eo_lhs,
+        casted_wo_rhs_trans,
+        contracting_dims=((1,), (2,)),
+    )
     d_wo = tex.grouped_gemm(
         casted_intermediate_lhs_trans,
         _casted_d_eo_rhs,
@@ -869,14 +506,11 @@ def _ffn_bwd_per_shard(
         group_sizes,
         flatten_axis=-1,
     )
-    if _use_reference_dgrad:
-        d_sorted_x = jax.lax.ragged_dot(d_combined, jnp.swapaxes(wi, -1, -2), group_sizes)
-    else:
-        d_sorted_x = tex.grouped_gemm(
-            casted_d_combined.get_tensor(usage=TensorUsage.LHS),
-            casted_wi_rhs_trans,
-            contracting_dims=((1,), (2,)),
-        )
+    d_sorted_x = tex.grouped_gemm(
+        casted_d_combined.get_tensor(usage=TensorUsage.LHS),
+        casted_wi_rhs_trans,
+        contracting_dims=((1,), (2,)),
+    )
     d_wi_combined = tex.grouped_gemm(
         casted_sorted_x_lhs_trans,
         casted_d_combined.get_tensor(usage=TensorUsage.RHS),
@@ -948,50 +582,6 @@ def _moe_fwd_rule(
     from jax.experimental.shard_map import shard_map
 
     x = with_sharding_constraint_by_logical_axes(x, input_axes)
-
-    if _skip_moe_forward:
-        if not _skip_moe_backward:
-            raise RuntimeError(
-                "NVTE_MOE_SKIP_FORWARD requires NVTE_MOE_SKIP_BACKWARD=1."
-            )
-        has_bias = wi_0_bias is not None
-        ctx = _Ctx(
-            x=x,
-            gate_kernel=gate_kernel,
-            expert_bias=expert_bias,
-            logits_2d=None,
-            saved_scores=None,
-            routing_map=None,
-            cfg=None,
-            handle_mem=None,
-            token_counts=None,
-            recv_topk_weights=None,
-            recv_token_probe=None,
-            casted_sorted_x_lhs_trans=None,
-            casted_wi_rhs_trans=None,
-            gate_proj_out=None,
-            up_proj_out=None,
-            casted_intermediate_lhs_trans=None,
-            casted_wo_rhs_trans=None,
-            wi=wi,
-            wo=wo,
-            wi_0_bias=wi_0_bias if has_bias else None,
-            wi_1_bias=wi_1_bias if has_bias else None,
-            wo_bias=wo_bias if has_bias else None,
-            expert_outputs=None,
-            local_group_sizes=None,
-            quantizer_sets=quantizer_sets,
-        )
-        static = {
-            "has_bias": has_bias,
-            "x_shape": x.shape,
-            "recv_pr": 0,
-        }
-        return (
-            jnp.zeros_like(x),
-            jnp.zeros((), dtype=x.dtype),
-            jnp.zeros((1,), dtype=jnp.int32),
-        ), (ctx, static)
 
     mesh = _get_mesh()
     if mesh is None or mesh.empty:
@@ -1147,7 +737,6 @@ def _moe_fwd_rule(
         dispatch_output_per_expert_alignment=_ALIGN_SIZE,
     )
     token_counts, total_recv_tokens, handle_mem = tex.ep_prepare(cfg, topk_idx_3d)
-    _print_handle_mem_value("forward_prepare", handle_mem, topk_idx_3d)
     token_counts = jax.lax.with_sharding_constraint(token_counts, NamedSharding(mesh, ep2_spec))
     recv_tokens, recv_topk_weights = tex.ep_dispatch_fwd(
         cfg, handle_mem, topk_idx_3d, x, topk_w_3d, recv_pr
@@ -1209,31 +798,11 @@ def _moe_fwd_rule(
 
     # ---------------- TE EP combine (global view) ----------------
     out_partition_spec = (batch_pspec_axis, None, None)
-    combine_handle_mem = handle_mem
-    if _refresh_ep_handle_before_combine:
-        # A scanned forward can reuse one physical handle_mem allocation across
-        # loop iterations. Re-prepare the current routing map at the combine
-        # consumption point so combine cannot rely on routing state left by a
-        # different iteration. Keep the original handle in the VJP residual:
-        # this diagnostic intentionally isolates forward combine.
-        refreshed_token_counts, combine_handle_mem = tex.ep_prepare(cfg, topk_idx_3d)
-        _print_handle_mem_value(
-            "forward_pre_combine_refresh", combine_handle_mem, topk_idx_3d
-        )
-        refreshed_token_counts = jax.lax.with_sharding_constraint(
-            refreshed_token_counts, NamedSharding(mesh, ep2_spec)
-        )
-        if _debug_moe_numerics:
-            jax.debug.print(
-                "[TE EP pre-combine refresh] token_counts_match={match}",
-                match=jnp.all(refreshed_token_counts == token_counts),
-                ordered=False,
-            )
     if apply_topk_weights_early:
         # expert_outputs is already weighted upstream.
         output = tex.ep_combine_fwd(
             cfg,
-            combine_handle_mem,
+            handle_mem,
             expert_outputs,
             num_local_tokens=(B, S),
             out_partition_spec=out_partition_spec,
@@ -1245,109 +814,13 @@ def _moe_fwd_rule(
         weighted = expert_outputs * w
         output = tex.ep_combine_fwd(
             cfg,
-            combine_handle_mem,
+            handle_mem,
             weighted,
             num_local_tokens=(B, S),
             out_partition_spec=out_partition_spec,
         )
     # output of MLP should be sharded the same way as the activation input
     output = with_sharding_constraint_by_logical_axes(output, input_axes)
-
-    if _validate_ep_forward_roundtrip:
-        # This validates more than the synthetic expert-code probe below:
-        # dispatch the actual input token values, combine them immediately,
-        # and compare against the weighted identity analytically. It detects
-        # a mutually consistent but wrong dispatch/combine token permutation.
-        probe_width = min(_EP_ROUTING_PROBE_WIDTH, H)
-        roundtrip_weighted = (
-            recv_tokens[..., :probe_width].astype(jnp.float32)
-            * recv_topk_weights[..., None]
-        ).astype(x.dtype)
-        roundtrip_output = tex.ep_combine_fwd(
-            cfg,
-            combine_handle_mem,
-            roundtrip_weighted,
-            num_local_tokens=(B, S),
-            out_partition_spec=out_partition_spec,
-        )
-        expected_roundtrip = (
-            x[..., :probe_width].astype(jnp.float32)
-            * jnp.sum(topk_w_3d, axis=-1, keepdims=True)
-        ).astype(x.dtype)
-        _print_ep_routing_probe_result(
-            "forward_token_roundtrip",
-            topk_idx_3d,
-            roundtrip_output,
-            expected_roundtrip,
-            tolerance=6.25e-2,
-        )
-
-    if _validate_ep_routing:
-        probe_code_table = _ep_routing_probe_code_table(num_experts, x.dtype)
-        probe_packed = _ep_routing_probe_packed_codes(
-            token_counts,
-            recv_pr,
-            num_ep,
-            num_local_experts,
-            x.dtype,
-        )
-        probe_packed = jax.lax.with_sharding_constraint(
-            probe_packed, NamedSharding(mesh, ep3_spec)
-        )
-        probe_weighted = (
-            probe_packed.astype(jnp.float32) * recv_topk_weights[..., None]
-        ).astype(x.dtype)
-        probe_combined = tex.ep_combine_fwd(
-            cfg,
-            combine_handle_mem,
-            probe_weighted,
-            num_local_tokens=(B, S),
-            out_partition_spec=out_partition_spec,
-        )
-        expected_probe_terms = (
-            probe_code_table[topk_idx_3d].astype(jnp.float32)
-            * topk_w_3d[..., None]
-        ).astype(x.dtype)
-        expected_probe_combined = jnp.sum(
-            expected_probe_terms.astype(jnp.float32), axis=-2
-        ).astype(x.dtype)
-        _print_ep_routing_probe_result(
-            "combine_fwd",
-            topk_idx_3d,
-            probe_combined,
-            expected_probe_combined,
-            tolerance=6.25e-2,
-        )
-
-    if _zero_moe_output:
-        output = jnp.zeros_like(output)
-
-    if _debug_moe_fwd_recompute:
-        signature_0, signature_1 = _ep_routing_probe_signature(topk_idx_3d)
-        x_stats = _debug_ordered_tensor_stats(x)
-        output_stats = _debug_ordered_tensor_stats(output)
-        jax.debug.print(
-            "[TE MoE fwd recompute] route_sig=({signature_0},{signature_1}) "
-            "input(mean={x_mean:.6e},std={x_std:.6e},absmax={x_absmax:.6e},"
-            "proj=({x_proj0:.9e},{x_proj1:.9e}),finite={x_finite:.6f}) "
-            "output(mean={out_mean:.6e},std={out_std:.6e},absmax={out_absmax:.6e},"
-            "proj=({out_proj0:.9e},{out_proj1:.9e}),finite={out_finite:.6f})",
-            signature_0=signature_0,
-            signature_1=signature_1,
-            x_mean=x_stats[0],
-            x_std=x_stats[1],
-            x_absmax=x_stats[2],
-            x_proj0=x_stats[3],
-            x_proj1=x_stats[4],
-            x_finite=x_stats[5],
-            out_mean=output_stats[0],
-            out_std=output_stats[1],
-            out_absmax=output_stats[2],
-            out_proj0=output_stats[3],
-            out_proj1=output_stats[4],
-            out_finite=output_stats[5],
-            ordered=False,
-        )
 
     (
         casted_sorted_x_lhs_trans,
@@ -1370,25 +843,12 @@ def _moe_fwd_rule(
         handle_mem=handle_mem,
         token_counts=token_counts,
         recv_topk_weights=recv_topk_weights,
-        recv_token_probe=(
-            jax.lax.with_sharding_constraint(
-                recv_tokens[..., :_EP_ROUTING_PROBE_WIDTH],
-                NamedSharding(mesh, ep3_spec),
-            )
-            if _validate_ep_token_roundtrip
-            else None
-        ),
         casted_sorted_x_lhs_trans=casted_sorted_x_lhs_trans,
         casted_wi_rhs_trans=casted_wi_rhs_trans,
         gate_proj_out=gate_proj_out,
         up_proj_out=up_proj_out,
         casted_intermediate_lhs_trans=casted_intermediate_lhs_trans,
         casted_wo_rhs_trans=casted_wo_rhs_trans,
-        wi=wi if (_use_reference_dgrad or _skip_moe_backward) else None,
-        wo=wo if (_use_reference_dgrad or _skip_moe_backward) else None,
-        wi_0_bias=wi_0_bias if (has_bias and _skip_moe_backward) else None,
-        wi_1_bias=wi_1_bias if (has_bias and _skip_moe_backward) else None,
-        wo_bias=wo_bias if (has_bias and _skip_moe_backward) else None,
         expert_outputs=expert_outputs,
         local_group_sizes=local_group_sizes,
         quantizer_sets=quantizer_sets,
@@ -1439,56 +899,6 @@ def _moe_bwd_rule(
     x_shape = static["x_shape"]
     recv_pr = static["recv_pr"]
 
-    if _skip_moe_backward:
-        # Strong isolation diagnostic: do not execute combine_bwd, grouped
-        # GEMM backward, dispatch_bwd, or router backward. This differs from
-        # NVTE_MOE_ZERO_INPUT_GRAD, which discards d_x only after all of those
-        # operations have already run and therefore cannot rule out an
-        # asynchronous side effect from a backward custom call.
-        if ctx.wi is None or ctx.wo is None:
-            raise RuntimeError(
-                "NVTE_MOE_SKIP_BACKWARD requires wi/wo in the VJP residual."
-            )
-        d_x = with_sharding_constraint_by_logical_axes(
-            jnp.zeros_like(ctx.x), input_axes
-        )
-        d_gate_kernel = with_sharding_constraint_by_logical_axes(
-            jnp.zeros_like(ctx.gate_kernel), gate_kernel_axes
-        )
-        d_wi = with_sharding_constraint_by_logical_axes(
-            jnp.zeros_like(ctx.wi), wi_kernel_axes
-        )
-        d_wo = with_sharding_constraint_by_logical_axes(
-            jnp.zeros_like(ctx.wo), wo_kernel_axes
-        )
-        if has_bias:
-            wi_bias_axes = (wi_kernel_axes[0], *wi_kernel_axes[2:])
-            wo_bias_axes = (wo_kernel_axes[0], *wo_kernel_axes[2:])
-            d_wi_0_bias = with_sharding_constraint_by_logical_axes(
-                jnp.zeros_like(ctx.wi_0_bias), wi_bias_axes
-            )
-            d_wi_1_bias = with_sharding_constraint_by_logical_axes(
-                jnp.zeros_like(ctx.wi_1_bias), wi_bias_axes
-            )
-            d_wo_bias = with_sharding_constraint_by_logical_axes(
-                jnp.zeros_like(ctx.wo_bias), wo_bias_axes
-            )
-        else:
-            d_wi_0_bias = None
-            d_wi_1_bias = None
-            d_wo_bias = None
-        return (
-            d_x,
-            d_gate_kernel,
-            d_wi,
-            d_wo,
-            d_wi_0_bias,
-            d_wi_1_bias,
-            d_wo_bias,
-            jnp.zeros_like(ctx.expert_bias),
-            ctx.quantizer_sets,
-        )
-
     mesh = _get_mesh()
     if mesh is None or mesh.empty:
         raise ValueError("moe(...) requires an active jax.sharding.Mesh.")
@@ -1504,36 +914,9 @@ def _moe_bwd_rule(
     ep2_spec = P(batch_pspec_axis, None)
     out_partition_spec = (batch_pspec_axis, None, None)
 
-    # A scanned layer can reuse the same physical handle_mem buffer for
-    # different loop iterations. The native NCCL EP cache is keyed by that
-    # buffer pointer and retains routing state established by ep_prepare.
-    # Refreshing here updates the cached handle to the routing plan for the
-    # current reverse-scan iteration before either backward EP operation.
-    bwd_handle_mem = ctx.handle_mem
-    if _refresh_ep_handle_in_bwd:
-        bwd_selected_experts = jnp.argsort(ctx.routing_map, axis=-1)[..., -K:]
-        bwd_topk_idx = bwd_selected_experts.reshape(B, S, K).astype(jnp.int32)
-        bwd_topk_idx = jax.lax.with_sharding_constraint(
-            bwd_topk_idx, NamedSharding(mesh, ep3_spec)
-        )
-        refreshed_token_counts, bwd_handle_mem = tex.ep_prepare(ctx.cfg, bwd_topk_idx)
-        _print_handle_mem_value(
-            "backward_refresh", bwd_handle_mem, bwd_topk_idx
-        )
-        refreshed_token_counts = jax.lax.with_sharding_constraint(
-            refreshed_token_counts, NamedSharding(mesh, ep2_spec)
-        )
-        if _debug_moe_numerics:
-            token_count_match = jnp.all(refreshed_token_counts == ctx.token_counts)
-            jax.debug.print(
-                "[TE EP handle refresh] token_counts_match={match}",
-                match=token_count_match,
-                ordered=False,
-            )
-
     # ---------------- Combine bwd (global view) ----------------
     d_output = jax.lax.with_sharding_constraint(d_output, NamedSharding(mesh, ep3_spec))
-    grad_pre_combine = tex.ep_combine_bwd(ctx.cfg, bwd_handle_mem, d_output, recv_pr)
+    grad_pre_combine = tex.ep_combine_bwd(ctx.cfg, ctx.handle_mem, d_output, recv_pr)
     grad_pre_combine = jax.lax.with_sharding_constraint(
         grad_pre_combine, NamedSharding(mesh, ep3_spec)
     )
@@ -1564,46 +947,6 @@ def _moe_bwd_rule(
         d_expert_outputs = grad_pre_combine * w
         d_recv_w_from_combine = (grad_pre_combine * ctx.expert_outputs).sum(axis=-1)
         d_recv_w_from_combine = d_recv_w_from_combine.astype(ctx.recv_topk_weights.dtype)
-
-    if _debug_moe_numerics:
-        d_output_stats = _debug_stable_stats(d_output)
-        grad_pre_combine_stats = _debug_stable_stats(
-            grad_pre_combine, active_recv_rows
-        )
-        d_expert_output_stats = _debug_stable_stats(
-            d_expert_outputs, active_recv_rows
-        )
-        d_recv_w_stats = _debug_stable_stats(
-            d_recv_w_from_combine, active_recv_rows
-        )
-        jax.debug.print(
-            "[TE combine-bwd stats] "
-            "upstream(absmean={up_absmean:.3e},std={up_std:.3e},"
-            "absmax={up_absmax:.3e},finite={up_finite:.6f}) "
-            "combine(absmean={combine_absmean:.3e},std={combine_std:.3e},"
-            "absmax={combine_absmax:.3e},finite={combine_finite:.6f}) "
-            "weighted(absmean={weighted_absmean:.3e},std={weighted_std:.3e},"
-            "absmax={weighted_absmax:.3e},finite={weighted_finite:.6f}) "
-            "dweight(absmean={dw_absmean:.3e},std={dw_std:.3e},"
-            "absmax={dw_absmax:.3e},finite={dw_finite:.6f})",
-            up_absmean=d_output_stats[1],
-            up_std=d_output_stats[2],
-            up_absmax=d_output_stats[3],
-            up_finite=d_output_stats[4],
-            combine_absmean=grad_pre_combine_stats[1],
-            combine_std=grad_pre_combine_stats[2],
-            combine_absmax=grad_pre_combine_stats[3],
-            combine_finite=grad_pre_combine_stats[4],
-            weighted_absmean=d_expert_output_stats[1],
-            weighted_std=d_expert_output_stats[2],
-            weighted_absmax=d_expert_output_stats[3],
-            weighted_finite=d_expert_output_stats[4],
-            dw_absmean=d_recv_w_stats[1],
-            dw_std=d_recv_w_stats[2],
-            dw_absmax=d_recv_w_stats[3],
-            dw_finite=d_recv_w_stats[4],
-            ordered=False,
-        )
 
     # ---------------- FFN bwd (per-shard via shard_map) ----------------
     kernel_spec = P(ep_axis, None, None)
@@ -1699,124 +1042,14 @@ def _moe_bwd_rule(
     # ---------------- Dispatch bwd (global view) ----------------
     d_sorted_x = jax.lax.with_sharding_constraint(d_sorted_x, NamedSharding(mesh, ep3_spec))
     d_recv_w_total = jax.lax.with_sharding_constraint(d_recv_w_total, NamedSharding(mesh, ep2_spec))
-    dispatch_weight_cotangent = (
-        jnp.zeros_like(d_recv_w_total) if _zero_dispatch_weight_grad else d_recv_w_total
-    )
     d_x_from_dispatch, d_topk_w = tex.ep_dispatch_bwd(
         ctx.cfg,
-        bwd_handle_mem,
+        ctx.handle_mem,
         d_sorted_x,
-        dispatch_weight_cotangent,
+        d_recv_w_total,
         num_local_tokens=(B, S),
         out_partition_spec=out_partition_spec,
     )
-
-    if _validate_ep_token_roundtrip:
-        roundtrip_topk_idx = jnp.argsort(ctx.routing_map, axis=-1)[..., -K:]
-        roundtrip_topk_idx_3d = roundtrip_topk_idx.reshape(B, S, K).astype(jnp.int32)
-        roundtrip_topk_idx_3d = jax.lax.with_sharding_constraint(
-            roundtrip_topk_idx_3d, NamedSharding(mesh, ep3_spec)
-        )
-        roundtrip_tokens, _ = tex.ep_dispatch_bwd(
-            ctx.cfg,
-            bwd_handle_mem,
-            ctx.recv_token_probe,
-            jnp.zeros_like(ctx.recv_topk_weights),
-            num_local_tokens=(B, S),
-            out_partition_spec=out_partition_spec,
-        )
-        expected_roundtrip = (
-            ctx.x[..., :_EP_ROUTING_PROBE_WIDTH].astype(jnp.float32) * float(K)
-        ).astype(roundtrip_tokens.dtype)
-        _print_ep_routing_probe_result(
-            "dispatch_token_roundtrip",
-            roundtrip_topk_idx_3d,
-            roundtrip_tokens,
-            expected_roundtrip,
-            tolerance=6.25e-2,
-        )
-
-    if _validate_ep_routing:
-        probe_topk_idx = jnp.argsort(ctx.routing_map, axis=-1)[..., -K:]
-        probe_topk_idx_3d = probe_topk_idx.reshape(B, S, K).astype(jnp.int32)
-        probe_topk_idx_3d = jax.lax.with_sharding_constraint(
-            probe_topk_idx_3d, NamedSharding(mesh, ep3_spec)
-        )
-        probe_code_table = _ep_routing_probe_code_table(num_experts, d_sorted_x.dtype)
-        probe_packed = _ep_routing_probe_packed_codes(
-            ctx.token_counts,
-            recv_pr,
-            num_ep,
-            num_local_experts,
-            d_sorted_x.dtype,
-        )
-        probe_packed = jax.lax.with_sharding_constraint(
-            probe_packed, NamedSharding(mesh, ep3_spec)
-        )
-        probe_dispatch, _ = tex.ep_dispatch_bwd(
-            ctx.cfg,
-            bwd_handle_mem,
-            probe_packed,
-            jnp.zeros_like(ctx.recv_topk_weights),
-            num_local_tokens=(B, S),
-            out_partition_spec=out_partition_spec,
-        )
-        expected_probe_dispatch = jnp.sum(
-            probe_code_table[probe_topk_idx_3d].astype(jnp.float32),
-            axis=-2,
-        ).astype(d_sorted_x.dtype)
-        _print_ep_routing_probe_result(
-            "dispatch_bwd",
-            probe_topk_idx_3d,
-            probe_dispatch,
-            expected_probe_dispatch,
-            tolerance=1.0e-3,
-        )
-
-    if _debug_moe_numerics or _debug_moe_input_grad:
-        d_sorted_x_stats = _debug_stable_stats(d_sorted_x, active_recv_rows)
-        d_recv_combine_stats = _debug_stable_stats(
-            d_recv_w_from_combine, active_recv_rows
-        )
-        d_recv_intermediate_stats = _debug_stable_stats(
-            d_recv_w_from_intermediate, active_recv_rows
-        )
-        d_recv_input_stats = _debug_stable_stats(
-            dispatch_weight_cotangent, active_recv_rows
-        )
-        d_dispatch_stats = _debug_stable_stats(d_x_from_dispatch)
-        d_topk_stats = _debug_stable_stats(d_topk_w)
-        jax.debug.print(
-            "[TE dispatch-bwd stats] "
-            "token_in(absmean={token_in_absmean:.3e},std={token_in_std:.3e},"
-            "absmax={token_in_absmax:.3e},finite={token_in_finite:.6f}) "
-            "weight_combine(absmean={wc_absmean:.3e},absmax={wc_absmax:.3e}) "
-            "weight_ffn(absmean={wf_absmean:.3e},absmax={wf_absmax:.3e}) "
-            "weight_input(absmean={wi_absmean:.3e},absmax={wi_absmax:.3e}) "
-            "token_out(absmean={token_out_absmean:.3e},std={token_out_std:.3e},"
-            "absmax={token_out_absmax:.3e},finite={token_out_finite:.6f}) "
-            "weight_out(absmean={weight_out_absmean:.3e},std={weight_out_std:.3e},"
-            "absmax={weight_out_absmax:.3e},finite={weight_out_finite:.6f})",
-            token_in_absmean=d_sorted_x_stats[1],
-            token_in_std=d_sorted_x_stats[2],
-            token_in_absmax=d_sorted_x_stats[3],
-            token_in_finite=d_sorted_x_stats[4],
-            wc_absmean=d_recv_combine_stats[1],
-            wc_absmax=d_recv_combine_stats[3],
-            wf_absmean=d_recv_intermediate_stats[1],
-            wf_absmax=d_recv_intermediate_stats[3],
-            wi_absmean=d_recv_input_stats[1],
-            wi_absmax=d_recv_input_stats[3],
-            token_out_absmean=d_dispatch_stats[1],
-            token_out_std=d_dispatch_stats[2],
-            token_out_absmax=d_dispatch_stats[3],
-            token_out_finite=d_dispatch_stats[4],
-            weight_out_absmean=d_topk_stats[1],
-            weight_out_std=d_topk_stats[2],
-            weight_out_absmax=d_topk_stats[3],
-            weight_out_finite=d_topk_stats[4],
-            ordered=False,
-        )
 
     # ---------------- Routing bwd (global view) ----------------
     # The cotangent on routing_weights is a sparse scatter into sparse_probs
@@ -1838,26 +1071,6 @@ def _moe_bwd_rule(
         score_function=score_function,
         compute_aux_scores=False,
     )
-
-    if _debug_moe_numerics or _debug_moe_input_grad:
-        sparse_prob_stats = _debug_stable_stats(d_sparse_probs)
-        logits_stats = _debug_stable_stats(d_logits_2d)
-        jax.debug.print(
-            "[TE router-bwd stats] "
-            "sparse_in(absmean={sparse_absmean:.3e},std={sparse_std:.3e},"
-            "absmax={sparse_absmax:.3e},finite={sparse_finite:.6f}) "
-            "logits_out(absmean={logits_absmean:.3e},std={logits_std:.3e},"
-            "absmax={logits_absmax:.3e},finite={logits_finite:.6f})",
-            sparse_absmean=sparse_prob_stats[1],
-            sparse_std=sparse_prob_stats[2],
-            sparse_absmax=sparse_prob_stats[3],
-            sparse_finite=sparse_prob_stats[4],
-            logits_absmean=logits_stats[1],
-            logits_std=logits_stats[2],
-            logits_absmax=logits_stats[3],
-            logits_finite=logits_stats[4],
-            ordered=False,
-        )
 
     # ---------------- Aux loss bwd (global view, replicated) ----------------
     # Reverse the fwd's all-gather/aux pipeline: aux_loss_bwd produces
@@ -1894,32 +1107,6 @@ def _moe_bwd_rule(
     d_x_from_gate = jnp.einsum("bse,he->bsh", d_gate_logits, gate_kernel_cast)
     d_gate_kernel = jnp.einsum("bsh,bse->he", ctx.x, d_gate_logits).astype(ctx.gate_kernel.dtype)
     d_x = d_x_from_gate + d_x_from_dispatch
-    if _zero_moe_input_grad:
-        d_x = jnp.zeros_like(d_x)
-
-    if _debug_moe_numerics or _debug_moe_input_grad:
-        dispatch_stats = _debug_stable_stats(d_x_from_dispatch)
-        gate_stats = _debug_stable_stats(d_x_from_gate)
-        total_stats = _debug_stable_stats(d_x)
-        jax.debug.print(
-            "[TE input-grad stats] "
-            "dispatch(absmean={dispatch_absmean:.3e},std={dispatch_std:.3e},"
-            "absmax={dispatch_absmax:.3e}) "
-            "gate(absmean={gate_absmean:.3e},std={gate_std:.3e},absmax={gate_absmax:.3e}) "
-            "total(absmean={total_absmean:.3e},std={total_std:.3e},"
-            "absmax={total_absmax:.3e},finite={total_finite:.6f})",
-            dispatch_absmean=dispatch_stats[1],
-            dispatch_std=dispatch_stats[2],
-            dispatch_absmax=dispatch_stats[3],
-            gate_absmean=gate_stats[1],
-            gate_std=gate_stats[2],
-            gate_absmax=gate_stats[3],
-            total_absmean=total_stats[1],
-            total_std=total_stats[2],
-            total_absmax=total_stats[3],
-            total_finite=total_stats[4],
-            ordered=False,
-        )
 
     # Pin output grads to the declared logical axes so downstream
     # optimizers see consistent shardings.
