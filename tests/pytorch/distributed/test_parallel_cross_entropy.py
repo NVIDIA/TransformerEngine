@@ -67,22 +67,16 @@ def _run_tensor_parallel(rank, world_size, init_file):
                         label_smoothing=0.1,
                         reduction="mean" if reduce_loss else "none",
                     ).reshape_as(loss)
-                    loss_grad = (
-                        torch.full_like(loss, 0.37) if reduce_loss else external_grad
-                    )
+                    loss_grad = torch.full_like(loss, 0.37) if reduce_loss else external_grad
                     loss.backward(loss_grad)
                     ref_loss.backward(loss_grad)
                     assert local_logits._version == version_before + int(overwrite_input)
                     if overwrite_input:
                         assert not torch.equal(local_logits, local_before)
                     else:
-                        torch.testing.assert_close(
-                            local_logits, local_before, rtol=0.0, atol=0.0
-                        )
+                        torch.testing.assert_close(local_logits, local_before, rtol=0.0, atol=0.0)
 
-                    torch.testing.assert_close(
-                        loss, ref_loss, **dtype_tols(torch.float32)
-                    )
+                    torch.testing.assert_close(loss, ref_loss, **dtype_tols(torch.float32))
                     expected_grad = ref_logits.grad[
                         ..., vocab_start : vocab_start + local_vocab
                     ].to(dtype)
