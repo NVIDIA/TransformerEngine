@@ -32,7 +32,6 @@ stateful recipes follow the same update semantics as the other TE MLPs.
 
 import math
 import warnings
-from dataclasses import replace
 from functools import partial
 from typing import Any, Optional, Tuple, Union
 
@@ -278,37 +277,69 @@ class _Ctx:
 # =============================================================================
 
 
-def _localize_grouped_quantizer_set(
-    quantizer_set: QuantizerSet, num_local_groups: int
-) -> QuantizerSet:
-    """Resize stateless grouped quantizers for one shard-local FFN.
+def _validate_moe_quantizer_sets(
+    quantizer_sets: Tuple[QuantizerSet, QuantizerSet],
+    *,
+    num_token_groups: int,
+    num_expert_groups: int,
+) -> None:
+    """Validate the current global-view MoE quantizer contract.
 
-    The public MoE API receives quantizers sized for the global dispatch and
-    expert layouts. Under ``shard_map``, however, grouped quantize/GEMM sees
-    only the local experts. MXFP8 block quantizers are stateless and identical
-    per group, so selecting the corresponding number of entries preserves the
-    recipe while matching the local grouped operation.
+    Quantizers passed to the public MoE API always describe the global logical
+    operation. The shard-mapped FFN consumes only its local group count, but it
+    must not rewrite that public metadata into a shard-local representation.
+
+    Stateful grouped recipes will eventually require sharded leading group
+    dimensions on their internal state. Until that representation exists, MoE
+    supports only no-op quantizers and stateless MXFP8 grouped quantizers.
     """
+    if not isinstance(quantizer_sets, tuple) or len(quantizer_sets) != 2:
+        raise TypeError("MoE quantizer_sets must be a tuple of FC1 and FC2 QuantizerSet objects.")
 
-    def _localize(quantizer):
-        if quantizer is None or not isinstance(quantizer, GroupedQuantizer):
-            return quantizer
-        if len(quantizer.quantizers) < num_local_groups:
-            raise ValueError(
-                "MoE grouped quantizer has fewer entries than the shard-local "
-                f"FFN requires: {len(quantizer.quantizers)} < {num_local_groups}."
+    expected_groups = {
+        "x": num_token_groups,
+        "kernel": num_expert_groups,
+        "dgrad": num_token_groups,
+    }
+    for set_name, quantizer_set in zip(("FC1", "FC2"), quantizer_sets):
+        if not isinstance(quantizer_set, QuantizerSet):
+            raise TypeError(f"MoE {set_name} quantizer must be a QuantizerSet.")
+        quantizers = {
+            "x": quantizer_set.x,
+            "kernel": quantizer_set.kernel,
+            "dgrad": quantizer_set.dgrad,
+        }
+        if all(quantizer is None for quantizer in quantizers.values()):
+            continue
+        if any(quantizer is None for quantizer in quantizers.values()):
+            raise TypeError(
+                f"MoE {set_name} must use either all no-op quantizers or all grouped MXFP8 "
+                "quantizers."
             )
-        return replace(
-            quantizer,
-            n_groups=num_local_groups,
-            quantizers=quantizer.quantizers[:num_local_groups],
-        )
 
-    return QuantizerSet(
-        x=_localize(quantizer_set.x),
-        kernel=_localize(quantizer_set.kernel),
-        dgrad=_localize(quantizer_set.dgrad),
-    )
+        for source, quantizer in quantizers.items():
+            if not isinstance(quantizer, GroupedQuantizer):
+                raise TypeError(
+                    f"MoE {set_name} {source} quantizer must be a GroupedQuantizer; "
+                    f"got {type(quantizer).__name__}."
+                )
+            if not quantizer.scaling_mode.is_mxfp8_scaling:
+                raise NotImplementedError(
+                    "TE MoE currently supports only BF16/no-op and stateless MXFP8 grouped "
+                    f"quantizers; {set_name} {source} uses {quantizer.scaling_mode}."
+                )
+            if jax.tree_util.tree_leaves(quantizer):
+                raise NotImplementedError(
+                    "TE MoE does not yet support stateful grouped quantizers. Quantizer state "
+                    "must first be represented with a sharded global group dimension."
+                )
+            expected = expected_groups[source]
+            if quantizer.n_groups != expected or len(quantizer.quantizers) != expected:
+                raise ValueError(
+                    f"MoE {set_name} {source} quantizer must describe the global logical "
+                    f"group count {expected}; got n_groups={quantizer.n_groups} and "
+                    f"{len(quantizer.quantizers)} child quantizers."
+                )
 
 
 def _ffn_fwd_per_shard(
@@ -341,10 +372,7 @@ def _ffn_fwd_per_shard(
         jnp.concatenate([wi_0_bias, wi_1_bias], axis=-1) if wi_0_bias is not None else None
     )
 
-    fc1_quantizer_set, fc2_quantizer_set = (
-        _localize_grouped_quantizer_set(qset, num_local_experts)
-        for qset in quantizer_sets
-    )
+    fc1_quantizer_set, fc2_quantizer_set = quantizer_sets
     casted_sorted_x = tex.grouped_quantize(
         sorted_x,
         fc1_quantizer_set.x,
@@ -423,16 +451,12 @@ def _ffn_bwd_per_shard(
     activation_type: str,
     apply_topk_weights_early: bool,
     has_bias: bool,
-    num_local_experts: int,
 ):
     """Backward mirror of :func:`_ffn_fwd_per_shard`."""
     group_sizes = local_group_sizes.reshape(-1).astype(jnp.int32)
     d_eo_2d = d_expert_outputs_local.reshape(-1, d_expert_outputs_local.shape[-1])
     recv_w_flat = recv_topk_weights_local.reshape(-1)
-    fc1_quantizer_set, fc2_quantizer_set = (
-        _localize_grouped_quantizer_set(qset, num_local_experts)
-        for qset in quantizer_sets
-    )
+    fc1_quantizer_set, fc2_quantizer_set = quantizer_sets
     wgrad_group_active = (group_sizes > 0)[:, None, None]
 
     # wo bwd
@@ -586,6 +610,11 @@ def _moe_fwd_rule(
     for ax in data_parallelism_axes:
         dp_size *= mesh.shape[ax]
     num_procs = num_ep * dp_size
+    _validate_moe_quantizer_sets(
+        quantizer_sets,
+        num_token_groups=dp_size * num_experts,
+        num_expert_groups=num_experts,
+    )
 
     B, S, H = x.shape
     K = num_experts_per_tok
@@ -899,8 +928,6 @@ def _moe_bwd_rule(
     mesh = _get_mesh()
     if mesh is None or mesh.empty:
         raise ValueError("moe(...) requires an active jax.sharding.Mesh.")
-    num_ep = mesh.shape[ep_axis]
-    num_local_experts = num_experts // num_ep
     B, S, _ = x_shape
     K = num_experts_per_tok
     if not data_parallelism_axes:
@@ -979,7 +1006,6 @@ def _moe_bwd_rule(
             activation_type=activation_type,
             apply_topk_weights_early=apply_topk_weights_early,
             has_bias=has_bias,
-            num_local_experts=num_local_experts,
         )
         (
             d_sorted_x_local,
@@ -1265,7 +1291,11 @@ def moe(
         ``fused_moe_aux_loss`` kernel sees a global ``[T_global, E]``
         view; this lives off the dispatch critical path.
     quantizer_sets : Tuple[QuantizerSet, QuantizerSet]
-        Independent FC1 and FC2 quantizer sets. They are differentiable
+        Independent FC1 and FC2 quantizer sets describing the global logical
+        operation. Token quantizers have ``dp_size * num_experts`` groups and
+        kernel quantizers have ``num_experts`` groups; shard-local FFN calls use
+        this global descriptor unchanged. Currently only no-op (BF16) and
+        stateless grouped MXFP8 quantizers are supported. They are differentiable
         custom-VJP arguments so recipe state is threaded through backward.
     recv_capacity_per_rank : Optional[int]
         Exact aligned receive-buffer capacity for each EP rank. ``None``
