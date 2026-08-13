@@ -921,8 +921,12 @@ class DotProductAttention(TransformerEngineBaseModule):
         """
         _original_recipe = self.fp8_meta.get("recipe", None)
 
+        # get_fp8_recipe() may build a default Recipe, which asserts it is not tracing.
+        # With quantization off the base class does all that is needed.
         qstate = FP8GlobalStateManager.quantization_state
-        if not (qstate.fp8_enabled or qstate.fp8_calibration or qstate.fp8_parameters):
+        if torch.compiler.is_compiling() and not (
+            qstate.fp8_enabled or qstate.fp8_calibration or qstate.fp8_parameters
+        ):
             super().init_fp8_metadata(num_gemms=num_gemms)
             return
 
