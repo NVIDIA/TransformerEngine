@@ -82,6 +82,8 @@ if mxfp8_available:
 if nvfp4_available:
     _quantization_list.append("nvfp4")
     _quantization_list.append("nvfp4_4over6")
+    if fp8_ue5m3_available:
+        _quantization_list.append("nvfp4_rht_ue5m3")
 if fp8_block_scaling_available:
     _quantization_list.append("fp8_block_scaling")
 
@@ -136,6 +138,11 @@ def maybe_skip_quantization(
         elif quantization in nvfp4_variant_names:
             if math.prod(dims[:-1]) % 16 != 0 or dims[-1] % 16 != 0:
                 pytest.skip("NVFP4 GEMMs require dims that are divisible by 16")
+            if (
+                quantization in ("nvfp4_ue5m3", "nvfp4_rht_ue5m3")
+                and (math.prod(dims[:-1]) % 64 != 0 or dims[-1] % 64 != 0)
+            ):
+                pytest.skip("cuDNN FE NVFP4-UE5M3 GEMMs produce incorrect values with 32x32 tensors")
 
     # Check dtype
     if dtype is not None:
@@ -3588,7 +3595,12 @@ class TestSequentialModules:
 
         # Skip invalid configurations
         with_quantization = quantization is not None
-        maybe_skip_quantization(quantization, dims=in_shape, device=device, dtype=dtype)
+        maybe_skip_quantization(
+            quantization,
+            dims=in_shape,
+            device=device,
+            dtype=dtype,
+        )
         if with_quantization and dtype not in (torch.bfloat16, torch.float16):
             pytest.skip("Quantized group GEMM is only supported with BF16/FP16")
         if activation == "scaled_srelu" and quantization == "nvfp4_rht" and bias:

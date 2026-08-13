@@ -822,36 +822,55 @@ class GroupedLinear(BasicOperation):
         * Input/weight/grad_output quantizers are assumed to be of the same type, otherwise it
           would trigger a fatal error in the cuBLASLt grouped GEMM check.
         """
-        if not (9, 0) <= get_device_compute_capability() <= (11, 0):
-            return False
-        if with_quantized_compute:
-            # FP8 per-tensor current scaling runs on the Hopper and Blackwell grouped GEMM
-            # path; the compute-capability range was already checked above. On Hopper it
-            # requires cuBLAS 13.5+; fall back to the legacy flow on older cuBLAS.
-            if all(isinstance(q, Float8CurrentScalingQuantizer) for q in input_quantizers):
-                if (
-                    get_device_compute_capability() < (10, 0)
-                    and tex.get_cublasLt_version() < 130500
-                ):
-                    return False
-                return True
-            if all(isinstance(q, Float8BlockQuantizer) for q in input_quantizers):
-                # Grouped FP8 block scaling is Hopper-only and needs cuBLAS 13.4+; elsewhere
-                # fall back to the split-quantize (MXFP8-emulated) flow.
-                if get_device_compute_capability() >= (10, 0):
-                    return False
-                return tex.get_cublasLt_version() >= 130400
-            # MXFP8 and NVFP4 grouped quantization kernels require Blackwell.
-            if not (10, 0) <= get_device_compute_capability() <= (11, 0):
+
+        device_arch = get_device_compute_capability()
+
+        # Unquantized compute
+        if not with_quantized_compute:
+            if not (9, 0) <= device_arch <= (11, 0):
+                # cuBLAS supports grouped GEMM on Hopper+
                 return False
-            if all(isinstance(q, MXFP8Quantizer) for q in input_quantizers):
-                return True
-            # NVFP4 graph-safe grouped quantization requires RHT and only supports
-            # discrete weights; otherwise fall back to the split-quantize flow.
-            if all(isinstance(q, NVFP4Quantizer) and q.with_rht for q in input_quantizers):
-                return not single_grouped_weight
-            return False
-        return dtype in (torch.bfloat16, torch.float16)
+            return dtype in (torch.bfloat16, torch.float16)
+
+        # FP8 current scaling
+        if all(isinstance(q, Float8CurrentScalingQuantizer) for q in input_quantizers):
+            if not (9, 0) <= device_arch <= (11, 0):
+                # cuBLAS supports grouped GEMM on Hopper+
+                return False
+            if device_arch[0] == 9 and tex.get_cublasLt_version() < 130500:
+                # Hopper support for grouped GEMM requires cuBLAS 13.5+
+                return False
+            return True
+
+        # FP8 block scaling
+        if all(isinstance(q, Float8BlockQuantizer) for q in input_quantizers):
+            # Grouped GEMM requires Hopper and cuBLAS 13.4+
+            return device_arch[0] == 9 and tex.get_cublasLt_version() >= 130400
+
+        # MXFP8
+        if all(isinstance(q, MXFP8Quantizer) for q in input_quantizers):
+            # MXFP8 grouped quantization requires Blackwell
+            return (10, 0) <= device_arch <= (11, 0)
+
+        # NVFP4
+        if all(isinstance(q, NVFP4Quantizer) for q in input_quantizers):
+            if not (10, 0) <= device_arch <= (11, 0):
+                # NVFP4 grouped quantization requires Blackwell
+                return False
+            if single_grouped_weight:
+                # NVFP4 graph-safe grouped quantization only supports discrete weights
+                return False
+            for q in input_quantizers:
+                if not q.with_rht:
+                    # NVFP4 graph-safe grouped quantization requires RHT
+                    return False
+                if q.scale_dtype != DType.kFloat8E4M3:
+                    # NVFP4 grouped GEMM is only supported with E4M3 scales
+                    return False
+            return True
+
+        # Fall back to non-graph-safe implementation
+        return False
 
     def _get_grouped_weight_for_gemm(
         self,

@@ -43,6 +43,7 @@ from utils import (
     dtype_tols,
     make_recipe,
     MegatronTrainingHelper,
+    nvfp4_variant_names,
     quantization_tols,
     reset_rng_states,
 )
@@ -51,6 +52,7 @@ from utils import (
 fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
 mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available(return_reason=True)
 nvfp4_available, reason_for_no_nvfp4 = te.is_nvfp4_available(return_reason=True)
+fp8_ue5m3_available, reason_for_no_fp8_ue5m3 = te.is_fp8_ue5m3_available(return_reason=True)
 
 # Supported data types
 _dtypes: list[torch.dtype] = [torch.float32, torch.float16]
@@ -73,6 +75,8 @@ if mxfp8_available:
     _grouped_mlp_quantization_list.append("mxfp8")
 if nvfp4_available:
     _grouped_mlp_quantization_list.append("nvfp4_rht")
+    if fp8_ue5m3_available:
+        _grouped_mlp_quantization_list.append("nvfp4_rht_ue5m3")
 
 
 @pytest.fixture(autouse=True, scope="function")
@@ -102,11 +106,10 @@ def maybe_skip_quantization(
         pytest.skip(reason_for_no_fp8)
     if quantization == "mxfp8" and not mxfp8_available:
         pytest.skip(reason_for_no_mxfp8)
-    if (
-        quantization in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6", "nvfp4_rht")
-        and not nvfp4_available
-    ):
+    if quantization in nvfp4_variant_names and not nvfp4_available:
         pytest.skip(reason_for_no_nvfp4)
+    if quantization in ("nvfp4_ue5m3", "nvfp4_rht_ue5m3") and not fp8_ue5m3_available:
+        pytest.skip(reason_for_no_fp8_ue5m3)
 
     # Check dims
     if dims is not None:
@@ -118,16 +121,18 @@ def maybe_skip_quantization(
         elif quantization == "mxfp8":
             if math.prod(dims[:-1]) % 32 != 0 or dims[-1] % 32 != 0:
                 pytest.skip("MXFP8 GEMMs require dims that are divisible by 32")
-        elif quantization in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6", "nvfp4_rht"):
+        elif quantization in nvfp4_variant_names:
             if math.prod(dims[:-1]) % 16 != 0 or dims[-1] % 16 != 0:
                 pytest.skip("NVFP4 GEMMs require dims that are divisible by 16")
+            if (
+                quantization in ("nvfp4_ue5m3", "nvfp4_rht_ue5m3")
+                and (math.prod(dims[:-1]) % 64 != 0 or dims[-1] % 64 != 0)
+            ):
+                pytest.skip("cuDNN FE NVFP4-UE5M3 GEMMs produce incorrect values with 32x32 tensors")
 
     # Check dtype
     if dtype is not None:
-        if (
-            quantization in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6", "nvfp4_rht")
-            and dtype != torch.bfloat16
-        ):
+        if quantization in nvfp4_variant_names and dtype != torch.bfloat16:
             pytest.skip("NVFP4 quantization is only supported with BF16 data")
 
 
@@ -183,17 +188,27 @@ def make_reference_and_test_tensors(
         test = quantizer(test)
     elif quantization == "mxfp8":
         test = MXFP8Quantizer(fp8_dtype=te.DType.kFloat8E4M3)(test)
-    elif quantization in ("nvfp4", "nvfp4_row_scaled", "nvfp4_rht"):
+    elif quantization in (
+        "nvfp4",
+        "nvfp4_row_scaled",
+        "nvfp4_rht",
+        "nvfp4_ue5m3",
+        "nvfp4_rht_ue5m3",
+    ):
         tensor_type = "input"
         if quantizer_role is not None:
             tensor_type = quantizer_role.tensor_type
-        with_rht = quantization == "nvfp4_rht" and tensor_type != "weight"
+        with_rht = quantization in ("nvfp4_rht", "nvfp4_rht_ue5m3") and tensor_type != "weight"
+        scale_dtype = (
+            te.DType.kFloat8UE5M3 if quantization == "nvfp4_rht_ue5m3" else te.DType.kFloat8E4M3
+        )
         test = NVFP4Quantizer(
+            scale_dtype=scale_dtype,
             with_rht=with_rht,
             with_post_rht_amax=with_rht,
             with_2d_quantization=False,
             stochastic_rounding=False,
-            with_random_sign_mask=False,
+            with_random_sign_mask=with_rht,
         )(test)
     elif quantization == "nvfp4_4over6":
         tensor_type = "input"

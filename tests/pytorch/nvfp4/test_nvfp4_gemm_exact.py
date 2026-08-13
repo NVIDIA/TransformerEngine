@@ -690,3 +690,112 @@ def test_nvfp4_row_scaled_gemm_matches_emulated(
         use_4over6=use_4over6,
         nvfp4_4over6_err_mode=nvfp4_4over6_err_mode,
     )
+
+
+def _check_ue5m3_gemm_versus_dequantized(
+    M, K, N, x_columnwise, w_columnwise, disable_second_level_scale
+):
+    """Run an NVFP4/UE5M3 GEMM and compare against a dequantized FP32 reference."""
+    if M % 256 != 0:
+        pytest.skip(
+            "cuDNN's grouped GEMM pads every group to 256 rows, so the UE5M3 path (which "
+            "routes there while cuBLAS lacks UE5M3 kernels) requires M % 256 == 0."
+        )
+    torch.manual_seed(0)
+    device, dtype, out_dtype = "cuda", torch.bfloat16, torch.bfloat16
+    x_shape = (K, M) if x_columnwise else (M, K)
+    w_shape = (K, N) if w_columnwise else (N, K)
+    x = torch.randn(x_shape, dtype=dtype, device=device)
+    w = torch.randn(w_shape, dtype=dtype, device=device)
+
+    common = dict(
+        fp4_dtype=tex.DType.kFloat4E2M1,
+        scale_dtype=tex.DType.kFloat8UE5M3,
+        rowwise=True,
+        columnwise=True,
+        with_amax_reduction=False,
+        amax_reduction_group=None,
+        with_rht=False,
+        with_post_rht_amax=False,
+    )
+    # disable_second_level_scale is given per operand, as (x, w).
+    xq = NVFP4Quantizer(**common, disable_second_level_scale=disable_second_level_scale[0])
+    wq = NVFP4Quantizer(**common, disable_second_level_scale=disable_second_level_scale[1])
+    x_q = xq.update_quantized(x, xq.make_empty(x_shape, dtype=dtype, device=device))
+    w_q = wq.update_quantized(w, wq.make_empty(w_shape, dtype=dtype, device=device))
+
+    if disable_second_level_scale[0]:
+        assert x_q._amax_rowwise is None, "disable_second_level_scale should drop the amax"
+    if disable_second_level_scale[1]:
+        assert w_q._amax_rowwise is None, "disable_second_level_scale should drop the amax"
+
+    # Reference: dequantize the orientation each operand is actually read in.
+    x_ref = _dequantize_nvfp4_usage(x_q, columnwise=x_columnwise)
+    w_ref = _dequantize_nvfp4_usage(w_q, columnwise=w_columnwise)
+    # _dequantize_nvfp4_usage returns each operand canonically as (rows, K), so
+    # the reference is the same expression for every layout.
+    ref = x_ref @ w_ref.t()
+
+    if x_columnwise:
+        x_q.update_usage(rowwise_usage=False)
+    if w_columnwise:
+        w_q.update_usage(rowwise_usage=False)
+    transa, transb = not w_columnwise, x_columnwise
+    layout = ("T" if transa else "N") + ("T" if transb else "N")
+    y = general_gemm(w_q, x_q, out_dtype=out_dtype, layout=layout)[0]
+
+    # Both sides see identically quantized operands, so quantization error cancels and
+    # only accumulation order and the bf16 output rounding differ. One bf16 ulp is
+    # already ~4e-3 relative, which no elementwise tolerance survives, so compare the
+    # whole result instead.
+    rel_err = (y.float() - ref).norm() / ref.norm()
+    assert rel_err < 5e-3, f"relative error {rel_err:.2e} is too large"
+
+ue5m3_available, reason_for_no_ue5m3 = te.is_fp8_ue5m3_available(return_reason=True)
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.skipif(not ue5m3_available, reason=reason_for_no_ue5m3)
+@pytest.mark.parametrize(
+    "M, K, N",
+    [
+        (256, 128, 256),
+        (256, 256, 256),
+        (256, 1024, 256),
+        (1024, 1024, 1024),
+        (4096, 512, 3072),
+        (112, 128, 96),
+        (304, 640, 304),
+        (1008, 3072, 992),
+        (256, 64, 256),
+        (128, 128, 112),
+    ],
+)
+@pytest.mark.parametrize(
+    "x_columnwise, w_columnwise",
+    [
+        (False, False),  # TN -- w rowwise, x rowwise   (fprop)
+        (False, True),  # NN -- w colwise, x rowwise   (dgrad)
+        (True, True),  # NT -- w colwise, x colwise   (wgrad)
+    ], ids=["FF", "FT", "TT"]
+)
+@pytest.mark.parametrize(
+    "disable_second_level_scale", [
+        (True, False),
+    ], ids=["TF"]
+)
+def test_nvfp4_ue5m3_gemm_versus_reference(
+    M: int,
+    K: int,
+    N: int,
+    x_columnwise: bool,
+    w_columnwise: bool,
+    disable_second_level_scale: bool,
+):
+    """NVFP4 GEMM with UE5M3 block scales, with and without second-level scaling.
+
+    UE5M3's wider range is what makes dropping the per-tensor global scale
+    viable, so both configurations must match the dequantized reference.
+    """
+    _check_ue5m3_gemm_versus_dequantized(
+        M, K, N, x_columnwise, w_columnwise, disable_second_level_scale
+    )
