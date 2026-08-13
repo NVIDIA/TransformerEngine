@@ -256,7 +256,6 @@ class _Ctx:
     routing_map: jnp.ndarray
     cfg: Any = flax.struct.field(pytree_node=False)
     handle_mem: jnp.ndarray
-    token_counts: jnp.ndarray
     recv_topk_weights: jnp.ndarray
     casted_sorted_x_lhs_trans: Any
     casted_wi_rhs_trans: Any
@@ -457,7 +456,6 @@ def _ffn_bwd_per_shard(
     d_eo_2d = d_expert_outputs_local.reshape(-1, d_expert_outputs_local.shape[-1])
     recv_w_flat = recv_topk_weights_local.reshape(-1)
     fc1_quantizer_set, fc2_quantizer_set = quantizer_sets
-    wgrad_group_active = (group_sizes > 0)[:, None, None]
 
     # wo bwd
     casted_d_eo = tex.grouped_quantize(
@@ -478,7 +476,6 @@ def _ffn_bwd_per_shard(
         _casted_d_eo_rhs,
         contracting_dims=((0,), (0,)),
     )
-    d_wo = jnp.where(wgrad_group_active, d_wo, jnp.zeros_like(d_wo))
     d_wo_bias = tex.grouped_dbias(d_eo_2d, group_sizes) if has_bias else None
 
     act_fn = _convert_to_activation_function(activation_type)
@@ -528,9 +525,6 @@ def _ffn_bwd_per_shard(
         casted_sorted_x_lhs_trans,
         casted_d_combined.get_tensor(usage=TensorUsage.RHS),
         contracting_dims=((0,), (0,)),
-    )
-    d_wi_combined = jnp.where(
-        wgrad_group_active, d_wi_combined, jnp.zeros_like(d_wi_combined)
     )
     if has_bias:
         d_wi_combined_bias = tex.grouped_dbias(d_combined, group_sizes)
@@ -867,7 +861,6 @@ def _moe_fwd_rule(
         routing_map=routing_map,
         cfg=cfg,
         handle_mem=handle_mem,
-        token_counts=token_counts,
         recv_topk_weights=recv_topk_weights,
         casted_sorted_x_lhs_trans=casted_sorted_x_lhs_trans,
         casted_wi_rhs_trans=casted_wi_rhs_trans,
@@ -944,21 +937,6 @@ def _moe_bwd_rule(
     grad_pre_combine = jax.lax.with_sharding_constraint(
         grad_pre_combine, NamedSharding(mesh, ep3_spec)
     )
-    # The EP kernel writes only the per-process packed expert prefix. Its
-    # over-allocation tail is intentionally left uninitialized, which is safe
-    # only while every downstream consumer is perfectly handle/group aware.
-    # Materialize the contract here so padding cannot leak through elementwise
-    # weighting, compiler fusion, or a later dispatch backward.
-    active_recv_rows = (
-        jnp.arange(ctx.recv_topk_weights.shape[-1])[None, :]
-        < jnp.sum(ctx.token_counts, axis=-1, dtype=jnp.int32)[:, None]
-    )
-    grad_pre_combine = jnp.where(
-        active_recv_rows[..., None],
-        grad_pre_combine,
-        jnp.zeros_like(grad_pre_combine),
-    )
-
     if apply_topk_weights_early:
         # combine_fwd consumed already-weighted expert_outputs; the recv_w
         # cotangent flows through the early-weighting step inside the FFN bwd.
