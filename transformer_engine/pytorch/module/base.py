@@ -10,6 +10,7 @@ import os
 import pickle
 import warnings
 from collections.abc import Hashable
+from dataclasses import dataclass
 from enum import Enum
 from abc import ABC, abstractmethod
 from typing import Any, Dict, Generator, List, Optional, Tuple, Union
@@ -78,6 +79,17 @@ __all__ = [
     "using_cublasmp_backend",
     "UserBufferQuantizationMode",
 ]
+
+
+@dataclass(frozen=True)
+class _QuantizationUpdate:
+    """A validated runtime update that is ready to commit."""
+
+    candidate: Optional[_QuantizationRuntime]
+    validation_result: Any
+    recipe_config_revision: int
+    role_revision: int
+
 
 _2X_ACC_FPROP = False
 _2X_ACC_DGRAD = True
@@ -887,7 +899,30 @@ def quantize_weight(
 
 
 class TransformerEngineBaseModule(torch.nn.Module, ABC):
-    """Base TE module."""
+    """Base TE module.
+
+    Private quantization runtime lifecycle
+    --------------------------------------
+    ``init_fp8_metadata`` calls ``_ensure_quantization_runtime``. An unchanged
+    forward returns from its constant-time revision fast path. A cold-path
+    mismatch follows this staged workflow::
+
+        _ensure_quantization_runtime
+            -> _plan_quantization_update
+                -> resolve roles and requested runtime key
+                -> recognize an equal semantic runtime
+                -> reject unsupported transitions
+                -> _build_quantization_runtime
+                -> _validate_quantization_runtime
+            -> _apply_quantization_update
+                -> synchronize revisions for an equal runtime, or
+                -> _activate_quantization_runtime for a replacement
+
+    Planning constructs and validates both forward and backward state without
+    publishing it. Applying a validated update is limited to revision updates
+    or no-fail publication of precomputed module state. Subclasses customize
+    candidate validation and activation through their corresponding hooks.
+    """
 
     def __init__(self, name: Optional[str] = None) -> None:
         super().__init__()
@@ -1136,7 +1171,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         state_roles = list(roles)
         return tuple(state_roles), state_roles
 
-    def _prepare_quantization_runtime(
+    def _build_quantization_runtime(
         self,
         *,
         recipe: Recipe,
@@ -1147,7 +1182,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         forward_state_roles: Optional[List[Optional[QuantizerRole]]],
         backward_state_roles: Optional[List[Optional[QuantizerRole]]],
     ) -> _QuantizationRuntime:
-        """Build both quantization directions without changing live module state."""
+        """Construct both candidate directions without validating or publishing them."""
         num_forward_quantizers = num_gemms * 3
         num_backward_quantizers = num_gemms * 2
 
@@ -1207,16 +1242,16 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         )
 
     def _validate_quantization_runtime(self, candidate: _QuantizationRuntime) -> Any:
-        """Validate a candidate and return optional transient commit data."""
+        """Validate a built candidate and return optional precomputed activation data."""
         del candidate
 
-    def _commit_quantization_runtime(
+    def _activate_quantization_runtime(
         self,
         candidate: _QuantizationRuntime,
         *,
         validation_result: Any = None,
     ) -> None:
-        """Publish a fully prepared and validated runtime as one unit."""
+        """Publish a validated replacement runtime and its compatibility views."""
         del validation_result
         recipe = candidate.recipe
         forward_state = candidate.forward_states[0]
@@ -1242,30 +1277,75 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         if workspaces is not None:
             workspaces.clear()
 
-    def _ensure_active_quantization_runtime(
+    def _get_quantization_runtime_num_gemms(self) -> int:
+        """Return the module's fixed quantizer slot layout in GEMM units."""
+        return 1
+
+    @staticmethod
+    def _runtime_has_delayed_scaling(runtime: _QuantizationRuntime) -> bool:
+        """Whether either direction of a runtime owns delayed-scaling state."""
+        return any(
+            _is_delayed_scaling_state(state)
+            for state in runtime.forward_states + runtime.backward_states
+        )
+
+    @staticmethod
+    def _reject_delayed_scaling_update() -> None:
+        """Reject a delayed-state transition and protect any active reduction."""
+        FP8GlobalStateManager.abort_current_amax_reduction()
+        raise RuntimeError(
+            "Mid-training recipe updates do not support delayed scaling. "
+            "A delayed-scaling runtime is frozen after initialization; only "
+            "unchanged execution is supported."
+        )
+
+    def _check_quantization_update_supported(
+        self,
+        *,
+        recipe: Recipe,
+        requested_key: _QuantizationRuntimeKey,
+        num_gemms: int,
+    ) -> None:
+        """Reject unsupported transitions known before candidate construction."""
+        active = getattr(self, "_quantization_runtime", None)
+        if active is None:
+            return
+
+        active_has_delayed_scaling = self._runtime_has_delayed_scaling(active)
+
+        # Until per-weight semantic keys are available, a recipe change may
+        # not retarget already-quantized primary storage. Keep this more
+        # specific diagnostic ahead of the general delayed-scaling boundary.
+        if getattr(self, "primary_weights_in_fp8", False) and (
+            active.key.recipe_config != requested_key.recipe_config
+            or active.num_gemms != num_gemms
+        ):
+            if active_has_delayed_scaling or recipe.delayed():
+                FP8GlobalStateManager.abort_current_amax_reduction()
+            raise RuntimeError(
+                "Recipe mismatch for quantized primary weights: mid-training recipe "
+                "configuration changes require per-weight semantic compatibility and "
+                "are not supported yet."
+            )
+
+        # Delayed state participates in global reduction registration and is
+        # intentionally outside this round's migration contract. Reject any
+        # effective update before invoking a CustomRecipe factory or preparing
+        # replacement tensors.
+        if active_has_delayed_scaling or recipe.delayed():
+            self._reject_delayed_scaling_update()
+
+    def _plan_quantization_update(
         self,
         *,
         recipe: Recipe,
         recipe_config: Hashable,
         recipe_config_revision: int,
         num_gemms: int,
-    ) -> bool:
-        """Ensure the active runtime matches the requested recipe, roles, and slot layout.
-
-        Return whether a new runtime was committed.
-        """
+    ) -> _QuantizationUpdate:
+        """Plan and validate a complete cold-path update without publishing it."""
         active = getattr(self, "_quantization_runtime", None)
         role_revision = getattr(self, "_role_revision", 0)
-
-        # Constant-time steady-state path: no role construction, factory
-        # calls, recipe traversal, or candidate validation.
-        if (
-            active is not None
-            and active.recipe_config_revision == recipe_config_revision
-            and active.role_revision == role_revision
-            and active.num_gemms == num_gemms
-        ):
-            return False
 
         num_forward_quantizers = num_gemms * 3
         num_backward_quantizers = num_gemms * 2
@@ -1283,58 +1363,23 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             backward_roles=backward_key_roles,
         )
 
-        # A module can miss an A -> B -> A sequence. Synchronize its cheap
-        # revision markers without rebuilding an equal semantic runtime.
+        # A module can miss an A -> B -> A sequence. Defer synchronizing its
+        # revision markers until commit so model-wide preparation is mutation-free.
         if active is not None and active.key == requested_key and active.num_gemms == num_gemms:
-            active.recipe_config_revision = recipe_config_revision
-            active.role_revision = role_revision
-            return False
-
-        def has_delayed_scaling(runtime: _QuantizationRuntime) -> bool:
-            return any(
-                _is_delayed_scaling_state(state)
-                for state in runtime.forward_states + runtime.backward_states
+            return _QuantizationUpdate(
+                candidate=None,
+                validation_result=None,
+                recipe_config_revision=recipe_config_revision,
+                role_revision=role_revision,
             )
 
-        active_has_delayed_scaling = active is not None and has_delayed_scaling(active)
+        self._check_quantization_update_supported(
+            recipe=recipe,
+            requested_key=requested_key,
+            num_gemms=num_gemms,
+        )
 
-        # Until per-weight semantic keys are available, a recipe change may
-        # not retarget already-quantized primary storage. Keep this more
-        # specific diagnostic ahead of the general delayed-scaling boundary.
-        if (
-            active is not None
-            and getattr(self, "primary_weights_in_fp8", False)
-            and (
-                active.key.recipe_config != requested_key.recipe_config
-                or active.num_gemms != num_gemms
-            )
-        ):
-            if active_has_delayed_scaling or recipe.delayed():
-                FP8GlobalStateManager.abort_current_amax_reduction()
-            raise RuntimeError(
-                "Recipe mismatch for quantized primary weights: mid-training recipe "
-                "configuration changes require per-weight semantic compatibility and "
-                "are not supported yet."
-            )
-
-        def reject_delayed_scaling_update() -> None:
-            FP8GlobalStateManager.abort_current_amax_reduction()
-            raise RuntimeError(
-                "Mid-training recipe updates do not support delayed scaling. "
-                "A delayed-scaling runtime is frozen after initialization; only "
-                "unchanged execution is supported."
-            )
-
-        # Delayed state participates in global reduction registration and is
-        # intentionally outside this round's migration contract. Reject any
-        # effective update before invoking a CustomRecipe factory or preparing
-        # replacement tensors.
-        if active_has_delayed_scaling:
-            reject_delayed_scaling_update()
-        if active is not None and not active_has_delayed_scaling and recipe.delayed():
-            reject_delayed_scaling_update()
-
-        candidate = self._prepare_quantization_runtime(
+        candidate = self._build_quantization_runtime(
             recipe=recipe,
             key=requested_key,
             num_gemms=num_gemms,
@@ -1343,17 +1388,70 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             forward_state_roles=forward_state_roles,
             backward_state_roles=backward_state_roles,
         )
-        if active is not None and has_delayed_scaling(candidate):
-            reject_delayed_scaling_update()
+        if active is not None and self._runtime_has_delayed_scaling(candidate):
+            self._reject_delayed_scaling_update()
         # Subclasses may return transient commit data even though the base implementation
         # returns None, which pylint cannot infer through dynamic dispatch.
         # pylint: disable-next=assignment-from-no-return
         validation_result = self._validate_quantization_runtime(candidate)
-        self._commit_quantization_runtime(
-            candidate,
+        return _QuantizationUpdate(
+            candidate=candidate,
             validation_result=validation_result,
+            recipe_config_revision=recipe_config_revision,
+            role_revision=role_revision,
+        )
+
+    def _apply_quantization_update(
+        self,
+        update: _QuantizationUpdate,
+    ) -> bool:
+        """Apply a validated update by synchronizing revisions or activating its candidate."""
+        candidate = update.candidate
+        if candidate is None:
+            active = self._quantization_runtime
+            assert active is not None
+            active.recipe_config_revision = update.recipe_config_revision
+            active.role_revision = update.role_revision
+            return False
+
+        self._activate_quantization_runtime(
+            candidate,
+            validation_result=update.validation_result,
         )
         return True
+
+    def _ensure_quantization_runtime(
+        self,
+        *,
+        recipe: Recipe,
+        recipe_config: Hashable,
+        recipe_config_revision: int,
+        num_gemms: int,
+    ) -> bool:
+        """Use the revision hot path or plan and immediately apply a module-local update.
+
+        Return whether a new runtime was committed.
+        """
+        active = getattr(self, "_quantization_runtime", None)
+        role_revision = getattr(self, "_role_revision", 0)
+
+        # Constant-time steady-state path: no role construction, factory
+        # calls, recipe traversal, or candidate validation.
+        if (
+            active is not None
+            and active.recipe_config_revision == recipe_config_revision
+            and active.role_revision == role_revision
+            and active.num_gemms == num_gemms
+        ):
+            return False
+
+        update = self._plan_quantization_update(
+            recipe=recipe,
+            recipe_config=recipe_config,
+            recipe_config_revision=recipe_config_revision,
+            num_gemms=num_gemms,
+        )
+        return self._apply_quantization_update(update)
 
     def set_meta_tensor(self, fwd: bool, recipe: Recipe) -> None:
         """Initialize both quantization directions atomically.
@@ -1364,7 +1462,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         # TODO(negvet): Remove set_meta_tensor after checkpoint, GroupedLinear, and DPA migration.
         del fwd
         num_gemms = self.fp8_meta.get("num_gemms", 1)
-        self._ensure_active_quantization_runtime(
+        self._ensure_quantization_runtime(
             recipe=recipe,
             recipe_config=recipe.quantizer_config(),
             recipe_config_revision=-1,
@@ -1747,7 +1845,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         if fp8_enabled:
             meta["fp8_group"] = FP8GlobalStateManager.get_fp8_group()
 
-        runtime_changed = self._ensure_active_quantization_runtime(
+        runtime_changed = self._ensure_quantization_runtime(
             recipe=recipe,
             recipe_config=recipe_config,
             recipe_config_revision=recipe_config_revision,

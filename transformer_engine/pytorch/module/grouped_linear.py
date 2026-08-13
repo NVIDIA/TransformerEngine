@@ -1765,6 +1765,10 @@ class GroupedLinear(TransformerEngineBaseModule):
     The TP communication should be handled in the dispatch and combine stages of MoE models.
     """
 
+    def _get_quantization_runtime_num_gemms(self) -> int:
+        """Return the configured grouped-GEMM quantizer slot layout."""
+        return self.num_gemms
+
     def __init__(
         self,
         num_gemms: int,
@@ -1995,7 +1999,7 @@ class GroupedLinear(TransformerEngineBaseModule):
         )
         return validation_result
 
-    def _commit_quantization_runtime(
+    def _activate_quantization_runtime(
         self,
         candidate: _QuantizationRuntime,
         *,
@@ -2008,7 +2012,7 @@ class GroupedLinear(TransformerEngineBaseModule):
             "scaling_bwd": candidate.backward_quantizers,
         }
 
-        super()._commit_quantization_runtime(
+        super()._activate_quantization_runtime(
             candidate,
             validation_result=validation_result,
         )

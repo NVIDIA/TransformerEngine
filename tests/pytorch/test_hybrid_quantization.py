@@ -205,6 +205,52 @@ class TestDPARuntimeRecipeUpdate:
         )
         assert not dpa._fp8_workspaces
 
+    def test_direct_runtime_commit_updates_dpa_derived_state(self):
+        """DPA cache and recipe labels are part of its runtime commit hook."""
+        from transformer_engine.pytorch.custom_recipes.quantizer_factories import (
+            current_scaling_factory,
+        )
+
+        dpa = self._make_dpa()
+        first_recipe = recipe.CustomRecipe(
+            qfactory=current_scaling_factory,
+            qfactory_key=("dpa-direct-commit", 1),
+            fp8_dpa=True,
+        )
+        with autocast(enabled=True, recipe=first_recipe):
+            dpa.get_qkv_quantization_capabilities()
+
+        old_runtime = dpa._quantization_runtime
+        old_local_recipes = object()
+        dpa.fp8_meta["local_recipes"] = old_local_recipes
+        old_cache_key = dpa._custom_dpa_local_recipes_cache_key
+        old_capabilities_quantizer = dpa._qkv_capabilities_quantizer
+
+        second_recipe = recipe.CustomRecipe(
+            qfactory=current_scaling_factory,
+            qfactory_key=("dpa-direct-commit", 2),
+            fp8_dpa=True,
+        )
+        update = dpa._plan_quantization_update(
+            recipe=second_recipe,
+            recipe_config=second_recipe.quantizer_config(),
+            recipe_config_revision=old_runtime.recipe_config_revision + 1,
+            num_gemms=dpa._get_quantization_runtime_num_gemms(),
+        )
+
+        assert dpa._quantization_runtime is old_runtime
+        assert dpa.fp8_meta["local_recipes"] is old_local_recipes
+        assert dpa._custom_dpa_local_recipes_cache_key is old_cache_key
+        assert dpa._qkv_capabilities_quantizer is old_capabilities_quantizer
+
+        assert dpa._apply_quantization_update(update)
+        assert dpa._quantization_runtime is update.candidate
+        assert "local_recipes" not in dpa.fp8_meta
+        assert dpa._custom_dpa_local_recipes_cache is None
+        assert dpa._custom_dpa_local_recipes_cache_key != old_cache_key
+        assert dpa._qkv_capabilities_quantizer is None
+        assert dpa._qkv_capabilities_cache is None
+
     def test_candidate_failure_preserves_active_runtime_and_caches(self):
         """A failed candidate validation does not partially update DPA."""
         from transformer_engine.pytorch.custom_recipes.quantizer_factories import (
@@ -2144,30 +2190,10 @@ class TestCustomDPALocalRecipeCache:
         from transformer_engine.pytorch.attention.dot_product_attention import (
             dot_product_attention as dpa_module,
         )
-        from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
-        from transformer_engine.pytorch.quantization import FP8GlobalStateManager
 
         custom_recipe = recipe.CustomRecipe(
             qfactory=lambda _role: IdentityQuantizer(),
             qfactory_key=("test_dpa_identity", 1),
-        )
-        monkeypatch.setattr(
-            FP8GlobalStateManager,
-            "get_fp8_recipe",
-            classmethod(lambda _cls: custom_recipe),
-        )
-
-        state = [object()]
-        quantizer = [object()]
-
-        def fake_base_init(module, num_gemms=1):  # pylint: disable=unused-argument
-            module.fp8_meta["scaling_fwd"] = state[0]
-            module.quantizers["scaling_fwd"] = [quantizer[0]]
-
-        monkeypatch.setattr(
-            TransformerEngineBaseModule,
-            "init_fp8_metadata",
-            fake_base_init,
         )
 
         inferred_labels = [recipe.MXFP8BlockScaling()]
@@ -2187,32 +2213,34 @@ class TestCustomDPALocalRecipeCache:
             kv_channels=16,
             attention_dropout=0.0,
         )
-        dpa.init_fp8_metadata()
-        assert dpa.fp8_meta["local_recipes"] is inferred_labels
-        dpa.init_fp8_metadata()
-        assert inference_calls == 1
-        assert dpa.fp8_meta["local_recipes"] is inferred_labels
+        with autocast(enabled=True, recipe=custom_recipe):
+            dpa.init_fp8_metadata(num_gemms=3)
+            assert dpa.fp8_meta["local_recipes"] is inferred_labels
+            dpa.init_fp8_metadata(num_gemms=3)
+            assert inference_calls == 1
+            assert dpa.fp8_meta["local_recipes"] is inferred_labels
 
-        # Native labels also copy these mutable fields from CustomRecipe. They
-        # must refresh even when the quantizer generation itself is unchanged.
+        # Native labels also copy these mutable fields from CustomRecipe, so a
+        # semantic recipe update must refresh them with the candidate runtime.
         custom_recipe.fp8_mha = True
-        dpa.init_fp8_metadata()
-        assert inference_calls == 2
-        assert dpa.fp8_meta["local_recipes"] is mutated_recipe_labels
-        dpa.init_fp8_metadata()
-        assert inference_calls == 2
-        assert dpa.fp8_meta["local_recipes"] is mutated_recipe_labels
+        with autocast(enabled=True, recipe=custom_recipe):
+            dpa.init_fp8_metadata(num_gemms=3)
+            assert inference_calls == 2
+            assert dpa.fp8_meta["local_recipes"] is mutated_recipe_labels
+            dpa.init_fp8_metadata(num_gemms=3)
+            assert inference_calls == 2
+            assert dpa.fp8_meta["local_recipes"] is mutated_recipe_labels
 
         # A rebuilt recipe state/quantizer list invalidates the cache. If the
         # new family has no native label, the old label must not survive.
-        state[0] = object()
-        quantizer[0] = object()
-        dpa.init_fp8_metadata()
-        assert inference_calls == 3
-        assert "local_recipes" not in dpa.fp8_meta
-        dpa.init_fp8_metadata()
-        assert inference_calls == 3
-        assert "local_recipes" not in dpa.fp8_meta
+        custom_recipe.qfactory_key = ("test_dpa_identity", 2)
+        with autocast(enabled=True, recipe=custom_recipe):
+            dpa.init_fp8_metadata(num_gemms=3)
+            assert inference_calls == 3
+            assert "local_recipes" not in dpa.fp8_meta
+            dpa.init_fp8_metadata(num_gemms=3)
+            assert inference_calls == 3
+            assert "local_recipes" not in dpa.fp8_meta
 
     @pytest.mark.parametrize(
         "factory_name,expected",

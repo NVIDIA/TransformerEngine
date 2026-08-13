@@ -38,6 +38,7 @@ if TYPE_CHECKING:
     from .quantized_tensor import Quantizer
 
 __all__ = [
+    "apply_recipe",
     "autocast",
     "quantized_model_init",
     "is_fp8_available",
@@ -994,6 +995,123 @@ class FP8GlobalStateManager:
 
         fp8_meta["scaling_fwd"].amax_history.copy_(fp8_meta["updated_amax_history_fwd"])
         fp8_meta["scaling_fwd"].scale.copy_(fp8_meta["updated_scale_fwd"])
+
+
+def apply_recipe(model: torch.nn.Module, recipe: Recipe) -> None:
+    """Prepare, validate, and apply a recipe across one model atomically.
+
+    This is an optional synchronous cold-path API for controllers that need a
+    model-wide update instead of lazy per-module migration. Call it outside
+    :class:`autocast`, CUDA graph capture, and compiled regions, after all
+    outstanding forward, backward, recompute, optimizer, and communication
+    work has completed.
+
+    Every participating Transformer Engine module is planned and validated
+    before any module or global recipe state is changed. If planning fails,
+    all active runtimes and the global recipe remain unchanged. Fusible
+    operations and the legacy built-in DPA recipe path are not yet supported by
+    this model-wide API.
+
+    This operation is atomic only within the calling process. In distributed
+    training, the framework or controller must distribute an identical recipe,
+    invoke this function consistently on the appropriate ranks at a synchronized
+    boundary, and coordinate failures before training resumes. Transformer
+    Engine does not infer data-, tensor-, pipeline-, or expert-parallel process
+    groups or perform cross-rank agreement in this API.
+
+    When resuming from a checkpoint, reconstruct the intended recipe and call
+    this function after restoring the model and before its first forward pass.
+
+    Parameters
+    ----------
+    model : torch.nn.Module
+        Model or composed module whose participating Transformer Engine
+        runtime owners should receive the recipe.
+    recipe : transformer_engine.common.recipe.Recipe
+        Complete precision recipe to apply.
+    """
+    if not isinstance(model, torch.nn.Module):
+        raise TypeError(f"model must be a torch.nn.Module, got {type(model).__name__}")
+    if not isinstance(recipe, Recipe):
+        raise TypeError(f"recipe must be a Recipe, got {type(recipe).__name__}")
+    if torch.compiler.is_compiling():
+        raise RuntimeError("te.apply_recipe() must be called outside torch.compile regions.")
+
+    qstate = FP8GlobalStateManager.quantization_state
+    if qstate.autocast_depth != 0:
+        raise RuntimeError("te.apply_recipe() must be called outside te.autocast regions.")
+    if FP8GlobalStateManager.fp8_graph_capturing():
+        raise RuntimeError("te.apply_recipe() must be called outside CUDA graph capture.")
+
+    check_recipe_support(recipe)
+    recipe_config = recipe.quantizer_config()
+    recipe_config_revision = qstate.quantizer_config_revision + int(
+        recipe_config != qstate.quantizer_config
+    )
+
+    # Import locally to keep quantization.py independent from module/base.py
+    # during package initialization.
+    from .attention.dot_product_attention.dot_product_attention import DotProductAttention
+    from .module.base import TransformerEngineBaseModule
+    from .ops.op import FusibleOperation
+
+    participants = []
+    fusible_owners = []
+    legacy_dpa_owners = []
+    seen = set()
+    for fqn, module in model.named_modules():
+        module_id = id(module)
+        if module_id in seen:
+            continue
+        seen.add(module_id)
+        diagnostic_name = fqn or "<root>"
+        if isinstance(module, FusibleOperation):
+            fusible_owners.append(diagnostic_name)
+        if isinstance(module, DotProductAttention) and not recipe.custom():
+            legacy_dpa_owners.append(diagnostic_name)
+        if isinstance(module, TransformerEngineBaseModule):
+            participants.append((diagnostic_name, module))
+
+    # Reject excluded owners after one complete discovery pass and before any
+    # qfactory invocation or candidate construction.
+    if fusible_owners:
+        owners = ", ".join(repr(name) for name in fusible_owners)
+        raise RuntimeError(
+            "te.apply_recipe() does not support fusible operations yet; "
+            f"recreate or update these owners separately: {owners}."
+        )
+    if legacy_dpa_owners:
+        owners = ", ".join(repr(name) for name in legacy_dpa_owners)
+        raise RuntimeError(
+            "te.apply_recipe() supports DotProductAttention only through CustomRecipe; "
+            f"the built-in NVTE_DPA_* path remains lazy and unchanged for: {owners}."
+        )
+    if not participants:
+        raise ValueError("te.apply_recipe() found no Transformer Engine runtime owners in model.")
+
+    updates = []
+    for fqn, module in participants:
+        try:
+            # pylint: disable-next=protected-access
+            num_gemms = module._get_quantization_runtime_num_gemms()
+            update = module._plan_quantization_update(  # pylint: disable=protected-access
+                recipe=recipe,
+                recipe_config=recipe_config,
+                recipe_config_revision=recipe_config_revision,
+                num_gemms=num_gemms,
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                f"te.apply_recipe() failed while planning module {fqn!r}: {exc}"
+            ) from exc
+        updates.append((module, update))
+
+    # Applying an update only publishes state that was fully constructed and
+    # validated above. Publish the manager state last so planning failures
+    # cannot expose a requested recipe globally.
+    for module, update in updates:
+        module._apply_quantization_update(update)  # pylint: disable=protected-access
+    FP8GlobalStateManager._set_recipe_config(recipe, recipe_config)
 
 
 @contextmanager

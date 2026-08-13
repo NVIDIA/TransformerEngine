@@ -629,6 +629,10 @@ class DotProductAttention(TransformerEngineBaseModule):
                     p2p between sub-groups (e.g., via IBLink).
     """
 
+    def _get_quantization_runtime_num_gemms(self) -> int:
+        """Return the fixed CustomRecipe DPA quantizer slot layout."""
+        return 3
+
     def __init__(
         self,
         num_attention_heads: int,
@@ -883,30 +887,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         # global recipe set in autocast()
         fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
         if fp8_recipe.custom():
-            old_runtime = getattr(self, "_quantization_runtime", None)
             super().init_fp8_metadata(num_gemms=num_gemms)
-            if self._quantization_runtime is not old_runtime:
-                self._invalidate_dpa_runtime_caches()
-            fwd_quantizers = self.quantizers.get("scaling_fwd", ())
-            cache_key = (
-                id(self.fp8_meta.get("scaling_fwd")),
-                tuple(id(quantizer) for quantizer in fwd_quantizers),
-                fp8_recipe.fp8_format,
-                fp8_recipe.fp8_dpa,
-                fp8_recipe.fp8_mha,
-            )
-            if cache_key != self._custom_dpa_local_recipes_cache_key:
-                self._custom_dpa_local_recipes_cache = _infer_custom_dpa_local_recipes(
-                    fp8_recipe, self.fp8_meta, self.quantizers
-                )
-                self._custom_dpa_local_recipes_cache_key = cache_key
-
-            if self._custom_dpa_local_recipes_cache is None:
-                # Do not leave labels from an earlier supported quantizer
-                # family attached after a rebuild to an unsupported family.
-                self.fp8_meta.pop("local_recipes", None)
-            else:
-                self.fp8_meta["local_recipes"] = self._custom_dpa_local_recipes_cache
             return
 
         # switch/append recipe: fp8_recipe stays unchanged, but DPA.fp8_meta["recipe"] may be set to
@@ -1121,23 +1102,63 @@ class DotProductAttention(TransformerEngineBaseModule):
         self._qkv_capabilities_cache = None
         _attention_backends["backend_selection_requires_update"] = True
 
-    def _validate_quantization_runtime(self, candidate: _QuantizationRuntime) -> Any:
+    def _activate_quantization_runtime(
+        self,
+        candidate: _QuantizationRuntime,
+        *,
+        validation_result: Optional[List[Recipe]] = None,
+    ) -> None:
+        """Publish a CustomRecipe DPA runtime and its derived cache state."""
+        super()._activate_quantization_runtime(
+            candidate,
+            validation_result=validation_result,
+        )
+        self._invalidate_dpa_runtime_caches()
+
+        cache_key = (
+            id(self.fp8_meta.get("scaling_fwd")),
+            tuple(id(quantizer) for quantizer in candidate.forward_quantizers),
+            candidate.recipe.fp8_format,
+            candidate.recipe.fp8_dpa,
+            candidate.recipe.fp8_mha,
+        )
+        local_recipes = validation_result
+        self._custom_dpa_local_recipes_cache_key = cache_key
+        self._custom_dpa_local_recipes_cache = local_recipes
+        if local_recipes is None:
+            # Do not leave labels from an earlier supported quantizer family
+            # attached after a rebuild to an unsupported family.
+            self.fp8_meta.pop("local_recipes", None)
+        else:
+            self.fp8_meta["local_recipes"] = local_recipes
+
+    def _validate_quantization_runtime(
+        self,
+        candidate: _QuantizationRuntime,
+    ) -> Optional[List[Recipe]]:
         """Validate an FP8-attention candidate before publishing it."""
         super()._validate_quantization_runtime(candidate)
-        if not candidate.recipe.fp8_dpa:
-            return None
-        if len(candidate.forward_quantizers) != 9 or len(candidate.backward_quantizers) != 6:
-            raise ValueError(
-                "FP8 DotProductAttention requires 9 forward and 6 backward quantizer slots."
+        if candidate.recipe.fp8_dpa:
+            if len(candidate.forward_quantizers) != 9 or len(candidate.backward_quantizers) != 6:
+                raise ValueError(
+                    "FP8 DotProductAttention requires 9 forward and 6 backward quantizer slots."
+                )
+            dpa_utils.get_attention_quantizers(
+                True,
+                {
+                    "scaling_fwd": candidate.forward_quantizers,
+                    "scaling_bwd": candidate.backward_quantizers,
+                },
             )
-        dpa_utils.get_attention_quantizers(
-            True,
+
+        return _infer_custom_dpa_local_recipes(
+            candidate.recipe,
+            {"scaling_fwd": candidate.forward_states[0]},
             {
                 "scaling_fwd": candidate.forward_quantizers,
                 "scaling_bwd": candidate.backward_quantizers,
             },
         )
-        return None
 
     def get_qkv_quantization_capabilities(self) -> Tuple[bool, bool]:
         """Return MHA boundary capabilities from the canonical QKV quantizer.

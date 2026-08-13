@@ -6,18 +6,25 @@
 
 import pytest
 import torch
+import transformer_engine.pytorch.ops as te_ops
 
 from transformer_engine.common.recipe import CustomRecipe, DelayedScaling, Float8CurrentScaling
 from transformer_engine.pytorch import (
+    DotProductAttention,
     GroupedLinear,
     LayerNormLinear,
     LayerNormMLP,
     Linear,
+    MultiheadAttention,
+    TransformerLayer,
+    apply_recipe,
     autocast,
     is_fp8_available,
 )
+from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
 from transformer_engine.pytorch.quantization import (
     DelayedScalingRequest,
+    FP8GlobalStateManager,
     QuantizerRole,
 )
 from transformer_engine.pytorch.tensor.identity_tensor import IdentityQuantizer
@@ -38,7 +45,16 @@ def _make_counting_recipe(key, calls, *, fail_on_grad_output=False):
 
 
 def _ensure_runtime(module, recipe, revision, *, num_gemms=1):
-    return module._ensure_active_quantization_runtime(  # pylint: disable=protected-access
+    return module._ensure_quantization_runtime(  # pylint: disable=protected-access
+        recipe=recipe,
+        recipe_config=recipe.quantizer_config(),
+        recipe_config_revision=revision,
+        num_gemms=num_gemms,
+    )
+
+
+def _prepare_runtime_update(module, recipe, revision, *, num_gemms=1):
+    return module._plan_quantization_update(  # pylint: disable=protected-access
         recipe=recipe,
         recipe_config=recipe.quantizer_config(),
         recipe_config_revision=revision,
@@ -70,6 +86,39 @@ def _runtime_views(module):
         module.fp8_meta["scaling_bwd"],
         module.quantizers["scaling_fwd"],
         module.quantizers["scaling_bwd"],
+    )
+
+
+def _run_update_step(module, recipe, inp, *args):
+    """Run a real forward/backward step and return the output."""
+    module.zero_grad(set_to_none=True)
+    with autocast(enabled=True, recipe=recipe):
+        output = module(inp, *args)
+    if isinstance(output, tuple):
+        output = output[0]
+    output.float().sum().backward()
+    assert inp.grad is not None
+    assert all(param.grad is not None for param in module.parameters() if param.requires_grad)
+    return output
+
+
+def _active_runtime_owners(module):
+    """Return executed TE runtime owners in module traversal order."""
+    return [
+        submodule
+        for submodule in module.modules()
+        if isinstance(submodule, TransformerEngineBaseModule)
+        and submodule._quantization_runtime is not None  # pylint: disable=protected-access
+    ]
+
+
+def _global_recipe_state():
+    """Return the identity-bearing global recipe state."""
+    state = FP8GlobalStateManager.quantization_state
+    return (
+        state.fp8_recipe,
+        state.quantizer_config,
+        state.quantizer_config_revision,
     )
 
 
@@ -268,6 +317,137 @@ def test_unchanged_runtime_uses_revision_hot_path(monkeypatch):
     assert len(calls) == 5
 
 
+def test_revision_only_update_is_not_published_during_planning():
+    """An equal semantic update synchronizes revisions only when committed."""
+    calls = []
+    recipe = _make_counting_recipe(("revision-plan", 1), calls)
+    equal_recipe = _make_counting_recipe(("revision-plan", 1), calls)
+    module = Linear(16, 16, bias=False, device="cuda", name="linear")
+    _ensure_runtime(module, recipe, revision=1)
+    active = module._quantization_runtime  # pylint: disable=protected-access
+    factory_call_count = len(calls)
+
+    update = _prepare_runtime_update(module, equal_recipe, revision=3)
+
+    assert update.candidate is None
+    assert module._quantization_runtime is active  # pylint: disable=protected-access
+    assert active.recipe_config_revision == 1
+    assert len(calls) == factory_call_count
+
+    assert not module._apply_quantization_update(  # pylint: disable=protected-access
+        update
+    )
+    assert active.recipe_config_revision == 3
+    assert len(calls) == factory_call_count
+
+
+def test_candidate_update_is_not_published_during_planning():
+    """Candidate state, views, and workspaces change only during commit."""
+    calls = []
+    active_recipe = _make_counting_recipe(("candidate-plan", 1), calls)
+    replacement_recipe = _make_counting_recipe(("candidate-plan", 2), calls)
+    module = Linear(16, 16, bias=False, device="cuda", name="linear")
+    _ensure_runtime(module, active_recipe, revision=1)
+    old_views = _runtime_views(module)
+    workspace = object()
+    module._fp8_workspaces["weight"] = workspace  # pylint: disable=protected-access
+
+    update = _prepare_runtime_update(module, replacement_recipe, revision=2)
+
+    assert update.candidate is not None
+    assert all(current is old for current, old in zip(_runtime_views(module), old_views))
+    assert old_views[0].recipe_config_revision == 1
+    assert module._fp8_workspaces["weight"] is workspace  # pylint: disable=protected-access
+
+    assert module._apply_quantization_update(  # pylint: disable=protected-access
+        update
+    )
+    assert module._quantization_runtime is update.candidate  # pylint: disable=protected-access
+    assert not module._fp8_workspaces  # pylint: disable=protected-access
+
+
+def test_uninitialized_runtime_can_be_prepared_without_publication():
+    """Planning supports modules that have not yet executed a quantized forward."""
+    calls = []
+    recipe = _make_counting_recipe(("initial-plan", 1), calls)
+    module = Linear(16, 16, bias=False, device="cuda", name="linear")
+
+    update = _prepare_runtime_update(module, recipe, revision=1)
+
+    assert update.candidate is not None
+    assert module._quantization_runtime is None  # pylint: disable=protected-access
+    assert "scaling_fwd" not in module.fp8_meta
+    assert "scaling_bwd" not in module.fp8_meta
+    assert module.quantizers == {"scaling_fwd": [], "scaling_bwd": []}
+
+    assert module._apply_quantization_update(  # pylint: disable=protected-access
+        update
+    )
+    assert module._quantization_runtime is update.candidate  # pylint: disable=protected-access
+
+
+def test_later_planning_failure_leaves_earlier_module_unchanged(monkeypatch):
+    """Prepared candidates can be discarded without changing any module."""
+    calls = []
+    active_recipe = _make_counting_recipe(("multi-plan", 1), calls)
+    replacement_recipe = _make_counting_recipe(("multi-plan", 2), calls)
+    first = Linear(16, 16, bias=False, device="cuda", name="first")
+    second = Linear(16, 16, bias=False, device="cuda", name="second")
+    _ensure_runtime(first, active_recipe, revision=1)
+    _ensure_runtime(second, active_recipe, revision=1)
+    old_first_views = _runtime_views(first)
+    old_second_views = _runtime_views(second)
+
+    first_update = _prepare_runtime_update(first, replacement_recipe, revision=2)
+    assert first_update.candidate is not None
+
+    def reject_candidate(_candidate):
+        raise RuntimeError("later module validation failure")
+
+    monkeypatch.setattr(second, "_validate_quantization_runtime", reject_candidate)
+    with pytest.raises(RuntimeError, match="later module validation failure"):
+        _prepare_runtime_update(second, replacement_recipe, revision=2)
+
+    assert all(current is old for current, old in zip(_runtime_views(first), old_first_views))
+    assert all(current is old for current, old in zip(_runtime_views(second), old_second_views))
+    assert old_first_views[0].recipe_config_revision == 1
+    assert old_second_views[0].recipe_config_revision == 1
+
+
+@pytest.mark.parametrize(
+    ("module_factory", "expected_num_gemms"),
+    (
+        pytest.param(
+            lambda: Linear(16, 16, bias=False, device="cuda"),
+            1,
+            id="linear",
+        ),
+        pytest.param(
+            lambda: LayerNormLinear(16, 16, bias=False, device="cuda"),
+            1,
+            id="layernorm-linear",
+        ),
+        pytest.param(
+            lambda: LayerNormMLP(16, 32, bias=False, device="cuda"),
+            2,
+            id="layernorm-mlp",
+        ),
+        pytest.param(
+            lambda: GroupedLinear(2, 16, 16, bias=False, device="cuda"),
+            2,
+            id="grouped-linear",
+        ),
+    ),
+)
+def test_module_owns_runtime_slot_layout(module_factory, expected_num_gemms):
+    """Model-wide orchestration does not need a module-type dispatch table."""
+    module = module_factory()
+    assert (
+        module._get_quantization_runtime_num_gemms()  # pylint: disable=protected-access
+        == expected_num_gemms
+    )
+
+
 def test_unchanged_forward_uses_revision_hot_path(monkeypatch):
     """Repeated forwards do not enter any runtime-construction cold path."""
     calls = []
@@ -286,9 +466,10 @@ def test_unchanged_forward_uses_revision_hot_path(monkeypatch):
             raise AssertionError("unchanged forward entered the runtime cold path")
 
         monkeypatch.setattr(module, "get_quantizer_roles", unexpected_cold_path)
-        monkeypatch.setattr(module, "_prepare_quantization_runtime", unexpected_cold_path)
+        monkeypatch.setattr(module, "_plan_quantization_update", unexpected_cold_path)
+        monkeypatch.setattr(module, "_build_quantization_runtime", unexpected_cold_path)
         monkeypatch.setattr(module, "_validate_quantization_runtime", unexpected_cold_path)
-        monkeypatch.setattr(module, "_commit_quantization_runtime", unexpected_cold_path)
+        monkeypatch.setattr(module, "_activate_quantization_runtime", unexpected_cold_path)
 
         workspace_sentinel = object()
         module._fp8_workspaces["sentinel"] = workspace_sentinel  # pylint: disable=protected-access
@@ -489,6 +670,426 @@ def test_runtime_update_workspace_lifecycle(
     assert not module._fp8_workspaces  # pylint: disable=protected-access
 
 
+@pytest.mark.parametrize(
+    ("module_factory", "input_factory", "forward_args"),
+    (
+        pytest.param(
+            lambda: LayerNormLinear(16, 16, bias=False, device="cuda"),
+            lambda: torch.randn(8, 16, device="cuda", requires_grad=True),
+            (),
+            id="layernorm-linear",
+        ),
+        pytest.param(
+            lambda: LayerNormMLP(16, 32, bias=False, device="cuda"),
+            lambda: torch.randn(8, 16, device="cuda", requires_grad=True),
+            (),
+            id="layernorm-mlp",
+        ),
+        pytest.param(
+            lambda: GroupedLinear(2, 16, 16, bias=False, device="cuda"),
+            lambda: torch.randn(8, 16, device="cuda", requires_grad=True),
+            ([4, 4],),
+            id="grouped-linear",
+        ),
+    ),
+)
+def test_module_family_executes_after_recipe_update(
+    module_factory,
+    input_factory,
+    forward_args,
+):
+    """Every base module family executes forward/backward across a runtime replacement."""
+    calls = []
+    first_recipe = _make_counting_recipe(("module-execution", 1), calls)
+    second_recipe = _make_counting_recipe(("module-execution", 2), calls)
+    module = module_factory()
+
+    _run_update_step(module, first_recipe, input_factory(), *forward_args)
+    first_runtime = module._quantization_runtime  # pylint: disable=protected-access
+    assert first_runtime is not None
+
+    _run_update_step(module, second_recipe, input_factory(), *forward_args)
+    second_runtime = module._quantization_runtime  # pylint: disable=protected-access
+    assert second_runtime is not first_runtime
+    assert second_runtime.key.recipe_config == second_recipe.quantizer_config()
+
+
+@pytest.mark.parametrize(
+    "module_factory",
+    (
+        pytest.param(
+            lambda: MultiheadAttention(
+                hidden_size=32,
+                num_attention_heads=2,
+                attention_dropout=0.0,
+                attn_mask_type="no_mask",
+                bias=False,
+                device="cuda",
+                name="mha",
+            ),
+            id="multihead-attention",
+        ),
+        pytest.param(
+            lambda: TransformerLayer(
+                hidden_size=32,
+                ffn_hidden_size=64,
+                num_attention_heads=2,
+                hidden_dropout=0.0,
+                attention_dropout=0.0,
+                self_attn_mask_type="no_mask",
+                bias=False,
+                device="cuda",
+            ),
+            id="transformer-layer",
+        ),
+    ),
+)
+def test_composed_module_executes_after_recipe_update(module_factory):
+    """A composed module updates every runtime owner reached by real execution."""
+    available, reason = is_fp8_available(return_reason=True)
+    if not available:
+        pytest.skip(reason)
+
+    calls = []
+    first_recipe = _make_counting_recipe(("composed-execution", 1), calls)
+    second_recipe = _make_counting_recipe(("composed-execution", 2), calls)
+    module = module_factory()
+
+    first_inp = torch.randn(8, 2, 32, device="cuda", requires_grad=True)
+    _run_update_step(module, first_recipe, first_inp)
+    owners = _active_runtime_owners(module)
+    assert len(owners) >= 2
+    first_runtimes = {
+        id(owner): owner._quantization_runtime  # pylint: disable=protected-access
+        for owner in owners
+    }
+
+    second_inp = torch.randn(8, 2, 32, device="cuda", requires_grad=True)
+    _run_update_step(module, second_recipe, second_inp)
+    assert _active_runtime_owners(module) == owners
+    for owner in owners:
+        runtime = owner._quantization_runtime  # pylint: disable=protected-access
+        assert runtime is not first_runtimes[id(owner)]
+        assert runtime.key.recipe_config == second_recipe.quantizer_config()
+
+
+def test_apply_recipe_success_noop_mutation_and_forward_fast_path():
+    """Explicit application publishes once and matching forwards remain lazy-path no-ops."""
+    FP8GlobalStateManager.reset()
+    calls = []
+    first_recipe = _make_counting_recipe(("apply-success", 1), calls)
+    equal_recipe = _make_counting_recipe(("apply-success", 1), calls)
+    model = torch.nn.Sequential(
+        Linear(16, 16, bias=False, device="cuda", name="first"),
+        Linear(16, 16, bias=False, device="cuda", name="second"),
+    )
+
+    try:
+        apply_recipe(model, first_recipe)
+        first_runtimes = [module._quantization_runtime for module in model]
+        first_revision = FP8GlobalStateManager.get_quantizer_config_revision()
+        first_factory_calls = len(calls)
+        assert first_factory_calls == 10
+        assert FP8GlobalStateManager.get_fp8_recipe() is first_recipe
+
+        # An independent equal recipe updates only the manager's requested
+        # recipe object. Runtime identity, revision, and factories stay fixed.
+        apply_recipe(model, equal_recipe)
+        assert [module._quantization_runtime for module in model] == first_runtimes
+        assert FP8GlobalStateManager.get_quantizer_config_revision() == first_revision
+        assert FP8GlobalStateManager.get_fp8_recipe() is equal_recipe
+        assert len(calls) == first_factory_calls
+
+        # The first matching autocast forward after explicit application uses
+        # each module's revision fast path and performs no factory work.
+        inp = torch.randn(8, 16, device="cuda", requires_grad=True)
+        _run_update_step(model, equal_recipe, inp)
+        assert [module._quantization_runtime for module in model] == first_runtimes
+        assert len(calls) == first_factory_calls
+
+        # Mutating and reusing the same recipe object produces a real model-wide
+        # replacement and one new global revision.
+        equal_recipe.qfactory_key = ("apply-success", 2)
+        apply_recipe(model, equal_recipe)
+        assert all(
+            module._quantization_runtime is not old_runtime
+            for module, old_runtime in zip(model, first_runtimes)
+        )
+        assert FP8GlobalStateManager.get_quantizer_config_revision() == first_revision + 1
+        assert len(calls) == first_factory_calls + 10
+    finally:
+        FP8GlobalStateManager.reset()
+
+
+def test_apply_recipe_computes_config_once(monkeypatch):
+    """All participant plans receive one shared semantic configuration."""
+    FP8GlobalStateManager.reset()
+    config_calls = []
+    factory_calls = []
+    make_config = CustomRecipe._make_quantizer_config
+
+    def counted_make_config(recipe):
+        config_calls.append(recipe)
+        return make_config(recipe)
+
+    monkeypatch.setattr(CustomRecipe, "_make_quantizer_config", counted_make_config)
+    recipe = _make_counting_recipe(("apply-config-once", 1), factory_calls)
+    model = torch.nn.Sequential(
+        Linear(16, 16, bias=False, device="cuda", name="first"),
+        Linear(16, 16, bias=False, device="cuda", name="second"),
+    )
+
+    try:
+        apply_recipe(model, recipe)
+        assert config_calls == [recipe]
+    finally:
+        FP8GlobalStateManager.reset()
+
+
+def test_apply_recipe_reconstructs_stateless_runtime_after_checkpoint_restore():
+    """A restored model can rebuild its committed recipe before its first forward."""
+    FP8GlobalStateManager.reset()
+    source_calls = []
+    source = Linear(16, 16, bias=False, device="cuda", name="linear")
+    initial_recipe = _make_counting_recipe(("checkpoint-resume", 1), source_calls)
+    committed_recipe = _make_counting_recipe(("checkpoint-resume", 2), source_calls)
+    inp = torch.randn(8, 16, device="cuda")
+
+    try:
+        apply_recipe(source, initial_recipe)
+        apply_recipe(source, committed_recipe)
+        checkpoint = source.state_dict()
+        with torch.no_grad(), autocast(enabled=True, recipe=committed_recipe):
+            expected = source(inp)
+
+        # Model/checkpoint restoration happens in a fresh runtime context. The
+        # intended recipe is reconstructed and explicitly applied before the
+        # restored model executes its first forward.
+        FP8GlobalStateManager.reset()
+        restored = Linear(16, 16, bias=False, device="cuda", name="linear")
+        restored.load_state_dict(checkpoint)
+        assert restored._quantization_runtime is None  # pylint: disable=protected-access
+
+        resumed_calls = []
+        resumed_recipe = _make_counting_recipe(("checkpoint-resume", 2), resumed_calls)
+        apply_recipe(restored, resumed_recipe)
+        runtime = restored._quantization_runtime  # pylint: disable=protected-access
+        assert runtime is not None
+        assert runtime.key.recipe_config == committed_recipe.quantizer_config()
+
+        with torch.no_grad(), autocast(enabled=True, recipe=resumed_recipe):
+            actual = restored(inp)
+        torch.testing.assert_close(actual, expected)
+    finally:
+        FP8GlobalStateManager.reset()
+
+
+def test_apply_recipe_includes_unexecuted_conditional_branch():
+    """Traversal updates owners independently of the branch executed by forward."""
+
+    class ConditionalModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.executed = Linear(16, 16, bias=False, device="cuda", name="executed")
+            self.unexecuted = Linear(16, 16, bias=False, device="cuda", name="unexecuted")
+
+        def forward(self, inp, *, use_unexecuted=False):
+            module = self.unexecuted if use_unexecuted else self.executed
+            return module(inp)
+
+    FP8GlobalStateManager.reset()
+    calls = []
+    first_recipe = _make_counting_recipe(("apply-conditional", 1), calls)
+    replacement_recipe = _make_counting_recipe(("apply-conditional", 2), calls)
+    model = ConditionalModel()
+
+    try:
+        # Lazy execution initializes only one branch.
+        inp = torch.randn(8, 16, device="cuda", requires_grad=True)
+        with autocast(enabled=True, recipe=first_recipe):
+            model(inp).sum().backward()
+        old_runtime = model.executed._quantization_runtime
+        assert old_runtime is not None
+        assert model.unexecuted._quantization_runtime is None
+
+        apply_recipe(model, replacement_recipe)
+        assert model.executed._quantization_runtime is not old_runtime
+        assert model.unexecuted._quantization_runtime is not None
+        assert model.executed._quantization_runtime.key.recipe_config == (
+            replacement_recipe.quantizer_config()
+        )
+        assert model.unexecuted._quantization_runtime.key.recipe_config == (
+            replacement_recipe.quantizer_config()
+        )
+    finally:
+        FP8GlobalStateManager.reset()
+
+
+def test_apply_recipe_supports_custom_recipe_dpa():
+    """Runtime-managed CustomRecipe DPA participates in model-wide application."""
+    FP8GlobalStateManager.reset()
+    calls = []
+    recipe = _make_counting_recipe(("apply-custom-dpa", 1), calls)
+    dpa = DotProductAttention(
+        num_attention_heads=2,
+        kv_channels=16,
+        attention_dropout=0.0,
+        name="dpa",
+    ).cuda()
+
+    try:
+        apply_recipe(dpa, recipe)
+        assert dpa._quantization_runtime is not None
+        assert dpa._quantization_runtime.key.recipe_config == recipe.quantizer_config()
+        assert len(calls) == 15
+    finally:
+        FP8GlobalStateManager.reset()
+
+
+@pytest.mark.parametrize("failure_index", (0, 1, 2))
+def test_apply_recipe_planning_failure_is_model_wide_atomic(failure_index):
+    """A factory failure in any participant leaves modules and manager unchanged."""
+    FP8GlobalStateManager.reset()
+    calls = []
+    active_recipe = _make_counting_recipe(("apply-failure", 1), calls)
+    modules = [
+        Linear(16, 16, bias=False, device="cuda", name=f"line{index}")
+        for index in range(3)
+    ]
+    model = torch.nn.Sequential(*modules)
+
+    try:
+        apply_recipe(model, active_recipe)
+        old_global_state = _global_recipe_state()
+        old_views = [_runtime_views(module) for module in modules]
+        workspaces = []
+        for module in modules:
+            workspace = object()
+            module._fp8_workspaces["weight"] = workspace
+            workspaces.append(workspace)
+
+        def failing_factory(role):
+            if role is not None and role.name == f"line{failure_index}":
+                raise RuntimeError("model-wide factory failure")
+            return IdentityQuantizer()
+
+        replacement_recipe = CustomRecipe(
+            qfactory=failing_factory,
+            qfactory_key=("apply-failure", 2, failure_index),
+        )
+        with pytest.raises(
+            RuntimeError,
+            match=rf"planning module '{failure_index}': model-wide factory failure",
+        ):
+            apply_recipe(model, replacement_recipe)
+
+        assert _global_recipe_state() == old_global_state
+        for module, expected_views, workspace in zip(modules, old_views, workspaces):
+            assert all(
+                current is expected
+                for current, expected in zip(_runtime_views(module), expected_views)
+            )
+            assert module._fp8_workspaces["weight"] is workspace
+    finally:
+        FP8GlobalStateManager.reset()
+
+
+def test_apply_recipe_deduplicates_shared_runtime_owner():
+    """A shared module is planned and applied exactly once."""
+    FP8GlobalStateManager.reset()
+    calls = []
+    recipe = _make_counting_recipe(("apply-shared", 1), calls)
+    shared = Linear(16, 16, bias=False, device="cuda", name="shared")
+    model = torch.nn.Module()
+    model.add_module("first", shared)
+    model.add_module("second", shared)
+
+    try:
+        apply_recipe(model, recipe)
+        assert shared._quantization_runtime is not None
+        assert len(calls) == 5
+    finally:
+        FP8GlobalStateManager.reset()
+
+
+def test_apply_recipe_rejects_fusible_owner_before_factory():
+    """Excluded fusible owners are discovered before any participant planning."""
+    FP8GlobalStateManager.reset()
+
+    def unexpected_factory(_role):
+        raise AssertionError("excluded model invoked qfactory")
+
+    recipe = CustomRecipe(
+        qfactory=unexpected_factory,
+        qfactory_key=("apply-fusible", 1),
+    )
+    model = torch.nn.ModuleList(
+        [
+            Linear(16, 16, bias=False, device="cuda", name="linear"),
+            te_ops.Quantize(),
+        ]
+    )
+    old_global_state = _global_recipe_state()
+
+    try:
+        with pytest.raises(RuntimeError, match="does not support fusible operations"):
+            apply_recipe(model, recipe)
+        assert model[0]._quantization_runtime is None
+        assert _global_recipe_state() == old_global_state
+    finally:
+        FP8GlobalStateManager.reset()
+
+
+def test_apply_recipe_rejects_legacy_dpa_path():
+    """Model-wide application does not alter the built-in NVTE_DPA_* mechanism."""
+    available, reason = is_fp8_available(return_reason=True)
+    if not available:
+        pytest.skip(reason)
+
+    FP8GlobalStateManager.reset()
+    dpa = DotProductAttention(
+        num_attention_heads=2,
+        kv_channels=16,
+        attention_dropout=0.0,
+        name="dpa",
+    ).cuda()
+    old_global_state = _global_recipe_state()
+    try:
+        with pytest.raises(RuntimeError, match="only through CustomRecipe"):
+            apply_recipe(dpa, Float8CurrentScaling())
+        assert dpa._quantization_runtime is None
+        assert _global_recipe_state() == old_global_state
+    finally:
+        FP8GlobalStateManager.reset()
+
+
+def test_apply_recipe_rejects_active_autocast_and_graph_capture(monkeypatch):
+    """Explicit model-wide application is limited to the documented safe boundary."""
+    FP8GlobalStateManager.reset()
+    calls = []
+    recipe = _make_counting_recipe(("apply-boundary", 1), calls)
+    model = Linear(16, 16, bias=False, device="cuda", name="linear")
+
+    try:
+        with autocast(enabled=False):
+            with pytest.raises(RuntimeError, match="outside te.autocast"):
+                apply_recipe(model, recipe)
+        assert not calls
+        assert model._quantization_runtime is None
+
+        monkeypatch.setattr(
+            FP8GlobalStateManager,
+            "fp8_graph_capturing",
+            classmethod(lambda _cls: True),
+        )
+        with pytest.raises(RuntimeError, match="outside CUDA graph capture"):
+            apply_recipe(model, recipe)
+        assert not calls
+        assert model._quantization_runtime is None
+    finally:
+        FP8GlobalStateManager.reset()
+
+
 def test_candidate_validation_failure_keeps_complete_active_runtime(monkeypatch):
     """Validation runs before any candidate state is published."""
     calls = []
@@ -584,7 +1185,13 @@ def test_grouped_candidate_validation_is_atomic(mismatched_tensor_type):
         dtype=torch.float16,
         unsafe_inputs=True,
     )
-    assert _ensure_runtime(module, replacement_recipe, revision=3, num_gemms=2)
+    update = _prepare_runtime_update(module, replacement_recipe, revision=3, num_gemms=2)
+    assert module._validated_quantizer_generations is old_validated_generations
+    assert module._delayed_scaling_input_quantizer is old_delayed_quantizer
+    assert module._unsafe_requantization_input_quantizer is old_unsafe_quantizer
+    assert module._apply_quantization_update(  # pylint: disable=protected-access
+        update
+    )
     replacement_runtime = module._quantization_runtime  # pylint: disable=protected-access
     assert replacement_runtime is not old_runtime
     assert (

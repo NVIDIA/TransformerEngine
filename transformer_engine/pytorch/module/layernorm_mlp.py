@@ -1946,6 +1946,10 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 for memory. default is false, in which activations are saved in fwd. not supported for onnx forward
     """
 
+    def _get_quantization_runtime_num_gemms(self) -> int:
+        """Return the fixed FC1/FC2 quantizer slot layout."""
+        return 2
+
     def __init__(
         self,
         hidden_size: int,

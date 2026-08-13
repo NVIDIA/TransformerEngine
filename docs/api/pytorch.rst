@@ -40,6 +40,8 @@ PyTorch
 
 .. autoapiclass:: transformer_engine.pytorch.autocast(enabled=True, calibrating=False, recipe=None, amax_reduction_group=None)
 
+.. autoapifunction:: transformer_engine.pytorch.apply_recipe
+
 .. autoapifunction:: transformer_engine.pytorch.quantized_model_init
 
 .. autoapifunction:: transformer_engine.pytorch.checkpoint
