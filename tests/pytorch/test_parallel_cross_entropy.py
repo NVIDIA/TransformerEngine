@@ -206,8 +206,11 @@ def test_bfloat16_unreduced_external_grad():
     with torch.autograd.graph.saved_tensors_hooks(pack_hook, lambda tensor: tensor):
         loss = parallel_cross_entropy(logits, target, 0.0, False, None)
 
-    assert len(saved_tensors) == 4
-    assert saved_tensors[0].dtype == torch.bfloat16
+    assert [tensor.dtype for tensor in saved_tensors] == [
+        torch.bfloat16,
+        torch.float32,
+        torch.int64,
+    ]
     torch.testing.assert_close(logits, logits_before, rtol=0.0, atol=0.0)
     loss.backward(external_grad)
 

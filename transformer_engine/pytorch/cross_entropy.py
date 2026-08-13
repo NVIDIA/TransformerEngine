@@ -142,19 +142,12 @@ def parallel_cross_entropy(
     """Cross entropy loss with optional distributed reduction.
 
     Loss and derivative calculations use FP32 arithmetic for BF16 and FP32
-    inputs. Instead of saving a full FP32 derivative, this function saves an
-    input-typed saved-input buffer and per-row FP32 softmax maximum/denominator
-    statistics. The returned loss is FP32.
+    inputs. The returned loss is FP32.
 
-    By default, the saved input is a private contiguous copy and ``inp`` is
-    preserved. This safe mode necessarily has both the caller's input and the
-    copy live during forward. With ``overwrite_input=True``, the original
-    contiguous input is used as the saved buffer and is
-    overwritten with its gradient during backward. Callers must not read or
-    otherwise reuse that input after starting backward.
-
-    The saved input buffer is consumed by backward, so repeated backward
-    passes on the same result are not supported.
+    By default, ``inp`` is preserved. With ``overwrite_input=True``, ``inp``
+    must be contiguous and its storage is overwritten during backward. Callers
+    must not read or reuse it after starting backward. Only one backward pass
+    is supported for each loss result.
 
     Parameters
     ----------
@@ -175,8 +168,8 @@ def parallel_cross_entropy(
     is_cg_capturable : bool, default = False
         Whether the operation is CUDA graph capturable.
     overwrite_input : bool, default = False
-        Reuse and overwrite ``inp`` rather than allocating a private input
-        copy. The input must be contiguous.
+        Allow ``inp`` to be overwritten during backward. The input must be
+        contiguous and cannot be reused afterward.
 
     Returns
     -------

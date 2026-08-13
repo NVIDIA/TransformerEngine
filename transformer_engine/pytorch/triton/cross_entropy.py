@@ -36,7 +36,7 @@ def cross_entropy_forward(
     n_rows = B * SQ
     BLOCK_SIZE = min(MAX_FUSED_SIZE, triton.next_power_of_2(V))
 
-    target = target.contiguous().reshape(-1)
+    target = target.contiguous()
     saved_input = (
         _input
         if overwrite_input
