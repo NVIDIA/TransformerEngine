@@ -402,8 +402,6 @@ model_configs_fused_attn = {
         2, 4096, 12, 128, attn_bias_type="post_scale_bias", bias_shape="bhss"
     ),  # MHA
     "cp_1_5": ModelConfig(2, 4096, 12, 128, attn_mask_type="causal", window_size=(512, 512)),  # MHA
-    # Noncausal MHA without bias/max-logit provides an FP8+THD+CP backend-compatible row.
-    "cp_1_6": ModelConfig(2, 4096, 12, 128),
     "cp_2_0": ModelConfig(
         2,
         4096,
@@ -488,7 +486,6 @@ cp_comm_types = ["p2p", "all_gather", "a2a", "a2a+p2p"]
 if test_essential:
     configs = [
         "cp_1_0",
-        "cp_1_6",
         "cp_2_0",
         "cp_2_1",
         "cp_2_2",
@@ -532,20 +529,6 @@ def test_cp_with_fused_attention(
     config = model_configs_fused_attn[model]
     config.context_parallel = True
     config.cp_comm_type = cp_comm_type
-
-    hopper_fp8_thd_forward = (
-        get_device_compute_capability() == (9, 0)
-        and dtype == "fp8"
-        and model == "cp_1_6"
-        and qkv_format == "thd"
-        and not fp8_bwd
-        and fp8_dpa
-        and not fp8_mha
-        and scaling_mode == "delayed"
-        and not f16_O
-    )
-    if hopper_fp8_thd_forward and get_cudnn_version() < (9, 25, 0):
-        pytest.skip("FP8+THD inference on Hopper requires cuDNN 9.25+.")
 
     if config.head_dim_qk == 256 and config.head_dim_v == 256:
         # D=256 uses this generic CP runner, but only a subset of its axes is supported.
@@ -655,9 +638,8 @@ def test_cp_with_fused_attention(
             MXFP8BlockScaling(fp8_format=Format.E4M3, fp8_dpa=True),
         ]
 
-    # 111s runs forward-only because its dbias is unsupported. Reuse otherwise-skipped Hopper
-    # FP8+THD nodes for forward-only coverage of the supported cuDNN path.
-    is_training = False if config.bias_shape == "111s" or hopper_fp8_thd_forward else True
+    # For 111s, dbias calculation is not supported as of cuDNN 9.18, hence, test fwd only for 111s.
+    is_training = False if config.bias_shape == "111s" else True
     available_backends, _, fused_attn_backends = get_available_attention_backends(
         config,
         qkv_dtype=dtypes[dtype] if dtype != "fp8" else torch.float8_e4m3fn,

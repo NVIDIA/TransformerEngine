@@ -2935,8 +2935,8 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
 
         nvtx_range_pop(f"{nvtx_label}")
 
-        # FP8 partial-gradient reduction can write THD inter-sequence padding.
-        if ctx.qkv_format == "thd" and ctx.fp8:
+        # Partial-gradient reduction can write THD inter-sequence padding.
+        if ctx.qkv_format == "thd":
             _zero_thd_padding(dq, cu_seqlens_q_per_step[0], cu_seqlens_q_padded)
             _zero_thd_padding(dk, cu_seqlens_kv_per_step[0], cu_seqlens_kv_padded)
             _zero_thd_padding(dv, cu_seqlens_kv_per_step[0], cu_seqlens_kv_padded)
