@@ -733,6 +733,19 @@ void ep_dispatch(at::Tensor handle_mem, at::Tensor topk_idx, at::Tensor tokens,
                  std::optional<at::Tensor> tokens_scale_inv = std::nullopt,
                  std::optional<at::Tensor> recv_scale_inv = std::nullopt);
 
+// Fused eager-mode prepare + dispatch in a single call so no Python runs between
+// the host recv-count read and the dispatch launch. Prepare writes the per-step
+// recv total directly into pinned-host total_recv_tokens (UVA); a stream sync then
+// makes it host-readable with no D2H copy, and the recv outputs are sized from it.
+// Passing tokens_scale_inv selects the MXFP8 path and also allocates + returns the
+// recv scale-inverse. Eager forbids symm-mem zero-copy IO. Returns {recv_tokens,
+// recv_topk_weights} (bf16), or {recv_tokens, recv_topk_weights, recv_scale_inv} (MXFP8).
+std::vector<at::Tensor> ep_prepare_and_dispatch_eager(
+    at::Tensor handle_mem, at::Tensor topk_idx, at::Tensor tokens, at::Tensor topk_weights,
+    at::Tensor tokens_per_expert, at::Tensor total_recv_tokens, int64_t top_k,
+    int64_t dispatch_output_per_expert_alignment,
+    std::optional<at::Tensor> tokens_scale_inv = std::nullopt);
+
 void ep_combine(at::Tensor handle_mem, at::Tensor expert_out, at::Tensor result);
 
 void ep_dispatch_bwd(at::Tensor handle_mem, at::Tensor grad, at::Tensor g_recv_topk_weights,
