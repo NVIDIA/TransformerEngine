@@ -289,8 +289,9 @@ def test_parallel_cross_entropy_matches_pytorch(
     torch.testing.assert_close(logits.grad, expected_grad, **dtype_tols(dtype))
 
 
+@pytest.mark.parametrize("reduce_loss", [False, True], ids=["none", "mean"])
 @pytest.mark.parametrize("overwrite_input", [False, True], ids=["safe", "destructive"])
-def test_parallel_cross_entropy_saved_state_and_buffer_reuse(overwrite_input):
+def test_parallel_cross_entropy_saved_state_and_buffer_reuse(reduce_loss, overwrite_input):
     """The saved input buffer is input-typed and becomes the returned derivative."""
 
     torch.manual_seed(42)
@@ -310,20 +311,25 @@ def test_parallel_cross_entropy_saved_state_and_buffer_reuse(overwrite_input):
             logits,
             target,
             label_smoothing=0.1,
+            reduce_loss=reduce_loss,
             overwrite_input=overwrite_input,
         )
 
-    assert len(saved_tensors) == 4
-    saved_input, stats, saved_target, n_non_ignore = saved_tensors
+    assert len(saved_tensors) == 3 + int(reduce_loss)
+    saved_input, stats, saved_target, *optional_tensors = saved_tensors
     assert saved_input.shape == logits.shape
     assert saved_input.dtype == logits.dtype
     assert stats.shape == (target.numel(), 2)
     assert stats.dtype == torch.float32
     assert saved_target.numel() == target.numel()
     assert saved_target.dtype == torch.int64
-    assert n_non_ignore.shape == (1,)
-    assert n_non_ignore.dtype == torch.int64
-    assert n_non_ignore.item() == target.numel() - 1
+    if reduce_loss:
+        n_non_ignore = optional_tensors[0]
+        assert n_non_ignore.shape == (1,)
+        assert n_non_ignore.dtype == torch.int64
+        assert n_non_ignore.item() == target.numel() - 1
+    else:
+        assert not optional_tensors
 
     if overwrite_input:
         assert saved_input.data_ptr() == logits.data_ptr()

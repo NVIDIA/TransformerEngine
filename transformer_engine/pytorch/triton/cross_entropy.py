@@ -4,7 +4,7 @@
 
 """PyTorch wrapper functions for Cross Entropy Triton kernels."""
 
-from typing import Union
+from typing import Optional, Union
 import torch
 import torch.distributed as dist
 
@@ -44,7 +44,9 @@ def cross_entropy_forward(
     )
     loss_1d = torch.empty(n_rows, dtype=torch.float32, device=_input.device)
     stats = torch.empty((n_rows, 2), dtype=torch.float32, device=_input.device)
-    n_non_ignore = torch.zeros(1, dtype=torch.int64, device=_input.device)
+    n_non_ignore = (
+        torch.zeros(1, dtype=torch.int64, device=_input.device) if reduce_loss else None
+    )
 
     rank = 0 if dist_process_group is None else dist.get_rank(dist_process_group)
     world_size = 1 if dist_process_group is None else dist.get_world_size(dist_process_group)
@@ -59,11 +61,12 @@ def cross_entropy_forward(
             Y_ptr=target,
             loss_ptr=loss_1d,
             stats_ptr=stats,
-            n_non_ignore=n_non_ignore,
+            n_non_ignore=n_non_ignore if n_non_ignore is not None else stats,
             n_cols=V,
             n_rows_1=SQ,
             ignore_idx=ignore_idx,
             label_smoothing=label_smoothing,
+            COUNT_NON_IGNORE=reduce_loss,
             COPY_INPUT=not overwrite_input,
             BLOCK_SIZE=BLOCK_SIZE,
             num_warps=32,
@@ -78,11 +81,12 @@ def cross_entropy_forward(
             saved_input_ptr=saved_input,
             Y_ptr=target,
             local_data_ptr=local_data,
-            n_non_ignore=n_non_ignore,
+            n_non_ignore=n_non_ignore if n_non_ignore is not None else stats,
             rank=rank,
             n_cols=V,
             n_rows_1=SQ,
             ignore_idx=ignore_idx,
+            COUNT_NON_IGNORE=reduce_loss,
             COPY_INPUT=not overwrite_input,
             BLOCK_SIZE=BLOCK_SIZE,
             num_warps=32,
@@ -104,9 +108,9 @@ def cross_entropy_forward(
             num_warps=1,
         )
 
-    n_non_ignore.clamp_(min=1)
     loss = loss_1d.reshape(B, SQ)
     if reduce_loss:
+        n_non_ignore.clamp_(min=1)
         loss = loss_1d.sum() / n_non_ignore
 
     return loss, saved_input, stats, target, n_non_ignore
@@ -116,7 +120,7 @@ def cross_entropy_backward(
     saved_input: torch.Tensor,
     stats: torch.Tensor,
     target: torch.Tensor,
-    n_non_ignore: torch.Tensor,
+    n_non_ignore: Optional[torch.Tensor],
     grad_output: torch.Tensor,
     label_smoothing: float,
     reduce_loss: bool,
@@ -138,7 +142,7 @@ def cross_entropy_backward(
         saved_input_ptr=saved_input,
         Y_ptr=target,
         stats_ptr=stats,
-        n_non_ignore_ptr=n_non_ignore,
+        n_non_ignore_ptr=n_non_ignore if n_non_ignore is not None else stats,
         grad_output_ptr=grad_output,
         grad_output_stride=0 if reduce_loss else 1,
         rank=rank,

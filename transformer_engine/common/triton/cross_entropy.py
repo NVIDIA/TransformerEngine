@@ -23,6 +23,7 @@ def cross_entropy_forward_kernel(
     n_rows_1,
     ignore_idx,
     label_smoothing: tl.constexpr,
+    COUNT_NON_IGNORE: tl.constexpr,
     COPY_INPUT: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
@@ -35,8 +36,9 @@ def cross_entropy_forward_kernel(
     saved_input_ptr += row * n_cols
 
     y = tl.load(Y_ptr + row)
-    if y != ignore_idx:
-        tl.atomic_add(n_non_ignore, 1)
+    if COUNT_NON_IGNORE:
+        if y != ignore_idx:
+            tl.atomic_add(n_non_ignore, 1)
 
     m = float("-inf")
     d = 0.0
@@ -89,6 +91,7 @@ def cross_entropy_tp_pre_kernel(
     n_cols,
     n_rows_1,
     ignore_idx,
+    COUNT_NON_IGNORE: tl.constexpr,
     COPY_INPUT: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
@@ -101,8 +104,9 @@ def cross_entropy_tp_pre_kernel(
     saved_input_ptr += row * n_cols
 
     y = tl.load(Y_ptr + row)
-    if y != ignore_idx:
-        tl.atomic_add(n_non_ignore, 1)
+    if COUNT_NON_IGNORE:
+        if y != ignore_idx:
+            tl.atomic_add(n_non_ignore, 1)
 
     vocab_start = rank * n_cols
     x_y = float("-inf")

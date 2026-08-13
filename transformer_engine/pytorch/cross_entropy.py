@@ -44,7 +44,10 @@ class CrossEntropyFunction(torch.autograd.Function):
             ignore_idx,
             overwrite_input,
         )
-        ctx.save_for_backward(saved_input.detach(), stats, target, n_non_ignore)
+        tensors_to_save = (saved_input.detach(), stats, target)
+        if reduce_loss:
+            tensors_to_save += (n_non_ignore,)
+        ctx.save_for_backward(*tensors_to_save)
         ctx.label_smoothing = label_smoothing
         ctx.reduce_loss = reduce_loss
         ctx.dist_process_group = dist_process_group
@@ -64,7 +67,8 @@ class CrossEntropyFunction(torch.autograd.Function):
                 "because backward reuses its saved input buffer"
             )
         ctx.did_backward = True
-        saved_input, stats, target, n_non_ignore = ctx.saved_tensors
+        saved_input, stats, target, *optional_tensors = ctx.saved_tensors
+        n_non_ignore = optional_tensors[0] if ctx.reduce_loss else None
         grad_input = triton_cross_entropy.cross_entropy_backward(
             saved_input,
             stats,
