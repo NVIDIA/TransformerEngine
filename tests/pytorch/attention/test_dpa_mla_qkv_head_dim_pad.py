@@ -237,11 +237,18 @@ def test_fp8_packed_skips_qkv_head_dim_pad():
 
     def params(fp8, fp8_meta):
         return dpa_utils.AttentionParams(
-            qkv_layout="thd_thd_thd", num_heads=4, num_gqa_groups=4,
-            max_seqlen_q=13, max_seqlen_kv=13,
-            head_dim_qk=96, head_dim_v=128,
-            attn_mask_type="padding_causal", is_training=True,
-            qkv_dtype=torch.bfloat16, fp8=fp8, fp8_meta=fp8_meta,
+            qkv_layout="thd_thd_thd",
+            num_heads=4,
+            num_gqa_groups=4,
+            max_seqlen_q=13,
+            max_seqlen_kv=13,
+            head_dim_qk=96,
+            head_dim_v=128,
+            attn_mask_type="padding_causal",
+            is_training=True,
+            qkv_dtype=torch.bfloat16,
+            fp8=fp8,
+            fp8_meta=fp8_meta,
         )
 
     # bf16 (fp8=False): pad is safe & beneficial regardless of packing.
