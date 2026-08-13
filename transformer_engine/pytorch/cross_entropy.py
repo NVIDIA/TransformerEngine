@@ -35,16 +35,14 @@ class CrossEntropyFunction(torch.autograd.Function):
     ):
         """Compute the loss and save the input and softmax statistics for backward."""
 
-        loss, saved_input, stats, target, n_non_ignore = (
-            triton_cross_entropy.cross_entropy_forward(
-                inp,
-                target,
-                label_smoothing,
-                reduce_loss,
-                dist_process_group,
-                ignore_idx,
-                overwrite_input,
-            )
+        loss, saved_input, stats, target, n_non_ignore = triton_cross_entropy.cross_entropy_forward(
+            inp,
+            target,
+            label_smoothing,
+            reduce_loss,
+            dist_process_group,
+            ignore_idx,
+            overwrite_input,
         )
         ctx.save_for_backward(saved_input.detach(), stats, target, n_non_ignore)
         ctx.label_smoothing = label_smoothing
