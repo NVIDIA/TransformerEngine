@@ -3087,10 +3087,12 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
             window_size == (-1, 0)
             or window_size == (-1, -1)
             or use_fused_attention
+            or use_flash_attn_3
             or fa_utils.v2_3_plus
         ), (
             "cp_comm_type='all_gather' only supports SWA through FusedAttention or FlashAttention"
-            f" >= 2.3. Found {use_fused_attention=} and {fa_utils.v2_3_plus=}."
+            f" >= 2.3. Found {use_fused_attention=}, {use_flash_attn_3=}, "
+            f"and {fa_utils.v2_3_plus=}."
         )
         assert q.shape[seq_dim_qkv] % 2 == 0 and k.shape[seq_dim_qkv] % 2 == 0, (
             "cp_comm_type='all_gather' requires seq_len % 2 == 0 for Q, K, V. Found seq_len_q ="
@@ -4231,10 +4233,11 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             window_size == (-1, 0)
             or window_size == (-1, -1)
             or use_fused_attention
+            or use_flash_attn_3
             or fa_utils.v2_3_plus
         ), (
             "cp_comm_type='a2a' only supports SWA through FusedAttention or FlashAttention >= 2.3."
-            f" Found {use_fused_attention=} and {fa_utils.v2_3_plus=}."
+            f" Found {use_fused_attention=}, {use_flash_attn_3=}, and {fa_utils.v2_3_plus=}."
         )
         assert q.shape[seq_dim_qkv] % 2 == 0 and k.shape[seq_dim_qkv] % 2 == 0, (
             "cp_comm_type='a2a' requires seq_len % 2 == 0 for Q, K, V. Found seq_len_q ="

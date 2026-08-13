@@ -24,6 +24,7 @@ from transformer_engine.pytorch.ops.fused.grouped_mlp import (
 from transformer_engine.pytorch.ops.basic.grouped_linear import (
     OUTPUT_BUFFER_KEY,
     GRAD_INPUT_BUFFER_KEY,
+    is_op_fuser_grouped_tensor_path_supported,
 )
 from transformer_engine.pytorch import (
     QuantizedTensor,
@@ -278,6 +279,26 @@ class TestGroupedLinearOp:
 
         assert grouped_weight.skip_backward_post_hook
 
+    def test_single_grouped_bias_uses_registered_packed_storage(self, monkeypatch) -> None:
+        """The grouped bias compute view must alias the registered trainable parent."""
+        monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
+        op = te.ops.GroupedLinear(
+            2,
+            128,
+            128,
+            bias=True,
+            device="cuda",
+            dtype=torch.bfloat16,
+            single_grouped_bias=True,
+        )
+
+        bias_packed = op._get_packed_bias_tensor(torch.bfloat16)
+
+        assert bias_packed.shape == (op.num_groups, op.out_features)
+        assert bias_packed.untyped_storage().data_ptr() == op.bias.rowwise_data.data_ptr()
+        assert op.bias.requires_grad
+        assert dict(op.named_parameters())["bias"] is op.bias
+
     @pytest.mark.parametrize("bias", (False, True))
     @pytest.mark.parametrize("dtype", _dtypes)
     @pytest.mark.parametrize("quantization", _quantization_list)
@@ -338,6 +359,16 @@ class TestGroupedLinearOp:
 
         if single_grouped_bias and not bias:
             pytest.skip("single_grouped_bias requires bias=True")
+        recipe = make_recipe(quantization)
+        compute_recipe = recipe if quantized_compute else None
+        if (
+            single_grouped_weight or single_grouped_bias
+        ) and not is_op_fuser_grouped_tensor_path_supported(
+            compute_recipe,
+            dtype,
+        ):
+            # Single grouped parameters intentionally have no split-quantize fallback.
+            pytest.skip("Single grouped parameters require the native grouped-tensor path")
         if single_grouped_weight and quantized_weight and quantization in ("fp8_delayed_scaling"):
             pytest.skip(
                 "single_grouped_weight does not support FP8 delayed scaling "
@@ -393,7 +424,6 @@ class TestGroupedLinearOp:
             y_ref.backward(dy_ref)
 
         # Construct fusible operation
-        recipe = make_recipe(quantization)
         with te.quantized_model_init(enabled=quantized_weight, recipe=recipe):
             op = te.ops.GroupedLinear(
                 group_size,
@@ -707,22 +737,6 @@ class TestGroupedLinearOp:
                 "single_grouped_weight/single_grouped_bias requires"
                 " NVTE_GROUPED_LINEAR_SINGLE_PARAM=1"
             )
-        device_capability = torch.cuda.get_device_capability()
-        if device_capability < (9, 0):
-            pytest.skip(
-                "Grouped GEMM CUDA-graph-safe path requires Hopper (SM90) or Blackwell (SM100+)"
-            )
-        # BF16/FP16 and FP8 per-tensor current scaling run on the Hopper grouped GEMM path,
-        # but MXFP8/NVFP4 grouped quantization kernels require Blackwell (SM100+).
-        requires_blackwell = quantization is not None and quantization != "fp8_current_scaling"
-        if requires_blackwell and device_capability < (10, 0):
-            pytest.skip("MXFP8/NVFP4 grouped GEMM CUDA-graph-safe path requires SM100+ (Blackwell)")
-        # Grouped GEMM on Hopper requires cuBLAS 13.4+; Blackwell requires cuBLAS 13.3+.
-        cublaslt_version = tex.get_cublasLt_version()
-        if device_capability < (10, 0) and cublaslt_version < 130400:
-            pytest.skip("Grouped GEMM on Hopper requires cuBLAS 13.4+.")
-        if cublaslt_version < 130300:
-            pytest.skip("Grouped GEMM requires cuBLAS 13.3+.")
         if quantization is None and quantized_weight:
             pytest.skip("quantized_weight requires a quantization recipe")
         if (
@@ -740,6 +754,13 @@ class TestGroupedLinearOp:
                 "only discrete weights (single_grouped_weight=False) are supported."
             )
 
+        recipe = make_recipe(quantization)
+        if not is_op_fuser_grouped_tensor_path_supported(
+            recipe,
+            dtype,
+        ):
+            pytest.skip("Configuration falls back to the non-CUDA-graph-safe path")
+
         single_grouped_bias = bias and single_grouped_weight
 
         # Split sizes (statically pinned for graph capture)
@@ -752,7 +773,6 @@ class TestGroupedLinearOp:
         in_shape = (num_active_tokens + token_padding, in_features)
         out_shape = (in_shape[0], out_features)
 
-        recipe = make_recipe(quantization)
         with te.quantized_model_init(enabled=quantized_weight, recipe=recipe):
             op = te.ops.GroupedLinear(
                 group_size,
@@ -1559,13 +1579,15 @@ class TestGroupedMLPFusedOp:
         """Single-group GroupedLinear + ScaledSwiGLU + GroupedLinear with MXFP8."""
         if (
             runtime_offsets_supported
-            and not grouped_mlp_module._cudnn_frontend_supports_single_group_runtime_offsets()
+            and not grouped_mlp_module._cudnn_frontend_supports_single_group_runtime_offsets(
+                te.ops.ScaledSwiGLU
+            )
         ):
             pytest.skip("Requires cuDNN frontend >= 1.27.0")
         monkeypatch.setattr(
             grouped_mlp_module,
             "_cudnn_frontend_supports_single_group_runtime_offsets",
-            lambda: runtime_offsets_supported,
+            lambda _activation_type: runtime_offsets_supported,
         )
         self.test_grouped_mlp(
             group_size=1,
