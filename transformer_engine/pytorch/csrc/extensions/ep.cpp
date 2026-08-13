@@ -360,6 +360,41 @@ void ep_dispatch(at::Tensor handle_mem, at::Tensor topk_idx, at::Tensor tokens,
                    recv_topk_w_te.data(), recv_topk_w_win, stream);
 }
 
+std::vector<at::Tensor> ep_prepare_and_dispatch_eager(at::Tensor handle_mem, at::Tensor topk_idx,
+                                                      at::Tensor tokens, at::Tensor topk_weights,
+                                                      at::Tensor tokens_per_expert,
+                                                      at::Tensor total_recv_tokens, int64_t top_k,
+                                                      int64_t dispatch_output_per_expert_alignment,
+                                                      std::optional<at::Tensor> tokens_scale_inv) {
+  auto stream = at::cuda::getCurrentCUDAStream().stream();
+  NVTE_CHECK(tokens.dim() == 2, "eager dispatch tokens must be 2D [T, H]");
+  NVTE_CHECK(total_recv_tokens.is_pinned(), "eager total_recv_tokens must be pinned host memory");
+
+  // Prepare writes the per-step recv total straight into pinned host total_recv_tokens
+  // (UVA), so a stream sync makes it host-readable with no D2H copy. Done here so no
+  // Python runs between the count read and the dispatch launch below.
+  ep_prepare(handle_mem, topk_idx, tokens_per_expert, top_k, dispatch_output_per_expert_alignment,
+             total_recv_tokens);
+  NVTE_CHECK_CUDA(cudaStreamSynchronize(stream));
+  const int64_t num_recv = *total_recv_tokens.data_ptr<int64_t>();
+
+  // Recv outputs sized to the host count (eager forbids zero-copy, so plain allocations).
+  const int64_t H = tokens.size(-1);
+  auto recv_tokens = at::empty({num_recv, H}, tokens.options());
+  auto recv_topk_weights = at::empty({num_recv}, topk_weights.options());
+  if (tokens_scale_inv.has_value()) {
+    // MXFP8: allocate the recv scale-inverse alongside the fp8 data and route both.
+    auto recv_scale_inv =
+        at::empty({num_recv, tokens_scale_inv->size(-1)}, tokens_scale_inv->options());
+    ep_dispatch(handle_mem, topk_idx, tokens, topk_weights, recv_tokens, recv_topk_weights,
+                tokens_scale_inv, recv_scale_inv);
+    return {recv_tokens, recv_topk_weights, recv_scale_inv};
+  }
+  ep_dispatch(handle_mem, topk_idx, tokens, topk_weights, recv_tokens, recv_topk_weights,
+              std::nullopt, std::nullopt);
+  return {recv_tokens, recv_topk_weights};
+}
+
 void ep_combine(at::Tensor handle_mem, at::Tensor expert_out, at::Tensor result) {
   auto stream = at::cuda::getCurrentCUDAStream().stream();
   NVTE_CHECK(expert_out.dim() >= 2, "expert_out must be at least 2D [..., recv_pr, H]");
@@ -524,6 +559,12 @@ void register_ep_bindings(pybind11::module_& m) {
         py::arg("tokens"), py::arg("topk_weights"), py::arg("recv_tokens"),
         py::arg("recv_topk_weights"), py::arg("tokens_scale_inv") = std::nullopt,
         py::arg("recv_scale_inv") = std::nullopt, py::call_guard<py::gil_scoped_release>());
+  m.def("ep_prepare_and_dispatch_eager", &ep_prepare_and_dispatch_eager,
+        "Fused eager EP prepare + dispatch", py::arg("handle_mem"), py::arg("topk_idx"),
+        py::arg("tokens"), py::arg("topk_weights"), py::arg("tokens_per_expert"),
+        py::arg("total_recv_tokens"), py::arg("top_k"),
+        py::arg("dispatch_output_per_expert_alignment"), py::arg("tokens_scale_inv") = std::nullopt,
+        py::call_guard<py::gil_scoped_release>());
   m.def("ep_combine", &ep_combine, "EP combine", py::call_guard<py::gil_scoped_release>());
   m.def("ep_dispatch_bwd", &ep_dispatch_bwd, "EP dispatch backward",
         py::call_guard<py::gil_scoped_release>());
