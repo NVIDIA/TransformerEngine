@@ -290,16 +290,12 @@ def test_fused_mla_q_uproj_autograd_pytorch_ref() -> None:
     # backward calls _linear_backward with the same MXFP8 dgrad GEMM as the fused path.
     # The GEMM contribution cancels out; any mismatch is in the RoPE backward only.
     x_ref = x.detach().clone().requires_grad_(True)
-    ref_linear = TELinear(
-        Q_LORA_RANK, PROJ_DIM, bias=False, params_dtype=torch.bfloat16
-    ).to(device)
+    ref_linear = TELinear(Q_LORA_RANK, PROJ_DIM, bias=False, params_dtype=torch.bfloat16).to(device)
     with torch.no_grad():
         ref_linear.weight.copy_(w_bf16)
 
     with fp8_autocast(enabled=True, fp8_recipe=MXFP8BlockScaling()):
-        y_ref = ref_linear(x_ref.reshape(tokens, Q_LORA_RANK)).reshape(
-            s, b, NUM_HEADS, HEAD_DIM
-        )
+        y_ref = ref_linear(x_ref.reshape(tokens, Q_LORA_RANK)).reshape(s, b, NUM_HEADS, HEAD_DIM)
         q_nope = y_ref[..., :HEAD_DIM_NOPE]
         q_rope = y_ref[..., HEAD_DIM_NOPE:]
         cos_ = cos[:, None, None, :]
