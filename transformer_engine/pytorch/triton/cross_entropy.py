@@ -87,6 +87,7 @@ def cross_entropy_forward(
             n_rows_1=SQ,
             ignore_idx=ignore_idx,
             COUNT_NON_IGNORE=reduce_loss,
+            COMPUTE_X_SUM=label_smoothing > 0,
             COPY_INPUT=not overwrite_input,
             BLOCK_SIZE=BLOCK_SIZE,
             num_warps=32,
@@ -113,7 +114,7 @@ def cross_entropy_forward(
         n_non_ignore.clamp_(min=1)
         loss = loss_1d.sum() / n_non_ignore
 
-    return loss, saved_input, stats, target, n_non_ignore
+    return loss, saved_input, stats, target, n_non_ignore, rank, world_size
 
 
 def cross_entropy_backward(
@@ -124,7 +125,8 @@ def cross_entropy_backward(
     grad_output: torch.Tensor,
     label_smoothing: float,
     reduce_loss: bool,
-    dist_process_group: Union[dist.ProcessGroup, None],
+    rank: int,
+    world_size: int,
     ignore_idx: int,
     is_cg_capturable: bool = False,
 ):
@@ -134,8 +136,6 @@ def cross_entropy_backward(
     B, SQ, V = saved_input.shape
     n_rows = B * SQ
     BLOCK_SIZE = min(MAX_FUSED_SIZE, triton.next_power_of_2(V))
-    rank = 0 if dist_process_group is None else dist.get_rank(dist_process_group)
-    world_size = 1 if dist_process_group is None else dist.get_world_size(dist_process_group)
     grad_output = grad_output.contiguous()
 
     cross_entropy_backward_kernel[(n_rows,)](

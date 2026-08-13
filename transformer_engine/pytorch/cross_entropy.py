@@ -35,7 +35,15 @@ class CrossEntropyFunction(torch.autograd.Function):
     ):
         """Compute the loss and save the input and softmax statistics for backward."""
 
-        loss, saved_input, stats, target, n_non_ignore = triton_cross_entropy.cross_entropy_forward(
+        (
+            loss,
+            saved_input,
+            stats,
+            target,
+            n_non_ignore,
+            rank,
+            world_size,
+        ) = triton_cross_entropy.cross_entropy_forward(
             inp,
             target,
             label_smoothing,
@@ -50,7 +58,8 @@ class CrossEntropyFunction(torch.autograd.Function):
         ctx.save_for_backward(*tensors_to_save)
         ctx.label_smoothing = label_smoothing
         ctx.reduce_loss = reduce_loss
-        ctx.dist_process_group = dist_process_group
+        ctx.rank = rank
+        ctx.world_size = world_size
         ctx.ignore_idx = ignore_idx
         ctx.is_cg_capturable = is_cg_capturable
         ctx.overwrite_input = overwrite_input
@@ -77,7 +86,8 @@ class CrossEntropyFunction(torch.autograd.Function):
             grad_output,
             ctx.label_smoothing,
             ctx.reduce_loss,
-            ctx.dist_process_group,
+            ctx.rank,
+            ctx.world_size,
             ctx.ignore_idx,
             ctx.is_cg_capturable,
         )
@@ -113,10 +123,8 @@ def _validate_inputs(
         )
     if not 0.0 <= label_smoothing <= 1.0:
         raise ValueError(f"label_smoothing must be in [0, 1], but got {label_smoothing}")
-    if overwrite_input and (not inp.is_contiguous() or torch._debug_has_internal_overlap(inp) != 0):
-        raise ValueError(
-            "overwrite_input=True requires a contiguous input with no internal overlap"
-        )
+    if overwrite_input and not inp.is_contiguous():
+        raise ValueError("overwrite_input=True requires a contiguous input")
 
 
 def parallel_cross_entropy(
@@ -141,7 +149,7 @@ def parallel_cross_entropy(
     By default, the saved input is a private contiguous copy and ``inp`` is
     preserved. This safe mode necessarily has both the caller's input and the
     copy live during forward. With ``overwrite_input=True``, the original
-    contiguous, non-overlapping input is used as the saved buffer and is
+    contiguous input is used as the saved buffer and is
     overwritten with its gradient during backward. Callers must not read or
     otherwise reuse that input after starting backward.
 
@@ -168,7 +176,7 @@ def parallel_cross_entropy(
         Whether the operation is CUDA graph capturable.
     overwrite_input : bool, default = False
         Reuse and overwrite ``inp`` rather than allocating a private input
-        copy. The input must be contiguous and have no internal overlap.
+        copy. The input must be contiguous.
 
     Returns
     -------

@@ -18,7 +18,7 @@ sys.path.append(str(pathlib.Path(__file__).resolve().parent.parent))
 from utils import dtype_tols
 
 
-def _run_tensor_parallel(rank, world_size, init_file):
+def _run_tensor_parallel(rank, world_size, init_file, label_smoothing):
     """Two-rank correctness worker for tensor-parallel cross entropy."""
 
     torch.cuda.set_device(rank)
@@ -56,7 +56,7 @@ def _run_tensor_parallel(rank, world_size, init_file):
                     loss = parallel_cross_entropy(
                         local_logits,
                         target,
-                        label_smoothing=0.1,
+                        label_smoothing=label_smoothing,
                         reduce_loss=reduce_loss,
                         dist_process_group=dist.group.WORLD,
                         overwrite_input=overwrite_input,
@@ -64,7 +64,7 @@ def _run_tensor_parallel(rank, world_size, init_file):
                     ref_loss = torch.nn.functional.cross_entropy(
                         ref_logits.reshape(-1, shape[-1]),
                         target.reshape(-1),
-                        label_smoothing=0.1,
+                        label_smoothing=label_smoothing,
                         reduction="mean" if reduce_loss else "none",
                     ).reshape_as(loss)
                     loss_grad = torch.full_like(loss, 0.37) if reduce_loss else external_grad
@@ -87,7 +87,8 @@ def _run_tensor_parallel(rank, world_size, init_file):
         dist.destroy_process_group()
 
 
-def test_parallel_cross_entropy_tensor_parallel():
+@pytest.mark.parametrize("label_smoothing", [0.0, 0.1], ids=["plain", "smoothed"])
+def test_parallel_cross_entropy_tensor_parallel(label_smoothing):
     """Validate tensor-parallel loss and gradients on two ranks."""
 
     if torch.cuda.device_count() < 2:
@@ -97,7 +98,7 @@ def test_parallel_cross_entropy_tensor_parallel():
         init_file = os.path.join(temp_dir, "distributed_init")
         mp.spawn(
             _run_tensor_parallel,
-            args=(world_size, init_file),
+            args=(world_size, init_file, label_smoothing),
             nprocs=world_size,
             join=True,
         )

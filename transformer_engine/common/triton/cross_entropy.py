@@ -92,6 +92,7 @@ def cross_entropy_tp_pre_kernel(
     n_rows_1,
     ignore_idx,
     COUNT_NON_IGNORE: tl.constexpr,
+    COMPUTE_X_SUM: tl.constexpr,
     COPY_INPUT: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
@@ -128,13 +129,15 @@ def cross_entropy_tp_pre_kernel(
         m_new = tl.maximum(m, block_max)
         d = d * tl.exp(m - m_new) + tl.sum(tl.exp(x - m_new))
         m = m_new
-        x_sum += tl.sum(tl.where(mask, x, 0.0))
+        if COMPUTE_X_SUM:
+            x_sum += tl.sum(tl.where(mask, x, 0.0))
 
     local_data_ptr += row * 4
     tl.store(local_data_ptr, m)
     tl.store(local_data_ptr + 1, d)
     tl.store(local_data_ptr + 2, x_y)
-    tl.store(local_data_ptr + 3, x_sum)
+    if COMPUTE_X_SUM:
+        tl.store(local_data_ptr + 3, x_sum)
 
 
 @triton.jit
@@ -156,7 +159,9 @@ def cross_entropy_tp_post_kernel(
     m = tl.load(data_ptr)
     d = tl.load(data_ptr + 1)
     x_y = tl.load(data_ptr + 2)
-    x_sum = tl.load(data_ptr + 3)
+    x_sum = 0.0
+    if label_smoothing > 0:
+        x_sum = tl.load(data_ptr + 3)
 
     for rank_idx in range(1, world_size):
         rank_data_ptr = data_ptr + rank_idx * n_rows * 4
@@ -166,7 +171,8 @@ def cross_entropy_tp_post_kernel(
         d = d * tl.exp(m - global_m) + d_new * tl.exp(m_new - global_m)
         m = global_m
         x_y = tl.maximum(x_y, tl.load(rank_data_ptr + 2))
-        x_sum += tl.load(rank_data_ptr + 3)
+        if label_smoothing > 0:
+            x_sum += tl.load(rank_data_ptr + 3)
 
     tl.store(stats_ptr + row * 2, m)
     tl.store(stats_ptr + row * 2 + 1, d)
