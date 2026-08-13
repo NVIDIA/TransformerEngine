@@ -1715,14 +1715,6 @@ def fp8_packed_skips_qkv_head_dim_pad(
     """Whether the optional QKV head-dim pad must be skipped because FP8 DPA is active and the
     caller passed packed QKV/KV buffers.
 
-    The pad in `DotProductAttention.forward` pads only the unpacked q/k/v views, not the packed
-    `qkv_layer`/`kv_layer` buffers. In the FP8 fused path, `combine_and_quantize` consumes those
-    packed buffers directly, bypassing the padded views -- so padding would feed the kernel the
-    original mismatched-dim packed data while the backend was selected for the equal padded dims.
-    This is only unsafe when FP8 DPA is active AND packed inputs are present; every other
-    combination is safe (FP8 DPA + unpacked re-derives from the padded views; bf16 + packed ignores
-    the packed buffers in `fused_attn_fwd`).
-
     Parameters
     ----------
     attention_params : AttentionParams
@@ -1733,7 +1725,7 @@ def fp8_packed_skips_qkv_head_dim_pad(
     Returns
     -------
     bool
-        True iff the pad should be skipped (not applied).
+        True iff the pad should be skipped.
     """
     if not attention_params.fp8:
         return False
