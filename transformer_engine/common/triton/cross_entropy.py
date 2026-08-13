@@ -14,7 +14,7 @@ def cross_entropy_forward_kernel(
     X_stride_0,
     X_stride_1,
     X_stride_2,
-    logits_ptr,
+    saved_input_ptr,
     Y_ptr,
     loss_ptr,
     stats_ptr,
@@ -23,16 +23,16 @@ def cross_entropy_forward_kernel(
     n_rows_1,
     ignore_idx,
     label_smoothing: tl.constexpr,
-    COPY_LOGITS: tl.constexpr,
+    COPY_INPUT: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
-    """Compute single-rank loss/statistics and optionally preserve the logits."""
+    """Compute single-rank loss/statistics and optionally preserve the input."""
 
     row = tl.program_id(0).to(tl.int64)
     row_0 = row // n_rows_1
     row_1 = row - row_0 * n_rows_1
     X_ptr += row_0 * X_stride_0 + row_1 * X_stride_1
-    logits_ptr += row * n_cols
+    saved_input_ptr += row * n_cols
 
     y = tl.load(Y_ptr + row)
     if y != ignore_idx:
@@ -45,8 +45,8 @@ def cross_entropy_forward_kernel(
         offsets = i + tl.arange(0, BLOCK_SIZE)
         mask = offsets < n_cols
         x = tl.load(X_ptr + offsets * X_stride_2, mask=mask, other=float("-inf"))
-        if COPY_LOGITS:
-            tl.store(logits_ptr + offsets, x, mask=mask)
+        if COPY_INPUT:
+            tl.store(saved_input_ptr + offsets, x, mask=mask)
         x = x.to(tl.float32)
         block_max = tl.max(x)
         m_new = tl.maximum(m, block_max)
@@ -81,7 +81,7 @@ def cross_entropy_tp_pre_kernel(
     X_stride_0,
     X_stride_1,
     X_stride_2,
-    logits_ptr,
+    saved_input_ptr,
     Y_ptr,
     local_data_ptr,
     n_non_ignore,
@@ -89,7 +89,7 @@ def cross_entropy_tp_pre_kernel(
     n_cols,
     n_rows_1,
     ignore_idx,
-    COPY_LOGITS: tl.constexpr,
+    COPY_INPUT: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
     """Compute the local statistics needed by tensor-parallel cross entropy."""
@@ -98,7 +98,7 @@ def cross_entropy_tp_pre_kernel(
     row_0 = row // n_rows_1
     row_1 = row - row_0 * n_rows_1
     X_ptr += row_0 * X_stride_0 + row_1 * X_stride_1
-    logits_ptr += row * n_cols
+    saved_input_ptr += row * n_cols
 
     y = tl.load(Y_ptr + row)
     if y != ignore_idx:
@@ -117,8 +117,8 @@ def cross_entropy_tp_pre_kernel(
         offsets = i + tl.arange(0, BLOCK_SIZE)
         mask = offsets < n_cols
         x = tl.load(X_ptr + offsets * X_stride_2, mask=mask, other=float("-inf"))
-        if COPY_LOGITS:
-            tl.store(logits_ptr + offsets, x, mask=mask)
+        if COPY_INPUT:
+            tl.store(saved_input_ptr + offsets, x, mask=mask)
         x = x.to(tl.float32)
         block_max = tl.max(x)
         m_new = tl.maximum(m, block_max)
@@ -183,7 +183,7 @@ def cross_entropy_tp_post_kernel(
 
 @triton.jit
 def cross_entropy_backward_kernel(
-    logits_ptr,
+    saved_input_ptr,
     Y_ptr,
     stats_ptr,
     n_non_ignore_ptr,
@@ -197,16 +197,16 @@ def cross_entropy_backward_kernel(
     label_smoothing: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
-    """Reconstruct the FP32 derivative and store it in the logits buffer."""
+    """Reconstruct the FP32 derivative and store it in the saved input buffer."""
 
     row = tl.program_id(0).to(tl.int64)
-    logits_ptr += row * n_cols
+    saved_input_ptr += row * n_cols
     y = tl.load(Y_ptr + row)
 
     if y == ignore_idx:
         for i in range(0, n_cols, BLOCK_SIZE):
             offsets = i + tl.arange(0, BLOCK_SIZE)
-            tl.store(logits_ptr + offsets, 0.0, mask=offsets < n_cols)
+            tl.store(saved_input_ptr + offsets, 0.0, mask=offsets < n_cols)
         return
 
     m = tl.load(stats_ptr + row * 2)
@@ -223,8 +223,8 @@ def cross_entropy_backward_kernel(
     for i in range(0, n_cols, BLOCK_SIZE):
         offsets = i + tl.arange(0, BLOCK_SIZE)
         mask = offsets < n_cols
-        x = tl.load(logits_ptr + offsets, mask=mask, other=float("-inf")).to(tl.float32)
+        x = tl.load(saved_input_ptr + offsets, mask=mask, other=float("-inf")).to(tl.float32)
         grad = tl.exp(x - m) / d - eps
         is_target = target_is_local & (offsets == target_col)
         grad -= tl.where(is_target, 1 - label_smoothing, 0.0)
-        tl.store(logits_ptr + offsets, grad * grad_output, mask=mask)
+        tl.store(saved_input_ptr + offsets, grad * grad_output, mask=mask)

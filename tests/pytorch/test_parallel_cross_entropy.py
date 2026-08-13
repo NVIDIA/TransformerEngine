@@ -293,7 +293,7 @@ def test_parallel_cross_entropy_matches_pytorch(
 
 @pytest.mark.parametrize("overwrite_input", [False, True], ids=["safe", "destructive"])
 def test_parallel_cross_entropy_saved_state_and_buffer_reuse(overwrite_input):
-    """The saved logits buffer is input-typed and becomes the returned derivative."""
+    """The saved input buffer is input-typed and becomes the returned derivative."""
 
     torch.manual_seed(42)
     logits = torch.randn(2, 3, 11, dtype=torch.bfloat16, device="cuda", requires_grad=True)
@@ -314,9 +314,9 @@ def test_parallel_cross_entropy_saved_state_and_buffer_reuse(overwrite_input):
         )
 
     assert len(saved_tensors) == 4
-    saved_logits, stats, saved_target, n_non_ignore = saved_tensors
-    assert saved_logits.shape == logits.shape
-    assert saved_logits.dtype == logits.dtype
+    saved_input, stats, saved_target, n_non_ignore = saved_tensors
+    assert saved_input.shape == logits.shape
+    assert saved_input.dtype == logits.dtype
     assert stats.shape == (target.numel(), 2)
     assert stats.dtype == torch.float32
     assert saved_target.numel() == target.numel()
@@ -326,9 +326,9 @@ def test_parallel_cross_entropy_saved_state_and_buffer_reuse(overwrite_input):
     assert n_non_ignore.item() == target.numel() - 1
 
     if overwrite_input:
-        assert saved_logits.data_ptr() == logits.data_ptr()
+        assert saved_input.data_ptr() == logits.data_ptr()
     else:
-        assert saved_logits.data_ptr() != logits.data_ptr()
+        assert saved_input.data_ptr() != logits.data_ptr()
     torch.testing.assert_close(logits, before, rtol=0.0, atol=0.0)
 
     expected_max = before.float().amax(dim=-1).reshape(-1)
@@ -344,7 +344,7 @@ def test_parallel_cross_entropy_saved_state_and_buffer_reuse(overwrite_input):
     loss.backward(external_grad)
 
     # Backward writes directly into the tensor saved by forward.
-    torch.testing.assert_close(saved_logits, logits.grad, rtol=0.0, atol=0.0)
+    torch.testing.assert_close(saved_input, logits.grad, rtol=0.0, atol=0.0)
     if overwrite_input:
         assert not torch.equal(logits, before)
     else:

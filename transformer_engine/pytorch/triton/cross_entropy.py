@@ -30,14 +30,14 @@ def cross_entropy_forward(
     ignore_idx: int,
     overwrite_input: bool,
 ):
-    """Forward implementation that saves logits and compact softmax statistics."""
+    """Forward implementation that saves the input and compact softmax statistics."""
 
     B, SQ, V = _input.shape
     n_rows = B * SQ
     BLOCK_SIZE = min(MAX_FUSED_SIZE, triton.next_power_of_2(V))
 
     target = target.contiguous().reshape(-1)
-    logits = (
+    saved_input = (
         _input
         if overwrite_input
         else torch.empty(_input.shape, dtype=_input.dtype, device=_input.device)
@@ -55,7 +55,7 @@ def cross_entropy_forward(
             X_stride_0=_input.stride(0),
             X_stride_1=_input.stride(1),
             X_stride_2=_input.stride(2),
-            logits_ptr=logits,
+            saved_input_ptr=saved_input,
             Y_ptr=target,
             loss_ptr=loss_1d,
             stats_ptr=stats,
@@ -64,7 +64,7 @@ def cross_entropy_forward(
             n_rows_1=SQ,
             ignore_idx=ignore_idx,
             label_smoothing=label_smoothing,
-            COPY_LOGITS=not overwrite_input,
+            COPY_INPUT=not overwrite_input,
             BLOCK_SIZE=BLOCK_SIZE,
             num_warps=32,
         )
@@ -75,7 +75,7 @@ def cross_entropy_forward(
             X_stride_0=_input.stride(0),
             X_stride_1=_input.stride(1),
             X_stride_2=_input.stride(2),
-            logits_ptr=logits,
+            saved_input_ptr=saved_input,
             Y_ptr=target,
             local_data_ptr=local_data,
             n_non_ignore=n_non_ignore,
@@ -83,7 +83,7 @@ def cross_entropy_forward(
             n_cols=V,
             n_rows_1=SQ,
             ignore_idx=ignore_idx,
-            COPY_LOGITS=not overwrite_input,
+            COPY_INPUT=not overwrite_input,
             BLOCK_SIZE=BLOCK_SIZE,
             num_warps=32,
         )
@@ -109,11 +109,11 @@ def cross_entropy_forward(
     if reduce_loss:
         loss = loss_1d.sum() / n_non_ignore
 
-    return loss, logits, stats, target, n_non_ignore
+    return loss, saved_input, stats, target, n_non_ignore
 
 
 def cross_entropy_backward(
-    logits: torch.Tensor,
+    saved_input: torch.Tensor,
     stats: torch.Tensor,
     target: torch.Tensor,
     n_non_ignore: torch.Tensor,
@@ -124,10 +124,10 @@ def cross_entropy_backward(
     ignore_idx: int,
     is_cg_capturable: bool = False,
 ):
-    """Reconstruct the derivative in FP32 and overwrite the saved logits buffer."""
+    """Reconstruct the derivative in FP32 and overwrite the saved input buffer."""
 
     del is_cg_capturable
-    B, SQ, V = logits.shape
+    B, SQ, V = saved_input.shape
     n_rows = B * SQ
     BLOCK_SIZE = min(MAX_FUSED_SIZE, triton.next_power_of_2(V))
     rank = 0 if dist_process_group is None else dist.get_rank(dist_process_group)
@@ -135,7 +135,7 @@ def cross_entropy_backward(
     grad_output = grad_output.contiguous()
 
     cross_entropy_backward_kernel[(n_rows,)](
-        logits_ptr=logits,
+        saved_input_ptr=saved_input,
         Y_ptr=target,
         stats_ptr=stats,
         n_non_ignore_ptr=n_non_ignore,
@@ -150,4 +150,4 @@ def cross_entropy_backward(
         BLOCK_SIZE=BLOCK_SIZE,
         num_warps=32,
     )
-    return logits
+    return saved_input

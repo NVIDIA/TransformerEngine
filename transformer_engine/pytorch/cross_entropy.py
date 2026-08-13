@@ -15,7 +15,11 @@ __all__ = ["parallel_cross_entropy"]
 
 
 class CrossEntropyFunction(torch.autograd.Function):
-    """Cross entropy autograd function that recomputes its derivative."""
+    """
+    This class implements a custom autograd function for the Cross Entropy loss. The input
+    tensor can be in BF16/FP32, and loss and gradient calculations happen in FP32. The
+    returned loss is always in FP32.
+    """
 
     @staticmethod
     def forward(
@@ -29,16 +33,20 @@ class CrossEntropyFunction(torch.autograd.Function):
         is_cg_capturable=False,
         overwrite_input=False,
     ):
-        loss, logits, stats, target, n_non_ignore = triton_cross_entropy.cross_entropy_forward(
-            inp,
-            target,
-            label_smoothing,
-            reduce_loss,
-            dist_process_group,
-            ignore_idx,
-            overwrite_input,
+        """Compute the loss and save the input and softmax statistics for backward."""
+
+        loss, saved_input, stats, target, n_non_ignore = (
+            triton_cross_entropy.cross_entropy_forward(
+                inp,
+                target,
+                label_smoothing,
+                reduce_loss,
+                dist_process_group,
+                ignore_idx,
+                overwrite_input,
+            )
         )
-        ctx.save_for_backward(logits.detach(), stats, target, n_non_ignore)
+        ctx.save_for_backward(saved_input.detach(), stats, target, n_non_ignore)
         ctx.label_smoothing = label_smoothing
         ctx.reduce_loss = reduce_loss
         ctx.dist_process_group = dist_process_group
@@ -49,15 +57,17 @@ class CrossEntropyFunction(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output):
+        """Reconstruct the input gradient from the tensors saved during forward."""
+
         if ctx.did_backward:
             raise RuntimeError(
                 "parallel_cross_entropy does not support repeated backward passes "
-                "because backward reuses its saved logits buffer"
+                "because backward reuses its saved input buffer"
             )
         ctx.did_backward = True
-        logits, stats, target, n_non_ignore = ctx.saved_tensors
+        saved_input, stats, target, n_non_ignore = ctx.saved_tensors
         grad_input = triton_cross_entropy.cross_entropy_backward(
-            logits,
+            saved_input,
             stats,
             target,
             n_non_ignore,
@@ -120,17 +130,17 @@ def parallel_cross_entropy(
 
     Loss and derivative calculations use FP32 arithmetic for BF16 and FP32
     inputs. Instead of saving a full FP32 derivative, this function saves an
-    input-typed logits buffer and per-row FP32 softmax maximum/denominator
+    input-typed saved-input buffer and per-row FP32 softmax maximum/denominator
     statistics. The returned loss is FP32.
 
-    By default, the saved logits are a private contiguous copy and ``inp`` is
+    By default, the saved input is a private contiguous copy and ``inp`` is
     preserved. This safe mode necessarily has both the caller's input and the
     copy live during forward. With ``overwrite_input=True``, the original
     contiguous, non-overlapping input is used as the saved buffer and is
     overwritten with its gradient during backward. Callers must not read or
     otherwise reuse that input after starting backward.
 
-    The saved logits buffer is consumed by backward, so repeated backward
+    The saved input buffer is consumed by backward, so repeated backward
     passes on the same result are not supported.
 
     Parameters
@@ -144,13 +154,15 @@ def parallel_cross_entropy(
     reduce_loss : bool, default = False
         Return the mean loss over non-ignored targets when True.
     dist_process_group : torch.distributed.ProcessGroup, default = None
-        Tensor-parallel process group, or None for a single device.
+        Tensor-parallel process group, or None for a single device. Every rank
+        must provide an equally sized vocabulary shard, and shards must be
+        ordered by process-group rank.
     ignore_idx : int, default = -100
         Target value for ignored rows.
     is_cg_capturable : bool, default = False
         Whether the operation is CUDA graph capturable.
     overwrite_input : bool, default = False
-        Reuse and overwrite ``inp`` rather than allocating a private logits
+        Reuse and overwrite ``inp`` rather than allocating a private input
         copy. The input must be contiguous and have no internal overlap.
 
     Returns
