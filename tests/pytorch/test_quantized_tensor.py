@@ -940,9 +940,6 @@ def test_skip_quantization_with_noop_flag(
     Test if the quantization honors the noop flag and skips quantization.
     This test only verifies that the kernel skips quantization where it's expected to do so.
     It doesn't verify otherwise (kernel correctly quantizes when noop is false) since that is already covered by other tests.
-
-    Parametrized over output usage and shape so that every kernel reachable from
-    dispatch/quantize.cuh with a noop flag gets exercised, not just the ones recently fixed.
     """
     if usage == "columnwise" and quantization in ("fp8", "fp8_delayed_scaling"):
         pytest.skip("Delayed scaling does not support columnwise-only quantization")
@@ -956,7 +953,9 @@ def test_skip_quantization_with_noop_flag(
     )
 
     first_batch = torch.rand(shape, dtype=torch.bfloat16, device="cuda")
-    second_batch = torch.rand_like(first_batch)
+    # Make the input range much larger, even under delayed scaling, so amax will differ for sure
+    # if the noop flag doesn't take effect
+    second_batch = torch.rand_like(first_batch) * 2.0
     x = first_batch.clone()
 
     noop = torch.zeros(1, dtype=torch.float32, device="cuda")
@@ -989,10 +988,16 @@ def test_skip_quantization_with_noop_flag(
             "_scale_inv",
             "_rowwise_scale_inv",
             "_columnwise_scale_inv",
+            "_amax_rowwise",
+            "_amax_columnwise",
         ):
             buf = getattr(quantized, attr, None)
             if buf is not None:
                 output_buffers[attr] = buf.clone()
+        # Delayed scaling keeps its global amax on the quantizer rather than on the tensor.
+        quantizer_amax = getattr(quantizer, "amax", None)
+        if quantizer_amax is not None:
+            output_buffers["quantizer.amax"] = quantizer_amax.clone()
         assert output_buffers, f"{quantization}: quantized tensor exposes no data buffer"
         return output_buffers
 
