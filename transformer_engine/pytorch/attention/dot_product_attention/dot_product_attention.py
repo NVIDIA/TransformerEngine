@@ -246,7 +246,9 @@ _dpa_fp8ds_reduce_amax = os.getenv("NVTE_DPA_FP8DS_REDUCE_AMAX", "1") == "1"
 __all__ = ["DotProductAttention"]
 
 
-def _should_pad_qkv_head_dim(head_dim_qk, head_dim_v, value_layer, qkv_layer, kv_layer, attention_params):
+def _should_pad_qkv_head_dim(
+    head_dim_qk, head_dim_v, value_layer, qkv_layer, kv_layer, attention_params
+):
     has_packed_inputs = qkv_layer is not None or kv_layer is not None
     is_shape_pad_eligible = (
         not is_in_onnx_export_mode()
@@ -261,7 +263,6 @@ def _should_pad_qkv_head_dim(head_dim_qk, head_dim_v, value_layer, qkv_layer, kv
         and not dpa_utils.fp8_packed_skips_qkv_head_dim_pad(attention_params, has_packed_inputs)
         and dpa_utils.should_pad_qkv_head_dim(attention_params)
     )
-
 
 
 def _pad_qkv_head_dim(query_layer, key_layer, value_layer):
@@ -2068,7 +2069,9 @@ class DotProductAttention(TransformerEngineBaseModule):
             # never changes the result, only which kernel runs.
             qkv_head_pad = False
             orig_head_dim_v = head_dim_v
-            if _should_pad_qkv_head_dim(head_dim_qk, head_dim_v, value_layer, qkv_layer, kv_layer, attention_params):
+            if _should_pad_qkv_head_dim(
+                head_dim_qk, head_dim_v, value_layer, qkv_layer, kv_layer, attention_params
+            ):
                 # Pad Q/K/V to the wider head dim so a fused backend can run.
                 query_layer, key_layer, value_layer, _, _ = _pad_qkv_head_dim(
                     query_layer, key_layer, value_layer
