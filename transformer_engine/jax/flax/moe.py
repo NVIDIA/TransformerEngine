@@ -32,14 +32,18 @@ from typing import Any, Callable, NewType, Optional, Tuple, Union
 
 import jax.numpy as jnp
 from flax import linen as nn
+from transformer_engine.common.recipe import Recipe
 
 # Re-exported so downstream users can ``from transformer_engine.jax.flax.moe
 # import P`` without a second jax.sharding import.
-from jax.sharding import PartitionSpec as P  # noqa: F401  # pylint: disable=unused-import
+from jax.sharding import (
+    PartitionSpec as P,
+)  # noqa: F401  # pylint: disable=unused-import
 
 from ..moe import moe
+from ..quantize import QuantizerSet
 from ..router import ScoreFunction
-from ..sharding import get_active_resource_axis
+from ..sharding import _get_mesh, get_active_resource_axis
 from .module import TransformerEngineBase
 
 PRNGKey = Any
@@ -120,10 +124,10 @@ class _MoEBlock(TransformerEngineBase):
         Register per-expert FFN biases (``wi_0_bias``, ``wi_1_bias``,
         ``wo_bias``).
 
-    Quantization is currently configured via the standard TE autocast
-    context (``fp8_autocast``/``with_quantizer_set``) and threaded
-    through ``moe()`` internally; this wrapper does not expose a
-    per-call ``quantizer_sets`` knob yet.
+    quantization_recipe : Optional[Recipe]
+        Recipe used to construct the FC1 and FC2 grouped-GEMM quantizer
+        sets. ``None`` uses the recipe from the active TE autocast context,
+        or no-op quantizers when autocast is disabled.
     """
 
     # Architecture
@@ -160,6 +164,7 @@ class _MoEBlock(TransformerEngineBase):
     bias_init: Initializer = nn.initializers.zeros
     expert_bias_init: Initializer = nn.initializers.zeros
     use_ffn_bias: bool = False
+    quantization_recipe: Optional[Recipe] = None
 
     def __post_init__(self):
         if self.kernel_init is None:
@@ -180,7 +185,6 @@ class _MoEBlock(TransformerEngineBase):
         ----------
         inputs : jnp.ndarray
             ``[batch, sequence, hidden]``.
-
         Returns
         -------
         output : jnp.ndarray
@@ -255,6 +259,34 @@ class _MoEBlock(TransformerEngineBase):
             )
 
         ep_axis = get_active_resource_axis("ep_resource")
+        mesh = _get_mesh()
+        data_parallel_size = 1
+        for axis in self.data_parallelism_axes:
+            data_parallel_size *= mesh.shape[axis]
+
+        def make_grouped_quantizer_set(postfix):
+            # Dispatched token groups span every data-parallel replica,
+            # whereas expert kernels have one group per global expert.
+            token_set = self.generate_quantizer_set(
+                f"{postfix}_token",
+                fp8_recipe=self.quantization_recipe,
+                n_groups=data_parallel_size * self.num_experts,
+            )
+            expert_set = self.generate_quantizer_set(
+                f"{postfix}_expert",
+                fp8_recipe=self.quantization_recipe,
+                n_groups=self.num_experts,
+            )
+            return QuantizerSet(
+                x=token_set.x,
+                kernel=expert_set.kernel,
+                dgrad=token_set.dgrad,
+            )
+
+        quantizer_sets = (
+            make_grouped_quantizer_set("_fc1"),
+            make_grouped_quantizer_set("_fc2"),
+        )
 
         return moe(
             inputs,
@@ -275,6 +307,7 @@ class _MoEBlock(TransformerEngineBase):
             scaling_factor=self.scaling_factor,
             aux_loss_coeff=self.aux_loss_coeff,
             apply_topk_weights_early=self.apply_topk_weights_early,
+            quantizer_sets=quantizer_sets,
             recv_capacity_per_rank=self.recv_capacity_per_rank,
             ep_axis=ep_axis,
             data_parallelism_axes=self.data_parallelism_axes,
