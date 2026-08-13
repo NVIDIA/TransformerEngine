@@ -46,7 +46,6 @@ import os
 
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", "0.5")
-os.environ.setdefault("NVTE_JAX_ENFORCE_V2_GROUPED_GEMM", "1")
 
 import sys
 from functools import partial
@@ -110,12 +109,10 @@ if not _MP_ACTIVE:
 
 from transformer_engine_jax import get_device_compute_capability
 
-# Grouped GEMM in the MoE custom_vjp requires Blackwell (sm_100+). The
-# TE EP NCCL primitives themselves need SM>=90, but the FFN body uses
-# grouped_gemm, so the file as a whole gates on sm_100+.
-if get_device_compute_capability(0) < 100:
+# TE EP NCCL primitives need SM>=90
+if get_device_compute_capability(0) < 90:
     pytest.skip(
-        "MoE TE EP tests require Blackwell (sm_100+) for grouped GEMM",
+        "MoE TE EP tests require Hopper (sm_90+) or newer for TE EP",
         allow_module_level=True,
     )
 
