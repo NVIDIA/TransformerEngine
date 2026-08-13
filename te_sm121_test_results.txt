@@ -1,0 +1,110 @@
+================================================================================
+SM_121 (GB10 Consumer Blackwell / DGX Spark) Flash Attention 4 Test Results
+================================================================================
+Date: 2026-06-13
+GPU: NVIDIA GB10 (sm_121)  |  CUDA 12.8  |  flash-attn-4 v4.0.0b16
+nvidia-cutlass-dsl: 4.5.2  |  TransformerEngine: feature/sm121-blackwell-support
+
+--------------------------------------------------------------------------------
+PRIMARY TEST: test_dpa_fa4_sm121  (SM_121-gated, unambiguous CI signal)
+--------------------------------------------------------------------------------
+3/3 PASS
+
+  PASSED  test_dpa_fa4_sm121[fa4_base_1-model_configs0-dtype0]  # b=4, sq=128,  hq=16, hdim=64
+  PASSED  test_dpa_fa4_sm121[fa4_base_2-model_configs0-dtype0]  # b=2, sq=2048, hq=24, hdim=128, causal
+  PASSED  test_dpa_fa4_sm121[fa4_base_3-model_configs0-dtype0]  # b=2, sq=1024, hq=8,  hdim=96,  causal
+
+These configs cover MHA forward+backward, causal masking, head dims 64/96/128,
+sequence lengths 128–2048 — all exercising the SM_121 FA4 CuTe-DSL kernel path.
+
+--------------------------------------------------------------------------------
+FULL FA4 SUITE — ISOLATION RESULTS (each category run in a separate process;
+full-suite run has MLIR context corruption from upstream GQA compile errors)
+--------------------------------------------------------------------------------
+
+  test_dpa_fa4_sm121          :  3/3  PASS  (SM_121-gated; our primary signal)
+  test_dpa_fa4_base           :  3/7  PASS  (gqa_1/2 + splits_1/2 → upstream FA4 bugs)
+  test_dpa_fa4_mask           :  3/6  PASS  (padding variants → TE cuDNN backend)
+  test_dpa_fa4_varlen         :  3/8  PASS  (thd layout + gqa_varlen → upstream FA4/cuDNN)
+  test_dpa_fa4_sliding_window :  0/8  FAIL  (SM_80 bwd has no local mask → see below)
+  test_dpa_fa4_hdim256        :  1/1  SKIP  (SM100-only kernel; expected on SM_121)
+
+  TOTAL ISOLATION PASSING: 12 / 32
+
+--------------------------------------------------------------------------------
+KNOWN LIMITATIONS (upstream flash-attn-4 bugs — NOT SM_121 or TE defects)
+--------------------------------------------------------------------------------
+
+1. GQA / pack_gqa  (fa4_gqa_1, fa4_gqa_2, fa4_varlen_3)
+   Error: ValueError: Operation creation failed
+   MLIR: unable to compute crd2idx with layout '(?):(1)' and coord '((?,?))'
+         at pack_gqa.py:139 compute_ptr()
+   Cause: pack_gqa.store_O(mO_cur, ...) expects mO_cur shaped
+          ((qhead_per_kvhead, seqlen_q), headdim) (hierarchical), but
+          FlashAttentionForwardSm80.__call__ passes flat (seqlen_q, headdim).
+   Scope: SM_80 code path (SM_80 and SM_121 equally); flash-attn-4 b16 regression.
+
+2. SplitKV  (fa4_splits_1, fa4_splits_2)
+   Error: AssertionError: SplitKV not supported on SM 12.0 in this PR
+   Cause: Explicit upstream stub — SplitKV kernel not yet ported to SM_12x.
+   Scope: SM_120 + SM_121; deliberate placeholder.
+
+3. Sliding window backward  (all 8 test_dpa_fa4_sliding_window tests)
+   Error: Numerical mismatch — dQ wrong (abs diff up to 0.43, tol 0.015)
+   Cause: FlashAttentionBackwardSm80.kernel() creates AttentionMask with
+          mask_causal=self.is_causal only, never mask_local=True nor window_size.
+          Local window is ignored in backward → incorrect gradients.
+          Forward is CORRECT (AttentionMask full local mask support, is_local=True).
+   Note: Before this patch these tests crashed earlier with:
+         DSLRuntimeError: argument #13 (window_size_left): (Int32, NoneType) but got int.
+         That crash (interface.py missing Int32 cast) is now fixed; the pre-existing
+         backward limitation is now visible as the failure mode.
+   Scope: SM_80 code path; upstream flash-attn-4 limitation.
+
+4. THD varlen layout — cuDNN fallback  (thd_thd_thd fa4_varlen_1..4)
+   Error: RuntimeError: cuDNN Error: No valid engine configs
+   Cause: TE routes thd_thd_thd varlen to cuDNN fused-attn backend (not FA4).
+          cuDNN has no valid engine for SM_121 + this combination.
+   Scope: TE cuDNN backend; not flash-attn-4.
+
+5. Padding mask tests — cuDNN fallback  (fa4_mask_padding*)
+   Error: RuntimeError: cuDNN Error: No valid engine configs
+   Cause: Same — TE routes padding+varlen mask combos to cuDNN backend.
+
+--------------------------------------------------------------------------------
+PATCHES APPLIED TO flash-attn-4 v4.0.0b16 TO ENABLE SM_121
+(to be reported as separate upstream flash-attn-4 issues)
+--------------------------------------------------------------------------------
+
+Patch 1 — flash_fwd.py:658  use_tma_O guard
+  Old: self.use_tma_O = self.arch >= Arch.sm_90
+  New: self.use_tma_O = Arch.sm_90 <= self.arch < Arch.sm_120
+  Why: FlashAttentionForwardSm120 sets class attr arch=80, but __init__ clobbers it
+       with Arch.sm_121 via BaseDSL._get_dsl().get_arch_enum(). sm_121 >= sm_90 → True
+       → tries tma_atom_O=None → AttributeError: 'NoneType'.._trait.
+
+Patch 2 — interface.py  dQ_single_wg in SM_12x backward branch
+  Added: dQ_single_wg = False  inside "if arch // 10 == 12:" block.
+  Why: Used in compile_key for arch//10 in [8,9,12] but never set for arch//10==12
+       → UnboundLocalError.
+
+Patch 3 — flash_bwd.py:440  softmax_scale preservation
+  Old: softmax_scale_log2, softmax_scale = utils.compute_softmax_scale_log2(...)
+  New: softmax_scale_log2, _ = utils.compute_softmax_scale_log2(...)
+  Why: compute_softmax_scale_log2 returns None when score_mod is None, clobbering the
+       original Float32 value the kernel requires.
+
+Patch 4 — utils.py:486  nvvm.atomicrmw API
+  Old: nvvm.atomicrmw(res=T.f32(), op=..., ptr=..., a=...)
+  New: nvvm.atomicrmw(op=..., ptr=..., a=...)
+  Why: 'res' kwarg removed in nvidia-cutlass-dsl 4.5.2.
+
+Patch 5 — interface.py  window_size Int32 cast in cute.compile paths
+  Added: window_size_left_typed = Int32(wsl) if wsl is not None else None  (fwd + bwd)
+  Used window_size_*_typed in compile_args instead of raw Python int.
+  Why: cute.compile requires Int32, not plain int, for Optional[Int32] params.
+       SM_90 path implicitly coerces; SM_80/12x else-branch does not.
+
+================================================================================
+END
+================================================================================
