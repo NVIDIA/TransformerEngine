@@ -14,6 +14,7 @@ from typing import Any, Optional
 import torch
 
 import transformer_engine_torch as tex
+from transformer_engine.common.recipe import Recipe, Format as RecipeFormat
 from ...constants import DType, TE_DType
 from ...cpp_extensions import general_grouped_gemm, general_grouped_gemm_for_grouped_tensor
 from ...distributed import CudaRNGStatesTracker
@@ -24,14 +25,12 @@ from ...module.base import (
     _2X_ACC_WGRAD,
 )
 from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload, start_offload
-from ...quantization import FP8GlobalStateManager, QuantizerRole, Recipe
+from ...quantization import FP8GlobalStateManager, QuantizerRole
 from ...quantized_tensor import QuantizedTensorStorage
 from ...tensor import (
     Float8BlockQuantizer,
-    Float8CurrentScalingQuantizer,
     MXFP8Quantizer,
     MXFP8Tensor,
-    NVFP4Quantizer,
     Quantizer,
 )
 from ...utils import (
@@ -70,6 +69,68 @@ from ...triton.grouped_dbias_dscales import (
 # linear (or fused grouped MLP) through Sequential's ``op_kwargs``.
 OUTPUT_BUFFER_KEY = "output"
 GRAD_INPUT_BUFFER_KEY = "grad_input"
+
+
+def is_op_fuser_grouped_tensor_path_supported(
+    recipe: Optional[Recipe],
+    dtype: torch.dtype,
+) -> bool:
+    """Whether the op-fuser grouped-tensor path supports this recipe and dtype.
+
+    * The graph-safe path dispatches to ``general_grouped_gemm_for_grouped_tensor``,
+      which is backed by ``nvte_grouped_gemm_with_discrete_inputA`` in the common
+      library.
+    * MXFP8 and NVFP4 are supported on Blackwell GPUs with Compute Capability
+      (CC) 10.x and 11.0. NVFP4 requires RHT because graph-safe grouped
+      quantization currently requires it.
+    * FP8 per-tensor current scaling uses grouped current-scaling quantization
+      through ``tex.group_quantize`` and cuBLASLt grouped GEMM with per-batch
+      scalar FP8 scaling. It is supported on Hopper and Blackwell, with
+      cuBLASLt 13.5+ required on Hopper.
+    * FP8 block scaling uses the grouped-tensor path only on Hopper with
+      cuBLASLt 13.6+. On other architectures or older cuBLAS versions it
+      falls back to the split-quantize path for discrete parameters.
+    * Custom recipes are unsupported because they may assign different
+      quantizers to input, weight, and grad-output roles. This predicate
+      currently supports only built-in recipes with known uniform layouts.
+    * Other quantization recipes, including FP8 delayed scaling, fall back to
+      split quantization because their grouped quantization kernels are missing.
+    * Unquantized BF16/FP16 compute is supported on Hopper and Blackwell. FP32
+      is excluded because cuBLASLt grouped GEMM does not support it.
+    * Single grouped parameters have no split-quantize fallback, so callers
+      must reject them when this function returns ``False``.
+    """
+    if dtype not in (torch.bfloat16, torch.float16):
+        return False
+
+    device_capability = get_device_compute_capability()
+    if not (9, 0) <= device_capability <= (11, 0):
+        return False
+    cublaslt_version = tex.get_cublasLt_version()
+    if cublaslt_version < 130300:
+        return False
+    if device_capability < (10, 0) and cublaslt_version < 130400:
+        return False
+
+    if recipe is None:
+        return True
+    if recipe.custom():
+        return False
+    if recipe.float8_current_scaling():
+        return device_capability >= (10, 0) or cublaslt_version >= 130500
+    if recipe.float8_block_scaling():
+        # cuBLASLt 13.6 fixes Hopper grouped GEMM algo selection for block-scaled FP8.
+        return device_capability < (10, 0) and cublaslt_version >= 130600
+    if recipe.mxfp8():
+        return device_capability >= (10, 0)
+    if recipe.nvfp4():
+        return (
+            device_capability >= (10, 0)
+            and not recipe.disable_rht
+            and not recipe.row_scaled_activation
+            and recipe.fp8_format == RecipeFormat.E4M3
+        )
+    return False
 
 
 class GroupedLinear(BasicOperation):
@@ -316,16 +377,27 @@ class GroupedLinear(BasicOperation):
                 w.grad = grad_weights[group_idx].to(w.dtype)
         self._trigger_wgrad_accumulation_and_reduce_hooks()
 
-    def _get_bias_tensors(self, dtype: torch.dtype) -> list[torch.Tensor]:
-        """Retrieve per-group bias tensors in the given dtype."""
+    def _get_discrete_bias_tensors(self, dtype: torch.dtype) -> list[torch.Tensor]:
+        """Retrieve discrete per-group bias parameters in the given dtype."""
         if self.single_grouped_bias:
-            bias_parts = self.bias.quantized_tensors
-            if bias_parts is None:
-                bias_parts = self.bias.split_into_quantized_tensors()
-            return [maybe_dequantize(p.reshape(-1), dtype) for p in bias_parts]
+            raise RuntimeError(
+                "Discrete bias tensors were requested for a single grouped bias parameter."
+            )
         return [
             maybe_dequantize(getattr(self, f"bias{idx}"), dtype) for idx in range(self.num_groups)
         ]
+
+    def _get_packed_bias_tensor(self, dtype: torch.dtype) -> torch.Tensor:
+        """Return all per-group biases as one dense tensor with shape [num_groups, out_features].
+
+        A single grouped bias is already stored in this layout, so return a view of the
+        registered parent parameter instead of splitting it into members and stacking it again.
+        Discrete biases require a stack because they are independent parameters.
+        """
+        if self.single_grouped_bias:
+            bias_data = self.bias.rowwise_data.view(self.num_groups, self.out_features)
+            return bias_data if bias_data.dtype == dtype else bias_data.to(dtype=dtype)
+        return torch.stack(self._get_discrete_bias_tensors(dtype), dim=0)
 
     def num_quantizers(self, mode: str) -> int:
         if mode == "forward":
@@ -791,87 +863,6 @@ class GroupedLinear(BasicOperation):
             "It overrides `fuser_backward` instead of `op_backward`."
         )
 
-    @staticmethod
-    def _is_graph_safe_path_supported(
-        *,
-        with_quantized_compute: bool,
-        input_quantizers: Sequence[Optional[Quantizer]],
-        dtype: torch.dtype,
-        single_grouped_weight: bool,
-    ) -> bool:
-        """Whether the graph-safe grouped-tensor flow can be used.
-
-        * The graph-safe path dispatches to ``general_grouped_gemm_for_grouped_tensor``,
-          which is backed by ``nvte_grouped_gemm_with_discrete_inputA`` in the common
-          library. This filter mirrors cuBLASLt grouped GEMM's architecture
-          requirement without duplicating its cuBLAS version checks.
-        * Quantized compute supports MXFP8 and NVFP4 on Blackwell GPUs with Compute Capability (CC)
-          10.x and 11.0. NVFP4 requires RHT because graph-safe grouped quantization currently
-          requires RHT. NVFP4 is additionally restricted to discrete weights: with
-          ``single_grouped_weight=True`` the weight quantizer is non-RHT and cannot use the
-          graph-safe grouped quantize kernel, so we fall back to the split-quantize flow.
-        * FP8 per-tensor current scaling is backed by grouped current-scaling quantization
-          (``tex.group_quantize``) and cuBLASLt grouped GEMM with per-batch scalar FP8 scaling,
-          which are supported on Hopper (CC 9.0) and Blackwell (CC 10.x and 11.0).
-        * FP8 block scaling uses the grouped-tensor path on Hopper (CC 9.0) with cuBLAS 13.4+;
-          it is Hopper-only (no MXFP8-broadcast emulation), so elsewhere it falls back.
-        * Every other quantization recipe (fp8 delayed scaling, ...) falls back to the legacy flow
-          because the corresponding grouped quantization kernels are missing.
-        * Unquantized compute supports BF16/FP16 on Hopper (CC 9.0) and Blackwell (CC 10.x and 11.0)
-          -- FP32 is excluded because the cuBLASLt grouped GEMM doesn't support it.
-        * Input/weight/grad_output quantizers are assumed to be of the same type, otherwise it
-          would trigger a fatal error in the cuBLASLt grouped GEMM check.
-        """
-
-        device_arch = get_device_compute_capability()
-
-        # Unquantized compute
-        if not with_quantized_compute:
-            if not (9, 0) <= device_arch <= (11, 0):
-                # cuBLAS supports grouped GEMM on Hopper+
-                return False
-            return dtype in (torch.bfloat16, torch.float16)
-
-        # FP8 current scaling
-        if all(isinstance(q, Float8CurrentScalingQuantizer) for q in input_quantizers):
-            if not (9, 0) <= device_arch <= (11, 0):
-                # cuBLAS supports grouped GEMM on Hopper+
-                return False
-            if device_arch[0] == 9 and tex.get_cublasLt_version() < 130500:
-                # Hopper support for grouped GEMM requires cuBLAS 13.5+
-                return False
-            return True
-
-        # FP8 block scaling
-        if all(isinstance(q, Float8BlockQuantizer) for q in input_quantizers):
-            # Grouped GEMM requires Hopper and cuBLAS 13.4+
-            return device_arch[0] == 9 and tex.get_cublasLt_version() >= 130400
-
-        # MXFP8
-        if all(isinstance(q, MXFP8Quantizer) for q in input_quantizers):
-            # MXFP8 grouped quantization requires Blackwell
-            return (10, 0) <= device_arch <= (11, 0)
-
-        # NVFP4
-        if all(isinstance(q, NVFP4Quantizer) for q in input_quantizers):
-            if not (10, 0) <= device_arch <= (11, 0):
-                # NVFP4 grouped quantization requires Blackwell
-                return False
-            if single_grouped_weight:
-                # NVFP4 graph-safe grouped quantization only supports discrete weights
-                return False
-            for q in input_quantizers:
-                if not q.with_rht:
-                    # NVFP4 graph-safe grouped quantization requires RHT
-                    return False
-                if q.scale_dtype != DType.kFloat8E4M3:
-                    # NVFP4 grouped GEMM is only supported with E4M3 scales
-                    return False
-            return True
-
-        # Fall back to non-graph-safe implementation
-        return False
-
     def _get_grouped_weight_for_gemm(
         self,
         weight_param: GroupedTensor,
@@ -993,16 +984,7 @@ class GroupedLinear(BasicOperation):
             return None
         num_groups = self.num_groups
 
-        if self.single_grouped_bias:
-            # Already a contiguous (num_groups * out_features) buffer.
-            bias_data = self.bias.rowwise_data
-            if bias_data.dtype != dtype:
-                bias_data = bias_data.to(dtype=dtype)
-        else:
-            bias_list = [
-                maybe_dequantize(getattr(self, f"bias{idx}"), dtype) for idx in range(num_groups)
-            ]
-            bias_data = torch.stack(bias_list, dim=0).contiguous()
+        bias_data = self._get_packed_bias_tensor(dtype)
 
         return GroupedTensorStorage(
             shape=(num_groups, self.out_features),
@@ -1071,16 +1053,22 @@ class GroupedLinear(BasicOperation):
         out_buffer = basic_op_kwargs[0].get(OUTPUT_BUFFER_KEY)
 
         # Dispatch: graph-safe GroupedTensor flow whenever it can be used.
-        # See ``_is_graph_safe_path_supported`` for the gating rationale --
+        # See ``is_op_fuser_grouped_tensor_path_supported`` for the gating rationale --
         # in short it requires Hopper (SM90+) plus a supported dtype /
         # quantization recipe. Otherwise we fall back to the legacy
         # ``tex.split_quantize`` + ``general_grouped_gemm`` flow.
-        use_grouped_tensor_path = self._is_graph_safe_path_supported(
-            with_quantized_compute=with_quantized_compute,
-            input_quantizers=input_quantizers,
-            dtype=dtype,
-            single_grouped_weight=self.single_grouped_weight,
+        recipe = FP8GlobalStateManager.get_fp8_recipe() if with_quantized_compute else None
+        use_grouped_tensor_path = is_op_fuser_grouped_tensor_path_supported(
+            recipe,
+            dtype,
         )
+        if (self.single_grouped_weight or self.single_grouped_bias) and not use_grouped_tensor_path:
+            raise RuntimeError(
+                "Single grouped parameters require the native grouped-tensor GroupedLinear path, "
+                "which is unavailable for the current device, dtype, or quantization recipe. "
+                "Disable single_grouped_weight/single_grouped_bias or use a supported grouped-"
+                "tensor configuration."
+            )
 
         if use_grouped_tensor_path:
             out, tensors_to_save = self._fuser_forward_grouped_tensor(
@@ -1234,16 +1222,11 @@ class GroupedLinear(BasicOperation):
         # Need CPU split sizes for split_quantize / general_grouped_gemm.
         split_sizes_int = [int(s) for s in split_sizes.tolist()]
 
-        # Extract params
-        if self.single_grouped_weight:
-            weights = self.weight.quantized_tensors
-            if weights is None:
-                weights = self.weight.split_into_quantized_tensors()
-        else:
-            weights = self._forward_weight_list()  # materialized when distributed
+        # Single grouped parameters are rejected before entering this legacy path.
+        weights = self._forward_weight_list()  # materialized when distributed
         bs = None
         if has_bias:
-            bs = self._get_bias_tensors(dtype)
+            bs = self._get_discrete_bias_tensors(dtype)
 
         ws = self._get_discrete_weights_for_gemm(
             weights,
@@ -1575,7 +1558,7 @@ class GroupedLinear(BasicOperation):
             offsets = torch.zeros(num_groups + 1, dtype=torch.int64, device=device)
             offsets[1:] = split_sizes.cumsum(0)
             if self._scale_bias:
-                bias_packed = torch.stack(self._get_bias_tensors(ctx.dtype))
+                bias_packed = self._get_packed_bias_tensor(ctx.dtype)
                 scales_f32 = scales.to(dtype=torch.float32)
                 dbias_packed, grad_scales = compute_grouped_dbias_dscales(
                     dy_2d,
@@ -1830,7 +1813,7 @@ class GroupedLinear(BasicOperation):
         grad_scales: Optional[torch.Tensor] = None
         if has_bias:
             if self._scale_bias:
-                bias_packed = torch.stack(self._get_bias_tensors(dtype))
+                bias_packed = self._get_packed_bias_tensor(dtype)
                 scales_f32 = scales.to(dtype=torch.float32)
                 dbias_packed, grad_scales = compute_grouped_dbias_dscales(
                     dy_2d,
