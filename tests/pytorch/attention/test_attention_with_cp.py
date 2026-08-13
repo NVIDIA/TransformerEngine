@@ -28,7 +28,7 @@ from transformer_engine.common.recipe import (
 from transformer_engine.pytorch.attention.dot_product_attention.utils import FlashAttentionUtils
 
 _current_file = pathlib.Path(__file__).resolve()
-sys.path.append(str(_current_file.parent.parent))
+sys.path = [str(_current_file.parent.parent)] + sys.path
 from utils import ModelConfig, get_available_attention_backends
 
 pytest_logging_level = logging.getLevelName(logging.root.level)
@@ -299,7 +299,10 @@ if test_essential:
     qkv_formats = ["sbhd", "thd"]
 
 
-@pytest.mark.skipif(not FlashAttentionUtils.v2_plus, reason="Flash-attn 2.0+ is required.")
+@pytest.mark.skipif(
+    not (FlashAttentionUtils.v2_plus or FlashAttentionUtils.v3_is_installed),
+    reason="Flash-attn v2 or v3 is required.",
+)
 @pytest.mark.skipif(get_device_compute_capability() < (8, 0), reason="CP tests require sm80+.")
 @pytest.mark.parametrize("dtype", dtypes)
 @pytest.mark.parametrize("model", model_configs_flash_attn.keys())
