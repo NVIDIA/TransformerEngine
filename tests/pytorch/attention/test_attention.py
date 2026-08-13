@@ -2282,19 +2282,32 @@ def _run_mha_fp8_vs_f16(
         if not is_training:
             mha = mha.eval()
 
+    def random_seqlens(max_seqlen):
+        if qkv_format != "thd":
+            return torch.randint(
+                1, max_seqlen, [config.batch_size], dtype=torch.int32, device="cuda"
+            )
+        # Reserve seven positions so total-token alignment only increases the final length.
+        return torch.cat(
+            (
+                torch.randint(
+                    1,
+                    max_seqlen,
+                    [config.batch_size - 1],
+                    dtype=torch.int32,
+                    device="cuda",
+                ),
+                torch.randint(1, max_seqlen - 6, [1], dtype=torch.int32, device="cuda"),
+            )
+        )
+
     if "padding" in config.attn_mask_type or qkv_format == "thd":
         if config.attn_type == "self":
-            seqlens_q = torch.randint(
-                1, config.max_seqlen_q, [config.batch_size], dtype=torch.int32, device="cuda"
-            )
+            seqlens_q = random_seqlens(config.max_seqlen_q)
             seqlens_kv = seqlens_q
         if config.attn_type == "cross":
-            seqlens_q = torch.randint(
-                1, config.max_seqlen_q, [config.batch_size], dtype=torch.int32, device="cuda"
-            )
-            seqlens_kv = torch.randint(
-                1, config.max_seqlen_kv, [config.batch_size], dtype=torch.int32, device="cuda"
-            )
+            seqlens_q = random_seqlens(config.max_seqlen_q)
+            seqlens_kv = random_seqlens(config.max_seqlen_kv)
     else:
         seqlens_q = torch.full(
             [config.batch_size], config.max_seqlen_q, dtype=torch.int32, device="cuda"
@@ -2344,8 +2357,6 @@ def _run_mha_fp8_vs_f16(
             rotary_pos_emb=rotary_pos_emb,
             cu_seqlens_q=cu_seqlens_q,
             cu_seqlens_kv=cu_seqlens_kv,
-            # The optimized zero-fill path dereferences device memory on the host.
-            fast_zero_fill=False,
         )
     if is_training:
         out.backward(out_grad)
@@ -2680,8 +2691,6 @@ def _run_dpa_fp8_vs_f16(dtype, config, fp8_dpa, qkv_layout, is_training, fp8_rec
             checkpoint_core_attention=False,
             core_attention_bias_type=config.attn_bias_type,
             fp8_output=fp8_dpa,
-            # The optimized zero-fill path dereferences device memory on the host.
-            fast_zero_fill=False,
         )
     if is_training:
         out.backward(out_grad)
