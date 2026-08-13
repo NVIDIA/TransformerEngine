@@ -347,7 +347,7 @@ class FusedMLAQUpProjRopeQuant:
         )
 
 
-class _FusedMLAQUpProjFunction(torch.autograd.Function):
+class FusedMLAQUpProjFunction(torch.autograd.Function):
     """Fused Q up-proj: q_normed -> (GEMM + per-head RoPE + MXFP8) -> MXFP8Tensor Q."""
 
     @staticmethod
@@ -371,6 +371,13 @@ class _FusedMLAQUpProjFunction(torch.autograd.Function):
         """Run the fused gemm + rope + mxfp8 quantization"""
 
         tokens = s * b
+        tp_size = get_distributed_world_size(tp_group) if tp_group is not None else 1
+        if tp_size > 1:
+            raise RuntimeError(
+                "FusedMLAQUpProjFunction does not support tensor parallelism (TP>1): "
+                "the backward dgrad is reduce-scattered over TP ranks but the caller "
+                "passes a pre-gathered full-sequence input. Use TP=1 or the unfused path."
+            )
         x = q_normed.detach().reshape(tokens, -1).contiguous()
 
         # Reshape [s, 1, 1, rope_dim] -> [s*b, rope_dim] bf16 as required by the KF kernel.
