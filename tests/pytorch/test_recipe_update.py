@@ -334,9 +334,7 @@ def test_revision_only_update_is_not_published_during_planning():
     assert active.recipe_config_revision == 1
     assert len(calls) == factory_call_count
 
-    assert not module._apply_quantization_update(  # pylint: disable=protected-access
-        update
-    )
+    assert not module._apply_quantization_update(update)  # pylint: disable=protected-access
     assert active.recipe_config_revision == 3
     assert len(calls) == factory_call_count
 
@@ -359,11 +357,21 @@ def test_candidate_update_is_not_published_during_planning():
     assert old_views[0].recipe_config_revision == 1
     assert module._fp8_workspaces["weight"] is workspace  # pylint: disable=protected-access
 
-    assert module._apply_quantization_update(  # pylint: disable=protected-access
-        update
-    )
+    assert module._apply_quantization_update(update)  # pylint: disable=protected-access
     assert module._quantization_runtime is update.candidate  # pylint: disable=protected-access
     assert not module._fp8_workspaces  # pylint: disable=protected-access
+
+
+def test_runtime_snapshot_does_not_copy_caller_repr_cache():
+    """Caller display history must not affect a runtime snapshot or its checkpoint bytes."""
+    recipe = _make_counting_recipe(("runtime-repr-cache", 1), [])
+    str(recipe)
+    module = Linear(16, 16, bias=False, device="cuda", name="linear")
+
+    update = _prepare_runtime_update(module, recipe, revision=1)
+
+    assert recipe.__dict__["_cached_repr"] is not None
+    assert update.candidate.recipe.__dict__["_cached_repr"] is None
 
 
 def test_uninitialized_runtime_can_be_prepared_without_publication():
@@ -380,9 +388,7 @@ def test_uninitialized_runtime_can_be_prepared_without_publication():
     assert "scaling_bwd" not in module.fp8_meta
     assert module.quantizers == {"scaling_fwd": [], "scaling_bwd": []}
 
-    assert module._apply_quantization_update(  # pylint: disable=protected-access
-        update
-    )
+    assert module._apply_quantization_update(update)  # pylint: disable=protected-access
     assert module._quantization_runtime is update.candidate  # pylint: disable=protected-access
 
 
@@ -952,10 +958,7 @@ def test_apply_recipe_planning_failure_is_model_wide_atomic(failure_index):
     FP8GlobalStateManager.reset()
     calls = []
     active_recipe = _make_counting_recipe(("apply-failure", 1), calls)
-    modules = [
-        Linear(16, 16, bias=False, device="cuda", name=f"line{index}")
-        for index in range(3)
-    ]
+    modules = [Linear(16, 16, bias=False, device="cuda", name=f"line{index}") for index in range(3)]
     model = torch.nn.Sequential(*modules)
 
     try:
@@ -1189,9 +1192,7 @@ def test_grouped_candidate_validation_is_atomic(mismatched_tensor_type):
     assert module._validated_quantizer_generations is old_validated_generations
     assert module._delayed_scaling_input_quantizer is old_delayed_quantizer
     assert module._unsafe_requantization_input_quantizer is old_unsafe_quantizer
-    assert module._apply_quantization_update(  # pylint: disable=protected-access
-        update
-    )
+    assert module._apply_quantization_update(update)  # pylint: disable=protected-access
     replacement_runtime = module._quantization_runtime  # pylint: disable=protected-access
     assert replacement_runtime is not old_runtime
     assert (

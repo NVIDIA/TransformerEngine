@@ -1191,6 +1191,9 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         # candidate validated, even if the caller later mutates and reuses the
         # same recipe instance.
         runtime_recipe = copy.copy(recipe)
+        # Do not snapshot a caller-populated display cache. Whether ``repr`` was
+        # requested before runtime construction must not change checkpoint bytes.
+        object.__setattr__(runtime_recipe, "_cached_repr", None)
 
         forward_state = RecipeState.create(  # pylint: disable=assignment-from-none
             runtime_recipe,
@@ -1317,8 +1320,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         # not retarget already-quantized primary storage. Keep this more
         # specific diagnostic ahead of the general delayed-scaling boundary.
         if getattr(self, "primary_weights_in_fp8", False) and (
-            active.key.recipe_config != requested_key.recipe_config
-            or active.num_gemms != num_gemms
+            active.key.recipe_config != requested_key.recipe_config or active.num_gemms != num_gemms
         ):
             if active_has_delayed_scaling or recipe.delayed():
                 FP8GlobalStateManager.abort_current_amax_reduction()
