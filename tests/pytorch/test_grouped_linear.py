@@ -2303,6 +2303,10 @@ def _run_grouped_linear_path(
             marks=pytest.mark.skipif(not _mxfp8_available, reason=_reason_for_no_mxfp8),
         ),
         pytest.param(
+            recipe.MXFP8BlockScaling(enable_2d_quantization=True),
+            marks=pytest.mark.skipif(not _mxfp8_available, reason=_reason_for_no_mxfp8),
+        ),
+        pytest.param(
             recipe.NVFP4BlockScaling(disable_stochastic_rounding=True),
             marks=pytest.mark.skipif(not _nvfp4_available, reason=_reason_for_no_nvfp4),
         ),
@@ -2313,7 +2317,14 @@ def _run_grouped_linear_path(
             ),
         ),
     ],
-    ids=["bf16", "fp8_current_scaling", "mxfp8", "nvfp4", "fp8_block_scaling"],
+    ids=[
+        "bf16",
+        "fp8_current_scaling",
+        "mxfp8",
+        "mxfp8_2d",
+        "nvfp4",
+        "fp8_block_scaling",
+    ],
 )
 @pytest.mark.parametrize("bias", _ALL_BOOLEAN)
 @pytest.mark.parametrize("fp8_model_params", _ALL_BOOLEAN)
