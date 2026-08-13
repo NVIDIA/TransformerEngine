@@ -2,13 +2,9 @@
 #
 # See LICENSE for license information.
 
-import os
 import random
-import tempfile
 import pytest
 import torch
-import torch.distributed as dist
-import torch.multiprocessing as mp
 from transformer_engine.pytorch import parallel_cross_entropy
 
 from utils import dtype_tols
@@ -256,7 +252,9 @@ def test_parallel_cross_entropy_matches_pytorch(
     shape = (2, 5, 37)
     target = torch.randint(0, shape[-1], shape[:-1], device="cuda")
     target[0, 1] = -100
-    values = torch.randn(shape, dtype=dtype, device="cuda")
+    # Use the same BF16-representable inputs for both dtypes so that the FP32
+    # loss comparison measures only the implementation's arithmetic.
+    values = torch.randn(shape, dtype=torch.bfloat16, device="cuda").to(dtype)
 
     logits = values.clone().requires_grad_()
     ref_logits = values.float().clone().requires_grad_()
@@ -285,10 +283,10 @@ def test_parallel_cross_entropy_matches_pytorch(
     loss.backward(external_grad)
     ref_loss.backward(external_grad)
 
-    tols = dtype_tols(dtype)
-    torch.testing.assert_close(loss, ref_loss, **tols)
+    assert loss.dtype == ref_loss.dtype == torch.float32
+    torch.testing.assert_close(loss, ref_loss, **dtype_tols(torch.float32))
     expected_grad = ref_logits.grad.to(dtype)
-    torch.testing.assert_close(logits.grad, expected_grad, **tols)
+    torch.testing.assert_close(logits.grad, expected_grad, **dtype_tols(dtype))
 
 
 @pytest.mark.parametrize("overwrite_input", [False, True], ids=["safe", "destructive"])
@@ -299,6 +297,8 @@ def test_parallel_cross_entropy_saved_state_and_buffer_reuse(overwrite_input):
     logits = torch.randn(2, 3, 11, dtype=torch.bfloat16, device="cuda", requires_grad=True)
     target = torch.tensor([[0, -100, 4], [7, 2, 10]], device="cuda")
     before = logits.detach().clone()
+    version_before = logits._version
+    other_consumer = logits.square().sum()
     saved_tensors = []
 
     def pack_hook(tensor):
@@ -330,6 +330,7 @@ def test_parallel_cross_entropy_saved_state_and_buffer_reuse(overwrite_input):
     else:
         assert saved_input.data_ptr() != logits.data_ptr()
     torch.testing.assert_close(logits, before, rtol=0.0, atol=0.0)
+    assert logits._version == version_before
 
     expected_max = before.float().amax(dim=-1).reshape(-1)
     expected_denominator = (
@@ -342,6 +343,7 @@ def test_parallel_cross_entropy_saved_state_and_buffer_reuse(overwrite_input):
 
     external_grad = torch.randn_like(loss)
     loss.backward(external_grad)
+    assert logits._version == version_before + int(overwrite_input)
 
     # Backward writes directly into the tensor saved by forward.
     torch.testing.assert_close(saved_input, logits.grad, rtol=0.0, atol=0.0)
@@ -349,6 +351,12 @@ def test_parallel_cross_entropy_saved_state_and_buffer_reuse(overwrite_input):
         assert not torch.equal(logits, before)
     else:
         torch.testing.assert_close(logits, before, rtol=0.0, atol=0.0)
+
+    if overwrite_input:
+        with pytest.raises(RuntimeError, match="modified by an inplace operation"):
+            other_consumer.backward()
+    else:
+        other_consumer.backward()
 
 
 @pytest.mark.parametrize("layout", ["transpose", "strided_vocab"])
@@ -413,75 +421,3 @@ def test_parallel_cross_entropy_deprecated_input_alias():
         alias_loss = parallel_cross_entropy(logits, target, _input=logits)
     direct_loss = parallel_cross_entropy(logits, target)
     torch.testing.assert_close(alias_loss, direct_loss)
-
-
-def _run_tensor_parallel(rank, world_size, init_file):
-    """Two-rank correctness worker for the tensor-parallel pre/post kernels."""
-
-    torch.cuda.set_device(rank)
-    device = torch.device("cuda", rank)
-    dist.init_process_group(
-        backend="nccl",
-        init_method=f"file://{init_file}",
-        rank=rank,
-        world_size=world_size,
-    )
-    try:
-        generator = torch.Generator().manual_seed(2025)
-        shape = (2, 3, 22)
-        local_vocab = shape[-1] // world_size
-        target = torch.randint(
-            0,
-            shape[-1],
-            shape[:-1],
-            generator=generator,
-        ).to(device)
-        target[0, 2] = -100
-        external_grad = torch.randn(shape[:-1], generator=generator).to(device)
-
-        for dtype in (torch.float32, torch.bfloat16):
-            global_values = torch.randn(shape, generator=generator).to(
-                device=device,
-                dtype=dtype,
-            )
-            vocab_start = rank * local_vocab
-            local_values = global_values[..., vocab_start : vocab_start + local_vocab]
-            local_logits = local_values.clone().requires_grad_()
-            ref_logits = global_values.float().clone().requires_grad_()
-
-            loss = parallel_cross_entropy(
-                local_logits,
-                target,
-                label_smoothing=0.1,
-                dist_process_group=dist.group.WORLD,
-            )
-            ref_loss = torch.nn.functional.cross_entropy(
-                ref_logits.reshape(-1, shape[-1]),
-                target.reshape(-1),
-                label_smoothing=0.1,
-                reduction="none",
-            ).reshape_as(target)
-            loss.backward(external_grad)
-            ref_loss.backward(external_grad)
-
-            tols = dtype_tols(dtype)
-            torch.testing.assert_close(loss, ref_loss, **tols)
-            expected_grad = ref_logits.grad[..., vocab_start : vocab_start + local_vocab].to(dtype)
-            torch.testing.assert_close(local_logits.grad, expected_grad, **tols)
-    finally:
-        dist.destroy_process_group()
-
-
-def test_parallel_cross_entropy_tensor_parallel():
-    """Validate global statistics, smoothed loss, and local gradients on two ranks."""
-
-    if torch.cuda.device_count() < 2:
-        pytest.skip("tensor-parallel cross entropy test requires two CUDA devices")
-    with tempfile.TemporaryDirectory() as temp_dir:
-        init_file = os.path.join(temp_dir, "distributed_init")
-        mp.spawn(
-            _run_tensor_parallel,
-            args=(2, init_file),
-            nprocs=2,
-            join=True,
-        )

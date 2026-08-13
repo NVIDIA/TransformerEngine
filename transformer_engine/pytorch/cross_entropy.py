@@ -50,6 +50,7 @@ class CrossEntropyFunction(torch.autograd.Function):
         ctx.dist_process_group = dist_process_group
         ctx.ignore_idx = ignore_idx
         ctx.is_cg_capturable = is_cg_capturable
+        ctx.overwrite_input = overwrite_input
         ctx.did_backward = False
         return loss
 
@@ -76,6 +77,8 @@ class CrossEntropyFunction(torch.autograd.Function):
             ctx.ignore_idx,
             ctx.is_cg_capturable,
         )
+        if ctx.overwrite_input:
+            torch.autograd.graph.increment_version(saved_input)
         return grad_input, None, None, None, None, None, None, None
 
 
