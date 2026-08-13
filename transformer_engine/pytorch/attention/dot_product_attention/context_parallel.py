@@ -93,16 +93,25 @@ def get_bsh_dims(tensor_format):
     return batch_dim, seq_dim, head_dim
 
 
-def _zero_thd_padding(tensor, cu_seqlens, cu_seqlens_padded):
-    """Zero inter-sequence padding without copying CUDA cu-seqlens to the host."""
-    if tensor is None or cu_seqlens is None or cu_seqlens_padded is None:
+def _get_thd_padding_mask(num_tokens, cu_seqlens, cu_seqlens_padded):
+    """Build a THD padding mask without host synchronization or per-sequence launches."""
+    rows = torch.arange(num_tokens, device=cu_seqlens_padded.device)
+    sequence = torch.searchsorted(cu_seqlens_padded[1:], rows, right=True)
+    valid_end = cu_seqlens_padded[sequence] + cu_seqlens[sequence + 1] - cu_seqlens[sequence]
+    return rows >= valid_end
+
+
+def _zero_thd_padding(tensors, cu_seqlens, cu_seqlens_padded):
+    """Zero inter-sequence padding in one or more tensors."""
+    if cu_seqlens is None or cu_seqlens_padded is None:
         return
-    rows = torch.arange(tensor.shape[0], device=tensor.device)
-    padding_mask = torch.zeros(tensor.shape[0], dtype=torch.bool, device=tensor.device)
-    for batch_idx in range(cu_seqlens.numel() - 1):
-        valid_end = cu_seqlens_padded[batch_idx] + cu_seqlens[batch_idx + 1] - cu_seqlens[batch_idx]
-        padding_mask |= (rows >= valid_end) & (rows < cu_seqlens_padded[batch_idx + 1])
-    tensor[padding_mask] = 0
+    tensor = next((tensor for tensor in tensors if tensor is not None), None)
+    if tensor is None:
+        return
+    padding_mask = _get_thd_padding_mask(tensor.shape[0], cu_seqlens, cu_seqlens_padded)
+    for tensor in tensors:
+        if tensor is not None:
+            tensor[padding_mask] = 0
 
 
 def flash_attn_p2p_communicate(
@@ -2937,9 +2946,8 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
 
         # Partial-gradient reduction can write THD inter-sequence padding.
         if ctx.qkv_format == "thd":
-            _zero_thd_padding(dq, cu_seqlens_q_per_step[0], cu_seqlens_q_padded)
-            _zero_thd_padding(dk, cu_seqlens_kv_per_step[0], cu_seqlens_kv_padded)
-            _zero_thd_padding(dv, cu_seqlens_kv_per_step[0], cu_seqlens_kv_padded)
+            _zero_thd_padding((dq,), cu_seqlens_q_per_step[0], cu_seqlens_q_padded)
+            _zero_thd_padding((dk, dv), cu_seqlens_kv_per_step[0], cu_seqlens_kv_padded)
 
         return (
             None,

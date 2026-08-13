@@ -8,6 +8,8 @@ import itertools
 import torch
 import unittest
 from transformer_engine.pytorch.attention.dot_product_attention.context_parallel import (
+    _get_thd_padding_mask,
+    _zero_thd_padding,
     get_batch_on_this_cp_rank,
     pad_thd_sequences_for_cp,
     generate_positional_ids_for_cp,
@@ -807,6 +809,84 @@ def _legacy_valid_copy(out, inp, cu_seqlens_padded, cu_seqlens):
         sz = (cu_seqlens[b + 1] - cu_seqlens[b]).item()
         if sz > 0:
             out[s : s + sz].copy_(inp[s : s + sz])
+
+
+@unittest.skipIf(not torch.cuda.is_available(), "THD padding-mask tests require CUDA")
+class TestTHDPaddingMask(unittest.TestCase):
+    @staticmethod
+    def _reference_mask(cu_seqlens, cu_seqlens_padded):
+        mask = torch.ones(cu_seqlens_padded[-1].item(), dtype=torch.bool)
+        for batch_idx in range(cu_seqlens.numel() - 1):
+            start = cu_seqlens_padded[batch_idx].item()
+            length = (cu_seqlens[batch_idx + 1] - cu_seqlens[batch_idx]).item()
+            mask[start : start + length] = False
+        return mask.cuda()
+
+    def test_matches_reference_across_batch_sizes_and_q_kv_layouts(self):
+        for batch_size in (2, 8, 32, 128):
+            with self.subTest(batch_size=batch_size):
+                sequence = torch.arange(batch_size, dtype=torch.int32)
+                layouts = (
+                    (17 + sequence % 7, torch.full_like(sequence, 32)),
+                    (9 + sequence * 3 % 11, torch.full_like(sequence, 24)),
+                )
+                for seqlens, padded_seqlens in layouts:
+                    cu_seqlens = torch.cat((torch.zeros(1, dtype=torch.int32), seqlens.cumsum(0)))
+                    cu_seqlens_padded = torch.cat(
+                        (torch.zeros(1, dtype=torch.int32), padded_seqlens.cumsum(0))
+                    )
+                    expected = self._reference_mask(cu_seqlens, cu_seqlens_padded)
+                    cu_seqlens = cu_seqlens.cuda()
+                    cu_seqlens_padded = cu_seqlens_padded.cuda()
+                    actual = _get_thd_padding_mask(expected.numel(), cu_seqlens, cu_seqlens_padded)
+                    self.assertTrue(torch.equal(actual, expected))
+
+    def test_zeroes_padding_without_changing_valid_rows(self):
+        cu_seqlens = torch.tensor([0, 3, 8], dtype=torch.int32)
+        cu_seqlens_padded = torch.tensor([0, 4, 12], dtype=torch.int32)
+        padding_mask = self._reference_mask(cu_seqlens, cu_seqlens_padded)
+        cu_seqlens = cu_seqlens.cuda()
+        cu_seqlens_padded = cu_seqlens_padded.cuda()
+
+        tensors = tuple(
+            torch.arange(1, 25, dtype=torch.float32, device="cuda").view(12, 2) + offset
+            for offset in (0, 100)
+        )
+        originals = tuple(tensor.clone() for tensor in tensors)
+
+        _zero_thd_padding(tensors, cu_seqlens, cu_seqlens_padded)
+
+        for tensor, original in zip(tensors, originals):
+            self.assertTrue(torch.equal(tensor[~padding_mask], original[~padding_mask]))
+            self.assertEqual(torch.count_nonzero(tensor[padding_mask]).item(), 0)
+
+    def test_zero_padding_is_cuda_graph_safe(self):
+        cu_seqlens = torch.tensor([0, 3, 8], dtype=torch.int32, device="cuda")
+        cu_seqlens_padded = torch.tensor([0, 4, 12], dtype=torch.int32, device="cuda")
+        tensors = tuple(torch.ones((12, 2), dtype=torch.float32, device="cuda") for _ in range(2))
+
+        side_stream = torch.cuda.Stream()
+        side_stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(side_stream):
+            _zero_thd_padding(tensors, cu_seqlens, cu_seqlens_padded)
+        torch.cuda.current_stream().wait_stream(side_stream)
+        torch.cuda.synchronize()
+
+        for tensor in tensors:
+            tensor.fill_(1)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            _zero_thd_padding(tensors, cu_seqlens, cu_seqlens_padded)
+
+        for tensor in tensors:
+            tensor.fill_(1)
+        graph.replay()
+        torch.cuda.synchronize()
+
+        padding_mask = _get_thd_padding_mask(12, cu_seqlens, cu_seqlens_padded)
+        for tensor in tensors:
+            self.assertEqual(torch.count_nonzero(tensor[padding_mask]).item(), 0)
+            self.assertTrue(torch.all(tensor[~padding_mask] == 1))
 
 
 @unittest.skipIf(
