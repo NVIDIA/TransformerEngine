@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 import os
+from contextlib import contextmanager
 import pytest
 import jax
 import jax.numpy as jnp
@@ -38,6 +39,21 @@ from transformer_engine.jax.attention import (
 
 
 DTYPES = [jnp.bfloat16]
+
+@contextmanager
+def _scan_env(use_scan_ring):
+    """Set NVTE_FUSED_RING_ATTENTION_USE_SCAN and restore the prior value on exit."""
+    key = "NVTE_FUSED_RING_ATTENTION_USE_SCAN"
+    old_value = os.environ.get(key)
+    os.environ[key] = "1" if use_scan_ring else "0"
+    try:
+        yield
+    finally:
+        if old_value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = old_value
+
 
 DISTRIBUTED_SELF_ATTN_DATA_SHAPES = {
     "L0": [()],
@@ -428,10 +444,6 @@ class TestDistributedContextParallelSelfAttn:
 
         assert not use_scan_ring or cp_strategy == CPStrategy.RING
 
-        if use_scan_ring:
-            os.environ["NVTE_FUSED_RING_ATTENTION_USE_SCAN"] = "1"
-        else:
-            os.environ["NVTE_FUSED_RING_ATTENTION_USE_SCAN"] = "0"
         attn_bias_type = AttnBiasType.NO_BIAS
         bias_shape = None
         dropout_prob = 0.0
@@ -513,8 +525,8 @@ class TestDistributedContextParallelSelfAttn:
         if num_head % kv_groups != 0 or (num_head // kv_groups) % tp_size != 0:
             pytest.skip(f"Skipping {kv_groups=} not multiple of {data_shape=} or {tp_size=}")
 
-        runner.test_backward()
-        del os.environ["NVTE_FUSED_RING_ATTENTION_USE_SCAN"]
+        with _scan_env(use_scan_ring):
+            runner.test_backward()
 
     @pytest_parametrize_wrapper(
         "device_count,mesh_shape,mesh_axes,mesh_resource",
@@ -848,3 +860,24 @@ class TestReorderCausalLoadBalancing:
         inversed = inverse(reordered, reorder_strategy, cp_size, seq_dim, stripe_size)
 
         assert jnp.array_equal(inversed, ref)
+
+
+def test_scan_env_restored():
+    """_scan_env restores the original env value even on exception."""
+    key = "NVTE_FUSED_RING_ATTENTION_USE_SCAN"
+    sentinel = "original"
+    original = os.environ.get(key)
+    os.environ[key] = sentinel
+    try:
+        try:
+            with _scan_env(True):
+                assert os.environ.get(key) == "1"
+                raise RuntimeError("expected")
+        except RuntimeError:
+            pass
+        assert os.environ.get(key) == sentinel
+    finally:
+        if original is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = original
