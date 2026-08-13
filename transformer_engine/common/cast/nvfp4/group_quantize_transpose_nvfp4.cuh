@@ -17,6 +17,7 @@
 #include <transformer_engine/transformer_engine.h>
 
 #include "../../common.h"
+#include "../../util/cuda_runtime.h"
 #include "../../util/math.h"
 #include "../../util/ptx.cuh"
 #include "../../utils.cuh"
@@ -166,15 +167,46 @@ constexpr size_t TOTAL_BANKS_WIDTH = (32 * 4 * 8) / 4;  // 256
 // Number of threads (rowwise scaling) that span 32 banks (4-byte banks) of shared memory
 constexpr size_t THREADS_PER_BANK = TOTAL_BANKS_WIDTH / SCALE_DIM;  // 8 = 128 / 16
 
+// In-register 16-point Walsh-Hadamard transform with a random sign mask:
+// v' = 0.25 * FWHT(v * signs). Same transform the RHT cast-fusion kernels
+// apply, evaluated on the 16 rows a thread already holds for the columnwise
+// block, so no separate transform pass over global memory is needed.
+__device__ __forceinline__ void group_rht_16pt(float (&f)[16], const uint16_t sign_mask) {
+#pragma unroll
+  for (int i = 0; i < 16; ++i) {
+    if ((sign_mask >> i) & 1) {
+      f[i] = -f[i];
+    }
+  }
+#pragma unroll
+  for (int stride = 1; stride < 16; stride <<= 1) {
+#pragma unroll
+    for (int i = 0; i < 16; ++i) {
+      if ((i & stride) == 0) {
+        const float a = f[i];
+        const float b = f[i + stride];
+        f[i] = a + b;
+        f[i + stride] = a - b;
+      }
+    }
+  }
+#pragma unroll
+  for (int i = 0; i < 16; ++i) {
+    f[i] *= 0.25f;
+  }
+}
+
 template <bool COMPUTE_ACTIVATIONS, typename ParamOP, float (*OP)(float, const ParamOP &),
-          typename IType, bool USE_STOCHASTIC_ROUNDING, bool RETURN_TRANSPOSE>
+          typename IType, bool USE_STOCHASTIC_ROUNDING, bool RETURN_TRANSPOSE,
+          bool COLWISE_RHT = false>
 __global__ void __launch_bounds__(THREADS_NUM)
     group_quantize_transpose_nvfp4_kernel(const __grid_constant__ CUtensorMap tensor_map_input,
                                           const __grid_constant__ CUtensorMap tensor_map_output,
                                           nvfp4_scale_t *const scales_ptr, const float *noop,
                                           const size_t rows, const size_t cols,
                                           const size_t scale_stride, const size_t *rng_state,
-                                          MultiAmaxCastTransposeFusionArgs kernel_args) {
+                                          MultiAmaxCastTransposeFusionArgs kernel_args,
+                                          const uint16_t rht_sign_mask_t) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   constexpr bool NO_ACTIVATIONS_NOT_FP32_INPUT =
       (!COMPUTE_ACTIVATIONS) && (!std::is_same_v<IType, float>);
@@ -217,7 +249,6 @@ __global__ void __launch_bounds__(THREADS_NUM)
   const size_t tid_Y_rowwise = threadIdx.x / THREADS_X_ROWWISE;
   const size_t tid_X_rowwise = threadIdx.x % THREADS_X_ROWWISE;
   const size_t tid_X_colwise = threadIdx.x;
-  const size_t tid_Y_t = tid_X_colwise;
   // const size_t tid_X_t = 0;
 
   const size_t thread_offset_Y_rowwise = tid_Y_rowwise;
@@ -252,14 +283,8 @@ __global__ void __launch_bounds__(THREADS_NUM)
 
   constexpr size_t buff_size_aligned_in =
       DIVUP_TO_MULTIPLE(buff_elems_total * sizeof(IType), TMA_SHMEM_ALIGNMENT);
-  constexpr size_t buff_size_aligned_out =
-      DIVUP_TO_MULTIPLE((buff_elems_total * 4) / 8, TMA_SHMEM_ALIGNMENT);
 
   constexpr size_t in_mem = buff_size_aligned_in;
-
-  constexpr size_t out_mem_rowwise_data = buff_size_aligned_out;
-  constexpr size_t out_mem_colwise_data = buff_size_aligned_out;
-  constexpr size_t out_mem_rowwise_scales = 0;
 
   extern __shared__ char dynamic_shmem[];
   // Manually align dynamic SHMEM per TMA requirements using padding
@@ -269,12 +294,6 @@ __global__ void __launch_bounds__(THREADS_NUM)
   // The destination shared memory buffer of a bulk tensor operation should be 16-byte aligned
   IType *in_sh = reinterpret_cast<IType *>(dshmem);
   fp4e2m1x2 *out_data_sh = reinterpret_cast<fp4e2m1x2 *>(dshmem + in_mem);
-  fp4e2m1x2 *out_t_data_sh = reinterpret_cast<fp4e2m1x2 *>(dshmem + in_mem + out_mem_rowwise_data);
-
-  nvfp4_scale_t *out_rowwise_scales_sh = reinterpret_cast<nvfp4_scale_t *>(
-      dshmem + in_mem + out_mem_rowwise_data + out_mem_colwise_data);
-  nvfp4_scale_t *out_colwise_scales_sh = reinterpret_cast<nvfp4_scale_t *>(
-      dshmem + in_mem + out_mem_rowwise_data + out_mem_colwise_data + out_mem_rowwise_scales);
   IType *cached_act_sh = in_sh;  // in_sh is used as a cache buffer
 
   constexpr size_t shmem_buff_size = buff_size_aligned_in / BUFFS_NUM;
@@ -300,9 +319,22 @@ __global__ void __launch_bounds__(THREADS_NUM)
   float S_dec_rowwise = 1.0f;
   UpdateEncodeDecodeScaleFP32(amax_rowwise_ptr, &S_enc_rowwise, &S_dec_rowwise);
 
-  // TODO (zhongbo): colwise scaling disabled for now because of transpose
   float S_enc_colwise = 1.0f;
   float S_dec_colwise = 1.0f;
+  // Columnwise output bindings. The transposed data of a split lands in that
+  // split's own buffers, so these follow the tensor id rather than a shared
+  // output tensor map.
+  uint8_t *split_colwise_data_ptr = nullptr;
+  nvfp4_scale_t *split_colwise_scale_ptr = nullptr;
+  size_t split_colwise_scale_stride = 0;
+  if constexpr (RETURN_TRANSPOSE) {
+    amax_colwise_ptr = reinterpret_cast<float *>(kernel_args.colwise_amax_list[tensor_id]);
+    split_colwise_data_ptr =
+        reinterpret_cast<uint8_t *>(kernel_args.output_colwise_data_list[tensor_id]);
+    split_colwise_scale_ptr =
+        reinterpret_cast<nvfp4_scale_t *>(kernel_args.output_colwise_scale_inv_list[tensor_id]);
+    split_colwise_scale_stride = kernel_args.output_colwise_scale_stride[tensor_id];
+  }
   if (amax_colwise_ptr != nullptr) {
     UpdateEncodeDecodeScaleFP32(amax_colwise_ptr, &S_enc_colwise, &S_dec_colwise);
   } else {
@@ -329,7 +361,6 @@ __global__ void __launch_bounds__(THREADS_NUM)
 
     const size_t buff_offset_in = buff * BUFF_IN_SIZE;
     const size_t buff_offset_out = buff * BUFF_OUT_SIZE;
-    const size_t buff_offset_out_t = buff * BUFF_OUT_T_SIZE;
 
     // for stages from 1 to STAGES - 1, we need to update the tensor id
     // skip updating tensor id if it's the last CTA, and some stages will be out of bounds
@@ -343,8 +374,15 @@ __global__ void __launch_bounds__(THREADS_NUM)
         UpdateEncodeDecodeScaleFP32(amax_rowwise_ptr, &S_enc_rowwise, &S_dec_rowwise);
         split_rowwise_scale_ptr =
             reinterpret_cast<nvfp4_scale_t *>(kernel_args.output_rowwise_scale_inv_list[tensor_id]);
-        // TODO (zhongbo): colwise scaling disabled for now because of transpose
-        // Skip fetching colwise amax pointer and scaling factor updates
+        if constexpr (RETURN_TRANSPOSE) {
+          amax_colwise_ptr = reinterpret_cast<float *>(kernel_args.colwise_amax_list[tensor_id]);
+          UpdateEncodeDecodeScaleFP32(amax_colwise_ptr, &S_enc_colwise, &S_dec_colwise);
+          split_colwise_data_ptr =
+              reinterpret_cast<uint8_t *>(kernel_args.output_colwise_data_list[tensor_id]);
+          split_colwise_scale_ptr = reinterpret_cast<nvfp4_scale_t *>(
+              kernel_args.output_colwise_scale_inv_list[tensor_id]);
+          split_colwise_scale_stride = kernel_args.output_colwise_scale_stride[tensor_id];
+        }
       }
     }
 
@@ -377,13 +415,8 @@ __global__ void __launch_bounds__(THREADS_NUM)
         const size_t in_thread_offset_Y = 0 + it * SCALE_DIM;
         const size_t in_thread_offset_X = thread_offset_X_colwise;
 
-        const size_t out_t_thread_offset_Y = thread_offset_X_colwise;
-        const size_t out_t_thread_offset_X = 0 + it * BUFF_OUT_IT_OFFSET;
-
         const size_t shmem_offset_base_colwise_in =
             buff_offset_in + in_thread_offset_Y * BUFF_IN_DIM_X + in_thread_offset_X;
-        const size_t shmem_offset_base_colwise_out_t =
-            buff_offset_out_t + out_t_thread_offset_Y * BUFF_OUT_T_DIM_X + out_t_thread_offset_X;
 
         block_amax = 0.0f;
         float in_compute_colwise[SCALE_DIM];
@@ -391,11 +424,29 @@ __global__ void __launch_bounds__(THREADS_NUM)
         // 1. Read/Compute elements. Find NVFP4-block AMAX
         if constexpr (NO_ACTIVATIONS_NOT_FP32_INPUT) {
           IType block_amax_f16 = static_cast<IType>(0.0f);
+          if constexpr (COLWISE_RHT) {
+            // Transform the 16-row column chunk in fp32, round back to IType so
+            // the values match what the unfused path materializes, and take the
+            // block amax after the transform.
+            float v[SCALE_DIM];
 #pragma unroll
-          for (int i = 0; i < SCALE_DIM; ++i) {
-            const int shmem_offset_colwise = shmem_offset_base_colwise_in + i * BUFF_IN_DIM_X;
-            in_colwise_IType[i] = in_sh[shmem_offset_colwise];
-            block_amax_f16 = __hmax(block_amax_f16, __habs(in_colwise_IType[i]));
+            for (int i = 0; i < SCALE_DIM; ++i) {
+              const int shmem_offset_colwise = shmem_offset_base_colwise_in + i * BUFF_IN_DIM_X;
+              v[i] = static_cast<float>(in_sh[shmem_offset_colwise]);
+            }
+            group_rht_16pt(v, rht_sign_mask_t);
+#pragma unroll
+            for (int i = 0; i < SCALE_DIM; ++i) {
+              in_colwise_IType[i] = static_cast<IType>(v[i]);
+              block_amax_f16 = __hmax(block_amax_f16, __habs(in_colwise_IType[i]));
+            }
+          } else {
+#pragma unroll
+            for (int i = 0; i < SCALE_DIM; ++i) {
+              const int shmem_offset_colwise = shmem_offset_base_colwise_in + i * BUFF_IN_DIM_X;
+              in_colwise_IType[i] = in_sh[shmem_offset_colwise];
+              block_amax_f16 = __hmax(block_amax_f16, __habs(in_colwise_IType[i]));
+            }
           }
           block_amax = static_cast<float>(block_amax_f16);
         } else {
@@ -432,10 +483,20 @@ __global__ void __launch_bounds__(THREADS_NUM)
         const nvfp4_scale_t S_dec_b_fp8 =
             compute_decoding_scaling_factor(block_amax, S_enc_colwise);
 
-        // Store scaling factors through SHMEM
-        const size_t scale_idx_sh =
-            tid_Y_t * SCALES_PER_CHUNK_Y + stage * ITERATIONS_TRANSPOSE + it;
-        out_colwise_scales_sh[scale_idx_sh] = S_dec_b_fp8;
+        // Transposed coordinates: this thread's column is a row of the split's
+        // columnwise output, and the 16-row chunk is 16 consecutive elements
+        // (8 bytes of FP4) along that row.
+        const size_t global_row_start = block_offset_Y + stage_offset_Y + it * SCALE_DIM;
+        const size_t local_row_start = global_row_start - split_start;
+        const size_t split_rows_t = split_end - split_start;
+        const bool colwise_in_bounds =
+            !col_out_of_bounds_colwise && (global_row_start + SCALE_DIM <= rows);
+
+        if (colwise_in_bounds && split_colwise_scale_ptr != nullptr) {
+          const size_t scale_idx_t =
+              col_base_colwise * split_colwise_scale_stride + local_row_start / SCALE_DIM;
+          split_colwise_scale_ptr[scale_idx_t] = S_dec_b_fp8;
+        }
 
         // Compute "correct" per-block encoding scaling factor
         constexpr float float_max = detail::TypeExtrema<float>::max;
@@ -461,26 +522,14 @@ __global__ void __launch_bounds__(THREADS_NUM)
           }
         }
 
-        const int group = thread_lane / 16;
-        uint32_t val[2];
-        uint32_t *regs_4x = reinterpret_cast<uint32_t *>(regs);
-
-        // Helps reducing bank conflicts
-        switch (group) {
-          case 0:
-            val[0] = regs_4x[0];
-            val[1] = regs_4x[1];
-            break;
-          case 1:
-            val[0] = regs_4x[1];
-            val[1] = regs_4x[0];
-
-            break;
+        // 16 FP4 values are 8 contiguous bytes of the split's columnwise data at
+        // (row = col_base_colwise, cols = [local_row_start, local_row_start+16)).
+        // 128-row-aligned splits keep this store 8-byte aligned.
+        if (colwise_in_bounds && split_colwise_data_ptr != nullptr) {
+          const size_t byte_offset = (col_base_colwise * split_rows_t + local_row_start) / 2;
+          *reinterpret_cast<uint64_t *>(split_colwise_data_ptr + byte_offset) =
+              *reinterpret_cast<uint64_t *>(regs);
         }
-        uint32_t *out_t_data_sh_as_uint32_t =
-            reinterpret_cast<uint32_t *>(&out_t_data_sh[shmem_offset_base_colwise_out_t]);
-        out_t_data_sh_as_uint32_t[group] = val[0];            // idx1 = (group + 0) % 2;
-        out_t_data_sh_as_uint32_t[(group + 1) & 1] = val[1];  // idx2 = (group + 1) % 2;
       }
     }
 
@@ -686,45 +735,14 @@ __global__ void __launch_bounds__(THREADS_NUM)
       const size_t global_offset_Y = block_offset_Y + stage_offset_Y;
       const size_t global_offset_X = block_offset_X;
 
-      // TODO(zhongbo): add back when transpose is supported
-      // const size_t global_offset_Y_t = block_offset_Y_t;
-      // const size_t global_offset_X_t = block_offset_X_t + stage_offset_Y;
-
       ptx::cp_async_bulk_tensor_2d_shared_to_global(
           reinterpret_cast<const uint64_t *>(&tensor_map_output), global_offset_X, global_offset_Y,
           reinterpret_cast<uint64_t *>(&out_data_sh[buff_offset_out]));
-
-      // TODO(zhongbo): add back when transpose is supported
-      // if constexpr (RETURN_TRANSPOSE) {
-      //   ptx::cp_async_bulk_tensor_2d_shared_to_global(
-      //       reinterpret_cast<const uint64_t *>(&tensor_map_output_t), global_offset_X_t,
-      //       global_offset_Y_t, reinterpret_cast<uint64_t *>(&out_t_data_sh[buff_offset_out_t]));
-      // }
 
       // Create a "bulk async-group" out of the previous bulk copy operation.
       ptx::cp_async_bulk_commit_group();
     }
   }  // end of stages
-
-  // TODO(zhongbo): add back when transpose is supported
-  // Vectorized store scaling factors through SHMEM
-  // if (RETURN_TRANSPOSE && colwise_scale_is_within_bounds_Y) {
-  //   using ScalesVec = Vec<nvfp4_scale_t, SCALES_PER_CHUNK_Y>;
-  //   const size_t scale_idx_sh = tid_Y_t * SCALES_PER_CHUNK_Y;
-  //   ScalesVec &scales_vec = *reinterpret_cast<ScalesVec *>(&out_colwise_scales_sh[scale_idx_sh]);
-  //   const size_t scale_idx_global = scales_offset_Y_t * scale_stride_t + scales_offset_X_t;
-  //   const size_t count =  // number of scales in Y dimension of this chunk
-  //       (chunk_rows >= CHUNK_DIM_Y) ? SCALES_PER_CHUNK_Y : (chunk_rows / SCALE_DIM);
-  //   nvfp4_scale_t *dst = &scales_t_ptr[scale_idx_global];
-  //   constexpr size_t vec_bytes = SCALES_PER_CHUNK_Y * sizeof(nvfp4_scale_t);
-  //   if (count == SCALES_PER_CHUNK_Y && (reinterpret_cast<uintptr_t>(dst) % vec_bytes == 0)) {
-  //     // Fast path: vectorized store when destination is properly aligned
-  //     scales_vec.store_to(dst);
-  //   } else {
-  //     // Safe path: element-wise store for tails or unaligned destinations
-  //     scales_vec.store_to_elts(dst, 0, count);
-  //   }
-  // }
 
   destroy_barriers<STAGES>(mbar, is_master_thread);
 #else
@@ -765,8 +783,28 @@ void group_quantize_transpose(const Tensor &input, const Tensor *noop,
   // If transposed output is allocated, return the transposed data. Otherwise, it's not necesary to
   // return the transposed data.
   bool return_transpose = output->has_columnwise_data();
-  // forbid return transpose for now because group quantize transpose is not supported yet
-  NVTE_CHECK(!return_transpose, "Return transpose is not supported for group quantize transpose.");
+  const bool colwise_rht = quant_config ? quant_config->nvfp4_colwise_rht : false;
+  const uint16_t rht_sign_mask_t = quant_config ? quant_config->nvfp4_rht_sign_mask_t : 0;
+  NVTE_CHECK(!colwise_rht || return_transpose,
+             "Columnwise RHT fusion requires a columnwise (transposed) output.");
+  if (return_transpose) {
+    // Only the columnwise RHT entry point writes the transposed output. Generic grouped
+    // quantize keeps the refusal it has today, on every architecture.
+    NVTE_CHECK(colwise_rht, "Return transpose is not supported for group quantize transpose.");
+    // The SM100 family has its own RHT cast-fusion kernels and never reaches this path.
+    const int sm = transformer_engine::cuda::sm_arch();
+    NVTE_CHECK(sm < 100 || sm > 110,
+               "Columnwise RHT group quantize is not supported on this architecture.");
+    // Each split writes its own transposed buffer, and a split boundary is only
+    // resolved once per 128-row chunk, so splits must be 128-row aligned.
+    for (size_t i = 0; i < num_tensors; ++i) {
+      NVTE_CHECK(split_sections[i] % CHUNK_DIM_Y == 0,
+                 "Group quantize with transposed output requires splits that are multiples of ",
+                 CHUNK_DIM_Y, ", but split ", i, " has ", split_sections[i], " rows.");
+    }
+    NVTE_CHECK(!output->row_scaled_nvfp4,
+               "Group quantize with transposed output does not support row-scaled NVFP4.");
+  }
 
   // output_List is contiguous in memory, so take the first tensor as the contiguous output
   auto output_contiguous = output->data;
@@ -800,6 +838,16 @@ void group_quantize_transpose(const Tensor &input, const Tensor *noop,
         reinterpret_cast<void *>(output_list[i]->amax.dptr);
     kernel_args.output_rowwise_scale_inv_list[kernel_args.num_tensors] =
         reinterpret_cast<void *>(output_list[i]->scale_inv.dptr);
+    if (return_transpose) {
+      kernel_args.colwise_amax_list[kernel_args.num_tensors] =
+          reinterpret_cast<void *>(output_list[i]->columnwise_amax.dptr);
+      kernel_args.output_colwise_data_list[kernel_args.num_tensors] =
+          reinterpret_cast<void *>(output_list[i]->columnwise_data.dptr);
+      kernel_args.output_colwise_scale_inv_list[kernel_args.num_tensors] =
+          reinterpret_cast<void *>(output_list[i]->columnwise_scale_inv.dptr);
+      kernel_args.output_colwise_scale_stride[kernel_args.num_tensors] =
+          static_cast<int>(output_list[i]->columnwise_scale_inv.shape[1]);
+    }
     // kernel_args.split_sections[kernel_args.num_tensors] = split_sections[i];
     kernel_args.split_sections_range[kernel_args.num_tensors + 1] =
         kernel_args.split_sections_range[kernel_args.num_tensors] + split_sections[i];
@@ -858,37 +906,34 @@ void group_quantize_transpose(const Tensor &input, const Tensor *noop,
       DIVUP_TO_MULTIPLE(buff_elems_total * sizeof(IType), TMA_SHMEM_ALIGNMENT);
   constexpr size_t buff_size_aligned_out =
       DIVUP_TO_MULTIPLE((buff_elems_total * 4) / 8, TMA_SHMEM_ALIGNMENT);
-  constexpr size_t buff_size_scales = (CHUNK_DIM_Y * CHUNK_DIM_X) / 16 * sizeof(nvfp4_scale_t);
-
   constexpr size_t in_mem = buff_size_aligned_in;
 
   constexpr size_t out_data_mem = buff_size_aligned_out;
-  constexpr size_t out_data_transpose_mem = buff_size_aligned_out;
-  constexpr size_t out_scales_transpose_mem = buff_size_scales;
 
-  constexpr size_t out_mem = out_data_mem + out_data_transpose_mem;
-
-  constexpr size_t dshmem_size = in_mem + out_mem + out_scales_transpose_mem + TMA_SHMEM_ALIGNMENT;
+  constexpr size_t dshmem_size = in_mem + out_data_mem + TMA_SHMEM_ALIGNMENT;
 
   TRANSFORMER_ENGINE_SWITCH_CONDITION(
       use_stochastic_rounding, USE_STOCHASTIC_ROUNDING,
 
-      TRANSFORMER_ENGINE_SWITCH_CONDITION(return_transpose, RETURN_TRANSPOSE, {
-        auto kernel =
-            group_quantize_transpose_nvfp4_kernel<COMPUTE_ACTIVATIONS, ParamOP, OP, IType,
-                                                  USE_STOCHASTIC_ROUNDING, RETURN_TRANSPOSE>;
+      TRANSFORMER_ENGINE_SWITCH_CONDITION(
+          return_transpose, RETURN_TRANSPOSE,
 
-        if constexpr (use_2d_quantization) {
-          NVTE_ERROR("2D quantization is not supported for group quantize transpose.");
-        }
+          TRANSFORMER_ENGINE_SWITCH_CONDITION(colwise_rht, COLWISE_RHT, {
+            auto kernel = group_quantize_transpose_nvfp4_kernel<COMPUTE_ACTIVATIONS, ParamOP, OP,
+                                                                IType, USE_STOCHASTIC_ROUNDING,
+                                                                RETURN_TRANSPOSE, COLWISE_RHT>;
 
-        NVTE_CHECK_CUDA(
-            cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size));
-        kernel<<<grid, block_size, dshmem_size, stream>>>(tensor_map_input, tensor_map_output,
-                                                          scales_ptr, noop_ptr, rows, cols,
-                                                          scale_stride, rng_state, kernel_args);
-        NVTE_CHECK_CUDA(cudaGetLastError());
-      }););
+            if constexpr (use_2d_quantization) {
+              NVTE_ERROR("2D quantization is not supported for group quantize transpose.");
+            }
+
+            NVTE_CHECK_CUDA(cudaFuncSetAttribute(
+                kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size));
+            kernel<<<grid, block_size, dshmem_size, stream>>>(
+                tensor_map_input, tensor_map_output, scales_ptr, noop_ptr, rows, cols, scale_stride,
+                rng_state, kernel_args, rht_sign_mask_t);
+            NVTE_CHECK_CUDA(cudaGetLastError());
+          });););
 #else
   NVTE_ERROR("FP4 support requires CUDA 12.8+, but compile-time CUDA version is ", CUDA_VERSION);
 #endif  // FP4_TYPE_SUPPORTED

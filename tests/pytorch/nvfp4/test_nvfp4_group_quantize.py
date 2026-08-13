@@ -274,3 +274,132 @@ def test_rht_split_quantize_matches_per_tensor_reference(quantize_mode: str) -> 
         split_sections=split_sections,
         with_rht=True,
     )
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.parametrize("N", [512, 2048])
+@pytest.mark.parametrize(
+    "split_sections",
+    [
+        [128, 128, 128, 128],
+        [256, 512, 128, 384],
+        [0, 256, 256, 0],
+        [0, 128, 0, 256, 128, 0, 384, 128],
+        [192, 320],
+        [64, 64, 192, 192],
+    ],
+    ids=[
+        "aligned",
+        "mixed_aligned",
+        "empty_ends",
+        "empty_mixed",
+        "unaligned",
+        "small_unaligned",
+    ],
+)
+def test_rht_split_quantize_grouped_matches_unfused(monkeypatch, split_sections, N) -> None:
+    # split_quantize folds the RHT into the columnwise pass in one grouped launch when
+    # every split is a multiple of 128 rows, and quantizes each split on its own
+    # otherwise. Empty splits are dropped from the grouped launch. Both routes have to
+    # produce the same bytes.
+    x = torch.randn((sum(split_sections), N), dtype=torch.bfloat16, device="cuda")
+
+    def run(disable_grouped: bool):
+        monkeypatch.setenv("NVTE_NVFP4_DISABLE_GROUPED_RHT", "1" if disable_grouped else "0")
+        quantizers = [
+            NVFP4Quantizer(
+                fp4_dtype=te.DType.kFloat4E2M1,
+                rowwise=True,
+                columnwise=True,
+                with_rht=True,
+                with_post_rht_amax=True,
+            )
+            for _ in split_sections
+        ]
+        return [
+            {
+                "rowwise_data": out._rowwise_data.view(dtype=torch.uint8).clone(),
+                "columnwise_data": out._columnwise_data.view(dtype=torch.uint8).clone(),
+                "amax_rowwise": out._amax_rowwise.clone(),
+                "amax_columnwise": out._amax_columnwise.clone(),
+                "rowwise_scale_inv": out._rowwise_scale_inv.clone(),
+                "columnwise_scale_inv": out._columnwise_scale_inv.clone(),
+            }
+            for out in tex.split_quantize(x, split_sections, quantizers)
+        ]
+
+    torch.manual_seed(0)
+    unfused = run(True)
+    fused = run(False)
+
+    x_splits = torch.split(x, split_sections)
+    for i, rows in enumerate(split_sections):
+        if rows == 0:
+            continue
+        for key in ("rowwise_data", "columnwise_data", "amax_rowwise", "amax_columnwise"):
+            torch.testing.assert_close(fused[i][key], unfused[i][key], atol=0.0, rtol=0.0)
+        # Scale buffers are allocated with padded shapes and neither route writes the
+        # padding, so compare only the region both of them define.
+        for key, columnwise in (("rowwise_scale_inv", False), ("columnwise_scale_inv", True)):
+            valid = get_nvfp4_scale_shape_no_padding(x_splits[i].shape, columnwise)
+            torch.testing.assert_close(
+                fused[i][key][: valid[0], : valid[1]],
+                unfused[i][key][: valid[0], : valid[1]],
+                atol=0.0,
+                rtol=0.0,
+            )
+
+
+def _grouped_kernel_names(split_sections, N, columnwise_per_split):
+    # Kernel names, not output bytes: TE allocates every split's columnwise buffer
+    # regardless of that split's own columnwise_usage flag, and rowwise output does
+    # not depend on columnwise_usage, so a heterogeneous list that wrongly takes the
+    # grouped path can still produce byte-identical rowwise output to the per-split
+    # path on some shapes. Which kernel launched is the property that actually
+    # distinguishes the two routes; see the launch-count table in the PR body.
+    x = torch.randn((sum(split_sections), N), dtype=torch.bfloat16, device="cuda")
+    quantizers = [
+        NVFP4Quantizer(
+            fp4_dtype=te.DType.kFloat4E2M1,
+            rowwise=True,
+            columnwise=columnwise_per_split[i],
+            with_rht=True,
+            with_post_rht_amax=True,
+        )
+        for i in range(len(split_sections))
+    ]
+    torch.cuda.synchronize()
+    with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CUDA]) as prof:
+        tex.split_quantize(x, split_sections, quantizers)
+        torch.cuda.synchronize()
+    return {e.key for e in prof.key_averages() if e.count > 0}
+
+
+def _launched_grouped_kernel(names):
+    return any(
+        "GroupHadamardAmaxTma" in n or "group_quantize_transpose_nvfp4_kernel" in n for n in names
+    )
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+def test_rht_split_quantize_grouped_kernel_engages_when_uniform() -> None:
+    # Positive control for the test below: with every split asking for the same
+    # usage, the grouped path is eligible and must be the one that runs.
+    split_sections = [128, 128, 128, 128]
+    names = _grouped_kernel_names(split_sections, 256, [True] * len(split_sections))
+    assert _launched_grouped_kernel(names)
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+def test_rht_split_quantize_declines_grouped_on_mismatched_quantizers() -> None:
+    # The grouped launch reads its usage flags, with_post_rht_amax, row_scaled_nvfp4,
+    # nvfp4_4over6_mode, stochastic_rounding and the RHT sign mask from quantizers[0]
+    # alone, and GroupedLinear builds one independent NVFP4Quantizer per expert.
+    # rowwise_usage and columnwise_usage are the one axis TE's own cross-expert
+    # validator explicitly allows to differ, so this is the realistic case: split 1
+    # asks for rowwise only, the rest ask for both. The grouped path must decline to
+    # the per-split loop, which reads each split's own quantizer.
+    split_sections = [128, 128, 128, 128]
+    columnwise = [i != 1 for i in range(len(split_sections))]
+    names = _grouped_kernel_names(split_sections, 256, columnwise)
+    assert not _launched_grouped_kernel(names)
