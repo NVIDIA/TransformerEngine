@@ -27,9 +27,11 @@ from transformer_engine.pytorch import (
 from transformer_engine.pytorch.attention.dot_product_attention import (
     _attention_backends,
 )
+import transformer_engine.pytorch.attention.dot_product_attention.utils as dpa_utils
 from transformer_engine.pytorch.attention.dot_product_attention.utils import (
     FlashAttentionUtils,
     check_set_window_size,
+    should_pad_qkv_head_dim,
 )
 from transformer_engine.pytorch.attention import RotaryPositionEmbedding
 import transformer_engine.pytorch.cpp_extensions as ext
@@ -638,6 +640,67 @@ model_configs_mla = {
 def test_dpa_mla(dtype, model_configs, model):
     """Test DotProductAttention module with Multi-Latent Attention (MLA)"""
     test_dot_product_attention(dtype, model_configs, model, True, None, False, False)
+
+
+@pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
+@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("model_configs", [model_configs_mla])
+@pytest.mark.parametrize("model", model_configs_mla.keys())
+def test_dpa_mla_should_pad(dtype, model_configs, model):
+    """Test whether optional padding works correctly.
+
+    It either pads (1) in case it's required for a functioning kernel or (2) to select a faster
+    backend. Otherwise padding should be avoided since it becomes redundant.
+    """
+
+    def make_attn_params(head_dim_qk, head_dim_v):
+        return dpa_utils.AttentionParams(
+            qkv_dtype=dtype,
+            qkv_layout="thd_thd_thd",
+            num_heads=config.num_heads,
+            num_gqa_groups=config.num_gqa_groups,
+            max_seqlen_q=config.max_seqlen_q,
+            max_seqlen_kv=config.max_seqlen_kv,
+            head_dim_qk=head_dim_qk,
+            head_dim_v=head_dim_v,
+            attn_mask_type=config.attn_mask_type,
+            is_training=True,
+        )
+
+    config = model_configs[model]
+    native_attn_params = make_attn_params(config.head_dim_qk, config.head_dim_v)
+    if config.head_dim_qk != config.head_dim_v:
+        native_backend = dpa_utils.get_attention_backend(native_attn_params)
+        native_flash_attention_backend = native_backend[1]
+        native_use_unfused_attention = native_backend[4]
+
+        padded_head_dim = max(config.head_dim_qk, config.head_dim_v)
+        padded_attn_params = make_attn_params(padded_head_dim, padded_head_dim)
+        padded_backend = dpa_utils.get_attention_backend(padded_attn_params)
+        padded_use_flash_attention = padded_backend[0]
+        padded_use_fused_attention = padded_backend[2]
+
+        if native_flash_attention_backend == FlashAttentionUtils.version:
+            # FA2 needs padding.
+            assert should_pad_qkv_head_dim(
+                native_attn_params
+            ), "did not suggest padding when required for functioning kernel"
+        elif native_use_unfused_attention and (
+            padded_use_flash_attention or padded_use_fused_attention
+        ):
+            # Native is unfused and a fused backend is available via padding.
+            assert should_pad_qkv_head_dim(
+                native_attn_params
+            ), "did not suggest padding when faster kernel was available"
+        else:
+            # Native is already fused, so we don't want to pad.
+            assert not should_pad_qkv_head_dim(
+                native_attn_params
+            ), "suggested padding when no faster kernel was available"
+    else:
+        assert not should_pad_qkv_head_dim(
+            native_attn_params
+        ), "suggested padding already equal-sized QK/V"
 
 
 model_configs_mask = {
