@@ -44,9 +44,7 @@ def cross_entropy_forward(
     )
     loss_1d = torch.empty(n_rows, dtype=torch.float32, device=_input.device)
     stats = torch.empty((n_rows, 2), dtype=torch.float32, device=_input.device)
-    n_non_ignore = (
-        torch.zeros(1, dtype=torch.int64, device=_input.device) if reduce_loss else None
-    )
+    n_non_ignore = torch.zeros(1, dtype=torch.int64, device=_input.device) if reduce_loss else None
 
     rank = 0 if dist_process_group is None else dist.get_rank(dist_process_group)
     world_size = 1 if dist_process_group is None else dist.get_world_size(dist_process_group)
