@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 """Methods needed for distributed training (DP/TP)."""
+
 from __future__ import annotations
 
 from collections.abc import Iterable
@@ -50,7 +51,6 @@ from .tensor.storage.nvfp4_tensor_storage import NVFP4TensorStorage
 from .tensor.storage.float8_blockwise_tensor_storage import Float8BlockwiseQTensorStorage
 from ..debug.pytorch.debug_quantization import DebugQuantizedTensor
 
-
 __all__ = ["checkpoint", "CudaRNGStatesTracker"]
 
 
@@ -62,8 +62,8 @@ _MODEL_PARALLEL_ATTRIBUTE_DEFAULTS = {
 
 _USE_REENTRANT_ACTIVATION_RECOMPUTE = True
 
-_FP8_ACTIVATION_RECOMPUTE_ENABLED = False
-_FP8_ACTIVATION_RECOMPUTE_PHASE = False
+_IN_ACTIVATION_RECOMPUTE_REGION = False
+_ACTIVATION_RECOMPUTE_PHASE = False
 
 
 _ALL_ACTIVE_RNG_STATES = {}
@@ -255,11 +255,14 @@ class activation_recompute_forward(AbstractContextManager, ContextDecorator):
         self.recompute_phase = recompute_phase
 
     def __enter__(self):
-        global _FP8_ACTIVATION_RECOMPUTE_ENABLED, _FP8_ACTIVATION_RECOMPUTE_PHASE
-        _FP8_ACTIVATION_RECOMPUTE_ENABLED = (
-            self.activation_recompute and FP8GlobalStateManager.is_fp8_enabled()
-        )
-        _FP8_ACTIVATION_RECOMPUTE_PHASE = self.recompute_phase
+        global _IN_ACTIVATION_RECOMPUTE_REGION, _ACTIVATION_RECOMPUTE_PHASE
+        # Track the checkpoint region independently of the FP8 state at entry.
+        # A checkpointed callable may open its own FP8 autocast context (for
+        # example, to select precision per layer). Delayed-scaling modules in
+        # that inner context must still save their scale and amax metadata for
+        # the recompute forward.
+        _IN_ACTIVATION_RECOMPUTE_REGION = self.activation_recompute
+        _ACTIVATION_RECOMPUTE_PHASE = self.recompute_phase
 
         qstate = FP8GlobalStateManager.quantization_state
         if self.activation_recompute and not self.recompute_phase:
@@ -268,19 +271,19 @@ class activation_recompute_forward(AbstractContextManager, ContextDecorator):
             qstate.is_first_fp8_module = activation_recompute_forward._is_first_fp8_module.pop(0)
 
     def __exit__(self, *exc_details):
-        global _FP8_ACTIVATION_RECOMPUTE_ENABLED, _FP8_ACTIVATION_RECOMPUTE_PHASE
-        _FP8_ACTIVATION_RECOMPUTE_ENABLED = False
-        _FP8_ACTIVATION_RECOMPUTE_PHASE = False
+        global _IN_ACTIVATION_RECOMPUTE_REGION, _ACTIVATION_RECOMPUTE_PHASE
+        _IN_ACTIVATION_RECOMPUTE_REGION = False
+        _ACTIVATION_RECOMPUTE_PHASE = False
 
 
 def is_fp8_activation_recompute_enabled() -> bool:
-    """Return global boolean"""
-    return _FP8_ACTIVATION_RECOMPUTE_ENABLED
+    """Whether we are in an activation recompute region with FP8 currently enabled"""
+    return _IN_ACTIVATION_RECOMPUTE_REGION and FP8GlobalStateManager.is_fp8_enabled()
 
 
 def in_fp8_activation_recompute_phase() -> bool:
     """Return global boolean"""
-    return _FP8_ACTIVATION_RECOMPUTE_PHASE
+    return _ACTIVATION_RECOMPUTE_PHASE
 
 
 def _get_active_autocast_contexts():
@@ -1882,6 +1885,11 @@ def get_symmetric_memory_tensor(tensor_numel, tensor_dtype, tensor_device, tp_gr
 
 _SYMM_MEM_POOL = None
 _SYMM_MEM_POOL_BACKEND = None
+# Device the pool was created for; the torch symm_mem._symm_mem_pools cache is keyed by it.
+_SYMM_MEM_POOL_DEVICE = None
+# True when the pool was created via torch's get_mem_pool, which caches it in the private
+# symm_mem._symm_mem_pools dict; release then has to drop that cached reference.
+_SYMM_MEM_POOL_TORCH_CACHED = False
 
 
 def _get_symm_mem_pool(device: torch.device, backend: str = "NCCL"):
@@ -1890,12 +1898,14 @@ def _get_symm_mem_pool(device: torch.device, backend: str = "NCCL"):
     backend arg, so the (process-global) backend is always set before the pool is created. The
     collective rendezvous cost is amortized across allocations (paid per new segment, not per buffer).
     """
-    global _SYMM_MEM_POOL, _SYMM_MEM_POOL_BACKEND
+    global _SYMM_MEM_POOL, _SYMM_MEM_POOL_BACKEND, _SYMM_MEM_POOL_DEVICE, _SYMM_MEM_POOL_TORCH_CACHED
     if _SYMM_MEM_POOL is None:
         symm_mem.set_backend(backend)
         _SYMM_MEM_POOL_BACKEND = backend
+        _SYMM_MEM_POOL_DEVICE = device
         if hasattr(symm_mem, "get_mem_pool"):
             _SYMM_MEM_POOL = symm_mem.get_mem_pool(device)
+            _SYMM_MEM_POOL_TORCH_CACHED = True
         elif hasattr(torch.cuda, "MemPool") and hasattr(symm_mem, "get_mempool_allocator"):
             _SYMM_MEM_POOL = torch.cuda.MemPool(symm_mem.get_mempool_allocator(device))
         else:
@@ -1909,6 +1919,40 @@ def _get_symm_mem_pool(device: torch.device, backend: str = "NCCL"):
             f"cannot switch to {backend!r}"
         )
     return _SYMM_MEM_POOL
+
+
+def release_symm_mem_pool() -> None:
+    """Free the process-wide symm-mem pool's segments, deregistering their NCCL windows.
+
+    Call before ``dist.destroy_process_group()``: the pool's windows are registered on
+    the group's NCCL comm, which becomes invalid once the group is destroyed. No-op if
+    no pool was created.
+    """
+    global _SYMM_MEM_POOL, _SYMM_MEM_POOL_BACKEND, _SYMM_MEM_POOL_DEVICE, _SYMM_MEM_POOL_TORCH_CACHED
+    if _SYMM_MEM_POOL is None:
+        return
+    # The torch symm_mem._symm_mem_pools cache is keyed by the pool's creation device.
+    device = _SYMM_MEM_POOL_DEVICE
+    _SYMM_MEM_POOL = None
+    _SYMM_MEM_POOL_BACKEND = None
+    _SYMM_MEM_POOL_DEVICE = None
+    torch_cached = _SYMM_MEM_POOL_TORCH_CACHED
+    _SYMM_MEM_POOL_TORCH_CACHED = False
+    # A pool from torch's get_mem_pool is also cached in the private module dict
+    # symm_mem._symm_mem_pools; drop that reference so the segments' refcount reaches zero
+    # and their NCCL windows deregister. Fail loudly if this internal has changed shape,
+    # otherwise the windows would silently leak past destroy_process_group().
+    if torch_cached:
+        pools = getattr(symm_mem, "_symm_mem_pools", None)
+        if not isinstance(pools, dict) or device not in pools:
+            raise RuntimeError(
+                "torch symmetric-memory pool cache (symm_mem._symm_mem_pools) is missing or "
+                "has changed layout; cannot release the pooled segments and their NCCL windows "
+                "would leak past destroy_process_group(). This torch version needs an updated "
+                "release_symm_mem_pool()."
+            )
+        pools.pop(device, None)
+    torch.cuda.empty_cache()
 
 
 def symm_mem_alloc(

@@ -389,6 +389,23 @@ std::optional<SwizzledGroupedScales> maybe_swizzle_grouped_tensor(GroupedTensorW
         tensor_offsets.data_ptr, static_cast<DType>(tensor_offsets.dtype), tensor_offsets.shape);
   }
 
+  // Varying per-tensor dimensions. Leaving these unset declares the grouped tensor uniform,
+  // which selects the uniform-shape swizzle kernel.
+  const auto first_dims = input.get_first_dims();
+  if (first_dims.data_ptr != nullptr) {
+    swizzle_input.set_first_dims(first_dims.data_ptr, static_cast<DType>(first_dims.dtype),
+                                 first_dims.shape);
+    swizzle_output.set_first_dims(first_dims.data_ptr, static_cast<DType>(first_dims.dtype),
+                                  first_dims.shape);
+  }
+  const auto last_dims = input.get_last_dims();
+  if (last_dims.data_ptr != nullptr) {
+    swizzle_input.set_last_dims(last_dims.data_ptr, static_cast<DType>(last_dims.dtype),
+                                last_dims.shape);
+    swizzle_output.set_last_dims(last_dims.data_ptr, static_cast<DType>(last_dims.dtype),
+                                 last_dims.shape);
+  }
+
   // Per-tensor logical dimensions (uniform-shape grouped tensor).
   const size_t num_tensors = input.num_tensors();
   const auto logical_shape_nvte = input.logical_shape();
@@ -398,11 +415,21 @@ std::optional<SwizzledGroupedScales> maybe_swizzle_grouped_tensor(GroupedTensorW
   const size_t per_tensor_last_dim = logical_shape_nvte.data[logical_shape_nvte.ndim - 1];
   constexpr size_t kMxfp8BlockSize = 32;
 
-  // Output is always allocated in the per-tensor padded ("swizzle-ready") layout
-  // so the cuDNN grouped GEMM consumer sees the correct stride between experts.
-  // The swizzle kernel itself handles converting from the kernel-emitted compact
-  // layout (per-tensor first dim is the unpadded value) to this padded layout.
-  auto compute_padded_grouped_scale_shape = [&](bool rowwise) {
+  const bool variable_shape = first_dims.data_ptr != nullptr || last_dims.data_ptr != nullptr;
+
+  // Output is allocated in the layout the swizzle kernel writes so its consumer sees the
+  // correct stride between experts.
+  auto compute_padded_grouped_scale_shape = [&](bool rowwise) -> std::vector<size_t> {
+    if (variable_shape) {
+      // Grouped variable-shape scale storage is a concatenation of per-tensor padded
+      // regions whose sizes live on the device. The swizzle kernel walks input and output
+      // with identical per-group strides, so swizzling is size-preserving and the output
+      // needs exactly the input's shape. The uniform-average formula below would be wrong
+      // here: the average of per-group sizes is generally not tile-aligned, so its
+      // rounded-up total matches neither the kernel's walk nor the input's capacity.
+      const auto &scales = rowwise ? row_scales : col_scales;
+      return nvte_shape_to_vector(scales.shape);
+    }
     const size_t m = rowwise ? per_tensor_first_dim : per_tensor_last_dim;
     const size_t k = rowwise ? per_tensor_last_dim : per_tensor_first_dim;
     const size_t padded_m = ceildiv(m, size_t{128}) * 128;

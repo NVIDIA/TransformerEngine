@@ -342,9 +342,18 @@ model_configs_fa4_base = {
 }
 
 
-@pytest.mark.skipif(
-    not FlashAttentionUtils.v4_is_installed, reason="Flash-attn v4 (flash-attn-4) is required."
+fa4_enabled = bool(int(os.getenv("NVTE_FLASH_ATTN", "1"))) and bool(
+    int(os.getenv("NVTE_FLASH_ATTN_V4", "1"))
 )
+requires_fa4 = pytest.mark.skipif(
+    not fa4_enabled
+    or not FlashAttentionUtils.v4_is_installed
+    or device_compute_capability < (9, 0),
+    reason="Enabled Flash-attn v4 and compute capability >= SM90 are required.",
+)
+
+
+@requires_fa4
 @pytest.mark.parametrize("dtype", param_types_lean)
 @pytest.mark.parametrize("model_configs", [model_configs_fa4_base])
 @pytest.mark.parametrize("model", model_configs_fa4_base.keys())
@@ -363,9 +372,7 @@ model_configs_fa4_hdim256 = {
 }
 
 
-@pytest.mark.skipif(
-    not FlashAttentionUtils.v4_is_installed, reason="Flash-attn v4 (flash-attn-4) is required."
-)
+@requires_fa4
 @pytest.mark.skipif(
     device_compute_capability not in ((10, 0), (10, 3)),
     reason="FA4 head_dim=256 dedicated kernel is SM100/103-only.",
@@ -443,9 +450,7 @@ model_configs_fa4_mla = {
 }
 
 
-@pytest.mark.skipif(
-    not FlashAttentionUtils.v4_is_installed, reason="Flash-attn v4 (flash-attn-4) is required."
-)
+@requires_fa4
 @pytest.mark.parametrize("dtype", param_types_lean)
 @pytest.mark.parametrize("model_configs", [model_configs_fa4_mla])
 @pytest.mark.parametrize("model", model_configs_fa4_mla.keys())
@@ -467,9 +472,7 @@ model_configs_fa4_swa = {
 }
 
 
-@pytest.mark.skipif(
-    not FlashAttentionUtils.v4_is_installed, reason="Flash-attn v4 (flash-attn-4) is required."
-)
+@requires_fa4
 @pytest.mark.parametrize("dtype", param_types_lean)
 @pytest.mark.parametrize("model_configs", [model_configs_fa4_swa])
 @pytest.mark.parametrize("model", model_configs_fa4_swa.keys())
@@ -490,9 +493,7 @@ model_configs_fa4_varlen = {
 }
 
 
-@pytest.mark.skipif(
-    not FlashAttentionUtils.v4_is_installed, reason="Flash-attn v4 (flash-attn-4) is required."
-)
+@requires_fa4
 @pytest.mark.parametrize("dtype", param_types_lean)
 @pytest.mark.parametrize("model_configs", [model_configs_fa4_varlen])
 @pytest.mark.parametrize("model", model_configs_fa4_varlen.keys())
@@ -515,9 +516,7 @@ model_configs_fa4_mask = {
 }
 
 
-@pytest.mark.skipif(
-    not FlashAttentionUtils.v4_is_installed, reason="Flash-attn v4 (flash-attn-4) is required."
-)
+@requires_fa4
 @pytest.mark.parametrize("dtype", param_types_lean)
 @pytest.mark.parametrize("model_configs", [model_configs_fa4_mask])
 @pytest.mark.parametrize("model", model_configs_fa4_mask.keys())

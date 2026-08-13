@@ -9,7 +9,6 @@ import signal
 import subprocess
 import sys
 import threading
-import time
 import pathlib
 import logging
 import copy
@@ -29,7 +28,7 @@ from transformer_engine.common.recipe import (
 from transformer_engine.pytorch.attention.dot_product_attention.utils import FlashAttentionUtils
 
 _current_file = pathlib.Path(__file__).resolve()
-sys.path.append(str(_current_file.parent.parent))
+sys.path = [str(_current_file.parent.parent)] + sys.path
 from utils import ModelConfig, get_available_attention_backends
 
 pytest_logging_level = logging.getLevelName(logging.root.level)
@@ -300,7 +299,10 @@ if test_essential:
     qkv_formats = ["sbhd", "thd"]
 
 
-@pytest.mark.skipif(not FlashAttentionUtils.v2_plus, reason="Flash-attn 2.0+ is required.")
+@pytest.mark.skipif(
+    not (FlashAttentionUtils.v2_plus or FlashAttentionUtils.v3_is_installed),
+    reason="Flash-attn v2 or v3 is required.",
+)
 @pytest.mark.skipif(get_device_compute_capability() < (8, 0), reason="CP tests require sm80+.")
 @pytest.mark.parametrize("dtype", dtypes)
 @pytest.mark.parametrize("model", model_configs_flash_attn.keys())
@@ -336,11 +338,6 @@ def test_cp_with_flash_attention(cp_pool, dtype, model, qkv_format, cp_comm_type
     if config.attn_bias_type != "no_bias" and cp_comm_type in ["all_gather", "a2a", "a2a+p2p"]:
         pytest.skip("No support for bias with cp_comm_type={all_gather, a2a, a2a+p2p}!")
 
-    if qkv_format == "thd" and cp_comm_type == "a2a+p2p":
-        pytest.skip(
-            "CP implementation with QKVO A2A+P2P (Hierarchical A2A) does not support THD format"
-            " yet!"
-        )
     if (
         qkv_format == "thd"
         and cp_comm_type == "all_gather"
@@ -581,12 +578,6 @@ def test_cp_with_fused_attention(
         pytest.skip("No support for bias with THD format!")
     if config.attn_bias_type != "no_bias" and cp_comm_type in ["all_gather", "a2a", "a2a+p2p"]:
         pytest.skip("No support for bias with cp_comm_type={all_gather, a2a, a2a+p2p}!")
-
-    if qkv_format == "thd" and cp_comm_type == "a2a+p2p":
-        pytest.skip(
-            "CP implementation with QKVO A2A+P2P (Hierarchical A2A) does not support THD format"
-            " yet!"
-        )
 
     if (config.window_size[0] != -1 or config.window_size[1] not in [-1, 0]) and cp_comm_type in [
         "p2p",
