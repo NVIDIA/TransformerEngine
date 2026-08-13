@@ -7,7 +7,7 @@
 /*
  * Shared TE EP test infrastructure. Include once per TU; ep_bootstrap() in
  * each test binary's main() populates process-level globals.
- * Defaults: 4 experts/rank, hidden_dim=256, max_tokens_per_rank=64.
+ * Defaults: 4 experts/rank, hidden_dim=512, max_tokens_per_rank=64.
  */
 #pragma once
 
@@ -48,7 +48,7 @@ static int         g_num_processes       = -1;
 static int         g_sm_major            = -1;   // set by ep_bootstrap; -1 until then
 static int         g_ep_size             = -1;
 static int         g_num_experts         = -1;
-static int         g_hidden_dim          = 256;
+static int         g_hidden_dim          = 512;
 static int         g_max_tokens_per_rank = 64;
 static NVTEDType   g_max_token_dtype     = kNVTEFloat32;  // staging-buffer sizing
 static bool        g_ep_initialized      = false;

@@ -563,10 +563,10 @@ def get_attention_backend(
         if use_flash_attention_3 and FlashAttentionUtils.v3_is_installed:
             logger.debug("Disabling FlashAttention 3 for compute capability != sm90")
         use_flash_attention_3 = False
-    # FA4 supports SM80, SM90, SM100, SM120
-    if device_compute_capability < (8, 0):
+    # FA4 does not currently support SM8x.
+    if device_compute_capability < (9, 0):
         if use_flash_attention_4 and FlashAttentionUtils.v4_is_installed:
-            logger.debug("Disabling FlashAttention 4 for compute capability < sm80")
+            logger.debug("Disabling FlashAttention 4 for compute capability < sm90")
         use_flash_attention_4 = False
     # On SM90, prefer FA3 over FA4 when FA3 is available.
     # FA3 is more mature on Hopper; FA4's SM90 backward has limitations
@@ -996,6 +996,19 @@ def get_attention_backend(
                 device_compute_capability[0] * 10 + device_compute_capability[1],
             )
             use_flash_attention_4 = False
+        # FA4's validator currently accepts symmetric (512, 512) on SM100/SM110,
+        # but the generic forward kernel exceeds its TMEM allocation for that shape.
+        # Preserve the supported asymmetric (64, 512) MLA path while D512 support
+        # is completed upstream.
+        if (
+            use_flash_attention_4
+            and (10, 0) <= device_compute_capability < (12, 0)
+            and head_dim_qk == head_dim_v == 512
+        ):
+            logger.debug(
+                "Disabling FlashAttention 4 for unsupported symmetric head_dim=512 on SM100/SM110."
+            )
+            use_flash_attention_4 = False
         # flash-attn-4 4.0.0b11 validates (256, 256) on SM100, but its dedicated
         # hd256 kernel diverges from the reference for cross-attention/decode-like
         # shapes such as sq=1, skv=2048. Keep FA4 enabled for the self-attention
@@ -1228,13 +1241,6 @@ def get_attention_backend(
             logger.debug(
                 "Disabling FusedAttention as it does not support context parallelism with bias"
                 " and cp_comm_type = %s",
-                cp_comm_type,
-            )
-            use_fused_attention = False
-        elif qkv_format == "thd" and cp_comm_type in ["a2a+p2p"]:
-            logger.debug(
-                "Disabling FusedAttention as it does not support context parallelism with THD"
-                " format and cp_comm_type = %s",
                 cp_comm_type,
             )
             use_fused_attention = False
@@ -2793,10 +2799,37 @@ def mxfp8_quantize_fast_path(tensor_quantizer_pairs, src_format):
     """
     if not tensor_quantizer_pairs:
         return [], src_format
+
+    fp8_tensors = mxfp8_quantize_only(tensor_quantizer_pairs, src_format)
+    mxfp8_transpose_swizzle(fp8_tensors, src_format)
+    return fp8_tensors, "bhsd"
+
+
+def mxfp8_quantize_only(tensor_quantizer_pairs, src_format):
+    """Phase 1 of mxfp8_quantize_fast_path: quantize only, no BHSD transpose or GEMM swizzle.
+
+    Returns MXFP8Tensors with data and scale_invs reshaped to src_format layout.
+    Call mxfp8_transpose_swizzle to complete the BHSD permute + swizzle when ready
+    (e.g. after pre-quantized tensors from fused kernels are also available).
+
+    Parameters
+    ----------
+    tensor_quantizer_pairs : list of (torch.Tensor, MXFP8Quantizer)
+        Same contract as mxfp8_quantize_fast_path.
+    src_format : str
+        ``"bshd"`` or ``"sbhd"``.
+
+    Returns
+    -------
+    fp8_tensors : list of MXFP8Tensor
+        Data and scale_invs in src_format layout; NOT yet BHSD-permuted or swizzled.
+    """
+    if not tensor_quantizer_pairs:
+        return []
     assert src_format in (
         "bshd",
         "sbhd",
-    ), f"mxfp8_quantize_fast_path only supports bshd/sbhd, got {src_format!r}."
+    ), f"mxfp8_quantize_only only supports bshd/sbhd, got {src_format!r}."
     _s_dim = {"bshd": 1, "sbhd": 0}
     _d_dim = {"bshd": 3, "sbhd": 3}
 
@@ -2807,45 +2840,74 @@ def mxfp8_quantize_fast_path(tensor_quantizer_pairs, src_format):
         rs_shape[_d_dim[src_format]] //= MXFP8_BLOCK_SCALING_SIZE
         cs_shape = list(original_shape)
         cs_shape[_s_dim[src_format]] //= MXFP8_BLOCK_SCALING_SIZE
-
-        # view tensor as 2D for quantization
-        # BSHD -> (B*S, H*D)
-        # SBHD -> (S, B*H*D)
         if src_format == "bshd":
-            tensor = tensor.view(*tensor.shape[:2], -1)
+            t2d = tensor.view(*tensor.shape[:2], -1)
         else:
-            tensor = tensor.view(tensor.shape[0], -1)
-
-        # quantize
+            t2d = tensor.view(tensor.shape[0], -1)
         orig_optimize = quantizer.optimize_for_gemm
         quantizer.optimize_for_gemm = False
-        fp8_tensor = quantizer(tensor)
+        fp8_2d = quantizer(t2d)
         quantizer.optimize_for_gemm = orig_optimize
+        # Re-wrap with the original 4D SBHD/BSHD shape so that shape[-1] equals the per-head
+        # dimension (matching Q's wrapper shape) and fused_attn_bwd produces 4D dkv that
+        # matches key/value's expected gradient shape in _KFQuantizeKVForAttn.backward.
+        fp8_t = MXFP8Tensor(
+            shape=original_shape,
+            dtype=tensor.dtype,
+            rowwise_data=(
+                fp8_2d._rowwise_data.view(original_shape)
+                if fp8_2d._rowwise_data is not None
+                else None
+            ),
+            rowwise_scale_inv=(
+                fp8_2d._rowwise_scale_inv.view(rs_shape)
+                if fp8_2d._rowwise_scale_inv is not None
+                else None
+            ),
+            columnwise_data=(
+                fp8_2d._columnwise_data.view(original_shape)
+                if fp8_2d._columnwise_data is not None
+                else None
+            ),
+            columnwise_scale_inv=(
+                fp8_2d._columnwise_scale_inv.view(cs_shape)
+                if fp8_2d._columnwise_scale_inv is not None
+                else None
+            ),
+            quantizer=quantizer,
+            requires_grad=False,
+            fp8_dtype=fp8_2d._fp8_dtype,
+            with_gemm_swizzled_scales=False,
+        )
+        fp8_tensors.append(fp8_t)
+    return fp8_tensors
 
-        # reshape rowwise/columnwise data to original shape
-        fp8_tensor._rowwise_data = (
-            fp8_tensor._rowwise_data.view(original_shape)
-            if fp8_tensor._rowwise_data is not None
-            else None
-        )
-        fp8_tensor._columnwise_data = (
-            fp8_tensor._columnwise_data.view(original_shape)
-            if fp8_tensor._columnwise_data is not None
-            else None
-        )
-        fp8_tensor._rowwise_scale_inv = (
-            fp8_tensor._rowwise_scale_inv.view(rs_shape)
-            if fp8_tensor._rowwise_scale_inv is not None
-            else None
-        )
-        fp8_tensor._columnwise_scale_inv = (
-            fp8_tensor._columnwise_scale_inv.view(cs_shape)
-            if fp8_tensor._columnwise_scale_inv is not None
-            else None
-        )
-        fp8_tensors.append(fp8_tensor)
 
-    # ---- Pad + permute + swizzle scale_inv to BHSD ----
+def mxfp8_transpose_swizzle(fp8_tensors, src_format):
+    """Phase 2 of mxfp8_quantize_fast_path: batched BHSD-transpose + GEMM-swizzle.
+
+    For tensors whose data is already quantized (e.g. from a fused GEMM+quant kernel
+    or from mxfp8_quantize_only), permutes each tensor's scale_invs from src_format to
+    BHSD and applies the GEMM swizzle in-place.  Complements mxfp8_quantize_only to
+    allow pre-quantized tensors (like a fused-kernel Q) to be processed in the same
+    batched operation as freshly quantized K/V.
+
+    Parameters
+    ----------
+    fp8_tensors : list of MXFP8Tensor
+        Tensors with _rowwise_scale_inv / _columnwise_scale_inv in src_format layout.
+        Modified in-place: scale_invs are replaced with BHSD-permuted, swizzled versions.
+    src_format : str
+        ``"bshd"`` or ``"sbhd"``.
+    """
+    if not fp8_tensors:
+        return
+
+    assert src_format in (
+        "bshd",
+        "sbhd",
+    ), f"mxfp8_transpose_swizzle only supports bshd/sbhd, got {src_format!r}."
+
     rs_list = [t._rowwise_scale_inv for t in fp8_tensors]
     cs_list = [t._columnwise_scale_inv for t in fp8_tensors]
 
@@ -2879,49 +2941,24 @@ def mxfp8_quantize_fast_path(tensor_quantizer_pairs, src_format):
         buf = torch.empty(total, dtype=torch.uint8, device=device)
         return [buf[e[0] : e[0] + e[1]].view(e[2]) if e is not None else None for e in entries]
 
-    # allocate buffers with padding in mind
     rs_outs = _build_outputs(rs_list, 4)
     cs_outs = _build_outputs(cs_list, 128)
 
-    # permute scale_invs to BHSD; batched
     rs_permuted = tex.multi_tensor_transpose_to_bhsd(
-        rs_list,
-        original_format=src_format,
-        outputs=rs_outs,
+        rs_list, original_format=src_format, outputs=rs_outs
     )
     cs_permuted = tex.multi_tensor_transpose_to_bhsd(
-        cs_list,
-        original_format=src_format,
-        outputs=cs_outs,
+        cs_list, original_format=src_format, outputs=cs_outs
     )
 
-    # build output tensors
-    result = []
     for t, rp, cp in zip(fp8_tensors, rs_permuted, cs_permuted):
-        rp = rp.view(-1, rp.shape[-1]) if rp is not None else None
-        cp = cp.view(-1, cp.shape[-1]) if cp is not None else None
-        result.append(
-            MXFP8Tensor(
-                shape=t.shape,
-                dtype=t.dtype,
-                rowwise_data=t._rowwise_data,
-                rowwise_scale_inv=rp,
-                columnwise_data=t._columnwise_data,
-                columnwise_scale_inv=cp,
-                quantizer=t._quantizer,
-                requires_grad=False,
-                fp8_dtype=t._fp8_dtype,
-                with_gemm_swizzled_scales=t._with_gemm_swizzled_scales,
-            )
-        )
+        t._rowwise_scale_inv = rp.view(-1, rp.shape[-1]) if rp is not None else None
+        t._columnwise_scale_inv = cp.view(-1, cp.shape[-1]) if cp is not None else None
 
-    # swizzle in place; batched
-    tex.multi_tensor_swizzle_scales_for_gemm_unchecked_(result, True, False)
-    tex.multi_tensor_swizzle_scales_for_gemm_unchecked_(result, False, True)
-    for t in result:
+    tex.multi_tensor_swizzle_scales_for_gemm_unchecked_(fp8_tensors, True, False)
+    tex.multi_tensor_swizzle_scales_for_gemm_unchecked_(fp8_tensors, False, True)
+    for t in fp8_tensors:
         t._with_gemm_swizzled_scales = True
-
-    return result, "bhsd"
 
 
 def combine_and_quantize(

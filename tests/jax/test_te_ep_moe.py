@@ -140,7 +140,7 @@ LOGICAL_AXIS_RULES = (
     ("exp", EP_AXIS),
     ("embed", FSDP_AXIS),
     ("mlp", None),
-    ("batch", (EP_AXIS, FSDP_AXIS)),
+    ("batch", (FSDP_AXIS, EP_AXIS)),
 )
 
 # Small shapes so the parity tests stay tight on bf16. The block still
@@ -364,6 +364,7 @@ def _make_block(
     use_expert_routing_bias=False,
     score_function="softmax",
     expert_bias_init=None,
+    input_axes=("batch", None, None),
 ):
     kwargs = dict(
         num_experts=NUM_EXPERTS,
@@ -375,6 +376,7 @@ def _make_block(
         use_expert_routing_bias=use_expert_routing_bias,
         score_function=score_function,
         dtype=DTYPE,
+        input_axes=input_axes,
     )
     # Custom expert_bias_init lets tests inject a non-zero expert_bias without
     # poking variables['params'] post-init.

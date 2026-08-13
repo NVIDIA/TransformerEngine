@@ -5,14 +5,14 @@
 """Mixin class holding data specific for MXFP8Tensor"""
 
 from __future__ import annotations
-from typing import Optional, Dict, Any, Tuple, Union
+from typing import Annotated, Optional, Dict, Any, Tuple, Union
 from collections.abc import Iterable
 import math
 import torch
 
 import transformer_engine_torch as tex
 
-from ...quantized_tensor import QuantizedTensorStorage, Quantizer
+from ...quantized_tensor import InnerTensor, QuantizedTensorStorage, Quantizer
 from .._quantization_helpers import safe_quantized_repr
 
 from ...constants import (
@@ -70,14 +70,12 @@ class MXFP8TensorStorage(QuantizedTensorStorage):
 
     """
 
-    # Row-scaled FP8 data
-    _rowwise_data: Optional[torch.Tensor]
-    # Column-scaled FP8 data
-    _columnwise_data: Optional[torch.Tensor]
-    # Scaling factors for row-scaled FP8 data
-    _rowwise_scale_inv: torch.Tensor
-    # Scaling factors for column-scaled FP8 data
-    _columnwise_scale_inv: torch.Tensor
+    # Row-scaled FP8 data and its scaling factors
+    _rowwise_data: Annotated[Optional[torch.Tensor], InnerTensor("rowwise_data")]
+    _rowwise_scale_inv: Annotated[torch.Tensor, InnerTensor("rowwise_scale_inv")]
+    # Column-scaled FP8 data and its scaling factors
+    _columnwise_data: Annotated[Optional[torch.Tensor], InnerTensor("columnwise_data")]
+    _columnwise_scale_inv: Annotated[torch.Tensor, InnerTensor("columnwise_scale_inv")]
 
     # Builder class for casting to MXFP8
     _quantizer: Optional[Quantizer]

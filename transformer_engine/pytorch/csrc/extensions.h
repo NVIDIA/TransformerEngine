@@ -290,6 +290,31 @@ py::object clamped_swiglu(const at::Tensor &input, py::handle quantizer, float l
 
 py::object clamped_dswiglu(const at::Tensor &grad, const at::Tensor &input, py::handle quantizer,
                            float limit, float alpha, float glu_linear_offset);
+
+/* Scaled activation */
+py::object scaled_swiglu(const at::Tensor &input, const at::Tensor &act_scales,
+                         py::handle quantizer, int64_t glu_interleave_size);
+
+py::object scaled_clamped_swiglu(const at::Tensor &input, const at::Tensor &act_scales,
+                                 py::handle quantizer, float limit, float alpha,
+                                 float glu_linear_offset, int64_t glu_interleave_size);
+
+py::object scaled_srelu(const at::Tensor &input, const at::Tensor &act_scales,
+                        py::handle quantizer);
+
+py::tuple scaled_dswiglu(const at::Tensor &grad, const at::Tensor &input,
+                         const at::Tensor &act_scales, py::handle quantizer,
+                         int64_t glu_interleave_size, bool compute_scale_grad);
+
+py::tuple scaled_clamped_dswiglu(const at::Tensor &grad, const at::Tensor &input,
+                                 const at::Tensor &act_scales, py::handle quantizer, float limit,
+                                 float alpha, float glu_linear_offset, int64_t glu_interleave_size,
+                                 bool compute_scale_grad);
+
+py::tuple scaled_dsrelu(const at::Tensor &grad, const at::Tensor &input,
+                        const at::Tensor &act_scales, py::handle quantizer,
+                        bool compute_scale_grad);
+
 /***************************************************************************************************
  * LayerNorm
  **************************************************************************************************/
@@ -350,7 +375,7 @@ py::object dequantize(const py::handle &input, DType otype);
 py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const size_t num_tensors,
                           std::optional<at::Tensor> first_dims, std::optional<at::Tensor> last_dims,
                           std::optional<at::Tensor> tensor_offsets,
-                          std::optional<at::Tensor> noop_flag);
+                          std::optional<at::Tensor> noop_flag, const py::object &output);
 
 py::object nvfp4_group_quantize_with_amax(const at::Tensor &tensor, py::handle quantizer,
                                           const size_t num_tensors,
@@ -366,6 +391,11 @@ py::object bgrad_group_quantize(const at::Tensor &tensor, py::handle quantizer,
                                 const size_t num_tensors, std::optional<at::Tensor> first_dims,
                                 std::optional<at::Tensor> last_dims,
                                 std::optional<at::Tensor> tensor_offsets);
+
+py::object group_requantize_inplace(py::handle grouped_x, py::handle quantizer,
+                                    const size_t num_tensors, std::optional<at::Tensor> first_dims,
+                                    DType otype, std::optional<at::Tensor> tensor_offsets,
+                                    bool return_dequantized);
 
 std::vector<py::object> multi_tensor_quantize(const std::vector<at::Tensor> &tensor_list,
                                               std::vector<py::handle> quantizer_list);
@@ -691,14 +721,18 @@ void ep_prepare(at::Tensor handle_mem, at::Tensor topk_idx, at::Tensor tokens_pe
                 at::Tensor total_recv_tokens);
 
 void ep_dispatch(at::Tensor handle_mem, at::Tensor topk_idx, at::Tensor tokens,
-                 at::Tensor topk_weights, at::Tensor recv_tokens, at::Tensor recv_topk_weights);
+                 at::Tensor topk_weights, at::Tensor recv_tokens, at::Tensor recv_topk_weights,
+                 std::optional<at::Tensor> tokens_scale_inv = std::nullopt,
+                 std::optional<at::Tensor> recv_scale_inv = std::nullopt);
 
 void ep_combine(at::Tensor handle_mem, at::Tensor expert_out, at::Tensor result);
 
 void ep_dispatch_bwd(at::Tensor handle_mem, at::Tensor grad, at::Tensor g_recv_topk_weights,
                      at::Tensor grad_tokens, at::Tensor grad_topk_weights);
 
-void ep_combine_bwd(at::Tensor handle_mem, at::Tensor grad, at::Tensor grad_expert_out);
+void ep_combine_bwd(at::Tensor handle_mem, at::Tensor grad, at::Tensor grad_expert_out,
+                    std::optional<at::Tensor> grad_scale_inv = std::nullopt,
+                    std::optional<at::Tensor> grad_expert_out_scale_inv = std::nullopt);
 
 // Registers the EP pybind functions on `m`. Defined under NVTE_WITH_NCCL_EP.
 void register_ep_bindings(pybind11::module_ &m);
