@@ -343,7 +343,10 @@ def test_thd_dropout_prefers_flash_attention_2(monkeypatch):
     the roadmap, so the choice is made here rather than left to the generic Hopper+ rule
     that prefers FusedAttention.
     """
+    # NVTE_FLASH_ATTN_V2 is read separately from NVTE_FLASH_ATTN, so an environment that
+    # disables FA2 on purpose would otherwise reach the availability assertion below.
     monkeypatch.setenv("NVTE_FLASH_ATTN", "1")
+    monkeypatch.setenv("NVTE_FLASH_ATTN_V2", "1")
     monkeypatch.setenv("NVTE_FUSED_ATTN", "1")
 
     attention_params = AttentionParams(

@@ -1617,14 +1617,13 @@ def get_attention_backend(
 
     # Prefer FA2 for THD training with dropout on SM100/103, where FusedAttention has a known
     # performance issue. At this point use_flash_attention_2 confirms a usable installation.
-    if (
+    is_slow_fused_thd_dropout = (
         is_training
         and qkv_format == "thd"
         and attention_dropout != 0.0
         and device_compute_capability in ((10, 0), (10, 3))
-        and use_flash_attention_2
-        and use_fused_attention
-    ):
+    )
+    if is_slow_fused_thd_dropout and use_flash_attention_2 and use_fused_attention:
         logger.debug(
             "Disabling FusedAttention to give FlashAttention 2 preference for THD with dropout"
             " on SM100/103"
