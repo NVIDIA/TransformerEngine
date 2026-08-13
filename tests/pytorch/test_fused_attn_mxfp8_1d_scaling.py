@@ -45,4 +45,3 @@ def test_fused_attn_mxfp8_1d_scaling_bwd_v_shape(head_dim):
 
     loss = out.sum()
     loss.backward()
-
