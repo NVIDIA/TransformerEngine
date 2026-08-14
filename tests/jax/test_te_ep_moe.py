@@ -582,8 +582,10 @@ _CONFIGS = [
 
 _QUANTIZATION_CASES = [
     pytest.param("bf16", id="bf16"),
-    pytest.param("mxfp8", id="mxfp8"),
 ]
+
+if get_device_compute_capability(0) >= 100:
+    _QUANTIZATION_CASES.append(pytest.param("mxfp8", id="mxfp8"))
 
 
 def _reference_kwargs_from_config(config, params_np):
