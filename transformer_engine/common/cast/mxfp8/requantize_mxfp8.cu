@@ -168,7 +168,8 @@ __device__ __forceinline__ ptx::bf16x2 dequantize_mxfp8_2x(
   ptx::bf16x2 result;
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 #if (defined CUDA_VERSION) && (CUDA_VERSION >= 13020)
-  if constexpr (ARCH_BLACKWELL_FAMILY) {
+  constexpr bool is_blackwell_arch = ARCH_BLACKWELL_FAMILY;
+  if constexpr (is_blackwell_arch) {
     const uint16_t scale_x2 = static_cast<uint16_t>(scale_code) |
                               (static_cast<uint16_t>(scale_code) << 8);
     if constexpr (std::is_same_v<IType, fp8e4m3>) {
