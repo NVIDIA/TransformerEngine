@@ -878,7 +878,7 @@ def fuse_grouped_mlp_ops(
         Updated operations with matched triples replaced by fused ops.
     """
     if not fused_op_cls.is_supported():
-        assert False ### TODO Remove
+        assert False  ### TODO Remove
         return ops
 
     # Fused kernels are only supported for MXFP8 and NVFP4
@@ -1455,10 +1455,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                     pass
                 elif self._cudnn_act_func == "swiglu":
                     kernel_impl = "gemm_act_rht_amax"
-                elif (
-                    activation_is_srelu
-                    and _cudnn_frontend_supports_grouped_gemm_srelu_hadamard()
-                ):
+                elif activation_is_srelu and _cudnn_frontend_supports_grouped_gemm_srelu_hadamard():
                     kernel_impl = "gemm_act_rht_amax"
 
         # Common kernel arguments
