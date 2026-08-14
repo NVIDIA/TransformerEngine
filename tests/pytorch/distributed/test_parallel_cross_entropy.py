@@ -14,7 +14,8 @@ import torch.multiprocessing as mp
 
 from transformer_engine.pytorch import parallel_cross_entropy
 
-sys.path.append(str(pathlib.Path(__file__).resolve().parent.parent))
+# Prepend so installed packages with a top-level utils module cannot shadow the test helpers.
+sys.path = [str(pathlib.Path(__file__).resolve().parent.parent)] + sys.path
 from utils import dtype_tols
 
 
