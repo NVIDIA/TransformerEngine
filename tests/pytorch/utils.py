@@ -17,10 +17,14 @@ import pytest
 import torch
 
 import transformer_engine
-from transformer_engine.common.recipe import Format as RecipeFormat
-from transformer_engine.common.recipe import Recipe
-from transformer_engine.pytorch import InferenceParams, QuantizedTensor
-from transformer_engine.pytorch import DType
+from transformer_engine.common.recipe import Format as RecipeFormat, Recipe
+from transformer_engine.pytorch import (
+    DType,
+    InferenceParams,
+    NVFP4Quantizer,
+    QuantizedTensor,
+    QuantizerRole,
+)
 from transformer_engine.pytorch.attention.dot_product_attention import _attention_backends
 from transformer_engine.pytorch.attention.dot_product_attention.utils import (
     get_attention_backend,
@@ -158,19 +162,39 @@ def make_recipe(name: Optional[str], **recipe_kwargs: Any) -> Optional[Recipe]:
         )
     if name == "fp8_block_scaling":
         return transformer_engine.common.recipe.Float8BlockScaling(**recipe_kwargs)
+    if name in ("nvfp4_ue5m3", "nvfp4_rht_ue5m3"):
+
+        def make_nvfp4_ue5m3_quantizer(role: QuantizerRole) -> NVFP4Quantizer:
+            """Quantizer factory for NVFP4-UE5M3 recipe."""
+            tensor_type = role.tensor_type if role is not None else "input"
+            if not tensor_type:
+                tensor_type = "input"
+            with_rht = name == "nvfp4_rht_ue5m3" and tensor_type != "weight"
+            return NVFP4Quantizer(
+                scale_dtype=DType.kFloat8UE5M3,
+                with_rht=with_rht,
+                with_post_rht_amax=with_rht,
+                with_2d_quantization=False,
+                stochastic_rounding=False,
+                with_random_sign_mask=with_rht,
+                disable_second_level_scale=tensor_type == "input",
+            )
+
+        recipe = transformer_engine.common.recipe.CustomRecipe(
+            qfactory=make_nvfp4_ue5m3_quantizer,
+            **recipe_kwargs,
+        )
+        recipe.enable_cutedsl_fused_grouped_mlp = True
+        return recipe
     if name in nvfp4_variant_names:
         with_rht = name in ("nvfp4_rht", "nvfp4_rht_ue5m3")
         use_4over6 = name == "nvfp4_4over6"
-        scale_format = (
-            RecipeFormat.UE5M3 if name in ("nvfp4_ue5m3", "nvfp4_rht_ue5m3") else RecipeFormat.E4M3
-        )
         kwargs = {
             "disable_rht": not with_rht,
             "disable_stochastic_rounding": True,
             "disable_2d_quantization": not use_4over6,
             "row_scaled_activation": name == "nvfp4_row_scaled",
             "nvfp4_4over6": "all" if use_4over6 else "none",
-            "fp8_format": scale_format,
         }
         kwargs.update(recipe_kwargs)
         return transformer_engine.common.recipe.NVFP4BlockScaling(**kwargs)

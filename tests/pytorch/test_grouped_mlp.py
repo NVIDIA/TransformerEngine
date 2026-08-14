@@ -201,7 +201,11 @@ def make_reference_and_test_tensors(
             tensor_type = quantizer_role.tensor_type
         with_rht = quantization in ("nvfp4_rht", "nvfp4_rht_ue5m3") and tensor_type != "weight"
         scale_dtype = (
-            te.DType.kFloat8UE5M3 if quantization == "nvfp4_rht_ue5m3" else te.DType.kFloat8E4M3
+            te.DType.kFloat8UE5M3 if quantization in ("nvfp4_ue5m3", "nvfp4_rht_ue5m3")
+            else te.DType.kFloat8E4M3
+        )
+        disable_second_level_scale = (
+            scale_dtype == te.DType.kFloat8UE5M3 and tensor_type == "input"
         )
         test = NVFP4Quantizer(
             scale_dtype=scale_dtype,
@@ -210,6 +214,7 @@ def make_reference_and_test_tensors(
             with_2d_quantization=False,
             stochastic_rounding=False,
             with_random_sign_mask=with_rht,
+            disable_second_level_scale=disable_second_level_scale,
         )(test)
     elif quantization == "nvfp4_4over6":
         tensor_type = "input"
