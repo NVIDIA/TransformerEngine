@@ -2300,6 +2300,8 @@ def _run_mha_fp8_vs_f16(
             attention_type="self",
             qkv_weight_interleaved=True,
             qkv_format=qkv_format,
+            window_size=config.window_size,
+            softmax_type=config.softmax_type,
         ).to(dtype=dtype, device="cuda")
         if not is_training:
             mha = mha.eval()
