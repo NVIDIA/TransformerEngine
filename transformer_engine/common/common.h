@@ -1139,6 +1139,9 @@ template <>
 struct is_fp4<fp4e2m1> : std::true_type {};
 #endif
 
+// Number of values represented by one MXFP8 E8M0 scaling factor.
+constexpr size_t MXFP8_SCALE_DIM = 32;
+
 // [128,4] rowwise and [4,128] colwise alignment requirements for the tensor with scaling factors
 constexpr size_t scale_tensor_alignment_X_rowwise = 4;
 constexpr size_t scale_tensor_alignment_Y_rowwise = 128;

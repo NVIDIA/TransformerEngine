@@ -429,6 +429,26 @@ void nvte_dequantize(const NVTETensor input, NVTETensor output, cudaStream_t str
 void nvte_group_dequantize(const NVTEGroupedTensor input, NVTEGroupedTensor output,
                            cudaStream_t stream);
 
+/*! \brief Requantizes compact rowwise MXFP8 grouped data into columnwise MXFP8.
+ *
+ * This is equivalent to grouped MXFP8 dequantization followed by columnwise-only
+ * grouped MXFP8 quantization, without materializing the high-precision
+ * intermediate in global memory. `use_fast_math` in `quant_config` selects a
+ * BF16 intermediate; the default intermediate is FP32.
+ *
+ * Input and output must describe the same grouped shapes. Input must contain
+ * rowwise FP8 data with compact E8M0 scales. Output must contain columnwise E4M3
+ * data and E8M0 scales; its scales may be compact or GEMM-swizzled.
+ *
+ *  \param[in]     input          Compact rowwise MXFP8 grouped tensor.
+ *  \param[in,out] output         Columnwise MXFP8 E4M3 grouped tensor.
+ *  \param[in]     quant_config   Quantization configuration.
+ *  \param[in]     stream         CUDA stream used for the operation.
+ */
+void nvte_group_requantize_mxfp8(
+    const NVTEGroupedTensor input, NVTEGroupedTensor output,
+    const NVTEQuantizationConfig quant_config, cudaStream_t stream);
+
 /*! \brief Casts multiple input tensors to quantized output tensors.
  *
  *  \param[in]      inputs          List of input tensors to be cast.
