@@ -1642,10 +1642,11 @@ def get_attention_backend(
                     window_size_right=step_config["window_size_right"],
                     bottom_right_diagonal=step_config["bottom_right_diagonal"],
                 )
-                if bias_seqlen_q != 1:
-                    fused_attn_kwargs["bias_seqlen_q"] = step_seqlen_q
-                if bias_seqlen_kv != 1:
-                    fused_attn_kwargs["bias_seqlen_kv"] = step_seqlen_kv
+                if fu_core_attention_bias_shape is not None:
+                    if bias_seqlen_q != 1:
+                        fused_attn_kwargs["bias_seqlen_q"] = step_seqlen_q
+                    if bias_seqlen_kv != 1:
+                        fused_attn_kwargs["bias_seqlen_kv"] = step_seqlen_kv
             # NOTE: under torch.compile the numeric entries of fused_attn_kwargs must not be
             # symbolic (assume_constant_result requires concrete values); ints/floats made
             # dynamic by automatic dynamic currently graph break here.
