@@ -314,7 +314,7 @@ __device__ __forceinline__ void process_chunk(
   auto &s_output = *reinterpret_cast<OutputShared *>(output_shared);
 
   const size_t input_scale_stride = DIVUP_TO_MULTIPLE(
-      DIVUP(cols, MXFP8_SCALE_DIM),
+      DIVUP(cols, static_cast<size_t>(MXFP8_SCALE_DIM)),
       static_cast<size_t>(scale_tensor_alignment_X_rowwise));
   const size_t output_scale_stride = DIVUP_TO_MULTIPLE(
       cols, static_cast<size_t>(scale_tensor_alignment_X_colwise));
@@ -624,7 +624,7 @@ __global__ void __launch_bounds__(Traits::THREADS_PER_CHUNK)
   }
 
   const size_t input_scale_stride = DIVUP_TO_MULTIPLE(
-      DIVUP(cols, MXFP8_SCALE_DIM),
+      DIVUP(cols, static_cast<size_t>(MXFP8_SCALE_DIM)),
       static_cast<size_t>(scale_tensor_alignment_X_rowwise));
   const size_t output_scale_stride = DIVUP_TO_MULTIPLE(
       cols, static_cast<size_t>(scale_tensor_alignment_X_colwise));
@@ -652,8 +652,10 @@ __global__ void __launch_bounds__(Traits::THREADS_PER_CHUNK)
         block_offset_x, tma_offset_y, input_shared, dequantized_shared,
         output_shared, input_barriers, input_barrier_parity, leading_thread);
   } else {
-    const size_t blocks_x = DIVUP(cols, Traits::CHUNK_DIM_X);
-    const size_t blocks_y = DIVUP(rows, Traits::CHUNK_DIM_Y);
+    const size_t blocks_x =
+        DIVUP(cols, static_cast<size_t>(Traits::CHUNK_DIM_X));
+    const size_t blocks_y =
+        DIVUP(rows, static_cast<size_t>(Traits::CHUNK_DIM_Y));
     const size_t total_blocks = blocks_x * blocks_y;
     for (size_t block_id = blockIdx.x; block_id < total_blocks;
          block_id += gridDim.x) {
