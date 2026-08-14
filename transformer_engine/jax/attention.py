@@ -1335,7 +1335,7 @@ def _fused_attn_fwd_rule(
     softmax_aux = checkpoint_name(softmax_aux, context_checkpoint_name)
     rng_state = checkpoint_name(rng_state, context_checkpoint_name)
     max_logit = checkpoint_name(max_logit, context_checkpoint_name)
-    attn_output = _resolve_fused_attn_output(output, max_logit, return_max_logit)
+    attn_output = (output, {"max_logit": max_logit}) if return_max_logit else output
     return attn_output, (
         qkv,
         bias,
@@ -1412,14 +1412,6 @@ def _fused_attn_bwd_rule(
         None,
         None,
     )
-
-
-def _resolve_fused_attn_output(output, max_logit, return_max_logit):
-    if not return_max_logit:
-        return output
-
-    return output, {"max_logit": max_logit}
-
 
 _fused_attn.defvjp(_fused_attn_fwd_rule, _fused_attn_bwd_rule)
 
