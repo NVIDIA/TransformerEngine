@@ -19,12 +19,14 @@
 #include <transformer_engine/swizzle.h>
 #include <transformer_engine/transformer_engine.h>
 
-#include "common.h"
 #include "../test_common.h"
 
 using namespace transformer_engine;
+using namespace test;
 
 namespace {
+
+constexpr size_t kMXFP8ScaleDim = 32;
 
 struct GroupShapeCase {
   std::string name;
@@ -98,13 +100,13 @@ GroupShapeInfo make_shape_info(const GroupShapeCase &test_case) {
     const size_t total_rows = info.logical_shape[0];
     const size_t cols = info.logical_shape[1];
     const size_t rowwise_stride = round_up(
-        (cols + MXFP8_SCALE_DIM - 1) / MXFP8_SCALE_DIM,
+        (cols + kMXFP8ScaleDim - 1) / kMXFP8ScaleDim,
         scale_tensor_alignment_X_rowwise);
     const size_t columnwise_stride = round_up(cols, scale_tensor_alignment_X_colwise);
     info.rowwise_scale_elements =
         round_up(total_rows, scale_tensor_alignment_Y_rowwise) * rowwise_stride;
     info.columnwise_scale_elements =
-        round_up((total_rows + MXFP8_SCALE_DIM - 1) / MXFP8_SCALE_DIM,
+        round_up((total_rows + kMXFP8ScaleDim - 1) / kMXFP8ScaleDim,
                  scale_tensor_alignment_Y_colwise) *
         columnwise_stride;
   } else {
@@ -115,10 +117,10 @@ GroupShapeInfo make_shape_info(const GroupShapeCase &test_case) {
     for (const auto &[rows, cols] : test_case.shapes) {
       const size_t rowwise_rows = round_up(rows, scale_tensor_alignment_Y_rowwise);
       const size_t rowwise_cols = round_up(
-          (cols + MXFP8_SCALE_DIM - 1) / MXFP8_SCALE_DIM,
+          (cols + kMXFP8ScaleDim - 1) / kMXFP8ScaleDim,
           scale_tensor_alignment_X_rowwise);
       const size_t columnwise_rows = round_up(
-          (rows + MXFP8_SCALE_DIM - 1) / MXFP8_SCALE_DIM,
+          (rows + kMXFP8ScaleDim - 1) / kMXFP8ScaleDim,
           scale_tensor_alignment_Y_colwise);
       const size_t columnwise_cols = round_up(cols, scale_tensor_alignment_X_colwise);
       info.rowwise_scale_elements += rowwise_rows * rowwise_cols;
@@ -349,13 +351,13 @@ TEST_P(GroupedRequantizeMXFP8TestSuite, MatchesDequantizeThenQuantize) {
 }
 
 const std::vector<GroupShapeCase> kGroupShapeCases = {
-    {"SameBothDims",
+    {"SameBothDims_1024x4096",
      {{1024, 4096}, {1024, 4096}, {1024, 4096}, {1024, 4096}}},
-    {"SameBothDims",
+    {"SameBothDims_2048x8192",
      {{2048, 8192}, {2048, 8192}, {2048, 8192}, {2048, 8192}}},
-    {"VaryingFirstDim",
+    {"VaryingFirstDim_512to2048x4096",
      {{512, 4096}, {512, 4096}, {1024, 4096}, {2048, 4096}}},
-    {"VaryingFirstDim",
+    {"VaryingFirstDim_1024to4096x8192",
      {{1024, 8192}, {1024, 8192}, {2048, 8192}, {4096, 8192}}},
     // // An empty member in the middle must not terminate the persistent work loop.
     // {"VaryingFirstDimWithEmpty",
@@ -384,11 +386,8 @@ INSTANTIATE_TEST_SUITE_P(
     OperatorTest, GroupedRequantizeMXFP8TestSuite,
     ::testing::Combine(
         ::testing::ValuesIn(kGroupShapeCases),
-        // ::testing::Values(DType::kFloat8E4M3, DType::kFloat8E5M2),
         ::testing::Values(DType::kFloat8E4M3),
-        // ::testing::Bool(),
         ::testing::Values(true),
-        // ::testing::Bool()
         ::testing::Values(true)
       ),
     make_test_name);
