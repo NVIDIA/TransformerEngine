@@ -963,9 +963,7 @@ def general_grouped_gemm(
     use_general_gemm_impl = False
     if isinstance(quantization_params[0], DebugQuantizer):
         use_general_gemm_impl = True
-    elif any(
-        _is_nvfp4_row_scaled_tensor(tensor) for tensor in itertools.chain(A, B)
-    ):
+    elif any(_is_nvfp4_row_scaled_tensor(tensor) for tensor in itertools.chain(A, B)):
         use_general_gemm_impl = True
     elif any(
         isinstance(t, NVFP4TensorStorage) and t._scale_dtype == DType.kFloat8UE5M3
