@@ -167,14 +167,34 @@ except PackageNotFoundError:
     flash_attn_func_v4 = None
     flash_attn_varlen_func_v4 = None
 else:
-    from flash_attn.cute.interface import (  # pylint: disable=ungrouped-imports,no-name-in-module
-        flash_attn_func as flash_attn_func_v4,
-        flash_attn_varlen_func as flash_attn_varlen_func_v4,
-        _validate_head_dims as _fa4_validate_head_dims,
-    )
+    try:
+        cutlass_dsl_version = PkgVersion(get_pkg_version("nvidia-cutlass-dsl"))
 
-    fa_utils.v4_validate_head_dims = _fa4_validate_head_dims
-    fa_utils.set_flash_attention_4_params()
+        # FA4 4.0.0b24 requires CUTLASS DSL 4.6.2 or newer.
+        if fa_utils.fa4_version == PkgVersion("4.0.0b24") and cutlass_dsl_version < PkgVersion(
+            "4.6.2"
+        ):
+            raise ImportError(
+                "flash-attn-4 4.0.0b24 requires nvidia-cutlass-dsl>=4.6.2; "
+                f"found {cutlass_dsl_version}"
+            )
+
+        from flash_attn.cute.interface import (  # pylint: disable=ungrouped-imports,no-name-in-module
+            flash_attn_func as flash_attn_func_v4,
+            flash_attn_varlen_func as flash_attn_varlen_func_v4,
+            _validate_head_dims as _fa4_validate_head_dims,
+        )
+    except ImportError as exc:
+        flash_attn_func_v4 = None
+        flash_attn_varlen_func_v4 = None
+        warnings.warn(
+            f"FlashAttention 4 is installed but cannot be loaded: {exc}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+    else:
+        fa_utils.v4_validate_head_dims = _fa4_validate_head_dims
+        fa_utils.set_flash_attention_4_params()
 
 # Float8CurrentScaling: fused_attn_bwd takes O in FP8 by default, this flag allows it in F16
 _dpa_fp8_cs_o_in_f16 = os.getenv("NVTE_DPA_FP8CS_O_in_F16", "1") == "1"
@@ -1040,6 +1060,18 @@ class FlashAttention(torch.nn.Module):
         use_flash_attn_3 = (
             flash_attention_backend is not None and flash_attention_backend.major == 3
         )
+        if (
+            use_flash_attn_4
+            and (10, 0) <= get_device_compute_capability() < (12, 0)
+            and query_layer.shape[-1] == key_layer.shape[-1] == value_layer.shape[-1] == 256
+            and all(not isinstance(x, Float8Tensor) for x in [query_layer, key_layer, value_layer])
+            and any(not x.is_contiguous() for x in [query_layer, key_layer, value_layer])
+        ):
+            # FA4 D=256 SM10x kernels need packed K/V views materialized, even
+            # when the last dimension is contiguous.
+            query_layer, key_layer, value_layer = [
+                x.contiguous() for x in (query_layer, key_layer, value_layer)
+            ]
         if context_parallel and all(
             not isinstance(x, Float8Tensor) for x in [query_layer, key_layer, value_layer]
         ):
@@ -1351,6 +1383,7 @@ class FusedAttnFunc(torch.autograd.Function):
         deterministic,
         softmax_offset,
         fp8_output,
+        bf16_backward,
         layer_number,
         return_max_logit,
         packed_qkv=None,
@@ -1415,6 +1448,9 @@ class FusedAttnFunc(torch.autograd.Function):
             #                      fp8_dtype = tex.DType.kFloat8E4M3
             if is_input_fp8:
                 q_fp8, k_fp8, v_fp8 = q, k, v
+
+                if fp8_recipe.mxfp8():
+                    qkv_scale_inv_format = "bhsd"  # Same as what combine_and_quantize would give
             else:
                 q_fp8, k_fp8, v_fp8, qkv_layout, qkv_scale_inv_format = combine_and_quantize(
                     qkv_layout,
@@ -1590,6 +1626,8 @@ class FusedAttnFunc(torch.autograd.Function):
 
         ctx.is_input_fp8 = is_input_fp8
         ctx.is_output_fp8 = is_output_fp8
+        # Return dQ/dK/dV in bf16 even if is_input_fp8
+        ctx.bf16_backward = bf16_backward
 
         tensors_to_save, tensor_objects = prepare_for_saving(
             *fp8_tensors,
@@ -1848,7 +1886,8 @@ class FusedAttnFunc(torch.autograd.Function):
                     # dq, dk, dv:             torch.Tensor; dtype = torch.float16 or torch.bfloat16
                     dq, dk, dv = dq_, dk_, dv_
                     is_quantized_tensor = isinstance(dq_, QuantizedTensorStorage)
-                    if is_quantized_tensor and not ctx.is_input_fp8:
+
+                    if is_quantized_tensor and (not ctx.is_input_fp8 or ctx.bf16_backward):
                         # return in F16
                         dq, dk, dv = combine_and_dequantize(
                             ctx.dqkv_layout,
@@ -1857,7 +1896,7 @@ class FusedAttnFunc(torch.autograd.Function):
                             dv_,
                             src_nominal_dtype=dq_.dtype,
                         )
-                    if not is_quantized_tensor and ctx.is_input_fp8:
+                    if not is_quantized_tensor and ctx.is_input_fp8 and not ctx.bf16_backward:
                         # return in FP8
                         dq, dk, dv, _, _ = combine_and_quantize(
                             ctx.dqkv_layout, dq_, dk_, dv_, ctx.dQKV_quantizer
@@ -1956,6 +1995,7 @@ class FusedAttnFunc(torch.autograd.Function):
             None,
             None,  # packed_qkv
             None,  # packed_kv
+            None,
         )
 
 
@@ -2052,6 +2092,7 @@ class FusedAttention(torch.nn.Module):
         score_mod_bprop_tensors: Optional[Dict[str, torch.Tensor]] = None,
         packed_qkv: Optional[torch.Tensor] = None,
         packed_kv: Optional[torch.Tensor] = None,
+        bf16_backward: bool = False,
     ) -> torch.Tensor:
         """fused attention fprop"""
         assert (
@@ -2268,6 +2309,7 @@ class FusedAttention(torch.nn.Module):
                     self.deterministic,
                     softmax_offset,
                     fp8_output,
+                    bf16_backward,
                     self.layer_number,
                     self.return_max_logit,
                     packed_qkv,

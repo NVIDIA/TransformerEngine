@@ -49,6 +49,9 @@ if(NOT arch_100_index EQUAL -1)
   if(CUDAToolkit_VERSION VERSION_GREATER_EQUAL 12.9)
     list(APPEND NVTE_SPECIFIC_ARCHS "103a")
   endif()
+  if(CUDAToolkit_VERSION VERSION_GREATER_EQUAL 13.4)
+    list(APPEND NVTE_SPECIFIC_ARCHS "107a")
+  endif()
 endif()
 
 # Check for architecture 101 (if we see this we are in toolkit <= 12.9)
@@ -385,6 +388,7 @@ target_link_libraries(transformer_engine PUBLIC
                       CUDA::cublas
                       CUDA::cudart
                       CUDNN::cudnn_all)
+target_link_libraries(transformer_engine PRIVATE ${CMAKE_DL_LIBS})
 
 # Include tvm-ffi headers to compile tvm_ffi_bridge.h. The tvm-ffi library is loaded at runtime via dlopen.
 # If libtvmffi.so is not successfully loaded, the CuTeDSL backend is disabled and will fall back to the default TE CUDA C++ kernels.

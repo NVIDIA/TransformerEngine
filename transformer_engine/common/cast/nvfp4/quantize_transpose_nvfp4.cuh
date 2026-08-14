@@ -100,17 +100,11 @@ __launch_bounds__(BLOCK_SIZE)
 }
 
 template <typename IType, int BLOCK_SIZE>
-__global__ void
-#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
-__launch_bounds__(BLOCK_SIZE)
-#endif
+__global__ void __launch_bounds__(BLOCK_SIZE)
     compute_columnwise_amax_kernel(const int num_rows, const int num_cols,
                                    const IType *__restrict__ input,
                                    float *__restrict__ output_columnwise_amax,
                                    const float *__restrict__ noop) {
-#if !defined(__CUDA_ARCH__) || (__CUDA_ARCH__ < 1000)
-  NVTE_DEVICE_ERROR("SM 10.0+ is required.");
-#else
   if (noop != nullptr && noop[0] == 1.0f) {
     return;
   }
@@ -128,7 +122,6 @@ __launch_bounds__(BLOCK_SIZE)
   if (threadIdx.x == 0) {
     output_columnwise_amax[col_idx] = col_amax;
   }
-#endif
 }
 
 template <typename IType>
@@ -410,11 +403,9 @@ __global__ void __launch_bounds__(THREADS_NUM)
   constexpr size_t out_mem_rowwise_scales = 0;
 
   extern __shared__ char dynamic_shmem[];
-  uintptr_t base_shmem_ptr = reinterpret_cast<uintptr_t>(dynamic_shmem);
   // Manually align dynamic SHMEM per TMA requirements using padding
   // __align__(128) Does not guarantee the pointer to be aligned!
-  uintptr_t dshmem = (base_shmem_ptr + TMA_SHMEM_ALIGNMENT - 1) &
-                     ~(static_cast<uintptr_t>(TMA_SHMEM_ALIGNMENT - 1));
+  char *dshmem = align_up(dynamic_shmem, TMA_SHMEM_ALIGNMENT);
 
   // The destination shared memory buffer of a bulk tensor operation should be 16-byte aligned
   IType *in_sh = reinterpret_cast<IType *>(dshmem);
@@ -952,11 +943,9 @@ __global__ void __launch_bounds__(THREADS_NUM)
   constexpr size_t out_mem_rowwise_scales = 0;
 
   extern __shared__ char dynamic_shmem[];
-  uintptr_t base_shmem_ptr = reinterpret_cast<uintptr_t>(dynamic_shmem);
   // Manually align dynamic SHMEM per TMA requirements using padding
   // __align__(128) Does not guarantee the pointer to be aligned!
-  uintptr_t dshmem = (base_shmem_ptr + TMA_SHMEM_ALIGNMENT - 1) &
-                     ~(static_cast<uintptr_t>(TMA_SHMEM_ALIGNMENT - 1));
+  char *dshmem = align_up(dynamic_shmem, TMA_SHMEM_ALIGNMENT);
 
   // The destination shared memory buffer of a bulk tensor operation should be 16-byte aligned
   IType *in_sh = reinterpret_cast<IType *>(dshmem);

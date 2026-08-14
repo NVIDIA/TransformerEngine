@@ -119,6 +119,25 @@ Runtime Environment Variables
 
 These environment variables control the behavior of Transformer Engine during execution.
 
+General
+^^^^^^^
+
+.. envvar:: NVTE_TENSOR_HANDLE_POOL_SIZE_MB
+
+   :Type: ``int`` (positive integer)
+   :Default: ``20``
+   :Description: Size in MiB of the internal ``NVTETensor`` handle pool. Increase this
+                 value if an application legitimately creates more tensor handles than
+                 the default pool can hold.
+
+.. envvar:: NVTE_GROUPED_TENSOR_HANDLE_POOL_SIZE_MB
+
+   :Type: ``int`` (positive integer)
+   :Default: ``20``
+   :Description: Size in MiB of the internal ``NVTEGroupedTensor`` handle pool. Increase
+                 this value if an application legitimately creates more grouped tensor
+                 handles than the default pool can hold.
+
 Attention Backend Selection
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
@@ -359,6 +378,16 @@ Torch Compilation and Fusion
 
 LayerNorm/RMSNorm SM Margins
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. envvar:: NVTE_CUDNN_MXFP8_NORM_OUTPUT_IN_INPUT_DTYPE
+
+   :Type: ``int`` (0 or 1)
+   :Default: ``0``
+   :Description: With cuDNN 9.25.0 or later, use the normalization input datatype for the virtual
+                 LayerNorm/RMSNorm output consumed by cuDNN MXFP8 block-scale quantization. This
+                 enables cuDNN's fused MXFP8 normalization engine, which requires matching FP16 or
+                 BF16 input and normalization-output datatypes. When set to ``0``, or with an
+                 earlier cuDNN version, the virtual normalization output uses FP32.
 
 .. envvar:: NVTE_FWD_LAYERNORM_SM_MARGIN
 
