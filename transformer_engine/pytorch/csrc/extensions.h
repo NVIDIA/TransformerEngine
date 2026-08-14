@@ -215,7 +215,8 @@ void nvfp4_multi_tensor_compute_partial_amax(
     std::vector<int64_t> w_list, std::vector<int64_t> start_offset_list, int64_t block_len);
 
 void nvfp4_expand_scale_to_fp8(at::Tensor input, at::Tensor output, int64_t tile_rows,
-                               int64_t tile_cols, int64_t rows_padded, int64_t block_len);
+                               int64_t tile_cols, int64_t rows_padded, int64_t block_len,
+                               DType scale_dtype = DType::kFloat8E4M3);
 
 void nvfp4_compute_per_block_scale(at::Tensor block_amax, at::Tensor scale, at::Tensor global_amax);
 

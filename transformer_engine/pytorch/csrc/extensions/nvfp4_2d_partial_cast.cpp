@@ -45,7 +45,7 @@ void nvfp4_2d_partial_cast(const at::Tensor& inp, py::handle out, const at::Tens
 
   nvte_nvfp4_2d_partial_cast(inp_cu.data(), out_cu.data(), scale_cu.data(), global_scale_cu.data(),
                              h, w, scale.stride(0), scale.stride(1), start_offset, block_len,
-                             at::cuda::getCurrentCUDAStream());
+                             at::cuda::getCurrentCUDAStream(), kNVTEFloat8E4M3);
 }
 
 void nvfp4_multi_tensor_2d_partial_cast(std::vector<at::Tensor> inp_list,
@@ -95,7 +95,8 @@ void nvfp4_multi_tensor_2d_partial_cast(std::vector<at::Tensor> inp_list,
 
     nvte_nvfp4_2d_partial_cast(inp_cu.data(), out_cu.data(), scale_cu.data(),
                                global_scale_cu.data(), h, w, scale.stride(0), scale.stride(1),
-                               start_offset, static_cast<size_t>(block_len), stream);
+                               start_offset, static_cast<size_t>(block_len), stream,
+                               kNVTEFloat8E4M3);
   }
 }
 
