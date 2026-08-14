@@ -15,6 +15,7 @@ from .utils import (
     all_files_in_dir,
     cudnn_frontend_include_path,
     debug_build_enabled,
+    get_bolt_build_flags,
     setup_mpi_flags,
     nccl_include_path,
     nccl_lib_path,
@@ -113,6 +114,9 @@ def setup_jax_extension(
     else:
         cxx_flags.append("-g0")
 
+    bolt_cxx_flags, linker_flags = get_bolt_build_flags()
+    cxx_flags.extend(bolt_cxx_flags)
+
     setup_mpi_flags(include_dirs, cxx_flags)
 
     if bool(int(os.getenv("NVTE_WITH_CUBLASMP", 0))):
@@ -135,5 +139,6 @@ def setup_jax_extension(
         sources=[str(path) for path in sources],
         include_dirs=[str(path) for path in include_dirs],
         extra_compile_args=cxx_flags,
+        extra_link_args=linker_flags,
         **kwargs,
     )
