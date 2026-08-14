@@ -182,8 +182,14 @@ struct FusedAttnConfig {
   // Derive fields such as bucketed batch_size or num_tokens for THD, based on input fields
   // that have been set by the caller. Call once, after the last input field is set and before
   // the config reaches a graph build, a cache lookup, or a support query -- all of which read
-  // derived fields. nvte_get_fused_attn_backend_v2() is where that happens for every config
-  // that enters this library, so nothing downstream of it needs to derive again.
+  // derived fields.
+  //
+  // Called by whoever owns the config, at the point it stops being edited: the execution entry
+  // points (nvte_fused_attn_fwd_v2 and its backward counterpart) on the config they go on to run,
+  // and nvte_get_fused_attn_backend_v2() on a copy of the caller's, so that asking whether a
+  // configuration is supported does not modify it. Nothing further in is expected to derive
+  // again, and check_derived() is what holds them to that. Idempotent, so a config that is
+  // derived and then re-derived is unharmed.
   void derive();
 
   // Return a normalized copy of this config to be used as a key for the cuDNN graph cache.
@@ -196,14 +202,14 @@ struct FusedAttnConfig {
 // Assert that `cfg` has been through derive(), for code about to read a derived field. Worth
 // asserting rather than assuming because the failure is silent: an unset bucketed_batch_size or
 // q_format reads as zero, which is a legal value that yields a graph of the wrong shape and a
-// key that collides with unrelated configs. Deriving happens in exactly one place
-// (nvte_get_fused_attn_backend_v2), so this is what keeps a new path into the builders from
+// key that collides with unrelated configs. Deriving happens at the library's entry points rather
+// than here, where it would be needed, so this is what keeps a new path into the builders from
 // quietly skipping it.
 inline void check_derived(const FusedAttnConfig &cfg) {
-  NVTE_CHECK(
-      cfg.is_derived,
-      "FusedAttnConfig reached a graph build with its derived fields unset. Every config "
-      "must pass through FusedAttnConfig::derive() first; see nvte_get_fused_attn_backend_v2.");
+  NVTE_CHECK(cfg.is_derived,
+             "FusedAttnConfig reached a graph build with its derived fields unset. Every config "
+             "must pass through FusedAttnConfig::derive() first; see the entry points in "
+             "fused_attn.cpp.");
 }
 
 inline const FusedAttnConfig *get_fused_attn_config(NVTEFusedAttnConfig config) {

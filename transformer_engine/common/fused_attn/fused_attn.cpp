@@ -228,7 +228,7 @@ NVTE_QKV_Format nvte_get_kv_format(NVTE_QKV_Layout qkv_layout) {
 
 namespace {
 
-// The per-thread storage for the diagnostic string; it's re-used (cleared + re-populated)
+// The per-thread storage for the diagnostic string; it is re-used (cleared + re-populated)
 // on every call to nvte_get_fused_attn_backend_v2 on the same thread.
 thread_local std::string fused_attn_backend_message_buffer;
 
@@ -240,6 +240,15 @@ void set_message(const char **message, std::string reason) {
   *message = fused_attn_backend_message_buffer.c_str();
 }
 
+// Records `reason` if `rejected`, and reports it, so that an early rejection reads as the one
+// statement it is: `if (set_message_if(cond, message, "why")) return NVTE_No_Backend;`. The
+// reason is built whether or not it is used, which is why it stays a plain string here -- these
+// are short literals on a path that goes on to build cuDNN graphs.
+bool set_message_if(bool rejected, const char **message, std::string reason) {
+  if (rejected) set_message(message, std::move(reason));
+  return rejected;
+}
+
 }  // namespace
 
 // select a backend for fused attention; the diagnostic message is based on the first failure, not cumulative.
@@ -247,21 +256,22 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend_v2(NVTEFusedAttnConfig confi
                                                        const char **message) {
   using namespace transformer_engine;
   using namespace transformer_engine::fused_attn;
-  // Every config entering this library passes through here on its way to a graph, so this is the
-  // one place that has to fill the derived fields, and it does so in place. The caller keeps
-  // ownership; what it gets back is its own config with the blanks filled in, which is what the
-  // execution path then hands to the backend it selected -- nvte_fused_attn_fwd_v2() queries with
-  // the very config it goes on to run, so deriving here is what lets the run reuse the graph the
-  // query built rather than key a second one. Deriving is idempotent, so a config that arrives
-  // already derived is unharmed. It is a write, though, so one config object must not be queried
-  // from two threads at once; every caller here builds its config as a local, one per call.
-  FusedAttnConfig &cfg = *get_fused_attn_config_mutable(config);
+  // Derived on a copy, leaving the caller's config untouched: this function answers a question
+  // about a configuration and has no business editing one, and a query that wrote to its argument
+  // could not be asked about the same config from two threads at once. The copy costs nothing that
+  // matters here, since deriving is a version check and some arithmetic.
+  //
+  // The execution path derives its own config before calling this (see nvte_fused_attn_fwd_v2),
+  // and still reuses whatever graph the query builds: both derive the same fields from the same
+  // inputs, so make_cache_key() lands on the same entry. Deriving is idempotent, so re-deriving
+  // an already-derived config here changes nothing.
+  FusedAttnConfig cfg = *get_fused_attn_config(config);
   cfg.derive();
   set_message(message, "");
 
   cudnnHandle_t handle = cudnnExecutionPlanManager::Instance().GetHandle();
-  const NVTE_QKV_Format qkv_format = nvte_get_qkv_format(cfg.qkv_layout);
-  const NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(cfg.qkv_layout);
+  const auto qkv_format = nvte_get_qkv_format(cfg.qkv_layout);
+  const auto layout_group = nvte_get_qkv_layout_group(cfg.qkv_layout);
   const auto cudnn_runtime_version = cudnnGetVersion();
 
   // THD + 64-bit ragged offsets require cuDNN >= 9.5
@@ -270,26 +280,26 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend_v2(NVTEFusedAttnConfig confi
        fused_attn::get_ragged_offset_dtype(layout_group, cfg.num_attn_heads, cfg.num_gqa_groups,
                                            cfg.max_seqlen_q, cfg.max_seqlen_kv, cfg.head_dim_qk,
                                            cfg.head_dim_v) == DType::kInt64);
-  if (requires_64bit_ragged_offset && cudnn_runtime_version < 90500) {
-    set_message(message,
-                "Configuration requires 64-bit ragged offsets, which require "
-                "cuDNN >= 9.5.");
+  if (set_message_if(requires_64bit_ragged_offset && cudnn_runtime_version < 90500, message,
+                     "Configuration requires 64-bit ragged offsets, which require "
+                     "cuDNN >= 9.5.")) {
     return NVTE_Fused_Attn_Backend::NVTE_No_Backend;
   }
 
   // THD requires padding-style mask
-  if (qkv_format == NVTE_QKV_Format::NVTE_THD &&
-      cfg.attn_mask_type != NVTE_Mask_Type::NVTE_PADDING_MASK &&
-      cfg.attn_mask_type != NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK &&
-      cfg.attn_mask_type != NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK) {
-    set_message(message,
-                "THD format requires PADDING / PADDING_CAUSAL / PADDING_CAUSAL_BOTTOM_RIGHT mask.");
+  if (set_message_if(
+          qkv_format == NVTE_QKV_Format::NVTE_THD &&
+              cfg.attn_mask_type != NVTE_Mask_Type::NVTE_PADDING_MASK &&
+              cfg.attn_mask_type != NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK &&
+              cfg.attn_mask_type != NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK,
+          message,
+          "THD format requires PADDING / PADDING_CAUSAL / PADDING_CAUSAL_BOTTOM_RIGHT mask.")) {
     return NVTE_Fused_Attn_Backend::NVTE_No_Backend;
   }
 
-  // cuDNN does not support pre-scale bias
-  if (cfg.bias_type == NVTE_Bias_Type::NVTE_PRE_SCALE_BIAS) {
-    set_message(message, "Fused attention does not support pre-scale bias.");
+  // TE's cuDNN fused-attention graph does not represent pre-scale bias.
+  if (set_message_if(cfg.bias_type == NVTE_Bias_Type::NVTE_PRE_SCALE_BIAS, message,
+                     "Fused attention does not support pre-scale bias.")) {
     return NVTE_Fused_Attn_Backend::NVTE_No_Backend;
   }
 
@@ -427,6 +437,9 @@ void nvte_fused_attn_fwd_v2(NVTEFusedAttnFwdParams params) {
 
   auto handle = cudnnExecutionPlanManager::Instance().GetHandle();
   FusedAttnConfig cfg = p.make_config();
+  // Derived here, not by the query below: the query works on its own copy, and it is this config
+  // that goes on to the backend and must arrive with its derived fields filled in.
+  cfg.derive();
   const char *fused_attn_reject_reason = nullptr;
   NVTE_Fused_Attn_Backend fused_attention_backend = nvte_get_fused_attn_backend_v2(
       reinterpret_cast<NVTEFusedAttnConfig>(&cfg), &fused_attn_reject_reason);
@@ -529,6 +542,9 @@ void nvte_fused_attn_bwd_v2(NVTEFusedAttnBwdParams params) {
 
   auto handle = cudnnExecutionPlanManager::Instance().GetHandle();
   FusedAttnConfig cfg = p.make_config();
+  // Derived here, not by the query below: the query works on its own copy, and it is this config
+  // that goes on to the backend and must arrive with its derived fields filled in.
+  cfg.derive();
   const char *fused_attn_reject_reason = nullptr;
   NVTE_Fused_Attn_Backend fused_attention_backend = nvte_get_fused_attn_backend_v2(
       reinterpret_cast<NVTEFusedAttnConfig>(&cfg), &fused_attn_reject_reason);
