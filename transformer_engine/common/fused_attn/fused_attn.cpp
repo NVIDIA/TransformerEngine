@@ -184,7 +184,7 @@ NVTE_QKV_Format nvte_get_qkv_format(NVTE_QKV_Layout qkv_layout) {
 
 // map NVTE_QKV_Layout to NVTE_QKV_Format for Q
 NVTE_QKV_Format nvte_get_q_format(NVTE_QKV_Layout qkv_layout) {
-  NVTE_QKV_Format qkv_format = nvte_get_qkv_format(qkv_layout);
+  const NVTE_QKV_Format qkv_format = nvte_get_qkv_format(qkv_layout);
   switch (qkv_format) {
     case NVTE_QKV_Format::NVTE_SBHD:
     case NVTE_QKV_Format::NVTE_SBHD_2BSHD:
@@ -206,7 +206,7 @@ NVTE_QKV_Format nvte_get_q_format(NVTE_QKV_Layout qkv_layout) {
 
 // map NVTE_QKV_Layout to NVTE_QKV_Format for KV
 NVTE_QKV_Format nvte_get_kv_format(NVTE_QKV_Layout qkv_layout) {
-  NVTE_QKV_Format qkv_format = nvte_get_qkv_format(qkv_layout);
+  const NVTE_QKV_Format qkv_format = nvte_get_qkv_format(qkv_layout);
   switch (qkv_format) {
     case NVTE_QKV_Format::NVTE_SBHD:
     case NVTE_QKV_Format::NVTE_BSHD_2SBHD:
@@ -309,14 +309,16 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend_v2(NVTEFusedAttnConfig confi
       (cfg.qkv_dtype == NVTEDType::kNVTEFloat16 || cfg.qkv_dtype == NVTEDType::kNVTEBFloat16);
 
   if (is_fp8) {
-    if (cfg.return_max_logit) {
-      set_message(message, "FP8 fused attention does not support return_max_logit=True.");
+    if (set_message_if(cfg.return_max_logit, message,
+                       "FP8 fused attention does not support return_max_logit=True.")) {
       return NVTE_Fused_Attn_Backend::NVTE_No_Backend;
     }
-    if (qkv_format != NVTE_QKV_Format::NVTE_BSHD && qkv_format != NVTE_QKV_Format::NVTE_SBHD &&
-        qkv_format != NVTE_QKV_Format::NVTE_BHSD) {
-      set_message(message, "FP8 fused attention supports BSHD/SBHD/BHSD formats, found " +
-                               std::to_string(static_cast<int>(qkv_format)) + ".");
+    if (set_message_if(qkv_format != NVTE_QKV_Format::NVTE_BSHD &&
+                           qkv_format != NVTE_QKV_Format::NVTE_SBHD &&
+                           qkv_format != NVTE_QKV_Format::NVTE_BHSD,
+                       message,
+                       "FP8 fused attention supports BSHD/SBHD/BHSD formats, found " +
+                           std::to_string(static_cast<int>(qkv_format)) + ".")) {
       return NVTE_Fused_Attn_Backend::NVTE_No_Backend;
     }
     if (cfg.check_for_forward_support) {
@@ -337,13 +339,21 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend_v2(NVTEFusedAttnConfig confi
   }
 
   if (is_f16_or_bf16) {
-    if (cudnn_runtime_version <= 91500 && cfg.is_training &&
-        (qkv_format == NVTE_QKV_Format::NVTE_BSHD || qkv_format == NVTE_QKV_Format::NVTE_SBHD) &&
-        (cfg.max_seqlen_kv % 128 != 0) && cfg.cuda_graph &&
-        cfg.attn_mask_type != NVTE_Mask_Type::NVTE_PADDING_MASK &&
-        cfg.attn_mask_type != NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK &&
-        cfg.attn_mask_type != NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK) {
-      set_message(message, "Known cuDNN <= 9.15 issue with CUDA graph. Please upgrade cuDNN.");
+    // TODO(cyanguwa): re-validate BRCM + cross-attention on sm100 with cuDNN <= 9.7. The
+    // hand-written support matrix this function replaced rejected bottom-right-diagonal masks
+    // with max_seqlen_q != max_seqlen_kv there, for a cuDNN bug fixed in 9.7. cuDNN's own
+    // check_support is the authority now, so the guard is gone; it needs to come back as an
+    // explicit rejection here, like the CUDA-graph one below, if that bug is a wrong-result
+    // bug rather than a support gap check_support reports for itself.
+    if (set_message_if(
+            cudnn_runtime_version <= 91500 && cfg.is_training &&
+                (qkv_format == NVTE_QKV_Format::NVTE_BSHD ||
+                 qkv_format == NVTE_QKV_Format::NVTE_SBHD) &&
+                (cfg.max_seqlen_kv % 128 != 0) && cfg.cuda_graph &&
+                cfg.attn_mask_type != NVTE_Mask_Type::NVTE_PADDING_MASK &&
+                cfg.attn_mask_type != NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK &&
+                cfg.attn_mask_type != NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK,
+            message, "Known cuDNN <= 9.15 issue with CUDA graph. Please upgrade cuDNN.")) {
       return NVTE_Fused_Attn_Backend::NVTE_No_Backend;
     }
     if (cfg.check_for_forward_support) {
@@ -455,7 +465,7 @@ void nvte_fused_attn_fwd_v2(NVTEFusedAttnFwdParams params) {
                        output_O, p.Aux_CTX_Tensors, input_cu_seqlens_q, input_cu_seqlens_kv,
                        input_rng_state, wkspace, p.stream, handle);
   } else {
-    const char *reject_reason =
+    const char *const reject_reason =
         (fused_attn_reject_reason != nullptr && fused_attn_reject_reason[0] != '\0')
             ? fused_attn_reject_reason
             : "no cuDNN fused-attention backend supports the requested parameters";
@@ -582,7 +592,7 @@ void nvte_fused_attn_bwd_v2(NVTEFusedAttnBwdParams params) {
                        output_dV, output_dSoftmaxOffset, input_cu_seqlens_q, input_cu_seqlens_kv,
                        input_rng_state, wkspace, p.stream, handle);
   } else {
-    const char *reject_reason =
+    const char *const reject_reason =
         (fused_attn_reject_reason != nullptr && fused_attn_reject_reason[0] != '\0')
             ? fused_attn_reject_reason
             : "no cuDNN fused-attention backend supports the requested parameters";

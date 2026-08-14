@@ -26,6 +26,35 @@
 // An optional ":<ranks>" suffix picks which processes emit, defaulting to rank 0
 // so that output does not scale with the world size: "1:all" for every rank,
 // "2:0,3" for a specific set. See `rank_selected` for when overriding pays off.
+//
+// Level 1 on one training step of a supported configuration. Every line begins with
+// "[FUSED-ATTN-CACHE] pid=<pid>[ rank=<n>] | ", elided below, and carries the running
+// totals, of which only the pass being reported is shown (the counters are printed
+// right-aligned in a fixed width, dropped here):
+//
+//   THREAD      | tid=0   os_tid=1234
+//   fwd BUILD   | tid=0   | fwd miss=1, hit=0, built=1, unsup=0, plans=0, exec=0 | bwd ...
+//   bwd BUILD   | tid=0   | fwd ...  | bwd miss=1, hit=0, built=1, unsup=0, plans=0, exec=0
+//   fwd PLANS   | tid=0   | fwd miss=1, hit=1, built=1, unsup=0, plans=1, exec=0 | bwd ...
+//   ===== summary begin =====
+//   SUMMARY-TID | tid=0   | fwd miss=1, hit=1, built=1, unsup=0, plans=1, exec=1 | bwd ...
+//   SUMMARY     | tid=all | fwd miss=1, hit=1, built=1, unsup=0, plans=1, exec=1 | bwd ...
+//   fwd check_support         | calls=1 | time=   42.135 ms/call
+//   ===== summary end =====
+//
+// Two forward lookups against one build is the shape of a healthy run: the support
+// query missed and built, and the execution that followed hit the entry the query left
+// behind. `built=1, plans=1` says that graph went on to be executed; `built` above
+// `plans` counts graphs built for a query and never run. A refused configuration reads
+// `miss=1, unsup=1, built=0` instead, and stays at one refusal however many times it is
+// queried.
+//
+// Level 2 adds one line per lookup and per execution, with the key that decided it:
+//
+//   fwd MISS  | tid=0 dev=0 | train=1 det=0 cg=0 ... b=2 h=16 sq=512 skv=512 ...
+//   fwd HIT   | tid=0 dev=0 | train=1 det=0 cg=0 ... b=2 h=16 sq=512 skv=512 ...
+//
+// where diffing two MISS lines names the fields that cost the extra build.
 // ============================================================================
 
 #ifndef TRANSFORMER_ENGINE_COMMON_FUSED_ATTN_GRAPH_CACHE_DEBUG_H_

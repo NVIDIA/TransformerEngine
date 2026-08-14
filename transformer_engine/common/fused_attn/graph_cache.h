@@ -95,11 +95,16 @@ struct CachedGraph {
 // is what it leaves behind -- cuDNN's own account of the refusal, which is the entire useful
 // output of a failed query, so nothing is lost by answering from it. Reasons are short strings
 // and there is one per refused key, so this grows far slower than the graphs beside it.
+// Holding the lock and the maps together is also what fixes their relative lifetimes. Members
+// are destroyed in reverse declaration order, so the mutex is declared first to be destroyed
+// last: the maps go while their guard is still valid, rather than the other way round. Declaring
+// a cache and its lock as two separate objects leaves that ordering to whoever writes the next
+// one; declaring them here settles it once.
 template <typename GraphAndTensors>
 struct GraphCache {
+  std::mutex mutex;  // guards both maps below
   std::map<FusedAttnConfig, std::shared_ptr<CachedGraph<GraphAndTensors>>> supported;
   std::map<FusedAttnConfig, std::string> unsupported;
-  std::mutex mutex;  // guards both maps
 };
 
 // Takes a constructed graph through the frontend calls that decide whether cuDNN can run it:
@@ -189,6 +194,10 @@ std::shared_ptr<CachedGraph<GraphAndTensors>> get_or_build_cached_graph(
   } else if (refused) {
     outcome = LookupResult::Unsupported;
   }
+  // Recorded after the lock is dropped, so that writing a trace line cannot hold up threads
+  // querying other keys. The counters are exact, but two lookups that raced on the lock can be
+  // recorded in the opposite order, so read a level-2 trace as the set of lookups that happened
+  // rather than as the sequence they happened in.
   graph_cache_debug::record_cache_lookup(pass, outcome, key);
 
   if (cached != nullptr) return cached;

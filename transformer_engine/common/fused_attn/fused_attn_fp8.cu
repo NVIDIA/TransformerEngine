@@ -211,9 +211,9 @@ static SdpaFp8FwdGraphAndTensors build_sdpa_fp8_fwd_graph(const FusedAttnConfig&
       scale_o = mha_graph->tensor(1.0f);
     }
   } else if (is_mxfp8) {
-    NVTE_QKV_Format q_scale_inv_format =
+    const NVTE_QKV_Format q_scale_inv_format =
         (qkv_scale_inv_format != NVTE_QKV_Format_NOT_SET) ? qkv_scale_inv_format : cfg.q_format;
-    NVTE_QKV_Format kv_scale_inv_format =
+    const NVTE_QKV_Format kv_scale_inv_format =
         (qkv_scale_inv_format != NVTE_QKV_Format_NOT_SET) ? qkv_scale_inv_format : cfg.kv_format;
     std::vector<int64_t> q_scale_strides(4);
     std::vector<int64_t> k_scale_strides(4);
@@ -493,8 +493,9 @@ void fused_attn_fp8_fwd_impl(const FusedAttnConfig& cfg, void* devPtrQ, void* de
         const size_t grid = (b + nthreads_per_block - 1) / nthreads_per_block;
         void* devActualSeqlenQ = static_cast<int8_t*>(workspace) + plan_workspace_size;
         void* devActualSeqlenKV = static_cast<int8_t*>(devActualSeqlenQ) + b * sizeof(int32_t);
+        // TODO(cyanguwa): pass bucketed_batch_size
         cu_seqlens_to_actual_seqlens<<<grid, nthreads_per_block, 0, stream>>>(
-            b, b, static_cast<const int32_t*>(devPtrcuSeqlensQ),  // TODO(pass bucketed_batch_size)
+            b, b, static_cast<const int32_t*>(devPtrcuSeqlensQ),
             static_cast<const int32_t*>(devPtrcuSeqlensKV), static_cast<int32_t*>(devActualSeqlenQ),
             static_cast<int32_t*>(devActualSeqlenKV));
         NVTE_CHECK_CUDA(cudaGetLastError());
@@ -758,13 +759,13 @@ static SdpaFp8BwdGraphAndTensors build_sdpa_fp8_bwd_graph(const FusedAttnConfig&
       scale_dV = mha_graph->tensor(1.0f);
     }
   } else if (is_mxfp8) {
-    NVTE_QKV_Format q_format = cfg.q_format;
-    NVTE_QKV_Format kv_format = cfg.kv_format;
-    NVTE_QKV_Format q_scale_inv_format =
+    const NVTE_QKV_Format q_format = cfg.q_format;
+    const NVTE_QKV_Format kv_format = cfg.kv_format;
+    const NVTE_QKV_Format q_scale_inv_format =
         (qkv_scale_inv_format != NVTE_QKV_Format_NOT_SET) ? qkv_scale_inv_format : q_format;
-    NVTE_QKV_Format kv_scale_inv_format =
+    const NVTE_QKV_Format kv_scale_inv_format =
         (qkv_scale_inv_format != NVTE_QKV_Format_NOT_SET) ? qkv_scale_inv_format : kv_format;
-    NVTE_QKV_Format do_scale_format_ =
+    const NVTE_QKV_Format do_scale_format_ =
         (do_scale_inv_format != NVTE_QKV_Format_NOT_SET) ? do_scale_inv_format : do_format;
     // Q_t, K_t, dO_t, dO_f16
     std::vector<int64_t> q_t_strides(4), k_t_strides(4), dO_t_strides(4);
@@ -1164,8 +1165,9 @@ void fused_attn_fp8_bwd_impl(
       const size_t grid = (b + nthreads_per_block - 1) / nthreads_per_block;
       void* devActualSeqlenQ = static_cast<int8_t*>(workspace) + plan_workspace_size;
       void* devActualSeqlenKV = static_cast<int8_t*>(devActualSeqlenQ) + b * sizeof(int32_t);
+      // TODO(cyanguwa): pass bucketed_batch_size
       cu_seqlens_to_actual_seqlens<<<grid, nthreads_per_block, 0, stream>>>(
-          b, b, static_cast<const int32_t*>(devPtrcuSeqlensQ),  // TODO(pass bucketed_batch_size)
+          b, b, static_cast<const int32_t*>(devPtrcuSeqlensQ),
           static_cast<const int32_t*>(devPtrcuSeqlensKV), static_cast<int32_t*>(devActualSeqlenQ),
           static_cast<int32_t*>(devActualSeqlenKV));
       NVTE_CHECK_CUDA(cudaGetLastError());
@@ -1276,7 +1278,7 @@ void fused_attn_fp8_fwd(const FusedAttnConfig& cfg, const Tensor* input_Q, const
 
   size_t workspace_size = 0;
 
-  NVTE_QKV_Format qkv_format = nvte_get_qkv_format(qkv_layout);
+  const NVTE_QKV_Format qkv_format = nvte_get_qkv_format(qkv_layout);
   if ((qkv_format == NVTE_QKV_Format::NVTE_BSHD) || (qkv_format == NVTE_QKV_Format::NVTE_SBHD) ||
       (qkv_format == NVTE_QKV_Format::NVTE_BHSD)) {
     fused_attn::fused_attn_fp8_fwd_impl(
@@ -1388,7 +1390,7 @@ void fused_attn_fp8_bwd(const FusedAttnConfig& cfg, const Tensor* input_Q, const
 
   size_t workspace_size = 0;
 
-  NVTE_QKV_Format dqkv_format = nvte_get_qkv_format(dqkv_layout);
+  const NVTE_QKV_Format dqkv_format = nvte_get_qkv_format(dqkv_layout);
   if ((dqkv_format == NVTE_QKV_Format::NVTE_BSHD) || (dqkv_format == NVTE_QKV_Format::NVTE_SBHD) ||
       (dqkv_format == NVTE_QKV_Format::NVTE_BHSD)) {
     fused_attn::fused_attn_fp8_bwd_impl(
