@@ -159,28 +159,23 @@ def _run_layer_with_overlap(
             pytest.skip("cuBLASMp comm+GEMM overlap does not yet support MXFP8 (block scaling).")
         test_cmd.append("--use-cublasmp")
 
-    os.environ["PYTORCH_JIT"] = "0"
-    os.environ["NVTE_TORCH_COMPILE"] = "0"
-    os.environ["NVTE_ALLOW_NONDETERMINISTIC_ALGO"] = "0"
+    test_env = os.environ.copy()
+    test_env["PYTORCH_JIT"] = "0"
+    test_env["NVTE_TORCH_COMPILE"] = "0"
+    test_env["NVTE_ALLOW_NONDETERMINISTIC_ALGO"] = "0"
     if te.get_device_compute_capability() <= (8, 0):
         # We've experienced numerical discrepancies in Flash Attention
         # backward when running with Userbuffers on A100s. This does
         # not show up in more recent GPUs.
-        os.environ["NVTE_FLASH_ATTN"] = "0"
+        test_env["NVTE_FLASH_ATTN"] = "0"
     elif fp8:
         # Fused attention is causing non-deterministic FP8 failures on H100s even with
         # NVTE_ALLOW_NONDETERMINISTIC_ALGO=0, so disable it entirely for this test.
-        os.environ["NVTE_FUSED_ATTN"] = "0"
+        test_env["NVTE_FUSED_ATTN"] = "0"
 
     result = subprocess.run(
-        test_cmd, env=os.environ, capture_output=True, text=True, check=False
+        test_cmd, env=test_env, capture_output=True, text=True, check=False
     )
-
-    os.unsetenv("PYTORCH_JIT")
-    os.unsetenv("NVTE_TORCH_COMPILE")
-    os.unsetenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO")
-    os.unsetenv("NVTE_FLASH_ATTN")
-    os.unsetenv("NVTE_FUSED_ATTN")
 
     _assert_subprocess_succeeded(result)
 
