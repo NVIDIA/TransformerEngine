@@ -91,6 +91,8 @@ void FusedAttnConfig::derive() {
       max_pages_per_seq_v = 1;
     }
   }
+
+  is_derived = true;
 }
 
 FusedAttnConfig FusedAttnConfig::make_cache_key() const {
@@ -121,7 +123,12 @@ FusedAttnConfig FusedAttnConfig::make_cache_key() const {
       }
       cache_cfg.num_tokens_q = 0;
       cache_cfg.num_tokens_kv = 0;
-      const bool bucket_batch = !is_forward || !cache_cfg.uses_cu_seqlens_directly;
+      // The forward graph keeps the true batch size when it takes the user's cu_seqlens
+      // directly, since cuDNN reads those [actual_b+1] buffers itself; the backward graph
+      // converts them and so always buckets. The key has to follow whichever the graph does,
+      // or it would name a batch size the graph was not built with. See
+      // derive_f16_bwd_graph_inputs.
+      const bool bucket_batch = !check_for_forward_support || !cache_cfg.uses_cu_seqlens_directly;
       if (bucket_batch) {
         cache_cfg.batch_size = cache_cfg.bucketed_batch_size;
       }
@@ -133,7 +140,7 @@ FusedAttnConfig FusedAttnConfig::make_cache_key() const {
 
   // Restrict each direction's key to the fields its graph actually consumes, so
   // no redundant graphs are built and no cache misses either
-  if (is_forward) {
+  if (check_for_forward_support) {
     cache_cfg.do_dtype = kNVTEBFloat16;
     cache_cfg.dqkv_dtype = kNVTEBFloat16;
     cache_cfg.do_format = NVTE_QKV_Format_NOT_SET;
@@ -150,7 +157,10 @@ FusedAttnConfig FusedAttnConfig::make_cache_key() const {
 FusedAttnConfig FusedAttnFwdParams::make_config() const {
   const FusedAttnFwdParams &params = *this;
   FusedAttnConfig cfg{};
-  cfg.is_forward = true;
+  // Forward execution: only the forward graph is run, so do not pay for a backward support
+  // check whose graph this call will never execute.
+  cfg.check_for_forward_support = true;
+  cfg.check_for_backward_support = false;
   cfg.is_training = params.is_training;
   cfg.deterministic = false;
   cfg.cuda_graph = params.cuda_graph;
@@ -255,6 +265,10 @@ FusedAttnConfig FusedAttnFwdParams::make_config() const {
 FusedAttnConfig FusedAttnBwdParams::make_config() const {
   const FusedAttnBwdParams &params = *this;
   FusedAttnConfig cfg{};
+  // Backward execution: only the backward graph is run. check_for_forward_support=false also
+  // selects the backward key normalization in make_cache_key().
+  cfg.check_for_forward_support = false;
+  cfg.check_for_backward_support = true;
   cfg.is_training = true;
   cfg.deterministic = params.deterministic;
   cfg.cuda_graph = params.cuda_graph;

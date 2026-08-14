@@ -247,7 +247,16 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend_v2(NVTEFusedAttnConfig confi
                                                        const char **message) {
   using namespace transformer_engine;
   using namespace transformer_engine::fused_attn;
-  const FusedAttnConfig &cfg = *get_fused_attn_config(config);
+  // Every config entering this library passes through here on its way to a graph, so this is the
+  // one place that has to fill the derived fields, and it does so in place. The caller keeps
+  // ownership; what it gets back is its own config with the blanks filled in, which is what the
+  // execution path then hands to the backend it selected -- nvte_fused_attn_fwd_v2() queries with
+  // the very config it goes on to run, so deriving here is what lets the run reuse the graph the
+  // query built rather than key a second one. Deriving is idempotent, so a config that arrives
+  // already derived is unharmed. It is a write, though, so one config object must not be queried
+  // from two threads at once; every caller here builds its config as a local, one per call.
+  FusedAttnConfig &cfg = *get_fused_attn_config_mutable(config);
+  cfg.derive();
   set_message(message, "");
 
   cudnnHandle_t handle = cudnnExecutionPlanManager::Instance().GetHandle();
@@ -300,12 +309,14 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend_v2(NVTEFusedAttnConfig confi
                                std::to_string(static_cast<int>(qkv_format)) + ".");
       return NVTE_Fused_Attn_Backend::NVTE_No_Backend;
     }
-    std::string fwd_reason = is_supported_fp8_fwd(cfg, handle);
-    if (!fwd_reason.empty()) {
-      set_message(message, std::move(fwd_reason));
-      return NVTE_Fused_Attn_Backend::NVTE_No_Backend;
+    if (cfg.check_for_forward_support) {
+      std::string fwd_reason = is_supported_fp8_fwd(cfg, handle);
+      if (!fwd_reason.empty()) {
+        set_message(message, std::move(fwd_reason));
+        return NVTE_Fused_Attn_Backend::NVTE_No_Backend;
+      }
     }
-    if (cfg.is_training && !cfg.is_forward) {
+    if (cfg.is_training && cfg.check_for_backward_support) {
       std::string bwd_reason = is_supported_fp8_bwd(cfg, handle);
       if (!bwd_reason.empty()) {
         set_message(message, std::move(bwd_reason));
@@ -325,12 +336,14 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend_v2(NVTEFusedAttnConfig confi
       set_message(message, "Known cuDNN <= 9.15 issue with CUDA graph. Please upgrade cuDNN.");
       return NVTE_Fused_Attn_Backend::NVTE_No_Backend;
     }
-    std::string fwd_reason = is_supported_f16_fwd(cfg, handle);
-    if (!fwd_reason.empty()) {
-      set_message(message, std::move(fwd_reason));
-      return NVTE_Fused_Attn_Backend::NVTE_No_Backend;
+    if (cfg.check_for_forward_support) {
+      std::string fwd_reason = is_supported_f16_fwd(cfg, handle);
+      if (!fwd_reason.empty()) {
+        set_message(message, std::move(fwd_reason));
+        return NVTE_Fused_Attn_Backend::NVTE_No_Backend;
+      }
     }
-    if (cfg.is_training && !cfg.is_forward) {
+    if (cfg.is_training && cfg.check_for_backward_support) {
       std::string bwd_reason = is_supported_f16_bwd(cfg, handle);
       if (!bwd_reason.empty()) {
         set_message(message, std::move(bwd_reason));

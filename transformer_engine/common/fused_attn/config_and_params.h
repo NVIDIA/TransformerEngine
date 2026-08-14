@@ -79,11 +79,16 @@ struct FusedAttnConfig {
   int device_id = -1;
 
   // Internal-only fields: never part of attribute serialization, operator<, or the graph cache key.
-  // Filled by derive() or set by caller (i.e. is_forward). Added for convinence purposes and do not
-  // represent any graph properties.
-
-  // Direction to build the cuDNN graph for; steers make_cache_key() normalization.
-  bool is_forward = false;
+  // Filled by derive() or set by caller (i.e. check_for_forward_support). Added for convinence
+  // purposes and do not represent any graph properties.
+  bool check_for_forward_support = true;
+  bool check_for_backward_support = true;
+  // Whether derive() has run, i.e. whether the fields below hold anything. Every consumer of a
+  // derived field needs them filled -- an unfilled config yields a graph with the wrong shapes
+  // and a cache key that collides with unrelated configs, neither of which announces itself --
+  // so this exists to let those consumers assert rather than trust. Not a cached-result marker:
+  // derive() recomputes unconditionally, so a config whose inputs change can simply be re-derived.
+  bool is_derived = false;
   // THD batch/token counts; make_cache_key() folds these into batch_size/max_seqlen_*.
   size_t bucketed_batch_size = 0;
   size_t bucketed_num_tokens_q = 0;
@@ -175,7 +180,10 @@ struct FusedAttnConfig {
   }
 
   // Derive fields such as bucketed batch_size or num_tokens for THD, based on input fields
-  // that have been set by the caller.
+  // that have been set by the caller. Call once, after the last input field is set and before
+  // the config reaches a graph build, a cache lookup, or a support query -- all of which read
+  // derived fields. nvte_get_fused_attn_backend_v2() is where that happens for every config
+  // that enters this library, so nothing downstream of it needs to derive again.
   void derive();
 
   // Return a normalized copy of this config to be used as a key for the cuDNN graph cache.
@@ -184,6 +192,19 @@ struct FusedAttnConfig {
   // This helps avoid redundant graph builds and cache misses.
   FusedAttnConfig make_cache_key() const;
 };
+
+// Assert that `cfg` has been through derive(), for code about to read a derived field. Worth
+// asserting rather than assuming because the failure is silent: an unset bucketed_batch_size or
+// q_format reads as zero, which is a legal value that yields a graph of the wrong shape and a
+// key that collides with unrelated configs. Deriving happens in exactly one place
+// (nvte_get_fused_attn_backend_v2), so this is what keeps a new path into the builders from
+// quietly skipping it.
+inline void check_derived(const FusedAttnConfig &cfg) {
+  NVTE_CHECK(
+      cfg.is_derived,
+      "FusedAttnConfig reached a graph build with its derived fields unset. Every config "
+      "must pass through FusedAttnConfig::derive() first; see nvte_get_fused_attn_backend_v2.");
+}
 
 inline const FusedAttnConfig *get_fused_attn_config(NVTEFusedAttnConfig config) {
   NVTE_CHECK(config != nullptr, "NVTEFusedAttnConfig must not be NULL.");

@@ -8,7 +8,6 @@
 #define TRANSFORMER_ENGINE_COMMON_FUSED_ATTN_UTILS_H_
 
 #include <cstdint>
-#include <mutex>
 
 #include "../common.h"
 #include "transformer_engine/fused_attn.h"
