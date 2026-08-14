@@ -167,14 +167,34 @@ except PackageNotFoundError:
     flash_attn_func_v4 = None
     flash_attn_varlen_func_v4 = None
 else:
-    from flash_attn.cute.interface import (  # pylint: disable=ungrouped-imports,no-name-in-module
-        flash_attn_func as flash_attn_func_v4,
-        flash_attn_varlen_func as flash_attn_varlen_func_v4,
-        _validate_head_dims as _fa4_validate_head_dims,
-    )
+    try:
+        cutlass_dsl_version = PkgVersion(get_pkg_version("nvidia-cutlass-dsl"))
 
-    fa_utils.v4_validate_head_dims = _fa4_validate_head_dims
-    fa_utils.set_flash_attention_4_params()
+        # FA4 4.0.0b24 requires CUTLASS DSL 4.6.2 or newer.
+        if fa_utils.fa4_version == PkgVersion("4.0.0b24") and cutlass_dsl_version < PkgVersion(
+            "4.6.2"
+        ):
+            raise ImportError(
+                "flash-attn-4 4.0.0b24 requires nvidia-cutlass-dsl>=4.6.2; "
+                f"found {cutlass_dsl_version}"
+            )
+
+        from flash_attn.cute.interface import (  # pylint: disable=ungrouped-imports,no-name-in-module
+            flash_attn_func as flash_attn_func_v4,
+            flash_attn_varlen_func as flash_attn_varlen_func_v4,
+            _validate_head_dims as _fa4_validate_head_dims,
+        )
+    except ImportError as exc:
+        flash_attn_func_v4 = None
+        flash_attn_varlen_func_v4 = None
+        warnings.warn(
+            f"FlashAttention 4 is installed but cannot be loaded: {exc}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+    else:
+        fa_utils.v4_validate_head_dims = _fa4_validate_head_dims
+        fa_utils.set_flash_attention_4_params()
 
 # Float8CurrentScaling: fused_attn_bwd takes O in FP8 by default, this flag allows it in F16
 _dpa_fp8_cs_o_in_f16 = os.getenv("NVTE_DPA_FP8CS_O_in_F16", "1") == "1"
