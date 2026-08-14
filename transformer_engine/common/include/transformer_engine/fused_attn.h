@@ -413,17 +413,6 @@ void nvte_set_fused_attn_bwd_params_attribute(NVTEFusedAttnBwdParams params,
                                               NVTEFusedAttnBwdParamsAttribute attr, const void *buf,
                                               size_t size_in_bytes);
 
-/*! \brief Prefix on the ``nvte_get_fused_attn_backend_v2`` diagnostic when a configuration is
- *         rejected solely by the backward-pass support check.
- *
- *  Its presence tells the caller that the forward pass is supported and only the backward pass
- *  is not, so re-querying the same configuration with ``is_training = false`` may succeed. Its
- *  absence means the forward pass itself was rejected, for which dropping to inference cannot
- *  help. Mirrored on the Python side as
- *  ``transformer_engine.pytorch.attention.dot_product_attention.utils.FUSED_ATTN_BWD_REJECT_PREFIX``.
- */
-#define NVTE_FUSED_ATTN_BWD_REJECT_PREFIX "[backward] "
-
 /*! \brief Get fused-attention backend based on user configuration.
  *
  *  This function passes the user configuration to cuDNN frontend, runs its support checks,
@@ -433,9 +422,7 @@ void nvte_set_fused_attn_bwd_params_attribute(NVTEFusedAttnBwdParams params,
  *  \param[in]     cfg     Fused-attention configuration created by
  *                         ``nvte_create_fused_attn_config()``.
  *  \param[out]    message If cuDNN graphs are built successfully, an empty string;
- *                         if not, a diagnostic message explaining why there is no support,
- *                         prefixed with ``NVTE_FUSED_ATTN_BWD_REJECT_PREFIX`` when only the
- *                         backward pass is unsupported.
+ *                         if not, a diagnostic message explaining why there is no support.
  *                         Pass NULL to skip the diagnostics. Note that the string pointer
  *                         refers to a per-thread buffer owned by the library and remains valid
  *                         only until the next call to ``nvte_get_fused_attn_backend_v2`` on the

@@ -79,18 +79,11 @@ struct FusedAttnConfig {
   int device_id = -1;
 
   // Internal-only fields: never part of attribute serialization, operator<, or the graph cache key.
-  // Filled by derive() or set by caller (i.e. check_forward). Added for convinence purposes and do
-  // not represent any graph properties.
+  // Filled by derive() or set by caller (i.e. is_forward). Added for convinence purposes and do not
+  // represent any graph properties.
 
-  // Which directions nvte_get_fused_attn_backend_v2() runs a support check for. The execution
-  // entry points each run one direction and ask about that one only; a support query leaves the
-  // defaults and asks about both. Checking a direction that is never executed builds a cuDNN
-  // graph under a cache key nothing consumes.
-  //
-  // check_forward doubles as the direction to build the cuDNN graph for, steering
-  // make_cache_key() normalization, so it must stay true wherever a forward graph is built.
-  bool check_forward = true;
-  bool check_backward = true;
+  // Direction to build the cuDNN graph for; steers make_cache_key() normalization.
+  bool is_forward = false;
   // THD batch/token counts; make_cache_key() folds these into batch_size/max_seqlen_*.
   size_t bucketed_batch_size = 0;
   size_t bucketed_num_tokens_q = 0;

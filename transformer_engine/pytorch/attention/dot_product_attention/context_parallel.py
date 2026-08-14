@@ -4946,8 +4946,7 @@ def cp_per_step_configs(
     padding_or_no_mask = "padding" if "padding" in attn_mask_type else "no_mask"
     window_left, window_right = window_size
 
-    def config(mask, s_q, s_kv, heads, gqa, bottom_right, t_q, t_kv, window=None):
-        w_left, w_right = window if window is not None else (window_left, window_right)
+    def config(mask, s_q, s_kv, heads, gqa, bottom_right, t_q, t_kv):
         return {
             "attn_mask_type": mask,
             "max_seqlen_q": s_q,
@@ -4956,8 +4955,8 @@ def cp_per_step_configs(
             "num_tokens_kv": t_kv,
             "num_attn_heads": heads,
             "num_gqa_groups": gqa,
-            "window_size_left": w_left,
-            "window_size_right": w_right,
+            "window_size_left": window_left,
+            "window_size_right": window_right,
             "bottom_right_diagonal": bottom_right,
         }
 
@@ -4983,16 +4982,20 @@ def cp_per_step_configs(
         mask, br = attn_mask_type, bottom_right_diagonal
         if is_causal and "bottom_right" not in attn_mask_type:
             mask, br = attn_mask_type + "_bottom_right", True
-        # Each step narrows max_seqlen_*, but the token counts it dispatches with are the
-        # rank's full Q tokens and the all-gathered KV tokens, unchanged across steps.
-        # Scaling them per step would key the probe's graph differently from the one the
-        # step looks up, and rebuild every graph this probes at execution time.
-        t_q = num_tokens_q
-        t_kv = num_tokens_kv * cp_size
+        t_q = num_tokens_q // 2
         # s_kv ranges from s_kv_chunk, i*s_kv_chunk, ..., max_seqlen_kv
         # check a single chunk and the full KV
         return [
-            config(mask, s_q, s_kv, num_heads, num_gqa_groups, br, t_q, t_kv)
+            config(
+                mask,
+                s_q,
+                s_kv,
+                num_heads,
+                num_gqa_groups,
+                br,
+                t_q,
+                num_tokens_kv * cp_size * s_kv // max_seqlen_kv if max_seqlen_kv else 0,
+            )
             for s_kv in dict.fromkeys([s_kv_chunk, max_seqlen_kv])
         ]
 

@@ -583,7 +583,6 @@ def test_get_attention_backend_traceable(monkeypatch):
             fused_attention_backend,
             use_unfused_attention,
             _,
-            _,
         ) = dpa_utils.get_attention_backend(params)
         # Encode the full selection (enabled backends + fused sub-backend) in
         # the tensor value: without a tensor op dynamo skips the frame entirely

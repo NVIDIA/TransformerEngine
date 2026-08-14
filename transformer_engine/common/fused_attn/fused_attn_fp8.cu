@@ -130,32 +130,23 @@ void fused_attn_fp8_fwd_impl(const FusedAttnConfig& cfg, void* devPtrQ, void* de
     // Process-wide graph cache so a compiled graph is reused across threads instead of rebuilt per thread.
     // Safe because cuDNN >= 9.0 allows concurrent execution of a shared plan and cudnn-frontend >= 1.25.0 has a thread-safe execute().
     static CacheType sdpa_fp8_fprop_cache;
-    static graph_cache::SingleFlight<FusedAttnConfig> sdpa_fp8_fprop_cache_sf;
+    static std::mutex sdpa_fp8_fprop_cache_mutex;
 
-    // Get plan from cache if available; otherwise build it exactly once across
-    // threads (single-flight), so concurrent misses of the same key don't each
-    // compile and discard an identical graph.
+    // Get plan from cache if cache is available, otherwise create one
     auto get_graph = [&](CacheType& cache, const FusedAttnConfig& descriptor) -> graph_and_tensors {
-      auto& sf = sdpa_fp8_fprop_cache_sf;
+      // Lock the map lookup, not the build, so different graphs can build in parallel
+      graph_and_tensors cached_graph{};
+      bool cache_hit = false;
       {
-        std::unique_lock<std::mutex> lock(sf.mutex);
-        // Wait until the graph is cached, or no other thread is building this key.
-        sf.cv.wait(lock, [&] {
-          return cache.count(descriptor) != 0 || sf.in_progress.count(descriptor) == 0;
-        });
+        std::lock_guard<std::mutex> shared_cache_lock(sdpa_fp8_fprop_cache_mutex);
         auto it = cache.find(descriptor);
-        if (it != cache.end()) {
-          graph_and_tensors cached_graph = it->second;  // copy under the lock
-          lock.unlock();
-          graph_cache_debug::record_cache_lookup("fwd", /*hit=*/true, cfg, descriptor.device_id);
-          return cached_graph;
-        }
-        // Claim the build for this key, so a concurrent miss waits instead of
-        // compiling an identical graph. No claim means no waiting.
-        if (graph_cache::single_flight_enabled()) sf.in_progress.insert(descriptor);
+        cache_hit = (it != cache.end());
+        if (cache_hit) cached_graph = it->second;
       }
-      graph_cache_debug::record_cache_lookup("fwd", /*hit=*/false, cfg, descriptor.device_id);
-      graph_cache::ClaimGuard<FusedAttnConfig> claim_guard{sf, descriptor};
+      graph_cache_debug::record_cache_lookup("fwd", cache_hit, cfg);
+      if (cache_hit) {
+        return cached_graph;
+      }
 
       // otherwise, build the op_graph and the plan. Then update cache
       auto mha_graph = std::make_shared<fe::graph::Graph>();
@@ -420,11 +411,10 @@ void fused_attn_fp8_fwd_impl(const FusedAttnConfig& cfg, void* devPtrQ, void* de
           std::tuple_cat(std::make_tuple(mha_graph), key_tensors_tuple, Stats_tuple, bias_tuple,
                          softmax_offset_tuple, padding_tuple, dropout_tuple);
       graph_cache_debug::record_build("fwd");
-      // Insert our graph. With single-flight we are normally the only builder
-      // for this key; insert() still tolerates a pre-existing entry and returns
-      // it. claim_guard releases the build claim and wakes waiters on return.
+      // Lock the insert. If another thread inserted a graph for the same key while we were building,
+      // use their graph (it's the same as ours) and discard our graph.
       {
-        std::lock_guard<std::mutex> shared_cache_lock(sf.mutex);
+        std::lock_guard<std::mutex> shared_cache_lock(sdpa_fp8_fprop_cache_mutex);
         auto inserted = cache.insert({descriptor, return_tuple});
         return inserted.first->second;
       }
@@ -636,32 +626,23 @@ void fused_attn_fp8_bwd_impl(
 
     using CacheType = std::map<FusedAttnConfig, graph_and_tensors>;
     static CacheType sdpa_fp8_bprop_cache;
-    static graph_cache::SingleFlight<FusedAttnConfig> sdpa_fp8_bprop_cache_sf;
+    static std::mutex sdpa_fp8_bprop_cache_mutex;
 
-    // Get plan from cache if available; otherwise build it exactly once across
-    // threads (single-flight), so concurrent misses of the same key don't each
-    // compile and discard an identical graph.
+    // Get plan from cache if cache is available, otherwise create one
     auto get_graph = [&](CacheType& cache, const FusedAttnConfig& descriptor) -> graph_and_tensors {
-      auto& sf = sdpa_fp8_bprop_cache_sf;
+      // Lock the map lookup, not the build, so different graphs can build in parallel
+      graph_and_tensors cached_graph{};
+      bool cache_hit = false;
       {
-        std::unique_lock<std::mutex> lock(sf.mutex);
-        // Wait until the graph is cached, or no other thread is building this key.
-        sf.cv.wait(lock, [&] {
-          return cache.count(descriptor) != 0 || sf.in_progress.count(descriptor) == 0;
-        });
+        std::lock_guard<std::mutex> shared_cache_lock(sdpa_fp8_bprop_cache_mutex);
         auto it = cache.find(descriptor);
-        if (it != cache.end()) {
-          graph_and_tensors cached_graph = it->second;  // copy under the lock
-          lock.unlock();
-          graph_cache_debug::record_cache_lookup("bwd", /*hit=*/true, cfg, descriptor.device_id);
-          return cached_graph;
-        }
-        // Claim the build for this key, so a concurrent miss waits instead of
-        // compiling an identical graph. No claim means no waiting.
-        if (graph_cache::single_flight_enabled()) sf.in_progress.insert(descriptor);
+        cache_hit = (it != cache.end());
+        if (cache_hit) cached_graph = it->second;
       }
-      graph_cache_debug::record_cache_lookup("bwd", /*hit=*/false, cfg, descriptor.device_id);
-      graph_cache::ClaimGuard<FusedAttnConfig> claim_guard{sf, descriptor};
+      graph_cache_debug::record_cache_lookup("bwd", cache_hit, cfg);
+      if (cache_hit) {
+        return cached_graph;
+      }
 
       // otherwise, build the op_graph and the plan. Then update cache
       auto mha_graph = std::make_shared<fe::graph::Graph>();
@@ -1056,11 +1037,10 @@ void fused_attn_fp8_bwd_impl(
           std::tuple_cat(std::make_tuple(mha_graph), key_tensors_tuple, mxfp8_tensors_tuple,
                          bias_tuple, softmax_offset_tuple, padding_tuple, dropout_tuple);
       graph_cache_debug::record_build("bwd");
-      // Insert our graph. With single-flight we are normally the only builder
-      // for this key; insert() still tolerates a pre-existing entry and returns
-      // it. claim_guard releases the build claim and wakes waiters on return.
+      // Lock the insert. If another thread inserted a graph for the same key while we were building,
+      // use their graph (it's the same as ours) and discard our graph.
       {
-        std::lock_guard<std::mutex> shared_cache_lock(sf.mutex);
+        std::lock_guard<std::mutex> shared_cache_lock(sdpa_fp8_bprop_cache_mutex);
         auto inserted = cache.insert({descriptor, return_tuple});
         return inserted.first->second;
       }
@@ -1405,11 +1385,8 @@ void fused_attn_fp8_bwd(const FusedAttnConfig& cfg, const Tensor* input_Q, const
 
 std::string is_supported_fp8_fwd(const FusedAttnConfig& cfg, cudnnHandle_t handle) {
   FusedAttnConfig graph_cfg = cfg;
-  graph_cfg.check_forward = true;
+  graph_cfg.is_forward = true;
   graph_cfg.derive();
-  // Attribute the graph this builds to the support probe, not to a real
-  // execution: it may be for a config that never runs.
-  graph_cache_debug::ScopedProbe probe;
 
   size_t workspace_size = 0;
   try {
@@ -1434,11 +1411,8 @@ std::string is_supported_fp8_fwd(const FusedAttnConfig& cfg, cudnnHandle_t handl
 
 std::string is_supported_fp8_bwd(const FusedAttnConfig& cfg, cudnnHandle_t handle) {
   FusedAttnConfig graph_cfg = cfg;
-  graph_cfg.check_forward = false;
+  graph_cfg.is_forward = false;
   graph_cfg.derive();
-  // Attribute the graph this builds to the support probe, not to a real
-  // execution: it may be for a config that never runs.
-  graph_cache_debug::ScopedProbe probe;
 
   size_t workspace_size = 0;
   try {
