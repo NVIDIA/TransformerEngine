@@ -95,14 +95,14 @@ _flash_attn_varlen_fwd = None
 _flash_attn_varlen_bwd = None
 # Try to import Flash Attention v2
 try:
-    fa_utils.version = PkgVersion(PkgVersion(get_pkg_version("flash-attn")).public)
+    fa_utils.version = PkgVersion(get_pkg_version("flash-attn"))
 except PackageNotFoundError:
     pass  # only print warning if use_flash_attention_2 = True in get_attention_backend
 else:
     if torch.cuda.is_available() and get_device_compute_capability() >= (10, 0):
-        if fa_utils.version_required_blackwell <= fa_utils.version <= fa_utils.max_version:
+        if fa_utils.is_version_supported(fa_utils.version, fa_utils.version_required_blackwell):
             fa_utils.is_installed = True
-    elif fa_utils.version_required <= fa_utils.version <= fa_utils.max_version:
+    elif fa_utils.is_version_supported(fa_utils.version, fa_utils.version_required):
         fa_utils.is_installed = True
 
     if fa_utils.is_installed:
@@ -834,8 +834,8 @@ class FlashAttention(torch.nn.Module):
                 fa_utils.version >= fa_utils.version_required
             ), f"FlashAttention minimum version {fa_utils.version_required} is required."
             assert (
-                fa_utils.version <= fa_utils.max_version
-            ), f"FlashAttention maximum version {fa_utils.max_version} is supported."
+                fa_utils.version < fa_utils.max_version
+            ), f"FlashAttention versions before {fa_utils.max_version} are supported."
 
         self.softmax_scale = softmax_scale
         self.attention_dropout_ctx = attention_dropout_ctx
