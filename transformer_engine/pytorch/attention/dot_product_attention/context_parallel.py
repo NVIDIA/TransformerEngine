@@ -2907,6 +2907,12 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 ctx.dP_quantizer,
             )
 
+        # Partial-gradient reduction can write THD inter-sequence padding.
+        # Clean it while gradients and per-step sequence metadata share sequence order.
+        if ctx.qkv_format == "thd":
+            _zero_thd_padding((dq,), cu_seqlens_q_per_step[0], cu_seqlens_q_padded)
+            _zero_thd_padding((dk, dv), cu_seqlens_kv_per_step[0], cu_seqlens_kv_padded)
+
         if cp_size_a2a > 1:
             if ctx.fp8 and ctx.is_input_fp8:
                 dq_fp8, dk_fp8, dv_fp8 = dq, dk, dv
@@ -2943,11 +2949,6 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             attn_dbias = attn_dbias.view(*attn_dbias.shape[:-2], -1)
 
         nvtx_range_pop(f"{nvtx_label}")
-
-        # Partial-gradient reduction can write THD inter-sequence padding.
-        if ctx.qkv_format == "thd":
-            _zero_thd_padding((dq,), cu_seqlens_q_per_step[0], cu_seqlens_q_padded)
-            _zero_thd_padding((dk, dv), cu_seqlens_kv_per_step[0], cu_seqlens_kv_padded)
 
         return (
             None,
