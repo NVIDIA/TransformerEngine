@@ -1126,8 +1126,6 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
   const auto columnwise_usage = quantizer_cpp_list[0]->columnwise_usage;
   if (row_scaled_nvfp4) {
     NVTE_CHECK(rowwise_usage, "Row-scaled NVFP4 bulk allocation requires rowwise usage.");
-    NVTE_CHECK(!columnwise_usage,
-               "Row-scaled NVFP4 bulk allocation does not support columnwise usage.");
   }
   const auto scaling_mode = quantizer_cpp_list[0]->get_scaling_mode();
   const auto fp4_dtype = quantizer_cpp_list[0]->dtype;
@@ -1271,7 +1269,10 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
     dtypes.insert(dtypes.end(), num_tensors, torch::kUInt8);
     alignments.insert(alignments.end(), num_tensors, 16);
     for (size_t i = 0; i < num_tensors; ++i) {
-      shapes.emplace_back(amax_shape(columnwise_data_shapes[i]));
+      // columnwise_data_shapes[i] is the transposed shape, so its leading dim is
+      // the original last dim (number of columns). For row-scaled NVFP4 this
+      // yields a per-column amax vector; otherwise it stays a scalar {1}.
+      shapes.emplace_back(amax_shape(columnwise_data_shapes[i], row_scaled_nvfp4));
     }
     dtypes.insert(dtypes.end(), num_tensors, torch::kFloat32);
     alignments.insert(alignments.end(), num_tensors, 16);
@@ -1331,7 +1332,7 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
       }
       if (columnwise_usage) {
         tensor_wrapper.set_columnwise_amax(amax_columnwise_list[i].data_ptr(), DType::kFloat32,
-                                           std::vector<size_t>{1});
+                                           getTensorShape(amax_columnwise_list[i]));
       }
 
       tensor_cpp_list.emplace_back(std::move(tensor_wrapper));
