@@ -39,6 +39,24 @@ LAUNCH_CMD = ["torchrun", f"--nproc_per_node={NUM_PROCS}"]
 if tex.ubuf_built_with_mpi():
     LAUNCH_CMD = ["mpirun", "-np", str(NUM_PROCS), "--oversubscribe", "--quiet", "python3"]
 
+OUTPUT_TAIL_CHARS = 4000
+
+
+def _assert_subprocess_succeeded(result):
+    if (
+        result.returncode != 0
+        or "NUMERICAL CHECK FAILED" in result.stderr
+        or "NUMERICAL CHECK PASSED" not in result.stdout
+    ):
+        raise AssertionError(
+            f"Distributed test exited with return code {result.returncode}"
+            f"\n--- stdout (last {OUTPUT_TAIL_CHARS} characters) ---\n"
+            f"{result.stdout[-OUTPUT_TAIL_CHARS:]}"
+            f"\n--- stderr (last {OUTPUT_TAIL_CHARS} characters) ---\n"
+            f"{result.stderr[-OUTPUT_TAIL_CHARS:]}"
+        )
+
+
 # Fall back on CUDA IPC if the platform does not support CUDA multicast
 if not tex.device_supports_multicast():
     os.environ["UB_SKIPMC"] = "1"
@@ -94,13 +112,10 @@ def _run_gemm_with_overlap(
                 )
             test_cmd.append("--use-cublasmp")
 
-    result = subprocess.run(test_cmd, env=os.environ, capture_output=True, check=False)
-    if (
-        result.returncode != 0
-        or "NUMERICAL CHECK FAILED" in result.stderr.decode()
-        or "NUMERICAL CHECK PASSED" not in result.stdout.decode()
-    ):
-        raise AssertionError(result.stderr.decode())
+    result = subprocess.run(
+        test_cmd, env=os.environ, capture_output=True, text=True, check=False
+    )
+    _assert_subprocess_succeeded(result)
 
 
 def _run_layer_with_overlap(
@@ -157,7 +172,9 @@ def _run_layer_with_overlap(
         # NVTE_ALLOW_NONDETERMINISTIC_ALGO=0, so disable it entirely for this test.
         os.environ["NVTE_FUSED_ATTN"] = "0"
 
-    result = subprocess.run(test_cmd, env=os.environ, capture_output=True, check=False)
+    result = subprocess.run(
+        test_cmd, env=os.environ, capture_output=True, text=True, check=False
+    )
 
     os.unsetenv("PYTORCH_JIT")
     os.unsetenv("NVTE_TORCH_COMPILE")
@@ -165,12 +182,7 @@ def _run_layer_with_overlap(
     os.unsetenv("NVTE_FLASH_ATTN")
     os.unsetenv("NVTE_FUSED_ATTN")
 
-    if (
-        result.returncode != 0
-        or "NUMERICAL CHECK FAILED" in result.stderr.decode()
-        or "NUMERICAL CHECK PASSED" not in result.stdout.decode()
-    ):
-        raise AssertionError(result.stderr.decode())
+    _assert_subprocess_succeeded(result)
 
 
 @pytest.mark.parametrize("use_cublasmp", (False, True))
