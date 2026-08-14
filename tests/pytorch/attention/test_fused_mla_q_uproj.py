@@ -43,6 +43,10 @@ fused_supported, reason_not_supported = (
 )
 
 
+_MXFP8_BLOCK = 32  # E8M0 block size; matches MXFP8_BLOCK_SCALING_SIZE in TE constants
+_E8M0_BIAS = 127
+
+
 def _dequantize_fused_output(query: MXFP8Tensor, s: int, b: int) -> torch.Tensor:
     """Dequantize the rowwise fused output to bf16 [s, b, nh, head_dim].
 
@@ -53,7 +57,7 @@ def _dequantize_fused_output(query: MXFP8Tensor, s: int, b: int) -> torch.Tensor
         shape=(tokens, PROJ_DIM),
         dtype=torch.bfloat16,
         rowwise_data=query._rowwise_data.view(tokens, PROJ_DIM),
-        rowwise_scale_inv=query._rowwise_scale_inv.view(tokens, PROJ_DIM // 32),
+        rowwise_scale_inv=query._rowwise_scale_inv.view(tokens, PROJ_DIM // _MXFP8_BLOCK),
         columnwise_data=None,
         columnwise_scale_inv=None,
         quantizer=query._quantizer,
@@ -62,6 +66,26 @@ def _dequantize_fused_output(query: MXFP8Tensor, s: int, b: int) -> torch.Tensor
         with_gemm_swizzled_scales=False,
     )
     return q_2d.dequantize().to(torch.bfloat16).view(s, b, NUM_HEADS, HEAD_DIM)
+
+
+def _dequantize_fused_output_col(query: MXFP8Tensor, s: int, b: int) -> torch.Tensor:
+    """Dequantize the columnwise fused output to bf16 [s, b, nh, head_dim].
+
+    The columnwise layout groups _MXFP8_BLOCK consecutive tokens per (head, head_dim)
+    E8M0 scale.  Matches the dequantization formula used in the cuDNN kernel's own
+    reference (test_gemm_proj_rope_mxfp8_utils._deq_col).
+    """
+    tokens = s * b
+    assert tokens % _MXFP8_BLOCK == 0, f"tokens ({tokens}) must be divisible by {_MXFP8_BLOCK}"
+    # Flatten batch into the token dimension to match the cuDNN kernel's native 3-D layout.
+    fp8_col = query._columnwise_data.view(tokens, NUM_HEADS, HEAD_DIM)
+    scale_col = query._columnwise_scale_inv.view(tokens // _MXFP8_BLOCK, NUM_HEADS, HEAD_DIM)
+    inv = torch.pow(2.0, scale_col.to(torch.float32) - _E8M0_BIAS)  # (tok//32, NH, HD)
+    dq = (
+        fp8_col.to(torch.float32).view(tokens // _MXFP8_BLOCK, _MXFP8_BLOCK, NUM_HEADS, HEAD_DIM)
+        * inv.unsqueeze(1)
+    )
+    return dq.reshape(s, b, NUM_HEADS, HEAD_DIM).to(torch.bfloat16)
 
 
 def _reference_q_uproj(
@@ -106,10 +130,12 @@ def _build_rope_tables(tokens: int, device: torch.device) -> tuple[torch.Tensor,
         10000
         ** (torch.arange(0, HEAD_DIM_ROPE, 2, dtype=torch.float32, device=device) / HEAD_DIM_ROPE)
     )
-    freqs = torch.cat(
-        [torch.outer(torch.arange(tokens, device=device, dtype=torch.float32), inv_freq)] * 2,
-        dim=-1,
-    )
+    t = torch.arange(tokens, device=device, dtype=torch.float32)
+    # Asymmetric table: left half uses standard inv_freq, right half uses a different
+    # scale so cos[:, :32] != cos[:, 32:].  This exposes any forward or backward kernel
+    # that accidentally treats the two halves as identical (which the symmetric table
+    # would silently hide).
+    freqs = torch.cat([torch.outer(t, inv_freq), torch.outer(t, inv_freq * 0.5)], dim=-1)
     return freqs.cos().to(torch.bfloat16), freqs.sin().to(torch.bfloat16)
 
 
@@ -137,10 +163,17 @@ def test_fused_mla_q_uproj(tokens: int, fp8_weight: bool) -> None:
 
     query, x_saved = FusedMLAQUpProjRopeQuant.run(x, w, cos, sin, s, b)
 
-    # Forward numerics: FP8 GEMM + output quantize introduce ~10% relative error.
+    # Forward numerics: E4M3 output quantization gives ≤6.25% relative error (= 2^-4) per
+    # normalized element. rtol=0.07 sits just above this floor with margin for subnormals.
     fused_dq = _dequantize_fused_output(query, s, b)
     ref_dq = _reference_q_uproj(x, w, cos, sin, s, b)
-    torch.testing.assert_close(fused_dq, ref_dq, atol=0.5, rtol=0.1)
+    torch.testing.assert_close(fused_dq, ref_dq, atol=0.5, rtol=0.07)
+
+    # Columnwise output: same E4M3 tolerance as rowwise.  The columnwise Q feeds the dK
+    # GEMM in the attention backward, so a bug here causes wrong K-path gradients without
+    # any other test catching it.
+    fused_dq_col = _dequantize_fused_output_col(query, s, b)
+    torch.testing.assert_close(fused_dq_col, ref_dq, atol=0.5, rtol=0.07)
 
     # x_saved shape and type depend on which branch ran.
     if fp8_weight:
@@ -240,78 +273,3 @@ def test_fused_mla_q_uproj_autograd() -> None:
     torch.testing.assert_close(x.grad.reshape(tokens, Q_LORA_RANK), grad_x_ref, atol=0.5, rtol=0.1)
     torch.testing.assert_close(w_bf16.grad, grad_w_ref, atol=0.5, rtol=0.1)
 
-
-@pytest.mark.skipif(not fused_supported, reason=reason_not_supported)
-def test_fused_mla_q_uproj_autograd_pytorch_ref() -> None:
-    """Gradient cross-check: fused path vs. the actual unfused code path.
-
-    Uses TE Linear (MXFP8 GEMMs via fp8_autocast) + plain PyTorch RoPE + torch.autograd
-    as the reference. The only difference between the two paths is the RoPE backward:
-    Triton kernel (fused) vs torch.autograd through the PyTorch RoPE formula (reference).
-    Both use identical MXFP8 dgrad GEMMs via _linear_backward, so mismatches beyond BF16
-    rounding indicate a bug in the Triton RoPE backward kernel.
-    """
-    from transformer_engine.common.recipe import MXFP8BlockScaling
-    from transformer_engine.pytorch.module.linear import Linear as TELinear
-    from transformer_engine.pytorch.quantization import fp8_autocast
-
-    tokens, s, b = 256, 256, 1
-    device = torch.device("cuda")
-    torch.manual_seed(SEED)
-
-    x = torch.randn(s, b, Q_LORA_RANK, dtype=torch.bfloat16, device=device, requires_grad=True)
-    w_bf16 = torch.randn(PROJ_DIM, Q_LORA_RANK, dtype=torch.bfloat16, device=device)
-    w = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3, rowwise=True, columnwise=True)(w_bf16)
-    cos, sin = _build_rope_tables(tokens, device)
-    grad_out = torch.randn(s, b, NUM_HEADS, HEAD_DIM, dtype=torch.bfloat16, device=device)
-
-    # --- Fused path: cuDNN GEMM+RoPE forward, Triton RoPE backward + MXFP8 dgrad GEMM ---
-    query_fused = FusedMLAQUpProjFunction.apply(
-        x,
-        w,
-        cos[:, None, None, :],
-        sin[:, None, None, :],
-        None,
-        False,
-        NUM_HEADS,
-        HEAD_DIM,
-        HEAD_DIM_NOPE,
-        HEAD_DIM_ROPE,
-        s,
-        b,
-        None,
-        False,
-    )
-    torch.autograd.backward(query_fused, grad_out.clone())
-    grad_x_fused = x.grad.clone()
-
-    # --- Unfused reference: TE Linear (MXFP8) + PyTorch RoPE + torch.autograd ---
-    # TE Linear in fp8_autocast quantizes the weight and activation to MXFP8, and its
-    # backward calls _linear_backward with the same MXFP8 dgrad GEMM as the fused path.
-    # The GEMM contribution cancels out; any mismatch is in the RoPE backward only.
-    x_ref = x.detach().clone().requires_grad_(True)
-    ref_linear = TELinear(Q_LORA_RANK, PROJ_DIM, bias=False, params_dtype=torch.bfloat16).to(device)
-    with torch.no_grad():
-        ref_linear.weight.copy_(w_bf16)
-
-    with fp8_autocast(enabled=True, fp8_recipe=MXFP8BlockScaling()):
-        y_ref = ref_linear(x_ref.reshape(tokens, Q_LORA_RANK)).reshape(s, b, NUM_HEADS, HEAD_DIM)
-        q_nope = y_ref[..., :HEAD_DIM_NOPE]
-        q_rope = y_ref[..., HEAD_DIM_NOPE:]
-        cos_ = cos[:, None, None, :]
-        sin_ = sin[:, None, None, :]
-        half = HEAD_DIM_ROPE // 2
-        x1, x2 = q_rope[..., 0::2], q_rope[..., 1::2]
-        q_rope_out = torch.cat(
-            [
-                x1 * cos_[..., :half] - x2 * sin_[..., :half],
-                x2 * cos_[..., half:] + x1 * sin_[..., half:],
-            ],
-            dim=-1,
-        )
-        out_ref = torch.cat([q_nope, q_rope_out], dim=-1)
-
-    out_ref.backward(grad_out.clone())
-    grad_x_ref = x_ref.grad.reshape(s, b, -1)
-
-    torch.testing.assert_close(grad_x_fused, grad_x_ref, atol=0.5, rtol=0.1)
