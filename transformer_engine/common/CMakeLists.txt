@@ -88,15 +88,12 @@ endif()
 set(NVTE_STANDARD_ARCHS ${CMAKE_CUDA_ARCHITECTURES})
 
 # cuDNN frontend API
-set(CUDNN_FRONTEND_INCLUDE_DIR
-    "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/cudnn-frontend/include")
-if(NOT EXISTS "${CUDNN_FRONTEND_INCLUDE_DIR}")
+if(NOT EXISTS "${CUDNN_FRONTEND_INCLUDE_DIR}/cudnn_frontend.h")
     message(FATAL_ERROR
-            "Could not find cuDNN frontend API at ${CUDNN_FRONTEND_INCLUDE_DIR}. "
-            "Try running 'git submodule update --init --recursive' "
-            "within the Transformer Engine source.")
+            "Could not find cudnn_frontend.h in ${CUDNN_FRONTEND_INCLUDE_DIR}. "
+            "Install nvidia-cudnn-frontend or set CUDNN_FRONTEND_INCLUDE_DIR.")
 endif()
-include(${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/cudnn-frontend/cmake/cuDNN.cmake)
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/cuDNN.cmake)
 
 set(CUTLASS_INCLUDE_DIR
   "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/cutlass/include")
@@ -186,6 +183,7 @@ list(APPEND transformer_engine_cpp_sources
      fused_attn/fused_attn.cpp
      gemm/config.cpp
      normalization/common.cpp
+     normalization/rtc_dispatch.cpp
      normalization/layernorm/ln_api.cpp
      normalization/rmsnorm/rmsnorm_api.cpp
      util/cuda_driver.cpp
@@ -255,6 +253,9 @@ list(APPEND transformer_engine_cuda_arch_specific_sources
      activation/relu_dbias.cu
      activation/relu_grouped.cu
      activation/relu_grouped_dbias.cu
+     activation/scaled_activation.cu
+     activation/scaled_srelu.cu
+     activation/scaled_swiglu.cu
      activation/swiglu.cu
      activation/swiglu_dbias.cu
      activation/swiglu_grouped.cu
@@ -554,12 +555,58 @@ make_string_header_from_file(transpose/rtc/transpose.cu
                              string_code_transpose_rtc_transpose_cu)
 make_string_header_from_file(transpose/rtc/swap_first_dims.cu
                              string_code_transpose_rtc_swap_first_dims_cu)
+make_string_header_from_file(fused_softmax/scaled_masked_softmax.cu
+                             string_code_fused_softmax_scaled_masked_softmax_cu)
+make_string_header_from_file(fused_softmax/scaled_upper_triang_masked_softmax.cu
+                             string_code_fused_softmax_scaled_upper_triang_masked_softmax_cu)
+make_string_header_from_file(fused_softmax/scaled_aligned_causal_masked_softmax.cu
+                             string_code_fused_softmax_scaled_aligned_causal_masked_softmax_cu)
 make_string_header_from_file(utils.cuh
                              string_code_utils_cuh)
 make_string_header_from_file(util/math.h
                              string_code_util_math_h)
+
+# Norm NVRTC bundled headers + RTC source files
+make_string_header_from_file(normalization/kernel_params.h
+                             string_code_normalization_kernel_params_h)
+make_string_header_from_file(normalization/kernel_traits.h
+                             string_code_normalization_kernel_traits_h)
+make_string_header_from_file(normalization/layernorm/ln_fwd_kernels.cuh
+                             string_code_normalization_layernorm_ln_fwd_kernels_cuh)
+make_string_header_from_file(normalization/layernorm/ln_bwd_kernels.cuh
+                             string_code_normalization_layernorm_ln_bwd_kernels_cuh)
+make_string_header_from_file(normalization/rmsnorm/rmsnorm_fwd_kernels.cuh
+                             string_code_normalization_rmsnorm_rmsnorm_fwd_kernels_cuh)
+make_string_header_from_file(normalization/rmsnorm/rmsnorm_bwd_kernels.cuh
+                             string_code_normalization_rmsnorm_rmsnorm_bwd_kernels_cuh)
+make_string_header_from_file(normalization/layernorm/rtc/ln_fwd_kernel.cu
+                             string_code_normalization_layernorm_rtc_ln_fwd_kernel_cu)
+make_string_header_from_file(normalization/layernorm/rtc/ln_bwd_kernel.cu
+                             string_code_normalization_layernorm_rtc_ln_bwd_kernel_cu)
+make_string_header_from_file(normalization/rmsnorm/rtc/rmsnorm_fwd_kernel.cu
+                             string_code_normalization_rmsnorm_rtc_rmsnorm_fwd_kernel_cu)
+make_string_header_from_file(normalization/rmsnorm/rtc/rmsnorm_bwd_kernel.cu
+                             string_code_normalization_rmsnorm_rtc_rmsnorm_bwd_kernel_cu)
 target_include_directories(transformer_engine PRIVATE
                            "${CMAKE_CURRENT_BINARY_DIR}/string_headers")
+
+option(NVTE_BUILD_LEGACY_STATIC_FUSED_SOFTMAX
+       "Also compile legacy static fused softmax kernels for NVTE_DISABLE_NVRTC fallback"
+       OFF)
+target_compile_definitions(transformer_engine
+                           PRIVATE
+                           NVTE_BUILD_LEGACY_STATIC_FUSED_SOFTMAX=$<BOOL:${NVTE_BUILD_LEGACY_STATIC_FUSED_SOFTMAX}>)
+
+# Default OFF: LayerNorm/RMSNorm require NVRTC. Set ON to additionally compile
+# the legacy static template instantiations, which are selected only when
+# NVTE_DISABLE_NVRTC=1 at runtime. This compiles all 556
+# REGISTER_NORM_LAUNCHER variants up front.
+option(NVTE_BUILD_LEGACY_STATIC_NORM
+       "Also compile static norm kernels for NVTE_DISABLE_NVRTC fallback"
+       OFF)
+target_compile_definitions(transformer_engine
+                           PRIVATE
+                           NVTE_BUILD_LEGACY_STATIC_NORM=$<BOOL:${NVTE_BUILD_LEGACY_STATIC_NORM}>)
 
 # Compiler options
 set(nvte_sources_with_fast_math)
@@ -586,6 +633,9 @@ if (NVTE_BUILD_ACTIVATION_WITH_FAST_MATH)
                                           activation/relu_dbias.cu
                                           activation/relu_grouped.cu
                                           activation/relu_grouped_dbias.cu
+                                          activation/scaled_activation.cu
+                                          activation/scaled_srelu.cu
+                                          activation/scaled_swiglu.cu
                                           activation/swiglu.cu
                                           activation/swiglu_dbias.cu
                                           activation/swiglu_grouped.cu

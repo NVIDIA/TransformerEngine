@@ -45,7 +45,7 @@ seed = 1234
 torch.manual_seed(seed)
 torch.cuda.manual_seed(seed)
 
-test_essential = True
+test_essential = bool(int(os.getenv("NVTE_TEST_ESSENTIAL", "1")))
 
 model_configs_flash_attn = {
     # test: ModelConfig(b, sq, hq, dqk)
@@ -319,6 +319,14 @@ def test_cp_with_flash_attention(cp_pool, dtype, model, qkv_format, cp_comm_type
         if cp_comm_type == "a2a+p2p":
             pytest.skip("pad_between_seqs is not yet supported with A2A+P2P CP comm type!")
 
+    if pad_between_seqs:
+        if qkv_format != "thd":
+            pytest.skip("pad_between_seqs only applies to THD format!")
+        if not FlashAttentionUtils.v3_is_installed:
+            pytest.skip("pad_between_seqs with CP requires Flash Attention v3!")
+        if cp_comm_type == "a2a+p2p":
+            pytest.skip("pad_between_seqs is not yet supported with A2A+P2P CP comm type!")
+
     config = model_configs_flash_attn[model]
     config.context_parallel = True
     config.cp_comm_type = cp_comm_type
@@ -328,8 +336,20 @@ def test_cp_with_flash_attention(cp_pool, dtype, model, qkv_format, cp_comm_type
     if config.attn_bias_type != "no_bias" and cp_comm_type in ["all_gather", "a2a", "a2a+p2p"]:
         pytest.skip("No support for bias with cp_comm_type={all_gather, a2a, a2a+p2p}!")
 
-    if qkv_format == "thd" and cp_comm_type in ["all_gather", "a2a+p2p"]:
-        pytest.skip("No support for THD format with cp_comm_type={all_gather, a2a+p2p}!")
+    if qkv_format == "thd" and cp_comm_type == "a2a+p2p":
+        pytest.skip(
+            "CP implementation with QKVO A2A+P2P (Hierarchical A2A) does not support THD format"
+            " yet!"
+        )
+    if (
+        qkv_format == "thd"
+        and cp_comm_type == "all_gather"
+        and not FlashAttentionUtils.v3_is_installed
+    ):
+        pytest.skip(
+            "THD + all_gather requires FA3 (seqused_k) to separate tensor offsets from"
+            " visibility limits in the gathered KV buffer."
+        )
 
     if (
         config.window_size != (-1, 0)
@@ -460,6 +480,8 @@ model_configs_fused_attn = {
     "cp_4_3": ModelConfig(
         2, 4096, 64, 64, attn_mask_type="causal", window_size=(128, 0), softmax_type="learnable"
     ),  # GQA
+    "cp_5_0": ModelConfig(2, 1024, 16, 256, attn_mask_type="causal"),
+    "cp_5_1": ModelConfig(2, 1024, 16, 256, attn_mask_type="causal", window_size=(128, 0)),
 }
 
 
@@ -478,6 +500,8 @@ if test_essential:
         "cp_3_4",
         "cp_4_2",
         "cp_4_3",
+        "cp_5_0",
+        "cp_5_1",
     ]
     model_configs_fused_attn = {k: model_configs_fused_attn[k] for k in configs}
     dtypes = ["bf16", "fp8"]
@@ -511,6 +535,23 @@ def test_cp_with_fused_attention(
     config.context_parallel = True
     config.cp_comm_type = cp_comm_type
 
+    if config.head_dim_qk == 256 and config.head_dim_v == 256:
+        # D=256 uses this generic CP runner, but only a subset of its axes is supported.
+        if get_device_compute_capability() not in ((10, 0), (10, 3)):
+            pytest.skip("D=256 CP fused attention is only enabled on Blackwell server GPUs.")
+        if dtype == "fp8":
+            pytest.skip("D=256 CP fused attention is covered for BF16/FP16 only.")
+        if cp_comm_type not in ["p2p", "all_gather"]:
+            pytest.skip("D=256 CP fused attention is covered for p2p and all_gather only.")
+
+        required_cudnn_version = (9, 25, 0) if qkv_format == "thd" else (9, 23, 0)
+        required_cudnn_version_label = "9.25" if qkv_format == "thd" else "9.23"
+        if get_cudnn_version() < required_cudnn_version:
+            pytest.skip(
+                f"D=256 CP fused attention with {qkv_format.upper()} requires cuDNN"
+                f" {required_cudnn_version_label} or newer."
+            )
+
     num_gpus = 4 if cp_comm_type == "a2a+p2p" else 2
     pool = cp_pool(num_gpus)
 
@@ -538,8 +579,11 @@ def test_cp_with_fused_attention(
     if config.attn_bias_type != "no_bias" and cp_comm_type in ["all_gather", "a2a", "a2a+p2p"]:
         pytest.skip("No support for bias with cp_comm_type={all_gather, a2a, a2a+p2p}!")
 
-    if qkv_format == "thd" and cp_comm_type in ["all_gather", "a2a+p2p"]:
-        pytest.skip("No support for THD format with cp_comm_type={all_gather, a2a+p2p}!")
+    if qkv_format == "thd" and cp_comm_type == "a2a+p2p":
+        pytest.skip(
+            "CP implementation with QKVO A2A+P2P (Hierarchical A2A) does not support THD format"
+            " yet!"
+        )
 
     if (config.window_size[0] != -1 or config.window_size[1] not in [-1, 0]) and cp_comm_type in [
         "p2p",

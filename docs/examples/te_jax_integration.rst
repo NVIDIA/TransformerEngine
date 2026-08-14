@@ -28,8 +28,8 @@ Pick a topic
      - *Coming soon*
      -
    * - `Attention <jax/attention.html>`_
-     - *Coming soon*
-     -
+     - **Available**
+     - Single-GPU and context-parallel attention tutorials
    * - `Expert Parallelism <jax/expert_parallelism.html>`_
      - *Coming soon*
      -

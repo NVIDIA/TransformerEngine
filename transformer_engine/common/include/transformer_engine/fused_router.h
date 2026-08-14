@@ -82,6 +82,17 @@ void nvte_fused_topk_with_score_function_forward_v2(
     const NVTETensor expert_bias, NVTETensor probs, NVTETensor routing_map,
     NVTERoutingMapFormat routing_map_format, NVTETensor intermediate_output, cudaStream_t stream);
 
+/*! \brief Apply topk + softmax/sigmoid and output dense top-k indices.
+ *
+ *  This entry point does not materialize routing_map. Instead, it writes the
+ *  selected expert ids to topk_indices with shape [num_tokens, topk].
+ */
+void nvte_fused_topk_with_score_function_forward_with_indices(
+    const NVTETensor logits, int num_tokens, int num_experts, int topk, int use_pre_softmax,
+    int num_groups, int group_topk, float scaling_factor, int score_function,
+    const NVTETensor expert_bias, NVTETensor probs, NVTETensor topk_indices,
+    NVTETensor intermediate_output, cudaStream_t stream);
+
 /*! \brief Backward pass for fused topk + softmax/sigmoid (deprecated).
  *
  *  \deprecated This function has been deprecated in favor of
@@ -129,6 +140,15 @@ void nvte_fused_topk_with_score_function_backward_v2(const NVTETensor routing_ma
                                                      int num_experts, int topk, int use_pre_softmax,
                                                      float scaling_factor, int score_function,
                                                      NVTETensor grad_logits, cudaStream_t stream);
+
+/*! \brief Backward pass for fused topk + score function with dense top-k indices.
+ *
+ *  \param[in]     topk_indices    Dense [num_tokens, topk] selected expert indices.
+ */
+void nvte_fused_topk_with_score_function_backward_with_indices(
+    const NVTETensor topk_indices, const NVTETensor intermediate_output,
+    const NVTETensor grad_probs, int num_tokens, int num_experts, int topk, int use_pre_softmax,
+    float scaling_factor, int score_function, NVTETensor grad_logits, cudaStream_t stream);
 
 /*! \brief Forward pass for computing scores/routing map for auxiliary loss (deprecated).
  *
@@ -190,24 +210,43 @@ void nvte_fused_score_for_moe_aux_loss_backward(const NVTETensor intermediate_ou
                                                 int num_experts, int topk, int score_function,
                                                 NVTETensor grad_logits, cudaStream_t stream);
 
-/*! \brief Forward pass for auxiliary loss.
+/*! \brief Forward pass for auxiliary loss. Host-int total_num_tokens path:
+ *  the coefficient is folded on the host and passed as a kernel argument.
+ *  Prefer this path when total_num_tokens is statically known and the call
+ *  is not captured into a CUDA Graph.
  *
- *  \param[in]     probs           Probabilities from the forward pass.
+ *  \param[in]     probs              Probabilities from the forward pass.
  *  \param[in]     tokens_per_expert  Number of tokens per expert.
- *  \param[in]     total_num_tokens   Number of total tokens. Will be used in seq/global aux loss.
- *  \param[in]     num_experts     Number of experts.
- *  \param[in]     num_rows        Number of rows of probs.
- *  \param[in]     num_cols        Number of columns of probs.
- *  \param[in]     topk            Topk value.
- *  \param[in]     coeff           Coefficient.
- *  \param[out]    aux_loss        Output GPU scalar for auxiliary loss.
- *  \param[out]    Const_buf       Output GPU scalar for temporary constant buffer for backward pass.
- *  \param[in]     stream          CUDA stream used for the operation.
+ *  \param[in]     total_num_tokens   Number of total tokens. Used in seq/global aux loss.
+ *  \param[in]     num_experts        Number of experts.
+ *  \param[in]     num_rows           Number of rows of probs.
+ *  \param[in]     num_cols           Number of columns of probs.
+ *  \param[in]     topk               Topk value.
+ *  \param[in]     coeff              Coefficient.
+ *  \param[out]    aux_loss           Output GPU scalar for auxiliary loss.
+ *  \param[out]    Const_buf          Output GPU scalar for temporary constant buffer for backward
+ *                                    pass.
+ *  \param[in]     stream             CUDA stream used for the operation.
  */
 void nvte_fused_moe_aux_loss_forward(const NVTETensor probs, const NVTETensor tokens_per_expert,
                                      int total_num_tokens, int num_experts, int num_rows,
                                      int num_cols, int topk, float coeff, NVTETensor aux_loss,
                                      NVTETensor Const_buf, cudaStream_t stream);
+
+/*! \brief Forward pass for auxiliary loss. Device-tensor total_num_tokens path:
+ *  the coefficient is computed on device from a 0-dim int64 GPU tensor so its
+ *  value stays dynamic across CUDA Graph replays. Prefer this path when the
+ *  caller needs CUDA-graph-safe semantics with a dynamic token count.
+ *
+ *  \param[in]     total_num_tokens   0-dim int64 GPU tensor with the total token count.
+ *  Other parameters as in :c:func:`nvte_fused_moe_aux_loss_forward`.
+ */
+void nvte_fused_moe_aux_loss_forward_graph_safe(const NVTETensor probs,
+                                                const NVTETensor tokens_per_expert,
+                                                const NVTETensor total_num_tokens, int num_experts,
+                                                int num_rows, int num_cols, int topk, float coeff,
+                                                NVTETensor aux_loss, NVTETensor Const_buf,
+                                                cudaStream_t stream);
 
 /*! \brief Backward pass for auxiliary loss.
  *

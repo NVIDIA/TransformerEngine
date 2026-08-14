@@ -4,7 +4,8 @@
 
 """Tests for GroupedTensor class"""
 
-from typing import List, Tuple
+from typing import List, Optional, Tuple
+import os
 import pytest
 import torch
 import transformer_engine.pytorch as te
@@ -18,6 +19,7 @@ from transformer_engine.pytorch import (
     NVFP4Quantizer,
 )
 from transformer_engine.pytorch.constants import TE_DType_To_Torch
+from transformer_engine.pytorch.utils import is_non_tn_fp8_gemm_supported
 import transformer_engine_torch as tex
 
 # Import test utilities
@@ -30,6 +32,21 @@ fp8_block_scaling_available, reason_for_no_fp8_block_scaling = te.is_fp8_block_s
 )
 mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available(return_reason=True)
 nvfp4_available, reason_for_no_nvfp4 = te.is_nvfp4_available(return_reason=True)
+
+# The fused grouped FP8 block-scaling quantize/dequantize kernels are Hopper-only: they gate on
+# SM90-SM99 (NVTE_CHECK(sm >= 90 && sm < 100)). FP8 block scaling is still reported "available" on
+# Blackwell (SM100+) for the emulated/non-grouped paths, so ``fp8_block_scaling_available`` alone
+# does not exclude SM100 — add the Hopper arch bound for the grouped tests.
+_device_cc = torch.cuda.get_device_capability() if torch.cuda.is_available() else (0, 0)
+fp8_block_scaling_grouped_available = fp8_block_scaling_available and (9, 0) <= _device_cc < (10, 0)
+reason_for_no_fp8_block_scaling_grouped = (
+    reason_for_no_fp8_block_scaling
+    if not fp8_block_scaling_available
+    else (
+        "Fused grouped FP8 block-scaling quantize/dequantize is only supported on Hopper"
+        " (SM90-SM99)."
+    )
+)
 
 _quantization_params = [
     pytest.param(
@@ -111,6 +128,33 @@ def _rowwise_offset_bytes(numel: int, quantization: str) -> int:
     if quantization == "nvfp4":
         return numel // 2
     return numel
+
+
+def _fp8bs_per_expert_scale_floats(
+    block_scaling_dim: int, columnwise: bool, m_t: int, k: int
+) -> int:
+    """Per-expert padded scale size (in floats) for grouped FP8 block-scaling.
+
+    Mirrors the per-expert sub-block layout that cuBLAS grouped GEMM consumes (and that the C++
+    test ``test_cast_float8blockwise_grouped.cu`` verifies against)::
+
+        1D rowwise : blocks_X   * roundup(M_t, 4)
+        1D colwise : blocks_y_t * roundup(K, 4)
+        2D rowwise : blocks_y_t * roundup(blocks_X, 4)
+        2D colwise : blocks_X   * roundup(blocks_y_t, 4)
+
+    The 2D columnwise roundup of each expert's block-rows to a multiple of 4 is the source of the
+    per-expert slack reserved in ``Float8BlockQuantizer.create_grouped_tensor``.
+    """
+
+    def align4(x: int) -> int:
+        return ((x + 3) // 4) * 4
+
+    blocks_x = (k + 127) // 128
+    blocks_y = (m_t + 127) // 128
+    if block_scaling_dim == 1:
+        return blocks_y * align4(k) if columnwise else blocks_x * align4(m_t)
+    return blocks_x * align4(blocks_y) if columnwise else blocks_y * align4(blocks_x)
 
 
 class TestGroupedTensor:
@@ -443,46 +487,81 @@ class TestGroupedTensor:
             cumulative_numel += tensor_shape[0] * tensor_shape[1]
 
     @pytest.mark.parametrize(
-        "shape",
-        [[(256, 512), (512, 512), (768, 512)], [(512, 512), (512, 512), (512, 512)]],
+        "shape_case",
+        ["varying_first", "varying_last", "varying_both"],
     )
     @pytest.mark.parametrize("output_dbias", [False, True])
     @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
-    def test_quantize_grouped_mxfp8(self, shape: List[Tuple[int, int]], output_dbias: bool) -> None:
-        """Test grouped quantization for MXFP8 against per-tensor quantization."""
-        # Test wont pass until the grouped quantization PR from Oleg is merged.
-        num_tensors = 2
-        shape = [(512, 1024) for _ in range(num_tensors)]
+    def test_quantize_grouped_mxfp8(self, shape_case: str, output_dbias: bool) -> None:
+        """Test grouped MXFP8 quantization against per-tensor quantization for
+        varying first/last/both dimensions."""
+        if output_dbias and shape_case != "varying_first":
+            pytest.skip("bgrad_group_quantize requires constant last dimension")
 
-        # Create BF16 input tensors and pack into a 2D tensor
-        input_tensors = [torch.randn(s, dtype=torch.bfloat16, device="cuda") for s in shape]
-        grouped_input = torch.cat(input_tensors, dim=0)
+        # Per-tensor shapes are chosen to satisfy MXFP8 alignment requirements:
+        #   - rowwise scale block size 32 -> last dim must be a multiple of 32
+        #   - kernel chunk size 128 along the first dim -> first dim must be a
+        #     multiple of 128 (per-tensor for VARYING_BOTH_DIMS, otherwise the
+        #     logical first dim).
+        if shape_case == "varying_first":
+            per_tensor_shapes = [(128, 512), (256, 512), (384, 512)]
+        elif shape_case == "varying_last":
+            per_tensor_shapes = [(512, 128), (512, 256), (512, 384)]
+        else:  # varying_both
+            per_tensor_shapes = [(128, 256), (256, 512), (384, 384)]
 
-        # Create MXFP8 output grouped tensor (rowwise only for easier validation)
-        quantizer = MXFP8Quantizer(fp8_dtype=te.DType.kFloat8E4M3)
-        quantizer.set_usage(rowwise=True, columnwise=False)
-        first_dims = torch.tensor(
-            [shape[0][0] for _ in range(num_tensors)],
-            dtype=torch.int64,
-            device="cuda",
+        num_tensors = len(per_tensor_shapes)
+
+        # Each tensor occupies a contiguous chunk of a flat buffer; the kernel
+        # locates each chunk via tensor_offsets, so the 2D view below only needs
+        # to encode the correct total number of elements.
+        input_tensors = [
+            torch.randn(s, dtype=torch.bfloat16, device="cuda") for s in per_tensor_shapes
+        ]
+        flat_buffer = torch.cat([t.reshape(-1) for t in input_tensors])
+
+        first_dims_host: Optional[List[int]]
+        last_dims_host: Optional[List[int]]
+        if shape_case == "varying_first":
+            first_dims_host = [s[0] for s in per_tensor_shapes]
+            last_dims_host = None
+            common_last = per_tensor_shapes[0][1]
+            grouped_input = flat_buffer.view(sum(first_dims_host), common_last)
+        elif shape_case == "varying_last":
+            first_dims_host = None
+            last_dims_host = [s[1] for s in per_tensor_shapes]
+            common_first = per_tensor_shapes[0][0]
+            grouped_input = flat_buffer.view(common_first, sum(last_dims_host))
+        else:  # varying_both
+            first_dims_host = [s[0] for s in per_tensor_shapes]
+            last_dims_host = [s[1] for s in per_tensor_shapes]
+            grouped_input = flat_buffer.view(1, -1)
+
+        first_dims = (
+            torch.tensor(first_dims_host, dtype=torch.int64, device="cuda")
+            if first_dims_host is not None
+            else None
+        )
+        last_dims = (
+            torch.tensor(last_dims_host, dtype=torch.int64, device="cuda")
+            if last_dims_host is not None
+            else None
         )
 
-        # Quantize using grouped API
+        quantizer = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)
+        quantizer.set_usage(rowwise=True, columnwise=False)
+
         if output_dbias:
             grouped_output, dbias = tex.bgrad_group_quantize(
-                grouped_input,
-                quantizer,
-                num_tensors,
-                first_dims,
+                grouped_input, quantizer, num_tensors, first_dims, last_dims
             )
         else:
             grouped_output = tex.group_quantize(
-                grouped_input,
-                quantizer,
-                num_tensors,
-                first_dims,
+                grouped_input, quantizer, num_tensors, first_dims, last_dims
             )
-        # Build expected output by quantizing each tensor independently
+
+        # Reference: quantize each tensor independently and concatenate the
+        # rowwise data / scale_inv buffers in tensor order.
         expected_data = []
         expected_scale_inv = []
         for tensor in input_tensors:
@@ -579,74 +658,470 @@ class TestGroupedTensor:
         assert dbias.shape == (num_tensors, last_dim)
         assert torch.all(dbias == 0)
 
+    @pytest.mark.parametrize(
+        "quantization",
+        [
+            pytest.param(
+                "fp8_current_scaling",
+                marks=pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8),
+            ),
+            pytest.param(
+                "mxfp8",
+                marks=pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8),
+            ),
+        ],
+    )
     @pytest.mark.parametrize("output_dbias", [False, True])
-    @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
-    def test_group_quantize_cudagraph_capturable(self, output_dbias: bool) -> None:
+    @pytest.mark.parametrize("shape_case", ["varying_first", "varying_last"])
+    def test_group_quantize_cudagraph_capturable(
+        self, quantization: str, output_dbias: bool, shape_case: str
+    ) -> None:
         """Ensure group_quantize is CUDA graph capturable."""
-        num_tensors = 2
-        shape = [(512, 1024) for _ in range(num_tensors)]
+        if output_dbias and quantization != "mxfp8":
+            pytest.skip("bgrad_group_quantize only supports MXFP8")
+        if output_dbias and shape_case == "varying_last":
+            pytest.skip("bgrad_group_quantize does not accept last_dims")
+
+        if shape_case == "varying_last":
+            rows = 128
+            last_dims_host = [256, 128, 384]
+            num_tensors = len(last_dims_host)
+            total_cols = sum(last_dims_host)
+            flat_input = torch.empty(rows * total_cols, dtype=torch.bfloat16, device="cuda")
+            offset = 0
+            for cols in last_dims_host:
+                member = torch.randn(rows, cols, dtype=torch.bfloat16, device="cuda")
+                flat_input[offset : offset + member.numel()].copy_(member.reshape(-1))
+                offset += member.numel()
+            grouped_input = flat_input.view(rows, total_cols)
+            first_dims = None
+            last_dims = torch.tensor(last_dims_host, dtype=torch.int64, device="cuda")
+        else:
+            first_dims_host = [256, 128, 384]
+            num_tensors = len(first_dims_host)
+            hidden = 1024
+            shape = [(r, hidden) for r in first_dims_host]
+            input_tensors = [torch.randn(s, dtype=torch.bfloat16, device="cuda") for s in shape]
+            grouped_input = torch.cat(input_tensors, dim=0)
+            first_dims = torch.tensor(first_dims_host, dtype=torch.int64, device="cuda")
+            last_dims = None
+
+        if quantization == "mxfp8":
+            quantizer = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)
+        else:
+            quantizer = Float8CurrentScalingQuantizer(
+                fp8_dtype=tex.DType.kFloat8E4M3,
+                device="cuda",
+                force_pow_2_scales=False,
+                amax_epsilon=0.0,
+            )
+        quantizer.set_usage(rowwise=True, columnwise=False)
+
+        torch.cuda.synchronize()
+        static_input = grouped_input.clone()
+        static_first_dims = first_dims.clone() if first_dims is not None else None
+        static_last_dims = last_dims.clone() if last_dims is not None else None
+
+        def _run_group_quantize(input_tensor):
+            """Return (output, dbias) where dbias is None when output_dbias is False."""
+            if output_dbias:
+                out, dbias = tex.bgrad_group_quantize(
+                    input_tensor, quantizer, num_tensors, static_first_dims
+                )
+                return out, dbias
+            out = tex.group_quantize(
+                input_tensor,
+                quantizer,
+                num_tensors,
+                static_first_dims,
+                last_dims=static_last_dims,
+            )
+            return out, None
+
+        # Warmup to initialize kernels and allocator state
+        _ = _run_group_quantize(static_input)
+        torch.cuda.synchronize()
+
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            static_output, static_dbias = _run_group_quantize(static_input)
+
+        fresh_input = torch.randn_like(grouped_input)
+        static_input.copy_(fresh_input)
+        graph.replay()
+        torch.cuda.synchronize()
+
+        expected_out, expected_dbias = _run_group_quantize(static_input)
+        assert torch.equal(static_output.rowwise_data, expected_out.rowwise_data)
+        assert torch.equal(static_output.scale_inv, expected_out.scale_inv)
+        if output_dbias:
+            assert torch.allclose(static_dbias, expected_dbias)
+
+    @pytest.mark.parametrize("block_scaling_dim", [1, 2], ids=["1D", "2D"])
+    @pytest.mark.skipif(
+        not fp8_block_scaling_grouped_available, reason=reason_for_no_fp8_block_scaling_grouped
+    )
+    def test_group_quantize_fp8_blockwise_cudagraph_capturable(
+        self, block_scaling_dim: int
+    ) -> None:
+        """Ensure grouped FP8 block-scaling quantize is CUDA graph capturable (parity with MXFP8)."""
+        first_dims_host = [256, 128, 384]
+        num_tensors = len(first_dims_host)
+        hidden = 512
+        shape = [(r, hidden) for r in first_dims_host]
         input_tensors = [torch.randn(s, dtype=torch.bfloat16, device="cuda") for s in shape]
         grouped_input = torch.cat(input_tensors, dim=0)
+        first_dims = torch.tensor(first_dims_host, dtype=torch.int64, device="cuda")
 
-        quantizer = MXFP8Quantizer(fp8_dtype=te.DType.kFloat8E4M3)
-        quantizer.set_usage(rowwise=True, columnwise=False)
-        first_dims = torch.tensor(
-            [shape[0][0] for _ in range(num_tensors)],
-            dtype=torch.int64,
-            device="cuda",
+        quantizer = Float8BlockQuantizer(
+            fp8_dtype=tex.DType.kFloat8E4M3,
+            rowwise=True,
+            columnwise=False,
+            force_pow_2_scales=False,
+            amax_epsilon=0.0,
+            block_scaling_dim=block_scaling_dim,
         )
 
         torch.cuda.synchronize()
         static_input = grouped_input.clone()
         static_first_dims = first_dims.clone()
 
-        # Warmup to initialize kernels and allocator state
-        if output_dbias:
-            _ = tex.bgrad_group_quantize(static_input, quantizer, num_tensors, static_first_dims)
-        else:
-            _ = tex.group_quantize(static_input, quantizer, num_tensors, static_first_dims)
+        def _run(inp):
+            return tex.group_quantize(inp, quantizer, num_tensors, static_first_dims)
+
+        _ = _run(static_input)  # warmup allocator/kernels
         torch.cuda.synchronize()
 
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
-            if output_dbias:
-                static_output, static_dbias = tex.bgrad_group_quantize(
-                    static_input,
-                    quantizer,
-                    num_tensors,
-                    static_first_dims,
-                )
-            else:
-                static_output = tex.group_quantize(
-                    static_input,
-                    quantizer,
-                    num_tensors,
-                    static_first_dims,
-                )
+            static_output = _run(static_input)
 
-        fresh_input = torch.cat(
-            [torch.randn(s, dtype=torch.bfloat16, device="cuda") for s in shape],
-            dim=0,
-        )
-        static_input.copy_(fresh_input)
+        # Replay with fresh input copied into the captured buffer.
+        static_input.copy_(torch.randn_like(grouped_input))
         graph.replay()
         torch.cuda.synchronize()
 
+        expected = _run(static_input)
+        assert torch.equal(static_output.rowwise_data, expected.rowwise_data)
+        assert torch.equal(static_output.scale_inv, expected.scale_inv)
+
+    @pytest.mark.parametrize("mode", ["rowwise", "columnwise", "both"])
+    @pytest.mark.parametrize(
+        "shape_case",
+        [
+            "uniform",
+            "varying_first",
+            "empty_split",
+            "varying_last",
+        ],
+    )
+    @pytest.mark.parametrize("overallocated", [False, True])
+    @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+    def test_group_quantize_fp8_current_scaling(
+        self,
+        mode: str,
+        shape_case: str,
+        overallocated: bool,
+    ) -> None:
+        """Test grouped FP8 current scaling matches per-tensor current scaling
+        across shape topologies:
+
+        - ``uniform``: no ``first_dims``/``last_dims`` (kernel partitions implicitly).
+        - ``varying_first``: ``first_dims`` set, values vary.
+        - ``empty_split``: ``first_dims`` set with one zero entry.
+        - ``varying_last``: ``last_dims`` set, values vary.
+
+        When ``overallocated`` is True the backing buffer is twice the active size
+        in the test case, so the kernel sees an active region followed by an unused tail.
+        The unused tail elements are poisoned with a large sentinel value (1e4);
+        since the per-group amax assertion compares against amax computed over the
+        active input tensors only, any tail read by the kernel would explode the
+        per-group amax and the assertion would fail. Overallocation is skipped for
+        ``uniform`` because it partitions the buffer implicitly (no metadata-defined
+        active region to over-allocate against).
+        """
+        if overallocated and shape_case == "uniform":
+            pytest.skip(
+                "Overallocation is not meaningful for ``uniform`` "
+                "(the kernel partitions the buffer implicitly, so there is no "
+                "metadata-defined active region to over-allocate against)."
+            )
+
+        # Per-tensor shapes for each shape_case.
+        if shape_case == "uniform":
+            per_tensor_shapes = [(128, 256)] * 3
+            first_dims_host = None
+            last_dims_host = None
+        elif shape_case == "varying_first":
+            # Only common dimension needs to be 16B aligned.
+            first_dims_host = [65, 128, 97]
+            last_dims_host = None
+            per_tensor_shapes = [(r, 256) for r in first_dims_host]
+        elif shape_case == "empty_split":
+            first_dims_host = [128, 0, 96]
+            last_dims_host = None
+            per_tensor_shapes = [(r, 256) for r in first_dims_host]
+        elif shape_case == "varying_last":
+            first_dims_host = None
+            last_dims_host = [513, 1027, 259]
+            per_tensor_shapes = [(256, c) for c in last_dims_host]
+        else:
+            raise ValueError(f"Unknown shape_case: {shape_case}")
+
+        num_tensors = len(per_tensor_shapes)
+        first_dims = (
+            torch.tensor(first_dims_host, dtype=torch.int64, device="cuda")
+            if first_dims_host is not None
+            else None
+        )
+        last_dims = (
+            torch.tensor(last_dims_host, dtype=torch.int64, device="cuda")
+            if last_dims_host is not None
+            else None
+        )
+
+        # Per-tensor data + flat buffer (tensor i occupies a contiguous chunk).
+        input_tensors = [
+            torch.randn(s, dtype=torch.bfloat16, device="cuda") for s in per_tensor_shapes
+        ]
+        actual_numel = sum(t.numel() for t in input_tensors)
+        allocated_numel = actual_numel * 2 if overallocated else actual_numel
+        flat_buffer = torch.empty(allocated_numel, dtype=torch.bfloat16, device="cuda")
+        offset = 0
+        for t in input_tensors:
+            flat_buffer[offset : offset + t.numel()].copy_(t.reshape(-1))
+            offset += t.numel()
+        if overallocated:
+            flat_buffer[actual_numel:].fill_(10000.0)
+
+        # View flat buffer as the 2D shape expected by group_quantize.
+        if shape_case in ("varying_last",):
+            common_first = per_tensor_shapes[0][0]
+            allocated_last = allocated_numel // common_first
+            grouped_input = flat_buffer.view(common_first, allocated_last)
+        else:
+            common_last = per_tensor_shapes[0][1]
+            allocated_first = allocated_numel // common_last
+            grouped_input = flat_buffer.view(allocated_first, common_last)
+
+        requested_rowwise = mode in ("rowwise", "both")
+        requested_columnwise = mode in ("columnwise", "both")
+        rowwise = requested_rowwise or (requested_columnwise and is_non_tn_fp8_gemm_supported())
+        columnwise = requested_columnwise and not is_non_tn_fp8_gemm_supported()
+
+        quantizer = Float8CurrentScalingQuantizer(
+            fp8_dtype=tex.DType.kFloat8E4M3,
+            device="cuda",
+            force_pow_2_scales=False,
+            amax_epsilon=0.0,
+        )
+        quantizer.set_usage(rowwise=requested_rowwise, columnwise=requested_columnwise)
+
+        grouped_output = tex.group_quantize(
+            grouped_input, quantizer, num_tensors, first_dims, last_dims=last_dims
+        )
+
+        # Metadata validation for the varying-last code path.
+        if shape_case in ("varying_last",):
+            assert grouped_output.first_dims is None
+            assert torch.equal(grouped_output.last_dims, last_dims)
+
+        # When ``overallocated`` is True, the input has poisoned rows past
+        # sum(first_dims) (filled with 1e4). If the kernel were to read those
+        # tail rows, per-group amax would explode well above what bf16 N(0,1)
+        # produces. We catch that implicitly via the per-group amax assertion in
+        # ``_assert_fp8_cs_group_quantize_matches_reference`` below.
+        self._assert_fp8_cs_group_quantize_matches_reference(
+            grouped_output=grouped_output,
+            input_tensors=input_tensors,
+            rowwise=rowwise,
+            columnwise=columnwise,
+        )
+
+    @staticmethod
+    def _assert_fp8_cs_group_quantize_matches_reference(
+        *,
+        grouped_output,
+        input_tensors: List[torch.Tensor],
+        rowwise: bool,
+        columnwise: bool,
+    ) -> None:
+        """Validate amax/scale/scale_inv/per-tensor data of an FP8 current-scaling
+        grouped output against per-tensor Float8CurrentScalingQuantizer references."""
+        expected_amax = torch.stack(
+            [
+                (
+                    tensor.abs().max().float()
+                    if tensor.numel() > 0
+                    else torch.zeros((), dtype=torch.float32, device="cuda")
+                )
+                for tensor in input_tensors
+            ]
+        )
+        torch.testing.assert_close(grouped_output.amax, expected_amax, rtol=0.0, atol=0.0)
+
+        scale_inv = grouped_output.scale_inv
+        if scale_inv is None:
+            scale_inv = grouped_output.columnwise_scale_inv
+        torch.testing.assert_close(
+            scale_inv,
+            torch.reciprocal(grouped_output.scale),
+            rtol=1e-6,
+            atol=1e-6,
+        )
+        if rowwise and columnwise:
+            torch.testing.assert_close(
+                grouped_output.columnwise_scale_inv,
+                grouped_output.scale_inv,
+                rtol=0.0,
+                atol=0.0,
+            )
+
+        expected_rowwise = []
+        expected_columnwise = []
+        for tensor in input_tensors:
+            if tensor.numel() == 0:
+                continue
+            ref_quantizer = Float8CurrentScalingQuantizer(
+                fp8_dtype=tex.DType.kFloat8E4M3,
+                device="cuda",
+                rowwise=True,
+                columnwise=False,
+                force_pow_2_scales=False,
+                amax_epsilon=0.0,
+            )
+            ref = ref_quantizer(tensor)
+            ref_rowwise_data = ref._data.reshape(tensor.shape)
+            if rowwise:
+                expected_rowwise.append(ref_rowwise_data.reshape(-1))
+            if columnwise:
+                expected_columnwise.append(ref_rowwise_data.T.contiguous().reshape(-1))
+
+        if rowwise and expected_rowwise:
+            expected = torch.cat(expected_rowwise)
+            assert torch.equal(grouped_output.rowwise_data[: expected.numel()], expected)
+        if columnwise and expected_columnwise:
+            expected = torch.cat(expected_columnwise)
+            assert torch.equal(grouped_output.columnwise_data[: expected.numel()], expected)
+
+    @pytest.mark.parametrize("block_scaling_dim", [1, 2], ids=["1D", "2D"])
+    @pytest.mark.parametrize("shape_case", ["uniform", "varying_first"])
+    @pytest.mark.parametrize("direction", ["rowwise", "columnwise", "both"])
+    @pytest.mark.parametrize("output_dbias", [False, True])
+    @pytest.mark.parametrize(
+        "force_pow_2_scales", [False, True], ids=["fp32_scales", "pow2_scales"]
+    )
+    @pytest.mark.skipif(
+        not fp8_block_scaling_grouped_available, reason=reason_for_no_fp8_block_scaling_grouped
+    )
+    def test_quantize_grouped_fp8_blockwise(
+        self,
+        block_scaling_dim: int,
+        shape_case: str,
+        direction: str,
+        output_dbias: bool,
+        force_pow_2_scales: bool,
+    ) -> None:
+        """Test grouped FP8 block-scaling quantization against per-tensor quantization.
+
+        Covers rowwise, columnwise and both directions. Each expert's data sub-block (and, for
+        rowwise, its scale sub-block placed at the cumulative padded offset from
+        ``_fp8bs_per_expert_scale_floats``) is compared against an independent per-tensor reference
+        quantizer. The columnwise scale layout carries 2D padding plus the per-expert slack
+        reserved in ``Float8BlockQuantizer.create_grouped_tensor``; it is validated end to end by
+        ``test_group_dequantize_fp8_blockwise`` rather than by a fragile byte-compare here.
+
+        FP8 block-scaling supports only SAME_BOTH_DIMS (``uniform``) and VARYING_FIRST_DIM
+        (``varying_first``); ``varying_last``/``varying_both`` are rejected at the kernel level.
+        Per-tensor first dim must be a multiple of 128 (kernel tile size).
+        """
+        rowwise = direction in ("rowwise", "both")
+        columnwise = direction in ("columnwise", "both")
+
+        # dbias is the bias gradient (per-column input sum) emitted by the bgrad path, which
+        # requires rowwise output; the columnwise-only + dbias combination is not applicable.
+        if output_dbias and not rowwise:
+            pytest.skip("bgrad (dbias) requires rowwise output; columnwise-only does not apply.")
+
+        if shape_case == "uniform":
+            per_tensor_shapes = [(128, 512)] * 3
+            first_dims_host = None
+        else:  # varying_first
+            per_tensor_shapes = [(128, 512), (256, 512), (384, 512)]
+            first_dims_host = [s[0] for s in per_tensor_shapes]
+
+        num_tensors = len(per_tensor_shapes)
+
+        input_tensors = [
+            torch.randn(s, dtype=torch.bfloat16, device="cuda") for s in per_tensor_shapes
+        ]
+        flat_buffer = torch.cat([t.reshape(-1) for t in input_tensors])
+        common_last = per_tensor_shapes[0][1]
+        grouped_input = flat_buffer.view(-1, common_last)
+
+        first_dims = (
+            torch.tensor(first_dims_host, dtype=torch.int64, device="cuda")
+            if first_dims_host is not None
+            else None
+        )
+
+        quantizer = Float8BlockQuantizer(
+            fp8_dtype=tex.DType.kFloat8E4M3,
+            rowwise=rowwise,
+            columnwise=columnwise,
+            force_pow_2_scales=force_pow_2_scales,
+            amax_epsilon=0.0,
+            block_scaling_dim=block_scaling_dim,
+        )
+
         if output_dbias:
-            expected_out, expected_dbias = tex.bgrad_group_quantize(
-                static_input,
-                quantizer,
-                num_tensors,
-                static_first_dims,
+            grouped_output, dbias = tex.bgrad_group_quantize(
+                grouped_input, quantizer, num_tensors, first_dims
             )
         else:
-            expected_out = tex.group_quantize(
-                static_input, quantizer, num_tensors, static_first_dims
-            )
-        assert torch.equal(static_output.rowwise_data, expected_out.rowwise_data)
-        assert torch.equal(static_output.scale_inv, expected_out.scale_inv)
+            grouped_output = tex.group_quantize(grouped_input, quantizer, num_tensors, first_dims)
+
+        # Compare each expert's sub-block against an independent per-tensor reference. The
+        # reference enables both directions: the non-grouped 2D kernel requires rowwise output to
+        # be allocated even when only columnwise is consumed, and the columnwise data/scale it
+        # emits are independent of whether rowwise is also computed.
+        ref_quantizer = Float8BlockQuantizer(
+            fp8_dtype=tex.DType.kFloat8E4M3,
+            rowwise=True,
+            columnwise=True,
+            force_pow_2_scales=force_pow_2_scales,
+            amax_epsilon=0.0,
+            block_scaling_dim=block_scaling_dim,
+        )
+        # Data sub-blocks are contiguous (rowwise (M_t, K) / columnwise transposed (K, M_t)) with
+        # no inter-expert padding. The rowwise scale sub-block is placed at the cumulative
+        # per-expert padded offset, so a wrong stride fails byte-equality here. The columnwise
+        # scale carries 2D ``roundup(blocks_y_t, 4)`` padding columns (and the per-expert slack),
+        # so its layout is validated end to end by ``test_group_dequantize_fp8_blockwise`` instead.
+        data_off = 0
+        rw_scale_off = 0
+        for tensor in input_tensors:
+            m_t, k = tensor.shape
+            numel = m_t * k
+            ref = ref_quantizer(tensor)
+            if rowwise:
+                ref_rw = ref._rowwise_data.reshape(-1)
+                assert torch.equal(grouped_output.rowwise_data[data_off : data_off + numel], ref_rw)
+                ref_rs = ref._rowwise_scale_inv.reshape(-1)
+                assert torch.equal(
+                    grouped_output.scale_inv[rw_scale_off : rw_scale_off + ref_rs.numel()], ref_rs
+                )
+                rw_scale_off += _fp8bs_per_expert_scale_floats(block_scaling_dim, False, m_t, k)
+            if columnwise:
+                ref_cw = ref._columnwise_data.reshape(-1)
+                assert torch.equal(
+                    grouped_output.columnwise_data[data_off : data_off + numel], ref_cw
+                )
+            data_off += numel
+
         if output_dbias:
-            assert torch.allclose(static_dbias, expected_dbias)
+            expected_dbias = torch.stack([t.sum(dim=0) for t in input_tensors])
+            assert torch.allclose(dbias, expected_dbias)
 
     @pytest.mark.parametrize(
         "shape",
@@ -729,6 +1204,115 @@ class TestGroupedTensor:
         for exp, got in zip(expected_tensors, static_tensors):
             assert torch.equal(got, exp)
 
+    @pytest.mark.parametrize("block_scaling_dim", [1, 2], ids=["1D", "2D"])
+    @pytest.mark.parametrize("direction", ["rowwise", "columnwise"])
+    @pytest.mark.skipif(
+        not fp8_block_scaling_grouped_available, reason=reason_for_no_fp8_block_scaling_grouped
+    )
+    def test_group_dequantize_fp8_blockwise_cudagraph_capturable(
+        self, block_scaling_dim: int, direction: str
+    ) -> None:
+        """Ensure grouped FP8 block-scaling dequantize is CUDA graph capturable (parity with MXFP8)."""
+        rowwise = direction == "rowwise"
+        columnwise = direction == "columnwise"
+        num_tensors = 2
+        shape = [(512, 1024) for _ in range(num_tensors)]
+        input_tensors = [torch.randn(s, dtype=torch.bfloat16, device="cuda") for s in shape]
+        grouped_input = torch.cat(input_tensors, dim=0)
+
+        quantizer = Float8BlockQuantizer(
+            fp8_dtype=tex.DType.kFloat8E4M3,
+            rowwise=rowwise,
+            columnwise=columnwise,
+            force_pow_2_scales=False,
+            amax_epsilon=0.0,
+            block_scaling_dim=block_scaling_dim,
+        )
+        first_dims = torch.tensor(
+            [shape[0][0] for _ in range(num_tensors)], dtype=torch.int64, device="cuda"
+        )
+
+        quantized = tex.group_quantize(grouped_input, quantizer, num_tensors, first_dims)
+
+        # Warmup dequantize.
+        torch.cuda.synchronize()
+        _ = tex.group_dequantize(quantized, te.DType.kBFloat16)
+        torch.cuda.synchronize()
+
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            static_output = tex.group_dequantize(quantized, te.DType.kBFloat16)
+
+        # Replay with fresh quantized data copied into the captured input buffers.
+        fresh_input = torch.cat(
+            [torch.randn(s, dtype=torch.bfloat16, device="cuda") for s in shape], dim=0
+        )
+        fresh_quantized = tex.group_quantize(fresh_input, quantizer, num_tensors, first_dims)
+        if rowwise:
+            quantized.rowwise_data.copy_(fresh_quantized.rowwise_data)
+            quantized.scale_inv.copy_(fresh_quantized.scale_inv)
+        else:
+            quantized.columnwise_data.copy_(fresh_quantized.columnwise_data)
+            quantized.columnwise_scale_inv.copy_(fresh_quantized.columnwise_scale_inv)
+
+        graph.replay()
+        torch.cuda.synchronize()
+
+        expected = tex.group_dequantize(quantized, te.DType.kBFloat16)
+        expected_tensors = expected.split_into_quantized_tensors()
+        static_tensors = static_output.split_into_quantized_tensors()
+        for exp, got in zip(expected_tensors, static_tensors):
+            assert torch.equal(got, exp)
+
+    @pytest.mark.parametrize("block_scaling_dim", [1, 2], ids=["1D", "2D"])
+    @pytest.mark.parametrize("direction", ["rowwise", "columnwise"])
+    @pytest.mark.parametrize(
+        "shape",
+        [[(512, 1024), (512, 1024)], [(128, 512), (256, 512), (384, 512)]],
+    )
+    @pytest.mark.skipif(
+        not fp8_block_scaling_grouped_available, reason=reason_for_no_fp8_block_scaling_grouped
+    )
+    def test_group_dequantize_fp8_blockwise(
+        self, block_scaling_dim: int, direction: str, shape: List[Tuple[int, int]]
+    ) -> None:
+        """Test grouped FP8 block-scaling dequantize round-trip for rowwise and columnwise.
+
+        The columnwise + ``varying_first`` + 2D case exercises the per-expert columnwise
+        scale-buffer slack end to end: a wrong slack/stride would place scales at the wrong
+        offsets and corrupt the dequantized values. ``group_dequantize`` consumes exactly one of
+        rowwise / columnwise data, so ``both`` is not a valid round-trip and is not tested here.
+        """
+        rowwise = direction == "rowwise"
+        columnwise = direction == "columnwise"
+        num_tensors = len(shape)
+
+        input_tensors = [torch.randn(s, dtype=torch.bfloat16, device="cuda") for s in shape]
+        grouped_input = torch.cat(input_tensors, dim=0)
+
+        quantizer = Float8BlockQuantizer(
+            fp8_dtype=tex.DType.kFloat8E4M3,
+            rowwise=rowwise,
+            columnwise=columnwise,
+            force_pow_2_scales=False,
+            amax_epsilon=0.0,
+            block_scaling_dim=block_scaling_dim,
+        )
+        first_dims = torch.tensor([s[0] for s in shape], dtype=torch.int64, device="cuda")
+
+        quantized = tex.group_quantize(grouped_input, quantizer, num_tensors, first_dims)
+        dequantized = tex.group_dequantize(quantized, te.DType.kBFloat16)
+
+        assert dequantized.num_tensors == num_tensors
+        assert dequantized.logical_shape == quantized.logical_shape
+        assert torch.equal(dequantized.first_dims, quantized.first_dims)
+        assert torch.equal(dequantized.tensor_offsets, quantized.tensor_offsets)
+
+        dequantized_tensors = dequantized.split_into_quantized_tensors()
+        assert len(dequantized_tensors) == num_tensors
+        for orig, deq in zip(input_tensors, dequantized_tensors):
+            torch.testing.assert_close(deq, orig, atol=0.125, rtol=0.1)
+
     def test_clear(self) -> None:
         """Test clear method"""
         num_tensors = 3
@@ -758,7 +1342,8 @@ class TestGroupedTensor:
         in_features = 64
         out_features = 32
         dtype = torch.float32
-
+        if os.environ.get("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "0") == "0":
+            pytest.skip("single_grouped_weight requires NVTE_GROUPED_LINEAR_SINGLE_PARAM=1")
         src = te.GroupedLinear(
             num_gemms=num_gemms,
             in_features=in_features,
@@ -809,6 +1394,8 @@ class TestGroupedTensor:
 
     def test_grouped_linear_load_state_dict_single_to_multi_param(self, tmp_path) -> None:
         """Load grouped-parameter checkpoint from disk into per-GEMM parameter format."""
+        if os.environ.get("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "0") == "0":
+            pytest.skip("single_grouped_weight requires NVTE_GROUPED_LINEAR_SINGLE_PARAM=1")
         num_gemms = 3
         in_features = 64
         out_features = 32

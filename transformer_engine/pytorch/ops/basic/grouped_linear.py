@@ -26,7 +26,14 @@ from ...module.base import (
 from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload, start_offload
 from ...quantization import FP8GlobalStateManager, QuantizerRole, Recipe
 from ...quantized_tensor import QuantizedTensorStorage
-from ...tensor import MXFP8Quantizer, MXFP8Tensor, NVFP4Quantizer, Quantizer
+from ...tensor import (
+    Float8BlockQuantizer,
+    Float8CurrentScalingQuantizer,
+    MXFP8Quantizer,
+    MXFP8Tensor,
+    NVFP4Quantizer,
+    Quantizer,
+)
 from ...utils import (
     canonicalize_device,
     canonicalize_dtype,
@@ -42,6 +49,7 @@ from .._common import (
     get_main_grad_from_param,
     is_quantized_tensor,
     maybe_dequantize,
+    validate_or_alloc_output,
     view_main_grad_as_grouped_buffer,
 )
 from ..op import BasicOperation, OperationContext
@@ -50,6 +58,12 @@ from ...triton.grouped_dbias_dscales import (
     compute_grouped_dbias,
     compute_grouped_dbias_dscales,
 )
+
+
+# Keys for passing caller-provided output and grad-input buffers to a grouped
+# linear (or fused grouped MLP) through Sequential's ``op_kwargs``.
+OUTPUT_BUFFER_KEY = "output"
+GRAD_INPUT_BUFFER_KEY = "grad_input"
 
 
 class GroupedLinear(BasicOperation):
@@ -417,11 +431,8 @@ class GroupedLinear(BasicOperation):
         quantizer = self.get_quantizer("forward", 1)
 
         recipe = None if quantizer is None else quantizer._get_compatible_recipe()
-        if recipe is not None and (recipe.delayed() or recipe.float8_current_scaling()):
-            raise RuntimeError(
-                "Delayed scaling or float8 current scaling is not supported with"
-                " single_grouped_weight=True"
-            )
+        if recipe is not None and recipe.delayed():
+            raise RuntimeError("Delayed scaling is not supported with single_grouped_weight=True")
 
         grouped_weights = GroupedTensor.make_grouped_tensor_with_shapes(
             num_tensors=self.num_groups,
@@ -759,6 +770,7 @@ class GroupedLinear(BasicOperation):
         with_quantized_compute: bool,
         input_quantizers: Sequence[Optional[Quantizer]],
         dtype: torch.dtype,
+        single_grouped_weight: bool,
     ) -> bool:
         """Whether the graph-safe grouped-tensor flow can be used.
 
@@ -768,10 +780,16 @@ class GroupedLinear(BasicOperation):
           requirement without duplicating its cuBLAS version checks.
         * Quantized compute supports MXFP8 and NVFP4 on Blackwell GPUs with Compute Capability (CC)
           10.x and 11.0. NVFP4 requires RHT because graph-safe grouped quantization currently
-          requires RHT;
-          Every other quantization recipe (fp8 delayed / current scaling, fp8 block scaling, ...)
-          falls back to the legacy flow because the corresponding grouped quantization kernels are
-          missing.
+          requires RHT. NVFP4 is additionally restricted to discrete weights: with
+          ``single_grouped_weight=True`` the weight quantizer is non-RHT and cannot use the
+          graph-safe grouped quantize kernel, so we fall back to the split-quantize flow.
+        * FP8 per-tensor current scaling is backed by grouped current-scaling quantization
+          (``tex.group_quantize``) and cuBLASLt grouped GEMM with per-batch scalar FP8 scaling,
+          which are supported on Hopper (CC 9.0) and Blackwell (CC 10.x and 11.0).
+        * FP8 block scaling uses the grouped-tensor path on Hopper (CC 9.0) with cuBLAS 13.4+;
+          it is Hopper-only (no MXFP8-broadcast emulation), so elsewhere it falls back.
+        * Every other quantization recipe (fp8 delayed scaling, ...) falls back to the legacy flow
+          because the corresponding grouped quantization kernels are missing.
         * Unquantized compute supports BF16/FP16 on Hopper (CC 9.0) and Blackwell (CC 10.x and 11.0)
           -- FP32 is excluded because the cuBLASLt grouped GEMM doesn't support it.
         * Input/weight/grad_output quantizers are assumed to be of the same type, otherwise it
@@ -780,11 +798,32 @@ class GroupedLinear(BasicOperation):
         if not (9, 0) <= get_device_compute_capability() <= (11, 0):
             return False
         if with_quantized_compute:
+            # FP8 per-tensor current scaling runs on the Hopper and Blackwell grouped GEMM
+            # path; the compute-capability range was already checked above. On Hopper it
+            # requires cuBLAS 13.5+; fall back to the legacy flow on older cuBLAS.
+            if all(isinstance(q, Float8CurrentScalingQuantizer) for q in input_quantizers):
+                if (
+                    get_device_compute_capability() < (10, 0)
+                    and tex.get_cublasLt_version() < 130500
+                ):
+                    return False
+                return True
+            if all(isinstance(q, Float8BlockQuantizer) for q in input_quantizers):
+                # Grouped FP8 block scaling is Hopper-only and needs cuBLAS 13.4+; elsewhere
+                # fall back to the split-quantize (MXFP8-emulated) flow.
+                if get_device_compute_capability() >= (10, 0):
+                    return False
+                return tex.get_cublasLt_version() >= 130400
+            # MXFP8 and NVFP4 grouped quantization kernels require Blackwell.
             if not (10, 0) <= get_device_compute_capability() <= (11, 0):
                 return False
-            return all(isinstance(q, MXFP8Quantizer) for q in input_quantizers) or all(
-                isinstance(q, NVFP4Quantizer) and q.with_rht for q in input_quantizers
-            )
+            if all(isinstance(q, MXFP8Quantizer) for q in input_quantizers):
+                return True
+            # NVFP4 graph-safe grouped quantization requires RHT and only supports
+            # discrete weights; otherwise fall back to the split-quantize flow.
+            if all(isinstance(q, NVFP4Quantizer) and q.with_rht for q in input_quantizers):
+                return not single_grouped_weight
+            return False
         return dtype in (torch.bfloat16, torch.float16)
 
     def _get_grouped_weight_for_gemm(
@@ -962,6 +1001,9 @@ class GroupedLinear(BasicOperation):
         if self._scale_bias:
             scales = basic_op_extra_inputs[0][1]
 
+        # Caller-provided output buffer (backward grad-input buffer is read in save_ctx).
+        out_buffer = basic_op_kwargs[0].get(OUTPUT_BUFFER_KEY)
+
         # Dispatch: graph-safe GroupedTensor flow whenever it can be used.
         # See ``_is_graph_safe_path_supported`` for the gating rationale --
         # in short it requires Hopper (SM90+) plus a supported dtype /
@@ -971,6 +1013,7 @@ class GroupedLinear(BasicOperation):
             with_quantized_compute=with_quantized_compute,
             input_quantizers=input_quantizers,
             dtype=dtype,
+            single_grouped_weight=self.single_grouped_weight,
         )
 
         if use_grouped_tensor_path:
@@ -985,6 +1028,7 @@ class GroupedLinear(BasicOperation):
                 input_requires_grad=input_requires_grad,
                 weight_requires_grad=weight_requires_grad,
                 device=device,
+                out_buffer=out_buffer,
             )
         else:
             out, tensors_to_save = self._fuser_forward_split_quantize(
@@ -998,6 +1042,7 @@ class GroupedLinear(BasicOperation):
                 input_requires_grad=input_requires_grad,
                 weight_requires_grad=weight_requires_grad,
                 device=device,
+                out_buffer=out_buffer,
             )
 
         # Save tensors and autograd metadata on the basic-op context.
@@ -1086,6 +1131,8 @@ class GroupedLinear(BasicOperation):
             ctx.dtype = weight_param.dtype
         ctx.input_requires_grad = requires_grad[0]
         ctx.weight_requires_grad = requires_grad[0] and weight_param.requires_grad
+        # Caller-provided backward grad-input buffer.
+        ctx.dgrad_out = basic_op_kwargs[0].get(GRAD_INPUT_BUFFER_KEY)
 
     # ==================================================================
     # Legacy `tex.split_quantize` + `general_grouped_gemm` flow.
@@ -1104,6 +1151,7 @@ class GroupedLinear(BasicOperation):
         input_requires_grad: bool,
         weight_requires_grad: bool,
         device: torch.device,
+        out_buffer: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, tuple[Optional[torch.Tensor], ...]]:
         """Legacy ``tex.split_quantize`` + ``general_grouped_gemm`` flow."""
         num_groups = self.num_groups
@@ -1148,7 +1196,7 @@ class GroupedLinear(BasicOperation):
         # Allocate output tensor
         in_shape = list(input_.size())
         out_shape = in_shape[:-1] + [self.out_features]
-        out = torch.empty(out_shape, dtype=dtype, device=device)
+        out = validate_or_alloc_output(out_buffer, out_shape, dtype, device)
 
         # Perform GEMMs
         use_gemm_bias = has_bias and not self._scale_bias
@@ -1214,6 +1262,7 @@ class GroupedLinear(BasicOperation):
         input_requires_grad: bool,
         weight_requires_grad: bool,
         device: torch.device,
+        out_buffer: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, tuple[Optional[torch.Tensor], ...]]:
         """Graph-safe GroupedTensor forward path (pure compute).
         Returns ``(output, tensors_to_save)``. ``split_sizes``,
@@ -1274,7 +1323,7 @@ class GroupedLinear(BasicOperation):
 
         # Allocate output buffer and wrap as a GroupedTensor view.
         out_shape = original_shape[:-1] + [self.out_features]
-        out = torch.empty(out_shape, dtype=dtype, device=device)
+        out = validate_or_alloc_output(out_buffer, out_shape, dtype, device)
         grouped_out = GroupedTensorStorage(
             shape=(total_tokens, self.out_features),
             dtype=dtype,
@@ -1318,8 +1367,9 @@ class GroupedLinear(BasicOperation):
         #   [split_sizes, base_split_offsets, split_points,
         #    (scales if _scale_bias), grouped_x, *weights]
         if grouped_x is not None:
-            if with_quantized_compute:
-                # only columnwise data is needed for wgrad
+            # (For FP8 per tensor current scaling on Hopper --> Free Rowwise Data
+            # in backward pass)
+            if with_quantized_compute and grouped_x.columnwise_data is not None:
                 grouped_x.rowwise_data = None
                 grouped_x.scale_inv = None
         saved: list[Optional[torch.Tensor]] = [split_sizes, base_split_offsets, split_points]
@@ -1463,10 +1513,8 @@ class GroupedLinear(BasicOperation):
         if ctx.input_requires_grad:
             out_shape = list(grad_output.size())
             in_shape = out_shape[:-1] + [self.in_features]
-            grad_input = torch.empty(
-                in_shape,
-                dtype=ctx.dtype,
-                device=device,
+            grad_input = validate_or_alloc_output(
+                getattr(ctx, "dgrad_out", None), in_shape, ctx.dtype, device
             )
             general_grouped_gemm(
                 ws,
@@ -1592,11 +1640,12 @@ class GroupedLinear(BasicOperation):
             )
             grad_output_quantizer.optimize_for_gemm = True
 
-            if (
-                has_bias
-                and not self._scale_bias
-                and isinstance(grad_output_quantizer, MXFP8Quantizer)
-            ):
+            # FP8 block scaling computes dbias in the rowwise (dgrad) pass, so only fuse
+            # when dgrad is required.
+            fuse_bgrad = isinstance(grad_output_quantizer, MXFP8Quantizer) or (
+                isinstance(grad_output_quantizer, Float8BlockQuantizer) and ctx.input_requires_grad
+            )
+            if has_bias and not self._scale_bias and fuse_bgrad:
                 grouped_dy, dbias_packed = tex.bgrad_group_quantize(
                     dy_2d, grad_output_quantizer, num_groups, split_sizes
                 )
@@ -1642,7 +1691,9 @@ class GroupedLinear(BasicOperation):
         grad_input = None
         if ctx.input_requires_grad:
             grad_input_shape = list(grad_output.size())[:-1] + [self.in_features]
-            grad_input = torch.empty(grad_input_shape, dtype=dtype, device=device)
+            grad_input = validate_or_alloc_output(
+                getattr(ctx, "dgrad_out", None), grad_input_shape, dtype, device
+            )
             grouped_grad_input = GroupedTensorStorage(
                 shape=(total_tokens, self.in_features),
                 dtype=dtype,

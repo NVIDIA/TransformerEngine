@@ -9,6 +9,7 @@
 #include <transformer_engine/fused_router.h>
 
 #include <climits>
+#include <type_traits>
 #include <vector>
 
 #include "../common.h"
@@ -26,14 +27,12 @@ namespace fused_router {
 // =============================================================================
 
 template <typename DataType, typename BiasType, NVTERoutingMapFormat RoutingMapFormat,
-          TopkFuncType TopkFunc = TopkFuncType::Naive>
-__global__ void fused_topk_forward_simple_kernel(const DataType *logits, int num_tokens,
-                                                 int num_experts, int topk, bool use_pre_softmax,
-                                                 int num_groups, int group_topk,
-                                                 float scaling_factor, int score_function,
-                                                 const BiasType *expert_bias, DataType *probs,
-                                                 uint8_t *routing_map,
-                                                 CompType *intermediate_output) {
+          TopkFuncType TopkFunc = TopkFuncType::Naive, typename IndexType = int32_t>
+__global__ void fused_topk_forward_simple_kernel(
+    const DataType *logits, int num_tokens, int num_experts, int topk, bool use_pre_softmax,
+    int num_groups, int group_topk, float scaling_factor, int score_function,
+    const BiasType *expert_bias, DataType *probs, uint8_t *routing_map,
+    CompType *intermediate_output, IndexType *topk_indices_output) {
   constexpr bool kIsBitmap = (RoutingMapFormat == NVTE_ROUTING_MAP_FORMAT_BITMAP_U8);
   int num_token_per_block = blockDim.x / kThreadsPerWarp;
   int warp_id = threadIdx.x / kThreadsPerWarp;
@@ -77,13 +76,15 @@ __global__ void fused_topk_forward_simple_kernel(const DataType *logits, int num
         intermediate_output[pos_offset + i] = -std::numeric_limits<CompType>::infinity();
       }
     }
-    if constexpr (!kIsBitmap) {
-      for (int i = lane_id; i < num_experts; i += kThreadsPerWarp) {
-        routing_map[pos_offset + i] = 0;
-      }
-    } else {
-      for (int i = lane_id; i < bitmap_words_per_warp; i += kThreadsPerWarp) {
-        local_bitmap_words[i] = 0u;
+    if (routing_map != nullptr) {
+      if constexpr (!kIsBitmap) {
+        for (int i = lane_id; i < num_experts; i += kThreadsPerWarp) {
+          routing_map[pos_offset + i] = 0;
+        }
+      } else {
+        for (int i = lane_id; i < bitmap_words_per_warp; i += kThreadsPerWarp) {
+          local_bitmap_words[i] = 0u;
+        }
       }
     }
     // Load the logits to shmem
@@ -192,16 +193,14 @@ __global__ void fused_topk_forward_simple_kernel(const DataType *logits, int num
     }
 
     // Write outputs
-    if constexpr (!kIsBitmap) {
-      for (int i = lane_id; i < topk; i += kThreadsPerWarp) {
-        routing_map[pos_offset + topk_indices[i]] = 1;
-        probs[pos_offset + topk_indices[i]] = scaling_factor * topk_scores[i];
-      }
-    } else {
+    if (routing_map != nullptr && kIsBitmap) {
       for (int i = lane_id; i < topk; i += kThreadsPerWarp) {
         int e = topk_indices[i];
         atomicOr(&local_bitmap_words[e / 32], 1u << (e % 32));
         probs[pos_offset + e] = scaling_factor * topk_scores[i];
+        if (topk_indices_output != nullptr) {
+          topk_indices_output[token_offset_cur_warp * topk + i] = static_cast<IndexType>(e);
+        }
       }
       __syncwarp();
       uint8_t *bitmap_row =
@@ -209,6 +208,17 @@ __global__ void fused_topk_forward_simple_kernel(const DataType *logits, int num
       const uint8_t *local_bitmap_bytes = reinterpret_cast<const uint8_t *>(local_bitmap_words);
       for (int i = lane_id; i < bitmap_row_bytes; i += kThreadsPerWarp) {
         bitmap_row[i] = local_bitmap_bytes[i];
+      }
+    } else {
+      for (int i = lane_id; i < topk; i += kThreadsPerWarp) {
+        int e = topk_indices[i];
+        if (routing_map != nullptr) {
+          routing_map[pos_offset + e] = 1;
+        }
+        if (topk_indices_output != nullptr) {
+          topk_indices_output[token_offset_cur_warp * topk + i] = static_cast<IndexType>(e);
+        }
+        probs[pos_offset + e] = scaling_factor * topk_scores[i];
       }
     }
     __threadfence_block();
@@ -222,11 +232,13 @@ __global__ void fused_topk_forward_simple_kernel(const DataType *logits, int num
 // =============================================================================
 
 template <typename DataType, typename BiasType, NVTERoutingMapFormat RoutingMapFormat,
-          TopkFuncType TopkFunc = TopkFuncType::Naive, int ScoreFunc = 0>
+          TopkFuncType TopkFunc = TopkFuncType::Naive, int ScoreFunc = 0,
+          typename IndexType = int32_t>
 __global__ void fused_topk_with_score_function_forward_kernel(
     const DataType *logits, int num_tokens, int num_experts, int topk, bool use_pre_softmax,
     int num_groups, int group_topk, float scaling_factor, const BiasType *expert_bias,
-    DataType *probs, uint8_t *routing_map, CompType *intermediate_output, int num_buffers) {
+    DataType *probs, uint8_t *routing_map, CompType *intermediate_output,
+    IndexType *topk_indices_output, int num_buffers) {
   constexpr bool kIsBitmap = (RoutingMapFormat == NVTE_ROUTING_MAP_FORMAT_BITMAP_U8);
   /***
      * Section: Global Variables/Addresses init
@@ -333,11 +345,13 @@ __global__ void fused_topk_with_score_function_forward_kernel(
 
     // Clear the probs/routing_map (num_experts)
     vec_fill_global(probs + pos_offset, static_cast<DataType>(0.0f), num_experts, lane_id);
-    if constexpr (!kIsBitmap) {
-      vec_fill_global(routing_map + pos_offset, static_cast<uint8_t>(0), num_experts, lane_id);
-    } else {
-      for (int i = lane_id; i < bitmap_words_per_warp; i += kThreadsPerWarp) {
-        local_bitmap_words[i] = 0u;
+    if (routing_map != nullptr) {
+      if constexpr (!kIsBitmap) {
+        vec_fill_global(routing_map + pos_offset, static_cast<uint8_t>(0), num_experts, lane_id);
+      } else {
+        for (int i = lane_id; i < bitmap_words_per_warp; i += kThreadsPerWarp) {
+          local_bitmap_words[i] = 0u;
+        }
       }
     }
 
@@ -491,16 +505,14 @@ __global__ void fused_topk_with_score_function_forward_kernel(
     }
 
     // Write the probs/routing_map to the output tensor
-    if constexpr (!kIsBitmap) {
-      for (int i = lane_id; i < topk; i += kThreadsPerWarp) {
-        routing_map[pos_offset + topk_indices[i]] = 1;
-        probs[pos_offset + topk_indices[i]] = scaling_factor * topk_scores[i];
-      }
-    } else {
+    if (routing_map != nullptr && kIsBitmap) {
       for (int i = lane_id; i < topk; i += kThreadsPerWarp) {
         int e = topk_indices[i];
         atomicOr(&local_bitmap_words[e / 32], 1u << (e % 32));
         probs[pos_offset + e] = scaling_factor * topk_scores[i];
+        if (topk_indices_output != nullptr) {
+          topk_indices_output[token_offset_cur_warp * topk + i] = static_cast<IndexType>(e);
+        }
       }
       __syncwarp();
       uint8_t *bitmap_row =
@@ -508,6 +520,17 @@ __global__ void fused_topk_with_score_function_forward_kernel(
       const uint8_t *local_bitmap_bytes = reinterpret_cast<const uint8_t *>(local_bitmap_words);
       for (int i = lane_id; i < bitmap_row_bytes; i += kThreadsPerWarp) {
         bitmap_row[i] = local_bitmap_bytes[i];
+      }
+    } else {
+      for (int i = lane_id; i < topk; i += kThreadsPerWarp) {
+        int e = topk_indices[i];
+        if (routing_map != nullptr) {
+          routing_map[pos_offset + e] = 1;
+        }
+        if (topk_indices_output != nullptr) {
+          topk_indices_output[token_offset_cur_warp * topk + i] = static_cast<IndexType>(e);
+        }
+        probs[pos_offset + e] = scaling_factor * topk_scores[i];
       }
     }
     __syncwarp();
@@ -533,6 +556,16 @@ void fused_topk_with_score_function_forward_kernel_launcher(
   if (group_topk > 0) {
     NVTE_CHECK(topk % group_topk == 0, "topk must be divisible by group_topk, got topk=", topk,
                " group_topk=", group_topk);
+    NVTE_CHECK(num_groups > 0, "num_groups must be positive when group_topk > 0, got ", num_groups);
+    NVTE_CHECK(group_topk <= num_groups,
+               "group_topk must be <= num_groups, got group_topk=", group_topk,
+               " num_groups=", num_groups);
+    NVTE_CHECK(num_experts % num_groups == 0,
+               "num_experts must be divisible by num_groups, got num_experts=", num_experts,
+               " num_groups=", num_groups);
+    NVTE_CHECK(topk / group_topk <= num_experts / num_groups,
+               "per-group topk must be <= group size, got per_group_topk=", topk / group_topk,
+               " group_size=", num_experts / num_groups);
   }
   size_t num_token_per_block = kThreadsPerBlock / kThreadsPerWarp;
   size_t total_blocks = (num_tokens + num_token_per_block - 1) / num_token_per_block;
@@ -562,7 +595,8 @@ void fused_topk_with_score_function_forward_kernel_launcher(
         compute_persistent_grid(kernel, kThreadsPerBlock, shared_memory_size, total_blocks);
     kernel<<<grid_size, kThreadsPerBlock, shared_memory_size, stream>>>(
         logits, num_tokens, num_experts, topk, use_pre_softmax, num_groups, group_topk,
-        scaling_factor, expert_bias, probs, routing_map, intermediate_output, num_buffers);
+        scaling_factor, expert_bias, probs, routing_map, intermediate_output,
+        static_cast<int32_t *>(nullptr), num_buffers);
     NVTE_CHECK_CUDA(cudaGetLastError());
   };
 
@@ -579,7 +613,8 @@ void fused_topk_with_score_function_forward_kernel_launcher(
           cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, other_shmem));
       kernel<<<total_blocks, kThreadsPerBlock, other_shmem, stream>>>(
           logits, num_tokens, num_experts, topk, use_pre_softmax, num_groups, group_topk,
-          scaling_factor, score_function, expert_bias, probs, routing_map, intermediate_output);
+          scaling_factor, score_function, expert_bias, probs, routing_map, intermediate_output,
+          static_cast<int32_t *>(nullptr));
       NVTE_CHECK_CUDA(cudaGetLastError());
     };
 
@@ -599,6 +634,110 @@ void fused_topk_with_score_function_forward_kernel_launcher(
       case 2:
         launch(fused_topk_with_score_function_forward_kernel<DataType, BiasType, RoutingMapFormat,
                                                              TopkFuncType::Radix, 2>);
+        break;
+      default:
+        NVTE_ERROR("Unsupported score_function: " + std::to_string(score_function));
+    }
+  }
+}
+
+template <typename DataType, typename BiasType, typename IndexType>
+void fused_topk_with_score_function_forward_with_indices_kernel_launcher(
+    const DataType *logits, int num_tokens, int num_experts, int topk, bool use_pre_softmax,
+    int num_groups, int group_topk, float scaling_factor, int score_function,
+    const BiasType *expert_bias, DataType *probs, IndexType *topk_indices,
+    CompType *intermediate_output, cudaStream_t stream) {
+  NVTE_CHECK(num_experts > 0, "num_experts must be positive, got ", num_experts);
+  NVTE_CHECK(topk > 0 && topk <= num_experts, "topk must be in [1, num_experts], got topk=", topk,
+             " num_experts=", num_experts);
+  NVTE_CHECK(static_cast<int64_t>(num_tokens) * num_experts <= INT_MAX,
+             "num_tokens * num_experts exceeds INT_MAX (kernel uses int offsets), got ",
+             static_cast<int64_t>(num_tokens) * num_experts);
+  NVTE_CHECK(score_function >= 0 && score_function <= 2,
+             "Unsupported score_function: ", score_function);
+  if (group_topk > 0) {
+    NVTE_CHECK(topk % group_topk == 0, "topk must be divisible by group_topk, got topk=", topk,
+               " group_topk=", group_topk);
+    NVTE_CHECK(num_groups > 0, "num_groups must be positive when group_topk > 0, got ", num_groups);
+    NVTE_CHECK(group_topk <= num_groups,
+               "group_topk must be <= num_groups, got group_topk=", group_topk,
+               " num_groups=", num_groups);
+    NVTE_CHECK(num_experts % num_groups == 0,
+               "num_experts must be divisible by num_groups, got num_experts=", num_experts,
+               " num_groups=", num_groups);
+    NVTE_CHECK(topk / group_topk <= num_experts / num_groups,
+               "per-group topk must be <= group size, got per_group_topk=", topk / group_topk,
+               " group_size=", num_experts / num_groups);
+  }
+  if constexpr (std::is_same_v<IndexType, int16_t>) {
+    NVTE_CHECK(num_experts <= INT16_MAX, "int16 topk indices require num_experts <= ", INT16_MAX,
+               ", got ", num_experts);
+  }
+
+  size_t num_token_per_block = kThreadsPerBlock / kThreadsPerWarp;
+  size_t total_blocks = (num_tokens + num_token_per_block - 1) / num_token_per_block;
+  size_t scores_shmem = num_experts * num_token_per_block * sizeof(CompType);
+  size_t scratch_shmem =
+      topk * num_token_per_block * sizeof(CompType) + topk * num_token_per_block * sizeof(int);
+  if (group_topk > 0) {
+    scratch_shmem += num_groups * num_token_per_block * sizeof(CompType);
+    scratch_shmem += num_experts * num_token_per_block * sizeof(CompType);
+  }
+  size_t other_shmem = scores_shmem + scratch_shmem;
+  size_t logits_single_buf =
+      RawAsyncLoader<DataType>::shmem_bytes(num_experts, num_token_per_block, 1);
+  int num_buffers = choose_num_buffers(logits_single_buf, other_shmem);
+  size_t logits_raw_shmem =
+      RawAsyncLoader<DataType>::shmem_bytes(num_experts, num_token_per_block, num_buffers);
+  size_t shared_memory_size = logits_raw_shmem + other_shmem;
+
+  auto launch = [&](auto kernel) {
+    check_shared_memory_capacity_num_experts(shared_memory_size, num_experts);
+    NVTE_CHECK_CUDA(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                         shared_memory_size));
+    size_t grid_size =
+        compute_persistent_grid(kernel, kThreadsPerBlock, shared_memory_size, total_blocks);
+    kernel<<<grid_size, kThreadsPerBlock, shared_memory_size, stream>>>(
+        logits, num_tokens, num_experts, topk, use_pre_softmax, num_groups, group_topk,
+        scaling_factor, expert_bias, probs, static_cast<uint8_t *>(nullptr), intermediate_output,
+        topk_indices, num_buffers);
+    NVTE_CHECK_CUDA(cudaGetLastError());
+  };
+
+  const bool use_radix = topk >= get_radix_topk_threshold() && num_experts <= kMaxExpertsRadixTopk;
+  if (!use_radix) {
+    // Simple path: no async loader, no persistent grid.
+    check_shared_memory_capacity_num_experts(other_shmem, num_experts);
+
+    auto launch_simple = [&](auto kernel) {
+      NVTE_CHECK_CUDA(
+          cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, other_shmem));
+      kernel<<<total_blocks, kThreadsPerBlock, other_shmem, stream>>>(
+          logits, num_tokens, num_experts, topk, use_pre_softmax, num_groups, group_topk,
+          scaling_factor, score_function, expert_bias, probs, static_cast<uint8_t *>(nullptr),
+          intermediate_output, topk_indices);
+      NVTE_CHECK_CUDA(cudaGetLastError());
+    };
+
+    launch_simple(
+        fused_topk_forward_simple_kernel<DataType, BiasType, NVTE_ROUTING_MAP_FORMAT_BYTEMAP,
+                                         TopkFuncType::Naive, IndexType>);
+  } else {
+    switch (score_function) {
+      case 0:
+        launch(fused_topk_with_score_function_forward_kernel<DataType, BiasType,
+                                                             NVTE_ROUTING_MAP_FORMAT_BYTEMAP,
+                                                             TopkFuncType::Radix, 0, IndexType>);
+        break;
+      case 1:
+        launch(fused_topk_with_score_function_forward_kernel<DataType, BiasType,
+                                                             NVTE_ROUTING_MAP_FORMAT_BYTEMAP,
+                                                             TopkFuncType::Radix, 1, IndexType>);
+        break;
+      case 2:
+        launch(fused_topk_with_score_function_forward_kernel<DataType, BiasType,
+                                                             NVTE_ROUTING_MAP_FORMAT_BYTEMAP,
+                                                             TopkFuncType::Radix, 2, IndexType>);
         break;
       default:
         NVTE_ERROR("Unsupported score_function: " + std::to_string(score_function));
@@ -626,6 +765,7 @@ void fused_topk_with_score_function_forward(const Tensor logits, int num_tokens,
                                             Tensor probs, Tensor routing_map,
                                             NVTERoutingMapFormat routing_map_format,
                                             Tensor intermediate_output, cudaStream_t stream) {
+  check_routing_map_format(routing_map_format);
   NVTE_CHECK(num_tokens > 0 && num_experts > 0,
              "num_tokens and num_experts must be positive; got num_tokens=", num_tokens,
              ", num_experts=", num_experts);
@@ -677,6 +817,66 @@ void fused_topk_with_score_function_forward(const Tensor logits, int num_tokens,
     ROUTER_FORWARD_DISPATCH(NVTE_ROUTING_MAP_FORMAT_BYTEMAP)
   }
 #undef ROUTER_FORWARD_DISPATCH
+}
+
+void fused_topk_with_score_function_forward_with_indices(
+    const Tensor logits, int num_tokens, int num_experts, int topk, bool use_pre_softmax,
+    int num_groups, int group_topk, float scaling_factor, int score_function,
+    const Tensor expert_bias, Tensor probs, Tensor topk_indices, Tensor intermediate_output,
+    cudaStream_t stream) {
+  NVTE_CHECK(num_tokens > 0 && num_experts > 0,
+             "num_tokens and num_experts must be positive; got num_tokens=", num_tokens,
+             ", num_experts=", num_experts);
+  NVTE_CHECK(topk > 0 && topk <= num_experts, "topk must be in [1, num_experts], got topk=", topk,
+             " num_experts=", num_experts);
+  const std::vector<size_t> dense_shape{static_cast<size_t>(num_tokens),
+                                        static_cast<size_t>(num_experts)};
+  const std::vector<size_t> indices_shape{static_cast<size_t>(num_tokens),
+                                          static_cast<size_t>(topk)};
+  NVTE_CHECK(logits.data.shape == dense_shape, "logits shape must be [num_tokens, num_experts]=[",
+             num_tokens, ", ", num_experts, "], got ", logits.data.shape);
+  NVTE_CHECK(probs.data.shape == dense_shape, "probs shape must be [num_tokens, num_experts]=[",
+             num_tokens, ", ", num_experts, "], got ", probs.data.shape);
+  NVTE_CHECK(intermediate_output.data.shape == dense_shape,
+             "intermediate_output shape must be [num_tokens, num_experts]=[", num_tokens, ", ",
+             num_experts, "], got ", intermediate_output.data.shape);
+  NVTE_CHECK(topk_indices.data.shape == indices_shape,
+             "topk_indices shape must be [num_tokens, "
+             "topk]=[",
+             num_tokens, ", ", topk, "], got ", topk_indices.data.shape);
+  if (expert_bias.has_data()) {
+    NVTE_CHECK(expert_bias.data.shape == std::vector<size_t>{static_cast<size_t>(num_experts)},
+               "expert_bias shape must be [num_experts]=[", num_experts, "], got ",
+               expert_bias.data.shape);
+  }
+  // Dispatch logits dtype and output-index dtype first; expert-bias dtype is only
+  // dispatched when an expert-bias tensor exists, otherwise the kernel receives nullptr.
+#define ROUTER_FORWARD_WITH_INDICES_DISPATCH(DataType, IndexType)                               \
+  if (expert_bias.has_data()) {                                                                 \
+    TE_ROUTER_PROBS_TYPE_SWITCH_ALL(                                                            \
+        expert_bias.data.dtype, BiasType,                                                       \
+        fused_topk_with_score_function_forward_with_indices_kernel_launcher<DataType, BiasType, \
+                                                                            IndexType>(         \
+            reinterpret_cast<DataType *>(logits.data.dptr), num_tokens, num_experts, topk,      \
+            use_pre_softmax, num_groups, group_topk, scaling_factor, score_function,            \
+            reinterpret_cast<BiasType *>(expert_bias.data.dptr),                                \
+            reinterpret_cast<DataType *>(probs.data.dptr),                                      \
+            reinterpret_cast<IndexType *>(topk_indices.data.dptr),                              \
+            reinterpret_cast<CompType *>(intermediate_output.data.dptr), stream););             \
+  } else {                                                                                      \
+    fused_topk_with_score_function_forward_with_indices_kernel_launcher<DataType, DataType,     \
+                                                                        IndexType>(             \
+        reinterpret_cast<DataType *>(logits.data.dptr), num_tokens, num_experts, topk,          \
+        use_pre_softmax, num_groups, group_topk, scaling_factor, score_function, nullptr,       \
+        reinterpret_cast<DataType *>(probs.data.dptr),                                          \
+        reinterpret_cast<IndexType *>(topk_indices.data.dptr),                                  \
+        reinterpret_cast<CompType *>(intermediate_output.data.dptr), stream);                   \
+  }
+  TE_ROUTER_PROBS_TYPE_SWITCH_ALL(logits.data.dtype, DataType,
+                                  TE_ROUTER_DENSE_INDEX_TYPE_SWITCH_ALL(
+                                      topk_indices.data.dtype, IndexType,
+                                      ROUTER_FORWARD_WITH_INDICES_DISPATCH(DataType, IndexType);););
+#undef ROUTER_FORWARD_WITH_INDICES_DISPATCH
 }
 
 // Backward: grad_probs + intermediate_output + routing_map → grad_logits.
@@ -909,6 +1109,8 @@ void fused_topk_with_score_function_backward_kernel_launcher(
     int num_tokens, int num_experts, int topk, bool use_pre_softmax, float scaling_factor,
     int score_function, DataType *grad_logits, cudaStream_t stream) {
   NVTE_CHECK(num_experts > 0, "num_experts must be positive, got ", num_experts);
+  NVTE_CHECK(topk > 0 && topk <= num_experts, "topk must be in [1, num_experts], got topk=", topk,
+             " num_experts=", num_experts);
   NVTE_CHECK(static_cast<int64_t>(num_tokens) * num_experts <= INT_MAX,
              "num_tokens * num_experts exceeds INT_MAX (kernel uses int offsets), got ",
              static_cast<int64_t>(num_tokens) * num_experts);
@@ -958,6 +1160,7 @@ void fused_topk_with_score_function_backward(const Tensor &routing_map,
                                              int num_experts, int topk, bool use_pre_softmax,
                                              float scaling_factor, int score_function,
                                              Tensor &grad_logits, cudaStream_t stream) {
+  check_routing_map_format(routing_map_format);
   NVTE_CHECK(num_tokens > 0 && num_experts > 0,
              "num_tokens and num_experts must be positive; got num_tokens=", num_tokens,
              ", num_experts=", num_experts);
@@ -994,6 +1197,172 @@ void fused_topk_with_score_function_backward(const Tensor &routing_map,
 #undef ROUTER_BACKWARD_DISPATCH
 }
 
+template <typename DataType, typename IndexType, int ScoreFunc>
+__global__ void fused_topk_backward_selected_indices_kernel(
+    const IndexType *topk_indices, const CompType *intermediate_output, const DataType *grad_probs,
+    int num_tokens, int num_experts, int topk, bool use_pre_softmax, float scaling_factor,
+    DataType *grad_logits) {
+  int num_token_per_block = blockDim.x / kThreadsPerWarp;
+  int warp_id = threadIdx.x / kThreadsPerWarp;
+  int lane_id = threadIdx.x % kThreadsPerWarp;
+  int total_round = (num_tokens + num_token_per_block - 1) / num_token_per_block;
+
+  for (int round = blockIdx.x; round < total_round; round += gridDim.x) {
+    int token_idx = round * num_token_per_block + warp_id;
+    if (token_idx >= num_tokens) break;
+
+    int pos = token_idx * num_experts;
+    const IndexType *token_topk_indices = topk_indices + token_idx * topk;
+
+    CompType sum_act = 0.0f;
+    CompType sum_grad_act = 0.0f;
+    CompType sum_output_x_grad = 0.0f;
+
+    if (topk > 1 || ScoreFunc == 1) {
+      for (int k = lane_id; k < topk; k += kThreadsPerWarp) {
+        int expert_idx = static_cast<int>(token_topk_indices[k]);
+        CompType g = static_cast<CompType>(grad_probs[pos + expert_idx]) * scaling_factor;
+        CompType act = intermediate_output[pos + expert_idx];
+
+        if constexpr (ScoreFunc == 0) {
+          sum_act += act;
+          sum_grad_act += g * act;
+        } else if constexpr (ScoreFunc == 2) {
+          CompType v = sqrtsoftplus_scalar(act);
+          sum_act += v;
+          sum_grad_act += g * v;
+        } else if constexpr (ScoreFunc == 1) {
+          sum_output_x_grad += g * act;
+        }
+      }
+      if constexpr (ScoreFunc == 0 || ScoreFunc == 2) {
+        sum_act = warp_allreduce_sum(sum_act);
+        sum_grad_act = warp_allreduce_sum(sum_grad_act);
+      } else if constexpr (ScoreFunc == 1) {
+        sum_output_x_grad = warp_allreduce_sum(sum_output_x_grad);
+      }
+    }
+
+    if constexpr (ScoreFunc == 1) {
+      if (use_pre_softmax) {
+        for (int i = lane_id; i < num_experts; i += kThreadsPerWarp) {
+          CompType act = intermediate_output[pos + i];
+          grad_logits[pos + i] =
+              static_cast<DataType>(softmax_bwd_scalar(0.0f, act, sum_output_x_grad));
+        }
+      } else {
+        vec_fill_global(grad_logits + pos, static_cast<DataType>(0.0f), num_experts, lane_id);
+      }
+    } else {
+      vec_fill_global(grad_logits + pos, static_cast<DataType>(0.0f), num_experts, lane_id);
+    }
+    __syncwarp();
+
+    for (int k = lane_id; k < topk; k += kThreadsPerWarp) {
+      int expert_idx = static_cast<int>(token_topk_indices[k]);
+      CompType g = static_cast<CompType>(grad_probs[pos + expert_idx]) * scaling_factor;
+      CompType act = intermediate_output[pos + expert_idx];
+
+      if constexpr (ScoreFunc == 0) {
+        if (topk > 1) {
+          g = normalize_bwd_scalar(g, true, sum_act, sum_grad_act);
+        }
+        g = sigmoid_bwd_scalar(g, act);
+      } else if constexpr (ScoreFunc == 2) {
+        CompType v = sqrtsoftplus_scalar(act);
+        if (topk > 1) {
+          g = normalize_bwd_scalar(g, true, sum_act, sum_grad_act);
+        }
+        g = sqrtsoftplus_bwd_scalar(g, act, v);
+      } else if constexpr (ScoreFunc == 1) {
+        g = softmax_bwd_scalar(g, act, sum_output_x_grad);
+      }
+
+      grad_logits[pos + expert_idx] = static_cast<DataType>(g);
+    }
+  }
+}
+
+template <typename DataType, typename IndexType>
+void fused_topk_with_score_function_backward_with_indices_kernel_launcher(
+    const IndexType *topk_indices, const CompType *intermediate_output, const DataType *grad_probs,
+    int num_tokens, int num_experts, int topk, bool use_pre_softmax, float scaling_factor,
+    int score_function, DataType *grad_logits, cudaStream_t stream) {
+  NVTE_CHECK(num_experts > 0, "num_experts must be positive, got ", num_experts);
+  NVTE_CHECK(topk > 0 && topk <= num_experts, "topk must be in [1, num_experts], got topk=", topk,
+             " num_experts=", num_experts);
+  NVTE_CHECK(static_cast<int64_t>(num_tokens) * num_experts <= INT_MAX,
+             "num_tokens * num_experts exceeds INT_MAX (kernel uses int offsets), got ",
+             static_cast<int64_t>(num_tokens) * num_experts);
+  if constexpr (std::is_same_v<IndexType, int16_t>) {
+    NVTE_CHECK(num_experts <= INT16_MAX, "int16 topk indices require num_experts <= ", INT16_MAX,
+               ", got ", num_experts);
+  }
+  size_t num_token_per_block = kThreadsPerBlock / kThreadsPerWarp;
+  size_t total_blocks = (num_tokens + num_token_per_block - 1) / num_token_per_block;
+
+  auto launch_selected_indices = [&](auto kernel) {
+    size_t grid_size = compute_persistent_grid(kernel, kThreadsPerBlock, 0, total_blocks);
+    kernel<<<grid_size, kThreadsPerBlock, 0, stream>>>(
+        topk_indices, intermediate_output, grad_probs, num_tokens, num_experts, topk,
+        use_pre_softmax, scaling_factor, grad_logits);
+    NVTE_CHECK_CUDA(cudaGetLastError());
+  };
+
+  if (score_function == 0) {
+    launch_selected_indices(fused_topk_backward_selected_indices_kernel<DataType, IndexType, 0>);
+    return;
+  }
+  if (score_function == 2) {
+    launch_selected_indices(fused_topk_backward_selected_indices_kernel<DataType, IndexType, 2>);
+    return;
+  }
+  if (score_function == 1) {
+    launch_selected_indices(fused_topk_backward_selected_indices_kernel<DataType, IndexType, 1>);
+    return;
+  }
+
+  NVTE_ERROR("Unsupported score_function: " + std::to_string(score_function));
+}
+
+void fused_topk_with_score_function_backward_with_indices(
+    const Tensor &topk_indices, const Tensor &intermediate_output, const Tensor &grad_probs,
+    int num_tokens, int num_experts, int topk, bool use_pre_softmax, float scaling_factor,
+    int score_function, Tensor &grad_logits, cudaStream_t stream) {
+  NVTE_CHECK(num_tokens > 0 && num_experts > 0,
+             "num_tokens and num_experts must be positive; got num_tokens=", num_tokens,
+             ", num_experts=", num_experts);
+  NVTE_CHECK(topk > 0 && topk <= num_experts, "topk must be in [1, num_experts], got topk=", topk,
+             " num_experts=", num_experts);
+  const std::vector<size_t> dense_shape{static_cast<size_t>(num_tokens),
+                                        static_cast<size_t>(num_experts)};
+  const std::vector<size_t> indices_shape{static_cast<size_t>(num_tokens),
+                                          static_cast<size_t>(topk)};
+  NVTE_CHECK(topk_indices.data.shape == indices_shape,
+             "topk_indices shape must be [num_tokens, "
+             "topk]=[",
+             num_tokens, ", ", topk, "], got ", topk_indices.data.shape);
+  NVTE_CHECK(intermediate_output.data.shape == dense_shape,
+             "intermediate_output shape must be [num_tokens, num_experts]=[", num_tokens, ", ",
+             num_experts, "], got ", intermediate_output.data.shape);
+  NVTE_CHECK(grad_probs.data.shape == dense_shape,
+             "grad_probs shape must be [num_tokens, num_experts]=[", num_tokens, ", ", num_experts,
+             "], got ", grad_probs.data.shape);
+  NVTE_CHECK(grad_logits.data.shape == dense_shape,
+             "grad_logits shape must be [num_tokens, num_experts]=[", num_tokens, ", ", num_experts,
+             "], got ", grad_logits.data.shape);
+  TE_ROUTER_PROBS_TYPE_SWITCH_ALL(
+      grad_logits.data.dtype, DataType,
+      TE_ROUTER_DENSE_INDEX_TYPE_SWITCH_ALL(
+          topk_indices.data.dtype, IndexType,
+          fused_topk_with_score_function_backward_with_indices_kernel_launcher<DataType, IndexType>(
+              reinterpret_cast<IndexType *>(topk_indices.data.dptr),
+              reinterpret_cast<CompType *>(intermediate_output.data.dptr),
+              reinterpret_cast<DataType *>(grad_probs.data.dptr), num_tokens, num_experts, topk,
+              use_pre_softmax, scaling_factor, score_function,
+              reinterpret_cast<DataType *>(grad_logits.data.dptr), stream);););
+}
+
 }  // namespace fused_router
 }  // namespace transformer_engine
 
@@ -1024,6 +1393,20 @@ void nvte_fused_topk_with_score_function_forward(
       NVTE_ROUTING_MAP_FORMAT_BYTEMAP, intermediate_output, stream);
 }
 
+void nvte_fused_topk_with_score_function_forward_with_indices(
+    const NVTETensor logits, int num_tokens, int num_experts, int topk, int use_pre_softmax,
+    int num_groups, int group_topk, float scaling_factor, int score_function,
+    const NVTETensor expert_bias, NVTETensor probs, NVTETensor topk_indices,
+    NVTETensor intermediate_output, cudaStream_t stream) {
+  NVTE_API_CALL(nvte_fused_topk_with_score_function_forward_with_indices);
+  using namespace transformer_engine;
+  fused_router::fused_topk_with_score_function_forward_with_indices(
+      *convertNVTETensorCheck(logits), num_tokens, num_experts, topk,
+      static_cast<bool>(use_pre_softmax), num_groups, group_topk, scaling_factor, score_function,
+      *convertNVTETensorCheck(expert_bias), *convertNVTETensorCheck(probs),
+      *convertNVTETensorCheck(topk_indices), *convertNVTETensorCheck(intermediate_output), stream);
+}
+
 void nvte_fused_topk_with_score_function_backward_v2(const NVTETensor routing_map,
                                                      NVTERoutingMapFormat routing_map_format,
                                                      const NVTETensor intermediate_output,
@@ -1050,4 +1433,17 @@ void nvte_fused_topk_with_score_function_backward(const NVTETensor routing_map,
   nvte_fused_topk_with_score_function_backward_v2(
       routing_map, NVTE_ROUTING_MAP_FORMAT_BYTEMAP, intermediate_output, grad_probs, num_tokens,
       num_experts, topk, use_pre_softmax, scaling_factor, score_function, grad_logits, stream);
+}
+
+void nvte_fused_topk_with_score_function_backward_with_indices(
+    const NVTETensor topk_indices, const NVTETensor intermediate_output,
+    const NVTETensor grad_probs, int num_tokens, int num_experts, int topk, int use_pre_softmax,
+    float scaling_factor, int score_function, NVTETensor grad_logits, cudaStream_t stream) {
+  NVTE_API_CALL(nvte_fused_topk_with_score_function_backward_with_indices);
+  using namespace transformer_engine;
+  fused_router::fused_topk_with_score_function_backward_with_indices(
+      *convertNVTETensorCheck(topk_indices), *convertNVTETensorCheck(intermediate_output),
+      *convertNVTETensorCheck(grad_probs), num_tokens, num_experts, topk,
+      static_cast<bool>(use_pre_softmax), scaling_factor, score_function,
+      *convertNVTETensorCheck(grad_logits), stream);
 }

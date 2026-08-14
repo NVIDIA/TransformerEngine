@@ -553,6 +553,19 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   destroy_barriers<STAGES>(mbar, is_master_thread);
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
+
+// Zeroes out a scale buffer (used to clear padding of swizzled scales).
+static __global__ void __launch_bounds__(256)
+    zero_scales_kernel(uint8_t *const ptr, const size_t size_in_bytes, const float *noop) {
+  if (noop != nullptr && noop[0] == 1.0f) {
+    return;
+  }
+  const size_t stride = static_cast<size_t>(gridDim.x) * blockDim.x;
+  for (size_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < size_in_bytes; idx += stride) {
+    ptr[idx] = 0;
+  }
+}
+
 }  // namespace quantize_kernel
 
 template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
@@ -780,14 +793,28 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
                 constexpr size_t TILE_DIM_X = 128;  // Tile dim in data buffer
                 constexpr size_t TILE_DIM_Y = 128;
                 if (cols % TILE_DIM_X != 0 || rows % TILE_DIM_Y != 0) {
+                  // Use a noop-aware zero kernel so that the clear is skipped
+                  // when quantization is a noop (e.g. FP8 weight caching).
+                  constexpr size_t zero_threads = 256;
                   if (use_rowwise_scaling) {
-                    NVTE_CHECK_CUDA(cudaMemsetAsync(output->scale_inv.dptr, 0,
-                                                    output->scale_inv.buffer_size_bytes(), stream));
+                    const size_t size_bytes = output->scale_inv.buffer_size_bytes();
+                    if (size_bytes > 0) {
+                      const size_t zero_blocks = DIVUP(size_bytes, zero_threads);
+                      zero_scales_kernel<<<zero_blocks, zero_threads, 0, stream>>>(
+                          reinterpret_cast<uint8_t *>(output->scale_inv.dptr), size_bytes,
+                          noop_ptr);
+                      NVTE_CHECK_CUDA(cudaGetLastError());
+                    }
                   }
                   if (use_colwise_scaling) {
-                    NVTE_CHECK_CUDA(
-                        cudaMemsetAsync(output->columnwise_scale_inv.dptr, 0,
-                                        output->columnwise_scale_inv.buffer_size_bytes(), stream));
+                    const size_t size_bytes = output->columnwise_scale_inv.buffer_size_bytes();
+                    if (size_bytes > 0) {
+                      const size_t zero_blocks = DIVUP(size_bytes, zero_threads);
+                      zero_scales_kernel<<<zero_blocks, zero_threads, 0, stream>>>(
+                          reinterpret_cast<uint8_t *>(output->columnwise_scale_inv.dptr),
+                          size_bytes, noop_ptr);
+                      NVTE_CHECK_CUDA(cudaGetLastError());
+                    }
                   }
                 }
               }
