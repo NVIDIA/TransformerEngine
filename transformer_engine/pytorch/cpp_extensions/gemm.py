@@ -343,8 +343,10 @@ def convert_TE_MX_tensor_to_cuDNN_operand(
     """
 
     if use_N_major_for_B:
-        assert data_dtype in (torch.float8_e4m3fn, torch.float8_e5m2), \
-            f"Using N-major layout for B is only supported for FP8, but got {data_dtype}."
+        assert data_dtype in (
+            torch.float8_e4m3fn,
+            torch.float8_e5m2,
+        ), f"Using N-major layout for B is only supported for FP8, but got {data_dtype}."
 
     available_scalings = {
         # NVFP4 recipe (UE5M3 rides as E4M3 since torch has no ue5m3 dtype)
@@ -364,7 +366,7 @@ def convert_TE_MX_tensor_to_cuDNN_operand(
     if data_dtype == torch.float4_e2m1fn_x2:
         k_packed = k_logical // 2  # fp4 packs two values per byte
     else:
-        k_packed = k_logical # fp8 packs one value per byte
+        k_packed = k_logical  # fp8 packs one value per byte
 
     data = data.view(dtype=data_dtype)
     if use_N_major_for_B:
@@ -456,9 +458,12 @@ def general_cuDNN_MX_gemm(
     functions) should be removed entirely.
 
     """
-    assert isinstance(A, NVFP4TensorStorage) and isinstance(B, NVFP4TensorStorage) and \
-        A.get_metadata()["scale_dtype"] == DType.kFloat8UE5M3 and B.get_metadata()["scale_dtype"] == DType.kFloat8UE5M3, \
-        f"cuDNN MX GEMM is only used for NVFP4 GEMM with e5m3 scale factors for now."
+    assert (
+        isinstance(A, NVFP4TensorStorage)
+        and isinstance(B, NVFP4TensorStorage)
+        and A.get_metadata()["scale_dtype"] == DType.kFloat8UE5M3
+        and B.get_metadata()["scale_dtype"] == DType.kFloat8UE5M3
+    ), f"cuDNN MX GEMM is only used for NVFP4 GEMM with e5m3 scale factors for now."
 
     assert quantization_params is None, "cuDNN GEMM currently does not support output quantization."
     assert gelu is False and gelu_in is None, "cuDNN GEMM currently does not support fused GELU."
@@ -474,8 +479,10 @@ def general_cuDNN_MX_gemm(
     transa = layout[0] == "T"
     transb = layout[1] == "T"
 
-    assert out_dtype in (torch.float32, torch.float16, torch.bfloat16), \
-        f"cuDNN MX GEMM currently only supports float32, float16, and bfloat16 outputs, but got {out_dtype}."
+    assert out_dtype in (torch.float32, torch.float16, torch.bfloat16), (
+        "cuDNN MX GEMM currently only supports float32, float16, and bfloat16 outputs, but got"
+        f" {out_dtype}."
+    )
 
     device = A.device
 
@@ -492,9 +499,9 @@ def general_cuDNN_MX_gemm(
     # `grad` only changes behaviour when a bias is supplied: it turns the bias slot
     # into a bias-gradient output, which cuDNN has no epilogue for. Backward GEMMs
     # that pass grad=True without a bias need nothing special.
-    assert not (grad and bias is not None), (
-        "cuDNN GEMM currently does not support fused bias gradient."
-    )
+    assert not (
+        grad and bias is not None
+    ), "cuDNN GEMM currently does not support fused bias gradient."
 
     # Pick the buffer whose block scales run along K. In every case the selected
     # buffer is physically (rows, K_packed), so the reshape below is uniform.
@@ -520,7 +527,9 @@ def general_cuDNN_MX_gemm(
     N_full = [B_shape[0]] if transb else B_shape[:-1]
     K_full = [A_shape[-1]] if transa else A_shape[1:]
     K_full_b = B_shape[1:] if transb else [B_shape[-1]]
-    assert K_full == K_full_b, f"Contraction dims disagree: A implies {K_full}, B implies {K_full_b}."
+    assert (
+        K_full == K_full_b
+    ), f"Contraction dims disagree: A implies {K_full}, B implies {K_full_b}."
     M = math.prod(M_full)
     N = math.prod(N_full)
     K = math.prod(K_full)
@@ -551,9 +560,9 @@ def general_cuDNN_MX_gemm(
     if accumulate or N % 256 != 0:
         alpha = alpha if alpha is not None else 1.0
         # This path uses cuDNN's wgrad (grouped_gemm_wgrad_wrapper_sm100) which supports grad accumulation
-        if accumulate: # Accumulate GEMM's result to the out tensor
+        if accumulate:  # Accumulate GEMM's result to the out tensor
             assert beta in (1.0, None), "beta must be one or None if accumulate is True"
-        else: # Overwrite GEMM's result to the out tensor
+        else:  # Overwrite GEMM's result to the out tensor
             assert beta in (0.0, None), "beta must be zero or None if not accumulate"
         _cuDNN_wgrad_gemm(
             a_tensor=dataB.view(N, K // 2),
@@ -572,7 +581,9 @@ def general_cuDNN_MX_gemm(
 
     alpha = alpha if alpha is not None else 1.0
     # cuDNN's general GEMM path (grouped_gemm_quant_wrapper_sm100) doesn't support accumulation
-    assert accumulate is False, "cuDNN GEMM currently does not support accumulation for this operation."
+    assert (
+        accumulate is False
+    ), "cuDNN GEMM currently does not support accumulation for this operation."
     assert beta in (0.0, None), "beta must be zero or None if not accumulate"
 
     # cuDNN's grouped quant kernel requires M to be divisible by 256 so we need to pad it
@@ -634,9 +645,9 @@ def general_cuDNN_MX_gemm(
     alpha_tensor = (alpha * scaleA * scaleB).to(torch.float32)
 
     if bias is not None:
-        assert bias.dim() == 1 and bias.shape[0] == M, (
-            f"cuDNN MX GEMM expects a ({M},) bias, but got {tuple(bias.shape)}."
-        )
+        assert (
+            bias.dim() == 1 and bias.shape[0] == M
+        ), f"cuDNN MX GEMM expects a ({M},) bias, but got {tuple(bias.shape)}."
         # cuDNN checks the stride literally, so (1, N) rather than reshape's (1, 1).
         bias = bias.contiguous().as_strided((M, 1), (1, M))
 
@@ -662,9 +673,9 @@ def general_cuDNN_MX_gemm(
         "acc_dtype": torch.float32,
         "d_dtype": out_dtype,  # high precision -> no output quantization
         "d_tensor": d_tensor,
-        "cd_major": "n", # only "n" is supported by cuDNN
-        "sf_vec_size": NVFP4_BLOCK_SCALING_SIZE, # Hardcode to NVFP4 for now
-        "sf_fp8_dtype_override": "e5m3", # Hardcode for now
+        "cd_major": "n",  # only "n" is supported by cuDNN
+        "sf_vec_size": NVFP4_BLOCK_SCALING_SIZE,  # Hardcode to NVFP4 for now
+        "sf_fp8_dtype_override": "e5m3",  # Hardcode for now
         "current_stream": torch.cuda.current_stream().cuda_stream,
         "discrete_col_sfd": False,
         "use_dynamic_sched": True,

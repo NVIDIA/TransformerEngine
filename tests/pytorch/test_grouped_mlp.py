@@ -125,11 +125,12 @@ def maybe_skip_quantization(
         elif quantization in nvfp4_variant_names:
             if math.prod(dims[:-1]) % 16 != 0 or dims[-1] % 16 != 0:
                 pytest.skip("NVFP4 GEMMs require dims that are divisible by 16")
-            if (
-                quantization in ("nvfp4_ue5m3", "nvfp4_rht_ue5m3")
-                and (math.prod(dims[:-1]) % 64 != 0 or dims[-1] % 64 != 0)
+            if quantization in ("nvfp4_ue5m3", "nvfp4_rht_ue5m3") and (
+                math.prod(dims[:-1]) % 64 != 0 or dims[-1] % 64 != 0
             ):
-                pytest.skip("cuDNN FE NVFP4-UE5M3 GEMMs produce incorrect values with 32x32 tensors")
+                pytest.skip(
+                    "cuDNN FE NVFP4-UE5M3 GEMMs produce incorrect values with 32x32 tensors"
+                )
 
     # Check dtype
     if dtype is not None:
@@ -201,12 +202,11 @@ def make_reference_and_test_tensors(
             tensor_type = quantizer_role.tensor_type
         with_rht = quantization in ("nvfp4_rht", "nvfp4_rht_ue5m3") and tensor_type != "weight"
         scale_dtype = (
-            te.DType.kFloat8UE5M3 if quantization in ("nvfp4_ue5m3", "nvfp4_rht_ue5m3")
+            te.DType.kFloat8UE5M3
+            if quantization in ("nvfp4_ue5m3", "nvfp4_rht_ue5m3")
             else te.DType.kFloat8E4M3
         )
-        disable_second_level_scale = (
-            scale_dtype == te.DType.kFloat8UE5M3 and tensor_type == "input"
-        )
+        disable_second_level_scale = scale_dtype == te.DType.kFloat8UE5M3 and tensor_type == "input"
         test = NVFP4Quantizer(
             scale_dtype=scale_dtype,
             with_rht=with_rht,

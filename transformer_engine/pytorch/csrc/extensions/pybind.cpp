@@ -417,8 +417,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::call_guard<py::gil_scoped_release>());
   m.def("nvfp4_compute_global_scale", &transformer_engine::pytorch::nvfp4_compute_global_scale,
         "Compute global encode scale from global amax", py::arg("global_amax"),
-        py::arg("global_scale"),
-        py::arg("scale_dtype") = transformer_engine::DType::kFloat8E4M3,
+        py::arg("global_scale"), py::arg("scale_dtype") = transformer_engine::DType::kFloat8E4M3,
         py::call_guard<py::gil_scoped_release>());
   m.def("nvfp4_fused_scale", &transformer_engine::pytorch::nvfp4_fused_scale,
         "Fused kernel: compute per-block decode scale, copy global amax, expand to row-level FP8",

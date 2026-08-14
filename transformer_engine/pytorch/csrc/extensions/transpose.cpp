@@ -144,8 +144,8 @@ void nvfp4_expand_scale_to_fp8(at::Tensor input, at::Tensor output, int64_t tile
                                  static_cast<size_t>(block_len), at::cuda::getCurrentCUDAStream());
 }
 
-void nvfp4_compute_per_block_scale(at::Tensor block_amax, at::Tensor scale,
-                                   at::Tensor global_amax, const DType scale_dtype) {
+void nvfp4_compute_per_block_scale(at::Tensor block_amax, at::Tensor scale, at::Tensor global_amax,
+                                   const DType scale_dtype) {
   init_extension();
 
   // block_amax and scale: [tile_rows, tile_cols], float32
@@ -193,8 +193,7 @@ void nvfp4_fused_scale(at::Tensor block_amax, at::Tensor global_amax, at::Tensor
                          target_scale_cu.data(), target_amax_cu.data(),
                          static_cast<size_t>(tile_rows), static_cast<size_t>(tile_cols),
                          static_cast<size_t>(rows_padded), static_cast<size_t>(block_len),
-                         at::cuda::getCurrentCUDAStream(),
-                         static_cast<NVTEDType>(scale_dtype));
+                         at::cuda::getCurrentCUDAStream(), static_cast<NVTEDType>(scale_dtype));
 }
 
 void nvfp4_multi_tensor_fused_scale(

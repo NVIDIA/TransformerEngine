@@ -751,7 +751,9 @@ def _check_ue5m3_gemm_versus_dequantized(
     rel_err = (y.float() - ref).norm() / ref.norm()
     assert rel_err < 5e-3, f"relative error {rel_err:.2e} is too large"
 
+
 ue5m3_available, reason_for_no_ue5m3 = te.is_fp8_ue5m3_available(return_reason=True)
+
 
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
 @pytest.mark.skipif(not ue5m3_available, reason=reason_for_no_ue5m3)
@@ -776,12 +778,15 @@ ue5m3_available, reason_for_no_ue5m3 = te.is_fp8_ue5m3_available(return_reason=T
         (False, False),  # TN -- w rowwise, x rowwise   (fprop)
         (False, True),  # NN -- w colwise, x rowwise   (dgrad)
         (True, True),  # NT -- w colwise, x colwise   (wgrad)
-    ], ids=["FF", "FT", "TT"]
+    ],
+    ids=["FF", "FT", "TT"],
 )
 @pytest.mark.parametrize(
-    "disable_second_level_scale", [
+    "disable_second_level_scale",
+    [
         (True, False),
-    ], ids=["TF"]
+    ],
+    ids=["TF"],
 )
 def test_nvfp4_ue5m3_gemm_versus_reference(
     M: int,

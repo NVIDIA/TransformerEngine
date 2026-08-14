@@ -533,8 +533,8 @@ def _cudnn_compute_wgrad(
     total_tokens = grouped_dy.logical_shape[0]
     device = grouped_dy.columnwise_data.device
 
-    dy_quantizer=getattr(grouped_dy, "quantizer", None)
-    x_quantizer=getattr(grouped_x, "quantizer", None)
+    dy_quantizer = getattr(grouped_dy, "quantizer", None)
+    x_quantizer = getattr(grouped_x, "quantizer", None)
 
     sfa_leading_dim = round_up_to_nearest_multiple(out_features, 128)
     sfb_leading_dim = round_up_to_nearest_multiple(in_features, 128)
@@ -1683,13 +1683,17 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                     bias_scale=fc2_bias_scale,
                 )
             fc2_out = fc2_out_buf
-        elif use_nvfp4 and fc2_input_sf_override is not None: # TODO(kainingz): remove this e5m3 workaround once cuBLAS is ready.
+        elif (
+            use_nvfp4 and fc2_input_sf_override is not None
+        ):  # TODO(kainingz): remove this e5m3 workaround once cuBLAS is ready.
             fc2_in = fc1_kernel_out["d_tensor"]
             fc2_in = fc2_in.view(in_shape[0], fc2_weight_shape[1]).contiguous()
             fc2_input_quantizer.set_usage(rowwise=True, columnwise=weight_requires_grad)
             fc2_input_quantizer.optimize_for_gemm = True
 
-            if use_fc1_act_hadamard: # Currently unreachable since e5m3 doesn't use second-level scaling
+            if (
+                use_fc1_act_hadamard
+            ):  # Currently unreachable since e5m3 doesn't use second-level scaling
                 grouped_fc2_x = _group_quantize_with_amax_for_grouped_mlp(
                     fc2_in,
                     fc2_input_quantizer,
@@ -2590,13 +2594,15 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                     grouped_grad_input,
                     layout="NN",
                 )
-            elif use_nvfp4: # TODO(kainingz): remove this e5m3 workaround once cuBLAS is ready
+            elif use_nvfp4:  # TODO(kainingz): remove this e5m3 workaround once cuBLAS is ready
                 # This assertion should never fail because we set fc1_grad_output_quantizer.optimize_for_gemm = True
-                assert grouped_fc1_dy._with_gemm_swizzled_scales, (
-                    "cuDNN NVFP4 dgrad requires GEMM-swizzled grad-output scale factors."
-                )
+                assert (
+                    grouped_fc1_dy._with_gemm_swizzled_scales
+                ), "cuDNN NVFP4 dgrad requires GEMM-swizzled grad-output scale factors."
 
-                grad_input_buffer = validate_or_alloc_output(grad_input_buffer, in_shape, dtype, device)
+                grad_input_buffer = validate_or_alloc_output(
+                    grad_input_buffer, in_shape, dtype, device
+                )
 
                 dgrad_k = fc1_weight_shape[0]  # contraction dim
                 dgrad_valid_m = out_shape[0]  # batch dim
