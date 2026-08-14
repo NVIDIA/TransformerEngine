@@ -64,6 +64,10 @@ struct F16FwdGraphInputs {
   // The true batch size, which the cu_seqlens buffers are sized [actual_b + 1] by whatever
   // the bucketing above did to `b`.
   int64_t actual_b;
+  // Whether this architecture takes the packed token-count representation above; see
+  // supports_packed_ragged_graph. Carried here so the graph build reads the same answer the
+  // dimensions were derived from rather than querying the device again.
+  bool use_packed_ragged_graph;
   bool use_ragged_stats;
   DType ragged_offset_type;
   RaggedOffsetMultipliers offset_mults;
@@ -86,6 +90,9 @@ static F16FwdGraphInputs derive_f16_fwd_graph_inputs(const FusedAttnConfig &cfg)
     NVTE_CHECK(is_padding, "Paged attention requires padding mask!");
   }
 
+  const bool use_packed_ragged_graph =
+      supports_packed_ragged_graph(cudnn_runtime_version, sm_arch_);
+
   int64_t b = static_cast<int64_t>(cfg.batch_size);
   int64_t s_q = static_cast<int64_t>(cfg.max_seqlen_q);
   int64_t s_kv = static_cast<int64_t>(cfg.max_seqlen_kv);
@@ -93,10 +100,10 @@ static F16FwdGraphInputs derive_f16_fwd_graph_inputs(const FusedAttnConfig &cfg)
   const int64_t actual_b = b;
   if ((is_ragged_q || is_ragged_kv) && cudnn_runtime_version >= 90600) {
     NVTE_CHECK(is_padding, "Ragged QKV input requires padding or padding_causal mask!");
-    // On SM 120, cuDNN support check treats layouts with stride[0] > dim[1]*dim[2]*dim[3]
-    // as interleaved and rejects them. Use BHSD-like dimensions/strides with max_seqlen at plan build
-    // so the check passes; ragged offset still provides variable-length boundaries.
-    if (sm_arch_ != 120) {
+    // SM8x and SM120 need dense, BHSD-like dimensions/strides at max_seqlen: on SM120 the cuDNN
+    // support check treats layouts with stride[0] > dim[1]*dim[2]*dim[3] as interleaved and
+    // rejects them. The ragged offsets still provide the variable-length boundaries either way.
+    if (use_packed_ragged_graph) {
       // replace batch size and maximum sequence lengths with maximum token counts
       // for query and key/value so the graph is static within each quantization bucket.
       // When passing cu_seqlens* directly to cuDNN SDPA, keep the true batch size:
@@ -110,7 +117,7 @@ static F16FwdGraphInputs derive_f16_fwd_graph_inputs(const FusedAttnConfig &cfg)
     }
   }
 
-  const bool use_ragged_stats = is_ragged_q && cudnn_runtime_version >= 90600 && sm_arch_ != 120;
+  const bool use_ragged_stats = is_ragged_q && use_packed_ragged_graph;
   const DType ragged_offset_type =
       use_cu_seqlens_directly
           ? DType::kInt32  // cu_seqlens* are given to us as int32; keep it that way.
@@ -124,7 +131,14 @@ static F16FwdGraphInputs derive_f16_fwd_graph_inputs(const FusedAttnConfig &cfg)
 
   // Field order must match F16FwdGraphInputs; one per line so that it can be checked by eye.
   return F16FwdGraphInputs{
-      b, s_q, s_kv, actual_b, use_ragged_stats, ragged_offset_type, offset_mults,
+      b,
+      s_q,
+      s_kv,
+      actual_b,
+      use_packed_ragged_graph,
+      use_ragged_stats,
+      ragged_offset_type,
+      offset_mults,
   };
 }
 
@@ -675,6 +689,7 @@ struct F16BwdGraphInputs {
   int64_t s_q;
   int64_t s_kv;
   int64_t actual_b;
+  bool use_packed_ragged_graph;
   bool use_ragged_stats;
   DType ragged_offset_type;
 };
@@ -689,6 +704,9 @@ static F16BwdGraphInputs derive_f16_bwd_graph_inputs(const FusedAttnConfig &cfg)
   const auto cudnn_runtime_version = cudnnGetVersion();
   const int sm_arch_ = cuda::sm_arch(cuda::current_device());
 
+  const bool use_packed_ragged_graph =
+      supports_packed_ragged_graph(cudnn_runtime_version, sm_arch_);
+
   int64_t b = static_cast<int64_t>(cfg.batch_size);
   int64_t s_q = static_cast<int64_t>(cfg.max_seqlen_q);
   int64_t s_kv = static_cast<int64_t>(cfg.max_seqlen_kv);
@@ -696,8 +714,8 @@ static F16BwdGraphInputs derive_f16_bwd_graph_inputs(const FusedAttnConfig &cfg)
   const int64_t actual_b = b;
   if ((is_ragged_q || is_ragged_kv) && cudnn_runtime_version >= 90600) {
     NVTE_CHECK(is_padding, "Ragged QKV input requires padding or padding_causal mask!");
-    // On SM 120, cuDNN support check requires BHSD-like strides with max_seqlen (see fwd).
-    if (sm_arch_ != 120) {
+    // SM8x and SM120 require dense, BHSD-like strides at max_seqlen (see fwd).
+    if (use_packed_ragged_graph) {
       // replace batch size and maximum sequence lengths with maximum token counts
       // for query and key/value so the graph is static within each quantization bucket.
       // The batch is bucketed unconditionally here, where the forward pass guards it: only
@@ -711,14 +729,14 @@ static F16BwdGraphInputs derive_f16_bwd_graph_inputs(const FusedAttnConfig &cfg)
     }
   }
 
-  const bool use_ragged_stats = is_ragged_q && cudnn_runtime_version >= 90600 && sm_arch_ != 120;
+  const bool use_ragged_stats = is_ragged_q && use_packed_ragged_graph;
   // We choose between 32-bit and 64-bit offsets depending on need.
   // This allows us to support older cuDNN runtimes gracefully.
   const DType ragged_offset_type = cudnn_runtime_version >= 90500 ? DType::kInt64 : DType::kInt32;
 
   // Field order must match F16BwdGraphInputs; one per line so that it can be checked by eye.
   return F16BwdGraphInputs{
-      b, s_q, s_kv, actual_b, use_ragged_stats, ragged_offset_type,
+      b, s_q, s_kv, actual_b, use_packed_ragged_graph, use_ragged_stats, ragged_offset_type,
   };
 }
 
@@ -762,7 +780,7 @@ static SdpaF16BwdGraphAndTensors build_sdpa_f16_bwd_graph(const FusedAttnConfig 
   const bool is_ragged_q = cfg.is_ragged_q;
   const bool is_ragged_kv = cfg.is_ragged_kv;
   const auto cudnn_runtime_version = cudnnGetVersion();
-  const int sm_arch_ = cuda::sm_arch(cuda::current_device());
+  const bool use_packed_ragged_graph = in.use_packed_ragged_graph;
   const bool use_ragged_stats = in.use_ragged_stats;
   const DType ragged_offset_type = in.ragged_offset_type;
 
@@ -865,7 +883,7 @@ static SdpaF16BwdGraphAndTensors build_sdpa_f16_bwd_graph(const FusedAttnConfig 
   if (use_ragged_stats) {
     sdpa_backward_options.set_max_total_seq_len_q(s_q);
   }
-  if (is_ragged_kv && cudnn_runtime_version >= 90600 && sm_arch_ != 120) {
+  if (is_ragged_kv && use_packed_ragged_graph) {
     sdpa_backward_options.set_max_total_seq_len_kv(s_kv);
   }
 
@@ -1185,12 +1203,10 @@ void fused_attn_arbitrary_seqlen_fwd(const FusedAttnConfig &cfg, const Tensor *i
   const size_t max_seqlen_q = cfg.max_seqlen_q;
   const size_t num_tokens_q = cfg.num_tokens_q;
   const bool return_max_logit = cfg.return_max_logit;
-  const NVTE_QKV_Layout qkv_layout = cfg.qkv_layout;
   const NVTE_Bias_Type bias_type = cfg.bias_type;
   const NVTE_Softmax_Type softmax_type = cfg.softmax_type;
 
   const auto QKV_type = input_Q->data.dtype;
-  NVTE_QKV_Format q_format = nvte_get_q_format(qkv_layout);
   void *devPtrQ = input_Q->data.dptr;
   void *devPtrK = input_K->data.dptr;
   void *devPtrV = input_V->data.dptr;
@@ -1219,13 +1235,14 @@ void fused_attn_arbitrary_seqlen_fwd(const FusedAttnConfig &cfg, const Tensor *i
   size_t i = 0;
   if (Aux_CTX_Tensors->size == 0) {
     const auto cudnn_runtime_version = cudnnGetVersion();
+    // These have to match the shape the forward graph declares for Stats and Max, which is
+    // packed only where the architecture supports it; see derive_f16_fwd_graph_inputs.
+    const bool use_ragged_stats =
+        cfg.is_ragged_q && supports_packed_ragged_graph(cudnn_runtime_version, sm_arch_);
 
     Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
     output_S->data.dptr = nullptr;
-    // sm120 does not use ragged stats: the graph declares a dense
-    // [b, h, s_q, 1] stats tensor, so allocate to match (same as Max below).
-    if ((q_format == NVTE_QKV_Format::NVTE_THD && cudnn_runtime_version >= 90600) &&
-        (sm_arch_ != 120)) {
+    if (use_ragged_stats) {
       output_S->data.shape = {num_tokens_q, num_attn_heads, 1};
     } else {
       output_S->data.shape = {batch, num_attn_heads, max_seqlen_q, 1};
@@ -1235,8 +1252,7 @@ void fused_attn_arbitrary_seqlen_fwd(const FusedAttnConfig &cfg, const Tensor *i
     if (return_max_logit) {
       Tensor *output_Max = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
       output_Max->data.dptr = nullptr;
-      if ((q_format == NVTE_QKV_Format::NVTE_THD && cudnn_runtime_version >= 90600) &&
-          (sm_arch_ != 120)) {
+      if (use_ragged_stats) {
         output_Max->data.shape = {num_tokens_q, num_attn_heads, 1};
       } else {
         output_Max->data.shape = {batch, num_attn_heads, max_seqlen_q, 1};

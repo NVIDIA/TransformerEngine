@@ -114,7 +114,7 @@ FusedAttnConfig FusedAttnConfig::make_cache_key() const {
   if (cache_cfg.is_ragged_q || cache_cfg.is_ragged_kv) {
     const auto cudnn_runtime_version = cudnnGetVersion();
     const int sm_arch_ = cuda::sm_arch(cuda::current_device());
-    if (cudnn_runtime_version >= 90600 && sm_arch_ != 120) {
+    if (supports_packed_ragged_graph(cudnn_runtime_version, sm_arch_)) {
       if (cache_cfg.is_ragged_q) {
         cache_cfg.max_seqlen_q = cache_cfg.bucketed_num_tokens_q;
       }

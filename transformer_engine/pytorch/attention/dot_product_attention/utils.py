@@ -1124,13 +1124,13 @@ def get_attention_backend(
                 use_flash_attention_4 = False
 
     # Filter: QKV layout
-    if qkv_format == "thd":
+    if "thd" in (q_format, kv_format):
         if pad_between_seqs:
             if (  # pylint: disable=too-many-boolean-expressions
                 use_flash_attention_2 and FlashAttentionUtils.is_installed
             ) or (use_flash_attention_4 and FlashAttentionUtils.v4_is_installed):
                 logger.debug(
-                    "Disabling FlashAttention 2 and 4 for qkv_format = thd when there is "
+                    "Disabling FlashAttention 2 and 4 when Q or KV uses THD and there is "
                     "padding between sequences, i.e. [a, a, PAD, b, b, b, PAD, c, PAD]"
                 )
             use_flash_attention_2 = False
@@ -1143,7 +1143,7 @@ def get_attention_backend(
             if cudnn_version < (9, 18, 1):
                 if use_fused_attention:
                     logger.debug(
-                        "Disabling FusedAttention as qkv_format = thd is"
+                        "Disabling FusedAttention when Q or KV uses THD because it is"
                         " not supported for compute capability = sm120 and cuDNN version < 9.18.1"
                     )
                 use_fused_attention = False

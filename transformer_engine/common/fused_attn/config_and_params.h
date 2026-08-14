@@ -19,6 +19,15 @@
 namespace transformer_engine {
 namespace fused_attn {
 
+// Whether a ragged (THD) graph can be built at packed token-count dimensions with ragged
+// Stats/LSE. SM8x and SM120 require dense, BHSD-like dimensions at max_seqlen for the auxiliary
+// tensors instead. Graph construction, auxiliary-tensor allocation and make_cache_key() all
+// answer this question, and a disagreement between them would key a graph by dimensions it was
+// not built with, so they share this one definition.
+inline constexpr bool supports_packed_ragged_graph(size_t cudnn_runtime_version, int sm_arch) {
+  return cudnn_runtime_version >= 90600 && sm_arch >= 90 && sm_arch != 120;
+}
+
 struct FusedAttnConfig {
   // basic attention settings
   bool is_training = true;
