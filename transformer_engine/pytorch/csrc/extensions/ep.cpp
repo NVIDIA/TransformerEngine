@@ -347,6 +347,70 @@ void ep_dispatch(at::Tensor handle_mem, at::Tensor topk_idx, at::Tensor tokens,
                    recv_topk_w_te.data(), recv_topk_w_win, stream);
 }
 
+void ep_prepare_and_dispatch(at::Tensor handle_mem, at::Tensor topk_idx, at::Tensor tokens,
+                             at::Tensor topk_weights, at::Tensor recv_tokens,
+                             at::Tensor recv_topk_weights, at::Tensor token_counts, int64_t top_k,
+                             int64_t dispatch_output_per_expert_alignment) {
+  auto stream = at::cuda::getCurrentCUDAStream().stream();
+  NVTE_CHECK(tokens.dim() >= 2, "tokens must be at least 2D [..., H]");
+  NVTE_CHECK(topk_idx.dim() >= 2, "topk_idx must be at least 2D [..., top_k]");
+  NVTE_CHECK(topk_weights.dim() >= 2, "topk_weights must be at least 2D [..., top_k]");
+  NVTE_CHECK(recv_tokens.dim() >= 2, "recv_tokens must be at least 2D [..., recv_pr, H]");
+  auto idx_dtype = check_topk_idx_dtype(topk_idx);
+  NVTE_CHECK(tokens.is_contiguous(), "tokens must be contiguous");
+  NVTE_CHECK(topk_weights.is_contiguous(), "topk_weights must be contiguous");
+  NVTE_CHECK(recv_tokens.is_contiguous(), "recv_tokens must be contiguous");
+  NVTE_CHECK(recv_topk_weights.is_contiguous(), "recv_topk_weights must be contiguous");
+  NVTE_CHECK(token_counts.is_contiguous(), "token_counts must be contiguous");
+  NVTE_CHECK(token_counts.scalar_type() == at::kInt || token_counts.scalar_type() == at::kLong,
+             "token_counts must be int32 or int64");
+
+  const size_t H = static_cast<size_t>(tokens.size(-1));
+  const size_t T_flat = tokens.numel() / H;
+  const size_t topk_n = static_cast<size_t>(topk_idx.size(-1));
+  const size_t recv_pr = recv_tokens.numel() / H;
+
+  NVTE_CHECK(static_cast<size_t>(topk_weights.size(-1)) == topk_n,
+             "topk_weights last dim must equal topk_idx last dim");
+  NVTE_CHECK(static_cast<size_t>(topk_idx.numel()) == T_flat * topk_n,
+             "topk_idx token count must equal tokens token count");
+  NVTE_CHECK(static_cast<size_t>(topk_weights.numel()) == T_flat * topk_n,
+             "topk_weights token count must equal tokens token count");
+  NVTE_CHECK(static_cast<size_t>(recv_topk_weights.numel()) == recv_pr,
+             "recv_topk_weights total size must equal recv_tokens recv_pr");
+  NVTE_CHECK(recv_tokens.scalar_type() == tokens.scalar_type(), "recv_tokens dtype (",
+             c10::toString(recv_tokens.scalar_type()), ") must match tokens dtype (",
+             c10::toString(tokens.scalar_type()), ")");
+  check_symm_mem_required(recv_tokens, "recv_tokens");
+  check_symm_mem_required(recv_topk_weights, "recv_topk_weights");
+
+  auto tok_dtype = GetTransformerEngineDType(tokens.scalar_type());
+  auto handle_mem_te = makeTransformerEngineTensor(
+      handle_mem.data_ptr(), Shape{static_cast<size_t>(handle_mem.numel())}, DType::kByte);
+  auto topk_idx_te =
+      makeTransformerEngineTensor(topk_idx.data_ptr(), Shape{T_flat, topk_n}, idx_dtype);
+  auto tokens_te = makeTransformerEngineTensor(tokens.data_ptr(), Shape{T_flat, H}, tok_dtype);
+  auto topk_w_te =
+      makeTransformerEngineTensor(topk_weights.data_ptr(), Shape{T_flat, topk_n}, DType::kFloat32);
+  auto recv_tokens_te =
+      makeTransformerEngineTensor(recv_tokens.data_ptr(), Shape{recv_pr, H}, tok_dtype);
+  auto recv_topk_w_te =
+      makeTransformerEngineTensor(recv_topk_weights.data_ptr(), Shape{recv_pr}, DType::kFloat32);
+  auto token_counts_te = makeTransformerEngineTensor(
+      token_counts.data_ptr(), Shape{static_cast<size_t>(token_counts.numel())},
+      GetTransformerEngineDType(token_counts.scalar_type()));
+
+  NVTECommWindow tokens_win = maybe_make_window(tokens);
+  NVTECommWindow topk_w_win = maybe_make_window(topk_weights);
+  NVTECommWindow recv_tokens_win = maybe_make_window(recv_tokens);
+  NVTECommWindow recv_topk_w_win = maybe_make_window(recv_topk_weights);
+  auto layer_cfg = make_layer_cfg(top_k, dispatch_output_per_expert_alignment);
+  nvte_ep_prepare_and_dispatch(handle_mem_te.data(), topk_idx_te.data(), tokens_te.data(),
+                               tokens_win, topk_w_te.data(), topk_w_win, recv_tokens_te.data(),
+                               recv_tokens_win, recv_topk_w_te.data(), recv_topk_w_win,
+                               token_counts_te.data(), &layer_cfg, stream);
+}
+
 void ep_combine(at::Tensor handle_mem, at::Tensor expert_out, at::Tensor result) {
   auto stream = at::cuda::getCurrentCUDAStream().stream();
   NVTE_CHECK(expert_out.dim() >= 2, "expert_out must be at least 2D [..., recv_pr, H]");
@@ -509,6 +573,8 @@ void register_ep_bindings(pybind11::module_& m) {
         py::arg("tokens"), py::arg("topk_weights"), py::arg("recv_tokens"),
         py::arg("recv_topk_weights"), py::arg("tokens_scale_inv") = std::nullopt,
         py::arg("recv_scale_inv") = std::nullopt, py::call_guard<py::gil_scoped_release>());
+  m.def("ep_prepare_and_dispatch", &ep_prepare_and_dispatch, "EP fused prepare + dispatch",
+        py::call_guard<py::gil_scoped_release>());
   m.def("ep_combine", &ep_combine, "EP combine", py::call_guard<py::gil_scoped_release>());
   m.def("ep_dispatch_bwd", &ep_dispatch_bwd, "EP dispatch backward",
         py::call_guard<py::gil_scoped_release>());

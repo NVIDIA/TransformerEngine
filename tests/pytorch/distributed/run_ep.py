@@ -347,6 +347,35 @@ class TestEP(unittest.TestCase):
         torch.testing.assert_close(result.float(), tokens.float(), atol=5e-2, rtol=5e-2)
         torch.testing.assert_close(tokens_p.grad.float(), tokens.float(), atol=5e-2, rtol=5e-2)
 
+    def test_fused_prepare_and_dispatch(self):
+        """Non-eager ep_dispatch fuses prepare+dispatch: one call seeds routing,
+        dispatches, and writes the buffer-owned int64 tokens_per_expert. Checks the
+        per-expert counts, recv sizing, and that grad flows through the fused fwd.
+        Runs only in the default (count) pass; the mode passes skip it in setUp."""
+        buf = self._make_buffer()
+        topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
+        tokens_p = tokens.detach().clone().requires_grad_(True)
+        recv_t, recv_w, tokens_per_expert = ep_dispatch(buf, tokens_p, topk_idx, w)
+        torch.cuda.synchronize()
+        # The fused op writes the buffer-owned int64 per-expert counts and returns them.
+        self.assertEqual(tokens_per_expert.data_ptr(), buf.tokens_per_expert.data_ptr())
+        self.assertEqual(tokens_per_expert.dtype, torch.int64)
+        self.assertEqual(tokens_per_expert.shape, (NUM_LOCAL_EXPERTS,))
+        # Non-eager sizes recv outputs to recv_capacity_per_rank, not the recv total.
+        self.assertEqual(recv_t.shape[0], self.cfg.recv_capacity_per_rank)
+        self.assertEqual(recv_w.shape[0], self.cfg.recv_capacity_per_rank)
+        # Per-expert counts sum, across ranks, to every routed (token, top-k) pair.
+        local = int(tokens_per_expert.sum().item())
+        total = torch.tensor([local], dtype=torch.int64, device=self.cfg.device)
+        dist.all_reduce(total, op=dist.ReduceOp.SUM, group=self.ep_group)
+        self.assertEqual(int(total.item()), self.cfg.world_size * TOKENS_PER_RANK * TOP_K)
+        # Round-trip identity and grad flow through the fused forward.
+        out = ep_combine(buf, self._weighted(recv_t, recv_w))
+        (0.5 * (out.float() ** 2).sum()).backward()
+        torch.cuda.synchronize()
+        torch.testing.assert_close(out.float(), tokens.float(), atol=5e-2, rtol=5e-2)
+        torch.testing.assert_close(tokens_p.grad.float(), tokens.float(), atol=5e-2, rtol=5e-2)
+
     @_overflow_test_include
     def test_overflow_drop(self):
         """drop_on_overflow: recv past capacity is dropped and dispatch continues
@@ -432,15 +461,21 @@ class TestEP(unittest.TestCase):
             )
 
     def _assert_mxfp8_matches_bf16(self, recv_mx, tokens, topk_idx, w, tc):
-        """Dequantized MXFP8 recv matches a bf16 dispatch of the same tokens. Both share the
-        alignment=128 padded expert-major layout, so compare the full prefix [0:sum(padded)]."""
+        """Dequantized MXFP8 recv matches a bf16 dispatch of the same tokens. Each expert's recv
+        rows carry an arbitrary (combine-consistent) slot order, so rows are compared as a per-expert
+        multiset within each alignment=128 padded zone rather than slot-by-slot."""
         ref_tokens = self._mxfp8_quantizer().quantize(tokens).dequantize()
         ref_recv, _rw, _tc = ep_dispatch(self._make_buffer(alignment=128), ref_tokens, topk_idx, w)
         torch.cuda.synchronize()
-        n = int(tc.sum())
-        torch.testing.assert_close(
-            _degroup_mxfp8(recv_mx).float(), ref_recv.float()[:n], atol=1e-2, rtol=1e-2
-        )
+        got = _degroup_mxfp8(recv_mx).float()
+        ref = ref_recv.float()[: int(tc.sum())]
+        start = 0
+        for end in torch.cumsum(tc, 0).tolist():
+            g, r = got[start:end], ref[start:end]
+            gi = torch.argsort(g.sum(dim=1), stable=True)
+            ri = torch.argsort(r.sum(dim=1), stable=True)
+            torch.testing.assert_close(g[gi], r[ri], atol=1e-2, rtol=1e-2)
+            start = end
 
     @_eager_test_include
     @_zero_copy_test_include
@@ -535,6 +570,8 @@ class TestEP(unittest.TestCase):
         returned per-expert GroupedTensor views those regions and, dequantized, matches a bf16
         combine backward reference on the same routing. Under zero-copy the caller buffer and combine
         input are symm-mem backed."""
+        if ZERO_COPY:
+            self.skipTest("count-mode dispatch is not supported under zero-copy")
         self._require_mxfp8_shapes()
         from transformer_engine.pytorch.constants import MXFP8_BLOCK_SCALING_SIZE
 
@@ -580,6 +617,8 @@ class TestEP(unittest.TestCase):
         GroupedTensor, dequantized, matches a bf16 combine backward reference on the same routing.
         Under zero-copy the combine input is symm-mem backed.
         """
+        if ZERO_COPY:
+            self.skipTest("count-mode dispatch is not supported under zero-copy")
         self._require_mxfp8_shapes()
         topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
         buf_mx = self._make_buffer(combine_bwd_quant_recipe=MXFP8BlockScaling(), alignment=128)
