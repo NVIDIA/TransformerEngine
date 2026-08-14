@@ -81,10 +81,9 @@ def _dequantize_fused_output_col(query: MXFP8Tensor, s: int, b: int) -> torch.Te
     fp8_col = query._columnwise_data.view(tokens, NUM_HEADS, HEAD_DIM)
     scale_col = query._columnwise_scale_inv.view(tokens // _MXFP8_BLOCK, NUM_HEADS, HEAD_DIM)
     inv = torch.pow(2.0, scale_col.to(torch.float32) - _E8M0_BIAS)  # (tok//32, NH, HD)
-    dq = (
-        fp8_col.to(torch.float32).view(tokens // _MXFP8_BLOCK, _MXFP8_BLOCK, NUM_HEADS, HEAD_DIM)
-        * inv.unsqueeze(1)
-    )
+    dq = fp8_col.to(torch.float32).view(
+        tokens // _MXFP8_BLOCK, _MXFP8_BLOCK, NUM_HEADS, HEAD_DIM
+    ) * inv.unsqueeze(1)
     return dq.reshape(s, b, NUM_HEADS, HEAD_DIM).to(torch.bfloat16)
 
 
@@ -272,4 +271,3 @@ def test_fused_mla_q_uproj_autograd() -> None:
     )[0]
     torch.testing.assert_close(x.grad.reshape(tokens, Q_LORA_RANK), grad_x_ref, atol=0.5, rtol=0.1)
     torch.testing.assert_close(w_bf16.grad, grad_w_ref, atol=0.5, rtol=0.1)
-
