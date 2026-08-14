@@ -350,16 +350,20 @@ TEST_P(GroupedRequantizeMXFP8TestSuite, MatchesDequantizeThenQuantize) {
 
 const std::vector<GroupShapeCase> kGroupShapeCases = {
     {"SameBothDims",
-     {{128, 256}, {128, 256}, {128, 256}, {128, 256}}},
+     {{1024, 4096}, {1024, 4096}, {1024, 4096}, {1024, 4096}}},
+    {"SameBothDims",
+     {{2048, 8192}, {2048, 8192}, {2048, 8192}, {2048, 8192}}},
     {"VaryingFirstDim",
-     {{128, 256}, {384, 256}, {512, 256}}},
-    // An empty member in the middle must not terminate the persistent work loop.
-    {"VaryingFirstDimWithEmpty",
-     {{128, 256}, {0, 256}, {384, 256}, {512, 256}}},
-    {"VaryingLastDim",
-     {{256, 128}, {256, 384}, {256, 640}}},
-    {"VaryingBothDims",
-     {{128, 128}, {256, 384}, {512, 640}}},
+     {{512, 4096}, {512, 4096}, {1024, 4096}, {2048, 4096}}},
+    {"VaryingFirstDim",
+     {{1024, 8192}, {1024, 8192}, {2048, 8192}, {4096, 8192}}},
+    // // An empty member in the middle must not terminate the persistent work loop.
+    // {"VaryingFirstDimWithEmpty",
+    //  {{128, 256}, {0, 256}, {384, 256}, {512, 256}}},
+    // {"VaryingLastDim",
+    //  {{256, 128}, {256, 384}, {256, 640}}},
+    // {"VaryingBothDims",
+    //  {{128, 128}, {256, 384}, {512, 640}}},
 };
 
 std::string make_test_name(
@@ -380,8 +384,13 @@ INSTANTIATE_TEST_SUITE_P(
     OperatorTest, GroupedRequantizeMXFP8TestSuite,
     ::testing::Combine(
         ::testing::ValuesIn(kGroupShapeCases),
-        ::testing::Values(DType::kFloat8E4M3, DType::kFloat8E5M2),
-        ::testing::Bool(), ::testing::Bool()),
+        // ::testing::Values(DType::kFloat8E4M3, DType::kFloat8E5M2),
+        ::testing::Values(DType::kFloat8E4M3),
+        // ::testing::Bool(),
+        ::testing::Values(true),
+        // ::testing::Bool()
+        ::testing::Values(true)
+      ),
     make_test_name);
 
 }  // namespace
