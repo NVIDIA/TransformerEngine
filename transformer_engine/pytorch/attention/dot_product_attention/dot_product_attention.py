@@ -3,9 +3,11 @@
 # See LICENSE for license information.
 
 """Attention."""
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
+import dataclasses
 import math
 import os
+import threading
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import warnings
 import logging
@@ -72,8 +74,121 @@ _attention_backends = {
     "use_fused_attention": None,
     "fused_attention_backend": None,
     "use_unfused_attention": None,
+    "available_backends": None,
+    "fused_attn_reject_reason": None,
     "backend_selection_requires_update": False,
 }
+
+# Dry-run backend selection: see dry_run_backend_selection().
+_dpa_dry_run = threading.local()
+
+
+class _DryRunComplete(Exception):
+    """Unwinds the forward pass once backend selection is known."""
+
+
+@dataclasses.dataclass
+class BackendSelectionProbe:
+    """Backend selection at a single `DotProductAttention` site.
+
+    Attributes
+    ----------
+    attention_params : AttentionParams
+        The parameters the module actually resolved, i.e. the exact cache key the real run
+        would use.
+    available_backends : List[bool]
+        [flash, fused, unfused] support for this configuration.
+    fused_attention_backend : Optional[FusedAttnBackend]
+        The selected `FusedAttention` sub-backend, or `None`.
+    fused_attn_reject_reason : Optional[str]
+        Why `FusedAttention` was ruled out, or `None`. A reason starting with
+        `FUSED_ATTN_BWD_REJECT_PREFIX` means only the backward pass is unsupported.
+    """
+
+    attention_params: Optional["dpa_utils.AttentionParams"] = None
+    available_backends: Optional[List[bool]] = None
+    fused_attention_backend: Optional[Any] = None
+    fused_attn_reject_reason: Optional[str] = None
+
+
+@dataclasses.dataclass
+class DryRunResult:
+    """Backend selection across every `DotProductAttention` site a dry run reached.
+
+    A module runs only if all of its attention sites are supported, so the `*_supported`
+    properties require every recorded site to support the backend. `probes` holds the
+    per-site detail, in the order the sites were reached.
+    """
+
+    stop_after: int = 1
+    probes: List[BackendSelectionProbe] = dataclasses.field(default_factory=list)
+
+    def _all_support(self, index: int) -> bool:
+        return bool(self.probes) and all(p.available_backends[index] for p in self.probes)
+
+    @property
+    def flash_supported(self) -> bool:
+        """Whether `FlashAttention` supports every attention site reached."""
+        return self._all_support(0)
+
+    @property
+    def fused_supported(self) -> bool:
+        """Whether `FusedAttention` supports every attention site reached."""
+        return self._all_support(1)
+
+    @property
+    def unfused_supported(self) -> bool:
+        """Whether `UnfusedDotProductAttention` supports every attention site reached."""
+        return self._all_support(2)
+
+    @property
+    def fused_attn_reject_reason(self) -> Optional[str]:
+        """Why `FusedAttention` was ruled out, from the first site that ruled it out."""
+        return next(
+            (p.fused_attn_reject_reason for p in self.probes if p.fused_attn_reject_reason),
+            None,
+        )
+
+
+@contextmanager
+def dry_run_backend_selection(stop_after: int = 1):
+    """Resolve attention backends for a module without running attention.
+
+    Call a module as usual inside this context. `DotProductAttention.forward` resolves its
+    configuration exactly as a real run would, records which backends support it, and then
+    unwinds the forward pass before any attention is executed. This avoids having to
+    predict the configuration a module will produce, e.g. the `qkv_layout` that
+    `MultiheadAttention` derives from its packed projection output.
+
+    Because the resolved configuration is identical to the real run's, the backend query
+    populates the same cache entries the real run will hit.
+
+    Parameters
+    ----------
+    stop_after : int, default = 1
+        Unwind after this many attention sites have been recorded. Modules with several
+        attention sites, e.g. a `TransformerLayer` with `layer_type="decoder"`, need a
+        higher value to reach the later ones. Note that the sites before the last one
+        execute for real, since that is the only way to arrive at what follows them.
+
+    .. code-block:: python
+
+        with dry_run_backend_selection() as dry_run:
+            model(hidden_states, attn_mask_type="causal")
+        if not dry_run.fused_supported:
+            print(dry_run.fused_attn_reject_reason)
+    """
+    assert stop_after >= 1, "stop_after must be at least 1"
+    result = DryRunResult(stop_after=stop_after)
+    previous = getattr(_dpa_dry_run, "result", None)
+    _dpa_dry_run.result = result
+    try:
+        yield result
+    except _DryRunComplete:
+        pass
+    finally:
+        _dpa_dry_run.result = previous
+
 
 _alibi_cache = {
     "_num_heads": None,
@@ -2041,6 +2156,9 @@ class DotProductAttention(TransformerEngineBaseModule):
                 use_flash_attention = False
                 use_fused_attention = False
                 use_unfused_attention = True
+                fused_attention_backend = None
+                available_backends = [False, False, True]
+                fused_attn_reject_reason = None
             else:
                 if (
                     _attention_backends["attention_params"] is None
@@ -2055,7 +2173,8 @@ class DotProductAttention(TransformerEngineBaseModule):
                         use_fused_attention,
                         fused_attention_backend,
                         use_unfused_attention,
-                        _,
+                        available_backends,
+                        fused_attn_reject_reason,
                     ) = dpa_utils.get_attention_backend(attention_params)
                     # Set global _attention_backends var using return value
                     # from get_attention_backend()
@@ -2064,6 +2183,8 @@ class DotProductAttention(TransformerEngineBaseModule):
                     _attention_backends["use_fused_attention"] = use_fused_attention
                     _attention_backends["fused_attention_backend"] = fused_attention_backend
                     _attention_backends["use_unfused_attention"] = use_unfused_attention
+                    _attention_backends["available_backends"] = available_backends
+                    _attention_backends["fused_attn_reject_reason"] = fused_attn_reject_reason
                     _attention_backends["backend_selection_requires_update"] = False
                     if use_flash_attention:
                         self.logger.info(
@@ -2083,6 +2204,21 @@ class DotProductAttention(TransformerEngineBaseModule):
                     use_fused_attention = _attention_backends["use_fused_attention"]
                     fused_attention_backend = _attention_backends["fused_attention_backend"]
                     use_unfused_attention = _attention_backends["use_unfused_attention"]
+                    available_backends = _attention_backends["available_backends"]
+                    fused_attn_reject_reason = _attention_backends["fused_attn_reject_reason"]
+
+            dry_run = getattr(_dpa_dry_run, "result", None)
+            if dry_run is not None:
+                dry_run.probes.append(
+                    BackendSelectionProbe(
+                        attention_params=attention_params,
+                        available_backends=available_backends,
+                        fused_attention_backend=fused_attention_backend,
+                        fused_attn_reject_reason=fused_attn_reject_reason,
+                    )
+                )
+                if len(dry_run.probes) >= dry_run.stop_after:
+                    raise _DryRunComplete
 
             # raise exception if no backend is available
             if sum([use_flash_attention, use_fused_attention, use_unfused_attention]) == 0:

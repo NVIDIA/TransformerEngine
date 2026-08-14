@@ -9,10 +9,13 @@
 #include <cudnn.h>
 #include <cudnn_frontend_version.h>
 
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 #include "../common.h"
 #include "../util/cuda_runtime.h"
+#include "graph_cache_debug.h"
 
 namespace {
 
@@ -22,6 +25,69 @@ void bool_to_uint8(bool in, void *out) {
 
 void uint8_to_bool(const void *in, bool &out) {
   out = static_cast<bool>(*reinterpret_cast<const uint8_t *>(in));
+}
+
+// Whether all visible CUDA devices can execute each other's cuDNN graphs. A plan is compiled
+// against both the SM architecture and the SM count, and cuDNN requires both to match for a
+// graph built on one device to run on another, so a difference in either one rules out sharing.
+// SM counts differ across devices in practice even at a fixed arch, e.g. when MIG partitions
+// or a harvested SKU are mixed in.
+bool all_visible_devices_share_plans() {
+  const int n = transformer_engine::cuda::num_devices();
+  if (n <= 1) return true;
+  const int arch0 = transformer_engine::cuda::sm_arch(0);
+  const int sm_count0 = transformer_engine::cuda::sm_count(0);
+  for (int i = 1; i < n; ++i) {
+    if (transformer_engine::cuda::sm_arch(i) != arch0) return false;
+    if (transformer_engine::cuda::sm_count(i) != sm_count0) return false;
+  }
+  return true;
+}
+
+// Width reserved for the SM count in the packed cache key below.
+constexpr int kSmCountBits = 16;
+
+// Scope of the fused-attention graph cache across devices in a single process.
+//   >= 0 : shared key packing (SM arch, SM count) -- all devices reuse one graph per shape
+//          (homogeneous node; a cuDNN plan compiled for this arch and SM count is valid on
+//          every device).
+//   -1   : per-device -- key by device id (heterogeneous node, or forced off).
+// Computed once. The two schemes are never mixed within a process, so the packed values need
+// not avoid the small device ids.
+//
+// NVTE_FUSED_ATTN_CACHE_PER_DEVICE=1 forces per-device keying. It is a debug-only
+// escape hatch, not a tuning knob: the homogeneity check above is what keeps a
+// mixed-arch node correct, so the only reasons to set it are A/B comparison
+// against the old behavior, or working around a cuDNN plan-portability bug in the
+// field without a rebuild.
+int fused_attn_cache_arch_key() {
+  static const int key = [] () -> int {
+    const char *e = std::getenv("NVTE_FUSED_ATTN_CACHE_PER_DEVICE");
+    const bool force_per_device = (e != nullptr && e[0] != '\0' && e[0] != '0');
+    const int n = transformer_engine::cuda::num_devices();
+    const bool per_device = force_per_device || !all_visible_devices_share_plans();
+    const int arch = per_device ? -1 : transformer_engine::cuda::sm_arch(0);
+    const int sm_count = per_device ? -1 : transformer_engine::cuda::sm_count(0);
+    const int result = per_device ? -1 : ((arch << kSmCountBits) | sm_count);
+    // One-shot: make the resolved cache scope unambiguous in the diagnostics.
+    if (transformer_engine::fused_attn::graph_cache_debug::enabled()) {
+      const char *tag = transformer_engine::fused_attn::graph_cache_debug::process_tag().c_str();
+      if (result >= 0) {
+        std::fprintf(stderr,
+                     "\n[FUSED-ATTN-CACHE] %s | cache scope = arch %d + %d SM(s) (key %d) shared "
+                     "across %d device(s)\n",
+                     tag, arch, sm_count, result, n);
+      } else {
+        std::fprintf(stderr,
+                     "\n[FUSED-ATTN-CACHE] %s | cache scope = per-device across %d device(s) (%s)\n",
+                     tag, n, force_per_device ? "forced by NVTE_FUSED_ATTN_CACHE_PER_DEVICE"
+                                              : "devices differ in arch or SM count");
+      }
+      std::fflush(stderr);
+    }
+    return result;
+  }();
+  return key;
 }
 
 }  // namespace
@@ -96,8 +162,14 @@ void FusedAttnConfig::derive() {
 FusedAttnConfig FusedAttnConfig::make_cache_key() const {
   FusedAttnConfig cache_cfg = *this;
 
-  // Key the device ID for multi-GPU single-process runs
-  cache_cfg.device_id = cuda::current_device();
+  // Scope the graph cache across devices in a single process. cuDNN plans are compiled against
+  // a specific SM architecture and SM count, so on a node whose devices agree on both the plan
+  // built on one device is valid on all of them: key by (arch, SM count) so a shape is built
+  // once and shared (single-flight collapses the otherwise-per-device duplicate builds).
+  // When the devices differ in either one (or keying is forced off) fall back to per-device
+  // keying, since a plan is not portable in that case.
+  const int arch_key = fused_attn_cache_arch_key();
+  cache_cfg.device_id = (arch_key >= 0) ? arch_key : cuda::current_device();
 
   // Normalize bottom_right_diagonal
   const bool has_window = cache_cfg.window_size_left != -1 || cache_cfg.window_size_right != -1;
@@ -121,7 +193,7 @@ FusedAttnConfig FusedAttnConfig::make_cache_key() const {
       }
       cache_cfg.num_tokens_q = 0;
       cache_cfg.num_tokens_kv = 0;
-      const bool bucket_batch = !is_forward || !cache_cfg.uses_cu_seqlens_directly;
+      const bool bucket_batch = !check_forward || !cache_cfg.uses_cu_seqlens_directly;
       if (bucket_batch) {
         cache_cfg.batch_size = cache_cfg.bucketed_batch_size;
       }
@@ -133,7 +205,7 @@ FusedAttnConfig FusedAttnConfig::make_cache_key() const {
 
   // Restrict each direction's key to the fields its graph actually consumes, so
   // no redundant graphs are built and no cache misses either
-  if (is_forward) {
+  if (check_forward) {
     cache_cfg.do_dtype = kNVTEBFloat16;
     cache_cfg.dqkv_dtype = kNVTEBFloat16;
     cache_cfg.do_format = NVTE_QKV_Format_NOT_SET;
@@ -150,7 +222,10 @@ FusedAttnConfig FusedAttnConfig::make_cache_key() const {
 FusedAttnConfig FusedAttnFwdParams::make_config() const {
   const FusedAttnFwdParams &params = *this;
   FusedAttnConfig cfg{};
-  cfg.is_forward = true;
+  // Forward execution: only the forward graph is run, so do not pay for a backward support
+  // check whose graph this call will never execute.
+  cfg.check_forward = true;
+  cfg.check_backward = false;
   cfg.is_training = params.is_training;
   cfg.deterministic = false;
   cfg.cuda_graph = params.cuda_graph;
@@ -255,6 +330,10 @@ FusedAttnConfig FusedAttnFwdParams::make_config() const {
 FusedAttnConfig FusedAttnBwdParams::make_config() const {
   const FusedAttnBwdParams &params = *this;
   FusedAttnConfig cfg{};
+  // Backward execution: only the backward graph is run. check_forward=false also selects the
+  // backward key normalization in make_cache_key().
+  cfg.check_forward = false;
+  cfg.check_backward = true;
   cfg.is_training = true;
   cfg.deterministic = params.deterministic;
   cfg.cuda_graph = params.cuda_graph;

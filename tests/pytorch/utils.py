@@ -20,7 +20,11 @@ import transformer_engine
 from transformer_engine.common.recipe import Recipe
 from transformer_engine.pytorch import InferenceParams, QuantizedTensor
 from transformer_engine.pytorch import DType
-from transformer_engine.pytorch.attention.dot_product_attention import _attention_backends
+from transformer_engine.pytorch.attention.dot_product_attention import (
+    DryRunResult,
+    dry_run_backend_selection,
+    _attention_backends,
+)
 from transformer_engine.pytorch.attention.dot_product_attention.utils import (
     get_attention_backend,
     AttentionParams,
@@ -336,6 +340,45 @@ def logging_context(highest_level=logging.WARNING):
         logging.disable(previous_level)
 
 
+def probe_attention_backends(run_fn, *args, num_attn_sites: int = 1, **kwargs) -> DryRunResult:
+    """Which backends support the configuration a module actually produces.
+
+    `run_fn(*args, **kwargs)` should build and call the module under test exactly as a real
+    run would. It is aborted inside `DotProductAttention`, once backend selection is known
+    but before any attention executes.
+
+    Prefer this over `get_available_attention_backends()` for module-level tests. The
+    latter needs the caller to restate the configuration, which means predicting what the
+    module derives internally, e.g. the `qkv_layout` that `MultiheadAttention` gets from
+    its packed projection output. Whenever such a prediction drifts from the module, cuDNN
+    builds a graph under a cache key that is never executed.
+
+    All three backends are enabled before `run_fn` is called, so a run function that does
+    not force a backend itself is probed against all of them. A run function that does
+    force one, e.g. `_run_transformer_layer(backend=...)`, is instead probed under exactly
+    the environment it will really use; read the matching `*_supported` property.
+
+    Set `num_attn_sites` above 1 for a module that reaches `DotProductAttention` more than
+    once, e.g. a `TransformerLayer` with `layer_type="decoder"`, which runs self-attention
+    and then cross-attention. The `*_supported` properties then require every site to be
+    supported, which is what the module needs to run.
+    """
+    os.environ["NVTE_FLASH_ATTN"] = "1"
+    os.environ["NVTE_FUSED_ATTN"] = "1"
+    os.environ["NVTE_UNFUSED_ATTN"] = "1"
+    _attention_backends["backend_selection_requires_update"] = True
+
+    with dry_run_backend_selection(stop_after=num_attn_sites) as dry_run:
+        run_fn(*args, **kwargs)
+
+    assert len(dry_run.probes) == num_attn_sites, (
+        f"dry run reached {len(dry_run.probes)} attention site(s), expected"
+        f" {num_attn_sites}; check num_attn_sites"
+    )
+    _attention_backends["backend_selection_requires_update"] = True
+    return dry_run
+
+
 def get_available_attention_backends(
     config: ModelConfig,
     qkv_dtype: torch.dtype,
@@ -352,6 +395,7 @@ def get_available_attention_backends(
     cp_size: int = 1,
     cp_size_a2a: int = 1,
     skip_fused_attn: bool = False,
+    return_reason: bool = False,
 ) -> Tuple[List, List]:
     """Check for all available attention backends that support a model configuration
 
@@ -359,6 +403,11 @@ def get_available_attention_backends(
     fused-attention backends are then empty, while the FlashAttention and unfused results
     are unaffected. This skips cuDNN's support checks, which build and cache a graph per
     configuration.
+
+    Set `return_reason=True` to append the fused-attention rejection reason to the returned
+    tuple. A reason starting with `FUSED_ATTN_BWD_REJECT_PREFIX` means only the backward pass
+    is unsupported, i.e. re-querying with `is_training=False` may report fused attention as
+    available; any other reason means it will not.
     """
 
     os.environ["NVTE_FLASH_ATTN"] = "1"
@@ -442,6 +491,7 @@ def get_available_attention_backends(
             fused_attention_backend,
             use_unfused_attention,
             available_backends,
+            fused_attention_reject_reason,
         ) = get_attention_backend(attention_params)
         # Check if FA3 is an available backend when num_splits != 1
         if available_backends[0]:
@@ -455,16 +505,23 @@ def get_available_attention_backends(
         _attention_backends["fused_attention_backend"] = fused_attention_backend
         _attention_backends["use_unfused_attention"] = use_unfused_attention
         _attention_backends["backend_selection_requires_update"] = False
-        return available_backends, flash_attention_backend, fused_attention_backend
+        return (
+            available_backends,
+            flash_attention_backend,
+            fused_attention_backend,
+            fused_attention_reject_reason,
+        )
 
     backends = {1: "F16_arbitrary_seqlen", 2: "FP8"}
     if AttentionLogging._is_logging_setup is False:
         AttentionLogging.setup_logging()
 
     _attention_backends["backend_selection_requires_update"] = True
-    available_backends, flash_attention_backend, fused_attention_backend = test()
+    available_backends, flash_attention_backend, fused_attention_backend, reject_reason = test()
     if fused_attention_backend in (FusedAttnBackend[name] for name in backends.values()):
         fused_attn_backends.append(fused_attention_backend)
+    if return_reason:
+        return available_backends, flash_attention_backend, fused_attn_backends, reject_reason
     return available_backends, flash_attention_backend, fused_attn_backends
 
 

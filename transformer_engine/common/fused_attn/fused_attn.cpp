@@ -300,15 +300,17 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend_v2(NVTEFusedAttnConfig confi
                                std::to_string(static_cast<int>(qkv_format)) + ".");
       return NVTE_Fused_Attn_Backend::NVTE_No_Backend;
     }
-    std::string fwd_reason = is_supported_fp8_fwd(cfg, handle);
-    if (!fwd_reason.empty()) {
-      set_message(message, std::move(fwd_reason));
-      return NVTE_Fused_Attn_Backend::NVTE_No_Backend;
+    if (cfg.check_forward) {
+      std::string fwd_reason = is_supported_fp8_fwd(cfg, handle);
+      if (!fwd_reason.empty()) {
+        set_message(message, std::move(fwd_reason));
+        return NVTE_Fused_Attn_Backend::NVTE_No_Backend;
+      }
     }
-    if (cfg.is_training && !cfg.is_forward) {
+    if (cfg.is_training && cfg.check_backward) {
       std::string bwd_reason = is_supported_fp8_bwd(cfg, handle);
       if (!bwd_reason.empty()) {
-        set_message(message, std::move(bwd_reason));
+        set_message(message, NVTE_FUSED_ATTN_BWD_REJECT_PREFIX + std::move(bwd_reason));
         return NVTE_Fused_Attn_Backend::NVTE_No_Backend;
       }
     }
@@ -325,15 +327,17 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend_v2(NVTEFusedAttnConfig confi
       set_message(message, "Known cuDNN <= 9.15 issue with CUDA graph. Please upgrade cuDNN.");
       return NVTE_Fused_Attn_Backend::NVTE_No_Backend;
     }
-    std::string fwd_reason = is_supported_f16_fwd(cfg, handle);
-    if (!fwd_reason.empty()) {
-      set_message(message, std::move(fwd_reason));
-      return NVTE_Fused_Attn_Backend::NVTE_No_Backend;
+    if (cfg.check_forward) {
+      std::string fwd_reason = is_supported_f16_fwd(cfg, handle);
+      if (!fwd_reason.empty()) {
+        set_message(message, std::move(fwd_reason));
+        return NVTE_Fused_Attn_Backend::NVTE_No_Backend;
+      }
     }
-    if (cfg.is_training && !cfg.is_forward) {
+    if (cfg.is_training && cfg.check_backward) {
       std::string bwd_reason = is_supported_f16_bwd(cfg, handle);
       if (!bwd_reason.empty()) {
-        set_message(message, std::move(bwd_reason));
+        set_message(message, NVTE_FUSED_ATTN_BWD_REJECT_PREFIX + std::move(bwd_reason));
         return NVTE_Fused_Attn_Backend::NVTE_No_Backend;
       }
     }

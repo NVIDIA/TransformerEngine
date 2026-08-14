@@ -4,6 +4,18 @@
 
 """Python interface for dot product attention"""
 
-from .dot_product_attention import DotProductAttention, _attention_backends
+from .dot_product_attention import (
+    DotProductAttention,
+    BackendSelectionProbe,
+    DryRunResult,
+    dry_run_backend_selection,
+    _attention_backends,
+)
 
-__all__ = ["DotProductAttention", "_attention_backends"]
+__all__ = [
+    "DotProductAttention",
+    "BackendSelectionProbe",
+    "DryRunResult",
+    "dry_run_backend_selection",
+    "_attention_backends",
+]

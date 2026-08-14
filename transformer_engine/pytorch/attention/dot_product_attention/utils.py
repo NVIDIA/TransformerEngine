@@ -73,6 +73,11 @@ _print_rank = int(os.getenv("NVTE_PRINT_RANK", "0"))
 
 _cu_seqlens_cache = {}
 
+# Mirrors NVTE_FUSED_ATTN_BWD_REJECT_PREFIX in common/include/transformer_engine/fused_attn.h.
+# A rejection reason carrying this prefix means only the backward pass is unsupported, so the
+# same config may be supported with is_training=False. Keep the two definitions in sync.
+FUSED_ATTN_BWD_REJECT_PREFIX = "[backward] "
+
 
 class AttentionLogging:
     """
@@ -466,6 +471,11 @@ def get_attention_backend(
     available_backends : List[bool]
         All available backends that could support the provided input. A list of Booleans
         in the form of [use_flash_attention, use_fused_attention, use_unfused_attention].
+    fused_attention_reject_reason : Optional[str]
+        Why `FusedAttention` was ruled out, or `None` if it was selected or was never queried
+        (e.g. disabled via `NVTE_FUSED_ATTN=0`). A reason starting with
+        `FUSED_ATTN_BWD_REJECT_PREFIX` means only the backward pass is unsupported, so the same
+        config may be supported with `is_training=False`.
     """
     # NOTE: As part of refactoring attention.py, populating the _attention_backends cache in attention
     # is no longer performed at the end of get_attention_backend(), but the responsibility of doing so
@@ -1531,6 +1541,7 @@ def get_attention_backend(
 
     # Filter: cuDNN support
     fused_attention_backend = None
+    fused_attention_reject_reason = None
     if use_fused_attention:
         recipe = fp8_meta["recipe"] if (fp8 and fp8_meta["recipe"].fp8_dpa) else None
         cs_o_in_f16 = os.getenv("NVTE_DPA_FP8CS_O_in_F16", "1") == "1"
@@ -1642,10 +1653,11 @@ def get_attention_backend(
                     window_size_right=step_config["window_size_right"],
                     bottom_right_diagonal=step_config["bottom_right_diagonal"],
                 )
-                if bias_seqlen_q != 1:
-                    fused_attn_kwargs["bias_seqlen_q"] = step_seqlen_q
-                if bias_seqlen_kv != 1:
-                    fused_attn_kwargs["bias_seqlen_kv"] = step_seqlen_kv
+                if fu_core_attention_bias_shape is not None:
+                    if bias_seqlen_q != 1:
+                        fused_attn_kwargs["bias_seqlen_q"] = step_seqlen_q
+                    if bias_seqlen_kv != 1:
+                        fused_attn_kwargs["bias_seqlen_kv"] = step_seqlen_kv
             # NOTE: under torch.compile the numeric entries of fused_attn_kwargs must not be
             # symbolic (assume_constant_result requires concrete values); ints/floats made
             # dynamic by automatic dynamic currently graph break here.
@@ -1662,6 +1674,7 @@ def get_attention_backend(
                 )
                 use_fused_attention = False
                 fused_attention_backend = None
+                fused_attention_reject_reason = reject_message
                 break
 
         if (
@@ -1722,12 +1735,11 @@ def get_attention_backend(
             and is_training
             and (device_compute_capability < (9, 0) or cudnn_version < (9, 19, 0))
         ):
-            logger.debug(
-                "Disabling FusedAttention for determinism reasons with FP8 on arch < sm90 or cuDNN"
-                " < 9.19.0"
-            )
+            reason = "determinism with FP8 is not supported on arch < sm90 or cuDNN < 9.19.0"
+            logger.debug("Disabling FusedAttention for %s", reason)
             use_fused_attention = False
             fused_attention_backend = None
+            fused_attention_reject_reason = FUSED_ATTN_BWD_REJECT_PREFIX + reason
         if (
             fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]
             and is_training
@@ -1737,9 +1749,11 @@ def get_attention_backend(
                 or cudnn_version < (8, 9, 5)
             )
         ):
-            logger.debug("Disabling FusedAttention for determinism reasons with post_scale_bias")
+            reason = "determinism with post_scale_bias is not supported"
+            logger.debug("Disabling FusedAttention for %s", reason)
             use_fused_attention = False
             fused_attention_backend = None
+            fused_attention_reject_reason = FUSED_ATTN_BWD_REJECT_PREFIX + reason
 
     # use_flash_attention may have been set above
     use_flash_attention_2 = use_flash_attention and use_flash_attention_2
@@ -1849,6 +1863,7 @@ def get_attention_backend(
         fused_attention_backend,
         use_unfused_attention,
         available_backends,
+        fused_attention_reject_reason,
     )
 
 
