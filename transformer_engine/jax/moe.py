@@ -80,7 +80,9 @@ def get_moe_recv_capacity_per_rank(
     per-local-expert alignment required by NCCL EP.
     """
     if num_experts <= 0 or num_experts_per_tok <= 0 or max_tokens_per_rank <= 0:
-        raise ValueError("num_experts, num_experts_per_tok, and max_tokens_per_rank must be positive")
+        raise ValueError(
+            "num_experts, num_experts_per_tok, and max_tokens_per_rank must be positive"
+        )
     if ep_size <= 0 or num_experts % ep_size != 0:
         raise ValueError(f"num_experts={num_experts} must be divisible by ep_size={ep_size}")
     if alignment <= 0:
@@ -95,18 +97,12 @@ def get_moe_recv_capacity_per_rank(
 
     num_local_experts = num_experts // ep_size
     tokens_per_ep_group = ep_size * max_tokens_per_rank
-    max_local_assignments = tokens_per_ep_group * min(
-        num_experts_per_tok, num_local_experts
-    )
+    max_local_assignments = tokens_per_ep_group * min(num_experts_per_tok, num_local_experts)
     max_nonempty_experts = min(num_local_experts, max_local_assignments)
     padded_total_bound = max_local_assignments + (alignment - 1) * max_nonempty_experts
-    aligned_total_bound = (
-        (padded_total_bound + alignment - 1) // alignment
-    ) * alignment
+    aligned_total_bound = ((padded_total_bound + alignment - 1) // alignment) * alignment
     per_expert_bound = (
-        num_local_experts
-        * ((tokens_per_ep_group + alignment - 1) // alignment)
-        * alignment
+        num_local_experts * ((tokens_per_ep_group + alignment - 1) // alignment) * alignment
     )
     worst_case = min(per_expert_bound, aligned_total_bound)
     if recv_capacity_factor is None:
@@ -116,9 +112,7 @@ def get_moe_recv_capacity_per_rank(
         max_tokens_per_rank * num_experts_per_tok + num_local_experts - 1
     ) // num_local_experts
     balanced_aligned = (
-        num_local_experts
-        * ((balanced_per_expert + alignment - 1) // alignment)
-        * alignment
+        num_local_experts * ((balanced_per_expert + alignment - 1) // alignment) * alignment
     )
     requested = math.ceil(balanced_aligned * recv_capacity_factor)
     requested = ((requested + alignment - 1) // alignment) * alignment
@@ -416,20 +410,12 @@ def _ffn_fwd_per_shard(
     expert_outputs_3d = expert_outputs.reshape(1, expert_outputs.shape[0], expert_outputs.shape[1])
     group_sizes_2d = group_sizes.reshape(1, num_local_experts)
     residuals = (
-        casted_sorted_x.get_tensor(usage=TensorUsage.LHS_TRANS).checkpoint(
-            fc1_quantizer_set.x
-        ),
-        casted_wi.get_tensor(usage=TensorUsage.RHS_TRANS).checkpoint(
-            fc1_quantizer_set.kernel
-        ),
+        casted_sorted_x.get_tensor(usage=TensorUsage.LHS_TRANS).checkpoint(fc1_quantizer_set.x),
+        casted_wi.get_tensor(usage=TensorUsage.RHS_TRANS).checkpoint(fc1_quantizer_set.kernel),
         gate_proj_out,
         up_proj_out,
-        casted_intermediate.get_tensor(usage=TensorUsage.LHS_TRANS).checkpoint(
-            fc2_quantizer_set.x
-        ),
-        casted_wo.get_tensor(usage=TensorUsage.RHS_TRANS).checkpoint(
-            fc2_quantizer_set.kernel
-        ),
+        casted_intermediate.get_tensor(usage=TensorUsage.LHS_TRANS).checkpoint(fc2_quantizer_set.x),
+        casted_wo.get_tensor(usage=TensorUsage.RHS_TRANS).checkpoint(fc2_quantizer_set.kernel),
         group_sizes_2d,
     )
     return expert_outputs_3d, residuals
@@ -629,7 +615,8 @@ def _moe_fwd_rule(
         recv_pr = int(recv_capacity_per_rank)
         if recv_pr <= 0 or recv_pr % _ALIGN_SIZE != 0:
             raise ValueError(
-                f"recv_capacity_per_rank must be a positive multiple of {_ALIGN_SIZE}, got {recv_pr}"
+                f"recv_capacity_per_rank must be a positive multiple of {_ALIGN_SIZE}, got"
+                f" {recv_pr}"
             )
 
     _te_ep_assert_compatible_bootstrap(
@@ -977,6 +964,7 @@ def _moe_bwd_rule(
         ctx.local_group_sizes,
         ctx.recv_topk_weights,
     ]
+
     def _ffn_bwd_body(*args):
         grads = _ffn_bwd_per_shard(
             *args,
@@ -1039,7 +1027,9 @@ def _moe_bwd_rule(
         in_specs=bwd_in_specs,
         out_specs=bwd_out_specs,
         check_rep=False,
-    )(*bwd_in_args)
+    )(
+        *bwd_in_args
+    )
 
     d_recv_w_total = d_recv_w_from_combine + d_recv_w_from_intermediate
 

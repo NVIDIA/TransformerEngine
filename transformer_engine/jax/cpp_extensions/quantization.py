@@ -1300,13 +1300,11 @@ def grouped_quantize(
         # groups. The recipe is identical for every group, and no per-group
         # state is selected here, so the global descriptor only needs to cover
         # the local operation.
-        assert n_groups <= n_quantizers, (
-            f"local n_groups={n_groups} exceeds global n_quantizers={n_quantizers}"
-        )
+        assert (
+            n_groups <= n_quantizers
+        ), f"local n_groups={n_groups} exceeds global n_quantizers={n_quantizers}"
     else:
-        assert n_groups == n_quantizers, (
-            f"n_groups={n_groups} != n_quantizers={n_quantizers}"
-        )
+        assert n_groups == n_quantizers, f"n_groups={n_groups} != n_quantizers={n_quantizers}"
     scale = jnp.ones((n_groups,), jnp.float32)
 
     if quantizer.scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING:

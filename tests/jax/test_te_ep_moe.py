@@ -198,16 +198,10 @@ def _compute_worst_case_recv_pr():
     tokens_per_ep_group = EP_SIZE * max_tokens_per_rank
     max_local_assignments = tokens_per_ep_group * min(TOPK, num_local_experts)
     max_nonempty_experts = min(num_local_experts, max_local_assignments)
-    padded_total_bound = (
-        max_local_assignments + (_ALIGN_SIZE - 1) * max_nonempty_experts
-    )
-    aligned_total_bound = (
-        (padded_total_bound + _ALIGN_SIZE - 1) // _ALIGN_SIZE
-    ) * _ALIGN_SIZE
+    padded_total_bound = max_local_assignments + (_ALIGN_SIZE - 1) * max_nonempty_experts
+    aligned_total_bound = ((padded_total_bound + _ALIGN_SIZE - 1) // _ALIGN_SIZE) * _ALIGN_SIZE
     per_expert_bound = (
-        num_local_experts
-        * ((tokens_per_ep_group + _ALIGN_SIZE - 1) // _ALIGN_SIZE)
-        * _ALIGN_SIZE
+        num_local_experts * ((tokens_per_ep_group + _ALIGN_SIZE - 1) // _ALIGN_SIZE) * _ALIGN_SIZE
     )
     return min(per_expert_bound, aligned_total_bound)
 
@@ -232,9 +226,7 @@ def mesh():
     # Eager bootstrap: ep_bootstrap does a host-side NCCL UID allgather
     # and cannot run from inside jax.jit. Sized to the worst-case recv_pr
     # across _CONFIGS so every parametrized config is bootstrap-compatible.
-    with mesh_obj, global_shard_guard(
-        MeshResource(ep_resource=EP_AXIS, fsdp_resource=FSDP_AXIS)
-    ):
+    with mesh_obj, global_shard_guard(MeshResource(ep_resource=EP_AXIS, fsdp_resource=FSDP_AXIS)):
         ep_bootstrap(
             world_size=num_procs,
             rank=jax.process_index(),
@@ -323,9 +315,7 @@ def _pure_jax_moe_reference(
         raise ValueError(f"Unsupported score_function={score_function!r}")
 
     routing_weights_full = jnp.zeros((T, num_experts), dtype=jnp.float32)
-    routing_weights_full = routing_weights_full.at[
-        jnp.arange(T)[:, None], top_indices
-    ].set(weights)
+    routing_weights_full = routing_weights_full.at[jnp.arange(T)[:, None], top_indices].set(weights)
 
     # FFN. ``apply_topk_weights_early`` is a fusion knob that doesn't
     # change the math (wo is linear), so the reference is identical for
@@ -338,9 +328,7 @@ def _pure_jax_moe_reference(
     # storing higher precision than the consumer (wo) GEMM buys nothing.
     intermediate = jax.nn.silu(layer_w0) * layer_w1
     expert_out = jnp.einsum("tem,emh->teh", intermediate, wo)  # [T, E, H]
-    output_2d = jnp.einsum(
-        "te,teh->th", routing_weights_full.astype(x.dtype), expert_out
-    )
+    output_2d = jnp.einsum("te,teh->th", routing_weights_full.astype(x.dtype), expert_out)
     output = output_2d.reshape(B, S, H).astype(x.dtype)
 
     if aux_loss_coeff > 0.0:
@@ -355,9 +343,7 @@ def _pure_jax_moe_reference(
         else:  # sigmoid
             aux_scores = jax.nn.sigmoid(logits)
             if K > 1:
-                aux_scores = aux_scores / (
-                    aux_scores.sum(axis=-1, keepdims=True) + 1e-20
-                )
+                aux_scores = aux_scores / (aux_scores.sum(axis=-1, keepdims=True) + 1e-20)
         routing_map = (routing_weights_full > 0).astype(jnp.int32)
         tokens_per_expert = jnp.sum(routing_map, axis=0)  # [E]
         sum_probs_per_expert = jnp.sum(aux_scores, axis=0)  # [E]
@@ -607,9 +593,7 @@ class TestTeEpMoeForward:
     @pytest.mark.parametrize("config", _CONFIGS)
     @pytest.mark.parametrize("quantization", _QUANTIZATION_CASES)
     def test_forward(self, mesh, config, quantization):
-        block = _make_block(
-            **config, quantization_recipe=_quantization_recipe(quantization)
-        )
+        block = _make_block(**config, quantization_recipe=_quantization_recipe(quantization))
         x = _make_inputs(jax.random.PRNGKey(0))
         variables, output, aux = _init_apply(block, mesh, x, jax.random.PRNGKey(1))
 
@@ -650,9 +634,7 @@ class TestTeEpMoeBackward:
     @pytest.mark.parametrize("config", _CONFIGS)
     @pytest.mark.parametrize("quantization", _QUANTIZATION_CASES)
     def test_backward(self, mesh, config, quantization):
-        block = _make_block(
-            **config, quantization_recipe=_quantization_recipe(quantization)
-        )
+        block = _make_block(**config, quantization_recipe=_quantization_recipe(quantization))
         x = _make_inputs(jax.random.PRNGKey(2))
         variables, _, _ = _init_apply(block, mesh, x, jax.random.PRNGKey(3))
         grads_te, grad_x_te = _grad_step(block, variables, mesh, x)
@@ -688,12 +670,8 @@ class TestTeEpMoeBackward:
         for name in ("gate_kernel", "wi", "wo"):
             # Per-tensor: finite + non-zero + parity in one pass.
             g_te = _to_global_numpy(_unwrap(grads_te["params"][name]), mesh)
-            assert np.all(
-                np.isfinite(g_te)
-            ), f"{name} grad has NaN/Inf [config={config}]"
-            assert np.any(
-                g_te != 0.0
-            ), f"{name} grad identically zero [config={config}]"
+            assert np.all(np.isfinite(g_te)), f"{name} grad has NaN/Inf [config={config}]"
+            assert np.any(g_te != 0.0), f"{name} grad identically zero [config={config}]"
             atol, rtol = (
                 (GRAD_GATE_ATOL, GRAD_GATE_RTOL)
                 if name == "gate_kernel"
@@ -705,8 +683,7 @@ class TestTeEpMoeBackward:
                 atol=atol,
                 rtol=rtol,
                 err_msg=(
-                    f"grad parity breach on {name} "
-                    f"[config={config}, quantization={quantization}]"
+                    f"grad parity breach on {name} [config={config}, quantization={quantization}]"
                 ),
             )
 
@@ -780,9 +757,7 @@ class TestTeEpMoeAuxLoss:
         # wired.
         aux_grads = _grad_aux_only(block, variables, mesh, x)
         g_gate = np.asarray(
-            jax.device_get(
-                _unwrap(aux_grads["params"]["gate_kernel"]).addressable_data(0)
-            )
+            jax.device_get(_unwrap(aux_grads["params"]["gate_kernel"]).addressable_data(0))
         )
         assert np.all(np.isfinite(g_gate)), "gate grad NaN/Inf under aux-only loss"
         assert np.any(g_gate != 0.0), "aux bwd should propagate to gate_kernel"
@@ -795,8 +770,6 @@ class TestTeEpMoeAuxLoss:
         variables, _, _ = _init_apply(block, mesh, x, jax.random.PRNGKey(23))
         grads, _ = _grad_step(block, variables, mesh, x, include_aux=True)
         for name in ("gate_kernel", "wi", "wo"):
-            g_local = np.asarray(
-                jax.device_get(_unwrap(grads["params"][name]).addressable_data(0))
-            )
+            g_local = np.asarray(jax.device_get(_unwrap(grads["params"][name]).addressable_data(0)))
             assert np.all(np.isfinite(g_local)), f"{name} grad NaN/Inf under main+aux"
             assert np.any(g_local != 0.0), f"{name} grad zero under main+aux"
