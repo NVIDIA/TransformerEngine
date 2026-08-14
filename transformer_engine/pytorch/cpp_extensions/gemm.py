@@ -959,14 +959,13 @@ def general_grouped_gemm(
     else:
         bias_dtype = TE_DType[torch.bfloat16]
 
-    if any(_is_nvfp4_row_scaled_tensor(tensor) for tensor in A):
-        raise NotImplementedError("Row-scaled NVFP4 grouped GEMM does not support row-scaled A.")
-
     # Determine whether to repeatedly call general_gemm
     use_general_gemm_impl = False
     if isinstance(quantization_params[0], DebugQuantizer):
         use_general_gemm_impl = True
-    elif any(_is_nvfp4_row_scaled_tensor(tensor) for tensor in B):
+    elif any(
+        _is_nvfp4_row_scaled_tensor(tensor) for tensor in itertools.chain(A, B)
+    ):
         use_general_gemm_impl = True
     elif any(
         isinstance(t, NVFP4TensorStorage) and t._scale_dtype == DType.kFloat8UE5M3

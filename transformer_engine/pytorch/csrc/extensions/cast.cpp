@@ -389,10 +389,12 @@ py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const 
       break;
     }
     case GroupedQuantizationMode::MXFP8_GROUPED_QUANTIZE: {
+      auto *mxfp8_quantizer_cpp = static_cast<MXFP8Quantizer *>(quantizer_cpp.get());
       QuantizationConfigWrapper quant_config_cpp;
       if (noop_flag_cpp.has_value()) {
         quant_config_cpp.set_noop_tensor(noop_flag_cpp->data());
       }
+      quant_config_cpp.set_mxfp8_2d_quantization(mxfp8_quantizer_cpp->with_2d_quantization);
       NVTE_SCOPED_GIL_RELEASE({
         nvte_group_quantize(grouped_input_tensor.data(), grouped_output_tensor_cpp.data(),
                             quant_config_cpp, at::cuda::getCurrentCUDAStream());
@@ -1124,8 +1126,6 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
   const auto columnwise_usage = quantizer_cpp_list[0]->columnwise_usage;
   if (row_scaled_nvfp4) {
     NVTE_CHECK(rowwise_usage, "Row-scaled NVFP4 bulk allocation requires rowwise usage.");
-    NVTE_CHECK(!columnwise_usage,
-               "Row-scaled NVFP4 bulk allocation does not support columnwise usage.");
   }
   const auto scaling_mode = quantizer_cpp_list[0]->get_scaling_mode();
   const auto fp4_dtype = quantizer_cpp_list[0]->dtype;
@@ -1278,7 +1278,7 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
     alignments.insert(alignments.end(), num_tensors, 16);
     if (!disable_second_level_scale) {
       for (size_t i = 0; i < num_tensors; ++i) {
-        shapes.emplace_back(amax_shape(columnwise_data_shapes[i]));
+        shapes.emplace_back(amax_shape(columnwise_data_shapes[i], row_scaled_nvfp4));
       }
       dtypes.insert(dtypes.end(), num_tensors, torch::kFloat32);
       alignments.insert(alignments.end(), num_tensors, 16);
@@ -1343,7 +1343,7 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
                                                 columnwise_scale_shapes[i]);
         if (!disable_second_level_scale) {
           tensor_wrapper.set_columnwise_amax(amax_columnwise_list[i].data_ptr(), DType::kFloat32,
-                                             std::vector<size_t>{1});
+                                             getTensorShape(amax_columnwise_list[i]));
         }
       }
       tensor_wrapper.set_with_gemm_swizzled_scales(with_gemm_swizzled_scales);

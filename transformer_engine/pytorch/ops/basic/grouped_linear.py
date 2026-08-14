@@ -208,11 +208,11 @@ class GroupedLinear(BasicOperation):
         delay_wgrad_compute: bool = False,
         scale_bias: bool = False,
     ) -> None:
-        super().__init__()
-
+        # Decide before BasicOperation.__init__ sizes _extra_input_channels.
         self._scale_bias: bool = scale_bias and bias
         if self._scale_bias:
             self.num_extra_inputs = 2
+        super().__init__()
 
         self.wgrad_store = WeightGradStore(delay_wgrad_compute)
         self.wgrad_accumulation_and_reduce_hooks: list = []
@@ -1004,7 +1004,7 @@ class GroupedLinear(BasicOperation):
         prev_op_grad_output_quantizer: Optional[Quantizer],
         next_op_input_quantizer: Optional[Quantizer],
         basic_op_kwargs: list[dict[str, Any]],
-    ) -> tuple[torch.Tensor, Iterable[Iterable[torch.Tensor]]]:
+    ) -> tuple[torch.Tensor, Sequence[Sequence[torch.Tensor]]]:
         num_groups = self.num_groups
         weight_param = self.weight if self.single_grouped_weight else self.weight0
         device = weight_param.device
