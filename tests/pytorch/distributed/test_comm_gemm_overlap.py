@@ -112,9 +112,7 @@ def _run_gemm_with_overlap(
                 )
             test_cmd.append("--use-cublasmp")
 
-    result = subprocess.run(
-        test_cmd, env=os.environ, capture_output=True, text=True, check=False
-    )
+    result = subprocess.run(test_cmd, env=os.environ, capture_output=True, text=True, check=False)
     _assert_subprocess_succeeded(result)
 
 
@@ -173,9 +171,7 @@ def _run_layer_with_overlap(
         # NVTE_ALLOW_NONDETERMINISTIC_ALGO=0, so disable it entirely for this test.
         test_env["NVTE_FUSED_ATTN"] = "0"
 
-    result = subprocess.run(
-        test_cmd, env=test_env, capture_output=True, text=True, check=False
-    )
+    result = subprocess.run(test_cmd, env=test_env, capture_output=True, text=True, check=False)
 
     _assert_subprocess_succeeded(result)
 
