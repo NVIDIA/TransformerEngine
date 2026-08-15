@@ -105,7 +105,7 @@ def _get_supported_versions(version_min, version_max):
     """
     Calculate version info based on min and max numbers
     """
-    return ">= " + str(version_min) + ", " + "<= " + str(version_max)
+    return ">= " + str(version_min) + ", " + "< " + str(version_max)
 
 
 def maybe_contiguous(tensor: torch.Tensor) -> torch.Tensor:
@@ -122,7 +122,7 @@ class FlashAttentionUtils:
     version = PkgVersion("0")
     version_required = PkgVersion("2.1.1")
     version_required_blackwell = PkgVersion("2.7.3")
-    max_version = PkgVersion("2.8.3")
+    max_version = PkgVersion("2.8.4")
     v2_plus = False
     v2_1_plus = False
     v2_3_plus = False
@@ -154,6 +154,11 @@ pip install flash-attn-4==4.0.0b11 nvidia-cutlass-dsl[cu13]"""
     # Set by backends.py if FA4 is installed; calls flash_attn.cute.interface._validate_head_dims
     # which raises AssertionError for unsupported (head_dim, head_dim_v) combinations.
     v4_validate_head_dims: Callable = None
+
+    @staticmethod
+    def is_version_supported(version: PkgVersion, minimum_version: PkgVersion) -> bool:
+        """Check whether a Flash Attention v2 version is supported."""
+        return minimum_version <= version < FlashAttentionUtils.max_version
 
     @staticmethod
     def set_flash_attention_version():
@@ -563,10 +568,10 @@ def get_attention_backend(
         if use_flash_attention_3 and FlashAttentionUtils.v3_is_installed:
             logger.debug("Disabling FlashAttention 3 for compute capability != sm90")
         use_flash_attention_3 = False
-    # FA4 supports SM80, SM90, SM100, SM120
-    if device_compute_capability < (8, 0):
+    # FA4 does not currently support SM8x.
+    if device_compute_capability < (9, 0):
         if use_flash_attention_4 and FlashAttentionUtils.v4_is_installed:
-            logger.debug("Disabling FlashAttention 4 for compute capability < sm80")
+            logger.debug("Disabling FlashAttention 4 for compute capability < sm90")
         use_flash_attention_4 = False
     # On SM90, prefer FA3 over FA4 when FA3 is available.
     # FA3 is more mature on Hopper; FA4's SM90 backward has limitations
@@ -994,6 +999,19 @@ def get_attention_backend(
                 head_dim_qk,
                 head_dim_v,
                 device_compute_capability[0] * 10 + device_compute_capability[1],
+            )
+            use_flash_attention_4 = False
+        # FA4's validator currently accepts symmetric (512, 512) on SM100/SM110,
+        # but the generic forward kernel exceeds its TMEM allocation for that shape.
+        # Preserve the supported asymmetric (64, 512) MLA path while D512 support
+        # is completed upstream.
+        if (
+            use_flash_attention_4
+            and (10, 0) <= device_compute_capability < (12, 0)
+            and head_dim_qk == head_dim_v == 512
+        ):
+            logger.debug(
+                "Disabling FlashAttention 4 for unsupported symmetric head_dim=512 on SM100/SM110."
             )
             use_flash_attention_4 = False
         # flash-attn-4 4.0.0b11 validates (256, 256) on SM100, but its dedicated

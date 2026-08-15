@@ -300,10 +300,16 @@ class EpBuffer:
         )
         # Persistent tensor; keep resident if activation CPU offloading is on.
         mark_not_offload(self.handle_mem)
-        # Per-step recv-token total (device int64 [1]), written by ep_prepare.
+        # Per-step recv-token total (int64 [1]), written by ep_prepare.
         # Eager mode uses it to size the recv outputs; graph mode reads it after
         # replay to detect overflow past recv_capacity_per_rank.
-        self.total_recv_tokens = torch.empty(1, dtype=torch.int64, device=device)
+        if self.eager:
+            # Eager reads this on the host every dispatch. Pinned host memory lets the
+            # prepare kernel store the total directly to RAM (UVA), so the readback is a
+            # plain CPU load after one stream sync instead of a pageable D2H round trip.
+            self.total_recv_tokens = torch.empty(1, dtype=torch.int64, pin_memory=True)
+        else:
+            self.total_recv_tokens = torch.empty(1, dtype=torch.int64, device=device)
         mark_not_offload(self.total_recv_tokens)
         # Host mirror of total_recv_tokens, set by ep_prepare in eager mode.
         self._host_total_recv_tokens: Optional[int] = None
@@ -433,9 +439,10 @@ def ep_prepare(buffer: "EpBuffer", topk_idx: torch.Tensor) -> torch.Tensor:
     ``buffer.tokens_per_expert`` (int64, shape [num_local_experts]). topk_idx must
     be int32 or int64.
 
-    Also fills ``buffer.total_recv_tokens`` (device int64 [1]) with the per-step
-    recv total; eager mode mirrors it to the host to size the recv outputs, graph
-    mode reads it device-side to detect overflow.
+    Also fills ``buffer.total_recv_tokens`` (int64 [1]; pinned host memory in eager
+    mode, device tensor otherwise) with the per-step recv total; eager mode reads it
+    on the host to size the recv outputs, graph mode reads it device-side to detect
+    overflow.
     """
     torch.ops.transformer_engine_ep.prepare(
         buffer.handle_mem,
@@ -446,6 +453,10 @@ def ep_prepare(buffer: "EpBuffer", topk_idx: torch.Tensor) -> torch.Tensor:
         buffer.total_recv_tokens,
     )
     if buffer.eager:
+        # total_recv_tokens is pinned host memory stored by the prepare kernel; a CPU
+        # tensor's .item() does not synchronize, so sync the stream first, then the
+        # read is a free CPU load (no D2H copy).
+        torch.cuda.current_stream().synchronize()
         buffer._host_total_recv_tokens = int(buffer.total_recv_tokens.item())
     return buffer.tokens_per_expert
 
