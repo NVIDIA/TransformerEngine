@@ -43,6 +43,14 @@ DTYPE = torch.bfloat16
 QKV_FORMAT = "bshd"
 QKV_LAYOUT = "bshd_bshd_bshd"
 
+# Derived exactly as DotProductAttention derives it, because the query below has to ask about
+# the configuration the execution phases will run: deterministic is part of the backward cache
+# key, so a query that assumed the default would build a graph the execution then misses.
+DETERMINISTIC = (
+    not bool(int(os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1")))
+    or torch.are_deterministic_algorithms_enabled()
+)
+
 
 def mark_phase(name: str) -> None:
     """Delimit the cache events of one phase from the next one's.
@@ -59,7 +67,7 @@ def query(config: ModelConfig) -> bool:
     took the configuration. This is the call that populates the cache without executing
     anything."""
     available_backends, _, fused_attn_backends = get_available_attention_backends(
-        config, qkv_dtype=DTYPE, qkv_layout=QKV_LAYOUT
+        config, qkv_dtype=DTYPE, qkv_layout=QKV_LAYOUT, deterministic=DETERMINISTIC
     )
     _, fused_attn_supported, _ = available_backends
     return fused_attn_supported and len(fused_attn_backends) > 0

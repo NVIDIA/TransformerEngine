@@ -297,6 +297,17 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend_v2(NVTEFusedAttnConfig confi
     return NVTE_Fused_Attn_Backend::NVTE_No_Backend;
   }
 
+  // Ragged Q/KV requires sm90+. cuDNN's check_support accepts them below that, but the only
+  // graph we can build there is the dense max_seqlen one -- supports_packed_ragged_graph() is
+  // false, so SDPA_backward never gets max_total_seq_len_q/kv and its dQ/dK/dV come back wrong.
+  // A wrong-result rejection like this one has to be stated here; check_support answers whether
+  // cuDNN can run the graph, not whether the graph computes what we asked for.
+  if (set_message_if((cfg.is_ragged_q || cfg.is_ragged_kv) &&
+                         cuda::sm_arch(cuda::current_device()) < 90,
+                     message, "Ragged (THD) Q or KV requires compute capability 9.0 or higher.")) {
+    return NVTE_Fused_Attn_Backend::NVTE_No_Backend;
+  }
+
   // TE's cuDNN fused-attention graph does not represent pre-scale bias.
   if (set_message_if(cfg.bias_type == NVTE_Bias_Type::NVTE_PRE_SCALE_BIAS, message,
                      "Fused attention does not support pre-scale bias.")) {
