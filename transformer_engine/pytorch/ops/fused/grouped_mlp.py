@@ -1445,7 +1445,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                 if kernel_getter is None or kernel_getter() is None:
                     # Kernel is not available
                     pass
-                elif not activation_is_srelu:
+                elif self._cudnn_act_func == "swiglu":
                     kernel_impl = "gemm_act_rht_quant"
             elif fc2_input_quantizer.with_post_rht_amax:
                 # Use GEMM + act + RHT + amax kernel if available
@@ -1473,6 +1473,13 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             "current_stream": current_stream,
             "use_dynamic_sched": True,
         }
+        if (
+            isinstance(fc1_input_quantizer, NVFP4Quantizer)
+            and fc1_input_quantizer.scale_dtype == DType.kFloat8UE5M3
+        ):
+            # PyTorch does not have a UE5M3 dtype, so override the
+            # tensor dtype when using UE5M3 scales
+            fc1_activation_kwargs["sf_fp8_dtype_override"] = "e5m3"
 
         # Kernel arguments based on kernel implementation
         if kernel_impl == "gemm_act":
@@ -1488,26 +1495,23 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             fc1_activation_kwargs["d_dtype"] = torch.float4_e2m1fn_x2
             fc1_activation_kwargs["rht_dtype"] = torch.float4_e2m1fn_x2
 
-        # Miscellaneous kernel arguments
+        # Kernel arguments based on activation
         if activation_is_srelu:
             if kernel_impl in ("gemm_act_rht_amax", "gemm_act_rht_quant"):
                 fc1_activation_kwargs["act_func"] = "srelu"
         elif self._cudnn_act_func is not None:
             fc1_activation_kwargs["act_func"] = self._cudnn_act_func
-        if (
-            isinstance(fc1_input_quantizer, NVFP4Quantizer)
-            and fc1_input_quantizer.scale_dtype == DType.kFloat8UE5M3
-        ):
-            # PyTorch does not have a UE5M3 dtype, so override the
-            # tensor dtype when using UE5M3 scales
-            fc1_activation_kwargs["sf_fp8_dtype_override"] = "e5m3"
-        if self._pass_geglu_runtime_params:
-            fc1_activation_kwargs.update(
-                linear_offset=self._cudnn_linear_offset,
-                geglu_alpha=self._cudnn_geglu_alpha,
-                glu_clamp_max=self._cudnn_glu_clamp_max,
-                glu_clamp_min=self._cudnn_glu_clamp_min,
-            )
+        if self._cudnn_act_func == "geglu" and self._pass_geglu_runtime_params:
+            if kernel_impl == "gemm_act_rht_quant":
+                fc1_activation_kwargs["glu_alpha"] = self._cudnn_geglu_alpha
+                fc1_activation_kwargs["glu_limit"] = self._cudnn_glu_clamp_max
+            else:
+                fc1_activation_kwargs.update(
+                    linear_offset=self._cudnn_linear_offset,
+                    geglu_alpha=self._cudnn_geglu_alpha,
+                    glu_clamp_max=self._cudnn_glu_clamp_max,
+                    glu_clamp_min=self._cudnn_glu_clamp_min,
+                )
 
         if fc1_op.single_grouped_weight:
             # Clone and swizzle scales for GEMM.
@@ -1651,11 +1655,11 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             elif kernel_impl == "gemm_act_rht_quant":
                 # Unpack NVFP4 output
                 fc2_in_row_data = fc1_kernel_out["d_tensor"]
-                fc2_in_row_data = fc2_in_row_data.view(in_shape[0], fc2_weight_shape[1])
-                fc2_in_row_scale = fc1_kernel_out["sfd_row_tensor"]
+                fc2_in_row_data = fc2_in_row_data.view(in_shape[0], fc2_weight_shape[1] // 2)
+                fc2_in_row_scale = fc1_kernel_out["sfd_tensor"]
                 fc2_in_row_scale = fc2_in_row_scale.permute(5, 2, 4, 0, 1, 3)
                 fc2_in_col_data = fc1_kernel_out["rht_tensor"]
-                fc2_in_col_data = fc2_in_col_data.view(in_shape[0], fc2_weight_shape[1])
+                fc2_in_col_data = fc2_in_col_data.view(fc2_weight_shape[1], in_shape[0] // 2)
                 fc2_in_col_scale = fc1_kernel_out["sfrht_tensor"]
                 fc2_in_col_scale = fc2_in_col_scale.permute(5, 2, 4, 0, 1, 3)
                 grouped_fc2_x = GroupedTensorStorage(
