@@ -79,7 +79,7 @@ constexpr uint THREADS_PER_BANK = TOTAL_BANKS_WIDTH / SCALE_DIM_X;  // 4 = 128 /
 
 template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
           float (*OP)(float, const ParamOP &), typename IType, typename OType, bool ROWWISE_SCALING,
-          bool WITH_GEMM_SWIZZLED_SCALES>
+          bool WITH_GEMM_SWIZZLED_SCALES, bool kIs2DBlockScaling>
 __device__ __forceinline__ void process_colwise_stage(
     const size_t buff, const int stage, const size_t tid_X_colwise,
     const size_t scales_offset_Y_colwise, const size_t scales_offset_X_colwise,
@@ -163,8 +163,12 @@ __device__ __forceinline__ void process_colwise_stage(
             "+r"(reinterpret_cast<uint32_t &>(thread_amax_2x))
           : "r"(src_smem_ptr), "r"(IN_SHMEM_STRIDE));
     }
-    const float thread_amax =
+    float thread_amax =
         static_cast<float>(__hmax(__habs(thread_amax_2x.x), __habs(thread_amax_2x.y)));
+
+    if constexpr (kIs2DBlockScaling) {
+      thread_amax = warp_reduce_max_broadcast(thread_amax);
+    }
 
     const e8m0_t biased_exponent =
         ptx::float_to_e8m0(thread_amax * Quantized_Limits<OType>::max_norm_rcp);
@@ -238,6 +242,10 @@ __device__ __forceinline__ void process_colwise_stage(
       }
     }
 
+    if constexpr (kIs2DBlockScaling) {
+      thread_amax = warp_reduce_max_broadcast(thread_amax);
+    }
+
     const e8m0_t biased_exponent =
         ptx::float_to_e8m0(thread_amax * Quantized_Limits<OType>::max_norm_rcp);
     // OOB padded region needs to be zeroed out.
@@ -262,7 +270,7 @@ __device__ __forceinline__ void process_colwise_stage(
 
 template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
           float (*OP)(float, const ParamOP &), typename IType, typename OType, bool COLWISE_SCALING,
-          bool WITH_GEMM_SWIZZLED_SCALES>
+          bool WITH_GEMM_SWIZZLED_SCALES, bool kIs2DBlockScaling>
 __device__ __forceinline__ void process_rowwise_stage(
     const size_t buff, const size_t stage_offset_Y, const size_t thread_offset_Y_rowwise,
     const size_t thread_offset_X_rowwise, const int bank_group,
@@ -290,6 +298,8 @@ __device__ __forceinline__ void process_rowwise_stage(
   auto &sOutRowwise = *reinterpret_cast<OType3D *>(sOutRowwise_ptr);
 
   const size_t i = thread_offset_Y_rowwise;
+  const size_t tid_Y_rowwise = thread_offset_Y_rowwise;
+  const size_t tid_X_rowwise = thread_offset_X_rowwise / SCALE_DIM_X;
 
   float thread_amax = 0.0f;
   float rInCompute[SCALE_DIM_X];
@@ -388,8 +398,31 @@ __device__ __forceinline__ void process_rowwise_stage(
     }
   }
 
-  const e8m0_t biased_exponent =
-      ptx::float_to_e8m0(thread_amax * Quantized_Limits<OType>::max_norm_rcp);
+  e8m0_t biased_exponent;
+  if constexpr (kIs2DBlockScaling) {
+    using AMax2DType = std::conditional_t<NON_FP32_CAST_ONLY, IType, float>;
+    __shared__ e8m0_t block_scales_2d[THREADS_X];
+    __shared__ AMax2DType block_amax_2d[THREADS_X * THREADS_Y];
+    block_amax_2d[tid_X_rowwise * THREADS_Y + tid_Y_rowwise] = static_cast<AMax2DType>(thread_amax);
+    __syncthreads();
+    if (tid_Y_rowwise == 0) {
+      AMax2DType amax_2d = static_cast<AMax2DType>(0.0f);
+#pragma unroll
+      for (int i = 0; i < THREADS_Y; ++i) {
+        if constexpr (std::is_same_v<AMax2DType, float>) {
+          amax_2d = fmaxf(amax_2d, block_amax_2d[tid_X_rowwise * THREADS_Y + i]);
+        } else {
+          amax_2d = __hmax(amax_2d, block_amax_2d[tid_X_rowwise * THREADS_Y + i]);
+        }
+      }
+      block_scales_2d[tid_X_rowwise] =
+          ptx::float_to_e8m0(static_cast<float>(amax_2d) * Quantized_Limits<OType>::max_norm_rcp);
+    }
+    __syncthreads();
+    biased_exponent = block_scales_2d[tid_X_rowwise];
+  } else {
+    biased_exponent = ptx::float_to_e8m0(thread_amax * Quantized_Limits<OType>::max_norm_rcp);
+  }
   const size_t stage_scales_offset_Y = scales_offset_Y_rowwise + stage_offset_Y;
   const size_t stage_scales_offset_X = scales_offset_X_rowwise;
 
@@ -448,7 +481,8 @@ __device__ __forceinline__ void process_rowwise_stage(
 
 template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
           float (*OP)(float, const ParamOP &), typename IType, typename OType,
-          ScalingType SCALING_TYPE, bool WITH_GEMM_SWIZZLED_SCALES, ShapeRepresentation SHAPE_REP>
+          ScalingType SCALING_TYPE, bool WITH_GEMM_SWIZZLED_SCALES, bool kIs2DBlockScaling,
+          ShapeRepresentation SHAPE_REP>
 __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel(
     const __grid_constant__ CUtensorMap tensor_map_input_static,
     const __grid_constant__ CUtensorMap tensor_map_act_input_static,
@@ -687,7 +721,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
       const size_t buff = buff_in;
       if constexpr (COLWISE_SCALING) {
         process_colwise_stage<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType, ROWWISE_SCALING,
-                              WITH_GEMM_SWIZZLED_SCALES>(
+                              WITH_GEMM_SWIZZLED_SCALES, kIs2DBlockScaling>(
             buff, stage, tid_X_colwise, scales_offset_Y_colwise, scales_offset_X_colwise,
             scale_stride_colwise, tensor_base_for_scales, tensor_rows_for_scales, cols, sIn_ptr,
             sActIn_ptr, sCachedAct_ptr, sOutColwise_ptr, scales_colwise, partial_dbias_colwise);
@@ -695,7 +729,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
 
       if constexpr (ROWWISE_SCALING) {
         process_rowwise_stage<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType, COLWISE_SCALING,
-                              WITH_GEMM_SWIZZLED_SCALES>(
+                              WITH_GEMM_SWIZZLED_SCALES, kIs2DBlockScaling>(
             buff, stage_offset_Y, thread_offset_Y_rowwise, thread_offset_X_rowwise, bank_group,
             scales_offset_Y_rowwise, scales_offset_X_rowwise, scale_stride_rowwise,
             rowwise_scale_is_within_bounds, cols, sIn_ptr, sActIn_ptr, sCachedAct_ptr,
@@ -845,6 +879,7 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
   const size_t block_size = THREADS_PER_CHUNK;
 
   const bool with_gemm_swizzled_scales = output->with_gemm_swizzled_scales;
+  const bool use_2d_quantization = quant_config != nullptr && quant_config->mxfp8_2d_quantization;
 
   // Logical shape of a tensor with varying all dims is [1, M*K]
   if (shape_rep != ShapeRepresentation::VARYING_BOTH_DIMS) {
@@ -981,20 +1016,25 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
                               last_dims_ptr, use_rowwise_scaling, use_colwise_scaling, IS_DACT);
                         }
 
-                        auto kernel =
-                            group_quantize_mxfp8_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP,
-                                                        IType, OType, SCALING_TYPE,
-                                                        WITH_GEMM_SWIZZLED_SCALES, SHAPE_REP>;
+                        TRANSFORMER_ENGINE_SWITCH_CONDITION(
+                            use_2d_quantization, kIs2DBlockScaling, {
+                              auto kernel =
+                                  group_quantize_mxfp8_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP,
+                                                              OP, IType, OType, SCALING_TYPE,
+                                                              WITH_GEMM_SWIZZLED_SCALES,
+                                                              kIs2DBlockScaling, SHAPE_REP>;
 
-                        NVTE_CHECK_CUDA(cudaFuncSetAttribute(
-                            kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size));
+                              NVTE_CHECK_CUDA(cudaFuncSetAttribute(
+                                  kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                  dshmem_size));
 
-                        kernel<<<grid, block_size, dshmem_size, stream>>>(
-                            tensor_map_input, tensor_map_act_input, tensor_map_output_rowwise,
-                            tensor_map_output_colwise, num_tensors, first_logical_dim,
-                            last_logical_dim, offsets_ptr, first_dims_ptr, last_dims_ptr,
-                            scales_rowwise_ptr, scales_colwise_ptr, noop_ptr, workspace_ptr,
-                            amax_ptr, work_blocks_X, work_blocks_Y);
+                              kernel<<<grid, block_size, dshmem_size, stream>>>(
+                                  tensor_map_input, tensor_map_act_input, tensor_map_output_rowwise,
+                                  tensor_map_output_colwise, num_tensors, first_logical_dim,
+                                  last_logical_dim, offsets_ptr, first_dims_ptr, last_dims_ptr,
+                                  scales_rowwise_ptr, scales_colwise_ptr, noop_ptr, workspace_ptr,
+                                  amax_ptr, work_blocks_X, work_blocks_Y);
+                            });
 
                         if constexpr (IS_DBIAS) {
                           common::grouped_reduce_dbias<IType>(

@@ -144,6 +144,7 @@ def check_grouped_tensor_mxfp8_versus_reference(
     return_transpose: bool,
     split_sections: list[int],
     optimize_for_gemm: bool = False,
+    with_2d_quantization: bool = False,
 ) -> None:
 
     te_dtype = te.DType.kFloat8E4M3
@@ -166,6 +167,7 @@ def check_grouped_tensor_mxfp8_versus_reference(
             fp8_dtype=te_dtype,
             rowwise=return_rowwise,
             columnwise=return_transpose,
+            with_2d_quantization=with_2d_quantization,
         )
         for _ in range(len(split_sections))
     ]
@@ -335,6 +337,30 @@ def check_grouped_tensor_mxfp8_with_paged_stashing(
                         split_sections[i], N, x_sx_t_ref_i, columnwise=True
                     )
                 torch.testing.assert_close(x_sx_t_i, x_sx_t_ref_i, atol=0.0, rtol=0.0)
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.parametrize("quantize_mode", ["rowwise_only", "both_directions", "columnwise_only"])
+@pytest.mark.parametrize(
+    "optimize_for_gemm", [True, False], ids=["optimize_for_gemm", "no_optimize_for_gemm"]
+)
+def test_grouped_tensor_mxfp8_2d_quantization_versus_reference(
+    quantize_mode: str,
+    optimize_for_gemm: bool,
+) -> None:
+    """Grouped MXFP8 should match independent 2D quantization of each tensor."""
+    return_rowwise = quantize_mode != "columnwise_only"
+    return_transpose = quantize_mode != "rowwise_only"
+    check_grouped_tensor_mxfp8_versus_reference(
+        x_dtype=torch.bfloat16,
+        M=1024,
+        N=256,
+        return_rowwise=return_rowwise,
+        return_transpose=return_transpose,
+        split_sections=[256, 256, 256, 256],
+        optimize_for_gemm=optimize_for_gemm,
+        with_2d_quantization=True,
+    )
 
 
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
