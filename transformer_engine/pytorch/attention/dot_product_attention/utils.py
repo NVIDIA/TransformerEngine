@@ -384,6 +384,22 @@ def _get_fused_attn_backend(
     )
 
 
+def is_thd_mask_type_padding_supported() -> bool:
+    """Whether mixed THD masks can use the inter-sequence-padding implementation.
+
+    FlashAttention 3 is the FlashAttention backend that supports padding between
+    sequences, and TE only enables it on Hopper (SM90). Keep this capability
+    selection next to the rest of the attention backend architecture filters so
+    callers can fall back without exposing a hardware-specific API.
+    """
+    return (
+        get_device_compute_capability() == (9, 0)
+        and FlashAttentionUtils.v3_is_installed
+        and bool(int(os.environ.get("NVTE_FLASH_ATTN", "1")))
+        and bool(int(os.environ.get("NVTE_FLASH_ATTN_V3", "1")))
+    )
+
+
 def get_attention_backend(
     attention_params: AttentionParams = None,
 ):
