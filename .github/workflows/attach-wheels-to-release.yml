@@ -79,6 +79,7 @@ jobs:
               "cuda-version": ["12.9.1"], 
               "cudnn-version": ["9"], 
               "cxx11_abi": ["TRUE"],
+              "smoke-test": ["false"],
               "include": [
                 {
                   "os": "ubuntu-22.04",
@@ -87,7 +88,8 @@ jobs:
                   "torch-version": "2.11.0",
                   "cuda-version": "13.0.0",
                   "cudnn-version": "9",
-                  "cxx11_abi": "TRUE"
+                  "cxx11_abi": "TRUE",
+                  "smoke-test": "true"
                 },
                 {
                   "os": "ubuntu-22.04-arm",
@@ -96,7 +98,8 @@ jobs:
                   "torch-version": "2.11.0",
                   "cuda-version": "13.0.0",
                   "cudnn-version": "9",
-                  "cxx11_abi": "TRUE"
+                  "cxx11_abi": "TRUE",
+                  "smoke-test": "true"
                 }
               ]
             }' | jq -rc)
@@ -171,6 +174,7 @@ jobs:
           torch-version: ${{ matrix.torch-version }}
           cxx11_abi: ${{ matrix.cxx11_abi }}
           aarch: ${{ matrix.os == 'ubuntu-22.04' && 'x86_64' || 'sbsa' }}
+          smoke-test: ${{ matrix.smoke-test || 'false' }}
         env:
           NVTE_FRAMEWORK: pytorch
           MAX_JOBS: 1
@@ -184,71 +188,6 @@ jobs:
           upload_url: ${{ needs.pre-flight.outputs.release-assets-url }}
           asset_path: ./transformer_engine/pytorch/dist/${{ steps.build-pytorch-wheel.outputs.wheel_name }}
           asset_name: ${{ steps.build-pytorch-wheel.outputs.wheel_name }}
-          asset_content_type: application/*
-
-  build_core_wheel:
-    name: Build Core Wheel (ubuntu-22.04-arm, CUDA 13)
-    runs-on: ubuntu-22.04-arm
-    needs: pre-flight
-    if: ${{ github.event_name == 'release' || inputs.ngc-image == '' }}
-    steps:
-      - name: 'Checkout'
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-        with:
-          ref: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.release-version }}
-          submodules: recursive
-
-      - name: Move /var/lib/docker/
-        run: sudo mv /var/lib/docker/ "${GITHUB_WORKSPACE}/docker"
-
-      - name: Maximize build space
-        uses: easimon/maximize-build-space@c28619d8999a147d5e09c1199f84ff6af6ad5794
-        with:
-          root-reserve-mb: 5120
-          temp-reserve-mb: 32
-          swap-size-mb: 10240
-          remove-dotnet: 'true'
-          remove-android: 'true'
-          remove-haskell: 'true'
-          remove-codeql: 'true'
-          build-mount-path: '/var/lib/docker/'
-
-      - name: Restore /var/lib/docker/
-        run: sudo sh -c "mv ${GITHUB_WORKSPACE}/docker/* /var/lib/docker"
-
-      - name: Build CUDA 13 core wheel
-        id: build-core-wheel
-        run: |
-          docker build \
-            --build-arg CUDA_MAJOR=13 \
-            --build-arg CUDA_MINOR=0 \
-            --build-arg BUILD_METAPACKAGE=false \
-            --build-arg BUILD_COMMON=true \
-            --build-arg BUILD_PYTORCH=false \
-            --build-arg BUILD_JAX=false \
-            --tag transformer-engine-core-wheel \
-            --file build_tools/wheel_utils/Dockerfile.aarch \
-            .
-
-          mkdir -p dist
-          docker run --rm \
-            --volume "$(pwd)/dist:/wheelhouse" \
-            transformer-engine-core-wheel
-
-          wheel_path=$(find dist -maxdepth 1 -type f \
-            -name 'transformer_engine_cu13-*-manylinux_2_28_aarch64.whl' \
-            -print -quit)
-          test -n "$wheel_path"
-          echo "wheel_name=$(basename "$wheel_path")" | tee -a "$GITHUB_OUTPUT"
-
-      - name: Upload release asset
-        uses: actions/upload-release-asset@e8f9f06c4b078e705bd2ea027f0926603fc9b4d5 # v1.0.2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ needs.pre-flight.outputs.release-assets-url }}
-          asset_path: ./dist/${{ steps.build-core-wheel.outputs.wheel_name }}
-          asset_name: ${{ steps.build-core-wheel.outputs.wheel_name }}
           asset_content_type: application/*
 
   build_wheels_for_ngc:
