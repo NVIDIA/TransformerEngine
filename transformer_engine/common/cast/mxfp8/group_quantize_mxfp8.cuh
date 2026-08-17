@@ -161,9 +161,6 @@ LaunchConfig get_launch_config(const size_t first_logical_dim, const size_t last
     // in the vertically stacked tensor.
     config.grid = dim3(config.work_blocks_X, config.work_blocks_Y);
   } else {
-    NVTE_CHECK(num_tensors <= MAX_SUPPORTED_TENSOR_DESCRIPTORS,
-               "Number of tensors in a group is larger than the MAX number of supported "
-               "descriptors (64).");
     config.work_blocks_Y = 1;
     // Per-tensor dimensions are device-resident. This is a conservative host-side estimate; the
     // kernel derives exact tensor-local work grids.
