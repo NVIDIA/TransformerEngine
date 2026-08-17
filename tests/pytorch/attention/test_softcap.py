@@ -44,9 +44,7 @@ def _flash_attn_2_6_available() -> bool:
 # backend (>= 2.6.0), and requires CUDA tensors.
 pytestmark = [
     pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required."),
-    pytest.mark.skipif(
-        not _flash_attn_2_6_available(), reason="flash-attn >= 2.6.0 is required."
-    ),
+    pytest.mark.skipif(not _flash_attn_2_6_available(), reason="flash-attn >= 2.6.0 is required."),
 ]
 
 
