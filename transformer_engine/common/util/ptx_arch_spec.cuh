@@ -8,7 +8,7 @@
  *  \brief Architecture / family specific PTX helpers
  *
  *  This header should only be included by sources that are listed under
- *  `transformer_engine_cuda_sources` in CMakeLists.txt since these helper
+ *  `transformer_engine_cuda_arch_specific_sources` in CMakeLists.txt since these helper
  *  functions use architecture-specific instructions and must be compiled with
  *  corresponding flags (e.g. sm100f, sm100a, etc.).
  */
