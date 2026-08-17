@@ -237,6 +237,24 @@ class TestIdentityQuantizerUnit:
         out = IdentityQuantizer()(x)
         assert isinstance(out, IdentityTensor)
 
+    def test_detach_preserves_subclass(self):
+        """IdentityTensor detach preserves its runtime subclass."""
+
+        class DerivedIdentityTensor(IdentityTensor):
+            pass
+
+        tensor = IdentityQuantizer()(torch.randn(8, 16, device="cuda", dtype=torch.bfloat16))
+        tensor.__class__ = DerivedIdentityTensor
+
+        detached = tensor.detach()
+
+        assert type(detached) is DerivedIdentityTensor
+        assert detached._hp_data is tensor._hp_data
+        assert not detached.requires_grad
+
+        parameter = torch.nn.Parameter(tensor)
+        assert type(parameter) is DerivedIdentityTensor
+
     def test_internal_returns_storage(self):
         x = torch.randn(8, 16, device="cuda", dtype=torch.bfloat16)
         q = IdentityQuantizer()

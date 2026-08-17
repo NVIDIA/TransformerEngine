@@ -362,7 +362,7 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorStorage, QuantizedTensor):
 
     def detach(self) -> Float8BlockwiseQTensor:
         # pylint: disable=missing-function-docstring
-        return Float8BlockwiseQTensor.make_like(self)
+        return self.__class__.make_like(self)
 
     def clone(self) -> Float8BlockwiseQTensor:
         # pylint: disable=missing-function-docstring

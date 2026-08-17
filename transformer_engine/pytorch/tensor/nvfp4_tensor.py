@@ -530,8 +530,7 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
 
     def detach(self) -> NVFP4Tensor:
         # pylint: disable=missing-function-docstring
-        # TODO(ksivamani): Fix the detach bug
-        return NVFP4Tensor.make_like(self)
+        return self.__class__.make_like(self)
 
     def clone(self) -> NVFP4Tensor:
         # pylint: disable=missing-function-docstring

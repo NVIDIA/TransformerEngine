@@ -798,7 +798,7 @@ class QuantizedTensor(torch.Tensor):
         """Create new quantized tensor with same data
 
         Output tensor must be detached from the current autograd
-        graph.
+        graph and have the same runtime type as ``self``.
 
         """
         raise NotImplementedError(

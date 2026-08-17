@@ -521,7 +521,7 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
 
     def detach(self) -> Float8Tensor:
         # pylint: disable=missing-function-docstring
-        return Float8Tensor.make_like(self)
+        return self.__class__.make_like(self)
 
     def clone(self) -> Float8Tensor:
         # pylint: disable=missing-function-docstring

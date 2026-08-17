@@ -323,8 +323,7 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
 
     def detach(self) -> MXFP8Tensor:
         # pylint: disable=missing-function-docstring
-        # TODO(ksivamani): Fix the detach bug
-        return MXFP8Tensor.make_like(self)
+        return self.__class__.make_like(self)
 
     def clone(self) -> MXFP8Tensor:
         # pylint: disable=missing-function-docstring
