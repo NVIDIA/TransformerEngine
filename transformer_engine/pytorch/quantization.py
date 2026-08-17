@@ -644,9 +644,7 @@ class FP8GlobalStateManager:
             qstate.is_first_fp8_module,
             qstate.fp8_graph_capturing,
         ) = state
-        qstate.is_first_fp8_module = (
-            current_is_first_fp8_module and qstate.is_first_fp8_module
-        )
+        qstate.is_first_fp8_module = current_is_first_fp8_module and qstate.is_first_fp8_module
 
     @staticmethod
     def reduce_tensor_across_group_op_max(tensor: torch.Tensor, group: dist_group_type) -> None:
