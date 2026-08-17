@@ -7,6 +7,7 @@
 from contextlib import nullcontext
 from importlib.metadata import version as get_pkg_version
 from importlib.metadata import PackageNotFoundError
+import inspect
 import os
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import warnings
@@ -164,6 +165,19 @@ else:
     from flash_attn_interface import _flash_attn_backward as _flash_attn_bwd_v3
 
     fa_utils.set_flash_attention_3_params()
+
+    # Probe whether this FA3 build exposes a `softcap` parameter on BOTH entry points. FA3's Hopper
+    # (sm90) kernels DO implement tanh logit softcapping in fwd AND bwd (dedicated
+    # flash_{fwd,bwd}_hdim256_bf16_softcap_sm90 instantiations, off only behind a compile-time
+    # DISABLE_SOFTCAP flag), so this is a mature path. Still fail-closed and additionally
+    # gated on opt-in (NVTE_FA3_SOFTCAP) + head_dim <= 256 in get_attention_backend.
+    try:
+        fa_utils.fa3_supports_softcap = (
+            "softcap" in inspect.signature(flash_attn_func_v3).parameters
+            and "softcap" in inspect.signature(flash_attn_varlen_func_v3).parameters
+        )
+    except (ValueError, TypeError):
+        fa_utils.fa3_supports_softcap = False
 
 # Try to import Flash Attention v4
 try:
@@ -885,6 +899,7 @@ class FlashAttention(torch.nn.Module):
         max_seqlen_kv: Optional[int] = None,
         attn_mask_type: str = "causal",
         window_size: Optional[Tuple[int, int]] = None,
+        softcap: float = 0.0,
         alibi_slopes: Optional[torch.Tensor] = None,
         cp_group: Optional[Union[dist_group_type, List[dist_group_type]]] = None,
         cp_global_ranks: List[int] = None,
@@ -1100,6 +1115,11 @@ class FlashAttention(torch.nn.Module):
             assert (
                 alibi_slopes is None
             ), "Alibi slope bias addition is not supported with context parallelism."
+            if use_flash_attn_3 and softcap != 0.0:
+                raise NotImplementedError(
+                    "softcap is not supported by the FlashAttention 3 backend in context "
+                    "parallel. Please use FlashAttention 2 (>= 2.6.0) for softcap support."
+                )
             with self.attention_dropout_ctx():
                 output = attn_forward_func_with_cp(
                     self.training,
@@ -1130,6 +1150,7 @@ class FlashAttention(torch.nn.Module):
                     attn_mask_type=attn_mask_type,
                     deterministic=self.deterministic,
                     window_size=window_size,
+                    softcap=softcap,
                     quantizers=quantizers,
                     pad_between_seqs=pad_between_seqs,
                     use_flash_attn_3=use_flash_attn_3,
@@ -1215,6 +1236,8 @@ class FlashAttention(torch.nn.Module):
                         fa_optional_forward_kwargs["alibi_slopes"] = alibi_slopes
                     if fa_utils.v2_4_1_plus:
                         fa_optional_forward_kwargs["deterministic"] = self.deterministic
+                    if fa_utils.v2_6_0_plus:
+                        fa_optional_forward_kwargs["softcap"] = softcap
                     if inference_params is not None:
                         # use block_table kwarg to support thd_2bshd for non-paged
                         fa_optional_forward_kwargs["block_table"] = (
@@ -1235,9 +1258,24 @@ class FlashAttention(torch.nn.Module):
                         **fa_optional_forward_kwargs,
                     )
                 else:
+                    # Fail-loud net: get_attention_backend only keeps FA3 for softcap on a
+                    # softcap-capable build (signature probe) + opt-in (NVTE_FA3_SOFTCAP) + Hopper
+                    # (FA3 is sm90-only upstream) + head_dim <= 256. If FA3 is still reached with
+                    # softcap while the build lacks support (force-selected / regressed path), raise
+                    # rather than silently drop the cap. The non-CP FA3 entry points
+                    # (flash_attn_func_v3 / flash_attn_varlen_func_v3) are self-contained autograd
+                    # functions, so threading `softcap` into the forward call also drives the
+                    # matching FA3 softcap backward kernel. (CP + FA3 + softcap stays blocked above.)
+                    if softcap != 0.0 and not fa_utils.fa3_supports_softcap:
+                        raise NotImplementedError(
+                            "softcap is not supported by the installed FlashAttention 3 build. "
+                            "Please use FlashAttention 2 (>= 2.6.0) for softcap support."
+                        )
                     fa_3_optional_forward_kwargs = {}
                     fa_3_optional_forward_kwargs["window_size"] = window_size
                     fa_3_optional_forward_kwargs["num_splits"] = num_splits
+                    if softcap != 0.0 and fa_utils.fa3_supports_softcap:
+                        fa_3_optional_forward_kwargs["softcap"] = softcap
                     if pad_between_seqs:
                         fa_3_optional_forward_kwargs["seqused_q"] = (
                             cu_seqlens_q[1:] - cu_seqlens_q[:-1]

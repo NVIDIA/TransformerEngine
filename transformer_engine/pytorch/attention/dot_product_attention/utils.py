@@ -148,6 +148,11 @@ class FlashAttentionUtils:
     v4_is_installed = False
     fa4_version = PkgVersion("0")
     use_v4 = False
+    # True only if the installed FA3 build exposes a `softcap` parameter (signature probe in
+    # backends.py, fail-closed default False). Necessary-but-not-sufficient: FA3 softcap is also
+    # gated on opt-in (NVTE_FA3_SOFTCAP=1) and head_dim <= 256 in get_attention_backend. FA3 is
+    # already restricted to Hopper (sm90) upstream, where its softcap fwd+bwd kernels are mature.
+    fa3_supports_softcap = False
     v4_installation_steps = """\
 pip install flash-attn-4==4.0.0b11 nvidia-cutlass-dsl[cu13]"""
     v4_warning_printed = False
@@ -229,6 +234,9 @@ class AttentionParams:
     bottom_right_diagonal: bool, default = `None`
         Whether to align sliding window and ALiBi diagonal to the bottom right corner
         of the softmax matrix.
+    softcap : float, default = 0.0
+        Tanh logit softcapping value applied to the attention scores. A value of
+        ``0.0`` disables softcapping. Only supported by the FlashAttention backend.
     alibi_slopes_shape : Optional[Union[torch.Size, List]], default = None
         Tensor shape of :attr:`alibi_slopes` in `DotProductAttention`.
     core_attention_bias_type : str, default = no_bias
@@ -289,6 +297,7 @@ class AttentionParams:
     attn_mask_type: str = "no_mask"
     window_size: Union[Tuple[int, int], None] = None
     bottom_right_diagonal: bool = True
+    softcap: float = 0.0
     alibi_slopes_shape: Union[torch.Size, List, None] = None
     core_attention_bias_type: str = "no_bias"
     core_attention_bias_shape: str = "1hss"
@@ -433,6 +442,7 @@ def get_attention_backend(
     attn_mask_type = attention_params.attn_mask_type
     window_size = attention_params.window_size
     bottom_right_diagonal = attention_params.bottom_right_diagonal
+    softcap = attention_params.softcap
     alibi_slopes_shape = attention_params.alibi_slopes_shape
     core_attention_bias_type = attention_params.core_attention_bias_type
     core_attention_bias_shape = attention_params.core_attention_bias_shape
@@ -763,6 +773,43 @@ def get_attention_backend(
             use_fused_attention = False
             use_unfused_attention = False
             logger.debug("Disabling all backends for max_logit with FP8 attention")
+
+    # Filter: softcap
+    # The scalar `softcap` kwarg (tanh logit softcapping) is plumbed to the FlashAttention 2
+    # backend (>= 2.6.0) by default, and to FA3 only behind an explicit opt-in gate below.
+    # FusedAttention/unfused don't take the scalar kwarg (cuDNN can softcap via score_mod, but that
+    # path is not used here). Steer selection to FA2 rather than (a) hitting a runtime
+    # NotImplementedError when an unwired backend is selected, or (b) silently dropping the cap.
+    if softcap != 0.0:
+        if use_fused_attention:
+            logger.debug("Disabling FusedAttention as it does not support softcap")
+            use_fused_attention = False
+        if use_unfused_attention:
+            logger.debug("Disabling UnfusedDotProductAttention as it does not support softcap")
+            use_unfused_attention = False
+        if use_flash_attention_3 and not (
+            FlashAttentionUtils.fa3_supports_softcap
+            and os.getenv("NVTE_FA3_SOFTCAP", "0") == "1"
+            and max(head_dim_qk, head_dim_v) <= 256
+            and not context_parallel
+        ):
+            # FA3 softcap is opt-in (NVTE_FA3_SOFTCAP=1) and requires a softcap-capable FA3 build,
+            # head_dim <= 256 (the range FA3's sm90 softcap kernels are instantiated for), and no
+            # context parallelism -- FA3's CP path hard-rejects nonzero softcap (backends.py), so
+            # selecting it here would just crash at dispatch instead of steering to FA2, which does
+            # support CP+softcap via context_parallel.py's autograd threading. FA3 is already
+            # Hopper-only upstream. FA3's non-CP softcap fwd+bwd is mature, so no arch/beta caveat is
+            # needed beyond the build probe; keep it opt-in to preserve FA2 as the default (unchanged
+            # behavior) and allow a clean FA2-vs-FA3 comparison. When all conditions hold, FA3
+            # survives and the softcap kwarg is threaded in backends.py.
+            logger.debug(
+                "Disabling FlashAttention 3 for softcap (requires softcap-capable FA3 build, "
+                "NVTE_FA3_SOFTCAP=1, head_dim <= 256, and no context parallelism)"
+            )
+            use_flash_attention_3 = False
+        if use_flash_attention_2 and not FlashAttentionUtils.v2_6_0_plus:
+            logger.debug("Disabling FlashAttention 2 for softcap (requires flash-attn >= 2.6.0)")
+            use_flash_attention_2 = False
 
     # Filter: score_mod
     if has_score_mod_bprop and not has_score_mod:
