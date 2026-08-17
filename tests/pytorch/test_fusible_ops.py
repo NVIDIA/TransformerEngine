@@ -764,8 +764,22 @@ class TestExtraTensorChannels:
                 output_to_caller=1,  # type: ignore[arg-type]
             )
 
-    def test_extra_channel_change_requires_new_sequential(self, size: int = 16) -> None:
-        """Rebinding a channel invalidates the fuser that captured it."""
+    def test_extra_channels_lock_after_capture(self, size: int = 16) -> None:
+        """Channel bindings freeze once a fuser captures them."""
+        producer = te_ops.MakeExtraOutput()
+        consumer = te_ops.AddExtraInput()
+        producer.set_extra_output_channel(0, "route")
+        consumer.set_extra_input_channel(0, "route")
+        assert not producer._extra_tensor_channels_locked
+
+        # Construction alone locks channels, before any forward pass.
+        OperationFuser([producer, consumer])
+        assert producer._extra_tensor_channels_locked
+        assert consumer._extra_tensor_channels_locked
+        with pytest.raises(RuntimeError, match="already captured its channel routing"):
+            producer.set_extra_output_channel(0, None)
+
+        # Fresh ops for the Sequential path.
         producer = te_ops.MakeExtraOutput()
         consumer = te_ops.AddExtraInput()
         producer.set_extra_output_channel(0, "route")
@@ -777,6 +791,7 @@ class TestExtraTensorChannels:
         torch.testing.assert_close(y, 2 * x)
         torch.testing.assert_close(route, x)
 
+<<<<<<< HEAD
         consumer.set_extra_input_channel(0, None)
         extra = torch.rand_like(x)
         with pytest.raises(RuntimeError, match="Construct a new OperationFuser"):
@@ -790,6 +805,12 @@ class TestExtraTensorChannels:
         producer.set_extra_output_channel(0, "route", output_to_caller=False)
         with pytest.raises(RuntimeError, match="Construct a new OperationFuser"):
             model(x, extra)
+=======
+        with pytest.raises(RuntimeError, match="already captured its channel routing"):
+            consumer.set_extra_input_channel(0, None)
+        with pytest.raises(RuntimeError, match="already captured its channel routing"):
+            producer.set_extra_output_channel(0, "route", output_to_caller=False)
+>>>>>>> nvidia_origin/main
 
     @pytest.mark.parametrize("layout", ("two_ops", "same_op"))
     def test_duplicate_extra_output_channel_names(self, layout: str) -> None:
