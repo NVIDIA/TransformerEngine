@@ -664,7 +664,7 @@ class CustomRecipe(Recipe):
 
         See ``transformer_engine.pytorch.quantization.QuantizerRole``
         and ``transformer_engine.pytorch.quantization.DelayedScalingRequest``
-        for API details. See :ref:`fine-grained-quantization-recipes` for
+        for API details. See :ref:`heterogeneous-quantization-recipes` for
         construction rules and direction mapping.
 
     backward_override : {None, 'high_precision', 'dequantized'}, default = None

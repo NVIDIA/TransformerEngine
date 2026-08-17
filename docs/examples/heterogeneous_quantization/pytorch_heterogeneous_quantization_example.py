@@ -3,7 +3,7 @@
 #
 # See LICENSE for license information.
 
-"""Runnable fine-grained quantization recipe example.
+"""Runnable heterogeneous quantization recipe example.
 
 The factory assigns one precision to each ``demo.fc1`` Linear GEMM:
 
@@ -16,13 +16,37 @@ special-cased and therefore exercises the MXFP8 base-factory fallback.
 
 Run from the Transformer Engine repository root::
 
-    python docs/features/low_precision_training/fine_grained_quantization/\
-        pytorch_fine_grained_quantization_example.py
+    python docs/examples/heterogeneous_quantization/\
+        pytorch_heterogeneous_quantization_example.py
 """
 
-# START_FINE_GRAINED_QUANTIZATION_EXAMPLE
-
 from __future__ import annotations
+
+import torch
+import transformer_engine.pytorch as te
+
+
+def require_supported_hardware() -> None:
+    """Fail early with TE's reason when either required format is unavailable."""
+
+    if not torch.cuda.is_available():
+        raise SystemExit("This example requires a CUDA-capable NVIDIA GPU.")
+
+    failures = []
+    for name, check in (
+        ("MXFP8", te.is_mxfp8_available),
+        ("NVFP4", te.is_nvfp4_available),
+    ):
+        available, reason = check(return_reason=True)
+        if not available:
+            failures.append(f"{name}: {reason}")
+    if failures:
+        raise SystemExit("Required formats are unavailable: " + "; ".join(failures))
+
+
+require_supported_hardware()
+
+# START_HETEROGENEOUS_QUANTIZATION_EXAMPLE
 
 from typing import Optional
 
@@ -78,75 +102,29 @@ def quantizer_factory(role: Optional[te.QuantizerRole]):
     return BASE_FACTORY(role)
 
 
-def require_supported_hardware() -> None:
-    """Fail early with TE's reason when either required format is unavailable."""
+linear_options = {"bias": False, "params_dtype": torch.bfloat16, "device": "cuda"}
+model = torch.nn.Sequential(
+    te.Linear(128, 256, name=THREE_FORMAT_MODULE, **linear_options),
+    torch.nn.GELU(),
+    te.Linear(256, 256, name=HIGH_PRECISION_MODULE, **linear_options),
+    torch.nn.GELU(),
+    te.Linear(256, 128, name="demo.output", **linear_options),
+)
+inputs = torch.randn(64, 128, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+recipe = CustomRecipe(qfactory=quantizer_factory)
 
-    if not torch.cuda.is_available():
-        raise SystemExit("This example requires a CUDA-capable NVIDIA GPU.")
+with te.autocast(enabled=True, recipe=recipe):
+    outputs = model(inputs)
 
-    failures = []
-    for name, check in (
-        ("MXFP8", te.is_mxfp8_available),
-        ("NVFP4", te.is_nvfp4_available),
-    ):
-        available, reason = check(return_reason=True)
-        if not available:
-            failures.append(f"{name}: {reason}")
-    if failures:
-        raise SystemExit("Required formats are unavailable: " + "; ".join(failures))
+loss = outputs.float().square().mean()
+loss.backward()
 
+# END_HETEROGENEOUS_QUANTIZATION_EXAMPLE
 
-def build_model() -> torch.nn.Module:
-    """Build aligned TE Linear layers with stable semantic names."""
+gradients = [inputs.grad, *(parameter.grad for parameter in model.parameters())]
+assert all(gradient is not None for gradient in gradients)
+assert all(torch.isfinite(gradient).all() for gradient in gradients)
 
-    common = {
-        "bias": False,
-        "params_dtype": torch.bfloat16,
-        "device": "cuda",
-    }
-    return torch.nn.Sequential(
-        te.Linear(128, 256, name=THREE_FORMAT_MODULE, **common),
-        torch.nn.GELU(),
-        te.Linear(256, 256, name=HIGH_PRECISION_MODULE, **common),
-        torch.nn.GELU(),
-        te.Linear(256, 128, name="demo.output", **common),
-    )
-
-
-def main() -> None:
-    """Run one training step through the custom recipe."""
-
-    require_supported_hardware()
-    torch.manual_seed(1234)
-    torch.cuda.manual_seed_all(1234)
-
-    model = build_model()
-    recipe = CustomRecipe(qfactory=quantizer_factory)
-    inputs = torch.randn(
-        64,
-        128,
-        device="cuda",
-        dtype=torch.bfloat16,
-        requires_grad=True,
-    )
-
-    with te.autocast(enabled=True, recipe=recipe):
-        outputs = model(inputs)
-
-    loss = outputs.float().square().mean()
-    # Backward uses the quantizers selected and saved during the forward pass.
-    loss.backward()
-
-    gradients = [inputs.grad, *(parameter.grad for parameter in model.parameters())]
-    assert all(gradient is not None for gradient in gradients)
-    assert all(torch.isfinite(gradient).all() for gradient in gradients)
-
-    print(f"GPU: {torch.cuda.get_device_name()}")
-    print(f"TE Linear names: {[model[index].name for index in (0, 2, 4)]}")
-    print(f"loss: {loss.item():.6f}; forward and backward completed")
-
-
-if __name__ == "__main__":
-    main()
-
-# END_FINE_GRAINED_QUANTIZATION_EXAMPLE
+print(f"GPU: {torch.cuda.get_device_name()}")
+print(f"TE Linear names: {[model[index].name for index in (0, 2, 4)]}")
+print(f"loss: {loss.item():.6f}; forward and backward completed")
