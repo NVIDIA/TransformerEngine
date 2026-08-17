@@ -361,7 +361,6 @@ def _make_graphed_callables(
             )
 
     saved_tensor_memory_alias_groups = None
-    saved_tensor_memory_families = None
     slot_io_memory_alias_groups = None
     slot_io_liveness_groups = None
     warmup_plan_alias_groups = None
@@ -386,7 +385,6 @@ def _make_graphed_callables(
         ):
             raise TypeError("Each graph-memory slot must be a tuple of nine integers.")
         saved_tensor_memory_alias_groups = [(slot[0], slot[1]) for slot in _graph_memory_slots]
-        saved_tensor_memory_families = [(slot[2], slot[4], slot[5]) for slot in _graph_memory_slots]
         slot_io_memory_alias_groups = [(slot[2], slot[3]) for slot in _graph_memory_slots]
         slot_io_liveness_groups = [(slot[4], slot[5]) for slot in _graph_memory_slots]
         warmup_plan_alias_groups = [slot[6] for slot in _graph_memory_slots]
@@ -1342,8 +1340,6 @@ def _make_graphed_callables(
         return tuple(copied_grad_inputs)
 
     per_callable_native_saved_storages = [{} for _ in flatten_sample_args]
-    per_callable_native_saved_intervals = [[] for _ in flatten_sample_args]
-    per_callable_native_saved_capture_targets = [None] * len(flatten_sample_args)
 
     def plan_native_saved_alias_targets(
         plan,
@@ -1507,10 +1503,10 @@ def _make_graphed_callables(
             raise RuntimeError(f"Native saved tensors have no canonical targets: {missing}.")
         return tuple(target_views)
 
-    def semantic_boundary_alias_targets(canonical_func_idx, sibling_func_idx):
-        """Map boundary-backed sibling saves onto the boundary address used at replay."""
-        plan = per_callable_saved_tensor_plans[sibling_func_idx]
-        aliases = per_callable_saved_tensor_boundary_aliases[sibling_func_idx]
+    def semantic_boundary_alias_targets(func_idx, outputs):
+        """Map boundary-backed saves onto the boundary address used at replay."""
+        plan = per_callable_saved_tensor_plans[func_idx]
+        aliases = per_callable_saved_tensor_boundary_aliases[func_idx]
         targets = [None] * len(plan)
         records_by_storage_group = {}
         for saved_idx, spec in enumerate(plan):
@@ -1564,9 +1560,9 @@ def _make_graphed_callables(
             for saved_idx, alias in component_aliases:
                 _, kind, boundary_idx, relative_offset, _ = alias
                 if kind == "input":
-                    boundary = per_callable_static_input_surfaces[sibling_func_idx][boundary_idx]
+                    boundary = per_callable_static_input_surfaces[func_idx][boundary_idx]
                 else:
-                    boundary = per_callable_static_outputs[canonical_func_idx][boundary_idx]
+                    boundary = outputs[boundary_idx]
                 if not isinstance(boundary, torch.Tensor) or not boundary.is_cuda:
                     raise RuntimeError(
                         f"CUDA graph {kind} boundary {boundary_idx} is not a CUDA tensor."
@@ -1582,7 +1578,7 @@ def _make_graphed_callables(
                 elif anchor_storage._cdata != storage._cdata or anchor_shift != shift:
                     raise RuntimeError(
                         "CUDA graph overlapping saved tensors have inconsistent boundary "
-                        f"aliases: func={sibling_func_idx}, saved={component_saved_indices}."
+                        f"aliases: func={func_idx}, saved={component_saved_indices}."
                     )
 
             for saved_idx in component_saved_indices:
@@ -1591,7 +1587,7 @@ def _make_graphed_callables(
                 if target_offset < 0 or target_offset + spec[7] > anchor_storage.nbytes():
                     raise RuntimeError(
                         "CUDA graph boundary-backed saved component does not fit its replay "
-                        f"storage: func={sibling_func_idx}, saved={saved_idx}, "
+                        f"storage: func={func_idx}, saved={saved_idx}, "
                         f"offset={target_offset}, bytes={spec[7]}, "
                         f"storage_bytes={anchor_storage.nbytes()}."
                     )
@@ -1610,80 +1606,99 @@ def _make_graphed_callables(
                 targets[saved_idx] = target
         return tuple(targets)
 
-    def materialize_native_saved_spill_targets(canonical_func_indices):
-        """Complete canonical saved-tensor storage for every same-slot CP branch."""
-        completed_targets = []
-        protected_ranges = {}
-        preassigned_targets = {}
+    def slot_tensor_targets(plan, arena=None):
+        """Lay out graph-boundary tensors contiguously in an arena."""
+        targets = []
+        offset = 0
+        for spec in plan:
+            if spec is None:
+                targets.append(None)
+                continue
+            offset = _align_up(offset)
+            target = None
+            if arena is not None:
+                target = _arena_view(arena, offset, spec)
+            targets.append(target)
+            offset += spec[7]
+        return tuple(targets), _align_up(offset)
 
-        for func_idx in canonical_func_indices:
-            targets = per_callable_native_saved_capture_targets[func_idx]
-            if targets is None:
-                raise RuntimeError("CUDA graph canonical CP branch did not retain saved targets.")
-
-            storage_ranges = {}
-            boundary_tensors = (
-                *per_callable_static_input_surfaces[func_idx][
-                    : per_callable_len_user_args[func_idx]
-                ],
-                *per_callable_static_outputs[func_idx],
-            )
-            for tensor in boundary_tensors:
-                if not isinstance(tensor, torch.Tensor) or not tensor.is_cuda:
-                    continue
-                storage = tensor.untyped_storage()
-                storage_ranges.setdefault(storage._cdata, []).append((0, storage.nbytes()))
-            for storage_id, ranges in storage_ranges.items():
-                merged = []
-                for start, end in sorted(ranges):
-                    if not merged or start > merged[-1][1]:
-                        merged.append([start, end])
-                    else:
-                        merged[-1][1] = max(merged[-1][1], end)
-                storage_ranges[storage_id] = tuple(map(tuple, merged))
-
-            family = saved_tensor_memory_families[func_idx]
-            sibling_indices = [
-                sibling_idx
-                for sibling_idx, sibling_family in enumerate(saved_tensor_memory_families)
-                if sibling_family == family
-            ]
-            for sibling_idx in sibling_indices:
-                protected_ranges[sibling_idx] = storage_ranges
-                preassigned_targets[sibling_idx] = (
-                    semantic_boundary_alias_targets(func_idx, sibling_idx)
-                    if sibling_idx != func_idx
-                    else None
-                )
-
-            spill_bytes = max(
-                (
-                    plan_native_saved_alias_targets(
-                        per_callable_saved_tensor_plans[sibling_idx],
-                        targets,
-                        measure_spill=True,
-                        protected_storage_ranges=storage_ranges,
-                        preassigned_targets=preassigned_targets[sibling_idx],
-                    )
-                    for sibling_idx in sibling_indices
-                    if sibling_idx != func_idx
-                ),
-                default=0,
-            )
-            if spill_bytes:
+    slot_saved_arenas = {}
+    per_callable_slot_saved_targets = None
+    if use_slot_memory:
+        arena_sizes = {}
+        for func_idx, plan in enumerate(per_callable_saved_tensor_plans):
+            output_plan = per_callable_output_tensor_plans[func_idx]
+            _, output_bytes = slot_tensor_targets(output_plan)
+            temporary_arena = None
+            if output_bytes:
                 with torch.cuda.use_mem_pool(slot_allocator_pool):
-                    spill = torch.empty(
-                        (spill_bytes,),
-                        dtype=torch.uint8,
-                        device=torch.cuda.current_device(),
+                    temporary_arena = torch.empty(
+                        (output_bytes,), dtype=torch.uint8, device=torch.cuda.current_device()
                     )
-                storage = spill.untyped_storage()
-                per_callable_native_saved_storages[func_idx].setdefault(
-                    storage._cdata, (storage, storage.data_ptr())
+            temporary_outputs, _ = slot_tensor_targets(output_plan, temporary_arena)
+            preassigned_targets = semantic_boundary_alias_targets(func_idx, temporary_outputs)
+            spill_bytes = plan_native_saved_alias_targets(
+                plan,
+                (),
+                measure_spill=True,
+                preassigned_targets=preassigned_targets,
+            )
+            arena_id, _ = saved_tensor_memory_alias_groups[func_idx]
+            arena_sizes[arena_id] = max(arena_sizes.get(arena_id, 0), output_bytes + spill_bytes)
+            del temporary_outputs, temporary_arena, preassigned_targets
+
+        with torch.cuda.use_mem_pool(slot_allocator_pool):
+            slot_saved_arenas = {
+                arena_id: torch.empty(
+                    (required_bytes,), dtype=torch.uint8, device=torch.cuda.current_device()
                 )
-                targets = (*targets, spill)
-            completed_targets.append(tuple(targets))
-        return tuple(completed_targets), protected_ranges, preassigned_targets
+                for arena_id, required_bytes in arena_sizes.items()
+                if required_bytes > 0
+            }
+
+        per_callable_slot_saved_targets = []
+        for func_idx, plan in enumerate(per_callable_saved_tensor_plans):
+            arena_id, _ = saved_tensor_memory_alias_groups[func_idx]
+            arena = slot_saved_arenas.get(arena_id)
+            output_targets, output_bytes = slot_tensor_targets(
+                per_callable_output_tensor_plans[func_idx], arena
+            )
+            per_callable_output_tensor_targets[func_idx] = list(output_targets)
+            preassigned_targets = semantic_boundary_alias_targets(func_idx, output_targets)
+            protected_ranges = {}
+            if arena is not None and output_bytes:
+                protected_ranges[arena.untyped_storage()._cdata] = ((0, output_bytes),)
+            canonical_targets = () if arena is None else (arena,)
+            per_callable_slot_saved_targets.append(
+                plan_native_saved_alias_targets(
+                    plan,
+                    canonical_targets,
+                    protected_storage_ranges=protected_ranges,
+                    preassigned_targets=preassigned_targets,
+                )
+            )
+
+    slot_user_grad_arenas = {}
+    if use_slot_memory:
+        slot_sizes = {}
+        for func_idx, plan in enumerate(per_callable_user_grad_tensor_plans):
+            _, required_bytes = slot_tensor_targets(plan)
+            physical_slot, _ = slot_io_memory_alias_groups[func_idx]
+            slot_sizes[physical_slot] = max(slot_sizes.get(physical_slot, 0), required_bytes)
+
+        with torch.cuda.use_mem_pool(slot_allocator_pool):
+            slot_user_grad_arenas = {
+                physical_slot: torch.empty(
+                    (required_bytes,), dtype=torch.uint8, device=torch.cuda.current_device()
+                )
+                for physical_slot, required_bytes in slot_sizes.items()
+                if required_bytes > 0
+            }
+
+        for func_idx, plan in enumerate(per_callable_user_grad_tensor_plans):
+            physical_slot, _ = slot_io_memory_alias_groups[func_idx]
+            targets, _ = slot_tensor_targets(plan, slot_user_grad_arenas.get(physical_slot))
+            per_callable_user_grad_tensor_targets[func_idx] = list(targets)
 
     @contextlib.contextmanager
     def capture_saved_tensors(func_idx, alias_targets=None):
@@ -1694,8 +1709,6 @@ def _make_graphed_callables(
 
         plan = per_callable_saved_tensor_plans[func_idx]
         saved_idx = 0
-        captured_targets = [None] * len(plan)
-        per_callable_native_saved_intervals[func_idx].clear()
         if alias_targets is not None and len(alias_targets) != len(plan):
             raise RuntimeError(
                 f"CUDA graph input {func_idx} changed its canonical saved-target count."
@@ -1727,6 +1740,10 @@ def _make_graphed_callables(
                     f"CUDA graph input {func_idx} has unsupported saved-tensor mode {spec[0]}."
                 )
 
+            source_storage = tensor.untyped_storage()
+            per_callable_native_saved_storages[func_idx].setdefault(
+                source_storage._cdata, (source_storage, source_storage.data_ptr())
+            )
             if alias_targets is None:
                 target = torch.empty((0,), dtype=tensor.dtype, device=tensor.device).set_(
                     tensor.untyped_storage(),
@@ -1753,18 +1770,10 @@ def _make_graphed_callables(
                         target.copy_(tensor)
                 tensor = target
 
-            captured_targets[current_saved_idx] = target
             storage = tensor.untyped_storage()
             per_callable_native_saved_storages[func_idx].setdefault(
                 storage._cdata, (storage, storage.data_ptr())
             )
-            if spec[7]:
-                start = _tensor_storage_ptr(tensor) + (
-                    tensor.storage_offset() * tensor.element_size()
-                )
-                per_callable_native_saved_intervals[func_idx].append(
-                    (current_saved_idx, start, start + spec[7])
-                )
             return tensor
 
         with torch.autograd.graph.saved_tensors_hooks(pack_saved_tensor, lambda x: x):
@@ -1774,8 +1783,6 @@ def _make_graphed_callables(
                 f"CUDA graph input {func_idx} saved {saved_idx} forward tensors during "
                 f"capture, but saved {len(plan)} during warmup."
             )
-        if alias_targets is None:
-            per_callable_native_saved_capture_targets[func_idx] = tuple(captured_targets)
 
     def validate_captured_module_grads(func_idx, static_grad_inputs):
         """Require capture to preserve every parameter gradient observed during warmup."""
@@ -1813,16 +1820,11 @@ def _make_graphed_callables(
     branch_capture_groups = None
     branch_checkpoint_state = None
     branch_checkpoint_live_blocks = None
-    branch_checkpoint_pool_layout = None
     branch_checkpoint_storage_owners = None
     branch_pre_checkpoint_state = None
     branch_pre_checkpoint_live_blocks = None
     branch_pre_checkpoint_storage_owners = None
     current_storage_owners = None
-    branch_canonical_native_saved_intervals = None
-    branch_canonical_native_saved_targets = None
-    branch_canonical_native_saved_excluded_storages = None
-    branch_canonical_native_saved_preassigned_targets = None
     native_saved_alias_targets = None
     if use_slot_memory:
         branch_capture_groups = [None] * len(_order)
@@ -1899,66 +1901,6 @@ def _make_graphed_callables(
             }
             for segment in segments
         }
-
-    def native_saved_pool_intervals(func_indices, layout, full_storage=False):
-        """Return native saved-tensor intervals that belong to the slot pool."""
-        segment_ranges = tuple(
-            (address, address + segment["total_size"]) for address, segment in layout.items()
-        )
-        output = []
-        for func_idx in func_indices:
-            intervals = []
-            if full_storage:
-                candidates = (
-                    (storage_idx, storage_ptr, storage_ptr + storage.nbytes())
-                    for storage_idx, (storage, storage_ptr) in enumerate(
-                        per_callable_native_saved_storages[func_idx].values()
-                    )
-                )
-            else:
-                candidates = iter(per_callable_native_saved_intervals[func_idx])
-            for saved_idx, start, end in candidates:
-                containing = [
-                    (segment_start, segment_end)
-                    for segment_start, segment_end in segment_ranges
-                    if segment_start <= start and end <= segment_end
-                ]
-                if containing:
-                    intervals.append((saved_idx, start, end))
-                    continue
-                if any(
-                    start < segment_end and segment_start < end
-                    for segment_start, segment_end in segment_ranges
-                ):
-                    raise RuntimeError(
-                        "CUDA graph native saved tensor crosses a slot-pool segment boundary: "
-                        f"func={func_idx}, saved={saved_idx}, interval=({start}, {end})."
-                    )
-            output.append(tuple(intervals))
-        return tuple(output)
-
-    def assert_native_saved_interval_coverage(canonical, current, func_indices, phase):
-        """Require alternate saved tensors to stay inside canonical live allocations."""
-        if len(canonical) != len(current):
-            raise RuntimeError("CUDA graph CP branch changed its captured layer count.")
-        for position, (canonical_intervals, current_intervals) in enumerate(
-            zip(canonical, current)
-        ):
-            merged = []
-            for _, start, end in sorted(canonical_intervals, key=lambda item: item[1:]):
-                if merged and start <= merged[-1][1]:
-                    merged[-1] = (merged[-1][0], max(merged[-1][1], end))
-                else:
-                    merged.append((start, end))
-            for saved_idx, start, end in current_intervals:
-                if any(left <= start and end <= right for left, right in merged):
-                    continue
-                raise RuntimeError(
-                    "CUDA graph CP branch placed a native saved tensor outside the "
-                    "canonical slot/layer live range: "
-                    f"phase={phase}, func={func_indices[position]}, saved={saved_idx}, "
-                    f"interval=({start}, {end}), canonical={merged}."
-                )
 
     def drain_slot_pool_pending_frees():
         """Poll completed cross-stream frees before restoring allocator state."""
@@ -2089,6 +2031,8 @@ def _make_graphed_callables(
             per_callable_param_grad_tensor_targets,
             static_grad_outputs_dict,
             native_io_anchors,
+            slot_saved_arenas,
+            slot_user_grad_arenas,
             *extra_values,
         ):
             visit(value)
@@ -2193,10 +2137,6 @@ def _make_graphed_callables(
                     branch_checkpoint_state,
                     branch_pre_checkpoint_state,
                     current_storage_owners,
-                    branch_canonical_native_saved_intervals,
-                    branch_canonical_native_saved_targets,
-                    branch_canonical_native_saved_excluded_storages,
-                    branch_canonical_native_saved_preassigned_targets,
                     native_saved_alias_targets,
                 )
             )
@@ -2242,26 +2182,11 @@ def _make_graphed_callables(
                     args = sample_args[per_callable_fwd_idx]
                     kwargs = sample_kwargs[per_callable_fwd_idx]
                     fwd_graph = fwd_graphs[per_callable_fwd_idx]
-                    native_saved_alias_targets = None
-                    if branch_group is not None and branch_group[0] > 0:
-                        if (
-                            branch_canonical_native_saved_targets is None
-                            or branch_canonical_native_saved_excluded_storages is None
-                            or branch_canonical_native_saved_preassigned_targets is None
-                        ):
-                            raise RuntimeError(
-                                "CUDA graph CP branch has no canonical saved-tensor targets."
-                            )
-                        native_saved_alias_targets = plan_native_saved_alias_targets(
-                            per_callable_saved_tensor_plans[per_callable_fwd_idx],
-                            branch_canonical_native_saved_targets[l_no],
-                            protected_storage_ranges=branch_canonical_native_saved_excluded_storages[
-                                per_callable_fwd_idx
-                            ],
-                            preassigned_targets=branch_canonical_native_saved_preassigned_targets[
-                                per_callable_fwd_idx
-                            ],
-                        )
+                    native_saved_alias_targets = (
+                        per_callable_slot_saved_targets[per_callable_fwd_idx]
+                        if use_slot_memory
+                        else None
+                    )
                     with _graph_context_wrapper(fwd_graph, pool=mempool):
                         with capture_saved_tensors(
                             per_callable_fwd_idx, native_saved_alias_targets
@@ -2272,15 +2197,16 @@ def _make_graphed_callables(
                         flatten_outputs = copy_outputs_to_slot_arena(
                             per_callable_fwd_idx, flatten_outputs
                         )
-                        if branch_group is not None and branch_group[0] > 0:
+                        if branch_group is not None:
                             record_replaced_io_storages(
                                 original_flatten_outputs,
                                 flatten_outputs,
                                 branch_stale_storages,
                             )
-                            branch_stale_storages.update(
-                                per_callable_native_saved_storages[per_callable_fwd_idx]
-                            )
+                            if branch_group[0] > 0:
+                                branch_stale_storages.update(
+                                    per_callable_native_saved_storages[per_callable_fwd_idx]
+                                )
                         del original_flatten_outputs
                     native_saved_alias_targets = None
                     per_callable_static_outputs[per_callable_fwd_idx] = tuple(flatten_outputs)
@@ -2495,25 +2421,10 @@ def _make_graphed_callables(
                 torch.cuda.synchronize()
                 drain_slot_pool_pending_frees()
                 if branch_group[0] == 0:
-                    if c_id > 0:
-                        (
-                            branch_canonical_native_saved_targets,
-                            branch_canonical_native_saved_excluded_storages,
-                            branch_canonical_native_saved_preassigned_targets,
-                        ) = materialize_native_saved_spill_targets(captured_branch_func_indices)
-                        for func_idx in captured_branch_func_indices:
-                            per_callable_native_saved_capture_targets[func_idx] = None
                     branch_checkpoint_state = torch._C._cuda_getCheckpointState(
                         torch.cuda.current_device(), mempool
                     )
                     branch_checkpoint_live_blocks = slot_pool_active_blocks()
-                    branch_checkpoint_pool_layout = slot_pool_layout()
-                    if c_id > 0:
-                        branch_canonical_native_saved_intervals = native_saved_pool_intervals(
-                            captured_branch_func_indices,
-                            branch_checkpoint_pool_layout,
-                            full_storage=True,
-                        )
                     branch_checkpoint_storage_owners = checkpoint_live_storage_owners(
                         branch_checkpoint_live_blocks,
                         f"{'forward' if c_id > 0 else 'backward'} branch "
@@ -2531,16 +2442,6 @@ def _make_graphed_callables(
                         )
                 else:
                     current_live_blocks = slot_pool_active_blocks()
-                    current_layout = slot_pool_layout()
-                    if c_id > 0:
-                        assert_native_saved_interval_coverage(
-                            branch_canonical_native_saved_intervals,
-                            native_saved_pool_intervals(
-                                captured_branch_func_indices, current_layout
-                            ),
-                            captured_branch_func_indices,
-                            f"branch {branch_group[0] + 1}/{branch_group[1]} at order index {i}",
-                        )
                     current_storage_owners = checkpoint_live_storage_owners(
                         current_live_blocks,
                         f"{'forward' if c_id > 0 else 'backward'} branch "
@@ -2572,15 +2473,10 @@ def _make_graphed_callables(
                 if branch_group[0] == branch_group[1] - 1:
                     branch_checkpoint_state = None
                     branch_checkpoint_live_blocks = None
-                    branch_checkpoint_pool_layout = None
                     branch_checkpoint_storage_owners = None
                     branch_pre_checkpoint_state = None
                     branch_pre_checkpoint_live_blocks = None
                     branch_pre_checkpoint_storage_owners = None
-                    branch_canonical_native_saved_intervals = None
-                    branch_canonical_native_saved_targets = None
-                    branch_canonical_native_saved_excluded_storages = None
-                    branch_canonical_native_saved_preassigned_targets = None
                     gc.collect()
                     torch.cuda.synchronize()
                     drain_slot_pool_pending_frees()
@@ -2933,6 +2829,8 @@ def _make_graphed_callables(
         setattr(ret[-1], "reset", reset_func)
         if slot_allocator_pool is not None:
             setattr(ret[-1], "_te_cuda_graph_allocator_pool", slot_allocator_pool)
+            setattr(ret[-1], "_te_cuda_graph_saved_arenas", slot_saved_arenas)
+            setattr(ret[-1], "_te_cuda_graph_user_grad_arenas", slot_user_grad_arenas)
 
     if just_one_callable:
         return ret[0]

@@ -1327,6 +1327,75 @@ def test_slot_memory_snapshots_live_inputs_across_slot_wrap() -> None:
         reset_graphs(graphed)
 
 
+def test_slot_memory_saved_arenas_cover_alternate_schedule() -> None:
+    """Saved tensors must follow union liveness, not only the capture schedule."""
+
+    class Module(torch.nn.Module):
+        def forward(self, inp):
+            hidden = inp.sin()
+            return hidden.square()
+
+    module = Module().cuda()
+    samples = tuple((torch.ones(4096, device="cuda", requires_grad=True),) for _ in range(4))
+    graphed = make_graphed_callables(
+        (module,),
+        samples,
+        num_warmup_iters=2,
+        _order=[1, 1, -1, 1, -1, 1, -1, -1],
+        _num_layers_per_chunk=[1],
+        _reuse_graph_input_output_buffers=True,
+        _graph_memory_slots=tuple(_slot(index, index, index) for index in range(4)),
+    )
+
+    try:
+        inputs = [torch.randn(4096, device="cuda", requires_grad=True) for _ in range(4)]
+        outputs = [graphed[index](inputs[index]) for index in range(3)]
+        outputs[0].sum().backward()
+        torch.testing.assert_close(
+            inputs[0].grad, 2.0 * inputs[0].detach().sin() * inputs[0].detach().cos()
+        )
+        outputs.append(graphed[3](inputs[3]))
+        for index in (1, 2, 3):
+            outputs[index].sum().backward()
+            torch.testing.assert_close(
+                inputs[index].grad,
+                2.0 * inputs[index].detach().sin() * inputs[index].detach().cos(),
+            )
+    finally:
+        reset_graphs(graphed)
+
+
+def test_slot_memory_reuses_user_grad_surface_across_chunks() -> None:
+    """Adjacent backward chunks may reuse one physical-slot gradient surface."""
+
+    class Module(torch.nn.Module):
+        def forward(self, inp):
+            return inp.square()
+
+    module = Module().cuda()
+    samples = tuple((torch.ones(4096, device="cuda", requires_grad=True),) for _ in range(2))
+    graphed = make_graphed_callables(
+        (module, module),
+        samples,
+        num_warmup_iters=2,
+        _order=[1, 2, -2, -1],
+        _num_layers_per_chunk=[1, 1],
+        _reuse_graph_input_output_buffers=True,
+        _graph_memory_slots=(
+            _slot(0, 0, 0, overlap=0, warmup=0),
+            _slot(1, 1, 0, overlap=1, warmup=1),
+        ),
+    )
+
+    try:
+        inp = torch.randn(4096, device="cuda", requires_grad=True)
+        graphed[1](graphed[0](inp)).sum().backward()
+        torch.testing.assert_close(inp.grad, 4.0 * inp.detach().pow(3))
+        assert tuple(graphed[-1]._te_cuda_graph_user_grad_arenas) == (0,)
+    finally:
+        reset_graphs(graphed)
+
+
 def test_slot_memory_coalesces_overlapping_saved_views() -> None:
     """Saved views of one storage should occupy only their byte union in each live slot."""
 
