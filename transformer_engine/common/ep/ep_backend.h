@@ -57,14 +57,16 @@ class EPBackend {
                 const NVTECommWindow& recv_tokens_win, NVTETensor recv_topk_weights,
                 const NVTECommWindow& recv_topk_weights_win, cudaStream_t stream);
 
-  // Fused prepare + dispatch: seeds routing then dispatches in one call.
-  // Per-expert recv counts are written to recv_tokens_per_expert by the dispatch.
+  // Fused prepare + dispatch: seeds routing then dispatches in one call. Routing writes the
+  // per-expert recv counts to recv_tokens_per_expert and the scalar pre-drop per-rank recv total
+  // to total_recv_tokens_per_rank (nullable); the dispatch then reads the counts from the handle.
   void prepare_and_dispatch(void* handle_mem, const NVTETensor topk_idx, const NVTETensor tokens,
                             const NVTECommWindow& tokens_win, const NVTETensor topk_weights,
                             const NVTECommWindow& topk_weights_win, NVTETensor recv_tokens,
                             const NVTECommWindow& recv_tokens_win, NVTETensor recv_topk_weights,
                             const NVTECommWindow& recv_topk_weights_win,
-                            NVTETensor recv_tokens_per_expert, NVTEEpLayerConfig layer_cfg,
+                            NVTETensor recv_tokens_per_expert,
+                            NVTETensor total_recv_tokens_per_rank, NVTEEpLayerConfig layer_cfg,
                             cudaStream_t stream);
 
   void combine(void* handle_mem, const NVTETensor expert_out, const NVTECommWindow& expert_out_win,
@@ -130,7 +132,8 @@ class EPBackend {
                              NVTETensor recv_tokens, const NVTECommWindow& recv_tokens_win,
                              NVTETensor recv_topk_weights,
                              const NVTECommWindow& recv_topk_weights_win,
-                             NVTETensor recv_tokens_per_expert, cudaStream_t stream);
+                             NVTETensor recv_tokens_per_expert,
+                             NVTETensor total_recv_tokens_per_rank, cudaStream_t stream);
 };
 
 }  // namespace ep

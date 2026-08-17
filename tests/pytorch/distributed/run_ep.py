@@ -11,6 +11,7 @@ import numpy as np
 import torch
 import torch.distributed as dist
 
+from transformer_engine.common.recipe import MXFP8BlockScaling
 from transformer_engine.pytorch.ep import (
     EpBuffer,
     ep_bootstrap,
@@ -19,11 +20,11 @@ from transformer_engine.pytorch.ep import (
     ep_dispatch,
     ep_combine,
     symm_mem_alloc,
+    release_symm_mem_pool,
     is_symm_backed,
     _ep_combine_raw,
     _ep_dispatch_raw,
 )
-
 
 ZERO_COPY = os.environ.get("NVTE_EP_ZERO_COPY", "0") == "1"
 EAGER = os.environ.get("NVTE_EP_EAGER", "0") == "1"
@@ -32,11 +33,13 @@ OVERFLOW = os.environ.get("NVTE_EP_OVERFLOW", "0") == "1"
 # Must come after the transformer_engine import so libtransformer_engine.so is loaded.
 import transformer_engine_torch as tex  # noqa: F401
 
-
 NUM_LOCAL_EXPERTS = 2
-HIDDEN_DIM = 32
+# MXFP8 dispatch needs HIDDEN_DIM % 512 == 0 and TOKENS_PER_RANK % 32 == 0. Defaults
+# satisfy both so the MXFP8 tests run by default; override via NVTE_EP_HIDDEN_DIM /
+# NVTE_EP_TOKENS_PER_RANK.
+HIDDEN_DIM = int(os.environ.get("NVTE_EP_HIDDEN_DIM", "512"))
 TOP_K = 2
-TOKENS_PER_RANK = 4
+TOKENS_PER_RANK = int(os.environ.get("NVTE_EP_TOKENS_PER_RANK", "32"))
 
 
 def _zero_copy_test_include(fn):
@@ -54,6 +57,18 @@ def _eager_test_include(fn):
 def _overflow_test_include(fn):
     """Mark a test to run in the overflow (drop-on-overflow) pass; others skip there."""
     fn._overflow_test_include = True
+    return fn
+
+
+# MXFP8 grouped dispatch needs a per-expert alignment of 128, but the EP backend caches a single
+# alignment per process, so alignment=128 tests cannot share a process with the alignment=0 tests.
+# They run in a dedicated pass (NVTE_EP_MXFP8_PASS=1) instead.
+MXFP8_PASS = os.environ.get("NVTE_EP_MXFP8_PASS", "0") == "1"
+
+
+def _mxfp8_align_test(fn):
+    """Mark a test that dispatches with alignment=128; runs only in the MXFP8 pass."""
+    fn._mxfp8_align_test = True
     return fn
 
 
@@ -121,6 +136,16 @@ def _make_identity_inputs(rank, ep_size, device="cuda"):
     )
 
 
+def _degroup_mxfp8(recv_grouped, valid_counts=None):
+    """Dequantize a per-expert MXFP8 GroupedTensor to a dense tensor in expert-major order.
+    With ``valid_counts`` keep only the first ``valid_counts[e]`` rows of each padded expert
+    slot; otherwise return every (padded) row."""
+    parts = recv_grouped.split_into_quantized_tensors()
+    if valid_counts is None:
+        return torch.cat([p.dequantize() for p in parts], dim=0)
+    return torch.cat([p.dequantize()[:v] for p, v in zip(parts, valid_counts)], dim=0)
+
+
 class _Cfg:
     rank: int
     world_size: int
@@ -144,6 +169,10 @@ def _make_cfg() -> _Cfg:
         # Undersize recv capacity so identity routing overflows a rank's budget;
         # HT requires capacity >= max_tokens_per_rank.
         cfg.recv_capacity_per_rank = TOKENS_PER_RANK
+        if MXFP8_PASS:
+            # MXFP8 pins per-expert alignment to 128, so the capacity floor is one 128-row
+            # zone; undersize to a single zone (< the aligned per-expert demand) to force drop.
+            cfg.recv_capacity_per_rank = 128
     cfg.device = torch.device("cuda", torch.cuda.current_device())
     return cfg
 
@@ -171,6 +200,16 @@ class TestEP(unittest.TestCase):
         )
 
     def setUp(self):
+        # alignment=128 MXFP8 tests run only in the dedicated MXFP8 pass; everything else skips
+        # there (and the MXFP8 tests skip outside it) since the backend pins one alignment/process.
+        is_mxfp8_align = getattr(getattr(self, self._testMethodName), "_mxfp8_align_test", False)
+        if MXFP8_PASS and not is_mxfp8_align:
+            self.skipTest("only alignment=128 MXFP8 tests run in the MXFP8 pass")
+        if not MXFP8_PASS and is_mxfp8_align:
+            self.skipTest("alignment=128 MXFP8 tests run in the dedicated MXFP8 pass")
+        # MXFP8 quantization requires Blackwell (SM 10.0) or newer.
+        if is_mxfp8_align and torch.cuda.get_device_capability() < (10, 0):
+            self.skipTest("MXFP8 EP tests require Blackwell (SM 10.0) or newer")
         # Only the zero-copy-capable tests run in the zero-copy pass.
         if ZERO_COPY and not getattr(
             getattr(self, self._testMethodName), "_zero_copy_test_include", False
@@ -185,7 +224,13 @@ class TestEP(unittest.TestCase):
         ):
             self.skipTest("not exercised in overflow mode")
 
-    def _make_buffer(self, alignment=0, top_k=TOP_K):
+    def _make_buffer(
+        self,
+        alignment=0,
+        top_k=TOP_K,
+        dispatch_fwd_quant_recipe=None,
+        combine_bwd_quant_recipe=None,
+    ):
         return EpBuffer(
             top_k=top_k,
             max_tokens_per_rank=TOKENS_PER_RANK,
@@ -193,13 +238,17 @@ class TestEP(unittest.TestCase):
             num_local_experts=NUM_LOCAL_EXPERTS,
             recv_capacity_per_rank=None if EAGER else self.cfg.recv_capacity_per_rank,
             alignment=alignment,
+            dispatch_fwd_quant_recipe=dispatch_fwd_quant_recipe,
+            combine_bwd_quant_recipe=combine_bwd_quant_recipe,
         )
 
     def _expert_out(self, expert_out):
         """Stage the combine input into symm-mem under zero-copy (combine requires it)."""
         if not ZERO_COPY:
             return expert_out
-        symm_buf = symm_mem_alloc(tuple(expert_out.shape), expert_out.dtype, self.ep_group)
+        symm_buf = symm_mem_alloc(
+            tuple(expert_out.shape), expert_out.dtype, self.ep_group, use_pool=True
+        )
         return _StageToSymm.apply(expert_out, symm_buf)
 
     def _stage_grad_symm(self, x, symm_buf=None):
@@ -305,12 +354,12 @@ class TestEP(unittest.TestCase):
     def test_fused_prepare_and_dispatch(self):
         """Non-eager ep_dispatch fuses prepare+dispatch: one call seeds routing,
         dispatches, and writes the buffer-owned int64 tokens_per_expert. Checks the
-        per-expert counts, recv sizing, and that grad flows through the fused fwd.
-        Runs only in the default (count) pass; the mode passes skip it in setUp."""
+        fusion contract (buffer-owned counts), recv sizing, and the per-expert counts.
+        Runs only in the default (count) pass; the mode passes skip it in setUp.
+        The round-trip and grad are covered by test_combine_autograd."""
         buf = self._make_buffer()
         topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
-        tokens_p = tokens.detach().clone().requires_grad_(True)
-        recv_t, recv_w, tokens_per_expert = ep_dispatch(buf, tokens_p, topk_idx, w)
+        recv_t, recv_w, tokens_per_expert = ep_dispatch(buf, tokens, topk_idx, w)
         torch.cuda.synchronize()
         # The fused op writes the buffer-owned int64 per-expert counts and returns them.
         self.assertEqual(tokens_per_expert.data_ptr(), buf.tokens_per_expert.data_ptr())
@@ -324,16 +373,10 @@ class TestEP(unittest.TestCase):
         total = torch.tensor([local], dtype=torch.int64, device=self.cfg.device)
         dist.all_reduce(total, op=dist.ReduceOp.SUM, group=self.ep_group)
         self.assertEqual(int(total.item()), self.cfg.world_size * TOKENS_PER_RANK * TOP_K)
-        # Round-trip identity and grad flow through the fused forward.
-        out = ep_combine(buf, self._weighted(recv_t, recv_w))
-        (0.5 * (out.float() ** 2).sum()).backward()
-        torch.cuda.synchronize()
-        torch.testing.assert_close(out.float(), tokens.float(), atol=5e-2, rtol=5e-2)
-        torch.testing.assert_close(tokens_p.grad.float(), tokens.float(), atol=5e-2, rtol=5e-2)
 
     @_overflow_test_include
     def test_overflow_drop(self):
-        """drop_on_overflow: recv past capacity is dropped and dispatch continues
+        """drop_on_overflow: recv past capacity is dropped and the fused dispatch continues
         instead of trapping; the pre-drop recv total exceeds recv_capacity."""
         if not OVERFLOW:
             self.skipTest("overflow-only assertions")
@@ -343,19 +386,39 @@ class TestEP(unittest.TestCase):
         # overflows the deliberately undersized capacity.
         expected_recv = TOKENS_PER_RANK * TOP_K
         self.assertGreater(expected_recv, self.cfg.recv_capacity_per_rank)
-        # total_recv_tokens reports the true (pre-drop) recv total, counting the
-        # tokens that will be dropped; the per-expert counts exclude them and sum
-        # to the kept tokens (capped at recv_capacity_per_rank).
-        tokens_per_expert = ep_prepare(buf, topk_idx)
+        # Fused dispatch drops overflowing tokens and completes (no trap). It writes the true
+        # (pre-drop) recv total into total_recv_tokens, counting the dropped tokens; the per-expert
+        # counts exclude them and sum to the kept tokens (capped at recv_capacity_per_rank), and the
+        # recv outputs stay capped too.
+        recv_t, recv_w, tokens_per_expert = ep_dispatch(buf, tokens, topk_idx, w)
         torch.cuda.synchronize()
         self.assertEqual(int(buf.total_recv_tokens.item()), expected_recv)
         self.assertEqual(int(tokens_per_expert.sum().item()), self.cfg.recv_capacity_per_rank)
-        # Dispatch drops overflowing tokens and completes (no trap); recv outputs
-        # stay capped at recv_capacity_per_rank.
-        recv_t, recv_w, _ = ep_dispatch(buf, tokens, topk_idx, w)
-        torch.cuda.synchronize()
         self.assertEqual(recv_t.shape[0], self.cfg.recv_capacity_per_rank)
         self.assertEqual(recv_w.shape[0], self.cfg.recv_capacity_per_rank)
+
+    @_overflow_test_include
+    @_mxfp8_align_test
+    def test_overflow_drop_mxfp8(self):
+        """drop_on_overflow through the fused MXFP8 dispatch (alignment=128): the 128-aligned
+        per-expert demand exceeds the single-zone capacity, so recv past capacity is dropped and the
+        recv GroupedTensor stays capped. The fused dispatch writes total_recv_tokens with the true
+        (pre-drop) recv total; the per-expert counts exclude the dropped tokens and sum to the kept
+        (capped) count."""
+        if not OVERFLOW:
+            self.skipTest("overflow-only assertions")
+        self._require_mxfp8_shapes()
+        cap = self.cfg.recv_capacity_per_rank
+        topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
+        buf = self._make_buffer(dispatch_fwd_quant_recipe=MXFP8BlockScaling(), alignment=128)
+        # Fused dispatch drops overflowing tokens and completes (no trap); it writes the pre-drop
+        # recv total, and the recv GroupedTensor and its per-expert counts stay capped at capacity.
+        recv_mx, recv_w, tc = ep_dispatch(buf, tokens, topk_idx, w)
+        torch.cuda.synchronize()
+        self.assertGreater(int(buf.total_recv_tokens.item()), cap)
+        self.assertEqual(recv_mx.shape[0], cap)
+        self.assertEqual(recv_w.shape[0], cap)
+        self.assertEqual(int(tc.sum().item()), cap)
 
     # Identity round-trip via raw primitives
 
@@ -400,6 +463,77 @@ class TestEP(unittest.TestCase):
                 torch.testing.assert_close(
                     tokens_p.grad.float(), tokens.float() * float(TOP_K), atol=5e-2, rtol=5e-2
                 )
+
+    # MXFP8 dispatch
+
+    def _mxfp8_quantizer(self):
+        from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
+
+        return MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3, rowwise=True, columnwise=False)
+
+    def _require_mxfp8_shapes(self):
+        if HIDDEN_DIM % 512 != 0 or TOKENS_PER_RANK % 32 != 0:
+            self.skipTest(
+                "MXFP8 needs HIDDEN_DIM % 512 == 0 and TOKENS_PER_RANK % 32 == 0 "
+                "(set NVTE_EP_HIDDEN_DIM / NVTE_EP_TOKENS_PER_RANK)"
+            )
+
+    def _assert_mxfp8_matches_bf16(self, recv_mx, tokens, topk_idx, w, tc):
+        """Dequantized MXFP8 recv matches a bf16 dispatch of the same tokens. Each expert's recv
+        rows carry an arbitrary (combine-consistent) slot order, so rows are compared as a per-expert
+        multiset within each alignment=128 padded zone rather than slot-by-slot."""
+        ref_tokens = self._mxfp8_quantizer().quantize(tokens).dequantize()
+        ref_recv, _rw, _tc = ep_dispatch(self._make_buffer(alignment=128), ref_tokens, topk_idx, w)
+        torch.cuda.synchronize()
+        got = _degroup_mxfp8(recv_mx).float()
+        ref = ref_recv.float()[: int(tc.sum())]
+        start = 0
+        for end in torch.cumsum(tc, 0).tolist():
+            g, r = got[start:end], ref[start:end]
+            gi = torch.argsort(g.sum(dim=1), stable=True)
+            ri = torch.argsort(r.sum(dim=1), stable=True)
+            torch.testing.assert_close(g[gi], r[ri], atol=1e-2, rtol=1e-2)
+            start = end
+
+    @_eager_test_include
+    @_zero_copy_test_include
+    @_mxfp8_align_test
+    def test_dispatch_mxfp8(self):
+        """MXFP8 dispatch quantizes bf16 tokens internally; recv (a per-expert GroupedTensor)
+        dequantized matches a bf16 dispatch of the same tokens. Covers an internally allocated recv
+        and a caller-supplied one buffer holding the recv data then the e8m0 scales, which
+        ep_dispatch slices and views in place. Under zero-copy the recv data and scales are
+        symm-mem backed. Caller presizing is skipped in eager (recv is sized per-step there)."""
+        self._require_mxfp8_shapes()
+        from transformer_engine.pytorch.constants import MXFP8_BLOCK_SCALING_SIZE
+
+        rc = self.cfg.recv_capacity_per_rank
+        cols = HIDDEN_DIM // MXFP8_BLOCK_SCALING_SIZE
+        nbytes = rc * (HIDDEN_DIM + cols)  # fp8 data + e8m0 scales, one byte per element
+        topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
+        cases = ["internal_alloc"] + ([] if EAGER else ["caller_recv"])
+        for label in cases:
+            with self.subTest(case=label):
+                if label == "internal_alloc":
+                    recv_buf = None
+                elif ZERO_COPY:
+                    recv_buf = symm_mem_alloc((nbytes,), torch.uint8, self.ep_group)
+                else:
+                    recv_buf = torch.empty(nbytes, dtype=torch.uint8, device=self.cfg.device)
+                buf = self._make_buffer(
+                    dispatch_fwd_quant_recipe=MXFP8BlockScaling(), alignment=128
+                )
+                recv_mx, _rw, tc = ep_dispatch(buf, tokens, topk_idx, w, recv_tokens=recv_buf)
+                if recv_buf is not None:
+                    # the returned GroupedTensor views the caller buffer's data then scale regions
+                    self.assertEqual(recv_mx.rowwise_data.data_ptr(), recv_buf.data_ptr())
+                    self.assertEqual(
+                        recv_mx.scale_inv.data_ptr(), recv_buf.data_ptr() + rc * HIDDEN_DIM
+                    )
+                if ZERO_COPY:
+                    self.assertTrue(is_symm_backed(recv_mx.rowwise_data))
+                    self.assertTrue(is_symm_backed(recv_mx.scale_inv))
+                self._assert_mxfp8_matches_bf16(recv_mx, tokens, topk_idx, w, tc)
 
     @_zero_copy_test_include
     def test_caller_provides_dispatch_recv_tokens(self):
@@ -447,6 +581,63 @@ class TestEP(unittest.TestCase):
         torch.testing.assert_close(tokens_p.grad.float(), tokens.float(), atol=5e-2, rtol=5e-2)
         # the caller-owned buffer was used as the combine-bwd scatter target
         self.assertGreater(gbuf.abs().sum().item(), 0.0)
+
+    @_eager_test_include
+    @_mxfp8_align_test
+    def test_combine_bwd_mxfp8(self):
+        """MXFP8 combine backward matches a bf16 combine backward reference on the same routing: the
+        returned per-expert GroupedTensor dequantized equals the bf16 grad. Covers an internally
+        allocated grad target and a caller-supplied one buffer holding the grad data then the e8m0
+        scales, which combine backward slices and views in place. Count-mode dispatch is unsupported
+        under zero-copy, so this runs outside the zero-copy pass; caller presizing is skipped in
+        eager (the grad target is sized per-step there)."""
+        self._require_mxfp8_shapes()
+        from transformer_engine.pytorch.constants import MXFP8_BLOCK_SCALING_SIZE
+
+        rc = self.cfg.recv_capacity_per_rank
+        cols = HIDDEN_DIM // MXFP8_BLOCK_SCALING_SIZE
+        topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
+        cases = ["internal_alloc"] + ([] if EAGER else ["caller_grad_out"])
+        for label in cases:
+            with self.subTest(case=label):
+                buf_mx = self._make_buffer(
+                    combine_bwd_quant_recipe=MXFP8BlockScaling(), alignment=128
+                )
+                _recv, _rw, tc = ep_dispatch(buf_mx, tokens, topk_idx, w)  # seeds the routing
+                # Combine input rows match the recv total (per-step in eager, capacity otherwise).
+                rows = int(buf_mx.total_recv_tokens.item()) if EAGER else rc
+                eo_vals = (
+                    torch.linspace(-0.5, 0.5, rows * HIDDEN_DIM, device=self.cfg.device)
+                    .reshape(rows, HIDDEN_DIM)
+                    .to(torch.bfloat16)
+                )
+                # For the caller case, combine backward writes into one buffer (data then scales).
+                grad_buf = (
+                    torch.empty(rc * (HIDDEN_DIM + cols), dtype=torch.uint8, device=self.cfg.device)
+                    if label == "caller_grad_out"
+                    else None
+                )
+                src_mx = eo_vals.detach().clone().requires_grad_(True)
+                out_mx = ep_combine(buf_mx, self._expert_out(src_mx), grad_out=grad_buf)
+                (0.5 * (out_mx.float() ** 2).sum()).backward()
+                g_mx = src_mx.grad  # per-expert GroupedTensor
+                if grad_buf is not None:
+                    # the returned GroupedTensor views the caller buffer's data then scale regions
+                    self.assertEqual(g_mx.rowwise_data.data_ptr(), grad_buf.data_ptr())
+                    self.assertEqual(
+                        g_mx.scale_inv.data_ptr(), grad_buf.data_ptr() + rc * HIDDEN_DIM
+                    )
+                # bf16 reference combine backward on the same routing
+                buf_bf = self._make_buffer(alignment=128)
+                ep_dispatch(buf_bf, tokens, topk_idx, w)
+                src_bf = eo_vals.detach().clone().requires_grad_(True)
+                out_bf = ep_combine(buf_bf, self._expert_out(src_bf))
+                (0.5 * (out_bf.float() ** 2).sum()).backward()
+                torch.cuda.synchronize()
+                n = int(tc.sum())
+                torch.testing.assert_close(
+                    _degroup_mxfp8(g_mx).float(), src_bf.grad.float()[:n], atol=5e-2, rtol=5e-2
+                )
 
     @_zero_copy_test_include
     def test_zero_copy_pool_auto_alloc(self):
@@ -556,18 +747,29 @@ class TestEP(unittest.TestCase):
 
         recv = [None, None, None]
         # Per-microbatch grad-staging buffers, symm-mem under zero-copy and
-        # pre-allocated so nothing is allocated/freed mid-interleave. The recv
-        # outputs are owned by each EpBuffer (symm-mem under zero-copy).
+        # pre-allocated so nothing is allocated/freed mid-interleave.
         recv_w = [None, None, None]
         rc = self.cfg.recv_capacity_per_rank
         if ZERO_COPY:
             gbuf_t = [symm_mem_alloc((rc, H), torch.bfloat16, self.ep_group) for _ in scales]
             gbuf_w = [symm_mem_alloc((rc,), torch.float32, self.ep_group) for _ in scales]
+            # Persistent symm-mem recv buffers per microbatch: leaving recv None
+            # pool-allocates, which is not CUDA-graph capturable.
+            rbuf_t = [symm_mem_alloc((rc, H), torch.bfloat16, self.ep_group) for _ in scales]
+            rbuf_w = [symm_mem_alloc((rc,), torch.float32, self.ep_group) for _ in scales]
         else:
             gbuf_t = gbuf_w = [None, None, None]
+            rbuf_t = rbuf_w = [None, None, None]
 
         def fwd(k):
-            rt, rw, _ = ep_dispatch(buffers[k], tokens_p[k], idx, w)
+            rt, rw, _ = ep_dispatch(
+                buffers[k],
+                tokens_p[k],
+                idx,
+                w,
+                recv_tokens=rbuf_t[k],
+                recv_topk_weights=rbuf_w[k],
+            )
             recv[k] = self._stage_grad_symm(rt, gbuf_t[k])
             recv_w[k] = self._stage_grad_symm(rw, gbuf_w[k])
 
@@ -660,5 +862,7 @@ if __name__ == "__main__":
     result = runner.run(suite)
     dist.barrier()
     ep_finalize()
+    # Deregister symm-mem windows while the comm is still valid.
+    release_symm_mem_pool()
     dist.destroy_process_group()
     sys.exit(0 if result.wasSuccessful() else 1)

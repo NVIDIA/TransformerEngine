@@ -47,26 +47,50 @@ ncclDataType_t te_dtype_to_nccl_dtype(NVTEDType dtype) {
       return ncclFloat8e4m3;
     case kNVTEFloat8E5M2:
       return ncclFloat8e5m2;
+    case kNVTEFloat8E8M0:
+      return ncclUint8;
     default:
       NVTE_ERROR("Unsupported NVTEDType for NCCL dtype conversion: ", static_cast<int>(dtype));
   }
   return ncclFloat32;  // unreachable
 }
 
-// shape_out is caller-owned; desc.sizes aliases shape_out.data and must
-// outlive the NCCL EP call.
+// Which part of a TE tensor an NCCL descriptor points at: the data payload, or
+// (for block-scaled tensors) the rowwise scale-inverse that rides alongside it.
+enum class DescSource { kData, kScaleInv };
+
+// Build an NCCL descriptor for a TE tensor's data (kData) or its rowwise
+// scale-inverse (kScaleInv). shape_out is caller-owned; desc.sizes aliases
+// shape_out.data and must outlive the NCCL EP call. Uses the matching window
+// field (win.window / win.scale_window) when set, else the raw pointer.
 inline ncclEpTensor_t make_nccl_ep_tensor(const NVTETensor t, NVTEShape& shape_out,
-                                          const NVTECommWindow& win = {}) {
-  shape_out = nvte_tensor_shape(t);
+                                          const NVTECommWindow& win = {},
+                                          DescSource source = DescSource::kData) {
   ncclEpTensor_t desc = NCCL_EP_TENSOR_INIT;
+  void* raw_ptr = nullptr;
+  ncclWindow_t win_hdl = nullptr;
+  uint64_t win_offset = 0;
+  if (source == DescSource::kData) {
+    shape_out = nvte_tensor_shape(t);
+    desc.datatype = te_dtype_to_nccl_dtype(nvte_tensor_type(t));
+    raw_ptr = nvte_tensor_data(t);
+    win_hdl = win.window;
+    win_offset = win.offset;
+  } else {
+    const SimpleTensor& si = convertNVTETensorCheck(t)->scale_inv;
+    shape_out = nvte_make_shape(si.shape.data(), si.shape.size());
+    desc.datatype = te_dtype_to_nccl_dtype(static_cast<NVTEDType>(si.dtype));
+    raw_ptr = si.dptr;
+    win_hdl = win.scale_window;
+    win_offset = win.scale_offset;
+  }
   desc.ndim = shape_out.ndim;
   desc.sizes = shape_out.data;
-  desc.datatype = te_dtype_to_nccl_dtype(nvte_tensor_type(t));
-  if (win.window != nullptr) {
-    desc.win_hdl = win.window;
-    desc.win_offset = win.offset;
+  if (win_hdl != nullptr) {
+    desc.win_hdl = win_hdl;
+    desc.win_offset = win_offset;
   } else {
-    desc.data = nvte_tensor_data(t);
+    desc.data = raw_ptr;
     NVTE_CHECK(desc.data != nullptr || nvte_tensor_numel(t) == 0,
                "non-empty tensor data must not be null");
   }
@@ -373,7 +397,8 @@ void EPBackend::issue_dispatch_locked(ncclEpHandle_t handle, const NVTETensor to
                                       NVTETensor recv_tokens, const NVTECommWindow& recv_tokens_win,
                                       NVTETensor recv_topk_weights,
                                       const NVTECommWindow& recv_topk_weights_win,
-                                      NVTETensor recv_tokens_per_expert, cudaStream_t stream) {
+                                      NVTETensor recv_tokens_per_expert,
+                                      NVTETensor total_recv_tokens_per_rank, cudaStream_t stream) {
   NVTE_CHECK(nvte_tensor_shape(tokens).ndim == 2, "tokens must be 2D [T, hidden_dim]");
   NVTE_CHECK(nvte_tensor_shape(recv_tokens).ndim == 2,
              "recv_tokens must be 2D [recv_T, hidden_dim]");
@@ -414,26 +439,60 @@ void EPBackend::issue_dispatch_locked(ncclEpHandle_t handle, const NVTETensor to
         make_nccl_ep_tensor(recv_topk_weights, recv_topk_weights_shape, recv_topk_weights_win);
   }
 
+  // Block-scaled (e.g. MXFP8): route the per-token scale-inverse alongside the
+  // data. High-precision (bf16/fp16/fp32) and per-tensor FP8 payloads carry the
+  // default delayed scaling mode and skip this. Keys on is_block_scaling so
+  // NVFP4 can reuse this path later.
+  const NVTEScalingMode tokens_scaling_mode = nvte_tensor_scaling_mode(tokens);
+  const bool is_scaled = is_block_scaling(tokens_scaling_mode);
+  NVTEShape scales_in_shape, scales_out_shape;
+  ncclEpTensor_t nccl_scales_in = NCCL_EP_TENSOR_INIT, nccl_scales_out = NCCL_EP_TENSOR_INIT;
+  if (is_scaled) {
+    NVTE_CHECK(is_mxfp8_scaling(tokens_scaling_mode),
+               "EP dispatch supports MXFP8 block scaling only; got scaling mode ",
+               static_cast<int>(tokens_scaling_mode));
+    NVTE_CHECK(nvte_tensor_scaling_mode(recv_tokens) == tokens_scaling_mode,
+               "recv_tokens scaling mode must match tokens scaling mode");
+    nccl_scales_in =
+        make_nccl_ep_tensor(tokens, scales_in_shape, tokens_win, DescSource::kScaleInv);
+    nccl_scales_out =
+        make_nccl_ep_tensor(recv_tokens, scales_out_shape, recv_tokens_win, DescSource::kScaleInv);
+  } else {
+    NVTE_CHECK(!is_fp8_dtype(static_cast<DType>(tok_dtype)),
+               "EP dispatch of FP8 tokens requires a block scaling mode (e.g. MXFP8); "
+               "per-tensor (delayed) FP8 scaling is not supported");
+  }
+
   ncclEpDispatchInputs_t in_struct = NCCL_EP_DISPATCH_INPUTS_INIT;
   in_struct.tokens = &nccl_tokens_in;
   in_struct.topk_weights = is_forward ? &nccl_topk_weights_in : nullptr;
+  in_struct.scales = is_scaled ? &nccl_scales_in : nullptr;
 
   ncclEpDispatchOutputs_t out_struct = NCCL_EP_DISPATCH_OUTPUTS_INIT;
   out_struct.tokens = &nccl_tokens_out;
   out_struct.topk_weights = is_forward ? &nccl_topk_weights_out : nullptr;
+  out_struct.scales = is_scaled ? &nccl_scales_out : nullptr;
 
   ncclEpDispatchConfig_t dispatch_cfg = NCCL_EP_DISPATCH_CONFIG_INIT;
   dispatch_cfg.pass_direction = is_forward ? NCCL_EP_FWD_PASS : NCCL_EP_BWD_PASS;
+  // Block-scaled payloads forward the per-token scale-inverse; select the matching recipe.
+  dispatch_cfg.quant_recipe = is_scaled ? NCCL_EP_DISP_QUANT_FWD : NCCL_EP_DISP_QUANT_NONE;
 
-  // Count mode: wire the caller's per-expert counts tensor so the dispatch
-  // writes recv counts. NULL leaves layout_info unset (non-count callers).
+  // Count mode: wire the caller's per-expert counts and the scalar pre-drop recv total so the
+  // fused dispatch writes them (the count scan is fused into the dispatch). NULL leaves
+  // layout_info unset (non-count callers).
   ncclEpLayoutInfo_t layout_info = NCCL_EP_LAYOUT_INFO_INIT;
-  NVTEShape recv_counts_shape;
-  ncclEpTensor_t recv_counts_desc;
+  NVTEShape recv_counts_shape, total_recv_shape;
+  ncclEpTensor_t recv_counts_desc, total_recv_desc;
   const ncclEpLayoutInfo_t* layout_info_ptr = nullptr;
   if (recv_tokens_per_expert != nullptr) {
     recv_counts_desc = make_nccl_ep_tensor(recv_tokens_per_expert, recv_counts_shape);
     layout_info.expert_counters = &recv_counts_desc;
+    layout_info_ptr = &layout_info;
+  }
+  if (total_recv_tokens_per_rank != nullptr) {
+    total_recv_desc = make_nccl_ep_tensor(total_recv_tokens_per_rank, total_recv_shape);
+    layout_info.recv_total_counter = &total_recv_desc;
     layout_info_ptr = &layout_info;
   }
 
@@ -452,18 +511,17 @@ void EPBackend::dispatch(void* handle_mem, const NVTETensor topk_idx, const NVTE
   ncclEpHandle_t h = lookup_handle_locked(handle_mem);
   issue_dispatch_locked(h, topk_idx, tokens, tokens_win, topk_weights, topk_weights_win,
                         recv_tokens, recv_tokens_win, recv_topk_weights, recv_topk_weights_win,
-                        /*recv_tokens_per_expert=*/nullptr, stream);
+                        /*recv_tokens_per_expert=*/nullptr,
+                        /*total_recv_tokens_per_rank=*/nullptr, stream);
 }
 
-void EPBackend::prepare_and_dispatch(void* handle_mem, const NVTETensor topk_idx,
-                                     const NVTETensor tokens, const NVTECommWindow& tokens_win,
-                                     const NVTETensor topk_weights,
-                                     const NVTECommWindow& topk_weights_win, NVTETensor recv_tokens,
-                                     const NVTECommWindow& recv_tokens_win,
-                                     NVTETensor recv_topk_weights,
-                                     const NVTECommWindow& recv_topk_weights_win,
-                                     NVTETensor recv_tokens_per_expert, NVTEEpLayerConfig layer_cfg,
-                                     cudaStream_t stream) {
+void EPBackend::prepare_and_dispatch(
+    void* handle_mem, const NVTETensor topk_idx, const NVTETensor tokens,
+    const NVTECommWindow& tokens_win, const NVTETensor topk_weights,
+    const NVTECommWindow& topk_weights_win, NVTETensor recv_tokens,
+    const NVTECommWindow& recv_tokens_win, NVTETensor recv_topk_weights,
+    const NVTECommWindow& recv_topk_weights_win, NVTETensor recv_tokens_per_expert,
+    NVTETensor total_recv_tokens_per_rank, NVTEEpLayerConfig layer_cfg, cudaStream_t stream) {
   NVTE_CHECK(handle_mem != nullptr, "handle_mem must not be null");
   NVTE_CHECK(layer_cfg.top_k > 0, "top_k must be > 0, got ", layer_cfg.top_k);
   NVTE_CHECK(nvte_tensor_shape(topk_idx).ndim == 2, "topk_idx must be 2D [T, top_k]");
@@ -471,15 +529,16 @@ void EPBackend::prepare_and_dispatch(void* handle_mem, const NVTETensor topk_idx
   NVTEShape topk_idx_shape;
   ncclEpTensor_t nccl_topk_idx = make_nccl_ep_tensor(topk_idx, topk_idx_shape);
 
+  // The per-expert recv counts and the scalar pre-drop per-rank recv total are produced by the
+  // dispatch, which fuses the count scan into itself. Leave UpdateHandle's layout_info NULL so the
+  // fused path stays active, then wire both tensors into the dispatch below.
   std::lock_guard<std::mutex> lock(mutex_);
   NVTE_CHECK(initialized_, "EPBackend not initialized");
   ncclEpHandle_t h = prepare_handle_locked(handle_mem, layer_cfg);
-  // Count mode: UpdateHandle only seeds routing; the dispatch produces the
-  // per-expert recv counts into recv_tokens_per_expert.
   NVTE_CHECK_NCCL(ncclEpUpdateHandle(h, &nccl_topk_idx, /*layout_info=*/nullptr, stream));
   issue_dispatch_locked(h, topk_idx, tokens, tokens_win, topk_weights, topk_weights_win,
                         recv_tokens, recv_tokens_win, recv_topk_weights, recv_topk_weights_win,
-                        recv_tokens_per_expert, stream);
+                        recv_tokens_per_expert, total_recv_tokens_per_rank, stream);
 }
 
 void EPBackend::combine(void* handle_mem, const NVTETensor expert_out,
