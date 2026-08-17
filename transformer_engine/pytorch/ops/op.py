@@ -10,7 +10,6 @@ from collections.abc import Iterable, Sequence
 import dataclasses
 import pickle
 from typing import Any, Optional
-import weakref
 
 import torch
 

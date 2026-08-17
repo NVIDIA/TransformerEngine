@@ -791,26 +791,10 @@ class TestExtraTensorChannels:
         torch.testing.assert_close(y, 2 * x)
         torch.testing.assert_close(route, x)
 
-<<<<<<< HEAD
-        consumer.set_extra_input_channel(0, None)
-        extra = torch.rand_like(x)
-        with pytest.raises(RuntimeError, match="Construct a new OperationFuser"):
-            model(x, extra)
-
-        model = te_ops.Sequential(producer, consumer)
-        y, route = model(x, extra)
-        torch.testing.assert_close(y, x + extra)
-        torch.testing.assert_close(route, x)
-
-        producer.set_extra_output_channel(0, "route", output_to_caller=False)
-        with pytest.raises(RuntimeError, match="Construct a new OperationFuser"):
-            model(x, extra)
-=======
         with pytest.raises(RuntimeError, match="already captured its channel routing"):
             consumer.set_extra_input_channel(0, None)
         with pytest.raises(RuntimeError, match="already captured its channel routing"):
             producer.set_extra_output_channel(0, "route", output_to_caller=False)
->>>>>>> nvidia_origin/main
 
     @pytest.mark.parametrize("layout", ("two_ops", "same_op"))
     def test_duplicate_extra_output_channel_names(self, layout: str) -> None:
