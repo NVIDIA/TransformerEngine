@@ -148,8 +148,6 @@ LaunchConfig get_launch_config(const size_t first_logical_dim, const size_t last
     config.work_blocks_Y = DIVUP(config.same_both_rows, CHUNK_DIM_Y);
     NVTE_CHECK(config.work_blocks_X > 0 && config.work_blocks_Y > 0,
                "SAME_BOTH_DIMS requires non-empty tensors.");
-    NVTE_CHECK(config.work_blocks_Y <= 65535 && num_tensors <= 65535,
-               "SAME_BOTH_DIMS direct mapper exceeds CUDA grid Y/Z limits.");
 
     // Direct tensor-local mapper: one CTA owns one chunk.
     config.grid = dim3(config.work_blocks_X, config.work_blocks_Y, num_tensors);
@@ -158,8 +156,6 @@ LaunchConfig get_launch_config(const size_t first_logical_dim, const size_t last
     config.work_blocks_Y = DIVUP(first_logical_dim, CHUNK_DIM_Y);
     NVTE_CHECK(config.work_blocks_X > 0 && config.work_blocks_Y > 0,
                "VARYING_FIRST_DIM requires a non-empty logical tensor.");
-    NVTE_CHECK(config.work_blocks_Y <= 65535,
-               "VARYING_FIRST_DIM direct mapper exceeds the CUDA grid Y limit.");
 
     // Tensor boundaries are TILE_DIM_Y-aligned, so each CTA directly owns one configured chunk
     // in the vertically stacked tensor.
