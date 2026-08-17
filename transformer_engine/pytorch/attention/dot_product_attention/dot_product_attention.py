@@ -2044,10 +2044,13 @@ class DotProductAttention(TransformerEngineBaseModule):
             # softcap is not supported by UnfusedDotProductAttention, which is the backend ONNX
             # export unconditionally force-selects further down (bypassing get_attention_backend's
             # softcap-aware filter). Fail loudly rather than silently export a model that omits
-            # softcapping.
-            assert (
-                softcap == 0.0 or not is_in_onnx_export_mode()
-            ), "Attention logit softcapping (softcap != 0.0) is not supported with ONNX export!"
+            # softcapping. Uses an explicit raise (not assert) so the check survives python -O /
+            # PYTHONOPTIMIZE, which strips asserts and would otherwise silently re-open this gap.
+            if softcap != 0.0 and is_in_onnx_export_mode():
+                raise ValueError(
+                    "Attention logit softcapping (softcap != 0.0) is not supported with "
+                    "ONNX export!"
+                )
 
             # Validate experimental Flex Attention API inputs that backend selection
             # cannot represent.
