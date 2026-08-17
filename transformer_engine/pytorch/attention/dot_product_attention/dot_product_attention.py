@@ -578,6 +578,12 @@ class DotProductAttention(TransformerEngineBaseModule):
                 or bottom right (`True`) corner of the softmax matrix in the encoder.
                 If `None`, it will be set to `False` for `attn_mask_type` =
                 {'causal', 'padding_causal'} and `True` for other mask types.
+    softcap : float, default = 0.0
+                tanh logit softcapping value applied to the attention scores as
+                ``softcap * tanh(scores / softcap)``. A value of ``0.0`` disables
+                softcapping. Softcapping is only supported by the FlashAttention
+                backend. Similar to :attr:`window_size`, ``softcap`` can be
+                overridden by :attr:`softcap` in ``forward`` as well.
     attention_type : str, default = "self"
                    type of attention, either ``"self"`` and ``"cross"``.
     layer_number : int, default = None
@@ -677,6 +683,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         attn_mask_type: str = "causal",
         window_size: Optional[Tuple[int, int]] = None,
         bottom_right_diagonal: Optional[bool] = None,
+        softcap: float = 0.0,
         sequence_parallel: bool = False,
         tp_size: int = 1,
         get_rng_state_tracker: Optional[Callable] = None,
@@ -713,6 +720,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         self.attn_mask_type = attn_mask_type
         self.window_size = dpa_utils.check_set_window_size(attn_mask_type, window_size)
         self.bottom_right_diagonal = bottom_right_diagonal
+        self.softcap = softcap
         if tp_group is None:
             self.tp_size = tp_size
             if tp_size == 1:
@@ -1393,6 +1401,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         attn_mask_type: Optional[str] = None,
         window_size: Optional[Tuple[int, int]] = None,
         bottom_right_diagonal: Optional[bool] = None,
+        softcap: Optional[float] = None,
         checkpoint_core_attention: bool = False,
         core_attention_bias_type: str = "no_bias",
         core_attention_bias: Optional[torch.Tensor] = None,
@@ -1563,6 +1572,11 @@ class DotProductAttention(TransformerEngineBaseModule):
                        causal masks are aligned to the bottom right corner.
         window_size: Optional[Tuple[int, int]], default = None
                     Sliding window size for local attention.
+        softcap: Optional[float], default = None
+                    tanh logit softcapping value applied to the attention scores as
+                    ``softcap * tanh(scores / softcap)``. A value of ``0.0`` disables
+                    softcapping. When `None`, the value passed to the constructor is used.
+                    Softcapping is only supported by the FlashAttention backend.
         bottom_right_diagonal: Optional[bool], default = None
                     Align sliding window and ALiBi diagonal to the top left (`False`)
                     or bottom right (`True`) corner of the softmax matrix in the encoder.
@@ -1743,6 +1757,8 @@ class DotProductAttention(TransformerEngineBaseModule):
             if window_size is None:
                 window_size = self.window_size
             window_size = dpa_utils.check_set_window_size(attn_mask_type, window_size)
+            if softcap is None:
+                softcap = self.softcap
             if bottom_right_diagonal is None:
                 bottom_right_diagonal = self.bottom_right_diagonal
             if attn_mask_type in {"causal", "padding_causal"}:
@@ -2025,6 +2041,14 @@ class DotProductAttention(TransformerEngineBaseModule):
                 else:
                     pad_between_seqs = False
 
+            # softcap is not supported by UnfusedDotProductAttention, which is the backend ONNX
+            # export unconditionally force-selects further down (bypassing get_attention_backend's
+            # softcap-aware filter). Fail loudly rather than silently export a model that omits
+            # softcapping.
+            assert (
+                softcap == 0.0 or not is_in_onnx_export_mode()
+            ), "Attention logit softcapping (softcap != 0.0) is not supported with ONNX export!"
+
             # Validate experimental Flex Attention API inputs that backend selection
             # cannot represent.
             if score_mod is None:
@@ -2074,6 +2098,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                 attn_mask_type=attn_mask_type,
                 window_size=window_size,
                 bottom_right_diagonal=bottom_right_diagonal,
+                softcap=softcap,
                 alibi_slopes_shape=alibi_slopes.shape if alibi_slopes is not None else None,
                 core_attention_bias_type=core_attention_bias_type,
                 core_attention_bias_shape=core_attention_bias_shape,
@@ -2205,6 +2230,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                     cu_seqlens_kv=cu_seqlens_kv,
                     attn_mask_type=attn_mask_type,
                     window_size=window_size,
+                    softcap=softcap,
                     alibi_slopes=alibi_slopes,
                     cp_group=self.cp_group,
                     cp_global_ranks=self.cp_global_ranks,
