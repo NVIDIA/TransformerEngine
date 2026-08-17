@@ -2598,6 +2598,7 @@ def get_qkv_layout(
             " torch.compile. Pass the packed buffer explicitly via DotProductAttention's"
             " qkv_layer/kv_layer (with qkv_interleave_dim)."
         )
+        q, k, v = [x if x.is_contiguous() else x.contiguous() for x in (q, k, v)]
         if is_same_q_kv_format:
             qkv_layout = "_".join([qkv_format] * 3)
         else:
