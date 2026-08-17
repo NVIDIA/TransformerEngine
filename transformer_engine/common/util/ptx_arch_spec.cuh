@@ -9,7 +9,7 @@
  *
  *  This header should only be included by sources that are listed under
  *  `transformer_engine_cuda_sources` in CMakeLists.txt since these helper
- *  functions use architecture-specific instructions and must be compiled with 
+ *  functions use architecture-specific instructions and must be compiled with
  *  corresponding flags (e.g. sm100f, sm100a, etc.).
  */
 
@@ -122,7 +122,7 @@ __device__ __forceinline__ void reduce_sync_max_abs_f32(float &out, float const 
 #if FP4_TYPE_SUPPORTED
 
 __device__ __forceinline__ fp4e2m1x4 mul_cvt_bf16_to_fp4_4x_with_stochastic_rounding(
-  const uint64_t in_4x, const float2 scale, const uint32_t rbits) {
+    const uint64_t in_4x, const float2 scale, const uint32_t rbits) {
   uint16_t out_4x = 0;
   constexpr bool has_rs = ARCH_HAS_STOCHASTIC_ROUNDING;
   if constexpr (has_rs) {
