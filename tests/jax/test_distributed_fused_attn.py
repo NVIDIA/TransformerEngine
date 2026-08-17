@@ -40,6 +40,7 @@ from transformer_engine.jax.attention import (
 
 DTYPES = [jnp.bfloat16]
 
+
 @contextmanager
 def _scan_env(use_scan_ring):
     """Set NVTE_FUSED_RING_ATTENTION_USE_SCAN and restore the prior value on exit."""
