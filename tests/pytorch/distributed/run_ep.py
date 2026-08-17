@@ -162,6 +162,8 @@ def _make_moe_inputs(rank, ep_size, device="cuda"):
     )
     topk_logits, topk_idx = torch.topk(router_logits, TOP_K, dim=-1)
     return topk_idx, tokens, torch.softmax(topk_logits, dim=-1)
+
+
 def _degroup_mxfp8(recv_grouped, valid_counts=None):
     """Dequantize a per-expert MXFP8 GroupedTensor to a dense tensor in expert-major order.
     With ``valid_counts`` keep only the first ``valid_counts[e]`` rows of each padded expert
