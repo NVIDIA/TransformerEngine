@@ -22,6 +22,8 @@
 #ifndef TRANSFORMER_ENGINE_COMMON_FUSED_ATTN_GRAPH_CACHE_H_
 #define TRANSFORMER_ENGINE_COMMON_FUSED_ATTN_GRAPH_CACHE_H_
 
+#include <cstdint>
+#include <cstdlib>
 #include <exception>
 #include <map>
 #include <memory>
@@ -44,12 +46,45 @@ namespace fused_attn {
 // configuration and reproducible for a given key, so it can be remembered and replayed, whereas
 // a failure that came from the machine's state at that moment (an allocation that did not fit, a
 // CUDA error left behind by unrelated work) could well succeed on the next attempt and must not
-// be turned into a permanent answer. Only the four adjudicating frontend calls in
-// validate_and_check_support() raise this; every other failure keeps its ordinary type and is
+// be turned into a permanent answer. Only a frontend call that returned one of the codes
+// is_unsupported_verdict() names raises this; every other failure keeps its ordinary type and is
 // re-attempted the next time the key comes around.
 struct UnsupportedGraph : public std::runtime_error {
   explicit UnsupportedGraph(const std::string &reason) : std::runtime_error(reason) {}
 };
+
+// Whether a frontend error code is a verdict on the graph rather than a report of something
+// that went wrong on the way to reaching one.
+//
+// cudnn-frontend distinguishes the two, and the negative cache is only sound for the first.
+// Three codes are verdicts:
+//
+//   GRAPH_NOT_SUPPORTED is what the frontend's own support surface returns, from validate().
+//     Nearly every rule it checks by hand -- the architecture gates, the head-dim limits, the
+//     version-specific workarounds -- reports itself this way.
+//   GRAPH_EXECUTION_PLAN_CREATION_FAILED is what check_support() returns when no engine config
+//     cuDNN's heuristics offered can run the graph. This is the verdict for everything the
+//     frontend does not rule on itself and defers to the backend, so leaving it out would
+//     exclude most of what a support probe actually discovers.
+//   UNSUPPORTED_GRAPH_FORMAT is a verdict by name and costs nothing to accept, though no
+//     frontend release we build against returns it.
+//
+// All three are properties of the key and will be just as true the next time it is asked. Every
+// other code -- CUDNN_BACKEND_API_FAILED, CUDA_API_FAILED, HEURISTIC_QUERY_FAILED, HANDLE_ERROR,
+// INVALID_CUDA_DEVICE and the rest -- describes the process at that moment: an OOM under memory
+// pressure, a sticky CUDA error left by unrelated work, a handle on the wrong device.
+// CUDNN_BACKEND_API_FAILED is the one to be careful about, since the frontend raises it for any
+// non-success cudnnStatus_t and so cannot tell CUDNN_STATUS_ALLOC_FAILED from
+// CUDNN_STATUS_NOT_SUPPORTED; caching it would let a moment of memory pressure blacklist a
+// configuration that is genuinely supported, for the life of the process, and the wider the
+// cache's reach the worse that gets. So those are raised as ordinary errors, which leave nothing
+// behind and are retried when the key next comes around. Either way cuDNN's own message reaches
+// the caller; only whether it is remembered differs.
+inline bool is_unsupported_verdict(cudnn_frontend::error_code_t code) {
+  return code == cudnn_frontend::error_code_t::GRAPH_NOT_SUPPORTED ||
+         code == cudnn_frontend::error_code_t::GRAPH_EXECUTION_PLAN_CREATION_FAILED ||
+         code == cudnn_frontend::error_code_t::UNSUPPORTED_GRAPH_FORMAT;
+}
 
 // The reason string an is_supported_* helper reports for `e`: its message, or `fallback` if it
 // has none. Those helpers signal support by returning the empty string, so a refusal that
@@ -86,7 +121,10 @@ struct CachedGraph {
 
 // One build site's cache. Process-wide rather than per-thread so that a graph is reused
 // across threads instead of rebuilt by each: cuDNN >= 9.0 allows concurrent execution of a
-// shared plan, and cudnn-frontend >= 1.25.0 has a thread-safe execute().
+// shared plan, and the frontend's execute() builds its variant pack in a local rather than in
+// the graph, so it does not write to the shared object. No particular frontend version is
+// relied on for that -- it has held for far longer than the >= 1.25.0 the build requirements
+// ask for, which is there for unrelated features.
 //
 // Refusals are cached alongside the graphs, under the same keys and the same lock. A support
 // query for an unsupported configuration is otherwise the most expensive thing this cache sees:
@@ -100,12 +138,72 @@ struct CachedGraph {
 // last: the maps go while their guard is still valid, rather than the other way round. Declaring
 // a cache and its lock as two separate objects leaves that ordering to whoever writes the next
 // one; declaring them here settles it once.
+//
+// Both maps are bounded; see cache_capacity(). `last_used` is what makes the bound an LRU rather
+// than an arbitrary cull: it is stamped from `clock` on every insertion and every hit, so the
+// entry with the smallest value is the one that has gone longest without being asked for. The
+// clock is an ordinary member rather than an atomic because it is only ever touched under
+// `mutex`, alongside the maps it orders.
 template <typename GraphAndTensors>
 struct GraphCache {
-  std::mutex mutex;  // guards both maps below
-  std::map<FusedAttnConfig, std::shared_ptr<CachedGraph<GraphAndTensors>>> supported;
-  std::map<FusedAttnConfig, std::string> unsupported;
+  struct Slot {
+    std::shared_ptr<CachedGraph<GraphAndTensors>> entry;
+    uint64_t last_used;
+  };
+  struct Refusal {
+    std::string reason;
+    uint64_t last_used;
+  };
+
+  std::mutex mutex;  // guards everything below
+  uint64_t clock = 0;
+  std::map<FusedAttnConfig, Slot> supported;
+  std::map<FusedAttnConfig, Refusal> unsupported;
 };
+
+// The default ceiling on entries in one of the maps of one build site's cache.
+//
+// Sized to be out of the way of real work rather than to be tight. A training step reuses a
+// handful of configurations, an inference server with bucketed sequence lengths tens of them;
+// a few hundred is already far more shape diversity than a model exhibits. What the ceiling is
+// for is the case where the key space is effectively unbounded -- a test suite sweeping shapes,
+// or a serving workload that keys on something that never repeats -- where an unbounded cache
+// is a slow leak of cuDNN graphs and their execution plans for the life of the process.
+constexpr size_t kDefaultCacheCapacity = 500;
+
+// The ceiling in force, from NVTE_FUSED_ATTN_CACHE_MAX_ENTRIES if it is set. 0 means no ceiling,
+// which is the escape hatch for a workload that genuinely has thousands of live configurations
+// and would rather spend the memory than rebuild. Read once: the limit is a property of the run.
+inline size_t cache_capacity() {
+  static const size_t capacity = [] {
+    const char *e = std::getenv("NVTE_FUSED_ATTN_CACHE_MAX_ENTRIES");
+    if (e == nullptr || e[0] == '\0') return kDefaultCacheCapacity;
+    const long long v = std::atoll(e);  // NOLINT(runtime/int)
+    return v < 0 ? kDefaultCacheCapacity : static_cast<size_t>(v);
+  }();
+  return capacity;
+}
+
+// Make room in `entries` for one more, by dropping the least recently used until there is.
+// Call under the cache's lock.
+//
+// Evicting a graph does not invalidate one that is in use. get_or_build_cached_graph() hands
+// back a shared_ptr, so a thread that is executing an entry holds it alive regardless of what
+// the map does; erasing here drops the cache's reference and nothing else. The scan is linear,
+// but it runs only when the cache is full, and comparing a few hundred integers is nothing
+// beside the graph build it is making room for.
+template <typename Map>
+void evict_to_fit(Map &entries) {
+  const size_t capacity = cache_capacity();
+  if (capacity == 0) return;
+  while (entries.size() >= capacity) {
+    auto oldest = entries.begin();
+    for (auto it = entries.begin(); it != entries.end(); ++it) {
+      if (it->second.last_used < oldest->second.last_used) oldest = it;
+    }
+    entries.erase(oldest);
+  }
+}
 
 // Takes a constructed graph through the frontend calls that decide whether cuDNN can run it:
 // validate, build_operation_graph, create_execution_plans, check_support. The sequence is
@@ -119,30 +217,40 @@ struct GraphCache {
 // the graph want the throw as well, since there is nothing useful to do with an unsupported
 // graph but fail.
 //
-// The throw is re-raised as UnsupportedGraph, which is what marks it cacheable. These four calls
-// are cuDNN adjudicating a graph it has been handed, so a failure among them is a statement about
-// the graph rather than about the moment -- which is the property the negative cache needs, and
-// the reason the boundary is drawn here rather than around a wider region. build_plans() and
-// execute() sit outside it: they commit real resources and can fail for reasons that have nothing
-// to do with the configuration.
+// A failure is raised as UnsupportedGraph only when the frontend's own error code says the graph
+// was adjudicated and refused; see is_unsupported_verdict(). Anything else these calls can report
+// is a failure to reach a verdict and is raised through NVTE_ERROR, so it is not remembered.
+// Classifying on the code rather than on which call failed is what keeps that honest: all four of
+// these calls can fail for environmental reasons too -- build_operation_graph() and
+// create_execution_plans() both talk to the cuDNN backend -- so their position in the sequence
+// says nothing about whether the failure was about the configuration.
 //
-// build_plans() is left out for a second reason as well: it belongs to whoever executes the graph,
-// once, the first time it is needed. See CachedGraph.
+// build_plans() and execute() sit outside this function entirely: they commit real resources, and
+// build_plans() belongs to whoever executes the graph, once, the first time it is needed. See
+// CachedGraph.
 inline void validate_and_check_support(const char *pass, cudnn_frontend::graph::Graph &graph,
                                        cudnnHandle_t handle) {
-  try {
-    graph_cache_debug::timer(pass, graph_cache_debug::BuildStage::Validate,
-                             [&] { NVTE_CHECK_CUDNN_FE(graph.validate()); });
-    graph_cache_debug::timer(pass, graph_cache_debug::BuildStage::BuildOpGraph,
-                             [&] { NVTE_CHECK_CUDNN_FE(graph.build_operation_graph(handle)); });
-    graph_cache_debug::timer(pass, graph_cache_debug::BuildStage::CreatePlans, [&] {
-      NVTE_CHECK_CUDNN_FE(graph.create_execution_plans({cudnn_frontend::HeurMode_t::A}));
-    });
-    graph_cache_debug::timer(pass, graph_cache_debug::BuildStage::CheckSupport,
-                             [&] { NVTE_CHECK_CUDNN_FE(graph.check_support()); });
-  } catch (const std::exception &e) {
-    throw UnsupportedGraph(e.what());
-  }
+  auto run = [&](graph_cache_debug::BuildStage stage, const char *call_name, auto &&call) {
+    cudnn_frontend::error_t error;
+    graph_cache_debug::timer(pass, stage, [&] { error = call(); });
+    if (error.is_good()) return;
+    // cuDNN normally explains itself; fall back to the call's name so that a refusal can never
+    // arrive as an empty string, which the is_supported_* helpers would read as an endorsement.
+    const std::string reason =
+        error.err_msg.empty() ? std::string(call_name) + " failed." : error.err_msg;
+    if (is_unsupported_verdict(error.code)) throw UnsupportedGraph(reason);
+    NVTE_ERROR("cuDNN Error in ", call_name, ": ", reason,
+               " For more information, enable cuDNN error logging by setting CUDNN_LOGERR_DBG=1 "
+               "and CUDNN_LOGDEST_DBG=stderr in the environment.");
+  };
+
+  run(graph_cache_debug::BuildStage::Validate, "validate", [&] { return graph.validate(); });
+  run(graph_cache_debug::BuildStage::BuildOpGraph, "build_operation_graph",
+      [&] { return graph.build_operation_graph(handle); });
+  run(graph_cache_debug::BuildStage::CreatePlans, "create_execution_plans",
+      [&] { return graph.create_execution_plans({cudnn_frontend::HeurMode_t::A}); });
+  run(graph_cache_debug::BuildStage::CheckSupport, "check_support",
+      [&] { return graph.check_support(); });
 }
 
 // The cached entry for `key`, building and inserting it via `build` if absent. Throws
@@ -172,6 +280,8 @@ std::shared_ptr<CachedGraph<GraphAndTensors>> get_or_build_cached_graph(
     GraphCache<GraphAndTensors> &cache, const FusedAttnConfig &key, const char *pass,
     cudnnHandle_t handle, BuildFn &&build) {
   using Entry = CachedGraph<GraphAndTensors>;
+  using Slot = typename GraphCache<GraphAndTensors>::Slot;
+  using Refusal = typename GraphCache<GraphAndTensors>::Refusal;
 
   std::shared_ptr<Entry> cached;
   bool refused = false;
@@ -180,11 +290,15 @@ std::shared_ptr<CachedGraph<GraphAndTensors>> get_or_build_cached_graph(
     std::lock_guard<std::mutex> lock(cache.mutex);
     auto it = cache.supported.find(key);
     if (it != cache.supported.end()) {
-      cached = it->second;
+      it->second.last_used = ++cache.clock;
+      cached = it->second.entry;
     } else {
       auto refusal = cache.unsupported.find(key);
       refused = (refusal != cache.unsupported.end());
-      if (refused) reason = refusal->second;
+      if (refused) {
+        refusal->second.last_used = ++cache.clock;
+        reason = refusal->second.reason;
+      }
     }
   }
   using graph_cache_debug::LookupResult;
@@ -216,7 +330,8 @@ std::shared_ptr<CachedGraph<GraphAndTensors>> get_or_build_cached_graph(
   } catch (const UnsupportedGraph &e) {
     {
       std::lock_guard<std::mutex> lock(cache.mutex);
-      cache.unsupported.insert({key, e.what()});
+      evict_to_fit(cache.unsupported);
+      cache.unsupported.insert({key, Refusal{e.what(), ++cache.clock}});
     }
     graph_cache_debug::record_unsupported(pass);
     throw;
@@ -224,7 +339,11 @@ std::shared_ptr<CachedGraph<GraphAndTensors>> get_or_build_cached_graph(
   graph_cache_debug::record_build(pass);
   {
     std::lock_guard<std::mutex> lock(cache.mutex);
-    return cache.supported.insert({key, std::move(entry)}).first->second;
+    evict_to_fit(cache.supported);
+    // On a losing race the insert does nothing: the temporary Slot is destroyed with the graph
+    // this thread built, and what comes back is the winner's entry.
+    auto inserted = cache.supported.insert({key, Slot{std::move(entry), ++cache.clock}});
+    return inserted.first->second.entry;
   }
 }
 

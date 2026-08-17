@@ -32,15 +32,19 @@
 // totals, of which only the pass being reported is shown (the counters are printed
 // right-aligned in a fixed width, dropped here):
 //
-//   THREAD      | tid=0   os_tid=1234
-//   fwd BUILD   | tid=0   | fwd miss=1, hit=0, built=1, unsup=0, plans=0, exec=0 | bwd ...
-//   bwd BUILD   | tid=0   | fwd ...  | bwd miss=1, hit=0, built=1, unsup=0, plans=0, exec=0
-//   fwd PLANS   | tid=0   | fwd miss=1, hit=1, built=1, unsup=0, plans=1, exec=0 | bwd ...
+//   THREAD      | tid=0   dev=0   os_tid=1234
+//   fwd BUILD   | tid=0   dev=0   | fwd miss=1, hit=0, built=1, unsup=0, plans=0, exec=0 | bwd ...
+//   bwd BUILD   | tid=0   dev=0   | fwd ...  | bwd miss=1, hit=0, built=1, unsup=0, plans=0, ...
+//   fwd PLANS   | tid=0   dev=0   | fwd miss=1, hit=1, built=1, unsup=0, plans=1, exec=0 | bwd ...
 //   ===== summary begin =====
-//   SUMMARY-TID | tid=0   | fwd miss=1, hit=1, built=1, unsup=0, plans=1, exec=1 | bwd ...
-//   SUMMARY     | tid=all | fwd miss=1, hit=1, built=1, unsup=0, plans=1, exec=1 | bwd ...
+//   SUMMARY-TID | tid=0   dev=0   | fwd miss=1, hit=1, built=1, unsup=0, plans=1, exec=1 | bwd ...
+//   SUMMARY     | tid=all dev=all | fwd miss=1, hit=1, built=1, unsup=0, plans=1, exec=1 | bwd ...
 //   fwd check_support         | calls=1 | time=   42.135 ms/call
 //   ===== summary end =====
+//
+// The device column matters as soon as one process drives more than one -- device_id is part of
+// the cache key, so the same shape on two devices is two entries, and a build count that looks
+// doubled is explained by reading which device each BUILD came from.
 //
 // Two forward lookups against one build is the shape of a healthy run: the support
 // query missed and built, and the execution that followed hit the entry the query left
@@ -77,6 +81,7 @@
 #include <utility>
 #include <vector>
 
+#include "../util/cuda_runtime.h"
 #include "config_and_params.h"
 
 namespace transformer_engine {
@@ -208,8 +213,15 @@ inline EventCounters &counters(bool is_fwd) {
 // Per-thread counters, so the summary can break down build/exec/hit/miss by
 // thread. In the single-process context-parallel case each device is driven by
 // its own thread, so this reveals which thread built/executed what.
+//
+// `device` is the device this thread last drove, restamped on every event. The event lines print
+// the live current device, which is exact; this exists for the SUMMARY-TID rows, which are
+// written at exit by whichever thread is exiting and so cannot ask the recorded thread what it
+// was working on. A thread that stays on one device -- which is the arrangement everything here
+// is built around, device_id being part of the cache key -- makes the two the same answer.
 struct ThreadCounters {
   unsigned tid = 0;
+  std::atomic<int> device{-1};
   EventCounters fwd;
   EventCounters bwd;
 };
@@ -239,13 +251,19 @@ inline ThreadCounters &thread_counters() {
   static thread_local ThreadCounters *tc = [] {
     auto *p = new ThreadCounters();
     p->tid = thread_seq_id();
+    // Stamped here as well as on every event, so that a thread which only ever hits the cache --
+    // and so never reaches print_counters() at level 1 -- still names a device in the summary
+    // rather than reporting the -1 it was constructed with.
+    const int device = cuda::current_device();
+    p->device.store(device, std::memory_order_relaxed);
     {
       std::lock_guard<std::mutex> lock(thread_registry_mutex());
       thread_registry().push_back(p);
     }
     // One line per thread, mapping the short id to something nsys/gdb can match.
-    std::fprintf(stderr, "[FUSED-ATTN-CACHE] %s | THREAD      | tid=%-3u os_tid=%" PRId64 "\n",
-                 process_tag().c_str(), p->tid, os_thread_id());
+    std::fprintf(stderr,
+                 "[FUSED-ATTN-CACHE] %s | THREAD      | tid=%-3u dev=%-3d os_tid=%" PRId64 "\n",
+                 process_tag().c_str(), p->tid, device, os_thread_id());
     std::fflush(stderr);
     return p;
   }();
@@ -259,41 +277,52 @@ inline EventCounters &thread_counters(bool is_fwd) {
 
 // Format one counter block (aggregate or a single thread's) as one line.
 // `tid_field` is the whole thread column, e.g. "tid=3"; the aggregate row passes
-// "tid=all" so that it cannot be misread as thread 0's row.
+// "tid=all" so that it cannot be misread as thread 0's row. `dev_field` is the device column and
+// works the same way, "dev=all" on the aggregate row -- the counters there are summed across
+// whatever devices the process drove, so naming one of them would be a lie.
 //
 // The columns are meant to be read against two identities. Every lookup lands in exactly one of
 // miss and hit, and every miss ends in exactly one of built and unsup -- so `miss = built + unsup`
 // and a shortfall in either means a build died of something other than a refusal. `built >= plans`
 // always, the difference being graphs that a support query built and nothing has yet run.
 inline std::string format_counter_line(const char *event, const char *tid_field,
-                                       const EventCounters &f, const EventCounters &b) {
+                                       const char *dev_field, const EventCounters &f,
+                                       const EventCounters &b) {
   char buf[768];
   std::snprintf(buf, sizeof(buf),
-                "[FUSED-ATTN-CACHE] %s | %-11s | %-7s | fwd miss=%4" PRIu64 ", hit=%4" PRIu64
+                "[FUSED-ATTN-CACHE] %s | %-11s | %-7s %-7s | fwd miss=%4" PRIu64 ", hit=%4" PRIu64
                 ", built=%4" PRIu64 ", unsup=%4" PRIu64 ", plans=%4" PRIu64 ", exec=%4" PRIu64
                 " | bwd miss=%4" PRIu64 ", hit=%4" PRIu64 ", built=%4" PRIu64 ", unsup=%4" PRIu64
                 ", plans=%4" PRIu64 ", exec=%4" PRIu64 "\n",
-                process_tag().c_str(), event, tid_field, f.miss.load(std::memory_order_relaxed),
-                f.hit.load(std::memory_order_relaxed), f.built.load(std::memory_order_relaxed),
-                f.unsup.load(std::memory_order_relaxed), f.plans.load(std::memory_order_relaxed),
-                f.exec.load(std::memory_order_relaxed), b.miss.load(std::memory_order_relaxed),
-                b.hit.load(std::memory_order_relaxed), b.built.load(std::memory_order_relaxed),
-                b.unsup.load(std::memory_order_relaxed), b.plans.load(std::memory_order_relaxed),
-                b.exec.load(std::memory_order_relaxed));
+                process_tag().c_str(), event, tid_field, dev_field,
+                f.miss.load(std::memory_order_relaxed), f.hit.load(std::memory_order_relaxed),
+                f.built.load(std::memory_order_relaxed), f.unsup.load(std::memory_order_relaxed),
+                f.plans.load(std::memory_order_relaxed), f.exec.load(std::memory_order_relaxed),
+                b.miss.load(std::memory_order_relaxed), b.hit.load(std::memory_order_relaxed),
+                b.built.load(std::memory_order_relaxed), b.unsup.load(std::memory_order_relaxed),
+                b.plans.load(std::memory_order_relaxed), b.exec.load(std::memory_order_relaxed));
   return std::string(buf);
 }
 
-inline void print_counter_block(const char *event, const char *tid_field, const EventCounters &f,
-                                const EventCounters &b) {
-  const std::string line = format_counter_line(event, tid_field, f, b);
+inline void print_counter_block(const char *event, const char *tid_field, const char *dev_field,
+                                const EventCounters &f, const EventCounters &b) {
+  const std::string line = format_counter_line(event, tid_field, dev_field, f, b);
   std::fputs(line.c_str(), stderr);
   std::fflush(stderr);
 }
 
+// One event line, from the thread the event happened on. The device is read live rather than
+// remembered, so it is the device this event was actually issued against, and is recorded on the
+// thread's block on the way past for the benefit of the exit summary.
 inline void print_counters(const char *event) {
+  const int device = cuda::current_device();
+  thread_counters().device.store(device, std::memory_order_relaxed);
   char tid_field[16];
+  char dev_field[16];
   std::snprintf(tid_field, sizeof(tid_field), "tid=%u", thread_seq_id());
-  print_counter_block(event, tid_field, counters(/*is_fwd=*/true), counters(/*is_fwd=*/false));
+  std::snprintf(dev_field, sizeof(dev_field), "dev=%d", device);
+  print_counter_block(event, tid_field, dev_field, counters(/*is_fwd=*/true),
+                      counters(/*is_fwd=*/false));
 }
 
 // A graph built through check_support() and cached. Call after the build, from the miss
@@ -467,10 +496,11 @@ inline StageTiming &stage_timing(bool is_fwd, BuildStage s) {
 
 // Times one stage: clock read in the constructor, accumulated in the destructor.
 // Recording on scope exit rather than at an explicit stop() keeps a failing stage
-// measurable -- the frontend calls are wrapped in NVTE_CHECK_CUDNN_FE, which
-// throws, and the destructor still runs during unwinding -- so a build that dies
-// in `check_support` contributes its time to failure instead of vanishing from the
-// summary. `on` is latched at construction rather than re-tested in the destructor,
+// measurable: `build_plans` throws through NVTE_CHECK_CUDNN_FE and the destructor
+// still runs during unwinding, so a build that dies there contributes its time to
+// the failure instead of vanishing from the summary. The four stages before it
+// return their status instead of throwing, and are timed the same way for the same
+// reason. `on` is latched at construction rather than re-tested in the destructor,
 // which is what keeps that symmetric: the destructor can never accumulate against a
 // `start` the constructor left unset.
 struct ScopedBuildTimer {
@@ -527,12 +557,15 @@ inline void register_summary_once() {
                   [](const ThreadCounters *a, const ThreadCounters *b) { return a->tid < b->tid; });
         for (const ThreadCounters *tc : blocks) {
           char tid_field[16];
+          char dev_field[16];
           std::snprintf(tid_field, sizeof(tid_field), "tid=%u", tc->tid);
-          block += format_counter_line("SUMMARY-TID", tid_field, tc->fwd, tc->bwd);
+          std::snprintf(dev_field, sizeof(dev_field), "dev=%d",
+                        tc->device.load(std::memory_order_relaxed));
+          block += format_counter_line("SUMMARY-TID", tid_field, dev_field, tc->fwd, tc->bwd);
         }
       }
       // Totals last, so they read as the sum of the per-thread lines above.
-      block += format_counter_line("SUMMARY", "tid=all", counters(/*is_fwd=*/true),
+      block += format_counter_line("SUMMARY", "tid=all", "dev=all", counters(/*is_fwd=*/true),
                                    counters(/*is_fwd=*/false));
       for (int p = 0; p < 2; ++p) {
         const bool is_fwd = (p == 0);

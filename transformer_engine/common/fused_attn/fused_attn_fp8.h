@@ -11,6 +11,8 @@
 #ifndef TRANSFORMER_ENGINE_COMMON_FUSED_ATTN_FUSED_ATTN_FP8_H_
 #define TRANSFORMER_ENGINE_COMMON_FUSED_ATTN_FUSED_ATTN_FP8_H_
 
+#include <cudnn.h>
+
 #include <string>
 
 #include "config_and_params.h"

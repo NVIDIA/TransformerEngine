@@ -198,9 +198,27 @@ backend-selection overview.
 
 .. envvar:: NVTE_FUSED_ATTN_CACHE_DEBUG
 
-   :Type: ``int`` (0 or 1)
+   :Type: ``int`` (0, 1 or 2), optionally followed by ``:<ranks>``
    :Default: ``0``
-   :Description: Enable diagnostic logging for the FusedAttention graph cache (covers both the F16 and FP8 kernels, forward and backward). When set to ``1``, prints to stderr (prefixed ``[FUSED-ATTN-CACHE]``) a per-lookup ``HIT``/``MISS`` line with the full graph-cache key, a ``BUILD`` line whenever a new graph is constructed, an ``EXEC`` line whenever a graph is executed, a ``SUMMARY`` of graph builds vs. executions at process exit, and a breakdown of cuDNN graph-build timings. Useful for diagnosing redundant graph rebuilds or stale-cache reuse, and for profiling graph-build cost. Has negligible overhead when unset.
+   :Description: Enable diagnostic logging for the FusedAttention graph cache (covers both the F16 and FP8 kernels, forward and backward). Output goes to stderr, prefixed ``[FUSED-ATTN-CACHE]``.
+
+      ``1`` emits one line per event that happens once per distinct cache key -- ``BUILD`` when a graph is constructed, ``PLANS`` when its kernels are compiled on first execution, ``UNSUP`` when cuDNN refuses a configuration -- plus an end-of-run ``SUMMARY`` (aggregate and per thread) and a breakdown of cuDNN graph-build timings. This is enough to diagnose redundant graph rebuilds and to profile build cost.
+
+      ``2`` additionally emits a per-lookup ``HIT``/``MISS``/``NOSUP`` line carrying the full cache key, and a per-execution ``EXEC`` line. Diffing two ``MISS`` lines names the fields that cost the extra build. These fire on every lookup and execution, so at test-suite scale they add I/O and serialize threads on the stderr lock; prefer ``1`` unless you need to see which shapes are missing.
+
+      By default only rank 0 emits, so that output does not scale with the world size. Append ``:<ranks>`` to override -- ``1:all`` for every rank, ``2:0,3`` for a specific set. Worth overriding under context parallelism, where the ranks genuinely run different configurations.
+
+      Has negligible overhead when unset.
+
+.. envvar:: NVTE_FUSED_ATTN_CACHE_MAX_ENTRIES
+
+   :Type: ``int``
+   :Default: ``500``
+   :Description: Ceiling on the number of entries the FusedAttention graph cache keeps per build site, evicting least-recently-used entries to stay under it. There are four build sites (F16 and FP8, forward and backward), each holding a cache of graphs and a cache of configurations cuDNN refused, and the ceiling applies to each of those independently.
+
+      The default is meant to be out of the way of real work rather than tight: a training step reuses a handful of configurations and an inference server with bucketed sequence lengths tens of them, so a few hundred is already more shape diversity than a model exhibits. The ceiling exists for workloads whose key space is effectively unbounded -- a test suite sweeping shapes, or a server keying on something that never repeats -- where an unbounded cache is a slow leak of cuDNN graphs and their execution plans for the life of the process.
+
+      Set to ``0`` to disable the ceiling entirely, for a workload that genuinely has thousands of live configurations and would rather spend the memory than rebuild. Evicting a graph never disturbs one that is executing; execution holds its own reference.
 
 .. envvar:: NVTE_ALLOW_NONDETERMINISTIC_ALGO
 

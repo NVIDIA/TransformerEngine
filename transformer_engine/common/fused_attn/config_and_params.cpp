@@ -138,6 +138,12 @@ FusedAttnConfig FusedAttnConfig::make_cache_key() const {
   // attn_scale is a pass-by-value graph input and different scales can share the same cached graph
   cache_cfg.attn_scale = 1.0f;
 
+  // cuda_graph never reaches a graph builder. Its one use is the cuDNN <= 9.15 rejection in
+  // nvte_get_fused_attn_backend_v2(), which is decided before the cache is consulted, so a
+  // configuration that gets this far builds the same graph either way. Left in the key it would
+  // give a workload that both captures and runs eagerly two entries for every configuration.
+  cache_cfg.cuda_graph = false;
+
   // Restrict each direction's key to the fields its graph actually consumes, so
   // no redundant graphs are built and no cache misses either
   if (check_for_forward_support) {

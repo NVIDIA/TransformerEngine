@@ -254,6 +254,7 @@ bool set_message_if(bool rejected, const char **message, std::string reason) {
 // select a backend for fused attention; the diagnostic message is based on the first failure, not cumulative.
 NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend_v2(NVTEFusedAttnConfig config,
                                                        const char **message) {
+  NVTE_API_CALL(nvte_get_fused_attn_backend_v2);
   using namespace transformer_engine;
   using namespace transformer_engine::fused_attn;
   // Derived on a copy, leaving the caller's config untouched: this function answers a question
@@ -297,11 +298,24 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend_v2(NVTEFusedAttnConfig confi
     return NVTE_Fused_Attn_Backend::NVTE_No_Backend;
   }
 
-  // Ragged Q/KV requires sm90+. cuDNN's check_support accepts them below that, but the only
-  // graph we can build there is the dense max_seqlen one -- supports_packed_ragged_graph() is
-  // false, so SDPA_backward never gets max_total_seq_len_q/kv and its dQ/dK/dV come back wrong.
-  // A wrong-result rejection like this one has to be stated here; check_support answers whether
-  // cuDNN can run the graph, not whether the graph computes what we asked for.
+  // Ragged Q/KV requires sm90+, the rule the hand-written support matrix this function replaced
+  // carried as `qkv_format == NVTE_THD && sm_arch_ >= 90`. Below sm90 the only graph we can build
+  // is the dense max_seqlen one -- supports_packed_ragged_graph() is false -- so SDPA_backward
+  // never gets max_total_seq_len_q/kv and its dQ/dK/dV come back wrong.
+  //
+  // This is ours to state because it is a wrong-result rejection, and check_support answers a
+  // different question: whether cuDNN can run the graph, not whether the graph computes what we
+  // asked for. cuDNN's own answer has moved, which is what makes the distinction worth spelling
+  // out here. Its frontend gates ragged SDPA on `sm < 90 && cudnn < 9.18.1`, so through 9.18.0 it
+  // would have refused this configuration for us and the rule below is redundant; from 9.18.1 it
+  // accepts sm80/sm89 ragged and the rule is the only thing standing between a THD model on an
+  // A100 and silently wrong gradients. Lifting it is a change to the graphs TE builds -- packed
+  // ragged shapes, and the Stats/LSE layouts that go with them, which cuDNN documents as
+  // differing on sm8x -- not a change to this condition, and that work is deliberately not part
+  // of this refactor.
+  //
+  // sm120 takes that same dense path and is left enabled, as it was before this refactor;
+  // whether it has the same problem is a separate question from restoring the sm90 rule.
   if (set_message_if((cfg.is_ragged_q || cfg.is_ragged_kv) &&
                          cuda::sm_arch(cuda::current_device()) < 90,
                      message, "Ragged (THD) Q or KV requires compute capability 9.0 or higher.")) {

@@ -165,6 +165,15 @@ struct FusedAttnConfig {
       sizeof(size_t),  // bias_seqlen_kv
   };
 
+  // The public header asks contributors to append to NVTEFusedAttnConfigAttribute, and the
+  // accessors index attr_sizes[attr] after checking only that attr is below the sentinel. An
+  // enumerator added without its size here would therefore read one past the end of this array,
+  // silently and only for the new attribute. Tying the two together turns that into a build
+  // failure at the line that has to change.
+  static_assert(sizeof(attr_sizes) / sizeof(attr_sizes[0]) == kNVTEFusedAttnConfigNumAttributes,
+                "attr_sizes must have one entry per NVTEFusedAttnConfigAttribute; add the size of "
+                "the new attribute alongside its enumerator.");
+
   bool operator<(const FusedAttnConfig &rhs) const {
     return std::tie(is_training, deterministic, cuda_graph, return_max_logit, attn_mask_type,
                     bias_type, window_size_left, window_size_right, bottom_right_diagonal,
@@ -302,6 +311,12 @@ struct FusedAttnFwdParams {
       sizeof(cudaStream_t),       // stream
   };
 
+  // See FusedAttnConfig::attr_sizes: an enumerator appended without a size here reads past the
+  // end of this array.
+  static_assert(sizeof(attr_sizes) / sizeof(attr_sizes[0]) == kNVTEFusedAttnFwdParamsNumAttributes,
+                "attr_sizes must have one entry per NVTEFusedAttnFwdParamsAttribute; add the size "
+                "of the new attribute alongside its enumerator.");
+
   // Build a FusedAttnConfig from the scalar "knobs" carried here (e.g. attn_mask_type, bias_type)
   // and the fields derived from the tensor handles (dtypes, dims, scaling mode, paged-KV and bias
   // broadcast shapes). Returns the real execution config; call FusedAttnConfig::make_cache_key on
@@ -397,6 +412,12 @@ struct FusedAttnBwdParams {
       sizeof(NVTETensor),              // workspace
       sizeof(cudaStream_t),            // stream
   };
+
+  // See FusedAttnConfig::attr_sizes: an enumerator appended without a size here reads past the
+  // end of this array.
+  static_assert(sizeof(attr_sizes) / sizeof(attr_sizes[0]) == kNVTEFusedAttnBwdParamsNumAttributes,
+                "attr_sizes must have one entry per NVTEFusedAttnBwdParamsAttribute; add the size "
+                "of the new attribute alongside its enumerator.");
 
   // Build a FusedAttnConfig from the scalar "knobs" carried here (e.g. attn_mask_type, bias_type)
   // and the fields derived from the tensor handles (e.g. dtypes, dims, scaling mode and bias broadcast

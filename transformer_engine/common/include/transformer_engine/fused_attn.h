@@ -11,8 +11,6 @@
 #ifndef TRANSFORMER_ENGINE_FUSED_ATTN_H_
 #define TRANSFORMER_ENGINE_FUSED_ATTN_H_
 
-#include <cudnn.h>
-
 #include "stdint.h"
 #include "transformer_engine.h"
 
@@ -1004,7 +1002,13 @@ class FusedAttnConfigWrapper {
 
   FusedAttnConfigWrapper &operator=(FusedAttnConfigWrapper &&other) noexcept {
     if (this != &other) {
-      nvte_destroy_fused_attn_config(cfg_);
+      // Guarded as the destructor is. A moved-from wrapper holds nullptr, and the C API rejects a
+      // NULL handle by throwing; thrown out of a noexcept function that is a call to
+      // std::terminate, which no caller can catch. The guard belongs on this side rather than in
+      // nvte_destroy_*, so that the C entry point keeps reporting a genuinely bad handle.
+      if (cfg_ != nullptr) {
+        nvte_destroy_fused_attn_config(cfg_);
+      }
       cfg_ = other.cfg_;
       other.cfg_ = nullptr;
     }
@@ -1179,7 +1183,11 @@ class FusedAttnFwdParamsWrapper {
 
   FusedAttnFwdParamsWrapper &operator=(FusedAttnFwdParamsWrapper &&other) noexcept {
     if (this != &other) {
-      nvte_destroy_fused_attn_fwd_params(params_);
+      // See FusedAttnConfigWrapper::operator=: destroying a moved-from (NULL) handle throws out
+      // of a noexcept function, which is std::terminate.
+      if (params_ != nullptr) {
+        nvte_destroy_fused_attn_fwd_params(params_);
+      }
       params_ = other.params_;
       other.params_ = nullptr;
     }
@@ -1327,7 +1335,11 @@ class FusedAttnBwdParamsWrapper {
 
   FusedAttnBwdParamsWrapper &operator=(FusedAttnBwdParamsWrapper &&other) noexcept {
     if (this != &other) {
-      nvte_destroy_fused_attn_bwd_params(params_);
+      // See FusedAttnConfigWrapper::operator=: destroying a moved-from (NULL) handle throws out
+      // of a noexcept function, which is std::terminate.
+      if (params_ != nullptr) {
+        nvte_destroy_fused_attn_bwd_params(params_);
+      }
       params_ = other.params_;
       other.params_ = nullptr;
     }
