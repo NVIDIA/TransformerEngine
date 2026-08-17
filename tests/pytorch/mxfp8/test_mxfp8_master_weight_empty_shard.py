@@ -28,20 +28,28 @@ def single_rank_group():
             torch.distributed.destroy_process_group()
 
 
-def _make_weight(dtype):
+# multi_tensor_compute_scale_inv_e8m0 requires a bf16 amax, and the amax buffer takes the
+# model weight dtype, so bf16 is the only model dtype this path supports.
+MODEL_DTYPE = torch.bfloat16
+
+
+def _make_weight():
     quantizer = MXFP8Quantizer(fp8_dtype=te.DType.kFloat8E4M3, rowwise=True, columnwise=True)
-    weight = quantizer.make_empty((128, 128), dtype=dtype, device="cuda")
-    quantizer.update_quantized(torch.randn(128, 128, dtype=dtype, device="cuda"), weight)
+    weight = quantizer.make_empty((128, 128), dtype=MODEL_DTYPE, device="cuda")
+    quantizer.update_quantized(torch.randn(128, 128, dtype=MODEL_DTYPE, device="cuda"), weight)
     return weight
 
 
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
-@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
-def test_empty_master_shard_agrees_with_populated_rank(monkeypatch, single_rank_group, dtype):
+def test_empty_master_shard_agrees_with_populated_rank(monkeypatch, single_rank_group):
     """A rank owning no shard must reduce the same amax dtype as one that owns data.
 
     Wide FSDP sharding pads the parameter bucket, so the tail ranks can end up with an
     empty shard of every weight. Those ranks still join the amax all-reduce.
+
+    Single-GPU counterpart of the 2-rank case in
+    tests/pytorch/distributed/test_cast_master_weights_to_fp8.py, which checks the same
+    agreement over a real collective.
     """
     amax_dtypes = []
     real_all_reduce = torch.distributed.all_reduce
@@ -52,12 +60,12 @@ def test_empty_master_shard_agrees_with_populated_rank(monkeypatch, single_rank_
 
     monkeypatch.setattr(torch.distributed, "all_reduce", spy)
 
-    populated = _make_weight(dtype)
+    populated = _make_weight()
     master = torch.randn(populated.numel(), dtype=torch.float32, device="cuda")
     quantize_master_weights([populated], [master], [0], group=single_rank_group)
 
     # Used to raise UnboundLocalError instead of reaching the all-reduce.
-    quantize_master_weights([_make_weight(dtype)], [None], [None], group=single_rank_group)
+    quantize_master_weights([_make_weight()], [None], [None], group=single_rank_group)
 
     assert len(amax_dtypes) == 2
     assert amax_dtypes[0] == amax_dtypes[1]
