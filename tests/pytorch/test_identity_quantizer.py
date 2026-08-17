@@ -249,7 +249,9 @@ class TestIdentityQuantizerUnit:
         detached = tensor.detach()
 
         assert type(detached) is DerivedIdentityTensor
-        assert detached._hp_data is tensor._hp_data
+        assert detached._hp_data.data_ptr() == tensor._hp_data.data_ptr()
+        assert detached._hp_data.stride() == tensor._hp_data.stride()
+        assert detached._hp_data.storage_offset() == tensor._hp_data.storage_offset()
         assert not detached.requires_grad
 
         parameter = torch.nn.Parameter(tensor)
