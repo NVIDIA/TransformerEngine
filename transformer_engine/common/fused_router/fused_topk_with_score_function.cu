@@ -28,6 +28,22 @@ enum class QBMode {
   FusedAtomic,
 };
 
+struct QBBinParams {
+  CompType lower;
+  CompType scale;
+};
+
+__device__ inline QBBinParams load_qb_bin_params(const CompType *bin_bounds, int num_bins) {
+  const CompType lower = bin_bounds[0];
+  const CompType upper = bin_bounds[1];
+  if (!isfinite(lower) || !isfinite(upper) || upper <= lower) {
+    // Bounds are caller-owned CUDA data, so host-side value validation would add a
+    // synchronization and break CUDA graph capture. Trap on the consuming stream instead.
+    __trap();
+  }
+  return {lower, static_cast<CompType>(num_bins) / (upper - lower)};
+}
+
 template <QBMode Mode>
 __device__ inline CompType extract_qb_cutoff_and_compact(int *topk_indices, CompType *topk_scores,
                                                          int topk, int lane_id) {
@@ -64,11 +80,10 @@ __device__ inline void accumulate_qb_histogram_epilogue(const CompType *raw_scor
                                                         const CompType *bin_bounds, int num_bins,
                                                         int32_t *histogram) {
   if constexpr (Mode == QBMode::FusedAtomic) {
-    const CompType lower = bin_bounds[0];
-    const CompType upper = bin_bounds[1];
-    const CompType scale = static_cast<CompType>(num_bins) / (upper - lower);
+    const QBBinParams bin_params = load_qb_bin_params(bin_bounds, num_bins);
     for (int expert = lane_id; expert < num_experts; expert += kThreadsPerWarp) {
-      int bin = static_cast<int>(floorf((cutoff - raw_scores[expert] - lower) * scale));
+      int bin = static_cast<int>(
+          floorf((cutoff - raw_scores[expert] - bin_params.lower) * bin_params.scale));
       bin = max(0, min(bin, num_bins - 1));
       atomicAdd(histogram + static_cast<size_t>(expert) * num_bins + bin, 1);
     }
@@ -875,9 +890,7 @@ __global__ void qb_histogram_accumulate_kernel(const CompType *raw_scores, const
   const int tokens_in_partition =
       (num_tokens - token_partition + num_token_partitions - 1) / num_token_partitions;
   const int num_items = tokens_in_partition * kQBExpertsPerBlock;
-  const CompType lower = bin_bounds[0];
-  const CompType upper = bin_bounds[1];
-  const CompType scale = static_cast<CompType>(num_bins) / (upper - lower);
+  const QBBinParams bin_params = load_qb_bin_params(bin_bounds, num_bins);
 
   for (int item = threadIdx.x; item < num_items; item += blockDim.x) {
     const int token_in_partition = item / kQBExpertsPerBlock;
@@ -887,7 +900,7 @@ __global__ void qb_histogram_accumulate_kernel(const CompType *raw_scores, const
     if (token < num_tokens && expert < num_experts) {
       const CompType required_bias =
           cutoff[token] - raw_scores[static_cast<size_t>(token) * num_experts + expert];
-      int bin = static_cast<int>(floorf((required_bias - lower) * scale));
+      int bin = static_cast<int>(floorf((required_bias - bin_params.lower) * bin_params.scale));
       bin = max(0, min(bin, num_bins - 1));
       atomicAdd(local_histogram + local_expert * num_bins + bin, 1);
     }

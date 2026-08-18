@@ -1,6 +1,10 @@
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
+import os
+import subprocess
+import sys
+
 import torch
 from typing import Optional
 from transformer_engine.pytorch.router import (
@@ -558,6 +562,82 @@ def test_qb_topk_argument_validation():
             qb_bin_bounds=bin_bounds,
             qb_histogram_mode="two_kernel",
         )
+
+
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="requires at least two CUDA devices")
+@pytest.mark.parametrize("histogram_mode", ["two_kernel", "fused_atomic"])
+def test_qb_topk_uses_logits_device(histogram_mode):
+    current_device = torch.cuda.current_device()
+    logits_device = (current_device + 1) % torch.cuda.device_count()
+    device = torch.device("cuda", logits_device)
+    num_tokens, num_experts, topk, num_bins = 17, 32, 4, 64
+    logits = torch.randn(num_tokens, num_experts, device=device, dtype=torch.float32)
+    expert_bias = torch.zeros(num_experts, device=device, dtype=torch.float32)
+    histogram = torch.zeros(num_experts, num_bins, device=device, dtype=torch.int32)
+    bin_bounds = torch.tensor([-1.0, 1.0], device=device, dtype=torch.float32)
+
+    probs, routing_map = fused_topk_with_score_function(
+        logits,
+        topk,
+        False,
+        None,
+        None,
+        None,
+        "sigmoid",
+        expert_bias,
+        qb_histogram=histogram,
+        qb_bin_bounds=bin_bounds,
+        qb_histogram_mode=histogram_mode,
+    )
+    torch.cuda.synchronize(logits_device)
+
+    assert probs.device == device
+    assert routing_map.device == device
+    assert histogram.sum().item() == num_tokens * num_experts
+    assert torch.cuda.current_device() == current_device
+
+
+@pytest.mark.parametrize("histogram_mode", ["two_kernel", "fused_atomic"])
+@pytest.mark.parametrize("invalid_bounds", ["equal", "reversed", "nonfinite"])
+def test_qb_topk_rejects_invalid_bin_bounds(histogram_mode, invalid_bounds):
+    script = f"""
+import torch
+from transformer_engine.pytorch.router import fused_topk_with_score_function
+
+logits = torch.randn(8, 16, device="cuda", dtype=torch.float32)
+expert_bias = torch.zeros(16, device="cuda", dtype=torch.float32)
+histogram = torch.zeros(16, 32, device="cuda", dtype=torch.int32)
+bounds = {{
+    "equal": [1.0, 1.0],
+    "reversed": [1.0, -1.0],
+    "nonfinite": [float("nan"), 1.0],
+}}[{invalid_bounds!r}]
+bin_bounds = torch.tensor(bounds, device="cuda", dtype=torch.float32)
+fused_topk_with_score_function(
+    logits,
+    4,
+    False,
+    None,
+    None,
+    None,
+    "sigmoid",
+    expert_bias,
+    qb_histogram=histogram,
+    qb_bin_bounds=bin_bounds,
+    qb_histogram_mode={histogram_mode!r},
+)
+torch.cuda.synchronize()
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        env=os.environ.copy(),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    output = result.stdout + result.stderr
+    assert result.returncode != 0, output
+    assert "CUDA error" in output, output
 
 
 @pytest.mark.parametrize(
