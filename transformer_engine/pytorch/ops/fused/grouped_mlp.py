@@ -24,6 +24,8 @@ from ...distributed_weight import (
     materialize_weight_for_forward,
     materialize_weight_for_backward,
     finalize_weight_grads,
+    weight_grad_buffers,
+    weight_grad_dtype,
 )
 from ...module.base import _2X_ACC_WGRAD
 from ...quantization import Recipe
@@ -573,7 +575,7 @@ def _compute_grad_params(
                     shapes=[weight_shape] * num_groups,
                     quantizer=None,
                     device=device,
-                    dtype=dtype,
+                    dtype=weight_grad_dtype(weights, dtype),
                 )
             wgrad_output = grouped_wgrad
             w_list = [grouped_wgrad.rowwise_data.view(num_groups, *weight_shape)]
@@ -586,13 +588,7 @@ def _compute_grad_params(
                 w_list = [get_main_grad_from_param(w, op_label=op_label) for w in weights]
                 accumulate_into_main_grad = get_accumulate_flag_in_param(weights[0])
             else:
-                wgrad_packed = torch.empty(
-                    num_groups,
-                    *weight_shape,
-                    dtype=dtype,
-                    device=device,
-                )
-                w_list = [wgrad_packed[i] for i in range(num_groups)]
+                w_list = weight_grad_buffers(weights, weight_shape, dtype, device)
             wgrad_output = w_list
 
     if ctx.weight_requires_grad:
