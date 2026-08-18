@@ -44,8 +44,8 @@ std::vector<py::object> dropout_fwd(const py::handle &input, float dropout_proba
   auto mask_nvte = makeTransformerEngineTensor(mask_pyt);
 
   // RNG state tensor
-  auto gen =
-      at::check_generator<at::CUDAGeneratorImpl>(at::cuda::detail::getDefaultCUDAGenerator());
+  auto gen = at::get_generator_or_default<at::CUDAGeneratorImpl>(
+      std::nullopt, at::cuda::detail::getDefaultCUDAGenerator());
   at::PhiloxCudaState philox_args;
   {
     std::lock_guard<std::mutex> lock(gen->mutex_);

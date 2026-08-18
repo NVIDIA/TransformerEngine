@@ -173,8 +173,8 @@ void group_quantize_nvfp4_impl(const GroupedTensorWrapper &grouped_input_tensor,
     // number for different tensors in the group, so we only need to allocate one rng state
     const size_t rng_elts_per_thread = 1024 * num_tensors;
     rng_states_tensor = torch::empty({2}, opts);
-    auto gen =
-        at::check_generator<at::CUDAGeneratorImpl>(at::cuda::detail::getDefaultCUDAGenerator());
+    auto gen = at::get_generator_or_default<at::CUDAGeneratorImpl>(
+        std::nullopt, at::cuda::detail::getDefaultCUDAGenerator());
     at::PhiloxCudaState philox_args = init_philox_state(gen, rng_elts_per_thread);
     philox_unpack(philox_args, static_cast<int64_t *>(rng_states_tensor.data_ptr()));
 
@@ -1390,8 +1390,8 @@ static StochasticRngStateResources setup_stochastic_rounding_rng_states_helper(
   if (need_separate_rng_states) res.te_rng_state_list_colwise.reserve(num_tensors);
 
   for (size_t i = 0; i < num_tensors; ++i) {
-    auto gen =
-        at::check_generator<at::CUDAGeneratorImpl>(at::cuda::detail::getDefaultCUDAGenerator());
+    auto gen = at::get_generator_or_default<at::CUDAGeneratorImpl>(
+        std::nullopt, at::cuda::detail::getDefaultCUDAGenerator());
 
     // Rowwise RNG state
     at::PhiloxCudaState philox_args = init_philox_state(gen, rng_elts_per_thread);
