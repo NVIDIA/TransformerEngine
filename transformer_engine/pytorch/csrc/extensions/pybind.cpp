@@ -149,7 +149,7 @@ void init_router_bindings(pybind11::module &m) {
   m.def("fused_topk_with_score_function_qb_fwd", &fused_topk_with_score_function_qb_fwd,
         py::arg("logits"), py::arg("topk"), py::arg("scaling_factor"), py::arg("expert_bias"),
         py::arg("routing_map_format"), py::arg("topk_indices"), py::arg("histogram"),
-        py::arg("bin_bounds"), py::arg("histogram_mode"),
+        py::arg("bin_bounds"), py::arg("histogram_mode"), py::arg("bin_bounds_validated") = false,
         "Kimi K3 QB fused topk with histogram accumulation");
   m.def("fused_topk_with_score_function_bwd", &fused_topk_with_score_function_bwd,
         py::arg("routing_map"), py::arg("intermediate_output"), py::arg("grad_probs"),

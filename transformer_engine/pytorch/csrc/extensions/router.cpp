@@ -4,6 +4,7 @@
  * See LICENSE for license information.
  ************************************************************************/
 
+#include <cmath>
 #include <numeric>
 
 #include "../extensions.h"
@@ -159,7 +160,8 @@ fused_topk_with_score_function_qb_fwd(at::Tensor logits, int topk,
                                       std::optional<float> scaling_factor, at::Tensor expert_bias,
                                       int routing_map_format,
                                       std::optional<at::Tensor> topk_indices, at::Tensor histogram,
-                                      at::Tensor bin_bounds, int histogram_mode) {
+                                      at::Tensor bin_bounds, int histogram_mode,
+                                      bool bin_bounds_validated) {
   check_routing_map_format(routing_map_format);
   TORCH_CHECK(logits.dim() >= 1, "logits must have at least 1 dim");
   TORCH_CHECK(logits.is_cuda() && logits.is_contiguous(),
@@ -192,6 +194,14 @@ fused_topk_with_score_function_qb_fwd(at::Tensor logits, int topk,
   TORCH_CHECK(
       bin_bounds.scalar_type() == at::kFloat && bin_bounds.dim() == 1 && bin_bounds.numel() == 2,
       "QB bin_bounds must be float32 with shape [2]");
+  if (!bin_bounds_validated) {
+    const at::Tensor bin_bounds_cpu = bin_bounds.cpu();
+    const float lower = bin_bounds_cpu.data_ptr<float>()[0];
+    const float upper = bin_bounds_cpu.data_ptr<float>()[1];
+    TORCH_CHECK(std::isfinite(lower) && std::isfinite(upper) && lower < upper,
+                "QB bin_bounds values must be finite with lower < upper, got [", lower, ", ", upper,
+                "]");
+  }
   TORCH_CHECK(histogram_mode == NVTE_QB_HISTOGRAM_TWO_KERNEL ||
                   histogram_mode == NVTE_QB_HISTOGRAM_FUSED_ATOMIC,
               "Unsupported QB histogram mode: ", histogram_mode);

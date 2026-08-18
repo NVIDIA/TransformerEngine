@@ -14,6 +14,7 @@ Precision Notes:
   global memory. For example, the gradient is required to have the same dtype as the input.
 """
 
+import math
 from typing import Optional, Union
 
 import torch
@@ -38,6 +39,36 @@ _QB_HISTOGRAM_MODE_FROM_STRING = {
     "two_kernel": int(QBHistogramMode.TWO_KERNEL),
     "fused_atomic": int(QBHistogramMode.FUSED_ATOMIC),
 }
+_QB_BOUNDS_VALIDATED_VERSION_ATTR = "_nvte_qb_bounds_validated_version"
+
+
+def _validate_qb_bin_bounds(bin_bounds: torch.Tensor) -> bool:
+    """Validate CUDA-resident QB bounds once per PyTorch tensor version."""
+    if not (
+        isinstance(bin_bounds, torch.Tensor)
+        and bin_bounds.is_cuda
+        and bin_bounds.is_contiguous()
+        and bin_bounds.dtype == torch.float32
+        and bin_bounds.shape == (2,)
+    ):
+        # The C++ binding owns metadata validation and its detailed error messages.
+        return False
+
+    version = bin_bounds._version
+    if getattr(bin_bounds, _QB_BOUNDS_VALIDATED_VERSION_ATTR, None) == version:
+        return True
+    with torch.cuda.device(bin_bounds.device):
+        if torch.cuda.is_current_stream_capturing():
+            raise RuntimeError(
+                "QB bin_bounds must be validated by an eager router call before CUDA graph capture"
+            )
+    lower, upper = bin_bounds.detach().cpu().tolist()
+    if not (math.isfinite(lower) and math.isfinite(upper) and lower < upper):
+        raise ValueError(
+            f"QB bin_bounds values must be finite with lower < upper, got [{lower}, {upper}]"
+        )
+    setattr(bin_bounds, _QB_BOUNDS_VALIDATED_VERSION_ATTR, version)
+    return True
 
 
 def _validate_routing_map_format(
@@ -158,6 +189,7 @@ class FusedTopkScoreFunctionQB(torch.autograd.Function):
         histogram_mode: int,
     ):
         # pylint: disable=missing-function-docstring
+        bin_bounds_validated = _validate_qb_bin_bounds(bin_bounds)
         (
             probs,
             routing_output,
@@ -174,6 +206,7 @@ class FusedTopkScoreFunctionQB(torch.autograd.Function):
             histogram,
             bin_bounds,
             histogram_mode,
+            bin_bounds_validated,
         )
         if topk_indices is not None:
             routing_output = topk_indices
@@ -253,7 +286,9 @@ def fused_topk_with_score_function(
     qb_histogram : torch.Tensor, optional
         Caller-owned int32 ``[num_experts, num_bins]`` histogram accumulated in place.
     qb_bin_bounds : torch.Tensor, optional
-        FP32 CUDA tensor ``[lower, upper]`` defining uniform QB histogram bins.
+        FP32 CUDA tensor ``[lower, upper]`` defining uniform QB histogram bins. Values must be
+        finite with ``lower < upper``. Bounds are revalidated after PyTorch-tracked in-place
+        updates; validate once with an eager call before CUDA graph capture.
     qb_histogram_mode : str, optional
         ``"two_kernel"`` or ``"fused_atomic"``. Must be provided with the two QB tensors.
 

@@ -109,6 +109,7 @@ void nvte_fused_topk_with_score_function_forward_with_indices(
  *  The router selects Top-(k+1) from biased sigmoid scores, writes only the first
  *  k routes, and exposes the final selected value as the per-token cutoff.
  *  In FUSED_ATOMIC mode it also directly accumulates the QB histogram.
+ *  bin_bounds must contain finite FP32 values [lower, upper] with lower < upper.
  */
 void nvte_fused_topk_with_score_function_forward_qb_v2(
     const NVTETensor logits, int num_tokens, int num_experts, int topk, float scaling_factor,
@@ -117,14 +118,20 @@ void nvte_fused_topk_with_score_function_forward_qb_v2(
     NVTETensor histogram, NVTETensor bin_bounds, NVTEQBHistogramMode histogram_mode,
     cudaStream_t stream);
 
-/*! \brief Kimi K3 Quantile Balancing fused-router forward with dense Top-k indices. */
+/*! \brief Kimi K3 Quantile Balancing fused-router forward with dense Top-k indices.
+ *
+ *  bin_bounds must contain finite FP32 values [lower, upper] with lower < upper.
+ */
 void nvte_fused_topk_with_score_function_forward_qb_with_indices(
     const NVTETensor logits, int num_tokens, int num_experts, int topk, float scaling_factor,
     const NVTETensor expert_bias, NVTETensor probs, NVTETensor topk_indices,
     NVTETensor intermediate_output, NVTETensor cutoff, NVTETensor histogram, NVTETensor bin_bounds,
     NVTEQBHistogramMode histogram_mode, cudaStream_t stream);
 
-/*! \brief Accumulate a QB histogram from raw sigmoid scores and Top-(k+1) cutoffs. */
+/*! \brief Accumulate a QB histogram from raw sigmoid scores and Top-(k+1) cutoffs.
+ *
+ *  bin_bounds must contain finite FP32 values [lower, upper] with lower < upper.
+ */
 void nvte_qb_histogram_accumulate(const NVTETensor raw_scores, const NVTETensor cutoff,
                                   const NVTETensor bin_bounds, NVTETensor histogram,
                                   cudaStream_t stream);

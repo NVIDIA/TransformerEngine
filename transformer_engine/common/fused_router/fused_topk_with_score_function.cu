@@ -36,11 +36,6 @@ struct QBBinParams {
 __device__ inline QBBinParams load_qb_bin_params(const CompType *bin_bounds, int num_bins) {
   const CompType lower = bin_bounds[0];
   const CompType upper = bin_bounds[1];
-  if (!isfinite(lower) || !isfinite(upper) || upper <= lower) {
-    // Bounds are caller-owned CUDA data, so host-side value validation would add a
-    // synchronization and break CUDA graph capture. Trap on the consuming stream instead.
-    __trap();
-  }
   return {lower, static_cast<CompType>(num_bins) / (upper - lower)};
 }
 
