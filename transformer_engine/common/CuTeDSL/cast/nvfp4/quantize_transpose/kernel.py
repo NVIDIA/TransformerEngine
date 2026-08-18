@@ -89,6 +89,7 @@ class NVFP4QuantizeTransposeTuned1DKernel:
     WAVES = NVFP4_BLOCK_SCALING_SIZE // PACK_SIZE  # 2
     # Threads that span the 32 4-byte SMEM banks at 16 bf16 per thread (the rowwise swizzle).
     THREADS_PER_BANK = (32 * 4 * 8) // 4 // NVFP4_BLOCK_SCALING_SIZE  # 16
+    assert(NUM_BUFFERS <= STAGES) # otherwise, prefetch loop would read OOB
 
     def __init__(self, cfg):
         self.cfg = cfg
@@ -279,15 +280,11 @@ class NVFP4QuantizeTransposeTuned1DKernel:
         tma_atom_col: Optional[cute.CopyAtom],
         tma_view_col: Optional[cute.Tensor],
     ):
+        # -- Trace time --
         cfg = self.cfg
         TILE = self.TILE_DIM
-        rows, cols = mX.shape
 
-        tidx, _, _ = cute.arch.thread_idx()
-        bidx, bidy, _ = cute.arch.block_idx()  # (chunk_x, chunk_y)
-        warp_idx = cute.arch.make_warp_uniform(cute.arch.warp_idx())
-
-        ## Shared memory
+        # Shared memory layout
         if cutlass.const_expr(cfg.RETURN_TRANSPOSE):
 
             @cute.struct
@@ -327,9 +324,11 @@ class NVFP4QuantizeTransposeTuned1DKernel:
                     16,
                 ]
 
+        # "Allocate" shared memory
         smem = cutlass.utils.SmemAllocator()
         storage = smem.allocate(SharedStorage)
 
+        # Create views into the shared memory
         buffered_tile = lambda inner_cols: cute.make_layout(
             ((TILE, inner_cols), self.NUM_BUFFERS),
             stride=((inner_cols, 1), TILE * inner_cols),
@@ -353,49 +352,7 @@ class NVFP4QuantizeTransposeTuned1DKernel:
             sO_col = None
             sS_col = None
 
-        if warp_idx == 0:
-            cute.nvgpu.cpasync.prefetch_descriptor(tma_atom_in)
-
-        ## Global encode scales, from the amax reduction pass that ran before this kernel.
-        if cutlass.const_expr(not cfg.ROW_SCALED_NVFP4):
-            S_enc_rowwise = compute_global_encode_sf(mAmaxRow[0])
-        else:
-            # Per-row encode scales are drawn inside the rowwise pass instead.
-            S_enc_rowwise = Float32(1.0)
-        if cutlass.const_expr(cfg.RETURN_TRANSPOSE):
-            S_enc_colwise = compute_global_encode_sf(mAmaxCol[0])
-        else:
-            S_enc_colwise = Float32(1.0)
-
-        ## Philox state for stochastic rounding, seeded per thread exactly like the CUDA kernel.
-        rng = None
-        if cutlass.const_expr(cfg.USE_STOCHASTIC_ROUNDING):
-            grid_dim_x, _, _ = cute.arch.grid_dim()
-            rng_sequence = (
-                Int64(tidx)
-                + Int64(bidx) * self.THREADS
-                + Int64(bidy) * Int64(grid_dim_x) * self.THREADS
-            )
-            rng = PhiloxRng(
-                seed=Uint64(mRngState[0].ir_value()),
-                subsequence=Uint64(rng_sequence.ir_value()),
-                offset=Uint64(mRngState[1].ir_value()),
-            )
-
-        ## Input-buffer mbarriers, the CUDA kernel's scheme rather than a full producer/consumer
-        ## pipeline: one arrive-count-1 barrier per buffer that the TMA load completes and every
-        ## thread waits on. There is no empty barrier -- a load into a buffer is only issued
-        ## after the syncthreads that ends the stage that read it -- and the staged output
-        ## buffers are protected by the bulk async-group wait below instead.
-        tx_count = TILE * TILE * BFloat16.width // 8
-        mbar = storage.mbar_storage.data_ptr()
-        if warp_idx == 0:
-            with cute.arch.elect_one():
-                for b in cutlass.range_constexpr(self.NUM_BUFFERS):
-                    cute.arch.mbarrier_init(mbar + b, 1)
-        cute.arch.mbarrier_init_fence()
-
-        ## TMA partitioning
+        # Bind GMEM and SMEM tensor views for TMA
         gX_tiled = cute.zipped_divide(tma_view_in, (TILE, TILE))
         tXsX, tXgX = cute.nvgpu.cpasync.tma_partition(
             tma_atom_in, 0, cute.make_layout(1), sX, gX_tiled
@@ -410,12 +367,57 @@ class NVFP4QuantizeTransposeTuned1DKernel:
                 tma_atom_col, 0, cute.make_layout(1), sO_col, gO_col_tiled
             )
 
-        # Barrier init must be visible before any thread waits on one.
-        cute.arch.sync_threads()
+        # -- Runtime --
+        rows, cols = mX.shape
+        tidx, _, _ = cute.arch.thread_idx()
+        bidx, bidy, _ = cute.arch.block_idx()  # (chunk_x, chunk_y)
+        warp_idx = cute.arch.make_warp_uniform(cute.arch.warp_idx())
 
-        ## Prologue: fill both buffers.
+        # Prefetch TMA descriptor of the input
         if warp_idx == 0:
-            for s in cutlass.range_constexpr(min(self.NUM_BUFFERS, self.STAGES)):
+            cute.nvgpu.cpasync.prefetch_descriptor(tma_atom_in)
+
+        # Compute global encode scales from supplied amax
+        if cutlass.const_expr(not cfg.ROW_SCALED_NVFP4):
+            S_enc_rowwise = compute_global_encode_sf(mAmaxRow[0])
+        else:
+            # Per-row encode scales are drawn inside the rowwise pass instead.
+            S_enc_rowwise = Float32(1.0)
+        if cutlass.const_expr(cfg.RETURN_TRANSPOSE):
+            S_enc_colwise = compute_global_encode_sf(mAmaxCol[0])
+        else:
+            S_enc_colwise = Float32(1.0)
+
+        # Construct RNG state for SR
+        rng = None
+        if cutlass.const_expr(cfg.USE_STOCHASTIC_ROUNDING):
+            grid_dim_x, _, _ = cute.arch.grid_dim()
+            # Contrary to CUDA C++ version, calculate in Int64 for correctness
+            rng_sequence = (
+                Int64(tidx)
+                + Int64(bidx) * self.THREADS
+                + Int64(bidy) * Int64(grid_dim_x) * self.THREADS
+            )
+            rng = PhiloxRng(
+                seed=Uint64(mRngState[0].ir_value()),
+                subsequence=Uint64(rng_sequence.ir_value()),
+                offset=Uint64(mRngState[1].ir_value()),
+            )
+
+        # Initialize mbarriers for TMA G2S input tensor copy
+        mbar = storage.mbar_storage.data_ptr()
+        if warp_idx == 0:
+            with cute.arch.elect_one():
+                for b in cutlass.range_constexpr(self.NUM_BUFFERS):
+                    cute.arch.mbarrier_init(mbar + b, 1)
+                # release mbarrier_init from elected thread to all threads in cluster (here: CTA)
+                cute.arch.mbarrier_init_fence()
+        cute.arch.sync_threads() # acquire mbarrier_init by CTA (cluster)
+
+        # Prefetch NUM_BUFFERS=PREFETCH_STAGES tiles + the first tile to process
+        tx_count = TILE * TILE * 2 # each load is a TILE x TILE x bf16 (2 bytes) tile 
+        if warp_idx == 0:
+            for s in cutlass.range_constexpr(self.NUM_BUFFERS):
                 tile_coord = (
                     bidy * self.STAGES_Y + s // self.STAGES_X,
                     bidx * self.STAGES_X + s % self.STAGES_X,
@@ -429,17 +431,15 @@ class NVFP4QuantizeTransposeTuned1DKernel:
                     tma_bar_ptr=mbar + s,
                 )
 
-        ## Main loop over the chunk's tiles. Unrolled at trace time: the buffer index and
-        ## barrier parity become compile-time constants, and the stochastic-rounding random
-        ## stream is consumed in a compile-time-deterministic order, which is what lets the
-        ## Philox word cycling live in Python (see PhiloxRng).
+        # Main loop over tiles/stages in chunk
         for stage in cutlass.range_constexpr(self.STAGES):
             stage_y = stage // self.STAGES_X
             stage_x = stage % self.STAGES_X
+            parity = (stage // self.NUM_BUFFERS) % 2
             buf = stage % self.NUM_BUFFERS
 
-            # Wait for this stage's TMA load. The buffer's barrier flips phase once per reuse.
-            cute.arch.mbarrier_wait(mbar + buf, (stage // self.NUM_BUFFERS) % 2)
+            # Wait for TMA G2S tile load to complete
+            cute.arch.mbarrier_wait(mbar + buf, parity)
 
             sX_tile = sX[(None, buf)]
             sO_row_tile = sO_row[(None, buf)]
