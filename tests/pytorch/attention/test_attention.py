@@ -8,6 +8,7 @@ import pathlib
 import copy
 from typing import Any, Dict, Tuple, Union
 
+from packaging.version import Version as PkgVersion
 import pytest
 import torch
 
@@ -29,6 +30,7 @@ from transformer_engine.pytorch.attention.dot_product_attention import (
 )
 from transformer_engine.pytorch.attention.dot_product_attention.utils import (
     FlashAttentionUtils,
+    _get_supported_versions,
     check_set_window_size,
 )
 from transformer_engine.pytorch.attention import RotaryPositionEmbedding
@@ -92,6 +94,39 @@ reset_rng_states()
 def reset_global_fp8_state():
     yield
     FP8GlobalStateManager.reset()
+
+
+@pytest.mark.parametrize(
+    "version,expected",
+    (
+        ("2.1.0", False),
+        ("2.1.1", True),
+        ("2.8.3", True),
+        ("2.8.3+local_version", True),
+        ("2.8.3.post1", True),
+        ("2.8.4", False),
+        ("2.8.4+local_version", False),
+        ("2.9.0", False),
+    ),
+)
+def test_flash_attention_version_support(version, expected):
+    """Test the supported Flash Attention v2 version range."""
+    assert (
+        FlashAttentionUtils.is_version_supported(
+            PkgVersion(version), FlashAttentionUtils.version_required
+        )
+        is expected
+    )
+
+
+def test_flash_attention_supported_version_message():
+    """Test that the supported version range describes an exclusive upper bound."""
+    assert (
+        _get_supported_versions(
+            FlashAttentionUtils.version_required, FlashAttentionUtils.max_version
+        )
+        == ">= 2.1.1, < 2.8.4"
+    )
 
 
 # Define F16 data types to test
@@ -341,9 +376,18 @@ model_configs_fa4_base = {
 }
 
 
-@pytest.mark.skipif(
-    not FlashAttentionUtils.v4_is_installed, reason="Flash-attn v4 (flash-attn-4) is required."
+fa4_enabled = bool(int(os.getenv("NVTE_FLASH_ATTN", "1"))) and bool(
+    int(os.getenv("NVTE_FLASH_ATTN_V4", "1"))
 )
+requires_fa4 = pytest.mark.skipif(
+    not fa4_enabled
+    or not FlashAttentionUtils.v4_is_installed
+    or device_compute_capability < (9, 0),
+    reason="Enabled Flash-attn v4 and compute capability >= SM90 are required.",
+)
+
+
+@requires_fa4
 @pytest.mark.parametrize("dtype", param_types_lean)
 @pytest.mark.parametrize("model_configs", [model_configs_fa4_base])
 @pytest.mark.parametrize("model", model_configs_fa4_base.keys())
@@ -362,9 +406,7 @@ model_configs_fa4_hdim256 = {
 }
 
 
-@pytest.mark.skipif(
-    not FlashAttentionUtils.v4_is_installed, reason="Flash-attn v4 (flash-attn-4) is required."
-)
+@requires_fa4
 @pytest.mark.skipif(
     device_compute_capability not in ((10, 0), (10, 3)),
     reason="FA4 head_dim=256 dedicated kernel is SM100/103-only.",
@@ -442,9 +484,7 @@ model_configs_fa4_mla = {
 }
 
 
-@pytest.mark.skipif(
-    not FlashAttentionUtils.v4_is_installed, reason="Flash-attn v4 (flash-attn-4) is required."
-)
+@requires_fa4
 @pytest.mark.parametrize("dtype", param_types_lean)
 @pytest.mark.parametrize("model_configs", [model_configs_fa4_mla])
 @pytest.mark.parametrize("model", model_configs_fa4_mla.keys())
@@ -466,9 +506,7 @@ model_configs_fa4_swa = {
 }
 
 
-@pytest.mark.skipif(
-    not FlashAttentionUtils.v4_is_installed, reason="Flash-attn v4 (flash-attn-4) is required."
-)
+@requires_fa4
 @pytest.mark.parametrize("dtype", param_types_lean)
 @pytest.mark.parametrize("model_configs", [model_configs_fa4_swa])
 @pytest.mark.parametrize("model", model_configs_fa4_swa.keys())
@@ -489,9 +527,7 @@ model_configs_fa4_varlen = {
 }
 
 
-@pytest.mark.skipif(
-    not FlashAttentionUtils.v4_is_installed, reason="Flash-attn v4 (flash-attn-4) is required."
-)
+@requires_fa4
 @pytest.mark.parametrize("dtype", param_types_lean)
 @pytest.mark.parametrize("model_configs", [model_configs_fa4_varlen])
 @pytest.mark.parametrize("model", model_configs_fa4_varlen.keys())
@@ -514,9 +550,7 @@ model_configs_fa4_mask = {
 }
 
 
-@pytest.mark.skipif(
-    not FlashAttentionUtils.v4_is_installed, reason="Flash-attn v4 (flash-attn-4) is required."
-)
+@requires_fa4
 @pytest.mark.parametrize("dtype", param_types_lean)
 @pytest.mark.parametrize("model_configs", [model_configs_fa4_mask])
 @pytest.mark.parametrize("model", model_configs_fa4_mask.keys())

@@ -42,6 +42,10 @@ from transformer_engine.pytorch import (
     is_nvfp4_available,
 )
 from transformer_engine.pytorch import checkpoint as te_checkpoint
+from transformer_engine.pytorch.distributed import (
+    is_fp8_activation_recompute_enabled,
+    in_fp8_activation_recompute_phase,
+)
 from transformer_engine.pytorch.cpp_extensions import general_gemm
 from transformer_engine.common import recipe
 from transformer_engine.pytorch import DType
@@ -81,6 +85,9 @@ if is_bf16_available():  # bf16 requires sm_80 or higher
 batch_sizes = [1, 2]
 
 all_boolean = [True, False]
+
+# fp8_meta key written by FP8GlobalStateManager.copy_forward_fp8_meta_tensors_for_recompute
+_FP8_RECOMPUTE_KEY = "global_fp8_buffer_pos_fwd_recompute"
 
 all_activations = [
     "gelu",
@@ -648,7 +655,15 @@ def test_gpt_selective_activation_recompute(dtype, bs, model, fp8, recipe, fp8_m
 
 
 def _test_e2e_full_recompute(
-    bs, dtype, config, fp8, recipe, fp8_model_params=False, recompute=False, use_reentrant=True
+    bs,
+    dtype,
+    config,
+    fp8,
+    recipe,
+    fp8_model_params=False,
+    recompute=False,
+    use_reentrant=True,
+    inner_autocast=False,
 ):
     reset_rng_states()
     FP8GlobalStateManager.reset()
@@ -685,10 +700,17 @@ def _test_e2e_full_recompute(
         te_inp_hidden_states.retain_grad()
     te_inp_attn_mask = get_causal_attn_mask(config.max_seqlen_q)
 
-    with autocast(enabled=fp8, recipe=recipe):
+    forward = block
+    if inner_autocast:
+
+        def forward(*args, **kwargs):
+            with autocast(enabled=fp8, recipe=recipe):
+                return block(*args, **kwargs)
+
+    with autocast(enabled=fp8 and not inner_autocast, recipe=recipe):
         if recompute:
             te_out = te_checkpoint(
-                block,
+                forward,
                 te_inp_hidden_states,
                 attention_mask=te_inp_attn_mask,
                 checkpoint_core_attention=False,
@@ -697,7 +719,7 @@ def _test_e2e_full_recompute(
                 use_reentrant=use_reentrant,
             )
         else:
-            te_out = block(
+            te_out = forward(
                 te_inp_hidden_states,
                 attention_mask=te_inp_attn_mask,
                 checkpoint_core_attention=False,
@@ -785,6 +807,152 @@ def test_gpt_full_activation_recompute(
             msg=f"Mismatch in tensor {i}",
             **tols,
         )
+
+
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+@pytest.mark.parametrize("use_reentrant", all_boolean)
+def test_gpt_full_activation_recompute_with_inner_autocast(use_reentrant, monkeypatch):
+    """Check recompute numerics when FP8 autocast starts inside the checkpointed callable."""
+    if not use_reentrant:
+        # Non-reentrant checkpoint becomes non-deterministic with bias+GELU fusion.
+        monkeypatch.setenv("NVTE_BIAS_GELU_NVFUSION", "0")
+
+    dtype = torch.bfloat16
+    fp8_recipe = recipe.DelayedScaling(fp8_format=recipe.Format.HYBRID)
+    config = model_configs["126m"]
+
+    # Reference also opens the autocast inside the callable, so the only difference
+    # between the two runs is activation recompute.
+    outputs, names = _test_e2e_full_recompute(
+        1,
+        dtype,
+        config,
+        True,
+        fp8_recipe,
+        recompute=False,
+        use_reentrant=use_reentrant,
+        inner_autocast=True,
+    )
+
+    # Before the fix, phase 1 skipped the stash while the recompute still restored it, which
+    # surfaced as a KeyError on the recompute buffer lookup. Count both sides to pin that down.
+    stash_counts, restore_counts = {}, {}
+    stash_fn = FP8GlobalStateManager.copy_forward_fp8_meta_tensors_for_recompute
+    restore_fn = FP8GlobalStateManager.get_old_fp8_meta_tensors_for_recompute
+
+    def record_stash(fp8_meta):
+        stash_fn(fp8_meta)
+        if _FP8_RECOMPUTE_KEY in fp8_meta:
+            stash_counts[id(fp8_meta)] = stash_counts.get(id(fp8_meta), 0) + 1
+
+    def record_restore(fp8_meta):
+        # The restore site is not gated on delayed scaling, but only delayed scaling stashes.
+        if not fp8_meta["recipe"].delayed():
+            restore_fn(fp8_meta)
+            return
+        key = id(fp8_meta)
+        assert key in stash_counts, "Recompute restored a scale that was never stashed"
+        restore_counts[key] = restore_counts.get(key, 0) + 1
+        restore_fn(fp8_meta)
+
+    monkeypatch.setattr(
+        FP8GlobalStateManager,
+        "copy_forward_fp8_meta_tensors_for_recompute",
+        staticmethod(record_stash),
+    )
+    monkeypatch.setattr(
+        FP8GlobalStateManager,
+        "get_old_fp8_meta_tensors_for_recompute",
+        staticmethod(record_restore),
+    )
+
+    outputs_recompute, _ = _test_e2e_full_recompute(
+        1,
+        dtype,
+        config,
+        True,
+        fp8_recipe,
+        recompute=True,
+        use_reentrant=use_reentrant,
+        inner_autocast=True,
+    )
+
+    assert stash_counts, "No FP8 module stashed a forward scale for the recompute phase"
+    assert restore_counts == stash_counts, "Stash and restore of forward scales are unbalanced"
+
+    for name, ref, test in zip(names, outputs, outputs_recompute):
+        torch.testing.assert_close(
+            test,
+            ref,
+            msg=f"Mismatch in tensor {name}",
+            rtol=0.125,
+            atol=0.0675,
+        )
+
+
+def _checkpointed_linear_backward(body, use_reentrant, *layers):
+    """Run a checkpointed callable end to end and check the gradients are finite."""
+    inp = torch.randn(16, 16, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    with torch.autocast("cuda", dtype=torch.bfloat16):
+        out = te_checkpoint(body, inp, use_reentrant=use_reentrant)
+        loss = out.float().sum()
+    loss.backward()
+    torch.cuda.synchronize()
+
+    assert torch.isfinite(loss)
+    assert inp.grad is not None and torch.isfinite(inp.grad).all()
+    for layer in layers:
+        assert layer.weight.grad is not None
+        assert torch.isfinite(layer.weight.grad).all()
+
+
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+@pytest.mark.parametrize("use_reentrant", all_boolean)
+def test_checkpoint_inner_autocast_is_an_fp8_recompute_region(use_reentrant):
+    """An FP8 autocast opened inside a checkpointed callable is an FP8 recompute region."""
+    FP8GlobalStateManager.reset()
+    fp8_recipe = recipe.DelayedScaling(fp8_format=recipe.Format.HYBRID)
+    layer = Linear(16, 16, bias=False, params_dtype=torch.float32).cuda()
+
+    observed = []
+
+    def body(value):
+        outside = is_fp8_activation_recompute_enabled()
+        with autocast(enabled=True, recipe=fp8_recipe):
+            observed.append(
+                (
+                    outside,
+                    is_fp8_activation_recompute_enabled(),
+                    in_fp8_activation_recompute_phase(),
+                )
+            )
+            return layer(value)
+
+    _checkpointed_linear_backward(body, use_reentrant, layer)
+
+    # One entry for the checkpointed forward, one for the recompute during backward. The
+    # query is only an FP8 recompute region inside the autocast, in both phases.
+    assert observed == [(False, True, False), (False, True, True)]
+
+
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+@pytest.mark.parametrize("use_reentrant", all_boolean)
+def test_checkpoint_with_mixed_fp8_regions_saves_only_fp8_recompute_state(use_reentrant):
+    """Only the inner FP8 region of a mixed checkpoint saves recompute metadata."""
+    FP8GlobalStateManager.reset()
+    fp8_recipe = recipe.DelayedScaling(fp8_format=recipe.Format.HYBRID)
+    non_fp8_layer = Linear(16, 16, bias=False, params_dtype=torch.float32).cuda()
+    fp8_layer = Linear(16, 16, bias=False, params_dtype=torch.float32).cuda()
+
+    def body(value):
+        value = non_fp8_layer(value)
+        with autocast(enabled=True, recipe=fp8_recipe):
+            return fp8_layer(value)
+
+    _checkpointed_linear_backward(body, use_reentrant, non_fp8_layer, fp8_layer)
+
+    assert _FP8_RECOMPUTE_KEY not in non_fp8_layer.fp8_meta
+    assert _FP8_RECOMPUTE_KEY in fp8_layer.fp8_meta
 
 
 def _test_e2e_checkpointing_get_model(config, dtype):
