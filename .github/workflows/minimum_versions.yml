@@ -59,7 +59,7 @@ jobs:
           apt-get update
           apt-get install -y git python3.9 pip cudnn9-cuda-12
           pip install jax==${MIN_JAX_VERSION} "flax>=0.7.1"
-          pip install cmake pybind11[global] ninja "nvidia-cudnn-frontend>=1.25.0"
+          pip install cmake pybind11[global] ninja packaging "nvidia-cudnn-frontend>=1.25.0"
       - name: 'Checkout'
         uses: actions/checkout@v3
         with:
