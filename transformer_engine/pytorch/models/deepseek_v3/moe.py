@@ -218,13 +218,29 @@ class DeepSeekV3MoE(torch.nn.Module):
         )
         topk_weights = probs.gather(1, topk_idx).float()
 
+        # Zero-filled recv/grad buffers: per-expert alignment padding lands
+        # inside the grouped-GEMM m_splits, so uninitialized rows would poison
+        # the expert wgrads.
+        cap = self.ep_buffer.recv_capacity_per_rank
         recv_tokens, recv_weights, tokens_per_expert = ep_dispatch(
-            self.ep_buffer, tokens, topk_idx, topk_weights
+            self.ep_buffer,
+            tokens,
+            topk_idx,
+            topk_weights,
+            recv_tokens=torch.zeros(
+                (cap, self.hidden_size), dtype=tokens.dtype, device=tokens.device
+            ),
+            recv_topk_weights=torch.zeros((cap,), dtype=torch.float32, device=tokens.device),
         )
         expert_out = self.experts(
             recv_tokens, tokens_per_expert, recv_weights.to(tokens.dtype), tokens_per_expert
         )
-        return ep_combine(self.ep_buffer, expert_out, num_local_tokens=tokens.shape[0])
+        return ep_combine(
+            self.ep_buffer,
+            expert_out,
+            num_local_tokens=tokens.shape[0],
+            grad_out=torch.zeros_like(expert_out),
+        )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """

@@ -119,16 +119,20 @@ class TestDeepSeekEP(unittest.TestCase):
         )
 
         # A local expert's wgrad on its owner rank equals the sum of the
-        # reference wgrads over all ranks.
+        # reference wgrads over all ranks. all_reduce is collective, so every
+        # rank must reduce every expert's grad (in the same order).
         ep_fc1, _, ep_fc2 = ep_moe.experts
         ref_fc1, _, ref_fc2 = ref.experts
         for ep_fc, ref_fc in ((ep_fc1, ref_fc1), (ep_fc2, ref_fc2)):
+            ref_grads = [
+                getattr(ref_fc, f"weight{e}").grad.float().clone() for e in range(self.num_experts)
+            ]
+            for g in ref_grads:
+                dist.all_reduce(g)
             for local_e in range(NUM_LOCAL_EXPERTS):
                 global_e = self.rank * NUM_LOCAL_EXPERTS + local_e
-                ref_grad = getattr(ref_fc, f"weight{global_e}").grad.float()
-                dist.all_reduce(ref_grad)
                 ep_grad = getattr(ep_fc, f"weight{local_e}").grad.float()
-                torch.testing.assert_close(ep_grad, ref_grad, rtol=0.1, atol=0.1)
+                torch.testing.assert_close(ep_grad, ref_grads[global_e], rtol=0.1, atol=0.1)
 
         counts = ep_moe._last_tokens_per_expert.clone()
         dist.all_reduce(counts)
