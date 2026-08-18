@@ -32,7 +32,8 @@ import transformer_engine.pytorch.ops as te_ops
 
 # Import utility functions
 _current_file = pathlib.Path(__file__).resolve()
-sys.path.append(str(_current_file.parent.parent))
+# Prepend so installed packages with a top-level utils module cannot shadow the test helpers.
+sys.path = [str(_current_file.parent.parent)] + sys.path
 from utils import dtype_tols, make_recipe, quantization_tols
 
 
