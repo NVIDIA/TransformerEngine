@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 """Enums for e2e transformer"""
+
 import enum
 from types import SimpleNamespace
 from typing import Union
@@ -32,7 +33,7 @@ class DType(enum.IntEnum):
       mantissa bits.
     * ``kFloat4E2M1`` -- 4-bit floating point with 2 exponent and 1 mantissa
       bits.
-    * ``kFloat8UE4M3`` -- 8-bit unsigned floating point with 5 exponent and 3
+    * ``kFloat8UE5M3`` -- 8-bit unsigned floating point with 5 exponent and 3
       mantissa bits.
 
     The enum mirrors the backend ``transformer_engine_torch.DType`` (pybind11)

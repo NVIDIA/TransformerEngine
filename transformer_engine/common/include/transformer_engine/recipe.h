@@ -14,10 +14,7 @@
 #include "transformer_engine.h"
 
 #ifdef __cplusplus
-#define NVTE_NVFP4_SCALE_DTYPE_DEFAULT = kNVTEFloat8E4M3
 extern "C" {
-#else
-#define NVTE_NVFP4_SCALE_DTYPE_DEFAULT
 #endif
 
 /*! \brief Update FP8 scaling factors with delayed scaling recipe.
@@ -382,8 +379,7 @@ void nvte_nvfp4_2d_compute_partial_amax(const NVTETensor inp, NVTETensor amax, s
 void nvte_nvfp4_2d_partial_cast(const NVTETensor inp, NVTETensor out, const NVTETensor scale,
                                 const NVTETensor global_scale, size_t h, size_t w,
                                 size_t scale_stride_h, size_t scale_stride_w, size_t start_offset,
-                                size_t block_len, cudaStream_t stream,
-                                const NVTEDType scale_dtype NVTE_NVFP4_SCALE_DTYPE_DEFAULT);
+                                size_t block_len, cudaStream_t stream, const NVTEDType scale_dtype);
 
 /*! \brief Expand tile-level scales to row-level scales and convert to the selected FP8 scale type.
  *
@@ -400,8 +396,7 @@ void nvte_nvfp4_2d_partial_cast(const NVTETensor inp, NVTETensor out, const NVTE
  */
 void nvte_nvfp4_expand_scale_to_fp8(const NVTETensor input, NVTETensor output, size_t tile_rows,
                                     size_t tile_cols, size_t rows_padded, size_t block_len,
-                                    cudaStream_t stream,
-                                    const NVTEDType scale_dtype NVTE_NVFP4_SCALE_DTYPE_DEFAULT);
+                                    cudaStream_t stream, const NVTEDType scale_dtype);
 
 /*! \brief Compute per-block decode scale from block amax and global amax.
  *
@@ -419,7 +414,7 @@ void nvte_nvfp4_expand_scale_to_fp8(const NVTETensor input, NVTETensor output, s
  */
 void nvte_nvfp4_compute_per_block_scale(const NVTETensor block_amax, NVTETensor scale,
                                         const NVTETensor global_amax, cudaStream_t stream,
-                                        const NVTEDType scale_dtype NVTE_NVFP4_SCALE_DTYPE_DEFAULT);
+                                        const NVTEDType scale_dtype);
 
 /*! \brief Fused kernel for NVFP4 scale computation.
  *
@@ -446,7 +441,7 @@ void nvte_nvfp4_fused_scale(const NVTETensor block_amax, const NVTETensor global
                             NVTETensor per_block_scale, NVTETensor target_scale,
                             NVTETensor target_amax, size_t tile_rows, size_t tile_cols,
                             size_t rows_padded, size_t block_len, cudaStream_t stream,
-                            const NVTEDType scale_dtype NVTE_NVFP4_SCALE_DTYPE_DEFAULT);
+                            const NVTEDType scale_dtype);
 
 /*! \brief Compute global encode scale from global amax.
  *
@@ -459,13 +454,10 @@ void nvte_nvfp4_fused_scale(const NVTETensor block_amax, const NVTETensor global
  *  \param[in]     scale_dtype   NVFP4 scale storage type (E4M3 or UE5M3).
  */
 void nvte_nvfp4_compute_global_scale(const NVTETensor global_amax, NVTETensor global_scale,
-                                     cudaStream_t stream,
-                                     const NVTEDType scale_dtype NVTE_NVFP4_SCALE_DTYPE_DEFAULT);
+                                     cudaStream_t stream, const NVTEDType scale_dtype);
 
 #ifdef __cplusplus
 }  // extern "C"
 #endif
-
-#undef NVTE_NVFP4_SCALE_DTYPE_DEFAULT
 
 #endif  // TRANSFORMER_ENGINE_RECIPE_H_

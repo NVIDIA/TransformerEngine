@@ -406,9 +406,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       py::arg("input"), py::arg("output"), py::arg("M_tiles"), py::arg("K_tiles"),
       py::call_guard<py::gil_scoped_release>());
   m.def("nvfp4_expand_scale_to_fp8", &transformer_engine::pytorch::nvfp4_expand_scale_to_fp8,
-        "Expand tile-level scales to row-level scales and convert to FP8 E4M3", py::arg("input"),
+        "Expand tile-level scales to row-level scales and convert to FP8", py::arg("input"),
         py::arg("output"), py::arg("tile_rows"), py::arg("tile_cols"), py::arg("rows_padded"),
-        py::arg("block_len"), py::call_guard<py::gil_scoped_release>());
+        py::arg("block_len"), py::arg("scale_dtype") = transformer_engine::DType::kFloat8E4M3);
   m.def("nvfp4_compute_per_block_scale",
         &transformer_engine::pytorch::nvfp4_compute_per_block_scale,
         "Compute per-block decode scale from block amax and global amax", py::arg("block_amax"),
