@@ -2,17 +2,19 @@
 #
 # See LICENSE for license information.
 
-# Verify that TE builds and imports against torch==2.8.
-name: 'Build PyTorch 2.8'
+# Verify that TE builds and imports against the minimum supported PyTorch.
+name: 'Minimum supported PyTorch'
 on:
   pull_request:
   workflow_dispatch:
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
+env:
+  MIN_TORCH_VERSION: "2.8.0"
 jobs:
-  pytorch28:
-    name: 'PyTorch 2.8'
+  min-pytorch:
+    name: 'Minimum supported PyTorch'
     runs-on: ubuntu-latest
     container:
       image: nvcr.io/nvidia/cuda:12.8.0-devel-ubuntu22.04
@@ -22,7 +24,7 @@ jobs:
         run: |
           apt-get update
           apt-get install -y git python3.9 pip cudnn9-cuda-12
-          pip install torch==2.8.0
+          pip install torch==${MIN_TORCH_VERSION}
           pip install cmake pybind11[global] ninja pydantic importlib-metadata>=1.0 packaging einops onnxscript "nvidia-cudnn-frontend>=1.25.0"
       - name: 'Checkout'
         uses: actions/checkout@v3
