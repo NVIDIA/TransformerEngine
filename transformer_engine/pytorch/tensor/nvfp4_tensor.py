@@ -528,10 +528,6 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
         self._get_quantizer().update_quantized(tensor, self, noop_flag=noop_flag)
         return self
 
-    def detach(self) -> NVFP4Tensor:
-        # pylint: disable=missing-function-docstring
-        return self.__class__.make_like(self)
-
     def clone(self) -> NVFP4Tensor:
         # pylint: disable=missing-function-docstring
         assert self._rowwise_data is not None
