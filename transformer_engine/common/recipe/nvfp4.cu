@@ -10,6 +10,7 @@
 #include <cassert>
 #include <limits>
 
+#include "../cast/nvfp4/core_nvfp4.cuh"
 #include "../common.h"
 #include "../util/ptx.cuh"
 #include "../utils.cuh"
