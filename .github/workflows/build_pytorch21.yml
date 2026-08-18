@@ -1,0 +1,43 @@
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# See LICENSE for license information.
+
+# Verify that the torch>=2.1 requirement declared in build_tools/pytorch.py
+# actually holds: build against torch==2.1.2 and run the sanity import.
+name: 'Build PyTorch 2.1'
+on:
+  pull_request:
+  workflow_dispatch:
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+jobs:
+  pytorch21:
+    name: 'PyTorch 2.1'
+    runs-on: ubuntu-latest
+    container:
+      image: nvcr.io/nvidia/cuda:12.8.0-devel-ubuntu22.04
+      options: --user root
+    steps:
+      - name: 'Dependencies'
+        run: |
+          apt-get update
+          apt-get install -y git python3.9 pip cudnn9-cuda-12
+          pip install torch==2.1.2 "numpy<2"
+          pip install cmake pybind11[global] ninja pydantic importlib-metadata>=1.0 packaging einops onnxscript "nvidia-cudnn-frontend>=1.25.0"
+      - name: 'Checkout'
+        uses: actions/checkout@v3
+        with:
+          submodules: recursive
+      - name: ccache
+        uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad
+      - name: 'Build'
+        run: NVTE_USE_CCACHE=1 NVTE_CCACHE_BIN=sccache pip install --no-build-isolation --no-deps . -v
+        env:
+          NVTE_FRAMEWORK: pytorch
+          # Single old arch (Volta) to keep memory/build size down
+          NVTE_CUDA_ARCHS: "70"
+          MAX_JOBS: 1
+          SCCACHE_GHA_ENABLED: "true"
+      - name: 'Sanity check'
+        run: python3 tests/pytorch/test_sanity_import.py
