@@ -472,9 +472,7 @@ class UserbuffersBackwardLinear(FusedOperation):
                 # overlapping the AG operation with the dgrad GEMM.
 
                 # Get the communication stream from the dgrad GEMM to use for the AG
-                send_ptr, recv_ptr = ub_comm_dgrad.get_communication_stream()
-                dgrad_send_stream = torch.cuda.ExternalStream(send_ptr)
-                dgrad_recv_stream = torch.cuda.ExternalStream(recv_ptr)
+                dgrad_send_stream, dgrad_recv_stream = ub_comm_dgrad.get_communication_stream()
 
                 ub_obj_overlap_wgrad = get_ub(ub_comm_name + "_wgrad", with_quantized_compute)
 
@@ -493,9 +491,7 @@ class UserbuffersBackwardLinear(FusedOperation):
 
                 # Allgather grad_outputs[0] using the dgrad streams so we can overlap with the fc2_dgrad gemm
                 bulk_overlap_ag_with_external_gemm(
-                    ub_obj_overlap_wgrad,
-                    dgrad_send_stream.cuda_stream,
-                    dgrad_recv_stream.cuda_stream,
+                    ub_obj_overlap_wgrad, dgrad_send_stream, dgrad_recv_stream
                 )
 
             if tensor_parallel_mode == "column":

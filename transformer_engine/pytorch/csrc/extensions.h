@@ -755,8 +755,8 @@ void nvshmem_finalize();
  * Comm+GEMM Overlap Wrappers
  **************************************************************************************************/
 
-void bulk_overlap_ag_with_external_gemm(CommOverlap &allgather_communicator, int64_t send_stream,
-                                        int64_t recv_stream);
+void bulk_overlap_ag_with_external_gemm(CommOverlap &allgather_communicator, at::Stream send_stream,
+                                        at::Stream recv_stream);
 
 /***************************************************************************************************
  * Newton-Schulz (cuSolverMp)
@@ -843,7 +843,7 @@ class CommOverlap : torch::CustomClassHolder, public transformer_engine::CommOve
   at::Tensor get_buffer(bool local_chunk = false,
                         std::optional<std::vector<int64_t>> shape = std::nullopt);
 
-  std::pair<int64_t, int64_t> get_communication_stream();
+  std::pair<at::Stream, at::Stream> get_communication_stream();
 
 };  // CommOverlap
 
@@ -876,7 +876,7 @@ class CommOverlapP2P : torch::CustomClassHolder, public transformer_engine::Comm
   at::Tensor get_buffer(bool local_chunk = false,
                         std::optional<std::vector<int64_t>> shape = std::nullopt);
 
-  std::pair<int64_t, int64_t> get_communication_stream();
+  std::pair<at::Stream, at::Stream> get_communication_stream();
 
 };  // CommOverlapP2P
 
