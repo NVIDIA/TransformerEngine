@@ -39,6 +39,16 @@ __device__ inline QBBinParams load_qb_bin_params(const CompType *bin_bounds, int
   return {lower, static_cast<CompType>(num_bins) / (upper - lower)};
 }
 
+void validate_qb_bin_bounds(const Tensor bin_bounds, cudaStream_t stream) {
+  float bounds[2];
+  NVTE_CHECK_CUDA(cudaMemcpyAsync(bounds, bin_bounds.data.dptr, sizeof(bounds),
+                                  cudaMemcpyDeviceToHost, stream));
+  NVTE_CHECK_CUDA(cudaStreamSynchronize(stream));
+  NVTE_CHECK(std::isfinite(bounds[0]) && std::isfinite(bounds[1]) && bounds[0] < bounds[1],
+             "QB bin_bounds values must be finite with lower < upper, got [", bounds[0], ", ",
+             bounds[1], "]");
+}
+
 template <QBMode Mode>
 __device__ inline CompType extract_qb_cutoff_and_compact(int *topk_indices, CompType *topk_scores,
                                                          int topk, int lane_id) {
@@ -913,7 +923,7 @@ __global__ void qb_histogram_accumulate_kernel(const CompType *raw_scores, const
 }
 
 void qb_histogram_accumulate(const Tensor raw_scores, const Tensor cutoff, const Tensor bin_bounds,
-                             Tensor histogram, cudaStream_t stream) {
+                             Tensor histogram, bool validate_bin_bounds, cudaStream_t stream) {
   NVTE_CHECK(raw_scores.data.dtype == DType::kFloat32, "QB raw_scores must have FP32 dtype");
   NVTE_CHECK(cutoff.data.dtype == DType::kFloat32, "QB cutoff must have FP32 dtype");
   NVTE_CHECK(bin_bounds.data.dtype == DType::kFloat32, "QB bin_bounds must have FP32 dtype");
@@ -930,6 +940,9 @@ void qb_histogram_accumulate(const Tensor raw_scores, const Tensor cutoff, const
              "QB histogram must have shape [num_experts, num_bins]");
   const int num_bins = static_cast<int>(histogram.data.shape[1]);
   NVTE_CHECK(num_bins > 0, "QB num_bins must be positive");
+  if (validate_bin_bounds) {
+    validate_qb_bin_bounds(bin_bounds, stream);
+  }
 
   const int token_partitions = std::min(4, std::max(1, (num_tokens + 1023) / 1024));
   const dim3 grid((num_experts + kQBExpertsPerBlock - 1) / kQBExpertsPerBlock, token_partitions);
@@ -1123,7 +1136,8 @@ void fused_topk_with_score_function_forward_qb(
     const Tensor logits, int num_tokens, int num_experts, int topk, float scaling_factor,
     const Tensor expert_bias, Tensor probs, Tensor routing_map,
     NVTERoutingMapFormat routing_map_format, Tensor intermediate_output, Tensor cutoff,
-    Tensor histogram, Tensor bin_bounds, NVTEQBHistogramMode histogram_mode, cudaStream_t stream) {
+    Tensor histogram, Tensor bin_bounds, NVTEQBHistogramMode histogram_mode,
+    bool validate_bin_bounds, cudaStream_t stream) {
   check_routing_map_format(routing_map_format);
   const int num_bins =
       check_qb_forward_tensors(logits, num_tokens, num_experts, topk, expert_bias, probs,
@@ -1132,6 +1146,9 @@ void fused_topk_with_score_function_forward_qb(
       expected_routing_map_shape(num_tokens, num_experts, routing_map_format);
   NVTE_CHECK(routing_map.data.shape == routing_map_shape,
              "QB routing_map shape does not match routing_map_format");
+  if (validate_bin_bounds) {
+    validate_qb_bin_bounds(bin_bounds, stream);
+  }
 
 #define QB_ROUTER_FORWARD_LAUNCH(RoutingMapFormatVal, QbModeVal)                                   \
   TE_ROUTER_PROBS_TYPE_SWITCH_ALL(                                                                 \
@@ -1170,7 +1187,7 @@ void fused_topk_with_score_function_forward_qb_with_indices(
     const Tensor logits, int num_tokens, int num_experts, int topk, float scaling_factor,
     const Tensor expert_bias, Tensor probs, Tensor topk_indices, Tensor intermediate_output,
     Tensor cutoff, Tensor histogram, Tensor bin_bounds, NVTEQBHistogramMode histogram_mode,
-    cudaStream_t stream) {
+    bool validate_bin_bounds, cudaStream_t stream) {
   const int num_bins =
       check_qb_forward_tensors(logits, num_tokens, num_experts, topk, expert_bias, probs,
                                intermediate_output, cutoff, histogram, bin_bounds);
@@ -1178,6 +1195,9 @@ void fused_topk_with_score_function_forward_qb_with_indices(
                                           static_cast<size_t>(topk)};
   NVTE_CHECK(topk_indices.data.shape == indices_shape,
              "QB topk_indices must have shape [num_tokens, topk]");
+  if (validate_bin_bounds) {
+    validate_qb_bin_bounds(bin_bounds, stream);
+  }
 
 #define QB_ROUTER_FORWARD_WITH_INDICES_LAUNCH(DataType, IndexType, QbModeVal)                     \
   fused_topk_with_score_function_forward_with_indices_kernel_launcher<DataType, float, IndexType, \
@@ -1751,7 +1771,24 @@ void nvte_fused_topk_with_score_function_forward_qb_v2(
       *convertNVTETensorCheck(routing_map), routing_map_format,
       *convertNVTETensorCheck(intermediate_output), *convertNVTETensorCheck(cutoff),
       *convertNVTETensorCheck(histogram), *convertNVTETensorCheck(bin_bounds), histogram_mode,
-      stream);
+      /*validate_bin_bounds=*/true, stream);
+}
+
+void nvte_fused_topk_with_score_function_forward_qb_v2_unchecked(
+    const NVTETensor logits, int num_tokens, int num_experts, int topk, float scaling_factor,
+    const NVTETensor expert_bias, NVTETensor probs, NVTETensor routing_map,
+    NVTERoutingMapFormat routing_map_format, NVTETensor intermediate_output, NVTETensor cutoff,
+    NVTETensor histogram, NVTETensor bin_bounds, NVTEQBHistogramMode histogram_mode,
+    cudaStream_t stream) {
+  NVTE_API_CALL(nvte_fused_topk_with_score_function_forward_qb_v2_unchecked);
+  using namespace transformer_engine;
+  fused_router::fused_topk_with_score_function_forward_qb(
+      *convertNVTETensorCheck(logits), num_tokens, num_experts, topk, scaling_factor,
+      *convertNVTETensorCheck(expert_bias), *convertNVTETensorCheck(probs),
+      *convertNVTETensorCheck(routing_map), routing_map_format,
+      *convertNVTETensorCheck(intermediate_output), *convertNVTETensorCheck(cutoff),
+      *convertNVTETensorCheck(histogram), *convertNVTETensorCheck(bin_bounds), histogram_mode,
+      /*validate_bin_bounds=*/false, stream);
 }
 
 void nvte_fused_topk_with_score_function_forward_qb_with_indices(
@@ -1766,7 +1803,22 @@ void nvte_fused_topk_with_score_function_forward_qb_with_indices(
       *convertNVTETensorCheck(expert_bias), *convertNVTETensorCheck(probs),
       *convertNVTETensorCheck(topk_indices), *convertNVTETensorCheck(intermediate_output),
       *convertNVTETensorCheck(cutoff), *convertNVTETensorCheck(histogram),
-      *convertNVTETensorCheck(bin_bounds), histogram_mode, stream);
+      *convertNVTETensorCheck(bin_bounds), histogram_mode, /*validate_bin_bounds=*/true, stream);
+}
+
+void nvte_fused_topk_with_score_function_forward_qb_with_indices_unchecked(
+    const NVTETensor logits, int num_tokens, int num_experts, int topk, float scaling_factor,
+    const NVTETensor expert_bias, NVTETensor probs, NVTETensor topk_indices,
+    NVTETensor intermediate_output, NVTETensor cutoff, NVTETensor histogram, NVTETensor bin_bounds,
+    NVTEQBHistogramMode histogram_mode, cudaStream_t stream) {
+  NVTE_API_CALL(nvte_fused_topk_with_score_function_forward_qb_with_indices_unchecked);
+  using namespace transformer_engine;
+  fused_router::fused_topk_with_score_function_forward_qb_with_indices(
+      *convertNVTETensorCheck(logits), num_tokens, num_experts, topk, scaling_factor,
+      *convertNVTETensorCheck(expert_bias), *convertNVTETensorCheck(probs),
+      *convertNVTETensorCheck(topk_indices), *convertNVTETensorCheck(intermediate_output),
+      *convertNVTETensorCheck(cutoff), *convertNVTETensorCheck(histogram),
+      *convertNVTETensorCheck(bin_bounds), histogram_mode, /*validate_bin_bounds=*/false, stream);
 }
 
 void nvte_qb_histogram_accumulate(const NVTETensor raw_scores, const NVTETensor cutoff,
@@ -1776,7 +1828,19 @@ void nvte_qb_histogram_accumulate(const NVTETensor raw_scores, const NVTETensor 
   using namespace transformer_engine;
   fused_router::qb_histogram_accumulate(
       *convertNVTETensorCheck(raw_scores), *convertNVTETensorCheck(cutoff),
-      *convertNVTETensorCheck(bin_bounds), *convertNVTETensorCheck(histogram), stream);
+      *convertNVTETensorCheck(bin_bounds), *convertNVTETensorCheck(histogram),
+      /*validate_bin_bounds=*/true, stream);
+}
+
+void nvte_qb_histogram_accumulate_unchecked(const NVTETensor raw_scores, const NVTETensor cutoff,
+                                            const NVTETensor bin_bounds, NVTETensor histogram,
+                                            cudaStream_t stream) {
+  NVTE_API_CALL(nvte_qb_histogram_accumulate_unchecked);
+  using namespace transformer_engine;
+  fused_router::qb_histogram_accumulate(
+      *convertNVTETensorCheck(raw_scores), *convertNVTETensorCheck(cutoff),
+      *convertNVTETensorCheck(bin_bounds), *convertNVTETensorCheck(histogram),
+      /*validate_bin_bounds=*/false, stream);
 }
 
 void nvte_fused_topk_with_score_function_backward_v2(const NVTETensor routing_map,

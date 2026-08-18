@@ -4,7 +4,6 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include <cmath>
 #include <numeric>
 
 #include "../extensions.h"
@@ -194,14 +193,6 @@ fused_topk_with_score_function_qb_fwd(at::Tensor logits, int topk,
   TORCH_CHECK(
       bin_bounds.scalar_type() == at::kFloat && bin_bounds.dim() == 1 && bin_bounds.numel() == 2,
       "QB bin_bounds must be float32 with shape [2]");
-  if (!bin_bounds_validated) {
-    const at::Tensor bin_bounds_cpu = bin_bounds.cpu();
-    const float lower = bin_bounds_cpu.data_ptr<float>()[0];
-    const float upper = bin_bounds_cpu.data_ptr<float>()[1];
-    TORCH_CHECK(std::isfinite(lower) && std::isfinite(upper) && lower < upper,
-                "QB bin_bounds values must be finite with lower < upper, got [", lower, ", ", upper,
-                "]");
-  }
   TORCH_CHECK(histogram_mode == NVTE_QB_HISTOGRAM_TWO_KERNEL ||
                   histogram_mode == NVTE_QB_HISTOGRAM_FUSED_ATOMIC,
               "Unsupported QB histogram mode: ", histogram_mode);
@@ -248,21 +239,37 @@ fused_topk_with_score_function_qb_fwd(at::Tensor logits, int topk,
   auto stream = at::cuda::getCurrentCUDAStream();
 
   if (topk_indices.has_value()) {
-    nvte_fused_topk_with_score_function_forward_qb_with_indices(
-        logits_cu.data(), static_cast<int>(num_tokens), static_cast<int>(num_experts), topk,
-        scaling_factor_value, expert_bias_cu.data(), probs_cu.data(), routing_output_cu.data(),
-        intermediate_output_cu.data(), cutoff_cu.data(), histogram_cu.data(), bin_bounds_cu.data(),
-        mode, stream);
+    if (bin_bounds_validated) {
+      nvte_fused_topk_with_score_function_forward_qb_with_indices_unchecked(
+          logits_cu.data(), static_cast<int>(num_tokens), static_cast<int>(num_experts), topk,
+          scaling_factor_value, expert_bias_cu.data(), probs_cu.data(), routing_output_cu.data(),
+          intermediate_output_cu.data(), cutoff_cu.data(), histogram_cu.data(),
+          bin_bounds_cu.data(), mode, stream);
+    } else {
+      nvte_fused_topk_with_score_function_forward_qb_with_indices(
+          logits_cu.data(), static_cast<int>(num_tokens), static_cast<int>(num_experts), topk,
+          scaling_factor_value, expert_bias_cu.data(), probs_cu.data(), routing_output_cu.data(),
+          intermediate_output_cu.data(), cutoff_cu.data(), histogram_cu.data(),
+          bin_bounds_cu.data(), mode, stream);
+    }
   } else {
-    nvte_fused_topk_with_score_function_forward_qb_v2(
-        logits_cu.data(), static_cast<int>(num_tokens), static_cast<int>(num_experts), topk,
-        scaling_factor_value, expert_bias_cu.data(), probs_cu.data(), routing_output_cu.data(),
-        static_cast<NVTERoutingMapFormat>(routing_map_format), intermediate_output_cu.data(),
-        cutoff_cu.data(), histogram_cu.data(), bin_bounds_cu.data(), mode, stream);
+    if (bin_bounds_validated) {
+      nvte_fused_topk_with_score_function_forward_qb_v2_unchecked(
+          logits_cu.data(), static_cast<int>(num_tokens), static_cast<int>(num_experts), topk,
+          scaling_factor_value, expert_bias_cu.data(), probs_cu.data(), routing_output_cu.data(),
+          static_cast<NVTERoutingMapFormat>(routing_map_format), intermediate_output_cu.data(),
+          cutoff_cu.data(), histogram_cu.data(), bin_bounds_cu.data(), mode, stream);
+    } else {
+      nvte_fused_topk_with_score_function_forward_qb_v2(
+          logits_cu.data(), static_cast<int>(num_tokens), static_cast<int>(num_experts), topk,
+          scaling_factor_value, expert_bias_cu.data(), probs_cu.data(), routing_output_cu.data(),
+          static_cast<NVTERoutingMapFormat>(routing_map_format), intermediate_output_cu.data(),
+          cutoff_cu.data(), histogram_cu.data(), bin_bounds_cu.data(), mode, stream);
+    }
   }
   if (mode == NVTE_QB_HISTOGRAM_TWO_KERNEL) {
-    nvte_qb_histogram_accumulate(intermediate_output_cu.data(), cutoff_cu.data(),
-                                 bin_bounds_cu.data(), histogram_cu.data(), stream);
+    nvte_qb_histogram_accumulate_unchecked(intermediate_output_cu.data(), cutoff_cu.data(),
+                                           bin_bounds_cu.data(), histogram_cu.data(), stream);
   }
 
   return std::make_tuple(probs, routing_output, intermediate_output, cutoff, histogram);

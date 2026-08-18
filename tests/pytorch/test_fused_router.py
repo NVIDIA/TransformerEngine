@@ -656,10 +656,18 @@ def test_qb_topk_revalidates_updated_bin_bounds():
         )
 
 
-def test_qb_raw_binding_rejects_invalid_bin_bounds_recoverably():
+@pytest.mark.parametrize(
+    "histogram_mode",
+    [QBHistogramMode.TWO_KERNEL, QBHistogramMode.FUSED_ATOMIC],
+)
+@pytest.mark.parametrize("use_dense_indices", [False, True])
+def test_qb_raw_binding_rejects_invalid_bin_bounds_recoverably(histogram_mode, use_dense_indices):
     logits = torch.randn(8, 16, device="cuda", dtype=torch.float32)
     expert_bias = torch.zeros(16, device="cuda", dtype=torch.float32)
     histogram = torch.zeros(16, 32, device="cuda", dtype=torch.int32)
+    topk_indices = (
+        torch.empty(8, 4, device="cuda", dtype=torch.int32) if use_dense_indices else None
+    )
     invalid_bounds = torch.tensor([1.0, 1.0], device="cuda", dtype=torch.float32)
     with pytest.raises(RuntimeError, match="finite with lower < upper"):
         tex.fused_topk_with_score_function_qb_fwd(
@@ -668,10 +676,10 @@ def test_qb_raw_binding_rejects_invalid_bin_bounds_recoverably():
             None,
             expert_bias,
             int(RoutingMapFormat.BYTEMAP),
-            None,
+            topk_indices,
             histogram,
             invalid_bounds,
-            QBHistogramMode.FUSED_ATOMIC,
+            histogram_mode,
         )
 
     # The validation error must not poison the CUDA context.
@@ -682,10 +690,10 @@ def test_qb_raw_binding_rejects_invalid_bin_bounds_recoverably():
         None,
         expert_bias,
         int(RoutingMapFormat.BYTEMAP),
-        None,
+        topk_indices,
         histogram,
         valid_bounds,
-        QBHistogramMode.FUSED_ATOMIC,
+        histogram_mode,
     )
     torch.cuda.synchronize()
 
