@@ -4,6 +4,7 @@
 
 import math
 import os
+from contextlib import nullcontext
 from typing import Dict, List, Tuple, Optional
 import pytest
 
@@ -1092,6 +1093,69 @@ def test_checkpoint_without_backward_does_not_accumulate_recompute_stashes(train
     recompute_buffer = FP8GlobalStateManager.quantization_state.fp8_tensors_recompute_buffer
     assert all(len(stashed) == 0 for stashed in recompute_buffer)
     assert observed == [(False, False)] * 3
+
+
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+@pytest.mark.parametrize("use_reentrant", all_boolean)
+@pytest.mark.parametrize("enable_grad_in", ["context_fn", "function"])
+def test_checkpoint_outer_no_grad_preserves_explicit_inner_grad(enable_grad_in, use_reentrant):
+    """The no-grad bypass preserves an explicit nested request for autograd."""
+    weight = torch.randn(16, 16, device="cuda", dtype=torch.float32)
+    input_data = torch.randn(16, 16, device="cuda", dtype=torch.bfloat16)
+    fp8_recipe = recipe.DelayedScaling(fp8_format=recipe.Format.HYBRID)
+
+    def run(checkpointed):
+        FP8GlobalStateManager.reset()
+        layer = Linear(16, 16, bias=False, params_dtype=torch.float32).cuda().eval()
+        with torch.no_grad():
+            layer.weight.copy_(weight)
+        inp = input_data.clone().requires_grad_()
+        observed = []
+
+        def body(value):
+            grad_ctx = torch.enable_grad() if enable_grad_in == "function" else nullcontext()
+            with grad_ctx, autocast(enabled=True, recipe=fp8_recipe):
+                observed.append(
+                    (
+                        torch.is_grad_enabled(),
+                        is_fp8_activation_recompute_enabled(),
+                        in_fp8_activation_recompute_phase(),
+                    )
+                )
+                return layer(value)
+
+        checkpoint_kwargs = {"use_reentrant": use_reentrant}
+        forward_ctx = nullcontext()
+        if enable_grad_in == "context_fn":
+            checkpoint_kwargs["context_fn"] = lambda: (torch.enable_grad(), nullcontext())
+            if not checkpointed:
+                # Match the checkpoint forward context in the direct reference without
+                # changing grad state at the checkpoint call site itself.
+                forward_ctx = torch.enable_grad()
+
+        with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16), forward_ctx:
+            if checkpointed:
+                out = te_checkpoint(body, inp, **checkpoint_kwargs)
+            else:
+                out = body(inp)
+
+        assert out.requires_grad
+        out.float().sum().backward()
+        torch.cuda.synchronize()
+        assert inp.grad is not None and torch.isfinite(inp.grad).all()
+        assert layer.weight.grad is not None and torch.isfinite(layer.weight.grad).all()
+        recompute_buffer = FP8GlobalStateManager.quantization_state.fp8_tensors_recompute_buffer
+        assert all(len(stashed) == 0 for stashed in recompute_buffer)
+        return out.detach(), inp.grad.detach(), layer.weight.grad.detach(), observed
+
+    ref_out, ref_dgrad, ref_wgrad, ref_observed = run(checkpointed=False)
+    out, dgrad, wgrad, observed = run(checkpointed=True)
+
+    torch.testing.assert_close(out, ref_out)
+    torch.testing.assert_close(dgrad, ref_dgrad)
+    torch.testing.assert_close(wgrad, ref_wgrad)
+    assert ref_observed == [(True, False, False)]
+    assert observed == ref_observed
 
 
 def _test_e2e_checkpointing_get_model(config, dtype):
