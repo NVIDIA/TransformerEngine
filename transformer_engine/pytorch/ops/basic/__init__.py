@@ -24,7 +24,7 @@ from .basic_linear import BasicLinear
 from .bias import Bias
 from .constant_scale import ConstantScale
 from .dropout import Dropout
-from .grouped_linear import GroupedLinear
+from .grouped_linear import GroupedLinear, is_op_fuser_grouped_tensor_path_supported
 from .identity import Identity
 from .l2normalization import L2Normalization
 from .layer_norm import LayerNorm

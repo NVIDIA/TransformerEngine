@@ -37,6 +37,7 @@ from transformer_engine.pytorch import (
 from transformer_engine.common import recipe
 from transformer_engine.pytorch.cpp_extensions import general_gemm
 from transformer_engine.pytorch.tensor.utils import replace_raw_data
+from transformer_engine.pytorch.module import is_module_grouped_tensor_path_supported
 from utils import ModelConfig, recipe_id, skip_unsupported_backward_override
 
 # Only run FP8 tests on supported devices.
@@ -86,11 +87,11 @@ model_configs = {
 
 
 def nvfp4_vanilla():
-    nvfp4_recipe = recipe.NVFP4BlockScaling()
-    nvfp4_recipe.fp4_quant_fwd_inp = recipe.QParams()
-    nvfp4_recipe.fp4_quant_fwd_weight = recipe.QParams()
-    nvfp4_recipe.fp4_quant_bwd_grad = recipe.QParams()
-    return nvfp4_recipe
+    return recipe.NVFP4BlockScaling(
+        disable_rht=True,
+        disable_stochastic_rounding=True,
+        disable_2d_quantization=True,
+    )
 
 
 def nvfp4_row_scaled():
@@ -123,7 +124,7 @@ fp8_recipes = []
 if mxfp8_available:
     fp8_recipes.append(recipe.MXFP8BlockScaling())
 if nvfp4_available:
-    fp8_recipes.append(nvfp4_vanilla())  # TODO: fix check for this
+    fp8_recipes.append(nvfp4_vanilla())
     fp8_recipes.append(nvfp4_4over6())
 if fp8_block_scaling_available:
     fp8_recipes.append(recipe.Float8BlockScaling())
@@ -563,6 +564,7 @@ def test_sanity_linear_with_zero_tokens(
         out = te_linear(inp_hidden_states)
     loss = out.sum()
     loss.backward()
+    torch.cuda.synchronize()
     assert out.shape == (num_tokens, ffn_hidden_size)
 
 
@@ -603,17 +605,34 @@ def test_sanity_grouped_linear(
     if fp8_recipe is not None:
         fp8_recipe = copy.deepcopy(fp8_recipe)
         fp8_recipe.backward_override = backward_override
+    if single_param and not is_module_grouped_tensor_path_supported(
+        fp8_recipe,
+        dtype,
+    ):
+        pytest.skip("Single grouped parameters require the native grouped-tensor path")
+    if single_param:
+        # Single grouped parameters intentionally have no split-quantize fallback, so this
+        # test must satisfy the native grouped kernels' shape contract. MCore pads each
+        # expert's token count to 256; TE requires at least 128-row alignment. Weight K must
+        # be 64-aligned.
+        tokens_per_nonempty_expert = bs * config.max_seqlen_q
+        if tokens_per_nonempty_expert % 128 != 0:
+            pytest.skip("Single grouped parameters require each nonempty m_split to be 128-aligned")
+        k_alignment = 64
+        if config.hidden_size % k_alignment != 0:
+            pytest.skip(f"Single grouped parameters require GEMM K to be {k_alignment}-aligned")
 
     if fp8_recipe is not None:
         if not is_fp8_supported(config):
             pytest.skip("Model config does not support FP8")
         if fp8_recipe.nvfp4():
-            if not getattr(fp8_recipe, "row_scaled_activation", False):
-                pytest.skip("NVFP4 not supported for grouped linear")
-            if single_param:
-                pytest.skip("Row-scaled NVFP4 does not support GroupedTensor grouped linear")
-            if dtype == torch.float16:
-                pytest.skip("FP16 output for NVFP4 not supported")
+            if dtype != torch.bfloat16:
+                pytest.skip("NVFP4 GroupedLinear requires BF16")
+            if single_param and not fp8_model_params:
+                pytest.skip(
+                    "NVFP4 single grouped BF16 primary weights require unsupported non-RHT "
+                    "grouped weight quantization; enable quantized model initialization"
+                )
 
     use_fp8 = fp8_recipe is not None
     with quantized_model_init(enabled=use_fp8 and fp8_model_params, recipe=fp8_recipe):
@@ -625,6 +644,7 @@ def test_sanity_grouped_linear(
             params_dtype=dtype,
             single_grouped_weight=single_param,
             single_grouped_bias=single_param,
+            use_grouped_tensor=single_param,
         ).cuda()
 
     # Verify grouped linear exposes a single grouped weight parameter(and bias when applicable).
@@ -644,11 +664,25 @@ def test_sanity_grouped_linear(
         m_splits[-1] = 0
     elif empty_split == "middle":
         m_splits[num_gemms // 2] = 0
+    if single_param:
+        m_splits = torch.tensor(m_splits, dtype=torch.int64, device="cuda")
+
+    if NVTE_TEST_NVINSPECT_ENABLED and single_param:
+        # DebugQuantizer operates on per-GEMM tensors, while single grouped parameters
+        # intentionally have no split-quantize fallback.
+        with pytest.raises(
+            RuntimeError,
+            match="TE debug features do not support single grouped parameters",
+        ):
+            with autocast(enabled=use_fp8, recipe=fp8_recipe):
+                te_grouped_linear(inp_hidden_states, m_splits)
+        return
 
     with autocast(enabled=use_fp8, recipe=fp8_recipe):
         out = te_grouped_linear(inp_hidden_states, m_splits)
     loss = out.sum()
     loss.backward()
+    torch.cuda.synchronize()
     assert out.shape == (num_tokens, ffn_hidden_size)
 
 
