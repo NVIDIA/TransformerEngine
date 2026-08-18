@@ -16,7 +16,6 @@
 #include <vector>
 
 #include "../cast/mxfp8/swizzle.cuh"
-#include "../cast/nvfp4/core_nvfp4.cuh"
 #include "../common.h"
 #include "../util/cuda_runtime.h"
 #include "../util/handle_manager.h"
@@ -1567,12 +1566,9 @@ inline void launch_grouped_gemm_setup(
   float a_unit_global_scale_amax = 1.0f;
   float b_unit_global_scale_amax = 1.0f;
   if (needs_nvfp4_alpha) {
-    constexpr float kFP4Max =
-        transformer_engine::detail::TypeExtrema<transformer_engine::fp4e2m1>::max;
-    a_unit_global_scale_amax =
-        transformer_engine::dispatch::nvfp4::core::scale_max(A_sel.scale_inv_dtype) * kFP4Max;
-    b_unit_global_scale_amax =
-        transformer_engine::dispatch::nvfp4::core::scale_max(B_sel.scale_inv_dtype) * kFP4Max;
+    const float kFP4Max = typeToMax(transformer_engine::DType::kFloat4E2M1);
+    a_unit_global_scale_amax = typeToMax(A_sel.scale_inv_dtype) * kFP4Max;
+    b_unit_global_scale_amax = typeToMax(B_sel.scale_inv_dtype) * kFP4Max;
   }
 
   setup_grouped_gemm_kernel<<<num_blocks, threads_per_block, 0, stream>>>(

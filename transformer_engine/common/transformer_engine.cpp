@@ -38,6 +38,11 @@ size_t typeToSize(const DType type) {
   return typeToNumBits(type) / 8;
 }
 
+float typeToMax(const DType type) {
+  TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(type, T,
+                                     return TypeInfo<T>::max_finite_value;);  // NOLINT(*)
+}
+
 std::string to_string(const NVTEScalingMode &mode) {
   switch (mode) {
     case NVTE_DELAYED_TENSOR_SCALING:

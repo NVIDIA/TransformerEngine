@@ -695,7 +695,7 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device_g
         for (int g = local_thread_idx; g < num_tensors; g += NumEpilogueColQuantThreadCount) {
           shared_storage.global_d_amax[g] =
               amax_colwise == nullptr
-                  ? dispatch::nvfp4::core::scale_max<TSFD>() * TypeExtrema<fp4e2m1>::max
+                  ? TypeExtrema<TSFD>::max * TypeExtrema<fp4e2m1>::max
                   : __ldg(amax_colwise + g);
         }
 
@@ -947,7 +947,7 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device_g
         for (int g = local_thread_idx; g < num_tensors; g += NumEpilogueRowQuantThreadCount) {
           shared_storage.global_a_amax[g] =
               amax_rowwise == nullptr
-                  ? dispatch::nvfp4::core::scale_max<TSFA>() * TypeExtrema<fp4e2m1>::max
+                  ? TypeExtrema<TSFA>::max * TypeExtrema<fp4e2m1>::max
                   : __ldg(amax_rowwise + g);
         }
         // RNG for stochastic rounding

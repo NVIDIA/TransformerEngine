@@ -10,7 +10,6 @@
 #include <cassert>
 #include <limits>
 
-#include "../cast/nvfp4/core_nvfp4.cuh"
 #include "../common.h"
 #include "../util/ptx.cuh"
 #include "../utils.cuh"
@@ -646,8 +645,8 @@ __global__ void nvfp4_compute_per_block_scale_kernel(
   const size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
   if (idx >= numel) return;
 
-  constexpr float fp4_max = transformer_engine::detail::TypeExtrema<fp4e2m1>::max;
-  constexpr float scale_max = dispatch::nvfp4::core::scale_max<ScaleType>();
+  constexpr float fp4_max = transformer_engine::TypeInfo<fp4e2m1>::max_finite_value;
+  constexpr float scale_max = transformer_engine::TypeInfo<ScaleType>::max_finite_value;
   constexpr float flt_max = 3.402823466e+38f;
   constexpr float tiny = 1.17549435e-38f;  // FLT_MIN
 
@@ -676,8 +675,8 @@ __global__ void nvfp4_compute_global_scale_kernel(
   const size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
   if (idx >= num_params) return;
 
-  constexpr float fp4_max = transformer_engine::detail::TypeExtrema<fp4e2m1>::max;
-  constexpr float scale_max = dispatch::nvfp4::core::scale_max<ScaleType>();
+  constexpr float fp4_max = transformer_engine::TypeInfo<fp4e2m1>::max_finite_value;
+  constexpr float scale_max = transformer_engine::TypeInfo<ScaleType>::max_finite_value;
   constexpr float flt_max = 3.402823466e+38f;
   constexpr float tiny = 1.17549435e-38f;  // FLT_MIN
 
@@ -773,8 +772,8 @@ __global__ void nvfp4_fused_scale_kernel(
   const size_t tile_row = out_row / block_len;
 
   // Compute the scale value
-  constexpr float fp4_max = transformer_engine::detail::TypeExtrema<fp4e2m1>::max;
-  constexpr float scale_max = dispatch::nvfp4::core::scale_max<ScaleType>();
+  constexpr float fp4_max = transformer_engine::TypeInfo<fp4e2m1>::max_finite_value;
+  constexpr float scale_max = transformer_engine::TypeInfo<ScaleType>::max_finite_value;
   constexpr float flt_max = 3.402823466e+38f;
   constexpr float tiny = 1.17549435e-38f;
 
@@ -945,14 +944,8 @@ void nvte_nvfp4_compute_per_tensor_scale(const NVTETensor inpA, const bool use_r
   void *amax_A_ptr = use_rowwise_amax_A ? tA->amax.dptr : tA->columnwise_amax.dptr;
   void *amax_B_ptr = use_rowwise_amax_B ? tB->amax.dptr : tB->columnwise_amax.dptr;
   void *alpha_ptr = tOut->data.dptr;
-  const DType scale_dtype_A =
-      use_rowwise_amax_A ? tA->scale_inv.dtype : tA->columnwise_scale_inv.dtype;
-  const DType scale_dtype_B =
-      use_rowwise_amax_B ? tB->scale_inv.dtype : tB->columnwise_scale_inv.dtype;
-  const float scale_max_A =
-      dispatch::nvfp4::core::scale_max(scale_dtype_A, tA->get_nvfp4_scale_max());
-  const float scale_max_B =
-      dispatch::nvfp4::core::scale_max(scale_dtype_B, tB->get_nvfp4_scale_max());
+  const float scale_max_A = tA->get_nvfp4_scale_max();
+  const float scale_max_B = tB->get_nvfp4_scale_max();
 
   NVTE_CHECK(alpha_ptr != nullptr, "alpha_ptr is null");
 

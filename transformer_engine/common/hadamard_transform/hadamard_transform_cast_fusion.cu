@@ -402,8 +402,7 @@ rht_gemm_device(MShape M, NShape N, KShape K, ClusterTileShape cluster_tile,
     accumulator_pipeline.producer_tail(accumulator_pipe_producer_state);
     tmem_allocator.free(tmem_base_ptr, TmemAllocator::Sm100TmemCapacityColumns);
   } else if (is_epilogue_warp) {
-    constexpr float kUnitGlobalScaleAmax =
-        dispatch::nvfp4::core::scale_max<TSFC>() * TypeExtrema<fp4e2m1>::max;
+    constexpr float kUnitGlobalScaleAmax = TypeExtrema<TSFC>::max * TypeExtrema<fp4e2m1>::max;
     const float global_amax_val =
         global_amax == nullptr ? kUnitGlobalScaleAmax : *global_amax;
     static constexpr int FragmentSize = 256 / sizeof_bits_v<TC>;

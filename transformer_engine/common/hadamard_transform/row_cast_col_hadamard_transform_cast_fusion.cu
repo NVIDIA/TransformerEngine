@@ -654,7 +654,7 @@ __global__ static void row_col_rht_gemm_device(
 
       float const c_global_amax_val =
           c_global_amax == nullptr
-              ? dispatch::nvfp4::core::scale_max<TSFD>() * TypeExtrema<fp4e2m1>::max
+              ? TypeExtrema<TSFD>::max * TypeExtrema<fp4e2m1>::max
               : *c_global_amax;
       auto acc_epilogue_pipelined_shape = append(acc_shape_epilogue, Int<AccumulatorPipelineStageCount / EpilogueUnrollFactor>{});
       auto bulk_tmem_epilogue_layout = make_layout(
@@ -862,7 +862,7 @@ __global__ static void row_col_rht_gemm_device(
       using S2RVectorType = uint128_t;
       float const a_global_amax_val =
           a_global_amax == nullptr
-              ? dispatch::nvfp4::core::scale_max<TSFA>() * TypeExtrema<fp4e2m1>::max
+              ? TypeExtrema<TSFA>::max * TypeExtrema<fp4e2m1>::max
               : *a_global_amax;
       int global_thread_idx = threadIdx.x;
       int local_thread_idx = global_thread_idx % 256;

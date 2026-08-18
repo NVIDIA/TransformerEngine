@@ -496,8 +496,7 @@ __global__ static void group_rht_gemm_device(
 
       Tensor tCgC = thr_mma_epilogue.partition_C(cur_gC_mn);
 
-      constexpr float kUnitGlobalScaleAmax =
-          dispatch::nvfp4::core::scale_max<TSFC>() * TypeExtrema<fp4e2m1>::max;
+      constexpr float kUnitGlobalScaleAmax = TypeExtrema<TSFC>::max * TypeExtrema<fp4e2m1>::max;
       float global_amax_val = global_amax_ptr == nullptr ? kUnitGlobalScaleAmax : *global_amax_ptr;
       float global_encode_scale =
           dispatch::nvfp4::core::compute_global_encode_scaling_factor_FP4<TSFC>(global_amax_val);

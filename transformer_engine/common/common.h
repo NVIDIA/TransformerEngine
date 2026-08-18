@@ -1248,6 +1248,7 @@ inline bool is_aligned_tensor_data(const Tensor &t, size_t alignment) {
 
 size_t typeToSize(const DType type);
 size_t typeToNumBits(const DType type);
+float typeToMax(const DType type);
 
 void CheckNoopTensor(const Tensor &t, std::string_view name);
 void CheckInputTensor(const Tensor &t, std::string_view name, bool check_scale_inv_shapes = true);
