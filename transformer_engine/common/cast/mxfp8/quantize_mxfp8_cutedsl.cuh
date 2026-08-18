@@ -166,11 +166,7 @@ inline bool mxfp8_quantize_cutedsl(const MXFP8QuantConfig &config, const Tensor 
                                    Tensor *workspace_tensor, cudaStream_t stream) {
   const size_t flat_m = input_tensor->flat_first_dim();
   const size_t flat_n = input_tensor->flat_last_dim();
-  // This is the same divisibility assumption we make when we compile the CuTeDSL kernel using fake tensors
-  // If the divisibility assumption is not met, we fall back to the CUDA kernel which can handle irregular shapes
-  if (flat_m % 32 != 0 || flat_n % 32 != 0) {
-    return false;
-  }
+  NVTE_CHECK(flat_n % 16 == 0, "Shape not supported because the last dimension of output is not 16 bytes aligned, which is required by TMA.");
 
   // When only WITH_DBIAS is true, we use a larger tile size (align with CUDA C++ implementation)
   const bool cast_dbias_only = config.with_dbias && !config.with_dact && !config.with_act;
@@ -202,7 +198,11 @@ inline bool mxfp8_quantize_cutedsl(const MXFP8QuantConfig &config, const Tensor 
   // Zero out swizzled scales if padding is needed.
   // Mirrors the CUDA C++ implementation in quantize_mxfp8.cuh. Skip when noop flag is set.
   if (config.swizzled && (flat_m % 128 != 0 || flat_n % 128 != 0)) {
-    const float *noop_flag_ptr = reinterpret_cast<const float *>(noop_ptr);
+    // zero_scales_kernel should ignore the noop tensor whenever the quantization kernel also ignores it,
+    // which happens when there are no fusions (NO ACT and DBIAS). Since zero_scales_kernel is not templated with these variants
+    // it doesn't know when to ignore, so we need to override the noop pointer to nullptr before passing it to the kernel.
+    const bool check_noop_flag = !config.with_act && !config.with_dact && !config.with_dbias;
+    const float *noop_flag_ptr = check_noop_flag ? reinterpret_cast<const float *>(noop_ptr) : nullptr;
     constexpr size_t zero_threads = 256;
     if (output_tensor->has_data()) {
       const size_t size_bytes = output_tensor->scale_inv.buffer_size_bytes();
@@ -228,8 +228,7 @@ inline bool mxfp8_quantize_cutedsl(const MXFP8QuantConfig &config, const Tensor 
     }
   }
 
-  // Data tensors auto-flatten to 2D (DLTensorWrapper's default), matching the
-  // kernel's flat (rows, cols) view; scale/amax are rank <= 2 and pass through.
+  // Data tensors auto-flatten to 2D (DLTensorWrapper's default)
   tvm_ffi_bridge::DLTensorWrapper mX(input_tensor->data);
   tvm_ffi_bridge::DLTensorWrapper mO_row, mS_row, mO_col, mS_col, mAmax, mActInput, mWorkspace;
   if (output_tensor->has_data()) {

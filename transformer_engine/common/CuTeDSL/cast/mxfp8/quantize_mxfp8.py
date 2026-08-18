@@ -106,8 +106,8 @@ def derive_swizzled_scale_layout(
     mS_col,
 ):
     """Derive the swizzled layout for the rowwise and colwise scale tensors."""
-    num_scale_cols = N // MXFP8_BLOCK_SCALING_SIZE
-    num_scale_rows = M // MXFP8_BLOCK_SCALING_SIZE
+    num_scale_cols = cute.ceil_div(N, MXFP8_BLOCK_SCALING_SIZE)
+    num_scale_rows = cute.ceil_div(M, MXFP8_BLOCK_SCALING_SIZE)
 
     num_tiles_M = cute.ceil_div(M, 128)
     num_tiles_SC = cute.ceil_div(num_scale_cols, 4)
@@ -275,6 +275,19 @@ def quantize_rowwise_mxfp8(
                     # If it's relu, we can handle it later
                     if not cutlass.const_expr(FUSE_RELU):
                         x = op(x)
+                    # TMA zero-fills the input tile outside its logical MxN
+                    # bounds. This is fine for non-activation cases, but for
+                    # activation cases, op(0) might not be 0 which will pollute
+                    # the amax and dbias. So we manually mask the OOB region here.
+                    global_row = tile_row_start + tidx // CTA_THREADS_X
+                    global_col = (
+                        tile_col_start
+                        + (tidx % CTA_THREADS_X) * MXFP8_BLOCK_SCALING_SIZE
+                        + start
+                        + i
+                    )
+                    if global_row >= M or global_col >= N:
+                        x = Float32(0.0)
                 # Accumulate to the per-thread dbias register buffer for this tile if WITH_DBIAS
                 if cutlass.const_expr(WITH_DBIAS):
                     # dbias_acc is register buffer so we can just write without bank conflict
@@ -407,6 +420,14 @@ def quantize_colwise_mxfp8(
             op = SUPPORTED_ACTIVATIONS[ACTIVATION]
             for i in cutlass.range_constexpr(MXFP8_BLOCK_SCALING_SIZE):
                 rX_thread_f32[i] = op(rX_thread_f32[i])
+                # TMA zero-fills the input tile outside its logical MxN
+                # bounds. This is fine for non-activation cases, but for
+                # activation cases, op(0) might not be 0 which will pollute
+                # the amax and dbias. So we manually mask the OOB region here
+                global_row = tile_row_start + i
+                global_col = tile_col_start + tidx
+                if global_row >= M or global_col >= N:
+                    rX_thread_f32[i] = Float32(0.0)
         # Accumulate fp32 activations to DBIAS before we truncate to half precision when the input is half precision
         if cutlass.const_expr(WITH_DBIAS):
             for i in cutlass.range_constexpr(MXFP8_BLOCK_SCALING_SIZE):
@@ -1732,7 +1753,15 @@ class MXFP8QuantizeSpecializedRowwiseKernel(MXFP8QuantizeKernelBase):
         row = bidy * self._TILE_ROWS + tidx // CTA_X
         col = bidx * self._TILE_COLS + (tidx % CTA_X) * MXFP8_BLOCK_SCALING_SIZE
         if row < M and col < N:
-            cute.autovec_copy(mX_thread, rX_thread)
+            full_block = col + MXFP8_BLOCK_SCALING_SIZE <= N
+            if full_block:
+                cute.autovec_copy(mX_thread, rX_thread)
+            else:
+                # Mask the OOB region with 0.0 so it doesn't affect the amax computation.
+                for i in cutlass.range_constexpr(MXFP8_BLOCK_SCALING_SIZE):
+                    rX_thread[(0, i)] = mX[(row, col + i)]
+                    if col + i >= N:
+                        rX_thread[(0, i)] = DTYPE(0.0)
             amax_2x = Int32(0)
             for i in cutlass.range_constexpr(MXFP8_BLOCK_SCALING_SIZE // 2):
                 amax_2x = abs_max_x2(amax_2x, rX_i32[i])
@@ -1750,7 +1779,13 @@ class MXFP8QuantizeSpecializedRowwiseKernel(MXFP8QuantizeKernelBase):
             scale_2x = pack_f32x2(inv_scale, inv_scale)
             for i in cutlass.range_constexpr(MXFP8_BLOCK_SCALING_SIZE // 4):
                 rO_u32[i] = mul_cvt4(rX_i32[2 * i], rX_i32[2 * i + 1], scale_2x)
-            cute.autovec_copy(rO_thread, mO_thread)
+            if full_block:
+                cute.autovec_copy(rO_thread, mO_thread)
+            else:
+                # Only write to the valid region
+                for i in cutlass.range_constexpr(MXFP8_BLOCK_SCALING_SIZE):
+                    if col + i < N:
+                        mO_row[(row, col + i)] = rO_thread[(0, i)]
 
         # Cooperative wide flush of the staged scales where padding columns flush as 0.
         if cutlass.const_expr(self._STASH_SCALE_TO_SMEM):
@@ -2301,15 +2336,13 @@ def compile_cutedsl_function_from_cfg(cfg):
     # CUDA dispatcher); everything else uses the general standard kernel.
     kernel_class = get_kernel_class(cfg)
     kernel_obj = kernel_class(cfg)
-    # M, N must be divisible by the MXFP8 scale-block size (MXFP8_BLOCK_SCALING_SIZE = 32) — the
-    # same alignment the CUDA C++ kernel requires.
-    sym_M = cute.sym_int32(divisibility=MXFP8_BLOCK_SCALING_SIZE)
-    sym_N = cute.sym_int32(divisibility=MXFP8_BLOCK_SCALING_SIZE)
+    sym_M = cute.sym_int32()
+    sym_N = cute.sym_int32(divisibility=16) # TMA requires 16 bytes alignment
     in_shape = out_shape = (sym_M, sym_N)
     # TE allocates scale tensors at a padded shape (see
     # MXFP8Quantizer::get_scale_shape in transformer_engine/pytorch/csrc):
-    #   rowwise:    (roundup(M, 128),     roundup(N // 32, 4))
-    #   columnwise: (roundup(M // 32, 4), roundup(N, 128))
+    #   rowwise:    (roundup(M, 128),           roundup(ceildiv(N, 32), 4))
+    #   columnwise: (roundup(ceildiv(M, 32), 4), roundup(N, 128))
     # These padded extents are NOT M/N (and SymInt has no `//`/`+`), so give the
     # scales their own fresh syms carrying the divisibility the padding
     # guarantees (rowwise: 128 x 4; colwise: 4 x 128).

@@ -146,6 +146,15 @@ class DLTensorWrapper : public DLTensor {
       strides_buf_[0] = flat_last;
       strides_buf_[1] = 1;
       this->ndim = 2;
+    } else if (flatten_2D && n == 1) {
+      const int64_t flat_last = static_cast<int64_t>(tensor.shape.data[0]);
+      shape_buf_ = std::make_unique<int64_t[]>(2);
+      strides_buf_ = std::make_unique<int64_t[]>(2);
+      shape_buf_[0] = 1;
+      shape_buf_[1] = flat_last;
+      strides_buf_[0] = flat_last;
+      strides_buf_[1] = 1;
+      this->ndim = 2;
     } else {
       shape_buf_ = std::make_unique<int64_t[]>(n);
       strides_buf_ = std::make_unique<int64_t[]>(n);
