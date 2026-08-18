@@ -59,6 +59,15 @@ PyTorch
 
 .. autoapifunction:: transformer_engine.pytorch.deinterleave_glu_tensor
 
+Model-specific layers
+---------------------
+
+.. autoapiclass:: transformer_engine.pytorch.models.DeepSeekV3Layer(**kwargs)
+
+.. autoapiclass:: transformer_engine.pytorch.models.DeepSeekV3MoE(**kwargs)
+
+.. autoapiclass:: transformer_engine.pytorch.models.MultiLatentAttention(**kwargs)
+
 Data types
 ----------
 
