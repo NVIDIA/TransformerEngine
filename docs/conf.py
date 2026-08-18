@@ -89,7 +89,7 @@ html_theme_options = {
             "url": "https://github.com/NVIDIA/TransformerEngine/",
             "icon": "fa-brands fa-github",
         }
-    ]
+    ],
 }
 html_extra_path = ["project.json", "versions1.json"]
 
