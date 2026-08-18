@@ -155,7 +155,11 @@ class DeepSeekV3MoE(torch.nn.Module):
 
             assert ep_max_tokens_per_rank is not None, "EP requires ep_max_tokens_per_rank."
             if ep_recv_capacity_per_rank is None:
-                ep_recv_capacity_per_rank = self.ep_size * ep_max_tokens_per_rank * topk
+                # Worst case plus per-expert alignment padding, rounded up to
+                # the multiple of 128 required by the fused grouped MLP.
+                cap = self.ep_size * ep_max_tokens_per_rank * topk
+                cap += num_local_experts * max(ep_alignment, 1)
+                ep_recv_capacity_per_rank = -(-cap // 128) * 128
             self.ep_buffer = EpBuffer(
                 top_k=topk,
                 max_tokens_per_rank=ep_max_tokens_per_rank,
