@@ -86,7 +86,7 @@ html_theme_options = {
     "icon_links": [
         {
             "name": "GitHub",
-            "url": "https://github.com/NVIDIA/Megatron-LM/",
+            "url": "https://github.com/NVIDIA/TransformerEngine/",
             "icon": "fa-brands fa-github",
         }
     ]
