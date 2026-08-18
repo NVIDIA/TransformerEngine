@@ -1191,7 +1191,9 @@ def _linear_backward(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None], ..
                 # overlapping the AG operation with the dgrad GEMM.
 
                 # Get the communication stream from the dgrad GEMM to use for the AG
-                dgrad_send_stream, dgrad_recv_stream = ub_obj_dgrad.get_communication_stream()
+                send_ptr, recv_ptr = ub_obj_dgrad.get_communication_stream()
+                dgrad_send_stream = torch.cuda.ExternalStream(send_ptr)
+                dgrad_recv_stream = torch.cuda.ExternalStream(recv_ptr)
 
                 # This object is separate from the ub_obj_wgrad object which is passed to the GEMM
                 ub_obj_overlap_wgrad = get_ub(bwd_args.ub_name + "_wgrad", bwd_args.fp8)
@@ -1211,7 +1213,9 @@ def _linear_backward(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None], ..
 
                 # Allgather grad_outputs[0] using the dgrad streams so we can overlap with the fc2_dgrad gemm
                 tex.bulk_overlap_ag_with_external_gemm(
-                    ub_obj_overlap_wgrad, dgrad_send_stream, dgrad_recv_stream
+                    ub_obj_overlap_wgrad,
+                    dgrad_send_stream.cuda_stream,
+                    dgrad_recv_stream.cuda_stream,
                 )
 
             if bwd_args.fp8 or bwd_args.debug:
