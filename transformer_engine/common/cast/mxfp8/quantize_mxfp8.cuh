@@ -53,9 +53,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
                           const __grid_constant__ CUtensorMap tensor_map_output_colwise,
                           e8m0_t *const scales_rowwise, e8m0_t *const scales_colwise,
                           const float *noop, float *const dbias_workspace, float *const amax_ptr,
-                          const bool skip_colwise_data_write, const size_t rows,
-                          const size_t cols, const size_t scale_stride_rowwise,
-                          const size_t scale_stride_colwise) {
+                          const bool skip_colwise_data_write, const size_t rows, const size_t cols,
+                          const size_t scale_stride_rowwise, const size_t scale_stride_colwise) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   constexpr bool COMPUTE_ACTIVATIONS = IS_DACT || IS_ACT;
   constexpr bool NO_ACTIVATIONS = !COMPUTE_ACTIVATIONS;
