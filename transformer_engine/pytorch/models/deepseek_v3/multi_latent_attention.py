@@ -9,8 +9,12 @@ from typing import Optional, Union
 import torch
 
 from transformer_engine.pytorch.module import Linear, LayerNormLinear
-from transformer_engine.pytorch.attention import DotProductAttention, RotaryPositionEmbedding
-from transformer_engine.pytorch.attention.rope import apply_rotary_pos_emb
+from transformer_engine.pytorch.attention import DotProductAttention
+from transformer_engine.pytorch.models.deepseek_v3.mla_rope import (
+    apply_mla_rope_kv,
+    apply_mla_rope_q,
+    build_rope_tables,
+)
 
 __all__ = ["MultiLatentAttention"]
 
@@ -28,6 +32,10 @@ class MultiLatentAttention(torch.nn.Module):
     :class:`DotProductAttention` with asymmetric head dims
     ``kv_channels=(qk_nope_head_dim + qk_rope_head_dim, v_head_dim)``, which
     supports the cuDNN fused attention backend.
+
+    RoPE uses the fused MLA kernels from :mod:`.mla_rope` (in-place on the
+    query rope slice, single-pass key/value assembly); the rope slice follows
+    the HF/Megatron DeepSeekV3 convention (interleaved weights, NeoX output).
 
     Parameters
     ----------
@@ -126,8 +134,8 @@ class MultiLatentAttention(torch.nn.Module):
             **common,
         )
 
-        self.rope = RotaryPositionEmbedding(qk_rope_head_dim, rotary_base=rotary_base)
-        self._rope_freqs: Optional[torch.Tensor] = None
+        self.rotary_base = rotary_base
+        self._rope_tables: Optional[tuple] = None
 
         self.core_attention = DotProductAttention(
             num_attention_heads,
@@ -140,10 +148,13 @@ class MultiLatentAttention(torch.nn.Module):
             tp_size=tp_size,
         )
 
-    def _rope_freqs_for(self, seq_len: int, device: torch.device) -> torch.Tensor:
-        if self._rope_freqs is None or self._rope_freqs.shape[0] < seq_len:
-            self._rope_freqs = self.rope(seq_len).to(device)
-        return self._rope_freqs[:seq_len]
+    def _rope_tables_for(self, seq_len: int, device: torch.device):
+        if self._rope_tables is None or self._rope_tables[0].shape[0] < seq_len:
+            self._rope_tables = build_rope_tables(
+                seq_len, self.qk_rope_head_dim, base=self.rotary_base, device=device
+            )
+        cos, sin = self._rope_tables
+        return cos[:seq_len], sin[:seq_len]
 
     def forward(
         self,
@@ -175,26 +186,26 @@ class MultiLatentAttention(torch.nn.Module):
         kv_latent, k_pos = torch.split(kv_down, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
         kv = self.kv_up_proj(kv_latent)
         kv = kv.view(*kv.shape[:-1], heads, self.qk_nope_head_dim + self.v_head_dim)
-        k_nope, v = torch.split(kv, [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
 
-        freqs = self._rope_freqs_for(seq_len, hidden_states.device)
-        q_rope = apply_rotary_pos_emb(
-            q[..., self.qk_nope_head_dim :].contiguous(),
-            freqs,
-            tensor_format=self.qkv_format,
-            fused=True,
+        cos, sin = self._rope_tables_for(seq_len, hidden_states.device)
+        q = apply_mla_rope_q(
+            q, cos, sin, self.qk_nope_head_dim, self.qk_rope_head_dim, self.qkv_format
         )
-        k_rope = apply_rotary_pos_emb(
-            k_pos.unsqueeze(-2), freqs, tensor_format=self.qkv_format, fused=True
+        k, v = apply_mla_rope_kv(
+            kv,
+            k_pos.unsqueeze(-2),
+            cos,
+            sin,
+            self.qk_nope_head_dim,
+            self.qk_rope_head_dim,
+            self.v_head_dim,
+            self.qkv_format,
         )
-
-        q = torch.cat([q[..., : self.qk_nope_head_dim], q_rope], dim=-1)
-        k = torch.cat([k_nope, k_rope.expand(*k_nope.shape[:-1], -1)], dim=-1)
 
         context = self.core_attention(
             q,
             k,
-            v.contiguous(),
+            v,
             attention_mask=attention_mask,
             qkv_format=self.qkv_format,
             attn_mask_type=attn_mask_type,
