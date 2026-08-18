@@ -606,6 +606,43 @@ class TestQuantizedTensor:
         parameter = torch.nn.Parameter(tensor)
         assert type(parameter) is derived_type
 
+    @pytest.mark.parametrize(
+        "quantization",
+        [
+            pytest.param(
+                "fp8",
+                marks=pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8),
+            ),
+            pytest.param(
+                "fp8_blockwise",
+                marks=pytest.mark.skipif(
+                    not fp8_block_scaling_available,
+                    reason=reason_for_no_fp8_block_scaling,
+                ),
+            ),
+            pytest.param(
+                "mxfp8",
+                marks=pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8),
+            ),
+            pytest.param(
+                "nvfp4",
+                marks=pytest.mark.skipif(not nvfp4_available, reason=reason_for_no_nvfp4),
+            ),
+        ],
+    )
+    def test_update_quantized_supports_subclass(self, quantization: str) -> None:
+        """Quantizers update derived quantized tensor wrappers in-place."""
+        quantizer = make_quantizer(quantization)
+        source = torch.randn(128, 128, dtype=torch.bfloat16, device="cuda")
+        tensor = quantizer(source)
+        derived_type = type(f"Derived{type(tensor).__name__}", (type(tensor),), {})
+        tensor.__class__ = derived_type
+
+        quantizer.update_quantized(torch.zeros_like(source), tensor)
+
+        assert type(tensor) is derived_type
+        torch.testing.assert_close(tensor.dequantize(), torch.zeros_like(source))
+
     @pytest.mark.parametrize("op", ("clone", "view", "reshape", "contiguous"))
     @pytest.mark.parametrize("quantization", _quantization_list)
     def test_identity_op(
