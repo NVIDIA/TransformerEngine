@@ -5,11 +5,7 @@
  ************************************************************************/
 
 /*! \file ptx.cuh
- *  \brief BW PTX
- *
- *  This header is safe to include from translation units compiled for a generic
- *  `sm_XXX` target. Helpers whose instruction selection depends on an
- *  arch/family-specific target live in ptx_arch_spec.cuh.
+*  \brief Helper functions with explicit PTX instructions
  */
 
 #ifndef TRANSFORMER_ENGINE_PTX_CUH_
