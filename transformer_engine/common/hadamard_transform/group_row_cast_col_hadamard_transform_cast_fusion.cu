@@ -682,10 +682,9 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device(
         CUTLASS_PRAGMA_NO_UNROLL
         for (int g = local_thread_idx; g < args.num_tensors; g += NumEpilogueColQuantThreadCount) {
           const auto *amax_ptr = reinterpret_cast<float *>(args.global_d_amax_list[g]);
-          shared_storage.global_d_amax[g] =
-              amax_ptr == nullptr
-                  ? TypeExtrema<TSFD>::max * TypeExtrema<fp4e2m1>::max
-                  : __ldg(amax_ptr);
+          shared_storage.global_d_amax[g] = amax_ptr == nullptr
+                                                ? TypeExtrema<TSFD>::max * TypeExtrema<fp4e2m1>::max
+                                                : __ldg(amax_ptr);
         }
 
         size_t rng_seed = 0;
@@ -924,10 +923,9 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device(
         CUTLASS_PRAGMA_NO_UNROLL
         for (int g = local_thread_idx; g < args.num_tensors; g += NumEpilogueRowQuantThreadCount) {
           const auto *amax_ptr = reinterpret_cast<float *>(args.global_a_amax_list[g]);
-          shared_storage.global_a_amax[g] =
-              amax_ptr == nullptr
-                  ? TypeExtrema<TSFA>::max * TypeExtrema<fp4e2m1>::max
-                  : __ldg(amax_ptr);
+          shared_storage.global_a_amax[g] = amax_ptr == nullptr
+                                                ? TypeExtrema<TSFA>::max * TypeExtrema<fp4e2m1>::max
+                                                : __ldg(amax_ptr);
         }
         // RNG for stochastic rounding
         if constexpr (kEnableStochasticRounding) {

@@ -131,7 +131,8 @@ __device__ __forceinline__ ScalePair compute_scale_pair(const float block_amax,
   constexpr float fp4_max = detail::TypeExtrema<fp4e2m1>::max;  // 6.0f
   constexpr float fp8_max = detail::TypeExtrema<fp8e4m3>::max;  // 448.0f
   constexpr float expand_to_map4 = 1.5f;
-  const float S_enc = core::compute_global_encode_scaling_factor_FP4<nvfp4_scale_t, E4M3_MAX>(global_amax);
+  const float S_enc =
+      core::compute_global_encode_scaling_factor_FP4<nvfp4_scale_t, E4M3_MAX>(global_amax);
   const float base = block_amax / fp4_max * S_enc;
 
   ScalePair scales;
@@ -687,7 +688,7 @@ void quantize_4over6(const Tensor &input, const Tensor *noop, Tensor *output,
              "Row-scaled NVFP4 quantization does not support 2D quantization.");
   NVTE_CHECK(!output->row_scaled_nvfp4 || output->amax.dptr != nullptr,
              "Row-scaled NVFP4 does not support disabling second-level scaling.");
-    NVTE_CHECK(!output->row_scaled_nvfp4 || !output->has_columnwise_data(),
+  NVTE_CHECK(!output->row_scaled_nvfp4 || !output->has_columnwise_data(),
              "Row-scaled NVFP4 quantization does not produce columnwise output.");
   NVTE_CHECK(!use_2d_quantization || output->has_data(),
              "NVFP4 4over6 2D quantization requires rowwise output.");

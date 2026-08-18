@@ -149,16 +149,15 @@ inline void dequantize(const Tensor &input, Tensor *output, cudaStream_t stream)
                "NVFP4 dequantization with non-default scale max "
                "is only supported with e4m3_max=256 (found ",
                e4m3_max, ").");
-    launch_dequantize<fp8e4m3, 256>(
-        input, output, with_gemm_swizzled_scales, row_scaled_nvfp4, N, Mread, blocks, threads,
-        num_scale_tiles_X, stream);
+    launch_dequantize<fp8e4m3, 256>(input, output, with_gemm_swizzled_scales, row_scaled_nvfp4, N,
+                                    Mread, blocks, threads, num_scale_tiles_X, stream);
     NVTE_CHECK_CUDA(cudaGetLastError());
   } else {
-    TRANSFORMER_ENGINE_NVFP4_SCALE_TYPE_SWITCH(scale_dtype, ScaleType,
-      launch_dequantize<ScaleType, static_cast<int>(TypeInfo<ScaleType>::max_finite_value)>(
-          input, output, with_gemm_swizzled_scales, row_scaled_nvfp4, N, Mread, blocks, threads,
-          num_scale_tiles_X, stream);
-    );  // NOLINT(*)
+    TRANSFORMER_ENGINE_NVFP4_SCALE_TYPE_SWITCH(
+        scale_dtype, ScaleType,
+        launch_dequantize<ScaleType, static_cast<int>(TypeInfo<ScaleType>::max_finite_value)>(
+            input, output, with_gemm_swizzled_scales, row_scaled_nvfp4, N, Mread, blocks, threads,
+            num_scale_tiles_X, stream););  // NOLINT(*)
     NVTE_CHECK_CUDA(cudaGetLastError());
   }
 #else
