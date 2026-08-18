@@ -1061,6 +1061,28 @@ def test_checkpoint_eval_intermediate_stashes_under_reentrant_no_grad(use_reentr
         assert "updated_scale_fwd" in layer.fp8_meta
 
 
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+@pytest.mark.parametrize("use_reentrant", all_boolean)
+def test_checkpoint_eval_without_backward_does_not_accumulate_recompute_stashes(use_reentrant):
+    """Eval forwards with autograd disabled must not leave unreachable recompute state."""
+    FP8GlobalStateManager.reset()
+    fp8_recipe = recipe.DelayedScaling(fp8_format=recipe.Format.HYBRID)
+    layer = Linear(16, 16, bias=False, params_dtype=torch.float32).cuda().eval()
+    inp = torch.randn(16, 16, device="cuda", dtype=torch.bfloat16)
+
+    def body(value):
+        with autocast(enabled=True, recipe=fp8_recipe):
+            return layer(value)
+
+    with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
+        for _ in range(3):
+            out = te_checkpoint(body, inp, use_reentrant=use_reentrant)
+            assert torch.isfinite(out).all()
+
+    recompute_buffer = FP8GlobalStateManager.quantization_state.fp8_tensors_recompute_buffer
+    assert all(len(stashed) == 0 for stashed in recompute_buffer)
+
+
 def _test_e2e_checkpointing_get_model(config, dtype):
     sigma = 0.023
     init_method = init_method_normal(sigma)
