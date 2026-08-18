@@ -10,7 +10,7 @@ import pytest
 import torch
 
 import transformer_engine.pytorch as te
-import transformer_engine.pytorch.module._split_quantization as grouped_quantization
+import transformer_engine.pytorch.module._split_quantization as split_quantization
 import transformer_engine_torch as tex
 
 from hybrid_quantization_utils import (
@@ -4249,14 +4249,14 @@ class TestHybridGroupedLinearValidation:
         ],
     )
     def test_uniform_lists_validate(self, quantizers):
-        grouped_quantization.validate_grouped_quantizer_list(
+        split_quantization.validate_grouped_quantizer_list(
             quantizers,
             operand_name="input",
         )
 
     def test_plain_custom_quantizer_uses_python_split_fallback(self, monkeypatch):
         monkeypatch.setattr(
-            grouped_quantization.tex,
+            split_quantization.tex,
             "split_quantize",
             lambda *args, **kwargs: pytest.fail("entered native split_quantize"),
         )
@@ -4264,7 +4264,7 @@ class TestHybridGroupedLinearValidation:
         tensor = torch.randn((4, 8))
         quantizers = [_CountingPythonQuantizer(calls) for _ in range(2)]
 
-        out, dbiases = grouped_quantization._split_quantize(
+        out, dbiases = split_quantization._split_quantize(
             tensor,
             [2, 2],
             quantizers,
@@ -4291,17 +4291,17 @@ class TestHybridGroupedLinearValidation:
             return tensor_part.sum(dim=0), tensor_part.clone()
 
         monkeypatch.setattr(
-            grouped_quantization.tex,
+            split_quantization.tex,
             "bgrad_quantize",
             fake_bgrad_quantize,
         )
         monkeypatch.setattr(
-            grouped_quantization.tex,
+            split_quantization.tex,
             "split_quantize",
             lambda *args, **kwargs: pytest.fail("entered split_quantize instead of bgrad_quantize"),
         )
 
-        outputs, dbiases = grouped_quantization._split_quantize(
+        outputs, dbiases = split_quantization._split_quantize(
             tensor,
             split_sizes,
             quantizers,
@@ -4333,17 +4333,17 @@ class TestHybridGroupedLinearValidation:
             return torch.split(tensor_arg, split_sizes_arg)
 
         monkeypatch.setattr(
-            grouped_quantization.tex,
+            split_quantization.tex,
             "bgrad_quantize",
             lambda *args, **kwargs: pytest.fail("entered bgrad_quantize without a dbias request"),
         )
         monkeypatch.setattr(
-            grouped_quantization.tex,
+            split_quantization.tex,
             "split_quantize",
             fake_split_quantize,
         )
 
-        outputs, dbiases = grouped_quantization._split_quantize(
+        outputs, dbiases = split_quantization._split_quantize(
             tensor,
             split_sizes,
             quantizers,
@@ -4370,7 +4370,7 @@ class TestHybridGroupedLinearValidation:
             quantizer.set_usage(rowwise=True, columnwise=False)
         reference_quantizers = [quantizer.copy() for quantizer in quantizers]
 
-        outputs, dbiases = grouped_quantization._split_quantize(
+        outputs, dbiases = split_quantization._split_quantize(
             tensor,
             split_sizes,
             quantizers,
@@ -4405,12 +4405,12 @@ class TestHybridGroupedLinearValidation:
         direction,
     ):
         monkeypatch.setattr(
-            grouped_quantization.tex,
+            split_quantization.tex,
             "split_quantize",
             lambda *args, **kwargs: pytest.fail("entered native split_quantize"),
         )
         monkeypatch.setattr(
-            grouped_quantization.tex,
+            split_quantization.tex,
             "bgrad_quantize",
             lambda *args, **kwargs: pytest.fail("hybrid quantization entered bgrad_quantize"),
         )
@@ -4430,7 +4430,7 @@ class TestHybridGroupedLinearValidation:
             quantizers.append(quantizer)
 
         tensor = torch.randn((4, 8))
-        out, dbiases = grouped_quantization._split_quantize(
+        out, dbiases = split_quantization._split_quantize(
             tensor,
             [2, 2],
             quantizers,
@@ -4466,7 +4466,7 @@ class TestHybridGroupedLinearValidation:
             _make_hybrid_quantizer_fp8_row_fp4_col(),
         ]
         with pytest.raises(ValueError, match="mix HybridQuantizer and non-hybrid"):
-            grouped_quantization.validate_grouped_quantizer_list(
+            split_quantization.validate_grouped_quantizer_list(
                 quantizers,
                 operand_name="input",
             )
@@ -4478,7 +4478,7 @@ class TestHybridGroupedLinearValidation:
             _make_hybrid_quantizer_fp8_row_fp4_col(),
         ]
         with pytest.raises(ValueError, match="mix None and concrete quantizers"):
-            grouped_quantization.validate_grouped_quantizer_list(
+            split_quantization.validate_grouped_quantizer_list(
                 quantizers,
                 operand_name="input",
             )
@@ -4489,7 +4489,7 @@ class TestHybridGroupedLinearValidation:
             IdentityQuantizer(dtype=torch.float16),
         ]
         with pytest.raises(ValueError, match="incompatible plain backend configurations"):
-            grouped_quantization.validate_grouped_quantizer_list(
+            split_quantization.validate_grouped_quantizer_list(
                 quantizers,
                 operand_name="input",
             )
@@ -4498,7 +4498,7 @@ class TestHybridGroupedLinearValidation:
         quantizers = [_make_delayed_quantizer(), _make_delayed_quantizer()]
         quantizers[1].scale.fill_(2.0)
         quantizers[1].amax.fill_(3.0)
-        grouped_quantization.validate_grouped_quantizer_list(
+        split_quantization.validate_grouped_quantizer_list(
             quantizers,
             operand_name="input",
         )
@@ -4534,7 +4534,7 @@ class TestHybridGroupedLinearValidation:
         for quantizer in quantizers:
             quantizer.set_usage(rowwise=usage[0], columnwise=usage[1])
 
-        out, dbiases = grouped_quantization._split_quantize(
+        out, dbiases = split_quantization._split_quantize(
             tensor,
             [16, 16],
             quantizers,
@@ -4561,7 +4561,7 @@ class TestHybridGroupedLinearValidation:
 
     @_XFAIL_HOPPER_COLUMNWISE_PER_TENSOR_FP8
     def test_columnwise_only_rowwise_dequantized_uses_transient_grouped_row(self, monkeypatch):
-        real_split_quantize = grouped_quantization.tex.split_quantize
+        real_split_quantize = split_quantization.tex.split_quantize
         calls = []
 
         def tracked_split_quantize(tensor, m_splits, quantizers, **kwargs):
@@ -4569,7 +4569,7 @@ class TestHybridGroupedLinearValidation:
             calls.append((tensor, result))
             return result
 
-        monkeypatch.setattr(grouped_quantization.tex, "split_quantize", tracked_split_quantize)
+        monkeypatch.setattr(split_quantization.tex, "split_quantize", tracked_split_quantize)
         tensor = torch.randn(32, 128, dtype=torch.bfloat16, device="cuda")
         quantizers = [
             HybridQuantizer(
@@ -4582,7 +4582,7 @@ class TestHybridGroupedLinearValidation:
         for quantizer in quantizers:
             quantizer.set_usage(rowwise=False, columnwise=True)
 
-        out, dbiases = grouped_quantization._split_quantize(
+        out, dbiases = split_quantization._split_quantize(
             tensor,
             [16, 16],
             quantizers,
@@ -4608,7 +4608,7 @@ class TestHybridGroupedLinearValidation:
     @requires_nvfp4
     @pytest.mark.parametrize("m_splits", ([128, 128], [0, 128]))
     def test_nvfp4_rowwise_dequantized_preserves_source_dtype(self, monkeypatch, m_splits):
-        real_split_quantize = grouped_quantization.tex.split_quantize
+        real_split_quantize = split_quantization.tex.split_quantize
         calls = []
 
         def tracked_split_quantize(tensor, splits, quantizers, **kwargs):
@@ -4616,7 +4616,7 @@ class TestHybridGroupedLinearValidation:
             calls.append((tensor, result))
             return result
 
-        monkeypatch.setattr(grouped_quantization.tex, "split_quantize", tracked_split_quantize)
+        monkeypatch.setattr(split_quantization.tex, "split_quantize", tracked_split_quantize)
         tensor = torch.randn(
             sum(m_splits),
             128,
@@ -4632,7 +4632,7 @@ class TestHybridGroupedLinearValidation:
             for _ in m_splits
         ]
 
-        out, dbiases = grouped_quantization._split_quantize(
+        out, dbiases = split_quantization._split_quantize(
             tensor,
             m_splits,
             quantizers,
@@ -4666,7 +4666,7 @@ class TestHybridGroupedLinearValidation:
             )
 
     def test_rowwise_only_skips_columnwise_quantization(self, monkeypatch):
-        real_split_quantize = grouped_quantization.tex.split_quantize
+        real_split_quantize = split_quantization.tex.split_quantize
         calls = []
 
         def tracked_split_quantize(tensor, m_splits, quantizers, **kwargs):
@@ -4674,7 +4674,7 @@ class TestHybridGroupedLinearValidation:
             calls.append((tensor, result))
             return result
 
-        monkeypatch.setattr(grouped_quantization.tex, "split_quantize", tracked_split_quantize)
+        monkeypatch.setattr(split_quantization.tex, "split_quantize", tracked_split_quantize)
         tensor = torch.randn(32, 128, dtype=torch.bfloat16, device="cuda")
         quantizers = [
             HybridQuantizer(
@@ -4687,7 +4687,7 @@ class TestHybridGroupedLinearValidation:
         for quantizer in quantizers:
             quantizer.set_usage(rowwise=True, columnwise=False)
 
-        out, dbiases = grouped_quantization._split_quantize(
+        out, dbiases = split_quantization._split_quantize(
             tensor,
             [16, 16],
             quantizers,
@@ -4708,7 +4708,7 @@ class TestHybridGroupedLinearValidation:
 
     @_XFAIL_HOPPER_COLUMNWISE_PER_TENSOR_FP8
     def test_original_source_preserves_two_bulk_call_fast_path(self, monkeypatch):
-        real_split_quantize = grouped_quantization.tex.split_quantize
+        real_split_quantize = split_quantization.tex.split_quantize
         calls = []
 
         def tracked_split_quantize(tensor, m_splits, quantizers, **kwargs):
@@ -4716,7 +4716,7 @@ class TestHybridGroupedLinearValidation:
             calls.append((tensor, result))
             return result
 
-        monkeypatch.setattr(grouped_quantization.tex, "split_quantize", tracked_split_quantize)
+        monkeypatch.setattr(split_quantization.tex, "split_quantize", tracked_split_quantize)
         tensor = torch.randn(32, 128, dtype=torch.bfloat16, device="cuda")
         quantizers = [
             HybridQuantizer(
@@ -4727,7 +4727,7 @@ class TestHybridGroupedLinearValidation:
             for _ in range(2)
         ]
 
-        out, dbiases = grouped_quantization._split_quantize(
+        out, dbiases = split_quantization._split_quantize(
             tensor,
             [16, 16],
             quantizers,
@@ -4765,7 +4765,7 @@ class TestHybridGroupedLinearValidation:
         ]
 
         with pytest.raises(ValueError, match="mixed columnwise source policies"):
-            grouped_quantization.validate_grouped_quantizer_list(
+            split_quantization.validate_grouped_quantizer_list(
                 quantizers,
                 operand_name="input",
             )
@@ -4778,7 +4778,7 @@ class TestHybridGroupedLinearValidation:
             ValueError,
             match="incompatible plain backend configurations",
         ):
-            grouped_quantization.validate_grouped_quantizer_list(
+            split_quantization.validate_grouped_quantizer_list(
                 quantizers,
                 operand_name="input",
             )
@@ -4788,7 +4788,7 @@ class TestHybridGroupedLinearValidation:
             pytest.fail("built-in recipes must not run custom grouped-quantizer validation")
 
         monkeypatch.setattr(
-            grouped_quantization,
+            split_quantization,
             "validate_grouped_quantizer_list",
             unexpected_validation,
         )
@@ -4832,7 +4832,7 @@ class TestHybridGroupedLinearValidation:
         m_splits = torch.tensor([64, 64], dtype=torch.int64)
         original_recipe = recipe.CustomRecipe(qfactory=make_qfactory("original"))
 
-        real_validate = grouped_quantization.validate_grouped_quantizer_list
+        real_validate = split_quantization.validate_grouped_quantizer_list
         validation_calls = []
 
         def tracked_validate(quantizers, *, operand_name="operand"):
@@ -4840,7 +4840,7 @@ class TestHybridGroupedLinearValidation:
             return real_validate(quantizers, operand_name=operand_name)
 
         monkeypatch.setattr(
-            grouped_quantization,
+            split_quantization,
             "validate_grouped_quantizer_list",
             tracked_validate,
         )
@@ -4907,7 +4907,7 @@ class TestHybridGroupedLinearValidation:
             )
 
         quantizers = [make_quantizer(), make_quantizer()]
-        actual, dbiases = grouped_quantization._split_quantize(
+        actual, dbiases = split_quantization._split_quantize(
             tensor,
             [64, 64],
             quantizers,
