@@ -13,7 +13,7 @@ import warnings
 import logging
 import functools
 
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, replace
 import numpy as np
 from packaging.version import Version as PkgVersion
 
@@ -71,6 +71,12 @@ _print_layer = int(os.getenv("NVTE_PRINT_LAYER_NUMBER", "1"))
 _print_rank = int(os.getenv("NVTE_PRINT_RANK", "0"))
 
 _cu_seqlens_cache = {}
+
+# Global var for MLA padding cache.
+_should_pad_qkv_head_dim_cache: Dict[str, Any] = {
+    "attention_params": None,
+    "result": None,
+}
 
 
 class AttentionLogging:
@@ -1675,6 +1681,87 @@ def get_attention_backend(
         use_unfused_attention,
         available_backends,
     )
+
+
+@torch.no_grad()
+def should_pad_qkv_head_dim(
+    attention_params: AttentionParams,
+) -> bool:
+    """Decide whether to pad Q/K/V to a common head dim.
+
+    This returns `True` in two cases:
+    1. when the native mismatched shape would otherwise land on a backend that cannot take
+       mismatched head dims (FlashAttention-2).
+    2. when padding results in a faster kernel
+
+    The selection is memoized for the given `attention_params`.
+
+    Parameters
+    ----------
+    attention_params : AttentionParams
+        Attention parameters for the native (unpadded) QK and V head dimensions.
+
+    Returns
+    -------
+    bool
+        Whether Q/K/V should be padded to a common (the wider) head dim.
+    """
+    if attention_params.head_dim_qk == attention_params.head_dim_v:
+        return False
+    cached_params = _should_pad_qkv_head_dim_cache["attention_params"]
+    if cached_params is not None and cached_params == attention_params:
+        return _should_pad_qkv_head_dim_cache["result"]
+    native_backend = get_attention_backend(attention_params)
+    native_flash_attention_backend = native_backend[1]
+    native_use_unfused_attention = native_backend[4]
+    # No point padding if native path is already fused.
+    if not native_use_unfused_attention:
+        # Native already lands on FlashAttention or FusedAttention, so no need to pad. However,
+        # FlashAttention-2 cannot take mismatched QK/V head dims, so we still pad in that case.
+        result = native_flash_attention_backend == FlashAttentionUtils.version
+    else:
+        padded_head_dim = max(attention_params.head_dim_qk, attention_params.head_dim_v)
+        padded_params = replace(
+            attention_params,
+            head_dim_qk=padded_head_dim,
+            head_dim_v=padded_head_dim,
+        )
+        padded_backend = get_attention_backend(padded_params)
+        padded_use_flash_attention = padded_backend[0]
+        padded_use_fused_attention = padded_backend[2]
+        result = padded_use_flash_attention or padded_use_fused_attention
+    # Store a shallow copy as the key to avoid later `attention_params` in-place modifications
+    # resulting in subsequent cache misses.
+    _should_pad_qkv_head_dim_cache["attention_params"] = replace(attention_params)
+    _should_pad_qkv_head_dim_cache["result"] = result
+    return result
+
+
+def fp8_packed_skips_qkv_head_dim_pad(
+    attention_params: AttentionParams,
+    has_packed_qkv: bool,
+) -> bool:
+    """Whether the optional QKV head-dim pad must be skipped because FP8 DPA is active and the
+    caller passed packed QKV/KV buffers.
+
+    Parameters
+    ----------
+    attention_params : AttentionParams
+        Attention parameters for the native (unpadded) QK and V head dimensions.
+    has_packed_qkv : bool
+        Whether the caller passed a packed `qkv_layer` or `kv_layer` buffer.
+
+    Returns
+    -------
+    bool
+        True iff the pad should be skipped.
+    """
+    if not attention_params.fp8:
+        return False
+    recipe = (attention_params.fp8_meta or {}).get("recipe", None)
+    if recipe is None or not getattr(recipe, "fp8_dpa", False):
+        return False
+    return has_packed_qkv
 
 
 @torch.no_grad()

@@ -52,7 +52,6 @@ from transformer_engine.pytorch.attention.inference import InferenceParams
 import transformer_engine.pytorch.attention.dot_product_attention.utils as dpa_utils
 from transformer_engine.pytorch.attention.dot_product_attention.utils import (
     AttentionLogging as attn_log,
-    FlashAttentionUtils,
 )
 
 from transformer_engine.pytorch.attention.dot_product_attention.backends import (
@@ -245,6 +244,25 @@ _dpa_fp8ds_reduce_amax = os.getenv("NVTE_DPA_FP8DS_REDUCE_AMAX", "1") == "1"
 
 
 __all__ = ["DotProductAttention"]
+
+
+def _should_pad_qkv_head_dim(
+    head_dim_qk, head_dim_v, value_layer, qkv_layer, kv_layer, attention_params
+):
+    has_packed_inputs = qkv_layer is not None or kv_layer is not None
+    is_shape_pad_eligible = (
+        not is_in_onnx_export_mode()
+        and head_dim_qk != head_dim_v
+        and value_layer is not None
+        and not isinstance(value_layer, Float8TensorStorage)
+    )
+    # Skip padding when packed inputs are used with the FP8 fused path, which would lead to using
+    # unpadded data with a kernel that assumes padded data.
+    return (
+        is_shape_pad_eligible
+        and not dpa_utils.fp8_packed_skips_qkv_head_dim_pad(attention_params, has_packed_inputs)
+        and dpa_utils.should_pad_qkv_head_dim(attention_params)
+    )
 
 
 def _pad_qkv_head_dim(query_layer, key_layer, value_layer):
@@ -2099,6 +2117,24 @@ class DotProductAttention(TransformerEngineBaseModule):
                 has_score_mod=score_mod is not None,
                 has_score_mod_bprop=score_mod_bprop is not None,
             )
+
+            # Optionally pad inputs to `max(head_dim_qk, head_dim_v)` when it's required by the
+            # kernel or when it leads to faster kernel selection. Note that the padded tensors could
+            # still be unsupported inputs shapes by `{Flash,Fused}Attention`.
+            qkv_head_pad = False
+            orig_head_dim_v = head_dim_v
+            if _should_pad_qkv_head_dim(
+                head_dim_qk, head_dim_v, value_layer, qkv_layer, kv_layer, attention_params
+            ):
+                query_layer, key_layer, value_layer, _, _ = _pad_qkv_head_dim(
+                    query_layer, key_layer, value_layer
+                )
+                padded_head_dim = max(head_dim_qk, head_dim_v)
+                head_dim_qk = head_dim_v = padded_head_dim
+                attention_params.head_dim_qk = padded_head_dim
+                attention_params.head_dim_v = padded_head_dim
+                qkv_head_pad = True
+
             global _attention_backends
             if is_in_onnx_export_mode():
                 # We do not want to call get_attention_backend() in ONNX mode
@@ -2172,21 +2208,6 @@ class DotProductAttention(TransformerEngineBaseModule):
             )
 
             if use_flash_attention:
-                orig_qk_dim = None
-                orig_v_dim = None
-                if (
-                    flash_attention_backend == FlashAttentionUtils.version
-                    and not isinstance(value_layer, Float8TensorStorage)
-                    and head_dim_qk != head_dim_v
-                ):
-                    (
-                        query_layer,
-                        key_layer,
-                        value_layer,
-                        orig_qk_dim,
-                        orig_v_dim,
-                    ) = _pad_qkv_head_dim(query_layer, key_layer, value_layer)
-
                 if core_attention_bias_type == "alibi":
                     alibi_slopes, _ = dpa_utils.get_alibi(
                         _alibi_cache,
@@ -2223,11 +2244,8 @@ class DotProductAttention(TransformerEngineBaseModule):
                     cu_seqlens_q_padded=cu_seqlens_q_padded,
                     cu_seqlens_kv_padded=cu_seqlens_kv_padded,
                 )
-                if orig_qk_dim is not None and orig_qk_dim > orig_v_dim:
-                    return _trim_output(attn_out, num_attention_heads, orig_qk_dim, orig_v_dim)
-                return attn_out
 
-            if use_fused_attention:
+            elif use_fused_attention:
                 fu_core_attention_bias_type = core_attention_bias_type
                 fu_core_attention_bias = core_attention_bias
                 if core_attention_bias_type == "alibi" and (alibi_slopes is not None):
@@ -2242,7 +2260,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                         bottom_right_alignment=bottom_right_diagonal,
                     )
                 if checkpoint_core_attention:
-                    return self._checkpointed_attention_forward(
+                    attn_out = self._checkpointed_attention_forward(
                         self.fused_attention,
                         query_layer,
                         key_layer,
@@ -2277,51 +2295,52 @@ class DotProductAttention(TransformerEngineBaseModule):
                         packed_kv=kv_layer,
                         bf16_backward=bf16_backward,
                     )
-                return self.fused_attention(
-                    query_layer,
-                    key_layer,
-                    value_layer,
-                    qkv_layout=qkv_layout,
-                    cu_seqlens_q=cu_seqlens_q,
-                    cu_seqlens_kv=cu_seqlens_kv,
-                    cu_seqlens_q_padded=cu_seqlens_q_padded,
-                    cu_seqlens_kv_padded=cu_seqlens_kv_padded,
-                    max_seqlen_q=max_seqlen_q,
-                    max_seqlen_kv=max_seqlen_kv,
-                    attn_mask_type=attn_mask_type,
-                    attention_mask=attention_mask,
-                    window_size=window_size,
-                    bottom_right_diagonal=bottom_right_diagonal,
-                    fused_attention_backend=fused_attention_backend,
-                    core_attention_bias_type=fu_core_attention_bias_type,
-                    core_attention_bias=fu_core_attention_bias,
-                    fast_zero_fill=fast_zero_fill,
-                    cp_group=self.cp_group,
-                    cp_global_ranks=self.cp_global_ranks,
-                    cp_stream=self.cp_stream,
-                    cp_comm_type=self.cp_comm_type,
-                    fp8=self.fp8 and self.fp8_meta["recipe"].fp8_dpa,
-                    fp8_meta=self.fp8_meta,
-                    quantizers=self.quantizers,
-                    pad_between_seqs=pad_between_seqs,
-                    inference_params=inference_params,
-                    softmax_offset=softmax_offset,
-                    fp8_output=fp8_output,
-                    score_mod=score_mod,
-                    score_mod_bprop=score_mod_bprop,
-                    score_mod_tensors=score_mod_tensors,
-                    score_mod_bprop_tensors=score_mod_bprop_tensors,
-                    packed_qkv=qkv_layer,
-                    packed_kv=kv_layer,
-                    bf16_backward=bf16_backward,
-                )
+                else:
+                    attn_out = self.fused_attention(
+                        query_layer,
+                        key_layer,
+                        value_layer,
+                        qkv_layout=qkv_layout,
+                        cu_seqlens_q=cu_seqlens_q,
+                        cu_seqlens_kv=cu_seqlens_kv,
+                        cu_seqlens_q_padded=cu_seqlens_q_padded,
+                        cu_seqlens_kv_padded=cu_seqlens_kv_padded,
+                        max_seqlen_q=max_seqlen_q,
+                        max_seqlen_kv=max_seqlen_kv,
+                        attn_mask_type=attn_mask_type,
+                        attention_mask=attention_mask,
+                        window_size=window_size,
+                        bottom_right_diagonal=bottom_right_diagonal,
+                        fused_attention_backend=fused_attention_backend,
+                        core_attention_bias_type=fu_core_attention_bias_type,
+                        core_attention_bias=fu_core_attention_bias,
+                        fast_zero_fill=fast_zero_fill,
+                        cp_group=self.cp_group,
+                        cp_global_ranks=self.cp_global_ranks,
+                        cp_stream=self.cp_stream,
+                        cp_comm_type=self.cp_comm_type,
+                        fp8=self.fp8 and self.fp8_meta["recipe"].fp8_dpa,
+                        fp8_meta=self.fp8_meta,
+                        quantizers=self.quantizers,
+                        pad_between_seqs=pad_between_seqs,
+                        inference_params=inference_params,
+                        softmax_offset=softmax_offset,
+                        fp8_output=fp8_output,
+                        score_mod=score_mod,
+                        score_mod_bprop=score_mod_bprop,
+                        score_mod_tensors=score_mod_tensors,
+                        score_mod_bprop_tensors=score_mod_bprop_tensors,
+                        packed_qkv=qkv_layer,
+                        packed_kv=kv_layer,
+                        bf16_backward=bf16_backward,
+                    )
 
-            if use_unfused_attention:
+            elif use_unfused_attention:
                 allow_emulation = (
                     os.getenv("NVTE_UnfusedDPA_Emulate_FP8", "0") == "1" or is_in_onnx_export_mode()
                 )
                 if checkpoint_core_attention:
-                    return self._checkpointed_attention_forward(
+                    attn_out = self._checkpointed_attention_forward(
                         self.unfused_attention,
                         _alibi_cache,
                         query_layer,
@@ -2346,28 +2365,34 @@ class DotProductAttention(TransformerEngineBaseModule):
                         quantizers=self.quantizers,
                         fp8_output=fp8_output,
                     )
-                return self.unfused_attention(
-                    _alibi_cache,
-                    query_layer,
-                    key_layer,
-                    value_layer,
-                    qkv_layout=qkv_layout,
-                    cu_seqlens_q=cu_seqlens_q,
-                    cu_seqlens_kv=cu_seqlens_kv,
-                    max_seqlen_q=max_seqlen_q,
-                    max_seqlen_kv=max_seqlen_kv,
-                    attn_mask_type=attn_mask_type,
-                    attention_mask=attention_mask,
-                    window_size=window_size,
-                    bottom_right_diagonal=bottom_right_diagonal,
-                    core_attention_bias_type=core_attention_bias_type,
-                    core_attention_bias=core_attention_bias,
-                    alibi_slopes=alibi_slopes,
-                    inference_params=inference_params,
-                    softmax_offset=softmax_offset,
-                    fp8=self.fp8 and self.fp8_meta["recipe"].fp8_dpa and allow_emulation,
-                    fp8_meta=self.fp8_meta,
-                    quantizers=self.quantizers,
-                    fp8_output=fp8_output,
-                )
-            return None
+                else:
+                    attn_out = self.unfused_attention(
+                        _alibi_cache,
+                        query_layer,
+                        key_layer,
+                        value_layer,
+                        qkv_layout=qkv_layout,
+                        cu_seqlens_q=cu_seqlens_q,
+                        cu_seqlens_kv=cu_seqlens_kv,
+                        max_seqlen_q=max_seqlen_q,
+                        max_seqlen_kv=max_seqlen_kv,
+                        attn_mask_type=attn_mask_type,
+                        attention_mask=attention_mask,
+                        window_size=window_size,
+                        bottom_right_diagonal=bottom_right_diagonal,
+                        core_attention_bias_type=core_attention_bias_type,
+                        core_attention_bias=core_attention_bias,
+                        alibi_slopes=alibi_slopes,
+                        inference_params=inference_params,
+                        softmax_offset=softmax_offset,
+                        fp8=self.fp8 and self.fp8_meta["recipe"].fp8_dpa and allow_emulation,
+                        fp8_meta=self.fp8_meta,
+                        quantizers=self.quantizers,
+                        fp8_output=fp8_output,
+                    )
+            else:
+                return None
+
+            if qkv_head_pad:
+                attn_out = _trim_output(attn_out, num_attention_heads, head_dim_qk, orig_head_dim_v)
+            return attn_out
