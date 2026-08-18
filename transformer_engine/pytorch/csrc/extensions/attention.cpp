@@ -228,8 +228,8 @@ std::vector<py::object> fused_attn_fwd(
   }
 
   // extract rng seed and offset
-  auto gen = at::get_generator_or_default<at::CUDAGeneratorImpl>(
-      rng_gen, at::cuda::detail::getDefaultCUDAGenerator());
+  auto gen = at::check_generator<at::CUDAGeneratorImpl>(
+      rng_gen.has_value() ? *rng_gen : at::cuda::detail::getDefaultCUDAGenerator());
   at::PhiloxCudaState philox_args = init_philox_state(gen, rng_elts_per_thread);
   auto options = torch::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA);
   auto rng_state = torch::empty({2}, options);
