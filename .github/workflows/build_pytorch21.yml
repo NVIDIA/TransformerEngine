@@ -37,6 +37,9 @@ jobs:
           NVTE_FRAMEWORK: pytorch
           # Single old arch (Volta) to keep memory/build size down
           NVTE_CUDA_ARCHS: "70"
+          # torch 2.1 pulls in pip cudnn 8.9; point the TE build at apt cudnn 9
+          CUDNN_INCLUDE_PATH: /usr/include/x86_64-linux-gnu
+          CUDNN_LIBRARY_PATH: /usr/lib/x86_64-linux-gnu
           # Full parallelism OOMs the 7GB runner (exit 137)
           MAX_JOBS: 2
           SCCACHE_GHA_ENABLED: "true"
