@@ -33,6 +33,15 @@ MAX_LAYER_NAME_LENGTH = max([len(layer.__name__) for layer in TE_LAYERS])
 # to avoid numerical tolerance issues of doing comm gemm overlap, limit the number of GPUs used
 MAX_GPUS_TO_USE = 4
 
+COMM_GEMM_QUANTIZATION_PARAMS = [
+    pytest.param(False, "none", id="ub-bf16"),
+    pytest.param(False, "fp8", id="ub-fp8"),
+    pytest.param(False, "mxfp8", id="ub-mxfp8"),
+    pytest.param(True, "none", id="cublasmp-bf16"),
+    pytest.param(True, "fp8", id="cublasmp-fp8"),
+    pytest.param(True, "mxfp8", id="cublasmp-mxfp8"),
+]
+
 TEST_ROOT = Path(__file__).parent.resolve()
 NUM_PROCS: int = min(torch.cuda.device_count(), MAX_GPUS_TO_USE)
 LAUNCH_CMD = ["torchrun", f"--nproc_per_node={NUM_PROCS}"]
@@ -84,10 +93,6 @@ def _run_gemm_with_overlap(
         if use_cublasmp:
             if not tex.nvte_built_with_cublasmp():
                 pytest.skip("Transformer Engine not built with cuBLASMp (NVTE_WITH_CUBLASMP=0).")
-            if quantization == "mxfp8":
-                pytest.skip(
-                    "cuBLASMp comm+GEMM overlap does not yet support MXFP8 (block scaling)."
-                )
             if comm_type == "RS" and not p2p and not tex.device_supports_multicast():
                 pytest.skip(
                     "cuBLASMp non-P2P reduce-scatter requires NVSwitch (multicast support)."
@@ -140,8 +145,6 @@ def _run_layer_with_overlap(
     if use_cublasmp:
         if not tex.nvte_built_with_cublasmp():
             pytest.skip("Transformer Engine not built with cuBLASMp (NVTE_WITH_CUBLASMP=0).")
-        if fp8 and quantization == "mxfp8":
-            pytest.skip("cuBLASMp comm+GEMM overlap does not yet support MXFP8 (block scaling).")
         test_cmd.append("--use-cublasmp")
 
     os.environ["PYTORCH_JIT"] = "0"
@@ -173,8 +176,7 @@ def _run_layer_with_overlap(
         raise AssertionError(result.stderr.decode())
 
 
-@pytest.mark.parametrize("use_cublasmp", (False, True))
-@pytest.mark.parametrize("quantization", ("none", "fp8", "mxfp8"))
+@pytest.mark.parametrize("use_cublasmp,quantization", COMM_GEMM_QUANTIZATION_PARAMS)
 @pytest.mark.parametrize("aggregate", (False, True))
 def test_split_all_gather_overlaps(quantization, aggregate, use_cublasmp):
     """
@@ -184,8 +186,7 @@ def test_split_all_gather_overlaps(quantization, aggregate, use_cublasmp):
     _run_gemm_with_overlap("AG", False, True, False, aggregate, quantization, use_cublasmp)
 
 
-@pytest.mark.parametrize("use_cublasmp", (False, True))
-@pytest.mark.parametrize("quantization", ("none", "fp8", "mxfp8"))
+@pytest.mark.parametrize("use_cublasmp,quantization", COMM_GEMM_QUANTIZATION_PARAMS)
 @pytest.mark.parametrize("p2p", (False, True))
 def test_split_reduce_scatter_overlaps(quantization, p2p, use_cublasmp):
     """
