@@ -24,7 +24,7 @@ jobs:
       - name: 'Dependencies'
         run: |
           apt-get update
-          apt-get install -y git python3.9 pip cudnn9-cuda-12
+          apt-get install -y --allow-change-held-packages git python3.9 pip cudnn9-cuda-12 libnccl-dev libnccl2
           pip install torch==${MIN_TORCH_VERSION}
           pip install cmake pybind11[global] ninja pydantic importlib-metadata>=1.0 packaging einops onnxscript "nvidia-cudnn-frontend>=1.25.0"
       - name: 'Checkout'
@@ -37,8 +37,9 @@ jobs:
         run: NVTE_USE_CCACHE=1 NVTE_CCACHE_BIN=sccache pip install --no-build-isolation --no-deps . -v
         env:
           NVTE_FRAMEWORK: pytorch
-          # Single old arch (Volta) to keep memory/build size down
-          NVTE_CUDA_ARCHS: "70"
+          # Single arch to keep memory/build size down; sm90 so the NCCL EP
+          # path (and its torch-version gate) is exercised
+          NVTE_CUDA_ARCHS: "90"
           # Prefer apt cudnn9 headers over the pip nvidia-cudnn-cu12 copy
           CUDNN_INCLUDE_PATH: /usr/include/x86_64-linux-gnu
           CUDNN_LIBRARY_PATH: /usr/lib/x86_64-linux-gnu

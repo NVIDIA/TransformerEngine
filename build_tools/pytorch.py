@@ -91,11 +91,26 @@ def setup_pytorch_extension(
     # ep.cpp source no-ops at the #ifdef boundary; without the define it would
     # produce undefined references to nvte_ep_*.
     if nccl_ep_enabled():
-        cxx_flags.append("-DNVTE_WITH_NCCL_EP")
-        # PyTorch's symm-mem headers gate the NCCL_HAS_SYMMEM_* feature macros on
-        # USE_NCCL. The EP extension shares the symm-mem NCCL comm with torch, so
-        # it needs those macros visible.
-        cxx_flags.append("-DUSE_NCCL")
+        # ep.cpp additionally needs torch's NCCL symm-mem headers (torch >= 2.11).
+        from torch.utils.cpp_extension import include_paths
+
+        symm_mem_header = "torch/csrc/distributed/c10d/symm_mem/nccl_dev_cap.hpp"
+        if any(os.path.exists(os.path.join(p, symm_mem_header)) for p in include_paths()):
+            cxx_flags.append("-DNVTE_WITH_NCCL_EP")
+            # PyTorch's symm-mem headers gate the NCCL_HAS_SYMMEM_* feature macros on
+            # USE_NCCL. The EP extension shares the symm-mem NCCL comm with torch, so
+            # it needs those macros visible.
+            cxx_flags.append("-DUSE_NCCL")
+        elif os.getenv("NVTE_WITH_NCCL_EP") == "1":
+            raise RuntimeError(
+                "NVTE_WITH_NCCL_EP=1 was set but the installed torch does not provide "
+                f"{symm_mem_header}. NCCL EP requires torch >= 2.11."
+            )
+        else:
+            print(
+                f"[NCCL EP] Installed torch does not provide {symm_mem_header} "
+                "(torch >= 2.11 required); skipping NCCL EP in the torch extension."
+            )
 
     library_dirs = []
     libraries = []
