@@ -265,6 +265,50 @@ def test_same_recipe_mutation_invalidates_config_for_direct_and_nested_parameter
     )
 
 
+@pytest.mark.parametrize(
+    "make_recipe",
+    (
+        pytest.param(DelayedScaling, id="delayed-scaling"),
+        pytest.param(Float8CurrentScaling, id="current-scaling"),
+        pytest.param(MXFP8BlockScaling, id="mxfp8"),
+        pytest.param(NVFP4BlockScaling, id="nvfp4"),
+        pytest.param(
+            lambda **kwargs: CustomRecipe(
+                qfactory=lambda _role: None,
+                qfactory_key=("canonical-attention-flags", 1),
+                **kwargs,
+            ),
+            id="custom",
+        ),
+    ),
+)
+def test_fp8_mha_canonicalizes_fp8_dpa_during_construction_and_mutation(make_recipe):
+    """FP8 MHA must never produce a semantic configuration with DPA disabled."""
+    constructed = make_recipe(fp8_mha=True)
+    assert constructed.fp8_mha is True
+    assert constructed.fp8_dpa is True
+    assert dict(constructed.quantizer_config())["fp8_dpa"] is True
+
+    mutated = make_recipe()
+    inactive_config = mutated.quantizer_config()
+    mutated.fp8_mha = True
+    canonical_config = mutated.quantizer_config()
+    assert mutated.fp8_dpa is True
+    assert canonical_config != inactive_config
+    assert dict(canonical_config)["fp8_dpa"] is True
+    assert dict(canonical_config)["fp8_mha"] is True
+
+    # DPA cannot be disabled while MHA still depends on it.
+    mutated.fp8_dpa = False
+    assert mutated.fp8_dpa is True
+    assert mutated.quantizer_config() == canonical_config
+
+    # Disable MHA first when disabling both attention modes.
+    mutated.fp8_mha = False
+    mutated.fp8_dpa = False
+    assert mutated.quantizer_config() == inactive_config
+
+
 def test_high_level_recipe_flags_configure_concrete_quantizers_at_construction():
     """Constructor flags must reach derived QParams and concrete quantizers."""
     current = Float8CurrentScaling(use_power_2_scales=True)

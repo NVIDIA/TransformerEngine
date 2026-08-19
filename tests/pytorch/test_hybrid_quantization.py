@@ -2272,13 +2272,16 @@ class TestCustomDPALocalRecipeCache:
     """Custom-DPA native recipe labels track the quantizer rebuild."""
 
     def test_inference_runs_once_per_quantizer_state_and_clears_stale_labels(self, monkeypatch):
+        if not mxfp8_available:
+            pytest.skip(f"MXFP8: {reason_for_no_mxfp8}")
+
         from transformer_engine.pytorch.attention.dot_product_attention import (
             dot_product_attention as dpa_module,
         )
 
         custom_recipe = recipe.CustomRecipe(
-            qfactory=lambda _role: IdentityQuantizer(),
-            qfactory_key=("test_dpa_identity", 1),
+            qfactory=mxfp8_factory,
+            qfactory_key=("test_dpa_local_recipe_cache", 1),
         )
 
         inferred_labels = [recipe.MXFP8BlockScaling()]
@@ -2318,7 +2321,7 @@ class TestCustomDPALocalRecipeCache:
 
         # A rebuilt recipe state/quantizer list invalidates the cache. If the
         # new family has no native label, the old label must not survive.
-        custom_recipe.qfactory_key = ("test_dpa_identity", 2)
+        custom_recipe.qfactory_key = ("test_dpa_local_recipe_cache", 2)
         with autocast(enabled=True, recipe=custom_recipe):
             dpa.init_fp8_metadata(num_gemms=3)
             assert inference_calls == 3

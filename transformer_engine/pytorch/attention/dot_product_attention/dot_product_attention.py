@@ -1713,14 +1713,6 @@ class DotProductAttention(TransformerEngineBaseModule):
                 ), "Upgrade PyTorch version to get RNG manipulation support for cuda graph capture."
 
             # checks for FP8
-            if self.fp8:
-                if self.fp8_meta["recipe"].fp8_mha:
-                    if not self.fp8_meta["recipe"].fp8_dpa:
-                        self.fp8_meta["recipe"].fp8_dpa = True
-                        self.logger.warning(
-                            """Forcing fp8_meta["recipe"].fp8_dpa=True due to """
-                            """fp8_meta["recipe"].fp8_mha=True"""
-                        )
             if self.fp8 and self.fp8_meta["recipe"].fp8_dpa:
                 forward_dtype = get_fp8_te_dtype(self.fp8_meta["recipe"], fprop_tensor=True)
                 backward_dtype = get_fp8_te_dtype(self.fp8_meta["recipe"], fprop_tensor=False)

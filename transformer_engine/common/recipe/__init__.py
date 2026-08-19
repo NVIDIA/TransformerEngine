@@ -190,6 +190,10 @@ class Recipe:
     _has_cached_quantizer_config: bool = False
 
     def __setattr__(self, name: str, value: Any) -> None:
+        # FP8 MHA requires FP8 DPA; keep both flags canonical across mutations.
+        if name == "fp8_dpa" and not value and self.__dict__.get("fp8_mha", False):
+            value = True
+
         # Invalidate derived caches on any recipe mutation. Updating either
         # cache itself must not invalidate the other cache.
         cache_attribute = name in (
@@ -202,8 +206,15 @@ class Recipe:
             object.__setattr__(self, "_cached_quantizer_config", None)
             object.__setattr__(self, "_has_cached_quantizer_config", False)
         object.__setattr__(self, name, value)
+        if name == "fp8_mha" and value:
+            object.__setattr__(self, "fp8_dpa", True)
         if not cache_attribute:
             self._synchronize_derived_qparams(name)
+
+    def __post_init__(self) -> None:
+        """Canonicalize fields after Pydantic dataclass construction."""
+        if getattr(self, "fp8_mha", False):
+            self.fp8_dpa = True
 
     def _synchronize_derived_qparams(self, name: str) -> None:
         """Propagate a changed recipe option into per-tensor ``QParams``.
@@ -363,6 +374,7 @@ class DelayedScaling(Recipe):
             Whether to enable FP8 multi-head attention (MHA). When `True`, it removes the casting
             operations mentioned above at the DPA boundaries. Currently only standard MHA modules
             i.e. `LayerNormLinear/Linear + DPA + Linear`, are supported for this feature. When
+            enabled, `fp8_dpa` is also enabled because FP8 MHA requires FP8 DPA. When
             `fp8_mha = False, fp8_dpa = True`, a typical MHA module works as
             `LayerNormLinear (BF16 output) -> (cast to FP8 ) FP8 DPA (cast to BF16) -> Linear`.
             When `fp8_mha = True, fp8_dpa = True`, it becomes
@@ -404,6 +416,7 @@ class DelayedScaling(Recipe):
     scaling_factor_compute_algo_key: Optional[Hashable] = None
 
     def __post_init__(self) -> None:
+        super().__post_init__()
         assert self.fp8_format != Format.E5M2, "Pure E5M2 training is not supported."
         assert (
             self.backward_override in _BACKWARD_OVERRIDES
@@ -481,6 +494,7 @@ class Float8CurrentScaling(Recipe):
     backward_override: Optional[str] = os.getenv("NVTE_BACKWARD_OVERRIDE", None)
 
     def __post_init__(self) -> None:
+        super().__post_init__()
         assert self.fp8_format != Format.E5M2, "Pure E5M2 training is not supported."
         assert (
             self.backward_override in _BACKWARD_OVERRIDES
@@ -580,6 +594,7 @@ class MXFP8BlockScaling(Recipe):
     backward_override: Optional[str] = os.getenv("NVTE_BACKWARD_OVERRIDE", None)
 
     def __post_init__(self) -> None:
+        super().__post_init__()
         assert self.fp8_format != Format.E5M2, "Pure E5M2 training is not supported."
         assert (
             self.backward_override in _BACKWARD_OVERRIDES
@@ -659,6 +674,7 @@ class Float8BlockScaling(Recipe):
     backward_override: Optional[str] = os.getenv("NVTE_BACKWARD_OVERRIDE", None)
 
     def __post_init__(self) -> None:
+        super().__post_init__()
         assert self.x_block_scaling_dim in [1, 2], "Only 1D or 2D blocks supported for x"
         assert self.w_block_scaling_dim in [1, 2], "Only 1D or 2D blocks supported for w"
         assert self.grad_block_scaling_dim in [1, 2], "Only 1D or 2D blocks supported for grad"
@@ -839,6 +855,7 @@ class NVFP4BlockScaling(Recipe):
     backward_override: Optional[str] = os.getenv("NVTE_BACKWARD_OVERRIDE", None)
 
     def __post_init__(self) -> None:
+        super().__post_init__()
         assert self.fp4_format == Format.E2M1, "Only E2M1 is supported for NVFP4 scaling"
         assert self.fp8_format == Format.E4M3, "Only E4M3 is supported for NVFP4 scaling"
         assert (
@@ -1006,6 +1023,7 @@ class CustomRecipe(Recipe):
     qfactory_key: Optional[Hashable] = None
 
     def __post_init__(self) -> None:
+        super().__post_init__()
         assert (
             self.backward_override in _BACKWARD_OVERRIDES
         ), "NVTE_BACKWARD_OVERRIDE must be unset or one of: 'high_precision', 'dequantized'."

@@ -154,12 +154,13 @@ def _make_compatible_fp8_mha_recipe(key):
             return nvfp4_linear_fp8_dpa_factory(role)
         return current_scaling_factory(role)
 
-    return CustomRecipe(
+    recipe = CustomRecipe(
         qfactory=qfactory,
         qfactory_key=key,
-        fp8_dpa=True,
         fp8_mha=True,
     )
+    assert recipe.fp8_dpa
+    return recipe
 
 
 @pytest.mark.parametrize(
@@ -997,6 +998,7 @@ def test_apply_recipe_before_first_mha_forward_has_stable_boundary_topology(
 
     try:
         assert not _active_runtime_owners(module)
+        expected_recipe_config = recipe.quantizer_config()
         apply_recipe(module, recipe)
         owners = _active_runtime_owners(module)
         assert owners
@@ -1010,6 +1012,11 @@ def test_apply_recipe_before_first_mha_forward_has_stable_boundary_topology(
             for owner in owners
         ]
         assert all(requested == active for _, _, requested, active in before)
+        assert all(
+            owner._quantization_runtime.key.recipe_config == expected_recipe_config
+            and owner._quantization_runtime.recipe.fp8_dpa
+            for owner in owners
+        )
 
         mha = next(child for child in module.modules() if isinstance(child, MultiheadAttention))
         qkv = mha.layernorm_qkv if mha.input_layernorm else mha.qkv
@@ -1048,6 +1055,7 @@ def test_apply_recipe_before_first_mha_forward_has_stable_boundary_topology(
                 for owner in owners
             ]
             assert after == before
+            assert recipe.quantizer_config() == expected_recipe_config
     finally:
         FP8GlobalStateManager.reset()
 
@@ -1293,7 +1301,7 @@ def test_explicit_mha_boundary_override_wins_and_can_restore_declared_role():
     qkv = module.qkv
 
     try:
-        apply_recipe(module, recipe)
+        apply_recipe(qkv, recipe)
         declared_runtime = qkv._quantization_runtime  # pylint: disable=protected-access
         declared_role = declared_runtime.key.forward_roles[-1]
 
@@ -1304,14 +1312,14 @@ def test_explicit_mha_boundary_override_wins_and_can_restore_declared_role():
         )
         qkv.output_quantizer_role = override
         assert qkv._role_revision == 1  # pylint: disable=protected-access
-        apply_recipe(module, recipe)
+        apply_recipe(qkv, recipe)
         override_runtime = qkv._quantization_runtime  # pylint: disable=protected-access
         assert override_runtime is not declared_runtime
         assert override_runtime.key.forward_roles[-1] == override
 
         qkv.output_quantizer_role = None
         assert qkv._role_revision == 2  # pylint: disable=protected-access
-        apply_recipe(module, recipe)
+        apply_recipe(qkv, recipe)
         restored_runtime = qkv._quantization_runtime  # pylint: disable=protected-access
         assert restored_runtime is not override_runtime
         assert restored_runtime.key.forward_roles[-1] == declared_role
