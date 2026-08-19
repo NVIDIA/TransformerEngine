@@ -470,6 +470,11 @@ class _ScaledGLU(BasicOperation):
     ) -> None:
         super().__init__()
         self.glu_interleave_size: Optional[int] = glu_interleave_size
+        if activation_recompute_in_mlp:
+            raise ValueError(
+                f"{self.__class__.__name__} does not support activation recomputation "
+                "in the fused grouped MLP"
+            )
         self.activation_recompute_in_mlp: bool = activation_recompute_in_mlp
 
     def _scaled_glu_forward(
@@ -603,8 +608,8 @@ class ScaledSwiGLU(_ScaledGLU):
         interleaved format. See the corresponding option in the SwiGLU
         operation for more details.
     activation_recompute_in_mlp : bool, default = ``False``
-        Enable fused grouped MLP kernels to recompute activation outputs
-        during backward when supported instead of saving them.
+        Must be ``False``. Fused grouped-MLP activation recomputation is not
+        implemented for SwiGLU.
 
     """
 
@@ -652,16 +657,23 @@ class ScaledSiTUGLU(_ScaledGLU):
         Positive up-branch soft-cap parameter.
     glu_interleave_size : int, optional
         Block-interleaved GLU layout, as in :class:`ScaledSwiGLU`.
+    activation_recompute_in_mlp : bool, default = ``False``
+        Must be ``False``. Fused grouped-MLP activation recomputation is not
+        implemented for SiTU-GLU.
     """
 
     def __init__(
         self,
         glu_interleave_size: Optional[int] = None,
         *,
+        activation_recompute_in_mlp: bool = False,
         beta1: float = 4.0,
         beta2: float = 25.0,
     ) -> None:
-        super().__init__(glu_interleave_size)
+        super().__init__(
+            glu_interleave_size,
+            activation_recompute_in_mlp=activation_recompute_in_mlp,
+        )
         self.beta1 = float(beta1)
         self.beta2 = float(beta2)
         if not math.isfinite(self.beta1) or self.beta1 <= 0.0:
@@ -717,8 +729,8 @@ class ScaledClampedQGeGLU(_ScaledGLU):
         When set, the GLU activations will use an experimental block
         interleaved format. See :class:`ClampedSwiGLU`.
     activation_recompute_in_mlp : bool, default = ``False``
-        Enable fused grouped MLP kernels to recompute activation outputs
-        during backward when supported instead of saving them.
+        Must be ``False``. Fused grouped-MLP activation recomputation is not
+        implemented for clamped QGeGLU.
     limit : float, default ``7.0``
         Clamp limit (see :class:`ClampedSwiGLU`).
     alpha : float, default ``1.702``

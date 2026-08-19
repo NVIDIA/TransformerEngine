@@ -3113,14 +3113,20 @@ class TestBasicOps:
         "op_cls",
         (
             te_ops.ScaledSwiGLU,
-            te_ops.ScaledSReLU,
+            te_ops.ScaledSiTUGLU,
             te_ops.ScaledClampedQGeGLU,
         ),
     )
-    def test_scaled_activation_recompute_in_mlp_config(self, op_cls) -> None:
-        """Scaled activations expose a per-op recompute knob."""
+    def test_scaled_glu_rejects_activation_recompute_in_mlp(self, op_cls) -> None:
+        """Scaled GLUs reject unsupported activation recomputation."""
         assert op_cls().activation_recompute_in_mlp is False
-        assert op_cls(activation_recompute_in_mlp=True).activation_recompute_in_mlp is True
+        with pytest.raises(ValueError, match="does not support activation recomputation"):
+            op_cls(activation_recompute_in_mlp=True)
+
+    def test_scaled_srelu_activation_recompute_in_mlp_config(self) -> None:
+        """Scaled SReLU exposes its supported activation recompute knob."""
+        assert te_ops.ScaledSReLU().activation_recompute_in_mlp is False
+        assert te_ops.ScaledSReLU(activation_recompute_in_mlp=True).activation_recompute_in_mlp
 
     @pytest.mark.parametrize("in_shape", ((71, 192), (5, 7, 128)))
     @pytest.mark.parametrize("input_requires_grad", (False, True))
