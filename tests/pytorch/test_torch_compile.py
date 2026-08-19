@@ -35,7 +35,7 @@ import transformer_engine_torch as tex
 from transformer_engine.common import recipe
 from transformer_engine.pytorch.constants import FP8FwdTensorIdx, FP8BwdTensorIdx
 from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
-from transformer_engine.pytorch.quantization import QuantizerRole
+from transformer_engine.pytorch.quantization import FP8GlobalStateManager, QuantizerRole
 from transformer_engine.pytorch.ops.basic.basic_linear import BasicLinear
 from transformer_engine.pytorch.tensor.float8_tensor import Float8CurrentScalingQuantizer
 from transformer_engine.pytorch.tensor.float8_blockwise_tensor import Float8BlockQuantizer
@@ -66,6 +66,15 @@ fp8_block_scaling_available, reason_for_no_fp8_block_scaling = is_fp8_block_scal
     return_reason=True
 )
 nvfp4_available, reason_for_no_nvfp4 = is_nvfp4_available(return_reason=True)
+
+
+@pytest.fixture(autouse=True)
+def _reset_fp8_global_state():
+    """Pending FP8 global state (e.g. delayed-scaling amax reductions) must not
+    leak between tests: a leftover buffer makes a later autocast __exit__ call
+    raw tex bindings, which graph-breaks fullgraph=True tests."""
+    yield
+    FP8GlobalStateManager.reset()
 
 
 def nvfp4_row_scaled():
