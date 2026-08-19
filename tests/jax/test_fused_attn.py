@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 """Tests for fused attention"""
 import os
+import sys
 from enum import Enum, auto
 from dataclasses import dataclass, field
 from functools import partial
@@ -224,7 +225,7 @@ def make_mask(
             segment_pos_q,
             segment_pos_kv,
             window_size,
-            dtype=jnp.bool,
+            dtype=jnp.bool_,
             segment_ids_q=segment_ids_q,
             segment_ids_kv=segment_ids_kv,
         )
@@ -234,6 +235,36 @@ def make_mask(
     inv_mask = combine_masks(inv_mask, inv_swa_mask)
     mask = jnp.logical_not(inv_mask)
     return mask
+
+
+def test_make_mask_bottom_right_swa_dtype(monkeypatch):
+    """Regression test: make_mask bottom-right branch should use jnp.bool_, not jnp.bool."""
+    captured_dtypes = []
+    mod = sys.modules[make_mask.__module__]
+    original_make_swa_mask = mod.make_swa_mask
+
+    def _captured_make_swa_mask(*args, **kwargs):
+        captured_dtypes.append(kwargs.get("dtype"))
+        return original_make_swa_mask(*args, **kwargs)
+
+    monkeypatch.setattr(mod, "make_swa_mask", _captured_make_swa_mask)
+
+    batch, seqlen = 2, 16
+    segment_ids = jnp.ones((batch, seqlen), dtype=jnp.int32)
+    segment_pos = jnp.broadcast_to(jnp.arange(seqlen, dtype=jnp.int32), (batch, seqlen))
+    window_size = (4, 0)
+    mask = make_mask(
+        segment_ids,
+        segment_ids,
+        segment_pos,
+        segment_pos,
+        AttnMaskType.PADDING_CAUSAL_BOTTOM_RIGHT_MASK,
+        window_size,
+    )
+    assert mask.dtype == jnp.bool_
+    assert (
+        jnp.bool_ in captured_dtypes
+    ), "bottom-right sliding-window mask should be built with jnp.bool_"
 
 
 @jax.jit
