@@ -25,15 +25,15 @@ from jax.sharding import NamedSharding, PartitionSpec
 import transformer_engine_jax
 from .base import BasePrimitive, register_primitive
 from ..sharding import global_mesh_resource, get_mesh_axis_size
-from ..version_utils import is_collective_stream_supported
+from ..version_utils import get_collective_stream_compute_on
 
 
 def _on_collective_stream(func):
     """Pin ``func``'s ops to XLA's collective stream so the scheduler serializes
     them with native collectives. No-op on JAX that lacks the annotation."""
-    if not is_collective_stream_supported():
+    compute_on = get_collective_stream_compute_on()
+    if compute_on is None:
         return func
-    from jax.experimental.compute_on import compute_on
 
     @functools.wraps(func)
     def wrapper(*args, **kwargs):

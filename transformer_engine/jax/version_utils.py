@@ -9,6 +9,7 @@ extensions, etc.) without pulling in feature-specific code.
 """
 
 from functools import lru_cache
+from importlib import import_module
 from importlib.metadata import version as get_pkg_version
 
 from packaging.version import Version as PkgVersion
@@ -69,16 +70,35 @@ def is_triton_autotuned_alias_safe() -> bool:
 _COLLECTIVE_STREAM_MIN_JAX_VERSION = "0.10.1"
 
 
+def _select_collective_stream_compute_on(compute_on_module):
+    """Select JAX's region-based ``compute_on`` transform.
+
+    JAX 0.10.1 exports the transform as ``compute_on2`` while retaining the
+    context-manager API under ``compute_on``. Newer JAX releases expose the
+    region transform as ``compute_on`` and eventually remove ``compute_on2``.
+    """
+    compute_on = getattr(compute_on_module, "compute_on2", None)
+    if compute_on is None:
+        compute_on = getattr(compute_on_module, "compute_on", None)
+    return compute_on
+
+
+@lru_cache(maxsize=None)
+def get_collective_stream_compute_on():
+    """Return JAX's region-based ``compute_on`` transform when supported."""
+    if not jax_version_meet_requirement(_COLLECTIVE_STREAM_MIN_JAX_VERSION):
+        return None
+    try:
+        compute_on_module = import_module("jax.experimental.compute_on")
+    except ImportError:
+        return None
+    return _select_collective_stream_compute_on(compute_on_module)
+
+
 @lru_cache(maxsize=None)
 def is_collective_stream_supported() -> bool:
     """Return True if the installed JAX supports the gpu_stream:collective annotation."""
-    if not jax_version_meet_requirement(_COLLECTIVE_STREAM_MIN_JAX_VERSION):
-        return False
-    try:
-        from jax.experimental.compute_on import compute_on  # pylint: disable=unused-import
-    except ImportError:
-        return False
-    return True
+    return get_collective_stream_compute_on() is not None
 
 
 def is_triton_extension_supported() -> bool:
@@ -94,6 +114,7 @@ def is_triton_extension_supported() -> bool:
 __all__ = [
     "jax_version_meet_requirement",
     "is_triton_autotuned_alias_safe",
+    "get_collective_stream_compute_on",
     "is_collective_stream_supported",
     "is_triton_extension_supported",
     "TRITON_EXTENSION_MIN_JAX_VERSION",
