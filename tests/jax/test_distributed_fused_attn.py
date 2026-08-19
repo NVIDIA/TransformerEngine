@@ -835,7 +835,7 @@ class TestReorderCausalLoadBalancing:
             seq_dim = 0
 
         if reorder_strategy == ReorderStrategy.Striped:
-            seq_lens = shape[seq_dim]
+            seq_lens = tensor.shape[seq_dim]
             if seq_lens < (cp_size * stripe_size):
                 pytest.skip(f"{seq_lens=} must be larger than {cp_size*stripe_size=}")
 
