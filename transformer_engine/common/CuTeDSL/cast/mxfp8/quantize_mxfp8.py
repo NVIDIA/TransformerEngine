@@ -1618,7 +1618,9 @@ class MXFP8QuantizeKernel(MXFP8QuantizeKernelBase):
 
 
 class MXFP8QuantizeSpecializedRowwiseKernel(MXFP8QuantizeKernelBase):
-    """Specialized cast-only ROWWISE-only MXFP8 kernel. Requires N % 128 == 0 (full vectorizable column chunks).
+    """Specialized cast-only ROWWISE-only MXFP8 kernel.
+
+    Requires N % 128 == 0 (full vectorizable column chunks).
 
     Plain rowwise-only quantize. Each thread owns one 32-element MXFP8 chunk and
     uses vectorized global loads/stores (no TMA used)."""
@@ -1756,15 +1758,7 @@ class MXFP8QuantizeSpecializedRowwiseKernel(MXFP8QuantizeKernelBase):
         row = bidy * self._TILE_ROWS + tidx // CTA_X
         col = bidx * self._TILE_COLS + (tidx % CTA_X) * MXFP8_BLOCK_SCALING_SIZE
         if row < M and col < N:
-            full_block = col + MXFP8_BLOCK_SCALING_SIZE <= N
-            if full_block:
-                cute.autovec_copy(mX_thread, rX_thread)
-            else:
-                # Mask the OOB region with 0.0 so it doesn't affect the amax computation.
-                for i in cutlass.range_constexpr(MXFP8_BLOCK_SCALING_SIZE):
-                    rX_thread[(0, i)] = mX[(row, col + i)]
-                    if col + i >= N:
-                        rX_thread[(0, i)] = DTYPE(0.0)
+            cute.autovec_copy(mX_thread, rX_thread)
             amax_2x = Int32(0)
             for i in cutlass.range_constexpr(MXFP8_BLOCK_SCALING_SIZE // 2):
                 amax_2x = abs_max_x2(amax_2x, rX_i32[i])
@@ -1782,13 +1776,7 @@ class MXFP8QuantizeSpecializedRowwiseKernel(MXFP8QuantizeKernelBase):
             scale_2x = pack_f32x2(inv_scale, inv_scale)
             for i in cutlass.range_constexpr(MXFP8_BLOCK_SCALING_SIZE // 4):
                 rO_u32[i] = mul_cvt4(rX_i32[2 * i], rX_i32[2 * i + 1], scale_2x)
-            if full_block:
-                cute.autovec_copy(rO_thread, mO_thread)
-            else:
-                # Only write to the valid region
-                for i in cutlass.range_constexpr(MXFP8_BLOCK_SCALING_SIZE):
-                    if col + i < N:
-                        mO_row[(row, col + i)] = rO_thread[(0, i)]
+            cute.autovec_copy(rO_thread, mO_thread)
 
         # Cooperative wide flush of the staged scales where padding columns flush as 0.
         if cutlass.const_expr(self._STASH_SCALE_TO_SMEM):
@@ -2314,20 +2302,58 @@ class MXFP8QuantizeSpecializedBidimensionalKernel(MXFP8QuantizeKernelBase):
                     )
 
 
-def get_kernel_class(cfg):
-    """If no fusion is involved and the kernel only quantizes, dispatch to the specialized kernel for better performance."""
-    plain_cast_only = (
-        not cfg.WITH_AMAX and not cfg.WITH_DBIAS and not cfg.WITH_DACT and not cfg.WITH_ACT
-    )
-    # Only dispatch to the specialized kernels for packed16 types (bf16/fp16)
-    if plain_cast_only and is_packed16(cfg.DTYPE):
-        # The rowwise-only specialized kernel does not handle swizzled scales yet
-        if cfg.ROWWISE and not cfg.COLWISE and not cfg.WITH_GEMM_SWIZZLED_SCALES:
-            return MXFP8QuantizeSpecializedRowwiseKernel
-        # The bidimensional specialized kernel supports swizzled scales but we don't dispatch to it for now
-        if cfg.ROWWISE and cfg.COLWISE and not cfg.WITH_GEMM_SWIZZLED_SCALES:
-            return MXFP8QuantizeSpecializedBidimensionalKernel
-    return MXFP8QuantizeKernel
+class MXFP8QuantizeEntry(MXFP8QuantizeKernelBase):
+    """Select the appropriate MXFP8 quantization kernel based on the configuration and runtime shapes."""
+
+    def __init__(self, cfg):
+        self.cfg = cfg
+        self.general_kernel = MXFP8QuantizeKernel(cfg)
+        self.specialized_rowwise = MXFP8QuantizeSpecializedRowwiseKernel(cfg) if cfg.ROWWISE else None
+        self.specialized_bidim = MXFP8QuantizeSpecializedBidimensionalKernel(cfg) if cfg.ROWWISE and cfg.COLWISE else None
+
+    @cute.jit
+    def __call__(
+        self,
+        mX: cute.Tensor,
+        mO_row: Optional[cute.Tensor],
+        mS_row: Optional[cute.Tensor],
+        mO_col: Optional[cute.Tensor],
+        mS_col: Optional[cute.Tensor],
+        mAmax: Optional[cute.Tensor],
+        mNoop: cute.Pointer,
+        mDActInput: Optional[cute.Tensor],
+        mWorkspace: Optional[cute.Tensor],
+        stream: CUstream,
+    ):
+        N = mX.shape[1]
+        # Select specialized kernels if possible
+        plain_cast_only = (
+            not self.cfg.WITH_AMAX and not self.cfg.WITH_DBIAS and not self.cfg.WITH_DACT and not self.cfg.WITH_ACT
+        )
+        dispatched_to_specialized = False
+        # Only dispatch to the specialized kernels for packed16 types (bf16/fp16)
+        if cutlass.const_expr(plain_cast_only and is_packed16(self.cfg.DTYPE)):
+            # The rowwise-only specialized kernel does not handle swizzled scales yet
+            if cutlass.const_expr(
+                self.cfg.ROWWISE
+                and not self.cfg.COLWISE
+                and not self.cfg.WITH_GEMM_SWIZZLED_SCALES
+            ):
+                # The rowwise specialized kernel requires N divisible by 128 for vectorized stores
+                if N % 128 == 0:
+                    dispatched_to_specialized = True
+                    self.specialized_rowwise(mX, mO_row, mS_row, mO_col, mS_col, mAmax, mNoop, mDActInput, mWorkspace, stream)
+            # The bidimensional specialized kernel supports swizzled scales but we don't dispatch to it for now
+            if cutlass.const_expr(
+                self.cfg.ROWWISE
+                and self.cfg.COLWISE
+                and not self.cfg.WITH_GEMM_SWIZZLED_SCALES
+            ):
+                dispatched_to_specialized = True
+                self.specialized_bidim(mX, mO_row, mS_row, mO_col, mS_col, mAmax, mNoop, mDActInput, mWorkspace, stream)
+        # If not using a specialized kernel, fall back to the general kernel
+        if not dispatched_to_specialized:
+            self.general_kernel(mX, mO_row, mS_row, mO_col, mS_col, mAmax, mNoop, mDActInput, mWorkspace, stream)
 
 
 def compile_cutedsl_function_from_cfg(cfg):
@@ -2335,10 +2361,7 @@ def compile_cutedsl_function_from_cfg(cfg):
     Return the compiled CuTeDSL function object for the given MXFP8 quantization config.
     """
 
-    # Route plain cast-only configs to the matching specialized kernel (mirrors the
-    # CUDA dispatcher); everything else uses the general standard kernel.
-    kernel_class = get_kernel_class(cfg)
-    kernel_obj = kernel_class(cfg)
+    kernel_obj = MXFP8QuantizeEntry(cfg)
     sym_M = cute.sym_int32()
     sym_N = cute.sym_int32(divisibility=16)  # TMA requires 16 bytes alignment
     in_shape = out_shape = (sym_M, sym_N)
