@@ -358,6 +358,13 @@ py::object group_scaled_swiglu(const at::Tensor &input_2f, const at::Tensor &pro
                                std::optional<at::Tensor> last_dims,
                                std::optional<at::Tensor> tensor_offsets);
 
+py::object group_scaled_clamped_swiglu(const at::Tensor &input_2f, const at::Tensor &prob,
+                                       py::handle quantizer, const size_t num_tensors, float limit,
+                                       float alpha, float glu_linear_offset,
+                                       std::optional<at::Tensor> first_dims,
+                                       std::optional<at::Tensor> last_dims,
+                                       std::optional<at::Tensor> tensor_offsets);
+
 py::object nvfp4_group_quantize_with_amax(const at::Tensor &tensor, py::handle quantizer,
                                           const size_t num_tensors,
                                           std::optional<at::Tensor> first_dims,

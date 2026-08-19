@@ -106,6 +106,30 @@ void nvte_group_silu(const NVTEGroupedTensor input, NVTEGroupedTensor output, cu
 void nvte_group_scaled_swiglu(const NVTEGroupedTensor input, const NVTETensor prob,
                               NVTEGroupedTensor output, cudaStream_t stream);
 
+/*! \brief Clamped variant of nvte_group_scaled_swiglu.
+ *
+ *  Computes, per token t and feature f, with x = input[t, f] and g = input[t, F + f]:
+ *      a = min(x, limit)
+ *      output[t, f] = ( a * sigmoid(alpha * a)
+ *                       * (clamp(g, -limit, limit) + glu_linear_offset) ) * prob[t]
+ *  Note the asymmetry, which matches nvte_clamped_swiglu and the forward path of the
+ *  gated MXFP8 kernels: the activation half is clamped from above only, the gate half
+ *  on both sides and then offset. Same shape, layout and scaling-mode restrictions as
+ *  nvte_group_scaled_swiglu.
+ *
+ *  \param[in]     input              Grouped input tensor [T, 2F] ([act|gate]).
+ *  \param[in]     prob               Per-token weights, at least T elements, in the
+ *                                    same dtype as \p input.
+ *  \param[in,out] output             Grouped output tensor [T, F] (columnwise MXFP8).
+ *  \param[in]     limit              Clamp threshold, must be positive.
+ *  \param[in]     alpha              Sigmoid gain of the activation half.
+ *  \param[in]     glu_linear_offset  Offset added to the gate half after clamping.
+ *  \param[in]     stream             CUDA stream used for the operation.
+ */
+void nvte_group_scaled_clamped_swiglu(const NVTEGroupedTensor input, const NVTETensor prob,
+                                      NVTEGroupedTensor output, float limit, float alpha,
+                                      float glu_linear_offset, cudaStream_t stream);
+
 /*! \brief Computes the ReLU activation of the input.
  *         If the scaling mode of the output tensor is set to NVTE_MXFP8_1D_SCALING,
  *         the block quantization (MXFP8) of the specified shape of the block will be used.

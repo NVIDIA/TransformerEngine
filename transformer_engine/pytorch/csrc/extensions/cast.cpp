@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -398,11 +399,24 @@ py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const 
   return py::reinterpret_borrow<py::object>(grouped_output_py);
 }
 
-py::object group_scaled_swiglu(const at::Tensor &input_2f, const at::Tensor &prob,
-                               py::handle quantizer, const size_t num_tensors,
-                               std::optional<at::Tensor> first_dims,
-                               std::optional<at::Tensor> last_dims,
-                               std::optional<at::Tensor> tensor_offsets) {
+namespace {
+
+// Absent means plain scaled SwiGLU.
+struct ClampedSwigluArgs {
+  float limit;
+  float alpha;
+  float glu_linear_offset;
+};
+
+// Shared body of group_scaled_swiglu and group_scaled_clamped_swiglu, which differ only
+// in the nvte entry point they call at the end.
+py::object group_scaled_swiglu_impl(const char *api_name, const at::Tensor &input_2f,
+                                    const at::Tensor &prob, py::handle quantizer,
+                                    const size_t num_tensors,
+                                    std::optional<at::Tensor> first_dims,
+                                    std::optional<at::Tensor> last_dims,
+                                    std::optional<at::Tensor> tensor_offsets,
+                                    std::optional<ClampedSwigluArgs> clamp) {
   using namespace transformer_engine::pytorch::detail;
   init_extension();
 
@@ -429,6 +443,15 @@ py::object group_scaled_swiglu(const at::Tensor &input_2f, const at::Tensor &pro
              "group_scaled_swiglu prob must have at least T elements.");
   NVTE_CHECK(prob.scalar_type() == input_2f.scalar_type(),
              "group_scaled_swiglu prob must have the same dtype as the input (model dtype).");
+
+  if (clamp.has_value()) {
+    // A negative limit collapses the gate clamp min(max(-limit, g), limit) to the limit
+    // itself, turning every gate element into a constant with nothing downstream raising.
+    NVTE_CHECK(clamp->limit > 0.0f, api_name, " limit must be positive, got ", clamp->limit, ".");
+    NVTE_CHECK(std::isfinite(clamp->limit) && std::isfinite(clamp->alpha) &&
+                   std::isfinite(clamp->glu_linear_offset),
+               api_name, " limit, alpha and glu_linear_offset must all be finite.");
+  }
 
   // The grouped metadata is turned into offsets by a kernel on the guarded device below,
   // and the fused kernel then indexes the input with those offsets.
@@ -472,11 +495,40 @@ py::object group_scaled_swiglu(const at::Tensor &input_2f, const at::Tensor &pro
   auto prob_te = makeTransformerEngineTensor(prob);
 
   NVTE_SCOPED_GIL_RELEASE({
-    nvte_group_scaled_swiglu(grouped_input_tensor.data(), prob_te.data(),
-                             grouped_output_tensor_cpp.data(), at::cuda::getCurrentCUDAStream());
+    if (clamp.has_value()) {
+      nvte_group_scaled_clamped_swiglu(grouped_input_tensor.data(), prob_te.data(),
+                                       grouped_output_tensor_cpp.data(), clamp->limit,
+                                       clamp->alpha, clamp->glu_linear_offset,
+                                       at::cuda::getCurrentCUDAStream());
+    } else {
+      nvte_group_scaled_swiglu(grouped_input_tensor.data(), prob_te.data(),
+                               grouped_output_tensor_cpp.data(), at::cuda::getCurrentCUDAStream());
+    }
   });
 
   return py::reinterpret_borrow<py::object>(grouped_output_py);
+}
+
+}  // namespace
+
+py::object group_scaled_swiglu(const at::Tensor &input_2f, const at::Tensor &prob,
+                               py::handle quantizer, const size_t num_tensors,
+                               std::optional<at::Tensor> first_dims,
+                               std::optional<at::Tensor> last_dims,
+                               std::optional<at::Tensor> tensor_offsets) {
+  return group_scaled_swiglu_impl("group_scaled_swiglu", input_2f, prob, quantizer, num_tensors,
+                                  first_dims, last_dims, tensor_offsets, std::nullopt);
+}
+
+py::object group_scaled_clamped_swiglu(const at::Tensor &input_2f, const at::Tensor &prob,
+                                       py::handle quantizer, const size_t num_tensors, float limit,
+                                       float alpha, float glu_linear_offset,
+                                       std::optional<at::Tensor> first_dims,
+                                       std::optional<at::Tensor> last_dims,
+                                       std::optional<at::Tensor> tensor_offsets) {
+  return group_scaled_swiglu_impl("group_scaled_clamped_swiglu", input_2f, prob, quantizer,
+                                  num_tensors, first_dims, last_dims, tensor_offsets,
+                                  ClampedSwigluArgs{limit, alpha, glu_linear_offset});
 }
 
 py::object nvfp4_group_quantize_with_amax(const at::Tensor &tensor, py::handle quantizer,

@@ -34,6 +34,14 @@ enum ShapeRepresentation {
 
 constexpr size_t SCALE_DIM_Y = 32;
 
+// `enabled == false` selects plain scaled SwiGLU, so one body covers both entry points.
+struct ClampSpec {
+    bool enabled = false;
+    float limit = 0.0f;
+    float alpha = 0.0f;
+    float glu_linear_offset = 0.0f;
+};
+
 // Host mirror of mxfp8::swizzle::gemm_swizzled_scale_idx. The FC2 wgrad GEMM reads this
 // operand transposed, so its scale matrix is the [cols, rows/32] transpose of the compact
 // one, tiled 128x4:
@@ -66,7 +74,8 @@ void compute_ref(const InputType* input,
                  const size_t rows,
                  const size_t cols,
                  const size_t scales_stride,
-                 const bool with_gemm_swizzled_scales) {
+                 const bool with_gemm_swizzled_scales,
+                 const ClampSpec& clamp) {
     const size_t blocks_Y = divide_round_up(rows, SCALE_DIM_Y);
     // Number of 4-wide tiles along the swizzled matrix's column axis (which is rows / 32).
     const size_t swizzled_tiles_X = divide_round_up(rows, scale_tensor_alignment_Y_rowwise);
@@ -85,12 +94,24 @@ void compute_ref(const InputType* input,
                 float block_amax = 0.0f;
                 for (size_t i = i_min; i < i_max; ++i) {
                     const float act_elt = static_cast<float>(input[i * input_stride + j]);
-                    const float gate_elt = static_cast<float>(input[i * input_stride + cols + j]);
+                    float gate_elt = static_cast<float>(input[i * input_stride + cols + j]);
                     const float prob_elt = static_cast<float>(prob[i]);
+
+                    // Activation clamped from above only, gate on both sides then offset.
+                    float act_x;
+                    if (clamp.enabled) {
+                        gate_elt = std::min(std::max(-clamp.limit, gate_elt), clamp.limit)
+                                   + clamp.glu_linear_offset;
+                        const float a = std::min(act_elt, clamp.limit);
+                        act_x = a / (1.0f + std::exp(-clamp.alpha * a));
+                    } else {
+                        act_x = silu(act_elt);
+                    }
+
                     // Numerical truncation: the kernel rounds the scaled activation back
                     // through InputType before quantizing, so the reference must too.
                     const float elt = static_cast<float>(
-                        static_cast<InputType>(silu(act_elt) * gate_elt * prob_elt));
+                        static_cast<InputType>(act_x * gate_elt * prob_elt));
                     cache[i - i_min] = elt;
                     block_amax = std::max(block_amax, std::abs(elt));
                 }
@@ -160,8 +181,18 @@ void performTest(const ShapeRepresentation shape_rep,
                  const std::vector<size_t>& rows_per_tensor,
                  const size_t F,
                  const bool with_gemm_swizzled_scales,
-                 const bool expect_rejection) {
+                 const bool expect_rejection,
+                 const ClampSpec& clamp) {
     using namespace test;
+
+    auto launch = [&clamp](NVTEGroupedTensor in, NVTETensor prob_t, NVTEGroupedTensor out) {
+        if (clamp.enabled) {
+            nvte_group_scaled_clamped_swiglu(in, prob_t, out, clamp.limit, clamp.alpha,
+                                             clamp.glu_linear_offset, 0);
+        } else {
+            nvte_group_scaled_swiglu(in, prob_t, out, 0);
+        }
+    };
 
     DType itype = TypeInfo<InputType>::dtype;
     DType otype = TypeInfo<OutputType>::dtype;
@@ -280,8 +311,7 @@ void performTest(const ShapeRepresentation shape_rep,
     }
 
     if (expect_rejection) {
-        EXPECT_THROW(nvte_group_scaled_swiglu(in_group_tensor, prob.data(), out_group_tensor, 0),
-                     std::runtime_error);
+        EXPECT_THROW(launch(in_group_tensor, prob.data(), out_group_tensor), std::runtime_error);
         nvte_destroy_grouped_tensor(in_group_tensor);
         nvte_destroy_grouped_tensor(out_group_tensor);
         return;
@@ -302,12 +332,12 @@ void performTest(const ShapeRepresentation shape_rep,
                                            prob_ptr + row_base,
                                            out_data_ref.data() + data_offsets[t],
                                            out_scales_ref.data() + scale_offsets[t],
-                                           M, F, scales_stride, with_gemm_swizzled_scales);
+                                           M, F, scales_stride, with_gemm_swizzled_scales, clamp);
         row_base += M;
     }
 
     // GPU
-    nvte_group_scaled_swiglu(in_group_tensor, prob.data(), out_group_tensor, 0);
+    launch(in_group_tensor, prob.data(), out_group_tensor);
     NVTE_CHECK_CUDA(cudaDeviceSynchronize());
     auto err = cudaGetLastError();
     ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
@@ -319,12 +349,17 @@ void performTest(const ShapeRepresentation shape_rep,
     NVTE_CHECK_CUDA(cudaMemcpy(out_scales_h.data(), out_scales_d.get(), scales_size,
                                cudaMemcpyDeviceToHost));
 
-    // A last-ULP silu difference can push a block amax onto the next e8m0 exponent, so a
-    // few scale mismatches are tolerated; every element of such a block is then allowed to
-    // differ as well.
+    // The approximate silu can carry a block's amax across a power of two and move its
+    // e8m0 exponent. Measured over this matrix: 2 flips in 361472 blocks (5.5e-6), so
+    // 0.36 expected in the largest config; 4 leaves that several sigma while still
+    // catching a regression, which would be tens of flips. Elements of a flipped block
+    // are then free to differ too, hence the 32x budget below.
+    //
+    // rel is 1.0 so abs binds: the helper takes min(abs, floor(N * rel)), so a rate would
+    // collapse to zero for any tensor with fewer than 1/rel blocks.
     const size_t scale_diff_abs_tolerance = 0;
-    const double abs_tolerable_mismatches_limit = 1.0;
-    const double rel_tolerable_mismatches_limit = 1.0e-4;
+    const double abs_tolerable_mismatches_limit = 4.0;
+    const double rel_tolerable_mismatches_limit = 1.0;
 
     size_t mismatches_scales = 0;
     compare_scaling_factors("colwise_scales", out_scales_h.data(), out_scales_ref.data(),
@@ -358,13 +393,23 @@ std::vector<std::vector<size_t>> input_configs_small = {
     {VARYING_FIRST_DIM, 4,  160,    128, 384, 512, 512},
 };
 
+// Inputs are drawn from [-2, 1), so the limits below sit inside that range and actually
+// exercise the clamp on both halves.
+std::vector<ClampSpec> clamp_specs_off = {ClampSpec{}};
+std::vector<ClampSpec> clamp_specs_on = {
+    ClampSpec{true, 0.5f, 1.702f, 1.0f},
+    // alpha = 1 and offset = 0 pin that plumbing: dropping either would still pass above.
+    ClampSpec{true, 1.0f, 1.0f, 0.0f},
+};
+
 }  // namespace
 
 class GroupedScaledSwigluMXFP8TestSuite : public ::testing::TestWithParam
     <std::tuple<std::vector<size_t>,        // Config
                 bool,                       // GEMM-swizzled scales
                 transformer_engine::DType,  // InputType
-                transformer_engine::DType   // OutputType
+                transformer_engine::DType,  // OutputType
+                ClampSpec                   // Clamped variant parameters
                 >> {};
 
 TEST_P(GroupedScaledSwigluMXFP8TestSuite, Test) {
@@ -380,6 +425,7 @@ TEST_P(GroupedScaledSwigluMXFP8TestSuite, Test) {
     const bool with_gemm_swizzled_scales = std::get<1>(GetParam());
     const DType input_type = std::get<2>(GetParam());
     const DType output_type = std::get<3>(GetParam());
+    const ClampSpec clamp = std::get<4>(GetParam());
 
     const ShapeRepresentation shape_rep = static_cast<ShapeRepresentation>(config[0]);
     const size_t num_tensors = config[1];
@@ -396,7 +442,7 @@ TEST_P(GroupedScaledSwigluMXFP8TestSuite, Test) {
     TRANSFORMER_ENGINE_TYPE_SWITCH_FP16_FP32_ONLY(input_type, InputType,
         TRANSFORMER_ENGINE_TYPE_SWITCH_FP8_ONLY(output_type, OutputType,
             performTest<InputType, OutputType>(shape_rep, num_tensors, rows_per_tensor, F,
-                                               with_gemm_swizzled_scales, expect_rejection);
+                                               with_gemm_swizzled_scales, expect_rejection, clamp);
         );
     );
 }
@@ -423,6 +469,14 @@ std::string MakeGroupedScaledSwigluMXFP8TestName(
     name += "_" + test::typeName(std::get<2>(info.param)) +
             "_" + test::typeName(std::get<3>(info.param));
 
+    // gtest names must be alphanumeric, so the floats go in scaled by 1000.
+    const ClampSpec clamp = std::get<4>(info.param);
+    if (clamp.enabled) {
+        name += "_CLAMP_" + std::to_string(static_cast<int>(clamp.limit * 1000)) +
+                "_A_" + std::to_string(static_cast<int>(clamp.alpha * 1000)) +
+                "_OFF_" + std::to_string(static_cast<int>(clamp.glu_linear_offset * 1000));
+    }
+
     return name;
 }
 
@@ -435,7 +489,8 @@ INSTANTIATE_TEST_SUITE_P(
         ::testing::ValuesIn(input_configs),
         ::testing::Values(false, true),
         ::testing::Values(DType::kBFloat16),
-        ::testing::Values(DType::kFloat8E4M3)),
+        ::testing::Values(DType::kFloat8E4M3),
+        ::testing::ValuesIn(clamp_specs_off)),
     MakeGroupedScaledSwigluMXFP8TestName);
 
 INSTANTIATE_TEST_SUITE_P(
@@ -445,5 +500,19 @@ INSTANTIATE_TEST_SUITE_P(
         ::testing::ValuesIn(input_configs_small),
         ::testing::Values(false, true),
         ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16),
-        ::testing::Values(DType::kFloat8E4M3, DType::kFloat8E5M2)),
+        ::testing::Values(DType::kFloat8E4M3, DType::kFloat8E5M2),
+        ::testing::ValuesIn(clamp_specs_off)),
+    MakeGroupedScaledSwigluMXFP8TestName);
+
+// The clamped variant shares the launcher with the plain one, so the shape matrix is not
+// repeated at full width; what is specific to it is the activation, hence the dtypes.
+INSTANTIATE_TEST_SUITE_P(
+    OperatorTest_GroupedScaledSwigluMXFP8_Clamped,
+    GroupedScaledSwigluMXFP8TestSuite,
+    ::testing::Combine(
+        ::testing::ValuesIn(input_configs_small),
+        ::testing::Values(false, true),
+        ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16),
+        ::testing::Values(DType::kFloat8E4M3),
+        ::testing::ValuesIn(clamp_specs_on)),
     MakeGroupedScaledSwigluMXFP8TestName);

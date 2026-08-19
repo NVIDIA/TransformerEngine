@@ -503,7 +503,7 @@ void group_quantize_fwd_helper(const NVTEGroupedTensor input, NVTEGroupedTensor 
 // -> columnwise MXFP8 of (silu(act) * gate) * prob.
 template <typename ParamOP, float (*OP)(float, const ParamOP &)>
 void group_scaled_swiglu_fwd_helper(const NVTEGroupedTensor input, const NVTETensor prob,
-                                    NVTEGroupedTensor output,
+                                    NVTEGroupedTensor output, const ParamOP &p,
                                     const NVTEQuantizationConfig quant_config,
                                     cudaStream_t stream) {
   using namespace detail;
@@ -530,7 +530,7 @@ void group_scaled_swiglu_fwd_helper(const NVTEGroupedTensor input, const NVTETen
   switch (scaling_mode) {
     case NVTE_MXFP8_1D_SCALING: {
       mxfp8::group_scaled_swiglu<ParamOP, OP>(input_tensor, prob_tensor, noop_tensor, output_tensor,
-                                              &quant_config_cpp, stream);
+                                              p, &quant_config_cpp, stream);
       break;
     }
     default:

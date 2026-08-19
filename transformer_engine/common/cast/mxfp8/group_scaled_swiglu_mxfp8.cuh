@@ -17,6 +17,9 @@
  *  the last dim is the activation input, the second half is the gate, i.e.
  *  swiglu(x) = silu(x[:, :F]) * x[:, F:]. "scaled" is the per-token prob factor,
  *  applied after the activation.
+ *
+ *  Instantiating with ParamOP = ClampedSwiGLUParam and OP = clamped_silu gives the
+ *  clamped variant, with the semantics of gated_mxfp8.cuh's forward path.
  */
 
 #ifndef TRANSFORMER_ENGINE_GROUP_SCALED_SWIGLU_MXFP8_CUH_
@@ -83,25 +86,25 @@ static_assert(CHUNK_DIM_Y % BUFF_DIM_Y == 0);
 static_assert(CHUNK_DIM_Y % SCALE_DIM_Y == 0);
 static_assert(CHUNK_DIM_X % SCALE_DIM_X == 0);
 
-// silu(x) = x / (1 + exp(-x)), evaluated directly on the MUFU units.
-//
-// Both operations are deliberately approximate. The generic path pays a full-precision
-// expf and a correctly rounded reciprocal, each a range-reduction / Newton-refinement
-// chain costing an order of magnitude more than the MUFU op it wraps, and none of that
-// precision survives rounding to an MXFP8 output whose mantissa is at most 3 bits wide.
-//
-// The exp is written as inline PTX rather than `__expf` to reach the ftz variant of
-// ex2. Because the non-ftz variant has to return a denormal when the result underflows,
-// nvcc guards every MUFU.EX2 with a compare plus two predicated multiplies that
-// evaluate ex2(arg/2)^2 in that range. That guard cannot affect this expression:
-// exp(-x) only underflows for x greater than about 87, where it is below 1e-38 and is
-// then added to 1.0f, whose fp32 ulp is 1.2e-7. The sum is exactly 1.0f either way, so
-// flushing to zero is bit-identical here and drops three instructions per element.
+// silu(x) = x * sigmoid(x) = h * (1 + tanh(h)), h = x/2. Deliberately approximate: one
+// MUFU per element, against two for the ex2 form and a full expf/division chain for the
+// generic path. The error cannot reach an MXFP8 mantissa of at most 3 bits; what it can
+// do is move an e8m0 block exponent, which the C++ gtest bounds.
 __device__ __forceinline__ float silu_approx(const float x) {
-  constexpr float LOG2_E = 1.4426950408889634f;
-  float exp_neg_x;
-  asm("ex2.approx.ftz.f32 %0, %1;" : "=f"(exp_neg_x) : "f"(-x * LOG2_E));
-  return __fdividef(x, 1.0f + exp_neg_x);
+  const float h = 0.5f * x;
+  float tanh_h;
+  asm("tanh.approx.f32 %0, %1;" : "=f"(tanh_h) : "f"(h));
+  return fmaf(h, tanh_h, h);
+}
+
+// clamped_silu's activation half, x * sigmoid(alpha * x), is the same identity with the
+// tanh argument scaled. Kept separate from silu_approx rather than passing alpha = 1.0f
+// so the plain path cannot regress on whether nvcc folds the multiply.
+__device__ __forceinline__ float clamped_silu_approx(const float x, const float alpha) {
+  const float h = 0.5f * x;
+  float tanh_ah;
+  asm("tanh.approx.f32 %0, %1;" : "=f"(tanh_ah) : "f"(alpha * h));
+  return fmaf(h, tanh_ah, h);
 }
 
 // Columnwise scaled SwiGLU + MXFP8 quantization of one 32-row buffer slice.
@@ -113,8 +116,8 @@ __device__ __forceinline__ void process_colwise_gated_stage(
     const size_t buff, const size_t out_buff, const int stage, const size_t tid_X_colwise,
     const size_t scales_offset_Y_colwise, const size_t scales_offset_X_colwise,
     const size_t scale_stride_colwise, const size_t tensor_base_for_scales, const size_t rows,
-    const size_t cols, const float *const sProb, IType *sInAct_ptr, IType *sInGate_ptr,
-    OType *sOutColwise_ptr, e8m0_t *scales_colwise) {
+    const size_t cols, const ParamOP &p, const float *const sProb, IType *sInAct_ptr,
+    IType *sInGate_ptr, OType *sOutColwise_ptr, e8m0_t *scales_colwise) {
   using IType3D = IType[BUFFS_NUM][BUFF_DIM_Y][BUFF_DIM_X];
   using OType3D = OType[OUT_BUFFS_NUM][BUFF_DIM_Y][BUFF_DIM_X];
 
@@ -151,17 +154,33 @@ __device__ __forceinline__ void process_colwise_gated_stage(
 #pragma unroll
   for (int i = 0; i < BUFF_DIM_Y; ++i) {
     const float act_elt = static_cast<float>(sInAct[buff][i][j]);
-    const float gate_elt = static_cast<float>(sInGate[buff][i][j]);
+    float gate_elt = static_cast<float>(sInGate[buff][i][j]);
     // Staged in shared memory for the whole chunk by the caller: every thread needs
     // all rows, so reading it from global here would issue one broadcast load per
     // row per warp on the critical path.
     const float prob = sProb[stage * BUFF_DIM_Y + i];
 
+    // Gate clamped on both sides then offset, activation clamped from above only --
+    // the asymmetry is gated_mxfp8.cuh's forward path.
+    //
+    // The OP comparison must nest inside the ParamOP branch: OP's type carries ParamOP,
+    // so `OP == &silu<fp32, fp32>` compares unrelated function pointer types once
+    // ParamOP is ClampedSwiGLUParam, and an if-constexpr condition must be well formed
+    // even where its branch is discarded.
     float act_x;
-    if constexpr (OP == &silu<fp32, fp32>) {
-      act_x = silu_approx(act_elt);
+    if constexpr (std::is_same_v<ParamOP, ClampedSwiGLUParam>) {
+      gate_elt = fminf(fmaxf(-p.limit, gate_elt), p.limit) + p.glu_linear_offset;
+      if constexpr (OP == &clamped_silu<fp32, fp32>) {
+        act_x = clamped_silu_approx(fminf(act_elt, p.limit), p.alpha);
+      } else {
+        act_x = OP(act_elt, p);
+      }
     } else {
-      act_x = OP(act_elt, {});
+      if constexpr (OP == &silu<fp32, fp32>) {
+        act_x = silu_approx(act_elt);
+      } else {
+        act_x = OP(act_elt, p);
+      }
     }
 
     float elt = act_x * gate_elt * prob;
@@ -196,7 +215,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_scaled_swiglu_mxfp8_k
     const int64_t *const __restrict__ offsets_ptr, const int64_t *const __restrict__ first_dims_ptr,
     const int64_t *const __restrict__ last_dims_ptr, const IType *const __restrict__ prob_ptr,
     e8m0_t *const __restrict__ scales_colwise_ptr, const float *__restrict__ noop,
-    const size_t work_blocks_X, const size_t work_blocks_Y) {
+    const size_t work_blocks_X, const size_t work_blocks_Y, const ParamOP p) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   if (noop != nullptr && noop[0] == 1.0f) {
     return;
@@ -369,7 +388,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_scaled_swiglu_mxfp8_k
         const size_t out_buff = buff_in % OUT_BUFFS_NUM;
         process_colwise_gated_stage<ParamOP, OP, IType, OType, WITH_GEMM_SWIZZLED_SCALES>(
             buff, out_buff, stage, tid_X_colwise, scales_offset_Y_colwise, scales_offset_X_colwise,
-            scale_stride_colwise, tensor_base_for_scales, rows, cols, sProb_ptr, sInAct_ptr,
+            scale_stride_colwise, tensor_base_for_scales, rows, cols, p, sProb_ptr, sInAct_ptr,
             sInGate_ptr, sOutColwise_ptr, scales_colwise_ptr);
 
         ptx::fence_proxy_async_shared_cta();
@@ -404,10 +423,11 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_scaled_swiglu_mxfp8_k
 //   input  : GroupedTensor [T, 2F] ([act|gate]) in a floating input dtype.
 //   prob   : Tensor [T] per-token weights, in the input (model) dtype.
 //   output : GroupedTensor with columnwise_data / columnwise_scale_inv for [T, F].
+//   p      : Empty for plain SwiGLU, ClampedSwiGLUParam for the clamped variant.
 template <typename ParamOP, float (*OP)(float, const ParamOP &)>
 void group_scaled_swiglu(const GroupedTensor *input, const Tensor *prob, const Tensor *noop,
-                         GroupedTensor *output, const QuantizationConfig *quant_config,
-                         cudaStream_t stream) {
+                         GroupedTensor *output, const ParamOP &p,
+                         const QuantizationConfig *quant_config, cudaStream_t stream) {
   using namespace group_scaled_swiglu_kernel;
 
   checkCuDriverContext(stream);
@@ -552,7 +572,7 @@ void group_scaled_swiglu(const GroupedTensor *input, const Tensor *prob, const T
                     kernel<<<grid, block_size, dshmem_size, stream>>>(
                         tensor_map_input_act, tensor_map_input_gate, tensor_map_output_colwise,
                         num_tensors, T, F, offsets_ptr, first_dims_ptr, last_dims_ptr, prob_dptr,
-                        scales_colwise_ptr, noop_ptr, work_blocks_X, work_blocks_Y);
+                        scales_colwise_ptr, noop_ptr, work_blocks_X, work_blocks_Y, p);
 
                     NVTE_CHECK_CUDA(cudaGetLastError());
                   });  // NOLINT(*)
