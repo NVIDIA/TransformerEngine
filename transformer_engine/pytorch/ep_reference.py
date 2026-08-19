@@ -1,4 +1,4 @@
-# Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2028 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: MIT
 
 """Pure PyTorch semantic reference for a SwiGLU MoE with expert parallelism.
@@ -326,6 +326,43 @@ def _format_round_trip(
     return quantize_blockwise(tensor, format, axis=-1).dequantize(dtype=dtype)
 
 
+def _qdq(
+    tensor: torch.Tensor,
+    format: Optional[MoeFormat],
+    *,
+    axis: int,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    """Simulate an MXFP8/NVFP4 GEMM operand in PyTorch.
+
+    The MegaMoE kernel quantizes once and feeds the quantized values into the
+    GEMM (FP32 accumulate). PyTorch has no MXFP8 matmul, so the reference
+    round-trips through block-scale storage and dequantizes back to ``dtype``.
+    """
+    if format is None or format is MoeFormat.BF16:
+        return tensor.to(dtype=dtype)
+    return quantize_blockwise(tensor, format, axis=axis).dequantize(dtype=dtype)
+
+
+def _swiglu_scale_fp32(
+    gate: torch.Tensor,
+    up: torch.Tensor,
+    weights: torch.Tensor,
+    *,
+    apply_scale: bool,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    """SiLU(gate)*up[*weights] in fp32, then one cast to ``dtype``.
+
+    Matches ``tex.scaled_swiglu``: promote, multiply, and store once. Stepwise
+    BF16 ``F.silu(g) * up * w`` extra-rounds between those muls.
+    """
+    out = F.silu(gate.float()) * up.float()
+    if apply_scale:
+        out = out * weights.float()
+    return out.to(dtype=dtype)
+
+
 class MoeEpReference:
     """Reference implementation of routed SwiGLU experts plus EP dispatch.
 
@@ -350,6 +387,7 @@ class MoeEpReference:
         gate_up_clamp: Optional[float] = None,
         generate_c: bool = False,
         compute_dtype: torch.dtype = torch.float32,
+        gemm_format: Optional[Union[MoeFormat, str]] = None,
     ) -> None:
         for name, value in (
             ("num_experts", num_experts),
@@ -397,6 +435,9 @@ class MoeEpReference:
         self.gate_up_clamp = None if gate_up_clamp is None else abs(float(gate_up_clamp))
         self.generate_c = bool(generate_c)
         self.compute_dtype = compute_dtype
+        self.gemm_format = None if gemm_format is None else _parse_format(gemm_format)
+        if self.gemm_format is MoeFormat.BF16:
+            self.gemm_format = None
 
         for name, fmt in (
             ("output_format", self.output_format),
@@ -418,8 +459,26 @@ class MoeEpReference:
             f"hidden={self.hidden_size}, intermediate={self.intermediate_size}, "
             f"top_k={self.top_k}, ep_rank={self.ep_rank}/{self.ep_size}, "
             f"output={self.output_format.value}, combine={self.combine_format.value}, "
+            f"gemm_format={None if self.gemm_format is None else self.gemm_format.value}, "
             f"compute_dtype={self.compute_dtype})"
         )
+
+    def _gemm_dtype(self) -> torch.dtype:
+        """FP32 accumulate when simulating an MXFP8 GEMM; otherwise ``compute_dtype``."""
+        return torch.float32 if self.gemm_format is MoeFormat.MXFP8 else self.compute_dtype
+
+    def _stage_gemm_operand(
+        self,
+        tensor: torch.Tensor,
+        *,
+        already_quantized: bool,
+        axis: int,
+    ) -> torch.Tensor:
+        """Apply the kernel's pre-GEMM quantize, then dequant for a PyTorch matmul."""
+        dtype = self._gemm_dtype()
+        if already_quantized or self.gemm_format is None:
+            return tensor.to(dtype=dtype)
+        return _qdq(tensor, self.gemm_format, axis=axis, dtype=dtype)
 
     def _collective_device(self, device: torch.device) -> torch.device:
         """Device the process group can run ``all_to_all_single`` on.
@@ -523,15 +582,30 @@ class MoeEpReference:
                 fc1_c_rows.append(gate_up.to(torch.bfloat16))
             gate, up = gate_up.split(self.intermediate_size, dim=-1)
             if self.gate_up_clamp is not None:
-                gate = gate.clamp(max=self.gate_up_clamp)
-                up = up.clamp(min=-self.gate_up_clamp, max=self.gate_up_clamp)
-            intermediate = F.silu(gate) * up
+                gate = gate.float().clamp(max=self.gate_up_clamp)
+                up = up.float().clamp(min=-self.gate_up_clamp, max=self.gate_up_clamp)
             weights = route_weight.index_select(0, positions).unsqueeze(-1)
-            if self.apply_topk_in_fc1:
-                intermediate = intermediate * weights
+            # FP32 SiLU*up[*scale], then one cast. MegaMoE then quantizes this
+            # intermediate for the FC2 MXFP8 GEMM; the reference QDQ mimics that.
+            intermediate = _swiglu_scale_fp32(
+                gate,
+                up,
+                weights,
+                apply_scale=self.apply_topk_in_fc1,
+                dtype=self._gemm_dtype(),
+            )
+            if self.gemm_format is not None:
+                intermediate = _qdq(
+                    intermediate,
+                    self.gemm_format,
+                    axis=-1,
+                    dtype=self._gemm_dtype(),
+                )
             expert_output = intermediate @ fc2_weight[expert]
             if not self.apply_topk_in_fc1:
-                expert_output = expert_output * weights
+                expert_output = (expert_output.float() * weights.float()).to(
+                    dtype=self.compute_dtype
+                )
             expert_output = _format_round_trip(
                 expert_output,
                 self.combine_format,
@@ -607,26 +681,42 @@ class MoeEpReference:
             if input_device != device:
                 raise ValueError(f"{name} must be on {device}, got {input_device}")
 
-        activation_float = _decode_tensor(
-            activation,
-            name="activation",
-            expected_shape=(token_count, self.hidden_size),
-            quantized_axis=1,
-            dtype=self.compute_dtype,
+        activation_float = self._stage_gemm_operand(
+            _decode_tensor(
+                activation,
+                name="activation",
+                expected_shape=(token_count, self.hidden_size),
+                quantized_axis=1,
+                dtype=self.compute_dtype,
+            ),
+            already_quantized=isinstance(activation, BlockScaledTensor),
+            axis=-1,
         )
-        fc1_float = _decode_tensor(
-            fc1_weight,
-            name="fc1_weight",
-            expected_shape=(self.experts_per_rank, self.hidden_size, 2 * self.intermediate_size),
-            quantized_axis=1,
-            dtype=self.compute_dtype,
+        fc1_float = self._stage_gemm_operand(
+            _decode_tensor(
+                fc1_weight,
+                name="fc1_weight",
+                expected_shape=(
+                    self.experts_per_rank,
+                    self.hidden_size,
+                    2 * self.intermediate_size,
+                ),
+                quantized_axis=1,
+                dtype=self.compute_dtype,
+            ),
+            already_quantized=isinstance(fc1_weight, BlockScaledTensor),
+            axis=1,
         )
-        fc2_float = _decode_tensor(
-            fc2_weight,
-            name="fc2_weight",
-            expected_shape=(self.experts_per_rank, self.intermediate_size, self.hidden_size),
-            quantized_axis=1,
-            dtype=self.compute_dtype,
+        fc2_float = self._stage_gemm_operand(
+            _decode_tensor(
+                fc2_weight,
+                name="fc2_weight",
+                expected_shape=(self.experts_per_rank, self.intermediate_size, self.hidden_size),
+                quantized_axis=1,
+                dtype=self.compute_dtype,
+            ),
+            already_quantized=isinstance(fc2_weight, BlockScaledTensor),
+            axis=1,
         )
 
         plan = self._dispatch_plan(topk_idx, topk_weights)
@@ -669,13 +759,15 @@ class MoeEpReference:
         )
 
         returned = self._all_to_all(recv_output, recv_counts, send_counts)
+        # Combine payload is combine_format (BF16 round-trip above); reduce in
+        # fp32 so top-k summation does not extra-round in compute_dtype.
         combine_plane = torch.zeros(
             (token_count * self.top_k, self.hidden_size),
-            dtype=self.compute_dtype,
+            dtype=torch.float32,
             device=device,
         )
         send_flat_slot = send_token_idx * self.top_k + send_slot_idx
-        combine_plane.index_copy_(0, send_flat_slot, returned)
+        combine_plane.index_copy_(0, send_flat_slot, returned.float())
         reduced = combine_plane.view(token_count, self.top_k, self.hidden_size).sum(dim=1)
 
         if self.output_format is MoeFormat.BF16:
@@ -711,9 +803,10 @@ class MoeEpReference:
 
         Returns ``(grad_activation, grad_fc1_weight, grad_fc2_weight,
         grad_topk_weights)``. Activation and expert weight gradients use
-        ``compute_dtype``. Router weights are cast to ``compute_dtype`` for the
-        activation scaling path; the returned
-        ``grad_topk_weights`` remain float32.
+        ``compute_dtype``. SwiGLU and router-weight scaling recompute in
+        fp32 and round once into ``compute_dtype`` before the FC2 GEMMs,
+        matching ``tex.scaled_swiglu``. The returned ``grad_topk_weights``
+        remain float32.
         """
 
         if not self.generate_c:
@@ -731,26 +824,38 @@ class MoeEpReference:
 
         device = _tensor_device(activation)
         two_i = 2 * self.intermediate_size
-        activation_float = _decode_tensor(
-            activation,
-            name="activation",
-            expected_shape=(token_count, self.hidden_size),
-            quantized_axis=1,
-            dtype=self.compute_dtype,
+        activation_float = self._stage_gemm_operand(
+            _decode_tensor(
+                activation,
+                name="activation",
+                expected_shape=(token_count, self.hidden_size),
+                quantized_axis=1,
+                dtype=self.compute_dtype,
+            ),
+            already_quantized=isinstance(activation, BlockScaledTensor),
+            axis=-1,
         )
-        fc1_float = _decode_tensor(
-            fc1_weight,
-            name="fc1_weight",
-            expected_shape=(self.experts_per_rank, self.hidden_size, two_i),
-            quantized_axis=1,
-            dtype=self.compute_dtype,
+        fc1_float = self._stage_gemm_operand(
+            _decode_tensor(
+                fc1_weight,
+                name="fc1_weight",
+                expected_shape=(self.experts_per_rank, self.hidden_size, two_i),
+                quantized_axis=1,
+                dtype=self.compute_dtype,
+            ),
+            already_quantized=isinstance(fc1_weight, BlockScaledTensor),
+            axis=1,
         )
-        fc2_float = _decode_tensor(
-            fc2_weight,
-            name="fc2_weight",
-            expected_shape=(self.experts_per_rank, self.intermediate_size, self.hidden_size),
-            quantized_axis=1,
-            dtype=self.compute_dtype,
+        fc2_float = self._stage_gemm_operand(
+            _decode_tensor(
+                fc2_weight,
+                name="fc2_weight",
+                expected_shape=(self.experts_per_rank, self.intermediate_size, self.hidden_size),
+                quantized_axis=1,
+                dtype=self.compute_dtype,
+            ),
+            already_quantized=isinstance(fc2_weight, BlockScaledTensor),
+            axis=1,
         )
         if fc1_c.shape != (int(route_metadata.shape[0]), two_i):
             raise ValueError(
@@ -808,44 +913,48 @@ class MoeEpReference:
                 continue
             c = c_rows.index_select(0, positions)
             x = x_rows.index_select(0, positions)
-            w = w_rows.index_select(0, positions).unsqueeze(-1)
+            w = w_rows.index_select(0, positions).unsqueeze(-1).float()
             d_y = dy_rows.index_select(0, positions)
 
             gate, up = c.split(self.intermediate_size, dim=-1)
             if self.gate_up_clamp is not None:
-                g = gate.clamp(max=self.gate_up_clamp)
-                u = up.clamp(min=-self.gate_up_clamp, max=self.gate_up_clamp)
+                g = gate.float().clamp(max=self.gate_up_clamp)
+                u = up.float().clamp(min=-self.gate_up_clamp, max=self.gate_up_clamp)
             else:
-                g, u = gate, up
+                g, u = gate.float(), up.float()
             sig = torch.sigmoid(g)
             s = g * sig
             h = s * u
 
             if self.apply_topk_in_fc1:
-                h_fc2 = h * w
-                d_y_pre = d_y
+                h_fc2 = (h * w).to(dtype=self._gemm_dtype())
+                d_y_pre = d_y.to(dtype=self._gemm_dtype())
             else:
-                h_fc2 = h
-                d_y_pre = d_y * w
+                h_fc2 = h.to(dtype=self._gemm_dtype())
+                d_y_pre = (d_y.float() * w).to(dtype=self._gemm_dtype())
+            if self.gemm_format is not None:
+                h_fc2 = _qdq(h_fc2, self.gemm_format, axis=-1, dtype=self._gemm_dtype())
+                d_y_pre = _qdq(d_y_pre, self.gemm_format, axis=-1, dtype=self._gemm_dtype())
             grad_fc2[expert] = h_fc2.transpose(0, 1) @ d_y_pre
-            d_h_fc2 = d_y_pre @ fc2_float[expert].transpose(0, 1)
+            d_h_fc2 = (d_y_pre @ fc2_float[expert].transpose(0, 1)).float()
             if self.apply_topk_in_fc1:
                 d_h = d_h_fc2 * w
-                d_w_rows[positions] = (d_h_fc2 * h).sum(dim=-1).to(dtype=self.compute_dtype).float()
+                d_w_rows[positions] = (d_h_fc2 * h).sum(dim=-1)
             else:
                 d_h = d_h_fc2
-                d_w_rows[positions] = (
-                    (d_y * (h @ fc2_float[expert])).sum(dim=-1).to(dtype=self.compute_dtype).float()
-                )
+                d_w_rows[positions] = (d_y.float() * (h @ fc2_float[expert].float())).sum(dim=-1)
 
             d_g = d_h * u * (sig * (1 + g * (1 - sig)))
             d_u = d_h * s
             if self.gate_up_clamp is not None:
-                d_gate = d_g * (gate <= self.gate_up_clamp)
-                d_up = d_u * ((up >= -self.gate_up_clamp) & (up <= self.gate_up_clamp))
+                d_gate = d_g * (gate.float() <= self.gate_up_clamp)
+                up_f = up.float()
+                d_up = d_u * ((up_f >= -self.gate_up_clamp) & (up_f <= self.gate_up_clamp))
             else:
                 d_gate, d_up = d_g, d_u
-            d_c = torch.cat((d_gate, d_up), dim=-1)
+            d_c = torch.cat((d_gate, d_up), dim=-1).to(dtype=self._gemm_dtype())
+            if self.gemm_format is not None:
+                d_c = _qdq(d_c, self.gemm_format, axis=-1, dtype=self._gemm_dtype())
             grad_fc1[expert] = x.transpose(0, 1) @ d_c
             d_x_rows.index_copy_(0, positions, d_c @ fc1_float[expert].transpose(0, 1))
 
@@ -854,10 +963,11 @@ class MoeEpReference:
         returned_dw = self._all_to_all(d_w_rows.index_select(0, perm), recv_counts, send_counts)
         grad_activation = torch.zeros(
             (token_count, self.hidden_size),
-            dtype=self.compute_dtype,
+            dtype=torch.float32,
             device=device,
         )
-        grad_activation.index_add_(0, plan.send_token_idx, returned_dx)
+        grad_activation.index_add_(0, plan.send_token_idx, returned_dx.float())
+        grad_activation = grad_activation.to(dtype=self.compute_dtype)
         grad_topk_weights = torch.zeros(
             (token_count * self.top_k,), dtype=torch.float32, device=device
         )
@@ -879,3 +989,4 @@ __all__ = [
     "MoeTensor",
     "quantize_blockwise",
 ]
+
