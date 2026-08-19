@@ -32,11 +32,11 @@ as op inputs:
   * ``_TensorOrQuantizedAdapter`` -- a field that may be a plain tensor, a bare
     quantized storage, or ``None``: three slots (the tensor, its flat inner
     buffers, and a ``__kind__`` tag) so a quantized tensor crosses as its buffers.
-  * ``_ProcessGroupAdapter`` -- a ProcessGroup, carried as its c10d registry
-    name and re-resolved inside the op.
   * ``_SimpleBundleAdapter`` -- every remaining simple value (scalars, enums,
     sizes, quantizers -- value-opaque constants baked into the graph -- and
     nested collections of them), gathered into one ``OpaqueValueBundle`` slot.
+    A ProcessGroup field rides here too, as its c10d registry name,
+    re-resolved inside the op.
   * ``_UnsupportedAdapter`` -- fallback for a field no adapter can encode; allowed
     only when its value is trivial (``None`` / all-``None``) at call time.
 
@@ -547,38 +547,6 @@ class _TensorAdapter(_Adapter):
         return 0
 
 
-class _ProcessGroupAdapter(_Adapter):
-    """``ProcessGroup`` -> its c10d registry name in one ``OpaqueValueBundle`` slot.
-
-    Mirrors traceable functional collectives: the graph carries the group's
-    *name* (a plain string, so guards and the FX cache key are trivial) and the
-    live group is re-resolved from the registry inside the op, in the same
-    process -- ``from_slots(to_slots(pg))`` returns the very group the caller
-    passed. Groups created outside the c10d registry fail the resolve loudly.
-    """
-
-    NAME_KEY = "group_name"
-
-    def __init__(self, name: str) -> None:
-        self.name = name
-
-    def meta_slot(self) -> str:
-        """Group-name slot name."""
-        return self.name + "__pg"
-
-    def schema_slots(self) -> List[Tuple[str, str]]:
-        return [(self.meta_slot(), _OPAQUE_VALUE_BUNDLE_TYPE_NAME)]
-
-    def to_slots(self, owner: Any) -> Dict[str, Any]:
-        pg = getattr(owner, self.name)
-        name = None if pg is None else pg.group_name
-        return {self.meta_slot(): OpaqueValueBundle({self.NAME_KEY: name})}
-
-    def from_slots(self, args: Dict[str, Any], kwargs: Dict[str, Any]) -> None:
-        name = args[self.meta_slot()][self.NAME_KEY]
-        kwargs[self.name] = None if name is None else _resolve_process_group(name)
-
-
 class _SimpleBundleAdapter(_Adapter):
     """Aggregates every simple-typed field into a single OpaqueValueBundle.
 
@@ -586,12 +554,19 @@ class _SimpleBundleAdapter(_Adapter):
     dataclass has no simple-typed fields): it owns the single shared
     ``_simple_meta`` slot, and ``_get_adapters`` builds it once from all
     simple-typed field names collected across the dataclass.
+
+    ``pg_names`` marks the fields carrying a ProcessGroup: a live group can't
+    cross as a value, so -- mirroring traceable functional collectives -- the
+    bundle stores its c10d registry *name* and the op re-resolves the very
+    group the caller passed, in the same process. Groups created outside the
+    c10d registry fail the resolve loudly.
     """
 
     META_SLOT = "_simple_meta"
 
-    def __init__(self, names: List[str]) -> None:
+    def __init__(self, names: List[str], pg_names: Sequence[str] = ()) -> None:
         self.names = list(names)
+        self.pg_names = frozenset(pg_names)
 
     @classmethod
     def matches_field(cls, annot: Any) -> bool:
@@ -620,14 +595,19 @@ class _SimpleBundleAdapter(_Adapter):
         return [(self.META_SLOT, _OPAQUE_VALUE_BUNDLE_TYPE_NAME)]
 
     def to_slots(self, owner: Any) -> Dict[str, Any]:
-        return {self.META_SLOT: OpaqueValueBundle({n: getattr(owner, n) for n in self.names})}
+        data: Dict[str, Any] = {}
+        for n in self.names:
+            v = getattr(owner, n)
+            data[n] = v.group_name if n in self.pg_names and v is not None else v
+        return {self.META_SLOT: OpaqueValueBundle(data)}
 
     def from_slots(self, args: Dict[str, Any], kwargs: Dict[str, Any]) -> None:
         if self.META_SLOT not in args:
             return
         meta = args[self.META_SLOT]
         for n in self.names:
-            kwargs[n] = meta[n]
+            v = meta[n]
+            kwargs[n] = _resolve_process_group(v) if n in self.pg_names and v is not None else v
 
 
 class _UnsupportedAdapter(_Adapter):
@@ -684,9 +664,15 @@ def _build_field_adapter(name: str, annot: Any) -> Optional[_Adapter]:
     stripped, is_optional = _strip_optional(annot)
     if stripped is torch.Tensor:
         return _TensorAdapter(name, is_optional)
-    if _PROCESS_GROUP_TYPE is not None and stripped is _PROCESS_GROUP_TYPE:
-        return _ProcessGroupAdapter(name)
     return None
+
+
+def _is_process_group_annot(annot: Any) -> bool:
+    """Whether the field annotation is (Optional) ProcessGroup."""
+    if _PROCESS_GROUP_TYPE is None:
+        return False
+    stripped, _ = _strip_optional(annot)
+    return stripped is _PROCESS_GROUP_TYPE
 
 
 def _resolved_field_annotations(cls: type) -> List[Tuple[str, Any]]:
@@ -710,16 +696,20 @@ def _get_adapters(cls: type) -> List[_Adapter]:
         )
     adapters: List[_Adapter] = []
     simple_names: List[str] = []
+    pg_names: List[str] = []
     for name, annot in _resolved_field_annotations(cls):
         built = _build_field_adapter(name, annot)
         if built is not None:
             adapters.append(built)
+        elif _is_process_group_annot(annot):
+            simple_names.append(name)
+            pg_names.append(name)
         elif _SimpleBundleAdapter.matches_field(annot):
             simple_names.append(name)
         else:
             adapters.append(_UnsupportedAdapter(name, cls.__name__))
     if simple_names:
-        adapters.append(_SimpleBundleAdapter(simple_names))
+        adapters.append(_SimpleBundleAdapter(simple_names, pg_names))
     return adapters
 
 
