@@ -275,18 +275,19 @@ def test_dpa_checkpoint(dtype, model_configs, model):
     test_dot_product_attention(dtype, model_configs, model, True, None, False, False)
 
 
-# One [FUSED-ATTN-CACHE] event, as either a counter line ("f16 fwd BUILD_GRAPH") or a level-2
-# trace line ("f16 fwd MISS"). Both name the build site first, and the backend half of it is
-# matched but not counted on: the worker below drives whichever one its dtype selects, and every
-# assertion here holds of either. The pass and the event name are what this test reads, plus the
-# trace line's cache key, kept so that distinct keys can be counted. Every event name is also the
-# counter column it increments, except UNSUPPORTED, which the diagnostics use for both the
-# level-1 refusal and the level-2 lookup answered from it -- both count as refusals here. The
-# rank prefix is optional because it is emitted only when the launcher exports a rank, which a
-# plain subprocess like the worker does not.
+# One [FUSED-ATTN-CACHE] event, as either a counter line ("f16 fwd CREATE_GRAPH") or a level-2
+# trace line ("f16 fwd MISS"). Both name the thread and device first and then the build site, of
+# which the backend half is matched but not counted on: the worker below drives whichever one its
+# dtype selects, and every assertion here holds of either. The pass and the event name are what
+# this test reads, plus the trace line's cache key, kept so that distinct keys can be counted.
+# Every event name is also the counter column it increments. Requiring an event name is also what
+# excludes the end-of-run summary rows, which are otherwise the same shape. The rank prefix is
+# optional because it is emitted only when the launcher exports a rank, which a plain subprocess
+# like the worker does not.
 _CACHE_EVENT = re.compile(
-    r"\[FUSED-ATTN-CACHE\]\s+(?:rank=\d+\s+\|\s+)?(?P<backend>f16|fp8)\s+(?P<pass>fwd|bwd)\s+"
-    r"(?P<event>BUILD_GRAPH|BUILD_PLANS|UNSUPPORTED|EXEC|MISS|HIT)\b(?P<rest>.*)"
+    r"\[FUSED-ATTN-CACHE\]\s+(?:rank=\d+\s+\|\s+)?tid=\d+\s+dev=-?\d+\s+\|\s+"
+    r"(?P<backend>f16|fp8)\s+(?P<pass>fwd|bwd)\s+"
+    r"(?P<event>CREATE_GRAPH|BUILD_PLANS|EXEC|MISS|HIT)\b(?P<rest>.*)"
 )
 _CACHE_PHASE = re.compile(r"\[CACHE-TEST\] phase=(?P<name>\w+)")
 
@@ -371,15 +372,17 @@ def test_fused_attn_graph_cache():
 
         # The first query builds each pass's graph, and no more than its graph: a support
         # query stops at check_support(), leaving the kernel compilation (BUILD_PLANS) to
-        # whoever executes it.
+        # whoever executes it. A build cuDNN refused would show up here as the miss without
+        # the build, since nothing is recorded for a refusal.
         assert count("query", "MISS") == 1, f"{pass_name}: expected one cold miss{context}"
-        assert count("query", "BUILD_GRAPH") == 1, f"{pass_name}: expected one build{context}"
-        assert count("query", "UNSUPPORTED") == 0, f"{pass_name}: cuDNN refused the config{context}"
+        assert count("query", "CREATE_GRAPH") == 1, f"{pass_name}: expected one build{context}"
         assert count("query", "BUILD_PLANS") == 0, f"{pass_name}: query compiled kernels{context}"
 
         # Asking the identical question again must cost nothing.
         assert count("requery", "MISS") == 0, f"{pass_name}: repeated query missed{context}"
-        assert count("requery", "BUILD_GRAPH") == 0, f"{pass_name}: repeated query rebuilt{context}"
+        assert (
+            count("requery", "CREATE_GRAPH") == 0
+        ), f"{pass_name}: repeated query rebuilt{context}"
         assert count("requery", "HIT") >= 1, f"{pass_name}: repeated query never looked{context}"
 
         # The execution must find the graph the query left behind -- a miss here is the
@@ -389,7 +392,7 @@ def test_fused_attn_graph_cache():
             count("exec", "MISS") == 0
         ), f"{pass_name}: execution missed the query's graph{context}"
         assert (
-            count("exec", "BUILD_GRAPH") == 0
+            count("exec", "CREATE_GRAPH") == 0
         ), f"{pass_name}: execution rebuilt the graph{context}"
         assert count("exec", "EXEC") >= 1, f"{pass_name}: fused attention never ran{context}"
         assert count("exec", "BUILD_PLANS") == 1, f"{pass_name}: expected one plan build{context}"
@@ -398,7 +401,7 @@ def test_fused_attn_graph_cache():
         # a different scale has to reuse everything, down to the compiled kernels.
         assert count("rescale", "MISS") == 0, f"{pass_name}: attn_scale changed the key{context}"
         assert (
-            count("rescale", "BUILD_GRAPH") == 0
+            count("rescale", "CREATE_GRAPH") == 0
         ), f"{pass_name}: attn_scale forced a build{context}"
         assert count("rescale", "BUILD_PLANS") == 0, f"{pass_name}: attn_scale recompiled{context}"
         assert count("rescale", "EXEC") >= 1, f"{pass_name}: rescaled run did not execute{context}"
@@ -406,7 +409,7 @@ def test_fused_attn_graph_cache():
         # max_seqlen is a dimension the graph is built at, so it must miss -- once, for one
         # new graph, rather than invalidating what is already cached.
         assert count("reshape", "MISS") == 1, f"{pass_name}: expected one miss{context}"
-        assert count("reshape", "BUILD_GRAPH") == 1, f"{pass_name}: expected one build{context}"
+        assert count("reshape", "CREATE_GRAPH") == 1, f"{pass_name}: expected one build{context}"
         assert (
             len(miss_keys["reshape"][pass_name]) == 1
         ), f"{pass_name}: more than one new cache key{context}"

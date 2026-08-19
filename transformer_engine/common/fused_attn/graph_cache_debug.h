@@ -7,75 +7,39 @@
 // ============================================================================
 // Fused-attention graph cache diagnostics.
 //
-// Enable at runtime with NVTE_FUSED_ATTN_CACHE_DEBUG. Two verbosity levels:
-//   =1 (events) : low volume. Cache event counters, a BUILD_GRAPH and a BUILD_PLANS line
-//                 per build, an UNSUPPORTED line per configuration cuDNN refuses, and the
-//                 end-of-run SUMMARY (per backend and per thread, plus a row across the
-//                 backends when a run used more than one) with stage timings. Each of these
-//                 fires once per distinct cache key, which is what keeps the volume low, and
-//                 is enough to diagnose redundant rebuilds and profile build cost.
-//   =2 (trace)  : high volume. Additionally emits a per-lookup HIT/MISS/UNSUPPORTED line
-//                 with the full shorthand cache key and a per-execution EXEC line. Use only
-//                 when you need to see *which* shapes are hitting/missing -- these fire on
-//                 every cache lookup and execution, so at suite scale they add I/O and
-//                 serialize threads on the stderr lock. No timed region writes to stderr, so
-//                 the stage timings stay sound, but they are measured under more contention
-//                 than at level 1 and read a little high.
+// Enable with NVTE_FUSED_ATTN_CACHE_DEBUG=<level>[:<ranks>]. The output format, how
+// to read it and the rank suffix are documented for users in docs/envvars.rst; what
+// follows is what maintaining this file needs.
 //
-// Every line names the build site behind it, "f16" or "fp8" followed by the pass, and the
-// counters it carries belong to that backend alone -- the two keep separate columns, so a
-// process that drives both can still say which of them built what. Every event name is also
-// the counter column it increments, so a line and the totals beside it read with one
-// vocabulary. UNSUPPORTED names both a level-1 event and a level-2 lookup outcome, which are
-// the two halves of one story: the event records the refusal cuDNN just handed back, and the
-// lookup line is a later query answered from that stored refusal instead of by building the
-// graph again. Tell them apart by the line shape -- the event line carries counters, the
-// lookup line carries the cache key.
+//   level 1 (events) : one line per event that happens once per distinct cache key
+//                      (CREATE_GRAPH, BUILD_PLANS), plus the exit summary block and
+//                      its stage timings. Low volume by construction.
+//   level 2 (trace)  : adds a line per cache lookup (HIT/MISS, with the normalized
+//                      key) and per execution (EXEC). High volume, and it serializes
+//                      threads on the stderr lock, which the stage timings are then
+//                      measured under -- no timed region writes to stderr, so they
+//                      stay sound, but they read a little high.
 //
-// An optional ":<ranks>" suffix picks which processes emit, defaulting to rank 0
-// so that output does not scale with the world size: "1:all" for every rank,
-// "2:0,3" for a specific set. See `rank_selected` for when overriding pays off.
+// Counters are kept per build site -- f16/fp8 crossed with fwd/bwd -- since one
+// process can drive both backends, and every event name is also the counter column
+// it increments. What the columns mean, the identities they satisfy and the ratios
+// worth reading are with the counter definitions below.
 //
-// Level 1 on one training step of a supported configuration. Every line begins with
-// "[FUSED-ATTN-CACHE] rank=<n> | ", or with just "[FUSED-ATTN-CACHE] " when the launcher
-// exports no rank (see `rank_tag`), elided below, and carries the running totals, of which
-// only the pass being reported is shown (the counters are printed right-aligned in a fixed
-// width, and are abbreviated here):
+// One level-1 training step, line prefixes and trailing columns elided:
 //
-//   f16 fwd BUILD_GRAPH | tid=0   dev=0   | fwd hit_supported=0, miss=1, build_graph=1, ...
-//   f16 bwd BUILD_GRAPH | tid=0   dev=0   | fwd ... | bwd hit_supported=0, miss=1, ...
-//   f16 fwd BUILD_PLANS | tid=0   dev=0   | fwd hit_supported=1, miss=1, build_plans=1, ...
+//   tid=0   dev=0   | f16 fwd CREATE_GRAPH | hit=0, miss=1, create_graph=1, ...
 //   ===== summary begin =====
-//   f16 SUMMARY-TID     | tid=0   dev=0   | fwd hit_supported=5, miss=1, build_graph=1, ...
-//   f16 SUMMARY-TID     | tid=1   dev=0   | fwd ... | bwd hit_supported=4, build_plans=1, ...
-//   f16 SUMMARY         | tid=all dev=all | fwd hit_supported=5, miss=1, build_graph=1, ...
-//   f16 fwd check_support          | calls=1 | time=    0.031 ms/call
+//   tid=0   dev=0   | f16 fwd | hit=5, miss=1, create_graph=1, ...
+//   tid=1   dev=0   | f16 bwd | hit=4, build_plans=1, exec=1, ...
+//   tid=all dev=all | f16 fwd | hit=5, miss=1, create_graph=1, ...
 //   f16 fwd build_plans            | calls=1 | time=  262.104 ms/call
 //   ===== summary end =====
 //
-// The two thread rows are what a PyTorch step really looks like: the forward, and the support
-// probe for the backward, run on the main thread, while the backward itself runs on the
-// autograd thread and finds the graph that probe left behind. Neither row satisfies
-// `build_graph >= build_plans` by itself -- tid=1 compiled the plans of a graph tid=0 built --
-// so read the identities off the totals rows rather than the per-thread ones.
-//
-// The device column matters as soon as one process drives more than one -- device_id is part of
-// the cache key, so the same shape on two devices is two entries, and a build count that looks
-// doubled is explained by reading which device each BUILD_GRAPH came from.
-//
-// A support query misses and builds, and every later lookup of that key is a hit_supported --
-// including the workspace-sizing call that precedes each execution -- so the hit columns climb
-// faster than exec. `build_graph=1, build_plans=1` says that graph went on to be executed;
-// `build_graph` above `build_plans` counts graphs built for a query and never run. A refused
-// configuration reads `miss=1, unsupported=1, build_graph=0` instead, and stays at one refusal
-// however many times it is queried: the repeat queries land in hit_unsupported.
-//
-// Level 2 adds one line per lookup and per execution, with the key that decided it:
-//
-//   f16 fwd MISS        | tid=0 dev=0 | train=1 det=0 cg=0 ... b=2 h=16 sq=512 skv=512 ...
-//   f16 fwd HIT         | tid=0 dev=0 | train=1 det=0 cg=0 ... b=2 h=16 sq=512 skv=512 ...
-//
-// where diffing two MISS lines names the fields that cost the extra build.
+// Rows for a site a thread never reached are left out rather than zeroed, which is
+// why tid=1 has a backward row and no forward one: in a PyTorch step the forward and
+// the backward's support probe run on the main thread, and the backward itself on the
+// autograd thread, which finds the graph that probe left behind. That split is why
+// the build identities hold on the totals rows and not on any single thread's.
 // ============================================================================
 
 #ifndef TRANSFORMER_ENGINE_COMMON_FUSED_ATTN_GRAPH_CACHE_DEBUG_H_
@@ -128,15 +92,11 @@ inline int launcher_rank() {
   return rank;
 }
 
-// Whether this process emits diagnostics. Every rank writes to the same stderr,
-// so emitting from all of them multiplies the volume by the world size -- and
-// under data/tensor parallelism the ranks are running identical shapes, so the
-// copies say the same thing. Hence rank 0 only by default.
-//
-// Context parallelism is the case worth overriding for: the ranks run different
-// subsets of the per-step regimes (under p2p, rank 0 never sees the lower-triangle
-// config that the last rank does), so their build counts genuinely differ.
-// Select with the ":<ranks>" suffix, e.g. "1:all" or "2:0,3".
+// Whether this process emits diagnostics. Every rank writes to the same stderr, and under
+// data/tensor parallelism they run identical shapes, so emitting from all of them multiplies the
+// volume by the world size to say the same thing. Hence rank 0 only by default, overridable with
+// the ":<ranks>" suffix. Context parallelism is the case worth overriding for: the ranks run
+// different subsets of the per-step regimes, so their build counts genuinely differ.
 inline bool rank_selected() {
   static const bool selected = [] {
     const int rank = launcher_rank();
@@ -159,13 +119,11 @@ inline bool rank_selected() {
   return selected;
 }
 
-// Diagnostics are on at level >= 1, and only for the selected ranks. Unselected
-// ranks skip the counters too, so they pay nothing beyond this check.
-//
-// Cached in its own flag rather than recomputed from the two above, so that this -- the check
-// every call site makes, on the per-lookup path included -- reads one initialized-once static
-// instead of two. Both inputs are fixed for the life of the process, so there is nothing to
-// recompute; `rank_selected` is still only reached when the level says diagnostics are on.
+// Diagnostics are on at level >= 1, and only for the selected ranks. Unselected ranks skip the
+// counters too, so they pay nothing beyond this check. Cached in its own flag rather than
+// recomputed from the two above, so that the check every call site makes -- the per-lookup path
+// included -- reads one initialized-once static instead of two. Both inputs are fixed for the
+// life of the process.
 inline bool enabled() {
   static const bool on = debug_level() >= 1 && rank_selected();
   return on;
@@ -174,11 +132,10 @@ inline bool enabled() {
 // Per-lookup / per-exec trace lines are gated behind level >= 2.
 inline bool trace_enabled() { return debug_level() >= 2; }
 
-// Names the emitting rank. Distributed runs put one process per rank on the same stderr, so
-// without this the ranks' lines would be indistinguishable. A run whose launcher exports no
-// rank is left untagged rather than falling back to a pid: an OS-level identifier is only
-// useful for correlating against a profiler or another process, which these logs are not for.
-// The tag carries its own trailing separator, so the untagged case prints no empty column.
+// Names the emitting rank, without which the ranks sharing one stderr would be indistinguishable.
+// A run whose launcher exports no rank is left untagged rather than falling back to a pid, an
+// OS-level identifier only being useful for correlating against a profiler. The tag carries its
+// own trailing separator, so the untagged case prints no empty column.
 inline const std::string &rank_tag() {
   static const std::string *tag = [] {
     const int rank = launcher_rank();
@@ -188,10 +145,9 @@ inline const std::string &rank_tag() {
   return *tag;
 }
 
-// More readable, shorter thread IDs (0, 1, 2, ...). These are assignment order, not identity:
-// tid=0 is whichever thread touched this cache first, and the number means nothing outside this
-// process. It exists to attribute the per-thread SUMMARY rows, not to be matched against
-// anything external.
+// Short thread IDs (0, 1, 2, ...) in assignment order, not identity: tid=0 is whichever thread
+// touched this cache first, and the number means nothing outside this process. It attributes the
+// per-thread summary rows and is not meant to be matched against anything external.
 inline unsigned thread_seq_id() {
   static std::atomic<unsigned> next{0};
   static thread_local unsigned id = next.fetch_add(1, std::memory_order_relaxed);
@@ -203,19 +159,17 @@ inline unsigned thread_seq_id() {
 inline void register_summary_once();
 
 // ============================================================================
-// The build site an event came from: f16 or fp8, forward or backward. Every recorder names
-// both halves, because the counters are kept per site rather than per pass. One process can
-// drive both backends, and adding f16's builds into the same column as fp8's would leave such
-// a run unable to say which of them paid for what.
+// The build site an event came from: f16 or fp8, forward or backward. Every recorder names both
+// halves, since the counters are per site -- adding f16's builds into fp8's column would leave a
+// run that drove both unable to say which paid for what. A pair of enums rather than the
+// "fwd"/"bwd" strings this used to take also turns a mistake at a call site into a compile error.
 //
-// Backend::F16 is the arbitrary-seqlen f16 backend; the max512 one keeps no graph cache and so
-// has nothing to report here. Naming the site with a pair of enums rather than with the
-// "fwd"/"bwd" strings this used to take is also what turns a mistake at a call site into a
-// compile error instead of an event silently counted against the wrong column.
+// Backend::F16 is the arbitrary-seqlen backend; the max512 one keeps no graph cache. Pass is
+// fused_attn::Pass, from config_and_params.h, so that a recorder and the key it prints share one
+// notion of direction.
 // ============================================================================
 
 enum class Backend { F16, FP8 };
-enum class Pass { Fwd, Bwd };
 
 inline constexpr const char *backend_name(Backend b) { return b == Backend::F16 ? "f16" : "fp8"; }
 inline constexpr const char *pass_name(Pass p) { return p == Pass::Fwd ? "fwd" : "bwd"; }
@@ -230,85 +184,67 @@ inline constexpr size_t site_index(Backend b, Pass p) {
 // ============================================================================
 // Cache event counters, one block per build site. Each name is both the event tag on the line
 // that records it and the column carrying its running total:
-//   - build_graph: a graph built and cached in response to a cache miss. Built only as far
-//                  as check_support(), which is all a support probe needs.
-//   - build_plans: a cached graph finished with build_plans(), the kernel compilation that
-//                  build_graph deferred. At most one per build_graph, and paid by the first
-//                  execution of that graph rather than by the probe that built it.
-//   - unsupported: a configuration cuDNN refused, now remembered as a negative cache entry.
-//                  The other way a miss can end. Counted once per refusal recorded, which is
-//                  normally once per distinct refused key; later queries for it are
-//                  hit_unsupported.
-//   - exec: a graph execution call with valid runtime tensors
-//   - hit_supported: a lookup answered from the graph map. May not lead to an exec: it can be
-//                  a backend availability check, or the workspace-sizing call of
-//                  nvte_fused_attn_fwd/bwd, which has no runtime tensors to run with.
-//   - hit_unsupported: a lookup answered from the refusal map -- a key cuDNN has already
-//                  refused, replayed instead of rebuilt. Both hit columns are named for the
-//                  map that answered them, and `unsupported` above counts the refusals
-//                  themselves rather than the queries that replay them.
-//   - miss: a lookup neither map answered; triggers a graph build
+//   - create_graph: a graph created and cached for a miss, only as far as check_support().
+//   - build_plans: a cached graph finished with graph.build_plans(), the kernel compilation that
+//     create_graph deferred. At most one per create_graph, paid by that graph's first execution
+//     rather than by the probe that built it.
+//   - exec: a graph execution call with valid runtime tensors.
+//   - hit: a lookup answered from the cache. Need not lead to an exec -- it can be a backend
+//     availability check, or the workspace-sizing call of nvte_fused_attn_fwd/bwd, which has no
+//     runtime tensors to run with.
+//   - miss: a lookup the cache did not answer; triggers a graph build.
 //
-// Identities. These hold by construction, so a violation is a bug in the cache or in the
-// counting rather than something the workload did:
-//   - hit_supported + hit_unsupported + miss = every lookup, one recorded per entry into
-//     build_or_get_cached_graph, which makes it the denominator for everything below.
-//   - miss = build_graph + unsupported. A shortfall in either means a build ended in
-//     something cuDNN did not state as a verdict on the graph.
-//   - build_graph >= build_plans, the gap being graphs a probe built that nothing has run.
-//     Eviction grows both rather than closing it: a rebuilt key gets a fresh once_flag.
-//   - exec > 0 implies build_plans > 0, every site calling ensure_plans_built ahead of the
-//     workspace-sizing return, which is itself ahead of record_exec. The same ordering read
-//     backwards: a workspace-sizing call pays build_plans and never exec.
-//   - hit_unsupported > 0 implies unsupported > 0, a refusal being replayable only once some
-//     earlier call has recorded it.
-//   - The two build identities are properties of the totals rows, not of one SUMMARY-TID row:
-//     the thread that builds a graph need not be the thread that compiles its plans, and a
-//     PyTorch step splits exactly that way across the autograd thread.
-//   - A backend's SUMMARY-TID rows sum column by column to its SUMMARY row, and the
-//     per-backend rows to the all-backends one.
-//   - A lost build race disturbs none of the above: the loser records its own miss and its own
-//     build_graph, so both sides of miss = build_graph + unsupported move together, and the
-//     entry's once_flag still permits only one build_plans. What a race does break is reading
-//     build_graph as the number of graphs cached, two builds being able to stand behind one
-//     entry; the same goes for unsupported and the number of keys cuDNN has refused.
-//   - In the stage timing rows, calls only fall along the sequence validate >=
-//     build_operation_graph >= create_execution_plans >= check_support, each drop being the
-//     builds that ended at the stage before -- which localizes where cuDNN refuses, rather
-//     than only how long refusing took.
-//   - The build_plans timing row can show more calls than the build_plans column counts, the
-//     difference being plan builds that threw: the timer records while unwinding, the counter
-//     only after the call returns.
+// Identities, holding by construction, so a violation is a bug in the cache or in the counting
+// rather than something the workload did:
+//   - hit + miss = every lookup, one per entry into lookup_or_cache_graph, which makes it the
+//     denominator for everything below.
+//   - miss >= create_graph, the difference being builds that threw, whether cuDNN refused the graph
+//     or could not reach a verdict. Nothing is cached for those, so this is the only place a
+//     refusal shows up; its reason goes to the framework instead.
+//   - create_graph >= build_plans, the gap being graphs a probe built that nothing has run.
+//   - exec > 0 implies build_plans > 0, every site calling build_plans() ahead of the
+//     workspace-sizing return, itself ahead of record_exec. Read backwards: a workspace-sizing
+//     call pays build_plans and never exec.
+//   - Both build identities belong to the totals rows, not to one thread's: the thread that builds
+//     a graph need not compile its plans, and a PyTorch step splits exactly that way.
+//   - Per-thread rows sum column by column to "tid=all dev=all", and the per-backend rows of one
+//     pass to that pass's all-backends row.
+//   - A lost build race disturbs none of the above -- the loser records its own miss and its own
+//     create_graph, and the once_flag still permits one build_plans -- but it does break reading
+//     create_graph as the number of graphs cached.
+//   - Stage timing calls fall along validate >= build_operation_graph >= create_execution_plans >=
+//     check_support, each drop being the builds that ended at the stage before, which localizes
+//     where cuDNN refuses rather than only how long refusing took.
+//   - The build_plans timing row can show more calls than the build_plans column, the difference
+//     being plan builds that threw: the timer records while unwinding, the counter only on return.
 //
-// Signatures. Workload-dependent, so these are read rather than asserted:
-//   - After warmup only hit_supported and exec should move. A build_graph late in a run means
-//     something varies per step that need not.
-//   - Several hit_supported per exec is normal, since backend selection, workspace sizing and
-//     execution all look the same key up; what matters is that the ratio stays flat.
-//   - exec / build_graph is the amortization figure, how many executions each built graph
-//     served, and a lower bound at that, since a race or an eviction adds a build without
-//     adding a graph. Single digits after a long run means the cache is not earning its keep.
-//   - hit_unsupported climbing while unsupported stays at one is the negative cache doing its
-//     job. It also says this site never runs fused, which makes it the column to reach for
+// Signatures, workload-dependent, so read rather than asserted:
+//   - After warmup only hit and exec should move; a late create_graph means something varies per
+//     step that need not.
+//   - Several hits per exec is normal, since selection, workspace sizing and execution all look
+//     the same key up; what matters is that the ratio stays flat.
+//   - exec / create_graph is the amortization figure, and a lower bound at that, a lost race adding
+//     a build without a graph. Single digits after a long run means the cache is not earning its
+//     keep.
+//   - miss climbing while create_graph stays put is a configuration cuDNN keeps refusing, each query
+//     paying a discarded build. It also says this site never runs fused, making it the pair to read
 //     when attention is slower than expected and nothing raised an error.
-//   - build_graph or unsupported past kCacheCapacity suggests that map has evicted. A hint
-//     rather than an identity: a lost build race counts twice against one key.
-//   - Two MISS lines carrying the same key, with build_graph above the number of distinct keys,
-//     is that lost race. It is wasted work rather than a bug, and worth chasing only if it
-//     repeats, which would mean threads are arriving on cold keys together every step.
-//   - A level-2 trace is the set of lookups that happened, not the order they happened in: the
-//     line is written after the cache lock is dropped, so two threads that raced for it can
-//     print in the opposite order.
+//   - miss climbing without settling means the key space is not closing, and since the cache is
+//     unbounded, every distinct key is held for the life of the process.
+//   - A build count that looks doubled on a multi-device process usually is not: device_id is part
+//     of the key, so the same shape on two devices is two entries. Read the dev column.
+//   - Two MISS lines with the same key, create_graph above the number of distinct keys, is that lost
+//     race: wasted work rather than a bug, worth chasing only if it repeats.
+//   - A level-2 trace is the set of lookups, not their order, the line being written after the
+//     cache lock is dropped.
 // ============================================================================
 
 struct EventCounters {
-  std::atomic<uint64_t> build_graph{0};
+  std::atomic<uint64_t> create_graph{0};
   std::atomic<uint64_t> build_plans{0};
   std::atomic<uint64_t> exec{0};
-  std::atomic<uint64_t> hit_supported{0};
-  std::atomic<uint64_t> hit_unsupported{0};
+  std::atomic<uint64_t> hit{0};
   std::atomic<uint64_t> miss{0};
-  std::atomic<uint64_t> unsupported{0};
 };
 
 inline EventCounters &counters(Backend b, Pass p) {
@@ -316,75 +252,59 @@ inline EventCounters &counters(Backend b, Pass p) {
   return table[site_index(b, p)];
 }
 
-// One counter block read out into plain values. The summary sums blocks to get its per-backend
-// and all-backends rows, atomics cannot be summed, and this is where the reading happens; it
-// also keeps the loads out of the formatting. The columns are not read as one indivisible
-// operation, which nothing here wants: the summary runs at exit, after the threads that wrote
-// them are done, and an event line is a snapshot of a moving count by nature.
+// One counter block read out into plain values, so the summary can sum blocks for its per-backend
+// and all-backends rows. The columns are not read as one indivisible operation, which nothing here
+// wants: the summary runs at exit, after the writing threads are done, and an event line is a
+// snapshot of a moving count by nature.
 struct CounterSnapshot {
-  uint64_t build_graph = 0;
+  uint64_t create_graph = 0;
   uint64_t build_plans = 0;
   uint64_t exec = 0;
-  uint64_t hit_supported = 0;
-  uint64_t hit_unsupported = 0;
+  uint64_t hit = 0;
   uint64_t miss = 0;
-  uint64_t unsupported = 0;
 
   CounterSnapshot &operator+=(const CounterSnapshot &other) {
-    build_graph += other.build_graph;
+    create_graph += other.create_graph;
     build_plans += other.build_plans;
     exec += other.exec;
-    hit_supported += other.hit_supported;
-    hit_unsupported += other.hit_unsupported;
+    hit += other.hit;
     miss += other.miss;
-    unsupported += other.unsupported;
     return *this;
   }
 
   // Whether this block saw nothing at all, which is what lets the summary leave out the rows
   // for a backend the run never used rather than printing zeros for it.
-  bool empty() const {
-    return (build_graph | build_plans | exec | hit_supported | hit_unsupported | miss |
-            unsupported) == 0;
-  }
+  bool empty() const { return (create_graph | build_plans | exec | hit | miss) == 0; }
 };
 
 inline CounterSnapshot snapshot(const EventCounters &c) {
   CounterSnapshot s;
-  s.build_graph = c.build_graph.load(std::memory_order_relaxed);
+  s.create_graph = c.create_graph.load(std::memory_order_relaxed);
   s.build_plans = c.build_plans.load(std::memory_order_relaxed);
   s.exec = c.exec.load(std::memory_order_relaxed);
-  s.hit_supported = c.hit_supported.load(std::memory_order_relaxed);
-  s.hit_unsupported = c.hit_unsupported.load(std::memory_order_relaxed);
+  s.hit = c.hit.load(std::memory_order_relaxed);
   s.miss = c.miss.load(std::memory_order_relaxed);
-  s.unsupported = c.unsupported.load(std::memory_order_relaxed);
   return s;
 }
 
-// Per-thread counters, one block per build site, so the summary can break down every column by
-// thread and backend. In the single-process context-parallel case each device is driven by its
-// own thread, so this reveals which thread built and executed what; under PyTorch it also
-// separates the main thread from the autograd thread that runs the backward.
+// Per-thread counters, one block per build site, so the summary can break every column down by
+// thread and backend: in the single-process context-parallel case each device is driven by its own
+// thread, and under PyTorch this separates the main thread from the autograd one.
 //
-// `device` is the device this thread last drove, restamped on every event. The event lines print
-// the live current device, which is exact; this exists for the SUMMARY-TID rows, which are
-// written at exit by whichever thread is exiting and so cannot ask the recorded thread what it
-// was working on. A thread that stays on one device -- which is the arrangement everything here
-// is built around, device_id being part of the cache key -- makes the two the same answer.
+// `device` is the device this thread last drove, restamped on every event. Event lines print the
+// live current device instead, which is exact; this exists for the per-thread summary rows, written
+// at exit by whichever thread is exiting, which cannot ask the recorded thread what it was doing.
 struct ThreadCounters {
   unsigned tid = 0;
   std::atomic<int> device{-1};
   std::array<EventCounters, kSiteCount> sites;
 };
 
-// The registry and its mutex are heap-allocated and deliberately never freed.
-// Function-local static destructors and atexit handlers run as a single sequence,
-// in reverse order of construction/registration. This registry is built lazily, so
-// it can be constructed *after* the summary handler is registered -- in which case
-// it would be destroyed *before* that handler runs, leaving the handler to lock a
-// destroyed mutex and walk a destroyed vector. Leaking removes the ordering
-// question rather than reasoning about it, and the cost is bounded: one mutex and
-// one vector for the process, reclaimed by the OS at exit anyway.
+// The registry and its mutex are heap-allocated and deliberately never freed. Static destructors
+// and atexit handlers run as one sequence in reverse order of construction, and this registry is
+// built lazily, so it can be constructed *after* the summary handler is registered -- and would
+// then be destroyed *before* it runs, leaving the handler to lock a destroyed mutex and walk a
+// destroyed vector. Leaking removes the ordering question, at a cost of one mutex and one vector.
 inline std::mutex &thread_registry_mutex() {
   static std::mutex *m = new std::mutex();
   return *m;
@@ -394,17 +314,15 @@ inline std::vector<ThreadCounters *> &thread_registry() {
   return *v;
 }
 
-// This thread's counter block, leaked for a related but distinct reason: a worker
-// thread can exit long before the process does, while the registry keeps a pointer
-// to its block for the end-of-run summary. Tying the block's lifetime to the
-// thread would leave that pointer dangling. One small struct per thread.
+// This thread's counter block, leaked for a related but distinct reason: a worker thread can exit
+// long before the process does, while the registry holds a pointer to its block for the exit
+// summary. Tying the block's lifetime to the thread would leave that pointer dangling.
 inline ThreadCounters &thread_counters() {
   static thread_local ThreadCounters *tc = [] {
     auto *p = new ThreadCounters();
     p->tid = thread_seq_id();
-    // Stamped here as well as on every event, so that a thread which only ever hits the cache --
-    // and so never reaches print_counters() at level 1 -- still names a device in the summary
-    // rather than reporting the -1 it was constructed with.
+    // Stamped here as well as on every event, so a thread that only ever hits the cache -- never
+    // reaching print_counters() at level 1 -- still names a device rather than the -1 it began at.
     p->device.store(cuda::current_device(), std::memory_order_relaxed);
     {
       std::lock_guard<std::mutex> lock(thread_registry_mutex());
@@ -419,89 +337,75 @@ inline EventCounters &thread_counters(Backend b, Pass p) {
   return thread_counters().sites[site_index(b, p)];
 }
 
-// Format one pair of counter blocks -- the two passes of a single backend -- as one line.
-// `label` is the event or summary tag, and names the backend whenever the line speaks for one.
-// `tid_field` is the whole thread column, e.g. "tid=3"; the totals rows pass "tid=all" so that
-// they cannot be misread as thread 0's row. `dev_field` is the device column and works the same
-// way, "dev=all" on a totals row -- those counters are summed across whatever devices the
-// process drove, so naming one of them would be a lie.
+// Format one counter block -- one pass of one backend -- as one line. One pass rather than both
+// because a line carrying the forward and backward columns together ran past 300 characters and
+// wrapped in most terminals; the two passes are adjacent rows instead.
 //
-// What the columns mean, the identities they can be asserted against and the ratios worth
-// reading are all with the counter definitions above.
-inline std::string format_counter_line(const char *label, const char *tid_field,
-                                       const char *dev_field, const CounterSnapshot &f,
-                                       const CounterSnapshot &b) {
-  char buf[768];
+// `tid_field` and `dev_field` are whole columns, e.g. "tid=3" and "dev=0". The totals rows pass
+// "tid=all" and "dev=all", since those counters are summed across whatever the process drove and
+// naming one thread or device would be a lie.
+//
+// `label` is the build site, "f16 fwd", plus the event name on an event line, and arrives padded to
+// the width its own kind of line uses: 20 characters for an event line, 7 for a summary row.
+// Deliberately not one width for both -- sharing it would put twelve blank columns on every summary
+// row to align the scattered event lines against a block that is delimited and read on its own.
+//
+// The thread and device come first, so every line, level-2 trace lines included, shares one prefix
+// to read down. What the columns mean and the identities they satisfy are with the definitions
+// above.
+inline std::string format_counter_line(const char *tid_field, const char *dev_field,
+                                       const char *label, const CounterSnapshot &c) {
+  char buf[512];
   std::snprintf(buf, sizeof(buf),
-                "[FUSED-ATTN-CACHE] %s%-19s | %-7s %-7s | fwd hit_supported=%4" PRIu64
-                ", hit_unsupported=%4" PRIu64 ", miss=%4" PRIu64 ", build_graph=%4" PRIu64
-                ", unsupported=%4" PRIu64 ", build_plans=%4" PRIu64 ", exec=%4" PRIu64
-                " | bwd hit_supported=%4" PRIu64 ", hit_unsupported=%4" PRIu64 ", miss=%4" PRIu64
-                ", build_graph=%4" PRIu64 ", unsupported=%4" PRIu64 ", build_plans=%4" PRIu64
-                ", exec=%4" PRIu64 "\n",
-                rank_tag().c_str(), label, tid_field, dev_field, f.hit_supported, f.hit_unsupported,
-                f.miss, f.build_graph, f.unsupported, f.build_plans, f.exec, b.hit_supported,
-                b.hit_unsupported, b.miss, b.build_graph, b.unsupported, b.build_plans, b.exec);
+                "[FUSED-ATTN-CACHE] %s%-7s %-7s | %s | hit=%4" PRIu64 ", miss=%4" PRIu64
+                ", create_graph=%4" PRIu64 ", build_plans=%4" PRIu64 ", exec=%4" PRIu64 "\n",
+                rank_tag().c_str(), tid_field, dev_field, label, c.hit, c.miss, c.create_graph,
+                c.build_plans, c.exec);
   return std::string(buf);
 }
 
-inline void print_counter_block(const char *label, const char *tid_field, const char *dev_field,
-                                const CounterSnapshot &f, const CounterSnapshot &b) {
-  const std::string line = format_counter_line(label, tid_field, dev_field, f, b);
-  std::fputs(line.c_str(), stderr);
-  std::fflush(stderr);
-}
-
-// One event line, from the thread the event happened on, carrying the running totals of the
-// backend that raised it. The device is read live rather than remembered, so it is the device
-// this event was actually issued against, and is recorded on the thread's block on the way past
-// for the benefit of the exit summary.
+// One event line, from the thread the event happened on, carrying the running totals of the build
+// site that raised it. The device is read live rather than remembered, so it is the device this
+// event was actually issued against, and is recorded on the thread's block on the way past for
+// the benefit of the exit summary.
 inline void print_counters(Backend b, Pass p, const char *event) {
   const int device = cuda::current_device();
   thread_counters().device.store(device, std::memory_order_relaxed);
   char label[32];
   char tid_field[16];
   char dev_field[16];
-  std::snprintf(label, sizeof(label), "%s %s %s", backend_name(b), pass_name(p), event);
+  // The event name is padded to the longest of them, so that the counters of one event line fall
+  // where the next one's do.
+  std::snprintf(label, sizeof(label), "%s %s %-12s", backend_name(b), pass_name(p), event);
   std::snprintf(tid_field, sizeof(tid_field), "tid=%u", thread_seq_id());
   std::snprintf(dev_field, sizeof(dev_field), "dev=%d", device);
-  print_counter_block(label, tid_field, dev_field, snapshot(counters(b, Pass::Fwd)),
-                      snapshot(counters(b, Pass::Bwd)));
+  const std::string line =
+      format_counter_line(tid_field, dev_field, label, snapshot(counters(b, p)));
+  std::fputs(line.c_str(), stderr);
+  std::fflush(stderr);
 }
 
-// A graph built through check_support() and cached. Call after the build, from the miss
-// path that performed it.
-inline void record_graph_built(Backend b, Pass p) {
+// A graph created, taken through check_support() and cached. Call after that, from the miss path
+// that did it -- after, because a graph cuDNN refuses throws instead of arriving here, which is
+// what makes miss - create_graph the count of refused builds.
+inline void record_graph_created(Backend b, Pass p) {
   if (!enabled()) return;
   register_summary_once();
-  counters(b, p).build_graph.fetch_add(1, std::memory_order_relaxed);
-  thread_counters(b, p).build_graph.fetch_add(1, std::memory_order_relaxed);
-  print_counters(b, p, "BUILD_GRAPH");
+  counters(b, p).create_graph.fetch_add(1, std::memory_order_relaxed);
+  thread_counters(b, p).create_graph.fetch_add(1, std::memory_order_relaxed);
+  print_counters(b, p, "CREATE_GRAPH");
 }
 
-// The build_plans() a build_graph deferred, now completed. Call from inside the std::call_once
-// that runs it, after the call returns rather than before: build_plans() throws without
-// setting the once_flag, leaving a later execution to retry it, so counting on the way out
-// keeps this a count of graphs that reached a runnable state. Like build_graph this fires once
-// per distinct cache key, so it stays on the level-1 path.
+// The graph.build_plans() a create_graph deferred, now completed. Call from inside the
+// std::call_once that runs it, and after the call returns rather than before: it throws without
+// setting the once_flag, leaving a later execution to retry, so counting on the way out keeps this
+// a count of graphs that reached a runnable state.
 inline void record_plans_built(Backend b, Pass p) {
   if (!enabled()) return;
   register_summary_once();
   counters(b, p).build_plans.fetch_add(1, std::memory_order_relaxed);
   thread_counters(b, p).build_plans.fetch_add(1, std::memory_order_relaxed);
   print_counters(b, p, "BUILD_PLANS");
-}
-
-// A build that cuDNN refused, now remembered as a negative cache entry. Call from the miss path
-// that attempted it, in place of record_graph_built(): a refusal and a build are the two ways a
-// miss can end, and counting both keeps `miss = build_graph + unsupported` true. Fires once per
-// refused key -- later queries for it land in hit_unsupported -- so it stays on the level-1 path.
-inline void record_unsupported(Backend b, Pass p) {
-  if (!enabled()) return;
-  register_summary_once();
-  counters(b, p).unsupported.fetch_add(1, std::memory_order_relaxed);
-  thread_counters(b, p).unsupported.fetch_add(1, std::memory_order_relaxed);
-  print_counters(b, p, "UNSUPPORTED");
 }
 
 inline void record_exec(Backend b, Pass p) {
@@ -514,19 +418,15 @@ inline void record_exec(Backend b, Pass p) {
   print_counters(b, p, "EXEC");
 }
 
-// What a lookup found. Unsupported is the negative-cache case: a key whose graph cuDNN has
-// already refused, so the answer is a remembered refusal rather than a graph.
-enum class LookupResult { Miss, Hit, Unsupported };
+// What a lookup found: an entry, or nothing.
+enum class LookupResult { Miss, Hit };
 
-// The column a lookup lands in, which is the cache map that answered it. Written as a switch
-// with no default so that adding an outcome fails to compile here rather than being silently
-// counted as a miss.
+// The column a lookup lands in. Written as a switch with no default so that adding an outcome
+// fails to compile here rather than being silently counted as a miss.
 inline std::atomic<uint64_t> &lookup_column(EventCounters &c, LookupResult result) {
   switch (result) {
     case LookupResult::Hit:
-      return c.hit_supported;
-    case LookupResult::Unsupported:
-      return c.hit_unsupported;
+      return c.hit;
     case LookupResult::Miss:
       break;
   }
@@ -537,36 +437,24 @@ inline const char *lookup_name(LookupResult result) {
   switch (result) {
     case LookupResult::Hit:
       return "HIT";
-    case LookupResult::Unsupported:
-      return "UNSUPPORTED";
     case LookupResult::Miss:
       break;
   }
   return "MISS";
 }
 
-// `key` is the normalized cache key -- make_cache_key()'s output, the exact value the
-// lookup was performed with -- not the execution config it was derived from. That is
-// deliberate: HIT/MISS is decided by comparing keys, so a trace of anything else cannot
-// explain its own outcome. Logging the pre-normalization config would show pairs of
-// identical lines with opposite outcomes (normalization having collapsed a difference,
-// e.g. bottom_right_diagonal or the THD token counts) and pairs of differing lines that
-// both hit (the difference being in a field the key drops, e.g. attn_scale). Diffing two
-// MISS lines here instead names exactly the fields responsible for the extra build.
+// `key` is the normalized cache key -- make_cache_key(pass)'s output, the exact value looked up --
+// not the execution config it came from. HIT/MISS is decided by comparing keys, so a trace of
+// anything else cannot explain its own outcome: the pre-normalization config would show identical
+// lines with opposite outcomes, and differing lines that both hit. Diffing two MISS lines here
+// names exactly the fields responsible for the extra build.
 //
-// The cost is that fields normalization overwrites are no longer visible in their
-// original form: attn_scale reads 1, ragged num_tokens read 0, and max_seqlen/batch_size
-// read their bucketed values. Recover those from the caller if a line needs to be traced
-// back to a specific test case.
+// The cost is that overwritten fields are no longer visible in their original form: attn_scale
+// reads 1, ragged num_tokens read 0, max_seqlen and batch_size read their bucketed values.
 inline void record_cache_lookup(Backend b, Pass p, LookupResult result,
                                 const FusedAttnConfig &key) {
   if (!enabled()) return;
   register_summary_once();
-  // A refusal replayed from the negative cache is counted apart from a graph hit, in
-  // hit_unsupported rather than in hit_supported. Both were answered without building
-  // anything, which is what the two hit columns have in common; which map answered is the
-  // thing worth being able to read off a level-1 summary, since a run whose hits are mostly
-  // replayed refusals is not reusing graphs at all.
   lookup_column(counters(b, p), result).fetch_add(1, std::memory_order_relaxed);
   lookup_column(thread_counters(b, p), result).fetch_add(1, std::memory_order_relaxed);
   // The per-lookup config dump is the highest-volume line (one per cache lookup);
@@ -574,7 +462,7 @@ inline void record_cache_lookup(Backend b, Pass p, LookupResult result,
   if (!trace_enabled()) return;
   std::fprintf(
       stderr,
-      "[FUSED-ATTN-CACHE] %s%-3s %-3s %-11s | tid=%u dev=%d | train=%d det=%d cg=%d "
+      "[FUSED-ATTN-CACHE] %stid=%-3u dev=%-3d | %-3s %-3s %-12s | train=%d det=%d cg=%d "
       "maxlogit=%d fwd=%d "
       "mask=%" PRId64 " bias=%" PRId64 " wl=%" PRId64 " wr=%" PRId64 " brd=%d softmax=%" PRId64
       " scale_mode=%" PRId64 " dropout=%g attn_scale=%g qkv_dt=%" PRId64 " o_dt=%" PRId64
@@ -584,8 +472,8 @@ inline void record_cache_lookup(Backend b, Pass p, LookupResult result,
       " tkv=%" PRId64 " bb=%" PRId64 " btq=%" PRId64 " btkv=%" PRId64 " npk=%" PRId64
       " npv=%" PRId64 " psk=%" PRId64 " psv=%" PRId64 " mppk=%" PRId64 " mppv=%" PRId64
       " bias_b=%" PRId64 " bias_h=%" PRId64 " bias_sq=%" PRId64 " bias_skv=%" PRId64 "\n",
-      rank_tag().c_str(), backend_name(b), pass_name(p), lookup_name(result), thread_seq_id(),
-      key.device_id, static_cast<int>(key.is_training), static_cast<int>(key.deterministic),
+      rank_tag().c_str(), thread_seq_id(), key.device_id, backend_name(b), pass_name(p),
+      lookup_name(result), static_cast<int>(key.is_training), static_cast<int>(key.deterministic),
       static_cast<int>(key.cuda_graph), static_cast<int>(key.return_max_logit),
       static_cast<int>(key.check_for_forward_support), static_cast<int64_t>(key.attn_mask_type),
       static_cast<int64_t>(key.bias_type), static_cast<int64_t>(key.window_size_left),
@@ -614,21 +502,17 @@ inline void record_cache_lookup(Backend b, Pass p, LookupResult result,
 // ============================================================================
 // Graph build timings.
 //
-// A cuDNN graph build is a fixed sequence of frontend calls, and which one
-// dominates determines what to do about a slow build: time in `check_support`
-// and `build_plans` is heuristic selection and kernel compilation, largely
-// intrinsic to the shape, whereas time in `validate` or `build_operation_graph`
-// is graph-construction cost on our side of the boundary. Timing the stages
-// separately is what makes that distinction; one duration per build cannot.
+// Which stage dominates determines what to do about a slow build: time in
+// `check_support` and `build_plans` is heuristic selection and kernel compilation,
+// largely intrinsic to the shape, while time in `validate` or
+// `build_operation_graph` is graph-construction cost on our side. One duration per
+// build cannot make that distinction.
 //
-// Each stage is wrapped where it is called -- graph_cache.h, which is where all
-// five frontend calls live -- and accumulates into the table below, under the
-// pass its caller was serving.
-// The end-of-run summary reports each as a mean over its calls. Only sums are
-// kept, so the mean is all that can be recovered -- and since a build happens
-// once per distinct cache key, those calls span different shapes rather than
-// repeating one. Read a stage mean as where build time goes in aggregate, not as
-// the cost of any particular build.
+// Each stage is wrapped where it is called, in graph_cache.h, and accumulates into
+// the table below under its build site. Only sums are kept, so the summary can
+// report a mean and nothing else -- and since a build happens once per distinct
+// cache key, those calls span different shapes rather than repeating one. Read a
+// stage mean as where build time goes in aggregate, not as any one build's cost.
 // ============================================================================
 
 // The frontend calls that make up a build, in the order they run. `kCount` must
@@ -661,13 +545,10 @@ inline StageTiming &stage_timing(Backend b, Pass p, BuildStage s) {
 
 // Times one stage: clock read in the constructor, accumulated in the destructor.
 // Recording on scope exit rather than at an explicit stop() keeps a failing stage
-// measurable: `build_plans` throws through NVTE_CHECK_CUDNN_FE and the destructor
-// still runs during unwinding, so a build that dies there contributes its time to
-// the failure instead of vanishing from the summary. The four stages before it
-// return their status instead of throwing, and are timed the same way for the same
-// reason. `on` is latched at construction rather than re-tested in the destructor,
-// which is what keeps that symmetric: the destructor can never accumulate against a
-// `start` the constructor left unset.
+// measurable, since `build_plans` throws through NVTE_CHECK_CUDNN_FE and the
+// destructor still runs while unwinding, so a build that dies there contributes its
+// time instead of vanishing. `on` is latched at construction rather than re-tested in
+// the destructor, so the destructor can never accumulate against an unset `start`.
 struct ScopedBuildTimer {
   BuildStage stage;
   bool on;
@@ -691,12 +572,12 @@ struct ScopedBuildTimer {
   }
 };
 
-// Time `fn` as `stage` of the given build site, named as the record_* helpers above name it.
-// Preferred over declaring a ScopedBuildTimer at the call site: the measured region is exactly
-// the call passed in, so surrounding work cannot drift into it as that code changes. With
-// diagnostics off this costs one cached-flag check, and that is per build rather than per lookup.
+// Record how long `fn` takes as `stage` of the given build site. Unlike the record_* helpers above
+// this wraps the work rather than reporting on work already done, which is the point: preferred
+// over a ScopedBuildTimer at the call site because the measured region is exactly the call passed
+// in, so surrounding work cannot drift into it as that code changes.
 template <typename Fn>
-inline void timer(Backend b, Pass p, BuildStage stage, Fn &&fn) {
+inline void record_time(Backend b, Pass p, BuildStage stage, Fn &&fn) {
   ScopedBuildTimer scoped(b, p, stage);
   fn();
 }
@@ -708,14 +589,12 @@ inline void register_summary_once() {
   static const bool registered = [] {
     std::atexit([] {
       if (!enabled()) return;
-      // Build the whole summary in memory and emit it with a single write, so
-      // that the blocks of concurrently-exiting processes (one per rank under
-      // torchrun) stay grouped instead of interleaving line by line.
+      // Built in memory and emitted with one write, so that concurrently-exiting
+      // processes (one per rank under torchrun) stay grouped rather than interleaving.
       std::string block;
       block += "[FUSED-ATTN-CACHE] " + rank_tag() + "===== summary begin =====\n";
       constexpr Backend kBackends[] = {Backend::F16, Backend::FP8};
-      // A backend the run never reached is left out of the summary rather than reported as a
-      // row of zeros, so the usual single-backend run reads as it did before this was split.
+      // A backend the run never reached is left out rather than reported as a row of zeros.
       size_t active_backends = 0;
       for (const Backend b : kBackends) {
         if (!snapshot(counters(b, Pass::Fwd)).empty() ||
@@ -723,8 +602,8 @@ inline void register_summary_once() {
           ++active_backends;
         }
       }
-      // Per-thread breakdown (sorted by tid), one row per backend that thread drove. Useful in
-      // the single-process context-parallel case where each device runs on its own thread.
+      // Per-thread breakdown (sorted by tid), one row per build site that thread drove, with
+      // unreached sites left out for the same reason an unused backend is.
       {
         std::lock_guard<std::mutex> lock(thread_registry_mutex());
         std::vector<ThreadCounters *> blocks = thread_registry();
@@ -737,32 +616,40 @@ inline void register_summary_once() {
           std::snprintf(dev_field, sizeof(dev_field), "dev=%d",
                         tc->device.load(std::memory_order_relaxed));
           for (const Backend b : kBackends) {
-            const CounterSnapshot fwd = snapshot(tc->sites[site_index(b, Pass::Fwd)]);
-            const CounterSnapshot bwd = snapshot(tc->sites[site_index(b, Pass::Bwd)]);
-            if (fwd.empty() && bwd.empty()) continue;
-            char label[32];
-            std::snprintf(label, sizeof(label), "%s SUMMARY-TID", backend_name(b));
-            block += format_counter_line(label, tid_field, dev_field, fwd, bwd);
+            for (const Pass p : {Pass::Fwd, Pass::Bwd}) {
+              const CounterSnapshot c = snapshot(tc->sites[site_index(b, p)]);
+              if (c.empty()) continue;
+              // No padding: a site name is exactly the width of the column on a summary row.
+              char label[32];
+              std::snprintf(label, sizeof(label), "%s %s", backend_name(b), pass_name(p));
+              block += format_counter_line(tid_field, dev_field, label, c);
+            }
           }
         }
       }
-      // Totals last, so they read as the sum of the per-thread rows above: one row per backend,
-      // then a row across the backends only when the run used more than one. With a single
-      // backend that row would repeat the one above it verbatim and say nothing extra.
+      // Totals last, so they read as the sum of the per-thread rows above: one row per build site,
+      // then a row per pass across the backends only when the run used more than one, since with a
+      // single backend those would repeat the rows above verbatim.
       CounterSnapshot all_fwd;
       CounterSnapshot all_bwd;
       for (const Backend b : kBackends) {
-        const CounterSnapshot fwd = snapshot(counters(b, Pass::Fwd));
-        const CounterSnapshot bwd = snapshot(counters(b, Pass::Bwd));
-        all_fwd += fwd;
-        all_bwd += bwd;
-        if (fwd.empty() && bwd.empty()) continue;
-        char label[32];
-        std::snprintf(label, sizeof(label), "%s SUMMARY", backend_name(b));
-        block += format_counter_line(label, "tid=all", "dev=all", fwd, bwd);
+        for (const Pass p : {Pass::Fwd, Pass::Bwd}) {
+          const CounterSnapshot c = snapshot(counters(b, p));
+          (p == Pass::Fwd ? all_fwd : all_bwd) += c;
+          if (c.empty()) continue;
+          char label[32];
+          std::snprintf(label, sizeof(label), "%s %s", backend_name(b), pass_name(p));
+          block += format_counter_line("tid=all", "dev=all", label, c);
+        }
       }
       if (active_backends > 1) {
-        block += format_counter_line("SUMMARY", "tid=all", "dev=all", all_fwd, all_bwd);
+        for (const Pass p : {Pass::Fwd, Pass::Bwd}) {
+          const CounterSnapshot &c = (p == Pass::Fwd ? all_fwd : all_bwd);
+          if (c.empty()) continue;
+          char label[32];
+          std::snprintf(label, sizeof(label), "all %s", pass_name(p));
+          block += format_counter_line("tid=all", "dev=all", label, c);
+        }
       }
       for (const Backend b : kBackends) {
         for (const Pass p : {Pass::Fwd, Pass::Bwd}) {

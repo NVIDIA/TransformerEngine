@@ -125,11 +125,41 @@ void FusedAttnConfig::derive() {
   is_derived = true;
 }
 
-FusedAttnConfig FusedAttnConfig::make_cache_key() const {
+GraphDims graph_dims(const FusedAttnConfig &cfg, Pass pass) {
+  check_derived(cfg);
+  GraphDims dims;
+
+  // The one condition both answers turn on: the forward graph can be handed the user's cu_seqlens*
+  // buffers untouched, and then it is those buffers the graph has to match -- their
+  // [batch_size + 1] length, which a bucketed batch would read past the end of, and their int32
+  // width. The backward graph always reads seqlens converted into our own workspace, so nothing
+  // there is sized by the true batch and nothing there is held to int32.
+  const bool cudnn_reads_users_cu_seqlens = pass == Pass::Fwd && cfg.uses_cu_seqlens_directly;
+
+  if (cudnn_reads_users_cu_seqlens) {
+    dims.ragged_offset_type = DType::kInt32;
+  } else {
+    // Choose between 32-bit and 64-bit offsets by what the runtime supports, which is what lets
+    // older cuDNN runtimes work rather than fail.
+    dims.ragged_offset_type = cudnnGetVersion() >= 90500 ? DType::kInt64 : DType::kInt32;
+  }
+
+  // Build at the bucketed batch where a ragged layout is packed, so that one graph serves every
+  // batch in its bucket -- the same reason graph_max_seqlen_* stands in for the sequence lengths.
+  dims.batch_size = static_cast<int64_t>(cfg.batch_size);
+  if ((cfg.is_ragged_q || cfg.is_ragged_kv) && cfg.uses_packed_ragged_graph &&
+      !cudnn_reads_users_cu_seqlens) {
+    dims.batch_size = static_cast<int64_t>(cfg.bucketed_batch_size);
+  }
+
+  return dims;
+}
+
+FusedAttnConfig FusedAttnConfig::make_cache_key(Pass pass) const {
   // Requires a derived config: every normalization below reads a derived field -- is_padding and
   // is_causal_bottom_right, the is_ragged_* pair, the graph_max_seqlen_* dimensions, and the
-  // uses_* flags. A precondition rather than an assert, since all four callers construct their
-  // GraphInputs first and that constructor asserts it.
+  // uses_* flags. A precondition rather than an assert, since every caller reaches this through a
+  // cache_graph_* wrapper, which asserts it once for both the key and the graph.
   FusedAttnConfig cache_cfg = *this;
 
   // Key the device ID for multi-GPU single-process runs
@@ -152,18 +182,14 @@ FusedAttnConfig FusedAttnConfig::make_cache_key() const {
   cache_cfg.max_seqlen_q = cache_cfg.graph_max_seqlen_q;
   cache_cfg.max_seqlen_kv = cache_cfg.graph_max_seqlen_kv;
 
-  // Bucket the THD (ragged) batch, and drop the token counts the bucketing has replaced
+  // Name the batch size the graph is built at, and drop the token counts the bucketing replaced.
+  // Asking graph_dims() rather than restating its rule is what keeps the key from naming a batch
+  // the graph was not built with -- the two directions bucket differently, and the graph builders
+  // ask the same question with the same pass.
   if ((cache_cfg.is_ragged_q || cache_cfg.is_ragged_kv) && cache_cfg.uses_packed_ragged_graph) {
     cache_cfg.num_tokens_q = 0;
     cache_cfg.num_tokens_kv = 0;
-    // The forward graph keeps the true batch size when it takes the user's cu_seqlens
-    // directly, since cuDNN reads those [actual_b+1] buffers itself; the backward graph
-    // converts them and so always buckets. The key has to follow whichever the graph does,
-    // or it would name a batch size the graph was not built with. See F16BwdGraphInputs.
-    const bool bucket_batch = !check_for_forward_support || !cache_cfg.uses_cu_seqlens_directly;
-    if (bucket_batch) {
-      cache_cfg.batch_size = cache_cfg.bucketed_batch_size;
-    }
+    cache_cfg.batch_size = static_cast<size_t>(graph_dims(*this, pass).batch_size);
   }
 
   // attn_scale is a pass-by-value graph input and different scales can share the same cached graph
@@ -175,19 +201,27 @@ FusedAttnConfig FusedAttnConfig::make_cache_key() const {
   // give a workload that both captures and runs eagerly two entries for every configuration.
   cache_cfg.cuda_graph = false;
 
-  // Restrict each direction's key to the fields its graph actually consumes, so
-  // no redundant graphs are built and no cache misses either
-  if (check_for_forward_support && !check_for_backward_support) {
+  // Restrict this direction's key to the fields its graph actually consumes, so no redundant
+  // graphs are built and no cache misses either. Keyed on the pass rather than on the
+  // check_for_*_support flags, so that a caller asking about both directions -- which every
+  // backend query from a framework does -- still gets a key each pass can find its own graph
+  // under, instead of one narrowed for neither.
+  if (pass == Pass::Fwd) {
     cache_cfg.do_dtype = kNVTEBFloat16;
     cache_cfg.dqkv_dtype = kNVTEBFloat16;
     cache_cfg.do_format = NVTE_QKV_Format_NOT_SET;
     cache_cfg.dqkv_layout = NVTE_QKV_Layout_NOT_SET;
     cache_cfg.do_scale_inv_format = NVTE_QKV_Format_NOT_SET;
     cache_cfg.deterministic = false;
-  }
-  if (check_for_backward_support && !check_for_forward_support) {
+  } else {
     cache_cfg.return_max_logit = false;
   }
+
+  // The two flags say which directions the caller wanted probed, which the graph this key names
+  // does not depend on. Normalized so that a key is the same whether it came from a probe or from
+  // execution, and so that a level-2 trace line cannot claim a direction the key is not for.
+  cache_cfg.check_for_forward_support = pass == Pass::Fwd;
+  cache_cfg.check_for_backward_support = pass == Pass::Bwd;
 
   return cache_cfg;
 }
@@ -303,8 +337,8 @@ FusedAttnConfig FusedAttnFwdParams::make_config() const {
 FusedAttnConfig FusedAttnBwdParams::make_config() const {
   const FusedAttnBwdParams &params = *this;
   FusedAttnConfig cfg{};
-  // Backward execution: only the backward graph is run. check_for_forward_support=false also
-  // selects the backward key normalization in make_cache_key().
+  // Backward execution: only the backward graph is run, so do not pay for a forward support
+  // check whose graph this call will never execute.
   cfg.check_for_forward_support = false;
   cfg.check_for_backward_support = true;
   cfg.is_training = true;

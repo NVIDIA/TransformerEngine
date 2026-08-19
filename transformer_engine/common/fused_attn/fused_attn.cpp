@@ -460,14 +460,14 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
 //     |     |     `-- reject -> NVTE_No_Backend + reason -> the NVTE_ERROR below
 //     |     |
 //     |     `-- is_supported_f16_fwd / is_supported_fp8_fwd
-//     |           `-- f16_fwd_cached_graph(): builds and inserts the entry, or throws
-//     |                 UnsupportedGraph, whose message becomes the reason for the refusal
+//     |           `-- cache_graph_f16_fwd(): builds and inserts the entry, or throws, in
+//     |                 which case cuDNN's message becomes the reason for the refusal
 //     |
 //     `-- fused_attn_arbitrary_seqlen_fwd -> ..._fwd_impl           the selected backend
 //           |
-//           +-- f16_fwd_cached_graph()   HIT: the entry the query above just built
-//           +-- ensure_plans_built()     the kernel compilation, once per entry
-//           `-- bind device pointers, execute()
+//           +-- cache_graph_f16_fwd()   HIT: the entry the query above just built
+//           +-- build_plans()           the kernel compilation, once per entry
+//           `-- bind device pointers, graph.execute()
 void nvte_fused_attn_fwd_v2(NVTEFusedAttnFwdParams params) {
   NVTE_API_CALL(nvte_fused_attn_fwd_v2);
   using namespace transformer_engine;
