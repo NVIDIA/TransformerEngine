@@ -121,12 +121,21 @@ def _cudnn_frontend_supports_deterministic_dprob() -> bool:
 
 
 def _deterministic_algorithms_required() -> bool:
-    """Whether the user has asked for bit-exact reproducibility.
+    """Whether the user has asked for bit-exact reproducibility, by either route.
 
-    Same check as ``transformer_engine.pytorch.triton.grouped_dbias_dscales``.
-    Deliberately uncached, so a test can flip the variable.
+    Same union as ``DotProductAttention``: the two knobs answer different questions.
+    ``NVTE_ALLOW_NONDETERMINISTIC_ALGO`` is set once in a job launcher, applies uniformly
+    across ranks and is the only one TE's C++ layer can read; ``use_deterministic_algorithms``
+    is the framework standard, is togglable at runtime, and is what a user who wants
+    reproducibility usually reaches for. Honoring only the first would leave the second
+    silently unenforced.
+
+    Deliberately uncached: both inputs can change during the process.
     """
-    return not bool(int(os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1")))
+    return (
+        not bool(int(os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1")))
+        or torch.are_deterministic_algorithms_enabled()
+    )
 
 
 @functools.lru_cache(maxsize=None)
@@ -136,11 +145,11 @@ def _warn_nondeterministic_cudnn_dprob(reason: str) -> None:
     Cached because the call site runs on every backward pass.
     """
     warnings.warn(
-        "NVTE_ALLOW_NONDETERMINISTIC_ALGO=0 selects deterministic kernels inside"
-        " Transformer Engine, but the cuDNN grouped-GEMM dactivation backward that the"
-        " CuTe DSL fused grouped MLP calls still accumulates the scale gradient (dprob)"
-        " with cross-CTA atomic adds, whose summation order is set by the tile scheduler."
-        f" That op is therefore not bit-exact here: {reason}.",
+        "Deterministic execution was requested (NVTE_ALLOW_NONDETERMINISTIC_ALGO=0 or"
+        " torch.use_deterministic_algorithms), but the cuDNN grouped-GEMM dactivation"
+        " backward that the CuTe DSL fused grouped MLP calls still accumulates the scale"
+        " gradient (dprob) with cross-CTA atomic adds, whose summation order is set by the"
+        f" tile scheduler. That op is therefore not bit-exact here: {reason}.",
         UserWarning,
     )
 
@@ -2070,10 +2079,12 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         }
         dactivation_kernel = self.grouped_gemm_dactivation_kernel()
         if deterministic_dactivation:
-            # Only ever set to True. Left unset otherwise so the wrapper keeps its own
-            # default, which follows ``torch.use_deterministic_algorithms``; passing False
-            # would override that and silently take determinism away from a caller who
-            # asked torch for it without setting NVTE_ALLOW_NONDETERMINISTIC_ALGO.
+            # Only ever set to True, and only once known to be accepted: the argument does
+            # not exist on the dGLU wrapper or on a front-end older than 1.28.0, where
+            # passing it at all -- even as False -- is a TypeError. Leaving it unset is also
+            # the same request: the wrapper's own default reads
+            # ``torch.are_deterministic_algorithms_enabled()``, which is half of what
+            # _deterministic_algorithms_required() just read.
             fc2_dactivation_kwargs["deterministic"] = True
         if _cudnn_frontend_supports_single_group_runtime_offsets():
             fc2_dactivation_kwargs["use_single_group_runtime_offsets"] = num_groups == 1

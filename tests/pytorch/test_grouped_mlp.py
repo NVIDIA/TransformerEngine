@@ -1974,7 +1974,7 @@ class TestGroupedMLPFusedOp:
 
 
 class TestGroupedMLPDeterminism:
-    """``NVTE_ALLOW_NONDETERMINISTIC_ALGO`` coverage for the CuTe DSL fused grouped MLP.
+    """Determinism coverage for the CuTe DSL fused grouped MLP.
 
     cuDNN's grouped-GEMM dactivation epilogue accumulates the scale gradient (``dprob``)
     with cross-CTA atomic adds, so its summation order follows the tile scheduler. The
@@ -1995,26 +1995,43 @@ class TestGroupedMLPDeterminism:
         yield
         self._reset_caches()
 
+    @pytest.fixture
+    def _restore_torch_determinism(self):
+        """``use_deterministic_algorithms`` is process-global, so put it back."""
+        previous = torch.are_deterministic_algorithms_enabled()
+        yield
+        torch.use_deterministic_algorithms(previous)
+
     @pytest.mark.parametrize(
-        "allow_nondeterministic,expected",
+        "allow_nondeterministic,torch_flag,expected",
         (
-            (None, False),  # default: non-deterministic algorithms are allowed
-            ("1", False),
-            ("0", True),
+            (None, False, False),  # default: non-deterministic algorithms are allowed
+            ("1", False, False),
+            ("0", False, True),  # the TE variable alone
+            (None, True, True),  # the torch flag alone, which TE must not ignore
+            ("1", True, True),  # ... including when the TE variable says otherwise
+            ("0", True, True),
         ),
     )
-    def test_env_var_selects_deterministic_mode(
+    def test_either_knob_requests_determinism(
         self,
         monkeypatch,
+        _restore_torch_determinism,
         *,
         allow_nondeterministic: Optional[str],
+        torch_flag: bool,
         expected: bool,
     ) -> None:
-        """Uncached, so flipping the variable mid-process takes effect."""
+        """The same union DotProductAttention uses, and uncached so both stay live.
+
+        ``NVTE_ALLOW_NONDETERMINISTIC_ALGO=1`` is not a request for non-determinism, only
+        the absence of one, so the torch flag still wins that row.
+        """
         if allow_nondeterministic is None:
             monkeypatch.delenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", raising=False)
         else:
             monkeypatch.setenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", allow_nondeterministic)
+        torch.use_deterministic_algorithms(torch_flag)
         assert grouped_mlp_module._deterministic_algorithms_required() is expected
 
     def test_only_the_srelu_path_can_be_deterministic(self) -> None:
