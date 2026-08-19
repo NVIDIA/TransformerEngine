@@ -416,8 +416,8 @@ def quantize_colwise_mxfp8(
             for i in cutlass.range_constexpr(MXFP8_BLOCK_SCALING_SIZE):
                 rX_thread_f32[i] = op(rX_thread_f32[i])
                 # If the input shape is not divisible by the tile size,
-                # TMA would zero-fills the input tile outside its logical MxN bounds. 
-                # This is fine for non-activation cases, but for activation cases, 
+                # TMA would zero-fills the input tile outside its logical MxN bounds.
+                # This is fine for non-activation cases, but for activation cases,
                 # op(0) might not be 0 which will pollute the amax and dbias.
                 # So we must manually mask the OOB region here.
                 if not cutlass.const_expr(SKIP_MASKING):
@@ -2310,12 +2310,12 @@ class MXFP8QuantizeEntry(MXFP8QuantizeKernelBase):
         self.cfg = cfg
         # Instantiate all possible kernels at compile time,
         # and we will pick the right one at runtime based on the input shape and config.
-        self.general_divisible_kernel = (
-            MXFP8QuantizeKernel(cfg, SKIP_MASKING=True)
-        )
+        self.general_divisible_kernel = MXFP8QuantizeKernel(cfg, SKIP_MASKING=True)
         self.general_non_divisible_kernel = (
             # We only need to mask when WITH_ACT is enabled because with activations applied zeros filled by TMA affect block statistics
-            MXFP8QuantizeKernel(cfg, SKIP_MASKING=False) if cfg.WITH_ACT else None
+            MXFP8QuantizeKernel(cfg, SKIP_MASKING=False)
+            if cfg.WITH_ACT
+            else None
         )
         self.specialized_rowwise = (
             MXFP8QuantizeSpecializedRowwiseKernel(cfg) if cfg.ROWWISE else None
@@ -2383,15 +2383,40 @@ class MXFP8QuantizeEntry(MXFP8QuantizeKernelBase):
             # Only skip masking if not WITH_ACT (zeros filled by TMA are still zeros without applying activation to them),
             # or if the shape is already divisible by the tile size (so no masking is needed)
             if cutlass.const_expr(self.cfg.WITH_ACT):
-                skip_masking = (mX.shape[0] % self.general_divisible_kernel._TILE_ROWS == 0 and \
-                                mX.shape[1] % self.general_divisible_kernel._TILE_COLS == 0)
+                skip_masking = (
+                    mX.shape[0] % self.general_divisible_kernel._TILE_ROWS == 0
+                    and mX.shape[1] % self.general_divisible_kernel._TILE_COLS == 0
+                )
                 if skip_masking:
-                    self.general_divisible_kernel(mX, mO_row, mS_row, mO_col, mS_col, mAmax, mNoop, mDActInput, mWorkspace, stream)
+                    self.general_divisible_kernel(
+                        mX,
+                        mO_row,
+                        mS_row,
+                        mO_col,
+                        mS_col,
+                        mAmax,
+                        mNoop,
+                        mDActInput,
+                        mWorkspace,
+                        stream,
+                    )
                 else:
-                    self.general_non_divisible_kernel(mX, mO_row, mS_row, mO_col, mS_col, mAmax, mNoop, mDActInput, mWorkspace, stream)
+                    self.general_non_divisible_kernel(
+                        mX,
+                        mO_row,
+                        mS_row,
+                        mO_col,
+                        mS_col,
+                        mAmax,
+                        mNoop,
+                        mDActInput,
+                        mWorkspace,
+                        stream,
+                    )
             else:
-                self.general_divisible_kernel(mX, mO_row, mS_row, mO_col, mS_col, mAmax, mNoop, mDActInput, mWorkspace, stream)
-
+                self.general_divisible_kernel(
+                    mX, mO_row, mS_row, mO_col, mS_col, mAmax, mNoop, mDActInput, mWorkspace, stream
+                )
 
 
 def compile_cutedsl_function_from_cfg(cfg):
