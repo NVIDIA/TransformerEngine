@@ -983,7 +983,9 @@ class MXFP8QuantizeKernel(MXFP8QuantizeKernelBase):
         tma_atom_out_col: Optional[cute.CopyAtom],
         tma_dst_out_col: Optional[cute.Tensor],  # Colwise output TMA atoms
         tma_atom_act: Optional[cute.CopyAtom],
-        tma_src_act: Optional[cute.Tensor],  # Activation derivative TMA atoms, None unless WITH_DACT
+        tma_src_act: Optional[
+            cute.Tensor
+        ],  # Activation derivative TMA atoms, None unless WITH_DACT
     ):
         """Device entry: no-op the CTA when the noop flag is set, else run the quantize main loop."""
 
@@ -1028,7 +1030,9 @@ class MXFP8QuantizeKernel(MXFP8QuantizeKernelBase):
         tma_atom_out_col: Optional[cute.CopyAtom],
         tma_dst_out_col: Optional[cute.Tensor],  # Colwise output TMA atoms
         tma_atom_act: Optional[cute.CopyAtom],
-        tma_src_act: Optional[cute.Tensor],  # Activation derivative TMA atoms, None unless WITH_DACT
+        tma_src_act: Optional[
+            cute.Tensor
+        ],  # Activation derivative TMA atoms, None unless WITH_DACT
     ):
         cfg = self.cfg
 
@@ -1553,7 +1557,9 @@ class MXFP8QuantizeKernel(MXFP8QuantizeKernelBase):
         M: Int32,
         N: Int32,  # full input extents, for OOB masking
         sActInput_tile: Optional[cute.Tensor] = None,  # (TILE_Y, TILE_X) act_input tile (dact only)
-        dbias_acc: Optional[cute.Tensor] = None,  # rmem Float32[32] dbias accumulator (rowwise-only dbias)
+        dbias_acc: Optional[
+            cute.Tensor
+        ] = None,  # rmem Float32[32] dbias accumulator (rowwise-only dbias)
     ):
         cfg = self.cfg
         return quantize_rowwise_mxfp8(
