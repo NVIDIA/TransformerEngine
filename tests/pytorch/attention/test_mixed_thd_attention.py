@@ -56,6 +56,7 @@ def _per_sequence_scalar_reference(
     *,
     cu_seqlens_q_padded=None,
     cu_seqlens_kv_padded=None,
+    window_size=None,
     window_size_per_mask_type=None,
 ) -> torch.Tensor:
     """Reference each physical sequence through an ordinary scalar-mask call."""
@@ -76,9 +77,9 @@ def _per_sequence_scalar_reference(
             sequence_cu_seqlens_kv = torch.tensor(
                 (0, kv_length), dtype=torch.int32, device=query.device
             )
-            policy_window_size = None
+            policy_window_size = window_size
             if window_size_per_mask_type is not None:
-                policy_window_size = window_size_per_mask_type.get(mask_type)
+                policy_window_size = window_size_per_mask_type.get(mask_type, window_size)
             outputs[sequence_id] = attention(
                 # THD scalar attention requires zero-offset storage. clone() is
                 # differentiable, so gradients still reach the packed inputs.
@@ -266,6 +267,67 @@ def test_thd_mask_types_support_cross_attention_and_per_policy_windows():
         cu_seqlens_kv,
         mask_type_per_seq,
         window_size_per_mask_type=windows,
+    )
+    torch.testing.assert_close(output, reference_output, atol=1.0e-3, rtol=1.0e-3)
+
+    output_grad = torch.randn_like(output)
+    output.backward(output_grad)
+    reference_output.backward(output_grad)
+    for actual_grad, reference_grad in (
+        (query.grad, reference_query.grad),
+        (key.grad, reference_key.grad),
+        (value.grad, reference_value.grad),
+    ):
+        torch.testing.assert_close(actual_grad, reference_grad, atol=1.0e-3, rtol=1.0e-3)
+
+
+@pytest.mark.parametrize(
+    "mask_type_per_seq",
+    (
+        {"padding_causal": (0, 2), "padding": (1, 3)},
+        {"padding": (1, 3), "padding_causal": (0, 2)},
+    ),
+)
+def test_thd_mask_types_default_window_is_independent_of_policy_order(mask_type_per_seq):
+    """Normalize a shared fallback window independently for every mask policy."""
+    torch.manual_seed(1234)
+    dtype = torch.float16
+    cu_seqlens = _make_cu_seqlens((7, 3, 5, 4))
+    mask_type_per_seq = _make_policy(mask_type_per_seq)
+    window_size = (2, 2)
+
+    def make_input():
+        return (
+            0.1 * torch.randn(19, NUM_HEADS, HEAD_DIM, dtype=dtype, device="cuda")
+        ).requires_grad_()
+
+    query, key, value = make_input(), make_input(), make_input()
+    reference_query = query.detach().clone().requires_grad_()
+    reference_key = key.detach().clone().requires_grad_()
+    reference_value = value.detach().clone().requires_grad_()
+    attention = _make_dpa(dtype)
+
+    output = attention(
+        query,
+        key,
+        value,
+        qkv_format="thd",
+        cu_seqlens_q=cu_seqlens,
+        cu_seqlens_kv=cu_seqlens,
+        max_seqlen_q=7,
+        max_seqlen_kv=7,
+        attn_mask_type_per_seq=mask_type_per_seq,
+        window_size=window_size,
+    )
+    reference_output = _per_sequence_scalar_reference(
+        attention,
+        reference_query,
+        reference_key,
+        reference_value,
+        cu_seqlens,
+        cu_seqlens,
+        mask_type_per_seq,
+        window_size=window_size,
     )
     torch.testing.assert_close(output, reference_output, atol=1.0e-3, rtol=1.0e-3)
 

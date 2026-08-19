@@ -2053,8 +2053,8 @@ class DotProductAttention(TransformerEngineBaseModule):
 
             # checks for attention mask
             if attn_mask_type_per_seq is not None:
-                # This scalar is used only for shared shape/window validation.
-                # Each policy call below uses its dictionary key.
+                # This scalar is used only for shared THD shape validation.
+                # Each policy call below uses its dictionary key and resolved window.
                 attn_mask_type = next(iter(attn_mask_type_per_seq))
             elif attn_mask_type is None:
                 attn_mask_type = self.attn_mask_type
@@ -2067,9 +2067,24 @@ class DotProductAttention(TransformerEngineBaseModule):
             ), f"Attention mask type {attn_mask_type} is not supported!"
 
             # checks for sliding window
-            if window_size is None:
-                window_size = self.window_size
-            window_size = dpa_utils.check_set_window_size(attn_mask_type, window_size)
+            if attn_mask_type_per_seq is not None:
+                default_window_size = self.window_size if window_size is None else window_size
+                resolved_window_sizes = {}
+                for mask_type in attn_mask_type_per_seq:
+                    policy_window_size = default_window_size
+                    if window_size_per_mask_type is not None:
+                        policy_window_size = window_size_per_mask_type.get(
+                            mask_type, default_window_size
+                        )
+                    resolved_window_sizes[mask_type] = dpa_utils.check_set_window_size(
+                        mask_type, policy_window_size
+                    )
+                window_size_per_mask_type = resolved_window_sizes
+                window_size = default_window_size
+            else:
+                if window_size is None:
+                    window_size = self.window_size
+                window_size = dpa_utils.check_set_window_size(attn_mask_type, window_size)
             if bottom_right_diagonal is None:
                 bottom_right_diagonal = self.bottom_right_diagonal
             if attn_mask_type in {"causal", "padding_causal"}:
@@ -2134,6 +2149,8 @@ class DotProductAttention(TransformerEngineBaseModule):
                     max_seqlen_kv = int((seqlens_kv.max().item() + 63) // 64 * 64)
 
             if attn_mask_type_per_seq is not None:
+                # Validate the shared call contract before dispatching each policy
+                # through an ordinary scalar-mask attention invocation.
                 if qkv_format != "thd":
                     raise ValueError(
                         "attn_mask_type_per_seq is supported only with qkv_format='thd'."
