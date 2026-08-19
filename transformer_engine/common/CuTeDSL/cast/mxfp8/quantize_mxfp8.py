@@ -156,6 +156,7 @@ def quantize_rowwise_mxfp8(
     WAVES,
     THREADS_PER_BANK,
     PACK_SIZE,
+    SKIP_MASKING,
     WITH_ACT=False,
     WITH_DACT=False,
     WITH_DBIAS=False,  # rowwise-only dbias: accumulate per-column partials
@@ -275,19 +276,21 @@ def quantize_rowwise_mxfp8(
                     # If it's relu, we can handle it later
                     if not cutlass.const_expr(FUSE_RELU):
                         x = op(x)
-                    # TMA zero-fills the input tile outside its logical MxN
-                    # bounds. This is fine for non-activation cases, but for
-                    # activation cases, op(0) might not be 0 which will pollute
-                    # the amax and dbias. So we manually mask the OOB region here.
-                    global_row = tile_row_start + tidx // CTA_THREADS_X
-                    global_col = (
-                        tile_col_start
-                        + (tidx % CTA_THREADS_X) * MXFP8_BLOCK_SCALING_SIZE
-                        + start
-                        + i
-                    )
-                    if global_row >= M or global_col >= N:
-                        x = Float32(0.0)
+                    if not cutlass.const_expr(SKIP_MASKING):
+                        # If the input shape is not divisible by the tile size,
+                        # TMA would zero-fills the input tile outside its logical MxN bounds.
+                        # This is fine for non-activation cases, but for activation cases,
+                        # op(0) might not be 0 which will pollute the amax and dbias.
+                        # So we must manually mask the OOB region here.
+                        global_row = tile_row_start + tidx // CTA_THREADS_X
+                        global_col = (
+                            tile_col_start
+                            + (tidx % CTA_THREADS_X) * MXFP8_BLOCK_SCALING_SIZE
+                            + start
+                            + i
+                        )
+                        if global_row >= M or global_col >= N:
+                            x = Float32(0.0)
                 # Accumulate to the per-thread dbias register buffer for this tile if WITH_DBIAS
                 if cutlass.const_expr(WITH_DBIAS):
                     # dbias_acc is register buffer so we can just write without bank conflict
@@ -361,6 +364,7 @@ def quantize_colwise_mxfp8(
     SWIZZLE,
     TILE_X,
     TILE_Y,  # pylint: disable=unused-argument  # kept for API symmetry with the rowwise path
+    SKIP_MASKING,  # True when the caller guarantees the tile is fully in bounds
     WITH_ACT=False,  # forward: apply activation to the element
     WITH_DACT=False,  # backward: out = grad · act'(act_input)
     sA_tile=None,  # (TILE_Y, TILE_X) activation-input smem tile (dact only)
@@ -420,14 +424,16 @@ def quantize_colwise_mxfp8(
             op = SUPPORTED_ACTIVATIONS[ACTIVATION]
             for i in cutlass.range_constexpr(MXFP8_BLOCK_SCALING_SIZE):
                 rX_thread_f32[i] = op(rX_thread_f32[i])
-                # TMA zero-fills the input tile outside its logical MxN
-                # bounds. This is fine for non-activation cases, but for
-                # activation cases, op(0) might not be 0 which will pollute
-                # the amax and dbias. So we manually mask the OOB region here
-                global_row = tile_row_start + i
-                global_col = tile_col_start + tidx
-                if global_row >= M or global_col >= N:
-                    rX_thread_f32[i] = Float32(0.0)
+                # If the input shape is not divisible by the tile size,
+                # TMA would zero-fills the input tile outside its logical MxN bounds. 
+                # This is fine for non-activation cases, but for activation cases, 
+                # op(0) might not be 0 which will pollute the amax and dbias.
+                # So we must manually mask the OOB region here.
+                if not cutlass.const_expr(SKIP_MASKING):
+                    global_row = tile_row_start + i
+                    global_col = tile_col_start + tidx
+                    if global_row >= M or global_col >= N:
+                        rX_thread_f32[i] = Float32(0.0)
         # Accumulate fp32 activations to DBIAS before we truncate to half precision when the input is half precision
         if cutlass.const_expr(WITH_DBIAS):
             for i in cutlass.range_constexpr(MXFP8_BLOCK_SCALING_SIZE):
@@ -813,8 +819,10 @@ class MXFP8QuantizeKernel(MXFP8QuantizeKernelBase):
     _THREADS_PER_BANK = _TOTAL_BANKS_WIDTH // MXFP8_BLOCK_SCALING_SIZE  # 4 threads per bank
     _NUM_STAGES = 2  # The pipeline depth is always 2
 
-    def __init__(self, cfg):
+    def __init__(self, cfg, SKIP_MASKING=False):
         self.cfg = cfg
+        # If the input shape is divisible by the tile size, we can skip the OOB masking in the kernel and save some instructions.
+        self.SKIP_MASKING = SKIP_MASKING
         # Cast + dbias with no activation gets the larger tile (CUDA CAST_DBIAS_ONLY).
         cast_dbias_only = cfg.WITH_DBIAS and not cfg.WITH_DACT and not cfg.WITH_ACT
         # Use a different tile size for dbias only config
@@ -1574,6 +1582,7 @@ class MXFP8QuantizeKernel(MXFP8QuantizeKernelBase):
             WAVES=self._WAVES,
             THREADS_PER_BANK=self._THREADS_PER_BANK,
             PACK_SIZE=self._PACK_SIZE,
+            SKIP_MASKING=self.SKIP_MASKING,
             WITH_ACT=cfg.WITH_ACT and not self.CACHE_ACTIVATION,
             WITH_DACT=cfg.WITH_DACT and not self.CACHE_ACTIVATION,
             WITH_DBIAS=self.DBIAS_REDUCTION_ROWWISE,
@@ -1609,6 +1618,7 @@ class MXFP8QuantizeKernel(MXFP8QuantizeKernelBase):
             SWIZZLE=cfg.WITH_GEMM_SWIZZLED_SCALES,
             TILE_X=self._TILE_COLS,
             TILE_Y=self._TILE_ROWS,
+            SKIP_MASKING=self.SKIP_MASKING,
             WITH_ACT=cfg.WITH_ACT,
             WITH_DACT=cfg.WITH_DACT,
             sA_tile=sActInput_tile,
@@ -2307,7 +2317,15 @@ class MXFP8QuantizeEntry(MXFP8QuantizeKernelBase):
 
     def __init__(self, cfg):
         self.cfg = cfg
-        self.general_kernel = MXFP8QuantizeKernel(cfg)
+        # Instantiate all possible kernels at compile time,
+        # and we will pick the right one at runtime based on the input shape and config.
+        self.general_divisible_kernel = (
+            MXFP8QuantizeKernel(cfg, SKIP_MASKING=True)
+        )
+        self.general_non_divisible_kernel = (
+            # We only need to mask when WITH_ACT is enabled because with activations applied zeros filled by TMA affect block statistics
+            MXFP8QuantizeKernel(cfg, SKIP_MASKING=False) if cfg.WITH_ACT else None
+        )
         self.specialized_rowwise = (
             MXFP8QuantizeSpecializedRowwiseKernel(cfg) if cfg.ROWWISE else None
         )
@@ -2371,9 +2389,18 @@ class MXFP8QuantizeEntry(MXFP8QuantizeKernelBase):
                 )
         # If not using a specialized kernel, fall back to the general kernel
         if not dispatched_to_specialized:
-            self.general_kernel(
-                mX, mO_row, mS_row, mO_col, mS_col, mAmax, mNoop, mDActInput, mWorkspace, stream
-            )
+            # Only skip masking if not WITH_ACT (zeros filled by TMA are still zeros without applying activation to them),
+            # or if the shape is already divisible by the tile size (so no masking is needed)
+            if cutlass.const_expr(self.cfg.WITH_ACT):
+                skip_masking = (mX.shape[0] % self.general_divisible_kernel._TILE_ROWS == 0 and \
+                                mX.shape[1] % self.general_divisible_kernel._TILE_COLS == 0)
+                if skip_masking:
+                    self.general_divisible_kernel(mX, mO_row, mS_row, mO_col, mS_col, mAmax, mNoop, mDActInput, mWorkspace, stream)
+                else:
+                    self.general_non_divisible_kernel(mX, mO_row, mS_row, mO_col, mS_col, mAmax, mNoop, mDActInput, mWorkspace, stream)
+            else:
+                self.general_divisible_kernel(mX, mO_row, mS_row, mO_col, mS_col, mAmax, mNoop, mDActInput, mWorkspace, stream)
+
 
 
 def compile_cutedsl_function_from_cfg(cfg):
