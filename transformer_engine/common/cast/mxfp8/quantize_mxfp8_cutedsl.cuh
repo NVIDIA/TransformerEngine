@@ -31,15 +31,15 @@ using namespace tvm_ffi_bridge;
 struct MXFP8QuantConfig {
   static constexpr const char *kEntrypointName = "get_mxfp8_quantization_function";
 
-  DType dtype;              // The input format
-  DType fp8_dtype;          // The fp8 output format
-  bool rowwise;             // If quantize rowwisely
-  bool colwise;             // If quantize columnwisely
-  bool swizzled;            // If the scale output is used for cudnn's swizzled layout
-  bool with_amax;           // If the kernel should return the amax
-  bool with_dbias = false;  // If the dbias is computated (via the workspace tensor)
-  bool with_dact = false;   // If an activation derivative operation is fused
-  bool with_act = false;    // If an activation operation is fused
+  DType dtype;                       // The input format
+  DType fp8_dtype;                   // The fp8 output format
+  bool rowwise;                      // If quantize rowwisely
+  bool colwise;                      // If quantize columnwisely
+  bool swizzled;                     // If the scale output is used for cudnn's swizzled layout
+  bool with_amax;                    // If the kernel should return the amax
+  bool with_dbias = false;           // If the dbias is computated (via the workspace tensor)
+  bool with_dact = false;            // If an activation derivative operation is fused
+  bool with_act = false;             // If an activation operation is fused
   bool use_2d_quantization = false;  // If use 2D quantization
   Activation activation = Activation::kNone;
 
@@ -97,11 +97,11 @@ struct MXFP8QuantConfig {
     if (!entrypoint.has_value()) {
       return false;
     }
-    tvm::ffi::Any result = (*entrypoint)(
-        tvm::ffi::String(fn_name), tvm::ffi::String(te_dtype_to_str(dtype)),
-        tvm::ffi::String(te_dtype_to_str(fp8_dtype)), rowwise, colwise, swizzled, with_amax,
-        with_dbias, with_dact, with_act, use_2d_quantization,
-        tvm::ffi::String(activation_to_str(activation)));
+    tvm::ffi::Any result =
+        (*entrypoint)(tvm::ffi::String(fn_name), tvm::ffi::String(te_dtype_to_str(dtype)),
+                      tvm::ffi::String(te_dtype_to_str(fp8_dtype)), rowwise, colwise, swizzled,
+                      with_amax, with_dbias, with_dact, with_act, use_2d_quantization,
+                      tvm::ffi::String(activation_to_str(activation)));
     return result.try_cast<bool>().value_or(false);
   }
 };
@@ -172,7 +172,9 @@ inline bool mxfp8_quantize_cutedsl(const MXFP8QuantConfig &config, const Tensor 
                                    Tensor *workspace_tensor, cudaStream_t stream) {
   const size_t flat_m = input_tensor->flat_first_dim();
   const size_t flat_n = input_tensor->flat_last_dim();
-  NVTE_CHECK(flat_n % 16 == 0, "Shape not supported because the last dimension of output is not 16 bytes aligned, which is required by TMA.");
+  NVTE_CHECK(flat_n % 16 == 0,
+             "Shape not supported because the last dimension of output is not 16 bytes aligned, "
+             "which is required by TMA.");
 
   // When only WITH_DBIAS is true, we use a larger tile size (align with CUDA C++ implementation)
   const bool cast_dbias_only = config.with_dbias && !config.with_dact && !config.with_act;
@@ -208,7 +210,8 @@ inline bool mxfp8_quantize_cutedsl(const MXFP8QuantConfig &config, const Tensor 
     // which happens when there are no fusions (NO ACT and DBIAS). Since zero_scales_kernel is not templated with these variants
     // it doesn't know when to ignore, so we need to override the noop pointer to nullptr before passing it to the kernel.
     const bool check_noop_flag = !config.with_act && !config.with_dact && !config.with_dbias;
-    const float *noop_flag_ptr = check_noop_flag ? reinterpret_cast<const float *>(noop_ptr) : nullptr;
+    const float *noop_flag_ptr =
+        check_noop_flag ? reinterpret_cast<const float *>(noop_ptr) : nullptr;
     constexpr size_t zero_threads = 256;
     if (output_tensor->has_data()) {
       const size_t size_bytes = output_tensor->scale_inv.buffer_size_bytes();

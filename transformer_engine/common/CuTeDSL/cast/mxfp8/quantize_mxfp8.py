@@ -2340,7 +2340,7 @@ def compile_cutedsl_function_from_cfg(cfg):
     kernel_class = get_kernel_class(cfg)
     kernel_obj = kernel_class(cfg)
     sym_M = cute.sym_int32()
-    sym_N = cute.sym_int32(divisibility=16) # TMA requires 16 bytes alignment
+    sym_N = cute.sym_int32(divisibility=16)  # TMA requires 16 bytes alignment
     in_shape = out_shape = (sym_M, sym_N)
     # TE allocates scale tensors at a padded shape (see
     # MXFP8Quantizer::get_scale_shape in transformer_engine/pytorch/csrc):
