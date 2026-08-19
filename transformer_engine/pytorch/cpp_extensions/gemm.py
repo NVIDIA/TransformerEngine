@@ -431,9 +431,9 @@ def general_grouped_gemm(
     else:
         bias_dtype = TE_DType[torch.bfloat16]
 
-    if any(_is_nvfp4_row_scaled_tensor(tensor) for tensor in A):
-        raise NotImplementedError("Row-scaled NVFP4 grouped GEMM does not support row-scaled A.")
-    if any(_is_nvfp4_row_scaled_tensor(tensor) for tensor in B):
+    if any(_is_nvfp4_row_scaled_tensor(tensor) for tensor in A) or any(
+        _is_nvfp4_row_scaled_tensor(tensor) for tensor in B
+    ):
         assert D_dtype is None, "Row-scaled NVFP4 grouped GEMM currently does not support D_dtype."
         if single_output:
             assert (
