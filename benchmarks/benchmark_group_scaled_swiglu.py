@@ -36,8 +36,12 @@ the activation is computed. That choice changes what the speedup means:
                    Python overhead: ScaledSwiGLU runs tex.swiglu and then a *separate*
                    kernel to apply the per-token scale, so the bf16 intermediate makes
                    one extra DRAM round trip. Operation-fuser overhead adds to that.
-  fused-clamped    the clamped instantiation of the same fused kernel. No unfused
-                   counterpart here, so read it against plain ``fused``.
+  fused-clamped    the clamped instantiation of the same fused kernel.
+  unfused-compiled-clamped
+                   the clamped expression through torch.compile, and the only fair
+                   baseline for fused-clamped: unfused-compiled computes plain SwiGLU,
+                   so timing the clamped kernel against it would credit the kernel for
+                   arithmetic the baseline never performed.
 
 Shapes must respect the kernel's restrictions: every expert's token count is
 divisible by 128, and the GEMM-swizzled scale layout also needs F divisible by
@@ -73,7 +77,14 @@ TOKEN_ALIGNMENT = 128
 # The swizzled scale layout tiles the transposed scale matrix 128-wide along F.
 SWIZZLE_F_ALIGNMENT = 128
 
-VARIANTS = ("fused", "fused-clamped", "unfused-eager", "unfused-compiled", "unfused-te-op")
+VARIANTS = (
+    "fused",
+    "fused-clamped",
+    "unfused-eager",
+    "unfused-compiled",
+    "unfused-compiled-clamped",
+    "unfused-te-op",
+)
 
 
 @dataclass
@@ -147,6 +158,22 @@ def _scaled_swiglu_bf16(input_2f: torch.Tensor, prob: torch.Tensor, hidden: int)
     return torch.nn.functional.silu(act) * gate * prob.unsqueeze(1)
 
 
+def _scaled_clamped_swiglu_bf16(
+    input_2f: torch.Tensor,
+    prob: torch.Tensor,
+    hidden: int,
+    limit: float,
+    alpha: float,
+    glu_linear_offset: float,
+) -> torch.Tensor:
+    # Mirrors the kernel: the activation half is clamped from above only, the gate half
+    # on both sides and then offset. Written with an explicit sigmoid because the alpha
+    # inside it is what distinguishes clamped_silu from silu.
+    act = input_2f[:, :hidden].clamp(max=limit)
+    gate = input_2f[:, hidden:].clamp(-limit, limit) + glu_linear_offset
+    return act * torch.sigmoid(alpha * act) * gate * prob.unsqueeze(1)
+
+
 def _fused_bytes(tokens: int, hidden: int) -> int:
     read_input = tokens * 2 * hidden * BF16_BYTES
     write_fp8 = tokens * hidden * FP8_BYTES
@@ -171,6 +198,26 @@ def _compile_activation() -> Optional[Callable]:
         return torch.compile(_scaled_swiglu_bf16, dynamic=False)
     except Exception as exc:  # torch.compile is optional for this benchmark
         print(f"  (torch.compile unavailable, skipping unfused-compiled: {exc})")
+        return None
+
+
+def _compile_clamped_activation(clamp: Tuple[float, float, float]) -> Optional[Callable]:
+    """torch.compile the clamped expression with the clamp constants closed over.
+
+    Baking them in keeps the callable's signature identical to the plain activation's,
+    so both go through the same unfused runner.
+    """
+    limit, alpha, glu_linear_offset = clamp
+
+    def clamped(input_2f: torch.Tensor, prob: torch.Tensor, hidden: int) -> torch.Tensor:
+        return _scaled_clamped_swiglu_bf16(
+            input_2f, prob, hidden, limit, alpha, glu_linear_offset
+        )
+
+    try:
+        return torch.compile(clamped, dynamic=False)
+    except Exception as exc:  # torch.compile is optional for this benchmark
+        print(f"  (torch.compile unavailable, skipping unfused-compiled-clamped: {exc})")
         return None
 
 
@@ -204,6 +251,7 @@ def _make_runner(
     num_groups: int,
     first_dims: Optional[torch.Tensor],
     compiled_activation: Optional[Callable],
+    compiled_clamped_activation: Optional[Callable],
     te_op_activation: Optional[Callable],
     clamp: Tuple[float, float, float],
 ) -> Callable[[torch.Tensor, torch.Tensor], object]:
@@ -219,6 +267,7 @@ def _make_runner(
     activation = {
         "unfused-eager": _scaled_swiglu_bf16,
         "unfused-compiled": compiled_activation,
+        "unfused-compiled-clamped": compiled_clamped_activation,
         "unfused-te-op": te_op_activation,
     }[variant]
 
@@ -283,6 +332,10 @@ def _check_fused_matches_unfused(
     hidden: int,
     num_groups: int,
     first_dims: Optional[torch.Tensor],
+    *,
+    fused_fn: Callable,
+    activation: Callable,
+    label: str,
 ) -> None:
     """Guard against timing a kernel that is not computing the right thing.
 
@@ -300,17 +353,18 @@ def _check_fused_matches_unfused(
     0.002/ln(2) ~ 0.3% of blocks, hence a similar fraction of elements. The budget
     below sits above that but far below the ~100% a wrong formula would produce.
     """
-    fused = tex.group_scaled_swiglu(input_2f, prob, quantizer, num_groups, first_dims)
+    fused = fused_fn(input_2f, prob)
     reference = tex.group_quantize(
-        _scaled_swiglu_bf16(input_2f, prob, hidden), quantizer, num_groups, first_dims
+        activation(input_2f, prob, hidden), quantizer, num_groups, first_dims
     )
     if fused.columnwise_data.numel() != reference.columnwise_data.numel():
         raise RuntimeError(
-            f"fused output has {fused.columnwise_data.numel()} elements but the reference has"
-            f" {reference.columnwise_data.numel()}; the benchmark is comparing different shapes."
+            f"{label}: fused output has {fused.columnwise_data.numel()} elements but the"
+            f" reference has {reference.columnwise_data.numel()}; the benchmark is comparing"
+            " different shapes."
         )
     if int(fused.columnwise_data.view(torch.uint8).max().item()) == 0:
-        raise RuntimeError("fused output is entirely zero; the kernel produced nothing.")
+        raise RuntimeError(f"{label}: fused output is entirely zero; the kernel produced nothing.")
 
     # Coarse code-level comparison. Signs agree between the two paths in practice, so
     # treating the FP8 bytes as integers is good enough to spot a gross mismatch.
@@ -320,7 +374,7 @@ def _check_fused_matches_unfused(
     mismatch_rate = float(mismatch.sum().item()) / max(1, mismatch.numel())
     if mismatch_rate > 2e-2:
         raise RuntimeError(
-            "fused output disagrees with the unfused reference on"
+            f"{label}: fused output disagrees with the unfused reference on"
             f" {100.0 * mismatch_rate:.3f}% of FP8 codes by more than 1 ULP, which is too much"
             " to be block-scale rounding; the benchmark would be timing the wrong computation."
         )
@@ -340,6 +394,7 @@ def run_case(
     iters: int,
     loop: str,
     compiled_activation: Optional[Callable],
+    compiled_clamped_activation: Optional[Callable],
     te_op_activation: Optional[Callable],
     clamp: Tuple[float, float, float],
 ) -> Optional[CaseResult]:
@@ -363,6 +418,7 @@ def run_case(
         num_groups,
         first_dims,
         compiled_activation,
+        compiled_clamped_activation,
         te_op_activation,
         clamp,
     )
@@ -524,18 +580,47 @@ def main() -> None:
     )
 
     compiled_activation = _compile_activation() if "unfused-compiled" in args.variants else None
+    compiled_clamped_activation = (
+        _compile_clamped_activation(tuple(args.clamp))
+        if "unfused-compiled-clamped" in args.variants
+        else None
+    )
     te_op_activation = _te_op_activation() if "unfused-te-op" in args.variants else None
 
-    # One correctness check up front: a benchmark of a wrong kernel is worthless.
+    # Correctness up front: a benchmark of a wrong kernel is worthless, and a speedup
+    # against a baseline computing something else is worse than worthless.
     check_tokens = min(args.tokens, 4096)
+    check_quantizer = _make_quantizer(False)
+    check_x = torch.randn(check_tokens, 2 * args.hidden, dtype=torch.bfloat16, device="cuda")
+    check_prob = torch.rand(check_tokens, dtype=torch.bfloat16, device="cuda")
     _check_fused_matches_unfused(
-        _make_quantizer(False),
-        torch.randn(check_tokens, 2 * args.hidden, dtype=torch.bfloat16, device="cuda"),
-        torch.rand(check_tokens, dtype=torch.bfloat16, device="cuda"),
+        check_quantizer,
+        check_x,
+        check_prob,
         args.hidden,
         num_groups=1,
         first_dims=None,
+        fused_fn=lambda x, prob: tex.group_scaled_swiglu(x, prob, check_quantizer, 1, None),
+        activation=_scaled_swiglu_bf16,
+        label="plain",
     )
+    if "fused-clamped" in args.variants and "unfused-compiled-clamped" in args.variants:
+        limit, alpha, glu_linear_offset = tuple(args.clamp)
+        _check_fused_matches_unfused(
+            check_quantizer,
+            check_x,
+            check_prob,
+            args.hidden,
+            num_groups=1,
+            first_dims=None,
+            fused_fn=lambda x, prob: tex.group_scaled_clamped_swiglu(
+                x, prob, check_quantizer, 1, limit, alpha, glu_linear_offset, None
+            ),
+            activation=lambda x, prob, hidden: _scaled_clamped_swiglu_bf16(
+                x, prob, hidden, limit, alpha, glu_linear_offset
+            ),
+            label="clamped",
+        )
 
     results: List[CaseResult] = []
     for num_groups in args.num_groups:
@@ -558,6 +643,11 @@ def main() -> None:
                 for variant in args.variants:
                     if variant == "unfused-compiled" and compiled_activation is None:
                         continue
+                    if (
+                        variant == "unfused-compiled-clamped"
+                        and compiled_clamped_activation is None
+                    ):
+                        continue
                     if variant == "unfused-te-op" and te_op_activation is None:
                         continue
                     result = run_case(
@@ -573,6 +663,7 @@ def main() -> None:
                         iters=args.iters,
                         loop=loop,
                         compiled_activation=compiled_activation,
+                        compiled_clamped_activation=compiled_clamped_activation,
                         te_op_activation=te_op_activation,
                         clamp=tuple(args.clamp),
                     )
