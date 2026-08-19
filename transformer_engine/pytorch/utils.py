@@ -36,18 +36,22 @@ except ImportError:  # pragma: no cover
     _comptime = None
 
 
-def _trace_time_warn(msg: str) -> None:
-    """Emit a warning from code being traced by Dynamo.
+def _compile_safe_warn(msg: str) -> None:
+    """``warnings.warn`` that also works from code being traced by Dynamo.
 
     Dynamo silently drops a traced ``warnings.warn``, and TE forwards wrap
     everything in try/finally, so a graph break there makes Dynamo skip the
     whole frame and re-run it with ``is_compiling() == False`` -- a runtime
-    warning branch is never reached. ``comptime`` runs for real inside the
-    compiler instead, so the warning fires once per compilation. The message
-    is read back via ``get_local`` (a traced closure would capture a
-    VariableTracker, not the value).
+    warning branch is never reached. Under compilation ``comptime`` runs for
+    real inside the compiler instead, so the warning fires once per
+    compilation; the message is read back via ``get_local`` (a traced closure
+    would capture a VariableTracker, not the value). In eager this is a plain
+    ``warnings.warn``.
     """
-    _comptime(lambda ctx: warnings.warn(ctx.get_local("msg").as_python_constant()))
+    if torch.compiler.is_compiling() and _comptime is not None:
+        _comptime(lambda ctx: warnings.warn(ctx.get_local("msg").as_python_constant()))
+    else:
+        warnings.warn(msg, stacklevel=3)
 
 
 def record_compile_disabled(reason: str) -> None:
@@ -78,26 +82,19 @@ def warn_if_compile_disabled() -> None:
         "Modules will fall back to eager execution under torch.compile, i.e. "
         "a graph break, which is incompatible with fullgraph=True."
     )
-    if torch.compiler.is_compiling() and _comptime is not None:
-        _trace_time_warn(msg)
-    else:
-        warnings.warn(msg, stacklevel=2)
+    _compile_safe_warn(msg)
 
 
 def warn_compile_eager_fallback(reason: str) -> None:
     """Warn that a TE module is running eagerly under ``torch.compile``.
 
     Emitted when ``reason`` is unsupported on the module's compiled custom-op
-    path -- once per compilation (see :func:`_trace_time_warn`).
+    path -- once per compilation (see :func:`_compile_safe_warn`).
     """
-    msg = (
+    _compile_safe_warn(
         f"Falling back to eager execution under torch.compile: {reason} is "
         "unsupported on the compiled path (graph-breaks under fullgraph=True)."
     )
-    if torch.compiler.is_compiling() and _comptime is not None:
-        _trace_time_warn(msg)
-    else:
-        warnings.warn(msg, stacklevel=2)
 
 
 @functools.lru_cache(maxsize=None)
