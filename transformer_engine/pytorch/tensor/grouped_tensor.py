@@ -10,6 +10,7 @@ from typing import List, Optional, Tuple
 import torch
 from torch.utils._pytree import tree_map
 
+from transformer_engine import te_device_type
 from ..quantized_tensor import QuantizedTensorStorage, Quantizer
 from .storage.grouped_tensor_storage import GroupedTensorStorage
 
@@ -128,7 +129,7 @@ class GroupedTensor(GroupedTensorStorage, torch.Tensor):
                 device = maybe_tensor.device
                 break
         if device is None:
-            device = torch.device("cuda")
+            device = torch.device(te_device_type())
 
         # Match QuantizedTensor __new__: accept externally-computed stride to
         # avoid Python-side stride computation overhead for C++ construction.

@@ -15,6 +15,7 @@ from packaging.version import Version as PkgVersion
 import torch
 import torch.nn.functional as F
 import transformer_engine_torch as tex
+from transformer_engine import te_device_type
 from transformer_engine.pytorch.utils import (
     get_device_compute_capability,
     split_tensor_along_dim,
@@ -456,10 +457,10 @@ class UnfusedDotProductAttention(torch.nn.Module):
                 fp8_recipe = fp8_meta["local_recipes"][0]
             if fp8_recipe.float8_current_scaling():
                 S_quantizer = Float8CurrentScalingQuantizer(
-                    fp8_dtype=S_quantizer.dtype, device="cuda"
+                    fp8_dtype=S_quantizer.dtype, device=te_device_type()
                 )
                 dP_quantizer = Float8CurrentScalingQuantizer(
-                    fp8_dtype=dP_quantizer.dtype, device="cuda"
+                    fp8_dtype=dP_quantizer.dtype, device=te_device_type()
                 )
 
             if "2" in qkv_layout or "3" in qkv_layout:
@@ -750,8 +751,10 @@ class FlashAttention(torch.nn.Module):
             for x in [query_layer, key_layer, value_layer]
         ), "FlashAttention only supports FP16 and BF16 data types, or Float8Tensors."
         assert (
-            query_layer.is_cuda and key_layer.is_cuda and value_layer.is_cuda
-        ), "FlashAttention currently only supports CUDA tensors."
+            query_layer.device.type == te_device_type()
+            and key_layer.device.type == te_device_type()
+            and value_layer.device.type == te_device_type()
+        ), f"FlashAttention currently only supports {te_device_type()} tensors."
         assert (
             qkv_layout in QKVLayouts
         ), f"FlashAttention does not support qkv_layout = {qkv_layout}!"
@@ -1821,8 +1824,10 @@ class FusedAttention(torch.nn.Module):
             for x in [query_layer, key_layer, value_layer]
         ), "FusedAttention only supports FP16 and BF16 data types, or Float8Tensors."
         assert (
-            query_layer.is_cuda and key_layer.is_cuda and value_layer.is_cuda
-        ), "FusedAttention only supports CUDA tensors."
+            query_layer.device.type == te_device_type()
+            and key_layer.device.type == te_device_type()
+            and value_layer.device.type == te_device_type()
+        ), f"FusedAttention only supports {te_device_type()} tensors."
         assert (
             qkv_layout in QKVLayouts
         ), f"FusedAttention does not support qkv_layout = {qkv_layout}!"

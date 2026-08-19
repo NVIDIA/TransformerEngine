@@ -10,6 +10,10 @@ from typing import Any, Optional
 
 import torch
 
+
+from transformer_engine import te_device_type
+
+
 from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ...quantization import FP8GlobalStateManager
 from ...tensor import Quantizer
@@ -89,7 +93,7 @@ class ForwardLinearBiasAdd(FusedOperation):
 
         # Get autocast dtype if needed
         if torch.is_autocast_enabled():
-            dtype = torch.get_autocast_dtype("cuda")
+            dtype = torch.get_autocast_dtype(te_device_type())
         else:
             dtype = linear_op.weight.dtype
 

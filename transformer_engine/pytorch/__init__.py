@@ -9,6 +9,7 @@
 import functools
 
 import torch
+import transformer_engine
 
 from transformer_engine.common import load_framework_extension
 from transformer_engine.pytorch.torch_version import torch_version
@@ -16,6 +17,26 @@ from transformer_engine.pytorch.torch_version import torch_version
 assert torch_version() >= (2, 1), f"Minimum torch version 2.1 required. Found {torch_version()}."
 
 load_framework_extension("torch")
+
+# Device type and platform globals — live here because torch cannot be imported
+# at the top-level transformer_engine package (shared with JAX).
+# Use plugin-set values if available, otherwise fall back to CUDA defaults.
+transformer_engine.TE_DEVICE_TYPE = getattr(transformer_engine, "TE_DEVICE_TYPE", "cuda")
+transformer_engine.TE_PLATFORM = getattr(transformer_engine, "TE_PLATFORM", torch.cuda)
+
+
+def te_device_type() -> str:
+    return transformer_engine.TE_DEVICE_TYPE
+
+
+def te_platform():
+    return transformer_engine.TE_PLATFORM
+
+
+transformer_engine.te_device_type = te_device_type
+transformer_engine.te_platform = te_platform
+
+
 from transformer_engine.pytorch.module import LayerNormLinear
 from transformer_engine.pytorch.module import Linear
 from transformer_engine.pytorch.module import LayerNormMLP

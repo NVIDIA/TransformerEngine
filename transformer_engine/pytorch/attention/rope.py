@@ -9,6 +9,7 @@ from typing import Optional, Tuple, Union, List
 import torch
 
 import transformer_engine_torch as tex
+from transformer_engine import te_device_type
 from transformer_engine.pytorch.cpp_extensions.fused_attn import QKVFormat
 
 
@@ -76,7 +77,7 @@ class RotaryPositionEmbedding(torch.nn.Module):
         offset: int, default = 0
             Fixed offset for frequencies.
         """
-        with torch.autocast(enabled=False, device_type="cuda"):
+        with torch.autocast(enabled=False, device_type=te_device_type()):
             seq = (
                 torch.arange(max_seq_len, device=self.inv_freq.device, dtype=self.inv_freq.dtype)
                 + offset

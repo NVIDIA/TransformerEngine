@@ -14,6 +14,7 @@ import torch
 import transformer_engine_torch as tex
 from transformer_engine_torch import DType as TE_DType
 
+from transformer_engine import te_device_type
 from transformer_engine.common.recipe import NVFP4BlockScaling, Recipe
 from ..constants import NVFP4_BLOCK_SCALING_SIZE, dist_group_type
 from ..utils import (
@@ -100,7 +101,7 @@ def get_rht_matrix(with_random_sign_mask: bool, device: int) -> torch.Tensor:
         signs = get_no_random_sign_vector(device=device)
     sign_matrix = signs * torch.eye(hadamard_dimension, dtype=torch.float32, device=device)
     rht_matrix = sign_matrix @ get_hadamard_matrix(hadamard_dimension, device=device)
-    return rht_matrix.to(dtype=torch.bfloat16)
+    return rht_matrix.to(dtype=torch.bfloat16).to(te_device_type())
 
 
 @functools.lru_cache(maxsize=None)
@@ -301,7 +302,7 @@ class NVFP4Quantizer(Quantizer):
 
         # Canonicalize tensor attributes
         if device is None:
-            device = torch.device("cuda")
+            device = torch.device(te_device_type())
 
         assert shape[-1] % NVFP4_BLOCK_SCALING_SIZE == 0, (
             f"Incorrect shape {shape} for NVFP4. Tensor dims must be divisible by"
@@ -681,7 +682,7 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
         """
 
         # Tensor device
-        new_device = tensor.device if tensor.is_cuda else self.device
+        new_device = tensor.device if tensor.device.type == te_device_type() else self.device
         if not devices_match(new_device, tensor.device):
             tensor = tensor.to(device=new_device)
 

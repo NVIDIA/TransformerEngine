@@ -8,6 +8,7 @@ import collections
 from typing import Any, Callable, List, Optional, Tuple, Union
 import torch
 
+from transformer_engine import te_device_type
 from transformer_engine.pytorch.quantization import FP8GlobalStateManager
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor
 from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
@@ -277,7 +278,7 @@ class MultiheadAttention(torch.nn.Module):
         ub_bulk_wgrad: bool = False,
         bias: bool = True,
         normalization: str = "LayerNorm",
-        device: Union[torch.device, str] = "cuda",
+        device: Union[torch.device, str] = te_device_type(),
         qkv_format: str = "sbhd",
         name: str = None,
         qk_norm_type: Optional[str] = None,

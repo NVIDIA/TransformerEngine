@@ -10,6 +10,7 @@ from typing import Optional, Tuple, Iterable
 
 import torch
 
+from transformer_engine import te_device_type
 from transformer_engine.pytorch.custom_recipes import quantization
 from transformer_engine.pytorch.custom_recipes import utils
 from transformer_engine.pytorch.quantized_tensor import QuantizedTensorStorage, Quantizer
@@ -498,7 +499,7 @@ class CurrentScalingQuantizerRef(Quantizer):
 
         # Canonicalize tensor attributes
         if device is None:
-            device = torch.device("cuda")
+            device = torch.device(te_device_type())
 
         # Allocate quantized data
         qx = torch.empty(shape, dtype=self.dtype, device=device)
