@@ -1,0 +1,98 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="500" height="680" viewBox="0 0 500 680">
+  <defs>
+    <style>
+      text { font-family: Arial, Helvetica, sans-serif; fill: #333; }
+      .op-label { font-size: 14px; font-weight: bold; }
+      .sub-label { font-size: 11px; fill: #666; }
+      .io-label { font-size: 14px; font-weight: bold; fill: #555; }
+    </style>
+    <marker id="arrowD" markerWidth="8" markerHeight="8" refX="4" refY="7" orient="auto">
+      <path d="M1,1 L4,7 L7,1" fill="none" stroke="#666" stroke-width="1.3"/>
+    </marker>
+    <marker id="arrowR" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+      <path d="M1,1 L7,4 L1,7" fill="none" stroke="#999" stroke-width="1.2"/>
+    </marker>
+  </defs>
+
+  <rect width="500" height="680" fill="white"/>
+
+  <!-- ===== Input ===== -->
+  <rect x="195" y="20" width="110" height="36" rx="18" fill="#eee" stroke="#aaa" stroke-width="1.5"/>
+  <text x="250" y="43" text-anchor="middle" class="io-label">Input</text>
+
+  <!-- Arrow: Input -> LayerNorm 1 -->
+  <line x1="250" y1="56" x2="250" y2="88" stroke="#666" stroke-width="1.5" marker-end="url(#arrowD)"/>
+
+  <!-- ===== LayerNorm 1 ===== -->
+  <rect x="175" y="93" width="150" height="42" rx="8" fill="#dce9f7" stroke="#5a9bd5" stroke-width="1.5"/>
+  <text x="250" y="119" text-anchor="middle" class="op-label" fill="#2c5f8a">LayerNorm</text>
+
+  <!-- Fork point for residual 1: y=135 -->
+  <!-- Arrow: LayerNorm 1 -> Self-Attention -->
+  <line x1="250" y1="135" x2="250" y2="172" stroke="#666" stroke-width="1.5" marker-end="url(#arrowD)"/>
+
+  <!-- ===== Self-Attention ===== -->
+  <rect x="150" y="177" width="200" height="50" rx="8" fill="#c4dbf6" stroke="#3a7cc0" stroke-width="1.5"/>
+  <text x="250" y="200" text-anchor="middle" class="op-label" fill="#1d4e7e">Self-Attention</text>
+  <text x="250" y="217" text-anchor="middle" class="sub-label">(MultiheadAttention)</text>
+
+  <!-- Arrow: Self-Attention -> Residual Add 1 -->
+  <line x1="250" y1="227" x2="250" y2="262" stroke="#666" stroke-width="1.5" marker-end="url(#arrowD)"/>
+
+  <!-- ===== Residual Add 1 (circle) ===== -->
+  <circle cx="250" cy="280" r="18" fill="#fff3e0" stroke="#e8a735" stroke-width="2"/>
+  <text x="250" y="286" text-anchor="middle" font-size="20" font-weight="bold" fill="#c88520">+</text>
+
+  <!-- Residual connection 1: curved arrow from before LayerNorm1 to Add1 -->
+  <!-- Start: (250, 90) fork right, curve down to (250, 280) from right -->
+  <path d="M 250,90 L 380,90 Q 400,90 400,110 L 400,260 Q 400,280 380,280 L 268,280"
+        stroke="#d4a020" stroke-width="1.8" fill="none" stroke-dasharray="6,3" marker-end="url(#arrowR)"/>
+  <text x="410" y="185" font-size="10" fill="#c88520" transform="rotate(90,410,185)">residual</text>
+
+  <!-- Arrow: Add1 -> LayerNorm 2 -->
+  <line x1="250" y1="298" x2="250" y2="335" stroke="#666" stroke-width="1.5" marker-end="url(#arrowD)"/>
+
+  <!-- ===== LayerNorm 2 ===== -->
+  <rect x="175" y="340" width="150" height="42" rx="8" fill="#dce9f7" stroke="#5a9bd5" stroke-width="1.5"/>
+  <text x="250" y="366" text-anchor="middle" class="op-label" fill="#2c5f8a">LayerNorm</text>
+
+  <!-- Fork point for residual 2: y=382 -->
+  <!-- Arrow: LayerNorm 2 -> MLP -->
+  <line x1="250" y1="382" x2="250" y2="418" stroke="#666" stroke-width="1.5" marker-end="url(#arrowD)"/>
+
+  <!-- ===== MLP ===== -->
+  <rect x="140" y="423" width="220" height="50" rx="8" fill="#c4dbf6" stroke="#3a7cc0" stroke-width="1.5"/>
+  <text x="250" y="446" text-anchor="middle" class="op-label" fill="#1d4e7e">MLP</text>
+  <text x="250" y="463" text-anchor="middle" class="sub-label">(FC1 -> Act -> FC2)</text>
+
+  <!-- Arrow: MLP -> Residual Add 2 -->
+  <line x1="250" y1="473" x2="250" y2="508" stroke="#666" stroke-width="1.5" marker-end="url(#arrowD)"/>
+
+  <!-- ===== Residual Add 2 (circle) ===== -->
+  <circle cx="250" cy="526" r="18" fill="#fff3e0" stroke="#e8a735" stroke-width="2"/>
+  <text x="250" y="532" text-anchor="middle" font-size="20" font-weight="bold" fill="#c88520">+</text>
+
+  <!-- Residual connection 2: curved arrow from before LayerNorm2 to Add2 -->
+  <path d="M 250,337 L 380,337 Q 400,337 400,357 L 400,506 Q 400,526 380,526 L 268,526"
+        stroke="#d4a020" stroke-width="1.8" fill="none" stroke-dasharray="6,3" marker-end="url(#arrowR)"/>
+  <text x="410" y="432" font-size="10" fill="#c88520" transform="rotate(90,410,432)">residual</text>
+
+  <!-- Arrow: Add2 -> Output -->
+  <line x1="250" y1="544" x2="250" y2="580" stroke="#666" stroke-width="1.5" marker-end="url(#arrowD)"/>
+
+  <!-- ===== Output ===== -->
+  <rect x="195" y="585" width="110" height="36" rx="18" fill="#eee" stroke="#aaa" stroke-width="1.5"/>
+  <text x="250" y="608" text-anchor="middle" class="io-label">Output</text>
+
+  <!-- Legend -->
+  <rect x="20" y="640" width="14" height="14" rx="3" fill="#c4dbf6" stroke="#3a7cc0" stroke-width="1"/>
+  <text x="40" y="652" font-size="10" fill="#666">Compute block</text>
+
+  <circle cx="137" cy="647" r="7" fill="#fff3e0" stroke="#e8a735" stroke-width="1.3"/>
+  <text x="137" y="651" text-anchor="middle" font-size="10" font-weight="bold" fill="#c88520">+</text>
+  <text x="152" y="652" font-size="10" fill="#666">Residual add</text>
+
+  <line x1="230" y1="647" x2="270" y2="647" stroke="#d4a020" stroke-width="1.5" stroke-dasharray="4,2"/>
+  <text x="278" y="652" font-size="10" fill="#666">Skip connection</text>
+</svg>

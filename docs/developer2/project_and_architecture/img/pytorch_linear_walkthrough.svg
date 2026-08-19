@@ -1,0 +1,119 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="700" viewBox="0 0 1200 700" role="img" aria-labelledby="title description">
+  <title id="title">PyTorch Linear forward and backward lifecycle</title>
+  <desc id="description">The forward path runs from Linear.forward through recipe and quantizer setup, common quantization operations, the common GEMM operation, and framework-owned output and saved backward state. The backward path starts with the output gradient, prepares its required representations, runs dgrad and wgrad GEMMs in the common layer, and returns gradients after framework cleanup. Saved input and weight representations connect the forward and backward paths.</desc>
+  <defs>
+    <style>
+      text { font-family: Arial, Helvetica, sans-serif; fill: #1a1a1a; }
+      .title { font-size: 22px; font-weight: 700; }
+      .lane-title { font-size: 18px; font-weight: 700; }
+      .box-title { font-size: 15px; font-weight: 700; }
+      .body { font-size: 13px; }
+      .white { fill: #ffffff; }
+      .note { font-size: 13px; fill: #555555; font-style: italic; }
+      .fwd-arrow { stroke: #3e6f9f; stroke-width: 2.2; fill: none; marker-end: url(#blueArrow); }
+      .bwd-arrow { stroke: #a64d32; stroke-width: 2.2; fill: none; marker-end: url(#redArrow); }
+      .saved-arrow { stroke: #6d6d6d; stroke-width: 1.8; fill: none; stroke-dasharray: 7 5; marker-end: url(#grayArrow); }
+    </style>
+    <marker id="blueArrow" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto">
+      <polygon points="0 0, 10 4, 0 8" fill="#3e6f9f"/>
+    </marker>
+    <marker id="redArrow" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto">
+      <polygon points="0 0, 10 4, 0 8" fill="#a64d32"/>
+    </marker>
+    <marker id="grayArrow" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto">
+      <polygon points="0 0, 10 4, 0 8" fill="#6d6d6d"/>
+    </marker>
+  </defs>
+
+  <rect width="1200" height="700" fill="#ffffff"/>
+  <text x="600" y="34" text-anchor="middle" class="title">PyTorch Linear: representative training path</text>
+
+  <!-- Legend -->
+  <rect x="820" y="48" width="18" height="18" rx="3" fill="#4a7ab5"/>
+  <text x="847" y="62" class="body">Framework orchestration</text>
+  <rect x="1010" y="48" width="18" height="18" rx="3" fill="#6d9f4a"/>
+  <text x="1037" y="62" class="body">Common operation</text>
+
+  <!-- Forward lane -->
+  <rect x="30" y="82" width="1140" height="220" rx="12" fill="#edf3f8" stroke="#9db8d1" stroke-width="1.5"/>
+  <text x="52" y="112" class="lane-title">Forward</text>
+
+  <rect x="55" y="145" width="180" height="90" rx="9" fill="#4a7ab5" stroke="#315e8d" stroke-width="1.5"/>
+  <text x="145" y="177" text-anchor="middle" class="box-title white">Public entry</text>
+  <text x="145" y="202" text-anchor="middle" class="body white">Linear.forward</text>
+
+  <line x1="235" y1="190" x2="270" y2="190" class="fwd-arrow"/>
+
+  <rect x="275" y="135" width="210" height="110" rx="9" fill="#4a7ab5" stroke="#315e8d" stroke-width="1.5"/>
+  <text x="380" y="166" text-anchor="middle" class="box-title white">Configure execution</text>
+  <text x="380" y="190" text-anchor="middle" class="body white">Recipe → quantizers</text>
+  <text x="380" y="212" text-anchor="middle" class="body white">LinearFwdArgs</text>
+  <text x="380" y="234" text-anchor="middle" class="body white">_Linear.apply</text>
+
+  <line x1="485" y1="190" x2="520" y2="190" class="fwd-arrow"/>
+
+  <rect x="525" y="135" width="210" height="110" rx="9" fill="#6d9f4a" stroke="#4f7d32" stroke-width="1.5"/>
+  <text x="630" y="166" text-anchor="middle" class="box-title white">Prepare operands</text>
+  <text x="630" y="190" text-anchor="middle" class="body white">Quantize input</text>
+  <text x="630" y="212" text-anchor="middle" class="body white">Quantize or reuse weight</text>
+  <text x="630" y="234" text-anchor="middle" class="body white">Required layouts</text>
+
+  <line x1="735" y1="190" x2="770" y2="190" class="fwd-arrow"/>
+
+  <rect x="775" y="145" width="160" height="90" rx="9" fill="#6d9f4a" stroke="#4f7d32" stroke-width="1.5"/>
+  <text x="855" y="177" text-anchor="middle" class="box-title white">Forward GEMM</text>
+  <text x="855" y="202" text-anchor="middle" class="body white">y = xWᵀ + b</text>
+
+  <line x1="935" y1="190" x2="970" y2="190" class="fwd-arrow"/>
+
+  <rect x="975" y="135" width="170" height="110" rx="9" fill="#4a7ab5" stroke="#315e8d" stroke-width="1.5"/>
+  <text x="1060" y="166" text-anchor="middle" class="box-title white">Finish forward</text>
+  <text x="1060" y="190" text-anchor="middle" class="body white">Return output</text>
+  <text x="1060" y="212" text-anchor="middle" class="body white">Save backward state</text>
+  <text x="1060" y="234" text-anchor="middle" class="body white">Refresh weight cache</text>
+
+  <!-- Backward lane -->
+  <rect x="30" y="382" width="1140" height="220" rx="12" fill="#fbf0ec" stroke="#d5aa9b" stroke-width="1.5"/>
+  <text x="52" y="412" class="lane-title">Backward</text>
+
+  <rect x="975" y="445" width="170" height="90" rx="9" fill="#b55c40" stroke="#8f4028" stroke-width="1.5"/>
+  <text x="1060" y="477" text-anchor="middle" class="box-title white">Backward entry</text>
+  <text x="1060" y="502" text-anchor="middle" class="body white">grad_output</text>
+
+  <line x1="975" y1="490" x2="940" y2="490" class="bwd-arrow"/>
+
+  <rect x="745" y="435" width="190" height="110" rx="9" fill="#b55c40" stroke="#8f4028" stroke-width="1.5"/>
+  <text x="840" y="466" text-anchor="middle" class="box-title white">Prepare gradients</text>
+  <text x="840" y="490" text-anchor="middle" class="body white">Restore saved state</text>
+  <text x="840" y="512" text-anchor="middle" class="body white">Prepare grad_output</text>
+  <text x="840" y="534" text-anchor="middle" class="body white">Required layouts</text>
+
+  <line x1="745" y1="490" x2="710" y2="490" class="bwd-arrow"/>
+
+  <rect x="545" y="445" width="160" height="90" rx="9" fill="#6d9f4a" stroke="#4f7d32" stroke-width="1.5"/>
+  <text x="625" y="477" text-anchor="middle" class="box-title white">Dgrad GEMM</text>
+  <text x="625" y="502" text-anchor="middle" class="body white">dx = dyW</text>
+
+  <line x1="545" y1="490" x2="510" y2="490" class="bwd-arrow"/>
+
+  <rect x="345" y="445" width="160" height="90" rx="9" fill="#6d9f4a" stroke="#4f7d32" stroke-width="1.5"/>
+  <text x="425" y="477" text-anchor="middle" class="box-title white">Wgrad GEMM</text>
+  <text x="425" y="502" text-anchor="middle" class="body white">dW = dyᵀx</text>
+
+  <line x1="345" y1="490" x2="310" y2="490" class="bwd-arrow"/>
+
+  <rect x="55" y="435" width="250" height="110" rx="9" fill="#b55c40" stroke="#8f4028" stroke-width="1.5"/>
+  <text x="180" y="466" text-anchor="middle" class="box-title white">Finish backward</text>
+  <text x="180" y="490" text-anchor="middle" class="body white">Return dx, dW, and db</text>
+  <text x="180" y="512" text-anchor="middle" class="body white">Wait for pending communication</text>
+  <text x="180" y="534" text-anchor="middle" class="body white">Update recipe state if required</text>
+
+  <!-- Saved-state relationships -->
+  <path d="M 630 245 L 630 330 L 840 330 L 840 430" class="saved-arrow"/>
+  <text x="652" y="324" class="note">Saved input and weight representations</text>
+
+  <path d="M 1060 245 L 1060 350 L 900 350 L 900 430" class="saved-arrow"/>
+  <text x="930" y="372" class="note">Autograd context</text>
+
+  <text x="600" y="655" text-anchor="middle" class="note">Tensor- and sequence-parallel communication is added around these phases; it is not shown in this baseline path.</text>
+</svg>
