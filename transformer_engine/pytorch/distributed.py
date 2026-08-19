@@ -729,7 +729,6 @@ def checkpoint(
     context_fn = kwargs.pop("context_fn", noop_context_fn)
     determinism_check = kwargs.pop("determinism_check", "default")
     debug = kwargs.pop("debug", False)
-
     if not has_te_modules(function):
         return torch.utils.checkpoint.checkpoint(
             function,
@@ -741,9 +740,8 @@ def checkpoint(
             **kwargs,
         )
 
-    # There will be no backward recompute when checkpoint is called with autograd
-    # disabled. Run the forward directly so FP8 modules do not save recompute state
-    # that can never be consumed. Preserve the user-provided forward context.
+    # When checkpoint is entered with autograd disabled, run the forward directly
+    # to avoid unreachable FP8 recompute state. Preserve the forward context.
     if not torch.is_grad_enabled():
         forward_ctx, _ = context_fn()
         with forward_ctx:

@@ -1632,9 +1632,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     FP8GlobalStateManager.add_fp8_tensors_to_global_buffer(self.fp8_meta)
 
                 # Activation recomputation is used and this is the first forward phase.
-                # Every delayed-scaling module in the first checkpoint phase must stash.
-                # Checkpoint phase, rather than module training mode, determines whether
-                # the matching recompute forward will need the original metadata.
                 if is_fp8_activation_recompute_enabled():
                     FP8GlobalStateManager.copy_forward_fp8_meta_tensors_for_recompute(self.fp8_meta)
 

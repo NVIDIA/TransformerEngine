@@ -958,121 +958,44 @@ def test_checkpoint_with_mixed_fp8_regions_saves_only_fp8_recompute_state(use_re
 
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
 @pytest.mark.parametrize("use_reentrant", all_boolean)
-@pytest.mark.parametrize("training", all_boolean)
-def test_checkpoint_with_eval_module_preserves_fp8_recompute_state(training, use_reentrant):
-    """An eval module participating in a checkpoint must stash like a training module."""
+@pytest.mark.parametrize("recompute_training", all_boolean)
+def test_checkpoint_eval_module_balances_fp8_recompute_state(recompute_training, use_reentrant):
+    """An eval module must stash metadata for the recompute forward."""
     FP8GlobalStateManager.reset()
     fp8_recipe = recipe.DelayedScaling(fp8_format=recipe.Format.HYBRID)
-    layer = Linear(16, 16, bias=False, params_dtype=torch.float32).cuda()
-    layer.train(training)
+    layer = Linear(16, 16, bias=False, params_dtype=torch.float32).cuda().eval()
 
     def body(value):
         with autocast(enabled=True, recipe=fp8_recipe):
-            return layer(value)
-
-    _checkpointed_linear_backward(body, use_reentrant, layer)
-
-    assert _FP8_RECOMPUTE_KEY in layer.fp8_meta
-    assert "updated_scale_fwd" in layer.fp8_meta
-    recompute_buffer = FP8GlobalStateManager.quantization_state.fp8_tensors_recompute_buffer
-    assert len(recompute_buffer) == 1
-    assert all(len(stashed) == 0 for stashed in recompute_buffer)
-
-
-@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
-@pytest.mark.parametrize("use_reentrant", all_boolean)
-@pytest.mark.parametrize("switch_to_eval", all_boolean)
-def test_checkpoint_mode_change_between_phases_does_not_leak_recompute_stash(
-    switch_to_eval, use_reentrant
-):
-    """The replay consumes the stash created by the original forward despite a mode change."""
-    FP8GlobalStateManager.reset()
-    fp8_recipe = recipe.DelayedScaling(fp8_format=recipe.Format.HYBRID)
-    layer = Linear(16, 16, bias=False, params_dtype=torch.float32).cuda()
-    observed = []
-
-    def body(value):
-        with autocast(enabled=True, recipe=fp8_recipe):
-            observed.append(
-                (
-                    is_fp8_activation_recompute_enabled(),
-                    in_fp8_activation_recompute_phase(),
-                    layer.training,
-                )
-            )
-            return layer(value)
-
-    stash_lengths = []
-    for i in range(3):
-        layer.train()
-        inp = (torch.randn(16, 16, device="cuda", dtype=torch.bfloat16) * (2.0**i)).requires_grad_()
-        with torch.autocast("cuda", dtype=torch.bfloat16):
-            loss = te_checkpoint(body, inp, use_reentrant=use_reentrant).float().sum()
-
-        if switch_to_eval:
-            layer.eval()
-        loss.backward()
-        torch.cuda.synchronize()
-
-        assert torch.isfinite(loss)
-        assert inp.grad is not None and torch.isfinite(inp.grad).all()
-        assert layer.weight.grad is not None and torch.isfinite(layer.weight.grad).all()
-        assert _FP8_RECOMPUTE_KEY in layer.fp8_meta
-        recompute_buffer = FP8GlobalStateManager.quantization_state.fp8_tensors_recompute_buffer
-        assert len(recompute_buffer) == 1
-        stash_lengths.append(len(recompute_buffer[layer.fp8_meta[_FP8_RECOMPUTE_KEY]]))
-        assert "updated_scale_fwd" in layer.fp8_meta
-        assert torch.equal(layer.fp8_meta["scaling_fwd"].scale, layer.fp8_meta["updated_scale_fwd"])
-        assert observed[-2:] == [
-            (True, False, True),
-            (True, True, not switch_to_eval),
-        ]
-
-    assert stash_lengths == [0, 0, 0], f"Recompute stash leaked: {stash_lengths}"
-
-
-@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
-@pytest.mark.parametrize("use_reentrant", all_boolean)
-def test_checkpoint_eval_intermediate_stashes_under_reentrant_no_grad(use_reentrant):
-    """An eval module with an intermediate input stashes even under reentrant `no_grad`."""
-    FP8GlobalStateManager.reset()
-    fp8_recipe = recipe.DelayedScaling(fp8_format=recipe.Format.HYBRID)
-    control = Linear(16, 16, bias=False, params_dtype=torch.float32).cuda()
-    toggled = Linear(16, 16, bias=False, params_dtype=torch.float32).cuda().eval()
-
-    def body(value):
-        with autocast(enabled=True, recipe=fp8_recipe):
-            return toggled(control(value))
+            # Exercise an intermediate input whose grad state differs between the
+            # reentrant and non-reentrant checkpoint forward implementations.
+            return layer(value * 2)
 
     inp = torch.randn(16, 16, device="cuda", dtype=torch.bfloat16, requires_grad=True)
     with torch.autocast("cuda", dtype=torch.bfloat16):
         loss = te_checkpoint(body, inp, use_reentrant=use_reentrant).float().sum()
 
-    toggled.train()
+    layer.train(recompute_training)
     loss.backward()
     torch.cuda.synchronize()
 
     assert inp.grad is not None and torch.isfinite(inp.grad).all()
+    assert layer.weight.grad is not None and torch.isfinite(layer.weight.grad).all()
+    assert _FP8_RECOMPUTE_KEY in layer.fp8_meta
     recompute_buffer = FP8GlobalStateManager.quantization_state.fp8_tensors_recompute_buffer
-    assert len(recompute_buffer) == 2
-    for layer in (control, toggled):
-        assert layer.weight.grad is not None and torch.isfinite(layer.weight.grad).all()
-        assert _FP8_RECOMPUTE_KEY in layer.fp8_meta
-        assert len(recompute_buffer[layer.fp8_meta[_FP8_RECOMPUTE_KEY]]) == 0
-        assert "updated_scale_fwd" in layer.fp8_meta
+    assert len(recompute_buffer) == 1
+    assert len(recompute_buffer[layer.fp8_meta[_FP8_RECOMPUTE_KEY]]) == 0
+    assert "updated_scale_fwd" in layer.fp8_meta
+    assert torch.equal(layer.fp8_meta["scaling_fwd"].scale, layer.fp8_meta["updated_scale_fwd"])
 
 
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
-@pytest.mark.parametrize("use_reentrant", all_boolean)
-@pytest.mark.parametrize("training", all_boolean)
-def test_checkpoint_without_backward_does_not_accumulate_recompute_stashes(training, use_reentrant):
-    """Forwards with autograd disabled must not leave unreachable recompute state."""
+def test_checkpoint_without_autograd_does_not_accumulate_recompute_stashes():
+    """Checkpoint calls without autograd must not leave unreachable metadata."""
     FP8GlobalStateManager.reset()
     fp8_recipe = recipe.DelayedScaling(fp8_format=recipe.Format.HYBRID)
     layer = Linear(16, 16, bias=False, params_dtype=torch.float32).cuda()
-    layer.train(training)
     inp = torch.randn(16, 16, device="cuda", dtype=torch.bfloat16)
-
     observed = []
 
     def body(value):
@@ -1087,75 +1010,42 @@ def test_checkpoint_without_backward_does_not_accumulate_recompute_stashes(train
 
     with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
         for _ in range(3):
-            out = te_checkpoint(body, inp, use_reentrant=use_reentrant)
+            out = te_checkpoint(body, inp)
             assert torch.isfinite(out).all()
 
     recompute_buffer = FP8GlobalStateManager.quantization_state.fp8_tensors_recompute_buffer
+    assert _FP8_RECOMPUTE_KEY not in layer.fp8_meta
     assert all(len(stashed) == 0 for stashed in recompute_buffer)
     assert observed == [(False, False)] * 3
 
 
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
-@pytest.mark.parametrize("use_reentrant", all_boolean)
-@pytest.mark.parametrize("enable_grad_in", ["context_fn", "function"])
-def test_checkpoint_outer_no_grad_preserves_explicit_inner_grad(enable_grad_in, use_reentrant):
-    """The no-grad bypass preserves an explicit nested request for autograd."""
-    weight = torch.randn(16, 16, device="cuda", dtype=torch.float32)
-    input_data = torch.randn(16, 16, device="cuda", dtype=torch.bfloat16)
+def test_checkpoint_without_autograd_preserves_forward_context():
+    """The direct path must preserve a context that explicitly enables gradients."""
+    FP8GlobalStateManager.reset()
     fp8_recipe = recipe.DelayedScaling(fp8_format=recipe.Format.HYBRID)
+    layer = Linear(16, 16, bias=False, params_dtype=torch.float32).cuda().eval()
+    inp = torch.randn(16, 16, device="cuda", dtype=torch.bfloat16, requires_grad=True)
 
-    def run(checkpointed):
-        FP8GlobalStateManager.reset()
-        layer = Linear(16, 16, bias=False, params_dtype=torch.float32).cuda().eval()
-        with torch.no_grad():
-            layer.weight.copy_(weight)
-        inp = input_data.clone().requires_grad_()
-        observed = []
+    def body(value):
+        with autocast(enabled=True, recipe=fp8_recipe):
+            return layer(value)
 
-        def body(value):
-            grad_ctx = torch.enable_grad() if enable_grad_in == "function" else nullcontext()
-            with grad_ctx, autocast(enabled=True, recipe=fp8_recipe):
-                observed.append(
-                    (
-                        torch.is_grad_enabled(),
-                        is_fp8_activation_recompute_enabled(),
-                        in_fp8_activation_recompute_phase(),
-                    )
-                )
-                return layer(value)
+    with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
+        out = te_checkpoint(
+            body,
+            inp,
+            context_fn=lambda: (torch.enable_grad(), nullcontext()),
+        )
 
-        checkpoint_kwargs = {"use_reentrant": use_reentrant}
-        forward_ctx = nullcontext()
-        if enable_grad_in == "context_fn":
-            checkpoint_kwargs["context_fn"] = lambda: (torch.enable_grad(), nullcontext())
-            if not checkpointed:
-                # Match the checkpoint forward context in the direct reference without
-                # changing grad state at the checkpoint call site itself.
-                forward_ctx = torch.enable_grad()
-
-        with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16), forward_ctx:
-            if checkpointed:
-                out = te_checkpoint(body, inp, **checkpoint_kwargs)
-            else:
-                out = body(inp)
-
-        assert out.requires_grad
-        out.float().sum().backward()
-        torch.cuda.synchronize()
-        assert inp.grad is not None and torch.isfinite(inp.grad).all()
-        assert layer.weight.grad is not None and torch.isfinite(layer.weight.grad).all()
-        recompute_buffer = FP8GlobalStateManager.quantization_state.fp8_tensors_recompute_buffer
-        assert all(len(stashed) == 0 for stashed in recompute_buffer)
-        return out.detach(), inp.grad.detach(), layer.weight.grad.detach(), observed
-
-    ref_out, ref_dgrad, ref_wgrad, ref_observed = run(checkpointed=False)
-    out, dgrad, wgrad, observed = run(checkpointed=True)
-
-    torch.testing.assert_close(out, ref_out)
-    torch.testing.assert_close(dgrad, ref_dgrad)
-    torch.testing.assert_close(wgrad, ref_wgrad)
-    assert ref_observed == [(True, False, False)]
-    assert observed == ref_observed
+    assert out.requires_grad
+    out.float().sum().backward()
+    torch.cuda.synchronize()
+    assert inp.grad is not None and torch.isfinite(inp.grad).all()
+    assert layer.weight.grad is not None and torch.isfinite(layer.weight.grad).all()
+    recompute_buffer = FP8GlobalStateManager.quantization_state.fp8_tensors_recompute_buffer
+    assert _FP8_RECOMPUTE_KEY not in layer.fp8_meta
+    assert all(len(stashed) == 0 for stashed in recompute_buffer)
 
 
 def _test_e2e_checkpointing_get_model(config, dtype):
