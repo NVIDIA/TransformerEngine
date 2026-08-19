@@ -5,6 +5,7 @@
 import abc
 import contextlib
 import os
+import re
 import sys
 import warnings
 
@@ -1379,6 +1380,124 @@ def test_te_linear_compile_with_fp8_output(compile_mode):
             torch.testing.assert_close(
                 deq, out_eager.dequantize(), atol=_EAGER_ATOL, rtol=_EAGER_RTOL
             )
+
+
+# Configs rejected by LinearFwdArgs.compile_unsupported_reason() that a
+# single-GPU unit test can construct. Distributed-only reasons (fsdp_group,
+# DistributedWeight) and CPU offloading need machinery this file doesn't have;
+# delayed scaling is a hard error (check_recipe_support), tested separately.
+# Modes: "bwd" = fwd+bwd vs eager; "fwd_grad" = grad-enabled forward only
+# (differentiable fp8_output backward hits a PyTorch limitation: the Float8
+# output crossing the graph-break boundary gets a plain-tensor tangent);
+# "no_grad" = forward under no_grad.
+_FALLBACK_CASES = [
+    "fp8_output_differentiable",
+    "fuse_wgrad_accumulation",
+    "delayed_wgrad",
+    "quantized_input",
+]
+
+
+def _fallback_case(case, dtype, device):
+    """Build ``(model, fn, mode, post_backward, reason)`` for one case."""
+    model_kwargs = {}
+    if case == "fuse_wgrad_accumulation":
+        model_kwargs["fuse_wgrad_accumulation"] = True
+    elif case == "delayed_wgrad":
+        model_kwargs["delay_wgrad_compute"] = True
+    model = te.Linear(64, 32, params_dtype=dtype, device=device, **model_kwargs)
+
+    if case == "fp8_output_differentiable":
+        fp8_recipe = recipe.Float8CurrentScaling()
+
+        def fn(inp):
+            with te.autocast(recipe=fp8_recipe):
+                return model(inp, fp8_output=True).dequantize()
+
+        return model, fn, "fwd_grad", None, "differentiable fp8_output=True"
+    if case == "fuse_wgrad_accumulation":
+        model.weight.main_grad = torch.zeros_like(model.weight, dtype=torch.float32)
+        return model, model, "bwd", None, "fuse_wgrad_accumulation"
+    if case == "delayed_wgrad":
+        return model, model, "bwd", model.backward_dw, "delayed wgrad compute"
+    if case == "quantized_input":
+        fp8_recipe = recipe.Float8CurrentScaling()
+
+        def fn(inp):
+            with te.autocast(recipe=fp8_recipe):
+                return model(inp)
+
+        return model, fn, "no_grad", None, "a quantized input tensor"
+    raise ValueError(case)
+
+
+@pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+@pytest.mark.parametrize("case", _FALLBACK_CASES)
+def test_te_linear_compile_eager_fallback(case):
+    """Configs unsupported on the compiled custom-op path must fall back to
+    eager under ``torch.compile`` -- warning + numerics identical to eager --
+    and graph-break with the explicit reason under ``fullgraph=True``."""
+    dtype, device = torch.bfloat16, "cuda"
+    torch.manual_seed(0)
+    model_ref, fn_ref, mode, post_bwd_ref, _ = _fallback_case(case, dtype, device)
+    torch.manual_seed(0)
+    _model, fn, _, post_bwd, reason = _fallback_case(case, dtype, device)
+
+    def make_inp():
+        torch.manual_seed(1)
+        x = torch.randn(32, 64, dtype=dtype, device=device)
+        if case == "quantized_input":
+            quantizer = Float8CurrentScalingQuantizer(
+                fp8_dtype=tex.DType.kFloat8E4M3, device=device
+            )
+            return quantizer(x)
+        return x.requires_grad_(mode != "no_grad")
+
+    torch._dynamo.reset()
+    compiled = torch.compile(fn)
+    grad_ctx = torch.no_grad() if mode == "no_grad" else contextlib.nullcontext()
+
+    inp_ref, inp = make_inp(), make_inp()
+    with grad_ctx:
+        out_ref = fn_ref(inp_ref)
+        with pytest.warns(UserWarning, match="Falling back to eager execution under torch.compile"):
+            out = compiled(inp)
+    if mode == "bwd":
+        out_ref.sum().backward()
+        if post_bwd_ref is not None:
+            post_bwd_ref()
+        out.sum().backward()
+        if post_bwd is not None:
+            post_bwd()
+        torch.testing.assert_close(inp.grad, inp_ref.grad, atol=_EAGER_ATOL, rtol=_EAGER_RTOL)
+    torch.testing.assert_close(out.detach(), out_ref.detach(), atol=_EAGER_ATOL, rtol=_EAGER_RTOL)
+
+    torch._dynamo.reset()
+    compiled_fg = torch.compile(fn, fullgraph=True)
+    with pytest.raises(Exception, match=re.escape(reason)):
+        with grad_ctx:
+            compiled_fg(make_inp())
+
+
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+def test_te_linear_compile_delayed_scaling_raises():
+    """Delayed scaling is rejected under torch.compile with a hard error
+    (``check_recipe_support`` in ``te.autocast.__enter__``), not a fallback.
+    Without fullgraph the raising frame is skipped and re-run eagerly (where
+    the guard passes), so only ``fullgraph=True`` surfaces the error."""
+    dtype, device = torch.bfloat16, "cuda"
+    model = te.Linear(64, 32, params_dtype=dtype, device=device)
+    fp8_recipe = recipe.DelayedScaling()
+
+    def fn(inp):
+        with te.autocast(recipe=fp8_recipe):
+            return model(inp)
+
+    torch._dynamo.reset()
+    inp = torch.randn(32, 64, dtype=dtype, device=device, requires_grad=True)
+    with pytest.raises(Exception, match="DelayedScaling is not supported under torch.compile"):
+        torch.compile(fn, fullgraph=True)(inp)
 
 
 @pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
