@@ -29,6 +29,7 @@ from transformer_engine.pytorch import (
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.quantization import (
     FP8GlobalStateManager,
+    Float8BlockScalingRecipeState,
     Float8CurrentScalingRecipeState,
     NVFP4BlockScalingRecipeState,
     QuantizerRole,
@@ -262,6 +263,98 @@ def test_same_recipe_mutation_invalidates_config_for_direct_and_nested_parameter
         ("stochastic_rounding", recipe.fp8_quant_fwd_inp.stochastic_rounding),
         ("fp4_2d_quantization", recipe.fp8_quant_fwd_inp.fp4_2d_quantization),
     )
+
+
+def test_high_level_recipe_flags_configure_concrete_quantizers_at_construction():
+    """Constructor flags must reach derived QParams and concrete quantizers."""
+    current = Float8CurrentScaling(use_power_2_scales=True)
+    current_quantizers = Float8CurrentScalingRecipeState(
+        current,
+        mode="forward",
+        num_quantizers=2,
+        device=torch.device("cpu"),
+        roles=[QuantizerRole(tensor_type="input"), QuantizerRole(tensor_type="weight")],
+    ).make_quantizers()
+    assert all(quantizer.force_pow_2_scales for quantizer in current_quantizers)
+
+    block = Float8BlockScaling(use_f32_scales=True)
+    block_quantizers = Float8BlockScalingRecipeState(
+        block,
+        mode="forward",
+        num_quantizers=2,
+        device=torch.device("cpu"),
+        roles=[QuantizerRole(tensor_type="input"), QuantizerRole(tensor_type="weight")],
+    ).make_quantizers()
+    assert all(not quantizer.force_pow_2_scales for quantizer in block_quantizers)
+
+    nvfp4 = NVFP4BlockScaling(
+        disable_rht=True,
+        disable_stochastic_rounding=True,
+        disable_2d_quantization=True,
+    )
+    nvfp4_forward = NVFP4BlockScalingRecipeState(
+        nvfp4,
+        mode="forward",
+        num_quantizers=2,
+        device=torch.device("cpu"),
+        roles=[QuantizerRole(tensor_type="input"), QuantizerRole(tensor_type="weight")],
+    ).make_quantizers()
+    nvfp4_backward = NVFP4BlockScalingRecipeState(
+        nvfp4,
+        mode="backward",
+        num_quantizers=1,
+        device=torch.device("cpu"),
+        roles=[QuantizerRole(tensor_type="grad_output")],
+    ).make_quantizers()
+    assert not nvfp4_forward[0].with_rht
+    assert not nvfp4_forward[1].with_2d_quantization
+    assert not nvfp4_backward[0].with_rht
+    assert not nvfp4_backward[0].stochastic_rounding
+
+
+def test_high_level_recipe_mutation_preserves_unowned_qparams_fields():
+    """Convenience fields update their traits without discarding nested customization."""
+    current = Float8CurrentScaling()
+    current.fp8_quant_fwd_inp = replace(current.fp8_quant_fwd_inp, amax_epsilon=0.125)
+    current.use_power_2_scales = True
+    assert current.fp8_quant_fwd_inp.power_2_scale
+    assert current.fp8_quant_fwd_inp.amax_epsilon == 0.125
+    assert current.fp8_quant_fwd_weight.power_2_scale
+    assert current.fp8_quant_bwd_grad.power_2_scale
+
+    block = Float8BlockScaling()
+    block.fp8_quant_fwd_weight = replace(block.fp8_quant_fwd_weight, amax_epsilon=0.25)
+    block.use_f32_scales = True
+    assert not block.fp8_quant_fwd_inp.power_2_scale
+    assert not block.fp8_quant_fwd_weight.power_2_scale
+    assert block.fp8_quant_fwd_weight.amax_epsilon == 0.25
+    assert not block.fp8_quant_bwd_grad.power_2_scale
+    block_quantizer = Float8BlockScalingRecipeState(
+        block,
+        mode="forward",
+        num_quantizers=1,
+        device=torch.device("cpu"),
+        roles=[QuantizerRole(tensor_type="weight")],
+    ).make_quantizers()[0]
+    assert not block_quantizer.force_pow_2_scales
+
+    nvfp4 = NVFP4BlockScaling()
+    nvfp4.fp4_quant_fwd_inp = replace(nvfp4.fp4_quant_fwd_inp, amax_epsilon=0.375)
+    nvfp4.fp4_quant_fwd_weight = replace(
+        nvfp4.fp4_quant_fwd_weight,
+        stochastic_rounding=True,
+    )
+    nvfp4.fp4_quant_bwd_grad = replace(nvfp4.fp4_quant_bwd_grad, amax_epsilon=0.5)
+    nvfp4.disable_rht = True
+    nvfp4.disable_stochastic_rounding = True
+    nvfp4.disable_2d_quantization = True
+    assert not nvfp4.fp4_quant_fwd_inp.random_hadamard_transform
+    assert nvfp4.fp4_quant_fwd_inp.amax_epsilon == 0.375
+    assert not nvfp4.fp4_quant_fwd_weight.fp4_2d_quantization
+    assert nvfp4.fp4_quant_fwd_weight.stochastic_rounding
+    assert not nvfp4.fp4_quant_bwd_grad.random_hadamard_transform
+    assert not nvfp4.fp4_quant_bwd_grad.stochastic_rounding
+    assert nvfp4.fp4_quant_bwd_grad.amax_epsilon == 0.5
 
 
 def test_current_scaling_recipe_state_configures_roles_and_preserves_boundary_defaults():

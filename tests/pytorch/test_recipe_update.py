@@ -8,7 +8,13 @@ import pytest
 import torch
 import transformer_engine.pytorch.ops as te_ops
 
-from transformer_engine.common.recipe import CustomRecipe, DelayedScaling, Float8CurrentScaling
+from transformer_engine.common.recipe import (
+    CustomRecipe,
+    DelayedScaling,
+    Float8BlockScaling,
+    Float8CurrentScaling,
+    NVFP4BlockScaling,
+)
 from transformer_engine.pytorch import (
     DotProductAttention,
     GroupedLinear,
@@ -20,6 +26,7 @@ from transformer_engine.pytorch import (
     apply_recipe,
     autocast,
     is_fp8_available,
+    is_fp8_block_scaling_available,
     is_nvfp4_available,
     quantized_model_init,
 )
@@ -534,6 +541,133 @@ def test_same_recipe_object_semantic_mutation_rebuilds_runtime():
     assert _ensure_runtime(module, recipe, revision=2)
     assert module._quantization_runtime is not old_runtime  # pylint: disable=protected-access
     assert len(calls) == 10
+
+
+def test_current_scaling_flag_mutation_rebuilds_concrete_quantizers():
+    """A same-object power-of-two update must change the active quantizers."""
+    available, reason = is_fp8_available(return_reason=True)
+    if not available:
+        pytest.skip(reason)
+
+    FP8GlobalStateManager.reset()
+    recipe = Float8CurrentScaling(use_power_2_scales=False)
+    module = Linear(
+        128,
+        128,
+        bias=False,
+        params_dtype=torch.bfloat16,
+        device="cuda",
+        name="current",
+    )
+    try:
+        apply_recipe(module, recipe)
+        old_runtime = module._quantization_runtime  # pylint: disable=protected-access
+        assert not old_runtime.forward_quantizers[0].force_pow_2_scales
+        assert not old_runtime.forward_quantizers[1].force_pow_2_scales
+        assert not old_runtime.backward_quantizers[0].force_pow_2_scales
+
+        recipe.use_power_2_scales = True
+        apply_recipe(module, recipe)
+        runtime = module._quantization_runtime  # pylint: disable=protected-access
+        assert runtime is not old_runtime
+        assert runtime.forward_quantizers[0].force_pow_2_scales
+        assert runtime.forward_quantizers[1].force_pow_2_scales
+        assert runtime.backward_quantizers[0].force_pow_2_scales
+
+        inp = torch.randn(128, 128, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+        _run_update_step(module, recipe, inp)
+        assert module._quantization_runtime is runtime  # pylint: disable=protected-access
+    finally:
+        FP8GlobalStateManager.reset()
+
+
+def test_float8_block_scaling_flag_mutation_rebuilds_concrete_quantizers():
+    """A same-object FP32-scale update must change the active quantizers."""
+    available, reason = is_fp8_block_scaling_available(return_reason=True)
+    if not available:
+        pytest.skip(reason)
+    if torch.cuda.get_device_capability() >= (10, 0):
+        pytest.skip("Blackwell FP8 block-scaling emulation requires power-of-two scales")
+
+    FP8GlobalStateManager.reset()
+    recipe = Float8BlockScaling(use_f32_scales=False)
+    module = Linear(
+        128,
+        128,
+        bias=False,
+        params_dtype=torch.bfloat16,
+        device="cuda",
+        name="block",
+    )
+    try:
+        apply_recipe(module, recipe)
+        old_runtime = module._quantization_runtime  # pylint: disable=protected-access
+        assert old_runtime.forward_quantizers[0].force_pow_2_scales
+        assert old_runtime.forward_quantizers[1].force_pow_2_scales
+        assert old_runtime.backward_quantizers[0].force_pow_2_scales
+
+        recipe.use_f32_scales = True
+        apply_recipe(module, recipe)
+        runtime = module._quantization_runtime  # pylint: disable=protected-access
+        assert runtime is not old_runtime
+        assert not runtime.forward_quantizers[0].force_pow_2_scales
+        assert not runtime.forward_quantizers[1].force_pow_2_scales
+        assert not runtime.backward_quantizers[0].force_pow_2_scales
+    finally:
+        FP8GlobalStateManager.reset()
+
+
+def test_nvfp4_flag_mutations_rebuild_concrete_quantizers():
+    """Every mutable NVFP4 convenience flag must change its concrete trait."""
+    if not is_nvfp4_available():
+        pytest.skip("NVFP4 is not available")
+
+    FP8GlobalStateManager.reset()
+    recipe = NVFP4BlockScaling(
+        disable_rht=False,
+        disable_stochastic_rounding=False,
+        disable_2d_quantization=False,
+    )
+    module = Linear(
+        128,
+        128,
+        bias=False,
+        params_dtype=torch.bfloat16,
+        device="cuda",
+        name="nvfp4",
+    )
+    try:
+        apply_recipe(module, recipe)
+        runtime = module._quantization_runtime  # pylint: disable=protected-access
+        assert runtime.forward_quantizers[0].with_rht
+        assert runtime.forward_quantizers[1].with_2d_quantization
+        assert runtime.backward_quantizers[0].with_rht
+        assert runtime.backward_quantizers[0].stochastic_rounding
+
+        recipe.disable_rht = True
+        apply_recipe(module, recipe)
+        rht_runtime = module._quantization_runtime  # pylint: disable=protected-access
+        assert rht_runtime is not runtime
+        assert not rht_runtime.forward_quantizers[0].with_rht
+        assert not rht_runtime.backward_quantizers[0].with_rht
+
+        recipe.disable_stochastic_rounding = True
+        apply_recipe(module, recipe)
+        rounding_runtime = module._quantization_runtime  # pylint: disable=protected-access
+        assert rounding_runtime is not rht_runtime
+        assert not rounding_runtime.backward_quantizers[0].stochastic_rounding
+
+        recipe.disable_2d_quantization = True
+        apply_recipe(module, recipe)
+        block_runtime = module._quantization_runtime  # pylint: disable=protected-access
+        assert block_runtime is not rounding_runtime
+        assert not block_runtime.forward_quantizers[1].with_2d_quantization
+
+        inp = torch.randn(128, 128, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+        _run_update_step(module, recipe, inp)
+        assert module._quantization_runtime is block_runtime  # pylint: disable=protected-access
+    finally:
+        FP8GlobalStateManager.reset()
 
 
 def test_role_revision_is_requested_until_atomic_runtime_commit():
