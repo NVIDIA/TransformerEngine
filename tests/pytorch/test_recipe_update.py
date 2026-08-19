@@ -346,7 +346,9 @@ def _global_recipe_state():
 
 def _make_compatible_fp8_mha_recipe(key):
     """Build an executable FP8-MHA recipe with compatible boundary formats."""
-    from transformer_engine.pytorch.custom_recipes.quantizer_factories import delayed_scaling_factory
+    from transformer_engine.pytorch.custom_recipes.quantizer_factories import (
+        delayed_scaling_factory,
+    )
     from transformer_engine.pytorch.custom_recipes.quantizer_factory_zoo import (
         nvfp4_linear_fp8_dpa_factory,
     )
@@ -2066,10 +2068,7 @@ def test_apply_recipe_planning_failure_is_model_wide_atomic(failure_index):
     modules = [Linear(16, 16, bias=False, device="cuda", name=f"line{index}") for index in range(3)]
     model = torch.nn.Sequential(*modules)
     control = torch.nn.Sequential(
-        *[
-            Linear(16, 16, bias=False, device="cuda", name=f"line{index}")
-            for index in range(3)
-        ]
+        *[Linear(16, 16, bias=False, device="cuda", name=f"line{index}") for index in range(3)]
     )
     control.load_state_dict(model.state_dict())
 
