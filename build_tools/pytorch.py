@@ -55,19 +55,13 @@ def nccl_ep_supported_by_torch() -> bool:
     """
     from torch.utils.cpp_extension import include_paths
 
-    header = "torch/csrc/distributed/c10d/symm_mem/nccl_dev_cap.hpp"
-    if any(os.path.exists(os.path.join(p, header)) for p in include_paths()):
+    header = Path("torch/csrc/distributed/c10d/symm_mem/nccl_dev_cap.hpp")
+    if any((Path(p) / header).exists() for p in include_paths()):
         return True
-    nccl_ep_env = os.getenv("NVTE_WITH_NCCL_EP")
-    if nccl_ep_env is not None and bool(int(nccl_ep_env)):
-        raise RuntimeError(
-            f"NVTE_WITH_NCCL_EP=1 was set but the installed torch does not provide {header}. "
-            "NCCL EP requires torch >= 2.11."
-        )
-    print(
-        f"[NCCL EP] Installed torch does not provide {header} (torch >= 2.11 required); "
-        "skipping NCCL EP in the torch extension."
-    )
+    message = f"Installed torch does not provide {header}; NCCL EP requires torch >= 2.11."
+    if bool(int(os.getenv("NVTE_WITH_NCCL_EP", "0"))):
+        raise RuntimeError(f"NVTE_WITH_NCCL_EP=1 was set but: {message}")
+    print(f"[NCCL EP] {message} Skipping NCCL EP in the torch extension.")
     return False
 
 
