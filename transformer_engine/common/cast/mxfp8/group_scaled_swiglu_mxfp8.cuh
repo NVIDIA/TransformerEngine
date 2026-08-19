@@ -86,25 +86,26 @@ static_assert(CHUNK_DIM_Y % BUFF_DIM_Y == 0);
 static_assert(CHUNK_DIM_Y % SCALE_DIM_Y == 0);
 static_assert(CHUNK_DIM_X % SCALE_DIM_X == 0);
 
-// silu(x) = x * sigmoid(x) = h * (1 + tanh(h)), h = x/2. Deliberately approximate: one
-// MUFU per element, against two for the ex2 form and a full expf/division chain for the
-// generic path. The error cannot reach an MXFP8 mantissa of at most 3 bits; what it can
-// do is move an e8m0 block exponent, which the C++ gtest bounds.
-__device__ __forceinline__ float silu_approx(const float x) {
-  const float h = 0.5f * x;
+// Return twice the activation; the compensating 0.5 is folded into the staged prob.
+// 2 * silu(x) = x * (1 + tanh(x/2)). Deliberately approximate: one MUFU per element.
+__device__ __forceinline__ float silu_approx_x2(const float x) {
   float tanh_h;
-  asm("tanh.approx.f32 %0, %1;" : "=f"(tanh_h) : "f"(h));
-  return fmaf(h, tanh_h, h);
+  asm("tanh.approx.f32 %0, %1;" : "=f"(tanh_h) : "f"(0.5f * x));
+  return fmaf(x, tanh_h, x);
 }
 
-// clamped_silu's activation half, x * sigmoid(alpha * x), is the same identity with the
-// tanh argument scaled. Kept separate from silu_approx rather than passing alpha = 1.0f
-// so the plain path cannot regress on whether nvcc folds the multiply.
-__device__ __forceinline__ float clamped_silu_approx(const float x, const float alpha) {
-  const float h = 0.5f * x;
+// 2 * clamped_silu(x) = x * (1 + tanh(alpha * x / 2)).
+__device__ __forceinline__ float clamped_silu_approx_x2(const float x, const float half_alpha) {
   float tanh_ah;
-  asm("tanh.approx.f32 %0, %1;" : "=f"(tanh_ah) : "f"(alpha * h));
-  return fmaf(h, tanh_ah, h);
+  asm("tanh.approx.f32 %0, %1;" : "=f"(tanh_ah) : "f"(half_alpha * x));
+  return fmaf(x, tanh_ah, x);
+}
+
+// clamp(g, -limit, limit) for limit > 0, which the binding enforces.
+__device__ __forceinline__ float clamp_symmetric(const float g, const float limit) {
+  float clamped;
+  asm("min.xorsign.abs.f32 %0, %1, %2;" : "=f"(clamped) : "f"(g), "f"(limit));
+  return clamped;
 }
 
 // Columnwise scaled SwiGLU + MXFP8 quantization of one 32-row buffer slice.
@@ -149,6 +150,11 @@ __device__ __forceinline__ void process_colwise_gated_stage(
 
   const size_t j = tid_X_colwise;
 
+  float half_alpha = 0.0f;
+  if constexpr (std::is_same_v<ParamOP, ClampedSwiGLUParam>) {
+    half_alpha = 0.5f * p.alpha;
+  }
+
   float rInCompute[BUFF_DIM_Y];
   float thread_amax = 0.0f;
 #pragma unroll
@@ -157,8 +163,8 @@ __device__ __forceinline__ void process_colwise_gated_stage(
     float gate_elt = static_cast<float>(sInGate[buff][i][j]);
     // Staged in shared memory for the whole chunk by the caller: every thread needs
     // all rows, so reading it from global here would issue one broadcast load per
-    // row per warp on the critical path.
-    const float prob = sProb[stage * BUFF_DIM_Y + i];
+    // row per warp on the critical path. Holds prob/2.
+    const float half_prob = sProb[stage * BUFF_DIM_Y + i];
 
     // Gate clamped on both sides then offset, activation clamped from above only --
     // the asymmetry is gated_mxfp8.cuh's forward path.
@@ -167,23 +173,25 @@ __device__ __forceinline__ void process_colwise_gated_stage(
     // so `OP == &silu<fp32, fp32>` compares unrelated function pointer types once
     // ParamOP is ClampedSwiGLUParam, and an if-constexpr condition must be well formed
     // even where its branch is discarded.
-    float act_x;
+    //
+    // Every branch produces twice the activation, to pair with the halved prob.
+    float act_x2;
     if constexpr (std::is_same_v<ParamOP, ClampedSwiGLUParam>) {
-      gate_elt = fminf(fmaxf(-p.limit, gate_elt), p.limit) + p.glu_linear_offset;
+      gate_elt = clamp_symmetric(gate_elt, p.limit) + p.glu_linear_offset;
       if constexpr (OP == &clamped_silu<fp32, fp32>) {
-        act_x = clamped_silu_approx(fminf(act_elt, p.limit), p.alpha);
+        act_x2 = clamped_silu_approx_x2(fminf(act_elt, p.limit), half_alpha);
       } else {
-        act_x = OP(act_elt, p);
+        act_x2 = 2.0f * OP(act_elt, p);
       }
     } else {
       if constexpr (OP == &silu<fp32, fp32>) {
-        act_x = silu_approx(act_elt);
+        act_x2 = silu_approx_x2(act_elt);
       } else {
-        act_x = OP(act_elt, p);
+        act_x2 = 2.0f * OP(act_elt, p);
       }
     }
 
-    float elt = act_x * gate_elt * prob;
+    float elt = act_x2 * gate_elt * half_prob;
 
     // Match round-trip precision of the plain quantize path (cast through IType).
     if constexpr (!std::is_same_v<IType, float>) {
@@ -319,9 +327,10 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_scaled_swiglu_mxfp8_k
       // Stage this chunk's per-token prob once. is_job_valid guarantees every row of a
       // valid 128-aligned block is a real token of this expert, so the absolute token
       // index is always in [0, T). prob rides along in the input (model) dtype,
-      // matching cuDNN fc1_prob_tensor.
+      // matching cuDNN fc1_prob_tensor. Stored pre-halved to pair with the doubled
+      // activations; exact, because 0.5 is a power of two.
       for (size_t row = threadIdx.x; row < CHUNK_DIM_Y; row += THREADS_PER_CHUNK) {
-        sProb_ptr[row] = static_cast<float>(prob_ptr[block_offset_Y + row]);
+        sProb_ptr[row] = 0.5f * static_cast<float>(prob_ptr[block_offset_Y + row]);
       }
 
       __syncthreads();

@@ -36,6 +36,8 @@ the activation is computed. That choice changes what the speedup means:
                    Python overhead: ScaledSwiGLU runs tex.swiglu and then a *separate*
                    kernel to apply the per-token scale, so the bf16 intermediate makes
                    one extra DRAM round trip. Operation-fuser overhead adds to that.
+  fused-clamped    the clamped instantiation of the same fused kernel. No unfused
+                   counterpart here, so read it against plain ``fused``.
 
 Shapes must respect the kernel's restrictions: every expert's token count is
 divisible by 128, and the GEMM-swizzled scale layout also needs F divisible by
@@ -51,7 +53,7 @@ from __future__ import annotations
 import argparse
 import json
 from dataclasses import dataclass
-from typing import Callable, List, Optional
+from typing import Callable, List, Optional, Tuple
 
 # IMPORTANT: import transformer_engine before torch to avoid cublasLt symbol-resolution
 # issues caused by torch's bundled CUDA libs.
@@ -71,7 +73,7 @@ TOKEN_ALIGNMENT = 128
 # The swizzled scale layout tiles the transposed scale matrix 128-wide along F.
 SWIZZLE_F_ALIGNMENT = 128
 
-VARIANTS = ("fused", "unfused-eager", "unfused-compiled", "unfused-te-op")
+VARIANTS = ("fused", "fused-clamped", "unfused-eager", "unfused-compiled", "unfused-te-op")
 
 
 @dataclass
@@ -203,9 +205,16 @@ def _make_runner(
     first_dims: Optional[torch.Tensor],
     compiled_activation: Optional[Callable],
     te_op_activation: Optional[Callable],
+    clamp: Tuple[float, float, float],
 ) -> Callable[[torch.Tensor, torch.Tensor], object]:
     if variant == "fused":
         return lambda x, prob: tex.group_scaled_swiglu(x, prob, quantizer, num_groups, first_dims)
+
+    if variant == "fused-clamped":
+        limit, alpha, glu_linear_offset = clamp
+        return lambda x, prob: tex.group_scaled_clamped_swiglu(
+            x, prob, quantizer, num_groups, limit, alpha, glu_linear_offset, first_dims
+        )
 
     activation = {
         "unfused-eager": _scaled_swiglu_bf16,
@@ -332,6 +341,7 @@ def run_case(
     loop: str,
     compiled_activation: Optional[Callable],
     te_op_activation: Optional[Callable],
+    clamp: Tuple[float, float, float],
 ) -> Optional[CaseResult]:
     quantizer = _make_quantizer(swizzled_scales)
     first_dims = None
@@ -347,7 +357,14 @@ def run_case(
     probs = [torch.rand(tokens, dtype=torch.bfloat16, device="cuda") for _ in range(num_buffers)]
 
     runner = _make_runner(
-        variant, quantizer, hidden, num_groups, first_dims, compiled_activation, te_op_activation
+        variant,
+        quantizer,
+        hidden,
+        num_groups,
+        first_dims,
+        compiled_activation,
+        te_op_activation,
+        clamp,
     )
 
     for it in range(warmup):
@@ -366,7 +383,9 @@ def run_case(
         actual_iters = iters
 
     min_bytes = (
-        _fused_bytes(tokens, hidden) if variant == "fused" else _unfused_bytes(tokens, hidden)
+        _fused_bytes(tokens, hidden)
+        if variant.startswith("fused")
+        else _unfused_bytes(tokens, hidden)
     )
     per_iter_us = elapsed_ms * 1000.0 / actual_iters
     bw_TBps = min_bytes / (per_iter_us * 1.0e-6) / 1.0e12
@@ -469,6 +488,14 @@ def main() -> None:
         default="both",
         help="Python loop, replayed CUDA graph, or both. Default both.",
     )
+    parser.add_argument(
+        "--clamp",
+        type=float,
+        nargs=3,
+        metavar=("LIMIT", "ALPHA", "OFFSET"),
+        default=(7.0, 1.702, 1.0),
+        help="limit, alpha, glu_linear_offset for the fused-clamped variant.",
+    )
     parser.add_argument("--num-buffers", type=int, default=4)
     parser.add_argument("--warmup", type=int, default=20)
     parser.add_argument("--iters", type=int, default=200)
@@ -547,6 +574,7 @@ def main() -> None:
                         loop=loop,
                         compiled_activation=compiled_activation,
                         te_op_activation=te_op_activation,
+                        clamp=tuple(args.clamp),
                     )
                     if result is None:
                         continue
