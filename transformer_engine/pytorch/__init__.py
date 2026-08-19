@@ -20,36 +20,22 @@ load_framework_extension("torch")
 
 # Device type and platform globals — live here because torch cannot be imported
 # at the top-level transformer_engine package (shared with JAX).
-# Only set defaults if the plugin hasn't already patched them.
-if not hasattr(transformer_engine, "TE_DEVICE_TYPE"):
-    transformer_engine.TE_DEVICE_TYPE = "cuda"
-TE_DEVICE_TYPE = transformer_engine.TE_DEVICE_TYPE
+# Use plugin-set values if available, otherwise fall back to CUDA defaults.
+transformer_engine.TE_DEVICE_TYPE = getattr(transformer_engine, "TE_DEVICE_TYPE", "cuda")
+transformer_engine.TE_PLATFORM = getattr(transformer_engine, "TE_PLATFORM", torch.cuda)
 
 
-def te_device_type(default: str = "cuda") -> str:
-    try:
-        return transformer_engine.TE_DEVICE_TYPE
-    except Exception:
-        return default
+def te_device_type() -> str:
+    return transformer_engine.TE_DEVICE_TYPE
 
 
-if not hasattr(transformer_engine, "te_device_type"):
-    transformer_engine.te_device_type = te_device_type
-
-if not hasattr(transformer_engine, "TE_PLATFORM"):
-    transformer_engine.TE_PLATFORM = torch.cuda
-TE_PLATFORM = transformer_engine.TE_PLATFORM
+def te_platform():
+    return transformer_engine.TE_PLATFORM
 
 
-def te_platform(default=torch.cuda):
-    try:
-        return transformer_engine.TE_PLATFORM
-    except Exception:
-        return default
+transformer_engine.te_device_type = te_device_type
+transformer_engine.te_platform = te_platform
 
-
-if not hasattr(transformer_engine, "te_platform"):
-    transformer_engine.te_platform = te_platform
 
 from transformer_engine.pytorch.module import LayerNormLinear
 from transformer_engine.pytorch.module import Linear

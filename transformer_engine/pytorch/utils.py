@@ -553,7 +553,7 @@ def canonicalize_device(device: Optional[torch.device | str]) -> torch.device:
         # Use default CUDA device
         device = torch.get_default_device()
         if device.type != te_device_type():
-            device = torch.device(te_device_type(),te_platform().current_device())
+            device = torch.device(te_device_type(), te_platform().current_device())
     elif not isinstance(device, torch.device):
         device = torch.device(device)
     if device.type == te_device_type() and device.index is None:

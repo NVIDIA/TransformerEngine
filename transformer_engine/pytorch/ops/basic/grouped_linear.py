@@ -12,6 +12,7 @@ import math
 from typing import Any, Optional
 
 import torch
+
 import transformer_engine_torch as tex
 
 from transformer_engine import te_device_type

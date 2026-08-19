@@ -1104,10 +1104,6 @@ def get_attention_backend(
             logger.debug("Disabling FusedAttention for determinism reasons with post_scale_bias")
             use_fused_attention = False
             fused_attention_backend = None
-        if is_training and device_compute_capability >= (10, 0):
-            logger.debug("Disabling FusedAttention for determinism reasons on Blackwell")
-            use_fused_attention = False
-            fused_attention_backend = None
 
     # use_flash_attention may have been set above
     use_flash_attention_2 = use_flash_attention and use_flash_attention_2
@@ -1508,9 +1504,7 @@ def get_alibi(
         _alibi_cache["_max_seqlen_q"], _alibi_cache["_max_seqlen_kv"] = max_seqlen_q, max_seqlen_kv
         _alibi_cache["_bottom_right_alignment"] = bottom_right_alignment
         bias_dtype = torch.float32 if bias_dtype is None else bias_dtype
-        _alibi_cache["_alibi_bias"] = bias.contiguous().to(
-            dtype=bias_dtype, device=te_device_type()
-        )
+        _alibi_cache["_alibi_bias"] = bias.contiguous().to(dtype=bias_dtype)
         _alibi_cache["_alibi_bias_require_update"] = False
 
     return _alibi_cache["_alibi_slopes"], _alibi_cache["_alibi_bias"]
