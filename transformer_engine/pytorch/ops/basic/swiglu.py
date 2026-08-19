@@ -652,22 +652,16 @@ class ScaledSiTUGLU(_ScaledGLU):
         Positive up-branch soft-cap parameter.
     glu_interleave_size : int, optional
         Block-interleaved GLU layout, as in :class:`ScaledSwiGLU`.
-    activation_recompute_in_mlp : bool, default = False
-        Enable activation recomputation in the fused grouped MLP.
     """
 
     def __init__(
         self,
         glu_interleave_size: Optional[int] = None,
         *,
-        activation_recompute_in_mlp: bool = False,
         beta1: float = 4.0,
         beta2: float = 25.0,
     ) -> None:
-        super().__init__(
-            glu_interleave_size,
-            activation_recompute_in_mlp=activation_recompute_in_mlp,
-        )
+        super().__init__(glu_interleave_size)
         self.beta1 = float(beta1)
         self.beta2 = float(beta2)
         if not math.isfinite(self.beta1) or self.beta1 <= 0.0:

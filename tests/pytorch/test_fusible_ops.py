@@ -3113,7 +3113,6 @@ class TestBasicOps:
         "op_cls",
         (
             te_ops.ScaledSwiGLU,
-            te_ops.ScaledSiTUGLU,
             te_ops.ScaledSReLU,
             te_ops.ScaledClampedQGeGLU,
         ),
