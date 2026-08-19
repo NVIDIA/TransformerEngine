@@ -32,13 +32,11 @@ as op inputs:
   * ``_TensorOrQuantizedAdapter`` -- a field that may be a plain tensor, a bare
     quantized storage, or ``None``: three slots (the tensor, its flat inner
     buffers, and a ``__kind__`` tag) so a quantized tensor crosses as its buffers.
-  * ``_QuantizerAdapter`` -- a quantizer, baked into the graph as a value-opaque
-    constant.
   * ``_ProcessGroupAdapter`` -- a ProcessGroup, carried as its c10d registry
     name and re-resolved inside the op.
   * ``_SimpleBundleAdapter`` -- every remaining simple value (scalars, enums,
-    sizes, nested collections of them), gathered into one ``OpaqueValueBundle``
-    slot.
+    sizes, quantizers -- value-opaque constants baked into the graph -- and
+    nested collections of them), gathered into one ``OpaqueValueBundle`` slot.
   * ``_UnsupportedAdapter`` -- fallback for a field no adapter can encode; allowed
     only when its value is trivial (``None`` / all-``None``) at call time.
 
@@ -586,42 +584,6 @@ class _TensorAdapter(_Adapter):
         return 0
 
 
-class _QuantizerAdapter(_Adapter):
-    """``Quantizer`` / ``Optional[Quantizer]`` -> one own ``OpaqueValueBundle`` slot.
-
-    Each quantizer gets its own dedicated slot. The field is annotated with the
-    base ``Quantizer`` (not itself a registered opaque type), so the simple
-    bundle would not claim it.
-    """
-
-    QUANTIZER_KEY = "q"
-
-    def __init__(self, name: str) -> None:
-        self.name = name
-
-    def meta_slot(self) -> str:
-        """Opaque quantizer metadata slot name."""
-        return self.name + "__q"
-
-    @classmethod
-    def try_build(cls, name: str, annot: Any) -> Optional["_QuantizerAdapter"]:
-        stripped, _ = _strip_optional(annot)
-        if isinstance(stripped, type) and issubclass(stripped, Quantizer):
-            return cls(name)
-        return None
-
-    def schema_slots(self) -> List[Tuple[str, str]]:
-        return [(self.meta_slot(), _OPAQUE_VALUE_BUNDLE_TYPE_NAME)]
-
-    def to_slots(self, owner: Any) -> Dict[str, Any]:
-        return {
-            self.meta_slot(): OpaqueValueBundle({self.QUANTIZER_KEY: getattr(owner, self.name)})
-        }
-
-    def from_slots(self, args: Dict[str, Any], kwargs: Dict[str, Any]) -> None:
-        kwargs[self.name] = args[self.meta_slot()][self.QUANTIZER_KEY]
-
-
 class _ProcessGroupAdapter(_Adapter):
     """``ProcessGroup`` -> its c10d registry name in one ``OpaqueValueBundle`` slot.
 
@@ -684,6 +646,10 @@ class _SimpleBundleAdapter(_Adapter):
         if annot in OpaqueValueBundle.PRIMITIVE_TYPES:
             return True
         if isinstance(annot, type) and issubclass(annot, Enum):
+            return True
+        # Quantizers are value-opaque constants; the abstract ``Quantizer``
+        # annotation itself is not a registered opaque type, so match by base.
+        if isinstance(annot, type) and issubclass(annot, Quantizer):
             return True
         if (
             isinstance(annot, type)
@@ -761,7 +727,6 @@ _FIELD_ADAPTERS: Tuple[type, ...] = (
     _TensorOrQuantizedAdapter,
     _TensorAdapter,
     _ProcessGroupAdapter,
-    _QuantizerAdapter,
 )
 
 
