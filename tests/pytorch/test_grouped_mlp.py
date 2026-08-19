@@ -8,6 +8,8 @@ from collections.abc import Iterable
 import os
 import math
 import random
+import sys
+import types
 from typing import Optional
 
 import pytest
@@ -18,6 +20,7 @@ import transformer_engine.pytorch as te
 from transformer_engine.pytorch.constants import TE_DType
 import transformer_engine.pytorch.ops.fused.grouped_mlp as grouped_mlp_module
 from transformer_engine.pytorch.ops.fused.grouped_mlp import (
+    _cudnn_frontend_supports_grouped_gemm_situglu,
     _cudnn_frontend_supports_grouped_gemm_srelu,
     _cudnn_frontend_version_supported,
 )
@@ -81,6 +84,28 @@ def _reset_rng_states_per_test():
     """Restore torch, CUDA, and Python ``random`` before each test in this module."""
     reset_rng_states()
     yield
+
+
+def test_cudnn_frontend_situglu_feature_detection(monkeypatch) -> None:
+    """Detect grouped SiTU-GLU from callable signatures, not package versions."""
+
+    def _with_situglu(*, situ_beta1=4.0, situ_beta2=25.0):
+        del situ_beta1, situ_beta2
+
+    def _without_situglu():
+        return None
+
+    fake_cudnn = types.ModuleType("cudnn")
+    fake_cudnn.grouped_gemm_glu_wrapper_sm100 = _with_situglu
+    fake_cudnn.grouped_gemm_dglu_wrapper_sm100 = _with_situglu
+    monkeypatch.setitem(sys.modules, "cudnn", fake_cudnn)
+    _cudnn_frontend_supports_grouped_gemm_situglu.cache_clear()
+    assert _cudnn_frontend_supports_grouped_gemm_situglu()
+
+    fake_cudnn.grouped_gemm_dglu_wrapper_sm100 = _without_situglu
+    _cudnn_frontend_supports_grouped_gemm_situglu.cache_clear()
+    assert not _cudnn_frontend_supports_grouped_gemm_situglu()
+    _cudnn_frontend_supports_grouped_gemm_situglu.cache_clear()
 
 
 def maybe_skip_quantization(
@@ -946,6 +971,7 @@ class TestGroupedMLPFusedOp:
         split_alignment: int = 256,
         delay_wgrad_compute: bool = False,
         activation: str,
+        situ_betas: tuple[float, float] = (4.0, 25.0),
     ) -> None:
         """GroupedLinear + scaled activation + GroupedLinear"""
 
@@ -965,6 +991,7 @@ class TestGroupedMLPFusedOp:
 
         activation_is_glu = activation in (
             "scaled_swiglu",
+            "scaled_situglu",
             "scaled_clamped_qgeglu",
             "scaled_clamped_qgeglu_custom",
         )
@@ -1106,6 +1133,16 @@ class TestGroupedMLPFusedOp:
             if activation == "scaled_swiglu":
                 x1, x2 = x.chunk(2, dim=-1)
                 return torch.nn.functional.silu(x1) * x2
+            if activation == "scaled_situglu":
+                x1, x2 = x.chunk(2, dim=-1)
+                beta1, beta2 = situ_betas
+                return (
+                    beta1
+                    * torch.tanh(x1 / beta1)
+                    * torch.sigmoid(x1)
+                    * beta2
+                    * torch.tanh(x2 / beta2)
+                )
             if activation.startswith("scaled_clamped_qgeglu"):
                 x1, x2 = x.chunk(2, dim=-1)
                 lim = torch.tensor(geglu_limit, device=x1.device, dtype=x1.dtype)
@@ -1140,6 +1177,12 @@ class TestGroupedMLPFusedOp:
         def _make_scaled_act():
             if activation == "scaled_swiglu":
                 return te.ops.ScaledSwiGLU(glu_interleave_size=glu_interleave_size)
+            if activation == "scaled_situglu":
+                return te.ops.ScaledSiTUGLU(
+                    glu_interleave_size=glu_interleave_size,
+                    beta1=situ_betas[0],
+                    beta2=situ_betas[1],
+                )
             if activation == "scaled_clamped_qgeglu_custom":
                 return te.ops.ScaledClampedQGeGLU(
                     glu_interleave_size=glu_interleave_size,
@@ -1238,9 +1281,13 @@ class TestGroupedMLPFusedOp:
 
         # Check for expected fusions
         cudnn_frontend_supports_grouped_mlp = (
-            _cudnn_frontend_supports_grouped_gemm_srelu()
-            if activation == "scaled_srelu"
-            else _cudnn_frontend_version_supported()
+            _cudnn_frontend_supports_grouped_gemm_situglu()
+            if activation == "scaled_situglu"
+            else (
+                _cudnn_frontend_supports_grouped_gemm_srelu()
+                if activation == "scaled_srelu"
+                else _cudnn_frontend_version_supported()
+            )
         )
         expected_grouped_mlp_fusion = cudnn_frontend_supports_grouped_mlp and (
             (
@@ -1336,6 +1383,20 @@ class TestGroupedMLPFusedOp:
         elif single_grouped_weight:
             assert_close(fc1.weight.grad, fc1_w_ref_grad, **tols)
             assert_close(fc2.weight.grad, fc2_w_ref_grad, **tols)
+
+    @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
+    @pytest.mark.parametrize("situ_betas", ((4.0, 25.0), (2.0, 8.0)))
+    def test_grouped_mlp_situglu_mxfp8(self, situ_betas: tuple[float, float]) -> None:
+        """Grouped MLP SiTU-GLU path, fused when the cuDNN feature is available."""
+        self.test_grouped_mlp(
+            group_size=4,
+            bias=False,
+            hidden_size=128,
+            quantization="mxfp8",
+            single_grouped_weight=False,
+            activation="scaled_situglu",
+            situ_betas=situ_betas,
+        )
 
     @pytest.mark.parametrize("weight_requires_grad", (False, True))
     def test_grouped_mlp_prequantized_mxfp8_input(

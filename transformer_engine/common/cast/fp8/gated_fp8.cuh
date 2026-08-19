@@ -165,10 +165,13 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
       float act_elt = static_cast<float>(in_act_sh_curr[shmem_idx]);
       float gate_elt = static_cast<float>(in_gate_sh_curr[shmem_idx]);
-      bool dgate_elt = true;  // gating is ideally an identity function
+      float dgate_elt = 1.0f;  // gating is ideally an identity function
       if constexpr (std::is_same<ParamOP, ClampedSwiGLUParam>::value) {
         dgate_elt = gate_elt <= p.limit && gate_elt >= -p.limit;
         gate_elt = min(max(-p.limit, gate_elt), p.limit) + p.glu_linear_offset;
+      } else if constexpr (std::is_same<ParamOP, SiTUGLUParam>::value) {
+        dgate_elt = dsitu_up<float, float>(gate_elt, p);
+        gate_elt = situ_up<float, float>(gate_elt, p);
       }
 
       if constexpr (IS_BWD) {
@@ -186,6 +189,9 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
           } else {
             dact_x = 0.0f;
           }
+        } else if constexpr (std::is_same<ParamOP, SiTUGLUParam>::value) {
+          act_x = ActOP(x, p);
+          dact_x = DActOP(x, p);
         } else {
           if constexpr ((ActOP == &silu<fp32, fp32>) && (DActOP == &dsilu<fp32, fp32>)) {
             const float s = sigmoidf(x);
@@ -197,7 +203,12 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
           }
         }
         float after_dact = dact_x * grad_elt * gate_elt;
-        float after_dgate = dgate_elt ? act_x * grad_elt : 0.0f;
+        float after_dgate;
+        if constexpr (std::is_same<ParamOP, SiTUGLUParam>::value) {
+          after_dgate = dgate_elt * act_x * grad_elt;
+        } else {
+          after_dgate = dgate_elt ? act_x * grad_elt : 0.0f;
+        }
 
         out_act_sh_curr[shmem_idx] = static_cast<OType>(scale * after_dact);
         out_gate_sh_curr[shmem_idx] = static_cast<OType>(scale * after_dgate);

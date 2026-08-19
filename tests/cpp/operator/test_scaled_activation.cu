@@ -4,16 +4,15 @@
  * See LICENSE for license information.
  ************************************************************************/
 
+#include <cuda_runtime.h>
+#include <gtest/gtest.h>
+#include <transformer_engine/activation.h>
+
 #include <algorithm>
 #include <cmath>
 #include <memory>
 #include <string>
 #include <tuple>
-
-#include <cuda_runtime.h>
-#include <gtest/gtest.h>
-
-#include <transformer_engine/activation.h>
 
 #include "../test_common.h"
 
@@ -23,6 +22,7 @@ namespace {
 
 enum class ScaledActivationCase {
   kSwiGLU,
+  kSiTUGLU,
   kClampedSwiGLU,
   kSReLU,
 };
@@ -30,11 +30,15 @@ enum class ScaledActivationCase {
 constexpr float kClampedLimit = 0.5f;
 constexpr float kClampedAlpha = 1.702f;
 constexpr float kClampedLinearOffset = 0.5f;
+constexpr float kSiTUBeta1 = 4.0f;
+constexpr float kSiTUBeta2 = 25.0f;
 
 const char *activation_name(ScaledActivationCase activation) {
   switch (activation) {
     case ScaledActivationCase::kSwiGLU:
       return "scaled_swiglu";
+    case ScaledActivationCase::kSiTUGLU:
+      return "scaled_situglu";
     case ScaledActivationCase::kClampedSwiGLU:
       return "scaled_clamped_swiglu";
     case ScaledActivationCase::kSReLU:
@@ -66,6 +70,19 @@ inline void gated_grads(const ScaledActivationCase activation, const float act_i
       *unscaled = act * linear_in;
       *dact = test::dsilu(act_in) * linear_in;
       *dlinear = act;
+      return;
+    }
+    case ScaledActivationCase::kSiTUGLU: {
+      const float gate_tanh = tanhf(act_in / kSiTUBeta1);
+      const float gate_sigmoid = 1.0f / (1.0f + expf(-act_in));
+      const float gate = kSiTUBeta1 * gate_tanh * gate_sigmoid;
+      const float up_tanh = tanhf(linear_in / kSiTUBeta2);
+      const float up = kSiTUBeta2 * up_tanh;
+      *unscaled = gate * up;
+      *dact = ((1.0f - gate_tanh * gate_tanh) * gate_sigmoid +
+               kSiTUBeta1 * gate_tanh * gate_sigmoid * (1.0f - gate_sigmoid)) *
+              up;
+      *dlinear = gate * (1.0f - up_tanh * up_tanh);
       return;
     }
     case ScaledActivationCase::kClampedSwiGLU: {
@@ -158,9 +175,8 @@ void run_scaled_activation_test(ScaledActivationCase activation, const size_t ro
   std::unique_ptr<DataT[]> ref_grad_scales = std::make_unique<DataT[]>(rows);
 
   compute_reference(activation, input.rowwise_cpu_dptr<DataT>(), scales.rowwise_cpu_dptr<ScaleT>(),
-                    grad_output.rowwise_cpu_dptr<DataT>(), ref_output.get(),
-                    ref_grad_input.get(), ref_grad_scales.get(), rows, hidden, interleave,
-                    compute_grad_scales);
+                    grad_output.rowwise_cpu_dptr<DataT>(), ref_output.get(), ref_grad_input.get(),
+                    ref_grad_scales.get(), rows, hidden, interleave, compute_grad_scales);
 
   switch (activation) {
     case ScaledActivationCase::kSwiGLU:
@@ -168,13 +184,20 @@ void run_scaled_activation_test(ScaledActivationCase activation, const size_t ro
       nvte_scaled_dswiglu(grad_output.data(), input.data(), scales.data(), grad_input.data(),
                           compute_grad_scales ? grad_scales.data() : nullptr, interleave, 0);
       break;
+    case ScaledActivationCase::kSiTUGLU:
+      nvte_scaled_situglu(input.data(), scales.data(), output.data(), kSiTUBeta1, kSiTUBeta2,
+                          interleave, 0);
+      nvte_scaled_dsituglu(grad_output.data(), input.data(), scales.data(), grad_input.data(),
+                           compute_grad_scales ? grad_scales.data() : nullptr, kSiTUBeta1,
+                           kSiTUBeta2, interleave, 0);
+      break;
     case ScaledActivationCase::kClampedSwiGLU:
       nvte_scaled_clamped_swiglu(input.data(), scales.data(), output.data(), kClampedLimit,
                                  kClampedAlpha, kClampedLinearOffset, interleave, 0);
-      nvte_scaled_clamped_dswiglu(
-          grad_output.data(), input.data(), scales.data(), grad_input.data(),
-          compute_grad_scales ? grad_scales.data() : nullptr, kClampedLimit, kClampedAlpha,
-          kClampedLinearOffset, interleave, 0);
+      nvte_scaled_clamped_dswiglu(grad_output.data(), input.data(), scales.data(),
+                                  grad_input.data(),
+                                  compute_grad_scales ? grad_scales.data() : nullptr, kClampedLimit,
+                                  kClampedAlpha, kClampedLinearOffset, interleave, 0);
       break;
     case ScaledActivationCase::kSReLU:
       nvte_scaled_srelu(input.data(), scales.data(), output.data(), 0);
@@ -202,10 +225,8 @@ void run_scaled_activation_test(ScaledActivationCase activation, const size_t ro
 }
 
 class ScaledActivationTest
-    : public ::testing::TestWithParam<
-          std::tuple<ScaledActivationCase, DType, DType, std::pair<size_t, size_t>, int64_t,
-                     bool>> {
-};
+    : public ::testing::TestWithParam<std::tuple<ScaledActivationCase, DType, DType,
+                                                 std::pair<size_t, size_t>, int64_t, bool>> {};
 
 std::string test_name_generator(
     const testing::TestParamInfo<ScaledActivationTest::ParamType> &info) {
@@ -264,28 +285,29 @@ TEST_P(ScaledActivationTest, ForwardBackward) {
 INSTANTIATE_TEST_SUITE_P(
     OperatorTest_ScaledActivation, ScaledActivationTest,
     ::testing::Combine(
-        ::testing::Values(ScaledActivationCase::kSwiGLU, ScaledActivationCase::kClampedSwiGLU,
-                          ScaledActivationCase::kSReLU),
-        ::testing::Values(DType::kFloat32, DType::kBFloat16),   // data dtype
-        ::testing::Values(DType::kFloat32, DType::kBFloat16),   // scale dtype
-        ::testing::Values(std::pair<size_t, size_t>{17, 64},      // aligned + interleaved
-                          std::pair<size_t, size_t>{13, 100},     // scalar fallback
+        ::testing::Values(ScaledActivationCase::kSwiGLU, ScaledActivationCase::kSiTUGLU,
+                          ScaledActivationCase::kClampedSwiGLU, ScaledActivationCase::kSReLU),
+        ::testing::Values(DType::kFloat32, DType::kBFloat16),      // data dtype
+        ::testing::Values(DType::kFloat32, DType::kBFloat16),      // scale dtype
+        ::testing::Values(std::pair<size_t, size_t>{17, 64},       // aligned + interleaved
+                          std::pair<size_t, size_t>{13, 100},      // scalar fallback
                           std::pair<size_t, size_t>{1024, 2048}),  // large FFN-ish width
-        ::testing::Values(0, 32),                                // contiguous + interleaved
-        ::testing::Values(false, true)),                         // grad_act_scales off / on
+        ::testing::Values(0, 32),                                  // contiguous + interleaved
+        ::testing::Values(false, true)),                           // grad_act_scales off / on
     test_name_generator);
 
 // Keep FP16 coverage focused on representative aligned and scalar-fallback shapes instead of
 // multiplying it across the full shape matrix above.
 INSTANTIATE_TEST_SUITE_P(
     OperatorTest_ScaledActivation_FP16, ScaledActivationTest,
-    ::testing::Combine(
-        ::testing::Values(ScaledActivationCase::kSwiGLU, ScaledActivationCase::kClampedSwiGLU,
-                          ScaledActivationCase::kSReLU),
-        ::testing::Values(DType::kFloat16),                       // data dtype
-        ::testing::Values(DType::kFloat32, DType::kFloat16),      // scale dtype
-        ::testing::Values(std::pair<size_t, size_t>{17, 64},      // aligned/interleaved
-                          std::pair<size_t, size_t>{13, 100}),    // scalar fallback
-        ::testing::Values(0, 32),                                 // contiguous + interleaved
-        ::testing::Values(false, true)),                          // grad_act_scales off / on
+    ::testing::Combine(::testing::Values(ScaledActivationCase::kSwiGLU,
+                                         ScaledActivationCase::kSiTUGLU,
+                                         ScaledActivationCase::kClampedSwiGLU,
+                                         ScaledActivationCase::kSReLU),
+                       ::testing::Values(DType::kFloat16),                   // data dtype
+                       ::testing::Values(DType::kFloat32, DType::kFloat16),  // scale dtype
+                       ::testing::Values(std::pair<size_t, size_t>{17, 64},  // aligned/interleaved
+                                         std::pair<size_t, size_t>{13, 100}),  // scalar fallback
+                       ::testing::Values(0, 32),         // contiguous + interleaved
+                       ::testing::Values(false, true)),  // grad_act_scales off / on
     test_name_generator);

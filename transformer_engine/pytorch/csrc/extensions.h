@@ -285,6 +285,11 @@ py::object swiglu(const at::Tensor &input, py::handle quantizer);
 
 py::object dswiglu(const at::Tensor &grad, const at::Tensor &input, py::handle quantizer);
 
+py::object situglu(const at::Tensor &input, py::handle quantizer, float beta1, float beta2);
+
+py::object dsituglu(const at::Tensor &grad, const at::Tensor &input, py::handle quantizer,
+                    float beta1, float beta2);
+
 py::object clamped_swiglu(const at::Tensor &input, py::handle quantizer, float limit, float alpha,
                           float glu_linear_offset);
 
@@ -294,6 +299,10 @@ py::object clamped_dswiglu(const at::Tensor &grad, const at::Tensor &input, py::
 /* Scaled activation */
 py::object scaled_swiglu(const at::Tensor &input, const at::Tensor &act_scales,
                          py::handle quantizer, int64_t glu_interleave_size);
+
+py::object scaled_situglu(const at::Tensor &input, const at::Tensor &act_scales,
+                          py::handle quantizer, float beta1, float beta2,
+                          int64_t glu_interleave_size);
 
 py::object scaled_clamped_swiglu(const at::Tensor &input, const at::Tensor &act_scales,
                                  py::handle quantizer, float limit, float alpha,
@@ -305,6 +314,10 @@ py::object scaled_srelu(const at::Tensor &input, const at::Tensor &act_scales,
 py::tuple scaled_dswiglu(const at::Tensor &grad, const at::Tensor &input,
                          const at::Tensor &act_scales, py::handle quantizer,
                          int64_t glu_interleave_size, bool compute_scale_grad);
+
+py::tuple scaled_dsituglu(const at::Tensor &grad, const at::Tensor &input,
+                          const at::Tensor &act_scales, py::handle quantizer, float beta1,
+                          float beta2, int64_t glu_interleave_size, bool compute_scale_grad);
 
 py::tuple scaled_clamped_dswiglu(const at::Tensor &grad, const at::Tensor &input,
                                  const at::Tensor &act_scales, py::handle quantizer, float limit,
