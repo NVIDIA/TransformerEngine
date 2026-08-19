@@ -2,8 +2,7 @@
 #
 # See LICENSE for license information.
 
-"""MegaMoE-backed expert-parallel MoE fusion (cudnn.moe_ep.MoeEp).
-"""
+"""MegaMoE-backed expert-parallel MoE fusion (cudnn.moe_ep.MoeEp)."""
 
 from __future__ import annotations
 
@@ -36,22 +35,16 @@ def _mxfp8_weight_k_major(weight: MXFP8Tensor) -> tuple[torch.Tensor, torch.Tens
     """
     if weight._with_gemm_swizzled_scales:
         raise NotImplementedError(
-            "FusedMoeEp requires unswizzled MXFP8 weight scales, "
-            "got a GEMM-swizzled tensor"
+            "FusedMoeEp requires unswizzled MXFP8 weight scales, got a GEMM-swizzled tensor"
         )
     if weight._rowwise_data is None or weight._rowwise_scale_inv is None:
         raise ValueError("MXFP8 weight is missing rowwise data or scales")
     out_features, in_features = weight.size()
     if in_features % MXFP8_BLOCK_SCALING_SIZE != 0:
         raise ValueError(
-            f"MXFP8 weight K={in_features} is not divisible by "
-            f"{MXFP8_BLOCK_SCALING_SIZE}"
+            f"MXFP8 weight K={in_features} is not divisible by {MXFP8_BLOCK_SCALING_SIZE}"
         )
-    data = (
-        weight._rowwise_data.view(torch.float8_e4m3fn)
-        .transpose(0, 1)
-        .contiguous()
-    )
+    data = weight._rowwise_data.view(torch.float8_e4m3fn).transpose(0, 1).contiguous()
     scale = (
         weight._rowwise_scale_inv[:out_features, : in_features // MXFP8_BLOCK_SCALING_SIZE]
         .view(torch.float8_e8m0fnu)
@@ -370,19 +363,11 @@ class FusedMoeEp(FusedOperation):
 
         # MegaMoE returns float32 grads in (E, in, out); TE parameters are (out, in).
         fc1_param_grads = [
-            (
-                grad_fc1[idx].transpose(0, 1).to(dtype=weight.dtype)
-                if weight.requires_grad
-                else None
-            )
+            (grad_fc1[idx].transpose(0, 1).to(dtype=weight.dtype) if weight.requires_grad else None)
             for idx, weight in enumerate(_weight_list(self.fc1))
         ]
         fc2_param_grads = [
-            (
-                grad_fc2[idx].transpose(0, 1).to(dtype=weight.dtype)
-                if weight.requires_grad
-                else None
-            )
+            (grad_fc2[idx].transpose(0, 1).to(dtype=weight.dtype) if weight.requires_grad else None)
             for idx, weight in enumerate(_weight_list(self.fc2))
         ]
         return (
@@ -430,4 +415,3 @@ register_forward_backward_fusion(fuse_ops, prepend=True)
 
 
 __all__ = ["FusedMoeEp"]
-

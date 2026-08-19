@@ -735,9 +735,7 @@ class TestEP(unittest.TestCase):
         torch.testing.assert_close(
             seq_tokens.grad, grad_tokens.to(dtype=seq_tokens.dtype), **tolerances
         )
-        torch.testing.assert_close(
-            seq_topk_weights.grad, grad_topk_weights.float(), **tolerances
-        )
+        torch.testing.assert_close(seq_topk_weights.grad, grad_topk_weights.float(), **tolerances)
         for op, ref_grad in ((fc1, grad_fc1), (fc2, grad_fc2)):
             for expert in range(NUM_LOCAL_EXPERTS):
                 seq_grad = getattr(op, f"weight{expert}").grad
@@ -1054,4 +1052,3 @@ if __name__ == "__main__":
     release_symm_mem_pool()
     dist.destroy_process_group()
     sys.exit(0 if result.wasSuccessful() else 1)
-
