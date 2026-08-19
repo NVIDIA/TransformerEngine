@@ -171,7 +171,7 @@ def _megamoe_supported(buffer, fc1: GroupedLinear, fc2: GroupedLinear) -> bool:
         return False
     if buffer.max_tokens_per_rank is None or buffer.max_tokens_per_rank <= 0:
         return False
-    if buffer.hidden_dim % 128 != 0 or fc2.in_features % 128 != 0:
+    if buffer.hidden_dim % 128 != 0 or fc2.in_features % 256 != 0:
         return False
     if buffer.top_k > 32:
         return False

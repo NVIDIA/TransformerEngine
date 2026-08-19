@@ -178,6 +178,14 @@ def _degroup_mxfp8(recv_grouped, valid_counts=None):
     return torch.cat([p.dequantize()[:v] for p, v in zip(parts, valid_counts)], dim=0)
 
 
+def _reference_weights(op):
+    """Pack GroupedLinear weights into MoeEpReference ``(E, in, out)`` layout."""
+    packed = _pack_grouped_linear_weights(op, block_scaled_cls=BlockScaledTensor)
+    if isinstance(packed, torch.Tensor):
+        return packed.detach()
+    return packed
+
+
 class _Cfg:
     rank: int
     world_size: int
@@ -612,7 +620,7 @@ class TestEP(unittest.TestCase):
 
     @_eager_test_include
     def test_bf16_moe_sequential_vs_reference(self):
-        """Fused MegaMoE Sequential matches the MXFP8-QDQ PyTorch reference."""
+        """Unfused BF16 Sequential matches a BF16 ``MoeEpReference``."""
         self._run_moe_sequential_vs_reference(quantization=None)
 
     @_eager_test_include
@@ -621,12 +629,11 @@ class TestEP(unittest.TestCase):
         self._run_moe_sequential_vs_reference(quantization="mxfp8")
 
     def _run_moe_sequential_vs_reference(self, *, quantization):
-        """Compare Sequential (MegaMoE when supported) to ``MoeEpReference``.
+        """Compare Sequential to ``MoeEpReference``.
 
-        MegaMoE quantizes GEMM operands to MXFP8 and accumulates in FP32.
-        Combine and public output are BF16 on the current device path. The
-        reference QDQ those operands then uses FP32 matmuls because PyTorch
-        cannot run MXFP8 GEMMs.
+        MXFP8 Sequential uses MegaMoE when supported; the reference QDQ GEMM
+        operands to MXFP8 and matmuls in FP32. BF16 Sequential stays unfused
+        and the reference runs FP32 GEMMs with no QDQ.
         """
         if not EAGER:
             self.skipTest("variable-size reference comparison requires eager EP mode")
@@ -634,9 +641,10 @@ class TestEP(unittest.TestCase):
             self.skipTest("MegaMoE fusion requires Rubin SM107")
         try:
             from cudnn.moe_ep import MoeEp  # noqa: F401
-        except ImportError:
-            self.skipTest("cudnn.moe_ep.MoeEp is not installed")
+        except ImportError as exc:
+            self.skipTest(f"cudnn.moe_ep.MoeEp is not installed ({type(exc).__name__}: {exc})")
 
+        # MegaMoE SM107 requires intermediate_size % 256 == 0.
         intermediate_dim = 128
         recipe = MXFP8BlockScaling() if quantization == "mxfp8" else None
         model, fc1, fc2 = self._make_moe_model(
@@ -677,8 +685,9 @@ class TestEP(unittest.TestCase):
             seq_out = model(seq_tokens, topk_idx, seq_topk_weights)
 
         forward_ops = model._module_groups[0]._forward_ops
-        self.assertEqual(len(forward_ops), 1)
-        self.assertIsInstance(forward_ops[0][0], FusedMoeEp)
+        if quantization == "mxfp8":
+            self.assertEqual(len(forward_ops), 1)
+            self.assertIsInstance(forward_ops[0][0], FusedMoeEp)
         self.assertIsInstance(seq_out, torch.Tensor)
         self.assertEqual(seq_out.dtype, torch.bfloat16)
 
@@ -695,8 +704,8 @@ class TestEP(unittest.TestCase):
             combine_format=MoeFormat.BF16,
             apply_topk_in_fc1=True,
             generate_c=True,
-            compute_dtype=torch.float32,
-            gemm_format=MoeFormat.MXFP8,
+            compute_dtype=torch.float32 if quantization == "mxfp8" else torch.bfloat16,
+            gemm_format=MoeFormat.MXFP8 if quantization == "mxfp8" else MoeFormat.BF16,
         )
         ref_out, fc1_c, route_metadata = reference(
             tokens.detach(),
@@ -728,9 +737,10 @@ class TestEP(unittest.TestCase):
             route_metadata,
         )
         torch.cuda.synchronize()
-
-        # Kernel MXFP8 GEMM vs QDQ+FP32 matmul: grouped-MLP-style MXFP8 tols.
-        tolerances = {"rtol": 0.125, "atol": 0.25}
+        if quantization == "bf16":
+            tolerances = {"rtol": 1.6e-2, "atol": 5e-5}
+        else:
+            tolerances = {"rtol": 0.125, "atol": 0.25}
         torch.testing.assert_close(seq_out, ref_out, **tolerances)
         torch.testing.assert_close(
             seq_tokens.grad, grad_tokens.to(dtype=seq_tokens.dtype), **tolerances
