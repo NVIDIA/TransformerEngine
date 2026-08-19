@@ -1498,7 +1498,11 @@ def _assert_zoo_layernorm_mlp_role_semantics(case_name):
     module = _make_zoo_dequantized_module("LayerNormMLP")
     qfactory = _zoo_dequantized_qfactory(case_name)
 
-    fwd_roles = module.get_quantizer_roles(fwd=True, num_quantizers=6)
+    fwd_roles = module.get_quantizer_roles(
+        fwd=True,
+        num_quantizers=6,
+        boundary_role=None,
+    )
     fwd_gemm_roles = [
         role for role in fwd_roles if role is not None and role.tensor_type in ("input", "weight")
     ]
@@ -1514,7 +1518,11 @@ def _assert_zoo_layernorm_mlp_role_semantics(case_name):
             assert isinstance(quantizer.rowwise_quantizer, NVFP4Quantizer)
             assert quantizer.rowwise_quantizer.row_scaled_nvfp4 == (role.tensor_type == "input")
 
-    bwd_roles = module.get_quantizer_roles(fwd=False, num_quantizers=4)
+    bwd_roles = module.get_quantizer_roles(
+        fwd=False,
+        num_quantizers=4,
+        boundary_role=None,
+    )
     grad_output_roles = [
         role for role in bwd_roles if role is not None and role.tensor_type == "grad_output"
     ]

@@ -1255,15 +1255,6 @@ class DotProductAttention(TransformerEngineBaseModule):
             for i in range(len(recipe))
         ]
 
-        # Reached the rebuild path because ``fp8_meta_tensors_initialized``
-        # was flipped to False after first init — most commonly because the
-        # base-class ``output_quantizer_role`` / ``grad_input_quantizer_role``
-        # setter invalidated state when MHA wired boundary roles. That
-        # setter is recipe-agnostic, so this code fires for built-in
-        # recipes too even though they don't consume role information here
-        # (e.g. ``test_dpa_fp8_extra_state`` reaches this path with pure
-        # DelayedScaling).
-        #
         # Rebuilding the recipe state must preserve persistent training
         # buffers (delayed-scaling ``scale`` / ``amax_history``) so the new
         # quantizer instances and the ``FP8GlobalStateManager`` reduction
@@ -1286,11 +1277,37 @@ class DotProductAttention(TransformerEngineBaseModule):
         for recipe_state in recipe_states:
             self.quantizers[fp8_meta_tensor_key].extend(recipe_state.make_quantizers())
 
+    def _resolve_boundary_quantizer_role(
+        self,
+        *,
+        recipe: Recipe,
+        fwd: bool,
+    ) -> Optional[QuantizerRole]:
+        """Keep the legacy inactive-boundary policy local to DPA.
+
+        O and dQKV are both composed-module boundaries and internal
+        fused-attention descriptor slots. With a ``CustomRecipe`` and the
+        legacy ``fp8_mha`` switch disabled, the external boundaries stay in
+        BF16 but those internal slots still require DPA-compatible placeholder
+        quantizers. Ignore only the declared default in that mode so
+        ``get_quantizer_roles`` emits its existing DPA hints. Explicit public
+        overrides continue to win.
+        """
+        explicit_role = (
+            self._output_quantizer_role if fwd else self._grad_input_quantizer_role
+        )
+        if explicit_role is not None:
+            return explicit_role
+        if recipe.custom() and not recipe.fp8_mha:
+            return None
+        return super()._resolve_boundary_quantizer_role(recipe=recipe, fwd=fwd)
+
     def get_quantizer_roles(
         self,
         *,
         fwd: bool,
         num_quantizers: int,
+        boundary_role: Optional[QuantizerRole],
     ) -> Optional[List[QuantizerRole]]:
         """QuantizerRole list for quantizers used by ``DotProductAttention``.
 
@@ -1329,10 +1346,8 @@ class DotProductAttention(TransformerEngineBaseModule):
 
         **Boundary slots** — O (fwd) and dQKV (bwd) leave DPA and enter
         the next module (e.g. proj linear).  DPA does not know that
-        consumer, so these default to ``None``.  The parent module
-        (e.g. ``MultiheadAttention``) can set
-        :attr:`output_quantizer_role` / :attr:`grad_input_quantizer_role`
-        to fill in the consumer identity.
+        consumer, so the planner supplies ``boundary_role`` from composed MHA
+        topology or an explicit caller override.
 
         When not set, a hint-only ``QuantizerRole`` with empty
         ``module_type`` / ``tensor_type`` is emitted, with ``name``
@@ -1343,7 +1358,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         name = self.name or ""
         if fwd:
             qkv_role = QuantizerRole(module_type="dpa", tensor_type="qkv", name=name)
-            o_role = self._output_quantizer_role
+            o_role = boundary_role
             if o_role is None:
                 o_role = QuantizerRole(name=f"{name}.dpa_output" if name else "dpa_output")
             s_role = QuantizerRole(module_type="dpa", tensor_type="s", name=name)
@@ -1359,7 +1374,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                 s_role,  # Group 3: S (post-softmax, input to S·V)
             ]
         else:
-            dqkv_role = self._grad_input_quantizer_role
+            dqkv_role = boundary_role
             if dqkv_role is None:
                 dqkv_role = QuantizerRole(
                     name=f"{name}.dpa_grad_input" if name else "dpa_grad_input"

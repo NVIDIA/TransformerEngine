@@ -952,6 +952,9 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self.wgrad_store = None
         self._output_quantizer_role: Optional[QuantizerRole] = None
         self._grad_input_quantizer_role: Optional[QuantizerRole] = None
+        # Stable defaults declared by a composed parent before runtime planning.
+        self._declared_output_quantizer_role: Optional[QuantizerRole] = None
+        self._declared_grad_input_quantizer_role: Optional[QuantizerRole] = None
         self._role_revision = 0
         self._quantization_runtime: Optional[_QuantizationRuntime] = None
 
@@ -1007,10 +1010,11 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
     def output_quantizer_role(self) -> Optional[QuantizerRole]:
         """Caller-configurable :class:`QuantizerRole` for the forward output quantizer.
 
-        When set, overrides the default role used by :meth:`get_quantizer_roles`
-        for the forward-pass output quantizer slot.  Setting this after
-        quantizers have been created forces their recreation on the next
-        forward pass.
+        When set, overrides the boundary role resolved for the forward-pass
+        output quantizer slot, including a role declared by a composed module
+        such as ``MultiheadAttention``. Clearing it restores the declared or
+        default role. Setting it after quantizers have been created forces
+        their recreation during the next explicit or lazy planning pass.
 
         See also :attr:`grad_input_quantizer_role` for the backward-pass
         counterpart.
@@ -1059,14 +1063,20 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         recipe = FP8GlobalStateManager.get_fp8_recipe()
         if not recipe.custom():
             return
-        if fp8_output and self._output_quantizer_role is None:
+        output_role = self._output_quantizer_role
+        grad_input_role = self._grad_input_quantizer_role
+        if output_role is None:
+            output_role = getattr(self, "_declared_output_quantizer_role", None)
+        if grad_input_role is None:
+            grad_input_role = getattr(self, "_declared_grad_input_quantizer_role", None)
+        if fp8_output and output_role is None:
             warnings.warn(
                 f"{type(self).__name__}: fp8_output=True but "
                 "output_quantizer_role is not set.  The CustomRecipe qfactory "
                 "will receive None for the output quantizer role.",
                 stacklevel=3,
             )
-        if fp8_grad and self._grad_input_quantizer_role is None:
+        if fp8_grad and grad_input_role is None:
             warnings.warn(
                 f"{type(self).__name__}: fp8_grad=True but "
                 "grad_input_quantizer_role is not set.  The CustomRecipe "
@@ -1144,9 +1154,33 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                             meta_key
                         ].amax_history[0]
 
+    def _resolve_boundary_quantizer_role(
+        self,
+        *,
+        recipe: Recipe,
+        fwd: bool,
+    ) -> Optional[QuantizerRole]:
+        """Resolve the caller override or composed-module boundary declaration.
+
+        ``recipe`` is part of this hook's contract so specialized runtime
+        owners can keep recipe-dependent inventory compatibility local.
+        Generic modules resolve topology independently of recipe policy.
+        """
+        del recipe
+        if fwd:
+            explicit_role = self._output_quantizer_role
+            declared_role = getattr(self, "_declared_output_quantizer_role", None)
+        else:
+            explicit_role = self._grad_input_quantizer_role
+            declared_role = getattr(self, "_declared_grad_input_quantizer_role", None)
+        if explicit_role is not None:
+            return explicit_role
+        return declared_role
+
     def _resolve_quantizer_roles(
         self,
         *,
+        recipe: Recipe,
         fwd: bool,
         num_quantizers: int,
     ) -> Tuple[
@@ -1154,9 +1188,12 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         Optional[List[Optional[QuantizerRole]]],
     ]:
         """Resolve semantic key roles and the role list passed to ``RecipeState``."""
+        boundary_role = self._resolve_boundary_quantizer_role(recipe=recipe, fwd=fwd)
+
         roles = self.get_quantizer_roles(  # pylint: disable=assignment-from-none
             fwd=fwd,
             num_quantizers=num_quantizers,
+            boundary_role=boundary_role,
         )
         if roles is None:
             # ``RecipeState`` treats a missing role list as one bare role per
@@ -1352,10 +1389,12 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         num_forward_quantizers = num_gemms * 3
         num_backward_quantizers = num_gemms * 2
         forward_key_roles, forward_state_roles = self._resolve_quantizer_roles(
+            recipe=recipe,
             fwd=True,
             num_quantizers=num_forward_quantizers,
         )
         backward_key_roles, backward_state_roles = self._resolve_quantizer_roles(
+            recipe=recipe,
             fwd=False,
             num_quantizers=num_backward_quantizers,
         )
@@ -1476,6 +1515,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         *,
         fwd: bool,  # pylint: disable=unused-argument
         num_quantizers: int,  # pylint: disable=unused-argument
+        boundary_role: Optional[QuantizerRole],  # pylint: disable=unused-argument
     ) -> Optional[List[QuantizerRole]]:
         """Return an ordered list of :class:`QuantizerRole` for quantizers.
 
@@ -1519,12 +1559,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         The last slot of a forward GEMM group (output) and the last slot
         of a backward group (grad_input) are **boundary** slots — the
         tensor leaves this module and enters an unknown consumer.  For
-        these slots, use ``self._output_quantizer_role`` (fwd) and
-        ``self._grad_input_quantizer_role`` (bwd), which default to
-        ``None``.  A parent module (e.g. ``MultiheadAttention``) can set
-        these attributes to fill in the consumer identity; see
-        ``MultiheadAttention._update_output_quantizer_roles`` for an
-        example.
+        these slots, use ``boundary_role``, which the planner resolves from an
+        explicit caller override or composed-module topology.
 
         Return value
         ------------

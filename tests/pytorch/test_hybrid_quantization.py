@@ -2616,19 +2616,17 @@ class TestAttentionFactoryNativeRecipeParity:
         )
 
     @pytest.mark.parametrize(
-        "case_name,native_dpa_recipe,qfactory,expected_flags",
+        "case_name,native_dpa_recipe,qfactory",
         [
             (
                 "fp8_dpa",
                 "Float8CurrentScaling",
                 nvfp4_linear_fp8_dpa_factory,
-                (False, False, False),
             ),
             (
                 "mxfp8_dpa",
                 "MXFP8BlockScaling",
                 _nvfp4_linear_mxfp8_dpa_factory,
-                (False, False, False),
             ),
         ],
     )
@@ -2638,30 +2636,15 @@ class TestAttentionFactoryNativeRecipeParity:
         case_name,
         native_dpa_recipe,
         qfactory,
-        expected_flags,
     ):
         if case_name == "mxfp8_dpa" and not mxfp8_available:
             pytest.skip(f"MXFP8: {reason_for_no_mxfp8}")
 
-        from transformer_engine.pytorch.attention import multi_head_attention as mha_module
         from transformer_engine.pytorch.utils import get_device_compute_capability
 
         cc = get_device_compute_capability()
         if cc < (9, 0) or cc >= (12, 0):
             pytest.skip(f"FP8 attention not supported on sm{cc[0] * 10 + cc[1]}")
-
-        recorded_flags = []
-        orig_update_roles = mha_module.MultiheadAttention._update_output_quantizer_roles
-
-        def _recording_update_roles(self, qkv_fp8_output, proj_fp8_grad, dpa_fp8_output):
-            recorded_flags.append((qkv_fp8_output, dpa_fp8_output, proj_fp8_grad))
-            return orig_update_roles(self, qkv_fp8_output, proj_fp8_grad, dpa_fp8_output)
-
-        monkeypatch.setattr(
-            mha_module.MultiheadAttention,
-            "_update_output_quantizer_roles",
-            _recording_update_roles,
-        )
 
         self._set_native_dpa_recipe(monkeypatch, native_dpa_recipe)
 
@@ -2710,7 +2693,6 @@ class TestAttentionFactoryNativeRecipeParity:
             native_recipe,
             seed=2303,
         )
-        native_flags = recorded_flags[-1]
         self._clear_native_dpa_recipe(monkeypatch)
         qfactory_out, qfactory_dx, qfactory_grads = self._run_mha_model(
             model_qfactory,
@@ -2719,10 +2701,7 @@ class TestAttentionFactoryNativeRecipeParity:
             qfactory_recipe,
             seed=2303,
         )
-        qfactory_flags = recorded_flags[-1]
 
-        assert native_flags == expected_flags
-        assert qfactory_flags == expected_flags
         self._assert_equal(qfactory_out, native_out, f"{case_name} MHA output")
         self._assert_equal(qfactory_dx, native_dx, f"{case_name} MHA input grad")
         assert qfactory_grads.keys() == native_grads.keys()
@@ -2733,7 +2712,8 @@ class TestAttentionFactoryNativeRecipeParity:
                 f"{case_name} MHA param grad {name}",
             )
 
-    def test_update_output_quantizer_roles_wires_independent_boundaries(self):
+    def test_mha_declared_boundaries_resolve_for_prospective_recipe(self):
+        """Topology is recipe-independent; DPA alone adapts its legacy inactive slots."""
         from transformer_engine.pytorch.quantization import QuantizerRole
 
         model = te.MultiheadAttention(
@@ -2770,25 +2750,105 @@ class TestAttentionFactoryNativeRecipeParity:
             name=qkv.name or "",
         )
 
-        def boundary_roles():
-            return (
-                qkv.output_quantizer_role,
-                model.proj.grad_input_quantizer_role,
-                model.core_attention.output_quantizer_role,
-                model.core_attention.grad_input_quantizer_role,
+        inactive_recipe = recipe.CustomRecipe(
+            qfactory=lambda _role: IdentityQuantizer(),
+            qfactory_key=("mha-declared-boundaries", 0),
+            fp8_mha=False,
+        )
+        active_recipe = recipe.CustomRecipe(
+            qfactory=lambda _role: IdentityQuantizer(),
+            qfactory_key=("mha-declared-boundaries", 1),
+            fp8_mha=True,
+        )
+
+        assert qkv.output_quantizer_role is None
+        assert model.proj.grad_input_quantizer_role is None
+        assert model.core_attention.output_quantizer_role is None
+        assert model.core_attention.grad_input_quantizer_role is None
+        assert all(owner._role_revision == 0 for owner in (qkv, model.proj, model.core_attention))
+
+        def resolved_roles(owner, target_recipe, *, fwd, num_quantizers):
+            _, roles = owner._resolve_quantizer_roles(  # pylint: disable=protected-access
+                recipe=target_recipe,
+                fwd=fwd,
+                num_quantizers=num_quantizers,
             )
+            assert roles is not None
+            return roles
 
-        model._update_output_quantizer_roles(True, False, False)
-        assert boundary_roles() == (expected_qkv, None, None, None)
+        assert resolved_roles(qkv, inactive_recipe, fwd=True, num_quantizers=3)[-1] == expected_qkv
+        assert (
+            resolved_roles(model.proj, inactive_recipe, fwd=False, num_quantizers=2)[-1]
+            == expected_do
+        )
 
-        model._update_output_quantizer_roles(False, True, False)
-        assert boundary_roles() == (None, expected_do, None, None)
+        # O/dQKV are also internal fused-attention descriptor slots. The
+        # DPA-local compatibility adapter retains its hint roles while the
+        # legacy CustomRecipe fp8_mha switch keeps those boundaries in BF16.
+        dpa_name = model.core_attention.name or ""
+        expected_o_hint = QuantizerRole(name=f"{dpa_name}.dpa_output" if dpa_name else "dpa_output")
+        expected_dqkv_hint = QuantizerRole(
+            name=f"{dpa_name}.dpa_grad_input" if dpa_name else "dpa_grad_input"
+        )
+        assert (
+            resolved_roles(
+                model.core_attention,
+                inactive_recipe,
+                fwd=True,
+                num_quantizers=9,
+            )[3:6]
+            == [expected_o_hint] * 3
+        )
+        assert (
+            resolved_roles(
+                model.core_attention,
+                inactive_recipe,
+                fwd=False,
+                num_quantizers=6,
+            )[:2]
+            == [expected_dqkv_hint] * 2
+        )
 
-        model._update_output_quantizer_roles(False, False, True)
-        assert boundary_roles() == (None, None, expected_o, expected_dqkv)
+        explicit_o = QuantizerRole(
+            module_type="linear",
+            tensor_type="input",
+            name="explicit-dpa-consumer",
+        )
+        model.core_attention.output_quantizer_role = explicit_o
+        assert (
+            resolved_roles(
+                model.core_attention,
+                inactive_recipe,
+                fwd=True,
+                num_quantizers=9,
+            )[3:6]
+            == [explicit_o] * 3
+        )
+        model.core_attention.output_quantizer_role = None
 
-        model._update_output_quantizer_roles(False, False, False)
-        assert boundary_roles() == (None, None, None, None)
+        assert resolved_roles(qkv, active_recipe, fwd=True, num_quantizers=3)[-1] == expected_qkv
+        assert (
+            resolved_roles(model.proj, active_recipe, fwd=False, num_quantizers=2)[-1]
+            == expected_do
+        )
+        assert (
+            resolved_roles(
+                model.core_attention,
+                active_recipe,
+                fwd=True,
+                num_quantizers=9,
+            )[3:6]
+            == [expected_o] * 3
+        )
+        assert (
+            resolved_roles(
+                model.core_attention,
+                active_recipe,
+                fwd=False,
+                num_quantizers=6,
+            )[:2]
+            == [expected_dqkv] * 2
+        )
 
     def test_mxfp8_qfactory_uses_plain_bf16_mha_boundaries(self, monkeypatch):
         """MXFP8 DPA stays internal; MHA boundary tensors remain plain BF16."""

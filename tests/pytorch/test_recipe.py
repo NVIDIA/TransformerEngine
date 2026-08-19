@@ -359,19 +359,35 @@ def test_current_scaling_role_layouts_cover_module_and_basic_op_families():
         ).make_quantizers()
         return [(q.force_pow_2_scales, q.amax_epsilon) for q in quantizers]
 
-    module_owner = SimpleNamespace(
-        name="test",
-        _output_quantizer_role=None,
-        _grad_input_quantizer_role=None,
-    )
+    module_owner = SimpleNamespace(name="test")
     for module_type in (Linear, LayerNormLinear):
-        forward_roles = module_type.get_quantizer_roles(module_owner, fwd=True, num_quantizers=3)
-        backward_roles = module_type.get_quantizer_roles(module_owner, fwd=False, num_quantizers=2)
+        forward_roles = module_type.get_quantizer_roles(
+            module_owner,
+            fwd=True,
+            num_quantizers=3,
+            boundary_role=None,
+        )
+        backward_roles = module_type.get_quantizer_roles(
+            module_owner,
+            fwd=False,
+            num_quantizers=2,
+            boundary_role=None,
+        )
         assert settings("forward", forward_roles) == [inp, weight, boundary]
         assert settings("backward", backward_roles) == [grad, boundary]
 
-    mlp_forward_roles = LayerNormMLP.get_quantizer_roles(module_owner, fwd=True, num_quantizers=6)
-    mlp_backward_roles = LayerNormMLP.get_quantizer_roles(module_owner, fwd=False, num_quantizers=4)
+    mlp_forward_roles = LayerNormMLP.get_quantizer_roles(
+        module_owner,
+        fwd=True,
+        num_quantizers=6,
+        boundary_role=None,
+    )
+    mlp_backward_roles = LayerNormMLP.get_quantizer_roles(
+        module_owner,
+        fwd=False,
+        num_quantizers=4,
+        boundary_role=None,
+    )
     assert settings("forward", mlp_forward_roles) == [
         inp,
         weight,
@@ -383,10 +399,16 @@ def test_current_scaling_role_layouts_cover_module_and_basic_op_families():
     assert settings("backward", mlp_backward_roles) == [grad, boundary, grad, grad]
 
     grouped_forward_roles = GroupedLinear.get_quantizer_roles(
-        module_owner, fwd=True, num_quantizers=6
+        module_owner,
+        fwd=True,
+        num_quantizers=6,
+        boundary_role=None,
     )
     grouped_backward_roles = GroupedLinear.get_quantizer_roles(
-        module_owner, fwd=False, num_quantizers=4
+        module_owner,
+        fwd=False,
+        num_quantizers=4,
+        boundary_role=None,
     )
     assert settings("forward", grouped_forward_roles) == [
         inp,

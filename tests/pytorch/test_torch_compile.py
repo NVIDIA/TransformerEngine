@@ -181,11 +181,12 @@ if _opaque_available:
             )
             torch.nn.init.normal_(self.weight)
 
-        def get_quantizer_roles(self, *, fwd: bool, num_quantizers: int):
+        def get_quantizer_roles(self, *, fwd: bool, num_quantizers: int, boundary_role):
             # Supplying explicit roles keeps CustomRecipeState from emitting a
             # warning (which would graph-break under fullgraph=True) and lets the
             # qfactory dispatch per tensor slot. Order must match the module's
             # quantizer array (FP8FwdTensorIdx / FP8BwdTensorIdx).
+            del boundary_role
             if fwd:
                 return [
                     QuantizerRole(module_type="linear", tensor_type="input"),

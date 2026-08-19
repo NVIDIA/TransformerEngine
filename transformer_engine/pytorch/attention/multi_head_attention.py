@@ -480,82 +480,60 @@ class MultiheadAttention(torch.nn.Module):
             **common_gemm_kwargs,
         )
 
-    def _update_output_quantizer_roles(
-        self,
-        qkv_fp8_output: bool,
-        proj_fp8_grad: bool,
-        dpa_fp8_output: bool,
-    ) -> None:
-        """Set quantizer roles at the boundaries between QKV, DPA, and proj.
+        self._declare_quantizer_roles()
+
+    def _declare_quantizer_roles(self) -> None:
+        """Declare stable topology at the boundaries between QKV, DPA, and proj.
 
         MHA contains three submodules connected as follows::
 
             Forward:   QKV linear ──(QKV tensor)──> DPA ──(O tensor)──> Proj linear
             Backward:  QKV linear <──(dQKV tensor)── DPA <──(dO tensor)── Proj linear
 
-        Each submodule owns quantizers for its internal tensors, but the
-        *boundary* tensors (the arrows above) need to know which module
-        will *consume* them so the quantizer factory can pick the right
-        format.  This method sets those boundary roles on all four edges:
-
-        1. ``qkv_fp8_output``  — **QKV linear → DPA (fwd)**: the QKV
-           linear's ``output_quantizer_role`` is told its consumer is DPA.
-        2. ``proj_fp8_grad``   — **Proj linear → DPA (bwd)**: proj's
-           ``grad_input_quantizer_role`` is told its consumer is DPA.
-        3. ``dpa_fp8_output``  — **DPA → Proj linear (fwd)**: DPA's
-           ``output_quantizer_role`` is told its consumer is the proj linear.
-        4. ``dpa_fp8_output``  — **DPA → QKV linear (bwd)**: DPA's
-           ``grad_input_quantizer_role`` is told its consumer is QKV linear.
-
-        When a flag is ``False`` the corresponding role is reset to ``None``
-        so the module falls back to its own default.
+        Each child owns its quantizers, while these declarations describe the
+        consumer of each boundary tensor. The base runtime planner combines
+        them with explicit caller overrides independently of recipe policy.
+        Whether a particular forward uses a prepared boundary quantizer remains
+        a call-local execution decision. DPA alone retains a local compatibility
+        adapter for its dual-purpose O/dQKV fused-kernel slots while the legacy
+        ``fp8_mha`` switch remains supported.
         """
         dpa_name = self.core_attention.name or ""
 
         # ── Boundary 1 (fwd): QKV linear output → consumed by DPA ────────
-        qkv_output_role = (
-            QuantizerRole(module_type="dpa", tensor_type="qkv", name=dpa_name)
-            if qkv_fp8_output
-            else None
-        )
+        qkv_output_role = QuantizerRole(module_type="dpa", tensor_type="qkv", name=dpa_name)
         if self.attention_type == "self":
-            if self.input_layernorm:
-                self.layernorm_qkv.output_quantizer_role = qkv_output_role
-            else:
-                self.qkv.output_quantizer_role = qkv_output_role
-        elif self.attention_type == "cross":
-            if self.input_layernorm:
-                self.layernorm_query.output_quantizer_role = qkv_output_role
-            else:
-                self.query_layer.output_quantizer_role = qkv_output_role
-            self.key_value.output_quantizer_role = qkv_output_role
+            qkv_producers = [self.layernorm_qkv if self.input_layernorm else self.qkv]
+        else:
+            qkv_producers = [
+                self.layernorm_query if self.input_layernorm else self.query_layer,
+                self.key_value,
+            ]
+        for qkv_producer in qkv_producers:
+            qkv_producer.fast_setattr(
+                "_declared_output_quantizer_role",
+                qkv_output_role,
+            )
 
         # ── Boundary 2 (bwd): Proj grad-input (dO) → consumed by DPA ─────
-        proj_grad_input_role = (
-            QuantizerRole(module_type="dpa", tensor_type="do", name=dpa_name)
-            if proj_fp8_grad
-            else None
+        self.proj.fast_setattr(
+            "_declared_grad_input_quantizer_role",
+            QuantizerRole(module_type="dpa", tensor_type="do", name=dpa_name),
         )
-        self.proj.grad_input_quantizer_role = proj_grad_input_role
 
         # ── Boundary 3 (fwd): DPA output (O) → consumed by Proj linear ───
         proj_name = self.proj.name or ""
-        self.core_attention.output_quantizer_role = (
-            QuantizerRole(module_type="linear", tensor_type="input", name=proj_name)
-            if dpa_fp8_output
-            else None
+        self.core_attention.fast_setattr(
+            "_declared_output_quantizer_role",
+            QuantizerRole(module_type="linear", tensor_type="input", name=proj_name),
         )
 
         # ── Boundary 4 (bwd): DPA grad-input (dQKV) → consumed by QKV linear
-        if self.attention_type == "self":
-            qkv_linear = self.layernorm_qkv if self.input_layernorm else self.qkv
-        else:
-            qkv_linear = self.layernorm_query if self.input_layernorm else self.query_layer
+        qkv_linear = qkv_producers[0]
         qkv_name = qkv_linear.name or ""
-        self.core_attention.grad_input_quantizer_role = (
-            QuantizerRole(module_type="linear", tensor_type="grad_output", name=qkv_name)
-            if dpa_fp8_output
-            else None
+        self.core_attention.fast_setattr(
+            "_declared_grad_input_quantizer_role",
+            QuantizerRole(module_type="linear", tensor_type="grad_output", name=qkv_name),
         )
 
     def fast_setattr(self, name: str, value: Any) -> None:
@@ -879,15 +857,6 @@ class MultiheadAttention(torch.nn.Module):
             float8_current_scaling = fp8_recipe.float8_current_scaling()
             mxfp8_scaling = fp8_recipe.mxfp8()
             if fp8 and custom_recipe and fp8_mha:
-                # Wire every boundary this CustomRecipe may quantize before
-                # DPA materializes its recipe state. Some quantizer families
-                # disable the corresponding output below, but pre-wiring avoids
-                # rebuilding that state after inspecting its canonical QKV slot.
-                self._update_output_quantizer_roles(
-                    rotary_pos_emb is None,
-                    True,
-                    True,
-                )
                 float8_current_scaling, mxfp8_scaling = (
                     self.core_attention.get_qkv_quantization_capabilities()
                 )
@@ -919,11 +888,6 @@ class MultiheadAttention(torch.nn.Module):
         # Projection Gemm: match DPA output except
         # 1. FP8CS recipe: produce F16 grads; again, due to cuBLAS limitation
         proj_fp8_grad = dpa_fp8_output and not float8_current_scaling
-
-        # Custom fp8_mha boundaries were wired before DPA recipe-state setup so
-        # querying its canonical QKV quantizer cannot trigger a second build.
-        if not (fp8 and custom_recipe and fp8_mha and _dpa_fp8_recipe == ""):
-            self._update_output_quantizer_roles(qkv_fp8_output, proj_fp8_grad, dpa_fp8_output)
 
         # Packed pass-through to DotProductAttention: the fused QKV/KV projection
         # already produces one packed buffer, which DPA accepts directly via its

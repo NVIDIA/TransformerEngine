@@ -20,6 +20,8 @@ from transformer_engine.pytorch import (
     apply_recipe,
     autocast,
     is_fp8_available,
+    is_nvfp4_available,
+    quantized_model_init,
 )
 from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
 from transformer_engine.pytorch.quantization import (
@@ -89,11 +91,11 @@ def _runtime_views(module):
     )
 
 
-def _run_update_step(module, recipe, inp, *args):
+def _run_update_step(module, recipe, inp, *args, **kwargs):
     """Run a real forward/backward step and return the output."""
     module.zero_grad(set_to_none=True)
     with autocast(enabled=True, recipe=recipe):
-        output = module(inp, *args)
+        output = module(inp, *args, **kwargs)
     if isinstance(output, tuple):
         output = output[0]
     output.float().sum().backward()
@@ -119,6 +121,37 @@ def _global_recipe_state():
         state.fp8_recipe,
         state.quantizer_config,
         state.quantizer_config_revision,
+    )
+
+
+def _make_compatible_fp8_mha_recipe(key):
+    """Build an executable FP8-MHA recipe with compatible boundary formats."""
+    from transformer_engine.pytorch.custom_recipes.quantizer_factories import (
+        current_scaling_factory,
+        delayed_scaling_factory,
+    )
+    from transformer_engine.pytorch.custom_recipes.quantizer_factory_zoo import (
+        nvfp4_linear_fp8_dpa_factory,
+    )
+    from transformer_engine.pytorch.utils import get_device_compute_capability
+
+    compute_capability = get_device_compute_capability()
+
+    def qfactory(role):
+        # Hopper supports the coherent all-delayed configuration. On Blackwell,
+        # use the shipped native FP8-attention mix for DPA-owned slots and
+        # current scaling for linears and the two DPA/linear boundaries.
+        if compute_capability < (10, 0):
+            return delayed_scaling_factory(role)
+        if role is not None and role.module_type == "dpa":
+            return nvfp4_linear_fp8_dpa_factory(role)
+        return current_scaling_factory(role)
+
+    return CustomRecipe(
+        qfactory=qfactory,
+        qfactory_key=key,
+        fp8_dpa=True,
+        fp8_mha=True,
     )
 
 
@@ -777,6 +810,485 @@ def test_composed_module_executes_after_recipe_update(module_factory):
         runtime = owner._quantization_runtime  # pylint: disable=protected-access
         assert runtime is not first_runtimes[id(owner)]
         assert runtime.key.recipe_config == second_recipe.quantizer_config()
+
+
+@pytest.mark.parametrize(
+    "module_factory",
+    (
+        pytest.param(
+            lambda: MultiheadAttention(
+                hidden_size=128,
+                num_attention_heads=2,
+                attention_dropout=0.0,
+                attn_mask_type="no_mask",
+                bias=False,
+                params_dtype=torch.bfloat16,
+                device="cuda",
+                name="mha",
+            ),
+            id="multihead-attention",
+        ),
+        pytest.param(
+            lambda: TransformerLayer(
+                hidden_size=128,
+                ffn_hidden_size=256,
+                num_attention_heads=2,
+                hidden_dropout=0.0,
+                attention_dropout=0.0,
+                self_attn_mask_type="no_mask",
+                bias=False,
+                params_dtype=torch.bfloat16,
+                device="cuda",
+            ),
+            id="transformer-layer",
+        ),
+    ),
+)
+def test_apply_recipe_before_first_mha_forward_has_stable_boundary_topology(
+    module_factory,
+):
+    """E2E TE-1 regression: first forward must not migrate unwarmed MHA roles."""
+    from transformer_engine.pytorch.utils import get_device_compute_capability
+
+    available, reason = is_fp8_available(return_reason=True)
+    if not available:
+        pytest.skip(reason)
+    compute_capability = get_device_compute_capability()
+    if compute_capability < (9, 0) or compute_capability >= (12, 0):
+        pytest.skip("FP8 attention is not supported on this compute capability")
+
+    FP8GlobalStateManager.reset()
+    module = module_factory()
+    recipe = _make_compatible_fp8_mha_recipe(("apply-unwarmed-mha", type(module).__name__, 1))
+
+    try:
+        assert not _active_runtime_owners(module)
+        apply_recipe(module, recipe)
+        owners = _active_runtime_owners(module)
+        assert owners
+        before = [
+            (
+                owner._quantization_runtime,  # pylint: disable=protected-access
+                owner._quantization_runtime.key,  # pylint: disable=protected-access
+                owner._role_revision,  # pylint: disable=protected-access
+                owner._quantization_runtime.role_revision,  # pylint: disable=protected-access
+            )
+            for owner in owners
+        ]
+        assert all(requested == active for _, _, requested, active in before)
+
+        mha = next(child for child in module.modules() if isinstance(child, MultiheadAttention))
+        qkv = mha.layernorm_qkv if mha.input_layernorm else mha.qkv
+        assert qkv._quantization_runtime.key.forward_roles[
+            -1
+        ] == QuantizerRole(  # pylint: disable=protected-access
+            module_type="dpa",
+            tensor_type="qkv",
+            name=mha.core_attention.name or "",
+        )
+        assert mha.proj._quantization_runtime.key.backward_roles[
+            -1
+        ] == QuantizerRole(  # pylint: disable=protected-access
+            module_type="dpa",
+            tensor_type="do",
+            name=mha.core_attention.name or "",
+        )
+
+        for _ in range(2):
+            inp = torch.randn(
+                128,
+                2,
+                128,
+                device="cuda",
+                dtype=torch.bfloat16,
+                requires_grad=True,
+            )
+            _run_update_step(module, recipe, inp)
+            after = [
+                (
+                    owner._quantization_runtime,  # pylint: disable=protected-access
+                    owner._quantization_runtime.key,  # pylint: disable=protected-access
+                    owner._role_revision,  # pylint: disable=protected-access
+                    owner._quantization_runtime.role_revision,  # pylint: disable=protected-access
+                )
+                for owner in owners
+            ]
+            assert after == before
+    finally:
+        FP8GlobalStateManager.reset()
+
+
+def test_mha_warmed_and_unwarmed_topology_matches_and_rope_does_not_migrate_runtime():
+    """Cover the TE-1 invariants not asserted by existing attention numerics tests."""
+    from transformer_engine.pytorch import RotaryPositionEmbedding
+    from transformer_engine.pytorch.utils import get_device_compute_capability
+
+    available, reason = is_fp8_available(return_reason=True)
+    if not available:
+        pytest.skip(reason)
+    compute_capability = get_device_compute_capability()
+    if compute_capability < (9, 0) or compute_capability >= (12, 0):
+        pytest.skip("FP8 attention is not supported on this compute capability")
+
+    FP8GlobalStateManager.reset()
+    recipe = _make_compatible_fp8_mha_recipe(("mha-warm-rope-topology", 1))
+
+    def make_mha():
+        return MultiheadAttention(
+            hidden_size=128,
+            num_attention_heads=2,
+            attention_dropout=0.0,
+            attn_mask_type="no_mask",
+            bias=False,
+            params_dtype=torch.bfloat16,
+            device="cuda",
+            name="mha",
+        )
+
+    def runtime_signature(module):
+        signature = []
+        for fqn, owner in module.named_modules():
+            if not isinstance(owner, TransformerEngineBaseModule):
+                continue
+            runtime = owner._quantization_runtime  # pylint: disable=protected-access
+            assert runtime is not None
+            signature.append(
+                (
+                    fqn,
+                    runtime.key.forward_roles,
+                    runtime.key.backward_roles,
+                    owner._role_revision,  # pylint: disable=protected-access
+                    runtime.role_revision,
+                    tuple(type(quantizer) for quantizer in runtime.forward_quantizers),
+                    tuple(type(quantizer) for quantizer in runtime.backward_quantizers),
+                )
+            )
+        return signature
+
+    try:
+        warmed = make_mha()
+        unwarmed = make_mha()
+
+        warm_inp = torch.randn(
+            128,
+            2,
+            128,
+            device="cuda",
+            dtype=torch.bfloat16,
+            requires_grad=True,
+        )
+        _run_update_step(warmed, recipe, warm_inp)
+        assert not _active_runtime_owners(unwarmed)
+
+        apply_recipe(unwarmed, recipe)
+        apply_recipe(warmed, recipe)
+        assert runtime_signature(unwarmed) == runtime_signature(warmed)
+
+        # Toggle RoPE on the already-warmed instance. The old forward-time
+        # wiring changed QKV boundary roles between these two call shapes.
+        owners = _active_runtime_owners(warmed)
+        before_rope = [
+            (
+                owner._quantization_runtime,  # pylint: disable=protected-access
+                owner._quantization_runtime.key,  # pylint: disable=protected-access
+                owner._role_revision,  # pylint: disable=protected-access
+                owner._quantization_runtime.role_revision,  # pylint: disable=protected-access
+            )
+            for owner in owners
+        ]
+        rotary_pos_emb = RotaryPositionEmbedding(dim=64)(128).to(device="cuda")
+        rope_inp = torch.randn(
+            128,
+            2,
+            128,
+            device="cuda",
+            dtype=torch.bfloat16,
+            requires_grad=True,
+        )
+        _run_update_step(
+            warmed,
+            recipe,
+            rope_inp,
+            rotary_pos_emb=rotary_pos_emb,
+        )
+        after_rope = [
+            (
+                owner._quantization_runtime,  # pylint: disable=protected-access
+                owner._quantization_runtime.key,  # pylint: disable=protected-access
+                owner._role_revision,  # pylint: disable=protected-access
+                owner._quantization_runtime.role_revision,  # pylint: disable=protected-access
+            )
+            for owner in owners
+        ]
+        assert after_rope == before_rope
+    finally:
+        FP8GlobalStateManager.reset()
+
+
+def test_apply_recipe_rejects_e2e_mha_reproducer_during_planning():
+    """The shipped factory's incompatible FP8-MHA boundaries fail before commit."""
+    from transformer_engine.pytorch.custom_recipes.quantizer_factory_zoo import (
+        nvfp4_linear_fp8_dpa_factory,
+    )
+
+    available, reason = is_fp8_available(return_reason=True)
+    if not available:
+        pytest.skip(reason)
+    if not is_nvfp4_available():
+        pytest.skip("NVFP4 is required for the E2E TE-1 reproducer")
+
+    FP8GlobalStateManager.reset()
+    module = MultiheadAttention(
+        hidden_size=32,
+        num_attention_heads=2,
+        attention_dropout=0.0,
+        attn_mask_type="no_mask",
+        bias=False,
+        device="cuda",
+        name="mha",
+    )
+    recipe = CustomRecipe(
+        qfactory=nvfp4_linear_fp8_dpa_factory,
+        fp8_dpa=True,
+        fp8_mha=True,
+    )
+    owners = [child for child in module.modules() if isinstance(child, TransformerEngineBaseModule)]
+    old_global_state = _global_recipe_state()
+
+    try:
+        with pytest.raises(RuntimeError, match="O quantizer is NVFP4Quantizer"):
+            apply_recipe(module, recipe)
+
+        assert _global_recipe_state() == old_global_state
+        assert all(
+            owner._quantization_runtime is None for owner in owners
+        )  # pylint: disable=protected-access
+        assert all(
+            owner._role_revision == 0 for owner in owners
+        )  # pylint: disable=protected-access
+        assert all("scaling_fwd" not in owner.fp8_meta for owner in owners)
+    finally:
+        FP8GlobalStateManager.reset()
+
+
+@pytest.mark.parametrize("attention_type", ("self", "cross"))
+@pytest.mark.parametrize("input_layernorm", (False, True))
+def test_mha_declares_all_boundary_topology_variants(attention_type, input_layernorm):
+    """Self/cross-attention QKV producers expose stable recipe-resolved roles."""
+    module = MultiheadAttention(
+        hidden_size=32,
+        num_attention_heads=2,
+        attention_dropout=0.0,
+        attn_mask_type="no_mask",
+        attention_type=attention_type,
+        input_layernorm=input_layernorm,
+        bias=False,
+        device="cuda",
+        name="mha",
+    )
+    recipe = CustomRecipe(
+        qfactory=lambda _role: IdentityQuantizer(),
+        qfactory_key=("mha-topology-variants", attention_type, input_layernorm),
+        fp8_mha=True,
+    )
+    expected_qkv = QuantizerRole(
+        module_type="dpa",
+        tensor_type="qkv",
+        name=module.core_attention.name or "",
+    )
+    if attention_type == "self":
+        qkv_producers = [module.layernorm_qkv if input_layernorm else module.qkv]
+    else:
+        qkv_producers = [
+            module.layernorm_query if input_layernorm else module.query_layer,
+            module.key_value,
+        ]
+
+    def resolved_roles(owner, *, fwd, num_quantizers):
+        _, roles = owner._resolve_quantizer_roles(  # pylint: disable=protected-access
+            recipe=recipe,
+            fwd=fwd,
+            num_quantizers=num_quantizers,
+        )
+        assert roles is not None
+        return roles
+
+    for producer in qkv_producers:
+        assert producer.output_quantizer_role is None
+        assert (
+            producer._declared_output_quantizer_role  # pylint: disable=protected-access
+            == expected_qkv
+        )
+        assert resolved_roles(producer, fwd=True, num_quantizers=3)[-1] == expected_qkv
+        assert producer._role_revision == 0  # pylint: disable=protected-access
+
+    assert resolved_roles(module.proj, fwd=False, num_quantizers=2)[-1] == QuantizerRole(
+        module_type="dpa",
+        tensor_type="do",
+        name=module.core_attention.name or "",
+    )
+    assert resolved_roles(module.core_attention, fwd=True, num_quantizers=9)[3] == QuantizerRole(
+        module_type="linear",
+        tensor_type="input",
+        name=module.proj.name or "",
+    )
+    assert resolved_roles(module.core_attention, fwd=False, num_quantizers=6)[0] == QuantizerRole(
+        module_type="linear",
+        tensor_type="grad_output",
+        name=qkv_producers[0].name or "",
+    )
+
+
+def test_explicit_mha_boundary_override_wins_and_can_restore_declared_role():
+    """Public role overrides retain revision semantics above declared topology."""
+    FP8GlobalStateManager.reset()
+    module = MultiheadAttention(
+        hidden_size=32,
+        num_attention_heads=2,
+        attention_dropout=0.0,
+        attn_mask_type="no_mask",
+        bias=False,
+        device="cuda",
+        name="mha",
+    )
+    recipe = CustomRecipe(
+        qfactory=lambda _role: IdentityQuantizer(),
+        qfactory_key=("mha-explicit-boundary-override", 1),
+        fp8_mha=True,
+    )
+    qkv = module.qkv
+
+    try:
+        apply_recipe(module, recipe)
+        declared_runtime = qkv._quantization_runtime  # pylint: disable=protected-access
+        declared_role = declared_runtime.key.forward_roles[-1]
+
+        override = QuantizerRole(
+            module_type="linear",
+            tensor_type="input",
+            name="explicit-consumer",
+        )
+        qkv.output_quantizer_role = override
+        assert qkv._role_revision == 1  # pylint: disable=protected-access
+        apply_recipe(module, recipe)
+        override_runtime = qkv._quantization_runtime  # pylint: disable=protected-access
+        assert override_runtime is not declared_runtime
+        assert override_runtime.key.forward_roles[-1] == override
+
+        qkv.output_quantizer_role = None
+        assert qkv._role_revision == 2  # pylint: disable=protected-access
+        apply_recipe(module, recipe)
+        restored_runtime = qkv._quantization_runtime  # pylint: disable=protected-access
+        assert restored_runtime is not override_runtime
+        assert restored_runtime.key.forward_roles[-1] == declared_role
+    finally:
+        FP8GlobalStateManager.reset()
+
+
+def test_shipped_dpa_factory_unwarmed_mha_keeps_bf16_boundaries_stable():
+    """The documented fp8_dpa=True/fp8_mha=False mode remains lazy-forward compatible."""
+    from transformer_engine.pytorch.custom_recipes.quantizer_factory_zoo import (
+        nvfp4_linear_fp8_dpa_factory,
+    )
+    from transformer_engine.pytorch.utils import get_device_compute_capability
+
+    available, reason = is_fp8_available(return_reason=True)
+    if not available:
+        pytest.skip(reason)
+    if not is_nvfp4_available():
+        pytest.skip("NVFP4 is required for the shipped DPA factory")
+    compute_capability = get_device_compute_capability()
+    if compute_capability < (9, 0) or compute_capability >= (12, 0):
+        pytest.skip("FP8 attention is not supported on this compute capability")
+
+    FP8GlobalStateManager.reset()
+    module = MultiheadAttention(
+        hidden_size=128,
+        num_attention_heads=2,
+        attention_dropout=0.0,
+        attn_mask_type="no_mask",
+        bias=False,
+        params_dtype=torch.bfloat16,
+        device="cuda",
+        name="mha",
+    )
+    recipe = CustomRecipe(
+        qfactory=nvfp4_linear_fp8_dpa_factory,
+        fp8_dpa=True,
+        fp8_mha=False,
+    )
+
+    try:
+        apply_recipe(module, recipe)
+        owners = _active_runtime_owners(module)
+        before = [
+            (
+                owner._quantization_runtime,  # pylint: disable=protected-access
+                owner._quantization_runtime.key,  # pylint: disable=protected-access
+                owner._role_revision,  # pylint: disable=protected-access
+            )
+            for owner in owners
+        ]
+        inp = torch.randn(
+            128,
+            2,
+            128,
+            device="cuda",
+            dtype=torch.bfloat16,
+            requires_grad=True,
+        )
+        _run_update_step(module, recipe, inp)
+        after = [
+            (
+                owner._quantization_runtime,  # pylint: disable=protected-access
+                owner._quantization_runtime.key,  # pylint: disable=protected-access
+                owner._role_revision,  # pylint: disable=protected-access
+            )
+            for owner in owners
+        ]
+        assert after == before
+    finally:
+        FP8GlobalStateManager.reset()
+
+
+def test_apply_recipe_rejects_quantized_primary_update_before_candidate_construction():
+    """The model-wide API preserves the quantized-model-init support boundary."""
+    FP8GlobalStateManager.reset()
+    initial_recipe = CustomRecipe(
+        qfactory=lambda _role: IdentityQuantizer(),
+        qfactory_key=("quantized-primary-apply", 1),
+    )
+    replacement_calls = []
+    replacement_recipe = _make_counting_recipe(
+        ("quantized-primary-apply", 2),
+        replacement_calls,
+    )
+
+    try:
+        with quantized_model_init(recipe=initial_recipe):
+            module = Linear(
+                16,
+                16,
+                bias=False,
+                params_dtype=torch.bfloat16,
+                device="cuda",
+                name="linear",
+            )
+        assert module.primary_weights_in_fp8
+        old_views = _runtime_views(module)
+        old_global_state = _global_recipe_state()
+
+        with pytest.raises(
+            RuntimeError,
+            match="Recipe mismatch for quantized primary weights",
+        ):
+            apply_recipe(module, replacement_recipe)
+
+        assert all(current is old for current, old in zip(_runtime_views(module), old_views))
+        assert _global_recipe_state() == old_global_state
+        assert not replacement_calls
+    finally:
+        FP8GlobalStateManager.reset()
 
 
 def test_apply_recipe_success_noop_mutation_and_forward_fast_path():
