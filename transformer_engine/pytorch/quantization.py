@@ -881,9 +881,7 @@ class FP8GlobalStateManager:
                 mxfp8_available, reason_for_no_mxfp8 = cls.is_mxfp8_available()
                 assert mxfp8_available, reason_for_no_mxfp8
             if isinstance(fp8_recipe, Float8BlockScaling):
-                fp8_block_available, reason_for_no_fp8_block = (
-                    cls.is_fp8_block_scaling_available()
-                )
+                fp8_block_available, reason_for_no_fp8_block = cls.is_fp8_block_scaling_available()
                 assert fp8_block_available, reason_for_no_fp8_block
             if isinstance(fp8_recipe, NVFP4BlockScaling):
                 nvfp4_available, reason_for_no_nvfp4 = cls.is_nvfp4_available()

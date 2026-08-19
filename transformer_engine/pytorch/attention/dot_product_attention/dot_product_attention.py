@@ -1196,14 +1196,12 @@ class DotProductAttention(TransformerEngineBaseModule):
                 raise ValueError(
                     "FP8 DotProductAttention requires 9 forward and 6 backward quantizer slots."
                 )
-            qkv_quantizer, _, s_quantizer, _, _, dp_quantizer = (
-                dpa_utils.get_attention_quantizers(
-                    True,
-                    {
-                        "scaling_fwd": candidate.forward_quantizers,
-                        "scaling_bwd": candidate.backward_quantizers,
-                    },
-                )
+            qkv_quantizer, _, s_quantizer, _, _, dp_quantizer = dpa_utils.get_attention_quantizers(
+                True,
+                {
+                    "scaling_fwd": candidate.forward_quantizers,
+                    "scaling_bwd": candidate.backward_quantizers,
+                },
             )
             from transformer_engine.pytorch.tensor.float8_tensor import (
                 Float8CurrentScalingQuantizer,
@@ -1366,9 +1364,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         ``get_quantizer_roles`` emits its existing DPA hints. Explicit public
         overrides continue to win.
         """
-        explicit_role = (
-            self._output_quantizer_role if fwd else self._grad_input_quantizer_role
-        )
+        explicit_role = self._output_quantizer_role if fwd else self._grad_input_quantizer_role
         if explicit_role is not None:
             return explicit_role
         if recipe.custom() and not recipe.fp8_mha:

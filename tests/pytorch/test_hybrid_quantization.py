@@ -248,9 +248,7 @@ class TestDPARuntimeRecipeUpdate:
         assert dpa._quantization_runtime is update.candidate
         assert dpa.fp8_meta["local_recipes"] is update.validation_result
         assert dpa._custom_dpa_local_recipes_cache is update.validation_result
-        assert [type(item).__name__ for item in update.validation_result] == [
-            "MXFP8BlockScaling"
-        ]
+        assert [type(item).__name__ for item in update.validation_result] == ["MXFP8BlockScaling"]
         assert dpa._custom_dpa_local_recipes_cache_key != old_cache_key
         assert dpa._qkv_capabilities_quantizer is None
         assert dpa._qkv_capabilities_cache is None
