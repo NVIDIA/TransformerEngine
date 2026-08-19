@@ -59,6 +59,8 @@ extensions = [
     "breathe",
     "autoapi.extension",
     "sphinx_tabs.tabs",
+    "myst_parser",
+    "nvidia-sphinx-theme",
 ]
 
 templates_path = ["_templates"]
