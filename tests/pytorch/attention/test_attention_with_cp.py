@@ -708,3 +708,23 @@ def test_cp_with_fused_attention(
         deterministic=_deterministic,
         log_level=pytest_logging_level,
     )
+
+
+@pytest.mark.skipif(get_cudnn_version() < (8, 9, 7), reason="cuDNN 8.9.7+ is required.")
+@pytest.mark.skipif(
+    get_device_compute_capability() < (9, 0), reason="FusedAttention THD requires sm90+."
+)
+@pytest.mark.parametrize("no_load_balance", [False, True])
+def test_cp_with_fused_attention_no_load_balance(cp_pool, no_load_balance):
+    """Check both the default policy and experimental single-chunk forward/backward."""
+    _submit(
+        cp_pool(2),
+        dtype="bf16",
+        model="cp_2_0",
+        qkv_format="thd",
+        kernel_backend="FusedAttention",
+        cp_comm_type="all_gather",
+        no_load_balance=no_load_balance,
+        deterministic=_deterministic,
+        log_level=pytest_logging_level,
+    )

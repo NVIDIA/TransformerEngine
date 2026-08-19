@@ -11,9 +11,9 @@ import torch
 import torch.distributed as dist
 from transformer_engine.pytorch.attention.dot_product_attention.context_parallel import (
     get_cu_seqlens_on_cp_rank,
+    get_thd_partitioned_indices,
 )
 from transformer_engine.pytorch.attention.dot_product_attention.utils import combine_and_quantize
-import transformer_engine_torch as tex
 from transformer_engine.pytorch import DType
 from test_attention_with_cp import (
     model_configs_flash_attn,
@@ -42,6 +42,8 @@ from utils import ModelConfig, compare_and_assert
 # its own groups inline.
 _pool_cp_comm_group = None
 _pool_cp_comm_sub_groups: list = []
+
+_NO_LOAD_BALANCE_ENV = "NVTE_EXPERIMENTAL_CP_AG_THD_NO_LOAD_BALANCE"
 
 dtypes = {"fp16": torch.float16, "bf16": torch.bfloat16, "fp8": torch.bfloat16}
 
@@ -110,8 +112,23 @@ def generate_input_shapes(
         cu_seqlens_q_padded = None
         cu_seqlens_kv_padded = None
     elif qkv_format == "thd":
-        seqlens_q = torch.randint(0, config.max_seqlen_q + 1, [config.batch_size]).to(torch.int32)
-        seqlens_q_padded = (seqlens_q + 2 * world_size - 1) // (world_size * 2) * (world_size * 2)
+        no_load_balance = os.getenv(_NO_LOAD_BALANCE_ENV, "0") == "1"
+        if no_load_balance:
+            assert config.batch_size == 2
+            # Exercise a global CP chunk boundary that does not match a document boundary.
+            seqlens_q = torch.tensor(
+                [config.max_seqlen_q - 2, config.max_seqlen_q - (world_size - 2)],
+                dtype=torch.int32,
+            )
+            assert seqlens_q.sum().remainder(world_size) == 0
+            seqlens_q_padded = seqlens_q.clone()
+        else:
+            seqlens_q = torch.randint(0, config.max_seqlen_q + 1, [config.batch_size]).to(
+                torch.int32
+            )
+            seqlens_q_padded = (
+                (seqlens_q + 2 * world_size - 1) // (world_size * 2) * (world_size * 2)
+            )
         cu_seqlens_q_padded = torch.cat(
             [
                 torch.zeros([1], dtype=torch.int32),
@@ -206,10 +223,12 @@ def run_dpa_with_cp(
     is_training="True",
     fa_pad_between_seqs="False",
     deterministic="False",
+    no_load_balance="False",
     log_level=logging.WARNING,
 ):
     """Test DotProductAttention module with context parallelism"""
     logging.root.setLevel(log_level)
+    os.environ[_NO_LOAD_BALANCE_ENV] = "1" if no_load_balance == "True" else "0"
     # When is_training is False, gradient outputs are None.
     is_training = is_training == "True"
     pad_between_seqs = None
@@ -468,11 +487,11 @@ def run_dpa_with_cp(
             x.view(*x.shape[:seq_dim], -1, *x.shape[(seq_dim + 2) :]) for x in [q_, k_, v_, dout_]
         ]
     elif qkv_format == "thd":
-        seq_idx_q = tex.thd_get_partitioned_indices(
-            cu_seqlens_q_padded, q_.shape[0], world_size, rank
+        seq_idx_q = get_thd_partitioned_indices(
+            cu_seqlens_q_padded, q_.shape[0], world_size, rank, device=q_.device
         )
-        seq_idx_kv = tex.thd_get_partitioned_indices(
-            cu_seqlens_kv_padded, k_.shape[0], world_size, rank
+        seq_idx_kv = get_thd_partitioned_indices(
+            cu_seqlens_kv_padded, k_.shape[0], world_size, rank, device=k_.device
         )
         q_, dout_ = [x.index_select(0, seq_idx_q) for x in [q_, dout_]]
         k_, v_ = [x.index_select(0, seq_idx_kv) for x in [k_, v_]]

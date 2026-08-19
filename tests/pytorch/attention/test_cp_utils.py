@@ -5,18 +5,80 @@
 """Unit tests for context parallel utils."""
 
 import itertools
+import os
 import torch
 import unittest
+from unittest.mock import patch
 from transformer_engine.pytorch.attention.dot_product_attention.context_parallel import (
+    get_no_load_balance_thd_causal_metadata,
     get_batch_on_this_cp_rank,
+    get_thd_partitioned_indices,
+    restore_thd_gathered_kv,
+    unrestore_thd_gathered_kv,
     pad_thd_sequences_for_cp,
     generate_positional_ids_for_cp,
 )
+
+_NO_LOAD_BALANCE_ENV = "NVTE_EXPERIMENTAL_CP_AG_THD_NO_LOAD_BALANCE"
 
 try:
     import transformer_engine_torch as tex
 except ImportError:
     tex = None
+
+
+class TestTHDPartitioning(unittest.TestCase):
+    @patch.dict(os.environ, {_NO_LOAD_BALANCE_ENV: "1"})
+    def test_no_load_balance_partition_uses_one_equal_chunk_per_rank(self):
+        # The global buffer, unlike each document, only needs to be divisible by CP.
+        cu_seqlens_padded = torch.tensor([0, 5, 12])
+
+        rank0 = get_thd_partitioned_indices(cu_seqlens_padded, 12, 4, 0)
+        rank3 = get_thd_partitioned_indices(cu_seqlens_padded, 12, 4, 3)
+
+        self.assertTrue(torch.equal(rank0, torch.tensor([0, 1, 2])))
+        self.assertTrue(torch.equal(rank3, torch.tensor([9, 10, 11])))
+
+    @patch.dict(os.environ, {_NO_LOAD_BALANCE_ENV: "0"})
+    def test_default_partition_rejects_cpu_metadata(self):
+        with self.assertRaisesRegex(AssertionError, "requires CUDA cu_seqlens"):
+            get_thd_partitioned_indices(torch.tensor([0, 8]), 8, 2, 0)
+
+    @unittest.skipUnless(torch.cuda.is_available() and tex is not None, "CUDA extension required")
+    @patch.dict(os.environ, {_NO_LOAD_BALANCE_ENV: "0"})
+    def test_default_partition_accepts_cpu_metadata_with_cuda_target(self):
+        indices = get_thd_partitioned_indices(torch.tensor([0, 8, 16]), 16, 2, 0, device="cuda")
+
+        expected = torch.tensor([0, 1, 6, 7, 8, 9, 14, 15], dtype=torch.int32, device="cuda")
+        self.assertTrue(torch.equal(indices, expected))
+
+    def test_no_load_balance_metadata_handles_document_padding_boundary(self):
+        cu_seqlens = torch.tensor([0, 6, 10], dtype=torch.int32)
+        cu_seqlens_padded = torch.tensor([0, 8, 12], dtype=torch.int32)
+
+        q_cu, q_cu_padded, kv_cu = get_no_load_balance_thd_causal_metadata(
+            cu_seqlens,
+            cu_seqlens_padded,
+            total_tokens=12,
+            cp_size=2,
+            cp_rank=1,
+        )
+
+        self.assertEqual(len(q_cu), 1)
+        self.assertTrue(torch.equal(q_cu[0], torch.tensor([0, 0, 4], dtype=torch.int32)))
+        self.assertTrue(torch.equal(q_cu_padded[0], torch.tensor([0, 2, 6], dtype=torch.int32)))
+        self.assertTrue(torch.equal(kv_cu[0], torch.tensor([0, 6, 10], dtype=torch.int32)))
+
+    @patch.dict(os.environ, {_NO_LOAD_BALANCE_ENV: "0"})
+    def test_no_load_balance_restore_uses_captured_mode(self):
+        tokens = torch.arange(8)
+        cu_seqlens_padded = torch.tensor([0, 8], dtype=torch.int32)
+
+        restored = restore_thd_gathered_kv(tokens, cu_seqlens_padded, 2, True)
+        unrestored = unrestore_thd_gathered_kv(tokens, cu_seqlens_padded, 2, True)
+
+        self.assertIs(restored, tokens)
+        self.assertIs(unrestored, tokens)
 
 
 class TestSequencePadding(unittest.TestCase):
