@@ -104,8 +104,10 @@ def reset_global_fp8_state():
         ("2.8.3", True),
         ("2.8.3+local_version", True),
         ("2.8.3.post1", True),
-        ("2.8.4", False),
-        ("2.8.4+local_version", False),
+        ("2.8.4", True),
+        ("2.8.4+local_version", True),
+        ("2.8.5", False),
+        ("2.8.5+local_version", False),
         ("2.9.0", False),
     ),
 )
@@ -125,7 +127,7 @@ def test_flash_attention_supported_version_message():
         _get_supported_versions(
             FlashAttentionUtils.version_required, FlashAttentionUtils.max_version
         )
-        == ">= 2.1.1, < 2.8.4"
+        == ">= 2.1.1, < 2.8.5"
     )
 
 
