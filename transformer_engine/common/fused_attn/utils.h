@@ -223,6 +223,11 @@ void generateMatrixStrides(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int6
 // by the cu_seqlens_padded_to_offsets conversion kernel and the direct-seqlens path
 // (which passes them to cuDNN as ragged offset multipliers).
 struct RaggedOffsetMultipliers {
+  // Zeroed, for a FusedAttnConfig that has not been through derive() yet. Every multiplier is
+  // a per-token element count, so zero is not a usable value; it is only ever read after
+  // derive() has replaced it, which check_derived() is what enforces.
+  RaggedOffsetMultipliers() = default;
+
   RaggedOffsetMultipliers(NVTE_QKV_Layout_Group layout_group, int64_t h, int64_t hg, int64_t d_qk,
                           int64_t d_v)
       : q(h * d_qk), k(hg * d_qk), v(hg * d_v), o(h * d_v), stats(h), kv_from_q(false) {
@@ -241,13 +246,13 @@ struct RaggedOffsetMultipliers {
     }
   }
 
-  int64_t q;
-  int64_t k;
-  int64_t v;
-  int64_t o;
-  int64_t stats;
+  int64_t q = 0;
+  int64_t k = 0;
+  int64_t v = 0;
+  int64_t o = 0;
+  int64_t stats = 0;
   // K/V offsets scale the Q-side cu_seqlens_padded (interleaved QKV layouts)
-  bool kv_from_q;
+  bool kv_from_q = false;
 };
 
 __global__ void cu_seqlens_to_actual_seqlens(int64_t actual_b, int64_t max_b,

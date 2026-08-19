@@ -202,23 +202,17 @@ backend-selection overview.
    :Default: ``0``
    :Description: Enable diagnostic logging for the FusedAttention graph cache (covers both the F16 and FP8 kernels, forward and backward). Output goes to stderr, prefixed ``[FUSED-ATTN-CACHE]``.
 
-      ``1`` emits one line per event that happens once per distinct cache key -- ``BUILD`` when a graph is constructed, ``PLANS`` when its kernels are compiled on first execution, ``UNSUP`` when cuDNN refuses a configuration -- plus an end-of-run ``SUMMARY`` (aggregate and per thread) and a breakdown of cuDNN graph-build timings. This is enough to diagnose redundant graph rebuilds and to profile build cost.
+      ``1`` emits one line per event that happens once per distinct cache key -- ``BUILD_GRAPH`` when a graph is constructed, ``BUILD_PLANS`` when its kernels are compiled on first execution, ``UNSUPPORTED`` when cuDNN refuses a configuration -- plus an end-of-run ``SUMMARY`` (per backend, per thread, and across the backends if a run used both) and a breakdown of cuDNN graph-build timings. This is enough to diagnose redundant graph rebuilds and to profile build cost. Every event name is also the counter column it increments, so each line can be read against the running totals it carries.
 
-      ``2`` additionally emits a per-lookup ``HIT``/``MISS``/``NOSUP`` line carrying the full cache key, and a per-execution ``EXEC`` line. Diffing two ``MISS`` lines names the fields that cost the extra build. These fire on every lookup and execution, so at test-suite scale they add I/O and serialize threads on the stderr lock; prefer ``1`` unless you need to see which shapes are missing.
+      Every line names the build site behind it -- ``f16`` or ``fp8``, then the pass -- and carries only that backend's counters, so a process that uses both can still tell which of them built what. A backend the run never reached is left out of the summary entirely.
+
+      The two hit columns name which of the cache's two maps answered a lookup: ``hit_supported`` is a cached graph reused, while ``hit_unsupported`` is a configuration cuDNN already refused, replayed from the negative cache rather than rebuilt. A run whose hits are mostly ``hit_unsupported`` is not reusing graphs at all -- it is asking repeatedly for something that will never run fused. Together with ``miss`` these account for every lookup, and ``unsupported`` counts the refusals themselves, so it stays at one per bad configuration however many times that configuration is queried.
+
+      ``2`` additionally emits a per-lookup ``HIT``/``MISS``/``UNSUPPORTED`` line carrying the full cache key, and a per-execution ``EXEC`` line. Diffing two ``MISS`` lines names the fields that cost the extra build. A level-2 ``UNSUPPORTED`` is a lookup answered from a stored refusal, as opposed to the level-1 event that recorded it; the counter line carries totals, the lookup line carries the key. These fire on every lookup and execution, so at test-suite scale they add I/O and serialize threads on the stderr lock; prefer ``1`` unless you need to see which shapes are missing.
 
       By default only rank 0 emits, so that output does not scale with the world size. Append ``:<ranks>`` to override -- ``1:all`` for every rank, ``2:0,3`` for a specific set. Worth overriding under context parallelism, where the ranks genuinely run different configurations.
 
       Has negligible overhead when unset.
-
-.. envvar:: NVTE_FUSED_ATTN_CACHE_MAX_ENTRIES
-
-   :Type: ``int``
-   :Default: ``500``
-   :Description: Ceiling on the number of entries the FusedAttention graph cache keeps per build site, evicting least-recently-used entries to stay under it. There are four build sites (F16 and FP8, forward and backward), each holding a cache of graphs and a cache of configurations cuDNN refused, and the ceiling applies to each of those independently.
-
-      The default is meant to be out of the way of real work rather than tight: a training step reuses a handful of configurations and an inference server with bucketed sequence lengths tens of them, so a few hundred is already more shape diversity than a model exhibits. The ceiling exists for workloads whose key space is effectively unbounded -- a test suite sweeping shapes, or a server keying on something that never repeats -- where an unbounded cache is a slow leak of cuDNN graphs and their execution plans for the life of the process.
-
-      Set to ``0`` to disable the ceiling entirely, for a workload that genuinely has thousands of live configurations and would rather spend the memory than rebuild. Evicting a graph never disturbs one that is executing; execution holds its own reference.
 
 .. envvar:: NVTE_ALLOW_NONDETERMINISTIC_ALGO
 

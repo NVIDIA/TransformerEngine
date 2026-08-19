@@ -15,6 +15,15 @@
 // four, and lives here so it has one definition rather than four copies to keep
 // in step.
 //
+// The five frontend calls a graph goes through, and which caller pays for each:
+//
+//   on a miss, either caller:
+//     validate() -> build_operation_graph() -> create_execution_plans(HeurMode_t::A)
+//       -> check_support()                            validate_and_check_support()
+//   the execution path only:
+//     build_plans()   ensure_plans_built(), once per entry, the kernel compilation
+//     execute()       every call, with its variant pack built in a local
+//
 // This header is deliberately not part of utils.h: it needs the cuDNN frontend,
 // and utils.h is included by translation units (utils.cu) that otherwise do not.
 // ============================================================================
@@ -22,8 +31,8 @@
 #ifndef TRANSFORMER_ENGINE_COMMON_FUSED_ATTN_GRAPH_CACHE_H_
 #define TRANSFORMER_ENGINE_COMMON_FUSED_ATTN_GRAPH_CACHE_H_
 
+#include <cstddef>
 #include <cstdint>
-#include <cstdlib>
 #include <exception>
 #include <map>
 #include <memory>
@@ -42,7 +51,7 @@ namespace transformer_engine {
 namespace fused_attn {
 
 // cuDNN's refusal to run a graph, as opposed to a failure to try. The distinction is what makes
-// the negative cache in get_or_build_cached_graph() safe: a refusal is a verdict on the
+// the negative cache in build_or_get_cached_graph() safe: a refusal is a verdict on the
 // configuration and reproducible for a given key, so it can be remembered and replayed, whereas
 // a failure that came from the machine's state at that moment (an allocation that did not fit, a
 // CUDA error left behind by unrelated work) could well succeed on the next attempt and must not
@@ -126,6 +135,16 @@ struct CachedGraph {
 // relied on for that -- it has held for far longer than the >= 1.25.0 the build requirements
 // ask for, which is there for unrelated features.
 //
+// What lets one cache serve every thread is an asymmetry between the two objects a call needs. A
+// cuDNN handle is per-thread mutable session state: it carries the stream that execute() launches
+// on, so each thread holds its own rather than racing to set that on a shared one. A graph and
+// its plans are the opposite -- compiled artifacts, built for the properties of a device and
+// bound to the device they were finalized against, with nothing in them belonging to the thread
+// that did the building. So the cache can be keyed by device and shared by all threads, which is
+// why make_cache_key() stamps device_id and nothing thread-shaped. ensure_plans_built() covers
+// what that costs at the seam, where the thread that finishes a build is often not the thread
+// that started it.
+//
 // Refusals are cached alongside the graphs, under the same keys and the same lock. A support
 // query for an unsupported configuration is otherwise the most expensive thing this cache sees:
 // it builds the whole graph, spends the four frontend calls, and throws the result away, and it
@@ -139,7 +158,7 @@ struct CachedGraph {
 // a cache and its lock as two separate objects leaves that ordering to whoever writes the next
 // one; declaring them here settles it once.
 //
-// Both maps are bounded; see cache_capacity(). `last_used` is what makes the bound an LRU rather
+// Both maps are bounded; see kCacheCapacity. `last_used` is what makes the bound an LRU rather
 // than an arbitrary cull: it is stamped from `clock` on every insertion and every hit, so the
 // entry with the smallest value is the one that has gone longest without being asked for. The
 // clock is an ordinary member rather than an atomic because it is only ever touched under
@@ -161,42 +180,32 @@ struct GraphCache {
   std::map<FusedAttnConfig, Refusal> unsupported;
 };
 
-// The default ceiling on entries in one of the maps of one build site's cache.
+// The ceiling on entries in one of the maps of one build site's cache.
 //
 // Sized to be out of the way of real work rather than to be tight. A training step reuses a
-// handful of configurations, an inference server with bucketed sequence lengths tens of them;
-// a few hundred is already far more shape diversity than a model exhibits. What the ceiling is
-// for is the case where the key space is effectively unbounded -- a test suite sweeping shapes,
-// or a serving workload that keys on something that never repeats -- where an unbounded cache
-// is a slow leak of cuDNN graphs and their execution plans for the life of the process.
-constexpr size_t kDefaultCacheCapacity = 500;
-
-// The ceiling in force, from NVTE_FUSED_ATTN_CACHE_MAX_ENTRIES if it is set. 0 means no ceiling,
-// which is the escape hatch for a workload that genuinely has thousands of live configurations
-// and would rather spend the memory than rebuild. Read once: the limit is a property of the run.
-inline size_t cache_capacity() {
-  static const size_t capacity = [] {
-    const char *e = std::getenv("NVTE_FUSED_ATTN_CACHE_MAX_ENTRIES");
-    if (e == nullptr || e[0] == '\0') return kDefaultCacheCapacity;
-    const long long v = std::atoll(e);  // NOLINT(runtime/int)
-    return v < 0 ? kDefaultCacheCapacity : static_cast<size_t>(v);
-  }();
-  return capacity;
-}
+// handful of configurations and an inference server with bucketed sequence lengths tens of them,
+// so a hundred is already more shape diversity than a model exhibits. What the ceiling is for is
+// the case where the key space is effectively unbounded -- a test suite sweeping shapes, or a
+// serving workload that keys on something that never repeats -- where an unbounded cache is a
+// slow leak of cuDNN graphs and their execution plans for the life of the process.
+//
+// Hard-coded rather than configurable, because nothing has yet needed a different number: the
+// workloads that fit under it never notice the ceiling, and the ones that do not are better
+// served by rebuilding a graph than by holding thousands. An environment variable can come back
+// if a workload turns up that wants to trade the memory for the rebuilds.
+constexpr size_t kCacheCapacity = 100;
 
 // Make room in `entries` for one more, by dropping the least recently used until there is.
 // Call under the cache's lock.
 //
-// Evicting a graph does not invalidate one that is in use. get_or_build_cached_graph() hands
+// Evicting a graph does not invalidate one that is in use. build_or_get_cached_graph() hands
 // back a shared_ptr, so a thread that is executing an entry holds it alive regardless of what
 // the map does; erasing here drops the cache's reference and nothing else. The scan is linear,
-// but it runs only when the cache is full, and comparing a few hundred integers is nothing
-// beside the graph build it is making room for.
+// but it runs only when the cache is full, and comparing a hundred integers is nothing beside
+// the graph build it is making room for.
 template <typename Map>
 void evict_to_fit(Map &entries) {
-  const size_t capacity = cache_capacity();
-  if (capacity == 0) return;
-  while (entries.size() >= capacity) {
+  while (entries.size() >= kCacheCapacity) {
     auto oldest = entries.begin();
     for (auto it = entries.begin(); it != entries.end(); ++it) {
       if (it->second.last_used < oldest->second.last_used) oldest = it;
@@ -207,8 +216,8 @@ void evict_to_fit(Map &entries) {
 
 // Takes a constructed graph through the frontend calls that decide whether cuDNN can run it:
 // validate, build_operation_graph, create_execution_plans, check_support. The sequence is
-// identical for both passes and both backends, so it is defined once here; `pass` only selects
-// which set of stage timers the calls are attributed to.
+// identical for both passes and both backends, so it is defined once here; `backend` and `pass`
+// only name the build site whose stage timers the calls are attributed to.
 //
 // Support is reported by throwing rather than by a return value. NVTE_CHECK_CUDNN_FE raises
 // an exception carrying cuDNN's own explanation of the rejection, and that text is what the
@@ -228,11 +237,12 @@ void evict_to_fit(Map &entries) {
 // build_plans() and execute() sit outside this function entirely: they commit real resources, and
 // build_plans() belongs to whoever executes the graph, once, the first time it is needed. See
 // CachedGraph.
-inline void validate_and_check_support(const char *pass, cudnn_frontend::graph::Graph &graph,
-                                       cudnnHandle_t handle) {
+inline void validate_and_check_support(graph_cache_debug::Backend backend,
+                                       graph_cache_debug::Pass pass,
+                                       cudnn_frontend::graph::Graph &graph, cudnnHandle_t handle) {
   auto run = [&](graph_cache_debug::BuildStage stage, const char *call_name, auto &&call) {
     cudnn_frontend::error_t error;
-    graph_cache_debug::timer(pass, stage, [&] { error = call(); });
+    graph_cache_debug::timer(backend, pass, stage, [&] { error = call(); });
     if (error.is_good()) return;
     // cuDNN normally explains itself; fall back to the call's name so that a refusal can never
     // arrive as an empty string, which the is_supported_* helpers would read as an endorsement.
@@ -272,13 +282,32 @@ inline void validate_and_check_support(const char *pass, cudnn_frontend::graph::
 // holding the lock across it would serialize builds of unrelated keys, so two threads racing
 // on the same key may both build. That is a wasted build, not a correctness problem: the
 // loser drops its own graph and takes the winner's, so every caller of a given key gets one
-// shared entry and the once-flag inside it still governs the plan build. The wasted build is
-// visible in diagnostics as a BUILD with no matching MISS of its own. The same race on a
-// refused key is equally harmless, both threads storing the same reason.
+// shared entry and the once-flag inside it still governs the plan build. Both threads record
+// their own lookup, so the wasted build shows up in diagnostics as two MISS lines carrying the
+// same key and a build_graph count above the number of distinct keys, rather than as anything
+// missing. The same race on a refused key is equally harmless, both threads storing the same
+// reason.
+//
+//   lock cache.mutex
+//     supported[key]?    found -> last_used = ++clock, copy the shared_ptr
+//     unsupported[key]?  found -> last_used = ++clock, copy the reason
+//   unlock
+//   record_cache_lookup(HIT | UNSUPPORTED | MISS)
+//
+//   HIT          -> return the entry
+//   UNSUPPORTED  -> throw UnsupportedGraph(the remembered reason)
+//   MISS         -> build()                          outside the lock, so builds of unrelated
+//                   validate_and_check_support()     keys proceed concurrently
+//                     ok      -> lock, evict_to_fit(supported), insert stamped ++clock, unlock,
+//                                return the inserted entry, which on a lost race is the winner's
+//                     verdict -> lock, evict_to_fit(unsupported), insert the reason, unlock,
+//                                rethrow
+//                     other   -> NVTE_ERROR: nothing remembered, retried when the key returns
 template <typename GraphAndTensors, typename BuildFn>
-std::shared_ptr<CachedGraph<GraphAndTensors>> get_or_build_cached_graph(
-    GraphCache<GraphAndTensors> &cache, const FusedAttnConfig &key, const char *pass,
-    cudnnHandle_t handle, BuildFn &&build) {
+std::shared_ptr<CachedGraph<GraphAndTensors>> build_or_get_cached_graph(
+    GraphCache<GraphAndTensors> &cache, const FusedAttnConfig &key,
+    graph_cache_debug::Backend backend, graph_cache_debug::Pass pass, cudnnHandle_t handle,
+    BuildFn &&build) {
   using Entry = CachedGraph<GraphAndTensors>;
   using Slot = typename GraphCache<GraphAndTensors>::Slot;
   using Refusal = typename GraphCache<GraphAndTensors>::Refusal;
@@ -312,7 +341,7 @@ std::shared_ptr<CachedGraph<GraphAndTensors>> get_or_build_cached_graph(
   // querying other keys. The counters are exact, but two lookups that raced on the lock can be
   // recorded in the opposite order, so read a level-2 trace as the set of lookups that happened
   // rather than as the sequence they happened in.
-  graph_cache_debug::record_cache_lookup(pass, outcome, key);
+  graph_cache_debug::record_cache_lookup(backend, pass, outcome, key);
 
   if (cached != nullptr) return cached;
   // Raised rather than returned so that a replayed refusal is the same event as a fresh one:
@@ -326,17 +355,17 @@ std::shared_ptr<CachedGraph<GraphAndTensors>> get_or_build_cached_graph(
     // Every site's tensor tuple leads with its graph, which is the one thing all four have in
     // common and the only element this needs. A tuple that stopped leading with it would fail to
     // compile here rather than quietly validate the wrong object.
-    validate_and_check_support(pass, *std::get<0>(entry->tensors), handle);
+    validate_and_check_support(backend, pass, *std::get<0>(entry->tensors), handle);
   } catch (const UnsupportedGraph &e) {
     {
       std::lock_guard<std::mutex> lock(cache.mutex);
       evict_to_fit(cache.unsupported);
       cache.unsupported.insert({key, Refusal{e.what(), ++cache.clock}});
     }
-    graph_cache_debug::record_unsupported(pass);
+    graph_cache_debug::record_unsupported(backend, pass);
     throw;
   }
-  graph_cache_debug::record_build(pass);
+  graph_cache_debug::record_graph_built(backend, pass);
   {
     std::lock_guard<std::mutex> lock(cache.mutex);
     evict_to_fit(cache.supported);
@@ -347,20 +376,45 @@ std::shared_ptr<CachedGraph<GraphAndTensors>> get_or_build_cached_graph(
   }
 }
 
-// Runs the plan build that get_or_build_cached_graph() left undone, once per entry.
+// Runs the plan build that build_or_get_cached_graph() left undone, once per entry.
 //
 // Call this only when the graph is about to be executed, which is why it is a separate step
 // rather than the tail of the lookup: a support query builds entries that nothing ever runs, and
 // kernel compilation is the most expensive of the five frontend calls, so a query that paid for
 // it would be paying for nothing. See CachedGraph for why the flag lives inside the entry and
 // what a throw here leaves behind.
+//
+// Splitting the build in two means the thread that finishes it is often not the thread that
+// started it -- a sizing call on one thread caches the graph, and an autograd thread is the first
+// to need it to run. Four facts make that safe, and only the first is visible here.
+//
+// build_plans() takes no handle. The overload that accepts one ignores it -- its body is
+// `(void)handle;` -- and the build works from the operation graph descriptor and the device
+// properties instead, which is how deviceless ahead-of-time compilation builds plans with no
+// handle at all. Unlike the plan sharing described on GraphCache, this does lean on the >= 1.25.0
+// frontend the build requires: it is where the handle-free overload arrived. Calling it means a
+// plan build cannot reach for the handle of a thread that has since exited.
+//
+// The handle from the build does outlive the build, held by the operation graph descriptor that
+// build_operation_graph(handle) finalized against it. It stays a valid object only because TE
+// never destroys cuDNN handles: cudnnExecutionPlanManager leaves HandleManager's Destroy
+// parameter at its nullptr default, so handles leak by design, one per thread per device.
+//
+// That descriptor was finalized for the device of the handle that built it, which is why the
+// cache key carries device_id (see FusedAttnConfig::make_cache_key). Without it a thread could
+// build plans, and compile kernels, from a descriptor belonging to another device.
+//
+// Execution stays clear of all of it: execute() is called with the running thread's own handle,
+// so a handle is never used by two threads at once, which is what cuDNN asks in return for
+// letting them share the plan.
 template <typename GraphAndTensors>
-void ensure_plans_built(const char *pass, CachedGraph<GraphAndTensors> &entry) {
+void ensure_plans_built(graph_cache_debug::Backend backend, graph_cache_debug::Pass pass,
+                        CachedGraph<GraphAndTensors> &entry) {
   std::call_once(entry.plans_built, [&] {
     cudnn_frontend::graph::Graph &graph = *std::get<0>(entry.tensors);
-    graph_cache_debug::timer(pass, graph_cache_debug::BuildStage::BuildPlans,
+    graph_cache_debug::timer(backend, pass, graph_cache_debug::BuildStage::BuildPlans,
                              [&] { NVTE_CHECK_CUDNN_FE(graph.build_plans()); });
-    graph_cache_debug::record_plans_built(pass);
+    graph_cache_debug::record_plans_built(backend, pass);
   });
 }
 

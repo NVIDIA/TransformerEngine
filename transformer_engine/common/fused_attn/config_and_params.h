@@ -15,18 +15,10 @@
 
 #include "common/common.h"
 #include "transformer_engine/fused_attn.h"
+#include "utils.h"
 
 namespace transformer_engine {
 namespace fused_attn {
-
-// Whether a ragged (THD) graph can be built at packed token-count dimensions with ragged
-// Stats/LSE. SM8x and SM120 require dense, BHSD-like dimensions at max_seqlen for the auxiliary
-// tensors instead. Graph construction, auxiliary-tensor allocation and make_cache_key() all
-// answer this question, and a disagreement between them would key a graph by dimensions it was
-// not built with, so they share this one definition.
-inline constexpr bool supports_packed_ragged_graph(size_t cudnn_runtime_version, int sm_arch) {
-  return cudnn_runtime_version >= 90600 && sm_arch >= 90 && sm_arch != 120;
-}
 
 struct FusedAttnConfig {
   // basic attention settings
@@ -98,12 +90,40 @@ struct FusedAttnConfig {
   // so this exists to let those consumers assert rather than trust. Not a cached-result marker:
   // derive() recomputes unconditionally, so a config whose inputs change can simply be re-derived.
   bool is_derived = false;
-  // THD batch/token counts; make_cache_key() folds these into batch_size/max_seqlen_*.
+  // THD batch/token counts, the raw buckets. The graph dimensions built out of them are
+  // graph_max_seqlen_* below and, because the batch is direction-dependent, F16FwdGraphInputs::b.
   size_t bucketed_batch_size = 0;
   size_t bucketed_num_tokens_q = 0;
   size_t bucketed_num_tokens_kv = 0;
   // Uses cu_seqlens or actual_seqlens.
   bool uses_cu_seqlens_directly = false;
+  // Whether a ragged (THD) graph is built at packed token-count dimensions with ragged Stats/LSE,
+  // rather than at dense max_seqlen ones. Held here rather than asked for at each of the places
+  // that need it -- graph_max_seqlen_* below, make_cache_key()'s batch, and the two GraphInputs --
+  // because the key and the graph have to be built at the same dimensions, and two independent
+  // queries are two chances to disagree. Unlike the flags above, this one depends on the device as
+  // well as the cuDNN version, so a config carries the answer for the device it was derived on;
+  // every entry point derives immediately before use, and the cache key records device_id.
+  bool uses_packed_ragged_graph = false;
+  // Whether the graph's Stats/LSE tensor is the packed, token-indexed one. Ragged Q is necessary
+  // but not sufficient, since the packed representation also needs an architecture that supports
+  // it. Derived because three unrelated places read it -- the graph build, the pointer binding at
+  // execution, and the Stats/Max shapes reported back to the framework -- and they are describing
+  // one buffer, so they cannot be allowed to disagree about its shape.
+  bool uses_ragged_stats = false;
+  // The sequence lengths the graph is built at: max_seqlen_* for a dense graph, and the bucketed
+  // token counts where a ragged layout is packed. Held here because the cache key has to name the
+  // dimensions the graph was built with -- a key that says otherwise is a hit on a graph of the
+  // wrong shape -- and stating the substitution once is what keeps make_cache_key() and the graph
+  // builders from drifting. Both passes build at the same sequence lengths; the batch size is the
+  // one dimension they disagree on, so it stays with the direction that knows, in
+  // F16FwdGraphInputs and F16BwdGraphInputs.
+  size_t graph_max_seqlen_q = 0;
+  size_t graph_max_seqlen_kv = 0;
+  // Elements per token for each ragged tensor, from the layout group and the head dimensions.
+  // Shared with the cu_seqlens_padded_to_offsets kernel, so the offsets the graph is told to
+  // expect and the offsets that are written cannot drift apart.
+  RaggedOffsetMultipliers ragged_offset_mults;
   // Convinence fields to avoid recompute.
   NVTE_QKV_Format q_format = NVTE_QKV_Format_NOT_SET;
   NVTE_QKV_Format kv_format = NVTE_QKV_Format_NOT_SET;
@@ -208,9 +228,15 @@ struct FusedAttnConfig {
   // configuration is supported does not modify it. Nothing further in is expected to derive
   // again, and check_derived() is what holds them to that. Idempotent, so a config that is
   // derived and then re-derived is unharmed.
+  //
+  // Throws for combinations of input fields that no graph can serve, so that all four graph
+  // builders inherit the rule from one place. Those same combinations are stated as rejection
+  // rules in nvte_get_fused_attn_backend_v2(), ahead of its derive() call, so that asking whether
+  // such a configuration is supported gets an answer instead of an exception.
   void derive();
 
   // Return a normalized copy of this config to be used as a key for the cuDNN graph cache.
+  // Requires a config that has been through derive(), whose fields the normalizations read.
   // It drops fields that are invariant (e.g. attn_scale) or irrelevant (e.g. dO/dQKV dtypes
   // and `deterministic` for forward, and `return_max_logit` for backward) to the corresponding graph.
   // This helps avoid redundant graph builds and cache misses.
@@ -222,7 +248,9 @@ struct FusedAttnConfig {
 // q_format reads as zero, which is a legal value that yields a graph of the wrong shape and a
 // key that collides with unrelated configs. Deriving happens at the library's entry points rather
 // than here, where it would be needed, so this is what keeps a new path into the builders from
-// quietly skipping it.
+// quietly skipping it. It catches a config that was never derived and nothing else: a config
+// derived and then edited passes, so callers that change an input field re-derive rather than rely
+// on this, which derive() being idempotent makes cheap.
 inline void check_derived(const FusedAttnConfig &cfg) {
   NVTE_CHECK(cfg.is_derived,
              "FusedAttnConfig reached a graph build with its derived fields unset. Every config "

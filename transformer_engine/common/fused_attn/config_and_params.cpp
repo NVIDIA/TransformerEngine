@@ -55,6 +55,19 @@ void FusedAttnConfig::derive() {
       (attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_BOTTOM_RIGHT_MASK) ||
       (attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK);
 
+  // Both layouts describe variable-length sequences inside padded dimensions, so the mask is the
+  // only thing that tells cuDNN where the real tokens end; without it the graph attends to
+  // padding. Asserted here so that all four graph builders inherit the rule, and stated as a
+  // rejection rule in nvte_get_fused_attn_backend_v2 so that a support query answers rather than
+  // throws. Not conditioned on the cuDNN version: the requirement comes from what the dimensions
+  // mean, not from what any particular cuDNN can run.
+  if (is_paged_kv) {
+    NVTE_CHECK(is_padding, "Paged attention requires padding mask!");
+  }
+  if (is_ragged_q || is_ragged_kv) {
+    NVTE_CHECK(is_padding, "Ragged QKV input requires padding or padding_causal mask!");
+  }
+
   // bucket the THD (ragged) batch and token counts
   const size_t tokens_q = num_tokens_q != 0 ? num_tokens_q : static_cast<size_t>(b * sq);
   const size_t tokens_kv = num_tokens_kv != 0 ? num_tokens_kv : static_cast<size_t>(b * skv);
@@ -69,6 +82,23 @@ void FusedAttnConfig::derive() {
   uses_cu_seqlens_directly = CUDNN_FRONTEND_VERSION >= 12500 &&
                              (CUDNN_VERSION >= 92400 && cudnn_runtime_version >= 92400) &&
                              !is_dropout;
+
+  // packed vs dense dimensions for a ragged (THD) graph; SM8x and SM120 require dense,
+  // BHSD-like dimensions for the Stats/LSE auxiliary tensors and so take the dense path
+  const int sm_arch = cuda::sm_arch(cuda::current_device());
+  uses_packed_ragged_graph = cudnn_runtime_version >= 90600 && sm_arch >= 90 && sm_arch != 120;
+  uses_ragged_stats = is_ragged_q && uses_packed_ragged_graph;
+
+  // sequence lengths the graph is built at
+  graph_max_seqlen_q =
+      (is_ragged_q && uses_packed_ragged_graph) ? bucketed_num_tokens_q : max_seqlen_q;
+  graph_max_seqlen_kv =
+      (is_ragged_kv && uses_packed_ragged_graph) ? bucketed_num_tokens_kv : max_seqlen_kv;
+
+  // elements per token for each ragged tensor
+  ragged_offset_mults = RaggedOffsetMultipliers(
+      layout_group, static_cast<int64_t>(num_attn_heads), static_cast<int64_t>(num_gqa_groups),
+      static_cast<int64_t>(head_dim_qk), static_cast<int64_t>(head_dim_v));
 
   // paged KV dimensions
   if (is_paged_kv) {
@@ -96,6 +126,10 @@ void FusedAttnConfig::derive() {
 }
 
 FusedAttnConfig FusedAttnConfig::make_cache_key() const {
+  // Requires a derived config: every normalization below reads a derived field -- is_padding and
+  // is_causal_bottom_right, the is_ragged_* pair, the graph_max_seqlen_* dimensions, and the
+  // uses_* flags. A precondition rather than an assert, since all four callers construct their
+  // GraphInputs first and that constructor asserts it.
   FusedAttnConfig cache_cfg = *this;
 
   // Key the device ID for multi-GPU single-process runs
@@ -110,28 +144,25 @@ FusedAttnConfig FusedAttnConfig::make_cache_key() const {
     cache_cfg.bottom_right_diagonal = false;
   }
 
-  // Bucket THD (ragged) batch and token counts
-  if (cache_cfg.is_ragged_q || cache_cfg.is_ragged_kv) {
-    const auto cudnn_runtime_version = cudnnGetVersion();
-    const int sm_arch_ = cuda::sm_arch(cuda::current_device());
-    if (supports_packed_ragged_graph(cudnn_runtime_version, sm_arch_)) {
-      if (cache_cfg.is_ragged_q) {
-        cache_cfg.max_seqlen_q = cache_cfg.bucketed_num_tokens_q;
-      }
-      if (cache_cfg.is_ragged_kv) {
-        cache_cfg.max_seqlen_kv = cache_cfg.bucketed_num_tokens_kv;
-      }
-      cache_cfg.num_tokens_q = 0;
-      cache_cfg.num_tokens_kv = 0;
-      // The forward graph keeps the true batch size when it takes the user's cu_seqlens
-      // directly, since cuDNN reads those [actual_b+1] buffers itself; the backward graph
-      // converts them and so always buckets. The key has to follow whichever the graph does,
-      // or it would name a batch size the graph was not built with. See
-      // derive_f16_bwd_graph_inputs.
-      const bool bucket_batch = !check_for_forward_support || !cache_cfg.uses_cu_seqlens_directly;
-      if (bucket_batch) {
-        cache_cfg.batch_size = cache_cfg.bucketed_batch_size;
-      }
+  // Name the sequence lengths the graph is built at rather than the ones the caller asked about,
+  // so that every shape falling in the same bucket lands on the same entry. The two are equal
+  // unless a ragged layout is packed, which is why this is unconditional. Stated after the
+  // bottom_right_diagonal rule above, which is about the real geometry of the attention mask and
+  // would read bucketed token counts as sequence lengths if it ran after the substitution.
+  cache_cfg.max_seqlen_q = cache_cfg.graph_max_seqlen_q;
+  cache_cfg.max_seqlen_kv = cache_cfg.graph_max_seqlen_kv;
+
+  // Bucket the THD (ragged) batch, and drop the token counts the bucketing has replaced
+  if ((cache_cfg.is_ragged_q || cache_cfg.is_ragged_kv) && cache_cfg.uses_packed_ragged_graph) {
+    cache_cfg.num_tokens_q = 0;
+    cache_cfg.num_tokens_kv = 0;
+    // The forward graph keeps the true batch size when it takes the user's cu_seqlens
+    // directly, since cuDNN reads those [actual_b+1] buffers itself; the backward graph
+    // converts them and so always buckets. The key has to follow whichever the graph does,
+    // or it would name a batch size the graph was not built with. See F16BwdGraphInputs.
+    const bool bucket_batch = !check_for_forward_support || !cache_cfg.uses_cu_seqlens_directly;
+    if (bucket_batch) {
+      cache_cfg.batch_size = cache_cfg.bucketed_batch_size;
     }
   }
 
@@ -146,14 +177,15 @@ FusedAttnConfig FusedAttnConfig::make_cache_key() const {
 
   // Restrict each direction's key to the fields its graph actually consumes, so
   // no redundant graphs are built and no cache misses either
-  if (check_for_forward_support) {
+  if (check_for_forward_support && !check_for_backward_support) {
     cache_cfg.do_dtype = kNVTEBFloat16;
     cache_cfg.dqkv_dtype = kNVTEBFloat16;
     cache_cfg.do_format = NVTE_QKV_Format_NOT_SET;
     cache_cfg.dqkv_layout = NVTE_QKV_Layout_NOT_SET;
     cache_cfg.do_scale_inv_format = NVTE_QKV_Format_NOT_SET;
     cache_cfg.deterministic = false;
-  } else {
+  }
+  if (check_for_backward_support && !check_for_forward_support) {
     cache_cfg.return_max_logit = false;
   }
 

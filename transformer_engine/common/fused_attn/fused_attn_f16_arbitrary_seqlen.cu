@@ -25,6 +25,11 @@ namespace fused_attn {
 
 namespace fe = cudnn_frontend;
 
+// Every graph-cache event raised here names the build site it came from. This file is the f16
+// arbitrary-seqlen backend throughout; only the pass differs between call sites.
+using graph_cache_debug::Backend;
+using graph_cache_debug::Pass;
+
 using SdpaF16FwdGraphAndTensors =
     std::tuple<std::shared_ptr<fe::graph::Graph>,
                std::shared_ptr<fe::graph::Tensor_attributes>,   // Q
@@ -48,102 +53,54 @@ using SdpaF16FwdGraphAndTensors =
                std::shared_ptr<fe::graph::Tensor_attributes>,   // dropout_seed
                std::shared_ptr<fe::graph::Tensor_attributes>>;  // dropout_offset
 
-// What the forward graph is built from beyond the config's own fields: the dimensions ragged
-// layouts bucket, and the choices that depend on the cuDNN runtime version or the SM
-// architecture. The build and the execution have to reach the same answer for every one of
-// these -- otherwise the graph is built for different dimensions than the pointers bound to it
-// describe, or with a ragged offset width the offsets are not written in -- so they are derived
-// once, by derive_f16_fwd_graph_inputs, and handed to both.
+// What the forward graph is built from that the config cannot say on its own, because the answer
+// depends on the direction: the batch size, and the width the ragged offsets are written in. The
+// sequence lengths are not here -- both passes build at cfg.graph_max_seqlen_* -- and neither is
+// anything else a backward graph would answer the same way. The build and the execution have to
+// agree on all of it, otherwise the graph is built for different dimensions than the pointers
+// bound to it describe, or with a ragged offset width the offsets are not written in, so it is
+// derived once, here, and handed to both.
 struct F16FwdGraphInputs {
-  // Dimensions the graph is built at. Ragged layouts substitute bucketed token counts for
-  // max_seqlen (and, unless cu_seqlens are passed to cuDNN directly, a bucketed batch size)
-  // so that one graph serves every shape that falls in the same bucket.
-  int64_t b;
-  int64_t s_q;
-  int64_t s_kv;
+  // Everything below is arithmetic on an already-derived cfg. Configurations no graph can serve
+  // are rejected before this point: FusedAttnConfig::derive() asserts them, and
+  // nvte_get_fused_attn_backend_v2 states them as rules so a support query can answer for them.
+  explicit F16FwdGraphInputs(const FusedAttnConfig &cfg);
+
+  // The batch size the graph is built at: bucketed for a packed ragged layout, so that one graph
+  // serves every batch in the same bucket, except when cu_seqlens go to cuDNN directly.
+  int64_t b = 0;
   // The true batch size, which the cu_seqlens buffers are sized [actual_b + 1] by whatever
   // the bucketing above did to `b`.
-  int64_t actual_b;
-  // Whether this architecture takes the packed token-count representation above; see
-  // supports_packed_ragged_graph. Carried here so the graph build reads the same answer the
-  // dimensions were derived from rather than querying the device again.
-  bool use_packed_ragged_graph;
-  bool use_ragged_stats;
-  DType ragged_offset_type;
-  RaggedOffsetMultipliers offset_mults;
+  int64_t actual_b = 0;
+  DType ragged_offset_type = DType::kInt32;
 };
 
-// Derives the above, and rejects configurations that no graph can serve. Those rejections
-// depend on combinations of fields rather than any single one, so they cannot live in the
-// config's own validation; running them here is what lets a support query answer for them
-// without building anything.
-static F16FwdGraphInputs derive_f16_fwd_graph_inputs(const FusedAttnConfig &cfg) {
+F16FwdGraphInputs::F16FwdGraphInputs(const FusedAttnConfig &cfg) {
   check_derived(cfg);
-  const bool is_padding = cfg.is_padding;
   const bool is_ragged_q = cfg.is_ragged_q;
   const bool is_ragged_kv = cfg.is_ragged_kv;
   const bool use_cu_seqlens_directly = cfg.uses_cu_seqlens_directly;
   const auto cudnn_runtime_version = cudnnGetVersion();
-  const int sm_arch_ = cuda::sm_arch(cuda::current_device());
 
-  if (cfg.is_paged_kv) {
-    NVTE_CHECK(is_padding, "Paged attention requires padding mask!");
-  }
-
-  const bool use_packed_ragged_graph =
-      supports_packed_ragged_graph(cudnn_runtime_version, sm_arch_);
-
-  int64_t b = static_cast<int64_t>(cfg.batch_size);
-  int64_t s_q = static_cast<int64_t>(cfg.max_seqlen_q);
-  int64_t s_kv = static_cast<int64_t>(cfg.max_seqlen_kv);
+  b = static_cast<int64_t>(cfg.batch_size);
   // keep original batch size because cu_seqlens are created with [b+1] shape
-  const int64_t actual_b = b;
-  if ((is_ragged_q || is_ragged_kv) && cudnn_runtime_version >= 90600) {
-    NVTE_CHECK(is_padding, "Ragged QKV input requires padding or padding_causal mask!");
-    // SM8x and SM120 need dense, BHSD-like dimensions/strides at max_seqlen: on SM120 the cuDNN
-    // support check treats layouts with stride[0] > dim[1]*dim[2]*dim[3] as interleaved and
-    // rejects them. The ragged offsets still provide the variable-length boundaries either way.
-    if (use_packed_ragged_graph) {
-      // replace batch size and maximum sequence lengths with maximum token counts
-      // for query and key/value so the graph is static within each quantization bucket.
-      // When passing cu_seqlens* directly to cuDNN SDPA, keep the true batch size:
-      // cuDNN reads the user's [actual_b+1] cu_seqlens buffers, so a quantized batch
-      // would read out of bounds.
-      if (!use_cu_seqlens_directly) {
-        b = static_cast<int64_t>(cfg.bucketed_batch_size);
-      }
-      s_q = is_ragged_q ? static_cast<int64_t>(cfg.bucketed_num_tokens_q) : s_q;
-      s_kv = is_ragged_kv ? static_cast<int64_t>(cfg.bucketed_num_tokens_kv) : s_kv;
-    }
+  actual_b = b;
+  // Replace the batch size with the bucketed one so the graph is static within its bucket, the
+  // same reason cfg.graph_max_seqlen_* replaces the sequence lengths. When passing cu_seqlens*
+  // directly to cuDNN SDPA, keep the true batch size: cuDNN reads the user's [actual_b+1]
+  // cu_seqlens buffers, so a quantized batch would read out of bounds.
+  if ((is_ragged_q || is_ragged_kv) && cfg.uses_packed_ragged_graph && !use_cu_seqlens_directly) {
+    b = static_cast<int64_t>(cfg.bucketed_batch_size);
   }
 
-  const bool use_ragged_stats = is_ragged_q && use_packed_ragged_graph;
-  const DType ragged_offset_type =
+  ragged_offset_type =
       use_cu_seqlens_directly
           ? DType::kInt32  // cu_seqlens* are given to us as int32; keep it that way.
           : (cudnn_runtime_version >= 90500 ? DType::kInt64 : DType::kInt32);
-  // Ragged offset multipliers (elements per token); shared with the legacy conversion
-  // kernel (cu_seqlens_padded_to_offsets) so the two paths cannot drift apart.
-  const RaggedOffsetMultipliers offset_mults(
-      nvte_get_qkv_layout_group(cfg.qkv_layout), static_cast<int64_t>(cfg.num_attn_heads),
-      static_cast<int64_t>(cfg.num_gqa_groups), static_cast<int64_t>(cfg.head_dim_qk),
-      static_cast<int64_t>(cfg.head_dim_v));
-
-  // Field order must match F16FwdGraphInputs; one per line so that it can be checked by eye.
-  return F16FwdGraphInputs{
-      b,
-      s_q,
-      s_kv,
-      actual_b,
-      use_packed_ragged_graph,
-      use_ragged_stats,
-      ragged_offset_type,
-      offset_mults,
-  };
 }
 
 // Constructs the forward graph for one cache key, and only constructs it: whether cuDNN will run
-// it is settled by the caller, in get_or_build_cached_graph(), which is also where the plan build
+// it is settled by the caller, in build_or_get_cached_graph(), which is also where the plan build
 // eventually happens. Hence no cuDNN handle here -- describing a graph needs none, and every call
 // that does need one now sits on the other side of that boundary.
 //
@@ -152,8 +109,8 @@ static F16FwdGraphInputs derive_f16_fwd_graph_inputs(const FusedAttnConfig &cfg)
 static SdpaF16FwdGraphAndTensors build_sdpa_f16_fwd_graph(const FusedAttnConfig &cfg,
                                                           const F16FwdGraphInputs &in) {
   const int64_t b = in.b;
-  const int64_t s_q = in.s_q;
-  const int64_t s_kv = in.s_kv;
+  const int64_t s_q = static_cast<int64_t>(cfg.graph_max_seqlen_q);
+  const int64_t s_kv = static_cast<int64_t>(cfg.graph_max_seqlen_kv);
   const cudnn_frontend::DataType_t tensorType =
       get_cudnn_fe_dtype(static_cast<DType>(cfg.qkv_dtype));
   const int64_t h = static_cast<int64_t>(cfg.num_attn_heads);
@@ -193,9 +150,9 @@ static SdpaF16FwdGraphAndTensors build_sdpa_f16_fwd_graph(const FusedAttnConfig 
   const bool is_ragged_kv = cfg.is_ragged_kv;
   const bool use_cu_seqlens_directly = cfg.uses_cu_seqlens_directly;
   const auto cudnn_runtime_version = cudnnGetVersion();
-  const bool use_ragged_stats = in.use_ragged_stats;
+  const bool use_ragged_stats = cfg.uses_ragged_stats;
   const DType ragged_offset_type = in.ragged_offset_type;
-  const RaggedOffsetMultipliers offset_mults = in.offset_mults;
+  const RaggedOffsetMultipliers offset_mults = cfg.ragged_offset_mults;
   const bool generate_stats = true;  // Always return stats
 
   auto mha_graph = std::make_shared<fe::graph::Graph>();
@@ -466,7 +423,7 @@ static SdpaF16FwdGraphAndTensors build_sdpa_f16_fwd_graph(const FusedAttnConfig 
 static std::shared_ptr<CachedGraph<SdpaF16FwdGraphAndTensors>> f16_fwd_cached_graph(
     const FusedAttnConfig &cfg, const F16FwdGraphInputs &in, cudnnHandle_t handle) {
   static GraphCache<SdpaF16FwdGraphAndTensors> cache;
-  return get_or_build_cached_graph(cache, cfg.make_cache_key(), "fwd", handle,
+  return build_or_get_cached_graph(cache, cfg.make_cache_key(), Backend::F16, Pass::Fwd, handle,
                                    [&] { return build_sdpa_f16_fwd_graph(cfg, in); });
 }
 
@@ -480,14 +437,13 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
   using namespace transformer_engine;
 
   // Derived once and handed to the cache, which passes them to the graph build, so that the
-  // graph and the pointers bound to it below cannot be decided differently. Also where an
-  // unserviceable configuration is rejected.
-  const F16FwdGraphInputs in = derive_f16_fwd_graph_inputs(cfg);
+  // graph and the pointers bound to it below cannot be decided differently.
+  const F16FwdGraphInputs in(cfg);
   const int64_t b = in.b;
   const int64_t actual_b = in.actual_b;
-  const bool use_ragged_stats = in.use_ragged_stats;
   const DType ragged_offset_type = in.ragged_offset_type;
-  const RaggedOffsetMultipliers offset_mults = in.offset_mults;
+  const bool use_ragged_stats = cfg.uses_ragged_stats;
+  const RaggedOffsetMultipliers offset_mults = cfg.ragged_offset_mults;
 
   const bool return_max_logit = cfg.return_max_logit;
   // Not const: bound into the variant pack by address as a pass-by-value graph input.
@@ -511,7 +467,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
           dropout_seed, dropout_offset] = cache_entry->tensors;
 
     // This graph is going to be used, so finish the build the cache deferred.
-    ensure_plans_built("fwd", *cache_entry);
+    ensure_plans_built(Backend::F16, Pass::Fwd, *cache_entry);
 
     // Exit to request upper level API to allocate memory if needed
     // n.b. Care should be taken to align each of the added worksapce tensors to their type.
@@ -540,7 +496,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
           plan_workspace_size + actual_seqlen_workspace_size + seqlen_offsets_workspace_size;
       return;
     }
-    graph_cache_debug::record_exec("fwd");
+    graph_cache_debug::record_exec(Backend::F16, Pass::Fwd);
 
     // cuDNN stream check needs to be moved here to support dummy kernel calls with
     // null streams for sizing the cuDNN workspace.
@@ -681,63 +637,35 @@ using SdpaF16BwdGraphAndTensors =
                std::shared_ptr<fe::graph::Tensor_attributes>,   // dropout_seed
                std::shared_ptr<fe::graph::Tensor_attributes>>;  // dropout_offset
 
-// The backward equivalent of F16FwdGraphInputs; see there for why these are derived once and
-// shared. The backward graph reads no page table and passes no cu_seqlens straight through, so
-// it needs neither the paged-attention check nor the ragged offset multipliers.
+// The backward equivalent of F16FwdGraphInputs; see there for why these two dimensions are the
+// only ones that cannot live on the config, and for why they are derived once and shared.
 struct F16BwdGraphInputs {
-  int64_t b;
-  int64_t s_q;
-  int64_t s_kv;
-  int64_t actual_b;
-  bool use_packed_ragged_graph;
-  bool use_ragged_stats;
-  DType ragged_offset_type;
+  explicit F16BwdGraphInputs(const FusedAttnConfig &cfg);
+
+  int64_t b = 0;
+  int64_t actual_b = 0;
+  DType ragged_offset_type = DType::kInt32;
 };
 
-// The backward counterpart of derive_f16_fwd_graph_inputs; see there for what the rejections are
-// doing here and why a support query can answer for them without building a graph.
-static F16BwdGraphInputs derive_f16_bwd_graph_inputs(const FusedAttnConfig &cfg) {
+F16BwdGraphInputs::F16BwdGraphInputs(const FusedAttnConfig &cfg) {
   check_derived(cfg);
-  const bool is_padding = cfg.is_padding;
-  const bool is_ragged_q = cfg.is_ragged_q;
-  const bool is_ragged_kv = cfg.is_ragged_kv;
   const auto cudnn_runtime_version = cudnnGetVersion();
-  const int sm_arch_ = cuda::sm_arch(cuda::current_device());
 
-  const bool use_packed_ragged_graph =
-      supports_packed_ragged_graph(cudnn_runtime_version, sm_arch_);
-
-  int64_t b = static_cast<int64_t>(cfg.batch_size);
-  int64_t s_q = static_cast<int64_t>(cfg.max_seqlen_q);
-  int64_t s_kv = static_cast<int64_t>(cfg.max_seqlen_kv);
+  b = static_cast<int64_t>(cfg.batch_size);
   // keep original batch size because cu_seqlens are created with [b+1] shape
-  const int64_t actual_b = b;
-  if ((is_ragged_q || is_ragged_kv) && cudnn_runtime_version >= 90600) {
-    NVTE_CHECK(is_padding, "Ragged QKV input requires padding or padding_causal mask!");
-    // SM8x and SM120 require dense, BHSD-like strides at max_seqlen (see fwd).
-    if (use_packed_ragged_graph) {
-      // replace batch size and maximum sequence lengths with maximum token counts
-      // for query and key/value so the graph is static within each quantization bucket.
-      // The batch is bucketed unconditionally here, where the forward pass guards it: only
-      // the forward graph can be handed the user's cu_seqlens buffers directly, and it is
-      // their [actual_b+1] length that a quantized batch would overrun. The backward graph
-      // always reads converted seqlens out of our own workspace, so nothing here is sized by
-      // the true batch. make_cache_key() splits on the pass for this reason as well.
-      b = static_cast<int64_t>(cfg.bucketed_batch_size);
-      s_q = is_ragged_q ? static_cast<int64_t>(cfg.bucketed_num_tokens_q) : s_q;
-      s_kv = is_ragged_kv ? static_cast<int64_t>(cfg.bucketed_num_tokens_kv) : s_kv;
-    }
+  actual_b = b;
+  // The batch is bucketed unconditionally here, where the forward pass guards it: only the
+  // forward graph can be handed the user's cu_seqlens buffers directly, and it is their
+  // [actual_b+1] length that a quantized batch would overrun. The backward graph always reads
+  // converted seqlens out of our own workspace, so nothing here is sized by the true batch.
+  // make_cache_key() splits on the pass for this reason as well.
+  if ((cfg.is_ragged_q || cfg.is_ragged_kv) && cfg.uses_packed_ragged_graph) {
+    b = static_cast<int64_t>(cfg.bucketed_batch_size);
   }
 
-  const bool use_ragged_stats = is_ragged_q && use_packed_ragged_graph;
   // We choose between 32-bit and 64-bit offsets depending on need.
   // This allows us to support older cuDNN runtimes gracefully.
-  const DType ragged_offset_type = cudnn_runtime_version >= 90500 ? DType::kInt64 : DType::kInt32;
-
-  // Field order must match F16BwdGraphInputs; one per line so that it can be checked by eye.
-  return F16BwdGraphInputs{
-      b, s_q, s_kv, actual_b, use_packed_ragged_graph, use_ragged_stats, ragged_offset_type,
-  };
+  ragged_offset_type = cudnn_runtime_version >= 90500 ? DType::kInt64 : DType::kInt32;
 }
 
 // The backward counterpart of build_sdpa_f16_fwd_graph; see there for why it constructs the graph
@@ -748,8 +676,8 @@ static F16BwdGraphInputs derive_f16_bwd_graph_inputs(const FusedAttnConfig &cfg)
 static SdpaF16BwdGraphAndTensors build_sdpa_f16_bwd_graph(const FusedAttnConfig &cfg,
                                                           const F16BwdGraphInputs &in) {
   const int64_t b = in.b;
-  const int64_t s_q = in.s_q;
-  const int64_t s_kv = in.s_kv;
+  const int64_t s_q = static_cast<int64_t>(cfg.graph_max_seqlen_q);
+  const int64_t s_kv = static_cast<int64_t>(cfg.graph_max_seqlen_kv);
   const cudnn_frontend::DataType_t tensorType =
       get_cudnn_fe_dtype(static_cast<DType>(cfg.qkv_dtype));
   const int64_t h = static_cast<int64_t>(cfg.num_attn_heads);
@@ -780,8 +708,8 @@ static SdpaF16BwdGraphAndTensors build_sdpa_f16_bwd_graph(const FusedAttnConfig 
   const bool is_ragged_q = cfg.is_ragged_q;
   const bool is_ragged_kv = cfg.is_ragged_kv;
   const auto cudnn_runtime_version = cudnnGetVersion();
-  const bool use_packed_ragged_graph = in.use_packed_ragged_graph;
-  const bool use_ragged_stats = in.use_ragged_stats;
+  const bool use_packed_ragged_graph = cfg.uses_packed_ragged_graph;
+  const bool use_ragged_stats = cfg.uses_ragged_stats;
   const DType ragged_offset_type = in.ragged_offset_type;
 
   auto mha_graph = std::make_shared<fe::graph::Graph>();
@@ -1016,7 +944,7 @@ static SdpaF16BwdGraphAndTensors build_sdpa_f16_bwd_graph(const FusedAttnConfig 
 static std::shared_ptr<CachedGraph<SdpaF16BwdGraphAndTensors>> f16_bwd_cached_graph(
     const FusedAttnConfig &cfg, const F16BwdGraphInputs &in, cudnnHandle_t handle) {
   static GraphCache<SdpaF16BwdGraphAndTensors> cache;
-  return get_or_build_cached_graph(cache, cfg.make_cache_key(), "bwd", handle,
+  return build_or_get_cached_graph(cache, cfg.make_cache_key(), Backend::F16, Pass::Bwd, handle,
                                    [&] { return build_sdpa_f16_bwd_graph(cfg, in); });
 }
 
@@ -1031,21 +959,15 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
   using namespace transformer_engine;
 
   // Derived once and handed to the cache, which passes them to the graph build, so that the
-  // graph and the pointers bound to it below cannot be decided differently. Also where an
-  // unserviceable configuration is rejected.
-  const F16BwdGraphInputs in = derive_f16_bwd_graph_inputs(cfg);
+  // graph and the pointers bound to it below cannot be decided differently.
+  const F16BwdGraphInputs in(cfg);
   const int64_t b = in.b;
   const int64_t actual_b = in.actual_b;
-  const bool use_ragged_stats = in.use_ragged_stats;
   const DType ragged_offset_type = in.ragged_offset_type;
+  const bool use_ragged_stats = cfg.uses_ragged_stats;
 
-  const int64_t h = static_cast<int64_t>(cfg.num_attn_heads);
-  const int64_t hg = static_cast<int64_t>(cfg.num_gqa_groups);
-  const int64_t d_qk = static_cast<int64_t>(cfg.head_dim_qk);
-  const int64_t d_v = static_cast<int64_t>(cfg.head_dim_v);
   // Not const: bound into the variant pack by address as a pass-by-value graph input.
   float scaling_factor = cfg.attn_scale;
-  const NVTE_QKV_Layout qkv_layout = cfg.qkv_layout;
   const bool is_bias = (cfg.bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS);
   const bool is_padding = cfg.is_padding;
   const bool is_softmax_offset = (cfg.softmax_type != NVTE_Softmax_Type::NVTE_VANILLA_SOFTMAX);
@@ -1060,7 +982,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
           dropout_seed, dropout_offset] = cache_entry->tensors;
 
     // This graph is going to be used, so finish the build the cache deferred.
-    ensure_plans_built("bwd", *cache_entry);
+    ensure_plans_built(Backend::F16, Pass::Bwd, *cache_entry);
 
     // Exit to request upper level API to allocate memory if needed
     // n.b. Care should be taken to align each of the added worksapce tensors to their type.
@@ -1084,7 +1006,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
           plan_workspace_size + actual_seqlen_workspace_size + seqlen_offsets_workspace_size;
       return;
     }
-    graph_cache_debug::record_exec("bwd");
+    graph_cache_debug::record_exec(Backend::F16, Pass::Bwd);
 
     // cuDNN stream check needs to be moved here to support dummy kernel calls with
     // null streams for sizing the cuDNN workspace.
@@ -1149,10 +1071,8 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
                       (static_cast<int>(is_ragged_q) + static_cast<int>(is_ragged_kv)) * 2 *
                           num_bytes_per_ragged_offset;
       }
-      const RaggedOffsetMultipliers offset_mults(nvte_get_qkv_layout_group(qkv_layout), h, hg, d_qk,
-                                                 d_v);
       cu_seqlens_padded_to_offsets<<<grid, nthreads_per_block, 0, stream>>>(
-          offset_mults, actual_b, b, static_cast<int32_t *>(devPtrSeqOffsetsQ),
+          cfg.ragged_offset_mults, actual_b, b, static_cast<int32_t *>(devPtrSeqOffsetsQ),
           static_cast<int32_t *>(devPtrSeqOffsetsKV), ragged_offset_type, devOffsetsQ, devOffsetsK,
           devOffsetsV, devOffsetsO, devOffsetsS);
       NVTE_CHECK_CUDA(cudaGetLastError());
@@ -1222,9 +1142,6 @@ void fused_attn_arbitrary_seqlen_fwd(const FusedAttnConfig &cfg, const Tensor *i
     devPtrSoftmaxOffset = input_SoftmaxOffset->data.dptr;
   }
 
-  const int device_id = cuda::current_device();
-  const int sm_arch_ = cuda::sm_arch(device_id);
-
   void *devPtrCuSeqlensQ = cu_seqlens_q->data.dptr;
   void *devPtrCuSeqlensKV = cu_seqlens_kv->data.dptr;
   void *devPtrSeqOffsetsQ = cu_seqlens_q_padded->data.dptr;
@@ -1234,11 +1151,9 @@ void fused_attn_arbitrary_seqlen_fwd(const FusedAttnConfig &cfg, const Tensor *i
 
   size_t i = 0;
   if (Aux_CTX_Tensors->size == 0) {
-    const auto cudnn_runtime_version = cudnnGetVersion();
-    // These have to match the shape the forward graph declares for Stats and Max, which is
-    // packed only where the architecture supports it; see derive_f16_fwd_graph_inputs.
-    const bool use_ragged_stats =
-        cfg.is_ragged_q && supports_packed_ragged_graph(cudnn_runtime_version, sm_arch_);
+    // These have to match the shape the forward graph declares for Stats and Max, which is why
+    // both read the same derived field rather than recomputing the condition.
+    const bool use_ragged_stats = cfg.uses_ragged_stats;
 
     Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
     output_S->data.dptr = nullptr;
@@ -1421,9 +1336,10 @@ void fused_attn_arbitrary_seqlen_bwd(const FusedAttnConfig &cfg, const Tensor *i
 std::string is_supported_f16_fwd(const FusedAttnConfig &cfg, cudnnHandle_t handle) {
   FusedAttnConfig graph_cfg = cfg;
   graph_cfg.check_for_forward_support = true;
+  graph_cfg.check_for_backward_support = false;
 
   try {
-    const fused_attn::F16FwdGraphInputs in = fused_attn::derive_f16_fwd_graph_inputs(graph_cfg);
+    const fused_attn::F16FwdGraphInputs in(graph_cfg);
     fused_attn::f16_fwd_cached_graph(graph_cfg, in, handle);
     return "";
   } catch (const std::exception &e) {
@@ -1437,9 +1353,10 @@ std::string is_supported_f16_fwd(const FusedAttnConfig &cfg, cudnnHandle_t handl
 std::string is_supported_f16_bwd(const FusedAttnConfig &cfg, cudnnHandle_t handle) {
   FusedAttnConfig graph_cfg = cfg;
   graph_cfg.check_for_forward_support = false;
+  graph_cfg.check_for_backward_support = true;
 
   try {
-    const fused_attn::F16BwdGraphInputs in = fused_attn::derive_f16_bwd_graph_inputs(graph_cfg);
+    const fused_attn::F16BwdGraphInputs in(graph_cfg);
     fused_attn::f16_bwd_cached_graph(graph_cfg, in, handle);
     return "";
   } catch (const std::exception &e) {

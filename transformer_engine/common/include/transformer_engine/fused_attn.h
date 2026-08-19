@@ -414,12 +414,12 @@ void nvte_set_fused_attn_bwd_params_attribute(NVTEFusedAttnBwdParams params,
 /*! \brief Get fused-attention backend based on user configuration.
  *
  *  This function passes the user configuration to cuDNN frontend, runs its support checks,
- *  attempts to build the necessary graphs, and if successful, caches the graphs (if not, returns
- *  ``NVTE_No_Backend``).
+ *  and returns a backend if supported, otherwise a message explaining why the configuration is not supported.
+ *  If supported, the backend is cached and reused for future calls with the same configuration.
  *
  *  \param[in]     cfg     Fused-attention configuration created by
  *                         ``nvte_create_fused_attn_config()``.
- *  \param[out]    message If cuDNN graphs are built successfully, an empty string;
+ *  \param[out]    message If the configuration is supported, an empty string;
  *                         if not, a diagnostic message explaining why there is no support.
  *                         Pass NULL to skip the diagnostics. Note that the string pointer
  *                         refers to a per-thread buffer owned by the library and remains valid
@@ -1002,10 +1002,6 @@ class FusedAttnConfigWrapper {
 
   FusedAttnConfigWrapper &operator=(FusedAttnConfigWrapper &&other) noexcept {
     if (this != &other) {
-      // Guarded as the destructor is. A moved-from wrapper holds nullptr, and the C API rejects a
-      // NULL handle by throwing; thrown out of a noexcept function that is a call to
-      // std::terminate, which no caller can catch. The guard belongs on this side rather than in
-      // nvte_destroy_*, so that the C entry point keeps reporting a genuinely bad handle.
       if (cfg_ != nullptr) {
         nvte_destroy_fused_attn_config(cfg_);
       }
@@ -1183,8 +1179,6 @@ class FusedAttnFwdParamsWrapper {
 
   FusedAttnFwdParamsWrapper &operator=(FusedAttnFwdParamsWrapper &&other) noexcept {
     if (this != &other) {
-      // See FusedAttnConfigWrapper::operator=: destroying a moved-from (NULL) handle throws out
-      // of a noexcept function, which is std::terminate.
       if (params_ != nullptr) {
         nvte_destroy_fused_attn_fwd_params(params_);
       }
@@ -1335,8 +1329,6 @@ class FusedAttnBwdParamsWrapper {
 
   FusedAttnBwdParamsWrapper &operator=(FusedAttnBwdParamsWrapper &&other) noexcept {
     if (this != &other) {
-      // See FusedAttnConfigWrapper::operator=: destroying a moved-from (NULL) handle throws out
-      // of a noexcept function, which is std::terminate.
       if (params_ != nullptr) {
         nvte_destroy_fused_attn_bwd_params(params_);
       }

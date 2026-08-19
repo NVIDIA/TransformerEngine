@@ -20,6 +20,11 @@ namespace fused_attn {
 using namespace transformer_engine;
 namespace fe = cudnn_frontend;
 
+// Every graph-cache event raised here names the build site it came from. This file is the fp8
+// backend throughout; only the pass differs between call sites.
+using graph_cache_debug::Backend;
+using graph_cache_debug::Pass;
+
 // fused attention FWD FP8 with FE 1.0+
 using SdpaFp8FwdGraphAndTensors =
     std::tuple<std::shared_ptr<fe::graph::Graph>,
@@ -49,16 +54,17 @@ using SdpaFp8FwdGraphAndTensors =
 // has, and so which pointers the variant pack has to bind -- the build and the execution cannot
 // answer them differently, which is why they are derived once, here, for both.
 struct Fp8FwdGraphInputs {
-  bool is_delayed_scaling;
-  bool is_current_scaling;
-  bool is_mxfp8;
-  bool use_cu_seqlens_directly;
+  // Also where what FP8 cannot serve is rejected. Unlike the F16 path there is no bucketing to
+  // do, because FP8 has no ragged/THD support: the graph's shapes are exactly the config's.
+  explicit Fp8FwdGraphInputs(const FusedAttnConfig& cfg);
+
+  bool is_delayed_scaling = false;
+  bool is_current_scaling = false;
+  bool is_mxfp8 = false;
+  bool use_cu_seqlens_directly = false;
 };
 
-// Derives the above and rejects what FP8 cannot serve. Unlike the F16 path there is no
-// bucketing to do, because FP8 has no ragged/THD support: the graph's shapes are exactly the
-// config's.
-static Fp8FwdGraphInputs derive_fp8_fwd_graph_inputs(const FusedAttnConfig& cfg) {
+Fp8FwdGraphInputs::Fp8FwdGraphInputs(const FusedAttnConfig& cfg) {
   check_derived(cfg);
   const auto cudnn_runtime_version = cudnnGetVersion();
   const cudnn_frontend::DataType_t o_tensor_type =
@@ -70,15 +76,15 @@ static Fp8FwdGraphInputs derive_fp8_fwd_graph_inputs(const FusedAttnConfig& cfg)
 
   NVTE_CHECK(!is_bias, "FP8 fused attention does not support pre/post_scale_bias yet!");
   NVTE_CHECK(!is_alibi, "FP8 fused attention does not support ALiBi yet!");
-  const bool is_delayed_scaling = (scaling_mode == NVTE_DELAYED_TENSOR_SCALING) &&
-                                  (o_tensor_type == cudnn_frontend::DataType_t::FP8_E4M3 ||
-                                   o_tensor_type == cudnn_frontend::DataType_t::FP8_E5M2);
-  const bool is_current_scaling = (scaling_mode == NVTE_DELAYED_TENSOR_SCALING) &&
-                                  (o_tensor_type == cudnn_frontend::DataType_t::HALF ||
-                                   o_tensor_type == cudnn_frontend::DataType_t::BFLOAT16);
-  const bool is_mxfp8 = (scaling_mode == NVTE_MXFP8_1D_SCALING) &&
-                        (o_tensor_type == cudnn_frontend::DataType_t::HALF ||
-                         o_tensor_type == cudnn_frontend::DataType_t::BFLOAT16);
+  is_delayed_scaling = (scaling_mode == NVTE_DELAYED_TENSOR_SCALING) &&
+                       (o_tensor_type == cudnn_frontend::DataType_t::FP8_E4M3 ||
+                        o_tensor_type == cudnn_frontend::DataType_t::FP8_E5M2);
+  is_current_scaling = (scaling_mode == NVTE_DELAYED_TENSOR_SCALING) &&
+                       (o_tensor_type == cudnn_frontend::DataType_t::HALF ||
+                        o_tensor_type == cudnn_frontend::DataType_t::BFLOAT16);
+  is_mxfp8 = (scaling_mode == NVTE_MXFP8_1D_SCALING) &&
+             (o_tensor_type == cudnn_frontend::DataType_t::HALF ||
+              o_tensor_type == cudnn_frontend::DataType_t::BFLOAT16);
   NVTE_CHECK(
       is_delayed_scaling || is_current_scaling || is_mxfp8,
       "FP8 fused attention only supports FP8DelayedScaling or FP8CurrentScaling or MXFP8 recipes!");
@@ -90,7 +96,7 @@ static Fp8FwdGraphInputs derive_fp8_fwd_graph_inputs(const FusedAttnConfig& cfg)
   // the F16 path, the FP8 path has no THD/ragged-offset support, so only the
   // cu_seqlens_to_actual_seqlens conversion applies here. Also note that the
   // needed versions of cuDNN backend and frontend are higher than for F16.)
-  const bool use_cu_seqlens_directly =
+  use_cu_seqlens_directly =
       // Frontend 1.26 supports fp8+cu_seqlens (for the C++ API).
       // Note: For the Python API, 1.27 is required.
       CUDNN_FRONTEND_VERSION >= 12600 &&
@@ -102,18 +108,10 @@ static Fp8FwdGraphInputs derive_fp8_fwd_graph_inputs(const FusedAttnConfig& cfg)
       // so any such request would always get routed to the old composite SDPA engine
       // (which doesn't support cu_seqlens). Remove this restriction when possible.
       !is_dropout;
-
-  // Field order must match Fp8FwdGraphInputs; one per line so that it can be checked by eye.
-  return Fp8FwdGraphInputs{
-      is_delayed_scaling,
-      is_current_scaling,
-      is_mxfp8,
-      use_cu_seqlens_directly,
-  };
 }
 
 // Constructs the forward FP8 graph for one cache key, and only constructs it: whether cuDNN will
-// run it is settled by the caller, in get_or_build_cached_graph(), which is also where the plan
+// run it is settled by the caller, in build_or_get_cached_graph(), which is also where the plan
 // build eventually happens. Hence no cuDNN handle here -- describing a graph needs none, and every
 // call that does need one now sits on the other side of that boundary.
 //
@@ -129,8 +127,8 @@ static SdpaFp8FwdGraphAndTensors build_sdpa_fp8_fwd_graph(const FusedAttnConfig&
   const int64_t b = static_cast<int64_t>(cfg.batch_size);
   const int64_t h = static_cast<int64_t>(cfg.num_attn_heads);
   const int64_t hg = static_cast<int64_t>(cfg.num_gqa_groups);
-  const int64_t s_q = static_cast<int64_t>(cfg.max_seqlen_q);
-  const int64_t s_kv = static_cast<int64_t>(cfg.max_seqlen_kv);
+  const int64_t s_q = static_cast<int64_t>(cfg.graph_max_seqlen_q);
+  const int64_t s_kv = static_cast<int64_t>(cfg.graph_max_seqlen_kv);
   const int64_t d_qk = static_cast<int64_t>(cfg.head_dim_qk);
   const int64_t d_v = static_cast<int64_t>(cfg.head_dim_v);
   const int64_t window_size_left = cfg.window_size_left;
@@ -403,7 +401,7 @@ static SdpaFp8FwdGraphAndTensors build_sdpa_fp8_fwd_graph(const FusedAttnConfig&
 static std::shared_ptr<CachedGraph<SdpaFp8FwdGraphAndTensors>> fp8_fwd_cached_graph(
     const FusedAttnConfig& cfg, const Fp8FwdGraphInputs& in, cudnnHandle_t handle) {
   static GraphCache<SdpaFp8FwdGraphAndTensors> cache;
-  return get_or_build_cached_graph(cache, cfg.make_cache_key(), "fwd", handle,
+  return build_or_get_cached_graph(cache, cfg.make_cache_key(), Backend::FP8, Pass::Fwd, handle,
                                    [&] { return build_sdpa_fp8_fwd_graph(cfg, in); });
 }
 
@@ -420,7 +418,7 @@ void fused_attn_fp8_fwd_impl(const FusedAttnConfig& cfg, void* devPtrQ, void* de
   // Derived once and handed to the cache, which passes them to the graph build, so that the
   // graph and the pointers bound to it below cannot be decided differently. Also where an
   // unserviceable configuration is rejected.
-  const Fp8FwdGraphInputs in = derive_fp8_fwd_graph_inputs(cfg);
+  const Fp8FwdGraphInputs in(cfg);
   const bool is_delayed_scaling = in.is_delayed_scaling;
   const bool is_current_scaling = in.is_current_scaling;
   const bool use_cu_seqlens_directly = in.use_cu_seqlens_directly;
@@ -440,7 +438,7 @@ void fused_attn_fp8_fwd_impl(const FusedAttnConfig& cfg, void* devPtrQ, void* de
           dropout_offset] = cache_entry->tensors;
 
     // This graph is going to be used, so finish the build the cache deferred.
-    ensure_plans_built("fwd", *cache_entry);
+    ensure_plans_built(Backend::FP8, Pass::Fwd, *cache_entry);
 
     auto plan_workspace_size = mha_graph->get_workspace_size();
 
@@ -452,7 +450,7 @@ void fused_attn_fp8_fwd_impl(const FusedAttnConfig& cfg, void* devPtrQ, void* de
       *workspace_size = plan_workspace_size + actual_seqlen_workspace_size;
       return;
     }
-    graph_cache_debug::record_exec("fwd");
+    graph_cache_debug::record_exec(Backend::FP8, Pass::Fwd);
 
     // cuDNN stream check needs to be moved here to support dummy kernel calls with
     // null streams for sizing the cuDNN workspace.
@@ -574,15 +572,17 @@ using SdpaFp8BwdGraphAndTensors =
 // rather than O's, since backward is what writes those. is_O_in_F16 additionally selects whether
 // O has to be descaled on the way in.
 struct Fp8BwdGraphInputs {
-  bool is_delayed_scaling;
-  bool is_current_scaling;
-  bool is_mxfp8;
-  bool is_O_in_F16;
+  // The backward counterpart of Fp8FwdGraphInputs' constructor; see there for the rejections and
+  // for why the graph's shapes are simply the config's.
+  explicit Fp8BwdGraphInputs(const FusedAttnConfig& cfg);
+
+  bool is_delayed_scaling = false;
+  bool is_current_scaling = false;
+  bool is_mxfp8 = false;
+  bool is_O_in_F16 = false;
 };
 
-// The backward counterpart of derive_fp8_fwd_graph_inputs; see there for the rejections and for
-// why the graph's shapes are simply the config's.
-static Fp8BwdGraphInputs derive_fp8_bwd_graph_inputs(const FusedAttnConfig& cfg) {
+Fp8BwdGraphInputs::Fp8BwdGraphInputs(const FusedAttnConfig& cfg) {
   check_derived(cfg);
   const auto cudnn_runtime_version = cudnnGetVersion();
   const cudnn_frontend::DataType_t o_tensor_type =
@@ -595,31 +595,23 @@ static Fp8BwdGraphInputs derive_fp8_bwd_graph_inputs(const FusedAttnConfig& cfg)
 
   NVTE_CHECK(!is_bias, "FP8 fused attention does not support pre/post_scale_bias yet!");
   NVTE_CHECK(!is_alibi, "FP8 fused attention does not support ALiBi yet!");
-  const bool is_delayed_scaling = (scaling_mode == NVTE_DELAYED_TENSOR_SCALING) &&
-                                  (dqkv_tensor_type == cudnn_frontend::DataType_t::FP8_E4M3 ||
-                                   dqkv_tensor_type == cudnn_frontend::DataType_t::FP8_E5M2);
-  const bool is_current_scaling = (scaling_mode == NVTE_DELAYED_TENSOR_SCALING) &&
-                                  (dqkv_tensor_type == cudnn_frontend::DataType_t::HALF ||
-                                   dqkv_tensor_type == cudnn_frontend::DataType_t::BFLOAT16);
-  const bool is_mxfp8 = (scaling_mode == NVTE_MXFP8_1D_SCALING) &&
-                        (dqkv_tensor_type == cudnn_frontend::DataType_t::HALF ||
-                         dqkv_tensor_type == cudnn_frontend::DataType_t::BFLOAT16);
+  is_delayed_scaling = (scaling_mode == NVTE_DELAYED_TENSOR_SCALING) &&
+                       (dqkv_tensor_type == cudnn_frontend::DataType_t::FP8_E4M3 ||
+                        dqkv_tensor_type == cudnn_frontend::DataType_t::FP8_E5M2);
+  is_current_scaling = (scaling_mode == NVTE_DELAYED_TENSOR_SCALING) &&
+                       (dqkv_tensor_type == cudnn_frontend::DataType_t::HALF ||
+                        dqkv_tensor_type == cudnn_frontend::DataType_t::BFLOAT16);
+  is_mxfp8 = (scaling_mode == NVTE_MXFP8_1D_SCALING) &&
+             (dqkv_tensor_type == cudnn_frontend::DataType_t::HALF ||
+              dqkv_tensor_type == cudnn_frontend::DataType_t::BFLOAT16);
   NVTE_CHECK(
       is_delayed_scaling || is_current_scaling || is_mxfp8,
       "FP8 fused attention only supports FP8DelayedScaling or FP8CurrentScaling or MXFP8 recipes!");
   NVTE_CHECK(!is_mxfp8 || cudnn_runtime_version >= 92100,
              "MXFP8 fused attention requires cuDNN 9.21.0 or later!");
 
-  const bool is_O_in_F16 = (o_tensor_type == cudnn_frontend::DataType_t::HALF ||
-                            o_tensor_type == cudnn_frontend::DataType_t::BFLOAT16);
-
-  // Field order must match Fp8BwdGraphInputs; one per line so that it can be checked by eye.
-  return Fp8BwdGraphInputs{
-      is_delayed_scaling,
-      is_current_scaling,
-      is_mxfp8,
-      is_O_in_F16,
-  };
+  is_O_in_F16 = (o_tensor_type == cudnn_frontend::DataType_t::HALF ||
+                 o_tensor_type == cudnn_frontend::DataType_t::BFLOAT16);
 }
 
 // The backward counterpart of build_sdpa_fp8_fwd_graph; see there for why it constructs the graph
@@ -638,8 +630,8 @@ static SdpaFp8BwdGraphAndTensors build_sdpa_fp8_bwd_graph(const FusedAttnConfig&
   const int64_t b = static_cast<int64_t>(cfg.batch_size);
   const int64_t h = static_cast<int64_t>(cfg.num_attn_heads);
   const int64_t hg = static_cast<int64_t>(cfg.num_gqa_groups);
-  const int64_t s_q = static_cast<int64_t>(cfg.max_seqlen_q);
-  const int64_t s_kv = static_cast<int64_t>(cfg.max_seqlen_kv);
+  const int64_t s_q = static_cast<int64_t>(cfg.graph_max_seqlen_q);
+  const int64_t s_kv = static_cast<int64_t>(cfg.graph_max_seqlen_kv);
   const int64_t d_qk = static_cast<int64_t>(cfg.head_dim_qk);
   const int64_t d_v = static_cast<int64_t>(cfg.head_dim_v);
   const int64_t window_size_left = cfg.window_size_left;
@@ -1045,7 +1037,7 @@ static SdpaFp8BwdGraphAndTensors build_sdpa_fp8_bwd_graph(const FusedAttnConfig&
 static std::shared_ptr<CachedGraph<SdpaFp8BwdGraphAndTensors>> fp8_bwd_cached_graph(
     const FusedAttnConfig& cfg, const Fp8BwdGraphInputs& in, cudnnHandle_t handle) {
   static GraphCache<SdpaFp8BwdGraphAndTensors> cache;
-  return get_or_build_cached_graph(cache, cfg.make_cache_key(), "bwd", handle,
+  return build_or_get_cached_graph(cache, cfg.make_cache_key(), Backend::FP8, Pass::Bwd, handle,
                                    [&] { return build_sdpa_fp8_bwd_graph(cfg, in); });
 }
 
@@ -1066,7 +1058,7 @@ void fused_attn_fp8_bwd_impl(
   // Derived once and handed to the cache, which passes them to the graph build, so that the
   // graph and the pointers bound to it below cannot be decided differently. Also where an
   // unserviceable configuration is rejected.
-  const Fp8BwdGraphInputs in = derive_fp8_bwd_graph_inputs(cfg);
+  const Fp8BwdGraphInputs in(cfg);
   const bool is_delayed_scaling = in.is_delayed_scaling;
   const bool is_current_scaling = in.is_current_scaling;
   const bool is_mxfp8 = in.is_mxfp8;
@@ -1090,7 +1082,7 @@ void fused_attn_fp8_bwd_impl(
           dropout_seed, dropout_offset] = cache_entry->tensors;
 
     // This graph is going to be used, so finish the build the cache deferred.
-    ensure_plans_built("bwd", *cache_entry);
+    ensure_plans_built(Backend::FP8, Pass::Bwd, *cache_entry);
 
     auto plan_workspace_size = mha_graph->get_workspace_size();
 
@@ -1100,7 +1092,7 @@ void fused_attn_fp8_bwd_impl(
       *workspace_size = plan_workspace_size + actual_seqlen_workspace_size;
       return;
     }
-    graph_cache_debug::record_exec("bwd");
+    graph_cache_debug::record_exec(Backend::FP8, Pass::Bwd);
 
     // cuDNN stream check needs to be moved here to support dummy kernel calls with
     // null streams for sizing the cuDNN workspace.
@@ -1435,7 +1427,7 @@ std::string is_supported_fp8_fwd(const FusedAttnConfig& cfg, cudnnHandle_t handl
   graph_cfg.check_for_forward_support = true;
 
   try {
-    const fused_attn::Fp8FwdGraphInputs in = fused_attn::derive_fp8_fwd_graph_inputs(graph_cfg);
+    const fused_attn::Fp8FwdGraphInputs in(graph_cfg);
     fused_attn::fp8_fwd_cached_graph(graph_cfg, in, handle);
     return "";
   } catch (const std::exception& e) {
@@ -1451,7 +1443,7 @@ std::string is_supported_fp8_bwd(const FusedAttnConfig& cfg, cudnnHandle_t handl
   graph_cfg.check_for_forward_support = false;
 
   try {
-    const fused_attn::Fp8BwdGraphInputs in = fused_attn::derive_fp8_bwd_graph_inputs(graph_cfg);
+    const fused_attn::Fp8BwdGraphInputs in(graph_cfg);
     fused_attn::fp8_bwd_cached_graph(graph_cfg, in, handle);
     return "";
   } catch (const std::exception& e) {
