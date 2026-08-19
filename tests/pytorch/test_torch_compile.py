@@ -1456,7 +1456,14 @@ def test_te_linear_compile_is_first_microbatch(compile_mode):
 
 @pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
-@pytest.mark.xfail(reason="waiting for a PyTorch fix", strict=False)
+@pytest.mark.xfail(
+    reason=(
+        "value-opaque module state comes back as None on recompile"
+        " (pytorch/pytorch#187041; fixed by #187057 (cold compile, merged)"
+        " + #193190 (FX-graph-cache hit, in review))"
+    ),
+    strict=False,
+)
 def test_te_linear_compile_train_eval_switch():
     """train -> eval -> train on the same compiled ``te.Linear``, vs eager."""
     dtype = torch.bfloat16
