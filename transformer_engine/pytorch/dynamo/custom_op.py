@@ -247,10 +247,6 @@ class OpaqueValueBundle:
     def __getitem__(self, key: str) -> Any:
         return self._data[key]
 
-    def get(self, key: str, default: Any = None) -> Any:
-        """Return ``self._data.get(key, default)``."""
-        return self._data.get(key, default)
-
     def as_dict(self) -> Dict[str, Any]:
         """Return a shallow copy of the stored mapping."""
         return dict(self._data)
@@ -347,9 +343,9 @@ def _storage_flatten(
     return OpaqueValueBundle(meta), tensors
 
 
-def _storage_unflatten(meta: Any, tensors: List[torch.Tensor]) -> Any:
+def _storage_unflatten(meta: "OpaqueValueBundle", tensors: List[torch.Tensor]) -> Any:
     """Inverse of :func:`_storage_flatten`."""
-    meta_dict = meta.as_dict() if isinstance(meta, OpaqueValueBundle) else dict(meta)
+    meta_dict = meta.as_dict()
     inner_names = meta_dict["_inner_names"]
     inner = dict(zip(inner_names, tensors))
     outer_shape = meta_dict.get("_outer_shape")
@@ -517,7 +513,7 @@ class _TensorOrQuantizedAdapter(_Adapter):
 
     def from_slots(self, args: Dict[str, Any], kwargs: Dict[str, Any]) -> None:
         meta = args[self.meta_slot()]
-        kind = meta.get(self.KIND_KEY)
+        kind = meta[self.KIND_KEY]
         if kind == _TensorOrQuantizedKind.NONE:
             kwargs[self.name] = None
         elif kind == _TensorOrQuantizedKind.TENSOR:
