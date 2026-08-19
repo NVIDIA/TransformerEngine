@@ -53,6 +53,11 @@ def _validate_cu_seqlens(
         raise ValueError(f"{name} must be on {device}, got {cu_seqlens.device}.")
 
 
+def _cu_seqlens_to_tuple(cu_seqlens: torch.Tensor) -> Tuple[int, ...]:
+    """Copy cumulative sequence lengths to the host for value validation."""
+    return tuple(cu_seqlens.detach().cpu().tolist())
+
+
 class _GatedDeltaNetAttention(torch.nn.Module):
     """Adapter from TransformerEngine attention layouts to cuDNN frontend GDN."""
 
@@ -71,7 +76,7 @@ class _GatedDeltaNetAttention(torch.nn.Module):
         self._dense_cu_seqlens_key: Optional[Tuple[torch.device, int, int]] = None
         self._dense_cu_seqlens: Optional[torch.Tensor] = None
         self._cu_seqlens_validation_cache: list[
-            Tuple[torch.Tensor, int, int, Tuple[int, ...]]
+            Tuple[torch.Tensor, Optional[int], int, Tuple[int, ...]]
         ] = []
 
     def _validate_cu_seqlens_values(
@@ -82,26 +87,34 @@ class _GatedDeltaNetAttention(torch.nn.Module):
         name: str,
         total_tokens: int,
     ) -> Tuple[int, ...]:
-        """Validate THD offsets, synchronizing only for new or mutated tensors."""
+        """Validate THD offsets and cache validated metadata for CUDA graph capture."""
         _validate_cu_seqlens(cu_seqlens, device=device, name=name)
         try:
             tensor_version = cu_seqlens._version  # pylint: disable=protected-access
         except RuntimeError:
-            # Tensors created in inference mode have no version counter. They cannot be
-            # cached safely because an in-place update would otherwise bypass validation.
+            # Tensors created in inference mode have no version counter. Revalidate these
+            # tensors in eager mode, but retain their warmup result for CUDA graph capture.
             tensor_version = None
+        inference_cache_hit = None
         for cached_tensor, cached_version, cached_total, cached_offsets in (
             self._cu_seqlens_validation_cache
         ):
-            if (
-                tensor_version is not None
-                and cached_tensor is cu_seqlens
-                and cached_version == tensor_version
-                and cached_total == total_tokens
-            ):
-                return cached_offsets
+            if cached_tensor is cu_seqlens and cached_total == total_tokens:
+                if tensor_version is not None and cached_version == tensor_version:
+                    return cached_offsets
+                if tensor_version is None and cached_version is None:
+                    inference_cache_hit = cached_offsets
 
-        offsets = tuple(cu_seqlens.detach().cpu().tolist())
+        if torch.cuda.is_current_stream_capturing():
+            if inference_cache_hit is not None:
+                # CUDA graphs already require persistent input buffers. Treat inference-mode
+                # sequence metadata as immutable between its eager warmup and graph capture.
+                return inference_cache_hit
+            raise RuntimeError(
+                f"{name} must be validated by an eager GDN warmup before CUDA graph capture."
+            )
+
+        offsets = _cu_seqlens_to_tuple(cu_seqlens)
         if offsets[0] != 0:
             raise ValueError(f"{name} must start at 0, got {offsets[0]}.")
         for index, (start, end) in enumerate(zip(offsets, offsets[1:])):
@@ -117,16 +130,15 @@ class _GatedDeltaNetAttention(torch.nn.Module):
             )
 
         # Holding a few tiny offset tensors avoids pointer-reuse ambiguity while keeping
-        # repeated forwards and CUDA graph replay free of validation synchronizations.
-        if tensor_version is not None:
-            self._cu_seqlens_validation_cache = [
-                entry for entry in self._cu_seqlens_validation_cache if entry[0] is not cu_seqlens
-            ]
-            self._cu_seqlens_validation_cache.append(
-                (cu_seqlens, tensor_version, total_tokens, offsets)
-            )
-            if len(self._cu_seqlens_validation_cache) > 4:
-                self._cu_seqlens_validation_cache.pop(0)
+        # repeated forwards and CUDA graph capture free of validation synchronizations.
+        self._cu_seqlens_validation_cache = [
+            entry for entry in self._cu_seqlens_validation_cache if entry[0] is not cu_seqlens
+        ]
+        self._cu_seqlens_validation_cache.append(
+            (cu_seqlens, tensor_version, total_tokens, offsets)
+        )
+        if len(self._cu_seqlens_validation_cache) > 4:
+            self._cu_seqlens_validation_cache.pop(0)
         return offsets
 
     def forward(
@@ -250,12 +262,15 @@ class _GatedDeltaNetAttention(torch.nn.Module):
             cu_seqlens_values = tuple(range(0, batch_size * sequence_length + 1, sequence_length))
 
         if cu_seqlens_kv is not None:
-            cu_seqlens_kv_values = self._validate_cu_seqlens_values(
-                cu_seqlens_kv,
-                device=device,
-                name="cu_seqlens_kv",
-                total_tokens=query_layer.shape[0],
-            )
+            if cu_seqlens_kv is cu_seqlens:
+                cu_seqlens_kv_values = cu_seqlens_values
+            else:
+                cu_seqlens_kv_values = self._validate_cu_seqlens_values(
+                    cu_seqlens_kv,
+                    device=device,
+                    name="cu_seqlens_kv",
+                    total_tokens=query_layer.shape[0],
+                )
             if cu_seqlens_kv_values != cu_seqlens_values:
                 raise ValueError(
                     "GDN requires cu_seqlens_q and cu_seqlens_kv to contain identical offsets."
