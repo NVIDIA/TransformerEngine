@@ -466,7 +466,9 @@ def general_cuDNN_MX_gemm(
 
     assert quantization_params is None, "cuDNN GEMM currently does not support output quantization."
     assert gelu is False and gelu_in is None, "cuDNN GEMM currently does not support fused GELU."
-    assert use_split_accumulator is False, "cuDNN GEMM currently does not support split accumulators."
+    assert (
+        use_split_accumulator is False
+    ), "cuDNN GEMM currently does not support split accumulators."
 
     # use_split_accumulator is deliberately not checked: it is a cuBLAS knob for
     # raising accumulator precision, and the cuDNN kernel always accumulates in
