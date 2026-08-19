@@ -429,7 +429,7 @@ def test_gdn_requires_both_gates():
         qkv_format="bshd",
         attn_mask_type="causal",
     )
-    with pytest.raises(ValueError, match="requires both g and beta"):
+    with pytest.raises(ValueError, match="require both g and beta"):
         attention(q, k, v, g=g)
 
 
