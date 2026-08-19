@@ -2101,6 +2101,101 @@ class TestGroupedMLPDeterminism:
         warned = any("dprob" in str(w.message) for w in caught)
         assert warned is expect_warning
 
+    @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
+    def test_dprob_is_bit_exact_across_runs(self, monkeypatch) -> None:
+        """The actual claim: identical inputs produce an identical ``dprob``.
+
+        The tolerance-based check above cannot see this. Reordering the same atomic adds
+        moves the result by about an ulp, which every tolerance in this file accepts, so a
+        run that is silently not reproducible passes it. Only an exact comparison of two
+        runs can tell the difference.
+
+        ``dbias`` rides the same slot mechanism, but reaching it needs an FC1 bias, and an
+        FC2 ``scale_bias`` then routes the scale gradient through a Triton kernel that
+        refuses to run under determinism at all. Left to the op-level tests.
+        """
+        fused_cls = grouped_mlp_module.GroupedMLP_CuTeGEMMUnary
+        if not fused_cls.is_supported():
+            pytest.skip("MXFP8 fused grouped MLP is not supported on this system")
+        if not fused_cls.grouped_gemm_dactivation_is_deterministic():
+            pytest.skip(
+                "grouped_gemm_dsrelu_wrapper_sm100 has no deterministic mode before cuDNN"
+                " frontend 1.28.0, so dprob is expected to vary run to run here"
+            )
+
+        monkeypatch.setenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "0")
+        self._reset_caches()
+
+        device = torch.device("cuda")
+        dtype = torch.bfloat16
+        group_size = 4
+        # Wide enough that the dprob reduction spans several N-tiles. With a single tile
+        # there is one writer per token, nothing to reorder, and the test is vacuous.
+        hidden_size = 1024
+        split_sizes = torch.tensor([256] * group_size, dtype=torch.int, device=device)
+        num_tokens = int(split_sizes.sum().item())
+
+        recipe = make_recipe("mxfp8")
+        _, x = make_reference_and_test_tensors(
+            (num_tokens, hidden_size),
+            min=-0.25,
+            max=0.25,
+            quantization="mxfp8",
+            test_dtype=dtype,
+            test_device=device,
+        )
+        _, dy = make_reference_and_test_tensors(
+            (num_tokens, hidden_size),
+            min=-0.25,
+            max=0.25,
+            quantization="mxfp8",
+            test_dtype=dtype,
+            test_device=device,
+            requires_grad=False,
+        )
+        _, probs = make_reference_and_test_tensors(
+            (num_tokens,),
+            test_dtype=dtype,
+            test_device=device,
+        )
+
+        # No bias on either linear: with bias the FC2 scale gradient goes through the
+        # Triton grouped-dbias kernel instead of arriving straight from the cuDNN epilogue,
+        # and probs.grad would no longer be the dprob under test.
+        with te.quantized_model_init(enabled=True, recipe=recipe):
+            module = te.ops.Sequential(
+                te.ops.GroupedLinear(
+                    group_size, hidden_size, hidden_size, bias=False, device=device, dtype=dtype
+                ),
+                te.ops.ScaledSReLU(),
+                te.ops.GroupedLinear(
+                    group_size, hidden_size, hidden_size, bias=False, device=device, dtype=dtype
+                ),
+            )
+
+        def _run() -> torch.Tensor:
+            x.grad = None
+            probs.grad = None
+            with te.autocast(enabled=True, recipe=recipe):
+                y = module(x, split_sizes, probs, split_sizes)
+            y.backward(dy)
+            return probs.grad.detach().clone()
+
+        first = _run()
+        # The fusion has to have happened, or dprob never came from the cuDNN epilogue and
+        # the comparison below proves nothing.
+        forward_ops = module._module_groups[0]._forward_ops
+        assert len(forward_ops) == 1
+        assert isinstance(forward_ops[0][0], fused_cls)
+        second = _run()
+
+        # Exact, not assert_close. Weight gradients are deliberately not compared: the CuTe
+        # DSL wgrad kernel has its own K-split atomics that this change does not address.
+        assert torch.equal(first, second), (
+            "dprob differed between two identical runs under determinism; max |delta| ="
+            f" {(first.float() - second.float()).abs().max().item()}"
+        )
+
 
 def test_grouped_gemm_quant_cute_matches_mxfp8_quantized() -> None:
     if not mxfp8_available:
