@@ -183,7 +183,13 @@ def _reference_weights(op):
     packed = _pack_grouped_linear_weights(op, block_scaled_cls=BlockScaledTensor)
     if isinstance(packed, torch.Tensor):
         return packed.detach()
-    return packed
+    return BlockScaledTensor(
+        data=packed.data.detach(),
+        scale=packed.scale.detach(),
+        format=packed.format,
+        logical_shape=packed.logical_shape,
+        axis=packed.axis,
+    )
 
 
 class _Cfg:
@@ -645,7 +651,7 @@ class TestEP(unittest.TestCase):
             self.skipTest(f"cudnn.moe_ep.MoeEp is not installed ({type(exc).__name__}: {exc})")
 
         # MegaMoE SM107 requires intermediate_size % 256 == 0.
-        intermediate_dim = 128
+        intermediate_dim = 256
         recipe = MXFP8BlockScaling() if quantization == "mxfp8" else None
         model, fc1, fc2 = self._make_moe_model(
             fuse_ops=True, intermediate_dim=intermediate_dim, recipe=recipe
@@ -691,8 +697,8 @@ class TestEP(unittest.TestCase):
         self.assertIsInstance(seq_out, torch.Tensor)
         self.assertEqual(seq_out.dtype, torch.bfloat16)
 
-        fc1_weight = _reference_weights(fc1).detach()
-        fc2_weight = _reference_weights(fc2).detach()
+        fc1_weight = _reference_weights(fc1)
+        fc2_weight = _reference_weights(fc2)
         reference = MoeEpReference(
             num_experts=self.cfg.num_experts,
             hidden_size=HIDDEN_DIM,
