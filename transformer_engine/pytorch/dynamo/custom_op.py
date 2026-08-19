@@ -247,16 +247,6 @@ class OpaqueValueBundle:
     def __getitem__(self, key: str) -> Any:
         return self._data[key]
 
-    def __getattr__(self, name: str) -> Any:
-        # Underscored names raise cleanly: copy/pickle probe dunders on a clone
-        # created without __init__, where reading ``self._data`` would recurse.
-        if name.startswith("_"):
-            raise AttributeError(name)
-        try:
-            return self._data[name]
-        except KeyError as e:
-            raise AttributeError(name) from e
-
     def get(self, key: str, default: Any = None) -> Any:
         """Return ``self._data.get(key, default)``."""
         return self._data.get(key, default)
@@ -399,22 +389,11 @@ class _Adapter:
 
     A custom op only takes flat, simply-typed arguments, but a TE op takes a
     single ``@dataclass`` of mixed fields. Each adapter knows how to translate
-    its kind of field both ways. ``try_build`` and ``schema_slots`` run once at
-    registration (to build the op's schema); ``to_slots`` and ``from_slots`` run
-    on each call and must agree on the slot layout that ``schema_slots`` declares.
+    its kind of field both ways; :func:`_build_field_adapter` picks the kind
+    from the field's annotation. ``schema_slots`` runs once at registration
+    (to build the op's schema); ``to_slots`` and ``from_slots`` run on each
+    call and must agree on the slot layout that ``schema_slots`` declares.
     """
-
-    @classmethod
-    def try_build(cls, name: str, annot: Any) -> Optional["_Adapter"]:
-        """Decide whether this adapter type handles the field ``name`` given its
-        type annotation ``annot``; return a configured adapter if so, else
-        ``None`` so the next candidate is tried.
-
-        Called once per field at registration, iterating :data:`_FIELD_ADAPTERS`
-        (adapters are mutually exclusive on annotations, so the order is not a
-        ranking).
-        """
-        raise NotImplementedError
 
     def schema_slots(self) -> List[Tuple[str, str]]:
         """Declare the schema slots this field occupies, each as a
@@ -500,17 +479,12 @@ class _TensorOrQuantizedAdapter(_Adapter):
     _MEMBERS = frozenset(get_args(TensorOrQuantized))
 
     @classmethod
-    def _is_tensor_storage_union(cls, annot: Any) -> bool:
+    def is_tensor_storage_union(cls, annot: Any) -> bool:
+        """Whether ``annot`` is exactly the tensor-or-quantized union."""
         if not _is_union(annot):
             return False
         members = frozenset(a for a in get_args(annot) if a is not type(None))
         return members == cls._MEMBERS
-
-    @classmethod
-    def try_build(cls, name: str, annot: Any) -> Optional["_TensorOrQuantizedAdapter"]:
-        if cls._is_tensor_storage_union(annot):
-            return cls(name)
-        return None
 
     def to_slots(self, owner: Any) -> Dict[str, Any]:
         value = getattr(owner, self.name)
@@ -564,13 +538,6 @@ class _TensorAdapter(_Adapter):
         self.name = name
         self.type_str = "Tensor?" if is_optional else "Tensor"
 
-    @classmethod
-    def try_build(cls, name: str, annot: Any) -> Optional["_TensorAdapter"]:
-        stripped, is_optional = _strip_optional(annot)
-        if stripped is torch.Tensor:
-            return cls(name, is_optional)
-        return None
-
     def schema_slots(self) -> List[Tuple[str, str]]:
         return [(self.name, self.type_str)]
 
@@ -602,15 +569,6 @@ class _ProcessGroupAdapter(_Adapter):
     def meta_slot(self) -> str:
         """Group-name slot name."""
         return self.name + "__pg"
-
-    @classmethod
-    def try_build(cls, name: str, annot: Any) -> Optional["_ProcessGroupAdapter"]:
-        if _PROCESS_GROUP_TYPE is None:
-            return None
-        stripped, _ = _strip_optional(annot)
-        if stripped is _PROCESS_GROUP_TYPE:
-            return cls(name)
-        return None
 
     def schema_slots(self) -> List[Tuple[str, str]]:
         return [(self.meta_slot(), _OPAQUE_VALUE_BUNDLE_TYPE_NAME)]
@@ -721,13 +679,18 @@ class _UnsupportedAdapter(_Adapter):
         kwargs[self.name] = None
 
 
-# Adapter candidates for a single field, tried via ``try_build``. Mutually
-# exclusive on annotations, so the order is not a ranking.
-_FIELD_ADAPTERS: Tuple[type, ...] = (
-    _TensorOrQuantizedAdapter,
-    _TensorAdapter,
-    _ProcessGroupAdapter,
-)
+def _build_field_adapter(name: str, annot: Any) -> Optional[_Adapter]:
+    """Pick the per-field adapter for one dataclass field from its annotation
+    (``None`` -> not a per-field kind; the caller falls back to the simple
+    bundle / unsupported)."""
+    if _TensorOrQuantizedAdapter.is_tensor_storage_union(annot):
+        return _TensorOrQuantizedAdapter(name)
+    stripped, is_optional = _strip_optional(annot)
+    if stripped is torch.Tensor:
+        return _TensorAdapter(name, is_optional)
+    if _PROCESS_GROUP_TYPE is not None and stripped is _PROCESS_GROUP_TYPE:
+        return _ProcessGroupAdapter(name)
+    return None
 
 
 def _resolved_field_annotations(cls: type) -> List[Tuple[str, Any]]:
@@ -752,11 +715,7 @@ def _get_adapters(cls: type) -> List[_Adapter]:
     adapters: List[_Adapter] = []
     simple_names: List[str] = []
     for name, annot in _resolved_field_annotations(cls):
-        built: Optional[_Adapter] = None
-        for adapter_cls in _FIELD_ADAPTERS:
-            built = adapter_cls.try_build(name, annot)
-            if built is not None:
-                break
+        built = _build_field_adapter(name, annot)
         if built is not None:
             adapters.append(built)
         elif _SimpleBundleAdapter.matches_field(annot):
