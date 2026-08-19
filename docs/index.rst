@@ -59,6 +59,7 @@ Transformer Engine documentation
    examples/te_mixtral/tutorial_accelerate_hf_mixtral_with_te.ipynb
    examples/onnx/onnx_export.ipynb
    examples/te_jax_integration.rst
+   examples/benchmarkable_tests.rst
    examples/op_fuser/op_fuser.rst
    examples/gemm_profiling/gemm_profiling.rst
 

@@ -124,7 +124,7 @@ def setup_requirements() -> Tuple[List[str], List[str]]:
         "importlib-metadata>=1.0",
         "packaging",
     ]
-    test_reqs: List[str] = ["pytest>=8.2.1"]
+    test_reqs: List[str] = ["pytest>=8.2.1", "cuda-python>=12.0"]
 
     # Framework-specific requirements
     if not bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))):
@@ -403,6 +403,11 @@ if __name__ == "__main__":
             ],
         ),
         extras_require=extras_require,
+        entry_points={
+            "pytest11": [
+                "nvte-benchmark = transformer_engine.common.testing.plugin",
+            ],
+        },
         description="Transformer acceleration library",
         long_description=long_description,
         long_description_content_type="text/x-rst",

@@ -7,3 +7,8 @@ requires = ["setuptools>=61.0", "cmake>=3.21", "wheel", "pybind11[global]", "nin
 
 # Use legacy backend to import local packages in setup.py
 build-backend = "setuptools.build_meta:__legacy__"
+
+[tool.pytest.ini_options]
+# Benchmarkable tests return a Case that only the nvte-benchmark plugin runs; without
+# it pytest discards the Case and the test passes having verified nothing.
+filterwarnings = ["error::pytest.PytestReturnNotNoneWarning"]
