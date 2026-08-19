@@ -4,6 +4,7 @@
 
 """Functions for CUDA Graphs support in FP8"""
 
+from bisect import bisect_right
 from collections.abc import Iterable
 import contextlib
 import gc
@@ -1970,41 +1971,40 @@ def _make_graphed_callables(
         """Resolve every checkpoint-live allocation to its owning StorageImpl."""
         owners = {}
         visited = set()
+        visited_storage_impls = set()
+        block_starts = sorted(expected_blocks)
+
+        def record_storage(storage):
+            if storage.device.type != "cuda" or storage._cdata in visited_storage_impls:
+                return
+            visited_storage_impls.add(storage._cdata)
+            storage_ptr = storage.data_ptr()
+            block_idx = bisect_right(block_starts, storage_ptr) - 1
+            if block_idx < 0:
+                return
+            block_ptr = block_starts[block_idx]
+            if storage_ptr >= block_ptr + expected_blocks[block_ptr]:
+                return
+            if torch._C._has_Standard_Deleter(storage._cdata):
+                previous = owners.setdefault(block_ptr, storage)
+                if previous._cdata != storage._cdata:
+                    raise RuntimeError(
+                        "CUDA graph slot checkpoint found multiple owning storages "
+                        f"for allocation {block_ptr}."
+                    )
 
         def visit(value):
             if value is None or id(value) in visited:
                 return
             if isinstance(value, torch.UntypedStorage):
-                if value.device.type != "cuda":
-                    return
-                storage_ptr = value.data_ptr()
-                for block_ptr, block_size in expected_blocks.items():
-                    if block_ptr <= storage_ptr < block_ptr + block_size:
-                        if torch._C._has_Standard_Deleter(value._cdata):
-                            previous = owners.setdefault(block_ptr, value)
-                            if previous._cdata != value._cdata:
-                                raise RuntimeError(
-                                    "CUDA graph slot checkpoint found multiple owning storages "
-                                    f"for allocation {block_ptr}."
-                                )
-                        break
+                record_storage(value)
                 return
             visited.add(id(value))
             if isinstance(value, torch.Tensor):
                 if not value.is_cuda:
                     return
                 storage = value.untyped_storage()
-                storage_ptr = storage.data_ptr()
-                for block_ptr, block_size in expected_blocks.items():
-                    if block_ptr <= storage_ptr < block_ptr + block_size:
-                        if torch._C._has_Standard_Deleter(storage._cdata):
-                            previous = owners.setdefault(block_ptr, storage)
-                            if previous._cdata != storage._cdata:
-                                raise RuntimeError(
-                                    "CUDA graph slot checkpoint found multiple owning storages "
-                                    f"for allocation {block_ptr}."
-                                )
-                        break
+                record_storage(storage)
                 if value.is_leaf:
                     visit(value.grad)
                 for child in vars(value).values():
