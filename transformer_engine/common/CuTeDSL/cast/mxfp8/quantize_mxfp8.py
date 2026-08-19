@@ -702,8 +702,11 @@ class MXFP8QuantizeConfig:
         with_dbias: bool = False,
         with_dact: bool = False,
         with_act: bool = False,
+        use_2d_quantization: bool = False,
         activation: Optional[str] = None,
     ):
+        if use_2d_quantization:
+            raise ValueError("2D block scaling is not implemented by the CuTeDSL MXFP8 kernels")
         if dtype is None or dtype not in ("fp32", "fp16", "bf16"):
             raise ValueError(f"unknown input dtype {dtype!r}; expected fp32|fp16|bf16")
         self.DTYPE = str_to_cutlass_dtype(dtype)
@@ -2462,6 +2465,7 @@ def get_mxfp8_quantization_function(
     with_dbias: bool,
     with_dact: bool,
     with_act: bool,
+    use_2d_quantization: bool,
     activation: str,
 ) -> bool:
     """Compile the MXFP8 quantize kernel for this config and register it in the TVM-FFI global registry
@@ -2494,6 +2498,7 @@ def get_mxfp8_quantization_function(
             with_dbias=with_dbias,
             with_dact=with_dact,
             with_act=with_act,
+            use_2d_quantization=use_2d_quantization,
             activation=activation,
         )
     except ValueError as e:

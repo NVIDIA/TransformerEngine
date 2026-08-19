@@ -153,7 +153,8 @@ def get_cfg_key(method, in_dtype, fp8_dtype, q_layout):
         desc = "dgelu"
     # MXFP8 never asks TE/common for an amax, and JAX quantize emits scales in the linear
     # (non-swizzled) layout -- the GEMM swizzle happens later, in JAX (see gemm.swizzled_scale).
-    flags = (True, q_layout.has_colwise, False, False, with_dbias, with_dact, with_act)
+    # trailing False is use_2d_quantization; JAX never requests 2D block scaling
+    flags = (True, q_layout.has_colwise, False, False, with_dbias, with_dact, with_act, False)
     return (
         "cutedsl_mxfp8_"
         + DTYPE_TO_STR[in_dtype]

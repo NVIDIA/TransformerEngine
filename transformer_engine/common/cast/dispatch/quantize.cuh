@@ -95,7 +95,7 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
           cutedsl_backend::mxfp8_quantize_cutedsl</*IS_DBIAS=*/false, /*IS_DACT=*/false, IS_ACT,
                                                   ParamOP, OP>(
               input_tensor, dummy_input_tensor, noop_tensor, output_tensor, dummy_dbias_tensor,
-              dummy_workspace_tensor, stream);
+              dummy_workspace_tensor, quant_config_cpp.mxfp8_2d_quantization, stream);
       if (!quantized_with_cutedsl) {
         mxfp8::quantize</*IS_DBIAS=*/false, /*IS_DACT=*/false, IS_ACT, ParamOP, OP>(
             *input_tensor, dummy_input_tensor, noop_tensor, output_tensor, dummy_dbias_tensor,
@@ -277,7 +277,7 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
       bool quantized_with_cutedsl =
           cutedsl_backend::mxfp8_quantize_cutedsl<IS_DBIAS, IS_DACT, /*IS_ACT=*/false, ParamOP, OP>(
               grad_tensor, input_tensor, noop_tensor, output_tensor, dbias_tensor, workspace_tensor,
-              stream);
+              quant_config_cpp.mxfp8_2d_quantization, stream);
       if (!quantized_with_cutedsl) {
         mxfp8::quantize<IS_DBIAS, IS_DACT, /*IS_ACT=*/false, ParamOP, OP>(
             *grad_tensor, input_tensor, noop_tensor, output_tensor, dbias_tensor, workspace_tensor,

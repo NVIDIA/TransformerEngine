@@ -147,7 +147,8 @@ def get_cfg_key(method, act, in_dtype, fp8_dtype, rowwise, colwise, swizzled):
     elif with_dact:
         desc = f"d{act['desc']}"
     # with_amax is hardcoded to False for now because there is no way to obtain this value and validate in python
-    flags = (rowwise, colwise, swizzled, False, with_dbias, with_dact, with_act)
+    # trailing False is use_2d_quantization; these cases never request 2D block scaling
+    flags = (rowwise, colwise, swizzled, False, with_dbias, with_dact, with_act, False)
     return (
         "cutedsl_mxfp8_"
         + DTYPE_TO_STR[in_dtype]

@@ -40,18 +40,21 @@ struct MXFP8QuantConfig {
   bool with_dbias = false;  // If the dbias is computated (via the workspace tensor)
   bool with_dact = false;   // If an activation derivative operation is fused
   bool with_act = false;    // If an activation operation is fused
+  bool use_2d_quantization = false;  // If use 2D quantization
   Activation activation = Activation::kNone;
 
   constexpr uint32_t to_id() const {
     static_assert(static_cast<uint32_t>(DType::kNumTypes) <= 256,
                   "DType no longer fits in the 8 bits to_id() gives it.");
-    static_assert(static_cast<uint32_t>(Activation::kNumTypes) <= 512,
-                  "Activation no longer fits in the 9 bits to_id() gives it.");
+    static_assert(static_cast<uint32_t>(Activation::kNumTypes) <= 256,
+                  "Activation no longer fits in the 8 bits to_id() gives it.");
     return static_cast<uint32_t>(dtype) | (static_cast<uint32_t>(fp8_dtype) << 8) |
            (static_cast<uint32_t>(rowwise) << 16) | (static_cast<uint32_t>(colwise) << 17) |
            (static_cast<uint32_t>(swizzled) << 18) | (static_cast<uint32_t>(with_amax) << 19) |
            (static_cast<uint32_t>(with_dbias) << 20) | (static_cast<uint32_t>(with_dact) << 21) |
-           (static_cast<uint32_t>(with_act) << 22) | (static_cast<uint32_t>(activation) << 23);
+           (static_cast<uint32_t>(with_act) << 22) |
+           (static_cast<uint32_t>(use_2d_quantization) << 23) |
+           (static_cast<uint32_t>(activation) << 24);
   }
 
   std::optional<tvm::ffi::Function> get_kernel() const {
@@ -83,6 +86,8 @@ struct MXFP8QuantConfig {
         .append("_")
         .append(with_act ? "1" : "0")
         .append("_")
+        .append(use_2d_quantization ? "1" : "0")
+        .append("_")
         .append(activation_to_str(activation));
     return key;
   }
@@ -95,7 +100,8 @@ struct MXFP8QuantConfig {
     tvm::ffi::Any result = (*entrypoint)(
         tvm::ffi::String(fn_name), tvm::ffi::String(te_dtype_to_str(dtype)),
         tvm::ffi::String(te_dtype_to_str(fp8_dtype)), rowwise, colwise, swizzled, with_amax,
-        with_dbias, with_dact, with_act, tvm::ffi::String(activation_to_str(activation)));
+        with_dbias, with_dact, with_act, use_2d_quantization,
+        tvm::ffi::String(activation_to_str(activation)));
     return result.try_cast<bool>().value_or(false);
   }
 };
@@ -265,8 +271,13 @@ template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
           float (*OP)(float, const ParamOP &)>
 bool mxfp8_quantize_cutedsl(const Tensor *input_tensor, const Tensor *act_input_tensor,
                             const Tensor *noop_tensor, Tensor *output_tensor, Tensor *dbias_tensor,
-                            Tensor *workspace_tensor, cudaStream_t stream) {
+                            Tensor *workspace_tensor, const bool use_2d_quantization,
+                            cudaStream_t stream) {
   if (!tvm_ffi_bridge::TVMFFICentral::getInstance().get_cutedsl_backend_enabled()) {
+    return false;
+  }
+  // TODO(kainingz): port 2D quantization to CuTeDSL
+  if (use_2d_quantization) {
     return false;
   }
   using Fused = MXFP8QuantFused<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>;
@@ -282,6 +293,7 @@ bool mxfp8_quantize_cutedsl(const Tensor *input_tensor, const Tensor *act_input_
                                   /*with_dbias=*/IS_DBIAS,
                                   /*with_dact=*/IS_DACT,
                                   /*with_act=*/IS_ACT,
+                                  /*use_2d_quantization=*/use_2d_quantization,
                                   /*activation=*/Fused::activation};
     checkCuDriverContext(stream);
     // Sanity checks, mirroring mxfp8::quantize in quantize_mxfp8.cuh
