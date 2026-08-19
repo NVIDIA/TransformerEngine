@@ -136,18 +136,14 @@ def derive_swizzled_scale_layout(
 @cute.jit
 def quantize_rowwise_mxfp8(
     sX_tile,  # (TILE_Y, TILE_X) bf16/fp16 smem view, post-TMA
-    sA_tile,  # (TILE_Y, TILE_X) activation-input smem tile (dact only)
+    sActInput_tile,  # (TILE_Y, TILE_X) activation-input smem tile (dact only)
     sO_row_tile,  # (TILE_Y, TILE_X) fp8 smem view (rowwise FP8 output)
     mS_row_stage,  # rowwise scale tensor (1D swizzled, or 2D linear)
     max_norm_rcp,
     tile_row_start,  # Int32 — global row index of this stage's row 0
-    # (= tile_idx_y * TILE_Y). Used to mask OOB scale stores
-    # for irregular shapes.
     tile_col_start,  # Int32 — global col index of this CTA's col 0
-    # (= bidx * TILE_X). Same purpose.
     M,
-    N,  # Int32 — full tensor extents; OOB threads skip their
-    # scale store.
+    N,
     ACTIVATION,
     DTYPE,
     FP8_DTYPE,
@@ -159,7 +155,7 @@ def quantize_rowwise_mxfp8(
     SKIP_MASKING,
     WITH_ACT=False,
     WITH_DACT=False,
-    WITH_DBIAS=False,  # rowwise-only dbias: accumulate per-column partials
+    WITH_DBIAS=False,
     dbias_acc=None,  #  only needed when WITH_DBIAS is True
 ):
     """Quantize one SMEM tile rowwise to MXFP8 (per-row 32-elt block scales); returns the tile amax."""
@@ -251,7 +247,7 @@ def quantize_rowwise_mxfp8(
         if cutlass.const_expr(WITH_DACT):
             # Backward: out = grad · act'(act_input). sX is grad, sA is act_input.
             dop = SUPPORTED_DACTIVATIONS[ACTIVATION]
-            sA_thread = cute.composition(sA_tile, tv_layout)[tidx, None]
+            sA_thread = cute.composition(sActInput_tile, tv_layout)[tidx, None]
             sA_thread_rw = cute.make_tensor(
                 sA_thread.iterator,
                 cute.make_layout((1, MXFP8_BLOCK_SCALING_SIZE), stride=(0, 1)),
@@ -348,30 +344,25 @@ def quantize_rowwise_mxfp8(
 @cute.jit
 def quantize_colwise_mxfp8(
     sX_tile,  # (TILE_Y, TILE_X) bf16/fp16 smem view, post-TMA
+    sActInput_tile,  # (TILE_Y, TILE_X) activation-input smem tile (dact only)
     sO_col_tile,  # (TILE_Y, TILE_X) fp8 smem view (colwise FP8 output)
     mS_col_stage,  # colwise scale tensor (1D swizzled, or 2D linear)
     max_norm_rcp,
     tile_row_start,  # Int32 — global row index of this stage's row 0
-    # (= tile_idx_y * TILE_Y). Used to mask OOB scale stores
-    # for irregular shapes.
     tile_col_start,  # Int32 — global col index of this CTA's col 0
-    # (= bidx * TILE_X).
     M,
-    N,  # Int32 — full tensor extents.
+    N,
     ACTIVATION,
     DTYPE,
     FP8_DTYPE,
     SWIZZLE,
     TILE_X,
     TILE_Y,  # pylint: disable=unused-argument  # kept for API symmetry with the rowwise path
-    SKIP_MASKING,  # True when the caller guarantees the tile is fully in bounds
-    WITH_ACT=False,  # forward: apply activation to the element
-    WITH_DACT=False,  # backward: out = grad · act'(act_input)
-    sA_tile=None,  # (TILE_Y, TILE_X) activation-input smem tile (dact only)
+    SKIP_MASKING,
+    WITH_ACT=False,
+    WITH_DACT=False,
     WITH_DBIAS=False,  # also return this thread's column sum (pre-truncate)
-    CACHE_ACTIVATION=False,  # overwrite sX_tile in place with the post-activation
-    # (IType-truncated) values, so the rowwise pass can read
-    # them instead of recomputing op
+    CACHE_ACTIVATION=False,  # cache the post-activation (IType-truncated) values to sX_tile for rowwise pass to use
 ):
     """Quantize one SMEM tile colwise to MXFP8 (per-column 32-elt block scales); returns (amax, dbias_partial)."""
     tidx, _, _ = cute.arch.thread_idx()
@@ -417,7 +408,7 @@ def quantize_colwise_mxfp8(
         # Apply activation (fwd) or grad·act'(act_input) (bwd dact) in f32.
         if cutlass.const_expr(WITH_DACT):
             dop = SUPPORTED_DACTIVATIONS[ACTIVATION]
-            sA_thread = cute.composition(sA_tile, tv_layout)[tidx, None]
+            sA_thread = cute.composition(sActInput_tile, tv_layout)[tidx, None]
             for i in cutlass.range_constexpr(MXFP8_BLOCK_SCALING_SIZE):
                 rX_thread_f32[i] = rX_thread_f32[i] * dop(Float32(sA_thread[i]))
         elif cutlass.const_expr(WITH_ACT):
@@ -1605,6 +1596,7 @@ class MXFP8QuantizeKernel(MXFP8QuantizeKernelBase):
         cfg = self.cfg
         return quantize_colwise_mxfp8(
             sX_tile,
+            sActInput_tile,
             sO_col_tile,
             mS_col_stage,
             max_norm_rcp,
@@ -1621,7 +1613,6 @@ class MXFP8QuantizeKernel(MXFP8QuantizeKernelBase):
             SKIP_MASKING=self.SKIP_MASKING,
             WITH_ACT=cfg.WITH_ACT,
             WITH_DACT=cfg.WITH_DACT,
-            sA_tile=sActInput_tile,
             WITH_DBIAS=self.DBIAS_REDUCTION_COLWISE,
             CACHE_ACTIVATION=self.CACHE_ACTIVATION,
         )
