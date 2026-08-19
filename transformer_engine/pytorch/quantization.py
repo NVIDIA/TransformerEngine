@@ -860,6 +860,38 @@ class FP8GlobalStateManager:
         return f"recipe={recipe_repr},group={group_id}"
 
     @classmethod
+    def _prepare_autocast_enter(
+        cls,
+        enabled: bool,
+        fp8_recipe: Optional[Recipe],
+        fp8_group: Optional[dist_group_type],
+    ) -> Tuple[Recipe, Hashable, str]:
+        """Resolve and validate an autocast activation without publishing state."""
+        fp8_recipe = get_default_fp8_recipe() if fp8_recipe is None else fp8_recipe
+        if enabled:
+            check_recipe_support(fp8_recipe)
+
+        quantizer_config = fp8_recipe.quantizer_config()
+        autocast_key = cls.get_unique_autocast_key(fp8_recipe, fp8_group)
+
+        if enabled:
+            fp8_available, reason_for_no_fp8 = cls.is_fp8_available()
+            assert fp8_available, reason_for_no_fp8
+            if isinstance(fp8_recipe, MXFP8BlockScaling):
+                mxfp8_available, reason_for_no_mxfp8 = cls.is_mxfp8_available()
+                assert mxfp8_available, reason_for_no_mxfp8
+            if isinstance(fp8_recipe, Float8BlockScaling):
+                fp8_block_available, reason_for_no_fp8_block = (
+                    cls.is_fp8_block_scaling_available()
+                )
+                assert fp8_block_available, reason_for_no_fp8_block
+            if isinstance(fp8_recipe, NVFP4BlockScaling):
+                nvfp4_available, reason_for_no_nvfp4 = cls.is_nvfp4_available()
+                assert nvfp4_available, reason_for_no_nvfp4
+
+        return fp8_recipe, quantizer_config, autocast_key
+
+    @classmethod
     def autocast_enter(
         cls,
         enabled: bool = False,
@@ -868,11 +900,18 @@ class FP8GlobalStateManager:
         fp8_group: Optional[dist_group_type] = None,
         _graph: bool = False,
     ) -> None:
-        """Set state and tracking variables for entry into FP8 region."""
+        """Prepare and publish state for entry into an FP8 region."""
 
-        fp8_recipe = get_default_fp8_recipe() if fp8_recipe is None else fp8_recipe
-        autocast_key = cls.get_unique_autocast_key(fp8_recipe, fp8_group)
+        fp8_recipe, quantizer_config, autocast_key = cls._prepare_autocast_enter(
+            enabled,
+            fp8_recipe,
+            fp8_group,
+        )
         qstate = cls.quantization_state
+
+        # Preparation above contains every operation that can fail due to the
+        # requested recipe or platform. Publish only after it has succeeded.
+        cls._set_recipe_config(fp8_recipe, quantizer_config)
         # Once a delayed bucket is registered, its committed recipe snapshot
         # owns the reduction semantics for this key. Do not replace it with a
         # caller-owned recipe object merely by entering another autocast.
@@ -883,7 +922,6 @@ class FP8GlobalStateManager:
 
         qstate.fp8_enabled = enabled
         qstate.fp8_calibration = calibrating
-        cls.activate_recipe(fp8_recipe)
         qstate.fp8_distributed_group = fp8_group
         qstate.fp8_graph_capturing = _graph
 
@@ -891,19 +929,6 @@ class FP8GlobalStateManager:
             qstate.abort_amax_reduction = False
             qstate.is_first_fp8_module = True
         qstate.autocast_depth += 1
-
-        if enabled:
-            fp8_available, reason_for_no_fp8 = cls.is_fp8_available()
-            assert fp8_available, reason_for_no_fp8
-            if isinstance(fp8_recipe, MXFP8BlockScaling):
-                mxfp8_available, reason_for_no_mxfp8 = cls.is_mxfp8_available()
-                assert mxfp8_available, reason_for_no_mxfp8
-            if isinstance(fp8_recipe, Float8BlockScaling):
-                fp8_block_available, reason_for_no_fp8_block = cls.is_fp8_block_scaling_available()
-                assert fp8_block_available, reason_for_no_fp8_block
-            if isinstance(fp8_recipe, NVFP4BlockScaling):
-                nvfp4_available, reason_for_no_nvfp4 = cls.is_nvfp4_available()
-                assert nvfp4_available, reason_for_no_nvfp4
 
     @classmethod
     def abort_current_amax_reduction(cls) -> None:
@@ -1318,10 +1343,9 @@ class autocast:
             raise RuntimeError(
                 "autocast context manager cannot be entered more than once concurrently"
             )
-        if self._enabled:
-            check_recipe_support(self._recipe)
-        # Save current state so we always restore it on exit.
-        self._fp8_state = FP8GlobalStateManager.get_autocast_state()
+        # Mark this instance active only after entry has succeeded. Failed
+        # preparation is mutation-free, so the same instance remains reusable.
+        fp8_state = FP8GlobalStateManager.get_autocast_state()
         FP8GlobalStateManager.autocast_enter(
             enabled=self._enabled,
             calibrating=self._calibrating,
@@ -1329,6 +1353,7 @@ class autocast:
             fp8_group=self._amax_reduction_group,
             _graph=self._graph,
         )
+        self._fp8_state = fp8_state
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:

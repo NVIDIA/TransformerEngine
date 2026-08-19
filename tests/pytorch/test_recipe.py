@@ -820,6 +820,100 @@ def test_recipe_activation_does_not_call_qfactory_and_is_atomic_on_config_error(
     FP8GlobalStateManager.reset()
 
 
+def _autocast_activation_state():
+    """Capture identity-bearing state that autocast entry may publish."""
+    qstate = FP8GlobalStateManager.quantization_state
+    return (
+        qstate.fp8_enabled,
+        qstate.fp8_calibration,
+        id(qstate.fp8_recipe),
+        id(qstate.quantizer_config),
+        qstate.quantizer_config_revision,
+        id(qstate.fp8_distributed_group),
+        qstate.is_first_fp8_module,
+        qstate.fp8_graph_capturing,
+        qstate.autocast_depth,
+        qstate.abort_amax_reduction,
+        tuple(
+            (key, id(recipe), id(group))
+            for key, (recipe, group) in qstate.autocast_arguments.items()
+        ),
+    )
+
+
+def test_failed_autocast_recipe_activation_is_atomic_and_context_is_reusable():
+    """A semantic-config error must not publish state or poison the context instance."""
+    FP8GlobalStateManager.reset()
+    active_recipe = Float8CurrentScaling()
+    FP8GlobalStateManager.activate_recipe(active_recipe)
+    original_state = _autocast_activation_state()
+
+    def unkeyed_factory(role):
+        del role
+
+    context = te.autocast(
+        enabled=True,
+        calibrating=True,
+        recipe=CustomRecipe(qfactory=unkeyed_factory),
+    )
+    for _ in range(2):
+        with pytest.raises(ValueError, match="requires a semantic qfactory key"):
+            context.__enter__()
+        assert context._fp8_state is None  # pylint: disable=protected-access
+        assert _autocast_activation_state() == original_state
+
+    FP8GlobalStateManager.reset()
+
+
+def test_failed_autocast_support_check_is_atomic(monkeypatch):
+    """Platform validation must complete before autocast state is published."""
+    FP8GlobalStateManager.reset()
+    active_recipe = Float8CurrentScaling()
+    FP8GlobalStateManager.activate_recipe(active_recipe)
+    original_state = _autocast_activation_state()
+
+    @quantizer_factory(key=("autocast_support_failure", 1))
+    def keyed_factory(role):
+        del role
+
+    monkeypatch.setattr(
+        FP8GlobalStateManager,
+        "is_fp8_available",
+        classmethod(lambda _cls: (False, "injected FP8 support failure")),
+    )
+    context = te.autocast(enabled=True, recipe=CustomRecipe(qfactory=keyed_factory))
+    with pytest.raises(AssertionError, match="injected FP8 support failure"):
+        context.__enter__()
+
+    assert context._fp8_state is None  # pylint: disable=protected-access
+    assert _autocast_activation_state() == original_state
+    FP8GlobalStateManager.reset()
+
+
+def test_failed_nested_autocast_activation_preserves_outer_state():
+    """A rejected inner recipe must leave its active outer autocast unchanged."""
+    FP8GlobalStateManager.reset()
+
+    def unkeyed_factory(role):
+        del role
+
+    invalid_context = te.autocast(
+        enabled=True,
+        calibrating=True,
+        recipe=CustomRecipe(qfactory=unkeyed_factory),
+    )
+    outer_recipe = Float8CurrentScaling()
+    with te.autocast(enabled=False, calibrating=True, recipe=outer_recipe):
+        outer_state = _autocast_activation_state()
+        with pytest.raises(ValueError, match="requires a semantic qfactory key"):
+            invalid_context.__enter__()
+        assert invalid_context._fp8_state is None  # pylint: disable=protected-access
+        assert _autocast_activation_state() == outer_state
+
+    assert FP8GlobalStateManager.quantization_state.autocast_depth == 0
+    FP8GlobalStateManager.reset()
+
+
 def test_autocast_restores_recipe_and_quantizer_config_together():
     """Leaving autocast restores the previously active recipe/configuration pair."""
     FP8GlobalStateManager.reset()
