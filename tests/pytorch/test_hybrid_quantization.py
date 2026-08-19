@@ -32,6 +32,8 @@ from hybrid_quantization_utils import (
 )
 from transformer_engine.common import recipe
 from transformer_engine.pytorch.custom_recipes.quantizer_factories import (
+    delayed_scaling_factory,
+    mxfp8_factory,
     nvfp4_factory,
 )
 from transformer_engine.pytorch.custom_recipes.quantizer_factory_zoo import (
@@ -149,14 +151,13 @@ class TestDPARuntimeRecipeUpdate:
 
     def test_custom_recipe_update_replaces_both_directions(self):
         """A qfactory change commits one complete DPA runtime."""
-        from transformer_engine.pytorch.custom_recipes.quantizer_factories import (
-            current_scaling_factory,
-        )
+        if not mxfp8_available:
+            pytest.skip(f"MXFP8: {reason_for_no_mxfp8}")
 
         dpa = self._make_dpa()
 
         def first_factory(role):
-            return current_scaling_factory(role)
+            return mxfp8_factory(role)
 
         first_recipe = recipe.CustomRecipe(
             qfactory=first_factory,
@@ -181,7 +182,7 @@ class TestDPARuntimeRecipeUpdate:
         dpa._fp8_workspaces["old"] = object()
 
         def second_factory(role):
-            return current_scaling_factory(role)
+            return mxfp8_factory(role)
 
         second_recipe = recipe.CustomRecipe(
             qfactory=second_factory,
@@ -197,7 +198,7 @@ class TestDPARuntimeRecipeUpdate:
         assert dpa.fp8_meta["scaling_bwd"] is second_runtime.backward_states[0]
         assert dpa.quantizers["scaling_fwd"] is second_runtime.forward_quantizers
         assert dpa.quantizers["scaling_bwd"] is second_runtime.backward_quantizers
-        assert second_capabilities == first_capabilities == (True, False)
+        assert second_capabilities == first_capabilities == (False, True)
         assert dpa._qkv_capabilities_quantizer is not first_capabilities_quantizer
         assert any(
             dpa._qkv_capabilities_quantizer is quantizer
@@ -207,13 +208,12 @@ class TestDPARuntimeRecipeUpdate:
 
     def test_direct_runtime_commit_updates_dpa_derived_state(self):
         """DPA cache and recipe labels are part of its runtime commit hook."""
-        from transformer_engine.pytorch.custom_recipes.quantizer_factories import (
-            current_scaling_factory,
-        )
+        if not mxfp8_available:
+            pytest.skip(f"MXFP8: {reason_for_no_mxfp8}")
 
         dpa = self._make_dpa()
         first_recipe = recipe.CustomRecipe(
-            qfactory=current_scaling_factory,
+            qfactory=mxfp8_factory,
             qfactory_key=("dpa-direct-commit", 1),
             fp8_dpa=True,
         )
@@ -227,7 +227,7 @@ class TestDPARuntimeRecipeUpdate:
         old_capabilities_quantizer = dpa._qkv_capabilities_quantizer
 
         second_recipe = recipe.CustomRecipe(
-            qfactory=current_scaling_factory,
+            qfactory=mxfp8_factory,
             qfactory_key=("dpa-direct-commit", 2),
             fp8_dpa=True,
         )
@@ -245,21 +245,23 @@ class TestDPARuntimeRecipeUpdate:
 
         assert dpa._apply_quantization_update(update)
         assert dpa._quantization_runtime is update.candidate
-        assert "local_recipes" not in dpa.fp8_meta
-        assert dpa._custom_dpa_local_recipes_cache is None
+        assert dpa.fp8_meta["local_recipes"] is update.validation_result
+        assert dpa._custom_dpa_local_recipes_cache is update.validation_result
+        assert [type(item).__name__ for item in update.validation_result] == [
+            "MXFP8BlockScaling"
+        ]
         assert dpa._custom_dpa_local_recipes_cache_key != old_cache_key
         assert dpa._qkv_capabilities_quantizer is None
         assert dpa._qkv_capabilities_cache is None
 
     def test_candidate_failure_preserves_active_runtime_and_caches(self):
         """A failed candidate validation does not partially update DPA."""
-        from transformer_engine.pytorch.custom_recipes.quantizer_factories import (
-            current_scaling_factory,
-        )
+        if not mxfp8_available:
+            pytest.skip(f"MXFP8: {reason_for_no_mxfp8}")
 
         dpa = self._make_dpa()
         active_recipe = recipe.CustomRecipe(
-            qfactory=current_scaling_factory,
+            qfactory=mxfp8_factory,
             qfactory_key=("dpa-runtime-valid", 1),
             fp8_dpa=True,
         )
@@ -308,6 +310,89 @@ class TestDPARuntimeRecipeUpdate:
             )
         )
         assert dpa._fp8_workspaces["old"] is workspace
+
+    def test_all_current_scaling_runtime_is_rejected(self):
+        """Current-scaling QKV requires delayed-scaling S/dP kernel slots."""
+        from transformer_engine.pytorch.custom_recipes.quantizer_factories import (
+            current_scaling_factory,
+        )
+
+        dpa = self._make_dpa()
+        invalid_recipe = recipe.CustomRecipe(
+            qfactory=current_scaling_factory,
+            qfactory_key=("dpa-all-current", 1),
+            fp8_dpa=True,
+        )
+
+        with autocast(enabled=True, recipe=invalid_recipe):
+            with pytest.raises(
+                TypeError,
+                match="Float8CurrentScaling DPA requires delayed scaling for S and dP",
+            ):
+                dpa.get_qkv_quantization_capabilities()
+        assert dpa._quantization_runtime is None
+
+    def test_all_current_scaling_update_is_rejected_before_commit(self):
+        """An invalid DPA update leaves the active MXFP8 runtime intact."""
+        if not mxfp8_available:
+            pytest.skip(f"MXFP8: {reason_for_no_mxfp8}")
+
+        from transformer_engine.pytorch.custom_recipes.quantizer_factories import (
+            current_scaling_factory,
+        )
+
+        dpa = self._make_dpa()
+        active_recipe = recipe.CustomRecipe(
+            qfactory=mxfp8_factory,
+            qfactory_key=("dpa-supported-mxfp8", 1),
+            fp8_dpa=True,
+        )
+        with autocast(enabled=True, recipe=active_recipe):
+            assert dpa.get_qkv_quantization_capabilities() == (False, True)
+
+        old_runtime = dpa._quantization_runtime
+        old_views = (
+            dpa.fp8_meta["recipe"],
+            dpa.fp8_meta["scaling_fwd"],
+            dpa.fp8_meta["scaling_bwd"],
+            dpa.quantizers["scaling_fwd"],
+            dpa.quantizers["scaling_bwd"],
+            dpa._custom_dpa_local_recipes_cache,
+            dpa._qkv_capabilities_quantizer,
+            dpa._qkv_capabilities_cache,
+        )
+        invalid_recipe = recipe.CustomRecipe(
+            qfactory=current_scaling_factory,
+            qfactory_key=("dpa-all-current-update", 1),
+            fp8_dpa=True,
+        )
+
+        with pytest.raises(
+            RuntimeError,
+            match="Float8CurrentScaling DPA requires delayed scaling for S and dP",
+        ):
+            te.apply_recipe(dpa, invalid_recipe)
+
+        assert dpa._quantization_runtime is old_runtime
+        assert all(
+            current is old
+            for current, old in zip(
+                (
+                    dpa.fp8_meta["recipe"],
+                    dpa.fp8_meta["scaling_fwd"],
+                    dpa.fp8_meta["scaling_bwd"],
+                    dpa.quantizers["scaling_fwd"],
+                    dpa.quantizers["scaling_bwd"],
+                    dpa._custom_dpa_local_recipes_cache,
+                    dpa._qkv_capabilities_quantizer,
+                    dpa._qkv_capabilities_cache,
+                ),
+                old_views,
+            )
+        )
+        with autocast(enabled=True, recipe=active_recipe):
+            assert dpa.get_qkv_quantization_capabilities() == (False, True)
+        assert dpa._quantization_runtime is old_runtime
 
 
 def test_hybrid_storage_snapshots_parent_quantizer():
@@ -2243,17 +2328,35 @@ class TestCustomDPALocalRecipeCache:
             assert "local_recipes" not in dpa.fp8_meta
 
     @pytest.mark.parametrize(
-        "factory_name,expected",
+        "factory_name,base_qfactory,expected,update_supported",
         [
-            ("current_scaling_factory", (True, False)),
-            ("delayed_scaling_factory", (False, False)),
+            (
+                "current_scaling_dpa",
+                nvfp4_linear_fp8_dpa_factory,
+                (True, False),
+                False,
+            ),
+            ("delayed_scaling", delayed_scaling_factory, (False, False), False),
+            pytest.param(
+                "mxfp8",
+                mxfp8_factory,
+                (False, True),
+                True,
+                marks=pytest.mark.skipif(
+                    not mxfp8_available,
+                    reason=f"MXFP8: {reason_for_no_mxfp8}",
+                ),
+            ),
         ],
     )
-    def test_qkv_capabilities_reuse_canonical_quantizer(self, factory_name, expected):
+    def test_qkv_capabilities_reuse_canonical_quantizer(
+        self,
+        factory_name,
+        base_qfactory,
+        expected,
+        update_supported,
+    ):
         """Capability queries must not call qfactory outside recipe-state setup."""
-        from transformer_engine.pytorch.custom_recipes import quantizer_factories
-
-        base_qfactory = getattr(quantizer_factories, factory_name)
         calls = []
 
         def counting_qfactory(role):
@@ -2299,7 +2402,7 @@ class TestCustomDPALocalRecipeCache:
             fp8_mha=True,
             qfactory_key=("test_dpa_capability_rebuilt", factory_name, 1),
         )
-        if factory_name == "delayed_scaling_factory":
+        if not update_supported:
             with autocast(enabled=True, recipe=rebuilt_recipe):
                 with pytest.raises(RuntimeError, match="do not support delayed scaling"):
                     dpa.get_qkv_quantization_capabilities()

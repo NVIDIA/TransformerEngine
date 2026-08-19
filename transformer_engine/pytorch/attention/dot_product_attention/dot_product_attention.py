@@ -1143,13 +1143,33 @@ class DotProductAttention(TransformerEngineBaseModule):
                 raise ValueError(
                     "FP8 DotProductAttention requires 9 forward and 6 backward quantizer slots."
                 )
-            dpa_utils.get_attention_quantizers(
-                True,
-                {
-                    "scaling_fwd": candidate.forward_quantizers,
-                    "scaling_bwd": candidate.backward_quantizers,
-                },
+            qkv_quantizer, _, s_quantizer, _, _, dp_quantizer = (
+                dpa_utils.get_attention_quantizers(
+                    True,
+                    {
+                        "scaling_fwd": candidate.forward_quantizers,
+                        "scaling_bwd": candidate.backward_quantizers,
+                    },
+                )
             )
+            from transformer_engine.pytorch.tensor.float8_tensor import (
+                Float8CurrentScalingQuantizer,
+                Float8Quantizer,
+            )
+
+            # Native current-scaling DPA uses delayed scaling for the two
+            # softmax-intermediate kernel slots. The fused kernel does not
+            # support an all-current-scaling slot topology.
+            if isinstance(qkv_quantizer, Float8CurrentScalingQuantizer) and not (
+                isinstance(s_quantizer, Float8Quantizer)
+                and isinstance(dp_quantizer, Float8Quantizer)
+            ):
+                raise TypeError(
+                    "Float8CurrentScaling DPA requires delayed scaling for S and dP, "
+                    f"but got S={type(s_quantizer).__name__} and "
+                    f"dP={type(dp_quantizer).__name__}. Return DelayedScalingRequest "
+                    "for DPA tensor types 's' and 'dp'."
+                )
 
         return _infer_custom_dpa_local_recipes(
             candidate.recipe,
