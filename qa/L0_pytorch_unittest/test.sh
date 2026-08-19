@@ -39,8 +39,6 @@ python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_jit.xml $TE_PATH
 python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_fused_rope.xml $TE_PATH/tests/pytorch/test_fused_rope.py || test_fail "test_fused_rope.py"
 python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_nvfp4.xml $TE_PATH/tests/pytorch/nvfp4 || test_fail "test_nvfp4"
 python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_mxfp8.xml $TE_PATH/tests/pytorch/mxfp8 || test_fail "test_mxfp8"
-# TODO(kainingz): remove NVTE_ENABLE_CUTEDSL_QUANT_BACKEND=1 once the cutedsl backend is by default on
-NVTE_ENABLE_CUTEDSL_QUANT_BACKEND=1 NVTE_WARN_IF_CUTEDSL_BACKEND_NOT_CHOSEN=1 python3 -m pytest -s --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_mxfp8_cutedsl_backend.xml $TE_PATH/tests/pytorch/mxfp8/test_mxfp8_cutedsl_backend.py || test_fail "test_mxfp8_cutedsl_backend.py"
 python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_weight_swizzle_in_layers.xml $TE_PATH/tests/pytorch/test_weight_swizzle_in_layers.py || test_fail "test_weight_swizzle_in_layers.py"
 python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_quantized_tensor.xml $TE_PATH/tests/pytorch/test_quantized_tensor.py || test_fail "test_quantized_tensor.py"
 python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_torch_compile.xml $TE_PATH/tests/pytorch/test_torch_compile.py || test_fail "test_torch_compile.py"
@@ -85,6 +83,22 @@ NVTE_ALLOW_NONDETERMINISTIC_ALGO=0 NVTE_DISABLE_TRITON_AUTOTUNING=1 NVIDIA_TF32_
 PYTORCH_JIT=0 NVTE_TORCH_COMPILE=0 python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_grouped_linear.xml $TE_PATH/tests/pytorch/test_grouped_linear.py || test_fail "test_grouped_linear.py"
 PYTORCH_JIT=0 NVTE_TORCH_COMPILE=0 python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_ops_grouped_linear_distributed_weight.xml $TE_PATH/tests/pytorch/test_ops_grouped_linear_distributed_weight.py || test_fail "test_ops_grouped_linear_distributed_weight.py"
 NVTE_GROUPED_LINEAR_SINGLE_PARAM=1 NVTE_CUTEDSL_FUSED_GROUPED_MLP=1 python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_grouped_mlp.xml $TE_PATH/tests/pytorch/test_grouped_mlp.py || test_fail "test_grouped_mlp.py"
+
+CUTEDSL_BACKEND_TESTS=(
+    tests/pytorch/mxfp8
+    tests/pytorch/test_quantized_tensor.py
+    tests/pytorch/test_grouped_tensor.py
+    tests/pytorch/test_cuda_graphs.py
+    tests/pytorch/test_fusible_ops.py
+    tests/pytorch/test_numerics.py
+    tests/pytorch/test_hybrid_quantization.py
+    tests/pytorch/attention/test_linear_mxfp8_attention.py
+    tests/pytorch/test_mxfp8_2d_quantize.py
+)
+for cutedsl_test in "${CUTEDSL_BACKEND_TESTS[@]}"; do
+    cutedsl_tag=$(echo "$cutedsl_test" | tr '/.' '__')
+    NVTE_ENABLE_CUTEDSL_QUANT_BACKEND=1 NVTE_WARN_IF_CUTEDSL_BACKEND_NOT_CHOSEN=1 python3 -m pytest -s --tb=auto --junitxml=$XML_LOG_DIR/pytest_cutedsl_${cutedsl_tag}.xml $TE_PATH/$cutedsl_test || test_fail "cutedsl backend: $cutedsl_test"
+done
 
 if [ "$RET" -ne 0 ]; then
     echo "Error in the following test cases:$FAILED_CASES"
