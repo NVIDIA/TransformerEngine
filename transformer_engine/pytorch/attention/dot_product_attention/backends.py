@@ -15,7 +15,6 @@ from packaging.version import Version as PkgVersion
 
 import torch
 import torch.nn.functional as F
-import transformer_engine_torch as tex
 from transformer_engine.pytorch.utils import (
     get_device_compute_capability,
     split_tensor_along_dim,
@@ -50,6 +49,12 @@ from transformer_engine.pytorch.cpp_extensions.fused_attn import (
 )
 from transformer_engine.pytorch.quantization import get_fp8_torch_dtype, FP8GlobalStateManager
 from transformer_engine.pytorch.distributed import get_distributed_world_size
+from transformer_engine.pytorch.attention.custom_ops import (
+    convert_bshd_to_thd,
+    convert_thd_to_bshd,
+    fa_prepare_bwd,
+    fa_prepare_fwd,
+)
 from transformer_engine.pytorch.jit import no_torch_dynamo
 from transformer_engine.pytorch.attention.dot_product_attention.context_parallel import (
     attn_forward_func_with_cp,
@@ -95,14 +100,14 @@ _flash_attn_varlen_fwd = None
 _flash_attn_varlen_bwd = None
 # Try to import Flash Attention v2
 try:
-    fa_utils.version = PkgVersion(PkgVersion(get_pkg_version("flash-attn")).public)
+    fa_utils.version = PkgVersion(get_pkg_version("flash-attn"))
 except PackageNotFoundError:
     pass  # only print warning if use_flash_attention_2 = True in get_attention_backend
 else:
     if torch.cuda.is_available() and get_device_compute_capability() >= (10, 0):
-        if fa_utils.version_required_blackwell <= fa_utils.version <= fa_utils.max_version:
+        if fa_utils.is_version_supported(fa_utils.version, fa_utils.version_required_blackwell):
             fa_utils.is_installed = True
-    elif fa_utils.version_required <= fa_utils.version <= fa_utils.max_version:
+    elif fa_utils.is_version_supported(fa_utils.version, fa_utils.version_required):
         fa_utils.is_installed = True
 
     if fa_utils.is_installed:
@@ -167,14 +172,39 @@ except PackageNotFoundError:
     flash_attn_func_v4 = None
     flash_attn_varlen_func_v4 = None
 else:
-    from flash_attn.cute.interface import (  # pylint: disable=ungrouped-imports,no-name-in-module
-        flash_attn_func as flash_attn_func_v4,
-        flash_attn_varlen_func as flash_attn_varlen_func_v4,
-        _validate_head_dims as _fa4_validate_head_dims,
-    )
+    try:
+        cutlass_dsl_version = PkgVersion(get_pkg_version("nvidia-cutlass-dsl"))
 
-    fa_utils.v4_validate_head_dims = _fa4_validate_head_dims
-    fa_utils.set_flash_attention_4_params()
+        # FA4 4.0.0b24 requires CUTLASS DSL 4.6.2 or newer.
+        if fa_utils.fa4_version == PkgVersion("4.0.0b24") and cutlass_dsl_version < PkgVersion(
+            "4.6.2"
+        ):
+            raise ImportError(
+                "flash-attn-4 4.0.0b24 requires nvidia-cutlass-dsl>=4.6.2; "
+                f"found {cutlass_dsl_version}"
+            )
+
+        from flash_attn.cute.interface import (  # pylint: disable=ungrouped-imports,no-name-in-module
+            flash_attn_func as _flash_attn_func_v4,
+            flash_attn_varlen_func as _flash_attn_varlen_func_v4,
+            _validate_head_dims as _fa4_validate_head_dims,
+        )
+    except ImportError as exc:
+        flash_attn_func_v4 = None
+        flash_attn_varlen_func_v4 = None
+        warnings.warn(
+            f"FlashAttention 4 is installed but cannot be loaded: {exc}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+    else:
+        # Unlike versions 2 and 3, FlashAttention 4 registers no custom ops: it builds
+        # its kernels through the CUTLASS DSL as it runs. Keep it an eager island.
+        flash_attn_func_v4 = no_torch_dynamo()(_flash_attn_func_v4)
+        flash_attn_varlen_func_v4 = no_torch_dynamo()(_flash_attn_varlen_func_v4)
+
+        fa_utils.v4_validate_head_dims = _fa4_validate_head_dims
+        fa_utils.set_flash_attention_4_params()
 
 # Float8CurrentScaling: fused_attn_bwd takes O in FP8 by default, this flag allows it in F16
 _dpa_fp8_cs_o_in_f16 = os.getenv("NVTE_DPA_FP8CS_O_in_F16", "1") == "1"
@@ -437,7 +467,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
 
         if qkv_format == "thd_2bshd":
             batch_size = key_layer.shape[0]
-            query_layer = tex.convert_thd_to_bshd(
+            query_layer = convert_thd_to_bshd(
                 query_layer,
                 cu_seqlens_q,
                 batch_size,
@@ -773,7 +803,7 @@ class _PrepareQKVForFA(torch.autograd.Function):
         # All inputs received are non-contiguous tensors.
         # The `query_layer` tensor is used to access the
         # full memory region of the QKV tensor.
-        qkv = tex.fa_prepare_fwd(query_layer)
+        qkv = fa_prepare_fwd(query_layer)
         q, k, v = split_tensor_along_dim(qkv, 0, 3)
         query_layer = torch.squeeze(q, 0)
         key_layer = torch.squeeze(k, 0)
@@ -788,9 +818,21 @@ class _PrepareQKVForFA(torch.autograd.Function):
         dv: torch.Tensor,
     ) -> Tuple[Union[torch.Tensor, None], ...]:
         # pylint: disable=missing-function-docstring
-        dqkv = tex.fa_prepare_bwd(dq, dk, dv)
+        dqkv = fa_prepare_bwd(dq, dk, dv)
         dq, dk, dv = split_tensor_along_dim(dqkv, -1, 3)
         return dq, dk, dv
+
+
+def _unalias_cu_seqlens(cu_q: torch.Tensor, cu_kv: torch.Tensor):
+    """Copy kv's cumulative sequence lengths when they are q's as well.
+
+    Self attention passes one tensor for both, and flash-attn forwards them to
+    two inputs of the same autograd.Function -- which dynamo cannot trace. In
+    eager the duplicate is harmless, so nothing is copied there.
+    """
+    if cu_q is cu_kv and torch.compiler.is_compiling():
+        return cu_q, cu_kv.clone()
+    return cu_q, cu_kv
 
 
 class FlashAttention(torch.nn.Module):
@@ -814,8 +856,8 @@ class FlashAttention(torch.nn.Module):
                 fa_utils.version >= fa_utils.version_required
             ), f"FlashAttention minimum version {fa_utils.version_required} is required."
             assert (
-                fa_utils.version <= fa_utils.max_version
-            ), f"FlashAttention maximum version {fa_utils.max_version} is supported."
+                fa_utils.version < fa_utils.max_version
+            ), f"FlashAttention versions before {fa_utils.max_version} are supported."
 
         self.softmax_scale = softmax_scale
         self.attention_dropout_ctx = attention_dropout_ctx
@@ -1017,7 +1059,7 @@ class FlashAttention(torch.nn.Module):
                 # convert from bshd to thd_2bshd for flash_attn_varlen_func/_with_kvcache;
                 # kernel assumes tensor is contiguous
                 if isinstance(query_layer, Float8Tensor):
-                    query_layer._data = tex.convert_bshd_to_thd(
+                    query_layer._data = convert_bshd_to_thd(
                         query_layer._data,
                         cu_seqlens_q,
                         batch_size * context_len,
@@ -1026,7 +1068,7 @@ class FlashAttention(torch.nn.Module):
                         query_layer, data=query_layer._data, shape=query_layer._data.shape
                     )
                 else:
-                    query_layer = tex.convert_bshd_to_thd(
+                    query_layer = convert_bshd_to_thd(
                         query_layer,
                         cu_seqlens_q,
                         batch_size * context_len,
@@ -1134,12 +1176,12 @@ class FlashAttention(torch.nn.Module):
                     else:
                         func = flash_attn_with_kvcache_v3  # pylint: disable=possibly-used-before-assignment
                     if not use_flash_attn_4 and (not use_flash_attn_3 or inference_params is None):
-                        fa_optional_forward_args_thd.append(
-                            cu_seqlens_q_padded if pad_between_seqs else cu_seqlens_q
+                        cu_q, cu_kv = _unalias_cu_seqlens(
+                            cu_seqlens_q_padded if pad_between_seqs else cu_seqlens_q,
+                            cu_seqlens_kv_padded if pad_between_seqs else cu_seqlens_kv,
                         )
-                        fa_optional_forward_args_thd.append(
-                            cu_seqlens_kv_padded if pad_between_seqs else cu_seqlens_kv
-                        )
+                        fa_optional_forward_args_thd.append(cu_q)
+                        fa_optional_forward_args_thd.append(cu_kv)
                         fa_optional_forward_args_thd.append(max_seqlen_q)
                         fa_optional_forward_args_thd.append(max_seqlen_kv)
                 if use_flash_attn_4:
@@ -1150,8 +1192,9 @@ class FlashAttention(torch.nn.Module):
                     if inference_params is None:
                         fa_4_optional_forward_kwargs["deterministic"] = self.deterministic
                     if func is flash_attn_varlen_func_v4:
-                        fa_4_optional_forward_kwargs["cu_seqlens_q"] = cu_seqlens_q
-                        fa_4_optional_forward_kwargs["cu_seqlens_k"] = cu_seqlens_kv
+                        cu_q, cu_kv = _unalias_cu_seqlens(cu_seqlens_q, cu_seqlens_kv)
+                        fa_4_optional_forward_kwargs["cu_seqlens_q"] = cu_q
+                        fa_4_optional_forward_kwargs["cu_seqlens_k"] = cu_kv
                         fa_4_optional_forward_kwargs["max_seqlen_q"] = max_seqlen_q
                         fa_4_optional_forward_kwargs["max_seqlen_k"] = max_seqlen_kv
                     output = func(
@@ -1286,7 +1329,7 @@ class FlashAttention(torch.nn.Module):
             # all KV caching cases use thd_2bshd for calculation
             # convert results back to bshd from thd_2bshd
             if isinstance(query_layer, Float8Tensor):
-                output._data = tex.convert_thd_to_bshd(
+                output._data = convert_thd_to_bshd(
                     output._data,
                     cu_seqlens_q,
                     batch_size,
@@ -1294,7 +1337,7 @@ class FlashAttention(torch.nn.Module):
                 )
                 output = Float8Tensor.make_like(output, data=output._data, shape=output._data.shape)
             else:
-                output = tex.convert_thd_to_bshd(
+                output = convert_thd_to_bshd(
                     output,
                     cu_seqlens_q,
                     batch_size,

@@ -154,7 +154,7 @@ def test_custom_recipe_sanity(module_type):
     assert inp.grad is not None
 
 
-def test_custom_recipe_grouped_linear_sanity():
+def test_custom_recipe_grouped_linear_matches_current_scaling():
     available, reason = te.is_fp8_available(return_reason=True)
     if not torch.cuda.is_available() or not available:
         pytest.skip(f"FP8 unsupported on this device: {reason}")
@@ -169,8 +169,25 @@ def test_custom_recipe_grouped_linear_sanity():
     m_splits = [16] * num_gemms
     batch = sum(m_splits)
 
-    model = GroupedLinear(num_gemms, in_features, out_features, params_dtype=torch.bfloat16).cuda()
-    inp = torch.randn(batch, in_features, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    model_ref = GroupedLinear(
+        num_gemms, in_features, out_features, params_dtype=torch.bfloat16
+    ).cuda()
+    model_custom = GroupedLinear(
+        num_gemms, in_features, out_features, params_dtype=torch.bfloat16
+    ).cuda()
+    model_custom.load_state_dict(model_ref.state_dict())
+
+    base_inp = torch.randn(batch, in_features, device="cuda", dtype=torch.bfloat16)
+    inp_ref = base_inp.clone().detach().requires_grad_(True)
+    inp_custom = base_inp.clone().detach().requires_grad_(True)
+
+    with autocast(enabled=True, recipe=recipe.Float8CurrentScaling()):
+        out_ref = model_ref(inp_ref, m_splits)
+
+    scale = torch.ones(out_features, device="cuda", dtype=torch.float32)
+    scale[0] = 1e8
+    scale[1] = 1e-8
+    (out_ref.float() * scale.view(1, -1)).sum().backward()
 
     @recipe.quantizer_factory(key=("test_current_scaling_grouped_linear", 1))
     def quantizer_factory(role):
@@ -183,11 +200,21 @@ def test_custom_recipe_grouped_linear_sanity():
     custom_recipe = recipe.CustomRecipe(qfactory=quantizer_factory)
 
     with autocast(enabled=True, recipe=custom_recipe):
-        out = model(inp, m_splits)
-    loss = out.float().sum()
-    loss.backward()
+        out_custom = model_custom(inp_custom, m_splits)
+    (out_custom.float() * scale.view(1, -1)).sum().backward()
 
-    assert inp.grad is not None
+    torch.testing.assert_close(out_ref, out_custom, rtol=0, atol=0)
+
+    assert inp_ref.grad is not None and inp_custom.grad is not None
+    torch.testing.assert_close(inp_ref.grad, inp_custom.grad, rtol=0, atol=0)
+
+    ref_params = dict(model_ref.named_parameters())
+    custom_params = dict(model_custom.named_parameters())
+    assert ref_params.keys() == custom_params.keys()
+    for name, ref_param in ref_params.items():
+        custom_param = custom_params[name]
+        assert ref_param.grad is not None and custom_param.grad is not None
+        torch.testing.assert_close(ref_param.grad, custom_param.grad, rtol=0, atol=0)
 
 
 def test_custom_recipe_matches_current_scaling():
