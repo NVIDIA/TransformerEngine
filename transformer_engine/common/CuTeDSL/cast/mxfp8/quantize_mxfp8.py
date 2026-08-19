@@ -2308,8 +2308,14 @@ class MXFP8QuantizeEntry(MXFP8QuantizeKernelBase):
     def __init__(self, cfg):
         self.cfg = cfg
         self.general_kernel = MXFP8QuantizeKernel(cfg)
-        self.specialized_rowwise = MXFP8QuantizeSpecializedRowwiseKernel(cfg) if cfg.ROWWISE else None
-        self.specialized_bidim = MXFP8QuantizeSpecializedBidimensionalKernel(cfg) if cfg.ROWWISE and cfg.COLWISE else None
+        self.specialized_rowwise = (
+            MXFP8QuantizeSpecializedRowwiseKernel(cfg) if cfg.ROWWISE else None
+        )
+        self.specialized_bidim = (
+            MXFP8QuantizeSpecializedBidimensionalKernel(cfg)
+            if cfg.ROWWISE and cfg.COLWISE
+            else None
+        )
 
     @cute.jit
     def __call__(
@@ -2328,32 +2334,46 @@ class MXFP8QuantizeEntry(MXFP8QuantizeKernelBase):
         N = mX.shape[1]
         # Select specialized kernels if possible
         plain_cast_only = (
-            not self.cfg.WITH_AMAX and not self.cfg.WITH_DBIAS and not self.cfg.WITH_DACT and not self.cfg.WITH_ACT
+            not self.cfg.WITH_AMAX
+            and not self.cfg.WITH_DBIAS
+            and not self.cfg.WITH_DACT
+            and not self.cfg.WITH_ACT
         )
         dispatched_to_specialized = False
         # Only dispatch to the specialized kernels for packed16 types (bf16/fp16)
         if cutlass.const_expr(plain_cast_only and is_packed16(self.cfg.DTYPE)):
             # The rowwise-only specialized kernel does not handle swizzled scales yet
             if cutlass.const_expr(
-                self.cfg.ROWWISE
-                and not self.cfg.COLWISE
-                and not self.cfg.WITH_GEMM_SWIZZLED_SCALES
+                self.cfg.ROWWISE and not self.cfg.COLWISE and not self.cfg.WITH_GEMM_SWIZZLED_SCALES
             ):
                 # The rowwise specialized kernel requires N divisible by 128 for vectorized stores
                 if N % 128 == 0:
                     dispatched_to_specialized = True
-                    self.specialized_rowwise(mX, mO_row, mS_row, mO_col, mS_col, mAmax, mNoop, mDActInput, mWorkspace, stream)
+                    self.specialized_rowwise(
+                        mX,
+                        mO_row,
+                        mS_row,
+                        mO_col,
+                        mS_col,
+                        mAmax,
+                        mNoop,
+                        mDActInput,
+                        mWorkspace,
+                        stream,
+                    )
             # The bidimensional specialized kernel supports swizzled scales but we don't dispatch to it for now
             if cutlass.const_expr(
-                self.cfg.ROWWISE
-                and self.cfg.COLWISE
-                and not self.cfg.WITH_GEMM_SWIZZLED_SCALES
+                self.cfg.ROWWISE and self.cfg.COLWISE and not self.cfg.WITH_GEMM_SWIZZLED_SCALES
             ):
                 dispatched_to_specialized = True
-                self.specialized_bidim(mX, mO_row, mS_row, mO_col, mS_col, mAmax, mNoop, mDActInput, mWorkspace, stream)
+                self.specialized_bidim(
+                    mX, mO_row, mS_row, mO_col, mS_col, mAmax, mNoop, mDActInput, mWorkspace, stream
+                )
         # If not using a specialized kernel, fall back to the general kernel
         if not dispatched_to_specialized:
-            self.general_kernel(mX, mO_row, mS_row, mO_col, mS_col, mAmax, mNoop, mDActInput, mWorkspace, stream)
+            self.general_kernel(
+                mX, mO_row, mS_row, mO_col, mS_col, mAmax, mNoop, mDActInput, mWorkspace, stream
+            )
 
 
 def compile_cutedsl_function_from_cfg(cfg):
