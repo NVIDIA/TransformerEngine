@@ -451,6 +451,8 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
         Columnwise amax tracking tensor.
     fp4_dtype : DType
         The FP4 data type used for quantization.
+    scale_dtype: DType
+        The FP8 scale factor data type used for quantization.
     quantizer : Quantizer
         The quantizer instance used for this tensor.
     dtype : torch.dtype, default = torch.float32

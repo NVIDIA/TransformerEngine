@@ -235,7 +235,6 @@ def _cuDNN_wgrad_gemm(
     out: torch.Tensor,
     accumulate: bool,
     alpha: Optional[float] = None,
-    beta: Optional[float] = None,
     bias: Optional[torch.Tensor] = None,
 ) -> Iterable[Optional[torch.Tensor]]:
     """Compute dw = dy^T @ x with cuDNN's purpose-built grouped wgrad kernel."""
@@ -463,10 +462,11 @@ def general_cuDNN_MX_gemm(
         and isinstance(B, NVFP4TensorStorage)
         and A.get_metadata()["scale_dtype"] == DType.kFloat8UE5M3
         and B.get_metadata()["scale_dtype"] == DType.kFloat8UE5M3
-    ), f"cuDNN MX GEMM is only used for NVFP4 GEMM with e5m3 scale factors for now."
+    ), "cuDNN MX GEMM is only used for NVFP4 GEMM with e5m3 scale factors for now."
 
     assert quantization_params is None, "cuDNN GEMM currently does not support output quantization."
     assert gelu is False and gelu_in is None, "cuDNN GEMM currently does not support fused GELU."
+    assert use_split_accumulator is False, "cuDNN GEMM currently does not support split accumulators."
 
     # use_split_accumulator is deliberately not checked: it is a cuBLAS knob for
     # raising accumulator precision, and the cuDNN kernel always accumulates in

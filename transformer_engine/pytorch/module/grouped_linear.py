@@ -59,7 +59,7 @@ from ..cpp_extensions import (
     general_grouped_gemm,
     general_grouped_gemm_for_grouped_tensor,
 )
-from ..constants import DType, GemmParallelModes, dist_group_type
+from ..constants import GemmParallelModes, dist_group_type
 from ..jit import no_torch_dynamo
 from ..cpu_offload import is_cpu_offload_enabled, mark_not_offload, start_offload
 from ..triton.grouped_dbias_dscales import compute_grouped_dbias

@@ -358,7 +358,6 @@ def _single_quantized_tensor_from_grouped(
             with_gemm_swizzled_scales=grouped._with_gemm_swizzled_scales,
         )
 
-    # TODO(kainingz): claude told me this doesn't pass the required param scale_dtype. Should check this later
     return NVFP4Tensor(
         shape=shape,
         dtype=grouped.get_dtype(),
@@ -369,6 +368,7 @@ def _single_quantized_tensor_from_grouped(
         amax_rowwise=grouped.amax,
         amax_columnwise=grouped.columnwise_amax,
         fp4_dtype=fp4_dtype or quantizer.dtype,
+        scale_dtype=quantizer.scale_dtype,
         quantizer=quantizer,
         requires_grad=False,
         with_gemm_swizzled_scales=grouped._with_gemm_swizzled_scales,
@@ -878,13 +878,12 @@ def fuse_grouped_mlp_ops(
         Updated operations with matched triples replaced by fused ops.
     """
     if not fused_op_cls.is_supported():
-        assert False  ### TODO Remove
         return ops
 
     # Fused kernels are only supported for MXFP8 and NVFP4
     if recipe is None:
         return ops
-    elif recipe.custom():
+    if recipe.custom():
         # Check if custom recipe explicitly enables fusion
         if not getattr(recipe, "enable_cutedsl_fused_grouped_mlp", False):
             return ops
@@ -995,6 +994,16 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         from cudnn import grouped_gemm_wgrad_wrapper_sm100  # pylint: disable=no-name-in-module
 
         return grouped_gemm_wgrad_wrapper_sm100
+
+    @classmethod
+    def grouped_gemm_act_hadamard_kernel(cls) -> Optional[Callable]:
+        """Fused grouped GEMM activation kernel that also emits NVFP4 RHT amaxes."""
+        return None
+
+    @classmethod
+    def grouped_gemm_act_hadamard_quant_kernel(cls) -> Optional[Callable]:
+        """Fused grouped GEMM activation kernel that also quantizes NVFP4 with RHT."""
+        return None
 
     @classmethod
     @functools.lru_cache(maxsize=None)
@@ -1441,16 +1450,14 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         ):
             if fc2_input_quantizer.disable_second_level_scale:
                 # Use GEMM + act + RHT + quant kernel if available
-                kernel_getter = getattr(self, "grouped_gemm_act_hadamard_quant_kernel", None)
-                if kernel_getter is None or kernel_getter() is None:
+                if self.grouped_gemm_act_hadamard_quant_kernel() is None:
                     # Kernel is not available
                     pass
                 elif self._cudnn_act_func == "swiglu":
                     kernel_impl = "gemm_act_rht_quant"
             elif fc2_input_quantizer.with_post_rht_amax:
                 # Use GEMM + act + RHT + amax kernel if available
-                kernel_getter = getattr(self, "grouped_gemm_act_hadamard_kernel", None)
-                if kernel_getter is None or kernel_getter() is None:
+                if self.grouped_gemm_act_hadamard_kernel() is None:
                     # Kernel is not available
                     pass
                 elif self._cudnn_act_func == "swiglu":
@@ -1608,11 +1615,13 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         if kernel_impl == "gemm_act":
             fc1_kernel_out = self.grouped_gemm_activation_kernel()(**fc1_activation_kwargs)
         elif kernel_impl == "gemm_act_rht_amax":
+            # pylint: disable-next=not-callable
             fc1_kernel_out = self.grouped_gemm_act_hadamard_kernel()(**fc1_activation_kwargs)
         elif kernel_impl == "gemm_act_rht_quant":
+            # pylint: disable-next=not-callable
             fc1_kernel_out = self.grouped_gemm_act_hadamard_quant_kernel()(**fc1_activation_kwargs)
         else:
-            raise RuntimeError("Unrecognized kernel variant ({kernel_impl})")
+            raise RuntimeError(f"Unrecognized kernel variant ({kernel_impl})")
 
         activation_in = fc1_kernel_out["c_tensor"]
         activation_in = activation_in.view(in_shape[0], fc1_weight_shape[0])
@@ -1675,6 +1684,8 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                     tensor_offsets=fc2_x_tensor_offsets,
                     with_gemm_swizzled_scales=True,
                 )
+            else:
+                raise RuntimeError(f"Unrecognized kernel variant ({kernel_impl})")
         else:
             # Unpack MXFP8 output
             fc2_in_row_data = fc1_kernel_out["d_tensor"]
