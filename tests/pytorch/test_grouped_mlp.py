@@ -8,6 +8,7 @@ from collections.abc import Iterable
 import os
 import math
 import random
+import warnings
 from typing import Optional
 
 import pytest
@@ -1970,6 +1971,118 @@ class TestGroupedMLPFusedOp:
         else:
             for graph_grad, param in zip(graph_param_grads, reference_module.parameters()):
                 assert_close(graph_grad, param.grad, **tols)
+
+
+class TestGroupedMLPDeterminism:
+    """``NVTE_ALLOW_NONDETERMINISTIC_ALGO`` coverage for the CuTe DSL fused grouped MLP.
+
+    cuDNN's grouped-GEMM dactivation epilogue accumulates the scale gradient (``dprob``)
+    with cross-CTA atomic adds, so its summation order follows the tile scheduler. The
+    dSReLU wrapper takes a ``deterministic`` argument from cuDNN frontend 1.28.0 on that
+    replaces those atomics with per-subtile slots reduced in a canonical order; the dGLU
+    wrapper has no equivalent, and neither does an older front-end, so those two cases
+    warn instead.
+    """
+
+    @staticmethod
+    def _reset_caches() -> None:
+        """Drop the warn-once state, which is an lru_cache keyed on the reason string."""
+        grouped_mlp_module._warn_nondeterministic_cudnn_dprob.cache_clear()
+
+    @pytest.fixture(autouse=True)
+    def _clean_caches(self):
+        self._reset_caches()
+        yield
+        self._reset_caches()
+
+    @pytest.mark.parametrize(
+        "allow_nondeterministic,expected",
+        (
+            (None, False),  # default: non-deterministic algorithms are allowed
+            ("1", False),
+            ("0", True),
+        ),
+    )
+    def test_env_var_selects_deterministic_mode(
+        self,
+        monkeypatch,
+        *,
+        allow_nondeterministic: Optional[str],
+        expected: bool,
+    ) -> None:
+        """Uncached, so flipping the variable mid-process takes effect."""
+        if allow_nondeterministic is None:
+            monkeypatch.delenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", raising=False)
+        else:
+            monkeypatch.setenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", allow_nondeterministic)
+        assert grouped_mlp_module._deterministic_algorithms_required() is expected
+
+    def test_only_the_srelu_path_can_be_deterministic(self) -> None:
+        """The capability is a property of the wrapper, not of the environment.
+
+        Needs neither a GPU nor cuDNN: both answers come from the installed
+        ``nvidia-cudnn-frontend`` version.
+        """
+        assert (
+            grouped_mlp_module.GroupedMLP_CuTeGEMMGLU.grouped_gemm_dactivation_is_deterministic()
+            is False
+        )
+        assert (
+            grouped_mlp_module.GroupedMLP_CuTeGEMMUnary.grouped_gemm_dactivation_is_deterministic()
+            is grouped_mlp_module._cudnn_frontend_supports_deterministic_dprob()
+        )
+
+    def test_dprob_warning_is_emitted_once_per_reason(self) -> None:
+        """TE flags a determinism request it cannot honor -- but not on every backward."""
+        with pytest.warns(UserWarning, match="dprob"):
+            grouped_mlp_module._warn_nondeterministic_cudnn_dprob("first reason")
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            grouped_mlp_module._warn_nondeterministic_cudnn_dprob("first reason")
+        assert not caught, "the dprob warning must not repeat every backward"
+        # A different reason is a different remedy, so it is worth saying once too.
+        with pytest.warns(UserWarning, match="second reason"):
+            grouped_mlp_module._warn_nondeterministic_cudnn_dprob("second reason")
+
+    @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
+    @pytest.mark.parametrize("activation", ("scaled_swiglu", "scaled_srelu"))
+    def test_deterministic_dactivation_is_numerically_correct(
+        self,
+        monkeypatch,
+        *,
+        activation: str,
+    ) -> None:
+        """End-to-end under determinism, and pins which of the two arms warns.
+
+        ``group_size > 1`` here, so the unit-activation-scale shortcut is off and the
+        cuDNN epilogue really does produce ``dprob``.
+        """
+        if not te.ops.fused.GroupedMLP_CuTeGEMMGLU.is_supported():
+            pytest.skip("MXFP8 fused grouped MLP is not supported on this system")
+
+        monkeypatch.setenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "0")
+        self._reset_caches()
+        fused_op_cls = (
+            grouped_mlp_module.GroupedMLP_CuTeGEMMUnary
+            if activation == "scaled_srelu"
+            else grouped_mlp_module.GroupedMLP_CuTeGEMMGLU
+        )
+        expect_warning = not fused_op_cls.grouped_gemm_dactivation_is_deterministic()
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            TestGroupedMLPFusedOp().test_grouped_mlp(
+                bias=False,
+                hidden_size=128,
+                quantization="mxfp8",
+                single_grouped_weight=False,
+                activation=activation,
+            )
+        # Asserted after the call rather than inside pytest.warns: on exit pytest.warns
+        # raises its own "DID NOT WARN" and chains it over whatever the body raised, so a
+        # real failure inside the op would report as a warning assertion and bury the cause.
+        warned = any("dprob" in str(w.message) for w in caught)
+        assert warned is expect_warning
 
 
 def test_grouped_gemm_quant_cute_matches_mxfp8_quantized() -> None:

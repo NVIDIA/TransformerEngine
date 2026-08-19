@@ -9,6 +9,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable
 import functools
 import os
+import warnings
 from importlib.metadata import PackageNotFoundError, version as get_pkg_version
 from typing import Any, Optional
 
@@ -104,6 +105,44 @@ def _nvidia_cudnn_frontend_supports_wgrad() -> bool:
 def _cudnn_frontend_supports_single_group_runtime_offsets() -> bool:
     """Check cuDNN FE min version for single-group runtime offsets."""
     return _cudnn_frontend_version_at_least("1.27.0")
+
+
+def _cudnn_frontend_supports_deterministic_dprob() -> bool:
+    """Check cuDNN FE min version for deterministic ``dprob`` in the dSReLU backward.
+
+    cuDNN frontend 1.28.0 (NVIDIA/cudnn-frontend#521) gave
+    ``grouped_gemm_dsrelu_wrapper_sm100`` a ``deterministic`` argument: each N-subtile's
+    partial result parks in its own slot and the slots are summed in a canonical order,
+    replacing the cross-CTA atomic accumulation whose summation order follows the tile
+    scheduler. ``grouped_gemm_dglu_wrapper_sm100`` has no equivalent argument, so the GLU
+    activations cannot take this path.
+    """
+    return _cudnn_frontend_version_at_least("1.28.0")
+
+
+def _deterministic_algorithms_required() -> bool:
+    """Whether the user has asked for bit-exact reproducibility.
+
+    Same check as ``transformer_engine.pytorch.triton.grouped_dbias_dscales``.
+    Deliberately uncached, so a test can flip the variable.
+    """
+    return not bool(int(os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1")))
+
+
+@functools.lru_cache(maxsize=None)
+def _warn_nondeterministic_cudnn_dprob(reason: str) -> None:
+    """Warn once per reason that determinism did not reach cuDNN's ``dprob`` accumulation.
+
+    Cached because the call site runs on every backward pass.
+    """
+    warnings.warn(
+        "NVTE_ALLOW_NONDETERMINISTIC_ALGO=0 selects deterministic kernels inside"
+        " Transformer Engine, but the cuDNN grouped-GEMM dactivation backward that the"
+        " CuTe DSL fused grouped MLP calls still accumulates the scale gradient (dprob)"
+        " with cross-CTA atomic adds, whose summation order is set by the tile scheduler."
+        f" That op is therefore not bit-exact here: {reason}.",
+        UserWarning,
+    )
 
 
 def _wrap_single_quantized_as_grouped(
@@ -882,6 +921,16 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
     def grouped_gemm_dactivation_kernel(cls) -> Callable:
         """Fused kernel for grouped GEMM, activation backward, and scale grad."""
         raise NotImplementedError
+
+    @classmethod
+    def grouped_gemm_dactivation_is_deterministic(cls) -> bool:
+        """Whether this op's dactivation kernel can be asked for a bit-exact ``dprob``.
+
+        Reported per subclass rather than per environment variable: the argument exists on
+        the dSReLU wrapper only, so a GLU activation stays non-deterministic no matter how
+        new the installed cuDNN front-end is.
+        """
+        return False
 
     @classmethod
     @functools.lru_cache(maxsize=None)
@@ -1947,10 +1996,32 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         scales_f32 = None
         scales_tensor = None
         dscales_tensor = None
+        deterministic_dactivation = False
         if not unit_activation_scale:
             scales_f32 = scales.detach().to(dtype=torch.float32)
             scales_tensor = scales_f32.reshape(-1, 1, 1)
             dscales_tensor = torch.zeros_like(scales_tensor)
+            # Decided here rather than up front because this is where dprob is actually
+            # produced: with a unit activation scale the cuDNN epilogue never runs its
+            # atomic dprob accumulation, so there is nothing to make deterministic.
+            if _deterministic_algorithms_required():
+                deterministic_dactivation = self.grouped_gemm_dactivation_is_deterministic()
+                if not deterministic_dactivation:
+                    # Two ways to get here, with different remedies: no deterministic mode
+                    # exists for this activation, or one exists but the installed front-end
+                    # predates it.
+                    if self._cudnn_dact_func is not None:
+                        reason = (
+                            "grouped_gemm_dglu_wrapper_sm100 has no deterministic mode, so"
+                            " only the scaled-SReLU activation can be made bit-exact"
+                        )
+                    else:
+                        reason = (
+                            "grouped_gemm_dsrelu_wrapper_sm100 takes a deterministic argument"
+                            " only from cuDNN frontend 1.28.0 on; upgrade"
+                            " nvidia-cudnn-frontend to get a bit-exact dprob"
+                        )
+                    _warn_nondeterministic_cudnn_dprob(reason)
 
         fc2_d_dtype = torch.bfloat16 if use_nvfp4 else torch.float8_e4m3fn
         if use_nvfp4:
@@ -1998,6 +2069,12 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             "use_dynamic_sched": True,
         }
         dactivation_kernel = self.grouped_gemm_dactivation_kernel()
+        if deterministic_dactivation:
+            # Only ever set to True. Left unset otherwise so the wrapper keeps its own
+            # default, which follows ``torch.use_deterministic_algorithms``; passing False
+            # would override that and silently take determinism away from a caller who
+            # asked torch for it without setting NVTE_ALLOW_NONDETERMINISTIC_ALGO.
+            fc2_dactivation_kwargs["deterministic"] = True
         if _cudnn_frontend_supports_single_group_runtime_offsets():
             fc2_dactivation_kwargs["use_single_group_runtime_offsets"] = num_groups == 1
         if self._cudnn_dact_func is not None:
@@ -2524,6 +2601,11 @@ class GroupedMLP_CuTeGEMMUnary(_GroupedMLP_CuTeGEMMBase):
         from cudnn import grouped_gemm_dsrelu_wrapper_sm100  # pylint: disable=no-name-in-module
 
         return grouped_gemm_dsrelu_wrapper_sm100
+
+    @classmethod
+    def grouped_gemm_dactivation_is_deterministic(cls) -> bool:
+        """``grouped_gemm_dsrelu_wrapper_sm100`` takes ``deterministic`` from 1.28.0 on."""
+        return _cudnn_frontend_supports_deterministic_dprob()
 
 
 def fuse_ops(
