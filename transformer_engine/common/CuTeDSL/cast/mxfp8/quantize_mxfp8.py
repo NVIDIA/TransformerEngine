@@ -98,12 +98,12 @@ SUPPORTED_DACTIVATIONS = {
 
 @cute.jit
 def derive_swizzled_scale_layout(
-    M,
-    N,
-    ROWWISE: cutlass.Constexpr,
-    COLWISE: cutlass.Constexpr,
-    mS_row,
-    mS_col,
+    M: Int32,
+    N: Int32,
+    ROWWISE: cutlass.Constexpr[bool],
+    COLWISE: cutlass.Constexpr[bool],
+    mS_row: Optional[cute.Tensor],
+    mS_col: Optional[cute.Tensor],
 ):
     """Derive the swizzled layout for the rowwise and colwise scale tensors."""
     num_scale_cols = cute.ceil_div(N, MXFP8_BLOCK_SCALING_SIZE)
@@ -135,28 +135,28 @@ def derive_swizzled_scale_layout(
 
 @cute.jit
 def quantize_rowwise_mxfp8(
-    sX_tile,  # (TILE_Y, TILE_X) bf16/fp16 smem view, post-TMA
-    sActInput_tile,  # (TILE_Y, TILE_X) activation-input smem tile (dact only)
-    sO_row_tile,  # (TILE_Y, TILE_X) fp8 smem view (rowwise FP8 output)
-    mS_row_stage,  # rowwise scale tensor (1D swizzled, or 2D linear)
-    max_norm_rcp,
-    tile_row_start,  # Int32 — global row index of this stage's row 0
-    tile_col_start,  # Int32 — global col index of this CTA's col 0
-    M,
-    N,
-    ACTIVATION,
-    DTYPE,
-    FP8_DTYPE,
-    TILE_X,
-    TILE_Y,
-    WAVES,
-    THREADS_PER_BANK,
-    PACK_SIZE,
-    SKIP_MASKING,
-    WITH_ACT=False,
-    WITH_DACT=False,
-    WITH_DBIAS=False,
-    dbias_acc=None,  #  only needed when WITH_DBIAS is True
+    sX_tile: cute.Tensor,  # (TILE_Y, TILE_X) bf16/fp16 smem view, post-TMA
+    sActInput_tile: Optional[cute.Tensor],  # (TILE_Y, TILE_X) act-input smem tile (dact only)
+    sO_row_tile: cute.Tensor,  # (TILE_Y, TILE_X) fp8 smem view (rowwise FP8 output)
+    mS_row_stage: cute.Tensor,  # rowwise scale tensor (1D swizzled, or 2D linear)
+    MAX_NORM_RCP: cutlass.Constexpr[float],
+    tile_row_start: Int32,  # global row index of this stage's row 0
+    tile_col_start: Int32,  # global col index of this CTA's col 0
+    M: Int32,
+    N: Int32,
+    ACTIVATION: cutlass.Constexpr[str | None],
+    DTYPE: cutlass.Constexpr[Type[cutlass.Numeric]],
+    FP8_DTYPE: cutlass.Constexpr[Type[cutlass.Numeric]],
+    TILE_X: cutlass.Constexpr[int],
+    TILE_Y: cutlass.Constexpr[int],
+    WAVES: cutlass.Constexpr[int],
+    THREADS_PER_BANK: cutlass.Constexpr[int],
+    PACK_SIZE: cutlass.Constexpr[int],
+    SKIP_MASKING: cutlass.Constexpr[bool],
+    WITH_ACT: cutlass.Constexpr[bool] = False,
+    WITH_DACT: cutlass.Constexpr[bool] = False,
+    WITH_DBIAS: cutlass.Constexpr[bool] = False,
+    dbias_acc: Optional[cute.Tensor] = None,  #  only needed when WITH_DBIAS is True
 ):
     """Quantize one SMEM tile rowwise to MXFP8 (per-row 32-elt block scales); returns the tile amax."""
     tidx, _, _ = cute.arch.thread_idx()
@@ -304,7 +304,7 @@ def quantize_rowwise_mxfp8(
         if cutlass.const_expr(FUSE_RELU):
             amax_r = cute.arch.fmax(amax_r, Float32(0.0))  # If relu, the amax is at least 0
 
-    biased_exp_r = cvt_f32_to_fp8e8m0fnu(amax_r * max_norm_rcp)
+    biased_exp_r = cvt_f32_to_fp8e8m0fnu(amax_r * MAX_NORM_RCP)
 
     # mS_row_stage has logical shape (32, 2) and we have 64 threads where each is mapped to one scale factor
     # The TV layout is equivalent to TV layout with thr_layout=(32, 2):(2, 1), val_layout=(1,)
@@ -343,26 +343,26 @@ def quantize_rowwise_mxfp8(
 
 @cute.jit
 def quantize_colwise_mxfp8(
-    sX_tile,  # (TILE_Y, TILE_X) bf16/fp16 smem view, post-TMA
-    sActInput_tile,  # (TILE_Y, TILE_X) activation-input smem tile (dact only)
-    sO_col_tile,  # (TILE_Y, TILE_X) fp8 smem view (colwise FP8 output)
-    mS_col_stage,  # colwise scale tensor (1D swizzled, or 2D linear)
-    max_norm_rcp,
-    tile_row_start,  # Int32 — global row index of this stage's row 0
-    tile_col_start,  # Int32 — global col index of this CTA's col 0
-    M,
-    N,
-    ACTIVATION,
-    DTYPE,
-    FP8_DTYPE,
-    SWIZZLE,
-    TILE_X,
-    TILE_Y,  # pylint: disable=unused-argument  # kept for API symmetry with the rowwise path
-    SKIP_MASKING,
-    WITH_ACT=False,
-    WITH_DACT=False,
-    WITH_DBIAS=False,  # also return this thread's column sum (pre-truncate)
-    CACHE_ACTIVATION=False,  # cache the post-activation (IType-truncated) values to sX_tile for rowwise pass to use
+    sX_tile: cute.Tensor,  # (TILE_Y, TILE_X) bf16/fp16 smem view, post-TMA
+    sActInput_tile: Optional[cute.Tensor],  # (TILE_Y, TILE_X) act-input smem tile (dact only)
+    sO_col_tile: cute.Tensor,  # (TILE_Y, TILE_X) fp8 smem view (colwise FP8 output)
+    mS_col_stage: cute.Tensor,  # colwise scale tensor (1D swizzled, or 2D linear)
+    MAX_NORM_RCP: cutlass.Constexpr[float],
+    tile_row_start: Int32,  # global row index of this stage's row 0
+    tile_col_start: Int32,  # global col index of this CTA's col 0
+    M: Int32,
+    N: Int32,
+    ACTIVATION: cutlass.Constexpr[str | None],
+    DTYPE: cutlass.Constexpr[Type[cutlass.Numeric]],
+    FP8_DTYPE: cutlass.Constexpr[Type[cutlass.Numeric]],
+    SWIZZLE: cutlass.Constexpr[bool],
+    TILE_X: cutlass.Constexpr[int],
+    TILE_Y: cutlass.Constexpr[int],  # pylint: disable=unused-argument  # kept for API consistency
+    SKIP_MASKING: cutlass.Constexpr[bool],
+    WITH_ACT: cutlass.Constexpr[bool] = False,
+    WITH_DACT: cutlass.Constexpr[bool] = False,
+    WITH_DBIAS: cutlass.Constexpr[bool] = False,
+    CACHE_ACTIVATION: cutlass.Constexpr[bool] = False,  # cache post-activation values to sX_tile
 ):
     """Quantize one SMEM tile colwise to MXFP8 (per-column 32-elt block scales); returns (amax, dbias_partial)."""
     tidx, _, _ = cute.arch.thread_idx()
@@ -446,7 +446,7 @@ def quantize_colwise_mxfp8(
     # Irregular shapes: skip when this stage's row range or this thread's
     # column lies past the input extents. TILE_Y == MXFP8_BLOCK_SCALING_SIZE so each stage
     # is exactly one scale-row; valid iff `tile_row_start < M`.
-    biased_exp_c = cvt_f32_to_fp8e8m0fnu(amax_c * max_norm_rcp)
+    biased_exp_c = cvt_f32_to_fp8e8m0fnu(amax_c * MAX_NORM_RCP)
     scale_col = tile_col_start + tidx
     if tile_row_start < M and scale_col < N:
         if cutlass.const_expr(SWIZZLE):
@@ -494,10 +494,10 @@ def quantize_bidimensional_mxfp8_swizzled(
     sS_row_tile: cute.Tensor,  # (32, 2) smem rowwise-scale staging tile (flushed in the epilogue)
     sS_col_tile: cute.Tensor,  # (1, 64) smem colwise-scale staging tile (flushed in the epilogue)
     sColReduce_warp: cute.Tensor,  # (32,) SMEM fp32 columnwise scale reduction buffer for this warp
-    WARPS_PER_CTA: cutlass.Constexpr,
-    max_norm_rcp,
-    DTYPE: cutlass.Constexpr,
-    fp8_dtype: cutlass.Constexpr,
+    WARPS_PER_CTA: cutlass.Constexpr[int],
+    MAX_NORM_RCP: cutlass.Constexpr[float],
+    DTYPE: cutlass.Constexpr[Type[cutlass.Numeric]],
+    FP8_DTYPE: cutlass.Constexpr[Type[cutlass.Numeric]],
 ):
     """Quantize a pre-sliced 32x64 tile -> both rowwise and colwise MXFP8. Elements are
     addressed through TV layouts: a warp = 32 lanes = 32 rows (lane == row), and each
@@ -510,8 +510,8 @@ def quantize_bidimensional_mxfp8_swizzled(
     (rowwise and colwise alike) go to staging slots whose flush targets are past-N
     padding columns of the respective scale tensors.
     """
-    mul_cvt4 = mul_f32x2_cvt_f32x4_to_fp8x4(fp8_dtype)
-    mul_cvt4_elemwise = mul_f32x4_cvt_f32x4_to_fp8x4(fp8_dtype)
+    mul_cvt4 = mul_f32x2_cvt_f32x4_to_fp8x4(FP8_DTYPE)
+    mul_cvt4_elemwise = mul_f32x4_cvt_f32x4_to_fp8x4(FP8_DTYPE)
 
     _, tv_layout = cute.make_layout_tv(
         thr_layout=cute.make_layout(((MXFP8_BLOCK_SCALING_SIZE, 1), WARPS_PER_CTA)),  # ((32, 1) 2)
@@ -537,8 +537,8 @@ def quantize_bidimensional_mxfp8_swizzled(
     tSsS_row_tile = cute.composition(sS_row_tile, tv_layout_rowwise_scale)[tidx, None]  # (1,)
     tSsS_col_tile = cute.composition(sS_col_tile, tv_layout_colwise_scale)[tidx, None]  # (1,)
 
-    rO_row = cute.make_rmem_tensor(MXFP8_BLOCK_SCALING_SIZE, fp8_dtype)
-    rO_col = cute.make_rmem_tensor(MXFP8_BLOCK_SCALING_SIZE, fp8_dtype)
+    rO_row = cute.make_rmem_tensor(MXFP8_BLOCK_SCALING_SIZE, FP8_DTYPE)
+    rO_col = cute.make_rmem_tensor(MXFP8_BLOCK_SCALING_SIZE, FP8_DTYPE)
     rO_row_u32 = cute.make_tensor(
         cute.recast_ptr(rO_row.iterator, dtype=Uint32),
         cute.make_layout((MXFP8_BLOCK_SCALING_SIZE // 4,), stride=(1,)),
@@ -582,13 +582,13 @@ def quantize_bidimensional_mxfp8_swizzled(
         row_amax = cute.arch.fmax(
             fabs_f32(kit.x2_lo_to_f32(row_amax2)), fabs_f32(kit.x2_hi_to_f32(row_amax2))
         )
-        row_exp = cvt_f32_to_fp8e8m0fnu(row_amax * max_norm_rcp)
+        row_exp = cvt_f32_to_fp8e8m0fnu(row_amax * MAX_NORM_RCP)
         row_inv = exp2f_rcp(row_exp)
         tSsS_row_tile[0] = row_exp
         cute.arch.sync_warp()
 
         # Compute the colwise scale factor (only handle the one that belongs to this thread / lane)
-        col_exp = cvt_f32_to_fp8e8m0fnu(sColReduce_warp[lane] * max_norm_rcp)
+        col_exp = cvt_f32_to_fp8e8m0fnu(sColReduce_warp[lane] * MAX_NORM_RCP)
         tSsS_col_tile[0] = col_exp
         sColReduce_warp[lane] = exp2f_rcp(col_exp)
         cute.arch.sync_warp()
@@ -629,13 +629,13 @@ def quantize_bidimensional_mxfp8_swizzled(
                 sColReduce_warp[c] = col_amax
 
         # Compute the rowwise scale factor
-        row_exp = cvt_f32_to_fp8e8m0fnu(row_amax * max_norm_rcp)
+        row_exp = cvt_f32_to_fp8e8m0fnu(row_amax * MAX_NORM_RCP)
         row_inv = exp2f_rcp(row_exp)
         tSsS_row_tile[0] = row_exp  # rowwise scale (this row-block, staged in smem)
         cute.arch.sync_warp()
 
         # Compute the colwise scale factor (only handle the one that belongs to this thread / lane)
-        col_exp = cvt_f32_to_fp8e8m0fnu(sColReduce_warp[lane] * max_norm_rcp)
+        col_exp = cvt_f32_to_fp8e8m0fnu(sColReduce_warp[lane] * MAX_NORM_RCP)
         tSsS_col_tile[0] = col_exp  # colwise scale (this thread's column)
         sColReduce_warp[lane] = exp2f_rcp(col_exp)
         cute.arch.sync_warp()
@@ -810,7 +810,7 @@ class MXFP8QuantizeKernel(MXFP8QuantizeKernelBase):
     _THREADS_PER_BANK = _TOTAL_BANKS_WIDTH // MXFP8_BLOCK_SCALING_SIZE  # 4 threads per bank
     _NUM_STAGES = 2  # The pipeline depth is always 2
 
-    def __init__(self, cfg, SKIP_MASKING=False):
+    def __init__(self, cfg: MXFP8QuantizeConfig, SKIP_MASKING: bool = False):
         self.cfg = cfg
         # If the input shape is divisible by the tile size, we can skip the OOB masking in the kernel and save some instructions.
         self.SKIP_MASKING = SKIP_MASKING
@@ -875,7 +875,6 @@ class MXFP8QuantizeKernel(MXFP8QuantizeKernelBase):
         M = mX.shape[0]
         N = mX.shape[1]
         cfg = self.cfg
-        max_norm_rcp = cfg.MAX_NORM_RCP
 
         # If WITH_GEMM_SWIZZLED_SCALES is enabled, the output must satisfy cublas's swizzled layout
         # This is expressed as a CuTe layout applied to the output tensor so it can be transparent throughout the kernel implementation.
@@ -952,7 +951,6 @@ class MXFP8QuantizeKernel(MXFP8QuantizeKernelBase):
             mAmax,
             mNoop,
             mWorkspace,
-            max_norm_rcp,
             mX.element_type,
             tma_atom,
             tma_src,
@@ -971,22 +969,21 @@ class MXFP8QuantizeKernel(MXFP8QuantizeKernelBase):
     @cute.kernel
     def kernel(
         self,
-        mX,
-        mS_row,
-        mS_col,
-        mAmax,
-        mNoop,
-        mWorkspace,
-        max_norm_rcp,
+        mX: cute.Tensor,
+        mS_row: Optional[cute.Tensor],
+        mS_col: Optional[cute.Tensor],
+        mAmax: Optional[cute.Tensor],
+        mNoop: cute.Pointer,
+        mWorkspace: Optional[cute.Tensor],
         dtype: cutlass.Constexpr[Type[cutlass.Numeric]],
-        tma_atom,
-        tma_src,  # Input TMA atoms
-        tma_atom_out_row,
-        tma_dst_out_row,  # Rowwise output TMA atoms
-        tma_atom_out_col,
-        tma_dst_out_col,  # Colwise output TMA atoms
-        tma_atom_act,
-        tma_src_act,  # Activation derivative TMA atoms, or None if WITH_DACT is False
+        tma_atom: cute.CopyAtom,
+        tma_src: cute.Tensor,  # Input TMA atoms
+        tma_atom_out_row: Optional[cute.CopyAtom],
+        tma_dst_out_row: Optional[cute.Tensor],  # Rowwise output TMA atoms
+        tma_atom_out_col: Optional[cute.CopyAtom],
+        tma_dst_out_col: Optional[cute.Tensor],  # Colwise output TMA atoms
+        tma_atom_act: Optional[cute.CopyAtom],
+        tma_src_act: Optional[cute.Tensor],  # Activation derivative TMA atoms, None unless WITH_DACT
     ):
         """Device entry: no-op the CTA when the noop flag is set, else run the quantize main loop."""
 
@@ -1004,7 +1001,6 @@ class MXFP8QuantizeKernel(MXFP8QuantizeKernelBase):
                 mS_col,
                 mAmax,
                 mWorkspace,
-                max_norm_rcp,
                 dtype,
                 tma_atom,
                 tma_src,
@@ -1019,21 +1015,20 @@ class MXFP8QuantizeKernel(MXFP8QuantizeKernelBase):
     @cute.jit
     def _kernel_main(
         self,
-        mX,
-        mS_row,
-        mS_col,
-        mAmax,
-        mWorkspace,
-        max_norm_rcp,
+        mX: cute.Tensor,
+        mS_row: Optional[cute.Tensor],
+        mS_col: Optional[cute.Tensor],
+        mAmax: Optional[cute.Tensor],
+        mWorkspace: Optional[cute.Tensor],
         dtype: cutlass.Constexpr[Type[cutlass.Numeric]],
-        tma_atom,
-        tma_src,  # Input TMA atoms
-        tma_atom_out_row,
-        tma_dst_out_row,  # Rowwise output TMA atoms
-        tma_atom_out_col,
-        tma_dst_out_col,  # Colwise output TMA atoms
-        tma_atom_act,
-        tma_src_act,  # Activation derivative TMA atoms, or None if WITH_DACT is False
+        tma_atom: cute.CopyAtom,
+        tma_src: cute.Tensor,  # Input TMA atoms
+        tma_atom_out_row: Optional[cute.CopyAtom],
+        tma_dst_out_row: Optional[cute.Tensor],  # Rowwise output TMA atoms
+        tma_atom_out_col: Optional[cute.CopyAtom],
+        tma_dst_out_col: Optional[cute.Tensor],  # Colwise output TMA atoms
+        tma_atom_act: Optional[cute.CopyAtom],
+        tma_src_act: Optional[cute.Tensor],  # Activation derivative TMA atoms, None unless WITH_DACT
     ):
         cfg = self.cfg
 
@@ -1350,7 +1345,6 @@ class MXFP8QuantizeKernel(MXFP8QuantizeKernelBase):
                     sX_tile,
                     sO_col_tile,
                     mS_col_stage,
-                    max_norm_rcp,
                     tile_idx_y * self._TILE_ROWS,
                     bidx * self._TILE_COLS,
                     M,
@@ -1378,7 +1372,6 @@ class MXFP8QuantizeKernel(MXFP8QuantizeKernelBase):
                     sX_tile,
                     sO_row_tile,
                     mS_row_stage,
-                    max_norm_rcp,
                     tile_idx_y * self._TILE_ROWS,
                     bidx * self._TILE_COLS,
                     M,
@@ -1464,7 +1457,9 @@ class MXFP8QuantizeKernel(MXFP8QuantizeKernelBase):
         cute.arch.cp_async_bulk_wait_group(0, read=False)
 
     @cute.jit
-    def _dbias_reduction_rowwise_epilouge(self, smem, tidx, rowwise_dbias_acc):
+    def _dbias_reduction_rowwise_epilouge(
+        self, smem: cutlass.utils.SmemAllocator, tidx: Int32, rowwise_dbias_acc: cute.Tensor
+    ):
         # Pad the buffer to avoid bank conflicts. The logical shape is still the same. Only the stride is different.
         DBIAS_BUFF_WIDTH = (
             self._TILE_COLS // MXFP8_BLOCK_SCALING_SIZE * (MXFP8_BLOCK_SCALING_SIZE + 1)
@@ -1517,7 +1512,14 @@ class MXFP8QuantizeKernel(MXFP8QuantizeKernelBase):
         return block_dbias
 
     @cute.jit
-    def _amax_epilogue(self, sAmax, mAmax, tidx, warp_idx, per_thread_amax):
+    def _amax_epilogue(
+        self,
+        sAmax: cute.Tensor,
+        mAmax: cute.Tensor,
+        tidx: Int32,
+        warp_idx: Int32,
+        per_thread_amax: Float32,
+    ):
         # Reduce and get the per-warp amax.
         warp_amax = cute.arch.warp_redux_sync(per_thread_amax, kind="fmax")
         # Write the per-warp amax to shared memory
@@ -1543,16 +1545,15 @@ class MXFP8QuantizeKernel(MXFP8QuantizeKernelBase):
     @cute.jit
     def _process_rowwise(
         self,
-        sX_tile,  # (TILE_Y, TILE_X) bf16/fp16 smem view, post-TMA
-        sO_row_tile,  # (TILE_Y, TILE_X) fp8 smem view (rowwise FP8 output)
-        mS_row_stage,  # rowwise scale tensor (1D swizzled, or 2D linear)
-        max_norm_rcp,
-        tile_row_start,  # Int32 — global row of this stage's row 0
-        tile_col_start,  # Int32 — global col of this CTA's col 0
-        M,
-        N,  # Int32 — full input extents, for OOB masking
-        sActInput_tile=None,  # (TILE_Y, TILE_X) act_input tile (dact only)
-        dbias_acc=None,  # rmem Float32[MXFP8_BLOCK_SCALING_SIZE] dbias accumulator (rowwise-only dbias)
+        sX_tile: cute.Tensor,  # (TILE_Y, TILE_X) bf16/fp16 smem view, post-TMA
+        sO_row_tile: cute.Tensor,  # (TILE_Y, TILE_X) fp8 smem view (rowwise FP8 output)
+        mS_row_stage: cute.Tensor,  # rowwise scale tensor (1D swizzled, or 2D linear)
+        tile_row_start: Int32,  # global row of this stage's row 0
+        tile_col_start: Int32,  # global col of this CTA's col 0
+        M: Int32,
+        N: Int32,  # full input extents, for OOB masking
+        sActInput_tile: Optional[cute.Tensor] = None,  # (TILE_Y, TILE_X) act_input tile (dact only)
+        dbias_acc: Optional[cute.Tensor] = None,  # rmem Float32[32] dbias accumulator (rowwise-only dbias)
     ):
         cfg = self.cfg
         return quantize_rowwise_mxfp8(
@@ -1560,7 +1561,7 @@ class MXFP8QuantizeKernel(MXFP8QuantizeKernelBase):
             None if self.CACHE_ACTIVATION else sActInput_tile,
             sO_row_tile,
             mS_row_stage,
-            max_norm_rcp,
+            self.cfg.MAX_NORM_RCP,
             tile_row_start,
             tile_col_start,
             M,
@@ -1583,15 +1584,14 @@ class MXFP8QuantizeKernel(MXFP8QuantizeKernelBase):
     @cute.jit
     def _process_colwise(
         self,
-        sX_tile,  # (TILE_Y, TILE_X) bf16/fp16 smem view, post-TMA
-        sO_col_tile,  # (TILE_Y, TILE_X) fp8 smem view (colwise FP8 output)
-        mS_col_stage,  # colwise scale tensor (1D swizzled, or 2D linear)
-        max_norm_rcp,
-        tile_row_start,  # Int32 — global row of this stage's row 0
-        tile_col_start,  # Int32 — global col of this CTA's col 0
-        M,
-        N,  # Int32 — full input extents, for OOB masking
-        sActInput_tile=None,  # (TILE_Y, TILE_X) act_input tile (dact only)
+        sX_tile: cute.Tensor,  # (TILE_Y, TILE_X) bf16/fp16 smem view, post-TMA
+        sO_col_tile: cute.Tensor,  # (TILE_Y, TILE_X) fp8 smem view (colwise FP8 output)
+        mS_col_stage: cute.Tensor,  # colwise scale tensor (1D swizzled, or 2D linear)
+        tile_row_start: Int32,  # global row of this stage's row 0
+        tile_col_start: Int32,  # global col of this CTA's col 0
+        M: Int32,
+        N: Int32,  # full input extents, for OOB masking
+        sActInput_tile: Optional[cute.Tensor] = None,  # (TILE_Y, TILE_X) act_input tile (dact only)
     ):
         cfg = self.cfg
         return quantize_colwise_mxfp8(
@@ -1599,7 +1599,7 @@ class MXFP8QuantizeKernel(MXFP8QuantizeKernelBase):
             sActInput_tile,
             sO_col_tile,
             mS_col_stage,
-            max_norm_rcp,
+            self.cfg.MAX_NORM_RCP,
             tile_row_start,
             tile_col_start,
             M,
@@ -1630,7 +1630,7 @@ class MXFP8QuantizeSpecializedRowwiseKernel(MXFP8QuantizeKernelBase):
     _TILE_COLS = 1024
     _THREADS_PER_CTA = 128
 
-    def __init__(self, cfg):
+    def __init__(self, cfg: MXFP8QuantizeConfig):
         self.cfg = cfg
         # If True, then this kernel will first write each thread's scale byte to a shared memory buffer,
         # then utilize vectorized store to flush the buffer to global memory.
@@ -1670,18 +1670,30 @@ class MXFP8QuantizeSpecializedRowwiseKernel(MXFP8QuantizeKernelBase):
             mO_row,
             mS_row,
             mNoop,
-            self.cfg.MAX_NORM_RCP,
             mX.element_type,
         ).launch(grid=grid, block=block, stream=stream)
 
     @cute.kernel
-    def kernel(self, mX, mO_row, mS_row, mNoop, max_norm_rcp, DTYPE):
+    def kernel(
+        self,
+        mX: cute.Tensor,
+        mO_row: cute.Tensor,
+        mS_row: cute.Tensor,
+        mNoop: cute.Pointer,
+        DTYPE: cutlass.Constexpr[Type[cutlass.Numeric]],
+    ):
         """Device entry: no-op the CTA when the noop flag is set, else run the quantize main loop."""
         if not noop_flag_is_set(mNoop):
-            self._kernel_main(mX, mO_row, mS_row, max_norm_rcp, DTYPE)
+            self._kernel_main(mX, mO_row, mS_row, DTYPE)
 
     @cute.jit
-    def _kernel_main(self, mX, mO_row, mS_row, max_norm_rcp, DTYPE):
+    def _kernel_main(
+        self,
+        mX: cute.Tensor,
+        mO_row: cute.Tensor,
+        mS_row: cute.Tensor,
+        DTYPE: cutlass.Constexpr[Type[cutlass.Numeric]],
+    ):
         """Device entry for the specialized rowwise-only cast kernel (vectorized global loads/stores, no TMA)."""
         tidx, _, _ = cute.arch.thread_idx()
         bidx, bidy, _ = cute.arch.block_idx()
@@ -1765,7 +1777,7 @@ class MXFP8QuantizeSpecializedRowwiseKernel(MXFP8QuantizeKernelBase):
                 amax_2x = abs_max_x2(amax_2x, rX_i32[i])
             amax = cute.arch.fmax(fabs_f32(x2_lo_to_f32(amax_2x)), fabs_f32(x2_hi_to_f32(amax_2x)))
 
-            biased_exp = cvt_f32_to_fp8e8m0fnu(amax * max_norm_rcp)
+            biased_exp = cvt_f32_to_fp8e8m0fnu(amax * self.cfg.MAX_NORM_RCP)
             if cutlass.const_expr(self._STASH_SCALE_TO_SMEM):
                 sS_thread[0] = biased_exp
             else:
@@ -1792,7 +1804,17 @@ class MXFP8QuantizeSpecializedRowwiseKernel(MXFP8QuantizeKernelBase):
                 self._flush_scales_to_gmem(sScale, mS_tile, tidx, bidx, bidy, M, padded_cols, 4)
 
     @cute.jit
-    def _flush_scales_to_gmem(self, sScale, mS_tile, tidx, bidx, bidy, M, padded_cols, width):
+    def _flush_scales_to_gmem(
+        self,
+        sScale: cute.Tensor,
+        mS_tile: cute.Tensor,
+        tidx: Int32,
+        bidx: Int32,
+        bidy: Int32,
+        M: Int32,
+        padded_cols: Int32,
+        width: cutlass.Constexpr[int],
+    ):
         """Flush the staged (CTA_Y, CTA_X) scale tile to gmem with vectorized stores."""
         CTA_Y = self._TILE_ROWS
         CTA_X = self._TILE_COLS // MXFP8_BLOCK_SCALING_SIZE
@@ -1836,7 +1858,7 @@ class MXFP8QuantizeSpecializedBidimensionalKernel(MXFP8QuantizeKernelBase):
     _SCALE_ROWS = _TILE_ROWS // MXFP8_BLOCK_SCALING_SIZE
     _SCALE_COLS = _TILE_COLS // MXFP8_BLOCK_SCALING_SIZE
 
-    def __init__(self, cfg):
+    def __init__(self, cfg: MXFP8QuantizeConfig):
         self.cfg = cfg
         if cfg.WITH_GEMM_SWIZZLED_SCALES:
             self._NUM_TILES_X = 2
@@ -1917,7 +1939,6 @@ class MXFP8QuantizeSpecializedBidimensionalKernel(MXFP8QuantizeKernelBase):
             mS_row,
             mS_col,
             mNoop,
-            self.cfg.MAX_NORM_RCP,
             mX.element_type,
             tma_atom,
             tma_src,
@@ -1930,18 +1951,17 @@ class MXFP8QuantizeSpecializedBidimensionalKernel(MXFP8QuantizeKernelBase):
     @cute.kernel
     def kernel(
         self,
-        mX,
-        mS_row,
-        mS_col,
-        mNoop,
-        max_norm_rcp,
+        mX: cute.Tensor,
+        mS_row: cute.Tensor,
+        mS_col: cute.Tensor,
+        mNoop: cute.Pointer,
         dtype: cutlass.Constexpr[Type[cutlass.Numeric]],
-        tma_atom,
-        tma_src,
-        tma_atom_out_row,
-        tma_dst_out_row,
-        tma_atom_out_col,
-        tma_dst_out_col,
+        tma_atom: cute.CopyAtom,
+        tma_src: cute.Tensor,
+        tma_atom_out_row: cute.CopyAtom,
+        tma_dst_out_row: cute.Tensor,
+        tma_atom_out_col: cute.CopyAtom,
+        tma_dst_out_col: cute.Tensor,
     ):
         """Device entry: no-op the CTA when the noop flag is set, else run the quantize main loop."""
         if not noop_flag_is_set(mNoop):
@@ -1949,7 +1969,6 @@ class MXFP8QuantizeSpecializedBidimensionalKernel(MXFP8QuantizeKernelBase):
                 mX,
                 mS_row,
                 mS_col,
-                max_norm_rcp,
                 dtype,
                 tma_atom,
                 tma_src,
@@ -1962,17 +1981,16 @@ class MXFP8QuantizeSpecializedBidimensionalKernel(MXFP8QuantizeKernelBase):
     @cute.jit
     def _kernel_main(
         self,
-        mX,
-        mS_row,
-        mS_col,
-        max_norm_rcp,
+        mX: cute.Tensor,
+        mS_row: cute.Tensor,
+        mS_col: cute.Tensor,
         dtype: cutlass.Constexpr[Type[cutlass.Numeric]],
-        tma_atom,
-        tma_src,
-        tma_atom_out_row,
-        tma_dst_out_row,
-        tma_atom_out_col,
-        tma_dst_out_col,
+        tma_atom: cute.CopyAtom,
+        tma_src: cute.Tensor,
+        tma_atom_out_row: cute.CopyAtom,
+        tma_dst_out_row: cute.Tensor,
+        tma_atom_out_col: cute.CopyAtom,
+        tma_dst_out_col: cute.Tensor,
     ):
         """Device entry for the specialized bidimensional (rowwise+colwise) cast kernel."""
 
@@ -2189,7 +2207,7 @@ class MXFP8QuantizeSpecializedBidimensionalKernel(MXFP8QuantizeKernelBase):
                     None, warp_idx
                 ],  # Pick the per-warp colwise-reduce scratchpad for this warp
                 self._WARPS_PER_CTA,
-                max_norm_rcp,
+                self.cfg.MAX_NORM_RCP,
                 dtype,
                 self.cfg.FP8_DTYPE,
             )
@@ -2261,14 +2279,14 @@ class MXFP8QuantizeSpecializedBidimensionalKernel(MXFP8QuantizeKernelBase):
     @cute.jit
     def _flush_scales_to_gmem(
         self,
-        sScale2D,
-        mS,
-        tidx,
-        bidx,
-        bidy,
-        ROWS: cutlass.Constexpr,
-        COLS: cutlass.Constexpr,
-        WIDTH: cutlass.Constexpr,
+        sScale2D: cute.Tensor,
+        mS: cute.Tensor,
+        tidx: Int32,
+        bidx: Int32,
+        bidy: Int32,
+        ROWS: cutlass.Constexpr[int],
+        COLS: cutlass.Constexpr[int],
+        WIDTH: cutlass.Constexpr[int],
     ):
         """Flush a staged (ROWS, COLS) SMEM scale block (a plain row-major 2D tensor) to its (bidy, bidx) slice of the gmem scale tensor,
         where each GMEM slice has the same shape as this SMEM tile. Use `WIDTH` bytes per vectorized store.
@@ -2306,7 +2324,7 @@ class MXFP8QuantizeSpecializedBidimensionalKernel(MXFP8QuantizeKernelBase):
 class MXFP8QuantizeEntry(MXFP8QuantizeKernelBase):
     """Select the appropriate MXFP8 quantization kernel based on the configuration and runtime shapes."""
 
-    def __init__(self, cfg):
+    def __init__(self, cfg: MXFP8QuantizeConfig):
         self.cfg = cfg
         # Instantiate all possible kernels at compile time,
         # and we will pick the right one at runtime based on the input shape and config.
