@@ -304,7 +304,11 @@ def _parse_args(argv=None, namespace=None):
     args = parser.parse_args(argv, namespace)
 
     if args.compile and args.use_cuda_graphs:
-        parser.error("--compile and --use-cuda-graphs are mutually exclusive.")
+        parser.error(
+            "--compile and --use-cuda-graphs are mutually exclusive; to test"
+            " torch.compile with CUDA graphs use --compile --compile-mode"
+            " reduce-overhead."
+        )
 
     if args.use_cuda_graphs and args.layer_type in [te.MultiheadAttention, te.TransformerLayer]:
         warnings.warn(f"{args.layer_type.__name__} does not support CUDA Graphs!")

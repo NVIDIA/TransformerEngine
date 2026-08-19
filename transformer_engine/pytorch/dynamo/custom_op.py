@@ -52,7 +52,7 @@ call through it:
   * calls the *forward op* -- which runs the real ``fwd_impl`` -- for a flat
     ``Tensor[]`` payload;
   * rebuilds the structured user outputs from that payload, sliced and reassembled
-    per the fake's output descriptors (``_unflatten_value``;
+    per the fake's output descriptors (``_unflatten_values``;
     ``_flatten_value`` is the pack-side inverse).
 
 Autograd, registered on the op, drives backward:
@@ -179,7 +179,7 @@ class OpaqueValueBundle:
             return True
         if isinstance(value, type):
             return True
-        if _is_opaque_value_type(type(value)):
+        if _is_opaque_value_type is not None and _is_opaque_value_type(type(value)):
             return True
         if isinstance(value, dict):
             return all(isinstance(k, str) and cls.is_simple_value(v) for k, v in value.items())
@@ -243,6 +243,8 @@ class OpaqueValueBundle:
         self._frozen: Tuple[Tuple[str, Any], ...] = tuple(
             (k, OpaqueValueBundle._to_hashable(v)) for k, v in sorted(data.items())
         )
+        # Precomputed: Dynamo guards hash bundles on every compiled call.
+        self._hash: int = hash(self._frozen)
 
     def __getitem__(self, key: str) -> Any:
         return self._data[key]
@@ -271,7 +273,7 @@ class OpaqueValueBundle:
         return self._frozen == other._frozen
 
     def __hash__(self) -> int:
-        return hash(self._frozen)
+        return self._hash
 
     def __fx_repr__(self) -> Tuple[str, Dict[str, Any]]:
         items = ", ".join(
@@ -872,21 +874,6 @@ def _spec_slot_count(spec: Optional[TensorSpec]) -> int:
     return len(spec.inner_names())
 
 
-def _unflatten_value(
-    spec: Optional[TensorSpec],
-    chunk: List[Optional[torch.Tensor]],
-) -> Optional[Union[torch.Tensor, QuantizedTensorStorage]]:
-    """Rebuild the value described by ``spec`` from its flat tensors ``chunk``.
-
-    ``spec is None`` -> ``None`` (op-boundary sentinel for an absent output);
-    otherwise delegates to :meth:`TensorSpec.assemble`, which returns a plain
-    tensor as-is or reassembles a quantized tensor from its inner buffers.
-    """
-    if spec is None:
-        return None
-    return spec.assemble(chunk)
-
-
 def _unflatten_values(
     specs: Sequence[Optional[TensorSpec]],
     flat: Sequence[Optional[torch.Tensor]],
@@ -902,7 +889,8 @@ def _unflatten_values(
         n = _spec_slot_count(spec)
         chunk = [_decode_none(t) for t in flat[cursor : cursor + n]]
         cursor += n
-        values.append(_unflatten_value(spec, chunk))
+        # ``spec is None`` is the op-boundary sentinel for an absent output.
+        values.append(spec.assemble(chunk) if spec is not None else None)
     return values, cursor
 
 
@@ -911,7 +899,7 @@ def _flatten_value(
 ) -> List[torch.Tensor]:
     """Return the flat ``Tensor[]`` slots that represent one op output ``value``.
 
-    Inverse of :func:`_unflatten_value`; the slot count matches
+    Inverse of :func:`_unflatten_values`; the slot count matches
     :func:`_spec_slot_count`.
     """
     if value is None:

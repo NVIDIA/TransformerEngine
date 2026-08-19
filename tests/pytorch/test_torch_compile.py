@@ -4,6 +4,8 @@
 
 import abc
 import contextlib
+import os
+import sys
 import warnings
 
 import pytest
@@ -35,6 +37,8 @@ from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
 from transformer_engine.pytorch.quantization import QuantizerRole
 from transformer_engine.pytorch.ops.basic.basic_linear import BasicLinear
 from transformer_engine.pytorch.tensor.float8_tensor import Float8CurrentScalingQuantizer
+from transformer_engine.pytorch.tensor.float8_blockwise_tensor import Float8BlockQuantizer
+from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
 from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Quantizer
 from transformer_engine.pytorch.quantized_tensor import QuantizedTensor, Quantizer
 from transformer_engine.pytorch.dynamo import TensorSpec, to_tensor_spec
@@ -43,11 +47,14 @@ from transformer_engine.pytorch import (
     is_mxfp8_available,
     is_fp8_block_scaling_available,
     is_nvfp4_available,
-    Float8Quantizer,
-    Float8BlockQuantizer,
-    MXFP8Quantizer,
 )
+
+# Import from the local utils.py by explicit path: importing cutedsl makes a
+# top-level ``utils`` package visible that would shadow it.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from utils import recipe_id
+
+sys.path.pop(0)
 from transformer_engine.pytorch.attention.dot_product_attention.backends import (
     UnfusedDotProductAttention,
 )
