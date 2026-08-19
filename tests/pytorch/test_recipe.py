@@ -243,6 +243,19 @@ def test_equal_builtin_recipes_have_equal_quantizer_configs(recipe_type):
     assert first == second
 
 
+def test_mxfp8_2d_quantization_changes_quantizer_config():
+    """MXFP8 weight layout participates in construction and mutation semantics."""
+    recipe = MXFP8BlockScaling(enable_2d_quantization=False)
+    original_config = recipe.quantizer_config()
+
+    recipe.enable_2d_quantization = True
+    updated_config = recipe.quantizer_config()
+
+    assert updated_config != original_config
+    assert dict(updated_config)["enable_2d_quantization"] is True
+    assert updated_config == MXFP8BlockScaling(enable_2d_quantization=True).quantizer_config()
+
+
 def test_same_recipe_mutation_invalidates_config_for_direct_and_nested_parameters():
     """Built-in recipe config changes for same-object and nested-qparam updates."""
     recipe = Float8CurrentScaling()

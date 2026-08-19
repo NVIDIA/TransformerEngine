@@ -611,6 +611,7 @@ class MXFP8BlockScaling(Recipe):
             ("fp8_dpa", self.fp8_dpa),
             ("fp8_mha", self.fp8_mha),
             ("backward_override", self.backward_override),
+            ("enable_2d_quantization", self.enable_2d_quantization),
         )
 
     def _make_repr(self) -> str:
