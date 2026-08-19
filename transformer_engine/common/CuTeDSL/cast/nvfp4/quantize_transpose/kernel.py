@@ -377,33 +377,6 @@ class NVFP4QuantizeTransposeTuned1DKernel:
         if warp_idx == 0:
             cute.nvgpu.cpasync.prefetch_descriptor(tma_atom_in)
 
-        # Compute global encode scales from supplied amax
-        if cutlass.const_expr(not cfg.ROW_SCALED_NVFP4):
-            S_enc_rowwise = compute_global_encode_sf(mAmaxRow[0])
-        else:
-            # Per-row encode scales are drawn inside the rowwise pass instead.
-            S_enc_rowwise = Float32(1.0)
-        if cutlass.const_expr(cfg.RETURN_TRANSPOSE):
-            S_enc_colwise = compute_global_encode_sf(mAmaxCol[0])
-        else:
-            S_enc_colwise = Float32(1.0)
-
-        # Construct RNG state for SR
-        rng = None
-        if cutlass.const_expr(cfg.USE_STOCHASTIC_ROUNDING):
-            grid_dim_x, _, _ = cute.arch.grid_dim()
-            # Contrary to CUDA C++ version, calculate in Int64 for correctness
-            rng_sequence = (
-                Int64(tidx)
-                + Int64(bidx) * self.THREADS
-                + Int64(bidy) * Int64(grid_dim_x) * self.THREADS
-            )
-            rng = PhiloxRng(
-                seed=Uint64(mRngState[0].ir_value()),
-                subsequence=Uint64(rng_sequence.ir_value()),
-                offset=Uint64(mRngState[1].ir_value()),
-            )
-
         # Initialize mbarriers for TMA G2S input tensor copy
         mbar = storage.mbar_storage.data_ptr()
         if warp_idx == 0:
@@ -430,6 +403,33 @@ class NVFP4QuantizeTransposeTuned1DKernel:
                     tXsX[(None, s)],
                     tma_bar_ptr=mbar + s,
                 )
+
+        # Compute global encode scales from supplied amax
+        if cutlass.const_expr(not cfg.ROW_SCALED_NVFP4):
+            S_enc_rowwise = compute_global_encode_sf(mAmaxRow[0])
+        else:
+            # Per-row encode scales are drawn inside the rowwise pass instead.
+            S_enc_rowwise = Float32(1.0)
+        if cutlass.const_expr(cfg.RETURN_TRANSPOSE):
+            S_enc_colwise = compute_global_encode_sf(mAmaxCol[0])
+        else:
+            S_enc_colwise = Float32(1.0)
+
+        # Construct RNG state for SR
+        rng = None
+        if cutlass.const_expr(cfg.USE_STOCHASTIC_ROUNDING):
+            grid_dim_x, _, _ = cute.arch.grid_dim()
+            # Contrary to CUDA C++ version, calculate in Int64 for correctness
+            rng_sequence = (
+                Int64(tidx)
+                + Int64(bidx) * self.THREADS
+                + Int64(bidy) * Int64(grid_dim_x) * self.THREADS
+            )
+            rng = PhiloxRng(
+                seed=Uint64(mRngState[0].ir_value()),
+                subsequence=Uint64(rng_sequence.ir_value()),
+                offset=Uint64(mRngState[1].ir_value()),
+            )
 
         # Main loop over tiles/stages in chunk
         for stage in cutlass.range_constexpr(self.STAGES):
