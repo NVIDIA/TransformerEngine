@@ -718,6 +718,36 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         )
 
     @staticmethod
+    def _empty_or_neg_inf_max_logit(head, dtype, config):
+        """Return the neutral value for per-head max_logit accumulation."""
+        if config.return_max_logit:
+            return jnp.full((head,), -jnp.inf, dtype=dtype)
+        return jnp.zeros((0,), dtype=dtype)
+
+    @staticmethod
+    def _max_logit_reduce_axes(mesh, max_logit_sharding):
+        """Return mesh axes to reduce while preserving max_logit's head sharding."""
+        # max_logit is [H], so axes that shard H (typically TP) are preserved.
+        # Axes for collapsed dimensions such as batch/sequence (DP/CP) must pmax.
+        head_axes = set()
+        for axis in max_logit_sharding.spec:
+            if axis is None:
+                continue
+            if isinstance(axis, tuple):
+                head_axes.update(axis)
+            else:
+                head_axes.add(axis)
+        return tuple(axis for axis in mesh.axis_names if axis not in head_axes)
+
+    @staticmethod
+    def _reduce_max_logit_across_mesh(max_logit, mesh, reduce_axes, config):
+        """Reduce max_logit across mesh axes absent from the [H] result."""
+        if config.return_max_logit:
+            for axis in reduce_axes:
+                max_logit = lax_paral_op(max_logit, lax.pmax, axis, mesh=mesh)
+        return max_logit
+
+    @staticmethod
     def batcher(batched_args, batch_dims, *, config):
         # batch_dims: each element is the batch axis (0, ...) or None. Only 0 or None allowed.
         check_valid_batch_dims(batch_dims)
@@ -1501,6 +1531,7 @@ class _FusedAttnCPWithAllGatherHelper:
             cp_axis=self.config.cp_axis,
             cp_striped_window_size=None,
             stripe_size=self.config.stripe_size,
+            return_max_logit=self.config.return_max_logit,
         )
 
     def get_step_config_for_striped(self, max_seqlen, cp_size) -> _FusedAttnConfig:
@@ -1521,6 +1552,7 @@ class _FusedAttnCPWithAllGatherHelper:
             cp_axis=self.config.cp_axis,
             cp_striped_window_size=None,
             stripe_size=self.config.stripe_size,
+            return_max_logit=self.config.return_max_logit,
         )
 
     def all_gather_kv(self, k, v):
@@ -1885,10 +1917,6 @@ class FusedAttnCPWithAllGatherFwdPrimitive(FusedAttnFwdPrimitive):
         ), "Sliding window attention is not supported when context parallelism is enabled"
         if not is_context_parallel:
             return FusedAttnFwdPrimitive.partition(config, mesh, arg_infos, result_infos)
-        if config.return_max_logit:
-            raise NotImplementedError(
-                "return_max_logit is not yet supported with context parallelism"
-            )
 
         helper = _FusedAttnCPWithAllGatherHelper(mesh, config)
         helper.check_supported()
@@ -1903,6 +1931,9 @@ class FusedAttnCPWithAllGatherFwdPrimitive(FusedAttnFwdPrimitive):
         arg_shardings[5] = seed_sharding
         arg_shardings = tuple(arg_shardings)
         out_shardings = (out_sharding, softmax_aux_sharding, rng_state_sharding, max_logit_sharding)
+        max_logit_reduce_axes = FusedAttnFwdPrimitive._max_logit_reduce_axes(
+            mesh, max_logit_sharding
+        )
 
         def impl(
             q,
@@ -1950,7 +1981,8 @@ class FusedAttnCPWithAllGatherFwdPrimitive(FusedAttnFwdPrimitive):
                     q_seqlen_for_step = q_seqlen / (cp_size * 2)
                     num_kv_chunks = kv_max_seqlen // kv_seqlens_for_rank[sub_idx]
                     kv_seqlen_for_step = (kv_seqlen / (cp_size * 2)) * num_kv_chunks
-                    output, softmax_aux, rng_state, _ = FusedAttnFwdPrimitive.impl(
+                    # max_logit returned here is already reduced to shape [H]
+                    output, softmax_aux, rng_state, max_logit = FusedAttnFwdPrimitive.impl(
                         q_split[sub_idx],
                         k_unmasked,
                         v_unmasked,
@@ -1967,12 +1999,13 @@ class FusedAttnCPWithAllGatherFwdPrimitive(FusedAttnFwdPrimitive):
                         _kv_segment_pos,
                         config=helper.get_step_config(),
                     )
-                    results.append((output, softmax_aux, rng_state))
+                    results.append((output, softmax_aux, rng_state, max_logit))
 
                 output = jnp.concatenate((results[0][0], results[1][0]), axis=1)
                 softmax_aux = jnp.concatenate((results[0][1], results[1][1]), axis=2)
                 rng_state = results[1][2]  # Use the final RNG state
-                max_logit = jnp.zeros((0,), dtype=output.dtype)
+                # Rank-local [H] max across both local dual-chunk query pieces.
+                max_logit = jnp.maximum(results[0][3], results[1][3])
 
                 return output, softmax_aux, rng_state, max_logit
 
@@ -1985,7 +2018,12 @@ class FusedAttnCPWithAllGatherFwdPrimitive(FusedAttnFwdPrimitive):
                 for idx in range(cp_size)
             ]
 
-            return lax.switch(cp_rank, functions)
+            output, softmax_aux, rng_state, max_logit = lax.switch(cp_rank, functions)
+            # Reduce over non-head mesh axes to make [H] global over batch/sequence.
+            max_logit = FusedAttnFwdPrimitive._reduce_max_logit_across_mesh(
+                max_logit, mesh, max_logit_reduce_axes, config
+            )
+            return output, softmax_aux, rng_state, max_logit
 
         return mesh, impl, out_shardings, arg_shardings
 
@@ -2184,10 +2222,6 @@ class FusedAttnCPStripedWithAllGatherFwdPrimitive(FusedAttnFwdPrimitive):
         is_context_parallel = get_mesh_axis_size(config.cp_axis, mesh) > 1
         if not is_context_parallel:
             return FusedAttnFwdPrimitive.partition(config, mesh, arg_infos, result_infos)
-        if config.return_max_logit:
-            raise NotImplementedError(
-                "return_max_logit is not yet supported with context parallelism"
-            )
 
         helper = _FusedAttnCPWithAllGatherHelper(mesh, config)
         helper.check_supported()
@@ -2202,6 +2236,9 @@ class FusedAttnCPStripedWithAllGatherFwdPrimitive(FusedAttnFwdPrimitive):
         arg_shardings[5] = seed_sharding
         arg_shardings = tuple(arg_shardings)
         out_shardings = (out_sharding, softmax_aux_sharding, rng_state_sharding, max_logit_sharding)
+        max_logit_reduce_axes = FusedAttnFwdPrimitive._max_logit_reduce_axes(
+            mesh, max_logit_sharding
+        )
 
         def impl(
             q,
@@ -2265,7 +2302,7 @@ class FusedAttnCPStripedWithAllGatherFwdPrimitive(FusedAttnFwdPrimitive):
                     max_segments_per_seq=adjusted_max_segments_per_seq,
                 )
 
-                output, softmax_aux, rng_state, _ = FusedAttnFwdPrimitive.impl(
+                output, softmax_aux, rng_state, max_logit = FusedAttnFwdPrimitive.impl(
                     q,  # sharded for rank
                     k,  # ag
                     v,  # ag
@@ -2284,7 +2321,6 @@ class FusedAttnCPStripedWithAllGatherFwdPrimitive(FusedAttnFwdPrimitive):
                         max_seqlen=kv_max_seqlen, cp_size=cp_size
                     ),
                 )
-                max_logit = jnp.zeros((0,), dtype=output.dtype)
                 return output, softmax_aux, rng_state, max_logit
 
             # AG the k, v, kv_segment_ids and kv_segment_pos
@@ -2306,7 +2342,11 @@ class FusedAttnCPStripedWithAllGatherFwdPrimitive(FusedAttnFwdPrimitive):
                 )
                 for _ in range(cp_size)
             ]
-            return lax.switch(cp_rank, functions)
+            output, softmax_aux, rng_state, max_logit = lax.switch(cp_rank, functions)
+            max_logit = FusedAttnFwdPrimitive._reduce_max_logit_across_mesh(
+                max_logit, mesh, max_logit_reduce_axes, config
+            )
+            return output, softmax_aux, rng_state, max_logit
 
         return mesh, impl, out_shardings, arg_shardings
 
@@ -2579,6 +2619,7 @@ class _FusedAttnCPWithP2PHelper:
             cp_axis=self.config.cp_axis,
             cp_striped_window_size=None,
             stripe_size=self.config.stripe_size,
+            return_max_logit=self.config.return_max_logit,
         )
 
     def stack_kv(self, k, v):
@@ -2640,10 +2681,6 @@ class FusedRingAttnFwdPrimitive(FusedAttnFwdPrimitive):
         ), "Sliding window attention is not supported when context parallelism is enabled"
         if not is_context_parallel:
             return FusedAttnFwdPrimitive.partition(config, mesh, arg_infos, result_infos)
-        if config.return_max_logit:
-            raise NotImplementedError(
-                "return_max_logit is not yet supported with context parallelism"
-            )
 
         helper = _FusedAttnCPWithP2PHelper(mesh, config)
         helper.check_supported()
@@ -2661,6 +2698,9 @@ class FusedRingAttnFwdPrimitive(FusedAttnFwdPrimitive):
         arg_shardings[-2] = arg_shardings[-4]
         arg_shardings = tuple(arg_shardings)
         out_shardings = (out_sharding, softmax_aux_sharding, rng_state_sharding, max_logit_sharding)
+        max_logit_reduce_axes = FusedAttnFwdPrimitive._max_logit_reduce_axes(
+            mesh, max_logit_sharding
+        )
 
         def ring_attn_fwd_impl(
             q,
@@ -2698,9 +2738,10 @@ class FusedRingAttnFwdPrimitive(FusedAttnFwdPrimitive):
             # support dropout currently.
             rng_state_shape = (seed.shape[0], *result_infos[2].shape[1:])
             rng_state = jnp.zeros(rng_state_shape).astype(result_infos[2].dtype)
+            max_logit = FusedAttnFwdPrimitive._empty_or_neg_inf_max_logit(head, q.dtype, config)
 
             def scan_kv_block(idx, carry):
-                kv, output, softmax_aux = carry
+                kv, output, softmax_aux, max_logit = carry
 
                 # Send KV block to next step so we can overlap compute.
                 kv_next = helper.permute_kv(kv, cp_perm)
@@ -2708,24 +2749,26 @@ class FusedRingAttnFwdPrimitive(FusedAttnFwdPrimitive):
                 def mask_compute(attn_mask_type):
                     q_seqlen_per_step = helper.adjust_seqlen(q_seqlen, q_max_seqlen, idx)
                     kv_seqlen_per_step = helper.adjust_seqlen(kv_seqlen, kv_max_seqlen, idx)
-                    output_per_step, softmax_aux_per_step, _, _ = FusedAttnFwdPrimitive.impl(
-                        q,
-                        kv,
-                        _not_used,
-                        bias,
-                        _softmax_offset,
-                        seed,
-                        q_seqlen_per_step,
-                        kv_seqlen_per_step,
-                        q_seq_offsets,
-                        k_seq_offsets,
-                        _q_segment_ids,
-                        _kv_segment_ids,
-                        _q_segment_pos,
-                        _kv_segment_pos,
-                        config=helper.get_step_config(attn_mask_type),
+                    output_per_step, softmax_aux_per_step, _, max_logit_per_step = (
+                        FusedAttnFwdPrimitive.impl(
+                            q,
+                            kv,
+                            _not_used,
+                            bias,
+                            _softmax_offset,
+                            seed,
+                            q_seqlen_per_step,
+                            kv_seqlen_per_step,
+                            q_seq_offsets,
+                            k_seq_offsets,
+                            _q_segment_ids,
+                            _kv_segment_ids,
+                            _q_segment_pos,
+                            _kv_segment_pos,
+                            config=helper.get_step_config(attn_mask_type),
+                        )
                     )
-                    return output_per_step, softmax_aux_per_step
+                    return output_per_step, softmax_aux_per_step, max_logit_per_step
 
                 causal_mask_compute = partial(mask_compute, AttnMaskType.CAUSAL_MASK)
                 no_mask_compute = partial(mask_compute, AttnMaskType.NO_MASK)
@@ -2734,45 +2777,49 @@ class FusedRingAttnFwdPrimitive(FusedAttnFwdPrimitive):
                     q_seqlen_per_step = helper.adjust_seqlen(q_seqlen, q_max_seqlen, idx)
                     kv_seqlen_per_step = helper.adjust_seqlen(kv_seqlen, kv_max_seqlen, idx) // 2
                     kv_part = lax.slice_in_dim(kv, 0, kv.shape[1] // 2, axis=1)
-                    output_per_step, softmax_aux_per_step, _, _ = FusedAttnFwdPrimitive.impl(
-                        q,
-                        kv_part,
-                        _not_used,
-                        bias,
-                        _softmax_offset,
-                        seed,
-                        q_seqlen_per_step,
-                        kv_seqlen_per_step,
-                        q_seq_offsets,
-                        k_seq_offsets,
-                        _q_segment_ids,
-                        _kv_segment_ids,
-                        _q_segment_pos,
-                        _kv_segment_pos,
-                        config=helper.get_step_config(AttnMaskType.NO_MASK),
+                    output_per_step, softmax_aux_per_step, _, max_logit_per_step = (
+                        FusedAttnFwdPrimitive.impl(
+                            q,
+                            kv_part,
+                            _not_used,
+                            bias,
+                            _softmax_offset,
+                            seed,
+                            q_seqlen_per_step,
+                            kv_seqlen_per_step,
+                            q_seq_offsets,
+                            k_seq_offsets,
+                            _q_segment_ids,
+                            _kv_segment_ids,
+                            _q_segment_pos,
+                            _kv_segment_pos,
+                            config=helper.get_step_config(AttnMaskType.NO_MASK),
+                        )
                     )
-                    return output_per_step, softmax_aux_per_step
+                    return output_per_step, softmax_aux_per_step, max_logit_per_step
 
                 def half_q_no_mask_compute():
                     q_seqlen_per_step = helper.adjust_seqlen(q_seqlen, q_max_seqlen, idx) // 2
                     kv_seqlen_per_step = helper.adjust_seqlen(kv_seqlen, kv_max_seqlen, idx)
                     q_part = lax.slice_in_dim(q, q_max_seqlen // 2, q_max_seqlen, axis=1)
-                    output_per_step, softmax_aux_per_step, _, _ = FusedAttnFwdPrimitive.impl(
-                        q_part,
-                        kv,
-                        _not_used,
-                        bias,
-                        _softmax_offset,
-                        seed,
-                        q_seqlen_per_step,
-                        kv_seqlen_per_step,
-                        q_seq_offsets,
-                        k_seq_offsets,
-                        _q_segment_ids,
-                        _kv_segment_ids,
-                        _q_segment_pos,
-                        _kv_segment_pos,
-                        config=helper.get_step_config(AttnMaskType.NO_MASK),
+                    output_per_step, softmax_aux_per_step, _, max_logit_per_step = (
+                        FusedAttnFwdPrimitive.impl(
+                            q_part,
+                            kv,
+                            _not_used,
+                            bias,
+                            _softmax_offset,
+                            seed,
+                            q_seqlen_per_step,
+                            kv_seqlen_per_step,
+                            q_seq_offsets,
+                            k_seq_offsets,
+                            _q_segment_ids,
+                            _kv_segment_ids,
+                            _q_segment_pos,
+                            _kv_segment_pos,
+                            config=helper.get_step_config(AttnMaskType.NO_MASK),
+                        )
                     )
                     output_per_step = jnp.concat([jnp.zeros_like(q_part), output_per_step], axis=1)
                     softmax_aux_per_step = jnp.concat(
@@ -2782,14 +2829,17 @@ class FusedRingAttnFwdPrimitive(FusedAttnFwdPrimitive):
                         ],
                         axis=2,
                     )
-                    return output_per_step, softmax_aux_per_step
+                    return output_per_step, softmax_aux_per_step, max_logit_per_step
 
                 def skip_compute():
                     output_per_step = jnp.zeros_like(q)
                     softmax_aux_per_step = jnp.full(
                         (batch, head, q.shape[1], 1), -jnp.inf, dtype=jnp.float32
                     )
-                    return output_per_step, softmax_aux_per_step
+                    max_logit_per_step = FusedAttnFwdPrimitive._empty_or_neg_inf_max_logit(
+                        head, q.dtype, config
+                    )
+                    return output_per_step, softmax_aux_per_step, max_logit_per_step
 
                 if config.attn_mask_type == AttnMaskType.CAUSAL_MASK:
                     # This is for nested jax.lax.cond
@@ -2800,11 +2850,11 @@ class FusedRingAttnFwdPrimitive(FusedAttnFwdPrimitive):
                             )
                         return lax.cond((idx <= cp_rank), no_mask_compute, skip_compute)
 
-                    output_per_step, softmax_aux_per_step = lax.cond(
+                    output_per_step, softmax_aux_per_step, max_logit_per_step = lax.cond(
                         idx == 0, causal_mask_compute, jax_cond_wrap
                     )
                 else:
-                    output_per_step, softmax_aux_per_step = no_mask_compute()
+                    output_per_step, softmax_aux_per_step, max_logit_per_step = no_mask_compute()
 
                 def skip_correction(output, softmax_aux, output_per_step, softmax_aux_per_step):
                     # No correction done here but we cast outputs to float32 and perform reduction
@@ -2827,19 +2877,23 @@ class FusedRingAttnFwdPrimitive(FusedAttnFwdPrimitive):
                     output_per_step,
                     softmax_aux_per_step,
                 )
+                # Running per-head max over all ring steps for this rank.
+                max_logit = jnp.maximum(max_logit, max_logit_per_step)
 
-                return (kv_next, output, softmax_aux)
+                return (kv_next, output, softmax_aux, max_logit)
 
-            carry = (kv, output, softmax_aux)
+            carry = (kv, output, softmax_aux, max_logit)
             if helper.use_scanloop():
                 carry = lax.fori_loop(0, cp_size, scan_kv_block, carry)
             else:
                 for i in range(0, cp_size):
                     carry = scan_kv_block(i, carry)
-            (kv, output, softmax_aux) = carry
+            (kv, output, softmax_aux, max_logit) = carry
 
             output = output.astype(q.dtype)
-            max_logit = jnp.zeros((0,), dtype=output.dtype)
+            max_logit = FusedAttnFwdPrimitive._reduce_max_logit_across_mesh(
+                max_logit, mesh, max_logit_reduce_axes, config
+            )
             return output, softmax_aux, rng_state, max_logit
 
         return mesh, ring_attn_fwd_impl, out_shardings, arg_shardings
@@ -3152,10 +3206,6 @@ class FusedRingAttnStripedFwdPrimitive(FusedAttnFwdPrimitive):
         is_context_parallel = get_mesh_axis_size(config.cp_axis, mesh) > 1
         if not is_context_parallel:
             return FusedAttnFwdPrimitive.partition(config, mesh, arg_infos, result_infos)
-        if config.return_max_logit:
-            raise NotImplementedError(
-                "return_max_logit is not yet supported with context parallelism"
-            )
 
         helper = _FusedAttnCPWithP2PHelper(mesh, config)
         helper.check_supported()
@@ -3173,6 +3223,9 @@ class FusedRingAttnStripedFwdPrimitive(FusedAttnFwdPrimitive):
         arg_shardings[-2] = arg_shardings[-4]
         arg_shardings = tuple(arg_shardings)
         out_shardings = (out_sharding, softmax_aux_sharding, rng_state_sharding, max_logit_sharding)
+        max_logit_reduce_axes = FusedAttnFwdPrimitive._max_logit_reduce_axes(
+            mesh, max_logit_sharding
+        )
 
         def fwd_impl(
             q,
@@ -3215,9 +3268,10 @@ class FusedRingAttnStripedFwdPrimitive(FusedAttnFwdPrimitive):
             # support dropout currently.
             rng_state_shape = (seed.shape[0], *result_infos[2].shape[1:])
             rng_state = jnp.zeros(rng_state_shape).astype(result_infos[2].dtype)
+            max_logit = FusedAttnFwdPrimitive._empty_or_neg_inf_max_logit(head, q.dtype, config)
 
             def scan_kv_block(idx, carry):
-                kv, kv_segment_ids, kv_segment_pos, output, softmax_aux = carry
+                kv, kv_segment_ids, kv_segment_pos, output, softmax_aux, max_logit = carry
 
                 # TODO(rewang): To check whether we need special handle for the last idx
                 # Send KV block to next step so we can overlap compute.
@@ -3255,7 +3309,9 @@ class FusedRingAttnStripedFwdPrimitive(FusedAttnFwdPrimitive):
                     )
                 else:
                     current_config = subblock_config
-                output_per_step, softmax_aux_per_step, _, _ = compute(current_config)
+                output_per_step, softmax_aux_per_step, _, max_logit_per_step = compute(
+                    current_config
+                )
 
                 softmax_aux_per_step = softmax_aux_per_step.reshape((batch, q_max_seqlen, head, 1))
 
@@ -3281,19 +3337,30 @@ class FusedRingAttnStripedFwdPrimitive(FusedAttnFwdPrimitive):
                     output_per_step,
                     softmax_aux_per_step,
                 )
+                # Running per-head max over all ring steps for this rank.
+                max_logit = jnp.maximum(max_logit, max_logit_per_step)
 
-                return (kv_next, kv_segment_ids_next, kv_segment_pos_next, output, softmax_aux)
+                return (
+                    kv_next,
+                    kv_segment_ids_next,
+                    kv_segment_pos_next,
+                    output,
+                    softmax_aux,
+                    max_logit,
+                )
 
-            carry = (kv, kv_segment_ids, kv_segment_pos, output, softmax_aux)
+            carry = (kv, kv_segment_ids, kv_segment_pos, output, softmax_aux, max_logit)
             if helper.use_scanloop():
                 carry = lax.fori_loop(0, cp_size, scan_kv_block, carry)
             else:
                 for i in range(0, cp_size):
                     carry = scan_kv_block(i, carry)
-            (_, _, _, output, softmax_aux) = carry
+            (_, _, _, output, softmax_aux, max_logit) = carry
 
             output = output.astype(q.dtype)
-            max_logit = jnp.zeros((0,), dtype=output.dtype)
+            max_logit = FusedAttnFwdPrimitive._reduce_max_logit_across_mesh(
+                max_logit, mesh, max_logit_reduce_axes, config
+            )
             return output, softmax_aux, rng_state, max_logit
 
         return mesh, fwd_impl, out_shardings, arg_shardings

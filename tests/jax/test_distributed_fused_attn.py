@@ -399,6 +399,75 @@ DISTRIBUTED_CONTEXT_SELF_ATTN_D256_LAYOUTS_MASKS_WINDOWS = [
     ),
 ]
 
+DISTRIBUTED_CONTEXT_SELF_ATTN_MAX_LOGIT_CASES = [
+    pytest.param(
+        QKVLayout.BSHD_BSHD_BSHD,
+        AttnMaskType.CAUSAL_MASK,
+        CPStrategy.ALL_GATHER,
+        (-1, -1),
+        None,
+        None,
+        False,
+        True,
+        id="AG-BSHD",
+    ),
+    pytest.param(
+        QKVLayout.THD_THD_THD,
+        AttnMaskType.PADDING_CAUSAL_MASK,
+        CPStrategy.ALL_GATHER,
+        (-1, -1),
+        64,
+        5,
+        False,
+        True,
+        id="AG-THD",
+    ),
+    pytest.param(
+        QKVLayout.BSHD_BSHD_BSHD,
+        AttnMaskType.CAUSAL_MASK,
+        CPStrategy.RING,
+        (-1, -1),
+        None,
+        None,
+        False,
+        True,
+        id="RING-BSHD-NO_SCAN",
+    ),
+    pytest.param(
+        QKVLayout.BSHD_BSHD_BSHD,
+        AttnMaskType.CAUSAL_MASK,
+        CPStrategy.RING,
+        (-1, -1),
+        None,
+        None,
+        True,
+        True,
+        id="RING-BSHD-SCAN",
+    ),
+    pytest.param(
+        QKVLayout.THD_THD_THD,
+        AttnMaskType.PADDING_CAUSAL_MASK,
+        CPStrategy.RING,
+        (-1, -1),
+        1,
+        5,
+        False,
+        False,
+        id="RING-THD-NO_SCAN",
+    ),
+    pytest.param(
+        QKVLayout.THD_THD_THD,
+        AttnMaskType.PADDING_CAUSAL_MASK,
+        CPStrategy.RING,
+        (-1, -1),
+        1,
+        5,
+        True,
+        False,
+        id="RING-THD-SCAN",
+    ),
+]
+
 
 class TestDistributedContextParallelSelfAttn:
     # TODO(KshitijLakhani): parametrize num_segments_per_seq for all CP tests
@@ -419,6 +488,8 @@ class TestDistributedContextParallelSelfAttn:
         window_size=None,
         stripe_size=None,
         num_segments_per_seq=None,
+        return_max_logit=False,
+        check_forward_output=True,
     ):
         if qkv_layout.is_thd():
             if not load_balanced and (
@@ -513,8 +584,62 @@ class TestDistributedContextParallelSelfAttn:
         if num_head % kv_groups != 0 or (num_head // kv_groups) % tp_size != 0:
             pytest.skip(f"Skipping {kv_groups=} not multiple of {data_shape=} or {tp_size=}")
 
-        runner.test_backward()
+        if return_max_logit:
+            runner.test_forward_with_max_logit(check_output=check_forward_output)
+        else:
+            runner.test_backward()
         del os.environ["NVTE_FUSED_RING_ATTENTION_USE_SCAN"]
+
+    @pytest_parametrize_wrapper(
+        "device_count,mesh_shape,mesh_axes,mesh_resource",
+        generate_context_parallel_configs_for_attn(),
+    )
+    @pytest.mark.parametrize("data_shape", DISTRIBUTED_CONTEXT_SELF_ATTN_DATA_SHAPES[:1])
+    @pytest.mark.parametrize("kv_groups", [1])
+    @pytest.mark.parametrize("dtype", [pytest.param(jnp.bfloat16, id="BF16")])
+    @pytest.mark.parametrize(
+        "qkv_layout, attn_mask_type, cp_strategy, window_size, stripe_size,"
+        " num_segments_per_seq, use_scan_ring, check_forward_output",
+        DISTRIBUTED_CONTEXT_SELF_ATTN_MAX_LOGIT_CASES,
+    )
+    def test_context_parallel_return_max_logit(
+        self,
+        device_count,
+        mesh_shape,
+        mesh_axes,
+        mesh_resource,
+        data_shape,
+        kv_groups,
+        dtype,
+        qkv_layout,
+        attn_mask_type,
+        cp_strategy,
+        window_size,
+        stripe_size,
+        num_segments_per_seq,
+        use_scan_ring,
+        check_forward_output,
+    ):
+        """Check CP fused attention returns global per-head max_logit."""
+        self.impl_test_context_parallel_attn(
+            device_count,
+            mesh_shape,
+            mesh_axes,
+            mesh_resource,
+            data_shape,
+            kv_groups,
+            attn_mask_type,
+            dtype,
+            qkv_layout,
+            True,
+            cp_strategy,
+            use_scan_ring=use_scan_ring,
+            window_size=window_size,
+            stripe_size=stripe_size,
+            num_segments_per_seq=num_segments_per_seq,
+            return_max_logit=True,
+            check_forward_output=check_forward_output,
+        )
 
     @pytest_parametrize_wrapper(
         "device_count,mesh_shape,mesh_axes,mesh_resource",
