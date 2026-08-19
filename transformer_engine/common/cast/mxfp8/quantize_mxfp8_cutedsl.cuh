@@ -172,9 +172,10 @@ inline bool mxfp8_quantize_cutedsl(const MXFP8QuantConfig &config, const Tensor 
                                    Tensor *workspace_tensor, cudaStream_t stream) {
   const size_t flat_m = input_tensor->flat_first_dim();
   const size_t flat_n = input_tensor->flat_last_dim();
-  NVTE_CHECK(flat_n % 16 == 0,
-             "Shape not supported because the last dimension of output is not 16 bytes aligned, "
-             "which is required by TMA.");
+  if (flat_n % 16 != 0) {
+    // Shape not supported because the last dimension of output is not 16 bytes aligned which is required by TMA.
+    return false;
+  }
 
   // When only WITH_DBIAS is true, we use a larger tile size (align with CUDA C++ implementation)
   const bool cast_dbias_only = config.with_dbias && !config.with_dact && !config.with_act;
