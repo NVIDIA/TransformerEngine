@@ -100,37 +100,27 @@ def _cudnn_frontend_supports_grouped_gemm_srelu_hadamard() -> bool:
 
 @functools.lru_cache(maxsize=None)
 def _cudnn_frontend_supports_grouped_gemm_situglu() -> bool:
-    """Feature-detect cuDNN frontend grouped SiTU-GLU support."""
+    """Feature-detect complete cuDNN frontend grouped SiTU-GLU support."""
     try:
         from cudnn import (  # pylint: disable=import-outside-toplevel
             grouped_gemm_dglu_wrapper_sm100,
+            grouped_gemm_glu_hadamard_wrapper_sm100,
             grouped_gemm_glu_wrapper_sm100,
         )
     except ImportError:
         return False
     try:
-        forward_params = inspect.signature(grouped_gemm_glu_wrapper_sm100).parameters
-        backward_params = inspect.signature(grouped_gemm_dglu_wrapper_sm100).parameters
-    except (TypeError, ValueError):
-        return False
-    situ_params = {"situ_beta1", "situ_beta2"}
-    return situ_params.issubset(forward_params) and situ_params.issubset(backward_params)
-
-
-@functools.lru_cache(maxsize=None)
-def _cudnn_frontend_supports_grouped_gemm_situglu_hadamard() -> bool:
-    """Feature-detect cuDNN frontend grouped SiTU-GLU Hadamard support."""
-    try:
-        from cudnn import (  # pylint: disable=import-outside-toplevel
+        wrappers = (
+            grouped_gemm_glu_wrapper_sm100,
+            grouped_gemm_dglu_wrapper_sm100,
             grouped_gemm_glu_hadamard_wrapper_sm100,
         )
-    except ImportError:
-        return False
-    try:
-        params = inspect.signature(grouped_gemm_glu_hadamard_wrapper_sm100).parameters
+        situ_params = {"situ_beta1", "situ_beta2"}
+        return all(
+            situ_params.issubset(inspect.signature(wrapper).parameters) for wrapper in wrappers
+        )
     except (TypeError, ValueError):
         return False
-    return {"situ_beta1", "situ_beta2"}.issubset(params)
 
 
 def _nvidia_cudnn_frontend_supports_wgrad() -> bool:
@@ -1397,13 +1387,8 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             and fc2_input_quantizer.with_post_rht_amax
         )
         activation_is_srelu = isinstance(activation_op, ScaledSReLU)
-        activation_supports_hadamard = (
-            self._cudnn_act_func == "swiglu"
-            or (
-                self._cudnn_act_func == "situglu"
-                and _cudnn_frontend_supports_grouped_gemm_situglu_hadamard()
-            )
-            or (activation_is_srelu and _cudnn_frontend_supports_grouped_gemm_srelu_hadamard())
+        activation_supports_hadamard = self._cudnn_act_func in ("swiglu", "situglu") or (
+            activation_is_srelu and _cudnn_frontend_supports_grouped_gemm_srelu_hadamard()
         )
         if use_nvfp4_rht_amax and activation_supports_hadamard:
             kernel_getter = getattr(self, "grouped_gemm_act_hadamard_kernel", None)
