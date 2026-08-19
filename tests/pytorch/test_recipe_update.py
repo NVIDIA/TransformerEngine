@@ -98,15 +98,38 @@ def _runtime_views(module):
     )
 
 
+def _assert_runtime_recipes_match_keys(module):
+    """Check every committed recipe snapshot in a module hierarchy."""
+    for module_name, owner in module.named_modules():
+        if not isinstance(owner, TransformerEngineBaseModule):
+            continue
+        runtime = owner._quantization_runtime  # pylint: disable=protected-access
+        if runtime is None:
+            continue
+        active_recipe = owner.fp8_meta.get("recipe")
+        assert (
+            active_recipe is runtime.recipe
+        ), f"Runtime recipe view changed after commit for {module_name or '<root>'}"
+        recipe_config = active_recipe.quantizer_config()
+        assert recipe_config == runtime.key.recipe_config, (
+            f"Runtime recipe mutated after commit for {module_name or '<root>'}: "
+            f"{recipe_config} != {runtime.key.recipe_config}"
+        )
+
+
 def _run_update_step(module, recipe, inp, *args, **kwargs):
     """Run a real forward/backward step and return the output."""
+    inputs = inp if isinstance(inp, tuple) else (inp,)
+    _assert_runtime_recipes_match_keys(module)
     module.zero_grad(set_to_none=True)
     with autocast(enabled=True, recipe=recipe):
-        output = module(inp, *args, **kwargs)
+        output = module(*inputs, *args, **kwargs)
+    _assert_runtime_recipes_match_keys(module)
     if isinstance(output, tuple):
         output = output[0]
     output.float().sum().backward()
-    assert inp.grad is not None
+    _assert_runtime_recipes_match_keys(module)
+    assert all(input_tensor.grad is not None for input_tensor in inputs)
     assert all(param.grad is not None for param in module.parameters() if param.requires_grad)
     return output
 
@@ -844,9 +867,37 @@ def test_runtime_update_workspace_lifecycle(
     assert not module._fp8_workspaces  # pylint: disable=protected-access
 
 
+def test_forward_recipe_mutation_breaks_committed_key_invariant():
+    """A forward path must not change its committed recipe snapshot."""
+
+    class MutatingLinear(Linear):
+        def forward(self, inp, *args, **kwargs):
+            output = super().forward(inp, *args, **kwargs)
+            self.fp8_meta["recipe"].fp8_dpa = True
+            return output
+
+    FP8GlobalStateManager.reset()
+    calls = []
+    recipe = _make_counting_recipe(("forward-recipe-mutation", 1), calls)
+    module = MutatingLinear(16, 16, bias=False, device="cuda")
+    inp = torch.randn(8, 16, device="cuda", requires_grad=True)
+
+    try:
+        with pytest.raises(AssertionError, match="Runtime recipe mutated after commit"):
+            _run_update_step(module, recipe, inp)
+    finally:
+        FP8GlobalStateManager.reset()
+
+
 @pytest.mark.parametrize(
     ("module_factory", "input_factory", "forward_args"),
     (
+        pytest.param(
+            lambda: Linear(16, 16, bias=False, device="cuda"),
+            lambda: torch.randn(8, 16, device="cuda", requires_grad=True),
+            (),
+            id="linear",
+        ),
         pytest.param(
             lambda: LayerNormLinear(16, 16, bias=False, device="cuda"),
             lambda: torch.randn(8, 16, device="cuda", requires_grad=True),
@@ -864,6 +915,28 @@ def test_runtime_update_workspace_lifecycle(
             lambda: torch.randn(8, 16, device="cuda", requires_grad=True),
             ([4, 4],),
             id="grouped-linear",
+        ),
+        pytest.param(
+            lambda: DotProductAttention(
+                num_attention_heads=2,
+                kv_channels=16,
+                attention_dropout=0.0,
+                qkv_format="bshd",
+                name="dpa",
+            ).cuda(),
+            lambda: tuple(
+                torch.randn(
+                    2,
+                    8,
+                    2,
+                    16,
+                    device="cuda",
+                    requires_grad=True,
+                )
+                for _ in range(3)
+            ),
+            (),
+            id="dot-product-attention",
         ),
     ),
 )
@@ -933,6 +1006,7 @@ def test_composed_module_executes_after_recipe_update(module_factory):
     _run_update_step(module, first_recipe, first_inp)
     owners = _active_runtime_owners(module)
     assert len(owners) >= 2
+    assert any(isinstance(owner, DotProductAttention) for owner in owners)
     first_runtimes = {
         id(owner): owner._quantization_runtime  # pylint: disable=protected-access
         for owner in owners
