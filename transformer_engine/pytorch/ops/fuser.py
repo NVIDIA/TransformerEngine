@@ -432,11 +432,6 @@ class OperationFuser:
                 basic_ops.append(op)
         self._num_basic_ops: int = len(basic_ops)
         self._basic_ops: list[BasicOperation] = basic_ops
-        # Capture channel routing from each basic op. If any op later rebinds a
-        # channel it flips this flag, essentially invalidating this fuser's forward pass.
-        self._channels_stale: bool = False
-        for op in self._basic_ops:
-            op._capturing_op_fusers.add(self)
 
         # Number of extra tensor inputs
         self._basic_op_num_extra_inputs: list[int] = list(op.num_extra_inputs for op in basic_ops)
