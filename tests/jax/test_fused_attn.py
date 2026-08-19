@@ -1323,7 +1323,7 @@ class FusedAttnRunner:
         kwargs.update(overrides)
         return kwargs
 
-    def test_forward_with_max_logit(self):
+    def test_forward_with_max_logit(self, check_output=True):
         """Test forward output and returned max_logit."""
         self._setup_inputs()
         kwargs = self._fused_attn_kwargs()
@@ -1347,14 +1347,15 @@ class FusedAttnRunner:
             primitive_max_logit = primitive_aux["max_logit"]
             primitive_out = self.cp_inverse_reorder_fn(primitive_out)
 
-        reference_out = jax_dpa(*self._reference_args(), **kwargs)
         reference_max_logit = jax_dpa(*self._reference_args(), is_max_logit_enabled=True, **kwargs)
 
-        primitive_valid, primitive_invalid, reference_valid, _ = _split_valid_and_invalid(
-            primitive_out, reference_out, self.pad_q
-        )
-        assert_allclose(primitive_invalid, jnp.zeros_like(primitive_invalid), dtype=self.dtype)
-        assert_allclose(primitive_valid, reference_valid, dtype=self.dtype)
+        if check_output:
+            reference_out = jax_dpa(*self._reference_args(), **kwargs)
+            primitive_valid, primitive_invalid, reference_valid, _ = _split_valid_and_invalid(
+                primitive_out, reference_out, self.pad_q
+            )
+            assert_allclose(primitive_invalid, jnp.zeros_like(primitive_invalid), dtype=self.dtype)
+            assert_allclose(primitive_valid, reference_valid, dtype=self.dtype)
         assert_allclose(primitive_max_logit, reference_max_logit, dtype=self.dtype)
 
     def test_backward_with_max_logit(self):

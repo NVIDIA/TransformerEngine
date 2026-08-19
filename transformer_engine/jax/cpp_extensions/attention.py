@@ -667,6 +667,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             _kv_segment_pos,
             config=config,
         )
+        # Reduce cuDNN's raw Max tensor to TE's public per-head [H] max_logit.
         max_logit = FusedAttnFwdPrimitive._reduce_max_logit(
             max_tensor, output, raw_q_seqlen, raw_q_seq_offsets, config
         )
@@ -674,19 +675,24 @@ class FusedAttnFwdPrimitive(BasePrimitive):
 
     @staticmethod
     def _reduce_max_logit(max_tensor, output, q_seqlen, q_seq_offsets, config):
-        """Reduce cuDNN's raw Max tensor to PyTorch-compatible per-head max_logit."""
+        """Reduce cuDNN's raw Max tensor to framework-compatible per-head max_logit."""
         if not config.return_max_logit:
             return jnp.zeros((0,), dtype=output.dtype)
 
         uses_thd_ragged_max_tensor = FusedAttnFwdPrimitive._uses_thd_ragged_max_tensor(config)
         if config.qkv_layout.is_thd() and max_tensor.ndim == 4:
+            # Dense BSHD Max rows are expected to be masked by cuDNN before TE reduces them.
+            # THD Max can include static holes/unwritten rows, so mask valid query rows here.
             q_seqlen = jnp.where(q_seqlen > 0, q_seqlen, 0)
             q_seq_offsets = jnp.where(q_seq_offsets >= 0, q_seq_offsets, -1)
+            num_segments = min(q_seqlen.shape[-1], q_seq_offsets.shape[-1])
+            q_seqlen = q_seqlen[..., :num_segments]
+            q_seq_offsets = q_seq_offsets[..., :num_segments]
             token_idx = jnp.arange(output.shape[-3], dtype=q_seq_offsets.dtype)
             valid = jnp.any(
-                (q_seq_offsets[..., :-1, None] >= 0)
-                & (token_idx >= q_seq_offsets[..., :-1, None])
-                & (token_idx < (q_seq_offsets[..., :-1, None] + q_seqlen[..., None])),
+                (q_seq_offsets[..., None] >= 0)
+                & (token_idx >= q_seq_offsets[..., None])
+                & (token_idx < (q_seq_offsets[..., None] + q_seqlen[..., None])),
                 axis=-2,
             )
             if uses_thd_ragged_max_tensor:
