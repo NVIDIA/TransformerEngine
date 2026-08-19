@@ -96,9 +96,12 @@ class _GatedDeltaNetAttention(torch.nn.Module):
             # tensors in eager mode, but retain their warmup result for CUDA graph capture.
             tensor_version = None
         inference_cache_hit = None
-        for cached_tensor, cached_version, cached_total, cached_offsets in (
-            self._cu_seqlens_validation_cache
-        ):
+        for (
+            cached_tensor,
+            cached_version,
+            cached_total,
+            cached_offsets,
+        ) in self._cu_seqlens_validation_cache:
             if cached_tensor is cu_seqlens and cached_total == total_tokens:
                 if tensor_version is not None and cached_version == tensor_version:
                     return cached_offsets
@@ -125,8 +128,7 @@ class _GatedDeltaNetAttention(torch.nn.Module):
                 )
         if offsets[-1] != total_tokens:
             raise ValueError(
-                f"{name} must end at the flattened token count {total_tokens}, "
-                f"got {offsets[-1]}."
+                f"{name} must end at the flattened token count {total_tokens}, got {offsets[-1]}."
             )
 
         # Holding a few tiny offset tensors avoids pointer-reuse ambiguity while keeping
