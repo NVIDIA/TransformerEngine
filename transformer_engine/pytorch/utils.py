@@ -30,6 +30,25 @@ __all__ = [
 _compile_disabled_reason: Optional[str] = None
 _compile_disabled_warned = False
 
+try:
+    from torch._dynamo.comptime import comptime as _comptime
+except ImportError:  # pragma: no cover
+    _comptime = None
+
+
+def _trace_time_warn(msg: str) -> None:
+    """Emit a warning from code being traced by Dynamo.
+
+    Dynamo silently drops a traced ``warnings.warn``, and TE forwards wrap
+    everything in try/finally, so a graph break there makes Dynamo skip the
+    whole frame and re-run it with ``is_compiling() == False`` -- a runtime
+    warning branch is never reached. ``comptime`` runs for real inside the
+    compiler instead, so the warning fires once per compilation. The message
+    is read back via ``get_local`` (a traced closure would capture a
+    VariableTracker, not the value).
+    """
+    _comptime(lambda ctx: warnings.warn(ctx.get_local("msg").as_python_constant()))
+
 
 def record_compile_disabled(reason: str) -> None:
     """Record why TE's torch.compile custom-op path is off; the warning is
@@ -47,34 +66,38 @@ def record_compile_disabled(reason: str) -> None:
         )
 
 
-@torch._dynamo.disable  # graph-breaks cleanly so the warning actually fires
 def warn_if_compile_disabled() -> None:
     """Warn once, at the first compile attempt, that the path is off."""
     global _compile_disabled_warned  # pylint: disable=global-statement
     if _compile_disabled_warned:
         return
     _compile_disabled_warned = True
-    warnings.warn(
+    msg = (
         "Transformer Engine torch.compile support is disabled: "
         f"{_compile_disabled_reason or 'custom-op registration unavailable'}. "
         "Modules will fall back to eager execution under torch.compile, i.e. "
-        "a graph break, which is incompatible with fullgraph=True.",
-        stacklevel=2,
+        "a graph break, which is incompatible with fullgraph=True."
     )
+    if torch.compiler.is_compiling() and _comptime is not None:
+        _trace_time_warn(msg)
+    else:
+        warnings.warn(msg, stacklevel=2)
 
 
 def warn_compile_eager_fallback(reason: str) -> None:
     """Warn that a TE module is running eagerly under ``torch.compile``.
 
     Emitted when ``reason`` is unsupported on the module's compiled custom-op
-    path. Python's default warning filter dedups identical messages, so each
-    distinct ``reason`` is surfaced once.
+    path -- once per compilation (see :func:`_trace_time_warn`).
     """
-    warnings.warn(
+    msg = (
         f"Falling back to eager execution under torch.compile: {reason} is "
-        "unsupported on the compiled path (graph-breaks under fullgraph=True).",
-        stacklevel=2,
+        "unsupported on the compiled path (graph-breaks under fullgraph=True)."
     )
+    if torch.compiler.is_compiling() and _comptime is not None:
+        _trace_time_warn(msg)
+    else:
+        warnings.warn(msg, stacklevel=2)
 
 
 @functools.lru_cache(maxsize=None)

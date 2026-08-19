@@ -2476,12 +2476,13 @@ class Linear(TransformerEngineBaseModule):
             if use_compiled_op:
                 fallback_reason = fwd_args.compile_unsupported_reason()
                 if fallback_reason is not None:
-                    # Explicit break so fullgraph=True errors show the reason
-                    # (warnings.warn below would break the graph inscrutably).
+                    # Warn first: the break below makes Dynamo skip this frame,
+                    # so anything after it is never traced. Explicit break so
+                    # fullgraph=True errors show the reason.
+                    warn_compile_eager_fallback(fallback_reason)
                     torch._dynamo.graph_break(
                         msg=f"te.Linear falling back to eager: {fallback_reason}"
                     )
-                    warn_compile_eager_fallback(fallback_reason)
                     use_compiled_op = False
 
             if use_compiled_op:
