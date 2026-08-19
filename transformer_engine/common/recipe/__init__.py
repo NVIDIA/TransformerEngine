@@ -13,6 +13,8 @@ from pydantic.dataclasses import dataclass
 
 
 _BACKWARD_OVERRIDES = (None, "high_precision", "dequantized")
+_NVFP4_4OVER6_SCOPES = ("none", "weights", "activations", "all")
+_NVFP4_4OVER6_ERR_MODES = ("MAE", "MSE")
 
 
 class _FormatHelper(NamedTuple):
@@ -359,6 +361,8 @@ class MXFP8BlockScaling(Recipe):
             `high_precision` keeps original high-precision operands for backward,
             and `dequantized` dequantizes saved operands to the active high-precision
             compute dtype (e.g. BF16/FP16/FP32) for backward.
+    enable_2d_quantization : bool, default = False
+                If set to `True`, 2D block scaling is used for weight tensors.
     """
 
     margin: int = 0
@@ -366,6 +370,7 @@ class MXFP8BlockScaling(Recipe):
     fp8_dpa: bool = False
     fp8_mha: bool = False
     backward_override: Optional[str] = os.getenv("NVTE_BACKWARD_OVERRIDE", None)
+    enable_2d_quantization: bool = False
 
     def __post_init__(self) -> None:
         assert self.fp8_format != Format.E5M2, "Pure E5M2 training is not supported."
@@ -378,7 +383,8 @@ class MXFP8BlockScaling(Recipe):
             f"recipe_type={self.__class__.__name__}, "
             f"margin={self.margin}, "
             f"format={str(self.fp8_format).split('.')[1]}, "
-            f"backward_override={self.backward_override}"
+            f"backward_override={self.backward_override}, "
+            f"enable_2d_quantization={self.enable_2d_quantization}"
         )
 
 
@@ -401,6 +407,12 @@ class Float8BlockScaling(Recipe):
 
     NOTE: To relax the default constraint that scales be powers of 2, set env variable
     NVTE_FP8_BLOCK_SCALING_FP32_SCALES=1 to override it for the recipe defaults.
+
+    NOTE: FP8 block scaling requires split accumulation for numerical accuracy, so
+    ``fp8_gemm_fprop``/``fp8_gemm_dgrad``/``fp8_gemm_wgrad`` all fix
+    ``use_split_accumulator=True`` (enforced in ``__post_init__``). The fused grouped
+    GEMM path (GroupedLinear) always uses split accumulation for FP8 block scaling and
+    ignores any caller- or recipe-supplied ``use_split_accumulator`` value.
 
     Parameters
     ----------
@@ -522,6 +534,19 @@ class NVFP4BlockScaling(Recipe):
              If set to `True`, forward activation quantizers emit row-scaled
              NVFP4 tensors. In this mode, rowwise ``amax`` metadata is stored
              as a vector with one FP32 value per tensor row.
+    nvfp4_4over6 : {'none', 'weights', 'activations', 'all'}, default = 'none'
+             Enable 4over6 adaptive NVFP4 block scaling for selected tensor
+             scopes. For each selected FP4 block, quantization compares
+             map-to-4 and map-to-6 candidates and stores the candidate with
+             lower configured error. Current 4over6 support targets RL and
+             post-training scenarios; pre-training paths that combine 4over6
+             with RHT are not yet implemented.
+    nvfp4_4over6_e4m3_use_256 : {'none', 'weights', 'activations', 'all'}, default = 'all'
+             Select 4over6 tensors that use 256 as the global E4M3 scale
+             bound. By default, all 4over6 tensors use 256. Use ``'none'``
+             to keep the standard NVFP4 448 bound for 4over6 tensors.
+    nvfp4_4over6_err_mode : {'MAE', 'MSE'}, default = 'MAE'
+             Error metric used by NVFP4 4over6 candidate selection.
     backward_override : {None, 'high_precision', 'dequantized'}, default = None
             Backward precision mode. None does not modify backward behavior,
             `high_precision` keeps original high-precision operands for backward,
@@ -536,6 +561,9 @@ class NVFP4BlockScaling(Recipe):
     )
     disable_2d_quantization: bool = os.getenv("NVTE_NVFP4_DISABLE_2D_QUANTIZATION", "0") == "1"
     row_scaled_activation: bool = os.getenv("NVTE_NVFP4_ROW_SCALED_ACTIVATION", "0") == "1"
+    nvfp4_4over6: str = os.getenv("NVTE_NVFP4_4OVER6", "none")
+    nvfp4_4over6_e4m3_use_256: str = os.getenv("NVTE_NVFP4_4OVER6_E4M3_USE_256", "all")
+    nvfp4_4over6_err_mode: str = os.getenv("NVTE_NVFP4_4OVER6_ERR_MODE", "MAE").upper()
 
     fp4_format: Format = Format.E2M1
     fp8_format: Format = Format.E4M3
@@ -551,6 +579,15 @@ class NVFP4BlockScaling(Recipe):
         assert (
             self.backward_override in _BACKWARD_OVERRIDES
         ), "NVTE_BACKWARD_OVERRIDE must be unset or one of: 'high_precision', 'dequantized'."
+        assert (
+            self.nvfp4_4over6 in _NVFP4_4OVER6_SCOPES
+        ), "NVTE_NVFP4_4OVER6 must be one of: 'none', 'weights', 'activations', 'all'."
+        assert (
+            self.nvfp4_4over6_e4m3_use_256 in _NVFP4_4OVER6_SCOPES
+        ), "NVTE_NVFP4_4OVER6_E4M3_USE_256 must be one of: 'none', 'weights', 'activations', 'all'."
+        assert (
+            self.nvfp4_4over6_err_mode in _NVFP4_4OVER6_ERR_MODES
+        ), "NVTE_NVFP4_4OVER6_ERR_MODE must be one of: 'MAE', 'MSE'."
 
         # Quantization params
         # Note: RHT is currently only applied to column-wise usage so that
@@ -580,6 +617,9 @@ class NVFP4BlockScaling(Recipe):
             f"fp8_mha={self.fp8_mha}, "
             f"backward_override={self.backward_override}, "
             f"row_scaled_activation={self.row_scaled_activation}, "
+            f"nvfp4_4over6={self.nvfp4_4over6}, "
+            f"nvfp4_4over6_e4m3_use_256={self.nvfp4_4over6_e4m3_use_256}, "
+            f"nvfp4_4over6_err_mode={self.nvfp4_4over6_err_mode}, "
             f"fp4_quant_fwd_inp={self.fp4_quant_fwd_inp}, "
             f"fp4_quant_fwd_weight={self.fp4_quant_fwd_weight}, "
             f"fp4_quant_bwd_grad={self.fp4_quant_bwd_grad}, "
@@ -630,6 +670,14 @@ class CustomRecipe(Recipe):
         `high_precision` keeps original high-precision operands for backward,
         and `dequantized` dequantizes saved operands to the active high-precision
         compute dtype (e.g. BF16/FP16/FP32) for backward.
+    quantization_alignment : int, default = 128
+        Conservative recipe-wide fallback used by automatic padding for grouped operations.
+        This must be at least the largest alignment required by any quantizer
+        that ``qfactory`` may return for a grouped operation, across all roles
+        and module names. The default of 128 safely supports all current TE
+        formats. It can be lowered when the factory's full output space is known;
+        for example, a factory restricted to MXFP8 may use 32.
+        Automatic padding reads this value without invoking ``qfactory``.
     """
 
     qfactory: Callable[..., Any]
@@ -642,15 +690,19 @@ class CustomRecipe(Recipe):
     fp8_dpa: bool = False
     fp8_mha: bool = False
     backward_override: Optional[str] = os.getenv("NVTE_BACKWARD_OVERRIDE", None)
+    quantization_alignment: int = 128
 
     def __post_init__(self) -> None:
         assert (
             self.backward_override in _BACKWARD_OVERRIDES
         ), "NVTE_BACKWARD_OVERRIDE must be unset or one of: 'high_precision', 'dequantized'."
+        if self.quantization_alignment <= 0:
+            raise ValueError("CustomRecipe quantization_alignment must be positive.")
 
     def _make_repr(self) -> str:
         return (
             f"recipe_type={self.__class__.__name__}, "
             f"qfactory={self.qfactory}, "
-            f"backward_override={self.backward_override}"
+            f"backward_override={self.backward_override}, "
+            f"quantization_alignment={self.quantization_alignment}"
         )

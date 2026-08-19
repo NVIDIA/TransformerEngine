@@ -5,17 +5,21 @@
 """Mixin class holding data specific for MXFP8Tensor"""
 
 from __future__ import annotations
-from typing import Optional, Dict, Any, Tuple
+from typing import Annotated, Optional, Dict, Any, Tuple, Union
 from collections.abc import Iterable
 import math
 import torch
 
 import transformer_engine_torch as tex
-from transformer_engine_torch import DType as TE_DType
 
-from ...quantized_tensor import QuantizedTensorStorage, Quantizer
+from ...quantized_tensor import InnerTensor, QuantizedTensorStorage, Quantizer
+from .._quantization_helpers import safe_quantized_repr
 
-from ...constants import TE_DType as torch_to_transformer_engine_dtype
+from ...constants import (
+    TE_DType as torch_to_transformer_engine_dtype,
+    MXFP8_BLOCK_SCALING_SIZE,
+    DType,
+)
 
 from ...utils import _empty_tensor
 
@@ -35,12 +39,16 @@ class _FromMXFP8Func(torch.autograd.Function):
         if tensor._columnwise_data is not None and tensor._columnwise_data.numel() == 0:
             return torch.empty(tensor.size(), dtype=dtype, device=tensor.device)
 
-        dtype = torch_to_transformer_engine_dtype[dtype]
-
-        # Make sure FP8 data is in expected format
-        if tensor._rowwise_data is not None or tensor._columnwise_data is not None:
-            return tex.dequantize(tensor, dtype)
-        raise ValueError("Cannot dequantize MXFP8 tensor with no data")
+        if tensor._rowwise_data is None and tensor._columnwise_data is None:
+            raise ValueError("Cannot dequantize MXFP8 tensor with no data")
+        te_dtype = torch_to_transformer_engine_dtype[dtype]
+        # ``tex.dequantize`` requires CUDA-resident buffers.
+        src_device = tensor.device
+        if src_device.type != "cuda":
+            cuda_tensor = tensor.to(device=torch.device("cuda"))
+            result = tex.dequantize(cuda_tensor, te_dtype)
+            return result.to(device=src_device)
+        return tex.dequantize(tensor, te_dtype)
 
     @staticmethod
     def backward(
@@ -62,19 +70,17 @@ class MXFP8TensorStorage(QuantizedTensorStorage):
 
     """
 
-    # Row-scaled FP8 data
-    _rowwise_data: Optional[torch.Tensor]
-    # Column-scaled FP8 data
-    _columnwise_data: Optional[torch.Tensor]
-    # Scaling factors for row-scaled FP8 data
-    _rowwise_scale_inv: torch.Tensor
-    # Scaling factors for column-scaled FP8 data
-    _columnwise_scale_inv: torch.Tensor
+    # Row-scaled FP8 data and its scaling factors
+    _rowwise_data: Annotated[Optional[torch.Tensor], InnerTensor("rowwise_data")]
+    _rowwise_scale_inv: Annotated[torch.Tensor, InnerTensor("rowwise_scale_inv")]
+    # Column-scaled FP8 data and its scaling factors
+    _columnwise_data: Annotated[Optional[torch.Tensor], InnerTensor("columnwise_data")]
+    _columnwise_scale_inv: Annotated[torch.Tensor, InnerTensor("columnwise_scale_inv")]
 
     # Builder class for casting to MXFP8
     _quantizer: Optional[Quantizer]
     # FP8 data type
-    _fp8_dtype: TE_DType
+    _fp8_dtype: DType
     # Whether scaling factors are in the swizzled format expected by
     # GEMM
     _with_gemm_swizzled_scales: bool
@@ -85,7 +91,7 @@ class MXFP8TensorStorage(QuantizedTensorStorage):
         rowwise_scale_inv: Optional[torch.Tensor],
         columnwise_data: Optional[torch.Tensor],
         columnwise_scale_inv: Optional[torch.Tensor],
-        fp8_dtype: TE_DType,
+        fp8_dtype: Union[DType, tex.DType],
         quantizer: Optional[Quantizer],
         with_gemm_swizzled_scales: bool,
         *args,
@@ -102,7 +108,7 @@ class MXFP8TensorStorage(QuantizedTensorStorage):
         instance._rowwise_scale_inv = rowwise_scale_inv
         instance._columnwise_scale_inv = columnwise_scale_inv
         instance._quantizer = quantizer.copy() if quantizer is not None else None
-        instance._fp8_dtype = fp8_dtype
+        instance._fp8_dtype = DType.cast(fp8_dtype)
         instance._with_gemm_swizzled_scales = with_gemm_swizzled_scales
 
         return instance
@@ -254,15 +260,18 @@ class MXFP8TensorStorage(QuantizedTensorStorage):
         )
 
     def __repr__(self):
-        data_rowwise = self.dequantize()
+        try:
+            data_rowwise = self.dequantize()
 
-        return (
-            "MXFP8TensorStorage("
-            f"fp8_dtype={self._fp8_dtype}, "
-            f"rowwise_scaled_data={data_rowwise}"
-            f"rowwise_scale_inv={self._rowwise_scale_inv}, "
-            ")"
-        )
+            return (
+                "MXFP8TensorStorage("
+                f"fp8_dtype={self._fp8_dtype}, "
+                f"rowwise_scaled_data={data_rowwise}"
+                f"rowwise_scale_inv={self._rowwise_scale_inv}, "
+                ")"
+            )
+        except Exception as exc:  # pylint: disable=broad-except
+            return safe_quantized_repr(self, "MXFP8TensorStorage", error=exc)
 
     def update_usage(
         self,
@@ -315,3 +324,77 @@ class MXFP8TensorStorage(QuantizedTensorStorage):
             "rowwise": self._rowwise_data is not None,
             "columnwise": self._columnwise_data is not None,
         }
+
+    def fsdp_buffer_fields(self) -> Tuple[str, ...]:
+        """Fields gathered by FSDP2 for MXFP8.
+
+        Block scales are per-block and direction-specific — each direction
+        gathers both its data buffer and its scale-inv buffer. ``None``-valued
+        directions (e.g. a columnwise-only sub-storage in hybrid quantization)
+        are excluded so the gather tuple only contains real tensors.
+        """
+        fields = []
+        if self._rowwise_data is not None:
+            fields.extend(("_rowwise_data", "_rowwise_scale_inv"))
+        if self._columnwise_data is not None:
+            fields.extend(("_columnwise_data", "_columnwise_scale_inv"))
+        return tuple(fields)
+
+    def fsdp_extract_buffers(
+        self,
+    ) -> Tuple[Tuple[Optional[torch.Tensor], ...], Dict[str, Any]]:
+        """Extract MXFP8 buffers, unpadding block-scale alignment before gather.
+
+        MXFP8 kernels require scale-inv tensors aligned to ``[128, 4]``
+        (rowwise) and ``[4, 128]`` (columnwise). That padding is attached to
+        the local shard but would produce misaligned concatenation under
+        FSDP2's dim-0 all-gather. Strip it here and re-apply in
+        :meth:`fsdp_assign_gathered`.
+        """
+        if self._with_gemm_swizzled_scales:
+            raise NotImplementedError(
+                "FSDP2 is only supported for MXFP8Tensors with compact scales"
+            )
+        names = self.fsdp_buffer_fields()
+        buffers = []
+        shape = self.size()
+        flattened_in_shape0 = math.prod(shape[:-1])
+        for name in names:
+            t = getattr(self, name)
+            if name == "_rowwise_scale_inv" and t is not None:
+                if t.size(0) != flattened_in_shape0:
+                    t = t[:flattened_in_shape0]
+            elif name == "_columnwise_scale_inv" and t is not None:
+                expected = math.ceil(flattened_in_shape0 / MXFP8_BLOCK_SCALING_SIZE)
+                if t.size(0) != expected:
+                    t = t[:expected]
+            buffers.append(t)
+        return tuple(buffers), {"field_names": names}
+
+    def fsdp_assign_gathered(
+        self,
+        gathered: Tuple[Optional[torch.Tensor], ...],
+        meta: Dict[str, Any],
+    ) -> None:
+        """Write gathered MXFP8 buffers back, re-padding block scales.
+
+        Inverse of :meth:`fsdp_extract_buffers`: the gathered scale-inv tensors
+        are padded back up to ``[128, 4]`` / ``[4, 128]`` alignment before
+        being assigned to the storage.
+        """
+        names = meta["field_names"]
+        if len(names) != len(gathered):
+            raise RuntimeError(
+                "MXFP8TensorStorage.fsdp_assign_gathered got "
+                f"{len(gathered)} buffers for {len(names)} fields"
+            )
+        for name, buf in zip(names, gathered):
+            if buf is not None and name == "_rowwise_scale_inv":
+                pad = (128 - buf.size(0) % 128) % 128
+                if pad > 0:
+                    buf = torch.nn.functional.pad(buf, (0, 0, 0, pad))
+            elif buf is not None and name == "_columnwise_scale_inv":
+                pad = (4 - buf.size(0) % 4) % 4
+                if pad > 0:
+                    buf = torch.nn.functional.pad(buf, (0, 0, 0, pad))
+            setattr(self, name, buf)

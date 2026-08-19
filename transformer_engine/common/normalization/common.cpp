@@ -128,7 +128,7 @@ void TeNormalizationPlan<KernelParamsType>::_build() {
 }
 
 template <typename KernelParamsType>
-std::vector<size_t> TeNormalizationPlan<KernelParamsType>::getWorkspaceShape() const {
+Shape TeNormalizationPlan<KernelParamsType>::getWorkspaceShape() const {
   size_t workspace_size = _launch_params.getTotalWorkspaceBytes(_is_layernorm);
   if (workspace_size == 0) {
     // Workspace size must not be zero since that corresponds to a
@@ -304,7 +304,17 @@ CudnnNormalizationPlan::CudnnNormalizationPlan(NVTE_Norm_Type NormType, NVTE_Nor
 
     if (_training) _rsigma->set_output(true).set_data_type(get_cudnn_fe_dtype(ctype));
 
-    const auto ZDtype = _fp8_out ? ctype : otype;
+    auto ZDtype = _fp8_out ? ctype : otype;
+    if (_fp8_out) {
+      const bool use_input_dtype = cudnnGetVersion() >= 92500 && _ndim_scale_block == 1 &&
+                                   use_cudnn_mxfp8_norm_output_in_input_dtype();
+      if (use_input_dtype) {
+        NVTE_WARN(
+            "The cuDNN MXFP8 normalization intermediate output uses the input dtype (itype) "
+            "instead of the compute dtype; otype still applies to the final quantized output.");
+        ZDtype = itype;
+      }
+    }
     _z->set_output(!_fp8_out).set_data_type(get_cudnn_fe_dtype(ZDtype));
 
     if (_fp8_out) {
@@ -431,7 +441,7 @@ void CudnnNormalizationPlan::_build() {
       _graph.build_plans(_handle, cudnn_frontend::BuildPlanPolicy_t::HEURISTICS_CHOICE).is_good());
 }
 
-std::vector<size_t> CudnnNormalizationPlan::getWorkspaceShape() const {
+Shape CudnnNormalizationPlan::getWorkspaceShape() const {
   size_t workspace_size = _graph.get_workspace_size();
   if (workspace_size == 0) {
     // Workspace size must not be zero since that corresponds to a
@@ -561,6 +571,12 @@ bool& _zero_centered_gamma_in_weight_dtype() {
 }
 
 bool& use_zero_centered_gamma_in_weight_dtype() { return _zero_centered_gamma_in_weight_dtype(); }
+
+bool use_cudnn_mxfp8_norm_output_in_input_dtype() {
+  static bool flag =
+      transformer_engine::getenv<bool>("NVTE_CUDNN_MXFP8_NORM_OUTPUT_IN_INPUT_DTYPE");
+  return flag;
+}
 
 }  //  namespace normalization
 }  // namespace transformer_engine

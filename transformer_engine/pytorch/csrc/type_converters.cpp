@@ -135,6 +135,7 @@ TensorWrapper NVTETensorFromNVFP4Tensor(py::handle tensor, Quantizer *quantizer)
   const bool columnwise_usage = !(tensor.attr("_columnwise_data").is_none());
   const bool with_gemm_swizzled_scales = tensor.attr("_with_gemm_swizzled_scales").cast<bool>();
   const bool row_scaled_nvfp4 = tensor.attr("_row_scaled_nvfp4").cast<bool>();
+  const int nvfp4_e4m3_max = tensor.attr("_nvfp4_e4m3_max").cast<int>();
 
   NVTE_CHECK(rowwise_usage || columnwise_usage, "No data found for NVFP4 Tensor.");
 
@@ -165,6 +166,7 @@ TensorWrapper NVTETensorFromNVFP4Tensor(py::handle tensor, Quantizer *quantizer)
   // Scale layout
   ret.set_with_gemm_swizzled_scales(with_gemm_swizzled_scales);
   ret.set_row_scaled_nvfp4(row_scaled_nvfp4);
+  ret.set_nvfp4_e4m3_max(nvfp4_e4m3_max);
 
   // Quantizer state
   quantizer->set_quantization_params(&ret);
@@ -217,12 +219,23 @@ GroupedTensorWrapper GroupedTensorFromPyTorchGroupedTensor(py::handle tensor) {
   }
   auto ret = GroupedTensorWrapper(num_tensors, logical_shape, scaling_mode);
 
+  auto get_initialized_storage_shape = [](const at::Tensor &data) {
+    auto shape = getTensorShape(data);
+    if (data.numel() == 0) {
+      // PyTorch may use a null pointer for a valid zero-sized allocation. TE Common reserves
+      // {nullptr, {0}} for uninitialized storage, so use an orientation-neutral 2D empty shape
+      // to distinguish explicitly provided rowwise or columnwise storage from missing storage.
+      shape = {0, 0};
+    }
+    return shape;
+  };
+
   // Rowwise data
   if (!tensor.attr("rowwise_data").is_none()) {
     const auto &data = tensor.attr("rowwise_data").cast<at::Tensor>();
     DType data_dtype =
         quantizer.is_none() ? GetTransformerEngineDType(data.scalar_type()) : quantizer_dtype;
-    ret.set_rowwise_data(data.data_ptr(), data_dtype, getTensorShape(data));
+    ret.set_rowwise_data(data.data_ptr(), data_dtype, get_initialized_storage_shape(data));
   } else if (quantizer_dtype != DType::kNumTypes) {
     ret.set_rowwise_data(nullptr, quantizer_dtype, std::vector<size_t>{0});
   }
@@ -232,7 +245,7 @@ GroupedTensorWrapper GroupedTensorFromPyTorchGroupedTensor(py::handle tensor) {
     const auto &data = tensor.attr("columnwise_data").cast<at::Tensor>();
     DType data_dtype =
         quantizer.is_none() ? GetTransformerEngineDType(data.scalar_type()) : quantizer_dtype;
-    ret.set_columnwise_data(data.data_ptr(), data_dtype, getTensorShape(data));
+    ret.set_columnwise_data(data.data_ptr(), data_dtype, get_initialized_storage_shape(data));
   } else if (quantizer_dtype != DType::kNumTypes) {
     ret.set_columnwise_data(nullptr, quantizer_dtype, std::vector<size_t>{0});
   }

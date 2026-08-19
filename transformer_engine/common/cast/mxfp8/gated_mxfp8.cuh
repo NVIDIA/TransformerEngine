@@ -124,11 +124,9 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   __shared__ float subamax_colwise_buff[SUBAMAX_BUFF_DIM_Y][CHUNK_DIM_X];
 
   extern __shared__ char dynamic_shmem[];
-  uintptr_t base_shmem_ptr = reinterpret_cast<uintptr_t>(dynamic_shmem);
   // Manually align dynamic SHMEM per TMA requirements using padding
   // __align__(128) Does not guarantee the pointer to be aligned!
-  uintptr_t dshmem = (base_shmem_ptr + TMA_SHMEM_ALIGNMENT - 1) &
-                     ~(static_cast<uintptr_t>(TMA_SHMEM_ALIGNMENT - 1));
+  char *dshmem = align_up(dynamic_shmem, TMA_SHMEM_ALIGNMENT);
 
   constexpr size_t buff_elems = BUFF_DIM_Y * BUFF_DIM_X;
   constexpr size_t buff_elems_total = BUFFS_NUM * buff_elems;
@@ -245,9 +243,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
         float after_gate_elt;
         bool dgate_elt = true;  // gating is ideally an identity function
         if constexpr (std::is_same<ParamOP, ClampedSwiGLUParam>::value) {
-          // In case of GPT OSS, clamp the activation and gate values
-          dgate_elt = gate_elt <= p.limit && gate_elt >= -p.limit;  // Derivative of clamp
-          gate_elt = min(max(-p.limit, gate_elt), p.limit) + 1.0f;
+          dgate_elt = gate_elt <= p.limit && gate_elt >= -p.limit;
+          gate_elt = min(max(-p.limit, gate_elt), p.limit) + p.glu_linear_offset;
         }
         if constexpr (IS_BWD) {
           float grad_elt = static_cast<float>(in_grad_sh[shmem_offset_colwise]);
@@ -510,9 +507,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
             float after_gate_elt;
             bool dgate_elt = true;
             if constexpr (std::is_same<ParamOP, ClampedSwiGLUParam>::value) {
-              // In case of GPT OSS, clamp the activation and gate values
-              dgate_elt = gate_elt <= p.limit && gate_elt >= -p.limit;  // Derivative of clamp
-              gate_elt = min(max(-p.limit, gate_elt), p.limit) + 1.0f;
+              dgate_elt = gate_elt <= p.limit && gate_elt >= -p.limit;
+              gate_elt = min(max(-p.limit, gate_elt), p.limit) + p.glu_linear_offset;
             }
             if constexpr (IS_BWD) {
               float grad_elt = static_cast<float>(in_grad.data.elt[e]);

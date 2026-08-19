@@ -25,6 +25,9 @@ def jax_version_meet_requirement(version: str):
 # Minimum JAX version required for Triton kernel dispatch (jaxlib < 0.8.0 segfaults).
 TRITON_EXTENSION_MIN_JAX_VERSION = "0.8.0"
 
+# Minimum JAX version for non-legacy Triton kernel FFI (supports CUDA graph capture).
+TRITON_EXTENSION_CUDA_GRAPH_MIN_JAX_VERSION = "0.10.1"
+
 # Nightly and stable floors for safe input_output_aliases in TritonAutotunedKernelCall.
 # jaxlib/gpu/triton_kernels.cc had a bug in the autotuning save/restore loop:
 # it iterated over all declared aliases unconditionally, but input_copies only
@@ -61,6 +64,23 @@ def is_triton_autotuned_alias_safe() -> bool:
     return v >= PkgVersion(_TRITON_AUTOTUNED_ALIAS_STABLE_FLOOR)
 
 
+# XLA gained the ``gpu_stream:collective`` stream annotation in openxla/xla#39604,
+# first shipping in JAX 0.10.1. Older XLA fatally fails on it.
+_COLLECTIVE_STREAM_MIN_JAX_VERSION = "0.10.1"
+
+
+@lru_cache(maxsize=None)
+def is_collective_stream_supported() -> bool:
+    """Return True if the installed JAX supports the gpu_stream:collective annotation."""
+    if not jax_version_meet_requirement(_COLLECTIVE_STREAM_MIN_JAX_VERSION):
+        return False
+    try:
+        from jax.experimental.compute_on import compute_on  # pylint: disable=unused-import
+    except ImportError:
+        return False
+    return True
+
+
 def is_triton_extension_supported() -> bool:
     """Return True if the current JAX version supports Triton kernel dispatch.
 
@@ -74,7 +94,9 @@ def is_triton_extension_supported() -> bool:
 __all__ = [
     "jax_version_meet_requirement",
     "is_triton_autotuned_alias_safe",
+    "is_collective_stream_supported",
     "is_triton_extension_supported",
     "TRITON_EXTENSION_MIN_JAX_VERSION",
+    "TRITON_EXTENSION_CUDA_GRAPH_MIN_JAX_VERSION",
     "TRITON_AUTOTUNED_INPUT_OUTPUT_ALIAS_MIN_JAX_VERSION",
 ]

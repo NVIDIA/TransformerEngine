@@ -24,7 +24,7 @@ namespace multi_tensor_compute_scale {
 #define BLOCK_SIZE 256
 
 struct ComputeScaleAndScaleInvFunctor {
-  __device__ __forceinline__ void operator()(int chunk_size, volatile int *noop_gmem,
+  __device__ __forceinline__ void operator()(int64_t chunk_size, volatile int *noop_gmem,
                                              TensorListMetadata<3> &tl,  // NOLINT(*)
                                              float max_fp8, bool force_pow_2_scales,
                                              float epsilon) {
@@ -34,7 +34,7 @@ struct ComputeScaleAndScaleInvFunctor {
 
     int tensor_loc = tl.block_to_tensor[blockIdx.x];
     int chunk_idx = tl.block_to_chunk[blockIdx.x];
-    int n = tl.sizes[tensor_loc];
+    int64_t n = tl.sizes[tensor_loc];
 
     float *amax = reinterpret_cast<float *>(tl.addresses[0][tensor_loc]);
     amax += chunk_idx * chunk_size;
@@ -57,11 +57,11 @@ struct ComputeScaleAndScaleInvFunctor {
 };
 
 struct ComputeScaleInvE8M0Functor {
-  __device__ __forceinline__ void operator()(int chunk_size, volatile int *unused,
+  __device__ __forceinline__ void operator()(int64_t chunk_size, volatile int *unused,
                                              TensorListMetadata<2> &tl) {
     int tensor_loc = tl.block_to_tensor[blockIdx.x];
     int chunk_idx = tl.block_to_chunk[blockIdx.x];
-    int n = tl.sizes[tensor_loc];
+    int64_t n = tl.sizes[tensor_loc];
 
     bf16 *amax = reinterpret_cast<bf16 *>(tl.addresses[0][tensor_loc]);
     amax += chunk_idx * chunk_size;

@@ -12,7 +12,7 @@ import torch
 import nvdlfw_inspect.api as debug_api
 from nvdlfw_inspect.debug_features.log_tensor_stats import LogTensorStats as BaseLogTensorStats
 from nvdlfw_inspect.registry import Registry, api_method
-import transformer_engine_torch as tex
+from transformer_engine.pytorch import DType
 
 from transformer_engine.debug.features.utils.stats_buffer import STATS_BUFFERS
 from transformer_engine.debug.features.utils import get_reduction_params, next_enabled_iter
@@ -251,7 +251,7 @@ class LogFp8TensorStats(BaseLogTensorStats):
         Yields the aux_dict.
         Needs to clean after usage, because it possibly change the usage of the quantized tensor.
         """
-        fp8_dtype = tex.DType.kFloat8E4M3
+        fp8_dtype = DType.kFloat8E4M3
         if recipe_name in ["fp8_delayed_scaling", "fp8_current_scaling", "fp8_block_scaling"]:
             assert isinstance(
                 quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer, Float8BlockQuantizer)

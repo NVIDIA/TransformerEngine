@@ -46,6 +46,7 @@ enum ShapeRepresentation {
 template <typename InputType, typename OutputType>
 void compute_ref(const ProcessingMethod processing_method,
                  float (*OP)(const float),
+                 const bool use_2d_quantization,
                  const bool rowwise,
                  const bool colwise,
                  const InputType* input,
@@ -117,13 +118,29 @@ void compute_ref(const ProcessingMethod processing_method,
                 }
             }
 
+            float block_amax_2d = 0.0f;
+            if (use_2d_quantization) {
+                for (size_t i = i_min; i < i_max; ++i) {
+                    for (size_t j = j_min; j < j_max; ++j) {
+                        const size_t cache_idx =
+                            (i - i_min) * tile_size_X + (j - j_min);
+                        block_amax_2d =
+                            std::max(block_amax_2d, std::abs(cache_buffer[cache_idx]));
+                    }
+                }
+            }
+
             if (rowwise) {
                 for (size_t i = i_min; i < i_max; ++i) {
-                    float block_amax = 0.0f;
+                    float block_amax = block_amax_2d;
 
-                    for (size_t j = j_min; j < j_max; ++j) {
-                        const size_t cache_idx = (i - i_min) * tile_size_X + (j - j_min);
-                        block_amax = std::max(block_amax, std::abs(cache_buffer[cache_idx]));
+                    if (!use_2d_quantization) {
+                        for (size_t j = j_min; j < j_max; ++j) {
+                            const size_t cache_idx =
+                                (i - i_min) * tile_size_X + (j - j_min);
+                            block_amax =
+                                std::max(block_amax, std::abs(cache_buffer[cache_idx]));
+                        }
                     }
 
                     const fp8e8m0 biased_exponent = float_to_e8m0(block_amax * Quantized_Limits<OutputType>::max_reciprocal());
@@ -140,11 +157,15 @@ void compute_ref(const ProcessingMethod processing_method,
             }
             if (colwise) {
                 for (size_t j = j_min; j < j_max; ++j) {
-                    float block_amax = 0.0f;
+                    float block_amax = block_amax_2d;
 
-                    for (size_t i = i_min; i < i_max; ++i) {
-                        const size_t cache_idx = (i - i_min) * tile_size_X + (j - j_min);
-                        block_amax = std::max(block_amax, std::abs(cache_buffer[cache_idx]));
+                    if (!use_2d_quantization) {
+                        for (size_t i = i_min; i < i_max; ++i) {
+                            const size_t cache_idx =
+                                (i - i_min) * tile_size_X + (j - j_min);
+                            block_amax =
+                                std::max(block_amax, std::abs(cache_buffer[cache_idx]));
+                        }
                     }
 
                     const fp8e8m0 biased_exponent = float_to_e8m0(block_amax * Quantized_Limits<OutputType>::max_reciprocal());
@@ -241,7 +262,8 @@ void performTest(const ProcessingMethod processing_method,
                  const std::vector<size_t>& last_dims_h,
                  const std::vector<size_t>& offsets_h,
                  const bool rowwise,
-                 const bool colwise) {
+                 const bool colwise,
+                 const bool use_2d_quantization = false) {
     using namespace test;
 
     DType itype = TypeInfo<InputType>::dtype;
@@ -491,7 +513,7 @@ void performTest(const ProcessingMethod processing_method,
         InputType* const ref_output_dbias_ptr = ref_output_dbias.data() + dbias_offset;
 
         compute_ref<InputType, OutputType>(
-            processing_method, OP, rowwise, colwise, in_ptr, grad_ptr,
+            processing_method, OP, use_2d_quantization, rowwise, colwise, in_ptr, grad_ptr,
             out_data_rowwise_ptr, out_data_colwise_ptr,
             out_scales_rowwise_ptr, out_scales_colwise_ptr,
             ref_output_dbias_ptr, M, K,
@@ -500,6 +522,7 @@ void performTest(const ProcessingMethod processing_method,
     }
 
     QuantizationConfigWrapper quant_config;
+    quant_config.set_mxfp8_2d_quantization(use_2d_quantization);
 
     // GPU
     Tensor workspace;
@@ -509,9 +532,9 @@ void performTest(const ProcessingMethod processing_method,
             break;
         }
         case ProcessingMethod::CAST_DBIAS: {
-            nvte_group_quantize_dbias(grad_group_tensor, out_group_tensor, output_dbias_tensor, workspace.data(), 0);
+            nvte_group_quantize_dbias(grad_group_tensor, out_group_tensor, output_dbias_tensor, workspace.data(), nullptr, 0);
             workspace = Tensor("workspace", workspace.rowwise_shape(), workspace.dtype());
-            nvte_group_quantize_dbias(grad_group_tensor, out_group_tensor, output_dbias_tensor, workspace.data(), 0);
+            nvte_group_quantize_dbias(grad_group_tensor, out_group_tensor, output_dbias_tensor, workspace.data(), nullptr, 0);
             break;
         }
         case ProcessingMethod::CAST_DBIAS_DACT: {
@@ -801,6 +824,35 @@ TEST_P(GroupedFusedCastMXFP8TestSuite, Test) {
                                                rowwise, colwise);
         );
     );
+}
+
+TEST(OperatorTest_GroupedFusedCastMXFP8, Test2DQuantization) {
+    if (getDeviceComputeCapability() < blackwellComputeCapability) {
+        GTEST_SKIP();
+    }
+
+    constexpr size_t num_tensors = 2;
+    const std::vector<size_t> logical_shape = {256, 128};
+    const std::vector<size_t> first_dims = {128, 128};
+    const std::vector<size_t> last_dims = {128, 128};
+    const std::vector<size_t> offsets = {0, 128 * 128, 2 * 128 * 128};
+
+    for (const auto scaling_direction : scaling_directions) {
+        const bool rowwise = scaling_direction != ScalingDirection::COLWISE;
+        const bool colwise = scaling_direction != ScalingDirection::ROWWISE;
+        performTest<bf16, fp8e4m3>(
+            ProcessingMethod::CAST_ONLY,
+            &identity,
+            ShapeRepresentation::SAME_BOTH_DIMS,
+            num_tensors,
+            logical_shape,
+            first_dims,
+            last_dims,
+            offsets,
+            rowwise,
+            colwise,
+            /*use_2d_quantization=*/true);
+    }
 }
 
 std::string to_string(const ProcessingMethod method) {

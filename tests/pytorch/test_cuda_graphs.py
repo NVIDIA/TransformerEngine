@@ -9,6 +9,7 @@ import copy
 import torch
 from transformer_engine.pytorch import (
     DotProductAttention,
+    GroupedLinear,
     LayerNormLinear,
     LayerNormMLP,
     Linear,
@@ -65,9 +66,27 @@ def nvfp4_rht_and_2d_quantization():
 
 
 def nvfp4_row_scaled():
-    nvfp4_recipe = recipe.NVFP4BlockScaling(row_scaled_activation=True)
+    nvfp4_recipe = recipe.NVFP4BlockScaling(
+        disable_rht=True,
+        disable_stochastic_rounding=True,
+        disable_2d_quantization=True,
+        row_scaled_activation=True,
+        backward_override="dequantized",
+    )
     nvfp4_recipe.fp4_quant_fwd_inp = recipe.QParams()
     nvfp4_recipe.fp4_quant_fwd_weight = recipe.QParams()
+    nvfp4_recipe.fp4_quant_bwd_grad = recipe.QParams()
+    return nvfp4_recipe
+
+
+def nvfp4_4over6():
+    nvfp4_recipe = recipe.NVFP4BlockScaling(
+        disable_rht=True,
+        disable_stochastic_rounding=True,
+        nvfp4_4over6="all",
+    )
+    nvfp4_recipe.fp4_quant_fwd_inp = recipe.QParams()
+    nvfp4_recipe.fp4_quant_fwd_weight = recipe.QParams(fp4_2d_quantization=True)
     nvfp4_recipe.fp4_quant_bwd_grad = recipe.QParams()
     return nvfp4_recipe
 
@@ -101,6 +120,7 @@ if mxfp8_available:
 if nvfp4_available:
     fp8_recipes.append(nvfp4_rht_and_2d_quantization())
     fp8_recipes.append(nvfp4_row_scaled())
+    fp8_recipes.append(nvfp4_4over6())
 if fp8_block_scaling_available:
     fp8_recipes.append(recipe.Float8BlockScaling())
 if fp8_available:
@@ -195,6 +215,38 @@ class _Sequential(torch.nn.Sequential):
         for module in self:
             x = module(x, **kwargs)
         return x
+
+
+class _GroupedLinearWrapper(torch.nn.Module):
+    """Adapt GroupedLinear to the [seqlen, batch, hidden] data used in this test.
+
+    GroupedLinear expects a 2D `[total_tokens, hidden]` input plus an `m_splits`
+    list, so this wrapper flattens the leading dims, splits the tokens evenly
+    across the GEMMs, and restores the original shape. It also forwards
+    `is_first_microbatch` so the FP8 weight-caching path is exercised under CUDA
+    graphs.
+    """
+
+    def __init__(self, hidden_size: int, num_gemms: int, params_dtype: torch.dtype) -> None:
+        super().__init__()
+        self.num_gemms = num_gemms
+        self.grouped_linear = GroupedLinear(
+            num_gemms,
+            hidden_size,
+            hidden_size,
+            device="cuda",
+            params_dtype=params_dtype,
+        )
+
+    def forward(self, input_: torch.Tensor, **kwargs) -> torch.Tensor:
+        seqlen, batch, hidden = input_.shape
+        x = input_.reshape(seqlen * batch, hidden)
+        total_tokens = x.shape[0]
+        assert total_tokens % self.num_gemms == 0, "tokens must split evenly across GEMMs"
+        split = total_tokens // self.num_gemms
+        m_splits = [split] * self.num_gemms
+        out = self.grouped_linear(x, m_splits, **kwargs)
+        return out.reshape(seqlen, batch, hidden)
 
 
 # Supported modules
@@ -292,6 +344,15 @@ def _test_cuda_graphs(
                     model_config.hidden_size,
                     model_config.hidden_size,
                     device="cuda",
+                    params_dtype=dtype,
+                )
+                for _ in range(num_layers)
+            ]
+        elif module == "grouped_linear":
+            modules = [
+                _GroupedLinearWrapper(
+                    model_config.hidden_size,
+                    num_gemms=2,
                     params_dtype=dtype,
                 )
                 for _ in range(num_layers)
@@ -482,6 +543,52 @@ def test_make_graphed_callables_with_fp8_weight_caching(
     )
 
 
+# Per-tensor FP8 recipes that support GroupedLinear FP8 weight caching.
+_grouped_linear_fp8_weight_caching_recipes = []
+if fp8_available:
+    _grouped_linear_fp8_weight_caching_recipes.append(recipe.DelayedScaling())
+    _grouped_linear_fp8_weight_caching_recipes.append(recipe.Float8CurrentScaling())
+
+
+@pytest.mark.skipif(not fp8_available, reason="FP8 is not supported")
+@pytest.mark.parametrize("dtype", dtypes)
+@pytest.mark.parametrize("fp8_params", (False, True))
+@pytest.mark.parametrize("fp8_recipe", _grouped_linear_fp8_weight_caching_recipes, ids=recipe_id)
+def test_make_graphed_callables_grouped_linear_with_fp8_weight_caching(
+    *,
+    dtype: torch.dtype,
+    fp8_params: bool,
+    fp8_recipe: recipe.Recipe,
+    model_config: str = "small",
+    num_layers: int = 3,
+) -> None:
+    """GroupedLinear must thread `is_first_microbatch` into the FP8 weight-update
+    skip tensor under CUDA graphs.
+
+    With `fp8_weight_caching` enabled, the graphed and non-graphed runs only match
+    when `skip_fp8_weight_update` is propagated for every microbatch. Before the
+    fix, GroupedLinear hardcoded it to `None`, so the cached FP8 weights diverged
+    from the eager reference. This regresses if that propagation is dropped again.
+    """
+    config = model_configs[model_config]
+    kwargs = dict(
+        module="grouped_linear",
+        model_config=config,
+        num_layers=num_layers,
+        dtype=dtype,
+        fp8=True,
+        fp8_params=fp8_params,
+        fp8_weight_caching=True,
+        fp8_recipe=fp8_recipe,
+    )
+    graph_outputs_full = _test_cuda_graphs(graph_mode="full", **kwargs)
+    graph_outputs_individual = _test_cuda_graphs(graph_mode="individual", **kwargs)
+    outputs = _test_cuda_graphs(graph_mode="none", **kwargs)
+
+    assert_all_equal(outputs, graph_outputs_full)
+    assert_all_equal(outputs, graph_outputs_individual)
+
+
 def generate_data_for_dot_product_attention(
     model_config: ModelConfig,
     dtype: torch.dtype,
@@ -644,12 +751,296 @@ def test_make_graphed_callables_with_kwargs(
     assert_all_equal(outputs, graph_outputs)
 
 
+def test_make_graphed_callables_returns_owned_parameter_grads() -> None:
+    """Parameter grads returned from graph replay must not alias static graph buffers."""
+    reset_rng_states()
+    model_config = model_configs["small"]
+    dtype = torch.float32
+    model = torch.nn.Linear(
+        model_config.hidden_size,
+        model_config.hidden_size,
+        bias=False,
+        device="cuda",
+        dtype=dtype,
+    )
+    model = make_graphed_callables(
+        model,
+        (generate_data(model_config, dtype, warmup=True, requires_grad=False),),
+    )
+
+    seen_grads = []
+
+    def save_grad(grad):
+        seen_grads.append(grad)
+        return grad
+
+    hook = model.weight.register_hook(save_grad)
+    try:
+        output = model(generate_data(model_config, dtype, requires_grad=False))
+        output.backward(generate_data(model_config, dtype, requires_grad=False))
+
+        assert len(seen_grads) == 1
+        first_grad = seen_grads[0]
+        first_grad_ptr = first_grad.data_ptr()
+        first_grad_snapshot = first_grad.clone()
+
+        model.zero_grad(set_to_none=True)
+
+        output = model(generate_data(model_config, dtype, requires_grad=False))
+        output.backward(generate_data(model_config, dtype, requires_grad=False))
+
+        assert len(seen_grads) == 2
+        assert first_grad.data_ptr() == first_grad_ptr
+        assert seen_grads[1].data_ptr() != first_grad_ptr
+        torch.testing.assert_close(first_grad, first_grad_snapshot, rtol=0, atol=0)
+    finally:
+        hook.remove()
+        reset_graphs(model)
+
+
+def test_make_graphed_callables_accumulates_owned_parameter_grads() -> None:
+    """Parameter grad accumulation must not reuse overwritten static graph buffers."""
+    reset_rng_states()
+    model_config = model_configs["small"]
+    dtype = torch.float32
+    model = torch.nn.Linear(
+        model_config.hidden_size,
+        model_config.hidden_size,
+        bias=False,
+        device="cuda",
+        dtype=dtype,
+    )
+    model = make_graphed_callables(
+        model,
+        (generate_data(model_config, dtype, warmup=True, requires_grad=False),),
+    )
+
+    input_1 = generate_data(model_config, dtype, requires_grad=False)
+    grad_1 = generate_data(model_config, dtype, requires_grad=False)
+    input_2 = generate_data(model_config, dtype, requires_grad=False)
+    grad_2 = generate_data(model_config, dtype, requires_grad=False)
+    expected_grad = torch.einsum("...o,...i->oi", grad_1, input_1) + torch.einsum(
+        "...o,...i->oi", grad_2, input_2
+    )
+
+    try:
+        model.zero_grad(set_to_none=True)
+        model(input_1).backward(grad_1)
+        model(input_2).backward(grad_2)
+        torch.testing.assert_close(model.weight.grad, expected_grad, rtol=0, atol=0)
+    finally:
+        reset_graphs(model)
+
+
+def test_make_graphed_callables_preserves_skipped_parameter_grad_alias() -> None:
+    """Delayed-wgrad parameters are excluded from returned-grad clone handling."""
+    reset_rng_states()
+    model_config = model_configs["small"]
+    dtype = torch.float32
+    model = torch.nn.Linear(
+        model_config.hidden_size,
+        model_config.hidden_size,
+        bias=False,
+        device="cuda",
+        dtype=dtype,
+    )
+    model.weight.skip_backward_post_hook = True
+    model = make_graphed_callables(
+        model,
+        (generate_data(model_config, dtype, warmup=True, requires_grad=False),),
+    )
+
+    seen_grads = []
+
+    def save_grad(grad):
+        seen_grads.append(grad)
+        return grad
+
+    hook = model.weight.register_hook(save_grad)
+    try:
+        output = model(generate_data(model_config, dtype, requires_grad=False))
+        output.backward(generate_data(model_config, dtype, requires_grad=False))
+
+        assert len(seen_grads) == 1
+        first_grad_ptr = seen_grads[0].data_ptr()
+
+        model.zero_grad(set_to_none=True)
+
+        output = model(generate_data(model_config, dtype, requires_grad=False))
+        output.backward(generate_data(model_config, dtype, requires_grad=False))
+
+        assert len(seen_grads) == 2
+        assert seen_grads[1].data_ptr() == first_grad_ptr
+    finally:
+        hook.remove()
+        reset_graphs(model)
+
+
+def test_make_graphed_callables_can_skip_returned_parameter_grad_clone() -> None:
+    """Parameter grad clone handling can be disabled for callers that manage lifetimes."""
+    reset_rng_states()
+    model_config = model_configs["small"]
+    dtype = torch.float32
+    model = torch.nn.Linear(
+        model_config.hidden_size,
+        model_config.hidden_size,
+        bias=False,
+        device="cuda",
+        dtype=dtype,
+    )
+    model = make_graphed_callables(
+        model,
+        (generate_data(model_config, dtype, warmup=True, requires_grad=False),),
+        clone_param_grads_on_return=False,
+    )
+
+    seen_grads = []
+
+    def save_grad(grad):
+        seen_grads.append(grad)
+        return grad
+
+    hook = model.weight.register_hook(save_grad)
+    try:
+        output = model(generate_data(model_config, dtype, requires_grad=False))
+        output.backward(generate_data(model_config, dtype, requires_grad=False))
+
+        assert len(seen_grads) == 1
+        first_grad_ptr = seen_grads[0].data_ptr()
+
+        model.zero_grad(set_to_none=True)
+
+        output = model(generate_data(model_config, dtype, requires_grad=False))
+        output.backward(generate_data(model_config, dtype, requires_grad=False))
+
+        assert len(seen_grads) == 2
+        assert seen_grads[1].data_ptr() == first_grad_ptr
+    finally:
+        hook.remove()
+        reset_graphs(model)
+
+
+def test_make_graphed_callables_snapshots_parameter_grad_clone_policy() -> None:
+    """Parameter grad clone policy is fixed at capture time."""
+    reset_rng_states()
+    model_config = model_configs["small"]
+    dtype = torch.float32
+    model = torch.nn.Linear(
+        model_config.hidden_size,
+        model_config.hidden_size,
+        bias=False,
+        device="cuda",
+        dtype=dtype,
+    )
+    model = make_graphed_callables(
+        model,
+        (generate_data(model_config, dtype, warmup=True, requires_grad=False),),
+    )
+    model.weight.skip_backward_post_hook = True
+
+    seen_grads = []
+
+    def save_grad(grad):
+        seen_grads.append(grad)
+        return grad
+
+    hook = model.weight.register_hook(save_grad)
+    try:
+        output = model(generate_data(model_config, dtype, requires_grad=False))
+        output.backward(generate_data(model_config, dtype, requires_grad=False))
+
+        assert len(seen_grads) == 1
+        first_grad = seen_grads[0]
+        first_grad_ptr = first_grad.data_ptr()
+        first_grad_snapshot = first_grad.clone()
+
+        model.zero_grad(set_to_none=True)
+
+        output = model(generate_data(model_config, dtype, requires_grad=False))
+        output.backward(generate_data(model_config, dtype, requires_grad=False))
+
+        assert len(seen_grads) == 2
+        assert seen_grads[1].data_ptr() != first_grad_ptr
+        torch.testing.assert_close(first_grad, first_grad_snapshot, rtol=0, atol=0)
+    finally:
+        hook.remove()
+        reset_graphs(model)
+
+
+def _make_capture_time_hooks(
+    modules: Tuple[torch.nn.Module, ...],
+    records: List[Tuple[int, str]],
+) -> List[Dict[str, Dict[int, Callable]]]:
+    """Make capture-time hooks that record call order."""
+
+    def make_hook(module_idx: int, hook_name: str) -> Callable:
+        expected_module = modules[module_idx]
+
+        def hook(module: torch.nn.Module) -> None:
+            assert module is expected_module
+            assert not torch.cuda.is_current_stream_capturing()
+            records.append((module_idx, hook_name))
+
+        return hook
+
+    return [
+        {
+            "forward_pre_hooks": {0: make_hook(module_idx, "forward_pre_hooks")},
+            "forward_hooks": {0: make_hook(module_idx, "forward_hooks")},
+            "backward_pre_hooks": {0: make_hook(module_idx, "backward_pre_hooks")},
+            "backward_hooks": {0: make_hook(module_idx, "backward_hooks")},
+        }
+        for module_idx in range(len(modules))
+    ]
+
+
+@pytest.mark.parametrize("with_order", (False, True))
+def test_make_graphed_callables_with_capture_time_hooks(with_order: bool) -> None:
+    """Test capture-time hooks around warmup and graph capture."""
+    num_warmup_iters = 2
+    modules = (
+        torch.nn.Linear(8, 8, device="cuda"),
+        torch.nn.Linear(8, 8, device="cuda"),
+    )
+    sample_args = tuple((torch.ones(4, 8, device="cuda", requires_grad=True),) for _ in modules)
+    records = []
+    hook_order = [
+        (0, "forward_pre_hooks"),
+        (0, "forward_hooks"),
+        (1, "forward_pre_hooks"),
+        (1, "forward_hooks"),
+        (1, "backward_pre_hooks"),
+        (1, "backward_hooks"),
+        (0, "backward_pre_hooks"),
+        (0, "backward_hooks"),
+    ]
+
+    graphed_callables = make_graphed_callables(
+        modules,
+        sample_args,
+        num_warmup_iters=num_warmup_iters,
+        _order=[1, 2, -2, -1] if with_order else None,
+        capture_time_hooks=_make_capture_time_hooks(modules, records),
+    )
+
+    assert records == hook_order * (num_warmup_iters + 1)
+
+    for graphed in graphed_callables:
+        x = torch.randn(4, 8, device="cuda", requires_grad=True)
+        y = graphed(x)
+        y.backward(torch.ones_like(y))
+    assert records == hook_order * (num_warmup_iters + 1)
+    reset_graphs(graphed_callables)
+
+
 def _test_cuda_graphs_with_interleaved_pipeline_parallelism(
     *,
     with_graph: bool,
     model_config: ModelConfig,
     dtype: torch.dtype,
-) -> List[torch.Tensor]:
+    reuse_graph_input_output_buffers: bool = False,
+    clone_param_grads_on_return: bool = True,
+) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
     """Simulate Megatron-LM interleaved pipeline parallelism."""
     reset_rng_states()
 
@@ -689,6 +1080,8 @@ def _test_cuda_graphs_with_interleaved_pipeline_parallelism(
             sample_args,
             allow_unused_input=True,
             _order=layer_order,
+            _reuse_graph_input_output_buffers=reuse_graph_input_output_buffers,
+            clone_param_grads_on_return=clone_param_grads_on_return,
         )
         layer_forwards = {
             (i // num_microbatches, i % num_microbatches): forward
@@ -715,11 +1108,15 @@ def _test_cuda_graphs_with_interleaved_pipeline_parallelism(
 
         # Cache for layer outputs.
         outputs = {}
+        output_snapshots = {} if reuse_graph_input_output_buffers else None
 
         def forward(layer_idx: int, microbatch_idx: int):
             """Helper function for forward steps"""
             idxs = (layer_idx, microbatch_idx)
             outputs[idxs] = layer_forwards[idxs](inputs[idxs])
+            if output_snapshots is not None:
+                # Reused graph output buffers are only valid until their corresponding backward.
+                output_snapshots[idxs] = outputs[idxs].detach().clone()
 
         def backward(layer_idx: int, microbatch_idx: int):
             """Helper function for backward steps"""
@@ -742,11 +1139,13 @@ def _test_cuda_graphs_with_interleaved_pipeline_parallelism(
         # Optimizer step.
         optimizer.step()
 
-    outputs = [y for _, y in sorted(outputs.items())]
-    outputs = get_outputs(model, outputs)
+    output_values = output_snapshots if output_snapshots is not None else outputs
+    output_values = [y for _, y in sorted(output_values.items())]
+    outputs = get_outputs(model, output_values)
+    final_weights = [param.detach().clone() for param in model.parameters()]
     if with_graph:
         reset_graphs(layer_forwards)
-    return outputs
+    return outputs, final_weights
 
 
 def test_make_graphed_callables_with_interleaved_pipeline_parallelism(
@@ -757,12 +1156,56 @@ def test_make_graphed_callables_with_interleaved_pipeline_parallelism(
     """Test CUDA graphs with Megatron-LM interleaved pipeline parallelism."""
     model_config = model_configs[model_config]
     kwargs = dict(model_config=model_config, dtype=dtype)
-    outputs = _test_cuda_graphs_with_interleaved_pipeline_parallelism(
+    outputs, weights = _test_cuda_graphs_with_interleaved_pipeline_parallelism(
         with_graph=False,
         **kwargs,
     )
-    graph_outputs = _test_cuda_graphs_with_interleaved_pipeline_parallelism(
+    graph_outputs, graph_weights = _test_cuda_graphs_with_interleaved_pipeline_parallelism(
         with_graph=True,
         **kwargs,
     )
     assert_all_equal(outputs, graph_outputs)
+    assert_all_equal(weights, graph_weights)
+
+
+def test_make_graphed_callables_with_interleaved_pipeline_parallelism_reused_buffers(
+    *,
+    model_config: str = "small",
+    dtype: torch.dtype = torch.float16,
+) -> None:
+    """Test CUDA graphs with reused input/output buffers."""
+    model_config = model_configs[model_config]
+    kwargs = dict(model_config=model_config, dtype=dtype)
+    outputs, weights = _test_cuda_graphs_with_interleaved_pipeline_parallelism(
+        with_graph=False,
+        **kwargs,
+    )
+    graph_outputs, graph_weights = _test_cuda_graphs_with_interleaved_pipeline_parallelism(
+        with_graph=True,
+        reuse_graph_input_output_buffers=True,
+        **kwargs,
+    )
+    assert_all_equal(outputs, graph_outputs)
+    assert_all_equal(weights, graph_weights)
+
+
+def test_make_graphed_callables_with_interleaved_pipeline_parallelism_reused_buffers_no_param_grad_clone(
+    *,
+    model_config: str = "small",
+    dtype: torch.dtype = torch.float16,
+) -> None:
+    """Test reused input/output buffers when returned parameter grad clones are disabled."""
+    model_config = model_configs[model_config]
+    kwargs = dict(model_config=model_config, dtype=dtype)
+    outputs, weights = _test_cuda_graphs_with_interleaved_pipeline_parallelism(
+        with_graph=False,
+        **kwargs,
+    )
+    graph_outputs, graph_weights = _test_cuda_graphs_with_interleaved_pipeline_parallelism(
+        with_graph=True,
+        reuse_graph_input_output_buffers=True,
+        clone_param_grads_on_return=False,
+        **kwargs,
+    )
+    assert_all_equal(outputs, graph_outputs)
+    assert_all_equal(weights, graph_weights)
