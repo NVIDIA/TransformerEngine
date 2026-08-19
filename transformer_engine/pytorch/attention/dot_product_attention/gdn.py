@@ -70,9 +70,7 @@ class _GatedDeltaNetAttention(torch.nn.Module):
         self.v_head_dim = v_head_dim
         self._dense_cu_seqlens_key: Optional[Tuple[torch.device, int, int]] = None
         self._dense_cu_seqlens: Optional[torch.Tensor] = None
-        self._cu_seqlens_validation_cache: list[
-            Tuple[torch.Tensor, int, int, Tuple[int, ...]]
-        ] = []
+        self._cu_seqlens_validation_cache: list[Tuple[torch.Tensor, int, int, Tuple[int, ...]]] = []
 
     def _validate_cu_seqlens_values(
         self,
@@ -90,9 +88,12 @@ class _GatedDeltaNetAttention(torch.nn.Module):
             # Tensors created in inference mode have no version counter. They cannot be
             # cached safely because an in-place update would otherwise bypass validation.
             tensor_version = None
-        for cached_tensor, cached_version, cached_total, cached_offsets in (
-            self._cu_seqlens_validation_cache
-        ):
+        for (
+            cached_tensor,
+            cached_version,
+            cached_total,
+            cached_offsets,
+        ) in self._cu_seqlens_validation_cache:
             if (
                 tensor_version is not None
                 and cached_tensor is cu_seqlens
@@ -112,8 +113,7 @@ class _GatedDeltaNetAttention(torch.nn.Module):
                 )
         if offsets[-1] != total_tokens:
             raise ValueError(
-                f"{name} must end at the flattened token count {total_tokens}, "
-                f"got {offsets[-1]}."
+                f"{name} must end at the flattened token count {total_tokens}, got {offsets[-1]}."
             )
 
         # Holding a few tiny offset tensors avoids pointer-reuse ambiguity while keeping
