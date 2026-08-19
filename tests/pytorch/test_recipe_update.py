@@ -13,6 +13,7 @@ from transformer_engine.common.recipe import (
     DelayedScaling,
     Float8BlockScaling,
     Float8CurrentScaling,
+    MXFP8BlockScaling,
     NVFP4BlockScaling,
 )
 from transformer_engine.pytorch import (
@@ -27,9 +28,11 @@ from transformer_engine.pytorch import (
     autocast,
     is_fp8_available,
     is_fp8_block_scaling_available,
+    is_mxfp8_available,
     is_nvfp4_available,
     quantized_model_init,
 )
+from transformer_engine.pytorch.custom_recipes.quantizer_factories import current_scaling_factory
 from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
 from transformer_engine.pytorch.quantization import (
     DelayedScalingRequest,
@@ -134,6 +137,193 @@ def _run_update_step(module, recipe, inp, *args, **kwargs):
     return output
 
 
+def _clone_inputs(inp):
+    """Clone one tensor or a tuple of tensors while preserving grad requirements."""
+    inputs = inp if isinstance(inp, tuple) else (inp,)
+    clones = tuple(
+        input_tensor.detach().clone().requires_grad_(input_tensor.requires_grad)
+        for input_tensor in inputs
+    )
+    return clones if isinstance(inp, tuple) else clones[0]
+
+
+def _run_numerical_step(module, recipe, inp, *args, output_grad=None, **kwargs):
+    """Run forward/backward and capture values used by exact numerical oracles."""
+    inputs = inp if isinstance(inp, tuple) else (inp,)
+    _assert_runtime_recipes_match_keys(module)
+    module.zero_grad(set_to_none=True)
+    with autocast(enabled=True, recipe=recipe):
+        output = module(*inputs, *args, **kwargs)
+    _assert_runtime_recipes_match_keys(module)
+    if isinstance(output, tuple):
+        output = output[0]
+    if output_grad is None:
+        output_grad = torch.linspace(
+            -1,
+            1,
+            output.numel(),
+            device=output.device,
+            dtype=output.dtype,
+        ).reshape(output.shape)
+    output.backward(output_grad)
+    _assert_runtime_recipes_match_keys(module)
+    return (
+        (
+            output.detach().clone(),
+            tuple(input_tensor.grad.detach().clone() for input_tensor in inputs),
+            {
+                name: param.grad.detach().clone()
+                for name, param in module.named_parameters()
+                if param.requires_grad
+            },
+        ),
+        output_grad,
+    )
+
+
+def _assert_numerical_traces_match(actual, expected):
+    """Require bitwise-identical output, input gradients, and parameter gradients."""
+    actual_output, actual_input_grads, actual_param_grads = actual
+    expected_output, expected_input_grads, expected_param_grads = expected
+    torch.testing.assert_close(actual_output, expected_output, rtol=0, atol=0)
+    assert len(actual_input_grads) == len(expected_input_grads)
+    for actual_grad, expected_grad in zip(actual_input_grads, expected_input_grads):
+        torch.testing.assert_close(actual_grad, expected_grad, rtol=0, atol=0)
+    assert actual_param_grads.keys() == expected_param_grads.keys()
+    for name, actual_grad in actual_param_grads.items():
+        torch.testing.assert_close(actual_grad, expected_param_grads[name], rtol=0, atol=0)
+
+
+def _make_identical_linears():
+    """Construct identical BF16 Linear modules for numerical comparisons."""
+    torch.manual_seed(2026)
+    first = Linear(
+        128,
+        128,
+        bias=False,
+        params_dtype=torch.bfloat16,
+        device="cuda",
+        name="linear",
+    )
+    second = Linear(
+        128,
+        128,
+        bias=False,
+        params_dtype=torch.bfloat16,
+        device="cuda",
+        name="linear",
+    )
+    second.load_state_dict(first.state_dict())
+    return first, second
+
+
+def _check_same_object_mutation_against_fresh_recipe(
+    active_recipe,
+    fresh_recipe,
+    mutations,
+    *,
+    seed,
+    prepare_models=None,
+):
+    """Compare a warmed, mutated runtime with a fresh target runtime."""
+    switching, oracle = _make_identical_linears()
+    if prepare_models is not None:
+        prepare_models(switching, oracle)
+    torch.manual_seed(seed)
+    warmup_inp = torch.randn(
+        32,
+        128,
+        device="cuda",
+        dtype=torch.bfloat16,
+        requires_grad=True,
+    )
+    _run_numerical_step(switching, active_recipe, warmup_inp)
+    old_runtime = switching._quantization_runtime  # pylint: disable=protected-access
+
+    for name, value in mutations.items():
+        setattr(active_recipe, name, value)
+    apply_recipe(switching, active_recipe)
+    runtime = switching._quantization_runtime  # pylint: disable=protected-access
+    apply_recipe(oracle, fresh_recipe)
+
+    base_inp = torch.randn(32, 128, device="cuda", dtype=torch.bfloat16)
+    switching_trace, output_grad = _run_numerical_step(
+        switching,
+        active_recipe,
+        base_inp.detach().clone().requires_grad_(True),
+    )
+    oracle_trace, _ = _run_numerical_step(
+        oracle,
+        fresh_recipe,
+        base_inp.detach().clone().requires_grad_(True),
+        output_grad=output_grad,
+    )
+    _assert_numerical_traces_match(switching_trace, oracle_trace)
+    assert runtime is not old_runtime
+
+
+def _check_recipe_transition_sequence(recipes, *, seed):
+    """Compare each runtime in a warmed recipe sequence with a fresh target."""
+    switching, _ = _make_identical_linears()
+    previous_runtime = None
+    previous_config = None
+    for step, recipe in enumerate(recipes):
+        _, oracle = _make_identical_linears()
+        if previous_runtime is not None:
+            switching._fp8_workspaces["sentinel"] = object()  # pylint: disable=protected-access
+        apply_recipe(switching, recipe)
+        runtime = switching._quantization_runtime  # pylint: disable=protected-access
+        recipe_config = recipe.quantizer_config()
+        if previous_config is not None and recipe_config != previous_config:
+            assert runtime is not previous_runtime
+            assert not switching._fp8_workspaces  # pylint: disable=protected-access
+
+        apply_recipe(oracle, recipe)
+        oracle_runtime = oracle._quantization_runtime  # pylint: disable=protected-access
+        assert tuple(type(quantizer) for quantizer in runtime.forward_quantizers) == tuple(
+            type(quantizer) for quantizer in oracle_runtime.forward_quantizers
+        )
+        assert tuple(type(quantizer) for quantizer in runtime.backward_quantizers) == tuple(
+            type(quantizer) for quantizer in oracle_runtime.backward_quantizers
+        )
+
+        torch.manual_seed(seed + step)
+        base_inp = torch.randn(32, 128, device="cuda", dtype=torch.bfloat16)
+        switching_trace, output_grad = _run_numerical_step(
+            switching,
+            recipe,
+            base_inp.detach().clone().requires_grad_(True),
+        )
+        oracle_trace, _ = _run_numerical_step(
+            oracle,
+            recipe,
+            base_inp.detach().clone().requires_grad_(True),
+            output_grad=output_grad,
+        )
+        _assert_numerical_traces_match(switching_trace, oracle_trace)
+        previous_runtime = runtime
+        previous_config = recipe_config
+
+
+def _assert_modules_and_sgd_state_match(first, second, first_optimizer, second_optimizer):
+    """Require exact parameters and per-parameter SGD state."""
+    first_params = dict(first.named_parameters())
+    second_params = dict(second.named_parameters())
+    assert first_params.keys() == second_params.keys()
+    for name, first_param in first_params.items():
+        second_param = second_params[name]
+        torch.testing.assert_close(first_param, second_param, rtol=0, atol=0)
+        first_state = first_optimizer.state[first_param]
+        second_state = second_optimizer.state[second_param]
+        assert first_state.keys() == second_state.keys()
+        for state_name, first_value in first_state.items():
+            second_value = second_state[state_name]
+            if isinstance(first_value, torch.Tensor):
+                torch.testing.assert_close(first_value, second_value, rtol=0, atol=0)
+            else:
+                assert first_value == second_value
+
+
 def _active_runtime_owners(module):
     """Return executed TE runtime owners in module traversal order."""
     return [
@@ -156,10 +346,7 @@ def _global_recipe_state():
 
 def _make_compatible_fp8_mha_recipe(key):
     """Build an executable FP8-MHA recipe with compatible boundary formats."""
-    from transformer_engine.pytorch.custom_recipes.quantizer_factories import (
-        current_scaling_factory,
-        delayed_scaling_factory,
-    )
+    from transformer_engine.pytorch.custom_recipes.quantizer_factories import delayed_scaling_factory
     from transformer_engine.pytorch.custom_recipes.quantizer_factory_zoo import (
         nvfp4_linear_fp8_dpa_factory,
     )
@@ -605,6 +792,118 @@ def test_current_scaling_flag_mutation_rebuilds_concrete_quantizers():
         FP8GlobalStateManager.reset()
 
 
+@pytest.mark.parametrize(("initial", "target"), ((False, True), (True, False)))
+def test_current_scaling_same_object_mutation_matches_fresh_recipe(initial, target):
+    """Same-object flag updates match fresh target recipes in both directions."""
+    available, reason = is_fp8_available(return_reason=True)
+    if not available:
+        pytest.skip(reason)
+
+    FP8GlobalStateManager.reset()
+    try:
+        _check_same_object_mutation_against_fresh_recipe(
+            Float8CurrentScaling(use_power_2_scales=initial),
+            Float8CurrentScaling(use_power_2_scales=target),
+            {"use_power_2_scales": target},
+            seed=6200 + int(target),
+        )
+    finally:
+        FP8GlobalStateManager.reset()
+
+
+def test_float8_block_same_object_layout_mutation_matches_fresh_recipe():
+    """A warmed Float8BlockScaling layout update matches a fresh target."""
+    available, reason = is_fp8_block_scaling_available(return_reason=True)
+    if not available:
+        pytest.skip(reason)
+
+    FP8GlobalStateManager.reset()
+    try:
+        _check_same_object_mutation_against_fresh_recipe(
+            Float8BlockScaling(x_block_scaling_dim=1, w_block_scaling_dim=2),
+            Float8BlockScaling(x_block_scaling_dim=2, w_block_scaling_dim=1),
+            {"x_block_scaling_dim": 2, "w_block_scaling_dim": 1},
+            seed=6250,
+        )
+    finally:
+        FP8GlobalStateManager.reset()
+
+
+def test_mxfp8_same_object_2d_mutation_matches_fresh_recipe():
+    """A warmed MXFP8 2D-weight update matches a fresh target."""
+    available, reason = is_mxfp8_available(return_reason=True)
+    if not available:
+        pytest.skip(reason)
+
+    def prepare_models(switching, oracle):
+        torch.manual_seed(6261)
+        weight = torch.randn(128, 128, device="cuda", dtype=torch.bfloat16)
+        row_scales = torch.pow(
+            2.0,
+            torch.arange(128, device="cuda", dtype=torch.float32).remainder(16) - 8,
+        ).to(torch.bfloat16)
+        weight *= row_scales[:, None]
+        with torch.no_grad():
+            switching.weight.copy_(weight)
+            oracle.weight.copy_(weight)
+
+    FP8GlobalStateManager.reset()
+    try:
+        _check_same_object_mutation_against_fresh_recipe(
+            MXFP8BlockScaling(enable_2d_quantization=False),
+            MXFP8BlockScaling(enable_2d_quantization=True),
+            {"enable_2d_quantization": True},
+            seed=6260,
+            prepare_models=prepare_models,
+        )
+    finally:
+        FP8GlobalStateManager.reset()
+
+
+def test_nvfp4_same_object_2d_mutation_matches_fresh_recipe():
+    """A warmed deterministic NVFP4 weight-layout update matches a fresh target."""
+    if not is_nvfp4_available():
+        pytest.skip("NVFP4 is not available")
+
+    FP8GlobalStateManager.reset()
+    try:
+        _check_same_object_mutation_against_fresh_recipe(
+            NVFP4BlockScaling(
+                disable_rht=True,
+                disable_stochastic_rounding=True,
+                disable_2d_quantization=False,
+            ),
+            NVFP4BlockScaling(
+                disable_rht=True,
+                disable_stochastic_rounding=True,
+                disable_2d_quantization=True,
+            ),
+            {"disable_2d_quantization": True},
+            seed=6270,
+        )
+    finally:
+        FP8GlobalStateManager.reset()
+
+
+def test_native_recipe_transition_matches_fresh_target():
+    """A warmed stateless runtime matches a fresh target across A -> B -> A."""
+    available, reason = is_fp8_available(return_reason=True)
+    if not available:
+        pytest.skip(reason)
+    available, reason = is_mxfp8_available(return_reason=True)
+    if not available:
+        pytest.skip(reason)
+
+    FP8GlobalStateManager.reset()
+    try:
+        _check_recipe_transition_sequence(
+            (Float8CurrentScaling(), MXFP8BlockScaling(), Float8CurrentScaling()),
+            seed=6300,
+        )
+    finally:
+        FP8GlobalStateManager.reset()
+
+
 def test_float8_block_scaling_flag_mutation_rebuilds_concrete_quantizers():
     """A same-object FP32-scale update must change the active quantizers."""
     available, reason = is_fp8_block_scaling_available(return_reason=True)
@@ -945,20 +1244,88 @@ def test_module_family_executes_after_recipe_update(
     input_factory,
     forward_args,
 ):
-    """Every base module family executes forward/backward across a runtime replacement."""
+    """A semantic-only runtime replacement is numerically transparent."""
     calls = []
     first_recipe = _make_counting_recipe(("module-execution", 1), calls)
     second_recipe = _make_counting_recipe(("module-execution", 2), calls)
     module = module_factory()
 
-    _run_update_step(module, first_recipe, input_factory(), *forward_args)
+    first_inp = input_factory()
+    second_inp = _clone_inputs(first_inp)
+    first_trace, output_grad = _run_numerical_step(
+        module,
+        first_recipe,
+        first_inp,
+        *forward_args,
+    )
     first_runtime = module._quantization_runtime  # pylint: disable=protected-access
     assert first_runtime is not None
 
-    _run_update_step(module, second_recipe, input_factory(), *forward_args)
+    second_trace, _ = _run_numerical_step(
+        module,
+        second_recipe,
+        second_inp,
+        *forward_args,
+        output_grad=output_grad,
+    )
     second_runtime = module._quantization_runtime  # pylint: disable=protected-access
     assert second_runtime is not first_runtime
     assert second_runtime.key.recipe_config == second_recipe.quantizer_config()
+    _assert_numerical_traces_match(second_trace, first_trace)
+
+
+def test_equivalent_recipe_round_trip_matches_uninterrupted_training():
+    """A -> equivalent B -> A training is bitwise identical to uninterrupted A."""
+    available, reason = is_fp8_available(return_reason=True)
+    if not available:
+        pytest.skip(reason)
+
+    FP8GlobalStateManager.reset()
+    reference, switching = _make_identical_linears()
+    reference_optimizer = torch.optim.SGD(reference.parameters(), lr=0.01, momentum=0.9)
+    switching_optimizer = torch.optim.SGD(switching.parameters(), lr=0.01, momentum=0.9)
+    reference_recipe = Float8CurrentScaling()
+    native_recipe = Float8CurrentScaling()
+    equivalent_recipe = CustomRecipe(qfactory=current_scaling_factory)
+    schedule = (native_recipe, equivalent_recipe, native_recipe, native_recipe)
+    previous_runtime = None
+    torch.manual_seed(6100)
+
+    try:
+        for step, switching_recipe in enumerate(schedule):
+            base_inp = torch.randn(32, 128, device="cuda", dtype=torch.bfloat16)
+            reference_inp = base_inp.detach().clone().requires_grad_(True)
+            switching_inp = base_inp.detach().clone().requires_grad_(True)
+            reference_trace, output_grad = _run_numerical_step(
+                reference,
+                reference_recipe,
+                reference_inp,
+            )
+            switching_trace, _ = _run_numerical_step(
+                switching,
+                switching_recipe,
+                switching_inp,
+                output_grad=output_grad,
+            )
+            _assert_numerical_traces_match(switching_trace, reference_trace)
+
+            runtime = switching._quantization_runtime  # pylint: disable=protected-access
+            if step in (1, 2):
+                assert runtime is not previous_runtime
+            if step == 3:
+                assert runtime is previous_runtime
+            previous_runtime = runtime
+
+            reference_optimizer.step()
+            switching_optimizer.step()
+            _assert_modules_and_sgd_state_match(
+                reference,
+                switching,
+                reference_optimizer,
+                switching_optimizer,
+            )
+    finally:
+        FP8GlobalStateManager.reset()
 
 
 @pytest.mark.parametrize(
@@ -992,7 +1359,7 @@ def test_module_family_executes_after_recipe_update(
     ),
 )
 def test_composed_module_executes_after_recipe_update(module_factory):
-    """A composed module updates every runtime owner reached by real execution."""
+    """A composed module's semantic-only runtime replacements are bitwise exact."""
     available, reason = is_fp8_available(return_reason=True)
     if not available:
         pytest.skip(reason)
@@ -1003,7 +1370,8 @@ def test_composed_module_executes_after_recipe_update(module_factory):
     module = module_factory()
 
     first_inp = torch.randn(8, 2, 32, device="cuda", requires_grad=True)
-    _run_update_step(module, first_recipe, first_inp)
+    second_inp = _clone_inputs(first_inp)
+    first_trace, output_grad = _run_numerical_step(module, first_recipe, first_inp)
     owners = _active_runtime_owners(module)
     assert len(owners) >= 2
     assert any(isinstance(owner, DotProductAttention) for owner in owners)
@@ -1012,13 +1380,18 @@ def test_composed_module_executes_after_recipe_update(module_factory):
         for owner in owners
     }
 
-    second_inp = torch.randn(8, 2, 32, device="cuda", requires_grad=True)
-    _run_update_step(module, second_recipe, second_inp)
+    second_trace, _ = _run_numerical_step(
+        module,
+        second_recipe,
+        second_inp,
+        output_grad=output_grad,
+    )
     assert _active_runtime_owners(module) == owners
     for owner in owners:
         runtime = owner._quantization_runtime  # pylint: disable=protected-access
         assert runtime is not first_runtimes[id(owner)]
         assert runtime.key.recipe_config == second_recipe.quantizer_config()
+    _assert_numerical_traces_match(second_trace, first_trace)
 
 
 @pytest.mark.parametrize(
@@ -1587,14 +1960,13 @@ def test_apply_recipe_reconstructs_stateless_runtime_after_checkpoint_restore():
     source = Linear(16, 16, bias=False, device="cuda", name="linear")
     initial_recipe = _make_counting_recipe(("checkpoint-resume", 1), source_calls)
     committed_recipe = _make_counting_recipe(("checkpoint-resume", 2), source_calls)
-    inp = torch.randn(8, 16, device="cuda")
+    inp = torch.randn(8, 16, device="cuda", requires_grad=True)
 
     try:
         apply_recipe(source, initial_recipe)
         apply_recipe(source, committed_recipe)
         checkpoint = source.state_dict()
-        with torch.no_grad(), autocast(enabled=True, recipe=committed_recipe):
-            expected = source(inp)
+        expected, output_grad = _run_numerical_step(source, committed_recipe, inp)
 
         # Model/checkpoint restoration happens in a fresh runtime context. The
         # intended recipe is reconstructed and explicitly applied before the
@@ -1611,9 +1983,14 @@ def test_apply_recipe_reconstructs_stateless_runtime_after_checkpoint_restore():
         assert runtime is not None
         assert runtime.key.recipe_config == committed_recipe.quantizer_config()
 
-        with torch.no_grad(), autocast(enabled=True, recipe=resumed_recipe):
-            actual = restored(inp)
-        torch.testing.assert_close(actual, expected)
+        restored_inp = _clone_inputs(inp)
+        actual, _ = _run_numerical_step(
+            restored,
+            resumed_recipe,
+            restored_inp,
+            output_grad=output_grad,
+        )
+        _assert_numerical_traces_match(actual, expected)
     finally:
         FP8GlobalStateManager.reset()
 
@@ -1688,9 +2065,26 @@ def test_apply_recipe_planning_failure_is_model_wide_atomic(failure_index):
     active_recipe = _make_counting_recipe(("apply-failure", 1), calls)
     modules = [Linear(16, 16, bias=False, device="cuda", name=f"line{index}") for index in range(3)]
     model = torch.nn.Sequential(*modules)
+    control = torch.nn.Sequential(
+        *[
+            Linear(16, 16, bias=False, device="cuda", name=f"line{index}")
+            for index in range(3)
+        ]
+    )
+    control.load_state_dict(model.state_dict())
 
     try:
         apply_recipe(model, active_recipe)
+        apply_recipe(control, active_recipe)
+        warmup_inp = torch.randn(8, 16, device="cuda", requires_grad=True)
+        expected, output_grad = _run_numerical_step(control, active_recipe, warmup_inp)
+        actual, _ = _run_numerical_step(
+            model,
+            active_recipe,
+            _clone_inputs(warmup_inp),
+            output_grad=output_grad,
+        )
+        _assert_numerical_traces_match(actual, expected)
         old_global_state = _global_recipe_state()
         old_views = [_runtime_views(module) for module in modules]
         workspaces = []
@@ -1721,6 +2115,20 @@ def test_apply_recipe_planning_failure_is_model_wide_atomic(failure_index):
                 for current, expected in zip(_runtime_views(module), expected_views)
             )
             assert module._fp8_workspaces["weight"] is workspace
+
+        continuation_inp = torch.randn(8, 16, device="cuda", requires_grad=True)
+        expected, output_grad = _run_numerical_step(
+            control,
+            active_recipe,
+            continuation_inp,
+        )
+        actual, _ = _run_numerical_step(
+            model,
+            active_recipe,
+            _clone_inputs(continuation_inp),
+            output_grad=output_grad,
+        )
+        _assert_numerical_traces_match(actual, expected)
     finally:
         FP8GlobalStateManager.reset()
 
