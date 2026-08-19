@@ -145,6 +145,11 @@ def ep_bootstrap(
         raise ValueError("ep_bootstrap: drop_on_overflow requires recv_capacity_per_rank")
     _check_nccl_runtime_version()
     if zero_copy:
+        if not tex.ep_zero_copy_supported():
+            raise RuntimeError(
+                "ep_bootstrap: zero_copy=True requires the Transformer Engine torch extension "
+                "built with NCCL symm-mem support (torch >= 2.11 with USE_NCCL)."
+            )
         warnings.warn(
             "ep_bootstrap(zero_copy=True) is experimental; the symm-mem IO path "
             "and its alias contracts on EpBuffer slots are subject to change.",
