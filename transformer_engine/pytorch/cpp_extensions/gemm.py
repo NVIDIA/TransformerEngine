@@ -651,8 +651,6 @@ def general_cuDNN_MX_gemm(
         # cuDNN checks the stride literally, so (1, N) rather than reshape's (1, 1).
         bias = bias.contiguous().as_strided((M, 1), (1, M))
 
-    # Prepare for output
-    out = validate_or_alloc_output(out, out_shape, out_dtype, device)
     if N_padded != N:
         # The kernel writes N_padded rows, so it cannot target `out` directly.
         d_buf = torch.empty((N_padded, M), dtype=out_dtype, device=device)
