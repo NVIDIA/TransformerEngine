@@ -5,11 +5,13 @@
 """cuDNN frontend Gated DeltaNet attention backend."""
 
 import importlib
+from functools import lru_cache
 from typing import Callable, Optional, Tuple, Union
 
 import torch
 
 
+@lru_cache(maxsize=1)
 def _import_gated_delta_net() -> Callable:
     """Import the cuDNN frontend GDN custom op lazily."""
     try:
@@ -51,7 +53,7 @@ def _validate_cu_seqlens(
         raise ValueError(f"{name} must be on {device}, got {cu_seqlens.device}.")
 
 
-class GatedDeltaNetAttention(torch.nn.Module):
+class _GatedDeltaNetAttention(torch.nn.Module):
     """Adapter from TransformerEngine attention layouts to cuDNN frontend GDN."""
 
     def __init__(
@@ -66,6 +68,8 @@ class GatedDeltaNetAttention(torch.nn.Module):
         self.num_q_heads = num_q_heads
         self.qk_head_dim = qk_head_dim
         self.v_head_dim = v_head_dim
+        self._dense_cu_seqlens_key: Optional[Tuple[torch.device, int, int]] = None
+        self._dense_cu_seqlens: Optional[torch.Tensor] = None
 
     def forward(
         self,
@@ -74,11 +78,11 @@ class GatedDeltaNetAttention(torch.nn.Module):
         value_layer: torch.Tensor,
         g: torch.Tensor,
         beta: torch.Tensor,
+        initial_state: Optional[torch.Tensor] = None,
         *,
         qkv_format: str,
         cu_seqlens_q: Optional[torch.Tensor] = None,
         cu_seqlens_kv: Optional[torch.Tensor] = None,
-        initial_state: Optional[torch.Tensor] = None,
         output_final_state: bool = False,
         use_qk_l2norm_in_kernel: bool = False,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
@@ -114,6 +118,14 @@ class GatedDeltaNetAttention(torch.nn.Module):
             raise ValueError(
                 f"GDN Q and K must have {self.num_q_heads} heads, got {query_layer.shape[-2]}."
             )
+        # The underlying op supports grouped value heads, but DPA's output contract is fixed
+        # at construction time. Integrations that use more V heads must expand Q/K before DPA.
+        if value_layer.shape[-2] != self.num_q_heads:
+            raise ValueError(
+                f"GDN V must have {self.num_q_heads} heads, got {value_layer.shape[-2]}. "
+                "DotProductAttention requires its output width to match "
+                "num_attention_heads * v_head_dim."
+            )
         if query_layer.shape[-1] != self.qk_head_dim:
             raise ValueError(
                 "GDN Q and K head dimension must match kv_channels; expected "
@@ -142,7 +154,7 @@ class GatedDeltaNetAttention(torch.nn.Module):
                 "GDN g and beta must have dtype torch.float32 (the kernel-native dtype)."
             )
 
-        num_output_heads = max(query_layer.shape[-2], value_layer.shape[-2])
+        num_output_heads = self.num_q_heads
         expected_gate_shape = (*query_layer.shape[:-2], num_output_heads)
         if g.shape != expected_gate_shape or beta.shape != expected_gate_shape:
             raise ValueError(
@@ -156,28 +168,30 @@ class GatedDeltaNetAttention(torch.nn.Module):
             _validate_cu_seqlens(cu_seqlens_q, device=device, name="cu_seqlens_q")
             cu_seqlens = cu_seqlens_q
         else:
+            if cu_seqlens_q is not None or cu_seqlens_kv is not None:
+                raise ValueError(
+                    "Dense GDN inputs do not accept cu_seqlens_q or cu_seqlens_kv. "
+                    "Use qkv_format='thd' for packed or ragged batches."
+                )
             if qkv_format == "bshd":
                 batch_size, sequence_length = query_layer.shape[:2]
             else:
                 sequence_length, batch_size = query_layer.shape[:2]
-            full_cu_seqlens = (
-                torch.arange(batch_size + 1, dtype=torch.int32, device=device) * sequence_length
-            )
-            if cu_seqlens_q is not None:
-                _validate_cu_seqlens(cu_seqlens_q, device=device, name="cu_seqlens_q")
-                if not torch.equal(cu_seqlens_q, full_cu_seqlens):
-                    raise ValueError(
-                        "Dense GDN inputs do not support padding; cu_seqlens_q must describe "
-                        "full, equal-length sequences. Use qkv_format='thd' for ragged batches."
-                    )
-            cu_seqlens = full_cu_seqlens
+            cache_key = (device, batch_size, sequence_length)
+            if self._dense_cu_seqlens_key != cache_key:
+                self._dense_cu_seqlens = (
+                    torch.arange(batch_size + 1, dtype=torch.int32, device=device)
+                    * sequence_length
+                )
+                self._dense_cu_seqlens_key = cache_key
+            cu_seqlens = self._dense_cu_seqlens
 
         if cu_seqlens_kv is not None:
             _validate_cu_seqlens(cu_seqlens_kv, device=device, name="cu_seqlens_kv")
-            if cu_seqlens.data_ptr() != cu_seqlens_kv.data_ptr() and not torch.equal(
-                cu_seqlens, cu_seqlens_kv
-            ):
-                raise ValueError("GDN requires cu_seqlens_q and cu_seqlens_kv to be identical.")
+            if cu_seqlens_kv.shape != cu_seqlens.shape:
+                raise ValueError(
+                    "GDN requires cu_seqlens_q and cu_seqlens_kv to have the same shape."
+                )
 
         batch_size = cu_seqlens.shape[0] - 1
         expected_state_shape = (

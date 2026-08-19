@@ -60,7 +60,7 @@ from transformer_engine.pytorch.attention.dot_product_attention.backends import 
     FusedAttention,
     FlashAttention,
 )
-from transformer_engine.pytorch.attention.dot_product_attention.gdn import GatedDeltaNetAttention
+from transformer_engine.pytorch.attention.dot_product_attention.gdn import _GatedDeltaNetAttention
 
 
 # Setup Attention Logging
@@ -818,7 +818,7 @@ class DotProductAttention(TransformerEngineBaseModule):
             return_max_logit=self.return_max_logit,
         )
 
-        self.gdn_attention = GatedDeltaNetAttention(
+        self.gdn_attention = _GatedDeltaNetAttention(
             softmax_scale,
             num_attention_heads // self.tp_size,
             self.hidden_size_per_attention_head_k,
@@ -864,7 +864,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         attention_func: Callable,
         *forward_args: Tuple[torch.Tensor, ...],
         **forward_kwargs: Dict[str, Any],
-    ) -> torch.Tensor:
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, ...]]:
         """Forward method with activation checkpointing."""
 
         def custom_forward(*input_args, **input_kwargs):
@@ -1398,6 +1398,8 @@ class DotProductAttention(TransformerEngineBaseModule):
         cu_seqlens_kv: Optional[torch.Tensor],
         cu_seqlens_q_padded: Optional[torch.Tensor],
         cu_seqlens_kv_padded: Optional[torch.Tensor],
+        max_seqlen_q: Optional[int],
+        max_seqlen_kv: Optional[int],
         attn_mask_type: Optional[str],
         window_size: Optional[Tuple[int, int]],
         bottom_right_diagonal: Optional[bool],
@@ -1405,9 +1407,11 @@ class DotProductAttention(TransformerEngineBaseModule):
         core_attention_bias_type: str,
         core_attention_bias: Optional[torch.Tensor],
         alibi_slopes: Optional[torch.Tensor],
+        fast_zero_fill: bool,
         inference_params: Optional[InferenceParams],
         pad_between_seqs: Optional[bool],
         fp8_output: Optional[bool],
+        bf16_backward: Optional[bool],
         num_splits: Optional[int],
         score_mod: Optional[Callable],
         score_mod_bprop: Optional[Callable],
@@ -1419,7 +1423,13 @@ class DotProductAttention(TransformerEngineBaseModule):
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         """Validate GDN-specific constraints and execute the cuDNN frontend op."""
         if g is None or beta is None:
-            raise ValueError("GDN attention requires both g and beta.")
+            raise ValueError(
+                "GDN-specific arguments require both g and beta; "
+                f"got g={'set' if g is not None else 'None'} and "
+                f"beta={'set' if beta is not None else 'None'}."
+            )
+        if FP8GlobalStateManager.is_fp8_enabled() or FP8GlobalStateManager.is_fp8_calibration():
+            raise ValueError("GDN attention does not support FP8 autocast or FP8 calibration.")
         if self.attention_type != "self":
             raise ValueError("GDN attention only supports attention_type='self'.")
         if self.attention_dropout != 0.0:
@@ -1458,7 +1468,9 @@ class DotProductAttention(TransformerEngineBaseModule):
             raise ValueError("GDN does not support bottom-right causal alignment.")
 
         if cu_seqlens_q_padded is not None or cu_seqlens_kv_padded is not None:
-            raise ValueError("GDN does not support padding between packed sequences.")
+            raise ValueError("GDN does not support padded cumulative sequence lengths.")
+        if max_seqlen_q is not None or max_seqlen_kv is not None:
+            raise ValueError("GDN does not use max_seqlen_q or max_seqlen_kv.")
         if core_attention_bias_type != "no_bias" or core_attention_bias is not None:
             raise ValueError("GDN does not support core attention bias.")
         if alibi_slopes is not None:
@@ -1469,9 +1481,13 @@ class DotProductAttention(TransformerEngineBaseModule):
                 "output_final_state=True for recurrent inference."
             )
         if pad_between_seqs:
-            raise ValueError("GDN does not support padding between packed sequences.")
+            raise ValueError("GDN does not support pad_between_seqs=True.")
+        if not fast_zero_fill:
+            raise ValueError("GDN does not support fast_zero_fill=False.")
         if fp8_output:
             raise ValueError("GDN does not support FP8 output.")
+        if bf16_backward:
+            raise ValueError("GDN does not support bf16_backward.")
         if num_splits not in {None, 1}:
             raise ValueError("GDN does not support num_splits.")
         if any(
@@ -1484,28 +1500,34 @@ class DotProductAttention(TransformerEngineBaseModule):
             "qkv_format": qkv_format,
             "cu_seqlens_q": cu_seqlens_q,
             "cu_seqlens_kv": cu_seqlens_kv,
-            "initial_state": initial_state,
             "output_final_state": output_final_state,
             "use_qk_l2norm_in_kernel": use_qk_l2norm_in_kernel,
         }
-        if checkpoint_core_attention:
-            return self._checkpointed_attention_forward(
-                self.gdn_attention,
+        with self.prepare_forward_ctx(
+            query_layer,
+            num_gemms=3,
+            allow_non_contiguous=True,
+        ) as query_layer:
+            if checkpoint_core_attention:
+                return self._checkpointed_attention_forward(
+                    self.gdn_attention,
+                    query_layer,
+                    key_layer,
+                    value_layer,
+                    g,
+                    beta,
+                    initial_state,
+                    **gdn_kwargs,
+                )
+            return self.gdn_attention(
                 query_layer,
                 key_layer,
                 value_layer,
                 g,
                 beta,
+                initial_state,
                 **gdn_kwargs,
             )
-        return self.gdn_attention(
-            query_layer,
-            key_layer,
-            value_layer,
-            g,
-            beta,
-            **gdn_kwargs,
-        )
 
     @no_torch_dynamo(when=_needs_eager_dpa)
     def forward(
@@ -1795,8 +1817,9 @@ class DotProductAttention(TransformerEngineBaseModule):
             since e.g. ``h == 3`` would make the shapes ambiguous.
         g: Optional[torch.Tensor], default = None
             GDN log-space scalar decay gate, with ``alpha = exp(g)``. Its shape is the
-            token dimensions followed by ``max(num_q_heads, num_v_heads)`` and its dtype
-            must be ``torch.float32``. Providing :attr:`g` and :attr:`beta` selects GDN.
+            token dimensions followed by ``num_attention_heads`` and its dtype must be
+            ``torch.float32``. Providing any GDN-specific argument selects GDN, and both
+            :attr:`g` and :attr:`beta` are required.
         beta: Optional[torch.Tensor], default = None
             GDN per-token write strength. It has the same shape and dtype requirements as
             :attr:`g`.
@@ -1808,8 +1831,8 @@ class DotProductAttention(TransformerEngineBaseModule):
             Return ``(output, final_state)`` for GDN when ``True``. The final state can be
             passed as :attr:`initial_state` to a later invocation.
         use_qk_l2norm_in_kernel: bool, default = False
-            L2-normalize GDN Q and K rows inside the kernel. Engines that do not support
-            this option will decline the operation.
+            L2-normalize GDN Q and K rows inside the kernel before applying the attention
+            scale to Q. Engines that do not support this option will decline the operation.
         """
 
         query_layer, key_layer, value_layer, declared_qkv_layout = _unpack_packed_qkv(
@@ -1841,6 +1864,8 @@ class DotProductAttention(TransformerEngineBaseModule):
                 cu_seqlens_kv=cu_seqlens_kv,
                 cu_seqlens_q_padded=cu_seqlens_q_padded,
                 cu_seqlens_kv_padded=cu_seqlens_kv_padded,
+                max_seqlen_q=max_seqlen_q,
+                max_seqlen_kv=max_seqlen_kv,
                 attn_mask_type=attn_mask_type,
                 window_size=window_size,
                 bottom_right_diagonal=bottom_right_diagonal,
@@ -1848,9 +1873,11 @@ class DotProductAttention(TransformerEngineBaseModule):
                 core_attention_bias_type=core_attention_bias_type,
                 core_attention_bias=core_attention_bias,
                 alibi_slopes=alibi_slopes,
+                fast_zero_fill=fast_zero_fill,
                 inference_params=inference_params,
                 pad_between_seqs=pad_between_seqs,
                 fp8_output=fp8_output,
+                bf16_backward=bf16_backward,
                 num_splits=num_splits,
                 score_mod=score_mod,
                 score_mod_bprop=score_mod_bprop,
