@@ -180,8 +180,7 @@ class _GatedDeltaNetAttention(torch.nn.Module):
             cache_key = (device, batch_size, sequence_length)
             if self._dense_cu_seqlens_key != cache_key:
                 self._dense_cu_seqlens = (
-                    torch.arange(batch_size + 1, dtype=torch.int32, device=device)
-                    * sequence_length
+                    torch.arange(batch_size + 1, dtype=torch.int32, device=device) * sequence_length
                 )
                 self._dense_cu_seqlens_key = cache_key
             cu_seqlens = self._dense_cu_seqlens

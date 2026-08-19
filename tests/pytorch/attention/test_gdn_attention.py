@@ -330,9 +330,7 @@ def test_gdn_state_round_trip_matches_single_shot():
     )
 
     with torch.no_grad():
-        full_output, full_state = attention(
-            q, k, v, g=g, beta=beta, output_final_state=True
-        )
+        full_output, full_state = attention(q, k, v, g=g, beta=beta, output_final_state=True)
         first_output, first_state = attention(
             q[:, :split],
             k[:, :split],
