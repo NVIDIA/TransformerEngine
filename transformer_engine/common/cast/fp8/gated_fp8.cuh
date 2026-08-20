@@ -203,12 +203,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
           }
         }
         float after_dact = dact_x * grad_elt * gate_elt;
-        float after_dgate;
-        if constexpr (std::is_same<ParamOP, SiTUGLUParam>::value) {
-          after_dgate = dgate_elt * act_x * grad_elt;
-        } else {
-          after_dgate = dgate_elt ? act_x * grad_elt : 0.0f;
-        }
+        float after_dgate = dgate_elt * act_x * grad_elt;
 
         out_act_sh_curr[shmem_idx] = static_cast<OType>(scale * after_dact);
         out_gate_sh_curr[shmem_idx] = static_cast<OType>(scale * after_dgate);

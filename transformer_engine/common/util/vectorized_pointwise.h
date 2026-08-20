@@ -552,12 +552,7 @@ __launch_bounds__(unary_kernel_threads) __global__
       }
 
       ComputeType after_dgelu = Dactivation(gelu_in, p) * grad_val * gate_in;
-      ComputeType after_dgate;
-      if constexpr (std::is_same<Param, SiTUGLUParam>::value) {
-        after_dgate = grad_val * Activation(gelu_in, p) * dgate_in;
-      } else {
-        after_dgate = dgate_in ? grad_val * Activation(gelu_in, p) : 0.0f;
-      }
+      ComputeType after_dgate = dgate_in * grad_val * Activation(gelu_in, p);
 
       if (requires_amax) {
         __builtin_assume(max >= 0);

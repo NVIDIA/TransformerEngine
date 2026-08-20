@@ -274,11 +274,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
           }
 
           after_act_elt = dact_x * grad_elt * gate_elt;
-          if constexpr (std::is_same<ParamOP, SiTUGLUParam>::value) {
-            after_gate_elt = dgate_elt * act_x * grad_elt;
-          } else {
-            after_gate_elt = dgate_elt ? act_x * grad_elt : 0.0f;
-          }
+          after_gate_elt = dgate_elt * act_x * grad_elt;
         } else {
           after_act_elt = ActOP(act_elt, p) * gate_elt;
         }
@@ -548,11 +544,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
               }
 
               after_act_elt = dact_x * grad_elt * gate_elt;
-              if constexpr (std::is_same<ParamOP, SiTUGLUParam>::value) {
-                after_gate_elt = dgate_elt * act_x * grad_elt;
-              } else {
-                after_gate_elt = dgate_elt ? act_x * grad_elt : 0.0f;
-              }
+              after_gate_elt = dgate_elt * act_x * grad_elt;
               after_act_rowwise[j] = after_act_elt;
               after_gate_rowwise[j] = after_gate_elt;
             } else {
