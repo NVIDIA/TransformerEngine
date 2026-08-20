@@ -698,8 +698,15 @@ class DotProductAttention(TransformerEngineBaseModule):
         softmax_type: str = "vanilla",
         return_max_logit: Optional[bool] = False,
         name: Optional[str] = None,
+        *,
+        _declared_output_quantizer_role: Optional[QuantizerRole] = None,
+        _declared_grad_input_quantizer_role: Optional[QuantizerRole] = None,
     ) -> None:
-        super().__init__(name=name)
+        super().__init__(
+            name=name,
+            _declared_output_quantizer_role=_declared_output_quantizer_role,
+            _declared_grad_input_quantizer_role=_declared_grad_input_quantizer_role,
+        )
 
         # Cache the native recipe labels inferred from custom DPA quantizers.
         # ``init_fp8_metadata`` runs on every forward, while the quantizers only

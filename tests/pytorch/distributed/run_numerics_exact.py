@@ -19,6 +19,7 @@ from transformer_engine.common.recipe import (
     Recipe,
     QParams,
     CustomRecipe,
+    quantizer_factory,
 )
 from transformer_engine.pytorch import NVFP4Quantizer
 from transformer_engine.pytorch.constants import NVFP4_BLOCK_SCALING_SIZE
@@ -66,6 +67,7 @@ def get_nvfp4_quantizer_factory():
         A factory function that takes a QuantizerRole and returns a quantizer instance
     """
 
+    @quantizer_factory(key=("distributed_numerics_exact_nvfp4_reference", 1))
     def factory(role):
         is_weight = (
             role is not None

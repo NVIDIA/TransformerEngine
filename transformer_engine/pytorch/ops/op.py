@@ -24,16 +24,53 @@ from ..quantization import (
 from ..tensor import Quantizer
 
 
+def _only_recipe_fields_changed(
+    old_config: Hashable,
+    new_config: Hashable,
+    allowed_fields: Iterable[str],
+) -> bool:
+    """Whether unequal recipe configs differ only in explicitly allowed top-level fields."""
+    if old_config == new_config:
+        return False
+    allowed_field_names = frozenset(allowed_fields)
+
+    def without_allowed_fields(config: Hashable) -> tuple:
+        return tuple(item for item in config if item[0] not in allowed_field_names)
+
+    return without_allowed_fields(old_config) == without_allowed_fields(new_config)
+
+
 def _only_delayed_history_length_changed(
     old_config: Hashable,
     new_config: Hashable,
 ) -> bool:
     """Whether delayed-scaling configs differ only in history length."""
+    return _only_recipe_fields_changed(
+        old_config,
+        new_config,
+        ("amax_history_len",),
+    )
 
-    def without_history_length(config: Hashable) -> tuple:
-        return tuple(item for item in config if item[0] != "amax_history_len")
 
-    return without_history_length(old_config) == without_history_length(new_config)
+def _is_preserved_fusible_recipe_transition(
+    recipe: Recipe,
+    old_config: Hashable,
+    new_config: Hashable,
+) -> bool:
+    """Whether this config delta is a transition already preserved by fusible ops.
+
+    Delayed recipes retain only their legacy history-resize path. For other recipes,
+    ``backward_override`` may change because the fuser already rebuilds the affected
+    topology and the field does not alter quantizer construction. Every other
+    same-class semantic delta remains unsupported.
+    """
+    if recipe.delayed():
+        return _only_delayed_history_length_changed(old_config, new_config)
+    return _only_recipe_fields_changed(
+        old_config,
+        new_config,
+        ("backward_override",),
+    )
 
 
 @dataclasses.dataclass
@@ -350,9 +387,10 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
             self._recipe_type is recipe_type
             and self._recipe_config is not None
             and self._recipe_config != recipe_config
-            and not (
-                recipe.delayed()
-                and _only_delayed_history_length_changed(self._recipe_config, recipe_config)
+            and not _is_preserved_fusible_recipe_transition(
+                recipe,
+                self._recipe_config,
+                recipe_config,
             )
         ):
             FP8GlobalStateManager.abort_current_amax_reduction()

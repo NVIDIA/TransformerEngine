@@ -924,10 +924,22 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
     candidate validation and activation through their corresponding hooks.
     """
 
-    def __init__(self, name: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        name: Optional[str] = None,
+        *,
+        _declared_output_quantizer_role: Optional[QuantizerRole] = None,
+        _declared_grad_input_quantizer_role: Optional[QuantizerRole] = None,
+    ) -> None:
         super().__init__()
         if not torch.cuda.is_available():
             raise RuntimeError("TransformerEngine needs CUDA.")
+        for attribute, role in (
+            ("_declared_output_quantizer_role", _declared_output_quantizer_role),
+            ("_declared_grad_input_quantizer_role", _declared_grad_input_quantizer_role),
+        ):
+            if role is not None and not isinstance(role, QuantizerRole):
+                raise TypeError(f"{attribute} must be a QuantizerRole or None")
         self.name = name
         self.next_iter_when_debug_should_be_run = 0
         self.fp8_initialized = False
@@ -953,8 +965,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self._output_quantizer_role: Optional[QuantizerRole] = None
         self._grad_input_quantizer_role: Optional[QuantizerRole] = None
         # Stable defaults declared by a composed parent before runtime planning.
-        self._declared_output_quantizer_role: Optional[QuantizerRole] = None
-        self._declared_grad_input_quantizer_role: Optional[QuantizerRole] = None
+        self._declared_output_quantizer_role = _declared_output_quantizer_role
+        self._declared_grad_input_quantizer_role = _declared_grad_input_quantizer_role
         self._role_revision = 0
         self._quantization_runtime: Optional[_QuantizationRuntime] = None
 

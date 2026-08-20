@@ -1730,6 +1730,110 @@ def test_mha_declares_all_boundary_topology_variants(attention_type, input_layer
     )
 
 
+@pytest.mark.parametrize(
+    "name",
+    (pytest.param(None, id="unnamed"), pytest.param("mha", id="named")),
+)
+@pytest.mark.parametrize("input_layernorm", (False, True))
+def test_delayed_qmi_mha_first_forward_preserves_initialized_runtimes(
+    name,
+    input_layernorm,
+):
+    """Initial composed roles are not mistaken for a delayed runtime update."""
+    available, reason = is_fp8_available(return_reason=True)
+    if not available:
+        pytest.skip(reason)
+
+    def runtime_object_ids(owner):
+        runtime = owner._quantization_runtime  # pylint: disable=protected-access
+        assert runtime is not None
+        forward_state = runtime.forward_states[0]
+        backward_state = runtime.backward_states[0]
+        return tuple(
+            id(obj)
+            for obj in (
+                runtime,
+                forward_state,
+                backward_state,
+                forward_state.scale,
+                forward_state.amax_history,
+                backward_state.scale,
+                backward_state.amax_history,
+                *runtime.forward_quantizers,
+                *runtime.backward_quantizers,
+            )
+        )
+
+    FP8GlobalStateManager.reset()
+    recipe = DelayedScaling(amax_history_len=4)
+
+    try:
+        with quantized_model_init(recipe=recipe):
+            module = MultiheadAttention(
+                hidden_size=32,
+                num_attention_heads=2,
+                attention_dropout=0.0,
+                attn_mask_type="no_mask",
+                input_layernorm=input_layernorm,
+                fuse_qkv_params=True,
+                bias=False,
+                params_dtype=torch.bfloat16,
+                device="cuda",
+                name=name,
+            )
+
+        qkv = module.layernorm_qkv if input_layernorm else module.qkv
+        initialized_owners = _active_runtime_owners(module)
+        assert initialized_owners == [qkv, module.proj]
+        assert all(owner.primary_weights_in_fp8 for owner in initialized_owners)
+        semantic_dpa_name = "" if name is None else module.core_attention.name
+        semantic_qkv_name = "" if name is None else qkv.name
+        semantic_proj_name = "" if name is None else module.proj.name
+        assert all(
+            owner._role_revision == owner._quantization_runtime.role_revision == 0
+            for owner in initialized_owners
+        )  # pylint: disable=protected-access
+        assert qkv._quantization_runtime.key.forward_roles[-1] == QuantizerRole(
+            module_type="dpa",
+            tensor_type="qkv",
+            name=semantic_dpa_name,
+        )  # pylint: disable=protected-access
+        assert module.proj._quantization_runtime.key.backward_roles[-1] == QuantizerRole(
+            module_type="dpa",
+            tensor_type="do",
+            name=semantic_dpa_name,
+        )  # pylint: disable=protected-access
+        assert module.core_attention._declared_output_quantizer_role == QuantizerRole(
+            module_type="linear",
+            tensor_type="input",
+            name=semantic_proj_name,
+        )  # pylint: disable=protected-access
+        assert module.core_attention._declared_grad_input_quantizer_role == QuantizerRole(
+            module_type="linear",
+            tensor_type="grad_output",
+            name=semantic_qkv_name,
+        )  # pylint: disable=protected-access
+
+        before = {owner: runtime_object_ids(owner) for owner in initialized_owners}
+        inp = torch.randn(
+            8,
+            2,
+            32,
+            device="cuda",
+            dtype=torch.bfloat16,
+            requires_grad=True,
+        )
+        _run_update_step(module, recipe, inp)
+
+        assert all(runtime_object_ids(owner) == before[owner] for owner in initialized_owners)
+        assert all(
+            owner._role_revision == owner._quantization_runtime.role_revision == 0
+            for owner in initialized_owners
+        )  # pylint: disable=protected-access
+    finally:
+        FP8GlobalStateManager.reset()
+
+
 def test_explicit_mha_boundary_override_wins_and_can_restore_declared_role():
     """Public role overrides retain revision semantics above declared topology."""
     FP8GlobalStateManager.reset()

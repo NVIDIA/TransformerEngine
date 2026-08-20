@@ -18,7 +18,7 @@ from .op import (
     FusibleOperation,
     FusedOperation,
     OperationContext,
-    _only_delayed_history_length_changed,
+    _is_preserved_fusible_recipe_transition,
 )
 
 
@@ -635,9 +635,10 @@ class OperationFuser:
         if (
             recipe_type is self.recipe_type
             and self.recipe_config != recipe_config
-            and not (
-                isinstance(recipe, DelayedScaling)
-                and _only_delayed_history_length_changed(self.recipe_config, recipe_config)
+            and not _is_preserved_fusible_recipe_transition(
+                recipe,
+                self.recipe_config,
+                recipe_config,
             )
         ):
             FP8GlobalStateManager.abort_current_amax_reduction()

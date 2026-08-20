@@ -5,7 +5,7 @@
 """Multi-head Attention."""
 import os
 import collections
-from typing import Any, Callable, List, Optional, Tuple, Union
+from typing import Callable, List, Optional, Tuple, Union
 import torch
 
 from transformer_engine.pytorch.quantization import FP8GlobalStateManager, QuantizerRole
@@ -361,6 +361,15 @@ class MultiheadAttention(torch.nn.Module):
 
         qkv_parallel_mode = "column" if set_parallel_mode else None
 
+        # quantized_model_init eagerly creates runtimes for weight-owning children.
+        # Pass the final composed topology into their constructors so each initial
+        # runtime is created with the same roles it will use during execution.
+        qkv_output_role = QuantizerRole(
+            module_type="dpa",
+            tensor_type="qkv",
+            name=dpa_name,
+        )
+
         if self.attention_type == "self":
             parameters_split = None
             if not fuse_qkv_params:
@@ -390,8 +399,10 @@ class MultiheadAttention(torch.nn.Module):
                     normalization=normalization,
                     ub_name="qkv",
                     name=name + ".layernorm_linear_qkv" if name is not None else None,
+                    _declared_output_quantizer_role=qkv_output_role,
                     **common_gemm_kwargs,
                 )
+                qkv_producers = [self.layernorm_qkv]
             else:
                 self.qkv = Linear(
                     hidden_size,
@@ -402,8 +413,10 @@ class MultiheadAttention(torch.nn.Module):
                     parallel_mode=qkv_parallel_mode,
                     parameters_split=parameters_split,
                     name=name + ".linear_qkv" if name is not None else None,
+                    _declared_output_quantizer_role=qkv_output_role,
                     **common_gemm_kwargs,
                 )
+                qkv_producers = [self.qkv]
         elif self.attention_type == "cross":
             if self.input_layernorm:
                 self.layernorm_query = LayerNormLinear(
@@ -424,6 +437,7 @@ class MultiheadAttention(torch.nn.Module):
                     normalization=normalization,
                     ub_name="qkv",
                     name=name + ".layernorm_linear_q" if name is not None else None,
+                    _declared_output_quantizer_role=qkv_output_role,
                     **common_gemm_kwargs,
                 )
             else:
@@ -434,6 +448,7 @@ class MultiheadAttention(torch.nn.Module):
                     bias=bias,
                     return_bias=False,
                     parallel_mode=qkv_parallel_mode,
+                    _declared_output_quantizer_role=qkv_output_role,
                     **common_gemm_kwargs,
                 )
             self.key_value = Linear(
@@ -445,8 +460,16 @@ class MultiheadAttention(torch.nn.Module):
                 parallel_mode=qkv_parallel_mode,
                 parameters_split=("key", "value") if not fuse_qkv_params else None,
                 name=name + ".linear_kv" if name is not None else None,
+                _declared_output_quantizer_role=qkv_output_role,
                 **common_gemm_kwargs,
             )
+            qkv_producers = [
+                self.layernorm_query if self.input_layernorm else self.query_layer,
+                self.key_value,
+            ]
+
+        qkv_name = qkv_producers[0].name if name is not None else ""
+        proj_name = name + ".proj" if name is not None else ""
 
         # Attention.
         self.core_attention = DotProductAttention(
@@ -463,6 +486,16 @@ class MultiheadAttention(torch.nn.Module):
             attention_type=self.attention_type,
             softmax_type=self.softmax_type,
             name=name + ".core_attention" if name is not None else None,
+            _declared_output_quantizer_role=QuantizerRole(
+                module_type="linear",
+                tensor_type="input",
+                name=proj_name,
+            ),
+            _declared_grad_input_quantizer_role=QuantizerRole(
+                module_type="linear",
+                tensor_type="grad_output",
+                name=qkv_name,
+            ),
         )
 
         # Linear
@@ -477,68 +510,13 @@ class MultiheadAttention(torch.nn.Module):
             ub_overlap_ag=ub_overlap_ag,
             ub_name="proj",
             name=name + ".proj" if name is not None else None,
+            _declared_grad_input_quantizer_role=QuantizerRole(
+                module_type="dpa",
+                tensor_type="do",
+                name=dpa_name,
+            ),
             **common_gemm_kwargs,
         )
-
-        self._declare_quantizer_roles()
-
-    def _declare_quantizer_roles(self) -> None:
-        """Declare stable topology at the boundaries between QKV, DPA, and proj.
-
-        MHA contains three submodules connected as follows::
-
-            Forward:   QKV linear ──(QKV tensor)──> DPA ──(O tensor)──> Proj linear
-            Backward:  QKV linear <──(dQKV tensor)── DPA <──(dO tensor)── Proj linear
-
-        Each child owns its quantizers, while these declarations describe the
-        consumer of each boundary tensor. The base runtime planner combines
-        them with explicit caller overrides independently of recipe policy.
-        Whether a particular forward uses a prepared boundary quantizer remains
-        a call-local execution decision. DPA alone retains a local compatibility
-        adapter for its dual-purpose O/dQKV fused-kernel slots while the legacy
-        ``fp8_mha`` switch remains supported.
-        """
-        dpa_name = self.core_attention.name or ""
-
-        # ── Boundary 1 (fwd): QKV linear output → consumed by DPA ────────
-        qkv_output_role = QuantizerRole(module_type="dpa", tensor_type="qkv", name=dpa_name)
-        if self.attention_type == "self":
-            qkv_producers = [self.layernorm_qkv if self.input_layernorm else self.qkv]
-        else:
-            qkv_producers = [
-                self.layernorm_query if self.input_layernorm else self.query_layer,
-                self.key_value,
-            ]
-        for qkv_producer in qkv_producers:
-            qkv_producer.fast_setattr(
-                "_declared_output_quantizer_role",
-                qkv_output_role,
-            )
-
-        # ── Boundary 2 (bwd): Proj grad-input (dO) → consumed by DPA ─────
-        self.proj.fast_setattr(
-            "_declared_grad_input_quantizer_role",
-            QuantizerRole(module_type="dpa", tensor_type="do", name=dpa_name),
-        )
-
-        # ── Boundary 3 (fwd): DPA output (O) → consumed by Proj linear ───
-        proj_name = self.proj.name or ""
-        self.core_attention.fast_setattr(
-            "_declared_output_quantizer_role",
-            QuantizerRole(module_type="linear", tensor_type="input", name=proj_name),
-        )
-
-        # ── Boundary 4 (bwd): DPA grad-input (dQKV) → consumed by QKV linear
-        qkv_linear = qkv_producers[0]
-        qkv_name = qkv_linear.name or ""
-        self.core_attention.fast_setattr(
-            "_declared_grad_input_quantizer_role",
-            QuantizerRole(module_type="linear", tensor_type="grad_output", name=qkv_name),
-        )
-
-    def fast_setattr(self, name: str, value: Any) -> None:
-        """Fast attribute set for non-parameter fields."""
-        self.__dict__[name] = value
 
     def _create_qk_norm_modules(
         self,

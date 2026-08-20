@@ -1332,8 +1332,15 @@ class LayerNormLinear(TransformerEngineBaseModule):
         delay_wgrad_compute: bool = False,
         symmetric_ar_type: Optional[str] = None,
         name: Optional[str] = None,
+        *,
+        _declared_output_quantizer_role: Optional[QuantizerRole] = None,
+        _declared_grad_input_quantizer_role: Optional[QuantizerRole] = None,
     ) -> None:
-        super().__init__(name)
+        super().__init__(
+            name,
+            _declared_output_quantizer_role=_declared_output_quantizer_role,
+            _declared_grad_input_quantizer_role=_declared_grad_input_quantizer_role,
+        )
 
         params_dtype = torch.get_default_dtype() if params_dtype is None else params_dtype
         self.in_features = in_features
