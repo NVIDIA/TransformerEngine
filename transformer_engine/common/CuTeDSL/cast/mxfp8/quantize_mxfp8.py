@@ -78,6 +78,9 @@ FP8E4M3_MAX_NORM_RCP = 1.0 / FP8E4M3_MAX_NORM
 FP8E5M2_MAX_NORM = 57344.0
 FP8E5M2_MAX_NORM_RCP = 1.0 / FP8E5M2_MAX_NORM
 
+# If N is not divisible by 16, writing quantized FP8 output with N bytes per row will fail because
+# TMA requires 16-byte alignment for each row
+SYM_N_DIVISIBILITY = 16
 
 SUPPORTED_ACTIVATIONS = {
     "relu": act_relu,
@@ -260,8 +263,35 @@ def quantize_rowwise_mxfp8(
 
         # Each wave we read PACK_SIZE elements, and we have WAVES waves, so we read WAVES * PACK_SIZE (= MXFP8_BLOCK_SCALING_SIZE) elements in total.
         in_r = [[None] * PACK_SIZE for _ in range(WAVES)]
+        # Don't repeat these OOB masking computation in the loop
+        thread_row_start = tile_row_start + tidx // CTA_THREADS_X
+        thread_col_start = tile_col_start + (tidx % CTA_THREADS_X) * MXFP8_BLOCK_SCALING_SIZE
+        thread_row_oob = thread_row_start >= M
+        # PACK_SIZE must divide every term of `thread_col_start + start` and N itself, or a
+        # pack could straddle the N boundary and the check below would be wrong. TILE_X is a
+        # tunable, so it is asserted rather than assumed.
+        assert MXFP8_BLOCK_SCALING_SIZE % PACK_SIZE == 0
+        assert SYM_N_DIVISIBILITY % PACK_SIZE == 0
+        assert TILE_X % PACK_SIZE == 0
         for w in cutlass.range_constexpr(WAVES):
             start = (w * PACK_SIZE + offset) % MXFP8_BLOCK_SCALING_SIZE
+            # thread_col_start + start >= N means "if the first element in this pack is OOB"
+            # If the first element is OOB, then (obviously) elements after it within this pack must be OOB
+            # If the first element is not OOB, then elements after it within this pack must be not OOB either.
+            # Proof:
+            # (1) when the first element is not OOB, we have thread_col_start + start < N,
+            #     which implies N - (thread_col_start + start) > 0
+            # (2) with the assertions above:
+            #     - N is divisible by SYM_N_DIVISIBILITY, so N is also divisible by PACK_SIZE
+            #     - thread_col_start = tile_col_start + (tidx % CTA_THREADS_X) * MXFP8_BLOCK_SCALING_SIZE is divisible by PACK_SIZE
+            #       because TILE_X and MXFP8_BLOCK_SCALING_SIZE are both divisible by PACK_SIZE
+            #     - start = (w * PACK_SIZE + bank_group * PACK_SIZE) % MXFP8_BLOCK_SCALING_SIZE is also divisible by PACK_SIZE
+            #       because MXFP8_BLOCK_SCALING_SIZE is a multiple of PACK_SIZE
+            #     so N - (thread_col_start + start) must be divisible by PACK_SIZE
+            # Therefore, N - (thread_col_start + start) >= PACK_SIZE because PACK_SIZE is the minimal number
+            # for (1) and (2) to hold, which implies thread_col_start + start + PACK_SIZE -1 < N
+            # Hence, we only need to check if the first element is OOB to determine if the whole pack is OOB
+            thread_col_oob = thread_col_start + start >= N
             for i in cutlass.range_constexpr(PACK_SIZE):
                 x = Float32(sX_thread_rw[0, start + i])
                 if cutlass.const_expr(WITH_DACT):
@@ -278,14 +308,7 @@ def quantize_rowwise_mxfp8(
                         # This is fine for non-activation cases, but for activation cases,
                         # op(0) might not be 0 which will pollute the amax and dbias.
                         # So we must manually mask the OOB region here.
-                        global_row = tile_row_start + tidx // CTA_THREADS_X
-                        global_col = (
-                            tile_col_start
-                            + (tidx % CTA_THREADS_X) * MXFP8_BLOCK_SCALING_SIZE
-                            + start
-                            + i
-                        )
-                        if global_row >= M or global_col >= N:
+                        if thread_row_oob or thread_col_oob:
                             x = Float32(0.0)
                 # Accumulate to the per-thread dbias register buffer for this tile if WITH_DBIAS
                 if cutlass.const_expr(WITH_DBIAS):
@@ -413,6 +436,9 @@ def quantize_colwise_mxfp8(
                 rX_thread_f32[i] = rX_thread_f32[i] * dop(Float32(sA_thread[i]))
         elif cutlass.const_expr(WITH_ACT):
             op = SUPPORTED_ACTIVATIONS[ACTIVATION]
+            # Don't repeat these OOB masking computation in the loop
+            thread_col_start = tile_col_start + tidx
+            thread_col_oob = thread_col_start >= N
             for i in cutlass.range_constexpr(MXFP8_BLOCK_SCALING_SIZE):
                 rX_thread_f32[i] = op(rX_thread_f32[i])
                 # If the input shape is not divisible by the tile size,
@@ -421,9 +447,7 @@ def quantize_colwise_mxfp8(
                 # op(0) might not be 0 which will pollute the amax and dbias.
                 # So we must manually mask the OOB region here.
                 if not cutlass.const_expr(SKIP_MASKING):
-                    global_row = tile_row_start + i
-                    global_col = tile_col_start + tidx
-                    if global_row >= M or global_col >= N:
+                    if tile_row_start + i >= M or thread_col_oob:
                         rX_thread_f32[i] = Float32(0.0)
         # Accumulate fp32 activations to DBIAS before we truncate to half precision when the input is half precision
         if cutlass.const_expr(WITH_DBIAS):
@@ -2450,7 +2474,7 @@ def compile_cutedsl_function_from_cfg(cfg):
 
     kernel_obj = MXFP8QuantizeEntry(cfg)
     sym_M = cute.sym_int32()
-    sym_N = cute.sym_int32(divisibility=16)  # TMA requires 16 bytes alignment
+    sym_N = cute.sym_int32(divisibility=SYM_N_DIVISIBILITY)
     in_shape = out_shape = (sym_M, sym_N)
     # TE allocates scale tensors at a padded shape (see
     # MXFP8Quantizer::get_scale_shape in transformer_engine/pytorch/csrc):
