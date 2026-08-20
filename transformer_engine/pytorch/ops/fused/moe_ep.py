@@ -58,8 +58,7 @@ def _pack_grouped_linear_weights(op: GroupedLinear, *, block_scaled_cls: Optiona
             )
         if in_features % MXFP8_BLOCK_SCALING_SIZE != 0:
             raise ValueError(
-                f"MXFP8 weight K={in_features} is not divisible by "
-                f"{MXFP8_BLOCK_SCALING_SIZE}"
+                f"MXFP8 weight K={in_features} is not divisible by {MXFP8_BLOCK_SCALING_SIZE}"
             )
         scale_cols = in_features // MXFP8_BLOCK_SCALING_SIZE
         expected_scale_numel = num_groups * out_features * scale_cols
