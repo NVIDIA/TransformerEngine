@@ -31,7 +31,8 @@ typedef enum {
  *
  *  TWO_KERNEL   — router writes the Top-(k+1) cutoff and a second kernel accumulates
  *                 the histogram from the saved raw sigmoid scores.
- *  FUSED_ATOMIC — router directly accumulates the histogram with global atomics.
+ *  FUSED_ATOMIC — router writes the cutoff and directly accumulates the histogram with
+ *                 global atomics.
  */
 typedef enum {
   NVTE_QB_HISTOGRAM_TWO_KERNEL = 0,
@@ -107,8 +108,8 @@ void nvte_fused_topk_with_score_function_forward_with_indices(
 /*! \brief Kimi K3 Quantile Balancing fused-router forward.
  *
  *  The router selects Top-(k+1) from biased sigmoid scores, writes only the first
- *  k routes, and exposes the final selected value as the per-token cutoff.
- *  In FUSED_ATOMIC mode it also directly accumulates the QB histogram.
+ *  k routes, and writes the final selected value as the per-token cutoff in both
+ *  histogram modes. In FUSED_ATOMIC mode it also directly accumulates the QB histogram.
  *  bin_bounds must contain finite FP32 values [lower, upper] with lower < upper. This entry point
  *  validates the device-resident values and synchronizes stream before launching the router.
  */

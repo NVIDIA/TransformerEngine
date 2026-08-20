@@ -250,11 +250,12 @@ __global__ void fused_topk_forward_simple_kernel(
 
     const CompType cutoff =
         extract_qb_cutoff_and_compact<QbMode>(topk_indices, topk_scores, topk, lane_id);
-    if constexpr (QbMode == QBMode::TwoKernel) {
+    if constexpr (kUseQB) {
       if (lane_id == 0) {
         qb_cutoff[token_offset_cur_warp] = cutoff;
       }
-    } else if constexpr (QbMode == QBMode::FusedAtomic) {
+    }
+    if constexpr (QbMode == QBMode::FusedAtomic) {
       accumulate_qb_histogram_epilogue<QbMode>(intermediate_output + pos_offset, cutoff,
                                                num_experts, lane_id, qb_bin_bounds, qb_num_bins,
                                                qb_histogram);
@@ -568,11 +569,12 @@ __global__ void fused_topk_with_score_function_forward_kernel(
 
     const CompType cutoff =
         extract_qb_cutoff_and_compact<QbMode>(topk_indices, topk_scores, topk, lane_id);
-    if constexpr (QbMode == QBMode::TwoKernel) {
+    if constexpr (kUseQB) {
       if (lane_id == 0) {
         qb_cutoff[token_offset_cur_warp] = cutoff;
       }
-    } else if constexpr (QbMode == QBMode::FusedAtomic) {
+    }
+    if constexpr (QbMode == QBMode::FusedAtomic) {
       accumulate_qb_histogram_epilogue<QbMode>(intermediate_output + pos_offset, cutoff,
                                                num_experts, lane_id, qb_bin_bounds, qb_num_bins,
                                                qb_histogram);

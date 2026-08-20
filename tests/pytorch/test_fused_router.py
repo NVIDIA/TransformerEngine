@@ -772,8 +772,7 @@ def test_qb_topk_plus_one_tie_and_bin_clamping(histogram_mode):
     torch.testing.assert_close(probs, reference["probs"])
     torch.testing.assert_close(routing_map, reference["routing_map"])
     torch.testing.assert_close(raw_scores, reference["raw_scores"])
-    if histogram_mode == QBHistogramMode.TWO_KERNEL:
-        torch.testing.assert_close(cutoff, reference["cutoff"])
+    torch.testing.assert_close(cutoff, reference["cutoff"])
     torch.testing.assert_close(histogram, reference["histogram"])
     assert histogram[:, 0].sum() > 0
     assert histogram[:, -1].sum() > 0
