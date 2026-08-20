@@ -2657,21 +2657,13 @@ def get_mxfp8_quantization_function(
             return False
 
         logger.debug("Compiling CuTeDSL MXFP8 quantization kernel for %s", cfg)
-        try:
-            compiled = compile_cutedsl_function_from_cfg(cfg)
-            tvm_ffi.register_global_func(fn_name, compiled, override=True)
-            return True
-        except Exception as e:  # pylint: disable=broad-exception-caught
-            logger.error(
-                "CuTeDSL MXFP8 kernel compilation & registration failed, falling back to the CUDA"
-                " C++ kernel: %s",
-                e,
-            )
-            return False
+        compiled = compile_cutedsl_function_from_cfg(cfg)
+        tvm_ffi.register_global_func(fn_name, compiled, override=True)
+        return True
     except Exception as e:  # pylint: disable=broad-exception-caught
         logger.error(
-            "Failed to retrieve CuTeDSL MXFP8 quantization function, falling back to the CUDA C++"
-            " kernel: %s",
+            "CuTeDSL MXFP8 kernel compilation & registration failed, falling back to the CUDA"
+            " C++ kernel: %s",
             e,
         )
         # Unconditionally fallback to CUDA path because we can't tell if this exception is transient or permanent.

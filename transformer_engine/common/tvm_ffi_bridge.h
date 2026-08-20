@@ -15,7 +15,6 @@
 
 #include <atomic>
 #include <cstdint>
-#include <cstdlib>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -29,6 +28,7 @@
 #include "transformer_engine/transformer_engine.h"
 #include "util/cuda_runtime.h"
 #include "util/logging.h"
+#include "util/system.h"
 
 namespace transformer_engine {
 namespace tvm_ffi_bridge {
@@ -339,13 +339,11 @@ class TVMFFICentral {
 
   static bool is_cutedsl_backend_enabled() {
     // Off by default; set NVTE_ENABLE_CUTEDSL_QUANT_BACKEND=1 to enable.
-    const char *flag = std::getenv("NVTE_ENABLE_CUTEDSL_QUANT_BACKEND");
-    return flag != nullptr && flag[0] != '0';
+    return transformer_engine::getenv<bool>("NVTE_ENABLE_CUTEDSL_QUANT_BACKEND");
   }
 
   static bool warn_if_cutedsl_backend_not_chosen() {
-    const char *flag = std::getenv("NVTE_WARN_IF_CUTEDSL_BACKEND_NOT_CHOSEN");
-    return flag != nullptr && flag[0] != '0';
+    return transformer_engine::getenv<bool>("NVTE_WARN_IF_CUTEDSL_BACKEND_NOT_CHOSEN");
   }
 
   const bool tvm_ffi_available_;  // libtvm_ffi.so loaded; false disables the backend
