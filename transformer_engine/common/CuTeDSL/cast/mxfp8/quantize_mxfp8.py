@@ -2375,7 +2375,13 @@ class MXFP8QuantizeEntry(MXFP8QuantizeKernelBase):
         )
         # These activation functions satisfy f(0) = 0 so we don't need to mask with OOB regions
         # (zeros filled by TMA are still zeros without applying activation to them)
-        self.ACT_NEED_MASKING = cfg.WITH_ACT and cfg.ACTIVATION not in ("relu", "gelu", "silu", "qgelu", "srelu")
+        self.ACT_NEED_MASKING = cfg.WITH_ACT and cfg.ACTIVATION not in (
+            "relu",
+            "gelu",
+            "silu",
+            "qgelu",
+            "srelu",
+        )
 
     @cute.jit
     def __call__(
