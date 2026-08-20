@@ -8,12 +8,12 @@ import itertools
 import torch
 import unittest
 from transformer_engine.pytorch.attention.dot_product_attention.context_parallel import (
-    _get_thd_padding_mask,
     _zero_thd_padding,
     get_batch_on_this_cp_rank,
     pad_thd_sequences_for_cp,
     generate_positional_ids_for_cp,
 )
+from transformer_engine.pytorch.attention.dot_product_attention.utils import get_thd_padding_mask
 
 try:
     import transformer_engine_torch as tex
@@ -838,7 +838,7 @@ class TestTHDPaddingMask(unittest.TestCase):
                     expected = self._reference_mask(cu_seqlens, cu_seqlens_padded)
                     cu_seqlens = cu_seqlens.cuda()
                     cu_seqlens_padded = cu_seqlens_padded.cuda()
-                    actual = _get_thd_padding_mask(expected.numel(), cu_seqlens, cu_seqlens_padded)
+                    actual = get_thd_padding_mask(expected.numel(), cu_seqlens, cu_seqlens_padded)
                     self.assertTrue(torch.equal(actual, expected))
 
     def test_zeroes_padding_without_changing_valid_rows(self):
@@ -883,7 +883,7 @@ class TestTHDPaddingMask(unittest.TestCase):
         graph.replay()
         torch.cuda.synchronize()
 
-        padding_mask = _get_thd_padding_mask(12, cu_seqlens, cu_seqlens_padded)
+        padding_mask = get_thd_padding_mask(12, cu_seqlens, cu_seqlens_padded)
         for tensor in tensors:
             self.assertEqual(torch.count_nonzero(tensor[padding_mask]).item(), 0)
             self.assertTrue(torch.all(tensor[~padding_mask] == 1))

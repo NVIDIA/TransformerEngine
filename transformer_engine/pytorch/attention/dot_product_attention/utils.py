@@ -1656,6 +1656,15 @@ def get_attention_backend(
 
 
 @torch.no_grad()
+def get_thd_padding_mask(num_tokens, cu_seqlens, cu_seqlens_padded):
+    """Identify inter-sequence padding in a flattened packed THD buffer."""
+    rows = torch.arange(num_tokens, device=cu_seqlens_padded.device)
+    sequence = torch.searchsorted(cu_seqlens_padded[1:], rows, right=True)
+    valid_end = cu_seqlens_padded[sequence] + cu_seqlens[sequence + 1] - cu_seqlens[sequence]
+    return rows >= valid_end
+
+
+@torch.no_grad()
 def get_padding_mask(
     batch_size: int,
     cu_seqlens_q: torch.Tensor = None,

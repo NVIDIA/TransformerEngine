@@ -745,7 +745,8 @@ void thd_grad_correction(Tensor grad, const Tensor &grad_per_step, const Tensor 
       thd_grad_correction_helper<byte, ZeroFunctor, CopyFunctor, 1>(grad, grad_per_step, cu_seqlens,
                                                                     stream);
     } else {
-      NVTE_ERROR("Byte gradients require copy/zero or zero/copy correction\n");
+      NVTE_ERROR(
+          "FP8 gradients stored as raw encoded bytes require copy/zero or zero/copy correction\n");
     }
     return;
   }

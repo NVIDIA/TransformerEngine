@@ -93,14 +93,6 @@ def get_bsh_dims(tensor_format):
     return batch_dim, seq_dim, head_dim
 
 
-def _get_thd_padding_mask(num_tokens, cu_seqlens, cu_seqlens_padded):
-    """Build a THD padding mask without host synchronization or per-sequence launches."""
-    rows = torch.arange(num_tokens, device=cu_seqlens_padded.device)
-    sequence = torch.searchsorted(cu_seqlens_padded[1:], rows, right=True)
-    valid_end = cu_seqlens_padded[sequence] + cu_seqlens[sequence + 1] - cu_seqlens[sequence]
-    return rows >= valid_end
-
-
 def _zero_thd_padding(tensors, cu_seqlens, cu_seqlens_padded):
     """Zero inter-sequence padding in one or more tensors."""
     if cu_seqlens is None or cu_seqlens_padded is None:
@@ -108,7 +100,9 @@ def _zero_thd_padding(tensors, cu_seqlens, cu_seqlens_padded):
     tensor = next((tensor for tensor in tensors if tensor is not None), None)
     if tensor is None:
         return
-    padding_mask = _get_thd_padding_mask(tensor.shape[0], cu_seqlens, cu_seqlens_padded)
+    padding_mask = dpa_utils.get_thd_padding_mask(
+        tensor.shape[0], cu_seqlens, cu_seqlens_padded
+    )
     for tensor in tensors:
         if tensor is not None:
             tensor[padding_mask] = 0
@@ -3415,7 +3409,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                         )
                         max_seqlen_kv_ = kv_range[1]
                         cu_seqlens_kv_per_step[i] = thd_cu_seqlens_kv_per_step[i]
-                        if fp8 and not fp8_recipe.mxfp8():
+                        if fp8:
                             q_part, k_part, v_part = [
                                 Float8Tensor.make_like(x, data=y, dtype=fwd_nominal_dtype)
                                 for x, y in zip([q_fp8, k_fp8, v_fp8], [q_part, k_part, v_part])
