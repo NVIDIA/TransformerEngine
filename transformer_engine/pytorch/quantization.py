@@ -657,58 +657,28 @@ class FP8GlobalStateManager:
         cls,
         forward: bool = True,
     ) -> None:
-        """Delayed scaling only. Concatenate, reduce, and split amaxes in the global buffer."""
-        # global_amax_buffer should only be non-empty for fp8 delayed scaling
+        """Run recipe state updates over the delayed-scaling global buffers."""
         qstate = cls.quantization_state
         for (
             buffer_key,
             amax_buffer,
         ) in qstate.global_amax_buffer.items():
-            # Check for forward or backward reduction.
+            # Check for forward or backward update.
             fwd_update, autocast_key = cls.split_key_in_buffer(buffer_key)
             if fwd_update != forward:
                 continue
             if len(amax_buffer) == 0:
                 continue
 
-            # Retrieve autocast specific args and concat amaxes.
             recipe, group = qstate.autocast_arguments[autocast_key]
-            contiguous_amax = torch.cat(amax_buffer)
-
-            # Reduction.
-            if (
-                recipe.reduce_amax
-                and torch.distributed.is_initialized()
-                and torch.distributed.get_world_size(group=group) > 1
-            ):
-                cls.reduce_tensor_across_group_op_max(contiguous_amax, group)
-
-            # Amax and scale update.
-            unfused_update = (
-                bool(int(os.getenv("NVTE_UNFUSED_FP8_UPDATE", "0")))
-                or callable(recipe.amax_compute_algo)
-                or callable(recipe.scaling_factor_compute_algo)
+            RecipeState.class_for_recipe(recipe).reduce_and_update_global_state(
+                recipe,
+                group,
+                forward,
+                amax_buffer,
+                qstate.global_amax_history_buffer[buffer_key],
+                qstate.global_scale_buffer[buffer_key],
             )
-
-            if not unfused_update:
-                tex.fused_amax_and_scale_update_after_reduction(
-                    contiguous_amax,
-                    qstate.global_amax_history_buffer[buffer_key],
-                    qstate.global_scale_buffer[buffer_key],
-                    recipe.amax_compute_algo,
-                    get_fp8_te_dtype(recipe, forward),
-                    recipe.margin,
-                )
-            else:
-                split_and_copy(contiguous_amax, amax_buffer, [x.numel() for x in amax_buffer])
-
-                for amax_history, scale in zip(
-                    qstate.global_amax_history_buffer[buffer_key],
-                    qstate.global_scale_buffer[buffer_key],
-                ):
-                    _amax_and_scale_update(
-                        amax_history, scale, get_fp8_max(recipe, forward), recipe
-                    )
 
     @staticmethod
     def get_unique_autocast_key(
@@ -1323,21 +1293,7 @@ class RecipeState(abc.ABC):
 
         """
 
-        cls = None
-        if recipe.delayed():
-            cls = DelayedScalingRecipeState
-        elif recipe.mxfp8():
-            cls = MXFP8BlockScalingRecipeState
-        elif recipe.float8_current_scaling():
-            cls = Float8CurrentScalingRecipeState
-        elif recipe.float8_block_scaling():
-            cls = Float8BlockScalingRecipeState
-        elif recipe.nvfp4():
-            cls = NVFP4BlockScalingRecipeState
-        elif recipe.custom():
-            cls = CustomRecipeState
-        else:
-            raise ValueError(f"{recipe.__class__.__name__} is not supported")
+        cls = RecipeState.class_for_recipe(recipe)
         return cls(
             recipe,
             mode=mode,
@@ -1345,6 +1301,35 @@ class RecipeState(abc.ABC):
             device=device,
             roles=roles,
         )
+
+    @staticmethod
+    def class_for_recipe(recipe: Recipe) -> type:
+        """Resolve the RecipeState subclass handling a recipe."""
+        if recipe.delayed():
+            return DelayedScalingRecipeState
+        if recipe.mxfp8():
+            return MXFP8BlockScalingRecipeState
+        if recipe.float8_current_scaling():
+            return Float8CurrentScalingRecipeState
+        if recipe.float8_block_scaling():
+            return Float8BlockScalingRecipeState
+        if recipe.nvfp4():
+            return NVFP4BlockScalingRecipeState
+        if recipe.custom():
+            return CustomRecipeState
+        raise ValueError(f"{recipe.__class__.__name__} is not supported")
+
+    @classmethod
+    def reduce_and_update_global_state(
+        cls,
+        recipe: Recipe,
+        group: Optional[dist_group_type],
+        forward: bool,
+        amax_buffer: List[torch.Tensor],
+        amax_history_buffer: List[torch.Tensor],
+        scale_buffer: List[torch.Tensor],
+    ) -> None:
+        """Update process-global state registered for this recipe."""
 
     @abc.abstractmethod
     def make_quantizers(self) -> list:
@@ -1413,6 +1398,47 @@ class DelayedScalingRecipeState(RecipeState):
     # Persistent training state inherited across role-driven rebuilds.
     # See ``RecipeState.inherit_state_from``.
     _persistent_state_buffers = ("scale", "amax_history")
+
+    @classmethod
+    def reduce_and_update_global_state(
+        cls,
+        recipe: DelayedScaling,
+        group: Optional[dist_group_type],
+        forward: bool,
+        amax_buffer: List[torch.Tensor],
+        amax_history_buffer: List[torch.Tensor],
+        scale_buffer: List[torch.Tensor],
+    ) -> None:
+        """Reduce amaxes and update delayed-scaling state."""
+        contiguous_amax = torch.cat(amax_buffer)
+
+        if (
+            recipe.reduce_amax
+            and torch.distributed.is_initialized()
+            and torch.distributed.get_world_size(group=group) > 1
+        ):
+            FP8GlobalStateManager.reduce_tensor_across_group_op_max(contiguous_amax, group)
+
+        unfused_update = (
+            bool(int(os.getenv("NVTE_UNFUSED_FP8_UPDATE", "0")))
+            or callable(recipe.amax_compute_algo)
+            or callable(recipe.scaling_factor_compute_algo)
+        )
+
+        if not unfused_update:
+            tex.fused_amax_and_scale_update_after_reduction(
+                contiguous_amax,
+                amax_history_buffer,
+                scale_buffer,
+                recipe.amax_compute_algo,
+                get_fp8_te_dtype(recipe, forward),
+                recipe.margin,
+            )
+        else:
+            split_and_copy(contiguous_amax, amax_buffer, [x.numel() for x in amax_buffer])
+
+            for amax_history, scale in zip(amax_history_buffer, scale_buffer):
+                _amax_and_scale_update(amax_history, scale, get_fp8_max(recipe, forward), recipe)
 
     def __init__(
         self,
