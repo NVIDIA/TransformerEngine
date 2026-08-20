@@ -77,6 +77,11 @@ def setup_common_extension() -> CMakeExtension:
     if bool(int(os.getenv("NVTE_BUILD_ACTIVATION_WITH_FAST_MATH", "0"))):
         cmake_flags.append("-DNVTE_BUILD_ACTIVATION_WITH_FAST_MATH=ON")
 
+    bolt_compatible = os.getenv("NVTE_ENABLE_BOLT_COMPATIBLE")
+    if bolt_compatible is not None:
+        bolt_compatible = "ON" if bool(int(bolt_compatible)) else "OFF"
+        cmake_flags.append(f"-DNVTE_ENABLE_BOLT_COMPATIBLE={bolt_compatible}")
+
     if bool(int(os.getenv("NVTE_WITH_CUBLASMP", "0"))):
         cmake_flags.append("-DNVTE_WITH_CUBLASMP=ON")
         cublasmp_dir = os.getenv("CUBLASMP_HOME") or metadata.distribution(

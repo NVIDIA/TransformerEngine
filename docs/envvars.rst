@@ -60,6 +60,12 @@ Build Configuration
    :Default: None
    :Description: Path to the CMake build directory for incremental builds. If set, CMake will use this directory for build artifacts.
 
+.. envvar:: NVTE_ENABLE_BOLT_COMPATIBLE
+
+   :Type: ``int`` (0 or 1)
+   :Default: ``1`` on Linux Arm64 (AArch64), ``0`` otherwise
+   :Description: Build the core, PyTorch, and JAX host ELFs with LLVM BOLT-compatible compiler and linker flags. On Arm64, this also disables the Cortex-A53 835769 and 843419 errata workarounds as required by BOLT. Set to ``0`` to disable the default on Arm64, or ``1`` to opt in on another supported Linux architecture. When using :envvar:`NVTE_CMAKE_BUILD_DIR`, use a fresh build directory after changing this setting.
+
 .. envvar:: NVTE_RELEASE_BUILD
 
    :Type: ``int`` (0 or 1)

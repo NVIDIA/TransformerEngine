@@ -15,6 +15,81 @@ endif()
 # Transformer Engine library
 project(transformer_engine LANGUAGES CUDA CXX)
 
+# BOLT-compatible builds are enabled by default on Linux Arm64, where function
+# layout has the largest impact on Grace CPUs. Other platforms remain opt-in.
+string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" _nvte_system_processor)
+set(NVTE_TARGET_IS_ARM64 OFF)
+if(_nvte_system_processor MATCHES "^(aarch64|arm64)$")
+  set(NVTE_TARGET_IS_ARM64 ON)
+endif()
+set(_nvte_bolt_compatible_default OFF)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NVTE_TARGET_IS_ARM64)
+  set(_nvte_bolt_compatible_default ON)
+endif()
+option(NVTE_ENABLE_BOLT_COMPATIBLE
+       "Build host ELF objects with LLVM BOLT-compatible compile and link flags"
+       ${_nvte_bolt_compatible_default})
+unset(_nvte_bolt_compatible_default)
+unset(_nvte_system_processor)
+
+if(NVTE_ENABLE_BOLT_COMPATIBLE)
+  if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    message(FATAL_ERROR
+            "NVTE_ENABLE_BOLT_COMPATIBLE is only supported for Linux ELF builds")
+  endif()
+
+  include(CheckCXXCompilerFlag)
+  check_cxx_compiler_flag("-fno-reorder-blocks-and-partition"
+                          NVTE_CXX_SUPPORTS_FNO_REORDER_BLOCKS_AND_PARTITION)
+  check_cxx_compiler_flag("-fno-jump-tables"
+                          NVTE_CXX_SUPPORTS_FNO_JUMP_TABLES)
+  if(NVTE_TARGET_IS_ARM64)
+    check_cxx_compiler_flag("-mno-fix-cortex-a53-835769"
+                            NVTE_CXX_SUPPORTS_MNO_FIX_CORTEX_A53_835769)
+    check_cxx_compiler_flag("-mno-fix-cortex-a53-843419"
+                            NVTE_CXX_SUPPORTS_MNO_FIX_CORTEX_A53_843419)
+  endif()
+  if(NOT NVTE_CXX_SUPPORTS_FNO_REORDER_BLOCKS_AND_PARTITION
+     OR NOT NVTE_CXX_SUPPORTS_FNO_JUMP_TABLES
+     OR (NVTE_TARGET_IS_ARM64
+         AND (NOT NVTE_CXX_SUPPORTS_MNO_FIX_CORTEX_A53_835769
+              OR NOT NVTE_CXX_SUPPORTS_MNO_FIX_CORTEX_A53_843419)))
+    message(FATAL_ERROR
+            "The host C++ compiler does not support the flags required for "
+            "NVTE_ENABLE_BOLT_COMPATIBLE")
+  endif()
+
+  # BOLT consumes the regular symbol table and emitted relocations. Shadow the
+  # cached strip tool for this configure without changing it for later builds.
+  set(CMAKE_STRIP "")
+endif()
+
+function(nvte_enable_bolt_compatible_compile_options TARGET_NAME)
+  if(NOT NVTE_ENABLE_BOLT_COMPATIBLE)
+    return()
+  endif()
+
+  target_compile_options(
+    ${TARGET_NAME}
+    PRIVATE
+    $<$<COMPILE_LANGUAGE:CXX>:-fno-reorder-blocks-and-partition>
+    $<$<COMPILE_LANGUAGE:CXX>:-fno-jump-tables>
+    $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-fno-reorder-blocks-and-partition>
+    $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-fno-jump-tables>
+  )
+
+  if(NVTE_TARGET_IS_ARM64)
+    target_compile_options(
+      ${TARGET_NAME}
+      PRIVATE
+      $<$<COMPILE_LANGUAGE:CXX>:-mno-fix-cortex-a53-835769>
+      $<$<COMPILE_LANGUAGE:CXX>:-mno-fix-cortex-a53-843419>
+      $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-mno-fix-cortex-a53-835769>
+      $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-mno-fix-cortex-a53-843419>
+    )
+  endif()
+endfunction()
+
 # CUDA Toolkit
 find_package(CUDAToolkit REQUIRED)
 if (CUDAToolkit_VERSION VERSION_LESS 12.1)
@@ -137,6 +212,7 @@ function(get_nccl_version OUT_VERSION INCLUDE_DIR)
       PARENT_SCOPE)
 endfunction()
 
+set(NVTE_BOLT_MIN_NCCL_VERSION "2.30.4")
 get_nccl_version(NCCL_VERSION "${NCCL_INCLUDE_DIR}")
 
 function(find_cublasmp_version OUT_VERSION OUT_INCLUDE_DIR SEARCH_DIR)
@@ -332,6 +408,7 @@ foreach(cuda_source IN LISTS transformer_engine_cuda_arch_specific_sources)
 endforeach()
 
 add_library(transformer_engine SHARED ${transformer_engine_SOURCES})
+nvte_enable_bolt_compatible_compile_options(transformer_engine)
 
 # This is TE-specific and should not apply to all targets
 target_link_options(
@@ -339,6 +416,22 @@ target_link_options(
   PRIVATE
   "LINKER:--version-script=${CMAKE_CURRENT_SOURCE_DIR}/libtransformer_engine.version"
 )
+if(NVTE_ENABLE_BOLT_COMPATIBLE)
+  target_link_options(
+    transformer_engine
+    PRIVATE
+    "LINKER:--emit-relocs"
+    "LINKER:-z,now"
+  )
+  if(NVTE_TARGET_IS_ARM64)
+    # The Cortex-A53 843419 workaround is applied by the linker.
+    target_link_options(
+      transformer_engine
+      PRIVATE
+      "LINKER:--no-fix-cortex-a53-843419"
+    )
+  endif()
+endif()
 
 # Disable CMake's automatic architecture flag injection.
 # All architectures are handled explicitly via per-source COMPILE_OPTIONS
@@ -395,6 +488,7 @@ endif()
 option(NVTE_ENABLE_NVSHMEM "Compile with NVSHMEM library" OFF)
 if (NVTE_ENABLE_NVSHMEM)
     add_subdirectory(nvshmem_api)
+    nvte_enable_bolt_compatible_compile_options(nvshmemapi)
     target_link_libraries(transformer_engine PUBLIC nvshmemapi)
     target_include_directories(transformer_engine PUBLIC ${NVSHMEMAPI_INCLUDE_DIR})
 endif()
@@ -452,11 +546,19 @@ endif()
 
 # -- NCCL EP (on by default, HT mode only) ---------------------------------
 # Set -DNVTE_WITH_NCCL_EP=OFF (or NVTE_WITH_NCCL_EP=0 in setup.py) to
-# skip NCCL EP entirely - useful on older images whose system NCCL is below
-# the 2.30.4 EP minimum.
+# skip NCCL EP entirely.
 option(NVTE_WITH_NCCL_EP "Build NCCL EP into libtransformer_engine.so" ON)
 if(NVTE_WITH_NCCL_EP)
-# SM>=90 and NCCL>=2.30.4 are gated at runtime in EPBackend::initialize.
+# SM>=90 and the NCCL version are gated at runtime in EPBackend::initialize.
+# BOLT-compatible builds additionally require the matching NCCL symbols at load
+# time because they use eager symbol binding.
+if(NVTE_ENABLE_BOLT_COMPATIBLE
+   AND NCCL_VERSION VERSION_LESS NVTE_BOLT_MIN_NCCL_VERSION)
+  message(FATAL_ERROR
+          "BOLT-compatible NCCL EP builds require NCCL >= "
+          "${NVTE_BOLT_MIN_NCCL_VERSION}, but found NCCL ${NCCL_VERSION} in "
+          "${NCCL_INCLUDE_DIR}/nccl.h")
+endif()
 # -- NCCL EP headers --------------------------------------------------------
 # Headers + libs are produced by the in-tree 3rdparty/nccl-extensions submodule build
 # (auto-built by setup.py via build_nccl_ep_submodule).
@@ -471,10 +573,9 @@ endif()
 message(STATUS "NCCL EP headers: ${NCCL_EP_INCLUDE_DIR}")
 
 # -- libnccl_ep.a -----------------------------------------------------------
-# Statically linked into libtransformer_engine.so. EPBackend::initialize checks
-# NCCL >= 2.30.4 before any nccl_ep call, so the newer NCCL symbols nccl_ep
-# imports stay unresolved (and harmless) under default ELF lazy binding when
-# the gate trips. LD_BIND_NOW environments lose this property.
+# Statically linked into libtransformer_engine.so. BOLT-compatible builds use
+# eager symbol binding, so the build-time and runtime NCCL minimum must remain
+# synchronized with the symbols imported by this archive.
 set(NCCL_EP_LIB_DIR "${NCCL_EP_SUBMODULE_ROOT}/build/lib")
 find_file(NCCL_EP_LIB
     NAMES libnccl_ep.a
