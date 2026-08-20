@@ -25,7 +25,9 @@
 #include "common.h"
 #include "common/util/cuda_runtime.h"
 #include "common/util/logging.h"
+#ifdef NVTE_WITH_CUTEDSL
 #include "tvm_ffi_bridge.h"
+#endif
 
 namespace transformer_engine {
 
@@ -1427,6 +1429,10 @@ extern "C" __attribute__((visibility("default"))) void nvte_set_cutedsl_quant_ba
   // Runtime toggle of the CuTeDSL quantize backend, overriding the
   // NVTE_ENABLE_CUTEDSL_QUANT_BACKEND env default.
   // Used for tests to compare the result of CuTeDSL and the original CUDA implementation.
+#ifdef NVTE_WITH_CUTEDSL
   transformer_engine::tvm_ffi_bridge::TVMFFICentral::getInstance().set_cutedsl_backend_enabled(
       enabled != 0);
+#else
+  (void)enabled;
+#endif
 }

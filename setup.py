@@ -89,6 +89,9 @@ def setup_common_extension() -> CMakeExtension:
         cusolvermp_dir = os.getenv("CUSOLVERMP_HOME", "/usr")
         cmake_flags.append(f"-DCUSOLVERMP_DIR={cusolvermp_dir}")
 
+    if not bool(int(os.getenv("NVTE_WITH_CUTEDSL", "1"))):
+        cmake_flags.append("-DNVTE_WITH_CUTEDSL=OFF")
+
     # NCCL EP (Hopper+): on by default; auto-skipped when no arch >= 90 is
     # targeted. Set NVTE_WITH_NCCL_EP=0 to force off.
     if nccl_ep_enabled(archs):
