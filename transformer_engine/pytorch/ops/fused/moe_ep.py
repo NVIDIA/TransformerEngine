@@ -14,76 +14,76 @@ import torch
 from ...constants import MXFP8_BLOCK_SCALING_SIZE
 from ...ep import get_ep_group
 from ...quantization import Recipe
-from ...tensor import Quantizer
-from ...tensor.mxfp8_tensor import MXFP8Tensor
+from ...tensor import GroupedTensor, Quantizer
 from ..basic import Combine, Dispatch, GroupedLinear, ScaledSwiGLU
 from ..fuser import register_forward_backward_fusion
 from ..op import FusedOperation, FusibleOperation, OperationContext
 
 
-def _weight_list(op: GroupedLinear) -> list[torch.Tensor]:
-    """Return per-expert weights in their registered order."""
-    return [getattr(op, f"weight{idx}") for idx in range(op.num_groups)]
-
-
-def _mxfp8_weight_k_major(weight: MXFP8Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """Transpose a TE ``(out, in)`` MXFP8 weight to MegaMoE ``(in, out)``.
-
-    Rowwise block scales travel with the ``in`` axis (K after the transpose).
-    GEMM-swizzled CuBLAS layouts are not a MegaMoE input; GroupedLinear stores
-    compact unswizzled scales under quantized model init.
-    """
-    if weight._with_gemm_swizzled_scales:
-        raise NotImplementedError(
-            "FusedMoeEp requires unswizzled MXFP8 weight scales, got a GEMM-swizzled tensor"
-        )
-    if weight._rowwise_data is None or weight._rowwise_scale_inv is None:
-        raise ValueError("MXFP8 weight is missing rowwise data or scales")
-    out_features, in_features = weight.size()
-    if in_features % MXFP8_BLOCK_SCALING_SIZE != 0:
-        raise ValueError(
-            f"MXFP8 weight K={in_features} is not divisible by {MXFP8_BLOCK_SCALING_SIZE}"
-        )
-    data = weight._rowwise_data.view(torch.float8_e4m3fn).transpose(0, 1).contiguous()
-    scale = (
-        weight._rowwise_scale_inv[:out_features, : in_features // MXFP8_BLOCK_SCALING_SIZE]
-        .view(torch.float8_e8m0fnu)
-        .transpose(0, 1)
-        .contiguous()
-    )
-    return data, scale
+def _grouped_weight(op: GroupedLinear) -> GroupedTensor:
+    """Return the single packed ``(E, out, in)`` parameter required by MegaMoE."""
+    if not op.single_grouped_weight or not isinstance(op.weight, GroupedTensor):
+        raise ValueError("FusedMoeEp requires GroupedLinear(single_grouped_weight=True)")
+    return op.weight
 
 
 def _pack_grouped_linear_weights(op: GroupedLinear, *, block_scaled_cls: Optional[type] = None):
-    """Pack TE ``(out, in)`` expert weights into MegaMoE ``(E, in, out)``.
+    """View a packed TE ``(E, out, in)`` weight as MegaMoE ``(E, in, out)``.
 
-    Dense BF16 stays a dense tensor. MXFP8 stays MXFP8: payloads and compact
-    scales are restacked without dequantizing. ``block_scaled_cls`` selects the
-    ``BlockScaledTensor`` type (cuDNN MegaMoE vs the PyTorch reference).
+    The permutation is intentionally not made contiguous. MegaMoE internally
+    permutes back to ``(E, out, in)`` before requesting contiguous storage, so
+    retaining this view lets that request reuse GroupedLinear's original packed
+    buffer. ``block_scaled_cls`` selects the ``BlockScaledTensor`` type (cuDNN
+    MegaMoE vs the PyTorch reference).
     """
-    weights = _weight_list(op)
-    if not weights:
-        raise ValueError("GroupedLinear has no per-expert weights to pack")
-    if all(isinstance(weight, MXFP8Tensor) for weight in weights):
+    weight = _grouped_weight(op)
+    num_groups = op.num_groups
+    out_features = op.out_features
+    in_features = op.in_features
+    expected_data_numel = num_groups * out_features * in_features
+    if weight.rowwise_data is None or weight.rowwise_data.numel() != expected_data_numel:
+        raise ValueError(
+            "GroupedLinear weight must have compact rowwise storage with shape "
+            f"({num_groups}, {out_features}, {in_features})"
+        )
+
+    data_nk = weight.rowwise_data.view(num_groups, out_features, in_features)
+    if weight.quantizer is not None:
+        recipe = weight.quantizer._get_compatible_recipe()
+        if recipe is None or not recipe.mxfp8():
+            raise TypeError("FusedMoeEp only supports dense BF16 or MXFP8 grouped weights")
+        if weight._with_gemm_swizzled_scales:
+            raise NotImplementedError(
+                "FusedMoeEp requires unswizzled MXFP8 weight scales, got a GEMM-swizzled tensor"
+            )
+        if in_features % MXFP8_BLOCK_SCALING_SIZE != 0:
+            raise ValueError(
+                f"MXFP8 weight K={in_features} is not divisible by "
+                f"{MXFP8_BLOCK_SCALING_SIZE}"
+            )
+        scale_cols = in_features // MXFP8_BLOCK_SCALING_SIZE
+        expected_scale_numel = num_groups * out_features * scale_cols
+        if weight.scale_inv is None or weight.scale_inv.numel() != expected_scale_numel:
+            raise ValueError(
+                "GroupedLinear MXFP8 scales must have compact rowwise storage with shape "
+                f"({num_groups}, {out_features}, {scale_cols})"
+            )
         if block_scaled_cls is None:
             from cudnn.moe_ep import BlockScaledTensor as block_scaled_cls
-        data = []
-        scale = []
-        for weight in weights:
-            expert_data, expert_scale = _mxfp8_weight_k_major(weight)
-            data.append(expert_data)
-            scale.append(expert_scale)
-        packed_data = torch.stack(data)
+        packed_data = data_nk.view(torch.float8_e4m3fn).permute(0, 2, 1)
+        packed_scale = (
+            weight.scale_inv.view(num_groups, out_features, scale_cols)
+            .view(torch.float8_e8m0fnu)
+            .permute(0, 2, 1)
+        )
         return block_scaled_cls(
             data=packed_data,
-            scale=torch.stack(scale),
+            scale=packed_scale,
             format="mxfp8",
             logical_shape=tuple(packed_data.shape),
             axis=1,
         )
-    if any(isinstance(weight, MXFP8Tensor) for weight in weights):
-        raise TypeError("cannot mix MXFP8 and dense expert weights")
-    return torch.stack([weight.transpose(0, 1).contiguous() for weight in weights])
+    return data_nk.permute(0, 2, 1)
 
 
 def _flatten_moe_weight(weight) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
@@ -106,26 +106,54 @@ def _restore_moe_weight(data: torch.Tensor, scale: Optional[torch.Tensor], block
     )
 
 
-def _grouped_linear_supported(op: GroupedLinear) -> bool:
-    weights = _weight_list(op) if not op.single_grouped_weight else []
+def _grouped_weight_grad(op: GroupedLinear, grad: torch.Tensor) -> list[Optional[torch.Tensor]]:
+    """Convert a MegaMoE ``(E, in, out)`` wgrad to one TE ``(E, out, in)`` grad."""
+    weight = _grouped_weight(op)
+    expected_shape = (op.num_groups, op.in_features, op.out_features)
+    if tuple(grad.shape) != expected_shape:
+        raise RuntimeError(
+            f"MegaMoE weight gradient must have shape {expected_shape}, got {tuple(grad.shape)}"
+        )
+    if not weight.requires_grad:
+        return [None]
 
-    def _weight_ok(weight: torch.Tensor) -> bool:
-        if weight.dtype is not torch.bfloat16:
-            return False
-        if isinstance(weight, MXFP8Tensor):
-            return True
-        return not hasattr(weight, "dequantize")
+    # copy_ performs the float32-to-parameter-dtype conversion while writing
+    # directly into the contiguous layout expected by the grouped parameter.
+    param_grad = torch.empty(
+        (op.num_groups, op.out_features, op.in_features),
+        dtype=weight.dtype,
+        device=grad.device,
+    )
+    param_grad.copy_(grad.transpose(1, 2))
+    return [param_grad]
+
+
+def _grouped_linear_supported(op: GroupedLinear) -> bool:
+    weight = op.weight if op.single_grouped_weight else None
+    weight_ok = (
+        isinstance(weight, GroupedTensor)
+        and weight.dtype is torch.bfloat16
+        and weight.rowwise_data is not None
+    )
+    if weight_ok and weight.quantizer is not None:
+        recipe = weight.quantizer._get_compatible_recipe()
+        weight_ok = (
+            recipe is not None
+            and recipe.mxfp8()
+            and not weight._with_gemm_swizzled_scales
+            and weight.rowwise_data is not None
+            and weight.scale_inv is not None
+        )
 
     return (
         not op.use_bias
         and not op._scale_bias
-        and not op.single_grouped_weight
+        and op.single_grouped_weight
         and not op.single_grouped_bias
         and not op._accumulate_into_main_grad
         and not op._is_distributed_weight()
         and not op.wgrad_store.delay_wgrad_compute()
-        and bool(weights)
-        and all(_weight_ok(weight) for weight in weights)
+        and weight_ok
     )
 
 
@@ -361,15 +389,10 @@ class FusedMoeEp(FusedOperation):
             route_metadata,
         )
 
-        # MegaMoE returns float32 grads in (E, in, out); TE parameters are (out, in).
-        fc1_param_grads = [
-            (grad_fc1[idx].transpose(0, 1).to(dtype=weight.dtype) if weight.requires_grad else None)
-            for idx, weight in enumerate(_weight_list(self.fc1))
-        ]
-        fc2_param_grads = [
-            (grad_fc2[idx].transpose(0, 1).to(dtype=weight.dtype) if weight.requires_grad else None)
-            for idx, weight in enumerate(_weight_list(self.fc2))
-        ]
+        # MegaMoE returns float32 grads in (E, in, out); each GroupedLinear has
+        # one packed (E, out, in) parameter.
+        fc1_param_grads = _grouped_weight_grad(self.fc1, grad_fc1)
+        fc2_param_grads = _grouped_weight_grad(self.fc2, grad_fc2)
         return (
             grad_input.to(dtype=input_.dtype),
             [(), fc1_param_grads, (), fc2_param_grads, ()],

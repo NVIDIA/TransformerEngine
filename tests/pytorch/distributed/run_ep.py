@@ -345,24 +345,34 @@ class TestEP(unittest.TestCase):
             if recipe is not None
             else nullcontext()
         )
-        with init_ctx:
-            fc1 = te_ops.GroupedLinear(
-                NUM_LOCAL_EXPERTS,
-                HIDDEN_DIM,
-                2 * intermediate_dim,
-                bias=False,
-                device=self.cfg.device,
-                dtype=torch.bfloat16,
-            )
-            activation = te_ops.ScaledSwiGLU()
-            fc2 = te_ops.GroupedLinear(
-                NUM_LOCAL_EXPERTS,
-                intermediate_dim,
-                HIDDEN_DIM,
-                bias=False,
-                device=self.cfg.device,
-                dtype=torch.bfloat16,
-            )
+        previous_single_param = os.environ.get("NVTE_GROUPED_LINEAR_SINGLE_PARAM")
+        os.environ["NVTE_GROUPED_LINEAR_SINGLE_PARAM"] = "1"
+        try:
+            with init_ctx:
+                fc1 = te_ops.GroupedLinear(
+                    NUM_LOCAL_EXPERTS,
+                    HIDDEN_DIM,
+                    2 * intermediate_dim,
+                    bias=False,
+                    device=self.cfg.device,
+                    dtype=torch.bfloat16,
+                    single_grouped_weight=True,
+                )
+                activation = te_ops.ScaledSwiGLU()
+                fc2 = te_ops.GroupedLinear(
+                    NUM_LOCAL_EXPERTS,
+                    intermediate_dim,
+                    HIDDEN_DIM,
+                    bias=False,
+                    device=self.cfg.device,
+                    dtype=torch.bfloat16,
+                    single_grouped_weight=True,
+                )
+        finally:
+            if previous_single_param is None:
+                del os.environ["NVTE_GROUPED_LINEAR_SINGLE_PARAM"]
+            else:
+                os.environ["NVTE_GROUPED_LINEAR_SINGLE_PARAM"] = previous_single_param
         combine = te_ops.Combine(buffer, num_local_tokens=TOKENS_PER_RANK)
         combine = te_ops.Combine(buffer, num_local_tokens=TOKENS_PER_RANK)
 
@@ -626,7 +636,7 @@ class TestEP(unittest.TestCase):
 
     @_eager_test_include
     def test_bf16_moe_sequential_vs_reference(self):
-        """Unfused BF16 Sequential matches a BF16 ``MoeEpReference``."""
+        """Fused BF16 MegaMoE Sequential matches a BF16 ``MoeEpReference``."""
         self._run_moe_sequential_vs_reference(quantization=None)
 
     @_eager_test_include
@@ -637,9 +647,9 @@ class TestEP(unittest.TestCase):
     def _run_moe_sequential_vs_reference(self, *, quantization):
         """Compare Sequential to ``MoeEpReference``.
 
-        MXFP8 Sequential uses MegaMoE when supported; the reference QDQ GEMM
-        operands to MXFP8 and matmuls in FP32. BF16 Sequential stays unfused
-        and the reference runs FP32 GEMMs with no QDQ.
+        Sequential uses MegaMoE when supported. The MXFP8 reference QDQ GEMM
+        operands to MXFP8 and matmuls in FP32; the BF16 reference runs FP32
+        GEMMs with no QDQ.
         """
         if not EAGER:
             self.skipTest("variable-size reference comparison requires eager EP mode")
@@ -660,22 +670,22 @@ class TestEP(unittest.TestCase):
         generator.manual_seed(3100 + self.cfg.rank)
         with torch.no_grad():
             for op in (fc1, fc2):
+                weights = op.weight.quantized_tensors
+                if weights is None:
+                    weights = op.weight.split_into_quantized_tensors()
                 for expert in range(NUM_LOCAL_EXPERTS):
                     weight = (
                         torch.randn(
-                            getattr(op, f"weight{expert}").shape,
+                            weights[expert].shape,
                             generator=generator,
                             dtype=torch.float32,
                             device=self.cfg.device,
                         )
                         * 0.1
                     ).to(torch.bfloat16)
-                    getattr(op, f"weight{expert}").copy_(weight)
+                    weights[expert].copy_(weight)
                     if quantization == "mxfp8":
-                        self.assertIsInstance(
-                            getattr(op, f"weight{expert}"),
-                            MXFP8Tensor,
-                        )
+                        self.assertIsInstance(weights[expert], MXFP8Tensor)
 
         topk_idx, tokens, topk_weights = _make_moe_inputs(
             self.cfg.rank,
@@ -691,14 +701,20 @@ class TestEP(unittest.TestCase):
             seq_out = model(seq_tokens, topk_idx, seq_topk_weights)
 
         forward_ops = model._module_groups[0]._forward_ops
-        if quantization == "mxfp8":
-            self.assertEqual(len(forward_ops), 1)
-            self.assertIsInstance(forward_ops[0][0], FusedMoeEp)
+        self.assertEqual(len(forward_ops), 1)
+        self.assertIsInstance(forward_ops[0][0], FusedMoeEp)
         self.assertIsInstance(seq_out, torch.Tensor)
         self.assertEqual(seq_out.dtype, torch.bfloat16)
 
         fc1_weight = _reference_weights(fc1)
         fc2_weight = _reference_weights(fc2)
+        for op, packed in ((fc1, fc1_weight), (fc2, fc2_weight)):
+            packed_data = packed.data if isinstance(packed, BlockScaledTensor) else packed
+            self.assertEqual(packed_data.data_ptr(), op.weight.rowwise_data.data_ptr())
+            self.assertTrue(packed_data.permute(0, 2, 1).is_contiguous())
+            if isinstance(packed, BlockScaledTensor):
+                self.assertEqual(packed.scale.data_ptr(), op.weight.scale_inv.data_ptr())
+                self.assertTrue(packed.scale.permute(0, 2, 1).is_contiguous())
         reference = MoeEpReference(
             num_experts=self.cfg.num_experts,
             hidden_size=HIDDEN_DIM,
@@ -753,14 +769,18 @@ class TestEP(unittest.TestCase):
         )
         torch.testing.assert_close(seq_topk_weights.grad, grad_topk_weights.float(), **tolerances)
         for op, ref_grad in ((fc1, grad_fc1), (fc2, grad_fc2)):
-            for expert in range(NUM_LOCAL_EXPERTS):
-                seq_grad = getattr(op, f"weight{expert}").grad
-                self.assertEqual(seq_grad.dtype, torch.bfloat16)
-                torch.testing.assert_close(
-                    seq_grad,
-                    ref_grad[expert].transpose(0, 1).to(dtype=seq_grad.dtype),
-                    **tolerances,
-                )
+            seq_grad = op.weight.grad
+            self.assertEqual(seq_grad.dtype, torch.bfloat16)
+            self.assertEqual(
+                tuple(seq_grad.shape),
+                (NUM_LOCAL_EXPERTS, op.out_features, op.in_features),
+            )
+            self.assertTrue(seq_grad.is_contiguous())
+            torch.testing.assert_close(
+                seq_grad,
+                ref_grad.transpose(1, 2).to(dtype=seq_grad.dtype),
+                **tolerances,
+            )
 
     @_zero_copy_test_include
     @_mxfp8_align_test
