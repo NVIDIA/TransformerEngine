@@ -656,8 +656,8 @@ inline void append_total_rows(std::string &block) {
   for (const Pass p : {Pass::Fwd, Pass::Bwd}) {
     const CounterSnapshot &c = (p == Pass::Fwd ? all_fwd : all_bwd);
     if (c.empty()) continue;
-    block += format_counter_line("tid=all", "dev=all", (std::string("all ") + pass_name(p)).c_str(),
-                                 c);
+    block +=
+        format_counter_line("tid=all", "dev=all", (std::string("all ") + pass_name(p)).c_str(), c);
   }
 }
 
