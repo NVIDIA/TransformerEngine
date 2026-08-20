@@ -11,6 +11,7 @@
 #ifndef TRANSFORMER_ENGINE_COMMON_FUSED_ATTN_CONFIG_AND_PARAMS_H_
 #define TRANSFORMER_ENGINE_COMMON_FUSED_ATTN_CONFIG_AND_PARAMS_H_
 
+#include <string>
 #include <tuple>
 
 #include "common/common.h"
@@ -20,10 +21,18 @@
 namespace transformer_engine {
 namespace fused_attn {
 
-// Which of the two graphs a config is being turned into. Declared here, rather than with the
-// diagnostics that also name it, because two things about a config depend on the direction:
-// make_cache_key() below, and graph_dims() further down.
+// The pair that names one build site: whose graphs, and which of the two a config is being turned
+// into. A site keeps its own graph cache and its own counters, so both halves travel together.
 //
+// Declared here, with the config, rather than with the cache or its diagnostics: they are the
+// vocabulary those two share, and the config is where their consumers start -- make_cache_key()
+// below turns a config into one site's key, and derive() fills the dimensions built from it.
+//
+// Backend::F16 is the arbitrary-seqlen backend; the max512 one keeps no graph cache, so it has no
+// site here. Narrower than the public NVTE_Fused_Attn_Backend, and not a substitute for it: this
+// names only the backends that build graphs.
+enum class Backend { F16, FP8 };
+
 // Passed in rather than derived, because a config cannot say which graph is being built from it.
 // check_for_forward_support and check_for_backward_support state which directions a caller wants
 // probed, and a backend query arriving from a framework has both set, so they answer a different
@@ -106,15 +115,19 @@ struct FusedAttnConfig {
   // derive() recomputes unconditionally, so a config whose inputs change can simply be re-derived.
   bool is_derived = false;
   // THD batch/token counts, the raw buckets. The graph dimensions built out of them are
-  // graph_max_seqlen_* below and, because the batch is direction-dependent, graph_dims().
+  // graph_max_seqlen_* below and, because the batch is direction-dependent, graph_batch_size_*.
   size_t bucketed_batch_size = 0;
   size_t bucketed_num_tokens_q = 0;
   size_t bucketed_num_tokens_kv = 0;
-  // Uses cu_seqlens or actual_seqlens.
+  // Uses cu_seqlens or actual_seqlens. One answer per backend, because the same question has two:
+  // the FP8 graphs need newer cuDNN and frontend versions for it than the F16 ones, so a config
+  // that can hand cu_seqlens straight to one cannot necessarily hand them to the other. Each
+  // backend reads its own and no more; nothing reads both.
   bool uses_cu_seqlens_directly = false;
+  bool fp8_uses_cu_seqlens_directly = false;
   // Whether a ragged (THD) graph is built at packed token-count dimensions with ragged Stats/LSE,
   // rather than at dense max_seqlen ones. Held here rather than asked for at each of the places
-  // that need it -- graph_max_seqlen_* below, and graph_dims() -- because the key and the
+  // that need it -- graph_max_seqlen_* and graph_batch_size_* below -- because the key and the
   // graph have to be built at the same dimensions, and two independent queries are two chances to
   // disagree. Unlike the flags above, this one depends on the device as
   // well as the cuDNN version, so a config carries the answer for the device it was derived on;
@@ -131,10 +144,22 @@ struct FusedAttnConfig {
   // dimensions the graph was built with -- a key that says otherwise is a hit on a graph of the
   // wrong shape -- and stating the substitution once is what keeps make_cache_key() and the graph
   // builders from drifting. Both passes build at the same sequence lengths; the batch size is the
-  // one dimension they disagree on, which is why that one comes from graph_dims() below instead of
-  // a field here.
+  // one dimension they disagree on, which is why that one is a pair below rather than a single
+  // field here.
   size_t graph_max_seqlen_q = 0;
   size_t graph_max_seqlen_kv = 0;
+  // The batch size the graph is built at and the width it expects ragged (THD) offsets in, one of
+  // each per direction. Pairs rather than one value apiece because the passes disagree on both,
+  // and a config is derived once and then probed and built for either direction, so no single
+  // field could answer: the selector derives a config and asks about forward and backward off that
+  // one copy. Whoever reads them names the direction they are building or keying for -- the graph
+  // builders, the code that binds runtime pointers to the built graph, and make_cache_key(), all
+  // of which have to agree, since a disagreement is a graph whose bound pointers do not describe
+  // the dimensions it was built at. All four are set together by the one condition in derive().
+  size_t graph_batch_size_fwd = 0;
+  size_t graph_batch_size_bwd = 0;
+  DType ragged_offset_type_fwd = DType::kInt32;
+  DType ragged_offset_type_bwd = DType::kInt32;
   // Elements per token for each ragged tensor, from the layout group and the head dimensions.
   // Shared with the cu_seqlens_padded_to_offsets kernel, so the offsets the graph is told to
   // expect and the offsets that are written cannot drift apart.
@@ -148,6 +173,28 @@ struct FusedAttnConfig {
   bool is_padding = false;
   bool is_causal = false;
   bool is_causal_bottom_right = false;
+  bool is_bias = false;
+  bool is_alibi = false;
+  bool is_softmax_offset = false;
+  bool is_mxfp8 = false;
+  // Whether the graph has a dropout node. The is_training term is what makes this one worth having
+  // as a field: a backward graph is only ever built for training, so the two directions used to
+  // spell this differently -- forward with the term, backward without -- and agreed only because
+  // every config that reaches a backward build has is_training set. One field states the rule the
+  // forward way, which is the safe way round: if that ever stops holding, a backward graph loses
+  // its dropout node rather than gaining one the cache key does not name.
+  bool is_dropout = false;
+  // Whether what each pass stores is itself quantized: O for a forward graph, dQKV for a backward
+  // one. Only the FP8 backend asks, and for it this is the whole of what separates the two
+  // tensor-scaling recipes -- FP8 out means the scale is known before the graph is built, F16 out
+  // means the graph has to compute it. Derived rather than asked at each build site so that the
+  // pairing of a pass with the tensor it writes is stated once.
+  //
+  // The FP8 builders read "not FP8" as "F16", which holds only because
+  // nvte_get_fused_attn_backend_v2 refuses an FP8 config whose output is neither before any graph
+  // is built; that refusal and these two fields are the same rule read from its two ends.
+  bool o_is_fp8 = false;
+  bool dqkv_is_fp8 = false;
 
   static constexpr size_t attr_sizes[] = {
       // basic attention settings
@@ -260,6 +307,22 @@ struct FusedAttnConfig {
   // which fields are dropped, and whether the batch is bucketed -- so a key built for one pass
   // cannot be handed to the other's cache.
   FusedAttnConfig make_cache_key(Pass pass) const;
+
+  // One line for the graph cache's level-2 trace: every field operator< compares, in its order,
+  // less device_id, which the trace's own prefix prints as the dev column. Abbreviated and terse
+  // on purpose, the reason to print a key at all being that two of these lines diff cleanly,
+  // naming the fields that cost an extra graph build.
+  //
+  // Four fields it prints that operator< does not compare, because a line without them cannot
+  // account for the values beside them: check_for_forward_support, which make_cache_key() sets
+  // from the pass and so is what says which direction's key this is, and the three bucketed_*
+  // inputs, which are what the normalization substituted into batch_size and the token counts.
+  //
+  // Defined here rather than with the diagnostics that print it because it is the third
+  // enumeration of these fields, after attr_sizes and operator< above. A field added to the key
+  // without being added here does not fail to build, it just stops appearing in the trace, so the
+  // three lists are kept where one change can see all of them.
+  std::string key_debug_string() const;
 };
 
 // Assert that `cfg` has been through derive(), for code about to read a derived field. Worth
@@ -276,32 +339,6 @@ inline void check_derived(const FusedAttnConfig &cfg) {
              "must pass through FusedAttnConfig::derive() first; see the entry points in "
              "fused_attn.cpp.");
 }
-
-// What a graph is built with that depends on which direction it is for, and so cannot be fields
-// derive() fills: one stored value cannot answer for both passes, and the selector derives a config
-// once and probes both directions off it.
-struct GraphDims {
-  // The batch size the graph is built at: the bucketed one where a ragged layout is packed, so
-  // that one graph serves every batch in its bucket, and the true one otherwise.
-  int64_t batch_size = 0;
-  // The width the graph expects ragged (THD) offsets in.
-  DType ragged_offset_type = DType::kInt32;
-};
-
-// Both of the above for one direction. One function returning the pair rather than two returning
-// one each, because a single condition decides both -- see the body -- and stating that condition
-// twice is what would let the two drift into a graph built at a bucketed batch that reads its
-// offsets at the other width.
-//
-// A free function rather than a member for the same reason as check_derived() above: it reads
-// public fields and computes, and is no part of the config's own invariants. Requires a derived
-// config and asserts it.
-//
-// Everything that has to agree about a graph asks this with the same pass: the builder, the code
-// that binds runtime pointers to the built graph, and make_cache_key(). That is the point of
-// having one place to ask, since a disagreement means a graph built at dimensions the pointers
-// bound to it do not describe.
-GraphDims graph_dims(const FusedAttnConfig &cfg, Pass pass);
 
 inline const FusedAttnConfig *get_fused_attn_config(NVTEFusedAttnConfig config) {
   NVTE_CHECK(config != nullptr, "NVTEFusedAttnConfig must not be NULL.");

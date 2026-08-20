@@ -20,13 +20,8 @@ namespace fused_attn {
 using namespace transformer_engine;
 namespace fe = cudnn_frontend;
 
-// Every graph-cache event raised here names the build site it came from. This file is the fp8
-// backend throughout; only the pass differs between call sites. Pass itself needs no
-// using-declaration: it is fused_attn::Pass, since the config answers by direction too.
-using graph_cache_debug::Backend;
-
 // fused attention FWD FP8 with FE 1.0+
-using SdpaFp8FwdGraphAndTensors =
+using Fp8FwdGraphAndTensors =
     std::tuple<std::shared_ptr<fe::graph::Graph>,
                std::shared_ptr<fe::graph::Tensor_attributes>,   // Q
                std::shared_ptr<fe::graph::Tensor_attributes>,   // K
@@ -49,99 +44,32 @@ using SdpaFp8FwdGraphAndTensors =
                std::shared_ptr<fe::graph::Tensor_attributes>,   // dropout_seed
                std::shared_ptr<fe::graph::Tensor_attributes>>;  // dropout_offset
 
-// The FP8 policy decisions a graph is built from, which the config cannot state on its own: which
-// quantization recipe the graph quantizes for, whether cu_seqlens can be handed to cuDNN directly,
-// and whether O arrives in F16. Each decides which tensors the graph has, and so which pointers
-// the variant pack has to bind, so the build and the execution ask the same question here rather
-// than each deciding for itself. Free functions for the reason check_derived() is one: they read
-// public fields and compute, and belong to this backend rather than to the config.
+// The three recipes these graphs are written for, spelled the same way at each of the four sites
+// that build or bind one:
+//
+//   is_mxfp8           = scaling_mode is MXFP8
+//   is_delayed_scaling = !is_mxfp8 &&  <this pass's output is FP8>
+//   is_current_scaling = !is_mxfp8 && !<this pass's output is FP8>
+//
+// which is exactly one of the three by construction, no combination of the booleans being able to
+// say two things at once. The output half comes from cfg.o_is_fp8 or cfg.dqkv_is_fp8 -- a forward
+// graph writes O, a backward one dQKV -- and reads "not FP8" as F16, which holds because
+// nvte_get_fused_attn_backend_v2 refuses an FP8 config whose output is neither. See there for the
+// rest of what these graphs cannot represent, and config_and_params.h for the two fields.
 //
 // Unlike the F16 path there is no bucketing to do, because FP8 has no ragged/THD support: the
 // graph's shapes are exactly the config's.
 
-// Which quantization recipe the graph is built for. One enum rather than the three mutually
-// exclusive booleans it replaces, since exactly one recipe applies to a config and a triple leaves
-// the other seven combinations expressible.
-enum class Fp8Recipe { DelayedScaling, CurrentScaling, MxFp8 };
-
-// The recipe `cfg` asks for, or a throw naming what FP8 cannot serve. The rejections are TE's own
-// rather than cuDNN's -- bias, ALiBi and the recipe combinations -- and a support probe reports
-// them the same way it reports a cuDNN refusal, as the reason the FP8 backend was not selected.
-//
-// The pass decides which tensor the recipe is read off: the forward graph writes O and the
-// backward writes dQKV, and a run can quantize one without the other, so each pass reads the
-// dtype of what it actually stores.
-static Fp8Recipe fp8_recipe(const FusedAttnConfig& cfg, Pass pass) {
-  check_derived(cfg);
-  const cudnn_frontend::DataType_t out_type =
-      get_cudnn_fe_dtype(static_cast<DType>(pass == Pass::Fwd ? cfg.o_dtype : cfg.dqkv_dtype));
-  const NVTEScalingMode scaling_mode = cfg.scaling_mode;
-  const bool is_bias = (cfg.bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS);
-  const bool is_alibi = (cfg.bias_type == NVTE_Bias_Type::NVTE_ALIBI);
-
-  NVTE_CHECK(!is_bias, "FP8 fused attention does not support pre/post_scale_bias yet!");
-  NVTE_CHECK(!is_alibi, "FP8 fused attention does not support ALiBi yet!");
-  const bool is_delayed_scaling = (scaling_mode == NVTE_DELAYED_TENSOR_SCALING) &&
-                                  (out_type == cudnn_frontend::DataType_t::FP8_E4M3 ||
-                                   out_type == cudnn_frontend::DataType_t::FP8_E5M2);
-  const bool is_current_scaling = (scaling_mode == NVTE_DELAYED_TENSOR_SCALING) &&
-                                  (out_type == cudnn_frontend::DataType_t::HALF ||
-                                   out_type == cudnn_frontend::DataType_t::BFLOAT16);
-  const bool is_mxfp8 =
-      (scaling_mode == NVTE_MXFP8_1D_SCALING) && (out_type == cudnn_frontend::DataType_t::HALF ||
-                                                  out_type == cudnn_frontend::DataType_t::BFLOAT16);
-  NVTE_CHECK(
-      is_delayed_scaling || is_current_scaling || is_mxfp8,
-      "FP8 fused attention only supports FP8DelayedScaling or FP8CurrentScaling or MXFP8 recipes!");
-  NVTE_CHECK(!is_mxfp8 || cudnnGetVersion() >= 92100,
-             "MXFP8 fused attention requires cuDNN 9.21.0 or later!");
-
-  if (is_delayed_scaling) return Fp8Recipe::DelayedScaling;
-  if (is_current_scaling) return Fp8Recipe::CurrentScaling;
-  return Fp8Recipe::MxFp8;
-}
-
-// Newer versions of cuDNN SDPA can accept sequence lengths directly as a cumulative
-// tensor. Take advantage of this if possible to avoid 1 extra kernel call. (Unlike
-// the F16 path, the FP8 path has no THD/ragged-offset support, so only the
-// cu_seqlens_to_actual_seqlens conversion applies here. Also note that the
-// needed versions of cuDNN backend and frontend are higher than for F16, which is why this does
-// not read cfg.uses_cu_seqlens_directly, the F16 path's answer to the same question.)
-static bool fp8_uses_cu_seqlens_directly(const FusedAttnConfig& cfg) {
-  const bool is_dropout = (cfg.is_training && cfg.dropout != 0.0f);
-  return
-      // Frontend 1.26 supports fp8+cu_seqlens (for the C++ API).
-      // Note: For the Python API, 1.27 is required.
-      CUDNN_FRONTEND_VERSION >= 12600 &&
-      // The frontend gates cu_seq_len support on min(compile-time, runtime) cuDNN
-      // version, so we'll do the same.
-      (CUDNN_VERSION >= 92500 && cudnnGetVersion() >= 92500) &&
-      // This extra restriction is needed because cuDNN frontend doesn't yet allow
-      // the combination of dropout and stats generation for the fprop unified engine,
-      // so any such request would always get routed to the old composite SDPA engine
-      // (which doesn't support cu_seqlens). Remove this restriction when possible.
-      !is_dropout;
-}
-
-// Whether O arrives in F16 rather than FP8, which is what decides if the backward graph has to
-// descale it on the way in. Read off O for both passes, unlike the recipe.
-static bool fp8_o_in_f16(const FusedAttnConfig& cfg) {
-  const cudnn_frontend::DataType_t o_tensor_type =
-      get_cudnn_fe_dtype(static_cast<DType>(cfg.o_dtype));
-  return o_tensor_type == cudnn_frontend::DataType_t::HALF ||
-         o_tensor_type == cudnn_frontend::DataType_t::BFLOAT16;
-}
-
 // Constructs the forward FP8 graph for one cache key, and only constructs it: whether cuDNN will
-// run it is settled by the caller, in lookup_or_cache_graph(), which is also where the plan
-// build eventually happens. Hence no cuDNN handle here -- describing a graph needs none, and every
-// call that does need one now sits on the other side of that boundary.
+// run it is settled by the caller, in cache_graph(), which is also where the plan build eventually
+// happens. Hence no cuDNN handle here -- describing a graph needs none, and every call that does
+// need one now sits on the other side of that boundary.
 //
 // Everything the graph's shape and topology depends on comes from `cfg`, so the build has one
-// source of truth and cannot drift from the caller that will bind pointers to it. The decisions
-// the config cannot state itself are asked for with Pass::Fwd, the same way the code binding
-// pointers to this graph asks.
-static SdpaFp8FwdGraphAndTensors create_graph_fp8_fwd(const FusedAttnConfig& cfg) {
+// source of truth and cannot drift from the caller that will bind pointers to it -- including the
+// forward half of the pass-indexed fields, read here the same way the code binding pointers to
+// this graph reads it.
+static Fp8FwdGraphAndTensors create_graph_fp8_fwd(const FusedAttnConfig& cfg) {
   const auto cudnn_runtime_version = cudnnGetVersion();
   const cudnn_frontend::DataType_t qkv_tensor_type =
       get_cudnn_fe_dtype(static_cast<DType>(cfg.qkv_dtype));
@@ -161,22 +89,17 @@ static SdpaFp8FwdGraphAndTensors create_graph_fp8_fwd(const FusedAttnConfig& cfg
   const NVTE_QKV_Layout qkv_layout = cfg.qkv_layout;
   const NVTE_QKV_Format o_format = cfg.o_format;
   const NVTE_QKV_Format qkv_scale_inv_format = cfg.qkv_scale_inv_format;
-  const NVTE_Bias_Type bias_type = cfg.bias_type;
-  const NVTE_Mask_Type mask_type = cfg.attn_mask_type;
-  const NVTE_Softmax_Type softmax_type = cfg.softmax_type;
   const bool bottom_right_diagonal = cfg.bottom_right_diagonal;
-  const bool is_bias = (bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS);
-  const bool is_causal = ((mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK) ||
-                          (mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK));
+  const bool is_bias = cfg.is_bias;
+  const bool is_causal = cfg.is_causal;
   const bool is_causal_bottom_right = cfg.is_causal_bottom_right;
   const bool is_padding = cfg.is_padding;
-  const bool is_dropout = (is_training && dropout_probability != 0.0f);
-  const bool is_softmax_offset = (softmax_type != NVTE_Softmax_Type::NVTE_VANILLA_SOFTMAX);
-  const Fp8Recipe recipe = fp8_recipe(cfg, Pass::Fwd);
-  const bool is_delayed_scaling = recipe == Fp8Recipe::DelayedScaling;
-  const bool is_current_scaling = recipe == Fp8Recipe::CurrentScaling;
-  const bool is_mxfp8 = recipe == Fp8Recipe::MxFp8;
-  const bool use_cu_seqlens_directly = fp8_uses_cu_seqlens_directly(cfg);
+  const bool is_dropout = cfg.is_dropout;
+  const bool is_softmax_offset = cfg.is_softmax_offset;
+  const bool is_mxfp8 = cfg.is_mxfp8;
+  const bool is_delayed_scaling = !is_mxfp8 && cfg.o_is_fp8;
+  const bool is_current_scaling = !is_mxfp8 && !cfg.o_is_fp8;
+  const bool use_cu_seqlens_directly = cfg.fp8_uses_cu_seqlens_directly;
 
   auto mha_graph = std::make_shared<fe::graph::Graph>();
   mha_graph->set_io_data_type(qkv_tensor_type)
@@ -420,17 +343,6 @@ static SdpaFp8FwdGraphAndTensors create_graph_fp8_fwd(const FusedAttnConfig& cfg
                         softmax_offset_tuple, padding_tuple, dropout_tuple);
 }
 
-// The FP8 forward graph cache and the only route to it. Both the execution path and the support
-// probe come through here, so a probe leaves behind exactly the entry a later execution finds.
-static std::shared_ptr<CachedGraph<SdpaFp8FwdGraphAndTensors>> cache_graph_fp8_fwd(
-    const FusedAttnConfig& cfg, cudnnHandle_t handle) {
-  static GraphCache<SdpaFp8FwdGraphAndTensors> cache;
-  // Asserted once here for both the key and the graph, which read the same derived fields.
-  check_derived(cfg);
-  return lookup_or_cache_graph(cache, cfg.make_cache_key(Pass::Fwd), Backend::FP8, Pass::Fwd,
-                               handle, [&] { return create_graph_fp8_fwd(cfg); });
-}
-
 void fused_attn_fp8_fwd_impl(const FusedAttnConfig& cfg, void* devPtrQ, void* devPtrK,
                              void* devPtrV, void* devPtrSoftmaxOffset, void* devPtrM, void* devPtrO,
                              void* devPtrDescaleQ, void* devPtrDescaleK, void* devPtrDescaleV,
@@ -441,27 +353,30 @@ void fused_attn_fp8_fwd_impl(const FusedAttnConfig& cfg, void* devPtrQ, void* de
                              cudaStream_t stream, cudnnHandle_t handle) {
   using namespace transformer_engine;
 
-  // Asked with the same pass the graph was built with, so that the tensors bound below and the
-  // ones the graph was built with cannot be decided differently. Also where an unserviceable
-  // configuration is rejected, ahead of the cache lookup.
-  const Fp8Recipe recipe = fp8_recipe(cfg, Pass::Fwd);
-  const bool is_delayed_scaling = recipe == Fp8Recipe::DelayedScaling;
-  const bool is_current_scaling = recipe == Fp8Recipe::CurrentScaling;
-  const bool use_cu_seqlens_directly = fp8_uses_cu_seqlens_directly(cfg);
+  // Asserted derived here because the reads below are the first derived fields this path touches,
+  // ahead of the get_graph() that asserts it for the build.
+  check_derived(cfg);
+
+  // Read from the same fields the graph was built from, so that the tensors bound below and the
+  // ones the graph was built with cannot be decided differently.
+  const bool is_mxfp8 = cfg.is_mxfp8;
+  const bool is_delayed_scaling = !is_mxfp8 && cfg.o_is_fp8;
+  const bool is_current_scaling = !is_mxfp8 && !cfg.o_is_fp8;
+  const bool use_cu_seqlens_directly = cfg.fp8_uses_cu_seqlens_directly;
 
   const int64_t b = static_cast<int64_t>(cfg.batch_size);
   // Not const: bound into the variant pack by address as a pass-by-value graph input.
   float scaling_factor = cfg.attn_scale;
-  const bool is_bias = (cfg.bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS);
+  const bool is_bias = cfg.is_bias;
   const bool is_padding = cfg.is_padding;
-  const bool is_dropout = (cfg.is_training && cfg.dropout != 0.0f);
-  const bool is_softmax_offset = (cfg.softmax_type != NVTE_Softmax_Type::NVTE_VANILLA_SOFTMAX);
+  const bool is_dropout = cfg.is_dropout;
+  const bool is_softmax_offset = cfg.is_softmax_offset;
 
   try {
-    auto cache_entry = cache_graph_fp8_fwd(cfg, handle);
+    auto cache_entry = get_graph<Backend::FP8, Pass::Fwd, create_graph_fp8_fwd>(cfg, handle);
     auto [mha_graph, Q, K, V, descale_q, descale_k, descale_v, descale_s, scale_s, scale_o,
           attn_scale, O, amax_s, amax_o, Stats, bias, softmax_offset, seq_q, seq_kv, dropout_seed,
-          dropout_offset] = cache_entry->tensors;
+          dropout_offset] = cache_entry->graph_and_tensors;
 
     // This graph is going to be used, so finish the build the cache deferred.
     build_plans(Backend::FP8, Pass::Fwd, *cache_entry);
@@ -476,8 +391,6 @@ void fused_attn_fp8_fwd_impl(const FusedAttnConfig& cfg, void* devPtrQ, void* de
       *workspace_size = plan_workspace_size + actual_seqlen_workspace_size;
       return;
     }
-    graph_cache_debug::record_exec(Backend::FP8, Pass::Fwd);
-
     // cuDNN stream check needs to be moved here to support dummy kernel calls with
     // null streams for sizing the cuDNN workspace.
     NVTE_CHECK_CUDNN(cudnnSetStream(handle, stream));
@@ -538,13 +451,14 @@ void fused_attn_fp8_fwd_impl(const FusedAttnConfig& cfg, void* devPtrQ, void* de
     }
 
     NVTE_CHECK_CUDNN_FE(mha_graph->execute(handle, variant_pack, workspace));
+    graph_cache_debug::record_execute(Backend::FP8, Pass::Fwd);
   } catch (cudnn_frontend::cudnnException& e) {
     NVTE_ERROR(e.what());
   }
 }
 
 // fused attention BWD FP8 with FE 1.0+
-using SdpaFp8BwdGraphAndTensors =
+using Fp8BwdGraphAndTensors =
     std::tuple<std::shared_ptr<fe::graph::Graph>,
                std::shared_ptr<fe::graph::Tensor_attributes>,   // Q
                std::shared_ptr<fe::graph::Tensor_attributes>,   // Q_t
@@ -589,14 +503,14 @@ using SdpaFp8BwdGraphAndTensors =
                std::shared_ptr<fe::graph::Tensor_attributes>>;  // dropout_offset
 
 // Builds the backward FP8 graph for one cache key, up to check_support() but not
-// graph.build_plans(); see CachedGraph for why the plan build is left to whoever runs the graph.
+// graph.build_plans(); see CacheEntry for why the plan build is left to whoever runs the graph.
 //
 // Everything the graph's shape and topology depends on is re-derived from `cfg` here, so the
 // build has one source of truth for them. Unlike the F16 path, FP8 has no ragged/THD support,
 // so the shapes are exactly the config's and need no bucketing from the caller.
 // The backward counterpart of create_graph_fp8_fwd; see there for why it constructs the graph
 // and nothing else.
-static SdpaFp8BwdGraphAndTensors create_graph_fp8_bwd(const FusedAttnConfig& cfg) {
+static Fp8BwdGraphAndTensors create_graph_fp8_bwd(const FusedAttnConfig& cfg) {
   const auto cudnn_runtime_version = cudnnGetVersion();
   const cudnn_frontend::DataType_t qkv_tensor_type =
       get_cudnn_fe_dtype(static_cast<DType>(cfg.qkv_dtype));
@@ -622,23 +536,20 @@ static SdpaFp8BwdGraphAndTensors create_graph_fp8_bwd(const FusedAttnConfig& cfg
   const NVTE_QKV_Format do_format = cfg.do_format;
   const NVTE_QKV_Format qkv_scale_inv_format = cfg.qkv_scale_inv_format;
   const NVTE_QKV_Format do_scale_inv_format = cfg.do_scale_inv_format;
-  const NVTE_Bias_Type bias_type = cfg.bias_type;
-  const NVTE_Mask_Type mask_type = cfg.attn_mask_type;
-  const NVTE_Softmax_Type softmax_type = cfg.softmax_type;
   const bool bottom_right_diagonal = cfg.bottom_right_diagonal;
   const bool deterministic = cfg.deterministic;
-  const bool is_bias = (bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS);
-  const bool is_causal = ((mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK) ||
-                          (mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK));
+  const bool is_bias = cfg.is_bias;
+  const bool is_causal = cfg.is_causal;
   const bool is_causal_bottom_right = cfg.is_causal_bottom_right;
   const bool is_padding = cfg.is_padding;
-  const bool is_dropout = (dropout_probability != 0.0f);
-  const bool is_softmax_offset = (softmax_type != NVTE_Softmax_Type::NVTE_VANILLA_SOFTMAX);
-  const Fp8Recipe recipe = fp8_recipe(cfg, Pass::Bwd);
-  const bool is_delayed_scaling = recipe == Fp8Recipe::DelayedScaling;
-  const bool is_current_scaling = recipe == Fp8Recipe::CurrentScaling;
-  const bool is_mxfp8 = recipe == Fp8Recipe::MxFp8;
-  const bool is_O_in_F16 = fp8_o_in_f16(cfg);
+  const bool is_dropout = cfg.is_dropout;
+  const bool is_softmax_offset = cfg.is_softmax_offset;
+  const bool is_mxfp8 = cfg.is_mxfp8;
+  const bool is_delayed_scaling = !is_mxfp8 && cfg.dqkv_is_fp8;
+  const bool is_current_scaling = !is_mxfp8 && !cfg.dqkv_is_fp8;
+  // Whether O arrived in F16 rather than FP8, which decides whether this graph has to descale it on
+  // the way in. Read off O, unlike the recipe above, because O is what the forward pass stored.
+  const bool is_O_in_F16 = !cfg.o_is_fp8;
 
   auto mha_graph = std::make_shared<fe::graph::Graph>();
 
@@ -1013,15 +924,6 @@ static SdpaFp8BwdGraphAndTensors create_graph_fp8_bwd(const FusedAttnConfig& cfg
                         bias_tuple, softmax_offset_tuple, padding_tuple, dropout_tuple);
 }
 
-// The backward counterpart of cache_graph_fp8_fwd; see there.
-static std::shared_ptr<CachedGraph<SdpaFp8BwdGraphAndTensors>> cache_graph_fp8_bwd(
-    const FusedAttnConfig& cfg, cudnnHandle_t handle) {
-  static GraphCache<SdpaFp8BwdGraphAndTensors> cache;
-  check_derived(cfg);
-  return lookup_or_cache_graph(cache, cfg.make_cache_key(Pass::Bwd), Backend::FP8, Pass::Bwd,
-                               handle, [&] { return create_graph_fp8_bwd(cfg); });
-}
-
 void fused_attn_fp8_bwd_impl(
     const FusedAttnConfig& cfg, void* devPtrQ, void* devPtrK, void* devPtrV, void* devPtrM,
     void* devPtrO, void* devPtrdO, void* devPtrSoftmaxOffset, void* devPtrdQ, void* devPtrdK,
@@ -1036,31 +938,33 @@ void fused_attn_fp8_bwd_impl(
     cudnnHandle_t handle) {
   using namespace transformer_engine;
 
-  // Asked with the same pass the graph was built with, so that the tensors bound below and the
-  // ones the graph was built with cannot be decided differently. Also where an unserviceable
-  // configuration is rejected, ahead of the cache lookup.
-  const Fp8Recipe recipe = fp8_recipe(cfg, Pass::Bwd);
-  const bool is_delayed_scaling = recipe == Fp8Recipe::DelayedScaling;
-  const bool is_current_scaling = recipe == Fp8Recipe::CurrentScaling;
-  const bool is_mxfp8 = recipe == Fp8Recipe::MxFp8;
-  const bool is_O_in_F16 = fp8_o_in_f16(cfg);
+  // Asserted derived here because the reads below are the first derived fields this path touches,
+  // ahead of the get_graph() that asserts it for the build.
+  check_derived(cfg);
+
+  // Read from the same fields the graph was built from, so that the tensors bound below and the
+  // ones the graph was built with cannot be decided differently.
+  const bool is_mxfp8 = cfg.is_mxfp8;
+  const bool is_delayed_scaling = !is_mxfp8 && cfg.dqkv_is_fp8;
+  const bool is_current_scaling = !is_mxfp8 && !cfg.dqkv_is_fp8;
+  const bool is_O_in_F16 = !cfg.o_is_fp8;
 
   const int64_t b = static_cast<int64_t>(cfg.batch_size);
   const int64_t h = static_cast<int64_t>(cfg.num_attn_heads);
   // Not const: bound into the variant pack by address as a pass-by-value graph input.
   float scaling_factor = cfg.attn_scale;
-  const bool is_bias = (cfg.bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS);
+  const bool is_bias = cfg.is_bias;
   const bool is_padding = cfg.is_padding;
-  const bool is_dropout = (cfg.dropout != 0.0f);
-  const bool is_softmax_offset = (cfg.softmax_type != NVTE_Softmax_Type::NVTE_VANILLA_SOFTMAX);
+  const bool is_dropout = cfg.is_dropout;
+  const bool is_softmax_offset = cfg.is_softmax_offset;
 
   try {
-    auto cache_entry = cache_graph_fp8_bwd(cfg, handle);
+    auto cache_entry = get_graph<Backend::FP8, Pass::Bwd, create_graph_fp8_bwd>(cfg, handle);
     auto [mha_graph, Q, K, V, O, Stats, dO, attn_scale, descale_q, descale_k, descale_v, descale_o,
           descale_dO, descale_s, descale_dP, scale_s, scale_dQ, scale_dK, scale_dV, scale_dP, dQ,
           dK, dV, amax_dQ, amax_dK, amax_dV, amax_dP, Q_t, K_t, dO_f16, dO_t, descale_q_t,
           descale_k_t, descale_dO_t, bias, dBias, softmax_offset, d_softmax_offset, seq_q, seq_kv,
-          dropout_seed, dropout_offset] = cache_entry->tensors;
+          dropout_seed, dropout_offset] = cache_entry->graph_and_tensors;
 
     // This graph is going to be used, so finish the build the cache deferred.
     build_plans(Backend::FP8, Pass::Bwd, *cache_entry);
@@ -1073,8 +977,6 @@ void fused_attn_fp8_bwd_impl(
       *workspace_size = plan_workspace_size + actual_seqlen_workspace_size;
       return;
     }
-    graph_cache_debug::record_exec(Backend::FP8, Pass::Bwd);
-
     // cuDNN stream check needs to be moved here to support dummy kernel calls with
     // null streams for sizing the cuDNN workspace.
     NVTE_CHECK_CUDNN(cudnnSetStream(handle, stream));
@@ -1159,6 +1061,7 @@ void fused_attn_fp8_bwd_impl(
     }
 
     NVTE_CHECK_CUDNN_FE(mha_graph->execute(handle, variant_pack, workspace));
+    graph_cache_debug::record_execute(Backend::FP8, Pass::Bwd);
   } catch (cudnn_frontend::cudnnException& e) {
     NVTE_ERROR(e.what());
   }
@@ -1392,29 +1295,16 @@ void fused_attn_fp8_bwd(const FusedAttnConfig& cfg, const Tensor* input_Q, const
   }
 }
 
-// Whether the FP8 forward graph this config asks for can run: the empty string if it can,
-// otherwise the account of why not, which the backend selector reports to the caller.
+// The FP8 counterpart of support_verdict_f16; see there for why the direction arrives at runtime.
 //
-// The question is answered by building the graph, which is where every rejection comes from --
-// there is no separate list of rules to keep in step with the builder. The graph goes into the same
-// cache the execution path reads, so the work is not thrown away and what was checked is what will
-// run. It stops short of graph.build_plans(), the expensive step, which the first execution of the
-// graph does instead; see CachedGraph.
-//
-// Unlike the F16 path, some of the rejections here are TE's own rather than cuDNN's: fp8_recipe()
-// throws for bias, ALiBi and the recipe combinations FP8 does not serve, from inside the build.
-// They read the same to the selector, which wants a reason and does not care whose rule it was.
-//
-// The direction comes from which of these two functions was called; see is_supported_f16_fwd.
-std::string is_supported_fp8_fwd(const FusedAttnConfig& cfg, cudnnHandle_t handle) {
-  return fused_attn::support_verdict("is_supported_fp8_fwd",
-                                     [&] { fused_attn::cache_graph_fp8_fwd(cfg, handle); });
-}
-
-// The backward counterpart of is_supported_fp8_fwd; see there.
-std::string is_supported_fp8_bwd(const FusedAttnConfig& cfg, cudnnHandle_t handle) {
-  return fused_attn::support_verdict("is_supported_fp8_bwd",
-                                     [&] { fused_attn::cache_graph_fp8_bwd(cfg, handle); });
+// Only cuDNN's rules reach this. TE's own -- bias, ALiBi and the recipes these graphs are not
+// written for -- are stated in nvte_get_fused_attn_backend_v2 and answered before it ever gets
+// here, which is why no build on this path throws for a configuration it cannot serve.
+std::string support_verdict_fp8(const FusedAttnConfig& cfg, Pass pass, cudnnHandle_t handle) {
+  if (pass == Pass::Fwd) {
+    return fused_attn::support_verdict<Backend::FP8, Pass::Fwd, create_graph_fp8_fwd>(cfg, handle);
+  }
+  return fused_attn::support_verdict<Backend::FP8, Pass::Bwd, create_graph_fp8_bwd>(cfg, handle);
 }
 
 }  // namespace transformer_engine

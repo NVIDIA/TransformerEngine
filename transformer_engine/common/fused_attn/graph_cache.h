@@ -10,8 +10,9 @@
 //
 // The four build sites (f16 and fp8, forward and backward) differ only in how
 // they construct their graph and which tensors they hand back. Everything after
-// that -- the lookup, the locking, the support check, the once-per-entry plan
-// build -- is shared, and lives here rather than in four copies.
+// that -- the cache each one keeps, the lookup, the locking, the support check,
+// the once-per-entry plan build -- is shared, and lives here rather than in four
+// copies: a site names its backend, pass and graph builder to get_graph().
 //
 // The five frontend calls a graph goes through, and which of our functions pays for
 // each. The frontend's are written graph.*, since that is how they are invoked and
@@ -49,32 +50,6 @@
 namespace transformer_engine {
 namespace fused_attn {
 
-// The verdict an is_supported_* helper reports for `probe`: the empty string if it completes,
-// otherwise cuDNN's own account of the refusal. Support is discovered by building the graph, so a
-// probe is one call and everything else is what to do with a failure; this is that, once, for all
-// four helpers.
-//
-// Refusals and failures on the way to a verdict read alike, because CUDNN_BACKEND_API_FAILED --
-// raised for any non-success cudnnStatus_t -- cannot separate CUDNN_STATUS_NOT_SUPPORTED from
-// CUDNN_STATUS_ALLOC_FAILED. Either way this backend cannot serve this call, and either way what
-// the caller wants is the message.
-//
-// `what` names the probe and is used only when a failure carried no message of its own: support is
-// signalled by returning the empty string, so an empty refusal would read as an endorsement.
-template <typename ProbeFn>
-std::string support_verdict(const char *what, ProbeFn &&probe) {
-  try {
-    probe();
-    return "";
-  } catch (const std::exception &e) {
-    const char *reason = e.what();
-    if (reason != nullptr && reason[0] != '\0') return reason;
-    return std::string(what) + ": rejected without a reason.";
-  } catch (...) {
-    return std::string(what) + ": unknown failure.";
-  }
-}
-
 // A graph in the cache, plus the tensor attributes needed to bind runtime pointers to it.
 //
 // Entries are built only as far as check_support(), which is all it takes to decide whether a
@@ -82,17 +57,18 @@ std::string support_verdict(const char *what, ProbeFn &&probe) {
 // of the five frontend calls -- is left to the execution path, since a support query never runs the
 // graph and many of the keys it builds are never run by anything.
 //
-// plans_built guards that completion, which has to happen exactly once per entry: the entry is
+// build_plans_once guards that completion, which has to happen exactly once per entry: the entry is
 // shared across threads and graph.build_plans() mutates it in place. Keeping the flag in the entry
 // keeps it with the graph it describes and leaves unrelated keys free to build concurrently. A
 // build that throws leaves it unset, so a later call retries rather than executing a graph with no
 // plans.
 template <typename GraphAndTensors>
-struct CachedGraph {
-  explicit CachedGraph(GraphAndTensors tensors) : tensors(std::move(tensors)) {}
+struct CacheEntry {
+  explicit CacheEntry(GraphAndTensors graph_and_tensors)
+      : graph_and_tensors(std::move(graph_and_tensors)) {}
 
-  GraphAndTensors tensors;
-  std::once_flag plans_built;
+  GraphAndTensors graph_and_tensors;
+  std::once_flag build_plans_once;
 };
 
 // One build site's cache. Process-wide rather than per-thread so a graph is reused across threads
@@ -120,7 +96,7 @@ struct CachedGraph {
 template <typename GraphAndTensors>
 struct GraphCache {
   std::mutex mutex;  // guards everything below
-  std::map<FusedAttnConfig, std::shared_ptr<CachedGraph<GraphAndTensors>>> entries;
+  std::map<FusedAttnConfig, std::shared_ptr<CacheEntry<GraphAndTensors>>> entries;
 };
 
 // Takes a constructed graph through the frontend calls that decide whether cuDNN can run it:
@@ -128,22 +104,22 @@ struct GraphCache {
 // and both backends, so it is defined once here; `backend` and `pass` only name the build site the
 // stage timers attribute the calls to.
 //
-// Reports by throwing, and the throw carries cuDNN's message alone. That message is what the
-// is_supported_* helpers return as the reason a backend was refused, so a bool would discard the
-// one thing a support probe exists to produce -- and NVTE_ERROR would wrap it in the file, line
-// and advice of an internal failure, which a backend refused for a plain reason is not. One kind
-// of throw for every failure; see support_verdict() for why that distinction is not drawn.
+// Reports by throwing, and the throw carries cuDNN's message alone. That message is what
+// support_verdict() returns as the reason a backend was refused, so a bool would discard the one
+// thing a support probe exists to produce -- and NVTE_ERROR would wrap it in the file, line and
+// advice of an internal failure, which a backend refused for a plain reason is not. One kind of
+// throw for every failure; see support_verdict() for why that distinction is not drawn.
 //
 // graph.build_plans() and graph.execute() sit outside this function: they commit real resources,
-// and the plan build belongs to whoever executes the graph, once. See CachedGraph.
-inline void query_support(graph_cache_debug::Backend backend, Pass pass,
-                          cudnn_frontend::graph::Graph &graph, cudnnHandle_t handle) {
+// and the plan build belongs to whoever executes the graph, once. See CacheEntry.
+inline void query_support(Backend backend, Pass pass, cudnn_frontend::graph::Graph &graph,
+                          cudnnHandle_t handle) {
   auto run = [&](graph_cache_debug::BuildStage stage, const char *call_name, auto &&call) {
     cudnn_frontend::error_t error;
     graph_cache_debug::record_time(backend, pass, stage, [&] { error = call(); });
     if (error.is_good()) return;
     // cuDNN normally explains itself; fall back to the call's name so that a refusal can never
-    // arrive as an empty string, which the is_supported_* helpers would read as an endorsement.
+    // arrive as an empty string, which support_verdict() would read as an endorsement.
     throw std::runtime_error(error.err_msg.empty() ? std::string(call_name) + " failed."
                                                    : error.err_msg);
   };
@@ -181,22 +157,22 @@ inline void query_support(graph_cache_debug::Backend backend, Pass pass,
 //   lock cache.mutex
 //     entries[key]?  found -> copy the shared_ptr
 //   unlock
-//   record_cache_lookup(HIT | MISS)
+//   record_hit_miss(HIT | MISS)
 //
 //   HIT   -> return the entry
-//   MISS  -> build()             outside the lock, so builds of unrelated
-//            query_support()     keys proceed concurrently
-//              ok    -> lock, insert, unlock, return the inserted entry, which on a lost race
-//                       is the winner's
+//   MISS  -> build(), record_create_graph()    outside the lock, so builds of
+//            query_support()                   unrelated keys proceed concurrently
+//              ok    -> record_cache_graph(), then lock, insert, unlock; return the inserted
+//                       entry, which on a lost race is the winner's
 //              throw -> propagates; nothing is stored, so the key is built again if it comes back
 template <typename GraphAndTensors, typename BuildFn>
-std::shared_ptr<CachedGraph<GraphAndTensors>> lookup_or_cache_graph(
-    GraphCache<GraphAndTensors> &cache, const FusedAttnConfig &key,
-    graph_cache_debug::Backend backend, Pass pass, cudnnHandle_t handle, BuildFn &&build) {
-  using Entry = CachedGraph<GraphAndTensors>;
+std::shared_ptr<CacheEntry<GraphAndTensors>> cache_graph(GraphCache<GraphAndTensors> &cache,
+                                                         const FusedAttnConfig &key,
+                                                         Backend backend, Pass pass,
+                                                         cudnnHandle_t handle, BuildFn &&build) {
   using graph_cache_debug::LookupResult;
 
-  std::shared_ptr<Entry> cached;
+  std::shared_ptr<CacheEntry<GraphAndTensors>> cached;
   {
     std::lock_guard<std::mutex> lock(cache.mutex);
     auto it = cache.entries.find(key);
@@ -205,33 +181,111 @@ std::shared_ptr<CachedGraph<GraphAndTensors>> lookup_or_cache_graph(
   // Recorded after the lock is dropped, so writing a trace line cannot hold up threads querying
   // other keys. The counters stay exact, but two lookups that raced can be recorded in the opposite
   // order, so a level-2 trace is the set of lookups that happened, not their sequence.
-  graph_cache_debug::record_cache_lookup(
+  graph_cache_debug::record_hit_miss(
       backend, pass, cached != nullptr ? LookupResult::Hit : LookupResult::Miss, key);
   if (cached != nullptr) return cached;
 
-  // A failure propagates with cuDNN's message and leaves nothing behind. It raised a MISS and no
-  // CREATE_GRAPH, which is what makes miss - create_graph the count of builds that ended this way.
-  auto entry = std::make_shared<Entry>(build());
+  // No backend refuses a configuration from in here any more -- TE's own FP8 rules moved to
+  // nvte_get_fused_attn_backend_v2, which answers them with a reason instead of throwing -- so
+  // `build` returning is now the ordinary case and miss == create_graph in a run that behaves.
+  // A throw that does get out still propagates with its message and leaves nothing behind, which
+  // is what keeps miss - create_graph worth printing: it should read zero.
+  auto entry = std::make_shared<CacheEntry<GraphAndTensors>>(build());
+  graph_cache_debug::record_create_graph(backend, pass);
   // Every site's tensor tuple leads with its graph, the one element this needs. A tuple ordered
   // otherwise would fail to compile rather than quietly validate the wrong object.
-  query_support(backend, pass, *std::get<0>(entry->tensors), handle);
-  graph_cache_debug::record_graph_created(backend, pass);
-  {
-    std::lock_guard<std::mutex> lock(cache.mutex);
-    // On a losing race the insert does nothing: the shared_ptr this thread built is dropped with
-    // its graph, and what comes back is the winner's entry.
-    auto inserted = cache.entries.insert({key, std::move(entry)});
-    return inserted.first->second;
+  //
+  // The two counters bracket this call deliberately: a graph cuDNN refuses throws here, having
+  // already recorded its CREATE_GRAPH and never reaching CACHE_GRAPH, so the gap between those two
+  // columns is cuDNN's refusals alone.
+  query_support(backend, pass, *std::get<0>(entry->graph_and_tensors), handle);
+  // Recorded on cuDNN's verdict rather than on the insert below, so the column counts the graphs
+  // cuDNN agreed to run. That is the question worth a counter; how many entries a map ended up
+  // holding is not, and tying it to the insert made a lost race -- which discards a supported graph
+  // and takes the winner's -- read as a miscount rather than as the duplicate work it is.
+  graph_cache_debug::record_cache_graph(backend, pass);
+  std::lock_guard<std::mutex> lock(cache.mutex);
+  // On a losing race the insert does nothing: the shared_ptr this thread built is dropped with
+  // its graph, and what comes back is the winner's entry.
+  return cache.entries.insert({key, std::move(entry)}).first->second;
+}
+
+// A backend's graph cache for one pass, and the only route to it. Both the execution path and the
+// support probe come through here, so a probe leaves behind exactly the entry a later execution
+// finds. That is what lets the probe's answer describe the graph that actually runs, rather than a
+// separately built lookalike.
+//
+// The cache is this instantiation's static local, so the callers that name one <backend, pass,
+// creator> triple share one cache, and each triple gets its own. Naming the triple is now what
+// picks the cache, where before there was a per-backend function per pass to call.
+//
+// `kCreateGraphFn` is a template parameter rather than a `CreateFn &&` argument on purpose. As a
+// parameter it makes the creator part of the instantiation, keeping the cache identified by the
+// function that fills it. Passed as an argument, each distinct lambda type would instantiate its
+// own copy of this function with its own static cache, and the two call sites for a pass would
+// quietly stop sharing entries.
+template <Backend kBackend, Pass kPass, auto kCreateGraphFn>
+auto get_graph(const FusedAttnConfig &cfg, cudnnHandle_t handle) {
+  static GraphCache<decltype(kCreateGraphFn(cfg))> cache;
+  // Asserted once here for both the key and the graph, which read the same derived fields.
+  check_derived(cfg);
+  return cache_graph(cache, cfg.make_cache_key(kPass), kBackend, kPass, handle,
+                     [&] { return kCreateGraphFn(cfg); });
+}
+
+// Whether cuDNN can run the graph this config asks for, in one direction: the empty string if it
+// can, otherwise cuDNN's own account of why not, which the backend selector reports to the caller.
+// This is the whole of what support_verdict_f16 and support_verdict_fp8 do; they exist only to
+// reach their own translation unit's graph builders, which is also where a runtime direction turns
+// into the compile-time one this needs.
+//
+// Named for what it returns rather than the question it answers: support is the empty string, so
+// an is_supported() spelling would read backwards wherever the result is tested.
+//
+// The question is answered by building the graph, which is where every rejection comes from --
+// there is no separate list of rules to keep in step with the builder. The graph goes into the same
+// cache the execution path reads, so the work is not thrown away and what was checked is what will
+// run. It stops short of graph.build_plans(), the expensive step, which the first execution of the
+// graph does instead; see CacheEntry.
+//
+// A refusal, by contrast, is not cached: nothing is stored for a key cuDNN rejected, so asking the
+// same question again pays for the build again. See cache_graph.
+//
+// Refusals and failures on the way to a verdict read alike, because CUDNN_BACKEND_API_FAILED --
+// raised for any non-success cudnnStatus_t -- cannot separate CUDNN_STATUS_NOT_SUPPORTED from
+// CUDNN_STATUS_ALLOC_FAILED. Either way this backend cannot serve this call, and either way what
+// the caller wants is the message.
+//
+// The direction is named by the caller rather than read off the config: a config arriving from a
+// framework has both check_for_*_support set, so it cannot say which graph is being probed.
+template <Backend kBackend, Pass kPass, auto kCreateGraphFn>
+std::string support_verdict(const FusedAttnConfig &cfg, cudnnHandle_t handle) {
+  // Built only where it is used, on the two paths where a refusal arrived without a message of its
+  // own. Support is signalled by returning the empty string, so an empty refusal would otherwise
+  // read as an endorsement.
+  auto label = [] {
+    return std::string("support_verdict<") + graph_cache_debug::backend_name(kBackend) + ", " +
+           graph_cache_debug::pass_name(kPass) + ">";
+  };
+  try {
+    get_graph<kBackend, kPass, kCreateGraphFn>(cfg, handle);
+    return "";
+  } catch (const std::exception &e) {
+    const char *reason = e.what();
+    if (reason != nullptr && reason[0] != '\0') return reason;
+    return label() + ": rejected without a reason.";
+  } catch (...) {
+    return label() + ": unknown failure.";
   }
 }
 
-// Runs graph.build_plans(), the plan build that lookup_or_cache_graph() left undone, once per
-// entry. Named for the frontend call it wraps; the once-per-entry part is the whole reason it is a
-// function rather than that call.
+// Runs graph.build_plans(), the plan build that cache_graph() left undone, once per entry. Named
+// for the frontend call it wraps; the once-per-entry part is the whole reason it is a function
+// rather than that call.
 //
 // Call only when the graph is about to be executed, which is why this is a separate step rather
 // than the tail of the lookup: a support query builds entries nothing ever runs, and kernel
-// compilation is the most expensive of the five frontend calls. See CachedGraph for why the flag
+// compilation is the most expensive of the five frontend calls. See CacheEntry for why the flag
 // lives inside the entry and what a throw here leaves behind.
 //
 // Splitting the build in two means the thread that finishes it is often not the thread that started
@@ -252,13 +306,12 @@ std::shared_ptr<CachedGraph<GraphAndTensors>> lookup_or_cache_graph(
 //   - graph.execute() is called with the running thread's own handle, so a handle is never used by
 //     two threads at once, which is what cuDNN asks in return for letting them share a plan.
 template <typename GraphAndTensors>
-void build_plans(graph_cache_debug::Backend backend, Pass pass,
-                 CachedGraph<GraphAndTensors> &entry) {
-  std::call_once(entry.plans_built, [&] {
-    cudnn_frontend::graph::Graph &graph = *std::get<0>(entry.tensors);
+void build_plans(Backend backend, Pass pass, CacheEntry<GraphAndTensors> &entry) {
+  std::call_once(entry.build_plans_once, [&] {
+    cudnn_frontend::graph::Graph &graph = *std::get<0>(entry.graph_and_tensors);
     graph_cache_debug::record_time(backend, pass, graph_cache_debug::BuildStage::BuildPlans,
                                    [&] { NVTE_CHECK_CUDNN_FE(graph.build_plans()); });
-    graph_cache_debug::record_plans_built(backend, pass);
+    graph_cache_debug::record_build_plans(backend, pass);
   });
 }
 

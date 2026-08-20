@@ -9,7 +9,10 @@
 #include <cudnn.h>
 #include <cudnn_frontend_version.h>
 
+#include <cinttypes>
+#include <cstdio>
 #include <cstring>
+#include <string>
 
 #include "../common.h"
 #include "../util/cuda_runtime.h"
@@ -54,6 +57,11 @@ void FusedAttnConfig::derive() {
   is_causal_bottom_right =
       (attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_BOTTOM_RIGHT_MASK) ||
       (attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK);
+  is_bias = (bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS);
+  is_alibi = (bias_type == NVTE_Bias_Type::NVTE_ALIBI);
+  is_softmax_offset = (softmax_type != NVTE_Softmax_Type::NVTE_VANILLA_SOFTMAX);
+  is_mxfp8 = (scaling_mode == NVTE_MXFP8_1D_SCALING);
+  is_dropout = is_training && dropout != 0.0f;
 
   // Both layouts describe variable-length sequences inside padded dimensions, so the mask is the
   // only thing that tells cuDNN where the real tokens end; without it the graph attends to
@@ -76,12 +84,25 @@ void FusedAttnConfig::derive() {
   bucketed_num_tokens_q = is_ragged_q ? fused_attn::get_max_tokens(tokens_q) : 0;
   bucketed_num_tokens_kv = is_ragged_kv ? fused_attn::get_max_tokens(tokens_kv) : 0;
 
-  // use of cu_seqlens vs actual_seqlens
+  // Use of cu_seqlens vs actual_seqlens, once per backend. Newer cuDNN SDPA can take sequence
+  // lengths directly as a cumulative tensor, which saves one kernel call; the frontend gates that
+  // on min(compile-time, runtime) cuDNN, so both versions are tested. The FP8 path needs newer
+  // versions of both than the F16 path, which is the whole reason there are two answers here.
   const size_t cudnn_runtime_version = cudnnGetVersion();
-  const bool is_dropout = is_training && dropout != 0.0f;
   uses_cu_seqlens_directly = CUDNN_FRONTEND_VERSION >= 12500 &&
                              (CUDNN_VERSION >= 92400 && cudnn_runtime_version >= 92400) &&
                              !is_dropout;
+  // Frontend 1.26 supports fp8+cu_seqlens for the C++ API; the Python API needs 1.27. The dropout
+  // exclusion is not the F16 one restated: the frontend cannot combine dropout with stats
+  // generation in the fprop unified engine, so such a request would be routed to the old composite
+  // SDPA engine, which has no cu_seqlens support at all. Remove that term when it can be.
+  fp8_uses_cu_seqlens_directly = CUDNN_FRONTEND_VERSION >= 12600 &&
+                                 (CUDNN_VERSION >= 92500 && cudnn_runtime_version >= 92500) &&
+                                 !is_dropout;
+
+  // What each pass stores, classified for the FP8 backend; see the fields for what reads them.
+  o_is_fp8 = (o_dtype == kNVTEFloat8E4M3 || o_dtype == kNVTEFloat8E5M2);
+  dqkv_is_fp8 = (dqkv_dtype == kNVTEFloat8E4M3 || dqkv_dtype == kNVTEFloat8E5M2);
 
   // packed vs dense dimensions for a ragged (THD) graph; SM8x and SM120 require dense,
   // BHSD-like dimensions for the Stats/LSE auxiliary tensors and so take the dense path
@@ -94,6 +115,28 @@ void FusedAttnConfig::derive() {
       (is_ragged_q && uses_packed_ragged_graph) ? bucketed_num_tokens_q : max_seqlen_q;
   graph_max_seqlen_kv =
       (is_ragged_kv && uses_packed_ragged_graph) ? bucketed_num_tokens_kv : max_seqlen_kv;
+
+  // Batch size and ragged-offset width the graph is built at, for each direction. One condition
+  // decides all four: whether cuDNN is handed the caller's cu_seqlens* buffers untouched, which
+  // only the forward graph ever is. When it is, those buffers are what the graph has to match --
+  // their [batch_size + 1] length, which a bucketed batch would read past the end of, and their
+  // int32 width. The backward graph always reads seqlens converted into our own workspace, so
+  // neither constraint reaches it and its two answers are the unconditional ones. Otherwise the
+  // batch is the bucketed one wherever a ragged layout is packed, so that one graph serves every
+  // batch in its bucket -- the same reason graph_max_seqlen_* stands in for the sequence lengths --
+  // and the offset width is whichever the runtime supports, which is what lets older cuDNN
+  // runtimes work rather than fail.
+  //
+  // Kept as four adjacent assignments off shared locals because the pairs have to agree: a forward
+  // graph built at a bucketed batch while expecting offsets at the other width is the failure this
+  // arrangement exists to make visible.
+  const DType wide_ragged_offsets = cudnn_runtime_version >= 90500 ? DType::kInt64 : DType::kInt32;
+  const bool buckets_the_batch = (is_ragged_q || is_ragged_kv) && uses_packed_ragged_graph;
+  ragged_offset_type_fwd = uses_cu_seqlens_directly ? DType::kInt32 : wide_ragged_offsets;
+  ragged_offset_type_bwd = wide_ragged_offsets;
+  graph_batch_size_fwd =
+      (buckets_the_batch && !uses_cu_seqlens_directly) ? bucketed_batch_size : batch_size;
+  graph_batch_size_bwd = buckets_the_batch ? bucketed_batch_size : batch_size;
 
   // elements per token for each ragged tensor
   ragged_offset_mults = RaggedOffsetMultipliers(
@@ -125,41 +168,11 @@ void FusedAttnConfig::derive() {
   is_derived = true;
 }
 
-GraphDims graph_dims(const FusedAttnConfig &cfg, Pass pass) {
-  check_derived(cfg);
-  GraphDims dims;
-
-  // The one condition both answers turn on: the forward graph can be handed the user's cu_seqlens*
-  // buffers untouched, and then it is those buffers the graph has to match -- their
-  // [batch_size + 1] length, which a bucketed batch would read past the end of, and their int32
-  // width. The backward graph always reads seqlens converted into our own workspace, so nothing
-  // there is sized by the true batch and nothing there is held to int32.
-  const bool cudnn_reads_users_cu_seqlens = pass == Pass::Fwd && cfg.uses_cu_seqlens_directly;
-
-  if (cudnn_reads_users_cu_seqlens) {
-    dims.ragged_offset_type = DType::kInt32;
-  } else {
-    // Choose between 32-bit and 64-bit offsets by what the runtime supports, which is what lets
-    // older cuDNN runtimes work rather than fail.
-    dims.ragged_offset_type = cudnnGetVersion() >= 90500 ? DType::kInt64 : DType::kInt32;
-  }
-
-  // Build at the bucketed batch where a ragged layout is packed, so that one graph serves every
-  // batch in its bucket -- the same reason graph_max_seqlen_* stands in for the sequence lengths.
-  dims.batch_size = static_cast<int64_t>(cfg.batch_size);
-  if ((cfg.is_ragged_q || cfg.is_ragged_kv) && cfg.uses_packed_ragged_graph &&
-      !cudnn_reads_users_cu_seqlens) {
-    dims.batch_size = static_cast<int64_t>(cfg.bucketed_batch_size);
-  }
-
-  return dims;
-}
-
 FusedAttnConfig FusedAttnConfig::make_cache_key(Pass pass) const {
   // Requires a derived config: every normalization below reads a derived field -- is_padding and
   // is_causal_bottom_right, the is_ragged_* pair, the graph_max_seqlen_* dimensions, and the
-  // uses_* flags. A precondition rather than an assert, since every caller reaches this through a
-  // cache_graph_* wrapper, which asserts it once for both the key and the graph.
+  // uses_* flags. A precondition rather than an assert, since every caller reaches this through
+  // get_graph(), which asserts it once for both the key and the graph.
   FusedAttnConfig cache_cfg = *this;
 
   // Key the device ID for multi-GPU single-process runs
@@ -183,13 +196,14 @@ FusedAttnConfig FusedAttnConfig::make_cache_key(Pass pass) const {
   cache_cfg.max_seqlen_kv = cache_cfg.graph_max_seqlen_kv;
 
   // Name the batch size the graph is built at, and drop the token counts the bucketing replaced.
-  // Asking graph_dims() rather than restating its rule is what keeps the key from naming a batch
-  // the graph was not built with -- the two directions bucket differently, and the graph builders
-  // ask the same question with the same pass.
+  // Reading the batch derive() recorded for this pass, rather than restating the rule that set it,
+  // is what keeps the key from naming a batch the graph was not built with -- the two directions
+  // bucket differently, and the graph builders read the same field for the same pass.
   if ((cache_cfg.is_ragged_q || cache_cfg.is_ragged_kv) && cache_cfg.uses_packed_ragged_graph) {
     cache_cfg.num_tokens_q = 0;
     cache_cfg.num_tokens_kv = 0;
-    cache_cfg.batch_size = static_cast<size_t>(graph_dims(*this, pass).batch_size);
+    cache_cfg.batch_size =
+        pass == Pass::Fwd ? cache_cfg.graph_batch_size_fwd : cache_cfg.graph_batch_size_bwd;
   }
 
   // attn_scale is a pass-by-value graph input and different scales can share the same cached graph
@@ -224,6 +238,47 @@ FusedAttnConfig FusedAttnConfig::make_cache_key(Pass pass) const {
   cache_cfg.check_for_backward_support = pass == Pass::Bwd;
 
   return cache_cfg;
+}
+
+std::string FusedAttnConfig::key_debug_string() const {
+  // Enums and sizes are printed as int64_t rather than by name, since the point is diffing two
+  // lines rather than reading one, and a numeric field cannot drift from a names table.
+  char buf[1024];
+  std::snprintf(
+      buf, sizeof(buf),
+      "train=%d det=%d cg=%d maxlogit=%d fwd=%d mask=%" PRId64 " bias=%" PRId64 " wl=%" PRId64
+      " wr=%" PRId64 " brd=%d softmax=%" PRId64 " scale_mode=%" PRId64
+      " dropout=%g attn_scale=%g qkv_dt=%" PRId64 " o_dt=%" PRId64 " do_dt=%" PRId64
+      " dqkv_dt=%" PRId64 " qkv_lay=%" PRId64 " o_fmt=%" PRId64 " do_fmt=%" PRId64
+      " dqkv_lay=%" PRId64 " qkv_sif=%" PRId64 " do_sif=%" PRId64 " b=%" PRId64 " h=%" PRId64
+      " hg=%" PRId64 " dqk=%" PRId64 " dv=%" PRId64 " sq=%" PRId64 " skv=%" PRId64 " tq=%" PRId64
+      " tkv=%" PRId64 " bb=%" PRId64 " btq=%" PRId64 " btkv=%" PRId64 " npk=%" PRId64
+      " npv=%" PRId64 " psk=%" PRId64 " psv=%" PRId64 " mppk=%" PRId64 " mppv=%" PRId64
+      " bias_b=%" PRId64 " bias_h=%" PRId64 " bias_sq=%" PRId64 " bias_skv=%" PRId64,
+      static_cast<int>(is_training), static_cast<int>(deterministic), static_cast<int>(cuda_graph),
+      static_cast<int>(return_max_logit), static_cast<int>(check_for_forward_support),
+      static_cast<int64_t>(attn_mask_type), static_cast<int64_t>(bias_type),
+      static_cast<int64_t>(window_size_left), static_cast<int64_t>(window_size_right),
+      static_cast<int>(bottom_right_diagonal), static_cast<int64_t>(softmax_type),
+      static_cast<int64_t>(scaling_mode), static_cast<double>(dropout),
+      static_cast<double>(attn_scale), static_cast<int64_t>(qkv_dtype),
+      static_cast<int64_t>(o_dtype), static_cast<int64_t>(do_dtype),
+      static_cast<int64_t>(dqkv_dtype), static_cast<int64_t>(qkv_layout),
+      static_cast<int64_t>(o_format), static_cast<int64_t>(do_format),
+      static_cast<int64_t>(dqkv_layout), static_cast<int64_t>(qkv_scale_inv_format),
+      static_cast<int64_t>(do_scale_inv_format), static_cast<int64_t>(batch_size),
+      static_cast<int64_t>(num_attn_heads), static_cast<int64_t>(num_gqa_groups),
+      static_cast<int64_t>(head_dim_qk), static_cast<int64_t>(head_dim_v),
+      static_cast<int64_t>(max_seqlen_q), static_cast<int64_t>(max_seqlen_kv),
+      static_cast<int64_t>(num_tokens_q), static_cast<int64_t>(num_tokens_kv),
+      static_cast<int64_t>(bucketed_batch_size), static_cast<int64_t>(bucketed_num_tokens_q),
+      static_cast<int64_t>(bucketed_num_tokens_kv), static_cast<int64_t>(num_pages_k),
+      static_cast<int64_t>(num_pages_v), static_cast<int64_t>(page_size_k),
+      static_cast<int64_t>(page_size_v), static_cast<int64_t>(max_pages_per_seq_k),
+      static_cast<int64_t>(max_pages_per_seq_v), static_cast<int64_t>(bias_batch_size),
+      static_cast<int64_t>(bias_num_heads), static_cast<int64_t>(bias_seqlen_q),
+      static_cast<int64_t>(bias_seqlen_kv));
+  return std::string(buf);
 }
 
 FusedAttnConfig FusedAttnFwdParams::make_config() const {

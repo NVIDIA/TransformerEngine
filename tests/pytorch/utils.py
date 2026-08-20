@@ -351,18 +351,11 @@ def get_available_attention_backends(
     score_mod_bprop: bool = False,
     cp_size: int = 1,
     cp_size_a2a: int = 1,
-    skip_fused_attn: bool = False,
 ) -> Tuple[List, List]:
-    """Check for all available attention backends that support a model configuration
-
-    Set `skip_fused_attn=True` to leave fused attention out of the query. The reported
-    fused-attention backends are then empty, while the FlashAttention and unfused results
-    are unaffected. This skips cuDNN's support checks, which build and cache a graph per
-    configuration.
-    """
+    """Check for all available attention backends that support a model configuration"""
 
     os.environ["NVTE_FLASH_ATTN"] = "1"
-    os.environ["NVTE_FUSED_ATTN"] = "0" if skip_fused_attn else "1"
+    os.environ["NVTE_FUSED_ATTN"] = "1"
     os.environ["NVTE_UNFUSED_ATTN"] = "1"
     _attention_backends["backend_selection_requires_update"] = True
     alibi_slopes_shape = None

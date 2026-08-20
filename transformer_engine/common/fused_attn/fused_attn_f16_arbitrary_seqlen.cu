@@ -25,12 +25,7 @@ namespace fused_attn {
 
 namespace fe = cudnn_frontend;
 
-// Every graph-cache event raised here names the build site it came from. This file is the f16
-// arbitrary-seqlen backend throughout; only the pass differs between call sites. Pass itself needs
-// no using-declaration: it is fused_attn::Pass, since the config answers by direction too.
-using graph_cache_debug::Backend;
-
-using SdpaF16FwdGraphAndTensors =
+using F16FwdGraphAndTensors =
     std::tuple<std::shared_ptr<fe::graph::Graph>,
                std::shared_ptr<fe::graph::Tensor_attributes>,   // Q
                std::shared_ptr<fe::graph::Tensor_attributes>,   // K
@@ -54,18 +49,17 @@ using SdpaF16FwdGraphAndTensors =
                std::shared_ptr<fe::graph::Tensor_attributes>>;  // dropout_offset
 
 // Constructs the forward graph for one cache key, and only constructs it: whether cuDNN will run
-// it is settled by the caller, in lookup_or_cache_graph(), which is also where the plan build
-// eventually happens. Hence no cuDNN handle here -- describing a graph needs none, and every call
-// that does need one now sits on the other side of that boundary.
+// it is settled by the caller, in cache_graph(), which is also where the plan build eventually
+// happens. Hence no cuDNN handle here -- describing a graph needs none, and every call that does
+// need one now sits on the other side of that boundary.
 //
 // Everything the graph's shape and topology depends on comes from `cfg`, so the build has one
 // source of truth and cannot drift from the caller that will bind pointers to it. The two
-// dimensions the config cannot answer on its own -- the batch size, and the width ragged offsets
-// are written in, both of which differ between the passes -- come from graph_dims() asked with
-// Pass::Fwd, the same way the code binding pointers to this graph asks.
-static SdpaF16FwdGraphAndTensors create_graph_f16_fwd(const FusedAttnConfig &cfg) {
-  const GraphDims dims = graph_dims(cfg, Pass::Fwd);
-  const int64_t b = dims.batch_size;
+// dimensions that differ between the passes -- the batch size, and the width ragged offsets are
+// written in -- are read from the config's forward halves, the same ones the code binding pointers
+// to this graph reads.
+static F16FwdGraphAndTensors create_graph_f16_fwd(const FusedAttnConfig &cfg) {
+  const int64_t b = static_cast<int64_t>(cfg.graph_batch_size_fwd);
   const int64_t s_q = static_cast<int64_t>(cfg.graph_max_seqlen_q);
   const int64_t s_kv = static_cast<int64_t>(cfg.graph_max_seqlen_kv);
   const cudnn_frontend::DataType_t tensorType =
@@ -86,29 +80,24 @@ static SdpaF16FwdGraphAndTensors create_graph_f16_fwd(const FusedAttnConfig &cfg
   const int64_t bias_skv = static_cast<int64_t>(cfg.bias_seqlen_kv);
   const int64_t window_size_left = cfg.window_size_left;
   const int64_t window_size_right = cfg.window_size_right;
-  const bool is_training = cfg.is_training;
   const bool return_max_logit = cfg.return_max_logit;
   const float dropout_probability = cfg.dropout;
   const NVTE_QKV_Layout qkv_layout = cfg.qkv_layout;
-  const NVTE_Bias_Type bias_type = cfg.bias_type;
-  const NVTE_Mask_Type mask_type = cfg.attn_mask_type;
-  const NVTE_Softmax_Type softmax_type = cfg.softmax_type;
   const bool bottom_right_diagonal = cfg.bottom_right_diagonal;
-  const bool is_bias = (bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS);
-  const bool is_alibi = (bias_type == NVTE_Bias_Type::NVTE_ALIBI);
-  const bool is_causal = ((mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK) ||
-                          (mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK));
+  const bool is_bias = cfg.is_bias;
+  const bool is_alibi = cfg.is_alibi;
+  const bool is_causal = cfg.is_causal;
   const bool is_causal_bottom_right = cfg.is_causal_bottom_right;
   const bool is_padding = cfg.is_padding;
   const bool is_paged_kv = cfg.is_paged_kv;
-  const bool is_softmax_offset = (softmax_type != NVTE_Softmax_Type::NVTE_VANILLA_SOFTMAX);
-  const bool is_dropout = (is_training && dropout_probability != 0.0f);
+  const bool is_softmax_offset = cfg.is_softmax_offset;
+  const bool is_dropout = cfg.is_dropout;
   const bool is_ragged_q = cfg.is_ragged_q;
   const bool is_ragged_kv = cfg.is_ragged_kv;
   const bool use_cu_seqlens_directly = cfg.uses_cu_seqlens_directly;
   const auto cudnn_runtime_version = cudnnGetVersion();
   const bool use_ragged_stats = cfg.uses_ragged_stats;
-  const DType ragged_offset_type = dims.ragged_offset_type;
+  const DType ragged_offset_type = cfg.ragged_offset_type_fwd;
   const RaggedOffsetMultipliers offset_mults = cfg.ragged_offset_mults;
   const bool generate_stats = true;  // Always return stats
 
@@ -373,19 +362,6 @@ static SdpaF16FwdGraphAndTensors create_graph_f16_fwd(const FusedAttnConfig &cfg
                         offset_kv_tuple, offset_s_tuple, dropout_tuple);
 }
 
-// The forward graph cache and the only route to it. Both the execution path and the support
-// probe come through here, so a probe leaves behind exactly the entry a later execution finds.
-// That is what lets the probe's answer describe the graph that actually runs, rather than a
-// separately built lookalike.
-static std::shared_ptr<CachedGraph<SdpaF16FwdGraphAndTensors>> cache_graph_f16_fwd(
-    const FusedAttnConfig &cfg, cudnnHandle_t handle) {
-  static GraphCache<SdpaF16FwdGraphAndTensors> cache;
-  // Asserted once here for both the key and the graph, which read the same derived fields.
-  check_derived(cfg);
-  return lookup_or_cache_graph(cache, cfg.make_cache_key(Pass::Fwd), Backend::F16, Pass::Fwd,
-                               handle, [&] { return create_graph_f16_fwd(cfg); });
-}
-
 void fused_attn_arbitrary_seqlen_fwd_impl(
     const FusedAttnConfig &cfg, void *devPtrQ, void *devPtrK, void *devPtrV, void *devPtrBias,
     void *devPtrSoftmaxOffset, void *devPtrS1, void *devPtrS2, void *devPtrO,
@@ -395,11 +371,13 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
     cudaStream_t stream, cudnnHandle_t handle) {
   using namespace transformer_engine;
 
-  // Asked with the same pass the graph was built with, so that the dimensions below and the ones
-  // the graph was built at cannot be decided differently.
-  const GraphDims dims = graph_dims(cfg, Pass::Fwd);
-  const int64_t b = dims.batch_size;
-  const DType ragged_offset_type = dims.ragged_offset_type;
+  // Read from the same halves of the config the graph was built from, so that the dimensions below
+  // and the ones the graph was built at cannot be decided differently. Asserted derived here
+  // because these are the first derived fields this path reads, ahead of the get_graph() that
+  // asserts it for the build.
+  check_derived(cfg);
+  const int64_t b = static_cast<int64_t>(cfg.graph_batch_size_fwd);
+  const DType ragged_offset_type = cfg.ragged_offset_type_fwd;
   // The true batch size, which the cu_seqlens buffers are sized [actual_b + 1] by whatever the
   // bucketing above did to `b`.
   const int64_t actual_b = static_cast<int64_t>(cfg.batch_size);
@@ -409,10 +387,10 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
   const bool return_max_logit = cfg.return_max_logit;
   // Not const: bound into the variant pack by address as a pass-by-value graph input.
   float scaling_factor = cfg.attn_scale;
-  const bool is_bias = (cfg.bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS);
+  const bool is_bias = cfg.is_bias;
   const bool is_padding = cfg.is_padding;
-  const bool is_softmax_offset = (cfg.softmax_type != NVTE_Softmax_Type::NVTE_VANILLA_SOFTMAX);
-  const bool is_dropout = (cfg.is_training && cfg.dropout != 0.0f);
+  const bool is_softmax_offset = cfg.is_softmax_offset;
+  const bool is_dropout = cfg.is_dropout;
   const bool is_ragged_q = cfg.is_ragged_q;
   const bool is_ragged_kv = cfg.is_ragged_kv;
   const bool is_paged_kv = cfg.is_paged_kv;
@@ -422,10 +400,10 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
   const bool use_cu_seqlens_directly = cfg.uses_cu_seqlens_directly;
 
   try {
-    auto cache_entry = cache_graph_f16_fwd(cfg, handle);
+    auto cache_entry = get_graph<Backend::F16, Pass::Fwd, create_graph_f16_fwd>(cfg, handle);
     auto [mha_graph, Q, K, V, attn_scale, O, S1, S2, bias, softmax_offset, seq_q, seq_kv,
           page_table_k, page_table_v, offset_q, offset_o, offset_k, offset_v, offset_stats,
-          dropout_seed, dropout_offset] = cache_entry->tensors;
+          dropout_seed, dropout_offset] = cache_entry->graph_and_tensors;
 
     // This graph is going to be used, so finish the build the cache deferred.
     build_plans(Backend::F16, Pass::Fwd, *cache_entry);
@@ -457,8 +435,6 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
           plan_workspace_size + actual_seqlen_workspace_size + seqlen_offsets_workspace_size;
       return;
     }
-    graph_cache_debug::record_exec(Backend::F16, Pass::Fwd);
-
     // cuDNN stream check needs to be moved here to support dummy kernel calls with
     // null streams for sizing the cuDNN workspace.
     NVTE_CHECK_CUDNN(cudnnSetStream(handle, stream));
@@ -567,12 +543,13 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
     }
 
     NVTE_CHECK_CUDNN_FE(mha_graph->execute(handle, variant_pack, workspace));
+    graph_cache_debug::record_execute(Backend::F16, Pass::Fwd);
   } catch (cudnn_frontend::cudnnException &e) {
     NVTE_ERROR(e.what());
   }
 }
 
-using SdpaF16BwdGraphAndTensors =
+using F16BwdGraphAndTensors =
     std::tuple<std::shared_ptr<fe::graph::Graph>,
                std::shared_ptr<fe::graph::Tensor_attributes>,   // q
                std::shared_ptr<fe::graph::Tensor_attributes>,   // k
@@ -599,10 +576,9 @@ using SdpaF16BwdGraphAndTensors =
                std::shared_ptr<fe::graph::Tensor_attributes>>;  // dropout_offset
 
 // The backward counterpart of create_graph_f16_fwd; see there for why it constructs the graph and
-// nothing else, and why the two direction-dependent dimensions are asked for rather than stored.
-static SdpaF16BwdGraphAndTensors create_graph_f16_bwd(const FusedAttnConfig &cfg) {
-  const GraphDims dims = graph_dims(cfg, Pass::Bwd);
-  const int64_t b = dims.batch_size;
+// nothing else, and why the two direction-dependent dimensions come from the config in pairs.
+static F16BwdGraphAndTensors create_graph_f16_bwd(const FusedAttnConfig &cfg) {
+  const int64_t b = static_cast<int64_t>(cfg.graph_batch_size_bwd);
   const int64_t s_q = static_cast<int64_t>(cfg.graph_max_seqlen_q);
   const int64_t s_kv = static_cast<int64_t>(cfg.graph_max_seqlen_kv);
   const cudnn_frontend::DataType_t tensorType =
@@ -619,25 +595,21 @@ static SdpaF16BwdGraphAndTensors create_graph_f16_bwd(const FusedAttnConfig &cfg
   const int64_t window_size_right = cfg.window_size_right;
   const float dropout_probability = cfg.dropout;
   const NVTE_QKV_Layout qkv_layout = cfg.qkv_layout;
-  const NVTE_Bias_Type bias_type = cfg.bias_type;
-  const NVTE_Mask_Type mask_type = cfg.attn_mask_type;
-  const NVTE_Softmax_Type softmax_type = cfg.softmax_type;
   const bool bottom_right_diagonal = cfg.bottom_right_diagonal;
   const bool deterministic = cfg.deterministic;
-  const bool is_bias = (bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS);
-  const bool is_alibi = (bias_type == NVTE_Bias_Type::NVTE_ALIBI);
-  const bool is_causal = ((mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK) ||
-                          (mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK));
+  const bool is_bias = cfg.is_bias;
+  const bool is_alibi = cfg.is_alibi;
+  const bool is_causal = cfg.is_causal;
   const bool is_causal_bottom_right = cfg.is_causal_bottom_right;
   const bool is_padding = cfg.is_padding;
-  const bool is_softmax_offset = (softmax_type != NVTE_Softmax_Type::NVTE_VANILLA_SOFTMAX);
-  const bool is_dropout = (dropout_probability != 0.0f);
+  const bool is_softmax_offset = cfg.is_softmax_offset;
+  const bool is_dropout = cfg.is_dropout;
   const bool is_ragged_q = cfg.is_ragged_q;
   const bool is_ragged_kv = cfg.is_ragged_kv;
   const auto cudnn_runtime_version = cudnnGetVersion();
   const bool use_packed_ragged_graph = cfg.uses_packed_ragged_graph;
   const bool use_ragged_stats = cfg.uses_ragged_stats;
-  const DType ragged_offset_type = dims.ragged_offset_type;
+  const DType ragged_offset_type = cfg.ragged_offset_type_bwd;
 
   auto mha_graph = std::make_shared<fe::graph::Graph>();
   mha_graph->set_io_data_type(tensorType)
@@ -867,15 +839,6 @@ static SdpaF16BwdGraphAndTensors create_graph_f16_bwd(const FusedAttnConfig &cfg
                         offset_s_tuple, dropout_tuple);
 }
 
-// The backward counterpart of cache_graph_f16_fwd; see there.
-static std::shared_ptr<CachedGraph<SdpaF16BwdGraphAndTensors>> cache_graph_f16_bwd(
-    const FusedAttnConfig &cfg, cudnnHandle_t handle) {
-  static GraphCache<SdpaF16BwdGraphAndTensors> cache;
-  check_derived(cfg);
-  return lookup_or_cache_graph(cache, cfg.make_cache_key(Pass::Bwd), Backend::F16, Pass::Bwd,
-                               handle, [&] { return create_graph_f16_bwd(cfg); });
-}
-
 void fused_attn_arbitrary_seqlen_bwd_impl(
     const FusedAttnConfig &cfg, void *devPtrQ, void *devPtrKTranspose, void *devPtrVTranspose,
     void *devPtrO, void *devPtrSoftmaxStats, void *devPtrBias, void *devPtrSoftmaxOffset,
@@ -886,29 +849,31 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
     cudnnHandle_t handle) {
   using namespace transformer_engine;
 
-  // Asked with the same pass the graph was built with, so that the dimensions below and the ones
-  // the graph was built at cannot be decided differently.
-  const GraphDims dims = graph_dims(cfg, Pass::Bwd);
-  const int64_t b = dims.batch_size;
-  const DType ragged_offset_type = dims.ragged_offset_type;
+  // Read from the same halves of the config the graph was built from, so that the dimensions below
+  // and the ones the graph was built at cannot be decided differently. Asserted derived here
+  // because these are the first derived fields this path reads, ahead of the get_graph() that
+  // asserts it for the build.
+  check_derived(cfg);
+  const int64_t b = static_cast<int64_t>(cfg.graph_batch_size_bwd);
+  const DType ragged_offset_type = cfg.ragged_offset_type_bwd;
   // The true batch size, which the cu_seqlens buffers are sized [actual_b + 1] by.
   const int64_t actual_b = static_cast<int64_t>(cfg.batch_size);
   const bool use_ragged_stats = cfg.uses_ragged_stats;
 
   // Not const: bound into the variant pack by address as a pass-by-value graph input.
   float scaling_factor = cfg.attn_scale;
-  const bool is_bias = (cfg.bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS);
+  const bool is_bias = cfg.is_bias;
   const bool is_padding = cfg.is_padding;
-  const bool is_softmax_offset = (cfg.softmax_type != NVTE_Softmax_Type::NVTE_VANILLA_SOFTMAX);
-  const bool is_dropout = (cfg.dropout != 0.0f);
+  const bool is_softmax_offset = cfg.is_softmax_offset;
+  const bool is_dropout = cfg.is_dropout;
   const bool is_ragged_q = cfg.is_ragged_q;
   const bool is_ragged_kv = cfg.is_ragged_kv;
 
   try {
-    auto cache_entry = cache_graph_f16_bwd(cfg, handle);
+    auto cache_entry = get_graph<Backend::F16, Pass::Bwd, create_graph_f16_bwd>(cfg, handle);
     auto [mha_graph, q, k, v, o, dO, stats, attn_scale, dQ, dK, dV, bias, dBias, softmax_offset,
           d_softmax_offset, seq_q, seq_kv, offset_q, offset_o, offset_k, offset_v, offset_stats,
-          dropout_seed, dropout_offset] = cache_entry->tensors;
+          dropout_seed, dropout_offset] = cache_entry->graph_and_tensors;
 
     // This graph is going to be used, so finish the build the cache deferred.
     build_plans(Backend::F16, Pass::Bwd, *cache_entry);
@@ -935,8 +900,6 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
           plan_workspace_size + actual_seqlen_workspace_size + seqlen_offsets_workspace_size;
       return;
     }
-    graph_cache_debug::record_exec(Backend::F16, Pass::Bwd);
-
     // cuDNN stream check needs to be moved here to support dummy kernel calls with
     // null streams for sizing the cuDNN workspace.
     NVTE_CHECK_CUDNN(cudnnSetStream(handle, stream));
@@ -1029,6 +992,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
     }
 
     NVTE_CHECK_CUDNN_FE(mha_graph->execute(handle, variant_pack, workspace));
+    graph_cache_debug::record_execute(Backend::F16, Pass::Bwd);
   } catch (cudnn_frontend::cudnnException &e) {
     NVTE_ERROR(e.what());
   }
@@ -1245,30 +1209,17 @@ void fused_attn_arbitrary_seqlen_bwd(const FusedAttnConfig &cfg, const Tensor *i
   }
 }
 
-// Whether cuDNN can run the forward graph this config asks for: the empty string if it can,
-// otherwise cuDNN's own account of why not, which the backend selector reports to the caller.
+// The one entry point into this translation unit's support probes; see fused_attn::support_verdict,
+// which is all it does. It exists because create_graph_f16_* is file-local, so this is the only
+// place that can name it, and because the selector calls it from another translation unit.
 //
-// The question is answered by deriving the graph's inputs and building the graph, which is
-// where every rejection comes from -- there is no separate list of rules to keep in step with
-// the builder. The graph goes into the same cache the execution path reads, so the work is not
-// thrown away and what was checked is what will run. It stops short of graph.build_plans(), the
-// expensive step, which the first execution of the graph does instead; see CachedGraph.
-//
-// A refusal, by contrast, is not cached: nothing is stored for a key cuDNN rejected, so asking the
-// same question again pays for the build again. See lookup_or_cache_graph.
-//
-// The direction comes from which of these two functions was called, not from the config: a config
-// arriving from a framework has both check_for_*_support set, so both probes run off a single
-// config, and each has to name its own direction for the key and the graph to be the forward ones.
-std::string is_supported_f16_fwd(const FusedAttnConfig &cfg, cudnnHandle_t handle) {
-  return fused_attn::support_verdict("is_supported_f16_fwd",
-                                     [&] { fused_attn::cache_graph_f16_fwd(cfg, handle); });
-}
-
-// The backward counterpart of is_supported_f16_fwd; see there.
-std::string is_supported_f16_bwd(const FusedAttnConfig &cfg, cudnnHandle_t handle) {
-  return fused_attn::support_verdict("is_supported_f16_bwd",
-                                     [&] { fused_attn::cache_graph_f16_bwd(cfg, handle); });
+// Turning `pass` into the template argument is the whole of the body: the direction has to be a
+// compile-time constant to pick a builder, and this is where the two meet.
+std::string support_verdict_f16(const FusedAttnConfig &cfg, Pass pass, cudnnHandle_t handle) {
+  if (pass == Pass::Fwd) {
+    return fused_attn::support_verdict<Backend::F16, Pass::Fwd, create_graph_f16_fwd>(cfg, handle);
+  }
+  return fused_attn::support_verdict<Backend::F16, Pass::Bwd, create_graph_f16_bwd>(cfg, handle);
 }
 
 }  // namespace transformer_engine

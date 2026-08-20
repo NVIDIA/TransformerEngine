@@ -39,15 +39,9 @@ void fused_attn_fp8_bwd(const fused_attn::FusedAttnConfig &cfg, const Tensor *in
                         const Tensor *rng_state, Tensor *workspace, cudaStream_t stream,
                         cudnnHandle_t handle);
 
-// check if a given configuration is supported for FP8 forward;
-// if it is, cache the graph built for this config, and return an empty string;
-// if not, return a diagnostic message explaining why it is not supported.
-std::string is_supported_fp8_fwd(const fused_attn::FusedAttnConfig &cfg, cudnnHandle_t handle);
-
-// check if a given configuration is supported for FP8 backward;
-// if it is, cache the graph built for this config, and return an empty string;
-// if not, return a diagnostic message explaining why it is not supported.
-std::string is_supported_fp8_bwd(const fused_attn::FusedAttnConfig &cfg, cudnnHandle_t handle);
+// The FP8 counterpart of support_verdict_f16; see there.
+std::string support_verdict_fp8(const fused_attn::FusedAttnConfig &cfg, fused_attn::Pass pass,
+                                cudnnHandle_t handle);
 }  // namespace transformer_engine
 
 #endif  // TRANSFORMER_ENGINE_COMMON_FUSED_ATTN_FUSED_ATTN_FP8_H_

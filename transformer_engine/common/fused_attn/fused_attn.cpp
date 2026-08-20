@@ -343,6 +343,38 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend_v2(NVTEFusedAttnConfig confi
   const bool is_f16_or_bf16 =
       (cfg.qkv_dtype == NVTEDType::kNVTEFloat16 || cfg.qkv_dtype == NVTEDType::kNVTEBFloat16);
 
+  // Ask `verdict` about each direction the caller wants, and report the first refusal: the empty
+  // string means every direction asked about is served. Stated once here because every rule that
+  // is direction-dependent has to be asked this same way, and two copies of the gating would be
+  // two chances to probe a direction the caller never asked about.
+  //
+  // Forward is asked first because a config that cannot run forward cannot train either, and the
+  // forward refusal is the more useful of the two to report. Backward is skipped for inference,
+  // where no backward graph is ever built.
+  auto each_pass = [&](auto &&verdict) -> std::string {
+    if (cfg.check_for_forward_support) {
+      std::string reason = verdict(Pass::Fwd);
+      if (!reason.empty()) return reason;
+    }
+    if (cfg.is_training && cfg.check_for_backward_support) {
+      std::string reason = verdict(Pass::Bwd);
+      if (!reason.empty()) return reason;
+    }
+    return "";
+  };
+
+  // cuDNN's own verdict on `backend`. The two backends differ only in which set of graphs gets
+  // built, so they share this; what is theirs alone are the rules in each branch below.
+  //
+  // Each backend answers for both directions from its own translation unit, the only place that can
+  // name the graph builders, so choosing between them is all the dispatch left to do here.
+  auto probe = [&](Backend backend) -> std::string {
+    return each_pass([&](Pass pass) {
+      return backend == Backend::FP8 ? support_verdict_fp8(cfg, pass, handle)
+                                     : support_verdict_f16(cfg, pass, handle);
+    });
+  };
+
   if (is_fp8) {
     if (cfg.return_max_logit) {
       return reject(message, "FP8 fused attention does not support return_max_logit=True.");
@@ -352,14 +384,50 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend_v2(NVTEFusedAttnConfig confi
       return reject(message, "FP8 fused attention supports BSHD/SBHD/BHSD formats, found " +
                                  std::to_string(static_cast<int>(qkv_format)) + ".");
     }
-    if (cfg.check_for_forward_support) {
-      std::string fwd_reason = is_supported_fp8_fwd(cfg, handle);
-      if (!fwd_reason.empty()) return reject(message, std::move(fwd_reason));
+    // The rest of what the FP8 graphs cannot represent: bias, ALiBi, and the quantization recipes
+    // they are not written for. TE's rules rather than cuDNN's, and stated here rather than in the
+    // build path for the reason all the rules above are: a rejection stated here is an answer
+    // carrying its reason, where the same rule inside a graph build would have to travel out as an
+    // exception.
+    if (cfg.bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS) {
+      return reject(message, "FP8 fused attention does not support pre/post_scale_bias yet!");
     }
-    if (cfg.is_training && cfg.check_for_backward_support) {
-      std::string bwd_reason = is_supported_fp8_bwd(cfg, handle);
-      if (!bwd_reason.empty()) return reject(message, std::move(bwd_reason));
+    if (cfg.bias_type == NVTE_Bias_Type::NVTE_ALIBI) {
+      return reject(message, "FP8 fused attention does not support ALiBi yet!");
     }
+
+    // Whether the config names a recipe the FP8 graphs are written for at all. Delayed scaling
+    // writes FP8 out and keeps its scale, current scaling writes F16 and computes one, MXFP8 writes
+    // F16 with block scales; every other pairing of scaling mode and output dtype is refused here.
+    //
+    // Per direction, because the pairing is read off what each pass stores, which is also how the
+    // graph builders read which of the three they are building for -- off cfg.o_is_fp8 and
+    // cfg.dqkv_is_fp8, taking "not FP8" to mean F16. That reading is sound only because this
+    // refusal has already happened, so the two belong to each other: a pairing accepted here must
+    // be one they read the same way, and anything added to either belongs in both.
+    std::string recipe_reason = each_pass([&](Pass pass) -> std::string {
+      const NVTEDType out_dtype = (pass == Pass::Fwd) ? cfg.o_dtype : cfg.dqkv_dtype;
+      const bool out_is_fp8 = (pass == Pass::Fwd) ? cfg.o_is_fp8 : cfg.dqkv_is_fp8;
+      const bool out_is_f16 = (out_dtype == kNVTEFloat16 || out_dtype == kNVTEBFloat16);
+      const bool serves_this_output =
+          (cfg.scaling_mode == NVTE_DELAYED_TENSOR_SCALING && (out_is_fp8 || out_is_f16)) ||
+          (cfg.scaling_mode == NVTE_MXFP8_1D_SCALING && out_is_f16);
+      if (!serves_this_output) {
+        return "FP8 fused attention only supports FP8DelayedScaling or FP8CurrentScaling or MXFP8 "
+               "recipes!";
+      }
+      return "";
+    });
+    if (!recipe_reason.empty()) return reject(message, std::move(recipe_reason));
+
+    // Asked after the pairing above, not with it: a config that names no recipe at all should hear
+    // that rather than be sent to upgrade cuDNN for a recipe it was not asking for.
+    if (cfg.scaling_mode == NVTE_MXFP8_1D_SCALING && cudnn_runtime_version < 92100) {
+      return reject(message, "MXFP8 fused attention requires cuDNN 9.21.0 or later!");
+    }
+
+    std::string reason = probe(Backend::FP8);
+    if (!reason.empty()) return reject(message, std::move(reason));
     return NVTE_Fused_Attn_Backend::NVTE_FP8;
   }
 
@@ -378,14 +446,8 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend_v2(NVTEFusedAttnConfig confi
         cfg.attn_mask_type != NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK) {
       return reject(message, "Known cuDNN <= 9.15 issue with CUDA graph. Please upgrade cuDNN.");
     }
-    if (cfg.check_for_forward_support) {
-      std::string fwd_reason = is_supported_f16_fwd(cfg, handle);
-      if (!fwd_reason.empty()) return reject(message, std::move(fwd_reason));
-    }
-    if (cfg.is_training && cfg.check_for_backward_support) {
-      std::string bwd_reason = is_supported_f16_bwd(cfg, handle);
-      if (!bwd_reason.empty()) return reject(message, std::move(bwd_reason));
-    }
+    std::string reason = probe(Backend::F16);
+    if (!reason.empty()) return reject(message, std::move(reason));
     return NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen;
   }
 
@@ -445,9 +507,10 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
 // support query and the execution path reach the same cache through the same accessor. That is
 // what the HIT below means: by the time a backend has been selected, the entry the implementation
 // needs has already been built and inserted by the probe that selected it, so what was checked is
-// what runs. The rules the selector does state for itself are the ones cuDNN cannot answer,
-// because they are about whether the graph computes what was asked for rather than whether cuDNN
-// can run it.
+// what runs. The rules the selector does state for itself are the ones cuDNN cannot answer: either
+// about whether the graph computes what was asked for rather than whether cuDNN can run it, or
+// about what TE's graphs can represent in the first place, which is where the FP8 recipes come in.
+// Stating them here rather than inside a build is what lets each one answer with its reason.
 //
 //   nvte_fused_attn_fwd_v2
 //     |
@@ -456,17 +519,19 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
 //     +-- nvte_get_fused_attn_backend_v2                            the support query
 //     |     |
 //     |     +-- TE's own rules: THD and paged KV need a padding mask, no pre-scale bias,
-//     |     |     ragged Q/KV needs sm90+, the cuDNN 9.15-and-older CUDA-graph bug
+//     |     |     ragged Q/KV needs sm90+, the cuDNN 9.15-and-older CUDA-graph bug, and for FP8
+//     |     |     bias, ALiBi and the quantization recipes its graphs are not written for
 //     |     |     `-- reject -> NVTE_No_Backend + reason -> the NVTE_ERROR below
 //     |     |
-//     |     `-- is_supported_f16_fwd / is_supported_fp8_fwd
-//     |           `-- cache_graph_f16_fwd(): builds and inserts the entry, or throws, in
-//     |                 which case cuDNN's message becomes the reason for the refusal
+//     |     `-- probe(backend) -> support_verdict_f16 / support_verdict_fp8, with Pass::Fwd
+//     |           `-- support_verdict<F16, Fwd, ...>()
+//     |                 `-- get_graph<F16, Fwd, ...>(): builds and inserts the entry, or throws,
+//     |                       in which case cuDNN's message becomes the reason for the refusal
 //     |
 //     `-- fused_attn_arbitrary_seqlen_fwd -> ..._fwd_impl           the selected backend
 //           |
-//           +-- cache_graph_f16_fwd()   HIT: the entry the query above just built
-//           +-- build_plans()           the kernel compilation, once per entry
+//           +-- get_graph<F16, Fwd, ...>() HIT: the entry the query above just built
+//           +-- build_plans()                the kernel compilation, once per entry
 //           `-- bind device pointers, graph.execute()
 void nvte_fused_attn_fwd_v2(NVTEFusedAttnFwdParams params) {
   NVTE_API_CALL(nvte_fused_attn_fwd_v2);
