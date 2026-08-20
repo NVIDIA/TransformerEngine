@@ -52,7 +52,6 @@ from ..distributed import (
     symmetric_all_reduce,
     reduce_scatter_along_first_dim,
     gather_along_first_dim,
-    in_fp8_activation_recompute_phase,
     _fsdp_scatter_tensors,
     _fsdp_gather_tensors,
 )
@@ -588,13 +587,11 @@ class _LayerNormLinear(torch.autograd.Function):
             ctx.ub_name = ub_name
             ctx.requires_dgrad = inp_requires_grad
             ctx.normalization = normalization
-            ctx.reduce_and_update_bwd_fp8_tensors = False
-            if ctx.fp8 and requires_grad(inp, ln_weight, ln_bias, weight, bias):
-                qstate = FP8GlobalStateManager.quantization_state
-                _first_fp8_module = qstate.is_first_fp8_module
-                ctx.reduce_and_update_bwd_fp8_tensors = FP8GlobalStateManager.is_first_fp8_module()
-                if in_fp8_activation_recompute_phase():
-                    qstate.is_first_fp8_module = _first_fp8_module
+            ctx.should_request_backward_quantization_update = (
+                ctx.fp8
+                and (ctx.fp8_recipe.delayed() or ctx.fp8_recipe.custom())
+                and requires_grad(inp, ln_weight, ln_bias, weight, bias)
+            )
             ctx.wgrad_store = wgrad_store
             ctx.debug = debug
 
@@ -609,7 +606,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 ctx.grad_input_quantizer = None
                 ctx.grad_weight_quantizer = None
                 ctx.grad_output_quantizer = None
-                ctx.reduce_and_update_bwd_fp8_tensors = False
+                ctx.should_request_backward_quantization_update = False
 
         # ------------------------------------------------------
         # Cached state for backward pass is ready...
@@ -1184,10 +1181,8 @@ class _LayerNormLinear(torch.autograd.Function):
         else:
             wgrad = None
 
-        if ctx.reduce_and_update_bwd_fp8_tensors and not is_graph_capturing():
-            nvtx_range_push(f"{nvtx_label}.reduce_and_update_fp8_tensors")
-            FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=False)
-            nvtx_range_pop(f"{nvtx_label}.reduce_and_update_fp8_tensors")
+        if ctx.should_request_backward_quantization_update and not is_graph_capturing():
+            FP8GlobalStateManager.request_backward_quantization_update()
 
         # Scatter fp8 weight buffers
         # if ctx.fp8 and not isinstance(weight, QuantizedTensorStorage):

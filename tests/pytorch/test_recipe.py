@@ -32,6 +32,7 @@ from transformer_engine.pytorch.quantization import (
     _amax_and_scale_update,
 )
 import transformer_engine.pytorch.ops as te_ops
+from transformer_engine.pytorch.distributed import checkpoint as te_checkpoint
 from transformer_engine.common.recipe import (
     CustomRecipe,
     DelayedScaling,
@@ -780,3 +781,207 @@ def test_stateful_unknown_or_malformed_pickled_extra_state_requires_opt_in(paylo
 
     monkeypatch.setenv(UNSAFE_PICKLE_EXTRA_STATE_ENV, "1")
     assert should_load_extra_state_pickle(payload, "test")
+
+
+_UPDATE_TEST_HIDDEN = 128
+_UPDATE_TEST_BATCH = 32
+_UPDATE_TEST_STEPS = 3
+
+
+class _UpdateCounter:
+    def __init__(self):
+        self.backward = 0
+        self._original = None
+
+    def __enter__(self):
+        self._original = FP8GlobalStateManager.reduce_and_update_quantization_state.__func__
+        original = self._original
+        counter = self
+
+        def counted(cls, forward=True):
+            if not forward:
+                counter.backward += 1
+            return original(cls, forward=forward)
+
+        FP8GlobalStateManager.reduce_and_update_quantization_state = classmethod(counted)
+        return self
+
+    def __exit__(self, *exc):
+        FP8GlobalStateManager.reduce_and_update_quantization_state = classmethod(self._original)
+
+
+def _make_update_test_model(num_layers=3, seed=1234):
+    torch.manual_seed(seed)
+    return torch.nn.ModuleList(
+        [
+            te.Linear(_UPDATE_TEST_HIDDEN, _UPDATE_TEST_HIDDEN, bias=True).cuda()
+            for _ in range(num_layers)
+        ]
+    )
+
+
+def _run_update_test_layers(layers, x):
+    for layer in layers:
+        x = layer(x)
+    return x
+
+
+def _run_update_test_step(model, x, forward_fn, recipe):
+    with te.autocast(enabled=True, recipe=recipe):
+        out = forward_fn(model, x)
+    loss = out.float().sum()
+    loss.backward()
+
+
+def _update_forward_plain(model, x):
+    return _run_update_test_layers(model, x)
+
+
+def _update_forward_reentrant(model, x):
+    return te_checkpoint(_run_update_test_layers, model, x, use_reentrant=True)
+
+
+def _update_forward_non_reentrant(model, x):
+    return te_checkpoint(_run_update_test_layers, model, x, use_reentrant=False)
+
+
+def _update_forward_per_layer_reentrant(model, x):
+    for layer in model:
+        x = te_checkpoint(layer, x, use_reentrant=True)
+    return x
+
+
+def _update_forward_nested(model, x):
+    def inner(value):
+        return te_checkpoint(model[1], value, use_reentrant=True)
+
+    def outer(value):
+        return model[2](inner(model[0](value)))
+
+    return te_checkpoint(outer, x, use_reentrant=True)
+
+
+_UPDATE_FORWARD_FNS = {
+    "plain": _update_forward_plain,
+    "reentrant": _update_forward_reentrant,
+    "non_reentrant": _update_forward_non_reentrant,
+    "per_layer_reentrant": _update_forward_per_layer_reentrant,
+    "nested": _update_forward_nested,
+}
+
+
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+@pytest.mark.parametrize("mode", _UPDATE_FORWARD_FNS.keys())
+def test_delayed_scaling_updates_once_per_backward(mode):
+    FP8GlobalStateManager.reset()
+    model = _make_update_test_model()
+    recipe = DelayedScaling()
+
+    with _UpdateCounter() as counter:
+        for step in range(_UPDATE_TEST_STEPS):
+            x = torch.randn(
+                _UPDATE_TEST_BATCH,
+                _UPDATE_TEST_HIDDEN,
+                device="cuda",
+                requires_grad=True,
+            )
+            _run_update_test_step(model, x, _UPDATE_FORWARD_FNS[mode], recipe)
+            assert counter.backward == step + 1
+            qstate = FP8GlobalStateManager.quantization_state
+            assert not qstate.pending_backward_quantization_update
+            assert qstate.backward_quantization_update_callback_task_id is None
+
+
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+def test_backward_quantization_update_scope_groups_autograd_calls():
+    FP8GlobalStateManager.reset()
+    model = _make_update_test_model()
+    recipe = DelayedScaling()
+
+    with _UpdateCounter() as counter, te.backward_quantization_update_scope():
+        for _ in range(_UPDATE_TEST_STEPS):
+            x = torch.randn(
+                _UPDATE_TEST_BATCH,
+                _UPDATE_TEST_HIDDEN,
+                device="cuda",
+                requires_grad=True,
+            )
+            _run_update_test_step(model, x, _update_forward_plain, recipe)
+            assert counter.backward == 0
+    assert counter.backward == 1
+
+
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+def test_backward_quantization_update_scope_covers_delayed_wgrad():
+    FP8GlobalStateManager.reset()
+    model = te.Linear(
+        _UPDATE_TEST_HIDDEN,
+        _UPDATE_TEST_HIDDEN,
+        bias=True,
+        delay_wgrad_compute=True,
+    ).cuda()
+    recipe = DelayedScaling()
+
+    with _UpdateCounter() as counter, te.backward_quantization_update_scope():
+        x = torch.randn(
+            _UPDATE_TEST_BATCH,
+            _UPDATE_TEST_HIDDEN,
+            device="cuda",
+            requires_grad=True,
+        )
+        with te.autocast(enabled=True, recipe=recipe):
+            out = model(x)
+        out.float().sum().backward()
+        assert counter.backward == 0
+        model.backward_dw()
+        assert model.weight.grad is not None
+        assert counter.backward == 0
+    assert counter.backward == 1
+
+
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+@pytest.mark.parametrize("checkpoint_first_branch", [True, False])
+def test_delayed_scaling_update_on_branched_graph(checkpoint_first_branch):
+    FP8GlobalStateManager.reset()
+    branch_a = _make_update_test_model(num_layers=2, seed=1)
+    branch_b = _make_update_test_model(num_layers=2, seed=2)
+    recipe = DelayedScaling()
+
+    with _UpdateCounter() as counter:
+        x = torch.randn(
+            _UPDATE_TEST_BATCH,
+            _UPDATE_TEST_HIDDEN,
+            device="cuda",
+            requires_grad=True,
+        )
+        with te.autocast(enabled=True, recipe=recipe):
+            if checkpoint_first_branch:
+                out_a = te_checkpoint(_run_update_test_layers, branch_a, x, use_reentrant=True)
+            else:
+                out_a = _run_update_test_layers(branch_a, x)
+            out_b = te_checkpoint(_run_update_test_layers, branch_b, x, use_reentrant=True)
+        (out_a + out_b).float().sum().backward()
+        assert counter.backward == 1
+        assert x.grad is not None and torch.isfinite(x.grad).all()
+
+
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+def test_unused_checkpoint_branch_does_not_own_backward_update():
+    FP8GlobalStateManager.reset()
+    used = _make_update_test_model(num_layers=2, seed=1)
+    unused = _make_update_test_model(num_layers=2, seed=2)
+    recipe = DelayedScaling()
+
+    with _UpdateCounter() as counter:
+        x = torch.randn(
+            _UPDATE_TEST_BATCH,
+            _UPDATE_TEST_HIDDEN,
+            device="cuda",
+            requires_grad=True,
+        )
+        with te.autocast(enabled=True, recipe=recipe):
+            unused_out = te_checkpoint(_run_update_test_layers, unused, x, use_reentrant=True)
+            out = _run_update_test_layers(used, x)
+        out.float().sum().backward()
+        del unused_out
+        assert counter.backward == 1

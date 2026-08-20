@@ -45,6 +45,7 @@ from transformer_engine.pytorch.permutation import (
 from transformer_engine.pytorch.quantization import fp8_autocast
 from transformer_engine.pytorch.quantization import fp8_model_init
 from transformer_engine.pytorch.quantization import autocast
+from transformer_engine.pytorch.quantization import backward_quantization_update_scope
 from transformer_engine.pytorch.quantization import quantized_model_init
 from transformer_engine.pytorch.quantization import is_fp8_available
 from transformer_engine.pytorch.quantization import is_mxfp8_available

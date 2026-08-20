@@ -39,7 +39,7 @@ from .utils import (
 )
 
 from .constants import dist_group_type
-from .quantization import FP8GlobalStateManager, autocast
+from .quantization import FP8GlobalStateManager, autocast, backward_quantization_update_scope
 from .tensor.float8_tensor import Float8Quantizer, Float8Tensor, Float8CurrentScalingQuantizer
 from .tensor.mxfp8_tensor import MXFP8Quantizer
 from .tensor.nvfp4_tensor import NVFP4Quantizer
@@ -247,8 +247,6 @@ class activation_recompute_forward(AbstractContextManager, ContextDecorator):
     activations, followed by calculation of gradients using these values.
     """
 
-    _is_first_fp8_module: List = []
-
     def __init__(self, activation_recompute: bool = False, recompute_phase: bool = False):
         super().__init__()
         self.activation_recompute = activation_recompute
@@ -263,12 +261,6 @@ class activation_recompute_forward(AbstractContextManager, ContextDecorator):
         # the recompute forward.
         _IN_ACTIVATION_RECOMPUTE_REGION = self.activation_recompute
         _ACTIVATION_RECOMPUTE_PHASE = self.recompute_phase
-
-        qstate = FP8GlobalStateManager.quantization_state
-        if self.activation_recompute and not self.recompute_phase:
-            activation_recompute_forward._is_first_fp8_module.append(qstate.is_first_fp8_module)
-        if self.activation_recompute and self.recompute_phase:
-            qstate.is_first_fp8_module = activation_recompute_forward._is_first_fp8_module.pop(0)
 
     def __exit__(self, *exc_details):
         global _IN_ACTIVATION_RECOMPUTE_REGION, _ACTIVATION_RECOMPUTE_PHASE
@@ -407,6 +399,20 @@ class _CheckpointFunction(torch.autograd.Function):
         ctx, *args: Tuple[Union[torch.Tensor, None], ...]
     ) -> Tuple[Union[torch.Tensor, None], ...]:
         """Call backward function with activation recomputation."""
+        recipe = ctx.fp8_recipe
+        update_scope = (
+            backward_quantization_update_scope()
+            if ctx.fp8 and (recipe.delayed() or recipe.custom())
+            else nullcontext()
+        )
+        with update_scope:
+            return _CheckpointFunction._backward(ctx, *args)
+
+    @staticmethod
+    def _backward(
+        ctx, *args: Tuple[Union[torch.Tensor, None], ...]
+    ) -> Tuple[Union[torch.Tensor, None], ...]:
+        """Recompute the forward and run its nested backward."""
         if not torch.autograd._is_checkpoint_valid():
             raise RuntimeError(
                 "Checkpointing is not compatible with .grad(), please use .backward() if possible"
@@ -440,9 +446,7 @@ class _CheckpointFunction(torch.autograd.Function):
         detached_inputs = detach_variable(inputs)
         with torch.enable_grad(), ctx.recompute_ctx, ctx.torch_gpu_amp_ctx, ctx.torch_cpu_amp_ctx, activation_recompute_forward(
             activation_recompute=True, recompute_phase=True
-        ), autocast(
-            enabled=ctx.fp8, recipe=ctx.fp8_recipe
-        ):
+        ), autocast(enabled=ctx.fp8, recipe=ctx.fp8_recipe):
             outputs = ctx.run_function(*detached_inputs, **ctx.kwargs)
 
         # Set the states back to what it was at the start of this function.

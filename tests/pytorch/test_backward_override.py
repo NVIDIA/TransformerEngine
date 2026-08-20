@@ -419,7 +419,7 @@ def _snapshot_backward_ctx_state(
         "backward_override",
         "fp8",
         "grad_output_quantizer",
-        "reduce_and_update_bwd_fp8_tensors",
+        "should_request_backward_quantization_update",
     )
     missing_attrs = [attr for attr in required_attrs if not hasattr(state_holder, attr)]
     if missing_attrs:
@@ -430,7 +430,7 @@ def _snapshot_backward_ctx_state(
         getattr(state_holder, "backward_override"),
         bool(getattr(state_holder, "fp8")),
         getattr(state_holder, "grad_output_quantizer"),
-        bool(getattr(state_holder, "reduce_and_update_bwd_fp8_tensors")),
+        bool(getattr(state_holder, "should_request_backward_quantization_update")),
     )
 
 
@@ -816,7 +816,7 @@ def _run_grouped_linear_single_step_with_ctx_state(
         required_attrs = (
             "backward_override",
             "fp8",
-            "reduce_and_update_bwd_fp8_tensors",
+            "should_request_backward_quantization_update",
         )
         missing_attrs = [attr for attr in required_attrs if not hasattr(y.grad_fn, attr)]
         if missing_attrs:
@@ -827,7 +827,7 @@ def _run_grouped_linear_single_step_with_ctx_state(
         ctx_state = (
             getattr(y.grad_fn, "backward_override"),
             bool(getattr(y.grad_fn, "fp8")),
-            bool(getattr(y.grad_fn, "reduce_and_update_bwd_fp8_tensors")),
+            bool(getattr(y.grad_fn, "should_request_backward_quantization_update")),
         )
     y.backward(dy)
     assert x_run.grad is not None
@@ -1453,33 +1453,34 @@ def test_linear_like_runtime_backward_override_switch_updates_ctx(
         default_mode,
         default_fp8,
         default_grad_output_quantizer,
-        default_reduce_and_update,
+        default_should_request_update,
     ) = default_ctx
+    expected_request = default_recipe.delayed() or default_recipe.custom()
     assert default_mode is None
     assert default_fp8
     assert default_grad_output_quantizer is not None
-    assert default_reduce_and_update
+    assert default_should_request_update == expected_request
 
     *_, switched_ctx = _run_single_step_with_ctx_state(module, x, dy, mode_recipe)
-    switched_mode, switched_fp8, switched_grad_output_quantizer, switched_reduce_and_update = (
+    switched_mode, switched_fp8, switched_grad_output_quantizer, switched_should_request_update = (
         switched_ctx
     )
     assert switched_mode == backward_override
     assert not switched_fp8
     assert switched_grad_output_quantizer is None
-    assert not switched_reduce_and_update
+    assert not switched_should_request_update
 
     *_, default_ctx_after = _run_single_step_with_ctx_state(module, x, dy, default_recipe)
     (
         default_mode_after,
         default_fp8_after,
         default_grad_output_quantizer_after,
-        default_reduce_and_update_after,
+        default_should_request_update_after,
     ) = default_ctx_after
     assert default_mode_after is None
     assert default_fp8_after
     assert default_grad_output_quantizer_after is not None
-    assert default_reduce_and_update_after
+    assert default_should_request_update_after == expected_request
 
 
 @pytest.mark.parametrize("recipe_name", _quantized_numerics_recipe_list)
@@ -1526,10 +1527,11 @@ def test_grouped_linear_runtime_backward_override_switch_updates_ctx(
         dy,
         default_recipe,
     )
-    default_mode, default_fp8, default_reduce_and_update = default_ctx
+    default_mode, default_fp8, default_should_request_update = default_ctx
+    expected_request = default_recipe.delayed() or default_recipe.custom()
     assert default_mode is None
     assert default_fp8
-    assert default_reduce_and_update
+    assert default_should_request_update == expected_request
 
     *_, switched_ctx = _run_grouped_linear_single_step_with_ctx_state(
         module,
@@ -1538,10 +1540,10 @@ def test_grouped_linear_runtime_backward_override_switch_updates_ctx(
         dy,
         mode_recipe,
     )
-    switched_mode, switched_fp8, switched_reduce_and_update = switched_ctx
+    switched_mode, switched_fp8, switched_should_request_update = switched_ctx
     assert switched_mode == backward_override
     assert not switched_fp8
-    assert not switched_reduce_and_update
+    assert not switched_should_request_update
 
     *_, default_ctx_after = _run_grouped_linear_single_step_with_ctx_state(
         module,
@@ -1550,10 +1552,10 @@ def test_grouped_linear_runtime_backward_override_switch_updates_ctx(
         dy,
         default_recipe,
     )
-    default_mode_after, default_fp8_after, default_reduce_and_update_after = default_ctx_after
+    default_mode_after, default_fp8_after, default_should_request_update_after = default_ctx_after
     assert default_mode_after is None
     assert default_fp8_after
-    assert default_reduce_and_update_after
+    assert default_should_request_update_after == expected_request
 
 
 @pytest.mark.parametrize("recipe_name", _quantized_numerics_recipe_list)

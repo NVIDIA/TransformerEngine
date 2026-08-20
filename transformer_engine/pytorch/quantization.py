@@ -28,12 +28,13 @@ from transformer_engine.common.recipe import (
 )
 from .constants import dist_group_type, DType
 
-from .utils import get_device_compute_capability
+from .utils import get_device_compute_capability, nvtx_range_push, nvtx_range_pop
 from .jit import jit_fuser
 
 
 __all__ = [
     "autocast",
+    "backward_quantization_update_scope",
     "quantized_model_init",
     "is_fp8_available",
     "is_mxfp8_available",
@@ -400,6 +401,9 @@ class FP8GlobalState:
     fp8_parameters: bool = False
     high_precision_init_val: bool = False
     is_first_fp8_module: bool = False
+    pending_backward_quantization_update: bool = False
+    backward_quantization_update_callback_task_id: Optional[int] = None
+    backward_quantization_update_scope_depth: int = 0
     fp8_graph_capturing: bool = False
     autocast_depth: int = 0
     global_amax_buffer: Dict[str, list] = field(default_factory=dict)
@@ -653,7 +657,7 @@ class FP8GlobalStateManager:
             )
 
     @classmethod
-    def reduce_and_update_fp8_tensors(
+    def reduce_and_update_quantization_state(
         cls,
         forward: bool = True,
     ) -> None:
@@ -679,6 +683,68 @@ class FP8GlobalStateManager:
                 qstate.global_amax_history_buffer[buffer_key],
                 qstate.global_scale_buffer[buffer_key],
             )
+
+    # Compatibility alias used by Megatron-Core.
+    reduce_and_update_fp8_tensors = reduce_and_update_quantization_state
+
+    @classmethod
+    def request_backward_quantization_update(cls) -> None:
+        """Request an update after the enclosing logical backward."""
+        qstate = cls.quantization_state
+        qstate.pending_backward_quantization_update = True
+        if qstate.backward_quantization_update_scope_depth == 0:
+            cls._queue_backward_quantization_update_callback()
+
+    @classmethod
+    def _queue_backward_quantization_update_callback(cls, task_id: Optional[int] = None) -> None:
+        """Queue an update after an autograd task."""
+        qstate = cls.quantization_state
+        if task_id is None:
+            task_id = torch._C._current_graph_task_id()
+        if task_id == -1:
+            raise RuntimeError("Backward quantization update must be requested during backward")
+        if qstate.backward_quantization_update_callback_task_id == task_id:
+            return
+
+        qstate.backward_quantization_update_callback_task_id = task_id
+
+        def callback() -> None:
+            cls._run_backward_quantization_update_callback(task_id)
+
+        try:
+            torch.autograd.Variable._execution_engine.queue_callback(callback)
+        except RuntimeError:
+            if qstate.backward_quantization_update_callback_task_id == task_id:
+                qstate.backward_quantization_update_callback_task_id = None
+            raise
+
+    @classmethod
+    def _run_backward_quantization_update_callback(cls, task_id: int) -> None:
+        """Run the update callback for an autograd task."""
+        qstate = cls.quantization_state
+        if qstate.backward_quantization_update_callback_task_id != task_id:
+            return
+        qstate.backward_quantization_update_callback_task_id = None
+        if qstate.backward_quantization_update_scope_depth == 0:
+            cls._run_pending_backward_quantization_update()
+
+    @classmethod
+    def _run_pending_backward_quantization_update(cls) -> None:
+        """Run the pending backward update, if any."""
+        qstate = cls.quantization_state
+        if not qstate.pending_backward_quantization_update:
+            return
+        qstate.pending_backward_quantization_update = False
+        nvtx_range_push("transformer_engine.reduce_and_update_quantization_state.backward")
+        update_succeeded = False
+        try:
+            with torch.no_grad():
+                cls.reduce_and_update_quantization_state(forward=False)
+            update_succeeded = True
+        finally:
+            if not update_succeeded:
+                qstate.pending_backward_quantization_update = True
+            nvtx_range_pop("transformer_engine.reduce_and_update_quantization_state.backward")
 
     @staticmethod
     def get_unique_autocast_key(
@@ -749,7 +815,7 @@ class FP8GlobalStateManager:
         if enabled and qstate.autocast_depth == 0 and not _graph and torch.is_grad_enabled():
             # delayed scaling only function, for other recipes (current scaling with any granularity),
             # this is noop for other recipes because cls.global_amax_buffer is empty list
-            cls.reduce_and_update_fp8_tensors(forward=True)
+            cls.reduce_and_update_quantization_state(forward=True)
 
     @classmethod
     def copy_forward_fp8_meta_tensors_for_recompute(cls, fp8_meta: Dict[str, Any]) -> None:
@@ -811,6 +877,29 @@ class FP8GlobalStateManager:
 
         fp8_meta["scaling_fwd"].amax_history.copy_(fp8_meta["updated_amax_history_fwd"])
         fp8_meta["scaling_fwd"].scale.copy_(fp8_meta["updated_scale_fwd"])
+
+
+@contextmanager
+def backward_quantization_update_scope() -> None:
+    """Delay the quantization state update until the end of a logical backward.
+
+    Ordinary backward calls update automatically and do not require this scope.
+    Use it when a logical backward spans multiple autograd calls or includes
+    delayed work such as ``module.backward_dw()``. Nested scopes update once
+    when the outermost scope exits.
+    """
+    qstate = FP8GlobalStateManager.quantization_state
+    outermost = qstate.backward_quantization_update_scope_depth == 0
+    task_id = torch._C._current_graph_task_id() if outermost else -1
+    if task_id != -1:
+        FP8GlobalStateManager._queue_backward_quantization_update_callback(task_id)
+    qstate.backward_quantization_update_scope_depth += 1
+    try:
+        yield
+    finally:
+        qstate.backward_quantization_update_scope_depth -= 1
+        if outermost and task_id == -1:
+            FP8GlobalStateManager._run_pending_backward_quantization_update()
 
 
 @contextmanager

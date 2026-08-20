@@ -233,8 +233,8 @@ class LinearBwdArgs:
     origin_weight_overwrites_main_grad: bool = False
     main_grad_func: Optional[Callable[[], torch.Tensor]] = None
 
-    # --- FP8 reduce-and-update bookkeeping ---
-    reduce_and_update_bwd_fp8_tensors: bool = False
+    # --- Quantization state update bookkeeping ---
+    should_request_backward_quantization_update: bool = False
 
     # --- Misc ---
     cpu_offloading: bool = False
@@ -253,16 +253,6 @@ class LinearBwdArgs:
         ) = restore_from_func_ctx(
             ctx
         )  # pylint: disable=unbalanced-tuple-unpacking
-
-
-def _check_fp8_reduce_and_update():
-    """Check if this is the first FP8 module (for backward reduce-and-update)."""
-    qstate = FP8GlobalStateManager.quantization_state
-    _first_fp8_module = qstate.is_first_fp8_module
-    result = FP8GlobalStateManager.is_first_fp8_module()
-    if in_fp8_activation_recompute_phase():
-        qstate.is_first_fp8_module = _first_fp8_module
-    return result
 
 
 def _linear_forward_impl(
@@ -1439,9 +1429,12 @@ class _Linear(torch.autograd.Function):
                 or fwd_args.weight_requires_grad
                 or fwd_args.bias_requires_grad
             ):
-                bwd_args.reduce_and_update_bwd_fp8_tensors = _check_fp8_reduce_and_update()
+                recipe = FP8GlobalStateManager.get_fp8_recipe()
+                bwd_args.should_request_backward_quantization_update = (
+                    recipe.delayed() or recipe.custom()
+                )
             if fwd_args.backward_override is not None:
-                bwd_args.reduce_and_update_bwd_fp8_tensors = False
+                bwd_args.should_request_backward_quantization_update = False
 
         return out, new_weight_workspace
 
@@ -1459,15 +1452,15 @@ class _Linear(torch.autograd.Function):
         if bwd_args.ub_name is not None:
             nvtx_label = f"{nvtx_label}.{bwd_args.ub_name}"
         result = _linear_backward(bwd_args) + (None,)  # fwd_args grad slot
-        reduce_and_update_bwd_fp8_tensors = bwd_args.reduce_and_update_bwd_fp8_tensors
+        should_request_backward_quantization_update = (
+            bwd_args.should_request_backward_quantization_update
+        )
         # Drop all references held by bwd_args (saved tensors, quantizers, weakrefs,
         # main_grad closure) so they don't outlive backward via ctx under retain_graph.
         ctx.backward_objects = None
         del bwd_args
-        if reduce_and_update_bwd_fp8_tensors and not is_graph_capturing():
-            nvtx_range_push(f"{nvtx_label}.reduce_and_update_fp8_tensors")
-            FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=False)
-            nvtx_range_pop(f"{nvtx_label}.reduce_and_update_fp8_tensors")
+        if should_request_backward_quantization_update and not is_graph_capturing():
+            FP8GlobalStateManager.request_backward_quantization_update()
         return result
 
 

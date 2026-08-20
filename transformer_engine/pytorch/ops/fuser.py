@@ -227,10 +227,12 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
             func_ctx.save_for_backward(*tensors_to_save)
             func_ctx.tensor_objects = tensor_objects
 
-            # Whether to perform recipe update in backward pass
-            is_first_module = False
-            if fuser.first_op_requiring_backward < fuser._num_basic_ops:
-                is_first_module = FP8GlobalStateManager.is_first_fp8_module()
+            recipe = FP8GlobalStateManager.get_fp8_recipe()
+            should_request_backward_quantization_update = (
+                fuser.first_op_requiring_backward < fuser._num_basic_ops
+                and FP8GlobalStateManager.is_fp8_enabled()
+                and (recipe.delayed() or recipe.custom())
+            )
 
             # Other context
             func_ctx.backward_ops = fuser._backward_ops
@@ -243,7 +245,9 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
             func_ctx.basic_op_extra_output_channels = fuser._basic_op_extra_output_channels
             func_ctx.basic_op_extra_output_consumers = fuser._basic_op_extra_output_consumers
             func_ctx.basic_op_extra_input_sources = fuser._basic_op_extra_input_sources
-            func_ctx.is_first_module = is_first_module
+            func_ctx.should_request_backward_quantization_update = (
+                should_request_backward_quantization_update
+            )
 
         # Mark output tensors as not deletable in backward
         for tensor in itertools.chain(
@@ -383,9 +387,8 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
             for op_idx, input_idx in func_ctx.external_extra_input_slots
         ]
 
-        # Update FP8 scaling factors
-        if func_ctx.is_first_module and not _is_graph_capturing():
-            FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=False)
+        if func_ctx.should_request_backward_quantization_update and not _is_graph_capturing():
+            FP8GlobalStateManager.request_backward_quantization_update()
 
         return (
             dx,  # input_
