@@ -176,7 +176,7 @@ def make_recipe(name: Optional[str], **recipe_kwargs: Any) -> Optional[Recipe]:
                 with_post_rht_amax=with_rht,
                 with_2d_quantization=False,
                 stochastic_rounding=False,
-                with_random_sign_mask=with_rht,
+                with_random_sign_mask=False,
                 disable_second_level_scale=tensor_type == "input",
             )
 

@@ -238,7 +238,7 @@ def make_reference_and_test_tensors(
             with_post_rht_amax=with_rht,
             with_2d_quantization=False,
             stochastic_rounding=False,
-            with_random_sign_mask=with_rht,
+            with_random_sign_mask=False,
             disable_second_level_scale=disable_second_level_scale,
         )(test)
     elif quantization == "nvfp4_4over6":

@@ -1447,14 +1447,11 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             use_nvfp4
             and isinstance(fc2_input_quantizer, NVFP4Quantizer)
             and fc2_input_quantizer.with_rht
+            and fc2_input_quantizer.rht_matrix_random_sign_mask_t == 0
         ):
             if fc2_input_quantizer.disable_second_level_scale:
-                # Use GEMM + act + RHT + quant kernel if available
-                if self.grouped_gemm_act_hadamard_quant_kernel() is None:
-                    # Kernel is not available
-                    pass
-                elif self._cudnn_act_func == "swiglu":
-                    kernel_impl = "gemm_act_rht_quant"
+                # Use GEMM + act + RHT + quant kernel once available
+                pass
             elif fc2_input_quantizer.with_post_rht_amax:
                 # Use GEMM + act + RHT + amax kernel if available
                 if self.grouped_gemm_act_hadamard_kernel() is None:
@@ -1668,9 +1665,8 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                 fc2_in_row_scale = fc1_kernel_out["sfd_tensor"]
                 fc2_in_row_scale = fc2_in_row_scale.permute(5, 2, 4, 0, 1, 3)
                 fc2_in_col_data = fc1_kernel_out["rht_tensor"]
-                fc2_in_col_data = fc2_in_col_data.view(fc2_weight_shape[1], in_shape[0] // 2)
+                fc2_in_col_data = fc2_in_col_data.permute(1, 0)
                 fc2_in_col_scale = fc1_kernel_out["sfrht_tensor"]
-                fc2_in_col_scale = fc2_in_col_scale.permute(5, 2, 4, 0, 1, 3)
                 grouped_fc2_x = GroupedTensorStorage(
                     shape=(in_shape[0], fc2_weight_shape[1]),
                     dtype=dtype,
