@@ -272,9 +272,10 @@ class TVMFFICentral {
                   "`bool retrieve_func_from_python(const std::string&) const`, "
                   "and `std::optional<tvm::ffi::Function> get_kernel() const`.");
     if (!cutedsl_backend_enabled_.load(std::memory_order_relaxed)) {
-      maybe_warn_not_chosen("the CuTeDSL backend is disabled, so no kernel is available for "
-                            "config `",
-                            cfg.to_key(), "`. Set NVTE_ENABLE_CUTEDSL_QUANT_BACKEND=1 to enable it.");
+      maybe_warn_not_chosen(
+          "the CuTeDSL backend is disabled, so no kernel is available for "
+          "config `",
+          cfg.to_key(), "`. Set NVTE_ENABLE_CUTEDSL_QUANT_BACKEND=1 to enable it.");
       return std::nullopt;
     }
     // Only check if libtvm_ffi.so is loaded if user enables the CuTeDSL backend.
