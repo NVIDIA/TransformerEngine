@@ -15,7 +15,7 @@
 //                      (CREATE_GRAPH, CACHE_GRAPH, BUILD_PLANS), plus the exit summary
 //                      block and its stage timings. Low volume by construction.
 //   level 2 (trace)  : adds a line per cache lookup (HIT/MISS, with the normalized
-//                      key) and per execution (EXEC). High volume, and it serializes
+//                      key) and per execution (EXECUTE). High volume, and it serializes
 //                      threads on the stderr lock, which the stage timings are then
 //                      measured under -- no timed region writes to stderr, so they
 //                      stay sound, but they read a little high.
@@ -803,10 +803,15 @@ inline void record_hit_miss(Backend b, Pass p, LookupResult result, const FusedA
 // wraps the work rather than reporting on work already done, which is the point: the measured
 // region is exactly the call passed in, so surrounding work cannot drift into it as that code
 // changes. Stage timings feed the summary only; they print no line of their own.
+//
+// Passes `fn`'s result back out so that a timed call reporting a value can be written as the
+// initializer of that value. cuDNN's error_t is [[nodiscard]], and the alternative -- declaring the
+// variable above the timing and assigning to it inside a void `fn` -- discards the assignment's own
+// result, which the compiler counts as ignoring a nodiscard value.
 template <typename Fn>
-inline void record_time(Backend b, Pass p, BuildStage stage, Fn &&fn) {
+inline decltype(auto) record_time(Backend b, Pass p, BuildStage stage, Fn &&fn) {
   detail::ScopedBuildTimer scoped(b, p, stage);
-  fn();
+  return fn();
 }
 
 }  // namespace graph_cache_debug

@@ -84,7 +84,6 @@ static Fp8FwdGraphAndTensors create_graph_fp8_fwd(const FusedAttnConfig& cfg) {
   const int64_t d_v = static_cast<int64_t>(cfg.head_dim_v);
   const int64_t window_size_left = cfg.window_size_left;
   const int64_t window_size_right = cfg.window_size_right;
-  const bool is_training = cfg.is_training;
   const float dropout_probability = cfg.dropout;
   const NVTE_QKV_Layout qkv_layout = cfg.qkv_layout;
   const NVTE_QKV_Format o_format = cfg.o_format;
@@ -367,7 +366,6 @@ void fused_attn_fp8_fwd_impl(const FusedAttnConfig& cfg, void* devPtrQ, void* de
   const int64_t b = static_cast<int64_t>(cfg.batch_size);
   // Not const: bound into the variant pack by address as a pass-by-value graph input.
   float scaling_factor = cfg.attn_scale;
-  const bool is_bias = cfg.is_bias;
   const bool is_padding = cfg.is_padding;
   const bool is_dropout = cfg.is_dropout;
   const bool is_softmax_offset = cfg.is_softmax_offset;
@@ -417,7 +415,7 @@ void fused_attn_fp8_fwd_impl(const FusedAttnConfig& cfg, void* devPtrQ, void* de
       variant_pack[amax_o] = devPtrAmaxO;
     }
 
-    /* if (is_bias) {
+    /* if (cfg.is_bias) {
        variant_pack[bias] = devPtrBias;
     } */
 
@@ -950,10 +948,8 @@ void fused_attn_fp8_bwd_impl(
   const bool is_O_in_F16 = !cfg.o_is_fp8;
 
   const int64_t b = static_cast<int64_t>(cfg.batch_size);
-  const int64_t h = static_cast<int64_t>(cfg.num_attn_heads);
   // Not const: bound into the variant pack by address as a pass-by-value graph input.
   float scaling_factor = cfg.attn_scale;
-  const bool is_bias = cfg.is_bias;
   const bool is_padding = cfg.is_padding;
   const bool is_dropout = cfg.is_dropout;
   const bool is_softmax_offset = cfg.is_softmax_offset;
@@ -1026,9 +1022,9 @@ void fused_attn_fp8_bwd_impl(
       variant_pack[descale_dO_t] = devPtrDescaledO_t;
     }
 
-    /* if (is_bias) {
+    /* if (cfg.is_bias) {
        variant_pack[bias] = devPtrBias;
-       if ((bias_b == 1) && (bias_h == h)) {
+       if ((bias_b == 1) && (bias_h == cfg.num_attn_heads)) {
          variant_pack[dBias] = devPtrdBias;
        } else {
          variant_pack[dBias] = nullptr;

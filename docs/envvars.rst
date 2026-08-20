@@ -210,6 +210,8 @@ backend-selection overview.
 
       ``2`` additionally emits a per-lookup ``HIT``/``MISS`` line carrying the full cache key, and a per-execution ``EXECUTE`` line. Diffing two ``MISS`` lines names the fields that cost the extra build. These fire on every lookup and execution, so at test-suite scale they add I/O and serialize threads on the stderr lock; prefer ``1`` unless you need to see which shapes are missing.
 
+      Each line is written after the cache lock is released rather than under it, so that no thread waits on stderr while holding the cache. With several threads active this means the lines can appear in a different order than the lookups they report; the counters each line carries still increase in event order, and lines from a single thread are still in that thread's order.
+
       By default only rank 0 emits, so that output does not scale with the world size. Append ``:<ranks>`` to override -- ``1:all`` for every rank, ``2:0,3`` for a specific set. Worth overriding under context parallelism, where the ranks genuinely run different configurations.
 
       Has negligible overhead when unset.

@@ -322,7 +322,7 @@ def test_dpa_checkpoint(dtype, model_configs, model):
 _CACHE_EVENT = re.compile(
     r"\[FUSED-ATTN-CACHE\]\s+(?:rank=\d+\s+\|\s+)?tid=\d+\s+dev=-?\d+\s+\|\s+"
     r"(?P<backend>f16|fp8)\s+(?P<pass>fwd|bwd)\s+"
-    r"(?P<event>CREATE_GRAPH|BUILD_PLANS|EXEC|MISS|HIT)\b(?P<rest>.*)"
+    r"(?P<event>CREATE_GRAPH|CACHE_GRAPH|BUILD_PLANS|EXECUTE|MISS|HIT)\b(?P<rest>.*)"
 )
 _CACHE_PHASE = re.compile(r"\[CACHE-TEST\] phase=(?P<name>\w+)")
 
@@ -412,6 +412,9 @@ def test_fused_attn_graph_cache():
         assert count("query", "MISS") == 1, f"{pass_name}: expected one cold miss{context}"
         assert count("query", "CREATE_GRAPH") == 1, f"{pass_name}: expected one build{context}"
         assert count("query", "BUILD_PLANS") == 0, f"{pass_name}: query compiled kernels{context}"
+        # The graph cuDNN took, which is the one the execution phases below go on to find. A
+        # build refused by check_support() would show up here as CREATE_GRAPH without this.
+        assert count("query", "CACHE_GRAPH") == 1, f"{pass_name}: build was not cached{context}"
 
         # Asking the identical question again must cost nothing.
         assert count("requery", "MISS") == 0, f"{pass_name}: repeated query missed{context}"
@@ -429,7 +432,7 @@ def test_fused_attn_graph_cache():
         assert (
             count("exec", "CREATE_GRAPH") == 0
         ), f"{pass_name}: execution rebuilt the graph{context}"
-        assert count("exec", "EXEC") >= 1, f"{pass_name}: fused attention never ran{context}"
+        assert count("exec", "EXECUTE") >= 1, f"{pass_name}: fused attention never ran{context}"
         assert count("exec", "BUILD_PLANS") == 1, f"{pass_name}: expected one plan build{context}"
 
         # softmax_scale reaches the graph as a pointer, not as a shape, so the key drops it:
@@ -439,7 +442,9 @@ def test_fused_attn_graph_cache():
             count("rescale", "CREATE_GRAPH") == 0
         ), f"{pass_name}: attn_scale forced a build{context}"
         assert count("rescale", "BUILD_PLANS") == 0, f"{pass_name}: attn_scale recompiled{context}"
-        assert count("rescale", "EXEC") >= 1, f"{pass_name}: rescaled run did not execute{context}"
+        assert (
+            count("rescale", "EXECUTE") >= 1
+        ), f"{pass_name}: rescaled run did not execute{context}"
 
         # max_seqlen is a dimension the graph is built at, so it must miss -- once, for one
         # new graph, rather than invalidating what is already cached.

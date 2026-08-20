@@ -115,8 +115,8 @@ struct GraphCache {
 inline void query_support(Backend backend, Pass pass, cudnn_frontend::graph::Graph &graph,
                           cudnnHandle_t handle) {
   auto run = [&](graph_cache_debug::BuildStage stage, const char *call_name, auto &&call) {
-    cudnn_frontend::error_t error;
-    graph_cache_debug::record_time(backend, pass, stage, [&] { error = call(); });
+    const cudnn_frontend::error_t error =
+        graph_cache_debug::record_time(backend, pass, stage, [&] { return call(); });
     if (error.is_good()) return;
     // cuDNN normally explains itself; fall back to the call's name so that a refusal can never
     // arrive as an empty string, which support_verdict() would read as an endorsement.
