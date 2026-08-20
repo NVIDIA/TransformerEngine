@@ -146,6 +146,63 @@ def maybe_skip_quantization(
             pytest.skip("NVFP4 quantization is only supported with BF16 data")
 
 
+def test_operation_fuser_reuses_plan_when_grad_requirement_changes(monkeypatch) -> None:
+    """Grad-mode changes update runtime state without rebuilding the fusion plan."""
+
+    # Count fusion-plan construction without depending on any particular real
+    # fusion implementation. A cache hit must bypass this function entirely.
+    fusion_calls = 0
+
+    def track_fusion(ops, *, recipe):  # pylint: disable=unused-argument
+        nonlocal fusion_calls
+        fusion_calls += 1
+        # Preserve the operation list so this hook observes plan construction
+        # without changing the topology under test.
+        return ops
+
+    # The fusion registries are class attributes shared by every OperationFuser.
+    # pytest's monkeypatch fixture restores all three after the test, preventing
+    # this synthetic fusion function from leaking into other tests. Keep only a
+    # joint forward-backward fusion hook so each plan build has one countable
+    # callback and no registered TE fusion can affect the result.
+    monkeypatch.setattr(OperationFuser, "forward_backward_fusion_functions", [track_fusion])
+    monkeypatch.setattr(OperationFuser, "forward_fusion_functions", [])
+    monkeypatch.setattr(OperationFuser, "backward_fusion_functions", [])
+
+    # One Identity op is enough to exercise the cache. With one basic op,
+    # first_op_requiring_backward has an intentionally simple interpretation:
+    #   0: backward starts at the Identity op;
+    #   1: the boundary is past the only op, so no backward work is required.
+    fuser = OperationFuser([te_ops.Identity()])
+    x = torch.ones(1, requires_grad=True)
+    # maybe_fuse_ops expects one extra-input collection per basic op. Identity
+    # has no extra inputs, so its collection is an empty tuple.
+    extra_inputs = [()]
+
+    # Phase 1: the original checkpointed forward runs with grad disabled. This
+    # is the first invocation, so the fuser must construct and cache one plan.
+    # Grad being disabled moves the runtime backward boundary past the only op.
+    fuser.maybe_fuse_ops(False, None, x, extra_inputs)
+    assert fusion_calls == 1
+    assert fuser.first_op_requiring_backward == 1
+
+    # Phase 2: backward replays the checkpointed region with grad enabled. The
+    # recipe and operation topology have not changed, so rebuilding the fusion
+    # plan would be wasted CPU work. The runtime boundary must nevertheless be
+    # updated before maybe_fuse_ops takes its cache-hit early return.
+    fuser.maybe_fuse_ops(True, None, x, extra_inputs)
+    assert fusion_calls == 1
+    assert fuser.first_op_requiring_backward == 0
+
+    # Phase 3: model the next checkpointed forward. This changes the runtime
+    # boundary back to "no backward" but still must reuse the original plan.
+    # Before the fix, the boundary was part of the cache key, so the three
+    # phases called track_fusion three times instead of once.
+    fuser.maybe_fuse_ops(False, None, x, extra_inputs)
+    assert fusion_calls == 1
+    assert fuser.first_op_requiring_backward == 1
+
+
 @torch.no_grad()
 def make_reference_and_test_tensors(
     shape: int | Iterable[int],
