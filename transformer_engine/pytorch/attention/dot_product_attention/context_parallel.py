@@ -3184,6 +3184,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         fp8_meta,
         quantizers,
         fp8_output,
+        no_load_balance,
     ):
         # pylint: disable=missing-function-docstring
         nvtx_range_push("transformer_engine.AttnFuncWithCPAndKVAllGather.forward")
@@ -3201,30 +3202,6 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         if qkv_format == "thd":
             # THD always uses padding mask types; per-step masks set internally
             assert padding, f"THD format requires padding mask type, got {attn_mask_type}!"
-        no_load_balance = qkv_format == "thd" and _use_no_load_balance_thd()
-        if no_load_balance:
-            assert qkv_format == "thd"
-            assert (
-                use_fused_attention or use_flash_attn_3
-            ), "No-load-balance THD partitioning requires FusedAttention or FlashAttention 3."
-            assert not (use_flash_attn_3 and pad_between_seqs), (
-                "No-load-balance THD partitioning with FlashAttention 3 does not support padding"
-                " yet."
-            )
-            assert causal and window_size == (
-                -1,
-                0,
-            ), "No-load-balance THD partitioning currently supports full causal attention only."
-            assert not fp8, "No-load-balance THD partitioning does not support FP8 yet."
-            assert (
-                not is_graph_capturing()
-            ), "No-load-balance THD partitioning does not support CUDA graph capture yet."
-            assert (
-                q.shape[0] == k.shape[0] == v.shape[0]
-            ), "No-load-balance THD partitioning requires equal local Q/K/V physical lengths."
-            assert cu_seqlens_q is cu_seqlens_kv and (
-                cu_seqlens_q_padded is cu_seqlens_kv_padded
-            ), "No-load-balance THD self-attention requires shared Q/KV sequence metadata tensors."
         # AG CP uses shorter per-step Q against longer KV, so causal masks need
         # bottom-right alignment for both sliced and THD paths.
         if use_fused_attention and causal and "bottom_right" not in attn_mask_type:
@@ -3386,12 +3363,8 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
             # [cp*2, s//2, b, h, d] -> [cp*s, b, h, d]
             k_ag = k_ag.view(-1, *k.shape[1:])
             v_ag = v_ag.view(-1, *v.shape[1:])
-        # cp_stream is used for step 1 of the per-step loop and must wait until
-        # k_ag/v_ag preparation finishes on the current stream — otherwise step 1
-        # races against AG/reorder writes. Manifests at high cp_size where reorder
-        # is large enough to outlast cp_stream's launch (e.g. bucket128k @ cp=8).
-        cp_stream.wait_stream(torch.cuda.current_stream())
-
+            # Preserve overlap by letting cp_stream proceed before output initialization.
+            cp_stream.wait_stream(torch.cuda.current_stream())
         # THD all_gather only reaches this path for f16/bf16 attention today.
         # q: [b, 2, s//2, h, d] or [2, s//2, b, h, d]
         # k: [s, b, h, d]
@@ -3510,9 +3483,8 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                 thd_cu_seqlens_kv_per_step[0][1:] = visible_actual[0].cumsum(0)
                 thd_cu_seqlens_kv_per_step[1][1:] = visible_actual[1].cumsum(0)
 
-        # Step 1 runs on cp_stream and consumes THD metadata produced above on
-        # the current stream. The earlier wait only covered K/V AG and reorder.
         if qkv_format == "thd":
+            # THD step 1 also consumes metadata produced on the current stream.
             cp_stream.wait_stream(torch.cuda.current_stream())
 
         for i in range(len(local_seq_chunk_ids) + 1):
@@ -4325,6 +4297,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
             dq,
             dk,
             dv,
+            None,
             None,
             None,
             None,
@@ -5235,10 +5208,29 @@ def attn_forward_func_with_cp(
     ], f"Context parallelism does not support {qkv_format=}!"
     no_load_balance = qkv_format == "thd" and _use_no_load_balance_thd()
     if no_load_balance:
-        assert qkv_format == "thd" and cp_comm_type == "all_gather", (
-            "No-load-balance THD partitioning requires qkv_format='thd' and"
-            " cp_comm_type='all_gather'."
-        )
+        assert (
+            cp_comm_type == "all_gather"
+        ), "No-load-balance THD partitioning requires cp_comm_type='all_gather'."
+        assert (
+            use_fused_attention or use_flash_attn_3
+        ), "No-load-balance THD partitioning requires FusedAttention or FlashAttention 3."
+        assert not (
+            use_flash_attn_3 and pad_between_seqs
+        ), "No-load-balance THD partitioning with FlashAttention 3 does not support padding yet."
+        assert "causal" in attn_mask_type and window_size == (
+            -1,
+            0,
+        ), "No-load-balance THD partitioning currently supports full causal attention only."
+        assert not fp8, "No-load-balance THD partitioning does not support FP8 yet."
+        assert (
+            not is_graph_capturing()
+        ), "No-load-balance THD partitioning does not support CUDA graph capture yet."
+        assert (
+            q.shape[0] == k.shape[0] == v.shape[0]
+        ), "No-load-balance THD partitioning requires equal local Q/K/V physical lengths."
+        assert cu_seqlens_q is cu_seqlens_kv and (
+            cu_seqlens_q_padded is cu_seqlens_kv_padded
+        ), "No-load-balance THD self-attention requires shared Q/KV sequence metadata tensors."
     assert (
         qkv_format != "sbhd" or use_fused_attention
     ), "Context parallelism does not support FlashAttention backend with qkv_format = 'sbhd'!"
@@ -5317,6 +5309,7 @@ def attn_forward_func_with_cp(
             fp8_meta,
             quantizers,
             fp8_output,
+            no_load_balance,
         ]
         out = AttnFuncWithCPAndKVAllGather.apply(*args)
     elif cp_comm_type == "a2a":
@@ -5478,18 +5471,57 @@ def get_batch_on_this_cp_rank(
         cp_size = torch.distributed.get_world_size(group=cp_group)
         if cp_size > 1:
             cp_rank = torch.distributed.get_rank(group=cp_group)
+            no_load_balance = _use_no_load_balance_thd()
+            seq_len_val = cu_seqlens_padded[-1].item()
+            rank_indices_by_device = {}
+
+            if no_load_balance:
+
+                def build_rank_indices(device):
+                    return get_thd_partitioned_indices(
+                        cu_seqlens_padded,
+                        seq_len_val,
+                        cp_size,
+                        cp_rank,
+                        device,
+                    )
+
+            else:
+                total_slices = 2 * cp_size
+                slice_sizes = (cu_seqlens_padded[1:] - cu_seqlens_padded[:-1]) // total_slices
+
+                def build_rank_indices(device):
+                    # Preserve the CPU-capable per-document dataloader path.
+                    rank_slices = []
+                    for slice_size, seq_start in zip(slice_sizes, cu_seqlens_padded[:-1]):
+                        rank_slices.extend(
+                            [
+                                torch.arange(
+                                    seq_start + cp_rank * slice_size,
+                                    seq_start + (cp_rank + 1) * slice_size,
+                                    device=device,
+                                ),
+                                torch.arange(
+                                    seq_start + (total_slices - cp_rank - 1) * slice_size,
+                                    seq_start + (total_slices - cp_rank) * slice_size,
+                                    device=device,
+                                ),
+                            ]
+                        )
+                    return torch.cat(rank_slices)
+
+            def get_rank_indices(device):
+                """Build partition indices once for each input device."""
+                device = torch.device(device)
+                if device not in rank_indices_by_device:
+                    rank_indices_by_device[device] = build_rank_indices(device)
+                return rank_indices_by_device[device]
 
             # Process each tensor directly instead of using keys_to_change loop
             def process_tensor(val):
                 if val is None:
                     return val
                 # Determine which dimension is the sequence dimension
-                # Ensure cu_seqlens_padded[-1] is a Python int, not a 0-dim tensor
-                if isinstance(cu_seqlens_padded[-1], torch.Tensor):
-                    seq_len_val = cu_seqlens_padded[-1].item()
-                else:
-                    seq_len_val = cu_seqlens_padded[-1]
-
                 # Handle 1D tensors (like position_ids that don't have batch dimension)
                 if val.ndim == 1:
                     if val.shape[0] == seq_len_val:
@@ -5511,14 +5543,7 @@ def get_batch_on_this_cp_rank(
                 else:
                     raise ValueError("Tensor must be at least 1D")
 
-                cp_rank_indices = get_thd_partitioned_indices(
-                    cu_seqlens_padded,
-                    seq_len_val,
-                    cp_size,
-                    cp_rank,
-                    val.device,
-                )
-                return val.index_select(current_seq_dim, cp_rank_indices)
+                return val.index_select(current_seq_dim, get_rank_indices(val.device))
 
             # Process each tensor directly
             input_ids_padded = process_tensor(input_ids_padded)

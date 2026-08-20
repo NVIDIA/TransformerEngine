@@ -115,13 +115,17 @@ def generate_input_shapes(
         no_load_balance = os.getenv(_NO_LOAD_BALANCE_ENV, "0") == "1"
         if no_load_balance:
             assert config.batch_size == 2
-            # Exercise a global CP chunk boundary that does not match a document boundary.
+            # Exercise both document padding and a CP chunk boundary inside a document.
             seqlens_q = torch.tensor(
-                [config.max_seqlen_q - 2, config.max_seqlen_q - (world_size - 2)],
+                [config.max_seqlen_q - 2, config.max_seqlen_q - 1],
                 dtype=torch.int32,
             )
-            assert seqlens_q.sum().remainder(world_size) == 0
-            seqlens_q_padded = seqlens_q.clone()
+            padded_total = 2 * config.max_seqlen_q
+            assert padded_total % world_size == 0
+            seqlens_q_padded = torch.tensor(
+                [config.max_seqlen_q - 1, config.max_seqlen_q + 1],
+                dtype=torch.int32,
+            )
         else:
             seqlens_q = torch.randint(0, config.max_seqlen_q + 1, [config.batch_size]).to(
                 torch.int32

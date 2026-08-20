@@ -583,6 +583,8 @@ class TestContextParallelUtils(unittest.TestCase):
 
     def setUp(self):
         """Set up mock distributed environment."""
+        self.env_patch = patch.dict(os.environ, {_NO_LOAD_BALANCE_ENV: "0"})
+        self.env_patch.start()
         # Mock torch.distributed functions
         self.original_get_world_size = torch.distributed.get_world_size
         self.original_get_rank = torch.distributed.get_rank
@@ -591,6 +593,7 @@ class TestContextParallelUtils(unittest.TestCase):
         """Restore original torch.distributed functions."""
         torch.distributed.get_world_size = self.original_get_world_size
         torch.distributed.get_rank = self.original_get_rank
+        self.env_patch.stop()
 
     def _mock_distributed_env(self, cp_size, cp_rank):
         """Mock the distributed environment for testing."""
@@ -645,6 +648,23 @@ class TestContextParallelUtils(unittest.TestCase):
         self.assertTrue(torch.equal(input_ids_r1, expected_input_ids_r1))
         self.assertTrue(torch.equal(labels_r1, expected_labels_r1))
         self.assertTrue(torch.equal(pos_ids_r1, expected_pos_ids_r1))
+
+    @patch.dict(os.environ, {_NO_LOAD_BALANCE_ENV: "1"})
+    def test_cp_rank_slicing_no_load_balance_on_cpu(self):
+        """The experimental policy assigns one contiguous CPU chunk per rank."""
+        input_ids = torch.arange(12).unsqueeze(0)
+        labels = input_ids + 100
+        position_ids = torch.arange(12)
+        cu_seqlens = torch.tensor([0, 5, 12])
+
+        self._mock_distributed_env(cp_size=4, cp_rank=2)
+        input_ids_rank, labels_rank, position_ids_rank = get_batch_on_this_cp_rank(
+            cu_seqlens, input_ids, labels, position_ids
+        )
+
+        self.assertTrue(torch.equal(input_ids_rank, torch.tensor([[6, 7, 8]])))
+        self.assertTrue(torch.equal(labels_rank, torch.tensor([[106, 107, 108]])))
+        self.assertTrue(torch.equal(position_ids_rank, torch.tensor([6, 7, 8])))
 
     def test_cp_rank_slicing_multiple_sequences(self):
         """Test CP rank slicing with multiple sequences."""
