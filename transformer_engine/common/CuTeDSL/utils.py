@@ -7,6 +7,7 @@
 import functools
 import logging
 from types import SimpleNamespace
+from typing import Optional
 
 import cutlass
 from cutlass import Float32, Int64, Int32, Int16
@@ -27,19 +28,22 @@ _STR_FROM_CUTLASS_DTYPE = {v: k for k, v in _CUTLASS_DTYPE_FROM_STR.items()}
 logger = logging.getLogger("transformer_engine.cutedsl.utils")
 
 
-@functools.lru_cache(maxsize=None)
-def device_compute_capability(device_id: int = 0) -> tuple:
-    """(major, minor) compute capability of the given CUDA device (default 0), or (0, 0) if it can't be queried."""
+def device_compute_capability(device_id: Optional[int] = None) -> tuple:
+    """(major, minor) compute capability of a CUDA device (current by default), or (0, 0) if it can't be queried."""
     from cuda.core import Device  # pylint: disable=no-name-in-module
 
-    major_minor = Device(device_id).arch  # compute capability as digits, e.g. "120"
-    return (int(major_minor[:-1]), int(major_minor[-1])) if major_minor else (0, 0)
+    try:
+        device_id = Device().device_id if device_id is None else device_id
+        major_minor = Device(device_id).arch
+        return (int(major_minor[:-1]), int(major_minor[-1])) if major_minor else (0, 0)
+    except Exception as e:  # pylint: disable=broad-except
+        logger.warning("Could not query CUDA device compute capability (%s); assuming (0, 0).", e)
+        return (0, 0)
 
 
-@functools.lru_cache(maxsize=None)
-def device_is_blackwell(device_id: int = 0) -> bool:
-    """Return True if the given CUDA device (default 0) is Blackwell family (SM 10.0 / 11.0 / 12.0).
-    Run-time check, not compile-time."""
+def device_is_blackwell(device_id: Optional[int] = None) -> bool:
+    """Return True if the device (current device by default) is Blackwell family
+    (SM 10.0 / 11.0 / 12.0). Run-time check, not compile-time."""
     major, minor = device_compute_capability(device_id)
     return (
         (major == 10 and minor == 0) or (major == 11 and minor == 0) or (major == 12 and minor == 0)
