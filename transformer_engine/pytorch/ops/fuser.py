@@ -540,9 +540,12 @@ class OperationFuser:
 
         # Cache and detect change of state relevant for fusing operations
         self.recipe_type = None
-        self.first_op_requiring_backward = 0
         self.backward_override = None
         self._last_amax_history_len = 0
+
+        # Runtime backward boundary. This may change between checkpointed
+        # forward and recompute without changing the fused operation plan.
+        self.first_op_requiring_backward = 0
 
         # Flatten list of parameters
         self._basic_op_params = [list(op.parameters()) for op in self._basic_ops]
@@ -626,17 +629,20 @@ class OperationFuser:
                     first_op_requiring_backward = op_idx
                     break
 
+        # Grad requirements control runtime execution, not fusion topology.
+        # Update them on every invocation, including the early-return path.
+        self.first_op_requiring_backward = first_op_requiring_backward
+
         # Early exit if fusion parameters haven't changed
         need_reset = False
         recipe_type = type(recipe)
         backward_override = recipe.backward_override if recipe is not None else None
-        fusion_params = (recipe_type, first_op_requiring_backward, backward_override)
+        fusion_params = (recipe_type, backward_override)
         if fusion_params != (
             self.recipe_type,
-            self.first_op_requiring_backward,
             self.backward_override,
         ):
-            # Recipe type, backward override, or grad requirements have changed
+            # Recipe type or backward override has changed
             need_reset = True
         elif (
             recipe is not None
@@ -683,7 +689,7 @@ class OperationFuser:
         )
 
         # Save current fusion params
-        self.recipe_type, self.first_op_requiring_backward, self.backward_override = fusion_params
+        self.recipe_type, self.backward_override = fusion_params
 
         # Save amax history length
         if isinstance(recipe, DelayedScaling):
