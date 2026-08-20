@@ -108,7 +108,7 @@ inline void gated_grads(const ScaledActivationCase activation, const float act_i
 template <typename DataT, typename ScaleT>
 void compute_reference(ScaledActivationCase activation, const DataT *input, const ScaleT *scales,
                        const DataT *grad_output, DataT *output, DataT *grad_input,
-                       DataT *grad_scales, const size_t rows, const size_t hidden,
+                       ScaleT *grad_scales, const size_t rows, const size_t hidden,
                        const int64_t interleave, const bool compute_grad_scales) {
   const bool is_gated = activation != ScaledActivationCase::kSReLU;
   const size_t input_cols = is_gated ? hidden * 2 : hidden;
@@ -144,7 +144,7 @@ void compute_reference(ScaledActivationCase activation, const DataT *input, cons
       scale_grad += static_cast<float>(grad_output[out_idx]) * unscaled;
     }
     if (compute_grad_scales) {
-      grad_scales[row] = static_cast<DataT>(scale_grad);
+      grad_scales[row] = static_cast<ScaleT>(scale_grad);
     }
   }
 }
@@ -164,7 +164,7 @@ void run_scaled_activation_test(ScaledActivationCase activation, const size_t ro
   Tensor output("output", std::vector<size_t>{rows, hidden}, data_type);
   Tensor grad_output("grad_output", std::vector<size_t>{rows, hidden}, data_type);
   Tensor grad_input("grad_input", std::vector<size_t>{rows, input_cols}, data_type);
-  Tensor grad_scales("grad_scales", std::vector<size_t>{rows}, data_type);
+  Tensor grad_scales("grad_scales", std::vector<size_t>{rows}, scale_type);
 
   fillUniform(&input);
   fillUniform(&scales);
@@ -172,7 +172,7 @@ void run_scaled_activation_test(ScaledActivationCase activation, const size_t ro
 
   std::unique_ptr<DataT[]> ref_output = std::make_unique<DataT[]>(rows * hidden);
   std::unique_ptr<DataT[]> ref_grad_input = std::make_unique<DataT[]>(rows * input_cols);
-  std::unique_ptr<DataT[]> ref_grad_scales = std::make_unique<DataT[]>(rows);
+  std::unique_ptr<ScaleT[]> ref_grad_scales = std::make_unique<ScaleT[]>(rows);
 
   compute_reference(activation, input.rowwise_cpu_dptr<DataT>(), scales.rowwise_cpu_dptr<ScaleT>(),
                     grad_output.rowwise_cpu_dptr<DataT>(), ref_output.get(), ref_grad_input.get(),
@@ -219,8 +219,11 @@ void run_scaled_activation_test(ScaledActivationCase activation, const size_t ro
   compareResults("scaled_activation_grad_input", grad_input, ref_grad_input.get(), true, atol,
                  rtol);
   if (compute_grad_scales) {
-    compareResults("scaled_activation_grad_scales", grad_scales, ref_grad_scales.get(), true, atol,
-                   rtol);
+    // Scale gradients are floating-point reductions, so their CUDA and CPU summation orders can
+    // differ. Use a wider absolute tolerance near zero while retaining the dtype-relative bound.
+    constexpr double kGradScaleAtol = 5e-5;
+    compareResults("scaled_activation_grad_scales", grad_scales, ref_grad_scales.get(), true,
+                   std::max(atol, kGradScaleAtol), rtol);
   }
 }
 
