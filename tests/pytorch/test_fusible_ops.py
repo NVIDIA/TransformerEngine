@@ -146,11 +146,12 @@ def maybe_skip_quantization(
             pytest.skip("NVFP4 quantization is only supported with BF16 data")
 
 
-def test_operation_fuser_reuses_plan_when_grad_requirement_changes(monkeypatch) -> None:
-    """Grad-mode changes update runtime state without rebuilding the fusion plan."""
+def test_operation_fuser_caches_plans_by_grad_requirement(monkeypatch) -> None:
+    """Cache and restore fusion plans for checkpoint forward and recompute."""
 
     # Count fusion-plan construction without depending on any particular real
-    # fusion implementation. A cache hit must bypass this function entirely.
+    # fusion implementation. Each distinct fusion configuration invokes this
+    # hook once, while a cache hit must bypass it entirely.
     fusion_calls = 0
 
     def track_fusion(ops, *, recipe):  # pylint: disable=unused-argument
@@ -180,27 +181,43 @@ def test_operation_fuser_reuses_plan_when_grad_requirement_changes(monkeypatch) 
     extra_inputs = [()]
 
     # Phase 1: the original checkpointed forward runs with grad disabled. This
-    # is the first invocation, so the fuser must construct and cache one plan.
-    # Grad being disabled moves the runtime backward boundary past the only op.
+    # is the first invocation, so the fuser must construct and cache the no-grad
+    # configuration. The runtime backward boundary is past the only op.
     fuser.maybe_fuse_ops(False, None, x, extra_inputs)
     assert fusion_calls == 1
     assert fuser.first_op_requiring_backward == 1
+    no_grad_forward_ops = fuser._forward_ops
+    no_grad_backward_ops = fuser._backward_ops
 
     # Phase 2: backward replays the checkpointed region with grad enabled. The
-    # recipe and operation topology have not changed, so rebuilding the fusion
-    # plan would be wasted CPU work. The runtime boundary must nevertheless be
-    # updated before maybe_fuse_ops takes its cache-hit early return.
+    # backward boundary is part of the fusion key, allowing future fusion rules
+    # to choose a training-specific topology. The first grad-enabled invocation
+    # therefore constructs and caches a second configuration.
     fuser.maybe_fuse_ops(True, None, x, extra_inputs)
-    assert fusion_calls == 1
+    assert fusion_calls == 2
     assert fuser.first_op_requiring_backward == 0
+    grad_forward_ops = fuser._forward_ops
+    grad_backward_ops = fuser._backward_ops
+    assert grad_forward_ops is not no_grad_forward_ops
+    assert grad_backward_ops is not no_grad_backward_ops
 
-    # Phase 3: model the next checkpointed forward. This changes the runtime
-    # boundary back to "no backward" but still must reuse the original plan.
-    # Before the fix, the boundary was part of the cache key, so the three
-    # phases called track_fusion three times instead of once.
+    # Phase 3: the next checkpointed forward must select the exact no-grad lists
+    # cached in phase 1. Before the cache was added, every boundary transition
+    # rebuilt the fused operations and called track_fusion again.
     fuser.maybe_fuse_ops(False, None, x, extra_inputs)
-    assert fusion_calls == 1
+    assert fusion_calls == 2
     assert fuser.first_op_requiring_backward == 1
+    assert fuser._forward_ops is no_grad_forward_ops
+    assert fuser._backward_ops is no_grad_backward_ops
+
+    # Phase 4: another recomputation must likewise restore the grad-enabled
+    # lists from phase 2. The full alternating sequence has built only the two
+    # configurations represented by its two fusion keys.
+    fuser.maybe_fuse_ops(True, None, x, extra_inputs)
+    assert fusion_calls == 2
+    assert fuser.first_op_requiring_backward == 0
+    assert fuser._forward_ops is grad_forward_ops
+    assert fuser._backward_ops is grad_backward_ops
 
 
 @torch.no_grad()
