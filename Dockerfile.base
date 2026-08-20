@@ -1,0 +1,245 @@
+ARG FROM_IMAGE_NAME=gitlab-master.nvidia.com:5005/dl/dgx/pytorch:main-py3-devel
+ARG FROM_SCRIPTS_IMAGE=gitlab-master.nvidia.com:5005/dl/devops/build-scripts:main
+ARG FRAMEWORK=pytorch
+ARG CCACHE_IMAGE=scratch
+
+FROM ${CCACHE_IMAGE} AS ccache-state
+FROM ${FROM_SCRIPTS_IMAGE} AS build-scripts
+FROM scratch as transformerengine
+COPY 3rdparty/ 3rdparty/
+COPY docs/ docs/
+COPY examples/ examples/
+COPY qa/ qa/
+COPY tests/ tests/
+COPY transformer_engine/ transformer_engine/
+COPY build_tools/ build_tools/
+COPY CONTRIBUTING.rst LICENSE README.rst setup.py pylintrc CPPLINT.cfg .
+
+FROM ${FROM_IMAGE_NAME}
+ARG FRAMEWORK
+
+ARG CUDNN_FRONTEND
+ARG WITH_CUBLASMP
+ARG WITH_NCCL_EP
+
+WORKDIR /opt/transformerengine/
+COPY --from=transformerengine . .
+
+# Disable Pip constraint file
+### TODO (tmoon): Update constraint file with TE dependency versions
+ENV PIP_CONSTRAINT=
+
+# Install dependencies
+# Note: PIP_BREAK_SYSTEM_PACKAGES is required because otherwise Ubuntu
+# 23+ only allows pip install within venv.
+ENV PIP_BREAK_SYSTEM_PACKAGES=1
+RUN <<"EOF" bash -e
+  [[ "${FRAMEWORK}" == "core" ]] \
+  && apt-get update \
+  && apt-get install -y git python3 python3-pip \
+  && pip3 install cmake==3.21.0 nvidia-cudnn-cu12==9.9.0.52 \
+  || [[ ! "${FRAMEWORK}" == "core" ]]
+
+  pip3 install ninja pybind11
+  if [ "$FRAMEWORK" = "pytorch" ]; then
+    # PyTorch images bundle CUTLASS DSL with flash-attn/quack; keep that matched stack.
+    pip3 install "${CUDNN_FRONTEND}"
+  else
+    # Currently `[cutedsl]` from `nvidia-cudnn-frontend` pulls in all of `torch` and NV CUDA library pip packages when torch is not already available.
+    # Remove [cutedsl] for now until cuDNN FE fixes this
+    CUDNN_FRONTEND_NO_CUTEDSL="${CUDNN_FRONTEND/\[cutedsl\]/}"
+    pip3 install "${CUDNN_FRONTEND_NO_CUTEDSL}"
+  fi
+EOF
+
+# Install google logging lib for paddle ci as a hotfix.
+# TODO (ksivamai): fix in TE build
+RUN apt-get update && apt-get install -y libgoogle-glog-dev ccache
+
+RUN --mount=from=ccache-state,target=/ccache-state <<"EOF" bash -e
+  mkdir -p /ccache
+  if [ -d /ccache-state/ccache ]; then
+    cp -a /ccache-state/ccache/. /ccache/
+    echo "Restored ccache state from cache image"
+  else
+    echo "No ccache state found, starting with empty cache"
+  fi
+EOF
+
+RUN --mount=from=build-scripts,source=build-scripts,target=/nvidia/build-scripts \
+    --mount=type=secret,id=ARTIFACTORY_USER,env=ARTIFACTORY_USER \
+    --mount=type=secret,id=ARTIFACTORY_TOKEN,env=ARTIFACTORY_TOKEN <<"EOF" bash -e
+  [[ "${WITH_CUBLASMP}" == "1" ]] \
+  && export CUBLASMP_VERSION=0.9.0.2693 \
+  && /nvidia/build-scripts/installCUBLASMP.sh \
+  || [[ ! "{WITH_CUBLASMP}" == "1" ]]
+EOF
+
+RUN --mount=from=build-scripts,source=build-scripts,target=/nvidia/build-scripts <<"EOF" bash -e
+  [[ "${FRAMEWORK}" == "jax" ]] \
+  && apt-get update \
+  && apt-get install -y python3 python3-pip \
+  && pip3 install cmake==3.21.0 \
+  || [[ ! "${FRAMEWORK}" == "jax" ]]
+EOF
+
+RUN CUDA_PARTS=(${CUDA_VERSION//./ }) \
+  && CUDA_SUFFIX=$([ ${CUDA_PARTS[0]} -eq 12 ] && echo "12.9.1" || echo "13.1.0") \
+  && ARCH=$([ ${HOSTTYPE} = "aarch64" ] && echo "sbsa" || echo "x86_64") \
+  && CUSOLVERMP_TAR_NAME="cusolvermp_build_${ARCH}_rockylinux8_cuda${CUDA_SUFFIX}_release.tar.gz" \
+  && wget "https://urm.nvidia.com/artifactory/sw-cuda-math-cusolvermp-generic/cicd/release/v0.8.0/3063//${CUSOLVERMP_TAR_NAME}" \
+  && tar -C /usr --strip-components=1 -xf "$CUSOLVERMP_TAR_NAME" \
+  && rm "$CUSOLVERMP_TAR_NAME"
+
+# Optionally install a different cuDNN backend version.
+# Set CUDNN_BACKEND_URL to a tarball URL to override the version in the base image.
+# artifactory.nvidia.com URLs use the ARTIFACTORY_USER/ARTIFACTORY_TOKEN
+# BuildKit secrets passed by the GitLab base-image jobs.
+# Leave empty/unset to use the cuDNN already present in the container.
+ARG CUDNN_BACKEND_URL=""
+
+# Optionally install Flash Attention 3 (SM90 / H100 only) for PyTorch.
+# Set INSTALL_FA3=1 to enable.
+ARG INSTALL_FA3="0"
+
+# Log the cuDNN version present in the base image
+RUN <<"EOF" bash -e
+  LOG=/var/log/cudnn_install.log
+  HEADER=$(find /usr/include /usr/local/include -name "cudnn_version.h" 2>/dev/null | head -1)
+  if [[ -n "${HEADER}" ]]; then
+    MAJOR=$(grep "#define CUDNN_MAJOR" "${HEADER}" | awk '{print $3}')
+    MINOR=$(grep "#define CUDNN_MINOR" "${HEADER}" | awk '{print $3}')
+    PATCH=$(grep "#define CUDNN_PATCHLEVEL" "${HEADER}" | awk '{print $3}')
+    BASE_VER="${MAJOR}.${MINOR}.${PATCH}"
+    DPKG_VER=$(dpkg-query -W -f='${Version}\n' 'libcudnn9-cuda-*' 2>/dev/null | head -1)
+    [[ -n "${DPKG_VER}" ]] && BASE_VER="${DPKG_VER}"
+  else
+    BASE_VER="unknown"
+  fi
+  echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] base-image cuDNN: ${BASE_VER}" >> "${LOG}"
+EOF
+
+RUN --mount=type=secret,id=ARTIFACTORY_USER,env=ARTIFACTORY_USER \
+    --mount=type=secret,id=ARTIFACTORY_TOKEN,env=ARTIFACTORY_TOKEN <<"EOF" bash -e
+  if [[ -z "${CUDNN_BACKEND_URL}" ]]; then
+    echo "CUDNN_BACKEND_URL not set; using cuDNN from base image"
+    exit 0
+  fi
+
+  LOG=/var/log/cudnn_install.log
+  echo "FRAMEWORK is ${FRAMEWORK}"
+  echo "cuDNN override URL: ${CUDNN_BACKEND_URL}"
+
+  cd /opt
+  URL_PATH="${CUDNN_BACKEND_URL%%\?*}"
+  URL_PATH="${URL_PATH%%#*}"
+  TAR_FILE=$(basename "${URL_PATH}")
+  case "${TAR_FILE}" in
+    *.tar|*.tar.gz|*.tgz|*.tar.xz|*.txz) ;;
+    *)
+      echo "ERROR: CUDNN_BACKEND_URL must point to a cuDNN archive file."
+      echo "       Got: ${CUDNN_BACKEND_URL}"
+      echo "       Example: https://artifactory.nvidia.com/artifactory/hw-cudnn-generic-local/CUDNN/v9.24/v9.24.0.31/<cuda-version>/<archive>.tar.gz"
+      exit 1
+      ;;
+  esac
+
+  WGET_ARGS=(--progress=dot:giga --tries=3 --waitretry=5)
+  if [[ "${CUDNN_BACKEND_URL}" == https://artifactory.nvidia.com/* ]]; then
+    if [[ -z "${ARTIFACTORY_USER:-}" || -z "${ARTIFACTORY_TOKEN:-}" ]]; then
+      echo "ERROR: CUDNN_BACKEND_URL points to artifactory.nvidia.com, but ARTIFACTORY_USER/ARTIFACTORY_TOKEN BuildKit secrets are not available."
+      echo "       Run through the GitLab base-image jobs or pass both secrets to docker buildx."
+      exit 1
+    fi
+    WGET_ARGS+=(--auth-no-challenge "--user=${ARTIFACTORY_USER}" "--password=${ARTIFACTORY_TOKEN}")
+  fi
+
+  wget "${WGET_ARGS[@]}" -O "${TAR_FILE}" "${CUDNN_BACKEND_URL}"
+  tar xvf "${TAR_FILE}"
+  rm -f "${TAR_FILE}"
+  echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] installed cuDNN from ${CUDNN_BACKEND_URL} (framework: ${FRAMEWORK})" >> "${LOG}"
+  echo "Installed cuDNN override for ${FRAMEWORK} from ${CUDNN_BACKEND_URL}"
+
+  # Make the override visible to the linker
+  echo "/opt/cudnn/lib" > /etc/ld.so.conf.d/cudnn-override.conf
+  ldconfig
+
+EOF
+
+ENV LD_LIBRARY_PATH="/opt/cudnn/lib:${LD_LIBRARY_PATH}"
+ENV CUDNN_PATH="/opt/cudnn"
+ENV CUDNN_HOME="/opt/cudnn"
+
+RUN echo LD_LIBRARY_PATH is ${LD_LIBRARY_PATH}
+RUN echo CUDNN_PATH is ${CUDNN_PATH}
+RUN echo CUDNN_HOME is ${CUDNN_HOME}
+
+# Install Transformer Engine
+RUN <<"EOF" bash -e
+  export CCACHE_DIR=/ccache
+  export CCACHE_MAXSIZE=10G
+  export NVTE_USE_CCACHE=1
+
+  [[ "${FRAMEWORK}" =~ pytorch|all ]] \
+  && export NVTE_WITH_USERBUFFERS=1 \
+  && export MPI_HOME=/usr/local/mpi \
+  && export MAX_JOBS=4 \
+  || [[ ! "${FRAMEWORK}" =~ pytorch|all ]]
+
+  [[ "${FRAMEWORK}" == "core" ]] \
+  && export NVTE_FRAMEWORK=none \
+  || export NVTE_FRAMEWORK=${FRAMEWORK}
+
+  [[ "${FRAMEWORK}" == "jax" ]] \
+  && export NVTE_WITH_CUBLASMP=0 \
+  || export NVTE_WITH_CUBLASMP="${WITH_CUBLASMP}"
+
+  export NVTE_WITH_NCCL_EP="${WITH_NCCL_EP}"
+
+  NVTE_BUILD_THREADS_PER_JOB=4 \
+  CUBLASMP_HOME=/usr \
+  NVTE_WITH_CUSOLVERMP=1 \
+  pip3 install --verbose --verbose --no-build-isolation .[test]
+
+  ccache --show-stats
+
+  rm -rf transformer_engine.egg-info dist build
+
+  LOG=/var/log/cudnn_install.log
+  CUDNN_FRONTEND_VERSION=$(pip3 show nvidia-cudnn-frontend | sed -n 's/^Version: //p')
+  echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] cudnn-frontend: version=${CUDNN_FRONTEND_VERSION:-unknown} (${CUDNN_FRONTEND})" >> "${LOG}"
+EOF
+
+# Optionally install Flash Attention 3 from source (Hopper+, PyTorch only)
+# setup.py install registers flash_attn_interface directly (GH PR #2849)
+RUN <<"EOF" bash -e
+  if [[ "${INSTALL_FA3}" != "1" ]]; then
+    echo "INSTALL_FA3 not set; skipping Flash Attention 3"
+    exit 0
+  fi
+
+  if [[ ! "${FRAMEWORK}" =~ pytorch|all ]]; then
+    echo "FA3 install requested but FRAMEWORK=${FRAMEWORK} is not pytorch; skipping"
+    exit 0
+  fi
+
+  export FLASH_ATTN_CUDA_ARCHS=90
+  export MAX_JOBS=32
+
+  cd /tmp
+  git clone https://github.com/Dao-AILab/flash-attention.git
+  cd flash-attention/hopper
+  python3 setup.py install
+
+  cd /
+  rm -rf /tmp/flash-attention
+  echo "Installed Flash Attention 3 (SM90 / H100)"
+EOF
+
+RUN <<"EOF" bash -e
+  echo "=== cuDNN install history ==="
+  cat /var/log/cudnn_install.log
+  echo "============================="
+EOF
+
+WORKDIR /workspace/
