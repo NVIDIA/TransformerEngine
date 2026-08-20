@@ -893,22 +893,30 @@ def test_delayed_scaling_updates_once_per_backward(mode):
 
 
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
-def test_backward_quantization_update_scope_groups_autograd_calls():
+def test_backward_quantization_update_scope_groups_independent_graphs():
     FP8GlobalStateManager.reset()
-    model = _make_update_test_model()
+    models = [_make_update_test_model(num_layers=2, seed=seed) for seed in (1, 2)]
+    inputs = [
+        torch.randn(
+            _UPDATE_TEST_BATCH,
+            _UPDATE_TEST_HIDDEN,
+            device="cuda",
+            requires_grad=True,
+        )
+        for _ in models
+    ]
     recipe = DelayedScaling()
 
-    with _UpdateCounter() as counter, te.backward_quantization_update_scope():
-        for _ in range(_UPDATE_TEST_STEPS):
-            x = torch.randn(
-                _UPDATE_TEST_BATCH,
-                _UPDATE_TEST_HIDDEN,
-                device="cuda",
-                requires_grad=True,
-            )
-            _run_update_test_step(model, x, _update_forward_plain, recipe)
-            assert counter.backward == 0
-    assert counter.backward == 1
+    with _UpdateCounter() as counter:
+        with te.autocast(enabled=True, recipe=recipe):
+            outputs = [_run_update_test_layers(model, x) for model, x in zip(models, inputs)]
+        with te.backward_quantization_update_scope():
+            for output in outputs:
+                output.float().sum().backward()
+                assert counter.backward == 0
+        assert counter.backward == 1
+        for x in inputs:
+            assert x.grad is not None
 
 
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)

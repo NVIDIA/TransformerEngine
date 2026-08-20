@@ -884,9 +884,10 @@ def backward_quantization_update_scope() -> None:
     """Delay the quantization state update until the end of a logical backward.
 
     Ordinary backward calls update automatically and do not require this scope.
-    Use it when a logical backward spans multiple autograd calls or includes
-    delayed work such as ``module.backward_dw()``. Nested scopes update once
-    when the outermost scope exits.
+    Use it when a logical backward spans multiple autograd calls, including
+    independent graphs produced under one autocast, or includes delayed work
+    such as ``module.backward_dw()``. Nested scopes update once when the
+    outermost scope exits.
     """
     qstate = FP8GlobalStateManager.quantization_state
     outermost = qstate.backward_quantization_update_scope_depth == 0
