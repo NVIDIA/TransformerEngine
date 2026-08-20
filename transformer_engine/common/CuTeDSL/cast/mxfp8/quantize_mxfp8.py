@@ -2373,6 +2373,9 @@ class MXFP8QuantizeEntry(MXFP8QuantizeKernelBase):
             if cfg.ROWWISE and cfg.COLWISE
             else None
         )
+        # These activation functions satisfy f(0) = 0 so we don't need to mask with OOB regions
+        # (zeros filled by TMA are still zeros without applying activation to them)
+        self.ACT_NEED_MASKING = cfg.WITH_ACT and cfg.ACTIVATION not in ("relu", "gelu", "silu", "qgelu", "srelu")
 
     @cute.jit
     def __call__(
@@ -2430,7 +2433,7 @@ class MXFP8QuantizeEntry(MXFP8QuantizeKernelBase):
         if not dispatched_to_specialized:
             # Only skip masking if not WITH_ACT (zeros filled by TMA are still zeros without applying activation to them),
             # or if the shape is already divisible by the tile size (so no masking is needed)
-            if cutlass.const_expr(self.cfg.WITH_ACT):
+            if cutlass.const_expr(self.ACT_NEED_MASKING):
                 skip_masking = (
                     mX.shape[0] % self.general_divisible_kernel._TILE_ROWS == 0
                     and mX.shape[1] % self.general_divisible_kernel._TILE_COLS == 0
