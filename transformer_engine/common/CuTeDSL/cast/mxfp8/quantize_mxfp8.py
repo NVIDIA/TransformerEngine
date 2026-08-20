@@ -2616,53 +2616,61 @@ def get_mxfp8_quantization_function(
     Returns True if a kernel is successfully registered under `fn_name` (the C++ side then fetches it with GetGlobal(fn_name));
     False if the config is unsupported, so the caller caches the negative result and falls back to the CUDA C++ kernel.
     """
-    # Already registered (e.g. by a prior call) -> supported.
-    if tvm_ffi.get_global_func(fn_name, allow_missing=True) is not None:
-        return True
-
-    major, minor = device_compute_capability()
-    if major < 10:
-        logger.warning(
-            "CuTeDSL MXFP8 backend requires compute capability >= 10.0 (Blackwell), "
-            "but detected %d.%d; falling back to the CUDA C++ kernel.",
-            major,
-            minor,
-        )
-        return False
-
     try:
-        cfg = MXFP8QuantizeConfig(
-            dtype=dtype,
-            fp8_dtype=fp8_dtype,
-            rowwise=rowwise,
-            colwise=colwise,
-            with_gemm_swizzled_scales=with_gemm_swizzled_scales,
-            with_amax=with_amax,
-            with_dbias=with_dbias,
-            with_dact=with_dact,
-            with_act=with_act,
-            use_2d_quantization=use_2d_quantization,
-            activation=activation,
-        )
-    except ValueError as e:
-        # The exception message states exactly why the config is unsupported
-        # (unknown dtype/activation, dbias not implemented, ...). Surfacing it as a
-        # warning lets the C++ dispatcher's CUDA fallback be recognized as expected.
-        logger.warning(
-            "CuTeDSL MXFP8 backend does not support this config, "
-            "falling back to the CUDA C++ kernel: %s",
-            e,
-        )
-        return False
+        # Already registered (e.g. by a prior call) -> supported.
+        if tvm_ffi.get_global_func(fn_name, allow_missing=True) is not None:
+            return True
 
-    logger.debug("Compiling CuTeDSL MXFP8 quantization kernel for %s", cfg)
-    try:
-        compiled = compile_cutedsl_function_from_cfg(cfg)
-        tvm_ffi.register_global_func(fn_name, compiled, override=True)
-        return True
+        major, minor = device_compute_capability()
+        if major < 10:
+            logger.warning(
+                "CuTeDSL MXFP8 backend requires compute capability >= 10.0 (Blackwell), "
+                "but detected %d.%d; falling back to the CUDA C++ kernel.",
+                major,
+                minor,
+            )
+            return False
+
+        try:
+            cfg = MXFP8QuantizeConfig(
+                dtype=dtype,
+                fp8_dtype=fp8_dtype,
+                rowwise=rowwise,
+                colwise=colwise,
+                with_gemm_swizzled_scales=with_gemm_swizzled_scales,
+                with_amax=with_amax,
+                with_dbias=with_dbias,
+                with_dact=with_dact,
+                with_act=with_act,
+                use_2d_quantization=use_2d_quantization,
+                activation=activation,
+            )
+        except ValueError as e:
+            # The exception message states exactly why the config is unsupported
+            # (unknown dtype/activation, dbias not implemented, ...). Surfacing it as a
+            # warning lets the C++ dispatcher's CUDA fallback be recognized as expected.
+            logger.warning(
+                "CuTeDSL MXFP8 backend does not support this config, "
+                "falling back to the CUDA C++ kernel: %s",
+                e,
+            )
+            return False
+
+        logger.debug("Compiling CuTeDSL MXFP8 quantization kernel for %s", cfg)
+        try:
+            compiled = compile_cutedsl_function_from_cfg(cfg)
+            tvm_ffi.register_global_func(fn_name, compiled, override=True)
+            return True
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            logger.error(
+                "CuTeDSL MXFP8 kernel compilation & registration failed, falling back to the CUDA C++ kernel: %s",
+                e,
+            )
+            return False
     except Exception as e:  # pylint: disable=broad-exception-caught
         logger.error(
-            "CuTeDSL MXFP8 kernel compilation failed, falling back to the CUDA C++ kernel: %s",
+            "Failed to retrieve CuTeDSL MXFP8 quantization function, falling back to the CUDA C++ kernel: %s",
             e,
         )
+        # Unconditionally fallback to CUDA path because we can't tell if this exception is transient or permanent.
         return False
