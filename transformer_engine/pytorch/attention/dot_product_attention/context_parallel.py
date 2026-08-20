@@ -100,9 +100,7 @@ def _zero_thd_padding(tensors, cu_seqlens, cu_seqlens_padded):
     tensor = next((tensor for tensor in tensors if tensor is not None), None)
     if tensor is None:
         return
-    padding_mask = dpa_utils.get_thd_padding_mask(
-        tensor.shape[0], cu_seqlens, cu_seqlens_padded
-    )
+    padding_mask = dpa_utils.get_thd_padding_mask(tensor.shape[0], cu_seqlens, cu_seqlens_padded)
     for tensor in tensors:
         if tensor is not None:
             tensor[padding_mask] = 0

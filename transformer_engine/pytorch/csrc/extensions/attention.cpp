@@ -442,8 +442,7 @@ std::vector<py::object> fused_attn_bwd(
         dK.fill_(0);
         dV.fill_(0);
       }
-      if (dq_format == NVTE_QKV_Format::NVTE_THD ||
-          dkv_format == NVTE_QKV_Format::NVTE_THD) {
+      if (dq_format == NVTE_QKV_Format::NVTE_THD || dkv_format == NVTE_QKV_Format::NVTE_THD) {
         auto *fp8_quantizer = dynamic_cast<Float8Quantizer *>(dQKV_quantizer.get());
         fp8_quantizer->amax.zero_();
       }
