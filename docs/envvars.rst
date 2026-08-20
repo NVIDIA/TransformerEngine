@@ -93,6 +93,12 @@ Optional Dependencies
    :Default: ``0``
    :Description: Enable NVSHMEM support. When set to ``1``, requires ``NVSHMEM_HOME`` to be set to the NVSHMEM installation directory.
 
+.. envvar:: NVTE_WITH_CUTEDSL
+
+   :Type: ``int`` (0 or 1)
+   :Default: ``1``
+   :Description: Enable CuTeDSL kernel bindings in C++ via TVM-FFI, requires the ``apache-tvm-ffi`` Python package's headers at build time.
+
 .. envvar:: NVTE_BUILD_ACTIVATION_WITH_FAST_MATH
 
    :Type: CMake option
@@ -129,6 +135,22 @@ General
    :Description: Size in MiB of the internal ``NVTETensor`` handle pool. Increase this
                  value if an application legitimately creates more tensor handles than
                  the default pool can hold.
+
+.. envvar:: NVTE_ENABLE_CUTEDSL_QUANT_BACKEND
+
+   :Type: ``int`` (0 or 1)
+   :Default: ``0``
+   :Description: Use CuTeDSL kernels when it's available, otherwise fallback to the 
+                 CUDA C++ kernels. CuTeDSL kernels will be registered when
+                 ``import transformer_engine`` so this env var should be set before that.
+
+.. envvar:: NVTE_WARN_IF_CUTEDSL_BACKEND_NOT_CHOSEN
+
+   :Type: ``int`` (0 or 1)
+   :Default: ``0``
+   :Description: Warn TE falls back to the CUDA C++ kernels instead of dispatching to 
+                 available CuTeDSL kernels. Useful to check if CuTeDSL path is taken,
+                 since a silent fallback is otherwise indistinguishable from success.
 
 .. envvar:: NVTE_GROUPED_TENSOR_HANDLE_POOL_SIZE_MB
 
