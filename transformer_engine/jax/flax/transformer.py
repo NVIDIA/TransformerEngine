@@ -30,7 +30,12 @@ from ..attention import (
     QKVLayout,
     SequenceDescriptor,
 )
-from ..attention import is_fused_attn_kernel_available, make_swa_mask, canonicalize_attn_mask_type
+from ..attention import (
+    is_fused_attn_kernel_available,
+    make_swa_mask,
+    canonicalize_attn_mask_type,
+    check_set_window_size,
+)
 from ..attention import fused_attn
 from ..attention import CPStrategy
 from ..softmax import SoftmaxFusionType
@@ -126,6 +131,11 @@ class _UnfusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-
     transpose_batch_sequence: bool = False
     window_size: Optional[Tuple[int, int]] = None
     softmax_type: AttnSoftmaxType = AttnSoftmaxType.VANILLA_SOFTMAX
+
+    def __post_init__(self):
+        # Canonicalize window_size so that the inner module never has to handle window_size=None.
+        self.window_size = check_set_window_size(self.attn_mask_type, self.window_size)
+        super().__post_init__()
 
     @nn.compact
     def __call__(
@@ -239,10 +249,13 @@ class _UnfusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-
 
         def convert_to_softmax_fusion_type(attn_mask_type, mask):
             """Convert the attn_mask_type to SoftmaxFusionType"""
+            # TODO(KshitijLakhani): Fix swa mask construction and softmax fusion selection for
+            # missing mask cases.
             # mask is ignored for no_mask and causal_mask without sliding window
             if attn_mask_type == AttnMaskType.NO_MASK:
                 mask = None
-            if attn_mask_type == AttnMaskType.CAUSAL_MASK and self.window_size is None:
+            # No SWA + causal mask is equivalent to no mask
+            if attn_mask_type == AttnMaskType.CAUSAL_MASK and self.window_size == (-1, 0):
                 mask = None
             if mask is not None:
                 mask = apply_swa_mask(mask)
@@ -308,6 +321,11 @@ class _FusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-me
     score_mod: Optional[Callable] = None
     score_mod_bprop: Optional[Callable] = None
     score_mod_requested: bool = False
+
+    def __post_init__(self):
+        # Canonicalize window_size so that the inner modules do not need to handle window_size=None.
+        self.window_size = check_set_window_size(self.attn_mask_type, self.window_size)
+        super().__post_init__()
 
     @nn.compact
     def __call__(
@@ -572,7 +590,21 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
         and sequence length dimension. If set to True, the input tensors
         should be in (seqlen, batch, ...), otherwise (batch, seqlen, ...).
     window_size: Optional[Tuple[int, int]], default = None
-        Sliding window size. The default value is no sliding window.
+        Sliding window size as ``(left, right)``. The default value of ``None`` means no
+        sliding window (full attention for ``no_mask`` / ``padding``, infinite-left for
+        causal-family masks).
+
+        Allowed values per :attr:`attn_mask_type`:
+
+        * ``no_mask``, ``padding``: ``(-1, -1)`` (sentinel for full attention) or
+          ``(>=0, >=0)``.
+        * ``causal``, ``padding_causal``, ``causal_bottom_right``,
+          ``padding_causal_bottom_right``: ``(-1, 0)`` (sentinel for infinite-left
+          causal) or ``(>=0, 0)``.
+
+        Inputs are validated and canonicalized at construction time via check_set_window_size.
+        Bidirectional sliding windows (right > 0 with no_mask / padding) for fused attention
+        require cuDNN >= 9.6; left-only sliding windows (right = 0) require cuDNN >= 9.2.
     max_segments_per_seq: Optional[int], default = 1
         The maximum number of segments per sequence, also used for THD format (sequence packing).
     context_parallel_causal_load_balanced: bool
@@ -657,6 +689,8 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
                 " TransformerEngine v2.10"
             )
             self.transpose_batch_sequence = False
+        # Validate / canonicalize window_size against attn_mask_type.
+        self.window_size = check_set_window_size(self.attn_mask_type, self.window_size)
         super().__post_init__()
 
     def _assert_dtypes(self, query: Array, key: Array, value: Array, qkv_layout: QKVLayout):
@@ -1197,7 +1231,21 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
     fuse_qkv: bool, default = None
         Deprecated. Please refer `fuse_qkv_params`
     window_size: Optional[Tuple[int, int]], default = None
-        Sliding window size. Default value is no sliding window.
+        Sliding window size as ``(left, right)``. The default value of ``None`` means no
+        sliding window (full attention for ``no_mask`` / ``padding``, infinite-left for
+        causal-family masks).
+
+        Allowed values per :attr:`attn_mask_type`:
+
+        * ``no_mask``, ``padding``: ``(-1, -1)`` (sentinel for full attention) or
+          ``(>=0, >=0)``.
+        * ``causal``, ``padding_causal``, ``causal_bottom_right``,
+          ``padding_causal_bottom_right``: ``(-1, 0)`` (sentinel for infinite-left
+          causal) or ``(>=0, 0)``.
+
+        Inputs are validated and canonicalized at construction time via check_set_window_size.
+        Bidirectional sliding windows (right > 0 with no_mask / padding) for fused attention
+        require cuDNN >= 9.6; left-only sliding windows (right = 0) require cuDNN >= 9.2.
     softmax_type: str = {'vanilla', 'off-by-one', 'learnable'}, default = 'vanilla'
         Softmax type as described in the paper
         `Efficient Streaming Language Models with Attention Sinks
@@ -1324,6 +1372,8 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
             )
         if self.num_gqa_groups is None:
             self.num_gqa_groups = self.num_attention_heads
+        # Validate / canonicalize window_size against attn_mask_type.
+        self.window_size = check_set_window_size(self.attn_mask_type, self.window_size)
         super().__post_init__()
 
     @nn.compact
@@ -1984,7 +2034,23 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
     enable_sequence_parallel: bool, default = False
         Whether to enable sequence parallelism to operations except dot.
     window_size: Optional[Tuple[int, int]], default = None
-        Sliding window size. Default value is no sliding window.
+        Sliding window size as ``(left, right)``. The default value of ``None`` means no
+        sliding window (full attention for ``no_mask`` / ``padding``, infinite-left for
+        causal-family masks).
+
+        ``TransformerLayer`` deliberately does not canonicalize ``window_size`` and passes
+        on the responsibility to the inner modules (MultiHeadAttention) to canonicalize.
+
+        Allowed values per mask type:
+
+        * ``no_mask``, ``padding``: ``(-1, -1)`` (sentinel for full attention) or
+          ``(>=0, >=0)``.
+        * ``causal``, ``padding_causal``, ``causal_bottom_right``,
+          ``padding_causal_bottom_right``: ``(-1, 0)`` (sentinel for infinite-left
+          causal) or ``(>=0, 0)``.
+
+        Bidirectional sliding windows (right > 0 with no_mask / padding) for fused attention
+        require cuDNN >= 9.6; left-only sliding windows (right = 0) require cuDNN >= 9.2.
     softmax_type: str = {'vanilla', 'off-by-one', 'learnable'}, default = 'vanilla'
         Softmax type as described in the paper
         `Efficient Streaming Language Models with Attention Sinks
@@ -2103,6 +2169,8 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
             )
         if self.num_gqa_groups is None:
             self.num_gqa_groups = self.num_attention_heads
+        # window_size is intentionally NOT canonicalized here and is passed on to the inner modules
+        # (MultiHeadAttention) to canonicalize against the mask type.
         super().__post_init__()
 
     @nn.compact

@@ -25,6 +25,7 @@ from transformer_engine.jax.attention import (
     QKVFormat,
     CPStrategy,
     SequenceDescriptor,
+    check_set_window_size,
 )
 from ..sharding import with_sharding_constraint_by_logical_axes, HEAD_AXES, is_mesh_available
 
@@ -2476,7 +2477,19 @@ class _FusedAttnCPWithP2PHelper:
             )
 
     def get_step_config(self, attn_mask_type) -> _FusedAttnConfig:
-        """Returns a _FusedAttnConfig for single CP step call to fused attention."""
+        """Returns a _FusedAttnConfig for single CP step call to fused attention.
+
+        Ring CP overrides ``attn_mask_type`` per step (e.g. ``CAUSAL_MASK`` -> ``NO_MASK``
+        for off-diagonal steps where the kv chunk is fully past or fully future of the
+        local q chunk; see ``ring_attn_fwd_impl`` / ``ring_attn_bwd_impl``). The user's
+        ``window_size`` is the canonical no-SWA form for the *original* mask, so we
+        re-canonicalize it for the per-step mask.
+
+        ``warn=False`` because the user's ``window_size`` was already canonicalized
+        by check_set_window_size upstream. This per-step coercion is an internal mask
+        switch (for ring P2P) which if reported, may confuse the user.
+        """
+        per_step_window = check_set_window_size(attn_mask_type, self.config.window_size, warn=False)
         return _FusedAttnConfig(
             attn_bias_type=self.config.attn_bias_type,
             attn_mask_type=attn_mask_type,
@@ -2486,7 +2499,7 @@ class _FusedAttnCPWithP2PHelper:
             dropout_probability=self.config.dropout_probability,
             is_training=self.config.is_training,
             max_segments_per_seq=self.config.max_segments_per_seq,
-            window_size=self.config.window_size,
+            window_size=per_step_window,
             bottom_right_diagonal=attn_mask_type.is_bottom_right(),
             context_parallel_load_balanced=self.config.context_parallel_load_balanced,
             cp_axis=self.config.cp_axis,
@@ -3146,7 +3159,11 @@ class FusedRingAttnStripedFwdPrimitive(FusedAttnFwdPrimitive):
                         config=config,
                     )
 
-                if config.window_size != (-1, -1):
+                # Trigger striped-window adjustment only when there is a finite SWA.
+                # window_size[0] == -1 is the unified "no finite window" sentinel that
+                # covers both the non-causal (-1, -1) form and the causal-family (-1, 0)
+                # form produced by check_set_window_size
+                if config.window_size[0] != -1:
                     kv_src_rank = (cp_size + cp_rank - idx) % cp_size
                     # Note: all inputs of adjust_cp_striped_window_size should be host values
                     cp_striped_window_size = adjust_cp_striped_window_size(
@@ -3299,7 +3316,10 @@ class FusedRingAttnStripedBwdPrimitive(FusedAttnBwdPrimitive):
                     )
                     return dq_per_step, dkv_per_step, dbias_per_step
 
-                if config.window_size != (-1, -1):
+                # See fwd path above: window_size[0] != -1 is the unified "finite SWA"
+                # sentinel that handles both the non-causal (-1, -1) and causal-family
+                # (-1, 0) canonical forms produced by check_set_window_size.
+                if config.window_size[0] != -1:
                     kv_src_rank = (cp_size + cp_rank - idx) % cp_size
                     # Note: all inputs of adjust_cp_striped_window_size should be host values
                     cp_striped_window_size = adjust_cp_striped_window_size(
@@ -3483,7 +3503,10 @@ def fused_attn_fwd(
         dropout_probability=dropout_probability,
         is_training=is_training,
         max_segments_per_seq=max_segments_per_seq,
-        window_size=(-1, -1) if window_size is None else window_size,
+        # Canonicalize at the CPP-extension boundary so every downstream primitive this
+        # function dispatches to (default fused-attn and the CP all-gather/ring variants)
+        # sees the same canonical encoding as the DPA/MHA API.
+        window_size=check_set_window_size(attn_mask_type, window_size),
         bottom_right_diagonal=attn_mask_type.is_bottom_right(),
         context_parallel_load_balanced=context_parallel_causal_load_balanced,
         cp_axis=_maybe_context_parallel_axis(context_parallel_axis),
@@ -3658,7 +3681,10 @@ def fused_attn_bwd(
         dropout_probability=dropout_probability,
         is_training=is_training,
         max_segments_per_seq=max_segments_per_seq,
-        window_size=(-1, -1) if window_size is None else window_size,
+        # Canonicalize at the CPP-extension boundary so every downstream primitive this
+        # function dispatches to (default fused-attn and the CP all-gather/ring variants)
+        # sees the same canonical encoding as the DPA/MHA API.
+        window_size=check_set_window_size(attn_mask_type, window_size),
         bottom_right_diagonal=attn_mask_type.is_bottom_right(),
         context_parallel_load_balanced=context_parallel_causal_load_balanced,
         cp_axis=_maybe_context_parallel_axis(context_parallel_axis),
