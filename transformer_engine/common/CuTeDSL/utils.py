@@ -4,7 +4,6 @@
 
 """Low-level CuTeDSL helpers: bitcast/fma/exp2 intrinsics, f32 packing, and the 16-bit (bf16/fp16) packed-op kit."""
 
-import functools
 import logging
 from types import SimpleNamespace
 from typing import Optional
