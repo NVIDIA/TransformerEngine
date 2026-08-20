@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable
 import functools
+import inspect
 import os
 import warnings
 from importlib.metadata import PackageNotFoundError, version as get_pkg_version
@@ -107,17 +108,29 @@ def _cudnn_frontend_supports_single_group_runtime_offsets() -> bool:
     return _cudnn_frontend_version_at_least("1.27.0")
 
 
+@functools.lru_cache(maxsize=None)
 def _cudnn_frontend_supports_deterministic_dprob() -> bool:
-    """Check cuDNN FE min version for deterministic ``dprob`` in the dSReLU backward.
+    """Whether the installed dSReLU backward wrapper takes a ``deterministic`` argument.
 
-    cuDNN frontend 1.28.0 (NVIDIA/cudnn-frontend#521) gave
-    ``grouped_gemm_dsrelu_wrapper_sm100`` a ``deterministic`` argument: each N-subtile's
-    partial result parks in its own slot and the slots are summed in a canonical order,
-    replacing the cross-CTA atomic accumulation whose summation order follows the tile
-    scheduler. ``grouped_gemm_dglu_wrapper_sm100`` has no equivalent argument, so the GLU
-    activations cannot take this path.
+    That argument (NVIDIA/cudnn-frontend#521) parks each N-subtile's partial result in its
+    own slot and sums the slots in a canonical order, replacing the cross-CTA atomic
+    accumulation whose summation order follows the tile scheduler.
+    ``grouped_gemm_dglu_wrapper_sm100`` has no equivalent, so the GLU activations cannot
+    take this path at all.
+
+    Asked of the signature rather than of the package version, because the version cannot
+    answer it. #521 merged after ``v1.27.0`` was tagged, so it ships in 1.28.0 -- but
+    ``develop`` already called itself ``1.28.0`` for the eleven days before that merge, and
+    a build from that window passes a version check and then raises ``TypeError: ...
+    unexpected keyword argument 'deterministic'``. The same coarseness bit
+    ``use_single_group_runtime_offsets`` on a cuDNN that reported 1.27.0 without
+    implementing it.
     """
-    return _cudnn_frontend_version_at_least("1.28.0")
+    try:
+        from cudnn import grouped_gemm_dsrelu_wrapper_sm100  # pylint: disable=no-name-in-module
+    except ImportError:
+        return False
+    return "deterministic" in inspect.signature(grouped_gemm_dsrelu_wrapper_sm100).parameters
 
 
 def _deterministic_algorithms_required() -> bool:

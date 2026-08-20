@@ -2037,8 +2037,8 @@ class TestGroupedMLPDeterminism:
     def test_only_the_srelu_path_can_be_deterministic(self) -> None:
         """The capability is a property of the wrapper, not of the environment.
 
-        Needs neither a GPU nor cuDNN: both answers come from the installed
-        ``nvidia-cudnn-frontend`` version.
+        Needs no GPU. Without cuDNN installed the capability probe returns False and both
+        assertions still hold, so this runs anywhere.
         """
         assert (
             grouped_mlp_module.GroupedMLP_CuTeGEMMGLU.grouped_gemm_dactivation_is_deterministic()
@@ -2048,6 +2048,17 @@ class TestGroupedMLPDeterminism:
             grouped_mlp_module.GroupedMLP_CuTeGEMMUnary.grouped_gemm_dactivation_is_deterministic()
             is grouped_mlp_module._cudnn_frontend_supports_deterministic_dprob()
         )
+
+    def test_capability_probe_answers_without_cudnn(self) -> None:
+        """The probe reads a signature, so it has more ways to fail than a version compare.
+
+        A missing cuDNN must give ``False``, not an ImportError, and a present one must not
+        raise out of ``inspect.signature``. Deliberately does not assert *which* answer:
+        that depends on the installed front-end, and pinning it would just restate the
+        implementation.
+        """
+        grouped_mlp_module._cudnn_frontend_supports_deterministic_dprob.cache_clear()
+        assert isinstance(grouped_mlp_module._cudnn_frontend_supports_deterministic_dprob(), bool)
 
     def test_dprob_warning_is_emitted_once_per_reason(self) -> None:
         """TE flags a determinism request it cannot honor -- but not on every backward."""
