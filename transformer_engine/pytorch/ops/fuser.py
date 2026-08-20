@@ -48,6 +48,8 @@ def _is_graph_capturing() -> bool:
 OperationFusionFunction: TypeAlias = (
     "Callable[tuple[list[FusibleOperation], ...], list[FusibleOperation]]"
 )
+_FusedOpList: TypeAlias = list[tuple[FusibleOperation, list[int]]]
+_FusionParams: TypeAlias = tuple[type, int, Optional[str]]
 
 
 class _OperationFuserAutogradFunction(torch.autograd.Function):
@@ -535,16 +537,20 @@ class OperationFuser:
             op._lock_extra_tensor_channels()
 
         # Ops for forward and backward pass, will be populated in maybe_fuse_ops
-        self._forward_ops: list[tuple[FusibleOperation, list[int]]]
-        self._backward_ops: list[tuple[FusibleOperation, list[int]]]
+        self._forward_ops: _FusedOpList
+        self._backward_ops: _FusedOpList
+
+        # Fused operation configurations are reusable wrappers around the basic
+        # ops, so cache each configuration by the state that selected it.
+        self._fused_ops_cache: dict[_FusionParams, tuple[_FusedOpList, _FusedOpList]] = {}
 
         # Cache and detect change of state relevant for fusing operations
         self.recipe_type = None
         self.backward_override = None
         self._last_amax_history_len = 0
 
-        # Runtime backward boundary. This may change between checkpointed
-        # forward and recompute without changing the fused operation plan.
+        # Runtime backward boundary. Full activation recompute alternates this
+        # between the checkpointed forward and the grad-enabled recomputation.
         self.first_op_requiring_backward = 0
 
         # Flatten list of parameters
@@ -629,39 +635,52 @@ class OperationFuser:
                     first_op_requiring_backward = op_idx
                     break
 
-        # Grad requirements control runtime execution, not fusion topology.
-        # Update them on every invocation, including the early-return path.
+        # Update the runtime backward boundary on every invocation, including
+        # paths that reuse a cached fused operation configuration.
         self.first_op_requiring_backward = first_op_requiring_backward
 
-        # Early exit if fusion parameters haven't changed
-        need_reset = False
+        # Recipe state belongs to the basic ops and is independent of the
+        # runtime backward boundary. Only reconfigure it when recipe settings
+        # that are relevant to operation fusion change.
         recipe_type = type(recipe)
         backward_override = recipe.backward_override if recipe is not None else None
-        fusion_params = (recipe_type, backward_override)
-        if fusion_params != (
+        recipe_params = (recipe_type, backward_override)
+        need_reset = recipe_params != (
             self.recipe_type,
             self.backward_override,
-        ):
-            # Recipe type or backward override has changed
-            need_reset = True
-        elif (
-            recipe is not None
+        )
+        if (
+            not need_reset
+            and recipe is not None
             and recipe.delayed()
             and self._last_amax_history_len != recipe.amax_history_len
         ):
-            # FP8 delayed scaling has changed amax history length
+            # Delayed-scaling history affects quantizer state, but it does not
+            # select a different fused operation configuration.
             need_reset = True
-        if not need_reset:
-            return
-
-        # Reset recipe state
-        for op in self._basic_ops:
-            op.reset_recipe_state(recipe=recipe)
-
-        # Check if this is the first iteration
-        if self.recipe_type is None:
+        if need_reset:
             for op in self._basic_ops:
-                op.pre_first_fuser_forward()
+                op.reset_recipe_state(recipe=recipe)
+
+            # Check if this is the first iteration
+            if self.recipe_type is None:
+                for op in self._basic_ops:
+                    op.pre_first_fuser_forward()
+
+            self.recipe_type, self.backward_override = recipe_params
+            self._last_amax_history_len = (
+                recipe.amax_history_len if isinstance(recipe, DelayedScaling) else 0
+            )
+
+        # Training and inference may support different fusions. Keep the
+        # backward boundary in the key, but pay construction cost only once for
+        # each configuration. Full recompute therefore builds at most one
+        # no-grad plan and one grad-enabled plan for a stable recipe.
+        fusion_params = (recipe_type, first_op_requiring_backward, backward_override)
+        cached_ops = self._fused_ops_cache.get(fusion_params)
+        if cached_ops is not None:
+            self._forward_ops, self._backward_ops = cached_ops
+            return
 
         # Apply joint forward-backward fusions first
         joint_ops = OperationFuser._apply_fusions(
@@ -688,14 +707,9 @@ class OperationFuser:
             self._basic_ops,
         )
 
-        # Save current fusion params
-        self.recipe_type, self.backward_override = fusion_params
-
-        # Save amax history length
-        if isinstance(recipe, DelayedScaling):
-            self._last_amax_history_len = recipe.amax_history_len
-        else:
-            self._last_amax_history_len = 0
+        # The FusedOperation contract excludes parameters and per-invocation
+        # state, so the mapped lists can be selected directly on cache hits.
+        self._fused_ops_cache[fusion_params] = (self._forward_ops, self._backward_ops)
 
     def __call__(
         self,
