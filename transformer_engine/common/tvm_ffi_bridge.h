@@ -272,11 +272,9 @@ class TVMFFICentral {
                   "`bool retrieve_func_from_python(const std::string&) const`, "
                   "and `std::optional<tvm::ffi::Function> get_kernel() const`.");
     if (!cutedsl_backend_enabled_.load(std::memory_order_relaxed)) {
-      if (warn_cutedsl_backend_not_chosen_) {
-        NVTE_WARN("CuTeDSL kernel for config `", cfg.to_key(),
-                  "` is not supported because the CuTeDSL backend is disabled. "
-                  "Set NVTE_ENABLE_CUTEDSL_QUANT_BACKEND=1 to enable it.");
-      }
+      maybe_warn_not_chosen("the CuTeDSL backend is disabled, so no kernel is available for "
+                            "config `",
+                            cfg.to_key(), "`. Set NVTE_ENABLE_CUTEDSL_QUANT_BACKEND=1 to enable it.");
       return std::nullopt;
     }
     // Only check if libtvm_ffi.so is loaded if user enables the CuTeDSL backend.
@@ -284,18 +282,18 @@ class TVMFFICentral {
     if (!tvm_ffi_available_) {
       // Warn once: the state is permanent, so a per-call warning would spam every quantize.
       static std::once_flag warned;
-      std::call_once(warned, [] {
-        NVTE_WARN(
-            "Cannot dispatch to CuTeDSL kernels because libtvm_ffi.so is not successfully loaded."
-            " Will fall back to the default CUDA C++ kernels.");
+      std::call_once(warned, [this] {
+        maybe_warn_not_chosen(
+            "libtvm_ffi.so is not successfully loaded. Will fall back to the default CUDA C++ "
+            "kernels.");
       });
       return std::nullopt;
     }
     const std::string key = cfg.to_key();
     std::optional<tvm::ffi::Function> fn =
         cfg.retrieve_func_from_python(key) ? tvm::ffi::Function::GetGlobal(key) : std::nullopt;
-    if (!fn && warn_cutedsl_backend_not_chosen_) {
-      NVTE_WARN("TVM-FFI kernel for config `", key, "` is not supported.");
+    if (!fn) {
+      maybe_warn_not_chosen("no TVM-FFI kernel is registered for config `", key, "`.");
     }
     return fn;
   }
@@ -309,6 +307,16 @@ class TVMFFICentral {
 
   bool get_cutedsl_backend_enabled() const {
     return cutedsl_backend_enabled_.load(std::memory_order_relaxed);
+  }
+
+  bool get_warn_cutedsl_backend_not_chosen() const { return warn_cutedsl_backend_not_chosen_; }
+
+  // Optionally emit a warning explaining why the CuTeDSL backend was not chosen for this config.
+  template <typename... Args>
+  void maybe_warn_not_chosen(Args &&...reason) const {
+    if (warn_cutedsl_backend_not_chosen_) {
+      NVTE_WARN("CuTeDSL quantization backend not chosen because ", reason...);
+    }
   }
 
  private:
@@ -390,6 +398,12 @@ class TVMFFIConfigCache {
   std::shared_mutex mutex_;
   std::unordered_map<uint32_t, std::optional<tvm::ffi::Function>> map_;
 };
+
+// Optionally emit a warning explaining why the CuTeDSL backend was not chosen for this config.
+template <typename... Args>
+inline void maybe_warn_cutedsl_not_chosen(Args &&...reason) {
+  TVMFFICentral::getInstance().maybe_warn_not_chosen(reason...);
+}
 
 }  // namespace tvm_ffi_bridge
 }  // namespace transformer_engine

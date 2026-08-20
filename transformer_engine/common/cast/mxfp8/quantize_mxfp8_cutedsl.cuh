@@ -174,6 +174,7 @@ inline bool mxfp8_quantize_cutedsl(const MXFP8QuantConfig &config, const Tensor 
   const size_t flat_n = input_tensor->flat_last_dim();
   if (flat_n % 16 != 0) {
     // Shape not supported because the last dimension of output is not 16 bytes aligned which is required by TMA.
+    maybe_warn_cutedsl_not_chosen("the last dimension of input is not 16 bytes aligned.");
     return false;
   }
 
@@ -278,14 +279,18 @@ bool mxfp8_quantize_cutedsl(const Tensor *input_tensor, const Tensor *act_input_
                             Tensor *workspace_tensor, const bool use_2d_quantization,
                             cudaStream_t stream) {
   if (!tvm_ffi_bridge::TVMFFICentral::getInstance().get_cutedsl_backend_enabled()) {
+    maybe_warn_cutedsl_not_chosen("the CuTeDSL backend is disabled.");
     return false;
   }
   // TODO(kainingz): port 2D quantization to CuTeDSL
   if (use_2d_quantization) {
+    maybe_warn_cutedsl_not_chosen("2D quantization is not supported.");
     return false;
   }
   using Fused = MXFP8QuantFused<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>;
   if constexpr (!Fused::supported) {
+    maybe_warn_cutedsl_not_chosen(
+        "the fused activation/activation derivative operation is not supported.");
     return false;
   } else {
     const MXFP8QuantConfig config{/*dtype=*/input_tensor->dtype(),
