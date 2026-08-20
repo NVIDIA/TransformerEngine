@@ -370,12 +370,14 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
   const bool gelu = pre_gelu_out != nullptr;
   const bool use_fp8 = is_fp8_dtype(param.Atype) || is_fp8_dtype(param.Btype);
   const bool use_fp4 = is_fp4_dtype(param.Atype) || is_fp4_dtype(param.Btype);
+  const bool nvfp4_tensor_scaling =
+      is_nvfp_scaling(inputA->scaling_mode) && is_nvfp_scaling(inputB->scaling_mode);
 
   // Update scaling factors with NVFP4 tensor scales
   // TODO: Check whether scales are on CPU/GPU or add API to control.
   // Currently scales are assumed to be on CPU when amax is provided
   // and on GPU when not provided, but this is brittle.
-  if (use_fp4 &&
+  if (use_fp4 && nvfp4_tensor_scaling &&
       ((transa == CUBLAS_OP_T ? inputA->amax.dptr : inputA->columnwise_amax.dptr) != nullptr ||
        (transb == CUBLAS_OP_T ? inputB->columnwise_amax.dptr : inputB->amax.dptr) != nullptr)) {
     // Reserve some workspace for alpha scale
