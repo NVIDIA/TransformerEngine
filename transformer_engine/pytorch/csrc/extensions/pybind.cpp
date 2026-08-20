@@ -137,12 +137,20 @@ void init_router_bindings(pybind11::module &m) {
   pybind11::enum_<NVTERoutingMapFormat>(m, "NVTERoutingMapFormat", pybind11::module_local())
       .value("BYTEMAP", NVTE_ROUTING_MAP_FORMAT_BYTEMAP)
       .value("BITMAP_U8", NVTE_ROUTING_MAP_FORMAT_BITMAP_U8);
+  pybind11::enum_<NVTEQBHistogramMode>(m, "NVTEQBHistogramMode", pybind11::module_local())
+      .value("TWO_KERNEL", NVTE_QB_HISTOGRAM_TWO_KERNEL)
+      .value("FUSED_ATOMIC", NVTE_QB_HISTOGRAM_FUSED_ATOMIC);
   m.def("fused_topk_with_score_function_fwd", &fused_topk_with_score_function_fwd,
         py::arg("logits"), py::arg("topk"), py::arg("use_pre_softmax"), py::arg("num_groups"),
         py::arg("group_topk"), py::arg("scaling_factor"), py::arg("score_function"),
         py::arg("expert_bias"),
         py::arg("routing_map_format") = static_cast<int>(NVTE_ROUTING_MAP_FORMAT_BYTEMAP),
         py::arg("topk_indices") = std::nullopt, "Fused topk with score function fwd");
+  m.def("fused_topk_with_score_function_qb_fwd", &fused_topk_with_score_function_qb_fwd,
+        py::arg("logits"), py::arg("topk"), py::arg("scaling_factor"), py::arg("expert_bias"),
+        py::arg("routing_map_format"), py::arg("topk_indices"), py::arg("histogram"),
+        py::arg("bin_bounds"), py::arg("histogram_mode"), py::arg("bin_bounds_validated") = false,
+        "Kimi K3 QB fused topk with histogram accumulation");
   m.def("fused_topk_with_score_function_bwd", &fused_topk_with_score_function_bwd,
         py::arg("routing_map"), py::arg("intermediate_output"), py::arg("grad_probs"),
         py::arg("grad_logits"), py::arg("topk"), py::arg("use_pre_softmax"),

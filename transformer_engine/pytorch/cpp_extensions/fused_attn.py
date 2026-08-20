@@ -107,14 +107,17 @@ class FusedAttnBackend(IntEnum):
     ``transformer_engine_torch.NVTE_Fused_Attn_Backend`` (pybind11) enum
     value-for-value, and instances of the two enums compare equal when they
     share the same integer value. Unlike the pybind enum, a plain-python
-    ``IntEnum`` is traceable by ``torch.compile``: comparisons constant-fold
-    cleanly and instances safely cross the ``assume_constant_result`` boundary
-    in ``get_attention_backend``. Lookup by name (``FusedAttnBackend["FP8"]``)
-    works the same way as with the dict this used to be. Adding
-    ``__eq__``/``__ne__`` overrides is unnecessary (the inherited ``int``
-    comparisons already match the pybind enum in both operand orders) and
-    harmful: a python ``__eq__`` would push dynamo from constant-folding the
-    comparison to inline-with-guard, breaking tracing.
+    ``IntEnum`` is traceable by ``torch.compile``: comparisons against a member
+    constant-fold cleanly. Lookup by name (``FusedAttnBackend["FP8"]``) works
+    the same way as with the dict this used to be. Adding ``__eq__``/``__ne__``
+    overrides is unnecessary (the inherited ``int`` comparisons already match
+    the pybind enum in both operand orders) and harmful: a python ``__eq__``
+    would push dynamo from constant-folding the comparison to
+    inline-with-guard, breaking tracing.
+
+    Members do not survive a graph break, though, so ``get_attention_backend``
+    returns the sub-backend as a plain int and ``cast`` turns it back into a
+    member.
     """
 
     No_Backend = int(NVTE_Fused_Attn_Backend.NVTE_No_Backend)

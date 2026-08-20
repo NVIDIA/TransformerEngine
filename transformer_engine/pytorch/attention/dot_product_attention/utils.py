@@ -106,7 +106,7 @@ def _get_supported_versions(version_min, version_max):
     """
     Calculate version info based on min and max numbers
     """
-    return ">= " + str(version_min) + ", " + "<= " + str(version_max)
+    return ">= " + str(version_min) + ", " + "< " + str(version_max)
 
 
 def maybe_contiguous(tensor: torch.Tensor) -> torch.Tensor:
@@ -123,7 +123,7 @@ class FlashAttentionUtils:
     version = PkgVersion("0")
     version_required = PkgVersion("2.1.1")
     version_required_blackwell = PkgVersion("2.7.3")
-    max_version = PkgVersion("2.8.3")
+    max_version = PkgVersion("2.8.4")
     v2_plus = False
     v2_1_plus = False
     v2_3_plus = False
@@ -155,6 +155,11 @@ pip install flash-attn-4==4.0.0b11 nvidia-cutlass-dsl[cu13]"""
     # Set by backends.py if FA4 is installed; calls flash_attn.cute.interface._validate_head_dims
     # which raises AssertionError for unsupported (head_dim, head_dim_v) combinations.
     v4_validate_head_dims: Callable = None
+
+    @staticmethod
+    def is_version_supported(version: PkgVersion, minimum_version: PkgVersion) -> bool:
+        """Check whether a Flash Attention v2 version is supported."""
+        return minimum_version <= version < FlashAttentionUtils.max_version
 
     @staticmethod
     def set_flash_attention_version():
@@ -424,23 +429,29 @@ class _NoOpLogger:
         """No-op."""
 
 
-_no_op_logger = _NoOpLogger()
+no_op_logger = _NoOpLogger()
 
 
 @torch.compiler.assume_constant_result
 def _get_fused_attn_backend(**fused_attn_kwargs):
     """Constant-foldable tex.get_fused_attn_backend: the result depends only on
-    the attention config, and the python-side enum keeps it traceable by
-    torch.compile (see the FusedAttnBackend docstring).
+    the attention config.
 
     The config comes in as keyword arguments rather than as a FusedAttentionParams:
     torch.compile materializes the arguments of a constant-folded call, and a
     dataclass built by traced code arrives here with its fields reset to defaults.
+
+    The backend comes back as a plain int rather than a FusedAttnBackend member:
+    dynamo reconstructs the result of an assume_constant_result call by
+    re-emitting the call, which is only valid inside the frame that made it. An
+    int survives a graph break because it is baked into the graph as a literal,
+    while an enum member comes out of the reconstruction corrupted (see the cast
+    at the call site, which restores the enum).
     """
     fused_attention_backend, reject_message = tex.get_fused_attn_backend(
         FusedAttentionParams(**fused_attn_kwargs)
     )
-    return FusedAttnBackend.cast(fused_attention_backend), reject_message
+    return int(fused_attention_backend), reject_message
 
 
 def get_attention_backend(
@@ -459,8 +470,11 @@ def get_attention_backend(
         Whether the `FlashAttention` backend has been selected.
     use_fused_attention : bool
         Whether the `FusedAttention` backend has been selected.
-    fused_attention_backend : FusedAttnBackend
-        If `use_fused_attention = True`, one of `FusedAttention` three sub-backends, else `None`.
+    fused_attention_backend : int
+        If `use_fused_attention = True`, the integer value of one of `FusedAttention`'s three
+        sub-backends, else `None`. It is not a `FusedAttnBackend` member because that does not
+        survive a graph break under `torch.compile`; `FusedAttnBackend.cast` turns it into one,
+        and comparing it against a member works either way.
     use_unfused_attention : bool
         Whether the `UnfusedDotProductAttention` backend has been selected.
     available_backends : List[bool]
@@ -521,7 +535,7 @@ def get_attention_backend(
     if torch.compiler.is_compiling():
         # logging.Logger methods graph-break under torch.compile; backend
         # selection logs are only emitted in eager mode.
-        logger = _no_op_logger
+        logger = no_op_logger
     else:
         logger = logging.getLogger("DotProductAttention")
         logger.setLevel(AttentionLogging._log_level)
@@ -1651,7 +1665,7 @@ def get_attention_backend(
             # symbolic (assume_constant_result requires concrete values); ints/floats made
             # dynamic by automatic dynamic currently graph break here.
             fused_attention_backend, reject_message = _get_fused_attn_backend(**fused_attn_kwargs)
-            if fused_attention_backend == FusedAttnBackend["No_Backend"]:
+            if fused_attention_backend == FusedAttnBackend.No_Backend.value:
                 logger.debug(
                     "Disabling FusedAttention: %s%s",
                     reject_message,
@@ -1668,7 +1682,7 @@ def get_attention_backend(
         if (
             use_fused_attention
             and has_score_mod
-            and fused_attention_backend != FusedAttnBackend["F16_arbitrary_seqlen"]
+            and fused_attention_backend != FusedAttnBackend.F16_arbitrary_seqlen.value
         ):
             logger.debug(
                 "Disabling FusedAttention for score_mod because sub-backend %s is not "
@@ -1719,7 +1733,7 @@ def get_attention_backend(
             use_fused_attention = False
             fused_attention_backend = None
         if (
-            fused_attention_backend == FusedAttnBackend["FP8"]
+            fused_attention_backend == FusedAttnBackend.FP8.value
             and is_training
             and (device_compute_capability < (9, 0) or cudnn_version < (9, 19, 0))
         ):
@@ -1730,7 +1744,7 @@ def get_attention_backend(
             use_fused_attention = False
             fused_attention_backend = None
         if (
-            fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]
+            fused_attention_backend == FusedAttnBackend.F16_arbitrary_seqlen.value
             and is_training
             and (
                 device_compute_capability < (9, 0)
@@ -2197,21 +2211,21 @@ def get_indices(max_seqlen: int, cu_seqlens: torch.Tensor) -> torch.Tensor:
     tensor of shape [batch_size * max_seqlen, 1, 1] containing the indices for
     the valid tokens in a batch.
     """
+    # Built with device-side ops only: reading the sequence lengths on the host
+    # would synchronize the device once per sequence.
     bs = len(cu_seqlens) - 1
     seqlens = cu_seqlens[1:] - cu_seqlens[:-1]
-    indices = [i * max_seqlen + ii for i, j in enumerate(seqlens) for ii in range(j)]
-    indices = torch.Tensor(indices).unsqueeze(1).unsqueeze(1).to(dtype=torch.int64, device="cuda")
-
-    num_nonzeros = indices.shape[0]
-    pad_amount = bs * max_seqlen - num_nonzeros
-    indices = F.pad(
-        input=indices,
-        pad=(0, 0, 0, 0, 0, pad_amount),
-        mode="constant",
-        value=float(bs * max_seqlen),
+    positions = torch.arange(max_seqlen, device=cu_seqlens.device)
+    valid = (positions.unsqueeze(0) < seqlens.unsqueeze(1)).flatten()
+    # Sorting the mask is stable, so the valid positions come first in order,
+    # and the invalid tail is replaced by the out-of-range padding index.
+    ordered = torch.argsort(~valid, stable=True)
+    indices = torch.where(
+        torch.arange(bs * max_seqlen, device=cu_seqlens.device) < valid.sum(),
+        ordered,
+        bs * max_seqlen,
     )
-
-    return indices
+    return indices.to(dtype=torch.int64, device="cuda").unsqueeze(1).unsqueeze(1)
 
 
 def get_full_cu_seqlens(
@@ -2236,6 +2250,11 @@ def get_full_cu_seqlens(
         )
 
     if is_in_onnx_export_mode():
+        # A tensor cached by an earlier call would be baked into the exported graph.
+        return _get_cu_seqlens(batch_size, max_seqlen, device)
+    if torch.compiler.is_compiling():
+        # torch.is_inference_mode_enabled(), part of the cache key, graph-breaks, and the
+        # cache only saves one arange.
         return _get_cu_seqlens(batch_size, max_seqlen, device)
 
     is_inference = torch.is_inference_mode_enabled()
@@ -2671,6 +2690,20 @@ def get_fused_attn_spec(recipe, qkv_dtype, qkv_layout, *, cs_o_in_f16, nominal_d
     )
 
 
+def qkv_layout_needs_detection(*qkv: Optional[torch.Tensor]) -> bool:
+    """Whether the layout of these q/k/v can only be told by inspecting memory.
+
+    True for tensors that may be slices of a packed buffer, i.e. strided ones
+    that do not own their whole storage.
+    """
+    return any(
+        x is not None
+        and not x.is_contiguous()
+        and x.untyped_storage().size() != x.numel() * x.element_size()
+        for x in qkv
+    )
+
+
 def get_qkv_layout(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -2844,10 +2877,25 @@ def get_qkv_layout(
 
         return qkv_layout
 
-    if not is_in_onnx_export_mode():
-        qkv_layout = run_iteratively(q, k, v)
-    else:
+    if is_in_onnx_export_mode():
+        # Checked first: the ONNX exporter runs through dynamo, so it also sets
+        # is_compiling(), and it has its own handling below.
         qkv_layout = "not_supported"
+    elif torch.compiler.is_compiling():
+        # run_iteratively reads data pointers and storage offsets, which dynamo
+        # cannot trace; unpacked q/k/v need no detection anyway.
+        assert not qkv_layout_needs_detection(q, k, v), (
+            "q/k/v may be views into a packed buffer, whose layout cannot be detected under"
+            " torch.compile. Pass the packed buffer explicitly via DotProductAttention's"
+            " qkv_layer/kv_layer (with qkv_interleave_dim)."
+        )
+        q, k, v = [x if x.is_contiguous() else x.contiguous() for x in (q, k, v)]
+        if is_same_q_kv_format:
+            qkv_layout = "_".join([qkv_format] * 3)
+        else:
+            qkv_layout = q_format + "_" + kv_format + "_" + kv_format
+    else:
+        qkv_layout = run_iteratively(q, k, v)
     if qkv_layout == "not_supported":
         # force q,k,v to be contiguous and run get_layout again
         q, k, v = [x.contiguous() for x in [q, k, v]]
