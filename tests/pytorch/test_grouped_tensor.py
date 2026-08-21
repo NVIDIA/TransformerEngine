@@ -187,6 +187,36 @@ class TestGroupedTensor:
         assert grouped_tensor.get_common_last_dim() == 512
         assert grouped_tensor.has_data()
 
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+    def test_module_to_moves_grouped_parameter_storage(self) -> None:
+        """Module.to preserves GroupedTensor parameters initialized on CPU."""
+        grouped_tensor = GroupedTensor.make_grouped_tensor_with_shapes(
+            num_tensors=2,
+            shapes=[(4, 8), (4, 8)],
+            quantizer=None,
+            device="cpu",
+            dtype=torch.float32,
+        )
+        values = torch.arange(grouped_tensor.numel(), dtype=torch.float32)
+        grouped_tensor.rowwise_data.copy_(values)
+
+        module = torch.nn.Module()
+        module.register_parameter("weight", torch.nn.Parameter(grouped_tensor))
+        original_parameter = module.weight
+        expected = values.to(device="cuda", dtype=torch.bfloat16)
+
+        module.to(device="cuda", dtype=torch.bfloat16)
+
+        assert module.weight is original_parameter
+        assert isinstance(module.weight, GroupedTensor)
+        assert module.weight.device.type == "cuda"
+        assert module.weight.dtype == torch.bfloat16
+        assert module.weight.rowwise_data.device.type == "cuda"
+        assert module.weight.rowwise_data.dtype == torch.bfloat16
+        torch.testing.assert_close(module.weight.rowwise_data, expected, rtol=0, atol=0)
+        members = module.weight.split_into_quantized_tensors()
+        assert all(member.device.type == "cuda" for member in members)
+
     def test_basic_construction_varying_first_dim(self) -> None:
         """Test GroupedTensor construction with varying first dimension"""
         num_tensors = 3
