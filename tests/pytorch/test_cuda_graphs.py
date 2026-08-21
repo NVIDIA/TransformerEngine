@@ -1113,7 +1113,7 @@ def test_slot_memory_checkpoint_reuses_lockstep_branches(reverse_replay) -> None
         reset_graphs(graphed)
 
 
-@pytest.mark.parametrize("failure_timing", ("before", "after"))
+@pytest.mark.parametrize("failure_timing", ("detach", "before", "after"))
 def test_slot_memory_checkpoint_rolls_back_restore_failure(monkeypatch, failure_timing) -> None:
     """A failed allocator restore must put the original owners back before raising."""
 
@@ -1137,6 +1137,9 @@ def test_slot_memory_checkpoint_rolls_back_restore_failure(monkeypatch, failure_
     def record_detach(storage_impl_ptr):
         detached_storage_impls.append(storage_impl_ptr)
         real_detach(storage_impl_ptr)
+        if failure_timing == "detach" and len(detached_storage_impls) == 1:
+            original_owner_impls.extend(detached_storage_impls)
+            raise RuntimeError("injected checkpoint detach failure")
 
     def fail_first_set_state(*args, **kwargs):
         nonlocal set_state_calls
@@ -1153,7 +1156,9 @@ def test_slot_memory_checkpoint_rolls_back_restore_failure(monkeypatch, failure_
     monkeypatch.setattr(te_graph.tex, "_graph_checkpoint_detach_storage", record_detach)
     monkeypatch.setattr(torch._C, "_cuda_setCheckpointPoolState", fail_first_set_state)
 
-    with pytest.raises(RuntimeError, match="injected checkpoint restore failure") as exc_info:
+    with pytest.raises(
+        RuntimeError, match="injected checkpoint (detach|restore) failure"
+    ) as exc_info:
         make_graphed_callables(
             (module,) * variants,
             samples,
@@ -1164,7 +1169,9 @@ def test_slot_memory_checkpoint_rolls_back_restore_failure(monkeypatch, failure_
             _reuse_graph_input_output_buffers=True,
             _graph_memory_slots=slots,
         )
-    assert set_state_calls == 2
+    assert set_state_calls == (1 if failure_timing == "detach" else 2)
+    if failure_timing == "detach":
+        original_owner_impls = list(dict.fromkeys(detached_storage_impls))
     assert original_owner_impls
     assert all(
         torch._C._has_Standard_Deleter(storage_impl_ptr)

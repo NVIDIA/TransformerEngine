@@ -2120,12 +2120,10 @@ def _make_graphed_callables(
             )
         return owners
 
-    def release_checkpoint_live_storages(expected_blocks, owners, phase):
-        """Make checkpoint-live blocks free before allocator topology restoration."""
+    def validate_checkpoint_live_storages(expected_blocks, owners):
+        """Validate checkpoint owners before changing any StorageImpl."""
         if set(owners) != set(expected_blocks):
             raise RuntimeError("CUDA graph slot checkpoint live-storage owner set changed.")
-        # Validate every owner before mutating any StorageImpl. A validation failure must not
-        # leave a partially detached checkpoint boundary.
         for block_ptr, storage in owners.items():
             storage_ptr = storage.data_ptr()
             if not block_ptr <= storage_ptr < block_ptr + expected_blocks[block_ptr]:
@@ -2137,6 +2135,8 @@ def _make_graphed_callables(
                     "CUDA graph slot checkpoint live storage lost its allocator deleter."
                 )
 
+    def release_checkpoint_live_storages(expected_blocks, owners, phase):
+        """Make prevalidated checkpoint-live blocks free for topology restoration."""
         for storage in owners.values():
             storage_ptr = storage.data_ptr()
             torch._C._free_And_Remove_DeleterFn(storage._cdata)
@@ -2180,10 +2180,13 @@ def _make_graphed_callables(
         """Switch between two allocator boundaries while preserving their StorageImpls."""
         device = torch.cuda.current_device()
         rollback_state = torch._C._cuda_getCheckpointState(device, mempool)
-        current_released = False
+        current_release_started = False
         try:
+            # Complete validation before the transaction starts. Once the first owner can be
+            # mutated, every failure must restore the original allocator boundary.
+            validate_checkpoint_live_storages(current_blocks, current_owners)
+            current_release_started = True
             release_checkpoint_live_storages(current_blocks, current_owners, phase)
-            current_released = True
             torch._C._cuda_setCheckpointPoolState(
                 device,
                 target_state,
@@ -2193,7 +2196,7 @@ def _make_graphed_callables(
             verify_checkpoint_live_storages(target_blocks, target_owners)
             assert_slot_pool_liveness(target_blocks, phase)
         except BaseException as restore_error:
-            if not current_released:
+            if not current_release_started:
                 raise
             try:
                 rollback_blocks = slot_pool_active_blocks()
@@ -2202,6 +2205,7 @@ def _make_graphed_callables(
                     f"{phase} rollback",
                     (current_owners, target_owners),
                 )
+                validate_checkpoint_live_storages(rollback_blocks, rollback_owners)
                 release_checkpoint_live_storages(
                     rollback_blocks, rollback_owners, f"{phase} rollback"
                 )
