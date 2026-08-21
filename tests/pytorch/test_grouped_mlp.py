@@ -8,7 +8,6 @@ from collections.abc import Iterable
 import os
 import math
 import random
-import warnings
 from typing import Optional
 
 import pytest
@@ -1979,21 +1978,9 @@ class TestGroupedMLPDeterminism:
     cuDNN's grouped-GEMM dactivation epilogue accumulates the scale gradient (``dprob``)
     with cross-CTA atomic adds, so its summation order follows the tile scheduler. The
     dSReLU wrapper takes a ``deterministic`` argument from cuDNN frontend 1.28.0 on that
-    replaces those atomics with per-subtile slots reduced in a canonical order; the dGLU
-    wrapper has no equivalent, and neither does an older front-end, so those two cases
-    warn instead.
+    replaces those atomics with per-subtile slots reduced in a canonical order. The dGLU
+    wrapper has no equivalent, so a determinism request it cannot honor is an error.
     """
-
-    @staticmethod
-    def _reset_caches() -> None:
-        """Drop the warn-once state, which is an lru_cache keyed on the reason string."""
-        grouped_mlp_module._warn_nondeterministic_cudnn_dprob.cache_clear()
-
-    @pytest.fixture(autouse=True)
-    def _clean_caches(self):
-        self._reset_caches()
-        yield
-        self._reset_caches()
 
     @pytest.fixture
     def _restore_torch_determinism(self):
@@ -2037,68 +2024,34 @@ class TestGroupedMLPDeterminism:
     def test_only_the_srelu_path_can_be_deterministic(self) -> None:
         """The capability is a property of the wrapper, not of the environment.
 
-        Needs no GPU. Without cuDNN installed the capability probe returns False and both
-        assertions still hold, so this runs anywhere.
+        Needs no GPU, and no cuDNN either: the SReLU probe answers False when the import
+        fails, so both assertions hold anywhere.
         """
-        assert (
-            grouped_mlp_module.GroupedMLP_CuTeGEMMGLU.grouped_gemm_dactivation_is_deterministic()
-            is False
-        )
-        assert (
-            grouped_mlp_module.GroupedMLP_CuTeGEMMUnary.grouped_gemm_dactivation_is_deterministic()
-            is grouped_mlp_module._cudnn_frontend_supports_deterministic_dprob()
-        )
-
-    def test_capability_probe_answers_without_cudnn(self) -> None:
-        """The probe reads a signature, so it has more ways to fail than a version compare.
-
-        A missing cuDNN must give ``False``, not an ImportError, and a present one must not
-        raise out of ``inspect.signature``. Deliberately does not assert *which* answer:
-        that depends on the installed front-end, and pinning it would just restate the
-        implementation.
-        """
-        grouped_mlp_module._cudnn_frontend_supports_deterministic_dprob.cache_clear()
-        assert isinstance(grouped_mlp_module._cudnn_frontend_supports_deterministic_dprob(), bool)
-
-    def test_dprob_warning_is_emitted_once_per_reason(self) -> None:
-        """TE flags a determinism request it cannot honor -- but not on every backward."""
-        with pytest.warns(UserWarning, match="dprob"):
-            grouped_mlp_module._warn_nondeterministic_cudnn_dprob("first reason")
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            grouped_mlp_module._warn_nondeterministic_cudnn_dprob("first reason")
-        assert not caught, "the dprob warning must not repeat every backward"
-        # A different reason is a different remedy, so it is worth saying once too.
-        with pytest.warns(UserWarning, match="second reason"):
-            grouped_mlp_module._warn_nondeterministic_cudnn_dprob("second reason")
+        glu = grouped_mlp_module.GroupedMLP_CuTeGEMMGLU
+        unary = grouped_mlp_module.GroupedMLP_CuTeGEMMUnary
+        assert glu.grouped_gemm_dactivation_is_deterministic() is False
+        assert isinstance(unary.grouped_gemm_dactivation_is_deterministic(), bool)
 
     @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
     @pytest.mark.parametrize("activation", ("scaled_swiglu", "scaled_srelu"))
-    def test_deterministic_dactivation_is_numerically_correct(
-        self,
-        monkeypatch,
-        *,
-        activation: str,
-    ) -> None:
-        """End-to-end under determinism, and pins which of the two arms warns.
+    def test_determinism_either_runs_or_refuses(self, monkeypatch, *, activation: str) -> None:
+        """A request TE cannot honor must fail loudly, not train on silently.
 
-        ``group_size > 1`` here, so the unit-activation-scale shortcut is off and the
-        cuDNN epilogue really does produce ``dprob``.
+        ``group_size > 1`` here, so the unit-activation-scale shortcut is off and the cuDNN
+        epilogue really does produce ``dprob``. When the request *can* be honored, the
+        wrapped test checks numerics as usual.
         """
         if not te.ops.fused.GroupedMLP_CuTeGEMMGLU.is_supported():
             pytest.skip("MXFP8 fused grouped MLP is not supported on this system")
 
         monkeypatch.setenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "0")
-        self._reset_caches()
-        fused_op_cls = (
+        fused_cls = (
             grouped_mlp_module.GroupedMLP_CuTeGEMMUnary
             if activation == "scaled_srelu"
             else grouped_mlp_module.GroupedMLP_CuTeGEMMGLU
         )
-        expect_warning = not fused_op_cls.grouped_gemm_dactivation_is_deterministic()
 
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
+        def _run() -> None:
             TestGroupedMLPFusedOp().test_grouped_mlp(
                 bias=False,
                 hidden_size=128,
@@ -2106,73 +2059,59 @@ class TestGroupedMLPDeterminism:
                 single_grouped_weight=False,
                 activation=activation,
             )
-        # Asserted after the call rather than inside pytest.warns: on exit pytest.warns
-        # raises its own "DID NOT WARN" and chains it over whatever the body raised, so a
-        # real failure inside the op would report as a warning assertion and bury the cause.
-        warned = any("dprob" in str(w.message) for w in caught)
-        assert warned is expect_warning
+
+        if fused_cls.grouped_gemm_dactivation_is_deterministic():
+            _run()
+        else:
+            with pytest.raises(RuntimeError, match="dprob"):
+                _run()
 
     @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
     def test_dprob_is_bit_exact_across_runs(self, monkeypatch) -> None:
         """The actual claim: identical inputs produce an identical ``dprob``.
 
-        The tolerance-based check above cannot see this. Reordering the same atomic adds
-        moves the result by about an ulp, which every tolerance in this file accepts, so a
-        run that is silently not reproducible passes it. Only an exact comparison of two
-        runs can tell the difference.
-
-        ``dbias`` rides the same slot mechanism, but reaching it needs an FC1 bias, and an
-        FC2 ``scale_bias`` then routes the scale gradient through a Triton kernel that
-        refuses to run under determinism at all. Left to the op-level tests.
+        The end-to-end test above cannot see this. Reordering the same atomic adds moves
+        the result by about an ulp, which every tolerance in this file accepts, so a run
+        that is silently not reproducible passes it. Only comparing two runs exactly can
+        tell the difference.
         """
         fused_cls = grouped_mlp_module.GroupedMLP_CuTeGEMMUnary
         if not fused_cls.is_supported():
             pytest.skip("MXFP8 fused grouped MLP is not supported on this system")
         if not fused_cls.grouped_gemm_dactivation_is_deterministic():
-            pytest.skip(
-                "grouped_gemm_dsrelu_wrapper_sm100 has no deterministic mode before cuDNN"
-                " frontend 1.28.0, so dprob is expected to vary run to run here"
-            )
+            pytest.skip("dSReLU determinism needs cuDNN frontend 1.28.0 or later")
 
         monkeypatch.setenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "0")
-        self._reset_caches()
 
         device = torch.device("cuda")
         dtype = torch.bfloat16
         group_size = 4
-        # Wide enough that the dprob reduction spans several N-tiles. With a single tile
-        # there is one writer per token, nothing to reorder, and the test is vacuous.
+        # Wide enough that the dprob reduction spans several 256-wide N-tiles. With a
+        # single tile there is one writer per token, nothing to reorder, and the test is
+        # vacuous.
         hidden_size = 1024
         split_sizes = torch.tensor([256] * group_size, dtype=torch.int, device=device)
         num_tokens = int(split_sizes.sum().item())
 
         recipe = make_recipe("mxfp8")
-        _, x = make_reference_and_test_tensors(
-            (num_tokens, hidden_size),
-            min=-0.25,
-            max=0.25,
-            quantization="mxfp8",
-            test_dtype=dtype,
-            test_device=device,
-        )
+        tensor_kwargs = {
+            "min": -0.25,
+            "max": 0.25,
+            "quantization": "mxfp8",
+            "test_dtype": dtype,
+            "test_device": device,
+        }
+        _, x = make_reference_and_test_tensors((num_tokens, hidden_size), **tensor_kwargs)
         _, dy = make_reference_and_test_tensors(
-            (num_tokens, hidden_size),
-            min=-0.25,
-            max=0.25,
-            quantization="mxfp8",
-            test_dtype=dtype,
-            test_device=device,
-            requires_grad=False,
+            (num_tokens, hidden_size), requires_grad=False, **tensor_kwargs
         )
         _, probs = make_reference_and_test_tensors(
-            (num_tokens,),
-            test_dtype=dtype,
-            test_device=device,
+            (num_tokens,), test_dtype=dtype, test_device=device
         )
 
-        # No bias on either linear: with bias the FC2 scale gradient goes through the
-        # Triton grouped-dbias kernel instead of arriving straight from the cuDNN epilogue,
-        # and probs.grad would no longer be the dprob under test.
+        # No bias: with an FC2 scale_bias the scale gradient is finished by the Triton
+        # grouped-dbias kernel instead of arriving straight from the cuDNN epilogue, and
+        # probs.grad would no longer be the dprob under test.
         with te.quantized_model_init(enabled=True, recipe=recipe):
             module = te.ops.Sequential(
                 te.ops.GroupedLinear(

@@ -211,14 +211,10 @@ backend-selection overview.
    .. note::
 
       As for attention, the fused grouped MLP treats determinism as requested when *either*
-      this variable is ``0`` or :func:`torch.use_deterministic_algorithms` is enabled.
-
-   .. note::
-
-      The deterministic dSReLU backward needs cuDNN frontend 1.28.0 or newer, and has no
-      counterpart for the GLU activations -- their ``dprob`` is accumulated with atomics
-      either way. Transformer Engine warns once when a determinism request cannot be
-      honored for either reason.
+      this variable is ``0`` or :func:`torch.use_deterministic_algorithms` is enabled. A
+      bit-exact ``dprob`` needs the scaled-SReLU activation and cuDNN frontend 1.28.0 or
+      later; the GLU activations have no deterministic counterpart. A request the fused
+      grouped MLP cannot honor raises ``RuntimeError`` rather than running anyway.
 
 .. envvar:: NVTE_FUSED_RING_ATTENTION_USE_SCAN
 
