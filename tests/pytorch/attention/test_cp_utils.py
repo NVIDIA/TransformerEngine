@@ -5,10 +5,9 @@
 """Unit tests for context parallel utils."""
 
 import itertools
-import os
 import torch
 import unittest
-from unittest.mock import patch
+from transformer_engine.pytorch import CPAttentionLoadBalancingStrategy
 from transformer_engine.pytorch.attention.dot_product_attention.context_parallel import (
     get_no_load_balance_thd_causal_metadata,
     get_batch_on_this_cp_rank,
@@ -19,8 +18,6 @@ from transformer_engine.pytorch.attention.dot_product_attention.context_parallel
     generate_positional_ids_for_cp,
 )
 
-_NO_LOAD_BALANCE_ENV = "NVTE_EXPERIMENTAL_CP_AG_THD_NO_LOAD_BALANCE"
-
 try:
     import transformer_engine_torch as tex
 except ImportError:
@@ -28,24 +25,33 @@ except ImportError:
 
 
 class TestTHDPartitioning(unittest.TestCase):
-    @patch.dict(os.environ, {_NO_LOAD_BALANCE_ENV: "1"})
     def test_no_load_balance_partition_uses_one_equal_chunk_per_rank(self):
         # The global buffer, unlike each document, only needs to be divisible by CP.
         cu_seqlens_padded = torch.tensor([0, 5, 12])
 
-        rank0 = get_thd_partitioned_indices(cu_seqlens_padded, 12, 4, 0)
-        rank3 = get_thd_partitioned_indices(cu_seqlens_padded, 12, 4, 3)
+        rank0 = get_thd_partitioned_indices(
+            cu_seqlens_padded,
+            12,
+            4,
+            0,
+            load_balancing_strategy=CPAttentionLoadBalancingStrategy.NO_LOAD_BALANCE,
+        )
+        rank3 = get_thd_partitioned_indices(
+            cu_seqlens_padded,
+            12,
+            4,
+            3,
+            load_balancing_strategy=CPAttentionLoadBalancingStrategy.NO_LOAD_BALANCE,
+        )
 
         self.assertTrue(torch.equal(rank0, torch.tensor([0, 1, 2])))
         self.assertTrue(torch.equal(rank3, torch.tensor([9, 10, 11])))
 
-    @patch.dict(os.environ, {_NO_LOAD_BALANCE_ENV: "0"})
     def test_default_partition_rejects_cpu_metadata(self):
         with self.assertRaisesRegex(AssertionError, "requires CUDA cu_seqlens"):
             get_thd_partitioned_indices(torch.tensor([0, 8]), 8, 2, 0)
 
     @unittest.skipUnless(torch.cuda.is_available() and tex is not None, "CUDA extension required")
-    @patch.dict(os.environ, {_NO_LOAD_BALANCE_ENV: "0"})
     def test_default_partition_accepts_cpu_metadata_with_cuda_target(self):
         indices = get_thd_partitioned_indices(torch.tensor([0, 8, 16]), 16, 2, 0, device="cuda")
 
@@ -69,13 +75,22 @@ class TestTHDPartitioning(unittest.TestCase):
         self.assertTrue(torch.equal(q_cu_padded[0], torch.tensor([0, 2, 6], dtype=torch.int32)))
         self.assertTrue(torch.equal(kv_cu[0], torch.tensor([0, 6, 10], dtype=torch.int32)))
 
-    @patch.dict(os.environ, {_NO_LOAD_BALANCE_ENV: "0"})
     def test_no_load_balance_restore_uses_captured_mode(self):
         tokens = torch.arange(8)
         cu_seqlens_padded = torch.tensor([0, 8], dtype=torch.int32)
 
-        restored = restore_thd_gathered_kv(tokens, cu_seqlens_padded, 2, True)
-        unrestored = unrestore_thd_gathered_kv(tokens, cu_seqlens_padded, 2, True)
+        restored = restore_thd_gathered_kv(
+            tokens,
+            cu_seqlens_padded,
+            2,
+            CPAttentionLoadBalancingStrategy.NO_LOAD_BALANCE,
+        )
+        unrestored = unrestore_thd_gathered_kv(
+            tokens,
+            cu_seqlens_padded,
+            2,
+            CPAttentionLoadBalancingStrategy.NO_LOAD_BALANCE,
+        )
 
         self.assertIs(restored, tokens)
         self.assertIs(unrestored, tokens)
@@ -583,8 +598,6 @@ class TestContextParallelUtils(unittest.TestCase):
 
     def setUp(self):
         """Set up mock distributed environment."""
-        self.env_patch = patch.dict(os.environ, {_NO_LOAD_BALANCE_ENV: "0"})
-        self.env_patch.start()
         # Mock torch.distributed functions
         self.original_get_world_size = torch.distributed.get_world_size
         self.original_get_rank = torch.distributed.get_rank
@@ -593,7 +606,6 @@ class TestContextParallelUtils(unittest.TestCase):
         """Restore original torch.distributed functions."""
         torch.distributed.get_world_size = self.original_get_world_size
         torch.distributed.get_rank = self.original_get_rank
-        self.env_patch.stop()
 
     def _mock_distributed_env(self, cp_size, cp_rank):
         """Mock the distributed environment for testing."""
@@ -649,7 +661,26 @@ class TestContextParallelUtils(unittest.TestCase):
         self.assertTrue(torch.equal(labels_r1, expected_labels_r1))
         self.assertTrue(torch.equal(pos_ids_r1, expected_pos_ids_r1))
 
-    @patch.dict(os.environ, {_NO_LOAD_BALANCE_ENV: "1"})
+    @unittest.skipUnless(torch.cuda.is_available() and tex is not None, "CUDA extension required")
+    def test_cp_rank_slicing_dual_chunk_swap_on_cuda(self):
+        """CUDA inputs use the native DualChunkSwap partition indices."""
+        input_ids = torch.arange(16, device="cuda").unsqueeze(0)
+        labels = input_ids + 100
+        position_ids = torch.arange(16, device="cuda")
+        cu_seqlens = torch.tensor([0, 8, 16])
+
+        self._mock_distributed_env(cp_size=2, cp_rank=0)
+        input_ids_rank, labels_rank, position_ids_rank = get_batch_on_this_cp_rank(
+            cu_seqlens, input_ids, labels, position_ids
+        )
+
+        expected_indices = torch.tensor([0, 1, 6, 7, 8, 9, 14, 15], device="cuda")
+        self.assertTrue(torch.equal(input_ids_rank, input_ids.index_select(1, expected_indices)))
+        self.assertTrue(torch.equal(labels_rank, labels.index_select(1, expected_indices)))
+        self.assertTrue(
+            torch.equal(position_ids_rank, position_ids.index_select(0, expected_indices))
+        )
+
     def test_cp_rank_slicing_no_load_balance_on_cpu(self):
         """The experimental policy assigns one contiguous CPU chunk per rank."""
         input_ids = torch.arange(12).unsqueeze(0)
@@ -659,7 +690,11 @@ class TestContextParallelUtils(unittest.TestCase):
 
         self._mock_distributed_env(cp_size=4, cp_rank=2)
         input_ids_rank, labels_rank, position_ids_rank = get_batch_on_this_cp_rank(
-            cu_seqlens, input_ids, labels, position_ids
+            cu_seqlens,
+            input_ids,
+            labels,
+            position_ids,
+            load_balancing_strategy=CPAttentionLoadBalancingStrategy.NO_LOAD_BALANCE,
         )
 
         self.assertTrue(torch.equal(input_ids_rank, torch.tensor([[6, 7, 8]])))

@@ -25,7 +25,10 @@ from transformer_engine.pytorch.tensor.storage.float8_tensor_storage import Floa
 from transformer_engine.pytorch.quantized_tensor import QuantizedTensorStorage
 from transformer_engine.pytorch.jit import jit_fuser
 from transformer_engine.pytorch.graph import is_graph_capturing
-from transformer_engine.pytorch.constants import dist_group_type
+from transformer_engine.pytorch.constants import (
+    CPAttentionLoadBalancingStrategy,
+    dist_group_type,
+)
 from transformer_engine.pytorch.distributed import (
     get_distributed_world_size,
     get_distributed_rank,
@@ -56,14 +59,6 @@ _softmax_offset_chunk_ids_cache = {}
 
 # Float8CurrentScaling: fused_attn_bwd takes O in FP8 by default, this flag allows it in F16
 _dpa_fp8_cs_o_in_f16 = os.getenv("NVTE_DPA_FP8CS_O_in_F16", "1") == "1"
-_NO_LOAD_BALANCE_ENV = "NVTE_EXPERIMENTAL_CP_AG_THD_NO_LOAD_BALANCE"
-
-
-def _use_no_load_balance_thd():
-    """Return whether experimental no-load-balance THD all-gather is enabled."""
-    # Read dynamically so input partitioning and attention agree when launchers or tests set
-    # the experimental flag after importing Transformer Engine.
-    return os.getenv(_NO_LOAD_BALANCE_ENV, "0") == "1"
 
 
 def _reject_custom_recipe_under_cp(fp8, fp8_recipe):
@@ -288,10 +283,14 @@ def get_thd_partitioned_indices(
     cp_size,
     cp_rank,
     device=None,
+    load_balancing_strategy=CPAttentionLoadBalancingStrategy.DUAL_CHUNK_SWAP,
 ):
     """Return THD token indices using the selected CP partition contract."""
-    no_load_balance = _use_no_load_balance_thd()
-    if no_load_balance:
+    assert isinstance(load_balancing_strategy, CPAttentionLoadBalancingStrategy), (
+        f"Expected {CPAttentionLoadBalancingStrategy.__name__}, "
+        f"got {type(load_balancing_strategy).__name__}."
+    )
+    if load_balancing_strategy is CPAttentionLoadBalancingStrategy.NO_LOAD_BALANCE:
         validate_no_load_balance_thd_metadata(
             cu_seqlens_padded,
             cu_seqlens_padded,
@@ -494,18 +493,18 @@ def thd_cp_rank_order_to_sequence_order(x, cu_seqlens, cp_size, seq_dim=0):
     return tex.thd_cp_rank_order_to_sequence_order(x, cu_seqlens, cp_size, x.shape[seq_dim])
 
 
-def restore_thd_gathered_kv(x, cu_seqlens_padded, cp_size, no_load_balance):
-    """Restore gathered THD tokens using the mode captured by attention forward."""
-    if no_load_balance:
+def restore_thd_gathered_kv(x, cu_seqlens_padded, cp_size, load_balancing_strategy):
+    """Restore gathered THD tokens using the strategy captured by attention forward."""
+    if load_balancing_strategy is CPAttentionLoadBalancingStrategy.NO_LOAD_BALANCE:
         # Rank r owns physical chunk r, so rank-major all-gather is already in sequence order.
         return x
     cu_seqlens_padded = _get_thd_partition_cu_seqlens(cu_seqlens_padded, x.device)
     return thd_cp_rank_order_to_sequence_order(x, cu_seqlens_padded, cp_size)
 
 
-def unrestore_thd_gathered_kv(x, cu_seqlens_padded, cp_size, no_load_balance):
-    """Arrange THD tokens for reduce-scatter using the captured attention mode."""
-    if no_load_balance:
+def unrestore_thd_gathered_kv(x, cu_seqlens_padded, cp_size, load_balancing_strategy):
+    """Arrange THD tokens for reduce-scatter using the captured attention strategy."""
+    if load_balancing_strategy is CPAttentionLoadBalancingStrategy.NO_LOAD_BALANCE:
         # Physical sequence order is also the rank-major reduce-scatter order for this policy.
         return x
     cu_seqlens_padded = _get_thd_partition_cu_seqlens(cu_seqlens_padded, x.device)
@@ -3184,7 +3183,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         fp8_meta,
         quantizers,
         fp8_output,
-        no_load_balance,
+        load_balancing_strategy,
     ):
         # pylint: disable=missing-function-docstring
         nvtx_range_push("transformer_engine.AttnFuncWithCPAndKVAllGather.forward")
@@ -3223,7 +3222,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
             f" >= 2.3. Found {use_fused_attention=}, {use_flash_attn_3=}, "
             f"and {fa_utils.v2_3_plus=}."
         )
-        if not no_load_balance:
+        if load_balancing_strategy is CPAttentionLoadBalancingStrategy.DUAL_CHUNK_SWAP:
             assert q.shape[seq_dim_qkv] % 2 == 0 and k.shape[seq_dim_qkv] % 2 == 0, (
                 "cp_comm_type='all_gather' requires seq_len % 2 == 0 for Q, K, V. Found "
                 f"seq_len_q = {q.shape[seq_dim_qkv]}, seq_len_kv = {k.shape[seq_dim_qkv]}."
@@ -3274,14 +3273,17 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
 
         # Per-document DCS divides every sequence into 2*CP chunks. No-load-balance
         # instead bounds Q by one global chunk and keeps full-document KV bounds.
-        if no_load_balance:
+        if load_balancing_strategy is CPAttentionLoadBalancingStrategy.NO_LOAD_BALANCE:
             max_seqlen_q = min(max_seqlen_q, q.shape[0])
         else:
             max_seqlen_q = max_seqlen_q // (2 * cp_size)
             max_seqlen_kv = max_seqlen_kv // (2 * cp_size)
         if use_fused_attention and qkv_format != "thd":
             cu_seqlens_q = cu_seqlens_q // (2 * cp_size)
-        if qkv_format == "thd" and not no_load_balance:
+        if (
+            qkv_format == "thd"
+            and load_balancing_strategy is CPAttentionLoadBalancingStrategy.DUAL_CHUNK_SWAP
+        ):
             cu_seqlens_q_padded = cu_seqlens_q_padded // (2 * cp_size)
         elif qkv_format != "thd":
             cu_seqlens_q_padded = None
@@ -3351,8 +3353,12 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
 
         if qkv_format == "thd":
             # [cp*t, h, d] -> reorder to sequence order -> [t_full, h, d]
-            k_ag = restore_thd_gathered_kv(k_ag, cu_seqlens_kv_padded, cp_size, no_load_balance)
-            v_ag = restore_thd_gathered_kv(v_ag, cu_seqlens_kv_padded, cp_size, no_load_balance)
+            k_ag = restore_thd_gathered_kv(
+                k_ag, cu_seqlens_kv_padded, cp_size, load_balancing_strategy
+            )
+            v_ag = restore_thd_gathered_kv(
+                v_ag, cu_seqlens_kv_padded, cp_size, load_balancing_strategy
+            )
         else:
             # [cp, s, b, h, d] -> [cp*2, s//2, b, h, d]
             k_ag = k_ag.view(2 * cp_size, k.shape[0] // 2, *k.shape[1:])
@@ -3363,7 +3369,8 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
             # [cp*2, s//2, b, h, d] -> [cp*s, b, h, d]
             k_ag = k_ag.view(-1, *k.shape[1:])
             v_ag = v_ag.view(-1, *v.shape[1:])
-            # Preserve overlap by letting cp_stream proceed before output initialization.
+            # Non-THD cp_stream inputs are ready after K/V reorder, so wait here to
+            # preserve overlap with output initialization below.
             cp_stream.wait_stream(torch.cuda.current_stream())
         # THD all_gather only reaches this path for f16/bf16 attention today.
         # q: [b, 2, s//2, h, d] or [2, s//2, b, h, d]
@@ -3379,7 +3386,11 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         # create two streams to resolve wave quantization issue of Flash Attn in each step
         flash_attn_streams = [torch.cuda.current_stream(), cp_stream]
         # prepare per-step tensors
-        local_seq_chunk_ids = [rank] if no_load_balance else [rank, 2 * cp_size - rank - 1]
+        local_seq_chunk_ids = (
+            [rank]
+            if load_balancing_strategy is CPAttentionLoadBalancingStrategy.NO_LOAD_BALANCE
+            else [rank, 2 * cp_size - rank - 1]
+        )
         kv_seq_range_per_step = [None, None]
         window_size_per_step = [None, None]
         cu_seqlens_kv_per_step = [None, None]
@@ -3399,7 +3410,10 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         thd_cu_seqlens_kv_per_step = [None, None]
 
         # Pre-compute THD-specific per-step cu_seqlens
-        if qkv_format == "thd" and no_load_balance:
+        if (
+            qkv_format == "thd"
+            and load_balancing_strategy is CPAttentionLoadBalancingStrategy.NO_LOAD_BALANCE
+        ):
             total_tokens_q = q.shape[0] * cp_size
             (
                 thd_cu_seqlens_q_per_step,
@@ -3484,7 +3498,8 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                 thd_cu_seqlens_kv_per_step[1][1:] = visible_actual[1].cumsum(0)
 
         if qkv_format == "thd":
-            # THD step 1 also consumes metadata produced on the current stream.
+            # Delay the THD wait so one dependency covers both restored K/V and the
+            # per-step metadata produced above on the current stream.
             cp_stream.wait_stream(torch.cuda.current_stream())
 
         for i in range(len(local_seq_chunk_ids) + 1):
@@ -3546,7 +3561,10 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                         q_part = q
                         k_part = k_ag
                         v_part = v_ag
-                        if no_load_balance:
+                        if (
+                            load_balancing_strategy
+                            is CPAttentionLoadBalancingStrategy.NO_LOAD_BALANCE
+                        ):
                             window_size_per_step[i] = (-1, 0)
                             max_seqlen_kv_ = max_seqlen_kv
                         else:
@@ -3803,7 +3821,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         ctx.use_flash_attn_3 = use_flash_attn_3
         ctx.pad_between_seqs = pad_between_seqs
         ctx.window_size = window_size
-        ctx.no_load_balance = no_load_balance
+        ctx.load_balancing_strategy = load_balancing_strategy
         if qkv_format == "thd":
             ctx.max_seqlen_kv = max_seqlen_kv
             ctx.cu_seqlens_kv_padded = cu_seqlens_kv_padded
@@ -3948,8 +3966,12 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
             cu_seqlens_kv_padded = ctx.cu_seqlens_kv_padded
             thd_cu_seqlens_q_per_step = ctx.thd_cu_seqlens_q_per_step
             # [cp*t, h, d] -> reorder to sequence order
-            k_ag = restore_thd_gathered_kv(k_ag, cu_seqlens_kv_padded, cp_size, ctx.no_load_balance)
-            v_ag = restore_thd_gathered_kv(v_ag, cu_seqlens_kv_padded, cp_size, ctx.no_load_balance)
+            k_ag = restore_thd_gathered_kv(
+                k_ag, cu_seqlens_kv_padded, cp_size, ctx.load_balancing_strategy
+            )
+            v_ag = restore_thd_gathered_kv(
+                v_ag, cu_seqlens_kv_padded, cp_size, ctx.load_balancing_strategy
+            )
 
             thd_cu_seqlens_q_padded_per_step = ctx.thd_cu_seqlens_q_padded_per_step
         else:
@@ -3997,7 +4019,11 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                 if fa_utils.v2_6_0_plus:
                     fa_backward_kwargs["softcap"] = 0.0
 
-        local_seq_chunk_ids = [rank] if ctx.no_load_balance else [rank, 2 * cp_size - rank - 1]
+        local_seq_chunk_ids = (
+            [rank]
+            if ctx.load_balancing_strategy is CPAttentionLoadBalancingStrategy.NO_LOAD_BALANCE
+            else [rank, 2 * cp_size - rank - 1]
+        )
         for i in range(len(local_seq_chunk_ids) + 1):
             if i < len(local_seq_chunk_ids):
                 # FA3 uses internal per-call workspace. Consecutive AG per-step
@@ -4012,7 +4038,10 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                         q_part = q
                         k_part = k_ag
                         v_part = v_ag
-                        if ctx.no_load_balance:
+                        if (
+                            ctx.load_balancing_strategy
+                            is CPAttentionLoadBalancingStrategy.NO_LOAD_BALANCE
+                        ):
                             max_seqlen_kv = ctx.max_seqlen_kv
                         else:
                             kv_range, _ = get_kv_seq_info_after_all_gather(
@@ -4259,8 +4288,12 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         if ctx.qkv_format == "thd":
             # Reorder dK/dV from sequence order back to dual-chunk CP rank order,
             # then reduce-scatter across CP ranks.
-            dk = unrestore_thd_gathered_kv(dk, cu_seqlens_kv_padded, cp_size, ctx.no_load_balance)
-            dv = unrestore_thd_gathered_kv(dv, cu_seqlens_kv_padded, cp_size, ctx.no_load_balance)
+            dk = unrestore_thd_gathered_kv(
+                dk, cu_seqlens_kv_padded, cp_size, ctx.load_balancing_strategy
+            )
+            dv = unrestore_thd_gathered_kv(
+                dv, cu_seqlens_kv_padded, cp_size, ctx.load_balancing_strategy
+            )
             dk, _ = reduce_scatter_along_first_dim(dk, ctx.cp_group)
             dv, _ = reduce_scatter_along_first_dim(dv, ctx.cp_group)
             # dQ is already [t_rank, h, d], no reshape needed
@@ -5113,6 +5146,7 @@ def attn_forward_func_with_cp(
     fp8_output=False,
     layer_number=1,
     return_max_logit=False,
+    load_balancing_strategy=CPAttentionLoadBalancingStrategy.DUAL_CHUNK_SWAP,
 ) -> torch.Tensor:
     """
     Attention implementation with context parallelism (CP). CP partitions tensors along the sequence
@@ -5122,13 +5156,13 @@ def attn_forward_func_with_cp(
     every sequence length to be, or be padded to be, divisible by (cp_size * 2), and
     tokens must be re-ordered before entering this function.
 
-    Experimental environment flag
-    ``NVTE_EXPERIMENTAL_CP_AG_THD_NO_LOAD_BALANCE=1`` instead assigns one
-    contiguous physical-buffer chunk to each rank and uses one attention step per rank.
-    Logical sequences remain isolated by ``cu_seqlens``. This mode requires THD,
-    all-gather, full causal self-attention, and FusedAttention, or FlashAttention 3
-    without padding. Input producers must use the same flag when partitioning inputs
-    with :func:`get_batch_on_this_cp_rank` or :func:`get_thd_partitioned_indices`.
+    Experimental strategy ``CPAttentionLoadBalancingStrategy.NO_LOAD_BALANCE`` instead
+    assigns one contiguous physical-buffer chunk to each rank and uses one attention
+    step per rank. Logical sequences remain isolated by ``cu_seqlens``. This strategy
+    requires THD, all-gather, causal self-attention without a sliding window, and
+    FusedAttention, or FlashAttention 3 with ``pad_between_seqs=False``. Input producers
+    must use the same strategy when partitioning inputs with
+    :func:`get_batch_on_this_cp_rank` or :func:`get_thd_partitioned_indices`.
 
     For qkv_format = {'bshd', 'sbhd'}, the token re-ordering is illustrated as below, for an example
     use case of s = 12, attn_mask_type = 'causal', and cp_size = 2. seq_pos indicates each token's position
@@ -5206,8 +5240,12 @@ def attn_forward_func_with_cp(
         "sbhd",
         "thd",
     ], f"Context parallelism does not support {qkv_format=}!"
-    no_load_balance = qkv_format == "thd" and _use_no_load_balance_thd()
-    if no_load_balance:
+    assert isinstance(load_balancing_strategy, CPAttentionLoadBalancingStrategy), (
+        f"Expected {CPAttentionLoadBalancingStrategy.__name__}, "
+        f"got {type(load_balancing_strategy).__name__}."
+    )
+    if load_balancing_strategy is CPAttentionLoadBalancingStrategy.NO_LOAD_BALANCE:
+        assert qkv_format == "thd", "No-load-balance CP partitioning requires qkv_format='thd'."
         assert (
             cp_comm_type == "all_gather"
         ), "No-load-balance THD partitioning requires cp_comm_type='all_gather'."
@@ -5220,7 +5258,10 @@ def attn_forward_func_with_cp(
         assert "causal" in attn_mask_type and window_size == (
             -1,
             0,
-        ), "No-load-balance THD partitioning currently supports full causal attention only."
+        ), (
+            "No-load-balance THD partitioning requires causal attention without a sliding "
+            "window (window_size=(-1, 0))."
+        )
         assert not fp8, "No-load-balance THD partitioning does not support FP8 yet."
         assert (
             not is_graph_capturing()
@@ -5309,7 +5350,7 @@ def attn_forward_func_with_cp(
             fp8_meta,
             quantizers,
             fp8_output,
-            no_load_balance,
+            load_balancing_strategy,
         ]
         out = AttnFuncWithCPAndKVAllGather.apply(*args)
     elif cp_comm_type == "a2a":
@@ -5453,6 +5494,7 @@ def get_batch_on_this_cp_rank(
     position_ids_padded: torch.Tensor,
     cp_group: torch.distributed.ProcessGroup = None,
     qvk_format: str = "thd",
+    load_balancing_strategy=CPAttentionLoadBalancingStrategy.DUAL_CHUNK_SWAP,
 ):
     """Slice batch input along sequence dimension into multiple chunks for THD format.
 
@@ -5461,21 +5503,24 @@ def get_batch_on_this_cp_rank(
 
     Which are parallelized across GPUs in a context parallel group.
     This version works with variable-length sequences using cumulative sequence lengths.
-    ``NVTE_EXPERIMENTAL_CP_AG_THD_NO_LOAD_BALANCE=1`` assigns one contiguous
+    ``CPAttentionLoadBalancingStrategy.NO_LOAD_BALANCE`` assigns one contiguous
     physical-buffer chunk per rank. By default, each padded sequence is chunked independently.
     """
     if qvk_format not in ["thd", "bshd", "sbhd"]:
         raise ValueError(f"Unsupported qvk_format: {qvk_format}!")
+    assert isinstance(load_balancing_strategy, CPAttentionLoadBalancingStrategy), (
+        f"Expected {CPAttentionLoadBalancingStrategy.__name__}, "
+        f"got {type(load_balancing_strategy).__name__}."
+    )
     if qvk_format == "thd":
         # Get context parallel size and rank
         cp_size = torch.distributed.get_world_size(group=cp_group)
         if cp_size > 1:
             cp_rank = torch.distributed.get_rank(group=cp_group)
-            no_load_balance = _use_no_load_balance_thd()
             seq_len_val = cu_seqlens_padded[-1].item()
             rank_indices_by_device = {}
 
-            if no_load_balance:
+            if load_balancing_strategy is CPAttentionLoadBalancingStrategy.NO_LOAD_BALANCE:
 
                 def build_rank_indices(device):
                     return get_thd_partitioned_indices(
@@ -5484,6 +5529,7 @@ def get_batch_on_this_cp_rank(
                         cp_size,
                         cp_rank,
                         device,
+                        load_balancing_strategy,
                     )
 
             else:
@@ -5491,6 +5537,15 @@ def get_batch_on_this_cp_rank(
                 slice_sizes = (cu_seqlens_padded[1:] - cu_seqlens_padded[:-1]) // total_slices
 
                 def build_rank_indices(device):
+                    if device.type == "cuda":
+                        return get_thd_partitioned_indices(
+                            cu_seqlens_padded,
+                            seq_len_val,
+                            cp_size,
+                            cp_rank,
+                            device,
+                            load_balancing_strategy,
+                        )
                     # Preserve the CPU-capable per-document dataloader path.
                     rank_slices = []
                     for slice_size, seq_start in zip(slice_sizes, cu_seqlens_padded[:-1]):
