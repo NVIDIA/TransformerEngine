@@ -48,16 +48,6 @@ using F16FwdGraphAndTensors =
                std::shared_ptr<fe::graph::Tensor_attributes>,   // dropout_seed
                std::shared_ptr<fe::graph::Tensor_attributes>>;  // dropout_offset
 
-// Constructs the forward graph for one cache key, and only constructs it: whether cuDNN will run
-// it is settled by the caller, in cache_graph(), which is also where the plan build eventually
-// happens. Hence no cuDNN handle here -- describing a graph needs none, and every call that does
-// need one now sits on the other side of that boundary.
-//
-// Everything the graph's shape and topology depends on comes from `cfg`, so the build has one
-// source of truth and cannot drift from the caller that will bind pointers to it. The two
-// dimensions that differ between the passes -- the batch size, and the width ragged offsets are
-// written in -- are read from the config's forward halves, the same ones the code binding pointers
-// to this graph reads.
 static F16FwdGraphAndTensors create_graph_f16_fwd(const FusedAttnConfig &cfg) {
   const int64_t b = static_cast<int64_t>(cfg.graph_batch_size_fwd);
   const int64_t s_q = static_cast<int64_t>(cfg.graph_max_seqlen_q);
@@ -371,21 +361,14 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
     cudaStream_t stream, cudnnHandle_t handle) {
   using namespace transformer_engine;
 
-  // Read from the same halves of the config the graph was built from, so that the dimensions below
-  // and the ones the graph was built at cannot be decided differently. Asserted derived here
-  // because these are the first derived fields this path reads, ahead of the get_graph() that
-  // asserts it for the build.
   cfg.check_derived();
   const int64_t b = static_cast<int64_t>(cfg.graph_batch_size_fwd);
   const DType ragged_offset_type = cfg.ragged_offset_type_fwd;
-  // The true batch size, which the cu_seqlens buffers are sized [actual_b + 1] by whatever the
-  // bucketing above did to `b`.
   const int64_t actual_b = static_cast<int64_t>(cfg.batch_size);
   const bool use_ragged_stats = cfg.uses_ragged_stats;
   const RaggedOffsetMultipliers offset_mults = cfg.ragged_offset_mults;
 
   const bool return_max_logit = cfg.return_max_logit;
-  // Not const: bound into the variant pack by address as a pass-by-value graph input.
   float scaling_factor = cfg.attn_scale;
   const bool is_bias = cfg.is_bias;
   const bool is_padding = cfg.is_padding;
@@ -575,8 +558,6 @@ using F16BwdGraphAndTensors =
                std::shared_ptr<fe::graph::Tensor_attributes>,   // dropout_seed
                std::shared_ptr<fe::graph::Tensor_attributes>>;  // dropout_offset
 
-// The backward counterpart of create_graph_f16_fwd; see there for why it constructs the graph and
-// nothing else, and why the two direction-dependent dimensions come from the config in pairs.
 static F16BwdGraphAndTensors create_graph_f16_bwd(const FusedAttnConfig &cfg) {
   const int64_t b = static_cast<int64_t>(cfg.graph_batch_size_bwd);
   const int64_t s_q = static_cast<int64_t>(cfg.graph_max_seqlen_q);
@@ -849,18 +830,12 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
     cudnnHandle_t handle) {
   using namespace transformer_engine;
 
-  // Read from the same halves of the config the graph was built from, so that the dimensions below
-  // and the ones the graph was built at cannot be decided differently. Asserted derived here
-  // because these are the first derived fields this path reads, ahead of the get_graph() that
-  // asserts it for the build.
   cfg.check_derived();
   const int64_t b = static_cast<int64_t>(cfg.graph_batch_size_bwd);
   const DType ragged_offset_type = cfg.ragged_offset_type_bwd;
-  // The true batch size, which the cu_seqlens buffers are sized [actual_b + 1] by.
   const int64_t actual_b = static_cast<int64_t>(cfg.batch_size);
   const bool use_ragged_stats = cfg.uses_ragged_stats;
 
-  // Not const: bound into the variant pack by address as a pass-by-value graph input.
   float scaling_factor = cfg.attn_scale;
   const bool is_bias = cfg.is_bias;
   const bool is_padding = cfg.is_padding;
@@ -1044,8 +1019,6 @@ void fused_attn_arbitrary_seqlen_fwd(const FusedAttnConfig &cfg, const Tensor *i
 
   size_t i = 0;
   if (Aux_CTX_Tensors->size == 0) {
-    // These have to match the shape the forward graph declares for Stats and Max, which is why
-    // both read the same derived field rather than recomputing the condition.
     const bool use_ragged_stats = cfg.uses_ragged_stats;
 
     Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
@@ -1209,12 +1182,7 @@ void fused_attn_arbitrary_seqlen_bwd(const FusedAttnConfig &cfg, const Tensor *i
   }
 }
 
-// The one entry point into this translation unit's support probes; see fused_attn::support_verdict,
-// which is all it does. It exists because create_graph_f16_* is file-local, so this is the only
-// place that can name it, and because the selector calls it from another translation unit.
-//
-// Turning `pass` into the template argument is the whole of the body: the direction has to be a
-// compile-time constant to pick a builder, and this is where the two meet.
+// Check whether cuDNN can support a given config, per forward/backward pass.
 std::string support_verdict_f16(const FusedAttnConfig &cfg, Pass pass, cudnnHandle_t handle) {
   if (pass == Pass::Fwd) {
     return fused_attn::support_verdict<Backend::F16, Pass::Fwd, create_graph_f16_fwd>(cfg, handle);

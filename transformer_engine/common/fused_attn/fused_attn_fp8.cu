@@ -20,7 +20,6 @@ namespace fused_attn {
 using namespace transformer_engine;
 namespace fe = cudnn_frontend;
 
-// fused attention FWD FP8 with FE 1.0+
 using Fp8FwdGraphAndTensors =
     std::tuple<std::shared_ptr<fe::graph::Graph>,
                std::shared_ptr<fe::graph::Tensor_attributes>,   // Q
@@ -44,43 +43,6 @@ using Fp8FwdGraphAndTensors =
                std::shared_ptr<fe::graph::Tensor_attributes>,   // dropout_seed
                std::shared_ptr<fe::graph::Tensor_attributes>>;  // dropout_offset
 
-// The three recipes these graphs are written for, read from cfg at each of the four sites that
-// build or bind one:
-//
-//   is_mxfp8                         = scaling_mode is MXFP8
-//   is_tensor_scaling                = scaling_mode is DELAYED_TENSOR_SCALING
-//   is_delayed_scaling_fwd  / _bwd   = is_tensor_scaling && O / dQKV is FP8
-//   is_current_scaling_fwd  / _bwd   = is_tensor_scaling && O / dQKV is F16
-//   is_mxfp8_fwd            / _bwd   = is_mxfp8          && O / dQKV is F16
-//
-// so at most one of the three holds for a pass, no combination of the booleans being able to say
-// two things at once, and is_tensor_scaling is the delayed/current pair together -- which is what
-// most of the sites below want, since a per-tensor scale is a per-tensor scale whichever recipe
-// put it there.
-//
-// Each flag pairs a recipe with an output dtype it can write, so an output none of them can write
-// leaves all three false rather than defaulting to one. That is the form the check takes in
-// nvte_get_fused_attn_backend_v2, which refuses such a config before any graph here is built --
-// which is in turn why the sites below can treat the three as a partition.
-//
-// The split is per pass because a forward graph writes O and a backward one dQKV, and it is drawn
-// on the output dtype because NVTEScalingMode has no current-scaling enumerator: both
-// tensor-scaling recipes arrive as DELAYED_TENSOR_SCALING, and what separates them is whether the
-// scale is known before the graph is built. See nvte_get_fused_attn_backend_v2 for the rest of
-// what these graphs cannot represent, and config_and_params.h for the fields.
-//
-// Unlike the F16 path there is no bucketing to do, because FP8 has no ragged/THD support: the
-// graph's shapes are exactly the config's.
-
-// Constructs the forward FP8 graph for one cache key, and only constructs it: whether cuDNN will
-// run it is settled by the caller, in cache_graph(), which is also where the plan build eventually
-// happens. Hence no cuDNN handle here -- describing a graph needs none, and every call that does
-// need one now sits on the other side of that boundary.
-//
-// Everything the graph's shape and topology depends on comes from `cfg`, so the build has one
-// source of truth and cannot drift from the caller that will bind pointers to it -- including the
-// forward half of the pass-indexed fields, read here the same way the code binding pointers to
-// this graph reads it.
 static Fp8FwdGraphAndTensors create_graph_fp8_fwd(const FusedAttnConfig& cfg) {
   const auto cudnn_runtime_version = cudnnGetVersion();
   const cudnn_frontend::DataType_t qkv_tensor_type =
@@ -365,18 +327,13 @@ void fused_attn_fp8_fwd_impl(const FusedAttnConfig& cfg, void* devPtrQ, void* de
                              cudaStream_t stream, cudnnHandle_t handle) {
   using namespace transformer_engine;
 
-  // Asserted derived here because the reads below are the first derived fields this path touches,
-  // ahead of the get_graph() that asserts it for the build.
   cfg.check_derived();
 
-  // Read from the same fields the graph was built from, so that the tensors bound below and the
-  // ones the graph was built with cannot be decided differently.
   const bool is_tensor_scaling = cfg.is_tensor_scaling;
   const bool is_delayed_scaling = cfg.is_delayed_scaling_fwd;
   const bool use_cu_seqlens_directly = cfg.fp8_uses_cu_seqlens_directly;
 
   const int64_t b = static_cast<int64_t>(cfg.batch_size);
-  // Not const: bound into the variant pack by address as a pass-by-value graph input.
   float scaling_factor = cfg.attn_scale;
   const bool is_padding = cfg.is_padding;
   const bool is_dropout = cfg.is_dropout;
@@ -467,7 +424,6 @@ void fused_attn_fp8_fwd_impl(const FusedAttnConfig& cfg, void* devPtrQ, void* de
   }
 }
 
-// fused attention BWD FP8 with FE 1.0+
 using Fp8BwdGraphAndTensors =
     std::tuple<std::shared_ptr<fe::graph::Graph>,
                std::shared_ptr<fe::graph::Tensor_attributes>,   // Q
@@ -512,14 +468,6 @@ using Fp8BwdGraphAndTensors =
                std::shared_ptr<fe::graph::Tensor_attributes>,   // dropout_seed
                std::shared_ptr<fe::graph::Tensor_attributes>>;  // dropout_offset
 
-// Builds the backward FP8 graph for one cache key, up to check_support() but not
-// graph.build_plans(); see CacheEntry for why the plan build is left to whoever runs the graph.
-//
-// Everything the graph's shape and topology depends on is re-derived from `cfg` here, so the
-// build has one source of truth for them. Unlike the F16 path, FP8 has no ragged/THD support,
-// so the shapes are exactly the config's and need no bucketing from the caller.
-// The backward counterpart of create_graph_fp8_fwd; see there for why it constructs the graph
-// and nothing else.
 static Fp8BwdGraphAndTensors create_graph_fp8_bwd(const FusedAttnConfig& cfg) {
   const auto cudnn_runtime_version = cudnnGetVersion();
   const cudnn_frontend::DataType_t qkv_tensor_type =
@@ -558,8 +506,6 @@ static Fp8BwdGraphAndTensors create_graph_fp8_bwd(const FusedAttnConfig& cfg) {
   const bool is_tensor_scaling = cfg.is_tensor_scaling;
   const bool is_delayed_scaling = cfg.is_delayed_scaling_bwd;
   const bool is_current_scaling = cfg.is_current_scaling_bwd;
-  // Whether O arrived in F16 rather than FP8, which decides whether this graph has to descale it on
-  // the way in. Read off O, unlike the recipe above, because O is what the forward pass stored.
   const bool is_O_in_F16 = !cfg.is_o_in_fp8;
 
   auto mha_graph = std::make_shared<fe::graph::Graph>();
@@ -949,12 +895,8 @@ void fused_attn_fp8_bwd_impl(
     cudnnHandle_t handle) {
   using namespace transformer_engine;
 
-  // Asserted derived here because the reads below are the first derived fields this path touches,
-  // ahead of the get_graph() that asserts it for the build.
   cfg.check_derived();
 
-  // Read from the same fields the graph was built from, so that the tensors bound below and the
-  // ones the graph was built with cannot be decided differently.
   const bool is_mxfp8 = cfg.is_mxfp8;
   const bool is_tensor_scaling = cfg.is_tensor_scaling;
   const bool is_delayed_scaling = cfg.is_delayed_scaling_bwd;
@@ -962,7 +904,6 @@ void fused_attn_fp8_bwd_impl(
   const bool is_O_in_F16 = !cfg.is_o_in_fp8;
 
   const int64_t b = static_cast<int64_t>(cfg.batch_size);
-  // Not const: bound into the variant pack by address as a pass-by-value graph input.
   float scaling_factor = cfg.attn_scale;
   const bool is_padding = cfg.is_padding;
   const bool is_dropout = cfg.is_dropout;
@@ -1305,11 +1246,7 @@ void fused_attn_fp8_bwd(const FusedAttnConfig& cfg, const Tensor* input_Q, const
   }
 }
 
-// The FP8 counterpart of support_verdict_f16; see there for why the direction arrives at runtime.
-//
-// Only cuDNN's rules reach this. TE's own -- bias, ALiBi and the recipes these graphs are not
-// written for -- are stated in nvte_get_fused_attn_backend_v2 and answered before it ever gets
-// here, which is why no build on this path throws for a configuration it cannot serve.
+// Check whether cuDNN can support a given config, per forward/backward pass.
 std::string support_verdict_fp8(const FusedAttnConfig& cfg, Pass pass, cudnnHandle_t handle) {
   if (pass == Pass::Fwd) {
     return fused_attn::support_verdict<Backend::FP8, Pass::Fwd, create_graph_fp8_fwd>(cfg, handle);
