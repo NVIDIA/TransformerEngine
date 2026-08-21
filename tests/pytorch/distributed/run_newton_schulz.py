@@ -10,12 +10,13 @@ Launched via torchrun from test_newton_schulz.py.
 import argparse
 import itertools
 import os
+from typing import Optional
 
 import torch
 import torch.distributed as dist
 from torch.distributed.elastic.multiprocessing.errors import record
 
-from transformer_engine.pytorch.optimizers.newton_schulz import (
+from transformer_engine.pytorch.newton_schulz import (
     CusolverMpCtx,
     get_coefficients,
     newton_schulz,
@@ -108,7 +109,7 @@ def _run_case(
     num_iterations: int,
     coeff_type: str,
     api: str = "base",
-    partition_dim: int = 1,
+    partition_dim: Optional[int] = 1,
     tp_mode: str = "distributed",
 ) -> None:
     rank = ctx.rank
@@ -118,7 +119,12 @@ def _run_case(
     coefficients = get_coefficients(num_iterations, coeff_type)
     atol, rtol = _test_tolerances(dtype_name, check, world_size)
 
-    if api == "base" or partition_dim == 1:
+    if api == "tp" and partition_dim is None:
+        # Replicated inputs are sharded along the larger dimension for cuSolverMp.
+        assert max(m, n) % world_size == 0, (
+            f"Matrix dimension {max(m, n)} must be divisible by world_size {world_size}"
+        )
+    elif api == "base" or partition_dim == 1:
         # Ensure the distributed column dimension is divisible by world_size.
         assert (
             n % world_size == 0
@@ -128,8 +134,11 @@ def _run_case(
 
     A = _make_matrix(m, n, dtype, rank)
 
-    # Scatter columns for the base API. Scatter along partition_dim for the TP API.
-    if api == "tp" and partition_dim == 0:
+    # Replicate the full tensor or scatter it along the API's partition dimension.
+    if api == "tp" and partition_dim is None:
+        x_local = A.clone()
+        gather_dim = None
+    elif api == "tp" and partition_dim == 0:
         local_rows = m // world_size
         x_local = A[rank * local_rows : (rank + 1) * local_rows, :].contiguous().clone()
         gather_dim = 0
@@ -150,10 +159,13 @@ def _run_case(
     else:
         newton_schulz(x_local, ctx, num_iterations, coefficients=coefficients)
 
-    # Gather results
-    gathered = [torch.empty_like(x_local) for _ in range(world_size)]
-    dist.all_gather(gathered, x_local)
-    X = torch.cat(gathered, dim=gather_dim)
+    # Reconstruct the full result unless the TP API already returned a replicated tensor.
+    if gather_dim is None:
+        X = x_local
+    else:
+        gathered = [torch.empty_like(x_local) for _ in range(world_size)]
+        dist.all_gather(gathered, x_local)
+        X = torch.cat(gathered, dim=gather_dim)
 
     # Check: the resulting matrix should be orthogonal, or match a local reference.
     if check == "orthogonality":
@@ -241,6 +253,19 @@ def run_all_tests(ctx: CusolverMpCtx) -> None:
             partition_dim=partition_dim,
             tp_mode=tp_mode,
         )
+
+    if rank == 0:
+        print("Running TP API reference check with replicated input", flush=True)
+    _run_case(
+        ctx=ctx,
+        check="reference",
+        dtype_name="float32",
+        matrix_shape=_reference_shapes(world_size)[0],
+        num_iterations=5,
+        coeff_type="quintic",
+        api="tp",
+        partition_dim=None,
+    )
 
     if rank == 0:
         print("NUMERICAL CHECK PASSED", flush=True)
