@@ -476,12 +476,12 @@ class FusedAttnRunner:
         if self.attn_mask_type.is_bottom_right():
             if self.max_seqlen_q > self.max_seqlen_kv:
                 pytest.skip(
-                    f"BRCM requires cross attn type pattern, i.e.max_seqlen_kv >= max_seqlen_q"
+                    "BRCM requires cross attn type pattern, i.e.max_seqlen_kv >= max_seqlen_q"
                 )
             if self.attn_bias_type is not AttnBiasType.NO_BIAS:
-                pytest.skip(f"cuDNN does not support pre or post scale bias for BRCM")
+                pytest.skip("cuDNN does not support pre or post scale bias for BRCM")
             if self.dropout_prob != 0.0:
-                pytest.skip(f"cuDNN does not support non-zero dropoouts for BRCM")
+                pytest.skip("cuDNN does not support non-zero dropouts for BRCM")
 
         if self.qkv_layout.is_qkvpacked():
             if self.max_seqlen_q != self.max_seqlen_kv:
@@ -957,7 +957,7 @@ class FusedAttnRunner:
 
         customcall_args = [
             # Put test data onto each GPU for distributed.
-            # TODO(mgoldfarb-nvidia): We will need to add reordering for bias, mas and
+            # TODO(mgoldfarb-nvidia): We will need to add reordering for bias, mask and
             # THD params once we support those features on CP.
             jax.device_put(self.cp_reorder_fn(self.q), self.qkvo_sharding),
             jax.device_put(self.cp_reorder_fn(self.k), self.qkvo_sharding),
@@ -1089,7 +1089,7 @@ class FusedAttnRunner:
             self.dropout_rng,
         ]
         customcall_args = [
-            # TODO(mgoldfarb-nvidia): We will need to add reordering for bias, mas and
+            # TODO(mgoldfarb-nvidia): We will need to add reordering for bias, mask and
             # THD params once we support those features on CP.
             jax.device_put(self.cp_reorder_fn(self.q), self.qkvo_sharding),
             jax.device_put(self.cp_reorder_fn(self.k), self.qkvo_sharding),

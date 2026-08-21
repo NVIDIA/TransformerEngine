@@ -287,7 +287,9 @@ __global__ void __launch_bounds__(kThreadsPerBlock, 4) group_block_scaled_2d_tma
     const float epsilon, const bool pow_2_scales, const float* __restrict__ noop_ptr,
     float* __restrict__ dbias_workspace) {
 #if __CUDA_ARCH__ >= 900 && __CUDA_ARCH__ < 1000
-  if (noop_ptr != nullptr && noop_ptr[0] == 1.0f) return;
+  // Skipping is only safe without dbias: the grouped_reduce_dbias launch is unconditional, so an
+  // early return would leave it reducing a workspace this kernel never wrote.
+  if (dbias_workspace == nullptr && noop_ptr != nullptr && noop_ptr[0] == 1.0f) return;
 
   const size_t tile_x = blockIdx.x;
   const size_t tile_y_global = blockIdx.y;
@@ -574,7 +576,9 @@ __global__ void __launch_bounds__(kThreadsPerBlock) group_block_scaled_1d_tma_ke
     const size_t R_total, const float epsilon, const bool pow_2_scales,
     const float* __restrict__ noop_ptr, float* __restrict__ dbias_workspace) {
 #if __CUDA_ARCH__ >= 900 && __CUDA_ARCH__ < 1000
-  if (noop_ptr != nullptr && noop_ptr[0] == 1.0f) return;
+  // Skipping is only safe without dbias: the grouped_reduce_dbias launch is unconditional, so an
+  // early return would leave it reducing a workspace this kernel never wrote.
+  if (dbias_workspace == nullptr && noop_ptr != nullptr && noop_ptr[0] == 1.0f) return;
 
   const size_t tile_x = blockIdx.x;
   const size_t tile_y_global = blockIdx.y;

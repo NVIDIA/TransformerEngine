@@ -27,6 +27,18 @@ typedef enum {
   NVTE_ROUTING_MAP_FORMAT_BITMAP_U8 = 1,
 } NVTERoutingMapFormat;
 
+/*! \brief Quantile Balancing histogram implementation.
+ *
+ *  TWO_KERNEL   — router writes the Top-(k+1) cutoff and a second kernel accumulates
+ *                 the histogram from the saved raw sigmoid scores.
+ *  FUSED_ATOMIC — router writes the cutoff and directly accumulates the histogram with
+ *                 global atomics.
+ */
+typedef enum {
+  NVTE_QB_HISTOGRAM_TWO_KERNEL = 0,
+  NVTE_QB_HISTOGRAM_FUSED_ATOMIC = 1,
+} NVTEQBHistogramMode;
+
 /*! \brief Apply topk + softmax/sigmoid to the input tensor. Grouped topk is supported (deprecated).
  *
  *  \deprecated This function has been deprecated in favor of
@@ -92,6 +104,75 @@ void nvte_fused_topk_with_score_function_forward_with_indices(
     int num_groups, int group_topk, float scaling_factor, int score_function,
     const NVTETensor expert_bias, NVTETensor probs, NVTETensor topk_indices,
     NVTETensor intermediate_output, cudaStream_t stream);
+
+/*! \brief Kimi K3 Quantile Balancing fused-router forward.
+ *
+ *  The router selects Top-(k+1) from biased sigmoid scores, writes only the first
+ *  k routes, and writes the final selected value as the per-token cutoff in both
+ *  histogram modes. In FUSED_ATOMIC mode it also directly accumulates the QB histogram.
+ *  bin_bounds must contain finite FP32 values [lower, upper] with lower < upper. This entry point
+ *  validates the device-resident values and synchronizes stream before launching the router.
+ */
+void nvte_fused_topk_with_score_function_forward_qb_v2(
+    const NVTETensor logits, int num_tokens, int num_experts, int topk, float scaling_factor,
+    const NVTETensor expert_bias, NVTETensor probs, NVTETensor routing_map,
+    NVTERoutingMapFormat routing_map_format, NVTETensor intermediate_output, NVTETensor cutoff,
+    NVTETensor histogram, NVTETensor bin_bounds, NVTEQBHistogramMode histogram_mode,
+    cudaStream_t stream);
+
+/*! \brief Same as nvte_fused_topk_with_score_function_forward_qb_v2, but skips bin_bounds value
+ *         validation.
+ *
+ *  The caller must have validated that bin_bounds contains finite FP32 values [lower, upper] with
+ *  lower < upper. Use this variant to avoid host synchronization in a hot path or CUDA graph.
+ */
+void nvte_fused_topk_with_score_function_forward_qb_v2_unchecked(
+    const NVTETensor logits, int num_tokens, int num_experts, int topk, float scaling_factor,
+    const NVTETensor expert_bias, NVTETensor probs, NVTETensor routing_map,
+    NVTERoutingMapFormat routing_map_format, NVTETensor intermediate_output, NVTETensor cutoff,
+    NVTETensor histogram, NVTETensor bin_bounds, NVTEQBHistogramMode histogram_mode,
+    cudaStream_t stream);
+
+/*! \brief Kimi K3 Quantile Balancing fused-router forward with dense Top-k indices.
+ *
+ *  bin_bounds must contain finite FP32 values [lower, upper] with lower < upper. This entry point
+ *  validates the device-resident values and synchronizes stream before launching the router.
+ */
+void nvte_fused_topk_with_score_function_forward_qb_with_indices(
+    const NVTETensor logits, int num_tokens, int num_experts, int topk, float scaling_factor,
+    const NVTETensor expert_bias, NVTETensor probs, NVTETensor topk_indices,
+    NVTETensor intermediate_output, NVTETensor cutoff, NVTETensor histogram, NVTETensor bin_bounds,
+    NVTEQBHistogramMode histogram_mode, cudaStream_t stream);
+
+/*! \brief Same as nvte_fused_topk_with_score_function_forward_qb_with_indices, but skips
+ *         bin_bounds value validation.
+ *
+ *  The caller must have validated that bin_bounds contains finite FP32 values [lower, upper] with
+ *  lower < upper. Use this variant to avoid host synchronization in a hot path or CUDA graph.
+ */
+void nvte_fused_topk_with_score_function_forward_qb_with_indices_unchecked(
+    const NVTETensor logits, int num_tokens, int num_experts, int topk, float scaling_factor,
+    const NVTETensor expert_bias, NVTETensor probs, NVTETensor topk_indices,
+    NVTETensor intermediate_output, NVTETensor cutoff, NVTETensor histogram, NVTETensor bin_bounds,
+    NVTEQBHistogramMode histogram_mode, cudaStream_t stream);
+
+/*! \brief Accumulate a QB histogram from raw sigmoid scores and Top-(k+1) cutoffs.
+ *
+ *  bin_bounds must contain finite FP32 values [lower, upper] with lower < upper. This entry point
+ *  validates the device-resident values and synchronizes stream before launching the kernel.
+ */
+void nvte_qb_histogram_accumulate(const NVTETensor raw_scores, const NVTETensor cutoff,
+                                  const NVTETensor bin_bounds, NVTETensor histogram,
+                                  cudaStream_t stream);
+
+/*! \brief Same as nvte_qb_histogram_accumulate, but skips bin_bounds value validation.
+ *
+ *  The caller must have validated that bin_bounds contains finite FP32 values [lower, upper] with
+ *  lower < upper. Use this variant to avoid host synchronization in a hot path or CUDA graph.
+ */
+void nvte_qb_histogram_accumulate_unchecked(const NVTETensor raw_scores, const NVTETensor cutoff,
+                                            const NVTETensor bin_bounds, NVTETensor histogram,
+                                            cudaStream_t stream);
 
 /*! \brief Backward pass for fused topk + softmax/sigmoid (deprecated).
  *

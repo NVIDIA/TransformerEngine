@@ -1324,7 +1324,8 @@ __global__ void setup_grouped_gemm_kernel(
     char *a_base, char *b_base, char *c_base, char *d_base, TensorShapeInfo A_meta,
     TensorShapeInfo B_meta, TensorShapeInfo C_meta, TensorShapeInfo D_meta, size_t a_bits_per_elem,
     size_t b_bits_per_elem, size_t c_elem_size, size_t d_elem_size, float *alpha_ptr,
-    float *beta_ptr, bool use_per_group_alpha_beta,
+    float *beta_ptr, bool use_per_group_alpha_beta, bool a_is_discrete, bool c_is_discrete,
+    bool d_is_discrete,
     // Scale inputs: for tensor scaling, pass float* and set mxfp8_base to nullptr
     // For MXFP8, pass nullptr for tensor_scale and set mxfp8_base
     float *a_scale_base, float *b_scale_base, bool a_rowwise, bool b_rowwise,
@@ -1339,12 +1340,9 @@ __global__ void setup_grouped_gemm_kernel(
   if (idx >= num_tensors) return;
 
   // Get dimensions for this tensor (from array or uniform value)
-  const bool has_a_multi_tensor = (a_base == nullptr);
-  const bool has_c_multi_tensor = (c_base == nullptr);
-  const bool has_d_multi_tensor = (d_base == nullptr);
   int64_t a_first = 0;
   int64_t a_last = 0;
-  if (!has_a_multi_tensor) {
+  if (!a_is_discrete) {
     a_first = A_meta.first_dims ? A_meta.first_dims[idx] : A_meta.uniform_first;
     a_last = A_meta.last_dims ? A_meta.last_dims[idx] : A_meta.uniform_last;
   }
@@ -1354,24 +1352,25 @@ __global__ void setup_grouped_gemm_kernel(
   int64_t d_last = D_meta.last_dims ? D_meta.last_dims[idx] : D_meta.uniform_last;
 
   // Compute offsets (from explicit array, cumulative from per-tensor dims, or uniform)
-  int64_t a_offset = has_a_multi_tensor ? 0 : compute_grouped_tensor_offset(A_meta, idx);
+  int64_t a_offset = a_is_discrete ? 0 : compute_grouped_tensor_offset(A_meta, idx);
   int64_t b_offset = compute_grouped_tensor_offset(B_meta, idx);
   int64_t c_offset = compute_grouped_tensor_offset(C_meta, idx);
   int64_t d_offset = compute_grouped_tensor_offset(D_meta, idx);
 
   // Compute data pointers
-  A_ptrs[idx] = has_a_multi_tensor ? a_multi_tensor_args.data_ptrs[idx]
-                                   : (a_base + (a_offset * a_bits_per_elem) / 8);
-  B_ptrs[idx] = b_base + (b_offset * b_bits_per_elem) / 8;
-  C_ptrs[idx] =
-      has_c_multi_tensor ? c_multi_tensor_args.data_ptrs[idx] : (c_base + c_offset * c_elem_size);
-  D_ptrs[idx] =
-      has_d_multi_tensor ? d_multi_tensor_args.data_ptrs[idx] : (d_base + d_offset * d_elem_size);
+  A_ptrs[idx] = a_is_discrete
+                    ? a_multi_tensor_args.data_ptrs[idx]
+                    : (a_base == nullptr ? nullptr : a_base + (a_offset * a_bits_per_elem) / 8);
+  B_ptrs[idx] = b_base == nullptr ? nullptr : b_base + (b_offset * b_bits_per_elem) / 8;
+  C_ptrs[idx] = c_is_discrete ? c_multi_tensor_args.data_ptrs[idx]
+                              : (c_base == nullptr ? nullptr : c_base + c_offset * c_elem_size);
+  D_ptrs[idx] = d_is_discrete ? d_multi_tensor_args.data_ptrs[idx]
+                              : (d_base == nullptr ? nullptr : d_base + d_offset * d_elem_size);
 
   // Compute storage dimensions for cuBLAS matrix layouts from logical dims.
   // Rowwise and MXFP8 columnwise storage use logical row-major layout, viewed as
   // column-major rows=last, cols=first. Transposed columnwise storage reverses this.
-  if (has_a_multi_tensor) {
+  if (a_is_discrete) {
     a_rows[idx] = a_multi_tensor_args.rows[idx];
     a_cols[idx] = a_multi_tensor_args.cols[idx];
   } else if (a_storage_transposed) {
@@ -1388,7 +1387,7 @@ __global__ void setup_grouped_gemm_kernel(
     b_rows[idx] = static_cast<int>(b_last);
     b_cols[idx] = static_cast<int>(b_first);
   }
-  if (has_d_multi_tensor) {
+  if (d_is_discrete) {
     d_rows[idx] = d_multi_tensor_args.rows[idx];
     d_cols[idx] = d_multi_tensor_args.cols[idx];
   } else {
@@ -1403,7 +1402,7 @@ __global__ void setup_grouped_gemm_kernel(
   if (use_per_group_alpha_beta) {
     float a_amax_val = 0.0f;
     bool has_a_amax = false;
-    if (has_a_multi_tensor) {
+    if (a_is_discrete) {
       auto *a_amax_p = static_cast<float *>(a_multi_tensor_args.amax_ptrs[idx]);
       if (a_amax_p != nullptr) {
         a_amax_val = *a_amax_p;
@@ -1471,10 +1470,12 @@ __global__ void setup_grouped_gemm_kernel(
     }
   };
 
-  if (a_scale_base) {
+  if (a_is_discrete) {
+    a_scale_inv_ptrs[idx] = a_multi_tensor_args.scale_inv_ptrs[idx];
+  } else if (a_scale_base) {
     fill_scale_ptr(a_scale_inv_ptrs, a_scale_base, A_meta, a_rowwise, a_scaling_mode);
   } else {
-    a_scale_inv_ptrs[idx] = a_multi_tensor_args.scale_inv_ptrs[idx];
+    a_scale_inv_ptrs[idx] = nullptr;
   }
   if (b_scale_base) {
     fill_scale_ptr(b_scale_inv_ptrs, b_scale_base, B_meta, b_rowwise, b_scaling_mode);
@@ -1491,7 +1492,7 @@ inline void launch_grouped_gemm_setup(
     const transformer_engine::Tensor *beta_tensor, bool use_per_group_alpha_beta,
     size_t num_tensors, cudaStream_t stream,
     const MultiTensorGroupGemmInputArgs &a_multi_tensor_args, const NVTETensor *C_list,
-    const NVTETensor *D_list, char *a_base, transformer_engine::DType c_dtype,
+    const NVTETensor *D_list, bool a_is_discrete, char *a_base, transformer_engine::DType c_dtype,
     transformer_engine::DType d_dtype) {
   // Use logical shape info from selection; storage transposes are tracked separately.
   TensorShapeInfo A_meta = A_sel.logical_tensor_shape;
@@ -1499,31 +1500,31 @@ inline void launch_grouped_gemm_setup(
   TensorShapeInfo C_meta{};
   TensorShapeInfo D_meta{};
 
-  const bool has_d_multi_tensor = (D_list != nullptr);
-  const bool has_c_multi_tensor = (C_list != nullptr) || has_d_multi_tensor;
+  const bool d_is_discrete = (D_list != nullptr);
+  const bool c_is_discrete = (C_list != nullptr) || d_is_discrete;
   MultiTensorGroupGemmOutputArgs c_multi_tensor_args{};
   MultiTensorGroupGemmOutputArgs d_multi_tensor_args{};
-  if (has_d_multi_tensor) {
+  if (d_is_discrete) {
     d_multi_tensor_args =
         build_grouped_gemm_multi_out_args(D_list, num_tensors, num_tensors, d_dtype, "D");
   }
   if (C_list != nullptr) {
     c_multi_tensor_args =
         build_grouped_gemm_multi_out_args(C_list, num_tensors, num_tensors, d_dtype, "C");
-  } else if (has_d_multi_tensor) {
+  } else if (d_is_discrete) {
     c_multi_tensor_args = d_multi_tensor_args;
   }
 
   char *c_base = nullptr;
   char *d_base = nullptr;
 
-  if (!has_c_multi_tensor) {
+  if (!c_is_discrete) {
     NVTE_CHECK(C != nullptr && D != nullptr,
                "Grouped GEMM: C/D grouped tensors are required when no C list is provided");
     C_meta = TensorShapeInfo::create_shape_info_for_C(C, D);
     c_base = static_cast<char *>(C->data.dptr);
   }
-  if (!has_d_multi_tensor) {
+  if (!d_is_discrete) {
     NVTE_CHECK(D != nullptr,
                "Grouped GEMM: D grouped tensor is required when no D list is provided");
     D_meta = TensorShapeInfo::from_tensor(D);
@@ -1544,8 +1545,8 @@ inline void launch_grouped_gemm_setup(
   const bool b_rowwise = B_sel.rowwise;
 
   // NVFP4 alpha needs A's amax from either A_sel.amax (grouped) or amax_ptrs (discrete).
-  const bool a_has_amax = (A_sel.amax != nullptr) ||
-                          (A_sel.dptr == nullptr && a_multi_tensor_args.amax_ptrs[0] != nullptr);
+  const bool a_has_amax =
+      a_is_discrete ? a_multi_tensor_args.amax_ptrs[0] != nullptr : A_sel.amax != nullptr;
   const bool needs_nvfp4_alpha = transformer_engine::is_nvfp_scaling(A_sel.scaling_mode) &&
                                  a_has_amax && (B_sel.amax != nullptr);
 
@@ -1554,11 +1555,12 @@ inline void launch_grouped_gemm_setup(
       ws.d_rows, ws.d_cols, ws.alpha_ptrs, ws.beta_ptrs, ws.a_scale_inv_ptrs, ws.b_scale_inv_ptrs,
       A_sel.dptr, B_sel.dptr, c_base, d_base, A_meta, B_meta, C_meta, D_meta, a_bits_per_elem,
       b_bits_per_elem, c_elem_size, d_elem_size, static_cast<float *>(alpha_tensor->data.dptr),
-      static_cast<float *>(beta_tensor->data.dptr), use_per_group_alpha_beta,
-      reinterpret_cast<float *>(A_sel.scale_inv), reinterpret_cast<float *>(B_sel.scale_inv),
-      a_rowwise, b_rowwise, A_sel.storage_transposed, B_sel.storage_transposed, A_sel.scaling_mode,
-      B_sel.scaling_mode, num_tensors, a_multi_tensor_args, c_multi_tensor_args,
-      d_multi_tensor_args, A_sel.amax ? static_cast<float *>(A_sel.amax) : nullptr,
+      static_cast<float *>(beta_tensor->data.dptr), use_per_group_alpha_beta, a_is_discrete,
+      c_is_discrete, d_is_discrete, reinterpret_cast<float *>(A_sel.scale_inv),
+      reinterpret_cast<float *>(B_sel.scale_inv), a_rowwise, b_rowwise, A_sel.storage_transposed,
+      B_sel.storage_transposed, A_sel.scaling_mode, B_sel.scaling_mode, num_tensors,
+      a_multi_tensor_args, c_multi_tensor_args, d_multi_tensor_args,
+      A_sel.amax ? static_cast<float *>(A_sel.amax) : nullptr,
       B_sel.amax ? static_cast<float *>(B_sel.amax) : nullptr,
       needs_nvfp4_alpha ? ws.nvfp4_computed_alpha : nullptr);
 
@@ -1633,8 +1635,8 @@ void nvte_grouped_gemm(const NVTEGroupedTensor A, int transa, const NVTEGroupedT
   MultiTensorGroupGemmInputArgs a_multi_tensor_args{};
   launch_grouped_gemm_setup(workspace.setup_workspace, A_sel, B_sel, inputC, outputD, alpha_tensor,
                             beta_tensor, use_per_group_alpha_beta, num_tensors, stream,
-                            a_multi_tensor_args, /*C_list=*/nullptr, /*D_list=*/nullptr, A_sel.dptr,
-                            inputC->dtype(), outputD->dtype());
+                            a_multi_tensor_args, /*C_list=*/nullptr, /*D_list=*/nullptr,
+                            /*a_is_discrete=*/false, A_sel.dptr, inputC->dtype(), outputD->dtype());
 
   // Compute average dimensions for heuristics
   // K dimension: if transa, K is A's last dim; if not, K is A's first dim
@@ -1788,8 +1790,8 @@ void nvte_grouped_gemm_with_discrete_inputA(const NVTETensor *A_list, size_t num
 
   launch_grouped_gemm_setup(workspace.setup_workspace, A_sel, B_sel, inputC, outputD, alpha_tensor,
                             beta_tensor, use_per_group_alpha_beta, num_tensors, stream,
-                            a_multi_tensor_args, /*C_list=*/nullptr, /*D_list=*/nullptr, nullptr,
-                            inputC->dtype(), outputD->dtype());
+                            a_multi_tensor_args, /*C_list=*/nullptr, /*D_list=*/nullptr,
+                            /*a_is_discrete=*/true, nullptr, inputC->dtype(), outputD->dtype());
 
   GroupedGemmConfig gemm_config;
   gemm_config.use_split_accumulator = config_.use_split_accumulator;
@@ -1873,8 +1875,8 @@ void nvte_grouped_gemm_with_discrete_out(const NVTEGroupedTensor A, int transa,
   MultiTensorGroupGemmInputArgs a_multi_tensor_args{};
   launch_grouped_gemm_setup(workspace.setup_workspace, A_sel, B_sel, /*C=*/nullptr, /*D=*/nullptr,
                             alpha_tensor, beta_tensor, use_per_group_alpha_beta, num_tensors,
-                            stream, a_multi_tensor_args, C_list, D_list, A_sel.dptr, d_dtype,
-                            d_dtype);
+                            stream, a_multi_tensor_args, C_list, D_list,
+                            /*a_is_discrete=*/false, A_sel.dptr, d_dtype, d_dtype);
 
   GroupedGemmConfig gemm_config;
   gemm_config.use_split_accumulator = config_.use_split_accumulator;
@@ -1909,8 +1911,6 @@ void launch_grouped_bias_add(const transformer_engine::GroupedTensor *outputD,
   NVTE_CHECK(outputD->num_tensors >= 1, api_name, ": number of tensors must be at least 1");
   NVTE_CHECK(outputD->num_tensors == bias_tensor->num_tensors, api_name,
              ": output and bias must have the same number of tensors");
-  NVTE_CHECK(outputD->has_data(), api_name, ": output is missing row-wise data");
-  NVTE_CHECK(bias_tensor->has_data(), api_name, ": bias is missing row-wise data");
   NVTE_CHECK(outputD->dtype() == bias_tensor->dtype(), api_name,
              ": output and bias must have matching dtypes");
   NVTE_CHECK(bias_tensor->all_same_first_dim(), api_name,
@@ -1921,15 +1921,23 @@ void launch_grouped_bias_add(const transformer_engine::GroupedTensor *outputD,
   NVTE_CHECK(outputD->get_common_last_dim() == bias_tensor->get_common_last_dim(), api_name,
              ": output and bias last dims must match");
 
+  const int num_tensors = static_cast<int>(outputD->num_tensors);
+  NVTE_CHECK(num_tensors <= kMaxGroups, api_name, " supports at most ", kMaxGroups,
+             " tensors, got ", num_tensors);
+  const int total_rows = static_cast<int>(outputD->logical_shape.data[0]);
+  // A valid zero-sized CUDA allocation may have a null data pointer.
+  if (total_rows == 0) {
+    return;
+  }
+
+  NVTE_CHECK(outputD->has_data(), api_name, ": output is missing row-wise data");
+  NVTE_CHECK(bias_tensor->has_data(), api_name, ": bias is missing row-wise data");
+
   const TensorShapeInfo d_meta = TensorShapeInfo::from_tensor(outputD);
 
   const DType dtype = outputD->dtype();
   constexpr int kThreads = 128;
 
-  const int num_tensors = static_cast<int>(outputD->num_tensors);
-  NVTE_CHECK(num_tensors <= kMaxGroups, api_name, " supports at most ", kMaxGroups,
-             " tensors, got ", num_tensors);
-  const int total_rows = static_cast<int>(outputD->logical_shape.data[0]);
   const int n = static_cast<int>(outputD->get_common_last_dim());
 
   const size_t elem_size = typeToSize(dtype);
@@ -1997,8 +2005,6 @@ void nvte_grouped_scaled_bias_add(const NVTEGroupedTensor output, const NVTEGrou
   const GroupedTensor *bias_tensor = convertNVTEGroupedTensorCheck(bias);
   const Tensor *scale_tensor = convertNVTETensorCheck(scale);
 
-  NVTE_CHECK(scale_tensor->data.dptr != nullptr,
-             "Grouped scaled bias add: scale tensor must not be null");
   NVTE_CHECK(scale_tensor->dtype() == DType::kFloat32,
              "Grouped scaled bias add: scale must be float32");
   NVTE_CHECK(scale_tensor->data.shape.size() == 1,
@@ -2007,6 +2013,10 @@ void nvte_grouped_scaled_bias_add(const NVTEGroupedTensor output, const NVTEGrou
   const size_t total_rows = static_cast<size_t>(outputD->logical_shape.data[0]);
   NVTE_CHECK(scale_tensor->data.shape[0] == total_rows, "Grouped scaled bias add: scale size (",
              scale_tensor->data.shape[0], ") must equal total rows (", total_rows, ")");
+  if (total_rows > 0) {
+    NVTE_CHECK(scale_tensor->data.dptr != nullptr,
+               "Grouped scaled bias add: scale tensor must not be null");
+  }
 
   const float *scale_ptr = static_cast<const float *>(scale_tensor->data.dptr);
   launch_grouped_bias_add(outputD, bias_tensor, scale_ptr, true, stream);

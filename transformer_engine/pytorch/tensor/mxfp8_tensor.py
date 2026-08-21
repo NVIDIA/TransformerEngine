@@ -34,6 +34,7 @@ class MXFP8Quantizer(Quantizer):
     """
 
     dtype: DType
+    with_2d_quantization: bool
 
     def __init__(
         self,
@@ -41,9 +42,11 @@ class MXFP8Quantizer(Quantizer):
         *,
         rowwise: bool = True,
         columnwise: bool = True,
+        with_2d_quantization: bool = False,
     ) -> None:
         super().__init__(rowwise=rowwise, columnwise=columnwise)
         self.dtype = DType.cast(fp8_dtype)
+        self.with_2d_quantization = with_2d_quantization
 
     def copy(self) -> MXFP8Quantizer:
         """Create shallow copy"""
@@ -52,6 +55,7 @@ class MXFP8Quantizer(Quantizer):
             fp8_dtype=self.dtype,
             rowwise=self.rowwise_usage,
             columnwise=self.columnwise_usage,
+            with_2d_quantization=self.with_2d_quantization,
         )
         quantizer.internal = self.internal
         quantizer.optimize_for_gemm = self.optimize_for_gemm
@@ -316,11 +320,6 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
         if isinstance(tensor, QuantizedTensor):
             return self.quantize_(tensor.dequantize())
         return super().quantize_(tensor, noop_flag=noop_flag)
-
-    def detach(self) -> MXFP8Tensor:
-        # pylint: disable=missing-function-docstring
-        # TODO(ksivamani): Fix the detach bug
-        return MXFP8Tensor.make_like(self)
 
     def clone(self) -> MXFP8Tensor:
         # pylint: disable=missing-function-docstring
