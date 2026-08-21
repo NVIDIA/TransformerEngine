@@ -77,6 +77,26 @@ struct Config {
   static constexpr bool err_use_fast_math = kErrUseFastMath;
 };
 
+// Policy that is specific to the 4over6 encoding. The ordinary scale-type
+// maximum comes from TypeInfo/typeToMax; only the reduced maximum needed for
+// map-to-4 headroom and the E4M3-only FP16 error fast path live here.
+template <typename ScaleType>
+struct FourOverSixScaleConfig;
+
+template <>
+struct FourOverSixScaleConfig<fp8e4m3> {
+  static constexpr int headroom_max = 256;
+  static constexpr bool supports_fp16_error_path = true;
+};
+
+#if CUDA_VERSION >= 13040
+template <>
+struct FourOverSixScaleConfig<fp8ue5m3> {
+  static constexpr int headroom_max = 65536;
+  static constexpr bool supports_fp16_error_path = false;
+};
+#endif
+
 struct Candidate {
   uint32_t packed[kPackedWordsPerGroup];
   float err;
@@ -116,16 +136,17 @@ __device__ __forceinline__ float compute_error_rn(const float diff) {
 template <typename ScaleType, int SCALE_TYPE_MAX>
 __device__ __forceinline__ ScalePair<ScaleType> compute_scale_pair(const float block_amax,
                                                                    const float global_amax) {
-  using ScaleTraits = core::NVFP4ScaleTraits<ScaleType>;
-  static_assert(SCALE_TYPE_MAX == static_cast<int>(ScaleTraits::expected_max) ||
-                    SCALE_TYPE_MAX == static_cast<int>(ScaleTraits::headroom_max),
+  using ScaleConfig = FourOverSixScaleConfig<ScaleType>;
+  constexpr int full_scale_max = static_cast<int>(TypeInfo<ScaleType>::max_finite_value);
+  static_assert(SCALE_TYPE_MAX == full_scale_max || SCALE_TYPE_MAX == ScaleConfig::headroom_max,
                 "Unsupported NVFP4 scale type maximum.");
+  static_assert(ScaleConfig::headroom_max * 1.5f <= full_scale_max,
+                "NVFP4 4over6 scale headroom exceeds scale type maximum.");
   constexpr float fp4_max = detail::TypeExtrema<fp4e2m1>::max;  // 6.0f
   constexpr float fp8_max = detail::TypeExtrema<ScaleType>::max;
-  constexpr int encode_scale_max = static_cast<int>(core::scale_max<ScaleType, SCALE_TYPE_MAX>());
   constexpr float expand_to_map4 = 1.5f;
   const float S_enc =
-      core::compute_global_encode_scaling_factor_FP4<ScaleType, encode_scale_max>(global_amax);
+      core::compute_global_encode_scaling_factor_FP4<ScaleType, SCALE_TYPE_MAX>(global_amax);
   const float base = block_amax / fp4_max * S_enc;
 
   ScalePair<ScaleType> scales;
@@ -188,7 +209,7 @@ __device__ __forceinline__ void accumulate_dequant_error(const uint32_t dequant_
                                                          const float sf, const float global_amax,
                                                          float *err) {
   constexpr float fp4_max = detail::TypeExtrema<fp4e2m1>::max;  // 6.0f
-  constexpr float fp8_max = core::scale_max<ScaleType, SCALE_TYPE_MAX>();
+  constexpr float fp8_max = static_cast<float>(SCALE_TYPE_MAX);
   constexpr float err_denom = fp4_max * fp8_max;
   const uint16_t half_bits = (dequant_bits >> SHIFT) & 0xFFFF;
   const float dequant = __half2float(__ushort_as_half(half_bits));
@@ -209,7 +230,7 @@ compute_fp16_error_scales(const ScalePair<ScaleType> &scales) {
   // deliberately does not enable supports_fp16_error_path and instead uses
   // the scale-format-independent float error path in
   // cvt_fp32_to_fp4_8x_with_error.
-  static_assert(core::NVFP4ScaleTraits<ScaleType>::supports_fp16_error_path);
+  static_assert(FourOverSixScaleConfig<ScaleType>::supports_fp16_error_path);
   FP16ErrorScalePair result;
   const uint32_t packed_scales = static_cast<uint32_t>(fp8_bits(scales.map4)) |
                                  (static_cast<uint32_t>(fp8_bits(scales.map6)) << 8);
@@ -305,7 +326,7 @@ __device__ __forceinline__ uint32_t cvt_fp32_to_fp4_8x_with_error(
   }
 
   if constexpr (Cfg::err_use_fast_math &&
-                core::NVFP4ScaleTraits<ScaleType>::supports_fp16_error_path) {
+                FourOverSixScaleConfig<ScaleType>::supports_fp16_error_path) {
     accumulate_fp16_scaled_error_pair<Cfg>(out_dequant_1, x[0], x[1], fp16_error_scale,
                                            global_encode_scale, err);
     accumulate_fp16_scaled_error_pair<Cfg>(out_dequant_2, x[2], x[3], fp16_error_scale,
@@ -345,7 +366,7 @@ __device__ __forceinline__ CandidatePair make_candidates(const float (&x0)[8], c
   candidates.map6.err = 0.0f;
   FP16ErrorScalePair fp16_error_scales{};
   if constexpr (Cfg::err_use_fast_math &&
-                core::NVFP4ScaleTraits<ScaleType>::supports_fp16_error_path) {
+                FourOverSixScaleConfig<ScaleType>::supports_fp16_error_path) {
     fp16_error_scales = compute_fp16_error_scales(scales);
   }
   candidates.map4.packed[0] = cvt_fp32_to_fp4_8x_with_error<Cfg, ScaleType, SCALE_TYPE_MAX>(
@@ -496,8 +517,7 @@ __device__ void quantize_stage_rowwise(const IType *tile, fp4e2m1x2 *output, Sca
       block_amax = reduce_group_max_16(group_amax);
     }
 
-    float global_amax =
-        core::scale_max<ScaleType, SCALE_TYPE_MAX>() * detail::TypeExtrema<fp4e2m1>::max;
+    float global_amax = static_cast<float>(SCALE_TYPE_MAX) * detail::TypeExtrema<fp4e2m1>::max;
     if (amax != nullptr) {
       global_amax = amax[0];
     }
@@ -556,9 +576,9 @@ __device__ void quantize_stage_colwise(const IType *tile, fp4e2m1x2 *output_t, S
       block_amax = reduce_group_max_16(group_amax);
     }
 
-    const float global_amax = amax == nullptr ? core::scale_max<ScaleType, SCALE_TYPE_MAX>() *
-                                                    detail::TypeExtrema<fp4e2m1>::max
-                                              : amax[0];
+    const float global_amax =
+        amax == nullptr ? static_cast<float>(SCALE_TYPE_MAX) * detail::TypeExtrema<fp4e2m1>::max
+                        : amax[0];
     const ScalePair<ScaleType> scale_pair =
         compute_scale_pair<ScaleType, SCALE_TYPE_MAX>(block_amax, global_amax);
     CandidatePair candidates =
@@ -695,7 +715,8 @@ void launch_quantize_4over6(const Tensor &input, const Tensor *noop, Tensor *out
 
 template <typename ScaleType, bool use_2d_quantization>
 void quantize_4over6_impl(const Tensor &input, const Tensor *noop, Tensor *output,
-                          const QuantizationConfig *quant_config, cudaStream_t stream) {
+                          const QuantizationConfig *quant_config, const DType scale_dtype,
+                          cudaStream_t stream) {
 #if FP4_TYPE_SUPPORTED
   using namespace quantize_4over6_kernel;
 
@@ -736,15 +757,18 @@ void quantize_4over6_impl(const Tensor &input, const Tensor *noop, Tensor *outpu
     NVTE_CHECK(is_fp4_dtype(output->columnwise_data.dtype),
                "Transposed output must have FP4 type.");
   }
-  using ScaleTraits = core::NVFP4ScaleTraits<ScaleType>;
+  using ScaleConfig = FourOverSixScaleConfig<ScaleType>;
   const int scale_type_max = output->get_nvfp4_scale_max();
-  NVTE_CHECK(scale_type_max == static_cast<int>(ScaleTraits::expected_max) ||
-                 scale_type_max == static_cast<int>(ScaleTraits::headroom_max),
+  const int full_scale_max = static_cast<int>(typeToMax(scale_dtype));
+  NVTE_CHECK(full_scale_max == static_cast<int>(TypeInfo<ScaleType>::max_finite_value),
+             "NVFP4 scale dtype dispatch does not match its datatype maximum.");
+  NVTE_CHECK(scale_type_max == full_scale_max || scale_type_max == ScaleConfig::headroom_max,
              "Unsupported maximum for NVFP4 scale dtype.");
   TRANSFORMER_ENGINE_SWITCH_CONDITION(
-      scale_type_max == static_cast<int>(ScaleTraits::headroom_max), USE_SCALE_HEADROOM, {
-        constexpr int SCALE_TYPE_MAX = static_cast<int>(
-            USE_SCALE_HEADROOM ? ScaleTraits::headroom_max : ScaleTraits::expected_max);
+      scale_type_max == ScaleConfig::headroom_max, USE_SCALE_HEADROOM, {
+        constexpr int SCALE_TYPE_MAX =
+            USE_SCALE_HEADROOM ? ScaleConfig::headroom_max
+                               : static_cast<int>(TypeInfo<ScaleType>::max_finite_value);
         TRANSFORMER_ENGINE_NVFP4_4OVER6_MODE_SWITCH(
             quant_config->nvfp4_4over6_mode, MODE,
             TRANSFORMER_ENGINE_SWITCH_CONDITION(
@@ -781,9 +805,10 @@ void quantize_4over6(const Tensor &input, const Tensor *noop, Tensor *output,
                to_string(output->columnwise_scale_inv.dtype), ").");
   }
 
-  TRANSFORMER_ENGINE_NVFP4_SCALE_TYPE_SWITCH(scale_dtype, ScaleType,
-                                             quantize_4over6_impl<ScaleType, use_2d_quantization>(
-                                                 input, noop, output, quant_config, stream);)
+  TRANSFORMER_ENGINE_NVFP4_SCALE_TYPE_SWITCH(
+      scale_dtype, ScaleType,
+      quantize_4over6_impl<ScaleType, use_2d_quantization>(input, noop, output, quant_config,
+                                                           scale_dtype, stream);)
 #else
   NVTE_ERROR("FP4 support requires CUDA 12.8+, but compile-time CUDA version is ", CUDA_VERSION);
 #endif  // FP4_TYPE_SUPPORTED

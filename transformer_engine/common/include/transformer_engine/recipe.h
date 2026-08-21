@@ -373,13 +373,13 @@ void nvte_nvfp4_2d_compute_partial_amax(const NVTETensor inp, NVTETensor amax, s
  *  \param[in]     scale_stride_w  Stride for scale in tile-col dimension.
  *  \param[in]     start_offset    Starting element offset in the flattened tensor.
  *  \param[in]     block_len       Tile dimension (must be 16 for NVFP4 2D).
- *  \param[in]     stream          CUDA stream used for the operation.
  *  \param[in]     scale_dtype     NVFP4 scale storage type (E4M3 or UE5M3).
+ *  \param[in]     stream          CUDA stream used for the operation.
  */
 void nvte_nvfp4_2d_partial_cast(const NVTETensor inp, NVTETensor out, const NVTETensor scale,
                                 const NVTETensor global_scale, size_t h, size_t w,
                                 size_t scale_stride_h, size_t scale_stride_w, size_t start_offset,
-                                size_t block_len, cudaStream_t stream, const NVTEDType scale_dtype);
+                                size_t block_len, const NVTEDType scale_dtype, cudaStream_t stream);
 
 /*! \brief Expand tile-level scales to row-level scales and convert to the selected FP8 scale type.
  *
