@@ -716,6 +716,12 @@ def test_cp_with_fused_attention(
 )
 def test_cp_with_fused_attention_no_load_balance(cp_pool):
     """Check experimental single-chunk forward/backward."""
+    # cp_2_0 reaches the generic test's known deterministic THD backward OOM threshold on sm90.
+    if _deterministic and get_device_compute_capability() == (9, 0):
+        pytest.skip(
+            "Deterministic FusedAttention backward with THD format OOMs on sm90"
+            " for large bHSS configs (known cuDNN issue)."
+        )
     _submit(
         cp_pool(2),
         dtype="bf16",
