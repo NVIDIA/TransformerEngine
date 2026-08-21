@@ -1488,8 +1488,15 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             and fc2_input_quantizer.rht_matrix_random_sign_mask_t == 0
         ):
             if fc2_input_quantizer.disable_second_level_scale:
-                # Use GEMM + act + RHT + quant kernel once available
-                pass
+                # Use GEMM + act + RHT + quant kernel if available
+                if self.grouped_gemm_act_hadamard_quant_kernel() is None:
+                    # Kernel is not available
+                    pass
+                if fc1_bias_packed is not None:
+                    # Kernel has large numerical error with bias
+                    pass
+                elif self._cudnn_act_func == "swiglu":
+                    kernel_impl = "gemm_act_rht_quant"
             elif fc2_input_quantizer.with_post_rht_amax:
                 # Use GEMM + act + RHT + amax kernel if available
                 if self.grouped_gemm_act_hadamard_kernel() is None:
@@ -1535,7 +1542,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             fc1_activation_kwargs["use_tmem_post_rht_amax"] = _use_tmem_post_rht_amax()
         elif kernel_impl == "gemm_act_rht_quant":
             fc1_activation_kwargs["d_dtype"] = torch.float4_e2m1fn_x2
-            fc1_activation_kwargs["rht_dtype"] = torch.float4_e2m1fn_x2
+            fc1_activation_kwargs["rht_colwise_dtype"] = torch.float4_e2m1fn_x2
 
         # Kernel arguments based on activation
         if activation_is_srelu:
@@ -1707,9 +1714,8 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                 fc2_in_row_data = fc2_in_row_data.view(in_shape[0], fc2_weight_shape[1] // 2)
                 fc2_in_row_scale = fc1_kernel_out["sfd_tensor"]
                 fc2_in_row_scale = fc2_in_row_scale.permute(5, 2, 4, 0, 1, 3)
-                fc2_in_col_data = fc1_kernel_out["rht_tensor"]
-                fc2_in_col_data = fc2_in_col_data.permute(1, 0)
-                fc2_in_col_scale = fc1_kernel_out["sfrht_tensor"]
+                fc2_in_col_data = fc1_kernel_out["rht_colwise_tensor"]
+                fc2_in_col_scale = fc1_kernel_out["sfrht_colwise_tensor"]
                 grouped_fc2_x = GroupedTensorStorage(
                     shape=(in_shape[0], fc2_weight_shape[1]),
                     dtype=dtype,
