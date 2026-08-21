@@ -399,73 +399,10 @@ DISTRIBUTED_CONTEXT_SELF_ATTN_D256_LAYOUTS_MASKS_WINDOWS = [
     ),
 ]
 
-DISTRIBUTED_CONTEXT_SELF_ATTN_MAX_LOGIT_CASES = [
-    pytest.param(
-        QKVLayout.BSHD_BSHD_BSHD,
-        AttnMaskType.CAUSAL_MASK,
-        CPStrategy.ALL_GATHER,
-        (-1, -1),
-        None,
-        None,
-        False,
-        True,
-        id="AG-BSHD",
-    ),
-    pytest.param(
-        QKVLayout.THD_THD_THD,
-        AttnMaskType.PADDING_CAUSAL_MASK,
-        CPStrategy.ALL_GATHER,
-        (-1, -1),
-        64,
-        5,
-        False,
-        True,
-        id="AG-THD",
-    ),
-    pytest.param(
-        QKVLayout.BSHD_BSHD_BSHD,
-        AttnMaskType.CAUSAL_MASK,
-        CPStrategy.RING,
-        (-1, -1),
-        None,
-        None,
-        False,
-        True,
-        id="RING-BSHD-NO_SCAN",
-    ),
-    pytest.param(
-        QKVLayout.BSHD_BSHD_BSHD,
-        AttnMaskType.CAUSAL_MASK,
-        CPStrategy.RING,
-        (-1, -1),
-        None,
-        None,
-        True,
-        True,
-        id="RING-BSHD-SCAN",
-    ),
-    pytest.param(
-        QKVLayout.THD_THD_THD,
-        AttnMaskType.PADDING_CAUSAL_MASK,
-        CPStrategy.RING,
-        (-1, -1),
-        1,
-        5,
-        False,
-        False,
-        id="RING-THD-NO_SCAN",
-    ),
-    pytest.param(
-        QKVLayout.THD_THD_THD,
-        AttnMaskType.PADDING_CAUSAL_MASK,
-        CPStrategy.RING,
-        (-1, -1),
-        1,
-        5,
-        True,
-        False,
-        id="RING-THD-SCAN",
-    ),
+DISTRIBUTED_CONTEXT_SELF_ATTN_MAX_LOGIT_CP_MODES = [
+    pytest.param(CPStrategy.ALL_GATHER, False, id="AG"),
+    pytest.param(CPStrategy.RING, False, id="RING-NO_SCAN"),
+    pytest.param(CPStrategy.RING, True, id="RING-SCAN"),
 ]
 
 
@@ -595,12 +532,22 @@ class TestDistributedContextParallelSelfAttn:
         generate_context_parallel_configs_for_attn(),
     )
     @pytest.mark.parametrize("data_shape", DISTRIBUTED_CONTEXT_SELF_ATTN_DATA_SHAPES[:1])
-    @pytest.mark.parametrize("kv_groups", [1])
+    @pytest.mark.parametrize("kv_groups", [1, 8])
     @pytest.mark.parametrize("dtype", [pytest.param(jnp.bfloat16, id="BF16")])
     @pytest.mark.parametrize(
-        "qkv_layout, attn_mask_type, cp_strategy, window_size, stripe_size,"
-        " num_segments_per_seq, use_scan_ring, check_forward_output",
-        DISTRIBUTED_CONTEXT_SELF_ATTN_MAX_LOGIT_CASES,
+        "qkv_layout, attn_mask_type",
+        DISTRIBUTED_CONTEXT_SELF_ATTN_LAYOUTS_MASKS,
+    )
+    @pytest.mark.parametrize(
+        "cp_strategy, use_scan_ring",
+        DISTRIBUTED_CONTEXT_SELF_ATTN_MAX_LOGIT_CP_MODES,
+    )
+    @pytest.mark.parametrize(
+        "window_size",
+        [
+            pytest.param((-1, -1), id="NO_SWA"),
+            pytest.param((20, 0), id="SWA"),
+        ],
     )
     def test_context_parallel_return_max_logit(
         self,
@@ -615,12 +562,23 @@ class TestDistributedContextParallelSelfAttn:
         attn_mask_type,
         cp_strategy,
         window_size,
-        stripe_size,
-        num_segments_per_seq,
         use_scan_ring,
-        check_forward_output,
     ):
         """Check CP fused attention returns global per-head max_logit."""
+        is_thd = qkv_layout.is_thd()
+        if window_size != (-1, -1) and not (
+            is_thd and cp_strategy == CPStrategy.RING and not use_scan_ring
+        ):
+            pytest.skip("SWA max-logit coverage is limited to THD Ring without scan.")
+        # TODO: Evaluate cuDNN Max mismatches observed for striped multi-segment THD Ring GQA.
+        if is_thd and cp_strategy == CPStrategy.RING and kv_groups > 1:
+            pytest.skip("THD Ring GQA Max mismatches require further evaluation.")
+
+        stripe_size = 64 if is_thd and cp_strategy == CPStrategy.ALL_GATHER else None
+        if is_thd and cp_strategy == CPStrategy.RING:
+            stripe_size = 1
+        num_segments_per_seq = 5 if is_thd else None
+        check_forward_output = not (is_thd and cp_strategy == CPStrategy.RING)
         self.impl_test_context_parallel_attn(
             device_count,
             mesh_shape,
