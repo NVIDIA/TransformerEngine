@@ -92,6 +92,7 @@ if HAVE_TRITON:
         cp_size,
         BLOCK_H: tl.constexpr,
     ):
+        """In-place RoPE fwd on the trailing rope slice of q."""
         pid_m = tl.program_id(axis=0)
         pid_head = tl.program_id(axis=1)
         if cu_seqlens_q is None:
@@ -139,6 +140,7 @@ if HAVE_TRITON:
         cp_size,
         BLOCK_H: tl.constexpr,
     ):
+        """In-place RoPE bwd on the trailing rope slice of dq."""
         pid_m = tl.program_id(axis=0)
         pid_head = tl.program_id(axis=1)
         if cu_seqlens_q is None:
@@ -195,6 +197,7 @@ if HAVE_TRITON:
         cp_size,
         BLOCK_H: tl.constexpr,
     ):
+        """Fwd: build (key, value) from kv and the shared rotated rope head."""
         pid_m = tl.program_id(axis=0)
         pid_head = tl.program_id(axis=1)
         if cu_seqlens_kv is None:
@@ -262,6 +265,7 @@ if HAVE_TRITON:
         cp_size,
         BLOCK_H: tl.constexpr,
     ):
+        """Bwd: scatter (dk, dv) into dkv and reduce rope-slice grads into demb."""
         pid_m = tl.program_id(axis=0)
         pid_head = tl.program_id(axis=1)
         if cu_seqlens_kv is None:
@@ -320,10 +324,14 @@ if HAVE_TRITON:
 
         @staticmethod
         def forward(ctx, q, cos, sin, head_dim_nope, head_dim_rope):
+            """Rotate the rope slice of q in place."""
             if not q.is_contiguous():
                 q = q.contiguous()
             s, b, nheads, _ = q.shape
-            grid = lambda META: (s * b, triton.cdiv(nheads, META["BLOCK_H"]))
+
+            def grid(meta):
+                return (s * b, triton.cdiv(nheads, meta["BLOCK_H"]))
+
             rotary_fwd_q_kernel[grid](
                 q,
                 cos,
@@ -345,12 +353,16 @@ if HAVE_TRITON:
 
         @staticmethod
         def backward(ctx, dq):
+            """Counter-rotate the rope slice of dq (in place on the copy)."""
             cos, sin = ctx.saved_tensors
             # attention backward may hand over a strided grad; the kernel
             # assumes a contiguous [s, b, h, d] layout
             dq = dq.contiguous()
             s, b, nheads, head_dim_nope, head_dim_rope = ctx.dims
-            grid = lambda META: (s * b, triton.cdiv(nheads, META["BLOCK_H"]))
+
+            def grid(meta):
+                return (s * b, triton.cdiv(nheads, meta["BLOCK_H"]))
+
             rotary_bwd_q_kernel[grid](
                 dq,
                 cos,
@@ -373,12 +385,16 @@ if HAVE_TRITON:
 
         @staticmethod
         def forward(ctx, kv, k_pos_emb, cos, sin, head_dim_nope, head_dim_rope, head_dim_v):
+            """Build (k, v) from kv and the shared rope head."""
             if not kv.is_contiguous():
                 kv = kv.contiguous()
             s, b, nheads, _ = kv.shape
             o_key = kv.new_empty(s, b, nheads, head_dim_nope + head_dim_rope)
             o_value = kv.new_empty(s, b, nheads, head_dim_v)
-            grid = lambda META: (s * b, triton.cdiv(nheads, META["BLOCK_H"]))
+
+            def grid(meta):
+                return (s * b, triton.cdiv(nheads, meta["BLOCK_H"]))
+
             rotary_fwd_kv_kernel[grid](
                 kv,
                 k_pos_emb,
@@ -409,13 +425,17 @@ if HAVE_TRITON:
 
         @staticmethod
         def backward(ctx, dk_out, dv_out):
+            """Gradients for (kv, k_pos_emb) from (dk, dv)."""
             cos, sin = ctx.saved_tensors
             s, b, nheads, ndp, ndr, ndv = ctx.dims
             dk_out = dk_out.contiguous()
             dv_out = dv_out.contiguous()
             d_kv = dk_out.new_empty(s, b, nheads, ndp + ndv)
             d_emb = dk_out.new_empty(s, b, 1, ndr)
-            grid = lambda META: (s * b, triton.cdiv(nheads, META["BLOCK_H"]))
+
+            def grid(meta):
+                return (s * b, triton.cdiv(nheads, meta["BLOCK_H"]))
+
             rotary_bwd_kv_kernel[grid](
                 dk_out,
                 dv_out,

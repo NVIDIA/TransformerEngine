@@ -40,12 +40,13 @@ class DeepSeekV3Layer(torch.nn.Module):
                          ffn size of each routed expert (required with MoE).
     hidden_dropout : float, default = 0.0
                     dropout probability on the residual branches.
-    kwargs common to the submodules (``q_lora_rank``, ``kv_lora_rank``,
-    ``qk_nope_head_dim``, ``qk_rope_head_dim``, ``v_head_dim``,
-    ``attention_dropout``, ``attn_mask_type``, ``qkv_format``, ``topk``,
-    ``num_groups``, ``group_topk``, ``routed_scaling_factor``,
-    ``shared_expert_ffn_hidden_size``, EP options, ...) are forwarded to
-    :class:`MultiLatentAttention` and :class:`DeepSeekV3MoE`.
+    **kwargs
+             kwargs common to the submodules (``q_lora_rank``, ``kv_lora_rank``,
+             ``qk_nope_head_dim``, ``qk_rope_head_dim``, ``v_head_dim``,
+             ``attention_dropout``, ``attn_mask_type``, ``qkv_format``, ``topk``,
+             ``num_groups``, ``group_topk``, ``routed_scaling_factor``,
+             ``shared_expert_ffn_hidden_size``, EP options, ...), forwarded to
+             :class:`MultiLatentAttention` and :class:`DeepSeekV3MoE`.
     """
 
     _MLA_KWARGS = frozenset(
