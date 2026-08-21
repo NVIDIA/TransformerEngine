@@ -1715,6 +1715,12 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                         )
 
                     kv_inputs[i % 2] = p2p_comm_buffers[i]
+
+                    # Release the KV chunk from two steps back.
+                    if i >= 2 and not is_graph_capturing():
+                        p2p_comm_buffers[i - 2].record_stream(flash_attn_streams[i % 2])
+                        p2p_comm_buffers[i - 2] = None
+
                     k_part = kv_inputs[i % 2][:k_numel].view(*k_shape)
                     v_part = kv_inputs[i % 2][k_numel:].view(*v_shape)
                     q_part = q
