@@ -2023,12 +2023,29 @@ class FusedAttnFunc(torch.autograd.Function):
 
 
 class FusedAttention(torch.nn.Module):
-    """Dot product attention using cuDNN attention:
+    """Dot product attention using `cuDNN attention <https://github.com/NVIDIA/cudnn-frontend>`_:
 
     FusedAttnBackend["F16_arbitrary_seqlen"]
        cuDNN attention for FP16/BF16 with any sequence length.
     FusedAttnBackend["FP8"]
-       cuDNN attention for FP8 with any sequence length.
+       cuDNN attention for FP8 with any sequence length. It supports the following recipes, where
+       "Inputs", "Intermediates" and "Outputs" are in the format of "tensor: quantizer". The recipes
+       are implemented in transformer_engine.pytorch.cpp_extension.fused_attn.fused_attn_fwd and
+       transformer_engine.pytorch.cpp_extension.fused_attn.fused_attn_bwd.
+
+                                    Direction   Inputs                                       Intermediates  Outputs
+       DelayedScaling (DS)          forward     Q/K/V: DS                                    S: DS          O: DS
+                                    backward    Q/K/V/O (from forward), dO: DS               dP: DS         dQ/dK/dV: DS
+       Float8CurrentScaling (CS)    forward     Q/K/V: CS                                    S: DS          O: F16
+                                    backward    Q/K/V (from forward), dO: CS,
+                                                O: F16 (or CS if NVTE_DPA_FP8CS_O_in_F16=0)  dP: DS         dQ/dK/dV: F16
+       MXFP8BlockScaling (MXFP8)    forward     Q/K row, V col: MXFP8                        S: None        O: F16
+                                    backward    Q/K row+col, V row: MXFP8,
+                                                O/dO: F16, dO row+col: MXFP8                 dP: None       dQ/dK/dV: F16
+
+       For MXFP8, "row" and "col" are the quantization directions, which align with the contraction axes
+       of the matmuls that consume the tensor. For more details, please refer to
+       `How Scales Are Applied in MXFP8 Attention <https://nvidia.github.io/cudnn-frontend/mxfp8-attention-scaling/>`_.
     """
 
     def __init__(

@@ -87,21 +87,22 @@ def _context_parallel_supported():
         return False, f"needs {cp_size} GPUs"
 
     has_kernel = is_fused_attn_kernel_available(
-        True,
-        jnp.bfloat16,
-        jnp.bfloat16,
-        QKVLayout.THD_THD_THD,
-        AttnBiasType.NO_BIAS,
-        AttnMaskType.PADDING_CAUSAL_MASK,
-        AttnSoftmaxType.VANILLA_SOFTMAX,
-        0.0,
-        128,
-        8,
-        65536,
-        65536,
-        128,
-        128,
-        (8192, 0),
+        is_training=True,
+        batch_size=2,
+        q_dtype=jnp.bfloat16,
+        kv_dtype=jnp.bfloat16,
+        qkv_layout=QKVLayout.THD_THD_THD,
+        attn_bias_type=AttnBiasType.NO_BIAS,
+        attn_mask_type=AttnMaskType.PADDING_CAUSAL_MASK,
+        softmax_type=AttnSoftmaxType.VANILLA_SOFTMAX,
+        dropout_probability=0.0,
+        q_num_heads=128,
+        kv_num_heads=8,
+        q_max_seqlen=65536,
+        kv_max_seqlen=65536,
+        head_dim_qk=128,
+        head_dim_v=128,
+        window_size=(8192, 0),
     )
     if not has_kernel:
         return False, "no fused attention kernel for the THD SWA shape"

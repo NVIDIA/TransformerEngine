@@ -1,8 +1,12 @@
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
+import collections
+import copy
 import logging
 import os
+import re
+import subprocess
 import sys
 import pathlib
 import copy
@@ -304,6 +308,151 @@ def test_dot_product_attention(
 def test_dpa_checkpoint(dtype, model_configs, model):
     """Test DotProductAttention module with checkpointing"""
     test_dot_product_attention(dtype, model_configs, model, True, None, False, False)
+
+
+# One [FUSED-ATTN-CACHE] event, as either a counter line ("f16 fwd CREATE_GRAPH") or a level-2
+# trace line ("f16 fwd MISS"). Both name the thread and device first and then the build site, of
+# which the backend half is matched but not counted on: the worker below drives whichever one its
+# dtype selects, and every assertion here holds of either. The pass and the event name are what
+# this test reads, plus the trace line's cache key, kept so that distinct keys can be counted.
+# Every event name is also the counter column it increments. Requiring an event name is also what
+# excludes the end-of-run summary rows, which are otherwise the same shape. The rank prefix is
+# optional because it is emitted only when the launcher exports a rank, which a plain subprocess
+# like the worker does not.
+_CACHE_EVENT = re.compile(
+    r"\[FUSED-ATTN-CACHE\]\s+(?:rank=\d+\s+\|\s+)?tid=\d+\s+dev=-?\d+\s+\|\s+"
+    r"(?P<backend>f16|fp8)\s+(?P<pass>fwd|bwd)\s+"
+    r"(?P<event>CREATE_GRAPH|CACHE_GRAPH|BUILD_PLANS|EXECUTE|MISS|HIT)\b(?P<rest>.*)"
+)
+_CACHE_PHASE = re.compile(r"\[CACHE-TEST\] phase=(?P<name>\w+)")
+
+
+def _parse_cache_events(stderr: str):
+    """Group the worker's cache diagnostics by the phase that produced them.
+
+    Returns (events, miss_keys): events[phase][(pass, event)] is a count, and
+    miss_keys[phase][pass] is the set of distinct cache keys that missed, so that "one extra
+    graph" can be told apart from "the same graph rebuilt".
+    """
+    events = collections.defaultdict(collections.Counter)
+    miss_keys = collections.defaultdict(lambda: collections.defaultdict(set))
+    phase = None
+    for line in stderr.splitlines():
+        phase_match = _CACHE_PHASE.search(line)
+        if phase_match is not None:
+            phase = phase_match.group("name")
+            continue
+        event_match = _CACHE_EVENT.search(line)
+        if event_match is None or phase is None:
+            continue
+        pass_name, event = event_match.group("pass"), event_match.group("event")
+        events[phase][(pass_name, event)] += 1
+        if event == "MISS":
+            miss_keys[phase][pass_name].add(event_match.group("rest").split("|")[-1].strip())
+    return events, miss_keys
+
+
+@pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
+def test_fused_attn_graph_cache():
+    """Test that the cuDNN graph cache is hit when it should be, and missed when it must be.
+
+    A cuDNN graph build is the most expensive thing in a fused-attention call, so what this
+    checks is that each distinct configuration pays for one and no more: that a support query
+    builds the graph an execution then reuses, that a field the graph does not read (here
+    softmax_scale, which the key normalizes away) does not multiply the cache, and that a
+    field it does read still gets its own graph. The counters come from
+    NVTE_FUSED_ATTN_CACHE_DEBUG, which is also what a user would reach for to answer the
+    same question about their own model.
+
+    The work runs in a subprocess (run_graph_cache.py): the cache is process-wide with
+    accumulating counters, so within pytest the graphs built by other tests would be
+    indistinguishable from this test's own.
+    """
+    if torch.cuda.device_count() == 0:
+        pytest.skip("No CUDA device available.")
+
+    worker = _current_file.parent / "run_graph_cache.py"
+    result = subprocess.run(
+        [sys.executable, str(worker)],
+        env={
+            **os.environ,
+            # Level 2: the per-lookup HIT/MISS lines are what make the hits visible, and
+            # the volume is trivial for the handful of configurations below.
+            "NVTE_FUSED_ATTN_CACHE_DEBUG": "2",
+            "PYTHONUNBUFFERED": "1",
+        },
+        capture_output=True,
+        text=True,
+        timeout=900,
+        check=False,
+    )
+    assert result.returncode == 0, (
+        f"{worker.name} failed with exit code {result.returncode}\n"
+        f"--- stdout ---\n{result.stdout}\n--- stderr (tail) ---\n{result.stderr[-4000:]}"
+    )
+    if "[CACHE-TEST] fused=1" not in result.stdout:
+        pytest.skip("No cuDNN fused attention backend for the graph cache test config.")
+
+    events, miss_keys = _parse_cache_events(result.stderr)
+    context = f"\n--- stderr ---\n{result.stderr[-8000:]}"
+    for phase in ("query", "requery", "exec", "rescale", "reshape"):
+        assert phase in events, f"worker emitted no cache events for phase {phase}{context}"
+
+    # Both passes are queried by one call and executed by one forward/backward pair, so each
+    # of them sees the same sequence of events.
+    for pass_name in ("fwd", "bwd"):
+
+        def count(phase, event, pass_name=pass_name):
+            return events[phase][(pass_name, event)]
+
+        # The first query builds each pass's graph, and no more than its graph: a support
+        # query stops at check_support(), leaving the kernel compilation (BUILD_PLANS) to
+        # whoever executes it. A build cuDNN refused would show up here as the miss without
+        # the build, since nothing is recorded for a refusal.
+        assert count("query", "MISS") == 1, f"{pass_name}: expected one cold miss{context}"
+        assert count("query", "CREATE_GRAPH") == 1, f"{pass_name}: expected one build{context}"
+        assert count("query", "BUILD_PLANS") == 0, f"{pass_name}: query compiled kernels{context}"
+        # The graph cuDNN took, which is the one the execution phases below go on to find. A
+        # build refused by check_support() would show up here as CREATE_GRAPH without this.
+        assert count("query", "CACHE_GRAPH") == 1, f"{pass_name}: build was not cached{context}"
+
+        # Asking the identical question again must cost nothing.
+        assert count("requery", "MISS") == 0, f"{pass_name}: repeated query missed{context}"
+        assert (
+            count("requery", "CREATE_GRAPH") == 0
+        ), f"{pass_name}: repeated query rebuilt{context}"
+        assert count("requery", "HIT") >= 1, f"{pass_name}: repeated query never looked{context}"
+
+        # The execution must find the graph the query left behind -- a miss here is the
+        # probe/execute key drift this cache is most likely to develop -- and it is what
+        # finishes the build, exactly once.
+        assert (
+            count("exec", "MISS") == 0
+        ), f"{pass_name}: execution missed the query's graph{context}"
+        assert (
+            count("exec", "CREATE_GRAPH") == 0
+        ), f"{pass_name}: execution rebuilt the graph{context}"
+        assert count("exec", "EXECUTE") >= 1, f"{pass_name}: fused attention never ran{context}"
+        assert count("exec", "BUILD_PLANS") == 1, f"{pass_name}: expected one plan build{context}"
+
+        # softmax_scale reaches the graph as a pointer, not as a shape, so the key drops it:
+        # a different scale has to reuse everything, down to the compiled kernels.
+        assert count("rescale", "MISS") == 0, f"{pass_name}: attn_scale changed the key{context}"
+        assert (
+            count("rescale", "CREATE_GRAPH") == 0
+        ), f"{pass_name}: attn_scale forced a build{context}"
+        assert count("rescale", "BUILD_PLANS") == 0, f"{pass_name}: attn_scale recompiled{context}"
+        assert (
+            count("rescale", "EXECUTE") >= 1
+        ), f"{pass_name}: rescaled run did not execute{context}"
+
+        # max_seqlen is a dimension the graph is built at, so it must miss -- once, for one
+        # new graph, rather than invalidating what is already cached.
+        assert count("reshape", "MISS") == 1, f"{pass_name}: expected one miss{context}"
+        assert count("reshape", "CREATE_GRAPH") == 1, f"{pass_name}: expected one build{context}"
+        assert (
+            len(miss_keys["reshape"][pass_name]) == 1
+        ), f"{pass_name}: more than one new cache key{context}"
 
 
 model_configs_max_logit = {
@@ -642,6 +791,9 @@ def test_dpa_softmax(dtype, model_configs, model):
 @pytest.mark.parametrize("model", model_configs_softmax.keys())
 def test_dpa_softmax_thd(dtype, model_configs, model):
     """Test DotProductAttention module with different softmax types"""
+    config = model_configs[model]
+    if "padding" not in config.attn_mask_type:
+        pytest.skip(f"Duplicate test to others with THD and padding mask.")
     test_dot_product_attention(dtype, model_configs, model, True, "thd_thd_thd", False, False)
 
 
@@ -912,6 +1064,9 @@ model_configs_swa = {
 @pytest.mark.parametrize("qkv_layout", ["thd_thd_thd", "sbhd_sbhd_sbhd"])
 def test_dpa_sliding_window(dtype, model_configs, model, qkv_layout):
     """Test DotProductAttention module with sliding window attention"""
+    config = model_configs[model]
+    if qkv_layout == "thd_thd_thd" and "padding" not in config.attn_mask_type:
+        pytest.skip(f"Duplicate test to others with THD and padding mask.")
     test_dot_product_attention(dtype, model_configs, model, False, qkv_layout, True, False)
 
 
@@ -1954,12 +2109,24 @@ def test_dpa_fp8_extra_state(model, dtype):
     config = model_configs_fp8_extra_state[model]
     # Test backend availability
     is_training = True
+    fp8_recipe = recipe.DelayedScaling(
+        margin=0,
+        fp8_format=recipe.Format.HYBRID,
+        amax_history_len=1,
+        amax_compute_algo="most_recent",
+        fp8_dpa=True,
+    )
+    fp8_meta = {}
+    fp8_meta["recipe"] = fp8_recipe
     available_backends, _, fused_attn_backends = get_available_attention_backends(
         config,
         qkv_dtype=torch.float8_e4m3fn,
+        nominal_dtype=dtype,
         qkv_layout="sb3hd",
         is_training=is_training,
         deterministic=_deterministic,
+        fp8=True,
+        fp8_meta=fp8_meta,
     )
     flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
     if not fused_attn_supported and not flash_attn_supported:
@@ -2155,6 +2322,9 @@ def test_mha_fp8_vs_f16(
     scaling_mode,
 ):
     """Test MultiHeadAttention module in FP8"""
+    if not is_training and fp8_dpa_bwd:
+        pytest.skip("fp8_dpa_bwd=True not applicable for inference")
+
     os.environ["NVTE_FP8_DPA_BWD"] = "1" if fp8_dpa_bwd else "0"
     config = model_configs_fp8_vs_f16[model]
 
@@ -2185,6 +2355,7 @@ def test_mha_fp8_vs_f16(
     available_backends, _, _ = get_available_attention_backends(
         config,
         qkv_dtype=torch.float8_e4m3fn,
+        nominal_dtype=dtype,
         qkv_layout=qkv_format.replace("hd", "h3d"),
         fp8=True,
         fp8_meta=fp8_meta,
@@ -2312,6 +2483,8 @@ def _run_mha_fp8_vs_f16(
             attention_type="self",
             qkv_weight_interleaved=True,
             qkv_format=qkv_format,
+            window_size=config.window_size,
+            softmax_type=config.softmax_type,
         ).to(dtype=dtype, device="cuda")
         if not is_training:
             mha = mha.eval()
@@ -2403,6 +2576,10 @@ def _run_mha_fp8_vs_f16(
 def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training, scaling_mode):
     """Test DotProductAttention module in FP8"""
     config = model_configs_fp8_vs_f16[model]
+    if config.num_heads != config.num_gqa_groups and "3" in qkv_layout:
+        pytest.skip("qkv_layout not applicable for MQA/GQA")
+    if not is_training and fp8_dpa_bwd:
+        pytest.skip("fp8_dpa_bwd=True not applicable for inference")
 
     # TODO(cyang): think of another way to verify dropout results
     # test cuDNN FP8 dropout
@@ -2442,6 +2619,7 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training, scal
     available_backends, _, _ = get_available_attention_backends(
         config,
         qkv_dtype=torch.float8_e4m3fn,
+        nominal_dtype=dtype,
         qkv_layout=qkv_layout,
         fp8=True,
         fp8_meta=fp8_meta,
@@ -2461,8 +2639,6 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training, scal
         pytest.skip("No FP8 attention backend available.")
     if not fused_attn_supported_f16:
         pytest.skip("No reference backend available.")
-    if config.num_heads != config.num_gqa_groups and "3" in qkv_layout:
-        pytest.skip("qkv_layout not applicable for MQA/GQA")
 
     if flash_attn_supported:
         os.environ["NVTE_FLASH_ATTN"] = "1"
@@ -2751,10 +2927,22 @@ def test_custom_mha_fp8_vs_f16(dtype, model):
 
     # Test backend availability
     is_training = True
+    fp8_meta = {}
+    fp8_recipe = recipe.DelayedScaling(
+        margin=0,
+        fp8_format=recipe.Format.HYBRID,
+        amax_history_len=1,
+        amax_compute_algo="most_recent",
+        fp8_dpa=True,
+    )
+    fp8_meta["recipe"] = fp8_recipe
     available_backends, _, fused_attn_backends = get_available_attention_backends(
         config,
         qkv_dtype=torch.float8_e4m3fn,
+        nominal_dtype=dtype,
         qkv_layout="bs3hd",
+        fp8=True,
+        fp8_meta=fp8_meta,
         is_training=is_training,
         deterministic=_deterministic,
     )
@@ -2832,6 +3020,7 @@ def _run_custom_mha_fp8(dtype, config, backend):
         fp8_format=recipe.Format.HYBRID,
         amax_history_len=1,
         amax_compute_algo="most_recent",
+        fp8_dpa=True,
     )
 
     mha = Custom_MHA_FP8(config).to(dtype=dtype, device="cuda")

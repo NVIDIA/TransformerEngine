@@ -190,17 +190,31 @@ backend-selection overview.
    :Default: ``1``
    :Description: Enable or disable UnfusedDotProductAttention backend (native PyTorch). When set to ``0``, UnfusedDotProductAttention will not be used.
 
-.. envvar:: NVTE_FUSED_ATTN_BACKEND
-
-   :Type: ``int`` (1 or 2)
-   :Default: Auto-selected
-   :Description: Request a cuDNN FusedAttention backend when that request is supported by the active fused-attention path. ``1`` = F16_arbitrary_seqlen (cuDNN, any seq len), ``2`` = FP8 backend. If not set, the backend is automatically selected based on the input configuration. BF16/FP16 attention uses sub-backend ``1`` when eligible. FP8 attention uses sub-backend ``2`` when FP8 DPA is enabled and supported by the architecture, cuDNN version, and input configuration.
-
 .. envvar:: NVTE_FUSED_ATTN_USE_FAv2_BWD
 
    :Type: ``int`` (0 or 1)
    :Default: ``0``
    :Description: When using FusedAttention, use FlashAttention-2 implementation for the backward pass instead of the cuDNN implementation. This can be useful due to performance differences between various versions of flash-attn and FusedAttention.
+
+.. envvar:: NVTE_FUSED_ATTN_CACHE_DEBUG
+
+   :Type: ``int`` (0, 1 or 2), optionally followed by ``:<ranks>``
+   :Default: ``0``
+   :Description: Enable diagnostic logging for the FusedAttention graph cache (covers both the F16 and FP8 kernels, forward and backward). Output goes to stderr, prefixed ``[FUSED-ATTN-CACHE]``.
+
+      ``1`` emits one line per event that happens once per distinct cache key -- ``CREATE_GRAPH`` when a graph is constructed, ``CACHE_GRAPH`` when cuDNN has agreed to run it, ``BUILD_PLANS`` when its kernels are compiled on first execution -- plus an end-of-run summary block (one row per build site, per thread and in total, plus a row per pass across the backends if a run used both) and a breakdown of cuDNN graph-build timings. This is enough to diagnose redundant graph rebuilds and to profile build cost. Every event name is also the counter column it increments, so each line can be read against the running totals it carries.
+
+      Every line names the thread and device it came from, then the build site behind it -- ``f16`` or ``fp8``, then the pass -- and carries the counters of that site alone, so a process that uses both backends can still tell which of them built what. One line is one pass; the forward and the backward read as adjacent rows. A summary row is an event line without the event name, the block is delimited by ``===== summary begin =====`` and ``===== summary end =====``, and ``tid=all dev=all`` marks the totals. A build site the run never reached is left out rather than shown as a row of zeros.
+
+      ``hit`` and ``miss`` account for every lookup. A miss builds a graph, counted in ``create_graph``, and keeps it only if cuDNN agrees to run it, counted in ``cache_graph``; so the columns fall ``miss`` >= ``create_graph`` >= ``cache_graph``. ``create_graph`` minus ``cache_graph`` is graphs cuDNN refused to run. Nothing is cached for them, so this counts rejected builds rather than rejected configurations: a configuration that is queried again is built and rejected again. A site whose ``cache_graph`` stays put while ``miss`` climbs never runs fused and keeps paying to find that out, which makes these the columns to read when attention is slower than expected and nothing raised an error -- and at level 1, a ``CREATE_GRAPH`` line with no ``CACHE_GRAPH`` after it is one such rejection as it happens. The reason cuDNN gave is not logged here; it reaches the framework as the message explaining why the fused backend was not selected. ``miss`` and ``create_graph`` should agree: configurations FusedAttention itself does not serve are refused before any graph is built, and reported as that same message, so a gap between those two columns means a graph build failed where none was expected to.
+
+      ``2`` additionally emits a per-lookup ``HIT``/``MISS`` line carrying the full cache key, and a per-execution ``EXECUTE`` line. Diffing two ``MISS`` lines names the fields that cost the extra build. These fire on every lookup and execution, so at test-suite scale they add I/O and serialize threads on the stderr lock; prefer ``1`` unless you need to see which shapes are missing.
+
+      Each line is written after the cache lock is released rather than under it, so that no thread waits on stderr while holding the cache. With several threads active this means the lines can appear in a different order than the lookups they report; the counters each line carries still increase in event order, and lines from a single thread are still in that thread's order.
+
+      By default only rank 0 emits, so that output does not scale with the world size. Append ``:<ranks>`` to override -- ``1:all`` for every rank, ``2:0,3`` for a specific set. Worth overriding under context parallelism, where the ranks genuinely run different configurations.
+
+      Has negligible overhead when unset.
 
 .. envvar:: NVTE_ALLOW_NONDETERMINISTIC_ALGO
 

@@ -53,6 +53,9 @@ from utils import assert_allclose, print_debug_tensor_stats
 # Get determinism
 _deterministic = not bool(int(os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1")))
 
+# CI test level
+_TEST_LEVEL = os.getenv("NVTE_JAX_UNITTEST_LEVEL", "L0")
+
 
 @pytest.fixture(autouse=True, scope="module")
 def init():
@@ -469,6 +472,27 @@ class FusedAttnRunner:
             return 1
 
     def _check_configs(self):
+        # Trim SWA configs for L0 and L1 to reduce test time; need to trim more in future test refactoring.
+        if self.window_size is not None and (
+            self.dropout_prob != 0.0 or self.attn_bias_type is not AttnBiasType.NO_BIAS
+        ):
+            if _TEST_LEVEL == "L0" and (
+                self.softmax_type != AttnSoftmaxType.VANILLA_SOFTMAX
+                or self.dtype != jnp.bfloat16
+                or self.attn_bias_type is not AttnBiasType.POST_SCALE_BIAS
+                or self.attn_mask_type is not AttnMaskType.NO_MASK
+            ):
+                pytest.skip(
+                    "Trimmed SWA+bias/dropout config: only vanilla-softmax + bf16 + post_scale_bias"
+                    " + no-mask runs at L0"
+                )
+            if _TEST_LEVEL == "L1" and (
+                self.dtype != jnp.float16 or self.softmax_type != AttnSoftmaxType.LEARNABLE_SOFTMAX
+            ):
+                pytest.skip(
+                    "Trimmed SWA+bias/dropout config: only float16 + learnable-softmax runs at L1"
+                )
+
         # TODO(KshitijLakhani): probably add/move this to is_fused_attn_available
         if self.qkv_layout.is_thd() and not self.attn_mask_type.is_padding():
             pytest.skip("THD format requires padding masks.")
@@ -571,8 +595,21 @@ class FusedAttnRunner:
                 "is either BSHD_BSHD_BSHD or THD_THD_THD"
             )
 
-        self.backend = FusedAttnHelper(
+        bias_batch = bias_heads = bias_seqlen_q = bias_seqlen_kv = None
+        if self.attn_bias_type == AttnBiasType.POST_SCALE_BIAS:
+            if self.bias_shape == BiasShape._1HSS:
+                bias_batch, bias_heads = 1, self.num_heads_q
+            elif self.bias_shape == BiasShape._B1SS:
+                bias_batch, bias_heads = self.batch_size, 1
+            elif self.bias_shape == BiasShape._BHSS:
+                bias_batch, bias_heads = self.batch_size, self.num_heads_q
+            elif self.bias_shape == BiasShape._11SS:
+                bias_batch, bias_heads = 1, 1
+            bias_seqlen_q, bias_seqlen_kv = self.max_seqlen_q, self.max_seqlen_kv
+
+        self.backend, message = FusedAttnHelper(
             self.is_training,
+            self.batch_size,
             self.dtype,
             self.dtype,
             self.qkv_layout,
@@ -587,9 +624,14 @@ class FusedAttnRunner:
             self.head_dim_qk,
             self.head_dim_v,
             (-1, -1) if self.window_size is None else self.window_size,
+            self.attn_mask_type.is_bottom_right(),
+            bias_batch=bias_batch,
+            bias_heads=bias_heads,
+            bias_seqlen_q=bias_seqlen_q,
+            bias_seqlen_kv=bias_seqlen_kv,
         ).get_fused_attn_backend()
         if self.backend != NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen:
-            pytest.skip("Unsupported inputs combination or device compute capability.")
+            pytest.skip(message)
 
         if (
             self.attn_bias_type == AttnBiasType.POST_SCALE_BIAS

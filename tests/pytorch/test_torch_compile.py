@@ -1269,7 +1269,7 @@ def test_get_attention_backend_traceable(monkeypatch):
     monkeypatch.setattr(
         dpa_utils.tex,
         "get_fused_attn_backend",
-        lambda *args: dpa_utils.FusedAttnBackend["No_Backend"],
+        lambda *args: (tex.NVTE_Fused_Attn_Backend.NVTE_No_Backend, "disabled by test"),
     )
 
     def fn_no_backend(x, params):

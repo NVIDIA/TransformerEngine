@@ -4921,6 +4921,103 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         )
 
 
+def cp_per_step_configs(
+    cp_comm_type,
+    cp_size,
+    cp_size_a2a,
+    *,
+    max_seqlen_q,
+    max_seqlen_kv,
+    num_tokens_q,
+    num_tokens_kv,
+    num_heads,
+    num_gqa_groups,
+    attn_mask_type,
+    window_size,
+    bottom_right_diagonal,
+):
+    """Per-step attention configs a context-parallel run dispatches to its attention backend.
+
+    CP runs attention in multiple steps, each with a distinct config (e.g. mask, and seqlens)
+    that differs from the single global config. This function returns the list of those distinct
+    per-step configs so `get_attention_backend` can check if the backend supports all of them.
+    """
+    is_causal = "causal" in attn_mask_type
+    padding_or_no_mask = "padding" if "padding" in attn_mask_type else "no_mask"
+    window_left, window_right = window_size
+
+    def config(mask, s_q, s_kv, heads, gqa, bottom_right, t_q, t_kv, window=None):
+        w_left, w_right = window if window is not None else (window_left, window_right)
+        return {
+            "attn_mask_type": mask,
+            "max_seqlen_q": s_q,
+            "max_seqlen_kv": s_kv,
+            "num_tokens_q": t_q,
+            "num_tokens_kv": t_kv,
+            "num_attn_heads": heads,
+            "num_gqa_groups": gqa,
+            "window_size_left": w_left,
+            "window_size_right": w_right,
+            "bottom_right_diagonal": bottom_right,
+        }
+
+    if cp_comm_type == "a2a":
+        # split heads across the cp ranks
+        return [
+            config(
+                attn_mask_type,
+                max_seqlen_q,
+                max_seqlen_kv,
+                num_heads // cp_size,
+                num_gqa_groups // cp_size,
+                bottom_right_diagonal,
+                num_tokens_q * cp_size,
+                num_tokens_kv * cp_size,
+            )
+        ]
+
+    if cp_comm_type == "all_gather":
+        # one short Q chunk vs a growing KV chunk; causal -> causal_bottom_right
+        s_q = max_seqlen_q // (2 * cp_size)
+        s_kv_chunk = max_seqlen_kv // (2 * cp_size)
+        mask, br = attn_mask_type, bottom_right_diagonal
+        if is_causal and "bottom_right" not in attn_mask_type:
+            mask, br = attn_mask_type + "_bottom_right", True
+        # Each step narrows max_seqlen_*, but the token counts it dispatches with are the
+        # rank's full Q tokens and the all-gathered KV tokens, unchanged across steps.
+        # Scaling them per step would key the probe's graph differently from the one the
+        # step looks up, and rebuild every graph this probes at execution time.
+        t_q = num_tokens_q
+        t_kv = num_tokens_kv * cp_size
+        # s_kv ranges from s_kv_chunk, i*s_kv_chunk, ..., max_seqlen_kv
+        # check a single chunk and the full KV
+        return [
+            config(mask, s_q, s_kv, num_heads, num_gqa_groups, br, t_q, t_kv)
+            for s_kv in dict.fromkeys([s_kv_chunk, max_seqlen_kv])
+        ]
+
+    # p2p and a2a+p2p: split heads across the a2a subgroup, and ring over the p2p subgroup
+    p2p_size = cp_size // cp_size_a2a
+    heads = num_heads // cp_size_a2a
+    gqa = num_gqa_groups // cp_size_a2a
+    r_q = max_seqlen_q // p2p_size
+    r_kv = max_seqlen_kv // p2p_size
+    # The tensors handed to this rank already correspond to (r_q, r_kv), so the token counts
+    # need no rescaling here; they only follow the halving below.
+    t_q, t_kv = num_tokens_q, num_tokens_kv
+    if not is_causal:
+        return [config(attn_mask_type, r_q, r_kv, heads, gqa, bottom_right_diagonal, t_q, t_kv)]
+    return [
+        config(attn_mask_type, r_q, r_kv, heads, gqa, bottom_right_diagonal, t_q, t_kv),  # diagonal
+        config(
+            padding_or_no_mask, r_q, r_kv // 2, heads, gqa, bottom_right_diagonal, t_q, t_kv // 2
+        ),  # lower-triangle
+        config(
+            padding_or_no_mask, r_q // 2, r_kv, heads, gqa, bottom_right_diagonal, t_q // 2, t_kv
+        ),  # upper-triangle
+    ]
+
+
 def attn_forward_func_with_cp(
     is_training,
     q,
