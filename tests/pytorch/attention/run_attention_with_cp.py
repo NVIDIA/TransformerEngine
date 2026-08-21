@@ -517,7 +517,7 @@ def run_dpa_with_cp(
         torch.cuda.Stream(),
         cp_comm_type,
     )
-    if config.softmax_type != "vanilla":
+    if is_training and config.softmax_type != "vanilla":
         core_attn.softmax_offset.grad.zero_()
     if dtype == "fp8":
         core_attn.fp8_initialized = False
@@ -690,7 +690,6 @@ def run_dpa_with_cp(
                             )
         else:
             out = out.index_select(0, seq_idx_q).contiguous()
-            out_ = out_
 
     atol, rtol, rmse_tol = get_tols(config, dtype)
     tensors_cp = [out_, dq_, dk_, dv_, dbias_, d_softmax_offset_, max_logit_]
