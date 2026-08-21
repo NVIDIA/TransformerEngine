@@ -121,9 +121,9 @@ def _run_case(
 
     if api == "tp" and partition_dim is None:
         # Replicated inputs are sharded along the larger dimension for cuSolverMp.
-        assert max(m, n) % world_size == 0, (
-            f"Matrix dimension {max(m, n)} must be divisible by world_size {world_size}"
-        )
+        assert (
+            max(m, n) % world_size == 0
+        ), f"Matrix dimension {max(m, n)} must be divisible by world_size {world_size}"
     elif api == "base" or partition_dim == 1:
         # Ensure the distributed column dimension is divisible by world_size.
         assert (
