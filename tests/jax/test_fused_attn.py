@@ -949,7 +949,7 @@ class FusedAttnRunner:
         self.seq_length_offset_pspec = PartitionSpec(self.mesh_resource.dp_resource, None)
         self.seq_length_offset_sharding = NamedSharding(self.mesh, self.seq_length_offset_pspec)
 
-    def test_forward(self):
+    def test_forward(self, return_max_logit=False, check_output=True):
         """
         Test forward with JITted primitive and unJITted reference
         """
@@ -997,6 +997,7 @@ class FusedAttnRunner:
             "score_mod_bprop": self.score_mod_bprop,
             "score_mod_tensors": self.score_mod_tensors,
             "score_mod_bprop_tensors": self.score_mod_bprop_tensors,
+            "return_max_logit": return_max_logit,
         }
         reference_kwargs = {**kwargs, "score_mod_reference": self.score_mod_reference}
 
@@ -1016,31 +1017,40 @@ class FusedAttnRunner:
 
         with self.mesh, autocast(mesh_resource=self.mesh_resource):
             primitive_out = customcall_fused_dpa_jit(*customcall_args)
+            if return_max_logit:
+                primitive_out, primitive_aux = primitive_out
+                primitive_max_logit = primitive_aux["max_logit"]
             primitive_out = self.cp_inverse_reorder_fn(primitive_out)
 
-        reference_out = jax_dpa(*args, **reference_kwargs)
+        if return_max_logit:
+            reference_max_logit = jax_dpa(
+                *args, is_max_logit_enabled=True, **reference_kwargs
+            )
 
-        if self.is_training and self.dropout_prob > 0.0:
-            return
+        if check_output and not (self.is_training and self.dropout_prob > 0.0):
+            reference_out = jax_dpa(*args, **reference_kwargs)
 
-        primitive_valid, primitive_invalid, reference_valid, reference_invalid = (
-            _split_valid_and_invalid(primitive_out, reference_out, self.pad_q)
-        )
+            primitive_valid, primitive_invalid, reference_valid, _ = _split_valid_and_invalid(
+                primitive_out, reference_out, self.pad_q
+            )
 
-        assert_allclose(
-            primitive_invalid,
-            jnp.zeros_like(primitive_invalid),
-            rtol=self.rtol,
-            atol=self.atol,
-            dtype=self.dtype,
-        )
-        assert_allclose(
-            primitive_valid,
-            reference_valid,
-            rtol=self.rtol,
-            atol=self.atol,
-            dtype=self.dtype,
-        )
+            assert_allclose(
+                primitive_invalid,
+                jnp.zeros_like(primitive_invalid),
+                rtol=self.rtol,
+                atol=self.atol,
+                dtype=self.dtype,
+            )
+            assert_allclose(
+                primitive_valid,
+                reference_valid,
+                rtol=self.rtol,
+                atol=self.atol,
+                dtype=self.dtype,
+            )
+
+        if return_max_logit:
+            assert_allclose(primitive_max_logit, reference_max_logit, dtype=self.dtype)
 
         if self.coll_count_ref is not None:
             with self.mesh, autocast(mesh_resource=self.mesh_resource):
@@ -1049,7 +1059,7 @@ class FusedAttnRunner:
                 )
             assert_equal_collectives(target_hlo, self.coll_count_ref)
 
-    def test_backward(self):
+    def test_backward(self, return_max_logit=False):
         """
         Test value_and_grad with JIT, which includes both forward and backward.
 
@@ -1077,6 +1087,8 @@ class FusedAttnRunner:
             if self.attn_mask_type.is_causal():
                 gradient_multiplier /= 10
             output = func(q, k, v, bias, softmax_offset, sequence_descriptor, dropout_rng, **kwargs)
+            if isinstance(output, tuple):
+                output, _ = output
             if cp_reverse_out:
                 output = self.cp_inverse_reorder_fn(output)
             # Keep only valid result for the gradient
@@ -1142,6 +1154,7 @@ class FusedAttnRunner:
             "score_mod_bprop": self.score_mod_bprop,
             "score_mod_tensors": self.score_mod_tensors,
             "score_mod_bprop_tensors": self.score_mod_bprop_tensors,
+            "return_max_logit": return_max_logit,
         }
         reference_kwargs = {**kwargs, "score_mod_reference": self.score_mod_reference}
 
@@ -1291,149 +1304,130 @@ class FusedAttnRunner:
                 target_hlo = jitted_primitive.lower(*customcall_args).compile().as_text()
             assert_equal_collectives(target_hlo, self.coll_count_ref)
 
-    def _reference_args(self):
-        return [self.q, self.k, self.v, self.bias, self.softmax_offset, self.mask, self.dropout_rng]
-
-    def _customcall_args(self):
-        return [
-            jax.device_put(self.cp_reorder_fn(self.q), self.qkvo_sharding),
-            jax.device_put(self.cp_reorder_fn(self.k), self.qkvo_sharding),
-            jax.device_put(self.cp_reorder_fn(self.v), self.qkvo_sharding),
-            jax.device_put(self.bias, self.bias_sharding),
-            jax.device_put(self.softmax_offset, self.softmax_offset_sharding),
-            jax.device_put(self.sequence_desciptor, self.seq_desc_sharding),
-            jax.device_put(self.dropout_rng, self.dropout_rng_sharding),
-        ]
-
-    def _fused_attn_kwargs(self, **overrides):
-        kwargs = {
-            "attn_bias_type": self.attn_bias_type,
-            "attn_mask_type": self.attn_mask_type,
-            "softmax_type": self.softmax_type,
-            "scaling_factor": self.scaling_factor,
-            "dropout_probability": self.dropout_prob,
-            "is_training": self.is_training,
-            "qkv_layout": self.qkv_layout,
-            "max_segments_per_seq": self._get_max_segments_per_sequence(),
-            "window_size": self.window_size,
-            "context_parallel_strategy": self.cp_strategy,
-            "context_parallel_causal_load_balanced": self.cp_load_balanced,
-            "stripe_size": self.stripe_size,
-        }
-        kwargs.update(overrides)
-        return kwargs
-
     def test_forward_with_max_logit(self, check_output=True):
         """Test forward output and returned max_logit."""
-        self._setup_inputs()
-        kwargs = self._fused_attn_kwargs()
-
-        customcall_fused_dpa_jit = jit(
-            partial(customcall_fused_dpa, return_max_logit=True, **kwargs),
-            static_argnames=kwargs.keys(),
-            in_shardings=[
-                self.qkvo_sharding,
-                self.qkvo_sharding,
-                self.qkvo_sharding,
-                self.bias_sharding,
-                self.softmax_offset_sharding,
-                self.seq_desc_sharding,
-                self.dropout_rng_sharding,
-            ],
-        )
-
-        with self.mesh, autocast(mesh_resource=self.mesh_resource):
-            primitive_out, primitive_aux = customcall_fused_dpa_jit(*self._customcall_args())
-            primitive_max_logit = primitive_aux["max_logit"]
-            primitive_out = self.cp_inverse_reorder_fn(primitive_out)
-
-        reference_max_logit = jax_dpa(*self._reference_args(), is_max_logit_enabled=True, **kwargs)
-
-        if check_output:
-            reference_out = jax_dpa(*self._reference_args(), **kwargs)
-            primitive_valid, primitive_invalid, reference_valid, _ = _split_valid_and_invalid(
-                primitive_out, reference_out, self.pad_q
-            )
-            assert_allclose(primitive_invalid, jnp.zeros_like(primitive_invalid), dtype=self.dtype)
-            assert_allclose(primitive_valid, reference_valid, dtype=self.dtype)
-        assert_allclose(primitive_max_logit, reference_max_logit, dtype=self.dtype)
+        self.test_forward(return_max_logit=True, check_output=check_output)
 
     def test_backward_with_max_logit(self):
         """Ensure aux-return cotangents do not break the fused attention backward path."""
-        self._setup_inputs()
-        kwargs = self._fused_attn_kwargs()
-
-        def loss_fn(query):
-            output, _ = customcall_fused_dpa(
-                query,
-                self.k,
-                self.v,
-                self.bias,
-                self.softmax_offset,
-                self.sequence_desciptor,
-                self.dropout_rng,
-                return_max_logit=True,
-                **kwargs,
-            )
-            return jnp.mean(output.astype(jnp.float32))
-
-        grad = jax.grad(loss_fn)(self.q)
-        assert grad.shape == self.q.shape
+        self.test_backward(return_max_logit=True)
 
 
-@pytest.mark.parametrize(
-    "qkv_layout, seq_desc_format",
-    [
-        pytest.param(QKVLayout.BSHD_BSHD_BSHD, SeqDescFormat.Seqlens, id="BSHD_SEPARATE"),
-        pytest.param(QKVLayout.T3HD, SeqDescFormat.Seqlens, id="THD_QKV_PACKED"),
-    ],
-)
-def test_fused_attn_return_max_logit(qkv_layout, seq_desc_format):
-    """Check non-CP JAX fused attention can expose PyTorch-compatible max_logit."""
-    runner = FusedAttnRunner(
-        batch_size=2,
-        max_seqlen_q=128,
-        max_seqlen_kv=128,
-        num_heads_q=8,
-        num_heads_kv=8,
-        head_dim_qk=64,
-        head_dim_v=64,
-        attn_bias_type=AttnBiasType.NO_BIAS,
-        attn_mask_type=AttnMaskType.PADDING_CAUSAL_MASK,
-        softmax_type=AttnSoftmaxType.VANILLA_SOFTMAX,
-        dropout_prob=0.0,
-        dtype=jnp.bfloat16,
-        is_training=True,
-        qkv_layout=qkv_layout,
-        bias_shape=None,
-        window_size=None,
-        seq_desc_format=seq_desc_format,
+FUSED_ATTN_MAX_LOGIT_QKV_LAYOUTS = [
+    pytest.param(
+        QKVLayout.BSHD_BSHD_BSHD,
+        8,
+        8,
+        id="BSHD_SEPARATE",
+    ),
+    pytest.param(
+        QKVLayout.BS3HD,
+        8,
+        8,
+        id="BS3HD",
+    ),
+    pytest.param(
+        QKVLayout.BSHD_BS2HD,
+        8,
+        4,
+        id="BSHD_KV_PACKED-GQA",
+    ),
+    pytest.param(
+        QKVLayout.T3HD,
+        8,
+        8,
+        id="THD_QKV_PACKED",
+    ),
+    pytest.param(
+        QKVLayout.THD_THD_THD,
+        8,
+        8,
+        id="THD_SEPARATE",
+    ),
+]
+
+
+class TestFusedAttnMaxLogit:
+    """Targeted non-CP max_logit coverage."""
+
+    @staticmethod
+    @pytest.mark.parametrize(
+        "qkv_layout, num_heads_q, num_heads_kv",
+        FUSED_ATTN_MAX_LOGIT_QKV_LAYOUTS,
     )
-    runner.test_forward_with_max_logit()
-
-
-def test_fused_attn_return_max_logit_backward_smoke():
-    """Ensure aux-return cotangents do not break the fused attention backward path."""
-    runner = FusedAttnRunner(
-        batch_size=2,
-        max_seqlen_q=128,
-        max_seqlen_kv=128,
-        num_heads_q=8,
-        num_heads_kv=8,
-        head_dim_qk=64,
-        head_dim_v=64,
-        attn_bias_type=AttnBiasType.NO_BIAS,
-        attn_mask_type=AttnMaskType.PADDING_CAUSAL_MASK,
-        softmax_type=AttnSoftmaxType.VANILLA_SOFTMAX,
-        dropout_prob=0.0,
-        dtype=jnp.bfloat16,
-        is_training=True,
-        qkv_layout=QKVLayout.BSHD_BSHD_BSHD,
-        bias_shape=None,
-        window_size=None,
-        seq_desc_format=SeqDescFormat.Seqlens,
+    @pytest.mark.parametrize(
+        "attn_bias_type, bias_shape",
+        [
+            pytest.param(AttnBiasType.NO_BIAS, None, id="NO_BIAS"),
+            pytest.param(
+                AttnBiasType.POST_SCALE_BIAS,
+                BiasShape._1HSS,
+                id="POST_SCALE_BIAS-1HSS",
+            ),
+        ],
     )
-    runner.test_backward_with_max_logit()
+    @pytest.mark.parametrize(
+        "attn_mask_type",
+        [
+            pytest.param(AttnMaskType.NO_MASK, id="NO_MASK"),
+            pytest.param(AttnMaskType.PADDING_MASK, id="PADDING_MASK"),
+            pytest.param(AttnMaskType.CAUSAL_MASK, id="CAUSAL_MASK"),
+            pytest.param(AttnMaskType.PADDING_CAUSAL_MASK, id="PADDING_CAUSAL_MASK"),
+        ],
+    )
+    def test_forward(
+        qkv_layout,
+        num_heads_q,
+        num_heads_kv,
+        attn_bias_type,
+        bias_shape,
+        attn_mask_type,
+    ):
+        """Check non-CP JAX fused attention can expose framework-compatible max_logit."""
+        runner = FusedAttnRunner(
+            batch_size=2,
+            max_seqlen_q=128,
+            max_seqlen_kv=128,
+            num_heads_q=num_heads_q,
+            num_heads_kv=num_heads_kv,
+            head_dim_qk=64,
+            head_dim_v=64,
+            attn_bias_type=attn_bias_type,
+            attn_mask_type=attn_mask_type,
+            softmax_type=AttnSoftmaxType.VANILLA_SOFTMAX,
+            dropout_prob=0.0,
+            dtype=jnp.bfloat16,
+            is_training=True,
+            qkv_layout=qkv_layout,
+            bias_shape=bias_shape,
+            window_size=None,
+            seq_desc_format=SeqDescFormat.Seqlens,
+        )
+        runner.test_forward(return_max_logit=True)
+
+    @staticmethod
+    def test_backward():
+        """Ensure aux-return cotangents do not break the fused attention backward path."""
+        runner = FusedAttnRunner(
+            batch_size=2,
+            max_seqlen_q=128,
+            max_seqlen_kv=128,
+            num_heads_q=8,
+            num_heads_kv=8,
+            head_dim_qk=64,
+            head_dim_v=64,
+            attn_bias_type=AttnBiasType.NO_BIAS,
+            attn_mask_type=AttnMaskType.PADDING_CAUSAL_MASK,
+            softmax_type=AttnSoftmaxType.VANILLA_SOFTMAX,
+            dropout_prob=0.0,
+            dtype=jnp.bfloat16,
+            is_training=True,
+            qkv_layout=QKVLayout.BSHD_BSHD_BSHD,
+            bias_shape=None,
+            window_size=None,
+            seq_desc_format=SeqDescFormat.Seqlens,
+        )
+        runner.test_backward(return_max_logit=True)
 
 
 def _get_swa_window_size_for_test(s_kv: int, attn_mask_type: AttnMaskType) -> Tuple[int, int]:
