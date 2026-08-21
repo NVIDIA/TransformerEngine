@@ -126,10 +126,12 @@ def setup_requirements() -> Tuple[List[str], List[str]]:
         "pydantic",
         "importlib-metadata>=1.0",
         "packaging",
-        "apache-tvm-ffi>=0.1.12",
-        "nvidia-cutlass-dsl>=4.4.2",
     ]
     test_reqs: List[str] = ["pytest>=8.2.1"]
+
+    # If user opt out from CuTeDSL backend, don't introduce these dependencies
+    if bool(int(os.getenv("NVTE_WITH_CUTEDSL", "1"))):
+        install_reqs += ["apache-tvm-ffi>=0.1.12", "nvidia-cutlass-dsl>=4.4.2"]
 
     # Framework-specific requirements
     if not bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))):

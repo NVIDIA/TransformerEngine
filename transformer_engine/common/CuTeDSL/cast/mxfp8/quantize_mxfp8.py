@@ -838,6 +838,10 @@ class MXFP8QuantizeKernel(MXFP8QuantizeKernelBase):
         self.cfg = cfg
         # If the input shape is divisible by the tile size, we can skip the OOB masking in the kernel and save some instructions.
         self.SKIP_MASKING = SKIP_MASKING
+        # Only honor the noop flag when no activation or dbias is fused to match CUDA C++'s implementation
+        self.CHECK_NOOP_FLAG: cutlass.const_expr = (
+            not self.cfg.WITH_ACT and not self.cfg.WITH_DACT and not self.cfg.WITH_DBIAS
+        )
         # Cast + dbias with no activation gets the larger tile (CUDA CAST_DBIAS_ONLY).
         cast_dbias_only = cfg.WITH_DBIAS and not cfg.WITH_DACT and not cfg.WITH_ACT
         # Use a different tile size for dbias only config
@@ -1013,12 +1017,8 @@ class MXFP8QuantizeKernel(MXFP8QuantizeKernelBase):
     ):
         """Device entry: no-op the CTA when the noop flag is set, else run the quantize main loop."""
 
-        # Only honor the noop flag when no activation or dbias is fused to match CUDA C++'s implementation
-        CHECK_NOOP_FLAG: cutlass.const_expr = (
-            not self.cfg.WITH_ACT and not self.cfg.WITH_DACT and not self.cfg.WITH_DBIAS
-        )
         skip_execution = False
-        if cutlass.const_expr(CHECK_NOOP_FLAG):
+        if cutlass.const_expr(self.CHECK_NOOP_FLAG):
             skip_execution = noop_flag_is_set(mNoop)
         if not skip_execution:
             self._kernel_main(
