@@ -78,8 +78,8 @@ def _build_mul_f32x2_cvt_f32x4_to_fp8x4(fp8_dtype, relu: bool = False) -> Callab
         "mov.b64 {vs2, vs3}, vp3;\n\t"
         # cvt d, a, b => d[15:8]=fp8(a), d[7:0]=fp8(b); feed (hi, lo) so the low
         # byte holds the earlier element.
-        f"cvt.rn.satfinite{".relu" if relu else ""}.{out_op}.f32 vo0, vs1, vs0;\n\t"
-        f"cvt.rn.satfinite{".relu" if relu else ""}.{out_op}.f32 vo1, vs3, vs2;\n\t"
+        f"cvt.rn.satfinite{'.relu' if relu else ''}.{out_op}.f32 vo0, vs1, vs0;\n\t"
+        f"cvt.rn.satfinite{'.relu' if relu else ''}.{out_op}.f32 vo1, vs3, vs2;\n\t"
         "mov.b32 $0, {vo0, vo1};\n\t"
         "}"
     )
@@ -142,8 +142,8 @@ def _build_mul_f32x4_cvt_f32x4_to_fp8x4(fp8_dtype, relu: bool = False) -> Callab
         "mov.b64 {vs2, vs3}, vr1;\n\t"
         # cvt d, a, b => d[15:8]=fp8(a), d[7:0]=fp8(b); feed (hi, lo) so the low
         # byte holds the earlier element.
-        f"cvt.rn.satfinite{".relu" if relu else ""}.{out_op}.f32 vo0, vs1, vs0;\n\t"
-        f"cvt.rn.satfinite{".relu" if relu else ""}.{out_op}.f32 vo1, vs3, vs2;\n\t"
+        f"cvt.rn.satfinite{'.relu' if relu else ''}.{out_op}.f32 vo0, vs1, vs0;\n\t"
+        f"cvt.rn.satfinite{'.relu' if relu else ''}.{out_op}.f32 vo1, vs3, vs2;\n\t"
         "mov.b32 $0, {vo0, vo1};\n\t"
         "}"
     )
@@ -240,8 +240,8 @@ def _build_mul_f32x2_cvt_packed16x4_to_fp8x4(
         "mov.b64 {v4, v3}, vq1;\n\t"
         # cvt d, a, b => d[15:8]=fp8(a), d[7:0]=fp8(b); feed (hi, lo) so the
         # low byte holds the earlier element.
-        f"cvt.rn.satfinite{".relu" if relu else ""}.{out_op}.f32 vo0, v1, v2;\n\t"
-        f"cvt.rn.satfinite{".relu" if relu else ""}.{out_op}.f32 vo1, v3, v4;\n\t"
+        f"cvt.rn.satfinite{'.relu' if relu else ''}.{out_op}.f32 vo0, v1, v2;\n\t"
+        f"cvt.rn.satfinite{'.relu' if relu else ''}.{out_op}.f32 vo1, v3, v4;\n\t"
         "mov.b32 $0, {vo0, vo1};\n\t"
         "}"
     )
@@ -291,7 +291,7 @@ def cvt_f32x2_to_fp8e4m3x2(
         llvm.inline_asm(
             T.i16(),
             [val_hi.ir_value(loc=loc, ip=ip), val_lo.ir_value(loc=loc, ip=ip)],
-            f"cvt.rn.satfinite{".relu" if relu else ""}.e4m3x2.f32 $0, $1, $2;",
+            f"cvt.rn.satfinite{'.relu' if relu else ''}.e4m3x2.f32 $0, $1, $2;",
             "=h,f,f",
             has_side_effects=False,
             is_align_stack=False,
@@ -313,7 +313,7 @@ def cvt_f32x2_to_fp8e5m2x2(
         llvm.inline_asm(
             T.i16(),
             [val_hi.ir_value(loc=loc, ip=ip), val_lo.ir_value(loc=loc, ip=ip)],
-            f"cvt.rn.satfinite{".relu" if relu else ""}.e5m2x2.f32 $0, $1, $2;",
+            f"cvt.rn.satfinite{'.relu' if relu else ''}.e5m2x2.f32 $0, $1, $2;",
             "=h,f,f",
             has_side_effects=False,
             is_align_stack=False,

@@ -12,10 +12,11 @@ import torch
 
 import transformer_engine.pytorch as te
 import transformer_engine_torch as tex
-import tvm_ffi
 
 from transformer_engine.common import _get_shared_object_file
 from transformer_engine.pytorch import MXFP8Quantizer
+
+tvm_ffi = pytest.importorskip("tvm_ffi")
 
 recipe_available, reason_for_no_recipe = te.is_mxfp8_available(return_reason=True)
 
@@ -221,7 +222,7 @@ def run_test_case(method, act, shape, block_size, in_dtype, fp8_dtype, swizzled=
 
     layout = "swizzled" if swizzled else "linear"
     tag = (
-        f"{method}/{act["name"]}/{M}x{N}/{DTYPE_TO_STR[in_dtype]}/{FP8_TO_STR[fp8_dtype]}/{layout}"
+        f"{method}/{act['name']}/{M}x{N}/{DTYPE_TO_STR[in_dtype]}/{FP8_TO_STR[fp8_dtype]}/{layout}"
     )
     for name, cuda_bytes in cuda_output.items():
         assert torch.equal(

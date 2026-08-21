@@ -16,7 +16,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-import tvm_ffi
 
 from utils import assert_allclose
 
@@ -29,6 +28,8 @@ from transformer_engine.jax.quantize import (
     ScalingMode,
     helper,
 )
+
+tvm_ffi = pytest.importorskip("tvm_ffi")
 
 recipe_available, reason_for_no_recipe = helper.is_scaling_mode_supported(
     ScalingMode.MXFP8_1D_SCALING
