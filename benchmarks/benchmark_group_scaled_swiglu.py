@@ -210,9 +210,7 @@ def _compile_clamped_activation(clamp: Tuple[float, float, float]) -> Optional[C
     limit, alpha, glu_linear_offset = clamp
 
     def clamped(input_2f: torch.Tensor, prob: torch.Tensor, hidden: int) -> torch.Tensor:
-        return _scaled_clamped_swiglu_bf16(
-            input_2f, prob, hidden, limit, alpha, glu_linear_offset
-        )
+        return _scaled_clamped_swiglu_bf16(input_2f, prob, hidden, limit, alpha, glu_linear_offset)
 
     try:
         return torch.compile(clamped, dynamic=False)

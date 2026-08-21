@@ -441,8 +441,7 @@ struct ClampedSwigluArgs {
 // in the nvte entry point they call at the end.
 py::object group_scaled_swiglu_impl(const char *api_name, const at::Tensor &input_2f,
                                     const at::Tensor &prob, py::handle quantizer,
-                                    const size_t num_tensors,
-                                    std::optional<at::Tensor> first_dims,
+                                    const size_t num_tensors, std::optional<at::Tensor> first_dims,
                                     std::optional<at::Tensor> last_dims,
                                     std::optional<at::Tensor> tensor_offsets,
                                     std::optional<ClampedSwigluArgs> clamp) {
@@ -526,9 +525,8 @@ py::object group_scaled_swiglu_impl(const char *api_name, const at::Tensor &inpu
   NVTE_SCOPED_GIL_RELEASE({
     if (clamp.has_value()) {
       nvte_group_scaled_clamped_swiglu(grouped_input_tensor.data(), prob_te.data(),
-                                       grouped_output_tensor_cpp.data(), clamp->limit,
-                                       clamp->alpha, clamp->glu_linear_offset,
-                                       at::cuda::getCurrentCUDAStream());
+                                       grouped_output_tensor_cpp.data(), clamp->limit, clamp->alpha,
+                                       clamp->glu_linear_offset, at::cuda::getCurrentCUDAStream());
     } else {
       nvte_group_scaled_swiglu(grouped_input_tensor.data(), prob_te.data(),
                                grouped_output_tensor_cpp.data(), at::cuda::getCurrentCUDAStream());
