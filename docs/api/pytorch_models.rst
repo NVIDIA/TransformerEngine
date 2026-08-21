@@ -97,8 +97,8 @@ fused into the up-projections):
    * - ``mlp.shared_expert[0].weight`` / ``[2].weight``
      - ``cat([gate_proj, up_proj])`` / ``down_proj`` of ``shared_experts``
 
-See ``tests/pytorch/test_deepseek_hf.py`` for a complete, numerically
-verified mapping.
+The routed-expert fc1 layout can be produced with
+:func:`transformer_engine.pytorch.interleave_glu_tensor`.
 
 API
 ^^^
