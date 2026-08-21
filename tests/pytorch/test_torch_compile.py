@@ -4,6 +4,7 @@
 
 import abc
 import contextlib
+import warnings
 
 import pytest
 import torch
@@ -20,6 +21,8 @@ try:
     _opaque_available = True
 except ImportError:
     _opaque_available = False
+
+from torch._dynamo.utils import counters
 
 import transformer_engine.pytorch as te
 import transformer_engine_torch as tex
@@ -41,7 +44,7 @@ from transformer_engine.pytorch import (
     MXFP8Quantizer,
     NVFP4Quantizer,
 )
-from utils import recipe_id
+from utils import ModelConfig, dtype_tols, get_available_attention_backends, recipe_id
 from transformer_engine.pytorch.attention.dot_product_attention.backends import (
     UnfusedDotProductAttention,
 )
@@ -547,14 +550,628 @@ def test_unfused_dpa_torch_compile(qkv_layout):
     compiled = torch.compile(fn, fullgraph=True, mode="reduce-overhead")
 
     for _ in range(3):
+        # Compared against eager rather than only checked for finiteness: a
+        # replay reusing stale buffers would pass the latter.
         q, k, v, extra, _ = _make_unfused_qkv(qkv_layout, dtype, requires_grad=True)
-        out = compiled(q, k, v, extra)
+        inputs = (q, k, v, extra)
+        replayed = _run_and_capture(compiled, inputs, {}, [q, k, v])
+        eager = _run_and_capture(fn, inputs, {}, [q, k, v])
+        _assert_run_matches(replayed, eager, "unfused", dtype)
+
+
+# ---------------------------------------------------------------------------
+# DotProductAttention under torch.compile
+# ---------------------------------------------------------------------------
+
+
+# Model configurations, described with the same ModelConfig the eager attention
+# tests use. Which backends can run each of them is not hardcoded here --
+# get_available_attention_backends() answers that, so configurations only one
+# backend supports (arbitrary masks, biases, MLA head dims, ...) are covered
+# rather than avoided.
+def _cfg(
+    model_config,
+    qkv_format="bshd",
+    packed=None,
+    interleave_dim=-3,
+    share_cu_seqlens=False,
+    kv_cache=False,
+):
+    """A model configuration plus what DotProductAttention is handed it as.
+
+    `packed` is "qkv" or "kv" for the declarative packed inputs, interleaved at
+    `interleave_dim`, or None for separate q/k/v. `kv_cache` runs the call as a
+    decoding step against an InferenceParams KV cache.
+    """
+    return dict(
+        model_config=model_config,
+        qkv_format=qkv_format,
+        packed=packed,
+        interleave_dim=interleave_dim,
+        share_cu_seqlens=share_cu_seqlens,
+        kv_cache=kv_cache,
+    )
+
+
+def _packed_layout(qkv_format: str, packed_dim: int, interleave_dim: int) -> str:
+    """bshd + 3 @ -3 -> bs3hd; bshd + 2 @ -2 -> bsh2d; as DotProductAttention
+    derives it from the declaration."""
+    position = len(qkv_format) + interleave_dim + 1
+    return qkv_format[:position] + str(packed_dim) + qkv_format[position:]
+
+
+_DPA_COMPILE_CONFIGS = {
+    "self_bshd_causal": _cfg(ModelConfig(2, 128, 4, 64, attn_mask_type="causal")),
+    "self_sbhd_no_mask": _cfg(ModelConfig(2, 128, 4, 64, attn_mask_type="no_mask"), "sbhd"),
+    "self_bshd_swa": _cfg(ModelConfig(2, 128, 4, 64, attn_mask_type="causal", window_size=(16, 0))),
+    "gqa_bshd_causal": _cfg(ModelConfig(2, 128, 8, 64, num_gqa_groups=2, attn_mask_type="causal")),
+    "cross_bshd_no_mask": _cfg(
+        ModelConfig(2, 128, 4, 64, max_seqlen_kv=256, attn_mask_type="no_mask")
+    ),
+    "self_bshd_padding_causal": _cfg(ModelConfig(2, 128, 4, 64, attn_mask_type="padding_causal")),
+    "self_thd_padding_causal": _cfg(
+        ModelConfig(2, 128, 4, 64, attn_mask_type="padding_causal"), "thd"
+    ),
+    # Self attention naturally passes one cu_seqlens tensor for both q and kv,
+    # which flash-attn hands to two inputs of the same autograd.Function.
+    "self_thd_shared_cu_seqlens": _cfg(
+        ModelConfig(2, 128, 4, 64, attn_mask_type="padding_causal"), "thd", share_cu_seqlens=True
+    ),
+    "packed_qkv_bs3hd": _cfg(ModelConfig(2, 128, 4, 64, attn_mask_type="causal"), packed="qkv"),
+    "packed_qkv_bsh3d": _cfg(
+        ModelConfig(2, 128, 4, 64, attn_mask_type="causal"), packed="qkv", interleave_dim=-2
+    ),
+    "packed_kv_bshd_bs2hd": _cfg(ModelConfig(2, 128, 4, 64, attn_mask_type="causal"), packed="kv"),
+    "packed_kv_thd_th2d": _cfg(
+        ModelConfig(2, 128, 4, 64, attn_mask_type="padding_causal"),
+        "thd",
+        packed="kv",
+        interleave_dim=-2,
+    ),
+    # Configurations below are supported by one backend only, or take a code
+    # path of their own inside DotProductAttention.
+    "alibi_bshd_causal": _cfg(
+        ModelConfig(2, 128, 4, 64, attn_mask_type="causal", attn_bias_type="alibi")
+    ),
+    "post_scale_bias_bshd": _cfg(
+        ModelConfig(2, 128, 4, 64, attn_bias_type="post_scale_bias", bias_shape="1hss")
+    ),
+    "arbitrary_mask_bshd": _cfg(ModelConfig(2, 128, 4, 64, attn_mask_type="arbitrary")),
+    "mla_bshd_causal": _cfg(ModelConfig(2, 128, 4, 128, head_dim_v=64, attn_mask_type="causal")),
+    "sink_softmax_bshd": _cfg(
+        ModelConfig(2, 128, 4, 64, attn_mask_type="causal", softmax_type="off-by-one")
+    ),
+    # FlashAttention takes a fused sbhd->bshd split for sbh3d with a head
+    # dimension of 128 and at least 512 tokens, and a plain transpose otherwise.
+    "packed_qkv_sbh3d_fused_split": _cfg(
+        ModelConfig(4, 128, 4, 128, attn_mask_type="no_mask"),
+        "sbhd",
+        packed="qkv",
+        interleave_dim=-2,
+    ),
+    # A decoding step against a KV cache. FlashAttention 2 wants the non-paged
+    # cache length divisible by 256.
+    "kv_cache_bshd": _cfg(
+        ModelConfig(2, 8, 4, 64, max_seqlen_kv=256, attn_mask_type="padding_causal_bottom_right"),
+        kv_cache=True,
+    ),
+}
+
+
+def _qkv_layout(spec: dict) -> str:
+    qkv_format, packed = spec["qkv_format"], spec["packed"]
+    if packed is None:
+        return "_".join([qkv_format] * 3)
+    if packed == "qkv":
+        return _packed_layout(qkv_format, 3, spec["interleave_dim"])
+    return f"{qkv_format}_{_packed_layout(qkv_format, 2, spec['interleave_dim'])}"
+
+
+def _make_dpa(spec: dict, dtype: torch.dtype) -> te.DotProductAttention:
+    config = spec["model_config"]
+    if spec["kv_cache"]:
+        # KV caching addresses the cache by layer number, and a decoding step
+        # runs in inference mode.
+        return (
+            te.DotProductAttention(
+                num_attention_heads=config.num_heads,
+                kv_channels=config.kv_channels,
+                num_gqa_groups=config.num_gqa_groups,
+                qkv_format=spec["qkv_format"],
+                attn_mask_type=config.attn_mask_type,
+                layer_number=1,
+            )
+            .to(dtype=dtype, device="cuda")
+            .eval()
+        )
+    return te.DotProductAttention(
+        num_attention_heads=config.num_heads,
+        kv_channels=config.kv_channels,
+        num_gqa_groups=config.num_gqa_groups,
+        attention_dropout=config.dropout_p,
+        qkv_format=spec["qkv_format"],
+        attn_mask_type=config.attn_mask_type,
+        window_size=config.window_size,
+        attention_type=config.attn_type,
+        softmax_type=config.softmax_type,
+    ).to(dtype=dtype, device="cuda")
+
+
+def _cu_seqlens(seqlens: torch.Tensor) -> torch.Tensor:
+    cu = torch.zeros(seqlens.numel() + 1, dtype=torch.int32, device="cuda")
+    cu[1:] = torch.cumsum(seqlens, dim=0)
+    return cu
+
+
+def _make_dpa_inputs(spec: dict, dtype: torch.dtype):
+    """Build the (args, kwargs) that `DotProductAttention.forward` is called
+    with, plus the list of tensors whose gradients the test compares."""
+    config = spec["model_config"]
+    qkv_format, packed = spec["qkv_format"], spec["packed"]
+    b = config.batch_size
+    s_q, s_kv = config.max_seqlen_q, config.max_seqlen_kv
+    h, g = config.num_heads, config.num_gqa_groups
+    d_qk, d_v = config.head_dim_qk, config.head_dim_v
+    padded = "padding" in config.attn_mask_type
+
+    kwargs = {}
+    if padded:
+        # Sequences shorter than the maximum, so the padding mask is not
+        # degenerate: with all sequences full it would be all-False, and any
+        # difference in how masking is compiled would be invisible.
+        seqlens_q = torch.randint(1, s_q, [b], dtype=torch.int32, device="cuda")
+        seqlens_kv = (
+            seqlens_q
+            if config.attn_type == "self"
+            else (torch.randint(1, s_kv, [b], dtype=torch.int32, device="cuda"))
+        )
+        cu_q = _cu_seqlens(seqlens_q)
+        cu_kv = cu_q if spec["share_cu_seqlens"] else _cu_seqlens(seqlens_kv)
+        kwargs.update(cu_seqlens_q=cu_q, cu_seqlens_kv=cu_kv, max_seqlen_q=s_q, max_seqlen_kv=s_kv)
+        t_q, t_kv = int(cu_q[-1]), int(cu_kv[-1])
+    else:
+        t_q, t_kv = b * s_q, b * s_kv
+
+    def _shape(s, t, heads, head_dim):
+        return {
+            "bshd": (b, s, heads, head_dim),
+            "sbhd": (s, b, heads, head_dim),
+            "thd": (t, heads, head_dim),
+        }[qkv_format]
+
+    def _randn(shape):
+        return torch.randn(shape, dtype=dtype, device="cuda", requires_grad=True)
+
+    if spec["kv_cache"]:
+        from collections import OrderedDict
+        from transformer_engine.pytorch.attention import InferenceParams
+
+        inference_params = InferenceParams(
+            max_batch_size=b,
+            max_sequence_length=s_kv,
+            num_heads_kv=g,
+            head_dim_k=d_qk,
+            dtype=dtype,
+            qkv_format=qkv_format,
+        )
+        inference_params.allocate_memory(1)
+        inference_params.pre_step(OrderedDict((i, s_q) for i in range(b)))
+        qkv = [
+            torch.randn(_shape(s_q, t_q, heads, d_qk), dtype=dtype, device="cuda")
+            for heads in (h, g, g)
+        ]
+        # The sequence lengths come from the cache, not from cu_seqlens, and a
+        # decoding step has no gradients to compare.
+        return tuple(qkv), {"inference_params": inference_params}, []
+
+    if packed is not None:
+        # Declarative packed inputs: q/k/v are derived from one buffer by DPA
+        # itself, and the layout comes from the declaration -- the only packed
+        # layout that torch.compile supports.
+        assert h == g and d_qk == d_v, "packed inputs require uniform heads and head dims"
+        interleave_dim = spec["interleave_dim"]
+
+        def _packed(seqlen, tokens, packed_dim):
+            leading = {
+                "bshd": (b, seqlen),
+                "sbhd": (seqlen, b),
+                "thd": (tokens,),
+            }[qkv_format]
+            trailing = (packed_dim, h, d_qk) if interleave_dim == -3 else (h, packed_dim, d_qk)
+            return _randn(leading + trailing)
+
+        kwargs["qkv_interleave_dim"] = interleave_dim
+        if packed == "qkv":
+            qkv = _packed(s_q, t_q, 3)
+            kwargs["qkv_layer"] = qkv
+            grad_tensors, args = [qkv], ()
+        else:
+            q = _randn(_shape(s_q, t_q, h, d_qk))
+            kv = _packed(s_kv, t_kv, 2)
+            kwargs["kv_layer"] = kv
+            grad_tensors, args = [q, kv], (q,)
+    else:
+        q = _randn(_shape(s_q, t_q, h, d_qk))
+        k = _randn(_shape(s_kv, t_kv, g, d_qk))
+        v = _randn(_shape(s_kv, t_kv, g, d_v))
+        grad_tensors, args = [q, k, v], (q, k, v)
+
+    if config.attn_mask_type == "arbitrary":
+        kwargs["attention_mask"] = torch.zeros(b, 1, s_q, s_kv, dtype=torch.bool, device="cuda")
+    if config.attn_bias_type != "no_bias":
+        kwargs["core_attention_bias_type"] = config.attn_bias_type
+    if config.attn_bias_type == "post_scale_bias":
+        kwargs["core_attention_bias"] = torch.randn(1, h, s_q, s_kv, dtype=dtype, device="cuda")
+
+    return args, kwargs, grad_tensors
+
+
+def _skip_unsupported(
+    spec: dict, backend: str, dtype, compiled: bool = True, inference_params=None
+) -> None:
+    """Skip what the backend under test cannot run, or -- for a test that
+    compiles it -- cannot be compiled."""
+    if compiled and backend == "fused":
+        # FusedAttention's forward carries @no_torch_dynamo, so there is nothing
+        # to compile: it runs as an eager island. Drop this skip once it traces,
+        # and the tests below cover it as they do the others.
+        pytest.skip("FusedAttention is an eager island and does not compile")
+    available, _, _ = get_available_attention_backends(
+        spec["model_config"],
+        dtype,
+        _qkv_layout(spec),
+        inference_params=inference_params,
+        is_training=inference_params is None,
+    )
+    flash_supported, fused_supported, unfused_supported = available
+    supported = {
+        "flash": flash_supported,
+        "fused": fused_supported,
+        "unfused": unfused_supported,
+    }[backend]
+    if not supported:
+        pytest.skip(f"the {backend} backend does not support this configuration")
+
+
+def _force_dpa_backend(monkeypatch, backend: str) -> None:
+    """Restrict DotProductAttention to a single backend."""
+    from transformer_engine.pytorch.attention.dot_product_attention.dot_product_attention import (
+        _attention_backends,
+    )
+    from transformer_engine.pytorch.attention.dot_product_attention.utils import (
+        FlashAttentionUtils,
+    )
+
+    if backend == "flash" and not FlashAttentionUtils.is_installed:
+        pytest.skip("flash-attn is not installed")
+
+    for name, var in (
+        ("flash", "NVTE_FLASH_ATTN"),
+        ("fused", "NVTE_FUSED_ATTN"),
+        ("unfused", "NVTE_UNFUSED_ATTN"),
+    ):
+        monkeypatch.setenv(var, "1" if name == backend else "0")
+    # Backend selection is cached on the attention params only, so the env vars
+    # above are not enough to invalidate it.
+    _attention_backends["backend_selection_requires_update"] = True
+
+
+def _assert_dpa_backend(backend: str) -> None:
+    from transformer_engine.pytorch.attention.dot_product_attention.dot_product_attention import (
+        _attention_backends,
+    )
+
+    assert _attention_backends[f"use_{backend}_attention"], (
+        f"expected the {backend} backend to run, selected:"
+        f" flash={_attention_backends['use_flash_attention']},"
+        f" fused={_attention_backends['use_fused_attention']},"
+        f" unfused={_attention_backends['use_unfused_attention']}"
+    )
+
+
+def _assert_matches_eager(actual, expected, backend: str, dtype: torch.dtype) -> None:
+    """Assert a compiled result matches the eager one.
+
+    A backend that calls the same kernel either way has to match exactly:
+    compiling changes what surrounds it, not its arithmetic. The unfused
+    backend is instead built from PyTorch ops, which inductor fuses and
+    reassociates; that error scales with the softmax sums rather than with each
+    output element, hence an absolute tolerance taken from the tensor's scale.
+    """
+    if backend != "unfused":
+        torch.testing.assert_close(actual, expected, rtol=0.0, atol=0.0)
+        return
+    tols = dtype_tols(dtype)
+    torch.testing.assert_close(
+        actual,
+        expected,
+        rtol=tols["rtol"],
+        atol=max(tols["atol"], 1e-3 * expected.abs().max().item()),
+    )
+
+
+def _run_and_capture(fn, args, kwargs, grads):
+    """Run `fn` and backward through its output, returning the output and a copy
+    of every input gradient.
+
+    The output is cloned because CUDA graphs hand back tensors owned by their
+    memory pool, which the next replay overwrites, and the gradients are cleared
+    so that the same inputs can be reused for the other run.
+    """
+    out = fn(*args, **kwargs).clone()
+    if grads:
         out.sum().backward()
-        torch.cuda.synchronize()
-        assert torch.isfinite(out).all()
-        assert q.grad is not None
-        assert k.grad is not None
-        assert v.grad is not None
+    torch.cuda.synchronize()
+    captured = []
+    for tensor in grads:
+        assert tensor.grad is not None
+        captured.append(tensor.grad.clone())
+        tensor.grad = None
+    return out, captured
+
+
+def _assert_run_matches(actual, expected, backend: str, dtype: torch.dtype) -> None:
+    """Compare an (output, gradients) pair produced by `_run_and_capture`."""
+    (out, out_grads), (ref, ref_grads) = actual, expected
+    _assert_matches_eager(out, ref, backend, dtype)
+    for out_grad, ref_grad in zip(out_grads, ref_grads):
+        _assert_matches_eager(out_grad, ref_grad, backend, dtype)
+
+
+def _compare_compiled_to_eager(
+    module, args, kwargs, grads, monkeypatch, backend: str, dtype: torch.dtype, **compile_kwargs
+) -> None:
+    """Run the module eagerly and compiled on the same inputs, and compare both
+    the output and every input gradient."""
+    eager = _run_and_capture(module, args, kwargs, grads)
+
+    torch._dynamo.reset()
+    # Force backend selection to be re-run (and traced) inside the compiled
+    # region instead of being served from the cache the eager call populated.
+    _force_dpa_backend(monkeypatch, backend)
+    compiled = _run_and_capture(torch.compile(module, **compile_kwargs), args, kwargs, grads)
+
+    _assert_dpa_backend(backend)
+    _assert_run_matches(compiled, eager, backend, dtype)
+
+
+@pytest.mark.parametrize("backend", ["flash", "fused", "unfused"])
+@pytest.mark.parametrize("config", _DPA_COMPILE_CONFIGS.keys())
+def test_dpa_torch_compile(monkeypatch, backend, config):
+    """`DotProductAttention` under `torch.compile(fullgraph=True)` must match
+    eager in forward and backward, for every backend that supports the
+    configuration.
+
+    `fullgraph=True` makes the test fail on any graph break, so it covers the
+    whole module: input unpacking, qkv layout, backend selection and the backend
+    itself.
+    """
+    dtype = torch.bfloat16
+    spec = _DPA_COMPILE_CONFIGS[config]
+    module = _make_dpa(spec, dtype)
+    args, kwargs, grads = _make_dpa_inputs(spec, dtype)
+    _skip_unsupported(spec, backend, dtype, inference_params=kwargs.get("inference_params"))
+    _force_dpa_backend(monkeypatch, backend)
+
+    _compare_compiled_to_eager(
+        module, args, kwargs, grads, monkeypatch, backend, dtype, fullgraph=True
+    )
+
+
+def test_dpa_torch_compile_around_fused(monkeypatch):
+    """FusedAttention itself is an eager island, but everything around it is
+    compiled: DotProductAttention traces up to the backend call, breaks the
+    graph there and resumes afterwards. What crosses that break has to survive
+    it -- the sub-backend enum did not, and reached cuDNN as the function that
+    produced it."""
+    dtype = torch.bfloat16
+    spec = _DPA_COMPILE_CONFIGS["self_bshd_causal"]
+    _skip_unsupported(spec, "fused", dtype, compiled=False)
+    _force_dpa_backend(monkeypatch, "fused")
+
+    module = _make_dpa(spec, dtype)
+    args, kwargs, grads = _make_dpa_inputs(spec, dtype)
+    # No fullgraph: the graph break at the eager island is the point here.
+    _compare_compiled_to_eager(module, args, kwargs, grads, monkeypatch, "fused", dtype)
+
+
+@pytest.mark.parametrize("backend", ["flash", "unfused"])
+@pytest.mark.parametrize("config", ["self_bshd_causal", "kv_cache_bshd"])
+def test_dpa_torch_compile_cudagraphs(monkeypatch, backend, config):
+    """`mode="reduce-overhead"`: forward and backward of DotProductAttention
+    are captured into CUDA graphs and replayed on subsequent iterations."""
+    dtype = torch.bfloat16
+    spec = _DPA_COMPILE_CONFIGS[config]
+    _force_dpa_backend(monkeypatch, backend)
+
+    module = _make_dpa(spec, dtype)
+
+    torch._dynamo.reset()
+    counters.clear()
+    compiled = torch.compile(module, fullgraph=True, mode="reduce-overhead")
+
+    for _ in range(3):
+        # Fresh inputs every iteration: a replay that reuses stale buffers would
+        # still produce finite values and non-None gradients, so only comparing
+        # against eager catches it.
+        args, kwargs, grads = _make_dpa_inputs(spec, dtype)
+        replayed = _run_and_capture(compiled, args, kwargs, grads)
+        eager = _run_and_capture(module, args, kwargs, grads)
+        _assert_run_matches(replayed, eager, backend, dtype)
+    _assert_dpa_backend(backend)
+    # Without this, inductor declining to capture -- a mutated input, a CPU
+    # scalar -- would leave the test passing while measuring nothing.
+    assert not counters["inductor"]["cudagraph_skips"], "inductor skipped CUDA graphs"
+
+
+@pytest.mark.parametrize("backend", ["flash", "unfused"])
+@pytest.mark.parametrize("paged", [False, True], ids=["non_paged", "paged"])
+@pytest.mark.parametrize("cuda_graphs", [False, True], ids=["default", "cudagraphs"])
+def test_dpa_torch_compile_kv_cache_decoding(monkeypatch, backend, paged, cuda_graphs):
+    """Generation against a KV cache, one prefill and three single-token steps.
+
+    The cache carries state from one step to the next, so a step that updates it
+    wrongly is only visible in the step after -- hence comparing every step, and
+    a cache of its own for each of the two runs.
+    """
+    from collections import OrderedDict
+    from transformer_engine.pytorch.attention import InferenceParams
+
+    dtype = torch.bfloat16
+    spec = _DPA_COMPILE_CONFIGS["kv_cache_bshd"]
+    config = spec["model_config"]
+    b, ctx_len = config.batch_size, config.max_seqlen_q
+    h, g, d = config.num_heads, config.num_gqa_groups, config.head_dim_qk
+
+    def make_cache():
+        kwargs = dict(
+            max_batch_size=b,
+            max_sequence_length=config.max_seqlen_kv,
+            num_heads_kv=g,
+            head_dim_k=d,
+            dtype=dtype,
+            qkv_format=spec["qkv_format"],
+        )
+        if paged:
+            # One page per sequence, and FlashAttention 2 wants it divisible by 256.
+            kwargs.update(is_paged=True, page_size=config.max_seqlen_kv, total_num_pages=b)
+        inference_params = InferenceParams(**kwargs)
+        inference_params.allocate_memory(1)
+        return inference_params
+
+    _skip_unsupported(spec, backend, dtype, inference_params=make_cache())
+
+    gen = torch.Generator(device="cuda").manual_seed(1234)
+    steps = [
+        [
+            torch.randn(b, seqlen, heads, d, device="cuda", dtype=dtype, generator=gen)
+            for heads in (h, g, g)
+        ]
+        for seqlen in (ctx_len, 1, 1, 1)
+    ]
+
+    _force_dpa_backend(monkeypatch, backend)
+    module = _make_dpa(spec, dtype)
+
+    def generate(fn):
+        inference_params = make_cache()
+        outputs = []
+        with torch.no_grad():
+            for args in steps:
+                inference_params.pre_step(OrderedDict((i, args[0].shape[1]) for i in range(b)))
+                _force_dpa_backend(monkeypatch, backend)
+                # Cloned because a CUDA graph replay overwrites what it returned.
+                outputs.append(fn(*args, inference_params=inference_params).clone())
+        return outputs
+
+    eager = generate(module)
+
+    torch._dynamo.reset()
+    counters.clear()
+    compile_kwargs = {"mode": "reduce-overhead"} if cuda_graphs else {}
+    compiled = generate(torch.compile(module, fullgraph=True, **compile_kwargs))
+
+    _assert_dpa_backend(backend)
+    for out, ref in zip(compiled, eager):
+        _assert_matches_eager(out, ref, backend, dtype)
+    if cuda_graphs:
+        assert not counters["inductor"]["cudagraph_skips"], "inductor skipped CUDA graphs"
+
+
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+@pytest.mark.parametrize("fp8_attention", [False, True], ids=["fp8_gemms_only", "fp8_attention"])
+def test_dpa_torch_compile_fp8(monkeypatch, fp8_attention):
+    """FP8 attention is not supported on the compiled path and falls back to
+    eager. FP8 elsewhere in the model with attention in high precision -- the
+    common training setup -- must stay compiled."""
+    dtype = torch.bfloat16
+    spec = _DPA_COMPILE_CONFIGS["self_bshd_causal"]
+    _force_dpa_backend(monkeypatch, "unfused")
+
+    module = _make_dpa(spec, dtype)
+    args, kwargs, _ = _make_dpa_inputs(spec, dtype)
+    fp8_recipe = recipe.DelayedScaling(fp8_dpa=fp8_attention)
+
+    def fn(*args, **kwargs):
+        with te.autocast(enabled=True, recipe=fp8_recipe):
+            return module(*args, **kwargs)
+
+    torch._dynamo.reset()
+    _force_dpa_backend(monkeypatch, "unfused")
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            torch.compile(fn)(*args, **kwargs)
+        except Exception:  # pylint: disable=broad-except
+            # FP8 attention is not available on every device; what matters here
+            # is which path was taken, which the warning below reports.
+            pass
+        fell_back = any("Falling back to eager" in str(w.message) for w in caught)
+
+    assert fell_back == fp8_attention
+
+
+def _packed_views_inputs(spec, dtype, interleave_dim=-3):
+    """Packed q/k/v handed over as plain views, without declaring the packing."""
+    config = spec["model_config"]
+    b, s = config.batch_size, config.max_seqlen_q
+    h, d = config.num_heads, config.head_dim_qk
+    shape = (b, s, 3, h, d) if interleave_dim == -3 else (b, s, h, 3, d)
+    qkv = torch.randn(shape, dtype=dtype, device="cuda", requires_grad=True)
+    q, k, v = [qkv.select(interleave_dim, i) for i in range(3)]
+    return (q, k, v), {}, [qkv]
+
+
+def _thd_without_max_seqlen_inputs(spec, dtype):
+    """thd inputs that leave max_seqlen to be derived from cu_seqlens."""
+    args, kwargs, grads = _make_dpa_inputs(spec, dtype)
+    del kwargs["max_seqlen_q"], kwargs["max_seqlen_kv"]
+    return args, kwargs, grads
+
+
+_EAGER_FALLBACK_CASES = {
+    # name: (config name, input builder)
+    "packed_views_bs3hd": (
+        "self_bshd_causal",
+        lambda spec, dtype: _packed_views_inputs(spec, dtype, -3),
+    ),
+    "packed_views_bsh3d": (
+        "self_bshd_causal",
+        lambda spec, dtype: _packed_views_inputs(spec, dtype, -2),
+    ),
+    "thd_without_max_seqlen": ("self_thd_padding_causal", _thd_without_max_seqlen_inputs),
+}
+
+
+@pytest.mark.parametrize("backend", ["flash", "unfused"])
+@pytest.mark.parametrize("case", _EAGER_FALLBACK_CASES.keys())
+def test_dpa_torch_compile_eager_fallback(monkeypatch, backend, case):
+    """Calls that cannot be traced run as an eager island instead, with a
+    warning: recognizing packed q/k/v takes the data pointers dynamo cannot
+    read, and deriving max_seqlen off cu_seqlens is a device synchronization.
+    Both keep working, and both are avoidable -- by declaring the packing via
+    qkv_layer/kv_layer, or by passing max_seqlen."""
+    dtype = torch.bfloat16
+    config_name, make_inputs = _EAGER_FALLBACK_CASES[case]
+    spec = _DPA_COMPILE_CONFIGS[config_name]
+    _force_dpa_backend(monkeypatch, backend)
+
+    module = _make_dpa(spec, dtype)
+    args, kwargs, grads = make_inputs(spec, dtype)
+
+    eager = _run_and_capture(module, args, kwargs, grads)
+
+    torch._dynamo.reset()
+    _force_dpa_backend(monkeypatch, backend)
+    with pytest.warns(UserWarning, match="Falling back to eager execution"):
+        fell_back = _run_and_capture(torch.compile(module), args, kwargs, grads)
+    _assert_run_matches(fell_back, eager, backend, dtype)
+
+    # The same eager island is an error when the user asked for a full graph.
+    torch._dynamo.reset()
+    _force_dpa_backend(monkeypatch, backend)
+    with pytest.raises(Exception, match="torch.compiler.disable"):
+        torch.compile(module, fullgraph=True)(*args, **kwargs)
 
 
 # ---------------------------------------------------------------------------
