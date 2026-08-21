@@ -62,11 +62,13 @@ PyTorch
 Model-specific layers
 ---------------------
 
-.. autoapiclass:: transformer_engine.pytorch.models.DeepSeekV3Layer(**kwargs)
+Full transformer layers for specific model families live in
+``transformer_engine.pytorch.models``:
 
-.. autoapiclass:: transformer_engine.pytorch.models.DeepSeekV3MoE(**kwargs)
+.. toctree::
+    :maxdepth: 1
 
-.. autoapiclass:: transformer_engine.pytorch.models.MultiLatentAttention(**kwargs)
+    pytorch_models
 
 Data types
 ----------
