@@ -2,6 +2,7 @@
 #
 # See LICENSE for license information.
 
+import contextlib
 import gc
 import weakref
 from typing import Callable, Dict, Iterable, List, Tuple, Union
@@ -29,6 +30,7 @@ from transformer_engine.pytorch.attention.dot_product_attention.context_parallel
     set_cp_p2p_transport_group,
 )
 import transformer_engine.pytorch.ops as te_ops
+import transformer_engine.pytorch.graph as te_graph
 from transformer_engine.common import recipe
 from utils import ModelConfig, reset_rng_states
 
@@ -777,7 +779,153 @@ def test_make_graphed_callables_with_interleaved_pipeline_parallelism(
 
 def _slot(saved_arena, branch, io_arena, overlap=0, frame=0, warmup=0):
     """Build one private graph-memory slot used by the focused tests below."""
-    return (saved_arena, branch, io_arena, branch, overlap, frame, warmup, 0, 0)
+    return (saved_arena, io_arena, branch, overlap, frame, warmup)
+
+
+def test_graph_capture_contexts_restore_process_state_on_error(monkeypatch) -> None:
+    """Capture failures must restore GC and input gradients."""
+    gc_was_enabled = gc.isenabled()
+    gc.enable()
+    monkeypatch.setattr(torch.cuda, "graph", lambda *args, **kwargs: contextlib.nullcontext())
+    try:
+        with pytest.raises(RuntimeError, match="capture failed"):
+            with te_graph._graph_context_wrapper():
+                raise RuntimeError("capture failed")
+        assert gc.isenabled()
+    finally:
+        if not gc_was_enabled:
+            gc.disable()
+
+    inp = torch.ones(1, requires_grad=True)
+    original_grad = torch.full_like(inp, 2.0)
+    inp.grad = original_grad
+    with pytest.raises(RuntimeError, match="capture failed"):
+        with te_graph._none_grad_context_wrapper((inp,)):
+            assert inp.grad is None
+            raise RuntimeError("capture failed")
+    assert inp.grad is original_grad
+
+
+def test_temporary_forward_hooks_are_removed_on_error() -> None:
+    """Warmup failures must not leave hooks installed on user modules."""
+    module = torch.nn.Sequential(torch.nn.Identity())
+
+    with pytest.raises(RuntimeError, match="warmup failed"):
+        with te_graph._module_forward_hooks(module.modules(), lambda *args: None):
+            assert module._forward_hooks
+            assert module[0]._forward_hooks
+            raise RuntimeError("warmup failed")
+
+    assert not module._forward_hooks
+    assert not module[0]._forward_hooks
+
+
+def test_allocator_settings_guard_restores_once() -> None:
+    """Temporary allocator settings have idempotent failure cleanup."""
+    settings = []
+    guard = te_graph._AllocatorSettingsGuard()
+
+    guard.apply(settings.append, "expandable_segments:False", "expandable_segments:True")
+    guard.restore()
+    guard.restore()
+
+    assert settings == ["expandable_segments:False", "expandable_segments:True"]
+
+
+def test_make_graphed_callables_restores_process_state_on_error(monkeypatch) -> None:
+    """The public graph API must unwind every process-wide capture mutation."""
+
+    class TestModule(torch.nn.Module):
+        def forward(self, inp):
+            return inp
+
+    module = TestModule()
+    original_call = TestModule.__call__
+    fp8_state = object()
+    rng_state = object()
+    restored_fp8 = []
+    restored_rng = []
+    allocator_settings = []
+
+    monkeypatch.setattr(te_graph, "save_fp8_tensors", lambda *args, **kwargs: fp8_state)
+    monkeypatch.setattr(
+        te_graph,
+        "restore_fp8_tensors",
+        lambda modules, state: restored_fp8.append((modules, state)),
+    )
+    monkeypatch.setattr(te_graph, "graph_safe_rng_available", lambda: False)
+    monkeypatch.setattr(torch.cuda, "get_rng_state", lambda: rng_state)
+    monkeypatch.setattr(torch.cuda, "set_rng_state", restored_rng.append)
+
+    def fail_capture(*args, **kwargs):
+        assert te_graph.is_graph_capturing()
+        kwargs["_allocator_settings_guard"].apply(
+            allocator_settings.append,
+            "expandable_segments:False",
+            "expandable_segments:True",
+        )
+        raise RuntimeError("capture failed")
+
+    monkeypatch.setattr(te_graph, "_make_graphed_callables", fail_capture)
+
+    assert not te_graph.is_graph_capturing()
+    with pytest.raises(RuntimeError, match="capture failed"):
+        te_graph.make_graphed_callables(module, (torch.ones(1),))
+
+    assert not te_graph.is_graph_capturing()
+    assert TestModule.__call__ is original_call
+    assert restored_fp8 == [((module,), fp8_state)]
+    assert restored_rng == [rng_state]
+    assert allocator_settings == ["expandable_segments:False", "expandable_segments:True"]
+
+
+def test_make_graphed_callables_restores_wrappers_on_preparation_error(monkeypatch) -> None:
+    """Preparation failures before capture starts must also restore global wrappers."""
+
+    class TestModule(torch.nn.Module):
+        def forward(self, inp):
+            return inp
+
+    module = TestModule()
+    original_call = TestModule.__call__
+    fp8_state = object()
+    restored_fp8 = []
+
+    monkeypatch.setattr(te_graph, "save_fp8_tensors", lambda *args, **kwargs: fp8_state)
+    monkeypatch.setattr(
+        te_graph,
+        "restore_fp8_tensors",
+        lambda modules, state: restored_fp8.append((modules, state)),
+    )
+
+    def fail_rng_preparation():
+        raise RuntimeError("rng preparation failed")
+
+    monkeypatch.setattr(te_graph, "graph_safe_rng_available", fail_rng_preparation)
+
+    with pytest.raises(RuntimeError, match="rng preparation failed"):
+        te_graph.make_graphed_callables(module, (torch.ones(1),))
+
+    assert not te_graph.is_graph_capturing()
+    assert TestModule.__call__ is original_call
+    assert restored_fp8 == [((module,), fp8_state)]
+
+
+def test_slot_memory_rejects_non_native_allocator(monkeypatch) -> None:
+    """Allocator checkpoints are only defined for the native caching allocator."""
+
+    module = torch.nn.Identity()
+    monkeypatch.setattr(torch.cuda.memory, "get_allocator_backend", lambda: "cudaMallocAsync")
+
+    with pytest.raises(RuntimeError, match="requires the native CUDA caching allocator"):
+        te_graph._make_graphed_callables(
+            module,
+            (torch.ones(1),),
+            _order=[1, -1],
+            _num_layers_per_chunk=[1],
+            _reuse_graph_input_output_buffers=True,
+            _graph_memory_slots=(_slot(0, 0, 0),),
+        )
 
 
 @pytest.mark.parametrize("elements", (0, 4096), ids=("empty", "nonempty"))
@@ -1133,7 +1281,7 @@ def test_slot_memory_checkpoint_aliases_parameter_gradients() -> None:
 
 
 def test_slot_memory_native_io_aliases_graph_pool_storage() -> None:
-    """Nine-field DCP slots default to forked graph-pool I/O aliases."""
+    """DCP slot plans default to forked graph-pool I/O aliases."""
 
     class Module(torch.nn.Module):
         def forward(self, inp):

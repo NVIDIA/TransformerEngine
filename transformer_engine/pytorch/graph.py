@@ -42,6 +42,31 @@ _T = TypeVar("_T")
 SingleOrTuple = Union[_T, Tuple[_T, ...]]
 
 
+class _AllocatorSettingsGuard:
+    """Restore temporary allocator settings even when graph capture fails."""
+
+    def __init__(self) -> None:
+        self._setter = None
+        self._settings_to_restore = None
+
+    def apply(self, setter: Callable[[str], None], settings: str, restore: str) -> None:
+        if self._setter is not None:
+            raise RuntimeError("CUDA allocator settings guard is already active.")
+        self._setter = setter
+        self._settings_to_restore = restore
+        setter(settings)
+
+    def restore(self) -> None:
+        if self._setter is None:
+            return
+        setter = self._setter
+        settings = self._settings_to_restore
+        assert settings is not None
+        setter(settings)
+        self._setter = None
+        self._settings_to_restore = None
+
+
 def _tensor_storage_ptr(tensor: torch.Tensor) -> int:
     """Return the base storage pointer used to recognize static graph inputs."""
     return tensor.untyped_storage().data_ptr()
@@ -145,12 +170,14 @@ def _none_grad_context_wrapper(inputs):
     in case the backward pass makes grad accumulations.
     """
     original_input_grads = []
-    for input_tensor in inputs:
-        original_input_grads.append(input_tensor.grad)
-        input_tensor.grad = None
-    yield
-    for input_tensor, original_grad in zip(inputs, original_input_grads):
-        input_tensor.grad = original_grad
+    try:
+        for input_tensor in inputs:
+            original_input_grads.append(input_tensor.grad)
+            input_tensor.grad = None
+        yield
+    finally:
+        for input_tensor, original_grad in zip(inputs, original_input_grads):
+            input_tensor.grad = original_grad
 
 
 @contextlib.contextmanager
@@ -166,10 +193,25 @@ def _graph_context_wrapper(*args, **kwargs):
     gc_is_enabled = gc.isenabled()
     if gc_is_enabled:
         gc.disable()
-    with torch.cuda.graph(*args, **kwargs):
+    try:
+        with torch.cuda.graph(*args, **kwargs):
+            yield
+    finally:
+        if gc_is_enabled:
+            gc.enable()
+
+
+@contextlib.contextmanager
+def _module_forward_hooks(modules, hook_fn):
+    """Remove temporary warmup hooks even when a module raises."""
+    hooks = []
+    try:
+        for module in modules:
+            hooks.append(module.register_forward_hook(hook_fn))
         yield
-    if gc_is_enabled:
-        gc.enable()
+    finally:
+        for hook in reversed(hooks):
+            hook.remove()
 
 
 def _make_graphed_callables(
@@ -185,6 +227,7 @@ def _make_graphed_callables(
     retain_graph_in_backward: bool = False,
     _reuse_graph_input_output_buffers: bool = False,
     _graph_memory_slots: Optional[Sequence[Tuple[int, ...]]] = None,
+    _allocator_settings_guard: Optional[_AllocatorSettingsGuard] = None,
     pre_warmup_hook: Optional[Callable] = None,
     post_warmup_hook: Optional[Callable] = None,
 ) -> SingleOrTuple[Callable]:
@@ -330,6 +373,12 @@ def _make_graphed_callables(
 
     use_slot_memory = _graph_memory_slots is not None
     if use_slot_memory:
+        allocator_backend = torch.cuda.memory.get_allocator_backend()
+        if allocator_backend != "native":
+            raise RuntimeError(
+                "CUDA graph slot-branch checkpointing requires the native CUDA caching "
+                f"allocator, but the active backend is {allocator_backend!r}."
+            )
         required_checkpoint_apis = (
             "_cuda_getCheckpointState",
             "_cuda_setCheckpointPoolState",
@@ -361,7 +410,7 @@ def _make_graphed_callables(
                 "`_reuse_graph_input_output_buffers` is only available in training mode."
             )
 
-    saved_tensor_memory_alias_groups = None
+    saved_tensor_arena_ids = None
     slot_io_memory_alias_groups = None
     slot_io_liveness_groups = None
     warmup_plan_alias_groups = None
@@ -380,15 +429,15 @@ def _make_graphed_callables(
             )
         if any(
             not isinstance(slot, tuple)
-            or len(slot) != 9
+            or len(slot) != 6
             or not all(isinstance(value, int) for value in slot)
             for slot in _graph_memory_slots
         ):
-            raise TypeError("Each graph-memory slot must be a tuple of nine integers.")
-        saved_tensor_memory_alias_groups = [(slot[0], slot[1]) for slot in _graph_memory_slots]
-        slot_io_memory_alias_groups = [(slot[2], slot[3]) for slot in _graph_memory_slots]
-        slot_io_liveness_groups = [(slot[4], slot[5]) for slot in _graph_memory_slots]
-        warmup_plan_alias_groups = [slot[6] for slot in _graph_memory_slots]
+            raise TypeError("Each graph-memory slot must be a tuple of six integers.")
+        saved_tensor_arena_ids = [slot[0] for slot in _graph_memory_slots]
+        slot_io_memory_alias_groups = [(slot[1], slot[2]) for slot in _graph_memory_slots]
+        slot_io_liveness_groups = [(slot[3], slot[4]) for slot in _graph_memory_slots]
+        warmup_plan_alias_groups = [slot[5] for slot in _graph_memory_slots]
 
     # Check reuse graph conditions and reorganize sample_args and sample_kwargs.
     # Note: When capturing a graph, we hold onto the args and kwargs so we have static buffers
@@ -545,6 +594,7 @@ def _make_graphed_callables(
 
     allocator_settings_to_apply = None
     allocator_settings_to_restore = None
+    allocator_settings_setter = None
     if use_slot_memory:
         allocator_conf = os.getenv("PYTORCH_CUDA_ALLOC_CONF") or os.getenv("PYTORCH_ALLOC_CONF", "")
         allocator_parts = [part.strip() for part in allocator_conf.split(",") if part.strip()]
@@ -896,55 +946,51 @@ def _make_graphed_callables(
             if pre_warmup_hook is not None:
                 pre_warmup_hook()
             for warmup_iter in range(num_warmup_iters):
-                hooks = []
-                for module in func.modules():
-                    hook = module.register_forward_hook(hook_fn)
-                    hooks.append(hook)
+                with _module_forward_hooks(func.modules(), hook_fn):
+                    if use_slot_memory:
+                        observed_saved_tensor_plan = []
+                        observed_saved_tensors = []
+                        observed_saved_versions = []
+                        copied_storages = {}
+                        record_saved_tensor = make_saved_tensor_recorder(
+                            func_idx,
+                            observed_saved_tensors,
+                            observed_saved_versions,
+                            copied_storages,
+                            observed_saved_tensor_plan,
+                        )
 
-                if use_slot_memory:
-                    observed_saved_tensor_plan = []
-                    observed_saved_tensors = []
-                    observed_saved_versions = []
-                    copied_storages = {}
-                    record_saved_tensor = make_saved_tensor_recorder(
-                        func_idx,
-                        observed_saved_tensors,
-                        observed_saved_versions,
-                        copied_storages,
-                        observed_saved_tensor_plan,
-                    )
-
-                    with torch.autograd.graph.saved_tensors_hooks(record_saved_tensor, lambda x: x):
+                        with torch.autograd.graph.saved_tensors_hooks(
+                            record_saved_tensor, lambda x: x
+                        ):
+                            outputs, _ = _tree_flatten(func(*args, **kwargs))
+                        observed_boundary_aliases = observe_saved_tensor_boundary_aliases(
+                            func_idx,
+                            observed_saved_tensors,
+                            observed_saved_versions,
+                            outputs,
+                            observed_saved_tensor_plan,
+                        )
+                        update_warmup_plan(
+                            per_callable_saved_tensor_plans,
+                            func_idx,
+                            observed_saved_tensor_plan,
+                            "Forward",
+                        )
+                        update_warmup_plan(
+                            per_callable_saved_tensor_boundary_aliases,
+                            func_idx,
+                            observed_boundary_aliases,
+                            "Forward boundary alias",
+                        )
+                        update_warmup_plan(
+                            per_callable_output_tensor_plans,
+                            func_idx,
+                            [_io_tensor_plan(output, "output") for output in outputs],
+                            "Output",
+                        )
+                    else:
                         outputs, _ = _tree_flatten(func(*args, **kwargs))
-                    observed_boundary_aliases = observe_saved_tensor_boundary_aliases(
-                        func_idx,
-                        observed_saved_tensors,
-                        observed_saved_versions,
-                        outputs,
-                        observed_saved_tensor_plan,
-                    )
-                    update_warmup_plan(
-                        per_callable_saved_tensor_plans,
-                        func_idx,
-                        observed_saved_tensor_plan,
-                        "Forward",
-                    )
-                    update_warmup_plan(
-                        per_callable_saved_tensor_boundary_aliases,
-                        func_idx,
-                        observed_boundary_aliases,
-                        "Forward boundary alias",
-                    )
-                    update_warmup_plan(
-                        per_callable_output_tensor_plans,
-                        func_idx,
-                        [_io_tensor_plan(output, "output") for output in outputs],
-                        "Output",
-                    )
-                else:
-                    outputs, _ = _tree_flatten(func(*args, **kwargs))
-                for hook in hooks:
-                    hook.remove()
                 if is_training:
                     inputs = tuple(i for i in static_input_surface if i.requires_grad)
                     with _none_grad_context_wrapper(inputs):
@@ -1072,7 +1118,13 @@ def _make_graphed_callables(
         ]
 
     if allocator_settings_to_apply is not None:
-        torch._C._accelerator_setAllocatorSettings(allocator_settings_to_apply)
+        if _allocator_settings_guard is None or allocator_settings_setter is None:
+            raise RuntimeError("CUDA graph slot capture is missing its allocator settings guard.")
+        _allocator_settings_guard.apply(
+            allocator_settings_setter,
+            allocator_settings_to_apply,
+            allocator_settings_to_restore,
+        )
 
     if use_slot_memory:
         if isinstance(sample_args, tuple):
@@ -1082,7 +1134,7 @@ def _make_graphed_callables(
         staging_groups = []
         for func_idx, args in enumerate(sample_args):
             old_input = args[0]
-            saved_arena_id, _ = saved_tensor_memory_alias_groups[func_idx]
+            saved_arena_id = saved_tensor_arena_ids[func_idx]
             staging_key = (saved_arena_id, _input_staging_key(old_input))
             group_idx = staging_group_by_key.get(staging_key)
             if group_idx is None:
@@ -1091,7 +1143,7 @@ def _make_graphed_callables(
                 staging_groups.append({"members": [], "candidates": {}})
             group = staging_groups[group_idx]
             group["members"].append(func_idx)
-            group["candidates"].setdefault(old_input.untyped_storage()._cdata, old_input)
+            group["candidates"].setdefault(_tensor_storage_ptr(old_input), old_input)
 
         # MCore's sample-input plan and the union liveness coloring are each safe in
         # isolation, but reusing an arbitrary representative can transitively merge two
@@ -1124,11 +1176,12 @@ def _make_graphed_callables(
                 source = next(iter(group["candidates"].values()))
                 signature = _saved_tensor_signature(source)
                 storage_numel = signature[-1] // source.element_size()
-                backing = torch.empty(
-                    (source.storage_offset() + storage_numel,),
-                    dtype=source.dtype,
-                    device=source.device,
-                )
+                with torch.cuda.use_mem_pool(slot_allocator_pool):
+                    backing = torch.empty(
+                        (source.storage_offset() + storage_numel,),
+                        dtype=source.dtype,
+                        device=source.device,
+                    )
                 input_target = torch.empty((0,), dtype=source.dtype, device=source.device).set_(
                     backing.untyped_storage(),
                     source.storage_offset(),
@@ -1644,7 +1697,7 @@ def _make_graphed_callables(
                 measure_spill=True,
                 preassigned_targets=preassigned_targets,
             )
-            arena_id, _ = saved_tensor_memory_alias_groups[func_idx]
+            arena_id = saved_tensor_arena_ids[func_idx]
             arena_sizes[arena_id] = max(arena_sizes.get(arena_id, 0), output_bytes + spill_bytes)
             del temporary_outputs, temporary_arena, preassigned_targets
 
@@ -1659,7 +1712,7 @@ def _make_graphed_callables(
 
         per_callable_slot_saved_targets = []
         for func_idx, plan in enumerate(per_callable_saved_tensor_plans):
-            arena_id, _ = saved_tensor_memory_alias_groups[func_idx]
+            arena_id = saved_tensor_arena_ids[func_idx]
             arena = slot_saved_arenas.get(arena_id)
             output_targets, output_bytes = slot_tensor_targets(
                 per_callable_output_tensor_plans[func_idx], arena
@@ -1844,12 +1897,12 @@ def _make_graphed_callables(
             slot = _graph_memory_slots[first_func_idx]
             event_key = (
                 c_id > 0,
-                slot[4],
+                slot[3],
                 logical_idx,
-                slot[2],
+                slot[1],
                 _num_layers_per_chunk[m_chunk],
             )
-            group_records.append((event_key, slot[3]))
+            group_records.append((event_key, slot[2]))
             if c_id > 0:
                 group_fwd_idx[m_chunk] += 1
             else:
@@ -2055,6 +2108,8 @@ def _make_graphed_callables(
         """Make checkpoint-live blocks free before allocator topology restoration."""
         if set(owners) != set(expected_blocks):
             raise RuntimeError("CUDA graph slot checkpoint live-storage owner set changed.")
+        # Validate every owner before mutating any StorageImpl. A validation failure must not
+        # leave a partially detached checkpoint boundary.
         for block_ptr, storage in owners.items():
             storage_ptr = storage.data_ptr()
             if not block_ptr <= storage_ptr < block_ptr + expected_blocks[block_ptr]:
@@ -2065,6 +2120,9 @@ def _make_graphed_callables(
                 raise RuntimeError(
                     "CUDA graph slot checkpoint live storage lost its allocator deleter."
                 )
+
+        for storage in owners.values():
+            storage_ptr = storage.data_ptr()
             torch._C._free_And_Remove_DeleterFn(storage._cdata)
             tex._graph_checkpoint_detach_storage(storage._cdata)
             if storage.data_ptr() != storage_ptr or torch._C._has_Standard_Deleter(storage._cdata):
@@ -2558,7 +2616,7 @@ def _make_graphed_callables(
         raise RuntimeError("CUDA graph capture ended inside a slot checkpoint group.")
 
     if allocator_settings_to_restore is not None:
-        torch._C._accelerator_setAllocatorSettings(allocator_settings_to_restore)
+        _allocator_settings_guard.restore()
 
     if use_slot_memory and (
         any(native_io_anchors.values()) or any(native_io_capture_counts.values())
@@ -2950,13 +3008,13 @@ def make_graphed_callables(
         graphs. Only supported with Mcore interleaved pipeline parallelism, i.e.
         when `_order` is provided. All callables in `modules` are assumed to have
         inputs and outputs with the same dtype and shape.
-    _graph_memory_slots: sequence of 7- or 9-int tuples, default = None
+    _graph_memory_slots: sequence of 6-int tuples, default = None
         Private liveness plan for mutually exclusive graph variants. Each tuple describes
-        saved-tensor, graph-I/O, and warmup alias groups for one graph input. Nine-field plans
-        additionally provide a frame ID and conflict mask for cross-slot validation. Requires the
-        first positional sample argument of every graph input to be a plain CUDA tensor; it
-        is snapshotted into the slot arenas whenever forward saves it for backward, so
-        shape-identical graph inputs can share one input staging surface.
+        the saved-tensor arena, physical I/O slot, I/O branch, model chunk, layer, and warmup
+        alias group for one graph input. Requires the first positional sample argument of every
+        graph input to be a plain CUDA tensor; it is snapshotted into the slot arenas whenever
+        forward saves it for backward, so shape-identical graph inputs can share one input
+        staging surface.
     pre_warmup_hook: callable, default = None
                       A hook function that will be called before the warmup iterations.
     post_warmup_hook: callable, default = None
@@ -3066,8 +3124,6 @@ def make_graphed_callables(
     if cache_quantized_params is None:
         cache_quantized_params = False
 
-    set_capture_start()
-
     # Handle single module.
     just_one_callable = False
     if not isinstance(modules, tuple):
@@ -3091,8 +3147,9 @@ def make_graphed_callables(
         recipe = None
     module_uses_fp8 = dict(zip((id(m) for m in modules), enabled))
 
-    # Store FP8 tensors to reset later.
-    saved_fp8_tensors = save_fp8_tensors(modules, recipe=recipe)
+    for module in modules:
+        if not isinstance(module, torch.nn.Module):
+            raise TypeError(f"Graphing for {type(module)} is not supported.")
 
     # FP8 wrapper.
     old_call_funcs = {}
@@ -3118,58 +3175,71 @@ def make_graphed_callables(
 
         block_cls.__call__ = call_func
 
-    forward_funcs = []
-    for module in modules:
-        if not isinstance(module, torch.nn.Module):
-            raise TypeError(f"Graphing for {type(module)} is not supported.")
-        wrap_autocast(module)
-        forward_funcs.append(module)
+    allocator_settings_guard = _AllocatorSettingsGuard()
+    saved_fp8_tensors = None
+    fp8_state_saved = False
+    rng_restore_callbacks = []
+    capture_started = False
+    try:
+        # Store all process-wide state before capture and register enough information to restore
+        # anything that was already changed if a later preparation step raises.
+        saved_fp8_tensors = save_fp8_tensors(modules, recipe=recipe)
+        fp8_state_saved = True
 
-    if just_one_callable:
-        forward_funcs = forward_funcs[0]
-    else:
-        forward_funcs = tuple(forward_funcs)
+        forward_funcs = []
+        for module in modules:
+            wrap_autocast(module)
+            forward_funcs.append(module)
 
-    # Save RNG state.
-    if graph_safe_rng_available():
-        generators = [
-            torch.cuda.default_generators[torch.cuda.current_device()],
-            *get_all_rng_states().values(),
-        ]
-        original_rng_states = [state.get_state() for state in generators]
-    else:
-        original_rng_states = torch.cuda.get_rng_state()
+        if just_one_callable:
+            forward_funcs = forward_funcs[0]
+        else:
+            forward_funcs = tuple(forward_funcs)
 
-    graphed_callables = _make_graphed_callables(
-        forward_funcs,
-        sample_args,
-        num_warmup_iters=num_warmup_iters,
-        allow_unused_input=allow_unused_input,
-        cache_quantized_params=cache_quantized_params,
-        sample_kwargs=sample_kwargs,
-        _order=_order,
-        _num_layers_per_chunk=_num_layers_per_chunk,
-        pool=pool,
-        retain_graph_in_backward=retain_graph_in_backward,
-        _reuse_graph_input_output_buffers=_reuse_graph_input_output_buffers,
-        _graph_memory_slots=_graph_memory_slots,
-        pre_warmup_hook=pre_warmup_hook,
-        post_warmup_hook=post_warmup_hook,
-    )
+        if graph_safe_rng_available():
+            generators = [
+                torch.cuda.default_generators[torch.cuda.current_device()],
+                *get_all_rng_states().values(),
+            ]
+            original_rng_states = [state.get_state() for state in generators]
+            rng_restore_callbacks = [
+                (generator.set_state, state)
+                for generator, state in zip(generators, original_rng_states)
+            ]
+        else:
+            original_rng_state = torch.cuda.get_rng_state()
+            rng_restore_callbacks = [(torch.cuda.set_rng_state, original_rng_state)]
 
-    # Ensures warmup does not affect numerics for ops such as dropout.
-    if graph_safe_rng_available():
-        for gen, state in zip(generators, original_rng_states):
-            gen.set_state(state)
-    else:
-        torch.cuda.set_rng_state(original_rng_states)
+        set_capture_start()
+        capture_started = True
+        graphed_callables = _make_graphed_callables(
+            forward_funcs,
+            sample_args,
+            num_warmup_iters=num_warmup_iters,
+            allow_unused_input=allow_unused_input,
+            cache_quantized_params=cache_quantized_params,
+            sample_kwargs=sample_kwargs,
+            _order=_order,
+            _num_layers_per_chunk=_num_layers_per_chunk,
+            pool=pool,
+            retain_graph_in_backward=retain_graph_in_backward,
+            _reuse_graph_input_output_buffers=_reuse_graph_input_output_buffers,
+            _graph_memory_slots=_graph_memory_slots,
+            _allocator_settings_guard=allocator_settings_guard,
+            pre_warmup_hook=pre_warmup_hook,
+            post_warmup_hook=post_warmup_hook,
+        )
+    finally:
+        # ExitStack runs every callback even if an earlier restoration fails.
+        with contextlib.ExitStack() as capture_cleanup:
+            if capture_started:
+                capture_cleanup.callback(set_capture_end)
+            if fp8_state_saved:
+                capture_cleanup.callback(restore_fp8_tensors, modules, saved_fp8_tensors)
+            for module_cls, old_call in old_call_funcs.items():
+                capture_cleanup.callback(setattr, module_cls, "__call__", old_call)
+            for restore_rng_state, state in rng_restore_callbacks:
+                capture_cleanup.callback(restore_rng_state, state)
+            capture_cleanup.callback(allocator_settings_guard.restore)
 
-    # Remove FP8 wrapper.
-    for module_cls, old_call in old_call_funcs.items():
-        module_cls.__call__ = old_call
-
-    # Restore FP8 state.
-    restore_fp8_tensors(modules, saved_fp8_tensors)
-
-    set_capture_end()
     return graphed_callables
