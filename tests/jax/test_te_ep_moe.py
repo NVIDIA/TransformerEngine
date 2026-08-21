@@ -31,11 +31,12 @@ finiteness AND numerical parity vs a pure-JAX reference. Variations
 on the block are pytest parametrize values rather than separate test
 classes:
 
-* ``test_forward`` covers the forward across a curated set of
-  configurations (softmax/sigmoid scoring, optional non-zero
-  expert_bias). Each config asserts shape, dtype, finiteness and
-  numerical parity vs the reference in one run.
-* ``test_backward`` mirrors that for gradients.
+* ``test_forward`` covers BF16 and MXFP8 forward execution across a
+  curated set of configurations (softmax/sigmoid scoring, optional
+  non-zero expert_bias). Each config asserts shape, dtype, finiteness
+  and numerical parity vs the same BF16 reference in one run.
+* ``test_backward`` mirrors that for gradients. BF16 and MXFP8 share
+  the full test body and differ only in the grouped-GEMM quantizer sets.
 * ``TestTeEpMoeAuxLoss`` covers the second return value end-to-end
   (returned + parity + aux-only grad propagates to gate + combined
   main+aux grads stay finite) in two consolidated tests.
@@ -108,18 +109,21 @@ if not _MP_ACTIVE:
 
 from transformer_engine_jax import get_device_compute_capability
 
-# Grouped GEMM in the MoE custom_vjp requires Blackwell (sm_100+). The
-# TE EP NCCL primitives themselves need SM>=90, but the FFN body uses
-# grouped_gemm, so the file as a whole gates on sm_100+.
-if get_device_compute_capability(0) < 100:
+# TE EP NCCL primitives need SM>=90
+if get_device_compute_capability(0) < 90:
     pytest.skip(
-        "MoE TE EP tests require Blackwell (sm_100+) for grouped GEMM",
+        "MoE TE EP tests require Hopper (sm_90+) or newer for TE EP",
         allow_module_level=True,
     )
 
 from transformer_engine.jax.flax import _MoEBlock as MoEBlock
-from transformer_engine.jax.moe import _ALIGN_SIZE, moe, record_ep_bootstrap_signature_for_moe
+from transformer_engine.jax.moe import (
+    _ALIGN_SIZE,
+    moe,
+    record_ep_bootstrap_signature_for_moe,
+)
 from transformer_engine.jax.ep import ep_bootstrap
+from transformer_engine.common.recipe import MXFP8BlockScaling
 from transformer_engine.jax.sharding import MeshResource, global_shard_guard
 
 
@@ -148,7 +152,7 @@ LOGICAL_AXIS_RULES = (
 DTYPE = jnp.bfloat16
 BATCH = EP_SIZE * FSDP_SIZE * 2  # 8 on 4-GPU, 16 on 8-GPU
 SEQ = 32
-HIDDEN = 64
+HIDDEN = 128
 INTER = 128
 NUM_EXPERTS = 8
 TOPK = 2
@@ -275,8 +279,7 @@ def mesh():
 def _pure_jax_moe_reference(
     x,
     gate_kernel,
-    wi_0,
-    wi_1,
+    wi,
     wo,
     expert_bias=None,
     *,
@@ -317,6 +320,7 @@ def _pure_jax_moe_reference(
     # FFN. ``apply_topk_weights_early`` is a fusion knob that doesn't
     # change the math (wo is linear), so the reference is identical for
     # both placements.
+    wi_0, wi_1 = jnp.split(wi, 2, axis=-1)
     layer_w0 = jnp.einsum("th,ehm->tem", x_2d, wi_0)
     layer_w1 = jnp.einsum("th,ehm->tem", x_2d, wi_1)
     # Activation runs in x.dtype (typically bf16) to mirror the impl --
@@ -365,6 +369,7 @@ def _make_block(
     score_function="softmax",
     expert_bias_init=None,
     input_axes=("batch", None, None),
+    quantization_recipe=None,
 ):
     kwargs = dict(
         num_experts=NUM_EXPERTS,
@@ -377,6 +382,7 @@ def _make_block(
         score_function=score_function,
         dtype=DTYPE,
         input_axes=input_axes,
+        quantization_recipe=quantization_recipe,
     )
     # Custom expert_bias_init lets tests inject a non-zero expert_bias without
     # poking variables['params'] post-init.
@@ -436,7 +442,14 @@ def _init_apply(block, mesh, x, key):
     return variables, output, aux
 
 
-def _grad_step(block, variables, mesh, x, *, include_aux=False):
+def _grad_step(
+    block,
+    variables,
+    mesh,
+    x,
+    *,
+    include_aux=False,
+):
     """Run jax.grad of mean(out^2) [+ aux if include_aux] vs (params, x).
 
     Returns ``(grads_variables, grad_x)`` so callers can check both the
@@ -503,6 +516,13 @@ def _make_inputs(key):
     return jax.random.normal(key, (BATCH, SEQ, HIDDEN), dtype=DTYPE)
 
 
+def _quantization_recipe(quantization):
+    if quantization == "bf16":
+        return None
+    assert quantization == "mxfp8"
+    return MXFP8BlockScaling()
+
+
 # -----------------------------------------------------------------------------
 # Tests
 # -----------------------------------------------------------------------------
@@ -546,6 +566,13 @@ _CONFIGS = [
     ),
 ]
 
+_QUANTIZATION_CASES = [
+    pytest.param("bf16", id="bf16"),
+]
+
+if get_device_compute_capability(0) >= 100:
+    _QUANTIZATION_CASES.append(pytest.param("mxfp8", id="mxfp8"))
+
 
 def _reference_kwargs_from_config(config, params_np):
     """Pick out the reference-relevant pieces of a parametrize config."""
@@ -564,8 +591,9 @@ class TestTeEpMoeForward:
     finiteness AND numerical parity vs the pure-JAX reference."""
 
     @pytest.mark.parametrize("config", _CONFIGS)
-    def test_forward(self, mesh, config):
-        block = _make_block(**config)
+    @pytest.mark.parametrize("quantization", _QUANTIZATION_CASES)
+    def test_forward(self, mesh, config, quantization):
+        block = _make_block(**config, quantization_recipe=_quantization_recipe(quantization))
         x = _make_inputs(jax.random.PRNGKey(0))
         variables, output, aux = _init_apply(block, mesh, x, jax.random.PRNGKey(1))
 
@@ -584,8 +612,7 @@ class TestTeEpMoeForward:
         out_ref, _ = _pure_jax_moe_reference(
             jnp.asarray(x_np),
             jnp.asarray(params_np["gate_kernel"]),
-            jnp.asarray(params_np["wi_0"]),
-            jnp.asarray(params_np["wi_1"]),
+            jnp.asarray(params_np["wi"]),
             jnp.asarray(params_np["wo"]),
             num_experts=NUM_EXPERTS,
             num_experts_per_tok=TOPK,
@@ -596,7 +623,7 @@ class TestTeEpMoeForward:
             np.asarray(jax.device_get(out_ref)).astype(np.float32),
             atol=FWD_ATOL,
             rtol=FWD_RTOL,
-            err_msg=f"forward parity breach for config={config}",
+            err_msg=f"forward parity breach for config={config}, quantization={quantization}",
         )
 
 
@@ -605,8 +632,9 @@ class TestTeEpMoeBackward:
     grads finite, non-zero AND parity vs the pure-JAX reference."""
 
     @pytest.mark.parametrize("config", _CONFIGS)
-    def test_backward(self, mesh, config):
-        block = _make_block(**config)
+    @pytest.mark.parametrize("quantization", _QUANTIZATION_CASES)
+    def test_backward(self, mesh, config, quantization):
+        block = _make_block(**config, quantization_recipe=_quantization_recipe(quantization))
         x = _make_inputs(jax.random.PRNGKey(2))
         variables, _, _ = _init_apply(block, mesh, x, jax.random.PRNGKey(3))
         grads_te, grad_x_te = _grad_step(block, variables, mesh, x)
@@ -623,8 +651,7 @@ class TestTeEpMoeBackward:
             out, _ = _pure_jax_moe_reference(
                 x,
                 params["gate_kernel"],
-                params["wi_0"],
-                params["wi_1"],
+                params["wi"],
                 params["wo"],
                 ref_expert_bias,
                 num_experts=NUM_EXPERTS,
@@ -640,7 +667,7 @@ class TestTeEpMoeBackward:
         grads_ref_np = {k: np.asarray(jax.device_get(v)) for k, v in grads_ref.items()}
         grad_x_ref_np = np.asarray(jax.device_get(grad_x_ref))
 
-        for name in ("gate_kernel", "wi_0", "wi_1", "wo"):
+        for name in ("gate_kernel", "wi", "wo"):
             # Per-tensor: finite + non-zero + parity in one pass.
             g_te = _to_global_numpy(_unwrap(grads_te["params"][name]), mesh)
             assert np.all(np.isfinite(g_te)), f"{name} grad has NaN/Inf [config={config}]"
@@ -655,7 +682,9 @@ class TestTeEpMoeBackward:
                 grads_ref_np[name].astype(np.float32),
                 atol=atol,
                 rtol=rtol,
-                err_msg=f"grad parity breach on {name} [config={config}]",
+                err_msg=(
+                    f"grad parity breach on {name} [config={config}, quantization={quantization}]"
+                ),
             )
 
         # d_x: the gradient propagated back to the previous layer. Checks
@@ -677,7 +706,7 @@ class TestTeEpMoeBackward:
             grad_x_ref_np.astype(np.float32),
             atol=GRAD_FFN_ATOL,
             rtol=GRAD_FFN_RTOL,
-            err_msg=f"d_x parity breach [config={config}]",
+            err_msg=f"d_x parity breach [config={config}, quantization={quantization}]",
         )
 
 
@@ -710,8 +739,7 @@ class TestTeEpMoeAuxLoss:
         _, aux_ref = _pure_jax_moe_reference(
             jnp.asarray(x_np),
             jnp.asarray(params_np["gate_kernel"]),
-            jnp.asarray(params_np["wi_0"]),
-            jnp.asarray(params_np["wi_1"]),
+            jnp.asarray(params_np["wi"]),
             jnp.asarray(params_np["wo"]),
             num_experts=NUM_EXPERTS,
             num_experts_per_tok=TOPK,
@@ -741,7 +769,7 @@ class TestTeEpMoeAuxLoss:
         x = _make_inputs(jax.random.PRNGKey(22))
         variables, _, _ = _init_apply(block, mesh, x, jax.random.PRNGKey(23))
         grads, _ = _grad_step(block, variables, mesh, x, include_aux=True)
-        for name in ("gate_kernel", "wi_0", "wi_1", "wo"):
+        for name in ("gate_kernel", "wi", "wo"):
             g_local = np.asarray(jax.device_get(_unwrap(grads["params"][name]).addressable_data(0)))
             assert np.all(np.isfinite(g_local)), f"{name} grad NaN/Inf under main+aux"
             assert np.any(g_local != 0.0), f"{name} grad zero under main+aux"
