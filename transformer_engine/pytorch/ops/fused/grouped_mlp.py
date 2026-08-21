@@ -2659,20 +2659,22 @@ class GroupedMLP_CuTeGEMMUnary(_GroupedMLP_CuTeGEMMBase):
     @classmethod
     @functools.lru_cache(maxsize=None)
     def grouped_gemm_dactivation_is_deterministic(cls) -> bool:
-        """Whether the installed dSReLU wrapper takes ``deterministic`` (cuDNN FE 1.28.0+).
+        """Feature-detect the dSReLU wrapper's ``deterministic`` argument (cuDNN FE 1.28.0+).
 
-        Asked of the signature rather than of the package version, because the version
-        cannot answer it: NVIDIA/cudnn-frontend#521 merged after ``v1.27.0`` was tagged, but
-        ``develop`` had already called itself ``1.28.0`` for the eleven days before that, so
-        a build from that window passes a version check and then raises ``TypeError: ...
-        unexpected keyword argument 'deterministic'``. The same coarseness bit
-        ``use_single_group_runtime_offsets`` on a cuDNN reporting 1.27.0 without it.
+        Detected rather than version-checked, because the version cannot answer it:
+        NVIDIA/cudnn-frontend#521 merged after ``v1.27.0`` was tagged, but ``develop`` had
+        already called itself ``1.28.0`` for the eleven days before that, so a build from
+        that window passes a version check and then raises ``TypeError: ... unexpected
+        keyword argument 'deterministic'``.
         """
         try:
             kernel = cls.grouped_gemm_dactivation_kernel()
         except ImportError:
             return False
-        return "deterministic" in inspect.signature(kernel).parameters
+        try:
+            return "deterministic" in inspect.signature(kernel).parameters
+        except (TypeError, ValueError):
+            return False
 
 
 def fuse_ops(
