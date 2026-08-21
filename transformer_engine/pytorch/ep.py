@@ -681,34 +681,37 @@ class _EpCombine(torch.autograd.Function):
     symm-mem pool in zero-copy mode (one-sided target) or a plain tensor in normal mode (keeps
     allocation torch.compile / CUDA-graph safe and lets autograd own the grad's lifetime).
 
-    ``grad_out`` is a write-only scatter target, so it is stashed as a plain ctx attribute rather
-    than via save_for_backward, which would version-track a tensor we mutate.
+    ``grad_out`` and ``handle_mem`` are stashed as plain ctx attributes rather than via
+    save_for_backward, which would version-track tensors we mutate. Only ``expert_out`` is
+    differentiable; the non-diff buffer tensors ride on ``buffer`` to keep the operand list short.
     """
 
     @staticmethod
     def forward(  # type: ignore[override]
         ctx,
-        handle_mem: torch.Tensor,
-        num_local_tokens: int,
-        hidden_dim: int,
-        grad_out: Optional[torch.Tensor],
         expert_out: torch.Tensor,
+        grad_out: Optional[torch.Tensor],
+        buffer: "EpBuffer",
+        num_local_tokens: int,
         bwd_quant_recipe=None,
-        token_counts: Optional[torch.Tensor] = None,
-        eager: bool = False,
     ):
         """Combine fwd; stashes the bwd grad target or expert_out shape to size it. When
         ``bwd_quant_recipe`` is set, the backward sends the result-grad as MXFP8. Eager mode is not
         graph-capturable, so it calls the backend op directly and skips the torch.library dispatch.
         """
+        handle_mem = buffer.handle_mem
+        token_counts = buffer.tokens_per_expert
+        eager = buffer.eager
         device = expert_out.device
         zero_copy = tex.ep_get_zero_copy()
-        result = torch.empty(num_local_tokens, hidden_dim, dtype=expert_out.dtype, device=device)
+        result = torch.empty(
+            num_local_tokens, buffer.hidden_dim, dtype=expert_out.dtype, device=device
+        )
         if eager:
             tex.ep_combine(handle_mem, expert_out, result)
         else:
             torch.ops.transformer_engine_ep.combine(handle_mem, expert_out, result)
-        ctx.save_for_backward(handle_mem)
+        ctx.handle_mem = handle_mem
         ctx.grad_out = grad_out
         ctx.bwd_quant_recipe = bwd_quant_recipe
         ctx.token_counts = token_counts
@@ -726,7 +729,7 @@ class _EpCombine(torch.autograd.Function):
         per-expert GroupedTensor."""
         if not g_result.is_contiguous():
             g_result = g_result.contiguous()
-        (handle_mem,) = ctx.saved_tensors
+        handle_mem = ctx.handle_mem
 
         if ctx.bwd_quant_recipe is None:
             grad_expert_out = ctx.grad_out
@@ -766,14 +769,11 @@ class _EpCombine(torch.autograd.Function):
             )
 
         return (
-            None,  # handle_mem
-            None,  # num_local_tokens
-            None,  # hidden_dim
-            None,  # grad_out
             grad_expert_out,
+            None,  # grad_out
+            None,  # buffer
+            None,  # num_local_tokens
             None,  # bwd_quant_recipe
-            None,  # token_counts
-            None,  # eager
         )
 
 
@@ -1015,12 +1015,9 @@ def ep_combine(
             )
         bwd_quant_recipe = buffer.combine_bwd_quant_recipe
     return _EpCombine.apply(
-        buffer.handle_mem,
-        num_local_tokens,
-        buffer.hidden_dim,
-        grad_out,
         expert_out,
+        grad_out,
+        buffer,
+        num_local_tokens,
         bwd_quant_recipe,
-        buffer.tokens_per_expert,
-        buffer.eager,
     )
