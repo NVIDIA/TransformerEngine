@@ -1985,18 +1985,22 @@ def _make_graphed_callables(
                 continue
             m_chunk = abs(int(c_id)) - 1
             logical_idx = group_fwd_idx[m_chunk] if c_id > 0 else group_bwd_idx[m_chunk]
-            first_func_idx = (_prefix_num_layers[m_chunk] * num_microbatches) + (
-                logical_idx * _num_layers_per_chunk[m_chunk]
-            )
-            slot = _graph_memory_slots[first_func_idx]
-            event_key = (
-                c_id > 0,
-                slot[3],
-                logical_idx,
-                slot[1],
-                _num_layers_per_chunk[m_chunk],
-            )
-            group_records.append((event_key, slot[2]))
+            num_layers = _num_layers_per_chunk[m_chunk]
+            if num_layers == 0:
+                group_records.append(None)
+            else:
+                first_func_idx = (_prefix_num_layers[m_chunk] * num_microbatches) + (
+                    logical_idx * num_layers
+                )
+                slot = _graph_memory_slots[first_func_idx]
+                event_key = (
+                    c_id > 0,
+                    slot[3],
+                    logical_idx,
+                    slot[1],
+                    num_layers,
+                )
+                group_records.append((event_key, slot[2]))
             if c_id > 0:
                 group_fwd_idx[m_chunk] += 1
             else:

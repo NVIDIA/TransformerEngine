@@ -986,6 +986,46 @@ def test_slot_memory_variants_share_one_backing(elements: int) -> None:
         reset_graphs(graphed)
 
 
+@pytest.mark.parametrize(
+    "num_layers_per_chunk",
+    ([1, 0], [1, 0, 1], [1, 0, 0, 1]),
+    ids=("trailing", "middle", "consecutive-middle"),
+)
+def test_slot_memory_skips_zero_layer_pipeline_chunks(num_layers_per_chunk) -> None:
+    """Pipeline schedule entries without graphable layers must not consume slot metadata."""
+
+    class Module(torch.nn.Module):
+        def forward(self, inp):
+            return inp.square()
+
+    module = Module().cuda()
+    num_chunks = len(num_layers_per_chunk)
+    num_graphable_layers = sum(num_layers_per_chunk)
+    samples = tuple(
+        (torch.ones(16, device="cuda", requires_grad=True),) for _ in range(num_graphable_layers)
+    )
+    graphed = make_graphed_callables(
+        (module,) * num_graphable_layers,
+        samples,
+        num_warmup_iters=2,
+        _order=[*range(1, num_chunks + 1), *range(-num_chunks, 0)],
+        _num_layers_per_chunk=num_layers_per_chunk,
+        _reuse_graph_input_output_buffers=True,
+        _graph_memory_slots=tuple(
+            _slot(layer, layer, layer, overlap=layer, warmup=layer)
+            for layer in range(num_graphable_layers)
+        ),
+    )
+
+    try:
+        for graph in graphed:
+            inp = torch.randn(16, device="cuda", requires_grad=True)
+            graph(inp).sum().backward()
+            torch.testing.assert_close(inp.grad, 2.0 * inp.detach())
+    finally:
+        reset_graphs(graphed)
+
+
 def test_slot_memory_preserves_aliased_public_outputs() -> None:
     """Slot output arenas retain overlapping public views across CP branches."""
 
