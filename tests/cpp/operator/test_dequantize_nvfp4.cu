@@ -362,7 +362,7 @@ TEST(NVFP4RecipeTest, UE5M3ScaleUtilities)
     global_amax.rowwise_cpu_dptr<float>()[0] = 12.0f;
     global_amax.from_cpu();
     nvte_nvfp4_compute_global_scale(
-        global_amax.data(), global_scale.data(), 0, kNVTEFloat8UE5M3);
+        global_amax.data(), global_scale.data(), kNVTEFloat8UE5M3, 0);
     global_scale.to_cpu();
     EXPECT_FLOAT_EQ(global_scale.rowwise_cpu_dptr<float>()[0], 6.0f * 114688.0f / 12.0f);
 
@@ -372,14 +372,14 @@ TEST(NVFP4RecipeTest, UE5M3ScaleUtilities)
     block_amax.rowwise_cpu_dptr<float>()[1] = 6.0f;
     block_amax.from_cpu();
     nvte_nvfp4_compute_per_block_scale(
-        block_amax.data(), block_scale.data(), global_amax.data(), 0, kNVTEFloat8UE5M3);
+        block_amax.data(), block_scale.data(), global_amax.data(), kNVTEFloat8UE5M3, 0);
     block_scale.to_cpu();
     EXPECT_FLOAT_EQ(block_scale.rowwise_cpu_dptr<float>()[0], 3.0f * 114688.0f / 12.0f);
     EXPECT_FLOAT_EQ(block_scale.rowwise_cpu_dptr<float>()[1], 6.0f * 114688.0f / 12.0f);
 
     Tensor expanded_scale("expanded_scale", std::vector<size_t>{16, 2}, DType::kByte);
     nvte_nvfp4_expand_scale_to_fp8(
-        block_scale.data(), expanded_scale.data(), 1, 2, 16, 16, 0, kNVTEFloat8UE5M3);
+        block_scale.data(), expanded_scale.data(), 1, 2, 16, 16, kNVTEFloat8UE5M3, 0);
     expanded_scale.to_cpu();
     const auto *scales = reinterpret_cast<const fp8ue5m3 *>(
         expanded_scale.rowwise_cpu_dptr<byte>());
