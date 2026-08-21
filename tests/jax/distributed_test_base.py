@@ -134,8 +134,7 @@ def assert_equal_collectives(target_hlo, coll_count_ref):
 
         computation_name = match.group(1)
         computation = re.search(
-            rf"(?ms)^[ \t]*{re.escape(computation_name)}(?=[ \t(])"
-            rf".*?^[ \t]*}}[ \t]*$",
+            rf"(?ms)^[ \t]*{re.escape(computation_name)}(?=[ \t(])" rf".*?^[ \t]*}}[ \t]*$",
             target_hlo,
         )
         if not computation:
@@ -155,7 +154,6 @@ def assert_equal_collectives(target_hlo, coll_count_ref):
     def count_collectives(splitted_hlo):
         result = generate_collectives_count(0, 0, 0)
 
-
         for line in splitted_hlo:
             txt = line.split()
 
@@ -167,29 +165,16 @@ def assert_equal_collectives(target_hlo, coll_count_ref):
             # instructions, so count only *-start. Synchronous collectives are
             # represented by a single instruction without either suffix.
             is_async_start = txt and start_symb in txt[0]
-            is_sync_collective = (
-                "collective_backend_config" in line
-                and sync_symb in line
-            )
+            is_sync_collective = "collective_backend_config" in line and sync_symb in line
 
             if is_async_start or is_sync_collective:
                 if is_sync_collective:
-                    is_all_reduce = re.search(
-                        r"\ball-reduce\s*\(", line
-                    )
-                    is_all_gather = re.search(
-                        r"\ball-gather\s*\(", line
-                    )
+                    is_all_reduce = re.search(r"\ball-reduce\s*\(", line)
+                    is_all_gather = re.search(r"\ball-gather\s*\(", line)
                 else:
                     called_collective = get_called_collective_type(line)
-                    is_all_reduce = (
-                        COLL_AR_KEY in txt[0]
-                        or called_collective == COLL_AR_KEY
-                    )
-                    is_all_gather = (
-                        COLL_AG_KEY in txt[0]
-                        or called_collective == COLL_AG_KEY
-                    )
+                    is_all_reduce = COLL_AR_KEY in txt[0] or called_collective == COLL_AR_KEY
+                    is_all_gather = COLL_AG_KEY in txt[0] or called_collective == COLL_AG_KEY
 
                 if is_all_reduce:
                     result[COLL_AR_KEY] += count_bytes(txt)
