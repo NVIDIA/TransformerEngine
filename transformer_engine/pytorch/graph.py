@@ -50,6 +50,7 @@ class _AllocatorSettingsGuard:
         self._settings_to_restore = None
 
     def apply(self, setter: Callable[[str], None], settings: str, restore: str) -> None:
+        """Apply temporary allocator settings and remember how to restore them."""
         if self._setter is not None:
             raise RuntimeError("CUDA allocator settings guard is already active.")
         self._setter = setter
@@ -57,6 +58,7 @@ class _AllocatorSettingsGuard:
         setter(settings)
 
     def restore(self) -> None:
+        """Restore the allocator settings saved by :meth:`apply`."""
         if self._setter is None:
             return
         setter = self._setter
