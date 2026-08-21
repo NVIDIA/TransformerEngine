@@ -137,12 +137,20 @@ void init_router_bindings(pybind11::module &m) {
   pybind11::enum_<NVTERoutingMapFormat>(m, "NVTERoutingMapFormat", pybind11::module_local())
       .value("BYTEMAP", NVTE_ROUTING_MAP_FORMAT_BYTEMAP)
       .value("BITMAP_U8", NVTE_ROUTING_MAP_FORMAT_BITMAP_U8);
+  pybind11::enum_<NVTEQBHistogramMode>(m, "NVTEQBHistogramMode", pybind11::module_local())
+      .value("TWO_KERNEL", NVTE_QB_HISTOGRAM_TWO_KERNEL)
+      .value("FUSED_ATOMIC", NVTE_QB_HISTOGRAM_FUSED_ATOMIC);
   m.def("fused_topk_with_score_function_fwd", &fused_topk_with_score_function_fwd,
         py::arg("logits"), py::arg("topk"), py::arg("use_pre_softmax"), py::arg("num_groups"),
         py::arg("group_topk"), py::arg("scaling_factor"), py::arg("score_function"),
         py::arg("expert_bias"),
         py::arg("routing_map_format") = static_cast<int>(NVTE_ROUTING_MAP_FORMAT_BYTEMAP),
         py::arg("topk_indices") = std::nullopt, "Fused topk with score function fwd");
+  m.def("fused_topk_with_score_function_qb_fwd", &fused_topk_with_score_function_qb_fwd,
+        py::arg("logits"), py::arg("topk"), py::arg("scaling_factor"), py::arg("expert_bias"),
+        py::arg("routing_map_format"), py::arg("topk_indices"), py::arg("histogram"),
+        py::arg("bin_bounds"), py::arg("histogram_mode"), py::arg("bin_bounds_validated") = false,
+        "Kimi K3 QB fused topk with histogram accumulation");
   m.def("fused_topk_with_score_function_bwd", &fused_topk_with_score_function_bwd,
         py::arg("routing_map"), py::arg("intermediate_output"), py::arg("grad_probs"),
         py::arg("grad_logits"), py::arg("topk"), py::arg("use_pre_softmax"),
@@ -258,6 +266,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("quantizer"));
   m.def("swiglu", transformer_engine::pytorch::swiglu, "SwiGLU activation", py::arg("input"),
         py::arg("quantizer"));
+  m.def("situglu", transformer_engine::pytorch::situglu, "SiTU-GLU activation", py::arg("input"),
+        py::arg("quantizer"), py::arg("beta1") = 4.0f, py::arg("beta2") = 25.0f);
   m.def("clamped_swiglu", transformer_engine::pytorch::clamped_swiglu,
         "SwiGLU activation used in GPT OSS", py::arg("input"), py::arg("quantizer"),
         py::arg("limit") = 7.0f, py::arg("alpha") = 1.702f, py::arg("glu_linear_offset") = 1.0f);
@@ -287,6 +297,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("fwd_input"), py::arg("quantizer"));
   m.def("dswiglu", transformer_engine::pytorch::dswiglu, "Backward of SwiGLU", py::arg("grad"),
         py::arg("fwd_input"), py::arg("quantizer"));
+  m.def("dsituglu", transformer_engine::pytorch::dsituglu, "Backward of SiTU-GLU", py::arg("grad"),
+        py::arg("fwd_input"), py::arg("quantizer"), py::arg("beta1") = 4.0f,
+        py::arg("beta2") = 25.0f);
   m.def("clamped_dswiglu", transformer_engine::pytorch::clamped_dswiglu,
         "Backward of SwiGLU used in GPT OSS", py::arg("grad"), py::arg("fwd_input"),
         py::arg("quantizer"), py::arg("limit") = 7.0f, py::arg("alpha") = 1.702f,
@@ -295,6 +308,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("scaled_swiglu", transformer_engine::pytorch::scaled_swiglu, "Scaled SwiGLU activation",
         py::arg("input"), py::arg("act_scales"), py::arg("quantizer"),
         py::arg("glu_interleave_size") = 0);
+  m.def("scaled_situglu", transformer_engine::pytorch::scaled_situglu, "Scaled SiTU-GLU activation",
+        py::arg("input"), py::arg("act_scales"), py::arg("quantizer"), py::arg("beta1") = 4.0f,
+        py::arg("beta2") = 25.0f, py::arg("glu_interleave_size") = 0);
   m.def("scaled_clamped_swiglu", transformer_engine::pytorch::scaled_clamped_swiglu,
         "Scaled clamped SwiGLU activation", py::arg("input"), py::arg("act_scales"),
         py::arg("quantizer"), py::arg("limit") = 7.0f, py::arg("alpha") = 1.702f,
@@ -304,6 +320,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("scaled_dswiglu", transformer_engine::pytorch::scaled_dswiglu, "Scaled SwiGLU backward",
         py::arg("grad"), py::arg("fwd_input"), py::arg("act_scales"), py::arg("quantizer"),
         py::arg("glu_interleave_size") = 0, py::arg("compute_scale_grad") = true);
+  m.def("scaled_dsituglu", transformer_engine::pytorch::scaled_dsituglu, "Scaled SiTU-GLU backward",
+        py::arg("grad"), py::arg("fwd_input"), py::arg("act_scales"), py::arg("quantizer"),
+        py::arg("beta1") = 4.0f, py::arg("beta2") = 25.0f, py::arg("glu_interleave_size") = 0,
+        py::arg("compute_scale_grad") = true);
   m.def("scaled_clamped_dswiglu", transformer_engine::pytorch::scaled_clamped_dswiglu,
         "Scaled clamped SwiGLU backward", py::arg("grad"), py::arg("fwd_input"),
         py::arg("act_scales"), py::arg("quantizer"), py::arg("limit") = 7.0f,

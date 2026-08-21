@@ -1040,6 +1040,10 @@ def _cast_master_weights_to_fp8_mxfp8_scaling(
 
     # Parameter attributes
     device = params[0][0].device
+    # Every shard can be empty on a rank. Master weights are cast to the model dtype in
+    # quantize_master_weights, so use that as the fallback: the amax buffer below is
+    # all-reduced and its dtype has to agree with the ranks that do own a shard.
+    master_weight_dtype = params[0][0].dtype
     for _, master_weight, _, _ in params:
         if master_weight is not None:
             master_weight_dtype = master_weight.dtype

@@ -335,6 +335,15 @@ py::object dswiglu(const at::Tensor& grad, const at::Tensor& input, py::handle q
   return dactivation_helper<nvte_dswiglu, nullptr>(grad, input, quantizer);
 }
 
+py::object situglu(const at::Tensor& input, py::handle quantizer, float beta1, float beta2) {
+  return activation_helper<nullptr, nvte_situglu>(input, quantizer, 2, beta1, beta2);
+}
+
+py::object dsituglu(const at::Tensor& grad, const at::Tensor& input, py::handle quantizer,
+                    float beta1, float beta2) {
+  return dactivation_helper<nullptr, nvte_dsituglu>(grad, input, quantizer, beta1, beta2);
+}
+
 /* clamped functions */
 py::object clamped_swiglu(const at::Tensor& input, py::handle quantizer, float limit, float alpha,
                           float glu_linear_offset) {
@@ -456,6 +465,13 @@ py::object scaled_swiglu(const at::Tensor& input, const at::Tensor& act_scales,
                                                       /*shape_divisor=*/2, glu_interleave_size);
 }
 
+py::object scaled_situglu(const at::Tensor& input, const at::Tensor& act_scales,
+                          py::handle quantizer, float beta1, float beta2,
+                          int64_t glu_interleave_size) {
+  return scaled_activation_helper<nvte_scaled_situglu>(
+      input, act_scales, quantizer, /*shape_divisor=*/2, beta1, beta2, glu_interleave_size);
+}
+
 py::object scaled_clamped_swiglu(const at::Tensor& input, const at::Tensor& act_scales,
                                  py::handle quantizer, float limit, float alpha,
                                  float glu_linear_offset, int64_t glu_interleave_size) {
@@ -475,6 +491,13 @@ py::tuple scaled_dswiglu(const at::Tensor& grad, const at::Tensor& input,
                          int64_t glu_interleave_size, bool compute_scale_grad) {
   return scaled_dactivation_helper<nvte_scaled_dswiglu>(grad, input, act_scales, quantizer,
                                                         compute_scale_grad, glu_interleave_size);
+}
+
+py::tuple scaled_dsituglu(const at::Tensor& grad, const at::Tensor& input,
+                          const at::Tensor& act_scales, py::handle quantizer, float beta1,
+                          float beta2, int64_t glu_interleave_size, bool compute_scale_grad) {
+  return scaled_dactivation_helper<nvte_scaled_dsituglu>(
+      grad, input, act_scales, quantizer, compute_scale_grad, beta1, beta2, glu_interleave_size);
 }
 
 py::tuple scaled_clamped_dswiglu(const at::Tensor& grad, const at::Tensor& input,

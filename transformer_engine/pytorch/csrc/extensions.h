@@ -38,6 +38,14 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> fused_topk_with_score_function_fw
     int routing_map_format = static_cast<int>(NVTE_ROUTING_MAP_FORMAT_BYTEMAP),
     std::optional<at::Tensor> topk_indices = std::nullopt);
 
+std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor>
+fused_topk_with_score_function_qb_fwd(at::Tensor logits, int topk,
+                                      std::optional<float> scaling_factor, at::Tensor expert_bias,
+                                      int routing_map_format,
+                                      std::optional<at::Tensor> topk_indices, at::Tensor histogram,
+                                      at::Tensor bin_bounds, int histogram_mode,
+                                      bool bin_bounds_validated = false);
+
 void fused_topk_with_score_function_bwd(
     at::Tensor routing_map, at::Tensor intermediate_output, at::Tensor grad_probs,
     at::Tensor grad_logits, int topk, bool use_pre_softmax, std::optional<float> scaling_factor,
@@ -290,6 +298,11 @@ py::object swiglu(const at::Tensor &input, py::handle quantizer);
 
 py::object dswiglu(const at::Tensor &grad, const at::Tensor &input, py::handle quantizer);
 
+py::object situglu(const at::Tensor &input, py::handle quantizer, float beta1, float beta2);
+
+py::object dsituglu(const at::Tensor &grad, const at::Tensor &input, py::handle quantizer,
+                    float beta1, float beta2);
+
 py::object clamped_swiglu(const at::Tensor &input, py::handle quantizer, float limit, float alpha,
                           float glu_linear_offset);
 
@@ -299,6 +312,10 @@ py::object clamped_dswiglu(const at::Tensor &grad, const at::Tensor &input, py::
 /* Scaled activation */
 py::object scaled_swiglu(const at::Tensor &input, const at::Tensor &act_scales,
                          py::handle quantizer, int64_t glu_interleave_size);
+
+py::object scaled_situglu(const at::Tensor &input, const at::Tensor &act_scales,
+                          py::handle quantizer, float beta1, float beta2,
+                          int64_t glu_interleave_size);
 
 py::object scaled_clamped_swiglu(const at::Tensor &input, const at::Tensor &act_scales,
                                  py::handle quantizer, float limit, float alpha,
@@ -310,6 +327,10 @@ py::object scaled_srelu(const at::Tensor &input, const at::Tensor &act_scales,
 py::tuple scaled_dswiglu(const at::Tensor &grad, const at::Tensor &input,
                          const at::Tensor &act_scales, py::handle quantizer,
                          int64_t glu_interleave_size, bool compute_scale_grad);
+
+py::tuple scaled_dsituglu(const at::Tensor &grad, const at::Tensor &input,
+                          const at::Tensor &act_scales, py::handle quantizer, float beta1,
+                          float beta2, int64_t glu_interleave_size, bool compute_scale_grad);
 
 py::tuple scaled_clamped_dswiglu(const at::Tensor &grad, const at::Tensor &input,
                                  const at::Tensor &act_scales, py::handle quantizer, float limit,

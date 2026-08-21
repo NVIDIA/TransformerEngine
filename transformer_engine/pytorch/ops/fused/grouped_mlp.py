@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Sequence
 import functools
+import inspect
 import os
 from importlib.metadata import PackageNotFoundError, version as get_pkg_version
 from typing import Any, Literal, Optional
@@ -45,6 +46,7 @@ from ...utils import (
 from ..basic import (
     GroupedLinear,
     ScaledClampedQGeGLU,
+    ScaledSiTUGLU,
     ScaledSReLU,
     ScaledSwiGLU,
 )
@@ -96,6 +98,31 @@ def _cudnn_frontend_supports_grouped_gemm_srelu() -> bool:
 def _cudnn_frontend_supports_grouped_gemm_srelu_hadamard() -> bool:
     """Check cuDNN frontend min version for grouped GEMM SReLU hadamard kernels."""
     return _cudnn_frontend_version_at_least("1.26.0")
+
+
+@functools.lru_cache(maxsize=None)
+def _cudnn_frontend_supports_grouped_gemm_situglu() -> bool:
+    """Feature-detect complete cuDNN frontend grouped SiTU-GLU support."""
+    try:
+        from cudnn import (  # pylint: disable=import-outside-toplevel
+            grouped_gemm_dglu_wrapper_sm100,
+            grouped_gemm_glu_hadamard_wrapper_sm100,
+            grouped_gemm_glu_wrapper_sm100,
+        )
+    except ImportError:
+        return False
+    try:
+        wrappers = (
+            grouped_gemm_glu_wrapper_sm100,
+            grouped_gemm_dglu_wrapper_sm100,
+            grouped_gemm_glu_hadamard_wrapper_sm100,
+        )
+        situ_params = {"situ_beta1", "situ_beta2"}
+        return all(
+            situ_params.issubset(inspect.signature(wrapper).parameters) for wrapper in wrappers
+        )
+    except (TypeError, ValueError):
+        return False
 
 
 def _nvidia_cudnn_frontend_supports_wgrad() -> bool:
@@ -817,7 +844,7 @@ def _compute_grad_params(
 
 def is_glu_activation(activation_op) -> bool:
     """Whether an activation consumes a GLU-style doubled input."""
-    return isinstance(activation_op, (ScaledSwiGLU, ScaledClampedQGeGLU))
+    return isinstance(activation_op, (ScaledSwiGLU, ScaledSiTUGLU, ScaledClampedQGeGLU))
 
 
 def validate_grouped_mlp_dims(fc1, activation_op, fc2) -> None:
@@ -891,7 +918,10 @@ def fuse_grouped_mlp_ops(
         return ops
 
     if activation_op_types is None:
-        activation_op_types = (ScaledSwiGLU, ScaledClampedQGeGLU)
+        activation_op_types = [ScaledSwiGLU, ScaledClampedQGeGLU]
+        if _cudnn_frontend_supports_grouped_gemm_situglu():
+            activation_op_types.append(ScaledSiTUGLU)
+        activation_op_types = tuple(activation_op_types)
 
     # Check for unsupported NVFP4 recipe configs
     if recipe.nvfp4():
@@ -1047,12 +1077,15 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         else:
             # The cuDNN geglu implementations correspond to ScaledClampedQGeGLU.
             # The act_func strings should be fixed on the cuDNN FE side.
-            self._cudnn_act_func = (
-                "geglu" if isinstance(activation, ScaledClampedQGeGLU) else "swiglu"
-            )
-            self._cudnn_dact_func = (
-                "dgeglu" if isinstance(activation, ScaledClampedQGeGLU) else "dswiglu"
-            )
+            if isinstance(activation, ScaledClampedQGeGLU):
+                self._cudnn_act_func = "geglu"
+                self._cudnn_dact_func = "dgeglu"
+            elif isinstance(activation, ScaledSiTUGLU):
+                self._cudnn_act_func = "situglu"
+                self._cudnn_dact_func = "dsituglu"
+            else:
+                self._cudnn_act_func = "swiglu"
+                self._cudnn_dact_func = "dswiglu"
 
         # cuDNN-frontend >= 1.24.0 exposes runtime-configurable GeGLU
         # parameters; pass them through when the activation carries
@@ -1065,6 +1098,11 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             self._cudnn_geglu_alpha: float = activation._clamped.alpha
             self._cudnn_glu_clamp_max: float = activation._clamped.limit
             self._cudnn_glu_clamp_min: float = -activation._clamped.limit
+
+        self._pass_situglu_params: bool = isinstance(activation, ScaledSiTUGLU)
+        if self._pass_situglu_params:
+            self._cudnn_situ_beta1: float = activation.beta1
+            self._cudnn_situ_beta2: float = activation.beta2
 
     def fuser_forward(
         self,
@@ -1457,7 +1495,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                 if self.grouped_gemm_act_hadamard_kernel() is None:
                     # Kernel is not available
                     pass
-                elif self._cudnn_act_func == "swiglu":
+                elif self._cudnn_act_func in ("swiglu", "situlu"):
                     kernel_impl = "gemm_act_rht_amax"
                 elif activation_is_srelu and _cudnn_frontend_supports_grouped_gemm_srelu_hadamard():
                     kernel_impl = "gemm_act_rht_amax"
@@ -1516,6 +1554,11 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                     glu_clamp_max=self._cudnn_glu_clamp_max,
                     glu_clamp_min=self._cudnn_glu_clamp_min,
                 )
+        if self._cudnn_act_func == "situglu" and self._pass_situglu_params:
+            fc1_activation_kwargs.update(
+                situ_beta1=self._cudnn_situ_beta1,
+                situ_beta2=self._cudnn_situ_beta2,
+            )
 
         if fc1_op.single_grouped_weight:
             # Clone and swizzle scales for GEMM.
@@ -2308,6 +2351,11 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                 geglu_alpha=self._cudnn_geglu_alpha,
                 glu_clamp_max=self._cudnn_glu_clamp_max,
                 glu_clamp_min=self._cudnn_glu_clamp_min,
+            )
+        if self._pass_situglu_params:
+            fc2_dactivation_kwargs.update(
+                situ_beta1=self._cudnn_situ_beta1,
+                situ_beta2=self._cudnn_situ_beta2,
             )
 
         fc2_leader = fc2_op.weight if fc2_op.single_grouped_weight else fc2_op.weight0
