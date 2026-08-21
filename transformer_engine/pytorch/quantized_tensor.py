@@ -5,7 +5,7 @@
 """Pure Python base classes for quantization."""
 
 from __future__ import annotations
-from typing import Optional, Tuple, Iterable, Any, Dict, Union
+from typing import NamedTuple, Optional, Tuple, Iterable, Any, Dict, Union, get_type_hints
 import abc
 import warnings
 import math
@@ -23,11 +23,31 @@ from transformer_engine.pytorch.tensor._quantization_helpers import (
     _stride_from_shape,
 )
 
-
 # Custom ops that should pass through __torch_dispatch__ without unwrapping
 # QuantizedTensor subclasses (e.g. Float8Tensor). Register ops here that
 # handle quantized tensors internally.
 _quantized_tensor_passthrough_ops: set = set()
+
+
+class InnerTensor(NamedTuple):
+    """Marks a storage field as a flat inner tensor.
+
+    Annotate the field with it -- ``_scale_inv: Annotated[torch.Tensor,
+    InnerTensor("fp8_scale_inv")]`` -- and ``__init_subclass__`` collects the
+    declarations into ``_INNER_TENSORS``, in field order.
+    """
+
+    ctor_kwarg: str
+
+
+def _collect_inner_tensor_fields(cls: type) -> Tuple[Tuple[str, str], ...]:
+    """Buffers a storage class declares, as ``(attribute, constructor kwarg)``."""
+    fields = []
+    for attr, hint in get_type_hints(cls, include_extras=True).items():
+        for meta in getattr(hint, "__metadata__", ()):
+            if isinstance(meta, InnerTensor):
+                fields.append((attr, meta.ctor_kwarg))
+    return tuple(fields)
 
 
 class QuantizedTensorStorage:
@@ -48,6 +68,20 @@ class QuantizedTensorStorage:
 
     _dtype: torch.dtype
     _quantizer: Optional[Quantizer]
+
+    @property
+    def shape(self) -> torch.Size:
+        """Logical tensor shape, valid on bare storages and wrapper tensors alike.
+
+        Wrapper subclasses (also ``torch.Tensor``) defer to the native tensor
+        shape (``size()`` on a bare storage may reconstruct the shape from the
+        columnwise buffer, which is not necessarily the outer shape); bare
+        storages derive it from ``size()``.
+        """
+        if isinstance(self, torch.Tensor):
+            # pylint: disable=unnecessary-dunder-call
+            return torch._C.TensorBase.shape.__get__(self, type(self))
+        return torch.Size(self.size())
 
     def update_usage(
         self,
@@ -131,6 +165,120 @@ class QuantizedTensorStorage:
         """Copy data from another QuantizedTensorStorage."""
         raise NotImplementedError(
             f"{self.__class__.__name__} class does not implement copy_from_storage function"
+        )
+
+    # ── FSDP2 buffer protocol ───────────────────────────────────────
+    #
+    # These three methods decouple FSDP2 all-gather buffer extraction from
+    # format-specific padding/layout tricks. `HybridQuantizedTensor` uses them
+    # to aggregate buffers from its two sub-storages without knowing each
+    # sub-storage's internal field layout.
+    #
+    # Contract:
+    #   * ``fsdp_buffer_fields`` returns an ordered tuple of attribute names
+    #     on *self* that hold the tensor buffers that must be all-gathered.
+    #     Scalars/metadata that only need broadcasting (e.g. per-tensor FP8
+    #     ``_scale_inv``) are NOT listed here — they travel via the hook's
+    #     metadata tuple instead.
+    #   * ``fsdp_extract_buffers`` returns ``(buffers, reassembly_meta)``.
+    #     The default implementation reads the fields as-is. Sub-storages with
+    #     gather-time padding (MXFP8 block scales) override this to strip the
+    #     padding before gather.
+    #   * ``fsdp_assign_gathered`` writes the gathered buffers back into the
+    #     storage's fields. Sub-storages with gather-time padding override
+    #     this to re-apply the padding before assignment.
+
+    def fsdp_buffer_fields(self) -> Tuple[str, ...]:
+        """Ordered attribute names holding tensor buffers gathered by FSDP2."""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} class does not implement fsdp_buffer_fields"
+        )
+
+    def fsdp_extract_buffers(
+        self,
+    ) -> Tuple[Tuple[Optional[torch.Tensor], ...], Dict[str, Any]]:
+        """Return ``(buffers, reassembly_meta)`` for FSDP2 all-gather.
+
+        Default implementation reads the fields named by ``fsdp_buffer_fields``
+        verbatim. Override when the on-disk layout differs from the
+        gather-ready layout (e.g. MXFP8 block scales carry alignment padding).
+        """
+        names = self.fsdp_buffer_fields()
+        buffers = tuple(getattr(self, name) for name in names)
+        return buffers, {"field_names": names}
+
+    def fsdp_assign_gathered(
+        self,
+        gathered: Tuple[Optional[torch.Tensor], ...],
+        meta: Dict[str, Any],
+    ) -> None:
+        """Write gathered buffers into the fields named in ``meta``.
+
+        Override when the gather-ready layout needs a format-specific transform
+        (e.g. MXFP8 scales must be padded back to ``[128, 4]`` / ``[4, 128]``).
+        """
+        names = meta["field_names"]
+        if len(names) != len(gathered):
+            raise RuntimeError(
+                f"{type(self).__name__}.fsdp_assign_gathered got "
+                f"{len(gathered)} buffers for {len(names)} fields"
+            )
+        for name, buf in zip(names, gathered):
+            setattr(self, name, buf)
+
+    # ----- PyTorch subclass flatten protocol (torch.compile / TensorSpec) -----
+
+    # Collected from the subclasses' :class:`InnerTensor` field annotations; everything
+    # else returned by :meth:`get_metadata` is treated as non-tensor context.
+    _INNER_TENSORS: Tuple[Tuple[str, str], ...] = ()
+
+    def __init_subclass__(cls, **kwargs) -> None:
+        super().__init_subclass__(**kwargs)
+        cls._INNER_TENSORS = _collect_inner_tensor_fields(cls)
+
+    def _flatten_nontensor_kwargs(self) -> Dict[str, Any]:
+        """Non-tensor constructor kwargs (scalars, dtype, quantizer)."""
+        tensor_kwargs = {kwarg for _, kwarg in self._INNER_TENSORS}
+        return {k: v for k, v in self.get_metadata().items() if k not in tensor_kwargs}
+
+    def __tensor_flatten__(self) -> Tuple[list, Dict[str, Any]]:
+        """Return ``(inner_tensor_attr_names, context)``; see class comment."""
+        present = [attr for attr, _ in self._INNER_TENSORS if getattr(self, attr) is not None]
+        ctx = {
+            "cls": type(self),
+            "is_tensor": isinstance(self, QuantizedTensor),
+            "requires_grad": (
+                bool(self.requires_grad) if isinstance(self, QuantizedTensor) else False
+            ),
+            "nontensor_kwargs": self._flatten_nontensor_kwargs(),
+        }
+        return present, ctx
+
+    @staticmethod
+    def __tensor_unflatten__(
+        inner_tensors: Dict[str, torch.Tensor],
+        ctx: Dict[str, Any],
+        outer_size: Iterable[int],
+        outer_stride: Optional[Iterable[int]],
+    ) -> QuantizedTensorStorage:
+        """Rebuild a storage / wrapper from flat tensors + context."""
+        cls = ctx["cls"]
+        kwargs: Dict[str, Any] = dict(ctx["nontensor_kwargs"])
+        # Map each declared inner tensor back to its constructor kwarg (absent -> None).
+        for attr, kwarg in cls._INNER_TENSORS:
+            kwargs[kwarg] = inner_tensors.get(attr)
+        if not ctx["is_tensor"]:
+            return cls(**kwargs)
+        # Wrapper subclass: it also needs outer shape / dtype / device / stride.
+        fake_dtype = kwargs.get("fake_dtype")
+        device = next((t.device for t in inner_tensors.values() if t is not None), None)
+        return cls(
+            shape=tuple(outer_size),
+            dtype=fake_dtype,
+            requires_grad=ctx["requires_grad"],
+            device=device,
+            stride=tuple(outer_stride) if outer_stride is not None else None,
+            **kwargs,
         )
 
 
@@ -350,6 +498,72 @@ class Quantizer(abc.ABC):
             result.requires_grad_(True)
         return result
 
+    # ----- Data-free inner-tensor/metadata primitives backing TensorSpec -----
+
+    def inner_tensor_specs(
+        self, shape: Tuple[int, ...]
+    ) -> Dict[str, Tuple[Tuple[int, ...], torch.dtype]]:
+        """Return ``{attr_name: (shape, dtype)}`` for the inner tensors
+        this quantizer would allocate for a logical tensor of ``shape``.
+
+        Keys must match the inner-tensor attribute names declared in the storage's
+        ``_INNER_TENSORS``, be emitted in that same order, and respect the
+        quantizer's usage flags.
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement inner_tensor_specs; "
+            "it cannot be used with TensorSpec / pure-Python allocation"
+        )
+
+    def storage_metadata(self, fake_dtype: torch.dtype) -> Dict[str, Any]:
+        """Non-tensor context for the produced storage.
+
+        Returns ``{"cls": <type>, "nontensor_kwargs": {...}}`` where ``cls`` is
+        the concrete class to instantiate (wrapper subclass for user-visible
+        tensors, bare storage class for ``internal`` quantizers) and
+        ``nontensor_kwargs`` are its non-tensor constructor kwargs (e.g.
+        ``fp8_dtype``, ``quantizer``, ``fake_dtype``).
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement storage_metadata; "
+            "it cannot be used with TensorSpec / pure-Python allocation"
+        )
+
+    def alloc_tensors(
+        self,
+        shape: Iterable[int],
+        *,
+        device: Optional[Union[torch.device, str]] = None,
+    ) -> Dict[str, torch.Tensor]:
+        """Allocate (uninitialized) the flat inner tensors for ``shape``.
+
+        Returns ``{attr_name: torch.Tensor}`` suitable as the ``inner_tensors``
+        argument of the storage's ``__tensor_unflatten__``.
+        """
+        device = torch.device(device if device is not None else "cuda")
+        return {
+            attr: torch.empty(buf_shape, dtype=buf_dtype, device=device)
+            for attr, (buf_shape, buf_dtype) in self.inner_tensor_specs(tuple(shape)).items()
+        }
+
+    def create_metadata(
+        self,
+        _shape: Iterable[int],
+        *,
+        dtype: torch.dtype,
+        requires_grad: bool = False,
+    ) -> Dict[str, Any]:
+        """Build the data-free ``__tensor_unflatten__`` context describing the
+        quantized tensor this quantizer would produce for ``shape`` / ``dtype``.
+        """
+        meta = self.storage_metadata(dtype)
+        return {
+            "cls": meta["cls"],
+            "is_tensor": not self.internal,
+            "requires_grad": requires_grad,
+            "nontensor_kwargs": meta["nontensor_kwargs"],
+        }
+
     def calibrate(self, tensor: torch.Tensor) -> None:
         """Calibrate quantizer state
 
@@ -392,6 +606,14 @@ class Quantizer(abc.ABC):
 
     def supports_only_rowwise_all_gather(self) -> bool:
         """Returns True if the quantizer supports only rowwise all-gather"""
+        return False
+
+    def is_requantization_safe(self) -> bool:
+        """Whether repeated quantization of the same input reproduces the same value.
+
+        Stateful or stochastic quantizers should return ``False``. This lets callers
+        decide whether a quantized value may be discarded and reconstructed later.
+        """
         return False
 
     def is_quantizable(self, inp: torch.Tensor) -> bool:  # pylint: disable=unused-argument
@@ -501,6 +723,7 @@ class QuantizedTensor(torch.Tensor):
         requires_grad: bool = False,
         device: Optional[torch.device] = None,
         stride: Optional[Iterable[int]] = None,
+        storage_offset: int = 0,
     ):
         if fake_dtype is not None and fake_dtype != dtype:
             raise ValueError(f"fake_dtype ({fake_dtype}) does not match dtype ({dtype})")
@@ -513,7 +736,7 @@ class QuantizedTensor(torch.Tensor):
             cls,
             shape,
             strides=stride,
-            storage_offset=0,
+            storage_offset=storage_offset,
             dtype=dtype,
             layout=torch.strided,
             requires_grad=requires_grad,
@@ -574,13 +797,10 @@ class QuantizedTensor(torch.Tensor):
     def detach(self) -> QuantizedTensor:
         """Create new quantized tensor with same data
 
-        Output tensor must be detached from the current autograd
-        graph.
+        Output tensor must be detached from the current autograd graph.
 
         """
-        raise NotImplementedError(
-            f"{self.__class__.__name__} class does not implement detach function"
-        )
+        return type(self).make_like(self)
 
     def clear(self):
         """Deallocate this tensor's memory. Typically not needed and must be used carefully"""
@@ -708,7 +928,7 @@ class QuantizedTensor(torch.Tensor):
 
         # View op
         if func == torch.ops.aten.view.default:
-            raise NotImplementedError("{cls.__name__} class does not support tensor views")
+            raise NotImplementedError(f"{cls.__name__} class does not support tensor views")
 
         # New empty op (used by DCP async staging to create CPU copies)
         if func == torch.ops.aten.new_empty.default:

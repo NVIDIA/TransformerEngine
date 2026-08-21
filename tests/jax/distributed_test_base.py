@@ -17,6 +17,17 @@ from utils import assert_allclose, is_devices_enough, is_devices_equal
 
 def generate_configs():
     configs = []
+    if is_devices_enough(8):
+        configs.append(
+            pytest.param(
+                8,
+                (2, 2, 2),
+                ("dp", "fsdp", "tpsp"),
+                MeshResource(dp_resource="dp", fsdp_resource="fsdp", tpsp_resource="tpsp"),
+                id="n8_dp2_fsdp2_tp2",
+            )
+        )
+
     if is_devices_enough(4):
         configs.append(
             pytest.param(
@@ -79,6 +90,7 @@ def generate_collectives_count(allreduce, allgather, other):
 def assert_equal_collectives(target_hlo, coll_count_ref):
     target_splitted_hlo = target_hlo.splitlines()
     start_symb = "-start"
+    sync_symb = '"is_sync":true'
 
     def count_bytes(hlo_text):
         bytes_count = 0
@@ -119,7 +131,12 @@ def assert_equal_collectives(target_hlo, coll_count_ref):
 
         for line in splitted_hlo:
             txt = line.split()
-            if len(txt) > 0 and start_symb in txt[0]:
+            # Asynchronous collectives are represented by *-start and *-done
+            # instructions, so count only *-start. Synchronous collectives are
+            # represented by a single instruction without either suffix.
+            is_async_start = len(txt) > 0 and start_symb in txt[0]
+            is_sync_collective = "collective_backend_config" in line and sync_symb in line
+            if is_async_start or is_sync_collective:
                 if COLL_AR_KEY in txt[0]:
                     result[COLL_AR_KEY] += count_bytes(txt)
                 elif COLL_AG_KEY in txt[0]:

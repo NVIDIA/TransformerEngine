@@ -3087,10 +3087,12 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
             window_size == (-1, 0)
             or window_size == (-1, -1)
             or use_fused_attention
+            or use_flash_attn_3
             or fa_utils.v2_3_plus
         ), (
             "cp_comm_type='all_gather' only supports SWA through FusedAttention or FlashAttention"
-            f" >= 2.3. Found {use_fused_attention=} and {fa_utils.v2_3_plus=}."
+            f" >= 2.3. Found {use_fused_attention=}, {use_flash_attn_3=}, "
+            f"and {fa_utils.v2_3_plus=}."
         )
         assert q.shape[seq_dim_qkv] % 2 == 0 and k.shape[seq_dim_qkv] % 2 == 0, (
             "cp_comm_type='all_gather' requires seq_len % 2 == 0 for Q, K, V. Found seq_len_q ="
@@ -3180,7 +3182,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         fp8_meta_kwargs = {}
         if fp8:
             assert use_fused_attention, "FP8 is only supported with FusedAttention backend!"
-            fused_attn_backend = tex.NVTE_Fused_Attn_Backend.NVTE_FP8
+            fused_attn_backend = FusedAttnBackend["FP8"]
             if not is_input_fp8 and not fp8_recipe.mxfp8():
                 q_fp8, k_fp8, v_fp8, qkv_layout, _ = combine_and_quantize(
                     qkv_layout, q, k, v, QKV_quantizer
@@ -3190,7 +3192,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
             fp8_meta_kwargs["s_quantizer"] = S_quantizer
             fp8_meta_kwargs["o_quantizer"] = O_quantizer
         elif use_fused_attention:
-            fused_attn_backend = tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen
+            fused_attn_backend = FusedAttnBackend["F16_arbitrary_seqlen"]
         orig_q_shape, _, orig_v_shape = q.shape, k.shape, v.shape
         orig_o_shape = orig_q_shape[:-1] + orig_v_shape[-1:]
 
@@ -3901,14 +3903,14 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                             softmax_lse_per_step[i],
                             rng_states[i],
                         ]
-                        fused_attn_backend = tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen
+                        fused_attn_backend = FusedAttnBackend["F16_arbitrary_seqlen"]
                         fp8_meta_kwargs = {}
                         new_qkv_layout = ctx.qkv_layout
                         do_format = ctx.o_format
                         qkv_scale_inv_format = None
                         do_scale_inv_format = None
                         if ctx.fp8:
-                            fused_attn_backend = tex.NVTE_Fused_Attn_Backend.NVTE_FP8
+                            fused_attn_backend = FusedAttnBackend["FP8"]
                             fp8_meta_kwargs["s_quantizer"] = ctx.S_quantizer
                             fp8_meta_kwargs["dp_quantizer"] = ctx.dP_quantizer
                             fp8_meta_kwargs["dqkv_quantizer"] = ctx.dQKV_quantizer
@@ -4231,10 +4233,11 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             window_size == (-1, 0)
             or window_size == (-1, -1)
             or use_fused_attention
+            or use_flash_attn_3
             or fa_utils.v2_3_plus
         ), (
             "cp_comm_type='a2a' only supports SWA through FusedAttention or FlashAttention >= 2.3."
-            f" Found {use_fused_attention=} and {fa_utils.v2_3_plus=}."
+            f" Found {use_fused_attention=}, {use_flash_attn_3=}, and {fa_utils.v2_3_plus=}."
         )
         assert q.shape[seq_dim_qkv] % 2 == 0 and k.shape[seq_dim_qkv] % 2 == 0, (
             "cp_comm_type='a2a' requires seq_len % 2 == 0 for Q, K, V. Found seq_len_q ="
@@ -5018,9 +5021,6 @@ def attn_forward_func_with_cp(
         assert (
             isinstance(cp_group, list) and len(cp_group) == 2
         ), "CP implementation a2a+p2p requires cp_group = [a2a_cp_group, p2p_cp_group]!"
-        assert (
-            qkv_format != "thd"
-        ), f"{qkv_format} format is not supported with hierarchical CP implementation yet!"
         assert (
             attn_bias_type == "no_bias"
         ), f"{attn_bias_type} bias type is not supported with hierarchical CP implementation yet!"

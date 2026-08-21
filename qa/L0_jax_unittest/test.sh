@@ -21,8 +21,8 @@ FAILED_CASES=""
 
 export NVTE_JAX_TEST_TIMING=1
 
-pip3 install "nltk>=3.8.2" || error_exit "Failed to install nltk"
-pip3 install pytest==8.2.1 || error_exit "Failed to install pytest"
+pip3 install "nltk>=3.8.2,<3.10.1" || error_exit "Failed to install nltk"
+pip3 install pytest==8.2.1 pytest-timeout==2.4.0 || error_exit "Failed to install pytest dependencies"
 
 : ${TE_PATH:=/opt/transformerengine}
 : ${XML_LOG_DIR:=/logs}
@@ -40,7 +40,6 @@ pip3 install -r $TE_PATH/examples/jax/encoder/requirements.txt || error_exit "Fa
 export XLA_FLAGS="${XLA_FLAGS} --xla_gpu_deterministic_ops"
 python3 -m pytest -c $TE_PATH/tests/jax/pytest.ini -v --junitxml=$XML_LOG_DIR/pytest_test_single_gpu_encoder.xml $TE_PATH/examples/jax/encoder/test_single_gpu_encoder.py || test_fail "test_single_gpu_encoder.py"
 # Test without custom calls
-export XLA_FLAGS="${XLA_FLAGS} --xla_gpu_deterministic_ops"
 NVTE_JAX_CUSTOM_CALLS="false" python3 -m pytest -c $TE_PATH/tests/jax/pytest.ini -v --junitxml=$XML_LOG_DIR/pytest_test_single_gpu_encoder_without_custom_call.xml $TE_PATH/examples/jax/encoder/test_single_gpu_encoder.py || test_fail "test_single_gpu_encoder.py without custom calls"
 
 # Exercise the docs/examples/jax tutorials. The multi-GPU tests are

@@ -30,7 +30,13 @@ from .base import (
     _2X_ACC_DGRAD,
     _2X_ACC_WGRAD,
 )
-from ._common import noop_cat, set_quantizer_amax_reduction_group, WeightGradStore
+from ._common import (
+    can_reconstruct_wgrad_input_from_original,
+    noop_cat,
+    set_quantizer_amax_reduction_group,
+    set_quantizer_usage_for_wgrad_all_gather,
+    WeightGradStore,
+)
 from ..quantization import FP8GlobalStateManager, QuantizerRole
 from ..utils import (
     cast_if_needed,
@@ -54,6 +60,12 @@ from ..distributed import (
     in_fp8_activation_recompute_phase,
     _fsdp_scatter_tensors,
     _fsdp_gather_tensors,
+)
+from ..distributed_weight import (
+    is_distributed_weight,
+    materialize_weight_for_forward,
+    materialize_weight_for_backward,
+    finalize_weight_grads,
 )
 from ..cpp_extensions import (
     general_gemm,
@@ -265,6 +277,7 @@ def _linear_forward_impl(
     """
 
     weight = args.weight
+    is_dist_weight = is_distributed_weight(args.weight)
     inp = args.inp
     bias = args.bias
     input_quantizer = args.input_quantizer
@@ -287,10 +300,38 @@ def _linear_forward_impl(
     debug = args.debug
     backward_override = args.backward_override
     is_fsdp2 = args.is_fsdp2
+    backward_needs_input = is_grad_enabled and weight.requires_grad
     if backward_override == "high_precision":
         save_original_input = True
     elif backward_override == "dequantized":
         save_original_input = False
+    if (
+        backward_override is None
+        and save_original_input
+        and backward_needs_input
+        and input_quantizer is not None
+    ):
+        # Megatron-Core enables this automatically for attention output projections
+        # to reuse the high-precision DPA output saved by attention backward. Validate
+        # the resolved quantizer since this is not necessarily an informed user opt-in.
+        if isinstance(input_quantizer, Float8Quantizer):
+            if FP8GlobalStateManager.get_fp8_recipe().custom():
+                warnings.warn(
+                    "save_original_input is incompatible with delayed-scaling quantizers "
+                    "(Float8Quantizer). Disabling save_original_input for this module.",
+                    stacklevel=2,
+                )
+                save_original_input = False
+            else:
+                raise ValueError("DelayedScaling recipe is not supported with save_original_input")
+        elif not can_reconstruct_wgrad_input_from_original(input_quantizer):
+            warnings.warn(
+                "Ignoring save_original_input=True because the input quantizer cannot "
+                "safely reconstruct the backward operand from the original input "
+                f"({input_quantizer}).",
+                stacklevel=2,
+            )
+            save_original_input = False
 
     # NVTX label for profiling
     nvtx_label = "transformer_engine._Linear.forward"
@@ -303,7 +344,6 @@ def _linear_forward_impl(
 
     # Configure tensor-parallel communication
     tp_world_size = get_distributed_world_size(tp_group)
-    backward_needs_input = is_grad_enabled and weight.requires_grad
     with_input_all_gather_nccl = (
         parallel_mode == "column" and sequence_parallel and not ub_overlap_ag_fprop
     )
@@ -334,10 +374,6 @@ def _linear_forward_impl(
     own_quantized_input = False
     if fp8:
         assert_dim_for_fp8_exec(inputmat, weight)
-        if save_original_input:
-            assert not isinstance(
-                input_quantizer, Float8Quantizer
-            ), "DelayedScaling recipe is not supported with save_original_input"
 
     if with_input_all_gather_nccl or ub_overlap_ag_fprop:  # All-gather input tensor
 
@@ -413,6 +449,14 @@ def _linear_forward_impl(
     # ------------------------------------------------------
     # Prepare weight tensor
     # ------------------------------------------------------
+    # Distributed weight (e.g. GTP): rebind `weight` to the all-gathered tensor;
+    # `args.weight` keeps the sharded-param reference for backward re-gather / grad
+    # finalize. No-op for a plain weight.
+    if is_dist_weight:
+        weight = materialize_weight_for_forward(args.weight)[0]
+        # Refresh out_features from the gathered weight (captured sharded above, pre-gather).
+        out_features = weight.shape[0]
+
     new_weight_workspace = None
     weightmat = weight
     if fp8 or debug:
@@ -599,6 +643,9 @@ def _linear_forward_impl(
         wt_save = weightmat
         if is_fsdp2 and weightmat is not weight:
             wt_save = None
+        # Distributed weight (e.g. GTP): don't save the workspace; backward re-gathers it.
+        if is_dist_weight:
+            wt_save = None
 
         # Dedup save slots that alias forward inputs; ``_linear_setup_ctx``
         # rebuilds the refs from ``inp`` / ``weight`` / ``bias``.
@@ -704,6 +751,8 @@ def _linear_setup_ctx(
         bwd_args.origin_weight_overwrites_main_grad = getattr(weight, "overwrite_main_grad", False)
         if hasattr(weight, "__fsdp_param__"):
             bwd_args.main_grad_func = weight.get_main_grad
+        elif is_distributed_weight(weight):
+            bwd_args.main_grad_func = weight.grad_buffer
         else:
             bwd_args.main_grad_func = lambda: weight.main_grad
 
@@ -749,6 +798,7 @@ def _linear_backward(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None], ..
     inputmat = args.inputmat
     weight_fp8 = args.weight_fp8
     saved_weight = args.saved_weight
+    is_dist_weight = is_distributed_weight(saved_weight)
     bias = args.bias
     input_quantizer = args.input_quantizer
     weight_quantizer = args.weight_quantizer
@@ -793,7 +843,8 @@ def _linear_backward(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None], ..
                 origin_weight_python_object is not None
             ), "weight was removed while fuse_wgrad_accumulation=True"
             main_grad = bwd_args.main_grad_func()
-            origin_weight_python_object.main_grad = main_grad
+            if not is_dist_weight:
+                origin_weight_python_object.main_grad = main_grad
 
         # Gather intermediate/activation tensors if needed
         # NOTE: weight_fp8 = weight when bwd_args.fp8 == False and torch.disttributed.FSDP already
@@ -929,12 +980,7 @@ def _linear_backward(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None], ..
             quantizer = None
             if bwd_args.fp8 or bwd_args.debug:
                 quantizer = input_quantizer
-                if quantizer.supports_only_rowwise_all_gather():
-                    # If data is in FP8, we compute FP8 transposes manually
-                    quantizer.set_usage(rowwise=True, columnwise=False)
-                else:
-                    # wgrad GEMM requires input with column-wise usage
-                    quantizer.set_usage(rowwise=False, columnwise=True)
+                set_quantizer_usage_for_wgrad_all_gather(quantizer)
             if bwd_args.ub_bulk_dgrad:
                 inputmat_total, _ = fill_userbuffers_buffer_for_all_gather(
                     ub_obj_dgrad,
@@ -963,6 +1009,12 @@ def _linear_backward(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None], ..
 
         dgrad = None
         dgrad_work = None
+
+        # Distributed weight (e.g. GTP): re-gather the sharded weight; runs even when
+        # requires_dgrad=False so the prev_w prefetch is issued for the next layer's bwd.
+        if is_dist_weight:
+            weight_fp8 = materialize_weight_for_backward(saved_weight)[0]
+
         if bwd_args.requires_dgrad:
 
             # FSDP2: Re-create workspace from all-gathered weight when
@@ -977,6 +1029,16 @@ def _linear_backward(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None], ..
                 elif bwd_args.weight_quantizer is not None:
                     bwd_args.weight_quantizer.set_usage(rowwise=True, columnwise=True)
                     weight_fp8 = bwd_args.weight_quantizer(saved_weight)
+            elif (
+                is_dist_weight
+                and bwd_args.fp8
+                and bwd_args.weight_quantizer is not None
+                and not isinstance(weight_fp8, QuantizedTensorStorage)
+            ):
+                # Distributed weight re-gathered a BF16 weight: quantize with the layer quantizer
+                # so the dgrad operand isn't cast by the delayed recipe.
+                bwd_args.weight_quantizer.set_usage(rowwise=True, columnwise=True)
+                weight_fp8 = bwd_args.weight_quantizer(weight_fp8)
 
             # Make sure required data is available
             if isinstance(grad_output, QuantizedTensorStorage):
@@ -1090,7 +1152,7 @@ def _linear_backward(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None], ..
             and bwd_args.ub_obj_gradout.with_cublasmp()
         ):
             if grad_output_quantizer is not None:
-                grad_output_quantizer.set_usage(rowwise=True, columnwise=False)
+                set_quantizer_usage_for_wgrad_all_gather(grad_output_quantizer)
             grad_output, _ = gather_along_first_dim(
                 grad_output,
                 bwd_args.tp_group,
@@ -1163,7 +1225,10 @@ def _linear_backward(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None], ..
             use_split_accumulator = bwd_args.wgrad_use_split_accumulator
 
             # Figure out whether to output wgrad GEMM directly into main grad
-            if bwd_args.is_first_microbatch is not None:
+            if is_dist_weight:
+                # Distributed weight (e.g. GTP): accumulation happens downstream in finalize.
+                accumulate_wgrad_into_param_main_grad = False
+            elif bwd_args.is_first_microbatch is not None:
                 accumulate_wgrad_into_param_main_grad = (
                     bwd_args.fuse_wgrad_accumulation and not bwd_args.is_first_microbatch
                 )
@@ -1239,6 +1304,11 @@ def _linear_backward(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None], ..
                 # Call wgrad GEMM now
                 wgrad, grad_bias_ = wgrad_gemm(inputmat_total, grad_output)
 
+                # Distributed weight (e.g. GTP): reduce-scatter the freshly computed wgrad
+                # (async; overlap with the next layer's bwd via the cascade).
+                if is_dist_weight:
+                    wgrad = finalize_weight_grads(saved_weight, [wgrad])[0]
+
                 # Update grad bias if needed
                 if grad_bias is None:
                     grad_bias = grad_bias_
@@ -1287,15 +1357,19 @@ def _linear_backward(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None], ..
             origin_weight_python_object, "grad_added_to_main_grad"
         ):
             origin_weight_python_object.grad_added_to_main_grad = True
+            # Use the param's local shape (sharded under GTP) so the dummy wgrad
+            # matches the saved weight shape; main_grad_func() under GTP returns
+            # an unsharded scratch and would otherwise mismatch.
+            wgrad_shape = list(origin_weight_python_object.shape)
             if getattr(origin_weight_python_object, "zero_out_wgrad", False):
                 wgrad = get_dummy_wgrad(
-                    list(main_grad.shape),
+                    wgrad_shape,
                     origin_weight_python_object.dtype,
                     zero=True,
                 )
             else:
                 wgrad = get_dummy_wgrad(
-                    list(main_grad.shape),
+                    wgrad_shape,
                     origin_weight_python_object.dtype,
                 )
         elif bwd_args.fuse_wgrad_accumulation:
@@ -1481,7 +1555,8 @@ class Linear(TransformerEngineBaseModule):
                        If set to ``True``, always saves the original input tensor rather than the
                        cast tensor. In some scenarios, the input tensor is used by multiple modules,
                        and saving the original input tensor may reduce the memory usage.
-                       Cannot work with FP8 DelayedScaling recipe.
+                       Requires an input quantizer that can safely reproduce its result from the
+                       original input. Cannot work with FP8 DelayedScaling recipe.
     """
 
     def __init__(
@@ -1868,6 +1943,10 @@ class Linear(TransformerEngineBaseModule):
                 grad_weight_quantizer,
                 grad_output_quantizer,
             ) = quantizers
+            if weight_quantizer is not None and not debug:
+                weight_quantizer.optimize_for_gemm = self._enable_weight_preswizzle(
+                    weight_quantizer, weight_tensor
+                )
 
             if is_grad_enabled:
                 linear_fn = _Linear.apply
@@ -2155,12 +2234,4 @@ class Linear(TransformerEngineBaseModule):
             return [None]
         weight_quantizer = self.quantizers["scaling_fwd"][FP8FwdTensorIdx.GEMM1_WEIGHT]
         weight_quantizer.internal = True
-        # Preswizzle the weights during quantization instead of lazily inside every GEMM.
-        # This wont work when primay weights are in fp8 because of 2 reasons
-        # 1. optimizer step updates would need to dequantize the weights. But swizzled weights
-        # currently dont support dequantization.
-        # 2. For FSDP2, quantized weight all-gather would need to be done in the
-        # unswizzled layout.
-        if not self.primary_weights_in_fp8:
-            weight_quantizer.optimize_for_gemm = True
         return [weight_quantizer]

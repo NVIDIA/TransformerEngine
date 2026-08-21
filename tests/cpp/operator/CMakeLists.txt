@@ -28,6 +28,7 @@ add_executable(test_operator
                test_cast_transpose_dbias_dgelu.cu
                test_cast_transpose_dgeglu.cu
                test_act.cu
+               test_scaled_activation.cu
                test_normalization.cu
                test_normalization_mxfp8.cu
                test_memset.cu
@@ -35,6 +36,7 @@ add_executable(test_operator
                test_multi_cast_transpose.cu
                test_multi_padding.cu
                test_multi_unpadding.cu
+               test_softmax.cu
                test_causal_softmax.cu
                test_swizzle.cu
                test_multi_swizzle.cu

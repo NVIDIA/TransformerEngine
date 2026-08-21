@@ -7,7 +7,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 import math
 import warnings
-from typing import Any, Optional, Tuple, Union
+from typing import Any, Dict, Optional, Tuple, Union
 
 import torch
 import transformer_engine_torch as tex
@@ -73,6 +73,39 @@ class Float8BlockQuantizer(Quantizer):
 
         return quantizer
 
+    # ----- TensorSpec / pure-Python allocation -----
+
+    def storage_metadata(self, fake_dtype: torch.dtype) -> Dict[str, Any]:
+        return {
+            "cls": Float8BlockwiseQTensorStorage if self.internal else Float8BlockwiseQTensor,
+            "nontensor_kwargs": {
+                "fp8_dtype": self.dtype,
+                "quantizer": self,
+                "is_2D_scaled": self.block_scaling_dim == 2,
+                "fake_dtype": fake_dtype,
+            },
+        }
+
+    def inner_tensor_specs(
+        self, shape: Tuple[int, ...]
+    ) -> Dict[str, Tuple[Tuple[int, ...], torch.dtype]]:
+        shape = tuple(shape)
+        specs: Dict[str, Tuple[Tuple[int, ...], torch.dtype]] = {}
+        # Blockwise FP8 scales are FP32; columnwise data is stored transposed.
+        if self.rowwise_usage:
+            specs["_rowwise_data"] = (shape, torch.uint8)
+            specs["_rowwise_scale_inv"] = (
+                tuple(self.get_scale_shape(shape, columnwise=False)),
+                torch.float32,
+            )
+        if self.columnwise_usage:
+            specs["_columnwise_data"] = (tuple(self.get_columnwise_shape(shape)), torch.uint8)
+            specs["_columnwise_scale_inv"] = (
+                tuple(self.get_scale_shape(shape, columnwise=True)),
+                torch.float32,
+            )
+        return specs
+
     def update_quantized(
         self,
         src: torch.Tensor,
@@ -121,6 +154,10 @@ class Float8BlockQuantizer(Quantizer):
     def quantize_impl(self, tensor: torch.Tensor) -> QuantizedTensor:
         """Quantize tensor implementation"""
         return tex.quantize(tensor, self)
+
+    def is_requantization_safe(self) -> bool:
+        """Block-FP8 scales are derived deterministically from each input."""
+        return True
 
     def get_scale_shape(self, shape: Iterable[int], columnwise: bool) -> Tuple[int, int]:
         """Scaling tensor shape.
@@ -322,10 +359,6 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorStorage, QuantizedTensor):
         if torch.is_grad_enabled():
             return _FromFloat8BlockwiseFunc.apply(self, dequant_dtype)
         return _FromFloat8BlockwiseFunc.forward(None, self, dequant_dtype)
-
-    def detach(self) -> Float8BlockwiseQTensor:
-        # pylint: disable=missing-function-docstring
-        return Float8BlockwiseQTensor.make_like(self)
 
     def clone(self) -> Float8BlockwiseQTensor:
         # pylint: disable=missing-function-docstring
@@ -551,7 +584,11 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorStorage, QuantizedTensor):
         if self._rowwise_data is not None:
             return self._rowwise_data.shape
         if self._columnwise_data is not None:
-            return self._columnwise_data.shape
+            # Columnwise data is stored transposed, matching size() in the storage.
+            dims = self._columnwise_data.shape
+            if len(dims) == 2:
+                return torch.Size((dims[1], dims[0]))
+            return torch.Size(tuple(dims[1:]) + (dims[0],))
         return torch.Tensor.size(self)
 
     @property

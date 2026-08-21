@@ -17,6 +17,25 @@ namespace transformer_engine::pytorch {
 
 namespace {
 
+/*! @brief Reject unsupported columnwise-only per-tensor FP8 quantization
+ *
+ * Per-tensor FP8 uses the legacy cast-transpose kernel whenever columnwise
+ * output is requested. That kernel requires both rowwise and columnwise
+ * output buffers, so a transpose-only output cannot be produced without an
+ * otherwise-unused rowwise allocation and write. Keep this limitation
+ * explicit until the kernel supports independently selecting its outputs.
+ */
+void check_per_tensor_fp8_quantize_output(const TensorWrapper& output) {
+  const auto rowwise_data = output.get_rowwise_data();
+  const auto columnwise_data = output.get_columnwise_data();
+  if (rowwise_data.data_ptr == nullptr && columnwise_data.data_ptr != nullptr) {
+    PyErr_SetString(PyExc_NotImplementedError,
+                    "Columnwise-only per-tensor FP8 quantization is not implemented; "
+                    "the cast-transpose kernel requires rowwise output storage.");
+    throw py::error_already_set();
+  }
+}
+
 /*! @brief Resolve an optional device to a concrete CUDA device
  *
  * If no device is provided, uses the current CUDA device.
@@ -615,6 +634,7 @@ void Float8Quantizer::quantize(const TensorWrapper& input, TensorWrapper& out,
   if (input.numel() == 0) {
     return;
   }
+  check_per_tensor_fp8_quantize_output(out);
   QuantizationConfigWrapper quant_config;
   if (noop_flag) {
     quant_config.set_noop_tensor(noop_flag->data());
@@ -975,6 +995,7 @@ void Float8CurrentScalingQuantizer::quantize_impl(const TensorWrapper& input, Te
     out.set_scale(nullptr, DType::kFloat32, out.defaultShape);
     return;
   }
+  check_per_tensor_fp8_quantize_output(out);
 
   // Quantization configs
   QuantizationConfigWrapper quant_config;
@@ -1153,14 +1174,6 @@ std::pair<GroupedTensorWrapper, py::object> Float8BlockQuantizer::create_grouped
     const std::optional<at::Tensor>& precomputed_tensor_offsets, const size_t logical_first_dim,
     const size_t logical_last_dim) const {
   using namespace pybind11::literals;
-
-  // The fused grouped FP8 block-scaling path uses unconstrained FP32 scales and does not
-  // implement power-of-2 scaling. Reject force_pow_2_scales rather than silently ignoring it;
-  // the unfused per-tensor split-quantize path still honors it.
-  NVTE_CHECK(!force_pow_2_scales,
-             "Fused grouped FP8 block-scaling quantize does not support force_pow_2_scales=True. "
-             "Set force_pow_2_scales=False, or use the unfused split-quantize path "
-             "(NVTE_GROUPED_LINEAR_USE_FUSED_GROUPED_GEMM=0) which supports power-of-2 scales.");
 
   const auto tensor_offsets =
       resolve_grouped_tensor_offsets(num_tensors, first_dims, last_dims, precomputed_tensor_offsets,
@@ -1481,6 +1494,7 @@ std::vector<size_t> Float8BlockQuantizer::get_scale_shape(const std::vector<size
 
 MXFP8Quantizer::MXFP8Quantizer(const py::handle& quantizer) : Quantizer(quantizer) {
   this->dtype = quantizer.attr("dtype").cast<DType>();
+  this->with_2d_quantization = quantizer.attr("with_2d_quantization").cast<bool>();
 }
 
 void MXFP8Quantizer::set_quantization_params(TensorWrapper* tensor) const {}
@@ -1827,6 +1841,9 @@ void MXFP8Quantizer::quantize(const TensorWrapper& input, TensorWrapper& out,
   if (noop_flag) {
     quant_config.set_noop_tensor(noop_flag->data());
   }
+  if (this->with_2d_quantization) {
+    quant_config.set_mxfp8_2d_quantization(true);
+  }
   NVTE_SCOPED_GIL_RELEASE({
     nvte_quantize_v2(input.data(), out.data(), quant_config, at::cuda::getCurrentCUDAStream());
   });
@@ -1972,8 +1989,6 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(
   const int nvfp4_e4m3_max = this->nvfp4_e4m3_max;
   if (row_scaled_nvfp4) {
     NVTE_CHECK(rowwise_usage, "Row-scaled NVFP4 quantization requires rowwise usage.");
-    NVTE_CHECK(!columnwise_usage,
-               "Row-scaled NVFP4 quantization does not support columnwise usage.");
   }
   const auto rowwise_scale_inv_shape = get_scale_shape(shape, false);
   const auto columnwise_scale_inv_shape = get_scale_shape(shape, true);
@@ -2008,7 +2023,8 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(
     columnwise_scale_inv_tensor = at::empty(scale_inv_shape_int64, bit8_tensor_opts);
     // hadamard amax kernel will zero out pointer with ZeroAmaxKernel
     // nvte_compute_amax_with_config will zero out the pointer if needed
-    amax_columnwise = at::empty({1}, bit32_tensor_opts);
+    const int64_t amax_cols = row_scaled_nvfp4 ? static_cast<int64_t>(flat_last_dim) : 1;
+    amax_columnwise = at::empty({amax_cols}, bit32_tensor_opts);
   }
 
   // Convert tensors to Python
@@ -2100,7 +2116,7 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(
     out_cpp.set_columnwise_scale_inv(columnwise_scale_inv_tensor.data_ptr(), DType::kFloat8E4M3,
                                      columnwise_scale_inv_shape);
     out_cpp.set_columnwise_amax(amax_columnwise.data_ptr(), DType::kFloat32,
-                                std::vector<size_t>{1});
+                                getTensorShape(amax_columnwise));
   }
   out_cpp.set_with_gemm_swizzled_scales(with_gemm_swizzled_scales);
   out_cpp.set_row_scaled_nvfp4(row_scaled_nvfp4);
@@ -2299,8 +2315,6 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::convert_and_update_tensor(
   const int nvfp4_e4m3_max = this->nvfp4_e4m3_max;
   if (row_scaled_nvfp4) {
     NVTE_CHECK(rowwise_usage, "Row-scaled NVFP4 quantization requires rowwise usage.");
-    NVTE_CHECK(!columnwise_usage,
-               "Row-scaled NVFP4 quantization does not support columnwise usage.");
   }
   tensor.attr("_row_scaled_nvfp4") = row_scaled_nvfp4;
   tensor.attr("_with_gemm_swizzled_scales") = with_gemm_swizzled_scales;
@@ -2366,11 +2380,12 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::convert_and_update_tensor(
       columnwise_scale_inv = at::empty(scale_inv_shape_int64, opts);
       tensor.attr("_columnwise_scale_inv") = *columnwise_scale_inv;
     }
-    if (!amax_columnwise) {
+    const int64_t amax_cols = row_scaled_nvfp4 ? static_cast<int64_t>(flat_last_dim) : 1;
+    if (!amax_columnwise || amax_columnwise->numel() != amax_cols) {
       const auto opts = at::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
       // hadamard amax kernel will zero out pointer with ZeroAmaxKernel
       // nvte_compute_amax_with_config will zero out the pointer if needed
-      amax_columnwise = at::empty({1}, opts);
+      amax_columnwise = at::empty({amax_cols}, opts);
       tensor.attr("_amax_columnwise") = *amax_columnwise;
     }
   } else {  // columnwise_usage == false
@@ -2406,7 +2421,7 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::convert_and_update_tensor(
     out_cpp.set_columnwise_scale_inv(columnwise_scale_inv->data_ptr(), DType::kFloat8E4M3,
                                      getTensorShape(*columnwise_scale_inv));
     out_cpp.set_columnwise_amax(amax_columnwise->data_ptr(), DType::kFloat32,
-                                std::vector<size_t>{1});
+                                getTensorShape(*amax_columnwise));
   }
   out_cpp.set_with_gemm_swizzled_scales(with_gemm_swizzled_scales);
   out_cpp.set_row_scaled_nvfp4(row_scaled_nvfp4);

@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 import abc
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 import dataclasses
 import pickle
 from typing import Any, Optional
@@ -85,11 +85,11 @@ class FusibleOperation(torch.nn.Module, metaclass=abc.ABCMeta):
         basic_op_ctxs: list[OperationContext],
         input_: torch.Tensor,
         *,
-        basic_op_extra_inputs: list[tuple[torch.Tensor, ...]],
+        basic_op_extra_inputs: Sequence[Sequence[Optional[torch.Tensor]]],
         prev_op_grad_output_quantizer: Optional[Quantizer],
         next_op_input_quantizer: Optional[Quantizer],
         basic_op_kwargs: list[dict[str, Any]],
-    ) -> tuple[torch.Tensor, Iterable[Iterable[torch.Tensor]]]:
+    ) -> tuple[torch.Tensor, Sequence[Sequence[Optional[torch.Tensor]]]]:
         """Forward pass
 
         This op is either a basic op or the fusion of basic ops, so
@@ -104,8 +104,9 @@ class FusibleOperation(torch.nn.Module, metaclass=abc.ABCMeta):
             Contexts for basic operations
         input_: torch.Tensor
             Input tensor
-        basic_op_extra_inputs: list of torch.Tensor
-            Extra tensor inputs to basic operations
+        basic_op_extra_inputs: sequence of sequences of torch.Tensor
+            Extra tensor inputs to basic operations. An internal input
+            owned by this fused operation may be ``None``.
         prev_op_grad_output_quantizer: Quantizer, optional
             The grad_output_quantizer of the preceeding operation
         next_op_input_quantizer: Quantizer, optional
@@ -118,8 +119,9 @@ class FusibleOperation(torch.nn.Module, metaclass=abc.ABCMeta):
         -------
         torch.Tensor:
             Output tensor.
-        Iterable of torch.Tensor:
-            Extra tensor outputs from basic operations.
+        Sequence of sequences of torch.Tensor:
+            Extra tensor outputs from basic operations. A non-public
+            channel owned by this fused operation may be ``None``.
 
         """
         raise NotImplementedError(
@@ -131,11 +133,11 @@ class FusibleOperation(torch.nn.Module, metaclass=abc.ABCMeta):
         basic_op_ctxs: list[OperationContext],
         grad_output: torch.Tensor,
         *,
-        basic_op_grad_extra_outputs: list[tuple[torch.Tensor, ...]],
+        basic_op_grad_extra_outputs: Sequence[Sequence[Optional[torch.Tensor]]],
     ) -> tuple[
         torch.Tensor,
-        Iterable[Iterable[Optional[torch.Tensor]]],
-        Iterable[Iterable[Optional[torch.Tensor]]],
+        Sequence[Sequence[Optional[torch.Tensor]]],
+        Sequence[Sequence[Optional[torch.Tensor]]],
     ]:
         """Backward pass
 
@@ -159,9 +161,9 @@ class FusibleOperation(torch.nn.Module, metaclass=abc.ABCMeta):
         -------
         torch.Tensor:
             Loss gradient w.r.t. operation input
-        Iterable of iterable of torch.Tensor:
+        Sequence of sequences of torch.Tensor:
             Loss gradients w.r.t. parameters for basic operations
-        Iterable of iterable of torch.Tensor:
+        Sequence of sequences of torch.Tensor:
             Loss gradients w.r.t. extra tensor inputs to basic
             operations
 
@@ -187,9 +189,90 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
     def __init__(self) -> None:
         super().__init__()
 
+        # Optional names for extra-tensor channels internal to an OperationFuser.
+        # Unbound slots remain public inputs/outputs, preserving the original API.
+        self._extra_input_channels: list[Optional[str]] = [None] * self.num_extra_inputs
+        self._extra_output_channels: list[Optional[str]] = [None] * self.num_extra_outputs
+        self._extra_output_to_caller: list[bool] = [True] * self.num_extra_outputs
+        # Channel routing is captured by an OperationFuser when it is
+        # constructed (including the transient fuser created by a
+        # standalone op(x) call), so it is frozen once that happens.
+        self._extra_tensor_channels_locked: bool = False
+
         # Objects for quantization
         self._fp8_metas: Optional[dict[str, dict[str, Any]]] = None
         self._quantizers: Optional[dict[str, list[Quantizer]]] = None
+
+    def _lock_extra_tensor_channels(self) -> None:
+        """Freeze channel routing after an OperationFuser has captured it."""
+        self._extra_tensor_channels_locked = True
+
+    def _check_extra_tensor_channels_unlocked(self) -> None:
+        """Reject channel rebinding after an OperationFuser has captured it."""
+        if self._extra_tensor_channels_locked:
+            raise RuntimeError(
+                f"Cannot change extra tensor channels of {type(self).__name__} because an "
+                "OperationFuser has already captured its channel routing. Construct new "
+                "operations, bind their channels, and build a new OperationFuser or Sequential."
+            )
+
+    def set_extra_input_channel(self, index: int, channel: Optional[str]) -> BasicOperation:
+        """Bind an extra input slot to an internal fuser channel.
+
+        A bound slot receives the matching extra output from an earlier
+        operation in the same fuser instead of consuming a public extra input.
+        Passing ``None`` removes the binding.
+
+        Channels must be bound before any ``OperationFuser`` captures
+        them. That includes constructing an ``OperationFuser`` or
+        ``Sequential``, and also calling the op directly (``op(x)``),
+        which builds a transient fuser and locks channels permanently.
+        """
+        if not 0 <= index < self.num_extra_inputs:
+            raise IndexError(
+                f"Extra input index {index} is out of range for "
+                f"{type(self).__name__} with {self.num_extra_inputs} extra inputs"
+            )
+        if channel is not None and (not isinstance(channel, str) or not channel):
+            raise ValueError("Extra input channel must be a non-empty string or None")
+        self._check_extra_tensor_channels_unlocked()
+        self._extra_input_channels[index] = channel
+        return self
+
+    def set_extra_output_channel(
+        self,
+        index: int,
+        channel: Optional[str],
+        *,
+        output_to_caller: bool = True,
+    ) -> BasicOperation:
+        """Bind an extra output slot to an internal fuser channel.
+
+        A bound slot can feed one or more later operations. By default, the
+        output is also returned to the caller. Set ``output_to_caller=False``
+        to keep it internal to the fuser. Passing ``channel=None`` removes the
+        binding and restores the output as public.
+
+        Channels must be bound before any ``OperationFuser`` captures
+        them. That includes constructing an ``OperationFuser`` or
+        ``Sequential``, and also calling the op directly (``op(x)``),
+        which builds a transient fuser and locks channels permanently.
+        """
+        if not 0 <= index < self.num_extra_outputs:
+            raise IndexError(
+                f"Extra output index {index} is out of range for "
+                f"{type(self).__name__} with {self.num_extra_outputs} extra outputs"
+            )
+        if channel is not None and (not isinstance(channel, str) or not channel):
+            raise ValueError("Extra output channel must be a non-empty string or None")
+        if not isinstance(output_to_caller, bool):
+            raise TypeError("output_to_caller must be a bool")
+        if channel is None:
+            output_to_caller = True
+        self._check_extra_tensor_channels_unlocked()
+        self._extra_output_channels[index] = channel
+        self._extra_output_to_caller[index] = output_to_caller
+        return self
 
     @property
     def is_fused_op(self) -> bool:
@@ -274,11 +357,6 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
                 num_quantizers = self.num_quantizers(mode)
                 if num_quantizers == 0:
                     continue
-
-                if recipe.float8_block_scaling():
-                    raise NotImplementedError(
-                        "Fusible operations do not support FP8 block scaling recipe"
-                    )
 
                 # Construct quantization recipe state
                 roles = self.get_quantizer_roles(mode)  # pylint: disable=assignment-from-none
@@ -537,7 +615,12 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         *extra_inputs: torch.Tensor,
         **kwargs: Any,
     ) -> torch.Tensor | tuple[torch.Tensor, ...]:
-        """Apply operation"""
+        """Apply operation.
+
+        Builds a transient ``OperationFuser([self])``, which captures and
+        locks this op's extra-tensor channel bindings. Bind channels before
+        the first call if they will be used later in a multi-op fuser.
+        """
         from .fuser import OperationFuser
 
         return OperationFuser([self])(
@@ -770,7 +853,11 @@ class FusedOperation(FusibleOperation):
         *extra_inputs: torch.Tensor,
         basic_op_kwargs: Optional[list[dict[str, Any]]] = None,
     ) -> torch.Tensor:
-        """Apply operation"""
+        """Apply operation.
+
+        Builds a transient ``OperationFuser([self])``, which captures and
+        locks every basic op's extra-tensor channel bindings.
+        """
         if basic_op_kwargs is None:
             basic_op_kwargs = [{} for _ in range(len(self.basic_ops))]
         from .fuser import OperationFuser

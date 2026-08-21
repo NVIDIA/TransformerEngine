@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 """Attention Backends."""
+
 from contextlib import nullcontext
 from importlib.metadata import version as get_pkg_version
 from importlib.metadata import PackageNotFoundError
@@ -14,7 +15,6 @@ from packaging.version import Version as PkgVersion
 
 import torch
 import torch.nn.functional as F
-import transformer_engine_torch as tex
 from transformer_engine.pytorch.utils import (
     get_device_compute_capability,
     split_tensor_along_dim,
@@ -49,6 +49,12 @@ from transformer_engine.pytorch.cpp_extensions.fused_attn import (
 )
 from transformer_engine.pytorch.quantization import get_fp8_torch_dtype, FP8GlobalStateManager
 from transformer_engine.pytorch.distributed import get_distributed_world_size
+from transformer_engine.pytorch.attention.custom_ops import (
+    convert_bshd_to_thd,
+    convert_thd_to_bshd,
+    fa_prepare_bwd,
+    fa_prepare_fwd,
+)
 from transformer_engine.pytorch.jit import no_torch_dynamo
 from transformer_engine.pytorch.attention.dot_product_attention.context_parallel import (
     attn_forward_func_with_cp,
@@ -94,14 +100,14 @@ _flash_attn_varlen_fwd = None
 _flash_attn_varlen_bwd = None
 # Try to import Flash Attention v2
 try:
-    fa_utils.version = PkgVersion(PkgVersion(get_pkg_version("flash-attn")).public)
+    fa_utils.version = PkgVersion(get_pkg_version("flash-attn"))
 except PackageNotFoundError:
     pass  # only print warning if use_flash_attention_2 = True in get_attention_backend
 else:
     if torch.cuda.is_available() and get_device_compute_capability() >= (10, 0):
-        if fa_utils.version_required_blackwell <= fa_utils.version <= fa_utils.max_version:
+        if fa_utils.is_version_supported(fa_utils.version, fa_utils.version_required_blackwell):
             fa_utils.is_installed = True
-    elif fa_utils.version_required <= fa_utils.version <= fa_utils.max_version:
+    elif fa_utils.is_version_supported(fa_utils.version, fa_utils.version_required):
         fa_utils.is_installed = True
 
     if fa_utils.is_installed:
@@ -166,14 +172,39 @@ except PackageNotFoundError:
     flash_attn_func_v4 = None
     flash_attn_varlen_func_v4 = None
 else:
-    from flash_attn.cute.interface import (  # pylint: disable=ungrouped-imports,no-name-in-module
-        flash_attn_func as flash_attn_func_v4,
-        flash_attn_varlen_func as flash_attn_varlen_func_v4,
-        _validate_head_dims as _fa4_validate_head_dims,
-    )
+    try:
+        cutlass_dsl_version = PkgVersion(get_pkg_version("nvidia-cutlass-dsl"))
 
-    fa_utils.v4_validate_head_dims = _fa4_validate_head_dims
-    fa_utils.set_flash_attention_4_params()
+        # FA4 4.0.0b24 requires CUTLASS DSL 4.6.2 or newer.
+        if fa_utils.fa4_version == PkgVersion("4.0.0b24") and cutlass_dsl_version < PkgVersion(
+            "4.6.2"
+        ):
+            raise ImportError(
+                "flash-attn-4 4.0.0b24 requires nvidia-cutlass-dsl>=4.6.2; "
+                f"found {cutlass_dsl_version}"
+            )
+
+        from flash_attn.cute.interface import (  # pylint: disable=ungrouped-imports,no-name-in-module
+            flash_attn_func as _flash_attn_func_v4,
+            flash_attn_varlen_func as _flash_attn_varlen_func_v4,
+            _validate_head_dims as _fa4_validate_head_dims,
+        )
+    except ImportError as exc:
+        flash_attn_func_v4 = None
+        flash_attn_varlen_func_v4 = None
+        warnings.warn(
+            f"FlashAttention 4 is installed but cannot be loaded: {exc}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+    else:
+        # Unlike versions 2 and 3, FlashAttention 4 registers no custom ops: it builds
+        # its kernels through the CUTLASS DSL as it runs. Keep it an eager island.
+        flash_attn_func_v4 = no_torch_dynamo()(_flash_attn_func_v4)
+        flash_attn_varlen_func_v4 = no_torch_dynamo()(_flash_attn_varlen_func_v4)
+
+        fa_utils.v4_validate_head_dims = _fa4_validate_head_dims
+        fa_utils.set_flash_attention_4_params()
 
 # Float8CurrentScaling: fused_attn_bwd takes O in FP8 by default, this flag allows it in F16
 _dpa_fp8_cs_o_in_f16 = os.getenv("NVTE_DPA_FP8CS_O_in_F16", "1") == "1"
@@ -365,7 +396,22 @@ class UnfusedDotProductAttention(torch.nn.Module):
         """Fast attribute set for non-parameter fields."""
         self.__dict__[name] = value
 
-    def forward(
+    def forward(self, *args, fp8: bool = False, fp8_output: bool = False, **kwargs) -> torch.Tensor:
+        """Unfused attention fprop; see `_forward` for the argument list.
+
+        FP8 (emulation and/or Float8Tensor output) is not supported under
+        torch.compile -- run the backend as an eager island in that case.
+        """
+        if fp8 or fp8_output:
+            return self._forward_eager(*args, fp8=fp8, fp8_output=fp8_output, **kwargs)
+        return self._forward(*args, fp8=False, fp8_output=False, **kwargs)
+
+    @no_torch_dynamo()
+    def _forward_eager(self, *args, **kwargs) -> torch.Tensor:
+        """Eager-only (dynamo-disabled) wrapper around `_forward`."""
+        return self._forward(*args, **kwargs)
+
+    def _forward(
         self,
         _alibi_cache: Dict[str, Any],
         query_layer: torch.Tensor,
@@ -400,6 +446,14 @@ class UnfusedDotProductAttention(torch.nn.Module):
         if inference_params is not None and inference_params.is_paged:
             key_layer, value_layer = inference_params.convert_paged_to_nonpaged(self.layer_number)
 
+        # Token count for the thd output conversion (ConvertBSHDtoTHD) below.
+        # Captured here, before any layout conversion, because when the query
+        # enters in thd layout (qkv_format "thd" for training or "thd_2bshd" for
+        # inference) shape[0] is the total query token count. Deriving it later
+        # via cu_seqlens_q[-1].item() would sync with the GPU and break
+        # torch.compile + cudagraphs (unbacked SymInt).
+        total_tokens_q = query_layer.shape[0] if q_format == "thd" else None
+
         # convert to sbhd
         # training: bshd, thd
         # inference: bshd, sbhd_2bshd, thd_2bshd
@@ -413,7 +467,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
 
         if qkv_format == "thd_2bshd":
             batch_size = key_layer.shape[0]
-            query_layer = tex.convert_thd_to_bshd(
+            query_layer = convert_thd_to_bshd(
                 query_layer,
                 cu_seqlens_q,
                 batch_size,
@@ -708,6 +762,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
             context_layer = ConvertBSHDtoTHD.apply(
                 context_layer,
                 cu_seqlens_q,
+                total_tokens_q,
             )
 
             # [tq, h, d] --> [tq, hd]
@@ -748,7 +803,7 @@ class _PrepareQKVForFA(torch.autograd.Function):
         # All inputs received are non-contiguous tensors.
         # The `query_layer` tensor is used to access the
         # full memory region of the QKV tensor.
-        qkv = tex.fa_prepare_fwd(query_layer)
+        qkv = fa_prepare_fwd(query_layer)
         q, k, v = split_tensor_along_dim(qkv, 0, 3)
         query_layer = torch.squeeze(q, 0)
         key_layer = torch.squeeze(k, 0)
@@ -763,9 +818,21 @@ class _PrepareQKVForFA(torch.autograd.Function):
         dv: torch.Tensor,
     ) -> Tuple[Union[torch.Tensor, None], ...]:
         # pylint: disable=missing-function-docstring
-        dqkv = tex.fa_prepare_bwd(dq, dk, dv)
+        dqkv = fa_prepare_bwd(dq, dk, dv)
         dq, dk, dv = split_tensor_along_dim(dqkv, -1, 3)
         return dq, dk, dv
+
+
+def _unalias_cu_seqlens(cu_q: torch.Tensor, cu_kv: torch.Tensor):
+    """Copy kv's cumulative sequence lengths when they are q's as well.
+
+    Self attention passes one tensor for both, and flash-attn forwards them to
+    two inputs of the same autograd.Function -- which dynamo cannot trace. In
+    eager the duplicate is harmless, so nothing is copied there.
+    """
+    if cu_q is cu_kv and torch.compiler.is_compiling():
+        return cu_q, cu_kv.clone()
+    return cu_q, cu_kv
 
 
 class FlashAttention(torch.nn.Module):
@@ -789,8 +856,8 @@ class FlashAttention(torch.nn.Module):
                 fa_utils.version >= fa_utils.version_required
             ), f"FlashAttention minimum version {fa_utils.version_required} is required."
             assert (
-                fa_utils.version <= fa_utils.max_version
-            ), f"FlashAttention maximum version {fa_utils.max_version} is supported."
+                fa_utils.version < fa_utils.max_version
+            ), f"FlashAttention versions before {fa_utils.max_version} are supported."
 
         self.softmax_scale = softmax_scale
         self.attention_dropout_ctx = attention_dropout_ctx
@@ -992,7 +1059,7 @@ class FlashAttention(torch.nn.Module):
                 # convert from bshd to thd_2bshd for flash_attn_varlen_func/_with_kvcache;
                 # kernel assumes tensor is contiguous
                 if isinstance(query_layer, Float8Tensor):
-                    query_layer._data = tex.convert_bshd_to_thd(
+                    query_layer._data = convert_bshd_to_thd(
                         query_layer._data,
                         cu_seqlens_q,
                         batch_size * context_len,
@@ -1001,7 +1068,7 @@ class FlashAttention(torch.nn.Module):
                         query_layer, data=query_layer._data, shape=query_layer._data.shape
                     )
                 else:
-                    query_layer = tex.convert_bshd_to_thd(
+                    query_layer = convert_bshd_to_thd(
                         query_layer,
                         cu_seqlens_q,
                         batch_size * context_len,
@@ -1015,6 +1082,18 @@ class FlashAttention(torch.nn.Module):
         use_flash_attn_3 = (
             flash_attention_backend is not None and flash_attention_backend.major == 3
         )
+        if (
+            use_flash_attn_4
+            and (10, 0) <= get_device_compute_capability() < (12, 0)
+            and query_layer.shape[-1] == key_layer.shape[-1] == value_layer.shape[-1] == 256
+            and all(not isinstance(x, Float8Tensor) for x in [query_layer, key_layer, value_layer])
+            and any(not x.is_contiguous() for x in [query_layer, key_layer, value_layer])
+        ):
+            # FA4 D=256 SM10x kernels need packed K/V views materialized, even
+            # when the last dimension is contiguous.
+            query_layer, key_layer, value_layer = [
+                x.contiguous() for x in (query_layer, key_layer, value_layer)
+            ]
         if context_parallel and all(
             not isinstance(x, Float8Tensor) for x in [query_layer, key_layer, value_layer]
         ):
@@ -1097,12 +1176,12 @@ class FlashAttention(torch.nn.Module):
                     else:
                         func = flash_attn_with_kvcache_v3  # pylint: disable=possibly-used-before-assignment
                     if not use_flash_attn_4 and (not use_flash_attn_3 or inference_params is None):
-                        fa_optional_forward_args_thd.append(
-                            cu_seqlens_q_padded if pad_between_seqs else cu_seqlens_q
+                        cu_q, cu_kv = _unalias_cu_seqlens(
+                            cu_seqlens_q_padded if pad_between_seqs else cu_seqlens_q,
+                            cu_seqlens_kv_padded if pad_between_seqs else cu_seqlens_kv,
                         )
-                        fa_optional_forward_args_thd.append(
-                            cu_seqlens_kv_padded if pad_between_seqs else cu_seqlens_kv
-                        )
+                        fa_optional_forward_args_thd.append(cu_q)
+                        fa_optional_forward_args_thd.append(cu_kv)
                         fa_optional_forward_args_thd.append(max_seqlen_q)
                         fa_optional_forward_args_thd.append(max_seqlen_kv)
                 if use_flash_attn_4:
@@ -1113,8 +1192,9 @@ class FlashAttention(torch.nn.Module):
                     if inference_params is None:
                         fa_4_optional_forward_kwargs["deterministic"] = self.deterministic
                     if func is flash_attn_varlen_func_v4:
-                        fa_4_optional_forward_kwargs["cu_seqlens_q"] = cu_seqlens_q
-                        fa_4_optional_forward_kwargs["cu_seqlens_k"] = cu_seqlens_kv
+                        cu_q, cu_kv = _unalias_cu_seqlens(cu_seqlens_q, cu_seqlens_kv)
+                        fa_4_optional_forward_kwargs["cu_seqlens_q"] = cu_q
+                        fa_4_optional_forward_kwargs["cu_seqlens_k"] = cu_kv
                         fa_4_optional_forward_kwargs["max_seqlen_q"] = max_seqlen_q
                         fa_4_optional_forward_kwargs["max_seqlen_k"] = max_seqlen_kv
                     output = func(
@@ -1249,7 +1329,7 @@ class FlashAttention(torch.nn.Module):
             # all KV caching cases use thd_2bshd for calculation
             # convert results back to bshd from thd_2bshd
             if isinstance(query_layer, Float8Tensor):
-                output._data = tex.convert_thd_to_bshd(
+                output._data = convert_thd_to_bshd(
                     output._data,
                     cu_seqlens_q,
                     batch_size,
@@ -1257,7 +1337,7 @@ class FlashAttention(torch.nn.Module):
                 )
                 output = Float8Tensor.make_like(output, data=output._data, shape=output._data.shape)
             else:
-                output = tex.convert_thd_to_bshd(
+                output = convert_thd_to_bshd(
                     output,
                     cu_seqlens_q,
                     batch_size,
@@ -1326,8 +1406,11 @@ class FusedAttnFunc(torch.autograd.Function):
         deterministic,
         softmax_offset,
         fp8_output,
+        bf16_backward,
         layer_number,
         return_max_logit,
+        packed_qkv=None,
+        packed_kv=None,
     ):
         # pylint: disable=missing-function-docstring
 
@@ -1388,9 +1471,19 @@ class FusedAttnFunc(torch.autograd.Function):
             #                      fp8_dtype = tex.DType.kFloat8E4M3
             if is_input_fp8:
                 q_fp8, k_fp8, v_fp8 = q, k, v
+
+                if fp8_recipe.mxfp8():
+                    qkv_scale_inv_format = "bhsd"  # Same as what combine_and_quantize would give
             else:
                 q_fp8, k_fp8, v_fp8, qkv_layout, qkv_scale_inv_format = combine_and_quantize(
-                    qkv_layout, q, k, v, QKV_quantizer, used_in_backward=is_training
+                    qkv_layout,
+                    q,
+                    k,
+                    v,
+                    QKV_quantizer,
+                    used_in_backward=is_training,
+                    combined_qkv=packed_qkv,
+                    combined_kv=packed_kv,
                 )
 
             # print quantizers
@@ -1556,6 +1649,8 @@ class FusedAttnFunc(torch.autograd.Function):
 
         ctx.is_input_fp8 = is_input_fp8
         ctx.is_output_fp8 = is_output_fp8
+        # Return dQ/dK/dV in bf16 even if is_input_fp8
+        ctx.bf16_backward = bf16_backward
 
         tensors_to_save, tensor_objects = prepare_for_saving(
             *fp8_tensors,
@@ -1814,7 +1909,8 @@ class FusedAttnFunc(torch.autograd.Function):
                     # dq, dk, dv:             torch.Tensor; dtype = torch.float16 or torch.bfloat16
                     dq, dk, dv = dq_, dk_, dv_
                     is_quantized_tensor = isinstance(dq_, QuantizedTensorStorage)
-                    if is_quantized_tensor and not ctx.is_input_fp8:
+
+                    if is_quantized_tensor and (not ctx.is_input_fp8 or ctx.bf16_backward):
                         # return in F16
                         dq, dk, dv = combine_and_dequantize(
                             ctx.dqkv_layout,
@@ -1823,7 +1919,7 @@ class FusedAttnFunc(torch.autograd.Function):
                             dv_,
                             src_nominal_dtype=dq_.dtype,
                         )
-                    if not is_quantized_tensor and ctx.is_input_fp8:
+                    if not is_quantized_tensor and ctx.is_input_fp8 and not ctx.bf16_backward:
                         # return in FP8
                         dq, dk, dv, _, _ = combine_and_quantize(
                             ctx.dqkv_layout, dq_, dk_, dv_, ctx.dQKV_quantizer
@@ -1920,6 +2016,9 @@ class FusedAttnFunc(torch.autograd.Function):
             None,
             None,
             None,
+            None,  # packed_qkv
+            None,  # packed_kv
+            None,
         )
 
 
@@ -1995,7 +2094,7 @@ class FusedAttention(torch.nn.Module):
         attention_mask: Optional[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]] = None,
         window_size: Optional[Tuple[int, int]] = None,
         bottom_right_diagonal: Optional[bool] = None,
-        fused_attention_backend: tex.NVTE_Fused_Attn_Backend = tex.NVTE_Fused_Attn_Backend.NVTE_No_Backend,
+        fused_attention_backend: FusedAttnBackend = FusedAttnBackend["No_Backend"],
         core_attention_bias_type: str = "no_bias",
         core_attention_bias: Optional[torch.Tensor] = None,
         fast_zero_fill: bool = True,
@@ -2014,10 +2113,13 @@ class FusedAttention(torch.nn.Module):
         score_mod_bprop: Optional[Callable] = None,
         score_mod_tensors: Optional[Dict[str, torch.Tensor]] = None,
         score_mod_bprop_tensors: Optional[Dict[str, torch.Tensor]] = None,
+        packed_qkv: Optional[torch.Tensor] = None,
+        packed_kv: Optional[torch.Tensor] = None,
+        bf16_backward: bool = False,
     ) -> torch.Tensor:
         """fused attention fprop"""
         assert (
-            fused_attention_backend != tex.NVTE_Fused_Attn_Backend.NVTE_No_Backend
+            fused_attention_backend != FusedAttnBackend["No_Backend"]
         ), "No fused attention backend supports this input combination!"
         assert all(
             x.dtype in [torch.float16, torch.bfloat16] or isinstance(x, QuantizedTensorStorage)
@@ -2110,15 +2212,15 @@ class FusedAttention(torch.nn.Module):
         use_FAv2_bwd = (
             self.use_FAv2_bwd
             and (core_attention_bias_type == "no_bias")
-            and (fused_attention_backend == tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen)
+            and (fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"])
         )
 
         if fp8:
             fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
             if fp8_meta is not None and fp8_meta.get("local_recipes", None) is not None:
                 fp8_recipe = fp8_meta["local_recipes"][0]
-            assert fused_attention_backend == tex.NVTE_Fused_Attn_Backend.NVTE_FP8, (
-                f"cuDNN attention sub-backend {int(tex.NVTE_Fused_Attn_Backend.NVTE_FP8)}"
+            assert fused_attention_backend == FusedAttnBackend["FP8"], (
+                f"cuDNN attention sub-backend {int(FusedAttnBackend['FP8'])}"
                 " is required for FP8 attention!"
             )
             assert fp8_meta is not None, "FP8 metadata fp8_meta is required for FP8 attention!"
@@ -2138,8 +2240,7 @@ class FusedAttention(torch.nn.Module):
 
         if context_parallel:
             assert (
-                fp8
-                or fused_attention_backend == tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen
+                fp8 or fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]
             ), f"{fused_attention_backend} does not work with context parallelism!"
             assert core_attention_bias_type not in [
                 "alibi"
@@ -2231,8 +2332,11 @@ class FusedAttention(torch.nn.Module):
                     self.deterministic,
                     softmax_offset,
                     fp8_output,
+                    bf16_backward,
                     self.layer_number,
                     self.return_max_logit,
+                    packed_qkv,
+                    packed_kv,
                 )
 
         if self.return_max_logit:

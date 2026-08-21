@@ -431,3 +431,39 @@ def test_group_stochastic_rounding_quantization_versus_reference(
         num_splits=num_splits,
         use_tex_split_quantize=use_tex_split_quantize,
     )
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.parametrize("x_dtype", [torch.float32, torch.bfloat16], ids=str)
+@pytest.mark.parametrize("use_2D", [False, True], ids=str)
+def test_stochastic_rounding_picks_an_adjacent_fp4_value(
+    x_dtype: torch.dtype, use_2D: bool
+) -> None:
+    device = "cuda"
+    torch.manual_seed(seed)
+    M, N = 512, 1024
+    x = torch.randn((M, N), dtype=x_dtype, device=device)
+    amax = torch.max(torch.abs(x)).float()
+
+    q, s, q_t, s_t = quantize_fp4(x, use_stochastic_rounding=True, use_2D=use_2D, use_RHT=False)
+    q_redraw, _, q_t_redraw, _ = quantize_fp4(
+        x, use_stochastic_rounding=True, use_2D=use_2D, use_RHT=False
+    )
+    assert not torch.equal(q, q_redraw), "two stochastic rounding draws are identical"
+    assert not torch.equal(q_t, q_t_redraw), "two stochastic rounding draws are identical"
+
+    def check_adjacent(qx: torch.Tensor, sx: torch.Tensor, reference: torch.Tensor) -> None:
+        # The kernel rounds reference / block_scale onto the E2M1 grid, so every
+        # output has to be one of the two grid values that bracket it, i.e. within
+        # one grid step. An all-zero output fails this everywhere the input is not
+        # already near zero.
+        block_scale = sx.repeat_interleave(16, dim=1).view(torch.float8_e4m3fn).to(torch.float32)
+        block_scale = block_scale[: reference.shape[0], : reference.shape[1]] * (amax / (6.0 * 448))
+        exact = (reference.float() / block_scale).clamp(-6.0, 6.0)
+        magnitude = exact.abs()
+        step = torch.where(magnitude >= 4.0, 2.0, torch.where(magnitude >= 2.0, 1.0, 0.5))
+        gap = (fp4_to_fp32(unpack_fp4(qx)) - exact).abs()
+        assert torch.all(gap <= step * 1.0001), f"largest gap to the exact value is {gap.max()}"
+
+    check_adjacent(q, s, x)
+    check_adjacent(q_t, s_t, x.t().contiguous())

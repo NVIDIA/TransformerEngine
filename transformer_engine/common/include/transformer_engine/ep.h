@@ -44,7 +44,8 @@ typedef struct {
   int num_experts;
   /*! Upper bound on tokens this rank sends per dispatch. */
   int max_tokens_per_rank;
-  /*! Upper bound on tokens this rank receives per dispatch (must be > 0). */
+  /*! Upper bound on tokens this rank receives per dispatch. 0 selects eager
+   *  mode: the caller sizes recv buffers to the per-routing recv count. */
   int max_recv_tokens_per_rank;
   /*! Token hidden dimension. */
   int hidden_dim;
@@ -58,6 +59,12 @@ typedef struct {
    *  by NVTECommWindow handles and transfer in place (no staging copies);
    *  0 (default) = staged. */
   int zero_copy;
+  /*! Per-token top-k; sizes NCCL EP internal buffers. Required in eager mode
+   *  (max_recv_tokens_per_rank == 0); 0 = unset. */
+  int num_topk;
+  /*! Recv overflow policy. Nonzero drops tokens past max_recv_tokens_per_rank
+   *  and continues; 0 (default) traps. Not supported in eager mode. */
+  int drop_on_overflow;
 } NVTEEpGroupConfig;
 
 /*! \brief Per-layer configuration consumed by nvte_ep_handle_mem_size and
@@ -121,13 +128,14 @@ size_t nvte_ep_handle_mem_size(const NVTEEpLayerConfig* layer_cfg);
  *  AllGathers topk_idx across the EP group and stages per-expert offsets and
  *  counts into handle_mem so the matching dispatch/combine/_bwd can run with
  *  no further routing computation. Must precede every dispatch/combine/_bwd
- *  that uses this handle_mem. recv_tokens_per_expert becomes host-valid after a
- *  stream sync.
+ *  that uses this handle_mem. recv_tokens_per_expert and total_recv_tokens_per_rank
+ *  become host-valid after a stream sync.
  *
  *  \param[in]     handle_mem                 uint8 routing-state buffer.
  *  \param[in]     topk_idx                   [T, top_k] int64 routing indices.
- *  \param[out]    recv_tokens_per_expert     [num_local_experts] int32 counts.
- *  \param[out]    total_recv_tokens_per_rank Reserved placeholder; may be null. Unused for now.
+ *  \param[out]    recv_tokens_per_expert     [num_local_experts] int32/int64 counts.
+ *  \param[out]    total_recv_tokens_per_rank Optional [1] int32/int64 scalar: padded
+ *                                            recv-slot total for this rank. May be null.
  *  \param[in]     layer_cfg                  Per-call layer configuration (struct_size set).
  *  \param[in]     stream                     CUDA stream.
  */
@@ -141,6 +149,12 @@ void nvte_ep_prepare(NVTETensor handle_mem, NVTETensor topk_idx, NVTETensor recv
  *  expert-major (contiguous per-expert slabs, padded per layer_cfg). The
  *  *_win arguments enable zero-copy via symmem windows; pass NVTECommWindow{}
  *  when unused. Requires a prior nvte_ep_prepare on this handle_mem.
+ *
+ *  tokens/recv_tokens may be high-precision (bf16/fp16) or FP8:
+ *  for the latter, set rowwise data and rowwise scale-inverse (unswizzled
+ *  [T, hidden_dim/block]) on the tensor and the scales are routed alongside the
+ *  data. tokens and recv_tokens must share a scaling mode. For now, only MXFP8
+ *  (NVTE_MXFP8_1D_SCALING, e4m3 data + e8m0 scales) is supported.
  *
  *  \param[in]     handle_mem             uint8 routing-state buffer (from prepare).
  *  \param[in]     topk_idx               [T, top_k] int64 sparse routing indices.

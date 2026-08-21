@@ -66,15 +66,18 @@ from ..distributed import (
 from ..constants import FP8BwdTensorIdx, FP8FwdTensorIdx, dist_group_type
 from ..jit import no_torch_dynamo
 from ..graph import is_graph_capturing
-from ..tensor.float8_tensor import (
-    Float8CurrentScalingQuantizer,
-    Float8Quantizer,
-    Float8Tensor,
-)
+from ..tensor.float8_tensor import Float8Tensor
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor.nvfp4_tensor import NVFP4Quantizer
 from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
-from ._common import apply_normalization, set_quantizer_amax_reduction_group, WeightGradStore
+from ..tensor.hybrid_tensor import HybridQuantizer
+from ..tensor.identity_tensor import IdentityQuantizer
+from ._common import (
+    apply_normalization,
+    set_quantizer_amax_reduction_group,
+    set_quantizer_usage_for_wgrad_all_gather,
+    WeightGradStore,
+)
 from ..cpu_offload import (
     is_cpu_offload_enabled,
     start_offload,
@@ -413,12 +416,16 @@ class _LayerNormMLP(torch.autograd.Function):
         # for debug: : layernorm output = High precision to enable processing of this norm
 
         custom = is_custom(fc1_input_quantizer)
+        hybrid = isinstance(fc1_input_quantizer, HybridQuantizer)
+        identity = isinstance(fc1_input_quantizer, IdentityQuantizer)
         with_quantized_norm = (
             fp8
             and not debug
             and not return_layernorm_output
             and not return_layernorm_output_gathered
             and not custom
+            and not hybrid
+            and not identity
         )
 
         # Apply normalization
@@ -1171,12 +1178,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 quantizer = None
                 if ctx.fp8 or ctx.debug:
                     quantizer = ctx.fc1_input_quantizer
-                    if isinstance(quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer)):
-                        # If data is in FP8, we compute FP8 transposes manually
-                        quantizer.set_usage(rowwise=True, columnwise=False)
-                    else:
-                        # wgrad GEMM requires input with column-wise usage
-                        quantizer.set_usage(rowwise=False, columnwise=True)
+                    set_quantizer_usage_for_wgrad_all_gather(quantizer)
                 if ctx.ub_bulk_dgrad:
                     ub_obj_fc1_dgrad = get_ub("fc1_dgrad", ctx.fp8)
                     ln_out_total, _ = fill_userbuffers_buffer_for_all_gather(
@@ -1294,7 +1296,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 and ctx.ub_obj_gradout.with_cublasmp()
             ):
                 if ctx.fc2_grad_output_quantizer is not None:
-                    ctx.fc2_grad_output_quantizer.set_usage(rowwise=True, columnwise=False)
+                    set_quantizer_usage_for_wgrad_all_gather(ctx.fc2_grad_output_quantizer)
                 grad_output, _ = gather_along_first_dim(
                     grad_output,
                     ctx.tp_group,
@@ -1471,7 +1473,10 @@ class _LayerNormMLP(torch.autograd.Function):
                 if ctx.fp8:
                     # TODO float8 blockwise current scaling (as well as custom quantizers) has no bgrad fusion for now
                     if (
-                        isinstance(ctx.fc1_grad_output_quantizer, Float8BlockQuantizer)
+                        isinstance(
+                            ctx.fc1_grad_output_quantizer,
+                            (Float8BlockQuantizer, IdentityQuantizer),
+                        )
                         or ctx.fp8_recipe.custom()
                     ):
                         fc1_bias_grad = dact.view(-1, dact.shape[-1]).sum(dim=0)
@@ -2337,6 +2342,15 @@ class LayerNormMLP(TransformerEngineBaseModule):
             fc1_weight, fc2_weight = self._get_weight_tensors()
             fc1_bias = self.fc1_bias if self.use_bias else None
             fc2_bias = self.fc2_bias if self.use_bias else None
+            if not debug:
+                if fc1_weight_quantizer is not None:
+                    fc1_weight_quantizer.optimize_for_gemm = self._enable_weight_preswizzle(
+                        fc1_weight_quantizer, fc1_weight
+                    )
+                if fc2_weight_quantizer is not None:
+                    fc2_weight_quantizer.optimize_for_gemm = self._enable_weight_preswizzle(
+                        fc2_weight_quantizer, fc2_weight
+                    )
             if not self.fp8:
                 if isinstance(fc1_weight, Float8Tensor):
                     fc1_weight = fc1_weight.dequantize()
@@ -2482,7 +2496,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 rowwise=True,
                 columnwise=isinstance(
                     fc2_input_quantizer,
-                    (MXFP8Quantizer, Float8BlockQuantizer, NVFP4Quantizer),
+                    (MXFP8Quantizer, Float8BlockQuantizer, NVFP4Quantizer, HybridQuantizer),
                 ),
             )
             fc2_input_quantizer.internal = True
@@ -2713,17 +2727,6 @@ class LayerNormMLP(TransformerEngineBaseModule):
         fc1_weight_quantizer.internal = True
         fc2_weight_quantizer = self.quantizers["scaling_fwd"][FP8FwdTensorIdx.GEMM2_WEIGHT]
         fc2_weight_quantizer.internal = True
-        # Weight scale factors must be GEMM-swizzled before cuBLAS/CUTLASS can
-        # consume them. Pre-swizzle once at quantize time (persisted on the cached
-        # workspace when the weight is cached) instead of lazily inside every GEMM.
-        # No-op for recipes whose scales don't need swizzling (e.g. per-tensor FP8).
-        # The exception is quantized_model_init, where the weight parameter is
-        # itself quantized and gets all-gathered (FSDP2) and optimizer-updated in
-        # its unswizzled layout; swizzling would break the all-gather and the
-        # dequantize-on-update, so leave the quantizer state untouched.
-        if not self.primary_weights_in_fp8:
-            fc1_weight_quantizer.optimize_for_gemm = True
-            fc2_weight_quantizer.optimize_for_gemm = True
         return [fc1_weight_quantizer, fc2_weight_quantizer]
 
     def backward_dw(self):

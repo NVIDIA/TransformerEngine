@@ -169,7 +169,7 @@ class _MoEBlock(TransformerEngineBase):
         super().__post_init__()
 
     @nn.compact
-    def __call__(self, inputs: Array) -> Tuple[Array, Optional[Array]]:
+    def __call__(self, inputs: Array) -> Tuple[Array, Optional[Array], Array]:
         """Run the MoE forward pass.
 
         Parameters
@@ -184,6 +184,9 @@ class _MoEBlock(TransformerEngineBase):
         aux_loss : Optional[jnp.ndarray]
             Scalar load-balancing loss when ``aux_loss_coeff > 0``,
             else ``None``.
+        total_recv_tokens : jnp.ndarray
+            Non-differentiable per-rank pre-drop recv-slot total; flags
+            overflow when ``drop_on_overflow`` is set at ep_bootstrap.
         """
         assert (
             inputs.ndim == 3
