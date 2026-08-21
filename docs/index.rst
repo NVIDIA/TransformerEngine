@@ -31,6 +31,7 @@ Transformer Engine documentation
    installation
    getting_started/index
    faq
+   release_notes
 
 .. toctree::
    :hidden:

@@ -59,6 +59,8 @@ extensions = [
     "breathe",
     "autoapi.extension",
     "sphinx_tabs.tabs",
+    "myst_parser",
+    "nvidia-sphinx-theme",
 ]
 
 templates_path = ["_templates"]
@@ -77,26 +79,22 @@ pygments_style = "sphinx"
 # -- Options for HTML output -------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#options-for-html-output
 
-html_theme = "sphinx_rtd_theme"
-html_static_path = ["_static"]
-html_show_sphinx = False
-
-html_css_files = [
-    "css/nvidia_font.css",
-    "css/nvidia_footer.css",
-    "css/output-style.css",
-    "css/diagram-colors.css",
-    "css/sphinx_tabs.css",
-    "css/svg-responsive.css",
-    "css/rtabs.css",
-]
-
+html_theme = "nvidia_sphinx_theme"
 html_theme_options = {
-    "collapse_navigation": False,
-    "logo_only": False,
-    "version_selector": False,
-    "language_selector": False,
+    "public_docs_features": True,
+    "switcher": {
+        "json_url": "../versions1.json",
+        "version_match": release,
+    },
+    "icon_links": [
+        {
+            "name": "GitHub",
+            "url": "https://github.com/NVIDIA/TransformerEngine/",
+            "icon": "fa-brands fa-github",
+        }
+    ],
 }
+html_extra_path = ["project.json", "versions1.json"]
 
 napoleon_custom_sections = [
     ("Parallelism parameters", "params_style"),
