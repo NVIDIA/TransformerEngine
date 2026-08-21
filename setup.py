@@ -89,9 +89,6 @@ def setup_common_extension() -> CMakeExtension:
         cusolvermp_dir = os.getenv("CUSOLVERMP_HOME", "/usr")
         cmake_flags.append(f"-DCUSOLVERMP_DIR={cusolvermp_dir}")
 
-    if not bool(int(os.getenv("NVTE_WITH_CUTEDSL", "1"))):
-        cmake_flags.append("-DNVTE_WITH_CUTEDSL=OFF")
-
     # NCCL EP (Hopper+): on by default; auto-skipped when no arch >= 90 is
     # targeted. Set NVTE_WITH_NCCL_EP=0 to force off.
     if nccl_ep_enabled(archs):
@@ -126,12 +123,10 @@ def setup_requirements() -> Tuple[List[str], List[str]]:
         "pydantic",
         "importlib-metadata>=1.0",
         "packaging",
+        "apache-tvm-ffi>=0.1.12",
+        "nvidia-cutlass-dsl>=4.5.0",
     ]
     test_reqs: List[str] = ["pytest>=8.2.1"]
-
-    # If user opt out from CuTeDSL backend, don't introduce these dependencies
-    if bool(int(os.getenv("NVTE_WITH_CUTEDSL", "1"))):
-        install_reqs += ["apache-tvm-ffi>=0.1.12", "nvidia-cutlass-dsl>=4.4.2"]
 
     # Framework-specific requirements
     if not bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))):

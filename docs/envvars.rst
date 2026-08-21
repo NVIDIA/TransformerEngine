@@ -95,9 +95,11 @@ Optional Dependencies
 
 .. envvar:: NVTE_WITH_CUTEDSL
 
-   :Type: ``int`` (0 or 1)
-   :Default: ``1``
-   :Description: Enable CuTeDSL kernel bindings in C++ via TVM-FFI, requires the ``apache-tvm-ffi`` Python package's headers at build time.
+   :Type: CMake option
+   :Default: ``ON``
+   :Description: Build CuTeDSL kernel bindings in C++. Only applies when configuring the C++ library with CMake directly; pass
+                 ``-DNVTE_WITH_CUTEDSL=OFF`` to build without it. This is intended for C++ users who do not want to introduce
+                 a python environment which is required to generate CuTeDSL kernels at runtime.
 
 .. envvar:: NVTE_BUILD_ACTIVATION_WITH_FAST_MATH
 
