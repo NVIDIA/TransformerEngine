@@ -627,6 +627,7 @@ class _EpPrepareAndDispatch(torch.autograd.Function):
         ctx.topk_T_flat = topk_weights.numel() // topk_weights.shape[-1]
         ctx.top_k = topk_weights.shape[-1]
         ctx.hidden_dim = hidden
+        ctx.eager = eager
         # Detach so the long-lived buffers aren't tracked as differentiable outputs; autograd
         # re-attaches grad_fn pointing back at this Function. For scaled inputs the expert-major
         # recv data + scales are wrapped into a per-expert GroupedTensor so downstream grouped GEMM
@@ -657,13 +658,19 @@ class _EpPrepareAndDispatch(torch.autograd.Function):
         grad_topk_weights = torch.empty(
             ctx.topk_T_flat, ctx.top_k, dtype=torch.float32, device=device
         )
-        torch.ops.transformer_engine_ep.dispatch_bwd(
-            handle_mem,
-            g_recv_tokens,
-            g_recv_topk_weights,
-            grad_tokens,
-            grad_topk_weights,
-        )
+        # Eager is not graph-capturable, so call the backend op directly and skip torch.library.
+        if ctx.eager:
+            tex.ep_dispatch_bwd(
+                handle_mem, g_recv_tokens, g_recv_topk_weights, grad_tokens, grad_topk_weights
+            )
+        else:
+            torch.ops.transformer_engine_ep.dispatch_bwd(
+                handle_mem,
+                g_recv_tokens,
+                g_recv_topk_weights,
+                grad_tokens,
+                grad_topk_weights,
+            )
         return (
             grad_tokens.view(ctx.tokens_shape),
             grad_topk_weights.view(ctx.topk_weights_shape),
