@@ -986,6 +986,115 @@ def test_slot_memory_variants_share_one_backing(elements: int) -> None:
         reset_graphs(graphed)
 
 
+def test_slot_memory_preserves_aliased_public_outputs() -> None:
+    """Slot output arenas retain overlapping public views across CP branches."""
+
+    class Module(torch.nn.Module):
+        def forward(self, inp):
+            output = inp.square()
+            return output, output[4:]
+
+    module = Module().cuda()
+    samples = tuple((torch.ones(16, device="cuda", requires_grad=True),) for _ in range(2))
+    graphed = make_graphed_callables(
+        (module, module),
+        samples,
+        num_warmup_iters=2,
+        _order=[1, 2, -1, -2],
+        _num_layers_per_chunk=[1, 1],
+        _reuse_graph_input_output_buffers=True,
+        _graph_memory_slots=(_slot(0, 0, 0), _slot(0, 1, 0, warmup=1)),
+    )
+    try:
+        for graph in graphed:
+            inp = torch.randn(16, device="cuda", requires_grad=True)
+            output, output_view = graph(inp)
+            assert output_view.data_ptr() - output.data_ptr() == 4 * output.element_size()
+            assert output_view.data_ptr() < (
+                output.data_ptr() + output.numel() * output.element_size()
+            )
+            (output.sum() + output_view.sum()).backward()
+            expected_grad = 2.0 * inp.detach()
+            expected_grad[4:] *= 2.0
+            torch.testing.assert_close(inp.grad, expected_grad)
+            previous = output[4:].clone()
+            with torch.no_grad():
+                output_view.add_(1.0)
+            torch.testing.assert_close(output[4:], previous + 1.0)
+    finally:
+        reset_graphs(graphed)
+
+
+@pytest.mark.parametrize("state_kind", ("parameter", "buffer"))
+def test_slot_memory_preserves_public_outputs_aliased_to_module_state(state_kind) -> None:
+    """Persistent module-state views remain outside the slot allocator pool."""
+
+    class Module(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            state = torch.randn(16, device="cuda")
+            if state_kind == "parameter":
+                self.state = torch.nn.Parameter(state)
+            else:
+                self.register_buffer("state", state)
+
+        def forward(self, inp):
+            return inp.square(), self.state.view_as(self.state)
+
+    module = Module()
+    samples = tuple((torch.ones(16, device="cuda", requires_grad=True),) for _ in range(2))
+    graphed = make_graphed_callables(
+        (module, module),
+        samples,
+        num_warmup_iters=2,
+        allow_unused_input=True,
+        _order=[1, 2, -1, -2],
+        _num_layers_per_chunk=[1, 1],
+        _reuse_graph_input_output_buffers=True,
+        _graph_memory_slots=(_slot(0, 0, 0), _slot(0, 1, 0, warmup=1)),
+    )
+    try:
+        for graph in graphed:
+            inp = torch.randn(16, device="cuda", requires_grad=True)
+            output, state_output = graph(inp)
+            assert (
+                state_output.untyped_storage().data_ptr()
+                == module.state.untyped_storage().data_ptr()
+            )
+            (output.sum() + state_output.sum()).backward()
+            torch.testing.assert_close(inp.grad, 2.0 * inp.detach())
+            if state_kind == "parameter":
+                torch.testing.assert_close(module.state.grad, torch.ones_like(module.state))
+                module.state.grad = None
+    finally:
+        reset_graphs(graphed)
+
+
+def test_slot_memory_rejects_public_cuda_tensor_subclass_outputs() -> None:
+    """Unsupported CUDA outputs must fail before allocator checkpoint mutation."""
+
+    class OutputTensor(torch.Tensor):
+        pass
+
+    class Module(torch.nn.Module):
+        def forward(self, inp):
+            return inp.square().as_subclass(OutputTensor)
+
+    module = Module().cuda()
+    sample = (torch.ones(16, device="cuda", requires_grad=True),)
+    with pytest.raises(RuntimeError, match="tensor subclasses"):
+        make_graphed_callables(
+            module,
+            sample,
+            num_warmup_iters=2,
+            _order=[1, -1],
+            _num_layers_per_chunk=[1],
+            _reuse_graph_input_output_buffers=True,
+            _graph_memory_slots=(_slot(0, 0, 0),),
+        )
+    assert not te_graph.is_graph_capturing()
+
+
 def test_slot_memory_input_staging_respects_overlapping_liveness() -> None:
     """Live microbatches must not overwrite inputs still needed by backward."""
 

@@ -130,6 +130,41 @@ def _io_tensor_plan(tensor: Any, kind: str) -> Optional[Tuple[Any, ...]]:
     return (kind, None, *_saved_tensor_signature(tensor))
 
 
+def _slot_output_plan(outputs: Sequence[Any], func: Callable) -> List[Optional[Tuple[Any, ...]]]:
+    """Describe public outputs while retaining storage aliases and module-state views."""
+    module_state_storages = set()
+    if isinstance(func, torch.nn.Module):
+        for tensors in (func.parameters(), func.buffers()):
+            for tensor in tensors:
+                if tensor.is_cuda and tensor.untyped_storage().nbytes() > 0:
+                    module_state_storages.add(_tensor_storage_ptr(tensor))
+
+    storage_groups = {}
+    plan = []
+    for output_idx, output in enumerate(outputs):
+        spec = _io_tensor_plan(output, "output")
+        if spec is None and isinstance(output, torch.Tensor) and output.is_cuda:
+            raise RuntimeError(
+                "CUDA graph slot memory does not support public CUDA outputs that are "
+                "tensor subclasses or use a non-strided layout: "
+                f"output tensor {output_idx} has type {type(output).__name__} "
+                f"and layout {output.layout}."
+            )
+        if spec is None:
+            plan.append(None)
+            continue
+
+        storage_id = _tensor_storage_ptr(output)
+        storage_offset_bytes = output.storage_offset() * output.element_size()
+        if storage_id in module_state_storages:
+            plan.append(("external_output", storage_id, *spec[2:], None, storage_offset_bytes))
+            continue
+
+        storage_group = storage_groups.setdefault(storage_id, len(storage_groups))
+        plan.append((*spec, storage_group, storage_offset_bytes))
+    return plan
+
+
 def _arena_view(arena: torch.Tensor, offset: int, spec: Tuple[Any, ...]) -> torch.Tensor:
     """Materialize a typed tensor view at a byte offset in an arena."""
     target = torch.empty((0,), dtype=spec[4], device=spec[5])
@@ -974,6 +1009,7 @@ def _make_graphed_callables(
                             record_saved_tensor, lambda x: x
                         ):
                             outputs, _ = _tree_flatten(func(*args, **kwargs))
+                        observed_output_plan = _slot_output_plan(outputs, func)
                         observed_boundary_aliases = observe_saved_tensor_boundary_aliases(
                             func_idx,
                             observed_saved_tensors,
@@ -996,7 +1032,7 @@ def _make_graphed_callables(
                         update_warmup_plan(
                             per_callable_output_tensor_plans,
                             func_idx,
-                            [_io_tensor_plan(output, "output") for output in outputs],
+                            observed_output_plan,
                             "Output",
                         )
                     else:
@@ -1249,6 +1285,14 @@ def _make_graphed_callables(
                         f"CUDA graph {kind} family {family} has an incompatible tensor "
                         f"at position {tensor_idx}."
                     )
+                modes = {spec[0] for spec in specs}
+                if modes == {"external_output"}:
+                    continue
+                if modes != {kind}:
+                    raise RuntimeError(
+                        f"CUDA graph {kind} family {family} has incompatible storage modes "
+                        f"at position {tensor_idx}: {sorted(modes)}."
+                    )
                 layout_keys = {(spec[0], spec[4], spec[5], spec[6]) for spec in specs}
                 if layout_keys != {(kind, specs[0][4], specs[0][5], specs[0][6])}:
                     raise RuntimeError(
@@ -1325,7 +1369,7 @@ def _make_graphed_callables(
                     per_callable_user_grad_tensor_targets[func_idx]
                 )
 
-    def copy_outputs_to_slot_arena(func_idx, flatten_outputs):
+    def copy_outputs_to_slot_arena(func_idx, flatten_outputs, func):
         """Copy public forward outputs to the fixed surface for their physical slot."""
         if per_callable_output_tensor_targets is None:
             return flatten_outputs
@@ -1335,12 +1379,16 @@ def _make_graphed_callables(
             raise RuntimeError(
                 f"CUDA graph input {func_idx} changed its output count during capture."
             )
+        if _slot_output_plan(flatten_outputs, func) != plan:
+            raise RuntimeError(
+                f"CUDA graph input {func_idx} changed its output tensor storage plan "
+                "during capture."
+            )
         copied_outputs = []
         for tensor_idx, (output, spec, target) in enumerate(zip(flatten_outputs, plan, targets)):
-            if spec != _io_tensor_plan(output, "output"):
-                raise RuntimeError(
-                    f"CUDA graph input {func_idx} changed its output tensor surface during capture."
-                )
+            if spec is not None and spec[0] == "external_output":
+                copied_outputs.append(output)
+                continue
             if target is None:
                 if spec is None:
                     copied_outputs.append(output)
@@ -1676,6 +1724,38 @@ def _make_graphed_callables(
 
     def slot_tensor_targets(plan, arena=None):
         """Lay out graph-boundary tensors contiguously in an arena."""
+        if any(spec is not None and len(spec) > 8 for spec in plan):
+            records_by_storage_group = {}
+            for tensor_idx, spec in enumerate(plan):
+                if spec is None or spec[0] == "external_output":
+                    continue
+                storage_group = spec[8]
+                storage_offset_bytes = spec[9]
+                records_by_storage_group.setdefault(storage_group, []).append(
+                    (storage_offset_bytes, storage_offset_bytes + spec[7], tensor_idx)
+                )
+
+            placements = {}
+            offset = 0
+            for storage_group, records in records_by_storage_group.items():
+                alignment = max(plan[tensor_idx][4].itemsize for _, _, tensor_idx in records)
+                component_start = min(start for start, _, _ in records)
+                component_end = max(end for _, end, _ in records)
+                component_origin = component_start // alignment * alignment
+                offset = _align_up(offset)
+                placements[storage_group] = (offset, component_origin)
+                offset += component_end - component_origin
+
+            targets = []
+            for spec in plan:
+                if spec is None or spec[0] == "external_output" or arena is None:
+                    targets.append(None)
+                    continue
+                group_offset, component_origin = placements[spec[8]]
+                target_offset = group_offset + spec[9] - component_origin
+                targets.append(_arena_view(arena, target_offset, spec))
+            return tuple(targets), _align_up(offset)
+
         targets = []
         offset = 0
         for spec in plan:
@@ -2133,7 +2213,7 @@ def _make_graphed_callables(
                     "CUDA graph slot checkpoint live storage lost its allocator deleter."
                 )
 
-    def release_checkpoint_live_storages(expected_blocks, owners, phase):
+    def release_checkpoint_live_storages(owners, phase):
         """Make prevalidated checkpoint-live blocks free for topology restoration."""
         for storage in owners.values():
             storage_ptr = storage.data_ptr()
@@ -2184,7 +2264,7 @@ def _make_graphed_callables(
             # mutated, every failure must restore the original allocator boundary.
             validate_checkpoint_live_storages(current_blocks, current_owners)
             current_release_started = True
-            release_checkpoint_live_storages(current_blocks, current_owners, phase)
+            release_checkpoint_live_storages(current_owners, phase)
             torch._C._cuda_setCheckpointPoolState(
                 device,
                 target_state,
@@ -2204,9 +2284,7 @@ def _make_graphed_callables(
                     (current_owners, target_owners),
                 )
                 validate_checkpoint_live_storages(rollback_blocks, rollback_owners)
-                release_checkpoint_live_storages(
-                    rollback_blocks, rollback_owners, f"{phase} rollback"
-                )
+                release_checkpoint_live_storages(rollback_owners, f"{phase} rollback")
                 torch._C._cuda_setCheckpointPoolState(
                     device,
                     rollback_state,
@@ -2302,7 +2380,7 @@ def _make_graphed_callables(
                         flatten_outputs, spec = _tree_flatten(outputs)
                         original_flatten_outputs = flatten_outputs
                         flatten_outputs = copy_outputs_to_slot_arena(
-                            per_callable_fwd_idx, flatten_outputs
+                            per_callable_fwd_idx, flatten_outputs, func
                         )
                         if branch_group is not None:
                             record_replaced_io_storages(
@@ -3063,7 +3141,10 @@ def make_graphed_callables(
         alias group, followed by the returned user-gradient arena for one graph input. Requires
         the first positional sample argument of every graph input to be a plain CUDA tensor. Plain
         CUDA user inputs are snapshotted into the slot arenas whenever forward saves them for
-        backward, so shape-identical graph inputs can safely share staging surfaces.
+        backward, so shape-identical graph inputs can safely share staging surfaces. Public CUDA
+        outputs must be plain strided tensors. Output views that share storage retain their relative
+        byte offsets in the slot arena, while views of module parameters or buffers remain external
+        to the graph pool.
     pre_warmup_hook: callable, default = None
                       A hook function that will be called before the warmup iterations.
     post_warmup_hook: callable, default = None
@@ -3229,18 +3310,21 @@ def make_graphed_callables(
     guarded_post_warmup_hook = post_warmup_hook
     if post_warmup_hook is not None:
 
-        def guarded_pre_warmup_hook():
+        def run_pre_warmup_hook():
             nonlocal warmup_cleanup_pending
             if pre_warmup_hook is not None:
                 pre_warmup_hook()
             warmup_cleanup_pending = True
 
-        def guarded_post_warmup_hook():
+        def run_post_warmup_hook():
             nonlocal warmup_cleanup_pending
             if not warmup_cleanup_pending:
                 return
             warmup_cleanup_pending = False
             post_warmup_hook()
+
+        guarded_pre_warmup_hook = run_pre_warmup_hook
+        guarded_post_warmup_hook = run_post_warmup_hook
 
     allocator_settings_guard = _AllocatorSettingsGuard()
     saved_fp8_tensors = None
