@@ -18,10 +18,14 @@ from jax.experimental.custom_partitioning import SdyShardingRule
 
 import transformer_engine_jax
 from transformer_engine_jax import (
+    DType,
     JAXX_Scaling_Mode,
+    NVTE_Bias_Type,
     NVTE_Fused_Attn_Backend,
+    NVTE_Mask_Type,
     NVTE_QKV_Format,
     NVTE_QKV_Layout,
+    NVTE_Softmax_Type,
 )
 from transformer_engine.jax.attention import (
     AttnBiasType,
@@ -138,6 +142,63 @@ class _FusedAttnConfig:
     )  # Only for CP + Striped. For Ring P2P, stripe_size=1 only.For AG, stripe_size>=1.
 
 
+@dataclass
+class FusedAttnParams:
+    """
+    Attention parameters used to select the fused attention backend.
+
+    Fields are declared in the order of the ``FusedAttnConfig`` struct in
+    ``common/fused_attn/config_and_params.h``, which is the order the C++ binding reads them in
+    and the order it fills the config with. Fields JAX does not use, namely the paged-KV
+    dimensions and the ragged token counts, are omitted and keep their ``FusedAttnConfig``
+    defaults.
+    """
+
+    # basic attention settings
+    is_training: bool = True
+    deterministic: bool = False
+    cuda_graph: bool = False
+    return_max_logit: bool = False
+    attn_mask_type: NVTE_Mask_Type = NVTE_Mask_Type.NVTE_NO_MASK
+    bias_type: NVTE_Bias_Type = NVTE_Bias_Type.NVTE_NO_BIAS
+    window_size_left: int = -1
+    window_size_right: int = -1
+    bottom_right_diagonal: bool = True
+    softmax_type: NVTE_Softmax_Type = NVTE_Softmax_Type.NVTE_VANILLA_SOFTMAX
+    scaling_mode: JAXX_Scaling_Mode = JAXX_Scaling_Mode.NO_SCALING
+    dropout: float = 0.0
+    attn_scale: float = 1.0
+
+    # tensor types
+    qkv_dtype: DType = DType.kBFloat16
+    o_dtype: DType = DType.kBFloat16
+    do_dtype: DType = DType.kBFloat16
+    dqkv_dtype: DType = DType.kBFloat16
+
+    # tensor layouts
+    qkv_layout: NVTE_QKV_Layout = NVTE_QKV_Layout.NVTE_QKV_Layout_NOT_SET
+    o_format: NVTE_QKV_Format = NVTE_QKV_Format.NVTE_QKV_Format_NOT_SET
+    do_format: NVTE_QKV_Format = NVTE_QKV_Format.NVTE_QKV_Format_NOT_SET
+    dqkv_layout: NVTE_QKV_Layout = NVTE_QKV_Layout.NVTE_QKV_Layout_NOT_SET
+    qkv_scale_inv_format: NVTE_QKV_Format = NVTE_QKV_Format.NVTE_QKV_Format_NOT_SET
+    do_scale_inv_format: NVTE_QKV_Format = NVTE_QKV_Format.NVTE_QKV_Format_NOT_SET
+
+    # tensor dimensions
+    batch_size: int = 0
+    num_attn_heads: int = 0
+    num_gqa_groups: int = 0
+    head_dim_qk: int = 0
+    head_dim_v: int = 0
+    max_seqlen_q: int = 0
+    max_seqlen_kv: int = 0
+
+    # bias dimensions
+    bias_batch_size: int = 0
+    bias_num_heads: int = 0
+    bias_seqlen_q: int = 0
+    bias_seqlen_kv: int = 0
+
+
 @dataclass(frozen=True)
 class FusedAttnHelper:
     """
@@ -183,6 +244,9 @@ class FusedAttnHelper:
         resolved config and the reason fused attention was rejected.
         """
         q_type = jax_dtype_to_te_dtype(self.q_dtype)
+        kv_type = jax_dtype_to_te_dtype(self.kv_dtype)
+        if q_type != kv_type:
+            raise ValueError("Q and KV must have the same data type.")
         bias_batch = bias_heads = bias_seqlen_q = bias_seqlen_kv = 0
         if self.attn_bias_type == AttnBiasType.POST_SCALE_BIAS:
             bias_batch = self.bias_batch or 0
@@ -190,39 +254,34 @@ class FusedAttnHelper:
             bias_seqlen_q = self.bias_seqlen_q or 0
             bias_seqlen_kv = self.bias_seqlen_kv or 0
         backend, message = transformer_engine_jax.get_fused_attn_backend(
-            self.is_training,
-            self.batch_size,
-            q_type,
-            jax_dtype_to_te_dtype(self.kv_dtype),
-            q_type,
-            q_type,
-            q_type,
-            JAXX_Scaling_Mode.NO_SCALING,
-            self.qkv_layout.value,
-            NVTE_QKV_Format.NVTE_QKV_Format_NOT_SET,
-            NVTE_QKV_Format.NVTE_QKV_Format_NOT_SET,
-            NVTE_QKV_Layout.NVTE_QKV_Layout_NOT_SET,
-            NVTE_QKV_Format.NVTE_QKV_Format_NOT_SET,
-            NVTE_QKV_Format.NVTE_QKV_Format_NOT_SET,
-            self.attn_bias_type.value,
-            self.attn_mask_type.value,
-            self.softmax_type.value,
-            self.attn_scale,
-            self.dropout_probability,
-            self.q_num_heads,
-            self.kv_num_heads,
-            self.q_max_seqlen,
-            self.kv_max_seqlen,
-            self.head_dim_qk,
-            self.head_dim_v,
-            self.window_size[0],
-            self.window_size[1],
-            self.bottom_right_diagonal,
-            not self.is_non_deterministic_allowed(),
-            bias_batch,
-            bias_heads,
-            bias_seqlen_q,
-            bias_seqlen_kv,
+            FusedAttnParams(
+                is_training=self.is_training,
+                deterministic=not self.is_non_deterministic_allowed(),
+                attn_mask_type=self.attn_mask_type.value,
+                bias_type=self.attn_bias_type.value,
+                window_size_left=self.window_size[0],
+                window_size_right=self.window_size[1],
+                bottom_right_diagonal=self.bottom_right_diagonal,
+                softmax_type=self.softmax_type.value,
+                dropout=self.dropout_probability,
+                attn_scale=self.attn_scale,
+                qkv_dtype=q_type,
+                o_dtype=q_type,
+                do_dtype=q_type,
+                dqkv_dtype=q_type,
+                qkv_layout=self.qkv_layout.value,
+                batch_size=self.batch_size,
+                num_attn_heads=self.q_num_heads,
+                num_gqa_groups=self.kv_num_heads,
+                head_dim_qk=self.head_dim_qk,
+                head_dim_v=self.head_dim_v,
+                max_seqlen_q=self.q_max_seqlen,
+                max_seqlen_kv=self.kv_max_seqlen,
+                bias_batch_size=bias_batch,
+                bias_num_heads=bias_heads,
+                bias_seqlen_q=bias_seqlen_q,
+                bias_seqlen_kv=bias_seqlen_kv,
+            )
         )
 
         AttentionLogging.setup_logging()

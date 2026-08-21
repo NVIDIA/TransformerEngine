@@ -44,18 +44,30 @@ using Fp8FwdGraphAndTensors =
                std::shared_ptr<fe::graph::Tensor_attributes>,   // dropout_seed
                std::shared_ptr<fe::graph::Tensor_attributes>>;  // dropout_offset
 
-// The three recipes these graphs are written for, spelled the same way at each of the four sites
-// that build or bind one:
+// The three recipes these graphs are written for, read from cfg at each of the four sites that
+// build or bind one:
 //
-//   is_mxfp8           = scaling_mode is MXFP8
-//   is_delayed_scaling = !is_mxfp8 &&  <this pass's output is FP8>
-//   is_current_scaling = !is_mxfp8 && !<this pass's output is FP8>
+//   is_mxfp8                         = scaling_mode is MXFP8
+//   is_tensor_scaling                = scaling_mode is DELAYED_TENSOR_SCALING
+//   is_delayed_scaling_fwd  / _bwd   = is_tensor_scaling && O / dQKV is FP8
+//   is_current_scaling_fwd  / _bwd   = is_tensor_scaling && O / dQKV is F16
+//   is_mxfp8_fwd            / _bwd   = is_mxfp8          && O / dQKV is F16
 //
-// which is exactly one of the three by construction, no combination of the booleans being able to
-// say two things at once. The output half comes from cfg.o_is_fp8 or cfg.dqkv_is_fp8 -- a forward
-// graph writes O, a backward one dQKV -- and reads "not FP8" as F16, which holds because
-// nvte_get_fused_attn_backend_v2 refuses an FP8 config whose output is neither. See there for the
-// rest of what these graphs cannot represent, and config_and_params.h for the two fields.
+// so at most one of the three holds for a pass, no combination of the booleans being able to say
+// two things at once, and is_tensor_scaling is the delayed/current pair together -- which is what
+// most of the sites below want, since a per-tensor scale is a per-tensor scale whichever recipe
+// put it there.
+//
+// Each flag pairs a recipe with an output dtype it can write, so an output none of them can write
+// leaves all three false rather than defaulting to one. That is the form the check takes in
+// nvte_get_fused_attn_backend_v2, which refuses such a config before any graph here is built --
+// which is in turn why the sites below can treat the three as a partition.
+//
+// The split is per pass because a forward graph writes O and a backward one dQKV, and it is drawn
+// on the output dtype because NVTEScalingMode has no current-scaling enumerator: both
+// tensor-scaling recipes arrive as DELAYED_TENSOR_SCALING, and what separates them is whether the
+// scale is known before the graph is built. See nvte_get_fused_attn_backend_v2 for the rest of
+// what these graphs cannot represent, and config_and_params.h for the fields.
 //
 // Unlike the F16 path there is no bucketing to do, because FP8 has no ragged/THD support: the
 // graph's shapes are exactly the config's.
@@ -96,8 +108,9 @@ static Fp8FwdGraphAndTensors create_graph_fp8_fwd(const FusedAttnConfig& cfg) {
   const bool is_dropout = cfg.is_dropout;
   const bool is_softmax_offset = cfg.is_softmax_offset;
   const bool is_mxfp8 = cfg.is_mxfp8;
-  const bool is_delayed_scaling = !is_mxfp8 && cfg.o_is_fp8;
-  const bool is_current_scaling = !is_mxfp8 && !cfg.o_is_fp8;
+  const bool is_tensor_scaling = cfg.is_tensor_scaling;
+  const bool is_delayed_scaling = cfg.is_delayed_scaling_fwd;
+  const bool is_current_scaling = cfg.is_current_scaling_fwd;
   const bool use_cu_seqlens_directly = cfg.fp8_uses_cu_seqlens_directly;
 
   auto mha_graph = std::make_shared<fe::graph::Graph>();
@@ -138,7 +151,7 @@ static Fp8FwdGraphAndTensors create_graph_fp8_fwd(const FusedAttnConfig& cfg) {
                                      .set_data_type(fe::DataType_t::FLOAT));
 
   // Descale_q, Descale_k, Descale_v, Descale_s, Scale_s, Scale_o
-  if (is_delayed_scaling || is_current_scaling) {
+  if (is_tensor_scaling) {
     descale_q = mha_graph->tensor(fe::graph::Tensor_attributes()
                                       .set_name("Descale_q")
                                       .set_dim({1, 1, 1, 1})
@@ -280,7 +293,7 @@ static Fp8FwdGraphAndTensors create_graph_fp8_fwd(const FusedAttnConfig& cfg) {
   }
 
   std::shared_ptr<fe::graph::Tensor_attributes> O, Stats, amax_s, amax_o;
-  if (is_delayed_scaling || is_current_scaling) {
+  if (is_tensor_scaling) {
     auto outputs = mha_graph->sdpa_fp8(Q, K, V, descale_q, descale_k, descale_v, descale_s, scale_s,
                                        scale_o, sdpa_options);
     O = outputs[0];
@@ -354,13 +367,12 @@ void fused_attn_fp8_fwd_impl(const FusedAttnConfig& cfg, void* devPtrQ, void* de
 
   // Asserted derived here because the reads below are the first derived fields this path touches,
   // ahead of the get_graph() that asserts it for the build.
-  check_derived(cfg);
+  cfg.check_derived();
 
   // Read from the same fields the graph was built from, so that the tensors bound below and the
   // ones the graph was built with cannot be decided differently.
-  const bool is_mxfp8 = cfg.is_mxfp8;
-  const bool is_delayed_scaling = !is_mxfp8 && cfg.o_is_fp8;
-  const bool is_current_scaling = !is_mxfp8 && !cfg.o_is_fp8;
+  const bool is_tensor_scaling = cfg.is_tensor_scaling;
+  const bool is_delayed_scaling = cfg.is_delayed_scaling_fwd;
   const bool use_cu_seqlens_directly = cfg.fp8_uses_cu_seqlens_directly;
 
   const int64_t b = static_cast<int64_t>(cfg.batch_size);
@@ -408,7 +420,7 @@ void fused_attn_fp8_fwd_impl(const FusedAttnConfig& cfg, void* devPtrQ, void* de
     if (is_delayed_scaling) {
       variant_pack[scale_o] = devPtrScaleO;
     }
-    if (is_delayed_scaling || is_current_scaling) {
+    if (is_tensor_scaling) {
       variant_pack[descale_s] = devPtrDescaleS;
       variant_pack[scale_s] = devPtrScaleS;
       variant_pack[amax_s] = devPtrAmaxS;
@@ -543,11 +555,12 @@ static Fp8BwdGraphAndTensors create_graph_fp8_bwd(const FusedAttnConfig& cfg) {
   const bool is_dropout = cfg.is_dropout;
   const bool is_softmax_offset = cfg.is_softmax_offset;
   const bool is_mxfp8 = cfg.is_mxfp8;
-  const bool is_delayed_scaling = !is_mxfp8 && cfg.dqkv_is_fp8;
-  const bool is_current_scaling = !is_mxfp8 && !cfg.dqkv_is_fp8;
+  const bool is_tensor_scaling = cfg.is_tensor_scaling;
+  const bool is_delayed_scaling = cfg.is_delayed_scaling_bwd;
+  const bool is_current_scaling = cfg.is_current_scaling_bwd;
   // Whether O arrived in F16 rather than FP8, which decides whether this graph has to descale it on
   // the way in. Read off O, unlike the recipe above, because O is what the forward pass stored.
-  const bool is_O_in_F16 = !cfg.o_is_fp8;
+  const bool is_O_in_F16 = !cfg.is_o_in_fp8;
 
   auto mha_graph = std::make_shared<fe::graph::Graph>();
 
@@ -611,7 +624,7 @@ static Fp8BwdGraphAndTensors create_graph_fp8_bwd(const FusedAttnConfig& cfg) {
                                      .set_data_type(fe::DataType_t::FLOAT));
 
   // Descale_q, Descale_k, Descale_v, Descale_s, Scale_s, Descale_dP, Scale_dP, Descale_o, Descale_dO, Scale_dQ, Scale_dK, Scale_dV
-  if (is_delayed_scaling || is_current_scaling) {
+  if (is_tensor_scaling) {
     descale_q = mha_graph->tensor(fe::graph::Tensor_attributes()
                                       .set_name("Descale_q")
                                       .set_dim({1, 1, 1, 1})
@@ -829,7 +842,7 @@ static Fp8BwdGraphAndTensors create_graph_fp8_bwd(const FusedAttnConfig& cfg) {
   }
 
   std::shared_ptr<fe::graph::Tensor_attributes> dQ, dK, dV, amax_dQ, amax_dK, amax_dV, amax_dP;
-  if (is_delayed_scaling || is_current_scaling) {
+  if (is_tensor_scaling) {
     std::tie(dQ, dK, dV, amax_dQ, amax_dK, amax_dV, amax_dP) =
         std::apply([](const auto&... elems) { return std::make_tuple(elems...); },
                    mha_graph->sdpa_fp8_backward(Q, K, V, O, dO, Stats, descale_q, descale_k,
@@ -870,7 +883,7 @@ static Fp8BwdGraphAndTensors create_graph_fp8_bwd(const FusedAttnConfig& cfg) {
       .set_dim({1, 1, 1, 1})
       .set_stride({1, 1, 1, 1})
       .set_data_type(fe::DataType_t::FLOAT);
-  if (is_delayed_scaling || is_current_scaling) {
+  if (is_tensor_scaling) {
     amax_dP->set_output(true)
         .set_dim({1, 1, 1, 1})
         .set_stride({1, 1, 1, 1})
@@ -938,14 +951,15 @@ void fused_attn_fp8_bwd_impl(
 
   // Asserted derived here because the reads below are the first derived fields this path touches,
   // ahead of the get_graph() that asserts it for the build.
-  check_derived(cfg);
+  cfg.check_derived();
 
   // Read from the same fields the graph was built from, so that the tensors bound below and the
   // ones the graph was built with cannot be decided differently.
   const bool is_mxfp8 = cfg.is_mxfp8;
-  const bool is_delayed_scaling = !is_mxfp8 && cfg.dqkv_is_fp8;
-  const bool is_current_scaling = !is_mxfp8 && !cfg.dqkv_is_fp8;
-  const bool is_O_in_F16 = !cfg.o_is_fp8;
+  const bool is_tensor_scaling = cfg.is_tensor_scaling;
+  const bool is_delayed_scaling = cfg.is_delayed_scaling_bwd;
+  const bool is_current_scaling = cfg.is_current_scaling_bwd;
+  const bool is_O_in_F16 = !cfg.is_o_in_fp8;
 
   const int64_t b = static_cast<int64_t>(cfg.batch_size);
   // Not const: bound into the variant pack by address as a pass-by-value graph input.
@@ -994,7 +1008,7 @@ void fused_attn_fp8_bwd_impl(
         {dK, devPtrdK},
         {dV, devPtrdV},
     };
-    if (is_delayed_scaling || is_current_scaling) {
+    if (is_tensor_scaling) {
       variant_pack[descale_s] = devPtrDescaleS;
       variant_pack[descale_dP] = devPtrDescaledP;
       variant_pack[scale_s] = devPtrScaleS;

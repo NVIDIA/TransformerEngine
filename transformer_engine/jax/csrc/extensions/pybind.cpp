@@ -134,7 +134,8 @@ pybind11::dict Registrations() {
 
 PYBIND11_MODULE(transformer_engine_jax, m) {
   m.def("registrations", &Registrations);
-  m.def("get_fused_attn_backend", &GetFusedAttnBackend);
+  m.def("get_fused_attn_backend", &GetFusedAttnBackend, "Get Fused Attention backend",
+        pybind11::arg("fused_attn_params"));
   m.def("get_cuda_version", &GetCudaRuntimeVersion);
   m.def("get_cudnn_version", &GetCudnnRuntimeVersion);
   m.def("get_cudnn_frontend_version", &GetCudnnFrontendVersion);

@@ -48,7 +48,6 @@ from utils import ModelConfig, dtype_tols, get_available_attention_backends, rec
 from transformer_engine.pytorch.attention.dot_product_attention.backends import (
     UnfusedDotProductAttention,
 )
-from transformer_engine.pytorch.cpp_extensions.fused_attn import FusedAttnBackend
 
 fp8_available, reason_for_no_fp8 = is_fp8_available(return_reason=True)
 mxfp8_available, reason_for_no_mxfp8 = is_mxfp8_available(return_reason=True)

@@ -36,13 +36,17 @@ namespace fused_attn {
 // Forward declarations
 size_t get_max_batch_size(size_t batch_size);
 size_t get_max_tokens(size_t num_tokens);
+DType get_ragged_offset_dtype(NVTE_QKV_Layout_Group layout_group, int64_t num_attn_heads,
+                              int64_t num_gqa_groups, int64_t max_seqlen_q, int64_t max_seqlen_kv,
+                              int64_t head_dim_qk, int64_t head_dim_v);
 
 void FusedAttnConfig::derive() {
   const int64_t b = static_cast<int64_t>(batch_size);
   const int64_t sq = static_cast<int64_t>(max_seqlen_q);
   const int64_t skv = static_cast<int64_t>(max_seqlen_kv);
 
-  // convenience fields
+  // Convenience fields
+  qkv_format = nvte_get_qkv_format(qkv_layout);
   q_format = nvte_get_q_format(qkv_layout);
   kv_format = nvte_get_kv_format(qkv_layout);
   const NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
@@ -63,20 +67,7 @@ void FusedAttnConfig::derive() {
   is_mxfp8 = (scaling_mode == NVTE_MXFP8_1D_SCALING);
   is_dropout = is_training && dropout != 0.0f;
 
-  // Both layouts describe variable-length sequences inside padded dimensions, so the mask is the
-  // only thing that tells cuDNN where the real tokens end; without it the graph attends to
-  // padding. Asserted here so that all four graph builders inherit the rule, and stated as a
-  // rejection rule in nvte_get_fused_attn_backend_v2 so that a support query answers rather than
-  // throws. Not conditioned on the cuDNN version: the requirement comes from what the dimensions
-  // mean, not from what any particular cuDNN can run.
-  if (is_paged_kv) {
-    NVTE_CHECK(is_padding, "Paged attention requires padding mask!");
-  }
-  if (is_ragged_q || is_ragged_kv) {
-    NVTE_CHECK(is_padding, "Ragged QKV input requires padding or padding_causal mask!");
-  }
-
-  // bucket the THD (ragged) batch and token counts
+  // Bucket the THD (ragged) batch and token counts
   const size_t tokens_q = num_tokens_q != 0 ? num_tokens_q : static_cast<size_t>(b * sq);
   const size_t tokens_kv = num_tokens_kv != 0 ? num_tokens_kv : static_cast<size_t>(b * skv);
   bucketed_batch_size =
@@ -84,66 +75,63 @@ void FusedAttnConfig::derive() {
   bucketed_num_tokens_q = is_ragged_q ? fused_attn::get_max_tokens(tokens_q) : 0;
   bucketed_num_tokens_kv = is_ragged_kv ? fused_attn::get_max_tokens(tokens_kv) : 0;
 
-  // Use of cu_seqlens vs actual_seqlens, once per backend. Newer cuDNN SDPA can take sequence
-  // lengths directly as a cumulative tensor, which saves one kernel call; the frontend gates that
-  // on min(compile-time, runtime) cuDNN, so both versions are tested. The FP8 path needs newer
-  // versions of both than the F16 path, which is the whole reason there are two answers here.
+  // Use cu_seqlens vs actual_seqlens
   const size_t cudnn_runtime_version = cudnnGetVersion();
   uses_cu_seqlens_directly = CUDNN_FRONTEND_VERSION >= 12500 &&
                              (CUDNN_VERSION >= 92400 && cudnn_runtime_version >= 92400) &&
                              !is_dropout;
-  // Frontend 1.26 supports fp8+cu_seqlens for the C++ API; the Python API needs 1.27. The dropout
-  // exclusion is not the F16 one restated: the frontend cannot combine dropout with stats
-  // generation in the fprop unified engine, so such a request would be routed to the old composite
-  // SDPA engine, which has no cu_seqlens support at all. Remove that term when it can be.
   fp8_uses_cu_seqlens_directly = CUDNN_FRONTEND_VERSION >= 12600 &&
                                  (CUDNN_VERSION >= 92500 && cudnn_runtime_version >= 92500) &&
                                  !is_dropout;
 
-  // What each pass stores, classified for the FP8 backend; see the fields for what reads them.
-  o_is_fp8 = (o_dtype == kNVTEFloat8E4M3 || o_dtype == kNVTEFloat8E5M2);
-  dqkv_is_fp8 = (dqkv_dtype == kNVTEFloat8E4M3 || dqkv_dtype == kNVTEFloat8E5M2);
+  is_o_in_fp8 = (o_dtype == kNVTEFloat8E4M3 || o_dtype == kNVTEFloat8E5M2);
+  is_dqkv_in_fp8 = (dqkv_dtype == kNVTEFloat8E4M3 || dqkv_dtype == kNVTEFloat8E5M2);
+  const bool is_o_in_f16 = (o_dtype == kNVTEFloat16 || o_dtype == kNVTEBFloat16);
+  const bool is_dqkv_in_f16 = (dqkv_dtype == kNVTEFloat16 || dqkv_dtype == kNVTEBFloat16);
 
-  // packed vs dense dimensions for a ragged (THD) graph; SM8x and SM120 require dense,
-  // BHSD-like dimensions for the Stats/LSE auxiliary tensors and so take the dense path
+  // Determine the FP8 recipe
+  is_tensor_scaling = (scaling_mode == NVTE_DELAYED_TENSOR_SCALING);
+  is_delayed_scaling_fwd = is_tensor_scaling && is_o_in_fp8;
+  is_current_scaling_fwd = is_tensor_scaling && is_o_in_f16;
+  is_delayed_scaling_bwd = is_tensor_scaling && is_dqkv_in_fp8;
+  is_current_scaling_bwd = is_tensor_scaling && is_dqkv_in_f16;
+  is_mxfp8_fwd = is_mxfp8 && is_o_in_f16;
+  is_mxfp8_bwd = is_mxfp8 && is_dqkv_in_f16;
+
+  // Whether packed graphs exist for THD
   const int sm_arch = cuda::sm_arch(cuda::current_device());
   uses_packed_ragged_graph = cudnn_runtime_version >= 90600 && sm_arch >= 90 && sm_arch != 120;
   uses_ragged_stats = is_ragged_q && uses_packed_ragged_graph;
 
-  // sequence lengths the graph is built at
+  // Sequence lengths the graph is built at
   graph_max_seqlen_q =
       (is_ragged_q && uses_packed_ragged_graph) ? bucketed_num_tokens_q : max_seqlen_q;
   graph_max_seqlen_kv =
       (is_ragged_kv && uses_packed_ragged_graph) ? bucketed_num_tokens_kv : max_seqlen_kv;
 
-  // Batch size and ragged-offset width the graph is built at, for each direction. One condition
-  // decides all four: whether cuDNN is handed the caller's cu_seqlens* buffers untouched, which
-  // only the forward graph ever is. When it is, those buffers are what the graph has to match --
-  // their [batch_size + 1] length, which a bucketed batch would read past the end of, and their
-  // int32 width. The backward graph always reads seqlens converted into our own workspace, so
-  // neither constraint reaches it and its two answers are the unconditional ones. Otherwise the
-  // batch is the bucketed one wherever a ragged layout is packed, so that one graph serves every
-  // batch in its bucket -- the same reason graph_max_seqlen_* stands in for the sequence lengths --
-  // and the offset width is whichever the runtime supports, which is what lets older cuDNN
-  // runtimes work rather than fail.
-  //
-  // Kept as four adjacent assignments off shared locals because the pairs have to agree: a forward
-  // graph built at a bucketed batch while expecting offsets at the other width is the failure this
-  // arrangement exists to make visible.
+  // Ragged-offset width that this config needs
+  needs_64bit_ragged_offset =
+      (is_ragged_q || is_ragged_kv) &&
+      fused_attn::get_ragged_offset_dtype(
+          layout_group, static_cast<int64_t>(num_attn_heads), static_cast<int64_t>(num_gqa_groups),
+          static_cast<int64_t>(max_seqlen_q), static_cast<int64_t>(max_seqlen_kv),
+          static_cast<int64_t>(head_dim_qk), static_cast<int64_t>(head_dim_v)) == DType::kInt64;
   const DType wide_ragged_offsets = cudnn_runtime_version >= 90500 ? DType::kInt64 : DType::kInt32;
-  const bool buckets_the_batch = (is_ragged_q || is_ragged_kv) && uses_packed_ragged_graph;
   ragged_offset_type_fwd = uses_cu_seqlens_directly ? DType::kInt32 : wide_ragged_offsets;
   ragged_offset_type_bwd = wide_ragged_offsets;
+
+  // Batch size the graph is built at
+  const bool buckets_the_batch = (is_ragged_q || is_ragged_kv) && uses_packed_ragged_graph;
   graph_batch_size_fwd =
       (buckets_the_batch && !uses_cu_seqlens_directly) ? bucketed_batch_size : batch_size;
   graph_batch_size_bwd = buckets_the_batch ? bucketed_batch_size : batch_size;
 
-  // elements per token for each ragged tensor
+  // Elements per token for each ragged tensor
   ragged_offset_mults = RaggedOffsetMultipliers(
       layout_group, static_cast<int64_t>(num_attn_heads), static_cast<int64_t>(num_gqa_groups),
       static_cast<int64_t>(head_dim_qk), static_cast<int64_t>(head_dim_v));
 
-  // paged KV dimensions
+  // Paged KV dimensions
   if (is_paged_kv) {
     if (num_pages_k == 0) {
       num_pages_k = static_cast<size_t>(b);
@@ -169,10 +157,7 @@ void FusedAttnConfig::derive() {
 }
 
 FusedAttnConfig FusedAttnConfig::make_cache_key(Pass pass) const {
-  // Requires a derived config: every normalization below reads a derived field -- is_padding and
-  // is_causal_bottom_right, the is_ragged_* pair, the graph_max_seqlen_* dimensions, and the
-  // uses_* flags. A precondition rather than an assert, since every caller reaches this through
-  // get_graph(), which asserts it once for both the key and the graph.
+  check_derived();
   FusedAttnConfig cache_cfg = *this;
 
   // Key the device ID for multi-GPU single-process runs
@@ -187,18 +172,11 @@ FusedAttnConfig FusedAttnConfig::make_cache_key(Pass pass) const {
     cache_cfg.bottom_right_diagonal = false;
   }
 
-  // Name the sequence lengths the graph is built at rather than the ones the caller asked about,
-  // so that every shape falling in the same bucket lands on the same entry. The two are equal
-  // unless a ragged layout is packed, which is why this is unconditional. Stated after the
-  // bottom_right_diagonal rule above, which is about the real geometry of the attention mask and
-  // would read bucketed token counts as sequence lengths if it ran after the substitution.
+  // Normalize sequence lengths the graph is built at
   cache_cfg.max_seqlen_q = cache_cfg.graph_max_seqlen_q;
   cache_cfg.max_seqlen_kv = cache_cfg.graph_max_seqlen_kv;
 
-  // Name the batch size the graph is built at, and drop the token counts the bucketing replaced.
-  // Reading the batch derive() recorded for this pass, rather than restating the rule that set it,
-  // is what keeps the key from naming a batch the graph was not built with -- the two directions
-  // bucket differently, and the graph builders read the same field for the same pass.
+  // Normalize batch size the graph is built at, and drop the token counts the bucketing replaced.
   if ((cache_cfg.is_ragged_q || cache_cfg.is_ragged_kv) && cache_cfg.uses_packed_ragged_graph) {
     cache_cfg.num_tokens_q = 0;
     cache_cfg.num_tokens_kv = 0;
@@ -210,16 +188,10 @@ FusedAttnConfig FusedAttnConfig::make_cache_key(Pass pass) const {
   cache_cfg.attn_scale = 1.0f;
 
   // cuda_graph never reaches a graph builder. Its one use is the cuDNN <= 9.15 rejection in
-  // nvte_get_fused_attn_backend_v2(), which is decided before the cache is consulted, so a
-  // configuration that gets this far builds the same graph either way. Left in the key it would
-  // give a workload that both captures and runs eagerly two entries for every configuration.
+  // nvte_get_fused_attn_backend_v2().
   cache_cfg.cuda_graph = false;
 
-  // Restrict this direction's key to the fields its graph actually consumes, so no redundant
-  // graphs are built and no cache misses either. Keyed on the pass rather than on the
-  // check_for_*_support flags, so that a caller asking about both directions -- which every
-  // backend query from a framework does -- still gets a key each pass can find its own graph
-  // under, instead of one narrowed for neither.
+  // Normalize the fields its graph actually consumes
   if (pass == Pass::Fwd) {
     cache_cfg.do_dtype = kNVTEBFloat16;
     cache_cfg.dqkv_dtype = kNVTEBFloat16;
@@ -231,22 +203,14 @@ FusedAttnConfig FusedAttnConfig::make_cache_key(Pass pass) const {
     cache_cfg.return_max_logit = false;
   }
 
-  // The two flags say which directions the caller wanted probed, which the graph this key names
-  // does not depend on. Normalized so that a key is the same whether it came from a probe or from
-  // execution, and so that a level-2 trace line cannot claim a direction the key is not for.
-  cache_cfg.check_for_forward_support = pass == Pass::Fwd;
-  cache_cfg.check_for_backward_support = pass == Pass::Bwd;
-
   return cache_cfg;
 }
 
-std::string FusedAttnConfig::key_debug_string() const {
-  // Enums and sizes are printed as int64_t rather than by name, since the point is diffing two
-  // lines rather than reading one, and a numeric field cannot drift from a names table.
+std::string FusedAttnConfig::to_string() const {
   char buf[1024];
   std::snprintf(
       buf, sizeof(buf),
-      "train=%d det=%d cg=%d maxlogit=%d fwd=%d mask=%" PRId64 " bias=%" PRId64 " wl=%" PRId64
+      "train=%d det=%d cg=%d maxlogit=%d mask=%" PRId64 " bias=%" PRId64 " wl=%" PRId64
       " wr=%" PRId64 " brd=%d softmax=%" PRId64 " scale_mode=%" PRId64
       " dropout=%g attn_scale=%g qkv_dt=%" PRId64 " o_dt=%" PRId64 " do_dt=%" PRId64
       " dqkv_dt=%" PRId64 " qkv_lay=%" PRId64 " o_fmt=%" PRId64 " do_fmt=%" PRId64
@@ -256,28 +220,27 @@ std::string FusedAttnConfig::key_debug_string() const {
       " npv=%" PRId64 " psk=%" PRId64 " psv=%" PRId64 " mppk=%" PRId64 " mppv=%" PRId64
       " bias_b=%" PRId64 " bias_h=%" PRId64 " bias_sq=%" PRId64 " bias_skv=%" PRId64,
       static_cast<int>(is_training), static_cast<int>(deterministic), static_cast<int>(cuda_graph),
-      static_cast<int>(return_max_logit), static_cast<int>(check_for_forward_support),
-      static_cast<int64_t>(attn_mask_type), static_cast<int64_t>(bias_type),
-      static_cast<int64_t>(window_size_left), static_cast<int64_t>(window_size_right),
-      static_cast<int>(bottom_right_diagonal), static_cast<int64_t>(softmax_type),
-      static_cast<int64_t>(scaling_mode), static_cast<double>(dropout),
-      static_cast<double>(attn_scale), static_cast<int64_t>(qkv_dtype),
-      static_cast<int64_t>(o_dtype), static_cast<int64_t>(do_dtype),
-      static_cast<int64_t>(dqkv_dtype), static_cast<int64_t>(qkv_layout),
-      static_cast<int64_t>(o_format), static_cast<int64_t>(do_format),
-      static_cast<int64_t>(dqkv_layout), static_cast<int64_t>(qkv_scale_inv_format),
-      static_cast<int64_t>(do_scale_inv_format), static_cast<int64_t>(batch_size),
-      static_cast<int64_t>(num_attn_heads), static_cast<int64_t>(num_gqa_groups),
-      static_cast<int64_t>(head_dim_qk), static_cast<int64_t>(head_dim_v),
-      static_cast<int64_t>(max_seqlen_q), static_cast<int64_t>(max_seqlen_kv),
-      static_cast<int64_t>(num_tokens_q), static_cast<int64_t>(num_tokens_kv),
-      static_cast<int64_t>(bucketed_batch_size), static_cast<int64_t>(bucketed_num_tokens_q),
-      static_cast<int64_t>(bucketed_num_tokens_kv), static_cast<int64_t>(num_pages_k),
-      static_cast<int64_t>(num_pages_v), static_cast<int64_t>(page_size_k),
-      static_cast<int64_t>(page_size_v), static_cast<int64_t>(max_pages_per_seq_k),
-      static_cast<int64_t>(max_pages_per_seq_v), static_cast<int64_t>(bias_batch_size),
-      static_cast<int64_t>(bias_num_heads), static_cast<int64_t>(bias_seqlen_q),
-      static_cast<int64_t>(bias_seqlen_kv));
+      static_cast<int>(return_max_logit), static_cast<int64_t>(attn_mask_type),
+      static_cast<int64_t>(bias_type), static_cast<int64_t>(window_size_left),
+      static_cast<int64_t>(window_size_right), static_cast<int>(bottom_right_diagonal),
+      static_cast<int64_t>(softmax_type), static_cast<int64_t>(scaling_mode),
+      static_cast<double>(dropout), static_cast<double>(attn_scale),
+      static_cast<int64_t>(qkv_dtype), static_cast<int64_t>(o_dtype),
+      static_cast<int64_t>(do_dtype), static_cast<int64_t>(dqkv_dtype),
+      static_cast<int64_t>(qkv_layout), static_cast<int64_t>(o_format),
+      static_cast<int64_t>(do_format), static_cast<int64_t>(dqkv_layout),
+      static_cast<int64_t>(qkv_scale_inv_format), static_cast<int64_t>(do_scale_inv_format),
+      static_cast<int64_t>(batch_size), static_cast<int64_t>(num_attn_heads),
+      static_cast<int64_t>(num_gqa_groups), static_cast<int64_t>(head_dim_qk),
+      static_cast<int64_t>(head_dim_v), static_cast<int64_t>(max_seqlen_q),
+      static_cast<int64_t>(max_seqlen_kv), static_cast<int64_t>(num_tokens_q),
+      static_cast<int64_t>(num_tokens_kv), static_cast<int64_t>(bucketed_batch_size),
+      static_cast<int64_t>(bucketed_num_tokens_q), static_cast<int64_t>(bucketed_num_tokens_kv),
+      static_cast<int64_t>(num_pages_k), static_cast<int64_t>(num_pages_v),
+      static_cast<int64_t>(page_size_k), static_cast<int64_t>(page_size_v),
+      static_cast<int64_t>(max_pages_per_seq_k), static_cast<int64_t>(max_pages_per_seq_v),
+      static_cast<int64_t>(bias_batch_size), static_cast<int64_t>(bias_num_heads),
+      static_cast<int64_t>(bias_seqlen_q), static_cast<int64_t>(bias_seqlen_kv));
   return std::string(buf);
 }
 
@@ -823,6 +786,15 @@ void nvte_get_fused_attn_fwd_params_attribute(NVTEFusedAttnFwdParams params,
     case kNVTEFusedAttnFwdParamsSoftmaxOffset:
       std::memcpy(buf, &p.SoftmaxOffset, attr_size);
       break;
+    case kNVTEFusedAttnFwdParamsS:
+      std::memcpy(buf, &p.S, attr_size);
+      break;
+    case kNVTEFusedAttnFwdParamsO:
+      std::memcpy(buf, &p.O, attr_size);
+      break;
+    case kNVTEFusedAttnFwdParamsAuxCtxTensors:
+      std::memcpy(buf, &p.Aux_CTX_Tensors, attr_size);
+      break;
     case kNVTEFusedAttnFwdParamsCuSeqlensQ:
       std::memcpy(buf, &p.cu_seqlens_q, attr_size);
       break;
@@ -844,29 +816,41 @@ void nvte_get_fused_attn_fwd_params_attribute(NVTEFusedAttnFwdParams params,
     case kNVTEFusedAttnFwdParamsRngState:
       std::memcpy(buf, &p.rng_state, attr_size);
       break;
-    case kNVTEFusedAttnFwdParamsS:
-      std::memcpy(buf, &p.S, attr_size);
+    case kNVTEFusedAttnFwdParamsMaxSeqlenQ:
+      std::memcpy(buf, &p.max_seqlen_q, attr_size);
       break;
-    case kNVTEFusedAttnFwdParamsO:
-      std::memcpy(buf, &p.O, attr_size);
-      break;
-    case kNVTEFusedAttnFwdParamsAuxCtxTensors:
-      std::memcpy(buf, &p.Aux_CTX_Tensors, attr_size);
+    case kNVTEFusedAttnFwdParamsMaxSeqlenKV:
+      std::memcpy(buf, &p.max_seqlen_kv, attr_size);
       break;
     case kNVTEFusedAttnFwdParamsIsTraining:
       bool_to_uint8(p.is_training, buf);
       break;
-    case kNVTEFusedAttnFwdParamsCudaGraph:
-      bool_to_uint8(p.cuda_graph, buf);
-      break;
     case kNVTEFusedAttnFwdParamsReturnMaxLogit:
       bool_to_uint8(p.return_max_logit, buf);
       break;
-    case kNVTEFusedAttnFwdParamsAttnMaskType:
-      std::memcpy(buf, &p.attn_mask_type, attr_size);
+    case kNVTEFusedAttnFwdParamsCudaGraph:
+      bool_to_uint8(p.cuda_graph, buf);
+      break;
+    case kNVTEFusedAttnFwdParamsAttnScale:
+      std::memcpy(buf, &p.attn_scale, attr_size);
+      break;
+    case kNVTEFusedAttnFwdParamsDropout:
+      std::memcpy(buf, &p.dropout, attr_size);
+      break;
+    case kNVTEFusedAttnFwdParamsQKVLayout:
+      std::memcpy(buf, &p.qkv_layout, attr_size);
+      break;
+    case kNVTEFusedAttnFwdParamsOFormat:
+      std::memcpy(buf, &p.o_format, attr_size);
+      break;
+    case kNVTEFusedAttnFwdParamsQKVScaleInvFormat:
+      std::memcpy(buf, &p.qkv_scale_inv_format, attr_size);
       break;
     case kNVTEFusedAttnFwdParamsBiasType:
       std::memcpy(buf, &p.bias_type, attr_size);
+      break;
+    case kNVTEFusedAttnFwdParamsAttnMaskType:
+      std::memcpy(buf, &p.attn_mask_type, attr_size);
       break;
     case kNVTEFusedAttnFwdParamsSoftmaxType:
       std::memcpy(buf, &p.softmax_type, attr_size);
@@ -879,27 +863,6 @@ void nvte_get_fused_attn_fwd_params_attribute(NVTEFusedAttnFwdParams params,
       break;
     case kNVTEFusedAttnFwdParamsBottomRightDiagonal:
       bool_to_uint8(p.bottom_right_diagonal, buf);
-      break;
-    case kNVTEFusedAttnFwdParamsDropout:
-      std::memcpy(buf, &p.dropout, attr_size);
-      break;
-    case kNVTEFusedAttnFwdParamsAttnScale:
-      std::memcpy(buf, &p.attn_scale, attr_size);
-      break;
-    case kNVTEFusedAttnFwdParamsQKVLayout:
-      std::memcpy(buf, &p.qkv_layout, attr_size);
-      break;
-    case kNVTEFusedAttnFwdParamsOFormat:
-      std::memcpy(buf, &p.o_format, attr_size);
-      break;
-    case kNVTEFusedAttnFwdParamsQKVScaleInvFormat:
-      std::memcpy(buf, &p.qkv_scale_inv_format, attr_size);
-      break;
-    case kNVTEFusedAttnFwdParamsMaxSeqlenQ:
-      std::memcpy(buf, &p.max_seqlen_q, attr_size);
-      break;
-    case kNVTEFusedAttnFwdParamsMaxSeqlenKV:
-      std::memcpy(buf, &p.max_seqlen_kv, attr_size);
       break;
     case kNVTEFusedAttnFwdParamsWorkspace:
       std::memcpy(buf, &p.workspace, attr_size);
@@ -940,6 +903,15 @@ void nvte_set_fused_attn_fwd_params_attribute(NVTEFusedAttnFwdParams params,
     case kNVTEFusedAttnFwdParamsSoftmaxOffset:
       std::memcpy(&p.SoftmaxOffset, buf, attr_size);
       break;
+    case kNVTEFusedAttnFwdParamsS:
+      std::memcpy(&p.S, buf, attr_size);
+      break;
+    case kNVTEFusedAttnFwdParamsO:
+      std::memcpy(&p.O, buf, attr_size);
+      break;
+    case kNVTEFusedAttnFwdParamsAuxCtxTensors:
+      std::memcpy(&p.Aux_CTX_Tensors, buf, attr_size);
+      break;
     case kNVTEFusedAttnFwdParamsCuSeqlensQ:
       std::memcpy(&p.cu_seqlens_q, buf, attr_size);
       break;
@@ -961,29 +933,41 @@ void nvte_set_fused_attn_fwd_params_attribute(NVTEFusedAttnFwdParams params,
     case kNVTEFusedAttnFwdParamsRngState:
       std::memcpy(&p.rng_state, buf, attr_size);
       break;
-    case kNVTEFusedAttnFwdParamsS:
-      std::memcpy(&p.S, buf, attr_size);
+    case kNVTEFusedAttnFwdParamsMaxSeqlenQ:
+      std::memcpy(&p.max_seqlen_q, buf, attr_size);
       break;
-    case kNVTEFusedAttnFwdParamsO:
-      std::memcpy(&p.O, buf, attr_size);
-      break;
-    case kNVTEFusedAttnFwdParamsAuxCtxTensors:
-      std::memcpy(&p.Aux_CTX_Tensors, buf, attr_size);
+    case kNVTEFusedAttnFwdParamsMaxSeqlenKV:
+      std::memcpy(&p.max_seqlen_kv, buf, attr_size);
       break;
     case kNVTEFusedAttnFwdParamsIsTraining:
       uint8_to_bool(buf, p.is_training);
       break;
-    case kNVTEFusedAttnFwdParamsCudaGraph:
-      uint8_to_bool(buf, p.cuda_graph);
-      break;
     case kNVTEFusedAttnFwdParamsReturnMaxLogit:
       uint8_to_bool(buf, p.return_max_logit);
       break;
-    case kNVTEFusedAttnFwdParamsAttnMaskType:
-      std::memcpy(&p.attn_mask_type, buf, attr_size);
+    case kNVTEFusedAttnFwdParamsCudaGraph:
+      uint8_to_bool(buf, p.cuda_graph);
+      break;
+    case kNVTEFusedAttnFwdParamsAttnScale:
+      std::memcpy(&p.attn_scale, buf, attr_size);
+      break;
+    case kNVTEFusedAttnFwdParamsDropout:
+      std::memcpy(&p.dropout, buf, attr_size);
+      break;
+    case kNVTEFusedAttnFwdParamsQKVLayout:
+      std::memcpy(&p.qkv_layout, buf, attr_size);
+      break;
+    case kNVTEFusedAttnFwdParamsOFormat:
+      std::memcpy(&p.o_format, buf, attr_size);
+      break;
+    case kNVTEFusedAttnFwdParamsQKVScaleInvFormat:
+      std::memcpy(&p.qkv_scale_inv_format, buf, attr_size);
       break;
     case kNVTEFusedAttnFwdParamsBiasType:
       std::memcpy(&p.bias_type, buf, attr_size);
+      break;
+    case kNVTEFusedAttnFwdParamsAttnMaskType:
+      std::memcpy(&p.attn_mask_type, buf, attr_size);
       break;
     case kNVTEFusedAttnFwdParamsSoftmaxType:
       std::memcpy(&p.softmax_type, buf, attr_size);
@@ -996,27 +980,6 @@ void nvte_set_fused_attn_fwd_params_attribute(NVTEFusedAttnFwdParams params,
       break;
     case kNVTEFusedAttnFwdParamsBottomRightDiagonal:
       uint8_to_bool(buf, p.bottom_right_diagonal);
-      break;
-    case kNVTEFusedAttnFwdParamsDropout:
-      std::memcpy(&p.dropout, buf, attr_size);
-      break;
-    case kNVTEFusedAttnFwdParamsAttnScale:
-      std::memcpy(&p.attn_scale, buf, attr_size);
-      break;
-    case kNVTEFusedAttnFwdParamsQKVLayout:
-      std::memcpy(&p.qkv_layout, buf, attr_size);
-      break;
-    case kNVTEFusedAttnFwdParamsOFormat:
-      std::memcpy(&p.o_format, buf, attr_size);
-      break;
-    case kNVTEFusedAttnFwdParamsQKVScaleInvFormat:
-      std::memcpy(&p.qkv_scale_inv_format, buf, attr_size);
-      break;
-    case kNVTEFusedAttnFwdParamsMaxSeqlenQ:
-      std::memcpy(&p.max_seqlen_q, buf, attr_size);
-      break;
-    case kNVTEFusedAttnFwdParamsMaxSeqlenKV:
-      std::memcpy(&p.max_seqlen_kv, buf, attr_size);
       break;
     case kNVTEFusedAttnFwdParamsWorkspace:
       std::memcpy(&p.workspace, buf, attr_size);
@@ -1106,35 +1069,17 @@ void nvte_get_fused_attn_bwd_params_attribute(NVTEFusedAttnBwdParams params,
     case kNVTEFusedAttnBwdParamsCuSeqlensKVPadded:
       std::memcpy(buf, &p.cu_seqlens_kv_padded, attr_size);
       break;
-    case kNVTEFusedAttnBwdParamsCudaGraph:
-      bool_to_uint8(p.cuda_graph, buf);
+    case kNVTEFusedAttnBwdParamsMaxSeqlenQ:
+      std::memcpy(buf, &p.max_seqlen_q, attr_size);
       break;
-    case kNVTEFusedAttnBwdParamsDeterministic:
-      bool_to_uint8(p.deterministic, buf);
-      break;
-    case kNVTEFusedAttnBwdParamsAttnMaskType:
-      std::memcpy(buf, &p.attn_mask_type, attr_size);
-      break;
-    case kNVTEFusedAttnBwdParamsBiasType:
-      std::memcpy(buf, &p.bias_type, attr_size);
-      break;
-    case kNVTEFusedAttnBwdParamsSoftmaxType:
-      std::memcpy(buf, &p.softmax_type, attr_size);
-      break;
-    case kNVTEFusedAttnBwdParamsWindowSizeLeft:
-      std::memcpy(buf, &p.window_size_left, attr_size);
-      break;
-    case kNVTEFusedAttnBwdParamsWindowSizeRight:
-      std::memcpy(buf, &p.window_size_right, attr_size);
-      break;
-    case kNVTEFusedAttnBwdParamsBottomRightDiagonal:
-      bool_to_uint8(p.bottom_right_diagonal, buf);
-      break;
-    case kNVTEFusedAttnBwdParamsDropout:
-      std::memcpy(buf, &p.dropout, attr_size);
+    case kNVTEFusedAttnBwdParamsMaxSeqlenKV:
+      std::memcpy(buf, &p.max_seqlen_kv, attr_size);
       break;
     case kNVTEFusedAttnBwdParamsAttnScale:
       std::memcpy(buf, &p.attn_scale, attr_size);
+      break;
+    case kNVTEFusedAttnBwdParamsDropout:
+      std::memcpy(buf, &p.dropout, attr_size);
       break;
     case kNVTEFusedAttnBwdParamsQKVLayout:
       std::memcpy(buf, &p.qkv_layout, attr_size);
@@ -1154,11 +1099,29 @@ void nvte_get_fused_attn_bwd_params_attribute(NVTEFusedAttnBwdParams params,
     case kNVTEFusedAttnBwdParamsDOScaleInvFormat:
       std::memcpy(buf, &p.do_scale_inv_format, attr_size);
       break;
-    case kNVTEFusedAttnBwdParamsMaxSeqlenQ:
-      std::memcpy(buf, &p.max_seqlen_q, attr_size);
+    case kNVTEFusedAttnBwdParamsBiasType:
+      std::memcpy(buf, &p.bias_type, attr_size);
       break;
-    case kNVTEFusedAttnBwdParamsMaxSeqlenKV:
-      std::memcpy(buf, &p.max_seqlen_kv, attr_size);
+    case kNVTEFusedAttnBwdParamsAttnMaskType:
+      std::memcpy(buf, &p.attn_mask_type, attr_size);
+      break;
+    case kNVTEFusedAttnBwdParamsSoftmaxType:
+      std::memcpy(buf, &p.softmax_type, attr_size);
+      break;
+    case kNVTEFusedAttnBwdParamsWindowSizeLeft:
+      std::memcpy(buf, &p.window_size_left, attr_size);
+      break;
+    case kNVTEFusedAttnBwdParamsWindowSizeRight:
+      std::memcpy(buf, &p.window_size_right, attr_size);
+      break;
+    case kNVTEFusedAttnBwdParamsBottomRightDiagonal:
+      bool_to_uint8(p.bottom_right_diagonal, buf);
+      break;
+    case kNVTEFusedAttnBwdParamsDeterministic:
+      bool_to_uint8(p.deterministic, buf);
+      break;
+    case kNVTEFusedAttnBwdParamsCudaGraph:
+      bool_to_uint8(p.cuda_graph, buf);
       break;
     case kNVTEFusedAttnBwdParamsWorkspace:
       std::memcpy(buf, &p.workspace, attr_size);
@@ -1235,35 +1198,17 @@ void nvte_set_fused_attn_bwd_params_attribute(NVTEFusedAttnBwdParams params,
     case kNVTEFusedAttnBwdParamsCuSeqlensKVPadded:
       std::memcpy(&p.cu_seqlens_kv_padded, buf, attr_size);
       break;
-    case kNVTEFusedAttnBwdParamsCudaGraph:
-      uint8_to_bool(buf, p.cuda_graph);
+    case kNVTEFusedAttnBwdParamsMaxSeqlenQ:
+      std::memcpy(&p.max_seqlen_q, buf, attr_size);
       break;
-    case kNVTEFusedAttnBwdParamsDeterministic:
-      uint8_to_bool(buf, p.deterministic);
-      break;
-    case kNVTEFusedAttnBwdParamsAttnMaskType:
-      std::memcpy(&p.attn_mask_type, buf, attr_size);
-      break;
-    case kNVTEFusedAttnBwdParamsBiasType:
-      std::memcpy(&p.bias_type, buf, attr_size);
-      break;
-    case kNVTEFusedAttnBwdParamsSoftmaxType:
-      std::memcpy(&p.softmax_type, buf, attr_size);
-      break;
-    case kNVTEFusedAttnBwdParamsWindowSizeLeft:
-      std::memcpy(&p.window_size_left, buf, attr_size);
-      break;
-    case kNVTEFusedAttnBwdParamsWindowSizeRight:
-      std::memcpy(&p.window_size_right, buf, attr_size);
-      break;
-    case kNVTEFusedAttnBwdParamsBottomRightDiagonal:
-      uint8_to_bool(buf, p.bottom_right_diagonal);
-      break;
-    case kNVTEFusedAttnBwdParamsDropout:
-      std::memcpy(&p.dropout, buf, attr_size);
+    case kNVTEFusedAttnBwdParamsMaxSeqlenKV:
+      std::memcpy(&p.max_seqlen_kv, buf, attr_size);
       break;
     case kNVTEFusedAttnBwdParamsAttnScale:
       std::memcpy(&p.attn_scale, buf, attr_size);
+      break;
+    case kNVTEFusedAttnBwdParamsDropout:
+      std::memcpy(&p.dropout, buf, attr_size);
       break;
     case kNVTEFusedAttnBwdParamsQKVLayout:
       std::memcpy(&p.qkv_layout, buf, attr_size);
@@ -1283,11 +1228,29 @@ void nvte_set_fused_attn_bwd_params_attribute(NVTEFusedAttnBwdParams params,
     case kNVTEFusedAttnBwdParamsDOScaleInvFormat:
       std::memcpy(&p.do_scale_inv_format, buf, attr_size);
       break;
-    case kNVTEFusedAttnBwdParamsMaxSeqlenQ:
-      std::memcpy(&p.max_seqlen_q, buf, attr_size);
+    case kNVTEFusedAttnBwdParamsBiasType:
+      std::memcpy(&p.bias_type, buf, attr_size);
       break;
-    case kNVTEFusedAttnBwdParamsMaxSeqlenKV:
-      std::memcpy(&p.max_seqlen_kv, buf, attr_size);
+    case kNVTEFusedAttnBwdParamsAttnMaskType:
+      std::memcpy(&p.attn_mask_type, buf, attr_size);
+      break;
+    case kNVTEFusedAttnBwdParamsSoftmaxType:
+      std::memcpy(&p.softmax_type, buf, attr_size);
+      break;
+    case kNVTEFusedAttnBwdParamsWindowSizeLeft:
+      std::memcpy(&p.window_size_left, buf, attr_size);
+      break;
+    case kNVTEFusedAttnBwdParamsWindowSizeRight:
+      std::memcpy(&p.window_size_right, buf, attr_size);
+      break;
+    case kNVTEFusedAttnBwdParamsBottomRightDiagonal:
+      uint8_to_bool(buf, p.bottom_right_diagonal);
+      break;
+    case kNVTEFusedAttnBwdParamsDeterministic:
+      uint8_to_bool(buf, p.deterministic);
+      break;
+    case kNVTEFusedAttnBwdParamsCudaGraph:
+      uint8_to_bool(buf, p.cuda_graph);
       break;
     case kNVTEFusedAttnBwdParamsWorkspace:
       std::memcpy(&p.workspace, buf, attr_size);

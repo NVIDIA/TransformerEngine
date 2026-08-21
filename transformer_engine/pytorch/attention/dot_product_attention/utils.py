@@ -1665,7 +1665,7 @@ def get_attention_backend(
             # symbolic (assume_constant_result requires concrete values); ints/floats made
             # dynamic by automatic dynamic currently graph break here.
             fused_attention_backend, reject_message = _get_fused_attn_backend(**fused_attn_kwargs)
-            if fused_attention_backend == FusedAttnBackend.No_Backend.value:
+            if fused_attention_backend == FusedAttnBackend.No_Backend:
                 logger.debug(
                     "Disabling FusedAttention: %s%s",
                     reject_message,
@@ -1682,7 +1682,7 @@ def get_attention_backend(
         if (
             use_fused_attention
             and has_score_mod
-            and fused_attention_backend != FusedAttnBackend.F16_arbitrary_seqlen.value
+            and fused_attention_backend != FusedAttnBackend.F16_arbitrary_seqlen
         ):
             logger.debug(
                 "Disabling FusedAttention for score_mod because sub-backend %s is not "
@@ -1733,7 +1733,7 @@ def get_attention_backend(
             use_fused_attention = False
             fused_attention_backend = None
         if (
-            fused_attention_backend == FusedAttnBackend.FP8.value
+            fused_attention_backend == FusedAttnBackend.FP8
             and is_training
             and (device_compute_capability < (9, 0) or cudnn_version < (9, 19, 0))
         ):
@@ -1744,7 +1744,7 @@ def get_attention_backend(
             use_fused_attention = False
             fused_attention_backend = None
         if (
-            fused_attention_backend == FusedAttnBackend.F16_arbitrary_seqlen.value
+            fused_attention_backend == FusedAttnBackend.F16_arbitrary_seqlen
             and is_training
             and (
                 device_compute_capability < (9, 0)

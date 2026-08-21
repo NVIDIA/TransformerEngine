@@ -21,22 +21,7 @@
 namespace transformer_engine {
 namespace fused_attn {
 
-// The pair that names one build site: whose graphs, and which of the two a config is being turned
-// into. A site keeps its own graph cache and its own counters, so both halves travel together.
-//
-// Declared here, with the config, rather than with the cache or its diagnostics: they are the
-// vocabulary those two share, and the config is where their consumers start -- make_cache_key()
-// below turns a config into one site's key, and derive() fills the dimensions built from it.
-//
-// Backend::F16 is the arbitrary-seqlen backend; the max512 one keeps no graph cache, so it has no
-// site here. Narrower than the public NVTE_Fused_Attn_Backend, and not a substitute for it: this
-// names only the backends that build graphs.
 enum class Backend { F16, FP8 };
-
-// Passed in rather than derived, because a config cannot say which graph is being built from it.
-// check_for_forward_support and check_for_backward_support state which directions a caller wants
-// probed, and a backend query arriving from a framework has both set, so they answer a different
-// question -- see the comment on them below.
 enum class Pass { Fwd, Bwd };
 
 struct FusedAttnConfig {
@@ -94,77 +79,60 @@ struct FusedAttnConfig {
   size_t bias_seqlen_q = 0;
   size_t bias_seqlen_kv = 0;
 
-  // device ID: not part of attribute serialization, but part of operator< and used to
-  // differentiate graphs built for different devices in multi-GPU single-process runs
+  // Internal fields: keyed
+  //
+  // device ID is not part of attribute serialization, i.e. internal, but it participates in
+  // operator< and is used to differentiate graphs built for different devices in multi-GPU
+  // single-process runs
   int device_id = -1;
 
-  // Internal-only fields: never part of attribute serialization, operator<, or the graph cache key.
-  // Filled by derive() or set by caller (i.e. check_for_forward_support). Added for convinence
-  // purposes and do not represent any graph properties.
+  // Internal fields: not keyed. The following fields are not part of attribute serialization,
+  // operator<, or the cache key; they are filled by derive() or set by caller such as with
+  // check_for_forward_support, and are used for convinence purposes
   //
-  // The two below say which directions nvte_get_fused_attn_backend_v2 should probe, and nothing
-  // else: not which graph is being built, which is what Pass names. They default to true and the
-  // attribute API cannot reach them, so a backend query from a framework asks about both
-  // directions, while the execution entry points set the one they are about to run.
+  // run query_support() for forward or backward
   bool check_for_forward_support = true;
   bool check_for_backward_support = true;
-  // Whether derive() has run, i.e. whether the fields below hold anything. Every consumer of a
-  // derived field needs them filled -- an unfilled config yields a graph with the wrong shapes
-  // and a cache key that collides with unrelated configs, neither of which announces itself --
-  // so this exists to let those consumers assert rather than trust. Not a cached-result marker:
-  // derive() recomputes unconditionally, so a config whose inputs change can simply be re-derived.
+  // whether derive() has been run
   bool is_derived = false;
-  // THD batch/token counts, the raw buckets. The graph dimensions built out of them are
-  // graph_max_seqlen_* below and, because the batch is direction-dependent, graph_batch_size_*.
+  // bucketed batch size/token counts for THD
   size_t bucketed_batch_size = 0;
   size_t bucketed_num_tokens_q = 0;
   size_t bucketed_num_tokens_kv = 0;
-  // Uses cu_seqlens or actual_seqlens. One answer per backend, because the same question has two:
-  // the FP8 graphs need newer cuDNN and frontend versions for it than the F16 ones, so a config
-  // that can hand cu_seqlens straight to one cannot necessarily hand them to the other. Each
-  // backend reads its own and no more; nothing reads both.
+  // whether to use cu_seqlens or actual_seqlens for THD or padding masks
   bool uses_cu_seqlens_directly = false;
   bool fp8_uses_cu_seqlens_directly = false;
-  // Whether a ragged (THD) graph is built at packed token-count dimensions with ragged Stats/LSE,
-  // rather than at dense max_seqlen ones. Held here rather than asked for at each of the places
-  // that need it -- graph_max_seqlen_* and graph_batch_size_* below -- because the key and the
-  // graph have to be built at the same dimensions, and two independent queries are two chances to
-  // disagree. Unlike the flags above, this one depends on the device as
-  // well as the cuDNN version, so a config carries the answer for the device it was derived on;
-  // every entry point derives immediately before use, and the cache key records device_id.
+  // Whether packed graphs exist for THD. A memory optimization, not a correctness gate: where this
+  // is false, ragged input still builds a correct graph, just the dense one, whose dimensions are
+  // max_seqlen rather than the token total and whose Stats is BHS1 rather than TH1. Nothing may
+  // gate support on it -- which architectures run ragged attention at all is cuDNN's answer.
   bool uses_packed_ragged_graph = false;
-  // Whether the graph's Stats/LSE tensor is the packed, token-indexed one. Ragged Q is necessary
-  // but not sufficient, since the packed representation also needs an architecture that supports
-  // it. Derived because three unrelated places read it -- the graph build, the pointer binding at
-  // execution, and the Stats/Max shapes reported back to the framework -- and they are describing
-  // one buffer, so they cannot be allowed to disagree about its shape.
   bool uses_ragged_stats = false;
-  // The sequence lengths the graph is built at: max_seqlen_* for a dense graph, and the bucketed
-  // token counts where a ragged layout is packed. Held here because the cache key has to name the
-  // dimensions the graph was built with -- a key that says otherwise is a hit on a graph of the
-  // wrong shape -- and stating the substitution once is what keeps make_cache_key() and the graph
-  // builders from drifting. Both passes build at the same sequence lengths; the batch size is the
-  // one dimension they disagree on, which is why that one is a pair below rather than a single
-  // field here.
+  // sequence lengths the graph is built at
   size_t graph_max_seqlen_q = 0;
   size_t graph_max_seqlen_kv = 0;
-  // The batch size the graph is built at and the width it expects ragged (THD) offsets in, one of
-  // each per direction. Pairs rather than one value apiece because the passes disagree on both,
-  // and a config is derived once and then probed and built for either direction, so no single
-  // field could answer: the selector derives a config and asks about forward and backward off that
-  // one copy. Whoever reads them names the direction they are building or keying for -- the graph
-  // builders, the code that binds runtime pointers to the built graph, and make_cache_key(), all
-  // of which have to agree, since a disagreement is a graph whose bound pointers do not describe
-  // the dimensions it was built at. All four are set together by the one condition in derive().
+  // batch size the graph is built at
   size_t graph_batch_size_fwd = 0;
   size_t graph_batch_size_bwd = 0;
+  // ragged offset type for THD
   DType ragged_offset_type_fwd = DType::kInt32;
   DType ragged_offset_type_bwd = DType::kInt32;
-  // Elements per token for each ragged tensor, from the layout group and the head dimensions.
-  // Shared with the cu_seqlens_padded_to_offsets kernel, so the offsets the graph is told to
-  // expect and the offsets that are written cannot drift apart.
+  // Whether this config's ragged offsets overflow 32 bits. The counterpart to the two fields above
+  // rather than a third of them: those are the width TE will use, already capped by the running
+  // cuDNN, while this is the width the config needs. nvte_get_fused_attn_backend_v2 compares the
+  // two and refuses the config whose need outruns the cuDNN it is running on.
+  bool needs_64bit_ragged_offset = false;
+  // elements per token for each ragged tensor
   RaggedOffsetMultipliers ragged_offset_mults;
-  // Convinence fields to avoid recompute.
+  // convenience fields
+  //
+  // qkv_format is the combined format: it says what Q and KV each are and whether they agree, with
+  // the mixed layouts keeping their own enumerators (NVTE_THD_2BSHD and friends) rather than
+  // collapsing onto either side. Ask it only where a rule means "Q and KV are the same dense
+  // layout". Anything about raggedness belongs to is_ragged_q/is_ragged_kv instead, because
+  // NVTE_THD names only the fully ragged layouts, so a test against it passes THD_BSHD_BSHD
+  // straight through -- a rule here did exactly that until it was found.
+  NVTE_QKV_Format qkv_format = NVTE_QKV_Format_NOT_SET;
   NVTE_QKV_Format q_format = NVTE_QKV_Format_NOT_SET;
   NVTE_QKV_Format kv_format = NVTE_QKV_Format_NOT_SET;
   bool is_ragged_q = false;
@@ -177,24 +145,29 @@ struct FusedAttnConfig {
   bool is_alibi = false;
   bool is_softmax_offset = false;
   bool is_mxfp8 = false;
-  // Whether the graph has a dropout node. The is_training term is what makes this one worth having
-  // as a field: a backward graph is only ever built for training, so the two directions used to
-  // spell this differently -- forward with the term, backward without -- and agreed only because
-  // every config that reaches a backward build has is_training set. One field states the rule the
-  // forward way, which is the safe way round: if that ever stops holding, a backward graph loses
-  // its dropout node rather than gaining one the cache key does not name.
   bool is_dropout = false;
-  // Whether what each pass stores is itself quantized: O for a forward graph, dQKV for a backward
-  // one. Only the FP8 backend asks, and for it this is the whole of what separates the two
-  // tensor-scaling recipes -- FP8 out means the scale is known before the graph is built, F16 out
-  // means the graph has to compute it. Derived rather than asked at each build site so that the
-  // pairing of a pass with the tensor it writes is stated once.
+  bool is_o_in_fp8 = false;
+  bool is_dqkv_in_fp8 = false;
+  // Whether the FP8 recipe is tensor scaling, i.e. delayed or current rather than MXFP8. The
+  // graphs need this on its own, wherever a tensor is per-tensor scaled and it does not matter
+  // which of the two put the scale there.
+  bool is_tensor_scaling = false;
+  // Which recipe serves each pass, one flag per recipe per pass. Each means "this recipe is in
+  // effect and can write this pass's output dtype", so at most one of a pass's three holds, and all
+  // three false is a configuration no FP8 graph is written for -- which is what lets
+  // nvte_get_fused_attn_backend_v2 refuse it by asking three booleans and nothing else.
   //
-  // The FP8 builders read "not FP8" as "F16", which holds only because
-  // nvte_get_fused_attn_backend_v2 refuses an FP8 config whose output is neither before any graph
-  // is built; that refusal and these two fields are the same rule read from its two ends.
-  bool o_is_fp8 = false;
-  bool dqkv_is_fp8 = false;
+  // Delayed against current is told apart by that output dtype rather than by scaling_mode, because
+  // NVTEScalingMode has no current-scaling enumerator: both arrive as NVTE_DELAYED_TENSOR_SCALING,
+  // and what separates them is that delayed knows the output scale before the graph is built while
+  // current has the graph compute it. So delayed writes FP8 and current writes F16/BF16, and an
+  // output dtype neither can write (FP32, say) leaves both false rather than defaulting to one.
+  bool is_delayed_scaling_fwd = false;
+  bool is_current_scaling_fwd = false;
+  bool is_mxfp8_fwd = false;
+  bool is_delayed_scaling_bwd = false;
+  bool is_current_scaling_bwd = false;
+  bool is_mxfp8_bwd = false;
 
   static constexpr size_t attr_sizes[] = {
       // basic attention settings
@@ -247,11 +220,6 @@ struct FusedAttnConfig {
       sizeof(size_t),  // bias_seqlen_kv
   };
 
-  // The public header asks contributors to append to NVTEFusedAttnConfigAttribute, and the
-  // accessors index attr_sizes[attr] after checking only that attr is below the sentinel. An
-  // enumerator added without its size here would therefore read one past the end of this array,
-  // silently and only for the new attribute. Tying the two together turns that into a build
-  // failure at the line that has to change.
   static_assert(sizeof(attr_sizes) / sizeof(attr_sizes[0]) == kNVTEFusedAttnConfigNumAttributes,
                 "attr_sizes must have one entry per NVTEFusedAttnConfigAttribute; add the size of "
                 "the new attribute alongside its enumerator.");
@@ -279,66 +247,32 @@ struct FusedAttnConfig {
                     rhs.bias_num_heads, rhs.bias_seqlen_q, rhs.bias_seqlen_kv, rhs.device_id);
   }
 
-  // Derive fields such as bucketed batch_size or num_tokens for THD, based on input fields
-  // that have been set by the caller. Call once, after the last input field is set and before
-  // the config reaches a graph build, a cache lookup, or a support query -- all of which read
-  // derived fields.
+  // Derive relevant fields based on input fields that have been set by the caller. They are
+  // read by the graph build, cache lookup, and support query.
   //
-  // Called by whoever owns the config, at the point it stops being edited: the execution entry
-  // points (nvte_fused_attn_fwd_v2 and its backward counterpart) on the config they go on to run,
-  // and nvte_get_fused_attn_backend_v2() on a copy of the caller's, so that asking whether a
-  // configuration is supported does not modify it. Nothing further in is expected to derive
-  // again, and check_derived() is what holds them to that. Idempotent, so a config that is
-  // derived and then re-derived is unharmed.
-  //
-  // Throws for combinations of input fields that no graph can serve, so that all four graph
-  // builders inherit the rule from one place. Those same combinations are stated as rejection
-  // rules in nvte_get_fused_attn_backend_v2(), ahead of its derive() call, so that asking whether
-  // such a configuration is supported gets an answer instead of an exception.
+  // Computes only; it validates nothing. Rules about which configurations are legal belong in
+  // nvte_get_fused_attn_backend_v2, which derives first and then states them once, so that a
+  // violation comes back as an unsupported configuration instead of being thrown from a query.
   void derive();
 
+  // Assert that derive() has run, for code about to read a derived field. Worth asserting rather
+  // than assuming because the failure is silent: an unset derived field reads as zero, which is a
+  // legal value that yields a graph of the wrong shape and a key that collides with unrelated
+  // configs.
+  void check_derived() const {
+    NVTE_CHECK(is_derived,
+               "FusedAttnConfig's derived fields are not set. Please run "
+               "FusedAttnConfig::derive() first.");
+  }
+
   // Return a normalized copy of this config to be used as a key for the cuDNN graph cache.
-  // Requires a config that has been through derive(), whose fields the normalizations read.
-  // It drops fields that are invariant (e.g. attn_scale) or irrelevant (e.g. dO/dQKV dtypes
-  // and `deterministic` for forward, and `return_max_logit` for backward) to the corresponding graph.
-  // This helps avoid redundant graph builds and cache misses.
-  //
-  // `pass` is which graph the key is for. It decides both direction-dependent normalizations --
-  // which fields are dropped, and whether the batch is bucketed -- so a key built for one pass
-  // cannot be handed to the other's cache.
+  // It drops fields that are either invariant (e.g. attn_scale) or irrelevant (e.g. dO/dQKV dtypes
+  // and `deterministic` for forward, and `return_max_logit` for backward).
   FusedAttnConfig make_cache_key(Pass pass) const;
 
-  // One line for the graph cache's level-2 trace: every field operator< compares, in its order,
-  // less device_id, which the trace's own prefix prints as the dev column. Abbreviated and terse
-  // on purpose, the reason to print a key at all being that two of these lines diff cleanly,
-  // naming the fields that cost an extra graph build.
-  //
-  // Four fields it prints that operator< does not compare, because a line without them cannot
-  // account for the values beside them: check_for_forward_support, which make_cache_key() sets
-  // from the pass and so is what says which direction's key this is, and the three bucketed_*
-  // inputs, which are what the normalization substituted into batch_size and the token counts.
-  //
-  // Defined here rather than with the diagnostics that print it because it is the third
-  // enumeration of these fields, after attr_sizes and operator< above. A field added to the key
-  // without being added here does not fail to build, it just stops appearing in the trace, so the
-  // three lists are kept where one change can see all of them.
-  std::string key_debug_string() const;
+  // Return a string representation of this config for level-2 cache diagnostics.
+  std::string to_string() const;
 };
-
-// Assert that `cfg` has been through derive(), for code about to read a derived field. Worth
-// asserting rather than assuming because the failure is silent: an unset bucketed_batch_size or
-// q_format reads as zero, which is a legal value that yields a graph of the wrong shape and a
-// key that collides with unrelated configs. Deriving happens at the library's entry points rather
-// than here, where it would be needed, so this is what keeps a new path into the builders from
-// quietly skipping it. It catches a config that was never derived and nothing else: a config
-// derived and then edited passes, so callers that change an input field re-derive rather than rely
-// on this, which derive() being idempotent makes cheap.
-inline void check_derived(const FusedAttnConfig &cfg) {
-  NVTE_CHECK(cfg.is_derived,
-             "FusedAttnConfig reached a graph build with its derived fields unset. Every config "
-             "must pass through FusedAttnConfig::derive() first; see the entry points in "
-             "fused_attn.cpp.");
-}
 
 inline const FusedAttnConfig *get_fused_attn_config(NVTEFusedAttnConfig config) {
   NVTE_CHECK(config != nullptr, "NVTEFusedAttnConfig must not be NULL.");
@@ -351,11 +285,19 @@ inline FusedAttnConfig *get_fused_attn_config_mutable(NVTEFusedAttnConfig config
 }
 
 struct FusedAttnFwdParams {
+  // Input tensors
   NVTETensor Q = nullptr;
   NVTETensor K = nullptr;
   NVTETensor V = nullptr;
   NVTETensor Bias = nullptr;
   NVTETensor SoftmaxOffset = nullptr;
+  // Intermediate tensors
+  NVTETensor S = nullptr;
+  // Output tensor
+  NVTETensor O = nullptr;
+  // Auxiliary context tensor pack
+  NVTETensorPack *Aux_CTX_Tensors = nullptr;
+  // Miscellaneous tensors
   NVTETensor cu_seqlens_q = nullptr;
   NVTETensor cu_seqlens_kv = nullptr;
   NVTETensor cu_seqlens_q_padded = nullptr;
@@ -363,25 +305,24 @@ struct FusedAttnFwdParams {
   NVTETensor page_table_k = nullptr;
   NVTETensor page_table_v = nullptr;
   NVTETensor rng_state = nullptr;
-  NVTETensor S = nullptr;
-  NVTETensor O = nullptr;
-  NVTETensorPack *Aux_CTX_Tensors = nullptr;
+  // Scalars
+  size_t max_seqlen_q = 0;
+  size_t max_seqlen_kv = 0;
   bool is_training = true;
-  bool cuda_graph = false;
   bool return_max_logit = false;
-  NVTE_Mask_Type attn_mask_type = NVTE_NO_MASK;
+  bool cuda_graph = false;
+  float attn_scale = 1.0f;
+  float dropout = 0.0f;
+  NVTE_QKV_Layout qkv_layout = NVTE_QKV_Layout_NOT_SET;
+  NVTE_QKV_Format o_format = NVTE_QKV_Format_NOT_SET;
+  NVTE_QKV_Format qkv_scale_inv_format = NVTE_QKV_Format_NOT_SET;
   NVTE_Bias_Type bias_type = NVTE_NO_BIAS;
+  NVTE_Mask_Type attn_mask_type = NVTE_NO_MASK;
   NVTE_Softmax_Type softmax_type = NVTE_VANILLA_SOFTMAX;
   int64_t window_size_left = -1;
   int64_t window_size_right = -1;
   bool bottom_right_diagonal = true;
-  float dropout = 0.0f;
-  float attn_scale = 1.0f;
-  NVTE_QKV_Layout qkv_layout = NVTE_QKV_Layout_NOT_SET;
-  NVTE_QKV_Format o_format = NVTE_QKV_Format_NOT_SET;
-  NVTE_QKV_Format qkv_scale_inv_format = NVTE_QKV_Format_NOT_SET;
-  size_t max_seqlen_q = 0;
-  size_t max_seqlen_kv = 0;
+  // Workspace and stream
   NVTETensor workspace = nullptr;
   cudaStream_t stream = nullptr;
 
@@ -391,6 +332,9 @@ struct FusedAttnFwdParams {
       sizeof(NVTETensor),         // V
       sizeof(NVTETensor),         // Bias
       sizeof(NVTETensor),         // SoftmaxOffset
+      sizeof(NVTETensor),         // S
+      sizeof(NVTETensor),         // O
+      sizeof(NVTETensorPack *),   // Aux_CTX_Tensors
       sizeof(NVTETensor),         // cu_seqlens_q
       sizeof(NVTETensor),         // cu_seqlens_kv
       sizeof(NVTETensor),         // cu_seqlens_q_padded
@@ -398,31 +342,26 @@ struct FusedAttnFwdParams {
       sizeof(NVTETensor),         // page_table_k
       sizeof(NVTETensor),         // page_table_v
       sizeof(NVTETensor),         // rng_state
-      sizeof(NVTETensor),         // S
-      sizeof(NVTETensor),         // O
-      sizeof(NVTETensorPack *),   // Aux_CTX_Tensors
+      sizeof(size_t),             // max_seqlen_q
+      sizeof(size_t),             // max_seqlen_kv
       sizeof(uint8_t),            // is_training
-      sizeof(uint8_t),            // cuda_graph
       sizeof(uint8_t),            // return_max_logit
-      sizeof(NVTE_Mask_Type),     // attn_mask_type
+      sizeof(uint8_t),            // cuda_graph
+      sizeof(float),              // attn_scale
+      sizeof(float),              // dropout
+      sizeof(NVTE_QKV_Layout),    // qkv_layout
+      sizeof(NVTE_QKV_Format),    // o_format
+      sizeof(NVTE_QKV_Format),    // qkv_scale_inv_format
       sizeof(NVTE_Bias_Type),     // bias_type
+      sizeof(NVTE_Mask_Type),     // attn_mask_type
       sizeof(NVTE_Softmax_Type),  // softmax_type
       sizeof(int64_t),            // window_size_left
       sizeof(int64_t),            // window_size_right
       sizeof(uint8_t),            // bottom_right_diagonal
-      sizeof(float),              // dropout
-      sizeof(float),              // attn_scale
-      sizeof(NVTE_QKV_Layout),    // qkv_layout
-      sizeof(NVTE_QKV_Format),    // o_format
-      sizeof(NVTE_QKV_Format),    // qkv_scale_inv_format
-      sizeof(size_t),             // max_seqlen_q
-      sizeof(size_t),             // max_seqlen_kv
       sizeof(NVTETensor),         // workspace
       sizeof(cudaStream_t),       // stream
   };
 
-  // See FusedAttnConfig::attr_sizes: an enumerator appended without a size here reads past the
-  // end of this array.
   static_assert(sizeof(attr_sizes) / sizeof(attr_sizes[0]) == kNVTEFusedAttnFwdParamsNumAttributes,
                 "attr_sizes must have one entry per NVTEFusedAttnFwdParamsAttribute; add the size "
                 "of the new attribute alongside its enumerator.");
@@ -445,6 +384,7 @@ inline FusedAttnFwdParams *get_fused_attn_fwd_params_mutable(NVTEFusedAttnFwdPar
 }
 
 struct FusedAttnBwdParams {
+  // Input tensors
   NVTETensor Q = nullptr;
   NVTETensor K = nullptr;
   NVTETensor V = nullptr;
@@ -453,33 +393,37 @@ struct FusedAttnBwdParams {
   NVTETensor S = nullptr;
   NVTETensor dP = nullptr;
   const NVTETensorPack *Aux_CTX_Tensors = nullptr;
+  // Output tensors
   NVTETensor dQ = nullptr;
   NVTETensor dK = nullptr;
   NVTETensor dV = nullptr;
   NVTETensor dBias = nullptr;
   NVTETensor dSoftmaxOffset = nullptr;
+  // Miscellaneous tensors
   NVTETensor cu_seqlens_q = nullptr;
   NVTETensor cu_seqlens_kv = nullptr;
   NVTETensor cu_seqlens_q_padded = nullptr;
   NVTETensor cu_seqlens_kv_padded = nullptr;
-  bool cuda_graph = false;
-  bool deterministic = false;
-  NVTE_Mask_Type attn_mask_type = NVTE_NO_MASK;
-  NVTE_Bias_Type bias_type = NVTE_NO_BIAS;
-  NVTE_Softmax_Type softmax_type = NVTE_VANILLA_SOFTMAX;
-  int64_t window_size_left = -1;
-  int64_t window_size_right = -1;
-  bool bottom_right_diagonal = true;
-  float dropout = 0.0f;
+  // Scalars
+  size_t max_seqlen_q = 0;
+  size_t max_seqlen_kv = 0;
   float attn_scale = 1.0f;
+  float dropout = 0.0f;
   NVTE_QKV_Layout qkv_layout = NVTE_QKV_Layout_NOT_SET;
   NVTE_QKV_Format o_format = NVTE_QKV_Format_NOT_SET;
   NVTE_QKV_Format do_format = NVTE_QKV_Format_NOT_SET;
   NVTE_QKV_Layout dqkv_layout = NVTE_QKV_Layout_NOT_SET;
   NVTE_QKV_Format qkv_scale_inv_format = NVTE_QKV_Format_NOT_SET;
   NVTE_QKV_Format do_scale_inv_format = NVTE_QKV_Format_NOT_SET;
-  size_t max_seqlen_q = 0;
-  size_t max_seqlen_kv = 0;
+  NVTE_Bias_Type bias_type = NVTE_NO_BIAS;
+  NVTE_Mask_Type attn_mask_type = NVTE_NO_MASK;
+  NVTE_Softmax_Type softmax_type = NVTE_VANILLA_SOFTMAX;
+  int64_t window_size_left = -1;
+  int64_t window_size_right = -1;
+  bool bottom_right_diagonal = true;
+  bool deterministic = false;
+  bool cuda_graph = false;
+  // Workspace and stream
   NVTETensor workspace = nullptr;
   cudaStream_t stream = nullptr;
 
@@ -501,30 +445,28 @@ struct FusedAttnBwdParams {
       sizeof(NVTETensor),              // cu_seqlens_kv
       sizeof(NVTETensor),              // cu_seqlens_q_padded
       sizeof(NVTETensor),              // cu_seqlens_kv_padded
-      sizeof(uint8_t),                 // cuda_graph
-      sizeof(uint8_t),                 // deterministic
-      sizeof(NVTE_Mask_Type),          // attn_mask_type
-      sizeof(NVTE_Bias_Type),          // bias_type
-      sizeof(NVTE_Softmax_Type),       // softmax_type
-      sizeof(int64_t),                 // window_size_left
-      sizeof(int64_t),                 // window_size_right
-      sizeof(uint8_t),                 // bottom_right_diagonal
-      sizeof(float),                   // dropout
+      sizeof(size_t),                  // max_seqlen_q
+      sizeof(size_t),                  // max_seqlen_kv
       sizeof(float),                   // attn_scale
+      sizeof(float),                   // dropout
       sizeof(NVTE_QKV_Layout),         // qkv_layout
       sizeof(NVTE_QKV_Format),         // o_format
       sizeof(NVTE_QKV_Format),         // do_format
       sizeof(NVTE_QKV_Layout),         // dqkv_layout
       sizeof(NVTE_QKV_Format),         // qkv_scale_inv_format
       sizeof(NVTE_QKV_Format),         // do_scale_inv_format
-      sizeof(size_t),                  // max_seqlen_q
-      sizeof(size_t),                  // max_seqlen_kv
+      sizeof(NVTE_Bias_Type),          // bias_type
+      sizeof(NVTE_Mask_Type),          // attn_mask_type
+      sizeof(NVTE_Softmax_Type),       // softmax_type
+      sizeof(int64_t),                 // window_size_left
+      sizeof(int64_t),                 // window_size_right
+      sizeof(uint8_t),                 // bottom_right_diagonal
+      sizeof(uint8_t),                 // deterministic
+      sizeof(uint8_t),                 // cuda_graph
       sizeof(NVTETensor),              // workspace
       sizeof(cudaStream_t),            // stream
   };
 
-  // See FusedAttnConfig::attr_sizes: an enumerator appended without a size here reads past the
-  // end of this array.
   static_assert(sizeof(attr_sizes) / sizeof(attr_sizes[0]) == kNVTEFusedAttnBwdParamsNumAttributes,
                 "attr_sizes must have one entry per NVTEFusedAttnBwdParamsAttribute; add the size "
                 "of the new attribute alongside its enumerator.");

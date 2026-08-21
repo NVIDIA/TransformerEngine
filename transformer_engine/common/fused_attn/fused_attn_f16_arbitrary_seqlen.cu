@@ -375,7 +375,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
   // and the ones the graph was built at cannot be decided differently. Asserted derived here
   // because these are the first derived fields this path reads, ahead of the get_graph() that
   // asserts it for the build.
-  check_derived(cfg);
+  cfg.check_derived();
   const int64_t b = static_cast<int64_t>(cfg.graph_batch_size_fwd);
   const DType ragged_offset_type = cfg.ragged_offset_type_fwd;
   // The true batch size, which the cu_seqlens buffers are sized [actual_b + 1] by whatever the
@@ -853,7 +853,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
   // and the ones the graph was built at cannot be decided differently. Asserted derived here
   // because these are the first derived fields this path reads, ahead of the get_graph() that
   // asserts it for the build.
-  check_derived(cfg);
+  cfg.check_derived();
   const int64_t b = static_cast<int64_t>(cfg.graph_batch_size_bwd);
   const DType ragged_offset_type = cfg.ragged_offset_type_bwd;
   // The true batch size, which the cu_seqlens buffers are sized [actual_b + 1] by.
