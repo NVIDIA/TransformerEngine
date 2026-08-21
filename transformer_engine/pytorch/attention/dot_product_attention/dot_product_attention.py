@@ -1338,6 +1338,32 @@ class DotProductAttention(TransformerEngineBaseModule):
         return base[:num_quantizers]
 
     @staticmethod
+    def _partition_thd_mask_policies(
+        policies: List[Dict[str, Any]],
+        attention_params_kwargs: Dict[str, Any],
+    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """Partition policies by inter-sequence-padding backend availability."""
+        padded_policies = []
+        grouped_policies = []
+        for policy in policies:
+            if policy["sequence_ids"].numel() == 0:
+                continue
+            padded_attention_params = dpa_utils.AttentionParams(
+                **attention_params_kwargs,
+                batch_size=policy["sequence_ids"].numel(),
+                attn_mask_type=policy["mask_type"],
+                window_size=policy["window_size"],
+                bottom_right_diagonal=policy["bottom_right_diagonal"],
+                pad_between_seqs=True,
+            )
+            *_, available_backends = dpa_utils.get_attention_backend(padded_attention_params)
+            if any(available_backends):
+                padded_policies.append(policy)
+            else:
+                grouped_policies.append(policy)
+        return padded_policies, grouped_policies
+
+    @staticmethod
     def _select_thd_sequences(
         cu_seqlens: torch.Tensor,
         cu_seqlens_padded: Optional[torch.Tensor],
@@ -1392,26 +1418,19 @@ class DotProductAttention(TransformerEngineBaseModule):
         cu_seqlens_kv: torch.Tensor,
         cu_seqlens_q_padded: Optional[torch.Tensor],
         cu_seqlens_kv_padded: Optional[torch.Tensor],
-        attn_mask_type_per_seq: Dict[str, torch.Tensor],
-        window_size_per_mask_type: Optional[Dict[str, Tuple[int, int]]],
+        policies: List[Dict[str, Any]],
         max_seqlen_q: Optional[int],
         max_seqlen_kv: Optional[int],
         *,
-        window_size: Optional[Tuple[int, int]],
         checkpoint_core_attention: bool,
         fast_zero_fill: bool,
         bf16_backward: Optional[bool],
         num_splits: Optional[int],
     ) -> torch.Tensor:
-        """Dispatch mixed THD masks with FA3 inter-sequence padding."""
-        nonempty_mask_types = [
-            mask_type
-            for mask_type, sequence_ids in attn_mask_type_per_seq.items()
-            if sequence_ids.numel() > 0
-        ]
+        """Dispatch mixed THD policies with inter-sequence padding."""
         output = None
-        for mask_type in nonempty_mask_types:
-            sequence_ids = attn_mask_type_per_seq[mask_type]
+        for policy in policies:
+            sequence_ids = policy["sequence_ids"]
             policy_q_token_mask = self._selected_thd_token_mask(
                 query_layer.shape[0],
                 cu_seqlens_q,
@@ -1443,9 +1462,6 @@ class DotProductAttention(TransformerEngineBaseModule):
                 cu_seqlens_kv_padded,
                 sequence_ids,
             )
-            policy_window_size = window_size
-            if window_size_per_mask_type is not None:
-                policy_window_size = window_size_per_mask_type.get(mask_type, window_size)
             policy_output = self.forward(
                 policy_query,
                 policy_key,
@@ -1457,8 +1473,9 @@ class DotProductAttention(TransformerEngineBaseModule):
                 cu_seqlens_kv_padded=selected_cu_seqlens_kv_padded,
                 max_seqlen_q=max_seqlen_q,
                 max_seqlen_kv=max_seqlen_kv,
-                attn_mask_type=mask_type,
-                window_size=policy_window_size,
+                attn_mask_type=policy["mask_type"],
+                window_size=policy["window_size"],
+                bottom_right_diagonal=policy["bottom_right_diagonal"],
                 checkpoint_core_attention=checkpoint_core_attention,
                 fast_zero_fill=fast_zero_fill,
                 pad_between_seqs=True,
@@ -1468,7 +1485,7 @@ class DotProductAttention(TransformerEngineBaseModule):
             policy_output = torch.where(policy_q_token_mask.unsqueeze(-1), policy_output, 0.0)
             output = policy_output if output is None else output + policy_output
         if output is None:
-            raise ValueError("attn_mask_type_per_seq must assign at least one sequence.")
+            raise ValueError("Mixed THD policies must assign at least one sequence.")
         return output
 
     def _forward_thd_mask_types_grouped(
@@ -1480,21 +1497,20 @@ class DotProductAttention(TransformerEngineBaseModule):
         cu_seqlens_kv: torch.Tensor,
         cu_seqlens_q_padded: Optional[torch.Tensor],
         cu_seqlens_kv_padded: Optional[torch.Tensor],
-        attn_mask_type_per_seq: Dict[str, torch.Tensor],
-        window_size_per_mask_type: Optional[Dict[str, Tuple[int, int]]],
+        policies: List[Dict[str, Any]],
         max_seqlen_q: Optional[int],
         max_seqlen_kv: Optional[int],
         *,
-        window_size: Optional[Tuple[int, int]],
         checkpoint_core_attention: bool,
         fast_zero_fill: bool,
         bf16_backward: Optional[bool],
         num_splits: Optional[int],
     ) -> torch.Tensor:
-        """Dispatch mixed THD masks by compacting each policy for FA2."""
+        """Dispatch mixed THD policies by compacting each policy's tokens."""
         output_features = query_layer.shape[-2] * value_layer.shape[-1]
         output = query_layer.new_zeros((query_layer.shape[0], output_features))
-        for mask_type, sequence_ids in attn_mask_type_per_seq.items():
+        for policy in policies:
+            sequence_ids = policy["sequence_ids"]
             if sequence_ids.numel() == 0:
                 continue
             q_token_mask = self._selected_thd_token_mask(
@@ -1521,9 +1537,6 @@ class DotProductAttention(TransformerEngineBaseModule):
                 cu_seqlens_kv_padded,
                 sequence_ids,
             )
-            policy_window_size = window_size
-            if window_size_per_mask_type is not None:
-                policy_window_size = window_size_per_mask_type.get(mask_type, window_size)
             policy_output = self.forward(
                 query_layer.index_select(0, q_token_indices),
                 key_layer.index_select(0, kv_token_indices),
@@ -1533,8 +1546,9 @@ class DotProductAttention(TransformerEngineBaseModule):
                 cu_seqlens_kv=selected_cu_seqlens_kv,
                 max_seqlen_q=max_seqlen_q,
                 max_seqlen_kv=max_seqlen_kv,
-                attn_mask_type=mask_type,
-                window_size=policy_window_size,
+                attn_mask_type=policy["mask_type"],
+                window_size=policy["window_size"],
+                bottom_right_diagonal=policy["bottom_right_diagonal"],
                 checkpoint_core_attention=checkpoint_core_attention,
                 fast_zero_fill=fast_zero_fill,
                 pad_between_seqs=False,
@@ -1553,38 +1567,30 @@ class DotProductAttention(TransformerEngineBaseModule):
         cu_seqlens_kv: torch.Tensor,
         cu_seqlens_q_padded: Optional[torch.Tensor],
         cu_seqlens_kv_padded: Optional[torch.Tensor],
-        attn_mask_type_per_seq: Dict[str, torch.Tensor],
-        window_size_per_mask_type: Optional[Dict[str, Tuple[int, int]]],
+        policies: List[Dict[str, Any]],
         max_seqlen_q: Optional[int],
         max_seqlen_kv: Optional[int],
         *,
-        window_size: Optional[Tuple[int, int]],
+        attention_params_kwargs: Dict[str, Any],
         checkpoint_core_attention: bool,
         fast_zero_fill: bool,
         pad_between_seqs: Optional[bool],
         bf16_backward: Optional[bool],
         num_splits: Optional[int],
     ) -> torch.Tensor:
-        """Dispatch mixed THD masks through the best runtime implementation."""
+        """Dispatch mixed THD policies through backend-compatible representations."""
         output_features = query_layer.shape[-2] * value_layer.shape[-1]
         if query_layer.shape[0] == 0:
             empty_output = query_layer.new_empty((0, output_features))
             return empty_output + 0 * (query_layer.sum() + key_layer.sum() + value_layer.sum())
 
-        nonempty_mask_types = [
-            mask_type
-            for mask_type, sequence_ids in attn_mask_type_per_seq.items()
-            if sequence_ids.numel() > 0
-        ]
+        nonempty_policies = [policy for policy in policies if policy["sequence_ids"].numel() > 0]
         batch_size = cu_seqlens_q.shape[0] - 1
         if (
-            len(nonempty_mask_types) == 1
-            and attn_mask_type_per_seq[nonempty_mask_types[0]].numel() == batch_size
+            len(nonempty_policies) == 1
+            and nonempty_policies[0]["sequence_ids"].numel() == batch_size
         ):
-            mask_type = nonempty_mask_types[0]
-            policy_window_size = window_size
-            if window_size_per_mask_type is not None:
-                policy_window_size = window_size_per_mask_type.get(mask_type, window_size)
+            policy = nonempty_policies[0]
             return self.forward(
                 query_layer,
                 key_layer,
@@ -1596,19 +1602,25 @@ class DotProductAttention(TransformerEngineBaseModule):
                 cu_seqlens_kv_padded=cu_seqlens_kv_padded,
                 max_seqlen_q=max_seqlen_q,
                 max_seqlen_kv=max_seqlen_kv,
-                attn_mask_type=mask_type,
-                window_size=policy_window_size,
+                attn_mask_type=policy["mask_type"],
+                window_size=policy["window_size"],
+                bottom_right_diagonal=policy["bottom_right_diagonal"],
                 checkpoint_core_attention=checkpoint_core_attention,
                 fast_zero_fill=fast_zero_fill,
                 pad_between_seqs=pad_between_seqs,
                 bf16_backward=bf16_backward,
                 num_splits=num_splits,
             )
-        if not nonempty_mask_types:
-            raise ValueError("attn_mask_type_per_seq must assign at least one sequence.")
+        if not nonempty_policies:
+            raise ValueError("Mixed THD policies must assign at least one sequence.")
 
-        if dpa_utils.is_thd_mask_type_padding_supported():
-            return self._forward_thd_mask_types_with_padding(
+        padded_policies, grouped_policies = self._partition_thd_mask_policies(
+            nonempty_policies,
+            attention_params_kwargs,
+        )
+        padded_output = None
+        if padded_policies:
+            padded_output = self._forward_thd_mask_types_with_padding(
                 query_layer,
                 key_layer,
                 value_layer,
@@ -1616,34 +1628,37 @@ class DotProductAttention(TransformerEngineBaseModule):
                 cu_seqlens_kv,
                 cu_seqlens_q_padded,
                 cu_seqlens_kv_padded,
-                attn_mask_type_per_seq,
-                window_size_per_mask_type,
+                padded_policies,
                 max_seqlen_q,
                 max_seqlen_kv,
-                window_size=window_size,
                 checkpoint_core_attention=checkpoint_core_attention,
                 fast_zero_fill=fast_zero_fill,
                 bf16_backward=bf16_backward,
                 num_splits=num_splits,
             )
-        return self._forward_thd_mask_types_grouped(
-            query_layer,
-            key_layer,
-            value_layer,
-            cu_seqlens_q,
-            cu_seqlens_kv,
-            cu_seqlens_q_padded,
-            cu_seqlens_kv_padded,
-            attn_mask_type_per_seq,
-            window_size_per_mask_type,
-            max_seqlen_q,
-            max_seqlen_kv,
-            window_size=window_size,
-            checkpoint_core_attention=checkpoint_core_attention,
-            fast_zero_fill=fast_zero_fill,
-            bf16_backward=bf16_backward,
-            num_splits=num_splits,
-        )
+        grouped_output = None
+        if grouped_policies:
+            grouped_output = self._forward_thd_mask_types_grouped(
+                query_layer,
+                key_layer,
+                value_layer,
+                cu_seqlens_q,
+                cu_seqlens_kv,
+                cu_seqlens_q_padded,
+                cu_seqlens_kv_padded,
+                grouped_policies,
+                max_seqlen_q,
+                max_seqlen_kv,
+                checkpoint_core_attention=checkpoint_core_attention,
+                fast_zero_fill=fast_zero_fill,
+                bf16_backward=bf16_backward,
+                num_splits=num_splits,
+            )
+        if padded_output is None:
+            return grouped_output
+        if grouped_output is None:
+            return padded_output
+        return padded_output + grouped_output
 
     @no_torch_dynamo(recursive=False)
     def forward(
@@ -1679,8 +1694,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         qkv_layer: Optional[torch.Tensor] = None,
         kv_layer: Optional[torch.Tensor] = None,
         qkv_interleave_dim: int = -3,
-        attn_mask_type_per_seq: Optional[Dict[str, torch.Tensor]] = None,
-        window_size_per_mask_type: Optional[Dict[str, Tuple[int, int]]] = None,
+        attn_mask_type_and_window_size_per_seq_policies: Optional[List[Dict[str, Any]]] = None,
     ) -> torch.Tensor:
         r"""
         Dot Product Attention Layer.
@@ -1920,59 +1934,76 @@ class DotProductAttention(TransformerEngineBaseModule):
             interleave sits; must be -3 (e.g. ``bs3hd``) or -2 (e.g. ``bsh3d``,
             Megatron-style). This is an explicit knob rather than shape inference,
             since e.g. ``h == 3`` would make the shapes ambiguous.
-        attn_mask_type_per_seq: Optional[Dict[str, torch.Tensor]], default = None
-            Per-sequence mask policies for packed THD attention. Each key is an
-            attention mask type and each value is a one-dimensional, ascending CUDA
-            integer tensor containing the sequence IDs assigned to that mask. The
-            sequence-ID tensors must be disjoint and together contain every sequence
-            exactly once. On Hopper with FlashAttention 3 enabled, Transformer Engine
-            keeps Q/K/V in their original packed layout and represents sequences owned
-            by other policies as inter-sequence padding. Otherwise it compacts each
-            policy's logical tokens for an ordinary scalar-mask call and restores the
-            original physical THD layout. The caller-facing API is identical for both
-            implementations.
-        window_size_per_mask_type: Optional[Dict[str, Tuple[int, int]]], default = None
-            Optional sliding-window override for each key in
-            :attr:`attn_mask_type_per_seq`. This is useful when, for example, offline
-            sequences need full context while causal sequences use bounded left
-            context. Missing keys fall back to :attr:`window_size`.
+        attn_mask_type_and_window_size_per_seq_policies: Optional[List[Dict[str, Any]]],
+            default = None
+            Per-sequence policies for packed THD attention. Each list item must contain
+            ``"sequence_ids"``, ``"mask_type"``, and ``"window_size"``. Sequence IDs
+            are supplied as a one-dimensional, strictly ascending CUDA integer tensor;
+            all policy tensors must be disjoint and together contain every sequence
+            exactly once. A list may contain multiple policies with the same mask type
+            and different windows. Transformer Engine queries its ordinary backend
+            selector for every policy, preserves the original packed layout when an
+            inter-sequence-padding backend is available, and otherwise compacts that
+            policy's logical tokens before its scalar-mask attention call.
         """
 
-        if window_size_per_mask_type is not None and attn_mask_type_per_seq is None:
-            raise ValueError("window_size_per_mask_type requires attn_mask_type_per_seq.")
-        if attn_mask_type_per_seq is not None:
-            if not isinstance(attn_mask_type_per_seq, dict) or not attn_mask_type_per_seq:
-                raise ValueError("attn_mask_type_per_seq must be a non-empty dictionary.")
-            normalized_mask_types = {}
-            for mask_type, sequence_ids in attn_mask_type_per_seq.items():
+        thd_mask_policies = None
+        if attn_mask_type_and_window_size_per_seq_policies is not None:
+            if (
+                not isinstance(attn_mask_type_and_window_size_per_seq_policies, list)
+                or not attn_mask_type_and_window_size_per_seq_policies
+            ):
+                raise ValueError(
+                    "attn_mask_type_and_window_size_per_seq_policies must be a non-empty list."
+                )
+            if attn_mask_type is not None or window_size is not None:
+                raise ValueError(
+                    "Mixed THD policies specify mask_type and window_size per policy; do not "
+                    "also pass attn_mask_type or window_size."
+                )
+
+            required_policy_keys = {"sequence_ids", "mask_type", "window_size"}
+            thd_mask_policies = []
+            for policy_index, policy in enumerate(attn_mask_type_and_window_size_per_seq_policies):
+                if not isinstance(policy, dict):
+                    raise ValueError(f"Mixed THD policy {policy_index} must be a dictionary.")
+                if set(policy) != required_policy_keys:
+                    raise ValueError(
+                        f"Mixed THD policy {policy_index} must contain exactly "
+                        "'sequence_ids', 'mask_type', and 'window_size'."
+                    )
+                mask_type = policy["mask_type"]
                 if not isinstance(mask_type, str):
-                    raise ValueError("attn_mask_type_per_seq keys must be attention mask strings.")
+                    raise ValueError(f"Mixed THD policy {policy_index} mask_type must be a string.")
                 mask_type = mask_type.replace(",", "_")
                 if mask_type == "causal_padding":
                     mask_type = "padding_causal"
                 if mask_type not in AttnMaskTypes or "padding" not in mask_type:
                     raise ValueError(
-                        "attn_mask_type_per_seq supports only padding mask types, got "
-                        f"{mask_type!r}."
+                        f"Mixed THD policies support only padding mask types, got {mask_type!r}."
                     )
-                if mask_type in normalized_mask_types:
-                    raise ValueError(f"Duplicate normalized attention mask type {mask_type!r}.")
-                normalized_mask_types[mask_type] = sequence_ids
-            attn_mask_type_per_seq = normalized_mask_types
-
-            if window_size_per_mask_type is not None:
-                normalized_window_sizes = {}
-                for mask_type, policy_window_size in window_size_per_mask_type.items():
-                    mask_type = mask_type.replace(",", "_")
-                    if mask_type == "causal_padding":
-                        mask_type = "padding_causal"
-                    if mask_type not in attn_mask_type_per_seq:
-                        raise ValueError(
-                            "window_size_per_mask_type contains a mask not present in "
-                            f"attn_mask_type_per_seq: {mask_type!r}."
-                        )
-                    normalized_window_sizes[mask_type] = policy_window_size
-                window_size_per_mask_type = normalized_window_sizes
+                policy_window_size = dpa_utils.check_set_window_size(
+                    mask_type,
+                    policy["window_size"],
+                )
+                policy_bottom_right_diagonal = bottom_right_diagonal
+                if policy_bottom_right_diagonal is None:
+                    policy_bottom_right_diagonal = self.bottom_right_diagonal
+                if mask_type in {"causal", "padding_causal"}:
+                    policy_bottom_right_diagonal = False
+                if policy_bottom_right_diagonal is None or mask_type in {
+                    "causal_bottom_right",
+                    "padding_causal_bottom_right",
+                }:
+                    policy_bottom_right_diagonal = True
+                thd_mask_policies.append(
+                    {
+                        "sequence_ids": policy["sequence_ids"],
+                        "mask_type": mask_type,
+                        "window_size": policy_window_size,
+                        "bottom_right_diagonal": policy_bottom_right_diagonal,
+                    }
+                )
 
         query_layer, key_layer, value_layer, declared_qkv_layout = _unpack_packed_qkv(
             qkv_layer,
@@ -2051,49 +2082,29 @@ class DotProductAttention(TransformerEngineBaseModule):
                 f" {self.num_gqa_groups_per_partition} heads! Found {num_gqa_groups}."
             )
 
-            # checks for attention mask
-            if attn_mask_type_per_seq is not None:
-                # This scalar is used only for shared THD shape validation.
-                # Each policy call below uses its dictionary key and resolved window.
-                attn_mask_type = next(iter(attn_mask_type_per_seq))
-            elif attn_mask_type is None:
-                attn_mask_type = self.attn_mask_type
-            else:
-                attn_mask_type = attn_mask_type.replace(",", "_")
-                if attn_mask_type == "causal_padding":
-                    attn_mask_type = "padding_causal"
-            assert (
-                attn_mask_type in AttnMaskTypes
-            ), f"Attention mask type {attn_mask_type} is not supported!"
-
-            # checks for sliding window
-            if attn_mask_type_per_seq is not None:
-                default_window_size = self.window_size if window_size is None else window_size
-                resolved_window_sizes = {}
-                for mask_type in attn_mask_type_per_seq:
-                    policy_window_size = default_window_size
-                    if window_size_per_mask_type is not None:
-                        policy_window_size = window_size_per_mask_type.get(
-                            mask_type, default_window_size
-                        )
-                    resolved_window_sizes[mask_type] = dpa_utils.check_set_window_size(
-                        mask_type, policy_window_size
-                    )
-                window_size_per_mask_type = resolved_window_sizes
-                window_size = default_window_size
-            else:
+            # checks for scalar attention mask and sliding window
+            if thd_mask_policies is None:
+                if attn_mask_type is None:
+                    attn_mask_type = self.attn_mask_type
+                else:
+                    attn_mask_type = attn_mask_type.replace(",", "_")
+                    if attn_mask_type == "causal_padding":
+                        attn_mask_type = "padding_causal"
+                assert (
+                    attn_mask_type in AttnMaskTypes
+                ), f"Attention mask type {attn_mask_type} is not supported!"
                 if window_size is None:
                     window_size = self.window_size
                 window_size = dpa_utils.check_set_window_size(attn_mask_type, window_size)
-            if bottom_right_diagonal is None:
-                bottom_right_diagonal = self.bottom_right_diagonal
-            if attn_mask_type in {"causal", "padding_causal"}:
-                bottom_right_diagonal = False
-            if bottom_right_diagonal is None or attn_mask_type in {
-                "causal_bottom_right",
-                "padding_causal_bottom_right",
-            }:
-                bottom_right_diagonal = True
+                if bottom_right_diagonal is None:
+                    bottom_right_diagonal = self.bottom_right_diagonal
+                if attn_mask_type in {"causal", "padding_causal"}:
+                    bottom_right_diagonal = False
+                if bottom_right_diagonal is None or attn_mask_type in {
+                    "causal_bottom_right",
+                    "padding_causal_bottom_right",
+                }:
+                    bottom_right_diagonal = True
 
             # checks for qkv_format
             if qkv_format is None:
@@ -2120,9 +2131,10 @@ class DotProductAttention(TransformerEngineBaseModule):
                 assert all(
                     len(x.shape) == 3 for x in (query_layer, key_layer, value_layer)
                 ), "Queries, keys and values must be 3D tensors when qkv_format = thd!"
-                assert (
-                    "padding" in attn_mask_type
-                ), "Attention mask type must be padding or padding_causal for qkv_format=thd!"
+                if thd_mask_policies is None:
+                    assert (
+                        "padding" in attn_mask_type
+                    ), "Attention mask type must be padding or padding_causal for qkv_format=thd!"
                 assert (
                     cu_seqlens_q is not None and cu_seqlens_kv is not None
                 ), "cu_seqlens_q and cu_seqlens_kv can not be None when qkv_format = thd!"
@@ -2148,81 +2160,57 @@ class DotProductAttention(TransformerEngineBaseModule):
                         seqlens_kv = cu_seqlens_kv[1:] - cu_seqlens_kv[:-1]
                     max_seqlen_kv = int((seqlens_kv.max().item() + 63) // 64 * 64)
 
-            if attn_mask_type_per_seq is not None:
+            if thd_mask_policies is not None:
                 # Validate the shared call contract before dispatching each policy
                 # through an ordinary scalar-mask attention invocation.
                 if qkv_format != "thd":
-                    raise ValueError(
-                        "attn_mask_type_per_seq is supported only with qkv_format='thd'."
-                    )
+                    raise ValueError("Mixed THD policies are supported only with qkv_format='thd'.")
                 if attention_mask is not None:
-                    raise ValueError(
-                        "attn_mask_type_per_seq does not support an explicit attention_mask."
-                    )
+                    raise ValueError("Mixed THD policies do not support an attention_mask.")
                 if (
                     core_attention_bias_type != "no_bias"
                     or core_attention_bias is not None
                     or alibi_slopes is not None
                 ):
                     raise ValueError(
-                        "attn_mask_type_per_seq does not yet support attention bias or ALiBi."
+                        "Mixed THD policies do not yet support attention bias or ALiBi."
                     )
                 if inference_params is not None:
-                    raise ValueError("attn_mask_type_per_seq does not support KV caching.")
+                    raise ValueError("Mixed THD policies do not support KV caching.")
                 if (
                     score_mod is not None
                     or score_mod_bprop is not None
                     or score_mod_tensors is not None
                     or score_mod_bprop_tensors is not None
                 ):
-                    raise ValueError("attn_mask_type_per_seq does not support score modification.")
+                    raise ValueError("Mixed THD policies do not support score modification.")
                 if fp8_output or self.fp8 or self.return_max_logit:
                     raise ValueError(
-                        "attn_mask_type_per_seq does not yet support FP8 or max-logit output."
+                        "Mixed THD policies do not yet support FP8 or max-logit output."
                     )
                 assigned_sequence_count = 0
-                for sequence_ids in attn_mask_type_per_seq.values():
+                for policy in thd_mask_policies:
+                    sequence_ids = policy["sequence_ids"]
                     if not isinstance(sequence_ids, torch.Tensor):
-                        raise ValueError(
-                            "attn_mask_type_per_seq values must be sequence-ID tensors."
-                        )
+                        raise ValueError("Mixed THD policy sequence_ids must be a torch.Tensor.")
                     if sequence_ids.ndim != 1 or sequence_ids.dtype not in (
                         torch.int32,
                         torch.int64,
                     ):
                         raise ValueError(
-                            "attn_mask_type_per_seq values must be one-dimensional int32 or "
-                            "int64 sequence-ID tensors."
+                            "Mixed THD policy sequence_ids must be one-dimensional int32 or "
+                            "int64 tensors."
                         )
                     if not sequence_ids.is_cuda or sequence_ids.device != query_layer.device:
                         raise ValueError(
-                            "attn_mask_type_per_seq sequence IDs must be on the Q/K/V device."
+                            "Mixed THD policy sequence_ids must be on the Q/K/V device."
                         )
                     assigned_sequence_count += sequence_ids.numel()
                 if assigned_sequence_count != batch_size:
                     raise ValueError(
-                        "attn_mask_type_per_seq must assign every sequence exactly once by count: "
+                        "Mixed THD policies must assign every sequence exactly once by count: "
                         f"got {assigned_sequence_count} assignments for {batch_size} sequences."
                     )
-                return self._forward_thd_mask_types(
-                    query_layer,
-                    key_layer,
-                    value_layer,
-                    cu_seqlens_q,
-                    cu_seqlens_kv,
-                    cu_seqlens_q_padded,
-                    cu_seqlens_kv_padded,
-                    attn_mask_type_per_seq,
-                    window_size_per_mask_type,
-                    max_seqlen_q,
-                    max_seqlen_kv,
-                    window_size=window_size,
-                    checkpoint_core_attention=checkpoint_core_attention,
-                    fast_zero_fill=fast_zero_fill,
-                    pad_between_seqs=pad_between_seqs,
-                    bf16_backward=bf16_backward,
-                    num_splits=num_splits,
-                )
 
             # update KV cache and retrieve saved tokens from cache for inference
             if inference_params is not None:
@@ -2474,27 +2462,22 @@ class DotProductAttention(TransformerEngineBaseModule):
                     ), "score_mod_bprop_tensors must map string names to torch.Tensor instances!"
 
             # gather attention params for get_attention_backend
-            attention_params = dpa_utils.AttentionParams(
+            attention_params_kwargs = dict(
                 qkv_type=type(query_layer),
                 qkv_dtype=query_layer.dtype,
                 qkv_layout=qkv_layout,
-                batch_size=batch_size,
                 num_heads=num_attention_heads,
                 num_gqa_groups=num_gqa_groups,
                 max_seqlen_q=max_seqlen_q,
                 max_seqlen_kv=max_seqlen_kv,
                 head_dim_qk=head_dim_qk,
                 head_dim_v=head_dim_v,
-                attn_mask_type=attn_mask_type,
-                window_size=window_size,
-                bottom_right_diagonal=bottom_right_diagonal,
                 alibi_slopes_shape=alibi_slopes.shape if alibi_slopes is not None else None,
                 core_attention_bias_type=core_attention_bias_type,
                 core_attention_bias_shape=core_attention_bias_shape,
                 core_attention_bias_requires_grad=(
                     core_attention_bias.requires_grad if core_attention_bias is not None else False
                 ),
-                pad_between_seqs=pad_between_seqs,
                 attention_dropout=self.attention_dropout,
                 context_parallel=context_parallel,
                 cp_comm_type=self.cp_comm_type,
@@ -2512,6 +2495,34 @@ class DotProductAttention(TransformerEngineBaseModule):
                 checkpoint_core_attention=checkpoint_core_attention,
                 has_score_mod=score_mod is not None,
                 has_score_mod_bprop=score_mod_bprop is not None,
+            )
+            if thd_mask_policies is not None:
+                return self._forward_thd_mask_types(
+                    query_layer,
+                    key_layer,
+                    value_layer,
+                    cu_seqlens_q,
+                    cu_seqlens_kv,
+                    cu_seqlens_q_padded,
+                    cu_seqlens_kv_padded,
+                    thd_mask_policies,
+                    max_seqlen_q,
+                    max_seqlen_kv,
+                    attention_params_kwargs=attention_params_kwargs,
+                    checkpoint_core_attention=checkpoint_core_attention,
+                    fast_zero_fill=fast_zero_fill,
+                    pad_between_seqs=pad_between_seqs,
+                    bf16_backward=bf16_backward,
+                    num_splits=num_splits,
+                )
+
+            attention_params = dpa_utils.AttentionParams(
+                **attention_params_kwargs,
+                batch_size=batch_size,
+                attn_mask_type=attn_mask_type,
+                window_size=window_size,
+                bottom_right_diagonal=bottom_right_diagonal,
+                pad_between_seqs=pad_between_seqs,
             )
             global _attention_backends
             if is_in_onnx_export_mode():
