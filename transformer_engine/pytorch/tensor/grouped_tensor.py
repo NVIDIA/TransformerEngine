@@ -340,9 +340,7 @@ class GroupedTensor(GroupedTensorStorage, torch.Tensor):
                 shapes=src.tensor_shapes,
                 quantizer=src.quantizer,
                 data=move_storage(src.rowwise_data, convert_dtype=convert_data_dtype),
-                columnwise_data=move_storage(
-                    src.columnwise_data, convert_dtype=convert_data_dtype
-                ),
+                columnwise_data=move_storage(src.columnwise_data, convert_dtype=convert_data_dtype),
                 scale_inv=move_storage(src.scale_inv),
                 columnwise_scale_inv=move_storage(src.columnwise_scale_inv),
                 amax=move_storage(src.amax),
