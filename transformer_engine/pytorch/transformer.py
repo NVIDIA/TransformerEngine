@@ -627,7 +627,14 @@ class TransformerLayer(torch.nn.Module):
                         p2p between sub-groups (e.g., via IBLink).
         load_balancing_strategy : CPLoadBalancingStrategy
                                   token partition strategy for context-parallel attention.
+                                  ``NO_LOAD_BALANCE`` is experimental.
         """
+        # Preserve the legacy child-setter call unless an experimental strategy is requested.
+        load_balancing_kwargs = (
+            {}
+            if load_balancing_strategy is CPLoadBalancingStrategy.DUAL_CHUNK_SWAP
+            else {"load_balancing_strategy": load_balancing_strategy}
+        )
         # Deep iterate but skip self to avoid infinite recursion.
         for index, child in enumerate(self.modules()):
             if index == 0:
@@ -638,7 +645,7 @@ class TransformerLayer(torch.nn.Module):
                     cp_global_ranks,
                     cp_stream,
                     cp_comm_type,
-                    load_balancing_strategy,
+                    **load_balancing_kwargs,
                 )
 
     def forward(

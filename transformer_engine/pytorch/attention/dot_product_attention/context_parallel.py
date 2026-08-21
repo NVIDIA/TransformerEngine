@@ -5495,8 +5495,9 @@ def get_batch_on_this_cp_rank(
 
     Which are parallelized across GPUs in a context parallel group.
     This version works with variable-length sequences using cumulative sequence lengths.
-    ``CPLoadBalancingStrategy.NO_LOAD_BALANCE`` assigns one contiguous
-    physical-buffer chunk per rank. By default, each padded sequence is chunked independently.
+    The experimental ``CPLoadBalancingStrategy.NO_LOAD_BALANCE`` strategy assigns one
+    contiguous physical-buffer chunk per rank. By default, each padded sequence is chunked
+    independently.
     """
     if qvk_format not in ["thd", "bshd", "sbhd"]:
         raise ValueError(f"Unsupported qvk_format: {qvk_format}!")

@@ -12,7 +12,10 @@ import transformer_engine_torch as tex
 
 
 class CPLoadBalancingStrategy(enum.Enum):
-    """Token partition strategy for context-parallel attention."""
+    """Token partition strategy for context-parallel attention.
+
+    ``NO_LOAD_BALANCE`` is experimental.
+    """
 
     DUAL_CHUNK_SWAP = "dual_chunk_swap"
     NO_LOAD_BALANCE = "no_load_balance"

@@ -710,6 +710,12 @@ class MultiheadAttention(torch.nn.Module):
             self.cp_size = cp_size_a2a * cp_size_p2p
             self.cp_rank = cp_size_a2a * cp_rank_p2p + cp_rank_a2a
 
+        # Preserve the legacy child-setter call unless an experimental strategy is requested.
+        load_balancing_kwargs = (
+            {}
+            if load_balancing_strategy is CPLoadBalancingStrategy.DUAL_CHUNK_SWAP
+            else {"load_balancing_strategy": load_balancing_strategy}
+        )
         # Deep iterate but skip self to avoid infinite recursion.
         for index, child in enumerate(self.modules()):
             if index == 0:
@@ -720,7 +726,7 @@ class MultiheadAttention(torch.nn.Module):
                     cp_global_ranks,
                     cp_stream,
                     cp_comm_type,
-                    load_balancing_strategy,
+                    **load_balancing_kwargs,
                 )
 
     def forward(
