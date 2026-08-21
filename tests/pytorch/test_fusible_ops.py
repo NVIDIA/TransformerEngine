@@ -2404,6 +2404,98 @@ class TestBasicOps:
         )
 
     @pytest.mark.parametrize("dtype", _dtypes)
+    @pytest.mark.parametrize("glu_interleave_size", (None, 32))
+    @pytest.mark.parametrize("betas", ((4.0, 25.0), (3.0, 12.0)))
+    def test_situglu(
+        self,
+        *,
+        dtype: torch.dtype,
+        glu_interleave_size: Optional[int],
+        betas: tuple[float, float],
+        device: torch.device = "cuda",
+    ) -> None:
+        """SiTU-GLU forward and backward."""
+        in_shape = (17, 192)
+        out_shape = (17, 96)
+        beta1, beta2 = betas
+        x_ref, x_test = make_reference_and_test_tensors(
+            in_shape,
+            test_dtype=dtype,
+            test_device=device,
+        )
+        dy_ref, dy_test = make_reference_and_test_tensors(
+            out_shape,
+            test_dtype=dtype,
+            test_device=device,
+            requires_grad=False,
+        )
+
+        x = x_ref
+        if glu_interleave_size is not None:
+            x = x.reshape(-1, 3, 2, glu_interleave_size).transpose(1, 2).reshape(in_shape)
+        gate, up = x.chunk(2, dim=-1)
+        y_ref = (
+            beta1 * torch.tanh(gate / beta1) * torch.sigmoid(gate) * beta2 * torch.tanh(up / beta2)
+        )
+        y_ref.backward(dy_ref)
+
+        op = te_ops.SiTUGLU(
+            beta1=beta1,
+            beta2=beta2,
+            glu_interleave_size=glu_interleave_size,
+        )
+        y_test = op(x_test)
+        y_test.backward(dy_test)
+
+        tols = dtype_tols(dtype)
+        assert_close(y_test, y_ref, **tols)
+        assert_close_grads(x_test, x_ref, **tols)
+
+    @pytest.mark.parametrize("name,value", (("beta1", 0.0), ("beta2", float("inf"))))
+    def test_situglu_invalid_beta(self, name: str, value: float) -> None:
+        """SiTU-GLU soft-cap parameters must be finite and positive."""
+        with pytest.raises(ValueError, match=name):
+            te_ops.SiTUGLU(**{name: value})
+        with pytest.raises(ValueError, match=name):
+            te_ops.ScaledSiTUGLU(**{name: value})
+
+    def test_situglu_mxfp8_quantization(self, device: torch.device = "cuda") -> None:
+        """SiTU-GLU supports fused MXFP8 output and input-gradient quantization."""
+        dtype = torch.bfloat16
+        quantization = "mxfp8"
+        in_shape = (256, 256)
+        out_shape = (256, 128)
+        maybe_skip_quantization(quantization, dims=in_shape, device=device, dtype=dtype)
+        x_ref, x_test = make_reference_and_test_tensors(
+            in_shape,
+            test_dtype=dtype,
+            test_device=device,
+        )
+        dy_ref, dy_test = make_reference_and_test_tensors(
+            out_shape,
+            test_dtype=dtype,
+            test_device=device,
+            requires_grad=False,
+        )
+
+        gate, up = x_ref.chunk(2, dim=-1)
+        y_ref = 4.0 * torch.tanh(gate / 4.0) * torch.sigmoid(gate) * 25.0 * torch.tanh(up / 25.0)
+        y_ref.backward(dy_ref)
+
+        forward = te_ops.Sequential(
+            te_ops.Quantize(forward=False, backward=True),
+            te_ops.SiTUGLU(),
+            te_ops.Quantize(forward=True, backward=False),
+        )
+        with te.autocast(enabled=True, recipe=make_recipe(quantization)):
+            y_test = forward(x_test)
+        y_test.backward(dy_test)
+
+        tols = quantization_tols(quantization)
+        assert_close(y_test, y_ref, **tols)
+        assert_close_grads(x_test, x_ref, **tols)
+
+    @pytest.mark.parametrize("dtype", _dtypes)
     @pytest.mark.parametrize("quantization", _quantization_list)
     @pytest.mark.parametrize("quantize_forward", (False, True))
     @pytest.mark.parametrize("quantize_backward", (False, True))
@@ -2907,6 +2999,54 @@ class TestBasicOps:
         assert_close_grads(x_test, x_ref, **tols)
         assert_close_grads(scales_test, scales_ref, **tols)
 
+    @pytest.mark.parametrize("dtype", _dtypes)
+    @pytest.mark.parametrize("glu_interleave_size", (None, 32))
+    def test_scaled_situglu(
+        self,
+        *,
+        dtype: torch.dtype,
+        glu_interleave_size: Optional[int],
+        device: torch.device = "cuda",
+    ) -> None:
+        """SiTU-GLU with a differentiable row-wise post-scale."""
+        in_shape = (17, 192)
+        out_shape = (17, 96)
+        x_ref, x_test = make_reference_and_test_tensors(
+            in_shape,
+            test_dtype=dtype,
+            test_device=device,
+        )
+        scales_ref, scales_test = make_reference_and_test_tensors(
+            in_shape[:-1],
+            test_dtype=dtype,
+            test_device=device,
+        )
+        dy_ref, dy_test = make_reference_and_test_tensors(
+            out_shape,
+            test_dtype=dtype,
+            test_device=device,
+            requires_grad=False,
+        )
+
+        x = x_ref
+        if glu_interleave_size is not None:
+            x = x.reshape(-1, 3, 2, glu_interleave_size).transpose(1, 2).reshape(in_shape)
+        gate, up = x.chunk(2, dim=-1)
+        activation = (
+            4.0 * torch.tanh(gate / 4.0) * torch.sigmoid(gate) * 25.0 * torch.tanh(up / 25.0)
+        )
+        y_ref = scales_ref.unsqueeze(-1) * activation
+        y_ref.backward(dy_ref)
+
+        op = te_ops.ScaledSiTUGLU(glu_interleave_size=glu_interleave_size)
+        y_test = op(x_test, scales_test)
+        y_test.backward(dy_test)
+
+        tols = dtype_tols(dtype)
+        assert_close(y_test, y_ref, **tols)
+        assert_close_grads(x_test, x_ref, **tols)
+        assert_close_grads(scales_test, scales_ref, **tols)
+
     @pytest.mark.parametrize("in_shape", ((71, 192), (5, 7, 128)))
     @pytest.mark.parametrize("input_requires_grad", (False, True))
     @pytest.mark.parametrize("scales_requires_grad", (False, True))
@@ -2971,12 +3111,22 @@ class TestBasicOps:
 
     @pytest.mark.parametrize(
         "op_cls",
-        (te_ops.ScaledSwiGLU, te_ops.ScaledSReLU, te_ops.ScaledClampedQGeGLU),
+        (
+            te_ops.ScaledSwiGLU,
+            te_ops.ScaledSiTUGLU,
+            te_ops.ScaledClampedQGeGLU,
+        ),
     )
-    def test_scaled_activation_recompute_in_mlp_config(self, op_cls) -> None:
-        """Scaled activations expose a per-op recompute knob."""
+    def test_scaled_glu_rejects_activation_recompute_in_mlp(self, op_cls) -> None:
+        """Scaled GLUs reject unsupported activation recomputation."""
         assert op_cls().activation_recompute_in_mlp is False
-        assert op_cls(activation_recompute_in_mlp=True).activation_recompute_in_mlp is True
+        with pytest.raises(ValueError, match="does not support activation recomputation"):
+            op_cls(activation_recompute_in_mlp=True)
+
+    def test_scaled_srelu_activation_recompute_in_mlp_config(self) -> None:
+        """Scaled SReLU exposes its supported activation recompute knob."""
+        assert te_ops.ScaledSReLU().activation_recompute_in_mlp is False
+        assert te_ops.ScaledSReLU(activation_recompute_in_mlp=True).activation_recompute_in_mlp
 
     @pytest.mark.parametrize("in_shape", ((71, 192), (5, 7, 128)))
     @pytest.mark.parametrize("input_requires_grad", (False, True))
