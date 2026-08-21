@@ -20,7 +20,7 @@
 
 #include "../../common.h"
 #include "../../util/math.h"
-#include "../../util/ptx.cuh"
+#include "../../util/ptx_arch_spec.cuh"
 #include "../../utils.cuh"
 #include "core_nvfp4.cuh"
 #include "specialized/quantize_transpose_nvfp4_tuned_1D.cuh"
@@ -100,17 +100,11 @@ __launch_bounds__(BLOCK_SIZE)
 }
 
 template <typename IType, int BLOCK_SIZE>
-__global__ void
-#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
-__launch_bounds__(BLOCK_SIZE)
-#endif
+__global__ void __launch_bounds__(BLOCK_SIZE)
     compute_columnwise_amax_kernel(const int num_rows, const int num_cols,
                                    const IType *__restrict__ input,
                                    float *__restrict__ output_columnwise_amax,
                                    const float *__restrict__ noop) {
-#if !defined(__CUDA_ARCH__) || (__CUDA_ARCH__ < 1000)
-  NVTE_DEVICE_ERROR("SM 10.0+ is required.");
-#else
   if (noop != nullptr && noop[0] == 1.0f) {
     return;
   }
@@ -128,7 +122,6 @@ __launch_bounds__(BLOCK_SIZE)
   if (threadIdx.x == 0) {
     output_columnwise_amax[col_idx] = col_amax;
   }
-#endif
 }
 
 template <typename IType>

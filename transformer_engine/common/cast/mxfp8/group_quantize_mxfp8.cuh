@@ -19,7 +19,7 @@
 #include "../../common.h"
 #include "../../util/cuda_runtime.h"
 #include "../../util/math.h"
-#include "../../util/ptx.cuh"
+#include "../../util/ptx_arch_spec.cuh"
 #include "../../utils.cuh"
 #include "../core/common.cuh"
 #include "swizzle.cuh"
@@ -498,7 +498,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
   constexpr bool COMPUTE_ACTIVATIONS = IS_DACT || IS_ACT;
   constexpr bool NO_ACTIVATIONS = !COMPUTE_ACTIVATIONS;
 
-  if constexpr (NO_ACTIVATIONS) {
+  if constexpr (NO_ACTIVATIONS && !IS_DBIAS) {
     if (noop != nullptr && noop[0] == 1.0f) {
       return;
     }

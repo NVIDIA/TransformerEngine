@@ -957,7 +957,7 @@ class FusedAttnRunner:
 
         customcall_args = [
             # Put test data onto each GPU for distributed.
-            # TODO(mgoldfarb-nvidia): We will need to add reordering for bias, mas and
+            # TODO(mgoldfarb-nvidia): We will need to add reordering for bias, mask and
             # THD params once we support those features on CP.
             jax.device_put(self.cp_reorder_fn(self.q), self.qkvo_sharding),
             jax.device_put(self.cp_reorder_fn(self.k), self.qkvo_sharding),
@@ -1089,7 +1089,7 @@ class FusedAttnRunner:
             self.dropout_rng,
         ]
         customcall_args = [
-            # TODO(mgoldfarb-nvidia): We will need to add reordering for bias, mas and
+            # TODO(mgoldfarb-nvidia): We will need to add reordering for bias, mask and
             # THD params once we support those features on CP.
             jax.device_put(self.cp_reorder_fn(self.q), self.qkvo_sharding),
             jax.device_put(self.cp_reorder_fn(self.k), self.qkvo_sharding),
