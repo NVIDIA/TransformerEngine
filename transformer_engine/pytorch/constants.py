@@ -11,7 +11,7 @@ import torch.distributed
 import transformer_engine_torch as tex
 
 
-class CPAttentionLoadBalancingStrategy(enum.Enum):
+class CPLoadBalancingStrategy(enum.Enum):
     """Token partition strategy for context-parallel attention."""
 
     DUAL_CHUNK_SWAP = "dual_chunk_swap"

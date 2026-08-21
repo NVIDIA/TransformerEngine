@@ -37,7 +37,7 @@ from transformer_engine.pytorch.quantized_tensor import (
 )
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor
 from transformer_engine.pytorch.constants import (
-    CPAttentionLoadBalancingStrategy,
+    CPLoadBalancingStrategy,
     QKVLayouts,
     dist_group_type,
 )
@@ -901,7 +901,7 @@ class FlashAttention(torch.nn.Module):
         num_splits: Optional[int] = 1,
         cu_seqlens_q_padded: Optional[torch.Tensor] = None,
         cu_seqlens_kv_padded: Optional[torch.Tensor] = None,
-        load_balancing_strategy=CPAttentionLoadBalancingStrategy.DUAL_CHUNK_SWAP,
+        load_balancing_strategy=CPLoadBalancingStrategy.DUAL_CHUNK_SWAP,
     ) -> torch.Tensor:
         """flash-attn fprop"""
 
@@ -2119,7 +2119,7 @@ class FusedAttention(torch.nn.Module):
         packed_qkv: Optional[torch.Tensor] = None,
         packed_kv: Optional[torch.Tensor] = None,
         bf16_backward: bool = False,
-        load_balancing_strategy=CPAttentionLoadBalancingStrategy.DUAL_CHUNK_SWAP,
+        load_balancing_strategy=CPLoadBalancingStrategy.DUAL_CHUNK_SWAP,
     ) -> torch.Tensor:
         """fused attention fprop"""
         assert (

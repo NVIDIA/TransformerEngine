@@ -22,7 +22,7 @@ from transformer_engine.pytorch.utils import (
 from transformer_engine.pytorch.constants import (
     AttnTypes,
     AttnBiasTypes,
-    CPAttentionLoadBalancingStrategy,
+    CPLoadBalancingStrategy,
     dist_group_type,
 )
 from transformer_engine.pytorch.distributed import (
@@ -660,7 +660,7 @@ class MultiheadAttention(torch.nn.Module):
         cp_global_ranks: List[int],
         cp_stream: torch.cuda.Stream,
         cp_comm_type: str = "p2p",
-        load_balancing_strategy=CPAttentionLoadBalancingStrategy.DUAL_CHUNK_SWAP,
+        load_balancing_strategy=CPLoadBalancingStrategy.DUAL_CHUNK_SWAP,
     ) -> None:
         """
         Set the context parallel attributes for the given
@@ -690,7 +690,7 @@ class MultiheadAttention(torch.nn.Module):
                       - ``"a2a+p2p"``: hierarchical CP implementation. First applying a2a to QKV
                         across each CP sub-group (e.g., via NVLink), then exchanging KV with
                         p2p between sub-groups (e.g., via IBLink).
-        load_balancing_strategy : CPAttentionLoadBalancingStrategy
+        load_balancing_strategy : CPLoadBalancingStrategy
                                   token partition strategy for context-parallel attention.
         """
         if isinstance(cp_group, dist_group_type):

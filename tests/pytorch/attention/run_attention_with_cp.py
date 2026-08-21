@@ -21,7 +21,7 @@ from test_attention_with_cp import (
 )
 from transformer_engine.pytorch import (
     autocast,
-    CPAttentionLoadBalancingStrategy,
+    CPLoadBalancingStrategy,
     DotProductAttention,
     Float8Quantizer,
     Float8CurrentScalingQuantizer,
@@ -53,7 +53,7 @@ def generate_input_shapes(
     world_size: int,
     kernel_backend: str,
     fa_pad_between_seqs: str = "False",
-    load_balancing_strategy=CPAttentionLoadBalancingStrategy.DUAL_CHUNK_SWAP,
+    load_balancing_strategy=CPLoadBalancingStrategy.DUAL_CHUNK_SWAP,
 ):
     if qkv_format == "bshd":
         q_input_shape = (
@@ -112,7 +112,7 @@ def generate_input_shapes(
         cu_seqlens_q_padded = None
         cu_seqlens_kv_padded = None
     elif qkv_format == "thd":
-        if load_balancing_strategy is CPAttentionLoadBalancingStrategy.NO_LOAD_BALANCE:
+        if load_balancing_strategy is CPLoadBalancingStrategy.NO_LOAD_BALANCE:
             assert config.batch_size == 2
             if kernel_backend == "FlashAttention" and fa_pad_between_seqs == "False":
                 seqlens_q = torch.tensor(
@@ -238,7 +238,7 @@ def run_dpa_with_cp(
 ):
     """Test DotProductAttention module with context parallelism"""
     logging.root.setLevel(log_level)
-    load_balancing_strategy = CPAttentionLoadBalancingStrategy[load_balancing_strategy]
+    load_balancing_strategy = CPLoadBalancingStrategy[load_balancing_strategy]
     # When is_training is False, gradient outputs are None.
     is_training = is_training == "True"
     pad_between_seqs = None

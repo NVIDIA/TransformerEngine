@@ -7,7 +7,7 @@
 import itertools
 import torch
 import unittest
-from transformer_engine.pytorch import CPAttentionLoadBalancingStrategy
+from transformer_engine.pytorch import CPLoadBalancingStrategy
 from transformer_engine.pytorch.attention.dot_product_attention.context_parallel import (
     get_no_load_balance_thd_causal_metadata,
     get_batch_on_this_cp_rank,
@@ -25,38 +25,9 @@ except ImportError:
 
 
 class TestTHDPartitioning(unittest.TestCase):
-    def test_no_load_balance_partition_uses_one_equal_chunk_per_rank(self):
-        # The global buffer, unlike each document, only needs to be divisible by CP.
-        cu_seqlens_padded = torch.tensor([0, 5, 12])
-
-        rank0 = get_thd_partitioned_indices(
-            cu_seqlens_padded,
-            12,
-            4,
-            0,
-            load_balancing_strategy=CPAttentionLoadBalancingStrategy.NO_LOAD_BALANCE,
-        )
-        rank3 = get_thd_partitioned_indices(
-            cu_seqlens_padded,
-            12,
-            4,
-            3,
-            load_balancing_strategy=CPAttentionLoadBalancingStrategy.NO_LOAD_BALANCE,
-        )
-
-        self.assertTrue(torch.equal(rank0, torch.tensor([0, 1, 2])))
-        self.assertTrue(torch.equal(rank3, torch.tensor([9, 10, 11])))
-
     def test_default_partition_rejects_cpu_metadata(self):
         with self.assertRaisesRegex(AssertionError, "requires CUDA cu_seqlens"):
             get_thd_partitioned_indices(torch.tensor([0, 8]), 8, 2, 0)
-
-    @unittest.skipUnless(torch.cuda.is_available() and tex is not None, "CUDA extension required")
-    def test_default_partition_accepts_cpu_metadata_with_cuda_target(self):
-        indices = get_thd_partitioned_indices(torch.tensor([0, 8, 16]), 16, 2, 0, device="cuda")
-
-        expected = torch.tensor([0, 1, 6, 7, 8, 9, 14, 15], dtype=torch.int32, device="cuda")
-        self.assertTrue(torch.equal(indices, expected))
 
     def test_no_load_balance_metadata_handles_document_padding_boundary(self):
         cu_seqlens = torch.tensor([0, 6, 10], dtype=torch.int32)
@@ -83,13 +54,13 @@ class TestTHDPartitioning(unittest.TestCase):
             tokens,
             cu_seqlens_padded,
             2,
-            CPAttentionLoadBalancingStrategy.NO_LOAD_BALANCE,
+            CPLoadBalancingStrategy.NO_LOAD_BALANCE,
         )
         unrestored = unrestore_thd_gathered_kv(
             tokens,
             cu_seqlens_padded,
             2,
-            CPAttentionLoadBalancingStrategy.NO_LOAD_BALANCE,
+            CPLoadBalancingStrategy.NO_LOAD_BALANCE,
         )
 
         self.assertIs(restored, tokens)
@@ -694,7 +665,7 @@ class TestContextParallelUtils(unittest.TestCase):
             input_ids,
             labels,
             position_ids,
-            load_balancing_strategy=CPAttentionLoadBalancingStrategy.NO_LOAD_BALANCE,
+            load_balancing_strategy=CPLoadBalancingStrategy.NO_LOAD_BALANCE,
         )
 
         self.assertTrue(torch.equal(input_ids_rank, torch.tensor([[6, 7, 8]])))

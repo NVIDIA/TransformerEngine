@@ -26,7 +26,7 @@ from transformer_engine.pytorch.quantized_tensor import QuantizedTensorStorage
 from transformer_engine.pytorch.jit import jit_fuser
 from transformer_engine.pytorch.graph import is_graph_capturing
 from transformer_engine.pytorch.constants import (
-    CPAttentionLoadBalancingStrategy,
+    CPLoadBalancingStrategy,
     dist_group_type,
 )
 from transformer_engine.pytorch.distributed import (
@@ -283,14 +283,13 @@ def get_thd_partitioned_indices(
     cp_size,
     cp_rank,
     device=None,
-    load_balancing_strategy=CPAttentionLoadBalancingStrategy.DUAL_CHUNK_SWAP,
+    load_balancing_strategy=CPLoadBalancingStrategy.DUAL_CHUNK_SWAP,
 ):
     """Return THD token indices using the selected CP partition contract."""
-    assert isinstance(load_balancing_strategy, CPAttentionLoadBalancingStrategy), (
-        f"Expected {CPAttentionLoadBalancingStrategy.__name__}, "
-        f"got {type(load_balancing_strategy).__name__}."
-    )
-    if load_balancing_strategy is CPAttentionLoadBalancingStrategy.NO_LOAD_BALANCE:
+    assert isinstance(
+        load_balancing_strategy, CPLoadBalancingStrategy
+    ), f"Expected {CPLoadBalancingStrategy.__name__}, got {type(load_balancing_strategy).__name__}."
+    if load_balancing_strategy is CPLoadBalancingStrategy.NO_LOAD_BALANCE:
         validate_no_load_balance_thd_metadata(
             cu_seqlens_padded,
             cu_seqlens_padded,
@@ -495,7 +494,7 @@ def thd_cp_rank_order_to_sequence_order(x, cu_seqlens, cp_size, seq_dim=0):
 
 def restore_thd_gathered_kv(x, cu_seqlens_padded, cp_size, load_balancing_strategy):
     """Restore gathered THD tokens using the strategy captured by attention forward."""
-    if load_balancing_strategy is CPAttentionLoadBalancingStrategy.NO_LOAD_BALANCE:
+    if load_balancing_strategy is CPLoadBalancingStrategy.NO_LOAD_BALANCE:
         # Rank r owns physical chunk r, so rank-major all-gather is already in sequence order.
         return x
     cu_seqlens_padded = _get_thd_partition_cu_seqlens(cu_seqlens_padded, x.device)
@@ -504,7 +503,7 @@ def restore_thd_gathered_kv(x, cu_seqlens_padded, cp_size, load_balancing_strate
 
 def unrestore_thd_gathered_kv(x, cu_seqlens_padded, cp_size, load_balancing_strategy):
     """Arrange THD tokens for reduce-scatter using the captured attention strategy."""
-    if load_balancing_strategy is CPAttentionLoadBalancingStrategy.NO_LOAD_BALANCE:
+    if load_balancing_strategy is CPLoadBalancingStrategy.NO_LOAD_BALANCE:
         # Physical sequence order is also the rank-major reduce-scatter order for this policy.
         return x
     cu_seqlens_padded = _get_thd_partition_cu_seqlens(cu_seqlens_padded, x.device)
@@ -3222,7 +3221,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
             f" >= 2.3. Found {use_fused_attention=}, {use_flash_attn_3=}, "
             f"and {fa_utils.v2_3_plus=}."
         )
-        if load_balancing_strategy is CPAttentionLoadBalancingStrategy.DUAL_CHUNK_SWAP:
+        if load_balancing_strategy is CPLoadBalancingStrategy.DUAL_CHUNK_SWAP:
             assert q.shape[seq_dim_qkv] % 2 == 0 and k.shape[seq_dim_qkv] % 2 == 0, (
                 "cp_comm_type='all_gather' requires seq_len % 2 == 0 for Q, K, V. Found "
                 f"seq_len_q = {q.shape[seq_dim_qkv]}, seq_len_kv = {k.shape[seq_dim_qkv]}."
@@ -3273,7 +3272,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
 
         # Per-document DCS divides every sequence into 2*CP chunks. No-load-balance
         # instead bounds Q by one global chunk and keeps full-document KV bounds.
-        if load_balancing_strategy is CPAttentionLoadBalancingStrategy.NO_LOAD_BALANCE:
+        if load_balancing_strategy is CPLoadBalancingStrategy.NO_LOAD_BALANCE:
             max_seqlen_q = min(max_seqlen_q, q.shape[0])
         else:
             max_seqlen_q = max_seqlen_q // (2 * cp_size)
@@ -3282,7 +3281,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
             cu_seqlens_q = cu_seqlens_q // (2 * cp_size)
         if (
             qkv_format == "thd"
-            and load_balancing_strategy is CPAttentionLoadBalancingStrategy.DUAL_CHUNK_SWAP
+            and load_balancing_strategy is CPLoadBalancingStrategy.DUAL_CHUNK_SWAP
         ):
             cu_seqlens_q_padded = cu_seqlens_q_padded // (2 * cp_size)
         elif qkv_format != "thd":
@@ -3388,7 +3387,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         # prepare per-step tensors
         local_seq_chunk_ids = (
             [rank]
-            if load_balancing_strategy is CPAttentionLoadBalancingStrategy.NO_LOAD_BALANCE
+            if load_balancing_strategy is CPLoadBalancingStrategy.NO_LOAD_BALANCE
             else [rank, 2 * cp_size - rank - 1]
         )
         kv_seq_range_per_step = [None, None]
@@ -3412,7 +3411,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         # Pre-compute THD-specific per-step cu_seqlens
         if (
             qkv_format == "thd"
-            and load_balancing_strategy is CPAttentionLoadBalancingStrategy.NO_LOAD_BALANCE
+            and load_balancing_strategy is CPLoadBalancingStrategy.NO_LOAD_BALANCE
         ):
             total_tokens_q = q.shape[0] * cp_size
             (
@@ -3561,10 +3560,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                         q_part = q
                         k_part = k_ag
                         v_part = v_ag
-                        if (
-                            load_balancing_strategy
-                            is CPAttentionLoadBalancingStrategy.NO_LOAD_BALANCE
-                        ):
+                        if load_balancing_strategy is CPLoadBalancingStrategy.NO_LOAD_BALANCE:
                             window_size_per_step[i] = (-1, 0)
                             max_seqlen_kv_ = max_seqlen_kv
                         else:
@@ -4021,7 +4017,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
 
         local_seq_chunk_ids = (
             [rank]
-            if ctx.load_balancing_strategy is CPAttentionLoadBalancingStrategy.NO_LOAD_BALANCE
+            if ctx.load_balancing_strategy is CPLoadBalancingStrategy.NO_LOAD_BALANCE
             else [rank, 2 * cp_size - rank - 1]
         )
         for i in range(len(local_seq_chunk_ids) + 1):
@@ -4038,10 +4034,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                         q_part = q
                         k_part = k_ag
                         v_part = v_ag
-                        if (
-                            ctx.load_balancing_strategy
-                            is CPAttentionLoadBalancingStrategy.NO_LOAD_BALANCE
-                        ):
+                        if ctx.load_balancing_strategy is CPLoadBalancingStrategy.NO_LOAD_BALANCE:
                             max_seqlen_kv = ctx.max_seqlen_kv
                         else:
                             kv_range, _ = get_kv_seq_info_after_all_gather(
@@ -5146,7 +5139,7 @@ def attn_forward_func_with_cp(
     fp8_output=False,
     layer_number=1,
     return_max_logit=False,
-    load_balancing_strategy=CPAttentionLoadBalancingStrategy.DUAL_CHUNK_SWAP,
+    load_balancing_strategy=CPLoadBalancingStrategy.DUAL_CHUNK_SWAP,
 ) -> torch.Tensor:
     """
     Attention implementation with context parallelism (CP). CP partitions tensors along the sequence
@@ -5156,7 +5149,7 @@ def attn_forward_func_with_cp(
     every sequence length to be, or be padded to be, divisible by (cp_size * 2), and
     tokens must be re-ordered before entering this function.
 
-    Experimental strategy ``CPAttentionLoadBalancingStrategy.NO_LOAD_BALANCE`` instead
+    Experimental strategy ``CPLoadBalancingStrategy.NO_LOAD_BALANCE`` instead
     assigns one contiguous physical-buffer chunk to each rank and uses one attention
     step per rank. Logical sequences remain isolated by ``cu_seqlens``. This strategy
     requires THD, all-gather, causal self-attention without a sliding window, and
@@ -5240,11 +5233,10 @@ def attn_forward_func_with_cp(
         "sbhd",
         "thd",
     ], f"Context parallelism does not support {qkv_format=}!"
-    assert isinstance(load_balancing_strategy, CPAttentionLoadBalancingStrategy), (
-        f"Expected {CPAttentionLoadBalancingStrategy.__name__}, "
-        f"got {type(load_balancing_strategy).__name__}."
-    )
-    if load_balancing_strategy is CPAttentionLoadBalancingStrategy.NO_LOAD_BALANCE:
+    assert isinstance(
+        load_balancing_strategy, CPLoadBalancingStrategy
+    ), f"Expected {CPLoadBalancingStrategy.__name__}, got {type(load_balancing_strategy).__name__}."
+    if load_balancing_strategy is CPLoadBalancingStrategy.NO_LOAD_BALANCE:
         assert qkv_format == "thd", "No-load-balance CP partitioning requires qkv_format='thd'."
         assert (
             cp_comm_type == "all_gather"
@@ -5494,7 +5486,7 @@ def get_batch_on_this_cp_rank(
     position_ids_padded: torch.Tensor,
     cp_group: torch.distributed.ProcessGroup = None,
     qvk_format: str = "thd",
-    load_balancing_strategy=CPAttentionLoadBalancingStrategy.DUAL_CHUNK_SWAP,
+    load_balancing_strategy=CPLoadBalancingStrategy.DUAL_CHUNK_SWAP,
 ):
     """Slice batch input along sequence dimension into multiple chunks for THD format.
 
@@ -5503,15 +5495,14 @@ def get_batch_on_this_cp_rank(
 
     Which are parallelized across GPUs in a context parallel group.
     This version works with variable-length sequences using cumulative sequence lengths.
-    ``CPAttentionLoadBalancingStrategy.NO_LOAD_BALANCE`` assigns one contiguous
+    ``CPLoadBalancingStrategy.NO_LOAD_BALANCE`` assigns one contiguous
     physical-buffer chunk per rank. By default, each padded sequence is chunked independently.
     """
     if qvk_format not in ["thd", "bshd", "sbhd"]:
         raise ValueError(f"Unsupported qvk_format: {qvk_format}!")
-    assert isinstance(load_balancing_strategy, CPAttentionLoadBalancingStrategy), (
-        f"Expected {CPAttentionLoadBalancingStrategy.__name__}, "
-        f"got {type(load_balancing_strategy).__name__}."
-    )
+    assert isinstance(
+        load_balancing_strategy, CPLoadBalancingStrategy
+    ), f"Expected {CPLoadBalancingStrategy.__name__}, got {type(load_balancing_strategy).__name__}."
     if qvk_format == "thd":
         # Get context parallel size and rank
         cp_size = torch.distributed.get_world_size(group=cp_group)
@@ -5520,7 +5511,7 @@ def get_batch_on_this_cp_rank(
             seq_len_val = cu_seqlens_padded[-1].item()
             rank_indices_by_device = {}
 
-            if load_balancing_strategy is CPAttentionLoadBalancingStrategy.NO_LOAD_BALANCE:
+            if load_balancing_strategy is CPLoadBalancingStrategy.NO_LOAD_BALANCE:
 
                 def build_rank_indices(device):
                     return get_thd_partitioned_indices(

@@ -39,7 +39,7 @@ from transformer_engine.pytorch.export import is_in_onnx_export_mode
 from transformer_engine.pytorch.constants import (
     AttnMaskTypes,
     AttnTypes,
-    CPAttentionLoadBalancingStrategy,
+    CPLoadBalancingStrategy,
     DType,
     dist_group_type,
 )
@@ -733,7 +733,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         self.cp_global_ranks = cp_global_ranks
         self.cp_stream = cp_stream
         self.cp_comm_type = cp_comm_type
-        self.load_balancing_strategy = CPAttentionLoadBalancingStrategy.DUAL_CHUNK_SWAP
+        self.load_balancing_strategy = CPLoadBalancingStrategy.DUAL_CHUNK_SWAP
 
         self.hidden_size_per_attention_head_k = (
             kv_channels if isinstance(kv_channels, int) else kv_channels[0]
@@ -886,7 +886,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         cp_global_ranks: List[int],
         cp_stream: torch.cuda.Stream,
         cp_comm_type: str = "p2p",
-        load_balancing_strategy=CPAttentionLoadBalancingStrategy.DUAL_CHUNK_SWAP,
+        load_balancing_strategy=CPLoadBalancingStrategy.DUAL_CHUNK_SWAP,
     ) -> None:
         """
         Set the context parallel attributes for the given
@@ -916,11 +916,11 @@ class DotProductAttention(TransformerEngineBaseModule):
                       - ``"a2a+p2p"``: hierarchical CP implementation. First applying a2a to QKV
                         across each CP sub-group (e.g., via NVLink), then exchanging KV with
                         p2p between sub-groups (e.g., via IBLink).
-        load_balancing_strategy : CPAttentionLoadBalancingStrategy
+        load_balancing_strategy : CPLoadBalancingStrategy
                                   token partition strategy for context-parallel attention.
         """
-        assert isinstance(load_balancing_strategy, CPAttentionLoadBalancingStrategy), (
-            f"Expected {CPAttentionLoadBalancingStrategy.__name__}, "
+        assert isinstance(load_balancing_strategy, CPLoadBalancingStrategy), (
+            f"Expected {CPLoadBalancingStrategy.__name__}, "
             f"got {type(load_balancing_strategy).__name__}."
         )
         self.cp_group = cp_group
