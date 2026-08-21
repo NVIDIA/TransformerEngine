@@ -416,6 +416,7 @@ def _make_graphed_callables(
     slot_io_memory_alias_groups = None
     slot_io_liveness_groups = None
     warmup_plan_alias_groups = None
+    user_grad_arena_ids = None
     if use_slot_memory:
         if _order is None or not is_training or not _reuse_graph_input_output_buffers:
             raise RuntimeError(
@@ -431,15 +432,16 @@ def _make_graphed_callables(
             )
         if any(
             not isinstance(slot, tuple)
-            or len(slot) != 6
+            or len(slot) != 7
             or not all(isinstance(value, int) for value in slot)
             for slot in _graph_memory_slots
         ):
-            raise TypeError("Each graph-memory slot must be a tuple of six integers.")
+            raise TypeError("Each graph-memory slot must be a tuple of seven integers.")
         saved_tensor_arena_ids = [slot[0] for slot in _graph_memory_slots]
         slot_io_memory_alias_groups = [(slot[1], slot[2]) for slot in _graph_memory_slots]
         slot_io_liveness_groups = [(slot[3], slot[4]) for slot in _graph_memory_slots]
         warmup_plan_alias_groups = [slot[5] for slot in _graph_memory_slots]
+        user_grad_arena_ids = [slot[6] for slot in _graph_memory_slots]
 
     # Check reuse graph conditions and reorganize sample_args and sample_kwargs.
     # Note: When capturing a graph, we hold onto the args and kwargs so we have static buffers
@@ -1739,21 +1741,21 @@ def _make_graphed_callables(
         slot_sizes = {}
         for func_idx, plan in enumerate(per_callable_user_grad_tensor_plans):
             _, required_bytes = slot_tensor_targets(plan)
-            physical_slot, _ = slot_io_memory_alias_groups[func_idx]
-            slot_sizes[physical_slot] = max(slot_sizes.get(physical_slot, 0), required_bytes)
+            arena_id = user_grad_arena_ids[func_idx]
+            slot_sizes[arena_id] = max(slot_sizes.get(arena_id, 0), required_bytes)
 
         with torch.cuda.use_mem_pool(slot_allocator_pool):
             slot_user_grad_arenas = {
-                physical_slot: torch.empty(
+                arena_id: torch.empty(
                     (required_bytes,), dtype=torch.uint8, device=torch.cuda.current_device()
                 )
-                for physical_slot, required_bytes in slot_sizes.items()
+                for arena_id, required_bytes in slot_sizes.items()
                 if required_bytes > 0
             }
 
         for func_idx, plan in enumerate(per_callable_user_grad_tensor_plans):
-            physical_slot, _ = slot_io_memory_alias_groups[func_idx]
-            targets, _ = slot_tensor_targets(plan, slot_user_grad_arenas.get(physical_slot))
+            arena_id = user_grad_arena_ids[func_idx]
+            targets, _ = slot_tensor_targets(plan, slot_user_grad_arenas.get(arena_id))
             per_callable_user_grad_tensor_targets[func_idx] = list(targets)
 
     @contextlib.contextmanager
@@ -3010,13 +3012,13 @@ def make_graphed_callables(
         graphs. Only supported with Mcore interleaved pipeline parallelism, i.e.
         when `_order` is provided. All callables in `modules` are assumed to have
         inputs and outputs with the same dtype and shape.
-    _graph_memory_slots: sequence of 6-int tuples, default = None
+    _graph_memory_slots: sequence of 7-int tuples, default = None
         Private liveness plan for mutually exclusive graph variants. Each tuple describes
         the saved-tensor arena, physical I/O slot, I/O branch, model chunk, layer, and warmup
-        alias group for one graph input. Requires the first positional sample argument of every
-        graph input to be a plain CUDA tensor; it is snapshotted into the slot arenas whenever
-        forward saves it for backward, so shape-identical graph inputs can share one input
-        staging surface.
+        alias group, followed by the returned user-gradient arena for one graph input. Requires
+        the first positional sample argument of every graph input to be a plain CUDA tensor; it is
+        snapshotted into the slot arenas whenever forward saves it for backward, so shape-identical
+        graph inputs can share one input staging surface.
     pre_warmup_hook: callable, default = None
                       A hook function that will be called before the warmup iterations.
     post_warmup_hook: callable, default = None

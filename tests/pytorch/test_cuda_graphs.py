@@ -777,9 +777,11 @@ def test_make_graphed_callables_with_interleaved_pipeline_parallelism(
     assert_all_equal(outputs, graph_outputs)
 
 
-def _slot(saved_arena, branch, io_arena, overlap=0, frame=0, warmup=0):
+def _slot(saved_arena, branch, io_arena, overlap=0, frame=0, warmup=0, user_grad=None):
     """Build one private graph-memory slot used by the focused tests below."""
-    return (saved_arena, io_arena, branch, overlap, frame, warmup)
+    if user_grad is None:
+        user_grad = io_arena
+    return (saved_arena, io_arena, branch, overlap, frame, warmup, user_grad)
 
 
 def test_graph_capture_contexts_restore_process_state_on_error(monkeypatch) -> None:
@@ -1513,8 +1515,8 @@ def test_slot_memory_saved_arenas_cover_alternate_schedule() -> None:
         reset_graphs(graphed)
 
 
-def test_slot_memory_reuses_user_grad_surface_across_chunks() -> None:
-    """Adjacent backward chunks may reuse one physical-slot gradient surface."""
+def test_slot_memory_honors_user_grad_liveness_groups() -> None:
+    """The private plan may keep adjacent asynchronous gradient consumers disjoint."""
 
     class Module(torch.nn.Module):
         def forward(self, inp):
@@ -1530,8 +1532,8 @@ def test_slot_memory_reuses_user_grad_surface_across_chunks() -> None:
         _num_layers_per_chunk=[1, 1],
         _reuse_graph_input_output_buffers=True,
         _graph_memory_slots=(
-            _slot(0, 0, 0, overlap=0, warmup=0),
-            _slot(1, 1, 0, overlap=1, warmup=1),
+            _slot(0, 0, 0, overlap=0, warmup=0, user_grad=0),
+            _slot(1, 1, 0, overlap=1, warmup=1, user_grad=1),
         ),
     )
 
@@ -1539,7 +1541,7 @@ def test_slot_memory_reuses_user_grad_surface_across_chunks() -> None:
         inp = torch.randn(4096, device="cuda", requires_grad=True)
         graphed[1](graphed[0](inp)).sum().backward()
         torch.testing.assert_close(inp.grad, 4.0 * inp.detach().pow(3))
-        assert tuple(graphed[-1]._te_cuda_graph_user_grad_arenas) == (0,)
+        assert tuple(graphed[-1]._te_cuda_graph_user_grad_arenas) == (0, 1)
     finally:
         reset_graphs(graphed)
 
