@@ -836,10 +836,9 @@ py::object group_requantize_inplace(py::handle grouped_x, py::handle quantizer,
     quant_config.set_use_fast_math(true);
 
     NVTE_SCOPED_GIL_RELEASE({
-      nvte_group_requantize(input_nvte.data(), output_nvte.data(),
-                                        element_offsets_nvte.data(),
-                                        return_dequantized ? dequantized_nvte.data() : nullptr,
-                                        quant_config, at::cuda::getCurrentCUDAStream());
+      nvte_group_requantize(input_nvte.data(), output_nvte.data(), element_offsets_nvte.data(),
+                            return_dequantized ? dequantized_nvte.data() : nullptr, quant_config,
+                            at::cuda::getCurrentCUDAStream());
     });
 
     grouped_x.attr("scale_inv") = swizzled_rowwise_scale_inv;
