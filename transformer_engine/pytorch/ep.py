@@ -307,7 +307,9 @@ class EpBuffer:
         # Per-step recv-token total (int64 [1]), written by ep_prepare. Eager reads it
         # host-side to size the recv outputs, so it lives in pinned host memory the prepare
         # kernel writes directly (UVA) — no D2H copy, just a stream sync. Graph mode keeps
-        # it on device for the backend's post-replay overflow check.
+        # it on device for the backend's post-replay overflow check. The eager tensor is host
+        # memory, so activation CPU offloading (which targets device tensors) never touches it
+        # and no mark_not_offload guard is needed.
         if self.eager:
             self.total_recv_tokens = torch.empty(1, dtype=torch.int64, pin_memory=True)
         else:
@@ -523,36 +525,15 @@ def _ep_combine_raw(buffer: "EpBuffer", expert_out: torch.Tensor, result: torch.
 # autograd.Function wrappers
 
 
-def _dispatch_backward(ctx, g_recv_tokens, g_recv_topk_weights):
-    """Shared dispatch bwd: run dispatch_bwd and reshape grads to the fwd input layout."""
-    handle_mem = ctx.handle_mem
-    device = handle_mem.device
-    g_recv_tokens = g_recv_tokens.contiguous()
-    g_recv_topk_weights = g_recv_topk_weights.contiguous()
-    # Dispatch grad follows the recv grad's (high-precision) dtype; the quantizer's STE
-    # owns the fp8 boundary for scaled inputs.
-    grad_tokens = torch.empty(
-        ctx.tokens_T_flat, ctx.hidden_dim, dtype=g_recv_tokens.dtype, device=device
-    )
-    grad_topk_weights = torch.empty(ctx.topk_T_flat, ctx.top_k, dtype=torch.float32, device=device)
-    torch.ops.transformer_engine_ep.dispatch_bwd(
-        handle_mem,
-        g_recv_tokens,
-        g_recv_topk_weights,
-        grad_tokens,
-        grad_topk_weights,
-    )
-    return grad_tokens.view(ctx.tokens_shape), grad_topk_weights.view(ctx.topk_weights_shape)
-
-
 class _EpPrepareAndDispatch(torch.autograd.Function):
-    """Autograd fused prepare + dispatch in one C++ op. In eager mode (``recv_tokens`` None) the op
-    sizes and allocates the recv outputs from the per-step host recv-count, so no Python runs
-    between the count read and the dispatch launch; caller-supplied buffers and zero-copy are then
-    forbidden. Otherwise the recv outputs are allocated here to the static recv capacity (caller-
-    supplied or symm-mem-backed under zero-copy) and passed in. When ``tokens_scale_inv`` is set
-    (MXFP8 for now), ``tokens`` is the quantized tensor kept as the autograd operand so grad reaches
-    the pre-quant input, and recv is returned as a per-expert GroupedTensor. Backward is shared."""
+    """Autograd prepare and dispatch grouped into one C++ op (two kernel launches, not a fused
+    kernel). In eager mode the op sizes and allocates the recv outputs from the per-step host
+    recv-count, so no Python runs between the count read and the dispatch launch; caller-supplied
+    buffers and zero-copy are then forbidden. Otherwise the recv outputs are allocated here to the
+    static recv capacity (caller-supplied or symm-mem-backed under zero-copy) and passed in. When
+    ``tokens_scale_inv`` is set (MXFP8 for now), ``tokens`` is the quantized tensor kept as the
+    autograd operand so grad reaches the pre-quant input, and recv is returned as a per-expert
+    GroupedTensor."""
 
     @staticmethod
     def forward(  # type: ignore[override]
@@ -663,11 +644,29 @@ class _EpPrepareAndDispatch(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, g_recv_tokens, g_recv_topk_weights):  # type: ignore[override]
-        """Dispatch bwd; normalizes grad-input layout, otherwise passes through."""
-        grad_tokens, grad_topk_weights = _dispatch_backward(ctx, g_recv_tokens, g_recv_topk_weights)
-        return (
+        """Dispatch bwd: run dispatch_bwd and reshape grads to the fwd input layout."""
+        handle_mem = ctx.handle_mem
+        device = handle_mem.device
+        g_recv_tokens = g_recv_tokens.contiguous()
+        g_recv_topk_weights = g_recv_topk_weights.contiguous()
+        # Dispatch grad follows the recv grad's (high-precision) dtype; the quantizer's STE
+        # owns the fp8 boundary for scaled inputs.
+        grad_tokens = torch.empty(
+            ctx.tokens_T_flat, ctx.hidden_dim, dtype=g_recv_tokens.dtype, device=device
+        )
+        grad_topk_weights = torch.empty(
+            ctx.topk_T_flat, ctx.top_k, dtype=torch.float32, device=device
+        )
+        torch.ops.transformer_engine_ep.dispatch_bwd(
+            handle_mem,
+            g_recv_tokens,
+            g_recv_topk_weights,
             grad_tokens,
             grad_topk_weights,
+        )
+        return (
+            grad_tokens.view(ctx.tokens_shape),
+            grad_topk_weights.view(ctx.topk_weights_shape),
             None,  # topk_idx
             None,  # buffer
             None,  # recv_tokens
