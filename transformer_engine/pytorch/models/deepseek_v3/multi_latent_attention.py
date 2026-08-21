@@ -57,6 +57,8 @@ class MultiLatentAttention(torch.nn.Module):
                        dropout probability on attention scores.
     attn_mask_type : str, default = "causal"
                     attention mask type passed to :class:`DotProductAttention`.
+    layernorm_epsilon : float, default = 1e-6
+                       epsilon of the latent RMSNorms (matches DeepSeekV3).
     rotary_base : float, default = 10000.0
                  RoPE base.
     softmax_scale : float, optional
@@ -83,6 +85,7 @@ class MultiLatentAttention(torch.nn.Module):
         v_head_dim: int = 128,
         attention_dropout: float = 0.0,
         attn_mask_type: str = "causal",
+        layernorm_epsilon: float = 1e-6,
         rotary_base: float = 10000.0,
         softmax_scale: Optional[float] = None,
         qkv_format: str = "sbhd",
@@ -113,6 +116,7 @@ class MultiLatentAttention(torch.nn.Module):
             q_lora_rank,
             num_attention_heads * self.qk_head_dim,
             normalization="RMSNorm",
+            eps=layernorm_epsilon,
             parallel_mode="column" if tp_size > 1 else None,
             **tp,
             **common,
@@ -122,6 +126,7 @@ class MultiLatentAttention(torch.nn.Module):
             kv_lora_rank,
             num_attention_heads * (qk_nope_head_dim + v_head_dim),
             normalization="RMSNorm",
+            eps=layernorm_epsilon,
             parallel_mode="column" if tp_size > 1 else None,
             **tp,
             **common,
