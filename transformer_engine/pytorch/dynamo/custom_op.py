@@ -59,7 +59,7 @@ Autograd, registered on the op, drives backward:
     parses the ``_OutputPlan``, reassembles the saved tensors from the op's flat
     output, then calls the user ``setup_context`` to fill the backward args from
     forward state + ``ctx_attrs`` (e.g. saved-tensor aliases) and return the
-    tensors to persist; the plan is stashed on ``ctx``;
+    tensors to persist; the plan's output ranges are stashed on ``ctx``;
   * on ``backward()`` the incoming flat grads are sliced per user output from the
     stashed plan (a ``grad_outputs`` field on the backward args receives the
     whole tuple; otherwise ``grad_output`` receives the first output's grad),
@@ -554,7 +554,8 @@ def _unpack_tensor_or_quantized(field: _FieldPlan, slots: Dict[str, Any]) -> Any
 class _ArgPlan:
     """The parsed plan for one args dataclass: the single source of truth for
     the schema string, slot order, packing / unpacking, gradient placement and
-    the tensor-or-quantized slot offsets used for subclass flattening.
+    the tensor-or-quantized slot offsets used for subclass flattening (the
+    latter two derived from ``fields`` on demand -- registration-time only).
 
     Built once per registration by :func:`_parse_arg_type`; :meth:`pack` and
     :meth:`unpack` interpret it on each call. ProcessGroup fields ride in the
@@ -567,14 +568,21 @@ class _ArgPlan:
     fields: Tuple[_FieldPlan, ...]
     slot_names: Tuple[str, ...]
     schema_str: str
-    simple_slot: Optional[str]
     tensor_field_names: Tuple[str, ...]
-    tq_offsets: Tuple[int, ...]
 
-    @property
-    def slot_count(self) -> int:
-        """Total number of input schema slots."""
-        return len(self.slot_names)
+    def tensor_or_quantized_offsets(self) -> List[int]:
+        """Start offset of each tensor-or-quantized slot group.
+
+        Derived from ``fields`` on demand -- used once per registration, for
+        the subclass-flattening dispatch wiring.
+        """
+        offsets: List[int] = []
+        offset = 0
+        for field in self.fields:
+            if field.kind is _FieldKind.TENSOR_OR_QUANTIZED:
+                offsets.append(offset)
+            offset += len(field.slots)
+        return offsets
 
     def resolve_grad_targets(self, input_tensors_for_grad: Sequence[str]) -> List[int]:
         """Absolute schema-slot index receiving each requested field's gradient.
@@ -627,8 +635,10 @@ class _ArgPlan:
                             "non-trivial value; add a matching field kind in custom_op.py "
                             "to handle it."
                         )
-        if self.simple_slot is not None:
-            slots[self.simple_slot] = OpaqueValueBundle(simple)
+        # Non-empty exactly when the dataclass has SIMPLE / PROCESS_GROUP
+        # fields, i.e. when the schema ends with the shared bundle slot.
+        if simple:
+            slots[_SIMPLE_META_SLOT] = OpaqueValueBundle(simple)
         return slots
 
     def unpack(self, slots: Dict[str, Any]) -> Any:
@@ -637,7 +647,7 @@ class _ArgPlan:
         Inverse of :meth:`pack`.
         """
         kwargs: Dict[str, Any] = {}
-        bundle = slots.get(self.simple_slot) if self.simple_slot is not None else None
+        bundle = slots.get(_SIMPLE_META_SLOT)
         for field in self.fields:
             match field.kind:
                 case _FieldKind.TENSOR:
@@ -686,19 +696,13 @@ def _parse_arg_type(cls: type) -> _ArgPlan:
     fields = tuple(_parse_field(name, annot) for name, annot in _resolved_field_annotations(cls))
 
     slot_specs: List[_SlotSpec] = []
-    tq_offsets: List[int] = []
     tensor_field_names: List[str] = []
     for field in fields:
-        if field.kind is _FieldKind.TENSOR_OR_QUANTIZED:
-            tq_offsets.append(len(slot_specs))
         if field.kind in (_FieldKind.TENSOR, _FieldKind.TENSOR_OR_QUANTIZED):
             tensor_field_names.append(field.name)
         slot_specs.extend(field.slots)
     if any(f.kind in (_FieldKind.SIMPLE, _FieldKind.PROCESS_GROUP) for f in fields):
-        simple_slot: Optional[str] = _SIMPLE_META_SLOT
         slot_specs.append(_SlotSpec(_SIMPLE_META_SLOT, _OPAQUE_VALUE_BUNDLE_TYPE_NAME))
-    else:
-        simple_slot = None
 
     slot_names = tuple(s.name for s in slot_specs)
     if len(set(slot_names)) != len(slot_names):
@@ -711,9 +715,7 @@ def _parse_arg_type(cls: type) -> _ArgPlan:
         fields=fields,
         slot_names=slot_names,
         schema_str=schema_str,
-        simple_slot=simple_slot,
         tensor_field_names=tuple(tensor_field_names),
-        tq_offsets=tuple(tq_offsets),
     )
 
 
@@ -904,17 +906,23 @@ class _OutputPlan:
             cursor += n
         return values
 
-    def user_grads(self, flat_grads: Sequence[Optional[torch.Tensor]]) -> List[Any]:
-        """Gradient of each user output, sliced from the op's flat grad list.
 
-        A single-slot output yields its tensor grad; a flattened quantized
-        output yields the tuple of its inner-buffer grads.
-        """
-        grads: List[Any] = []
-        for start, stop in self.user_ranges:
-            chunk = [_decode_none(g) for g in flat_grads[start:stop]]
-            grads.append(chunk[0] if stop - start == 1 else tuple(chunk))
-        return grads
+def _slice_user_grads(
+    user_ranges: Tuple[Tuple[int, int], ...], flat_grads: Sequence[Optional[torch.Tensor]]
+) -> List[Any]:
+    """Gradient of each user output, sliced from the op's flat grad list.
+
+    A single-slot output yields its tensor grad; a flattened quantized output
+    yields the tuple of its inner-buffer grads. Takes the bare ranges (not the
+    whole :class:`_OutputPlan`) so ``setup_context`` only has to stash those on
+    ``ctx`` -- keeping the specs (and the quantizers they reference) off the
+    autograd tape.
+    """
+    grads: List[Any] = []
+    for start, stop in user_ranges:
+        chunk = [_decode_none(g) for g in flat_grads[start:stop]]
+        grads.append(chunk[0] if stop - start == 1 else tuple(chunk))
+    return grads
 
 
 # --------------------------------------------------------------------------- #
@@ -997,15 +1005,15 @@ def _register_autograd_for_op(
         ctx.tensor_objects = tensor_objects
         ctx.save_for_backward(*tensors_to_save)
         ctx.backward_objects = bwd_obj
-        ctx.output_plan = out_plan
+        ctx.output_ranges = out_plan.user_ranges
 
     def _autograd_backward(ctx, *grad_outputs):
         bwd_obj = ctx.backward_objects
         if hasattr(bwd_obj, "setup_saved_tensors"):
             bwd_obj.setup_saved_tensors(ctx)
         ctx.tensor_objects = None
-        user_grads = ctx.output_plan.user_grads(grad_outputs[0])
-        ctx.output_plan = None
+        user_grads = _slice_user_grads(ctx.output_ranges, grad_outputs[0])
+        ctx.output_ranges = None
         if bwd_takes_grad_tuple:
             bwd_obj.grad_outputs = tuple(user_grads)
         else:
@@ -1017,7 +1025,7 @@ def _register_autograd_for_op(
         # One grad per input schema slot: default None, but a ``Tensor[]`` slot
         # (always recorded in ``fwd_tensor_list_lengths``) needs a
         # list-shaped no-grad of matching length.
-        out: List[Any] = [None] * fwd_plan.slot_count
+        out: List[Any] = [None] * len(fwd_plan.slot_names)
         for pos, length in ctx.fwd_tensor_list_lengths.items():
             out[pos] = [None] * length
         for pos, g in zip(grad_targets, grads):
@@ -1259,8 +1267,8 @@ def _register_custom_op_impl(
     base_fwd_op = getattr(getattr(torch.ops, _TE_OP_NAMESPACE), base_fwd_name)
     base_bwd_op = getattr(getattr(torch.ops, _TE_OP_NAMESPACE), base_bwd_name)
 
-    fwd_slot_offsets = fwd_plan.tq_offsets
-    bwd_slot_offsets = bwd_plan.tq_offsets
+    fwd_slot_offsets = fwd_plan.tensor_or_quantized_offsets()
+    bwd_slot_offsets = bwd_plan.tensor_or_quantized_offsets()
 
     wrapper_fwd_def = _register_wrapper_op(
         wrapper_op_name=wrapper_fwd_name,
