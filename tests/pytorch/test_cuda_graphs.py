@@ -1124,9 +1124,7 @@ def test_slot_memory_checkpoint_rolls_back_restore_failure(monkeypatch, failure_
 
     module = Module().cuda()
     variants = 2
-    samples = tuple(
-        (torch.ones(4096, device="cuda", requires_grad=True),) for _ in range(variants)
-    )
+    samples = tuple((torch.ones(4096, device="cuda", requires_grad=True),) for _ in range(variants))
     slots = tuple(_slot(0, variant, 1, warmup=variant) for variant in range(variants))
     real_set_state = torch._C._cuda_setCheckpointPoolState
     real_detach = te_graph.tex._graph_checkpoint_detach_storage

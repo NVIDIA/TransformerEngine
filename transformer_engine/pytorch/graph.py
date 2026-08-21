@@ -1600,9 +1600,7 @@ def _make_graphed_callables(
                 # Only the leading input is rebound to a union-liveness staging surface.
                 # Other user inputs may share MCore capture-order buffers that overlap in a
                 # different runtime schedule, so they must use the saved arena instead.
-                and not (
-                    aliases[saved_idx][1] == "input" and aliases[saved_idx][2] != 0
-                )
+                and not (aliases[saved_idx][1] == "input" and aliases[saved_idx][2] != 0)
             ]
             if not candidate_aliases:
                 continue
