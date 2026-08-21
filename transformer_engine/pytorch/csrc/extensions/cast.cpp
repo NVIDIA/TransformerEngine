@@ -467,8 +467,8 @@ py::object group_scaled_swiglu_impl(const char *api_name, const at::Tensor &inpu
   NVTE_CHECK(prob.is_contiguous(), "group_scaled_swiglu prob must be contiguous.");
   NVTE_CHECK(prob.device() == input_2f.device(),
              "group_scaled_swiglu prob must be on the same device as the input.");
-  NVTE_CHECK(prob.numel() >= static_cast<int64_t>(T),
-             "group_scaled_swiglu prob must have at least T elements.");
+  NVTE_CHECK(prob.dim() == 1 && prob.numel() == static_cast<int64_t>(T),
+             "group_scaled_swiglu prob must be a 1D tensor with exactly T elements.");
   NVTE_CHECK(prob.scalar_type() == input_2f.scalar_type(),
              "group_scaled_swiglu prob must have the same dtype as the input (model dtype).");
 
