@@ -690,12 +690,19 @@ class _EpCombine(torch.autograd.Function):
         expert_out: torch.Tensor,
         bwd_quant_recipe=None,
         token_counts: Optional[torch.Tensor] = None,
+        eager: bool = False,
     ):
         """Combine fwd; stashes the bwd grad target or expert_out shape to size it. When
-        ``bwd_quant_recipe`` is set, the backward sends the result-grad as MXFP8."""
+        ``bwd_quant_recipe`` is set, the backward sends the result-grad as MXFP8. Eager mode is not
+        graph-capturable, so it calls the backend op directly and skips the torch.library dispatch.
+        """
         device = expert_out.device
+        zero_copy = tex.ep_get_zero_copy()
         result = torch.empty(num_local_tokens, hidden_dim, dtype=expert_out.dtype, device=device)
-        torch.ops.transformer_engine_ep.combine(handle_mem, expert_out, result)
+        if eager:
+            tex.ep_combine(handle_mem, expert_out, result)
+        else:
+            torch.ops.transformer_engine_ep.combine(handle_mem, expert_out, result)
         ctx.save_for_backward(handle_mem)
         ctx.grad_out = grad_out
         ctx.bwd_quant_recipe = bwd_quant_recipe
@@ -703,6 +710,8 @@ class _EpCombine(torch.autograd.Function):
         ctx.expert_out_shape = expert_out.shape
         ctx.expert_out_dtype = expert_out.dtype
         ctx.device = device
+        ctx.eager = eager
+        ctx.zero_copy = zero_copy
         return result
 
     @staticmethod
@@ -718,9 +727,12 @@ class _EpCombine(torch.autograd.Function):
             grad_expert_out = ctx.grad_out
             if grad_expert_out is None:
                 grad_expert_out = _alloc_io(
-                    ctx.expert_out_shape, ctx.expert_out_dtype, ctx.device, tex.ep_get_zero_copy()
+                    ctx.expert_out_shape, ctx.expert_out_dtype, ctx.device, ctx.zero_copy
                 )
-            torch.ops.transformer_engine_ep.combine_bwd(handle_mem, g_result, grad_expert_out)
+            if ctx.eager:
+                tex.ep_combine_bwd(handle_mem, g_result, grad_expert_out, None, None)
+            else:
+                torch.ops.transformer_engine_ep.combine_bwd(handle_mem, g_result, grad_expert_out)
         else:
             mx, g_scale_inv = _quantize_mxfp8(g_result)
             g_data = mx._rowwise_data
@@ -733,16 +745,17 @@ class _EpCombine(torch.autograd.Function):
                 g_data.dtype,
                 g_scale_inv.dtype,
                 ctx.device,
-                tex.ep_get_zero_copy(),
+                ctx.zero_copy,
             )
             # The backend keys on the fp8 scaling mode; reinterpret the byte-backed data as fp8.
-            torch.ops.transformer_engine_ep.combine_bwd(
-                handle_mem,
-                g_data.view(torch.float8_e4m3fn),
-                ge_data.view(torch.float8_e4m3fn),
-                g_scale_inv,
-                ge_scale_inv,
-            )
+            g_data_fp8 = g_data.view(torch.float8_e4m3fn)
+            ge_data_fp8 = ge_data.view(torch.float8_e4m3fn)
+            if ctx.eager:
+                tex.ep_combine_bwd(handle_mem, g_data_fp8, ge_data_fp8, g_scale_inv, ge_scale_inv)
+            else:
+                torch.ops.transformer_engine_ep.combine_bwd(
+                    handle_mem, g_data_fp8, ge_data_fp8, g_scale_inv, ge_scale_inv
+                )
             grad_expert_out = _make_grouped_mxfp8(
                 ge_data, ge_scale_inv, ctx.token_counts, mx._fp8_dtype, ctx.expert_out_dtype
             )
@@ -755,6 +768,7 @@ class _EpCombine(torch.autograd.Function):
             grad_expert_out,
             None,  # bwd_quant_recipe
             None,  # token_counts
+            None,  # eager
         )
 
 
@@ -1003,4 +1017,5 @@ def ep_combine(
         expert_out,
         bwd_quant_recipe,
         buffer.tokens_per_expert,
+        buffer.eager,
     )
