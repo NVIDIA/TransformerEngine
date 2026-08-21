@@ -1061,6 +1061,36 @@ class TestGroupedLinearOp:
 class TestGroupedMLPFusedOp:
     """Tests for grouped MLP fused op"""
 
+    def test_fusion_declined_for_e5m2_grad_output(self, monkeypatch) -> None:
+        """MXFP8 with Format.HYBRID must fall back to the unfused ops.
+
+        The fused backward reinterprets the grad output's storage as E4M3, so an
+        E5M2 backward format would be misread rather than converted.
+        """
+        from transformer_engine.common.recipe import Format, MXFP8BlockScaling
+
+        fused_op_cls = grouped_mlp_module.GroupedMLP_CuTeGEMMGLU
+        monkeypatch.setattr(fused_op_cls, "is_supported", classmethod(lambda cls: True))
+
+        # Never matches the fusion pattern, so the window scan leaves it alone. That keeps
+        # this test on the dispatch logic and off the kernels, which need SM100.
+        ops = [object(), object(), object()]
+
+        # Declined before the window is scanned, so the original list comes straight back.
+        hybrid = MXFP8BlockScaling(fp8_format=Format.HYBRID)
+        assert (
+            grouped_mlp_module.fuse_grouped_mlp_ops(ops, recipe=hybrid, fused_op_cls=fused_op_cls)
+            is ops
+        )
+
+        # E4M3 gets past the guard and is rebuilt by the scan.
+        e4m3 = MXFP8BlockScaling(fp8_format=Format.E4M3)
+        rebuilt = grouped_mlp_module.fuse_grouped_mlp_ops(
+            ops, recipe=e4m3, fused_op_cls=fused_op_cls
+        )
+        assert rebuilt is not ops
+        assert rebuilt == ops
+
     @pytest.mark.parametrize("bias", (False, True))
     @pytest.mark.parametrize("quantization", _grouped_mlp_quantization_list)
     @pytest.mark.parametrize("single_grouped_weight", (False, True))
