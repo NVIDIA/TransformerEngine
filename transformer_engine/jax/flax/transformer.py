@@ -959,7 +959,9 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
                 score_mod_bprop_tensors=score_mod_bprop_tensors,
             )
         output = x[0] if self.return_max_logit else x
-        assert output.dtype == input_dtype, f"output_dtype={output.dtype}, input_dtype={input_dtype}"
+        assert (
+            output.dtype == input_dtype
+        ), f"output_dtype={output.dtype}, input_dtype={input_dtype}"
         return x
 
 
