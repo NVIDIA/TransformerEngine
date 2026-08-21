@@ -2775,11 +2775,8 @@ class TestGroupedMLPFusedOp:
 class TestGroupedMLPDeterminism:
     """Determinism coverage for the CuTe DSL fused grouped MLP.
 
-    cuDNN's grouped-GEMM dactivation epilogue accumulates the scale gradient (``dprob``)
-    with cross-CTA atomic adds, so its summation order follows the tile scheduler. The
-    dSReLU wrapper takes a ``deterministic`` argument from cuDNN frontend 1.28.0 on that
-    replaces those atomics with per-subtile slots reduced in a canonical order. The dGLU
-    wrapper has no equivalent, so a determinism request it cannot honor is an error.
+    Only the dSReLU wrapper can make ``dprob`` bit-exact, and only from cuDNN FE 1.28.0 on.
+    Anything else must refuse a determinism request rather than run non-deterministically.
     """
 
     @pytest.fixture
@@ -2809,11 +2806,7 @@ class TestGroupedMLPDeterminism:
         torch_flag: bool,
         expected: bool,
     ) -> None:
-        """The same union DotProductAttention uses, and uncached so both stay live.
-
-        ``NVTE_ALLOW_NONDETERMINISTIC_ALGO=1`` is not a request for non-determinism, only
-        the absence of one, so the torch flag still wins that row.
-        """
+        """``=1`` is the absence of a request, not a request for non-determinism."""
         if allow_nondeterministic is None:
             monkeypatch.delenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", raising=False)
         else:
@@ -2822,11 +2815,7 @@ class TestGroupedMLPDeterminism:
         assert grouped_mlp_module._deterministic_algorithms_required() is expected
 
     def test_only_the_srelu_path_can_be_deterministic(self) -> None:
-        """The capability is a property of the wrapper, not of the environment.
-
-        Needs no GPU, and no cuDNN either: the SReLU probe answers False when the import
-        fails, so both assertions hold anywhere.
-        """
+        """The capability belongs to the wrapper, not the environment. Needs no GPU."""
         glu = grouped_mlp_module.GroupedMLP_CuTeGEMMGLU
         unary = grouped_mlp_module.GroupedMLP_CuTeGEMMUnary
         assert glu.grouped_gemm_dactivation_is_deterministic() is False
@@ -2835,12 +2824,7 @@ class TestGroupedMLPDeterminism:
     @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
     @pytest.mark.parametrize("activation", ("scaled_swiglu", "scaled_srelu"))
     def test_determinism_either_runs_or_refuses(self, monkeypatch, *, activation: str) -> None:
-        """A request TE cannot honor must fail loudly, not train on silently.
-
-        ``group_size > 1`` here, so the unit-activation-scale shortcut is off and the cuDNN
-        epilogue really does produce ``dprob``. When the request *can* be honored, the
-        wrapped test checks numerics as usual.
-        """
+        """A request TE cannot honor must fail loudly; one it can must still be correct."""
         if not te.ops.fused.GroupedMLP_CuTeGEMMGLU.is_supported():
             pytest.skip("MXFP8 fused grouped MLP is not supported on this system")
 
@@ -2868,12 +2852,10 @@ class TestGroupedMLPDeterminism:
 
     @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
     def test_dprob_is_bit_exact_across_runs(self, monkeypatch) -> None:
-        """The actual claim: identical inputs produce an identical ``dprob``.
+        """Two identical runs must give a bit-identical ``dprob``.
 
-        The end-to-end test above cannot see this. Reordering the same atomic adds moves
-        the result by about an ulp, which every tolerance in this file accepts, so a run
-        that is silently not reproducible passes it. Only comparing two runs exactly can
-        tell the difference.
+        An ulp of reordering passes every tolerance in this file, so only an exact
+        comparison of two runs can see it.
         """
         fused_cls = grouped_mlp_module.GroupedMLP_CuTeGEMMUnary
         if not fused_cls.is_supported():
@@ -2886,9 +2868,7 @@ class TestGroupedMLPDeterminism:
         device = torch.device("cuda")
         dtype = torch.bfloat16
         group_size = 4
-        # Wide enough that the dprob reduction spans several 256-wide N-tiles. With a
-        # single tile there is one writer per token, nothing to reorder, and the test is
-        # vacuous.
+        # >256 so dprob spans several N-tiles; one tile means one writer and no reordering.
         hidden_size = 1024
         split_sizes = torch.tensor([256] * group_size, dtype=torch.int, device=device)
         num_tokens = int(split_sizes.sum().item())
@@ -2909,9 +2889,7 @@ class TestGroupedMLPDeterminism:
             (num_tokens,), test_dtype=dtype, test_device=device
         )
 
-        # No bias: with an FC2 scale_bias the scale gradient is finished by the Triton
-        # grouped-dbias kernel instead of arriving straight from the cuDNN epilogue, and
-        # probs.grad would no longer be the dprob under test.
+        # No bias, or probs.grad comes from the Triton dbias kernel instead of cuDNN.
         with te.quantized_model_init(enabled=True, recipe=recipe):
             module = te.ops.Sequential(
                 te.ops.GroupedLinear(
@@ -2932,15 +2910,13 @@ class TestGroupedMLPDeterminism:
             return probs.grad.detach().clone()
 
         first = _run()
-        # The fusion has to have happened, or dprob never came from the cuDNN epilogue and
-        # the comparison below proves nothing.
+        # Without the fusion there is no cuDNN dprob and the comparison proves nothing.
         forward_ops = module._module_groups[0]._forward_ops
         assert len(forward_ops) == 1
         assert isinstance(forward_ops[0][0], fused_cls)
         second = _run()
 
-        # Exact, not assert_close. Weight gradients are deliberately not compared: the CuTe
-        # DSL wgrad kernel has its own K-split atomics that this change does not address.
+        # Weight grads are excluded: the CuTe DSL wgrad kernel has its own K-split atomics.
         assert torch.equal(first, second), (
             "dprob differed between two identical runs under determinism; max |delta| ="
             f" {(first.float() - second.float()).abs().max().item()}"

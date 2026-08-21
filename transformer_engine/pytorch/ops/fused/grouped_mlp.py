@@ -138,16 +138,9 @@ def _cudnn_frontend_supports_single_group_runtime_offsets(
 
 
 def _deterministic_algorithms_required() -> bool:
-    """Whether the user has asked for bit-exact reproducibility, by either route.
+    """Whether bit-exact reproducibility was asked for. Same union as ``DotProductAttention``.
 
-    Same union as ``DotProductAttention``: the two knobs answer different questions.
-    ``NVTE_ALLOW_NONDETERMINISTIC_ALGO`` is set once in a job launcher, applies uniformly
-    across ranks and is the only one TE's C++ layer can read; ``use_deterministic_algorithms``
-    is the framework standard, is togglable at runtime, and is what a user who wants
-    reproducibility usually reaches for. Honoring only the first would leave the second
-    silently unenforced.
-
-    Deliberately uncached: both inputs can change during the process.
+    Uncached: both knobs can change during the process.
     """
     return (
         not bool(int(os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1")))
@@ -937,12 +930,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
 
     @classmethod
     def grouped_gemm_dactivation_is_deterministic(cls) -> bool:
-        """Whether this op's dactivation kernel can be asked for a bit-exact ``dprob``.
-
-        Reported per subclass rather than per environment variable: the argument exists on
-        the dSReLU wrapper only, so a GLU activation stays non-deterministic no matter how
-        new the installed cuDNN front-end is.
-        """
+        """Whether this op's dactivation kernel can produce a bit-exact ``dprob``."""
         return False
 
     @classmethod
@@ -2061,9 +2049,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             scales_f32 = scales.detach().to(dtype=torch.float32)
             scales_tensor = scales_f32.reshape(-1, 1, 1)
             dscales_tensor = torch.zeros_like(scales_tensor)
-            # Checked here rather than up front because this is where dprob is actually
-            # produced: with a unit activation scale the cuDNN epilogue never runs its
-            # atomic dprob accumulation, so there is nothing to make deterministic.
+            # Only inside this branch: a unit activation scale produces no dprob at all.
             if _deterministic_algorithms_required():
                 deterministic_dactivation = self.grouped_gemm_dactivation_is_deterministic()
                 if not deterministic_dactivation:
@@ -2124,9 +2110,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         }
         dactivation_kernel = self.grouped_gemm_dactivation_kernel()
         if deterministic_dactivation:
-            # Only reachable when the installed wrapper takes the argument: the check above
-            # raises otherwise, and passing it to a wrapper that does not accept it -- the
-            # dGLU one, or a front-end older than 1.28.0 -- is a TypeError.
+            # Never passed to a wrapper that would reject it -- the check above raises first.
             fc2_dactivation_kwargs["deterministic"] = True
         if _cudnn_frontend_supports_single_group_runtime_offsets(type(activation_op)):
             fc2_dactivation_kwargs["use_single_group_runtime_offsets"] = num_groups == 1
@@ -2659,14 +2643,7 @@ class GroupedMLP_CuTeGEMMUnary(_GroupedMLP_CuTeGEMMBase):
     @classmethod
     @functools.lru_cache(maxsize=None)
     def grouped_gemm_dactivation_is_deterministic(cls) -> bool:
-        """Feature-detect the dSReLU wrapper's ``deterministic`` argument (cuDNN FE 1.28.0+).
-
-        Detected rather than version-checked, because the version cannot answer it:
-        NVIDIA/cudnn-frontend#521 merged after ``v1.27.0`` was tagged, but ``develop`` had
-        already called itself ``1.28.0`` for the eleven days before that, so a build from
-        that window passes a version check and then raises ``TypeError: ... unexpected
-        keyword argument 'deterministic'``.
-        """
+        """Feature-detect the dSReLU wrapper's ``deterministic`` argument (cuDNN FE 1.28.0+)."""
         try:
             kernel = cls.grouped_gemm_dactivation_kernel()
         except ImportError:
