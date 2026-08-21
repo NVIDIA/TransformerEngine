@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+import contextlib
 import functools
 import os
 import math
@@ -2822,20 +2823,27 @@ class TestGroupedMLPDeterminism:
         assert isinstance(unary.grouped_gemm_dactivation_is_deterministic(), bool)
 
     @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
-    @pytest.mark.parametrize("activation", ("scaled_swiglu", "scaled_srelu"))
-    def test_determinism_either_runs_or_refuses(self, monkeypatch, *, activation: str) -> None:
+    @pytest.mark.parametrize(
+        "activation,fused_cls",
+        (
+            ("scaled_srelu", grouped_mlp_module.GroupedMLP_CuTeGEMMUnary),
+            ("scaled_swiglu", grouped_mlp_module.GroupedMLP_CuTeGEMMGLU),
+        ),
+    )
+    def test_determinism_either_runs_or_refuses(
+        self, monkeypatch, *, activation, fused_cls
+    ) -> None:
         """A request TE cannot honor must fail loudly; one it can must still be correct."""
-        if not te.ops.fused.GroupedMLP_CuTeGEMMGLU.is_supported():
+        if not fused_cls.is_supported():
             pytest.skip("MXFP8 fused grouped MLP is not supported on this system")
 
         monkeypatch.setenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "0")
-        fused_cls = (
-            grouped_mlp_module.GroupedMLP_CuTeGEMMUnary
-            if activation == "scaled_srelu"
-            else grouped_mlp_module.GroupedMLP_CuTeGEMMGLU
+        expectation = (
+            contextlib.nullcontext()
+            if fused_cls.grouped_gemm_dactivation_is_deterministic()
+            else pytest.raises(RuntimeError, match="dprob")
         )
-
-        def _run() -> None:
+        with expectation:
             TestGroupedMLPFusedOp().test_grouped_mlp(
                 bias=False,
                 hidden_size=128,
@@ -2843,12 +2851,6 @@ class TestGroupedMLPDeterminism:
                 single_grouped_weight=False,
                 activation=activation,
             )
-
-        if fused_cls.grouped_gemm_dactivation_is_deterministic():
-            _run()
-        else:
-            with pytest.raises(RuntimeError, match="dprob"):
-                _run()
 
     @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
     def test_dprob_is_bit_exact_across_runs(self, monkeypatch) -> None:

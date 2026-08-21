@@ -2041,27 +2041,26 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         current_stream = torch.cuda.current_stream().cuda_stream
 
         unit_activation_scale = bool(getattr(fc1_ctx, "unit_activation_scale", False))
+        # A unit activation scale produces no dprob, so there is nothing to make deterministic.
+        deterministic_dactivation = (
+            not unit_activation_scale and _deterministic_algorithms_required()
+        )
+        if deterministic_dactivation and not self.grouped_gemm_dactivation_is_deterministic():
+            raise RuntimeError(
+                "Deterministic execution was requested"
+                " (NVTE_ALLOW_NONDETERMINISTIC_ALGO=0 or"
+                " torch.use_deterministic_algorithms), but this activation's cuDNN dactivation"
+                " kernel accumulates the scale gradient (dprob) with nondeterministic atomics."
+                " A bit-exact dprob requires the scaled-SReLU activation and"
+                " nvidia-cudnn-frontend 1.28.0 or later."
+            )
         scales_f32 = None
         scales_tensor = None
         dscales_tensor = None
-        deterministic_dactivation = False
         if not unit_activation_scale:
             scales_f32 = scales.detach().to(dtype=torch.float32)
             scales_tensor = scales_f32.reshape(-1, 1, 1)
             dscales_tensor = torch.zeros_like(scales_tensor)
-            # Only inside this branch: a unit activation scale produces no dprob at all.
-            if _deterministic_algorithms_required():
-                deterministic_dactivation = self.grouped_gemm_dactivation_is_deterministic()
-                if not deterministic_dactivation:
-                    raise RuntimeError(
-                        "Deterministic execution was requested"
-                        " (NVTE_ALLOW_NONDETERMINISTIC_ALGO=0 or"
-                        " torch.use_deterministic_algorithms), but the cuDNN grouped-GEMM"
-                        " dactivation backward accumulates the scale gradient (dprob) with"
-                        " cross-CTA atomic adds whose summation order is set by the tile"
-                        " scheduler. A bit-exact dprob needs the scaled-SReLU activation and"
-                        " nvidia-cudnn-frontend 1.28.0 or later."
-                    )
 
         fc2_d_dtype = torch.bfloat16 if use_nvfp4 else torch.float8_e4m3fn
         if use_nvfp4:
