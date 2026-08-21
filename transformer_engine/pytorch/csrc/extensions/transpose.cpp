@@ -142,7 +142,8 @@ void nvfp4_expand_scale_to_fp8(at::Tensor input, at::Tensor output, int64_t tile
 
   nvte_nvfp4_expand_scale_to_fp8(input_cu.data(), output_cu.data(), static_cast<size_t>(tile_rows),
                                  static_cast<size_t>(tile_cols), static_cast<size_t>(rows_padded),
-                                 static_cast<size_t>(block_len), static_cast<NVTEDType>(scale_dtype),
+                                 static_cast<size_t>(block_len),
+                                 static_cast<NVTEDType>(scale_dtype),
                                  at::cuda::getCurrentCUDAStream());
 }
 

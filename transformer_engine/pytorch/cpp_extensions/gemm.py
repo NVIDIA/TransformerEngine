@@ -245,6 +245,7 @@ def _cudnn_grouped_gemm_wgrad_kernel() -> Callable:
 
     return grouped_gemm_wgrad_wrapper_sm100
 
+
 def _cudnn_wgrad_grouped_gemm_nvfp4_ue5m3(
     a_tensor: torch.Tensor,
     b_tensor: torch.Tensor,
