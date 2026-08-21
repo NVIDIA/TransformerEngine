@@ -429,7 +429,7 @@ void nvte_dequantize(const NVTETensor input, NVTETensor output, cudaStream_t str
 void nvte_group_dequantize(const NVTEGroupedTensor input, NVTEGroupedTensor output,
                            cudaStream_t stream);
 
-/*! \brief Fused grouped MXFP8 requantization.
+/*! \brief Fused grouped requantization. Currently only MXFP8 1D scaling is supported.
  *
  * Makes a rowwise-only grouped MXFP8 tensor GEMM-ready in one kernel:
  * dequantizes, builds the columnwise MXFP8 copy with GEMM-swizzled per-group
@@ -464,7 +464,7 @@ void nvte_group_dequantize(const NVTEGroupedTensor input, NVTEGroupedTensor outp
  *                                 path.
  *  \param[in]     stream          CUDA stream used for the operation.
  */
-void nvte_fused_group_requantize_mxfp8(const NVTETensor input, NVTETensor output,
+void nvte_group_requantize(const NVTETensor input, NVTETensor output,
                                        const NVTETensor tensor_offsets, NVTETensor dequantized,
                                        const NVTEQuantizationConfig quant_config,
                                        cudaStream_t stream);

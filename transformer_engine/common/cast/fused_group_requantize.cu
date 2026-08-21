@@ -536,12 +536,12 @@ void fused_group_requantize(const Tensor &input, Tensor *output, const Tensor &t
 }  // namespace requantize
 }  // namespace transformer_engine
 
-void nvte_fused_group_requantize_mxfp8(const NVTETensor input, NVTETensor output,
+void nvte_group_requantize(const NVTETensor input, NVTETensor output,
                                        const NVTETensor tensor_offsets, NVTETensor dequantized,
                                        const NVTEQuantizationConfig quant_config,
                                        cudaStream_t stream) {
   using namespace transformer_engine;
-  NVTE_API_CALL(nvte_fused_group_requantize_mxfp8);
+  NVTE_API_CALL(nvte_group_requantize);
 
   const Tensor *input_cu = convertNVTETensorCheck(input);
   Tensor *output_cu = convertNVTETensorCheck(output);

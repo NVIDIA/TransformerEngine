@@ -145,7 +145,7 @@ TEST_P(FusedGroupRequantizeTestSuite, MatchesUnfusedChainReference) {
 
   QuantizationConfigWrapper fused_config;
   fused_config.set_use_fast_math(use_fast_math);
-  nvte_fused_group_requantize_mxfp8(input_mxfp8.data(), actual.data(), tensor_offsets.data(),
+  nvte_group_requantize(input_mxfp8.data(), actual.data(), tensor_offsets.data(),
                                     return_dequantized ? dequantized_out.data() : nullptr,
                                     fused_config, 0);
 
