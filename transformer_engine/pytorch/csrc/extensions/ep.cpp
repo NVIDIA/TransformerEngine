@@ -358,13 +358,13 @@ std::vector<at::Tensor> ep_prepare_and_dispatch(
   const bool is_scaled = tokens_scale_inv.has_value();
   // Eager sizes the recv outputs from the per-step count and allocates them here; a caller
   // that supplies them (non-eager) uses static recv capacity, so no count read is needed.
-  const bool alloc_recv = !recv_tokens.has_value();
+  const bool caller_omitted_recv = !recv_tokens.has_value();
 
   ep_prepare(handle_mem, topk_idx, tokens_per_expert, top_k, dispatch_output_per_expert_alignment,
              total_recv_tokens);
 
   at::Tensor rt, rw, rsi;
-  if (alloc_recv) {
+  if (caller_omitted_recv) {
     // Prepare writes the per-step recv total straight into pinned host total_recv_tokens
     // (UVA), so a stream sync makes it host-readable with no D2H copy. Kept in one C++ op
     // so no Python runs between the count read and the dispatch launch below.
@@ -389,7 +389,7 @@ std::vector<at::Tensor> ep_prepare_and_dispatch(
 
   ep_dispatch(handle_mem, topk_idx, tokens, topk_weights, rt, rw, tokens_scale_inv,
               is_scaled ? std::optional<at::Tensor>(rsi) : std::nullopt);
-  if (!alloc_recv) return {};  // caller buffers were mutated in place
+  if (!caller_omitted_recv) return {};  // caller buffers were mutated in place
   if (is_scaled) return {rt, rw, rsi};
   return {rt, rw};
 }
