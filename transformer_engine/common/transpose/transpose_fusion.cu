@@ -433,7 +433,7 @@ void fp8_transpose_dbias(const Tensor &input, Tensor *transposed_output, Tensor 
 
   NVTE_CHECK(transposed_output->data.dtype == input.data.dtype,
              "T output must have the same type as input.");
-  NVTE_CHECK(dbias->data.shape == std::vector<size_t>{row_length}, "Wrong shape of DBias.");
+  NVTE_CHECK(dbias->data.shape == Shape{row_length}, "Wrong shape of DBias.");
 
   TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
       dbias->data.dtype, BiasType,

@@ -21,14 +21,23 @@ from torch.distributed.tensor import DTensor
 import transformer_engine_torch as tex
 
 from ._common import _ParameterInitMeta, noop_cat
+from .._extra_state import (
+    extra_state_pickle_advisory,
+    is_stateless_recipe,
+    should_load_extra_state_pickle,
+    unsafe_pickle_extra_state_enabled,
+)
 from ..quantization import (
     MXFP8BlockScalingRecipeState,
     DelayedScalingRecipeState,
     Float8CurrentScalingRecipeState,
     Float8BlockScalingRecipeState,
     NVFP4BlockScalingRecipeState,
+    CustomRecipeState,
     FP8GlobalStateManager,
+    QuantizerRole,
     RecipeState,
+    _has_delayed_scaling_state,
 )
 from ..distributed import (
     gather_along_first_dim,
@@ -41,13 +50,18 @@ from ..cpp_extensions.gemm import _NUM_MAX_UB_STREAMS
 from ..quantized_tensor import QuantizedTensor, QuantizedTensorStorage, Quantizer
 from ..tensor.float8_tensor import Float8Quantizer, Float8CurrentScalingQuantizer
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
+from ..tensor.nvfp4_tensor import NVFP4Quantizer
 from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
+from ..tensor.hybrid_tensor import HybridQuantizer
+from ..tensor.identity_tensor import IdentityQuantizer
 from ..tensor.storage.float8_tensor_storage import Float8TensorStorage
 from ..tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
 from ..tensor.storage.nvfp4_tensor_storage import NVFP4TensorStorage
+from ..tensor.storage.hybrid_tensor_storage import HybridQuantizedTensorStorage
 from ..utils import (
     is_non_tn_fp8_gemm_supported,
     torch_get_autocast_gpu_dtype,
+    get_device_compute_capability,
     get_nvtx_range_context,
     nvtx_range_push,
     nvtx_range_pop,
@@ -58,15 +72,54 @@ from ...debug.pytorch.debug_state import TEDebugState
 from ...debug.pytorch.debug_quantization import DebugQuantizer, DebugQuantizedTensor
 from ...debug.pytorch.utils import next_iter_when_debug_should_be_run, any_feature_enabled
 
-__all__ = ["initialize_ub", "destroy_ub", "UserBufferQuantizationMode"]
+__all__ = [
+    "initialize_ub",
+    "destroy_ub",
+    "is_ub_initialized",
+    "using_cublasmp_backend",
+    "UserBufferQuantizationMode",
+]
 
 _2X_ACC_FPROP = False
 _2X_ACC_DGRAD = True
 _2X_ACC_WGRAD = True
 _dummy_wgrads = {}
 _ub_communicators = None
+_ub_initialized = False
+_ub_with_cublasmp = False
 _MIN_STREAM_PRIORITY, _MAX_STREAM_PRIORITY = None, None
 layers_atomic_ring_exchange = []
+
+
+def _get_high_precision_init_val(parameter: torch.Tensor) -> Optional[torch.Tensor]:
+    """Return temporary pre-quantization initialization stored on a parameter."""
+    return getattr(parameter, "_high_precision_init_val", None)
+
+
+def _clear_high_precision_init_val(parameter: torch.Tensor) -> None:
+    """Release temporary pre-quantization initialization stored on a parameter."""
+    if hasattr(parameter, "_high_precision_init_val"):
+        del parameter._high_precision_init_val
+
+
+def _attach_high_precision_init_val(
+    parameter: torch.Tensor,
+    high_precision_init_val: torch.Tensor,
+) -> None:
+    """Attach TE's temporary high-precision initialization contract to a parameter."""
+    parameter._high_precision_init_val = high_precision_init_val
+    parameter.get_high_precision_init_val = MethodType(_get_high_precision_init_val, parameter)
+    parameter.clear_high_precision_init_val = MethodType(_clear_high_precision_init_val, parameter)
+
+
+def is_ub_initialized() -> bool:
+    """Whether the Userbuffers communicators have been initialized."""
+    return _ub_initialized
+
+
+def using_cublasmp_backend() -> bool:
+    """Whether the active comm+GEMM overlap backend is cuBLASMp."""
+    return _ub_initialized and _ub_with_cublasmp
 
 
 class UserBufferQuantizationMode(Enum):
@@ -103,6 +156,7 @@ def initialize_ub(
     dtype: torch.dtype = torch.bfloat16,
     ub_cfgs: Optional[Union[dict, List[dict]]] = None,
     bootstrap_backend: Union[str, torch.distributed.Backend] = None,
+    with_cublasmp: bool = False,
 ) -> None:
     r"""
     Initialize the Userbuffers communicator for overlapping tensor-parallel communications with
@@ -155,8 +209,15 @@ def initialize_ub(
                         not available. Setting ``NVTE_UB_WITH_MPI=1`` when building TE overrides this
                         option and always initializes Userbuffers with direct MPI calls in C++,
                         which also requires ``MPI_HOME=/path/to/mpi/root`` to be set at compile time.
+    with_cublasmp : bool = False
+                    Whether to use cuBlasMp for the all-gather and reduce-scatter overlaps. TE must
+                    be compiled with `NVTE_WITH_CUBLASMP=1` for this option to work.
+
     """
-    if not tex.device_supports_multicast():
+    # The cuBLASMp backend falls back to a non-multicast algorithm in C++ when multicast is
+    # unsupported or disabled (via UB_SKIPMC), so only enforce the multicast requirement for
+    # the Userbuffers backend.
+    if not tex.device_supports_multicast() and not with_cublasmp:
         if not bool(int(os.getenv("UB_SKIPMC", "0"))):
             raise RuntimeError(
                 "CUDA device, driver and/or toolkit version does not support comm+GEMM overlap "
@@ -195,12 +256,13 @@ def initialize_ub(
                 f"quantization configurations ({len(quantization_modes)})"
             )
 
-    global _ub_communicators
+    global _ub_communicators, _ub_with_cublasmp
     if _ub_communicators is not None:
         raise RuntimeError("UB communicators are already initialized.")
     _ub_communicators = {}
+    _ub_with_cublasmp = with_cublasmp
 
-    if tex.ubuf_built_with_mpi():
+    if tex.ubuf_built_with_mpi() and not with_cublasmp:
         # We're bootstrapping with direct calls to MPI in Userbuffers code so we need to force
         # an MPI_Init() here by creating a new MPI process group...
         if not torch.distributed.is_mpi_available():
@@ -212,7 +274,10 @@ def initialize_ub(
         helper = tex.CommOverlapHelper()
     else:
         # Bootstrapping with torch.distributed API, so check backend and construct
-        # intra/inter-node process groups...
+        # intra/inter-node process groups. The cuBLASMp backend always takes this path
+        # (even when Userbuffers is built with MPI) because it derives its NCCL
+        # communicators from the helper's PyTorch process groups, which the dummy
+        # MPI-bootstrap helper does not provide.
         if not torch.distributed.is_initialized():
             raise RuntimeError("torch.distributed must be initialized before using Userbuffers")
         if bootstrap_backend is None:
@@ -256,7 +321,7 @@ def initialize_ub(
             local_rank = world_rank
             tp_domain_ranks = list(range(world_size))
 
-            helper = tex.CommOverlapHelper(world_group)
+            helper = tex.CommOverlapHelper(world_group, world_group)
 
         if world_rank == 0:
             print(f"!!! [UB] Number of TP domains: {num_domains}\n", end="", flush=True)
@@ -280,6 +345,7 @@ def initialize_ub(
     ]
     layers_reduce_scatter_overlap = ["proj_fprop", "fc2_fprop", "qkv_wgrad", "fc1_wgrad"]
     dgrad_reduce_scatter_overlap = ["qkv_dgrad", "fc1_dgrad"]
+
     # Default overlap methods for layers
     methods = {
         "ring_exchange": [
@@ -346,6 +412,11 @@ def initialize_ub(
         gemm_priority: int = 0,
         pipeline_rs_overlap_first_gemm: bool = False,
     ) -> None:
+        if with_cublasmp and method in ("bulk", "external"):
+            raise ValueError(
+                f"At {name}, cuBLASMp does not support `{method}` overlap method. "
+                "Please select a different method or set with_cublasmp=False."
+            )
         if atomic_gemm:
             warnings.warn(
                 "Atomic GEMM uses a beta API from cublas and is not tested for all use cases."
@@ -357,7 +428,7 @@ def initialize_ub(
                 )
             if method in ("bulk", "external"):
                 warnings.warn(
-                    f"At {name}, atoimic GEMM not is supported for a bulk overlap."
+                    f"At {name}, atomic GEMM not is supported for a bulk overlap."
                     "Defaulting to `atomic_gemm=False`."
                 )
                 atomic_gemm = 0
@@ -403,13 +474,15 @@ def initialize_ub(
             if (quantization_mode == UserBufferQuantizationMode.FP8 and fp8_buf)
             else dtype
         )
+        comm_type = tex.CommOverlapType.RS if is_reduce_scatter else tex.CommOverlapType.AG
         if method == "ring_exchange":
             ub_obj = tex.CommOverlapP2P(
                 shape,  # Communication buffer shape
                 buffer_dtype,  # Communication buffer data type
                 helper,  # Helper for torch.distributed callbacks during bootstrapping
-                tp_size,  # Tensor-parallel group size (may be different than local_size)
-                tex.CommOverlapType.RS if is_reduce_scatter else tex.CommOverlapType.AG,
+                tp_size,  # Tensor-parallel group size (may differ from local_size)
+                comm_type,
+                use_cublasmp=with_cublasmp,
                 num_max_streams=_NUM_MAX_UB_STREAMS,
                 comm_cga_size=cga_size,
                 num_comm_sm=num_sm,
@@ -425,7 +498,9 @@ def initialize_ub(
                 shape,  # Communication buffer shape
                 buffer_dtype,  # Communication buffer data type
                 helper,  # Helper for torch.distributed callbacks during bootstrapping
-                tp_size,  # Tensor-parallel group size (may be different than local_size)
+                tp_size,  # Tensor-parallel group size (may differ from local_size)
+                use_cublasmp=with_cublasmp,
+                comm_type=comm_type,
                 num_splits=num_splits,
                 num_max_streams=_NUM_MAX_UB_STREAMS,
                 comm_cga_size=cga_size,
@@ -460,9 +535,30 @@ def initialize_ub(
                     new_method = user_ub_cfg[name]["method"]
                     methods[new_method].append(name)
 
-        for name in (
-            methods["ring_exchange"] + methods["pipeline"] + methods["bulk"] + methods["external"]
-        ):
+        # Adjust defaults to account for the fact that cuBLASMp does not support
+        # bulk or external overlaps
+        if with_cublasmp:
+            warnings.warn(
+                "cuBLASMp does not support bulk or external overlaps. "
+                "'qkv_dgrad' and 'fc1_dgrad' GEMMs will be configured with 'ring_exchange'"
+                "overlap unless user configuration specifies otherwise. Bulk overlaps for the "
+                "corresponding 'qkv_wgrad' and 'fc1_wgrad' GEMMs will be disabled."
+            )
+            methods["bulk"] = []
+            methods["external"] = []
+            external_gemm_to_overlap.clear()
+
+            for name in dgrad_reduce_scatter_overlap:
+                wgrad_name = name.replace("dgrad", "wgrad")
+                if name not in layers_reduce_scatter_overlap:
+                    layers_reduce_scatter_overlap.append(name)
+                if wgrad_name in layers_reduce_scatter_overlap:
+                    layers_reduce_scatter_overlap.remove(wgrad_name)
+                if name not in methods["ring_exchange"] and name not in methods["pipeline"]:
+                    methods["ring_exchange"].append(name)
+
+        configured_methods = ["ring_exchange", "pipeline", "bulk", "external"]
+        for name in (m for k in configured_methods for m in methods[k]):
             ub_cfg = get_default_config(name)
             if user_ub_cfg is not None and name in user_ub_cfg:
                 fp8_buf = (name in layers_all_gather_overlap) or (
@@ -472,6 +568,9 @@ def initialize_ub(
                 ub_cfg["fp8_buf"] = fp8_buf
             add_ub(name, quantization_mode, **ub_cfg)
 
+    global _ub_initialized
+    _ub_initialized = True
+
 
 def get_ub(name: str, use_fp8: bool):
     """Get userbuffer communicator corresponding to give key."""
@@ -479,19 +578,30 @@ def get_ub(name: str, use_fp8: bool):
     # So favour simplicity until the correct design becomes clear.
     # This is mainly an internal API so we don't need to worry about future changes
     key = (name, UserBufferQuantizationMode.FP8 if use_fp8 else UserBufferQuantizationMode.NONE)
-    if _ub_communicators is None:
+    if not _ub_initialized or _ub_communicators is None:
         raise RuntimeError("UB manager is not initialized.")
     if key not in _ub_communicators:
         raise KeyError(f"UB for {name} with use_fp8={use_fp8} is not registered.")
     return _ub_communicators[key]
 
 
+@torch.compiler.assume_constant_result
+def get_ub_is_fp8(name: str, use_fp8: bool) -> bool:
+    """Query is_fp8_ubuf for a named UB communicator; treated as compile-time constant."""
+    return get_ub(name, use_fp8).is_fp8_ubuf()
+
+
 def destroy_ub():
     """Destroy all allocated userbuffer communicators."""
-    global _ub_communicators
+    global _ub_communicators, _ub_with_cublasmp, _ub_initialized
     _ub_communicators = None
+    _ub_with_cublasmp = False
+    _ub_initialized = False
     global layers_atomic_ring_exchange
     layers_atomic_ring_exchange = []
+    # Compiled graphs may have baked is_fp8_ubuf() via assume_constant_result;
+    # reset so re-init with different settings doesn't read stale constants.
+    torch.compiler.reset()
 
 
 def fill_userbuffers_buffer_for_all_gather(
@@ -512,6 +622,15 @@ def fill_userbuffers_buffer_for_all_gather(
     tensor's metadata, e.g. scaling factors.
 
     """
+    # cuBlasMp handles its own buffer filling and gather, but its fused all-gather + GEMM
+    # still needs an already-quantized local tensor for FP8 GEMMs. The standard FP8 paths
+    # pre-quantize before this call and the quantized-norm path produces an already-quantized
+    # tensor, but custom-recipe paths pass an unquantized tensor and rely on this helper to
+    # quantize it. The callers configure the quantizer usage (rowwise) expected by cuBLASMp.
+    if comm.with_cublasmp():
+        if quantizer is not None and not isinstance(local_tensor, QuantizedTensorStorage):
+            local_tensor = quantizer(local_tensor)
+        return local_tensor, local_tensor
 
     # Tensor dimensions
     local_shape = local_tensor.size()
@@ -657,6 +776,14 @@ def _is_weight_workspace_valid(
             return False
         if quantizer.columnwise_usage and workspace._columnwise_data is None:
             return False
+    elif isinstance(workspace, HybridQuantizedTensorStorage):
+        # Workspace cached under one flag setting (e.g. inference with
+        # ``columnwise=False``) becomes stale when the next call needs the
+        # missing direction; invalidate so a fresh workspace is built.
+        if quantizer.rowwise_usage and workspace._rowwise_storage is None:
+            return False
+        if quantizer.columnwise_usage and workspace._columnwise_storage is None:
+            return False
     if isinstance(workspace, DebugQuantizedTensor) != isinstance(quantizer, DebugQuantizer):
         return False
     return True
@@ -776,7 +903,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self.fp8_meta["fp8_checkpoint"] = False
         self.fp8_meta["fp8_group"] = None
         self.fp8_meta_tensors_initialized = False
-        self.quantizers = {"scaling_fwd": {}, "scaling_bwd": {}}
+        self.quantizers = {"scaling_fwd": [], "scaling_bwd": []}
         self.tp_group = None
         self.tp_size = 1
         self.sequence_parallel = False
@@ -789,6 +916,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self.activation_dtype: Optional[torch.dtype] = None
         self.wgrad_accumulation_and_reduce_hooks = []
         self.wgrad_store = None
+        self._output_quantizer_role: Optional[QuantizerRole] = None
+        self._grad_input_quantizer_role: Optional[QuantizerRole] = None
 
         if not TEDebugState.debug_enabled:
             TEDebugState.initialize()
@@ -808,6 +937,101 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         parameters and buffers.
         """
         super().__setattr__(name, value)
+
+    def _apply(self, *args, **kwargs):
+        """Re-attach attributes that ``swap_tensors`` moves off a quantized parameter.
+
+        ``_apply`` moves wrapper subclasses by exchanging the parameter's whole
+        ``__dict__``, which carries the inner buffers over but takes externally
+        attached state (``_high_precision_init_val``, ``main_grad``, ...) with it.
+        """
+        snapshots = {
+            name: (param, dict(param.__dict__))
+            for name, param in self._parameters.items()
+            if isinstance(param, QuantizedTensorStorage)
+        }
+        out = super()._apply(*args, **kwargs)
+        for name, (old_param, attrs) in snapshots.items():
+            new_param = self._parameters.get(name)
+            if new_param is None:
+                raise RuntimeError(
+                    f"{type(self).__name__}.{name} disappeared during _apply; the state"
+                    " attached to it cannot be restored"
+                )
+            for key, value in attrs.items():
+                # Still present -> tensor state; the post-swap value is the right one.
+                if key in new_param.__dict__:
+                    continue
+                if isinstance(value, MethodType) and value.__self__ is old_param:
+                    value = MethodType(value.__func__, new_param)
+                setattr(new_param, key, value)
+        return out
+
+    @property
+    def output_quantizer_role(self) -> Optional[QuantizerRole]:
+        """Caller-configurable :class:`QuantizerRole` for the forward output quantizer.
+
+        When set, overrides the default role used by :meth:`get_quantizer_roles`
+        for the forward-pass output quantizer slot.  Setting this after
+        quantizers have been created forces their recreation on the next
+        forward pass.
+
+        See also :attr:`grad_input_quantizer_role` for the backward-pass
+        counterpart.
+        """
+        return self._output_quantizer_role
+
+    @output_quantizer_role.setter
+    def output_quantizer_role(self, role: Optional[QuantizerRole]) -> None:
+        if role == self._output_quantizer_role:
+            return
+        self._output_quantizer_role = role
+        if self.fp8_meta_tensors_initialized:
+            self.fp8_meta_tensors_initialized = False
+
+    @property
+    def grad_input_quantizer_role(self) -> Optional[QuantizerRole]:
+        """Caller-configurable :class:`QuantizerRole` for the grad-input quantizer.
+
+        Backward-pass counterpart of :attr:`output_quantizer_role`.
+        """
+        return self._grad_input_quantizer_role
+
+    @grad_input_quantizer_role.setter
+    def grad_input_quantizer_role(self, role: Optional[QuantizerRole]) -> None:
+        if role == self._grad_input_quantizer_role:
+            return
+        self._grad_input_quantizer_role = role
+        if self.fp8_meta_tensors_initialized:
+            self.fp8_meta_tensors_initialized = False
+
+    def _warn_missing_output_quantizer_role(
+        self,
+        fp8_output: bool,
+        fp8_grad: bool,
+    ) -> None:
+        """Warn when quantized output is requested but no consumer role is set.
+
+        Only relevant for ``CustomRecipe`` where the ``qfactory`` dispatches
+        on roles.  Built-in recipes ignore role metadata.
+        """
+        recipe = FP8GlobalStateManager.get_fp8_recipe()
+        if not recipe.custom():
+            return
+        if fp8_output and self._output_quantizer_role is None:
+            warnings.warn(
+                f"{type(self).__name__}: fp8_output=True but "
+                "output_quantizer_role is not set.  The CustomRecipe qfactory "
+                "will receive None for the output quantizer role.",
+                stacklevel=3,
+            )
+        if fp8_grad and self._grad_input_quantizer_role is None:
+            warnings.warn(
+                f"{type(self).__name__}: fp8_grad=True but "
+                "grad_input_quantizer_role is not set.  The CustomRecipe "
+                "qfactory will receive None for the grad-input quantizer role.",
+                stacklevel=3,
+            )
 
     @property
     def is_fsdp2(self) -> bool:
@@ -886,6 +1110,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         # Return early if recipe state matches recipe
         if self.fp8_meta_tensors_initialized:
             recipe_state = self.fp8_meta[fp8_meta_tensor_key]
+            # TODO(#3157): Match built-in recipes by full config, not just RecipeState type, so
+            # same-class mid-training changes rebuild quantizers/workspaces correctly.
             if recipe.delayed() and isinstance(recipe_state, DelayedScalingRecipeState):
                 self.adjust_amax_history_length(recipe.amax_history_len, fwd=fwd)
                 return
@@ -901,20 +1127,127 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 return
             if recipe.nvfp4() and isinstance(recipe_state, NVFP4BlockScalingRecipeState):
                 return
+            if recipe.custom() and isinstance(recipe_state, CustomRecipeState):
+                # TODO(#3157): Compare CustomRecipe/qfactory config here. qfactory changes made
+                # mid-training on the same recipe object currently do not take effect because
+                # stale quantizers are reused.
+                if recipe_state.recipe is recipe:
+                    return
 
         # Max. number of fp8 tensors per GEMM = 3 (input, weight, output) for fwd and
         # 2 (grad_output and grad_input) for bwd
         num_fp8_tensors = self.fp8_meta["num_gemms"] * 3 if fwd else self.fp8_meta["num_gemms"] * 2
 
         # Initialize recipe state and quantizers
-        recipe_state = RecipeState.create(
+        roles = self.get_quantizer_roles(  # pylint: disable=assignment-from-none
+            fwd=fwd, num_quantizers=num_fp8_tensors
+        )
+        if roles is not None:
+            assert (
+                len(roles) == num_fp8_tensors
+            ), f"Recipe roles must match number of quantizers ({len(roles)=} vs {num_fp8_tensors=})"
+        recipe_state = RecipeState.create(  # pylint: disable=assignment-from-none
             recipe,
             mode=("forward" if fwd else "backward"),
             num_quantizers=num_fp8_tensors,
+            roles=roles,
         )
+
+        # Reached the rebuild path because ``fp8_meta_tensors_initialized``
+        # was flipped to False after first init — most commonly because the
+        # ``output_quantizer_role`` / ``grad_input_quantizer_role`` setter
+        # invalidated state when a parent module (e.g. ``MultiheadAttention``)
+        # wired boundary roles. That setter is recipe-agnostic, so this code
+        # fires even for built-in recipes that don't consume role information
+        # in ``make_quantizers``.
+        #
+        # Rebuilding the recipe state must preserve persistent training
+        # buffers (delayed-scaling ``scale`` / ``amax_history``) so the new
+        # quantizer instances and the ``FP8GlobalStateManager`` reduction
+        # buffers end up viewing the SAME tensor objects, and so any
+        # checkpoint-loaded state isn't silently destroyed on the first
+        # forward after ``load_state_dict``.
+        old_state = self.fp8_meta.get(fp8_meta_tensor_key)
+        if old_state is not None:
+            recipe_state.inherit_state_from(old_state)
 
         self.fp8_meta[fp8_meta_tensor_key] = recipe_state
         self.quantizers[fp8_meta_tensor_key] = recipe_state.make_quantizers()
+
+    def get_quantizer_roles(
+        self,
+        *,
+        fwd: bool,  # pylint: disable=unused-argument
+        num_quantizers: int,  # pylint: disable=unused-argument
+    ) -> Optional[List[QuantizerRole]]:
+        """Return an ordered list of :class:`QuantizerRole` for quantizers.
+
+        Overview
+        --------
+        When using ``CustomRecipe``, the quantizer factory is called once
+        per quantizer slot.  Each call receives a ``QuantizerRole`` that
+        tells the factory *what* is being quantized so it can return the
+        right quantizer.
+
+        This method builds the role list.  Subclasses override it to
+        describe their internal GEMM layout.
+
+        Slot layout
+        -----------
+        Return one ``QuantizerRole`` per slot, in the same order as the
+        module's quantizer array.  For example, ``Linear`` uses 3
+        forward slots ``[input, weight, output]`` and 2 backward slots
+        ``[grad_output, grad_input]``.  Multi-GEMM modules like
+        ``LayerNormMLP`` repeat that pattern for each GEMM:
+        ``[fc1_input, fc1_weight, fc1_output, fc2_input, fc2_weight, fc2_output]``.
+
+        What to put in each slot
+        ------------------------
+        Create a ``QuantizerRole(module_type=..., tensor_type=...,
+        name=...)`` for each slot:
+
+        * **module_type** — the kind of module: ``"linear"``,
+          ``"grouped_linear"``, ``"dpa"``, etc.  The factory can dispatch
+          on this to use different quantization formats per module type.
+        * **tensor_type** — what tensor this slot holds, in the module's
+          own vocabulary.  For linears: ``"input"``, ``"weight"``,
+          ``"grad_output"``, etc.  For DPA: ``"qkv"``, ``"s"``,
+          ``"do"``, ``"dp"``, etc.
+        * **name** — the instance name (e.g. ``"encoder.layer0.fc1"``),
+          propagated from the ``name=`` constructor argument.  The factory
+          can dispatch on this to target specific layers.
+
+        Boundary slots
+        --------------
+        The last slot of a forward GEMM group (output) and the last slot
+        of a backward group (grad_input) are **boundary** slots — the
+        tensor leaves this module and enters an unknown consumer.  For
+        these slots, use ``self._output_quantizer_role`` (fwd) and
+        ``self._grad_input_quantizer_role`` (bwd), which default to
+        ``None``.  A parent module (e.g. ``MultiheadAttention``) can set
+        these attributes to fill in the consumer identity; see
+        ``MultiheadAttention._update_output_quantizer_roles`` for an
+        example.
+
+        Return value
+        ------------
+        * A list of ``QuantizerRole`` with length ``num_quantizers``.
+        * ``None`` to opt out of role-based dispatch.
+
+        Not implemented (default)
+        ~~~~~~~~~~~~~~~~~~~~~~~~~
+        The base implementation returns ``None``.  When ``None`` is
+        returned, ``CustomRecipeState`` emits a warning and falls back
+        to bare ``QuantizerRole()`` instances (all fields empty) for
+        every slot.  The factory still gets called once per slot, but
+        every call receives an identical empty role — it cannot
+        distinguish input from weight, forward from backward, or one
+        module from another.  What happens then depends entirely on the
+        factory: it may return the same quantizer for all slots (acting
+        as a uniform recipe), or it may raise an error if it requires
+        meaningful roles to dispatch on.
+        """
+        return None
 
     def _update_weight_quantizers(self) -> None:
         """Update the quantizers for the weight tensors."""
@@ -940,6 +1273,40 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         raise NotImplementedError(
             f"{self.__class__.__name__} class does not implement _get_weight_quantizers function"
         )
+
+    def _enable_weight_preswizzle(
+        self,
+        quantizer: Quantizer,
+        weight: torch.Tensor,
+    ) -> bool:
+        """Whether to fuse scale-factor swizzling into weight quantization.
+
+        When enabled, scales are preswizzled during quantization instead of lazily
+        inside every GEMM. Disabled when primary weights are already quantized
+        (dequant and FSDP2 all-gather expect the unswizzled layout). For NVFP4,
+        enabled only for shapes/architectures where the fused swizzle+quantize
+        kernel is supported. Weight quantization always uses the single-tensor
+        kernel (including GroupedLinear's cached weights), so NVFP4 RHT
+        eligibility uses that kernel's 64-row alignment.
+        """
+        if self.primary_weights_in_fp8:
+            return False
+        if isinstance(quantizer, MXFP8Quantizer):
+            return True
+        if isinstance(quantizer, NVFP4Quantizer):
+            rows, cols = weight.numel() // weight.shape[-1], weight.shape[-1]
+            arch_supported = get_device_compute_capability() >= (10, 0)
+            if quantizer.with_rht:
+                return arch_supported and rows % 64 == 0 and cols % 128 == 0
+            return (
+                arch_supported
+                and quantizer.with_2d_quantization
+                and not quantizer.row_scaled_nvfp4
+                and not quantizer.nvfp4_use_4over6
+                and rows % 128 == 0
+                and cols % 128 == 0
+            )
+        return False
 
     def init_fp8_meta_tensors(self, recipe: Recipe) -> None:
         """Init scales and amaxes."""
@@ -1021,10 +1388,14 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         if not fp8_checkpoint:
             return torch.empty(0, dtype=torch.uint8)
 
+        recipe = self.fp8_meta["recipe"]
+        if is_stateless_recipe(recipe):
+            return torch.empty(0, dtype=torch.uint8)
+
         # Copy tensors to CPU and store
         state = {}
-        state["recipe"] = self.fp8_meta["recipe"]
-        if state["recipe"].delayed():
+        state["recipe"] = recipe
+        if _has_delayed_scaling_state(self.fp8_meta):
             state["scale_fwd"] = to_cpu(self.fp8_meta["scaling_fwd"].scale)
             state["amax_history_fwd"] = to_cpu(self.fp8_meta["scaling_fwd"].amax_history)
             state["scale_bwd"] = to_cpu(self.fp8_meta["scaling_bwd"].scale)
@@ -1053,16 +1424,21 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             return
 
         # Load state
+        context = self.__class__.__name__
         if isinstance(state, torch.Tensor):
-            # No FP8 is indicated by an empty tensor we don't need to unpickle.
+            # Empty extra state does not need pickle handling.
             if state.numel() == 0:
                 return
-            # Default format: byte tensor with pickled data
-            state = pickle.loads(state.detach().cpu().numpy().tobytes())
+            state_bytes = state.detach().cpu().numpy().tobytes()
+            if not should_load_extra_state_pickle(state_bytes, context):
+                return
+            state = pickle.loads(state_bytes)
         elif isinstance(state, io.BytesIO):
-            # Deprecated format with io.BytesIO
+            # Deprecated format with io.BytesIO. Treat it as unsafe pickle.
+            if not unsafe_pickle_extra_state_enabled():
+                raise RuntimeError(extra_state_pickle_advisory(context))
             state.seek(0)
-            state = torch.load(state, map_location="cuda")
+            state = torch.load(state, map_location="cuda", weights_only=False)
         else:
             raise RuntimeError("Unsupported checkpoint format.")
 
@@ -1096,7 +1472,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             dst.copy_(src, non_blocking=True)
 
         # Load tensors
-        if self.fp8_meta["recipe"].delayed():
+        if _has_delayed_scaling_state(self.fp8_meta):
             copy_tensor(state["scale_fwd"], self.fp8_meta["scaling_fwd"].scale)
             copy_tensor(state["amax_history_fwd"], self.fp8_meta["scaling_fwd"].amax_history)
             copy_tensor(state["scale_bwd"], self.fp8_meta["scaling_bwd"].scale)
@@ -1223,7 +1599,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
         # Activation recomputation is used and this is the second forward phase.
         if self.fp8 and in_fp8_activation_recompute_phase():
-            delayed_scaling_recipe = self.fp8_meta["recipe"].delayed()
+            delayed_scaling_recipe = _has_delayed_scaling_state(self.fp8_meta)
             FP8GlobalStateManager.get_old_fp8_meta_tensors_for_recompute(self.fp8_meta)
         else:
             if not inp.is_cuda:
@@ -1242,14 +1618,15 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             self.init_fp8_metadata(num_gemms=num_gemms)
             self._check_weight_tensor_recipe_correspondence()
 
-            delayed_scaling_recipe = self.fp8 and self.fp8_meta["recipe"].delayed()
+            delayed_scaling_recipe = self.fp8 and _has_delayed_scaling_state(self.fp8_meta)
             if delayed_scaling_recipe:
                 if self.sequence_parallel:
-                    if not self.fp8_meta["recipe"].reduce_amax:
-                        raise ValueError(
-                            "Amax reduction across tensor parallel group is "
-                            "necessary when using sequence parallelism with FP8."
-                        )
+                    assert (
+                        self.fp8_meta["recipe"].custom() or self.fp8_meta["recipe"].reduce_amax
+                    ), (
+                        "Amax reduction across tensor parallel group is "
+                        "necessary when using sequence parallelism with FP8."
+                    )
 
                 if not FP8GlobalStateManager.fp8_graph_capturing():
                     FP8GlobalStateManager.add_fp8_tensors_to_global_buffer(self.fp8_meta)
@@ -1268,7 +1645,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         Required to be called at the end of the forward function to properly handle
         DelayedScaling metadata handling and the NVTX ranges.
         """
-        delayed_scaling_recipe = self.fp8 and self.fp8_meta["recipe"].delayed()
+        delayed_scaling_recipe = self.fp8 and _has_delayed_scaling_state(self.fp8_meta)
         if delayed_scaling_recipe and self.fp8 and in_fp8_activation_recompute_phase():
             FP8GlobalStateManager.restore_fp8_meta_tensors(self.fp8_meta)
         nvtx_range_pop()
@@ -1398,8 +1775,12 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             ):
                 grad_bias = grad_output.dequantize().view(-1, grad_output.shape[-1]).sum(dim=0)
             else:
-                if isinstance(quantizer, Float8BlockQuantizer):
-                    # unfuse bgrad for now until cast_transpose + dgrad calculation is ready for Float8BlockQuantizer.
+                if isinstance(
+                    quantizer, (Float8BlockQuantizer, HybridQuantizer, IdentityQuantizer)
+                ):
+                    # Float8BlockQuantizer: unfused until cast_transpose + dgrad is ready.
+                    # HybridQuantizer: tex.bgrad_quantize doesn't recognize hybrid quantizers.
+                    # IdentityQuantizer: high-precision passthrough; bgrad computed in HP.
                     grad_bias = grad_output.view(-1, grad_output.shape[-1]).sum(dim=0)
                 else:
                     grad_bias, grad_output = tex.bgrad_quantize(grad_output, quantizer)
@@ -1466,7 +1847,12 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     raise RuntimeError("Weight quantizer has not been initialized")
                 quantizer.set_usage(rowwise=True, columnwise=torch.is_grad_enabled())
                 quantizer.internal = False
-                if is_dtensor and isinstance(quantizer, Float8CurrentScalingQuantizer):
+                # HybridQuantizer is included so its current-scaling / NVFP4
+                # sub-quantizers get the same cross-shard amax reduction as the
+                # vanilla path (no-op for block-scaled sub-quantizers like MXFP8).
+                if is_dtensor and isinstance(
+                    quantizer, (Float8CurrentScalingQuantizer, NVFP4Quantizer, HybridQuantizer)
+                ):
                     device_mesh = dtensor_param.device_mesh
                     amax_reduction_group = (
                         device_mesh.get_group(mesh_dim="shard")
@@ -1509,21 +1895,10 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 #   should call `clear_high_precision_init_val` to remove it after master weight
                 #   is initialized.
 
-                def get(self):
-                    if hasattr(self, "_high_precision_init_val"):
-                        return self._high_precision_init_val
-                    return None
-
-                def clear(self):
-                    if hasattr(self, "_high_precision_init_val"):
-                        del self._high_precision_init_val
-
                 # DTensor.from_local() does not preserve object identity,
                 # so attach to the DTensor's local tensor when applicable.
                 target = dtensor_param._local_tensor if is_dtensor else param
-                target._high_precision_init_val = high_precision_init_val
-                target.get_high_precision_init_val = MethodType(get, target)
-                target.clear_high_precision_init_val = MethodType(clear, target)
+                _attach_high_precision_init_val(target, high_precision_init_val)
 
             if not is_dtensor:
                 self.module_setattr(name, param)

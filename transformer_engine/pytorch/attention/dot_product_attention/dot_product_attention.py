@@ -11,9 +11,10 @@ import warnings
 import logging
 
 import torch
+import torch.nn.functional as F
+from torch.fx.experimental.symbolic_shapes import guard_scalar
 from torch.nn.parameter import Parameter
 
-import transformer_engine_torch as tex
 from transformer_engine.common.recipe import (
     Format,
     Recipe,
@@ -21,8 +22,8 @@ from transformer_engine.common.recipe import (
     Float8CurrentScaling,
     MXFP8BlockScaling,
 )
-from transformer_engine.pytorch.utils import get_cudnn_version
 from transformer_engine.pytorch.quantization import (
+    QuantizerRole,
     get_fp8_te_dtype,
     FP8GlobalStateManager,
     RecipeState,
@@ -32,13 +33,10 @@ from transformer_engine.pytorch.quantization import (
     Float8BlockScalingRecipeState,
 )
 from transformer_engine.pytorch.tensor.storage.float8_tensor_storage import Float8TensorStorage
+from transformer_engine.pytorch.tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
 from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
 from transformer_engine.pytorch.export import is_in_onnx_export_mode
-from transformer_engine.pytorch.constants import (
-    AttnMaskTypes,
-    AttnTypes,
-    dist_group_type,
-)
+from transformer_engine.pytorch.constants import AttnMaskTypes, AttnTypes, dist_group_type, DType
 from transformer_engine.pytorch.distributed import (
     get_distributed_world_size,
     checkpoint,
@@ -54,6 +52,7 @@ from transformer_engine.pytorch.attention.inference import InferenceParams
 import transformer_engine.pytorch.attention.dot_product_attention.utils as dpa_utils
 from transformer_engine.pytorch.attention.dot_product_attention.utils import (
     AttentionLogging as attn_log,
+    FlashAttentionUtils,
 )
 
 from transformer_engine.pytorch.attention.dot_product_attention.backends import (
@@ -87,6 +86,75 @@ _alibi_cache = {
     "_alibi_slopes_require_update": False,
     "_alibi_bias_require_update": False,
 }
+
+
+def _infer_custom_dpa_local_recipes(
+    fp8_recipe: Recipe,
+    fp8_meta: Dict[str, Any],
+    quantizers: Dict[str, Any],
+) -> Optional[List[Recipe]]:
+    """Infer native-equivalent DPA recipe labels for CustomRecipe control-flow.
+
+    CustomRecipe owns quantizer construction, but DPA backend selection and a
+    few fused-attention branches still dispatch on recipe predicates. Attach
+    local recipe labels that match the qfactory DPA quantizer family while
+    keeping the actual qfactory-created quantizers untouched.
+    """
+    try:
+        qkv_quantizer = quantizers["scaling_fwd"][dpa_utils.META_QKV]
+    except (KeyError, IndexError, TypeError):
+        return None
+
+    from transformer_engine.pytorch.tensor.float8_tensor import (
+        Float8CurrentScalingQuantizer,
+        Float8Quantizer,
+    )
+    from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
+
+    if isinstance(qkv_quantizer, MXFP8Quantizer):
+        return [
+            MXFP8BlockScaling(
+                fp8_format=fp8_recipe.fp8_format,
+                fp8_dpa=fp8_recipe.fp8_dpa,
+                fp8_mha=fp8_recipe.fp8_mha,
+            )
+        ]
+
+    def _delayed_scaling_recipe() -> Optional[DelayedScaling]:
+        fwd_state = fp8_meta.get("scaling_fwd")
+        ds_recipe = getattr(fwd_state, "_inner_delayed_scaling_recipe", None)
+        if ds_recipe is None:
+            return None
+        return DelayedScaling(
+            fp8_format=ds_recipe.fp8_format,
+            margin=ds_recipe.margin,
+            amax_history_len=ds_recipe.amax_history_len,
+            amax_compute_algo=ds_recipe.amax_compute_algo,
+            scaling_factor_compute_algo=ds_recipe.scaling_factor_compute_algo,
+            reduce_amax=ds_recipe.reduce_amax,
+            fp8_dpa=fp8_recipe.fp8_dpa,
+            fp8_mha=fp8_recipe.fp8_mha,
+        )
+
+    if isinstance(qkv_quantizer, Float8CurrentScalingQuantizer):
+        ds_recipe = _delayed_scaling_recipe()
+        if ds_recipe is not None:
+            return [
+                Float8CurrentScaling(
+                    fp8_format=fp8_recipe.fp8_format,
+                    fp8_dpa=fp8_recipe.fp8_dpa,
+                    fp8_mha=fp8_recipe.fp8_mha,
+                ),
+                ds_recipe,
+            ]
+
+    if isinstance(qkv_quantizer, Float8Quantizer):
+        ds_recipe = _delayed_scaling_recipe()
+        if ds_recipe is not None:
+            return [ds_recipe]
+
+    return None
+
 
 """
 This feature is **experimental** and subject to change.
@@ -179,6 +247,171 @@ _dpa_fp8ds_reduce_amax = os.getenv("NVTE_DPA_FP8DS_REDUCE_AMAX", "1") == "1"
 __all__ = ["DotProductAttention"]
 
 
+def _pad_qkv_head_dim(query_layer, key_layer, value_layer):
+    """Pad Q/K/V to the same head dimension for FlashAttention 2 MLA."""
+    orig_head_dim_qk = query_layer.shape[-1]
+    orig_head_dim_v = value_layer.shape[-1]
+    padded_head_dim = max(orig_head_dim_qk, orig_head_dim_v)
+    if orig_head_dim_qk < padded_head_dim:
+        query_layer = F.pad(query_layer, (0, padded_head_dim - orig_head_dim_qk))
+        key_layer = F.pad(key_layer, (0, padded_head_dim - key_layer.shape[-1]))
+    if orig_head_dim_v < padded_head_dim:
+        value_layer = F.pad(value_layer, (0, padded_head_dim - orig_head_dim_v))
+    return query_layer, key_layer, value_layer, orig_head_dim_qk, orig_head_dim_v
+
+
+def _trim_output(attn_out, num_attention_heads, padded_head_dim_v, orig_head_dim_v):
+    """Trim FlashAttention output after padding V to a larger head dimension."""
+    out_shape = attn_out.shape[:-1]
+    attn_out = attn_out.reshape(*out_shape, num_attention_heads, padded_head_dim_v)
+    return attn_out[..., :orig_head_dim_v].reshape(*out_shape, -1)
+
+
+def _needs_eager_dpa(call: Dict[str, Any]) -> Optional[str]:
+    """Why this DotProductAttention call has to run outside the graph, or None.
+
+    `call` maps `DotProductAttention.forward`'s parameter names to the arguments
+    this call passed, including `self`.
+    """
+    # FP8 GEMMs with the attention itself in high precision -- the common
+    # training setup -- stay on the compiled path; only FP8 attention bails out.
+    qstate = FP8GlobalStateManager.quantization_state
+    fp8_recipe = qstate.fp8_recipe
+    if qstate.fp8_enabled and fp8_recipe is not None:
+        if fp8_recipe.fp8_dpa or fp8_recipe.fp8_mha:
+            return "FP8 attention"
+
+    if call["self"].cp_group is not None:
+        return "context parallelism"
+
+    if call.get("checkpoint_core_attention", False):
+        return "activation checkpointing of the attention"
+
+    qkv_format = call.get("qkv_format") or call["self"].qkv_format
+    if qkv_format == "thd" and (
+        call.get("max_seqlen_q") is None or call.get("max_seqlen_kv") is None
+    ):
+        # Deriving it reads the sequence lengths off cu_seqlens, which is a
+        # device synchronization and a data-dependent value while tracing.
+        return "deriving max_seqlen from cu_seqlens"
+
+    if call.get("qkv_layer") is None and call.get("kv_layer") is None:
+        qkv = [call.get(name) for name in ("query_layer", "key_layer", "value_layer")]
+        if dpa_utils.qkv_layout_needs_detection(*qkv):
+            return "detecting packed q/k/v that were not declared via qkv_layer/kv_layer"
+
+    if call["self"].rng_states_tracker is not None and call["self"].attention_dropout > 0:
+        # Forking the tracker swaps the global CUDA generator state, which Dynamo
+        # refuses to trace. With no dropout there is nothing to fork for.
+        return "attention dropout under a CUDA RNG states tracker"
+    return None
+
+
+def _unpack_packed_qkv(
+    qkv_layer: Optional[torch.Tensor],
+    kv_layer: Optional[torch.Tensor],
+    query_layer: Optional[torch.Tensor],
+    key_layer: Optional[torch.Tensor],
+    value_layer: Optional[torch.Tensor],
+    qkv_format: str,
+    qkv_interleave_dim: int,
+    inference_params: Optional[InferenceParams],
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[str]]:
+    """Resolve declarative packed inputs into q/k/v.
+
+    Derives q/k/v as zero-copy views of the packed buffer (``qkv_layer`` or
+    ``kv_layer``) and constructs the exact layout string from the declaration.
+    The layout enum is truthful by construction, so no pointer-based detection
+    is needed downstream (this also covers thd and FP8 DPA).
+
+    Returns ``(query_layer, key_layer, value_layer, declared_qkv_layout)``;
+    the layout is ``None`` when no packed input is given.
+    """
+    if qkv_layer is None and kv_layer is None:
+        if query_layer is None or key_layer is None or value_layer is None:
+            raise ValueError(
+                "query_layer, key_layer and value_layer are required unless packed"
+                " inputs (qkv_layer or query_layer + kv_layer) are provided."
+            )
+        return query_layer, key_layer, value_layer, None
+
+    if qkv_layer is not None and kv_layer is not None:
+        raise ValueError("qkv_layer and kv_layer are mutually exclusive.")
+    if inference_params is not None:
+        raise ValueError(
+            "Packed inputs (qkv_layer/kv_layer) are not supported with KV caching"
+            " (inference_params); pass separate query/key/value tensors instead."
+        )
+    if qkv_interleave_dim not in (-3, -2):
+        raise ValueError(
+            "qkv_interleave_dim must be -3 (e.g. bs3hd) or -2 (e.g. bsh3d), got"
+            f" {qkv_interleave_dim}."
+        )
+    packed = qkv_layer if qkv_layer is not None else kv_layer
+    # The declared layout describes the packed buffer's memory, so it must have
+    # stride 1 in its last dimension (the check get_qkv_layout would otherwise
+    # perform on the derived q/k/v views).
+    if packed.stride(-1) != 1:
+        raise ValueError(
+            "The packed tensor (qkv_layer/kv_layer) must have stride 1 in its last"
+            f" dimension, got strides {tuple(packed.stride())}."
+        )
+
+    def _packed_layout(fmt: str, num: int) -> str:
+        # bshd + 3 @ -3 -> bs3hd; bshd + 3 @ -2 -> bsh3d; thd + 2 @ -2 -> th2d
+        pos = len(fmt) + qkv_interleave_dim + 1
+        return fmt[:pos] + str(num) + fmt[pos:]
+
+    if qkv_layer is not None:
+        if any(x is not None for x in (query_layer, key_layer, value_layer)):
+            raise ValueError(
+                "qkv_layer already packs Q, K and V: query_layer, key_layer and"
+                " value_layer must be None when qkv_layer is provided."
+            )
+        expected_rank = 4 if qkv_format == "thd" else 5
+        if qkv_layer.dim() != expected_rank:
+            raise ValueError(
+                f"qkv_layer must be a {expected_rank}D tensor for"
+                f" qkv_format={qkv_format!r}, got {qkv_layer.dim()}D."
+            )
+        if qkv_layer.shape[qkv_interleave_dim] != 3:
+            raise ValueError(
+                f"qkv_layer must have size 3 at dim {qkv_interleave_dim}"
+                f" (qkv_interleave_dim), got shape {tuple(qkv_layer.shape)}."
+            )
+        query_layer, key_layer, value_layer = (
+            qkv_layer.select(qkv_interleave_dim, i) for i in range(3)
+        )
+        return query_layer, key_layer, value_layer, _packed_layout(qkv_format, 3)
+
+    if query_layer is None:
+        raise ValueError(
+            "kv_layer packs only K and V: query_layer is required when kv_layer is provided."
+        )
+    if key_layer is not None or value_layer is not None:
+        raise ValueError(
+            "kv_layer already packs K and V: key_layer and value_layer must be"
+            " None when kv_layer is provided."
+        )
+    if kv_layer.dim() != query_layer.dim() + 1:
+        raise ValueError(
+            "kv_layer must have one more dimension than query_layer, got"
+            f" {kv_layer.dim()}D kv_layer and {query_layer.dim()}D query_layer."
+        )
+    if kv_layer.shape[qkv_interleave_dim] != 2:
+        raise ValueError(
+            f"kv_layer must have size 2 at dim {qkv_interleave_dim}"
+            f" (qkv_interleave_dim), got shape {tuple(kv_layer.shape)}."
+        )
+    key_layer, value_layer = (kv_layer.select(qkv_interleave_dim, i) for i in range(2))
+    return (
+        query_layer,
+        key_layer,
+        value_layer,
+        f"{qkv_format}_{_packed_layout(qkv_format, 2)}",
+    )
+
+
 class DotProductAttention(TransformerEngineBaseModule):
     r"""Allows the model to jointly attend to information from different
     representation subspaces as described in the paper:
@@ -201,6 +434,90 @@ class DotProductAttention(TransformerEngineBaseModule):
         Transformer Engine stores the FP8 metadata under a ``._extra_state`` key when checkpointing.
         As the FP8 attention support expands from one backend to multiple backends, the location
         of that key has also shifted (see `FP8 checkpoint compatibility <https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/faq.html#fp8-checkpoint-compatibility>`_).
+
+    .. rubric:: Fine-grained Linear and attention recipes
+
+    .. warning::
+
+        Fine-grained attention configuration through ``CustomRecipe`` and a quantizer factory is
+        experimental and subject to change.
+
+    A quantizer factory can select different recipes for Linear and DotProductAttention tensors
+    using ``QuantizerRole``. DotProductAttention itself supports only its fixed recipe families:
+    FP8 delayed scaling, FP8 current scaling, and MXFP8 block scaling. In particular, a factory may
+    return NVFP4 quantizers for Linear roles, but it must not return NVFP4 quantizers for DPA roles.
+
+    .. list-table:: Example Linear and attention combinations
+        :header-rows: 1
+
+        * - Linear
+          - Attention
+          - Configuration
+          - Status
+        * - NVFP4
+          - FP8 current scaling for QKV/O and delayed scaling for S/dP
+          - ``nvfp4_linear_fp8_dpa_factory``
+          - Validated factory provided by Transformer Engine
+        * - NVFP4
+          - MXFP8
+          - User-defined factory shown below
+          - Experimental example; not broadly validated
+
+    The validated NVFP4 Linear + FP8 attention combination is available from the quantizer factory
+    zoo::
+
+        from transformer_engine.common.recipe import CustomRecipe
+        from transformer_engine.pytorch.quantization import autocast
+        from transformer_engine.pytorch.custom_recipes.quantizer_factory_zoo import (
+            nvfp4_linear_fp8_dpa_factory,
+        )
+
+        recipe = CustomRecipe(
+            qfactory=nvfp4_linear_fp8_dpa_factory,
+            fp8_dpa=True,
+        )
+        with autocast(recipe=recipe):
+            output = model(input)
+
+    The following factory demonstrates the experimental NVFP4 Linear + MXFP8 attention
+    combination. With ``CustomRecipe``, the per-role selection is expressed directly in the
+    factory, so ``NVTE_DPA_FP8_RECIPE`` is not needed. DPA also issues hint-only roles for its
+    output boundaries; these must resolve to a DPA-supported quantizer even when the boundary
+    tensor remains in BF16. For MXFP8 attention, the fused kernel handles the S/dP slots
+    internally, so their factory-provided quantizers are not consumed::
+
+        from transformer_engine.common.recipe import CustomRecipe
+        from transformer_engine.pytorch.constants import DType
+        from transformer_engine.pytorch.custom_recipes.quantizer_factories import nvfp4_factory
+        from transformer_engine.pytorch.quantization import autocast
+        from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
+
+        def nvfp4_linear_mxfp8_dpa_factory(role):
+            # NVFP4 for Linear roles and MXFP8 for supported DPA roles.
+            is_dpa = role is not None and role.module_type == "dpa"
+            is_dpa_boundary = (
+                role is not None
+                and not role.module_type
+                and ("dpa_output" in role.name or "dpa_grad_input" in role.name)
+            )
+
+            if is_dpa or is_dpa_boundary:
+                is_bwd_role = (
+                    is_dpa and role.tensor_type in ("do", "dp", "dqkv")
+                ) or (
+                    is_dpa_boundary and "dpa_grad_input" in role.name
+                )
+                fp8_dtype = DType.kFloat8E5M2 if is_bwd_role else DType.kFloat8E4M3
+                return MXFP8Quantizer(fp8_dtype=fp8_dtype)
+
+            return nvfp4_factory(role)
+
+        recipe = CustomRecipe(
+            qfactory=nvfp4_linear_mxfp8_dpa_factory,
+            fp8_dpa=True,
+        )
+        with autocast(recipe=recipe):
+            output = model(input)
 
 
     Parameters
@@ -312,6 +629,8 @@ class DotProductAttention(TransformerEngineBaseModule):
                      <https://arxiv.org/pdf/2502.16982>`_).
                      :math:`\text{max_logit} = \max(S)`, where :math:`S = \text{mask}(Q \cdot K^T \cdot \text{softmax_scale} + \text{bias})` of shape ``[b, h, s_q, s_kv]``,
                      and :math:`\text{max_logit}` is of shape ``[h]``.
+    name : Optional[str], default = None
+                module instance name.
 
     Parallelism parameters
     ----------------------
@@ -371,8 +690,17 @@ class DotProductAttention(TransformerEngineBaseModule):
         softmax_scale: Optional[float] = None,
         softmax_type: str = "vanilla",
         return_max_logit: Optional[bool] = False,
+        name: Optional[str] = None,
     ) -> None:
-        super().__init__()
+        super().__init__(name=name)
+
+        # Cache the native recipe labels inferred from custom DPA quantizers.
+        # ``init_fp8_metadata`` runs on every forward, while the quantizers only
+        # change when their recipe state is rebuilt.
+        self._custom_dpa_local_recipes_cache_key: Optional[Tuple[Any, ...]] = None
+        self._custom_dpa_local_recipes_cache: Optional[List[Recipe]] = None
+        self._qkv_capabilities_quantizer: Optional[Any] = None
+        self._qkv_capabilities_cache: Optional[Tuple[bool, bool]] = None
 
         self.logger = logging.getLogger("DotProductAttention")
         self.logger.setLevel(attn_log._log_level)
@@ -420,7 +748,10 @@ class DotProductAttention(TransformerEngineBaseModule):
         else:
             self.rng_states_tracker = get_rng_state_tracker()
             set_all_rng_states(self.rng_states_tracker.get_states())
-            attention_dropout_ctx = self.rng_states_tracker.fork
+            # Forking only matters if the dropout actually draws from the generator.
+            attention_dropout_ctx = (
+                self.rng_states_tracker.fork if attention_dropout > 0 else nullcontext
+            )
 
         if softmax_scale is None:
             softmax_scale = 1.0 / math.sqrt(
@@ -431,25 +762,6 @@ class DotProductAttention(TransformerEngineBaseModule):
             not bool(int(os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1")))
             or torch.are_deterministic_algorithms_enabled()
         )
-        # To use the workspace optimization path for determinism, please
-        # set NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT=1 for cuDNN >=8.9.5 and <9.0.0,
-        # and set NVTE_ALLOW_NONDETERMINISTIC_ALGO=0 for cuDNN >=9.0.0.
-        cudnn_version = get_cudnn_version()
-        if (8, 9, 5) <= cudnn_version < (9, 0, 0):
-            if self.deterministic:
-                os.environ["NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT"] = "1"
-
-            # CUDNN_FRONTEND_ATTN_DP_WORKSPACE_LIMIT
-            # - unset:       enables workspace optimization when required workspace is <= 256MB
-            #                or when bias gradient needs to be computed
-            # - n:           enables workspace optimization when required workspace is <= n bytes
-            # - -1:          enables workspace optimization always
-            # - 0:           disables workspace optimization always
-            if "NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT" in os.environ:
-                if os.environ["NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT"] == "0":
-                    os.environ["CUDNN_FRONTEND_ATTN_DP_WORKSPACE_LIMIT"] = "0"
-                if os.environ["NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT"] == "1":
-                    os.environ["CUDNN_FRONTEND_ATTN_DP_WORKSPACE_LIMIT"] = "-1"
 
         assert attention_type in AttnTypes, f"attention_type {attention_type} not supported"
 
@@ -609,9 +921,39 @@ class DotProductAttention(TransformerEngineBaseModule):
         """
         _original_recipe = self.fp8_meta.get("recipe", None)
 
+        # get_fp8_recipe() may build a default Recipe, which asserts it is not tracing.
+        # With quantization off the base class does all that is needed.
+        qstate = FP8GlobalStateManager.quantization_state
+        if torch.compiler.is_compiling() and not (
+            qstate.fp8_enabled or qstate.fp8_calibration or qstate.fp8_parameters
+        ):
+            super().init_fp8_metadata(num_gemms=num_gemms)
+            return
+
         # global recipe set in autocast()
         fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
         if fp8_recipe.custom():
+            super().init_fp8_metadata(num_gemms=num_gemms)
+            fwd_quantizers = self.quantizers.get("scaling_fwd", ())
+            cache_key = (
+                id(self.fp8_meta.get("scaling_fwd")),
+                tuple(id(quantizer) for quantizer in fwd_quantizers),
+                fp8_recipe.fp8_format,
+                fp8_recipe.fp8_dpa,
+                fp8_recipe.fp8_mha,
+            )
+            if cache_key != self._custom_dpa_local_recipes_cache_key:
+                self._custom_dpa_local_recipes_cache = _infer_custom_dpa_local_recipes(
+                    fp8_recipe, self.fp8_meta, self.quantizers
+                )
+                self._custom_dpa_local_recipes_cache_key = cache_key
+
+            if self._custom_dpa_local_recipes_cache is None:
+                # Do not leave labels from an earlier supported quantizer
+                # family attached after a rebuild to an unsupported family.
+                self.fp8_meta.pop("local_recipes", None)
+            else:
+                self.fp8_meta["local_recipes"] = self._custom_dpa_local_recipes_cache
             return
 
         # switch/append recipe: fp8_recipe stays unchanged, but DPA.fp8_meta["recipe"] may be set to
@@ -818,8 +1160,62 @@ class DotProductAttention(TransformerEngineBaseModule):
             # Clear cached workspaces as they were created with the old recipe/quantizer type
             self._fp8_workspaces.clear()
 
+    def get_qkv_quantization_capabilities(self) -> Tuple[bool, bool]:
+        """Return MHA boundary capabilities from the canonical QKV quantizer.
+
+        The returned flags are ``(float8_current_scaling, mxfp8_scaling)``.
+        """
+        self.init_fp8_metadata(num_gemms=3)
+        try:
+            qkv_quantizer = self.quantizers["scaling_fwd"][dpa_utils.META_QKV]
+        except (KeyError, IndexError, TypeError) as exc:
+            role = QuantizerRole(
+                module_type="dpa",
+                tensor_type="qkv",
+                name=self.name or "",
+            )
+            raise RuntimeError(
+                f"DotProductAttention did not materialize the canonical QKV quantizer for {role}."
+            ) from exc
+
+        if qkv_quantizer is self._qkv_capabilities_quantizer:
+            assert self._qkv_capabilities_cache is not None
+            return self._qkv_capabilities_cache
+
+        from transformer_engine.pytorch.tensor.float8_tensor import (
+            Float8CurrentScalingQuantizer,
+            Float8Quantizer,
+        )
+        from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
+
+        if isinstance(qkv_quantizer, Float8CurrentScalingQuantizer):
+            capabilities = (True, False)
+        elif isinstance(qkv_quantizer, MXFP8Quantizer):
+            capabilities = (False, True)
+        elif isinstance(qkv_quantizer, Float8Quantizer):
+            capabilities = (False, False)
+        else:
+            capabilities = None
+
+        if capabilities is not None:
+            self._qkv_capabilities_quantizer = qkv_quantizer
+            self._qkv_capabilities_cache = capabilities
+            return capabilities
+
+        role = QuantizerRole(
+            module_type="dpa",
+            tensor_type="qkv",
+            name=self.name or "",
+        )
+        raise TypeError(
+            f"Unsupported CustomRecipe quantizer for {role}: {type(qkv_quantizer).__name__}."
+        )
+
     def set_meta_tensor(self, fwd: bool, recipe: Union[Recipe, List[Recipe]]) -> None:
         """Override to allow multiple recipes. Init scales and amaxes for fwd | bwd."""
+        if isinstance(recipe, Recipe) and recipe.custom():
+            TransformerEngineBaseModule.set_meta_tensor(self, fwd, recipe)
+            return
         if isinstance(recipe, Recipe):
             recipe = [recipe]
         fp8_recipe_dpa = recipe[-1]
@@ -859,19 +1255,133 @@ class DotProductAttention(TransformerEngineBaseModule):
             for i in range(len(recipe))
         ]
 
-        self.fp8_meta[fp8_meta_tensor_key] = (
-            recipe_states[-1] if len(recipe) == 2 else recipe_states[0]
-        )
+        # Reached the rebuild path because ``fp8_meta_tensors_initialized``
+        # was flipped to False after first init — most commonly because the
+        # base-class ``output_quantizer_role`` / ``grad_input_quantizer_role``
+        # setter invalidated state when MHA wired boundary roles. That
+        # setter is recipe-agnostic, so this code fires for built-in
+        # recipes too even though they don't consume role information here
+        # (e.g. ``test_dpa_fp8_extra_state`` reaches this path with pure
+        # DelayedScaling).
+        #
+        # Rebuilding the recipe state must preserve persistent training
+        # buffers (delayed-scaling ``scale`` / ``amax_history``) so the new
+        # quantizer instances and the ``FP8GlobalStateManager`` reduction
+        # buffers end up viewing the SAME tensor objects, and so any
+        # checkpoint-loaded state isn't silently destroyed on the first
+        # forward after ``load_state_dict``.
+        #
+        # Inheritance targets the "primary" state stored under
+        # ``fp8_meta[fp8_meta_tensor_key]`` — the one tracked across
+        # ``set_meta_tensor`` calls. Auxiliary states in a multi-recipe
+        # splice (e.g. the CS half of ``[CS, DS]``) are stateless and have
+        # nothing to inherit.
+        old_state = self.fp8_meta.get(fp8_meta_tensor_key)
+        primary_idx = -1 if len(recipe) == 2 else 0
+        if old_state is not None:
+            recipe_states[primary_idx].inherit_state_from(old_state)
+
+        self.fp8_meta[fp8_meta_tensor_key] = recipe_states[primary_idx]
         self.quantizers[fp8_meta_tensor_key] = []
         for recipe_state in recipe_states:
             self.quantizers[fp8_meta_tensor_key].extend(recipe_state.make_quantizers())
 
-    @no_torch_dynamo(recursive=False)
+    def get_quantizer_roles(
+        self,
+        *,
+        fwd: bool,
+        num_quantizers: int,
+    ) -> Optional[List[QuantizerRole]]:
+        """QuantizerRole list for quantizers used by ``DotProductAttention``.
+
+        DPA internally performs two matmuls::
+
+            S = softmax(Q · K^T)   (GEMM1)
+            O = S · V              (GEMM2)
+
+        cuDNN's fused-attention API exposes FP8 scale/amax descriptors as
+        a flat array of **slot groups** numbered 1-3.  The numbering is a
+        cuDNN convention — it does *not* correspond to operation order
+        inside DPA:
+
+        Forward  (3 slot groups × 3 positions = 9 slots):
+
+        =========== =========================================== ===========
+        Slot group  Primary tensor                              cuDNN enum
+        =========== =========================================== ===========
+        Group 1     QKV — inputs to GEMM1 (Q·K^T)              GEMM1_OUTPUT
+        Group 2     O — output of GEMM2 (S·V)                  GEMM2_INPUT
+        Group 3     S — post-softmax, input to GEMM2 (S·V)     GEMM3_OUTPUT
+        =========== =========================================== ===========
+
+        Backward (3 slot groups × 2 positions = 6 slots):
+
+        =========== =========================================== ===========
+        Slot group  Primary tensor                              cuDNN enum
+        =========== =========================================== ===========
+        Group 1     dQKV — gradients flowing back to Q, K, V   GRAD_OUTPUT1
+        Group 2     dO — gradient of the attention output       GRAD_INPUT2
+        Group 3     dP — gradient of the softmax output         GRAD_INPUT3
+        =========== =========================================== ===========
+
+        Unused positions within a group share the role of the group's
+        primary tensor.
+
+        **Boundary slots** — O (fwd) and dQKV (bwd) leave DPA and enter
+        the next module (e.g. proj linear).  DPA does not know that
+        consumer, so these default to ``None``.  The parent module
+        (e.g. ``MultiheadAttention``) can set
+        :attr:`output_quantizer_role` / :attr:`grad_input_quantizer_role`
+        to fill in the consumer identity.
+
+        When not set, a hint-only ``QuantizerRole`` with empty
+        ``module_type`` / ``tensor_type`` is emitted, with ``name``
+        containing ``"dpa_output"`` or ``"dpa_grad_input"``.  This lets
+        the factory return a DPA-compatible quantizer (required by the
+        fused kernel) even when the downstream consumer is unknown.
+        """
+        name = self.name or ""
+        if fwd:
+            qkv_role = QuantizerRole(module_type="dpa", tensor_type="qkv", name=name)
+            o_role = self._output_quantizer_role
+            if o_role is None:
+                o_role = QuantizerRole(name=f"{name}.dpa_output" if name else "dpa_output")
+            s_role = QuantizerRole(module_type="dpa", tensor_type="s", name=name)
+            base = [
+                qkv_role,
+                qkv_role,
+                qkv_role,  # Group 1: QKV (inputs to Q·K^T)
+                o_role,
+                o_role,
+                o_role,  # Group 2: O (output of S·V) — boundary
+                s_role,
+                s_role,
+                s_role,  # Group 3: S (post-softmax, input to S·V)
+            ]
+        else:
+            dqkv_role = self._grad_input_quantizer_role
+            if dqkv_role is None:
+                dqkv_role = QuantizerRole(
+                    name=f"{name}.dpa_grad_input" if name else "dpa_grad_input"
+                )
+            do_role = QuantizerRole(module_type="dpa", tensor_type="do", name=name)
+            dp_role = QuantizerRole(module_type="dpa", tensor_type="dp", name=name)
+            base = [
+                dqkv_role,
+                dqkv_role,  # Group 1: dQKV (grads to Q,K,V) — boundary
+                do_role,
+                do_role,  # Group 2: dO (grad of attention output)
+                dp_role,
+                dp_role,  # Group 3: dP (grad of softmax output)
+            ]
+        return base[:num_quantizers]
+
+    @no_torch_dynamo(when=_needs_eager_dpa)
     def forward(
         self,
-        query_layer: torch.Tensor,
-        key_layer: torch.Tensor,
-        value_layer: torch.Tensor,
+        query_layer: Optional[torch.Tensor] = None,
+        key_layer: Optional[torch.Tensor] = None,
+        value_layer: Optional[torch.Tensor] = None,
         attention_mask: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]] = None,
         qkv_format: str = None,
         cu_seqlens_q: torch.Tensor = None,
@@ -891,7 +1401,15 @@ class DotProductAttention(TransformerEngineBaseModule):
         inference_params: Optional[InferenceParams] = None,
         pad_between_seqs: Optional[bool] = None,
         fp8_output: Optional[bool] = False,
+        bf16_backward: Optional[bool] = False,
         num_splits: Optional[int] = 1,
+        score_mod: Optional[Callable] = None,
+        score_mod_bprop: Optional[Callable] = None,
+        score_mod_tensors: Optional[Dict[str, torch.Tensor]] = None,
+        score_mod_bprop_tensors: Optional[Dict[str, torch.Tensor]] = None,
+        qkv_layer: Optional[torch.Tensor] = None,
+        kv_layer: Optional[torch.Tensor] = None,
+        qkv_interleave_dim: int = -3,
     ) -> torch.Tensor:
         r"""
         Dot Product Attention Layer.
@@ -916,16 +1434,17 @@ class DotProductAttention(TransformerEngineBaseModule):
 
             Users can use environment variables :attr:`NVTE_FLASH_ATTN`, :attr:`NVTE_FUSED_ATTN`,
             and :attr:`NVTE_FUSED_ATTN_BACKEND` to control which DotProductAttention backend,
-            and FusedAttention backend if applicable, to use. Transformer Engine prioritizes
-            FlashAttention over FusedAttention and over UnfusedDotProductAttention.
+            and FusedAttention backend if applicable, to use. Transformer Engine first filters
+            backends by support for the runtime environment and input configuration, then applies
+            a performance-based preference order. On supported pre-Hopper GPUs, FlashAttention is
+            preferred over FusedAttention and UnfusedDotProductAttention when both optimized
+            backends are eligible. On Hopper and newer GPUs, including Blackwell, FusedAttention is
+            preferred over FlashAttention and UnfusedDotProductAttention when both optimized
+            backends are eligible.
             If FusedAttention is being used, users can also choose to switch to flash-attn's
             implementation for backward by setting :attr:`NVTE_FUSED_ATTN_USE_FAv2_BWD=1`
             (default: 0), because of the performance differences between various versions of
-            flash-attn and FusedAttention. Further, :attr:`NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT`
-            can be used to enable (:attr:`1`) or disable (:attr:`0`) the workspace related
-            optimizations in FusedAttention. When unset, Transformer Engine determines the code path
-            based on its internal logic. These optimizations trade memory for performance
-            and should be used with care.
+            flash-attn and FusedAttention.
 
         .. note::
             .. _cu_seqlens note:
@@ -981,14 +1500,23 @@ class DotProductAttention(TransformerEngineBaseModule):
               :attr:`max_seqlen_q`, :attr:`max_seqlen_kv`}, and for cuDNN >= 9.6, {"t" dimension of
               :attr:`query_layer`, "t" dimension of :attr:`key_layer`}.
 
+        .. note::
+
+            :attr:`score_mod`, :attr:`score_mod_bprop`, :attr:`score_mod_tensors`, and
+            :attr:`score_mod_bprop_tensors` are experimental cuDNN frontend Flex Attention
+            APIs. Their callback signatures and supported configurations may change.
+
         Parameters
         ----------
-        query_layer : torch.Tensor
-                     Query tensor.
-        key_layer : torch.Tensor
-                   Key tensor.
-        value_layer : torch.Tensor
-                     Value tensor.
+        query_layer : Optional[torch.Tensor], default = None
+                     Query tensor. Required unless a packed input (``qkv_layer``, or
+                     ``kv_layer`` together with ``query_layer``) is provided instead.
+        key_layer : Optional[torch.Tensor], default = None
+                   Key tensor. Required unless a packed input (``qkv_layer`` or ``kv_layer``)
+                   is provided instead.
+        value_layer : Optional[torch.Tensor], default = None
+                     Value tensor. Required unless a packed input (``qkv_layer`` or ``kv_layer``)
+                     is provided instead.
         attention_mask: Optional[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]],
              default = None. Boolean tensor(s) used to mask out attention softmax input.
              It should be ``None`` for causal masks and ``"no_mask"``. For padding masks, it should be
@@ -1080,7 +1608,59 @@ class DotProductAttention(TransformerEngineBaseModule):
             Optional split control for FlashAttention-3 only. When set, this value is forwarded
             to the FA3 backend to control internal kernel splitting behavior for non-context-parallel
             cases. It is ignored for other backends and when context parallelism is enabled.
+        score_mod: Optional[Callable], default = None
+            Experimental cuDNN frontend score modification callback. This is a cuDNN-only path
+            and is mutually exclusive with masks, bias, ALiBi, sink attention, dropout, FP8,
+            context parallelism, THD format, KV caching, and return_max_logit. The callback
+            signature is ``score_mod(graph, score, tensors) -> score``.
+        score_mod_bprop: Optional[Callable], default = None
+            Optional cuDNN frontend callback for the backward pass of score_mod. The callback
+            signature is ``score_mod_bprop(graph, dP, tensors) -> dP``.
+        score_mod_tensors: Optional[Dict[str, torch.Tensor]], default = None
+            Runtime tensors exposed to score_mod as cuDNN graph tensors. Keys are
+            user-defined string names consumed by the callback through ``tensors[name]``;
+            there is no predefined set of accepted keys.
+        score_mod_bprop_tensors: Optional[Dict[str, torch.Tensor]], default = None
+            Runtime tensors exposed to score_mod_bprop as cuDNN graph tensors. Keys are
+            user-defined string names consumed by the callback through ``tensors[name]``;
+            there is no predefined set of accepted keys.
+        qkv_layer: Optional[torch.Tensor], default = None
+            Fully packed QKV tensor. When the QKV projection produces one packed buffer
+            (e.g. a fused QKV GEMM), it can be passed here directly instead of slicing
+            it into :attr:`query_layer`/:attr:`key_layer`/:attr:`value_layer` views.
+            For :attr:`qkv_format` = {"bshd", "sbhd"}, it must be a 5D tensor of shape
+            ``[b, s, 3, h, d]``/``[s, b, 3, h, d]`` (:attr:`qkv_interleave_dim` = -3) or
+            ``[b, s, h, 3, d]``/``[s, b, h, 3, d]`` (:attr:`qkv_interleave_dim` = -2);
+            for :attr:`qkv_format` = "thd", a 4D tensor of shape ``[t, 3, h, d]`` or
+            ``[t, h, 3, d]``. Q/K/V are derived as zero-copy views and the memory layout
+            (e.g. ``bs3hd``) is declared from the packing itself, so no pointer-based
+            layout detection runs on this path -- including for "thd" and FP8 attention.
+            Mutually exclusive with :attr:`query_layer`, :attr:`key_layer`,
+            :attr:`value_layer` and :attr:`kv_layer`.
+        kv_layer: Optional[torch.Tensor], default = None
+            Packed KV tensor, used together with :attr:`query_layer`
+            (e.g. ``[b, s, 2, hg, d]`` for :attr:`qkv_interleave_dim` = -3, or
+            ``[b, s, hg, 2, d]`` for :attr:`qkv_interleave_dim` = -2). K/V are derived
+            as zero-copy views and the layout (e.g. ``bshd_bs2hd``) is declared, not
+            detected. Mutually exclusive with :attr:`key_layer`, :attr:`value_layer`
+            and :attr:`qkv_layer`.
+        qkv_interleave_dim: int, default = -3
+            Dimension of :attr:`qkv_layer`/:attr:`kv_layer` where the 3 (QKV) or 2 (KV)
+            interleave sits; must be -3 (e.g. ``bs3hd``) or -2 (e.g. ``bsh3d``,
+            Megatron-style). This is an explicit knob rather than shape inference,
+            since e.g. ``h == 3`` would make the shapes ambiguous.
         """
+
+        query_layer, key_layer, value_layer, declared_qkv_layout = _unpack_packed_qkv(
+            qkv_layer,
+            kv_layer,
+            query_layer,
+            key_layer,
+            value_layer,
+            qkv_format if qkv_format is not None else self.qkv_format,
+            qkv_interleave_dim,
+            inference_params,
+        )
 
         with self.prepare_forward_ctx(
             query_layer,
@@ -1110,11 +1690,11 @@ class DotProductAttention(TransformerEngineBaseModule):
                 forward_dtype = get_fp8_te_dtype(self.fp8_meta["recipe"], fprop_tensor=True)
                 backward_dtype = get_fp8_te_dtype(self.fp8_meta["recipe"], fprop_tensor=False)
                 assert forward_dtype in [
-                    tex.DType.kFloat8E4M3,
-                    tex.DType.kFloat8E5M2,
+                    DType.kFloat8E4M3,
+                    DType.kFloat8E5M2,
                 ] and backward_dtype in [
-                    tex.DType.kFloat8E4M3,
-                    tex.DType.kFloat8E5M2,
+                    DType.kFloat8E4M3,
+                    DType.kFloat8E5M2,
                 ], """DotProductAttention only supports "E4M3" and "E5M2" FP8 data types."""
             else:
                 fp8_output = False
@@ -1194,6 +1774,10 @@ class DotProductAttention(TransformerEngineBaseModule):
                     batch_size = query_layer.shape[0]
                     max_seqlen_q = query_layer.shape[1] if max_seqlen_q is None else max_seqlen_q
                     max_seqlen_kv = key_layer.shape[1] if max_seqlen_kv is None else max_seqlen_kv
+                # Backend selection bakes these in, which it cannot do symbolically.
+                if not is_in_onnx_export_mode():
+                    max_seqlen_q = guard_scalar(max_seqlen_q)
+                    max_seqlen_kv = guard_scalar(max_seqlen_kv)
             if qkv_format == "thd":
                 assert all(
                     len(x.shape) == 3 for x in (query_layer, key_layer, value_layer)
@@ -1267,7 +1851,15 @@ class DotProductAttention(TransformerEngineBaseModule):
                 cu_seqlens_kv_padded = None
 
             # get qkv's memory layout
-            if all(
+            if declared_qkv_layout is not None:
+                # Packed inputs (qkv_layer/kv_layer) declare the layout: the enum is
+                # truthful by construction, so the pointer-based detection in
+                # get_qkv_layout is skipped entirely -- for dense, thd (t3hd/th3d)
+                # and FP8 DPA alike.
+                qkv_layout = declared_qkv_layout
+                q_format = qkv_format
+                kv_format = qkv_format
+            elif all(
                 isinstance(x, Float8TensorStorage) for x in [query_layer, key_layer, value_layer]
             ):
                 (
@@ -1281,6 +1873,25 @@ class DotProductAttention(TransformerEngineBaseModule):
                     query_layer._data,
                     key_layer._data,
                     value_layer._data,
+                    qkv_format=qkv_format,
+                    inference_params=inference_params,
+                )
+            elif all(
+                isinstance(x, MXFP8TensorStorage) for x in [query_layer, key_layer, value_layer]
+            ):
+                # Pre-quantized MXFP8 q/k/v: the wrapper has no real storage, so run
+                # layout detection on the underlying rowwise data (mirrors the Float8 path).
+                (
+                    qkv_layout,
+                    query_layer._rowwise_data,
+                    key_layer._rowwise_data,
+                    value_layer._rowwise_data,
+                    q_format,
+                    kv_format,
+                ) = dpa_utils.get_qkv_layout(
+                    query_layer._rowwise_data,
+                    key_layer._rowwise_data,
+                    value_layer._rowwise_data,
                     qkv_format=qkv_format,
                     inference_params=inference_params,
                 )
@@ -1393,18 +2004,60 @@ class DotProductAttention(TransformerEngineBaseModule):
                         False
                     ), "core_attention_bias must be in one of {bhss, 1hss, b1ss, 11ss, 111s} shapes"
 
-            # check if there is padding between sequences when qkv_format='thd'
+            # Default pad_between_seqs auto-detect. For THD, infer presence of
+            # inter-sequence padding from whether padded cu_seqlens were supplied --
+            # sync-free, and stable across eager and CUDA graph capture (the auto-detect
+            # must return the same value in both modes for backend selection to match).
+            # If padded cu_seqlens are the *same object* as the unpadded ones, no real
+            # inter-sequence padding exists (only THD tail padding) -- treat as False so
+            # FlashAttention v2/v4 remain eligible.
             if pad_between_seqs is None:
                 if qkv_format == "thd":
-                    pad_between_seqs = (
-                        cu_seqlens_q_padded is not None
-                        and not torch.equal(cu_seqlens_q_padded[:-1], cu_seqlens_q[:-1])
-                    ) or (
-                        cu_seqlens_kv_padded is not None
-                        and not torch.equal(cu_seqlens_kv_padded[:-1], cu_seqlens_kv[:-1])
-                    )
+                    if (
+                        cu_seqlens_q_padded is cu_seqlens_q
+                        and cu_seqlens_kv_padded is cu_seqlens_kv
+                    ):
+                        pad_between_seqs = False
+                    else:
+                        pad_between_seqs = (
+                            cu_seqlens_q_padded is not None or cu_seqlens_kv_padded is not None
+                        )
                 else:
                     pad_between_seqs = False
+
+            # Validate experimental Flex Attention API inputs that backend selection
+            # cannot represent.
+            if score_mod is None:
+                assert score_mod_bprop is None, "score_mod_bprop requires score_mod!"
+                assert score_mod_tensors is None, "score_mod_tensors requires score_mod!"
+                assert (
+                    score_mod_bprop_tensors is None
+                ), "score_mod_bprop_tensors requires score_mod!"
+            else:
+                assert callable(score_mod), "score_mod must be callable!"
+                assert score_mod_bprop is None or callable(
+                    score_mod_bprop
+                ), "score_mod_bprop must be callable when provided!"
+                assert (
+                    not is_in_onnx_export_mode()
+                ), "Flex Attention is not supported with ONNX export!"
+                if score_mod_tensors is not None:
+                    assert isinstance(score_mod_tensors, dict), "score_mod_tensors must be a dict!"
+                    assert all(
+                        isinstance(k, str) and isinstance(v, torch.Tensor)
+                        for k, v in score_mod_tensors.items()
+                    ), "score_mod_tensors must map string names to torch.Tensor instances!"
+                if score_mod_bprop_tensors is not None:
+                    assert (
+                        score_mod_bprop is not None
+                    ), "score_mod_bprop_tensors requires score_mod_bprop!"
+                    assert isinstance(
+                        score_mod_bprop_tensors, dict
+                    ), "score_mod_bprop_tensors must be a dict!"
+                    assert all(
+                        isinstance(k, str) and isinstance(v, torch.Tensor)
+                        for k, v in score_mod_bprop_tensors.items()
+                    ), "score_mod_bprop_tensors must map string names to torch.Tensor instances!"
 
             # gather attention params for get_attention_backend
             attention_params = dpa_utils.AttentionParams(
@@ -1441,6 +2094,10 @@ class DotProductAttention(TransformerEngineBaseModule):
                 return_max_logit=self.return_max_logit,
                 cuda_graph=is_graph_capturing(),
                 num_splits=num_splits,
+                fp8_output=fp8_output,
+                checkpoint_core_attention=checkpoint_core_attention,
+                has_score_mod=score_mod is not None,
+                has_score_mod_bprop=score_mod_bprop is not None,
             )
             global _attention_backends
             if is_in_onnx_export_mode():
@@ -1473,18 +2130,25 @@ class DotProductAttention(TransformerEngineBaseModule):
                     _attention_backends["fused_attention_backend"] = fused_attention_backend
                     _attention_backends["use_unfused_attention"] = use_unfused_attention
                     _attention_backends["backend_selection_requires_update"] = False
+                    # logging.Logger methods graph-break under torch.compile, so
+                    # selection is only logged in eager -- as in
+                    # get_attention_backend. Note the arguments below are
+                    # evaluated either way, so they have to stay traceable.
+                    logger = (
+                        dpa_utils.no_op_logger if torch.compiler.is_compiling() else self.logger
+                    )
                     if use_flash_attention:
-                        self.logger.info(
+                        logger.info(
                             "Running with FlashAttention backend (version %s)",
                             flash_attention_backend,
                         )
                     elif use_fused_attention:
-                        self.logger.info(
+                        logger.info(
                             "Running with FusedAttention backend (sub-backend %s)",
                             int(fused_attention_backend),
                         )
                     elif use_unfused_attention:
-                        self.logger.info("Running with UnfusedDotProductAttention backend")
+                        logger.info("Running with UnfusedDotProductAttention backend")
                 else:
                     use_flash_attention = _attention_backends["use_flash_attention"]
                     flash_attention_backend = _attention_backends["flash_attention_backend"]
@@ -1508,6 +2172,21 @@ class DotProductAttention(TransformerEngineBaseModule):
             )
 
             if use_flash_attention:
+                orig_qk_dim = None
+                orig_v_dim = None
+                if (
+                    flash_attention_backend == FlashAttentionUtils.version
+                    and not isinstance(value_layer, Float8TensorStorage)
+                    and head_dim_qk != head_dim_v
+                ):
+                    (
+                        query_layer,
+                        key_layer,
+                        value_layer,
+                        orig_qk_dim,
+                        orig_v_dim,
+                    ) = _pad_qkv_head_dim(query_layer, key_layer, value_layer)
+
                 if core_attention_bias_type == "alibi":
                     alibi_slopes, _ = dpa_utils.get_alibi(
                         _alibi_cache,
@@ -1516,7 +2195,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                         max_seqlen_kv,
                         alibi_slopes=alibi_slopes,
                     )
-                return self.flash_attention(
+                attn_out = self.flash_attention(
                     query_layer,
                     key_layer,
                     value_layer,
@@ -1536,11 +2215,17 @@ class DotProductAttention(TransformerEngineBaseModule):
                     fp8=self.fp8 and self.fp8_meta["recipe"].fp8_dpa,
                     fp8_meta=self.fp8_meta,
                     quantizers=self.quantizers,
+                    pad_between_seqs=pad_between_seqs,
                     inference_params=inference_params,
                     flash_attention_backend=flash_attention_backend,
                     fp8_output=fp8_output,
                     num_splits=num_splits,
+                    cu_seqlens_q_padded=cu_seqlens_q_padded,
+                    cu_seqlens_kv_padded=cu_seqlens_kv_padded,
                 )
+                if orig_qk_dim is not None and orig_qk_dim > orig_v_dim:
+                    return _trim_output(attn_out, num_attention_heads, orig_qk_dim, orig_v_dim)
+                return attn_out
 
             if use_fused_attention:
                 fu_core_attention_bias_type = core_attention_bias_type
@@ -1588,6 +2273,9 @@ class DotProductAttention(TransformerEngineBaseModule):
                         inference_params=inference_params,
                         softmax_offset=softmax_offset,
                         fp8_output=fp8_output,
+                        packed_qkv=qkv_layer,
+                        packed_kv=kv_layer,
+                        bf16_backward=bf16_backward,
                     )
                 return self.fused_attention(
                     query_layer,
@@ -1619,6 +2307,13 @@ class DotProductAttention(TransformerEngineBaseModule):
                     inference_params=inference_params,
                     softmax_offset=softmax_offset,
                     fp8_output=fp8_output,
+                    score_mod=score_mod,
+                    score_mod_bprop=score_mod_bprop,
+                    score_mod_tensors=score_mod_tensors,
+                    score_mod_bprop_tensors=score_mod_bprop_tensors,
+                    packed_qkv=qkv_layer,
+                    packed_kv=kv_layer,
+                    bf16_backward=bf16_backward,
                 )
 
             if use_unfused_attention:

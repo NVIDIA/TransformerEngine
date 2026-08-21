@@ -35,9 +35,10 @@ class CgemmConfig {
   int num_comm_sm;
   bool use_ce;
   bool aggregate_ag;
+  bool use_cublasmp;
 
   static void init(int _num_max_streams, int _gemm_priority, int _comm_priority, int _num_comm_sm,
-                   bool _use_ce, bool _aggregate_ag) {
+                   bool _use_ce, bool _aggregate_ag, bool _use_cublasmp = false) {
     auto &config = get(false);
     config._initialized = true;
     config.num_max_streams = _num_max_streams;
@@ -46,6 +47,7 @@ class CgemmConfig {
     config.num_comm_sm = _num_comm_sm;
     config.use_ce = _use_ce;
     config.aggregate_ag = _aggregate_ag;
+    config.use_cublasmp = _use_cublasmp;
   }
 
   static CgemmConfig &get(bool is_initialized = true) {
@@ -178,8 +180,10 @@ class CollectiveGemmPlanRegistry {
 // Function declarations
 void InitializeCgemmCommunicator(int num_total_devices, int num_devices_per_process, int process_id,
                                  int tp_size, int num_max_streams, int gemm_priority,
-                                 int comm_priority, int num_comm_sm, bool use_ce,
-                                 bool aggregate_ag);
+                                 int comm_priority, int num_comm_sm, bool use_ce, bool aggregate_ag,
+                                 bool use_cublasmp = false);
+
+bool IsCollectiveGemmWithCublasmp();
 
 int GetCgemmNumMaxStreams();
 

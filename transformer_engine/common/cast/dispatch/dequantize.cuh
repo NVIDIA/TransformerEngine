@@ -15,6 +15,7 @@
 
 #include "../../common.h"
 #include "../fp8/dequantize_fp8.cuh"
+#include "../fp8_blockwise/group_dequantize_fp8_blockwise.cuh"
 #include "../mxfp8/dequantize_mxfp8.cuh"
 #include "../mxfp8/group_dequantize_mxfp8.cuh"
 #include "../nvfp4/dequantize_nvfp4.cuh"
@@ -25,6 +26,10 @@ namespace dispatch {
 inline void dequantize_helper(const Tensor &input, Tensor *output, cudaStream_t stream) {
   CheckInputTensor(input, "cast_input");
   CheckOutputTensor(*output, "cast_output");
+
+  if (input.numel() == 0) {
+    return;
+  }
 
   switch (input.scaling_mode) {
     case NVTE_DELAYED_TENSOR_SCALING: {
@@ -63,6 +68,11 @@ inline void group_dequantize_helper(const GroupedTensor &input, GroupedTensor *o
       } else {
         NVTE_ERROR("MXFP8 Grouped Dequantization is NOT supported by architectures < 10.0");
       }
+      break;
+    }
+    case NVTE_BLOCK_SCALING_1D:
+    case NVTE_BLOCK_SCALING_2D: {
+      fp8_blockwise::group_dequantize(&input, output, stream);
       break;
     }
     default:

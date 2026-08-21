@@ -86,6 +86,8 @@ def online_softmax_kernel(
 def cross_entropy_kernel(
     X_ptr,
     X_stride,
+    grad_input_ptr,
+    grad_input_stride,
     Y_ptr,
     Y_stride,
     loss_ptr,
@@ -108,6 +110,8 @@ def cross_entropy_kernel(
     Parameters:
     X_ptr: Pointer to input tensor.
     X_stride (int): The stride of the input tensor.
+    grad_input_ptr: Pointer to the FP32 tensor that stores the input gradient.
+    grad_input_stride (int): The stride of the input gradient tensor.
     Y_ptr: Pointer to target tensor.
     Y_stride (int): The stride of the target tensor.
     loss_ptr: Pointer to tensor to store the loss.
@@ -129,16 +133,17 @@ def cross_entropy_kernel(
 
     # locate the start index
     X_ptr += program_id * X_stride
+    grad_input_ptr += program_id * grad_input_stride
 
     # Load Y_ptr
     Y_ptr += program_id * Y_stride
     y = tl.load(Y_ptr)
 
     if y == ignore_idx:
-        # set all X_ptr as 0
+        # Set the input gradient to zero.
         for i in range(0, n_cols, BLOCK_SIZE):
             X_offsets = i + tl.arange(0, BLOCK_SIZE)
-            tl.store(X_ptr + X_offsets, 0.0, mask=X_offsets < n_cols)
+            tl.store(grad_input_ptr + X_offsets, 0.0, mask=X_offsets < n_cols)
         return
 
     loss_ptr += program_id * loss_stride
@@ -175,7 +180,6 @@ def cross_entropy_kernel(
     for i in range(0, n_cols, BLOCK_SIZE):
         X_offsets = i + tl.arange(0, BLOCK_SIZE)
         X_block = tl.load(X_ptr + X_offsets, mask=X_offsets < n_cols, other=float("-inf"))
-        grad_dtype = X_block.dtype
         X_block = X_block.to(tl.float32)
         if label_smoothing > 0:
             # scale X beforehand to avoid overflow
@@ -187,9 +191,9 @@ def cross_entropy_kernel(
             X_block = (tl.exp(X_block - m) / d - eps) / (n_non_ignore)
         else:
             X_block = tl.exp(X_block - m) / d - eps
-        tl.store(X_ptr + X_offsets, X_block.to(grad_dtype), mask=X_offsets < n_cols)
+        tl.store(grad_input_ptr + X_offsets, X_block, mask=X_offsets < n_cols)
 
-    # We need tl.debug_barrier() to ensure the new result of X_ptr is written
+    # Ensure the gradient is written before updating the target-token element.
     tl.debug_barrier()
 
     # 5. Calculate the loss
@@ -213,13 +217,13 @@ def cross_entropy_kernel(
     vocab_end_idx = (rank + 1) * n_cols
     if y >= vocab_start_idx:
         if y < vocab_end_idx:
-            X_y = tl.load(X_ptr + y - vocab_start_idx)
+            X_y = tl.load(grad_input_ptr + y - vocab_start_idx)
             # Apply the same conditional scaling logic for the target token
             if reduce_loss:
                 X_y += -(1 - label_smoothing) / (n_non_ignore)
             else:
                 X_y += -(1 - label_smoothing)
-            tl.store(X_ptr + y - vocab_start_idx, X_y)
+            tl.store(grad_input_ptr + y - vocab_start_idx, X_y)
 
     tl.store(loss_ptr, loss)
 

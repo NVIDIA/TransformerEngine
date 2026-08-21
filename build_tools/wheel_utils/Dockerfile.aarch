@@ -23,7 +23,6 @@ ENV CUDA_MAJOR=${CUDA_MAJOR}
 
 # Cuda toolkit, cudnn, driver.
 RUN dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel8/sbsa/cuda-rhel8.repo
-RUN dnf -y install epel-release
 RUN dnf -y install cuda-compiler-${CUDA_MAJOR}-${CUDA_MINOR}.aarch64 \
                    cuda-libraries-${CUDA_MAJOR}-${CUDA_MINOR}.aarch64 \
                    cuda-libraries-devel-${CUDA_MAJOR}-${CUDA_MINOR}.aarch64

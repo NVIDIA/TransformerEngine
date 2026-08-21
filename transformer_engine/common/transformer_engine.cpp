@@ -7,10 +7,15 @@
 #include <transformer_engine/transformer_engine.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
+#include <cerrno>
 #include <climits>
+#include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <limits>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -51,7 +56,7 @@ std::string to_string(const NVTEScalingMode &mode) {
   return "Invalid Scaling";
 }
 
-void CheckNoopTensor(const Tensor &t, const std::string &name) {
+void CheckNoopTensor(const Tensor &t, std::string_view name) {
   if (t.data.has_data()) {
     NVTE_CHECK(t.numel() == 1, "Expected 1 element for ", name, " noop, but found ", t.numel(),
                ".");
@@ -60,7 +65,7 @@ void CheckNoopTensor(const Tensor &t, const std::string &name) {
   }
 }
 
-void CheckScaleTensorShape(const Tensor &t, const std::string &name) {
+void CheckScaleTensorShape(const Tensor &t, std::string_view name) {
   NVTE_CHECK(t.scaling_mode != NVTE_INVALID_SCALING, "Invalid scaling mode!");
   if (is_tensor_scaling(t.scaling_mode)) {
     if (is_fp8_dtype(t.dtype())) {
@@ -91,60 +96,55 @@ void CheckScaleTensorShape(const Tensor &t, const std::string &name) {
   } else {
     if (t.scaling_mode == NVTE_MXFP8_1D_SCALING) {
       // Need (4, 128) alignment even for e8 scaling factor
-      auto block_alignment = std::vector<size_t>{128ul, 4ul};
-      size_t expected_x, expected_y, alignment;
-      const size_t block_size_rowwise = 32;
-      const size_t block_size_colwise = 32;
+      constexpr std::array<size_t, 2> block_alignment{128ul, 4ul};
+      const auto [first_dim, last_dim] = t.flat_2d_dims();
 
       if (t.has_data()) {
-        alignment = block_alignment[0];
-        expected_x =
-            DIVUP(DIVUP(t.flat_first_dim(), static_cast<size_t>(1)), alignment) * alignment;
-        alignment = block_alignment[1];
-        expected_y =
-            DIVUP(DIVUP(t.flat_last_dim(), static_cast<size_t>(block_size_rowwise)), alignment) *
-            alignment;
-
-        const auto &expected = std::vector<size_t>{expected_x, expected_y};
+        constexpr std::array<size_t, 2> block_shape{1, 32};
+        const std::array<size_t, 2> expected{
+            DIVUP_TO_MULTIPLE(DIVUP(first_dim, block_shape[0]), block_alignment[0]),
+            DIVUP_TO_MULTIPLE(DIVUP(last_dim, block_shape[1]), block_alignment[1])};
         NVTE_CHECK(t.scale_inv.shape == expected, "Tensor \"", name,
                    "\" has invalid scale_inv shape (expected ", expected, ", got ",
                    t.scale_inv.shape, ")");
       }
       if (t.has_columnwise_data()) {
-        alignment = block_alignment[1];
-        expected_x =
-            DIVUP(DIVUP(t.flat_first_dim(), static_cast<size_t>(block_size_colwise)), alignment) *
-            alignment;
-        alignment = block_alignment[0];
-        expected_y = DIVUP(DIVUP(t.flat_last_dim(), static_cast<size_t>(1)), alignment) * alignment;
-
-        const auto &expected = std::vector<size_t>{expected_x, expected_y};
+        constexpr std::array<size_t, 2> block_shape{32, 1};
+        const std::array<size_t, 2> expected{
+            DIVUP_TO_MULTIPLE(DIVUP(first_dim, block_shape[0]), block_alignment[1]),
+            DIVUP_TO_MULTIPLE(DIVUP(last_dim, block_shape[1]), block_alignment[0])};
         NVTE_CHECK(t.columnwise_scale_inv.shape == expected, "Tensor \"", name,
                    "\" has invalid columnwise_scale_inv shape (expected ", expected, ", got ",
                    t.columnwise_scale_inv.shape, ")");
       }
     } else if (t.scaling_mode == NVTE_NVFP4_1D_SCALING) {
+      const auto [first_dim, last_dim] = t.flat_2d_dims();
+
       if (t.has_data()) {
-        const size_t expected_y = DIVUP_TO_MULTIPLE(t.flat_first_dim(), 128);
-        const size_t expected_x = DIVUP_TO_MULTIPLE(DIVUP(t.flat_last_dim(), 16lu), 4);
-        const auto &expected = std::vector<size_t>{expected_y, expected_x};
+        constexpr std::array<size_t, 2> block_shape{1, 16};
+        constexpr std::array<size_t, 2> block_alignment{128, 4};
+        const std::array<size_t, 2> expected{
+            DIVUP_TO_MULTIPLE(DIVUP(first_dim, block_shape[0]), block_alignment[0]),
+            DIVUP_TO_MULTIPLE(DIVUP(last_dim, block_shape[1]), block_alignment[1])};
         NVTE_CHECK(t.scale_inv.shape == expected, "Tensor \"", name,
                    "\" has invalid scale_inv shape (expected ", expected, ", got ",
                    t.scale_inv.shape, ")");
       }
       if (t.has_columnwise_data()) {
-        const size_t expected_y = DIVUP_TO_MULTIPLE(t.flat_last_dim(), 128);
-        const size_t expected_x = DIVUP_TO_MULTIPLE(DIVUP(t.flat_first_dim(), 16lu), 4);
-        const auto &expected = std::vector<size_t>{expected_y, expected_x};
+        constexpr std::array<size_t, 2> block_shape{1, 16};
+        constexpr std::array<size_t, 2> block_alignment{128, 4};
+        const std::array<size_t, 2> expected{
+            DIVUP_TO_MULTIPLE(DIVUP(last_dim, block_shape[0]), block_alignment[0]),
+            DIVUP_TO_MULTIPLE(DIVUP(first_dim, block_shape[1]), block_alignment[1])};
         NVTE_CHECK(t.columnwise_scale_inv.shape == expected, "Tensor \"", name,
-                   "\"  has invalid columnwise_scale_inv shape (expected ", expected, ", got ",
+                   "\" has invalid columnwise_scale_inv shape (expected ", expected, ", got ",
                    t.columnwise_scale_inv.shape, ")");
       }
     }
   }
 }
 
-void CheckInputTensor(const Tensor &t, const std::string &name, bool check_scale_inv_shapes) {
+void CheckInputTensor(const Tensor &t, std::string_view name, bool check_scale_inv_shapes) {
   const DType type = t.dtype();
   if (is_fp8_dtype(type)) {
     // FP8 input needs to have scale_inv
@@ -200,7 +200,7 @@ void CheckInputTensor(const Tensor &t, const std::string &name, bool check_scale
   }
 }
 
-void CheckOutputTensor(const Tensor &t, const std::string &name, bool allow_empty) {
+void CheckOutputTensor(const Tensor &t, std::string_view name, bool allow_empty) {
   const DType type = t.dtype();
   if (is_fp8_dtype(type)) {
     // FP8 output needs to have scale, scale_inv and (if delayed scaling) amax
@@ -262,7 +262,7 @@ void CheckOutputTensor(const Tensor &t, const std::string &name, bool allow_empt
   CheckScaleTensorShape(t, name);
 }
 
-void CheckGroupedTensorShapeArrays(const GroupedTensor &t, const std::string &name) {
+void CheckGroupedTensorShapeArrays(const GroupedTensor &t, std::string_view name) {
   NVTE_CHECK(t.num_tensors > 0, "Grouped tensor ", name, " has no tensors!");
 
   // Helper lambda to validate shape arrays
@@ -332,7 +332,7 @@ void CheckGroupedTensorShapeArrays(const GroupedTensor &t, const std::string &na
 }
 
 // Helper function to check scale_inv for both input and output
-static void CheckGroupedScaleInv(const GroupedTensor &t, const std::string &name, bool is_output) {
+static void CheckGroupedScaleInv(const GroupedTensor &t, std::string_view name, bool is_output) {
   const char *tensor_type = is_output ? "output" : "input";
 
   // Helper to check scale_inv for both rowwise and columnwise layouts
@@ -356,6 +356,8 @@ static void CheckGroupedScaleInv(const GroupedTensor &t, const std::string &name
   // Determine expected dtype based on data type and scaling mode
   if (is_fp8_dtype(t.dtype()) && is_tensor_scaling(t.scaling_mode)) {
     check_scales(DType::kFloat32);
+  } else if (is_fp8_block_scaling(t.scaling_mode)) {
+    check_scales(DType::kFloat32);
   } else if (is_mxfp8_scaling(t.scaling_mode)) {
     check_scales(DType::kFloat8E8M0);
   } else if (is_nvfp4_scaling(t.scaling_mode)) {
@@ -369,14 +371,14 @@ static void CheckGroupedScaleInv(const GroupedTensor &t, const std::string &name
   }
 }
 
-void CheckInputGroupedTensor(const GroupedTensor &t, const std::string &name) {
+void CheckInputGroupedTensor(const GroupedTensor &t, std::string_view name) {
   NVTE_CHECK(t.has_data() || t.has_columnwise_data(), "Input grouped tensor ", name,
              " not allocated");
   CheckGroupedScaleInv(t, name, false);
   CheckGroupedTensorShapeArrays(t, name);
 }
 
-void CheckOutputGroupedTensor(const GroupedTensor &t, const std::string &name, bool allow_empty) {
+void CheckOutputGroupedTensor(const GroupedTensor &t, std::string_view name, bool allow_empty) {
   if (!allow_empty) {
     NVTE_CHECK(t.has_data() || t.has_columnwise_data(), "Output grouped tensor ", name,
                " not allocated");
@@ -395,6 +397,47 @@ void CheckOutputGroupedTensor(const GroupedTensor &t, const std::string &name, b
   CheckGroupedTensorShapeArrays(t, name);
 }
 
+namespace {
+
+constexpr size_t kDefaultTensorHandlePoolSizeMB = 20;
+constexpr size_t kBytesPerMB = 1024 * 1024;
+
+size_t GetTensorHandlePoolSizeMB(const char *env_var) {
+  const char *env_value = std::getenv(env_var);
+  if (env_value == nullptr || env_value[0] == '\0') {
+    return kDefaultTensorHandlePoolSizeMB;
+  }
+
+  const std::string value(env_value);
+  constexpr const char *kWhitespace = " \t\n\r\f\v";
+  const size_t first = value.find_first_not_of(kWhitespace);
+  const size_t last = value.find_last_not_of(kWhitespace);
+  NVTE_CHECK(first != std::string::npos, env_var, " must be a positive integer.");
+
+  const char *begin = value.c_str() + first;
+  const char *expected_end = value.c_str() + last + 1;
+  errno = 0;
+  char *end = nullptr;
+  const uint64_t pool_size_mb = std::strtoul(begin, &end, 10);
+
+  NVTE_CHECK(value[first] >= '0' && value[first] <= '9' && end == expected_end && pool_size_mb > 0,
+             env_var, " must be a positive integer, got \"", value, "\".");
+  NVTE_CHECK(errno != ERANGE, env_var, " is too large.");
+  NVTE_CHECK(pool_size_mb <= std::numeric_limits<size_t>::max() / kBytesPerMB, env_var,
+             " is too large.");
+  return static_cast<size_t>(pool_size_mb);
+}
+
+size_t GetTensorHandlePoolCapacity(size_t pool_size_mb, size_t handle_size, const char *handle_name,
+                                   const char *env_var) {
+  const size_t pool_size_bytes = pool_size_mb * kBytesPerMB;
+  NVTE_CHECK(pool_size_bytes >= handle_size, env_var, "=", pool_size_mb,
+             " MiB is too small for one ", handle_name, " handle of size ", handle_size, " bytes.");
+  return pool_size_bytes / handle_size;
+}
+
+}  // namespace
+
 class TensorAllocator {
  public:
   static TensorAllocator &instance() {
@@ -404,51 +447,38 @@ class TensorAllocator {
 
   ~TensorAllocator() {}
 
-  NVTETensor Allocate(NVTEScalingMode mode) {
+  void Allocate(NVTEScalingMode mode, NVTETensor *out, size_t N) {
     std::lock_guard<std::mutex> lock(mutex);
-    if (!free_list.empty()) {
-      uintptr_t index = free_list.back();
-      NVTETensor ret = reinterpret_cast<NVTETensor>(index);
-      free_list.pop_back();
-      if (debug) {
-        std::cout << "Allocated " << index
-                  << " from free list. Free list size: " << free_list.size() << " and capacity "
-                  << free_list.capacity() << std::endl;
+    const size_t available = free_list.size() + (memory.capacity() - memory.size());
+    NVTE_CHECK(available >= N, "Cannot allocate ", N,
+               " new NVTETensors. Maximum number of tensors reached: ", MAX_TENSOR_NUM, " (",
+               TENSOR_HANDLE_POOL_SIZE_MB,
+               " MiB handle pool). If your application legitimately needs more tensor handles, "
+               "increase NVTE_TENSOR_HANDLE_POOL_SIZE_MB.");
+    for (size_t i = 0; i < N; ++i) {
+      uintptr_t index;
+      if (!free_list.empty()) {
+        index = free_list.back();
+        free_list.pop_back();
+      } else {
+        memory.emplace_back();
+        index = memory.size();
+        size = index;
+        memory[index - 1].nvte_tensor = reinterpret_cast<NVTETensor>(index);
       }
-      // 1-based indexing
       memory[index - 1].scaling_mode = mode;
-      return ret;
+      out[i] = reinterpret_cast<NVTETensor>(index);
     }
-    if (memory.size() < memory.capacity()) {
-      memory.emplace_back();
-      Tensor &t = memory.back();
-      size = memory.size();
-      // 1-based indexing
-      uintptr_t index = memory.size();
-      if (debug) {
-        std::cout << "Allocated " << index << ". Memory size: " << memory.size() << " and capacity "
-                  << memory.capacity() << std::endl;
-      }
-      t.scaling_mode = mode;
-      t.nvte_tensor = reinterpret_cast<NVTETensor>(index);
-      return reinterpret_cast<NVTETensor>(index);
+    if (debug) {
+      std::cout << "Allocated range of " << N << " tensors. Free list size: " << free_list.size()
+                << " and capacity " << free_list.capacity() << std::endl;
     }
-    NVTE_ERROR("Cannot allocate a new NVTETensor. Maximum number of tensors reached: ",
-               MAX_TENSOR_NUM, ". There is probably a memory leak in your application.");
   }
 
-  void Free(NVTETensor t) {
-    uintptr_t index = reinterpret_cast<uintptr_t>(t);
-    if (index == 0) return;
-    std::lock_guard<std::mutex> lock(mutex);
-    NVTE_CHECK(index <= memory.size(), "Invalid tensor.");
-    free_list.push_back(index);
-    // Clean up
-    memory[index - 1].clear();
-    if (debug) {
-      std::cout << "Freed " << index << ". Free list size: " << free_list.size() << " and capacity "
-                << free_list.capacity() << std::endl;
-    }
+  NVTETensor Allocate(NVTEScalingMode mode) {
+    NVTETensor t;
+    Allocate(mode, &t, 1);
+    return t;
   }
 
   void Free(NVTETensor *t, size_t N) {
@@ -462,9 +492,14 @@ class TensorAllocator {
       memory[index - 1].clear();
     }
     if (debug) {
-      std::cout << "Freed range of" << N << " tensors. Free list size: " << free_list.size()
+      std::cout << "Freed range of " << N << " tensors. Free list size: " << free_list.size()
                 << " and capacity " << free_list.capacity() << std::endl;
     }
+  }
+
+  void Free(NVTETensor t) {
+    if (reinterpret_cast<uintptr_t>(t) == 0) return;
+    Free(&t, 1);
   }
 
   Tensor *convertNVTETensor(NVTETensor t) {
@@ -491,9 +526,11 @@ class TensorAllocator {
 
   std::mutex mutex;
   std::atomic<size_t> size;
-  // Allocate at most 20 MB for tensors
   // Should be replaced by virtual memory allocation
-  const size_t MAX_TENSOR_NUM = 20 * 1024 * 1024 / sizeof(Tensor);
+  const size_t TENSOR_HANDLE_POOL_SIZE_MB =
+      GetTensorHandlePoolSizeMB("NVTE_TENSOR_HANDLE_POOL_SIZE_MB");
+  const size_t MAX_TENSOR_NUM = GetTensorHandlePoolCapacity(
+      TENSOR_HANDLE_POOL_SIZE_MB, sizeof(Tensor), "NVTETensor", "NVTE_TENSOR_HANDLE_POOL_SIZE_MB");
   std::vector<uintptr_t> free_list;
   std::vector<Tensor> memory;
   bool debug = false;
@@ -544,7 +581,9 @@ class GroupedTensorAllocator {
     }
     NVTE_ERROR(
         "Cannot allocate a new NVTEGroupedTensor. Maximum number of grouped tensors reached: ",
-        MAX_GROUPED_TENSOR_NUM, ". There is probably a memory leak in your application.");
+        MAX_GROUPED_TENSOR_NUM, " (", GROUPED_TENSOR_HANDLE_POOL_SIZE_MB,
+        " MiB handle pool). If your application legitimately needs more grouped tensor handles, "
+        "increase NVTE_GROUPED_TENSOR_HANDLE_POOL_SIZE_MB.");
   }
 
   void Free(NVTEGroupedTensor t) {
@@ -576,8 +615,11 @@ class GroupedTensorAllocator {
 
   std::mutex mutex;
   std::atomic<size_t> size;
-  // Allocate at most 20 MB for grouped tensors
-  const size_t MAX_GROUPED_TENSOR_NUM = 20 * 1024 * 1024 / sizeof(GroupedTensor);
+  const size_t GROUPED_TENSOR_HANDLE_POOL_SIZE_MB =
+      GetTensorHandlePoolSizeMB("NVTE_GROUPED_TENSOR_HANDLE_POOL_SIZE_MB");
+  const size_t MAX_GROUPED_TENSOR_NUM =
+      GetTensorHandlePoolCapacity(GROUPED_TENSOR_HANDLE_POOL_SIZE_MB, sizeof(GroupedTensor),
+                                  "NVTEGroupedTensor", "NVTE_GROUPED_TENSOR_HANDLE_POOL_SIZE_MB");
   std::vector<uintptr_t> free_list;
   std::vector<GroupedTensor> memory;
 };
@@ -597,6 +639,10 @@ GroupedTensor *convertNVTEGroupedTensorCheck(const NVTEGroupedTensor t) {
 NVTETensor nvte_create_tensor(NVTEScalingMode scaling_mode) {
   NVTETensor ret = transformer_engine::TensorAllocator::instance().Allocate(scaling_mode);
   return ret;
+}
+
+void nvte_create_tensors(NVTEScalingMode scaling_mode, NVTETensor *tensors, size_t N) {
+  transformer_engine::TensorAllocator::instance().Allocate(scaling_mode, tensors, N);
 }
 
 void nvte_destroy_tensor(NVTETensor tensor) {
@@ -636,11 +682,7 @@ NVTEShape nvte_tensor_shape(const NVTETensor tensor) {
   if (t == nullptr) {
     NVTE_ERROR("Invalid tensor: received null pointer in nvte_tensor_shape");
   }
-
-  // Determine tensor shape depending on tensor format
-  const std::vector<size_t> &shape = t->shape();
-
-  return nvte_make_shape(shape.data(), shape.size());
+  return t->shape();
 }
 
 NVTEShape nvte_tensor_columnwise_shape(const NVTETensor tensor) {
@@ -648,8 +690,7 @@ NVTEShape nvte_tensor_columnwise_shape(const NVTETensor tensor) {
   if (t == nullptr) {
     NVTE_ERROR("Invalid tensor: received null pointer in nvte_tensor_columnwise_shape");
   }
-  const std::vector<size_t> &shape = t->columnwise_data.shape;
-  return nvte_make_shape(shape.data(), shape.size());
+  return t->columnwise_data.shape;
 }
 
 size_t nvte_tensor_ndims(const NVTETensor tensor) { return nvte_tensor_shape(tensor).ndim; }
@@ -852,6 +893,14 @@ void nvte_set_tensor_param_v2(NVTETensor tensor, NVTETensorParam param, const vo
     case kNVTEWithGEMMSwizzledScales:
       t.with_gemm_swizzled_scales = static_cast<bool>(*reinterpret_cast<const uint8_t *>(buf));
       break;
+    case kNVTERowScaledNVFP4:
+      t.row_scaled_nvfp4 = static_cast<bool>(*reinterpret_cast<const uint8_t *>(buf));
+      break;
+    case kNVTENVFP4E4M3Max:
+      std::memcpy(&t.nvfp4_e4m3_max, buf, attr_size);
+      NVTE_CHECK(t.nvfp4_e4m3_max == 448 || t.nvfp4_e4m3_max == 256,
+                 "Unsupported NVFP4 E4M3 max (got ", t.nvfp4_e4m3_max, ")");
+      break;
     default:
       NVTE_ERROR("Unsupported tensor parameter (", static_cast<int>(param), ")");
   }
@@ -932,6 +981,12 @@ void nvte_get_tensor_param_v2(const NVTETensor tensor, NVTETensorParam param, vo
     case kNVTEWithGEMMSwizzledScales:
       *reinterpret_cast<uint8_t *>(buf) = static_cast<uint8_t>(t->with_gemm_swizzled_scales);
       break;
+    case kNVTERowScaledNVFP4:
+      *reinterpret_cast<uint8_t *>(buf) = static_cast<uint8_t>(t->row_scaled_nvfp4);
+      break;
+    case kNVTENVFP4E4M3Max:
+      std::memcpy(buf, &t->nvfp4_e4m3_max, attr_size);
+      break;
     default:
       NVTE_ERROR("Unsupported tensor parameter (", static_cast<int>(param), ")");
   }
@@ -946,10 +1001,8 @@ NVTEScalingMode nvte_tensor_scaling_mode(const NVTETensor tensor) {
 }
 
 void nvte_tensor_pack_create(NVTETensorPack *pack) {
-  for (int i = 0; i < pack->MAX_SIZE; i++) {
-    pack->tensors[i] =
-        transformer_engine::TensorAllocator::instance().Allocate(NVTE_DELAYED_TENSOR_SCALING);
-  }
+  transformer_engine::TensorAllocator::instance().Allocate(NVTE_DELAYED_TENSOR_SCALING,
+                                                           pack->tensors, pack->MAX_SIZE);
 }
 
 void nvte_tensor_pack_destroy(NVTETensorPack *pack) {
@@ -1043,6 +1096,17 @@ void nvte_get_quantization_config_attribute(NVTEQuantizationConfig config,
     case kNVTEQuantizationConfigUseFastMath:
       bool_to_uint8(config_.use_fast_math, buf);
       break;
+    case kNVTEQuantizationConfigNVFP44Over6Mode: {
+      const auto val = static_cast<uint8_t>(config_.nvfp4_4over6_mode);
+      std::memcpy(buf, &val, attr_size);
+      break;
+    }
+    case kNVTEQuantizationConfigNVFP44Over6ErrUseFastMath:
+      bool_to_uint8(config_.nvfp4_4over6_err_use_fast_math, buf);
+      break;
+    case kNVTEQuantizationConfigMXFP82DQuantization:
+      bool_to_uint8(config_.mxfp8_2d_quantization, buf);
+      break;
     default:
       NVTE_ERROR("Unsupported NVTEQuantizationConfigAttribute (got ", static_cast<int>(attr), ")");
   }
@@ -1097,6 +1161,21 @@ void nvte_set_quantization_config_attribute(NVTEQuantizationConfig config,
       break;
     case kNVTEQuantizationConfigUseFastMath:
       uint8_to_bool(buf, config_.use_fast_math);
+      break;
+    case kNVTEQuantizationConfigNVFP44Over6Mode: {
+      const auto val = *reinterpret_cast<const uint8_t *>(buf);
+      NVTE_CHECK(val == static_cast<uint8_t>(kNVTENVFP44Over6Disabled) ||
+                     val == static_cast<uint8_t>(kNVTENVFP44Over6MinMAE) ||
+                     val == static_cast<uint8_t>(kNVTENVFP44Over6MinMSE),
+                 "Invalid NVFP4 4over6 mode (got ", static_cast<int>(val), ")");
+      config_.nvfp4_4over6_mode = static_cast<NVTENVFP44Over6Mode>(val);
+      break;
+    }
+    case kNVTEQuantizationConfigNVFP44Over6ErrUseFastMath:
+      uint8_to_bool(buf, config_.nvfp4_4over6_err_use_fast_math);
+      break;
+    case kNVTEQuantizationConfigMXFP82DQuantization:
+      uint8_to_bool(buf, config_.mxfp8_2d_quantization);
       break;
     default:
       NVTE_ERROR("Unsupported NVTEQuantizationConfigAttribute (got ", static_cast<int>(attr), ")");

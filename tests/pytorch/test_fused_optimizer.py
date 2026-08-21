@@ -8,7 +8,6 @@ from contextlib import nullcontext
 import pytest
 import torch
 from torch import nn
-from torch.testing._internal.common_device_type import largeTensorTest
 import transformer_engine.pytorch as te
 from transformer_engine.common.recipe import DelayedScaling, MXFP8BlockScaling, Float8BlockScaling
 from transformer_engine.pytorch import MultiheadAttention, quantized_model_init, is_bf16_available
@@ -166,6 +165,44 @@ class TestFusedAdam(TestFusedOptimizer):
             tst_optim.step()
 
             torch.testing.assert_close(ref_param, tst_param)
+
+    @pytest.mark.parametrize("capturable", [False, True])
+    def test_empty_param_group_advances_step(self, capturable):
+        # An empty param group must advance its step counter like a populated one.
+        # The same group can be empty on one data-parallel rank and populated on
+        # another, and "step" is part of the checkpoint, so a group that stops
+        # counting makes a resumed run apply a stale bias correction.
+        param = torch.nn.Parameter(torch.rand(4, dtype=torch.float, device="cuda"))
+        tst_optim = self.fused_optim(
+            [{"params": [param]}, {"params": []}], capturable=capturable, **self.options
+        )
+
+        num_steps = 3
+        for _ in range(num_steps):
+            param.grad = torch.rand_like(param)
+            tst_optim.step()
+
+        populated_step, empty_step = (int(g["step"]) for g in tst_optim.param_groups)
+        assert populated_step == num_steps
+        assert empty_step == populated_step
+
+        # The counter is checkpointed through the param groups, so the empty group
+        # has to round trip with the same value as the populated one.
+        checkpoint = tst_optim.state_dict()
+        assert int(checkpoint["param_groups"][1]["step"]) == num_steps
+
+    def test_empty_param_at_end_of_group(self):
+        tensors = [
+            torch.ones(4, dtype=torch.float, device="cuda"),
+            torch.empty(0, dtype=torch.float, device="cuda"),
+        ]
+        ref_param, tst_param, ref_optim, tst_optim = self.gen_param_optim(tensors, self.options)
+
+        self.gen_grad(ref_param, tst_param)
+        ref_optim.step()
+        tst_optim.step()
+
+        torch.testing.assert_close(ref_param, tst_param)
 
     def gen_precision_aware_test(
         self,
@@ -797,6 +834,19 @@ class TestFusedSGD(TestFusedOptimizer):
     def test_half(self):
         self.gen_single_type_test(param_type=torch.float16)
 
+    def test_empty_param_at_end_of_group(self):
+        tensors = [
+            torch.ones(4, dtype=torch.float, device="cuda"),
+            torch.empty(0, dtype=torch.float, device="cuda"),
+        ]
+        ref_param, tst_param, ref_optim, tst_optim = self.gen_param_optim(tensors, self.options)
+
+        self.gen_grad(ref_param, tst_param)
+        ref_optim.step()
+        tst_optim.step()
+
+        torch.testing.assert_close(ref_param, tst_param)
+
 
 class Model(torch.nn.Module):
     def __init__(self):
@@ -1053,8 +1103,13 @@ class TestAdamTest:
 
             self.model_.load_state_dict(copy.deepcopy(self.model.state_dict()))
 
-    @largeTensorTest("60GB", "cuda")
     def test_large_tensor(self):
+        import gc
+
+        gc.collect()
+        torch.cuda.empty_cache()
+        if torch.cuda.memory.mem_get_info()[0] < 60 * 1024**3:
+            pytest.skip("Insufficient available memory")
         t = torch.zeros(2359332864, dtype=torch.half, device="cuda")
         t2 = torch.zeros(2359332864, dtype=torch.half, device="cuda")
         grad = torch.randn_like(t)

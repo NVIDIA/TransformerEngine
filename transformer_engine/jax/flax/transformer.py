@@ -8,7 +8,7 @@ import functools
 from enum import Enum
 from math import sqrt
 import os
-from typing import Any, Callable, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Mapping, Optional, Sequence, Tuple, Union
 import warnings
 
 import jax
@@ -305,6 +305,9 @@ class _FusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-me
     context_parallel_strategy: CPStrategy = CPStrategy.DEFAULT
     context_checkpoint_name: str = "context"
     softmax_type: AttnSoftmaxType = AttnSoftmaxType.VANILLA_SOFTMAX
+    score_mod: Optional[Callable] = None
+    score_mod_bprop: Optional[Callable] = None
+    score_mod_requested: bool = False
 
     @nn.compact
     def __call__(
@@ -317,6 +320,8 @@ class _FusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-me
         *,
         dropout_rng: Optional[PRNGKey] = None,
         deterministic: bool = False,
+        score_mod_tensors: Optional[Mapping[str, Any]] = None,
+        score_mod_bprop_tensors: Optional[Mapping[str, Any]] = None,
     ) -> Array:
 
         seed = None
@@ -340,6 +345,26 @@ class _FusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-me
                 jnp.float32,
             )
 
+        fused_attn_kwargs = {
+            "attn_mask_type": self.attn_mask_type,
+            "attn_bias_type": self.attn_bias_type,
+            "softmax_type": self.softmax_type,
+            "scaling_factor": scale_factor,
+            "dropout_probability": self.attention_dropout,
+            "is_training": not deterministic,
+            "window_size": self.window_size,
+            "max_segments_per_seq": self.max_segments_per_seq,
+            "context_parallel_causal_load_balanced": self.context_parallel_causal_load_balanced,
+            "context_parallel_axis": self.context_parallel_axis,
+            "context_parallel_strategy": self.context_parallel_strategy,
+            "context_checkpoint_name": self.context_checkpoint_name,
+            "softmax_offset": softmax_offset,
+            "score_mod": self.score_mod,
+            "score_mod_bprop": self.score_mod_bprop,
+            "score_mod_tensors": score_mod_tensors,
+            "score_mod_bprop_tensors": score_mod_bprop_tensors,
+        }
+
         if self.qkv_layout.is_qkvpacked():
             """qkvpacked format, treat
             query: qkvpacked tensor, shape = [..., 3, h, d]
@@ -349,25 +374,23 @@ class _FusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-me
             qkv_packed = query
             if self.transpose_batch_sequence:
                 qkv_packed = qkv_packed.transpose([1, 0, 2, 3, 4])
+            if self.score_mod_requested:
+                query, key, value = jnp.split(qkv_packed, [1, 2], axis=-3)
+                query, key, value = map(
+                    functools.partial(jnp.squeeze, axis=-3), [query, key, value]
+                )
+                qkv_layout = self.qkv_layout.to_separate()
+                qkv_args = (query, key, value)
+            else:
+                qkv_layout = self.qkv_layout
+                qkv_args = (qkv_packed,)
             x = fused_attn(
-                (qkv_packed,),
+                qkv_args,
                 bias,
                 sequence_descriptor,
                 seed,
-                attn_mask_type=self.attn_mask_type,
-                attn_bias_type=self.attn_bias_type,
-                qkv_layout=self.qkv_layout,
-                softmax_type=self.softmax_type,
-                scaling_factor=scale_factor,
-                dropout_probability=self.attention_dropout,
-                is_training=not deterministic,
-                window_size=self.window_size,
-                max_segments_per_seq=self.max_segments_per_seq,
-                context_parallel_causal_load_balanced=self.context_parallel_causal_load_balanced,
-                context_parallel_axis=self.context_parallel_axis,
-                context_parallel_strategy=self.context_parallel_strategy,
-                context_checkpoint_name=self.context_checkpoint_name,
-                softmax_offset=softmax_offset,
+                qkv_layout=qkv_layout,
+                **fused_attn_kwargs,
             )
         elif self.qkv_layout.is_kvpacked():
             """kvpacked format, treat
@@ -379,25 +402,21 @@ class _FusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-me
             if self.transpose_batch_sequence:
                 query = query.transpose([1, 0, 2, 3])
                 kv_packed = kv_packed.transpose([1, 0, 2, 3, 4])
+            if self.score_mod_requested:
+                key, value = jnp.split(kv_packed, [1], axis=-3)
+                key, value = map(functools.partial(jnp.squeeze, axis=-3), [key, value])
+                qkv_layout = self.qkv_layout.to_separate()
+                qkv_args = (query, key, value)
+            else:
+                qkv_layout = self.qkv_layout
+                qkv_args = (query, kv_packed)
             x = fused_attn(
-                (query, kv_packed),
+                qkv_args,
                 bias,
                 sequence_descriptor,
                 seed,
-                attn_mask_type=self.attn_mask_type,
-                attn_bias_type=self.attn_bias_type,
-                qkv_layout=self.qkv_layout,
-                softmax_type=self.softmax_type,
-                scaling_factor=scale_factor,
-                dropout_probability=self.attention_dropout,
-                is_training=not deterministic,
-                window_size=self.window_size,
-                max_segments_per_seq=self.max_segments_per_seq,
-                context_parallel_causal_load_balanced=self.context_parallel_causal_load_balanced,
-                context_parallel_axis=self.context_parallel_axis,
-                context_parallel_strategy=self.context_parallel_strategy,
-                context_checkpoint_name=self.context_checkpoint_name,
-                softmax_offset=softmax_offset,
+                qkv_layout=qkv_layout,
+                **fused_attn_kwargs,
             )
         elif self.qkv_layout.is_separate():
             if self.transpose_batch_sequence:
@@ -409,20 +428,8 @@ class _FusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-me
                 bias,
                 sequence_descriptor,
                 seed,
-                attn_mask_type=self.attn_mask_type,
-                attn_bias_type=self.attn_bias_type,
                 qkv_layout=self.qkv_layout,
-                softmax_type=self.softmax_type,
-                scaling_factor=scale_factor,
-                dropout_probability=self.attention_dropout,
-                is_training=not deterministic,
-                window_size=self.window_size,
-                max_segments_per_seq=self.max_segments_per_seq,
-                context_parallel_causal_load_balanced=self.context_parallel_causal_load_balanced,
-                context_parallel_axis=self.context_parallel_axis,
-                context_parallel_strategy=self.context_parallel_strategy,
-                context_checkpoint_name=self.context_checkpoint_name,
-                softmax_offset=softmax_offset,
+                **fused_attn_kwargs,
             )
         else:
             raise ValueError(f"Unsupported {self.qkv_layout=}.")
@@ -602,6 +609,16 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
 
         ``'off-by-one'`` and ``'learnable'`` softmax types are also called sink attention
         (``'zero sink'`` and ``'learnable sink'``).
+    score_mod: Optional[Callable], default = None
+        Experimental cuDNN frontend score modification callback. When set, fused attention is
+        required and the same score_mod limitations as :func:`fused_attn` apply.
+    score_mod_bprop: Optional[Callable], default = None
+        Optional score modification backward callback.
+    score_mod_tensors: Optional[Mapping[str, Any]], default = None
+        Additional tensors or pass-by-value scalars for ``score_mod``. This is a call-time
+        argument to keep tensor operands as normal JAX inputs.
+    score_mod_bprop_tensors: Optional[Mapping[str, Any]], default = None
+        Additional tensors or pass-by-value scalars for ``score_mod_bprop``.
 
     Optimization parameters
     -----------------------
@@ -628,6 +645,8 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
     context_parallel_strategy: str = "DEFAULT"
     context_checkpoint_name: str = "context"
     softmax_type: str = "vanilla"
+    score_mod: Optional[Callable] = None
+    score_mod_bprop: Optional[Callable] = None
 
     def __post_init__(self):
         # TODO(KshitijLakhani): Remove warning in TransformerEngine v2.12
@@ -669,6 +688,8 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
         *,
         deterministic: bool = False,
         mask: Optional[Union[SequenceDescriptor, Array]] = None,
+        score_mod_tensors: Optional[Mapping[str, Any]] = None,
+        score_mod_bprop_tensors: Optional[Mapping[str, Any]] = None,
     ) -> Array:
         """
         Parameters
@@ -689,6 +710,10 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
             Below parameters are keyword only
         deterministic: bool, default = False
             Disable dropout layers if set to True.
+        score_mod_tensors: Optional[Mapping[str, Any]], default = None
+            Additional tensor/scalar operands passed to ``score_mod``.
+        score_mod_bprop_tensors: Optional[Mapping[str, Any]], default = None
+            Additional tensor/scalar operands passed to ``score_mod_bprop``.
 
         Returns
         -------
@@ -715,6 +740,12 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
         qkv_layout = QKVLayout[self.qkv_layout.upper()]
         softmax_type = AttnSoftmaxType.from_str(self.softmax_type)
         del self.attn_bias_type, self.attn_mask_type, self.qkv_layout
+        score_mod_requested = (
+            self.score_mod is not None
+            or self.score_mod_bprop is not None
+            or score_mod_tensors is not None
+            or score_mod_bprop_tensors is not None
+        )
 
         if attn_bias_type == AttnBiasType.NO_BIAS:
             assert (
@@ -760,13 +791,19 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
             head_dim_qk = self.head_dim
             head_dim_v = self.head_dim
 
+        if score_mod_requested:
+            if not enable_fused_attn:
+                raise ValueError("score_mod requires fused attention, but NVTE_FUSED_ATTN=0.")
+        kernel_qkv_layout = qkv_layout.to_separate() if score_mod_requested else qkv_layout
         has_fused_attn_kernel = is_fused_attn_kernel_available(
-            # This needs to be fixed: TE-Jax has historically correlated training mode with deterministic mode.
+            # This needs to be fixed: TE-Jax has historically correlated training mode
+            # with deterministic mode.
             not deterministic,
             input_dtype,
-            # self._assert_dtypes enforces Q, K, V, bias to have the same dtype so using input_dtype as kv dtype is sufficient
+            # self._assert_dtypes enforces Q, K, V, bias to have the same dtype, so
+            # using input_dtype as kv dtype is sufficient.
             input_dtype,
-            qkv_layout,
+            kernel_qkv_layout,
             attn_bias_type,
             attn_mask_type,
             softmax_type,
@@ -779,6 +816,10 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
             head_dim_v,
             self.window_size,
         )
+        if score_mod_requested and not has_fused_attn_kernel:
+            raise ValueError(
+                "score_mod requires fused attention, but no fused attention kernel is available."
+            )
 
         use_fused_attn = enable_fused_attn and has_fused_attn_kernel
 
@@ -788,7 +829,7 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
                 "Fall back to the unfused attention.\n"
                 "Please try to update the cuDNN and TE to the latest version.\n"
                 f"{qkv_layout=}\n{attn_bias_type=}\n{attn_mask_type=}\n"
-                f"{self.attention_dropout=}\n{self.num_attention_heads=}\n"
+                f"{self.attention_dropout=}\n{self.num_attention_heads=}\n{self.window_size=}\n"
                 f"{self.num_gqa_groups=}\n{seqlen_q=}\n{seqlen_kv=}\n{head_dim_qk=}\n{head_dim_v=}\n"
             )
 
@@ -872,6 +913,9 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
                 context_parallel_strategy=context_parallel_strategy,
                 context_checkpoint_name=self.context_checkpoint_name,
                 softmax_type=softmax_type,
+                score_mod=self.score_mod,
+                score_mod_bprop=self.score_mod_bprop,
+                score_mod_requested=score_mod_requested,
             )(
                 query,
                 key,
@@ -880,6 +924,8 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
                 bias,
                 dropout_rng=dropout_rng,
                 deterministic=deterministic,
+                score_mod_tensors=score_mod_tensors,
+                score_mod_bprop_tensors=score_mod_bprop_tensors,
             )
         assert x.dtype == input_dtype, f"output_dtype={x.dtype}, input_dtype={input_dtype}"
         return x
@@ -1178,6 +1224,16 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
 
         ``'off-by-one'`` and ``'learnable'`` softmax types are also called sink attention
         (``'zero sink'`` and ``'learnable sink'``).
+    score_mod: Optional[Callable], default = None
+        Experimental cuDNN frontend score modification callback. When set, fused attention is
+        required and the same score_mod limitations as :func:`fused_attn` apply.
+    score_mod_bprop: Optional[Callable], default = None
+        Optional score modification backward callback.
+    score_mod_tensors: Optional[Mapping[str, Any]], default = None
+        Additional tensors or pass-by-value scalars for ``score_mod``. This is a call-time
+        argument to keep tensor operands as normal JAX inputs.
+    score_mod_bprop_tensors: Optional[Mapping[str, Any]], default = None
+        Additional tensors or pass-by-value scalars for ``score_mod_bprop``.
     """
 
     head_dim: int
@@ -1210,6 +1266,8 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
     float32_logits: bool = False
     window_size: Optional[Tuple[int, int]] = None
     softmax_type: str = "vanilla"
+    score_mod: Optional[Callable] = None
+    score_mod_bprop: Optional[Callable] = None
 
     # Deprecated parameters
     num_heads: Optional[int] = None
@@ -1278,6 +1336,8 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
         *,
         decode: bool = False,
         deterministic: bool = False,
+        score_mod_tensors: Optional[Mapping[str, Any]] = None,
+        score_mod_bprop_tensors: Optional[Mapping[str, Any]] = None,
     ) -> Array:
         """
         MultiHeadAttention Layer:
@@ -1300,6 +1360,10 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
             Indicate whether to prepare and use an autoregressive cache.
         deterministic: bool, default = False
             Disable dropout layers if set to True.
+        score_mod_tensors: Optional[Mapping[str, Any]], default = None
+            Additional tensor/scalar operands passed to ``score_mod``.
+        score_mod_bprop_tensors: Optional[Mapping[str, Any]], default = None
+            Additional tensor/scalar operands passed to ``score_mod_bprop``.
 
         Returns
         -------
@@ -1631,7 +1695,16 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
             transpose_batch_sequence=self.transpose_batch_sequence,
             window_size=self.window_size,
             softmax_type=self.softmax_type,
-        )(*dpa_args, mask, bias, deterministic=deterministic)
+            score_mod=self.score_mod,
+            score_mod_bprop=self.score_mod_bprop,
+        )(
+            *dpa_args,
+            mask,
+            bias,
+            deterministic=deterministic,
+            score_mod_tensors=score_mod_tensors,
+            score_mod_bprop_tensors=score_mod_bprop_tensors,
+        )
         x = x.reshape((x.shape[0], x.shape[1], x.shape[2] * x.shape[3]))
 
         attn_context_sharding_constraint = (*LEADING_AXES, HIDDEN_TP_AXES)
@@ -1939,6 +2012,17 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
         ``'off-by-one'`` and ``'learnable'`` softmax types are also called sink attention
         (``'zero sink'`` and ``'learnable sink'``).
         Only supported for fused attention backend.
+    score_mod: Optional[Callable], default = None
+        Experimental cuDNN frontend score modification callback for the self-attention block.
+        When set, fused attention is required and the same score_mod limitations as
+        :func:`fused_attn` apply.
+    score_mod_bprop: Optional[Callable], default = None
+        Optional score modification backward callback for the self-attention block.
+    score_mod_tensors: Optional[Mapping[str, Any]], default = None
+        Additional tensors or pass-by-value scalars for ``score_mod``. This is a call-time
+        argument to keep tensor operands as normal JAX inputs.
+    score_mod_bprop_tensors: Optional[Mapping[str, Any]], default = None
+        Additional tensors or pass-by-value scalars for ``score_mod_bprop``.
 
     Optimization parameters
     -----------------------
@@ -2005,6 +2089,8 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
     scaled_query_init: bool = True
     window_size: Optional[Tuple[int, int]] = None
     softmax_type: str = "vanilla"
+    score_mod: Optional[Callable] = None
+    score_mod_bprop: Optional[Callable] = None
 
     def __post_init__(self):
         if self.mha_kernel_init is None:
@@ -2029,6 +2115,8 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
         deterministic: bool = False,
         decode: bool = False,
         max_decode_length: bool = None,
+        score_mod_tensors: Optional[Mapping[str, Any]] = None,
+        score_mod_bprop_tensors: Optional[Mapping[str, Any]] = None,
     ):
         """
         Transformer Layer: attention block and a feedforward network (MLP)
@@ -2057,6 +2145,10 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
             The maximum length to generate relative embedding biases when
             :attr:`layer_type=TransformerLayerType.DECODER` and
             :attr:`enable_relative_embedding=True`.
+        score_mod_tensors: Optional[Mapping[str, Any]], default = None
+            Additional tensor/scalar operands passed to the self-attention ``score_mod``.
+        score_mod_bprop_tensors: Optional[Mapping[str, Any]], default = None
+            Additional tensor/scalar operands passed to the self-attention ``score_mod_bprop``.
 
         Returns
         -------
@@ -2168,7 +2260,18 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
             name=mha_name,
             window_size=self.window_size,
             softmax_type=self.softmax_type,
-        )(inputs, inputs, attention_mask, attn_bias, deterministic=deterministic, decode=decode)
+            score_mod=self.score_mod,
+            score_mod_bprop=self.score_mod_bprop,
+        )(
+            inputs,
+            inputs,
+            attention_mask,
+            attn_bias,
+            deterministic=deterministic,
+            decode=decode,
+            score_mod_tensors=score_mod_tensors,
+            score_mod_bprop_tensors=score_mod_bprop_tensors,
+        )
 
         def hidden_dropout(x, deterministic):
             assert isinstance(

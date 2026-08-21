@@ -26,6 +26,20 @@ std::vector<size_t> convert_shape_back_from_fp4(const std::vector<size_t>& shape
   return ret;
 }
 
+std::array<size_t, 2> get_2d_dims(NVTEShape shape, bool transpose) {
+  if (!transpose) {
+    size_t flat_first = 1;
+    for (size_t i = 0; i + 1 < shape.ndim; ++i) flat_first *= shape.data[i];
+    const size_t flat_last = shape.ndim > 0 ? shape.data[shape.ndim - 1] : 1;
+    return {flat_first, flat_last};
+  } else {
+    const size_t flat_first = shape.ndim > 0 ? shape.data[0] : 1;
+    size_t flat_last = 1;
+    for (size_t i = 1; i < shape.ndim; ++i) flat_last *= shape.data[i];
+    return {flat_first, flat_last};
+  }
+}
+
 std::vector<size_t> getTensorShape(const at::Tensor& t) {
   std::vector<size_t> shape;
   for (auto s : t.sizes()) {
@@ -70,6 +84,31 @@ transformer_engine::DType getTransformerEngineFP8Type(bool e4m3_if_hybrid,
     return transformer_engine::DType::kFloat8E4M3;
   }
   return transformer_engine::DType::kFloat8E5M2;
+}
+
+pybind11::object MakePythonDType(transformer_engine::DType dtype) {
+  constexpr size_t num_dtypes = static_cast<size_t>(transformer_engine::DType::kNumTypes);
+  const size_t idx = static_cast<size_t>(dtype);
+  NVTE_CHECK(idx < num_dtypes, "Invalid DType (", idx, ").");
+
+  // Cache one ``transformer_engine.pytorch.DType`` member per value, built once in a
+  // thread-safe C++11 "magic static" initializer.
+  static const std::array<pybind11::object, num_dtypes> cache = [] {
+    pybind11::object dtype_cls =
+        pybind11::module_::import("transformer_engine.pytorch").attr("DType");
+    std::array<pybind11::object, num_dtypes> members;
+    for (pybind11::handle member : dtype_cls) {
+      const size_t value = member.attr("value").cast<size_t>();
+      if (value < num_dtypes) {
+        members[value] = pybind11::reinterpret_borrow<pybind11::object>(member);
+      }
+    }
+    return members;
+  }();
+  const pybind11::object& member = cache[idx];
+  NVTE_CHECK(static_cast<bool>(member), "No transformer_engine.pytorch.DType member for DType (",
+             idx, "); the Python DType enum is out of sync with the C++ enum.");
+  return member;
 }
 
 TensorWrapper makeTransformerEngineTensor(py::handle tensor, py::handle quantizer) {

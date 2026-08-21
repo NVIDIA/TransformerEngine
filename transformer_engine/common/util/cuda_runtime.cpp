@@ -7,8 +7,10 @@
 #include "../util/cuda_runtime.h"
 
 #include <cublasLt.h>
+#include <dlfcn.h>
 
 #include <filesystem>
+#include <fstream>
 #include <mutex>
 
 #include "../common.h"
@@ -24,6 +26,83 @@ namespace {
 
 // String with build-time CUDA include path
 #include "string_path_cuda_include.h"
+
+// Get the runtime directory of the shared library that contains this code
+std::filesystem::path shared_library_directory() {
+  static const char library_anchor = 0;
+  Dl_info library_info{};
+  if (dladdr(static_cast<const void *>(&library_anchor), &library_info) == 0 ||
+      library_info.dli_fname == nullptr) {
+    return {};
+  }
+
+  std::filesystem::path library_path = library_info.dli_fname;
+  if (library_path.is_relative()) {
+    std::error_code error;
+    library_path = std::filesystem::absolute(library_path, error);
+    if (error) {
+      return {};
+    }
+  }
+
+  return library_path.parent_path();
+}
+
+std::string runtime_cuda_major_version() {
+  int runtime_version = 0;
+  // Header discovery is best-effort, so do not throw if the runtime cannot
+  // report its version.
+  if (cudaRuntimeGetVersion(&runtime_version) != cudaSuccess || runtime_version <= 0) {
+    return {};
+  }
+
+  return std::to_string(runtime_version / 1000);
+}
+
+std::filesystem::path python_cuda_directory() {
+  using Path = std::filesystem::path;
+
+  // Find the Python package root from the installed Transformer Engine package. Do not
+  // assume that the root is named site-packages or dist-packages since valid installs
+  // may use an arbitrary target directory.
+  Path te_package_directory = shared_library_directory();
+  while (true) {
+    if (te_package_directory.filename() == "transformer_engine") {
+      break;
+    }
+
+    const Path parent = te_package_directory.parent_path();
+    if (parent == te_package_directory) {
+      // Root directory reached
+      return {};
+    }
+
+    te_package_directory = parent;
+  }
+
+  const Path nvidia_directory = te_package_directory.parent_path() / "nvidia";
+  const auto cuda_major_version = runtime_cuda_major_version();
+  if (cuda_major_version.empty()) {
+    return {};
+  }
+
+  std::error_code error;
+  const Path cuda_directory = nvidia_directory / ("cu" + cuda_major_version);
+  if (std::filesystem::is_directory(cuda_directory, error)) {
+    return cuda_directory;
+  }
+
+  // CUDA 12 Python wheels use the older nvidia/cuda_runtime layout.
+  if (cuda_major_version == "12") {
+    error.clear();
+    const Path legacy_cuda_directory = nvidia_directory / "cuda_runtime";
+    if (std::filesystem::is_directory(legacy_cuda_directory, error)) {
+      return legacy_cuda_directory;
+    }
+  }
+
+  return {};
+}
 
 }  // namespace
 
@@ -151,6 +230,7 @@ const std::string &include_directory(bool required) {
     std::vector<std::pair<std::string, Path>> search_paths = {{"NVTE_CUDA_INCLUDE_DIR", ""},
                                                               {"CUDA_HOME", ""},
                                                               {"CUDA_DIR", ""},
+                                                              {"", python_cuda_directory()},
                                                               {"", string_path_cuda_include},
                                                               {"", "/usr/local/cuda"}};
     for (auto &[env, p] : search_paths) {
@@ -200,6 +280,49 @@ const std::string &include_directory(bool required) {
 
   // Return cached path
   return path;
+}
+
+int include_directory_version(bool required) {
+  // Header path
+  const auto &include_dir = cuda::include_directory(false);
+  if (include_dir.empty()) {
+    if (required) {
+      NVTE_ERROR(
+          "Could not detect version of CUDA Toolkit headers "
+          "(CUDA Toolkit headers not found).");
+    }
+    return -1;
+  }
+
+  // Parse CUDART_VERSION from cuda_runtime_api.h.
+  const auto header_path = std::filesystem::path(include_dir) / "cuda_runtime_api.h";
+  std::ifstream header_file(header_path);
+  if (header_file.is_open()) {
+    const std::string define_prefix = "#define CUDART_VERSION ";
+    std::string line;
+    while (std::getline(header_file, line)) {
+      const auto pos = line.find(define_prefix);
+      if (pos == std::string::npos) {
+        continue;
+      }
+      try {
+        const int version = std::stoi(line.substr(pos + define_prefix.size()));
+        if (version > 0) {
+          return version;
+        }
+      } catch (...) {
+        continue;
+      }
+    }
+  }
+
+  if (required) {
+    NVTE_ERROR(
+        "Could not detect version of CUDA Toolkit headers "
+        "(Could not parse CUDART_VERSION from ",
+        header_path.string(), ").");
+  }
+  return -1;
 }
 
 int cudart_version() {

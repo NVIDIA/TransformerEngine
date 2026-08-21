@@ -53,13 +53,14 @@ void performTest(const std::vector<size_t>& shape) {
 
   fillUniform(&input);
   setRandomScale(&output_c);
+  const float ref_scale = isFp8Type(otype) ? output_c.scale() : 1.0f;
 
   nvte_quantize(input.data(), output_c.data(), 0);
 
   float ref_amax;
 
   compute_ref<InputType, OutputType>(input.rowwise_cpu_dptr<InputType>(), ref_output_c.get(),
-                                     full_size, &ref_amax, output_c.scale());
+                                     full_size, &ref_amax, ref_scale);
 
   cudaDeviceSynchronize();
   auto err = cudaGetLastError();
@@ -67,7 +68,7 @@ void performTest(const std::vector<size_t>& shape) {
   if (isFp8Type(otype)) {
     auto [atol_amax, rtol_amax] = getTolerances(DType::kFloat32);
     compareResults("amax", output_c.amax(), ref_amax, atol_amax, rtol_amax);
-    float ref_scale_inv = 1.f / output_c.scale();
+    float ref_scale_inv = 1.f / ref_scale;
     compareResults("scale_inv", output_c.rowwise_scale_inv(), ref_scale_inv, atol_amax, rtol_amax);
   }
   auto [atol, rtol] = getTolerances(otype);

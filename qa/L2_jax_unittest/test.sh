@@ -21,16 +21,20 @@ FAILED_CASES=""
 
 export NVTE_JAX_TEST_TIMING=1
 
-pip3 install "nltk>=3.8.2" || error_exit "Failed to install nltk"
-pip3 install pytest==8.2.1 || error_exit "Failed to install pytest"
+pip3 install "nltk>=3.8.2,<3.10.1" || error_exit "Failed to install nltk"
+pip3 install pytest==8.2.1 pytest-timeout==2.4.0 || error_exit "Failed to install pytest dependencies"
 
 : ${TE_PATH:=/opt/transformerengine}
 : ${XML_LOG_DIR:=/logs}
 mkdir -p "$XML_LOG_DIR"
 
-NVTE_JAX_UNITTEST_LEVEL="L2" python3 -m pytest -c $TE_PATH/tests/jax/pytest.ini -v --junitxml=$XML_LOG_DIR/pytest_jax_not_distributed.xml $TE_PATH/tests/jax -k 'not distributed' || test_fail "tests/jax/*not_distributed_*"
+NVTE_JAX_UNITTEST_LEVEL="L2" python3 -m pytest -c $TE_PATH/tests/jax/pytest.ini -v --junitxml=$XML_LOG_DIR/pytest_jax_not_distributed.xml $TE_PATH/tests/jax --ignore=$TE_PATH/tests/jax/test_multi_process_ep.py -k 'not distributed' || test_fail "tests/jax/*not_distributed_*"
 
 pip3 install -r $TE_PATH/examples/jax/mnist/requirements.txt || error_exit "Failed to install mnist requirements"
+# Note: mnist intentionally does NOT set --xla_gpu_deterministic_ops because it
+# significantly slows down small conv/GEMM kernels and was causing CI timeouts.
+# The mnist verify() already uses a tail-window min/max with relaxed thresholds
+# to be robust to run-to-run numerical noise.
 NVTE_JAX_UNITTEST_LEVEL="L2" python3 -m pytest -c $TE_PATH/tests/jax/pytest.ini -v --junitxml=$XML_LOG_DIR/pytest_mnist.xml $TE_PATH/examples/jax/mnist || test_fail "mnist"
 
 pip3 install -r $TE_PATH/examples/jax/encoder/requirements.txt || error_exit "Failed to install encoder requirements"

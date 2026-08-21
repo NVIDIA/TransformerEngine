@@ -255,10 +255,6 @@ def main():
     local_rank = int(os.environ["LOCAL_RANK"])
     torch.cuda.set_device(local_rank)
 
-    # Initialize the NCCL communicator before passing its raw pointer to cuSolverMp.
-    warmup = torch.ones((), device="cuda")
-    dist.all_reduce(warmup, group=dist.group.WORLD)
-
     ctx = CusolverMpCtx(dist.group.WORLD)
     try:
         run_all_tests(ctx)

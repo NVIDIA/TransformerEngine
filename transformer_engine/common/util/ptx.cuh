@@ -124,26 +124,26 @@ constexpr bool is_supported_arch() {
   NVTE_CUDA_ARCH_MATCHES(ptx::FamilySpecific<100>, ptx::FamilySpecific<110>, \
                          ptx::FamilySpecific<120>)
 #define ARCH_HAS_STOCHASTIC_ROUNDING \
-  NVTE_CUDA_ARCH_MATCHES(ptx::ArchSpecific<100>, ptx::ArchSpecific<103>)
+  NVTE_CUDA_ARCH_MATCHES(ptx::ArchSpecific<100>, ptx::ArchSpecific<103>, ptx::ArchSpecific<107>)
 
 // https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#parallel-synchronization-and-communication-instructions-mbarrier-init
 __device__ __forceinline__ void mbarrier_init(uint64_t *mbar, const uint32_t count) {
-#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
   uint32_t mbar_ptr = __cvta_generic_to_shared(mbar);
   asm volatile("mbarrier.init.shared.b64 [%0], %1;" ::"r"(mbar_ptr), "r"(count) : "memory");
 #else
-  NVTE_DEVICE_ERROR("mbarrier_init is only supported on SM 10.0+.");
-#endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+  NVTE_DEVICE_ERROR("mbarrier_init is only supported on SM 9.0+.");
+#endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
 }
 
 // https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#parallel-synchronization-and-communication-instructions-mbarrier-inval
 __device__ __forceinline__ void mbarrier_invalid(uint64_t *mbar) {
-#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
   uint32_t mbar_ptr = __cvta_generic_to_shared(mbar);
   asm volatile("mbarrier.inval.shared.b64 [%0];" ::"r"(mbar_ptr) : "memory");
 #else
-  NVTE_DEVICE_ERROR("mbarrier_invalid is only supported on SM 10.0+.");
-#endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+  NVTE_DEVICE_ERROR("mbarrier_invalid is only supported on SM 9.0+.");
+#endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
 }
 
 // https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#parallel-synchronization-and-communication-instructions-mbarrier-arrive
@@ -158,13 +158,13 @@ __device__ __forceinline__ void mbarrier_arrive(uint64_t *mbar) {
 
 // https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#parallel-synchronization-and-communication-instructions-mbarrier-arrive
 __device__ __forceinline__ void mbarrier_arrive_expect_tx(uint64_t *mbar, const uint32_t tx_count) {
-#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
   uint32_t mbar_ptr = __cvta_generic_to_shared(mbar);
   asm volatile("mbarrier.arrive.expect_tx.shared.b64 _, [%0], %1;" ::"r"(mbar_ptr), "r"(tx_count)
                : "memory");
 #else
-  NVTE_DEVICE_ERROR("mbarrier_arrive_expect_tx is only supported on SM 10.0+.");
-#endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+  NVTE_DEVICE_ERROR("mbarrier_arrive_expect_tx is only supported on SM 9.0+.");
+#endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
 }
 
 __device__ __forceinline__ void mbarrier_arrive_expect_tx_cta_relaxed_shared_cta(
@@ -230,8 +230,26 @@ __device__ __forceinline__ void cp_async_bulk_tensor_2d_global_to_shared(
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
 
+// global -> shared::cta (no cluster; valid on Hopper sm_90+ and Blackwell with
+// cluster size 1). Used by the FP8 block-scaling grouped quantize kernels.
+__device__ __forceinline__ void cp_async_bulk_tensor_2d_global_to_shared_cta(
+    uint64_t *dst_shmem, const uint64_t *tensor_map_ptr, const uint32_t offset_x,
+    const uint32_t offset_y, uint64_t *mbar) {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+  uint32_t dst_shmem_ptr = __cvta_generic_to_shared(dst_shmem);
+  uint32_t mbar_ptr = __cvta_generic_to_shared(mbar);
+  asm volatile(
+      "cp.async.bulk.tensor.2d.shared::cta.global.tile"
+      ".mbarrier::complete_tx::bytes [%0], [%1, {%2, %3}], [%4];" ::"r"(dst_shmem_ptr),
+      "l"(tensor_map_ptr), "r"(offset_x), "r"(offset_y), "r"(mbar_ptr)
+      : "memory");
+#else
+  NVTE_DEVICE_ERROR("cp_async_bulk_tensor_2d_global_to_shared_cta is only supported on SM 9.0+.");
+#endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+}
+
 __device__ __forceinline__ bool mbarrier_try_wait_parity(uint32_t mbar_ptr, const uint32_t parity) {
-#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
   uint32_t waitComplete;
   asm volatile(
       "{\n\t .reg .pred P_OUT; \n\t"
@@ -243,19 +261,19 @@ __device__ __forceinline__ bool mbarrier_try_wait_parity(uint32_t mbar_ptr, cons
       : "memory");
   return static_cast<bool>(waitComplete);
 #else
-  NVTE_DEVICE_ERROR("mbarrier_try_wait_parity is only supported on SM 10.0+.");
-#endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+  NVTE_DEVICE_ERROR("mbarrier_try_wait_parity is only supported on SM 9.0+.");
+#endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
   return true;
 }
 
 __device__ __forceinline__ void mbarrier_wait_parity(uint64_t *mbar, const uint32_t parity) {
-#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
   uint32_t mbar_ptr = __cvta_generic_to_shared(mbar);
   while (!mbarrier_try_wait_parity(mbar_ptr, parity)) {
   }
 #else
-  NVTE_DEVICE_ERROR("mbarrier_wait_parity is only supported on SM 10.0+.");
-#endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+  NVTE_DEVICE_ERROR("mbarrier_wait_parity is only supported on SM 9.0+.");
+#endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
 }
 
 __device__ __forceinline__ void mbarrier_wait_parity_acquire_cta_shared_cta(uint64_t *mbar,
@@ -362,6 +380,10 @@ __device__ __forceinline__ bf16 exp2f_rcp<bf16>(e8m0_t biased_exp) {
 }
 
 __device__ __forceinline__ float exp2f(e8m0_t biased_exp) {
+  // Handle the special case of NaN.
+  if (biased_exp == 255) return __int_as_float(0x7fffffff);
+  // 2^-127 is subnormal, so it cannot be built by shifting into the exponent field.
+  if (biased_exp == 0) return __int_as_float(0x00400000);
   return __int_as_float(biased_exp << FP32_MANTISSA_BITS);
 }
 
@@ -582,6 +604,29 @@ __device__ __forceinline__ void mul_cvt_4x(fp4e2m1x4 &out, const Tx2 &in01, cons
   out = fp4e2m1x4(make_float4(x0, x1, x2, x3));
 }
 
+// Software stochastic rounding onto the e2m1 grid, for architectures without
+// cvt.rs. Takes 8 random bits per element, which is what
+// cvt.rs.satfinite.e2m1x4.f32 takes from its rbits operand. Follows satfinite
+// for the edges: NaN becomes positive MAX_NORM and larger magnitudes clamp to
+// MAX_NORM with the sign kept. The result is exactly representable in e2m1, so
+// packing it is lossless.
+__device__ __forceinline__ float stochastic_round_fp4_e2m1(const float x, const uint32_t rbits8) {
+  constexpr float max_norm = 6.0f;
+  const float u = static_cast<float>(rbits8 & 0xFFu) * (1.0f / 256.0f);
+  const float a = fabsf(x);
+  // Grid step at |x|: 0.5 below 2, 1 in [2, 4), 2 in [4, 6].
+  const float step = (a >= 4.0f) ? 2.0f : ((a >= 2.0f) ? 1.0f : 0.5f);
+  const float t = fmaf(u, step, a);
+  // The jitter can carry t across one region boundary, so the rounding step
+  // derives from t. Flooring in units of that step lands on the e2m1 grid in
+  // every region, and the saturation also maps a NaN t to max_norm, which the
+  // sign select keeps positive.
+  const float step_t = (t >= 4.0f) ? 2.0f : ((t >= 2.0f) ? 1.0f : 0.5f);
+  const float inv_step_t = (t >= 4.0f) ? 0.5f : ((t >= 2.0f) ? 1.0f : 2.0f);
+  const float q = fminf(floorf(t * inv_step_t) * step_t, max_norm);
+  return copysignf(q, (x != x) ? 1.0f : x);
+}
+
 __device__ __forceinline__ fp4e2m1x4 mul_cvt_bf16_to_fp4_4x_with_stochastic_rounding(
     const uint64_t in_4x, const float2 scale, const uint32_t rbits) {
   uint16_t out_4x = 0;
@@ -615,9 +660,14 @@ __device__ __forceinline__ fp4e2m1x4 mul_cvt_bf16_to_fp4_4x_with_stochastic_roun
         : "=h"(out_4x)
         : "l"(in_4x), "l"(reinterpret_cast<const uint64_t &>(scale)), "r"(rbits));
   } else {
-    NVTE_DEVICE_ERROR(
-        "FP4 cvt PTX instructions are architecture-specific. "
-        "Try recompiling with sm_XXXa instead of sm_XXX.");
+    // mul.f32x2 above applies scale.x to the even elements and scale.y to the odd ones.
+    const bf16 *vals = reinterpret_cast<const bf16 *>(&in_4x);
+    const float q0 = stochastic_round_fp4_e2m1(static_cast<float>(vals[0]) * scale.x, rbits);
+    const float q1 = stochastic_round_fp4_e2m1(static_cast<float>(vals[1]) * scale.y, rbits >> 8);
+    const float q2 = stochastic_round_fp4_e2m1(static_cast<float>(vals[2]) * scale.x, rbits >> 16);
+    const float q3 = stochastic_round_fp4_e2m1(static_cast<float>(vals[3]) * scale.y, rbits >> 24);
+    const fp4e2m1x4 packed(make_float4(q0, q1, q2, q3));
+    out_4x = *reinterpret_cast<const uint16_t *>(&packed);
   }
   return *reinterpret_cast<fp4e2m1x4 *>(&out_4x);
 }
@@ -707,9 +757,12 @@ __device__ __forceinline__ fp4e2m1x4 mul_cvt_fp32_to_fp4_4x_with_stochastic_roun
           "l"(reinterpret_cast<const uint64_t &>(in23)),
           "l"(reinterpret_cast<const uint64_t &>(scale)), "r"(rbits));
   } else {
-    NVTE_DEVICE_ERROR(
-        "FP4 cvt PTX instructions are architecture-specific. "
-        "Try recompiling with sm_XXXa instead of sm_XXX.");
+    const float q0 = stochastic_round_fp4_e2m1(in01.x * scale.x, rbits);
+    const float q1 = stochastic_round_fp4_e2m1(in01.y * scale.y, rbits >> 8);
+    const float q2 = stochastic_round_fp4_e2m1(in23.x * scale.x, rbits >> 16);
+    const float q3 = stochastic_round_fp4_e2m1(in23.y * scale.y, rbits >> 24);
+    const fp4e2m1x4 packed(make_float4(q0, q1, q2, q3));
+    out_4x = *reinterpret_cast<const uint16_t *>(&packed);
   }
   return *reinterpret_cast<fp4e2m1x4 *>(&out_4x);
 }
@@ -932,9 +985,26 @@ __device__ __forceinline__ uint32_t mul_cvt_bf16_to_fp4_8x_stochastic_rounding(
       NVTE_DEVICE_ERROR("Not supported scaling coefficient type.");
     }
   } else {
-    NVTE_DEVICE_ERROR(
-        "FP4 cvt PTX instructions are architecture-specific. "
-        "Try recompiling with sm_XXXa instead of sm_XXX.");
+    constexpr bool known_coeff = std::is_same<SCALING_COEFFICIENT_TYPE, bf16>::value ||
+                                 std::is_same<SCALING_COEFFICIENT_TYPE, float>::value;
+    if constexpr (known_coeff) {
+      const float coeff = static_cast<float>(scaling_coefficient);
+      const bf16 *vals03 = reinterpret_cast<const bf16 *>(&in03);
+      const bf16 *vals47 = reinterpret_cast<const bf16 *>(&in47);
+      float q[8];
+#pragma unroll
+      for (int i = 0; i < 4; ++i) {
+        q[i] = stochastic_round_fp4_e2m1(static_cast<float>(vals03[i]) * coeff, rbits03 >> (8 * i));
+        q[i + 4] =
+            stochastic_round_fp4_e2m1(static_cast<float>(vals47[i]) * coeff, rbits47 >> (8 * i));
+      }
+      const fp4e2m1x4 lo(make_float4(q[0], q[1], q[2], q[3]));
+      const fp4e2m1x4 hi(make_float4(q[4], q[5], q[6], q[7]));
+      out_8x = static_cast<uint32_t>(*reinterpret_cast<const uint16_t *>(&lo)) |
+               (static_cast<uint32_t>(*reinterpret_cast<const uint16_t *>(&hi)) << 16);
+    } else {
+      NVTE_DEVICE_ERROR("Not supported scaling coefficient type.");
+    }
   }
   return out_8x;
 }

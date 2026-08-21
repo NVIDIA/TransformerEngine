@@ -6,6 +6,7 @@
 #include "utils.h"
 
 #include <cuda_runtime_api.h>
+#include <cudnn_frontend_version.h>
 
 #include <cassert>
 
@@ -21,6 +22,8 @@ int GetCudaRuntimeVersion() {
 }
 
 size_t GetCudnnRuntimeVersion() { return cudnnGetVersion(); }
+
+size_t GetCudnnFrontendVersion() { return CUDNN_FRONTEND_VERSION; }
 
 int GetDeviceComputeCapability(int gpu_id) { return transformer_engine::cuda::sm_arch(gpu_id); }
 

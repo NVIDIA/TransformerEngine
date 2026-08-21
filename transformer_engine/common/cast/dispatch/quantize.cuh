@@ -17,11 +17,13 @@
 #include "../../transpose/cast_transpose.h"
 #include "../../util/vectorized_pointwise.h"
 #include "../core/common.cuh"
+#include "../fp8/group_quantize_fp8.cuh"
 #include "../fp8/quantize_fp8.cuh"
+#include "../fp8_blockwise/group_quantize_fp8_blockwise.cuh"
 #include "../mxfp8/group_quantize_mxfp8.cuh"
 #include "../mxfp8/quantize_mxfp8.cuh"
 #include "../nvfp4/group_quantize_transpose_nvfp4.cuh"
-#include "../nvfp4/quantize_nvfp4.cuh"
+#include "../nvfp4/quantize_4over6_nvfp4.cuh"
 #include "../nvfp4/quantize_transpose_nvfp4.cuh"
 
 namespace transformer_engine {
@@ -86,7 +88,7 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
       Tensor *dummy_workspace_tensor = nullptr;
       mxfp8::quantize</*IS_DBIAS=*/false, /*IS_DACT=*/false, IS_ACT, ParamOP, OP>(
           *input_tensor, dummy_input_tensor, noop_tensor, output_tensor, dummy_dbias_tensor,
-          dummy_workspace_tensor, stream);
+          dummy_workspace_tensor, quant_config_cpp.mxfp8_2d_quantization, stream);
       break;
     }
     case NVTE_NVFP4_1D_SCALING: {
@@ -98,14 +100,50 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
       CheckOutputTensor(*output_tensor, "output", false);
 
       // Choose kernel
-      int32_t rows = input_tensor->flat_first_dim();
-      int32_t cols = input_tensor->flat_last_dim();
+      const auto [rows, cols] = input_tensor->flat_2d_dims();
       auto dtype = input_tensor->dtype();
-      bool use_optimized_kernel = (dtype == DType::kBFloat16) && (rows % 32 == 0) &&
-                                  (cols % 32 == 0) && output_tensor->has_data();
+      const bool row_scaled_nvfp4 = output_tensor->row_scaled_nvfp4;
+      const bool nvfp4_use_4over6 = quant_config_cpp.nvfp4_4over6_mode != kNVTENVFP44Over6Disabled;
+      NVTE_CHECK(nvfp4_use_4over6 || output_tensor->nvfp4_e4m3_max == 448,
+                 "Non-4over6 NVFP4 quantization requires E4M3 max 448.");
+      NVTE_CHECK(!nvfp4_use_4over6 || !quant_config_cpp.stochastic_rounding,
+                 "NVFP4 4over6 quantization does not support stochastic rounding.");
+      if (row_scaled_nvfp4) {
+        NVTE_CHECK(!quant_config_cpp.nvfp4_2d_quantization,
+                   "Row-scaled NVFP4 quantization does not support 2D quantization.");
+        NVTE_CHECK(
+            !(nvfp4_use_4over6 && output_tensor->has_columnwise_data()),
+            "Row-scaled NVFP4 transpose quantization is not supported with 4over6 mode. The 4over6 "
+            "kernel does not consume the per-row/per-column amaxes, so the columnwise output would "
+            "be incorrect.");
+        NVTE_CHECK(
+            !output_tensor->has_columnwise_data() ||
+                (dtype == DType::kBFloat16 && rows % 32 == 0 && cols % 32 == 0),
+            "Row-scaled NVFP4 transpose quantization requires BF16 input and dimensions that are "
+            "multiples of 32.");
+        nvfp4::compute_rowwise_amax(*input_tensor, noop_tensor, output_tensor, stream);
+        if (output_tensor->has_columnwise_data()) {
+          nvfp4::compute_columnwise_amax(*input_tensor, noop_tensor, output_tensor, stream);
+        }
+      }
+      // Columnwise-only is supported on the optimized path only for 2D scaling; rowwise-only and
+      // both-directions keep their existing routing. Columnwise-only 1D and non-bf16 fall back to
+      // quantize_transpose_vector_blockwise_fp4.
+      bool use_optimized_kernel =
+          (dtype == DType::kBFloat16) && (rows % 32 == 0) && (cols % 32 == 0) &&
+          (output_tensor->has_data() ||
+           (output_tensor->has_columnwise_data() && quant_config_cpp.nvfp4_2d_quantization));
 
       // Launch NVFP4 quantize kernel
-      if (use_optimized_kernel) {
+      if (nvfp4_use_4over6) {
+        if (quant_config_cpp.nvfp4_2d_quantization) {
+          nvfp4::quantize_4over6</*use_2d_quantization=*/true>(
+              *input_tensor, noop_tensor, output_tensor, &quant_config_cpp, stream);
+        } else {
+          nvfp4::quantize_4over6</*use_2d_quantization=*/false>(
+              *input_tensor, noop_tensor, output_tensor, &quant_config_cpp, stream);
+        }
+      } else if (use_optimized_kernel) {
         if (quant_config_cpp.nvfp4_2d_quantization) {
           nvfp4::quantize_transpose</*use_2d_quantization=*/true>(
               *input_tensor, noop_tensor, output_tensor, &quant_config_cpp, stream);
@@ -123,11 +161,13 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
             /*output=*/output_tensor->data, /*output_t=*/output_tensor->columnwise_data,
             /*epsilon=*/0.0f, /*return_identity=*/output_tensor->has_data(),
             /*return_transpose=*/output_tensor->has_columnwise_data(), /*pow2_scale=*/false,
-            /*swizzled_scale=*/false,
+            /*swizzled_scale=*/output_tensor->with_gemm_swizzled_scales,
             /*use_stochastic_rounding=*/quant_config_cpp.stochastic_rounding,
             /*rng_state=*/quant_config_cpp.rng_state,
             /*use_2d_quantization=*/quant_config_cpp.nvfp4_2d_quantization,
-            /*noop_tensor=*/noop_tensor->data, /*stream=*/stream);
+            /*row_scaled_nvfp4=*/row_scaled_nvfp4,
+            /*noop_tensor=*/noop_tensor->data,
+            /*stream=*/stream);
       }
       break;
     }
@@ -224,7 +264,7 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
     case NVTE_MXFP8_1D_SCALING: {
       mxfp8::quantize<IS_DBIAS, IS_DACT, /*IS_ACT=*/false, ParamOP, OP>(
           *grad_tensor, input_tensor, noop_tensor, output_tensor, dbias_tensor, workspace_tensor,
-          stream);
+          quant_config_cpp.mxfp8_2d_quantization, stream);
       break;
     }
     case NVTE_NVFP4_1D_SCALING: {
@@ -237,14 +277,50 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
       CheckOutputTensor(*output_tensor, "output", false);
 
       // Choose kernel
-      int32_t rows = grad_tensor->flat_first_dim();
-      int32_t cols = grad_tensor->flat_last_dim();
+      const auto [rows, cols] = grad_tensor->flat_2d_dims();
       auto dtype = grad_tensor->dtype();
-      bool use_optimized_kernel = (dtype == DType::kBFloat16) && (rows % 32 == 0) &&
-                                  (cols % 32 == 0) && output_tensor->has_data();
+      const bool row_scaled_nvfp4 = output_tensor->row_scaled_nvfp4;
+      const bool nvfp4_use_4over6 = quant_config_cpp.nvfp4_4over6_mode != kNVTENVFP44Over6Disabled;
+      NVTE_CHECK(nvfp4_use_4over6 || output_tensor->nvfp4_e4m3_max == 448,
+                 "Non-4over6 NVFP4 quantization requires E4M3 max 448.");
+      NVTE_CHECK(!nvfp4_use_4over6 || !quant_config_cpp.stochastic_rounding,
+                 "NVFP4 4over6 quantization does not support stochastic rounding.");
+      if (row_scaled_nvfp4) {
+        NVTE_CHECK(!quant_config_cpp.nvfp4_2d_quantization,
+                   "Row-scaled NVFP4 quantization does not support 2D quantization.");
+        NVTE_CHECK(
+            !(nvfp4_use_4over6 && output_tensor->has_columnwise_data()),
+            "Row-scaled NVFP4 transpose quantization is not supported with 4over6 mode. The 4over6 "
+            "kernel does not consume the per-row/per-column amaxes, so the columnwise output would "
+            "be incorrect.");
+        NVTE_CHECK(
+            !output_tensor->has_columnwise_data() ||
+                (dtype == DType::kBFloat16 && rows % 32 == 0 && cols % 32 == 0),
+            "Row-scaled NVFP4 transpose quantization requires BF16 input and dimensions that are "
+            "multiples of 32.");
+        nvfp4::compute_rowwise_amax(*grad_tensor, noop_tensor, output_tensor, stream);
+        if (output_tensor->has_columnwise_data()) {
+          nvfp4::compute_columnwise_amax(*grad_tensor, noop_tensor, output_tensor, stream);
+        }
+      }
+      // Columnwise-only is supported on the optimized path only for 2D scaling; rowwise-only and
+      // both-directions keep their existing routing. Columnwise-only 1D and non-bf16 fall back to
+      // quantize_transpose_vector_blockwise_fp4.
+      bool use_optimized_kernel =
+          (dtype == DType::kBFloat16) && (rows % 32 == 0) && (cols % 32 == 0) &&
+          (output_tensor->has_data() ||
+           (output_tensor->has_columnwise_data() && quant_config_cpp.nvfp4_2d_quantization));
 
       // Launch NVFP4 quantize kernel
-      if (use_optimized_kernel) {
+      if (nvfp4_use_4over6) {
+        if (quant_config_cpp.nvfp4_2d_quantization) {
+          nvfp4::quantize_4over6</*use_2d_quantization=*/true>(
+              *grad_tensor, noop_tensor, output_tensor, &quant_config_cpp, stream);
+        } else {
+          nvfp4::quantize_4over6</*use_2d_quantization=*/false>(
+              *grad_tensor, noop_tensor, output_tensor, &quant_config_cpp, stream);
+        }
+      } else if (use_optimized_kernel) {
         if (quant_config_cpp.nvfp4_2d_quantization) {
           nvfp4::quantize_transpose</*use_2d_quantization=*/true>(
               *grad_tensor, noop_tensor, output_tensor, &quant_config_cpp, stream);
@@ -262,11 +338,13 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
             /*output=*/output_tensor->data, /*output_t=*/output_tensor->columnwise_data,
             /*epsilon=*/0.0f, /*return_identity=*/output_tensor->has_data(),
             /*return_transpose=*/output_tensor->has_columnwise_data(), /*pow2_scale=*/false,
-            /*swizzled_scale=*/false,
+            /*swizzled_scale=*/output_tensor->with_gemm_swizzled_scales,
             /*use_stochastic_rounding=*/quant_config_cpp.stochastic_rounding,
             /*rng_state=*/quant_config_cpp.rng_state,
             /*use_2d_quantization=*/quant_config_cpp.nvfp4_2d_quantization,
-            /*noop_tensor=*/noop_tensor->data, /*stream=*/stream);
+            /*row_scaled_nvfp4=*/row_scaled_nvfp4,
+            /*noop_tensor=*/noop_tensor->data,
+            /*stream=*/stream);
       }
       break;
     }
@@ -356,12 +434,18 @@ void group_quantize_fwd_host_aware_helper(const NVTETensor input, NVTETensor *ou
       // output list here is allowed to have empty tensor
 
       // Choose kernel
-      int32_t rows = input_tensor->flat_first_dim();
-      int32_t cols = input_tensor->flat_last_dim();
+      const auto [rows, cols] = input_tensor->flat_2d_dims();
       auto dtype = input_tensor->dtype();
 
+      const bool nvfp4_use_4over6 = quant_config_cpp.nvfp4_4over6_mode != kNVTENVFP44Over6Disabled;
+      for (const auto *output_tensor : output_tensors) {
+        NVTE_CHECK(nvfp4_use_4over6 || output_tensor->nvfp4_e4m3_max == 448,
+                   "Non-4over6 NVFP4 quantization requires E4M3 max 448.");
+      }
       NVTE_CHECK(!quant_config_cpp.nvfp4_2d_quantization,
                  "2D quantization is not supported for group quantize.");
+      NVTE_CHECK(!nvfp4_use_4over6,
+                 "NVFP4 4over6 quantization is not supported for group quantize.");
 
       // Launch NVFP4 group quantize kernel
       nvfp4::group_quantize_transpose</*use_2d_quantization*/ false>(
@@ -406,10 +490,29 @@ void group_quantize_fwd_helper(const NVTEGroupedTensor input, NVTEGroupedTensor 
 
   // Dispatch to quantization kernel depending on data format
   switch (scaling_mode) {
+    case NVTE_DELAYED_TENSOR_SCALING: {
+      fp8::group_quantize<IS_ACT, ParamOP, OP>(input_tensor, noop_tensor, output_tensor,
+                                               &quant_config_cpp, stream);
+      break;
+    }
     case NVTE_MXFP8_1D_SCALING: {
       mxfp8::group_quantize</*IS_DBIAS=*/false, /*IS_DACT=*/false, IS_ACT, ParamOP, OP>(
           input_tensor, activations_tensor, noop_tensor, output_tensor, dbias_tensor,
           workspace_tensor, &quant_config_cpp, stream);
+      break;
+    }
+    case NVTE_BLOCK_SCALING_1D: {
+      NVTE_CHECK(!IS_ACT, "IS_ACT is not implemented for grouped NVTE_BLOCK_SCALING_1D.");
+      fp8_blockwise::group_quantize_blockwise_1d(input_tensor, output_tensor, noop_tensor,
+                                                 quant_config_cpp.amax_epsilon,
+                                                 quant_config_cpp.force_pow_2_scales, stream);
+      break;
+    }
+    case NVTE_BLOCK_SCALING_2D: {
+      NVTE_CHECK(!IS_ACT, "IS_ACT is not implemented for grouped NVTE_BLOCK_SCALING_2D.");
+      fp8_blockwise::group_quantize_blockwise_2d(input_tensor, output_tensor, noop_tensor,
+                                                 quant_config_cpp.amax_epsilon,
+                                                 quant_config_cpp.force_pow_2_scales, stream);
       break;
     }
     default:
@@ -451,6 +554,24 @@ void group_quantize_bwd_helper(const NVTEGroupedTensor grad, const NVTEGroupedTe
       mxfp8::group_quantize<IS_DBIAS, IS_DACT, /*IS_ACT=*/false, ParamOP, OP>(
           grad_tensor, input_tensor, noop_tensor, output_tensor, dbias_tensor, workspace_tensor,
           &quant_config_cpp, stream);
+      break;
+    }
+    case NVTE_BLOCK_SCALING_1D:
+    case NVTE_BLOCK_SCALING_2D: {
+      NVTE_CHECK(!IS_DACT, "IS_DACT is not implemented for grouped FP8 block scaling.");
+      // dbias is computed in-kernel and reduced per-expert inside group_quantize_blockwise_{1d,2d}
+      // (mirrors MXFP8); those also handle the two-call workspace sizing protocol.
+      GroupedTensor *dbias_arg = IS_DBIAS ? dbias_tensor : nullptr;
+      Tensor *workspace_arg = IS_DBIAS ? workspace_tensor : nullptr;
+      if (scaling_mode == NVTE_BLOCK_SCALING_1D) {
+        fp8_blockwise::group_quantize_blockwise_1d(
+            grad_tensor, output_tensor, noop_tensor, quant_config_cpp.amax_epsilon,
+            quant_config_cpp.force_pow_2_scales, stream, dbias_arg, workspace_arg);
+      } else {
+        fp8_blockwise::group_quantize_blockwise_2d(
+            grad_tensor, output_tensor, noop_tensor, quant_config_cpp.amax_epsilon,
+            quant_config_cpp.force_pow_2_scales, stream, dbias_arg, workspace_arg);
+      }
       break;
     }
     default:
