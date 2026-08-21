@@ -632,6 +632,10 @@ class FP8GlobalStateManager:
     def set_autocast_state(cls, state: tuple) -> None:
         """Restore a previously saved autocast state snapshot."""
         qstate = cls.quantization_state
+        # Ownership is consumed monotonically by FP8 modules. Restoring an
+        # outer autocast snapshot must not revive an already-consumed owner
+        # when a nested autocast context exits.
+        current_is_first_fp8_module = qstate.is_first_fp8_module
         (
             qstate.fp8_enabled,
             qstate.fp8_calibration,
@@ -640,6 +644,7 @@ class FP8GlobalStateManager:
             qstate.is_first_fp8_module,
             qstate.fp8_graph_capturing,
         ) = state
+        qstate.is_first_fp8_module = current_is_first_fp8_module and qstate.is_first_fp8_module
 
     @staticmethod
     def reduce_tensor_across_group_op_max(tensor: torch.Tensor, group: dist_group_type) -> None:
@@ -734,6 +739,7 @@ class FP8GlobalStateManager:
         fp8_recipe: Optional[Recipe] = None,
         fp8_group: Optional[dist_group_type] = None,
         _graph: bool = False,
+        _recompute: bool = False,
     ) -> None:
         """Set state and tracking variables for entry into FP8 region."""
 
@@ -751,7 +757,7 @@ class FP8GlobalStateManager:
         qstate.fp8_distributed_group = fp8_group
         qstate.fp8_graph_capturing = _graph
 
-        if qstate.autocast_depth == 0:
+        if qstate.autocast_depth == 0 and not _recompute:
             qstate.is_first_fp8_module = True
         qstate.autocast_depth += 1
 
@@ -769,14 +775,20 @@ class FP8GlobalStateManager:
                 assert nvfp4_available, reason_for_no_nvfp4
 
     @classmethod
-    def autocast_exit(cls, enabled: bool, _graph: bool) -> None:
+    def autocast_exit(cls, enabled: bool, _graph: bool, _recompute: bool = False) -> None:
         """Set state and tracking variables for exit from FP8 region."""
         qstate = cls.quantization_state
         qstate.autocast_depth -= 1
         # Reduce only the non-FP8 weight modules here.
         # FP8 weight modules are reduced at the end of the optimizer
         # step after the weight amax is populated.
-        if enabled and qstate.autocast_depth == 0 and not _graph and torch.is_grad_enabled():
+        if (
+            enabled
+            and qstate.autocast_depth == 0
+            and not _graph
+            and not _recompute
+            and torch.is_grad_enabled()
+        ):
             # delayed scaling only function, for other recipes (current scaling with any granularity),
             # this is noop for other recipes because cls.global_amax_buffer is empty list
             cls.reduce_and_update_fp8_tensors(forward=True)
@@ -1016,6 +1028,7 @@ class autocast:
         "_recipe",
         "_amax_reduction_group",
         "_graph",
+        "_recompute",
         "_fp8_state",
     )
 
@@ -1026,12 +1039,14 @@ class autocast:
         recipe: Optional["Recipe"] = None,
         amax_reduction_group: Optional["dist_group_type"] = None,
         _graph: bool = False,
+        _recompute: bool = False,
     ) -> None:
         self._enabled = enabled
         self._calibrating = calibrating
         self._recipe = recipe
         self._amax_reduction_group = amax_reduction_group
         self._graph = _graph
+        self._recompute = _recompute
         self._fp8_state = None
 
     def __enter__(self) -> "autocast":
@@ -1050,13 +1065,18 @@ class autocast:
             fp8_recipe=self._recipe,
             fp8_group=self._amax_reduction_group,
             _graph=self._graph,
+            _recompute=self._recompute,
         )
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         try:
             FP8GlobalStateManager.set_autocast_state(self._fp8_state)
-            FP8GlobalStateManager.autocast_exit(self._enabled, _graph=self._graph)
+            FP8GlobalStateManager.autocast_exit(
+                self._enabled,
+                _graph=self._graph,
+                _recompute=self._recompute,
+            )
         finally:
             # Clear the saved state so the instance can be entered again
             # sequentially (and so a failure inside the restore path does not
