@@ -258,15 +258,20 @@ class NVFP4Quantizer(Quantizer):
         """NVFP4 quantization is replay-safe unless stochastic rounding is enabled."""
         return not self.stochastic_rounding
 
-    def is_quantizable(self, inp: torch.Tensor) -> bool:
-        """Returns whether or not given inp can be quantized"""
+    def supports_quantized_allgather(self, inp: torch.Tensor) -> bool:
+        """Whether tensor shape supports quantized all-gather.
+
+        For distributed all-gather with columnwise scaling, the first
+        dimension must be aligned to the block size so that no scaling
+        block spans across GPU boundaries.
+        """
         if self.row_scaled_nvfp4:
             return False
         if inp.ndim < 2:
             return False
-        if inp.shape[-1] % NVFP4_BLOCK_SCALING_SIZE != 0:
+        if inp.shape[-1] % 32 != 0:
             return False
-        if math.prod(inp.shape[:-1]) % NVFP4_BLOCK_SCALING_SIZE != 0:
+        if self.columnwise_usage and math.prod(inp.shape[:-1]) % NVFP4_BLOCK_SCALING_SIZE != 0:
             return False
         return True
 
