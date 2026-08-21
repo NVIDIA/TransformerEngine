@@ -378,6 +378,7 @@ class NVFP4Quantizer(Quantizer):
             "cls": NVFP4TensorStorage if self.internal else NVFP4Tensor,
             "nontensor_kwargs": {
                 "fp4_dtype": self.dtype,
+                "scale_dtype": self.scale_dtype,
                 "quantizer": self,
                 "with_gemm_swizzled_scales": self.optimize_for_gemm,
                 "row_scaled_nvfp4": self.row_scaled_nvfp4,
@@ -474,7 +475,7 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
         amax_rowwise: Optional[torch.Tensor],
         amax_columnwise: Optional[torch.Tensor],
         fp4_dtype: DType,
-        scale_dtype: DType,
+        scale_dtype: DType = DType.kFloat8E4M3,
         quantizer: Quantizer,
         with_gemm_swizzled_scales: bool,
         row_scaled_nvfp4: bool = False,
