@@ -2178,15 +2178,46 @@ def _make_graphed_callables(
         phase,
     ):
         """Switch between two allocator boundaries while preserving their StorageImpls."""
-        release_checkpoint_live_storages(current_blocks, current_owners, phase)
-        torch._C._cuda_setCheckpointPoolState(
-            torch.cuda.current_device(),
-            target_state,
-            [],
-            [storage._cdata for storage in target_owners.values()],
-        )
-        verify_checkpoint_live_storages(target_blocks, target_owners)
-        assert_slot_pool_liveness(target_blocks, phase)
+        device = torch.cuda.current_device()
+        rollback_state = torch._C._cuda_getCheckpointState(device, mempool)
+        current_released = False
+        try:
+            release_checkpoint_live_storages(current_blocks, current_owners, phase)
+            current_released = True
+            torch._C._cuda_setCheckpointPoolState(
+                device,
+                target_state,
+                [],
+                [storage._cdata for storage in target_owners.values()],
+            )
+            verify_checkpoint_live_storages(target_blocks, target_owners)
+            assert_slot_pool_liveness(target_blocks, phase)
+        except BaseException as restore_error:
+            if not current_released:
+                raise
+            try:
+                rollback_blocks = slot_pool_active_blocks()
+                rollback_owners = checkpoint_live_storage_owners(
+                    rollback_blocks,
+                    f"{phase} rollback",
+                    (current_owners, target_owners),
+                )
+                release_checkpoint_live_storages(
+                    rollback_blocks, rollback_owners, f"{phase} rollback"
+                )
+                torch._C._cuda_setCheckpointPoolState(
+                    device,
+                    rollback_state,
+                    [],
+                    [storage._cdata for storage in current_owners.values()],
+                )
+                verify_checkpoint_live_storages(current_blocks, current_owners)
+                assert_slot_pool_liveness(current_blocks, f"{phase} rollback")
+            except BaseException as rollback_error:
+                raise RuntimeError(
+                    f"CUDA graph slot checkpoint rollback failed after {restore_error!r}."
+                ) from rollback_error
+            raise
 
     if _order is not None:  # pylint: disable=too-many-nested-blocks
         per_callable_static_outputs = [None] * len(flatten_sample_args)

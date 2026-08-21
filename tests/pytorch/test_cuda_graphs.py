@@ -1113,6 +1113,85 @@ def test_slot_memory_checkpoint_reuses_lockstep_branches(reverse_replay) -> None
         reset_graphs(graphed)
 
 
+@pytest.mark.parametrize("failure_timing", ("before", "after"))
+def test_slot_memory_checkpoint_rolls_back_restore_failure(monkeypatch, failure_timing) -> None:
+    """A failed allocator restore must put the original owners back before raising."""
+
+    class Module(torch.nn.Module):
+        def forward(self, inp):
+            transient = torch.cat((inp.square(), inp.sin(), inp.cos()), dim=0)
+            return transient[: inp.numel()] * 3.0
+
+    module = Module().cuda()
+    variants = 2
+    samples = tuple(
+        (torch.ones(4096, device="cuda", requires_grad=True),) for _ in range(variants)
+    )
+    slots = tuple(_slot(0, variant, 1, warmup=variant) for variant in range(variants))
+    real_set_state = torch._C._cuda_setCheckpointPoolState
+    real_detach = te_graph.tex._graph_checkpoint_detach_storage
+    detached_storage_impls = []
+    original_owner_impls = []
+    set_state_calls = 0
+
+    def record_detach(storage_impl_ptr):
+        detached_storage_impls.append(storage_impl_ptr)
+        real_detach(storage_impl_ptr)
+
+    def fail_first_set_state(*args, **kwargs):
+        nonlocal set_state_calls
+        set_state_calls += 1
+        if set_state_calls == 1:
+            original_owner_impls.extend(detached_storage_impls)
+            if failure_timing == "before":
+                raise RuntimeError("injected checkpoint restore failure")
+        result = real_set_state(*args, **kwargs)
+        if set_state_calls == 1:
+            raise RuntimeError("injected checkpoint restore failure")
+        return result
+
+    monkeypatch.setattr(te_graph.tex, "_graph_checkpoint_detach_storage", record_detach)
+    monkeypatch.setattr(torch._C, "_cuda_setCheckpointPoolState", fail_first_set_state)
+
+    with pytest.raises(RuntimeError, match="injected checkpoint restore failure") as exc_info:
+        make_graphed_callables(
+            (module,) * variants,
+            samples,
+            num_warmup_iters=2,
+            allow_unused_input=True,
+            _order=[1, 2, -1, -2],
+            _num_layers_per_chunk=[1, 1],
+            _reuse_graph_input_output_buffers=True,
+            _graph_memory_slots=slots,
+        )
+    assert set_state_calls == 2
+    assert original_owner_impls
+    assert all(
+        torch._C._has_Standard_Deleter(storage_impl_ptr)
+        for storage_impl_ptr in original_owner_impls
+    )
+
+    del exc_info
+    gc.collect()
+    graphed = make_graphed_callables(
+        (module,) * variants,
+        samples,
+        num_warmup_iters=2,
+        allow_unused_input=True,
+        _order=[1, 2, -1, -2],
+        _num_layers_per_chunk=[1, 1],
+        _reuse_graph_input_output_buffers=True,
+        _graph_memory_slots=slots,
+    )
+    try:
+        for graph in graphed:
+            inp = torch.randn(4096, device="cuda", requires_grad=True)
+            graph(inp).sum().backward()
+            torch.testing.assert_close(inp.grad, 6.0 * inp.detach())
+    finally:
+        reset_graphs(graphed)
+
+
 def test_slot_memory_checkpoint_reclaims_retained_branch_outputs() -> None:
     """A module-held source output must not pin a mutually exclusive branch allocation."""
 
