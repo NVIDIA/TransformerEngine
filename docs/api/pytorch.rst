@@ -59,11 +59,8 @@ PyTorch
 
 .. autoapifunction:: transformer_engine.pytorch.deinterleave_glu_tensor
 
-Model-specific layers
----------------------
-
-Full transformer layers for specific model families live in
-``transformer_engine.pytorch.models``:
+Models
+------
 
 .. toctree::
     :maxdepth: 1
