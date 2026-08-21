@@ -206,15 +206,7 @@ backend-selection overview.
 
    :Type: ``int`` (0 or 1)
    :Default: ``1``
-   :Description: Allow non-deterministic algorithms for Transformer Engine execution. When set to ``0``, only deterministic algorithms are allowed. This is relevant for both PyTorch and JAX attention implementations. In PyTorch it also asks the cuDNN grouped-GEMM dSReLU backward used by the CuTe DSL fused grouped MLP for a bit-exact scale gradient (``dprob``) and bias gradient, in place of the default cross-CTA atomic accumulation whose summation order follows the tile scheduler.
-
-   .. note::
-
-      As for attention, the fused grouped MLP treats determinism as requested when *either*
-      this variable is ``0`` or :func:`torch.use_deterministic_algorithms` is enabled. A
-      bit-exact ``dprob`` needs the scaled-SReLU activation and cuDNN frontend 1.28.0 or
-      later; the GLU activations have no deterministic counterpart. A request the fused
-      grouped MLP cannot honor raises ``RuntimeError`` rather than running anyway.
+   :Description: Allow non-deterministic algorithms for Transformer Engine execution. When set to ``0``, only deterministic algorithms are allowed. This is relevant for both PyTorch and JAX attention implementations.
 
 .. envvar:: NVTE_FUSED_RING_ATTENTION_USE_SCAN
 
