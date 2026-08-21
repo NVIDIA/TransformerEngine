@@ -379,7 +379,7 @@ void nvte_nvfp4_2d_compute_partial_amax(const NVTETensor inp, NVTETensor amax, s
 void nvte_nvfp4_2d_partial_cast(const NVTETensor inp, NVTETensor out, const NVTETensor scale,
                                 const NVTETensor global_scale, size_t h, size_t w,
                                 size_t scale_stride_h, size_t scale_stride_w, size_t start_offset,
-                                size_t block_len, const NVTEDType scale_dtype, cudaStream_t stream);
+                                size_t block_len, NVTEDType scale_dtype, cudaStream_t stream);
 
 /*! \brief Expand tile-level scales to row-level scales and convert to the selected FP8 scale type.
  *
@@ -391,12 +391,12 @@ void nvte_nvfp4_2d_partial_cast(const NVTETensor inp, NVTETensor out, const NVTE
  *  \param[in]     tile_cols   Number of tile columns.
  *  \param[in]     rows_padded Padded row count in output.
  *  \param[in]     block_len   Block length (typically 16 for NVFP4).
- *  \param[in]     stream      CUDA stream.
  *  \param[in]     scale_dtype NVFP4 scale storage type (E4M3 or UE5M3).
+ *  \param[in]     stream      CUDA stream.
  */
 void nvte_nvfp4_expand_scale_to_fp8(const NVTETensor input, NVTETensor output, size_t tile_rows,
                                     size_t tile_cols, size_t rows_padded, size_t block_len,
-                                    cudaStream_t stream, const NVTEDType scale_dtype);
+                                    NVTEDType scale_dtype, cudaStream_t stream);
 
 /*! \brief Compute per-block decode scale from block amax and global amax.
  *
@@ -409,12 +409,12 @@ void nvte_nvfp4_expand_scale_to_fp8(const NVTETensor input, NVTETensor output, s
  *  \param[in]     block_amax   Input block amax tensor [tile_rows, tile_cols], float32.
  *  \param[out]    scale        Output scale tensor [tile_rows, tile_cols], float32.
  *  \param[in]     global_amax  Global amax tensor (single element), float32. Avoids D2H transfer.
- *  \param[in]     stream       CUDA stream.
  *  \param[in]     scale_dtype  NVFP4 scale storage type (E4M3 or UE5M3).
+ *  \param[in]     stream       CUDA stream.
  */
 void nvte_nvfp4_compute_per_block_scale(const NVTETensor block_amax, NVTETensor scale,
-                                        const NVTETensor global_amax, cudaStream_t stream,
-                                        const NVTEDType scale_dtype);
+                                        const NVTETensor global_amax, NVTEDType scale_dtype,
+                                        cudaStream_t stream);
 
 /*! \brief Fused kernel for NVFP4 scale computation.
  *
@@ -434,14 +434,14 @@ void nvte_nvfp4_compute_per_block_scale(const NVTETensor block_amax, NVTETensor 
  *  \param[in]     tile_cols       Number of tile columns.
  *  \param[in]     rows_padded     Total padded rows in output.
  *  \param[in]     block_len       Block length (16 for NVFP4).
- *  \param[in]     stream          CUDA stream.
  *  \param[in]     scale_dtype     NVFP4 scale storage type (E4M3 or UE5M3).
+ *  \param[in]     stream          CUDA stream.
  */
 void nvte_nvfp4_fused_scale(const NVTETensor block_amax, const NVTETensor global_amax,
                             NVTETensor per_block_scale, NVTETensor target_scale,
                             NVTETensor target_amax, size_t tile_rows, size_t tile_cols,
-                            size_t rows_padded, size_t block_len, cudaStream_t stream,
-                            const NVTEDType scale_dtype);
+                            size_t rows_padded, size_t block_len, NVTEDType scale_dtype,
+                            cudaStream_t stream);
 
 /*! \brief Compute global encode scale from global amax.
  *
@@ -450,11 +450,11 @@ void nvte_nvfp4_fused_scale(const NVTETensor block_amax, const NVTETensor global
  *
  *  \param[in]     global_amax   Input global amax tensor [num_params], float32.
  *  \param[out]    global_scale  Output global scale tensor [num_params], float32.
- *  \param[in]     stream        CUDA stream.
  *  \param[in]     scale_dtype   NVFP4 scale storage type (E4M3 or UE5M3).
+ *  \param[in]     stream        CUDA stream.
  */
 void nvte_nvfp4_compute_global_scale(const NVTETensor global_amax, NVTETensor global_scale,
-                                     cudaStream_t stream, const NVTEDType scale_dtype);
+                                     NVTEDType scale_dtype, cudaStream_t stream);
 
 #ifdef __cplusplus
 }  // extern "C"

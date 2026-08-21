@@ -836,7 +836,7 @@ void nvfp4_fused_scale(const Tensor block_amax, const Tensor global_amax, Tensor
 
 void nvte_nvfp4_expand_scale_to_fp8(const NVTETensor input, NVTETensor output, size_t tile_rows,
                                     size_t tile_cols, size_t rows_padded, size_t block_len,
-                                    cudaStream_t stream, const NVTEDType scale_dtype) {
+                                    NVTEDType scale_dtype, cudaStream_t stream) {
 #if FP4_TYPE_SUPPORTED
   NVTE_API_CALL(nvte_nvfp4_expand_scale_to_fp8);
   using namespace transformer_engine;
@@ -849,8 +849,8 @@ void nvte_nvfp4_expand_scale_to_fp8(const NVTETensor input, NVTETensor output, s
 }
 
 void nvte_nvfp4_compute_per_block_scale(const NVTETensor block_amax, NVTETensor scale,
-                                        const NVTETensor global_amax, cudaStream_t stream,
-                                        const NVTEDType scale_dtype) {
+                                        const NVTETensor global_amax, NVTEDType scale_dtype,
+                                        cudaStream_t stream) {
 #if FP4_TYPE_SUPPORTED
   NVTE_API_CALL(nvte_nvfp4_compute_per_block_scale);
   using namespace transformer_engine;
@@ -863,7 +863,7 @@ void nvte_nvfp4_compute_per_block_scale(const NVTETensor block_amax, NVTETensor 
 }
 
 void nvte_nvfp4_compute_global_scale(const NVTETensor global_amax, NVTETensor global_scale,
-                                     cudaStream_t stream, const NVTEDType scale_dtype) {
+                                     NVTEDType scale_dtype, cudaStream_t stream) {
 #if FP4_TYPE_SUPPORTED
   NVTE_API_CALL(nvte_nvfp4_compute_global_scale);
   using namespace transformer_engine;
@@ -916,7 +916,7 @@ void nvte_nvfp4_2d_compute_partial_amax(const NVTETensor inp, NVTETensor amax, s
 void nvte_nvfp4_2d_partial_cast(const NVTETensor inp, NVTETensor out, const NVTETensor scale,
                                 const NVTETensor global_scale, size_t h, size_t w,
                                 size_t scale_stride_h, size_t scale_stride_w, size_t start_offset,
-                                size_t block_len, const NVTEDType scale_dtype,
+                                size_t block_len, NVTEDType scale_dtype,
                                 cudaStream_t stream) {
 #if FP4_TYPE_SUPPORTED
   NVTE_API_CALL(nvte_nvfp4_2d_partial_cast);
@@ -963,8 +963,8 @@ void nvte_nvfp4_compute_per_tensor_scale(const NVTETensor inpA, const bool use_r
 void nvte_nvfp4_fused_scale(const NVTETensor block_amax, const NVTETensor global_amax,
                             NVTETensor per_block_scale, NVTETensor target_scale,
                             NVTETensor target_amax, size_t tile_rows, size_t tile_cols,
-                            size_t rows_padded, size_t block_len, cudaStream_t stream,
-                            const NVTEDType scale_dtype) {
+                            size_t rows_padded, size_t block_len, NVTEDType scale_dtype,
+                            cudaStream_t stream) {
 #if FP4_TYPE_SUPPORTED
   NVTE_API_CALL(nvte_nvfp4_fused_scale);
   using namespace transformer_engine;
