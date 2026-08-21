@@ -31,7 +31,7 @@ def install_requirements() -> List[str]:
         "packaging",
         "pydantic",
         "nvdlfw-inspect",
-        "nvidia-cudnn-frontend>=1.25.0",
+        "nvidia-cudnn-frontend>=1.27.0",
     ]
 
 
