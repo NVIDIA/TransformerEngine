@@ -2879,10 +2879,10 @@ class TestGroupedMLPDeterminism:
 
     @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
     def test_dprob_is_bit_exact_across_runs(self, monkeypatch) -> None:
-        """Two identical runs must give a bit-identical ``dprob``.
+        """Repeated identical runs must give a bit-identical ``dprob``.
 
         An ulp of reordering passes every tolerance in this file, so only an exact
-        comparison of two runs can see it.
+        comparison across runs can see it.
         """
         fused_cls = grouped_mlp_module.GroupedMLP_CuTeGEMMUnary
         if not fused_cls.is_supported():
@@ -2894,10 +2894,13 @@ class TestGroupedMLPDeterminism:
 
         device = torch.device("cuda")
         dtype = torch.bfloat16
-        group_size = 4
-        # >256 so dprob spans several N-tiles; one tile means one writer and no reordering.
-        hidden_size = 1024
-        tokens_per_group = 256
+        # l=8 / [1024]*8 / n=2048, the shape cudnn-frontend#521 measured as varying 15/15
+        # without the fix. Its own tests originally used l=4 / [256]*4 / n=512, where the
+        # nondeterministic dprob is already bit-stable -- there the assertion below cannot
+        # fail, and a pass means nothing.
+        group_size = 8
+        hidden_size = 2048
+        tokens_per_group = 1024
         split_sizes = torch.tensor([tokens_per_group] * group_size, dtype=torch.int, device=device)
         num_tokens = tokens_per_group * group_size
 
@@ -2934,18 +2937,27 @@ class TestGroupedMLPDeterminism:
             y.backward(dy)
             return probs.grad.detach().clone()
 
-        first = _run()
+        runs = [_run()]
         # Without the fusion there is no cuDNN dprob and the comparison proves nothing.
         forward_ops = module._module_groups[0]._forward_ops
         assert len(forward_ops) == 1
         assert isinstance(forward_ops[0][0], fused_cls)
-        second = _run()
+        # More than two, as cudnn-frontend#521 does: the cross-CTA order that determinism
+        # removes is set by the scheduler, so two runs can agree by luck.
+        runs += [_run() for _ in range(int(os.getenv("NVTE_TEST_DETERMINISM_REPEATS", "4")) - 1)]
+        torch.cuda.synchronize()
 
-        # Weight grads are excluded: the CuTe DSL wgrad kernel has its own K-split atomics.
-        assert torch.equal(first, second), (
-            "dprob differed between two identical runs under determinism; max |delta| ="
-            f" {(first.float() - second.float()).abs().max().item()}"
-        )
+        assert torch.isfinite(runs[0]).all(), "dprob is not finite; the comparison would be moot"
+        # Bytes, not values: torch.equal calls +0.0 and -0.0 equal, and a change in reduction
+        # order can produce exactly that. Weight grads are excluded from the comparison --
+        # the CuTe DSL wgrad kernel has its own K-split atomics, which this change leaves.
+        for index, later in enumerate(runs[1:], start=1):
+            assert torch.equal(
+                runs[0].contiguous().view(torch.uint8), later.contiguous().view(torch.uint8)
+            ), (
+                f"dprob differs between run 0 and run {index} under determinism; max |delta| ="
+                f" {(runs[0].float() - later.float()).abs().max().item()}"
+            )
 
 
 def test_grouped_gemm_quant_cute_matches_mxfp8_quantized() -> None:
