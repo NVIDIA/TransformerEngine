@@ -2045,14 +2045,19 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         deterministic_dactivation = (
             not unit_activation_scale and _deterministic_algorithms_required()
         )
-        if deterministic_dactivation and not self.grouped_gemm_dactivation_is_deterministic():
+        # dprob has two producers here: the cuDNN epilogue below, and -- when scale_bias is
+        # set -- the Triton kernel that accumulates into it further down. Both must be
+        # deterministic, and the Triton one never is.
+        if deterministic_dactivation and not (
+            self.grouped_gemm_dactivation_is_deterministic() and not scale_bias
+        ):
             raise RuntimeError(
                 "Deterministic execution was requested"
                 " (NVTE_ALLOW_NONDETERMINISTIC_ALGO=0 or"
-                " torch.use_deterministic_algorithms), but this activation's cuDNN dactivation"
-                " kernel accumulates the scale gradient (dprob) with nondeterministic atomics."
-                " A bit-exact dprob requires the scaled-SReLU activation and"
-                " nvidia-cudnn-frontend 1.28.0 or later."
+                " torch.use_deterministic_algorithms), but the scale gradient (dprob) is"
+                " accumulated with nondeterministic atomics on this configuration."
+                " A bit-exact dprob requires the scaled-SReLU activation,"
+                " nvidia-cudnn-frontend 1.28.0 or later, and an FC2 without scale_bias."
             )
         scales_f32 = None
         scales_tensor = None

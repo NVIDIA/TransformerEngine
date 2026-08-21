@@ -2872,24 +2872,22 @@ class TestGroupedMLPDeterminism:
         group_size = 4
         # >256 so dprob spans several N-tiles; one tile means one writer and no reordering.
         hidden_size = 1024
-        split_sizes = torch.tensor([256] * group_size, dtype=torch.int, device=device)
-        num_tokens = int(split_sizes.sum().item())
+        tokens_per_group = 256
+        split_sizes = torch.tensor([tokens_per_group] * group_size, dtype=torch.int, device=device)
+        num_tokens = tokens_per_group * group_size
 
         recipe = make_recipe("mxfp8")
-        tensor_kwargs = {
-            "min": -0.25,
-            "max": 0.25,
-            "quantization": "mxfp8",
-            "test_dtype": dtype,
-            "test_device": device,
-        }
-        _, x = make_reference_and_test_tensors((num_tokens, hidden_size), **tensor_kwargs)
-        _, dy = make_reference_and_test_tensors(
-            (num_tokens, hidden_size), requires_grad=False, **tensor_kwargs
-        )
-        _, probs = make_reference_and_test_tensors(
-            (num_tokens,), test_dtype=dtype, test_device=device
-        )
+
+        # Plain random tensors, not make_reference_and_test_tensors: this test compares two
+        # runs against each other, never against a reference, so the fp64 companion and the
+        # MXFP8 representability round-trip would both be allocated and thrown away.
+        def _rand(*shape, requires_grad=True) -> torch.Tensor:
+            out = torch.empty(shape, dtype=dtype, device=device).uniform_(-0.25, 0.25)
+            return out.requires_grad_() if requires_grad else out
+
+        x = _rand(num_tokens, hidden_size)
+        dy = _rand(num_tokens, hidden_size, requires_grad=False)
+        probs = _rand(num_tokens)
 
         # No bias, or probs.grad comes from the Triton dbias kernel instead of cuDNN.
         with te.quantized_model_init(enabled=True, recipe=recipe):
