@@ -15,29 +15,28 @@ tensors, quantized tensors, quantizers, process groups and plain Python values.
 A ``torch.library`` custom op is narrower: it only accepts flat schema slots
 (tensors plus opaque objects) and returns a flat ``Tensor[]``.
 
-Bridging the two takes three parts (below): per-field *adapters* map the args
-dataclass onto the op's input slots; *fake impls* on data-free specs give the
-output geometry and reassemble the op's flat return; and a *two-tier op* lets a
-quantized-tensor subclass be an op input.
+Bridging the two takes three parts (below): a parsed per-op *arg plan* maps the
+args dataclass onto the op's input slots; *fake impls* on data-free specs give
+the output geometry and reassemble the op's flat return; and a *two-tier op*
+lets a quantized-tensor subclass be an op input.
 
-Field <-> slot mapping. This mapping turns each field of the args dataclass into
-the op's flat input slots, in a way that suits the field's type. A field's type
-annotation selects the one ``_Adapter`` that handles it; that adapter declares the
-slot(s) the field needs, packs the field's value into them on the way into the op,
-and unpacks it back on the way out. The kinds -- and how each represents its field
-as op inputs:
+Field <-> slot mapping. ``_parse_arg_type`` parses the dataclass's field
+annotations once, at registration, into an immutable ``_ArgPlan``: per field a
+``_FieldPlan`` (its ``_FieldKind`` plus the schema slots it occupies), and the
+derived layout -- schema string, slot order, gradient placement and
+tensor-or-quantized offsets. ``_ArgPlan.pack`` / ``unpack`` interpret the plan
+on each call. The kinds -- and how each represents its field as op inputs:
 
-  * ``_TensorAdapter`` -- a plain ``Tensor`` / ``Optional[Tensor]``: one tensor
-    slot.
-  * ``_TensorOrQuantizedAdapter`` -- a field that may be a plain tensor, a bare
+  * ``TENSOR`` -- a plain ``Tensor`` / ``Optional[Tensor]``: one tensor slot.
+  * ``TENSOR_OR_QUANTIZED`` -- a field that may be a plain tensor, a bare
     quantized storage, or ``None``: three slots (the tensor, its flat inner
     buffers, and a ``__kind__`` tag) so a quantized tensor crosses as its buffers.
-  * ``_SimpleBundleAdapter`` -- every remaining simple value (scalars, enums,
-    sizes, quantizers -- value-opaque constants baked into the graph -- and
-    nested collections of them), gathered into one ``OpaqueValueBundle`` slot.
-    A ProcessGroup field rides here too, as its c10d registry name,
-    re-resolved inside the op.
-  * ``_UnsupportedAdapter`` -- fallback for a field no adapter can encode; allowed
+  * ``SIMPLE`` -- every remaining simple value (scalars, enums, sizes,
+    quantizers -- value-opaque constants baked into the graph -- and nested
+    collections of them), gathered into one shared ``OpaqueValueBundle`` slot.
+  * ``PROCESS_GROUP`` -- rides in the shared bundle too, as its c10d registry
+    name, re-resolved inside the op.
+  * ``UNSUPPORTED`` -- a field no kind can encode; emits no slot and is allowed
     only when its value is trivial (``None`` / all-``None``) at call time.
 
 What runs where. Each op registers a data-free fake (``register_fake``) so it
@@ -354,7 +353,10 @@ def _storage_unflatten(meta: "OpaqueValueBundle", tensors: List[torch.Tensor]) -
 
 
 # --------------------------------------------------------------------------- #
-# Field adapters: dataclass field <-> flat torch.library slot(s)
+# Arg plans: dataclass annotations are parsed once, at registration, into an
+# immutable per-op plan (schema string, slot order, gradient placement,
+# tensor-or-quantized offsets); packing / unpacking interpret that plan on
+# each call.
 # --------------------------------------------------------------------------- #
 
 
@@ -379,52 +381,14 @@ def _strip_optional(annot: Any) -> Tuple[Any, bool]:
     return annot, False
 
 
-class _Adapter:
-    """Maps one (or, for the aggregating adapter, several) dataclass field(s)
-    to/from a contiguous run of custom-op schema *slots*.
+class _FieldKind(Enum):
+    """How one dataclass field crosses the custom-op boundary."""
 
-    A custom op only takes flat, simply-typed arguments, but a TE op takes a
-    single ``@dataclass`` of mixed fields. Each adapter knows how to translate
-    its kind of field both ways; :func:`_build_field_adapter` picks the kind
-    from the field's annotation. ``schema_slots`` runs once at registration
-    (to build the op's schema); ``to_slots`` and ``from_slots`` run on each
-    call and must agree on the slot layout that ``schema_slots`` declares.
-    """
-
-    def schema_slots(self) -> List[Tuple[str, str]]:
-        """Declare the schema slots this field occupies, each as a
-        ``(slot_name, schema_type)`` pair (e.g. ``("bias", "Tensor?")``).
-
-        Concatenated across all adapters to form the op's schema string.
-        """
-        raise NotImplementedError
-
-    def to_slots(self, owner: Any) -> Dict[str, Any]:
-        """Read this field from the dataclass ``owner`` and produce the concrete
-        value for each of its schema slots, as a ``{slot_name: value}`` dict.
-
-        Composite values are flattened to fit the (tensor-only) slots: e.g. a
-        quantized tensor is split into its plain inner buffers plus a metadata
-        bundle. Inverse of :meth:`from_slots`.
-        """
-        raise NotImplementedError
-
-    def from_slots(self, args: Dict[str, Any], kwargs: Dict[str, Any]) -> None:
-        """Read this field's slots back from the op arguments ``args`` and write
-        the reconstructed field value into ``kwargs`` (rebuilding any flattened
-        composite). The filled ``kwargs`` are then used to rebuild the original
-        dataclass for the eager implementation. Inverse of :meth:`to_slots`.
-        """
-        raise NotImplementedError
-
-    def grad_slot(self) -> Optional[int]:
-        """Index (within this adapter's :meth:`schema_slots`) of the slot that
-        carries a gradient, or ``None`` if the field is not differentiable.
-
-        Used to map ``input_tensors_for_grad`` names onto backward grad-output
-        positions. Non-tensor adapters (quantizers, metadata) return ``None``.
-        """
-        return None
+    TENSOR = "tensor"  # one ``Tensor`` / ``Tensor?`` slot
+    TENSOR_OR_QUANTIZED = "tensor_or_quantized"  # 3 slots: tensor / inner / meta
+    PROCESS_GROUP = "process_group"  # c10d group name inside the shared bundle
+    SIMPLE = "simple"  # value carried verbatim inside the shared bundle
+    UNSUPPORTED = "unsupported"  # no slots; only a trivial value may cross
 
 
 class _TensorOrQuantizedKind(Enum):
@@ -435,236 +399,43 @@ class _TensorOrQuantizedKind(Enum):
     STORAGE = "storage"
 
 
-class _TensorOrQuantizedAdapter(_Adapter):
-    """``Tensor | QuantizedTensorStorage | None`` (also subclass tensor) field.
+_TQ_KIND_KEY = "__kind__"
+_SIMPLE_META_SLOT = "_simple_meta"
 
-    Three slots regardless of value: ``<name>`` (``Tensor?`` -- plain / subclass
-    tensor passes through, ``None`` for bare storage), ``<name>__tensors``
-    (``Tensor[]`` flat inner tensors when flattened), ``<name>__meta``
-    (``OpaqueValueBundle`` flatten metadata + a ``__kind__`` marker). A ``None``
-    field is tagged ``_TensorOrQuantizedKind.NONE`` with the other two slots empty.
+# Matched by exact member set, so a bare quantized annotation or an accidental
+# extra union member is rejected rather than silently taken as tensor-or-quantized.
+_TQ_MEMBERS = frozenset(get_args(TensorOrQuantized))
+
+
+@dataclasses.dataclass(frozen=True)
+class _SlotSpec:
+    """One schema slot: its name and torch.library type string."""
+
+    name: str
+    type_str: str
+
+
+@dataclasses.dataclass(frozen=True)
+class _FieldPlan:
+    """Parsed record for one dataclass field.
+
+    ``slots`` are the schema slots the field occupies (empty for the kinds that
+    ride in the shared simple bundle, or cross nothing); ``grad_slot`` is the
+    index within ``slots`` of the slot carrying the field's gradient, or ``None``.
     """
 
-    KIND_KEY = "__kind__"
-
-    def __init__(self, name: str) -> None:
-        self.name = name
-
-    def tensor_slot(self) -> str:
-        """Primary slot name for a plain / subclass tensor."""
-        return self.name
-
-    def inner_slot(self) -> str:
-        """Flat inner-tensor slot name."""
-        return self.name + "__tensors"
-
-    def meta_slot(self) -> str:
-        """Flatten-metadata slot name."""
-        return self.name + "__meta"
-
-    def schema_slots(self) -> List[Tuple[str, str]]:
-        return [
-            (self.tensor_slot(), "Tensor?"),
-            (self.inner_slot(), "Tensor[]"),
-            (self.meta_slot(), _OPAQUE_VALUE_BUNDLE_TYPE_NAME),
-        ]
-
-    # Matched by exact member set, so a bare quantized annotation or an
-    # accidental extra union member is rejected rather than silently taken as a
-    # tensor-or-quantized field.
-    _MEMBERS = frozenset(get_args(TensorOrQuantized))
-
-    @classmethod
-    def is_tensor_storage_union(cls, annot: Any) -> bool:
-        """Whether ``annot`` is exactly the tensor-or-quantized union."""
-        if not _is_union(annot):
-            return False
-        members = frozenset(a for a in get_args(annot) if a is not type(None))
-        return members == cls._MEMBERS
-
-    def to_slots(self, owner: Any) -> Dict[str, Any]:
-        value = getattr(owner, self.name)
-        if value is None:
-            return {
-                self.tensor_slot(): None,
-                self.inner_slot(): [],
-                self.meta_slot(): OpaqueValueBundle({self.KIND_KEY: _TensorOrQuantizedKind.NONE}),
-            }
-        if isinstance(value, torch.Tensor):
-            # Plain tensor *and* subclass (e.g. Float8Tensor) pass through the
-            # ``Tensor?`` slot; subclass flattening (if any) is done by the
-            # wrapper op's ``register_torch_dispatch`` rule.
-            return {
-                self.tensor_slot(): value,
-                self.inner_slot(): [],
-                self.meta_slot(): OpaqueValueBundle({self.KIND_KEY: _TensorOrQuantizedKind.TENSOR}),
-            }
-        if isinstance(value, QuantizedTensorStorage):
-            meta, tensors = _storage_flatten(value, {self.KIND_KEY: _TensorOrQuantizedKind.STORAGE})
-            return {
-                self.tensor_slot(): None,
-                self.inner_slot(): tensors,
-                self.meta_slot(): meta,
-            }
-        raise TypeError(
-            f"field {self.name!r} expected None, torch.Tensor, or "
-            f"QuantizedTensorStorage, got {type(value).__name__}"
-        )
-
-    def from_slots(self, args: Dict[str, Any], kwargs: Dict[str, Any]) -> None:
-        meta = args[self.meta_slot()]
-        kind = meta[self.KIND_KEY]
-        if kind == _TensorOrQuantizedKind.NONE:
-            kwargs[self.name] = None
-        elif kind == _TensorOrQuantizedKind.TENSOR:
-            kwargs[self.name] = args[self.tensor_slot()]
-        else:
-            kwargs[self.name] = _storage_unflatten(meta, args[self.inner_slot()])
-
-    def grad_slot(self) -> Optional[int]:
-        # Gradient flows to the plain / subclass tensor slot (``tensor_slot()``,
-        # the first of the three).
-        return 0
+    name: str
+    kind: _FieldKind
+    slots: Tuple[_SlotSpec, ...]
+    grad_slot: Optional[int]
 
 
-class _TensorAdapter(_Adapter):
-    """``Tensor`` / ``Optional[Tensor]`` -> single ``Tensor`` / ``Tensor?`` slot."""
-
-    def __init__(self, name: str, is_optional: bool) -> None:
-        self.name = name
-        self.type_str = "Tensor?" if is_optional else "Tensor"
-
-    def schema_slots(self) -> List[Tuple[str, str]]:
-        return [(self.name, self.type_str)]
-
-    def to_slots(self, owner: Any) -> Dict[str, Any]:
-        return {self.name: getattr(owner, self.name)}
-
-    def from_slots(self, args: Dict[str, Any], kwargs: Dict[str, Any]) -> None:
-        kwargs[self.name] = args[self.name]
-
-    def grad_slot(self) -> Optional[int]:
-        return 0
-
-
-class _SimpleBundleAdapter(_Adapter):
-    """Aggregates every simple-typed field into a single OpaqueValueBundle.
-
-    Unlike the per-field adapters, at most one of these exists per op (none if the
-    dataclass has no simple-typed fields): it owns the single shared
-    ``_simple_meta`` slot, and ``_get_adapters`` builds it once from all
-    simple-typed field names collected across the dataclass.
-
-    ``pg_names`` marks the fields carrying a ProcessGroup: a live group can't
-    cross as a value, so -- mirroring traceable functional collectives -- the
-    bundle stores its c10d registry *name* and the op re-resolves the very
-    group the caller passed, in the same process. Groups created outside the
-    c10d registry fail the resolve loudly.
-    """
-
-    META_SLOT = "_simple_meta"
-
-    def __init__(self, names: List[str], pg_names: Sequence[str] = ()) -> None:
-        self.names = list(names)
-        self.pg_names = frozenset(pg_names)
-
-    @classmethod
-    def matches_field(cls, annot: Any) -> bool:
-        """Whether ``annot`` (Optional-aware, recursive) is bundle-simple."""
-        annot, _ = _strip_optional(annot)
-        if annot in OpaqueValueBundle.PRIMITIVE_TYPES:
-            return True
-        if isinstance(annot, type) and issubclass(annot, Enum):
-            return True
-        # Quantizers are value-opaque constants; the abstract ``Quantizer``
-        # annotation itself is not a registered opaque type, so match by base.
-        if isinstance(annot, type) and issubclass(annot, Quantizer):
-            return True
-        if (
-            isinstance(annot, type)
-            and _is_opaque_value_type is not None
-            and _is_opaque_value_type(annot)
-        ):
-            return True
-        if get_origin(annot) in (tuple, list):
-            inner = [a for a in get_args(annot) if a is not Ellipsis]
-            return bool(inner) and all(cls.matches_field(a) for a in inner)
+def _is_tensor_storage_union(annot: Any) -> bool:
+    """Whether ``annot`` is exactly the tensor-or-quantized union."""
+    if not _is_union(annot):
         return False
-
-    def schema_slots(self) -> List[Tuple[str, str]]:
-        return [(self.META_SLOT, _OPAQUE_VALUE_BUNDLE_TYPE_NAME)]
-
-    def to_slots(self, owner: Any) -> Dict[str, Any]:
-        data: Dict[str, Any] = {}
-        for n in self.names:
-            v = getattr(owner, n)
-            data[n] = v.group_name if n in self.pg_names and v is not None else v
-        return {self.META_SLOT: OpaqueValueBundle(data)}
-
-    def from_slots(self, args: Dict[str, Any], kwargs: Dict[str, Any]) -> None:
-        if self.META_SLOT not in args:
-            return
-        meta = args[self.META_SLOT]
-        for n in self.names:
-            v = meta[n]
-            kwargs[n] = _resolve_process_group(v) if n in self.pg_names and v is not None else v
-
-
-class _UnsupportedAdapter(_Adapter):
-    """Fallback for fields whose type no other adapter can encode.
-
-    Such a field cannot cross the op boundary, so it emits no slot and is
-    tolerated only when its runtime value carries nothing: ``to_slots`` accepts
-    ``None`` / an all-``None`` sequence (e.g. an unset ``Optional[Any]`` field,
-    or an empty list, on the compiled path) and ``from_slots`` restores it as
-    ``None``. A non-trivial value means the config is genuinely unsupported
-    under torch.compile, and ``to_slots`` raises.
-
-    The check must run at call time (not in ``_get_adapters``): the annotation
-    alone -- e.g. ``Optional[Any]`` -- is valid when the value is ``None``, so
-    only the runtime value can decide.
-    """
-
-    def __init__(self, name: str, owner_cls_name: str) -> None:
-        self.name = name
-        self.owner_cls_name = owner_cls_name
-
-    @staticmethod
-    def _is_trivial(value: Any) -> bool:
-        if value is None:
-            return True
-        if isinstance(value, (list, tuple)):
-            return all(v is None for v in value)
-        return False
-
-    def schema_slots(self) -> List[Tuple[str, str]]:
-        return []
-
-    def to_slots(self, owner: Any) -> Dict[str, Any]:
-        value = getattr(owner, self.name, None)
-        if not self._is_trivial(value):
-            raise TypeError(
-                f"{self.owner_cls_name} field {self.name!r} has a type not "
-                "supported by torch.compile (not Tensor, simple, Quantizer, or "
-                "ProcessGroup) and carries a "
-                "non-trivial value; add a matching adapter in custom_op.py to handle it."
-            )
-        return {}
-
-    def from_slots(self, args: Dict[str, Any], kwargs: Dict[str, Any]) -> None:
-        kwargs[self.name] = None
-
-
-def _build_field_adapter(name: str, annot: Any) -> Optional[_Adapter]:
-    """Pick the per-field adapter for one dataclass field from its annotation
-    (``None`` -> not a per-field kind; the caller falls back to the simple
-    bundle / unsupported)."""
-    if _TensorOrQuantizedAdapter.is_tensor_storage_union(annot):
-        return _TensorOrQuantizedAdapter(name)
-    stripped, is_optional = _strip_optional(annot)
-    if stripped is torch.Tensor:
-        return _TensorAdapter(name, is_optional)
-    return None
+    members = frozenset(a for a in get_args(annot) if a is not type(None))
+    return members == _TQ_MEMBERS
 
 
 def _is_process_group_annot(annot: Any) -> bool:
@@ -673,6 +444,193 @@ def _is_process_group_annot(annot: Any) -> bool:
         return False
     stripped, _ = _strip_optional(annot)
     return stripped is _PROCESS_GROUP_TYPE
+
+
+def _is_simple_annot(annot: Any) -> bool:
+    """Whether ``annot`` (Optional-aware, recursive) is bundle-simple."""
+    annot, _ = _strip_optional(annot)
+    if annot in OpaqueValueBundle.PRIMITIVE_TYPES:
+        return True
+    if isinstance(annot, type) and issubclass(annot, Enum):
+        return True
+    # Quantizers are value-opaque constants; the abstract ``Quantizer``
+    # annotation itself is not a registered opaque type, so match by base.
+    if isinstance(annot, type) and issubclass(annot, Quantizer):
+        return True
+    if (
+        isinstance(annot, type)
+        and _is_opaque_value_type is not None
+        and _is_opaque_value_type(annot)
+    ):
+        return True
+    if get_origin(annot) in (tuple, list):
+        inner = [a for a in get_args(annot) if a is not Ellipsis]
+        return bool(inner) and all(_is_simple_annot(a) for a in inner)
+    return False
+
+
+def _parse_field(name: str, annot: Any) -> _FieldPlan:
+    """Parse one field's annotation into its :class:`_FieldPlan`."""
+    if _is_tensor_storage_union(annot):
+        slots = (
+            _SlotSpec(name, "Tensor?"),
+            _SlotSpec(name + "__tensors", "Tensor[]"),
+            _SlotSpec(name + "__meta", _OPAQUE_VALUE_BUNDLE_TYPE_NAME),
+        )
+        return _FieldPlan(name, _FieldKind.TENSOR_OR_QUANTIZED, slots, grad_slot=0)
+    stripped, is_optional = _strip_optional(annot)
+    if stripped is torch.Tensor:
+        slot = _SlotSpec(name, "Tensor?" if is_optional else "Tensor")
+        return _FieldPlan(name, _FieldKind.TENSOR, (slot,), grad_slot=0)
+    if _is_process_group_annot(annot):
+        return _FieldPlan(name, _FieldKind.PROCESS_GROUP, (), grad_slot=None)
+    if _is_simple_annot(annot):
+        return _FieldPlan(name, _FieldKind.SIMPLE, (), grad_slot=None)
+    return _FieldPlan(name, _FieldKind.UNSUPPORTED, (), grad_slot=None)
+
+
+def _is_trivial(value: Any) -> bool:
+    """Whether an unsupported field's runtime value carries nothing."""
+    if value is None:
+        return True
+    if isinstance(value, (list, tuple)):
+        return all(v is None for v in value)
+    return False
+
+
+def _pack_tensor_or_quantized(field: _FieldPlan, value: Any, slots: Dict[str, Any]) -> None:
+    """Fill a tensor-or-quantized field's three slots from its runtime value."""
+    tensor_slot, inner_slot, meta_slot = (s.name for s in field.slots)
+    if value is None:
+        slots[tensor_slot] = None
+        slots[inner_slot] = []
+        slots[meta_slot] = OpaqueValueBundle({_TQ_KIND_KEY: _TensorOrQuantizedKind.NONE})
+    elif isinstance(value, torch.Tensor):
+        # Plain tensor *and* subclass (e.g. Float8Tensor) pass through the
+        # ``Tensor?`` slot; subclass flattening (if any) is done by the
+        # wrapper op's ``register_torch_dispatch`` rule.
+        slots[tensor_slot] = value
+        slots[inner_slot] = []
+        slots[meta_slot] = OpaqueValueBundle({_TQ_KIND_KEY: _TensorOrQuantizedKind.TENSOR})
+    elif isinstance(value, QuantizedTensorStorage):
+        meta, tensors = _storage_flatten(value, {_TQ_KIND_KEY: _TensorOrQuantizedKind.STORAGE})
+        slots[tensor_slot] = None
+        slots[inner_slot] = tensors
+        slots[meta_slot] = meta
+    else:
+        raise TypeError(
+            f"field {field.name!r} expected None, torch.Tensor, or "
+            f"QuantizedTensorStorage, got {type(value).__name__}"
+        )
+
+
+def _unpack_tensor_or_quantized(field: _FieldPlan, slots: Dict[str, Any]) -> Any:
+    """Inverse of :func:`_pack_tensor_or_quantized`."""
+    tensor_slot, inner_slot, meta_slot = (s.name for s in field.slots)
+    meta = slots[meta_slot]
+    kind = meta[_TQ_KIND_KEY]
+    if kind == _TensorOrQuantizedKind.NONE:
+        return None
+    if kind == _TensorOrQuantizedKind.TENSOR:
+        return slots[tensor_slot]
+    return _storage_unflatten(meta, slots[inner_slot])
+
+
+@dataclasses.dataclass(frozen=True)
+class _ArgPlan:
+    """The parsed plan for one args dataclass: the single source of truth for
+    the schema string, slot order, packing / unpacking, gradient placement and
+    the tensor-or-quantized slot offsets used for subclass flattening.
+
+    Built once per registration by :func:`_parse_arg_type`; :meth:`pack` and
+    :meth:`unpack` interpret it on each call. ProcessGroup fields ride in the
+    shared bundle as their c10d registry *name* -- mirroring traceable
+    functional collectives -- and the op re-resolves the very group the caller
+    passed; groups created outside the c10d registry fail the resolve loudly.
+    """
+
+    arg_type: type
+    fields: Tuple[_FieldPlan, ...]
+    slot_names: Tuple[str, ...]
+    schema_str: str
+    simple_slot: Optional[str]
+    tensor_field_names: Tuple[str, ...]
+    tq_offsets: Tuple[int, ...]
+    grad_slot_index: Dict[str, int]
+
+    @property
+    def slot_count(self) -> int:
+        """Total number of input schema slots."""
+        return len(self.slot_names)
+
+    def resolve_grad_targets(self, input_tensors_for_grad: Sequence[str]) -> List[int]:
+        """Absolute schema-slot index receiving each requested field's gradient."""
+        non_differentiable = [n for n in input_tensors_for_grad if n not in self.grad_slot_index]
+        if non_differentiable:
+            raise ValueError(
+                f"input_tensors_for_grad contains non-differentiable fields: {non_differentiable}"
+            )
+        return [self.grad_slot_index[n] for n in input_tensors_for_grad]
+
+    def pack(self, obj: Any) -> Dict[str, Any]:
+        """Flatten an ``arg_type`` instance into the op's ``{slot: value}`` dict.
+
+        Inverse of :meth:`unpack`.
+        """
+        slots: Dict[str, Any] = {}
+        simple: Dict[str, Any] = {}
+        for field in self.fields:
+            value = getattr(obj, field.name, None)
+            match field.kind:
+                case _FieldKind.TENSOR:
+                    slots[field.slots[0].name] = value
+                case _FieldKind.TENSOR_OR_QUANTIZED:
+                    _pack_tensor_or_quantized(field, value, slots)
+                case _FieldKind.PROCESS_GROUP:
+                    simple[field.name] = None if value is None else value.group_name
+                case _FieldKind.SIMPLE:
+                    simple[field.name] = value
+                case _FieldKind.UNSUPPORTED:
+                    # Annotation alone (e.g. Optional[Any]) can't decide; only
+                    # the runtime value can, so the check runs at pack time.
+                    if not _is_trivial(value):
+                        raise TypeError(
+                            f"{self.arg_type.__name__} field {field.name!r} has a type not "
+                            "supported by torch.compile (not Tensor, simple, Quantizer, or "
+                            "ProcessGroup) and carries a "
+                            "non-trivial value; add a matching field kind in custom_op.py "
+                            "to handle it."
+                        )
+        if self.simple_slot is not None:
+            slots[self.simple_slot] = OpaqueValueBundle(simple)
+        return slots
+
+    def unpack(self, slots: Dict[str, Any]) -> Any:
+        """Rebuild a fresh ``arg_type`` instance from the op's flat slot dict.
+
+        Inverse of :meth:`pack`.
+        """
+        kwargs: Dict[str, Any] = {}
+        bundle = slots.get(self.simple_slot) if self.simple_slot is not None else None
+        for field in self.fields:
+            match field.kind:
+                case _FieldKind.TENSOR:
+                    kwargs[field.name] = slots[field.slots[0].name]
+                case _FieldKind.TENSOR_OR_QUANTIZED:
+                    kwargs[field.name] = _unpack_tensor_or_quantized(field, slots)
+                case _FieldKind.PROCESS_GROUP:
+                    if bundle is not None:
+                        name = bundle[field.name]
+                        kwargs[field.name] = None if name is None else _resolve_process_group(name)
+                case _FieldKind.SIMPLE:
+                    if bundle is not None:
+                        kwargs[field.name] = bundle[field.name]
+                case _FieldKind.UNSUPPORTED:
+                    kwargs[field.name] = None
+        obj = self.arg_type.__new__(self.arg_type)
+        for k, v in kwargs.items():
+            object.__setattr__(obj, k, v)
+        return obj
 
 
 def _resolved_field_annotations(cls: type) -> List[Tuple[str, Any]]:
@@ -686,69 +644,55 @@ def _resolved_field_annotations(cls: type) -> List[Tuple[str, Any]]:
     return [(f.name, hints.get(f.name, f.type)) for f in dataclasses.fields(cls)]
 
 
-def _get_adapters(cls: type) -> List[_Adapter]:
-    """Build the adapter list for a dataclass from its field annotations."""
+def _parse_arg_type(cls: type) -> _ArgPlan:
+    """Parse an args ``@dataclass`` into its immutable :class:`_ArgPlan`.
+
+    The layout pass assigns absolute slot positions (the shared simple bundle,
+    if any field needs it, takes the last slot) and validates the result:
+    duplicate slot names are rejected here, before any op is registered.
+    """
     if _OPAQUE_VALUE_BUNDLE_TYPE_NAME is None:
         raise RuntimeError(
             f"{cls.__name__} cannot be turned into a TE custom op: OpaqueValueBundle "
             "is not registered as a torch._library value-opaque type (PyTorch build "
             "without opaque-object support)."
         )
-    adapters: List[_Adapter] = []
-    simple_names: List[str] = []
-    pg_names: List[str] = []
-    for name, annot in _resolved_field_annotations(cls):
-        built = _build_field_adapter(name, annot)
-        if built is not None:
-            adapters.append(built)
-        elif _is_process_group_annot(annot):
-            simple_names.append(name)
-            pg_names.append(name)
-        elif _SimpleBundleAdapter.matches_field(annot):
-            simple_names.append(name)
-        else:
-            adapters.append(_UnsupportedAdapter(name, cls.__name__))
-    if simple_names:
-        adapters.append(_SimpleBundleAdapter(simple_names, pg_names))
-    return adapters
+    fields = tuple(_parse_field(name, annot) for name, annot in _resolved_field_annotations(cls))
 
+    slot_specs: List[_SlotSpec] = []
+    tq_offsets: List[int] = []
+    tensor_field_names: List[str] = []
+    grad_slot_index: Dict[str, int] = {}
+    for field in fields:
+        if field.kind is _FieldKind.TENSOR_OR_QUANTIZED:
+            tq_offsets.append(len(slot_specs))
+        if field.kind in (_FieldKind.TENSOR, _FieldKind.TENSOR_OR_QUANTIZED):
+            tensor_field_names.append(field.name)
+        if field.grad_slot is not None:
+            grad_slot_index[field.name] = len(slot_specs) + field.grad_slot
+        slot_specs.extend(field.slots)
+    if any(f.kind in (_FieldKind.SIMPLE, _FieldKind.PROCESS_GROUP) for f in fields):
+        simple_slot: Optional[str] = _SIMPLE_META_SLOT
+        slot_specs.append(_SlotSpec(_SIMPLE_META_SLOT, _OPAQUE_VALUE_BUNDLE_TYPE_NAME))
+    else:
+        simple_slot = None
 
-def _tensor_field_names(adapters: List[_Adapter]) -> List[str]:
-    """Names of fields carrying tensors (for building the spec view)."""
-    return [b.name for b in adapters if isinstance(b, (_TensorAdapter, _TensorOrQuantizedAdapter))]
+    slot_names = tuple(s.name for s in slot_specs)
+    if len(set(slot_names)) != len(slot_names):
+        dupes = sorted(n for n in set(slot_names) if slot_names.count(n) > 1)
+        raise ValueError(f"{cls.__name__}: duplicate schema slot names: {dupes}")
+    schema_str = "(" + ", ".join(f"{s.type_str} {s.name}" for s in slot_specs) + ")"
 
-
-def _build_schema(adapters: List[_Adapter]) -> Tuple[str, List[str]]:
-    """Return ``(schema_arg_str, slot_names)`` for an adapter list."""
-    spec = [slot for b in adapters for slot in b.schema_slots()]
-    names = [name for name, _ in spec]
-    schema_str = "(" + ", ".join(f"{type_str} {name}" for name, type_str in spec) + ")"
-    return schema_str, names
-
-
-def _args_to_slots(obj: Any, adapters: List[_Adapter]) -> Dict[str, Any]:
-    """Build the op's flat ``{slot_name: value}`` argument dict from an args
-    dataclass ``obj`` (e.g. ``LinearFwdArgs``), by collecting every adapter's
-    packed slot(s). Inverse of :func:`_args_from_slots`.
-    """
-    out: Dict[str, Any] = {}
-    for adapter in adapters:
-        out.update(adapter.to_slots(obj))
-    return out
-
-
-def _args_from_slots(cls: type, args: Dict[str, Any], adapters: List[_Adapter]) -> Any:
-    """Rebuild a fresh args dataclass ``cls`` (e.g. ``LinearFwdArgs``) from the
-    op's flat slot ``args`` dict, by letting every adapter restore its field(s).
-    Inverse of :func:`_args_to_slots`.
-    """
-    kwargs: Dict[str, Any] = {}
-    for adapter in adapters:
-        adapter.from_slots(args, kwargs)
-    obj = cls.__new__(cls)
-    for k, v in kwargs.items():
-        object.__setattr__(obj, k, v)
-    return obj
+    return _ArgPlan(
+        arg_type=cls,
+        fields=fields,
+        slot_names=slot_names,
+        schema_str=schema_str,
+        simple_slot=simple_slot,
+        tensor_field_names=tuple(tensor_field_names),
+        tq_offsets=tuple(tq_offsets),
+        grad_slot_index=grad_slot_index,
+    )
 
 
 def _spec_view(obj: Any, tensor_field_names: Sequence[str]) -> Any:
@@ -912,45 +856,11 @@ def _unpack_fwd_fake_result(
 # --------------------------------------------------------------------------- #
 
 
-def _resolve_grad_targets(
-    fwd_adapters: List[_Adapter],
-    input_tensors_for_grad: List[str],
-) -> Tuple[int, List[int]]:
-    """Validate ``input_tensors_for_grad`` and resolve the grad-output layout.
-
-    ``fwd_adapters`` already encode the arg dataclass's fields (they are built
-    from it), so the type itself is not needed here.
-
-    Returns ``(slot_count, grad_targets)``: the total number of input schema
-    slots and, for each requested input name, the schema-slot index its gradient
-    maps to.
-    """
-    name_to_slot: Dict[str, int] = {}
-    slot_offset = 0
-    for adapter in fwd_adapters:
-        slots = adapter.schema_slots()
-        grad_slot = adapter.grad_slot()
-        if grad_slot is not None:
-            name_to_slot[adapter.name] = slot_offset + grad_slot
-        slot_offset += len(slots)
-
-    non_differentiable = [n for n in input_tensors_for_grad if n not in name_to_slot]
-    if non_differentiable:
-        raise ValueError(
-            f"input_tensors_for_grad contains non-differentiable fields: {non_differentiable}"
-        )
-    grad_targets = [name_to_slot[n] for n in input_tensors_for_grad]
-    return slot_offset, grad_targets
-
-
 def _register_base_op(
     *,
     op_name: str,
     schema_str: str,
-    arg_type: type,
-    arg_names: List[str],
-    adapters: List[_Adapter],
-    tensor_field_names: List[str],
+    plan: _ArgPlan,
     impl: Callable[[Any], Any],
     fake_impl: Callable[[Any], Any],
     pack_result: Callable[[Any], List[torch.Tensor]],
@@ -964,14 +874,12 @@ def _register_base_op(
     """
 
     def _impl(*flat: Any) -> List[torch.Tensor]:
-        kwargs = dict(zip(arg_names, flat))
-        obj = _args_from_slots(arg_type, kwargs, adapters)
+        obj = plan.unpack(dict(zip(plan.slot_names, flat)))
         return pack_result(impl(obj))
 
     def _fake(*flat: Any) -> List[torch.Tensor]:
-        kwargs = dict(zip(arg_names, flat))
-        obj = _args_from_slots(arg_type, kwargs, adapters)
-        spec_obj = _spec_view(obj, tensor_field_names)
+        obj = plan.unpack(dict(zip(plan.slot_names, flat)))
+        spec_obj = _spec_view(obj, plan.tensor_field_names)
         return pack_result(fake_impl(spec_obj))
 
     op = torch.library.custom_op(
@@ -985,16 +893,10 @@ def _register_autograd_for_op(
     *,
     fwd_op: Any,
     bwd_op: Any,
-    fwd_arg_type: type,
-    fwd_arg_names: List[str],
-    fwd_adapters: List[_Adapter],
-    fwd_tensor_field_names: List[str],
-    bwd_arg_names: List[str],
-    bwd_adapters: List[_Adapter],
-    slot_count: int,
+    fwd_plan: _ArgPlan,
+    bwd_plan: _ArgPlan,
     grad_targets: List[int],
     setup_context_user: Callable[..., Any],
-    bwd_arg_type: type,
     fwd_fake_impl: Callable[[Any], Tuple[Any, ...]],
 ) -> None:
     """Wire ``register_autograd`` on a forward op so its backward calls ``bwd_op``.
@@ -1008,16 +910,15 @@ def _register_autograd_for_op(
         ctx.fwd_tensor_list_lengths = {
             i: len(value) for i, value in enumerate(inputs) if isinstance(value, list)
         }
-        kwargs = dict(zip(fwd_arg_names, inputs))
-        fwd_obj = _args_from_slots(fwd_arg_type, kwargs, fwd_adapters)
-        spec_obj = _spec_view(fwd_obj, fwd_tensor_field_names)
+        fwd_obj = fwd_plan.unpack(dict(zip(fwd_plan.slot_names, inputs)))
+        spec_obj = _spec_view(fwd_obj, fwd_plan.tensor_field_names)
 
         user_fakes, saved_fakes, ctx_attrs = _unpack_fwd_fake_result(fwd_fake_impl(spec_obj))
 
         user_outputs, cursor = _unflatten_values(user_fakes, output)
         saved_list, _ = _unflatten_values(saved_fakes, output, cursor)
 
-        bwd_obj = bwd_arg_type()
+        bwd_obj = bwd_plan.arg_type()
         tensors_to_save_from_setup = setup_context_user(
             bwd_obj,
             fwd_obj,
@@ -1037,14 +938,14 @@ def _register_autograd_for_op(
         ctx.tensor_objects = None
         flat_grads = grad_outputs[0]
         bwd_obj.grad_output = _decode_none(flat_grads[0])
-        kwargs = _args_to_slots(bwd_obj, bwd_adapters)
-        bwd_args_flat = [kwargs[name] for name in bwd_arg_names]
+        kwargs = bwd_plan.pack(bwd_obj)
+        bwd_args_flat = [kwargs[name] for name in bwd_plan.slot_names]
         grads = [_decode_none(g) for g in bwd_op(*bwd_args_flat)]
         ctx.backward_objects = None
         # One grad per input schema slot: default None, but a ``Tensor[]`` slot
         # (always recorded in ``fwd_tensor_list_lengths``) needs a
         # list-shaped no-grad of matching length.
-        out: List[Any] = [None] * slot_count
+        out: List[Any] = [None] * fwd_plan.slot_count
         for pos, length in ctx.fwd_tensor_list_lengths.items():
             out[pos] = [None] * length
         for pos, g in zip(grad_targets, grads):
@@ -1054,30 +955,17 @@ def _register_autograd_for_op(
     fwd_op.register_autograd(_autograd_backward, setup_context=_setup_context)
 
 
-def _tensor_or_quantized_offsets(adapters: List[_Adapter]) -> List[int]:
-    """Start index of each ``_TensorOrQuantizedAdapter`` group in the flat args."""
-    offsets: List[int] = []
-    pos = 0
-    for adapter in adapters:
-        if isinstance(adapter, _TensorOrQuantizedAdapter):
-            offsets.append(pos)
-        pos += len(adapter.schema_slots())
-    return offsets
-
-
 def _flatten_subclass_into_slots(
-    new_args: List[Any], slot_offsets: List[int], subclass: type
+    new_args: List[Any], slot_offsets: Sequence[int], subclass: type
 ) -> None:
-    """Rewrite each tensor-or-quantized-adapter group whose ``Tensor?`` slot holds an
+    """Rewrite each tensor-or-quantized slot group whose ``Tensor?`` slot holds an
     instance of ``subclass`` into the storage layout (3 slots: name / tensors / meta).
     """
     for offset in slot_offsets:
         val = new_args[offset]
         if not isinstance(val, subclass):
             continue
-        meta, tensors = _storage_flatten(
-            val, {_TensorOrQuantizedAdapter.KIND_KEY: _TensorOrQuantizedKind.STORAGE}
-        )
+        meta, tensors = _storage_flatten(val, {_TQ_KIND_KEY: _TensorOrQuantizedKind.STORAGE})
         new_args[offset] = None
         new_args[offset + 1] = tensors
         new_args[offset + 2] = meta
@@ -1252,8 +1140,8 @@ def _register_custom_op_impl(
     """Body of :func:`register_custom_op`; see it for semantics."""
     # Existence check at the API boundary: every ``input_tensors_for_grad`` name
     # must be an actual field of ``fwd_arg_type`` (differentiability -- whether
-    # that field can carry a gradient -- is checked later in
-    # :func:`_resolve_grad_targets`).
+    # that field can carry a gradient -- is checked later, in
+    # :meth:`_ArgPlan.resolve_grad_targets`).
     fwd_field_names = {f.name for f in dataclasses.fields(fwd_arg_type)}
     missing = [n for n in input_tensors_for_grad if n not in fwd_field_names]
     if missing:
@@ -1265,29 +1153,21 @@ def _register_custom_op_impl(
     base_bwd_name = f"{wrapper_bwd_name}_base"
     subclass_list = _all_quantized_tensor_subclasses()
 
-    fwd_adapters = _get_adapters(fwd_arg_type)
-    bwd_adapters = _get_adapters(bwd_arg_type)
-    fwd_tensor_field_names = _tensor_field_names(fwd_adapters)
-    bwd_tensor_field_names = _tensor_field_names(bwd_adapters)
-
-    fwd_schema_args, fwd_arg_names = _build_schema(fwd_adapters)
-    bwd_schema_args, bwd_arg_names = _build_schema(bwd_adapters)
+    fwd_plan = _parse_arg_type(fwd_arg_type)
+    bwd_plan = _parse_arg_type(bwd_arg_type)
 
     num_grad_inputs = len(input_tensors_for_grad)
-    slot_count, grad_targets = _resolve_grad_targets(fwd_adapters, input_tensors_for_grad)
+    grad_targets = fwd_plan.resolve_grad_targets(input_tensors_for_grad)
 
-    fwd_schema = f"{fwd_schema_args} -> Tensor[]"
-    bwd_schema = f"{bwd_schema_args} -> Tensor[]"
+    fwd_schema = f"{fwd_plan.schema_str} -> Tensor[]"
+    bwd_schema = f"{bwd_plan.schema_str} -> Tensor[]"
 
     base_bwd_qualname = f"{_TE_OP_NAMESPACE}::{base_bwd_name}"
 
     base_fwd_def = _register_base_op(
         op_name=base_fwd_name,
         schema_str=fwd_schema,
-        arg_type=fwd_arg_type,
-        arg_names=fwd_arg_names,
-        adapters=fwd_adapters,
-        tensor_field_names=fwd_tensor_field_names,
+        plan=fwd_plan,
         impl=fwd_impl,
         fake_impl=fwd_fake_impl,
         pack_result=_pack_fwd_result,
@@ -1295,10 +1175,7 @@ def _register_custom_op_impl(
     _register_base_op(
         op_name=base_bwd_name,
         schema_str=bwd_schema,
-        arg_type=bwd_arg_type,
-        arg_names=bwd_arg_names,
-        adapters=bwd_adapters,
-        tensor_field_names=bwd_tensor_field_names,
+        plan=bwd_plan,
         impl=bwd_impl,
         fake_impl=bwd_fake_impl,
         pack_result=lambda g: _pack_bwd_result(g, num_grad_inputs, base_bwd_qualname),
@@ -1307,8 +1184,8 @@ def _register_custom_op_impl(
     base_fwd_op = getattr(getattr(torch.ops, _TE_OP_NAMESPACE), base_fwd_name)
     base_bwd_op = getattr(getattr(torch.ops, _TE_OP_NAMESPACE), base_bwd_name)
 
-    fwd_slot_offsets = _tensor_or_quantized_offsets(fwd_adapters)
-    bwd_slot_offsets = _tensor_or_quantized_offsets(bwd_adapters)
+    fwd_slot_offsets = fwd_plan.tq_offsets
+    bwd_slot_offsets = bwd_plan.tq_offsets
 
     wrapper_fwd_def = _register_wrapper_op(
         wrapper_op_name=wrapper_fwd_name,
@@ -1324,16 +1201,10 @@ def _register_custom_op_impl(
     )
 
     autograd_common = {
-        "fwd_arg_type": fwd_arg_type,
-        "fwd_arg_names": fwd_arg_names,
-        "fwd_adapters": fwd_adapters,
-        "fwd_tensor_field_names": fwd_tensor_field_names,
-        "bwd_arg_names": bwd_arg_names,
-        "bwd_adapters": bwd_adapters,
-        "slot_count": slot_count,
+        "fwd_plan": fwd_plan,
+        "bwd_plan": bwd_plan,
         "grad_targets": grad_targets,
         "setup_context_user": setup_context,
-        "bwd_arg_type": bwd_arg_type,
         "fwd_fake_impl": fwd_fake_impl,
     }
     wrapper_fwd_op = getattr(getattr(torch.ops, _TE_OP_NAMESPACE), wrapper_fwd_name)
@@ -1359,10 +1230,10 @@ def _register_custom_op_impl(
     _quantized_tensor_passthrough_ops.add(base_bwd_op.default)
 
     def forward_fn(fwd_args):
-        spec_obj = _spec_view(fwd_args, fwd_tensor_field_names)
+        spec_obj = _spec_view(fwd_args, fwd_plan.tensor_field_names)
         user_fakes, _saved_fakes, _ctx_attrs = _unpack_fwd_fake_result(fwd_fake_impl(spec_obj))
-        kwargs = _args_to_slots(fwd_args, fwd_adapters)
-        flat_in = [kwargs[name] for name in fwd_arg_names]
+        kwargs = fwd_plan.pack(fwd_args)
+        flat_in = [kwargs[name] for name in fwd_plan.slot_names]
         result = wrapper_fwd_op(*flat_in)
 
         outputs, _ = _unflatten_values(user_fakes, result)
