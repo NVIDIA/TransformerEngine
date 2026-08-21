@@ -848,6 +848,7 @@ def test_make_graphed_callables_restores_process_state_on_error(monkeypatch) -> 
     restored_fp8 = []
     restored_rng = []
     allocator_settings = []
+    warmup_hooks = []
 
     monkeypatch.setattr(te_graph, "save_fp8_tensors", lambda *args, **kwargs: fp8_state)
     monkeypatch.setattr(
@@ -861,6 +862,8 @@ def test_make_graphed_callables_restores_process_state_on_error(monkeypatch) -> 
 
     def fail_capture(*args, **kwargs):
         assert te_graph.is_graph_capturing()
+        kwargs["pre_warmup_hook"]()
+        assert warmup_hooks == ["pre"]
         kwargs["_allocator_settings_guard"].apply(
             allocator_settings.append,
             "expandable_segments:False",
@@ -872,13 +875,19 @@ def test_make_graphed_callables_restores_process_state_on_error(monkeypatch) -> 
 
     assert not te_graph.is_graph_capturing()
     with pytest.raises(RuntimeError, match="capture failed"):
-        te_graph.make_graphed_callables(module, (torch.ones(1),))
+        te_graph.make_graphed_callables(
+            module,
+            (torch.ones(1),),
+            pre_warmup_hook=lambda: warmup_hooks.append("pre"),
+            post_warmup_hook=lambda: warmup_hooks.append("post"),
+        )
 
     assert not te_graph.is_graph_capturing()
     assert TestModule.__call__ is original_call
     assert restored_fp8 == [((module,), fp8_state)]
     assert restored_rng == [rng_state]
     assert allocator_settings == ["expandable_segments:False", "expandable_segments:True"]
+    assert warmup_hooks == ["pre", "post"]
 
 
 def test_make_graphed_callables_restores_wrappers_on_preparation_error(monkeypatch) -> None:

@@ -3224,6 +3224,24 @@ def make_graphed_callables(
 
         block_cls.__call__ = call_func
 
+    warmup_cleanup_pending = False
+    guarded_pre_warmup_hook = pre_warmup_hook
+    guarded_post_warmup_hook = post_warmup_hook
+    if post_warmup_hook is not None:
+
+        def guarded_pre_warmup_hook():
+            nonlocal warmup_cleanup_pending
+            if pre_warmup_hook is not None:
+                pre_warmup_hook()
+            warmup_cleanup_pending = True
+
+        def guarded_post_warmup_hook():
+            nonlocal warmup_cleanup_pending
+            if not warmup_cleanup_pending:
+                return
+            warmup_cleanup_pending = False
+            post_warmup_hook()
+
     allocator_settings_guard = _AllocatorSettingsGuard()
     saved_fp8_tensors = None
     fp8_state_saved = False
@@ -3275,8 +3293,8 @@ def make_graphed_callables(
             _reuse_graph_input_output_buffers=_reuse_graph_input_output_buffers,
             _graph_memory_slots=_graph_memory_slots,
             _allocator_settings_guard=allocator_settings_guard,
-            pre_warmup_hook=pre_warmup_hook,
-            post_warmup_hook=post_warmup_hook,
+            pre_warmup_hook=guarded_pre_warmup_hook,
+            post_warmup_hook=guarded_post_warmup_hook,
         )
     finally:
         # ExitStack runs every callback even if an earlier restoration fails.
@@ -3290,5 +3308,7 @@ def make_graphed_callables(
             for restore_rng_state, state in rng_restore_callbacks:
                 capture_cleanup.callback(restore_rng_state, state)
             capture_cleanup.callback(allocator_settings_guard.restore)
+            if guarded_post_warmup_hook is not None:
+                capture_cleanup.callback(guarded_post_warmup_hook)
 
     return graphed_callables
