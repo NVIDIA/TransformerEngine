@@ -111,9 +111,7 @@ class TestFusedAdam(TestFusedOptimizer):
             (torch.bfloat16, torch.float32, True),
         ],
     )
-    def test_capturable_mixed_param_grad_dtype(
-        self, param_dtype, grad_dtype, master_weights
-    ):
+    def test_capturable_mixed_param_grad_dtype(self, param_dtype, grad_dtype, master_weights):
         """Capturable Adam supports parameter and gradient tensors with different dtypes."""
         if param_dtype == torch.bfloat16 and not is_bf16_available():
             pytest.skip("BF16 is not supported")
