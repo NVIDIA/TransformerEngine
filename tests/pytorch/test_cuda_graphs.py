@@ -1012,6 +1012,42 @@ def test_slot_memory_input_staging_respects_overlapping_liveness() -> None:
         reset_graphs(graphed)
 
 
+def test_slot_memory_snapshots_shared_kwarg_across_alternate_liveness() -> None:
+    """A later forward must not overwrite a shared kwarg needed by backward."""
+
+    class Module(torch.nn.Module):
+        def forward(self, inp, scale):
+            return inp * scale
+
+    module = Module().cuda()
+    samples = tuple((torch.ones(4096, device="cuda", requires_grad=True),) for _ in range(2))
+    shared_scale = torch.ones(4096, device="cuda")
+    sample_kwargs = ({"scale": shared_scale}, {"scale": shared_scale})
+    graphed = make_graphed_callables(
+        (module,),
+        samples,
+        sample_kwargs=sample_kwargs,
+        num_warmup_iters=2,
+        allow_unused_input=True,
+        _order=[1, -1, 1, -1],
+        _num_layers_per_chunk=[1],
+        _reuse_graph_input_output_buffers=True,
+        _graph_memory_slots=(_slot(0, 0, 0), _slot(1, 1, 1)),
+    )
+
+    try:
+        inp0 = torch.ones(4096, device="cuda", requires_grad=True)
+        inp1 = torch.ones(4096, device="cuda", requires_grad=True)
+        out0 = graphed[0](inp0, scale=torch.full_like(inp0, 2.0))
+        out1 = graphed[1](inp1, scale=torch.full_like(inp1, 3.0))
+        out0.sum().backward()
+        out1.sum().backward()
+        torch.testing.assert_close(inp0.grad, torch.full_like(inp0, 2.0))
+        torch.testing.assert_close(inp1.grad, torch.full_like(inp1, 3.0))
+    finally:
+        reset_graphs(graphed)
+
+
 @pytest.mark.parametrize("reverse_replay", (False, True), ids=("forward", "reverse"))
 def test_slot_memory_checkpoint_reuses_lockstep_branches(reverse_replay) -> None:
     """Lockstep CP branches must restore one live slot boundary between captures."""

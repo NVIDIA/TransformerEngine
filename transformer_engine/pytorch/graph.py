@@ -722,7 +722,13 @@ def _make_graphed_callables(
                     "Slot user-input snapshots require the first positional tensor to be the "
                     "first flattened graph input."
                 )
-            per_callable_snapshot_input_storage_ptrs.append(_tensor_storage_ptr(args[0]))
+            per_callable_snapshot_input_storage_ptrs.append(
+                {
+                    _tensor_storage_ptr(tensor)
+                    for tensor in flatten_sample_args[func_idx]
+                    if tensor.__class__ is torch.Tensor and tensor.is_cuda
+                }
+            )
     else:
         per_callable_saved_tensor_plans = None
         per_callable_saved_tensor_boundary_aliases = None
@@ -881,7 +887,7 @@ def _make_graphed_callables(
             storage_ptr = _tensor_storage_ptr(tensor)
             signature = _saved_tensor_signature(tensor)
             snapshot_user_input = (
-                tensor.is_cuda and storage_ptr == per_callable_snapshot_input_storage_ptrs[func_idx]
+                tensor.is_cuda and storage_ptr in per_callable_snapshot_input_storage_ptrs[func_idx]
             )
             is_external = not tensor.is_cuda or (
                 storage_ptr in per_callable_external_storage_ptrs[func_idx]
@@ -1591,6 +1597,12 @@ def _make_graphed_callables(
                 (saved_idx, aliases[saved_idx])
                 for saved_idx in component_saved_indices
                 if aliases[saved_idx] is not None
+                # Only the leading input is rebound to a union-liveness staging surface.
+                # Other user inputs may share MCore capture-order buffers that overlap in a
+                # different runtime schedule, so they must use the saved arena instead.
+                and not (
+                    aliases[saved_idx][1] == "input" and aliases[saved_idx][2] != 0
+                )
             ]
             if not candidate_aliases:
                 continue
@@ -3016,9 +3028,9 @@ def make_graphed_callables(
         Private liveness plan for mutually exclusive graph variants. Each tuple describes
         the saved-tensor arena, physical I/O slot, I/O branch, model chunk, layer, and warmup
         alias group, followed by the returned user-gradient arena for one graph input. Requires
-        the first positional sample argument of every graph input to be a plain CUDA tensor; it is
-        snapshotted into the slot arenas whenever forward saves it for backward, so shape-identical
-        graph inputs can share one input staging surface.
+        the first positional sample argument of every graph input to be a plain CUDA tensor. Plain
+        CUDA user inputs are snapshotted into the slot arenas whenever forward saves them for
+        backward, so shape-identical graph inputs can safely share staging surfaces.
     pre_warmup_hook: callable, default = None
                       A hook function that will be called before the warmup iterations.
     post_warmup_hook: callable, default = None
