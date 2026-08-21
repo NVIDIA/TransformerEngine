@@ -253,6 +253,11 @@ class Float8TensorStorage(QuantizedTensorStorage):
         )
 
     def __repr__(self):
+        # Data-free repr for a fake/meta scale_inv (exact class check: fake /
+        # functional tensors subclass Tensor); materializing it under tracing
+        # would leak an unbacked symbol into the ShapeEnv.
+        if self._scale_inv.__class__ is not torch.Tensor or self._scale_inv.is_meta:
+            return safe_quantized_repr(self, "Float8TensorStorage")
         try:
             return (
                 "Float8TensorStorage("
