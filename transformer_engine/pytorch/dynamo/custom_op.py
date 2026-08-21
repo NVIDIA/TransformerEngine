@@ -16,9 +16,10 @@ A ``torch.library`` custom op is narrower: it only accepts flat schema slots
 (tensors plus opaque objects) and returns a flat ``Tensor[]``.
 
 Bridging the two takes three parts (below): a parsed per-op *arg plan* maps the
-args dataclass onto the op's input slots; *fake impls* on data-free specs give
-the output geometry and reassemble the op's flat return; and a *two-tier op*
-lets a quantized-tensor subclass be an op input.
+args dataclass onto the op's input slots; a per-trace *output plan*, parsed from
+the data-free fake impl's result, maps the logical outputs / saved tensors /
+grads onto ranges of the flat return; and a *two-tier op* lets a
+quantized-tensor subclass be an op input.
 
 Field <-> slot mapping. ``_parse_arg_type`` parses the dataclass's field
 annotations once, at registration, into an immutable ``_ArgPlan``: per field a
@@ -45,24 +46,26 @@ traces under ``torch.compile`` without allocating. ``register_custom_op`` return
 call through it:
 
   * runs the fake ``fwd_fake_impl`` on ``TensorSpec`` descriptors (data-free; see
-    ``tensor_spec.py``) to get the outputs' geometry in pure Python;
+    ``tensor_spec.py``) and parses its result into an ``_OutputPlan`` -- the
+    outputs' geometry and their ranges in the flat payload, in pure Python;
   * calls the *forward op* -- which runs the real ``fwd_impl`` -- for a flat
     ``Tensor[]`` payload;
-  * rebuilds the structured user outputs from that payload, sliced and reassembled
-    per the fake's output descriptors (``_unflatten_values``;
-    ``_flatten_value`` is the pack-side inverse).
+  * rebuilds the structured user outputs from that payload per the plan
+    (``_OutputPlan.user_outputs``; ``_flatten_value`` is the pack-side inverse).
 
 Autograd, registered on the op, drives backward:
 
-  * ``setup_context`` (run when the forward is taped) re-runs ``fwd_fake_impl`` for
-    the saved-tensor descriptors and a ``ctx_attrs`` dict, reassembles the saved
-    tensors from the op's flat output, then calls the user ``setup_context`` to
-    fill the backward args from forward state + ``ctx_attrs`` (e.g. saved-tensor
-    aliases) and return the tensors to persist;
-  * on ``backward()`` the backward args container's optional ``setup_saved_tensors``
-    hook restores those saved tensors, then the *backward op* runs the real
-    ``bwd_impl`` and returns the flat grads (``bwd_fake_impl`` is its
-    data-free fake).
+  * ``setup_context`` (run when the forward is taped) re-runs ``fwd_fake_impl``,
+    parses the ``_OutputPlan``, reassembles the saved tensors from the op's flat
+    output, then calls the user ``setup_context`` to fill the backward args from
+    forward state + ``ctx_attrs`` (e.g. saved-tensor aliases) and return the
+    tensors to persist; the plan is stashed on ``ctx``;
+  * on ``backward()`` the incoming flat grads are sliced per user output from the
+    stashed plan (a ``grad_outputs`` field on the backward args receives the
+    whole tuple; otherwise ``grad_output`` receives the first output's grad),
+    the container's optional ``setup_saved_tensors`` hook restores the saved
+    tensors, then the *backward op* runs the real ``bwd_impl`` and returns the
+    flat grads (``bwd_fake_impl`` is its data-free fake).
 
 Two-tier op (``base`` + ``wrapper``), so a ``QuantizedTensor`` subclass can be an
 op *input*. The ``<op>_base`` op carries the real schema + autograd; a custom op
@@ -420,14 +423,12 @@ class _FieldPlan:
     """Parsed record for one dataclass field.
 
     ``slots`` are the schema slots the field occupies (empty for the kinds that
-    ride in the shared simple bundle, or cross nothing); ``grad_slot`` is the
-    index within ``slots`` of the slot carrying the field's gradient, or ``None``.
+    ride in the shared simple bundle, or cross nothing).
     """
 
     name: str
     kind: _FieldKind
     slots: Tuple[_SlotSpec, ...]
-    grad_slot: Optional[int]
 
 
 def _is_tensor_storage_union(annot: Any) -> bool:
@@ -477,16 +478,29 @@ def _parse_field(name: str, annot: Any) -> _FieldPlan:
             _SlotSpec(name + "__tensors", "Tensor[]"),
             _SlotSpec(name + "__meta", _OPAQUE_VALUE_BUNDLE_TYPE_NAME),
         )
-        return _FieldPlan(name, _FieldKind.TENSOR_OR_QUANTIZED, slots, grad_slot=0)
+        return _FieldPlan(name, _FieldKind.TENSOR_OR_QUANTIZED, slots)
     stripped, is_optional = _strip_optional(annot)
     if stripped is torch.Tensor:
         slot = _SlotSpec(name, "Tensor?" if is_optional else "Tensor")
-        return _FieldPlan(name, _FieldKind.TENSOR, (slot,), grad_slot=0)
+        return _FieldPlan(name, _FieldKind.TENSOR, (slot,))
+    # A union mixing tensor types with anything else is a malformed signature
+    # (e.g. a bare quantized-storage Optional, or Tensor | int): reject it at
+    # registration instead of silently degrading to an unsupported field.
+    if _is_union(annot):
+        members = [a for a in get_args(annot) if a is not type(None)]
+        if any(
+            isinstance(m, type) and issubclass(m, (torch.Tensor, QuantizedTensorStorage))
+            for m in members
+        ):
+            raise TypeError(
+                f"field {name!r}: union {annot!r} is not a supported tensor "
+                "signature; use Tensor, Optional[Tensor], or TensorOrQuantized."
+            )
     if _is_process_group_annot(annot):
-        return _FieldPlan(name, _FieldKind.PROCESS_GROUP, (), grad_slot=None)
+        return _FieldPlan(name, _FieldKind.PROCESS_GROUP, ())
     if _is_simple_annot(annot):
-        return _FieldPlan(name, _FieldKind.SIMPLE, (), grad_slot=None)
-    return _FieldPlan(name, _FieldKind.UNSUPPORTED, (), grad_slot=None)
+        return _FieldPlan(name, _FieldKind.SIMPLE, ())
+    return _FieldPlan(name, _FieldKind.UNSUPPORTED, ())
 
 
 def _is_trivial(value: Any) -> bool:
@@ -556,7 +570,6 @@ class _ArgPlan:
     simple_slot: Optional[str]
     tensor_field_names: Tuple[str, ...]
     tq_offsets: Tuple[int, ...]
-    grad_slot_index: Dict[str, int]
 
     @property
     def slot_count(self) -> int:
@@ -564,13 +577,26 @@ class _ArgPlan:
         return len(self.slot_names)
 
     def resolve_grad_targets(self, input_tensors_for_grad: Sequence[str]) -> List[int]:
-        """Absolute schema-slot index receiving each requested field's gradient."""
-        non_differentiable = [n for n in input_tensors_for_grad if n not in self.grad_slot_index]
+        """Absolute schema-slot index receiving each requested field's gradient.
+
+        Derived from ``fields`` on demand -- called once per registration, so
+        the plan doesn't cache the mapping.
+        """
+        index: Dict[str, int] = {}
+        offset = 0
+        for field in self.fields:
+            if field.kind in (_FieldKind.TENSOR, _FieldKind.TENSOR_OR_QUANTIZED):
+                # The gradient flows to the group's first slot -- for
+                # tensor-or-quantized that is the ``Tensor?`` slot, the one
+                # autograd sees the (subclass) tensor in.
+                index[field.name] = offset
+            offset += len(field.slots)
+        non_differentiable = [n for n in input_tensors_for_grad if n not in index]
         if non_differentiable:
             raise ValueError(
                 f"input_tensors_for_grad contains non-differentiable fields: {non_differentiable}"
             )
-        return [self.grad_slot_index[n] for n in input_tensors_for_grad]
+        return [index[n] for n in input_tensors_for_grad]
 
     def pack(self, obj: Any) -> Dict[str, Any]:
         """Flatten an ``arg_type`` instance into the op's ``{slot: value}`` dict.
@@ -662,14 +688,11 @@ def _parse_arg_type(cls: type) -> _ArgPlan:
     slot_specs: List[_SlotSpec] = []
     tq_offsets: List[int] = []
     tensor_field_names: List[str] = []
-    grad_slot_index: Dict[str, int] = {}
     for field in fields:
         if field.kind is _FieldKind.TENSOR_OR_QUANTIZED:
             tq_offsets.append(len(slot_specs))
         if field.kind in (_FieldKind.TENSOR, _FieldKind.TENSOR_OR_QUANTIZED):
             tensor_field_names.append(field.name)
-        if field.grad_slot is not None:
-            grad_slot_index[field.name] = len(slot_specs) + field.grad_slot
         slot_specs.extend(field.slots)
     if any(f.kind in (_FieldKind.SIMPLE, _FieldKind.PROCESS_GROUP) for f in fields):
         simple_slot: Optional[str] = _SIMPLE_META_SLOT
@@ -691,7 +714,6 @@ def _parse_arg_type(cls: type) -> _ArgPlan:
         simple_slot=simple_slot,
         tensor_field_names=tuple(tensor_field_names),
         tq_offsets=tuple(tq_offsets),
-        grad_slot_index=grad_slot_index,
     )
 
 
@@ -728,33 +750,13 @@ def _spec_slot_count(spec: Optional[TensorSpec]) -> int:
     return len(spec.inner_names())
 
 
-def _unflatten_values(
-    specs: Sequence[Optional[TensorSpec]],
-    flat: Sequence[Optional[torch.Tensor]],
-    cursor: int = 0,
-) -> Tuple[List[Any], int]:
-    """Rebuild one group of values from an op's flat return, starting at ``cursor``.
-
-    Returns the values and the new cursor, so consecutive groups (user outputs,
-    then saved tensors) can walk the same payload.
-    """
-    values: List[Any] = []
-    for spec in specs:
-        n = _spec_slot_count(spec)
-        chunk = [_decode_none(t) for t in flat[cursor : cursor + n]]
-        cursor += n
-        # ``spec is None`` is the op-boundary sentinel for an absent output.
-        values.append(spec.assemble(chunk) if spec is not None else None)
-    return values, cursor
-
-
 def _flatten_value(
     value: Optional[Union[torch.Tensor, QuantizedTensorStorage, TensorSpec]],
 ) -> List[torch.Tensor]:
     """Return the flat ``Tensor[]`` slots that represent one op output ``value``.
 
-    Inverse of :func:`_unflatten_values`; the slot count matches
-    :func:`_spec_slot_count`.
+    Pack-side inverse of :meth:`_OutputPlan.user_outputs`; the slot count
+    matches :func:`_spec_slot_count`.
     """
     if value is None:
         return [_encode_none(None)]
@@ -782,7 +784,7 @@ def _check_fwd_result(result: Any) -> None:
     message for op authors (user-output *types* are checked later, by
     :func:`_flatten_value`).
 
-    Only called on the fake path (:func:`_unpack_fwd_fake_result`), which runs at
+    Only called on the fake path (:meth:`_OutputPlan.parse`), which runs at
     trace/compile time -- so this is a compile-time check with no per-call cost.
     The real impl must return the same shape as the fake, so validating the fake
     covers both.
@@ -837,18 +839,82 @@ def _pack_bwd_result(grads: Any, num_grad_inputs: int, op_qualname: str) -> List
     return out
 
 
-def _unpack_fwd_fake_result(
-    result: Tuple[Any, ...],
-) -> Tuple[List[Any], List[Any], Dict[str, Any]]:
-    """Slice a fwd fake-impl return into ``(user_fakes, saved_fakes, ctx_attrs)``."""
-    _check_fwd_result(result)
-    num_outputs = len(result) - _FWD_TRAILING_SLOTS
-    saved = result[num_outputs]
-    ctx_attrs = result[num_outputs + 1]
-    user_fakes = list(result[:num_outputs])
-    saved_fakes = list(saved) if saved is not None else []
-    ctx_attrs = dict(ctx_attrs) if ctx_attrs else {}
-    return user_fakes, saved_fakes, ctx_attrs
+@dataclasses.dataclass(frozen=True)
+class _OutputPlan:
+    """Per-trace layout of an op's flat ``Tensor[]`` return.
+
+    Parsed from a fwd fake-impl result: the logical user outputs and the
+    saved-for-backward tensors, each with its range in the flat payload. The
+    single source of truth for rebuilding forward outputs and saved tensors and
+    for slicing backward grad_outputs per user output. Per-trace rather than
+    per-registration because a quantized output's inner-tensor count is only
+    known from the fake result.
+    """
+
+    user_specs: Tuple[Optional[TensorSpec], ...]
+    saved_specs: Tuple[Optional[TensorSpec], ...]
+    ctx_attrs: Dict[str, Any]
+    user_ranges: Tuple[Tuple[int, int], ...]
+    saved_start: int
+
+    @classmethod
+    def parse(cls, result: Tuple[Any, ...]) -> "_OutputPlan":
+        """Slice a fwd fake-impl return into the plan (validating the contract)."""
+        _check_fwd_result(result)
+        num_outputs = len(result) - _FWD_TRAILING_SLOTS
+        user_specs = tuple(result[:num_outputs])
+        saved = result[num_outputs]
+        ctx_attrs = result[num_outputs + 1]
+        cursor = 0
+        user_ranges: List[Tuple[int, int]] = []
+        for spec in user_specs:
+            n = _spec_slot_count(spec)
+            user_ranges.append((cursor, cursor + n))
+            cursor += n
+        return cls(
+            user_specs=user_specs,
+            saved_specs=tuple(saved) if saved is not None else (),
+            ctx_attrs=dict(ctx_attrs) if ctx_attrs else {},
+            user_ranges=tuple(user_ranges),
+            saved_start=cursor,
+        )
+
+    @staticmethod
+    def _assemble(
+        spec: Optional[TensorSpec], flat: Sequence[Optional[torch.Tensor]], start: int, stop: int
+    ) -> Any:
+        chunk = [_decode_none(t) for t in flat[start:stop]]
+        # ``spec is None`` is the op-boundary sentinel for an absent output.
+        return spec.assemble(chunk) if spec is not None else None
+
+    def user_outputs(self, flat: Sequence[Optional[torch.Tensor]]) -> List[Any]:
+        """Rebuild the structured user outputs from the op's flat return."""
+        return [
+            self._assemble(spec, flat, start, stop)
+            for spec, (start, stop) in zip(self.user_specs, self.user_ranges)
+        ]
+
+    def saved_tensors(self, flat: Sequence[Optional[torch.Tensor]]) -> List[Any]:
+        """Rebuild the saved-for-backward tensors from the op's flat return."""
+        values: List[Any] = []
+        cursor = self.saved_start
+        for spec in self.saved_specs:
+            n = _spec_slot_count(spec)
+            values.append(self._assemble(spec, flat, cursor, cursor + n))
+            cursor += n
+        return values
+
+    def user_grads(self, flat_grads: Sequence[Optional[torch.Tensor]]) -> List[Any]:
+        """Gradient of each user output, sliced from the op's flat grad list.
+
+        A single-slot output yields its tensor grad; a flattened quantized
+        output yields the tuple of its inner-buffer grads.
+        """
+        grads: List[Any] = []
+        for start, stop in self.user_ranges:
+            chunk = [_decode_none(g) for g in flat_grads[start:stop]]
+            grads.append(chunk[0] if stop - start == 1 else tuple(chunk))
+        return grads
 
 
 # --------------------------------------------------------------------------- #
@@ -901,10 +967,12 @@ def _register_autograd_for_op(
 ) -> None:
     """Wire ``register_autograd`` on a forward op so its backward calls ``bwd_op``.
 
-    ``setup_context`` re-runs the spec fwd fake impl to recover output / saved
-    templates, reassembles each flat output chunk, and hands the saved tuple +
-    ``ctx_attrs`` to the module's ``setup_context``.
+    ``setup_context`` re-runs the spec fwd fake impl to parse the
+    :class:`_OutputPlan`, reassembles the outputs / saved tensors from it, hands
+    the saved tuple + ``ctx_attrs`` to the module's ``setup_context`` and stashes
+    the plan on ``ctx`` so backward can slice its grads per user output.
     """
+    bwd_takes_grad_tuple = any(f.name == "grad_outputs" for f in bwd_plan.fields)
 
     def _setup_context(ctx, inputs, output):
         ctx.fwd_tensor_list_lengths = {
@@ -913,31 +981,35 @@ def _register_autograd_for_op(
         fwd_obj = fwd_plan.unpack(dict(zip(fwd_plan.slot_names, inputs)))
         spec_obj = _spec_view(fwd_obj, fwd_plan.tensor_field_names)
 
-        user_fakes, saved_fakes, ctx_attrs = _unpack_fwd_fake_result(fwd_fake_impl(spec_obj))
-
-        user_outputs, cursor = _unflatten_values(user_fakes, output)
-        saved_list, _ = _unflatten_values(saved_fakes, output, cursor)
+        out_plan = _OutputPlan.parse(fwd_fake_impl(spec_obj))
+        user_outputs = out_plan.user_outputs(output)
+        saved_list = out_plan.saved_tensors(output)
 
         bwd_obj = bwd_plan.arg_type()
         tensors_to_save_from_setup = setup_context_user(
             bwd_obj,
             fwd_obj,
             user_outputs[0] if len(user_outputs) == 1 else tuple(user_outputs),
-            ctx_attrs,
+            out_plan.ctx_attrs,
             tuple(saved_list),
         )
         tensors_to_save, tensor_objects = prepare_for_saving(*(tensors_to_save_from_setup or ()))
         ctx.tensor_objects = tensor_objects
         ctx.save_for_backward(*tensors_to_save)
         ctx.backward_objects = bwd_obj
+        ctx.output_plan = out_plan
 
     def _autograd_backward(ctx, *grad_outputs):
         bwd_obj = ctx.backward_objects
         if hasattr(bwd_obj, "setup_saved_tensors"):
             bwd_obj.setup_saved_tensors(ctx)
         ctx.tensor_objects = None
-        flat_grads = grad_outputs[0]
-        bwd_obj.grad_output = _decode_none(flat_grads[0])
+        user_grads = ctx.output_plan.user_grads(grad_outputs[0])
+        ctx.output_plan = None
+        if bwd_takes_grad_tuple:
+            bwd_obj.grad_outputs = tuple(user_grads)
+        else:
+            bwd_obj.grad_output = user_grads[0]
         kwargs = bwd_plan.pack(bwd_obj)
         bwd_args_flat = [kwargs[name] for name in bwd_plan.slot_names]
         grads = [_decode_none(g) for g in bwd_op(*bwd_args_flat)]
@@ -1098,8 +1170,11 @@ def register_custom_op(
     forward state and returns the tensors to persist; the framework saves them
     via ``ctx.save_for_backward``. Before ``bwd_impl`` runs, the framework
     restores them into the container's tensor fields through the
-    ``setup_saved_tensors`` hook and sets ``grad_output`` directly, so
-    ``bwd_impl`` receives a fully-populated ``bwd_arg_type``.
+    ``setup_saved_tensors`` hook and sets the incoming gradient directly --
+    into a ``grad_outputs`` field (tuple, one grad per user output) if
+    ``bwd_arg_type`` declares one, else into ``grad_output`` (the first user
+    output's grad) -- so ``bwd_impl`` receives a fully-populated
+    ``bwd_arg_type``.
 
     Registration touches experimental ``torch.library`` / opaque-object APIs
     that may be missing on older PyTorch. If it fails, this warns once and
@@ -1231,12 +1306,12 @@ def _register_custom_op_impl(
 
     def forward_fn(fwd_args):
         spec_obj = _spec_view(fwd_args, fwd_plan.tensor_field_names)
-        user_fakes, _saved_fakes, _ctx_attrs = _unpack_fwd_fake_result(fwd_fake_impl(spec_obj))
+        out_plan = _OutputPlan.parse(fwd_fake_impl(spec_obj))
         kwargs = fwd_plan.pack(fwd_args)
         flat_in = [kwargs[name] for name in fwd_plan.slot_names]
         result = wrapper_fwd_op(*flat_in)
 
-        outputs, _ = _unflatten_values(user_fakes, result)
+        outputs = out_plan.user_outputs(result)
         if len(outputs) == 1:
             return outputs[0]
         return tuple(outputs)
