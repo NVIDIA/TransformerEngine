@@ -22,6 +22,7 @@ from transformer_engine.pytorch.ep import (
     symm_mem_alloc,
     release_symm_mem_pool,
     is_symm_backed,
+    mxfp8_carrier_to_grouped,
     _ep_combine_raw,
     _ep_dispatch_raw,
 )
@@ -136,11 +137,12 @@ def _make_identity_inputs(rank, ep_size, device="cuda"):
     )
 
 
-def _degroup_mxfp8(recv_grouped, valid_counts=None):
-    """Dequantize a per-expert MXFP8 GroupedTensor to a dense tensor in expert-major order.
-    With ``valid_counts`` keep only the first ``valid_counts[e]`` rows of each padded expert
-    slot; otherwise return every (padded) row."""
-    parts = recv_grouped.split_into_quantized_tensors()
+def _degroup_mxfp8(recv_carrier, token_counts, valid_counts=None):
+    """Rebuild the per-expert MXFP8 grouped view of an opaque EP carrier tensor and dequantize
+    it to a dense tensor in expert-major order. ``token_counts`` is the padded per-expert row
+    counts the carrier was routed with. With ``valid_counts`` keep only the first
+    ``valid_counts[e]`` rows of each padded expert slot; otherwise return every (padded) row."""
+    parts = mxfp8_carrier_to_grouped(recv_carrier, token_counts).split_into_quantized_tensors()
     if valid_counts is None:
         return torch.cat([p.dequantize() for p in parts], dim=0)
     return torch.cat([p.dequantize()[:v] for p, v in zip(parts, valid_counts)], dim=0)
@@ -439,46 +441,49 @@ class TestEP(unittest.TestCase):
         torch.cuda.synchronize()
         n = int(tc.sum())
         torch.testing.assert_close(
-            _degroup_mxfp8(recv_mx).float(), ref_recv.float()[:n], atol=1e-2, rtol=1e-2
+            _degroup_mxfp8(recv_mx, tc).float(), ref_recv.float()[:n], atol=1e-2, rtol=1e-2
         )
 
     @_eager_test_include
     @_zero_copy_test_include
     @_mxfp8_align_test
     def test_dispatch_mxfp8(self):
-        """MXFP8 dispatch quantizes bf16 tokens internally; recv (a per-expert GroupedTensor)
-        dequantized matches a bf16 dispatch of the same tokens. Under zero-copy the recv data and
-        scales are symm-mem backed."""
+        """MXFP8 dispatch quantizes bf16 tokens internally; recv is an opaque plain-tensor
+        carrier (payload-dtype [rows, hidden], storage = E4M3 data then compact e8m0 scales)
+        whose rebuilt grouped view, dequantized, matches a bf16 dispatch of the same tokens.
+        Under zero-copy the carrier is symm-mem backed."""
         self._require_mxfp8_shapes()
         topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
         buf = self._make_buffer(dispatch_fwd_quant_recipe=MXFP8BlockScaling(), alignment=128)
         recv_mx, _rw, tc = ep_dispatch(buf, tokens, topk_idx, w)
+        # The recv is a plain torch tensor with the payload dtype, not a GroupedTensor.
+        self.assertIs(type(recv_mx), torch.Tensor)
+        self.assertEqual(recv_mx.dtype, torch.bfloat16)
         if ZERO_COPY:
-            self.assertTrue(is_symm_backed(recv_mx.rowwise_data))
-            self.assertTrue(is_symm_backed(recv_mx.scale_inv))
+            self.assertTrue(is_symm_backed(recv_mx))
         self._assert_mxfp8_matches_bf16(recv_mx, tokens, topk_idx, w, tc)
 
     @_zero_copy_test_include
     @_mxfp8_align_test
     def test_caller_provides_dispatch_recv_mxfp8(self):
-        """One caller-supplied buffer holds the recv data followed by the e8m0 scales; ep_dispatch
-        slices it and the returned GroupedTensor views the data and scale regions of that buffer."""
+        """The caller-supplied recv_tokens buffer becomes the MXFP8 carrier: ep_dispatch carves
+        its storage into recv data followed by the e8m0 scales, returns it as-is, and the
+        rebuilt grouped view points at those regions."""
         self._require_mxfp8_shapes()
-        from transformer_engine.pytorch.constants import MXFP8_BLOCK_SCALING_SIZE
-
         rc = self.cfg.recv_capacity_per_rank
-        cols = HIDDEN_DIM // MXFP8_BLOCK_SCALING_SIZE
-        nbytes = rc * (HIDDEN_DIM + cols)  # fp8 data + e8m0 scales, one byte per element
+        # Payload-dtype [rows, hidden] carrier: bf16's 2 bytes/elem >= 1 (data) + 1/32 (scales).
         if ZERO_COPY:
-            recv_buf = symm_mem_alloc((nbytes,), torch.uint8, self.ep_group)
+            recv_buf = symm_mem_alloc((rc, HIDDEN_DIM), torch.bfloat16, self.ep_group)
         else:
-            recv_buf = torch.empty(nbytes, dtype=torch.uint8, device=self.cfg.device)
+            recv_buf = torch.empty(rc, HIDDEN_DIM, dtype=torch.bfloat16, device=self.cfg.device)
         buf = self._make_buffer(dispatch_fwd_quant_recipe=MXFP8BlockScaling(), alignment=128)
         topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
         recv_mx, _rw, tc = ep_dispatch(buf, tokens, topk_idx, w, recv_tokens=recv_buf)
-        # the returned GroupedTensor views the caller buffer's data then scale regions
-        self.assertEqual(recv_mx.rowwise_data.data_ptr(), recv_buf.data_ptr())
-        self.assertEqual(recv_mx.scale_inv.data_ptr(), recv_buf.data_ptr() + rc * HIDDEN_DIM)
+        # the returned carrier is the caller's buffer; its grouped view carves data then scales
+        self.assertEqual(recv_mx.data_ptr(), recv_buf.data_ptr())
+        recv_grouped = mxfp8_carrier_to_grouped(recv_mx, tc)
+        self.assertEqual(recv_grouped.rowwise_data.data_ptr(), recv_buf.data_ptr())
+        self.assertEqual(recv_grouped.scale_inv.data_ptr(), recv_buf.data_ptr() + rc * HIDDEN_DIM)
         self._assert_mxfp8_matches_bf16(recv_mx, tokens, topk_idx, w, tc)
 
     @_zero_copy_test_include
@@ -531,35 +536,34 @@ class TestEP(unittest.TestCase):
     @_zero_copy_test_include
     @_mxfp8_align_test
     def test_combine_bwd_mxfp8_caller_grad_out(self):
-        """MXFP8 combine backward into a single caller buffer sliced into data + e8m0 scales: the
-        returned per-expert GroupedTensor views those regions and, dequantized, matches a bf16
-        combine backward reference on the same routing. Under zero-copy the caller buffer and combine
-        input are symm-mem backed."""
+        """MXFP8 combine backward into a caller-supplied carrier (expert_out-shaped bf16, storage
+        carved into data + e8m0 scales): the grad IS that buffer, and its rebuilt grouped view,
+        dequantized, matches a bf16 combine backward reference on the same routing. Under
+        zero-copy the caller buffer and combine input are symm-mem backed."""
         self._require_mxfp8_shapes()
-        from transformer_engine.pytorch.constants import MXFP8_BLOCK_SCALING_SIZE
-
         rc = self.cfg.recv_capacity_per_rank
-        cols = HIDDEN_DIM // MXFP8_BLOCK_SCALING_SIZE
         topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
         eo_vals = (
             torch.linspace(-0.5, 0.5, rc * HIDDEN_DIM, device=self.cfg.device)
             .reshape(rc, HIDDEN_DIM)
             .to(torch.bfloat16)
         )
-        # MXFP8 combine backward writes into one caller buffer (data then e8m0 scales)
+        # MXFP8 combine backward writes into one caller carrier; autograd hands it back as the
+        # grad, so it must match expert_out's shape and dtype.
         buf_mx = self._make_buffer(combine_bwd_quant_recipe=MXFP8BlockScaling(), alignment=128)
         _recv, _rw, tc = ep_dispatch(buf_mx, tokens, topk_idx, w)  # seeds the routing
-        nbytes = rc * (HIDDEN_DIM + cols)
         if ZERO_COPY:
-            grad_buf = symm_mem_alloc((nbytes,), torch.uint8, self.ep_group)
+            grad_buf = symm_mem_alloc((rc, HIDDEN_DIM), torch.bfloat16, self.ep_group)
         else:
-            grad_buf = torch.empty(nbytes, dtype=torch.uint8, device=self.cfg.device)
+            grad_buf = torch.empty(rc, HIDDEN_DIM, dtype=torch.bfloat16, device=self.cfg.device)
         src_mx = eo_vals.detach().clone().requires_grad_(True)
         out_mx = ep_combine(buf_mx, self._expert_out(src_mx), grad_out=grad_buf)
         (0.5 * (out_mx.float() ** 2).sum()).backward()
-        g_mx = src_mx.grad  # per-expert GroupedTensor viewing grad_buf
-        self.assertEqual(g_mx.rowwise_data.data_ptr(), grad_buf.data_ptr())
-        self.assertEqual(g_mx.scale_inv.data_ptr(), grad_buf.data_ptr() + rc * HIDDEN_DIM)
+        g_mx = src_mx.grad  # the caller carrier, returned as-is
+        self.assertEqual(g_mx.data_ptr(), grad_buf.data_ptr())
+        g_grouped = mxfp8_carrier_to_grouped(g_mx, tc)
+        self.assertEqual(g_grouped.rowwise_data.data_ptr(), grad_buf.data_ptr())
+        self.assertEqual(g_grouped.scale_inv.data_ptr(), grad_buf.data_ptr() + rc * HIDDEN_DIM)
         # bf16 reference combine backward on the same routing
         buf_bf = self._make_buffer(alignment=128)
         ep_dispatch(buf_bf, tokens, topk_idx, w)
@@ -569,7 +573,7 @@ class TestEP(unittest.TestCase):
         torch.cuda.synchronize()
         n = int(tc.sum())
         torch.testing.assert_close(
-            _degroup_mxfp8(g_mx).float(), src_bf.grad.float()[:n], atol=5e-2, rtol=5e-2
+            _degroup_mxfp8(g_mx, tc).float(), src_bf.grad.float()[:n], atol=5e-2, rtol=5e-2
         )
 
     @_eager_test_include
@@ -604,7 +608,7 @@ class TestEP(unittest.TestCase):
         torch.cuda.synchronize()
         n = int(tc.sum())
         torch.testing.assert_close(
-            _degroup_mxfp8(g_mx).float(), src_bf.grad.float()[:n], atol=5e-2, rtol=5e-2
+            _degroup_mxfp8(g_mx, tc).float(), src_bf.grad.float()[:n], atol=5e-2, rtol=5e-2
         )
 
     @_zero_copy_test_include
