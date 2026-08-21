@@ -1765,7 +1765,7 @@ class NVFP4BlockScalingRecipeState(RecipeState):
                     raise ValueError("NVFP4 4over6 quantization is incompatible with UE5M3 scales.")
 
             # Scale max for 4over6
-            nvfp4_e4m3_max = None
+            nvfp4_e4m3_max = 0
             if nvfp4_use_4over6:
                 if self.recipe.nvfp4_4over6_e4m3_use_256 == "all":
                     nvfp4_e4m3_max = 256

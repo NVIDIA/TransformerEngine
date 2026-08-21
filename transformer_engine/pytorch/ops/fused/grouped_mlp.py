@@ -306,9 +306,9 @@ def _nvfp4_sf_dtype_override(quantizer: Optional[Quantizer]) -> Literal["e5m3"] 
 def _nvfp4_scale_max(quantizer: Quantizer) -> float:
     """Return the maximum representable magnitude of an NVFP4 scale factor."""
     # 4over6 might override e4m3's max to 256 over default 448
-    override_max = getattr(quantizer, "nvfp4_e4m3_max", None)
-    # NVFP4Quantizer's initialization sets nvfp4_e4m3_max to -1 if no override
-    if override_max is not None and override_max != -1:
+    override_max = getattr(quantizer, "nvfp4_e4m3_max", 0)
+    # NVFP4Quantizer's initialization sets nvfp4_e4m3_max to 0 if no override
+    if override_max != 0:
         return float(override_max)
     scale_dtype = getattr(quantizer, "scale_dtype", None)
     if scale_dtype is not None and scale_dtype == DType.kFloat8UE5M3:

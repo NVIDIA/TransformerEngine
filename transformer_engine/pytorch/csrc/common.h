@@ -353,8 +353,8 @@ class NVFP4Quantizer : public Quantizer {
   bool stochastic_rounding;
   // 4over6 candidate-selection mode used when quantizing emitted NVFP4 tensors.
   NVTENVFP44Over6Mode nvfp4_4over6_mode;
-  // Global E4M3 scale bound used by emitted NVFP4 tensors.
-  std::optional<int> nvfp4_e4m3_max;
+  // Global E4M3 scale bound used by emitted NVFP4 tensors (0 when inactive).
+  int nvfp4_e4m3_max = 0;
   // Dtype of scale_inv tensors (kFloat8E4M3 or kFloat8UE5M3).
   DType scale_dtype;
   // Whether tensors emitted by this quantizer use row-scaled NVFP4 metadata.

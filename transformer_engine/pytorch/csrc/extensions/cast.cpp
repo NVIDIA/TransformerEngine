@@ -1121,7 +1121,7 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
   const bool row_scaled_nvfp4 = quantizer_cpp_list[0]->row_scaled_nvfp4;
   const bool nvfp4_use_4over6 =
       quantizer_cpp_list[0]->nvfp4_4over6_mode != kNVTENVFP44Over6Disabled;
-  const auto nvfp4_e4m3_max = quantizer_cpp_list[0]->nvfp4_e4m3_max;
+  const int nvfp4_e4m3_max = quantizer_cpp_list[0]->nvfp4_e4m3_max;
   const bool disable_second_level_scale = quantizer_cpp_list[0]->disable_second_level_scale;
   const auto columnwise_usage = quantizer_cpp_list[0]->columnwise_usage;
   if (row_scaled_nvfp4) {
@@ -1348,8 +1348,8 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
       }
       tensor_wrapper.set_with_gemm_swizzled_scales(with_gemm_swizzled_scales);
       tensor_wrapper.set_row_scaled_nvfp4(row_scaled_nvfp4);
-      if (nvfp4_e4m3_max) {
-        tensor_wrapper.set_nvfp4_e4m3_max(*nvfp4_e4m3_max);
+      if (nvfp4_e4m3_max != 0) {
+        tensor_wrapper.set_nvfp4_e4m3_max(nvfp4_e4m3_max);
       }
 
       tensor_cpp_list.emplace_back(std::move(tensor_wrapper));

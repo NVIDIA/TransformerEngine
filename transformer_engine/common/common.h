@@ -306,13 +306,13 @@ struct Tensor {
   bool row_scaled_nvfp4 = false;
   /*! \brief Global scale bound used by NVFP4.
    *
-   *  When negative, use the maximum value of the scale-inverse dtype.
+   *  When zero, use the maximum value of the scale-inverse dtype.
    *  Some 4over6 tensors use 256 (instead of the E4M3 max of 448) in
    *  order to leave room for map-to-4 local scale expansion.
    *
    *  TODO: Change to a dtype-agnostic name.
    */
-  int nvfp4_e4m3_max = -1;
+  int nvfp4_e4m3_max = 0;
 
   /*! Map from NVTETensorParam to parameter sizes */
   static constexpr size_t attr_sizes[] = {
@@ -342,7 +342,7 @@ struct Tensor {
     scaling_mode = NVTE_DELAYED_TENSOR_SCALING;
     with_gemm_swizzled_scales = false;
     row_scaled_nvfp4 = false;
-    nvfp4_e4m3_max = -1;
+    nvfp4_e4m3_max = 0;
   }
 
   explicit operator NVTETensor() const noexcept { return nvte_tensor; }
@@ -455,12 +455,12 @@ struct Tensor {
 
   /*! \brief Global scale bound used by NVFP4. */
   int get_nvfp4_scale_max() const {
-    NVTE_CHECK(scaling_mode == NVTE_NVFP4_1D_SCALING,
-               "Attempted to access NVFP4 scale bound for tensor with scaling mode \"",
-               to_string(scaling_mode), "\".");
+    if (scaling_mode != NVTE_NVFP4_1D_SCALING) {
+      return 0;
+    }
 
     // Return non-default scale max
-    if (nvfp4_e4m3_max >= 0) {
+    if (nvfp4_e4m3_max != 0) {
       return nvfp4_e4m3_max;
     }
 

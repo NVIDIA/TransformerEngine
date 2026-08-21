@@ -77,7 +77,7 @@ class GroupedTensorStorage:
         with_gemm_swizzled_scales: bool = False,
         row_scaled_nvfp4: bool = False,
         nvfp4_use_4over6: bool = False,
-        nvfp4_e4m3_max: int = 448,
+        nvfp4_e4m3_max: int = 0,
     ) -> None:
         """
         Initialize a GroupedTensor.
@@ -158,7 +158,7 @@ class GroupedTensorStorage:
         instance._with_gemm_swizzled_scales = with_gemm_swizzled_scales
         instance.row_scaled_nvfp4 = row_scaled_nvfp4
         instance.nvfp4_use_4over6 = nvfp4_use_4over6
-        instance.nvfp4_e4m3_max = nvfp4_e4m3_max if nvfp4_use_4over6 else 448
+        instance.nvfp4_e4m3_max = nvfp4_e4m3_max
 
     def __new__(
         cls,
@@ -187,7 +187,7 @@ class GroupedTensorStorage:
         with_gemm_swizzled_scales: bool = False,
         row_scaled_nvfp4: bool = False,
         nvfp4_use_4over6: bool = False,
-        nvfp4_e4m3_max: int = 448,
+        nvfp4_e4m3_max: int = 0,
     ):
         instance = object.__new__(cls)
         cls._initialize_storage_fields(
@@ -470,7 +470,7 @@ class GroupedTensorStorage:
         self.fake_dtype = torch.float32
         self.row_scaled_nvfp4 = False
         self.nvfp4_use_4over6 = False
-        self.nvfp4_e4m3_max = 448
+        self.nvfp4_e4m3_max = 0
 
     def __repr__(self) -> str:
         """String representation of the GroupedTensorStorage."""
@@ -788,7 +788,7 @@ class GroupedTensorStorage:
         columnwise_scale_inv_offsets = None
         row_scaled_nvfp4 = False
         nvfp4_use_4over6 = False
-        nvfp4_e4m3_max = 448
+        nvfp4_e4m3_max = 0
         if no_quantization:
             assert dtype is not None, "dtype must be provided for unquantized GroupedTensor"
             if rowwise_usage:

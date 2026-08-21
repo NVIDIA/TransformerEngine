@@ -1887,10 +1887,7 @@ NVFP4Quantizer::NVFP4Quantizer(const py::handle& quantizer) : Quantizer(quantize
   this->with_2d_quantization = quantizer.attr("with_2d_quantization").cast<bool>();
   this->stochastic_rounding = quantizer.attr("stochastic_rounding").cast<bool>();
   const bool nvfp4_use_4over6 = quantizer.attr("nvfp4_use_4over6").cast<bool>();
-  const int e4m3_max = quantizer.attr("nvfp4_e4m3_max").cast<int>();
-  if (e4m3_max >= 0) {
-    this->nvfp4_e4m3_max = e4m3_max;
-  }
+  this->nvfp4_e4m3_max = quantizer.attr("nvfp4_e4m3_max").cast<int>();
   const auto nvfp4_4over6_err_mode = quantizer.attr("nvfp4_4over6_err_mode").cast<std::string>();
   if (!nvfp4_use_4over6) {
     this->nvfp4_4over6_mode = kNVTENVFP44Over6Disabled;
@@ -2136,8 +2133,8 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(
   }
   out_cpp.set_with_gemm_swizzled_scales(with_gemm_swizzled_scales);
   out_cpp.set_row_scaled_nvfp4(row_scaled_nvfp4);
-  if (this->nvfp4_e4m3_max) {
-    out_cpp.set_nvfp4_e4m3_max(*this->nvfp4_e4m3_max);
+  if (this->nvfp4_e4m3_max != 0) {
+    out_cpp.set_nvfp4_e4m3_max(this->nvfp4_e4m3_max);
   }
   this->set_quantization_params(&out_cpp);
 
@@ -2463,8 +2460,8 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::convert_and_update_tensor(
   }
   out_cpp.set_with_gemm_swizzled_scales(with_gemm_swizzled_scales);
   out_cpp.set_row_scaled_nvfp4(row_scaled_nvfp4);
-  if (this->nvfp4_e4m3_max) {
-    out_cpp.set_nvfp4_e4m3_max(*this->nvfp4_e4m3_max);
+  if (this->nvfp4_e4m3_max != 0) {
+    out_cpp.set_nvfp4_e4m3_max(this->nvfp4_e4m3_max);
   }
   this->set_quantization_params(&out_cpp);
 

@@ -95,7 +95,7 @@ class GroupedTensor(GroupedTensorStorage, torch.Tensor):
         with_gemm_swizzled_scales: bool = False,
         row_scaled_nvfp4: bool = False,
         nvfp4_use_4over6: bool = False,
-        nvfp4_e4m3_max: int = 448,
+        nvfp4_e4m3_max: int = 0,
         scale_inv_dtype: Optional[DType] = None,
     ):
         if (

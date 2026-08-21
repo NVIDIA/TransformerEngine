@@ -104,7 +104,7 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
     # Whether this NVFP4 tensor uses 4over6 map-to-4/map-to-6 block selection
     _nvfp4_use_4over6: bool
     # Global E4M3 scale bound used by this NVFP4 tensor
-    _nvfp4_e4m3_max: Optional[int]
+    _nvfp4_e4m3_max: int
 
     def __new__(
         cls,
@@ -122,7 +122,7 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
         fake_dtype: Optional[torch.dtype] = None,
         row_scaled_nvfp4: bool = False,
         nvfp4_use_4over6: bool = False,
-        nvfp4_e4m3_max: Optional[int] = None,
+        nvfp4_e4m3_max: int = 0,
         **kwargs,
     ):
         if cls is NVFP4TensorStorage:

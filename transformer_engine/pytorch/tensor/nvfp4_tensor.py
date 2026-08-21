@@ -157,7 +157,7 @@ class NVFP4Quantizer(Quantizer):
         stochastic_rounding: bool = False,
         row_scaled_nvfp4: bool = False,
         nvfp4_use_4over6: bool = False,
-        nvfp4_e4m3_max: Optional[int] = None,
+        nvfp4_e4m3_max: int = 0,
         nvfp4_4over6_err_mode: str = "MAE",
         with_random_sign_mask: bool = True,
         disable_second_level_scale: bool = False,
@@ -187,7 +187,7 @@ class NVFP4Quantizer(Quantizer):
             raise ValueError(
                 "nvfp4_use_4over6 is incompatible with scale_dtype=DType.kFloat8UE5M3."
             )
-        self.nvfp4_e4m3_max = nvfp4_e4m3_max if nvfp4_e4m3_max is not None else -1
+        self.nvfp4_e4m3_max = nvfp4_e4m3_max
         self.nvfp4_4over6_err_mode = nvfp4_4over6_err_mode.upper()
         if self.nvfp4_4over6_err_mode not in ("MAE", "MSE"):
             raise ValueError("nvfp4_4over6_err_mode must be 'MAE' or 'MSE'.")
@@ -479,7 +479,7 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
         with_gemm_swizzled_scales: bool,
         row_scaled_nvfp4: bool = False,
         nvfp4_use_4over6: bool = False,
-        nvfp4_e4m3_max: Optional[int] = None,
+        nvfp4_e4m3_max: int = 0,
         **kwargs,
     ):
         instance = super().__new__(
@@ -1063,7 +1063,7 @@ def _make_nvfp4_tensor_in_reduce_ex(
     with_gemm_swizzled_scales: bool,
     row_scaled_nvfp4: bool = False,
     nvfp4_use_4over6: bool = False,
-    nvfp4_e4m3_max: Optional[int] = None,
+    nvfp4_e4m3_max: int = 0,
     scale_dtype: DType = DType.kFloat8E4M3,
 ) -> NVFP4Tensor:
     """Reconstruct an ``NVFP4Tensor`` from its ``__reduce_ex__`` payload."""

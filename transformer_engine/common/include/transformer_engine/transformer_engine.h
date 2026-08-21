@@ -930,7 +930,7 @@ class TensorWrapper {
   }
 
   int get_nvfp4_e4m3_max() const {
-    int val = 448;
+    int val = 0;
     nvte_get_tensor_param_v2(tensor_, kNVTENVFP4E4M3Max, &val, sizeof(val), nullptr);
     return val;
   }
