@@ -166,7 +166,7 @@ def make_recipe(name: Optional[str], **recipe_kwargs: Any) -> Optional[Recipe]:
 
         def make_nvfp4_ue5m3_quantizer(role: QuantizerRole) -> NVFP4Quantizer:
             """Quantizer factory for NVFP4-UE5M3 recipe."""
-            tensor_type = role.tensor_type if role is not None else "input"
+            tensor_type = role.tensor_type if role is not None else None
             if not tensor_type:
                 tensor_type = "input"
             with_rht = name == "nvfp4_rht_ue5m3" and tensor_type != "weight"

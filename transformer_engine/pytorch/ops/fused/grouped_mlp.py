@@ -20,7 +20,7 @@ from ....common.recipe import Format as RecipeFormat
 from ...constants import DType, MXFP8_BLOCK_SCALING_SIZE, NVFP4_BLOCK_SCALING_SIZE, TE_DType
 from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload, start_offload
 from ...cpp_extensions import general_gemm, general_grouped_gemm_for_grouped_tensor
-from ...cpp_extensions.gemm import convert_TE_MX_tensor_to_cuDNN_operand
+from ...cpp_extensions.gemm import _convert_to_cudnn_grouped_gemm_tensor_format
 from ...distributed_weight import (
     is_distributed_weight,
     materialize_weight_for_forward,
@@ -1758,7 +1758,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         elif (
             use_nvfp4 and fc2_input_sf_override is not None
         ):  # TODO(kainingz): remove this e5m3 workaround once cuBLAS is ready.
-            fc2_x_data, fc2_x_scales = convert_TE_MX_tensor_to_cuDNN_operand(
+            fc2_x_data, fc2_x_scales = _convert_to_cudnn_grouped_gemm_tensor_format(
                 grouped_fc2_x.rowwise_data,
                 grouped_fc2_x.scale_inv,
                 data_dtype=data_dtype,
@@ -1813,7 +1813,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                 fc2_weight_for_gemm = grouped_fc2_weight.copy()
                 tex.grouped_swizzle_for_gemm(fc2_weight_for_gemm, rowwise=True, columnwise=False)
 
-                fc2_w_data, fc2_w_scales = convert_TE_MX_tensor_to_cuDNN_operand(
+                fc2_w_data, fc2_w_scales = _convert_to_cudnn_grouped_gemm_tensor_format(
                     fc2_weight_for_gemm.rowwise_data,
                     fc2_weight_for_gemm.scale_inv,
                     data_dtype=data_dtype,
@@ -2630,7 +2630,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                 dgrad_valid_m = out_shape[0]  # batch dim
 
                 # Create A and its sf tensor for cuDNN that satisfies its layout requirements
-                fc1_dgrad_a_data, fc1_dgrad_a_scales = convert_TE_MX_tensor_to_cuDNN_operand(
+                fc1_dgrad_a_data, fc1_dgrad_a_scales = _convert_to_cudnn_grouped_gemm_tensor_format(
                     grouped_fc1_dy.rowwise_data,
                     grouped_fc1_dy.scale_inv,
                     data_dtype=data_dtype,
@@ -2683,7 +2683,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                     # Create B and its sf tensor for cuDNN that satisfies its layout
                     # requirements. NVFP4 column-wise data is physically transposed, so
                     # it is already (in_features, out_features) and stays K-major.
-                    fc1_w_data, fc1_w_scales = convert_TE_MX_tensor_to_cuDNN_operand(
+                    fc1_w_data, fc1_w_scales = _convert_to_cudnn_grouped_gemm_tensor_format(
                         fc1_weight_for_gemm.columnwise_data,
                         fc1_weight_for_gemm.columnwise_scale_inv,
                         data_dtype=data_dtype,

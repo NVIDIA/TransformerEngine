@@ -217,14 +217,35 @@ def validate_or_alloc_output(
 
 
 @functools.lru_cache(maxsize=None)
-def grouped_gemm_wgrad_kernel() -> Callable:
-    """cuDNN CuTe DSL grouped wgrad kernel for block-scaled inputs."""
+def _cudnn_grouped_gemm_quant_kernel() -> Callable:
+    """cuDNN CuTe DSL grouped GEMM kernel for block-scaled inputs.
+
+    This function is a temporary hack until TE supports NVFP4-UE5M3
+    GEMMs natively. This should not be used externally and once native
+    GEMM support is added then this function (and related helper
+    functions) should be removed entirely.
+
+    """
+    from cudnn import grouped_gemm_quant_wrapper_sm100  # pylint: disable=no-name-in-module
+
+    return grouped_gemm_quant_wrapper_sm100
+
+
+@functools.lru_cache(maxsize=None)
+def _cudnn_grouped_gemm_wgrad_kernel() -> Callable:
+    """cuDNN CuTe DSL grouped wgrad kernel for block-scaled inputs.
+
+    This function is a temporary hack until TE supports NVFP4-UE5M3
+    GEMMs natively. This should not be used externally and once native
+    GEMM support is added then this function (and related helper
+    functions) should be removed entirely.
+
+    """
     from cudnn import grouped_gemm_wgrad_wrapper_sm100  # pylint: disable=no-name-in-module
 
     return grouped_gemm_wgrad_wrapper_sm100
 
-
-def _cuDNN_wgrad_gemm(
+def _cudnn_wgrad_grouped_gemm_nvfp4_ue5m3(
     a_tensor: torch.Tensor,
     b_tensor: torch.Tensor,
     sfa: torch.Tensor,
@@ -237,7 +258,14 @@ def _cuDNN_wgrad_gemm(
     alpha: Optional[float] = None,
     bias: Optional[torch.Tensor] = None,
 ) -> Iterable[Optional[torch.Tensor]]:
-    """Compute dw = dy^T @ x with cuDNN's purpose-built grouped wgrad kernel."""
+    """Compute dw = dy^T @ x for NVFP4-UE5M3 data with cuDNN's grouped wgrad kernel.
+
+    This function is a temporary hack until TE supports NVFP4-UE5M3
+    GEMMs natively. This should not be used externally and once native
+    GEMM support is added then this function (and related helper
+    functions) should be removed entirely.
+
+    """
 
     # Column-wise NVFP4 buffers are physically (features, tokens), FP4-packed
     # two values per byte along the token dim.
@@ -255,7 +283,7 @@ def _cuDNN_wgrad_gemm(
     b_tensor = b_tensor.view(dtype=fp4).view(in_features, tokens_packed).T
 
     # Create the scale factor tensors with the logical layout cuDNN expects
-    # In general_cuDNN_MX_gemm we've already ensured they are swizzled physically
+    # Assume scales have already been swizzled in _cudnn_grouped_gemm_nvfp4_ue5m3
     def _sf(scale_inv, features):
         leading = ceil_div(features, 128) * 128
         return scale_inv.view(leading, -1).view(dtype=torch.float8_e4m3fn)
@@ -270,7 +298,7 @@ def _cuDNN_wgrad_gemm(
         global_scale_a = global_scale_a * alpha
 
     out = validate_or_alloc_output(out, (out_features, in_features), out_dtype, a_tensor.device)
-    grouped_gemm_wgrad_kernel()(
+    _cudnn_grouped_gemm_wgrad_kernel()(
         a_tensor=a_tensor,
         b_tensor=b_tensor,
         sfa_tensor=_sf(sfa, out_features),
@@ -297,15 +325,7 @@ def _cuDNN_wgrad_gemm(
     return out, None, None, None
 
 
-@functools.lru_cache(maxsize=None)
-def grouped_gemm_quant_kernel() -> Callable:
-    """cuDNN CuTe DSL grouped GEMM kernel for block-scaled inputs."""
-    from cudnn import grouped_gemm_quant_wrapper_sm100  # pylint: disable=no-name-in-module
-
-    return grouped_gemm_quant_wrapper_sm100
-
-
-def convert_TE_MX_tensor_to_cuDNN_operand(
+def _convert_to_cudnn_grouped_gemm_tensor_format(
     data: torch.Tensor,
     scale_inv: torch.Tensor,
     *,
@@ -317,7 +337,7 @@ def convert_TE_MX_tensor_to_cuDNN_operand(
     sf_swizzled: bool = False,
     use_N_major_for_B: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Reshape an plain buffer into the layout cuDNN's grouped GEMM expects.
+    """Reshape a plain buffer into the layout cuDNN's grouped GEMM expects.
 
     cuDNN requirements:
     A: (valid_m, K, 1), K-major
@@ -339,6 +359,12 @@ def convert_TE_MX_tensor_to_cuDNN_operand(
     SFB (unswizzled): (L, ceil(N/128),       4, 32, ceil(ceil(K/sf_vec_size)/4), 4)
     SFA (swizzled): (1, ceil(valid_m/128), ceil(ceil(K/sf_vec_size)/4), 32, 4, 4)
     SFB (swizzled): (L, ceil(N/128),       ceil(ceil(K/sf_vec_size)/4), 32, 4, 4)
+
+    This function is a temporary hack until TE supports NVFP4-UE5M3
+    GEMMs natively. This should not be used externally and once native
+    GEMM support is added then this function (and related helper
+    functions) should be removed entirely.
+
     """
 
     if use_N_major_for_B:
@@ -404,7 +430,7 @@ def convert_TE_MX_tensor_to_cuDNN_operand(
     return data, scale_inv
 
 
-def general_cuDNN_MX_gemm(
+def _cudnn_grouped_gemm_nvfp4_ue5m3(
     A: torch.Tensor,
     B: torch.Tensor,
     out_dtype: Optional[torch.dtype] = None,
@@ -417,7 +443,6 @@ def general_cuDNN_MX_gemm(
     layout: str = "TN",
     out: Optional[torch.Tensor] = None,
     bias: Optional[torch.Tensor] = None,
-    use_split_accumulator: bool = False,
     grad: bool = False,
     ub: Union[tex.CommOverlap, tex.CommOverlapP2P] = None,
     ub_type: tex.CommOverlapType = None,
@@ -460,19 +485,13 @@ def general_cuDNN_MX_gemm(
     assert (
         isinstance(A, NVFP4TensorStorage)
         and isinstance(B, NVFP4TensorStorage)
-        and A.get_metadata()["scale_dtype"] == DType.kFloat8UE5M3
-        and B.get_metadata()["scale_dtype"] == DType.kFloat8UE5M3
+        and A._scale_dtype == DType.kFloat8UE5M3
+        and B._scale_dtype == DType.kFloat8UE5M3
     ), "cuDNN MX GEMM is only used for NVFP4 GEMM with e5m3 scale factors for now."
 
     assert quantization_params is None, "cuDNN GEMM currently does not support output quantization."
     assert gelu is False and gelu_in is None, "cuDNN GEMM currently does not support fused GELU."
-    assert (
-        use_split_accumulator is False
-    ), "cuDNN GEMM currently does not support split accumulators."
 
-    # use_split_accumulator is deliberately not checked: it is a cuBLAS knob for
-    # raising accumulator precision, and the cuDNN kernel always accumulates in
-    # FP32, so the request is already satisfied either way.
     assert ub is None and ub_type is None, "cuDNN GEMM currently does not support CommOverlap."
     assert extra_output is None, "cuDNN GEMM currently does not support extra output."
     assert bulk_overlap is False, "cuDNN GEMM currently does not support bulk overlap."
@@ -566,7 +585,7 @@ def general_cuDNN_MX_gemm(
             assert beta in (1.0, None), "beta must be one or None if accumulate is True"
         else:  # Overwrite GEMM's result to the out tensor
             assert beta in (0.0, None), "beta must be zero or None if not accumulate"
-        _cuDNN_wgrad_gemm(
+        _cudnn_wgrad_grouped_gemm_nvfp4_ue5m3(
             a_tensor=dataB.view(N, K // 2),
             b_tensor=dataA.view(M, K // 2),
             sfa=sfB,
@@ -591,7 +610,7 @@ def general_cuDNN_MX_gemm(
     # cuDNN's own operand names are the other way round: its "a" is the (M, K)
     # activation-like operand (TE's B) and its "b" is the (N, K) weight-like one
     # (TE's A).
-    cudnn_a, cudnn_sfa = convert_TE_MX_tensor_to_cuDNN_operand(
+    cudnn_a, cudnn_sfa = _convert_to_cudnn_grouped_gemm_tensor_format(
         dataB,
         sfB,
         data_dtype=torch.float4_e2m1fn_x2,
@@ -601,7 +620,7 @@ def general_cuDNN_MX_gemm(
         L=1,
         sf_swizzled=True,  # ensured above
     )
-    cudnn_b, cudnn_sfb = convert_TE_MX_tensor_to_cuDNN_operand(
+    cudnn_b, cudnn_sfb = _convert_to_cudnn_grouped_gemm_tensor_format(
         dataA,
         sfA,
         data_dtype=torch.float4_e2m1fn_x2,
@@ -658,7 +677,7 @@ def general_cuDNN_MX_gemm(
         "discrete_col_sfd": False,
         "use_dynamic_sched": True,
     }
-    grouped_gemm_quant_kernel()(**gemm_kwargs)
+    _cudnn_grouped_gemm_quant_kernel()(**gemm_kwargs)
 
     # Matches general_gemm's contract: (out, bias_grad, gelu_input, extra_output).
     return out, None, None, None
@@ -711,7 +730,7 @@ def general_gemm(
         and A._scale_dtype == DType.kFloat8UE5M3
         and B._scale_dtype == DType.kFloat8UE5M3
     ):
-        return general_cuDNN_MX_gemm(
+        return _cudnn_grouped_gemm_nvfp4_ue5m3(
             A,
             B,
             out_dtype,
@@ -724,7 +743,6 @@ def general_gemm(
             layout,
             out,
             bias,
-            use_split_accumulator,
             grad,
             ub,
             ub_type,
