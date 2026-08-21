@@ -525,7 +525,7 @@ def _ep_combine_raw(buffer: "EpBuffer", expert_out: torch.Tensor, result: torch.
 
 def _dispatch_backward(ctx, g_recv_tokens, g_recv_topk_weights):
     """Shared dispatch bwd: run dispatch_bwd and reshape grads to the fwd input layout."""
-    (handle_mem,) = ctx.saved_tensors
+    handle_mem = ctx.handle_mem
     device = handle_mem.device
     g_recv_tokens = g_recv_tokens.contiguous()
     g_recv_topk_weights = g_recv_topk_weights.contiguous()
@@ -557,23 +557,26 @@ class _EpPrepareAndDispatch(torch.autograd.Function):
     @staticmethod
     def forward(  # type: ignore[override]
         ctx,
-        handle_mem: torch.Tensor,
-        tokens_per_expert: torch.Tensor,
-        total_recv_tokens: torch.Tensor,
-        topk_idx: torch.Tensor,
         tokens: torch.Tensor,
         topk_weights: torch.Tensor,
-        top_k: int,
-        alignment: int,
-        eager: bool,
+        topk_idx: torch.Tensor,
+        buffer: "EpBuffer",
         recv_tokens: Optional[torch.Tensor] = None,
         recv_topk_weights: Optional[torch.Tensor] = None,
         tokens_scale_inv: Optional[torch.Tensor] = None,
-        num_recv_tokens: Optional[int] = None,
-        payload_dtype: torch.dtype = torch.bfloat16,
     ):
-        """Fused prepare + dispatch fwd; eager sizes recv from the host count, else recv is sized to
-        ``num_recv_tokens`` (caller-supplied buffers allowed)."""
+        """Fused prepare and dispatch forward. Eager sizes recv from the host count; otherwise recv
+        uses the buffer static recv capacity. Only tokens and topk_weights are differentiable, so
+        the non-diff buffer tensors ride on the buffer object to keep the autograd operand list short.
+        """
+        handle_mem = buffer.handle_mem
+        tokens_per_expert = buffer.tokens_per_expert
+        total_recv_tokens = buffer.total_recv_tokens
+        top_k = buffer.top_k
+        alignment = buffer.alignment
+        eager = buffer.eager
+        num_recv_tokens = buffer.recv_capacity_per_rank
+        payload_dtype = buffer.payload_dtype
         is_scaled = tokens_scale_inv is not None
         tokens_data = tokens._rowwise_data if isinstance(tokens, QuantizedTensor) else tokens
         assert tokens_data.dim() == 2, "EP dispatch tokens must be 2D [num_tokens, hidden]"
@@ -634,7 +637,9 @@ class _EpPrepareAndDispatch(torch.autograd.Function):
                 recv_scale_inv,
                 tokens_scale_inv,
             )
-        ctx.save_for_backward(handle_mem)
+        # Stash handle_mem as a plain attribute instead of save_for_backward: it is buffer-owned
+        # and mutated in place, so version tracking would falsely trip the backward inplace check.
+        ctx.handle_mem = handle_mem
         ctx.tokens_shape = tokens.shape
         ctx.topk_weights_shape = topk_weights.shape
         ctx.tokens_T_flat = tokens_data.shape[0]
@@ -661,20 +666,13 @@ class _EpPrepareAndDispatch(torch.autograd.Function):
         """Dispatch bwd; normalizes grad-input layout, otherwise passes through."""
         grad_tokens, grad_topk_weights = _dispatch_backward(ctx, g_recv_tokens, g_recv_topk_weights)
         return (
-            None,  # handle_mem
-            None,  # tokens_per_expert
-            None,  # total_recv_tokens
-            None,  # topk_idx
             grad_tokens,
             grad_topk_weights,
-            None,  # top_k
-            None,  # alignment
-            None,  # eager
+            None,  # topk_idx
+            None,  # buffer
             None,  # recv_tokens
             None,  # recv_topk_weights
             None,  # tokens_scale_inv
-            None,  # num_recv_tokens
-            None,  # payload_dtype
         )
 
 
@@ -954,20 +952,13 @@ def ep_dispatch(
     # recv-count (allocated in C++, no caller buffers); non-eager sizes them to the static recv
     # capacity here (caller-supplied or symm-mem-backed under zero-copy) and passes them in.
     recv_out, recv_topk_weights = _EpPrepareAndDispatch.apply(
-        buffer.handle_mem,
-        buffer.tokens_per_expert,
-        buffer.total_recv_tokens,
-        topk_idx,
         tokens,
         topk_weights,
-        buffer.top_k,
-        buffer.alignment,
-        buffer.eager,
+        topk_idx,
+        buffer,
         recv_tokens,
         recv_topk_weights,
         tokens_scale_inv,
-        buffer.recv_capacity_per_rank,
-        buffer.payload_dtype,
     )
     return recv_out, recv_topk_weights, buffer.tokens_per_expert
 
