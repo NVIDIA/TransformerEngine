@@ -452,11 +452,7 @@ def _install_fake_flax_fused_attn(monkeypatch, *, kernel_available=True):
             score_mod_bprop=score_mod_bprop,
             score_mod_tensors=score_mod_tensors,
             score_mod_bprop_tensors=score_mod_bprop_tensors,
-            return_max_logit=return_max_logit,
         )
-        if return_max_logit:
-            max_logit = jnp.arange(qkv[0].shape[-2], dtype=qkv[0].dtype)
-            return qkv[0], {"max_logit": max_logit}
         return qkv[0]
 
     monkeypatch.setattr(
@@ -539,72 +535,6 @@ def test_dot_product_attention_plumbs_score_mod_to_fused_attn(monkeypatch):
     assert captured["qkv_layout"] is QKVLayout.BSHD_BSHD_BSHD
     assert captured["softmax_type"] is AttnSoftmaxType.VANILLA_SOFTMAX
     assert captured["kernel_checks"][0][0][3] is QKVLayout.BSHD_BSHD_BSHD
-
-
-def test_dot_product_attention_plumbs_return_max_logit_to_fused_attn(monkeypatch):
-    """DotProductAttention forwards return_max_logit to fused_attn and returns aux data."""
-    captured = _install_fake_flax_fused_attn(monkeypatch)
-    query = jnp.ones((1, 8, 2, 16), dtype=jnp.float16)
-    key = jnp.ones((1, 8, 2, 16), dtype=jnp.float16)
-    value = jnp.ones((1, 8, 2, 16), dtype=jnp.float16)
-
-    dpa = flax_transformer.DotProductAttention(
-        head_dim=16,
-        num_attention_heads=2,
-        num_gqa_groups=2,
-        attn_mask_type="no_mask",
-        qkv_layout="bshd_bshd_bshd",
-        transpose_batch_sequence=False,
-        return_max_logit=True,
-    )
-    out, aux = dpa.apply({}, query, key, value, deterministic=True)
-
-    np.testing.assert_array_equal(out, query)
-    np.testing.assert_array_equal(aux["max_logit"], jnp.arange(2, dtype=query.dtype))
-    assert captured["return_max_logit"] is True
-    assert captured["kernel_checks"][0][1]["return_max_logit"] is True
-
-
-def test_dot_product_attention_return_max_logit_requires_fused_attn_enabled(monkeypatch):
-    """DotProductAttention rejects return_max_logit when the fused backend is disabled."""
-    monkeypatch.setenv("NVTE_FUSED_ATTN", "0")
-    query = jnp.ones((1, 8, 1, 16), dtype=jnp.float16)
-    key = jnp.ones((1, 8, 1, 16), dtype=jnp.float16)
-    value = jnp.ones((1, 8, 1, 16), dtype=jnp.float16)
-
-    dpa = flax_transformer.DotProductAttention(
-        head_dim=16,
-        num_attention_heads=1,
-        num_gqa_groups=1,
-        attn_mask_type="no_mask",
-        qkv_layout="bshd_bshd_bshd",
-        transpose_batch_sequence=False,
-        return_max_logit=True,
-    )
-
-    with pytest.raises(ValueError, match="NVTE_FUSED_ATTN=0"):
-        dpa.apply({}, query, key, value, deterministic=True)
-
-
-def test_dot_product_attention_return_max_logit_requires_available_fused_kernel(monkeypatch):
-    """DotProductAttention rejects return_max_logit instead of falling back to unfused attention."""
-    _install_fake_flax_fused_attn(monkeypatch, kernel_available=False)
-    query = jnp.ones((1, 8, 1, 16), dtype=jnp.float16)
-    key = jnp.ones((1, 8, 1, 16), dtype=jnp.float16)
-    value = jnp.ones((1, 8, 1, 16), dtype=jnp.float16)
-
-    dpa = flax_transformer.DotProductAttention(
-        head_dim=16,
-        num_attention_heads=1,
-        num_gqa_groups=1,
-        attn_mask_type="no_mask",
-        qkv_layout="bshd_bshd_bshd",
-        transpose_batch_sequence=False,
-        return_max_logit=True,
-    )
-
-    with pytest.raises(ValueError, match="requires a cuDNN fused attention kernel"):
-        dpa.apply({}, query, key, value, deterministic=True)
 
 
 def test_dot_product_attention_unpacks_packed_score_mod_to_separate_layout(monkeypatch):
