@@ -10,6 +10,7 @@ import warnings
 import torch
 
 import transformer_engine.pytorch.triton.cross_entropy as triton_cross_entropy
+from transformer_engine.pytorch.jit import no_torch_dynamo
 
 __all__ = ["parallel_cross_entropy"]
 
@@ -127,6 +128,30 @@ def _validate_inputs(
         raise ValueError("overwrite_input=True requires a contiguous input")
 
 
+@no_torch_dynamo()
+def _parallel_cross_entropy_overwrite_input(
+    inp: torch.Tensor,
+    target: torch.Tensor,
+    label_smoothing: float,
+    reduce_loss: bool,
+    dist_process_group: Optional[torch.distributed.ProcessGroup],
+    ignore_idx: int,
+    is_cg_capturable: bool,
+) -> torch.Tensor:
+    """Run destructive cross entropy outside Torch Dynamo's compiled graph."""
+
+    return CrossEntropyFunction.apply(
+        inp,
+        target,
+        label_smoothing,
+        reduce_loss,
+        dist_process_group,
+        ignore_idx,
+        is_cg_capturable,
+        True,
+    )
+
+
 def parallel_cross_entropy(
     inp: torch.Tensor,
     target: torch.Tensor,
@@ -169,7 +194,8 @@ def parallel_cross_entropy(
         Whether the operation is CUDA graph capturable.
     overwrite_input : bool, default = False
         Allow ``inp`` to be overwritten during backward. The input must be
-        contiguous and cannot be reused afterward.
+        contiguous and cannot be reused afterward. This mode is incompatible with
+        ``torch.compile`` and will result in a graph break if used in that context.
 
     Returns
     -------
@@ -185,6 +211,16 @@ def parallel_cross_entropy(
         inp = _input
 
     _validate_inputs(inp, target, label_smoothing, overwrite_input)
+    if overwrite_input:
+        return _parallel_cross_entropy_overwrite_input(
+            inp,
+            target,
+            label_smoothing,
+            reduce_loss,
+            dist_process_group,
+            ignore_idx,
+            is_cg_capturable,
+        )
     return CrossEntropyFunction.apply(
         inp,
         target,
