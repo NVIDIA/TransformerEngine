@@ -471,7 +471,7 @@ struct Tensor {
     } else if (columnwise_scale_inv.has_data()) {
       dtype = columnwise_scale_inv.dtype;
     } else {
-      dtype = scale_inv.dtype;
+      dtype = DType::kFloat8E4M3;
     }
     switch (dtype) {
       case DType::kFloat8E4M3:
