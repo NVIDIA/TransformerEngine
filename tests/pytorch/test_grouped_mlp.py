@@ -2853,6 +2853,31 @@ class TestGroupedMLPDeterminism:
             )
 
     @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
+    def test_scale_bias_refuses_under_the_torch_flag(
+        self, monkeypatch, _restore_torch_determinism
+    ) -> None:
+        """``scale_bias`` finishes ``dprob`` in a Triton kernel that reads only the env var.
+
+        So the torch flag alone is the combination that used to pass this op's own check and
+        then reduce nondeterministically anyway, on a front-end new enough to say yes.
+        """
+        fused_cls = grouped_mlp_module.GroupedMLP_CuTeGEMMUnary
+        if not fused_cls.is_supported():
+            pytest.skip("MXFP8 fused grouped MLP is not supported on this system")
+
+        monkeypatch.delenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", raising=False)
+        # warn_only so torch's own enforcement cannot raise first and mask what TE does.
+        torch.use_deterministic_algorithms(True, warn_only=True)
+        with pytest.raises(RuntimeError, match="dprob"):
+            TestGroupedMLPFusedOp().test_grouped_mlp(
+                bias=True,
+                hidden_size=128,
+                quantization="mxfp8",
+                single_grouped_weight=False,
+                activation="scaled_srelu",
+            )
+
+    @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
     def test_dprob_is_bit_exact_across_runs(self, monkeypatch) -> None:
         """Two identical runs must give a bit-identical ``dprob``.
 
