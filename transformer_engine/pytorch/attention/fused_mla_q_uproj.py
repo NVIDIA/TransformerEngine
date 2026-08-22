@@ -186,7 +186,7 @@ class FusedMLAQUpProjRopeQuant:
     @classmethod
     def run(
         cls,
-        x: torch.Tensor,
+        x,  # MXFP8Tensor when w is MXFP8 (already quantized by the norm), else bf16 Tensor
         w,  # MXFP8Tensor (primary FP8 param) or bf16 torch.Tensor
         cos: torch.Tensor,
         sin: torch.Tensor,
@@ -195,7 +195,10 @@ class FusedMLAQUpProjRopeQuant:
     ) -> "tuple[MXFP8Tensor, torch.Tensor]":
         """Run the fused kernel; return (Q MXFP8Tensor, activation saved for the wgrad backward).
 
-        The kernel precision is selected by the weight precision.
+        The kernel precision is selected by the weight precision.  On the FP8 path ``x`` must
+        arrive already MXFP8-quantized: the caller's normalization emits MXFP8 straight from
+        its FP32 accumulator, exactly as `TELayerNormColumnParallelLinear` does, and quantizing
+        again here would round a second time and change the GEMM's input bytes.
         """
 
         from cuda.bindings import driver as cuda
@@ -209,13 +212,18 @@ class FusedMLAQUpProjRopeQuant:
                 f" recipe), got {type(w).__name__}. Use the unfused path for other quantization"
                 " recipes."
             )
-            # ---- FP8 projection: MXFP8-cast x (both usages) + reuse w's fp8 codes -> mxfp8in ----
-            # Quantize x with both rowwise (for the forward GEMM) and columnwise (for the FP8
-            # wgrad in backward, matching the unfused path).
-            x_quantizer = MXFP8Quantizer(
-                fp8_dtype=tex.DType.kFloat8E4M3, rowwise=True, columnwise=True
+            # ---- FP8 projection: MXFP8 x straight from the norm + w's fp8 codes -> mxfp8in ----
+            # x carries both usages: rowwise feeds this GEMM, columnwise the FP8 wgrad in
+            # backward, matching the unfused path.
+            x_mxfp8 = x
+            assert isinstance(x_mxfp8, QuantizedTensor) and hasattr(x_mxfp8, "_rowwise_data"), (
+                "FusedMLAQUpProjRopeQuant needs an MXFP8-quantized input on the FP8 path, got"
+                f" {type(x_mxfp8).__name__}; have the normalization emit MXFP8 directly."
             )
-            x_mxfp8 = x_quantizer(x)
+            assert not x_mxfp8._with_gemm_swizzled_scales, (
+                "x scales must be unswizzled: the cuDNN kernel reads them as a plain"
+                " [tokens, K//32] array."
+            )
             x_code = x_mxfp8._rowwise_data.view(torch.float8_e4m3fn)  # [tokens, K]
             x_scale = x_mxfp8._rowwise_scale_inv  # [tokens, K//32] uint8
 
@@ -348,12 +356,28 @@ class FusedMLAQUpProjRopeQuant:
 
 
 class FusedMLAQUpProjFunction(torch.autograd.Function):
-    """Fused Q up-proj: q_normed -> (GEMM + per-head RoPE + MXFP8) -> MXFP8Tensor Q."""
+    """Fused Q up-proj: q_layernorm -> (GEMM + per-head RoPE + MXFP8) -> MXFP8Tensor Q.
+
+    The normalization is part of this node rather than a separate module in front of it,
+    which is what keeps the fused path numerically identical to the unfused one.
+    `TELayerNormColumnParallelLinear` hands its input quantizer to the norm kernel, so MXFP8
+    is produced in a single step from the FP32 accumulator.  A standalone norm emits BF16 and
+    a separate quantize rounds a second time; under `NVTE_NORM_FWD_USE_CUDNN=1` (the MLPerf
+    default) that moves ~3.3% of the E4M3 codes and also perturbs the `rsigma` the norm
+    backward consumes.  Absorbing the norm here reproduces the single-round behaviour.
+
+    Backward is RoPE bwd, then the projection bwd, then the norm bwd on the saved `rsigma`.
+
+    Scope: RMSNorm at TP=1.  LayerNorm additionally needs `mu` saved in forward, and TP>1
+    needs a sequence gather between the norm and the GEMM, which cannot happen inside a
+    single autograd node.
+    """
 
     @staticmethod
     def forward(
         ctx,
-        q_normed,  # [s, b, q_lora_rank] bf16 (post-layernorm)
+        x,  # [s, b, q_lora_rank] pre-norm input
+        gamma,  # [q_lora_rank] q_layernorm weight
         w_q,  # [nh*q_head_dim, q_lora_rank] FP8 QuantizedTensor or bf16 (TE out×in layout)
         cos,  # [s, 1, 1, rope_dim]
         sin,  # [s, 1, 1, rope_dim]
@@ -367,8 +391,12 @@ class FusedMLAQUpProjFunction(torch.autograd.Function):
         b,
         tp_group,  # tensor-parallel process group
         sequence_parallel,  # True if sequence parallelism is active
+        eps,  # norm epsilon
+        normalization,  # "RMSNorm"
+        zero_centered_gamma,
     ):
-        """Run the fused gemm + rope + mxfp8 quantization"""
+        """Run the normalization (quantized output) then the fused gemm + rope + mxfp8"""
+        from ..module._common import apply_normalization
 
         tokens = s * b
         tp_size = get_distributed_world_size(tp_group) if tp_group is not None else 1
@@ -378,7 +406,36 @@ class FusedMLAQUpProjFunction(torch.autograd.Function):
                 "the backward dgrad is reduce-scattered over TP ranks but the caller "
                 "passes a pre-gathered full-sequence input. Use TP=1 or the unfused path."
             )
-        x = q_normed.detach().reshape(tokens, -1).contiguous()
+        if normalization != "RMSNorm":
+            raise RuntimeError(
+                "FusedMLAQUpProjFunction supports RMSNorm only, got "
+                f"{normalization}; LayerNorm would also need mu saved in forward."
+            )
+        x2d = x.detach().reshape(tokens, -1).contiguous()
+        fp8 = isinstance(w_q, QuantizedTensor)
+
+        # Matches LayerNormLinear's input quantizer with one deliberate difference:
+        # optimize_for_gemm stays off, because the cuDNN kernel reads the rowwise scales as a
+        # plain [tokens, K//32] array.  Swizzling is a layout change only, so leaving it off
+        # does not alter a single quantized value.
+        x_quantizer = None
+        if fp8:
+            x_quantizer = MXFP8Quantizer(
+                fp8_dtype=tex.DType.kFloat8E4M3, rowwise=True, columnwise=True
+            )
+
+        ln_out, _, rsigma = apply_normalization(
+            x2d,
+            None,
+            gamma,
+            None,
+            eps,
+            x_quantizer,
+            x2d.dtype,
+            normalization,
+            int(os.getenv("NVTE_FWD_LAYERNORM_SM_MARGIN", "0")),
+            zero_centered_gamma,
+        )
 
         # Reshape [s, 1, 1, rope_dim] -> [s*b, rope_dim] bf16 as required by the KF kernel.
         def _flat(t):
@@ -388,15 +445,17 @@ class FusedMLAQUpProjFunction(torch.autograd.Function):
             return t.to(torch.bfloat16).contiguous()
 
         cos, sin = _flat(cos), _flat(sin)
-        query, x_saved = FusedMLAQUpProjRopeQuant.run(x, w_q.detach(), cos, sin, s, b)
+        query, x_saved = FusedMLAQUpProjRopeQuant.run(ln_out, w_q.detach(), cos, sin, s, b)
 
-        ctx.save_for_backward(x_saved, w_q, cos, sin)
+        ctx.save_for_backward(x2d, rsigma, gamma, x_saved, w_q, cos, sin)
         ctx.wgrad_store = wgrad_store
         ctx.fuse_wgrad_accumulation = fuse_wgrad_accumulation
-        ctx.act_dtype = q_normed.dtype
+        ctx.act_dtype = x.dtype
         ctx.dims = (nh, q_head_dim, qk_head_dim, qk_pos_emb_head_dim, s, b)
         ctx.tp_group = tp_group
         ctx.sequence_parallel = sequence_parallel
+        ctx.normalization = normalization
+        ctx.zero_centered_gamma = zero_centered_gamma
         return query
 
     @staticmethod
@@ -405,7 +464,7 @@ class FusedMLAQUpProjFunction(torch.autograd.Function):
         if rotary_bwd_q_kernel is None:
             raise RuntimeError("Fused MLA Q up-projection backward requires Triton")
 
-        x_saved, w_q, cos, sin = ctx.saved_tensors
+        x2d, rsigma, gamma, x_saved, w_q, cos, sin = ctx.saved_tensors
         nh, q_head_dim, qk_head_dim, qk_pos_emb_head_dim, s, b = ctx.dims
         tokens = s * b
         act_dtype = ctx.act_dtype
@@ -435,7 +494,7 @@ class FusedMLAQUpProjFunction(torch.autograd.Function):
         dq2d = dq3.reshape(tokens, nh * q_head_dim).contiguous()
 
         # Delegate the projection backward to TE's _linear_backward (via backward_linear)
-        grad_x, ret_grad_w, _ = FusedMLAQUpProjRopeQuant.backward_linear(
+        grad_ln_out, ret_grad_w, _ = FusedMLAQUpProjRopeQuant.backward_linear(
             grad_output=dq2d,
             x_saved=x_saved,
             w_q=w_q,
@@ -445,23 +504,18 @@ class FusedMLAQUpProjFunction(torch.autograd.Function):
             tp_group=ctx.tp_group,
             sequence_parallel=ctx.sequence_parallel,
         )
+
+        # --- Norm backward, on the rsigma this forward saved ---
+        bwd_sm_margin = int(os.getenv("NVTE_BWD_LAYERNORM_SM_MARGIN", "0"))
+        grad_x, dgamma = tex.rmsnorm_bwd(
+            grad_ln_out.reshape(x2d.shape),
+            x2d,
+            rsigma,
+            gamma,
+            bwd_sm_margin,
+            ctx.zero_centered_gamma,
+        )
         grad_x = grad_x.reshape(s, b, -1)
 
-        # grads for: q_normed, w_q, cos, sin, then 10 non-tensor args
-        # (including tp_group, sequence_parallel)
-        return (
-            grad_x,
-            ret_grad_w,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
+        # grads for: x, gamma, w_q, then cos, sin and the 13 non-tensor args
+        return (grad_x, dgamma, ret_grad_w) + (None,) * 15
