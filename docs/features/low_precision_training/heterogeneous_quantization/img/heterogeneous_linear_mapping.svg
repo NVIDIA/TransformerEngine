@@ -1,0 +1,106 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 520" width="100%" style="max-width: 900px;" role="img" aria-labelledby="title description">
+  <title id="title">Heterogeneous precision mapping for Linear GEMMs</title>
+  <desc id="description">Input, weight, and output-gradient tensors each provide rowwise and columnwise representations. Forward uses format F, input-gradient uses format D, and weight-gradient uses format W.</desc>
+  <defs>
+    <style>
+      .heading { font: 600 18px 'Segoe UI', Arial, sans-serif; fill: #212121; text-anchor: middle; }
+      .section { font: 600 15px 'Segoe UI', Arial, sans-serif; fill: #424242; text-anchor: middle; }
+      .label { font: 600 14px 'Segoe UI', Arial, sans-serif; fill: #212121; text-anchor: middle; }
+      .detail { font: 13px 'Segoe UI', Arial, sans-serif; fill: #424242; text-anchor: middle; }
+      .format { font: 600 13px 'Segoe UI', Arial, sans-serif; text-anchor: middle; }
+      .card { fill: #fafafa; stroke: #9e9e9e; stroke-width: 1.5; }
+      .f { fill: #e3f2fd; stroke: #1976d2; stroke-width: 2; }
+      .d { fill: #fff3e0; stroke: #f57c00; stroke-width: 2; }
+      .w { fill: #ede7f6; stroke: #673ab7; stroke-width: 2; }
+      .result { fill: #e8f5e9; stroke: #388e3c; stroke-width: 2; }
+      .f-text { fill: #1565c0; }
+      .d-text { fill: #e65100; }
+      .w-text { fill: #512da8; }
+      .arrow { stroke: #616161; stroke-width: 2; fill: none; marker-end: url(#arrowhead); }
+    </style>
+    <marker id="arrowhead" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#616161"/>
+    </marker>
+  </defs>
+
+  <text x="500" y="28" class="heading">Tensor representations and Linear GEMMs</text>
+  <text x="500" y="53" class="section">Quantizer outputs by tensor role</text>
+
+  <g aria-label="Input representations">
+    <rect x="40" y="70" width="280" height="105" rx="7" class="card"/>
+    <text x="180" y="95" class="label">Input</text>
+    <rect x="55" y="110" width="120" height="45" rx="6" class="f"/>
+    <text x="115" y="130" class="detail">rowwise</text>
+    <text x="115" y="147" class="format f-text">F</text>
+    <rect x="185" y="110" width="120" height="45" rx="6" class="w"/>
+    <text x="245" y="130" class="detail">columnwise</text>
+    <text x="245" y="147" class="format w-text">W</text>
+  </g>
+
+  <g aria-label="Weight representations">
+    <rect x="360" y="70" width="280" height="105" rx="7" class="card"/>
+    <text x="500" y="95" class="label">Weight</text>
+    <rect x="375" y="110" width="120" height="45" rx="6" class="f"/>
+    <text x="435" y="130" class="detail">rowwise</text>
+    <text x="435" y="147" class="format f-text">F</text>
+    <rect x="505" y="110" width="120" height="45" rx="6" class="d"/>
+    <text x="565" y="130" class="detail">columnwise</text>
+    <text x="565" y="147" class="format d-text">D</text>
+  </g>
+
+  <g aria-label="Output-gradient representations">
+    <rect x="680" y="70" width="280" height="105" rx="7" class="card"/>
+    <text x="820" y="95" class="label">Grad output</text>
+    <rect x="695" y="110" width="120" height="45" rx="6" class="d"/>
+    <text x="755" y="130" class="detail">rowwise</text>
+    <text x="755" y="147" class="format d-text">D</text>
+    <rect x="825" y="110" width="120" height="45" rx="6" class="w"/>
+    <text x="885" y="130" class="detail">columnwise</text>
+    <text x="885" y="147" class="format w-text">W</text>
+  </g>
+
+  <text x="500" y="207" class="section">TE selects the required direction for each GEMM</text>
+
+  <g aria-label="Forward GEMM">
+    <text x="90" y="268" class="label">FPROP</text>
+    <rect x="190" y="235" width="260" height="65" rx="7" class="f"/>
+    <text x="320" y="261" class="label">weight.rowwise</text>
+    <text x="320" y="282" class="format f-text">format F</text>
+    <text x="470" y="275" class="heading">×</text>
+    <rect x="490" y="235" width="260" height="65" rx="7" class="f"/>
+    <text x="620" y="261" class="label">input.rowwise</text>
+    <text x="620" y="282" class="format f-text">format F</text>
+    <path d="M 760 268 L 815 268" class="arrow"/>
+    <rect x="825" y="243" width="145" height="50" rx="7" class="result"/>
+    <text x="897" y="273" class="label">Output</text>
+  </g>
+
+  <g aria-label="Input-gradient GEMM">
+    <text x="90" y="368" class="label">DGRAD</text>
+    <rect x="190" y="335" width="260" height="65" rx="7" class="d"/>
+    <text x="320" y="361" class="label">weight.columnwise</text>
+    <text x="320" y="382" class="format d-text">format D</text>
+    <text x="470" y="375" class="heading">×</text>
+    <rect x="490" y="335" width="260" height="65" rx="7" class="d"/>
+    <text x="620" y="361" class="label">grad_output.rowwise</text>
+    <text x="620" y="382" class="format d-text">format D</text>
+    <path d="M 760 368 L 815 368" class="arrow"/>
+    <rect x="825" y="343" width="145" height="50" rx="7" class="result"/>
+    <text x="897" y="373" class="label">Input grad.</text>
+  </g>
+
+  <g aria-label="Weight-gradient GEMM">
+    <text x="90" y="468" class="label">WGRAD</text>
+    <rect x="190" y="435" width="260" height="65" rx="7" class="w"/>
+    <text x="320" y="461" class="label">input.columnwise</text>
+    <text x="320" y="482" class="format w-text">format W</text>
+    <text x="470" y="475" class="heading">×</text>
+    <rect x="490" y="435" width="260" height="65" rx="7" class="w"/>
+    <text x="620" y="461" class="label">grad_output.columnwise</text>
+    <text x="620" y="482" class="format w-text">format W</text>
+    <path d="M 760 468 L 815 468" class="arrow"/>
+    <rect x="825" y="443" width="145" height="50" rx="7" class="result"/>
+    <text x="897" y="473" class="label">Weight grad.</text>
+  </g>
+</svg>

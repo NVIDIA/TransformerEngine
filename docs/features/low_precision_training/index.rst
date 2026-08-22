@@ -15,4 +15,5 @@ Low precision training
    fp8_blockwise_scaling/fp8_blockwise_scaling.rst
    mxfp8/mxfp8.rst
    nvfp4/nvfp4.rst
+   heterogeneous_quantization/heterogeneous_quantization.rst
    speedups.rst
