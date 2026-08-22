@@ -1,0 +1,410 @@
+/*************************************************************************
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ *
+ * See LICENSE for license information.
+ ************************************************************************/
+
+#ifndef TRANSFORMER_ENGINE_COMMON_TVM_FFI_BRIDGE_H_
+#define TRANSFORMER_ENGINE_COMMON_TVM_FFI_BRIDGE_H_
+
+#include <dlfcn.h>
+#include <tvm/ffi/any.h>
+#include <tvm/ffi/container/tensor.h>
+#include <tvm/ffi/function.h>
+#include <tvm/ffi/optional.h>
+
+#include <atomic>
+#include <cstdint>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <shared_mutex>
+#include <string>
+#include <type_traits>
+#include <unordered_map>
+#include <utility>
+#include <vector>
+
+#include "transformer_engine/transformer_engine.h"
+#include "util/cuda_runtime.h"
+#include "util/logging.h"
+#include "util/system.h"
+
+namespace transformer_engine {
+namespace tvm_ffi_bridge {
+
+inline const char *te_dtype_to_str(DType dtype) {
+  switch (dtype) {
+    case DType::kFloat32:
+      return "fp32";
+    case DType::kFloat16:
+      return "fp16";
+    case DType::kBFloat16:
+      return "bf16";
+    case DType::kFloat8E4M3:
+      return "fp8_e4m3fn";
+    case DType::kFloat8E5M2:
+      return "fp8_e5m2";
+    case DType::kFloat8E8M0:
+      return "fp8_e8m0fnu";
+    default:
+      return "";
+  }
+}
+
+// Fused activation token forwarded to Python. Encodes both the family and the
+// forward-vs-derivative direction: "relu" is the forward activation, "drelu" its
+// backward derivative (dact). This is why no separate is_act/is_dact flag is
+// needed — the token carries it; only with_dbias (orthogonal) is a separate flag.
+// The d-variants are slots for the not-yet-wired backward path; the forward
+// tokens must match Python's SUPPORTED_ACTIVATIONS set.
+enum class Activation {
+  kNone,
+  kReLU,
+  kGeLU,
+  kSiLU,
+  kQGeLU,
+  kSReLU,
+  kDReLU,
+  kDGeLU,
+  kDSiLU,
+  kDQGeLU,
+  kDSReLU,
+  kNumTypes
+};
+
+inline const char *activation_to_str(Activation act) {
+  switch (act) {
+    case Activation::kReLU:
+      return "relu";
+    case Activation::kGeLU:
+      return "gelu";
+    case Activation::kSiLU:
+      return "silu";
+    case Activation::kQGeLU:
+      return "qgelu";
+    case Activation::kSReLU:
+      return "srelu";
+    case Activation::kDReLU:
+      return "drelu";
+    case Activation::kDGeLU:
+      return "dgelu";
+    case Activation::kDSiLU:
+      return "dsilu";
+    case Activation::kDQGeLU:
+      return "dqgelu";
+    case Activation::kDSReLU:
+      return "dsrelu";
+    case Activation::kNone:
+    case Activation::kNumTypes:
+      return "none";
+  }
+  return "none";
+}
+
+inline DLDataType convert_to_dltype(NVTEDType type) {
+  switch (type) {
+    case kNVTEFloat32:
+      return DLDataType{kDLFloat, 32, 1};
+    case kNVTEFloat16:
+      return DLDataType{kDLFloat, 16, 1};
+    case kNVTEBFloat16:
+      return DLDataType{kDLBfloat, 16, 1};
+    case kNVTEByte:
+      return DLDataType{kDLUInt, 8, 1};
+    case kNVTEInt32:
+      return DLDataType{kDLInt, 32, 1};
+    case kNVTEInt64:
+      return DLDataType{kDLInt, 64, 1};
+    case kNVTEFloat8E4M3:
+      return DLDataType{kDLFloat8_e4m3fn, 8, 1};
+    case kNVTEFloat8E5M2:
+      return DLDataType{kDLFloat8_e5m2, 8, 1};
+    case kNVTEFloat8E8M0:
+      return DLDataType{kDLFloat8_e8m0fnu, 8, 1};
+    default:
+      NVTE_ERROR("unsupported NVTEDType: ", static_cast<int>(type));
+  }
+}
+
+class DLTensorWrapper : public DLTensor {
+ public:
+  // Null wrapper (data == nullptr): packs as TVM-FFI None, no allocation.
+  DLTensorWrapper() : DLTensor{} {}
+
+  explicit DLTensorWrapper(const NVTEBasicTensor &tensor, bool flatten_2D = true) {
+    const int32_t device_index = transformer_engine::cuda::current_device();
+    const int n = static_cast<int>(tensor.shape.ndim);
+    if (flatten_2D && n > 2) {
+      int64_t flat_first = 1;
+      for (int i = 0; i + 1 < n; ++i) flat_first *= static_cast<int64_t>(tensor.shape.data[i]);
+      const int64_t flat_last = static_cast<int64_t>(tensor.shape.data[n - 1]);
+      shape_buf_ = std::make_unique<int64_t[]>(2);
+      strides_buf_ = std::make_unique<int64_t[]>(2);
+      shape_buf_[0] = flat_first;
+      shape_buf_[1] = flat_last;
+      strides_buf_[0] = flat_last;
+      strides_buf_[1] = 1;
+      this->ndim = 2;
+    } else if (flatten_2D && n == 1) {
+      const int64_t flat_last = static_cast<int64_t>(tensor.shape.data[0]);
+      shape_buf_ = std::make_unique<int64_t[]>(2);
+      strides_buf_ = std::make_unique<int64_t[]>(2);
+      shape_buf_[0] = 1;
+      shape_buf_[1] = flat_last;
+      strides_buf_[0] = flat_last;
+      strides_buf_[1] = 1;
+      this->ndim = 2;
+    } else {
+      shape_buf_ = std::make_unique<int64_t[]>(n);
+      strides_buf_ = std::make_unique<int64_t[]>(n);
+      int64_t stride = 1;
+      for (int i = n - 1; i >= 0; --i) {
+        shape_buf_[i] = static_cast<int64_t>(tensor.shape.data[i]);
+        strides_buf_[i] = stride;
+        stride *= shape_buf_[i];
+      }
+      this->ndim = n;
+    }
+    this->data = tensor.data_ptr;
+    this->device = DLDevice{kDLCUDA, device_index};
+    this->dtype = convert_to_dltype(tensor.dtype);
+    this->shape = shape_buf_.get();
+    this->strides = strides_buf_.get();
+    this->byte_offset = 0;
+  }
+
+  ~DLTensorWrapper() = default;
+  DLTensorWrapper(const DLTensorWrapper &) = delete;
+  DLTensorWrapper &operator=(const DLTensorWrapper &) = delete;
+  DLTensorWrapper(DLTensorWrapper &&) = default;
+  DLTensorWrapper &operator=(DLTensorWrapper &&) = default;
+
+ private:
+  std::unique_ptr<int64_t[]> shape_buf_;
+  std::unique_ptr<int64_t[]> strides_buf_;
+};
+
+}  // namespace tvm_ffi_bridge
+}  // namespace transformer_engine
+
+namespace tvm {
+namespace ffi {
+// Make a (borrowed) DLTensorWrapper* a first-class TVM-FFI argument, so wrappers
+// can be passed straight to Function::operator()(&w, ...). Like DLTensor* it is a
+// non-owning DLTensorPtr view (the wrapper must outlive the call), but a null
+// pointer OR a wrapper over an absent buffer (null data) packs as TVM-FFI None —
+// so a kernel's optional args need no special handling at the call site. Only
+// the pack-as-argument path (CopyToAnyView) is provided; reading back is unused.
+// Declared after DLTensorWrapper: the specialization needs the complete type
+// (it reads src->data and static_casts to its DLTensor base).
+template <>
+struct TypeTraits<transformer_engine::tvm_ffi_bridge::DLTensorWrapper *>
+    : public TypeTraits<DLTensor *> {
+  TVM_FFI_INLINE static void CopyToAnyView(transformer_engine::tvm_ffi_bridge::DLTensorWrapper *src,
+                                           TVMFFIAny *result) {
+    if (src == nullptr || src->data == nullptr) {
+      TypeTraits<std::nullptr_t>::CopyToAnyView(nullptr, result);  // -> TVM-FFI None
+    } else {
+      TypeTraits<DLTensor *>::CopyToAnyView(static_cast<DLTensor *>(src), result);
+    }
+  }
+};
+}  // namespace ffi
+}  // namespace tvm
+
+namespace transformer_engine {
+namespace tvm_ffi_bridge {
+
+// Compile-time check that a config provides the lazy-loadable kernel API:
+//   - std::string to_key() const
+// Builds the globally unique TVM-FFI registry key used when Python compiles and
+// registers the CuTeDSL function. The cache itself may use a different key.
+//
+//   - bool retrieve_func_from_python(const std::string& key) const
+// This compiles + globally registers the kernel under `key`; returns whether
+// a kernel is now registered / the config is supported
+//
+//   - std::optional<tvm::ffi::Function> get_kernel() const
+// Retrieves the possibly cached function. If the config provides a
+// `uint32_t to_id() const` method, it can reuse TVMFFIConfigCache with the
+// canonical implementation:
+// ```
+// std::optional<tvm::ffi::Function> get_kernel() const {
+//   static TVMFFIConfigCache &cache = TVMFFIConfigCache::create();
+//   return cache.get_or_load(*this);
+// }
+// ```
+// The ID only has to be unique within the config type because the function-local
+// cache belongs to that type. Configs that need a different key type or caching
+// policy may implement get_kernel() themselves.
+//
+// Note: TVMFFIConfigCache::create() intentionally gives its cache process lifetime.
+// This prevents cached tvm::ffi::Function handles from being destroyed during
+// static teardown, when Python or TVM-FFI runtime state may already have been
+// finalized. The OS reclaims the allocation when the process exits.
+class TVMFFIConfigCache;
+
+namespace detail {
+template <typename, typename = void>
+struct is_lazyloadable_config : std::false_type {};
+template <typename T>
+struct is_lazyloadable_config<
+    T, std::void_t<decltype(std::declval<const T &>().to_key()),
+                   decltype(std::declval<const T &>().retrieve_func_from_python(
+                       std::declval<const std::string &>())),
+                   std::enable_if_t<std::is_same<decltype(std::declval<const T &>().get_kernel()),
+                                                 std::optional<tvm::ffi::Function>>::value>>>
+    : std::true_type {};
+}  // namespace detail
+
+class TVMFFICentral {
+ public:
+  static TVMFFICentral &getInstance() {
+    static TVMFFICentral instance;
+    return instance;
+  }
+
+  template <typename Config>
+  std::optional<tvm::ffi::Function> load_tvm_ffi_function(const Config &cfg) {
+    static_assert(detail::is_lazyloadable_config<Config>::value,
+                  "Config must define `std::string to_key() const`, "
+                  "`bool retrieve_func_from_python(const std::string&) const`, "
+                  "and `std::optional<tvm::ffi::Function> get_kernel() const`.");
+    if (!cutedsl_backend_enabled_.load(std::memory_order_relaxed)) {
+      maybe_warn_not_chosen(
+          "the CuTeDSL backend is disabled, so no kernel is available for "
+          "config `",
+          cfg.to_key(), "`. Set NVTE_ENABLE_CUTEDSL_QUANT_BACKEND=1 to enable it.");
+      return std::nullopt;
+    }
+    // Only check if libtvm_ffi.so is loaded if user enables the CuTeDSL backend.
+    // So if user disables the CuTeDSL backend, don't output this warning message.
+    if (!tvm_ffi_available_) {
+      // Warn once: the state is permanent, so a per-call warning would spam every quantize.
+      static std::once_flag warned;
+      std::call_once(warned, [this] {
+        maybe_warn_not_chosen(
+            "libtvm_ffi.so is not successfully loaded. Will fall back to the default CUDA C++ "
+            "kernels.");
+      });
+      return std::nullopt;
+    }
+    const std::string key = cfg.to_key();
+    std::optional<tvm::ffi::Function> fn =
+        cfg.retrieve_func_from_python(key) ? tvm::ffi::Function::GetGlobal(key) : std::nullopt;
+    if (!fn) {
+      maybe_warn_not_chosen("no TVM-FFI kernel is registered for config `", key, "`.");
+    }
+    return fn;
+  }
+
+  // Runtime override of NVTE_ENABLE_CUTEDSL_QUANT_BACKEND (exposed to Python as
+  // nvte_set_cutedsl_quant_backend; used by tests to compare both backends in
+  // one process). Safe to toggle at any time
+  void set_cutedsl_backend_enabled(bool enabled) {
+    cutedsl_backend_enabled_.store(enabled, std::memory_order_relaxed);
+  }
+
+  bool get_cutedsl_backend_enabled() const {
+    return cutedsl_backend_enabled_.load(std::memory_order_relaxed);
+  }
+
+  bool get_warn_cutedsl_backend_not_chosen() const { return warn_cutedsl_backend_not_chosen_; }
+
+  // Optionally emit a warning explaining why the CuTeDSL backend was not chosen for this config.
+  template <typename... Args>
+  void maybe_warn_not_chosen(Args &&...reason) const {
+    if (warn_cutedsl_backend_not_chosen_) {
+      NVTE_WARN("CuTeDSL quantization backend not chosen because ", reason...);
+    }
+  }
+
+ private:
+  ~TVMFFICentral() = default;
+  TVMFFICentral()
+      : tvm_ffi_available_(load_tvm_ffi()),
+        cutedsl_backend_enabled_(is_cutedsl_backend_enabled()),
+        warn_cutedsl_backend_not_chosen_(warn_if_cutedsl_backend_not_chosen()) {}
+
+  // Load all tvm-ffi symbols into the global namespace, which should be already loaded in common/__init__.py via ctypes.CDLL
+  // if user uses TE from a python environment. Otherwise, if user stays in C++ only without python, then CuTeDSL kernels
+  // will be unavailable either because we fail to load libtvm_ffi.so or CuTeDSL kernel entrypoints are not registered in Python.
+  // In either case, we will fall back to the default TE CUDA C++ kernels.
+  static bool load_tvm_ffi() { return dlopen("libtvm_ffi.so", RTLD_NOW | RTLD_GLOBAL) != nullptr; }
+  TVMFFICentral(const TVMFFICentral &) = delete;
+  TVMFFICentral &operator=(const TVMFFICentral &) = delete;
+  TVMFFICentral(TVMFFICentral &&) = delete;
+  TVMFFICentral &operator=(TVMFFICentral &&) = delete;
+
+  static bool is_cutedsl_backend_enabled() {
+    // Off by default; set NVTE_ENABLE_CUTEDSL_QUANT_BACKEND=1 to enable.
+    return transformer_engine::getenv<bool>("NVTE_ENABLE_CUTEDSL_QUANT_BACKEND");
+  }
+
+  static bool warn_if_cutedsl_backend_not_chosen() {
+    return transformer_engine::getenv<bool>("NVTE_WARN_IF_CUTEDSL_BACKEND_NOT_CHOSEN");
+  }
+
+  const bool tvm_ffi_available_;  // libtvm_ffi.so loaded; false disables the backend
+  std::atomic<bool> cutedsl_backend_enabled_;
+  const bool warn_cutedsl_backend_not_chosen_;
+};
+
+// A utility class that each Config struct can use to cache the registered TVM-FFI functions
+// via `to_id` method, where an id is a unique integer that represents a specific config.
+// Defined after TVMFFICentral because get_or_load names it.
+//
+class TVMFFIConfigCache {
+ public:
+  static TVMFFIConfigCache &create() { return *new TVMFFIConfigCache(); }
+
+  // Lazy-load the CuTeDSL function for this config and cache the result.
+  // Returns std::nullopt if the config is unsupported or CuTeDSL backend is disabled.
+  // This requires the config to have a `uint32_t to_id() const` method, which returns an unique
+  // identifier among all configs of this type.
+  template <typename Config>
+  std::optional<tvm::ffi::Function> get_or_load(const Config &cfg) {
+    TVMFFICentral &central = TVMFFICentral::getInstance();
+    // Checked ahead of the cache so that toggling the backend off still disables
+    // already-resolved configs; load_tvm_ffi_function emits the "disabled" warning.
+    if (!central.get_cutedsl_backend_enabled()) {
+      return central.load_tvm_ffi_function(cfg);
+    }
+    // Otherwise try the cache first, and ask Python to compile/register the kernel if not found.
+    const uint32_t id = cfg.to_id();
+    {
+      std::shared_lock<std::shared_mutex> read_lock(mutex_);
+      auto it = map_.find(id);
+      if (it != map_.end()) {
+        return it->second;
+      }
+    }
+    std::optional<tvm::ffi::Function> fn = central.load_tvm_ffi_function(cfg);
+    {
+      std::unique_lock<std::shared_mutex> write_lock(mutex_);
+      // emplace is a no-op if another thread resolved this id meanwhile; the
+      // resolved value is identical given the same cfg, so either copy is fine.
+      map_.emplace(id, fn);
+    }
+    return fn;
+  }
+
+ private:
+  TVMFFIConfigCache() = default;
+  ~TVMFFIConfigCache() = default;
+
+  std::shared_mutex mutex_;
+  std::unordered_map<uint32_t, std::optional<tvm::ffi::Function>> map_;
+};
+
+// Optionally emit a warning explaining why the CuTeDSL backend was not chosen for this config.
+template <typename... Args>
+inline void maybe_warn_cutedsl_not_chosen(Args &&...reason) {
+  TVMFFICentral::getInstance().maybe_warn_not_chosen(reason...);
+}
+
+}  // namespace tvm_ffi_bridge
+}  // namespace transformer_engine
+
+#endif  // TRANSFORMER_ENGINE_COMMON_TVM_FFI_BRIDGE_H_

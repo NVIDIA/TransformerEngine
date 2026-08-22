@@ -13,8 +13,12 @@
 
 #include <transformer_engine/transformer_engine.h>
 
+#include <optional>
+#include <string>
+
 #include "../../common.h"
 #include "../../transpose/cast_transpose.h"
+#include "../../util/cuda_runtime.h"
 #include "../../util/vectorized_pointwise.h"
 #include "../core/common.cuh"
 #include "../fp8/group_quantize_fp8.cuh"
@@ -25,6 +29,10 @@
 #include "../nvfp4/group_quantize_transpose_nvfp4.cuh"
 #include "../nvfp4/quantize_4over6_nvfp4.cuh"
 #include "../nvfp4/quantize_transpose_nvfp4.cuh"
+
+#ifdef NVTE_WITH_CUTEDSL
+#include "../mxfp8/quantize_mxfp8_cutedsl.cuh"
+#endif
 
 namespace transformer_engine {
 namespace dispatch {
@@ -86,9 +94,19 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
       const Tensor *dummy_input_tensor = nullptr;
       Tensor *dummy_dbias_tensor = nullptr;
       Tensor *dummy_workspace_tensor = nullptr;
-      mxfp8::quantize</*IS_DBIAS=*/false, /*IS_DACT=*/false, IS_ACT, ParamOP, OP>(
-          *input_tensor, dummy_input_tensor, noop_tensor, output_tensor, dummy_dbias_tensor,
-          dummy_workspace_tensor, quant_config_cpp.mxfp8_2d_quantization, stream);
+      bool quantized_with_cutedsl = false;
+#ifdef NVTE_WITH_CUTEDSL
+      quantized_with_cutedsl =
+          cutedsl_backend::mxfp8_quantize_cutedsl</*IS_DBIAS=*/false, /*IS_DACT=*/false, IS_ACT,
+                                                  ParamOP, OP>(
+              input_tensor, dummy_input_tensor, noop_tensor, output_tensor, dummy_dbias_tensor,
+              dummy_workspace_tensor, quant_config_cpp.mxfp8_2d_quantization, stream);
+#endif
+      if (!quantized_with_cutedsl) {
+        mxfp8::quantize</*IS_DBIAS=*/false, /*IS_DACT=*/false, IS_ACT, ParamOP, OP>(
+            *input_tensor, dummy_input_tensor, noop_tensor, output_tensor, dummy_dbias_tensor,
+            dummy_workspace_tensor, quant_config_cpp.mxfp8_2d_quantization, stream);
+      }
       break;
     }
     case NVTE_NVFP4_1D_SCALING: {
@@ -262,9 +280,18 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
       break;
     }
     case NVTE_MXFP8_1D_SCALING: {
-      mxfp8::quantize<IS_DBIAS, IS_DACT, /*IS_ACT=*/false, ParamOP, OP>(
-          *grad_tensor, input_tensor, noop_tensor, output_tensor, dbias_tensor, workspace_tensor,
-          quant_config_cpp.mxfp8_2d_quantization, stream);
+      bool quantized_with_cutedsl = false;
+#ifdef NVTE_WITH_CUTEDSL
+      quantized_with_cutedsl =
+          cutedsl_backend::mxfp8_quantize_cutedsl<IS_DBIAS, IS_DACT, /*IS_ACT=*/false, ParamOP, OP>(
+              grad_tensor, input_tensor, noop_tensor, output_tensor, dbias_tensor, workspace_tensor,
+              quant_config_cpp.mxfp8_2d_quantization, stream);
+#endif
+      if (!quantized_with_cutedsl) {
+        mxfp8::quantize<IS_DBIAS, IS_DACT, /*IS_ACT=*/false, ParamOP, OP>(
+            *grad_tensor, input_tensor, noop_tensor, output_tensor, dbias_tensor, workspace_tensor,
+            quant_config_cpp.mxfp8_2d_quantization, stream);
+      }
       break;
     }
     case NVTE_NVFP4_1D_SCALING: {
