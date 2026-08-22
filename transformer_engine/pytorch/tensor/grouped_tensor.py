@@ -173,6 +173,69 @@ class GroupedTensor(GroupedTensorStorage, torch.Tensor):
         )
         return instance
 
+    def __tensor_flatten__(self):
+        """Expose grouped backing buffers to PyTorch's wrapper-subclass protocol."""
+        tensor_attrs = (
+            "rowwise_data",
+            "columnwise_data",
+            "scale_inv",
+            "columnwise_scale_inv",
+            "amax",
+            "columnwise_amax",
+            "scale",
+            "first_dims",
+            "last_dims",
+            "tensor_offsets",
+        )
+        present = [name for name in tensor_attrs if getattr(self, name) is not None]
+        context = {
+            "cls": type(self),
+            "logical_shape": self.logical_shape,
+            "fake_dtype": self.fake_dtype,
+            "num_tensors": self.num_tensors,
+            "tensor_shapes": self.tensor_shapes,
+            "quantizer": self.quantizer,
+            "offsets": self.offsets,
+            "scale_inv_offsets": self.scale_inv_offsets,
+            "columnwise_scale_inv_offsets": self.columnwise_scale_inv_offsets,
+            "requires_grad": self.requires_grad,
+            "with_gemm_swizzled_scales": self._with_gemm_swizzled_scales,
+            "row_scaled_nvfp4": self.row_scaled_nvfp4,
+            "nvfp4_use_4over6": self.nvfp4_use_4over6,
+            "nvfp4_e4m3_max": self.nvfp4_e4m3_max,
+        }
+        return present, context
+
+    @staticmethod
+    def __tensor_unflatten__(inner_tensors, context, outer_size, outer_stride):
+        """Rebuild a GroupedTensor from PyTorch-managed backing buffers."""
+        return context["cls"](
+            shape=context["logical_shape"],
+            dtype=context["fake_dtype"],
+            num_tensors=context["num_tensors"],
+            shapes=context["tensor_shapes"],
+            quantizer=context["quantizer"],
+            data=inner_tensors.get("rowwise_data"),
+            columnwise_data=inner_tensors.get("columnwise_data"),
+            scale_inv=inner_tensors.get("scale_inv"),
+            columnwise_scale_inv=inner_tensors.get("columnwise_scale_inv"),
+            amax=inner_tensors.get("amax"),
+            columnwise_amax=inner_tensors.get("columnwise_amax"),
+            scale=inner_tensors.get("scale"),
+            first_dims=inner_tensors.get("first_dims"),
+            last_dims=inner_tensors.get("last_dims"),
+            tensor_offsets=inner_tensors.get("tensor_offsets"),
+            offsets=context["offsets"],
+            scale_inv_offsets=context["scale_inv_offsets"],
+            columnwise_scale_inv_offsets=context["columnwise_scale_inv_offsets"],
+            requires_grad=context["requires_grad"],
+            stride=list(outer_stride) if outer_stride is not None else None,
+            with_gemm_swizzled_scales=context["with_gemm_swizzled_scales"],
+            row_scaled_nvfp4=context["row_scaled_nvfp4"],
+            nvfp4_use_4over6=context["nvfp4_use_4over6"],
+            nvfp4_e4m3_max=context["nvfp4_e4m3_max"],
+        )
+
     @classmethod
     def __torch_dispatch__(cls, func, types, args, kwargs=None):
         """Dispatch by dequantizing grouped members, then requantizing writes."""
@@ -228,6 +291,74 @@ class GroupedTensor(GroupedTensorStorage, torch.Tensor):
             if func == torch.ops.aten.detach.default:
                 return make_wrapper_like(src, requires_grad=False)
             return make_wrapper_like(src, requires_grad=src.requires_grad)
+
+        # Module.to()/cuda() use aten._to_copy on parameters. Rebuild the
+        # wrapper around migrated grouped storage instead of taking the default
+        # dequantize-and-stack path, which loses the GroupedTensor subclass and
+        # leaves its backing buffers on the original device.
+        if func == torch.ops.aten._to_copy.default:
+            src = args[0]
+            if not isinstance(src, GroupedTensor):
+                raise TypeError(f"Expected GroupedTensor, got {type(src).__name__}")
+
+            target_device = kwargs.get("device", src.device)
+            target_dtype = kwargs.get("dtype", src.dtype)
+            target_layout = kwargs.get("layout", src.layout)
+            pin_memory = kwargs.get("pin_memory", False)
+            non_blocking = kwargs.get("non_blocking", False)
+
+            if target_layout != torch.strided:
+                raise NotImplementedError(
+                    f"{cls.__name__} only supports strided layout, got {target_layout}"
+                )
+            if pin_memory:
+                raise NotImplementedError(f"{cls.__name__} does not support pin_memory=True")
+            if src.quantizer is not None and target_dtype != src.dtype:
+                raise NotImplementedError(
+                    f"{cls.__name__} cannot change the logical dtype of quantized storage "
+                    f"from {src.dtype} to {target_dtype}"
+                )
+
+            def move_storage(
+                tensor: Optional[torch.Tensor], *, convert_dtype: bool = False
+            ) -> Optional[torch.Tensor]:
+                if tensor is None:
+                    return None
+                dtype = target_dtype if convert_dtype else tensor.dtype
+                return tensor.to(
+                    device=target_device,
+                    dtype=dtype,
+                    non_blocking=non_blocking,
+                    copy=True,
+                )
+
+            convert_data_dtype = src.quantizer is None
+            return type(src)(
+                shape=src.logical_shape,
+                dtype=target_dtype,
+                num_tensors=src.num_tensors,
+                shapes=src.tensor_shapes,
+                quantizer=src.quantizer,
+                data=move_storage(src.rowwise_data, convert_dtype=convert_data_dtype),
+                columnwise_data=move_storage(src.columnwise_data, convert_dtype=convert_data_dtype),
+                scale_inv=move_storage(src.scale_inv),
+                columnwise_scale_inv=move_storage(src.columnwise_scale_inv),
+                amax=move_storage(src.amax),
+                columnwise_amax=move_storage(src.columnwise_amax),
+                scale=move_storage(src.scale),
+                first_dims=move_storage(src.first_dims),
+                last_dims=move_storage(src.last_dims),
+                tensor_offsets=move_storage(src.tensor_offsets),
+                offsets=src.offsets,
+                scale_inv_offsets=src.scale_inv_offsets,
+                columnwise_scale_inv_offsets=src.columnwise_scale_inv_offsets,
+                requires_grad=src.requires_grad,
+                stride=list(src.stride()),
+                with_gemm_swizzled_scales=src._with_gemm_swizzled_scales,
+                row_scaled_nvfp4=src.row_scaled_nvfp4,
+                nvfp4_use_4over6=src.nvfp4_use_4over6,
+                nvfp4_e4m3_max=src.nvfp4_e4m3_max,
+            )
 
         # Parameter construction may invoke aten.expand on tensor subclasses.
         # Handle this explicitly so grouped parameters can be created safely.
