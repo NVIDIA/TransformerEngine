@@ -113,7 +113,7 @@ def quantize_mxfp8_for_ep(
     scale_cols = hidden // MXFP8_BLOCK_SCALING_SIZE
     if scale_cols * scale_inv.element_size() % 16:
         raise ValueError(
-            f"MXFP8 EP transport requires hidden size divisible by "
+            "MXFP8 EP transport requires hidden size divisible by "
             f"{16 * MXFP8_BLOCK_SCALING_SIZE}, got {hidden}."
         )
     scale_inv = scale_inv[:rows, :scale_cols]

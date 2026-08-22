@@ -132,9 +132,7 @@ class Combine(BasicOperation):
         next_op_input_quantizer: Optional[Quantizer],
         basic_op_kwargs: list[dict[str, Any]],
     ) -> tuple[torch.Tensor, list[tuple[()]]]:
-        grad_output_quantizer = self._resolve_grad_output_quantizer(
-            prev_op_grad_output_quantizer
-        )
+        grad_output_quantizer = self._resolve_grad_output_quantizer(prev_op_grad_output_quantizer)
         handle_mem, tokens_per_expert = basic_op_extra_inputs[0]
         kwargs = basic_op_kwargs[0]
         if input_.dtype is not torch.bfloat16:
@@ -183,9 +181,7 @@ class Combine(BasicOperation):
                 )
             elif grad_out is not None:
                 if grad_out.device != input_.device:
-                    raise ValueError(
-                        f"grad_out must be on {input_.device}, got {grad_out.device}."
-                    )
+                    raise ValueError(f"grad_out must be on {input_.device}, got {grad_out.device}.")
                 if not grad_out.is_contiguous():
                     raise ValueError("MXFP8 grad_out storage must be contiguous.")
                 if grad_out.requires_grad:
@@ -234,9 +230,7 @@ class Combine(BasicOperation):
                 grad_input,
             )
         else:
-            quantized_grad, grad_scale_inv = quantize_mxfp8_for_ep(
-                grad_output, quantizer
-            )
+            quantized_grad, grad_scale_inv = quantize_mxfp8_for_ep(grad_output, quantizer)
             rows, hidden = ctx.input_shape
             scale_cols = hidden // MXFP8_BLOCK_SCALING_SIZE
             grad_data, grad_input_scale_inv = _scale_alloc_io(

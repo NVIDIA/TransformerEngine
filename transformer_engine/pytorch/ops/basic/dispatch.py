@@ -115,8 +115,7 @@ class Dispatch(BasicOperation):
             return None
         if not isinstance(quantizer, MXFP8Quantizer):
             raise TypeError(
-                "NCCL EP Dispatch supports MXFP8Quantizer only, got "
-                f"{type(quantizer).__name__}."
+                f"NCCL EP Dispatch supports MXFP8Quantizer only, got {type(quantizer).__name__}."
             )
         if quantizer.dtype != DType.kFloat8E4M3:
             raise NotImplementedError("NCCL EP Dispatch supports E4M3 MXFP8 only.")
@@ -225,9 +224,7 @@ class Dispatch(BasicOperation):
                 recv_topk_weights,
             )
         else:
-            quantized_input, input_scale_inv = quantize_mxfp8_for_ep(
-                input_, input_quantizer
-            )
+            quantized_input, input_scale_inv = quantize_mxfp8_for_ep(input_, input_quantizer)
             scale_cols = self.buffer.hidden_dim // MXFP8_BLOCK_SCALING_SIZE
             recv_data, recv_scale_inv = _scale_alloc_io(
                 recv_tokens,

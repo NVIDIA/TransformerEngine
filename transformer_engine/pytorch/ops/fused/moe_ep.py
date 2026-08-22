@@ -422,9 +422,7 @@ class FusedMoeEp(FusedOperation):
                 route_metadata,
             )
             basic_op_ctxs[0].input_dtype = input_.dtype
-            basic_op_ctxs[0].prev_op_grad_output_quantizer = (
-                prev_op_grad_output_quantizer
-            )
+            basic_op_ctxs[0].prev_op_grad_output_quantizer = prev_op_grad_output_quantizer
 
         # Dispatch extras are channel-bound with output_to_caller=False and are
         # only consumed by ops inside this fusion, so they need not be materialized.
