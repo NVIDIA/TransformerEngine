@@ -154,6 +154,127 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> fused_topk_with_score_function_fw
   return std::make_tuple(probs, routing_map, intermediate_output);
 }
 
+std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor>
+fused_topk_with_score_function_qb_fwd(at::Tensor logits, int topk,
+                                      std::optional<float> scaling_factor, at::Tensor expert_bias,
+                                      int routing_map_format,
+                                      std::optional<at::Tensor> topk_indices, at::Tensor histogram,
+                                      at::Tensor bin_bounds, int histogram_mode,
+                                      bool bin_bounds_validated) {
+  check_routing_map_format(routing_map_format);
+  TORCH_CHECK(logits.dim() >= 1, "logits must have at least 1 dim");
+  TORCH_CHECK(logits.is_cuda() && logits.is_contiguous(),
+              "logits must be a contiguous CUDA tensor");
+  at::cuda::CUDAGuard device_guard(logits.device());
+  const auto sizes = logits.sizes();
+  const int64_t num_experts = sizes.back();
+  const int64_t num_tokens =
+      std::accumulate(sizes.begin(), sizes.end() - 1, int64_t{1}, std::multiplies<int64_t>());
+  TORCH_CHECK(num_tokens > 0 && num_experts > 0,
+              "num_tokens and num_experts must be greater than 0");
+  TORCH_CHECK(topk > 0 && topk < num_experts,
+              "QB topk must be in [1, num_experts), got topk=", topk, " num_experts=", num_experts);
+  TORCH_CHECK(expert_bias.is_cuda() && expert_bias.is_contiguous(),
+              "QB expert_bias must be a contiguous CUDA tensor");
+  TORCH_CHECK(expert_bias.device() == logits.device(),
+              "QB expert_bias must be on the logits device");
+  TORCH_CHECK(expert_bias.scalar_type() == at::kFloat, "QB expert_bias must have float32 dtype");
+  TORCH_CHECK(expert_bias.dim() == 1 && expert_bias.numel() == num_experts,
+              "QB expert_bias must have shape [num_experts]");
+  TORCH_CHECK(histogram.is_cuda() && histogram.is_contiguous(),
+              "QB histogram must be a contiguous CUDA tensor");
+  TORCH_CHECK(histogram.device() == logits.device(), "QB histogram must be on the logits device");
+  TORCH_CHECK(histogram.scalar_type() == at::kInt, "QB histogram must have int32 dtype");
+  TORCH_CHECK(histogram.dim() == 2 && histogram.size(0) == num_experts && histogram.size(1) > 0,
+              "QB histogram must have shape [num_experts, num_bins]");
+  TORCH_CHECK(bin_bounds.is_cuda() && bin_bounds.is_contiguous(),
+              "QB bin_bounds must be a contiguous CUDA tensor");
+  TORCH_CHECK(bin_bounds.device() == logits.device(), "QB bin_bounds must be on the logits device");
+  TORCH_CHECK(
+      bin_bounds.scalar_type() == at::kFloat && bin_bounds.dim() == 1 && bin_bounds.numel() == 2,
+      "QB bin_bounds must be float32 with shape [2]");
+  TORCH_CHECK(histogram_mode == NVTE_QB_HISTOGRAM_TWO_KERNEL ||
+                  histogram_mode == NVTE_QB_HISTOGRAM_FUSED_ATOMIC,
+              "Unsupported QB histogram mode: ", histogram_mode);
+  if (topk_indices.has_value()) {
+    TORCH_CHECK(routing_map_format == NVTE_ROUTING_MAP_FORMAT_BYTEMAP,
+                "dense Top-k indices cannot be combined with a non-default routing-map format");
+    check_dense_topk_indices(topk_indices.value(), logits, sizes.slice(0, sizes.size() - 1), topk);
+  }
+
+  const float scaling_factor_value = scaling_factor.has_value() ? scaling_factor.value() : 1.0f;
+  at::Tensor probs = at::empty(sizes, at::dtype(logits.scalar_type()).device(logits.device()));
+  at::Tensor routing_output =
+      topk_indices.has_value()
+          ? topk_indices.value()
+          : allocate_routing_map(sizes.slice(0, sizes.size() - 1), num_experts, routing_map_format);
+  at::Tensor intermediate_output = at::empty(sizes, at::dtype(at::kFloat).device(logits.device()));
+  at::Tensor cutoff = at::empty({num_tokens}, at::dtype(at::kFloat).device(logits.device()));
+
+  const std::vector<size_t> shape_2d = {static_cast<size_t>(num_tokens),
+                                        static_cast<size_t>(num_experts)};
+  const std::vector<size_t> routing_output_shape_2d =
+      topk_indices.has_value()
+          ? std::vector<size_t>{static_cast<size_t>(num_tokens), static_cast<size_t>(topk)}
+          : std::vector<size_t>{
+                static_cast<size_t>(num_tokens),
+                static_cast<size_t>(routing_map_format == NVTE_ROUTING_MAP_FORMAT_BITMAP_U8
+                                        ? (num_experts + 7) / 8
+                                        : num_experts)};
+  auto logits_cu = makeTransformerEngineTensor(logits.data_ptr(), shape_2d,
+                                               GetTransformerEngineDType(logits.scalar_type()));
+  auto probs_cu = makeTransformerEngineTensor(probs.data_ptr(), shape_2d,
+                                              GetTransformerEngineDType(probs.scalar_type()));
+  auto routing_output_cu =
+      makeTransformerEngineTensor(routing_output.data_ptr(), routing_output_shape_2d,
+                                  GetTransformerEngineDType(routing_output.scalar_type()));
+  auto intermediate_output_cu =
+      makeTransformerEngineTensor(intermediate_output.data_ptr(), shape_2d, DType::kFloat32);
+  const std::vector<size_t> cutoff_shape = {static_cast<size_t>(num_tokens)};
+  auto cutoff_cu = makeTransformerEngineTensor(cutoff.data_ptr(), cutoff_shape, DType::kFloat32);
+  auto expert_bias_cu = makeTransformerEngineTensor(expert_bias);
+  auto histogram_cu = makeTransformerEngineTensor(histogram);
+  auto bin_bounds_cu = makeTransformerEngineTensor(bin_bounds);
+  const auto mode = static_cast<NVTEQBHistogramMode>(histogram_mode);
+  auto stream = at::cuda::getCurrentCUDAStream();
+
+  if (topk_indices.has_value()) {
+    if (bin_bounds_validated) {
+      nvte_fused_topk_with_score_function_forward_qb_with_indices_unchecked(
+          logits_cu.data(), static_cast<int>(num_tokens), static_cast<int>(num_experts), topk,
+          scaling_factor_value, expert_bias_cu.data(), probs_cu.data(), routing_output_cu.data(),
+          intermediate_output_cu.data(), cutoff_cu.data(), histogram_cu.data(),
+          bin_bounds_cu.data(), mode, stream);
+    } else {
+      nvte_fused_topk_with_score_function_forward_qb_with_indices(
+          logits_cu.data(), static_cast<int>(num_tokens), static_cast<int>(num_experts), topk,
+          scaling_factor_value, expert_bias_cu.data(), probs_cu.data(), routing_output_cu.data(),
+          intermediate_output_cu.data(), cutoff_cu.data(), histogram_cu.data(),
+          bin_bounds_cu.data(), mode, stream);
+    }
+  } else {
+    if (bin_bounds_validated) {
+      nvte_fused_topk_with_score_function_forward_qb_v2_unchecked(
+          logits_cu.data(), static_cast<int>(num_tokens), static_cast<int>(num_experts), topk,
+          scaling_factor_value, expert_bias_cu.data(), probs_cu.data(), routing_output_cu.data(),
+          static_cast<NVTERoutingMapFormat>(routing_map_format), intermediate_output_cu.data(),
+          cutoff_cu.data(), histogram_cu.data(), bin_bounds_cu.data(), mode, stream);
+    } else {
+      nvte_fused_topk_with_score_function_forward_qb_v2(
+          logits_cu.data(), static_cast<int>(num_tokens), static_cast<int>(num_experts), topk,
+          scaling_factor_value, expert_bias_cu.data(), probs_cu.data(), routing_output_cu.data(),
+          static_cast<NVTERoutingMapFormat>(routing_map_format), intermediate_output_cu.data(),
+          cutoff_cu.data(), histogram_cu.data(), bin_bounds_cu.data(), mode, stream);
+    }
+  }
+  if (mode == NVTE_QB_HISTOGRAM_TWO_KERNEL) {
+    nvte_qb_histogram_accumulate_unchecked(intermediate_output_cu.data(), cutoff_cu.data(),
+                                           bin_bounds_cu.data(), histogram_cu.data(), stream);
+  }
+
+  return std::make_tuple(probs, routing_output, intermediate_output, cutoff, histogram);
+}
+
 void fused_topk_with_score_function_bwd(at::Tensor routing_map, at::Tensor intermediate_output,
                                         at::Tensor grad_probs, at::Tensor grad_logits, int topk,
                                         bool use_pre_softmax, std::optional<float> scaling_factor,

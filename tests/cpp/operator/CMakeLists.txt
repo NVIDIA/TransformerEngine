@@ -18,6 +18,7 @@ add_executable(test_operator
                test_cast_float8blockwise_grouped.cu
                test_dequantize_mxfp8.cu
                test_dequantize_mxfp8_grouped.cu
+               test_fused_group_requantize_mxfp8.cu
                test_dequantize_float8blockwise_grouped.cu
                test_dequantize_nvfp4.cu
                test_transpose.cu

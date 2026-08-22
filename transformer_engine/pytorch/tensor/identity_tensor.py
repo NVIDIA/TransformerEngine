@@ -266,7 +266,7 @@ class IdentityTensor(IdentityTensorStorage, QuantizedTensor):
         self, data: torch.Tensor, *, requires_grad: Optional[bool] = None
     ) -> "IdentityTensor":
         requires_grad = self.requires_grad if requires_grad is None else requires_grad
-        return IdentityTensor(
+        return self.__class__(
             shape=data.shape,
             dtype=self.dtype,
             hp_data=data,
