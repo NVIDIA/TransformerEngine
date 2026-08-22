@@ -33,6 +33,8 @@ from hybrid_quantization_utils import (
 )
 from transformer_engine.common import recipe
 from transformer_engine.pytorch.custom_recipes.quantizer_factories import (
+    delayed_scaling_factory,
+    mxfp8_factory,
     nvfp4_factory,
 )
 from transformer_engine.pytorch.custom_recipes.quantizer_factory_zoo import (
@@ -133,6 +135,263 @@ def test_native_gemm_output_quantizer_support_is_opt_in():
         match="Quantizer is not supported as a native GEMM output quantizer",
     ):
         _validate_native_gemm_output_quantizer(unknown_quantizer)
+
+
+@requires_fp8
+class TestDPARuntimeRecipeUpdate:
+    """CustomRecipe DPA uses the normal module runtime update path."""
+
+    @staticmethod
+    def _make_dpa():
+        return te.DotProductAttention(
+            num_attention_heads=2,
+            kv_channels=16,
+            attention_dropout=0.0,
+            name="recipe_update_dpa",
+        ).cuda()
+
+    def test_custom_recipe_update_replaces_both_directions(self):
+        """A qfactory change commits one complete DPA runtime."""
+        if not mxfp8_available:
+            pytest.skip(f"MXFP8: {reason_for_no_mxfp8}")
+
+        dpa = self._make_dpa()
+
+        def first_factory(role):
+            return mxfp8_factory(role)
+
+        first_recipe = recipe.CustomRecipe(
+            qfactory=first_factory,
+            qfactory_key=("dpa-runtime-update", 1),
+            fp8_dpa=True,
+        )
+
+        with autocast(enabled=True, recipe=first_recipe):
+            first_capabilities = dpa.get_qkv_quantization_capabilities()
+            first_runtime = dpa._quantization_runtime
+            first_forward_quantizers = dpa.quantizers["scaling_fwd"]
+            first_backward_quantizers = dpa.quantizers["scaling_bwd"]
+            first_capabilities_quantizer = dpa._qkv_capabilities_quantizer
+            assert dpa.get_qkv_quantization_capabilities() == first_capabilities
+
+        assert dpa._quantization_runtime is first_runtime
+        assert len(first_runtime.forward_quantizers) == 9
+        assert len(first_runtime.backward_quantizers) == 6
+        assert first_runtime.forward_quantizers is first_forward_quantizers
+        assert first_runtime.backward_quantizers is first_backward_quantizers
+
+        dpa._fp8_workspaces["old"] = object()
+
+        def second_factory(role):
+            return mxfp8_factory(role)
+
+        second_recipe = recipe.CustomRecipe(
+            qfactory=second_factory,
+            qfactory_key=("dpa-runtime-update", 2),
+            fp8_dpa=True,
+        )
+        with autocast(enabled=True, recipe=second_recipe):
+            second_capabilities = dpa.get_qkv_quantization_capabilities()
+
+        second_runtime = dpa._quantization_runtime
+        assert second_runtime is not first_runtime
+        assert dpa.fp8_meta["scaling_fwd"] is second_runtime.forward_states[0]
+        assert dpa.fp8_meta["scaling_bwd"] is second_runtime.backward_states[0]
+        assert dpa.quantizers["scaling_fwd"] is second_runtime.forward_quantizers
+        assert dpa.quantizers["scaling_bwd"] is second_runtime.backward_quantizers
+        assert second_capabilities == first_capabilities == (False, True)
+        assert dpa._qkv_capabilities_quantizer is not first_capabilities_quantizer
+        assert any(
+            dpa._qkv_capabilities_quantizer is quantizer
+            for quantizer in second_runtime.forward_quantizers
+        )
+        assert not dpa._fp8_workspaces
+
+    def test_direct_runtime_commit_updates_dpa_derived_state(self):
+        """DPA cache and recipe labels are part of its runtime commit hook."""
+        if not mxfp8_available:
+            pytest.skip(f"MXFP8: {reason_for_no_mxfp8}")
+
+        dpa = self._make_dpa()
+        first_recipe = recipe.CustomRecipe(
+            qfactory=mxfp8_factory,
+            qfactory_key=("dpa-direct-commit", 1),
+            fp8_dpa=True,
+        )
+        with autocast(enabled=True, recipe=first_recipe):
+            dpa.get_qkv_quantization_capabilities()
+
+        old_runtime = dpa._quantization_runtime
+        old_local_recipes = object()
+        dpa.fp8_meta["local_recipes"] = old_local_recipes
+        old_cache_key = dpa._custom_dpa_local_recipes_cache_key
+        old_capabilities_quantizer = dpa._qkv_capabilities_quantizer
+
+        second_recipe = recipe.CustomRecipe(
+            qfactory=mxfp8_factory,
+            qfactory_key=("dpa-direct-commit", 2),
+            fp8_dpa=True,
+        )
+        update = dpa._plan_quantization_update(
+            recipe=second_recipe,
+            recipe_config=second_recipe.quantizer_config(),
+            recipe_config_revision=old_runtime.recipe_config_revision + 1,
+            num_gemms=dpa._get_quantization_runtime_num_gemms(),
+        )
+
+        assert dpa._quantization_runtime is old_runtime
+        assert dpa.fp8_meta["local_recipes"] is old_local_recipes
+        assert dpa._custom_dpa_local_recipes_cache_key is old_cache_key
+        assert dpa._qkv_capabilities_quantizer is old_capabilities_quantizer
+
+        assert dpa._apply_quantization_update(update)
+        assert dpa._quantization_runtime is update.candidate
+        assert dpa.fp8_meta["local_recipes"] is update.validation_result
+        assert dpa._custom_dpa_local_recipes_cache is update.validation_result
+        assert [type(item).__name__ for item in update.validation_result] == ["MXFP8BlockScaling"]
+        assert dpa._custom_dpa_local_recipes_cache_key != old_cache_key
+        assert dpa._qkv_capabilities_quantizer is None
+        assert dpa._qkv_capabilities_cache is None
+
+    def test_candidate_failure_preserves_active_runtime_and_caches(self):
+        """A failed candidate validation does not partially update DPA."""
+        if not mxfp8_available:
+            pytest.skip(f"MXFP8: {reason_for_no_mxfp8}")
+
+        dpa = self._make_dpa()
+        active_recipe = recipe.CustomRecipe(
+            qfactory=mxfp8_factory,
+            qfactory_key=("dpa-runtime-valid", 1),
+            fp8_dpa=True,
+        )
+        with autocast(enabled=True, recipe=active_recipe):
+            dpa.get_qkv_quantization_capabilities()
+
+        old_runtime = dpa._quantization_runtime
+        old_views = (
+            dpa.fp8_meta["recipe"],
+            dpa.fp8_meta["scaling_fwd"],
+            dpa.fp8_meta["scaling_bwd"],
+            dpa.quantizers["scaling_fwd"],
+            dpa.quantizers["scaling_bwd"],
+            dpa._qkv_capabilities_quantizer,
+            dpa._qkv_capabilities_cache,
+        )
+        workspace = object()
+        dpa._fp8_workspaces["old"] = workspace
+
+        invalid_recipe = recipe.CustomRecipe(
+            qfactory=lambda _role: IdentityQuantizer(),
+            qfactory_key=("invalid-dpa-update", 1),
+            fp8_dpa=True,
+        )
+        with autocast(
+            enabled=True,
+            recipe=invalid_recipe,
+        ):
+            with pytest.raises(TypeError, match="FP8 attention requires FP8-compatible quantizers"):
+                dpa.get_qkv_quantization_capabilities()
+
+        assert dpa._quantization_runtime is old_runtime
+        assert all(
+            current is old
+            for current, old in zip(
+                (
+                    dpa.fp8_meta["recipe"],
+                    dpa.fp8_meta["scaling_fwd"],
+                    dpa.fp8_meta["scaling_bwd"],
+                    dpa.quantizers["scaling_fwd"],
+                    dpa.quantizers["scaling_bwd"],
+                    dpa._qkv_capabilities_quantizer,
+                    dpa._qkv_capabilities_cache,
+                ),
+                old_views,
+            )
+        )
+        assert dpa._fp8_workspaces["old"] is workspace
+
+    def test_all_current_scaling_runtime_is_rejected(self):
+        """Current-scaling QKV requires delayed-scaling S/dP kernel slots."""
+        from transformer_engine.pytorch.custom_recipes.quantizer_factories import (
+            current_scaling_factory,
+        )
+
+        dpa = self._make_dpa()
+        invalid_recipe = recipe.CustomRecipe(
+            qfactory=current_scaling_factory,
+            qfactory_key=("dpa-all-current", 1),
+            fp8_dpa=True,
+        )
+
+        with autocast(enabled=True, recipe=invalid_recipe):
+            with pytest.raises(
+                TypeError,
+                match="Float8CurrentScaling DPA requires delayed scaling for S and dP",
+            ):
+                dpa.get_qkv_quantization_capabilities()
+        assert dpa._quantization_runtime is None
+
+    def test_all_current_scaling_update_is_rejected_before_commit(self):
+        """An invalid DPA update leaves the active MXFP8 runtime intact."""
+        if not mxfp8_available:
+            pytest.skip(f"MXFP8: {reason_for_no_mxfp8}")
+
+        from transformer_engine.pytorch.custom_recipes.quantizer_factories import (
+            current_scaling_factory,
+        )
+
+        dpa = self._make_dpa()
+        active_recipe = recipe.CustomRecipe(
+            qfactory=mxfp8_factory,
+            qfactory_key=("dpa-supported-mxfp8", 1),
+            fp8_dpa=True,
+        )
+        with autocast(enabled=True, recipe=active_recipe):
+            assert dpa.get_qkv_quantization_capabilities() == (False, True)
+
+        old_runtime = dpa._quantization_runtime
+        old_views = (
+            dpa.fp8_meta["recipe"],
+            dpa.fp8_meta["scaling_fwd"],
+            dpa.fp8_meta["scaling_bwd"],
+            dpa.quantizers["scaling_fwd"],
+            dpa.quantizers["scaling_bwd"],
+            dpa._custom_dpa_local_recipes_cache,
+            dpa._qkv_capabilities_quantizer,
+            dpa._qkv_capabilities_cache,
+        )
+        invalid_recipe = recipe.CustomRecipe(
+            qfactory=current_scaling_factory,
+            qfactory_key=("dpa-all-current-update", 1),
+            fp8_dpa=True,
+        )
+
+        with pytest.raises(
+            RuntimeError,
+            match="Float8CurrentScaling DPA requires delayed scaling for S and dP",
+        ):
+            te.apply_recipe(dpa, invalid_recipe)
+
+        assert dpa._quantization_runtime is old_runtime
+        assert all(
+            current is old
+            for current, old in zip(
+                (
+                    dpa.fp8_meta["recipe"],
+                    dpa.fp8_meta["scaling_fwd"],
+                    dpa.fp8_meta["scaling_bwd"],
+                    dpa.quantizers["scaling_fwd"],
+                    dpa.quantizers["scaling_bwd"],
+                    dpa._custom_dpa_local_recipes_cache,
+                    dpa._qkv_capabilities_quantizer,
+                    dpa._qkv_capabilities_cache,
+                ),
+                old_views,
+            )
+        )
+        with autocast(enabled=True, recipe=active_recipe):
+            assert dpa.get_qkv_quantization_capabilities() == (False, True)
+        assert dpa._quantization_runtime is old_runtime
 
 
 def test_hybrid_storage_snapshots_parent_quantizer():
@@ -804,7 +1063,10 @@ class TestHybridSaveOriginalInputPolicy:
         reference.load_state_dict(module.state_dict())
         inp = torch.randn(128, 128, dtype=torch.bfloat16, device="cuda", requires_grad=True)
         reference_inp = inp.detach().clone().requires_grad_()
-        custom_recipe = recipe.CustomRecipe(qfactory=qfactory)
+        custom_recipe = recipe.CustomRecipe(
+            qfactory=qfactory,
+            qfactory_key=("test_grouped_linear_unsafe_custom_input", 1),
+        )
 
         with pytest.warns(UserWarning, match="Ignoring save_original_input=True"):
             with autocast(enabled=True, recipe=custom_recipe):
@@ -853,7 +1115,16 @@ class TestHybridSaveOriginalInputPolicy:
                 )
             return IdentityQuantizer()
 
-        return recipe.CustomRecipe(qfactory=factory)
+        return recipe.CustomRecipe(
+            qfactory=factory,
+            qfactory_key=(
+                "test_counting_identity_hybrid",
+                1,
+                columnwise_source,
+                rowwise_safe,
+                columnwise_safe,
+            ),
+        )
 
     def test_linear_save_original_input_veto_uses_saved_forward_quantized_input(self):
         torch.manual_seed(205)
@@ -1732,6 +2003,7 @@ class TestHybridUsageFlagsRespected:
         hybrid_recipe = _hybrid_custom_recipe(
             row_factory=lambda: Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda"),
             col_factory=lambda: Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda"),
+            qfactory_key=("test_inference_workspace_hybrid_fp8", 1),
         )
         torch.manual_seed(2026)
         model = Linear(128, 256, bias=False, params_dtype=torch.bfloat16).cuda()
@@ -1896,7 +2168,10 @@ class TestHybridGemmBitwiseIdentical:
                 device="cuda",
             )
 
-        hybrid_recipe = recipe.CustomRecipe(qfactory=hybrid_fp8_factory)
+        hybrid_recipe = recipe.CustomRecipe(
+            qfactory=hybrid_fp8_factory,
+            qfactory_key=("test_hybrid_fp8_parity", 1),
+        )
         with autocast(enabled=True, recipe=hybrid_recipe):
             out_hybrid = model_hybrid(inp_hybrid)
         loss_hybrid = out_hybrid.float().sum()
@@ -1962,7 +2237,10 @@ class TestHybridGemmBitwiseIdenticalMXFP8:
                 columnwise_quantizer=MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3),
             )
 
-        hybrid_recipe = recipe.CustomRecipe(qfactory=hybrid_mxfp8_factory)
+        hybrid_recipe = recipe.CustomRecipe(
+            qfactory=hybrid_mxfp8_factory,
+            qfactory_key=("test_hybrid_mxfp8_parity", 1),
+        )
         with autocast(enabled=True, recipe=hybrid_recipe):
             out_hybrid = model_hybrid(inp_hybrid)
         out_hybrid.float().sum().backward()
@@ -2048,30 +2326,16 @@ class TestCustomDPALocalRecipeCache:
     """Custom-DPA native recipe labels track the quantizer rebuild."""
 
     def test_inference_runs_once_per_quantizer_state_and_clears_stale_labels(self, monkeypatch):
+        if not mxfp8_available:
+            pytest.skip(f"MXFP8: {reason_for_no_mxfp8}")
+
         from transformer_engine.pytorch.attention.dot_product_attention import (
             dot_product_attention as dpa_module,
         )
-        from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
-        from transformer_engine.pytorch.quantization import FP8GlobalStateManager
 
-        custom_recipe = recipe.CustomRecipe(qfactory=lambda _role: IdentityQuantizer())
-        monkeypatch.setattr(
-            FP8GlobalStateManager,
-            "get_fp8_recipe",
-            classmethod(lambda _cls: custom_recipe),
-        )
-
-        state = [object()]
-        quantizer = [object()]
-
-        def fake_base_init(module, num_gemms=1):  # pylint: disable=unused-argument
-            module.fp8_meta["scaling_fwd"] = state[0]
-            module.quantizers["scaling_fwd"] = [quantizer[0]]
-
-        monkeypatch.setattr(
-            TransformerEngineBaseModule,
-            "init_fp8_metadata",
-            fake_base_init,
+        custom_recipe = recipe.CustomRecipe(
+            qfactory=mxfp8_factory,
+            qfactory_key=("test_dpa_local_recipe_cache", 1),
         )
 
         inferred_labels = [recipe.MXFP8BlockScaling()]
@@ -2091,45 +2355,65 @@ class TestCustomDPALocalRecipeCache:
             kv_channels=16,
             attention_dropout=0.0,
         )
-        dpa.init_fp8_metadata()
-        assert dpa.fp8_meta["local_recipes"] is inferred_labels
-        dpa.init_fp8_metadata()
-        assert inference_calls == 1
-        assert dpa.fp8_meta["local_recipes"] is inferred_labels
+        with autocast(enabled=True, recipe=custom_recipe):
+            dpa.init_fp8_metadata(num_gemms=3)
+            assert dpa.fp8_meta["local_recipes"] is inferred_labels
+            dpa.init_fp8_metadata(num_gemms=3)
+            assert inference_calls == 1
+            assert dpa.fp8_meta["local_recipes"] is inferred_labels
 
-        # Native labels also copy these mutable fields from CustomRecipe. They
-        # must refresh even when the quantizer generation itself is unchanged.
+        # Native labels also copy these mutable fields from CustomRecipe, so a
+        # semantic recipe update must refresh them with the candidate runtime.
         custom_recipe.fp8_mha = True
-        dpa.init_fp8_metadata()
-        assert inference_calls == 2
-        assert dpa.fp8_meta["local_recipes"] is mutated_recipe_labels
-        dpa.init_fp8_metadata()
-        assert inference_calls == 2
-        assert dpa.fp8_meta["local_recipes"] is mutated_recipe_labels
+        with autocast(enabled=True, recipe=custom_recipe):
+            dpa.init_fp8_metadata(num_gemms=3)
+            assert inference_calls == 2
+            assert dpa.fp8_meta["local_recipes"] is mutated_recipe_labels
+            dpa.init_fp8_metadata(num_gemms=3)
+            assert inference_calls == 2
+            assert dpa.fp8_meta["local_recipes"] is mutated_recipe_labels
 
         # A rebuilt recipe state/quantizer list invalidates the cache. If the
         # new family has no native label, the old label must not survive.
-        state[0] = object()
-        quantizer[0] = object()
-        dpa.init_fp8_metadata()
-        assert inference_calls == 3
-        assert "local_recipes" not in dpa.fp8_meta
-        dpa.init_fp8_metadata()
-        assert inference_calls == 3
-        assert "local_recipes" not in dpa.fp8_meta
+        custom_recipe.qfactory_key = ("test_dpa_local_recipe_cache", 2)
+        with autocast(enabled=True, recipe=custom_recipe):
+            dpa.init_fp8_metadata(num_gemms=3)
+            assert inference_calls == 3
+            assert "local_recipes" not in dpa.fp8_meta
+            dpa.init_fp8_metadata(num_gemms=3)
+            assert inference_calls == 3
+            assert "local_recipes" not in dpa.fp8_meta
 
     @pytest.mark.parametrize(
-        "factory_name,expected",
+        "factory_name,base_qfactory,expected,update_supported",
         [
-            ("current_scaling_factory", (True, False)),
-            ("delayed_scaling_factory", (False, False)),
+            (
+                "current_scaling_dpa",
+                nvfp4_linear_fp8_dpa_factory,
+                (True, False),
+                False,
+            ),
+            ("delayed_scaling", delayed_scaling_factory, (False, False), False),
+            pytest.param(
+                "mxfp8",
+                mxfp8_factory,
+                (False, True),
+                True,
+                marks=pytest.mark.skipif(
+                    not mxfp8_available,
+                    reason=f"MXFP8: {reason_for_no_mxfp8}",
+                ),
+            ),
         ],
     )
-    def test_qkv_capabilities_reuse_canonical_quantizer(self, factory_name, expected):
+    def test_qkv_capabilities_reuse_canonical_quantizer(
+        self,
+        factory_name,
+        base_qfactory,
+        expected,
+        update_supported,
+    ):
         """Capability queries must not call qfactory outside recipe-state setup."""
-        from transformer_engine.pytorch.custom_recipes import quantizer_factories
-
-        base_qfactory = getattr(quantizer_factories, factory_name)
         calls = []
 
         def counting_qfactory(role):
@@ -2143,6 +2427,7 @@ class TestCustomDPALocalRecipeCache:
             qfactory=counting_qfactory,
             fp8_dpa=True,
             fp8_mha=True,
+            qfactory_key=("test_dpa_capability_counting", factory_name, 1),
         )
         dpa = te.DotProductAttention(
             num_attention_heads=2,
@@ -2162,8 +2447,9 @@ class TestCustomDPALocalRecipeCache:
         assert dpa._qkv_capabilities_quantizer is canonical_qkv
         assert len(calls) == calls_after_first
 
-        # A recipe-state rebuild creates a new canonical slot and must
-        # invalidate the capability cache automatically.
+        # A supported recipe-state rebuild creates a new canonical slot and
+        # must invalidate the capability cache automatically. Delayed state is
+        # frozen and rejects the rebuild before invoking the new factory.
         def rebuilt_qfactory(role):
             return counting_qfactory(role)
 
@@ -2171,7 +2457,16 @@ class TestCustomDPALocalRecipeCache:
             qfactory=rebuilt_qfactory,
             fp8_dpa=True,
             fp8_mha=True,
+            qfactory_key=("test_dpa_capability_rebuilt", factory_name, 1),
         )
+        if not update_supported:
+            with autocast(enabled=True, recipe=rebuilt_recipe):
+                with pytest.raises(RuntimeError, match="do not support delayed scaling"):
+                    dpa.get_qkv_quantization_capabilities()
+            assert dpa._qkv_capabilities_quantizer is canonical_qkv
+            assert len(calls) == calls_after_first
+            return
+
         with autocast(enabled=True, recipe=rebuilt_recipe):
             rebuilt = dpa.get_qkv_quantization_capabilities()
         rebuilt_qkv = dpa._qkv_capabilities_quantizer
@@ -2226,6 +2521,7 @@ class TestCustomDPALocalRecipeCache:
             qfactory=counting_qfactory,
             fp8_dpa=True,
             fp8_mha=fp8_mha,
+            qfactory_key=("test_mha_factory_invocation_count", fp8_mha, 1),
         )
         model = te.MultiheadAttention(
             hidden_size=128,
@@ -2480,19 +2776,17 @@ class TestAttentionFactoryNativeRecipeParity:
         )
 
     @pytest.mark.parametrize(
-        "case_name,native_dpa_recipe,qfactory,expected_flags",
+        "case_name,native_dpa_recipe,qfactory",
         [
             (
                 "fp8_dpa",
                 "Float8CurrentScaling",
                 nvfp4_linear_fp8_dpa_factory,
-                (False, False, False),
             ),
             (
                 "mxfp8_dpa",
                 "MXFP8BlockScaling",
                 _nvfp4_linear_mxfp8_dpa_factory,
-                (False, False, False),
             ),
         ],
     )
@@ -2502,30 +2796,15 @@ class TestAttentionFactoryNativeRecipeParity:
         case_name,
         native_dpa_recipe,
         qfactory,
-        expected_flags,
     ):
         if case_name == "mxfp8_dpa" and not mxfp8_available:
             pytest.skip(f"MXFP8: {reason_for_no_mxfp8}")
 
-        from transformer_engine.pytorch.attention import multi_head_attention as mha_module
         from transformer_engine.pytorch.utils import get_device_compute_capability
 
         cc = get_device_compute_capability()
         if cc < (9, 0) or cc >= (12, 0):
             pytest.skip(f"FP8 attention not supported on sm{cc[0] * 10 + cc[1]}")
-
-        recorded_flags = []
-        orig_update_roles = mha_module.MultiheadAttention._update_output_quantizer_roles
-
-        def _recording_update_roles(self, qkv_fp8_output, proj_fp8_grad, dpa_fp8_output):
-            recorded_flags.append((qkv_fp8_output, dpa_fp8_output, proj_fp8_grad))
-            return orig_update_roles(self, qkv_fp8_output, proj_fp8_grad, dpa_fp8_output)
-
-        monkeypatch.setattr(
-            mha_module.MultiheadAttention,
-            "_update_output_quantizer_roles",
-            _recording_update_roles,
-        )
 
         self._set_native_dpa_recipe(monkeypatch, native_dpa_recipe)
 
@@ -2574,7 +2853,6 @@ class TestAttentionFactoryNativeRecipeParity:
             native_recipe,
             seed=2303,
         )
-        native_flags = recorded_flags[-1]
         self._clear_native_dpa_recipe(monkeypatch)
         qfactory_out, qfactory_dx, qfactory_grads = self._run_mha_model(
             model_qfactory,
@@ -2583,10 +2861,7 @@ class TestAttentionFactoryNativeRecipeParity:
             qfactory_recipe,
             seed=2303,
         )
-        qfactory_flags = recorded_flags[-1]
 
-        assert native_flags == expected_flags
-        assert qfactory_flags == expected_flags
         self._assert_equal(qfactory_out, native_out, f"{case_name} MHA output")
         self._assert_equal(qfactory_dx, native_dx, f"{case_name} MHA input grad")
         assert qfactory_grads.keys() == native_grads.keys()
@@ -2597,7 +2872,8 @@ class TestAttentionFactoryNativeRecipeParity:
                 f"{case_name} MHA param grad {name}",
             )
 
-    def test_update_output_quantizer_roles_wires_independent_boundaries(self):
+    def test_mha_declared_boundaries_resolve_for_prospective_recipe(self):
+        """Topology is recipe-independent; DPA alone adapts its legacy inactive slots."""
         from transformer_engine.pytorch.quantization import QuantizerRole
 
         model = te.MultiheadAttention(
@@ -2634,25 +2910,105 @@ class TestAttentionFactoryNativeRecipeParity:
             name=qkv.name or "",
         )
 
-        def boundary_roles():
-            return (
-                qkv.output_quantizer_role,
-                model.proj.grad_input_quantizer_role,
-                model.core_attention.output_quantizer_role,
-                model.core_attention.grad_input_quantizer_role,
+        inactive_recipe = recipe.CustomRecipe(
+            qfactory=lambda _role: IdentityQuantizer(),
+            qfactory_key=("mha-declared-boundaries", 0),
+            fp8_mha=False,
+        )
+        active_recipe = recipe.CustomRecipe(
+            qfactory=lambda _role: IdentityQuantizer(),
+            qfactory_key=("mha-declared-boundaries", 1),
+            fp8_mha=True,
+        )
+
+        assert qkv.output_quantizer_role is None
+        assert model.proj.grad_input_quantizer_role is None
+        assert model.core_attention.output_quantizer_role is None
+        assert model.core_attention.grad_input_quantizer_role is None
+        assert all(owner._role_revision == 0 for owner in (qkv, model.proj, model.core_attention))
+
+        def resolved_roles(owner, target_recipe, *, fwd, num_quantizers):
+            _, roles = owner._resolve_quantizer_roles(  # pylint: disable=protected-access
+                recipe=target_recipe,
+                fwd=fwd,
+                num_quantizers=num_quantizers,
             )
+            assert roles is not None
+            return roles
 
-        model._update_output_quantizer_roles(True, False, False)
-        assert boundary_roles() == (expected_qkv, None, None, None)
+        assert resolved_roles(qkv, inactive_recipe, fwd=True, num_quantizers=3)[-1] == expected_qkv
+        assert (
+            resolved_roles(model.proj, inactive_recipe, fwd=False, num_quantizers=2)[-1]
+            == expected_do
+        )
 
-        model._update_output_quantizer_roles(False, True, False)
-        assert boundary_roles() == (None, expected_do, None, None)
+        # O/dQKV are also internal fused-attention descriptor slots. The
+        # DPA-local compatibility adapter retains its hint roles while the
+        # legacy CustomRecipe fp8_mha switch keeps those boundaries in BF16.
+        dpa_name = model.core_attention.name or ""
+        expected_o_hint = QuantizerRole(name=f"{dpa_name}.dpa_output" if dpa_name else "dpa_output")
+        expected_dqkv_hint = QuantizerRole(
+            name=f"{dpa_name}.dpa_grad_input" if dpa_name else "dpa_grad_input"
+        )
+        assert (
+            resolved_roles(
+                model.core_attention,
+                inactive_recipe,
+                fwd=True,
+                num_quantizers=9,
+            )[3:6]
+            == [expected_o_hint] * 3
+        )
+        assert (
+            resolved_roles(
+                model.core_attention,
+                inactive_recipe,
+                fwd=False,
+                num_quantizers=6,
+            )[:2]
+            == [expected_dqkv_hint] * 2
+        )
 
-        model._update_output_quantizer_roles(False, False, True)
-        assert boundary_roles() == (None, None, expected_o, expected_dqkv)
+        explicit_o = QuantizerRole(
+            module_type="linear",
+            tensor_type="input",
+            name="explicit-dpa-consumer",
+        )
+        model.core_attention.output_quantizer_role = explicit_o
+        assert (
+            resolved_roles(
+                model.core_attention,
+                inactive_recipe,
+                fwd=True,
+                num_quantizers=9,
+            )[3:6]
+            == [explicit_o] * 3
+        )
+        model.core_attention.output_quantizer_role = None
 
-        model._update_output_quantizer_roles(False, False, False)
-        assert boundary_roles() == (None, None, None, None)
+        assert resolved_roles(qkv, active_recipe, fwd=True, num_quantizers=3)[-1] == expected_qkv
+        assert (
+            resolved_roles(model.proj, active_recipe, fwd=False, num_quantizers=2)[-1]
+            == expected_do
+        )
+        assert (
+            resolved_roles(
+                model.core_attention,
+                active_recipe,
+                fwd=True,
+                num_quantizers=9,
+            )[3:6]
+            == [expected_o] * 3
+        )
+        assert (
+            resolved_roles(
+                model.core_attention,
+                active_recipe,
+                fwd=False,
+                num_quantizers=6,
+            )[:2]
+            == [expected_dqkv] * 2
+        )
 
     def test_mxfp8_qfactory_uses_plain_bf16_mha_boundaries(self, monkeypatch):
         """MXFP8 DPA stays internal; MHA boundary tensors remain plain BF16."""
@@ -2831,7 +3187,10 @@ class TestHybridGemmBitwiseIdenticalBlockFP8:
                 ),
             )
 
-        hybrid_recipe = recipe.CustomRecipe(qfactory=hybrid_block_fp8_factory)
+        hybrid_recipe = recipe.CustomRecipe(
+            qfactory=hybrid_block_fp8_factory,
+            qfactory_key=("test_hybrid_block_fp8_parity", 1),
+        )
         with autocast(enabled=True, recipe=hybrid_recipe):
             out_hybrid = model_hybrid(inp_hybrid)
         out_hybrid.float().sum().backward()
@@ -2892,7 +3251,10 @@ class TestHybridGemmBitwiseIdenticalNVFP4:
                 columnwise_quantizer=nvfp4_factory(role),
             )
 
-        hybrid_recipe = recipe.CustomRecipe(qfactory=hybrid_nvfp4_factory)
+        hybrid_recipe = recipe.CustomRecipe(
+            qfactory=hybrid_nvfp4_factory,
+            qfactory_key=("test_hybrid_nvfp4_parity", 1),
+        )
         torch.manual_seed(1202)
         torch.cuda.manual_seed_all(1202)
         with autocast(enabled=True, recipe=hybrid_recipe):
@@ -2942,7 +3304,10 @@ class TestHybridGemmBitwiseIdenticalNVFP4:
                 columnwise_quantizer=nvfp4_factory(role),
             )
 
-        hybrid_recipe = recipe.CustomRecipe(qfactory=hybrid_nvfp4_all_roles_factory)
+        hybrid_recipe = recipe.CustomRecipe(
+            qfactory=hybrid_nvfp4_all_roles_factory,
+            qfactory_key=("test_hybrid_nvfp4_all_roles", 1),
+        )
         torch.manual_seed(1203)
         torch.cuda.manual_seed_all(1203)
         with autocast(enabled=True, recipe=hybrid_recipe):
@@ -3004,7 +3369,10 @@ class TestHybridGemmMixedFormat:
                 return _make_nvfp4_quantizer()
             return _make_fp8_quantizer()
 
-        mixed_recipe = recipe.CustomRecipe(qfactory=mixed_factory)
+        mixed_recipe = recipe.CustomRecipe(
+            qfactory=mixed_factory,
+            qfactory_key=("test_mixed_fp8_nvfp4", 1),
+        )
 
         with autocast(enabled=True, recipe=mixed_recipe):
             out = model(inp)
@@ -3054,7 +3422,10 @@ class TestHybridGemmMixedFormat:
                 )
             return _make_fp8_quantizer()
 
-        mixed_recipe = recipe.CustomRecipe(qfactory=mixed_factory)
+        mixed_recipe = recipe.CustomRecipe(
+            qfactory=mixed_factory,
+            qfactory_key=("test_mixed_fp8_nvfp4_numerics", 1),
+        )
         with torch.no_grad():
             with autocast(enabled=True, recipe=mixed_recipe):
                 out_mixed = model(inp)
@@ -3185,7 +3556,7 @@ class TestHybridBiasGradient:
                 ),
             )
 
-        return factory
+        return recipe.quantizer_factory(key=("test_uniform_hybrid_fp8", 1))(factory)
 
     def test_bias_grad_matches_vanilla_fp8(self):
         torch.manual_seed(456)
@@ -3276,7 +3647,13 @@ class TestHybridScalingModeCompatibility:
                 return _make_nvfp4_quantizer()
             return _make_fp8_quantizer()
 
-        with autocast(enabled=True, recipe=recipe.CustomRecipe(qfactory=factory)):
+        with autocast(
+            enabled=True,
+            recipe=recipe.CustomRecipe(
+                qfactory=factory,
+                qfactory_key=("test_matching_columnwise_formats", 1),
+            ),
+        ):
             out = model(inp)
         out.float().sum().backward()
         assert inp.grad is not None
@@ -3308,7 +3685,13 @@ class TestHybridScalingModeCompatibility:
                 )
             return _make_fp8_quantizer()
 
-        with autocast(enabled=True, recipe=recipe.CustomRecipe(qfactory=factory)):
+        with autocast(
+            enabled=True,
+            recipe=recipe.CustomRecipe(
+                qfactory=factory,
+                qfactory_key=("test_mismatched_columnwise_formats", 1),
+            ),
+        ):
             out = model(inp)
         with pytest.raises(RuntimeError, match="scaling_mode"):
             out.float().sum().backward()
@@ -3343,7 +3726,10 @@ class TestHybridReversedDirection:
                 )
             return _make_nvfp4_quantizer()
 
-        mixed_recipe = recipe.CustomRecipe(qfactory=factory)
+        mixed_recipe = recipe.CustomRecipe(
+            qfactory=factory,
+            qfactory_key=("test_nvfp4_row_fp8_column_forward", 1),
+        )
         with torch.no_grad():
             with autocast(enabled=True, recipe=mixed_recipe):
                 out = model(inp)
@@ -3380,7 +3766,10 @@ class TestHybridReversedDirection:
                 return _make_fp8_quantizer()
             return _make_nvfp4_quantizer()
 
-        mixed_recipe = recipe.CustomRecipe(qfactory=factory)
+        mixed_recipe = recipe.CustomRecipe(
+            qfactory=factory,
+            qfactory_key=("test_nvfp4_row_fp8_column", 1),
+        )
         with autocast(enabled=True, recipe=mixed_recipe):
             out = model(inp)
 
@@ -3437,7 +3826,10 @@ class TestHybridMixedWithNonHybrid:
             model_hybrid,
             base_input,
             grad_output,
-            recipe.CustomRecipe(qfactory=mixed_factory),
+            recipe.CustomRecipe(
+                qfactory=mixed_factory,
+                qfactory_key=("test_single_hybrid_role", hybrid_role, 1),
+            ),
             seed=seed + 100,
         )
         native_result = _run_linear_forward_backward(
@@ -3611,7 +4003,9 @@ def _plain_linear_qfactory(operand_factory, grad_factory):
             return _make_role_aware_quantizer(grad_factory, role)
         return _make_role_aware_quantizer(operand_factory, role)
 
-    return factory
+    return recipe.quantizer_factory(
+        key=("test_plain_linear", operand_factory.__name__, grad_factory.__name__, 1)
+    )(factory)
 
 
 def _assert_linear_results_exact(actual, expected, *, output, input_grad, param_grads):
@@ -3670,7 +4064,10 @@ class TestHybridCrossFormatParametrized:
                 return _make_role_aware_quantizer(make_col_grad, role)
             return _make_role_aware_quantizer(make_row_operand, role)
 
-        hybrid_recipe = recipe.CustomRecipe(qfactory=hybrid_factory)
+        hybrid_recipe = recipe.CustomRecipe(
+            qfactory=hybrid_factory,
+            qfactory_key=("test_cross_format", row_name, col_name, 1),
+        )
         fprop_ref_recipe = recipe.CustomRecipe(
             qfactory=_plain_linear_qfactory(make_row_operand, make_row_grad)
         )
@@ -3942,7 +4339,17 @@ class TestHybridThreeFormats:
             model_hybrid,
             base_input,
             grad_output,
-            recipe.CustomRecipe(qfactory=hybrid_factory),
+            recipe.CustomRecipe(
+                qfactory=hybrid_factory,
+                qfactory_key=(
+                    "test_three_format",
+                    make_fprop.__name__,
+                    make_dgrad.__name__,
+                    make_wgrad.__name__,
+                    plain_grad_output,
+                    1,
+                ),
+            ),
             seed=seed + 100,
         )
         fprop_ref = _run_linear_forward(
@@ -4042,7 +4449,7 @@ def _make_hybrid_fp8_factory():
             device="cuda",
         )
 
-    return factory
+    return recipe.quantizer_factory(key=("test_hybrid_fp8_all_modules", 1))(factory)
 
 
 @requires_fp8
@@ -4074,7 +4481,13 @@ def test_fusible_norm_hybrid_output_falls_back_to_explicit_quantize(norm_cls):
         requires_grad=True,
     )
 
-    with autocast(enabled=True, recipe=recipe.CustomRecipe(qfactory=qfactory)):
+    with autocast(
+        enabled=True,
+        recipe=recipe.CustomRecipe(
+            qfactory=qfactory,
+            qfactory_key=("test_fusible_norm_hybrid_output", 1),
+        ),
+    ):
         out = forward(inp)
 
     assert isinstance(out, HybridQuantizedTensor)
@@ -4802,9 +5215,9 @@ class TestHybridGroupedLinearValidation:
                 operand_name="input",
             )
 
-    def test_builtin_recipe_skips_custom_grouped_validation(self, monkeypatch):
+    def test_builtin_recipe_skips_grouped_quantizer_validation(self, monkeypatch):
         def unexpected_validation(*_args, **_kwargs):
-            pytest.fail("built-in recipes must not run custom grouped-quantizer validation")
+            pytest.fail("built-in recipes must not run grouped-quantizer validation")
 
         monkeypatch.setattr(
             split_quantization,
@@ -4823,16 +5236,6 @@ class TestHybridGroupedLinearValidation:
 
         with torch.no_grad(), autocast(enabled=True, recipe=recipe.DelayedScaling()):
             model(tensor, m_splits)
-            assert model._custom_quantizer_cache == {}
-
-            def unexpected_custom_validation(*_args, **_kwargs):
-                pytest.fail("built-in recipes must not validate custom quantizers per forward")
-
-            monkeypatch.setattr(
-                model,
-                "_validate_custom_recipe_quantizers",
-                unexpected_custom_validation,
-            )
             model(tensor, m_splits)
 
     def test_validation_runs_only_with_quantizer_generation(self, monkeypatch):
@@ -4844,7 +5247,9 @@ class TestHybridGroupedLinearValidation:
                     columnwise_source=columnwise_source,
                 )
 
-            return qfactory
+            return recipe.quantizer_factory(
+                key=("test_grouped_linear_columnwise_source", columnwise_source, 1)
+            )(qfactory)
 
         model = GroupedLinear(2, 128, 128, bias=False, params_dtype=torch.bfloat16).cuda()
         tensor = torch.randn(128, 128, dtype=torch.bfloat16, device="cuda")
@@ -4867,18 +5272,18 @@ class TestHybridGroupedLinearValidation:
         with torch.no_grad(), autocast(enabled=True, recipe=original_recipe):
             model(tensor, m_splits)
         first_call_count = len(validation_calls)
-        first_generation = model._custom_quantizer_cache["scaling_fwd"]
+        first_generation = model._validated_quantizer_generations["scaling_fwd"]
         assert first_call_count > 0
 
         with torch.no_grad(), autocast(enabled=True, recipe=original_recipe):
             model(tensor, m_splits)
         assert len(validation_calls) == first_call_count
-        assert model._custom_quantizer_cache["scaling_fwd"] is first_generation
+        assert model._validated_quantizer_generations["scaling_fwd"] is first_generation
 
         rebuilt_recipe = recipe.CustomRecipe(qfactory=make_qfactory("rowwise_dequantized"))
         with torch.no_grad(), autocast(enabled=True, recipe=rebuilt_recipe):
             model(tensor, m_splits)
-        rebuilt_generation = model._custom_quantizer_cache["scaling_fwd"]
+        rebuilt_generation = model._validated_quantizer_generations["scaling_fwd"]
         assert len(validation_calls) > first_call_count
         assert rebuilt_generation is not first_generation
         assert rebuilt_generation[0].columnwise_source == "rowwise_dequantized"
@@ -4889,7 +5294,7 @@ class TestHybridGroupedLinearValidation:
             nonlocal input_count
             source = "original"
             if role is not None and role.tensor_type == "input":
-                source = "original" if input_count == 0 else "rowwise_dequantized"
+                source = "original" if input_count % 2 == 0 else "rowwise_dequantized"
                 input_count += 1
             return HybridQuantizer(
                 rowwise_quantizer=_make_fp8_quantizer(),
@@ -4897,14 +5302,31 @@ class TestHybridGroupedLinearValidation:
                 columnwise_source=source,
             )
 
-        mixed_recipe = recipe.CustomRecipe(qfactory=mixed_source_qfactory)
-        # A failed generation is never marked validated. Base metadata can then
-        # early-return on retry, so the O(1) guard must validate it again.
+        mixed_recipe = recipe.CustomRecipe(
+            qfactory=mixed_source_qfactory,
+            qfactory_key=("test_mixed_columnwise_sources", 1),
+        )
+        # A failed candidate is neither committed nor marked validated. The
+        # active runtime stays behind the requested revision, so each retry
+        # prepares and validates a fresh candidate.
+        rebuilt_runtime = model._quantization_runtime
+        rebuilt_backward_generation = model._validated_quantizer_generations["scaling_bwd"]
+        rebuilt_delayed_quantizer = model._delayed_scaling_input_quantizer
+        rebuilt_unsafe_quantizer = model._unsafe_requantization_input_quantizer
+        failed_validation_call_count = len(validation_calls)
         for _ in range(2):
             with pytest.raises(ValueError, match="mixed columnwise source policies"):
                 with torch.no_grad(), autocast(enabled=True, recipe=mixed_recipe):
                     model(tensor, m_splits)
-            assert model._custom_quantizer_cache["scaling_fwd"] is rebuilt_generation
+            assert model._quantization_runtime is rebuilt_runtime
+            assert model._validated_quantizer_generations["scaling_fwd"] is rebuilt_generation
+            assert (
+                model._validated_quantizer_generations["scaling_bwd"] is rebuilt_backward_generation
+            )
+            assert model._delayed_scaling_input_quantizer is rebuilt_delayed_quantizer
+            assert model._unsafe_requantization_input_quantizer is rebuilt_unsafe_quantizer
+            assert len(validation_calls) > failed_validation_call_count
+            failed_validation_call_count = len(validation_calls)
 
         # Stale invalid recipe metadata must not affect the non-quantized path.
         with torch.no_grad():
@@ -4967,6 +5389,7 @@ class TestHybridQuantizedModelInit:
             grad_factory=lambda: Float8CurrentScalingQuantizer(
                 tex.DType.kFloat8E5M2, device="cuda"
             ),
+            qfactory_key=("test_quantized_model_init_hybrid_fp8", 1),
         )
 
     def test_linear_weight_is_hybrid_quantized_tensor(self):
@@ -5070,6 +5493,7 @@ class TestHybridWeightWorkspaceCache:
             grad_factory=lambda: Float8CurrentScalingQuantizer(
                 tex.DType.kFloat8E5M2, device="cuda"
             ),
+            qfactory_key=("test_weight_workspace_hybrid_fp8", 1),
         )
 
     @_XFAIL_HOPPER_COLUMNWISE_PER_TENSOR_FP8
@@ -5175,6 +5599,7 @@ class TestHybridUpdateWeightQuantizers:
             grad_factory=lambda: Float8CurrentScalingQuantizer(
                 tex.DType.kFloat8E5M2, device="cuda"
             ),
+            qfactory_key=("test_weight_quantizer_update_hybrid_fp8", 1),
         )
 
     def test_quantized_param_survives_multiple_forward_passes(self):
@@ -5241,6 +5666,7 @@ def _hybrid_recipe_fp8_current():
         row_factory=lambda: Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda"),
         col_factory=lambda: Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda"),
         grad_factory=lambda: Float8CurrentScalingQuantizer(tex.DType.kFloat8E5M2, device="cuda"),
+        qfactory_key=("test_hybrid_fp8_current", 1),
     )
 
 
@@ -5273,6 +5699,7 @@ def _hybrid_recipe_fp8_delayed():
         row_factory=lambda: _make_delayed_quantizer(tex.DType.kFloat8E4M3),
         col_factory=lambda: _make_delayed_quantizer(tex.DType.kFloat8E4M3),
         grad_factory=lambda: _make_delayed_quantizer(tex.DType.kFloat8E5M2),
+        qfactory_key=("test_hybrid_fp8_delayed", 1),
     )
 
 
@@ -5289,6 +5716,7 @@ def _hybrid_recipe_fp8_delayed_row_current_col():
         # grad_factory matches the columnwise direction so the wgrad GEMM's
         # grad_output sub-quantizer pairs with the input/weight col format.
         grad_factory=lambda: Float8CurrentScalingQuantizer(tex.DType.kFloat8E5M2, device="cuda"),
+        qfactory_key=("test_hybrid_fp8_delayed_row_current_column", 1),
     )
 
 
@@ -5302,6 +5730,7 @@ def _hybrid_recipe_fp8_current_row_delayed_col():
         row_factory=lambda: Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda"),
         col_factory=lambda: _make_delayed_quantizer(tex.DType.kFloat8E4M3),
         grad_factory=lambda: _make_delayed_quantizer(tex.DType.kFloat8E5M2),
+        qfactory_key=("test_hybrid_fp8_current_row_delayed_column", 1),
     )
 
 
@@ -5311,6 +5740,7 @@ def _hybrid_recipe_mxfp8():
         row_factory=lambda: MXFP8Quantizer(tex.DType.kFloat8E4M3),
         col_factory=lambda: MXFP8Quantizer(tex.DType.kFloat8E4M3),
         grad_factory=lambda: MXFP8Quantizer(tex.DType.kFloat8E5M2),
+        qfactory_key=("test_hybrid_mxfp8", 1),
     )
 
 
@@ -5326,6 +5756,7 @@ def _hybrid_recipe_blockwise():
         grad_factory=lambda: Float8BlockQuantizer(
             fp8_dtype=tex.DType.kFloat8E5M2, rowwise=True, columnwise=True
         ),
+        qfactory_key=("test_hybrid_blockwise", 1),
     )
 
 
@@ -5885,6 +6316,7 @@ class TestHybridQuantizeMasterWeights:
             grad_factory=lambda: Float8CurrentScalingQuantizer(
                 tex.DType.kFloat8E5M2, device="cuda"
             ),
+            qfactory_key=("test_master_weight_mxfp8_columnwise", 1),
         )
         # Shape must be a multiple of MXFP8 block size (32) on both axes.
         weight, hp_master = _build_hybrid_linear_weight(64, 128, hybrid_recipe)
@@ -5918,6 +6350,7 @@ class TestHybridQuantizeMasterWeights:
             grad_factory=lambda: NVFP4Quantizer(
                 fp4_dtype=tex.DType.kFloat4E2M1, with_2d_quantization=False
             ),
+            qfactory_key=("test_master_weight_nvfp4_rowwise", 1),
         )
         weight, hp_master = _build_hybrid_linear_weight(64, 128, hybrid_recipe)
         master_flat = hp_master.view(-1).contiguous()
@@ -5939,6 +6372,7 @@ class TestHybridQuantizeMasterWeights:
             grad_factory=lambda: Float8CurrentScalingQuantizer(
                 tex.DType.kFloat8E5M2, device="cuda"
             ),
+            qfactory_key=("test_master_weight_nvfp4_columnwise", 1),
         )
         weight, hp_master = _build_hybrid_linear_weight(64, 128, hybrid_recipe)
         master_flat = hp_master.view(-1).contiguous()
@@ -5984,6 +6418,7 @@ class TestHybridQuantizeMasterWeights:
             grad_factory=lambda: Float8CurrentScalingQuantizer(
                 tex.DType.kFloat8E5M2, device="cuda"
             ),
+            qfactory_key=("test_master_weight_blockwise_columnwise", 1),
         )
         weight, hp_master = _build_hybrid_linear_weight(128, 128, hybrid_recipe)
         master_flat = hp_master.view(-1).contiguous()
@@ -6142,6 +6577,7 @@ class TestHybridRecipeCorrespondence:
             grad_factory=lambda: Float8CurrentScalingQuantizer(
                 tex.DType.kFloat8E5M2, device="cuda"
             ),
+            qfactory_key=("test_recipe_correspondence_hybrid_fp8", 1),
         )
 
     def test_hybrid_param_with_matching_recipe_does_not_raise(self):
@@ -6241,6 +6677,7 @@ class TestHybridFusedAdam:
             grad_factory=lambda: Float8CurrentScalingQuantizer(
                 tex.DType.kFloat8E5M2, device="cuda"
             ),
+            qfactory_key=("test_fused_adam_hybrid_fp8", 1),
         )
         with quantized_model_init(enabled=True, recipe=hybrid_recipe):
             model = Linear(256, 256, params_dtype=torch.bfloat16).cuda()
@@ -6344,6 +6781,7 @@ class TestHybridQuantizedParamsEndToEnd:
             grad_factory=lambda: Float8CurrentScalingQuantizer(
                 tex.DType.kFloat8E5M2, device="cuda"
             ),
+            qfactory_key=("test_end_to_end_hybrid_fp8", 1),
         )
         with quantized_model_init(enabled=True, recipe=hybrid_recipe):
             model = Linear(256, 256, params_dtype=torch.bfloat16).cuda()
@@ -6467,7 +6905,10 @@ class TestHybridMixedFormatQuantizedParams:
                 return nvfp4_factory(role)
             return MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)
 
-        hybrid_recipe = recipe.CustomRecipe(qfactory=qfactory)
+        hybrid_recipe = recipe.CustomRecipe(
+            qfactory=qfactory,
+            qfactory_key=("test_mxfp8_nvfp4_quantized_params", 1),
+        )
         with quantized_model_init(enabled=True, recipe=hybrid_recipe):
             model = Linear(in_features, out_features, params_dtype=torch.bfloat16).cuda()
         return model, hybrid_recipe
@@ -6755,7 +7196,10 @@ class TestQuantizedParamsEquivalenceFP8CurrentScaling(_QuantizedParamsEquivalenc
         return recipe.Float8CurrentScaling()
 
     def _hybrid_recipe(self):
-        return recipe.CustomRecipe(qfactory=_hybrid_fp8_current_qfactory)
+        return recipe.CustomRecipe(
+            qfactory=_hybrid_fp8_current_qfactory,
+            qfactory_key=("test_hybrid_fp8_current", 1),
+        )
 
     def test_equivalence(self):
         self._test_equivalence()
@@ -6769,7 +7213,10 @@ class TestQuantizedParamsEquivalenceMXFP8(_QuantizedParamsEquivalenceBase):
         return recipe.MXFP8BlockScaling()
 
     def _hybrid_recipe(self):
-        return recipe.CustomRecipe(qfactory=_hybrid_mxfp8_qfactory)
+        return recipe.CustomRecipe(
+            qfactory=_hybrid_mxfp8_qfactory,
+            qfactory_key=("test_hybrid_mxfp8", 1),
+        )
 
     def test_equivalence(self):
         self._test_equivalence()
@@ -6783,7 +7230,10 @@ class TestQuantizedParamsEquivalenceBlockFP8(_QuantizedParamsEquivalenceBase):
         return recipe.Float8BlockScaling()
 
     def _hybrid_recipe(self):
-        return recipe.CustomRecipe(qfactory=_hybrid_block_fp8_qfactory)
+        return recipe.CustomRecipe(
+            qfactory=_hybrid_block_fp8_qfactory,
+            qfactory_key=("test_hybrid_block_fp8", 1),
+        )
 
     def test_equivalence(self):
         self._test_equivalence()
@@ -6800,7 +7250,10 @@ class TestQuantizedParamsEquivalenceNVFP4(_QuantizedParamsEquivalenceBase):
         return recipe.NVFP4BlockScaling()
 
     def _hybrid_recipe(self):
-        return recipe.CustomRecipe(qfactory=_hybrid_nvfp4_qfactory)
+        return recipe.CustomRecipe(
+            qfactory=_hybrid_nvfp4_qfactory,
+            qfactory_key=("test_hybrid_nvfp4", 1),
+        )
 
     def test_equivalence(self):
         self._test_equivalence()
@@ -7106,6 +7559,7 @@ class TestHybridActivationRecompute:
             row_factory=_fp8_row_factory,
             col_factory=_fp8_col_factory,
             grad_factory=_fp8_grad_factory,
+            qfactory_key=("test_recompute_hybrid_fp8", 1),
         )
 
     def _same_format_mxfp8_recipe(self):
@@ -7115,6 +7569,7 @@ class TestHybridActivationRecompute:
             row_factory=_mxfp8_factory,
             col_factory=_mxfp8_factory,
             grad_factory=lambda: MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E5M2),
+            qfactory_key=("test_recompute_hybrid_mxfp8", 1),
         )
 
     def _cross_format_fp8_mxfp8_recipe(self):
@@ -7126,6 +7581,7 @@ class TestHybridActivationRecompute:
             row_factory=_fp8_row_factory,
             col_factory=_mxfp8_factory,
             grad_factory=_mxfp8_factory,
+            qfactory_key=("test_recompute_fp8_mxfp8", 1),
         )
 
     def _run_linear(self, recipe_obj, *, checkpoint_fn=None):
@@ -7652,6 +8108,7 @@ class TestHybridActivationRecompute:
             row_factory=row_factory,
             col_factory=row_factory,
             grad_factory=grad_factory,
+            qfactory_key=("test_checkpoint_hybrid", format_name, 1),
         )
 
         def fn(model, inp):

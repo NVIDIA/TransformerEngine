@@ -31,6 +31,7 @@ from transformer_engine.pytorch.quantization import (
     MXFP8BlockScalingRecipeState,
     Float8CurrentScalingRecipeState,
     Float8BlockScalingRecipeState,
+    _QuantizationRuntime,
 )
 from transformer_engine.pytorch.tensor.storage.float8_tensor_storage import Float8TensorStorage
 from transformer_engine.pytorch.tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
@@ -134,6 +135,8 @@ def _infer_custom_dpa_local_recipes(
             reduce_amax=ds_recipe.reduce_amax,
             fp8_dpa=fp8_recipe.fp8_dpa,
             fp8_mha=fp8_recipe.fp8_mha,
+            amax_compute_algo_key=ds_recipe.amax_compute_algo_key,
+            scaling_factor_compute_algo_key=ds_recipe.scaling_factor_compute_algo_key,
         )
 
     if isinstance(qkv_quantizer, Float8CurrentScalingQuantizer):
@@ -667,6 +670,10 @@ class DotProductAttention(TransformerEngineBaseModule):
                     p2p between sub-groups (e.g., via IBLink).
     """
 
+    def _get_quantization_runtime_num_gemms(self) -> int:
+        """Return the fixed CustomRecipe DPA quantizer slot layout."""
+        return 3
+
     def __init__(
         self,
         num_attention_heads: int,
@@ -691,8 +698,15 @@ class DotProductAttention(TransformerEngineBaseModule):
         softmax_type: str = "vanilla",
         return_max_logit: Optional[bool] = False,
         name: Optional[str] = None,
+        *,
+        _declared_output_quantizer_role: Optional[QuantizerRole] = None,
+        _declared_grad_input_quantizer_role: Optional[QuantizerRole] = None,
     ) -> None:
-        super().__init__(name=name)
+        super().__init__(
+            name=name,
+            _declared_output_quantizer_role=_declared_output_quantizer_role,
+            _declared_grad_input_quantizer_role=_declared_grad_input_quantizer_role,
+        )
 
         # Cache the native recipe labels inferred from custom DPA quantizers.
         # ``init_fp8_metadata`` runs on every forward, while the quantizers only
@@ -934,26 +948,6 @@ class DotProductAttention(TransformerEngineBaseModule):
         fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
         if fp8_recipe.custom():
             super().init_fp8_metadata(num_gemms=num_gemms)
-            fwd_quantizers = self.quantizers.get("scaling_fwd", ())
-            cache_key = (
-                id(self.fp8_meta.get("scaling_fwd")),
-                tuple(id(quantizer) for quantizer in fwd_quantizers),
-                fp8_recipe.fp8_format,
-                fp8_recipe.fp8_dpa,
-                fp8_recipe.fp8_mha,
-            )
-            if cache_key != self._custom_dpa_local_recipes_cache_key:
-                self._custom_dpa_local_recipes_cache = _infer_custom_dpa_local_recipes(
-                    fp8_recipe, self.fp8_meta, self.quantizers
-                )
-                self._custom_dpa_local_recipes_cache_key = cache_key
-
-            if self._custom_dpa_local_recipes_cache is None:
-                # Do not leave labels from an earlier supported quantizer
-                # family attached after a rebuild to an unsupported family.
-                self.fp8_meta.pop("local_recipes", None)
-            else:
-                self.fp8_meta["local_recipes"] = self._custom_dpa_local_recipes_cache
             return
 
         # switch/append recipe: fp8_recipe stays unchanged, but DPA.fp8_meta["recipe"] may be set to
@@ -1160,6 +1154,90 @@ class DotProductAttention(TransformerEngineBaseModule):
             # Clear cached workspaces as they were created with the old recipe/quantizer type
             self._fp8_workspaces.clear()
 
+    def _invalidate_dpa_runtime_caches(self) -> None:
+        """Invalidate DPA caches after a committed quantizer replacement."""
+        self._custom_dpa_local_recipes_cache_key = None
+        self._custom_dpa_local_recipes_cache = None
+        self._qkv_capabilities_quantizer = None
+        self._qkv_capabilities_cache = None
+        _attention_backends["backend_selection_requires_update"] = True
+
+    def _activate_quantization_runtime(
+        self,
+        candidate: _QuantizationRuntime,
+        *,
+        validation_result: Optional[List[Recipe]] = None,
+    ) -> None:
+        """Publish a CustomRecipe DPA runtime and its derived cache state."""
+        super()._activate_quantization_runtime(
+            candidate,
+            validation_result=validation_result,
+        )
+        self._invalidate_dpa_runtime_caches()
+
+        cache_key = (
+            id(self.fp8_meta.get("scaling_fwd")),
+            tuple(id(quantizer) for quantizer in candidate.forward_quantizers),
+            candidate.recipe.fp8_format,
+            candidate.recipe.fp8_dpa,
+            candidate.recipe.fp8_mha,
+        )
+        local_recipes = validation_result
+        self._custom_dpa_local_recipes_cache_key = cache_key
+        self._custom_dpa_local_recipes_cache = local_recipes
+        if local_recipes is None:
+            # Do not leave labels from an earlier supported quantizer family
+            # attached after a rebuild to an unsupported family.
+            self.fp8_meta.pop("local_recipes", None)
+        else:
+            self.fp8_meta["local_recipes"] = local_recipes
+
+    def _validate_quantization_runtime(
+        self,
+        candidate: _QuantizationRuntime,
+    ) -> Optional[List[Recipe]]:
+        """Validate an FP8-attention candidate before publishing it."""
+        super()._validate_quantization_runtime(candidate)
+        if candidate.recipe.fp8_dpa:
+            if len(candidate.forward_quantizers) != 9 or len(candidate.backward_quantizers) != 6:
+                raise ValueError(
+                    "FP8 DotProductAttention requires 9 forward and 6 backward quantizer slots."
+                )
+            qkv_quantizer, _, s_quantizer, _, _, dp_quantizer = dpa_utils.get_attention_quantizers(
+                True,
+                {
+                    "scaling_fwd": candidate.forward_quantizers,
+                    "scaling_bwd": candidate.backward_quantizers,
+                },
+            )
+            from transformer_engine.pytorch.tensor.float8_tensor import (
+                Float8CurrentScalingQuantizer,
+                Float8Quantizer,
+            )
+
+            # Native current-scaling DPA uses delayed scaling for the two
+            # softmax-intermediate kernel slots. The fused kernel does not
+            # support an all-current-scaling slot topology.
+            if isinstance(qkv_quantizer, Float8CurrentScalingQuantizer) and not (
+                isinstance(s_quantizer, Float8Quantizer)
+                and isinstance(dp_quantizer, Float8Quantizer)
+            ):
+                raise TypeError(
+                    "Float8CurrentScaling DPA requires delayed scaling for S and dP, "
+                    f"but got S={type(s_quantizer).__name__} and "
+                    f"dP={type(dp_quantizer).__name__}. Return DelayedScalingRequest "
+                    "for DPA tensor types 's' and 'dp'."
+                )
+
+        return _infer_custom_dpa_local_recipes(
+            candidate.recipe,
+            {"scaling_fwd": candidate.forward_states[0]},
+            {
+                "scaling_fwd": candidate.forward_quantizers,
+                "scaling_bwd": candidate.backward_quantizers,
+            },
+        )
+
     def get_qkv_quantization_capabilities(self) -> Tuple[bool, bool]:
         """Return MHA boundary capabilities from the canonical QKV quantizer.
 
@@ -1255,15 +1333,6 @@ class DotProductAttention(TransformerEngineBaseModule):
             for i in range(len(recipe))
         ]
 
-        # Reached the rebuild path because ``fp8_meta_tensors_initialized``
-        # was flipped to False after first init — most commonly because the
-        # base-class ``output_quantizer_role`` / ``grad_input_quantizer_role``
-        # setter invalidated state when MHA wired boundary roles. That
-        # setter is recipe-agnostic, so this code fires for built-in
-        # recipes too even though they don't consume role information here
-        # (e.g. ``test_dpa_fp8_extra_state`` reaches this path with pure
-        # DelayedScaling).
-        #
         # Rebuilding the recipe state must preserve persistent training
         # buffers (delayed-scaling ``scale`` / ``amax_history``) so the new
         # quantizer instances and the ``FP8GlobalStateManager`` reduction
@@ -1286,11 +1355,35 @@ class DotProductAttention(TransformerEngineBaseModule):
         for recipe_state in recipe_states:
             self.quantizers[fp8_meta_tensor_key].extend(recipe_state.make_quantizers())
 
+    def _resolve_boundary_quantizer_role(
+        self,
+        *,
+        recipe: Recipe,
+        fwd: bool,
+    ) -> Optional[QuantizerRole]:
+        """Keep the legacy inactive-boundary policy local to DPA.
+
+        O and dQKV are both composed-module boundaries and internal
+        fused-attention descriptor slots. With a ``CustomRecipe`` and the
+        legacy ``fp8_mha`` switch disabled, the external boundaries stay in
+        BF16 but those internal slots still require DPA-compatible placeholder
+        quantizers. Ignore only the declared default in that mode so
+        ``get_quantizer_roles`` emits its existing DPA hints. Explicit public
+        overrides continue to win.
+        """
+        explicit_role = self._output_quantizer_role if fwd else self._grad_input_quantizer_role
+        if explicit_role is not None:
+            return explicit_role
+        if recipe.custom() and not recipe.fp8_mha:
+            return None
+        return super()._resolve_boundary_quantizer_role(recipe=recipe, fwd=fwd)
+
     def get_quantizer_roles(
         self,
         *,
         fwd: bool,
         num_quantizers: int,
+        boundary_role: Optional[QuantizerRole],
     ) -> Optional[List[QuantizerRole]]:
         """QuantizerRole list for quantizers used by ``DotProductAttention``.
 
@@ -1329,10 +1422,8 @@ class DotProductAttention(TransformerEngineBaseModule):
 
         **Boundary slots** — O (fwd) and dQKV (bwd) leave DPA and enter
         the next module (e.g. proj linear).  DPA does not know that
-        consumer, so these default to ``None``.  The parent module
-        (e.g. ``MultiheadAttention``) can set
-        :attr:`output_quantizer_role` / :attr:`grad_input_quantizer_role`
-        to fill in the consumer identity.
+        consumer, so the planner supplies ``boundary_role`` from composed MHA
+        topology or an explicit caller override.
 
         When not set, a hint-only ``QuantizerRole`` with empty
         ``module_type`` / ``tensor_type`` is emitted, with ``name``
@@ -1343,7 +1434,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         name = self.name or ""
         if fwd:
             qkv_role = QuantizerRole(module_type="dpa", tensor_type="qkv", name=name)
-            o_role = self._output_quantizer_role
+            o_role = boundary_role
             if o_role is None:
                 o_role = QuantizerRole(name=f"{name}.dpa_output" if name else "dpa_output")
             s_role = QuantizerRole(module_type="dpa", tensor_type="s", name=name)
@@ -1359,7 +1450,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                 s_role,  # Group 3: S (post-softmax, input to S·V)
             ]
         else:
-            dqkv_role = self._grad_input_quantizer_role
+            dqkv_role = boundary_role
             if dqkv_role is None:
                 dqkv_role = QuantizerRole(
                     name=f"{name}.dpa_grad_input" if name else "dpa_grad_input"
@@ -1678,14 +1769,6 @@ class DotProductAttention(TransformerEngineBaseModule):
                 ), "Upgrade PyTorch version to get RNG manipulation support for cuda graph capture."
 
             # checks for FP8
-            if self.fp8:
-                if self.fp8_meta["recipe"].fp8_mha:
-                    if not self.fp8_meta["recipe"].fp8_dpa:
-                        self.fp8_meta["recipe"].fp8_dpa = True
-                        self.logger.warning(
-                            """Forcing fp8_meta["recipe"].fp8_dpa=True due to """
-                            """fp8_meta["recipe"].fp8_mha=True"""
-                        )
             if self.fp8 and self.fp8_meta["recipe"].fp8_dpa:
                 forward_dtype = get_fp8_te_dtype(self.fp8_meta["recipe"], fprop_tensor=True)
                 backward_dtype = get_fp8_te_dtype(self.fp8_meta["recipe"], fprop_tensor=False)

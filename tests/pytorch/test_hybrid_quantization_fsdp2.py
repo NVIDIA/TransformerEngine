@@ -89,7 +89,17 @@ def _make_hybrid_param_for_dispatch(
     row_factory, col_factory, grad_factory=None, in_features=256, out_features=256
 ):
     """Create a HybridQuantizedTensor weight via quantized_model_init for dispatch tests."""
-    hybrid_recipe = _hybrid_custom_recipe(row_factory, col_factory, grad_factory)
+    factory_names = tuple(
+        getattr(factory, "__name__", type(factory).__name__)
+        for factory in (row_factory, col_factory, grad_factory)
+        if factory is not None
+    )
+    hybrid_recipe = _hybrid_custom_recipe(
+        row_factory,
+        col_factory,
+        grad_factory,
+        qfactory_key=("fsdp2-dispatch", factory_names),
+    )
     with quantized_model_init(enabled=True, recipe=hybrid_recipe):
         model = Linear(in_features, out_features, params_dtype=torch.bfloat16).cuda()
     return model.weight
@@ -772,11 +782,24 @@ class TestHybridTorchDispatchFSDP2Ops:
 def _make_fsdp_protocol_param(config_name):
     """Create a HybridQuantizedTensor weight for FSDP protocol tests."""
     if config_name == "fp8_fp8":
-        r = _hybrid_custom_recipe(_fp8_row_factory, _fp8_col_factory, _fp8_grad_factory)
+        r = _hybrid_custom_recipe(
+            _fp8_row_factory,
+            _fp8_col_factory,
+            _fp8_grad_factory,
+            qfactory_key=("fsdp2-protocol", config_name),
+        )
     elif config_name == "mxfp8_fp8":
-        r = _hybrid_custom_recipe(_mxfp8_factory, _fp8_col_factory, _fp8_grad_factory)
+        r = _hybrid_custom_recipe(
+            _mxfp8_factory,
+            _fp8_col_factory,
+            _fp8_grad_factory,
+            qfactory_key=("fsdp2-protocol", config_name),
+        )
     elif config_name == "block_fp8":
-        r = recipe.CustomRecipe(qfactory=_hybrid_block_fp8_qfactory)
+        r = recipe.CustomRecipe(
+            qfactory=_hybrid_block_fp8_qfactory,
+            qfactory_key=("fsdp2-protocol", config_name),
+        )
     else:
         raise ValueError(f"Unknown config: {config_name}")
     with quantized_model_init(enabled=True, recipe=r):
@@ -1080,6 +1103,7 @@ class TestHybridFsdpRoundtrip:
             _fp8_row_factory,
             _fp8_col_factory,
             _fp8_grad_factory,
+            qfactory_key=("fsdp2-scale-refresh", 1),
         )
         with quantized_model_init(enabled=True, recipe=hybrid_recipe):
             model = Linear(256, 256, params_dtype=torch.bfloat16).cuda()
@@ -1160,6 +1184,7 @@ class TestHybridFsdpRoundtrip:
         hybrid_recipe = _hybrid_custom_recipe(
             row_factory=lambda: NVFP4Quantizer(),
             col_factory=lambda: NVFP4Quantizer(),
+            qfactory_key=("fsdp2-nvfp4-rejection", 1),
         )
         with quantized_model_init(enabled=True, recipe=hybrid_recipe):
             model = Linear(256, 256, params_dtype=torch.bfloat16).cuda()
@@ -1199,6 +1224,7 @@ class TestHybridMakeLike:
             _fp8_row_factory,
             _fp8_col_factory,
             _fp8_grad_factory,
+            qfactory_key=("fsdp2-make-like", 1),
         )
         with quantized_model_init(enabled=True, recipe=hybrid_recipe):
             model = Linear(256, 256, params_dtype=torch.bfloat16).cuda()
@@ -1471,6 +1497,7 @@ class TestHybridFsdpPostAllGatherUpdateUsage:
             _fp8_row_factory,
             _fp8_col_factory,
             _fp8_grad_factory,
+            qfactory_key=("fsdp2-post-gather-update-usage", 1),
         )
         with quantized_model_init(enabled=True, recipe=hybrid_recipe):
             model = Linear(64, 64, params_dtype=torch.bfloat16).cuda()

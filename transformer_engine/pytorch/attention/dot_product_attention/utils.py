@@ -2748,8 +2748,8 @@ def get_attention_quantizers(fp8, quantizers):
                 f"but {_name} quantizer is {type(_q).__name__}. "
                 "When using CustomRecipe with fp8_dpa=True, ensure the factory returns an "
                 "FP8 quantizer (Float8Quantizer, Float8CurrentScalingQuantizer, or "
-                "MXFP8Quantizer) for all DPA roles (module_type='dpa') and for None roles "
-                "(boundary slots like O output and dQKV grad-input)."
+                "MXFP8Quantizer) for every role assigned to a DPA tensor slot. In composed "
+                "attention, O and dQKV carry their downstream linear consumer roles."
             )
 
     return QKV_quantizer, O_quantizer, S_quantizer, dQKV_quantizer, dO_quantizer, dP_quantizer

@@ -751,6 +751,73 @@ def test_make_graphed_callables_with_kwargs(
     assert_all_equal(outputs, graph_outputs)
 
 
+@pytest.mark.skipif(not fp8_available, reason="FP8 is not available")
+def test_graphed_callable_rejects_changed_quantization_recipe(monkeypatch) -> None:
+    """Validate the capture recipe once per revision and reject mismatches."""
+    model_config = model_configs["small"]
+    dtype = torch.bfloat16
+    captured_recipe = recipe.Float8CurrentScaling()
+    equal_recipe = copy.deepcopy(captured_recipe)
+    model = Linear(
+        model_config.hidden_size,
+        model_config.hidden_size,
+        device="cuda",
+        params_dtype=dtype,
+    )
+    for param in model.parameters():
+        param.grad = torch.empty_like(param)
+    model = make_graphed_callables(
+        model,
+        (generate_data(model_config, dtype, warmup=True),),
+        enabled=True,
+        recipe=captured_recipe,
+    )
+
+    get_config_calls = 0
+    get_quantizer_config = FP8GlobalStateManager.get_quantizer_config
+
+    def counted_get_quantizer_config(cls):
+        nonlocal get_config_calls
+        get_config_calls += 1
+        return get_quantizer_config()
+
+    monkeypatch.setattr(
+        FP8GlobalStateManager,
+        "get_quantizer_config",
+        classmethod(counted_get_quantizer_config),
+    )
+
+    try:
+        with autocast(enabled=True, recipe=equal_recipe):
+            for _ in range(2):
+                output = model(generate_data(model_config, dtype))
+                output.backward(generate_data(model_config, dtype, requires_grad=False))
+        assert get_config_calls == 1
+
+        # Re-entering after autocast restores the previous recipe advances the
+        # revision. Validate the equal semantic configuration once again, then
+        # stay on the integer-only fast path.
+        with autocast(enabled=True, recipe=equal_recipe):
+            for _ in range(2):
+                output = model(generate_data(model_config, dtype))
+                output.backward(generate_data(model_config, dtype, requires_grad=False))
+        assert get_config_calls == 2
+
+        # Mutating and reusing the caller-owned recipe must not mutate the
+        # immutable semantic configuration saved at capture time.
+        captured_recipe.fp8_quant_fwd_inp = recipe.QParams(amax_epsilon=0.25)
+        with autocast(enabled=True, recipe=captured_recipe):
+            for _ in range(2):
+                with pytest.raises(
+                    RuntimeError,
+                    match="Recapture the graph with the new recipe",
+                ):
+                    model(generate_data(model_config, dtype))
+        assert get_config_calls == 3
+    finally:
+        reset_graphs(model)
+
+
 def test_make_graphed_callables_returns_owned_parameter_grads() -> None:
     """Parameter grads returned from graph replay must not alias static graph buffers."""
     reset_rng_states()

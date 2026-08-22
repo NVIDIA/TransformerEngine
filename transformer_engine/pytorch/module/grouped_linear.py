@@ -33,7 +33,12 @@ from .base import (
 )
 from ._common import can_reconstruct_wgrad_input_from_original, WeightGradStore
 from . import _split_quantization
-from ..quantization import FP8GlobalStateManager, QuantizerRole
+from ..quantization import (
+    FP8GlobalStateManager,
+    Float8CurrentScalingRecipeState,
+    QuantizerRole,
+    _QuantizationRuntime,
+)
 from ..utils import (
     divide,
     cast_if_needed,
@@ -648,6 +653,8 @@ class _GroupedLinear(torch.autograd.Function):
             cache_weight,
             skip_fp8_weight_update,
             save_original_input,
+            delayed_scaling_input_quantizer,
+            unsafe_requantization_input_quantizer,
             debug,
             single_grouped_weight,
             single_grouped_bias,
@@ -675,30 +682,30 @@ class _GroupedLinear(torch.autograd.Function):
 
         backward_needs_input = is_grad_enabled and weight_requires_grad
         if backward_override is None and save_original_input and backward_needs_input:
-            if recipe is not None and recipe.delayed():
-                raise ValueError("DelayedScaling recipe is not supported with save_original_input")
-
-            # Megatron-Core may enable this automatically to reuse an activation
-            # already retained by an upstream operation. Built-in recipes guarantee
-            # group homogeneity, while CustomRecipe generations are validated once,
-            # so runtime safety can be determined from expert 0.
-            if recipe is not None:
-                input_quantizer = input_quantizers[0]
-                if isinstance(input_quantizer, Float8Quantizer):
+            if delayed_scaling_input_quantizer is not None:
+                if recipe is not None and recipe.custom():
                     warnings.warn(
                         "save_original_input is incompatible with delayed-scaling quantizers "
                         "(Float8Quantizer). Disabling save_original_input for this module.",
                         stacklevel=2,
                     )
                     save_original_input = False
-                elif not can_reconstruct_wgrad_input_from_original(input_quantizer):
-                    warnings.warn(
-                        "Ignoring save_original_input=True because the input quantizer cannot "
-                        "safely reconstruct the backward operand from the original input "
-                        f"({input_quantizer}).",
-                        stacklevel=2,
+                else:
+                    raise ValueError(
+                        "DelayedScaling recipe is not supported with save_original_input"
                     )
-                    save_original_input = False
+
+            # Megatron-Core may enable this automatically to reuse an activation
+            # already retained by an upstream operation. Quantizer generations
+            # are classified once before their runtime is committed.
+            if save_original_input and unsafe_requantization_input_quantizer is not None:
+                warnings.warn(
+                    "Ignoring save_original_input=True because the input quantizer cannot "
+                    "safely reconstruct the backward operand from the original input "
+                    f"({unsafe_requantization_input_quantizer}).",
+                    stacklevel=2,
+                )
+                save_original_input = False
 
         # Configure quantizers
         if input_quantizers[0] is not None:
@@ -1612,6 +1619,10 @@ class GroupedLinear(TransformerEngineBaseModule):
     The TP communication should be handled in the dispatch and combine stages of MoE models.
     """
 
+    def _get_quantization_runtime_num_gemms(self) -> int:
+        """Return the configured grouped-GEMM quantizer slot layout."""
+        return self.num_gemms
+
     def __init__(
         self,
         num_gemms: int,
@@ -1703,8 +1714,10 @@ class GroupedLinear(TransformerEngineBaseModule):
             "fwd": 3,
             "bwd": 2,
         }
-        self._custom_quantizer_cache = {}
         self._uses_custom_recipe = False
+        self._validated_quantizer_generations = {}
+        self._delayed_scaling_input_quantizer = None
+        self._unsafe_requantization_input_quantizer = None
 
         if tp_group is None:
             self.tp_size = tp_size
@@ -1786,38 +1799,31 @@ class GroupedLinear(TransformerEngineBaseModule):
 
     def set_meta_tensor(self, fwd: bool, recipe: Recipe) -> None:
         """Init scales and amaxes for fwd | bwd."""
+        if recipe.float8_current_scaling() and self.tp_size > 1:
+            raise ValueError(
+                "GroupedLinear doesn't support TP > 1 with Float8 current scaling. "
+                "Because the TP communication is handled outside of this module."
+            )
         super().set_meta_tensor(fwd, recipe)
+        if self._uses_custom_recipe:
+            self._validate_quantizer_generation(fwd)
 
-        # Recipe-specific quantizer configuration
-        recipe = FP8GlobalStateManager.get_fp8_recipe()
-        if recipe.float8_current_scaling():
-            self._customize_quantizers_float8_current_scaling(fwd, recipe)
-
-        self._uses_custom_recipe = recipe.custom()
-        self._validate_custom_recipe_quantizers(fwd, recipe)
-
-    def _validate_custom_recipe_quantizers(self, fwd: bool, recipe: Recipe) -> None:
-        """Validate one CustomRecipe quantizer generation."""
-        if not recipe.custom():
-            return
-
-        # A CustomRecipe factory may return a different quantizer for every expert,
-        # while grouped execution selects its implementation from expert 0. Validate
-        # every newly constructed list once and keep the steady-state path O(1).
-        meta_key = "scaling_fwd" if fwd else "scaling_bwd"
-        generation = self.quantizers.get(meta_key)
-        if generation is None:
-            return
-        if self._custom_quantizer_cache.get(meta_key) is generation:
-            return
-
-        if fwd:
-            stride = self._num_fp8_tensors_per_gemm["fwd"]
+    def _validate_forward_quantizer_generation(
+        self,
+        generation: List[Quantizer],
+        *,
+        num_gemms: int,
+        validate_grouped_quantizers: bool,
+    ) -> Tuple[Optional[Quantizer], Optional[Quantizer]]:
+        """Validate candidate forward quantizers and derive grouped runtime state."""
+        stride = self._num_fp8_tensors_per_gemm["fwd"]
+        first_input_quantizer = generation[self._offsets["input"]]
+        if validate_grouped_quantizers:
             input_quantizers = tuple(
-                generation[self._offsets["input"] + i * stride] for i in range(self.num_gemms)
+                generation[self._offsets["input"] + i * stride] for i in range(num_gemms)
             )
             weight_quantizers = tuple(
-                generation[self._offsets["weight"] + i * stride] for i in range(self.num_gemms)
+                generation[self._offsets["weight"] + i * stride] for i in range(num_gemms)
             )
             _split_quantization.validate_grouped_quantizer_list(
                 input_quantizers, operand_name="input"
@@ -1826,42 +1832,157 @@ class GroupedLinear(TransformerEngineBaseModule):
                 weight_quantizers, operand_name="weight"
             )
         else:
-            stride = self._num_fp8_tensors_per_gemm["bwd"]
-            grad_output_quantizers = tuple(
-                generation[self._offsets["grad_output"] + i * stride] for i in range(self.num_gemms)
-            )
-            _split_quantization.validate_grouped_quantizer_list(
-                grad_output_quantizers,
-                operand_name="grad_output",
+            # Native recipe construction guarantees homogeneous expert quantizers.
+            input_quantizers = (first_input_quantizer,)
+        delayed_scaling_input_quantizer = next(
+            (q for q in input_quantizers if isinstance(q, Float8Quantizer)),
+            None,
+        )
+        unsafe_requantization_input_quantizer = next(
+            (
+                q
+                for q in input_quantizers
+                if q is not None and not can_reconstruct_wgrad_input_from_original(q)
+            ),
+            None,
+        )
+        return (
+            delayed_scaling_input_quantizer,
+            unsafe_requantization_input_quantizer,
+        )
+
+    def _validate_backward_quantizer_generation(
+        self,
+        generation: List[Quantizer],
+        *,
+        num_gemms: int,
+        validate_grouped_quantizers: bool,
+    ) -> None:
+        """Validate candidate backward quantizers for grouped-kernel compatibility."""
+        if not validate_grouped_quantizers:
+            return
+        stride = self._num_fp8_tensors_per_gemm["bwd"]
+        grad_output_quantizers = tuple(
+            generation[self._offsets["grad_output"] + i * stride] for i in range(num_gemms)
+        )
+        _split_quantization.validate_grouped_quantizer_list(
+            grad_output_quantizers,
+            operand_name="grad_output",
+        )
+
+    def _validate_quantization_runtime(
+        self,
+        candidate: _QuantizationRuntime,
+    ) -> Tuple[Optional[Quantizer], Optional[Quantizer]]:
+        """Validate both grouped directions without changing live module state."""
+        super()._validate_quantization_runtime(candidate)
+        if (
+            isinstance(candidate.forward_states[0], Float8CurrentScalingRecipeState)
+            and self.tp_size > 1
+        ):
+            raise ValueError(
+                "GroupedLinear doesn't support TP > 1 with Float8 current scaling. "
+                "Because the TP communication is handled outside of this module."
             )
 
-        # Cache only a fully validated generation so failures are retried.
-        self._custom_quantizer_cache[meta_key] = generation
+        validate_grouped_quantizers = candidate.recipe.custom()
+        validation_result = self._validate_forward_quantizer_generation(
+            candidate.forward_quantizers,
+            num_gemms=candidate.num_gemms,
+            validate_grouped_quantizers=validate_grouped_quantizers,
+        )
+        self._validate_backward_quantizer_generation(
+            candidate.backward_quantizers,
+            num_gemms=candidate.num_gemms,
+            validate_grouped_quantizers=validate_grouped_quantizers,
+        )
+        return validation_result
+
+    def _activate_quantization_runtime(
+        self,
+        candidate: _QuantizationRuntime,
+        *,
+        validation_result: Tuple[Optional[Quantizer], Optional[Quantizer]],
+    ) -> None:
+        """Publish validated grouped-derived state with the candidate runtime."""
+        delayed_scaling_input_quantizer, unsafe_requantization_input_quantizer = validation_result
+        validated_generations = {
+            "scaling_fwd": candidate.forward_quantizers,
+            "scaling_bwd": candidate.backward_quantizers,
+        }
+
+        super()._activate_quantization_runtime(
+            candidate,
+            validation_result=validation_result,
+        )
+        self.fast_setattr(
+            "_delayed_scaling_input_quantizer",
+            delayed_scaling_input_quantizer,
+        )
+        self.fast_setattr(
+            "_unsafe_requantization_input_quantizer",
+            unsafe_requantization_input_quantizer,
+        )
+        self.fast_setattr("_uses_custom_recipe", candidate.recipe.custom())
+        self.fast_setattr("_validated_quantizer_generations", validated_generations)
+
+    def _validate_quantizer_generation(self, fwd: bool) -> None:
+        """Validate grouped-kernel invariants once per quantizer generation."""
+        # Recipe state replaces this list object only when it constructs a new
+        # quantizer generation. The O(1) identity guard keeps validation off the
+        # steady-state forward path. Record a generation only after all of its
+        # operand roles pass, so a failed recipe transition is retried.
+        meta_key = "scaling_fwd" if fwd else "scaling_bwd"
+        generation = self.quantizers.get(meta_key)
+        if generation is None:
+            return
+        if self._validated_quantizer_generations.get(meta_key) is generation:
+            return
+
+        if fwd:
+            (
+                delayed_scaling_input_quantizer,
+                unsafe_requantization_input_quantizer,
+            ) = self._validate_forward_quantizer_generation(
+                generation,
+                num_gemms=self.num_gemms,
+                validate_grouped_quantizers=True,
+            )
+            self._delayed_scaling_input_quantizer = delayed_scaling_input_quantizer
+            self._unsafe_requantization_input_quantizer = unsafe_requantization_input_quantizer
+        else:
+            self._validate_backward_quantizer_generation(
+                generation,
+                num_gemms=self.num_gemms,
+                validate_grouped_quantizers=True,
+            )
+
+        self._validated_quantizer_generations[meta_key] = generation
 
     def get_quantizer_roles(
         self,
         *,
         fwd: bool,
         num_quantizers: int,
+        boundary_role: Optional[QuantizerRole],
     ) -> Optional[List[QuantizerRole]]:
         """QuantizerRole list for quantizers used by ``GroupedLinear``.
 
-        For grouped GEMMs we repeat the same pattern for each GEMM in
-        order.  The output (fwd) and grad-input (bwd) slots default to
-        ``None`` (unknown consumer).  Set :attr:`output_quantizer_role` /
-        :attr:`grad_input_quantizer_role` to provide consumer identity.
+        For grouped GEMMs we repeat the same pattern for each GEMM in order.
+        ``boundary_role`` is the planner-resolved output (fwd) or grad-input
+        (bwd) consumer role.
         """
         name = self.name or ""
         if fwd:
             base = [
                 QuantizerRole(module_type="grouped_linear", tensor_type="input", name=name),
                 QuantizerRole(module_type="grouped_linear", tensor_type="weight", name=name),
-                self._output_quantizer_role,
+                boundary_role,
             ]
         else:
             base = [
                 QuantizerRole(module_type="grouped_linear", tensor_type="grad_output", name=name),
-                self._grad_input_quantizer_role,
+                boundary_role,
             ]
         return [base[i % len(base)] for i in range(num_quantizers)]
 
@@ -2287,6 +2408,8 @@ class GroupedLinear(TransformerEngineBaseModule):
                 cache_weight,
                 skip_fp8_weight_update,
                 self.save_original_input,
+                self._delayed_scaling_input_quantizer,
+                self._unsafe_requantization_input_quantizer,
                 debug,
                 self.single_grouped_weight,
                 use_grouped_bias,
@@ -2362,41 +2485,6 @@ class GroupedLinear(TransformerEngineBaseModule):
             del tensor_list
             self._trigger_wgrad_accumulation_and_reduce_hooks()
 
-    def _customize_quantizers_float8_current_scaling(self, fwd: bool, recipe: Recipe) -> None:
-        """Customize quantizers based on current scaling recipe + linear."""
-
-        if self.tp_size > 1:
-            raise ValueError(
-                "GroupedLinear doesn't support TP > 1 with Float8 current scaling. "
-                "Because the TP communication is handled outside of this module."
-            )
-
-        if fwd:
-            for i in range(self.num_gemms):
-                # set configs about amax epsilon and power_2_scale
-                self.quantizers["scaling_fwd"][
-                    self._offsets["input"] + i * self._num_fp8_tensors_per_gemm["fwd"]
-                ].force_pow_2_scales = recipe.fp8_quant_fwd_inp.power_2_scale
-                self.quantizers["scaling_fwd"][
-                    self._offsets["input"] + i * self._num_fp8_tensors_per_gemm["fwd"]
-                ].amax_epsilon = recipe.fp8_quant_fwd_inp.amax_epsilon
-                # also set weight quantizer with same amax_epsilon & power_2_scale
-                self.quantizers["scaling_fwd"][
-                    self._offsets["weight"] + i * self._num_fp8_tensors_per_gemm["fwd"]
-                ].force_pow_2_scales = recipe.fp8_quant_fwd_weight.power_2_scale
-                self.quantizers["scaling_fwd"][
-                    self._offsets["weight"] + i * self._num_fp8_tensors_per_gemm["fwd"]
-                ].amax_epsilon = recipe.fp8_quant_fwd_weight.amax_epsilon
-        else:
-            for i in range(self.num_gemms):
-                # set grad_output_quantizer with amax epsilon and power_2_scale
-                self.quantizers["scaling_bwd"][
-                    self._offsets["input"] + i * self._num_fp8_tensors_per_gemm["bwd"]
-                ].force_pow_2_scales = recipe.fp8_quant_bwd_grad.power_2_scale
-                self.quantizers["scaling_bwd"][
-                    self._offsets["input"] + i * self._num_fp8_tensors_per_gemm["bwd"]
-                ].amax_epsilon = recipe.fp8_quant_bwd_grad.amax_epsilon
-
     def _get_weight_tensors(self) -> List[Union[torch.Tensor, QuantizedTensorStorage]]:
         """Get the weight tensors of the module."""
         grouped_weight = getattr(self, "weight", None)
@@ -2451,12 +2539,11 @@ class GroupedLinear(TransformerEngineBaseModule):
 
     def _get_quantizers(self):
         if self.fp8 and self._uses_custom_recipe:
-            # Validation normally runs while installing metadata. Retry here because
-            # a failed generation remains installed when the caller catches the error.
-            recipe = FP8GlobalStateManager.get_fp8_recipe()
-            self._validate_custom_recipe_quantizers(True, recipe)
+            # Normally validated before candidate commit. Keep this O(1)
+            # generation guard for legacy/direct quantizer-list replacement.
+            self._validate_quantizer_generation(True)
             if torch.is_grad_enabled():
-                self._validate_custom_recipe_quantizers(False, recipe)
+                self._validate_quantizer_generation(False)
 
         weight_quantizers = self._get_weight_quantizers()
         input_quantizers, output_quantizers = (

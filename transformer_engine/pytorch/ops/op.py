@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 import abc
-from collections.abc import Iterable, Sequence
+from collections.abc import Hashable, Iterable, Sequence
 import dataclasses
 import pickle
 from typing import Any, Optional
@@ -22,6 +22,55 @@ from ..quantization import (
     autocast,
 )
 from ..tensor import Quantizer
+
+
+def _only_recipe_fields_changed(
+    old_config: Hashable,
+    new_config: Hashable,
+    allowed_fields: Iterable[str],
+) -> bool:
+    """Whether unequal recipe configs differ only in explicitly allowed top-level fields."""
+    if old_config == new_config:
+        return False
+    allowed_field_names = frozenset(allowed_fields)
+
+    def without_allowed_fields(config: Hashable) -> tuple:
+        return tuple(item for item in config if item[0] not in allowed_field_names)
+
+    return without_allowed_fields(old_config) == without_allowed_fields(new_config)
+
+
+def _only_delayed_history_length_changed(
+    old_config: Hashable,
+    new_config: Hashable,
+) -> bool:
+    """Whether delayed-scaling configs differ only in history length."""
+    return _only_recipe_fields_changed(
+        old_config,
+        new_config,
+        ("amax_history_len",),
+    )
+
+
+def _is_preserved_fusible_recipe_transition(
+    recipe: Recipe,
+    old_config: Hashable,
+    new_config: Hashable,
+) -> bool:
+    """Whether this config delta is a transition already preserved by fusible ops.
+
+    Delayed recipes retain only their legacy history-resize path. For other recipes,
+    ``backward_override`` may change because the fuser already rebuilds the affected
+    topology and the field does not alter quantizer construction. Every other
+    same-class semantic delta remains unsupported.
+    """
+    if recipe.delayed():
+        return _only_delayed_history_length_changed(old_config, new_config)
+    return _only_recipe_fields_changed(
+        old_config,
+        new_config,
+        ("backward_override",),
+    )
 
 
 @dataclasses.dataclass
@@ -202,6 +251,8 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         # Objects for quantization
         self._fp8_metas: Optional[dict[str, dict[str, Any]]] = None
         self._quantizers: Optional[dict[str, list[Quantizer]]] = None
+        self._recipe_type: Optional[type[Recipe]] = None
+        self._recipe_config: Optional[Hashable] = None
 
     def _lock_extra_tensor_channels(self) -> None:
         """Freeze channel routing after an OperationFuser has captured it."""
@@ -326,7 +377,27 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         if recipe is None:
             self._fp8_metas = None
             self._quantizers = None
+            self._recipe_type = None
+            self._recipe_config = None
             return
+
+        recipe_type = type(recipe)
+        recipe_config = recipe.quantizer_config()
+        if (
+            self._recipe_type is recipe_type
+            and self._recipe_config is not None
+            and self._recipe_config != recipe_config
+            and not _is_preserved_fusible_recipe_transition(
+                recipe,
+                self._recipe_config,
+                recipe_config,
+            )
+        ):
+            FP8GlobalStateManager.abort_current_amax_reduction()
+            raise RuntimeError(
+                "Mid-training recipe updates are not supported for fusible operations. "
+                "Recreate the fusible operation or operation pipeline with the new recipe."
+            )
 
         # Communication group for FP8 amax reductions
         fp8_group = FP8GlobalStateManager.get_fp8_group()
@@ -442,6 +513,9 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
                 FP8GlobalStateManager.add_fp8_tensors_to_global_buffer(
                     self._fp8_metas[mode],
                 )
+
+        self._recipe_type = recipe_type
+        self._recipe_config = recipe_config
 
     def get_quantizer(
         self,

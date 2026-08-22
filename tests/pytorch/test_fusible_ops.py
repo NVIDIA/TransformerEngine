@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
+import copy
 import io
 import os
 import math
@@ -25,6 +26,7 @@ from transformer_engine.pytorch.ops.basic.grouped_linear import (
 )
 from transformer_engine.pytorch.ops.fuser import OperationFuser
 from transformer_engine.pytorch._extra_state import UNSAFE_PICKLE_EXTRA_STATE_ENV
+from transformer_engine.pytorch.quantization import FP8GlobalStateManager
 
 from transformer_engine.pytorch.ops.fused import (
     BackwardActivationBias,
@@ -144,6 +146,105 @@ def maybe_skip_quantization(
             and dtype != torch.bfloat16
         ):
             pytest.skip("NVFP4 quantization is only supported with BF16 data")
+
+
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+@pytest.mark.parametrize("persistent_fuser", (False, True))
+def test_fusible_operation_rejects_unsupported_same_class_recipe_update(
+    persistent_fuser: bool,
+) -> None:
+    """Unsupported and mixed same-class deltas reject without partial publication."""
+    op = te_ops.Quantize()
+    model = te_ops.Sequential(op) if persistent_fuser else op
+    x = torch.randn(16, 16, dtype=torch.bfloat16, device="cuda")
+    initial_recipe = transformer_engine.common.recipe.Float8CurrentScaling()
+    equal_recipe = copy.deepcopy(initial_recipe)
+    changed_recipe = copy.deepcopy(initial_recipe)
+    changed_recipe.fp8_quant_fwd_inp = transformer_engine.common.recipe.QParams(amax_epsilon=0.25)
+    mixed_recipe = copy.deepcopy(changed_recipe)
+    mixed_recipe.backward_override = "high_precision"
+
+    try:
+        with torch.no_grad(), te.autocast(recipe=initial_recipe):
+            model(x)
+        with torch.no_grad(), te.autocast(recipe=equal_recipe):
+            model(x)
+
+        op_recipe_config = op._recipe_config
+        op_fp8_metas = op._fp8_metas
+        op_quantizers = op._quantizers
+        if persistent_fuser:
+            fuser = model._module_groups[0]
+            fuser_recipe_config = fuser.recipe_config
+            forward_ops = fuser._forward_ops
+            backward_ops = fuser._backward_ops
+
+        for rejected_recipe in (changed_recipe, mixed_recipe):
+            with pytest.raises(RuntimeError, match="not supported for fusible operations"):
+                with torch.no_grad(), te.autocast(recipe=rejected_recipe):
+                    model(x)
+
+            assert op._recipe_config == op_recipe_config
+            assert op._fp8_metas is op_fp8_metas
+            assert op._quantizers is op_quantizers
+            if persistent_fuser:
+                assert fuser.recipe_config == fuser_recipe_config
+                assert fuser.backward_override is None
+                assert fuser._forward_ops is forward_ops
+                assert fuser._backward_ops is backward_ops
+    finally:
+        FP8GlobalStateManager.reset()
+
+
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+@pytest.mark.parametrize("persistent_fuser", (False, True))
+def test_fusible_operation_preserves_backward_override_transition(
+    persistent_fuser: bool,
+) -> None:
+    """The existing fusion-control field can change without rebuilding quantizers."""
+    op = te_ops.Quantize()
+    model = te_ops.Sequential(op) if persistent_fuser else op
+    x = torch.randn(16, 16, dtype=torch.bfloat16, device="cuda")
+    recipes = [
+        transformer_engine.common.recipe.Float8CurrentScaling(backward_override=mode)
+        for mode in (None, "high_precision", "dequantized", None)
+    ]
+
+    try:
+        quantizers = None
+        for active_recipe in recipes:
+            with torch.no_grad(), te.autocast(recipe=active_recipe):
+                model(x)
+            assert op._recipe_config == active_recipe.quantizer_config()
+            if quantizers is None:
+                quantizers = op._quantizers
+            else:
+                assert op._quantizers is quantizers
+            if persistent_fuser:
+                fuser = model._module_groups[0]
+                assert fuser.recipe_config == active_recipe.quantizer_config()
+                assert fuser.backward_override == active_recipe.backward_override
+    finally:
+        FP8GlobalStateManager.reset()
+
+
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+def test_fusible_operation_preserves_delayed_history_resize() -> None:
+    """The explicit legacy delayed-history update remains supported."""
+    op = te_ops.Quantize()
+    model = te_ops.Sequential(op)
+    x = torch.randn(16, 16, dtype=torch.bfloat16, device="cuda")
+    initial_recipe = transformer_engine.common.recipe.DelayedScaling(amax_history_len=2)
+    resized_recipe = transformer_engine.common.recipe.DelayedScaling(amax_history_len=4)
+
+    try:
+        with torch.no_grad(), te.autocast(recipe=initial_recipe):
+            model(x)
+        with torch.no_grad(), te.autocast(recipe=resized_recipe):
+            model(x)
+        assert op._fp8_metas["forward"]["scaling_fwd"].amax_history.shape[0] == 4
+    finally:
+        FP8GlobalStateManager.reset()
 
 
 @torch.no_grad()

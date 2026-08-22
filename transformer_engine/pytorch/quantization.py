@@ -3,21 +3,24 @@
 # See LICENSE for license information.
 
 """Quantization utilities for TransformerEngine"""
+
 from __future__ import annotations
 
 import abc
 import dataclasses
 import warnings
 import os
+from collections import deque
+from collections.abc import Hashable
 from dataclasses import dataclass, field
 from contextlib import contextmanager
-from collections import deque
-from typing import Callable, List, Optional, Dict, Any, Tuple, Union
+from typing import Callable, List, Optional, Dict, Any, Tuple, TYPE_CHECKING, Union
 
 import torch
 import transformer_engine_torch as tex
 from transformer_engine.common.recipe import (
     Recipe,
+    QParams,
     DelayedScaling,
     Format,
     MXFP8BlockScaling,
@@ -31,8 +34,11 @@ from .constants import dist_group_type, DType
 from .utils import get_device_compute_capability
 from .jit import jit_fuser
 
+if TYPE_CHECKING:
+    from .quantized_tensor import Quantizer
 
 __all__ = [
+    "apply_recipe",
     "autocast",
     "quantized_model_init",
     "is_fp8_available",
@@ -94,6 +100,65 @@ class QuantizerRole:
         if self.name:
             parts.append(f"name={self.name}")
         return "|".join(parts) if parts else "QuantizerRole()"
+
+
+@dataclass(frozen=True)
+class _QuantizationRuntimeKey:
+    """Immutable semantic request for one module or operation's quantizers.
+
+    ``recipe_config`` is the recipe-owned semantic configuration cached by
+    :class:`FP8GlobalStateManager`.  The role tuples preserve the ordered
+    forward and backward quantizer-slot layouts for this particular runtime
+    owner.  ``None`` is a meaningful boundary slot and is therefore retained
+    rather than filtered out.
+
+    This is intentionally private: runtime owners use it to decide whether a
+    candidate runtime would construct the same quantizers as the active one.
+    It must contain only immutable semantic values, never recipe, factory,
+    state, or quantizer object identity.
+    """
+
+    recipe_config: Hashable
+    forward_roles: Tuple[Optional[QuantizerRole], ...]
+    backward_roles: Tuple[Optional[QuantizerRole], ...]
+
+    def __post_init__(self) -> None:
+        """Canonicalize role containers and reject non-semantic slot values."""
+        try:
+            hash(self.recipe_config)
+        except TypeError as exc:
+            raise TypeError("_QuantizationRuntimeKey.recipe_config must be hashable") from exc
+
+        for attribute in ("forward_roles", "backward_roles"):
+            roles = tuple(getattr(self, attribute))
+            if any(role is not None and not isinstance(role, QuantizerRole) for role in roles):
+                raise TypeError(
+                    f"_QuantizationRuntimeKey.{attribute} entries must be QuantizerRole or None"
+                )
+            object.__setattr__(self, attribute, roles)
+
+
+@dataclass
+class _QuantizationRuntime:
+    """Complete active-or-candidate quantization state for one runtime owner.
+
+    A module or operation prepares this bundle away from its active state,
+    validates it, and then publishes it as one unit.  Keeping forward and
+    backward states and quantizers together prevents a failed update from
+    exposing a new forward configuration with stale backward state. ``recipe``
+    is the runtime-owned snapshot used to construct those states; it is not the
+    mutable recipe object owned by the caller.
+    """
+
+    key: _QuantizationRuntimeKey
+    recipe: Recipe
+    num_gemms: int
+    recipe_config_revision: int
+    role_revision: int
+    forward_states: Tuple["RecipeState", ...]
+    backward_states: Tuple["RecipeState", ...]
+    forward_quantizers: List["Quantizer"]
+    backward_quantizers: List["Quantizer"]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -396,12 +461,15 @@ class FP8GlobalState:
     fp8_enabled: bool = False
     fp8_calibration: bool = False
     fp8_recipe: Optional[Recipe] = None
+    quantizer_config: Optional[Hashable] = None
+    quantizer_config_revision: int = 0
     fp8_distributed_group: Optional[dist_group_type] = None
     fp8_parameters: bool = False
     high_precision_init_val: bool = False
     is_first_fp8_module: bool = False
     fp8_graph_capturing: bool = False
     autocast_depth: int = 0
+    abort_amax_reduction: bool = False
     global_amax_buffer: Dict[str, list] = field(default_factory=dict)
     global_amax_history_buffer: Dict[str, list] = field(default_factory=dict)
     global_scale_buffer: Dict[str, list] = field(default_factory=dict)
@@ -522,6 +590,17 @@ class FP8GlobalStateManager:
         if not _has_delayed_scaling_state(fp8_meta):
             return
 
+        forward_key = cls.get_meta_tensor_key(forward=True)
+        backward_key = cls.get_meta_tensor_key(forward=False)
+        if forward_key in fp8_meta and backward_key in fp8_meta:
+            forward_delayed = _is_delayed_scaling_state(fp8_meta[forward_key])
+            backward_delayed = _is_delayed_scaling_state(fp8_meta[backward_key])
+            if forward_delayed != backward_delayed:
+                cls.abort_current_amax_reduction()
+                raise RuntimeError(
+                    "This hybrid quantization configuration with delayed scaling is not supported."
+                )
+
         # Every module must call this function exactly once since
         # the amax tensors are static. Ensures that compatibility
         # with non-graphed modules is maintained.
@@ -539,15 +618,25 @@ class FP8GlobalStateManager:
 
             state = fp8_meta[fp8_meta_tensor_key]
 
-            # Determine recipe + buffers: built-in DS or custom with DS requests
+            # Determine recipe + buffers: built-in DS or custom with DS requests.
             if isinstance(state, CustomRecipeState) and state._has_delayed_scaling:
-                inner_recipe = state._inner_delayed_scaling_recipe
-                key = cls.get_key_in_buffer(forward, inner_recipe, fp8_meta["fp8_group"])
-                # Register inner recipe in autocast_arguments for reduction
-                autocast_key = cls.get_unique_autocast_key(inner_recipe, fp8_meta["fp8_group"])
-                qstate.autocast_arguments[autocast_key] = (inner_recipe, fp8_meta["fp8_group"])
+                committed_recipe = state._inner_delayed_scaling_recipe
             else:
-                key = cls.get_key_in_buffer(forward, fp8_meta["recipe"], fp8_meta["fp8_group"])
+                # The state owns the committed recipe snapshot. Register that
+                # snapshot rather than the caller-owned object installed by
+                # ``autocast_enter`` so later caller mutation cannot change an
+                # existing bucket's reduction behavior.
+                committed_recipe = state.recipe
+
+            key = cls.get_key_in_buffer(forward, committed_recipe, fp8_meta["fp8_group"])
+            autocast_key = cls.get_unique_autocast_key(
+                committed_recipe,
+                fp8_meta["fp8_group"],
+            )
+            qstate.autocast_arguments[autocast_key] = (
+                committed_recipe,
+                fp8_meta["fp8_group"],
+            )
 
             if key not in qstate.global_amax_buffer:
                 qstate.global_amax_buffer[key] = [fp8_meta[fp8_meta_tensor_key].amax_history[0]]
@@ -611,6 +700,40 @@ class FP8GlobalStateManager:
         return get_default_fp8_recipe()
 
     @classmethod
+    def _set_recipe_config(
+        cls,
+        recipe: Optional[Recipe],
+        quantizer_config: Optional[Hashable],
+    ) -> None:
+        """Publish a recipe/configuration pair and advance its monotonic revision."""
+        qstate = cls.quantization_state
+        config_changed = quantizer_config != qstate.quantizer_config
+        if config_changed:
+            qstate.quantizer_config_revision += 1
+            qstate.quantizer_config = quantizer_config
+        qstate.fp8_recipe = recipe
+
+    @classmethod
+    def activate_recipe(cls, recipe: Recipe) -> Hashable:
+        """Make a recipe and its semantic quantizer configuration active together."""
+        quantizer_config = recipe.quantizer_config()
+        cls._set_recipe_config(recipe, quantizer_config)
+        return quantizer_config
+
+    @classmethod
+    def get_quantizer_config(cls) -> Hashable:
+        """Return the active recipe's cached semantic quantizer configuration."""
+        quantizer_config = cls.quantization_state.quantizer_config
+        if quantizer_config is None:
+            return cls.activate_recipe(cls.get_fp8_recipe())
+        return quantizer_config
+
+    @classmethod
+    def get_quantizer_config_revision(cls) -> int:
+        """Return the manager-owned active recipe-configuration revision."""
+        return cls.quantization_state.quantizer_config_revision
+
+    @classmethod
     def get_fp8_group(cls) -> Union[dist_group_type, None]:
         """Return the fp8 group for scale/amax comm"""
         return cls.quantization_state.fp8_distributed_group
@@ -623,6 +746,7 @@ class FP8GlobalStateManager:
             qstate.fp8_enabled,
             qstate.fp8_calibration,
             qstate.fp8_recipe,
+            qstate.quantizer_config,
             qstate.fp8_distributed_group,
             qstate.is_first_fp8_module,
             qstate.fp8_graph_capturing,
@@ -630,16 +754,23 @@ class FP8GlobalStateManager:
 
     @classmethod
     def set_autocast_state(cls, state: tuple) -> None:
-        """Restore a previously saved autocast state snapshot."""
+        """Restore an autocast snapshot without restoring its old configuration revision."""
         qstate = cls.quantization_state
         (
-            qstate.fp8_enabled,
-            qstate.fp8_calibration,
-            qstate.fp8_recipe,
-            qstate.fp8_distributed_group,
-            qstate.is_first_fp8_module,
-            qstate.fp8_graph_capturing,
+            fp8_enabled,
+            fp8_calibration,
+            fp8_recipe,
+            quantizer_config,
+            fp8_distributed_group,
+            is_first_fp8_module,
+            fp8_graph_capturing,
         ) = state
+        cls._set_recipe_config(fp8_recipe, quantizer_config)
+        qstate.fp8_enabled = fp8_enabled
+        qstate.fp8_calibration = fp8_calibration
+        qstate.fp8_distributed_group = fp8_distributed_group
+        qstate.is_first_fp8_module = is_first_fp8_module
+        qstate.fp8_graph_capturing = fp8_graph_capturing
 
     @staticmethod
     def reduce_tensor_across_group_op_max(tensor: torch.Tensor, group: dist_group_type) -> None:
@@ -660,6 +791,8 @@ class FP8GlobalStateManager:
         """Delayed scaling only. Concatenate, reduce, and split amaxes in the global buffer."""
         # global_amax_buffer should only be non-empty for fp8 delayed scaling
         qstate = cls.quantization_state
+        if qstate.abort_amax_reduction:
+            return
         for (
             buffer_key,
             amax_buffer,
@@ -727,33 +860,19 @@ class FP8GlobalStateManager:
         return f"recipe={recipe_repr},group={group_id}"
 
     @classmethod
-    def autocast_enter(
+    def _prepare_autocast_enter(
         cls,
-        enabled: bool = False,
-        calibrating: bool = False,
-        fp8_recipe: Optional[Recipe] = None,
-        fp8_group: Optional[dist_group_type] = None,
-        _graph: bool = False,
-    ) -> None:
-        """Set state and tracking variables for entry into FP8 region."""
-
+        enabled: bool,
+        fp8_recipe: Optional[Recipe],
+        fp8_group: Optional[dist_group_type],
+    ) -> Tuple[Recipe, Hashable, str]:
+        """Resolve and validate an autocast activation without publishing state."""
         fp8_recipe = get_default_fp8_recipe() if fp8_recipe is None else fp8_recipe
+        if enabled:
+            check_recipe_support(fp8_recipe)
+
+        quantizer_config = fp8_recipe.quantizer_config()
         autocast_key = cls.get_unique_autocast_key(fp8_recipe, fp8_group)
-        qstate = cls.quantization_state
-        qstate.autocast_arguments[autocast_key] = (
-            fp8_recipe,
-            fp8_group,
-        )
-
-        qstate.fp8_enabled = enabled
-        qstate.fp8_calibration = calibrating
-        qstate.fp8_recipe = fp8_recipe
-        qstate.fp8_distributed_group = fp8_group
-        qstate.fp8_graph_capturing = _graph
-
-        if qstate.autocast_depth == 0:
-            qstate.is_first_fp8_module = True
-        qstate.autocast_depth += 1
 
         if enabled:
             fp8_available, reason_for_no_fp8 = cls.is_fp8_available()
@@ -768,17 +887,75 @@ class FP8GlobalStateManager:
                 nvfp4_available, reason_for_no_nvfp4 = cls.is_nvfp4_available()
                 assert nvfp4_available, reason_for_no_nvfp4
 
+        return fp8_recipe, quantizer_config, autocast_key
+
+    @classmethod
+    def autocast_enter(
+        cls,
+        enabled: bool = False,
+        calibrating: bool = False,
+        fp8_recipe: Optional[Recipe] = None,
+        fp8_group: Optional[dist_group_type] = None,
+        _graph: bool = False,
+    ) -> None:
+        """Prepare and publish state for entry into an FP8 region."""
+
+        fp8_recipe, quantizer_config, autocast_key = cls._prepare_autocast_enter(
+            enabled,
+            fp8_recipe,
+            fp8_group,
+        )
+        qstate = cls.quantization_state
+
+        # Preparation above contains every operation that can fail due to the
+        # requested recipe or platform. Publish only after it has succeeded.
+        cls._set_recipe_config(fp8_recipe, quantizer_config)
+        # Once a delayed bucket is registered, its committed recipe snapshot
+        # owns the reduction semantics for this key. Do not replace it with a
+        # caller-owned recipe object merely by entering another autocast.
+        qstate.autocast_arguments.setdefault(
+            autocast_key,
+            (fp8_recipe, fp8_group),
+        )
+
+        qstate.fp8_enabled = enabled
+        qstate.fp8_calibration = calibrating
+        qstate.fp8_distributed_group = fp8_group
+        qstate.fp8_graph_capturing = _graph
+
+        if qstate.autocast_depth == 0:
+            qstate.abort_amax_reduction = False
+            qstate.is_first_fp8_module = True
+        qstate.autocast_depth += 1
+
+    @classmethod
+    def abort_current_amax_reduction(cls) -> None:
+        """Prevent delayed-state updates when the active autocast has failed."""
+        qstate = cls.quantization_state
+        if qstate.autocast_depth > 0:
+            qstate.abort_amax_reduction = True
+
     @classmethod
     def autocast_exit(cls, enabled: bool, _graph: bool) -> None:
         """Set state and tracking variables for exit from FP8 region."""
         qstate = cls.quantization_state
         qstate.autocast_depth -= 1
+        outermost = qstate.autocast_depth == 0
         # Reduce only the non-FP8 weight modules here.
         # FP8 weight modules are reduced at the end of the optimizer
         # step after the weight amax is populated.
-        if enabled and qstate.autocast_depth == 0 and not _graph and torch.is_grad_enabled():
-            # delayed scaling only function, for other recipes (current scaling with any granularity),
-            # this is noop for other recipes because cls.global_amax_buffer is empty list
+        should_reduce = (
+            enabled
+            and outermost
+            and not qstate.abort_amax_reduction
+            and not _graph
+            and torch.is_grad_enabled()
+        )
+        if outermost:
+            qstate.abort_amax_reduction = False
+        if should_reduce:
+            # Delayed scaling only function. For other recipes this is a
+            # no-op because the global amax buffer is empty.
             cls.reduce_and_update_fp8_tensors(forward=True)
 
     @classmethod
@@ -841,6 +1018,123 @@ class FP8GlobalStateManager:
 
         fp8_meta["scaling_fwd"].amax_history.copy_(fp8_meta["updated_amax_history_fwd"])
         fp8_meta["scaling_fwd"].scale.copy_(fp8_meta["updated_scale_fwd"])
+
+
+def apply_recipe(model: torch.nn.Module, recipe: Recipe) -> None:
+    """Prepare, validate, and apply a recipe across one model atomically.
+
+    This is an optional synchronous cold-path API for controllers that need a
+    model-wide update instead of lazy per-module migration. Call it outside
+    :class:`autocast`, CUDA graph capture, and compiled regions, after all
+    outstanding forward, backward, recompute, optimizer, and communication
+    work has completed.
+
+    Every participating Transformer Engine module is planned and validated
+    before any module or global recipe state is changed. If planning fails,
+    all active runtimes and the global recipe remain unchanged. Fusible
+    operations and the legacy built-in DPA recipe path are not yet supported by
+    this model-wide API.
+
+    This operation is atomic only within the calling process. In distributed
+    training, the framework or controller must distribute an identical recipe,
+    invoke this function consistently on the appropriate ranks at a synchronized
+    boundary, and coordinate failures before training resumes. Transformer
+    Engine does not infer data-, tensor-, pipeline-, or expert-parallel process
+    groups or perform cross-rank agreement in this API.
+
+    When resuming from a checkpoint, reconstruct the intended recipe and call
+    this function after restoring the model and before its first forward pass.
+
+    Parameters
+    ----------
+    model : torch.nn.Module
+        Model or composed module whose participating Transformer Engine
+        runtime owners should receive the recipe.
+    recipe : transformer_engine.common.recipe.Recipe
+        Complete precision recipe to apply.
+    """
+    if not isinstance(model, torch.nn.Module):
+        raise TypeError(f"model must be a torch.nn.Module, got {type(model).__name__}")
+    if not isinstance(recipe, Recipe):
+        raise TypeError(f"recipe must be a Recipe, got {type(recipe).__name__}")
+    if torch.compiler.is_compiling():
+        raise RuntimeError("te.apply_recipe() must be called outside torch.compile regions.")
+
+    qstate = FP8GlobalStateManager.quantization_state
+    if qstate.autocast_depth != 0:
+        raise RuntimeError("te.apply_recipe() must be called outside te.autocast regions.")
+    if FP8GlobalStateManager.fp8_graph_capturing():
+        raise RuntimeError("te.apply_recipe() must be called outside CUDA graph capture.")
+
+    check_recipe_support(recipe)
+    recipe_config = recipe.quantizer_config()
+    recipe_config_revision = qstate.quantizer_config_revision + int(
+        recipe_config != qstate.quantizer_config
+    )
+
+    # Import locally to keep quantization.py independent from module/base.py
+    # during package initialization.
+    from .attention.dot_product_attention.dot_product_attention import DotProductAttention
+    from .module.base import TransformerEngineBaseModule
+    from .ops.op import FusibleOperation
+
+    participants = []
+    fusible_owners = []
+    legacy_dpa_owners = []
+    seen = set()
+    for fqn, module in model.named_modules():
+        module_id = id(module)
+        if module_id in seen:
+            continue
+        seen.add(module_id)
+        diagnostic_name = fqn or "<root>"
+        if isinstance(module, FusibleOperation):
+            fusible_owners.append(diagnostic_name)
+        if isinstance(module, DotProductAttention) and not recipe.custom():
+            legacy_dpa_owners.append(diagnostic_name)
+        if isinstance(module, TransformerEngineBaseModule):
+            participants.append((diagnostic_name, module))
+
+    # Reject excluded owners after one complete discovery pass and before any
+    # qfactory invocation or candidate construction.
+    if fusible_owners:
+        owners = ", ".join(repr(name) for name in fusible_owners)
+        raise RuntimeError(
+            "te.apply_recipe() does not support fusible operations yet; "
+            f"recreate or update these owners separately: {owners}."
+        )
+    if legacy_dpa_owners:
+        owners = ", ".join(repr(name) for name in legacy_dpa_owners)
+        raise RuntimeError(
+            "te.apply_recipe() supports DotProductAttention only through CustomRecipe; "
+            f"the built-in NVTE_DPA_* path remains lazy and unchanged for: {owners}."
+        )
+    if not participants:
+        raise ValueError("te.apply_recipe() found no Transformer Engine runtime owners in model.")
+
+    updates = []
+    for fqn, module in participants:
+        try:
+            # pylint: disable-next=protected-access
+            num_gemms = module._get_quantization_runtime_num_gemms()
+            update = module._plan_quantization_update(  # pylint: disable=protected-access
+                recipe=recipe,
+                recipe_config=recipe_config,
+                recipe_config_revision=recipe_config_revision,
+                num_gemms=num_gemms,
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                f"te.apply_recipe() failed while planning module {fqn!r}: {exc}"
+            ) from exc
+        updates.append((module, update))
+
+    # Applying an update only publishes state that was fully constructed and
+    # validated above. Publish the manager state last so planning failures
+    # cannot expose a requested recipe globally.
+    for module, update in updates:
+        module._apply_quantization_update(update)  # pylint: disable=protected-access
+    FP8GlobalStateManager._set_recipe_config(recipe, recipe_config)
 
 
 @contextmanager
@@ -926,15 +1220,16 @@ def quantized_model_init(
     qstate = FP8GlobalStateManager.quantization_state
     _fp8_parameters = qstate.fp8_parameters
     _fp8_recipe = qstate.fp8_recipe
+    _quantizer_config = qstate.quantizer_config
     _high_precision_init_val = qstate.high_precision_init_val
     qstate.fp8_parameters = enabled
-    qstate.fp8_recipe = get_default_fp8_recipe() if recipe is None else recipe
+    FP8GlobalStateManager.activate_recipe(get_default_fp8_recipe() if recipe is None else recipe)
     qstate.high_precision_init_val = preserve_high_precision_init_val
     try:
         yield
     finally:
         qstate.fp8_parameters = _fp8_parameters
-        qstate.fp8_recipe = _fp8_recipe
+        FP8GlobalStateManager._set_recipe_config(_fp8_recipe, _quantizer_config)
         qstate.high_precision_init_val = _high_precision_init_val
 
 
@@ -992,6 +1287,12 @@ class autocast:
         module more than once inside an `autocast` region overrides the amax tensors
         before reduction can occur.
 
+    .. note::
+
+        Mid-training recipe changes are not supported within an existing ``torch.compile``
+        graph. Change the recipe outside the compiled region and reset or recompile the callable
+        before continuing.
+
     Parameters
     ----------
     enabled : bool, default = True
@@ -1040,10 +1341,9 @@ class autocast:
             raise RuntimeError(
                 "autocast context manager cannot be entered more than once concurrently"
             )
-        if self._enabled:
-            check_recipe_support(self._recipe)
-        # Save current state so we always restore it on exit.
-        self._fp8_state = FP8GlobalStateManager.get_autocast_state()
+        # Mark this instance active only after entry has succeeded. Failed
+        # preparation is mutation-free, so the same instance remains reusable.
+        fp8_state = FP8GlobalStateManager.get_autocast_state()
         FP8GlobalStateManager.autocast_enter(
             enabled=self._enabled,
             calibrating=self._calibrating,
@@ -1051,6 +1351,7 @@ class autocast:
             fp8_group=self._amax_reduction_group,
             _graph=self._graph,
         )
+        self._fp8_state = fp8_state
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
@@ -1214,6 +1515,12 @@ class RecipeState(abc.ABC):
     _BWD_DEFAULT_TENSOR_TYPES = ("grad_output", "grad_input")
 
     @staticmethod
+    def _validate_mode(mode: str) -> None:
+        """Validate the quantization direction shared by every recipe state."""
+        if mode not in ("forward", "backward"):
+            raise ValueError(f"Unexpected recipe mode ({mode})")
+
+    @staticmethod
     def _validate_roles(
         roles: Optional[List[QuantizerRole]],
         num_quantizers: int,
@@ -1290,6 +1597,27 @@ class RecipeState(abc.ABC):
             else self._BWD_DEFAULT_TENSOR_TYPES
         )
         return default_tensor_types[idx % len(default_tensor_types)]
+
+    @staticmethod
+    def _qparams_for_tensor_type(
+        tensor_type: str,
+        *,
+        input_qparams: QParams,
+        weight_qparams: QParams,
+        grad_qparams: QParams,
+        output_uses_input_qparams: bool = True,
+        grad_input_uses_grad_qparams: bool = True,
+    ) -> Optional[QParams]:
+        """Select a recipe qparam bundle for a canonical tensor type."""
+        if tensor_type == "weight":
+            return weight_qparams
+        if tensor_type == "input" or (tensor_type == "output" and output_uses_input_qparams):
+            return input_qparams
+        if tensor_type == "grad_output" or (
+            tensor_type == "grad_input" and grad_input_uses_grad_qparams
+        ):
+            return grad_qparams
+        return None
 
     @staticmethod
     def create(
@@ -1423,6 +1751,7 @@ class DelayedScalingRecipeState(RecipeState):
         device: Optional[torch.device] = None,
         roles: Optional[List[QuantizerRole]] = None,
     ) -> None:
+        self._validate_mode(mode)
         self._validate_roles(roles, num_quantizers)
         self.recipe = recipe
         self.mode = mode
@@ -1472,6 +1801,7 @@ class Float8CurrentScalingRecipeState(RecipeState):
         device: Optional[torch.device] = None,
         roles: Optional[List[QuantizerRole]] = None,
     ) -> None:
+        self._validate_mode(mode)
         self._validate_roles(roles, num_quantizers)
         self.recipe = recipe
         self.mode = mode
@@ -1485,14 +1815,38 @@ class Float8CurrentScalingRecipeState(RecipeState):
         self.device = device
 
     def make_quantizers(self) -> list:
+        """Build one current-scaling quantizer per slot, dispatched by tensor type.
+
+        Input, weight, and grad-output slots use their corresponding recipe
+        qparams. Output and grad-input boundary slots retain the legacy
+        constructor defaults. Missing or non-canonical roles use the common
+        positional fallback provided by :meth:`RecipeState._slot_tensor_type`.
+        """
         from .tensor.float8_tensor import Float8CurrentScalingQuantizer
 
-        return [
-            Float8CurrentScalingQuantizer(
-                self.dtype, device=self.device, force_pow_2_scales=self.recipe.use_power_2_scales
+        def _make(tensor_type: str) -> Float8CurrentScalingQuantizer:
+            qparams = self._qparams_for_tensor_type(
+                tensor_type,
+                input_qparams=self.recipe.fp8_quant_fwd_inp,
+                weight_qparams=self.recipe.fp8_quant_fwd_weight,
+                grad_qparams=self.recipe.fp8_quant_bwd_grad,
+                output_uses_input_qparams=False,
+                grad_input_uses_grad_qparams=False,
             )
-            for i in range(self.num_quantizers)
-        ]
+
+            force_pow_2_scales = self.recipe.use_power_2_scales
+            amax_epsilon = 0.0
+            if qparams is not None:
+                force_pow_2_scales = qparams.power_2_scale
+                amax_epsilon = qparams.amax_epsilon
+            return Float8CurrentScalingQuantizer(
+                self.dtype,
+                device=self.device,
+                force_pow_2_scales=force_pow_2_scales,
+                amax_epsilon=amax_epsilon,
+            )
+
+        return [_make(self._slot_tensor_type(idx)) for idx in range(self.num_quantizers)]
 
 
 class MXFP8BlockScalingRecipeState(RecipeState):
@@ -1515,6 +1869,7 @@ class MXFP8BlockScalingRecipeState(RecipeState):
         device: Optional[torch.device] = None,
         roles: Optional[List[QuantizerRole]] = None,
     ) -> None:
+        self._validate_mode(mode)
         self._validate_roles(roles, num_quantizers)
         self.recipe = recipe
         self.mode = mode
@@ -1571,6 +1926,7 @@ class Float8BlockScalingRecipeState(RecipeState):
         device: Optional[torch.device] = None,
         roles: Optional[List[QuantizerRole]] = None,
     ) -> None:
+        self._validate_mode(mode)
         self._validate_roles(roles, num_quantizers)
         self.recipe = recipe
         self.mode = mode
@@ -1609,18 +1965,22 @@ class Float8BlockScalingRecipeState(RecipeState):
         from .tensor.float8_blockwise_tensor import Float8BlockQuantizer
 
         def _make(tensor_type: str) -> Float8BlockQuantizer:
+            qparams = self._qparams_for_tensor_type(
+                tensor_type,
+                input_qparams=self.recipe.fp8_quant_fwd_inp,
+                weight_qparams=self.recipe.fp8_quant_fwd_weight,
+                grad_qparams=self.recipe.fp8_quant_bwd_grad,
+            )
+            assert qparams is not None
             if tensor_type == "weight":
-                qparams = self.recipe.fp8_quant_fwd_weight
                 fp8_dtype = self.qw_dtype
                 block_scaling_dim = self.recipe.w_block_scaling_dim
             elif tensor_type in ("grad_output", "grad_input"):
-                qparams = self.recipe.fp8_quant_bwd_grad
                 fp8_dtype = self.qgrad_dtype
                 block_scaling_dim = self.recipe.grad_block_scaling_dim
             else:
                 # "input", "output", or any unknown forward type fall back to
                 # the input config, matching the legacy positional behavior.
-                qparams = self.recipe.fp8_quant_fwd_inp
                 fp8_dtype = self.qx_dtype
                 block_scaling_dim = self.recipe.x_block_scaling_dim
             return Float8BlockQuantizer(
@@ -1632,7 +1992,6 @@ class Float8BlockScalingRecipeState(RecipeState):
                 block_scaling_dim=block_scaling_dim,
             )
 
-        assert self.mode in ("forward", "backward"), f"Unexpected mode {self.mode}"
         return [_make(self._slot_tensor_type(idx)) for idx in range(self.num_quantizers)]
 
 
@@ -1656,6 +2015,7 @@ class NVFP4BlockScalingRecipeState(RecipeState):
         device: Optional[torch.device] = None,
         roles: Optional[List[QuantizerRole]] = None,
     ) -> None:
+        self._validate_mode(mode)
         self._validate_roles(roles, num_quantizers)
         self.recipe = recipe
         self.mode = mode
@@ -1690,15 +2050,14 @@ class NVFP4BlockScalingRecipeState(RecipeState):
         """
         from .tensor.nvfp4_tensor import NVFP4Quantizer
 
-        def _qparams(tensor_type: str):
-            if tensor_type in ("grad_output", "grad_input"):
-                return self.recipe.fp4_quant_bwd_grad
-            if tensor_type == "weight":
-                return self.recipe.fp4_quant_fwd_weight
-            return self.recipe.fp4_quant_fwd_inp
-
         def _make(tensor_type: str) -> NVFP4Quantizer:
-            qparams = _qparams(tensor_type)
+            qparams = self._qparams_for_tensor_type(
+                tensor_type,
+                input_qparams=self.recipe.fp4_quant_fwd_inp,
+                weight_qparams=self.recipe.fp4_quant_fwd_weight,
+                grad_qparams=self.recipe.fp4_quant_bwd_grad,
+            )
+            assert qparams is not None
             nvfp4_use_4over6 = False
             if tensor_type not in ("grad_output", "grad_input"):
                 if self.recipe.nvfp4_4over6 == "all":
@@ -1744,9 +2103,6 @@ class NVFP4BlockScalingRecipeState(RecipeState):
                 nvfp4_e4m3_max=nvfp4_e4m3_max,
                 nvfp4_4over6_err_mode=self.recipe.nvfp4_4over6_err_mode,
             )
-
-        if self.mode not in ("forward", "backward"):
-            raise RuntimeError(f"Unexpected recipe mode ({self.mode})")
 
         return [_make(self._slot_tensor_type(idx)) for idx in range(self.num_quantizers)]
 
@@ -1838,6 +2194,13 @@ def _handle_delayed_scaling_requests(
     return dsrs
 
 
+def _is_delayed_scaling_state(state: Any) -> bool:
+    """Return whether one direction owns delayed scale/history tensors."""
+    return isinstance(state, DelayedScalingRecipeState) or (
+        isinstance(state, CustomRecipeState) and state._has_delayed_scaling
+    )
+
+
 def _has_delayed_scaling_state(fp8_meta: Dict[str, Any]) -> bool:
     """Check if fp8_meta has delayed scaling state (built-in or custom)."""
     if fp8_meta["recipe"].delayed():
@@ -1890,6 +2253,7 @@ class CustomRecipeState(RecipeState):
         device: Optional[torch.device] = None,
         roles: Optional[List[QuantizerRole]] = None,
     ) -> None:
+        self._validate_mode(mode)
         self._validate_roles(roles, num_quantizers)
         self.recipe = recipe
         self.mode = mode

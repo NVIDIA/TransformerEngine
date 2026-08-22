@@ -1905,6 +1905,15 @@ def test_operation_fuser_rebuilds_userbuffers_fusion_on_backward_override_switch
     )
     assert not any(isinstance(op, UserbuffersForwardLinear) for op, _ in fuser._forward_ops)
 
+    current_recipe["value"] = quant_recipe
+    fuser.maybe_fuse_ops(
+        is_grad_enabled=True,
+        recipe=quant_recipe,
+        input_=x,
+        extra_inputs=extra_inputs,
+    )
+    assert any(isinstance(op, UserbuffersForwardLinear) for op, _ in fuser._forward_ops)
+
 
 @pytest.mark.parametrize("recipe_name", _quantized_numerics_recipe_list)
 @pytest.mark.parametrize("dtype", _core_dtypes, ids=str)
