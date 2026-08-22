@@ -180,11 +180,17 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     const size_t next_stage = stage + 1;
     const size_t stage_offset_Y = stage * BUFF_DIM_Y;
 
-    if (next_stage < STAGES) {
-      // Wait for TMA transfer to have finished reading shared memory.
-      // I.e. the buffer is ready to be written to
-      ptx::cp_async_bulk_wait_group_read<1>();
+    // S2G bulk async-groups are thread-local, so only the issuing thread can wait for the
+    // previous TMA read of this output buffer to complete. Hand that completion off to the
+    // rest of the CTA before any thread overwrites the reused buffer.
+    if (stage >= BUFFS_NUM) {
+      if (is_master_thread) {
+        ptx::cp_async_bulk_wait_group_read<BUFFS_NUM - 1>();
+      }
+      __syncthreads();
+    }
 
+    if (next_stage < STAGES) {
       const size_t next_buff = next_stage % BUFFS_NUM;
       const size_t next_stage_offset_Y = next_stage * BUFF_DIM_Y;
       const size_t global_offset_Y = block_offset_Y + next_stage_offset_Y;
@@ -577,6 +583,12 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   if (is_master_thread && amax_ptr != nullptr) {
     atomicMaxFloat(amax_ptr, block_amax);
   }
+
+  // Ensure all S2G operations issued by the master have completed before the CTA exits.
+  if (is_master_thread) {
+    ptx::cp_async_bulk_wait_group();
+  }
+  __syncthreads();
 
   destroy_barriers<STAGES>(mbar, is_master_thread);
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
