@@ -55,6 +55,7 @@ from ..distributed_weight import (
     materialize_weight_for_forward,
     materialize_weight_for_backward,
     finalize_weight_grads,
+    weight_grad_dtype,
 )
 from ..cpp_extensions import (
     general_grouped_gemm,
@@ -1406,7 +1407,7 @@ class _GroupedLinear(torch.autograd.Function):
                     wgrad_packed = torch.empty(
                         ctx.num_gemms,
                         *weights[0].size(),
-                        dtype=ctx.activation_dtype,
+                        dtype=weight_grad_dtype(origin_weights, ctx.activation_dtype),
                         device=ctx.device,
                     )
                     wgrad_list = [wgrad_packed[i] for i in range(ctx.num_gemms)]
