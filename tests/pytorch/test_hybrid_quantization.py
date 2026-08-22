@@ -1772,6 +1772,25 @@ class TestHybridTorchDispatch:
         assert isinstance(detached, HybridQuantizedTensor)
         assert not detached.requires_grad
 
+    def test_detach_preserves_subclass(self, hybrid_tensor):
+        """HybridQuantizedTensor detach preserves its runtime subclass."""
+
+        class DerivedHybridQuantizedTensor(HybridQuantizedTensor):
+            pass
+
+        hybrid_tensor.__class__ = DerivedHybridQuantizedTensor
+        source_data = hybrid_tensor.get_data_tensors()
+
+        detached = hybrid_tensor.detach()
+
+        assert type(detached) is DerivedHybridQuantizedTensor
+        for detached_data, source_data_tensor in zip(detached.get_data_tensors(), source_data):
+            assert detached_data is source_data_tensor
+        assert not detached.requires_grad
+
+        parameter = torch.nn.Parameter(hybrid_tensor)
+        assert type(parameter) is DerivedHybridQuantizedTensor
+
     def test_repr(self, hybrid_tensor):
         r = repr(hybrid_tensor)
         assert "HybridQuantizedTensor" in r
