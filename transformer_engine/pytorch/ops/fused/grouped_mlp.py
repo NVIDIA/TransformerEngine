@@ -1350,7 +1350,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
 
         alpha_tensor = get_cached_ones_tensor(num_groups, dtype, device)
         norm_const_tensor = get_cached_ones_tensor(1, torch.float32, device)
-        current_stream = torch.cuda.current_stream().cuda_stream
+        current_stream = torch.cuda.current_stream(device.index).cuda_stream
 
         fc1_bias_packed = _pack_grouped_linear_bias_for_cudnn(fc1_op)
         fc2_bias_packed = _pack_grouped_linear_bias_for_cudnn(fc2_op)
@@ -2022,7 +2022,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         # Kernel scaling factors
         alpha_tensor = get_cached_ones_tensor(num_groups, dtype, device)
         norm_const_tensor = get_cached_ones_tensor(1, torch.float32, device)
-        current_stream = torch.cuda.current_stream().cuda_stream
+        current_stream = torch.cuda.current_stream(device.index).cuda_stream
 
         unit_activation_scale = bool(getattr(fc1_ctx, "unit_activation_scale", False))
         scales_f32 = None

@@ -146,6 +146,80 @@ def maybe_skip_quantization(
             pytest.skip("NVFP4 quantization is only supported with BF16 data")
 
 
+def test_operation_fuser_caches_plans_by_grad_requirement(monkeypatch) -> None:
+    """Cache and restore fusion plans for checkpoint forward and recompute."""
+
+    # Count fusion-plan construction without depending on any particular real
+    # fusion implementation. Each distinct fusion configuration invokes this
+    # hook once, while a cache hit must bypass it entirely.
+    fusion_calls = 0
+
+    def track_fusion(ops, *, recipe):  # pylint: disable=unused-argument
+        nonlocal fusion_calls
+        fusion_calls += 1
+        # Preserve the operation list so this hook observes plan construction
+        # without changing the topology under test.
+        return ops
+
+    # The fusion registries are class attributes shared by every OperationFuser.
+    # pytest's monkeypatch fixture restores all three after the test, preventing
+    # this synthetic fusion function from leaking into other tests. Keep only a
+    # joint forward-backward fusion hook so each plan build has one countable
+    # callback and no registered TE fusion can affect the result.
+    monkeypatch.setattr(OperationFuser, "forward_backward_fusion_functions", [track_fusion])
+    monkeypatch.setattr(OperationFuser, "forward_fusion_functions", [])
+    monkeypatch.setattr(OperationFuser, "backward_fusion_functions", [])
+
+    # One Identity op is enough to exercise the cache. With one basic op,
+    # first_op_requiring_backward has an intentionally simple interpretation:
+    #   0: backward starts at the Identity op;
+    #   1: the boundary is past the only op, so no backward work is required.
+    fuser = OperationFuser([te_ops.Identity()])
+    x = torch.ones(1, requires_grad=True)
+    # maybe_fuse_ops expects one extra-input collection per basic op. Identity
+    # has no extra inputs, so its collection is an empty tuple.
+    extra_inputs = [()]
+
+    # Phase 1: the original checkpointed forward runs with grad disabled. This
+    # is the first invocation, so the fuser must construct and cache the no-grad
+    # configuration. The runtime backward boundary is past the only op.
+    fuser.maybe_fuse_ops(False, None, x, extra_inputs)
+    assert fusion_calls == 1
+    assert fuser.first_op_requiring_backward == 1
+    no_grad_forward_ops = fuser._forward_ops
+    no_grad_backward_ops = fuser._backward_ops
+
+    # Phase 2: backward replays the checkpointed region with grad enabled. The
+    # backward boundary is part of the fusion key, allowing future fusion rules
+    # to choose a training-specific topology. The first grad-enabled invocation
+    # therefore constructs and caches a second configuration.
+    fuser.maybe_fuse_ops(True, None, x, extra_inputs)
+    assert fusion_calls == 2
+    assert fuser.first_op_requiring_backward == 0
+    grad_forward_ops = fuser._forward_ops
+    grad_backward_ops = fuser._backward_ops
+    assert grad_forward_ops is not no_grad_forward_ops
+    assert grad_backward_ops is not no_grad_backward_ops
+
+    # Phase 3: the next checkpointed forward must select the exact no-grad lists
+    # cached in phase 1. Before the cache was added, every boundary transition
+    # rebuilt the fused operations and called track_fusion again.
+    fuser.maybe_fuse_ops(False, None, x, extra_inputs)
+    assert fusion_calls == 2
+    assert fuser.first_op_requiring_backward == 1
+    assert fuser._forward_ops is no_grad_forward_ops
+    assert fuser._backward_ops is no_grad_backward_ops
+
+    # Phase 4: another recomputation must likewise restore the grad-enabled
+    # lists from phase 2. The full alternating sequence has built only the two
+    # configurations represented by its two fusion keys.
+    fuser.maybe_fuse_ops(True, None, x, extra_inputs)
+    assert fusion_calls == 2
+    assert fuser.first_op_requiring_backward == 0
+    assert fuser._forward_ops is grad_forward_ops
+    assert fuser._backward_ops is grad_backward_ops
+
+
 @torch.no_grad()
 def make_reference_and_test_tensors(
     shape: int | Iterable[int],
