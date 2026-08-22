@@ -7,8 +7,13 @@
 import itertools
 import torch
 import unittest
+from transformer_engine.pytorch import CPLoadBalancingStrategy
 from transformer_engine.pytorch.attention.dot_product_attention.context_parallel import (
+    get_no_load_balance_thd_causal_metadata,
     get_batch_on_this_cp_rank,
+    get_thd_partitioned_indices,
+    restore_thd_gathered_kv,
+    unrestore_thd_gathered_kv,
     pad_thd_sequences_for_cp,
     generate_positional_ids_for_cp,
 )
@@ -17,6 +22,49 @@ try:
     import transformer_engine_torch as tex
 except ImportError:
     tex = None
+
+
+class TestTHDPartitioning(unittest.TestCase):
+    def test_default_partition_rejects_cpu_metadata(self):
+        with self.assertRaisesRegex(AssertionError, "requires CUDA cu_seqlens"):
+            get_thd_partitioned_indices(torch.tensor([0, 8]), 8, 2, 0)
+
+    def test_no_load_balance_metadata_handles_document_padding_boundary(self):
+        cu_seqlens = torch.tensor([0, 6, 10], dtype=torch.int32)
+        cu_seqlens_padded = torch.tensor([0, 8, 12], dtype=torch.int32)
+
+        q_cu, q_cu_padded, kv_cu = get_no_load_balance_thd_causal_metadata(
+            cu_seqlens,
+            cu_seqlens_padded,
+            total_tokens=12,
+            cp_size=2,
+            cp_rank=1,
+        )
+
+        self.assertEqual(len(q_cu), 1)
+        self.assertTrue(torch.equal(q_cu[0], torch.tensor([0, 0, 4], dtype=torch.int32)))
+        self.assertTrue(torch.equal(q_cu_padded[0], torch.tensor([0, 2, 6], dtype=torch.int32)))
+        self.assertTrue(torch.equal(kv_cu[0], torch.tensor([0, 6, 10], dtype=torch.int32)))
+
+    def test_no_load_balance_restore_uses_captured_mode(self):
+        tokens = torch.arange(8)
+        cu_seqlens_padded = torch.tensor([0, 8], dtype=torch.int32)
+
+        restored = restore_thd_gathered_kv(
+            tokens,
+            cu_seqlens_padded,
+            2,
+            CPLoadBalancingStrategy.NO_LOAD_BALANCE,
+        )
+        unrestored = unrestore_thd_gathered_kv(
+            tokens,
+            cu_seqlens_padded,
+            2,
+            CPLoadBalancingStrategy.NO_LOAD_BALANCE,
+        )
+
+        self.assertIs(restored, tokens)
+        self.assertIs(unrestored, tokens)
 
 
 class TestSequencePadding(unittest.TestCase):
@@ -583,6 +631,46 @@ class TestContextParallelUtils(unittest.TestCase):
         self.assertTrue(torch.equal(input_ids_r1, expected_input_ids_r1))
         self.assertTrue(torch.equal(labels_r1, expected_labels_r1))
         self.assertTrue(torch.equal(pos_ids_r1, expected_pos_ids_r1))
+
+    @unittest.skipUnless(torch.cuda.is_available() and tex is not None, "CUDA extension required")
+    def test_cp_rank_slicing_dual_chunk_swap_on_cuda(self):
+        """CUDA inputs use the native DualChunkSwap partition indices."""
+        input_ids = torch.arange(16, device="cuda").unsqueeze(0)
+        labels = input_ids + 100
+        position_ids = torch.arange(16, device="cuda")
+        cu_seqlens = torch.tensor([0, 8, 16])
+
+        self._mock_distributed_env(cp_size=2, cp_rank=0)
+        input_ids_rank, labels_rank, position_ids_rank = get_batch_on_this_cp_rank(
+            cu_seqlens, input_ids, labels, position_ids
+        )
+
+        expected_indices = torch.tensor([0, 1, 6, 7, 8, 9, 14, 15], device="cuda")
+        self.assertTrue(torch.equal(input_ids_rank, input_ids.index_select(1, expected_indices)))
+        self.assertTrue(torch.equal(labels_rank, labels.index_select(1, expected_indices)))
+        self.assertTrue(
+            torch.equal(position_ids_rank, position_ids.index_select(0, expected_indices))
+        )
+
+    def test_cp_rank_slicing_no_load_balance_on_cpu(self):
+        """The experimental policy assigns one contiguous CPU chunk per rank."""
+        input_ids = torch.arange(12).unsqueeze(0)
+        labels = input_ids + 100
+        position_ids = torch.arange(12)
+        cu_seqlens = torch.tensor([0, 5, 12])
+
+        self._mock_distributed_env(cp_size=4, cp_rank=2)
+        input_ids_rank, labels_rank, position_ids_rank = get_batch_on_this_cp_rank(
+            cu_seqlens,
+            input_ids,
+            labels,
+            position_ids,
+            load_balancing_strategy=CPLoadBalancingStrategy.NO_LOAD_BALANCE,
+        )
+
+        self.assertTrue(torch.equal(input_ids_rank, torch.tensor([[6, 7, 8]])))
+        self.assertTrue(torch.equal(labels_rank, torch.tensor([[106, 107, 108]])))
+        self.assertTrue(torch.equal(position_ids_rank, torch.tensor([6, 7, 8])))
 
     def test_cp_rank_slicing_multiple_sequences(self):
         """Test CP rank slicing with multiple sequences."""
