@@ -137,6 +137,17 @@ def _cudnn_frontend_supports_single_group_runtime_offsets(
     )
 
 
+def _deterministic_algorithms_required() -> bool:
+    """Whether bit-exact reproducibility was asked for. Same union as ``DotProductAttention``.
+
+    Uncached: both knobs can change during the process.
+    """
+    return (
+        not bool(int(os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1")))
+        or torch.are_deterministic_algorithms_enabled()
+    )
+
+
 def _wrap_single_quantized_as_grouped(
     tensor: torch.Tensor,
     quantized: MXFP8Tensor | NVFP4Tensor | NVFP4TensorStorage,
@@ -916,6 +927,11 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
     def grouped_gemm_dactivation_kernel(cls) -> Callable:
         """Fused kernel for grouped GEMM, activation backward, and scale grad."""
         raise NotImplementedError
+
+    @classmethod
+    def grouped_gemm_dactivation_is_deterministic(cls) -> bool:
+        """Whether this op's dactivation kernel can produce a bit-exact ``dprob``."""
+        return False
 
     @classmethod
     @functools.lru_cache(maxsize=None)
@@ -2025,6 +2041,24 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         current_stream = torch.cuda.current_stream().cuda_stream
 
         unit_activation_scale = bool(getattr(fc1_ctx, "unit_activation_scale", False))
+        # A unit activation scale produces no dprob, so there is nothing to make deterministic.
+        deterministic_dactivation = (
+            not unit_activation_scale and _deterministic_algorithms_required()
+        )
+        # dprob has two producers here: the cuDNN epilogue below, and -- when scale_bias is
+        # set -- the Triton kernel that accumulates into it further down. Both must be
+        # deterministic, and the Triton one never is.
+        if deterministic_dactivation and not (
+            self.grouped_gemm_dactivation_is_deterministic() and not scale_bias
+        ):
+            raise RuntimeError(
+                "Deterministic execution was requested"
+                " (NVTE_ALLOW_NONDETERMINISTIC_ALGO=0 or"
+                " torch.use_deterministic_algorithms), but the scale gradient (dprob) is"
+                " accumulated with nondeterministic atomics on this configuration."
+                " A bit-exact dprob requires the scaled-SReLU activation,"
+                " nvidia-cudnn-frontend 1.28.0 or later, and an FC2 without scale_bias."
+            )
         scales_f32 = None
         scales_tensor = None
         dscales_tensor = None
@@ -2079,6 +2113,9 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             "use_dynamic_sched": True,
         }
         dactivation_kernel = self.grouped_gemm_dactivation_kernel()
+        if deterministic_dactivation:
+            # Never passed to a wrapper that would reject it -- the check above raises first.
+            fc2_dactivation_kwargs["deterministic"] = True
         if _cudnn_frontend_supports_single_group_runtime_offsets(type(activation_op)):
             fc2_dactivation_kwargs["use_single_group_runtime_offsets"] = num_groups == 1
         if self._cudnn_dact_func is not None:
@@ -2606,6 +2643,19 @@ class GroupedMLP_CuTeGEMMUnary(_GroupedMLP_CuTeGEMMBase):
         from cudnn import grouped_gemm_dsrelu_wrapper_sm100  # pylint: disable=no-name-in-module
 
         return grouped_gemm_dsrelu_wrapper_sm100
+
+    @classmethod
+    @functools.lru_cache(maxsize=None)
+    def grouped_gemm_dactivation_is_deterministic(cls) -> bool:
+        """Feature-detect the dSReLU wrapper's ``deterministic`` argument (cuDNN FE 1.28.0+)."""
+        try:
+            kernel = cls.grouped_gemm_dactivation_kernel()
+        except ImportError:
+            return False
+        try:
+            return "deterministic" in inspect.signature(kernel).parameters
+        except (TypeError, ValueError):
+            return False
 
 
 def fuse_ops(
