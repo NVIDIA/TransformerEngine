@@ -15,6 +15,7 @@
 #include <cuda/barrier>
 #include <cute/tensor.hpp>
 
+#include "common/cast/nvfp4/core_nvfp4.cuh"
 #include "common/common.h"
 #include "common/util/cuda_runtime.h"
 #include "common/util/curanddx.hpp"
@@ -39,17 +40,6 @@ using namespace cute;
 
 using cute::Tensor;  // Avoid conflict with transformer_engine::Tensor
 using cute::Shape;  // Avoid conflict with transformer_engine::Shape
-
-// calculate the global encode scale factor for a given global amax.
-__device__ __forceinline__ float ComputeGlobalEncodeScaleFP4(const float global_amax) {
-  constexpr float kFP8E4M3Max = 448.0f;
-  constexpr float kFP4E2M1Max = 6.0f;
-  // If scale is infinity, return max value of float32
-  float global_encode_scale = cutlass::minimum_with_nan_propagation<float>{}(
-    kFP8E4M3Max * kFP4E2M1Max / global_amax, cutlass::platform::numeric_limits<float>::max());
-  // If global amax is 0 or infinity, return 1
-  return (global_amax == 0.f || global_encode_scale == 0.f) ? 1.f : global_encode_scale;
-}
 
 template <class ElementA,
           class ElementB,
@@ -276,7 +266,7 @@ rht_gemm_device(MShape M, NShape N, KShape K, ClusterTileShape cluster_tile,
   bool is_dma_warp = (warp_idx == 1);
   bool is_epilogue_warp = (warp_idx >= 4 && warp_idx <= 7);
 
-  if (is_epilogue_warp && elect_one_sync()) {
+  if (is_epilogue_warp && elect_one_sync() && global_amax != nullptr) {
     cute::prefetch(raw_pointer_cast(global_amax));
   }
 
@@ -412,7 +402,9 @@ rht_gemm_device(MShape M, NShape N, KShape K, ClusterTileShape cluster_tile,
     accumulator_pipeline.producer_tail(accumulator_pipe_producer_state);
     tmem_allocator.free(tmem_base_ptr, TmemAllocator::Sm100TmemCapacityColumns);
   } else if (is_epilogue_warp) {
-    const float global_amax_val = *global_amax;
+    constexpr float kUnitGlobalScaleAmax = TypeExtrema<TSFC>::max * TypeExtrema<fp4e2m1>::max;
+    const float global_amax_val =
+        global_amax == nullptr ? kUnitGlobalScaleAmax : *global_amax;
     static constexpr int FragmentSize = 256 / sizeof_bits_v<TC>;
 
     tmem_allocation_result_barrier.arrive_and_wait();
@@ -427,9 +419,11 @@ rht_gemm_device(MShape M, NShape N, KShape K, ClusterTileShape cluster_tile,
     auto thr_r2g = tiled_r2g.get_slice(thread_idx);
 
     // NVFP4 non-E8 recipe constants and global scales
-    static constexpr float fp4_max = 6.0f;
+    static constexpr float fp4_max =
+        transformer_engine::detail::TypeExtrema<fp4e2m1>::max;
 
-    const float global_encode_scale = ComputeGlobalEncodeScaleFP4(global_amax_val);
+    const float global_encode_scale =
+        dispatch::nvfp4::core::compute_global_encode_scaling_factor_FP4<TSFC>(global_amax_val);
     const float global_decode_scale = 1.0f / global_encode_scale;
 
     // Scaling factor for fast math path
@@ -758,7 +752,6 @@ void hadamard_transform_cast_fusion_columnwise(const Tensor &input_, Tensor &out
   using TA = cute::bfloat16_t;
   using TB = cute::bfloat16_t;
   using TC = cutlass::float_e2m1_t;
-  using TSFC = cutlass::float_ue4m3_t;
 
   checkCuDriverContext(stream);
 
@@ -819,22 +812,24 @@ void hadamard_transform_cast_fusion_columnwise(const Tensor &input_, Tensor &out
     k_tile_size = 512;
   }
 
-  TRANSFORMER_ENGINE_SWITCH_CONDITION(
-      use_stochastic_rounding, kUseStochasticRounding,
+  TRANSFORMER_ENGINE_NVFP4_SCALE_TYPE_SWITCH(
+      scale_inv_t.dtype, TSFC,
       TRANSFORMER_ENGINE_SWITCH_CONDITION(
-          quant_config.use_fast_math, kUseFastMath,
-          detail::rht_gemm_ttt_wrapper<TA, TB, TC, TSFC, kUseStochasticRounding, kUseFastMath>(
-              /*m=*/m,
-              /*n=*/n,
-              /*A=*/reinterpret_cast<TA const *>(input.dptr),
-              /*B=*/reinterpret_cast<TB const *>(hadamard_matrix.dptr),
-              /*C=*/reinterpret_cast<TC *>(output_t.dptr),
-              /*SFC=*/reinterpret_cast<TSFC *>(scale_inv_t.dptr),
-              /*global_amax=*/reinterpret_cast<float const *>(global_amax.dptr),
-              /*rng_state=*/rng_state,
-              /*sm_count=*/sm_count,
-              /*stream=*/stream,
-              /*k_tile_size=*/k_tile_size);););
+          use_stochastic_rounding, kUseStochasticRounding,
+          TRANSFORMER_ENGINE_SWITCH_CONDITION(
+              quant_config.use_fast_math, kUseFastMath,
+              detail::rht_gemm_ttt_wrapper<TA, TB, TC, TSFC, kUseStochasticRounding, kUseFastMath>(
+                  /*m=*/m,
+                  /*n=*/n,
+                  /*A=*/reinterpret_cast<TA const *>(input.dptr),
+                  /*B=*/reinterpret_cast<TB const *>(hadamard_matrix.dptr),
+                  /*C=*/reinterpret_cast<TC *>(output_t.dptr),
+                  /*SFC=*/reinterpret_cast<TSFC *>(scale_inv_t.dptr),
+                  /*global_amax=*/reinterpret_cast<float const *>(global_amax.dptr),
+                  /*rng_state=*/rng_state,
+                  /*sm_count=*/sm_count,
+                  /*stream=*/stream,
+                  /*k_tile_size=*/k_tile_size);););)
 }
 
 }  // namespace transformer_engine

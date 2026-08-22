@@ -28,26 +28,29 @@ class _FormatHelper(NamedTuple):
 
 class Format(Enum):
     """
-    Supported FP8 formats.
-    Supported FP4 formats.
+    Low precision data formats.
 
     Values
     ------
     E2M1 :
-          All FP4 tensors are in e2m1 format
+          FP4 type with e2m1 format
     E4M3 :
-          All FP8 tensors are in e4m3 format
+          FP8 type with e4m3 format
     E5M2 :
-          All FP8 tensors are in e5m2 format
+          FP8 type with e5m2 format
     HYBRID :
             FP8 tensors in the forward pass are in e4m3 format,
             FP8 tensors in the backward pass are in e5m2 format
+    UE5M3 :
+          FP8 type with ue5m3 format
+
     """
 
     E2M1 = _FormatHelper(max_fwd=6, max_bwd=6)
     E4M3 = _FormatHelper(max_fwd=448, max_bwd=448)
     E5M2 = _FormatHelper(max_fwd=57344, max_bwd=57344)
     HYBRID = _FormatHelper(max_fwd=E4M3.max_fwd, max_bwd=E5M2.max_bwd)
+    UE5M3 = _FormatHelper(max_fwd=114688, max_bwd=114688)
 
 
 @dataclass(frozen=True)
@@ -261,7 +264,7 @@ class DelayedScaling(Recipe):
     backward_override: Optional[str] = os.getenv("NVTE_BACKWARD_OVERRIDE", None)
 
     def __post_init__(self) -> None:
-        assert self.fp8_format != Format.E5M2, "Pure E5M2 training is not supported."
+        assert self.fp8_format in (Format.E4M3, Format.HYBRID), "Unsupported FP8 format."
         assert (
             self.backward_override in _BACKWARD_OVERRIDES
         ), "NVTE_BACKWARD_OVERRIDE must be unset or one of: 'high_precision', 'dequantized'."
@@ -312,7 +315,7 @@ class Float8CurrentScaling(Recipe):
     backward_override: Optional[str] = os.getenv("NVTE_BACKWARD_OVERRIDE", None)
 
     def __post_init__(self) -> None:
-        assert self.fp8_format != Format.E5M2, "Pure E5M2 training is not supported."
+        assert self.fp8_format in (Format.E4M3, Format.HYBRID), "Unsupported FP8 format."
         assert (
             self.backward_override in _BACKWARD_OVERRIDES
         ), "NVTE_BACKWARD_OVERRIDE must be unset or one of: 'high_precision', 'dequantized'."
@@ -373,7 +376,7 @@ class MXFP8BlockScaling(Recipe):
     enable_2d_quantization: bool = False
 
     def __post_init__(self) -> None:
-        assert self.fp8_format != Format.E5M2, "Pure E5M2 training is not supported."
+        assert self.fp8_format in (Format.E4M3, Format.HYBRID), "Unsupported FP8 format."
         assert (
             self.backward_override in _BACKWARD_OVERRIDES
         ), "NVTE_BACKWARD_OVERRIDE must be unset or one of: 'high_precision', 'dequantized'."
@@ -461,7 +464,7 @@ class Float8BlockScaling(Recipe):
         assert (
             not self.fp8_dpa and not self.fp8_mha
         ), "FP8 attention is not supported for Float8BlockScaling."
-        assert self.fp8_format != Format.E5M2, "Pure E5M2 training is not supported."
+        assert self.fp8_format in (Format.E4M3, Format.HYBRID), "Unsupported FP8 format."
         assert (
             self.backward_override in _BACKWARD_OVERRIDES
         ), "NVTE_BACKWARD_OVERRIDE must be unset or one of: 'high_precision', 'dequantized'."
@@ -575,7 +578,10 @@ class NVFP4BlockScaling(Recipe):
 
     def __post_init__(self) -> None:
         assert self.fp4_format == Format.E2M1, "Only E2M1 is supported for NVFP4 scaling"
-        assert self.fp8_format == Format.E4M3, "Only E4M3 is supported for NVFP4 scaling"
+        assert self.fp8_format in (
+            Format.E4M3,
+            Format.UE5M3,
+        ), "Unsupported format for NVFP4 scaling."
         assert (
             self.backward_override in _BACKWARD_OVERRIDES
         ), "NVTE_BACKWARD_OVERRIDE must be unset or one of: 'high_precision', 'dequantized'."

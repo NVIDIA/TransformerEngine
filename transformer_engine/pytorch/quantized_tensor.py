@@ -7,6 +7,7 @@
 from __future__ import annotations
 from typing import NamedTuple, Optional, Tuple, Iterable, Any, Dict, Union, get_type_hints
 import abc
+import enum
 import warnings
 import math
 
@@ -681,8 +682,8 @@ class Quantizer(abc.ABC):
         items = []
         for name in fields:
             value = getattr(self, name)
-            if name == "dtype":
-                # ``DType`` is an ``IntEnum``; store the int so the key stays
+            if isinstance(value, enum.IntEnum):
+                # Store IntEnum values (like DType) as int so that the key stays
                 # plain: hashable and ``repr``-reproducible for FX codegen.
                 value = int(value)
             items.append((name, value))

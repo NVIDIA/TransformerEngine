@@ -27,7 +27,7 @@ void nvfp4_2d_compute_partial_amax(const at::Tensor& tensor, at::Tensor amax, si
 
 void nvfp4_2d_partial_cast(const at::Tensor& inp, py::handle out, const at::Tensor& scale,
                            const at::Tensor& global_scale, size_t h, size_t w, size_t start_offset,
-                           size_t block_len) {
+                           size_t block_len, const DType scale_dtype) {
   TORCH_CHECK(block_len == 16, "Currently only block_len = 16 is supported for NVFP4 2D");
   TORCH_CHECK(scale.dim() == 2, "scale must be a 2D tensor");
   TORCH_CHECK(scale.scalar_type() == at::ScalarType::Float, "scale must be a float tensor");
@@ -45,7 +45,7 @@ void nvfp4_2d_partial_cast(const at::Tensor& inp, py::handle out, const at::Tens
 
   nvte_nvfp4_2d_partial_cast(inp_cu.data(), out_cu.data(), scale_cu.data(), global_scale_cu.data(),
                              h, w, scale.stride(0), scale.stride(1), start_offset, block_len,
-                             at::cuda::getCurrentCUDAStream());
+                             static_cast<NVTEDType>(scale_dtype), at::cuda::getCurrentCUDAStream());
 }
 
 void nvfp4_multi_tensor_2d_partial_cast(std::vector<at::Tensor> inp_list,
@@ -53,7 +53,8 @@ void nvfp4_multi_tensor_2d_partial_cast(std::vector<at::Tensor> inp_list,
                                         std::vector<at::Tensor> scale_list,
                                         std::vector<at::Tensor> global_scale_list,
                                         std::vector<int64_t> h_list, std::vector<int64_t> w_list,
-                                        std::vector<int64_t> start_offset_list, int64_t block_len) {
+                                        std::vector<int64_t> start_offset_list, int64_t block_len,
+                                        const DType scale_dtype) {
   TORCH_CHECK(block_len == 16, "Currently only block_len = 16 is supported for NVFP4 2D");
 
   const size_t num_tensors = inp_list.size();
@@ -95,7 +96,8 @@ void nvfp4_multi_tensor_2d_partial_cast(std::vector<at::Tensor> inp_list,
 
     nvte_nvfp4_2d_partial_cast(inp_cu.data(), out_cu.data(), scale_cu.data(),
                                global_scale_cu.data(), h, w, scale.stride(0), scale.stride(1),
-                               start_offset, static_cast<size_t>(block_len), stream);
+                               start_offset, static_cast<size_t>(block_len),
+                               static_cast<NVTEDType>(scale_dtype), stream);
   }
 }
 

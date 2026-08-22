@@ -16,6 +16,8 @@
 #include <cuda_runtime.h>
 #include <transformer_engine/transformer_engine.h>
 
+#include <type_traits>
+
 #include "../../../common.h"
 #include "../../../util/math.h"
 #include "../../../util/ptx_arch_spec.cuh"
@@ -28,7 +30,6 @@ namespace nvfp4 {
 
 namespace quantize_transpose_tuned_kernel {
 
-using namespace quantization_and_transposition_SF;
 using namespace core;
 using namespace ptx;
 
@@ -140,8 +141,10 @@ using IType3D = IType[BUFFS_NUM_IN][BUFF_IN_DIM_Y][BUFF_IN_DIM_X];
 using IType2x3D = IType2[BUFFS_NUM_IN][BUFF_IN_DIM_Y][BUFF_IN_DIM_X / 2];
 using OType2x3D = fp4e2m1x2[BUFFS_NUM_OUT][BUFF_OUT_DIM_Y][BUFF_OUT_DIM_X];
 using OType2xt3D = fp4e2m1x2[BUFFS_NUM_OUT_TR][BUFF_OUT_TR_DIM_Y][BUFF_OUT_TR_DIM_X];
-using ScalesType2D = nvfp4_scale_t[TunableConfig::CHUNK_DIM_Y][SCALES_PER_CHUNK_X];
-using ScalesTypeTr2D = nvfp4_scale_t[TunableConfig::CHUNK_DIM_X][SCALES_PER_CHUNK_Y];
+template <typename ScaleType>
+using ScalesType2D = ScaleType[TunableConfig::CHUNK_DIM_Y][SCALES_PER_CHUNK_X];
+template <typename ScaleType>
+using ScalesTypeTr2D = ScaleType[TunableConfig::CHUNK_DIM_X][SCALES_PER_CHUNK_Y];
 using RNG_t = typename transformer_engine::curanddx::detail::philox4x32_native_state<
     NVTE_BUILD_NUM_PHILOX_ROUNDS>;
 
@@ -160,41 +163,35 @@ __device__ __forceinline__ float get_amax_of_pair(const IType2 pair) {
   return static_cast<float>(__hmax(__habs(pair.x), __habs(pair.y)));
 }
 
-// Compute "correct" per-block encoding scaling factor
-template <typename SF_TYPE>
-__device__ __forceinline__ SF_TYPE
-compute_nvfp4_scaling_coefficient(const nvfp4_scale_t S_dec_block, const float S_enc) {
-  NVTE_DEVICE_ERROR("Unsupported scaling-factor type. Only FP32 and BF16 are supported.");
+// Compute "correct" per-block encoding scaling factor.
+template <typename SFType, typename ScaleType>
+__device__ __forceinline__ SFType
+compute_nvfp4_scaling_coefficient(const ScaleType decode_scale, const float global_encode_scale) {
+  if constexpr (std::is_same_v<SFType, float>) {
+    const float global_decode_scale = 1.0f / global_encode_scale;
+    return fminf(1.0f / (static_cast<float>(decode_scale) * global_decode_scale),
+                 detail::TypeExtrema<float>::max);
+  } else if constexpr (std::is_same_v<SFType, bf16>) {
+    const float scale_rcp = fminf(global_encode_scale / static_cast<float>(decode_scale),
+                                  detail::TypeExtrema<bf16>::max);
+    return static_cast<bf16>(scale_rcp);
+  } else {
+    NVTE_DEVICE_ERROR("Unsupported scaling-factor type. Only FP32 and BF16 are supported.");
+  }
 }
 
-template <>
-__device__ __forceinline__ float compute_nvfp4_scaling_coefficient<float>(
-    const nvfp4_scale_t S_dec_block, const float S_enc) {
-  const float S_dec = 1.0f / S_enc;
-  const float scale_rcp =
-      fminf(1.0f / (static_cast<float>(S_dec_block) * S_dec), detail::TypeExtrema<float>::max);
-  return scale_rcp;
-}
-
-template <>
-__device__ __forceinline__ bf16
-compute_nvfp4_scaling_coefficient<bf16>(const nvfp4_scale_t S_dec_block, const float S_enc) {
-  const float scale_rcp =
-      fminf(S_enc / (static_cast<float>(S_dec_block)), detail::TypeExtrema<bf16>::max);
-  return static_cast<bf16>(scale_rcp);
-}
-
-template <bool USE_STOCHASTIC_ROUNDING, bool USE_FAST_MATH, bool ROW_SCALED_NVFP4>
+template <typename ScaleType, bool USE_STOCHASTIC_ROUNDING, bool USE_FAST_MATH,
+          bool ROW_SCALED_NVFP4>
 __device__ __forceinline__ void colwise_scaling(
     const IType *__restrict__ sIn_ptr, fp4e2m1x2 *__restrict__ sOut_tr_ptr,
-    nvfp4_scale_t *__restrict__ sSFcolwise_ptr, const float S_enc_colwise, const int stage_Y,
+    ScaleType *__restrict__ sSFcolwise_ptr, const float S_enc_colwise, const int stage_Y,
     const int stage_X, const int buff_in, const int buff_out_tr, const float *amax_colwise_ptr,
     const size_t col_offset, const size_t cols, RNG_t &rng, uint4 &random_uint4, int &rnd_idx) {
   using scaling_coeff_type = typename SCALING_COEFFICIENT_TYPE<USE_FAST_MATH>::type;
 
   const auto &sIn2x = *reinterpret_cast<const IType2x3D *>(sIn_ptr);
   auto &sOut_tr = *reinterpret_cast<OType2xt3D *>(sOut_tr_ptr);
-  auto &sSFcolwise = *reinterpret_cast<ScalesTypeTr2D *>(sSFcolwise_ptr);
+  auto &sSFcolwise = *reinterpret_cast<ScalesTypeTr2D<ScaleType> *>(sSFcolwise_ptr);
 
   const int warp = threadIdx.x / THREADS_PER_WARP;
   const int thread_lane = threadIdx.x % THREADS_PER_WARP;
@@ -233,11 +230,12 @@ __device__ __forceinline__ void colwise_scaling(
     if constexpr (ROW_SCALED_NVFP4) {
       const size_t col_idx = col_offset + stage_X * TILE_DIM_X + thread_offset_X_colwise + w;
       S_enc_colwise_block =
-          col_idx < cols ? core::compute_global_encode_scaling_factor_FP4(amax_colwise_ptr[col_idx])
-                         : 1.0f;
+          col_idx < cols && amax_colwise_ptr != nullptr
+              ? core::compute_global_encode_scaling_factor_FP4<ScaleType>(amax_colwise_ptr[col_idx])
+              : 1.0f;
     }
-    const nvfp4_scale_t S_dec_b_fp8 =
-        compute_decoding_scaling_factor(block_amax[w], S_enc_colwise_block);
+    const ScaleType S_dec_b_fp8 =
+        core::compute_decoding_scaling_factor<ScaleType>(block_amax[w], S_enc_colwise_block);
 
     // Store scaling factors to SMEM buffer (R2S)
     sSFcolwise[scale_tr_offset_Y + w][scale_tr_offset_X] = S_dec_b_fp8;
@@ -267,17 +265,18 @@ __device__ __forceinline__ void colwise_scaling(
   }
 }
 
-template <bool USE_STOCHASTIC_ROUNDING, bool USE_FAST_MATH, bool ROW_SCALED_NVFP4>
+template <typename ScaleType, bool USE_STOCHASTIC_ROUNDING, bool USE_FAST_MATH,
+          bool ROW_SCALED_NVFP4>
 __device__ __forceinline__ void rowwise_scaling(
     const IType *__restrict__ sIn_ptr, fp4e2m1x2 *__restrict__ sOut_ptr,
-    nvfp4_scale_t *__restrict__ sSFrowwise_ptr, const float S_enc_rowwise, const int stage_Y,
+    ScaleType *__restrict__ sSFrowwise_ptr, const float S_enc_rowwise, const int stage_Y,
     const int stage_X, const int buff_in, const int buff_out, const float *amax_rowwise_ptr,
     const size_t row_offset, const size_t rows, RNG_t &rng, uint4 &random_uint4, int &rnd_idx) {
   using scaling_coeff_type = typename SCALING_COEFFICIENT_TYPE<USE_FAST_MATH>::type;
 
   const auto &sIn = *reinterpret_cast<const IType3D *>(sIn_ptr);
   auto &sOut = *reinterpret_cast<OType2x3D *>(sOut_ptr);
-  auto &sSFrowwise = *reinterpret_cast<ScalesType2D *>(sSFrowwise_ptr);
+  auto &sSFrowwise = *reinterpret_cast<ScalesType2D<ScaleType> *>(sSFrowwise_ptr);
 
   const int thread_lane = threadIdx.x % THREADS_PER_WARP;
   const int bank_group = thread_lane / THREADS_PER_BANK;
@@ -319,18 +318,20 @@ __device__ __forceinline__ void rowwise_scaling(
     }
     const float block_amax = get_amax_of_pair(thread_amax_2x);
 
-    nvfp4_scale_t S_dec_b_fp8;
+    ScaleType S_dec_b_fp8;
     scaling_coeff_type SFcoefficient;
     if constexpr (ROW_SCALED_NVFP4) {
       const size_t row_idx = row_offset + stage_Y * TILE_DIM_Y + it_offset_Y_rowwise;
       const float S_enc_rowwise_block =
-          row_idx < rows ? core::compute_global_encode_scaling_factor_FP4(amax_rowwise_ptr[row_idx])
-                         : 1.0f;
-      S_dec_b_fp8 = compute_decoding_scaling_factor(block_amax, S_enc_rowwise_block);
+          row_idx < rows && amax_rowwise_ptr != nullptr
+              ? core::compute_global_encode_scaling_factor_FP4<ScaleType>(amax_rowwise_ptr[row_idx])
+              : 1.0f;
+      S_dec_b_fp8 =
+          core::compute_decoding_scaling_factor<ScaleType>(block_amax, S_enc_rowwise_block);
       SFcoefficient =
           compute_nvfp4_scaling_coefficient<scaling_coeff_type>(S_dec_b_fp8, S_enc_rowwise_block);
     } else {
-      S_dec_b_fp8 = compute_decoding_scaling_factor(block_amax, S_enc_rowwise);
+      S_dec_b_fp8 = core::compute_decoding_scaling_factor<ScaleType>(block_amax, S_enc_rowwise);
       SFcoefficient =
           compute_nvfp4_scaling_coefficient<scaling_coeff_type>(S_dec_b_fp8, S_enc_rowwise);
     }
@@ -366,13 +367,13 @@ __device__ __forceinline__ void rowwise_scaling(
   }
 }
 
-template <bool USE_STOCHASTIC_ROUNDING, bool USE_FAST_MATH, bool RETURN_TRANSPOSE,
-          bool ROW_SCALED_NVFP4>
+template <typename ScaleType, bool USE_STOCHASTIC_ROUNDING, bool USE_FAST_MATH,
+          bool RETURN_TRANSPOSE, bool ROW_SCALED_NVFP4>
 __global__ void __launch_bounds__(THREADS_NUM) quantize_transpose_nvfp4_tuned_1D_kernel(
     const __grid_constant__ CUtensorMap tensor_map_input,
     const __grid_constant__ CUtensorMap tensor_map_output,
-    const __grid_constant__ CUtensorMap tensor_map_output_t, nvfp4_scale_t *const scales_ptr,
-    nvfp4_scale_t *const scales_t_ptr, const float *noop, const float *const amax_rowwise_ptr,
+    const __grid_constant__ CUtensorMap tensor_map_output_t, ScaleType *const scales_ptr,
+    ScaleType *const scales_t_ptr, const float *noop, const float *const amax_rowwise_ptr,
     const float *const amax_colwise_ptr, const size_t rows, const size_t cols,
     const size_t scale_stride, const size_t scale_stride_t, const size_t *rng_state) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
@@ -407,7 +408,7 @@ __global__ void __launch_bounds__(THREADS_NUM) quantize_transpose_nvfp4_tuned_1D
   constexpr int out_mem_rowwise_data = buff_size_aligned_out;
   constexpr int out_mem_colwise_data = RETURN_TRANSPOSE ? buff_size_aligned_out_t : 0;
   constexpr int out_mem_rowwise_scales = DIVUP_TO_MULTIPLE(
-      TunableConfig::CHUNK_DIM_Y * SCALES_PER_CHUNK_X * sizeof(nvfp4_scale_t), TMA_SHMEM_ALIGNMENT);
+      TunableConfig::CHUNK_DIM_Y * SCALES_PER_CHUNK_X * sizeof(ScaleType), TMA_SHMEM_ALIGNMENT);
 
   // The destination shared memory buffer of a bulk tensor operation should be 16-byte aligned
   extern __shared__ unsigned char dynamic_shmem[];
@@ -421,13 +422,13 @@ __global__ void __launch_bounds__(THREADS_NUM) quantize_transpose_nvfp4_tuned_1D
   auto &sOut = *reinterpret_cast<OType2x3D *>(sOut_ptr);
   auto &sOut_tr = *reinterpret_cast<OType2xt3D *>(sOut_tr_ptr);
 
-  nvfp4_scale_t *sSFrowwise_ptr = reinterpret_cast<nvfp4_scale_t *>(
-      dshmem + in_mem + out_mem_rowwise_data + out_mem_colwise_data);
-  nvfp4_scale_t *sSFcolwise_ptr = reinterpret_cast<nvfp4_scale_t *>(
+  ScaleType *sSFrowwise_ptr =
+      reinterpret_cast<ScaleType *>(dshmem + in_mem + out_mem_rowwise_data + out_mem_colwise_data);
+  ScaleType *sSFcolwise_ptr = reinterpret_cast<ScaleType *>(
       dshmem + in_mem + out_mem_rowwise_data + out_mem_colwise_data + out_mem_rowwise_scales);
 
-  auto &sSFrowwise = *reinterpret_cast<ScalesType2D *>(sSFrowwise_ptr);
-  auto &sSFcolwise = *reinterpret_cast<ScalesTypeTr2D *>(sSFcolwise_ptr);
+  auto &sSFrowwise = *reinterpret_cast<ScalesType2D<ScaleType> *>(sSFrowwise_ptr);
+  auto &sSFcolwise = *reinterpret_cast<ScalesTypeTr2D<ScaleType> *>(sSFcolwise_ptr);
 
   constexpr int shmem_buff_size = buff_size_aligned_in / BUFFS_NUM;
 
@@ -435,12 +436,12 @@ __global__ void __launch_bounds__(THREADS_NUM) quantize_transpose_nvfp4_tuned_1D
   const float S_enc_rowwise =
       (amax_rowwise_ptr == nullptr)
           ? 1.0f
-          : core::compute_global_encode_scaling_factor_FP4(*amax_rowwise_ptr);
+          : core::compute_global_encode_scaling_factor_FP4<ScaleType>(*amax_rowwise_ptr);
 
   const float S_enc_colwise =
       (amax_colwise_ptr == nullptr || ROW_SCALED_NVFP4)
           ? S_enc_rowwise
-          : core::compute_global_encode_scaling_factor_FP4(*amax_colwise_ptr);
+          : core::compute_global_encode_scaling_factor_FP4<ScaleType>(*amax_colwise_ptr);
 
   __shared__ uint64_t workID_mbar;
   __shared__ __uint128_t workID_response;
@@ -588,12 +589,12 @@ __global__ void __launch_bounds__(THREADS_NUM) quantize_transpose_nvfp4_tuned_1D
       ptx::cp_async_bulk_wait_group_read<TunableConfig::PREFETCH_STAGES>();
 
       // NVFP4 Quantization
-      rowwise_scaling<USE_STOCHASTIC_ROUNDING, USE_FAST_MATH, ROW_SCALED_NVFP4>(
+      rowwise_scaling<ScaleType, USE_STOCHASTIC_ROUNDING, USE_FAST_MATH, ROW_SCALED_NVFP4>(
           sIn_ptr, sOut_ptr, sSFrowwise_ptr, S_enc_rowwise, stage_Y, stage_X, buff_in, buff_out,
           amax_rowwise_ptr, block_offset_Y, rows, rng, random_uint4, rnd_idx);
 
       if constexpr (RETURN_TRANSPOSE) {
-        colwise_scaling<USE_STOCHASTIC_ROUNDING, USE_FAST_MATH, ROW_SCALED_NVFP4>(
+        colwise_scaling<ScaleType, USE_STOCHASTIC_ROUNDING, USE_FAST_MATH, ROW_SCALED_NVFP4>(
             sIn_ptr, sOut_tr_ptr, sSFcolwise_ptr, S_enc_colwise, stage_Y, stage_X, buff_in,
             buff_out_tr, amax_colwise_ptr, block_offset_X, cols, rng, random_uint4, rnd_idx);
       }
@@ -633,7 +634,7 @@ __global__ void __launch_bounds__(THREADS_NUM) quantize_transpose_nvfp4_tuned_1D
     {
       // Rowwise
       {
-        using ScalesVec = Vec<nvfp4_scale_t, SCALES_PER_CHUNK_X>;
+        using ScalesVec = Vec<ScaleType, SCALES_PER_CHUNK_X>;
         // number of scales in X dimension of this chunk
         const int count = min(SCALES_PER_CHUNK_X, chunk_cols / SCALE_DIM);
 
@@ -650,7 +651,7 @@ __global__ void __launch_bounds__(THREADS_NUM) quantize_transpose_nvfp4_tuned_1D
 
       // Colwise
       if constexpr (RETURN_TRANSPOSE) {
-        using ScalesVec = Vec<nvfp4_scale_t, SCALES_PER_CHUNK_Y>;
+        using ScalesVec = Vec<ScaleType, SCALES_PER_CHUNK_Y>;
         // number of scales in Y dimension of this chunk
         const int count = min(SCALES_PER_CHUNK_Y, chunk_rows / SCALE_DIM);
 
@@ -688,6 +689,7 @@ __global__ void __launch_bounds__(THREADS_NUM) quantize_transpose_nvfp4_tuned_1D
 #endif  // FP4_TYPE_SUPPORTED
 }  // namespace quantize_transpose_tuned_kernel
 
+template <typename ScaleType>
 inline void quantize_transpose_tuned_1D(const Tensor &input, const Tensor *noop, Tensor *output,
                                         const QuantizationConfig *quant_config,
                                         cudaStream_t stream) {
@@ -713,15 +715,15 @@ inline void quantize_transpose_tuned_1D(const Tensor &input, const Tensor *noop,
   NVTE_CHECK(is_fp4_dtype(output->data.dtype), "Output must have FP4 type.");
   NVTE_CHECK(output->scale_inv.dptr != nullptr, "Scaling tensor must be allocated");
   NVTE_CHECK(!row_scaled_nvfp4 || output->amax.dptr != nullptr,
-             "Row-scaled NVFP4 quantization requires rowwise amax.");
-
+             "Row-scaled NVFP4 does not support disabling second-level scaling.");
   if (return_transpose) {
     NVTE_CHECK(is_fp4_dtype(output->columnwise_data.dtype),
                "Transposed output must have FP4 type.");
     NVTE_CHECK(output->columnwise_scale_inv.dptr != nullptr,
                "Transposed scaling tensor must be allocated");
     NVTE_CHECK(!row_scaled_nvfp4 || output->columnwise_amax.dptr != nullptr,
-               "Row-scaled NVFP4 transpose quantization requires columnwise amax.");
+               "Row-scaled NVFP4 transpose quantization does not support disabling "
+               "second-level scaling.");
   }
 
   const auto [rows, cols] = input.flat_2d_dims();
@@ -740,9 +742,9 @@ inline void quantize_transpose_tuned_1D(const Tensor &input, const Tensor *noop,
   const size_t scale_stride_transpose =
       return_transpose ? output->columnwise_scale_inv.shape[1] : 0;
 
-  nvfp4_scale_t *const scales_ptr = reinterpret_cast<nvfp4_scale_t *>(output->scale_inv.dptr);
-  nvfp4_scale_t *const scales_transpose_ptr =
-      reinterpret_cast<nvfp4_scale_t *>(output->columnwise_scale_inv.dptr);
+  ScaleType *const scales_ptr = reinterpret_cast<ScaleType *>(output->scale_inv.dptr);
+  ScaleType *const scales_transpose_ptr =
+      reinterpret_cast<ScaleType *>(output->columnwise_scale_inv.dptr);
 
   const float *noop_ptr = reinterpret_cast<const float *>(noop->data.dptr);
   const float *const amax_rowwise_ptr = reinterpret_cast<const float *>(output->amax.dptr);
@@ -784,9 +786,9 @@ inline void quantize_transpose_tuned_1D(const Tensor &input, const Tensor *noop,
       DIVUP_TO_MULTIPLE(BUFFS_NUM_OUT_TR * BUFF_OUT_TR_SIZE, TMA_SHMEM_ALIGNMENT);
 
   constexpr int buff_size_scales = DIVUP_TO_MULTIPLE(
-      TunableConfig::CHUNK_DIM_Y * SCALES_PER_CHUNK_X * sizeof(nvfp4_scale_t), TMA_SHMEM_ALIGNMENT);
+      TunableConfig::CHUNK_DIM_Y * SCALES_PER_CHUNK_X * sizeof(ScaleType), TMA_SHMEM_ALIGNMENT);
   constexpr int buff_size_scales_transpose = DIVUP_TO_MULTIPLE(
-      TunableConfig::CHUNK_DIM_X * SCALES_PER_CHUNK_Y * sizeof(nvfp4_scale_t), TMA_SHMEM_ALIGNMENT);
+      TunableConfig::CHUNK_DIM_X * SCALES_PER_CHUNK_Y * sizeof(ScaleType), TMA_SHMEM_ALIGNMENT);
 
   const int in_mem = buff_size_aligned_in;
 
@@ -808,8 +810,9 @@ inline void quantize_transpose_tuned_1D(const Tensor &input, const Tensor *noop,
               row_scaled_nvfp4, ROW_SCALED_NVFP4,
               TRANSFORMER_ENGINE_SWITCH_CONDITION(return_transpose, RETURN_TRANSPOSE, {
                 auto kernel =
-                    quantize_transpose_nvfp4_tuned_1D_kernel<USE_STOCHASTIC_ROUNDING, USE_FAST_MATH,
-                                                             RETURN_TRANSPOSE, ROW_SCALED_NVFP4>;
+                    quantize_transpose_nvfp4_tuned_1D_kernel<ScaleType, USE_STOCHASTIC_ROUNDING,
+                                                             USE_FAST_MATH, RETURN_TRANSPOSE,
+                                                             ROW_SCALED_NVFP4>;
 
                 cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
                                      dshmem_size);
