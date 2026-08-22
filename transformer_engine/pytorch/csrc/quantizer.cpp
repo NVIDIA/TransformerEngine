@@ -2096,7 +2096,6 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(
     kwargs["row_scaled_nvfp4"] = py::cast(row_scaled_nvfp4);
     kwargs["nvfp4_use_4over6"] = py::cast(nvfp4_use_4over6);
     kwargs["nvfp4_e4m3_max"] = py::cast(this->nvfp4_e4m3_max);
-    kwargs["scale_inv_dtype"] = MakePythonDType(DType::kFloat8E8M0);
     py::tuple args(0);
     PyObject* result = PyObject_Call(reinterpret_cast<PyObject*>(NVFP4TensorPythonClass),
                                      args.ptr(), kwargs.ptr());
