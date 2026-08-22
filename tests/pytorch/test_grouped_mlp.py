@@ -2894,11 +2894,12 @@ class TestGroupedMLPDeterminism:
 
         device = torch.device("cuda")
         dtype = torch.bfloat16
-        # l=8 / [1024]*8 / n=2048, the shape cudnn-frontend#521 measured as varying 15/15
-        # without the fix. Its own tests originally used l=4 / [256]*4 / n=512, where the
-        # nondeterministic dprob is already bit-stable -- there the assertion below cannot
-        # fail, and a pass means nothing.
-        group_size = 8
+        # Measured on GB300, determinism off, 8 launches per shape (job 538058): this shape
+        # gives 7/7 runs differing from run 0, so the assertion below can actually fail.
+        # Shapes matter more than they look -- l=8 with the same n and tokens/group varies
+        # only 2/7, which an 8-run sample reports as stable often enough to be useless, and
+        # cudnn-frontend#521 measured its own l=4 / [256]*4 / n=512 as never varying.
+        group_size = 16
         hidden_size = 2048
         tokens_per_group = 1024
         split_sizes = torch.tensor([tokens_per_group] * group_size, dtype=torch.int, device=device)
