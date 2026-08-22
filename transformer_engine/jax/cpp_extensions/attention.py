@@ -149,8 +149,7 @@ class FusedAttnParams:
 
     Fields are declared in the order of the ``FusedAttnConfig`` struct in
     ``common/fused_attn/config_and_params.h``, which is the order the C++ binding reads them in
-    and the order it fills the config with. Fields JAX does not use, namely the paged-KV
-    dimensions and the ragged token counts, are omitted and keep their ``FusedAttnConfig``
+    and the order it fills the config with. Fields JAX does not use, are left at their ``FusedAttnConfig``
     defaults.
     """
 

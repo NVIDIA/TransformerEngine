@@ -474,11 +474,11 @@ def test_kv_cache(dtype, model, qkv_format, is_paged, backend, module, is_cuda_g
     qkv_layout = qkv_format + "_" + "_".join([inference_params_qkv_format] * 2)
     if is_paged:
         qkv_layout = "paged_kv_" + qkv_layout
-    # probe inference configs only; reference configs are widely supported
-    probe_config = copy.deepcopy(config)
-    probe_config.attn_mask_type = "padding_causal"
-    available_backends, _, _ = get_available_attention_backends(
-        probe_config,
+    # Both models run on the single backend the env vars below leave enabled, so probe both.
+    inference_config = copy.deepcopy(config)
+    inference_config.attn_mask_type = "padding_causal"
+    inference_backends, _, _ = get_available_attention_backends(
+        inference_config,
         qkv_dtype=dtype,
         qkv_layout=qkv_layout,
         pad_between_seqs=False,
@@ -487,13 +487,26 @@ def test_kv_cache(dtype, model, qkv_format, is_paged, backend, module, is_cuda_g
         fp8_meta=fp8_meta,
         inference_params=inference_params,
     )
-    flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
-    if backend == "FlashAttention" and not flash_attn_supported:
-        pytest.skip("FlashAttention backend is not supported")
-    if backend == "FusedAttention" and not fused_attn_supported:
-        pytest.skip("FusedAttention backend is not supported")
-    if backend == "UnfusedAttention" and not unfused_attn_supported:
-        pytest.skip("UnfusedAttention backend is not supported")
+    # the reference model takes every request's full sequence at once, in bshd with no cache, and
+    # get_model() builds it with causal masking and without fp8
+    reference_config = copy.deepcopy(config)
+    reference_config.attn_mask_type = "causal"
+    reference_config.batch_size = config.total_requests
+    reference_config.max_seqlen_q = config.max_seqlen_kv
+    reference_backends, _, _ = get_available_attention_backends(
+        reference_config,
+        qkv_dtype=dtype,
+        qkv_layout="bshd_bshd_bshd",
+        pad_between_seqs=False,
+        is_training=False,
+    )
+    backend_index = ("FlashAttention", "FusedAttention", "UnfusedAttention").index(backend)
+    for probe, supported in (
+        ("inference", inference_backends),
+        ("reference", reference_backends),
+    ):
+        if not supported[backend_index]:
+            pytest.skip(f"{backend} backend is not supported for the {probe} config")
     os.environ["NVTE_FLASH_ATTN"] = str(int(backend == "FlashAttention"))
     os.environ["NVTE_FUSED_ATTN"] = str(int(backend == "FusedAttention"))
     os.environ["NVTE_UNFUSED_ATTN"] = str(int(backend == "UnfusedAttention"))

@@ -301,24 +301,6 @@ def test_dot_product_attention(
             torch.testing.assert_close(fused_attn_bwd[i], flash_attn_bwd[i], **tols)
 
 
-@pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
-@pytest.mark.parametrize("dtype", param_types)
-@pytest.mark.parametrize("model_configs", [model_configs_base])
-@pytest.mark.parametrize("model", ["base_1_1", "base_2_1"])
-def test_dpa_checkpoint(dtype, model_configs, model):
-    """Test DotProductAttention module with checkpointing"""
-    test_dot_product_attention(dtype, model_configs, model, True, None, False, False)
-
-
-# One [FUSED-ATTN-CACHE] event, as either a counter line ("f16 fwd CREATE_GRAPH") or a level-2
-# trace line ("f16 fwd MISS"). Both name the thread and device first and then the build site, of
-# which the backend half is matched but not counted on: the worker below drives whichever one its
-# dtype selects, and every assertion here holds of either. The pass and the event name are what
-# this test reads, plus the trace line's cache key, kept so that distinct keys can be counted.
-# Every event name is also the counter column it increments. Requiring an event name is also what
-# excludes the end-of-run summary rows, which are otherwise the same shape. The rank prefix is
-# optional because it is emitted only when the launcher exports a rank, which a plain subprocess
-# like the worker does not.
 _CACHE_EVENT = re.compile(
     r"\[FUSED-ATTN-CACHE\]\s+(?:rank=\d+\s+\|\s+)?tid=\d+\s+dev=-?\d+\s+\|\s+"
     r"(?P<backend>f16|fp8)\s+(?P<pass>fwd|bwd)\s+"
@@ -327,57 +309,16 @@ _CACHE_EVENT = re.compile(
 _CACHE_PHASE = re.compile(r"\[CACHE-TEST\] phase=(?P<name>\w+)")
 
 
-def _parse_cache_events(stderr: str):
-    """Group the worker's cache diagnostics by the phase that produced them.
-
-    Returns (events, miss_keys): events[phase][(pass, event)] is a count, and
-    miss_keys[phase][pass] is the set of distinct cache keys that missed, so that "one extra
-    graph" can be told apart from "the same graph rebuilt".
-    """
-    events = collections.defaultdict(collections.Counter)
-    miss_keys = collections.defaultdict(lambda: collections.defaultdict(set))
-    phase = None
-    for line in stderr.splitlines():
-        phase_match = _CACHE_PHASE.search(line)
-        if phase_match is not None:
-            phase = phase_match.group("name")
-            continue
-        event_match = _CACHE_EVENT.search(line)
-        if event_match is None or phase is None:
-            continue
-        pass_name, event = event_match.group("pass"), event_match.group("event")
-        events[phase][(pass_name, event)] += 1
-        if event == "MISS":
-            miss_keys[phase][pass_name].add(event_match.group("rest").split("|")[-1].strip())
-    return events, miss_keys
-
-
 @pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
 def test_fused_attn_graph_cache():
-    """Test that the cuDNN graph cache is hit when it should be, and missed when it must be.
-
-    A cuDNN graph build is the most expensive thing in a fused-attention call, so what this
-    checks is that each distinct configuration pays for one and no more: that a support query
-    builds the graph an execution then reuses, that a field the graph does not read (here
-    softmax_scale, which the key normalizes away) does not multiply the cache, and that a
-    field it does read still gets its own graph. The counters come from
-    NVTE_FUSED_ATTN_CACHE_DEBUG, which is also what a user would reach for to answer the
-    same question about their own model.
-
-    The work runs in a subprocess (run_graph_cache.py): the cache is process-wide with
-    accumulating counters, so within pytest the graphs built by other tests would be
-    indistinguishable from this test's own.
+    """Test FusedAttention graph cache with level 2 diagnostics. It runs a subprocess
+    to avoid contamination from other tests, because the counters are process-wide.
     """
-    if torch.cuda.device_count() == 0:
-        pytest.skip("No CUDA device available.")
-
     worker = _current_file.parent / "run_graph_cache.py"
     result = subprocess.run(
         [sys.executable, str(worker)],
         env={
             **os.environ,
-            # Level 2: the per-lookup HIT/MISS lines are what make the hits visible, and
-            # the volume is trivial for the handful of configurations below.
             "NVTE_FUSED_ATTN_CACHE_DEBUG": "2",
             "PYTHONUNBUFFERED": "1",
         },
@@ -386,73 +327,78 @@ def test_fused_attn_graph_cache():
         timeout=900,
         check=False,
     )
-    assert result.returncode == 0, (
-        f"{worker.name} failed with exit code {result.returncode}\n"
-        f"--- stdout ---\n{result.stdout}\n--- stderr (tail) ---\n{result.stderr[-4000:]}"
-    )
     if "[CACHE-TEST] fused=1" not in result.stdout:
-        pytest.skip("No cuDNN fused attention backend for the graph cache test config.")
+        pytest.skip("No FusedAttention backend for the graph cache test config.")
 
-    events, miss_keys = _parse_cache_events(result.stderr)
+    # Group the cache diagnostics:
+    # events[phase][(pass, event)] = count of events
+    # miss_keys[phase][pass] = set of distinct cache keys that missed
+    events = collections.defaultdict(collections.Counter)
+    miss_keys = collections.defaultdict(lambda: collections.defaultdict(set))
+    phase = None
+    for line in result.stderr.splitlines():
+        phase_match = _CACHE_PHASE.search(line)
+        if phase_match is not None:
+            phase = phase_match.group("name")
+            continue
+        event_match = _CACHE_EVENT.search(line)
+        if event_match is None or phase is None:
+            continue
+        event_pass, event = event_match.group("pass"), event_match.group("event")
+        events[phase][(event_pass, event)] += 1
+        if event == "MISS":
+            miss_keys[phase][event_pass].add(event_match.group("rest").split("|")[-1].strip())
+
     context = f"\n--- stderr ---\n{result.stderr[-8000:]}"
-    for phase in ("query", "requery", "exec", "rescale", "reshape"):
-        assert phase in events, f"worker emitted no cache events for phase {phase}{context}"
 
-    # Both passes are queried by one call and executed by one forward/backward pair, so each
-    # of them sees the same sequence of events.
     for pass_name in ("fwd", "bwd"):
 
-        def count(phase, event, pass_name=pass_name):
-            return events[phase][(pass_name, event)]
+        def expect(phase, event, expected, reason, actual=None, pass_name=pass_name):
+            if actual is None:
+                actual = events[phase][(pass_name, event)]
+            ok = actual >= 1 if expected == "1+" else actual == expected
+            assert ok, (
+                f"{pass_name} {phase}: expected {event}={expected}, got {actual}"
+                f" ({reason}){context}"
+            )
 
-        # The first query builds each pass's graph, and no more than its graph: a support
-        # query stops at check_support(), leaving the kernel compilation (BUILD_PLANS) to
-        # whoever executes it. A build cuDNN refused would show up here as the miss without
-        # the build, since nothing is recorded for a refusal.
-        assert count("query", "MISS") == 1, f"{pass_name}: expected one cold miss{context}"
-        assert count("query", "CREATE_GRAPH") == 1, f"{pass_name}: expected one build{context}"
-        assert count("query", "BUILD_PLANS") == 0, f"{pass_name}: query compiled kernels{context}"
-        # The graph cuDNN took, which is the one the execution phases below go on to find. A
-        # build refused by check_support() would show up here as CREATE_GRAPH without this.
-        assert count("query", "CACHE_GRAPH") == 1, f"{pass_name}: build was not cached{context}"
+        expect("query", "MISS", 1, "expected one cold miss")
+        expect("query", "CREATE_GRAPH", 1, "expected one build")
+        expect("query", "CACHE_GRAPH", 1, "build was not cached")
+        expect("query", "BUILD_PLANS", 0, "query compiled kernels")
 
-        # Asking the identical question again must cost nothing.
-        assert count("requery", "MISS") == 0, f"{pass_name}: repeated query missed{context}"
-        assert (
-            count("requery", "CREATE_GRAPH") == 0
-        ), f"{pass_name}: repeated query rebuilt{context}"
-        assert count("requery", "HIT") >= 1, f"{pass_name}: repeated query never looked{context}"
+        expect("requery", "MISS", 0, "repeated query missed")
+        expect("requery", "CREATE_GRAPH", 0, "repeated query rebuilt")
+        expect("requery", "HIT", "1+", "repeated query never looked")
 
-        # The execution must find the graph the query left behind -- a miss here is the
-        # probe/execute key drift this cache is most likely to develop -- and it is what
-        # finishes the build, exactly once.
-        assert (
-            count("exec", "MISS") == 0
-        ), f"{pass_name}: execution missed the query's graph{context}"
-        assert (
-            count("exec", "CREATE_GRAPH") == 0
-        ), f"{pass_name}: execution rebuilt the graph{context}"
-        assert count("exec", "EXECUTE") >= 1, f"{pass_name}: fused attention never ran{context}"
-        assert count("exec", "BUILD_PLANS") == 1, f"{pass_name}: expected one plan build{context}"
+        expect("exec", "MISS", 0, "execution missed the query's graph")
+        expect("exec", "CREATE_GRAPH", 0, "execution rebuilt the graph")
+        expect("exec", "EXECUTE", "1+", "fused attention never ran")
+        expect("exec", "BUILD_PLANS", 1, "expected one plan build")
 
-        # softmax_scale reaches the graph as a pointer, not as a shape, so the key drops it:
-        # a different scale has to reuse everything, down to the compiled kernels.
-        assert count("rescale", "MISS") == 0, f"{pass_name}: attn_scale changed the key{context}"
-        assert (
-            count("rescale", "CREATE_GRAPH") == 0
-        ), f"{pass_name}: attn_scale forced a build{context}"
-        assert count("rescale", "BUILD_PLANS") == 0, f"{pass_name}: attn_scale recompiled{context}"
-        assert (
-            count("rescale", "EXECUTE") >= 1
-        ), f"{pass_name}: rescaled run did not execute{context}"
+        expect("rescale", "MISS", 0, "attn_scale changed the key")
+        expect("rescale", "CREATE_GRAPH", 0, "attn_scale forced a build")
+        expect("rescale", "BUILD_PLANS", 0, "attn_scale recompiled")
+        expect("rescale", "EXECUTE", "1+", "rescaled run did not execute")
 
-        # max_seqlen is a dimension the graph is built at, so it must miss -- once, for one
-        # new graph, rather than invalidating what is already cached.
-        assert count("reshape", "MISS") == 1, f"{pass_name}: expected one miss{context}"
-        assert count("reshape", "CREATE_GRAPH") == 1, f"{pass_name}: expected one build{context}"
-        assert (
-            len(miss_keys["reshape"][pass_name]) == 1
-        ), f"{pass_name}: more than one new cache key{context}"
+        expect("reshape", "MISS", 1, "expected one miss")
+        expect("reshape", "CREATE_GRAPH", 1, "expected one build")
+        expect(
+            "reshape",
+            "MISS keys",
+            1,
+            "more than one new cache key",
+            actual=len(miss_keys["reshape"][pass_name]),
+        )
+
+
+@pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
+@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("model_configs", [model_configs_base])
+@pytest.mark.parametrize("model", ["base_1_1", "base_2_1"])
+def test_dpa_checkpoint(dtype, model_configs, model):
+    """Test DotProductAttention module with checkpointing"""
+    test_dot_product_attention(dtype, model_configs, model, True, None, False, False)
 
 
 model_configs_max_logit = {

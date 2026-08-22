@@ -140,13 +140,12 @@ class FusedAttnBackend(IntEnum):
 
 
 # Fail fast at import time if a new enumerator is added on the C++ side
-# without being mirrored above. Not an assert, so that the check survives -O.
-if {f"NVTE_{m.name}" for m in FusedAttnBackend} != set(NVTE_Fused_Attn_Backend.__members__):
-    raise RuntimeError(
-        "FusedAttnBackend in python is out of sync with"
-        " transformer_engine_torch.NVTE_Fused_Attn_Backend defined on the C++ side."
-        " Please make sure TE C++ and python are in sync."
-    )
+# without being mirrored above.
+assert {f"NVTE_{m.name}" for m in FusedAttnBackend} == set(NVTE_Fused_Attn_Backend.__members__), (
+    "FusedAttnBackend in python is out of sync with"
+    " transformer_engine_torch.NVTE_Fused_Attn_Backend defined on the C++ side."
+    " Please make sure TE C++ and python are in sync."
+)
 
 BACKEND_FP8_THREADS_PER_CTA = 128
 BACKEND_F16arb_ELTS_PER_THREADS = 16

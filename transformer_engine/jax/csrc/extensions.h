@@ -152,9 +152,6 @@ XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedAttnScoreModForwardHandler);
 
 XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedAttnScoreModBackwardHandler);
 
-// Select the fused attention backend for the configuration carried by a FusedAttnParams object
-// (see jax/cpp_extensions/attention.py). Returns the backend and, when no backend supports the
-// configuration, a diagnostic message explaining why it was rejected.
 std::tuple<NVTE_Fused_Attn_Backend, std::string> GetFusedAttnBackend(
     const pybind11::object &params);
 
