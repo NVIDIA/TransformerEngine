@@ -74,6 +74,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
   constexpr size_t STAGES = CHUNK_DIM_Y / BUFF_DIM_Y;
   static_assert(STAGES >= 1);
+  static_assert(STAGES <= BUFFS_NUM,
+                "Output-buffer reuse requires a TMA completion handoff to the CTA");
 
   constexpr bool IS_CACHED_ACT_OP = ROWWISE_SCALING && COLWISE_SCALING;
   constexpr bool ONLY_COLWISE_SCALING = COLWISE_SCALING && (!ROWWISE_SCALING);
@@ -195,10 +197,6 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     const size_t stage_offset_Y = stage * BUFF_DIM_Y;
 
     if (next_stage < STAGES) {
-      // Wait for TMA transfer to have finished reading shared memory.
-      // I.e. the buffer is ready to be written to
-      ptx::cp_async_bulk_wait_group_read<1>();
-
       const size_t next_buff = next_stage % BUFFS_NUM;
       const size_t next_stage_offset_Y = next_stage * BUFF_DIM_Y;
       const size_t global_offset_Y = block_offset_Y + next_stage_offset_Y;
@@ -704,6 +702,13 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   }
 
   parity ^= 1;
+
+  // Ensure all S2G operations issued by the master have completed before the CTA exits.
+  if (is_master_thread) {
+    ptx::cp_async_bulk_wait_group();
+  }
+  __syncthreads();
+
   destroy_barriers<STAGES>(mbar, is_master_thread);
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }  // NOLINT(readability/fn_size)

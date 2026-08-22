@@ -374,7 +374,7 @@ __device__ __forceinline__ void cp_async_bulk_tensor_2d_shared_to_global(
 // https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#data-movement-and-conversion-instructions-cp-async-bulk-wait-group
 __device__ __forceinline__ void cp_async_bulk_wait_group() {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
-  asm volatile("cp.async.bulk.wait_group 0;");
+  asm volatile("cp.async.bulk.wait_group 0;" ::: "memory");
 #else
   NVTE_DEVICE_ERROR("cp_async_bulk_wait_group is only supported on SM 9.0+.");
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
@@ -384,7 +384,7 @@ __device__ __forceinline__ void cp_async_bulk_wait_group() {
 template <size_t W>
 __device__ __forceinline__ void cp_async_bulk_wait_group_read() {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
-  asm volatile("cp.async.bulk.wait_group.read 0;");
+  asm volatile("cp.async.bulk.wait_group.read 0;" ::: "memory");
 #else
   NVTE_DEVICE_ERROR("cp_async_bulk_wait_group_read is only supported on SM 9.0+.");
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
@@ -393,7 +393,7 @@ __device__ __forceinline__ void cp_async_bulk_wait_group_read() {
 template <>
 __device__ __forceinline__ void cp_async_bulk_wait_group_read<0>() {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
-  asm volatile("cp.async.bulk.wait_group.read 0;");
+  asm volatile("cp.async.bulk.wait_group.read 0;" ::: "memory");
 #else
   NVTE_DEVICE_ERROR("cp_async_bulk_wait_group_read is only supported on SM 9.0+.");
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
@@ -401,7 +401,7 @@ __device__ __forceinline__ void cp_async_bulk_wait_group_read<0>() {
 template <>
 __device__ __forceinline__ void cp_async_bulk_wait_group_read<1>() {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
-  asm volatile("cp.async.bulk.wait_group.read 1;");
+  asm volatile("cp.async.bulk.wait_group.read 1;" ::: "memory");
 #else
   NVTE_DEVICE_ERROR("cp_async_bulk_wait_group_read is only supported on SM 9.0+.");
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
@@ -409,7 +409,7 @@ __device__ __forceinline__ void cp_async_bulk_wait_group_read<1>() {
 template <>
 __device__ __forceinline__ void cp_async_bulk_wait_group_read<2>() {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
-  asm volatile("cp.async.bulk.wait_group.read 2;");
+  asm volatile("cp.async.bulk.wait_group.read 2;" ::: "memory");
 #else
   NVTE_DEVICE_ERROR("cp_async_bulk_wait_group_read is only supported on SM 9.0+.");
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
@@ -417,7 +417,7 @@ __device__ __forceinline__ void cp_async_bulk_wait_group_read<2>() {
 template <>
 __device__ __forceinline__ void cp_async_bulk_wait_group_read<4>() {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
-  asm volatile("cp.async.bulk.wait_group.read 4;");
+  asm volatile("cp.async.bulk.wait_group.read 4;" ::: "memory");
 #else
   NVTE_DEVICE_ERROR("cp_async_bulk_wait_group_read is only supported on SM 9.0+.");
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
@@ -426,7 +426,7 @@ __device__ __forceinline__ void cp_async_bulk_wait_group_read<4>() {
 // https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#data-movement-and-conversion-instructions-cp-async-bulk-commit-group
 __device__ __forceinline__ void cp_async_bulk_commit_group() {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
-  asm volatile("cp.async.bulk.commit_group;");
+  asm volatile("cp.async.bulk.commit_group;" ::: "memory");
 #else
   NVTE_DEVICE_ERROR("cp_async_bulk_commit_group is only supported on SM 9.0+.");
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
@@ -435,7 +435,7 @@ __device__ __forceinline__ void cp_async_bulk_commit_group() {
 // Proxy fence (bi-directional):
 __device__ __forceinline__ void fence_proxy_async() {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
-  asm volatile("fence.proxy.async;");
+  asm volatile("fence.proxy.async;" ::: "memory");
 #else
   NVTE_DEVICE_ERROR("fence_proxy_async is only supported on SM 9.0+.");
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
@@ -443,7 +443,7 @@ __device__ __forceinline__ void fence_proxy_async() {
 
 __device__ __forceinline__ void fence_proxy_async_shared_cta() {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
-  asm volatile("fence.proxy.async.shared::cta;");
+  asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
 #else
   NVTE_DEVICE_ERROR("fence_proxy_async_shared_cta is only supported on SM 9.0+.");
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
