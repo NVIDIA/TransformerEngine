@@ -1387,6 +1387,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         deterministic,
         use_fused_attention,
         return_max_logit,
+        softcap,
         fp8,
         fp8_meta,
         cp_group,
@@ -1664,7 +1665,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 if fa_utils.v2_5_7_plus and qkv_format == "thd":
                     fa_forward_kwargs["block_table"] = None
                 if fa_utils.v2_6_0_plus:
-                    fa_forward_kwargs["softcap"] = 0.0
+                    fa_forward_kwargs["softcap"] = softcap
 
         # set up inputs for forward
         q_inputs = [None, None]
@@ -2156,6 +2157,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         ctx.attn_bias_type = attn_bias_type
         ctx.attn_bias_shape = None if attn_bias is None else attn_bias.shape
         ctx.deterministic = deterministic
+        ctx.softcap = softcap
         ctx.use_fused_attention = use_fused_attention
         ctx.pad_between_seqs = pad_between_seqs
         ctx.softmax_lse_in_packed_format = softmax_lse_in_packed_format
@@ -2454,7 +2456,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 if fa_utils.v2_4_1_plus:
                     fa_backward_kwargs["deterministic"] = ctx.deterministic
                 if fa_utils.v2_6_0_plus:
-                    fa_backward_kwargs["softcap"] = 0.0
+                    fa_backward_kwargs["softcap"] = ctx.softcap
 
         send_recv_reqs = []
         for i in range(cp_size):
@@ -2970,6 +2972,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             None,
             None,
             None,
+            None,
         )
 
 
@@ -3047,6 +3050,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         deterministic,
         use_fused_attention,
         return_max_logit,
+        softcap,
         window_size,
         cp_group,
         cp_stream,
@@ -3128,7 +3132,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                 if fa_utils.v2_5_7_plus and qkv_format == "thd":
                     fa_forward_kwargs["block_table"] = None
                 if fa_utils.v2_6_0_plus:
-                    fa_forward_kwargs["softcap"] = 0.0
+                    fa_forward_kwargs["softcap"] = softcap
 
         qkv_layout = qkv_format + "_" + qkv_format + "_" + qkv_format
 
@@ -3644,6 +3648,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         ctx.attn_bias_type = attn_bias_type
         ctx.attn_mask_type = attn_mask_type
         ctx.deterministic = deterministic
+        ctx.softcap = softcap
         ctx.use_fused_attention = use_fused_attention
         ctx.use_flash_attn_3 = use_flash_attn_3
         ctx.pad_between_seqs = pad_between_seqs
@@ -3840,7 +3845,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                 if fa_utils.v2_4_1_plus:
                     fa_backward_kwargs["deterministic"] = ctx.deterministic
                 if fa_utils.v2_6_0_plus:
-                    fa_backward_kwargs["softcap"] = 0.0
+                    fa_backward_kwargs["softcap"] = ctx.softcap
 
         local_seq_chunk_ids = [rank, 2 * cp_size - rank - 1]
         for i in range(len(local_seq_chunk_ids) + 1):
@@ -4164,6 +4169,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
             None,
             None,
             None,
+            None,
         )
 
 
@@ -4195,6 +4201,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         deterministic,
         use_fused_attention,
         return_max_logit,
+        softcap,
         window_size,
         fp8,
         fp8_meta,
@@ -4284,7 +4291,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                 if fa_utils.v2_5_7_plus and qkv_format == "thd":
                     fa_forward_kwargs["block_table"] = None
                 if fa_utils.v2_6_0_plus:
-                    fa_forward_kwargs["softcap"] = 0.0
+                    fa_forward_kwargs["softcap"] = softcap
 
         assert isinstance(k, q.__class__) and isinstance(
             v, q.__class__
@@ -4585,6 +4592,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         ctx.attn_mask_type = attn_mask_type
         ctx.attn_bias_type = attn_bias_type
         ctx.deterministic = deterministic
+        ctx.softcap = softcap
         ctx.window_size = window_size
         ctx.use_fused_attention = use_fused_attention
         ctx.fp8_meta = fp8_meta
@@ -4725,7 +4733,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                 if fa_utils.v2_4_1_plus:
                     fa_backward_kwargs["deterministic"] = ctx.deterministic
                 if fa_utils.v2_6_0_plus:
-                    fa_backward_kwargs["softcap"] = 0.0
+                    fa_backward_kwargs["softcap"] = ctx.softcap
 
         dq_fp8, dk_fp8, dv_fp8 = None, None, None
         if ctx.use_fused_attention:
@@ -4916,6 +4924,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             None,
             None,
             None,
+            None,
             d_softmax_offset,
             None,
         )
@@ -4945,6 +4954,7 @@ def attn_forward_func_with_cp(
     deterministic=False,
     use_fused_attention=False,
     window_size=None,
+    softcap=0.0,
     fp8=False,
     fp8_meta=None,
     quantizers=None,
@@ -5091,6 +5101,7 @@ def attn_forward_func_with_cp(
         deterministic,
         use_fused_attention,
         return_max_logit,
+        softcap,
     ]
 
     if cp_comm_type in ["p2p", "a2a+p2p"]:
