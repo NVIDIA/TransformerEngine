@@ -939,6 +939,24 @@ def test_slot_memory_rejects_non_native_allocator(monkeypatch) -> None:
         )
 
 
+def test_slot_memory_rejects_missing_allocator_api(monkeypatch) -> None:
+    """Every private allocator API must be checked before slot preparation."""
+
+    module = torch.nn.Identity()
+    monkeypatch.setattr(torch.cuda.memory, "get_allocator_backend", lambda: "native")
+    monkeypatch.delattr(torch._C, "_has_Standard_Deleter")
+
+    with pytest.raises(RuntimeError, match="_has_Standard_Deleter"):
+        te_graph._make_graphed_callables(
+            module,
+            (torch.ones(1),),
+            _order=[1, -1],
+            _num_layers_per_chunk=[1],
+            _reuse_graph_input_output_buffers=True,
+            _graph_memory_slots=(_slot(0, 0, 0),),
+        )
+
+
 @pytest.mark.parametrize("elements", (0, 4096), ids=("empty", "nonempty"))
 def test_slot_memory_variants_share_one_backing(elements: int) -> None:
     """Mutually exclusive variants must use identical slot storage and output addresses."""

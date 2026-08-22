@@ -421,6 +421,7 @@ def _make_graphed_callables(
             "_cuda_setCheckpointPoolState",
             "_cuda_checkPoolLiveAllocations",
             "_free_And_Remove_DeleterFn",
+            "_has_Standard_Deleter",
         )
         missing_checkpoint_apis = [
             name for name in required_checkpoint_apis if not hasattr(torch._C, name)
@@ -622,9 +623,7 @@ def _make_graphed_callables(
     graph_callables = [None for _ in range(len(flatten_sample_args))]
 
     # For cases with multiple active RNG states, e.g. TP.
-    if graph_safe_rng_available() and not bool(
-        int(os.getenv("NVTE_DISABLE_GRAPH_SAFE_RNG_REGISTRATION", "0"))
-    ):
+    if graph_safe_rng_available():
         for _, state in get_all_rng_states().items():
             for fwd_graph, bwd_graph, bwd_dw_graph in zip(fwd_graphs, bwd_graphs, bwd_dw_graphs):
                 fwd_graph.register_generator_state(state)
