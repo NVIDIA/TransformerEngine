@@ -523,8 +523,8 @@ def dbias_reduction_colwise(
     ACTIVATION: cutlass.Constexpr[str | None],
     DTYPE: cutlass.Constexpr[Type[cutlass.Numeric]],
     TILE_X: cutlass.Constexpr[int],
-    WITH_DACT: cutlass.Constexpr[bool]=False,
-    CACHE_ACTIVATION: cutlass.Constexpr[bool]=False,  # cache post-activation values to sX_tile
+    WITH_DACT: cutlass.Constexpr[bool] = False,
+    CACHE_ACTIVATION: cutlass.Constexpr[bool] = False,  # cache post-activation values to sX_tile
 ):
     """Reduce one SMEM tile along rows (the dbias direction) and possibly cache dact values, with no quantization."""
     tidx, _, _ = cute.arch.thread_idx()
@@ -1541,7 +1541,9 @@ class MXFP8QuantizeKernel(MXFP8QuantizeKernelBase):
     def _dbias_only_colwise(
         self,
         sX_tile: cute.Tensor,  # (TILE_Y, TILE_X) bf16/fp16 smem view, post-TMA
-        sActInput_tile: Optional[cute.Tensor] = None,  # (TILE_Y, TILE_X) act_input tile (dact only),
+        sActInput_tile: Optional[
+            cute.Tensor
+        ] = None,  # (TILE_Y, TILE_X) act_input tile (dact only),
     ):
         return dbias_reduction_colwise(
             sX_tile,
@@ -1550,7 +1552,7 @@ class MXFP8QuantizeKernel(MXFP8QuantizeKernelBase):
             DTYPE=self.cfg.DTYPE,
             TILE_X=self._TILE_COLS,
             WITH_DACT=self.cfg.WITH_DACT,
-            CACHE_ACTIVATION=self.CACHE_ACTIVATION
+            CACHE_ACTIVATION=self.CACHE_ACTIVATION,
         )
 
     @cute.jit
@@ -2543,6 +2545,7 @@ class MXFP8QuantizeEntry(MXFP8QuantizeKernelBase):
                 self.general_divisible_kernel(
                     mX, mO_row, mS_row, mO_col, mS_col, mAmax, mNoop, mDActInput, mWorkspace, stream
                 )
+
 
 def compile_cutedsl_function_from_cfg(cfg):
     """
