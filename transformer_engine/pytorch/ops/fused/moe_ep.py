@@ -11,10 +11,15 @@ from typing import Any, Optional
 
 import torch
 
-from ...constants import MXFP8_BLOCK_SCALING_SIZE
+from ...constants import DType, MXFP8_BLOCK_SCALING_SIZE
 from ...ep import get_ep_group
 from ...quantization import Recipe
-from ...tensor import GroupedTensor, Quantizer
+from ...tensor import GroupedTensor, MXFP8Quantizer, Quantizer
+from .._common import (
+    is_quantized_tensor,
+    maybe_dequantize,
+    quantize_mxfp8_for_ep,
+)
 from ..basic import Combine, Dispatch, GroupedLinear, ScaledSwiGLU
 from ..fuser import register_forward_backward_fusion
 from ..op import FusedOperation, FusibleOperation, OperationContext
@@ -105,6 +110,64 @@ def _restore_moe_weight(data: torch.Tensor, scale: Optional[torch.Tensor], block
     )
 
 
+def _pack_activation(
+    input_: torch.Tensor,
+    quantizer: Optional[MXFP8Quantizer],
+    block_scaled_cls: type,
+):
+    """Represent a TE activation in the public cuDNN MoeEp format."""
+    if quantizer is None:
+        return input_
+    quantized, scale_inv = quantize_mxfp8_for_ep(input_, quantizer)
+    return block_scaled_cls(
+        data=quantized.rowwise_data.view(torch.float8_e4m3fn),
+        scale=scale_inv.view(torch.float8_e8m0fnu),
+        format="mxfp8",
+        logical_shape=tuple(input_.shape),
+        axis=1,
+    )
+
+
+def _validate_internal_quantizers(
+    dispatch: Dispatch,
+    fc1: GroupedLinear,
+    fc2: GroupedLinear,
+    combine: Combine,
+) -> Optional[MXFP8Quantizer]:
+    """Validate quantizers hidden inside the five-op MegaMoE fusion."""
+    dispatch_quantizer = dispatch.get_input_quantizer()
+    quantizers = {
+        "Dispatch input": dispatch_quantizer,
+        "Combine grad_output": combine.get_grad_output_quantizer(),
+    }
+    for op_name, op in (("FC1", fc1), ("FC2", fc2)):
+        for group_idx in range(op.num_groups):
+            quantizers[f"{op_name} input {group_idx}"] = op.get_quantizer(
+                "forward",
+                2 * group_idx,
+            )
+            quantizers[f"{op_name} grad_output {group_idx}"] = op.get_quantizer(
+                "backward",
+                group_idx,
+            )
+    active = {name: quantizer for name, quantizer in quantizers.items() if quantizer is not None}
+    for name, quantizer in active.items():
+        if not isinstance(quantizer, MXFP8Quantizer):
+            raise TypeError(
+                f"FusedMoeEp supports MXFP8 internal quantizers only; {name} uses "
+                f"{type(quantizer).__name__}."
+            )
+        if quantizer.dtype != DType.kFloat8E4M3:
+            raise NotImplementedError(f"FusedMoeEp requires E4M3 MXFP8 for {name}.")
+    if active and len(active) != len(quantizers):
+        missing = ", ".join(name for name, quantizer in quantizers.items() if quantizer is None)
+        raise ValueError(
+            "FusedMoeEp requires either an all-BF16 boundary or a complete MXFP8 "
+            f"quantizer set; missing {missing}."
+        )
+    return dispatch_quantizer or fc1.get_quantizer("forward", 0)
+
+
 def _grouped_weight_grad(op: GroupedLinear, grad: torch.Tensor) -> list[Optional[torch.Tensor]]:
     """Convert a MegaMoE ``(E, in, out)`` wgrad to one TE ``(E, out, in)`` grad."""
     weight = _grouped_weight(op)
@@ -170,6 +233,7 @@ def _routing_extras_internal(
     fc1: GroupedLinear,
     activation: ScaledSwiGLU,
     fc2: GroupedLinear,
+    combine: Combine,
 ) -> bool:
     """Whether the dispatch routing extras stay inside the fusion.
 
@@ -178,8 +242,8 @@ def _routing_extras_internal(
     sequence when those two outputs feed exactly these ops and are not
     returned to the caller.
     """
-    tokens_per_expert, routing_weights = dispatch._extra_output_channels
-    if tokens_per_expert is None or routing_weights is None:
+    tokens_per_expert, routing_weights, ep_handle = dispatch._extra_output_channels
+    if tokens_per_expert is None or routing_weights is None or ep_handle is None:
         return False
     if any(dispatch._extra_output_to_caller):
         return False
@@ -187,6 +251,8 @@ def _routing_extras_internal(
         fc1._extra_input_channels[0] == tokens_per_expert
         and fc2._extra_input_channels[0] == tokens_per_expert
         and activation._extra_input_channels[0] == routing_weights
+        and combine._extra_input_channels[0] == ep_handle
+        and combine._extra_input_channels[1] == tokens_per_expert
     )
 
 
@@ -223,16 +289,16 @@ def _matches(window: Sequence[FusibleOperation], recipe: Optional[Recipe]) -> bo
         and isinstance(combine, Combine)
     ):
         return False
-    if dispatch.buffer is not combine.buffer:
-        return False
     buffer = dispatch.buffer
+    if combine.num_local_tokens != buffer.max_tokens_per_rank:
+        return False
     if not buffer.eager or buffer.payload_dtype is not torch.bfloat16:
         return False
     if not (_grouped_linear_supported(fc1) and _grouped_linear_supported(fc2)):
         return False
     if activation.activation_recompute_in_mlp or activation.glu_interleave_size is not None:
         return False
-    if not _routing_extras_internal(dispatch, fc1, activation, fc2):
+    if not _routing_extras_internal(dispatch, fc1, activation, fc2, combine):
         return False
     if not _megamoe_supported(buffer, fc1, fc2):
         return False
@@ -279,6 +345,8 @@ class FusedMoeEp(FusedOperation):
             max_tokens_per_rank=dispatch.buffer.max_tokens_per_rank,
             apply_topk_in_fc1=True,
             generate_c=True,
+            combine_format="bf16",
+            output_format="bf16",
         )
 
     @property
@@ -303,7 +371,6 @@ class FusedMoeEp(FusedOperation):
         next_op_input_quantizer: Optional[Quantizer],
         basic_op_kwargs: list[dict[str, Any]],
     ) -> tuple[torch.Tensor, Sequence[Sequence[Optional[torch.Tensor]]]]:
-        del prev_op_grad_output_quantizer, next_op_input_quantizer
         if input_.dtype is not torch.bfloat16:
             raise NotImplementedError(f"FusedMoeEp requires BF16 input, got {input_.dtype}.")
         if any(kwargs for kwargs in basic_op_kwargs):
@@ -313,6 +380,17 @@ class FusedMoeEp(FusedOperation):
         if topk_weights.dtype is not torch.float32:
             raise TypeError(f"topk_weights must be float32, got {topk_weights.dtype}.")
         with torch.no_grad():
+            input_quantizer = _validate_internal_quantizers(
+                self.dispatch,
+                self.fc1,
+                self.fc2,
+                self.basic_ops[4],
+            )
+            activation = _pack_activation(
+                input_,
+                input_quantizer,
+                self._block_scaled_cls,
+            )
             fc1_weight = _pack_grouped_linear_weights(
                 self.fc1, block_scaled_cls=self._block_scaled_cls
             )
@@ -320,7 +398,7 @@ class FusedMoeEp(FusedOperation):
                 self.fc2, block_scaled_cls=self._block_scaled_cls
             )
         output, fc1_c, route_metadata = self._moe(
-            input_,
+            activation,
             fc1_weight,
             fc2_weight,
             topk_idx,
@@ -328,10 +406,12 @@ class FusedMoeEp(FusedOperation):
         )
 
         if any(ctx.requires_grad for ctx in basic_op_ctxs):
+            input_data, input_scale = _flatten_moe_weight(activation)
             fc1_data, fc1_scale = _flatten_moe_weight(fc1_weight)
             fc2_data, fc2_scale = _flatten_moe_weight(fc2_weight)
             basic_op_ctxs[0].save_for_backward(
-                input_,
+                input_data,
+                input_scale,
                 fc1_data,
                 fc1_scale,
                 fc2_data,
@@ -341,11 +421,17 @@ class FusedMoeEp(FusedOperation):
                 fc1_c,
                 route_metadata,
             )
+            basic_op_ctxs[0].input_dtype = input_.dtype
+            basic_op_ctxs[0].prev_op_grad_output_quantizer = (
+                prev_op_grad_output_quantizer
+            )
 
         # Dispatch extras are channel-bound with output_to_caller=False and are
         # only consumed by ops inside this fusion, so they need not be materialized.
+        if next_op_input_quantizer is not None and not is_quantized_tensor(output):
+            output = next_op_input_quantizer(output)
         return output, [
-            (None, None),
+            (None, None, None),
             (),
             (),
             (),
@@ -365,7 +451,8 @@ class FusedMoeEp(FusedOperation):
     ]:
         del basic_op_grad_extra_outputs
         (
-            input_,
+            input_data,
+            input_scale,
             fc1_data,
             fc1_scale,
             fc2_data,
@@ -375,8 +462,17 @@ class FusedMoeEp(FusedOperation):
             fc1_c,
             route_metadata,
         ) = basic_op_ctxs[0].saved_tensors
+        input_ = _restore_moe_weight(
+            input_data,
+            input_scale,
+            self._block_scaled_cls,
+        )
         fc1_weight = _restore_moe_weight(fc1_data, fc1_scale, self._block_scaled_cls)
         fc2_weight = _restore_moe_weight(fc2_data, fc2_scale, self._block_scaled_cls)
+        grad_output = maybe_dequantize(
+            grad_output,
+            basic_op_ctxs[0].input_dtype,
+        )
         grad_input, grad_fc1, grad_fc2, grad_topk_weights = self._moe.backward(
             grad_output,
             input_,
@@ -392,10 +488,14 @@ class FusedMoeEp(FusedOperation):
         # one packed (E, out, in) parameter.
         fc1_param_grads = _grouped_weight_grad(self.fc1, grad_fc1)
         fc2_param_grads = _grouped_weight_grad(self.fc2, grad_fc2)
+        grad_input = grad_input.to(dtype=basic_op_ctxs[0].input_dtype)
+        grad_input_quantizer = basic_op_ctxs[0].prev_op_grad_output_quantizer
+        if grad_input_quantizer is not None:
+            grad_input = grad_input_quantizer(grad_input)
         return (
-            grad_input.to(dtype=input_.dtype),
+            grad_input,
             [(), fc1_param_grads, (), fc2_param_grads, ()],
-            [(None, grad_topk_weights.float()), (None,), (None,), (None,), ()],
+            [(None, grad_topk_weights.float()), (None,), (None,), (None,), (None, None)],
         )
 
 

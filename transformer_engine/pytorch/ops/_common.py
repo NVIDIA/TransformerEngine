@@ -11,6 +11,7 @@ from typing import Optional
 import torch
 
 from transformer_engine_torch import FP8TensorMeta
+from ..constants import MXFP8_BLOCK_SCALING_SIZE
 from ..torch_version import torch_version
 from ..quantization import FP8GlobalStateManager
 from ..quantized_tensor import QuantizedTensorStorage, Quantizer
@@ -22,6 +23,8 @@ from ..tensor import (
     NVFP4Quantizer,
 )
 from ..tensor.float8_tensor import Float8Tensor
+from ..tensor.mxfp8_tensor import MXFP8Tensor
+from ..tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
 from ..utils import canonicalize_dtype
 
 
@@ -89,6 +92,34 @@ def maybe_dequantize(
     if not tensor.is_contiguous():
         tensor = tensor.contiguous()
     return tensor
+
+
+def quantize_mxfp8_for_ep(
+    input_: torch.Tensor,
+    quantizer: MXFP8Quantizer,
+) -> tuple[MXFP8Tensor | MXFP8TensorStorage, torch.Tensor]:
+    """Apply an MXFP8 quantizer and expose compact rowwise scales for EP."""
+    if isinstance(input_, (MXFP8Tensor, MXFP8TensorStorage)):
+        quantized = input_
+    else:
+        quantized = quantizer(input_)
+    if quantized._with_gemm_swizzled_scales:
+        raise ValueError("NCCL EP requires unswizzled MXFP8 scales.")
+    data = quantized.rowwise_data
+    scale_inv = quantized.scale_inv
+    if data is None or scale_inv is None:
+        raise ValueError("NCCL EP requires rowwise MXFP8 data and scales.")
+    rows, hidden = input_.shape
+    scale_cols = hidden // MXFP8_BLOCK_SCALING_SIZE
+    if scale_cols * scale_inv.element_size() % 16:
+        raise ValueError(
+            f"MXFP8 EP transport requires hidden size divisible by "
+            f"{16 * MXFP8_BLOCK_SCALING_SIZE}, got {hidden}."
+        )
+    scale_inv = scale_inv[:rows, :scale_cols]
+    if not scale_inv.is_contiguous():
+        raise ValueError("NCCL EP requires compact contiguous MXFP8 scales.")
+    return quantized, scale_inv
 
 
 def maybe_autocast_dtype(

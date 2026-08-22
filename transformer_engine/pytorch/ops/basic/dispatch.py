@@ -10,8 +10,21 @@ from typing import Any, Iterable, Optional
 
 import torch
 
-from ...ep import EpBuffer, _alloc_io, ep_prepare
-from ...tensor import Quantizer
+from ...constants import DType, MXFP8_BLOCK_SCALING_SIZE
+from ...ep import (
+    EpBuffer,
+    _alloc_io,
+    _make_grouped_mxfp8,
+    _scale_alloc_io,
+    ep_prepare,
+)
+from ...quantization import QuantizerRole, Recipe
+from ...tensor import MXFP8Quantizer, Quantizer
+from .._common import (
+    is_quantized_tensor,
+    maybe_dequantize,
+    quantize_mxfp8_for_ep,
+)
 from ..op import BasicOperation, OperationContext
 
 
@@ -46,11 +59,68 @@ class Dispatch(BasicOperation):
     """
 
     num_extra_inputs: int = 2
-    num_extra_outputs: int = 2
+    # tokens-per-expert, received routing weights, and the opaque NCCL EP
+    # routing handle consumed by Combine.
+    num_extra_outputs: int = 3
 
     def __init__(self, buffer: EpBuffer) -> None:
         super().__init__()
         self.buffer = buffer
+
+    def num_quantizers(self, mode: str) -> int:
+        return 1 if mode == "forward" else 0
+
+    def get_quantizer_roles(self, mode: str) -> Optional[list[QuantizerRole]]:
+        if mode == "forward":
+            name = getattr(self, "name", "") or ""
+            return [
+                QuantizerRole(
+                    module_type="dispatch",
+                    tensor_type="input",
+                    name=name,
+                )
+            ]
+        return None
+
+    def pre_fuser_forward(self, *, requires_grad: bool) -> None:
+        super().pre_fuser_forward(requires_grad=requires_grad)
+        quantizer = self.get_quantizer("forward", 0)
+        if quantizer is not None:
+            quantizer.set_usage(rowwise=True, columnwise=False)
+            quantizer.optimize_for_gemm = False
+
+    def reset_recipe_state(self, *, recipe: Optional[Recipe]) -> None:
+        super().reset_recipe_state(recipe=recipe)
+        quantizer = self.get_quantizer("forward", 0)
+        if quantizer is not None:
+            quantizer.internal = True
+
+    def _resolve_input_quantizer(
+        self,
+        next_op_input_quantizer: Optional[Quantizer],
+    ) -> Optional[MXFP8Quantizer]:
+        quantizer = self.get_quantizer("forward", 0)
+        if (
+            quantizer is not None
+            and next_op_input_quantizer is not None
+            and quantizer is not next_op_input_quantizer
+        ):
+            raise ValueError(
+                "Dispatch input_quantizer and next operation input quantizer "
+                "must be the same object when both are set."
+            )
+        if quantizer is None:
+            quantizer = next_op_input_quantizer
+        if quantizer is None:
+            return None
+        if not isinstance(quantizer, MXFP8Quantizer):
+            raise TypeError(
+                "NCCL EP Dispatch supports MXFP8Quantizer only, got "
+                f"{type(quantizer).__name__}."
+            )
+        if quantizer.dtype != DType.kFloat8E4M3:
+            raise NotImplementedError("NCCL EP Dispatch supports E4M3 MXFP8 only.")
+        return quantizer
 
     def op_forward(self, *args: Any, **kwargs: Any) -> None:
         raise RuntimeError("Dispatch uses fuser_forward")
@@ -68,7 +138,7 @@ class Dispatch(BasicOperation):
         next_op_input_quantizer: Optional[Quantizer],
         basic_op_kwargs: list[dict[str, Any]],
     ) -> tuple[torch.Tensor, Iterable[Iterable[torch.Tensor]]]:
-        del prev_op_grad_output_quantizer, next_op_input_quantizer
+        input_quantizer = self._resolve_input_quantizer(next_op_input_quantizer)
         topk_idx, topk_weights = basic_op_extra_inputs[0]
         kwargs = basic_op_kwargs[0]
 
@@ -115,13 +185,14 @@ class Dispatch(BasicOperation):
             raise RuntimeError("NCCL EP dispatch receive size is unavailable.")
         rows = int(rows)
         recv_shape = (rows, self.buffer.hidden_dim)
-        recv_tokens = _validate_output_buffer(
-            "recv_tokens",
-            recv_tokens,
-            shape=recv_shape,
-            dtype=self.buffer.payload_dtype,
-            device=self.buffer.device,
-        )
+        if input_quantizer is None:
+            recv_tokens = _validate_output_buffer(
+                "recv_tokens",
+                recv_tokens,
+                shape=recv_shape,
+                dtype=self.buffer.payload_dtype,
+                device=self.buffer.device,
+            )
         recv_topk_weights = _validate_output_buffer(
             "recv_topk_weights",
             recv_topk_weights,
@@ -129,13 +200,6 @@ class Dispatch(BasicOperation):
             dtype=torch.float32,
             device=self.buffer.device,
         )
-        if recv_tokens is None:
-            recv_tokens = _alloc_io(
-                recv_shape,
-                self.buffer.payload_dtype,
-                self.buffer.device,
-                self.buffer.zero_copy,
-            )
         if recv_topk_weights is None:
             recv_topk_weights = _alloc_io(
                 (rows,),
@@ -144,23 +208,64 @@ class Dispatch(BasicOperation):
                 self.buffer.zero_copy,
             )
 
-        torch.ops.transformer_engine_ep.dispatch(
-            self.buffer.handle_mem,
-            topk_idx,
-            input_,
-            topk_weights,
-            recv_tokens,
-            recv_topk_weights,
-        )
+        if input_quantizer is None:
+            if recv_tokens is None:
+                recv_tokens = _alloc_io(
+                    recv_shape,
+                    self.buffer.payload_dtype,
+                    self.buffer.device,
+                    self.buffer.zero_copy,
+                )
+            torch.ops.transformer_engine_ep.dispatch(
+                self.buffer.handle_mem,
+                topk_idx,
+                input_,
+                topk_weights,
+                recv_tokens,
+                recv_topk_weights,
+            )
+        else:
+            quantized_input, input_scale_inv = quantize_mxfp8_for_ep(
+                input_, input_quantizer
+            )
+            scale_cols = self.buffer.hidden_dim // MXFP8_BLOCK_SCALING_SIZE
+            recv_data, recv_scale_inv = _scale_alloc_io(
+                recv_tokens,
+                rows,
+                self.buffer.hidden_dim,
+                scale_cols,
+                quantized_input.rowwise_data.dtype,
+                input_scale_inv.dtype,
+                self.buffer.device,
+                self.buffer.zero_copy,
+            )
+            torch.ops.transformer_engine_ep.dispatch(
+                self.buffer.handle_mem,
+                topk_idx,
+                quantized_input.rowwise_data.view(torch.float8_e4m3fn),
+                topk_weights,
+                recv_data.view(torch.float8_e4m3fn),
+                recv_topk_weights,
+                input_scale_inv,
+                recv_scale_inv,
+            )
+            recv_tokens = _make_grouped_mxfp8(
+                recv_data,
+                recv_scale_inv,
+                tokens_per_expert,
+                quantized_input._fp8_dtype,
+                input_.dtype,
+            )
 
         ctx = basic_op_ctxs[0]
         if ctx.requires_grad:
             ctx.input_shape = tuple(input_.shape)
             ctx.input_dtype = input_.dtype
             ctx.topk_weights_shape = tuple(topk_weights.shape)
+            ctx.prev_op_grad_output_quantizer = prev_op_grad_output_quantizer
             ctx.save_for_backward(self.buffer.handle_mem)
 
-        return recv_tokens, [(tokens_per_expert, recv_topk_weights)]
+        return recv_tokens, [(tokens_per_expert, recv_topk_weights, self.buffer.handle_mem)]
 
     def fuser_backward(
         self,
@@ -175,7 +280,7 @@ class Dispatch(BasicOperation):
     ]:
         ctx = basic_op_ctxs[0]
         (handle_mem,) = ctx.saved_tensors
-        grad_output = grad_output.contiguous()
+        grad_output = maybe_dequantize(grad_output, ctx.input_dtype).contiguous()
 
         grad_recv_weights = basic_op_grad_extra_outputs[0][1]
         if grad_recv_weights is None:
@@ -204,4 +309,7 @@ class Dispatch(BasicOperation):
             grad_input,
             grad_topk_weights,
         )
+        quantizer = ctx.prev_op_grad_output_quantizer
+        if quantizer is not None and not is_quantized_tensor(grad_input):
+            grad_input = quantizer(grad_input)
         return grad_input, [()], [(None, grad_topk_weights)]

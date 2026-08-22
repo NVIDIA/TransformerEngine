@@ -30,6 +30,8 @@ from transformer_engine.pytorch.ep import (
 )
 from transformer_engine.pytorch.ep_reference import BlockScaledTensor, MoeEpReference, MoeFormat
 from transformer_engine.pytorch.ops.fused.moe_ep import FusedMoeEp, _pack_grouped_linear_weights
+from transformer_engine.pytorch.ops.op import OperationContext
+from transformer_engine.pytorch.tensor import GroupedTensor
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Tensor
 
 ZERO_COPY = os.environ.get("NVTE_EP_ZERO_COPY", "0") == "1"
@@ -373,15 +375,28 @@ class TestEP(unittest.TestCase):
                 del os.environ["NVTE_GROUPED_LINEAR_SINGLE_PARAM"]
             else:
                 os.environ["NVTE_GROUPED_LINEAR_SINGLE_PARAM"] = previous_single_param
-        combine = te_ops.Combine(buffer, num_local_tokens=TOKENS_PER_RANK)
-        combine = te_ops.Combine(buffer, num_local_tokens=TOKENS_PER_RANK)
+        combine = te_ops.Combine(num_local_tokens=TOKENS_PER_RANK)
 
         dispatch.set_extra_output_channel(0, "tokens_per_expert", output_to_caller=not fuse_ops)
         dispatch.set_extra_output_channel(1, "routing_weights", output_to_caller=not fuse_ops)
+        dispatch.set_extra_output_channel(2, "ep_handle", output_to_caller=False)
         fc1.set_extra_input_channel(0, "tokens_per_expert")
         activation.set_extra_input_channel(0, "routing_weights")
         fc2.set_extra_input_channel(0, "tokens_per_expert")
+        combine.set_extra_input_channel(0, "ep_handle")
+        combine.set_extra_input_channel(1, "tokens_per_expert")
         return te_ops.Sequential(dispatch, fc1, activation, fc2, combine), fc1, fc2
+
+    def _make_dispatch_combine_model(self, buffer):
+        """Build the minimal channel-routed Dispatch -> Combine pipeline."""
+        dispatch = te_ops.Dispatch(buffer)
+        combine = te_ops.Combine(num_local_tokens=TOKENS_PER_RANK)
+        dispatch.set_extra_output_channel(0, "tokens_per_expert", output_to_caller=False)
+        dispatch.set_extra_output_channel(1, "routing_weights", output_to_caller=False)
+        dispatch.set_extra_output_channel(2, "ep_handle", output_to_caller=False)
+        combine.set_extra_input_channel(0, "ep_handle")
+        combine.set_extra_input_channel(1, "tokens_per_expert")
+        return te_ops.Sequential(dispatch, combine)
 
     # Prepare
 
@@ -494,6 +509,30 @@ class TestEP(unittest.TestCase):
 
     # Autograd
 
+    @_eager_test_include
+    @_zero_copy_test_include
+    def test_basic_ops_channel_routed_identity(self):
+        """Combine consumes Dispatch's handle/count channels without receiving EpBuffer."""
+        buffer = self._make_buffer()
+        model = self._make_dispatch_combine_model(buffer)
+        topk_idx, tokens, weights = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
+        tokens = tokens.detach().clone().requires_grad_(True)
+        output = model(tokens, topk_idx, weights)
+        (0.5 * output.float().square().sum()).backward()
+        torch.cuda.synchronize()
+        torch.testing.assert_close(
+            output.float(),
+            tokens.detach().float() * TOP_K,
+            atol=5e-2,
+            rtol=5e-2,
+        )
+        torch.testing.assert_close(
+            tokens.grad.float(),
+            tokens.detach().float() * (TOP_K**2),
+            atol=1e-1,
+            rtol=1e-1,
+        )
+
     @_zero_copy_test_include
     def test_dispatch_autograd(self):
         """0.5*||recv_tokens||^2 ; grad_tokens equals TOP_K * tokens. Covers the
@@ -563,6 +602,62 @@ class TestEP(unittest.TestCase):
             self.assertTrue(is_symm_backed(recv_mx.rowwise_data))
             self.assertTrue(is_symm_backed(recv_mx.scale_inv))
         self._assert_mxfp8_matches_bf16(recv_mx, tokens, topk_idx, w, tc)
+
+    @_eager_test_include
+    @_zero_copy_test_include
+    @_mxfp8_align_test
+    def test_basic_dispatch_mxfp8_and_recipe_change(self):
+        """The basic op uses its recipe-owned input quantizer and refreshes it."""
+        self._require_mxfp8_shapes()
+        buffer = self._make_buffer(alignment=128)
+        dispatch = te_ops.Dispatch(buffer)
+        topk_idx, tokens, weights = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
+
+        recv_bf16, _counts, _recv_weights, _handle = dispatch(tokens, topk_idx, weights)
+        self.assertIsInstance(recv_bf16, torch.Tensor)
+        self.assertNotIsInstance(recv_bf16, MXFP8Tensor)
+
+        with te.autocast(enabled=True, recipe=MXFP8BlockScaling()):
+            recv_mx, counts, _recv_weights, handle = dispatch(tokens, topk_idx, weights)
+        self.assertIsInstance(recv_mx, GroupedTensor)
+        self.assertEqual(handle.data_ptr(), buffer.handle_mem.data_ptr())
+        self._assert_mxfp8_matches_bf16(recv_mx, tokens, topk_idx, weights, counts)
+
+    @_eager_test_include
+    @_zero_copy_test_include
+    @_mxfp8_align_test
+    def test_basic_combine_backward_mxfp8(self):
+        """Combine's recipe-owned grad-output quantizer drives scaled combine_bwd."""
+        self._require_mxfp8_shapes()
+        buffer = self._make_buffer(alignment=128)
+        topk_idx, tokens, weights = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
+        recv_tokens, _recv_weights, counts = ep_dispatch(
+            buffer,
+            tokens,
+            topk_idx,
+            weights,
+        )
+        combine = te_ops.Combine(num_local_tokens=TOKENS_PER_RANK)
+        combine.reset_recipe_state(recipe=MXFP8BlockScaling())
+        combine.pre_fuser_forward(requires_grad=True)
+        ctx = OperationContext()
+        output, _ = combine.fuser_forward(
+            [ctx],
+            recv_tokens,
+            basic_op_extra_inputs=[(buffer.handle_mem, counts)],
+            prev_op_grad_output_quantizer=None,
+            next_op_input_quantizer=None,
+            basic_op_kwargs=[{}],
+        )
+        ctx.saved_tensors = ctx.to_save
+        grad_input, _, _ = combine.fuser_backward(
+            [ctx],
+            torch.ones_like(output),
+            basic_op_grad_extra_outputs=[()],
+        )
+        self.assertIsInstance(grad_input, GroupedTensor)
+        self.assertIsNotNone(grad_input.rowwise_data)
+        self.assertIsNotNone(grad_input.scale_inv)
 
     @_zero_copy_test_include
     @_mxfp8_align_test
