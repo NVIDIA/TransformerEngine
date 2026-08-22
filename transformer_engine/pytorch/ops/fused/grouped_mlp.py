@@ -1492,7 +1492,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                 if self.grouped_gemm_act_hadamard_quant_kernel() is None:
                     # Kernel is not available
                     pass
-                if fc1_bias_packed is not None:
+                elif fc1_bias_packed is not None:
                     # Kernel has large numerical error with bias
                     pass
                 elif self._cudnn_act_func == "swiglu":
