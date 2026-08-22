@@ -70,64 +70,6 @@ class _GatedDeltaNetAttention(torch.nn.Module):
         self.v_head_dim = v_head_dim
         self._dense_cu_seqlens_key: Optional[Tuple[torch.device, int, int]] = None
         self._dense_cu_seqlens: Optional[torch.Tensor] = None
-        self._cu_seqlens_validation_cache: list[Tuple[torch.Tensor, int, int, Tuple[int, ...]]] = []
-
-    def _validate_cu_seqlens_values(
-        self,
-        cu_seqlens: torch.Tensor,
-        *,
-        device: torch.device,
-        name: str,
-        total_tokens: int,
-    ) -> Tuple[int, ...]:
-        """Validate THD offsets, synchronizing only for new or mutated tensors."""
-        _validate_cu_seqlens(cu_seqlens, device=device, name=name)
-        try:
-            tensor_version = cu_seqlens._version  # pylint: disable=protected-access
-        except RuntimeError:
-            # Tensors created in inference mode have no version counter. They cannot be
-            # cached safely because an in-place update would otherwise bypass validation.
-            tensor_version = None
-        for (
-            cached_tensor,
-            cached_version,
-            cached_total,
-            cached_offsets,
-        ) in self._cu_seqlens_validation_cache:
-            if (
-                tensor_version is not None
-                and cached_tensor is cu_seqlens
-                and cached_version == tensor_version
-                and cached_total == total_tokens
-            ):
-                return cached_offsets
-
-        offsets = tuple(cu_seqlens.detach().cpu().tolist())
-        if offsets[0] != 0:
-            raise ValueError(f"{name} must start at 0, got {offsets[0]}.")
-        for index, (start, end) in enumerate(zip(offsets, offsets[1:])):
-            if end < start:
-                raise ValueError(
-                    f"{name} must be nondecreasing; offsets[{index}]={start} is greater "
-                    f"than offsets[{index + 1}]={end}."
-                )
-        if offsets[-1] != total_tokens:
-            raise ValueError(
-                f"{name} must end at the flattened token count {total_tokens}, got {offsets[-1]}."
-            )
-
-        # Holding a few tiny offset tensors avoids pointer-reuse ambiguity while keeping
-        # repeated forwards and CUDA graph replay free of validation synchronizations.
-        if tensor_version is not None:
-            self._cu_seqlens_validation_cache = [
-                entry for entry in self._cu_seqlens_validation_cache if entry[0] is not cu_seqlens
-            ]
-            self._cu_seqlens_validation_cache.append(
-                (cu_seqlens, tensor_version, total_tokens, offsets)
-            )
-            if len(self._cu_seqlens_validation_cache) > 4:
-                self._cu_seqlens_validation_cache.pop(0)
-        return offsets
 
     def forward(
         self,
@@ -223,11 +165,10 @@ class _GatedDeltaNetAttention(torch.nn.Module):
         if qkv_format == "thd":
             if cu_seqlens_q is None:
                 raise ValueError("cu_seqlens_q is required for GDN with qkv_format='thd'.")
-            cu_seqlens_values = self._validate_cu_seqlens_values(
+            _validate_cu_seqlens(
                 cu_seqlens_q,
                 device=device,
                 name="cu_seqlens_q",
-                total_tokens=query_layer.shape[0],
             )
             cu_seqlens = cu_seqlens_q
         else:
@@ -247,21 +188,19 @@ class _GatedDeltaNetAttention(torch.nn.Module):
                 )
                 self._dense_cu_seqlens_key = cache_key
             cu_seqlens = self._dense_cu_seqlens
-            cu_seqlens_values = tuple(range(0, batch_size * sequence_length + 1, sequence_length))
 
-        if cu_seqlens_kv is not None:
-            cu_seqlens_kv_values = self._validate_cu_seqlens_values(
+        if cu_seqlens_kv is not None and cu_seqlens_kv is not cu_seqlens:
+            _validate_cu_seqlens(
                 cu_seqlens_kv,
                 device=device,
                 name="cu_seqlens_kv",
-                total_tokens=query_layer.shape[0],
             )
-            if cu_seqlens_kv_values != cu_seqlens_values:
+            if cu_seqlens_kv.shape != cu_seqlens.shape:
                 raise ValueError(
-                    "GDN requires cu_seqlens_q and cu_seqlens_kv to contain identical offsets."
+                    "GDN requires cu_seqlens_q and cu_seqlens_kv to have the same shape."
                 )
 
-        batch_size = len(cu_seqlens_values) - 1
+        batch_size = cu_seqlens.shape[0] - 1
         expected_state_shape = (
             batch_size,
             num_output_heads,
