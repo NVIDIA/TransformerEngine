@@ -66,6 +66,8 @@ static_assert(BUFF_DIM_Y == 32);
 
 constexpr uint STAGES = CHUNK_DIM_Y / BUFF_DIM_Y;
 static_assert(STAGES >= 1);
+static_assert(STAGES % BUFFS_NUM == 0,
+              "Persistent jobs reset the shared-memory ring and require aligned stage counts");
 
 static_assert(CHUNK_DIM_Y % BUFF_DIM_Y == 0);
 static_assert(CHUNK_DIM_Y % SCALE_DIM_Y == 0);
@@ -716,7 +718,14 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
       ptx::mbarrier_wait_parity_acquire_cta_shared_cta(&IN_buff_readable_mbar[buff_in],
                                                        IN_buff_readable_parity[buff_in]);
       IN_buff_readable_parity[buff_in] ^= 1;
-      ptx::cp_async_bulk_wait_group_read<PREFETCH_STAGES>();
+
+      // Bulk async-groups are per-thread. Only the leading thread issues and commits the TMA
+      // stores, so it is also the only thread whose wait observes their completion. Hand that
+      // completion off to every cooperative writer before the output ring buffer is reused.
+      if (leading_thread) {
+        ptx::cp_async_bulk_wait_group_read<PREFETCH_STAGES>();
+      }
+      __syncthreads();
 
       const size_t buff = buff_in;
       if constexpr (COLWISE_SCALING) {
@@ -795,6 +804,12 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
     advance_to_next_job(job_finished, ctaid_X, ctaid_Y, static_next_block_id, static_block_stride,
                         total_work_blocks, work_blocks_X);
   }
+
+  // Drain every TMA store before the CTA releases its shared-memory source buffers.
+  if (leading_thread) {
+    ptx::cp_async_bulk_wait_group();
+  }
+  __syncthreads();
 
   destroy_barriers<BUFFS_NUM>(IN_buff_readable_mbar, leading_thread);
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)

@@ -1027,8 +1027,8 @@ __global__ void quantize_mxfp8_kernel_cast_only(
         ptx::cp_async_bulk_wait_group_read<CastTraits::numStages - 1>();
         ptx::mbarrier_arrive_expect_tx(&stg_consumer[read_state.index()], 0u);
       }
+      ptx::cp_async_bulk_wait_group();
     }
-    ptx::cp_async_bulk_wait_group_read<0>();
   } else {
     PipeState<CastTraits::numStages> read_state;
 
@@ -1510,6 +1510,17 @@ __global__ void quantize_mxfp8_kernel_cast_only(
   }
 #pragma unroll 1
   for (int32_t iter = 0; iter < CastTraits::iterLayout::num; iter++) {
+    // S2G bulk async-groups are thread-local. Once the output ring wraps, the issuing
+    // thread must observe completion and hand it off to the CTA before cooperative STS.
+    if constexpr (CastTraits::_need_wait_group) {
+      if (iter >= CastTraits::numStages) {
+        if (warpId == 0 && leader) {
+          ptx::cp_async_bulk_wait_group_read<CastTraits::numStages - 1>();
+        }
+        __syncthreads();
+      }
+    }
+
     {
       int32_t next = iter + (CastTraits::numStages - 1);
       int32_t next_stage = next % CastTraits::numStages;
@@ -1520,10 +1531,6 @@ __global__ void quantize_mxfp8_kernel_cast_only(
       coords.x = block_coords.x + iter_n * CastTraits::blockIterDim::N;
       if (coords.x < cols && coords.y < rows) {
         if (warpId == 0 && leader) {
-          if constexpr (CastTraits::_need_wait_group) {
-            ptx::cp_async_bulk_wait_group_read<CastTraits::numStages - 1>();
-          }
-
           ptx::cp_async_bulk_tensor_2d_global_to_shared(
               reinterpret_cast<uint64_t *>(sInput + next_stage * CastTraits::blockIterDim::num),
               reinterpret_cast<const uint64_t *>(&tensor_map_input),
@@ -1984,7 +1991,10 @@ __global__ void quantize_mxfp8_kernel_cast_only(
     }
   }
 
-  ptx::cp_async_bulk_wait_group_read<0>();
+  if (warpId == 0 && leader) {
+    ptx::cp_async_bulk_wait_group();
+  }
+  __syncthreads();
 
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }  // NOLINT(readability/fn_size)

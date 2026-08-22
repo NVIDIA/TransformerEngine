@@ -80,7 +80,11 @@ constexpr int STAGES = STAGES_Y * STAGES_X;
 constexpr int BUFFS_NUM = TunableConfig::PREFETCH_STAGES + 1;
 constexpr int BUFFS_NUM_IN = BUFFS_NUM;
 constexpr int BUFFS_NUM_OUT = BUFFS_NUM;
-constexpr int BUFFS_NUM_OUT_TR = 2;
+constexpr int BUFFS_NUM_OUT_TR = TunableConfig::PREFETCH_STAGES + 1;
+static_assert(BUFFS_NUM_OUT >= TunableConfig::PREFETCH_STAGES + 1,
+              "The output buffer ring must be larger than the TMA store wait depth");
+static_assert(BUFFS_NUM_OUT_TR >= TunableConfig::PREFETCH_STAGES + 1,
+              "The transposed output buffer ring must be larger than the TMA store wait depth");
 constexpr int BUFF_DIM_Y = TILE_DIM_Y;
 constexpr int BUFF_DIM_X = TILE_DIM_X;
 constexpr int BUFF_SIZE = BUFF_DIM_Y * BUFF_DIM_X;
@@ -585,7 +589,12 @@ __global__ void __launch_bounds__(THREADS_NUM) quantize_transpose_nvfp4_tuned_1D
 
       // Wait for TMA transfer to have finished reading shared memory
       // I.e. the OUT buffer is ready to be written to
-      ptx::cp_async_bulk_wait_group_read<TunableConfig::PREFETCH_STAGES>();
+      if (leading_thread) {
+        ptx::cp_async_bulk_wait_group_read<TunableConfig::PREFETCH_STAGES>();
+      }
+      // Bulk async-groups are thread-local. Publish the leading thread's completion to all
+      // threads before they cooperatively overwrite a reused output buffer.
+      __syncthreads();
 
       // NVFP4 Quantization
       rowwise_scaling<USE_STOCHASTIC_ROUNDING, USE_FAST_MATH, ROW_SCALED_NVFP4>(
@@ -672,6 +681,11 @@ __global__ void __launch_bounds__(THREADS_NUM) quantize_transpose_nvfp4_tuned_1D
       }
     }
   }
+
+  if (leading_thread) {
+    ptx::cp_async_bulk_wait_group();
+  }
+  __syncthreads();
 
   if (leading_thread) {
 #pragma unroll
