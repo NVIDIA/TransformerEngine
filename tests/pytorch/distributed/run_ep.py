@@ -856,7 +856,8 @@ class TestEP(unittest.TestCase):
             combine_format=MoeFormat.BF16,
             apply_topk_in_fc1=True,
             generate_c=True,
-            compute_dtype=torch.float32)
+            compute_dtype=torch.float32,
+        )
         ref_out, fc1_c, route_metadata = reference(
             tokens.detach(),
             fc1_weight,
