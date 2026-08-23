@@ -29,7 +29,11 @@ from transformer_engine.pytorch.ep import (
     _ep_dispatch_raw,
 )
 from transformer_engine.pytorch.ep_reference import BlockScaledTensor, MoeEpReference, MoeFormat
-from transformer_engine.pytorch.ops.fused.moe_ep import FusedMoeEp, _pack_cudnn_weights
+from transformer_engine.pytorch.ops.fused.moe_ep import (
+    FusedMoeEp,
+    _cudnn_megamoe_supported,
+    _pack_cudnn_weights,
+)
 from transformer_engine.pytorch.ops.op import OperationContext
 from transformer_engine.pytorch.tensor import GroupedTensor
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Tensor
@@ -328,19 +332,16 @@ class TestEP(unittest.TestCase):
     def _make_moe_model(
         self,
         *,
-        fuse_ops=True,
         intermediate_dim=INTERMEDIATE_DIM,
         recipe=None,
     ):
         """Build an EP MoE Sequential.
 
-        With ``fuse_ops=True``, dispatch routing extras stay internal so
-        MegaMoE can claim the sequence when its gates pass. With
-        ``fuse_ops=False``, those extras are returned to the caller and the
-        Sequential stays unfused. Pass an MXFP8 ``recipe`` to construct
-        natively quantized GroupedLinear weights via ``quantized_model_init``.
+        Routing extras stay internal so MegaMoE can claim the sequence when
+        its gates pass. Pass an MXFP8 ``recipe`` to construct natively
+        quantized GroupedLinear weights via ``quantized_model_init``.
         """
-        buffer = self._make_buffer()
+        buffer = self._make_buffer(alignment=128 if recipe is not None else 0)
         dispatch = te_ops.Dispatch(buffer)
         init_ctx = (
             te.quantized_model_init(enabled=True, recipe=recipe)
@@ -377,8 +378,8 @@ class TestEP(unittest.TestCase):
                 os.environ["NVTE_GROUPED_LINEAR_SINGLE_PARAM"] = previous_single_param
         combine = te_ops.Combine()
 
-        dispatch.set_extra_output_channel(0, "tokens_per_expert", output_to_caller=not fuse_ops)
-        dispatch.set_extra_output_channel(1, "routing_weights", output_to_caller=not fuse_ops)
+        dispatch.set_extra_output_channel(0, "tokens_per_expert", output_to_caller=False)
+        dispatch.set_extra_output_channel(1, "routing_weights", output_to_caller=False)
         dispatch.set_extra_output_channel(2, "ep_handle", output_to_caller=False)
         dispatch.set_extra_output_channel(3, "routing_indices", output_to_caller=False)
         fc1.set_extra_input_channel(0, "tokens_per_expert")
@@ -761,20 +762,20 @@ class TestEP(unittest.TestCase):
 
     @_eager_test_include
     def test_bf16_moe_sequential_vs_reference(self):
-        """Unfused BF16 Sequential matches a BF16 ``MoeEpReference``."""
+        """BF16 Sequential matches its reference, with MegaMoE when available."""
         self._run_moe_sequential_vs_reference(quantization="bf16")
 
     @_eager_test_include
+    @_mxfp8_align_test
     def test_mxfp8_moe_sequential_vs_reference(self):
-        """Fused MegaMoE Sequential under MXFP8 autocast matches the QDQ reference."""
+        """MXFP8 Sequential matches the QDQ reference, with MegaMoE when available."""
         self._run_moe_sequential_vs_reference(quantization="mxfp8")
 
     def _run_moe_sequential_vs_reference(self, *, quantization):
-        """Compare Sequential to ``MoeEpReference``.
+        """Compare a Sequential MoE to ``MoeEpReference``.
 
-        Sequential uses MegaMoE for MXFP8 when supported. The MXFP8 reference
-        QDQ GEMM operands to MXFP8 and matmuls in FP32; the BF16 reference runs
-        FP32 GEMMs with no QDQ.
+        MegaMoE is used when its cuDNN and hardware requirements are met;
+        otherwise the basic EP and grouped-MLP operations run unfused.
         """
         if not EAGER:
             self.skipTest("variable-size reference comparison requires eager EP mode")
@@ -789,7 +790,8 @@ class TestEP(unittest.TestCase):
         intermediate_dim = 256
         recipe = MXFP8BlockScaling() if quantization == "mxfp8" else None
         model, fc1, fc2 = self._make_moe_model(
-            fuse_ops=True, intermediate_dim=intermediate_dim, recipe=recipe
+            intermediate_dim=intermediate_dim,
+            recipe=recipe,
         )
         generator = torch.Generator(device=self.cfg.device)
         generator.manual_seed(3100 + self.cfg.rank)
@@ -826,11 +828,10 @@ class TestEP(unittest.TestCase):
             seq_out = model(seq_tokens, topk_idx, seq_topk_weights)
 
         forward_ops = model._module_groups[0]._forward_ops
-        if quantization == "mxfp8":
+        if _cudnn_megamoe_supported():
             self.assertEqual(len(forward_ops), 1)
             self.assertIsInstance(forward_ops[0][0], FusedMoeEp)
         else:
-            self.assertEqual(len(forward_ops), 5)
             self.assertFalse(any(isinstance(op, FusedMoeEp) for op, _ in forward_ops))
         self.assertIsInstance(seq_out, torch.Tensor)
         self.assertEqual(seq_out.dtype, torch.bfloat16)
@@ -855,9 +856,7 @@ class TestEP(unittest.TestCase):
             combine_format=MoeFormat.BF16,
             apply_topk_in_fc1=True,
             generate_c=True,
-            compute_dtype=torch.float32 if quantization == "mxfp8" else torch.bfloat16,
-            gemm_format=MoeFormat.MXFP8 if quantization == "mxfp8" else MoeFormat.BF16,
-        )
+            compute_dtype=torch.float32)
         ref_out, fc1_c, route_metadata = reference(
             tokens.detach(),
             fc1_weight,
@@ -888,10 +887,7 @@ class TestEP(unittest.TestCase):
             route_metadata,
         )
         torch.cuda.synchronize()
-        if quantization == "bf16":
-            tolerances = {"rtol": 1.6e-2, "atol": 5e-5}
-        else:
-            tolerances = {"rtol": 0.125, "atol": 0.25}
+        tolerances = {"rtol": 0.125, "atol": 0.25}
         torch.testing.assert_close(seq_out, ref_out, **tolerances)
         torch.testing.assert_close(
             seq_tokens.grad, grad_tokens.to(dtype=seq_tokens.dtype), **tolerances

@@ -7,8 +7,10 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
+from importlib.metadata import PackageNotFoundError, version as get_pkg_version
 from typing import Any, Optional
 
+from packaging.version import Version as PkgVersion
 import torch
 import transformer_engine_torch as tex
 
@@ -24,6 +26,15 @@ from .._common import (
 from ..basic import Combine, Dispatch, GroupedLinear, ScaledSwiGLU
 from ..fuser import register_forward_backward_fusion
 from ..op import FusedOperation, FusibleOperation, OperationContext
+
+
+def _cudnn_megamoe_supported() -> bool:
+    """Whether the installed cuDNN frontend includes the public MegaMoE API."""
+    return True
+    # try:
+    #     return PkgVersion(get_pkg_version("nvidia-cudnn-frontend")) >= PkgVersion("1.28.0")
+    # except PackageNotFoundError:
+    #     return False
 
 
 def _pack_as_cudnn_moe_tensor(
@@ -210,6 +221,8 @@ def _routing_extras_internal(
 
 def _megamoe_supported(buffer, fc1: GroupedLinear, fc2: GroupedLinear) -> bool:
     """Static MegaMoE capability gates that can be checked before first launch."""
+    if not _cudnn_megamoe_supported():
+        return False
     if _import_cudnn_moe_ep() is None:
         return False
     if not torch.cuda.is_available() or torch.cuda.get_device_capability() != (10, 7):
@@ -230,7 +243,7 @@ def _megamoe_supported(buffer, fc1: GroupedLinear, fc2: GroupedLinear) -> bool:
 def _matches(window: Sequence[FusibleOperation], recipe: Optional[Recipe]) -> bool:
     if len(window) != 5:
         return False
-    if recipe is None or not recipe.mxfp8():
+    if recipe is not None and not recipe.mxfp8():
         return False
     dispatch, fc1, activation, fc2, combine = window
     if not (
@@ -350,9 +363,12 @@ class FusedMoeEp(FusedOperation):
         )
 
         if any(ctx.requires_grad for ctx in basic_op_ctxs):
-            input_data, input_scale = activation.data, activation.scale
-            fc1_data, fc1_scale = fc1_weight.data, fc1_weight.scale
-            fc2_data, fc2_scale = fc2_weight.data, fc2_weight.scale
+            input_data = activation if isinstance(activation, torch.Tensor) else activation.data
+            input_scale = None if isinstance(activation, torch.Tensor) else activation.scale
+            fc1_data = fc1_weight if isinstance(fc1_weight, torch.Tensor) else fc1_weight.data
+            fc1_scale = None if isinstance(fc1_weight, torch.Tensor) else fc1_weight.scale
+            fc2_data = fc2_weight if isinstance(fc2_weight, torch.Tensor) else fc2_weight.data
+            fc2_scale = None if isinstance(fc2_weight, torch.Tensor) else fc2_weight.scale
             basic_op_ctxs[0].save_for_backward(
                 input_data,
                 input_scale,

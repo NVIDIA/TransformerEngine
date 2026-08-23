@@ -171,11 +171,13 @@ class Dispatch(BasicOperation):
         if (
             quantizer is not None
             and next_op_input_quantizer is not None
-            and quantizer is not next_op_input_quantizer
+            and type(quantizer) is not type(next_op_input_quantizer)
         ):
-            raise ValueError(
-                "Dispatch input_quantizer and next operation input quantizer "
-                "must be the same object when both are set."
+            raise TypeError(
+                "Dispatch input quantizer and next operation input quantizer "
+                "must have the same type, got "
+                f"{type(quantizer).__name__} and "
+                f"{type(next_op_input_quantizer).__name__}."
             )
         if quantizer is None:
             quantizer = next_op_input_quantizer
