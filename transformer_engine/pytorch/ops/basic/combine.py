@@ -116,11 +116,13 @@ class Combine(BasicOperation):
         if (
             quantizer is not None
             and prev_op_grad_output_quantizer is not None
-            and quantizer is not prev_op_grad_output_quantizer
+            and type(quantizer) is not type(prev_op_grad_output_quantizer)
         ):
-            raise ValueError(
-                "Combine grad_output_quantizer and previous operation grad-output "
-                "quantizer must be the same object when both are set."
+            raise TypeError(
+                "Combine grad-output quantizer and previous operation grad-output "
+                "quantizer must have the same type, got "
+                f"{type(quantizer).__name__} and "
+                f"{type(prev_op_grad_output_quantizer).__name__}."
             )
         if quantizer is None:
             quantizer = prev_op_grad_output_quantizer

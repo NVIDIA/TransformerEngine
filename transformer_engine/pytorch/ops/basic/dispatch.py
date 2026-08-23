@@ -286,6 +286,11 @@ class Dispatch(BasicOperation):
 
         quantized_input, input_scale_inv = quantize_mxfp8_for_ep(input_, input_quantizer)
         scale_cols = self.buffer.hidden_dim // MXFP8_BLOCK_SCALING_SIZE
+        if scale_cols * input_scale_inv.element_size() % 16:
+            raise ValueError(
+                "MXFP8 NCCL EP transport requires hidden size divisible by "
+                f"{16 * MXFP8_BLOCK_SCALING_SIZE}, got {self.buffer.hidden_dim}."
+            )
         recv_data, recv_scale_inv = _scale_alloc_io(
             recv_tokens,
             num_recv_tokens,

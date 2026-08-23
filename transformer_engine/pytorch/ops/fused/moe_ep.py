@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
+import functools
 from importlib.metadata import PackageNotFoundError, version as get_pkg_version
 from typing import Any, Optional
 
@@ -14,14 +15,19 @@ from packaging.version import Version as PkgVersion
 import torch
 import transformer_engine_torch as tex
 
-from ...constants import MXFP8_BLOCK_SCALING_SIZE
+from ...constants import DType, MXFP8_BLOCK_SCALING_SIZE
 from ...ep import get_ep_group
 from ...quantization import Recipe
 from ...tensor import GroupedTensor, MXFP8Quantizer, Quantizer
+from ...tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
 from .._common import (
+    get_accumulate_flag_in_param,
+    get_dummy_wgrads_for_params,
+    get_main_grad_from_param,
     is_quantized_tensor,
     maybe_dequantize,
     quantize_mxfp8_for_ep,
+    view_main_grad_as_grouped_buffer,
 )
 from ..basic import Combine, Dispatch, GroupedLinear, ScaledSwiGLU
 from ..fuser import register_forward_backward_fusion
@@ -30,11 +36,10 @@ from ..op import FusedOperation, FusibleOperation, OperationContext
 
 def _cudnn_megamoe_supported() -> bool:
     """Whether the installed cuDNN frontend includes the public MegaMoE API."""
-    return True
-    # try:
-    #     return PkgVersion(get_pkg_version("nvidia-cudnn-frontend")) >= PkgVersion("1.28.0")
-    # except PackageNotFoundError:
-    #     return False
+    try:
+        return PkgVersion(get_pkg_version("nvidia-cudnn-frontend")) >= PkgVersion("1.28.0")
+    except PackageNotFoundError:
+        return False
 
 
 def _pack_as_cudnn_moe_tensor(
@@ -55,12 +60,12 @@ def _pack_as_cudnn_moe_tensor(
 
 
 def _pack_cudnn_activation(
-    input_: torch.Tensor,
+    input_: torch.Tensor | MXFP8TensorStorage,
     quantizer: Optional[MXFP8Quantizer],
     block_scaled_cls: type,
 ):
     """Pack the dispatch input in the public cuDNN MoE activation layout."""
-    if quantizer is None:
+    if quantizer is None and not isinstance(input_, MXFP8TensorStorage):
         return input_
     quantized, scale = quantize_mxfp8_for_ep(input_, quantizer)
     return _pack_as_cudnn_moe_tensor(
@@ -123,26 +128,99 @@ def _pack_cudnn_weights(
     )
 
 
-def _grouped_weight_grad(op: GroupedLinear, grad: torch.Tensor) -> list[Optional[torch.Tensor]]:
-    """Convert a MegaMoE ``(E, in, out)`` wgrad to one TE ``(E, out, in)`` grad."""
+def _launch_grouped_wgrad_from_operands(
+    layer_operands: list[torch.Tensor],
+    unused: None,
+    output: torch.Tensor | GroupedTensor,
+    *,
+    offsets: torch.Tensor,
+    accumulate: bool,
+) -> None:
+    """Compute one TE-layout grouped wgrad directly from MegaMoE's operands."""
+    del unused
+    from cudnn import grouped_gemm_wgrad_wrapper_sm100
+
+    a_tensor, sfa_tensor, b_tensor, sfb_tensor = layer_operands
+    output_data = output.rowwise_data if isinstance(output, GroupedTensor) else output
+    # MegaMoE exports dW in (in, out) layout. Swapping operands computes
+    # B.T @ A.T directly into TE's contiguous (out, in) parameter layout.
+    grouped_gemm_wgrad_wrapper_sm100(
+        a_tensor=b_tensor.transpose(0, 1),
+        b_tensor=a_tensor.transpose(0, 1),
+        sfa_tensor=sfb_tensor,
+        sfb_tensor=sfa_tensor,
+        offsets_tensor=offsets,
+        output_mode="dense",
+        wgrad_tensor=output_data,
+        wgrad_dtype=output_data.dtype,
+        acc_dtype=torch.float32,
+        mma_tiler_mn=(128, 128),
+        cluster_shape_mn=(1, 1),
+        sf_vec_size=MXFP8_BLOCK_SCALING_SIZE,
+        accumulate_on_output=accumulate,
+    )
+
+
+def _compute_grouped_weight_grad(
+    op: GroupedLinear,
+    operands,
+    prefix: str,
+) -> list[Optional[torch.Tensor]]:
+    """Launch or defer one operand-mode wgrad with GroupedLinear semantics."""
     weight = op.weight
-    expected_shape = (op.num_groups, op.in_features, op.out_features)
-    if tuple(grad.shape) != expected_shape:
-        raise RuntimeError(
-            f"MegaMoE weight gradient must have shape {expected_shape}, got {tuple(grad.shape)}"
-        )
     if not weight.requires_grad:
         return [None]
 
-    # copy_ performs the float32-to-parameter-dtype conversion while writing
-    # directly into the contiguous layout expected by the grouped parameter.
-    param_grad = torch.empty(
-        (op.num_groups, op.out_features, op.in_features),
-        dtype=weight.dtype,
-        device=grad.device,
+    weight_shape = (op.out_features, op.in_features)
+    output_shape = (op.num_groups, *weight_shape)
+    accumulate = False
+    if op._accumulate_into_main_grad:
+        output_data = get_main_grad_from_param(
+            weight,
+            op_label=f"FusedMoeEp {prefix.upper()}",
+        )
+        output_data = view_main_grad_as_grouped_buffer(
+            output_data,
+            op.num_groups,
+            weight_shape,
+            label=f"FusedMoeEp {prefix.upper()} weight",
+        )
+        accumulate = get_accumulate_flag_in_param(weight)
+    else:
+        output_data = torch.empty(
+            output_shape,
+            dtype=weight.dtype,
+            device=weight.device,
+        )
+
+    layer_operands = [
+        getattr(operands, f"{prefix}_a"),
+        getattr(operands, f"{prefix}_sfa"),
+        getattr(operands, f"{prefix}_b"),
+        getattr(operands, f"{prefix}_sfb"),
+    ]
+    launch = functools.partial(
+        _launch_grouped_wgrad_from_operands,
+        offsets=operands.expert_offsets,
+        accumulate=accumulate,
     )
-    param_grad.copy_(grad.transpose(1, 2))
-    return [param_grad]
+    delay_wgrad = op.wgrad_store is not None and op.wgrad_store.delay_wgrad_compute()
+    if delay_wgrad:
+        grouped_output = GroupedTensor.make_grouped_tensor_from_rowwise_data(
+            num_tensors=op.num_groups,
+            tensor_shape=weight_shape,
+            rowwise_data=output_data,
+            dtype=output_data.dtype,
+        )
+        op.wgrad_store.put([layer_operands, None, grouped_output], launch)
+    else:
+        launch(layer_operands, None, output_data)
+
+    if op._accumulate_into_main_grad:
+        return get_dummy_wgrads_for_params([weight])
+    if delay_wgrad:
+        return [None]
+    return [output_data]
 
 
 def _grouped_linear_supported(op: GroupedLinear) -> bool:
@@ -167,9 +245,7 @@ def _grouped_linear_supported(op: GroupedLinear) -> bool:
         and not op._scale_bias
         and op.single_grouped_weight
         and not op.single_grouped_bias
-        and not op._accumulate_into_main_grad
         and not op._is_distributed_weight()
-        and not op.wgrad_store.delay_wgrad_compute()
         and weight_ok
     )
 
@@ -306,6 +382,9 @@ class FusedMoeEp(FusedOperation):
             max_tokens_per_rank=dispatch.buffer.max_tokens_per_rank,
             apply_topk_in_fc1=True,
             generate_c=True,
+            backward_wgrad_mode="operands",
+            token_padding_size=256,
+            sf_padding_size=128,
             combine_format="bf16",
             output_format="bf16",
         )
@@ -325,15 +404,29 @@ class FusedMoeEp(FusedOperation):
     def fuser_forward(
         self,
         basic_op_ctxs: list[OperationContext],
-        input_: torch.Tensor,
+        input_: torch.Tensor | MXFP8TensorStorage,
         *,
         basic_op_extra_inputs: list[tuple[torch.Tensor, ...]],
         prev_op_grad_output_quantizer: Optional[Quantizer],
         next_op_input_quantizer: Optional[Quantizer],
         basic_op_kwargs: list[dict[str, Any]],
     ) -> tuple[torch.Tensor, Sequence[Sequence[Optional[torch.Tensor]]]]:
-        if input_.dtype is not torch.bfloat16:
-            raise NotImplementedError(f"FusedMoeEp requires BF16 input, got {input_.dtype}.")
+        is_mxfp8 = isinstance(input_, MXFP8TensorStorage)
+        if is_quantized_tensor(input_) and not is_mxfp8:
+            raise TypeError(
+                "FusedMoeEp supports BF16 and MXFP8 inputs, "
+                f"got {type(input_).__name__}."
+            )
+        input_dtype = input_.dtype if isinstance(input_, torch.Tensor) else input_._dtype
+        if input_dtype is not torch.bfloat16:
+            raise TypeError(
+                "FusedMoeEp input must be BF16 or an MXFP8 tensor representing BF16 values, "
+                f"got logical dtype {input_dtype}."
+            )
+        if is_mxfp8 and input_._fp8_dtype != DType.kFloat8E4M3:
+            raise NotImplementedError(
+                f"FusedMoeEp supports E4M3 MXFP8 only, got {input_._fp8_dtype}."
+            )
         if any(kwargs for kwargs in basic_op_kwargs):
             raise NotImplementedError("FusedMoeEp does not support per-operation output buffers.")
 
@@ -348,7 +441,7 @@ class FusedMoeEp(FusedOperation):
         )
         fc1_weight = _pack_cudnn_weights(self.fc1, block_scaled_cls=self._block_scaled_cls)
         fc2_weight = _pack_cudnn_weights(self.fc2, block_scaled_cls=self._block_scaled_cls)
-        output, fc1_c, route_metadata = self._moe(
+        output, fc1_c, route_metadata, wgrad_forward_stash = self._moe(
             activation,
             fc1_weight,
             fc2_weight,
@@ -357,15 +450,11 @@ class FusedMoeEp(FusedOperation):
         )
 
         if any(ctx.requires_grad for ctx in basic_op_ctxs):
-            input_data = activation if isinstance(activation, torch.Tensor) else activation.data
-            input_scale = None if isinstance(activation, torch.Tensor) else activation.scale
             fc1_data = fc1_weight if isinstance(fc1_weight, torch.Tensor) else fc1_weight.data
             fc1_scale = None if isinstance(fc1_weight, torch.Tensor) else fc1_weight.scale
             fc2_data = fc2_weight if isinstance(fc2_weight, torch.Tensor) else fc2_weight.data
             fc2_scale = None if isinstance(fc2_weight, torch.Tensor) else fc2_weight.scale
             basic_op_ctxs[0].save_for_backward(
-                input_data,
-                input_scale,
                 fc1_data,
                 fc1_scale,
                 fc2_data,
@@ -374,8 +463,13 @@ class FusedMoeEp(FusedOperation):
                 topk_weights,
                 fc1_c,
                 route_metadata,
+                wgrad_forward_stash.fc1_a,
+                wgrad_forward_stash.fc1_sfa,
+                wgrad_forward_stash.expert_offsets,
+                wgrad_forward_stash.valid_route_counts,
+                wgrad_forward_stash.route_metadata,
             )
-            basic_op_ctxs[0].input_dtype = input_.dtype
+            basic_op_ctxs[0].input_dtype = input_dtype
             basic_op_ctxs[0].prev_op_grad_output_quantizer = prev_op_grad_output_quantizer
 
         # Dispatch extras are channel-bound with output_to_caller=False and are
@@ -403,8 +497,6 @@ class FusedMoeEp(FusedOperation):
     ]:
         del basic_op_grad_extra_outputs
         (
-            input_data,
-            input_scale,
             fc1_data,
             fc1_scale,
             fc2_data,
@@ -413,33 +505,40 @@ class FusedMoeEp(FusedOperation):
             topk_weights,
             fc1_c,
             route_metadata,
+            wgrad_fc1_a,
+            wgrad_fc1_sfa,
+            wgrad_expert_offsets,
+            wgrad_valid_route_counts,
+            wgrad_route_metadata,
         ) = basic_op_ctxs[0].saved_tensors
-        input_ = _pack_as_cudnn_moe_tensor(
-            input_data,
-            input_scale,
-            self._block_scaled_cls,
-        )
         fc1_weight = _pack_as_cudnn_moe_tensor(fc1_data, fc1_scale, self._block_scaled_cls)
         fc2_weight = _pack_as_cudnn_moe_tensor(fc2_data, fc2_scale, self._block_scaled_cls)
         grad_output = maybe_dequantize(
             grad_output,
             basic_op_ctxs[0].input_dtype,
         )
-        grad_input, grad_fc1, grad_fc2, grad_topk_weights = self._moe.backward(
+        from cudnn.moe_ep import MoeEpWgradForwardStash
+
+        wgrad_forward_stash = MoeEpWgradForwardStash(
+            fc1_a=wgrad_fc1_a,
+            fc1_sfa=wgrad_fc1_sfa,
+            expert_offsets=wgrad_expert_offsets,
+            valid_route_counts=wgrad_valid_route_counts,
+            route_metadata=wgrad_route_metadata,
+        )
+        grad_input, grad_topk_weights, wgrad_operands = self._moe.backward(
             grad_output,
-            input_,
             fc1_weight,
             fc2_weight,
             topk_idx,
             topk_weights,
             fc1_c,
             route_metadata,
+            wgrad_forward_stash=wgrad_forward_stash,
         )
 
-        # MegaMoE returns float32 grads in (E, in, out); each GroupedLinear has
-        # one packed (E, out, in) parameter.
-        fc1_param_grads = _grouped_weight_grad(self.fc1, grad_fc1)
-        fc2_param_grads = _grouped_weight_grad(self.fc2, grad_fc2)
+        fc1_param_grads = _compute_grouped_weight_grad(self.fc1, wgrad_operands, "fc1")
+        fc2_param_grads = _compute_grouped_weight_grad(self.fc2, wgrad_operands, "fc2")
         grad_input = grad_input.to(dtype=basic_op_ctxs[0].input_dtype)
         grad_input_quantizer = basic_op_ctxs[0].prev_op_grad_output_quantizer
         if grad_input_quantizer is not None:

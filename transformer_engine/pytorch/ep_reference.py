@@ -1,4 +1,4 @@
-# Copyright (c) 2028 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: MIT
 
 """Pure PyTorch semantic reference for a SwiGLU MoE with expert parallelism.
@@ -123,9 +123,7 @@ class BlockScaledTensor:
             expected_scale_dtype = _require_torch_dtype("float8_e8m0fnu")
             data_shape = self.logical_shape
             if self.data.dtype != expected_dtype:
-                raise TypeError(
-                    f"mxfp8 data must have dtype {expected_dtype}, got {self.data.dtype}"
-                )
+                raise TypeError(f"mxfp8 data must have dtype {expected_dtype}, got {self.data.dtype}")
         else:
             expected_scale_dtype = _require_torch_dtype("float8_e4m3fn")
             fp4_dtype = getattr(torch, "float4_e2m1fn_x2", None)
@@ -276,6 +274,68 @@ MoeTensor = Union[torch.Tensor, BlockScaledTensor]
 
 
 @dataclass(frozen=True)
+class WgradForwardStashReference:
+    """Logical reference for the caller-owned forward wgrad stash.
+
+    Unlike the production object, ``fc1_a`` bundles its logical E8M0 scales
+    with the E4M3 payload.  It represents the padded, expert-concatenated
+    ``x.T`` operand after input MXFP8 staging and token-axis requantization.
+    """
+
+    fc1_a: BlockScaledTensor
+    expert_offsets: torch.Tensor
+    valid_route_counts: torch.Tensor
+    route_metadata: torch.Tensor
+
+
+@dataclass(frozen=True)
+class WgradOperandsReference:
+    """Logical MXFP8 operands and dense expert-weight-gradient oracle.
+
+    The K dimension is a concatenation of local experts.  Each expert's valid
+    routes come first, followed by zero rows up to its 256-route boundary.
+    Production scale tensors use a blocked physical layout; these reference
+    tensors keep ordinary logical scales so their represented values are easy
+    to inspect.
+    """
+
+    fc1_a: BlockScaledTensor
+    fc1_b: BlockScaledTensor
+    fc2_a: BlockScaledTensor
+    fc2_b: BlockScaledTensor
+    expert_offsets: torch.Tensor
+    valid_route_counts: torch.Tensor
+    route_metadata: torch.Tensor
+
+    def dense_wgrads(self) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Return dense ``dW1=x.T@dC`` and ``dW2=h.T@(p*dY)`` per expert."""
+
+        a1 = self.fc1_a.dequantize()
+        b1 = self.fc1_b.dequantize()
+        a2 = self.fc2_a.dequantize()
+        b2 = self.fc2_b.dequantize()
+        expert_count = int(self.expert_offsets.numel())
+        dw1 = torch.zeros(
+            (expert_count, a1.shape[0], b1.shape[1]),
+            dtype=torch.float32,
+            device=a1.device,
+        )
+        dw2 = torch.zeros(
+            (expert_count, a2.shape[0], b2.shape[1]),
+            dtype=torch.float32,
+            device=a2.device,
+        )
+        begin = 0
+        for expert, end_tensor in enumerate(self.expert_offsets):
+            end = int(end_tensor.item())
+            if end > begin:
+                dw1[expert] = a1[:, begin:end] @ b1[begin:end]
+                dw2[expert] = a2[:, begin:end] @ b2[begin:end]
+            begin = end
+        return dw1, dw2
+
+
+@dataclass(frozen=True)
 class _DispatchPlan:
     """Send-side routing derived from ``topk_idx``; identical in fwd and bwd."""
 
@@ -297,70 +357,84 @@ def _decode_tensor(
     name: str,
     expected_shape: Tuple[int, ...],
     quantized_axis: int,
-    dtype: torch.dtype,
 ) -> torch.Tensor:
     if isinstance(tensor, BlockScaledTensor):
         if tensor.logical_shape != expected_shape:
-            raise ValueError(
-                f"{name} logical shape must be {expected_shape}, got {tensor.logical_shape}"
-            )
+            raise ValueError(f"{name} logical shape must be {expected_shape}, got {tensor.logical_shape}")
         if tensor.axis != _normalize_axis(quantized_axis, len(expected_shape)):
             raise ValueError(f"{name} must be block-scaled along axis {quantized_axis}")
-        return tensor.dequantize(dtype=dtype)
+        return tensor.dequantize()
 
     if tuple(tensor.shape) != expected_shape:
         raise ValueError(f"{name} shape must be {expected_shape}, got {tuple(tensor.shape)}")
     if not tensor.is_floating_point():
         raise TypeError(f"{name} must be floating point or BlockScaledTensor, got {tensor.dtype}")
-    return tensor.to(dtype=dtype)
+    return tensor.float()
 
 
-def _format_round_trip(
+def _format_round_trip_axis(
     tensor: torch.Tensor,
     format: MoeFormat,
     *,
-    dtype: torch.dtype,
+    axis: int,
 ) -> torch.Tensor:
     if format is MoeFormat.BF16:
-        return tensor.to(torch.bfloat16).to(dtype)
-    return quantize_blockwise(tensor, format, axis=-1).dequantize(dtype=dtype)
+        return tensor.to(torch.bfloat16).float()
+    return quantize_blockwise(tensor, format, axis=axis).dequantize()
 
 
-def _qdq(
+def _format_round_trip(tensor: torch.Tensor, format: MoeFormat) -> torch.Tensor:
+    return _format_round_trip_axis(tensor, format, axis=-1)
+
+
+def forward_combine_round_trip(
     tensor: torch.Tensor,
-    format: Optional[MoeFormat],
-    *,
-    axis: int,
-    dtype: torch.dtype,
+    format: MoeFormat,
 ) -> torch.Tensor:
-    """Simulate an MXFP8/NVFP4 GEMM operand in PyTorch.
+    """Model GLU combine conversion directly from its FP32 accumulator."""
 
-    The MegaMoE kernel quantizes once and feeds the quantized values into the
-    GEMM (FP32 accumulate). PyTorch has no MXFP8 matmul, so the reference
-    round-trips through block-scale storage and dequantizes back to ``dtype``.
-    """
-    if format is None or format is MoeFormat.BF16:
-        return tensor.to(dtype=dtype)
-    return quantize_blockwise(tensor, format, axis=axis).dequantize(dtype=dtype)
+    return _format_round_trip(tensor, format)
 
 
-def _swiglu_scale_fp32(
-    gate: torch.Tensor,
-    up: torch.Tensor,
-    weights: torch.Tensor,
-    *,
-    apply_scale: bool,
-    dtype: torch.dtype,
+def backward_combine_round_trip(
+    tensor: torch.Tensor,
+    format: MoeFormat,
 ) -> torch.Tensor:
-    """SiLU(gate)*up[*weights] in fp32, then one cast to ``dtype``.
+    """Model dGLU combine conversion directly from its FP32 accumulator."""
 
-    Matches ``tex.scaled_swiglu``: promote, multiply, and store once. Stepwise
-    BF16 ``F.silu(g) * up * w`` extra-rounds between those muls.
-    """
-    out = F.silu(gate.float()) * up.float()
-    if apply_scale:
-        out = out * weights.float()
-    return out.to(dtype=dtype)
+    return _format_round_trip(tensor, format)
+
+
+def _padded_expert_rows(
+    rows: torch.Tensor,
+    expert_rows: torch.Tensor,
+    valid_counts: Sequence[int],
+    padded_ends: Sequence[int],
+) -> torch.Tensor:
+    """Place compact expert-grouped rows at the start of padded ranges."""
+
+    padded_extent = int(padded_ends[-1]) if padded_ends else 0
+    padded = torch.zeros(
+        (padded_extent, *rows.shape[1:]),
+        dtype=rows.dtype,
+        device=rows.device,
+    )
+    begin = 0
+    for expert, (count, end) in enumerate(zip(valid_counts, padded_ends)):
+        positions = torch.nonzero(
+            expert_rows == expert,
+            as_tuple=False,
+        ).flatten()
+        if int(positions.numel()) != int(count):
+            raise ValueError(
+                f"expert {expert} has {positions.numel()} rows, expected {count}"
+            )
+        if count:
+            padded[begin : begin + count].copy_(
+                rows.index_select(0, positions)
+            )
+        begin = int(end)
+    return padded
 
 
 class MoeEpReference:
@@ -370,6 +444,12 @@ class MoeEpReference:
     ``[r * experts_per_rank, (r + 1) * experts_per_rank)``.  Pass an explicit
     initialized process group for multi-rank execution; ``None`` means a
     one-rank reference even if the default distributed group is initialized.
+
+    ``intermediate_format`` optionally applies a post-SwiGLU, pre-FC2 format
+    round trip to model fused kernels that materialize their FC2 input in low
+    precision. ``None`` preserves the raw mathematical reference semantics.
+    ``backward_operand_format`` additionally models dGLU staging of grad-output
+    and transposed weights along their backward reduction dimensions.
     """
 
     def __init__(
@@ -383,11 +463,13 @@ class MoeEpReference:
         max_tokens_per_rank: Optional[int] = None,
         output_format: Union[MoeFormat, str] = MoeFormat.BF16,
         combine_format: Union[MoeFormat, str] = MoeFormat.BF16,
+        intermediate_format: Optional[Union[MoeFormat, str]] = None,
+        backward_operand_format: Optional[Union[MoeFormat, str]] = None,
         apply_topk_in_fc1: bool = True,
         gate_up_clamp: Optional[float] = None,
         generate_c: bool = False,
-        compute_dtype: torch.dtype = torch.float32,
-        gemm_format: Optional[Union[MoeFormat, str]] = None,
+        backward_wgrad_mode: str = "none",
+        token_padding_size: int = 128,
     ) -> None:
         for name, value in (
             ("num_experts", num_experts),
@@ -401,24 +483,34 @@ class MoeEpReference:
             raise ValueError(f"top_k ({top_k}) cannot exceed num_experts ({num_experts})")
         if max_tokens_per_rank is not None and max_tokens_per_rank < 0:
             raise ValueError("max_tokens_per_rank must be non-negative")
-        if compute_dtype not in (torch.float32, torch.bfloat16):
+        if backward_wgrad_mode not in ("none", "operands"):
             raise ValueError(
-                f"compute_dtype must be torch.float32 or torch.bfloat16, got {compute_dtype}"
+                "backward_wgrad_mode must be 'none' or 'operands'"
+            )
+        if backward_wgrad_mode == "operands" and not generate_c:
+            raise ValueError(
+                "backward_wgrad_mode='operands' requires generate_c=True"
+            )
+        if not isinstance(token_padding_size, int) or token_padding_size <= 0:
+            raise ValueError("token_padding_size must be a positive integer")
+        if (
+            backward_wgrad_mode == "operands"
+            and token_padding_size != 256
+        ):
+            raise ValueError(
+                "backward_wgrad_mode='operands' requires "
+                "token_padding_size=256"
             )
 
         if ep_group is None:
             ep_size, ep_rank = 1, 0
         else:
             if not dist.is_available() or not dist.is_initialized():
-                raise RuntimeError(
-                    "ep_group requires an initialized torch.distributed process group"
-                )
+                raise RuntimeError("ep_group requires an initialized torch.distributed process group")
             ep_size = dist.get_world_size(ep_group)
             ep_rank = dist.get_rank(ep_group)
         if num_experts % ep_size != 0:
-            raise ValueError(
-                f"num_experts ({num_experts}) must be divisible by EP size ({ep_size})"
-            )
+            raise ValueError(f"num_experts ({num_experts}) must be divisible by EP size ({ep_size})")
 
         self.num_experts = num_experts
         self.hidden_size = hidden_size
@@ -431,26 +523,24 @@ class MoeEpReference:
         self.max_tokens_per_rank = max_tokens_per_rank
         self.output_format = _parse_format(output_format)
         self.combine_format = _parse_format(combine_format)
+        self.intermediate_format = (
+            None if intermediate_format is None else _parse_format(intermediate_format)
+        )
+        self.backward_operand_format = (
+            None
+            if backward_operand_format is None
+            else _parse_format(backward_operand_format)
+        )
         self.apply_topk_in_fc1 = bool(apply_topk_in_fc1)
         self.gate_up_clamp = None if gate_up_clamp is None else abs(float(gate_up_clamp))
         self.generate_c = bool(generate_c)
-        self.compute_dtype = compute_dtype
-        self.gemm_format = None if gemm_format is None else _parse_format(gemm_format)
-        if self.gemm_format is MoeFormat.BF16:
-            self.gemm_format = None
+        self.backward_wgrad_mode = backward_wgrad_mode
+        self.token_padding_size = token_padding_size
 
-        for name, fmt in (
-            ("output_format", self.output_format),
-            ("combine_format", self.combine_format),
-        ):
-            required_multiple = (
-                32 if fmt is MoeFormat.MXFP8 else 16 if fmt is MoeFormat.NVFP4 else 1
-            )
+        for name, fmt in (("output_format", self.output_format), ("combine_format", self.combine_format)):
+            required_multiple = 32 if fmt is MoeFormat.MXFP8 else 16 if fmt is MoeFormat.NVFP4 else 1
             if hidden_size % required_multiple != 0:
-                raise ValueError(
-                    f"hidden_size ({hidden_size}) must be divisible by {required_multiple} for"
-                    f" {name}={fmt.value}"
-                )
+                raise ValueError(f"hidden_size ({hidden_size}) must be divisible by {required_multiple} for {name}={fmt.value}")
 
     def __repr__(self) -> str:
         return (
@@ -458,27 +548,8 @@ class MoeEpReference:
             f"experts={self.num_experts}, local_experts={self.experts_per_rank}, "
             f"hidden={self.hidden_size}, intermediate={self.intermediate_size}, "
             f"top_k={self.top_k}, ep_rank={self.ep_rank}/{self.ep_size}, "
-            f"output={self.output_format.value}, combine={self.combine_format.value}, "
-            f"gemm_format={None if self.gemm_format is None else self.gemm_format.value}, "
-            f"compute_dtype={self.compute_dtype})"
+            f"output={self.output_format.value}, combine={self.combine_format.value})"
         )
-
-    def _gemm_dtype(self) -> torch.dtype:
-        """FP32 accumulate when simulating an MXFP8 GEMM; otherwise ``compute_dtype``."""
-        return torch.float32 if self.gemm_format is MoeFormat.MXFP8 else self.compute_dtype
-
-    def _stage_gemm_operand(
-        self,
-        tensor: torch.Tensor,
-        *,
-        already_quantized: bool,
-        axis: int,
-    ) -> torch.Tensor:
-        """Apply the kernel's pre-GEMM quantize, then dequant for a PyTorch matmul."""
-        dtype = self._gemm_dtype()
-        if already_quantized or self.gemm_format is None:
-            return tensor.to(dtype=dtype)
-        return _qdq(tensor, self.gemm_format, axis=axis, dtype=dtype)
 
     def _collective_device(self, device: torch.device) -> torch.device:
         """Device the process group can run ``all_to_all_single`` on.
@@ -544,9 +615,7 @@ class MoeEpReference:
         destination = torch.div(expert, self.experts_per_rank, rounding_mode="floor")
         order = torch.argsort(destination, stable=True)
 
-        send_counts_tensor = torch.bincount(
-            destination.index_select(0, order), minlength=self.ep_size
-        ).to(torch.int64)
+        send_counts_tensor = torch.bincount(destination.index_select(0, order), minlength=self.ep_size).to(torch.int64)
         recv_counts_tensor = self._exchange_counts(send_counts_tensor)
         return _DispatchPlan(
             send_expert=expert.index_select(0, order).remainder(self.experts_per_rank),
@@ -567,7 +636,7 @@ class MoeEpReference:
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         output = torch.empty(
             (tokens.shape[0], self.hidden_size),
-            dtype=self.compute_dtype,
+            dtype=torch.float32,
             device=tokens.device,
         )
         fc1_c_rows = [] if self.generate_c else None
@@ -582,45 +651,31 @@ class MoeEpReference:
                 fc1_c_rows.append(gate_up.to(torch.bfloat16))
             gate, up = gate_up.split(self.intermediate_size, dim=-1)
             if self.gate_up_clamp is not None:
-                gate = gate.float().clamp(max=self.gate_up_clamp)
-                up = up.float().clamp(min=-self.gate_up_clamp, max=self.gate_up_clamp)
+                gate = gate.clamp(max=self.gate_up_clamp)
+                up = up.clamp(min=-self.gate_up_clamp, max=self.gate_up_clamp)
+            intermediate = F.silu(gate) * up
             weights = route_weight.index_select(0, positions).unsqueeze(-1)
-            # FP32 SiLU*up[*scale], then one cast. MegaMoE then quantizes this
-            # intermediate for the FC2 MXFP8 GEMM; the reference QDQ mimics that.
-            intermediate = _swiglu_scale_fp32(
-                gate,
-                up,
-                weights,
-                apply_scale=self.apply_topk_in_fc1,
-                dtype=self._gemm_dtype(),
-            )
-            if self.gemm_format is not None:
-                intermediate = _qdq(
+            if self.apply_topk_in_fc1:
+                intermediate = intermediate * weights
+            if self.intermediate_format is not None:
+                intermediate = _format_round_trip(
                     intermediate,
-                    self.gemm_format,
-                    axis=-1,
-                    dtype=self._gemm_dtype(),
+                    self.intermediate_format,
                 )
             expert_output = intermediate @ fc2_weight[expert]
-            if not self.apply_topk_in_fc1:
-                expert_output = (expert_output.float() * weights.float()).to(
-                    dtype=self.compute_dtype
-                )
-            expert_output = _format_round_trip(
+            expert_output = forward_combine_round_trip(
                 expert_output,
                 self.combine_format,
-                dtype=self.compute_dtype,
             )
+            if not self.apply_topk_in_fc1:
+                # The upstream training kernel leaves scores out of dispatch
+                # and applies them in standalone TopkReduce after the combine
+                # wire-format round trip.
+                expert_output = expert_output * weights
             output.index_copy_(0, positions, expert_output)
         fc1_c = None
         if fc1_c_rows is not None:
-            fc1_c = (
-                torch.cat(fc1_c_rows)
-                if fc1_c_rows
-                else torch.empty(
-                    (0, 2 * self.intermediate_size), dtype=torch.bfloat16, device=tokens.device
-                )
-            )
+            fc1_c = torch.cat(fc1_c_rows) if fc1_c_rows else torch.empty((0, 2 * self.intermediate_size), dtype=torch.bfloat16, device=tokens.device)
         return output, fc1_c
 
     def __call__(
@@ -630,7 +685,16 @@ class MoeEpReference:
         fc2_weight: MoeTensor,
         topk_idx: torch.Tensor,
         topk_weights: torch.Tensor,
-    ) -> Union[MoeTensor, Tuple[MoeTensor, torch.Tensor, torch.Tensor]]:
+    ) -> Union[
+        MoeTensor,
+        Tuple[MoeTensor, torch.Tensor, torch.Tensor],
+        Tuple[
+            MoeTensor,
+            torch.Tensor,
+            torch.Tensor,
+            WgradForwardStashReference,
+        ],
+    ]:
         """Run dispatch, local experts, return routing, top-k reduce, and encode.
 
         Shapes:
@@ -640,7 +704,9 @@ class MoeEpReference:
             topk_idx/topk_weights: ``(T, K)``
 
         Returns the ``(T, H)`` result, or ``(result, fc1_c, route_metadata)``
-        when constructed with ``generate_c=True``.  ``fc1_c`` is the BF16
+        when constructed with ``generate_c=True``. In wgrad operand mode, a
+        fourth :class:`WgradForwardStashReference` item is returned. ``fc1_c``
+        is the BF16
         pre-SwiGLU FC1 accumulator of every route this rank's experts
         processed, ``(local_routes, 2 * I)``, grouped by local expert and
         ordered within each expert by (source rank, source token-major route
@@ -658,17 +724,13 @@ class MoeEpReference:
         if tuple(topk_idx.shape) != route_shape:
             raise ValueError(f"topk_idx shape must be {route_shape}, got {tuple(topk_idx.shape)}")
         if tuple(topk_weights.shape) != route_shape:
-            raise ValueError(
-                f"topk_weights shape must be {route_shape}, got {tuple(topk_weights.shape)}"
-            )
+            raise ValueError(f"topk_weights shape must be {route_shape}, got {tuple(topk_weights.shape)}")
         if topk_idx.dtype not in (torch.int32, torch.int64):
             raise TypeError(f"topk_idx must be int32 or int64, got {topk_idx.dtype}")
         if not topk_weights.is_floating_point():
             raise TypeError(f"topk_weights must be floating point, got {topk_weights.dtype}")
         if self.max_tokens_per_rank is not None and token_count > self.max_tokens_per_rank:
-            raise ValueError(
-                f"token count {token_count} exceeds max_tokens_per_rank={self.max_tokens_per_rank}"
-            )
+            raise ValueError(f"token count {token_count} exceeds max_tokens_per_rank={self.max_tokens_per_rank}")
 
         device = _tensor_device(activation)
         inputs = {
@@ -681,57 +743,73 @@ class MoeEpReference:
             if input_device != device:
                 raise ValueError(f"{name} must be on {device}, got {input_device}")
 
-        activation_float = self._stage_gemm_operand(
-            _decode_tensor(
-                activation,
-                name="activation",
-                expected_shape=(token_count, self.hidden_size),
-                quantized_axis=1,
-                dtype=self.compute_dtype,
-            ),
-            already_quantized=isinstance(activation, BlockScaledTensor),
-            axis=-1,
+        activation_float = _decode_tensor(
+            activation,
+            name="activation",
+            expected_shape=(token_count, self.hidden_size),
+            quantized_axis=1,
         )
-        fc1_float = self._stage_gemm_operand(
-            _decode_tensor(
-                fc1_weight,
-                name="fc1_weight",
-                expected_shape=(
-                    self.experts_per_rank,
-                    self.hidden_size,
-                    2 * self.intermediate_size,
-                ),
-                quantized_axis=1,
-                dtype=self.compute_dtype,
-            ),
-            already_quantized=isinstance(fc1_weight, BlockScaledTensor),
-            axis=1,
+        # The Rubin path first stages plain activation along H, then its
+        # forward column requantization forms x.T scales along routed K.
+        wgrad_activation_float = None
+        if self.backward_wgrad_mode == "operands":
+            wgrad_activation_float = _format_round_trip(
+                activation_float,
+                MoeFormat.MXFP8,
+            )
+        fc1_float = _decode_tensor(
+            fc1_weight,
+            name="fc1_weight",
+            expected_shape=(self.experts_per_rank, self.hidden_size, 2 * self.intermediate_size),
+            quantized_axis=1,
         )
-        fc2_float = self._stage_gemm_operand(
-            _decode_tensor(
-                fc2_weight,
-                name="fc2_weight",
-                expected_shape=(self.experts_per_rank, self.intermediate_size, self.hidden_size),
-                quantized_axis=1,
-                dtype=self.compute_dtype,
-            ),
-            already_quantized=isinstance(fc2_weight, BlockScaledTensor),
-            axis=1,
+        fc2_float = _decode_tensor(
+            fc2_weight,
+            name="fc2_weight",
+            expected_shape=(self.experts_per_rank, self.intermediate_size, self.hidden_size),
+            quantized_axis=1,
         )
+        if self.backward_wgrad_mode == "operands":
+            # Plain forward operands are staged to the same public MXFP8
+            # reduction-axis representation before the Rubin GEMMs.
+            fc1_float = _format_round_trip_axis(
+                fc1_float,
+                MoeFormat.MXFP8,
+                axis=1,
+            )
+            fc2_float = _format_round_trip_axis(
+                fc2_float,
+                MoeFormat.MXFP8,
+                axis=1,
+            )
 
         plan = self._dispatch_plan(topk_idx, topk_weights)
         send_token_idx = plan.send_token_idx
         send_slot_idx = plan.send_slot_idx
         send_counts, recv_counts = plan.send_counts, plan.recv_counts
-        send_tokens = activation_float.index_select(0, send_token_idx)
-
-        recv_tokens = self._all_to_all(send_tokens, send_counts, recv_counts)
-        recv_expert = self._all_to_all(plan.send_expert, send_counts, recv_counts)
-        recv_weight = self._all_to_all(plan.send_weight, send_counts, recv_counts).to(
-            dtype=self.compute_dtype
+        forward_activation_float = (
+            wgrad_activation_float
+            if wgrad_activation_float is not None
+            else activation_float
+        )
+        send_tokens = forward_activation_float.index_select(
+            0,
+            send_token_idx,
         )
 
+        recv_tokens = self._all_to_all(send_tokens, send_counts, recv_counts)
+        recv_wgrad_tokens = None
+        if wgrad_activation_float is not None:
+            recv_wgrad_tokens = self._all_to_all(
+                wgrad_activation_float.index_select(0, send_token_idx),
+                send_counts,
+                recv_counts,
+            )
+        recv_expert = self._all_to_all(plan.send_expert, send_counts, recv_counts)
+        recv_weight = self._all_to_all(plan.send_weight, send_counts, recv_counts)
+
         route_metadata = None
+        fc1_c_order = None
         if self.generate_c:
             recv_src_rank = torch.repeat_interleave(
                 torch.arange(self.ep_size, device=device),
@@ -742,11 +820,7 @@ class MoeEpReference:
             # Stable sort by local expert reproduces the fc1_c row order
             # (grouped by expert; source order preserved within each group).
             fc1_c_order = torch.argsort(recv_expert, stable=True)
-            route_metadata = (
-                torch.stack((recv_expert, recv_src_rank, recv_token, recv_slot), dim=1)
-                .index_select(0, fc1_c_order)
-                .to(torch.int32)
-            )
+            route_metadata = torch.stack((recv_expert, recv_src_rank, recv_token, recv_slot), dim=1).index_select(0, fc1_c_order).to(torch.int32)
         # recv rows are ordered by source rank, then that source's token-major
         # route order, so the per-expert position grouping below realizes the
         # documented fc1_c ordering.
@@ -759,15 +833,13 @@ class MoeEpReference:
         )
 
         returned = self._all_to_all(recv_output, recv_counts, send_counts)
-        # Combine payload is combine_format (BF16 round-trip above); reduce in
-        # fp32 so top-k summation does not extra-round in compute_dtype.
         combine_plane = torch.zeros(
             (token_count * self.top_k, self.hidden_size),
             dtype=torch.float32,
             device=device,
         )
         send_flat_slot = send_token_idx * self.top_k + send_slot_idx
-        combine_plane.index_copy_(0, send_flat_slot, returned.float())
+        combine_plane.index_copy_(0, send_flat_slot, returned)
         reduced = combine_plane.view(token_count, self.top_k, self.hidden_size).sum(dim=1)
 
         if self.output_format is MoeFormat.BF16:
@@ -775,20 +847,78 @@ class MoeEpReference:
         else:
             output = quantize_blockwise(reduced, self.output_format, axis=-1)
         if self.generate_c:
+            if self.backward_wgrad_mode == "operands":
+                if recv_wgrad_tokens is None or fc1_c_order is None:
+                    raise RuntimeError("wgrad forward staging was not built")
+                valid_counts = tuple(
+                    int(value)
+                    for value in torch.bincount(
+                        recv_expert,
+                        minlength=self.experts_per_rank,
+                    ).cpu().tolist()
+                )
+                padded_ends = []
+                total = 0
+                for count in valid_counts:
+                    total += _ceil_div(
+                        count,
+                        self.token_padding_size,
+                    ) * self.token_padding_size
+                    padded_ends.append(total)
+                ordered_tokens = recv_wgrad_tokens.index_select(
+                    0,
+                    fc1_c_order,
+                )
+                metadata_experts = route_metadata[:, 0].to(torch.int64)
+                padded_x = _padded_expert_rows(
+                    ordered_tokens,
+                    metadata_experts,
+                    valid_counts,
+                    padded_ends,
+                )
+                wgrad_stash = WgradForwardStashReference(
+                    fc1_a=quantize_blockwise(
+                        padded_x.transpose(0, 1),
+                        MoeFormat.MXFP8,
+                        axis=1,
+                    ),
+                    expert_offsets=torch.tensor(
+                        padded_ends,
+                        dtype=torch.int32,
+                        device=device,
+                    ),
+                    valid_route_counts=torch.tensor(
+                        valid_counts,
+                        dtype=torch.int32,
+                        device=device,
+                    ),
+                    route_metadata=route_metadata,
+                )
+                return output, fc1_c, route_metadata, wgrad_stash
             return output, fc1_c, route_metadata
         return output
 
     def backward(
         self,
         grad_output: torch.Tensor,
-        activation: MoeTensor,
         fc1_weight: MoeTensor,
         fc2_weight: MoeTensor,
         topk_idx: torch.Tensor,
         topk_weights: torch.Tensor,
         fc1_c: torch.Tensor,
         route_metadata: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        *,
+        wgrad_forward_stash: Optional[
+            WgradForwardStashReference
+        ] = None,
+    ) -> Union[
+        Tuple[torch.Tensor, torch.Tensor],
+        Tuple[
+            torch.Tensor,
+            torch.Tensor,
+            WgradOperandsReference,
+        ],
+    ]:
         """Backward pass consuming the ``generate_c=True`` stash.
 
         ``fc1_c`` is the recompute source: gate/up, the clamp masks, SwiGLU,
@@ -801,82 +931,94 @@ class MoeEpReference:
         ``output_format``) are treated as straight-through identities;
         ``grad_output`` is the ``(T, H)`` gradient of the dequantized output.
 
-        Returns ``(grad_activation, grad_fc1_weight, grad_fc2_weight,
-        grad_topk_weights)``. Activation and expert weight gradients use
-        ``compute_dtype``. SwiGLU and router-weight scaling recompute in
-        fp32 and round once into ``compute_dtype`` before the FC2 GEMMs,
-        matching ``tex.scaled_swiglu``. The returned ``grad_topk_weights``
-        remain float32.
+        Returns ``(grad_activation, grad_topk_weights)`` in float32. In wgrad
+        operand mode, a third :class:`WgradOperandsReference` item models the
+        caller-owned grouped-GEMM operands.
         """
 
         if not self.generate_c:
-            raise RuntimeError(
-                "backward requires the operator to be constructed with generate_c=True"
+            raise RuntimeError("backward requires the operator to be constructed with generate_c=True")
+        if self.backward_wgrad_mode == "operands":
+            if not isinstance(
+                wgrad_forward_stash,
+                WgradForwardStashReference,
+            ):
+                raise TypeError(
+                    "wgrad_forward_stash must be a "
+                    "WgradForwardStashReference"
+                )
+            if not torch.equal(
+                wgrad_forward_stash.route_metadata,
+                route_metadata,
+            ):
+                raise ValueError(
+                    "wgrad_forward_stash route identity does not match "
+                    "route_metadata"
+                )
+        elif wgrad_forward_stash is not None:
+            raise ValueError(
+                "wgrad_forward_stash is only accepted in operands mode"
             )
         token_count = topk_idx.shape[0]
         if tuple(grad_output.shape) != (token_count, self.hidden_size):
-            raise ValueError(
-                f"grad_output shape must be {(token_count, self.hidden_size)}, got"
-                f" {tuple(grad_output.shape)}"
-            )
+            raise ValueError(f"grad_output shape must be {(token_count, self.hidden_size)}, got {tuple(grad_output.shape)}")
         if not grad_output.is_floating_point():
             raise TypeError(f"grad_output must be floating point, got {grad_output.dtype}")
 
-        device = _tensor_device(activation)
+        device = _tensor_device(fc1_weight)
         two_i = 2 * self.intermediate_size
-        activation_float = self._stage_gemm_operand(
-            _decode_tensor(
-                activation,
-                name="activation",
-                expected_shape=(token_count, self.hidden_size),
-                quantized_axis=1,
-                dtype=self.compute_dtype,
-            ),
-            already_quantized=isinstance(activation, BlockScaledTensor),
-            axis=-1,
+        fc1_float = _decode_tensor(
+            fc1_weight,
+            name="fc1_weight",
+            expected_shape=(self.experts_per_rank, self.hidden_size, two_i),
+            quantized_axis=1,
         )
-        fc1_float = self._stage_gemm_operand(
-            _decode_tensor(
-                fc1_weight,
-                name="fc1_weight",
-                expected_shape=(self.experts_per_rank, self.hidden_size, two_i),
-                quantized_axis=1,
-                dtype=self.compute_dtype,
-            ),
-            already_quantized=isinstance(fc1_weight, BlockScaledTensor),
-            axis=1,
+        fc2_float = _decode_tensor(
+            fc2_weight,
+            name="fc2_weight",
+            expected_shape=(self.experts_per_rank, self.intermediate_size, self.hidden_size),
+            quantized_axis=1,
         )
-        fc2_float = self._stage_gemm_operand(
-            _decode_tensor(
-                fc2_weight,
-                name="fc2_weight",
-                expected_shape=(self.experts_per_rank, self.intermediate_size, self.hidden_size),
-                quantized_axis=1,
-                dtype=self.compute_dtype,
-            ),
-            already_quantized=isinstance(fc2_weight, BlockScaledTensor),
-            axis=1,
-        )
+        semantic_fc2_float = fc2_float
+        effective_backward_format = self.backward_operand_format
+        if (
+            effective_backward_format is None
+            and self.backward_wgrad_mode == "operands"
+        ):
+            effective_backward_format = MoeFormat.MXFP8
+        if effective_backward_format is not None:
+            # The dGLU adapter requantizes both transposed weights along the
+            # backward GEMM reduction dimension.
+            fc1_float = _format_round_trip_axis(
+                fc1_float.transpose(1, 2),
+                effective_backward_format,
+                axis=1,
+            ).transpose(1, 2)
+            fc2_float = _format_round_trip_axis(
+                fc2_float.transpose(1, 2),
+                effective_backward_format,
+                axis=1,
+            ).transpose(1, 2)
         if fc1_c.shape != (int(route_metadata.shape[0]), two_i):
-            raise ValueError(
-                f"fc1_c shape must be {(int(route_metadata.shape[0]), two_i)}, got"
-                f" {tuple(fc1_c.shape)}"
-            )
+            raise ValueError(f"fc1_c shape must be {(int(route_metadata.shape[0]), two_i)}, got {tuple(fc1_c.shape)}")
 
-        # Re-dispatch the FC1 inputs, router weights, and output gradients
-        # along the identical forward routes.
+        # Re-dispatch router weights and output gradients along the identical
+        # forward routes.
         plan = self._dispatch_plan(topk_idx, topk_weights)
         send_counts, recv_counts = plan.send_counts, plan.recv_counts
-        grad_output_float = grad_output.to(dtype=self.compute_dtype)
-        recv_tokens = self._all_to_all(
-            activation_float.index_select(0, plan.send_token_idx), send_counts, recv_counts
-        )
-        # Same FP32-on-wire / compute_dtype-for-activation cast as forward.
-        recv_weight = self._all_to_all(plan.send_weight, send_counts, recv_counts).to(
-            dtype=self.compute_dtype
-        )
-        recv_grad = self._all_to_all(
-            grad_output_float.index_select(0, plan.send_token_idx), send_counts, recv_counts
+        semantic_grad_output = grad_output.float()
+        grad_output_float = semantic_grad_output
+        if effective_backward_format is not None:
+            grad_output_float = _format_round_trip(
+                grad_output_float,
+                effective_backward_format,
+            )
+        recv_weight = self._all_to_all(plan.send_weight, send_counts, recv_counts)
+        recv_grad = self._all_to_all(grad_output_float.index_select(0, plan.send_token_idx), send_counts, recv_counts)
+        recv_semantic_grad = self._all_to_all(
+            semantic_grad_output.index_select(0, plan.send_token_idx),
+            send_counts,
+            recv_counts,
         )
 
         # route_metadata rows are in fc1_c order; sorting them by
@@ -890,96 +1032,151 @@ class MoeEpReference:
             perm = torch.argsort(recv_key)  # perm[j] = fc1_c row at receive position j
         else:
             perm = torch.empty((0,), dtype=torch.int64, device=device)
-        x_rows = torch.empty_like(recv_tokens)
-        x_rows.index_copy_(0, perm, recv_tokens)
         w_rows = torch.empty_like(recv_weight)
         w_rows.index_copy_(0, perm, recv_weight)
         dy_rows = torch.empty_like(recv_grad)
         dy_rows.index_copy_(0, perm, recv_grad)
+        semantic_dy_rows = torch.empty_like(recv_semantic_grad)
+        semantic_dy_rows.index_copy_(0, perm, recv_semantic_grad)
 
-        c_rows = fc1_c.to(dtype=self.compute_dtype)
+        c_rows = fc1_c.float()
         expert_rows = metadata[:, 0]
-        d_x_rows = torch.zeros(
-            (local_routes, self.hidden_size),
-            dtype=self.compute_dtype,
+        d_x_rows = torch.zeros((local_routes, self.hidden_size), dtype=torch.float32, device=device)
+        d_w_rows = torch.zeros((local_routes,), dtype=torch.float32, device=device)
+        h_rows = torch.zeros(
+            (local_routes, self.intermediate_size),
+            dtype=torch.float32,
             device=device,
         )
-        d_w_rows = torch.zeros((local_routes,), dtype=torch.float32, device=device)
-        grad_fc1 = torch.zeros_like(fc1_float)
-        grad_fc2 = torch.zeros_like(fc2_float)
+        weighted_dy_rows = torch.zeros(
+            (local_routes, self.hidden_size),
+            dtype=torch.float32,
+            device=device,
+        )
+        dc_rows = torch.zeros(
+            (local_routes, two_i),
+            dtype=torch.float32,
+            device=device,
+        )
         for expert in range(self.experts_per_rank):
             positions = torch.nonzero(expert_rows == expert, as_tuple=False).flatten()
             if positions.numel() == 0:
                 continue
             c = c_rows.index_select(0, positions)
-            x = x_rows.index_select(0, positions)
-            w = w_rows.index_select(0, positions).unsqueeze(-1).float()
+            w = w_rows.index_select(0, positions).unsqueeze(-1)
             d_y = dy_rows.index_select(0, positions)
+            semantic_d_y = semantic_dy_rows.index_select(0, positions)
 
             gate, up = c.split(self.intermediate_size, dim=-1)
             if self.gate_up_clamp is not None:
-                g = gate.float().clamp(max=self.gate_up_clamp)
-                u = up.float().clamp(min=-self.gate_up_clamp, max=self.gate_up_clamp)
+                g = gate.clamp(max=self.gate_up_clamp)
+                u = up.clamp(min=-self.gate_up_clamp, max=self.gate_up_clamp)
             else:
-                g, u = gate.float(), up.float()
+                g, u = gate, up
             sig = torch.sigmoid(g)
             s = g * sig
             h = s * u
+            h_rows.index_copy_(0, positions, h)
+            weighted_dy_rows.index_copy_(0, positions, d_y * w)
 
             if self.apply_topk_in_fc1:
-                h_fc2 = (h * w).to(dtype=self._gemm_dtype())
-                d_y_pre = d_y.to(dtype=self._gemm_dtype())
+                d_y_pre = d_y
             else:
-                h_fc2 = h.to(dtype=self._gemm_dtype())
-                d_y_pre = (d_y.float() * w).to(dtype=self._gemm_dtype())
-            if self.gemm_format is not None:
-                h_fc2 = _qdq(h_fc2, self.gemm_format, axis=-1, dtype=self._gemm_dtype())
-                d_y_pre = _qdq(d_y_pre, self.gemm_format, axis=-1, dtype=self._gemm_dtype())
-            grad_fc2[expert] = h_fc2.transpose(0, 1) @ d_y_pre
-            d_h_fc2 = (d_y_pre @ fc2_float[expert].transpose(0, 1)).float()
+                d_y_pre = d_y * w
+            d_h_fc2 = d_y_pre @ fc2_float[expert].transpose(0, 1)
             if self.apply_topk_in_fc1:
                 d_h = d_h_fc2 * w
-                d_w_rows[positions] = (d_h_fc2 * h).sum(dim=-1)
+                semantic_d_h = (
+                    semantic_d_y
+                    @ semantic_fc2_float[expert].transpose(0, 1)
+                )
+                d_w_rows[positions] = (semantic_d_h * h).sum(dim=-1)
             else:
                 d_h = d_h_fc2
-                d_w_rows[positions] = (d_y.float() * (h @ fc2_float[expert].float())).sum(dim=-1)
+                d_w_rows[positions] = (
+                    semantic_d_y * (h @ semantic_fc2_float[expert])
+                ).sum(dim=-1)
 
             d_g = d_h * u * (sig * (1 + g * (1 - sig)))
             d_u = d_h * s
             if self.gate_up_clamp is not None:
-                d_gate = d_g * (gate.float() <= self.gate_up_clamp)
-                up_f = up.float()
-                d_up = d_u * ((up_f >= -self.gate_up_clamp) & (up_f <= self.gate_up_clamp))
+                d_gate = d_g * (gate <= self.gate_up_clamp)
+                d_up = d_u * ((up >= -self.gate_up_clamp) & (up <= self.gate_up_clamp))
             else:
                 d_gate, d_up = d_g, d_u
-            d_c = torch.cat((d_gate, d_up), dim=-1).to(dtype=self._gemm_dtype())
-            if self.gemm_format is not None:
-                d_c = _qdq(d_c, self.gemm_format, axis=-1, dtype=self._gemm_dtype())
-            grad_fc1[expert] = x.transpose(0, 1) @ d_c
-            d_x_rows.index_copy_(0, positions, d_c @ fc1_float[expert].transpose(0, 1))
+            d_c = torch.cat((d_gate, d_up), dim=-1)
+            dc_rows.index_copy_(0, positions, d_c)
+            if self.intermediate_format is not None:
+                d_c = _format_round_trip(d_c, self.intermediate_format)
+            d_x = d_c @ fc1_float[expert].transpose(0, 1)
+            d_x_rows.index_copy_(
+                0,
+                positions,
+                backward_combine_round_trip(d_x, self.combine_format),
+            )
 
         # Return the route gradients to their source ranks and scatter-add.
         returned_dx = self._all_to_all(d_x_rows.index_select(0, perm), recv_counts, send_counts)
         returned_dw = self._all_to_all(d_w_rows.index_select(0, perm), recv_counts, send_counts)
-        grad_activation = torch.zeros(
-            (token_count, self.hidden_size),
-            dtype=torch.float32,
-            device=device,
+        grad_activation = torch.zeros((token_count, self.hidden_size), dtype=torch.float32, device=device)
+        grad_activation.index_add_(0, plan.send_token_idx, returned_dx)
+        grad_topk_weights = torch.zeros((token_count * self.top_k,), dtype=torch.float32, device=device)
+        grad_topk_weights.index_copy_(0, plan.send_token_idx * self.top_k + plan.send_slot_idx, returned_dw)
+        grad_topk_weights = grad_topk_weights.view(
+            token_count,
+            self.top_k,
         )
-        grad_activation.index_add_(0, plan.send_token_idx, returned_dx.float())
-        grad_activation = grad_activation.to(dtype=self.compute_dtype)
-        grad_topk_weights = torch.zeros(
-            (token_count * self.top_k,), dtype=torch.float32, device=device
-        )
-        grad_topk_weights.index_copy_(
-            0, plan.send_token_idx * self.top_k + plan.send_slot_idx, returned_dw
-        )
-        return (
-            grad_activation,
-            grad_fc1,
-            grad_fc2,
-            grad_topk_weights.view(token_count, self.top_k),
-        )
+        if self.backward_wgrad_mode == "operands":
+            stash = wgrad_forward_stash
+            padded_ends = tuple(
+                int(value)
+                for value in stash.expert_offsets.cpu().tolist()
+            )
+            valid_counts = tuple(
+                int(value)
+                for value in stash.valid_route_counts.cpu().tolist()
+            )
+            padded_dc = _padded_expert_rows(
+                dc_rows,
+                expert_rows,
+                valid_counts,
+                padded_ends,
+            )
+            padded_h = _padded_expert_rows(
+                h_rows,
+                expert_rows,
+                valid_counts,
+                padded_ends,
+            )
+            padded_weighted_dy = _padded_expert_rows(
+                weighted_dy_rows,
+                expert_rows,
+                valid_counts,
+                padded_ends,
+            )
+            operands = WgradOperandsReference(
+                fc1_a=stash.fc1_a,
+                fc1_b=quantize_blockwise(
+                    padded_dc,
+                    MoeFormat.MXFP8,
+                    axis=0,
+                ),
+                fc2_a=quantize_blockwise(
+                    padded_h.transpose(0, 1),
+                    MoeFormat.MXFP8,
+                    axis=1,
+                ),
+                fc2_b=quantize_blockwise(
+                    padded_weighted_dy,
+                    MoeFormat.MXFP8,
+                    axis=0,
+                ),
+                expert_offsets=stash.expert_offsets,
+                valid_route_counts=stash.valid_route_counts,
+                route_metadata=stash.route_metadata,
+            )
+            return grad_activation, grad_topk_weights, operands
+        return grad_activation, grad_topk_weights
 
 
 __all__ = [
@@ -987,5 +1184,9 @@ __all__ = [
     "MoeEpReference",
     "MoeFormat",
     "MoeTensor",
+    "WgradForwardStashReference",
+    "WgradOperandsReference",
+    "backward_combine_round_trip",
+    "forward_combine_round_trip",
     "quantize_blockwise",
 ]

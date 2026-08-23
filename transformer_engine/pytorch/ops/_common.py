@@ -106,21 +106,16 @@ def quantize_mxfp8_for_ep(
             raise ValueError("An MXFP8 quantizer is required for a non-quantized EP input.")
         quantized = quantizer(input_)
     if quantized._with_gemm_swizzled_scales:
-        raise ValueError("NCCL EP requires unswizzled MXFP8 scales.")
+        raise ValueError("EP requires unswizzled MXFP8 scales.")
     data = quantized._rowwise_data
     scale_inv = quantized._rowwise_scale_inv
     if data is None or scale_inv is None:
-        raise ValueError("NCCL EP requires rowwise MXFP8 data and scales.")
+        raise ValueError("EP requires rowwise MXFP8 data and scales.")
     rows, hidden = input_.shape
     scale_cols = hidden // MXFP8_BLOCK_SCALING_SIZE
-    if scale_cols * scale_inv.element_size() % 16:
-        raise ValueError(
-            "MXFP8 EP transport requires hidden size divisible by "
-            f"{16 * MXFP8_BLOCK_SCALING_SIZE}, got {hidden}."
-        )
     scale_inv = scale_inv[:rows, :scale_cols]
     if not scale_inv.is_contiguous():
-        raise ValueError("NCCL EP requires compact contiguous MXFP8 scales.")
+        raise ValueError("EP requires compact contiguous MXFP8 scales.")
     return quantized, scale_inv
 
 

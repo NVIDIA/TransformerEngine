@@ -28,14 +28,18 @@ from transformer_engine.pytorch.ep import (
     _ep_combine_raw,
     _ep_dispatch_raw,
 )
-from transformer_engine.pytorch.ep_reference import BlockScaledTensor, MoeEpReference, MoeFormat
+from transformer_engine.pytorch.ep_reference import (
+    BlockScaledTensor,
+    MoeEpReference,
+    MoeFormat,
+    quantize_blockwise,
+)
 from transformer_engine.pytorch.ops.fused.moe_ep import (
     FusedMoeEp,
     _cudnn_megamoe_supported,
+    _pack_cudnn_activation,
     _pack_cudnn_weights,
 )
-from transformer_engine.pytorch.ops.op import OperationContext
-from transformer_engine.pytorch.tensor import GroupedTensor
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Tensor
 
 ZERO_COPY = os.environ.get("NVTE_EP_ZERO_COPY", "0") == "1"
@@ -51,7 +55,6 @@ NUM_LOCAL_EXPERTS = 2
 # NVTE_EP_TOKENS_PER_RANK.
 HIDDEN_DIM = int(os.environ.get("NVTE_EP_HIDDEN_DIM", "512"))
 TOP_K = 2
-INTERMEDIATE_DIM = 16
 TOKENS_PER_RANK = int(os.environ.get("NVTE_EP_TOKENS_PER_RANK", "32"))
 
 
@@ -225,16 +228,24 @@ def _make_cfg() -> _Cfg:
     return cfg
 
 
-class TestEP(unittest.TestCase):
+class _EpTestCase(unittest.TestCase):
+    """Shared NCCL EP process state and pass selection."""
+
     cfg: _Cfg
     ep_group: dist.ProcessGroup
 
     @classmethod
     def setUpClass(cls):
+        if hasattr(_EpTestCase, "cfg"):
+            cls.cfg = _EpTestCase.cfg
+            cls.ep_group = _EpTestCase.ep_group
+            return
         if _device_sm() < 90:
             raise unittest.SkipTest(f"NCCL EP requires SM>=90 (got SM{_device_sm()})")
-        cls.cfg = _make_cfg()
-        cls.ep_group = _build_ep_group()
+        _EpTestCase.cfg = _make_cfg()
+        _EpTestCase.ep_group = _build_ep_group()
+        cls.cfg = _EpTestCase.cfg
+        cls.ep_group = _EpTestCase.ep_group
         ep_bootstrap(
             cls.ep_group,
             num_experts=cls.cfg.num_experts,
@@ -290,6 +301,10 @@ class TestEP(unittest.TestCase):
             combine_bwd_quant_recipe=combine_bwd_quant_recipe,
         )
 
+
+class TestEP(_EpTestCase):
+    """NCCL EP tests inherited from nvidia_origin/main."""
+
     def _expert_out(self, expert_out):
         """Stage the combine input into symm-mem under zero-copy (combine requires it)."""
         if not ZERO_COPY:
@@ -328,80 +343,6 @@ class TestEP(unittest.TestCase):
         recv_t, recv_w_out, _tc = ep_dispatch(buffer, tokens, topk_idx, w)
         expert_out = self._weighted(recv_t, recv_w_out)
         return ep_combine(buffer, expert_out)
-
-    def _make_moe_model(
-        self,
-        *,
-        intermediate_dim=INTERMEDIATE_DIM,
-        recipe=None,
-    ):
-        """Build an EP MoE Sequential.
-
-        Routing extras stay internal so MegaMoE can claim the sequence when
-        its gates pass. Pass an MXFP8 ``recipe`` to construct natively
-        quantized GroupedLinear weights via ``quantized_model_init``.
-        """
-        buffer = self._make_buffer(alignment=128 if recipe is not None else 0)
-        dispatch = te_ops.Dispatch(buffer)
-        init_ctx = (
-            te.quantized_model_init(enabled=True, recipe=recipe)
-            if recipe is not None
-            else nullcontext()
-        )
-        previous_single_param = os.environ.get("NVTE_GROUPED_LINEAR_SINGLE_PARAM")
-        os.environ["NVTE_GROUPED_LINEAR_SINGLE_PARAM"] = "1"
-        try:
-            with init_ctx:
-                fc1 = te_ops.GroupedLinear(
-                    NUM_LOCAL_EXPERTS,
-                    HIDDEN_DIM,
-                    2 * intermediate_dim,
-                    bias=False,
-                    device=self.cfg.device,
-                    dtype=torch.bfloat16,
-                    single_grouped_weight=True,
-                )
-                activation = te_ops.ScaledSwiGLU()
-                fc2 = te_ops.GroupedLinear(
-                    NUM_LOCAL_EXPERTS,
-                    intermediate_dim,
-                    HIDDEN_DIM,
-                    bias=False,
-                    device=self.cfg.device,
-                    dtype=torch.bfloat16,
-                    single_grouped_weight=True,
-                )
-        finally:
-            if previous_single_param is None:
-                del os.environ["NVTE_GROUPED_LINEAR_SINGLE_PARAM"]
-            else:
-                os.environ["NVTE_GROUPED_LINEAR_SINGLE_PARAM"] = previous_single_param
-        combine = te_ops.Combine()
-
-        dispatch.set_extra_output_channel(0, "tokens_per_expert", output_to_caller=False)
-        dispatch.set_extra_output_channel(1, "routing_weights", output_to_caller=False)
-        dispatch.set_extra_output_channel(2, "ep_handle", output_to_caller=False)
-        dispatch.set_extra_output_channel(3, "routing_indices", output_to_caller=False)
-        fc1.set_extra_input_channel(0, "tokens_per_expert")
-        activation.set_extra_input_channel(0, "routing_weights")
-        fc2.set_extra_input_channel(0, "tokens_per_expert")
-        combine.set_extra_input_channel(0, "ep_handle")
-        combine.set_extra_input_channel(1, "tokens_per_expert")
-        combine.set_extra_input_channel(2, "routing_indices")
-        return te_ops.Sequential(dispatch, fc1, activation, fc2, combine), fc1, fc2
-
-    def _make_dispatch_combine_model(self, buffer):
-        """Build the minimal channel-routed Dispatch -> Combine pipeline."""
-        dispatch = te_ops.Dispatch(buffer)
-        combine = te_ops.Combine()
-        dispatch.set_extra_output_channel(0, "tokens_per_expert", output_to_caller=False)
-        dispatch.set_extra_output_channel(1, "routing_weights", output_to_caller=False)
-        dispatch.set_extra_output_channel(2, "ep_handle", output_to_caller=False)
-        dispatch.set_extra_output_channel(3, "routing_indices", output_to_caller=False)
-        combine.set_extra_input_channel(0, "ep_handle")
-        combine.set_extra_input_channel(1, "tokens_per_expert")
-        combine.set_extra_input_channel(2, "routing_indices")
-        return te_ops.Sequential(dispatch, combine)
 
     # Prepare
 
@@ -514,30 +455,6 @@ class TestEP(unittest.TestCase):
 
     # Autograd
 
-    @_eager_test_include
-    @_zero_copy_test_include
-    def test_basic_ops_channel_routed_identity(self):
-        """Combine consumes Dispatch's handle/count channels without receiving EpBuffer."""
-        buffer = self._make_buffer()
-        model = self._make_dispatch_combine_model(buffer)
-        topk_idx, tokens, weights = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
-        tokens = tokens.detach().clone().requires_grad_(True)
-        output = model(tokens, topk_idx, weights)
-        (0.5 * output.float().square().sum()).backward()
-        torch.cuda.synchronize()
-        torch.testing.assert_close(
-            output.float(),
-            tokens.detach().float() * TOP_K,
-            atol=5e-2,
-            rtol=5e-2,
-        )
-        torch.testing.assert_close(
-            tokens.grad.float(),
-            tokens.detach().float() * (TOP_K**2),
-            atol=1e-1,
-            rtol=1e-1,
-        )
-
     @_zero_copy_test_include
     def test_dispatch_autograd(self):
         """0.5*||recv_tokens||^2 ; grad_tokens equals TOP_K * tokens. Covers the
@@ -608,88 +525,6 @@ class TestEP(unittest.TestCase):
             self.assertTrue(is_symm_backed(recv_mx.scale_inv))
         self._assert_mxfp8_matches_bf16(recv_mx, tokens, topk_idx, w, tc)
 
-    @_eager_test_include
-    @_zero_copy_test_include
-    @_mxfp8_align_test
-    def test_basic_dispatch_prequantized_mxfp8(self):
-        """A fresh basic Dispatch accepts an already-quantized MXFP8 input."""
-        self._require_mxfp8_shapes()
-        buffer = self._make_buffer(alignment=128)
-        dispatch = te_ops.Dispatch(buffer)
-        topk_idx, tokens, weights = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
-        quantized_tokens = self._mxfp8_quantizer().quantize(tokens)
-
-        recv_tokens, counts, _recv_weights, handle, _routing_indices = dispatch(
-            quantized_tokens, topk_idx, weights
-        )
-
-        self.assertIsInstance(recv_tokens, GroupedTensor)
-        self.assertEqual(handle.data_ptr(), buffer.handle_mem.data_ptr())
-        torch.cuda.synchronize()
-        self.assertEqual(counts.shape, (NUM_LOCAL_EXPERTS,))
-        recv_data = _degroup_mxfp8(recv_tokens).float()
-        self.assertTrue(torch.isfinite(recv_data).all())
-        self.assertGreater(recv_data.abs().sum().item(), 0.0)
-
-    @_eager_test_include
-    @_zero_copy_test_include
-    @_mxfp8_align_test
-    def test_basic_dispatch_recipe_mxfp8(self):
-        """A fresh basic Dispatch quantizes BF16 input under MXFP8 autocast."""
-        self._require_mxfp8_shapes()
-        buffer = self._make_buffer(alignment=128)
-        dispatch = te_ops.Dispatch(buffer)
-        topk_idx, tokens, weights = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
-
-        with te.autocast(enabled=True, recipe=MXFP8BlockScaling()):
-            recv_tokens, counts, _recv_weights, handle, _routing_indices = dispatch(
-                tokens, topk_idx, weights
-            )
-
-        self.assertIsInstance(recv_tokens, GroupedTensor)
-        self.assertEqual(handle.data_ptr(), buffer.handle_mem.data_ptr())
-        torch.cuda.synchronize()
-        self.assertEqual(counts.shape, (NUM_LOCAL_EXPERTS,))
-        recv_data = _degroup_mxfp8(recv_tokens).float()
-        self.assertTrue(torch.isfinite(recv_data).all())
-        self.assertGreater(recv_data.abs().sum().item(), 0.0)
-
-    @_eager_test_include
-    @_zero_copy_test_include
-    @_mxfp8_align_test
-    def test_basic_combine_backward_mxfp8(self):
-        """Combine's recipe-owned grad-output quantizer drives scaled combine_bwd."""
-        self._require_mxfp8_shapes()
-        buffer = self._make_buffer(alignment=128)
-        topk_idx, tokens, weights = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
-        recv_tokens, _recv_weights, counts = ep_dispatch(
-            buffer,
-            tokens,
-            topk_idx,
-            weights,
-        )
-        combine = te_ops.Combine()
-        combine.reset_recipe_state(recipe=MXFP8BlockScaling())
-        combine.pre_fuser_forward(requires_grad=True)
-        ctx = OperationContext()
-        output, _ = combine.fuser_forward(
-            [ctx],
-            recv_tokens,
-            basic_op_extra_inputs=[(buffer.handle_mem, counts, topk_idx)],
-            prev_op_grad_output_quantizer=None,
-            next_op_input_quantizer=None,
-            basic_op_kwargs=[{}],
-        )
-        ctx.saved_tensors = ctx.to_save
-        grad_input, _, _ = combine.fuser_backward(
-            [ctx],
-            torch.ones_like(output),
-            basic_op_grad_extra_outputs=[()],
-        )
-        self.assertIsInstance(grad_input, GroupedTensor)
-        self.assertIsNotNone(grad_input.rowwise_data)
-        self.assertIsNotNone(grad_input.scale_inv)
-
     @_zero_copy_test_include
     @_mxfp8_align_test
     def test_caller_provides_dispatch_recv_mxfp8(self):
@@ -759,154 +594,6 @@ class TestEP(unittest.TestCase):
         torch.testing.assert_close(tokens_p.grad.float(), tokens.float(), atol=5e-2, rtol=5e-2)
         # the caller-owned buffer was used as the combine-bwd scatter target
         self.assertGreater(gbuf.abs().sum().item(), 0.0)
-
-    @_eager_test_include
-    def test_bf16_moe_sequential_vs_reference(self):
-        """BF16 Sequential matches its reference, with MegaMoE when available."""
-        self._run_moe_sequential_vs_reference(quantization="bf16")
-
-    @_eager_test_include
-    @_mxfp8_align_test
-    def test_mxfp8_moe_sequential_vs_reference(self):
-        """MXFP8 Sequential matches the QDQ reference, with MegaMoE when available."""
-        self._run_moe_sequential_vs_reference(quantization="mxfp8")
-
-    def _run_moe_sequential_vs_reference(self, *, quantization):
-        """Compare a Sequential MoE to ``MoeEpReference``.
-
-        MegaMoE is used when its cuDNN and hardware requirements are met;
-        otherwise the basic EP and grouped-MLP operations run unfused.
-        """
-        if not EAGER:
-            self.skipTest("variable-size reference comparison requires eager EP mode")
-        if torch.cuda.get_device_capability() != (10, 7):
-            self.skipTest("MegaMoE fusion requires Rubin SM107")
-        try:
-            from cudnn.moe_ep import MoeEp  # noqa: F401
-        except ImportError as exc:
-            self.skipTest(f"cudnn.moe_ep.MoeEp is not installed ({type(exc).__name__}: {exc})")
-
-        # MegaMoE SM107 requires intermediate_size % 256 == 0.
-        intermediate_dim = 256
-        recipe = MXFP8BlockScaling() if quantization == "mxfp8" else None
-        model, fc1, fc2 = self._make_moe_model(
-            intermediate_dim=intermediate_dim,
-            recipe=recipe,
-        )
-        generator = torch.Generator(device=self.cfg.device)
-        generator.manual_seed(3100 + self.cfg.rank)
-        with torch.no_grad():
-            for op in (fc1, fc2):
-                weights = op.weight.quantized_tensors
-                if weights is None:
-                    weights = op.weight.split_into_quantized_tensors()
-                for expert in range(NUM_LOCAL_EXPERTS):
-                    weight = (
-                        torch.randn(
-                            weights[expert].shape,
-                            generator=generator,
-                            dtype=torch.float32,
-                            device=self.cfg.device,
-                        )
-                        * 0.1
-                    ).to(torch.bfloat16)
-                    weights[expert].copy_(weight)
-                    if quantization == "mxfp8":
-                        self.assertIsInstance(weights[expert], MXFP8Tensor)
-
-        topk_idx, tokens, topk_weights = _make_moe_inputs(
-            self.cfg.rank,
-            self.cfg.ep_size,
-            self.cfg.device,
-        )
-        seq_tokens = tokens.detach().clone().requires_grad_(True)
-        seq_topk_weights = topk_weights.detach().clone().requires_grad_(True)
-        autocast_ctx = (
-            te.autocast(enabled=True, recipe=recipe) if recipe is not None else nullcontext()
-        )
-        with autocast_ctx:
-            seq_out = model(seq_tokens, topk_idx, seq_topk_weights)
-
-        forward_ops = model._module_groups[0]._forward_ops
-        if _cudnn_megamoe_supported():
-            self.assertEqual(len(forward_ops), 1)
-            self.assertIsInstance(forward_ops[0][0], FusedMoeEp)
-        else:
-            self.assertFalse(any(isinstance(op, FusedMoeEp) for op, _ in forward_ops))
-        self.assertIsInstance(seq_out, torch.Tensor)
-        self.assertEqual(seq_out.dtype, torch.bfloat16)
-
-        fc1_weight = _reference_weights(fc1)
-        fc2_weight = _reference_weights(fc2)
-        for op, packed in ((fc1, fc1_weight), (fc2, fc2_weight)):
-            packed_data = packed.data if isinstance(packed, BlockScaledTensor) else packed
-            self.assertEqual(packed_data.data_ptr(), op.weight.rowwise_data.data_ptr())
-            self.assertTrue(packed_data.permute(0, 2, 1).is_contiguous())
-            if isinstance(packed, BlockScaledTensor):
-                self.assertEqual(packed.scale.data_ptr(), op.weight.scale_inv.data_ptr())
-                self.assertTrue(packed.scale.permute(0, 2, 1).is_contiguous())
-        reference = MoeEpReference(
-            num_experts=self.cfg.num_experts,
-            hidden_size=HIDDEN_DIM,
-            intermediate_size=intermediate_dim,
-            top_k=TOP_K,
-            ep_group=self.ep_group,
-            max_tokens_per_rank=TOKENS_PER_RANK,
-            output_format=MoeFormat.BF16,
-            combine_format=MoeFormat.BF16,
-            apply_topk_in_fc1=True,
-            generate_c=True,
-            compute_dtype=torch.float32,
-        )
-        ref_out, fc1_c, route_metadata = reference(
-            tokens.detach(),
-            fc1_weight,
-            fc2_weight,
-            topk_idx,
-            topk_weights.detach(),
-        )
-        self.assertEqual(ref_out.dtype, torch.bfloat16)
-
-        dy = (
-            torch.randn(
-                seq_out.shape,
-                generator=generator,
-                dtype=torch.float32,
-                device=self.cfg.device,
-            )
-            * 0.1
-        ).to(torch.bfloat16)
-        seq_out.backward(dy)
-        grad_tokens, grad_fc1, grad_fc2, grad_topk_weights = reference.backward(
-            dy,
-            tokens.detach(),
-            fc1_weight,
-            fc2_weight,
-            topk_idx,
-            topk_weights.detach(),
-            fc1_c,
-            route_metadata,
-        )
-        torch.cuda.synchronize()
-        tolerances = {"rtol": 0.125, "atol": 0.25}
-        torch.testing.assert_close(seq_out, ref_out, **tolerances)
-        torch.testing.assert_close(
-            seq_tokens.grad, grad_tokens.to(dtype=seq_tokens.dtype), **tolerances
-        )
-        torch.testing.assert_close(seq_topk_weights.grad, grad_topk_weights.float(), **tolerances)
-        for op, ref_grad in ((fc1, grad_fc1), (fc2, grad_fc2)):
-            seq_grad = op.weight.grad
-            self.assertEqual(seq_grad.dtype, torch.bfloat16)
-            self.assertEqual(
-                tuple(seq_grad.shape),
-                (NUM_LOCAL_EXPERTS, op.out_features, op.in_features),
-            )
-            self.assertTrue(seq_grad.is_contiguous())
-            torch.testing.assert_close(
-                seq_grad,
-                ref_grad.transpose(1, 2).to(dtype=seq_grad.dtype),
-                **tolerances,
-            )
 
     @_zero_copy_test_include
     @_mxfp8_align_test
@@ -1188,6 +875,382 @@ class TestEP(unittest.TestCase):
         torch.testing.assert_close(tokens_p.grad.float(), tokens.float(), atol=5e-2, rtol=5e-2)
 
 
+class TestMoeEpSequential(_EpTestCase):
+    """Integration tests for Dispatch -> expert MLP -> Combine sequences."""
+
+    def _mxfp8_quantizer(self):
+        from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
+
+        return MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3, rowwise=True, columnwise=False)
+
+    def _require_mxfp8_shapes(self):
+        if HIDDEN_DIM % 512 != 0 or TOKENS_PER_RANK % 32 != 0:
+            self.skipTest(
+                "MXFP8 needs HIDDEN_DIM % 512 == 0 and TOKENS_PER_RANK % 32 == 0 "
+                "(set NVTE_EP_HIDDEN_DIM / NVTE_EP_TOKENS_PER_RANK)"
+            )
+
+    def _make_dispatch_combine_ops(self, *, mxfp8):
+        buffer = self._make_buffer(alignment=128 if mxfp8 else 0)
+        return buffer, te_ops.Dispatch(buffer), te_ops.Combine()
+
+    def _run_dispatch_combine_identity(self, *, mxfp8):
+        """Route, apply top-k weights, and combine back to local token order."""
+        if mxfp8:
+            self._require_mxfp8_shapes()
+        buffer, dispatch, combine = self._make_dispatch_combine_ops(mxfp8=mxfp8)
+        topk_idx, tokens, topk_weights = _make_identity_inputs(
+            self.cfg.rank,
+            self.cfg.ep_size,
+        )
+        recipe = MXFP8BlockScaling() if mxfp8 else None
+        with te.autocast(enabled=mxfp8, recipe=recipe):
+            recv_tokens, tokens_per_expert, recv_weights, handle, routing_indices = dispatch(
+                tokens,
+                topk_idx,
+                topk_weights,
+            )
+        if mxfp8:
+            recv_tokens = _degroup_mxfp8(recv_tokens)
+            recv_weights = recv_weights[: recv_tokens.shape[0]]
+        weighted_expert_output = (
+            recv_tokens.float() * recv_weights.float().unsqueeze(-1)
+        ).to(torch.bfloat16)
+        output = combine(
+            weighted_expert_output,
+            handle,
+            tokens_per_expert,
+            routing_indices,
+        )
+        torch.cuda.synchronize()
+        torch.testing.assert_close(output, tokens, atol=5e-2, rtol=5e-2)
+        self.assertEqual(handle.data_ptr(), buffer.handle_mem.data_ptr())
+
+    @_eager_test_include
+    @_zero_copy_test_include
+    def test_dispatch_combine_identity_bf16(self):
+        """Dispatch and Combine basic ops form an identity in BF16."""
+        self._run_dispatch_combine_identity(mxfp8=False)
+
+    @_eager_test_include
+    @_zero_copy_test_include
+    @_mxfp8_align_test
+    def test_dispatch_combine_identity_mxfp8(self):
+        """Dispatch and Combine basic ops form an identity with MXFP8 transport."""
+        self._run_dispatch_combine_identity(mxfp8=True)
+
+    def _make_megamoe_model(
+        self,
+        *,
+        recipe,
+        accumulate_into_main_grad=False,
+        delay_wgrad_compute=False,
+    ):
+        """Build the exact five-op sequence recognized by MegaMoE fusion."""
+        buffer = self._make_buffer(alignment=128 if recipe is not None else 0)
+        dispatch = te_ops.Dispatch(buffer)
+        init_ctx = (
+            te.quantized_model_init(enabled=True, recipe=recipe)
+            if recipe is not None
+            else nullcontext()
+        )
+        previous_single_param = os.environ.get("NVTE_GROUPED_LINEAR_SINGLE_PARAM")
+        os.environ["NVTE_GROUPED_LINEAR_SINGLE_PARAM"] = "1"
+        try:
+            with init_ctx:
+                fc1 = te_ops.GroupedLinear(
+                    NUM_LOCAL_EXPERTS,
+                    HIDDEN_DIM,
+                    2 * 256,
+                    bias=False,
+                    device=self.cfg.device,
+                    dtype=torch.bfloat16,
+                    single_grouped_weight=True,
+                    accumulate_into_main_grad=accumulate_into_main_grad,
+                    delay_wgrad_compute=delay_wgrad_compute,
+                )
+                activation = te_ops.ScaledSwiGLU()
+                fc2 = te_ops.GroupedLinear(
+                    NUM_LOCAL_EXPERTS,
+                    256,
+                    HIDDEN_DIM,
+                    bias=False,
+                    device=self.cfg.device,
+                    dtype=torch.bfloat16,
+                    single_grouped_weight=True,
+                    accumulate_into_main_grad=accumulate_into_main_grad,
+                    delay_wgrad_compute=delay_wgrad_compute,
+                )
+        finally:
+            if previous_single_param is None:
+                del os.environ["NVTE_GROUPED_LINEAR_SINGLE_PARAM"]
+            else:
+                os.environ["NVTE_GROUPED_LINEAR_SINGLE_PARAM"] = previous_single_param
+        combine = te_ops.Combine()
+
+        dispatch.set_extra_output_channel(0, "tokens_per_expert", output_to_caller=False)
+        dispatch.set_extra_output_channel(1, "routing_weights", output_to_caller=False)
+        dispatch.set_extra_output_channel(2, "ep_handle", output_to_caller=False)
+        dispatch.set_extra_output_channel(3, "routing_indices", output_to_caller=False)
+        fc1.set_extra_input_channel(0, "tokens_per_expert")
+        activation.set_extra_input_channel(0, "routing_weights")
+        fc2.set_extra_input_channel(0, "tokens_per_expert")
+        combine.set_extra_input_channel(0, "ep_handle")
+        combine.set_extra_input_channel(1, "tokens_per_expert")
+        combine.set_extra_input_channel(2, "routing_indices")
+        model = te_ops.Sequential(dispatch, fc1, activation, fc2, combine)
+        return model, fc1, fc2
+
+    @_eager_test_include
+    def test_megamoe_bf16_numerics(self):
+        self._run_megamoe_vs_reference(quantization="bf16")
+
+    @_eager_test_include
+    @_mxfp8_align_test
+    def test_megamoe_mxfp8_numerics(self):
+        self._run_megamoe_vs_reference(quantization="mxfp8")
+
+    @_eager_test_include
+    @_mxfp8_align_test
+    def test_megamoe_main_grad_accumulation(self):
+        self._run_megamoe_vs_reference(
+            quantization="mxfp8",
+            accumulate_into_main_grad=True,
+        )
+
+    @_eager_test_include
+    @_mxfp8_align_test
+    def test_megamoe_main_grad_overwrite(self):
+        self._run_megamoe_vs_reference(
+            quantization="mxfp8",
+            accumulate_into_main_grad=True,
+            overwrite_main_grad=True,
+        )
+
+    @_eager_test_include
+    @_mxfp8_align_test
+    def test_megamoe_delayed_wgrad(self):
+        self._run_megamoe_vs_reference(
+            quantization="mxfp8",
+            delay_wgrad_compute=True,
+        )
+
+    @_eager_test_include
+    @_mxfp8_align_test
+    def test_megamoe_delayed_main_grad(self):
+        self._run_megamoe_vs_reference(
+            quantization="mxfp8",
+            accumulate_into_main_grad=True,
+            delay_wgrad_compute=True,
+        )
+
+    @_eager_test_include
+    @_mxfp8_align_test
+    def test_megamoe_prequantized_input(self):
+        self._run_megamoe_vs_reference(
+            quantization="mxfp8",
+            prequantized_input=True,
+        )
+
+    def _run_megamoe_vs_reference(
+        self,
+        *,
+        quantization,
+        accumulate_into_main_grad=False,
+        overwrite_main_grad=False,
+        delay_wgrad_compute=False,
+        prequantized_input=False,
+    ):
+        """Compare the five-op MoE sequence with the PyTorch EP reference.
+
+        The fuser selects MegaMoE when its runtime gates pass. Otherwise this
+        exercises the same sequence as separate NCCL EP and grouped-MLP ops.
+        """
+        if not EAGER:
+            self.skipTest("MoE reference comparison requires eager EP mode")
+
+        recipe = MXFP8BlockScaling() if quantization == "mxfp8" else None
+        model, fc1, fc2 = self._make_megamoe_model(
+            recipe=recipe,
+            accumulate_into_main_grad=accumulate_into_main_grad,
+            delay_wgrad_compute=delay_wgrad_compute,
+        )
+        generator = torch.Generator(device=self.cfg.device)
+        generator.manual_seed(3100 + self.cfg.rank)
+        with torch.no_grad():
+            for op in (fc1, fc2):
+                weights = op.weight.quantized_tensors
+                if weights is None:
+                    weights = op.weight.split_into_quantized_tensors()
+                for expert in range(NUM_LOCAL_EXPERTS):
+                    weight = (
+                        torch.randn(
+                            weights[expert].shape,
+                            generator=generator,
+                            dtype=torch.float32,
+                            device=self.cfg.device,
+                        )
+                        * 0.1
+                    ).to(torch.bfloat16)
+                    weights[expert].copy_(weight)
+                    if quantization == "mxfp8":
+                        self.assertIsInstance(weights[expert], MXFP8Tensor)
+
+        topk_idx, tokens, topk_weights = _make_moe_inputs(
+            self.cfg.rank,
+            self.cfg.ep_size,
+            self.cfg.device,
+        )
+        seq_tokens = tokens.detach().clone().requires_grad_(True)
+        seq_topk_weights = topk_weights.detach().clone().requires_grad_(True)
+        main_grad_sentinel = 0.5
+        if accumulate_into_main_grad:
+            for op in (fc1, fc2):
+                op.weight.main_grad = torch.full(
+                    op.weight.size(),
+                    main_grad_sentinel,
+                    dtype=torch.float32,
+                    device=op.weight.device,
+                )
+                op.weight.overwrite_main_grad = overwrite_main_grad
+                op.weight.zero_out_wgrad = False
+                op.weight.grad_added_to_main_grad = False
+        autocast_ctx = (
+            te.autocast(enabled=True, recipe=recipe) if recipe is not None else nullcontext()
+        )
+        with autocast_ctx:
+            model_input = (
+                self._mxfp8_quantizer()(seq_tokens) if prequantized_input else seq_tokens
+            )
+            seq_out = model(model_input, topk_idx, seq_topk_weights)
+
+        forward_ops = model._module_groups[0]._forward_ops
+        fused = len(forward_ops) == 1 and isinstance(forward_ops[0][0], FusedMoeEp)
+        if fused:
+            self.assertTrue(_cudnn_megamoe_supported())
+        else:
+            self.assertFalse(any(isinstance(op, FusedMoeEp) for op, _ in forward_ops))
+        self.assertEqual(seq_out.dtype, torch.bfloat16)
+
+        fc1_weight = _reference_weights(fc1)
+        fc2_weight = _reference_weights(fc2)
+        emulate_mxfp8 = fused or quantization == "mxfp8"
+        reference = MoeEpReference(
+            num_experts=self.cfg.num_experts,
+            hidden_size=HIDDEN_DIM,
+            intermediate_size=256,
+            top_k=TOP_K,
+            ep_group=self.ep_group,
+            max_tokens_per_rank=TOKENS_PER_RANK,
+            output_format=MoeFormat.BF16,
+            combine_format=MoeFormat.BF16,
+            apply_topk_in_fc1=True,
+            generate_c=True,
+            intermediate_format=MoeFormat.MXFP8 if emulate_mxfp8 else None,
+            backward_operand_format=MoeFormat.MXFP8 if emulate_mxfp8 and not fused else None,
+            backward_wgrad_mode="operands" if fused else "none",
+            token_padding_size=256,
+        )
+        if emulate_mxfp8:
+            reference_activation = _pack_cudnn_activation(
+                tokens.detach(),
+                self._mxfp8_quantizer(),
+                BlockScaledTensor,
+            )
+        else:
+            reference_activation = tokens.detach()
+        if emulate_mxfp8 and not isinstance(fc1_weight, BlockScaledTensor):
+            fc1_weight = quantize_blockwise(fc1_weight, MoeFormat.MXFP8, axis=1)
+        if emulate_mxfp8 and not isinstance(fc2_weight, BlockScaledTensor):
+            fc2_weight = quantize_blockwise(fc2_weight, MoeFormat.MXFP8, axis=1)
+        reference_outputs = reference(
+            reference_activation,
+            fc1_weight,
+            fc2_weight,
+            topk_idx,
+            topk_weights.detach(),
+        )
+        if fused:
+            ref_out, fc1_c, route_metadata, wgrad_forward_stash = reference_outputs
+        else:
+            ref_out, fc1_c, route_metadata = reference_outputs
+            wgrad_forward_stash = None
+
+        dy = (
+            torch.randn(
+                seq_out.shape,
+                generator=generator,
+                dtype=torch.float32,
+                device=self.cfg.device,
+            )
+            * 0.1
+        ).to(torch.bfloat16)
+        seq_out.backward(dy)
+        if delay_wgrad_compute:
+            fc1.backward_dw()
+            fc2.backward_dw()
+        reference_grads = reference.backward(
+            dy,
+            fc1_weight,
+            fc2_weight,
+            topk_idx,
+            topk_weights.detach(),
+            fc1_c,
+            route_metadata,
+            wgrad_forward_stash=wgrad_forward_stash,
+        )
+        if fused:
+            grad_tokens, grad_topk_weights, wgrad_operands = reference_grads
+            grad_fc1, grad_fc2 = wgrad_operands.dense_wgrads()
+            reference_wgrads = (grad_fc1, grad_fc2)
+        else:
+            grad_tokens, grad_topk_weights = reference_grads
+            reference_wgrads = (None, None)
+
+        torch.cuda.synchronize()
+        tolerances = {"rtol": 0.125, "atol": 0.25}
+        torch.testing.assert_close(seq_out, ref_out, **tolerances)
+        torch.testing.assert_close(
+            seq_tokens.grad,
+            grad_tokens.to(dtype=seq_tokens.dtype),
+            **tolerances,
+        )
+        torch.testing.assert_close(seq_topk_weights.grad, grad_topk_weights.float(), **tolerances)
+        for op, ref_grad in zip((fc1, fc2), reference_wgrads):
+            expected_grad = None if ref_grad is None else ref_grad.transpose(1, 2)
+            if accumulate_into_main_grad:
+                if expected_grad is not None and not overwrite_main_grad:
+                    expected_grad = expected_grad + main_grad_sentinel
+                if expected_grad is not None:
+                    torch.testing.assert_close(
+                        op.weight.main_grad,
+                        expected_grad.to(dtype=op.weight.main_grad.dtype),
+                        **tolerances,
+                    )
+                else:
+                    self.assertTrue(torch.isfinite(op.weight.main_grad).all())
+                    self.assertFalse(
+                        torch.all(op.weight.main_grad == main_grad_sentinel).item()
+                    )
+                self.assertTrue(op.weight.grad_added_to_main_grad)
+                self.assertIsNotNone(op.weight.grad)
+                continue
+            seq_grad = op.weight.grad
+            self.assertEqual(seq_grad.dtype, torch.bfloat16)
+            self.assertEqual(
+                tuple(seq_grad.shape),
+                (NUM_LOCAL_EXPERTS, op.out_features, op.in_features),
+            )
+            self.assertTrue(seq_grad.is_contiguous())
+            self.assertTrue(torch.isfinite(seq_grad).all())
+            if expected_grad is not None:
+                torch.testing.assert_close(
+                    seq_grad,
+                    expected_grad.to(dtype=seq_grad.dtype),
+                    **tolerances,
+                )
+
+
 def _init_distributed():
     dist.init_process_group(backend="nccl")
     torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
@@ -1205,7 +1268,12 @@ if __name__ == "__main__":
     name_filter = os.environ.get("NVTE_EP_TEST_FILTER")
     if name_filter:
         loader.testMethodPrefix = name_filter
-    suite = loader.loadTestsFromTestCase(TestEP)
+    suite = unittest.TestSuite(
+        (
+            loader.loadTestsFromTestCase(TestEP),
+            loader.loadTestsFromTestCase(TestMoeEpSequential),
+        )
+    )
     runner = unittest.TextTestRunner(stream=sys.stdout, verbosity=2)
     result = runner.run(suite)
     dist.barrier()
