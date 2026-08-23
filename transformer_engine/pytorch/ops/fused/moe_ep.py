@@ -414,8 +414,7 @@ class FusedMoeEp(FusedOperation):
         is_mxfp8 = isinstance(input_, MXFP8TensorStorage)
         if is_quantized_tensor(input_) and not is_mxfp8:
             raise TypeError(
-                "FusedMoeEp supports BF16 and MXFP8 inputs, "
-                f"got {type(input_).__name__}."
+                f"FusedMoeEp supports BF16 and MXFP8 inputs, got {type(input_).__name__}."
             )
         input_dtype = input_.dtype if isinstance(input_, torch.Tensor) else input_._dtype
         if input_dtype is not torch.bfloat16:

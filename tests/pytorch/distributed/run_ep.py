@@ -913,9 +913,9 @@ class TestMoeEpSequential(_EpTestCase):
         if mxfp8:
             recv_tokens = _degroup_mxfp8(recv_tokens)
             recv_weights = recv_weights[: recv_tokens.shape[0]]
-        weighted_expert_output = (
-            recv_tokens.float() * recv_weights.float().unsqueeze(-1)
-        ).to(torch.bfloat16)
+        weighted_expert_output = (recv_tokens.float() * recv_weights.float().unsqueeze(-1)).to(
+            torch.bfloat16
+        )
         output = combine(
             weighted_expert_output,
             handle,
@@ -1119,9 +1119,7 @@ class TestMoeEpSequential(_EpTestCase):
             te.autocast(enabled=True, recipe=recipe) if recipe is not None else nullcontext()
         )
         with autocast_ctx:
-            model_input = (
-                self._mxfp8_quantizer()(seq_tokens) if prequantized_input else seq_tokens
-            )
+            model_input = self._mxfp8_quantizer()(seq_tokens) if prequantized_input else seq_tokens
             seq_out = model(model_input, topk_idx, seq_topk_weights)
 
         forward_ops = model._module_groups[0]._forward_ops
@@ -1229,9 +1227,7 @@ class TestMoeEpSequential(_EpTestCase):
                     )
                 else:
                     self.assertTrue(torch.isfinite(op.weight.main_grad).all())
-                    self.assertFalse(
-                        torch.all(op.weight.main_grad == main_grad_sentinel).item()
-                    )
+                    self.assertFalse(torch.all(op.weight.main_grad == main_grad_sentinel).item())
                 self.assertTrue(op.weight.grad_added_to_main_grad)
                 self.assertIsNotNone(op.weight.grad)
                 continue
