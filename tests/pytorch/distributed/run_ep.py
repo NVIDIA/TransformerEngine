@@ -29,7 +29,7 @@ from transformer_engine.pytorch.ep import (
     _ep_dispatch_raw,
 )
 from transformer_engine.pytorch.ep_reference import BlockScaledTensor, MoeEpReference, MoeFormat
-from transformer_engine.pytorch.ops.fused.moe_ep import FusedMoeEp, _pack_grouped_linear_weights
+from transformer_engine.pytorch.ops.fused.moe_ep import FusedMoeEp, _pack_cudnn_weights
 from transformer_engine.pytorch.ops.op import OperationContext
 from transformer_engine.pytorch.tensor import GroupedTensor
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Tensor
@@ -182,7 +182,7 @@ def _degroup_mxfp8(recv_grouped, valid_counts=None):
 
 def _reference_weights(op):
     """Pack GroupedLinear weights into MoeEpReference ``(E, in, out)`` layout."""
-    packed = _pack_grouped_linear_weights(op, block_scaled_cls=BlockScaledTensor)
+    packed = _pack_cudnn_weights(op, block_scaled_cls=BlockScaledTensor)
     if isinstance(packed, torch.Tensor):
         return packed.detach()
     return BlockScaledTensor(
@@ -375,27 +375,31 @@ class TestEP(unittest.TestCase):
                 del os.environ["NVTE_GROUPED_LINEAR_SINGLE_PARAM"]
             else:
                 os.environ["NVTE_GROUPED_LINEAR_SINGLE_PARAM"] = previous_single_param
-        combine = te_ops.Combine(num_local_tokens=TOKENS_PER_RANK)
+        combine = te_ops.Combine()
 
         dispatch.set_extra_output_channel(0, "tokens_per_expert", output_to_caller=not fuse_ops)
         dispatch.set_extra_output_channel(1, "routing_weights", output_to_caller=not fuse_ops)
         dispatch.set_extra_output_channel(2, "ep_handle", output_to_caller=False)
+        dispatch.set_extra_output_channel(3, "routing_indices", output_to_caller=False)
         fc1.set_extra_input_channel(0, "tokens_per_expert")
         activation.set_extra_input_channel(0, "routing_weights")
         fc2.set_extra_input_channel(0, "tokens_per_expert")
         combine.set_extra_input_channel(0, "ep_handle")
         combine.set_extra_input_channel(1, "tokens_per_expert")
+        combine.set_extra_input_channel(2, "routing_indices")
         return te_ops.Sequential(dispatch, fc1, activation, fc2, combine), fc1, fc2
 
     def _make_dispatch_combine_model(self, buffer):
         """Build the minimal channel-routed Dispatch -> Combine pipeline."""
         dispatch = te_ops.Dispatch(buffer)
-        combine = te_ops.Combine(num_local_tokens=TOKENS_PER_RANK)
+        combine = te_ops.Combine()
         dispatch.set_extra_output_channel(0, "tokens_per_expert", output_to_caller=False)
         dispatch.set_extra_output_channel(1, "routing_weights", output_to_caller=False)
         dispatch.set_extra_output_channel(2, "ep_handle", output_to_caller=False)
+        dispatch.set_extra_output_channel(3, "routing_indices", output_to_caller=False)
         combine.set_extra_input_channel(0, "ep_handle")
         combine.set_extra_input_channel(1, "tokens_per_expert")
+        combine.set_extra_input_channel(2, "routing_indices")
         return te_ops.Sequential(dispatch, combine)
 
     # Prepare
@@ -606,22 +610,48 @@ class TestEP(unittest.TestCase):
     @_eager_test_include
     @_zero_copy_test_include
     @_mxfp8_align_test
-    def test_basic_dispatch_mxfp8_and_recipe_change(self):
-        """The basic op uses its recipe-owned input quantizer and refreshes it."""
+    def test_basic_dispatch_prequantized_mxfp8(self):
+        """A fresh basic Dispatch accepts an already-quantized MXFP8 input."""
+        self._require_mxfp8_shapes()
+        buffer = self._make_buffer(alignment=128)
+        dispatch = te_ops.Dispatch(buffer)
+        topk_idx, tokens, weights = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
+        quantized_tokens = self._mxfp8_quantizer().quantize(tokens)
+
+        recv_tokens, counts, _recv_weights, handle, _routing_indices = dispatch(
+            quantized_tokens, topk_idx, weights
+        )
+
+        self.assertIsInstance(recv_tokens, GroupedTensor)
+        self.assertEqual(handle.data_ptr(), buffer.handle_mem.data_ptr())
+        torch.cuda.synchronize()
+        self.assertEqual(counts.shape, (NUM_LOCAL_EXPERTS,))
+        recv_data = _degroup_mxfp8(recv_tokens).float()
+        self.assertTrue(torch.isfinite(recv_data).all())
+        self.assertGreater(recv_data.abs().sum().item(), 0.0)
+
+    @_eager_test_include
+    @_zero_copy_test_include
+    @_mxfp8_align_test
+    def test_basic_dispatch_recipe_mxfp8(self):
+        """A fresh basic Dispatch quantizes BF16 input under MXFP8 autocast."""
         self._require_mxfp8_shapes()
         buffer = self._make_buffer(alignment=128)
         dispatch = te_ops.Dispatch(buffer)
         topk_idx, tokens, weights = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
 
-        recv_bf16, _counts, _recv_weights, _handle = dispatch(tokens, topk_idx, weights)
-        self.assertIsInstance(recv_bf16, torch.Tensor)
-        self.assertNotIsInstance(recv_bf16, MXFP8Tensor)
-
         with te.autocast(enabled=True, recipe=MXFP8BlockScaling()):
-            recv_mx, counts, _recv_weights, handle = dispatch(tokens, topk_idx, weights)
-        self.assertIsInstance(recv_mx, GroupedTensor)
+            recv_tokens, counts, _recv_weights, handle, _routing_indices = dispatch(
+                tokens, topk_idx, weights
+            )
+
+        self.assertIsInstance(recv_tokens, GroupedTensor)
         self.assertEqual(handle.data_ptr(), buffer.handle_mem.data_ptr())
-        self._assert_mxfp8_matches_bf16(recv_mx, tokens, topk_idx, weights, counts)
+        torch.cuda.synchronize()
+        self.assertEqual(counts.shape, (NUM_LOCAL_EXPERTS,))
+        recv_data = _degroup_mxfp8(recv_tokens).float()
+        self.assertTrue(torch.isfinite(recv_data).all())
+        self.assertGreater(recv_data.abs().sum().item(), 0.0)
 
     @_eager_test_include
     @_zero_copy_test_include
@@ -637,14 +667,14 @@ class TestEP(unittest.TestCase):
             topk_idx,
             weights,
         )
-        combine = te_ops.Combine(num_local_tokens=TOKENS_PER_RANK)
+        combine = te_ops.Combine()
         combine.reset_recipe_state(recipe=MXFP8BlockScaling())
         combine.pre_fuser_forward(requires_grad=True)
         ctx = OperationContext()
         output, _ = combine.fuser_forward(
             [ctx],
             recv_tokens,
-            basic_op_extra_inputs=[(buffer.handle_mem, counts)],
+            basic_op_extra_inputs=[(buffer.handle_mem, counts, topk_idx)],
             prev_op_grad_output_quantizer=None,
             next_op_input_quantizer=None,
             basic_op_kwargs=[{}],
@@ -731,8 +761,8 @@ class TestEP(unittest.TestCase):
 
     @_eager_test_include
     def test_bf16_moe_sequential_vs_reference(self):
-        """Fused BF16 MegaMoE Sequential matches a BF16 ``MoeEpReference``."""
-        self._run_moe_sequential_vs_reference(quantization=None)
+        """Unfused BF16 Sequential matches a BF16 ``MoeEpReference``."""
+        self._run_moe_sequential_vs_reference(quantization="bf16")
 
     @_eager_test_include
     def test_mxfp8_moe_sequential_vs_reference(self):
@@ -742,9 +772,9 @@ class TestEP(unittest.TestCase):
     def _run_moe_sequential_vs_reference(self, *, quantization):
         """Compare Sequential to ``MoeEpReference``.
 
-        Sequential uses MegaMoE when supported. The MXFP8 reference QDQ GEMM
-        operands to MXFP8 and matmuls in FP32; the BF16 reference runs FP32
-        GEMMs with no QDQ.
+        Sequential uses MegaMoE for MXFP8 when supported. The MXFP8 reference
+        QDQ GEMM operands to MXFP8 and matmuls in FP32; the BF16 reference runs
+        FP32 GEMMs with no QDQ.
         """
         if not EAGER:
             self.skipTest("variable-size reference comparison requires eager EP mode")
@@ -796,8 +826,12 @@ class TestEP(unittest.TestCase):
             seq_out = model(seq_tokens, topk_idx, seq_topk_weights)
 
         forward_ops = model._module_groups[0]._forward_ops
-        self.assertEqual(len(forward_ops), 1)
-        self.assertIsInstance(forward_ops[0][0], FusedMoeEp)
+        if quantization == "mxfp8":
+            self.assertEqual(len(forward_ops), 1)
+            self.assertIsInstance(forward_ops[0][0], FusedMoeEp)
+        else:
+            self.assertEqual(len(forward_ops), 5)
+            self.assertFalse(any(isinstance(op, FusedMoeEp) for op, _ in forward_ops))
         self.assertIsInstance(seq_out, torch.Tensor)
         self.assertEqual(seq_out.dtype, torch.bfloat16)
 

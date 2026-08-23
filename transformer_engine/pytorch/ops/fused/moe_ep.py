@@ -10,8 +10,9 @@ from collections.abc import Iterable, Sequence
 from typing import Any, Optional
 
 import torch
+import transformer_engine_torch as tex
 
-from ...constants import DType, MXFP8_BLOCK_SCALING_SIZE
+from ...constants import MXFP8_BLOCK_SCALING_SIZE
 from ...ep import get_ep_group
 from ...quantization import Recipe
 from ...tensor import GroupedTensor, MXFP8Quantizer, Quantizer
@@ -25,80 +26,12 @@ from ..fuser import register_forward_backward_fusion
 from ..op import FusedOperation, FusibleOperation, OperationContext
 
 
-def _grouped_weight(op: GroupedLinear) -> GroupedTensor:
-    """Return the single packed ``(E, out, in)`` parameter required by MegaMoE."""
-    if not op.single_grouped_weight or not isinstance(op.weight, GroupedTensor):
-        raise ValueError("FusedMoeEp requires GroupedLinear(single_grouped_weight=True)")
-    return op.weight
-
-
-def _pack_grouped_linear_weights(op: GroupedLinear, *, block_scaled_cls: Optional[type] = None):
-    """View a packed TE ``(E, out, in)`` weight as MegaMoE ``(E, in, out)``.
-
-    The permutation is intentionally not made contiguous. MegaMoE internally
-    permutes back to ``(E, out, in)`` before requesting contiguous storage, so
-    retaining this view lets that request reuse GroupedLinear's original packed
-    buffer. ``block_scaled_cls`` selects the ``BlockScaledTensor`` type (cuDNN
-    MegaMoE vs the PyTorch reference).
-    """
-    weight = _grouped_weight(op)
-    num_groups = op.num_groups
-    out_features = op.out_features
-    in_features = op.in_features
-    expected_data_numel = num_groups * out_features * in_features
-    if weight.rowwise_data is None or weight.rowwise_data.numel() != expected_data_numel:
-        raise ValueError(
-            "GroupedLinear weight must have compact rowwise storage with shape "
-            f"({num_groups}, {out_features}, {in_features})"
-        )
-
-    data_nk = weight.rowwise_data.view(num_groups, out_features, in_features)
-    if weight.quantizer is not None:
-        recipe = weight.quantizer._get_compatible_recipe()
-        if recipe is None or not recipe.mxfp8():
-            raise TypeError("FusedMoeEp only supports dense BF16 or MXFP8 grouped weights")
-        if weight._with_gemm_swizzled_scales:
-            raise NotImplementedError(
-                "FusedMoeEp requires unswizzled MXFP8 weight scales, got a GEMM-swizzled tensor"
-            )
-        if in_features % MXFP8_BLOCK_SCALING_SIZE != 0:
-            raise ValueError(
-                f"MXFP8 weight K={in_features} is not divisible by {MXFP8_BLOCK_SCALING_SIZE}"
-            )
-        scale_cols = in_features // MXFP8_BLOCK_SCALING_SIZE
-        expected_scale_numel = num_groups * out_features * scale_cols
-        if weight.scale_inv is None or weight.scale_inv.numel() != expected_scale_numel:
-            raise ValueError(
-                "GroupedLinear MXFP8 scales must have compact rowwise storage with shape "
-                f"({num_groups}, {out_features}, {scale_cols})"
-            )
-        if block_scaled_cls is None:
-            from cudnn.moe_ep import BlockScaledTensor as block_scaled_cls
-        packed_data = data_nk.view(torch.float8_e4m3fn).permute(0, 2, 1)
-        packed_scale = (
-            weight.scale_inv.view(num_groups, out_features, scale_cols)
-            .view(torch.float8_e8m0fnu)
-            .permute(0, 2, 1)
-        )
-        return block_scaled_cls(
-            data=packed_data,
-            scale=packed_scale,
-            format="mxfp8",
-            logical_shape=tuple(packed_data.shape),
-            axis=1,
-        )
-    return data_nk.permute(0, 2, 1)
-
-
-def _flatten_moe_weight(weight) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
-    """Split a MegaMoE weight into tensors that ``save_for_backward`` can hold."""
-    if isinstance(weight, torch.Tensor):
-        return weight, None
-    return weight.data, weight.scale
-
-
-def _restore_moe_weight(data: torch.Tensor, scale: Optional[torch.Tensor], block_scaled_cls: type):
-    """Rebuild the MegaMoE weight saved by :func:`_flatten_moe_weight`."""
+def _pack_as_cudnn_moe_tensor(
+    data: torch.Tensor,
+    scale: Optional[torch.Tensor],
+    block_scaled_cls: type,
+):
+    """Represent payload and scales using the public cuDNN MoE tensor type."""
     if scale is None:
         return data
     return block_scaled_cls(
@@ -110,67 +43,78 @@ def _restore_moe_weight(data: torch.Tensor, scale: Optional[torch.Tensor], block
     )
 
 
-def _pack_activation(
+def _pack_cudnn_activation(
     input_: torch.Tensor,
     quantizer: Optional[MXFP8Quantizer],
     block_scaled_cls: type,
 ):
-    """Represent a TE activation in the public cuDNN MoeEp format."""
+    """Pack the dispatch input in the public cuDNN MoE activation layout."""
     if quantizer is None:
         return input_
-    quantized, scale_inv = quantize_mxfp8_for_ep(input_, quantizer)
-    return block_scaled_cls(
-        data=quantized.rowwise_data.view(torch.float8_e4m3fn),
-        scale=scale_inv.view(torch.float8_e8m0fnu),
-        format="mxfp8",
-        logical_shape=tuple(input_.shape),
-        axis=1,
+    quantized, scale = quantize_mxfp8_for_ep(input_, quantizer)
+    return _pack_as_cudnn_moe_tensor(
+        quantized._rowwise_data.view(torch.float8_e4m3fn),
+        scale.view(torch.float8_e8m0fnu),
+        block_scaled_cls,
     )
 
 
-def _validate_internal_quantizers(
-    dispatch: Dispatch,
-    fc1: GroupedLinear,
-    fc2: GroupedLinear,
-    combine: Combine,
-) -> Optional[MXFP8Quantizer]:
-    """Validate quantizers hidden inside the five-op MegaMoE fusion."""
-    dispatch_quantizer = dispatch.get_input_quantizer()
-    quantizers = {
-        "Dispatch input": dispatch_quantizer,
-        "Combine grad_output": combine.get_grad_output_quantizer(),
-    }
-    for op_name, op in (("FC1", fc1), ("FC2", fc2)):
-        for group_idx in range(op.num_groups):
-            quantizers[f"{op_name} input {group_idx}"] = op.get_quantizer(
-                "forward",
-                2 * group_idx,
-            )
-            quantizers[f"{op_name} grad_output {group_idx}"] = op.get_quantizer(
-                "backward",
-                group_idx,
-            )
-    active = {name: quantizer for name, quantizer in quantizers.items() if quantizer is not None}
-    for name, quantizer in active.items():
-        if not isinstance(quantizer, MXFP8Quantizer):
-            raise TypeError(
-                f"FusedMoeEp supports MXFP8 internal quantizers only; {name} uses "
-                f"{type(quantizer).__name__}."
-            )
-        if quantizer.dtype != DType.kFloat8E4M3:
-            raise NotImplementedError(f"FusedMoeEp requires E4M3 MXFP8 for {name}.")
-    if active and len(active) != len(quantizers):
-        missing = ", ".join(name for name, quantizer in quantizers.items() if quantizer is None)
-        raise ValueError(
-            "FusedMoeEp requires either an all-BF16 boundary or a complete MXFP8 "
-            f"quantizer set; missing {missing}."
+def _pack_cudnn_weights(
+    op: GroupedLinear,
+    *,
+    block_scaled_cls: Optional[type] = None,
+):
+    """Pack a GroupedLinear ``(E, out, in)`` weight as cuDNN ``(E, in, out)``.
+
+    The permutation is intentionally not made contiguous. MegaMoE internally
+    permutes back to ``(E, out, in)`` before requesting contiguous storage, so
+    retaining this view lets quantized-model-init weights reuse their original
+    packed buffer. Dense parameters are quantized with GroupedLinear's weight
+    quantizer, matching its normal MXFP8 forward path.
+    """
+    weight = op.weight
+    num_groups = op.num_groups
+    out_features = op.out_features
+    in_features = op.in_features
+    weight_quantizer = op.get_quantizer("forward", 1)
+    if weight_quantizer is None and weight.quantizer is None:
+        return weight.rowwise_data.view(
+            num_groups,
+            out_features,
+            in_features,
+        ).permute(0, 2, 1)
+
+    if weight_quantizer is not None and weight.quantizer is None:
+        weight_quantizer.set_usage(rowwise=True)
+        weight = tex.group_quantize(
+            weight.rowwise_data.view(weight.logical_shape),
+            weight_quantizer,
+            op.num_groups,
+            None,
         )
-    return dispatch_quantizer or fc1.get_quantizer("forward", 0)
+    scale_cols = in_features // MXFP8_BLOCK_SCALING_SIZE
+    data = (
+        weight.rowwise_data.view(num_groups, out_features, in_features)
+        .view(torch.float8_e4m3fn)
+        .permute(0, 2, 1)
+    )
+    scale = (
+        weight.scale_inv.view(num_groups, out_features, scale_cols)
+        .view(torch.float8_e8m0fnu)
+        .permute(0, 2, 1)
+    )
+    if block_scaled_cls is None:
+        from cudnn.moe_ep import BlockScaledTensor as block_scaled_cls
+    return _pack_as_cudnn_moe_tensor(
+        data,
+        scale,
+        block_scaled_cls,
+    )
 
 
 def _grouped_weight_grad(op: GroupedLinear, grad: torch.Tensor) -> list[Optional[torch.Tensor]]:
     """Convert a MegaMoE ``(E, in, out)`` wgrad to one TE ``(E, out, in)`` grad."""
-    weight = _grouped_weight(op)
+    weight = op.weight
     expected_shape = (op.num_groups, op.in_features, op.out_features)
     if tuple(grad.shape) != expected_shape:
         raise RuntimeError(
@@ -242,8 +186,15 @@ def _routing_extras_internal(
     sequence when those two outputs feed exactly these ops and are not
     returned to the caller.
     """
-    tokens_per_expert, routing_weights, ep_handle = dispatch._extra_output_channels
-    if tokens_per_expert is None or routing_weights is None or ep_handle is None:
+    tokens_per_expert, routing_weights, ep_handle, routing_indices = (
+        dispatch._extra_output_channels
+    )
+    if (
+        tokens_per_expert is None
+        or routing_weights is None
+        or ep_handle is None
+        or routing_indices is None
+    ):
         return False
     if any(dispatch._extra_output_to_caller):
         return False
@@ -253,6 +204,7 @@ def _routing_extras_internal(
         and activation._extra_input_channels[0] == routing_weights
         and combine._extra_input_channels[0] == ep_handle
         and combine._extra_input_channels[1] == tokens_per_expert
+        and combine._extra_input_channels[2] == routing_indices
     )
 
 
@@ -278,7 +230,7 @@ def _megamoe_supported(buffer, fc1: GroupedLinear, fc2: GroupedLinear) -> bool:
 def _matches(window: Sequence[FusibleOperation], recipe: Optional[Recipe]) -> bool:
     if len(window) != 5:
         return False
-    if recipe is not None and not recipe.mxfp8():
+    if recipe is None or not recipe.mxfp8():
         return False
     dispatch, fc1, activation, fc2, combine = window
     if not (
@@ -290,8 +242,6 @@ def _matches(window: Sequence[FusibleOperation], recipe: Optional[Recipe]) -> bo
     ):
         return False
     buffer = dispatch.buffer
-    if combine.num_local_tokens != buffer.max_tokens_per_rank:
-        return False
     if not buffer.eager or buffer.payload_dtype is not torch.bfloat16:
         return False
     if not (_grouped_linear_supported(fc1) and _grouped_linear_supported(fc2)):
@@ -379,24 +329,18 @@ class FusedMoeEp(FusedOperation):
         topk_idx, topk_weights = basic_op_extra_inputs[0]
         if topk_weights.dtype is not torch.float32:
             raise TypeError(f"topk_weights must be float32, got {topk_weights.dtype}.")
-        with torch.no_grad():
-            input_quantizer = _validate_internal_quantizers(
-                self.dispatch,
-                self.fc1,
-                self.fc2,
-                self.basic_ops[4],
-            )
-            activation = _pack_activation(
-                input_,
-                input_quantizer,
-                self._block_scaled_cls,
-            )
-            fc1_weight = _pack_grouped_linear_weights(
-                self.fc1, block_scaled_cls=self._block_scaled_cls
-            )
-            fc2_weight = _pack_grouped_linear_weights(
-                self.fc2, block_scaled_cls=self._block_scaled_cls
-            )
+        input_quantizer = self.dispatch.get_quantizer("forward", 0)
+        activation = _pack_cudnn_activation(
+            input_,
+            input_quantizer,
+            self._block_scaled_cls,
+        )
+        fc1_weight = _pack_cudnn_weights(
+            self.fc1, block_scaled_cls=self._block_scaled_cls
+        )
+        fc2_weight = _pack_cudnn_weights(
+            self.fc2, block_scaled_cls=self._block_scaled_cls
+        )
         output, fc1_c, route_metadata = self._moe(
             activation,
             fc1_weight,
@@ -406,9 +350,9 @@ class FusedMoeEp(FusedOperation):
         )
 
         if any(ctx.requires_grad for ctx in basic_op_ctxs):
-            input_data, input_scale = _flatten_moe_weight(activation)
-            fc1_data, fc1_scale = _flatten_moe_weight(fc1_weight)
-            fc2_data, fc2_scale = _flatten_moe_weight(fc2_weight)
+            input_data, input_scale = activation.data, activation.scale
+            fc1_data, fc1_scale = fc1_weight.data, fc1_weight.scale
+            fc2_data, fc2_scale = fc2_weight.data, fc2_weight.scale
             basic_op_ctxs[0].save_for_backward(
                 input_data,
                 input_scale,
@@ -429,7 +373,7 @@ class FusedMoeEp(FusedOperation):
         if next_op_input_quantizer is not None and not is_quantized_tensor(output):
             output = next_op_input_quantizer(output)
         return output, [
-            (None, None, None),
+            (None, None, None, None),
             (),
             (),
             (),
@@ -460,13 +404,13 @@ class FusedMoeEp(FusedOperation):
             fc1_c,
             route_metadata,
         ) = basic_op_ctxs[0].saved_tensors
-        input_ = _restore_moe_weight(
+        input_ = _pack_as_cudnn_moe_tensor(
             input_data,
             input_scale,
             self._block_scaled_cls,
         )
-        fc1_weight = _restore_moe_weight(fc1_data, fc1_scale, self._block_scaled_cls)
-        fc2_weight = _restore_moe_weight(fc2_data, fc2_scale, self._block_scaled_cls)
+        fc1_weight = _pack_as_cudnn_moe_tensor(fc1_data, fc1_scale, self._block_scaled_cls)
+        fc2_weight = _pack_as_cudnn_moe_tensor(fc2_data, fc2_scale, self._block_scaled_cls)
         grad_output = maybe_dequantize(
             grad_output,
             basic_op_ctxs[0].input_dtype,

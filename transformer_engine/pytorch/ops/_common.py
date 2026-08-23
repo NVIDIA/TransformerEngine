@@ -95,18 +95,20 @@ def maybe_dequantize(
 
 
 def quantize_mxfp8_for_ep(
-    input_: torch.Tensor,
-    quantizer: MXFP8Quantizer,
+    input_: torch.Tensor | MXFP8TensorStorage,
+    quantizer: Optional[MXFP8Quantizer],
 ) -> tuple[MXFP8Tensor | MXFP8TensorStorage, torch.Tensor]:
-    """Apply an MXFP8 quantizer and expose compact rowwise scales for EP."""
+    """Return an MXFP8 input and its compact rowwise scales for EP."""
     if isinstance(input_, (MXFP8Tensor, MXFP8TensorStorage)):
         quantized = input_
     else:
+        if quantizer is None:
+            raise ValueError("An MXFP8 quantizer is required for a non-quantized EP input.")
         quantized = quantizer(input_)
     if quantized._with_gemm_swizzled_scales:
         raise ValueError("NCCL EP requires unswizzled MXFP8 scales.")
-    data = quantized.rowwise_data
-    scale_inv = quantized.scale_inv
+    data = quantized._rowwise_data
+    scale_inv = quantized._rowwise_scale_inv
     if data is None or scale_inv is None:
         raise ValueError("NCCL EP requires rowwise MXFP8 data and scales.")
     rows, hidden = input_.shape
