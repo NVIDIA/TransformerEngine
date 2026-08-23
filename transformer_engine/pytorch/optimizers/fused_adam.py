@@ -764,9 +764,7 @@ class FusedAdam(torch.optim.Optimizer):
                 if len(tensor_lists[0]) > _MAX_TENSORS_PER_MULTI_TENSOR_ADAM_CALL:
                     tensor_list_chunks = (
                         [
-                            tensors[
-                                start : start + _MAX_TENSORS_PER_MULTI_TENSOR_ADAM_CALL
-                            ]
+                            tensors[start : start + _MAX_TENSORS_PER_MULTI_TENSOR_ADAM_CALL]
                             for tensors in tensor_lists
                         ]
                         for start in range(
