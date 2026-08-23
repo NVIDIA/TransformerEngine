@@ -186,9 +186,7 @@ def _routing_extras_internal(
     sequence when those two outputs feed exactly these ops and are not
     returned to the caller.
     """
-    tokens_per_expert, routing_weights, ep_handle, routing_indices = (
-        dispatch._extra_output_channels
-    )
+    tokens_per_expert, routing_weights, ep_handle, routing_indices = dispatch._extra_output_channels
     if (
         tokens_per_expert is None
         or routing_weights is None
@@ -335,12 +333,8 @@ class FusedMoeEp(FusedOperation):
             input_quantizer,
             self._block_scaled_cls,
         )
-        fc1_weight = _pack_cudnn_weights(
-            self.fc1, block_scaled_cls=self._block_scaled_cls
-        )
-        fc2_weight = _pack_cudnn_weights(
-            self.fc2, block_scaled_cls=self._block_scaled_cls
-        )
+        fc1_weight = _pack_cudnn_weights(self.fc1, block_scaled_cls=self._block_scaled_cls)
+        fc2_weight = _pack_cudnn_weights(self.fc2, block_scaled_cls=self._block_scaled_cls)
         output, fc1_c, route_metadata = self._moe(
             activation,
             fc1_weight,

@@ -58,8 +58,7 @@ def _validate_dispatch_input(
     is_mxfp8 = isinstance(input_, MXFP8TensorStorage)
     if is_quantized_tensor(input_) and not is_mxfp8:
         raise TypeError(
-            "NCCL EP Dispatch supports BF16 and MXFP8 inputs, "
-            f"got {type(input_).__name__}."
+            f"NCCL EP Dispatch supports BF16 and MXFP8 inputs, got {type(input_).__name__}."
         )
 
     input_shape = tuple(input_.shape)
@@ -378,9 +377,7 @@ class Dispatch(BasicOperation):
             ctx.prev_op_grad_output_quantizer = prev_op_grad_output_quantizer
             ctx.save_for_backward(self.buffer.handle_mem)
 
-        return output, [
-            (tokens_per_expert, recv_topk_weights, self.buffer.handle_mem, topk_idx)
-        ]
+        return output, [(tokens_per_expert, recv_topk_weights, self.buffer.handle_mem, topk_idx)]
 
     def fuser_backward(
         self,

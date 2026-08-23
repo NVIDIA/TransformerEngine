@@ -62,9 +62,7 @@ def _validate_combine_inputs(
     if tokens_per_expert.dtype is not torch.int64 or tokens_per_expert.device != input_.device:
         raise ValueError("Combine tokens_per_expert must be an int64 tensor on the input device.")
     if topk_idx.ndim != 2:
-        raise ValueError(
-            f"Combine routing indices must be 2D, got shape {tuple(topk_idx.shape)}."
-        )
+        raise ValueError(f"Combine routing indices must be 2D, got shape {tuple(topk_idx.shape)}.")
     if topk_idx.dtype not in (torch.int32, torch.int64) or topk_idx.device != input_.device:
         raise ValueError(
             "Combine routing indices must be an int32 or int64 tensor on the input device."
