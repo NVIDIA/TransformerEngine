@@ -467,8 +467,8 @@ void group_quantize_fwd_host_aware_helper(const NVTETensor input, NVTETensor *ou
           NVTE_CHECK(
               static_cast<float>(output_tensor->get_nvfp4_scale_max()) == typeToMax(scale_dtype),
               "NVFP4 quantization with non-default scale max is only supported with 4over6 "
-              "(expected ", typeToMax(scale_dtype), ", found ",
-              output_tensor->get_nvfp4_scale_max(), ").");
+              "(expected ",
+              typeToMax(scale_dtype), ", found ", output_tensor->get_nvfp4_scale_max(), ").");
         }
       }
       NVTE_CHECK(!quant_config_cpp.nvfp4_2d_quantization,
