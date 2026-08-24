@@ -2099,6 +2099,18 @@ qkv_layout_fp8_vs_f16 = ["sbh3d", "bshd_bshd_bshd", "sbhd_sbhd_sbhd", "thd_thd_t
 qkv_format_fp8_vs_f16 = ["bshd", "sbhd", "thd"]
 
 
+def _get_fp8_vs_f16_config(model, qkv_layout):
+    config = copy.copy(model_configs_fp8_vs_f16[model])
+    # THD is variable-length, so it requires the corresponding padding-aware mask type.
+    if qkv_layout.startswith("thd"):
+        config.attn_mask_type = {
+            "no_mask": "padding",
+            "causal": "padding_causal",
+            "causal_bottom_right": "padding_causal_bottom_right",
+        }.get(config.attn_mask_type, config.attn_mask_type)
+    return config
+
+
 @pytest.mark.skipif(get_cudnn_version() < (9, 2, 1), reason="cuDNN 9.2.1+ is required.")
 @pytest.mark.skipif(not fp8_attn_available, reason=reason_for_no_fp8_attn)
 @pytest.mark.parametrize("dtype", param_types_fp8_vs_f16)
@@ -2121,7 +2133,7 @@ def test_mha_fp8_vs_f16(
 ):
     """Test MultiHeadAttention module in FP8"""
     os.environ["NVTE_FP8_DPA_BWD"] = "1" if fp8_dpa_bwd else "0"
-    config = model_configs_fp8_vs_f16[model]
+    config = _get_fp8_vs_f16_config(model, qkv_format)
 
     # Test backend availability
     if scaling_mode == "delayed":
@@ -2384,7 +2396,7 @@ def _run_mha_fp8_vs_f16(
 @pytest.mark.parametrize("scaling_mode", ["delayed", "current", "mxfp8"])
 def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training, scaling_mode):
     """Test DotProductAttention module in FP8"""
-    config = model_configs_fp8_vs_f16[model]
+    config = _get_fp8_vs_f16_config(model, qkv_layout)
 
     # TODO(cyang): think of another way to verify dropout results
     # test cuDNN FP8 dropout
