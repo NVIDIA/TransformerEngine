@@ -357,10 +357,9 @@ def test_fused_attn_graph_cache():
             if actual is None:
                 actual = events[phase][(pass_name, event)]
             ok = actual >= 1 if expected == "1+" else actual == expected
-            assert ok, (
-                f"{pass_name} {phase}: expected {event}={expected}, got {actual}"
-                f" ({reason}){context}"
-            )
+            assert (
+                ok
+            ), f"{pass_name} {phase}: expected {event}={expected}, got {actual} ({reason}){context}"
 
         expect("query", "MISS", 1, "expected one cold miss")
         expect("query", "CREATE_GRAPH", 1, "expected one build")
