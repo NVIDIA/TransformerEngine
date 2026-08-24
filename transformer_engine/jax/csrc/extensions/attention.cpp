@@ -66,9 +66,14 @@ void PrepareFusedAttnForwardAuxTensors(NVTETensorPack *tensor_pack, const size_t
   // arbitrary sequence length backend needs the RNG state and a different shape/dtype softmax
   if (backend == NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen) {
     int size = 1;  // Start after softmax.
+    auto next_aux_tensor = [&]() -> NVTETensor & {
+      NVTE_CHECK(size < NVTETensorPack::MAX_SIZE,
+                 "Fused attention auxiliary tensor pack capacity exceeded.");
+      return tensor_pack->tensors[size++];
+    };
 
     if (max_logits_buf != nullptr) {
-      NVTETensor &max_aux = tensor_pack->tensors[size++];
+      NVTETensor &max_aux = next_aux_tensor();
       NVTEBasicTensor max_aux_data;
       max_aux_data.data_ptr = max_logits_buf;
       max_aux_data.shape = {};
@@ -81,7 +86,7 @@ void PrepareFusedAttnForwardAuxTensors(NVTETensorPack *tensor_pack, const size_t
       nvte_set_tensor_param(&max_aux, kNVTERowwiseData, &max_aux_data);
     }
 
-    NVTETensor &rng_state_aux = tensor_pack->tensors[size++];
+    NVTETensor &rng_state_aux = next_aux_tensor();
     NVTEBasicTensor rng_state_aux_data;
     rng_state_aux_data.data_ptr = rng_state_buf;
     rng_state_aux_data.shape = {};
@@ -94,8 +99,7 @@ void PrepareFusedAttnForwardAuxTensors(NVTETensorPack *tensor_pack, const size_t
 
     // include bias if enabled
     if (bias_type != NVTE_Bias_Type::NVTE_NO_BIAS && bias_type != NVTE_Bias_Type::NVTE_ALIBI) {
-      NVTETensor &bias_aux = tensor_pack->tensors[size];
-      size++;
+      NVTETensor &bias_aux = next_aux_tensor();
       NVTEBasicTensor bias_aux_data;
       bias_aux_data.data_ptr = bias_buf;
       bias_aux_data.shape.ndim = 4;
@@ -109,8 +113,7 @@ void PrepareFusedAttnForwardAuxTensors(NVTETensorPack *tensor_pack, const size_t
 
     // include softmax_offset if provided
     if (softmax_offset_buf != nullptr) {
-      NVTETensor &softmax_offset_aux = tensor_pack->tensors[size];
-      size++;
+      NVTETensor &softmax_offset_aux = next_aux_tensor();
       NVTEBasicTensor softmax_offset_aux_data;
       softmax_offset_aux_data.data_ptr = softmax_offset_buf;
       softmax_offset_aux_data.shape.ndim = 4;
