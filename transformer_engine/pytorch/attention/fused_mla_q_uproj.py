@@ -213,8 +213,7 @@ class FusedMLAQUpProjRopeQuant:
                 " recipes."
             )
             # ---- FP8 projection: MXFP8 x straight from the norm + w's fp8 codes -> mxfp8in ----
-            # x carries both usages: rowwise feeds this GEMM, columnwise the FP8 wgrad in
-            # backward, matching the unfused path.
+            # x carries both usages: rowwise feeds this GEMM, columnwise the FP8 wgrad in backward.
             x_mxfp8 = x
             assert isinstance(x_mxfp8, QuantizedTensor) and hasattr(x_mxfp8, "_rowwise_data"), (
                 "FusedMLAQUpProjRopeQuant needs an MXFP8-quantized input on the FP8 path, got"
@@ -356,22 +355,7 @@ class FusedMLAQUpProjRopeQuant:
 
 
 class FusedMLAQUpProjFunction(torch.autograd.Function):
-    """Fused Q up-proj: q_layernorm -> (GEMM + per-head RoPE + MXFP8) -> MXFP8Tensor Q.
-
-    The normalization is part of this node rather than a separate module in front of it,
-    which is what keeps the fused path numerically identical to the unfused one.
-    `TELayerNormColumnParallelLinear` hands its input quantizer to the norm kernel, so MXFP8
-    is produced in a single step from the FP32 accumulator.  A standalone norm emits BF16 and
-    a separate quantize rounds a second time; under `NVTE_NORM_FWD_USE_CUDNN=1` (the MLPerf
-    default) that moves ~3.3% of the E4M3 codes and also perturbs the `rsigma` the norm
-    backward consumes.  Absorbing the norm here reproduces the single-round behaviour.
-
-    Backward is RoPE bwd, then the projection bwd, then the norm bwd on the saved `rsigma`.
-
-    Scope: RMSNorm at TP=1.  LayerNorm additionally needs `mu` saved in forward, and TP>1
-    needs a sequence gather between the norm and the GEMM, which cannot happen inside a
-    single autograd node.
-    """
+    """Fused Q up-proj: q -> (layernorm + MXFP8 quant) -> (GEMM + per-head RoPE + MXFP8) -> MXFP8Tensor Q."""
 
     @staticmethod
     def forward(
@@ -415,9 +399,8 @@ class FusedMLAQUpProjFunction(torch.autograd.Function):
         fp8 = isinstance(w_q, QuantizedTensor)
 
         # Matches LayerNormLinear's input quantizer with one deliberate difference:
-        # optimize_for_gemm stays off, because the cuDNN kernel reads the rowwise scales as a
-        # plain [tokens, K//32] array.  Swizzling is a layout change only, so leaving it off
-        # does not alter a single quantized value.
+        # optimize_for_gemm stays off, because the fused GEMM+RoPE+Quant cuDNN kernel reads the rowwise scales as a
+        # plain [tokens, K//32] array.
         x_quantizer = None
         if fp8:
             x_quantizer = MXFP8Quantizer(
