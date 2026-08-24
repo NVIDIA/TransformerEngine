@@ -13,7 +13,7 @@
 
 #include <cstdlib>
 
-#include "../../../util/ptx.cuh"
+#include "../../../util/ptx_arch_spec.cuh"
 #include "../swizzle.cuh"  // gemm_swizzled_scale_idx (parent dir, GEMM scale swizzle)
 #include "state_counter.cuh"
 #include "swizzle.cuh"  // specialized/swizzle.cuh (TMA input bank-conflict swizzle)
