@@ -586,7 +586,7 @@ class _EpPrepareAndDispatch(torch.autograd.Function):
             recv_scale_inv = outs[2] if is_scaled else None
         else:
             device = tokens_data.device
-            zero_copy = tex.ep_get_zero_copy()
+            zero_copy = buffer.zero_copy
             if is_scaled:
                 # recv data + scales share one buffer (data then scales); carve or allocate here.
                 recv_tokens, recv_scale_inv = _scale_alloc_io(
@@ -629,9 +629,10 @@ class _EpPrepareAndDispatch(torch.autograd.Function):
         ctx.hidden_dim = hidden
         ctx.eager = eager
         # Detach so the long-lived buffers aren't tracked as differentiable outputs; autograd
-        # re-attaches grad_fn pointing back at this Function. For scaled inputs the expert-major
-        # recv data + scales are wrapped into a per-expert GroupedTensor so downstream grouped GEMM
-        # and autograd see a proper quantized grouped tensor.
+        # re-attaches grad_fn pointing back at this Function. Eager recv tensors are freshly built
+        # in C++ (requires_grad=False, no input alias), so skip detach and its Python->C++ hop.
+        # For scaled inputs the expert-major recv data + scales are wrapped into a per-expert
+        # GroupedTensor so downstream grouped GEMM and autograd see a proper quantized grouped tensor.
         if is_scaled:
             recv_out = _make_grouped_mxfp8(
                 recv_tokens.view(tokens._rowwise_data.dtype),
@@ -640,7 +641,9 @@ class _EpPrepareAndDispatch(torch.autograd.Function):
                 tokens._fp8_dtype,
                 tokens.dtype,
             )
-            return recv_out, recv_topk_weights.detach()
+            return recv_out, recv_topk_weights if eager else recv_topk_weights.detach()
+        if eager:
+            return recv_tokens, recv_topk_weights
         return recv_tokens.detach(), recv_topk_weights.detach()
 
     @staticmethod
@@ -710,7 +713,7 @@ class _EpCombine(torch.autograd.Function):
         token_counts = buffer.tokens_per_expert
         eager = buffer.eager
         device = expert_out.device
-        zero_copy = tex.ep_get_zero_copy()
+        zero_copy = buffer.zero_copy
         result = torch.empty(
             num_local_tokens, buffer.hidden_dim, dtype=expert_out.dtype, device=device
         )
