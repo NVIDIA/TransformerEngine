@@ -1412,6 +1412,7 @@ def _fused_attn_bwd_rule(
         None,
     )
 
+
 _fused_attn.defvjp(_fused_attn_fwd_rule, _fused_attn_bwd_rule)
 
 

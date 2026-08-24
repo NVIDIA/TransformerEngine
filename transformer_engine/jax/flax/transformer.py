@@ -789,9 +789,7 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
         # Use fused attn (if kernel check below passes) by default
         enable_fused_attn = int(os.getenv("NVTE_FUSED_ATTN", "1"))
         if self.return_max_logit and not enable_fused_attn:
-            raise ValueError(
-                "return_max_logit requires fused attention, but NVTE_FUSED_ATTN=0."
-            )
+            raise ValueError("return_max_logit requires fused attention, but NVTE_FUSED_ATTN=0.")
 
         sequence_dim = 0 if self.transpose_batch_sequence else 1
         seqlen_q = query.shape[sequence_dim]
@@ -950,7 +948,9 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
                 score_mod_bprop_tensors=score_mod_bprop_tensors,
             )
         output = x[0] if self.return_max_logit else x
-        assert output.dtype == input_dtype, f"output_dtype={output.dtype}, input_dtype={input_dtype}"
+        assert (
+            output.dtype == input_dtype
+        ), f"output_dtype={output.dtype}, input_dtype={input_dtype}"
         return x
 
 

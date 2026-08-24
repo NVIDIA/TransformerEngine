@@ -1022,9 +1022,7 @@ class FusedAttnRunner:
             primitive_out = self.cp_inverse_reorder_fn(primitive_out)
 
         if return_max_logit:
-            reference_max_logit = jax_dpa(
-                *args, is_max_logit_enabled=True, **reference_kwargs
-            )
+            reference_max_logit = jax_dpa(*args, is_max_logit_enabled=True, **reference_kwargs)
 
         if check_output and not (self.is_training and self.dropout_prob > 0.0):
             reference_out = jax_dpa(*args, **reference_kwargs)
@@ -1302,6 +1300,7 @@ class FusedAttnRunner:
             with self.mesh, autocast(mesh_resource=self.mesh_resource):
                 target_hlo = jitted_primitive.lower(*customcall_args).compile().as_text()
             assert_equal_collectives(target_hlo, self.coll_count_ref)
+
 
 FUSED_ATTN_MAX_LOGIT_QKV_LAYOUTS = [
     pytest.param(
