@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import atexit
 import warnings
+from dataclasses import dataclass
 from typing import Optional, TYPE_CHECKING
 
 import torch
@@ -525,6 +526,168 @@ def _ep_combine_raw(buffer: "EpBuffer", expert_out: torch.Tensor, result: torch.
 # autograd.Function wrappers
 
 
+@dataclass
+class _DispatchState:
+    """Backward state + output-shaping flags for the prepare-and-dispatch op. ``handle_mem`` is
+    buffer-owned and mutated in place, so it rides here as a plain attribute rather than through
+    save_for_backward (which would version-track it). The autograd wrapper stashes this on ctx;
+    other callers keep it however they manage backward state."""
+
+    handle_mem: torch.Tensor
+    tokens_shape: torch.Size
+    topk_weights_shape: torch.Size
+    tokens_T_flat: int
+    topk_T_flat: int
+    top_k: int
+    hidden_dim: int
+    eager: bool
+    is_scaled: bool
+
+
+def _ep_prepare_and_dispatch_fwd(
+    tokens: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_idx: torch.Tensor,
+    buffer: "EpBuffer",
+    recv_tokens: Optional[torch.Tensor],
+    recv_topk_weights: Optional[torch.Tensor],
+    tokens_scale_inv: Optional[torch.Tensor],
+):
+    """Validate inputs, size/allocate the recv outputs, and run prepare+dispatch. Eager sizes recv
+    from the host count; otherwise recv uses the buffer static recv capacity. Returns the recv
+    output (a per-expert GroupedTensor for MXFP8, else the raw recv tokens), the recv topk weights,
+    and a _DispatchState for backward. No autograd; the caller owns context handling."""
+    handle_mem = buffer.handle_mem
+    tokens_per_expert = buffer.tokens_per_expert
+    total_recv_tokens = buffer.total_recv_tokens
+    top_k = buffer.top_k
+    alignment = buffer.alignment
+    eager = buffer.eager
+    num_recv_tokens = buffer.recv_capacity_per_rank
+    payload_dtype = buffer.payload_dtype
+    is_scaled = tokens_scale_inv is not None
+    tokens_data = tokens._rowwise_data if isinstance(tokens, QuantizedTensor) else tokens
+    assert tokens_data.dim() == 2, "EP dispatch tokens must be 2D [num_tokens, hidden]"
+    hidden = tokens_data.shape[-1]
+    if is_scaled and tokens._fp8_dtype != tex.DType.kFloat8E4M3:
+        raise NotImplementedError("EP dispatch supports only E4M3 MXFP8 tokens for now.")
+    # Reinterpret byte-backed FP8 data as the fp8 dtype so the backend sees a scaled tensor.
+    dispatch_tokens = tokens_data.view(torch.float8_e4m3fn) if is_scaled else tokens_data
+
+    recv_scale_inv = None
+    if eager:
+        # The C++ op sizes and allocates the recv outputs from the host recv-count and returns
+        # them (called directly, not via torch.library: eager forbids graph capture).
+        outs = tex.ep_prepare_and_dispatch(
+            handle_mem,
+            topk_idx,
+            dispatch_tokens,
+            topk_weights,
+            tokens_per_expert,
+            total_recv_tokens,
+            top_k,
+            alignment,
+            tokens_scale_inv=tokens_scale_inv,
+        )
+        recv_tokens, recv_topk_weights = outs[0], outs[1]
+        recv_scale_inv = outs[2] if is_scaled else None
+    else:
+        device = tokens_data.device
+        zero_copy = buffer.zero_copy
+        if is_scaled:
+            # recv data + scales share one buffer (data then scales); carve or allocate here.
+            recv_tokens, recv_scale_inv = _scale_alloc_io(
+                recv_tokens,
+                num_recv_tokens,
+                hidden,
+                tokens_scale_inv.shape[-1],
+                tokens_data.dtype,
+                tokens_scale_inv.dtype,
+                device,
+                zero_copy,
+            )
+        elif recv_tokens is None:
+            recv_tokens = _alloc_io((num_recv_tokens, hidden), payload_dtype, device, zero_copy)
+        if recv_topk_weights is None:
+            recv_topk_weights = _alloc_io((num_recv_tokens,), torch.float32, device, zero_copy)
+        dispatch_recv = recv_tokens.view(torch.float8_e4m3fn) if is_scaled else recv_tokens
+        torch.ops.transformer_engine_ep.prepare_and_dispatch(
+            handle_mem,
+            topk_idx,
+            dispatch_tokens,
+            topk_weights,
+            tokens_per_expert,
+            total_recv_tokens,
+            top_k,
+            alignment,
+            dispatch_recv,
+            recv_topk_weights,
+            recv_scale_inv,
+            tokens_scale_inv,
+        )
+    state = _DispatchState(
+        handle_mem=handle_mem,
+        tokens_shape=tokens.shape,
+        topk_weights_shape=topk_weights.shape,
+        tokens_T_flat=tokens_data.shape[0],
+        topk_T_flat=topk_weights.numel() // topk_weights.shape[-1],
+        top_k=topk_weights.shape[-1],
+        hidden_dim=hidden,
+        eager=eager,
+        is_scaled=is_scaled,
+    )
+    # For scaled inputs the expert-major recv data + scales are wrapped into a per-expert
+    # GroupedTensor so downstream grouped GEMM and autograd see a proper quantized grouped tensor.
+    if is_scaled:
+        recv_out = _make_grouped_mxfp8(
+            recv_tokens.view(tokens._rowwise_data.dtype),
+            recv_scale_inv,
+            tokens_per_expert,
+            tokens._fp8_dtype,
+            tokens.dtype,
+        )
+        return recv_out, recv_topk_weights, state
+    return recv_tokens, recv_topk_weights, state
+
+
+def _ep_dispatch_bwd(
+    state: "_DispatchState",
+    g_recv_tokens: torch.Tensor,
+    g_recv_topk_weights: torch.Tensor,
+):
+    """Run dispatch_bwd and reshape the grads to the forward input layout. Returns
+    ``(grad_tokens, grad_topk_weights)``. No autograd; the caller owns context handling."""
+    handle_mem = state.handle_mem
+    device = handle_mem.device
+    g_recv_tokens = g_recv_tokens.contiguous()
+    g_recv_topk_weights = g_recv_topk_weights.contiguous()
+    # Dispatch grad follows the recv grad's (high-precision) dtype; the quantizer's STE
+    # owns the fp8 boundary for scaled inputs.
+    grad_tokens = torch.empty(
+        state.tokens_T_flat, state.hidden_dim, dtype=g_recv_tokens.dtype, device=device
+    )
+    grad_topk_weights = torch.empty(
+        state.topk_T_flat, state.top_k, dtype=torch.float32, device=device
+    )
+    # Eager is not graph-capturable, so call the backend op directly and skip torch.library.
+    if state.eager:
+        tex.ep_dispatch_bwd(
+            handle_mem, g_recv_tokens, g_recv_topk_weights, grad_tokens, grad_topk_weights
+        )
+    else:
+        torch.ops.transformer_engine_ep.dispatch_bwd(
+            handle_mem,
+            g_recv_tokens,
+            g_recv_topk_weights,
+            grad_tokens,
+            grad_topk_weights,
+        )
+    return (
+        grad_tokens.view(state.tokens_shape),
+        grad_topk_weights.view(state.topk_weights_shape),
+    )
+
+
 class _EpPrepareAndDispatch(torch.autograd.Function):
     """Autograd prepare and dispatch grouped into one C++ op (two kernel launches, not a fused
     kernel). In eager mode the op sizes and allocates the recv outputs from the per-step host
@@ -533,7 +696,8 @@ class _EpPrepareAndDispatch(torch.autograd.Function):
     static recv capacity (caller-supplied or symm-mem-backed under zero-copy) and passed in. When
     ``tokens_scale_inv`` is set (MXFP8 for now), ``tokens`` is the quantized tensor kept as the
     autograd operand so grad reaches the pre-quant input, and recv is returned as a per-expert
-    GroupedTensor."""
+    GroupedTensor. The compute lives in ``_ep_prepare_and_dispatch_fwd`` / ``_ep_dispatch_bwd``;
+    this wrapper only bridges autograd context handling."""
 
     @staticmethod
     def forward(  # type: ignore[override]
@@ -546,137 +710,31 @@ class _EpPrepareAndDispatch(torch.autograd.Function):
         recv_topk_weights: Optional[torch.Tensor] = None,
         tokens_scale_inv: Optional[torch.Tensor] = None,
     ):
-        """Fused prepare and dispatch forward. Eager sizes recv from the host count; otherwise recv
-        uses the buffer static recv capacity. Only tokens and topk_weights are differentiable, so
-        the non-diff buffer tensors ride on the buffer object to keep the autograd operand list short.
-        """
-        handle_mem = buffer.handle_mem
-        tokens_per_expert = buffer.tokens_per_expert
-        total_recv_tokens = buffer.total_recv_tokens
-        top_k = buffer.top_k
-        alignment = buffer.alignment
-        eager = buffer.eager
-        num_recv_tokens = buffer.recv_capacity_per_rank
-        payload_dtype = buffer.payload_dtype
-        is_scaled = tokens_scale_inv is not None
-        tokens_data = tokens._rowwise_data if isinstance(tokens, QuantizedTensor) else tokens
-        assert tokens_data.dim() == 2, "EP dispatch tokens must be 2D [num_tokens, hidden]"
-        hidden = tokens_data.shape[-1]
-        if is_scaled and tokens._fp8_dtype != tex.DType.kFloat8E4M3:
-            raise NotImplementedError("EP dispatch supports only E4M3 MXFP8 tokens for now.")
-        # Reinterpret byte-backed FP8 data as the fp8 dtype so the backend sees a scaled tensor.
-        dispatch_tokens = tokens_data.view(torch.float8_e4m3fn) if is_scaled else tokens_data
-
-        recv_scale_inv = None
-        if eager:
-            # The C++ op sizes and allocates the recv outputs from the host recv-count and returns
-            # them (called directly, not via torch.library: eager forbids graph capture).
-            outs = tex.ep_prepare_and_dispatch(
-                handle_mem,
-                topk_idx,
-                dispatch_tokens,
-                topk_weights,
-                tokens_per_expert,
-                total_recv_tokens,
-                top_k,
-                alignment,
-                tokens_scale_inv=tokens_scale_inv,
-            )
-            recv_tokens, recv_topk_weights = outs[0], outs[1]
-            recv_scale_inv = outs[2] if is_scaled else None
-        else:
-            device = tokens_data.device
-            zero_copy = buffer.zero_copy
-            if is_scaled:
-                # recv data + scales share one buffer (data then scales); carve or allocate here.
-                recv_tokens, recv_scale_inv = _scale_alloc_io(
-                    recv_tokens,
-                    num_recv_tokens,
-                    hidden,
-                    tokens_scale_inv.shape[-1],
-                    tokens_data.dtype,
-                    tokens_scale_inv.dtype,
-                    device,
-                    zero_copy,
-                )
-            elif recv_tokens is None:
-                recv_tokens = _alloc_io((num_recv_tokens, hidden), payload_dtype, device, zero_copy)
-            if recv_topk_weights is None:
-                recv_topk_weights = _alloc_io((num_recv_tokens,), torch.float32, device, zero_copy)
-            dispatch_recv = recv_tokens.view(torch.float8_e4m3fn) if is_scaled else recv_tokens
-            torch.ops.transformer_engine_ep.prepare_and_dispatch(
-                handle_mem,
-                topk_idx,
-                dispatch_tokens,
-                topk_weights,
-                tokens_per_expert,
-                total_recv_tokens,
-                top_k,
-                alignment,
-                dispatch_recv,
-                recv_topk_weights,
-                recv_scale_inv,
-                tokens_scale_inv,
-            )
-        # Stash handle_mem as a plain attribute instead of save_for_backward: it is buffer-owned
-        # and mutated in place, so version tracking would falsely trip the backward inplace check.
-        ctx.handle_mem = handle_mem
-        ctx.tokens_shape = tokens.shape
-        ctx.topk_weights_shape = topk_weights.shape
-        ctx.tokens_T_flat = tokens_data.shape[0]
-        ctx.topk_T_flat = topk_weights.numel() // topk_weights.shape[-1]
-        ctx.top_k = topk_weights.shape[-1]
-        ctx.hidden_dim = hidden
-        ctx.eager = eager
+        """Only tokens and topk_weights are differentiable, so the non-diff buffer tensors ride on
+        the buffer object to keep the autograd operand list short."""
+        recv_out, recv_topk_weights, state = _ep_prepare_and_dispatch_fwd(
+            tokens, topk_weights, topk_idx, buffer, recv_tokens, recv_topk_weights, tokens_scale_inv
+        )
+        ctx.state = state
         # Detach so the long-lived buffers aren't tracked as differentiable outputs; autograd
         # re-attaches grad_fn pointing back at this Function. Eager recv tensors are freshly built
-        # in C++ (requires_grad=False, no input alias), so skip detach and its Python->C++ hop.
-        # For scaled inputs the expert-major recv data + scales are wrapped into a per-expert
-        # GroupedTensor so downstream grouped GEMM and autograd see a proper quantized grouped tensor.
-        if is_scaled:
-            recv_out = _make_grouped_mxfp8(
-                recv_tokens.view(tokens._rowwise_data.dtype),
-                recv_scale_inv,
-                tokens_per_expert,
-                tokens._fp8_dtype,
-                tokens.dtype,
-            )
-            return recv_out, recv_topk_weights if eager else recv_topk_weights.detach()
-        if eager:
-            return recv_tokens, recv_topk_weights
-        return recv_tokens.detach(), recv_topk_weights.detach()
+        # in C++ (requires_grad=False, no input alias), so skip detach and its Python->C++ hop. The
+        # scaled recv is a freshly built GroupedTensor, so only its topk weights need detaching.
+        if state.is_scaled:
+            return recv_out, recv_topk_weights if state.eager else recv_topk_weights.detach()
+        if state.eager:
+            return recv_out, recv_topk_weights
+        return recv_out.detach(), recv_topk_weights.detach()
 
     @staticmethod
     def backward(ctx, g_recv_tokens, g_recv_topk_weights):  # type: ignore[override]
         """Dispatch bwd: run dispatch_bwd and reshape grads to the fwd input layout."""
-        handle_mem = ctx.handle_mem
-        device = handle_mem.device
-        g_recv_tokens = g_recv_tokens.contiguous()
-        g_recv_topk_weights = g_recv_topk_weights.contiguous()
-        # Dispatch grad follows the recv grad's (high-precision) dtype; the quantizer's STE
-        # owns the fp8 boundary for scaled inputs.
-        grad_tokens = torch.empty(
-            ctx.tokens_T_flat, ctx.hidden_dim, dtype=g_recv_tokens.dtype, device=device
+        grad_tokens, grad_topk_weights = _ep_dispatch_bwd(
+            ctx.state, g_recv_tokens, g_recv_topk_weights
         )
-        grad_topk_weights = torch.empty(
-            ctx.topk_T_flat, ctx.top_k, dtype=torch.float32, device=device
-        )
-        # Eager is not graph-capturable, so call the backend op directly and skip torch.library.
-        if ctx.eager:
-            tex.ep_dispatch_bwd(
-                handle_mem, g_recv_tokens, g_recv_topk_weights, grad_tokens, grad_topk_weights
-            )
-        else:
-            torch.ops.transformer_engine_ep.dispatch_bwd(
-                handle_mem,
-                g_recv_tokens,
-                g_recv_topk_weights,
-                grad_tokens,
-                grad_topk_weights,
-            )
         return (
-            grad_tokens.view(ctx.tokens_shape),
-            grad_topk_weights.view(ctx.topk_weights_shape),
+            grad_tokens,
+            grad_topk_weights,
             None,  # topk_idx
             None,  # buffer
             None,  # recv_tokens
@@ -685,16 +743,111 @@ class _EpPrepareAndDispatch(torch.autograd.Function):
         )
 
 
+@dataclass
+class _CombineState:
+    """Backward state for the combine op. ``grad_out`` and ``handle_mem`` ride here as plain
+    attributes rather than through save_for_backward, which would version-track tensors we mutate.
+    The autograd wrapper stashes this on ctx; other callers keep it however they manage state."""
+
+    handle_mem: torch.Tensor
+    grad_out: Optional[torch.Tensor]
+    bwd_quant_recipe: object
+    token_counts: torch.Tensor
+    expert_out_shape: torch.Size
+    expert_out_dtype: torch.dtype
+    device: torch.device
+    eager: bool
+    zero_copy: bool
+
+
+def _ep_combine_fwd(
+    expert_out: torch.Tensor,
+    grad_out: Optional[torch.Tensor],
+    buffer: "EpBuffer",
+    num_local_tokens: int,
+    bwd_quant_recipe,
+):
+    """Run combine and return ``(result, _CombineState)``. Eager mode is not graph-capturable, so
+    it calls the backend op directly and skips the torch.library dispatch. No autograd; the caller
+    owns context handling."""
+    handle_mem = buffer.handle_mem
+    eager = buffer.eager
+    device = expert_out.device
+    result = torch.empty(num_local_tokens, buffer.hidden_dim, dtype=expert_out.dtype, device=device)
+    if eager:
+        tex.ep_combine(handle_mem, expert_out, result)
+    else:
+        torch.ops.transformer_engine_ep.combine(handle_mem, expert_out, result)
+    state = _CombineState(
+        handle_mem=handle_mem,
+        grad_out=grad_out,
+        bwd_quant_recipe=bwd_quant_recipe,
+        token_counts=buffer.tokens_per_expert,
+        expert_out_shape=expert_out.shape,
+        expert_out_dtype=expert_out.dtype,
+        device=device,
+        eager=eager,
+        zero_copy=buffer.zero_copy,
+    )
+    return result, state
+
+
+def _ep_combine_bwd(state: "_CombineState", g_result: torch.Tensor):
+    """Scatter the result-grad to expert positions and return the expert_out grad. High-precision
+    sends the grad as-is; a quantized recipe (MXFP8 today) quantizes it and returns a per-expert
+    GroupedTensor. No autograd; the caller owns context handling."""
+    if not g_result.is_contiguous():
+        g_result = g_result.contiguous()
+    handle_mem = state.handle_mem
+
+    if state.bwd_quant_recipe is None:
+        grad_expert_out = state.grad_out
+        if grad_expert_out is None:
+            grad_expert_out = _alloc_io(
+                state.expert_out_shape, state.expert_out_dtype, state.device, state.zero_copy
+            )
+        if state.eager:
+            tex.ep_combine_bwd(handle_mem, g_result, grad_expert_out, None, None)
+        else:
+            torch.ops.transformer_engine_ep.combine_bwd(handle_mem, g_result, grad_expert_out)
+    else:
+        mx, g_scale_inv = _quantize_mxfp8(g_result)
+        g_data = mx._rowwise_data
+        recv_pr, hidden = state.expert_out_shape[0], state.expert_out_shape[-1]
+        ge_data, ge_scale_inv = _scale_alloc_io(
+            state.grad_out,
+            recv_pr,
+            hidden,
+            g_scale_inv.shape[-1],
+            g_data.dtype,
+            g_scale_inv.dtype,
+            state.device,
+            state.zero_copy,
+        )
+        # The backend keys on the fp8 scaling mode; reinterpret the byte-backed data as fp8.
+        g_data_fp8 = g_data.view(torch.float8_e4m3fn)
+        ge_data_fp8 = ge_data.view(torch.float8_e4m3fn)
+        if state.eager:
+            tex.ep_combine_bwd(handle_mem, g_data_fp8, ge_data_fp8, g_scale_inv, ge_scale_inv)
+        else:
+            torch.ops.transformer_engine_ep.combine_bwd(
+                handle_mem, g_data_fp8, ge_data_fp8, g_scale_inv, ge_scale_inv
+            )
+        grad_expert_out = _make_grouped_mxfp8(
+            ge_data, ge_scale_inv, state.token_counts, mx._fp8_dtype, state.expert_out_dtype
+        )
+    return grad_expert_out
+
+
 class _EpCombine(torch.autograd.Function):
     """Autograd combine; bwd scatters the expert_out grad into ``grad_out``. When the caller
     supplies it that buffer is used as-is; otherwise it is allocated in the backward from the
     symm-mem pool in zero-copy mode (one-sided target) or a plain tensor in normal mode (keeps
     allocation torch.compile / CUDA-graph safe and lets autograd own the grad's lifetime).
 
-    ``grad_out`` and ``handle_mem`` are stashed as plain ctx attributes rather than via
-    save_for_backward, which would version-track tensors we mutate. Only ``expert_out`` is
-    differentiable; the non-diff buffer tensors ride on ``buffer`` to keep the operand list short.
-    """
+    Only ``expert_out`` is differentiable; the non-diff buffer tensors ride on ``buffer`` to keep
+    the operand list short. The compute lives in ``_ep_combine_fwd`` / ``_ep_combine_bwd``; this
+    wrapper only bridges autograd context handling."""
 
     @staticmethod
     def forward(  # type: ignore[override]
@@ -705,79 +858,17 @@ class _EpCombine(torch.autograd.Function):
         num_local_tokens: int,
         bwd_quant_recipe=None,
     ):
-        """Combine fwd; stashes the bwd grad target or expert_out shape to size it. When
-        ``bwd_quant_recipe`` is set, the backward sends the result-grad as MXFP8. Eager mode is not
-        graph-capturable, so it calls the backend op directly and skips the torch.library dispatch.
-        """
-        handle_mem = buffer.handle_mem
-        token_counts = buffer.tokens_per_expert
-        eager = buffer.eager
-        device = expert_out.device
-        zero_copy = buffer.zero_copy
-        result = torch.empty(
-            num_local_tokens, buffer.hidden_dim, dtype=expert_out.dtype, device=device
+        """Combine fwd; stashes the backward state on ctx. When ``bwd_quant_recipe`` is set, the
+        backward sends the result-grad as MXFP8."""
+        result, ctx.state = _ep_combine_fwd(
+            expert_out, grad_out, buffer, num_local_tokens, bwd_quant_recipe
         )
-        if eager:
-            tex.ep_combine(handle_mem, expert_out, result)
-        else:
-            torch.ops.transformer_engine_ep.combine(handle_mem, expert_out, result)
-        ctx.handle_mem = handle_mem
-        ctx.grad_out = grad_out
-        ctx.bwd_quant_recipe = bwd_quant_recipe
-        ctx.token_counts = token_counts
-        ctx.expert_out_shape = expert_out.shape
-        ctx.expert_out_dtype = expert_out.dtype
-        ctx.device = device
-        ctx.eager = eager
-        ctx.zero_copy = zero_copy
         return result
 
     @staticmethod
     def backward(ctx, g_result):  # type: ignore[override]
-        """Combine bwd; scatters the result-grad to expert positions. High-precision sends the grad
-        as-is; a quantized recipe (MXFP8 today) quantizes it and returns the expert_out grad as a
-        per-expert GroupedTensor."""
-        if not g_result.is_contiguous():
-            g_result = g_result.contiguous()
-        handle_mem = ctx.handle_mem
-
-        if ctx.bwd_quant_recipe is None:
-            grad_expert_out = ctx.grad_out
-            if grad_expert_out is None:
-                grad_expert_out = _alloc_io(
-                    ctx.expert_out_shape, ctx.expert_out_dtype, ctx.device, ctx.zero_copy
-                )
-            if ctx.eager:
-                tex.ep_combine_bwd(handle_mem, g_result, grad_expert_out, None, None)
-            else:
-                torch.ops.transformer_engine_ep.combine_bwd(handle_mem, g_result, grad_expert_out)
-        else:
-            mx, g_scale_inv = _quantize_mxfp8(g_result)
-            g_data = mx._rowwise_data
-            recv_pr, hidden = ctx.expert_out_shape[0], ctx.expert_out_shape[-1]
-            ge_data, ge_scale_inv = _scale_alloc_io(
-                ctx.grad_out,
-                recv_pr,
-                hidden,
-                g_scale_inv.shape[-1],
-                g_data.dtype,
-                g_scale_inv.dtype,
-                ctx.device,
-                ctx.zero_copy,
-            )
-            # The backend keys on the fp8 scaling mode; reinterpret the byte-backed data as fp8.
-            g_data_fp8 = g_data.view(torch.float8_e4m3fn)
-            ge_data_fp8 = ge_data.view(torch.float8_e4m3fn)
-            if ctx.eager:
-                tex.ep_combine_bwd(handle_mem, g_data_fp8, ge_data_fp8, g_scale_inv, ge_scale_inv)
-            else:
-                torch.ops.transformer_engine_ep.combine_bwd(
-                    handle_mem, g_data_fp8, ge_data_fp8, g_scale_inv, ge_scale_inv
-                )
-            grad_expert_out = _make_grouped_mxfp8(
-                ge_data, ge_scale_inv, ctx.token_counts, mx._fp8_dtype, ctx.expert_out_dtype
-            )
-
+        """Combine bwd; scatters the result-grad to expert positions."""
+        grad_expert_out = _ep_combine_bwd(ctx.state, g_result)
         return (
             grad_expert_out,
             None,  # grad_out
