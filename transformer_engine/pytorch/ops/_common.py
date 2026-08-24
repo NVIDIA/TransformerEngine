@@ -134,9 +134,7 @@ def quantize_for_ep(
     if isinstance(input_, MXFP8TensorStorage):
         quantized = input_
     elif isinstance(input_, QuantizedTensorStorage):
-        raise TypeError(
-            f"EP MXFP8 transport requires an MXFP8 input, got {type(input_).__name__}."
-        )
+        raise TypeError(f"EP MXFP8 transport requires an MXFP8 input, got {type(input_).__name__}.")
     else:
         if quantizer is None:
             raise ValueError("An MXFP8 quantizer is required for a non-quantized EP input.")
