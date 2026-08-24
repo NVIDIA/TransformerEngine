@@ -24,6 +24,9 @@ namespace fused_attn {
 enum class Backend { F16, FP8 };
 enum class Pass { Fwd, Bwd };
 
+inline constexpr const char *backend_name(Backend b) { return b == Backend::F16 ? "f16" : "fp8"; }
+inline constexpr const char *pass_name(Pass p) { return p == Pass::Fwd ? "fwd" : "bwd"; }
+
 struct FusedAttnConfig {
   // basic attention settings
   bool is_training = true;

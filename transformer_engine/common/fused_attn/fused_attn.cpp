@@ -247,9 +247,31 @@ thread_local std::string fused_attn_backend_message_buffer;
 
 }  // namespace
 
-// Fused attention backend query: returns the backend that supports the given configuration;
-// otherwise, returns NVTE_No_Backend and a diagnostic message. It performs several TE-specific
-// checks before running the cuDNN support query.
+// Fused attention backend query: returns the backend that can run this config, or NVTE_No_Backend
+// and a diagnostic message naming what refused it. TE's own rules run first, so that a config cuDNN
+// was never going to accept is turned away before any graph is built.
+//
+// The first rule that fires wins, so the message names the earliest objection rather than every
+// one. each_pass asks Pass::Fwd when the caller wants forward support, then Pass::Bwd when training
+// and the caller wants backward, and reports the first refusal.
+//
+//   nvte_get_fused_attn_backend_v2
+//     |
+//     +-- cfg.derive(), unless the caller passed a config that is derived already
+//     |
+//     +-- rules that hold for any dtype
+//     |     `-- ragged/paged input needs a padding mask; no pre-scale bias; 64-bit ragged
+//     |         offsets need cuDNN >= 9.5
+//     |
+//     +-- FP8 (qkv_dtype e4m3/e5m2)
+//     |     |-- format, bias, ALiBi, recipe, and the MXFP8 cuDNN version floor
+//     |     `-- each_pass: support_verdict_fp8   -> NVTE_FP8
+//     |
+//     +-- F16 (qkv_dtype fp16/bf16)
+//     |     |-- two known cuDNN version bugs, on sm100 masking and on CUDA graphs
+//     |     `-- each_pass: support_verdict_f16   -> NVTE_F16_arbitrary_seqlen
+//     |
+//     `-- any other qkv_dtype                    reject
 NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend_v2(NVTEFusedAttnConfig config,
                                                        const char **message) {
   NVTE_API_CALL(nvte_get_fused_attn_backend_v2);
@@ -442,7 +464,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
 //     |           `-- get_graph(): builds and inserts the entry, or refuses with cuDNN's reason
 //     |
 //     `-- fused_attn_arbitrary_seqlen_fwd -> ..._fwd_impl   the selected backend
-//           `-- get_graph() HIT -> build_plans() -> bind device pointers, graph.execute()
+//           `-- get_graph() HIT -> build_plans() -> bind device pointers -> graph.execute()
 void nvte_fused_attn_fwd_v2(NVTEFusedAttnFwdParams params) {
   NVTE_API_CALL(nvte_fused_attn_fwd_v2);
   using namespace transformer_engine;

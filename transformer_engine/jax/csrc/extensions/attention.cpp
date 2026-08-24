@@ -318,6 +318,10 @@ pybind11::tuple GetFusedAttnForwardWorkspaceSizes(
 #define FUSED_ATTN_IMPL_COMMON_BLOCK                                                          \
   auto is_ragged = nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD;              \
   auto bias_shape = std::vector<size_t>{bias_batch, bias_heads, q_max_seqlen, kv_max_seqlen}; \
+  const bool has_bias_tensor =                                                                \
+      bias_type != NVTE_Bias_Type::NVTE_NO_BIAS && bias_type != NVTE_Bias_Type::NVTE_ALIBI;   \
+  const size_t bias_seqlen_q = has_bias_tensor ? q_max_seqlen : 0;                            \
+  const size_t bias_seqlen_kv = has_bias_tensor ? kv_max_seqlen : 0;                          \
   size_t num_segments = input_batch;                                                          \
   if (is_ragged) {                                                                            \
     auto cudnn_runtime_version = cudnnGetVersion();                                           \
@@ -384,7 +388,7 @@ static void FusedAttnForwardImpl(
       nvte_get_q_format(qkv_layout), nvte_get_q_format(qkv_layout), qkv_layout,
       NVTE_QKV_Format::NVTE_QKV_Format_NOT_SET, NVTE_QKV_Format::NVTE_QKV_Format_NOT_SET,
       input_batch, attn_heads, num_gqa_groups, qk_head_dim, v_head_dim, q_max_seqlen, kv_max_seqlen,
-      bias_batch, bias_heads, q_max_seqlen, kv_max_seqlen);
+      bias_batch, bias_heads, bias_seqlen_q, bias_seqlen_kv);
   nvte_populate_rng_state_async(rng_state, seed, q_max_seqlen, kv_max_seqlen, backend, stream);
 
   /* Auxiliary tensors (to be propagated to the backward pass later) */
@@ -715,7 +719,7 @@ static void FusedAttnBackwardImpl(
       nvte_get_q_format(qkv_layout), nvte_get_q_format(qkv_layout), qkv_layout,
       NVTE_QKV_Format::NVTE_QKV_Format_NOT_SET, NVTE_QKV_Format::NVTE_QKV_Format_NOT_SET,
       input_batch, attn_heads, num_gqa_groups, qk_head_dim, v_head_dim, q_max_seqlen, kv_max_seqlen,
-      bias_batch, bias_heads, q_max_seqlen, kv_max_seqlen);
+      bias_batch, bias_heads, bias_seqlen_q, bias_seqlen_kv);
   PrepareFusedAttnBackwardAuxTensors(&aux_input_tensors, input_batch, bias_batch, attn_heads,
                                      bias_heads, q_max_seqlen, kv_max_seqlen, dtype, backend,
                                      softmax_aux, rng_state, bias, softmax_offset);

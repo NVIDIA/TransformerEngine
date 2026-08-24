@@ -48,13 +48,13 @@ from transformer_engine_jax import (
 )
 
 from distributed_test_base import assert_equal_collectives
-from utils import assert_allclose, print_debug_tensor_stats
+from utils import assert_allclose, get_test_level, print_debug_tensor_stats
 
 # Get determinism
 _deterministic = not bool(int(os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1")))
 
 # CI test level
-_TEST_LEVEL = os.getenv("NVTE_JAX_UNITTEST_LEVEL", "L0")
+_TEST_LEVEL = get_test_level()
 
 
 @pytest.fixture(autouse=True, scope="module")

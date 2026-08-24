@@ -4,28 +4,31 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-// The fused-attention graph cache: what a cache entry is, and how one is built, cached and found
-// again. The four build sites for cuDNN graphs -- f16/fp8 crossed with fwd/bwd -- differ only in
-// what the graph computes and which tensors it binds; caching, lookup, locking, the support query
-// and the plan build are the same for all four and live here.
+// Fused-attention graph cache.
 //
-// The pieces below elide the `backend, pass` pair most of them also take: it never steers the
-// logic, only attributing debug counters and stage timings to a build site.
+// The fused-attention backend calls cuDNN frontend at four sites, (f16/fp8, fwd/bwd). They each
+// create a different graph with different computational operations and input/output tensors, but
+// they share the same mechanism for caching, support queries, error messaging, and plan building.
+// This file implements that shared mechanism and is called by all four (f16/fp8, fwd/bwd) sites.
 //
-// - CacheEntry: a graph, the tensors it binds as inputs and outputs, and a once_flag guarding its
-//   plan build.
-// - GraphCache: process-wide map from a normalized FusedAttnConfig to a CacheEntry.
-// - get_graph<backend, pass, kCreateGraphFn>(cfg, handle): the execution path's way in. Keys `cfg`
-//   and owns the cache for its one triple; kCreateGraphFn is a create_graph_f16/fp8_fwd/bwd from a
-//   .cu file, the only piece a build site supplies.
-// - support_verdict<...>(cfg, handle): the backend selector's way in. get_graph() in a try,
-//   returning the empty string when cuDNN accepts the graph and its complaint when it does not.
-// - cache_graph(cache, key, handle, build): a hit, or a build under frontend_build_mutex() and an
-//   insert. The work behind both of the above.
-// - query_support(graph, handle): takes a constructed graph through validate,
-//   build_operation_graph, create_execution_plans and check_support; throws cuDNN's message on
-//   refusal.
-// - build_plans(entry): the kernel compilation cache_graph() deferred, once per entry, no handle.
+// Cache types:
+// - CacheEntry: a cuDNN graph, the tensors it binds, and a once_flag guarding its plan build.
+// - GraphCache: a process-wide map from a normalized FusedAttnConfig to a CacheEntry.
+//
+// Internals (namespace detail):
+// - query_support(graph, handle): takes a constructed graph through a series of cuDNN frontend calls:
+//   validate, build_operation_graph, create_execution_plans and check_support; returns true if cuDNN
+//   supports it, otherwise throws cuDNN's message.
+// - cache_graph(cache, key, handle, build): returns a cached entry if hit; otherwise, builds the graph
+//   anew, checks it with query_support() and if supported, inserts it. The work behind get_graph() below.
+//
+// Entry points by (f16/fp8, fwd/bwd) implementations:
+// - get_graph<backend, pass, kCreateGraphFn>(cfg, handle): normalizes cfg into a cache key and owns
+//   the cache for its one <backend, pass, creator> triple; kCreateGraphFn is a create_graph_f16/fp8_fwd/bwd
+//   from a .cu file, the only piece a build site supplies.
+// - support_verdict<...>(cfg, handle): wraps get_graph() in a try, returning the empty string when
+//   cuDNN accepts the graph and its rejection reason when it does not.
+// - build_plans(entry): runs the kernel compilation that cache_graph() deferred, once per entry.
 
 #ifndef TRANSFORMER_ENGINE_COMMON_FUSED_ATTN_GRAPH_CACHE_H_
 #define TRANSFORMER_ENGINE_COMMON_FUSED_ATTN_GRAPH_CACHE_H_
@@ -62,19 +65,14 @@ struct GraphCache {
   std::map<FusedAttnConfig, std::shared_ptr<CacheEntry<GraphAndTensors>>> entries;
 };
 
-inline std::mutex &frontend_build_mutex() {
-  static std::mutex mutex;
-  return mutex;
-}
+namespace detail {
 
-// Takes a constructed graph through the frontend calls that decide whether cuDNN can run it.
-// `backend` and `pass` only name the build site the stage timers attribute the calls to.
-//
-// Reports by throwing, carrying cuDNN's message alone: that message is what support_verdict()
-// returns as the reason a backend was refused.
+// Query if a constructed graph can be supported by cuDNN; throw cuDNN's message on refusal.
 inline void query_support(Backend backend, Pass pass, cudnn_frontend::graph::Graph &graph,
                           cudnnHandle_t handle) {
-  auto run = [&](graph_cache_debug::BuildStage stage, const char *call_name, auto &&call) {
+  using graph_cache_debug::BuildStage;
+
+  auto run = [&](BuildStage stage, const char *call_name, auto &&call) {
     const cudnn_frontend::error_t error =
         graph_cache_debug::record_time(backend, pass, stage, [&] { return call(); });
     if (error.is_good()) return;
@@ -82,19 +80,20 @@ inline void query_support(Backend backend, Pass pass, cudnn_frontend::graph::Gra
                                                    : error.err_msg);
   };
 
-  run(graph_cache_debug::BuildStage::Validate, "validate", [&] { return graph.validate(); });
-  run(graph_cache_debug::BuildStage::BuildOpGraph, "build_operation_graph",
+  run(BuildStage::Validate, "validate", [&] { return graph.validate(); });
+  run(BuildStage::BuildOpGraph, "build_operation_graph",
       [&] { return graph.build_operation_graph(handle); });
-  run(graph_cache_debug::BuildStage::CreatePlans, "create_execution_plans",
+  run(BuildStage::CreatePlans, "create_execution_plans",
       [&] { return graph.create_execution_plans({cudnn_frontend::HeurMode_t::A}); });
-  run(graph_cache_debug::BuildStage::CheckSupport, "check_support",
-      [&] { return graph.check_support(); });
+  run(BuildStage::CheckSupport, "check_support", [&] { return graph.check_support(); });
 }
 
-// Cache for the entry `key`; build it first if absent. Record the lookup result and return the entry.
-//   hit  -> record HIT, return the entry
-//   miss -> take frontend_build_mutex(), look again (a thread that raced us has finished by now),
-//           record MISS, build(), query_support(), insert
+// Look up `key` in `cache` and if missed, build the graph from fresh
+//   hit  -> record HIT, return the cached entry
+//   miss -> record MISS, build(), query_support(), insert if supported and throw on refusal
+//
+// The cache lookup and insert are guarded by mutex, but not the graph builds. Multiple threads
+// may build for the same key concurrently, but only the first build will be inserted.
 template <typename GraphAndTensors, typename BuildFn>
 std::shared_ptr<CacheEntry<GraphAndTensors>> cache_graph(GraphCache<GraphAndTensors> &cache,
                                                          const FusedAttnConfig &key,
@@ -113,11 +112,6 @@ std::shared_ptr<CacheEntry<GraphAndTensors>> cache_graph(GraphCache<GraphAndTens
     return cached;
   }
 
-  std::lock_guard<std::mutex> build_lock(frontend_build_mutex());
-  if (std::shared_ptr<CacheEntry<GraphAndTensors>> cached = find()) {
-    graph_cache_debug::record_hit_miss(backend, pass, LookupResult::Hit, key);
-    return cached;
-  }
   graph_cache_debug::record_hit_miss(backend, pass, LookupResult::Miss, key);
 
   auto entry = std::make_shared<CacheEntry<GraphAndTensors>>(build());
@@ -130,24 +124,23 @@ std::shared_ptr<CacheEntry<GraphAndTensors>> cache_graph(GraphCache<GraphAndTens
   return cache.entries.insert({key, std::move(entry)}).first->second;
 }
 
-// Each backend's graph cache per forward/backward pass, called by support_verdict() and the
-// execution path. The cache is this instantiation's static local, so the callers naming one
-// <backend, pass, creator> triple share one cache and each triple gets its own.
+}  // namespace detail
+
+// Create a cache for each (backend, pass) pair, and either get cached entry or build anew.
 template <Backend kBackend, Pass kPass, auto kCreateGraphFn>
 auto get_graph(const FusedAttnConfig &cfg, cudnnHandle_t handle) {
   static GraphCache<decltype(kCreateGraphFn(cfg))> cache;
   cfg.check_derived();
-  return cache_graph(cache, cfg.make_cache_key(kPass), kBackend, kPass, handle,
-                     [&] { return kCreateGraphFn(cfg); });
+  return detail::cache_graph(cache, cfg.make_cache_key(kPass), kBackend, kPass, handle,
+                             [&] { return kCreateGraphFn(cfg); });
 }
 
-// Check whether cuDNN can support a given config, per forward/backward pass.
-// Returns an empty string if can; otherwise, a diagnostic string for the reason.
+// Check if cuDNN supports a given config.
+// Return an empty string if it does, or a diagnostic string if not.
 template <Backend kBackend, Pass kPass, auto kCreateGraphFn>
 std::string support_verdict(const FusedAttnConfig &cfg, cudnnHandle_t handle) {
   auto label = [] {
-    return std::string("support_verdict<") + graph_cache_debug::backend_name(kBackend) + ", " +
-           graph_cache_debug::pass_name(kPass) + ">";
+    return std::string("support_verdict<") + backend_name(kBackend) + ", " + pass_name(kPass) + ">";
   };
   try {
     get_graph<kBackend, kPass, kCreateGraphFn>(cfg, handle);
@@ -161,13 +154,10 @@ std::string support_verdict(const FusedAttnConfig &cfg, cudnnHandle_t handle) {
   }
 }
 
-// Previous calls only create the graph, caches it if verified to be supported. This function
-// compiles the kernels via graph.build_plans(). It is the most expensive frontend call, and
-// done only once per cache entry.
+// Compile kernels for the graph, once per cache entry. Most expensive cuDNN frontend call.
 template <typename GraphAndTensors>
 void build_plans(Backend backend, Pass pass, CacheEntry<GraphAndTensors> &entry) {
   std::call_once(entry.build_plans_once, [&] {
-    std::lock_guard<std::mutex> build_lock(frontend_build_mutex());
     cudnn_frontend::graph::Graph &graph = *std::get<0>(entry.graph_and_tensors);
     graph_cache_debug::record_time(backend, pass, graph_cache_debug::BuildStage::BuildPlans,
                                    [&] { NVTE_CHECK_CUDNN_FE(graph.build_plans()); });
