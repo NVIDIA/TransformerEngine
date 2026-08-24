@@ -352,8 +352,8 @@ def customcall_fused_dpa(
         qkv_args, bias, sequence_descriptor, dropout_rng, softmax_offset=softmax_offset, **kwargs
     )
     if isinstance(result, tuple):
-        output, aux = result
-        return output.astype(query.dtype), aux
+        output, max_logit = result
+        return output.astype(query.dtype), max_logit
     return result.astype(query.dtype)
 
 
@@ -1018,8 +1018,7 @@ class FusedAttnRunner:
         with self.mesh, autocast(mesh_resource=self.mesh_resource):
             primitive_out = customcall_fused_dpa_jit(*customcall_args)
             if return_max_logit:
-                primitive_out, primitive_aux = primitive_out
-                primitive_max_logit = primitive_aux["max_logit"]
+                primitive_out, primitive_max_logit = primitive_out
             primitive_out = self.cp_inverse_reorder_fn(primitive_out)
 
         if return_max_logit:

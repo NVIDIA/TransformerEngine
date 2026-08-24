@@ -1090,13 +1090,12 @@ def _legacy_fused_attn(
         softmax_offset (Optional[jnp.ndarray]): An optional learnable softmax offset tensor with shape
             [1, num_heads, 1, 1]. Used when softmax_type is AttnSoftmaxType.LEARNABLE_SOFTMAX.
         return_max_logit (bool): If True, also return per-head maximum attention logits
-            in an auxiliary dictionary under ``"max_logit"``.
+            with shape ``[h]``.
     Returns:
         jnp.ndarray:
             Attention output when ``return_max_logit`` is False.
-        tuple[jnp.ndarray, dict[str, jnp.ndarray]]:
-            ``(output, aux)`` when ``return_max_logit`` is True. ``aux`` contains
-            ``"max_logit"`` with shape ``[h]``.
+        tuple[jnp.ndarray, jnp.ndarray]:
+            ``(output, max_logit)`` when ``return_max_logit`` is True.
     """
     assert (
         not qkv_layout.is_thd()
@@ -1335,7 +1334,7 @@ def _fused_attn_fwd_rule(
     softmax_aux = checkpoint_name(softmax_aux, context_checkpoint_name)
     rng_state = checkpoint_name(rng_state, context_checkpoint_name)
     max_logit = checkpoint_name(max_logit, context_checkpoint_name)
-    attn_output = (output, {"max_logit": max_logit}) if return_max_logit else output
+    attn_output = (output, max_logit) if return_max_logit else output
     return attn_output, (
         qkv,
         bias,
@@ -1551,13 +1550,12 @@ def fused_attn(
         score_mod_bprop_tensors (Optional[Mapping[str, Any]]): Additional tensors or
             Python/NumPy scalars made available to `score_mod_bprop`.
         return_max_logit (bool): If True, also return per-head maximum attention logits
-            in an auxiliary dictionary under ``"max_logit"``.
+            with shape ``[h]``.
     Returns:
         jnp.ndarray:
             Attention output when ``return_max_logit`` is False.
-        tuple[jnp.ndarray, dict[str, jnp.ndarray]]:
-            ``(output, aux)`` when ``return_max_logit`` is True. ``aux`` contains
-            ``"max_logit"`` with shape ``[h]``.
+        tuple[jnp.ndarray, jnp.ndarray]:
+            ``(output, max_logit)`` when ``return_max_logit`` is True.
 
     Examples (non-THD, also known as non-packed):
         >>> #  q_segment_ids = [[1, 1, 1, 0], [1, 1, 0, 0]], 0 means padded tokens
