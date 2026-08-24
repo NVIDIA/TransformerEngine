@@ -522,7 +522,10 @@ class TestDistributedContextParallelSelfAttn:
             pytest.skip(f"Skipping {kv_groups=} not multiple of {data_shape=} or {tp_size=}")
 
         if return_max_logit:
-            runner.test_forward_with_max_logit(check_output=check_forward_output)
+            runner.test_forward(
+                return_max_logit=True,
+                check_output=check_forward_output,
+            )
         else:
             runner.test_backward()
         del os.environ["NVTE_FUSED_RING_ATTENTION_USE_SCAN"]
@@ -566,10 +569,12 @@ class TestDistributedContextParallelSelfAttn:
     ):
         """Check CP fused attention returns global per-head max_logit."""
         is_thd = qkv_layout.is_thd()
-        if window_size != (-1, -1) and not (
-            is_thd and cp_strategy == CPStrategy.RING and not use_scan_ring
-        ):
-            pytest.skip("SWA max-logit coverage is limited to THD Ring without scan.")
+        supports_swa = is_thd and (
+            cp_strategy == CPStrategy.ALL_GATHER
+            or (cp_strategy == CPStrategy.RING and not use_scan_ring)
+        )
+        if window_size != (-1, -1) and not supports_swa:
+            pytest.skip("CP SWA requires THD All-Gather or unrolled THD Ring.")
         # TODO: Evaluate cuDNN Max mismatches observed for striped multi-segment THD Ring GQA.
         if is_thd and cp_strategy == CPStrategy.RING and kv_groups > 1:
             pytest.skip("THD Ring GQA Max mismatches require further evaluation.")

@@ -1303,15 +1303,6 @@ class FusedAttnRunner:
                 target_hlo = jitted_primitive.lower(*customcall_args).compile().as_text()
             assert_equal_collectives(target_hlo, self.coll_count_ref)
 
-    def test_forward_with_max_logit(self, check_output=True):
-        """Test forward output and returned max_logit."""
-        self.test_forward(return_max_logit=True, check_output=check_output)
-
-    def test_backward_with_max_logit(self):
-        """Ensure aux-return cotangents do not break the fused attention backward path."""
-        self.test_backward(return_max_logit=True)
-
-
 FUSED_ATTN_MAX_LOGIT_QKV_LAYOUTS = [
     pytest.param(
         QKVLayout.BSHD_BSHD_BSHD,
