@@ -353,7 +353,7 @@ class NVFP4QuantizerRef(Quantizer):
         quant_tile_shape: Tuple[int, int] = (1, 16),
         row_scaled_nvfp4: bool = False,
         nvfp4_use_4over6: bool = False,
-        nvfp4_e4m3_max: int = 448,
+        nvfp4_e4m3_max: int = 0,
         nvfp4_4over6_err_mode: str = "MAE",
         nvfp4_4over6_err_use_fast_math: bool = False,
         with_rht: bool = False,
@@ -379,7 +379,7 @@ class NVFP4QuantizerRef(Quantizer):
         self.quant_tile_shape = quant_tile_shape
         self.row_scaled_nvfp4 = row_scaled_nvfp4
         self.nvfp4_use_4over6 = nvfp4_use_4over6
-        self.nvfp4_e4m3_max = nvfp4_e4m3_max if nvfp4_use_4over6 else 448
+        self.nvfp4_e4m3_max = nvfp4_e4m3_max if nvfp4_e4m3_max != 0 else 448
         if self.nvfp4_e4m3_max not in (448, 256):
             raise ValueError("nvfp4_e4m3_max must be 448 or 256.")
         self.nvfp4_4over6_err_mode = nvfp4_4over6_err_mode

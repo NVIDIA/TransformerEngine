@@ -1712,6 +1712,7 @@ std::pair<GroupedTensorWrapper, py::object> MXFP8Quantizer::create_grouped_tenso
   kwargs["last_dims"] = last_dims.has_value() ? py::cast(*last_dims) : py::none();
   kwargs["tensor_offsets"] = tensor_offsets.has_value() ? py::cast(*tensor_offsets) : py::none();
   kwargs["with_gemm_swizzled_scales"] = this->optimize_for_gemm;
+  kwargs["scale_inv_dtype"] = MakePythonDType(DType::kFloat8E8M0);
   PyObject* result = PyObject_Call(GroupedTensorClass.ptr(), args.ptr(), kwargs.ptr());
   if (result == nullptr) {
     PyErr_Print();

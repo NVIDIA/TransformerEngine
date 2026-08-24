@@ -458,12 +458,17 @@ void group_quantize_fwd_host_aware_helper(const NVTETensor input, NVTETensor *ou
       const bool nvfp4_use_4over6 = quant_config_cpp.nvfp4_4over6_mode != kNVTENVFP44Over6Disabled;
       if (!nvfp4_use_4over6) {
         for (const auto *output_tensor : output_tensors) {
-          const DType scale_dtype = output_tensor->scale_inv.has_data()
-                                        ? output_tensor->scale_inv.dtype
-                                        : output_tensor->columnwise_scale_inv.dtype;
+          DType scale_dtype = DType::kFloat8E4M3;
+          if (output_tensor->scale_inv.has_data()) {
+            scale_dtype = output_tensor->scale_inv.dtype;
+          } else if (output_tensor->columnwise_scale_inv.has_data()) {
+            scale_dtype = output_tensor->columnwise_scale_inv.dtype;
+          }
           NVTE_CHECK(
               static_cast<float>(output_tensor->get_nvfp4_scale_max()) == typeToMax(scale_dtype),
-              "NVFP4 quantization with non-default scale max is only supported with 4over6.");
+              "NVFP4 quantization with non-default scale max is only supported with 4over6 "
+              "(expected ", typeToMax(scale_dtype), ", found ",
+              output_tensor->get_nvfp4_scale_max(), ").");
         }
       }
       NVTE_CHECK(!quant_config_cpp.nvfp4_2d_quantization,
