@@ -1485,12 +1485,14 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             use_nvfp4
             and isinstance(fc2_input_quantizer, NVFP4Quantizer)
             and fc2_input_quantizer.with_rht
-            and fc2_input_quantizer.rht_matrix_random_sign_mask_t == 0
         ):
             if fc2_input_quantizer.disable_second_level_scale:
                 # Use GEMM + act + RHT + quant kernel if available
                 if self.grouped_gemm_act_hadamard_quant_kernel() is None:
                     # Kernel is not available
+                    pass
+                elif fc2_input_quantizer.rht_matrix_random_sign_mask_t != 0:
+                    # Kernel does not apply sign mask in RHT
                     pass
                 elif fc1_bias_packed is not None:
                     # Kernel has large numerical error with bias
