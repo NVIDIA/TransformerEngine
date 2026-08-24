@@ -1497,7 +1497,6 @@ class GroupedLinear(BasicOperation):
         final_weight_grads: list[Optional[torch.Tensor]] = (
             [None] if self.single_grouped_weight else [None] * num_groups
         )
-        wgrad_dtype = weight_grad_dtype(weights, ctx.dtype)
         if ctx.weight_requires_grad:
             weight_shape = (self.out_features, self.in_features)
             grouped_shape = (num_groups, *weight_shape)
@@ -1514,7 +1513,7 @@ class GroupedLinear(BasicOperation):
                     accumulate_into_main_grad = get_accumulate_flag_in_param(weights[0])
                 else:
                     final_weight_grads[0] = torch.empty(
-                        grouped_shape, dtype=wgrad_dtype, device=device
+                        grouped_shape, dtype=weight_grad_dtype(weights, ctx.dtype), device=device
                     )
                     grad_weights = [final_weight_grads[0][idx] for idx in range(num_groups)]
             else:
@@ -1745,7 +1744,6 @@ class GroupedLinear(BasicOperation):
 
         # Get the right wgrad buffers for grouped gemm.
         # Can be a GroupedTensor or list of tensors based on single_grouped_weight.
-        wgrad_dtype = weight_grad_dtype(weights, dtype)
         if ctx.weight_requires_grad:
             if self.single_grouped_weight:
                 if self._accumulate_into_main_grad:
@@ -1769,7 +1767,7 @@ class GroupedLinear(BasicOperation):
                         shapes=[weight_shape] * num_groups,
                         quantizer=None,
                         device=device,
-                        dtype=wgrad_dtype,
+                        dtype=weight_grad_dtype(weights, dtype),
                     )
                 final_weight_grads[0] = grouped_wgrad.rowwise_data.view(num_groups, *weight_shape)
                 wgrad_output = grouped_wgrad
