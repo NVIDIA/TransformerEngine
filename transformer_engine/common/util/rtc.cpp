@@ -326,7 +326,7 @@ int KernelManager::occupancy_max_active_blocks_per_sm(const std::string& kernel_
   const auto kernel_it = kernel_cache_.find(key);
   NVTE_CHECK(kernel_it != kernel_cache_.end(), "Attempted to query occupancy before compilation");
   return kernel_it->second.occupancy_max_active_blocks_per_sm(device_id, block_size,
-                                                               dynamic_smem_bytes);
+                                                              dynamic_smem_bytes);
 }
 
 bool KernelManager::is_compiled(const std::string& kernel_label, int device_id) const {
