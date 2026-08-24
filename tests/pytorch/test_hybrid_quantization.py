@@ -4883,10 +4883,12 @@ class TestHybridGroupedLinearValidation:
         assert len(validation_calls) == first_call_count
         assert model._custom_quantizer_cache["scaling_fwd"] is first_generation
 
-        # Backward quantizers are validated on the first grad-enabled use. Once
-        # cached, validation returns before querying grad mode again.
-        with autocast(enabled=True, recipe=original_recipe):
-            model(tensor, m_splits)
+        # Backward quantizers are validated the first time quantizers are selected
+        # with gradients enabled. Do not run a full forward here: this validation
+        # test intentionally uses a columnwise-only configuration that is not
+        # supported by the split-quantization kernel.
+        with torch.enable_grad(), autocast(enabled=True, recipe=original_recipe):
+            model._get_quantizers()
         assert len(validation_calls) == first_call_count + 1
         assert model._custom_quantizer_cache["scaling_bwd"] is model.quantizers["scaling_bwd"]
 
