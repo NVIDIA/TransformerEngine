@@ -163,23 +163,54 @@ def set_tensor_model_parallel_attributes(
     setattr(tensor, "partition_stride", stride)
 
 
+def is_logical_process_group(group: Any) -> bool:
+    """Return whether ``group`` is a topology-only CP group descriptor."""
+    return (
+        group is not None
+        and hasattr(group, "ranks")
+        and hasattr(group, "cp_size")
+        and hasattr(group, "cp_rank")
+    )
+
+
 @lru_cache
-def get_distributed_world_size(group: Optional[dist_group_type] = None) -> int:
-    """Return world size for the distributed group."""
+def _get_distributed_world_size(group: Optional[dist_group_type] = None) -> int:
+    """Return world size for a real distributed process group."""
     if not torch.distributed.is_initialized():
         return 1
     return torch.distributed.get_world_size(group=group)
 
 
+def get_distributed_world_size(group: Optional[dist_group_type] = None) -> int:
+    """Return world size for a distributed group or logical CP descriptor."""
+    if is_logical_process_group(group):
+        return int(group.cp_size)
+    return _get_distributed_world_size(group)
+
+
 @lru_cache
-def get_distributed_rank(group: Optional[dist_group_type] = None) -> int:
-    """Return my rank for the distributed group."""
+def _get_distributed_rank(group: Optional[dist_group_type] = None) -> int:
+    """Return my rank for a real distributed process group."""
     if not torch.distributed.is_initialized():
         raise RuntimeError(
             "torch.distributed is not initialized. Call torch.distributed.init_process_group() "
             "before calling get_distributed_rank()."
         )
     return torch.distributed.get_rank(group=group)
+
+
+def get_distributed_rank(group: Optional[dist_group_type] = None) -> int:
+    """Return my rank for a distributed group or logical CP descriptor."""
+    if is_logical_process_group(group):
+        return int(group.cp_rank)
+    return _get_distributed_rank(group)
+
+
+def get_distributed_group_ranks(group) -> Tuple[int, ...]:
+    """Return global ranks for a ProcessGroup or logical CP descriptor."""
+    if is_logical_process_group(group):
+        return tuple(group.ranks)
+    return tuple(torch.distributed.get_process_group_ranks(group))
 
 
 def initialize_affine_weight_gpu(

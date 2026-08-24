@@ -48,7 +48,10 @@ from transformer_engine.pytorch.cpp_extensions.fused_attn import (
     META_QKV,
 )
 from transformer_engine.pytorch.quantization import get_fp8_torch_dtype, FP8GlobalStateManager
-from transformer_engine.pytorch.distributed import get_distributed_world_size
+from transformer_engine.pytorch.distributed import (
+    get_distributed_world_size,
+    is_logical_process_group,
+)
 from transformer_engine.pytorch.jit import no_torch_dynamo
 from transformer_engine.pytorch.attention.dot_product_attention.context_parallel import (
     attn_forward_func_with_cp,
@@ -757,7 +760,7 @@ class FlashAttention(torch.nn.Module):
         ), f"FlashAttention does not support qkv_layout = {qkv_layout}!"
 
         cp_size = 1
-        if isinstance(cp_group, dist_group_type):
+        if isinstance(cp_group, dist_group_type) or is_logical_process_group(cp_group):
             cp_size = get_distributed_world_size(cp_group)
         elif isinstance(cp_group, list):
             for group in cp_group:
@@ -1828,7 +1831,7 @@ class FusedAttention(torch.nn.Module):
         ), f"FusedAttention does not support qkv_layout = {qkv_layout}!"
 
         cp_size = 1
-        if isinstance(cp_group, dist_group_type):
+        if isinstance(cp_group, dist_group_type) or is_logical_process_group(cp_group):
             cp_size = get_distributed_world_size(cp_group)
         elif isinstance(cp_group, list):
             for group in cp_group:

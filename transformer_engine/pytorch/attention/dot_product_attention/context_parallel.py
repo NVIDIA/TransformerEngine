@@ -3,9 +3,11 @@
 # See LICENSE for license information.
 
 """Context Parallelism."""
-import os
+
 import itertools
-from typing import List, Union, Tuple
+import os
+import weakref
+from typing import List, Tuple, Union
 import torch
 import transformer_engine_torch as tex
 
@@ -30,9 +32,11 @@ from transformer_engine.pytorch.constants import (
     TE_DType,
 )
 from transformer_engine.pytorch.distributed import (
+    get_distributed_group_ranks,
     get_distributed_world_size,
     get_distributed_rank,
     gather_along_first_dim,
+    is_logical_process_group,
     reduce_scatter_along_first_dim,
 )
 
@@ -54,6 +58,28 @@ _cu_seqlens_info_with_cp_cache = {}
 _seq_chunk_ids_cache_for_reordering_before_attn = {}
 _seq_chunk_ids_cache_for_reordering_after_attn = {}
 _softmax_offset_chunk_ids_cache = {}
+_cp_p2p_transport_groups = weakref.WeakKeyDictionary()
+
+
+def set_cp_p2p_transport_group(cp_group, transport_group):
+    """Override only the P2P transport group for a logical CP group."""
+    if transport_group is None:
+        _cp_p2p_transport_groups.pop(cp_group, None)
+        return
+    _cp_p2p_transport_groups[cp_group] = weakref.ref(transport_group)
+
+
+def _get_cp_p2p_transport_group(cp_group):
+    transport_group_ref = _cp_p2p_transport_groups.get(cp_group)
+    if transport_group_ref is not None:
+        transport_group = transport_group_ref()
+        if transport_group is not None:
+            return transport_group, True
+        _cp_p2p_transport_groups.pop(cp_group, None)
+    if is_logical_process_group(cp_group):
+        raise RuntimeError("A logical CP group requires a registered parent P2P transport group.")
+    return cp_group, False
+
 
 # Float8CurrentScaling: fused_attn_bwd takes O in FP8 by default, this flag allows it in F16
 _dpa_fp8_cs_o_in_f16 = os.getenv("NVTE_DPA_FP8CS_O_in_F16", "1") == "1"
@@ -64,41 +90,109 @@ def flash_attn_p2p_communicate(
 ):
     """Point-to-point communications of KV and dKV in Attention with context parallelism"""
     send_recv_ops = []
+    transport_group, transport_overridden = _get_cp_p2p_transport_group(cp_group)
+    if transport_overridden:
+        batch_p2p_comm = True
 
     if batch_p2p_comm:
         if rank % 2 == 0:
             send_op = torch.distributed.P2POp(
-                torch.distributed.isend, send_tensor, send_dst, cp_group
+                torch.distributed.isend, send_tensor, send_dst, transport_group
             )
             recv_op = torch.distributed.P2POp(
-                torch.distributed.irecv, recv_tensor, recv_src, cp_group
+                torch.distributed.irecv, recv_tensor, recv_src, transport_group
             )
             send_recv_ops.append(send_op)
             send_recv_ops.append(recv_op)
         else:
             recv_op = torch.distributed.P2POp(
-                torch.distributed.irecv, recv_tensor, recv_src, cp_group
+                torch.distributed.irecv, recv_tensor, recv_src, transport_group
             )
             send_op = torch.distributed.P2POp(
-                torch.distributed.isend, send_tensor, send_dst, cp_group
+                torch.distributed.isend, send_tensor, send_dst, transport_group
             )
             send_recv_ops.append(recv_op)
             send_recv_ops.append(send_op)
         send_recv_reqs = torch.distributed.batch_isend_irecv(send_recv_ops)
     else:
         if rank % 2 == 0:
-            send_op = torch.distributed.isend(send_tensor, send_dst, cp_group)
-            recv_op = torch.distributed.irecv(recv_tensor, recv_src, cp_group)
+            send_op = torch.distributed.isend(send_tensor, send_dst, transport_group)
+            recv_op = torch.distributed.irecv(recv_tensor, recv_src, transport_group)
             send_recv_ops.append(send_op)
             send_recv_ops.append(recv_op)
         else:
-            recv_op = torch.distributed.irecv(recv_tensor, recv_src, cp_group)
-            send_op = torch.distributed.isend(send_tensor, send_dst, cp_group)
+            recv_op = torch.distributed.irecv(recv_tensor, recv_src, transport_group)
+            send_op = torch.distributed.isend(send_tensor, send_dst, transport_group)
             send_recv_ops.append(recv_op)
             send_recv_ops.append(send_op)
         send_recv_reqs = send_recv_ops
 
     return send_recv_reqs
+
+
+def _logical_cp_all_reduce_max_(tensor, cp_group):
+    """Apply an in-place max reduction using a logical ring on the parent group."""
+    cp_size = get_distributed_world_size(cp_group)
+    if cp_size == 1:
+        return tensor
+
+    cp_rank = get_distributed_rank(cp_group)
+    cp_global_ranks = get_distributed_group_ranks(cp_group)
+    send_dst = cp_global_ranks[(cp_rank + 1) % cp_size]
+    recv_src = cp_global_ranks[(cp_rank - 1) % cp_size]
+    send_buffer = tensor.clone()
+    for _ in range(cp_size - 1):
+        recv_buffer = torch.empty_like(send_buffer)
+        requests = flash_attn_p2p_communicate(
+            cp_rank,
+            send_buffer,
+            send_dst,
+            recv_buffer,
+            recv_src,
+            cp_group,
+            True,
+        )
+        for request in requests:
+            request.wait()
+        torch.maximum(tensor, recv_buffer, out=tensor)
+        send_buffer = recv_buffer
+    return tensor
+
+
+def _logical_cp_all_to_all_single(output, input_, cp_group):
+    """Run equal-split all-to-all as subgroup P2P through the parent group."""
+    cp_size = get_distributed_world_size(cp_group)
+    cp_rank = get_distributed_rank(cp_group)
+    cp_global_ranks = get_distributed_group_ranks(cp_group)
+    transport_group, _ = _get_cp_p2p_transport_group(cp_group)
+
+    if input_.shape[0] % cp_size != 0 or output.shape[0] % cp_size != 0:
+        raise RuntimeError("Logical CP all-to-all requires equal splits along dimension 0.")
+
+    input_chunks = input_.chunk(cp_size, dim=0)
+    output_chunks = output.chunk(cp_size, dim=0)
+    output_chunks[cp_rank].copy_(input_chunks[cp_rank])
+    operations = []
+    for peer_rank, peer_global_rank in enumerate(cp_global_ranks):
+        if peer_rank == cp_rank:
+            continue
+        operations.extend(
+            [
+                torch.distributed.P2POp(
+                    torch.distributed.isend,
+                    input_chunks[peer_rank],
+                    peer_global_rank,
+                    transport_group,
+                ),
+                torch.distributed.P2POp(
+                    torch.distributed.irecv,
+                    output_chunks[peer_rank],
+                    peer_global_rank,
+                    transport_group,
+                ),
+            ]
+        )
+    return torch.distributed.batch_isend_irecv(operations) if operations else []
 
 
 @jit_fuser
@@ -540,7 +634,9 @@ def flash_attn_a2a_communicate_softmax_offset(
             )
         torch.cuda.current_stream().wait_stream(cp_stream)
         output = output.view(
-            *tensor.shape[:h_dim], cp_size * tensor.shape[h_dim], *tensor.shape[h_dim + 1 :]
+            *tensor.shape[:h_dim],
+            cp_size * tensor.shape[h_dim],
+            *tensor.shape[h_dim + 1 :],
         )
     return output
 
@@ -1382,7 +1478,13 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 q, k, v = (q._data, k._data, v._data)
             chunk_ids_for_a2a = get_seq_chunk_ids_for_reordering_before_attn(cp_size_a2a, q.device)
             q, k, v = flash_attn_a2a_communicate(
-                [q, k, v], chunk_ids_for_a2a, seq_dim, cp_size_a2a, cp_group_a2a, cp_stream, True
+                [q, k, v],
+                chunk_ids_for_a2a,
+                seq_dim,
+                cp_size_a2a,
+                cp_group_a2a,
+                cp_stream,
+                True,
             )
             if fp8 and is_input_fp8:
                 q_fp8, k_fp8, v_fp8 = [
@@ -1480,7 +1582,9 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 ), "Sequence length does not meet divisible requirements!"
                 # [b, h, sq, sk] -> [b, h, sq, 2*cp, sk//(2*cp)]
                 attn_bias_ = attn_bias.view(
-                    *attn_bias.shape[:-1], 2 * cp_size, attn_bias.shape[-1] // (2 * cp_size)
+                    *attn_bias.shape[:-1],
+                    2 * cp_size,
+                    attn_bias.shape[-1] // (2 * cp_size),
                 )
 
             # [b, h, sq, sk] -> [b, h, sq, 2*cp, sk//(2*cp)]
@@ -1683,10 +1787,12 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                                     *fused_attn_inputs, *prepare_outputs, section
                                 )
                             else:
-                                out_per_step[i], softmax_lse_per_step[i], rng_states[i] = (
-                                    cp_p2p_fwd_flash_attn(
-                                        *flash_attn_inputs, *prepare_outputs, section
-                                    )
+                                (
+                                    out_per_step[i],
+                                    softmax_lse_per_step[i],
+                                    rng_states[i],
+                                ) = cp_p2p_fwd_flash_attn(
+                                    *flash_attn_inputs, *prepare_outputs, section
                                 )
                         elif i <= rank:
                             section = "lower-triangle"
@@ -1710,10 +1816,12 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                                     *fused_attn_inputs, *prepare_outputs, section
                                 )
                             else:
-                                out_per_step[i], softmax_lse_per_step[i], rng_states[i] = (
-                                    cp_p2p_fwd_flash_attn(
-                                        *flash_attn_inputs, *prepare_outputs, section
-                                    )
+                                (
+                                    out_per_step[i],
+                                    softmax_lse_per_step[i],
+                                    rng_states[i],
+                                ) = cp_p2p_fwd_flash_attn(
+                                    *flash_attn_inputs, *prepare_outputs, section
                                 )
                         else:
                             section = "upper-triangle"
@@ -1737,10 +1845,12 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                                     *fused_attn_inputs, *prepare_outputs, section
                                 )
                             else:
-                                out_per_step[i], softmax_lse_per_step[i], rng_states[i] = (
-                                    cp_p2p_fwd_flash_attn(
-                                        *flash_attn_inputs, *prepare_outputs, section
-                                    )
+                                (
+                                    out_per_step[i],
+                                    softmax_lse_per_step[i],
+                                    rng_states[i],
+                                ) = cp_p2p_fwd_flash_attn(
+                                    *flash_attn_inputs, *prepare_outputs, section
                                 )
                     else:
                         # all tiles
@@ -1831,9 +1941,12 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
 
         torch.cuda.current_stream().wait_stream(flash_attn_streams[1])
         if return_max_logit:
-            torch.distributed.all_reduce(
-                max_logit, op=torch.distributed.ReduceOp.MAX, group=cp_group
-            )
+            if is_logical_process_group(cp_group):
+                _logical_cp_all_reduce_max_(max_logit, cp_group)
+            else:
+                torch.distributed.all_reduce(
+                    max_logit, op=torch.distributed.ReduceOp.MAX, group=cp_group
+                )
 
         second_half_lse_seqlen = None
         if causal and rank < (cp_size - 1):
@@ -1902,7 +2015,13 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         if cp_size_a2a > 1:
             chunk_ids_for_a2a = get_seq_chunk_ids_for_reordering_after_attn(cp_size_a2a, out.device)
             out = flash_attn_a2a_communicate(
-                out, chunk_ids_for_a2a, seq_dim, cp_size_a2a, cp_group_a2a, cp_stream, False
+                out,
+                chunk_ids_for_a2a,
+                seq_dim,
+                cp_size_a2a,
+                cp_group_a2a,
+                cp_stream,
+                False,
             )
             if use_fused_attention:
                 if qkv_format == "bshd":
@@ -2106,12 +2225,17 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         if attn_biases[0] is not None:
             # [b, h, sq, 2*cp, sk//(2*cp)]
             attn_dbias = torch.zeros(
-                *ctx.attn_bias_shape, dtype=attn_biases[0].dtype, device=attn_biases[0].device
+                *ctx.attn_bias_shape,
+                dtype=attn_biases[0].dtype,
+                device=attn_biases[0].device,
             )
             # [b, h, sq, 2*cp, sk//(2*cp)] -> [b, h, 2, sq//2, 2*cp, sk//(2*cp)] only when sq > 1 (i.e. all supported bias shapes except 111s)
             if attn_dbias.shape[-3] > 1:
                 attn_dbias_ = attn_dbias.view(
-                    *attn_dbias.shape[:-3], 2, attn_dbias.shape[-3] // 2, *attn_dbias.shape[-2:]
+                    *attn_dbias.shape[:-3],
+                    2,
+                    attn_dbias.shape[-3] // 2,
+                    *attn_dbias.shape[-2:],
                 )
             else:
                 attn_dbias_ = None
@@ -2216,7 +2340,10 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 device=kv.device,
             )
             dkv_recv_buffer = torch.empty_like(dkv_send_buffer)
-            p2p_comm_buffers = [[kv, dkv_send_buffer], [kv_recv_buffer, dkv_recv_buffer]]
+            p2p_comm_buffers = [
+                [kv, dkv_send_buffer],
+                [kv_recv_buffer, dkv_recv_buffer],
+            ]
             if ctx.fp8_recipe.float8_current_scaling():
                 dkv_buffer = torch.zeros(
                     kv.shape,
@@ -2326,13 +2453,18 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                         batch_p2p_comm,
                     )
                 else:
-                    dkv_a2a_req = torch.distributed.all_to_all_single(
-                        dkv_send_buffer,
-                        dkv_recv_buffer,
-                        group=ctx.cp_group,
-                        async_op=True,
-                    )
-                    send_recv_reqs = [dkv_a2a_req]
+                    if is_logical_process_group(ctx.cp_group):
+                        send_recv_reqs = _logical_cp_all_to_all_single(
+                            dkv_send_buffer, dkv_recv_buffer, ctx.cp_group
+                        )
+                    else:
+                        dkv_a2a_req = torch.distributed.all_to_all_single(
+                            dkv_send_buffer,
+                            dkv_recv_buffer,
+                            group=ctx.cp_group,
+                            async_op=True,
+                        )
+                        send_recv_reqs = [dkv_a2a_req]
             else:
                 if i == 0:
                     send_tensor = send_tensor[0]
@@ -2341,7 +2473,13 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                     send_tensor = send_tensor[1]
                     recv_tensor = recv_tensor[1]
                 send_recv_reqs = flash_attn_p2p_communicate(
-                    rank, send_tensor, send_dst, recv_tensor, recv_src, ctx.cp_group, batch_p2p_comm
+                    rank,
+                    send_tensor,
+                    send_dst,
+                    recv_tensor,
+                    recv_src,
+                    ctx.cp_group,
+                    batch_p2p_comm,
                 )
 
             kv = p2p_comm_buffers[i % 2][0]
@@ -2656,7 +2794,9 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 dv = dkv_recv_buffer[:, ctx.k_numel :].view(cp_size, *ctx.v_shape)
                 dq, dk, dv = [
                     ctx.dQKV_quantizer.create_tensor_from_data(
-                        x, fake_dtype=bwd_nominal_dtype, internal=ctx.dQKV_quantizer.internal
+                        x,
+                        fake_dtype=bwd_nominal_dtype,
+                        internal=ctx.dQKV_quantizer.internal,
                     )
                     for x in [dq, dk, dv]
                 ]
@@ -3081,7 +3221,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         rank = get_distributed_rank(ctx.cp_group)
 
         (*saved_tensors,) = ctx.saved_tensors
-        (q, k, v, cu_seqlens_q, cu_seqlens_q_padded) = saved_tensors[:5]
+        q, k, v, cu_seqlens_q, cu_seqlens_q_padded = saved_tensors[:5]
         cu_seqlens_kv_per_step = saved_tensors[5:7]
         out_per_step = saved_tensors[7:9]
         softmax_lse_per_step = saved_tensors[9:11]
@@ -3430,9 +3570,14 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         fused_attn_backend = None
         max_logit = None
 
-        QKV_quantizer, O_quantizer, S_quantizer, dQKV_quantizer, dO_quantizer, dP_quantizer = (
-            dpa_utils.get_attention_quantizers(fp8, quantizers)
-        )
+        (
+            QKV_quantizer,
+            O_quantizer,
+            S_quantizer,
+            dQKV_quantizer,
+            dO_quantizer,
+            dP_quantizer,
+        ) = dpa_utils.get_attention_quantizers(fp8, quantizers)
 
         q_fp8, k_fp8, v_fp8 = (None, None, None)
         if fp8:
@@ -4041,9 +4186,14 @@ def attn_forward_func_with_cp(
             cp_group = cp_group[0]
             cp_comm_type = "a2a"
     else:
-        assert isinstance(
-            cp_group, dist_group_type
-        ), f"cp_group must be {dist_group_type} type for {cp_comm_type=}!"
+        if is_logical_process_group(cp_group):
+            assert (
+                cp_comm_type == "p2p"
+            ), f"A logical CP group can only be used with cp_comm_type='p2p'; got {cp_comm_type=}."
+        else:
+            assert isinstance(
+                cp_group, dist_group_type
+            ), f"cp_group must be {dist_group_type} type for {cp_comm_type=}!"
 
     assert qkv_format in [
         "bshd",
@@ -4286,9 +4436,9 @@ def get_batch_on_this_cp_rank(
         raise ValueError(f"Unsupported qvk_format: {qvk_format}!")
     if qvk_format == "thd":
         # Get context parallel size and rank
-        cp_size = torch.distributed.get_world_size(group=cp_group)
+        cp_size = get_distributed_world_size(cp_group)
         if cp_size > 1:
-            cp_rank = torch.distributed.get_rank(group=cp_group)
+            cp_rank = get_distributed_rank(cp_group)
 
             # Calculate the chunk sizes for each sequence
             total_slices_of_any_sequence = 2 * cp_size
