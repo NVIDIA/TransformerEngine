@@ -65,16 +65,20 @@ inline void launch_quantize_4over6_rtc(const IType *input, fp4e2m1x2 *output, fp
                                        bool return_identity, bool return_transpose,
                                        bool row_scaled_nvfp4, dim3 grid, dim3 block, size_t shmem,
                                        cudaStream_t stream) {
-  const std::string itype_name = rtc_type_name<IType>();
-  const std::string mode_name = rtc_mode_name(Cfg::mode);
+  const char *itype_name = rtc_type_name<IType>();
+  const char *mode_name = rtc_mode_name(Cfg::mode);
 
   // Cache key encodes everything that varies the compiled kernel.
-  const std::string kernel_label =
-      std::string("quantize_4over6,itype=") + itype_name +
-      ",use2d=" + (USE_2D_QUANTIZATION ? "1" : "0") + ",id=" + (return_identity ? "1" : "0") +
-      ",t=" + (return_transpose ? "1" : "0") + ",rowscaled=" + (row_scaled_nvfp4 ? "1" : "0") +
-      ",mode=" + mode_name + ",fastmath=" + (Cfg::err_use_fast_math ? "1" : "0") +
-      ",e4m3max=" + std::to_string(E4M3_MAX);
+  std::string kernel_label;
+  kernel_label.reserve(160);
+  kernel_label.append("quantize_4over6,itype=").append(itype_name);
+  kernel_label.append(",use2d=").push_back(USE_2D_QUANTIZATION ? '1' : '0');
+  kernel_label.append(",id=").push_back(return_identity ? '1' : '0');
+  kernel_label.append(",t=").push_back(return_transpose ? '1' : '0');
+  kernel_label.append(",rowscaled=").push_back(row_scaled_nvfp4 ? '1' : '0');
+  kernel_label.append(",mode=").append(mode_name);
+  kernel_label.append(",fastmath=").push_back(Cfg::err_use_fast_math ? '1' : '0');
+  kernel_label.append(",e4m3max=").append(std::to_string(E4M3_MAX));
 
   auto &mgr = rtc::KernelManager::instance();
   if (!mgr.is_compiled(kernel_label)) {

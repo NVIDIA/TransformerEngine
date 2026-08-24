@@ -300,8 +300,10 @@ void KernelManager::set_cache_config(const std::string& kernel_label, CUfunc_cac
   const int device_id = cuda::current_device();
   const auto key = get_kernel_cache_key(kernel_label, device_id);
   std::shared_lock<std::shared_mutex> lock_guard_(lock_);
-  NVTE_CHECK(kernel_cache_.count(key) > 0, "Attempted to configure RTC kernel before compilation");
-  kernel_cache_.at(key).set_function_cache_config(device_id, cache_config);
+  const auto kernel_it = kernel_cache_.find(key);
+  NVTE_CHECK(kernel_it != kernel_cache_.end(),
+             "Attempted to configure RTC kernel before compilation");
+  kernel_it->second.set_function_cache_config(device_id, cache_config);
 }
 
 void KernelManager::set_function_attribute(const std::string& kernel_label,
@@ -309,8 +311,10 @@ void KernelManager::set_function_attribute(const std::string& kernel_label,
   const int device_id = cuda::current_device();
   const auto key = get_kernel_cache_key(kernel_label, device_id);
   std::shared_lock<std::shared_mutex> lock_guard_(lock_);
-  NVTE_CHECK(kernel_cache_.count(key) > 0, "Attempted to configure RTC kernel before compilation");
-  kernel_cache_.at(key).set_function_attribute(device_id, attr, value);
+  const auto kernel_it = kernel_cache_.find(key);
+  NVTE_CHECK(kernel_it != kernel_cache_.end(),
+             "Attempted to configure RTC kernel before compilation");
+  kernel_it->second.set_function_attribute(device_id, attr, value);
 }
 
 int KernelManager::occupancy_max_active_blocks_per_sm(const std::string& kernel_label,
@@ -319,9 +323,10 @@ int KernelManager::occupancy_max_active_blocks_per_sm(const std::string& kernel_
   const int device_id = cuda::current_device();
   const auto key = get_kernel_cache_key(kernel_label, device_id);
   std::shared_lock<std::shared_mutex> lock_guard_(lock_);
-  NVTE_CHECK(kernel_cache_.count(key) > 0, "Attempted to query occupancy before compilation");
-  return kernel_cache_.at(key).occupancy_max_active_blocks_per_sm(device_id, block_size,
-                                                                  dynamic_smem_bytes);
+  const auto kernel_it = kernel_cache_.find(key);
+  NVTE_CHECK(kernel_it != kernel_cache_.end(), "Attempted to query occupancy before compilation");
+  return kernel_it->second.occupancy_max_active_blocks_per_sm(device_id, block_size,
+                                                               dynamic_smem_bytes);
 }
 
 bool KernelManager::is_compiled(const std::string& kernel_label, int device_id) const {
@@ -332,7 +337,12 @@ bool KernelManager::is_compiled(const std::string& kernel_label, int device_id) 
 
 std::string KernelManager::get_kernel_cache_key(const std::string& kernel_label,
                                                 int device_id) const {
-  return concat_strings("sm=", cuda::sm_arch(device_id), ",", kernel_label);
+  const std::string sm_arch = std::to_string(cuda::sm_arch(device_id));
+  std::string key;
+  key.reserve(3 + sm_arch.size() + 1 + kernel_label.size());
+  key.append("sm=").append(sm_arch).push_back(',');
+  key.append(kernel_label);
+  return key;
 }
 
 }  // namespace rtc

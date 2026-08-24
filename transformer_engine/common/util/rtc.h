@@ -197,9 +197,11 @@ class KernelManager {
     const int device_id = cuda::current_device();
     const auto key = get_kernel_cache_key(kernel_label, device_id);
     std::shared_lock<std::shared_mutex> lock_guard_(lock_);
-    NVTE_CHECK(kernel_cache_.count(key) > 0, "Attempted to launch RTC kernel before compilation");
-    kernel_cache_.at(key).launch(device_id, grid_dim, block_dim, shared_mem_bytes, stream,
-                                 std::forward<ArgTs>(args)...);
+    const auto kernel_it = kernel_cache_.find(key);
+    NVTE_CHECK(kernel_it != kernel_cache_.end(),
+               "Attempted to launch RTC kernel before compilation");
+    kernel_it->second.launch(device_id, grid_dim, block_dim, shared_mem_bytes, stream,
+                             std::forward<ArgTs>(args)...);
   }
 
   /*! \brief Sets the preferred cache configuration for a function in the context
@@ -227,9 +229,11 @@ class KernelManager {
     const int device_id = cuda::current_device();
     const auto key = get_kernel_cache_key(kernel_label, device_id);
     std::shared_lock<std::shared_mutex> lock_guard_(lock_);
-    NVTE_CHECK(kernel_cache_.count(key) > 0, "Attempted to launch RTC kernel before compilation");
-    kernel_cache_.at(key).launch_cooperative(device_id, grid_dim, block_dim, shared_mem_bytes,
-                                             stream, std::forward<ArgTs>(args)...);
+    const auto kernel_it = kernel_cache_.find(key);
+    NVTE_CHECK(kernel_it != kernel_cache_.end(),
+               "Attempted to launch RTC kernel before compilation");
+    kernel_it->second.launch_cooperative(device_id, grid_dim, block_dim, shared_mem_bytes, stream,
+                                         std::forward<ArgTs>(args)...);
   }
 
  private:
