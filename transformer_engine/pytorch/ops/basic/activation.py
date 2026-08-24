@@ -418,7 +418,7 @@ class _ScaledUnary(BasicOperation, metaclass=abc.ABCMeta):
             dtype = extra_input.dtype
 
         x = maybe_dequantize(input_.contiguous(), dtype)
-        scales = maybe_dequantize(extra_input, dtype)
+        scales = extra_input
         y = self._scaled_unary_forward(x, scales)
 
         ctx = basic_op_ctxs[0]

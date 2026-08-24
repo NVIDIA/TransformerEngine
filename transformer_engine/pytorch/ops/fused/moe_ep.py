@@ -26,7 +26,7 @@ from .._common import (
     get_main_grad_from_param,
     is_quantized_tensor,
     maybe_dequantize,
-    quantize_mxfp8_for_ep,
+    quantize_for_ep,
     view_main_grad_as_grouped_buffer,
 )
 from ..basic import Combine, Dispatch, GroupedLinear, ScaledSwiGLU
@@ -67,7 +67,7 @@ def _pack_cudnn_activation(
     """Pack the dispatch input in the public cuDNN MoE activation layout."""
     if quantizer is None and not isinstance(input_, MXFP8TensorStorage):
         return input_
-    quantized, scale = quantize_mxfp8_for_ep(input_, quantizer)
+    quantized, scale = quantize_for_ep(input_, quantizer)
     return _pack_as_cudnn_moe_tensor(
         quantized._rowwise_data.view(torch.float8_e4m3fn),
         scale.view(torch.float8_e8m0fnu),

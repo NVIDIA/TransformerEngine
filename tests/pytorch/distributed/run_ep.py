@@ -1066,9 +1066,6 @@ class TestMoeEpSequential(_EpTestCase):
         The fuser selects MegaMoE when its runtime gates pass. Otherwise this
         exercises the same sequence as separate NCCL EP and grouped-MLP ops.
         """
-        if not EAGER:
-            self.skipTest("MoE reference comparison requires eager EP mode")
-
         recipe = MXFP8BlockScaling() if quantization == "mxfp8" else None
         model, fc1, fc2 = self._make_megamoe_model(
             recipe=recipe,

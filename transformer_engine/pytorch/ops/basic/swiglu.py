@@ -446,9 +446,9 @@ class _ScaledGLU(BasicOperation):
         else:
             dtype = extra_input.dtype
 
-        # Make sure inputs are in correct dtype
+        # Prepare the activation input in the compute dtype.
         input_ = maybe_dequantize(input_, dtype)
-        scales = maybe_dequantize(extra_input, dtype)
+        scales = extra_input
         out = self._scaled_glu_forward(input_, scales)
 
         # Save state for backward pass

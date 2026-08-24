@@ -11,7 +11,7 @@ from typing import Optional
 import torch
 
 from transformer_engine_torch import FP8TensorMeta
-from ..constants import MXFP8_BLOCK_SCALING_SIZE
+from ..constants import DType, MXFP8_BLOCK_SCALING_SIZE
 from ..torch_version import torch_version
 from ..quantization import FP8GlobalStateManager
 from ..quantized_tensor import QuantizedTensorStorage, Quantizer
@@ -44,6 +44,30 @@ def get_fused_normalization_quantizer(
     ):
         return quantizer
     return None
+
+
+def validate_buffer(
+    name: str,
+    buffer: Optional[torch.Tensor],
+    *,
+    shape: Optional[tuple[int, ...] | list[int]] = None,
+    dtype: Optional[torch.dtype] = None,
+    device: Optional[torch.device] = None,
+    contiguous: Optional[bool] = None,
+) -> Optional[torch.Tensor]:
+    """Validate requested buffer properties and return detached storage."""
+    if buffer is None:
+        return None
+    if shape is not None and tuple(buffer.shape) != tuple(shape):
+        raise ValueError(f"{name} shape {tuple(buffer.shape)} does not match {tuple(shape)}.")
+    if dtype is not None and buffer.dtype is not dtype:
+        raise TypeError(f"{name} must have dtype {dtype}, got {buffer.dtype}.")
+    if device is not None and buffer.device != device:
+        raise ValueError(f"{name} must be on {device}, got {buffer.device}.")
+    if contiguous is not None and buffer.is_contiguous() != contiguous:
+        requirement = "contiguous" if contiguous else "non-contiguous"
+        raise ValueError(f"{name} must be {requirement}.")
+    return buffer.detach()
 
 
 def validate_or_alloc_output(
@@ -94,17 +118,31 @@ def maybe_dequantize(
     return tensor
 
 
-def quantize_mxfp8_for_ep(
-    input_: torch.Tensor | MXFP8TensorStorage,
-    quantizer: Optional[MXFP8Quantizer],
+def quantize_for_ep(
+    input_: torch.Tensor | QuantizedTensorStorage,
+    quantizer: Optional[Quantizer],
 ) -> tuple[MXFP8Tensor | MXFP8TensorStorage, torch.Tensor]:
     """Return an MXFP8 input and its compact rowwise scales for EP."""
-    if isinstance(input_, (MXFP8Tensor, MXFP8TensorStorage)):
+    if quantizer is not None:
+        if not isinstance(quantizer, MXFP8Quantizer):
+            raise TypeError(
+                f"EP MXFP8 transport requires MXFP8Quantizer, got {type(quantizer).__name__}."
+            )
+        if quantizer.dtype != DType.kFloat8E4M3:
+            raise NotImplementedError("EP MXFP8 transport supports E4M3 only.")
+
+    if isinstance(input_, MXFP8TensorStorage):
         quantized = input_
+    elif isinstance(input_, QuantizedTensorStorage):
+        raise TypeError(
+            f"EP MXFP8 transport requires an MXFP8 input, got {type(input_).__name__}."
+        )
     else:
         if quantizer is None:
             raise ValueError("An MXFP8 quantizer is required for a non-quantized EP input.")
         quantized = quantizer(input_)
+    if quantized._fp8_dtype != DType.kFloat8E4M3:
+        raise NotImplementedError("EP MXFP8 transport supports E4M3 only.")
     if quantized._with_gemm_swizzled_scales:
         raise ValueError("EP requires unswizzled MXFP8 scales.")
     data = quantized._rowwise_data
