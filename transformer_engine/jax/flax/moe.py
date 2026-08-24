@@ -32,7 +32,6 @@ from typing import Any, Callable, NewType, Optional, Tuple, Union
 
 import jax.numpy as jnp
 from flax import linen as nn
-from transformer_engine.common.recipe import Recipe
 
 # Re-exported so downstream users can ``from transformer_engine.jax.flax.moe
 # import P`` without a second jax.sharding import.
@@ -40,6 +39,7 @@ from jax.sharding import (
     PartitionSpec as P,
 )  # noqa: F401  # pylint: disable=unused-import
 
+from transformer_engine.common.recipe import Recipe
 from ..moe import moe
 from ..quantize import QuantizerSet
 from ..router import ScoreFunction
