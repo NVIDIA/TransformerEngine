@@ -831,7 +831,21 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         arg_shardings[-2] = arg_shardings[-4]
         arg_shardings = tuple(arg_shardings)
         out_shardings = (out_sharding, softmax_aux_sharding, rng_state_sharding, max_logit_sharding)
-        impl = partial(FusedAttnFwdPrimitive.impl, config=config)
+        max_logit_reduce_axes = (
+            FusedAttnFwdPrimitive._max_logit_reduce_axes(mesh, max_logit_sharding)
+            if config.return_max_logit
+            else ()
+        )
+
+        def impl(*args):
+            output, softmax_aux, rng_state, max_logit = FusedAttnFwdPrimitive.impl(
+                *args, config=config
+            )
+            max_logit = FusedAttnFwdPrimitive._reduce_max_logit_across_mesh(
+                max_logit, mesh, max_logit_reduce_axes, config
+            )
+            return output, softmax_aux, rng_state, max_logit
+
         return mesh, impl, out_shardings, arg_shardings
 
     @staticmethod
@@ -1931,8 +1945,10 @@ class FusedAttnCPWithAllGatherFwdPrimitive(FusedAttnFwdPrimitive):
         arg_shardings[5] = seed_sharding
         arg_shardings = tuple(arg_shardings)
         out_shardings = (out_sharding, softmax_aux_sharding, rng_state_sharding, max_logit_sharding)
-        max_logit_reduce_axes = FusedAttnFwdPrimitive._max_logit_reduce_axes(
-            mesh, max_logit_sharding
+        max_logit_reduce_axes = (
+            FusedAttnFwdPrimitive._max_logit_reduce_axes(mesh, max_logit_sharding)
+            if config.return_max_logit
+            else ()
         )
 
         def impl(
@@ -2236,8 +2252,10 @@ class FusedAttnCPStripedWithAllGatherFwdPrimitive(FusedAttnFwdPrimitive):
         arg_shardings[5] = seed_sharding
         arg_shardings = tuple(arg_shardings)
         out_shardings = (out_sharding, softmax_aux_sharding, rng_state_sharding, max_logit_sharding)
-        max_logit_reduce_axes = FusedAttnFwdPrimitive._max_logit_reduce_axes(
-            mesh, max_logit_sharding
+        max_logit_reduce_axes = (
+            FusedAttnFwdPrimitive._max_logit_reduce_axes(mesh, max_logit_sharding)
+            if config.return_max_logit
+            else ()
         )
 
         def impl(
@@ -2698,8 +2716,10 @@ class FusedRingAttnFwdPrimitive(FusedAttnFwdPrimitive):
         arg_shardings[-2] = arg_shardings[-4]
         arg_shardings = tuple(arg_shardings)
         out_shardings = (out_sharding, softmax_aux_sharding, rng_state_sharding, max_logit_sharding)
-        max_logit_reduce_axes = FusedAttnFwdPrimitive._max_logit_reduce_axes(
-            mesh, max_logit_sharding
+        max_logit_reduce_axes = (
+            FusedAttnFwdPrimitive._max_logit_reduce_axes(mesh, max_logit_sharding)
+            if config.return_max_logit
+            else ()
         )
 
         def ring_attn_fwd_impl(
@@ -3223,8 +3243,10 @@ class FusedRingAttnStripedFwdPrimitive(FusedAttnFwdPrimitive):
         arg_shardings[-2] = arg_shardings[-4]
         arg_shardings = tuple(arg_shardings)
         out_shardings = (out_sharding, softmax_aux_sharding, rng_state_sharding, max_logit_sharding)
-        max_logit_reduce_axes = FusedAttnFwdPrimitive._max_logit_reduce_axes(
-            mesh, max_logit_sharding
+        max_logit_reduce_axes = (
+            FusedAttnFwdPrimitive._max_logit_reduce_axes(mesh, max_logit_sharding)
+            if config.return_max_logit
+            else ()
         )
 
         def fwd_impl(
