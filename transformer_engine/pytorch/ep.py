@@ -526,7 +526,7 @@ def _ep_combine_raw(buffer: "EpBuffer", expert_out: torch.Tensor, result: torch.
 # autograd.Function wrappers
 
 
-@dataclass
+@dataclass(slots=True)
 class _DispatchState:
     """Backward state + output-shaping flags for the prepare-and-dispatch op. ``handle_mem`` is
     buffer-owned and mutated in place, so it rides here as a plain attribute rather than through
@@ -743,7 +743,7 @@ class _EpPrepareAndDispatch(torch.autograd.Function):
         )
 
 
-@dataclass
+@dataclass(slots=True)
 class _CombineState:
     """Backward state for the combine op. ``grad_out`` and ``handle_mem`` ride here as plain
     attributes rather than through save_for_backward, which would version-track tensors we mutate.
@@ -959,8 +959,8 @@ def _scale_alloc_io(buf, rows, data_cols, scale_cols, data_dtype, scale_dtype, d
     ``scale_dtype``). Carve both from a single caller ``buf`` when it is large enough, so one
     symm-mem window backs both views; else allocate them (symm-mem pool under zero-copy, else
     plain). Recipe-agnostic: byte sizes come from the element sizes."""
-    data_bytes = rows * data_cols * torch.empty((), dtype=data_dtype).element_size()
-    scale_bytes = rows * scale_cols * torch.empty((), dtype=scale_dtype).element_size()
+    data_bytes = rows * data_cols * data_dtype.itemsize
+    scale_bytes = rows * scale_cols * scale_dtype.itemsize
     if buf is not None:
         # Reinterpret in place; a non-contiguous buf would force a copy and leave the caller's
         # buffer unwritten, so require contiguous and view rather than reshape.
