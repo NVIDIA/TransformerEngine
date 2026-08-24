@@ -149,8 +149,9 @@ LaunchConfig get_launch_config(const size_t first_logical_dim, const size_t last
     NVTE_CHECK(config.work_blocks_X > 0 && config.work_blocks_Y > 0,
                "SAME_BOTH_DIMS requires non-empty tensors.");
 
-    // Direct tensor-local mapper: one CTA owns one chunk.
-    config.grid = dim3(config.work_blocks_X, config.work_blocks_Y, num_tensors);
+    // Direct tensor-local mapper: one CTA owns one chunk. Linearize the virtual (X, Y, tensor)
+    // work grid into the physical X dimension, whose extent is much larger than grid Y/Z.
+    config.grid = dim3(config.work_blocks_X * config.work_blocks_Y * num_tensors);
   } else if constexpr (shape_rep == ShapeRepresentation::VARYING_FIRST_DIM) {
     config.work_blocks_X = DIVUP(last_logical_dim, CHUNK_DIM_X);
     config.work_blocks_Y = DIVUP(first_logical_dim, CHUNK_DIM_Y);
@@ -158,8 +159,8 @@ LaunchConfig get_launch_config(const size_t first_logical_dim, const size_t last
                "VARYING_FIRST_DIM requires a non-empty logical tensor.");
 
     // Tensor boundaries are TILE_DIM_Y-aligned, so each CTA directly owns one configured chunk
-    // in the vertically stacked tensor.
-    config.grid = dim3(config.work_blocks_X, config.work_blocks_Y);
+    // in the vertically stacked tensor. Use a linear grid to avoid the smaller grid Y limit.
+    config.grid = dim3(config.work_blocks_X * config.work_blocks_Y);
   } else {
     config.work_blocks_Y = 1;
     // Per-tensor dimensions are device-resident. This is a conservative host-side estimate; the
@@ -657,6 +658,24 @@ __global__ void __launch_bounds__(CastTraits::THREADS_PER_CHUNK) group_quantize_
 
   const bool leading_thread = (threadIdx.x == 0);
 
+  // Decode the linear direct-mapper grid once per CTA. Valid CUDA grid extents fit in uint, which
+  // also keeps this one-time coordinate calculation in 32-bit arithmetic.
+  [[maybe_unused]] uint direct_block_id_X = 0;
+  [[maybe_unused]] uint direct_block_id_Y = 0;
+  [[maybe_unused]] uint direct_tensor_id = 0;
+  if constexpr (use_direct_mapper) {
+    const uint direct_blocks_X = static_cast<uint>(work_blocks_X);
+    const uint tensor_block_id = blockIdx.x / direct_blocks_X;
+    direct_block_id_X = blockIdx.x - tensor_block_id * direct_blocks_X;
+    if constexpr (use_direct_same_both_mapper) {
+      const uint direct_blocks_Y = static_cast<uint>(work_blocks_Y);
+      direct_tensor_id = tensor_block_id / direct_blocks_Y;
+      direct_block_id_Y = tensor_block_id - direct_tensor_id * direct_blocks_Y;
+    } else {
+      direct_block_id_Y = tensor_block_id;
+    }
+  }
+
   const size_t tid_Y_rowwise = threadIdx.x / THREADS_X;
   const size_t tid_X_rowwise = threadIdx.x % THREADS_X;
   const size_t tid_Y_colwise = 0;
@@ -701,7 +720,7 @@ __global__ void __launch_bounds__(CastTraits::THREADS_PER_CHUNK) group_quantize_
     // active tail once per CTA and reject it before initializing TMA barriers. Reuse the same
     // temporary storage for the exceptional colwise-swizzled tensor metadata.
     size_t *const mapper_storage = reinterpret_cast<size_t *>(dshmem);
-    const size_t block_offset_Y = blockIdx.y * CHUNK_DIM_Y;
+    const size_t block_offset_Y = direct_block_id_Y * CHUNK_DIM_Y;
     const size_t tensor_offset = block_offset_Y * last_logical_dim;
     if (leading_thread) {
       const size_t active_elements = static_cast<size_t>(offsets_ptr[num_tensors]);
@@ -792,12 +811,12 @@ __global__ void __launch_bounds__(CastTraits::THREADS_PER_CHUNK) group_quantize_
 
     if constexpr (use_direct_same_both_mapper) {
       // SAME_BOTH_DIMS is represented by one vertically stacked TMA tensor. The launch grid is
-      // tensor-local, so only the Y coordinate needs the tensor's offset in that stacked view.
-      tensor_id = blockIdx.z;
+      // linearized in the same order as the virtual CUDA grid: X, then Y, then tensor.
+      tensor_id = direct_tensor_id;
       rows = same_both_rows;
       cols = last_logical_dim;
-      block_id_Y = blockIdx.y;
-      block_id_X = blockIdx.x;
+      block_id_Y = direct_block_id_Y;
+      block_id_X = direct_block_id_X;
       tensor_offset_Y = block_id_Y * CHUNK_DIM_Y;
       tensor_start_offset = tensor_id * rows * cols;
       block_offset_Y = tensor_id * rows + tensor_offset_Y;
@@ -808,8 +827,8 @@ __global__ void __launch_bounds__(CastTraits::THREADS_PER_CHUNK) group_quantize_
       // directly, without decode_job/decode_block or follower CTAs.
       rows = first_logical_dim;
       cols = last_logical_dim;
-      block_id_Y = blockIdx.y;
-      block_id_X = blockIdx.x;
+      block_id_Y = direct_block_id_Y;
+      block_id_X = direct_block_id_X;
       block_offset_Y = block_id_Y * CHUNK_DIM_Y;
       block_offset_X = block_id_X * CHUNK_DIM_X;
       tensor_offset_Y = block_offset_Y;
