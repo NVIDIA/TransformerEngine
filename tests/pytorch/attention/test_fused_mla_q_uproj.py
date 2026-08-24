@@ -8,6 +8,8 @@ Run:
     pytest tests/pytorch/attention/test_fused_mla_q_uproj.py -v
 """
 
+import os
+
 import pytest
 import torch
 
@@ -156,11 +158,15 @@ def test_fused_mla_q_uproj(tokens: int, fp8_weight: bool) -> None:
     w_raw = torch.randn(PROJ_DIM, Q_LORA_RANK, dtype=torch.bfloat16, device=device)
     if fp8_weight:
         w = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3, rowwise=True, columnwise=False)(w_raw)
+        x_run = MXFP8Quantizer(
+            fp8_dtype=tex.DType.kFloat8E4M3, rowwise=True, columnwise=True
+        )(x)
     else:
         w = w_raw
+        x_run = x
     cos, sin = _build_rope_tables(tokens, device)
 
-    query, x_saved = FusedMLAQUpProjRopeQuant.run(x, w, cos, sin, s, b)
+    query, x_saved = FusedMLAQUpProjRopeQuant.run(x_run, w, cos, sin, s, b)
 
     # Forward numerics: E4M3 output quantization gives ≤6.25% relative error (= 2^-4) per
     # normalized element. rtol=0.07 sits just above this floor with margin for subnormals.
@@ -188,9 +194,8 @@ def test_fused_mla_q_uproj(tokens: int, fp8_weight: bool) -> None:
 def test_fused_mla_q_uproj_autograd() -> None:
     """The real autograd path must produce correct input and weight gradients.
 
-    Verifies wiring: Triton RoPE backward + TE linear backward produce the same
-    result as the reference computed with the same kernels. For an independent
-    pure-PyTorch cross-check (reviewer #15), see test_fused_mla_q_uproj_autograd_pytorch_ref.
+    Verifies wiring: Triton RoPE backward + TE linear and RMSNorm backward produce
+    the same result as the reference computed with the same kernels.
     """
     import triton
 
@@ -201,20 +206,44 @@ def test_fused_mla_q_uproj_autograd() -> None:
     torch.manual_seed(SEED)
 
     x = torch.randn(s, b, Q_LORA_RANK, dtype=torch.bfloat16, device=device, requires_grad=True)
+    gamma = torch.ones(Q_LORA_RANK, dtype=torch.bfloat16, device=device, requires_grad=True)
     w_bf16 = torch.randn(
         PROJ_DIM, Q_LORA_RANK, dtype=torch.bfloat16, device=device, requires_grad=True
     )
     w = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3, rowwise=True, columnwise=True)(w_bf16)
+    eps = 1.0e-6
+    normalization = "RMSNorm"
+    zero_centered_gamma = False
     cos, sin = _build_rope_tables(tokens, device)
     cos_flat = cos.reshape(s, -1).contiguous()
     sin_flat = sin.reshape(s, -1).contiguous()
+
+    from transformer_engine.pytorch.module._common import apply_normalization
+
+    x2d = x.detach().reshape(tokens, Q_LORA_RANK).contiguous()
+    x_quantizer = MXFP8Quantizer(
+        fp8_dtype=tex.DType.kFloat8E4M3, rowwise=True, columnwise=True
+    )
+    ln_out, _, rsigma = apply_normalization(
+        x2d,
+        None,
+        gamma.detach(),
+        None,
+        eps,
+        x_quantizer,
+        x2d.dtype,
+        normalization,
+        int(os.getenv("NVTE_FWD_LAYERNORM_SM_MARGIN", "0")),
+        zero_centered_gamma,
+    )
     _, x_saved = FusedMLAQUpProjRopeQuant.run(
-        x.detach().reshape(tokens, Q_LORA_RANK), w.detach(), cos_flat, sin_flat, s, b
+        ln_out, w.detach(), cos_flat, sin_flat, s, b
     )
     grad_out = torch.randn(s, b, NUM_HEADS, HEAD_DIM, dtype=torch.bfloat16, device=device)
 
     query = FusedMLAQUpProjFunction.apply(
         x,
+        gamma,
         w,
         cos[:, None, None, :],
         sin[:, None, None, :],
@@ -228,11 +257,15 @@ def test_fused_mla_q_uproj_autograd() -> None:
         b,
         None,
         False,
+        eps,
+        normalization,
+        zero_centered_gamma,
     )
     assert query.requires_grad
     assert query.grad_fn is not None
     torch.autograd.backward(query, grad_out.clone())
     assert x.grad is not None
+    assert gamma.grad is not None
     assert w_bf16.grad is not None
 
     dq3 = grad_out.reshape(tokens, NUM_HEADS, HEAD_DIM).clone().contiguous()
@@ -258,7 +291,7 @@ def test_fused_mla_q_uproj_autograd() -> None:
     gy = gy_quantizer(dq2d)
 
     w.update_usage(rowwise_usage=True, columnwise_usage=True)
-    grad_x_ref = _fused_general_gemm(
+    grad_ln_out_ref = _fused_general_gemm(
         w, gy, layout="NN", grad=True, out_dtype=torch.bfloat16, use_split_accumulator=True
     )[0]
     grad_w_ref = _fused_general_gemm(
@@ -269,5 +302,14 @@ def test_fused_mla_q_uproj_autograd() -> None:
         out_dtype=torch.bfloat16,
         use_split_accumulator=True,
     )[0]
+    grad_x_ref, grad_gamma_ref = tex.rmsnorm_bwd(
+        grad_ln_out_ref.reshape(x2d.shape),
+        x2d,
+        rsigma,
+        gamma.detach(),
+        int(os.getenv("NVTE_BWD_LAYERNORM_SM_MARGIN", "0")),
+        zero_centered_gamma,
+    )
     torch.testing.assert_close(x.grad.reshape(tokens, Q_LORA_RANK), grad_x_ref, atol=0.5, rtol=0.1)
+    torch.testing.assert_close(gamma.grad, grad_gamma_ref, atol=0.5, rtol=0.1)
     torch.testing.assert_close(w_bf16.grad, grad_w_ref, atol=0.5, rtol=0.1)
