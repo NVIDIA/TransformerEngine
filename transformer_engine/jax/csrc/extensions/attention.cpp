@@ -48,7 +48,7 @@ void PrepareFusedAttnForwardAuxTensors(NVTETensorPack *tensor_pack, const size_t
                                        const size_t bias_heads, const size_t q_max_seqlen,
                                        const size_t kv_max_seqlen, DType dtype,
                                        NVTE_Bias_Type bias_type, NVTE_Fused_Attn_Backend backend,
-                                       void *softmax_buf, void *max_buf = nullptr,
+                                       void *softmax_buf, void *max_logits_buf = nullptr,
                                        void *rng_state_buf = nullptr, void *bias_buf = nullptr,
                                        void *softmax_offset_buf = nullptr) {
   // all backends need softmax but expect different shapes/dtypes
@@ -67,10 +67,10 @@ void PrepareFusedAttnForwardAuxTensors(NVTETensorPack *tensor_pack, const size_t
   if (backend == NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen) {
     int size = 1;  // Start after softmax.
 
-    if (max_buf != nullptr) {
+    if (max_logits_buf != nullptr) {
       NVTETensor &max_aux = tensor_pack->tensors[size++];
       NVTEBasicTensor max_aux_data;
-      max_aux_data.data_ptr = max_buf;
+      max_aux_data.data_ptr = max_logits_buf;
       max_aux_data.shape = {};
       max_aux_data.shape.ndim = 4;
       max_aux_data.shape.data[0] = input_batch;
