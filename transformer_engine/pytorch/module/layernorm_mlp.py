@@ -1946,6 +1946,10 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 for memory. default is false, in which activations are saved in fwd. not supported for onnx forward
     """
 
+    def _get_quantization_runtime_num_gemms(self) -> int:
+        """Return the fixed FC1/FC2 quantizer slot layout."""
+        return 2
+
     def __init__(
         self,
         hidden_size: int,
@@ -2173,30 +2177,20 @@ class LayerNormMLP(TransformerEngineBaseModule):
         self.bwd_ln_sm_margin = int(os.getenv("NVTE_BWD_LAYERNORM_SM_MARGIN", "0"))
         self.inf_ln_sm_margin = int(os.getenv("NVTE_INF_LAYERNORM_SM_MARGIN", "0"))
 
-    def set_meta_tensor(self, fwd: bool, recipe: Recipe) -> None:
-        """Init scales and amaxes for fwd | bwd."""
-        super().set_meta_tensor(fwd, recipe)
-
-        # Recipe-specific quantizer configuration
-        recipe = FP8GlobalStateManager.get_fp8_recipe()
-        if recipe.float8_current_scaling():
-            self._customize_quantizers_float8_current_scaling(fwd, recipe)
-
     def get_quantizer_roles(
         self,
         *,
         fwd: bool,
         num_quantizers: int,
+        boundary_role: Optional[QuantizerRole],
     ) -> Optional[List[QuantizerRole]]:
         """QuantizerRole list for quantizers used by ``LayerNormMLP``.
 
         Each internal GEMM (fc1, fc2) gets a distinct name suffix so that
         custom-recipe factories can target them individually.
 
-        The module's final output (fc2 fwd) and final grad (fc1 bwd)
-        slots default to ``None`` (unknown consumer).  Set
-        :attr:`output_quantizer_role` / :attr:`grad_input_quantizer_role`
-        to provide consumer identity.  Internal boundaries use fixed
+        ``boundary_role`` is the planner-resolved final output (fc2 fwd) or
+        final grad-input (fc1 bwd) consumer role. Internal boundaries use fixed
         roles with known consumer identity.
         """
         base_name = self.name or ""
@@ -2215,14 +2209,14 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 QuantizerRole(module_type="linear", tensor_type="input", name=fc2_name),
                 QuantizerRole(module_type="linear", tensor_type="input", name=fc2_name),
                 QuantizerRole(module_type="linear", tensor_type="weight", name=fc2_name),
-                # fc2 output — boundary, consumer unknown
-                self._output_quantizer_role,
+                # fc2 output — resolved boundary consumer
+                boundary_role,
             ]
         else:
             base = [
                 QuantizerRole(module_type="linear", tensor_type="grad_output", name=fc1_name),
-                # fc1 grad_input — boundary, consumer unknown
-                self._grad_input_quantizer_role,
+                # fc1 grad_input — resolved boundary consumer
+                boundary_role,
                 QuantizerRole(module_type="linear", tensor_type="grad_output", name=fc2_name),
                 # fc2 grad_input — consumed by fc1 (via activation'), so labeled as fc1 grad_output
                 QuantizerRole(module_type="linear", tensor_type="grad_output", name=fc1_name),
@@ -2664,56 +2658,6 @@ class LayerNormMLP(TransformerEngineBaseModule):
             ]
 
         return tuple(make_debug("fc1", 0) + make_debug("fc2", 6))
-
-    def _customize_quantizers_float8_current_scaling(self, fwd: bool, recipe: Recipe) -> None:
-        """Customize quantizers based on current scaling recipe + layernorm_mlp."""
-        assert (
-            recipe.float8_current_scaling()
-        ), "current scaling recipe quantizer customization here"
-        if fwd:
-            # fc1_input_quantizer: set configs about amax epsilon and power_2_scale
-            self.quantizers["scaling_fwd"][
-                FP8FwdTensorIdx.GEMM1_INPUT
-            ].force_pow_2_scales = recipe.fp8_quant_fwd_inp.power_2_scale
-            self.quantizers["scaling_fwd"][
-                FP8FwdTensorIdx.GEMM1_INPUT
-            ].amax_epsilon = recipe.fp8_quant_fwd_inp.amax_epsilon
-            # fc2_input_quantizer
-            self.quantizers["scaling_fwd"][
-                FP8FwdTensorIdx.GEMM2_INPUT
-            ].force_pow_2_scales = recipe.fp8_quant_fwd_inp.power_2_scale
-            self.quantizers["scaling_fwd"][
-                FP8FwdTensorIdx.GEMM2_INPUT
-            ].amax_epsilon = recipe.fp8_quant_fwd_inp.amax_epsilon
-            # fc1_weight_quantizer: also set numerical configs about weight
-            self.quantizers["scaling_fwd"][
-                FP8FwdTensorIdx.GEMM1_WEIGHT
-            ].force_pow_2_scales = recipe.fp8_quant_fwd_weight.power_2_scale
-            self.quantizers["scaling_fwd"][
-                FP8FwdTensorIdx.GEMM1_WEIGHT
-            ].amax_epsilon = recipe.fp8_quant_fwd_weight.amax_epsilon
-            # fc2_weight_quantizer
-            self.quantizers["scaling_fwd"][
-                FP8FwdTensorIdx.GEMM2_WEIGHT
-            ].force_pow_2_scales = recipe.fp8_quant_fwd_weight.power_2_scale
-            self.quantizers["scaling_fwd"][
-                FP8FwdTensorIdx.GEMM2_WEIGHT
-            ].amax_epsilon = recipe.fp8_quant_fwd_weight.amax_epsilon
-        else:
-            # fc2_grad_output_quantizer: set configs about amax epsilon and power_2_scale for fc2_grad_output_quantizer
-            self.quantizers["scaling_bwd"][
-                FP8BwdTensorIdx.GRAD_OUTPUT2
-            ].force_pow_2_scales = recipe.fp8_quant_bwd_grad.power_2_scale
-            self.quantizers["scaling_bwd"][
-                FP8BwdTensorIdx.GRAD_OUTPUT2
-            ].amax_epsilon = recipe.fp8_quant_bwd_grad.amax_epsilon
-            # fc1_grad_output_quantizer: also set numerical configs for fc1_grad_output_quantizer
-            self.quantizers["scaling_bwd"][
-                FP8BwdTensorIdx.GRAD_OUTPUT1
-            ].force_pow_2_scales = recipe.fp8_quant_bwd_grad.power_2_scale
-            self.quantizers["scaling_bwd"][
-                FP8BwdTensorIdx.GRAD_OUTPUT1
-            ].amax_epsilon = recipe.fp8_quant_bwd_grad.amax_epsilon
 
     def _get_weight_tensors(self) -> List[Union[torch.Tensor, QuantizedTensorStorage]]:
         """Get the weight tensors of the module."""

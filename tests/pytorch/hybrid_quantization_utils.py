@@ -37,6 +37,7 @@ def _make_mxfp8(*, fp8_dtype=te.DType.kFloat8E4M3):
     return te.MXFP8Quantizer(fp8_dtype=fp8_dtype)
 
 
+@recipe.quantizer_factory(key=("test_nvfp4_linear_mxfp8_dpa", 1))
 def nvfp4_linear_mxfp8_dpa_test_factory(role):
     """Test-local reference for the experimental NVFP4 Linear + MXFP8 DPA example."""
     is_dpa = role is not None and role.module_type == "dpa"
@@ -211,7 +212,7 @@ def make_role_aware_quantizer(factory, role):
     return quantizer
 
 
-def hybrid_custom_recipe(row_factory, col_factory, grad_factory=None):
+def hybrid_custom_recipe(row_factory, col_factory, grad_factory=None, *, qfactory_key):
     """Build a CustomRecipe with hybrid forward and configurable grad quantizers."""
     if grad_factory is None:
         grad_factory = col_factory
@@ -227,9 +228,10 @@ def hybrid_custom_recipe(row_factory, col_factory, grad_factory=None):
             return make_role_aware_quantizer(grad_factory, role)
         return make_role_aware_quantizer(row_factory, role)
 
-    return recipe.CustomRecipe(qfactory=qfactory)
+    return recipe.CustomRecipe(qfactory=qfactory, qfactory_key=qfactory_key)
 
 
+@recipe.quantizer_factory(key=("test_hybrid_fp8_current", 1))
 def hybrid_fp8_current_qfactory(role):
     """FP8 current scaling in both hybrid directions for forward tensor roles."""
     if _is_linear_role(role) and role.tensor_type in _FORWARD_TENSOR_TYPES:
@@ -240,6 +242,7 @@ def hybrid_fp8_current_qfactory(role):
     return current_scaling_factory(role)
 
 
+@recipe.quantizer_factory(key=("test_hybrid_fp8_current_e5m2_grads", 1))
 def hybrid_fp8_current_e5m2_grads_qfactory(role):
     """FP8 current-scaling hybrid with E5M2 for both grad boundary roles."""
     if _is_linear_role(role) and role.tensor_type in _FORWARD_TENSOR_TYPES:
@@ -252,6 +255,7 @@ def hybrid_fp8_current_e5m2_grads_qfactory(role):
     return _make_fp8_current()
 
 
+@recipe.quantizer_factory(key=("test_hybrid_mxfp8", 1))
 def hybrid_mxfp8_qfactory(role):
     """MXFP8 in both hybrid directions for forward tensor roles."""
     if _is_linear_role(role) and role.tensor_type in _FORWARD_TENSOR_TYPES:
@@ -262,6 +266,7 @@ def hybrid_mxfp8_qfactory(role):
     return mxfp8_factory(role)
 
 
+@recipe.quantizer_factory(key=("test_hybrid_float8_block", 1))
 def hybrid_float8_block_qfactory(role):
     """Float8 block scaling in both hybrid directions for forward roles."""
     if _is_linear_role(role) and role.tensor_type in _FORWARD_TENSOR_TYPES:
@@ -272,6 +277,7 @@ def hybrid_float8_block_qfactory(role):
     return float8_block_scaling_factory(role)
 
 
+@recipe.quantizer_factory(key=("test_hybrid_block_fp8_e4m3", 1))
 def hybrid_block_fp8_e4m3_qfactory(role):
     """Hybrid E4M3 Block-FP8 with role-aware 1D/2D block geometry."""
     is_linear = _is_linear_role(role)
@@ -294,6 +300,7 @@ def hybrid_block_fp8_e4m3_qfactory(role):
     )
 
 
+@recipe.quantizer_factory(key=("test_hybrid_mixed_mxfp8_fp8", 1))
 def hybrid_mixed_mxfp8_fp8_qfactory(role):
     """MXFP8 rowwise plus FP8 current-scaling columnwise."""
     if _is_linear_role(role) and role.tensor_type in _FORWARD_TENSOR_TYPES:
@@ -304,6 +311,7 @@ def hybrid_mixed_mxfp8_fp8_qfactory(role):
     return current_scaling_factory(role)
 
 
+@recipe.quantizer_factory(key=("test_hybrid_fp8_current_identity", 1))
 def hybrid_fp8_current_identity_qfactory(role):
     """FP8 current-scaling forward plus Identity backward."""
     if _is_linear_role(role) and role.tensor_type in _FORWARD_TENSOR_TYPES:
@@ -316,6 +324,7 @@ def hybrid_fp8_current_identity_qfactory(role):
     return current_scaling_factory(role)
 
 
+@recipe.quantizer_factory(key=("test_hybrid_mxfp8_identity", 1))
 def hybrid_mxfp8_identity_qfactory(role):
     """MXFP8 forward plus Identity backward."""
     if _is_linear_role(role) and role.tensor_type in _FORWARD_TENSOR_TYPES:
@@ -328,11 +337,13 @@ def hybrid_mxfp8_identity_qfactory(role):
     return mxfp8_factory(role)
 
 
+@recipe.quantizer_factory(key=("test_identity", 1))
 def identity_qfactory(role):  # pylint: disable=unused-argument
     """High-precision passthrough for every quantizer slot."""
     return te.IdentityQuantizer()
 
 
+@recipe.quantizer_factory(key=("test_hybrid_nvfp4", 1))
 def hybrid_nvfp4_qfactory(role):
     """NVFP4 in both hybrid directions for forward tensor roles."""
     if _is_linear_role(role) and role.tensor_type in _FORWARD_TENSOR_TYPES:
@@ -343,6 +354,7 @@ def hybrid_nvfp4_qfactory(role):
     return nvfp4_factory(role)
 
 
+@recipe.quantizer_factory(key=("test_hybrid_tp_mxfp8_nvfp4", 1))
 def hybrid_tp_mxfp8_nvfp4_qfactory(role):
     """TP/SP MXFP8 rowwise plus NVFP4 columnwise, including boundary roles."""
     if _is_linear_role(role) and role.tensor_type in _GRAD_TENSOR_TYPES:
@@ -353,6 +365,7 @@ def hybrid_tp_mxfp8_nvfp4_qfactory(role):
     )
 
 
+@recipe.quantizer_factory(key=("test_hybrid_fp8_mxfp8", 1))
 def hybrid_fp8_mxfp8_qfactory(role):
     """FP8 current-scaling rowwise plus MXFP8 columnwise for CPU-offload tests."""
     if _is_linear_role(role) and role.tensor_type in _FORWARD_TENSOR_TYPES:
@@ -365,6 +378,7 @@ def hybrid_fp8_mxfp8_qfactory(role):
     return _make_fp8_current()
 
 
+@recipe.quantizer_factory(key=("test_hybrid_mxfp8_nvfp4", 1))
 def hybrid_mxfp8_nvfp4_qfactory(role):
     """MXFP8 rowwise plus NVFP4 columnwise for CPU-offload tests."""
     if _is_linear_role(role) and role.tensor_type in _FORWARD_TENSOR_TYPES:

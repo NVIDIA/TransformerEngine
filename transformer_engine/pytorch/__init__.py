@@ -42,9 +42,10 @@ from transformer_engine.pytorch.permutation import (
     moe_sort_chunks_by_index,
     moe_sort_chunks_by_index_with_probs,
 )
+from transformer_engine.pytorch.quantization import apply_recipe
+from transformer_engine.pytorch.quantization import autocast
 from transformer_engine.pytorch.quantization import fp8_autocast
 from transformer_engine.pytorch.quantization import fp8_model_init
-from transformer_engine.pytorch.quantization import autocast
 from transformer_engine.pytorch.quantization import quantized_model_init
 from transformer_engine.pytorch.quantization import is_fp8_available
 from transformer_engine.pytorch.quantization import is_mxfp8_available
@@ -54,6 +55,7 @@ from transformer_engine.pytorch.quantization import get_default_recipe
 from transformer_engine.pytorch.quantization import QuantizerRole
 from transformer_engine.pytorch.quantization import QuantizerRequest
 from transformer_engine.pytorch.quantization import DelayedScalingRequest
+from transformer_engine.common.recipe import quantizer_factory
 from transformer_engine.pytorch.utils import get_cudnn_version
 from transformer_engine.pytorch.utils import get_device_compute_capability
 from transformer_engine.pytorch.utils import is_bf16_available

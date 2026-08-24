@@ -15,7 +15,6 @@ from torch.nn import init
 
 import transformer_engine_torch as tex
 
-from transformer_engine.common.recipe import Recipe
 from transformer_engine.pytorch.torch_version import torch_version
 from transformer_engine.pytorch.tensor.utils import clear_columnwise_cache, is_custom
 from .base import (
@@ -1333,8 +1332,15 @@ class LayerNormLinear(TransformerEngineBaseModule):
         delay_wgrad_compute: bool = False,
         symmetric_ar_type: Optional[str] = None,
         name: Optional[str] = None,
+        *,
+        _declared_output_quantizer_role: Optional[QuantizerRole] = None,
+        _declared_grad_input_quantizer_role: Optional[QuantizerRole] = None,
     ) -> None:
-        super().__init__(name)
+        super().__init__(
+            name,
+            _declared_output_quantizer_role=_declared_output_quantizer_role,
+            _declared_grad_input_quantizer_role=_declared_grad_input_quantizer_role,
+        )
 
         params_dtype = torch.get_default_dtype() if params_dtype is None else params_dtype
         self.in_features = in_features
@@ -1595,38 +1601,29 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 if name in self.weight_names or name in self.bias_names:
                     param.skip_backward_post_hook = True
 
-    def set_meta_tensor(self, fwd: bool, recipe: Recipe) -> None:
-        """Init scales and amaxes for fwd | bwd."""
-        super().set_meta_tensor(fwd, recipe)
-
-        # Recipe-specific quantizer configuration
-        recipe = FP8GlobalStateManager.get_fp8_recipe()
-        if recipe.float8_current_scaling():
-            self._customize_quantizers_float8_current_scaling(fwd, recipe)
-
     def get_quantizer_roles(
         self,
         *,
         fwd: bool,
         num_quantizers: int,
+        boundary_role: Optional[QuantizerRole],
     ) -> Optional[List[QuantizerRole]]:
         """QuantizerRole list for quantizers used by ``LayerNormLinear``.
 
-        The output (fwd) and grad-input (bwd) slots default to ``None``
-        (unknown consumer).  Set :attr:`output_quantizer_role` /
-        :attr:`grad_input_quantizer_role` to provide consumer identity.
+        ``boundary_role`` is the planner-resolved output (fwd) or grad-input
+        (bwd) consumer role.
         """
         name = self.name or ""
         if fwd:
             base = [
                 QuantizerRole(module_type="linear", tensor_type="input", name=name),
                 QuantizerRole(module_type="linear", tensor_type="weight", name=name),
-                self._output_quantizer_role,
+                boundary_role,
             ]
         else:
             base = [
                 QuantizerRole(module_type="linear", tensor_type="grad_output", name=name),
-                self._grad_input_quantizer_role,
+                boundary_role,
             ]
         return [base[i % len(base)] for i in range(num_quantizers)]
 
@@ -1947,35 +1944,6 @@ class LayerNormLinear(TransformerEngineBaseModule):
         if self.return_bias:
             return output, bias_tensor.to(inp_dtype)
         return output
-
-    def _customize_quantizers_float8_current_scaling(self, fwd: bool, recipe: Recipe) -> None:
-        """Customize quantizers based on current scaling recipe + layernorm_linear."""
-        assert (
-            recipe.float8_current_scaling()
-        ), "current scaling recipe quantizer customization here"
-        if fwd:
-            # set configs about amax epsilon and power_2_scale
-            self.quantizers["scaling_fwd"][
-                FP8FwdTensorIdx.GEMM1_INPUT
-            ].force_pow_2_scales = recipe.fp8_quant_fwd_inp.power_2_scale
-            self.quantizers["scaling_fwd"][
-                FP8FwdTensorIdx.GEMM1_INPUT
-            ].amax_epsilon = recipe.fp8_quant_fwd_inp.amax_epsilon
-            # also set weight quantizer with same amax_epsilon & power_2_scale
-            self.quantizers["scaling_fwd"][
-                FP8FwdTensorIdx.GEMM1_WEIGHT
-            ].force_pow_2_scales = recipe.fp8_quant_fwd_weight.power_2_scale
-            self.quantizers["scaling_fwd"][
-                FP8FwdTensorIdx.GEMM1_WEIGHT
-            ].amax_epsilon = recipe.fp8_quant_fwd_weight.amax_epsilon
-        else:
-            # set grad_output_quantizer with amax epsilon and power_2_scale (no amax reduction here)
-            self.quantizers["scaling_bwd"][
-                FP8BwdTensorIdx.GRAD_OUTPUT1
-            ].force_pow_2_scales = recipe.fp8_quant_bwd_grad.power_2_scale
-            self.quantizers["scaling_bwd"][
-                FP8BwdTensorIdx.GRAD_OUTPUT1
-            ].amax_epsilon = recipe.fp8_quant_bwd_grad.amax_epsilon
 
     def _get_weight_tensors(self) -> List[Union[torch.Tensor, QuantizedTensorStorage]]:
         """Get the weight tensors of the module."""
