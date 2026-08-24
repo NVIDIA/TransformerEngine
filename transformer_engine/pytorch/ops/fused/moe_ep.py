@@ -138,10 +138,12 @@ def _launch_grouped_wgrad_from_operands(
 ) -> None:
     """Compute one TE-layout grouped wgrad directly from MegaMoE's operands."""
     del unused
-    from cudnn import grouped_gemm_wgrad_wrapper_sm100
+    from cudnn.gemm.cutedsl.grouped.wgrad import grouped_gemm_wgrad_wrapper_sm100
 
     a_tensor, sfa_tensor, b_tensor, sfb_tensor = layer_operands
-    output_data = output.rowwise_data if isinstance(output, GroupedTensor) else output
+    output_data = (
+        output.rowwise_data.view(output.shape) if isinstance(output, GroupedTensor) else output
+    )
     # MegaMoE exports dW in (in, out) layout. Swapping operands computes
     # B.T @ A.T directly into TE's contiguous (out, in) parameter layout.
     grouped_gemm_wgrad_wrapper_sm100(
@@ -545,7 +547,7 @@ class FusedMoeEp(FusedOperation):
         return (
             grad_input,
             [(), fc1_param_grads, (), fc2_param_grads, ()],
-            [(None, grad_topk_weights.float()), (None,), (None,), (None,), (None, None)],
+            [(None, grad_topk_weights.float()), (None,), (None,), (None,), (None, None, None)],
         )
 
 
