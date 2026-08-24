@@ -17,6 +17,11 @@ struct ClampedSwiGLUParam {
   float glu_linear_offset = 1.0f;  // Offset added to the linear (gate) component after clamping
 };
 
+struct SiTUGLUParam {
+  float beta1 = 4.0f;
+  float beta2 = 25.0f;
+};
+
 template <typename OType, typename IType>
 __device__ inline OType gelu(const IType val, const Empty&) {
   const float cval = val;
@@ -87,6 +92,35 @@ template <typename OType, typename IType>
 __device__ inline OType dsilu(const IType val, const Empty& e) {
   const float cval = val;
   return cval * dsigmoid<float, float>(cval, e) + sigmoid<float, float>(cval, e);
+}
+
+template <typename OType, typename IType>
+__device__ inline OType situ_gate(const IType val, const SiTUGLUParam& p) {
+  const float x = static_cast<float>(val);
+  Empty e = {};
+  return p.beta1 * tanhf(x / p.beta1) * sigmoid<float, float>(x, e);
+}
+
+template <typename OType, typename IType>
+__device__ inline OType dsitu_gate(const IType val, const SiTUGLUParam& p) {
+  const float x = static_cast<float>(val);
+  const float t = tanhf(x / p.beta1);
+  Empty e = {};
+  const float s = sigmoid<float, float>(x, e);
+  return (1.0f - t * t) * s + p.beta1 * t * s * (1.0f - s);
+}
+
+template <typename OType, typename IType>
+__device__ inline OType situ_up(const IType val, const SiTUGLUParam& p) {
+  const float x = static_cast<float>(val);
+  return p.beta2 * tanhf(x / p.beta2);
+}
+
+template <typename OType, typename IType>
+__device__ inline OType dsitu_up(const IType val, const SiTUGLUParam& p) {
+  const float x = static_cast<float>(val);
+  const float t = tanhf(x / p.beta2);
+  return 1.0f - t * t;
 }
 
 template <typename OType, typename IType>
