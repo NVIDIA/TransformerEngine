@@ -377,6 +377,9 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             raise ValueError(f"Unsupported {backend=}")
         softmax_aux_aval = q_aval.update(shape=softmax_shape, dtype=softmax_dtype)
         if config.return_max_logit:
+            # cuDNN Max is row-wise over S_kv. Dense and SM120 THD use
+            # [..., H, S_q, 1]; cuDNN >= 9.6 non-SM120 THD uses [..., S_q, H, 1].
+            # Both raw layouts are reduced to the public per-head [H] result below.
             if FusedAttnFwdPrimitive._uses_thd_ragged_max_tensor(config):
                 max_tensor_shape = (*batch_shape, q_max_seqlen, attn_heads, 1)
             else:
@@ -675,7 +678,13 @@ class FusedAttnFwdPrimitive(BasePrimitive):
 
     @staticmethod
     def _reduce_max_logit(max_tensor, output, q_seqlen, q_seq_offsets, config):
-        """Reduce cuDNN's raw Max tensor to framework-compatible per-head max_logit."""
+        """Reduce cuDNN's row-wise Max tensor to the public per-head max_logit.
+
+        Dense and SM120 THD use ``[..., H, S_q, 1]``; cuDNN >= 9.6 non-SM120
+        THD uses ``[..., S_q, H, 1]``. A rank-3 THD result is ``[T_q, H, 1]``.
+        All layouts reduce to ``[H]``. Static THD buffers can contain invalid query
+        rows, so those rows are masked before reduction.
+        """
         if not config.return_max_logit:
             return jnp.zeros((0,), dtype=output.dtype)
 
@@ -841,6 +850,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             output, softmax_aux, rng_state, max_logit = FusedAttnFwdPrimitive.impl(
                 *args, config=config
             )
+            # Globalize the rank-local [H] max across DP/CP while preserving TP head sharding.
             max_logit = FusedAttnFwdPrimitive._reduce_max_logit_across_mesh(
                 max_logit, mesh, max_logit_reduce_axes, config
             )
@@ -2035,7 +2045,7 @@ class FusedAttnCPWithAllGatherFwdPrimitive(FusedAttnFwdPrimitive):
             ]
 
             output, softmax_aux, rng_state, max_logit = lax.switch(cp_rank, functions)
-            # Reduce over non-head mesh axes to make [H] global over batch/sequence.
+            # Globalize the rank-local [H] max across DP/CP while preserving TP head sharding.
             max_logit = FusedAttnFwdPrimitive._reduce_max_logit_across_mesh(
                 max_logit, mesh, max_logit_reduce_axes, config
             )
@@ -2361,6 +2371,7 @@ class FusedAttnCPStripedWithAllGatherFwdPrimitive(FusedAttnFwdPrimitive):
                 for _ in range(cp_size)
             ]
             output, softmax_aux, rng_state, max_logit = lax.switch(cp_rank, functions)
+            # Globalize the rank-local [H] max across DP/CP while preserving TP head sharding.
             max_logit = FusedAttnFwdPrimitive._reduce_max_logit_across_mesh(
                 max_logit, mesh, max_logit_reduce_axes, config
             )
@@ -2911,6 +2922,7 @@ class FusedRingAttnFwdPrimitive(FusedAttnFwdPrimitive):
             (kv, output, softmax_aux, max_logit) = carry
 
             output = output.astype(q.dtype)
+            # Globalize the rank-local running [H] max across DP/CP.
             max_logit = FusedAttnFwdPrimitive._reduce_max_logit_across_mesh(
                 max_logit, mesh, max_logit_reduce_axes, config
             )
@@ -3380,6 +3392,7 @@ class FusedRingAttnStripedFwdPrimitive(FusedAttnFwdPrimitive):
             (_, _, _, output, softmax_aux, max_logit) = carry
 
             output = output.astype(q.dtype)
+            # Globalize the rank-local running [H] max across DP/CP.
             max_logit = FusedAttnFwdPrimitive._reduce_max_logit_across_mesh(
                 max_logit, mesh, max_logit_reduce_axes, config
             )
