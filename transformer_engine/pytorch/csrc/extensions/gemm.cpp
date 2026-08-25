@@ -582,11 +582,20 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
   });
 #else
   NVTE_SCOPED_GIL_RELEASE({
-    nvte_multi_stream_cublas_gemm(te_A_vector.data(), te_B_vector.data(), te_D_vector.data(),
-                                  te_bias_vector.data(), te_pre_gelu_out_vector.data(),
-                                  te_A_vector.size(), transa, transb, grad,
-                                  te_workspace_vector.data(), accumulate, use_split_accumulator,
-                                  math_sm_count, at::musa::getCurrentCUDAStream());
+    const char* multi_stream_env = std::getenv("TE_MULTI_STREAM_GROUPGEMM");
+    if (multi_stream_env != nullptr && std::string(multi_stream_env) == "1") {
+      nvte_multi_stream_cublas_gemm(
+          te_A_vector.data(), te_B_vector.data(), te_D_vector.data(), te_bias_vector.data(),
+          te_pre_gelu_out_vector.data(), te_A_vector.size(), transa, transb, grad,
+          te_workspace_vector.data(), accumulate, use_split_accumulator, math_sm_count,
+          at::musa::getCurrentCUDAStream());
+    } else {
+      nvte_grouped_mudnn_gemm(
+          te_A_vector.data(), te_B_vector.data(), te_D_vector.data(), te_bias_vector.data(),
+          te_pre_gelu_out_vector.data(), te_A_vector.size(), transa, transb, grad,
+          te_workspace_vector.data(), accumulate, use_split_accumulator, math_sm_count,
+          at::musa::getCurrentCUDAStream());
+    }
   });
 #endif
   return bias;

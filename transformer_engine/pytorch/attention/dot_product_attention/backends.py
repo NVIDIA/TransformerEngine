@@ -690,6 +690,7 @@ class FlashAttention(torch.nn.Module):
         attention_type: str = "self",
         layer_number: Optional[int] = None,
         deterministic: bool = False,
+        recompute_variance: bool = False,
     ) -> None:
         super().__init__()
 
@@ -707,12 +708,151 @@ class FlashAttention(torch.nn.Module):
         self.attention_type = attention_type
         self.layer_number = 1 if layer_number is None else layer_number
         self.deterministic = deterministic
+        self.recompute_variance = recompute_variance
         self.logger = logging.getLogger("FlashAttention")
         if attn_log._is_logging_setup is False:
             attn_log.setup_logging()
         self.logger.setLevel(attn_log._log_level)
         if not self.logger.hasHandlers():
             self.logger.addHandler(attn_log._stream_handler)
+
+    def forward_before_fa(
+        self,
+        query_layer: torch.Tensor,
+        key_layer: torch.Tensor,
+        value_layer: torch.Tensor,
+        attention_mask: Optional[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]] = None,
+        qkv_layout: str = "sbh3d",
+        cu_seqlens_q: Optional[torch.Tensor] = None,
+        cu_seqlens_kv: Optional[torch.Tensor] = None,
+        max_seqlen_q: Optional[int] = None,
+        max_seqlen_kv: Optional[int] = None,
+        attn_mask_type: str = "causal",
+        window_size: Optional[Tuple[int, int]] = None,
+        alibi_slopes: Optional[torch.Tensor] = None,
+        cp_group: Optional[Union[dist_group_type, List[dist_group_type]]] = None,
+        cp_global_ranks: List[int] = None,
+        cp_stream: torch.cuda.Stream = None,
+        cp_comm_type: str = "p2p",
+        fp8: bool = False,
+        fp8_meta: Optional[Dict[str, Any]] = None,
+        quantizers=None,
+    ) -> Tuple[Any, ...]:
+        """Prepare QKV for a separately executed MUSA FlashAttention operation."""
+        del cp_global_ranks, cp_stream, cp_comm_type, fp8_meta, quantizers
+        assert self.recompute_variance, "Split FlashAttention requires recompute_variance=True."
+        assert not fp8, "Split MUSA FlashAttention does not support FP8."
+        assert all(x.dtype in [torch.float16, torch.bfloat16] for x in (query_layer, key_layer, value_layer))
+        assert all(x.is_cuda for x in (query_layer, key_layer, value_layer))
+        assert qkv_layout in QKVLayouts, f"Unsupported qkv_layout = {qkv_layout}."
+
+        cp_size = 1
+        if isinstance(cp_group, dist_group_type):
+            cp_size = get_distributed_world_size(cp_group)
+        elif isinstance(cp_group, list):
+            for group in cp_group:
+                cp_size *= get_distributed_world_size(group)
+        assert cp_size == 1, "Split MUSA FlashAttention does not support context parallelism."
+
+        qkv_format, q_format, kv_format = dpa_utils.get_qkv_format(qkv_layout, None)
+        if qkv_format == "sbhd":
+            query_layer, key_layer, value_layer = [
+                x.transpose(0, 1).contiguous() for x in (query_layer, key_layer, value_layer)
+            ]
+        elif q_format == "sbhd" and kv_format == "bshd":
+            query_layer = query_layer.transpose(0, 1).contiguous()
+
+        indices_q = None
+        if qkv_format in ["sbhd", "bshd"]:
+            batch_size = query_layer.shape[0]
+            max_seqlen_q, max_seqlen_kv = query_layer.shape[1], key_layer.shape[1]
+            if "padding" in attn_mask_type:
+                query_layer, key_layer, value_layer = [
+                    x.reshape(x.shape[0] * x.shape[1], *x.shape[2:])
+                    for x in (query_layer, key_layer, value_layer)
+                ]
+                assert self.attention_type == "self", (
+                    "Split MUSA FlashAttention only supports padding with self-attention."
+                )
+                if cu_seqlens_q is None:
+                    assert attention_mask is not None, "Please provide attention_mask for padding."
+                    cu_seqlens_q, indices_q = dpa_utils.get_cu_seqlens_and_indices(attention_mask)
+                else:
+                    indices_q = dpa_utils.get_indices(max_seqlen_q, cu_seqlens_q)
+                cu_seqlens_kv = cu_seqlens_q
+                query_layer, key_layer, value_layer = dpa_utils.PackTensors.apply(
+                    indices_q, query_layer, key_layer, value_layer
+                )
+            else:
+                if cu_seqlens_q is None:
+                    cu_seqlens_q = dpa_utils.get_full_cu_seqlens(
+                        batch_size, max_seqlen_q, query_layer.device
+                    )
+                if cu_seqlens_kv is None:
+                    cu_seqlens_kv = dpa_utils.get_full_cu_seqlens(
+                        batch_size, max_seqlen_kv, key_layer.device
+                    )
+        else:
+            assert qkv_format == "thd"
+            assert cu_seqlens_q is not None and cu_seqlens_kv is not None
+            batch_size = cu_seqlens_q.numel() - 1
+            if max_seqlen_q is None:
+                max_seqlen_q = (cu_seqlens_q[1:] - cu_seqlens_q[:-1]).max().item()
+            if max_seqlen_kv is None:
+                max_seqlen_kv = (cu_seqlens_kv[1:] - cu_seqlens_kv[:-1]).max().item()
+
+        if is_cpu_offload_enabled():
+            mark_activation_offload(query_layer, key_layer, value_layer, cu_seqlens_q, cu_seqlens_kv)
+
+        q_shape, v_shape = query_layer.shape, value_layer.shape
+        assert qkv_format != "thd", "Split MUSA FlashAttention does not support THD input."
+        query_layer, key_layer, value_layer = [
+            x.view(batch_size, -1, x.shape[-2], x.shape[-1]).transpose(1, 2)
+            for x in (query_layer, key_layer, value_layer)
+        ]
+        return (
+            query_layer, key_layer, value_layer, cu_seqlens_q, cu_seqlens_kv,
+            max_seqlen_q, max_seqlen_kv, attn_mask_type, window_size, alibi_slopes,
+            qkv_format, indices_q, batch_size, q_shape, v_shape,
+        )
+
+    def forward_fa(self, *args) -> Tuple[Any, ...]:
+        """Execute MUSA FlashAttention while preserving its backward metadata."""
+        query_layer, key_layer, value_layer = args[:3]
+        attn_mask_type, qkv_format, indices_q, batch_size = args[7], args[10], args[11], args[12]
+        q_shape, v_shape = args[13], args[14]
+        head_dim = query_layer.shape[-1]
+        if not 64 <= head_dim <= 192:
+            raise NotImplementedError(f"head_dim={head_dim} is not supported by MUSA FlashAttention")
+        with self.attention_dropout_ctx():
+            with torch.backends.cuda.sdp_kernel(enable_flash=True, enable_math=False):
+                output = torch.ops.aten._scaled_dot_product_attention_flash_musa(
+                    query_layer,
+                    key_layer,
+                    value_layer,
+                    dropout_p=self.attention_dropout if self.training else 0.0,
+                    is_causal="causal" in attn_mask_type,
+                )
+        return (
+            output, qkv_format, indices_q, batch_size, attn_mask_type,
+            q_shape[1], q_shape, v_shape,
+        )
+
+    def forward_after_fa(
+        self, output, qkv_format, indices_q, batch_size, attn_mask_type,
+        max_seqlen_q, q_shape, v_shape,
+    ) -> torch.Tensor:
+        """Restore the Transformer Engine output layout after split MUSA FlashAttention."""
+        output = output[0].transpose(1, 2).contiguous().view(
+            q_shape[0], q_shape[1], q_shape[-2], v_shape[-1]
+        )
+        if "padding" in attn_mask_type:
+            output = dpa_utils.UnpackTensor.apply(indices_q, batch_size * max_seqlen_q, output)
+        if qkv_format == "sbhd":
+            output = output.view(batch_size, max_seqlen_q, -1).transpose(0, 1)
+        else:
+            output = output.view(batch_size, max_seqlen_q, -1)
+        return output.contiguous()
 
     def forward(
         self,

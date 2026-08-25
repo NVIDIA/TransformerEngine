@@ -23,12 +23,43 @@ from .quantized_tensor import (
 )
 
 
-__all__ = ["get_cpu_offload_context", "mark_not_offload", "start_offload"]
+__all__ = [
+    "get_cpu_offload_context",
+    "mark_activation_offload",
+    "mark_not_offload",
+    "start_offload",
+    "set_offloading_param",
+    "has_acivation_offloading_param",
+    "get_fine_grained_offload_handler",
+    "LaunchReloadFunction",
+    "WaitReloadFunction",
+    "FineGrainedOffloadLayerCounter",
+]
 
 NVTE_CPU_OFFLOAD_V1 = os.environ.get("NVTE_CPU_OFFLOAD_V1", "0") == "1"
 
 OFFLOAD_SYNCHRONIZER = None
 
+
+
+def set_offloading_param(tensor, param_name, value):
+    """Set the type of the offloading needed for a tensor."""
+    assert param_name in ["weight_offloading", "activation_offloading", "fine_grained_offloading"]
+    if tensor is None:
+        return
+    if type(tensor) in [torch.Tensor, torch.nn.Parameter]:
+        setattr(tensor, param_name, value)
+    else:
+        data_tensors = tensor.get_data_tensors()
+        for tensor in data_tensors:
+            if tensor is not None:
+                setattr(tensor, param_name, value)
+
+def has_acivation_offloading_param(tensor):
+    for param_name in ["activation_offloading", "fine_grained_offloading"]:
+        if hasattr(tensor, param_name):
+            return True
+    return False
 
 def is_cpu_offload_enabled():
     """Returns True if CPU offload is enabled."""
@@ -913,3 +944,535 @@ def get_cpu_offload_context(
         cpu_offload_context,
         cpu_offload_context.synchronization_function,
     )
+
+class OffloadHandler:
+    """Base interface used by the fine-grained offload handler."""
+
+    def tensor_push(self, tensor: torch.Tensor, **kwargs) -> Any:
+        """Register a tensor and return its retrieval state."""
+        raise NotImplementedError
+
+    def tensor_pop(self, tensor_tag: Any, **kwargs):
+        """Retrieve a tensor from its saved state."""
+        raise NotImplementedError
+
+
+class _FineGrainedAsyncDoubleBufferGroupOffloadHandler(OffloadHandler):
+
+    def __init__(self) -> None:
+        # Data Structure to maintain reference to activation tensors
+        self.tensor_tag_to_state = {}
+        # Tracking the number of layers offloaded
+        self.current_layer_id = 0
+        # Tracking the number of microbatches offloaded
+        self.current_microbatch_id = 0
+
+        self.reloading_tensor = {}
+        self.to_offload_tensor_tag_queue_dict = {}
+        self.to_offload_tensor_queue_dict = {}
+        self.to_release_tensor_queue_dict = {}
+
+        # allocate streams and events for synchronization
+        self.d2h_stream = None
+        self.h2d_stream = None
+
+        self.OFFLOAD_TENSOR_ATTR_KEY = 'fine_grained_offloading'
+
+        self.num_layers = None # num of layers in a PP/VPP stage
+        self.pp_size = None
+        self.pp_rank = None
+        self.num_microbatches = None
+
+        self.pin_memory_tensor_pool_released = False
+
+        self.moe_layer_pattern = []
+        self.num_model_chunks = None # vpp size
+
+        # (microbatch_id, chunk_id) -> virtual_batch_id_backward (list index of (microbatch_id, chunk_id) in self.schedule_table_backward)
+        self.microbatch_id_chunk_id_to_virtual_batch_id_backward = {}
+
+        self.schedule_table_forward = [] # schedule_table [(microbatch_id_, chunk_id)] for forward
+        self.schedule_table_backward = [] # schedule_table [(microbatch_id_, chunk_id)] for backward
+        self.schedule_table_forward_backward = [] # [(microbatch_id_, chunk_id, "forward" / "backward")]
+
+        # (current_microbatch_id, current_layer_id) -> True/False (should offload)
+        self.cur_batch_id_cur_layer_id_to_should_offload = {}
+
+
+    def init_by_config(self, config):
+        self.config = config
+        from megatron.core.parallel_state import get_pipeline_model_parallel_rank, get_pipeline_model_parallel_world_size
+        self.pp_rank = get_pipeline_model_parallel_rank()
+        self.pp_size = get_pipeline_model_parallel_world_size()
+
+        if config.overlap_moe_expert_parallel_comm:
+            from megatron.core.pipeline_parallel.utils import get_comm_stream
+            self.a2a_stream = get_comm_stream()
+
+        import queue
+        if config.offload_moe_fc1_input:
+            self.to_offload_tensor_tag_queue_dict['moe_fc1_input'] = queue.Queue()
+            self.to_offload_tensor_queue_dict['moe_fc1_input'] = queue.Queue()
+            self.to_release_tensor_queue_dict['moe_fc1_input'] = queue.Queue()
+        if config.offload_moe_fused_swiglu_input:
+            self.to_offload_tensor_tag_queue_dict['moe_fused_swiglu_input'] = queue.Queue()
+            self.to_offload_tensor_queue_dict['moe_fused_swiglu_input'] = queue.Queue()
+            self.to_release_tensor_queue_dict['moe_fused_swiglu_input'] = queue.Queue()
+
+
+    def release_cpu_pinmem_pool(self):
+        torch.cuda.synchronize()
+        self.tensor_tag_to_state.clear()
+
+        import gc
+        gc.collect()
+        import torch_musa
+        torch_musa._MUSAC._host_emptyCache()
+        torch.distributed.barrier()
+        self.pin_memory_tensor_pool_released = True
+
+
+    def is_last_2_pipeline_parallel_stage(self):
+        return (self.pp_rank == (self.pp_size - 1)) or (self.pp_rank == (self.pp_size - 2))
+
+
+    def is_last_batch_last_layer(self):
+        # print(f"self.current_microbatch_id = {self.current_microbatch_id}, self.num_microbatches = {self.num_microbatches}, self.current_layer_id = {self.current_layer_id}, self.num_layers = {self.num_layers}")
+        return self.current_microbatch_id >= self.num_microbatches - 1 and self.current_layer_id >= len(self.moe_layer_pattern) - 1
+
+
+    def make_should_offload_table(self, num_warmup_microbatches):
+        def make_schedule_table_forward_backward():
+            virtual_batch_id_fwd = 0
+            virtual_batch_id_bwd = 0
+            self.schedule_table_forward_backward = []
+            for i in range(num_warmup_microbatches):
+                self.schedule_table_forward_backward.append((self.schedule_table_forward[virtual_batch_id_fwd][0], self.schedule_table_forward[virtual_batch_id_fwd][1], "forward"))
+                virtual_batch_id_fwd +=1
+
+            while True:
+                if virtual_batch_id_fwd < len(self.schedule_table_forward):
+                    self.schedule_table_forward_backward.append((self.schedule_table_forward[virtual_batch_id_fwd][0], self.schedule_table_forward[virtual_batch_id_fwd][1], "forward"))
+                    virtual_batch_id_fwd +=1
+                if virtual_batch_id_bwd < len(self.schedule_table_backward):
+                    self.schedule_table_forward_backward.append((self.schedule_table_backward[virtual_batch_id_bwd][0], self.schedule_table_backward[virtual_batch_id_bwd][1], "backward"))
+                    virtual_batch_id_bwd +=1
+                if virtual_batch_id_fwd == len(self.schedule_table_forward) and virtual_batch_id_bwd == len(self.schedule_table_backward):
+                    break
+
+        def is_moe_layer(layer_id):
+            return layer_id < len(self.moe_layer_pattern) and self.moe_layer_pattern[layer_id] == 1
+
+        make_schedule_table_forward_backward()
+        # (current_microbatch_id, current_layer_id) -> True/False (should offload)
+        self.cur_batch_id_cur_layer_id_to_should_offload = {}
+        judging_microbatch_id = None
+        judging_layer_id = None
+        for i in range(len(self.schedule_table_forward_backward)):
+            microbatch_id = self.schedule_table_forward_backward[i][0]
+            chunk_id = self.schedule_table_forward_backward[i][1]
+            is_forward = 1 if self.schedule_table_forward_backward[i][2] == "forward" else 0
+            for j in range(self.num_layers):
+                layer_id = j + chunk_id * self.num_layers
+                if is_moe_layer(layer_id):
+                    if is_forward:
+                        if judging_microbatch_id == None and judging_layer_id == None:
+                            judging_microbatch_id = microbatch_id
+                            judging_layer_id = layer_id
+                        if judging_microbatch_id != microbatch_id or judging_layer_id != layer_id:
+                            self.cur_batch_id_cur_layer_id_to_should_offload[(judging_microbatch_id, judging_layer_id)] = 1
+                            judging_microbatch_id = microbatch_id
+                            judging_layer_id = layer_id
+                    else:
+                        if judging_microbatch_id == microbatch_id and judging_layer_id == layer_id:
+                            self.cur_batch_id_cur_layer_id_to_should_offload[(judging_microbatch_id, judging_layer_id)] = 0
+                            judging_microbatch_id = None
+                            judging_layer_id = None
+
+        # The last MoE layer in a (microbatch, chunk) is the first MoE layer whose
+        # activation is needed during that chunk's backward.  It can only be
+        # reloaded early if another MoE backward happens after its forward and
+        # before its own backward.
+        last_moe_layer_id_by_chunk_id = {}
+        chunk_ids = set()
+        for _, chunk_id, _ in self.schedule_table_forward_backward:
+            chunk_ids.add(chunk_id)
+        for chunk_id in chunk_ids:
+            for j in range(self.num_layers):
+                layer_id = j + chunk_id * self.num_layers
+                if is_moe_layer(layer_id):
+                    last_moe_layer_id_by_chunk_id[chunk_id] = layer_id
+
+        moe_events = []
+        for microbatch_id, chunk_id, direction in self.schedule_table_forward_backward:
+            if direction == "forward":
+                layer_range = range(self.num_layers)
+            else:
+                layer_range = range(self.num_layers - 1, -1, -1)
+            for j in layer_range:
+                layer_id = j + chunk_id * self.num_layers
+                if is_moe_layer(layer_id):
+                    moe_events.append((microbatch_id, chunk_id, layer_id, direction))
+
+        last_moe_forward_event_index = {}
+        backward_event_index = {}
+        for event_index, (microbatch_id, chunk_id, layer_id, direction) in enumerate(moe_events):
+            key = (microbatch_id, layer_id)
+            if direction == "forward" and last_moe_layer_id_by_chunk_id.get(chunk_id) == layer_id:
+                last_moe_forward_event_index[key] = event_index
+            elif direction == "backward":
+                backward_event_index[key] = event_index
+
+        for key, forward_event_index in last_moe_forward_event_index.items():
+            backward_event_index_for_key = backward_event_index.get(key)
+            if backward_event_index_for_key == None:
+                continue
+            has_reload_window = False
+            for event_index in range(forward_event_index + 1, backward_event_index_for_key):
+                if moe_events[event_index][3] == "backward":
+                    has_reload_window = True
+                    break
+            if not has_reload_window:
+                self.cur_batch_id_cur_layer_id_to_should_offload[key] = 0
+                judging_microbatch_id, judging_layer_id = key
+
+        if self.pp_rank != (self.pp_size - 1):
+            batch_id = 0
+            layer_id = self.num_model_chunks * self.num_layers - 1
+            self.cur_batch_id_cur_layer_id_to_should_offload[(batch_id, layer_id)] = 1
+
+        # print(f"self.cur_batch_id_cur_layer_id_to_should_offload = {self.cur_batch_id_cur_layer_id_to_should_offload}")
+
+
+    def should_offload(self):
+        if self.is_last_batch_last_layer():
+            return False
+        if self.config.virtual_pipeline_model_parallel_size != None and self.config.virtual_pipeline_model_parallel_size > 1:
+            # vpp
+
+            whether_offload = self.cur_batch_id_cur_layer_id_to_should_offload.get((self.current_microbatch_id, self.current_layer_id))
+            if whether_offload == None or whether_offload == 0:
+                return False
+            else:
+                return True
+            # if self.pp_rank == (self.pp_size - 1):
+            #     cur_chunk_id = int(self.current_layer_id / self.num_layers)
+            #     cur_virtual_layer_id = self.current_layer_id % self.num_layers
+            #     if cur_chunk_id == (self.num_model_chunks - 1) and cur_virtual_layer_id == (self.num_layers - 1):
+            #         return False
+            #     else:
+            #         return True
+            # return True
+
+        else:
+            # 1F1B
+            return not self.is_last_2_pipeline_parallel_stage()
+
+
+    def register_offload(self, src_tensor):
+        assert hasattr(src_tensor, self.OFFLOAD_TENSOR_ATTR_KEY)
+        tensor_name = getattr(src_tensor, self.OFFLOAD_TENSOR_ATTR_KEY)
+        tensor_tag = (self.current_microbatch_id, self.current_layer_id, tensor_name)
+        self.to_offload_tensor_tag_queue_dict[tensor_name].put(tensor_tag)
+        self.to_offload_tensor_queue_dict[tensor_name].put(src_tensor)
+        return tensor_tag
+
+
+    def get_tag_from_name(self, tensor_name):
+        tensor_tag = (self.current_microbatch_id, self.current_layer_id, tensor_name)
+        return tensor_tag
+
+
+    def launch_offload(self, tensor_name, offloading_microbatch_id = None, offloading_layer_id = None):
+        # print(f"[launch_offload] call with tensor_name:{tensor_name}, offloading_microbatch_id:{offloading_microbatch_id}, offloading_layer_id:{offloading_layer_id}")
+        # print(f"[launch_offload] current_layer_id={self.current_layer_id}")
+        if self.d2h_stream is None:
+            self.d2h_stream = torch.cuda.Stream()
+
+        if self.current_layer_id >= len(self.moe_layer_pattern) or self.moe_layer_pattern[self.current_layer_id] == 0 or self.to_offload_tensor_queue_dict[tensor_name].empty():
+            return
+
+        src_tensor = self.to_offload_tensor_queue_dict[tensor_name].get()
+        tensor_tag = self.to_offload_tensor_tag_queue_dict[tensor_name].get()
+        copy_done_event = torch.cuda.Event()
+        # print(f"[SUCCES launch_offload] on tensor tag (offloading_microbatch_id, offloading_layer_id, tensor_name) : {tensor_tag}")
+
+        # token_num = src_tensor.size(0)
+        # hidden_dim = src_tensor.size()[1:]
+
+        if not self.config.overlap_moe_expert_parallel_comm:
+            self.d2h_stream.wait_stream(torch.cuda.current_stream())
+
+        with torch.cuda.stream(self.d2h_stream):
+
+            cpu_backup = torch.empty(
+                src_tensor.size(),
+                dtype=src_tensor.dtype,
+                layout=src_tensor.layout,
+                device="cpu",
+                pin_memory=True,
+            )
+
+            cpu_backup.copy_(src_tensor.detach(), non_blocking=True)
+
+            copy_done_event.record(stream=self.d2h_stream)
+
+        self.to_release_tensor_queue_dict[tensor_name].put((copy_done_event, src_tensor))
+
+        state = (src_tensor, cpu_backup, copy_done_event, src_tensor.untyped_storage().size())
+        self.tensor_tag_to_state[tensor_tag] = state
+
+        return tensor_tag
+
+
+    def wait_offload(self, tensor_name, offloading_microbatch_id = None, offloading_layer_id = None):
+        # print(f"[wait_offload] call with tensor_name:{tensor_name}, offloading_microbatch_id:{offloading_microbatch_id}, offloading_layer_id:{offloading_layer_id}")
+        # print(f"[wait_offload] current_layer_id={self.current_layer_id}")
+        if self.current_layer_id >= len(self.moe_layer_pattern) or self.moe_layer_pattern[self.current_layer_id] == 0 or self.to_release_tensor_queue_dict[tensor_name].empty():
+            return
+
+        copy_done_event, release_src_tensor = self.to_release_tensor_queue_dict[tensor_name].get()
+        copy_done_event.synchronize() # TODO: use .wait() to check the stream with copy engine (d2h / h2d / all2all)
+        release_src_tensor.untyped_storage().resize_(0)
+
+
+    def get_reloading_microbatch_id_layer_id_from_table(self):
+        chunk_id = int(self.current_layer_id / self.num_layers)
+        virtual_batch_id_backward = self.microbatch_id_chunk_id_to_virtual_batch_id_backward[(self.current_microbatch_id, chunk_id)]
+        cur_virtual_layer_id = self.current_layer_id % self.num_layers
+        for virtual_layer_id in range(cur_virtual_layer_id - 1, -1, -1):
+            layer_id = virtual_layer_id + chunk_id * self.num_layers
+            if layer_id < len(self.moe_layer_pattern) and self.moe_layer_pattern[layer_id] == 1:
+                return (self.current_microbatch_id, layer_id)
+
+        reloading_virtual_batch_id_backward = virtual_batch_id_backward
+        while reloading_virtual_batch_id_backward + 1 < len(self.microbatch_id_chunk_id_to_virtual_batch_id_backward):
+            reloading_virtual_batch_id_backward += 1
+            reloading_microbatch_id, reloading_chunk_id = self.schedule_table_backward[reloading_virtual_batch_id_backward]
+            if reloading_chunk_id == chunk_id:
+                return (self.current_microbatch_id + 1, self.current_layer_id)
+            else:
+                for virtual_layer_id in range(self.num_layers - 1, -1, -1):
+                    if self.pp_rank == (self.pp_size - 1) and reloading_chunk_id == (self.num_model_chunks - 1) and virtual_layer_id == (self.num_layers - 1):
+                        continue
+                    layer_id = virtual_layer_id + reloading_chunk_id * self.num_layers
+                    if layer_id < len(self.moe_layer_pattern) and self.moe_layer_pattern[layer_id] == 1:
+                        return (reloading_microbatch_id, layer_id)
+        # print("get_reloading_microbatch_id_layer_id_from_table returning (-1,-1)")
+        return (-1, -1)
+
+
+    def launch_reload(self, tensor_name, reloading_microbatch_id = None, reloading_layer_id = None):
+        # print(f"[launch_reload] call with tensor_name:{tensor_name}, reloading_microbatch_id:{reloading_microbatch_id}, reloading_layer_id:{reloading_layer_id}")
+        # print(f"[launch_reload] self.current_layer_id = {self.current_layer_id}")
+        if reloading_microbatch_id == None and (self.current_layer_id >= len(self.moe_layer_pattern) or self.moe_layer_pattern[self.current_layer_id] == 0):
+            return
+
+        if self.h2d_stream is None:
+            if self.d2h_stream is None:
+                self.d2h_stream = torch.cuda.Stream()
+            self.h2d_stream = self.d2h_stream
+
+        if self.num_model_chunks == None:
+            # 1F1B
+            # reload actication of layer i-1 in the bwd of layer i (when i > 0)
+            # reload actication of last layer of next microbatch in the bwd of layer 0
+            if reloading_microbatch_id == None and reloading_layer_id == None:
+                if self.current_layer_id == 0:
+                    reloading_microbatch_id = self.current_microbatch_id + 1
+                    reloading_layer_id = self.num_layers - 1
+                else:
+                    reloading_microbatch_id = self.current_microbatch_id
+                    reloading_layer_id = self.current_layer_id - 1
+
+            for i in range(len(self.moe_layer_pattern) - 1):
+                if self.moe_layer_pattern[reloading_layer_id] == 0:
+                    # is dense layer
+                    if reloading_layer_id == 0:
+                        reloading_microbatch_id = reloading_microbatch_id + 1
+                        reloading_layer_id = self.num_layers - 1
+                    else:
+                        reloading_layer_id = reloading_layer_id - 1
+                else:
+                    # is moe layer
+                    break
+        else:
+            # interleaved 1F1B (VPP)
+            if reloading_microbatch_id == None and reloading_layer_id == None:
+                reloading_microbatch_id, reloading_layer_id = self.get_reloading_microbatch_id_layer_id_from_table()
+
+            if reloading_microbatch_id < 0 or reloading_layer_id < 0 or reloading_layer_id >= len(self.moe_layer_pattern) or self.moe_layer_pattern[reloading_layer_id] == 0:
+                return
+
+        tensor_tag = (reloading_microbatch_id, reloading_layer_id, tensor_name)
+        if not tensor_tag in self.tensor_tag_to_state:
+            # in the bwd of layer 0 of the last mircobatch
+            # print(f"launch reload : not tensor_tag in self.tensor_tag_to_state")
+            return
+        (src_tensor, cpu_backup, copy_done_event, untyped_size) = self.tensor_tag_to_state.pop(tensor_tag)
+        # print(f"[SUCCES launch reload] on tensor_tag (reloading_microbatch_id, reloading_layer_id, tensor_name): {tensor_tag}")
+
+        copy_done_event = torch.cuda.Event()
+
+        if not self.config.overlap_moe_expert_parallel_comm:
+            self.h2d_stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(self.h2d_stream):
+            src_tensor.untyped_storage().resize_(untyped_size)
+            src_tensor.copy_(cpu_backup, non_blocking=True)
+            copy_done_event.record(stream=self.h2d_stream)
+            state = (copy_done_event, src_tensor)
+            self.reloading_tensor[tensor_tag] = state
+
+
+    def wait_reload(self, tensor_name, reloading_microbatch_id = None, reloading_layer_id = None):
+        # print(f"[wait_reload] current_layer_id={self.current_layer_id}")
+        if reloading_microbatch_id == None and (self.current_layer_id >= len(self.moe_layer_pattern) or self.moe_layer_pattern[self.current_layer_id] == 0):
+            return
+
+        if self.num_model_chunks == None:
+            # 1F1B
+            # reload actication of layer i-1 in the bwd of layer i (when i > 0)
+            # reload actication of last layer of next microbatch in the bwd of layer 0
+            if reloading_microbatch_id == None and reloading_layer_id == None:
+                if self.current_layer_id == 0:
+                    reloading_microbatch_id = self.current_microbatch_id + 1
+                    reloading_layer_id = self.num_layers - 1
+                else:
+                    reloading_microbatch_id = self.current_microbatch_id
+                    reloading_layer_id = self.current_layer_id - 1
+
+            for i in range(len(self.moe_layer_pattern) - 1):
+                if self.moe_layer_pattern[reloading_layer_id] == 0:
+                    # is dense layer
+                    if reloading_layer_id == 0:
+                        reloading_microbatch_id = reloading_microbatch_id + 1
+                        reloading_layer_id = self.num_layers - 1
+                    else:
+                        reloading_layer_id = reloading_layer_id - 1
+                else:
+                    # is moe layer
+                    break
+        else:
+            # interleaved 1F1B (VPP)
+            if reloading_microbatch_id == None and reloading_layer_id == None:
+                reloading_microbatch_id, reloading_layer_id = self.get_reloading_microbatch_id_layer_id_from_table()
+
+            if reloading_microbatch_id < 0 or reloading_layer_id < 0 or reloading_layer_id >= len(self.moe_layer_pattern) or self.moe_layer_pattern[reloading_layer_id] == 0:
+                return
+
+        tensor_tag = (reloading_microbatch_id, reloading_layer_id, tensor_name)
+        if not tensor_tag in self.reloading_tensor:
+            # in the bwd of layer 0 of the last mircobatch
+            # print(f"wait reload : not tensor_tag in self.reloading_tensor")
+            return
+        # print(f"[SUCCES wait_reload] on tensor_tag (reloading_microbatch_id, reloading_layer_id, tensor_name): {tensor_tag}")
+        (copy_done_event, device_tensor) = self.reloading_tensor[tensor_tag]
+        copy_done_event.synchronize() # TODO: use .wait() to check the stream with copy engine (d2h / h2d / all2all)
+        return
+
+
+    def get_reloaded(self, tensor_tag):
+        (copy_done_event, device_tensor) = self.reloading_tensor.pop(tensor_tag)
+        return device_tensor
+
+
+    def tensor_push(self, tensor: torch.Tensor, **kwargs) -> Any:
+        if hasattr(tensor, self.OFFLOAD_TENSOR_ATTR_KEY):
+            return self.register_offload(tensor)
+        return tensor
+
+
+    def tensor_pop(self, tensor_tag, **kwargs):
+        if tensor_tag in self.reloading_tensor:
+            return self.wait_reload(tensor_tag)
+        return tensor_tag
+
+
+    def start_microbatch_forward(self, current_microbatch_id, current_layer_id = 0):
+        # print(f"[start_microbatch_forward] batch id: {current_microbatch_id}, from layer current_layer_id = {current_layer_id}")
+        self.current_microbatch_id = current_microbatch_id
+        self.current_layer_id = current_layer_id
+
+
+    def start_microbatch_backward(self, current_microbatch_id, current_layer_id = None):
+        # print(f"[start_microbatch_backward] batch id: {current_microbatch_id}, from layer current_layer_id = {current_layer_id}")
+        self.current_microbatch_id = current_microbatch_id
+        if current_layer_id == None:
+            self.current_layer_id = self.num_layers
+        else:
+            self.current_layer_id = current_layer_id
+
+
+
+_fg_offload_handler_instance = _FineGrainedAsyncDoubleBufferGroupOffloadHandler()
+
+
+def get_fine_grained_offload_handler():
+    return _fg_offload_handler_instance
+
+
+
+# class CpuOffloadHookWithFineGrainedOffloadHandler(CpuOffloadSavedTensorHook):
+
+#     def __init__(self):
+#         self.offload_handler = get_fine_grained_offload_handler()
+#         self.handler_extra_kwargs = {}
+#         super().__init__()
+
+#     def on_save_for_backward(self, tensor: torch.Tensor) -> Any:
+#         retrieve_identifier = self.offload_handler.tensor_push(tensor, **self.handler_extra_kwargs)
+#         return retrieve_identifier
+
+#     def on_get_saved_tensor(self, saved_state: Any) -> torch.Tensor:
+#         tensor = self.offload_handler.tensor_pop(saved_state, **self.handler_extra_kwargs)
+#         return tensor
+
+
+class LaunchReloadFunction(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, tensor, fine_grained_tensor_name):
+        ctx.fine_grained_tensor_name = fine_grained_tensor_name
+        # print(f"LaunchReloadFunction fwd on {fine_grained_tensor_name}")
+        return tensor
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        cpu_offload_handler = get_fine_grained_offload_handler()
+        # print(f"LaunchReloadFunction bwd on {ctx.fine_grained_tensor_name}")
+        cpu_offload_handler.launch_reload(ctx.fine_grained_tensor_name)
+        return grad_output, None
+
+
+class WaitReloadFunction(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, tensor, fine_grained_tensor_name):
+        ctx.fine_grained_tensor_name = fine_grained_tensor_name
+        # print(f"WaitReloadFunction fwd on {fine_grained_tensor_name}")
+        return tensor
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        cpu_offload_handler = get_fine_grained_offload_handler()
+        # print(f"WaitReloadFunction bwd on {ctx.fine_grained_tensor_name}")
+        cpu_offload_handler.wait_reload(ctx.fine_grained_tensor_name)
+        return grad_output, None
+
+
+class FineGrainedOffloadLayerCounter(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, tensor):
+        cpu_offload_handler = get_fine_grained_offload_handler()
+        # print(f'[LayerCounter] finish layer forward: current_microbatch_id = {cpu_offload_handler.current_microbatch_id}, current_layer_id = {cpu_offload_handler.current_layer_id}')
+        cpu_offload_handler.current_layer_id += 1
+        return tensor
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        cpu_offload_handler = get_fine_grained_offload_handler()
+        cpu_offload_handler.current_layer_id -= 1
+        # print(f'[LayerCounter] start layer backward: current_microbatch_id = {cpu_offload_handler.current_microbatch_id}, current_layer_id = {cpu_offload_handler.current_layer_id}')
+        return grad_output, None
+
+
+# def get_fine_grained_offload_context():
+#     return CpuOffloadHookWithFineGrainedOffloadHandler()

@@ -13,7 +13,6 @@ from typing import Any, Optional
 import torch
 
 from ...cpp_extensions import general_gemm
-from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ...distributed import (
     CudaRNGStatesTracker,
     gather_along_first_dim,
@@ -26,7 +25,7 @@ from ...module.base import (
     _2X_ACC_WGRAD,
     get_dummy_wgrad,
 )
-from ...tensor import Quantizer
+from ...tensor import MXFP8Quantizer, Quantizer, QuantizedTensor
 from ...tensor.float8_tensor import Float8Quantizer
 from ...tensor.storage.float8_tensor_storage import Float8TensorStorage
 from ...utils import (
@@ -53,35 +52,32 @@ class BasicLinear(BasicOperation):
 
     Parameters
     ----------
-    in_features : int
+    in_features: int
         Inner dimension of input tensor
-    out_features : int
+    out_features: int
         Inner dimension of output tensor
-    device : torch.device, default = default CUDA device
+    device: torch.device, default = default CUDA device
         Tensor device
-    dtype : torch.dtype, default = default dtype
+    dtype: torch.dtype, default = default dtype
         Tensor datatype
-    tensor_parallel_mode : {`None`, "column", "row"}, default = `None`
+    tensor_parallel_mode: {`None`, "column", "row"}, default = `None`
         Mode for tensor parallelism
-    tensor_parallel_group : torch.distributed.ProcessGroup, default = world group
+    tensor_parallel_group: torch.distributed.ProcessGroup, default = world group
         Process group for tensor parallelism
-    sequence_parallel : bool, default = `False`
+    sequence_parallel: bool, default = `False`
         Whether to apply sequence parallelism together with tensor
         parallelism, i.e. distributing input or output tensors along
         outer dimension (sequence or batch dim) when not distributing
         along inner dimension (embedding dim)
-    rng_state_tracker_function : callable
+    rng_state_tracker_function: callable
         Function that returns `CudaRNGStatesTracker`, which is used
         for model-parallel weight initialization
-    accumulate_into_main_grad : bool, default = `False`
+    accumulate_into_main_grad: bool, default = `False`
         Whether to directly accumulate weight gradients into the
         weight's `main_grad` attribute instead of relying on PyTorch
         autograd. The weight's `main_grad` must be set externally and
         there is no guarantee that `grad` will be set or be
-        meaningful. This is primarily intented to integrate with
-        Megatron-LM. This argument along with weight tensor having
-        attribute 'overwrite_main_grad' set to True will overwrite
-        `main_grad` instead of accumulating.
+        meaningful.
     userbuffers_options, dict, optional
         Options for overlapping tensor-parallel communication with
         compute using Userbuffers. This feature is highly
@@ -137,10 +133,8 @@ class BasicLinear(BasicOperation):
             out_features=out_features,
         )
 
-        # Initialize recipe state if needed for natively quantized weight
+        # Whether weight tensor is natively quantized
         self._with_quantized_weight: bool = FP8GlobalStateManager.with_fp8_parameters()
-        if self._with_quantized_weight:
-            self.reset_recipe_state(recipe=FP8GlobalStateManager.get_fp8_recipe())
 
         # Initialize parameters if needed
         weight = torch.empty(
@@ -280,7 +274,7 @@ class BasicLinear(BasicOperation):
             device = canonicalize_device(None)
 
         # Allocate buffer if needed
-        if is_quantized_tensor(weight):
+        if isinstance(weight, QuantizedTensor):
             weight = torch.empty(
                 weight.size(),
                 dtype=weight.dtype,
@@ -311,7 +305,6 @@ class BasicLinear(BasicOperation):
                 rowwise=True,
                 columnwise=torch.is_grad_enabled(),
             )
-            quantizer.internal = False
             with torch.no_grad():
                 weight = quantizer(weight)
 
@@ -320,101 +313,45 @@ class BasicLinear(BasicOperation):
             weight = torch.nn.Parameter(weight)
         self.weight = weight
 
-    def pre_first_fuser_forward(self) -> None:
-        super().pre_first_fuser_forward()
-        if self.weight.device.type == "meta":
-            self.reset_parameters()
+    def pre_forward(self, *args, **kwargs) -> None:
+        super().pre_forward(*args, **kwargs)
 
-    def pre_fuser_forward(self, *, requires_grad: bool) -> None:
-        super().pre_fuser_forward(requires_grad=requires_grad)
+        # Initialize weights if needed
+        weight = self.weight
+        if weight.device.type == "meta":
+            self.reset_parameters()
+            weight = self.weight
+
+        # Configure quantizers
         if FP8GlobalStateManager.is_fp8_enabled():
-            # Configure quantizer usages
-            # Note: We cache the quantized input for backward pass,
-            # but discard the quantized weights.
-            weight_requires_grad = requires_grad and self.weight.requires_grad
             input_quantizer = self.get_quantizer("forward", 0)
             weight_quantizer = self.get_quantizer("forward", 1)
             grad_output_quantizer = self.get_quantizer("backward", 0)
+
+            # Specify required tensor formats
+            is_grad_enabled = torch.is_grad_enabled()
+            weight_requires_grad = is_grad_enabled and weight.requires_grad
             input_quantizer.set_usage(rowwise=True, columnwise=weight_requires_grad)
-            weight_quantizer.set_usage(rowwise=True, columnwise=False)
+            weight_quantizer.set_usage(rowwise=True, columnwise=is_grad_enabled)
             grad_output_quantizer.set_usage(rowwise=True, columnwise=weight_requires_grad)
 
-    def reset_recipe_state(self, *, recipe: Optional[Recipe]) -> None:
-        super().reset_recipe_state(recipe=recipe)
-
-        # Configure input/grad output tensor
-        # Note: These tensors are only used internally. If there is no
-        # tensor-parallel communication, they are only used for GEMM.
-        input_quantizer = self.get_quantizer("forward", 0)
-        grad_output_quantizer = self.get_quantizer("backward", 0)
-        if input_quantizer is not None:
-            input_quantizer.internal = True
-            if not (self.tensor_parallel_mode == "column" and self.sequence_parallel):
-                input_quantizer.optimize_for_gemm = True
-        if grad_output_quantizer is not None:
-            grad_output_quantizer.internal = True
-            if not (self.tensor_parallel_mode == "row" and self.sequence_parallel):
-                grad_output_quantizer.optimize_for_gemm = True
-
-        # Configure weight quantizer
-        # Note: This function may be called in base class constructor,
-        # before any basic linear attrs have been set.
-        weight_quantizer = self.get_quantizer("forward", 1)
-        if weight_quantizer is None:
-            pass
-        elif is_quantized_tensor(getattr(self, "weight", None)):
-            # Make sure weight param has correct quantizer
-            weight_quantizer.set_usage(rowwise=True, columnwise=torch.is_grad_enabled())
-            weight_quantizer.internal = False
-            self.weight.update_quantizer(weight_quantizer.copy())
-        else:
-            # Use internal tensors if quantized weights will not be
-            # exposed externally
-            weight_quantizer.internal = (
-                not FP8GlobalStateManager.with_fp8_parameters()
-                and not getattr(self, "_with_quantized_weight", False)
-            )
-
-        # Recipe-specific configuration
-        # Note: This function may be called in base class constructor,
-        # before any basic linear attrs have been set.
-        if recipe is not None:
-            if recipe.float8_current_scaling():
-                input_quantizer.force_pow_2_scales = recipe.fp8_quant_fwd_inp.power_2_scale
-                input_quantizer.amax_epsilon_scales = recipe.fp8_quant_fwd_inp.amax_epsilon
-                weight_quantizer.force_pow_2_scales = recipe.fp8_quant_fwd_weight.power_2_scale
-                weight_quantizer.amax_epsilon_scales = recipe.fp8_quant_fwd_weight.amax_epsilon
-                grad_output_quantizer.force_pow_2_scales = recipe.fp8_quant_bwd_grad.power_2_scale
-                grad_output_quantizer.amax_epsilon_scales = recipe.fp8_quant_bwd_grad.amax_epsilon
-                if getattr(self, "sequence_parallel", False):
-                    tensor_parallel_mode = getattr(self, "tensor_parallel_mode", None)
-                    if tensor_parallel_mode == "column":
-                        input_quantizer.with_amax_reduction = True
-                        input_quantizer.amax_reduction_group = self.tensor_parallel_group
-                    elif tensor_parallel_mode == "row":
-                        grad_output_quantizer.with_amax_reduction = True
-                        grad_output_quantizer.amax_reduction_group = self.tensor_parallel_group
-            if recipe.nvfp4():
-                if getattr(self, "sequence_parallel", False):
-                    tensor_parallel_mode = getattr(self, "tensor_parallel_mode", None)
-                    if tensor_parallel_mode == "column":
-                        input_quantizer.with_amax_reduction = True
-                        input_quantizer.amax_reduction_group = self.tensor_parallel_group
-                    elif tensor_parallel_mode == "row":
-                        grad_output_quantizer.with_amax_reduction = True
-                        grad_output_quantizer.amax_reduction_group = self.tensor_parallel_group
+            # Make sure weight tensor has correct quantizer
+            # Note: Quantizer might have changed if quantization
+            # recipe changed
+            if isinstance(weight_quantizer, Float8Quantizer) and isinstance(
+                weight, Float8TensorStorage
+            ):
+                weight._quantizer = weight_quantizer
 
     @staticmethod
     def _functional_forward(
         input: torch.Tensor,  # pylint: disable=redefined-builtin
         weight: torch.Tensor,
         *,
-        alpha: float = 1.0,
         bias: Optional[torch.Tensor] = None,
         device: Optional[torch.device] = None,  # pylint: disable=unused-argument
         dtype: Optional[torch.dtype] = None,
         out: Optional[torch.Tensor] = None,
-        beta: Optional[float] = None,
         accumulate_into_out: bool = False,
         tensor_parallel_mode: Optional[str] = None,
         tensor_parallel_group: Optional[torch.distributed.ProcessGroup] = None,
@@ -423,9 +360,7 @@ class BasicLinear(BasicOperation):
         input_quantizer: Optional[Quantizer] = None,
         weight_quantizer: Optional[Quantizer] = None,
         output_quantizer: Optional[Quantizer] = None,
-        input_requires_grad: bool = True,
-        weight_requires_grad: bool = True,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Functional API for forward pass
 
         Parameters
@@ -434,18 +369,14 @@ class BasicLinear(BasicOperation):
             Input tensor
         weight: torch.Tensor
             Weight tensor
-        alpha: float, default = 1.0
-            Scaling factor applied to the result of the GEMM
         bias: torch.Tensor, optional
             Bias tensor
         device: torch.device, default = default CUDA device
             Tensor device
-        dtype: torch.dtype, default = infer from out or weight
+        dtype: torch.dtype, default = default dtype
             Tensor datatype
         out: torch.Tensor, optional
             Output tensor
-        beta: float, optional
-            Scaling factor applied to original value of out when accumulating into it
         accumulate_into_out: bool, default = `False`
             Add result to output tensor instead of overwriting
         tensor_parallel_mode: {`None`, "column", "row"}, default = `None`
@@ -465,38 +396,24 @@ class BasicLinear(BasicOperation):
             Builder class for quantized weight tensor.
         output_quantizer: Quantizer, optional
             Builder class for quantized output tensor.
-        input_requires_grad: bool, default = `True`
-            Whether the loss gradient w.r.t. the input tensor is
-            required in the backward pass.
-        weight_requires_grad: bool, default = `True`
-            Whether the loss gradient w.r.t. the weight tensor is
-            required in the backward pass.
 
         Returns
         -------
         torch.Tensor
             Output tensor
-        torch.Tensor, optional
-            Input tensor, ready for use in backward pass. `None` is
-            returned if loss gradient w.r.t. the weight tensor is not
-            required.
-        torch.Tensor, optional
-            Weight tensor, ready for use in backward pass. `None` is
-            returned if loss gradient w.r.t. the input tensor is not
-            required.
+        torch.Tensor
+            Input tensor used in GEMM, possibly cast and reshaped from
+            provided input tensor
+        torch.Tensor
+            Weight tensor used in GEMM, possibly cast and reshaped from
+            provided weight tensor
 
         """
 
         # Check datatype
         if dtype is None:
-            if out is not None and isinstance(out, torch.Tensor):
-                dtype = out.dtype
-            elif weight is not None and isinstance(weight, torch.Tensor):
-                dtype = weight.dtype
-            else:
-                raise ValueError(
-                    "Could not infer dtype from weight nor out and dtype was not provided"
-                )
+            dtype = weight.dtype if out is None else out.dtype
+        dtype = canonicalize_dtype(dtype)
         if dtype not in (torch.float32, torch.float16, torch.bfloat16):
             raise ValueError(f"Supported dtypes are float32, float16, bfloat16 (got {dtype})")
         if out is not None and out.dtype != dtype:
@@ -507,10 +424,11 @@ class BasicLinear(BasicOperation):
         x = None
         x_async = None
         with_x_all_gather = tensor_parallel_mode == "column" and sequence_parallel
+        own_quantized_x_local = False
         if with_quantized_compute:
             if input_quantizer is None:
                 raise ValueError("Missing quantizer for input tensor")
-            input_quantizer.set_usage(rowwise=True, columnwise=weight_requires_grad)
+            input_quantizer.set_usage(rowwise=True)
             if with_x_all_gather:
                 input_quantizer.set_usage(columnwise=False)
                 x, x_async = gather_along_first_dim(
@@ -520,12 +438,15 @@ class BasicLinear(BasicOperation):
                     quantizer=input_quantizer,
                 )
             else:
-                if not is_quantized_tensor(x_local):
+                if not isinstance(x_local, QuantizedTensor):
                     x_local = input_quantizer(x_local)
+                    own_quantized_x_local = True
                 x = x_local
         else:
-            x_local = maybe_dequantize(x_local, dtype)
-
+            if isinstance(x_local, QuantizedTensor):
+                x_local = x_local.dequantize()
+            if x_local.dtype != dtype:
+                x_local = x_local.to(dtype=dtype)
             if with_x_all_gather:
                 x, x_async = gather_along_first_dim(
                     x_local,
@@ -537,13 +458,16 @@ class BasicLinear(BasicOperation):
 
         # Check weight tensor
         w = weight
-        if not with_quantized_compute:
-            w = maybe_dequantize(w, dtype)
-        elif with_quantized_compute and not is_quantized_tensor(w):
+        w_is_quantized = isinstance(w, QuantizedTensor)
+        if with_quantized_compute and not w_is_quantized:
             if weight_quantizer is None:
                 raise ValueError("Missing quantizer for weight tensor")
-            weight_quantizer.set_usage(rowwise=True, columnwise=input_requires_grad)
+            weight_quantizer.set_usage(rowwise=True)
             w = weight_quantizer(w)
+        elif not with_quantized_compute and w_is_quantized:
+            w = w.dequantize()
+        if not with_quantized_compute and w.dtype != dtype:
+            w = w.to(dtype=dtype)
 
         # Check output tensor
         y = out
@@ -552,7 +476,7 @@ class BasicLinear(BasicOperation):
                 output_quantizer = None
             if tensor_parallel_mode == "row":
                 output_quantizer = None
-        elif is_quantized_tensor(y):
+        elif isinstance(y, QuantizedTensor):
             if not with_quantized_compute:
                 raise ValueError("Output tensor is quantized, but quantized compute is not enabled")
             if tensor_parallel_mode == "row":
@@ -566,11 +490,12 @@ class BasicLinear(BasicOperation):
                 raise ValueError("Output tensor is quantized, but quantizer was not provided")
         else:
             output_quantizer = None
+        if isinstance(output_quantizer, MXFP8Quantizer):
+            raise RuntimeError(
+                "Attempting to generate MXFP8 output tensor, "
+                "but GEMM with MXFP8 output is not supported"
+            )
         if output_quantizer is not None:
-            if not isinstance(output_quantizer, Float8Quantizer):
-                raise RuntimeError(
-                    "Attempting to generate quantized output tensor with unsupported quantizer"
-                )
             output_quantizer.set_usage(rowwise=True, columnwise=False)
 
         # Check if accumulating into output tensor
@@ -592,10 +517,9 @@ class BasicLinear(BasicOperation):
         y, *_ = general_gemm(
             w,
             x,
+            get_workspace(),
             out_dtype=dtype,
             quantization_params=output_quantizer,
-            alpha=alpha,
-            beta=beta,
             accumulate=accumulate_into_out,
             out=y,
             bias=bias,
@@ -609,21 +533,17 @@ class BasicLinear(BasicOperation):
             else:
                 torch.distributed.all_reduce(y, group=tensor_parallel_group)
 
-        # Prepare weight tensor for backward pass
-        if input_requires_grad:
-            if w is not weight and with_quantized_compute and is_quantized_tensor(w):
-                w.update_usage(rowwise_usage=False, columnwise_usage=True)
-        else:
-            w = None
+        # Configure input tensor for backward pass
+        if own_quantized_x_local:
+            ### TODO Restore once column-wise usage is supported by itself  # pylint: disable=fixme
+            # x_local.update_usage(rowwise_usage=False)
+            pass
 
-        # Prepare input tensor for backward pass
-        if weight_requires_grad:
-            if with_quantized_compute and is_quantized_tensor(x_local):
-                if not (isinstance(x_local, Float8TensorStorage) and with_x_all_gather):
-                    # FP8 does not support all-gather of transpose data
-                    x_local.update_usage(rowwise_usage=False, columnwise_usage=True)
-        else:
-            x_local = None
+        # Detach input tensor if needed
+        # Note: PyTorch autograd produces esoteric errors if we save
+        # input tensor as context for backward pass.
+        if x_local is input:
+            x_local = x_local.detach()
 
         return y, x_local, w
 
@@ -633,17 +553,13 @@ class BasicLinear(BasicOperation):
         input: Optional[torch.Tensor],  # pylint: disable=redefined-builtin
         weight: Optional[torch.Tensor],
         *,
-        grad_input_alpha: Optional[float] = None,
         input_requires_grad: bool = True,
-        grad_weight_alpha: Optional[float] = None,
         weight_requires_grad: bool = True,
         device: Optional[torch.device] = None,  # pylint: disable=unused-argument
         dtype: Optional[torch.dtype] = None,
         grad_weight: Optional[torch.Tensor] = None,
-        grad_weight_beta: Optional[float] = None,
         accumulate_into_grad_weight: bool = False,
         grad_input: Optional[torch.Tensor] = None,
-        grad_input_beta: Optional[float] = None,
         accumulate_into_grad_input: bool = False,
         tensor_parallel_mode: Optional[str] = None,
         tensor_parallel_group: Optional[torch.distributed.ProcessGroup] = None,
@@ -666,12 +582,8 @@ class BasicLinear(BasicOperation):
         weight: torch.Tensor, optional
             Weight tensor. Required to compute loss gradient w.r.t.
             input.
-        grad_input_alpha: float, optional
-            Scaling factor applied to the result of the dgrad GEMM
         input_requires_grad: bool
             Whether to compute loss gradient w.r.t. input tensor
-        grad_weight_alpha: float, optional
-            Scaling factor applied to the result of the wgrad GEMM
         weight_requires_grad: bool
             Whether to compute loss gradient w.r.t. weight tensor
         device: torch.device, default = default CUDA device
@@ -680,14 +592,10 @@ class BasicLinear(BasicOperation):
             Tensor datatype
         grad_weight: torch.Tensor, optional
             Loss gradient w.r.t. weight tensor
-        grad_weight_beta: float, optional
-            Scaling factor applied to original value of grad_weight when accumulating into it
         accumulate_into_grad_weight: bool, default = `False`
             Add result to weight grad instead of overwriting
         grad_input: torch.Tensor, optional
             Loss gradient w.r.t. input tensor
-        grad_input_beta: float, optional
-            Scaling factor applied to original value of grad_input when accumulating into it
         accumulate_into_grad_input: bool, default = `False`
             Add result to input grad instead of overwriting
         tensor_parallel_mode: {`None`, "column", "row"}, default = `None`
@@ -723,10 +631,7 @@ class BasicLinear(BasicOperation):
 
         # Check datatype
         if dtype is None:
-            if isinstance(weight, torch.Tensor):
-                dtype = weight.dtype
-            elif isinstance(grad_output, torch.Tensor):
-                dtype = grad_output.dtype
+            dtype = weight.dtype
         dtype = canonicalize_dtype(dtype)
         if dtype not in (torch.float32, torch.float16, torch.bfloat16):
             raise ValueError(f"Supported dtypes are float32, float16, bfloat16 (got {dtype})")
@@ -751,17 +656,14 @@ class BasicLinear(BasicOperation):
                     quantizer=grad_output_quantizer,
                 )
             else:
-                if not is_quantized_tensor(dy_local):
+                if not isinstance(dy_local, QuantizedTensor):
                     dy_local = grad_output_quantizer(dy_local)
-                else:
-                    dy_local.update_usage(
-                        rowwise_usage=input_requires_grad,
-                        columnwise_usage=weight_requires_grad,
-                    )
                 dy = dy_local
         else:
-            dy_local = maybe_dequantize(dy_local, dtype)
-
+            if isinstance(dy_local, QuantizedTensor):
+                dy_local = dy_local.dequantize()
+            if dy_local.dtype != dtype:
+                dy_local = dy_local.to(dtype=dtype)
             if with_dy_all_gather:
                 dy, dy_async = gather_along_first_dim(
                     dy_local,
@@ -782,7 +684,7 @@ class BasicLinear(BasicOperation):
             if with_quantized_compute:
                 if input_quantizer is None:
                     raise ValueError("Missing quantizer for input tensor")
-                input_quantizer.set_usage(rowwise=False, columnwise=True)
+                input_quantizer.set_usage(columnwise=True)
                 if with_x_all_gather:
                     x, x_async = gather_along_first_dim(
                         x_local,
@@ -791,14 +693,14 @@ class BasicLinear(BasicOperation):
                         quantizer=input_quantizer,
                     )
                 else:
-                    if is_quantized_tensor(x_local):
-                        x_local.update_usage(columnwise_usage=True)
-                    else:
+                    if not isinstance(x_local, QuantizedTensor):
                         x_local = input_quantizer(x_local)
                     x = x_local
             else:
-                x_local = maybe_dequantize(x_local, dtype)
-
+                if isinstance(x_local, QuantizedTensor):
+                    x_local = x_local.dequantize()
+                if x_local.dtype != dtype:
+                    x_local = x_local.to(dtype=dtype)
                 if with_x_all_gather:
                     x, x_async = gather_along_first_dim(
                         x_local,
@@ -817,16 +719,16 @@ class BasicLinear(BasicOperation):
             if weight is None:
                 raise ValueError("Weight tensor is required to compute input grad")
             w = weight
-            if with_quantized_compute:
-                if is_quantized_tensor(w):
-                    w.update_usage(columnwise_usage=True)
-                else:
-                    if weight_quantizer is None:
-                        raise ValueError("Missing quantizer for weight tensor")
-                    weight_quantizer.set_usage(columnwise=True)
-                    w = weight_quantizer(w)
-            else:
-                w = maybe_dequantize(w, dtype)
+            w_is_quantized = isinstance(w, QuantizedTensor)
+            if with_quantized_compute and not w_is_quantized:
+                if weight_quantizer is None:
+                    raise ValueError("Missing quantizer for weight tensor")
+                weight_quantizer.set_usage(columnwise=True)
+                w = weight_quantizer(w)
+            elif not with_quantized_compute and w_is_quantized:
+                w = w.dequantize()
+            if not with_quantized_compute and w.dtype != dtype:
+                w = w.to(dtype=dtype)
 
             # Synchronize tensor-parallel communication
             _wait_async(dy_async)
@@ -839,7 +741,7 @@ class BasicLinear(BasicOperation):
                     grad_input_quantizer = None
                 if tensor_parallel_mode == "column":
                     grad_input_quantizer = None
-            elif is_quantized_tensor(dx):
+            elif isinstance(dx, QuantizedTensor):
                 if not with_quantized_compute:
                     raise ValueError(
                         "Grad input tensor is quantized, but quantized compute is not enabled"
@@ -857,12 +759,11 @@ class BasicLinear(BasicOperation):
                     )
             else:
                 grad_input_quantizer = None
-            if grad_input_quantizer is not None:
-                if not isinstance(grad_input_quantizer, Float8Quantizer):
-                    raise RuntimeError(
-                        "Attempting to generate quantized grad input tensor "
-                        "with unsupported quantizer"
-                    )
+            if isinstance(grad_input_quantizer, MXFP8Quantizer):
+                raise RuntimeError(
+                    "Attempting to generate MXFP8 grad input tensor, "
+                    "but GEMM with MXFP8 output is not supported"
+                )
 
             # Check if accumulating into grad input tensor
             if accumulate_into_grad_input:
@@ -881,10 +782,9 @@ class BasicLinear(BasicOperation):
             dx, *_ = general_gemm(
                 w,
                 dy,
+                get_workspace(),
                 out_dtype=dtype,
                 quantization_params=grad_input_quantizer,
-                alpha=grad_input_alpha,
-                beta=grad_input_beta,
                 accumulate=accumulate_into_grad_input,
                 layout="NN",
                 out=dx,
@@ -917,7 +817,7 @@ class BasicLinear(BasicOperation):
             x_async = None
             dy_async = None
 
-            # Check grad weight tensor
+            # Check grad input tensor
             dw = grad_weight
             dw_dtype = dtype
             if dw is None:
@@ -933,9 +833,8 @@ class BasicLinear(BasicOperation):
             dw, *_ = general_gemm(
                 x,
                 dy,
+                get_workspace(),
                 out_dtype=dw_dtype,
-                alpha=grad_weight_alpha,
-                beta=grad_weight_beta,
                 accumulate=accumulate_into_grad_weight,
                 layout="NT",
                 out=dw,
@@ -953,30 +852,45 @@ class BasicLinear(BasicOperation):
         self,
         ctx: OperationContext,
         input_: torch.Tensor,
-        prev_op_grad_output_quantizer: Optional[Quantizer],
-        next_op_input_quantizer: Optional[Quantizer],
+        prev_op: Optional[BasicOperation] = None,
+        next_op: Optional[BasicOperation] = None,
     ) -> torch.Tensor:
 
         # Check which grads are required
-        input_requires_grad = ctx.requires_grad
+        input_requires_grad = ctx.requires_grad and input_.requires_grad
         weight_requires_grad = ctx.requires_grad and self.weight.requires_grad
 
-        # Quantizers
-        input_quantizer = self.get_quantizer("forward", 0)
-        weight_quantizer = self.get_quantizer("forward", 1)
-        output_quantizer = next_op_input_quantizer
-        grad_output_quantizer = self.get_quantizer("backward", 0)
-        grad_input_quantizer = prev_op_grad_output_quantizer
+        # FP8 metadata
         with_quantized_compute = FP8GlobalStateManager.is_fp8_enabled()
+        input_quantizer = None
+        weight_quantizer = None
+        output_quantizer = None
+        grad_output_quantizer = None
+        grad_input_quantizer = None
+        if with_quantized_compute:
+
+            # Get quantizers
+            input_quantizer = self.get_quantizer("forward", 0)
+            weight_quantizer = self.get_quantizer("forward", 1)
+            if next_op is not None and next_op.num_quantizers("forward") > 0:
+                output_quantizer = next_op.get_quantizer("forward", 0)
+            grad_output_quantizer = self.get_quantizer("backward", 0)
+            if prev_op is not None and prev_op.num_quantizers("backward") > 0:
+                grad_input_quantizer = prev_op.get_quantizer("backward", 0)
+
+            # Configure quantizers
+            # Note: We cache the quantized input for backward pass,
+            # but discard the quantized weights.
+            input_quantizer.set_usage(columnwise=weight_requires_grad)
+            weight_quantizer.set_usage(columnwise=False)
 
         # Get autocast dtype if needed
+        dtype = None
         if torch.is_autocast_enabled():
             dtype = torch.get_autocast_dtype("cuda")
-        else:
-            dtype = self.weight.dtype
 
         # Linear forward
-        output, x_local, w = BasicLinear._functional_forward(
+        output, x_local, _ = BasicLinear._functional_forward(
             input=input_,
             weight=self.weight,
             dtype=dtype,
@@ -987,23 +901,19 @@ class BasicLinear(BasicOperation):
             input_quantizer=input_quantizer,
             weight_quantizer=weight_quantizer,
             output_quantizer=output_quantizer,
-            input_requires_grad=input_requires_grad,
-            weight_requires_grad=weight_requires_grad,
         )
 
         # Save state for backward pass
-        if ctx.requires_grad:
-            if is_cpu_offload_enabled():
-                mark_activation_offload(x_local)
-            ctx.save_for_backward(x_local, w)
-            ctx.with_quantized_compute = with_quantized_compute
-            ctx.input_quantizer = input_quantizer
-            ctx.weight_quantizer = weight_quantizer
-            ctx.grad_output_quantizer = grad_output_quantizer
-            ctx.grad_input_quantizer = grad_input_quantizer
-            ctx.dtype = dtype
-            ctx.input_requires_grad = input_requires_grad
-            ctx.weight_requires_grad = weight_requires_grad
+        ctx.save_for_backward(x_local)
+        ctx.with_quantized_compute = with_quantized_compute
+        ctx.input_quantizer = input_quantizer
+        ctx.weight_quantizer = weight_quantizer
+        ctx.grad_output_quantizer = grad_output_quantizer
+        ctx.grad_input_quantizer = grad_input_quantizer
+        ctx.dtype = dtype
+        ctx.input_requires_grad = input_requires_grad
+        ctx.weight_requires_grad = weight_requires_grad
+        ctx.has_prev_op = prev_op is not None
 
         return output
 
@@ -1014,25 +924,19 @@ class BasicLinear(BasicOperation):
     ) -> tuple[torch.Tensor, Iterable[Optional[torch.Tensor]]]:
 
         # Saved tensors from forward pass
-        (x_local, w) = ctx.saved_tensors
+        (x_local,) = ctx.saved_tensors
 
-        # Megatron-LM wgrad fusion
-        # Note: Get grad tensor from param so we can accumulate
-        # directly into it.
+        # wgrad fusion
         accumulate_into_main_grad = self._accumulate_into_main_grad
         grad_weight = None
         if ctx.weight_requires_grad and accumulate_into_main_grad:
-            weight_param = self.weight
-            if hasattr(weight_param, "__fsdp_param__"):
-                weight_param.main_grad = weight_param.get_main_grad()
-            accumulate_into_main_grad = not getattr(weight_param, "overwrite_main_grad", False)
-            if not hasattr(weight_param, "main_grad"):
+            if not hasattr(self.weight, "main_grad"):
                 raise RuntimeError(
                     "BasicLinear op is configured with "
                     "accumulate_into_main_grad=True, "
                     "but weight parameter does not have main_grad attribute"
                 )
-            grad_weight = weight_param.main_grad.detach()
+            grad_weight = self.weight.main_grad.detach()
         else:
             accumulate_into_main_grad = False
 
@@ -1040,7 +944,7 @@ class BasicLinear(BasicOperation):
         grad_input, grad_weight = BasicLinear._functional_backward(
             grad_output=grad_output,
             input=x_local,
-            weight=w,
+            weight=self.weight,
             input_requires_grad=ctx.input_requires_grad,
             weight_requires_grad=ctx.weight_requires_grad,
             dtype=ctx.dtype,
@@ -1057,19 +961,9 @@ class BasicLinear(BasicOperation):
         )
 
         # Clear input tensor if possible
-        clear_tensor_data(x_local)
+        if ctx.has_prev_op:
+            clear_tensor_data(x_local)
 
-        # Megatron-LM wgrad fusion
-        # Note: Return dummy tensor for grad weight if needed.
         if accumulate_into_main_grad:
             grad_weight = None
-            weight_param = self.weight
-            if hasattr(weight_param, "grad_added_to_main_grad"):
-                weight_param.grad_added_to_main_grad = True
-                grad_weight = get_dummy_wgrad(
-                    list(weight_param.size()),
-                    weight_param.dtype,
-                    zero=getattr(weight_param, "zero_out_wgrad", False),
-                )
-
         return grad_input, [grad_weight]

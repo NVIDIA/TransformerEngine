@@ -343,6 +343,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         softmax_scale: Optional[float] = None,
         softmax_type: str = "vanilla",
         return_max_logit: Optional[bool] = False,
+        recompute_variance: bool = False,
     ) -> None:
         super().__init__()
 
@@ -428,6 +429,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         self.attention_type = attention_type
         self.attention_dropout = attention_dropout
         self.return_max_logit = return_max_logit
+        self.recompute_variance = recompute_variance
 
         self.softmax_type = softmax_type
         if self.softmax_type == "vanilla":
@@ -453,6 +455,7 @@ class DotProductAttention(TransformerEngineBaseModule):
             attention_type=attention_type,
             layer_number=layer_number,
             deterministic=self.deterministic,
+            recompute_variance=self.recompute_variance,
             **attn_kwargs,
         )
 
@@ -801,6 +804,104 @@ class DotProductAttention(TransformerEngineBaseModule):
         self.quantizers[fp8_meta_tensor_key] = []
         for recipe_state in recipe_states:
             self.quantizers[fp8_meta_tensor_key].extend(recipe_state.make_quantizers())
+
+    def forward_before_fa(
+        self,
+        query_layer: torch.Tensor,
+        key_layer: torch.Tensor,
+        value_layer: torch.Tensor,
+        attention_mask: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]] = None,
+        qkv_format: str = None,
+        cu_seqlens_q: torch.Tensor = None,
+        cu_seqlens_kv: torch.Tensor = None,
+        cu_seqlens_q_padded: torch.Tensor = None,
+        cu_seqlens_kv_padded: torch.Tensor = None,
+        max_seqlen_q: int = None,
+        max_seqlen_kv: int = None,
+        attn_mask_type: Optional[str] = None,
+        window_size: Optional[Tuple[int, int]] = None,
+        checkpoint_core_attention: bool = False,
+        core_attention_bias_type: str = "no_bias",
+        core_attention_bias: Optional[torch.Tensor] = None,
+        alibi_slopes: Optional[torch.Tensor] = None,
+        fast_zero_fill: bool = True,
+        inference_params: Optional[InferenceParams] = None,
+        **kwargs,
+    ) -> Tuple[Any, ...]:
+        """Prepare inputs for the split MUSA FlashAttention recompute path."""
+        del cu_seqlens_q_padded, cu_seqlens_kv_padded, checkpoint_core_attention
+        del fast_zero_fill, kwargs
+        assert self.recompute_variance, "Split attention requires recompute_variance=True."
+        assert inference_params is None, "Split MUSA FlashAttention does not support inference."
+        assert core_attention_bias is None and core_attention_bias_type in {"no_bias", "alibi"}
+
+        with self.prepare_forward_ctx(
+            query_layer,
+            num_gemms=3,
+            allow_non_contiguous=True,
+        ) as query_layer:
+            if self.rng_states_tracker is not None and is_graph_capturing():
+                assert isinstance(self.rng_states_tracker, CudaRNGStatesTracker)
+                assert graph_safe_rng_available()
+            assert not self.fp8, "Split MUSA FlashAttention does not support FP8."
+            assert query_layer.dtype == key_layer.dtype == value_layer.dtype
+
+            if qkv_format is None:
+                qkv_format = self.qkv_format
+            if attn_mask_type is None:
+                attn_mask_type = self.attn_mask_type
+            else:
+                attn_mask_type = attn_mask_type.replace(",", "_")
+                if attn_mask_type == "causal_padding":
+                    attn_mask_type = "padding_causal"
+            if window_size is None:
+                window_size = self.window_size
+            window_size = dpa_utils.check_set_window_size(attn_mask_type, window_size)
+
+            qkv_layout, query_layer, key_layer, value_layer, _, _ = dpa_utils.get_qkv_layout(
+                query_layer,
+                key_layer,
+                value_layer,
+                qkv_format=qkv_format,
+                inference_params=None,
+            )
+            if core_attention_bias_type == "alibi":
+                alibi_slopes, _ = dpa_utils.get_alibi(
+                    _alibi_cache,
+                    query_layer.shape[-2],
+                    max_seqlen_q,
+                    max_seqlen_kv,
+                    alibi_slopes=alibi_slopes,
+                )
+            return self.flash_attention.forward_before_fa(
+                query_layer,
+                key_layer,
+                value_layer,
+                attention_mask=attention_mask,
+                qkv_layout=qkv_layout,
+                cu_seqlens_q=cu_seqlens_q,
+                cu_seqlens_kv=cu_seqlens_kv,
+                max_seqlen_q=max_seqlen_q,
+                max_seqlen_kv=max_seqlen_kv,
+                attn_mask_type=attn_mask_type,
+                window_size=window_size,
+                alibi_slopes=alibi_slopes,
+                cp_group=self.cp_group,
+                cp_global_ranks=self.cp_global_ranks,
+                cp_stream=self.cp_stream,
+                cp_comm_type=self.cp_comm_type,
+                fp8=False,
+                fp8_meta=self.fp8_meta,
+                quantizers=self.quantizers,
+            )
+
+    def forward_fa(self, *args) -> Tuple[Any, ...]:
+        """Execute the split MUSA FlashAttention operation."""
+        return self.flash_attention.forward_fa(*args)
+
+    def forward_after_fa(self, *args) -> torch.Tensor:
+        """Restore output layout after split MUSA FlashAttention."""
+        return self.flash_attention.forward_after_fa(*args)
 
     @no_torch_dynamo(recursive=False)
     def forward(

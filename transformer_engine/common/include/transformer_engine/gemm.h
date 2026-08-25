@@ -366,6 +366,18 @@ void nvte_multi_stream_cublas_gemm(const NVTETensor* A, const NVTETensor* B, NVT
                                    bool use_split_accumulator, int math_sm_count,
                                    musaStream_t stream);
 
+/*! \brief Execute grouped GEMMs through muDNN on one stream.
+ *
+ *  During graph capture the implementation uses graph-safe per-GEMM ATen
+ *  matmuls; eager execution retains the fused muDNN grouped operation.
+ */
+void nvte_grouped_mudnn_gemm(const NVTETensor* A, const NVTETensor* B, NVTETensor* D,
+                             const NVTETensor* bias, NVTETensor* pre_gelu_out,
+                             const int num_gemms, bool transa, bool transb, bool grad,
+                             NVTETensor* workspace, bool accumulate,
+                             bool use_split_accumulator, int math_sm_count,
+                             musaStream_t stream);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif  // __cplusplus

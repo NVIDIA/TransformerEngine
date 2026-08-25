@@ -707,6 +707,7 @@ _torch_dtype_to_np_typestr_dict = {
     torch.float32: "<f4",
     torch.int64: "<i8",
     torch.int32: "<i4",
+    torch.int16: "<i2",
     torch.int8: "|i1",
     torch.float8_e4m3fn: "|i1",
     torch.qint8: "|u1",
@@ -785,18 +786,35 @@ def make_weak_ref(x):
             return tensor
 
         old_ptr = tensor.data_ptr()
-        new_tensor = torch.as_tensor(tensor).view(tensor.dtype)
+        source_storage = getattr(tensor, "_source_storage", None)
+        if source_storage is None:
+            raise RuntimeError(
+                "_WeakRefTensor is missing source storage; cannot rebuild a MUSA tensor "
+                "without using the CUDA array interface"
+            )
+        new_tensor = torch.empty(0, dtype=tensor.dtype, device=tensor._source_device)
+        new_tensor.set_(
+            source_storage,
+            tensor._source_storage_offset,
+            tensor.shape,
+            tensor._source_stride,
+        )
         new_ptr = new_tensor.data_ptr()
         if old_ptr != new_ptr:
             raise RuntimeError("Data pointer mismatch after converting to torch.Tensor")
         return new_tensor
 
     if isinstance(x, torch.Tensor):
-        return (
-            convert_to_torch_tensor(_WeakRefTensor(x.data_ptr(), x.dtype, x.shape))
-            if x.is_cuda
-            else x
-        )
+        if x.is_cuda:
+            weak_ref = _WeakRefTensor(x.data_ptr(), x.dtype, x.shape)
+            # torch.as_tensor follows __cuda_array_interface__, which creates a CUDA-keyed
+            # tensor over a MUSA pointer. Rebind a MUSA tensor to the original storage instead.
+            weak_ref._source_storage = x.untyped_storage()
+            weak_ref._source_storage_offset = x.storage_offset()
+            weak_ref._source_stride = x.stride()
+            weak_ref._source_device = x.device
+            return convert_to_torch_tensor(weak_ref)
+        return x
     if isinstance(x, tuple):
         return tuple(make_weak_ref(i) for i in x)
     if isinstance(x, list):

@@ -750,7 +750,7 @@ def moe_permute_and_pad_with_probs(
         )
 
     output, row_id_map, permuted_probs = _moe_permute_mask_map.apply(
-        inp, routing_map, target_tokens_per_expert.sum().item(), probs, pad_offsets
+        inp, routing_map, target_tokens_per_expert.sum().item(), probs, pad_offsets, None
     )
     return output, permuted_probs, row_id_map, pad_offsets, target_tokens_per_expert
 

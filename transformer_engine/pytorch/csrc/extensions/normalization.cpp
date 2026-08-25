@@ -9,10 +9,8 @@
 #include "pybind.h"
 
 #include <torch_musa/csrc/core/MUSAGuard.h>
-#include <ATen/ops/torch__fused_rmsnorm_backward_native.h>
-#ifdef NVTE_SKIP_MUSA_UNCOMPATIBLE
+#include <ATen/ops/_fused_rms_norm_backward.h>
 #include <torch_musa/csrc/aten/ops/RMSNorm.h>
-#endif
 
 namespace transformer_engine::pytorch {
 
@@ -259,8 +257,8 @@ std::vector<py::object> rmsnorm_bwd(const at::Tensor &dz, const at::Tensor &x,
                      zero_centered_gamma, at::musa::getCurrentCUDAStream());
   });
 #else
-  std::tie(dx, dgamma) = at::_fused_rmsnorm_backward(
-      dz_, rsigma_, x_, {x_.size(-1)}, 1e-5, gamma_);
+  std::tie(dx, dgamma) = at::_fused_rms_norm_backward(
+      dz_, x_, {x_.size(-1)}, rsigma_, gamma_, {true, true});
 
 #endif
   return {py::cast(dx), py::cast(dgamma)};

@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -11,24 +11,11 @@ from typing import Optional
 import torch
 
 import transformer_engine_torch as tex
-from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload
-from ...tensor.float8_tensor import Float8CurrentScalingQuantizer, Quantizer
-from ...utils import clear_tensor_data
+from ...fp8 import FP8GlobalStateManager
+from ...tensor import QuantizedTensor
+from ...utils import clear_tensor_data, devices_match
 from ..op import BasicOperation, OperationContext
-from .._common import maybe_dequantize
-
-__all__ = [
-    "GELU",
-    "GEGLU",
-    "GLU",
-    "QGELU",
-    "QGEGLU",
-    "ReLU",
-    "ReGLU",
-    "SReLU",
-    "SReGLU",
-    "SiLU",
-]
+from .._common import reshape
 
 
 class _ActivationOperation(BasicOperation, metaclass=abc.ABCMeta):
@@ -84,8 +71,8 @@ class _ActivationOperation(BasicOperation, metaclass=abc.ABCMeta):
         self,
         ctx: OperationContext,
         input_: torch.Tensor,
-        prev_op_grad_output_quantizer: Optional[Quantizer],
-        next_op_input_quantizer: Optional[Quantizer],
+        prev_op: Optional[BasicOperation] = None,
+        next_op: Optional[BasicOperation] = None,
     ) -> torch.Tensor:
 
         # Compute dtype
@@ -98,24 +85,37 @@ class _ActivationOperation(BasicOperation, metaclass=abc.ABCMeta):
             raise RuntimeError(f"Unsupported dtype ({dtype})")
 
         # Check input tensor
-        x = maybe_dequantize(input_.contiguous(), dtype)
+        x = input_
+        if isinstance(x, QuantizedTensor):
+            x = x.dequantize()
+        if x.device.type != "cuda":
+            x = x.cuda()
+        if x.dtype != dtype:
+            x = x.to(dtype=dtype)
+        if not x.is_contiguous():
+            x = x.contiguous()
+
+        # Check if FP8 is enabled
+        fp8_enabled = FP8GlobalStateManager.is_fp8_enabled()
+        if fp8_enabled and next_op is not None and next_op.num_quantizers("forward") > 0:
+            quantizer = next_op.get_quantizer("forward", 0)
+        else:
+            quantizer = None
 
         # Launch kernel
-        y = self._activation_forward_impl(x, next_op_input_quantizer)
+        y = self._activation_forward_impl(
+            reshape(x, (-1, x.size(-1))),
+            quantizer,
+        )
 
-        # Quantize input to FP8 before caching if needed
-        if self.cache_quantized_input:
-            input_quantizer = Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, x.device)
-            input_quantizer.set_usage(rowwise=True, columnwise=False)
-            x = input_quantizer(x)
+        # Check output tensor
+        if y.dim() != x.dim():
+            y = y.reshape(list(x.shape[:-1]) + [-1])
 
         # Save state for backward pass
-        if ctx.requires_grad:
-            if is_cpu_offload_enabled():
-                mark_activation_offload(x)
-            ctx.save_for_backward(x)
-            ctx.dtype = dtype
-            ctx.prev_op_grad_output_quantizer = prev_op_grad_output_quantizer
+        ctx.save_for_backward(x.detach())
+        ctx.fp8_enabled = fp8_enabled
+        ctx.prev_op = prev_op
 
         return y
 
@@ -128,17 +128,29 @@ class _ActivationOperation(BasicOperation, metaclass=abc.ABCMeta):
         # Saved tensors from forward pass
         (x,) = ctx.saved_tensors
 
-        # Check input tensor
-        x = maybe_dequantize(x.contiguous(), ctx.dtype)
-
         # Check grad output tensor
-        dy = maybe_dequantize(grad_output.contiguous(), x.dtype)
+        dy = grad_output
+        if isinstance(dy, QuantizedTensor):
+            dy = dy.dequantize()
+        if not devices_match(dy.device, x.device) or dy.dtype != x.dtype:
+            dy = dy.to(device=x.device, dtype=x.dtype)
+        if not dy.is_contiguous():
+            dy = dy.contiguous()
 
         # Launch kernel
-        dx = self._activation_backward_impl(dy, x, ctx.prev_op_grad_output_quantizer)
+        dx = self._activation_backward_impl(
+            reshape(dy, (-1, dy.size(-1))),
+            reshape(x, (-1, x.size(-1))),
+            None,
+        )
+
+        # Check grad input tensor
+        if dx.size() != x.size():
+            dx = dx.reshape(x.size())
 
         # Clear input tensor if possible
-        clear_tensor_data(x)
+        if ctx.prev_op is not None:
+            clear_tensor_data(x)
 
         return dx, ()
 
@@ -299,7 +311,7 @@ class ReLU(_ActivationOperation):
 
 
 class ReGLU(_ActivationOperation):
-    r"""Rectified Gated Linear Unit
+    r"""Rectified gated linear unit
 
     The input tensor is split into chunks :math:`a` and :math:`b`
     along the last dimension and the following is computed:

@@ -158,8 +158,6 @@ def patch_after_import_torch():
     torch.cuda.nvtx.range_push = _pass_pvtx
     torch.cuda.nvtx.range_pop = _pass_pvtx
 
-    torch.cuda.is_current_stream_capturing = lambda: False
-
     origin_module_to = torch.nn.Module.to
     def patched_module_to(self, *args, **kwargs):
         args, kwargs = maybe_hook_cuda_args(args, kwargs)
