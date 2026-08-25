@@ -19,12 +19,17 @@
 #include <cstdio>
 #include <cstdlib>
 #include <string>
-#include <torch/csrc/distributed/c10d/symm_mem/SymmetricMemory.hpp>
-#include <torch/csrc/distributed/c10d/symm_mem/nccl_dev_cap.hpp>
 #include <tuple>
 #include <vector>
 
 #include "transformer_engine/comm_window.h"
+
+// torch's NCCL symm-mem headers (zero-copy path) exist only since torch 2.11;
+// without them NCCL_HAS_SYMMEM_SUPPORT stays undefined and zero-copy is compiled out.
+#if __has_include(<torch/csrc/distributed/c10d/symm_mem/nccl_dev_cap.hpp>)
+#include <torch/csrc/distributed/c10d/symm_mem/SymmetricMemory.hpp>
+#include <torch/csrc/distributed/c10d/symm_mem/nccl_dev_cap.hpp>
+#endif
 
 #ifdef NCCL_HAS_SYMMEM_SUPPORT
 #include <torch/csrc/distributed/c10d/symm_mem/NCCLSymmetricMemory.hpp>
@@ -151,6 +156,14 @@ size_t check_mxfp8_scale_pair(const at::Tensor& send_scale, const at::Tensor& re
 }  // namespace
 
 bool ep_get_zero_copy() { return g_zero_copy_enabled.load(std::memory_order_relaxed); }
+
+bool ep_zero_copy_supported() {
+#ifdef NCCL_HAS_SYMMEM_SUPPORT
+  return true;
+#else
+  return false;
+#endif
+}
 
 // ── Bootstrap ────────────────────────────────────────────────────────────────
 // Borrows torch's NCCL host comm (from ``ProcessGroupNCCL._comm_ptr()``).
@@ -498,6 +511,8 @@ void register_ep_bindings(pybind11::module_& m) {
   m.def("ep_finalize", &ep_finalize, "Tear down the EP backend. Idempotent.",
         py::call_guard<py::gil_scoped_release>());
   m.def("ep_get_zero_copy", &ep_get_zero_copy, "Return the current EP zero-copy toggle state.");
+  m.def("ep_zero_copy_supported", &ep_zero_copy_supported,
+        "Return True when the extension was built with NCCL symm-mem (zero-copy) support.");
   m.def("ep_handle_mem_size", &ep_handle_mem_size,
         "Return the handle_mem byte size for the given layer config.", py::arg("top_k"),
         py::arg("dispatch_output_per_expert_alignment") = 0);
