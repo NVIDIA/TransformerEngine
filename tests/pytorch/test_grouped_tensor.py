@@ -643,15 +643,15 @@ class TestGroupedTensor:
         """Test the grouped scaled SwiGLU MXFP8 recompute binding plumbs shapes/dtypes.
 
         Numerics live in tests/cpp/operator/test_cast_mxfp8_grouped_scaled_swiglu.cu; this only
-        covers the pybind layer: a [T, 2F] input plus a [T] prob must come back as a
-        columnwise-MXFP8 [T, F] grouped output.
+        covers the pybind layer: a [N, 2H] input plus a [N] prob must come back as a
+        columnwise-MXFP8 [N, H] grouped output.
         """
         num_tensors = 3
         last_dim = 256
         split_sizes_list = [128, 384, 512]
         total_tokens = sum(split_sizes_list)
 
-        input_2f = torch.randn(total_tokens, 2 * last_dim, dtype=torch.bfloat16, device="cuda")
+        input_2h = torch.randn(total_tokens, 2 * last_dim, dtype=torch.bfloat16, device="cuda")
         # prob rides in the model dtype, matching TE's cuDNN fc1_prob_tensor convention.
         prob = torch.rand(total_tokens, dtype=torch.bfloat16, device="cuda")
         first_dims = torch.tensor(split_sizes_list, dtype=torch.int64, device="cuda")
@@ -660,7 +660,7 @@ class TestGroupedTensor:
         quantizer.set_usage(rowwise=False, columnwise=True)
         quantizer.optimize_for_gemm = optimize_for_gemm
 
-        grouped_output = tex.group_scaled_swiglu(input_2f, prob, quantizer, num_tensors, first_dims)
+        grouped_output = tex.group_scaled_swiglu(input_2h, prob, quantizer, num_tensors, first_dims)
 
         outputs = grouped_output.split_into_quantized_tensors()
         assert len(outputs) == num_tensors
@@ -672,7 +672,7 @@ class TestGroupedTensor:
             assert output._columnwise_scale_inv.numel() == (rows // 32) * last_dim
 
         with pytest.raises(RuntimeError):
-            tex.group_scaled_swiglu(input_2f, prob.float(), quantizer, num_tensors, first_dims)
+            tex.group_scaled_swiglu(input_2h, prob.float(), quantizer, num_tensors, first_dims)
 
         # Both operands reach the kernel as raw pointers over a densely packed range, so a
         # strided view must be rejected instead of being read as if it were contiguous.
@@ -684,7 +684,7 @@ class TestGroupedTensor:
 
         strided_prob = torch.rand(2 * total_tokens, dtype=torch.bfloat16, device="cuda")[::2]
         with pytest.raises(RuntimeError):
-            tex.group_scaled_swiglu(input_2f, strided_prob, quantizer, num_tensors, first_dims)
+            tex.group_scaled_swiglu(input_2h, strided_prob, quantizer, num_tensors, first_dims)
 
     @pytest.mark.parametrize("optimize_for_gemm", [False, True])
     @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
@@ -699,7 +699,7 @@ class TestGroupedTensor:
         split_sizes_list = [128, 384, 512]
         total_tokens = sum(split_sizes_list)
 
-        input_2f = torch.randn(total_tokens, 2 * last_dim, dtype=torch.bfloat16, device="cuda")
+        input_2h = torch.randn(total_tokens, 2 * last_dim, dtype=torch.bfloat16, device="cuda")
         prob = torch.rand(total_tokens, dtype=torch.bfloat16, device="cuda")
         first_dims = torch.tensor(split_sizes_list, dtype=torch.int64, device="cuda")
 
@@ -708,7 +708,7 @@ class TestGroupedTensor:
         quantizer.optimize_for_gemm = optimize_for_gemm
 
         grouped_output = tex.group_scaled_clamped_swiglu(
-            input_2f, prob, quantizer, num_tensors, 7.0, 1.702, 1.0, first_dims
+            input_2h, prob, quantizer, num_tensors, 7.0, 1.702, 1.0, first_dims
         )
 
         outputs = grouped_output.split_into_quantized_tensors()
@@ -720,11 +720,11 @@ class TestGroupedTensor:
 
         # A clamp wider than any input, with alpha and offset at their identity values,
         # must reproduce the unclamped kernel exactly.
-        wide_limit = float(input_2f.abs().max()) + 1.0
+        wide_limit = float(input_2h.abs().max()) + 1.0
         clamped_identity = tex.group_scaled_clamped_swiglu(
-            input_2f, prob, quantizer, num_tensors, wide_limit, 1.0, 0.0, first_dims
+            input_2h, prob, quantizer, num_tensors, wide_limit, 1.0, 0.0, first_dims
         )
-        plain = tex.group_scaled_swiglu(input_2f, prob, quantizer, num_tensors, first_dims)
+        plain = tex.group_scaled_swiglu(input_2h, prob, quantizer, num_tensors, first_dims)
         for lhs, rhs in zip(
             clamped_identity.split_into_quantized_tensors(),
             plain.split_into_quantized_tensors(),
@@ -735,7 +735,7 @@ class TestGroupedTensor:
         for bad_limit in (0.0, -1.0):
             with pytest.raises(RuntimeError):
                 tex.group_scaled_clamped_swiglu(
-                    input_2f, prob, quantizer, num_tensors, bad_limit, 1.702, 1.0, first_dims
+                    input_2h, prob, quantizer, num_tensors, bad_limit, 1.702, 1.0, first_dims
                 )
 
     @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)

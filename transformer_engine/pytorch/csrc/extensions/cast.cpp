@@ -439,7 +439,7 @@ struct ClampedSwigluArgs {
 
 // Shared body of group_scaled_swiglu and group_scaled_clamped_swiglu, which differ only
 // in the nvte entry point they call at the end.
-py::object group_scaled_swiglu_impl(const char *api_name, const at::Tensor &input_2f,
+py::object group_scaled_swiglu_impl(const char *api_name, const at::Tensor &input_2h,
                                     const at::Tensor &prob, py::handle quantizer,
                                     const size_t num_tensors, std::optional<at::Tensor> first_dims,
                                     std::optional<at::Tensor> last_dims,
@@ -449,27 +449,27 @@ py::object group_scaled_swiglu_impl(const char *api_name, const at::Tensor &inpu
   init_extension();
 
   // Grouped scaled SwiGLU recompute of the MoE FC2 input:
-  //   input_2f : [T, 2F] ([act|gate]) in model dtype (bf16).
-  //   prob     : [T] per-token weights, model dtype (matches TE fc1_prob_tensor).
-  //   output   : columnwise MXFP8 of (silu(act) * gate) * prob, logical [T, F].
-  NVTE_CHECK(input_2f.dim() == 2, "group_scaled_swiglu input must be 2D [T, 2F].");
-  const auto T = static_cast<size_t>(input_2f.size(0));
-  const auto two_f = static_cast<size_t>(input_2f.size(1));
-  NVTE_CHECK(two_f % 2 == 0, "group_scaled_swiglu input last dim must be even (=2F).");
-  const size_t F = two_f / 2;
+  //   input_2h : [N, 2H] ([act|gate]) in model dtype (bf16).
+  //   prob     : [N] per-token weights, model dtype (matches TE fc1_prob_tensor).
+  //   output   : columnwise MXFP8 of (silu(act) * gate) * prob, logical [N, H].
+  NVTE_CHECK(input_2h.dim() == 2, "group_scaled_swiglu input must be 2D [N, 2H].");
+  const auto N = static_cast<size_t>(input_2h.size(0));
+  const auto two_h = static_cast<size_t>(input_2h.size(1));
+  NVTE_CHECK(two_h % 2 == 0, "group_scaled_swiglu input last dim must be even (=2H).");
+  const size_t H = two_h / 2;
 
   NVTE_CHECK(IsMXFP8Quantizers(quantizer.ptr()),
              "group_scaled_swiglu only supports MXFP8 quantizers.");
-  NVTE_CHECK(input_2f.is_cuda(), "group_scaled_swiglu input must be a CUDA tensor.");
+  NVTE_CHECK(input_2h.is_cuda(), "group_scaled_swiglu input must be a CUDA tensor.");
   // Both operands are handed to the kernel as raw pointers over a densely packed
   // range, so a strided view would be read as if it were contiguous.
-  NVTE_CHECK(input_2f.is_contiguous(), "group_scaled_swiglu input must be contiguous.");
+  NVTE_CHECK(input_2h.is_contiguous(), "group_scaled_swiglu input must be contiguous.");
   NVTE_CHECK(prob.is_contiguous(), "group_scaled_swiglu prob must be contiguous.");
-  NVTE_CHECK(prob.device() == input_2f.device(),
+  NVTE_CHECK(prob.device() == input_2h.device(),
              "group_scaled_swiglu prob must be on the same device as the input.");
-  NVTE_CHECK(prob.dim() == 1 && prob.numel() == static_cast<int64_t>(T),
-             "group_scaled_swiglu prob must be a 1D tensor with exactly T elements.");
-  NVTE_CHECK(prob.scalar_type() == input_2f.scalar_type(),
+  NVTE_CHECK(prob.dim() == 1 && prob.numel() == static_cast<int64_t>(N),
+             "group_scaled_swiglu prob must be a 1D tensor with exactly N elements.");
+  NVTE_CHECK(prob.scalar_type() == input_2h.scalar_type(),
              "group_scaled_swiglu prob must have the same dtype as the input (model dtype).");
 
   if (clamp.has_value()) {
@@ -483,10 +483,10 @@ py::object group_scaled_swiglu_impl(const char *api_name, const at::Tensor &inpu
 
   // The grouped metadata is turned into offsets by a kernel on the guarded device below,
   // and the fused kernel then indexes the input with those offsets.
-  auto check_metadata_device = [&input_2f](const std::optional<at::Tensor> &metadata,
+  auto check_metadata_device = [&input_2h](const std::optional<at::Tensor> &metadata,
                                            const char *name) {
     if (metadata.has_value()) {
-      NVTE_CHECK(metadata->device() == input_2f.device(), "group_scaled_swiglu ", name,
+      NVTE_CHECK(metadata->device() == input_2h.device(), "group_scaled_swiglu ", name,
                  " must be on the same device as the input.");
     }
   };
@@ -496,25 +496,25 @@ py::object group_scaled_swiglu_impl(const char *api_name, const at::Tensor &inpu
 
   // Allocate the output and launch on the operands' device rather than on whatever
   // torch.cuda.set_device last selected.
-  at::cuda::CUDAGuard device_guard(input_2f.device());
+  at::cuda::CUDAGuard device_guard(input_2h.device());
 
-  const bool empty_input_buffer = (T == 0 || F == 0);
+  const bool empty_input_buffer = (N == 0 || H == 0);
 
   auto quantizer_cpp = convert_quantizer(quantizer);
 
-  // Input GroupedTensor: [T, 2F].
-  std::vector<size_t> in_logical_shape = {T, two_f};
+  // Input GroupedTensor: [N, 2H].
+  std::vector<size_t> in_logical_shape = {N, two_h};
   auto grouped_input_tensor = GroupedTensorWrapper(num_tensors, in_logical_shape);
-  grouped_input_tensor.set_rowwise_data(input_2f.data_ptr(),
-                                        GetTransformerEngineDType(input_2f.scalar_type()),
-                                        std::vector<size_t>{static_cast<size_t>(input_2f.numel())});
+  grouped_input_tensor.set_rowwise_data(input_2h.data_ptr(),
+                                        GetTransformerEngineDType(input_2h.scalar_type()),
+                                        std::vector<size_t>{static_cast<size_t>(input_2h.numel())});
 
-  // Output GroupedTensor: [T, F] (columnwise MXFP8). Driving logical_last_dim = F
-  // makes the allocated data/scales and the tensor_offsets F-based.
-  std::vector<size_t> out_logical_shape = {T, F};
+  // Output GroupedTensor: [N, H] (columnwise MXFP8). Driving logical_last_dim = H
+  // makes the allocated data/scales and the tensor_offsets H-based.
+  std::vector<size_t> out_logical_shape = {N, H};
   auto [grouped_output_tensor_cpp, grouped_output_py] = quantizer_cpp->create_grouped_tensor(
-      num_tensors, out_logical_shape, GetTransformerEngineDType(input_2f.scalar_type()),
-      py::reinterpret_borrow<py::object>(quantizer), first_dims, last_dims, tensor_offsets, T, F);
+      num_tensors, out_logical_shape, GetTransformerEngineDType(input_2h.scalar_type()),
+      py::reinterpret_borrow<py::object>(quantizer), first_dims, last_dims, tensor_offsets, N, H);
 
   if (empty_input_buffer) {
     return py::reinterpret_borrow<py::object>(grouped_output_py);
@@ -538,22 +538,22 @@ py::object group_scaled_swiglu_impl(const char *api_name, const at::Tensor &inpu
 
 }  // namespace
 
-py::object group_scaled_swiglu(const at::Tensor &input_2f, const at::Tensor &prob,
+py::object group_scaled_swiglu(const at::Tensor &input_2h, const at::Tensor &prob,
                                py::handle quantizer, const size_t num_tensors,
                                std::optional<at::Tensor> first_dims,
                                std::optional<at::Tensor> last_dims,
                                std::optional<at::Tensor> tensor_offsets) {
-  return group_scaled_swiglu_impl("group_scaled_swiglu", input_2f, prob, quantizer, num_tensors,
+  return group_scaled_swiglu_impl("group_scaled_swiglu", input_2h, prob, quantizer, num_tensors,
                                   first_dims, last_dims, tensor_offsets, std::nullopt);
 }
 
-py::object group_scaled_clamped_swiglu(const at::Tensor &input_2f, const at::Tensor &prob,
+py::object group_scaled_clamped_swiglu(const at::Tensor &input_2h, const at::Tensor &prob,
                                        py::handle quantizer, const size_t num_tensors, float limit,
                                        float alpha, float glu_linear_offset,
                                        std::optional<at::Tensor> first_dims,
                                        std::optional<at::Tensor> last_dims,
                                        std::optional<at::Tensor> tensor_offsets) {
-  return group_scaled_swiglu_impl("group_scaled_clamped_swiglu", input_2f, prob, quantizer,
+  return group_scaled_swiglu_impl("group_scaled_clamped_swiglu", input_2h, prob, quantizer,
                                   num_tensors, first_dims, last_dims, tensor_offsets,
                                   ClampedSwigluArgs{limit, alpha, glu_linear_offset});
 }

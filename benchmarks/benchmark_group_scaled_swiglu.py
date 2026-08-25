@@ -8,11 +8,11 @@
 Compares the fused kernel against the unfused path it replaces when recomputing
 the MoE FC2 weight-gradient input:
 
-    fused   : [T, 2F] bf16 --(scaled SwiGLU + columnwise MXFP8)--> [T, F] fp8 + scales
-    unfused : [T, 2F] bf16 --(scaled SwiGLU)--> [T, F] bf16 --(group_quantize)--> fp8
+    fused   : [N, 2H] bf16 --(scaled SwiGLU + columnwise MXFP8)--> [N, H] fp8 + scales
+    unfused : [N, 2H] bf16 --(scaled SwiGLU)--> [N, H] bf16 --(group_quantize)--> fp8
 
 Both paths are bandwidth bound, so the number that explains the speedup is DRAM
-traffic. Per output element the unfused path moves 4 bytes reading [T, 2F], 2
+traffic. Per output element the unfused path moves 4 bytes reading [N, 2H], 2
 writing the bf16 activation, 2 reading it back, and 1 writing FP8; the fused
 kernel keeps the activation in registers and moves 4 + 1. That is 9 vs 5 bytes
 per element, so ~1.8x is the ceiling for the fused kernel.
@@ -31,11 +31,11 @@ the activation is computed. That choice changes what the speedup means:
                    the number to quote: against it, the fused kernel's remaining
                    advantage can only come from fusing the *quantization* in.
   unfused-te-op    the same two steps assembled from TE's existing components, i.e.
-                   what a user falls back on today without this kernel. It is slower
-                   than unfused-compiled for a structural reason rather than just
-                   Python overhead: ScaledSwiGLU runs tex.swiglu and then a *separate*
-                   kernel to apply the per-token scale, so the bf16 intermediate makes
-                   one extra DRAM round trip. Operation-fuser overhead adds to that.
+                   what a user falls back on today without this kernel. ScaledSwiGLU
+                   now applies the per-token scale inside tex.scaled_swiglu, so it
+                   moves the same DRAM traffic as unfused-compiled and the gap between
+                   them is operation-fuser and autograd overhead rather than an extra
+                   round trip. It used to be far slower for that structural reason.
   fused-clamped    the clamped instantiation of the same fused kernel.
   unfused-compiled-clamped
                    the clamped expression through torch.compile, and the only fair
@@ -44,12 +44,19 @@ the activation is computed. That choice changes what the speedup means:
                    arithmetic the baseline never performed.
 
 Shapes must respect the kernel's restrictions: every expert's token count is
-divisible by 128, and the GEMM-swizzled scale layout also needs F divisible by
+divisible by 128, and the GEMM-swizzled scale layout also needs H divisible by
 128. The default total token count mirrors benchmark_group_quantize_current_scaling.py.
+
+``--occupancy`` below 1 allocates for more rows than carry data and leaves the
+trailing experts empty, which is the shape a capacity-limited router produces. The
+work grid still spans the allocation, so it measures what the scheduler spends on
+jobs with nothing in them.
 
 Example:
     python benchmarks/benchmark_group_scaled_swiglu.py
     python benchmarks/benchmark_group_scaled_swiglu.py --hidden 4096 --num-groups 8 64
+    python benchmarks/benchmark_group_scaled_swiglu.py --num-groups 2 4 8 16 32 64
+    python benchmarks/benchmark_group_scaled_swiglu.py --occupancy 1.0 0.5 0.125
 """
 
 from __future__ import annotations
@@ -74,8 +81,8 @@ FP8_BYTES = 1
 SCALE_BLOCK_ROWS = 32
 # The kernel schedules 128-row blocks, so every expert's token count must be a multiple.
 TOKEN_ALIGNMENT = 128
-# The swizzled scale layout tiles the transposed scale matrix 128-wide along F.
-SWIZZLE_F_ALIGNMENT = 128
+# The swizzled scale layout tiles the transposed scale matrix 128-wide along H.
+SWIZZLE_H_ALIGNMENT = 128
 
 VARIANTS = (
     "fused",
@@ -91,8 +98,10 @@ VARIANTS = (
 class CaseResult:
     variant: str
     tokens: int
+    active_tokens: int
     hidden: int
     num_groups: int
+    empty_groups: int
     swizzled_scales: bool
     loop: str
     iters: int
@@ -137,11 +146,33 @@ def _distribute_blocks(blocks: int, num_groups: int, imbalance: str) -> List[int
     return counts
 
 
-def _make_first_dims(tokens: int, num_groups: int, imbalance: str) -> List[int]:
+def _make_first_dims(
+    tokens: int, num_groups: int, imbalance: str, occupancy: float = 1.0
+) -> List[int]:
+    """Per-expert token counts over a buffer allocated for ``tokens`` rows.
+
+    ``occupancy`` below 1 leaves the allocation larger than the data, which is the
+    steady state for a router with a fixed capacity: the trailing experts get zero
+    rows. The work grid still spans the whole allocation, so this is what exercises
+    the scheduler's empty-job path rather than its compute.
+    """
     if tokens % TOKEN_ALIGNMENT != 0:
         raise SystemExit(f"--tokens must be a multiple of {TOKEN_ALIGNMENT}, got {tokens}")
-    blocks = _distribute_blocks(tokens // TOKEN_ALIGNMENT, num_groups, imbalance)
-    return [b * TOKEN_ALIGNMENT for b in blocks]
+    total_blocks = tokens // TOKEN_ALIGNMENT
+    active_blocks = max(1, int(round(total_blocks * occupancy)))
+
+    if active_blocks >= total_blocks:
+        blocks = _distribute_blocks(total_blocks, num_groups, imbalance)
+        return [b * TOKEN_ALIGNMENT for b in blocks]
+
+    # Spread the active blocks evenly over as many leading experts as there are blocks
+    # and zero the rest. An even split keeps `imbalance` out of the picture here, so a
+    # sparse case measures only the empty-tensor effect.
+    filled = min(num_groups, active_blocks)
+    per_expert = [active_blocks // filled] * filled
+    for i in range(active_blocks % filled):
+        per_expert[i] += 1
+    return [b * TOKEN_ALIGNMENT for b in per_expert] + [0] * (num_groups - filled)
 
 
 def _make_quantizer(swizzled_scales: bool) -> MXFP8Quantizer:
@@ -152,14 +183,14 @@ def _make_quantizer(swizzled_scales: bool) -> MXFP8Quantizer:
     return quantizer
 
 
-def _scaled_swiglu_bf16(input_2f: torch.Tensor, prob: torch.Tensor, hidden: int) -> torch.Tensor:
-    act = input_2f[:, :hidden]
-    gate = input_2f[:, hidden:]
+def _scaled_swiglu_bf16(input_2h: torch.Tensor, prob: torch.Tensor, hidden: int) -> torch.Tensor:
+    act = input_2h[:, :hidden]
+    gate = input_2h[:, hidden:]
     return torch.nn.functional.silu(act) * gate * prob.unsqueeze(1)
 
 
 def _scaled_clamped_swiglu_bf16(
-    input_2f: torch.Tensor,
+    input_2h: torch.Tensor,
     prob: torch.Tensor,
     hidden: int,
     limit: float,
@@ -169,8 +200,8 @@ def _scaled_clamped_swiglu_bf16(
     # Mirrors the kernel: the activation half is clamped from above only, the gate half
     # on both sides and then offset. Written with an explicit sigmoid because the alpha
     # inside it is what distinguishes clamped_silu from silu.
-    act = input_2f[:, :hidden].clamp(max=limit)
-    gate = input_2f[:, hidden:].clamp(-limit, limit) + glu_linear_offset
+    act = input_2h[:, :hidden].clamp(max=limit)
+    gate = input_2h[:, hidden:].clamp(-limit, limit) + glu_linear_offset
     return act * torch.sigmoid(alpha * act) * gate * prob.unsqueeze(1)
 
 
@@ -182,7 +213,7 @@ def _fused_bytes(tokens: int, hidden: int) -> int:
 
 
 def _unfused_bytes(tokens: int, hidden: int) -> int:
-    # Activation kernel: read [T, 2F] bf16, write the [T, F] bf16 intermediate.
+    # Activation kernel: read [N, 2H] bf16, write the [N, H] bf16 intermediate.
     activation = tokens * 2 * hidden * BF16_BYTES + tokens * hidden * BF16_BYTES
     # Quantize kernel: read that intermediate back, write FP8 plus scales.
     quantize = (
@@ -209,8 +240,8 @@ def _compile_clamped_activation(clamp: Tuple[float, float, float]) -> Optional[C
     """
     limit, alpha, glu_linear_offset = clamp
 
-    def clamped(input_2f: torch.Tensor, prob: torch.Tensor, hidden: int) -> torch.Tensor:
-        return _scaled_clamped_swiglu_bf16(input_2f, prob, hidden, limit, alpha, glu_linear_offset)
+    def clamped(input_2h: torch.Tensor, prob: torch.Tensor, hidden: int) -> torch.Tensor:
+        return _scaled_clamped_swiglu_bf16(input_2h, prob, hidden, limit, alpha, glu_linear_offset)
 
     try:
         return torch.compile(clamped, dynamic=False)
@@ -234,10 +265,10 @@ def _te_op_activation() -> Optional[Callable]:
         print(f"  (te_ops.ScaledSwiGLU unavailable, skipping unfused-te-op: {exc})")
         return None
 
-    def activation(input_2f: torch.Tensor, prob: torch.Tensor, hidden: int) -> torch.Tensor:
-        del hidden  # the op infers F from the input
+    def activation(input_2h: torch.Tensor, prob: torch.Tensor, hidden: int) -> torch.Tensor:
+        del hidden  # the op infers H from the input
         with torch.no_grad():
-            return op(input_2f, prob)
+            return op(input_2h, prob)
 
     return activation
 
@@ -325,7 +356,7 @@ def _time_graph(runner, inputs, probs, iters: int, calls_per_replay: int = 16):
 
 def _check_fused_matches_unfused(
     quantizer: MXFP8Quantizer,
-    input_2f: torch.Tensor,
+    input_2h: torch.Tensor,
     prob: torch.Tensor,
     hidden: int,
     num_groups: int,
@@ -334,6 +365,7 @@ def _check_fused_matches_unfused(
     fused_fn: Callable,
     activation: Callable,
     label: str,
+    compare_elems: Optional[int] = None,
 ) -> None:
     """Guard against timing a kernel that is not computing the right thing.
 
@@ -350,10 +382,15 @@ def _check_fused_matches_unfused(
     and shift all 32 of its codes at once. That affects on the order of
     0.002/ln(2) ~ 0.3% of blocks, hence a similar fraction of elements. The budget
     below sits above that but far below the ~100% a wrong formula would produce.
+
+    ``compare_elems`` limits the comparison to the leading elements of the output. It
+    is what makes the check usable on an under-filled allocation, where both paths skip
+    the same trailing rows and so leave the same region of their output buffers
+    uninitialized -- comparing that region would be comparing two lots of garbage.
     """
-    fused = fused_fn(input_2f, prob)
+    fused = fused_fn(input_2h, prob)
     reference = tex.group_quantize(
-        activation(input_2f, prob, hidden), quantizer, num_groups, first_dims
+        activation(input_2h, prob, hidden), quantizer, num_groups, first_dims
     )
     if fused.columnwise_data.numel() != reference.columnwise_data.numel():
         raise RuntimeError(
@@ -361,13 +398,19 @@ def _check_fused_matches_unfused(
             f" reference has {reference.columnwise_data.numel()}; the benchmark is comparing"
             " different shapes."
         )
-    if int(fused.columnwise_data.view(torch.uint8).max().item()) == 0:
+
+    fused_bytes = fused.columnwise_data.view(torch.uint8).flatten()
+    reference_bytes = reference.columnwise_data.view(torch.uint8).flatten()
+    if compare_elems is not None:
+        fused_bytes = fused_bytes[:compare_elems]
+        reference_bytes = reference_bytes[:compare_elems]
+    if int(fused_bytes.max().item()) == 0:
         raise RuntimeError(f"{label}: fused output is entirely zero; the kernel produced nothing.")
 
     # Coarse code-level comparison. Signs agree between the two paths in practice, so
     # treating the FP8 bytes as integers is good enough to spot a gross mismatch.
-    fused_codes = fused.columnwise_data.view(torch.uint8).to(torch.int16)
-    reference_codes = reference.columnwise_data.view(torch.uint8).to(torch.int16)
+    fused_codes = fused_bytes.to(torch.int16)
+    reference_codes = reference_bytes.to(torch.int16)
     mismatch = (fused_codes - reference_codes).abs() > 1
     mismatch_rate = float(mismatch.sum().item()) / max(1, mismatch.numel())
     if mismatch_rate > 2e-2:
@@ -395,13 +438,17 @@ def run_case(
     compiled_clamped_activation: Optional[Callable],
     te_op_activation: Optional[Callable],
     clamp: Tuple[float, float, float],
+    occupancy: float = 1.0,
 ) -> Optional[CaseResult]:
     quantizer = _make_quantizer(swizzled_scales)
     first_dims = None
+    active_tokens = tokens
+    empty_groups = 0
     if not same_shape:
-        first_dims = torch.tensor(
-            _make_first_dims(tokens, num_groups, imbalance), dtype=torch.int64, device="cuda"
-        )
+        dims = _make_first_dims(tokens, num_groups, imbalance, occupancy)
+        active_tokens = sum(dims)
+        empty_groups = sum(1 for d in dims if d == 0)
+        first_dims = torch.tensor(dims, dtype=torch.int64, device="cuda")
 
     inputs = [
         torch.randn(tokens, 2 * hidden, dtype=torch.bfloat16, device="cuda")
@@ -436,10 +483,12 @@ def run_case(
         elapsed_ms = _time_eager(runner, inputs, probs, iters)
         actual_iters = iters
 
+    # Charged on the rows that carry data, not the allocation. Crediting an under-filled
+    # buffer with traffic it never moves would hide the cost this case exists to show.
     min_bytes = (
-        _fused_bytes(tokens, hidden)
+        _fused_bytes(active_tokens, hidden)
         if variant.startswith("fused")
-        else _unfused_bytes(tokens, hidden)
+        else _unfused_bytes(active_tokens, hidden)
     )
     per_iter_us = elapsed_ms * 1000.0 / actual_iters
     bw_TBps = min_bytes / (per_iter_us * 1.0e-6) / 1.0e12
@@ -447,8 +496,10 @@ def run_case(
     return CaseResult(
         variant=variant,
         tokens=tokens,
+        active_tokens=active_tokens,
         hidden=hidden,
         num_groups=num_groups,
+        empty_groups=empty_groups,
         swizzled_scales=swizzled_scales,
         loop=loop,
         iters=actual_iters,
@@ -460,8 +511,8 @@ def run_case(
 
 def _print_table(results: List[CaseResult]) -> None:
     header = (
-        f"{'T x F':>14s} {'experts':>7s} {'scales':>8s} {'loop':>5s} "
-        f"{'variant':16s} {'per_iter_us':>11s} {'min_GB/iter':>11s} "
+        f"{'N x H':>14s} {'active':>8s} {'experts':>7s} {'empty':>5s} {'scales':>8s} "
+        f"{'loop':>5s} {'variant':16s} {'per_iter_us':>11s} {'min_GB/iter':>11s} "
         f"{'BW_TB/s':>8s} {'vs fused':>9s}"
     )
     print()
@@ -470,24 +521,32 @@ def _print_table(results: List[CaseResult]) -> None:
     print("-" * len(header))
     for r in results:
         shape = f"{r.tokens}x{r.hidden}"
+        active = "full" if r.active_tokens == r.tokens else str(r.active_tokens)
         scales = "swizzled" if r.swizzled_scales else "compact"
         speedup = f"{r.speedup_vs_fused:.2f}x" if r.speedup_vs_fused is not None else "-"
         print(
-            f"{shape:>14s} {r.num_groups:7d} {scales:>8s} {r.loop:>5s} "
-            f"{r.variant:16s} {r.per_iter_us:11.2f} {r.min_bytes / 1e9:11.3f} "
+            f"{shape:>14s} {active:>8s} {r.num_groups:7d} {r.empty_groups:5d} {scales:>8s} "
+            f"{r.loop:>5s} {r.variant:16s} {r.per_iter_us:11.2f} {r.min_bytes / 1e9:11.3f} "
             f"{r.bw_TBps:8.2f} {speedup:>9s}"
         )
     print("-" * len(header))
+    if any(r.active_tokens != r.tokens for r in results):
+        print(
+            "active < N means the buffer is allocated for N rows but only that many carry"
+            " data, so 'empty' experts hold nothing. Traffic is charged on the active rows"
+            " only, which makes BW the fraction of peak the kernel still reaches while"
+            " scheduling over the whole allocation. The unfused baselines run their"
+            " activation over the full allocation, so ignore their speedup column here."
+        )
     print(
         "min_GB/iter = minimum DRAM traffic the path must move (reads + writes);"
         " BW = min_GB/iter / per_iter_us."
     )
     print(
-        "min_GB/iter assumes one activation kernel plus one quantize kernel, so the"
-        " variants that use more than that read below their real bandwidth:"
-        " unfused-eager launches one kernel per elementwise op, and unfused-te-op"
-        " applies the per-token scale in a separate kernel (one extra round trip of"
-        " the bf16 intermediate) on top of op-fuser overhead."
+        "min_GB/iter assumes one activation kernel plus one quantize kernel, so"
+        " unfused-eager reads below its real bandwidth: it launches one kernel per"
+        " elementwise op. unfused-te-op moves the same traffic as unfused-compiled,"
+        " so its gap is op-fuser and autograd overhead, not extra DRAM traffic."
     )
     print(
         "unfused-compiled is the tightest baseline; quote the speedup against it."
@@ -501,13 +560,13 @@ def main() -> None:
         "--tokens",
         type=int,
         default=98304,
-        help="Total tokens T summed over experts (multiple of 128). Default 98304.",
+        help="Total tokens N summed over experts (multiple of 128). Default 98304.",
     )
     parser.add_argument(
         "--hidden",
         type=int,
         default=2048,
-        help="MoE intermediate size F; the input is [T, 2F]. Default 2048.",
+        help="MoE intermediate size H; the input is [N, 2H]. Default 2048.",
     )
     parser.add_argument("--num-groups", type=int, nargs="+", default=[16, 64])
     parser.add_argument(
@@ -550,6 +609,18 @@ def main() -> None:
         default=(7.0, 1.702, 1.0),
         help="limit, alpha, glu_linear_offset for the fused-clamped variant.",
     )
+    parser.add_argument(
+        "--occupancy",
+        type=float,
+        nargs="+",
+        default=[1.0],
+        help=(
+            "Fraction of the allocated rows that carry data, one run per value."
+            " Below 1 the trailing experts get zero rows, which is what a capacity-"
+            " limited router produces and what exercises the scheduler's empty-job"
+            " path. Requires the VARYING_FIRST_DIM layout. Default 1.0."
+        ),
+    )
     parser.add_argument("--num-buffers", type=int, default=4)
     parser.add_argument("--warmup", type=int, default=20)
     parser.add_argument("--iters", type=int, default=200)
@@ -561,6 +632,14 @@ def main() -> None:
             raise SystemExit(f"unknown variant={variant}")
     if args.tokens % TOKEN_ALIGNMENT != 0:
         raise SystemExit(f"--tokens must be a multiple of {TOKEN_ALIGNMENT}, got {args.tokens}")
+    for occupancy in args.occupancy:
+        if not 0.0 < occupancy <= 1.0:
+            raise SystemExit(f"--occupancy must be in (0, 1], got {occupancy}")
+        if occupancy < 1.0 and args.same_shape:
+            raise SystemExit(
+                "--occupancy below 1 needs per-expert token counts, which SAME_BOTH_DIMS"
+                " does not carry; drop --same-shape."
+            )
 
     scale_layouts = {
         "compact": [False],
@@ -571,8 +650,8 @@ def main() -> None:
 
     print(f"GPU: {torch.cuda.get_device_name(0)}")
     print(
-        f"Config: T={args.tokens}, F={args.hidden}, experts={args.num_groups},"
-        f" imbalance={args.imbalance},"
+        f"Config: N={args.tokens}, H={args.hidden}, experts={args.num_groups},"
+        f" occupancy={args.occupancy}, imbalance={args.imbalance},"
         f" layout={'SAME_BOTH_DIMS' if args.same_shape else 'VARYING_FIRST_DIM'},"
         f" iters={args.iters}, warmup={args.warmup}"
     )
@@ -620,13 +699,50 @@ def main() -> None:
             label="clamped",
         )
 
+    # A kernel that skipped the live rows along with the dead ones would just look fast,
+    # so gate the sparse timings on correctness first.
+    if any(o < 1.0 for o in args.occupancy):
+        # Half the experts empty by construction: an occupancy taken from the command
+        # line could fill every expert and pass without touching the path being tested.
+        sparse_groups = min(8, max(args.num_groups))
+        check_blocks = check_tokens // TOKEN_ALIGNMENT
+        sparse_occupancy = (sparse_groups // 2) / check_blocks
+        sparse_dims = _make_first_dims(
+            check_tokens, sparse_groups, args.imbalance, sparse_occupancy
+        )
+        sparse_active = sum(sparse_dims)
+        if all(d > 0 for d in sparse_dims):
+            raise SystemExit(
+                f"sparse gate did not produce an empty expert (dims={sparse_dims}); it would"
+                " not be testing the empty-tensor path."
+            )
+        print(
+            f"  sparse gate: {sparse_active}/{check_tokens} rows over {sparse_groups} experts,"
+            f" {sum(1 for d in sparse_dims if d == 0)} empty"
+        )
+        sparse_first_dims = torch.tensor(sparse_dims, dtype=torch.int64, device="cuda")
+        _check_fused_matches_unfused(
+            check_quantizer,
+            check_x,
+            check_prob,
+            args.hidden,
+            num_groups=sparse_groups,
+            first_dims=sparse_first_dims,
+            fused_fn=lambda x, prob: tex.group_scaled_swiglu(
+                x, prob, check_quantizer, sparse_groups, sparse_first_dims
+            ),
+            activation=_scaled_swiglu_bf16,
+            label="plain/sparse",
+            compare_elems=sparse_active * args.hidden,
+        )
+
     results: List[CaseResult] = []
-    for num_groups in args.num_groups:
+    for num_groups, occupancy in ((g, o) for g in args.num_groups for o in args.occupancy):
         for swizzled_scales in scale_layouts:
-            if swizzled_scales and args.hidden % SWIZZLE_F_ALIGNMENT != 0:
+            if swizzled_scales and args.hidden % SWIZZLE_H_ALIGNMENT != 0:
                 print(
-                    f"  skipping swizzled scales: F={args.hidden} is not a multiple of"
-                    f" {SWIZZLE_F_ALIGNMENT}"
+                    f"  skipping swizzled scales: H={args.hidden} is not a multiple of"
+                    f" {SWIZZLE_H_ALIGNMENT}"
                 )
                 continue
             if swizzled_scales and args.same_shape and num_groups > 1:
@@ -664,6 +780,7 @@ def main() -> None:
                         compiled_clamped_activation=compiled_clamped_activation,
                         te_op_activation=te_op_activation,
                         clamp=tuple(args.clamp),
+                        occupancy=occupancy,
                     )
                     if result is None:
                         continue

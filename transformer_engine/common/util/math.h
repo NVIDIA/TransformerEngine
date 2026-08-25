@@ -83,6 +83,51 @@ __device__ inline OType clamped_silu(const IType val, const ClampedSwiGLUParam& 
   return qgelu_with_alpha<OType, float>(cval, p.alpha);
 }
 
+// clamp(val, -limit, limit). Requires limit > 0: the single-instruction form below
+// derives the lower bound from the upper one's sign.
+__device__ inline float clamp_symmetric(const float val, const float limit) {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 860)
+  float clamped;
+  asm("min.xorsign.abs.f32 %0, %1, %2;" : "=f"(clamped) : "f"(val), "f"(limit));
+  return clamped;
+#else
+  return min(max(-limit, val), limit);
+#endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 860)
+}
+
+// Twice the SiLU, from the identity 2 * silu(x) = x * (1 + tanh(x / 2)).
+//
+// Returning twice the value is what makes this cheaper than silu: a caller that already
+// scales the result by a per-row factor can fold the compensating 0.5 into that factor,
+// so the halving costs nothing per element. That leaves one transcendental per element
+// against the exponential and reciprocal the exact sigmoid needs. Approximate, so only
+// worth using where the output is quantized to few mantissa bits.
+template <typename OType, typename IType>
+__device__ inline OType silu_approx_x2(const IType val, const Empty&) {
+  const float cval = val;
+  float tanh_half;
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 750)
+  asm("tanh.approx.f32 %0, %1;" : "=f"(tanh_half) : "f"(0.5f * cval));
+#else
+  tanh_half = tanhf(0.5f * cval);
+#endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 750)
+  return fmaf(cval, tanh_half, cval);
+}
+
+// Twice the clamped SiLU; see silu_approx_x2 for why it returns twice the value.
+template <typename OType, typename IType>
+__device__ inline OType clamped_silu_approx_x2(const IType val, const ClampedSwiGLUParam& p) {
+  const float cval = min(p.limit, static_cast<float>(val));  // Clamping
+  const float half_alpha = 0.5f * p.alpha;
+  float tanh_half;
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 750)
+  asm("tanh.approx.f32 %0, %1;" : "=f"(tanh_half) : "f"(half_alpha * cval));
+#else
+  tanh_half = tanhf(half_alpha * cval);
+#endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 750)
+  return fmaf(cval, tanh_half, cval);
+}
+
 template <typename OType, typename IType>
 __device__ inline OType dsilu(const IType val, const Empty& e) {
   const float cval = val;

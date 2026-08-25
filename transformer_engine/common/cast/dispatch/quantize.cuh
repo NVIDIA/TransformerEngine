@@ -521,7 +521,7 @@ void group_quantize_fwd_helper(const NVTEGroupedTensor input, NVTEGroupedTensor 
   }
 }
 
-// Grouped scaled SwiGLU recompute: input [T, 2F] ([act|gate]) + prob [T]
+// Grouped scaled SwiGLU recompute: input [N, 2H] ([act|gate]) + prob [N]
 // -> columnwise MXFP8 of (silu(act) * gate) * prob.
 template <typename ParamOP, float (*OP)(float, const ParamOP &)>
 void group_scaled_swiglu_fwd_helper(const NVTEGroupedTensor input, const NVTETensor prob,

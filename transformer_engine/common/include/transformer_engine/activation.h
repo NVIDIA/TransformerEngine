@@ -87,20 +87,20 @@ void nvte_group_silu(const NVTEGroupedTensor input, NVTEGroupedTensor output, cu
 
 /*! \brief Grouped scaled SwiGLU "recompute" fused with MXFP8 columnwise quantization.
  *
- *  Computes, per token t and feature f:
- *      output[t, f] = ( silu(input[t, f]) * input[t, F + f] ) * prob[t]
- *  where the grouped input has logical shape [T, 2F] (last dim = [act | gate]) and
- *  the grouped output has logical shape [T, F]. Only the columnwise MXFP8 output is
+ *  Computes, per token n and feature h:
+ *      output[n, h] = ( silu(input[n, h]) * input[n, H + h] ) * prob[n]
+ *  where the grouped input has logical shape [N, 2H] (last dim = [act | gate]) and
+ *  the grouped output has logical shape [N, H]. Only the columnwise MXFP8 output is
  *  produced (it feeds the MoE FC2 weight-gradient GEMM). Restrictions:
- *  NVTE_MXFP8_1D_SCALING output, uniform F across experts (SAME_BOTH_DIMS /
+ *  NVTE_MXFP8_1D_SCALING output, uniform H across experts (SAME_BOTH_DIMS /
  *  VARYING_FIRST_DIM), per-expert token counts divisible by 128. Scales may be
  *  compact or in the cuBLAS GEMM-swizzled layout; the swizzled layout additionally
- *  requires F divisible by 128 and, for multiple experts, VARYING_FIRST_DIM.
+ *  requires H divisible by 128 and, for multiple experts, VARYING_FIRST_DIM.
  *
- *  \param[in]     input     Grouped input tensor [T, 2F] ([act|gate]).
- *  \param[in]     prob      Per-token weights, at least T elements, in the same
+ *  \param[in]     input     Grouped input tensor [N, 2H] ([act|gate]).
+ *  \param[in]     prob      Per-token weights, at least N elements, in the same
  *                           dtype as \p input.
- *  \param[in,out] output    Grouped output tensor [T, F] (columnwise MXFP8).
+ *  \param[in,out] output    Grouped output tensor [N, H] (columnwise MXFP8).
  *  \param[in]     stream    CUDA stream used for the operation.
  */
 void nvte_group_scaled_swiglu(const NVTEGroupedTensor input, const NVTETensor prob,
@@ -108,19 +108,19 @@ void nvte_group_scaled_swiglu(const NVTEGroupedTensor input, const NVTETensor pr
 
 /*! \brief Clamped variant of nvte_group_scaled_swiglu.
  *
- *  Computes, per token t and feature f, with x = input[t, f] and g = input[t, F + f]:
+ *  Computes, per token n and feature h, with x = input[n, h] and g = input[n, H + h]:
  *      a = min(x, limit)
- *      output[t, f] = ( a * sigmoid(alpha * a)
- *                       * (clamp(g, -limit, limit) + glu_linear_offset) ) * prob[t]
+ *      output[n, h] = ( a * sigmoid(alpha * a)
+ *                       * (clamp(g, -limit, limit) + glu_linear_offset) ) * prob[n]
  *  Note the asymmetry, which matches nvte_clamped_swiglu and the forward path of the
  *  gated MXFP8 kernels: the activation half is clamped from above only, the gate half
  *  on both sides and then offset. Same shape, layout and scaling-mode restrictions as
  *  nvte_group_scaled_swiglu.
  *
- *  \param[in]     input              Grouped input tensor [T, 2F] ([act|gate]).
- *  \param[in]     prob               Per-token weights, at least T elements, in the
+ *  \param[in]     input              Grouped input tensor [N, 2H] ([act|gate]).
+ *  \param[in]     prob               Per-token weights, at least N elements, in the
  *                                    same dtype as \p input.
- *  \param[in,out] output             Grouped output tensor [T, F] (columnwise MXFP8).
+ *  \param[in,out] output             Grouped output tensor [N, H] (columnwise MXFP8).
  *  \param[in]     limit              Clamp threshold, must be positive.
  *  \param[in]     alpha              Sigmoid gain of the activation half.
  *  \param[in]     glu_linear_offset  Offset added to the gate half after clamping.

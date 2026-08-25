@@ -9,13 +9,13 @@
  *
  *  MoE backward recompute of the FC2 input, without re-running the FC1 GEMM:
  *
- *      input  : FC1 output, grouped, logical shape [T, 2F] (last dim = [act|gate]).
- *      prob   : per-token router weight, [T], in the input dtype.
- *      output : columnwise-MXFP8 of  (silu(act) * gate) * prob, grouped [T, F].
+ *      input  : FC1 output, grouped, logical shape [N, 2H] (last dim = [act|gate]).
+ *      prob   : per-token router weight, [N], in the input dtype.
+ *      output : columnwise-MXFP8 of  (silu(act) * gate) * prob, grouped [N, H].
  *
  *  "SwiGLU" is TE's gated convention (same as gated_mxfp8.cuh): the first half of
  *  the last dim is the activation input, the second half is the gate, i.e.
- *  swiglu(x) = silu(x[:, :F]) * x[:, F:]. "scaled" is the per-token prob factor,
+ *  swiglu(x) = silu(x[:, :H]) * x[:, H:]. "scaled" is the per-token prob factor,
  *  applied after the activation.
  *
  *  Instantiating with ParamOP = ClampedSwiGLUParam and OP = clamped_silu gives the
@@ -86,31 +86,12 @@ static_assert(CHUNK_DIM_Y % BUFF_DIM_Y == 0);
 static_assert(CHUNK_DIM_Y % SCALE_DIM_Y == 0);
 static_assert(CHUNK_DIM_X % SCALE_DIM_X == 0);
 
-// Return twice the activation; the compensating 0.5 is folded into the staged prob.
-// 2 * silu(x) = x * (1 + tanh(x/2)). Deliberately approximate: one MUFU per element.
-__device__ __forceinline__ float silu_approx_x2(const float x) {
-  float tanh_h;
-  asm("tanh.approx.f32 %0, %1;" : "=f"(tanh_h) : "f"(0.5f * x));
-  return fmaf(x, tanh_h, x);
-}
-
-// 2 * clamped_silu(x) = x * (1 + tanh(alpha * x / 2)).
-__device__ __forceinline__ float clamped_silu_approx_x2(const float x, const float half_alpha) {
-  float tanh_ah;
-  asm("tanh.approx.f32 %0, %1;" : "=f"(tanh_ah) : "f"(half_alpha * x));
-  return fmaf(x, tanh_ah, x);
-}
-
-// clamp(g, -limit, limit) for limit > 0, which the binding enforces.
-__device__ __forceinline__ float clamp_symmetric(const float g, const float limit) {
-  float clamped;
-  asm("min.xorsign.abs.f32 %0, %1, %2;" : "=f"(clamped) : "f"(g), "f"(limit));
-  return clamped;
-}
-
 // Columnwise scaled SwiGLU + MXFP8 quantization of one 32-row buffer slice.
 // Each thread owns one column j and reduces amax over the BUFF_DIM_Y rows, then
 // writes the e8m0 block scale and the scaled FP8 column.
+//
+// OP must return twice the activation, to pair with the halved prob staged by the
+// caller; see silu_approx_x2 in util/math.h.
 template <typename ParamOP, float (*OP)(float, const ParamOP &), typename IType, typename OType,
           bool WITH_GEMM_SWIZZLED_SCALES>
 __device__ __forceinline__ void process_colwise_gated_stage(
@@ -150,11 +131,6 @@ __device__ __forceinline__ void process_colwise_gated_stage(
 
   const size_t j = tid_X_colwise;
 
-  float half_alpha = 0.0f;
-  if constexpr (std::is_same_v<ParamOP, ClampedSwiGLUParam>) {
-    half_alpha = 0.5f * p.alpha;
-  }
-
   float rInCompute[BUFF_DIM_Y];
   float thread_amax = 0.0f;
 #pragma unroll
@@ -167,31 +143,13 @@ __device__ __forceinline__ void process_colwise_gated_stage(
     const float half_prob = sProb[stage * BUFF_DIM_Y + i];
 
     // Gate clamped on both sides then offset, activation clamped from above only --
-    // the asymmetry is gated_mxfp8.cuh's forward path.
-    //
-    // The OP comparison must nest inside the ParamOP branch: OP's type carries ParamOP,
-    // so `OP == &silu<fp32, fp32>` compares unrelated function pointer types once
-    // ParamOP is ClampedSwiGLUParam, and an if-constexpr condition must be well formed
-    // even where its branch is discarded.
-    //
-    // Every branch produces twice the activation, to pair with the halved prob.
-    float act_x2;
+    // the asymmetry is gated_mxfp8.cuh's forward path. The activation-side clamp
+    // lives inside OP.
     if constexpr (std::is_same_v<ParamOP, ClampedSwiGLUParam>) {
       gate_elt = clamp_symmetric(gate_elt, p.limit) + p.glu_linear_offset;
-      if constexpr (OP == &clamped_silu<fp32, fp32>) {
-        act_x2 = clamped_silu_approx_x2(fminf(act_elt, p.limit), half_alpha);
-      } else {
-        act_x2 = 2.0f * OP(act_elt, p);
-      }
-    } else {
-      if constexpr (OP == &silu<fp32, fp32>) {
-        act_x2 = silu_approx_x2(act_elt);
-      } else {
-        act_x2 = 2.0f * OP(act_elt, p);
-      }
     }
 
-    float elt = act_x2 * gate_elt * half_prob;
+    float elt = OP(act_elt, p) * gate_elt * half_prob;
 
     // Match round-trip precision of the plain quantize path (cast through IType).
     if constexpr (!std::is_same_v<IType, float>) {
@@ -326,7 +284,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_scaled_swiglu_mxfp8_k
 
       // Stage this chunk's per-token prob once. is_job_valid guarantees every row of a
       // valid 128-aligned block is a real token of this expert, so the absolute token
-      // index is always in [0, T). prob rides along in the input (model) dtype,
+      // index is always in [0, N). prob rides along in the input (model) dtype,
       // matching cuDNN fc1_prob_tensor. Stored pre-halved to pair with the doubled
       // activations; exact, because 0.5 is a power of two.
       for (size_t row = threadIdx.x; row < CHUNK_DIM_Y; row += THREADS_PER_CHUNK) {
@@ -429,9 +387,9 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_scaled_swiglu_mxfp8_k
 }  // namespace group_scaled_swiglu_kernel
 
 // Host launcher: grouped scaled SwiGLU -> columnwise MXFP8.
-//   input  : GroupedTensor [T, 2F] ([act|gate]) in a floating input dtype.
-//   prob   : Tensor [T] per-token weights, in the input (model) dtype.
-//   output : GroupedTensor with columnwise_data / columnwise_scale_inv for [T, F].
+//   input  : GroupedTensor [N, 2H] ([act|gate]) in a floating input dtype.
+//   prob   : Tensor [N] per-token weights, in the input (model) dtype.
+//   output : GroupedTensor with columnwise_data / columnwise_scale_inv for [N, H].
 //   p      : Empty for plain SwiGLU, ClampedSwiGLUParam for the clamped variant.
 template <typename ParamOP, float (*OP)(float, const ParamOP &)>
 void group_scaled_swiglu(const GroupedTensor *input, const Tensor *prob, const Tensor *noop,
@@ -460,37 +418,37 @@ void group_scaled_swiglu(const GroupedTensor *input, const Tensor *prob, const T
     shape_rep = ShapeRepresentation::VARYING_FIRST_DIM;
   } else {
     NVTE_CHECK(false,
-               "group_scaled_swiglu requires all experts to share the same last dim F "
+               "group_scaled_swiglu requires all experts to share the same last dim H "
                "(grouped layout SAME_BOTH_DIMS or VARYING_FIRST_DIM).");
   }
 
   const bool with_gemm_swizzled_scales = output->with_gemm_swizzled_scales;
 
-  // Output logical shape drives the schedule ([T, F]); input is [T, 2F].
-  const size_t first_logical_dim = output->logical_shape.data[0];     // T
-  const size_t out_last_logical_dim = output->logical_shape.data[1];  // F
-  const size_t in_last_logical_dim = input->logical_shape.data[1];    // 2F
+  // Output logical shape drives the schedule ([N, H]); input is [N, 2H].
+  const size_t first_logical_dim = output->logical_shape.data[0];     // N
+  const size_t out_last_logical_dim = output->logical_shape.data[1];  // H
+  const size_t in_last_logical_dim = input->logical_shape.data[1];    // 2H
 
   NVTE_CHECK(in_last_logical_dim == 2 * out_last_logical_dim,
              "group_scaled_swiglu input last dim must be 2x the output last dim ([act|gate]).");
   NVTE_CHECK(input->logical_shape.data[0] == first_logical_dim,
-             "group_scaled_swiglu input/output must share the token dimension T.");
+             "group_scaled_swiglu input/output must share the token dimension N.");
 
-  const size_t T = first_logical_dim;
-  const size_t F = out_last_logical_dim;
+  const size_t N = first_logical_dim;
+  const size_t H = out_last_logical_dim;
   const size_t num_tensors = input->num_tensors;
 
   NVTE_CHECK(prob != nullptr && prob->data.dptr != nullptr, "prob tensor must be allocated.");
   // prob follows TE's cuDNN fc1_prob_tensor convention: model (input) dtype.
   NVTE_CHECK(prob->data.dtype == input->dtype(),
              "prob tensor must have the same dtype as the input (model dtype).");
-  NVTE_CHECK(prob->data.numel() >= T, "prob tensor must have at least T elements.");
+  NVTE_CHECK(prob->data.numel() >= N, "prob tensor must have at least N elements.");
 
-  // Single-tensor schedule: one virtual work grid over [T, F].
-  const size_t work_blocks_Y = DIVUP(T, static_cast<size_t>(CHUNK_DIM_Y));
-  const size_t work_blocks_X = DIVUP(F, static_cast<size_t>(CHUNK_DIM_X));
+  // Single-tensor schedule: one virtual work grid over [N, H].
+  const size_t work_blocks_Y = DIVUP(N, static_cast<size_t>(CHUNK_DIM_Y));
+  const size_t work_blocks_X = DIVUP(H, static_cast<size_t>(CHUNK_DIM_X));
 
-  NVTE_CHECK(T % 128 == 0, "group_scaled_swiglu requires T divisible by 128.");
+  NVTE_CHECK(N % 128 == 0, "group_scaled_swiglu requires N divisible by 128.");
 
   const size_t sm_num = static_cast<size_t>(transformer_engine::cuda::sm_count());
   const size_t static_grid_size = sm_num * TunableConfig::STATIC_PERSISTENT_BLOCKS_PER_SM;
@@ -503,12 +461,12 @@ void group_scaled_swiglu(const GroupedTensor *input, const Tensor *prob, const T
   const int64_t *const last_dims_ptr = reinterpret_cast<const int64_t *>(output->last_dims.dptr);
 
   if (with_gemm_swizzled_scales) {
-    // The swizzled block is tiled 128x4 over the transposed [F, rows/32] scale
-    // matrix, so a partial F tile would not map onto a whole number of tiles.
-    NVTE_CHECK(F % 128 == 0,
+    // The swizzled block is tiled 128x4 over the transposed [H, rows/32] scale
+    // matrix, so a partial H tile would not map onto a whole number of tiles.
+    NVTE_CHECK(H % 128 == 0,
                "group_scaled_swiglu with GEMM-swizzled scales requires the output "
-               "last dim (F) to be divisible by 128, got ",
-               F, ".");
+               "last dim (H) to be divisible by 128, got ",
+               H, ".");
     if (num_tensors > 1) {
       // Each expert owns a separate swizzled block whose extent depends on its
       // own token count, so per-expert first dims and offsets are mandatory.
@@ -543,15 +501,15 @@ void group_scaled_swiglu(const GroupedTensor *input, const Tensor *prob, const T
 
                     const IType *const prob_dptr = reinterpret_cast<const IType *>(prob->data.dptr);
 
-                    // act half: [T, F] view of the [T, 2F] buffer, stride 2F, offset 0.
-                    create_2D_tensor_map(tensor_map_input_act, input->data, T, F, BUFF_DIM_Y,
-                                         BUFF_DIM_X, 2 * F, 0, input_type_bit_size);
-                    // gate half: same view, offset F.
-                    create_2D_tensor_map(tensor_map_input_gate, input->data, T, F, BUFF_DIM_Y,
-                                         BUFF_DIM_X, 2 * F, F, input_type_bit_size);
-                    // colwise output: [T, F] contiguous, stride F.
-                    create_2D_tensor_map(tensor_map_output_colwise, output->columnwise_data, T, F,
-                                         BUFF_DIM_Y, BUFF_DIM_X, F, 0, output_type_bit_size);
+                    // act half: [N, H] view of the [N, 2H] buffer, stride 2H, offset 0.
+                    create_2D_tensor_map(tensor_map_input_act, input->data, N, H, BUFF_DIM_Y,
+                                         BUFF_DIM_X, 2 * H, 0, input_type_bit_size);
+                    // gate half: same view, offset H.
+                    create_2D_tensor_map(tensor_map_input_gate, input->data, N, H, BUFF_DIM_Y,
+                                         BUFF_DIM_X, 2 * H, H, input_type_bit_size);
+                    // colwise output: [N, H] contiguous, stride H.
+                    create_2D_tensor_map(tensor_map_output_colwise, output->columnwise_data, N, H,
+                                         BUFF_DIM_Y, BUFF_DIM_X, H, 0, output_type_bit_size);
 
                     constexpr size_t buff_elems = BUFF_DIM_Y * BUFF_DIM_X;
                     constexpr size_t buff_elems_total = BUFFS_NUM * buff_elems;
@@ -580,7 +538,7 @@ void group_scaled_swiglu(const GroupedTensor *input, const Tensor *prob, const T
 
                     kernel<<<grid, block_size, dshmem_size, stream>>>(
                         tensor_map_input_act, tensor_map_input_gate, tensor_map_output_colwise,
-                        num_tensors, T, F, offsets_ptr, first_dims_ptr, last_dims_ptr, prob_dptr,
+                        num_tensors, N, H, offsets_ptr, first_dims_ptr, last_dims_ptr, prob_dptr,
                         scales_colwise_ptr, noop_ptr, work_blocks_X, work_blocks_Y, p);
 
                     NVTE_CHECK_CUDA(cudaGetLastError());

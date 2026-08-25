@@ -220,12 +220,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("noop_flag") = py::none(), py::arg("output") = py::none());
   m.def("group_scaled_swiglu", transformer_engine::pytorch::group_scaled_swiglu,
         "Grouped scaled SwiGLU recompute fused with columnwise MXFP8 quantization",
-        py::arg("input_2f"), py::arg("prob"), py::arg("quantizer"), py::arg("num_tensors"),
+        py::arg("input_2h"), py::arg("prob"), py::arg("quantizer"), py::arg("num_tensors"),
         py::arg("first_dims") = py::none(), py::arg("last_dims") = py::none(),
         py::arg("tensor_offsets") = py::none());
   m.def("group_scaled_clamped_swiglu", transformer_engine::pytorch::group_scaled_clamped_swiglu,
         "Grouped scaled clamped-SwiGLU recompute fused with columnwise MXFP8 quantization",
-        py::arg("input_2f"), py::arg("prob"), py::arg("quantizer"), py::arg("num_tensors"),
+        py::arg("input_2h"), py::arg("prob"), py::arg("quantizer"), py::arg("num_tensors"),
         py::arg("limit"), py::arg("alpha") = 1.702f, py::arg("glu_linear_offset") = 1.0f,
         py::arg("first_dims") = py::none(), py::arg("last_dims") = py::none(),
         py::arg("tensor_offsets") = py::none());
