@@ -123,7 +123,9 @@ class BlockScaledTensor:
             expected_scale_dtype = _require_torch_dtype("float8_e8m0fnu")
             data_shape = self.logical_shape
             if self.data.dtype != expected_dtype:
-                raise TypeError(f"mxfp8 data must have dtype {expected_dtype}, got {self.data.dtype}")
+                raise TypeError(
+                    f"mxfp8 data must have dtype {expected_dtype}, got {self.data.dtype}"
+                )
         else:
             expected_scale_dtype = _require_torch_dtype("float8_e4m3fn")
             fp4_dtype = getattr(torch, "float4_e2m1fn_x2", None)
@@ -613,7 +615,9 @@ class MoeEpReference:
         destination = torch.div(expert, self.experts_per_rank, rounding_mode="floor")
         order = torch.argsort(destination, stable=True)
 
-        send_counts_tensor = torch.bincount(destination.index_select(0, order), minlength=self.ep_size).to(torch.int64)
+        send_counts_tensor = torch.bincount(
+            destination.index_select(0, order), minlength=self.ep_size
+        ).to(torch.int64)
         recv_counts_tensor = self._exchange_counts(send_counts_tensor)
         return _DispatchPlan(
             send_expert=expert.index_select(0, order).remainder(self.experts_per_rank),
@@ -728,13 +732,17 @@ class MoeEpReference:
         if tuple(topk_idx.shape) != route_shape:
             raise ValueError(f"topk_idx shape must be {route_shape}, got {tuple(topk_idx.shape)}")
         if tuple(topk_weights.shape) != route_shape:
-            raise ValueError(f"topk_weights shape must be {route_shape}, got {tuple(topk_weights.shape)}")
+            raise ValueError(
+                f"topk_weights shape must be {route_shape}, got {tuple(topk_weights.shape)}"
+            )
         if topk_idx.dtype not in (torch.int32, torch.int64):
             raise TypeError(f"topk_idx must be int32 or int64, got {topk_idx.dtype}")
         if not topk_weights.is_floating_point():
             raise TypeError(f"topk_weights must be floating point, got {topk_weights.dtype}")
         if self.max_tokens_per_rank is not None and token_count > self.max_tokens_per_rank:
-            raise ValueError(f"token count {token_count} exceeds max_tokens_per_rank={self.max_tokens_per_rank}")
+            raise ValueError(
+                f"token count {token_count} exceeds max_tokens_per_rank={self.max_tokens_per_rank}"
+            )
 
         device = _tensor_device(activation)
         inputs = {
@@ -822,7 +830,11 @@ class MoeEpReference:
             # Stable sort by local expert reproduces the fc1_c row order
             # (grouped by expert; source order preserved within each group).
             fc1_c_order = torch.argsort(recv_expert, stable=True)
-            route_metadata = torch.stack((recv_expert, recv_src_rank, recv_token, recv_slot), dim=1).index_select(0, fc1_c_order).to(torch.int32)
+            route_metadata = (
+                torch.stack((recv_expert, recv_src_rank, recv_token, recv_slot), dim=1)
+                .index_select(0, fc1_c_order)
+                .to(torch.int32)
+            )
         # recv rows are ordered by source rank, then that source's token-major
         # route order, so the per-expert position grouping below realizes the
         # documented fc1_c ordering.
