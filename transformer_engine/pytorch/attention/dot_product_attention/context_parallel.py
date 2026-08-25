@@ -614,8 +614,28 @@ def get_fa_args(
     dv=None,
     seqused_q=None,
     seqused_k=None,
+    use_flash_attn_4: bool = False,
 ):
-    """Get forward/backward arguments for flash-attn v2 and v3."""
+    """Get positional FA2/FA3 arguments or FA4 keyword arguments.
+
+    FA2/FA3 use version-specific positional layouts, while FA4's raw backward
+    API orders its optional metadata differently and returns the gradients.
+    """
+    if use_flash_attn_4:
+        fa_kwargs = {}
+        if qkv_format == "thd":
+            fa_kwargs.update(
+                cu_seqlens_q=cu_seqlens_q,
+                cu_seqlens_k=cu_seqlens_kv,
+                seqused_q=seqused_q,
+                seqused_k=seqused_k,
+                max_seqlen_q=max_seqlen_q,
+                max_seqlen_k=max_seqlen_kv,
+            )
+        if not forward:
+            fa_kwargs.update(dq=dq, dk=dk, dv=dv)
+        return fa_kwargs
+
     if use_flash_attn_3:
         if forward:
             if qkv_format == "thd":
@@ -686,28 +706,6 @@ def get_fa_args(
         dk,
         dv,
     ]
-
-
-def get_fa4_thd_kwargs(
-    qkv_format,
-    cu_seqlens_q,
-    cu_seqlens_kv,
-    max_seqlen_q,
-    max_seqlen_kv,
-    seqused_q=None,
-    seqused_k=None,
-):
-    """Get FA4 varlen kwargs for THD inputs."""
-    if qkv_format != "thd":
-        return {}
-    return {
-        "cu_seqlens_q": cu_seqlens_q,
-        "cu_seqlens_k": cu_seqlens_kv,
-        "seqused_q": seqused_q,
-        "seqused_k": seqused_k,
-        "max_seqlen_q": max_seqlen_q,
-        "max_seqlen_k": max_seqlen_kv,
-    }
 
 
 def cp_p2p_fwd_prepare_qkv(
@@ -1049,14 +1047,17 @@ def cp_p2p_fwd_flash_attn(
             q_part,
             k_part,
             v_part,
-            **get_fa4_thd_kwargs(
+            **get_fa_args(
+                True,
+                False,
                 qkv_format,
-                cu_seqlens_q_,
-                cu_seqlens_kv_,
-                max_seqlen_q_,
-                max_seqlen_kv_,
+                cu_seqlens_q=cu_seqlens_q_,
+                cu_seqlens_kv=cu_seqlens_kv_,
+                max_seqlen_q=max_seqlen_q_,
+                max_seqlen_kv=max_seqlen_kv_,
                 seqused_q=seqused_q,
                 seqused_k=seqused_k,
+                use_flash_attn_4=True,
             ),
             causal=causal_,
             **fa_forward_kwargs,
@@ -1383,19 +1384,22 @@ def cp_p2p_bwd_flash_attn(
 
     if use_flash_attn_4:
         fa_backward_kwargs.update(
-            get_fa4_thd_kwargs(
+            get_fa_args(
+                False,
+                False,
                 qkv_format,
-                cu_seqlens_q_bwd,
-                cu_seqlens_kv_bwd,
-                max_seqlen_q_,
-                max_seqlen_kv_,
+                cu_seqlens_q=cu_seqlens_q_bwd,
+                cu_seqlens_kv=cu_seqlens_kv_bwd,
+                max_seqlen_q=max_seqlen_q_,
+                max_seqlen_kv=max_seqlen_kv_,
+                dq=dq,
+                dk=dk,
+                dv=dv,
                 seqused_q=seqused_q,
                 seqused_k=seqused_k,
+                use_flash_attn_4=True,
             )
         )
-        fa_backward_kwargs["dq"] = dq
-        fa_backward_kwargs["dk"] = dk
-        fa_backward_kwargs["dv"] = dv
     else:
         fa_backward_args_thd = get_fa_args(
             False,
@@ -3604,14 +3608,17 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                                 q_part,
                                 k_part,
                                 v_part,
-                                **get_fa4_thd_kwargs(
+                                **get_fa_args(
+                                    True,
+                                    False,
                                     qkv_format,
-                                    fa_cu_seqlens_q,
-                                    fa_cu_seqlens_kv,
-                                    max_seqlen_q,
-                                    max_seqlen_kv_,
+                                    cu_seqlens_q=fa_cu_seqlens_q,
+                                    cu_seqlens_kv=fa_cu_seqlens_kv,
+                                    max_seqlen_q=max_seqlen_q,
+                                    max_seqlen_kv=max_seqlen_kv_,
                                     seqused_q=seqused_q,
                                     seqused_k=seqused_k,
+                                    use_flash_attn_4=True,
                                 ),
                                 causal=causal,
                                 **fa_forward_kwargs,
@@ -4173,19 +4180,22 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                             fa_cu_seqlens_kv = cu_seqlens_kv_padded
                         if ctx.use_flash_attn_4:
                             fa_backward_kwargs.update(
-                                get_fa4_thd_kwargs(
+                                get_fa_args(
+                                    False,
+                                    False,
                                     ctx.qkv_format,
-                                    fa_cu_seqlens_q,
-                                    fa_cu_seqlens_kv,
-                                    ctx.max_seqlen_q,
-                                    max_seqlen_kv,
+                                    cu_seqlens_q=fa_cu_seqlens_q,
+                                    cu_seqlens_kv=fa_cu_seqlens_kv,
+                                    max_seqlen_q=ctx.max_seqlen_q,
+                                    max_seqlen_kv=max_seqlen_kv,
+                                    dq=dq_per_step[i],
+                                    dk=dk_per_step[i],
+                                    dv=dv_per_step[i],
                                     seqused_q=seqused_q,
                                     seqused_k=seqused_k,
+                                    use_flash_attn_4=True,
                                 )
                             )
-                            fa_backward_kwargs["dq"] = dq_per_step[i]
-                            fa_backward_kwargs["dk"] = dk_per_step[i]
-                            fa_backward_kwargs["dv"] = dv_per_step[i]
                         else:
                             fa_backward_args_thd = get_fa_args(
                                 False,
@@ -4661,14 +4671,17 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                     q_part,
                     k_part,
                     v_part,
-                    **get_fa4_thd_kwargs(
+                    **get_fa_args(
+                        True,
+                        False,
                         qkv_format,
-                        fa_cu_seqlens_q,
-                        fa_cu_seqlens_kv,
-                        max_seqlen_q,
-                        max_seqlen_kv,
+                        cu_seqlens_q=fa_cu_seqlens_q,
+                        cu_seqlens_kv=fa_cu_seqlens_kv,
+                        max_seqlen_q=max_seqlen_q,
+                        max_seqlen_kv=max_seqlen_kv,
                         seqused_q=seqused_q,
                         seqused_k=seqused_k,
+                        use_flash_attn_4=True,
                     ),
                     causal=causal,
                     **fa_forward_kwargs,
@@ -5041,19 +5054,22 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                 fa_cu_seqlens_kv = cu_seqlens_kv_padded
             if ctx.use_flash_attn_4:
                 fa_backward_kwargs.update(
-                    get_fa4_thd_kwargs(
+                    get_fa_args(
+                        False,
+                        False,
                         ctx.dqkv_format,
-                        fa_cu_seqlens_q,
-                        fa_cu_seqlens_kv,
-                        ctx.max_seqlen_q,
-                        ctx.max_seqlen_kv,
+                        cu_seqlens_q=fa_cu_seqlens_q,
+                        cu_seqlens_kv=fa_cu_seqlens_kv,
+                        max_seqlen_q=ctx.max_seqlen_q,
+                        max_seqlen_kv=ctx.max_seqlen_kv,
+                        dq=dq,
+                        dk=dk,
+                        dv=dv,
                         seqused_q=seqused_q,
                         seqused_k=seqused_k,
+                        use_flash_attn_4=True,
                     )
                 )
-                fa_backward_kwargs["dq"] = dq
-                fa_backward_kwargs["dk"] = dk
-                fa_backward_kwargs["dv"] = dv
             else:
                 fa_backward_args_thd = get_fa_args(
                     False,
