@@ -83,7 +83,7 @@ html_theme = "nvidia_sphinx_theme"
 html_theme_options = {
     "public_docs_features": True,
     "switcher": {
-        "json_url": "../versions1.json",
+        "json_url": "./versions1.json",
         "version_match": release,
     },
     "icon_links": [
@@ -94,7 +94,7 @@ html_theme_options = {
         }
     ],
 }
-html_extra_path = ["project.json", "versions1.json"]
+html_extra_path = ["versions1.json"]
 
 napoleon_custom_sections = [
     ("Parallelism parameters", "params_style"),
