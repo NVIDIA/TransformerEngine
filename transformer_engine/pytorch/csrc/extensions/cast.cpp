@@ -698,11 +698,15 @@ py::object group_requantize_inplace(py::handle grouped_x, py::handle quantizer,
                                     bool return_dequantized) {
   init_extension();
 
-  const bool has_rowwise =
-      !grouped_x.attr("rowwise_data").is_none() && !grouped_x.attr("scale_inv").is_none();
+  // Python attribute access is CPU-heavy; read each attribute once and reuse across
+  // both the fused and unfused paths.
+  const py::object rowwise_data_py = grouped_x.attr("rowwise_data");
+  const py::object rowwise_scale_inv_py = grouped_x.attr("scale_inv");
+  const bool has_rowwise = !rowwise_data_py.is_none() && !rowwise_scale_inv_py.is_none();
   const bool has_columnwise = !grouped_x.attr("columnwise_data").is_none() &&
                               !grouped_x.attr("columnwise_scale_inv").is_none();
   const bool swizzled = grouped_x.attr("_with_gemm_swizzled_scales").cast<bool>();
+  const DType op_dtype = quantizer.attr("dtype").cast<DType>();
 
   NVTE_CHECK(has_rowwise, "Grouped input has no rowwise data and scales for the GEMM to consume.");
 
@@ -713,7 +717,7 @@ py::object group_requantize_inplace(py::handle grouped_x, py::handle quantizer,
   NVTE_CHECK(!input_quantizer.is_none(), "Grouped input has no quantizer.");
   NVTE_CHECK(Py_TYPE(input_quantizer.ptr()) == Py_TYPE(quantizer.ptr()),
              "Grouped input and the op disagree on quantization format.");
-  NVTE_CHECK(input_quantizer.attr("dtype").cast<DType>() == quantizer.attr("dtype").cast<DType>(),
+  NVTE_CHECK(input_quantizer.attr("dtype").cast<DType>() == op_dtype,
              "Grouped input and the quantizer disagree on the FP8 dtype.");
 
   // The columnwise copy is only worth building when a wgrad GEMM will consume it. Read this
@@ -750,6 +754,103 @@ py::object group_requantize_inplace(py::handle grouped_x, py::handle quantizer,
   NVTE_CHECK(total_tokens % 128 == 0 && hidden_dim % 128 == 0,
              "Requantizing a grouped input requires dims that are multiples of 128, but got (",
              total_tokens, ", ", hidden_dim, ").");
+
+  // Fused path (default; NVTE_FUSED_GROUP_REQUANTIZE=0 recovers the unfused chain): one
+  // kernel replaces the group_dequantize -> group_quantize(columnwise) ->
+  // grouped_swizzle(rowwise scales) chain below, with the dequantized values living only in
+  // shared memory unless requested. The BF16-intermediate kernel variant reproduces the
+  // unfused chain's numerics, hence the otype gate; anything the kernel does not cover
+  // falls through to the unfused chain.
+  // The kernel takes the grouped tensor's cached element-based tensor_offsets;
+  // a prefix-sum over first_dims is only the fallback when they are absent.
+  const bool tensor_offsets_usable =
+      tensor_offsets.has_value() && tensor_offsets->scalar_type() == at::kLong &&
+      tensor_offsets->numel() == static_cast<int64_t>(num_tensors) + 1;
+  const bool has_usable_offsets = tensor_offsets_usable || first_dims.has_value();
+  // total_tokens > 0: an empty grouped tensor carries null data pointers, which the
+  // unfused chain's dedicated empty-input handling accepts and the kernel's pointer
+  // validation (correctly) rejects.
+  const bool use_fused_kernel =
+      transformer_engine::getenv<bool>("NVTE_FUSED_GROUP_REQUANTIZE", true) && need_columnwise &&
+      has_usable_offsets && total_tokens > 0 && otype == DType::kBFloat16 &&
+      op_dtype == DType::kFloat8E4M3 && transformer_engine::cuda::sm_arch() >= 100;
+  if (use_fused_kernel) {
+    const auto rowwise_data = rowwise_data_py.cast<at::Tensor>();
+    const auto rowwise_scale_inv = rowwise_scale_inv_py.cast<at::Tensor>();
+    const auto options = rowwise_data.options().dtype(at::kByte);
+    const auto tokens_i64 = static_cast<int64_t>(total_tokens);
+    const auto hidden_i64 = static_cast<int64_t>(hidden_dim);
+    const size_t num_scales = total_tokens * hidden_dim / 32;
+
+    // Element-based exclusive-cumsum offsets ([num_tensors + 1], device) for the
+    // per-group columnwise scale bases and the live-row bound.
+    at::Tensor element_offsets;
+    if (tensor_offsets_usable) {
+      element_offsets = *tensor_offsets;
+    } else {
+      const at::Tensor first_dims_i64 =
+          first_dims->scalar_type() == at::kLong ? *first_dims : first_dims->to(at::kLong);
+      element_offsets = splits_to_offsets(first_dims_i64, static_cast<int64_t>(hidden_dim));
+    }
+
+    // Grouped tensors carry data and scales as flat 1D buffers.
+    at::Tensor columnwise_data = at::empty({tokens_i64 * hidden_i64}, options);
+    at::Tensor columnwise_scale_inv = at::empty({tokens_i64 / 32 * hidden_i64}, options);
+    at::Tensor swizzled_rowwise_scale_inv = at::empty({static_cast<int64_t>(num_scales)}, options);
+    at::Tensor dequantized;
+    if (return_dequantized) {
+      dequantized =
+          at::empty({tokens_i64, hidden_i64}, rowwise_data.options().dtype(at::kBFloat16));
+    }
+
+    TensorWrapper input_nvte(NVTE_MXFP8_1D_SCALING);
+    input_nvte.set_rowwise_data(rowwise_data.data_ptr(), op_dtype,
+                                std::vector<size_t>{total_tokens, hidden_dim});
+    input_nvte.set_rowwise_scale_inv(rowwise_scale_inv.data_ptr(), DType::kFloat8E8M0,
+                                     std::vector<size_t>{total_tokens, hidden_dim / 32});
+
+    // After the kernel the output is GEMM-ready: it keeps consuming the input's rowwise
+    // data, so that slot aliases the input.
+    TensorWrapper output_nvte(NVTE_MXFP8_1D_SCALING);
+    output_nvte.set_rowwise_data(rowwise_data.data_ptr(), op_dtype,
+                                 std::vector<size_t>{total_tokens, hidden_dim});
+    output_nvte.set_rowwise_scale_inv(swizzled_rowwise_scale_inv.data_ptr(), DType::kFloat8E8M0,
+                                      std::vector<size_t>{num_scales});
+    output_nvte.set_columnwise_data(columnwise_data.data_ptr(), DType::kFloat8E4M3,
+                                    std::vector<size_t>{total_tokens, hidden_dim});
+    output_nvte.set_columnwise_scale_inv(columnwise_scale_inv.data_ptr(), DType::kFloat8E8M0,
+                                         std::vector<size_t>{total_tokens / 32 * hidden_dim});
+
+    TensorWrapper element_offsets_nvte;
+    element_offsets_nvte.set_rowwise_data(element_offsets.data_ptr(), DType::kInt64,
+                                          std::vector<size_t>{num_tensors + 1});
+    TensorWrapper dequantized_nvte;
+    if (return_dequantized) {
+      dequantized_nvte.set_rowwise_data(dequantized.data_ptr(), DType::kBFloat16,
+                                        std::vector<size_t>{total_tokens, hidden_dim});
+    }
+
+    // BF16 intermediate: matches the unfused chain, which materializes the dequantized
+    // tensor in otype (gated to BF16 above) before requantizing.
+    QuantizationConfigWrapper quant_config;
+    quant_config.set_use_fast_math(true);
+
+    NVTE_SCOPED_GIL_RELEASE({
+      nvte_group_requantize(input_nvte.data(), output_nvte.data(), element_offsets_nvte.data(),
+                            return_dequantized ? dequantized_nvte.data() : nullptr, quant_config,
+                            at::cuda::getCurrentCUDAStream());
+    });
+
+    grouped_x.attr("scale_inv") = swizzled_rowwise_scale_inv;
+    grouped_x.attr("columnwise_data") = columnwise_data;
+    grouped_x.attr("columnwise_scale_inv") = columnwise_scale_inv;
+    grouped_x.attr("_with_gemm_swizzled_scales") = py::cast(true);
+
+    if (return_dequantized) {
+      return py::cast(dequantized);
+    }
+    return py::none();
+  }
 
   // Dequantize first: it reads the rowwise scales, which the swizzle below replaces. Left
   // undefined when nothing consumes it, which skips the pass entirely.
@@ -1126,8 +1227,6 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
   const auto columnwise_usage = quantizer_cpp_list[0]->columnwise_usage;
   if (row_scaled_nvfp4) {
     NVTE_CHECK(rowwise_usage, "Row-scaled NVFP4 bulk allocation requires rowwise usage.");
-    NVTE_CHECK(!columnwise_usage,
-               "Row-scaled NVFP4 bulk allocation does not support columnwise usage.");
   }
   const auto scaling_mode = quantizer_cpp_list[0]->get_scaling_mode();
   const auto fp4_dtype = quantizer_cpp_list[0]->dtype;
@@ -1271,7 +1370,10 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
     dtypes.insert(dtypes.end(), num_tensors, torch::kUInt8);
     alignments.insert(alignments.end(), num_tensors, 16);
     for (size_t i = 0; i < num_tensors; ++i) {
-      shapes.emplace_back(amax_shape(columnwise_data_shapes[i]));
+      // columnwise_data_shapes[i] is the transposed shape, so its leading dim is
+      // the original last dim (number of columns). For row-scaled NVFP4 this
+      // yields a per-column amax vector; otherwise it stays a scalar {1}.
+      shapes.emplace_back(amax_shape(columnwise_data_shapes[i], row_scaled_nvfp4));
     }
     dtypes.insert(dtypes.end(), num_tensors, torch::kFloat32);
     alignments.insert(alignments.end(), num_tensors, 16);
@@ -1331,7 +1433,7 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
       }
       if (columnwise_usage) {
         tensor_wrapper.set_columnwise_amax(amax_columnwise_list[i].data_ptr(), DType::kFloat32,
-                                           std::vector<size_t>{1});
+                                           getTensorShape(amax_columnwise_list[i]));
       }
 
       tensor_cpp_list.emplace_back(std::move(tensor_wrapper));

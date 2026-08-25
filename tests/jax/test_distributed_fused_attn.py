@@ -399,6 +399,12 @@ DISTRIBUTED_CONTEXT_SELF_ATTN_D256_LAYOUTS_MASKS_WINDOWS = [
     ),
 ]
 
+DISTRIBUTED_CONTEXT_SELF_ATTN_MAX_LOGIT_CP_MODES = [
+    pytest.param(CPStrategy.ALL_GATHER, False, id="AG"),
+    pytest.param(CPStrategy.RING, False, id="RING-NO_SCAN"),
+    pytest.param(CPStrategy.RING, True, id="RING-SCAN"),
+]
+
 
 class TestDistributedContextParallelSelfAttn:
     # TODO(KshitijLakhani): parametrize num_segments_per_seq for all CP tests
@@ -419,6 +425,8 @@ class TestDistributedContextParallelSelfAttn:
         window_size=None,
         stripe_size=None,
         num_segments_per_seq=None,
+        return_max_logit=False,
+        check_forward_output=True,
     ):
         if qkv_layout.is_thd():
             if not load_balanced and (
@@ -513,8 +521,88 @@ class TestDistributedContextParallelSelfAttn:
         if num_head % kv_groups != 0 or (num_head // kv_groups) % tp_size != 0:
             pytest.skip(f"Skipping {kv_groups=} not multiple of {data_shape=} or {tp_size=}")
 
-        runner.test_backward()
+        if return_max_logit:
+            runner.test_forward(
+                return_max_logit=True,
+                check_output=check_forward_output,
+            )
+        else:
+            runner.test_backward()
         del os.environ["NVTE_FUSED_RING_ATTENTION_USE_SCAN"]
+
+    @pytest_parametrize_wrapper(
+        "device_count,mesh_shape,mesh_axes,mesh_resource",
+        generate_context_parallel_configs_for_attn(),
+    )
+    @pytest.mark.parametrize("data_shape", DISTRIBUTED_CONTEXT_SELF_ATTN_DATA_SHAPES[:1])
+    @pytest.mark.parametrize("kv_groups", [1, 8])
+    @pytest.mark.parametrize("dtype", [pytest.param(jnp.bfloat16, id="BF16")])
+    @pytest.mark.parametrize(
+        "qkv_layout, attn_mask_type",
+        DISTRIBUTED_CONTEXT_SELF_ATTN_LAYOUTS_MASKS,
+    )
+    @pytest.mark.parametrize(
+        "cp_strategy, use_scan_ring",
+        DISTRIBUTED_CONTEXT_SELF_ATTN_MAX_LOGIT_CP_MODES,
+    )
+    @pytest.mark.parametrize(
+        "window_size",
+        [
+            pytest.param((-1, -1), id="NO_SWA"),
+            pytest.param((20, 0), id="SWA"),
+        ],
+    )
+    def test_context_parallel_return_max_logit(
+        self,
+        device_count,
+        mesh_shape,
+        mesh_axes,
+        mesh_resource,
+        data_shape,
+        kv_groups,
+        dtype,
+        qkv_layout,
+        attn_mask_type,
+        cp_strategy,
+        window_size,
+        use_scan_ring,
+    ):
+        """Check CP fused attention returns global per-head max_logit."""
+        is_thd = qkv_layout.is_thd()
+        supports_swa = is_thd and (
+            cp_strategy == CPStrategy.ALL_GATHER
+            or (cp_strategy == CPStrategy.RING and not use_scan_ring)
+        )
+        if window_size != (-1, -1) and not supports_swa:
+            pytest.skip("CP SWA requires THD All-Gather or unrolled THD Ring.")
+        # TODO: Evaluate cuDNN Max mismatches observed for striped multi-segment THD Ring GQA.
+        if is_thd and cp_strategy == CPStrategy.RING and kv_groups > 1:
+            pytest.skip("THD Ring GQA Max mismatches require further evaluation.")
+
+        stripe_size = 64 if is_thd and cp_strategy == CPStrategy.ALL_GATHER else None
+        if is_thd and cp_strategy == CPStrategy.RING:
+            stripe_size = 1
+        num_segments_per_seq = 5 if is_thd else None
+        check_forward_output = not (is_thd and cp_strategy == CPStrategy.RING)
+        self.impl_test_context_parallel_attn(
+            device_count,
+            mesh_shape,
+            mesh_axes,
+            mesh_resource,
+            data_shape,
+            kv_groups,
+            attn_mask_type,
+            dtype,
+            qkv_layout,
+            True,
+            cp_strategy,
+            use_scan_ring=use_scan_ring,
+            window_size=window_size,
+            stripe_size=stripe_size,
+            num_segments_per_seq=num_segments_per_seq,
+            return_max_logit=True,
+            check_forward_output=check_forward_output,
+        )
 
     @pytest_parametrize_wrapper(
         "device_count,mesh_shape,mesh_axes,mesh_resource",
@@ -835,7 +923,7 @@ class TestReorderCausalLoadBalancing:
             seq_dim = 0
 
         if reorder_strategy == ReorderStrategy.Striped:
-            seq_lens = shape[seq_dim]
+            seq_lens = tensor.shape[seq_dim]
             if seq_lens < (cp_size * stripe_size):
                 pytest.skip(f"{seq_lens=} must be larger than {cp_size*stripe_size=}")
 

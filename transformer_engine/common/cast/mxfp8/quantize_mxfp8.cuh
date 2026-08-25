@@ -18,7 +18,7 @@
 
 #include "../../common.h"
 #include "../../util/math.h"
-#include "../../util/ptx.cuh"
+#include "../../util/ptx_arch_spec.cuh"
 #include "../../utils.cuh"
 #include "../core/common.cuh"
 #include "specialized/quantize_mxfp8.cuh"
@@ -64,7 +64,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
   using transformer_engine::dispatch::mxfp8::swizzle::gemm_swizzled_scale_idx;
 
-  if constexpr (NO_ACTIVATIONS) {
+  if constexpr (NO_ACTIVATIONS && !IS_DBIAS) {
     if (noop != nullptr && noop[0] == 1.0f) {
       return;
     }
@@ -675,7 +675,12 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
 
   float *const workspace_ptr = IS_DBIAS ? reinterpret_cast<float *>(workspace->data.dptr) : nullptr;
   float *const amax_ptr = reinterpret_cast<float *>(output->amax.dptr);
-  const float *noop_ptr = reinterpret_cast<const float *>(noop->data.dptr);
+  constexpr bool NO_ACTIVATIONS = !(IS_DACT || IS_ACT);
+  // zero_scales_kernel should ignore the noop tensor whenever the quantization kernel also ignores it,
+  // which happens when there are no fusions (NO ACT and DBIAS). Since zero_scales_kernel is not templated with these variants
+  // it doesn't know when to ignore, so we need to override the noop pointer to nullptr before passing it to the kernel.
+  const float *const noop_ptr =
+      (NO_ACTIVATIONS && !IS_DBIAS) ? reinterpret_cast<const float *>(noop->data.dptr) : nullptr;
 
   // Clear padding before either the generic or specialized kernel writes
   // directly into the GEMM-swizzled scale layout.
