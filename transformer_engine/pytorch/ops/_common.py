@@ -12,6 +12,7 @@ import torch
 
 from transformer_engine_torch import FP8TensorMeta
 from ..constants import DType, MXFP8_BLOCK_SCALING_SIZE
+from ..ep import _as_mxfp8_storage
 from ..torch_version import torch_version
 from ..quantization import FP8GlobalStateManager
 from ..quantized_tensor import QuantizedTensorStorage, Quantizer
@@ -23,7 +24,6 @@ from ..tensor import (
     NVFP4Quantizer,
 )
 from ..tensor.float8_tensor import Float8Tensor
-from ..tensor.mxfp8_tensor import MXFP8Tensor
 from ..tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
 from ..utils import canonicalize_dtype
 
@@ -121,7 +121,7 @@ def maybe_dequantize(
 def quantize_for_ep(
     input_: torch.Tensor | QuantizedTensorStorage,
     quantizer: Optional[Quantizer],
-) -> tuple[MXFP8Tensor | MXFP8TensorStorage, torch.Tensor]:
+) -> tuple[MXFP8TensorStorage, torch.Tensor]:
     """Return an MXFP8 input and its compact rowwise scales for EP."""
     if quantizer is not None:
         if not isinstance(quantizer, MXFP8Quantizer):
@@ -138,7 +138,11 @@ def quantize_for_ep(
     else:
         if quantizer is None:
             raise ValueError("An MXFP8 quantizer is required for a non-quantized EP input.")
+        if not quantizer.internal:
+            quantizer = quantizer.copy()
+            quantizer.internal = True
         quantized = quantizer(input_)
+    quantized = _as_mxfp8_storage(quantized)
     if quantized._fp8_dtype != DType.kFloat8E4M3:
         raise NotImplementedError("EP MXFP8 transport supports E4M3 only.")
     if quantized._with_gemm_swizzled_scales:

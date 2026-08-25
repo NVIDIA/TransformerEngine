@@ -1032,11 +1032,26 @@ class TestMoeEpSequential(_EpTestCase):
         self._run_megamoe_vs_reference(quantization="mxfp8")
 
     @_eager_test_include
+    def test_megamoe_main_grad_accumulation_bf16(self):
+        self._run_megamoe_vs_reference(
+            quantization="bf16",
+            accumulate_into_main_grad=True,
+        )
+
+    @_eager_test_include
     @_mxfp8_align_test
     def test_megamoe_main_grad_accumulation(self):
         self._run_megamoe_vs_reference(
             quantization="mxfp8",
             accumulate_into_main_grad=True,
+        )
+
+    @_eager_test_include
+    def test_megamoe_main_grad_overwrite_bf16(self):
+        self._run_megamoe_vs_reference(
+            quantization="bf16",
+            accumulate_into_main_grad=True,
+            overwrite_main_grad=True,
         )
 
     @_eager_test_include
@@ -1049,10 +1064,25 @@ class TestMoeEpSequential(_EpTestCase):
         )
 
     @_eager_test_include
+    def test_megamoe_delayed_wgrad_bf16(self):
+        self._run_megamoe_vs_reference(
+            quantization="bf16",
+            delay_wgrad_compute=True,
+        )
+
+    @_eager_test_include
     @_mxfp8_align_test
     def test_megamoe_delayed_wgrad(self):
         self._run_megamoe_vs_reference(
             quantization="mxfp8",
+            delay_wgrad_compute=True,
+        )
+
+    @_eager_test_include
+    def test_megamoe_delayed_main_grad_bf16(self):
+        self._run_megamoe_vs_reference(
+            quantization="bf16",
+            accumulate_into_main_grad=True,
             delay_wgrad_compute=True,
         )
 

@@ -11,16 +11,15 @@ from typing import Any, Iterable, Optional
 import torch
 import transformer_engine_torch as tex
 
-from ...constants import MXFP8_BLOCK_SCALING_SIZE
 from ...ep import (
     _alloc_io,
-    _make_grouped_mxfp8,
-    _scale_alloc_io,
+    _ep_combine_bwd,
+    _ep_combine_fwd,
+    _ep_is_eager,
     is_symm_backed,
 )
-from ...quantization import QuantizerRole, Recipe
+from ...quantization import QuantizerRole
 from ...tensor import MXFP8Quantizer, Quantizer
-from ...tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
 from .._common import (
     is_quantized_tensor,
     maybe_dequantize,
@@ -117,43 +116,6 @@ class Combine(BasicOperation):
             raise ValueError("zero-copy Combine grad_out must be symmetric-memory-backed.")
         return grad_out
 
-    @staticmethod
-    def _prepare_grad_buffers(
-        grad_out: Optional[torch.Tensor],
-        quantized_grad: Optional[MXFP8TensorStorage],
-        grad_scale_inv: Optional[torch.Tensor],
-        *,
-        input_shape: tuple[int, int],
-        input_dtype: torch.dtype,
-        device: torch.device,
-        zero_copy: bool,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
-        """Allocate the expert-output gradient data and optional scale storage."""
-        if quantized_grad is None:
-            if grad_out is None:
-                grad_out = _alloc_io(input_shape, input_dtype, device, zero_copy)
-            return grad_out, None
-
-        if grad_scale_inv is None:
-            raise RuntimeError("MXFP8 Combine gradient scales are unavailable.")
-        num_recv_tokens, hidden = input_shape
-        scale_cols = hidden // MXFP8_BLOCK_SCALING_SIZE
-        if scale_cols * grad_scale_inv.element_size() % 16:
-            raise ValueError(
-                "MXFP8 NCCL EP transport requires hidden size divisible by "
-                f"{16 * MXFP8_BLOCK_SCALING_SIZE}, got {hidden}."
-            )
-        return _scale_alloc_io(
-            grad_out,
-            num_recv_tokens,
-            hidden,
-            scale_cols,
-            quantized_grad._rowwise_data.dtype,
-            grad_scale_inv.dtype,
-            device,
-            zero_copy,
-        )
-
     def fuser_forward(
         self,
         basic_op_ctxs: list[OperationContext],
@@ -183,17 +145,11 @@ class Combine(BasicOperation):
         if zero_copy:
             expert_out = _alloc_io(tuple(input_.shape), input_.dtype, input_.device, True)
             expert_out.copy_(input_)
-        result = torch.empty(
-            num_local_tokens,
-            expert_out.shape[-1],
-            dtype=expert_out.dtype,
-            device=expert_out.device,
-        )
-        torch.ops.transformer_engine_ep.combine(handle_mem, expert_out, result)
         # Preserve routing state and optional caller storage for backward.
         ctx = basic_op_ctxs[0]
+        grad_out = None
         if ctx.requires_grad:
-            ctx.grad_out = self._prepare_grad_buffer(
+            grad_out = self._prepare_grad_buffer(
                 kwargs.get("grad_out"),
                 grad_output_quantizer,
                 input_shape=input_shape,
@@ -201,10 +157,20 @@ class Combine(BasicOperation):
                 device=input_.device,
                 zero_copy=zero_copy,
             )
-            ctx.input_shape = input_shape
             ctx.input_dtype = input_.dtype
-            ctx.zero_copy = zero_copy
-            ctx.save_for_backward(handle_mem, tokens_per_expert)
+        result, combine_state = _ep_combine_fwd(
+            expert_out,
+            grad_out,
+            handle_mem=handle_mem,
+            token_counts=tokens_per_expert,
+            num_local_tokens=num_local_tokens,
+            hidden_dim=expert_out.shape[-1],
+            bwd_quant_recipe=grad_output_quantizer,
+            eager=_ep_is_eager(),
+            zero_copy=zero_copy,
+        )
+        if ctx.requires_grad:
+            ctx.combine_state = combine_state
 
         # Hand off to the next op in its requested representation.
         if next_op_input_quantizer is not None and not is_quantized_tensor(result):
@@ -224,7 +190,6 @@ class Combine(BasicOperation):
     ]:
         del basic_op_grad_extra_outputs
         ctx = basic_op_ctxs[0]
-        handle_mem, tokens_per_expert = ctx.saved_tensors
         grad_output_quantizer = self.get_quantizer("backward", 0)
         grad_scale_inv = None
         # Prepare grad_output (Quantize if necessary)
@@ -242,30 +207,10 @@ class Combine(BasicOperation):
                 "NCCL EP Combine backward supports MXFP8Quantizer only, got "
                 f"{type(grad_output_quantizer).__name__}."
             )
-        grad_input, grad_input_scale_inv = self._prepare_grad_buffers(
-            ctx.grad_out,
+        grad_input = _ep_combine_bwd(
+            ctx.combine_state,
+            grad_output,
             quantized_grad,
             grad_scale_inv,
-            input_shape=ctx.input_shape,
-            input_dtype=ctx.input_dtype,
-            device=grad_output.device,
-            zero_copy=ctx.zero_copy,
         )
-        if quantized_grad is None:
-            torch.ops.transformer_engine_ep.combine_bwd(handle_mem, grad_output, grad_input)
-        else:
-            torch.ops.transformer_engine_ep.combine_bwd(
-                handle_mem,
-                quantized_grad._rowwise_data.view(torch.float8_e4m3fn),
-                grad_input.view(torch.float8_e4m3fn),
-                grad_scale_inv,
-                grad_input_scale_inv,
-            )
-            grad_input = _make_grouped_mxfp8(
-                grad_input,
-                grad_input_scale_inv,
-                tokens_per_expert,
-                quantized_grad._fp8_dtype,
-                ctx.input_dtype,
-            )
         return grad_input, [()], [(None, None, None)]
