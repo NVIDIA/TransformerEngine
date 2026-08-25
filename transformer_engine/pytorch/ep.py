@@ -501,7 +501,6 @@ class _EpDispatch(torch.autograd.Function):
         tokens: torch.Tensor,
         topk_weights: torch.Tensor,
         tokens_scale_inv: Optional[torch.Tensor] = None,
-        token_counts: Optional[torch.Tensor] = None,
         num_recv_tokens: Optional[int] = None,
         payload_dtype: torch.dtype = torch.bfloat16,
     ):
@@ -520,8 +519,13 @@ class _EpDispatch(torch.autograd.Function):
         if is_scaled:
             if tokens._fp8_dtype != tex.DType.kFloat8E4M3:
                 raise NotImplementedError("EP dispatch supports only E4M3 MXFP8 tokens for now.")
-            # recv data + scales share one buffer (data then scales); carve or allocate it here.
-            recv_tokens, recv_scale_inv = _scale_alloc_io(
+            # The recv is an opaque MXFP8 carrier: one payload-dtype-shaped [rows, hidden]
+            # tensor whose storage holds [E4M3 data | compact e8m0 scales | slack]. It gives
+            # the caller plain-tensor semantics (views, record_stream, offload, storage
+            # release); the consumer rebuilds the grouped view via mxfp8_carrier_to_grouped.
+            if recv_tokens is None:
+                recv_tokens = _alloc_io((num_recv_tokens, hidden), payload_dtype, device, zero_copy)
+            recv_data, recv_scale_inv = _scale_alloc_io(
                 recv_tokens,
                 num_recv_tokens,
                 hidden,
@@ -533,7 +537,7 @@ class _EpDispatch(torch.autograd.Function):
             )
             # Reinterpret byte-backed FP8 data as the fp8 dtype so the backend sees a scaled tensor.
             dispatch_tokens = tokens_data.view(torch.float8_e4m3fn)
-            dispatch_recv = recv_tokens.view(torch.float8_e4m3fn)
+            dispatch_recv = recv_data.view(torch.float8_e4m3fn)
         else:
             if recv_tokens is None:
                 recv_tokens = _alloc_io((num_recv_tokens, hidden), payload_dtype, device, zero_copy)
@@ -560,19 +564,9 @@ class _EpDispatch(torch.autograd.Function):
         ctx.hidden_dim = hidden
         # Detach so the long-lived buffers aren't tracked as differentiable outputs;
         # autograd re-attaches grad_fn pointing back at this Function. For scaled inputs
-        # the expert-major recv data + scales are wrapped into a per-expert GroupedTensor
-        # so downstream grouped GEMM and autograd see a proper quantized grouped tensor.
-        if is_scaled:
-            recv_out = _make_grouped_mxfp8(
-                recv_tokens.view(tokens._rowwise_data.dtype),
-                recv_scale_inv,
-                token_counts,
-                tokens._fp8_dtype,
-                tokens.dtype,
-            )
-        else:
-            recv_out = recv_tokens.detach()
-        return recv_out, recv_topk_weights.detach()
+        # recv_tokens is the opaque MXFP8 carrier (data + scales packed in its storage);
+        # its grad is the plain high-precision recv grad either way.
+        return recv_tokens.detach(), recv_topk_weights.detach()
 
     @staticmethod
     def backward(ctx, g_recv_tokens, g_recv_topk_weights):  # type: ignore[override]
@@ -604,7 +598,6 @@ class _EpDispatch(torch.autograd.Function):
             grad_tokens.view(ctx.tokens_shape),
             grad_topk_weights.view(ctx.topk_weights_shape),
             None,  # tokens_scale_inv (scales; non-differentiable)
-            None,  # token_counts (per-expert counts; non-differentiable)
             None,  # num_recv_tokens (sizing scalar)
             None,  # payload_dtype (sizing scalar)
         )
@@ -629,7 +622,6 @@ class _EpCombine(torch.autograd.Function):
         grad_out: Optional[torch.Tensor],
         expert_out: torch.Tensor,
         bwd_quant_recipe=None,
-        token_counts: Optional[torch.Tensor] = None,
     ):
         """Combine fwd; stashes the bwd grad target or expert_out shape to size it. When
         ``bwd_quant_recipe`` is set, the backward sends the result-grad as MXFP8."""
@@ -639,7 +631,6 @@ class _EpCombine(torch.autograd.Function):
         ctx.save_for_backward(handle_mem)
         ctx.grad_out = grad_out
         ctx.bwd_quant_recipe = bwd_quant_recipe
-        ctx.token_counts = token_counts
         ctx.expert_out_shape = expert_out.shape
         ctx.expert_out_dtype = expert_out.dtype
         ctx.device = device
@@ -648,8 +639,8 @@ class _EpCombine(torch.autograd.Function):
     @staticmethod
     def backward(ctx, g_result):  # type: ignore[override]
         """Combine bwd; scatters the result-grad to expert positions. High-precision sends the grad
-        as-is; a quantized recipe (MXFP8 today) quantizes it and returns the expert_out grad as a
-        per-expert GroupedTensor."""
+        as-is; a quantized recipe (MXFP8 today) quantizes it and returns the expert_out grad as an
+        opaque MXFP8 carrier tensor."""
         if not g_result.is_contiguous():
             g_result = g_result.contiguous()
         (handle_mem,) = ctx.saved_tensors
@@ -665,8 +656,16 @@ class _EpCombine(torch.autograd.Function):
             mx, g_scale_inv = _quantize_mxfp8(g_result)
             g_data = mx._rowwise_data
             recv_pr, hidden = ctx.expert_out_shape[0], ctx.expert_out_shape[-1]
+            # The expert_out grad is an opaque MXFP8 carrier (see _EpDispatch.forward): one
+            # expert_out-shaped tensor whose storage holds [E4M3 data | e8m0 scales | slack],
+            # matching autograd's shape/dtype expectations with plain-tensor semantics.
+            carrier = ctx.grad_out
+            if carrier is None:
+                carrier = _alloc_io(
+                    ctx.expert_out_shape, ctx.expert_out_dtype, ctx.device, tex.ep_get_zero_copy()
+                )
             ge_data, ge_scale_inv = _scale_alloc_io(
-                ctx.grad_out,
+                carrier,
                 recv_pr,
                 hidden,
                 g_scale_inv.shape[-1],
@@ -683,9 +682,7 @@ class _EpCombine(torch.autograd.Function):
                 g_scale_inv,
                 ge_scale_inv,
             )
-            grad_expert_out = _make_grouped_mxfp8(
-                ge_data, ge_scale_inv, ctx.token_counts, mx._fp8_dtype, ctx.expert_out_dtype
-            )
+            grad_expert_out = carrier
 
         return (
             None,  # handle_mem
@@ -694,7 +691,6 @@ class _EpCombine(torch.autograd.Function):
             None,  # grad_out
             grad_expert_out,
             None,  # bwd_quant_recipe
-            None,  # token_counts
         )
 
 
@@ -802,26 +798,35 @@ def _scale_alloc_io(buf, rows, data_cols, scale_cols, data_dtype, scale_dtype, d
     return data, scale_inv
 
 
-def _make_grouped_mxfp8(data, scale_inv, token_counts, fp8_dtype, fake_dtype):
-    """Wrap expert-major MXFP8 recv data + compact e8m0 scales as a per-expert ``GroupedTensor``.
+def mxfp8_carrier_to_grouped(carrier: torch.Tensor, token_counts: torch.Tensor):
+    """Rebuild the per-expert MXFP8 ``GroupedTensor`` from an opaque EP carrier tensor.
 
-    ``token_counts`` (int64 [num_local_experts]) is the padded per-expert row counts (128-aligned),
-    used as the group sizes. Grouping is device-side (first_dims/tensor_offsets), so the counts never
-    sync to host; the outer shape is the static recv capacity, bounded per expert by first_dims.
+    The carrier is the plain ``[rows, hidden]`` tensor EP dispatch forward (and combine
+    backward) return when quantization is on: its storage holds ``rows*hidden`` bytes of
+    expert-major E4M3 data followed by ``rows*(hidden/block)`` bytes of compact e8m0 scales.
+    ``token_counts`` (int64 [num_local_experts]) is the padded per-expert row counts
+    (alignment-padded), used as the group sizes; grouping is device-side
+    (first_dims/tensor_offsets), so the counts never sync to host.
     """
+    from .constants import MXFP8_BLOCK_SCALING_SIZE
     from .tensor.grouped_tensor import GroupedTensor
     from .tensor.mxfp8_tensor import MXFP8Quantizer
 
-    assert data.dim() == 2, "recv data must be 2D [capacity_rows, hidden]"
-    capacity_rows, hidden = data.shape
-    quantizer = MXFP8Quantizer(fp8_dtype, rowwise=True, columnwise=False)
+    assert carrier.dim() == 2, "EP carrier must be 2D [rows, hidden]"
+    if not carrier.is_contiguous():
+        raise ValueError("EP carrier must be contiguous; got a strided tensor.")
+    rows, hidden = carrier.shape
+    scale_cols = hidden // MXFP8_BLOCK_SCALING_SIZE
+    flat = carrier.detach().reshape(-1).view(torch.uint8)
+    data_bytes = rows * hidden
+    quantizer = MXFP8Quantizer(tex.DType.kFloat8E4M3, rowwise=True, columnwise=False)
     return GroupedTensor(
-        shape=(capacity_rows, hidden),
-        dtype=fake_dtype,
+        shape=(rows, hidden),
+        dtype=carrier.dtype,
         num_tensors=token_counts.numel(),
         quantizer=quantizer,
-        data=data.reshape(-1).detach(),
-        scale_inv=scale_inv.reshape(-1).detach(),
+        data=flat[:data_bytes],
+        scale_inv=flat[data_bytes : data_bytes + rows * scale_cols],
         first_dims=token_counts,
         tensor_offsets=tex.splits_to_offsets(token_counts, hidden),
     )
@@ -838,9 +843,12 @@ def ep_dispatch(
 ):
     """Prepare + dispatch with autograd. ``tokens`` is bfloat16; ``topk_idx`` is int32 or int64.
 
-    When the buffer's ``dispatch_fwd_quant_recipe`` is set (``MXFP8BlockScaling`` only for now), tokens
-    are quantized internally and recv is returned as a per-expert ``GroupedTensor``; otherwise recv
-    stays bfloat16. A pre-quantized ``tokens`` is not accepted.
+    When the buffer's ``dispatch_fwd_quant_recipe`` is set (``MXFP8BlockScaling`` only for now),
+    tokens are quantized internally and recv is returned as an opaque MXFP8 carrier: a plain
+    ``[rows, hidden]`` payload-dtype tensor whose storage holds the E4M3 data then the compact
+    e8m0 scales (rebuild the grouped view with ``mxfp8_carrier_to_grouped``; the contents are
+    not valid payload-dtype data). Otherwise recv stays bfloat16. A pre-quantized ``tokens`` is
+    not accepted.
 
     ``recv_tokens`` / ``recv_topk_weights`` are the recv outputs: pass caller-owned buffers
     (symm-mem-backed under zero-copy) or leave them None to allocate. For MXFP8 the recv data and
@@ -897,7 +905,6 @@ def ep_dispatch(
         tokens,
         topk_weights,
         tokens_scale_inv,
-        tokens_per_expert,
         num_recv_tokens,
         buffer.payload_dtype,
     )
@@ -931,7 +938,7 @@ def ep_combine(
     if num_local_tokens is None:
         num_local_tokens = buffer.max_tokens_per_rank
     # When combine_bwd_quant_recipe is set the combine backward sends the result-grad over the
-    # wire as MXFP8 and returns the expert_out grad as a GroupedTensor.
+    # wire as MXFP8 and returns the expert_out grad as an opaque MXFP8 carrier (see ep_dispatch).
     bwd_quant_recipe = None
     if buffer.combine_bwd_quant_recipe is not None:
         from ..common.recipe import MXFP8BlockScaling
@@ -949,5 +956,4 @@ def ep_combine(
         grad_out,
         expert_out,
         bwd_quant_recipe,
-        buffer.tokens_per_expert,
     )
