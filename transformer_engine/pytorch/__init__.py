@@ -29,6 +29,7 @@ from transformer_engine.pytorch.module import initialize_ub
 from transformer_engine.pytorch.module import destroy_ub
 from transformer_engine.pytorch.module import UserBufferQuantizationMode
 from transformer_engine.pytorch.attention import DotProductAttention
+from transformer_engine.pytorch.attention import FusedMLAQUpProjRopeQuant
 from transformer_engine.pytorch.attention import MultiheadAttention
 from transformer_engine.pytorch.attention import InferenceParams
 from transformer_engine.pytorch.attention import RotaryPositionEmbedding
@@ -93,6 +94,12 @@ from transformer_engine.pytorch.tensor import Float8Tensor
 from transformer_engine.pytorch.tensor import MXFP8Tensor
 from transformer_engine.pytorch.tensor import Float8BlockwiseQTensor
 from transformer_engine.pytorch.tensor import NVFP4Tensor
+from transformer_engine.pytorch.tensor import HybridQuantizer
+from transformer_engine.pytorch.tensor import HybridQuantizedTensorStorage
+from transformer_engine.pytorch.tensor import IdentityQuantizer
+from transformer_engine.pytorch.tensor import IdentityTensorStorage
+from transformer_engine.pytorch.tensor import HybridQuantizedTensor
+from transformer_engine.pytorch.tensor import IdentityTensor
 from transformer_engine.pytorch.tensor.float8_tensor import (
     _make_float8_tensor_in_reduce_ex,
 )
@@ -104,6 +111,12 @@ from transformer_engine.pytorch.tensor.nvfp4_tensor import (
 )
 from transformer_engine.pytorch.tensor.float8_blockwise_tensor import (
     _make_float8_blockwise_tensor_in_reduce_ex,
+)
+from transformer_engine.pytorch.tensor.hybrid_tensor import (
+    _make_hybrid_quantized_tensor_in_reduce_ex,
+)
+from transformer_engine.pytorch.tensor.identity_tensor import (
+    _make_identity_tensor_in_reduce_ex,
 )
 
 try:
@@ -129,6 +142,8 @@ try:
             MXFP8TensorStorage,
             NVFP4TensorStorage,
             Float8BlockwiseQTensorStorage,
+            HybridQuantizedTensorStorage,
+            IdentityTensorStorage,
             # Quantizer types embedded in metadata
             Quantizer,
             Float8Quantizer,
@@ -136,6 +151,8 @@ try:
             MXFP8Quantizer,
             NVFP4Quantizer,
             Float8BlockQuantizer,
+            HybridQuantizer,
+            IdentityQuantizer,
             # Python IntEnum used as Quantizer.dtype.
             DType,
             # pybind11 enum used as Quantizer.dtype.
@@ -146,6 +163,8 @@ try:
             _make_mxfp8_tensor_in_reduce_ex,
             _make_nvfp4_tensor_in_reduce_ex,
             _make_float8_blockwise_tensor_in_reduce_ex,
+            _make_hybrid_quantized_tensor_in_reduce_ex,
+            _make_identity_tensor_in_reduce_ex,
         ]
     )
 except (ImportError, AttributeError):

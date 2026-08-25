@@ -5,8 +5,10 @@ import logging
 import os
 import sys
 import pathlib
+import copy
 from typing import Any, Dict, Tuple, Union
 
+from packaging.version import Version as PkgVersion
 import pytest
 import torch
 
@@ -28,6 +30,7 @@ from transformer_engine.pytorch.attention.dot_product_attention import (
 )
 from transformer_engine.pytorch.attention.dot_product_attention.utils import (
     FlashAttentionUtils,
+    _get_supported_versions,
     check_set_window_size,
 )
 from transformer_engine.pytorch.attention import RotaryPositionEmbedding
@@ -93,6 +96,39 @@ def reset_global_fp8_state():
     FP8GlobalStateManager.reset()
 
 
+@pytest.mark.parametrize(
+    "version,expected",
+    (
+        ("2.1.0", False),
+        ("2.1.1", True),
+        ("2.8.3", True),
+        ("2.8.3+local_version", True),
+        ("2.8.3.post1", True),
+        ("2.8.4", False),
+        ("2.8.4+local_version", False),
+        ("2.9.0", False),
+    ),
+)
+def test_flash_attention_version_support(version, expected):
+    """Test the supported Flash Attention v2 version range."""
+    assert (
+        FlashAttentionUtils.is_version_supported(
+            PkgVersion(version), FlashAttentionUtils.version_required
+        )
+        is expected
+    )
+
+
+def test_flash_attention_supported_version_message():
+    """Test that the supported version range describes an exclusive upper bound."""
+    assert (
+        _get_supported_versions(
+            FlashAttentionUtils.version_required, FlashAttentionUtils.max_version
+        )
+        == ">= 2.1.1, < 2.8.4"
+    )
+
+
 # Define F16 data types to test
 param_types = [torch.float16]
 if is_bf16_available():
@@ -133,6 +169,7 @@ def test_dot_product_attention(
     swa,
     pad_between_seqs,
     declarative_packed=False,
+    is_training=True,
 ):
     """Test DotProductAttention module"""
 
@@ -140,7 +177,7 @@ def test_dot_product_attention(
     tols = dict(atol=1e-3, rtol=1e-3)
     if dtype == torch.bfloat16:
         tols = dict(atol=1.5e-2, rtol=1.5e-2)
-    config = model_configs[model]
+    config = copy.deepcopy(model_configs[model])
     is_mla = config.head_dim_qk != config.head_dim_v
     is_mqa_gqa = config.num_heads != config.num_gqa_groups
     if qkv_layout is None:
@@ -167,10 +204,9 @@ def test_dot_product_attention(
 
     # Get backends
     # For 111s, dbias calculation is not supported as of cuDNN 9.18, hence, test fwd only for 111s.
-    # For all other shapes test fwd+bwd
-    is_training = True
+    # For all other shapes test fwd+bwd unless the caller requests fwd-only coverage.
     # TODO(KshitijLakhani): Set is_training to True for all cases once cuDNN supports dbias for 111s.
-    if config.bias_shape == "111s":
+    if is_training and config.bias_shape == "111s":
         is_training = False
         logging.info(
             "Setting is_training to False as cuDNN does not support dbias for"
@@ -340,9 +376,18 @@ model_configs_fa4_base = {
 }
 
 
-@pytest.mark.skipif(
-    not FlashAttentionUtils.v4_is_installed, reason="Flash-attn v4 (flash-attn-4) is required."
+fa4_enabled = bool(int(os.getenv("NVTE_FLASH_ATTN", "1"))) and bool(
+    int(os.getenv("NVTE_FLASH_ATTN_V4", "1"))
 )
+requires_fa4 = pytest.mark.skipif(
+    not fa4_enabled
+    or not FlashAttentionUtils.v4_is_installed
+    or device_compute_capability < (9, 0),
+    reason="Enabled Flash-attn v4 and compute capability >= SM90 are required.",
+)
+
+
+@requires_fa4
 @pytest.mark.parametrize("dtype", param_types_lean)
 @pytest.mark.parametrize("model_configs", [model_configs_fa4_base])
 @pytest.mark.parametrize("model", model_configs_fa4_base.keys())
@@ -361,9 +406,7 @@ model_configs_fa4_hdim256 = {
 }
 
 
-@pytest.mark.skipif(
-    not FlashAttentionUtils.v4_is_installed, reason="Flash-attn v4 (flash-attn-4) is required."
-)
+@requires_fa4
 @pytest.mark.skipif(
     device_compute_capability not in ((10, 0), (10, 3)),
     reason="FA4 head_dim=256 dedicated kernel is SM100/103-only.",
@@ -373,7 +416,59 @@ model_configs_fa4_hdim256 = {
 @pytest.mark.parametrize("model", model_configs_fa4_hdim256.keys())
 def test_dpa_fa4_hdim256(dtype, model_configs, model):
     """Test DotProductAttention with FA4: head_dim=256 dedicated kernel on SM100"""
-    test_dot_product_attention(dtype, model_configs, model, False, None, False, False)
+    # Keep this FA4 D=256 test forward-only. Before cuDNN D=256 backward support,
+    # the generic helper took this path implicitly because fused-attn training was unavailable.
+    test_dot_product_attention(
+        dtype, model_configs, model, False, None, False, False, is_training=False
+    )
+
+
+# cuDNN FusedAttention D=256 bprop is supported on sm10x by the dedicated deterministic
+# SDPA bprop kernel. BSHD support starts with cuDNN FE 1.24 / BE 9.23; THD support starts
+# with cuDNN FE 1.26 / BE 9.25. The kernel supports d_qk == d_v == 256 only, vanilla softmax only,
+# no dropout, no ALiBi, and (for non-causal masks) full-window attention only.
+model_configs_d256 = {
+    # test: ModelConfig(b, sq, hq, dqk)  -> head_dim_v defaults to head_dim_qk (256)
+    "d256_no_mask": ModelConfig(2, 512, 16, 256),
+    "d256_padding": ModelConfig(2, 512, 16, 256, attn_mask_type="padding"),
+    # SWA is allowed only together with a causal mask on the D=256 bprop kernel.
+    "d256_causal_swa": ModelConfig(2, 1024, 16, 256, attn_mask_type="causal", window_size=(128, 0)),
+    # GQA variant (num_gqa_groups < num_heads).
+    "d256_padding_causal_gqa": ModelConfig(
+        2, 1024, 16, 256, num_gqa_groups=4, attn_mask_type="padding_causal"
+    ),
+}
+
+
+@pytest.mark.skipif(
+    device_compute_capability not in ((10, 0), (10, 3)),
+    reason="cuDNN FusedAttention head_dim=256 backward is Blackwell server (SM100/SM103) only.",
+)
+@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("model_configs", [model_configs_d256])
+@pytest.mark.parametrize("model", model_configs_d256.keys())
+@pytest.mark.parametrize(
+    "qkv_layout",
+    [
+        pytest.param(
+            "bshd_bs2hd",
+            marks=pytest.mark.skipif(
+                get_cudnn_version() < (9, 23, 0),
+                reason="cuDNN 9.23+ is required for BSHD D=256 fused-attn backward.",
+            ),
+        ),
+        pytest.param(
+            "thd_t2hd",
+            marks=pytest.mark.skipif(
+                get_cudnn_version() < (9, 25, 0),
+                reason="cuDNN 9.25+ is required for THD D=256 fused-attn backward.",
+            ),
+        ),
+    ],
+)
+def test_dpa_d256(dtype, model_configs, model, qkv_layout):
+    """Test DotProductAttention with head_dim=256 backward on Blackwell"""
+    test_dot_product_attention(dtype, model_configs, model, False, qkv_layout, False, False)
 
 
 model_configs_fa4_mla = {
@@ -389,9 +484,7 @@ model_configs_fa4_mla = {
 }
 
 
-@pytest.mark.skipif(
-    not FlashAttentionUtils.v4_is_installed, reason="Flash-attn v4 (flash-attn-4) is required."
-)
+@requires_fa4
 @pytest.mark.parametrize("dtype", param_types_lean)
 @pytest.mark.parametrize("model_configs", [model_configs_fa4_mla])
 @pytest.mark.parametrize("model", model_configs_fa4_mla.keys())
@@ -413,9 +506,7 @@ model_configs_fa4_swa = {
 }
 
 
-@pytest.mark.skipif(
-    not FlashAttentionUtils.v4_is_installed, reason="Flash-attn v4 (flash-attn-4) is required."
-)
+@requires_fa4
 @pytest.mark.parametrize("dtype", param_types_lean)
 @pytest.mark.parametrize("model_configs", [model_configs_fa4_swa])
 @pytest.mark.parametrize("model", model_configs_fa4_swa.keys())
@@ -436,9 +527,7 @@ model_configs_fa4_varlen = {
 }
 
 
-@pytest.mark.skipif(
-    not FlashAttentionUtils.v4_is_installed, reason="Flash-attn v4 (flash-attn-4) is required."
-)
+@requires_fa4
 @pytest.mark.parametrize("dtype", param_types_lean)
 @pytest.mark.parametrize("model_configs", [model_configs_fa4_varlen])
 @pytest.mark.parametrize("model", model_configs_fa4_varlen.keys())
@@ -461,9 +550,7 @@ model_configs_fa4_mask = {
 }
 
 
-@pytest.mark.skipif(
-    not FlashAttentionUtils.v4_is_installed, reason="Flash-attn v4 (flash-attn-4) is required."
-)
+@requires_fa4
 @pytest.mark.parametrize("dtype", param_types_lean)
 @pytest.mark.parametrize("model_configs", [model_configs_fa4_mask])
 @pytest.mark.parametrize("model", model_configs_fa4_mask.keys())

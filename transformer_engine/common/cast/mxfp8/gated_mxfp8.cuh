@@ -18,7 +18,7 @@
 
 #include "../../common.h"
 #include "../../util/math.h"
-#include "../../util/ptx.cuh"
+#include "../../util/ptx_arch_spec.cuh"
 #include "../../utils.cuh"
 #include "swizzle.cuh"
 
@@ -124,11 +124,9 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   __shared__ float subamax_colwise_buff[SUBAMAX_BUFF_DIM_Y][CHUNK_DIM_X];
 
   extern __shared__ char dynamic_shmem[];
-  uintptr_t base_shmem_ptr = reinterpret_cast<uintptr_t>(dynamic_shmem);
   // Manually align dynamic SHMEM per TMA requirements using padding
   // __align__(128) Does not guarantee the pointer to be aligned!
-  uintptr_t dshmem = (base_shmem_ptr + TMA_SHMEM_ALIGNMENT - 1) &
-                     ~(static_cast<uintptr_t>(TMA_SHMEM_ALIGNMENT - 1));
+  char *dshmem = align_up(dynamic_shmem, TMA_SHMEM_ALIGNMENT);
 
   constexpr size_t buff_elems = BUFF_DIM_Y * BUFF_DIM_X;
   constexpr size_t buff_elems_total = BUFFS_NUM * buff_elems;
@@ -243,10 +241,15 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
         float gate_elt = static_cast<float>(in_gate_sh[shmem_offset_colwise]);
         float after_act_elt;
         float after_gate_elt;
-        bool dgate_elt = true;  // gating is ideally an identity function
+        float dgate_elt = 1.0f;  // gating is ideally an identity function
         if constexpr (std::is_same<ParamOP, ClampedSwiGLUParam>::value) {
-          dgate_elt = gate_elt <= p.limit && gate_elt >= -p.limit;
+          if (gate_elt > p.limit || gate_elt < -p.limit) {
+            dgate_elt = 0.f;
+          }
           gate_elt = min(max(-p.limit, gate_elt), p.limit) + p.glu_linear_offset;
+        } else if constexpr (std::is_same<ParamOP, SiTUGLUParam>::value) {
+          dgate_elt = dsitu_up<float, float>(gate_elt, p);
+          gate_elt = situ_up<float, float>(gate_elt, p);
         }
         if constexpr (IS_BWD) {
           float grad_elt = static_cast<float>(in_grad_sh[shmem_offset_colwise]);
@@ -258,6 +261,9 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
             const float s = sigmoidf(p.alpha * x);
             act_x = x * s;
             dact_x = act_elt <= p.limit ? s + s * (1 - s) * p.alpha * x : 0.0f;
+          } else if constexpr (std::is_same<ParamOP, SiTUGLUParam>::value) {
+            act_x = ActOP(x, p);
+            dact_x = DActOP(x, p);
           } else {
             if constexpr ((ActOP == &silu<fp32, fp32>) && (DActOP == &dsilu<fp32, fp32>)) {
               const float s = sigmoidf(x);
@@ -270,7 +276,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
           }
 
           after_act_elt = dact_x * grad_elt * gate_elt;
-          after_gate_elt = dgate_elt ? act_x * grad_elt : 0.0f;
+          after_gate_elt = dgate_elt * act_x * grad_elt;
         } else {
           after_act_elt = ActOP(act_elt, p) * gate_elt;
         }
@@ -507,10 +513,13 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
             float gate_elt = static_cast<float>(in_gate.data.elt[e]);
             float after_act_elt;
             float after_gate_elt;
-            bool dgate_elt = true;
+            float dgate_elt = 1.0f;
             if constexpr (std::is_same<ParamOP, ClampedSwiGLUParam>::value) {
               dgate_elt = gate_elt <= p.limit && gate_elt >= -p.limit;
               gate_elt = min(max(-p.limit, gate_elt), p.limit) + p.glu_linear_offset;
+            } else if constexpr (std::is_same<ParamOP, SiTUGLUParam>::value) {
+              dgate_elt = dsitu_up<float, float>(gate_elt, p);
+              gate_elt = situ_up<float, float>(gate_elt, p);
             }
             if constexpr (IS_BWD) {
               float grad_elt = static_cast<float>(in_grad.data.elt[e]);
@@ -522,6 +531,9 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
                 const float s = sigmoidf(p.alpha * x);
                 act_x = x * s;
                 dact_x = act_elt <= p.limit ? s + s * (1 - s) * p.alpha * x : 0.0f;
+              } else if constexpr (std::is_same<ParamOP, SiTUGLUParam>::value) {
+                act_x = ActOP(x, p);
+                dact_x = DActOP(x, p);
               } else {
                 if constexpr ((ActOP == &silu<fp32, fp32>) && (DActOP == &dsilu<fp32, fp32>)) {
                   const float s = sigmoidf(x);
@@ -534,7 +546,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
               }
 
               after_act_elt = dact_x * grad_elt * gate_elt;
-              after_gate_elt = dgate_elt ? act_x * grad_elt : 0.0f;
+              after_gate_elt = dgate_elt * act_x * grad_elt;
               after_act_rowwise[j] = after_act_elt;
               after_gate_rowwise[j] = after_gate_elt;
             } else {

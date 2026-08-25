@@ -240,6 +240,8 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
   NVTE_QKV_Format qkv_format = nvte_get_qkv_format(qkv_layout);
   NVTE_QKV_Format q_format = nvte_get_q_format(qkv_layout);
   NVTE_QKV_Format kv_format = nvte_get_kv_format(qkv_layout);
+  const bool is_thd_layout =
+      q_format == NVTE_QKV_Format::NVTE_THD || kv_format == NVTE_QKV_Format::NVTE_THD;
   NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
   auto cudnn_runtime_version = cudnnGetVersion();
 
@@ -327,7 +329,23 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
              attn_mask_type != NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK))) ||
           // 9.11: d_qk = 192, d_v = 128 + Blackwell + bprop + non-paged
           (head_dim_qk == 192 && head_dim_v == 128 && is_training && sm_arch_ >= 100 &&
-           cudnn_runtime_version >= 91100)) &&
+           cudnn_runtime_version >= 91100) ||
+          // 9.23: d_qk = d_v = 256 + SM10x (cuDNN FE 1.24 / BE 9.23+) + bprop + non-paged.
+          // THD layouts require cuDNN FE 1.26 / BE 9.25+ for execution-plan support.
+          (head_dim_qk == 256 && head_dim_v == 256 && is_training && sm_arch_ >= 100 &&
+           sm_arch_ < 110 && cudnn_runtime_version >= (is_thd_layout ? 92500 : 92300) &&
+           layout_group != NVTE_QKV_Layout_Group::NVTE_Paged_KV_HD_HD_HD &&
+           // The FE forces this path onto the deterministic bprop algorithm, which on
+           // Blackwell rejects dBias, dropout, and ALiBi (and supports vanilla softmax only).
+           bias_type == NVTE_Bias_Type::NVTE_NO_BIAS && dropout == 0.0 &&
+           softmax_type == NVTE_Softmax_Type::NVTE_VANILLA_SOFTMAX &&
+           // Non-causal D=256 supports only full-window attention; SWA is allowed only for causal masks.
+           ((window_size_left == -1 && window_size_right == -1) ||
+            ((attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK ||
+              attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK ||
+              attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_BOTTOM_RIGHT_MASK ||
+              attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK) &&
+             (window_size_right == -1 || window_size_right == 0))))) &&
          // 9.11+ bug: 128 < d_qk <= 256, 128 < d_v <= 256 + Hopper + bprop + MLA
          // Conditional to temporarily use blanket cudnn_runtime_version >= 9.11 until fixed
          (!((cudnn_runtime_version >= 91100) && is_training && sm_arch_ == 90 &&

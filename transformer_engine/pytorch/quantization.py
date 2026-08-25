@@ -260,7 +260,17 @@ def get_default_recipe() -> Recipe:
 
 
 def get_align_size_for_quantization(recipe: Recipe) -> int:
-    """Get the alignment size for quantization."""
+    """Get the alignment used to pad grouped quantized operations.
+
+    Built-in recipes use their format requirement. Custom recipes use their
+    declarative ``quantization_alignment`` contract rather than invoking
+    ``qfactory``, since a factory may be stateful or role-dependent.
+    """
+    # TODO(#3158): Prefer module/role-specific alignment derived from canonical
+    # cached quantizers when that context is available. Keep the recipe-wide
+    # alignment as the conservative fallback for context-free callers.
+    if recipe.custom():
+        return recipe.quantization_alignment
     if recipe.mxfp8():
         return 32
     if recipe.nvfp4():
@@ -1520,7 +1530,23 @@ class MXFP8BlockScalingRecipeState(RecipeState):
         # TODO(ksivamani); Find better design for this, adding here to avoid circular import.
         from .tensor.mxfp8_tensor import MXFP8Quantizer
 
-        return [MXFP8Quantizer(self.dtype) for i in range(self.num_quantizers)]
+        if self.mode not in ("forward", "backward"):
+            raise RuntimeError(f"Unexpected recipe mode ({self.mode})")
+
+        if self.mode == "backward" or not self.recipe.enable_2d_quantization:
+            return [MXFP8Quantizer(self.dtype) for i in range(self.num_quantizers)]
+
+        def _use_2d_quantization(idx: int) -> bool:
+            role = self._slot_role(idx)
+            return role.module_type in ("linear", "grouped_linear") and role.tensor_type == "weight"
+
+        return [
+            MXFP8Quantizer(
+                self.dtype,
+                with_2d_quantization=_use_2d_quantization(idx),
+            )
+            for idx in range(self.num_quantizers)
+        ]
 
 
 class Float8BlockScalingRecipeState(RecipeState):
@@ -1894,18 +1920,17 @@ class CustomRecipeState(RecipeState):
             )
             roles = [QuantizerRole() for _ in range(self.num_quantizers)]
 
-        # qfactory must return a Quantizer or QuantizerRequest for every slot.
-        # None is not a valid return value — it would silently disable quantization
-        # for that tensor, risking hard-to-detect performance regressions.
-        # TODO(negvet): Introduce an explicit IdentityQuantizer for intentional no-op
-        # quantization. Until then, None is rejected.
+        # qfactory returns one quantizer-like object per slot; use
+        # ``IdentityQuantizer`` for intentional high-precision passthrough.
         raw = [qfactory(roles[i]) for i in range(self.num_quantizers)]
         for i, q in enumerate(raw):
             if q is None:
                 raise ValueError(
                     f"CustomRecipe qfactory returned None for slot {i} "
                     f"(role={roles[i]}). Every slot must return a Quantizer "
-                    "instance or a QuantizerRequest."
+                    "instance or a QuantizerRequest. For an intentional no-op "
+                    "(high-precision / unquantized) slot, return an "
+                    "IdentityQuantizer instead of None."
                 )
 
         # -- Delayed scaling sub-state --
