@@ -285,14 +285,14 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
             attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_BOTTOM_RIGHT_MASK))) &&
       // pre-9.21: {bshd, sbhd}, {vanilla}
       // 9.21+: {bshd, sbhd, bhsd}, {vanilla, off-by-one, learnable}
-      // 9.23+ sm100+: {thd}
+      // 9.23+ sm90+: {thd}
       ((cudnn_runtime_version < 92100 &&
         (qkv_format == NVTE_QKV_Format::NVTE_BSHD || qkv_format == NVTE_QKV_Format::NVTE_SBHD) &&
         softmax_type == NVTE_Softmax_Type::NVTE_VANILLA_SOFTMAX) ||
        (cudnn_runtime_version >= 92100 &&
         (qkv_format == NVTE_QKV_Format::NVTE_BSHD || qkv_format == NVTE_QKV_Format::NVTE_SBHD ||
          qkv_format == NVTE_QKV_Format::NVTE_BHSD)) ||
-       ((cudnn_runtime_version >= 92300 && sm_arch_ >= 100) &&
+       ((cudnn_runtime_version >= 92300 && sm_arch_ >= 90) &&
         qkv_format == NVTE_QKV_Format::NVTE_THD && supported_ragged_offset_size &&
         (attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK ||
          attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK ||
