@@ -18,7 +18,7 @@
 
 #include "../../../common.h"
 #include "../../../util/math.h"
-#include "../../../util/ptx.cuh"
+#include "../../../util/ptx_arch_spec.cuh"
 #include "../../../utils.cuh"
 #include "../core_nvfp4.cuh"
 

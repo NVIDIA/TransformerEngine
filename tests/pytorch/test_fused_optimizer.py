@@ -100,6 +100,57 @@ class TestFusedAdam(TestFusedOptimizer):
     def test_float(self):
         self.gen_single_type_test(param_type=torch.float)
 
+    @pytest.mark.skipif(
+        not hasattr(torch.nn.Parameter(torch.empty(0)), "grad_dtype"),
+        reason="PyTorch does not support parameter grad_dtype",
+    )
+    @pytest.mark.parametrize(
+        "param_dtype,grad_dtype,master_weights",
+        [
+            (torch.float32, torch.bfloat16, False),
+            (torch.bfloat16, torch.float32, True),
+        ],
+    )
+    def test_capturable_mixed_param_grad_dtype(self, param_dtype, grad_dtype, master_weights):
+        """Capturable Adam supports parameter and gradient tensors with different dtypes."""
+        if param_dtype == torch.bfloat16 and not is_bf16_available():
+            pytest.skip("BF16 is not supported")
+
+        ref_param = torch.nn.Parameter(torch.ones(16, device="cuda", dtype=param_dtype))
+        tst_param = torch.nn.Parameter(ref_param.detach().clone())
+        for param in (ref_param, tst_param):
+            param.grad_dtype = grad_dtype
+            param.grad = torch.ones_like(param, dtype=grad_dtype)
+
+        ref_optim = self.fused_optim(
+            [ref_param], capturable=False, master_weights=master_weights, **self.options
+        )
+        tst_optim = self.fused_optim(
+            [tst_param], capturable=True, master_weights=master_weights, **self.options
+        )
+        # Initialize optimizer state before CUDA graph capture.
+        ref_optim.step()
+        tst_optim.step()
+
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            tst_optim.step()
+        graph.replay()
+        ref_optim.step()
+
+        torch.testing.assert_close(tst_param, ref_param)
+        torch.testing.assert_close(
+            tst_optim.state[tst_param]["exp_avg"], ref_optim.state[ref_param]["exp_avg"]
+        )
+        torch.testing.assert_close(
+            tst_optim.state[tst_param]["exp_avg_sq"], ref_optim.state[ref_param]["exp_avg_sq"]
+        )
+        if master_weights:
+            torch.testing.assert_close(
+                tst_optim.state[tst_param]["master_param"],
+                ref_optim.state[ref_param]["master_param"],
+            )
+
     # NOTE(mkozuki): Current threshold values look too small for BFloat16.
     # TODO(mkozuki): Refactor `TestFusedOptimizer`
     def test_half(self):
