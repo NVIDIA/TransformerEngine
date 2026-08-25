@@ -31,8 +31,8 @@ export NVTE_ALLOW_UNSAFE_PICKLE_EXTRA_STATE=1
 # Iterate over Flash Attention versions
 sm_arch=`python3 -c "import torch; sm = torch.cuda.get_device_capability(0); print(sm[0]*10+sm[1])"`
 export FLASH_ATTN_CUDA_ARCHS=$sm_arch
-# Run one architecture-owned FlashAttention generation. H100 keeps the mature
-# FA3 path, while B200 exercises the FA4 CP support enabled by this change.
+# Run one architecture-owned FlashAttention generation. sm90 keeps the mature
+# FA3 path, while sm100+ exercises the FA4 CP support enabled by this change.
 CP_FA_VERSION=""
 if [ $sm_arch -gt 90 ]
 then
