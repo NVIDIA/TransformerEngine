@@ -802,7 +802,7 @@ class GroupedTensorStorage:
             # Amax buffer for delayed scaling - one per tensor
             amax = torch.empty(num_tensors, dtype=torch.float32, device=device)
 
-            scale_inv_dtype = DType.kFloat32
+            scale_inv_dtype = DType.kFloat8E8M0
 
             if rowwise_usage:
                 # Allocate rowwise data buffer (1D flattened, uint8)
@@ -833,7 +833,7 @@ class GroupedTensorStorage:
                     total_columnwise_scale_elements, dtype=torch.uint8, device=device
                 )
         elif compatible_recipe.delayed():
-            scale_inv_dtype = DType.kFloat8E8M0
+            scale_inv_dtype = DType.kFloat32
             if rowwise_usage:
                 # Allocate rowwise data buffer (1D flattened, uint8)
                 data = torch.empty(total_elements, dtype=torch.uint8, device=device)
