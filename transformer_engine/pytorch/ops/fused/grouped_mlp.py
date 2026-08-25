@@ -2045,20 +2045,24 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         deterministic_dactivation = (
             not unit_activation_scale and _deterministic_algorithms_required()
         )
-        # dprob has two producers here: the cuDNN epilogue below, and -- when scale_bias is
-        # set -- the Triton kernel that accumulates into it further down. Both must be
-        # deterministic, and the Triton one never is.
-        if deterministic_dactivation and not (
-            self.grouped_gemm_dactivation_is_deterministic() and not scale_bias
-        ):
-            raise RuntimeError(
-                "Deterministic execution was requested"
-                " (NVTE_ALLOW_NONDETERMINISTIC_ALGO=0 or"
-                " torch.use_deterministic_algorithms), but the scale gradient (dprob) is"
-                " accumulated with nondeterministic atomics on this configuration."
-                " A bit-exact dprob requires the scaled-SReLU activation,"
-                " nvidia-cudnn-frontend 1.28.0 or later, and an FC2 without scale_bias."
+        if deterministic_dactivation:
+            # Two kernels write dprob and both have to be exact. The cuDNN dactivation
+            # epilogue produces it below; then, when scale_bias is set, it is passed to
+            # compute_grouped_dbias_dscales as the ``dscales`` accumulator and atomically
+            # added into (see triton/grouped_dbias_dscales.py). That Triton kernel is never
+            # deterministic, so scale_bias rules out a bit-exact dprob on its own.
+            dprob_is_deterministic = (
+                self.grouped_gemm_dactivation_is_deterministic() and not scale_bias
             )
+            if not dprob_is_deterministic:
+                raise RuntimeError(
+                    "Deterministic execution was requested"
+                    " (NVTE_ALLOW_NONDETERMINISTIC_ALGO=0 or"
+                    " torch.use_deterministic_algorithms), but the scale gradient (dprob) is"
+                    " accumulated with nondeterministic atomics on this configuration."
+                    " A bit-exact dprob requires the scaled-SReLU activation,"
+                    " nvidia-cudnn-frontend 1.28.0 or later, and an FC2 without scale_bias."
+                )
         scales_f32 = None
         scales_tensor = None
         dscales_tensor = None
