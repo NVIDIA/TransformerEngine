@@ -22,8 +22,8 @@ void nvte_group_scaled_swiglu(const NVTEGroupedTensor input, const NVTETensor pr
   // Scaled SwiGLU recompute: (silu(act) * gate) * prob -> columnwise MXFP8.
   // The kernel halves prob, so the activation is the doubled approximate SiLU.
   Empty e = {};
-  dispatch::group_scaled_swiglu_fwd_helper<Empty, silu_approx_x2<fp32, fp32>>(
-      input, prob, output, e, nullptr, stream);
+  dispatch::group_scaled_swiglu_fwd_helper<Empty, silu_approx_x2<fp32, fp32>>(input, prob, output,
+                                                                              e, nullptr, stream);
 }
 
 void nvte_group_scaled_clamped_swiglu(const NVTEGroupedTensor input, const NVTETensor prob,
