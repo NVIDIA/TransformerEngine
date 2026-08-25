@@ -4,8 +4,10 @@
 
 """Tests for GroupedTensor class"""
 
-from typing import List, Optional, Tuple
 import os
+from types import SimpleNamespace
+from typing import List, Optional, Tuple
+
 import pytest
 import torch
 import transformer_engine.pytorch as te
@@ -18,8 +20,7 @@ from transformer_engine.pytorch import (
     MXFP8Quantizer,
     NVFP4Quantizer,
 )
-from transformer_engine.pytorch.constants import TE_DType_To_Torch
-from transformer_engine.pytorch.utils import is_non_tn_fp8_gemm_supported
+from transformer_engine.pytorch.utils import is_non_tn_fp8_gemm_supported, mark_grouped_tensor
 import transformer_engine_torch as tex
 
 # Import test utilities
@@ -47,6 +48,37 @@ reason_for_no_fp8_block_scaling_grouped = (
         " (SM90-SM99)."
     )
 )
+
+
+def test_mark_grouped_tensor_supports_unquantized_rowwise_storage():
+    rowwise_data = torch.empty(16)
+    grouped_tensor = SimpleNamespace(
+        rowwise_data=rowwise_data,
+        columnwise_data=None,
+        columnwise_scale_inv=None,
+    )
+
+    mark_grouped_tensor(grouped_tensor)
+
+    assert rowwise_data.grouped_tensor_scale_inv is False
+
+
+def test_mark_grouped_tensor_marks_quantized_columnwise_storage():
+    rowwise_data = torch.empty(16)
+    columnwise_data = torch.empty(16)
+    columnwise_scale_inv = torch.empty(4)
+    grouped_tensor = SimpleNamespace(
+        rowwise_data=rowwise_data,
+        columnwise_data=columnwise_data,
+        columnwise_scale_inv=columnwise_scale_inv,
+    )
+
+    mark_grouped_tensor(grouped_tensor)
+
+    assert not hasattr(rowwise_data, "grouped_tensor_scale_inv")
+    assert columnwise_data.grouped_tensor_scale_inv is False
+    assert columnwise_scale_inv.grouped_tensor_scale_inv is True
+
 
 _quantization_params = [
     pytest.param(

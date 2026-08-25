@@ -311,19 +311,21 @@ def mark_grouped_tensor(*tensors: List[Any]):
     Megatron-LM to detect which tensors are dynamic (varying shapes)
     and remove the padding before doing the `save_for_backward` to
     save memory.
-    Note: Only columnwise data is saved for backward."""
+    Quantized grouped tensors save their columnwise data and scale metadata;
+    unquantized grouped tensors save their rowwise activation data."""
     for tensor in tensors:
         if tensor is None:
             continue
         if hasattr(tensor, "columnwise_data"):
-            assert (
-                tensor.columnwise_data is not None
-            ), "Columnwise data is not set for grouped tensor"
-            assert (
-                tensor.columnwise_scale_inv is not None
-            ), "Columnwise scale inverse is not set for grouped tensor"
-            setattr(tensor.columnwise_data, "grouped_tensor_scale_inv", False)
-            setattr(tensor.columnwise_scale_inv, "grouped_tensor_scale_inv", True)
+            if tensor.columnwise_data is not None:
+                assert (
+                    tensor.columnwise_scale_inv is not None
+                ), "Columnwise scale inverse is not set for grouped tensor"
+                setattr(tensor.columnwise_data, "grouped_tensor_scale_inv", False)
+                setattr(tensor.columnwise_scale_inv, "grouped_tensor_scale_inv", True)
+            else:
+                assert tensor.rowwise_data is not None, "Grouped tensor has no activation data"
+                setattr(tensor.rowwise_data, "grouped_tensor_scale_inv", False)
         else:
             setattr(tensor, "grouped_tensor_scale_inv", False)
 
