@@ -1,7 +1,6 @@
 [
- 
   {
-    "name": "Current release",
+    "name": "Latest",
     "version": "latest",
     "url": "https://docs.nvidia.com/deeplearning/transformer-engine/",
     "preferred": true

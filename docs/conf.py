@@ -9,7 +9,7 @@ import subprocess
 from builtins import str
 
 # Basic project info
-project = "Transformer Engine"
+project_name = "Transformer Engine"
 author = "NVIDIA CORPORATION & AFFILIATES"
 
 # Copyright statement
@@ -46,6 +46,7 @@ if "dev" in _raw_version:
 else:
     version = str(_raw_version)
 release = _raw_version
+project = f"{project_name} {release}"
 
 # -- General configuration ---------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#general-configuration
@@ -60,17 +61,17 @@ extensions = [
     "autoapi.extension",
     "sphinx_tabs.tabs",
     "myst_parser",
-    "nvidia-sphinx-theme",
 ]
 
-templates_path = ["_templates"]
 exclude_patterns = [
     "_build",
     "Thumbs.db",
-    "sphinx_rtd_theme",
 ]
 
-source_suffix = ".rst"
+source_suffix = {
+    ".rst": "restructuredtext",
+    ".md": "markdown",
+}
 
 master_doc = "index"
 
@@ -80,12 +81,28 @@ pygments_style = "sphinx"
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#options-for-html-output
 
 html_theme = "nvidia_sphinx_theme"
+html_static_path = ["_static"]
+html_css_files = [
+    "css/output-style.css",
+    "css/diagram-colors.css",
+    "css/sphinx_tabs.css",
+    "css/svg-responsive.css",
+]
+
+# Allow local previews to test the version switcher before the production JSON is published.
+switcher_json_url = os.getenv(
+    "NVTE_DOCS_SWITCHER_JSON_URL",
+    "https://docs.nvidia.com/deeplearning/transformer-engine/versions1.json",
+)
+switcher_version = os.getenv("NVTE_DOCS_SWITCHER_VERSION", "latest")
+
 html_theme_options = {
     "public_docs_features": True,
     "switcher": {
-        "json_url": "./versions1.json",
-        "version_match": release,
+        "json_url": switcher_json_url,
+        "version_match": switcher_version,
     },
+    "check_switcher": False,
     "icon_links": [
         {
             "name": "GitHub",

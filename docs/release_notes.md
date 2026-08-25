@@ -1,12 +1,12 @@
-# Transformer Engine v2.19 Release Notes
+# Transformer Engine vX.Y Release Notes
 
 ## Key Features and Enhancements
 
-- 
+-
 
 ## Fixed Issues
 
-- 
+-
 
 ## Breaking Changes in This Release
 

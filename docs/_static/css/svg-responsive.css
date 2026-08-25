@@ -3,7 +3,7 @@
 /* Make all SVG images responsive */
 .document svg,
 .document object[type="image/svg+xml"],
-.rst-content svg {
+.bd-content svg {
     max-width: 100%;
     height: auto;
     display: block;
@@ -63,7 +63,6 @@
     font-size: 0.95em;
     line-height: 1.4;
 }
-
 
 
 
