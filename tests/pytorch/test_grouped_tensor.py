@@ -50,6 +50,14 @@ reason_for_no_fp8_block_scaling_grouped = (
 )
 
 
+def test_mark_grouped_tensor_supports_plain_tensor():
+    tensor = torch.empty(16)
+
+    mark_grouped_tensor(tensor)
+
+    assert tensor.grouped_tensor_scale_inv is False
+
+
 def test_mark_grouped_tensor_supports_unquantized_rowwise_storage():
     rowwise_data = torch.empty(16)
     grouped_tensor = SimpleNamespace(

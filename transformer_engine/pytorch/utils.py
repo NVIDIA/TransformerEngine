@@ -311,23 +311,39 @@ def mark_grouped_tensor(*tensors: List[Any]):
     Megatron-LM to detect which tensors are dynamic (varying shapes)
     and remove the padding before doing the `save_for_backward` to
     save memory.
-    Quantized grouped tensors save their columnwise data and scale metadata;
-    unquantized grouped tensors save their rowwise activation data."""
+
+    Plain tensors are saved directly. Grouped tensors are decomposed by
+    `prepare_for_saving`: unquantized BF16/FP16 activations save their
+    rowwise data, while quantized activations save their columnwise data
+    and scale metadata.
+    """
     for tensor in tensors:
         if tensor is None:
             continue
-        if hasattr(tensor, "columnwise_data"):
-            if tensor.columnwise_data is not None:
-                assert (
-                    tensor.columnwise_scale_inv is not None
-                ), "Columnwise scale inverse is not set for grouped tensor"
-                setattr(tensor.columnwise_data, "grouped_tensor_scale_inv", False)
-                setattr(tensor.columnwise_scale_inv, "grouped_tensor_scale_inv", True)
-            else:
-                assert tensor.rowwise_data is not None, "Grouped tensor has no activation data"
-                setattr(tensor.rowwise_data, "grouped_tensor_scale_inv", False)
-        else:
+
+        if not hasattr(tensor, "columnwise_data"):
+            # Plain tensor, e.g. a fused-MLP activation input.
             setattr(tensor, "grouped_tensor_scale_inv", False)
+            continue
+
+        # Grouped tensor: mark the underlying tensors that `prepare_for_saving`
+        # will pass to `save_for_backward`, rather than the storage wrapper.
+        if tensor.columnwise_data is None:
+            # Unquantized BF16/FP16 grouped tensor.
+            saved_activation = tensor.rowwise_data
+            saved_scale_inv = None
+        else:
+            # Quantized grouped tensor saved in the representation used by wgrad.
+            saved_activation = tensor.columnwise_data
+            saved_scale_inv = tensor.columnwise_scale_inv
+            assert (
+                saved_scale_inv is not None
+            ), "Columnwise scale inverse is not set for grouped tensor"
+
+        assert saved_activation is not None, "Grouped tensor has no activation data"
+        setattr(saved_activation, "grouped_tensor_scale_inv", False)
+        if saved_scale_inv is not None:
+            setattr(saved_scale_inv, "grouped_tensor_scale_inv", True)
 
 
 def split_tensor_along_dim(
