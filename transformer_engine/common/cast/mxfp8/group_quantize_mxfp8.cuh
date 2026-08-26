@@ -97,6 +97,8 @@ struct CastTraitsImpl {
   static_assert(BUFF_DIM_Y == SCALE_DIM_Y);
   static_assert(PREFETCH_STAGES > 0);
   static_assert(STAGES >= PREFETCH_STAGES);
+  static_assert(STAGES % BUFFS_NUM == 0,
+                "Persistent jobs reset the shared-memory ring and require aligned stage counts");
   static_assert(CHUNK_DIM_Y % BUFF_DIM_Y == 0);
   static_assert(CHUNK_DIM_X % TILE_DIM_X == 0);
   static_assert(CHUNK_DIM_Y % TILE_DIM_Y == 0);
@@ -171,14 +173,11 @@ LaunchConfig get_launch_config(const size_t first_logical_dim, const size_t last
     const size_t static_grid_size = sm_num * CastTraits::STATIC_PERSISTENT_BLOCKS_PER_SM;
     NVTE_CHECK(static_grid_size > 0, "Static persistent grid size must be greater than zero.");
 
-    size_t estimated_work_blocks = config.work_blocks_X * config.work_blocks_Y;
-    estimated_work_blocks = DIVUP(estimated_work_blocks, static_cast<size_t>(CastTraits::STAGES_X));
-    const size_t requested_workers_per_tensor =
-        std::max<size_t>(size_t{1}, static_grid_size / num_tensors);
-    const size_t average_work_blocks_per_tensor =
-        std::max<size_t>(size_t{1}, DIVUP(estimated_work_blocks, num_tensors));
-    const size_t workers_per_tensor =
-        std::min(requested_workers_per_tensor, average_work_blocks_per_tensor);
+    size_t estimated_work_blocks = DIVUP(config.work_blocks_X * config.work_blocks_Y,
+                                         static_cast<size_t>(CastTraits::STAGES_X));
+    const size_t requested_workers_per_tensor = std::max(1, static_grid_size / num_tensors);
+    const size_t average_work_blocks_per_tensor = std::max(1, DIVUP(estimated_work_blocks, num_tensors));
+    const size_t workers_per_tensor = std::min(requested_workers_per_tensor, average_work_blocks_per_tensor);
     config.grid = dim3(workers_per_tensor, num_tensors);
   }
   return config;
@@ -969,7 +968,14 @@ __global__ void __launch_bounds__(CastTraits::THREADS_PER_CHUNK) group_quantize_
       ptx::mbarrier_wait_parity_acquire_cta_shared_cta(&IN_buff_readable_mbar[buff_in],
                                                        IN_buff_readable_parity[buff_in]);
       IN_buff_readable_parity[buff_in] ^= 1;
-      ptx::cp_async_bulk_wait_group_read<PREFETCH_STAGES>();
+
+      // Bulk async-groups are per-thread. Only the leading thread issues and commits the TMA
+      // stores, so it is also the only thread whose wait observes their completion. Hand that
+      // completion off to every cooperative writer before the output ring buffer is reused.
+      if (leading_thread) {
+        ptx::cp_async_bulk_wait_group_read<PREFETCH_STAGES>();
+      }
+      __syncthreads();
 
       const size_t buff = buff_in;
       const size_t stage_scales_offset_X_rowwise =
@@ -1073,6 +1079,12 @@ __global__ void __launch_bounds__(CastTraits::THREADS_PER_CHUNK) group_quantize_
     }
   }
 
+  // Drain every TMA store before the CTA releases its shared-memory source buffers.
+  if (leading_thread) {
+    ptx::cp_async_bulk_wait_group();
+  }
+  __syncthreads();
+
   destroy_barriers<BUFFS_NUM>(IN_buff_readable_mbar, leading_thread);
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
@@ -1133,7 +1145,9 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
   const size_t elts_total = first_logical_dim * last_logical_dim;
 
   const size_t num_tensors = input->num_tensors;
-  NVTE_CHECK(num_tensors > 0, "Grouped tensor must contain at least one tensor.");
+  NVTE_CHECK(num_tensors > 0 && num_tensors <= MAX_SUPPORTED_TENSOR_DESCRIPTORS,
+             "Number of tensors in a group must be between 1 and ",
+             MAX_SUPPORTED_TENSOR_DESCRIPTORS, ".");
 
   const bool with_gemm_swizzled_scales = output->with_gemm_swizzled_scales;
   const bool use_2d_quantization = quant_config != nullptr && quant_config->mxfp8_2d_quantization;
