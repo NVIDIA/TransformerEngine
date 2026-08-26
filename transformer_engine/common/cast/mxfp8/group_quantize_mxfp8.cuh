@@ -175,9 +175,9 @@ LaunchConfig get_launch_config(const size_t first_logical_dim, const size_t last
 
     size_t estimated_work_blocks = DIVUP(config.work_blocks_X * config.work_blocks_Y,
                                          static_cast<size_t>(CastTraits::STAGES_X));
-    const size_t requested_workers_per_tensor = std::max(1, static_grid_size / num_tensors);
+    const size_t requested_workers_per_tensor = std::max(static_cast<size_t>(1), static_grid_size / num_tensors);
     const size_t average_work_blocks_per_tensor =
-        std::max(1, DIVUP(estimated_work_blocks, num_tensors));
+        std::max(static_cast<size_t>(1), DIVUP(estimated_work_blocks, num_tensors));
     const size_t workers_per_tensor =
         std::min(requested_workers_per_tensor, average_work_blocks_per_tensor);
     config.grid = dim3(workers_per_tensor, num_tensors);
