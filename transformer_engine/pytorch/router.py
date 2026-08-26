@@ -43,7 +43,7 @@ _QB_BOUNDS_VALIDATED_VERSION_ATTR = "_nvte_qb_bounds_validated_version"
 
 
 def _validate_qb_bin_bounds(bin_bounds: torch.Tensor) -> bool:
-    """Validate CUDA-resident QB bounds once per PyTorch tensor version."""
+    """Validate QB bounds eagerly while allowing prevalidated mutable CUDA-graph inputs."""
     if not (
         isinstance(bin_bounds, torch.Tensor)
         and bin_bounds.is_cuda
@@ -55,10 +55,15 @@ def _validate_qb_bin_bounds(bin_bounds: torch.Tensor) -> bool:
         return False
 
     version = bin_bounds._version
-    if getattr(bin_bounds, _QB_BOUNDS_VALIDATED_VERSION_ATTR, None) == version:
+    validated_version = getattr(bin_bounds, _QB_BOUNDS_VALIDATED_VERSION_ATTR, None)
+    if validated_version == version:
         return True
     with torch.cuda.device(bin_bounds.device):
         if torch.cuda.is_current_stream_capturing():
+            if validated_version is not None:
+                # CUDA graphs support persistent input tensors whose values are updated in place
+                # between capture and replay. The kernel reads the current bounds by device pointer.
+                return True
             raise RuntimeError(
                 "QB bin_bounds must be validated by an eager router call before CUDA graph capture"
             )
