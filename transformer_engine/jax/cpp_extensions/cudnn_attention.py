@@ -51,12 +51,6 @@ _UID_DV = 21
 _UID_DBIAS = 22
 _UID_DSINK = 23
 _UID_ATTN_SCALE = 24
-_UID_OFFSET_MULT_Q = 30
-_UID_OFFSET_MULT_K = 31
-_UID_OFFSET_MULT_V = 32
-_UID_OFFSET_MULT_O = 33
-_UID_OFFSET_MULT_STATS = 34
-_UID_OFFSET_MULT_MAX = 35
 
 
 @dataclass(frozen=True)
@@ -216,6 +210,28 @@ def _device_arch() -> int:
     return int(capabilities[0]) if capabilities else 0
 
 
+def ragged_graph_batch_size(input_batch: int, max_segments_per_seq: int) -> int:
+    """Match TE common's cuDNN graph batch-size bucket for ragged attention."""
+    batch = int(input_batch) * int(max_segments_per_seq)
+    if _device_arch() == 120:
+        return batch
+    if batch <= 32:
+        return 32
+    if batch <= 512:
+        return 1 << (batch - 1).bit_length()
+    return ((batch + 511) // 512) * 512
+
+
+def _ragged_graph_token_count(tokens: int) -> int:
+    """Match TE common's cuDNN graph token-count bucket for ragged attention."""
+    tokens = int(tokens)
+    if tokens <= 1024:
+        return 1024
+    if tokens <= 32768:
+        return 1 << (tokens - 1).bit_length()
+    return ((tokens + 32767) // 32768) * 32768
+
+
 def _graph_dimensions(info: _LayoutInfo, config):
     """Return logical cuDNN B/H/S dimensions and physical auxiliary shapes."""
     is_ragged = config.qkv_layout.is_thd()
@@ -228,10 +244,13 @@ def _graph_dimensions(info: _LayoutInfo, config):
             graph_sq = info.q_max_seqlen
             graph_skv = info.kv_max_seqlen
         else:
-            # Static token extents replace common's quantized max-token buckets.  JAX already
-            # compiles per local shape, so exact extents avoid unnecessary graph variants.
-            graph_sq = info.input_batch * info.q_max_seqlen
-            graph_skv = info.input_batch * info.kv_max_seqlen
+            graph_batch = ragged_graph_batch_size(
+                info.input_batch, config.max_segments_per_seq
+            )
+            graph_sq = _ragged_graph_token_count(info.input_batch * info.q_max_seqlen)
+            graph_skv = _ragged_graph_token_count(
+                info.input_batch * info.kv_max_seqlen
+            )
     else:
         graph_batch = info.input_batch
         graph_sq = info.q_max_seqlen
@@ -269,66 +288,24 @@ def _tensor(graph, cudnn, *, name, dim, stride, dtype, uid):
     )
 
 
-def _ragged_offset(graph, cudnn, name: str, uid: int, graph_batch: int):
+def _ragged_offset(graph, cudnn, name: str, uid: int, graph_batch: int, dtype):
     return _tensor(
         graph,
         cudnn,
         name=name,
         dim=(graph_batch + 1, 1, 1, 1),
         stride=(1, 1, 1, 1),
-        dtype=cudnn.data_type.INT32,
+        dtype=dtype,
         uid=uid,
     )
 
 
-def _set_ragged(
-    tensor,
-    offset,
-    multiplier: int,
-    *,
-    graph=None,
-    cudnn=None,
-    multiplier_uid=None,
-    scalar_uids=None,
-    scalar_values=None,
-    materialize_multiplier: bool = False,
-):
-    """Attach token-unit offsets, optionally materializing element offsets in the graph.
-
-    The unified SDPA engine understands ``ragged_offset_multiplier`` directly.  cuDNN's
-    dropout forward path currently selects the composite engine, so for that case an
-    INT64 pointwise node performs the conversion that TE common used to launch as a
-    separate CUDA kernel.
-    """
-    if materialize_multiplier:
-        use_int64 = get_cudnn_version() >= (9, 5, 0)
-        offset_data_type = cudnn.data_type.INT64 if use_int64 else cudnn.data_type.INT32
-        offset_numpy_type = np.int64 if use_int64 else np.int32
-        scale = _scalar_tensor(
-            graph,
-            cudnn,
-            f"ragged_multiplier_{multiplier_uid}",
-            multiplier_uid,
-            offset_data_type,
-        )
-        effective_offset = graph.mul(
-            offset,
-            scale,
-            compute_data_type=offset_data_type,
-            name=f"scale_ragged_offset_{multiplier_uid}",
-        )
-        effective_offset.set_data_type(offset_data_type)
-        effective_offset.set_dim((offset.get_dim()[0], 1, 1, 1)).set_stride(
-            (1, 1, 1, 1)
-        )
-        tensor.set_ragged_offset(effective_offset)
-        scalar_uids.append(multiplier_uid)
-        scalar_values.append(np.asarray(multiplier, dtype=offset_numpy_type).tobytes())
-        return effective_offset
-    else:
-        tensor.set_ragged_offset(offset)
-        tensor.set_ragged_offset_multiplier(int(multiplier))
-        return offset
+def _ragged_offset_spec(cudnn):
+    """Return the cuDNN datatype and byte size for external element offsets."""
+    use_int64 = get_cudnn_version() >= (9, 5, 0)
+    dtype = cudnn.data_type.INT64 if use_int64 else cudnn.data_type.INT32
+    itemsize = np.dtype(np.int64 if use_int64 else np.int32).itemsize
+    return dtype, itemsize
 
 
 def _mask_options(cudnn, info: _LayoutInfo, config):
@@ -513,62 +490,29 @@ def _build_fwd_graph(q_aval, k_aval, v_aval, bias_aval, config) -> AttentionGrap
 
     offset_q = offset_k = offset_v = offset_o = offset_stats = None
     if config.qkv_layout.is_thd():
-        offset_q = _ragged_offset(graph, cudnn, "offset_q", _UID_OFFSET_Q, graph_batch)
-        offset_k = _ragged_offset(graph, cudnn, "offset_k", _UID_OFFSET_K, graph_batch)
-        offset_v = _ragged_offset(graph, cudnn, "offset_v", _UID_OFFSET_V, graph_batch)
-        offset_o = _ragged_offset(graph, cudnn, "offset_o", _UID_OFFSET_O, graph_batch)
-        materialize_offsets = True
-        _set_ragged(
-            q,
-            offset_q,
-            info.q_heads * info.qk_dim * (3 if config.qkv_layout.is_qkvpacked() else 1),
-            graph=graph,
-            cudnn=cudnn,
-            multiplier_uid=_UID_OFFSET_MULT_Q,
-            scalar_uids=scalar_uids,
-            scalar_values=scalar_values,
-            materialize_multiplier=materialize_offsets,
+        offset_dtype, offset_itemsize = _ragged_offset_spec(cudnn)
+        offset_bytes = (graph_batch + 1) * offset_itemsize
+        offset_q = _ragged_offset(
+            graph, cudnn, "offset_q", _UID_OFFSET_Q, graph_batch, offset_dtype
         )
-        if config.qkv_layout.is_qkvpacked():
-            kv_offset_operand = 8
-            kv_multiplier = 3 * info.q_heads * info.qk_dim
-        else:
-            kv_offset_operand = 9
-            kv_multiplier = (
-                2 * info.kv_heads * info.qk_dim
-                if config.qkv_layout.is_kvpacked()
-                else info.kv_heads * info.qk_dim
-            )
-        _set_ragged(
-            k,
-            offset_k,
-            kv_multiplier,
-            graph=graph,
-            cudnn=cudnn,
-            multiplier_uid=_UID_OFFSET_MULT_K,
-            scalar_uids=scalar_uids,
-            scalar_values=scalar_values,
-            materialize_multiplier=materialize_offsets,
+        offset_k = _ragged_offset(
+            graph, cudnn, "offset_k", _UID_OFFSET_K, graph_batch, offset_dtype
         )
-        _set_ragged(
-            v,
-            offset_v,
-            kv_multiplier
-            if config.qkv_layout.is_kvpacked()
-            else info.kv_heads * info.v_dim,
-            graph=graph,
-            cudnn=cudnn,
-            multiplier_uid=_UID_OFFSET_MULT_V,
-            scalar_uids=scalar_uids,
-            scalar_values=scalar_values,
-            materialize_multiplier=materialize_offsets,
+        offset_v = _ragged_offset(
+            graph, cudnn, "offset_v", _UID_OFFSET_V, graph_batch, offset_dtype
         )
+        offset_o = _ragged_offset(
+            graph, cudnn, "offset_o", _UID_OFFSET_O, graph_batch, offset_dtype
+        )
+        q.set_ragged_offset(offset_q)
+        k.set_ragged_offset(offset_k)
+        v.set_ragged_offset(offset_v)
         input_bindings.extend(
             (
-                GraphBinding(_UID_OFFSET_Q, 8),
-                GraphBinding(_UID_OFFSET_K, kv_offset_operand),
-                GraphBinding(_UID_OFFSET_V, kv_offset_operand),
-                GraphBinding(_UID_OFFSET_O, 8),
+                GraphBinding(_UID_OFFSET_Q, 10, 0),
+                GraphBinding(_UID_OFFSET_K, 10, offset_bytes),
+                GraphBinding(_UID_OFFSET_V, 10, 2 * offset_bytes),
+                GraphBinding(_UID_OFFSET_O, 10, 3 * offset_bytes),
             )
         )
 
@@ -616,20 +560,15 @@ def _build_fwd_graph(q_aval, k_aval, v_aval, bias_aval, config) -> AttentionGrap
         )
         if ragged_stats:
             offset_stats = _ragged_offset(
-                graph, cudnn, "offset_stats", _UID_OFFSET_STATS, graph_batch
+                graph,
+                cudnn,
+                "offset_stats",
+                _UID_OFFSET_STATS,
+                graph_batch,
+                dtype=offset_dtype,
             )
-            _set_ragged(
-                max_tensor,
-                offset_stats,
-                info.q_heads,
-                graph=graph,
-                cudnn=cudnn,
-                multiplier_uid=_UID_OFFSET_MULT_MAX,
-                scalar_uids=scalar_uids,
-                scalar_values=scalar_values,
-                materialize_multiplier=True,
-            )
-            input_bindings.append(GraphBinding(_UID_OFFSET_STATS, 8))
+            max_tensor.set_ragged_offset(offset_stats)
+            input_bindings.append(GraphBinding(_UID_OFFSET_STATS, 10, 4 * offset_bytes))
         max_tensor.set_output(True)
         kwargs["score_max"] = max_tensor
         output_bindings.append(GraphBinding(_UID_MAX, 2))
@@ -640,38 +579,23 @@ def _build_fwd_graph(q_aval, k_aval, v_aval, bias_aval, config) -> AttentionGrap
     ).set_stride(_matrix_stride(info, config.qkv_layout, "o", graph_sq, graph_skv))
     output.set_data_type(io_dtype)
     if config.qkv_layout.is_thd():
-        _set_ragged(
-            output,
-            offset_o,
-            info.q_heads * info.v_dim,
-            graph=graph,
-            cudnn=cudnn,
-            multiplier_uid=_UID_OFFSET_MULT_O,
-            scalar_uids=scalar_uids,
-            scalar_values=scalar_values,
-            materialize_multiplier=True,
-        )
+        output.set_ragged_offset(offset_o)
 
     stats.set_output(True).set_uid(_UID_STATS).set_data_type(cudnn.data_type.FLOAT)
     stats.set_dim((graph_batch, info.q_heads, graph_sq, 1))
     if ragged_stats:
         if offset_stats is None:
             offset_stats = _ragged_offset(
-                graph, cudnn, "offset_stats", _UID_OFFSET_STATS, graph_batch
+                graph,
+                cudnn,
+                "offset_stats",
+                _UID_OFFSET_STATS,
+                graph_batch,
+                dtype=offset_dtype,
             )
-            input_bindings.append(GraphBinding(_UID_OFFSET_STATS, 8))
+            input_bindings.append(GraphBinding(_UID_OFFSET_STATS, 10, 4 * offset_bytes))
         stats.set_stride((info.q_heads * graph_sq, 1, info.q_heads, 1))
-        _set_ragged(
-            stats,
-            offset_stats,
-            info.q_heads,
-            graph=graph,
-            cudnn=cudnn,
-            multiplier_uid=_UID_OFFSET_MULT_STATS,
-            scalar_uids=scalar_uids,
-            scalar_values=scalar_values,
-            materialize_multiplier=True,
-        )
+        stats.set_ragged_offset(offset_stats)
     else:
         stats.set_stride((info.q_heads * graph_sq, graph_sq, 1, 1))
 
@@ -900,95 +824,44 @@ def _build_bwd_graph(
         )
 
     if config.qkv_layout.is_thd():
-        offset_q = _ragged_offset(graph, cudnn, "offset_q", _UID_OFFSET_Q, graph_batch)
-        offset_k = _ragged_offset(graph, cudnn, "offset_k", _UID_OFFSET_K, graph_batch)
-        offset_v = _ragged_offset(graph, cudnn, "offset_v", _UID_OFFSET_V, graph_batch)
-        offset_o = _ragged_offset(graph, cudnn, "offset_o", _UID_OFFSET_O, graph_batch)
-        q_mult = (
-            info.q_heads * info.qk_dim * (3 if config.qkv_layout.is_qkvpacked() else 1)
+        offset_dtype, offset_itemsize = _ragged_offset_spec(cudnn)
+        offset_bytes = (graph_batch + 1) * offset_itemsize
+        offset_q = _ragged_offset(
+            graph, cudnn, "offset_q", _UID_OFFSET_Q, graph_batch, offset_dtype
         )
-        kv_mult = (
-            3 * info.q_heads * info.qk_dim
-            if config.qkv_layout.is_qkvpacked()
-            else 2 * info.kv_heads * info.qk_dim
-            if config.qkv_layout.is_kvpacked()
-            else info.kv_heads * info.qk_dim
+        offset_k = _ragged_offset(
+            graph, cudnn, "offset_k", _UID_OFFSET_K, graph_batch, offset_dtype
         )
-        v_mult = (
-            kv_mult
-            if not config.qkv_layout.is_separate()
-            else info.kv_heads * info.v_dim
+        offset_v = _ragged_offset(
+            graph, cudnn, "offset_v", _UID_OFFSET_V, graph_batch, offset_dtype
         )
-        effective_q_offset = _set_ragged(
-            q,
-            offset_q,
-            q_mult,
-            graph=graph,
-            cudnn=cudnn,
-            multiplier_uid=_UID_OFFSET_MULT_Q,
-            scalar_uids=scalar_uids,
-            scalar_values=scalar_values,
-            materialize_multiplier=True,
+        offset_o = _ragged_offset(
+            graph, cudnn, "offset_o", _UID_OFFSET_O, graph_batch, offset_dtype
         )
-        effective_k_offset = _set_ragged(
-            k,
-            offset_k,
-            kv_mult,
-            graph=graph,
-            cudnn=cudnn,
-            multiplier_uid=_UID_OFFSET_MULT_K,
-            scalar_uids=scalar_uids,
-            scalar_values=scalar_values,
-            materialize_multiplier=True,
-        )
-        effective_v_offset = _set_ragged(
-            v,
-            offset_v,
-            v_mult,
-            graph=graph,
-            cudnn=cudnn,
-            multiplier_uid=_UID_OFFSET_MULT_V,
-            scalar_uids=scalar_uids,
-            scalar_values=scalar_values,
-            materialize_multiplier=True,
-        )
-        effective_o_offset = _set_ragged(
-            output,
-            offset_o,
-            info.q_heads * info.v_dim,
-            graph=graph,
-            cudnn=cudnn,
-            multiplier_uid=_UID_OFFSET_MULT_O,
-            scalar_uids=scalar_uids,
-            scalar_values=scalar_values,
-            materialize_multiplier=True,
-        )
-        doutput.set_ragged_offset(effective_o_offset)
-        kv_operand = 11 if config.qkv_layout.is_qkvpacked() else 12
+        q.set_ragged_offset(offset_q)
+        k.set_ragged_offset(offset_k)
+        v.set_ragged_offset(offset_v)
+        output.set_ragged_offset(offset_o)
+        doutput.set_ragged_offset(offset_o)
         input_bindings.extend(
             (
-                GraphBinding(_UID_OFFSET_Q, 11),
-                GraphBinding(_UID_OFFSET_K, kv_operand),
-                GraphBinding(_UID_OFFSET_V, kv_operand),
-                GraphBinding(_UID_OFFSET_O, 11),
+                GraphBinding(_UID_OFFSET_Q, 13, 0),
+                GraphBinding(_UID_OFFSET_K, 13, offset_bytes),
+                GraphBinding(_UID_OFFSET_V, 13, 2 * offset_bytes),
+                GraphBinding(_UID_OFFSET_O, 13, 3 * offset_bytes),
             )
         )
         if ragged_stats:
             offset_stats = _ragged_offset(
-                graph, cudnn, "offset_stats", _UID_OFFSET_STATS, graph_batch
-            )
-            _set_ragged(
-                stats,
-                offset_stats,
-                info.q_heads,
                 graph=graph,
                 cudnn=cudnn,
-                multiplier_uid=_UID_OFFSET_MULT_STATS,
-                scalar_uids=scalar_uids,
-                scalar_values=scalar_values,
-                materialize_multiplier=True,
+                name="offset_stats",
+                uid=_UID_OFFSET_STATS,
+                graph_batch=graph_batch,
+                dtype=offset_dtype,
             )
-            input_bindings.append(GraphBinding(_UID_OFFSET_STATS, 11))
+            stats.set_ragged_offset(offset_stats)
+            input_bindings.append(GraphBinding(_UID_OFFSET_STATS, 13, 4 * offset_bytes))
 
     if _is_dropout(config):
         seed = io_tensor(
@@ -1027,9 +900,9 @@ def _build_bwd_graph(
         (graph_batch, info.kv_heads, graph_skv, info.v_dim)
     ).set_stride(v_stride)
     if config.qkv_layout.is_thd():
-        dq.set_ragged_offset(effective_q_offset)
-        dk.set_ragged_offset(effective_k_offset)
-        dv.set_ragged_offset(effective_v_offset)
+        dq.set_ragged_offset(offset_q)
+        dk.set_ragged_offset(offset_k)
+        dv.set_ragged_offset(offset_v)
 
     workspace, data, version = finalize_graph(
         cudnn, graph, description="fused-attention backward"

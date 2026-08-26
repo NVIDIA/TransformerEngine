@@ -40,7 +40,12 @@ from ..sharding import (
     with_sharding_constraint_by_logical_axes,
 )
 from .base import BasePrimitive, register_primitive
-from .cudnn_attention import build_bwd_graph, build_fwd_graph, is_fused_attn_supported
+from .cudnn_attention import (
+    build_bwd_graph,
+    build_fwd_graph,
+    is_fused_attn_supported,
+    ragged_graph_batch_size,
+)
 from .misc import (
     check_valid_batch_dims,
     get_all_device_compute_capability,
@@ -252,6 +257,77 @@ class _FusedAttnRNGStateChecker:
         ), f"Expected seed.size >= {self.seed_size}, but got seed.size={seed.size}"
 
         return seed
+
+
+def _multiply_offsets_as_uint64_words(offsets, multiplier):
+    """Return unsigned 64-bit products as interleaved low/high uint32 words."""
+    values = offsets.astype(jnp.uint32)
+    scale = jnp.asarray(multiplier, dtype=jnp.uint32)
+    mask = jnp.asarray(0xFFFF, dtype=jnp.uint32)
+
+    value_lo = values & mask
+    value_hi = values >> 16
+    scale_lo = scale & mask
+    scale_hi = scale >> 16
+
+    product_lo = value_lo * scale_lo
+    product_mid_lo = value_lo * scale_hi
+    product_mid_hi = value_hi * scale_lo
+    product_hi = value_hi * scale_hi
+    carry = (product_lo >> 16) + (product_mid_lo & mask) + (product_mid_hi & mask)
+
+    low_word = (product_lo & mask) | ((carry & mask) << 16)
+    high_word = (
+        product_hi + (product_mid_lo >> 16) + (product_mid_hi >> 16) + (carry >> 16)
+    )
+    return jnp.stack((low_word, high_word), axis=-1)
+
+
+def _pack_ragged_offsets(
+    q_seq_offsets,
+    k_seq_offsets,
+    qkv_layout,
+    attn_heads,
+    num_gqa_groups,
+    q_head_dim,
+    v_head_dim,
+):
+    """Pack Q/K/V/O/Stats element offsets into one JAX buffer."""
+    q_multiplier = attn_heads * q_head_dim
+    if qkv_layout.is_qkvpacked():
+        q_multiplier *= 3
+        k_multiplier = v_multiplier = q_multiplier
+    elif qkv_layout.is_kvpacked():
+        k_multiplier = v_multiplier = 2 * num_gqa_groups * q_head_dim
+    else:
+        k_multiplier = num_gqa_groups * q_head_dim
+        v_multiplier = num_gqa_groups * v_head_dim
+    offsets_and_multipliers = (
+        (q_seq_offsets, q_multiplier),
+        (k_seq_offsets, k_multiplier),
+        (k_seq_offsets, v_multiplier),
+        (q_seq_offsets, attn_heads * v_head_dim),
+        (q_seq_offsets, attn_heads),
+    )
+    if get_cudnn_version() < (9, 5, 0):
+        return jnp.stack(
+            tuple(
+                offsets.astype(jnp.int32) * jnp.asarray(multiplier, dtype=jnp.int32)
+                for offsets, multiplier in offsets_and_multipliers
+            )
+        )
+    return jnp.stack(
+        tuple(
+            _multiply_offsets_as_uint64_words(offsets, multiplier)
+            for offsets, multiplier in offsets_and_multipliers
+        )
+    )
+
+
+def _pad_ragged_metadata(values, size, fill_value):
+    """Pad compact sequence metadata to the bucketed cuDNN graph extent."""
+    values = values.flatten()[:size]
+    return jnp.pad(values, (0, size - values.size), constant_values=fill_value)
 
 
 class FusedAttnFwdPrimitive(BasePrimitive):
@@ -486,9 +562,15 @@ class FusedAttnFwdPrimitive(BasePrimitive):
                 )
                 return offsets_2d
 
-            batch, q_max_seqlen, kv_max_seqlen, *_ = FusedAttnHelper.parse_qkv_aval(
-                q, k, v, config.qkv_layout
-            )
+            (
+                batch,
+                q_max_seqlen,
+                kv_max_seqlen,
+                attn_heads,
+                num_gqa_groups,
+                q_head_dim,
+                v_head_dim,
+            ) = FusedAttnHelper.parse_qkv_aval(q, k, v, config.qkv_layout)
             assert len(batch) == 1, f"Expected len(batch) == 1, but got {len(batch)=}"
             kv_batch = q_batch = batch[0]
 
@@ -519,6 +601,29 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             )
             k_seq_offsets = _fix_len_take(
                 k_seq_offsets, k_seq_offsets >= 0, fill_value=kv_batch * kv_max_seqlen
+            )
+
+            graph_batch = ragged_graph_batch_size(q_batch, config.max_segments_per_seq)
+            q_seqlen = _pad_ragged_metadata(q_seqlen, graph_batch, fill_value)
+            kv_seqlen = _pad_ragged_metadata(kv_seqlen, graph_batch, fill_value)
+            q_seq_offsets = _pad_ragged_metadata(
+                q_seq_offsets, graph_batch + 1, q_batch * q_max_seqlen
+            )
+            k_seq_offsets = _pad_ragged_metadata(
+                k_seq_offsets, graph_batch + 1, kv_batch * kv_max_seqlen
+            )
+
+            # Supported cuDNN ragged graphs require external element offsets. JAX disables
+            # x64 by default, so represent INT64 offsets as pairs of uint32 words and pack
+            # all five graph offsets into one otherwise-unused inner operand.
+            _q_segment_ids = _pack_ragged_offsets(
+                q_seq_offsets,
+                k_seq_offsets,
+                config.qkv_layout,
+                attn_heads,
+                num_gqa_groups,
+                q_head_dim,
+                v_head_dim,
             )
 
         output, softmax_aux, max_tensor, rng_state, _ = FusedAttnFwdPrimitive.inner_primitive.bind(
@@ -1020,9 +1125,15 @@ class FusedAttnBwdPrimitive(BasePrimitive):
                 )
                 return offsets_2d
 
-            batch, q_max_seqlen, kv_max_seqlen, *_ = FusedAttnHelper.parse_qkv_aval(
-                q, k, v, config.qkv_layout
-            )
+            (
+                batch,
+                q_max_seqlen,
+                kv_max_seqlen,
+                attn_heads,
+                num_gqa_groups,
+                q_head_dim,
+                v_head_dim,
+            ) = FusedAttnHelper.parse_qkv_aval(q, k, v, config.qkv_layout)
             assert (
                 len(batch) == 1
             ), f"Expected len(batch) == 1, but got len(batch)={len(batch)}, batch={batch}"
@@ -1054,6 +1165,25 @@ class FusedAttnBwdPrimitive(BasePrimitive):
             )
             k_seq_offsets = _fix_len_take(
                 k_seq_offsets, k_seq_offsets >= 0, fill_value=kv_batch * kv_max_seqlen
+            )
+
+            graph_batch = ragged_graph_batch_size(q_batch, config.max_segments_per_seq)
+            q_seqlen = _pad_ragged_metadata(q_seqlen, graph_batch, fill_value)
+            kv_seqlen = _pad_ragged_metadata(kv_seqlen, graph_batch, fill_value)
+            q_seq_offsets = _pad_ragged_metadata(
+                q_seq_offsets, graph_batch + 1, q_batch * q_max_seqlen
+            )
+            k_seq_offsets = _pad_ragged_metadata(
+                k_seq_offsets, graph_batch + 1, kv_batch * kv_max_seqlen
+            )
+            _q_segment_ids = _pack_ragged_offsets(
+                q_seq_offsets,
+                k_seq_offsets,
+                config.qkv_layout,
+                attn_heads,
+                num_gqa_groups,
+                q_head_dim,
+                v_head_dim,
             )
 
         dq, dk, dv, dbias, dsoftmax_offset, _ = FusedAttnBwdPrimitive.inner_primitive.bind(

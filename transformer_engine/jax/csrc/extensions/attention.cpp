@@ -216,8 +216,7 @@ void AppendRemainingBuffers(Variadic_Buffer_Type args, std::vector<void *> *ptrs
 }
 
 size_t BufferBytes(const Buffer_Type &buffer) {
-  return product(buffer.dimensions()) *
-         typeToSize(convert_ffi_datatype_to_te_dtype(buffer.element_type()));
+  return buffer.size_bytes();
 }
 
 void MemsetResultAsync(cudaStream_t stream, Result_Type result, int value) {
