@@ -109,10 +109,12 @@ if not _MP_ACTIVE:
 
 from transformer_engine_jax import get_device_compute_capability
 
-# TE EP NCCL primitives need SM>=90
-if get_device_compute_capability(0) < 90:
+# Grouped GEMM in the MoE custom_vjp requires Blackwell (sm_100+). The
+# TE EP NCCL primitives themselves need SM>=90, but the FFN body uses
+# grouped_gemm, so the file as a whole gates on sm_100+.
+if get_device_compute_capability(0) < 100:
     pytest.skip(
-        "MoE TE EP tests require Hopper (sm_90+) or newer for TE EP",
+        "MoE TE EP tests require Blackwell (sm_100+) for grouped GEMM",
         allow_module_level=True,
     )
 
