@@ -5,6 +5,7 @@
 from typing import Callable, Dict, Iterable, List, Tuple, Union
 import pytest
 import copy
+import gc
 import weakref
 
 import torch
@@ -1125,6 +1126,74 @@ def test_reused_capture_buffers_release_outputs_after_backward() -> None:
     assert module.previous_capture_output is not None
     assert module.previous_capture_output() is None
     reset_graphs(graphed_callables)
+
+
+def test_reset_releases_only_the_selected_callable() -> None:
+    """Reset releases one callable's graph state without retaining its peers."""
+
+    class CaptureOutputModule(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.capture_output = None
+
+        def forward(self, input_: torch.Tensor) -> torch.Tensor:
+            output = input_ * 2
+            if torch.cuda.is_current_stream_capturing():
+                self.capture_output = weakref.ref(output)
+            return output
+
+    modules = tuple(CaptureOutputModule().cuda() for _ in range(2))
+    graphed_callables = make_graphed_callables(
+        modules,
+        tuple((torch.ones(4, device="cuda", requires_grad=True),) for _ in modules),
+    )
+    capture_outputs = tuple(module.capture_output for module in modules)
+    assert all(output is not None and output() is not None for output in capture_outputs)
+
+    graphed_callables[0].reset()
+    graphed_callables[0].reset()
+    gc.collect()
+    assert capture_outputs[0]() is None
+    assert capture_outputs[1]() is not None
+
+    output = graphed_callables[1](torch.randn(4, device="cuda", requires_grad=True))
+    output.sum().backward()
+    del output
+    graphed_callables[1].reset()
+    gc.collect()
+    assert capture_outputs[1]() is None
+
+
+@pytest.mark.parametrize("with_order", (False, True))
+def test_reset_rejects_all_replay_entry_points(with_order: bool) -> None:
+    """Reset is idempotent and terminal for forward and backward replay."""
+
+    class TestModule(torch.nn.Module):
+        def forward(self, input_: torch.Tensor) -> torch.Tensor:
+            return input_ * 2
+
+    module = TestModule().cuda()
+    sample_input = torch.ones(4, device="cuda", requires_grad=True)
+    graph_options = {}
+    if with_order:
+        graph_options = {"_order": [1, -1], "_num_layers_per_chunk": [1]}
+    graphed_callable = make_graphed_callables(module, (sample_input,), **graph_options)
+    output = graphed_callable(torch.randn_like(sample_input, requires_grad=True))
+    torch.cuda.synchronize()
+
+    graphed_callable.reset()
+    graphed_callable.reset()
+    if not with_order:
+        # The eager fallback for a different training state is invalid after reset too.
+        graphed_callable.eval()
+
+    error = "has been reset and can no longer be used"
+    with pytest.raises(RuntimeError, match=error):
+        graphed_callable(torch.randn_like(sample_input, requires_grad=True))
+    with pytest.raises(RuntimeError, match=error):
+        graphed_callable.backward_dw()
+    with pytest.raises(RuntimeError, match=error):
+        output.sum().backward()
 
 
 @pytest.mark.parametrize("with_order", (False, True))

@@ -1042,12 +1042,22 @@ def _make_graphed_callables(
         static_grad_inputs,
         returned_param_grad_clone_slots,
     ):
+        is_reset = False
+
+        def ensure_not_reset():
+            """Reject replay after this callable's graph state has been released."""
+            if is_reset:
+                raise RuntimeError(
+                    "This graphed callable has been reset and can no longer be used."
+                )
+
         class Graphed(torch.autograd.Function):
             """Autograd function for graph replay."""
 
             @staticmethod
             def forward(ctx, skip_fp8_weight_update, cuda_graph_stream, cuda_graph_event, *inputs):
                 # pylint: disable=missing-function-docstring
+                ensure_not_reset()
 
                 # Set flag for whether to update FP8 weight updates
                 ctx.is_first_module = FP8GlobalStateManager.is_first_fp8_module()
@@ -1085,6 +1095,7 @@ def _make_graphed_callables(
             @torch.autograd.function.once_differentiable
             def backward(ctx, *grads):
                 # pylint: disable=missing-function-docstring
+                ensure_not_reset()
 
                 # Replay backward graph
                 if len(grads) != len(static_grad_outputs):
@@ -1133,6 +1144,7 @@ def _make_graphed_callables(
                 return (None, None, None) + tuple(grad_inputs)
 
         def functionalized(*user_args, **user_kwargs):
+            ensure_not_reset()
 
             # Decide whether to update FP8 weights
             skip_fp8_weight_update = None
@@ -1184,16 +1196,39 @@ def _make_graphed_callables(
             )
             return _tree_unflatten(out, output_unflatten_spec)
 
-        return functionalized
+        def release_static_state():
+            """Release per-callable state captured by replay closures."""
+            nonlocal fwd_graph, bwd_graph, is_reset
+            nonlocal module_params
+            nonlocal static_input_surface, static_outputs
+            nonlocal static_grad_outputs, static_grad_inputs
 
-    def make_graphed_attribute_functions(graph_idx):
-        # Get te modules for current graph
+            is_reset = True
+
+            # Drop the per-callable references that can own graph-pool storage.
+            fwd_graph = None
+            bwd_graph = None
+            module_params = ()
+            static_input_surface = ()
+            static_outputs = ()
+            static_grad_outputs = ()
+            static_grad_inputs = ()
+
+        return functionalized, release_static_state, ensure_not_reset
+
+    def make_graphed_attribute_functions(graph_idx, release_static_state, ensure_not_reset):
+        # Snapshot per-callable state so returned closures do not retain the outer lists.
+        fwd_graph = fwd_graphs[graph_idx]
+        bwd_graph = bwd_graphs[graph_idx]
+        bwd_dw_graph = bwd_dw_graphs[graph_idx]
+        need_bwd_dw = need_bwd_dw_graph.get(graph_idx, False)
         te_modules = visited_te_modules.get(graph_idx, set())
 
         # Attach backward_dw as an attribute to the graphed callable.
         def backward_dw():
-            if need_bwd_dw_graph.get(graph_idx, False):
-                bwd_dw_graphs[graph_idx].replay()
+            ensure_not_reset()
+            if need_bwd_dw:
+                bwd_dw_graph.replay()
 
                 # Trigger the grad accumulation hook for wgrad graphs.
                 for module in te_modules:
@@ -1205,16 +1240,24 @@ def _make_graphed_callables(
 
         # Attach reset as an attribute to the graphed callable.
         def reset():
-            fwd_graphs[graph_idx].reset()
-            bwd_graphs[graph_idx].reset()
-            bwd_dw_graphs[graph_idx].reset()
+            nonlocal fwd_graph, bwd_graph, bwd_dw_graph, te_modules
+
+            for graph in (fwd_graph, bwd_graph, bwd_dw_graph):
+                if graph is not None:
+                    graph.reset()
+
+            fwd_graph = None
+            bwd_graph = None
+            bwd_dw_graph = None
+            te_modules = ()
+            release_static_state()
 
         return backward_dw, reset
 
     # Put together the final graphed callables
     ret = []
     for i in range(len(sample_args)):
-        graphed = make_graphed_autograd_function(
+        graphed, release_static_state, ensure_not_reset = make_graphed_autograd_function(
             fwd_graphs[i],
             bwd_graphs[i],
             per_callable_module_params[i],
@@ -1232,8 +1275,17 @@ def _make_graphed_callables(
         te_modules = visited_te_modules.get(i, set())
         if isinstance(func, torch.nn.Module):
 
-            def make_graphed_forward(func, graph_training_state, graphed, orig_fwd, te_modules):
+            def make_graphed_forward(
+                func,
+                graph_training_state,
+                graphed,
+                orig_fwd,
+                te_modules,
+                ensure_not_reset,
+            ):
                 def new_fwd(*user_args, **user_kwargs):
+                    ensure_not_reset()
+
                     # If the module's training-or-eval state matches what we graphed,
                     # run the graph, otherwise run the original forward method
                     if func.training == graph_training_state:
@@ -1278,7 +1330,14 @@ def _make_graphed_callables(
 
                 return new_fwd
 
-            forward = make_graphed_forward(func, func.training, graphed, func.forward, te_modules)
+            forward = make_graphed_forward(
+                func,
+                func.training,
+                graphed,
+                func.forward,
+                te_modules,
+                ensure_not_reset,
+            )
             if _order is None:
                 func.forward = forward
                 ret.append(func)
@@ -1287,7 +1346,11 @@ def _make_graphed_callables(
         else:
             ret.append(graphed)
 
-        backward_dw_func, reset_func = make_graphed_attribute_functions(i)
+        backward_dw_func, reset_func = make_graphed_attribute_functions(
+            i,
+            release_static_state,
+            ensure_not_reset,
+        )
         setattr(ret[-1], "backward_dw", backward_dw_func)
         setattr(ret[-1], "reset", reset_func)
 
