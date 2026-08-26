@@ -8,7 +8,10 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from test_fused_attn import FusedAttnRunner, SeqDescFormat
+from transformer_engine_jax import get_device_compute_capability
 
+import transformer_engine.jax.cpp_extensions.cudnn_graph as cudnn_graph
 import transformer_engine.jax.cpp_extensions.flex_attention as tex_attention
 from transformer_engine.jax.attention import (
     AttnBiasType,
@@ -18,9 +21,6 @@ from transformer_engine.jax.attention import (
 )
 from transformer_engine.jax.cpp_extensions import make_fused_attn_score_mod_config
 from transformer_engine.jax.flax import transformer as flax_transformer
-from transformer_engine_jax import get_device_compute_capability
-from test_fused_attn import FusedAttnRunner, SeqDescFormat
-
 
 _CONFIG_TEST_HEAD_DIM = 128
 _CONFIG_TEST_SCALING_FACTOR = 1.0 / sqrt(_CONFIG_TEST_HEAD_DIM)
@@ -655,19 +655,19 @@ def test_fused_attn_score_mod_cudnn_frontend_version_check(monkeypatch):
         __version__ = "1.22.0"
 
     monkeypatch.setattr(
-        tex_attention.transformer_engine_jax,
+        cudnn_graph.transformer_engine_jax,
         "get_cudnn_frontend_version",
         lambda: 12200,
     )
-    assert tex_attention._check_cudnn_frontend_version_match(FakeCudnn) == 12200
+    assert cudnn_graph.check_cudnn_frontend_version_match(FakeCudnn) == 12200
 
     monkeypatch.setattr(
-        tex_attention.transformer_engine_jax,
+        cudnn_graph.transformer_engine_jax,
         "get_cudnn_frontend_version",
         lambda: 12100,
     )
     with pytest.raises(RuntimeError, match="Python/C\\+\\+ version mismatch"):
-        tex_attention._check_cudnn_frontend_version_match(FakeCudnn)
+        cudnn_graph.check_cudnn_frontend_version_match(FakeCudnn)
 
 
 def test_fused_attn_score_mod_config_stabilizes_bound_method_cache_keys():
