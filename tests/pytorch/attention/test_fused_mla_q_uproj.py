@@ -158,9 +158,7 @@ def test_fused_mla_q_uproj(tokens: int, fp8_weight: bool) -> None:
     w_raw = torch.randn(PROJ_DIM, Q_LORA_RANK, dtype=torch.bfloat16, device=device)
     if fp8_weight:
         w = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3, rowwise=True, columnwise=False)(w_raw)
-        x_run = MXFP8Quantizer(
-            fp8_dtype=tex.DType.kFloat8E4M3, rowwise=True, columnwise=True
-        )(x)
+        x_run = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3, rowwise=True, columnwise=True)(x)
     else:
         w = w_raw
         x_run = x
@@ -221,9 +219,7 @@ def test_fused_mla_q_uproj_autograd() -> None:
     from transformer_engine.pytorch.module._common import apply_normalization
 
     x2d = x.detach().reshape(tokens, Q_LORA_RANK).contiguous()
-    x_quantizer = MXFP8Quantizer(
-        fp8_dtype=tex.DType.kFloat8E4M3, rowwise=True, columnwise=True
-    )
+    x_quantizer = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3, rowwise=True, columnwise=True)
     ln_out, _, rsigma = apply_normalization(
         x2d,
         None,
@@ -236,9 +232,7 @@ def test_fused_mla_q_uproj_autograd() -> None:
         int(os.getenv("NVTE_FWD_LAYERNORM_SM_MARGIN", "0")),
         zero_centered_gamma,
     )
-    _, x_saved = FusedMLAQUpProjRopeQuant.run(
-        ln_out, w.detach(), cos_flat, sin_flat, s, b
-    )
+    _, x_saved = FusedMLAQUpProjRopeQuant.run(ln_out, w.detach(), cos_flat, sin_flat, s, b)
     grad_out = torch.randn(s, b, NUM_HEADS, HEAD_DIM, dtype=torch.bfloat16, device=device)
 
     query = FusedMLAQUpProjFunction.apply(
