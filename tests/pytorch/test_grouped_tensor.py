@@ -157,6 +157,105 @@ def _fp8bs_per_expert_scale_floats(
     return blocks_x * align4(blocks_y) if columnwise else blocks_y * align4(blocks_x)
 
 
+def _scaled_swiglu_reference(
+    input_2h: torch.Tensor,
+    prob: torch.Tensor,
+    *,
+    limit: Optional[float] = None,
+    alpha: float = 1.0,
+    glu_linear_offset: float = 0.0,
+) -> torch.Tensor:
+    """PyTorch reference for the (clamped) scaled SwiGLU that the grouped kernel recomputes.
+
+    ``limit=None`` selects plain SwiGLU, where ``alpha`` and ``glu_linear_offset`` sit at
+    their identity values. The clamps use ``torch.where`` rather than ``Tensor.clamp`` so
+    this stays character-for-character the formulation that #3424 settled on in
+    tests/pytorch/test_fusible_ops.py.
+
+    Evaluated in fp32 because the kernel also widens its bf16 input to fp32 and quantizes
+    from there; a bf16 reference would carry a rounding step the kernel never takes.
+    """
+    x_glu, x_linear = input_2h.float().chunk(2, dim=-1)
+    if limit is not None:
+        x_glu = torch.where(x_glu > limit, limit, x_glu)
+        x_linear = torch.where(x_linear < -limit, -limit, x_linear)
+        x_linear = torch.where(x_linear > limit, limit, x_linear)
+    out_glu = x_glu * torch.sigmoid(alpha * x_glu)
+    return out_glu * (x_linear + glu_linear_offset) * prob.float().unsqueeze(-1)
+
+
+# MXFP8 scales one e8m0 exponent per 32-row block of a column, and e4m3 carries 3 mantissa
+# bits, so within a block the representable values are spaced 2^-3 of the leading binade
+# apart. Using the block amax as a stand-in for that binade (it is within 2x of it) puts one
+# code step at ``amax * 2^-3``; the bound below allows two, which covers a block whose two
+# e8m0 exponents land one step apart and so quantizes at twice the spacing.
+#
+# Note the scope: this bounds the resolution the kernel is entitled to lose, so it catches a
+# defect that moves some element far. It is measured against each block's largest element, so
+# it is much weaker against a defect that perturbs many elements a little without moving that
+# one -- a wrong ``alpha`` is the case in point, since sigmoid has saturated where the largest
+# element sits. Measured on GB200, a doubled alpha lands at 1.14 steps, inside this bound.
+_MXFP8_STEPS_ALLOWED = 2.0
+_MXFP8_E4M3_MANTISSA_BITS = 3
+
+_MXFP8_SCALE_BLOCK_ROWS = 32
+
+
+def _assert_mxfp8_matches_reference(actual, expected, *, context: str) -> None:
+    """Compare two columnwise-MXFP8 tensors produced by the same quantizer.
+
+    Both sides must come from the same quantizer instance so the scale layout (compact or
+    GEMM-swizzled) and the usage flags agree; only the values being quantized differ, which
+    is what makes a resolution-level comparison meaningful.
+
+    Two independent assertions. The e8m0 scales are compared as raw exponents, where any
+    disagreement beyond one step means the two sides indexed different data rather than
+    rounded differently. The values are then compared after dequantization, elementwise,
+    against the quantization step of their own 32-row block.
+    """
+    actual_scale = actual._columnwise_scale_inv.reshape(-1).view(torch.uint8)
+    expected_scale = expected._columnwise_scale_inv.reshape(-1).view(torch.uint8)
+    assert actual_scale.shape == expected_scale.shape, (
+        f"{context}: scale size {tuple(actual_scale.shape)} != reference"
+        f" {tuple(expected_scale.shape)}"
+    )
+
+    scale_delta = (actual_scale.int() - expected_scale.int()).abs()
+    scale_bad = int((scale_delta > 1).sum())
+    assert scale_bad == 0, (
+        f"{context}: {scale_bad} of {expected_scale.numel()} scales differ by more than one"
+        f" e8m0 step (max delta {int(scale_delta.max())}); that is an indexing or layout"
+        " error, not rounding"
+    )
+
+    actual_deq = actual.dequantize().float()
+    expected_deq = expected.dequantize().float()
+    assert actual_deq.shape == expected_deq.shape, (
+        f"{context}: dequantized shape {tuple(actual_deq.shape)} != reference"
+        f" {tuple(expected_deq.shape)}"
+    )
+    rows, cols = actual_deq.shape
+    assert rows % _MXFP8_SCALE_BLOCK_ROWS == 0, (
+        f"{context}: {rows} rows is not a whole number of {_MXFP8_SCALE_BLOCK_ROWS}-row scale"
+        " blocks, so the per-block bound below would not line up"
+    )
+
+    blocked = (rows // _MXFP8_SCALE_BLOCK_ROWS, _MXFP8_SCALE_BLOCK_ROWS, cols)
+    block_amax = expected_deq.reshape(blocked).abs().amax(dim=1, keepdim=True)
+    tolerance = block_amax * _MXFP8_STEPS_ALLOWED * 2.0**-_MXFP8_E4M3_MANTISSA_BITS
+    deviation = (actual_deq - expected_deq).reshape(blocked).abs()
+
+    n_over = int((deviation > tolerance).sum())
+    floor = torch.finfo(torch.float32).tiny
+    worst = float((deviation / tolerance.clamp(min=floor)).max()) * _MXFP8_STEPS_ALLOWED
+    assert n_over == 0, (
+        f"{context}: {n_over} of {deviation.numel()} elements deviate by more than"
+        f" {_MXFP8_STEPS_ALLOWED:g} MXFP8 code steps of their block"
+        f" (worst {worst:.3f} steps); scales differing by one step:"
+        f" {int((scale_delta != 0).sum())}"
+    )
+
+
 class TestGroupedTensor:
     @staticmethod
     def setup_class(cls) -> None:
@@ -642,9 +741,10 @@ class TestGroupedTensor:
     def test_group_scaled_swiglu_shapes(self, optimize_for_gemm: bool) -> None:
         """Test the grouped scaled SwiGLU MXFP8 recompute binding plumbs shapes/dtypes.
 
-        Numerics live in tests/cpp/operator/test_cast_mxfp8_grouped_scaled_swiglu.cu; this only
-        covers the pybind layer: a [N, 2H] input plus a [N] prob must come back as a
-        columnwise-MXFP8 [N, H] grouped output.
+        Covers the pybind layer and its rejection paths: a [N, 2H] input plus a [N] prob must
+        come back as a columnwise-MXFP8 [N, H] grouped output, and non-contiguous or
+        wrong-dtype operands must raise. Values are checked in
+        ``test_group_scaled_swiglu_matches_reference``.
         """
         num_tensors = 3
         last_dim = 256
@@ -656,7 +756,7 @@ class TestGroupedTensor:
         prob = torch.rand(total_tokens, dtype=torch.bfloat16, device="cuda")
         first_dims = torch.tensor(split_sizes_list, dtype=torch.int64, device="cuda")
 
-        quantizer = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)
+        quantizer = MXFP8Quantizer(fp8_dtype=te.DType.kFloat8E4M3)
         quantizer.set_usage(rowwise=False, columnwise=True)
         quantizer.optimize_for_gemm = optimize_for_gemm
 
@@ -691,8 +791,9 @@ class TestGroupedTensor:
     def test_group_scaled_clamped_swiglu_shapes(self, optimize_for_gemm: bool) -> None:
         """Test the clamped variant's binding plumbs shapes, dtypes and clamp parameters.
 
-        Numerics live in tests/cpp/operator/test_cast_mxfp8_grouped_scaled_swiglu.cu; this only
-        covers the pybind layer.
+        Covers the pybind layer, the identity case that must collapse onto the unclamped
+        kernel, and rejection of a non-positive limit. Values are checked in
+        ``test_group_scaled_swiglu_matches_reference``.
         """
         num_tensors = 3
         last_dim = 256
@@ -703,7 +804,7 @@ class TestGroupedTensor:
         prob = torch.rand(total_tokens, dtype=torch.bfloat16, device="cuda")
         first_dims = torch.tensor(split_sizes_list, dtype=torch.int64, device="cuda")
 
-        quantizer = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)
+        quantizer = MXFP8Quantizer(fp8_dtype=te.DType.kFloat8E4M3)
         quantizer.set_usage(rowwise=False, columnwise=True)
         quantizer.optimize_for_gemm = optimize_for_gemm
 
@@ -737,6 +838,79 @@ class TestGroupedTensor:
                 tex.group_scaled_clamped_swiglu(
                     input_2h, prob, quantizer, num_tensors, bad_limit, 1.702, 1.0, first_dims
                 )
+
+    @pytest.mark.parametrize("optimize_for_gemm", [False, True])
+    @pytest.mark.parametrize("clamped", [False, True])
+    @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
+    def test_group_scaled_swiglu_matches_reference(
+        self, clamped: bool, optimize_for_gemm: bool
+    ) -> None:
+        """Check both grouped kernels against a quantized PyTorch reference, expert by expert.
+
+        Each expert's reference is computed from that expert's own rows and quantized with
+        the very quantizer the kernel used, so a wrong expert offset, a dropped prob multiply
+        or a mis-applied clamp all surface as codes differing far beyond the rounding budget
+        that ``_assert_mxfp8_matches_reference`` allows.
+        """
+        limit, alpha, glu_linear_offset = (7.0, 1.702, 1.0) if clamped else (None, 1.0, 0.0)
+
+        # Row counts are multiples of the kernel's 128-row chunk, and deliberately unequal so
+        # that a per-expert offset computed from the wrong group is caught.
+        split_sizes_list = [128, 256, 384, 512]
+        num_tensors = len(split_sizes_list)
+        last_dim = 256
+        total_tokens = sum(split_sizes_list)
+
+        # Scaled up so the tails reach past the clamp limit: standard normals essentially
+        # never exceed 7.0, which would leave the clamped path untested on its own numerics.
+        input_2h = 4.0 * torch.randn(
+            total_tokens, 2 * last_dim, dtype=torch.bfloat16, device="cuda"
+        )
+        prob = torch.rand(total_tokens, dtype=torch.bfloat16, device="cuda")
+        first_dims = torch.tensor(split_sizes_list, dtype=torch.int64, device="cuda")
+
+        quantizer = MXFP8Quantizer(fp8_dtype=te.DType.kFloat8E4M3)
+        quantizer.set_usage(rowwise=False, columnwise=True)
+        quantizer.optimize_for_gemm = optimize_for_gemm
+
+        if clamped:
+            grouped_output = tex.group_scaled_clamped_swiglu(
+                input_2h,
+                prob,
+                quantizer,
+                num_tensors,
+                limit,
+                alpha,
+                glu_linear_offset,
+                first_dims,
+            )
+        else:
+            grouped_output = tex.group_scaled_swiglu(
+                input_2h, prob, quantizer, num_tensors, first_dims
+            )
+
+        outputs = grouped_output.split_into_quantized_tensors()
+        assert len(outputs) == num_tensors
+
+        row = 0
+        for expert, (rows, output) in enumerate(zip(split_sizes_list, outputs)):
+            reference = _scaled_swiglu_reference(
+                input_2h[row : row + rows],
+                prob[row : row + rows],
+                limit=limit,
+                alpha=alpha,
+                glu_linear_offset=glu_linear_offset,
+            )
+            assert reference.shape == (rows, last_dim)
+            _assert_mxfp8_matches_reference(
+                output,
+                quantizer(reference),
+                context=(
+                    f"expert {expert} ({rows}x{last_dim}, clamped={clamped},"
+                    f" optimize_for_gemm={optimize_for_gemm})"
+                ),
+            )
+            row += rows
 
     @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
     def test_bgrad_group_quantize_zero_size_tensor(self) -> None:
