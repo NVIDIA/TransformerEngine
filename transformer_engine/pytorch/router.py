@@ -42,8 +42,28 @@ _QB_HISTOGRAM_MODE_FROM_STRING = {
 _QB_BOUNDS_VALIDATED_VERSION_ATTR = "_nvte_qb_bounds_validated_version"
 
 
+def mark_qb_bin_bounds_validated(bin_bounds: torch.Tensor) -> None:
+    """Mark the current QB bounds version as valid after a trusted device-side update.
+
+    This function does not inspect tensor values. The caller must guarantee finite FP32 bounds
+    with ``lower < upper`` and call this function outside CUDA graph capture.
+    """
+    if not (
+        isinstance(bin_bounds, torch.Tensor)
+        and bin_bounds.is_cuda
+        and bin_bounds.is_contiguous()
+        and bin_bounds.dtype == torch.float32
+        and bin_bounds.shape == (2,)
+    ):
+        raise ValueError("QB bin_bounds must be a contiguous FP32 CUDA tensor with shape [2]")
+    with torch.cuda.device(bin_bounds.device):
+        if torch.cuda.is_current_stream_capturing():
+            raise RuntimeError("QB bin_bounds must be marked valid outside CUDA graph capture")
+    setattr(bin_bounds, _QB_BOUNDS_VALIDATED_VERSION_ATTR, bin_bounds._version)
+
+
 def _validate_qb_bin_bounds(bin_bounds: torch.Tensor) -> bool:
-    """Validate QB bounds eagerly while allowing prevalidated mutable CUDA-graph inputs."""
+    """Validate QB bounds once per PyTorch tensor version."""
     if not (
         isinstance(bin_bounds, torch.Tensor)
         and bin_bounds.is_cuda
@@ -60,20 +80,15 @@ def _validate_qb_bin_bounds(bin_bounds: torch.Tensor) -> bool:
         return True
     with torch.cuda.device(bin_bounds.device):
         if torch.cuda.is_current_stream_capturing():
-            if validated_version is not None:
-                # CUDA graphs support persistent input tensors whose values are updated in place
-                # between capture and replay. Python validation is not re-entered by replay, so
-                # keeping those mutable values valid is necessarily the caller's contract.
-                return True
             raise RuntimeError(
-                "QB bin_bounds must be validated by an eager router call before CUDA graph capture"
+                "QB bin_bounds current version must be validated before CUDA graph capture"
             )
     lower, upper = bin_bounds.detach().cpu().tolist()
     if not (math.isfinite(lower) and math.isfinite(upper) and lower < upper):
         raise ValueError(
             f"QB bin_bounds values must be finite with lower < upper, got [{lower}, {upper}]"
         )
-    setattr(bin_bounds, _QB_BOUNDS_VALIDATED_VERSION_ATTR, version)
+    mark_qb_bin_bounds_validated(bin_bounds)
     return True
 
 
@@ -294,8 +309,9 @@ def fused_topk_with_score_function(
     qb_bin_bounds : torch.Tensor, optional
         FP32 CUDA tensor ``[lower, upper]`` defining uniform QB histogram bins. Values must be
         finite with ``lower < upper``. Eager calls revalidate PyTorch-tracked in-place updates.
-        CUDA graphs read updates through the captured device pointer, so callers must preserve
-        valid values across capture and replay; validate once eagerly before capture.
+        Before CUDA graph capture, validate the current version eagerly or use
+        :func:`mark_qb_bin_bounds_validated` after a trusted device-side update. Graph replays read
+        subsequent updates through the captured device pointer, so callers must preserve validity.
     qb_histogram_mode : str, optional
         ``"two_kernel"`` or ``"fused_atomic"``. Must be provided with the two QB tensors.
 

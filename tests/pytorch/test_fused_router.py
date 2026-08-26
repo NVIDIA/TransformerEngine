@@ -9,6 +9,7 @@ from transformer_engine.pytorch.router import (
     fused_topk_with_score_function,
     fused_compute_score_for_moe_aux_loss,
     fused_moe_aux_loss,
+    mark_qb_bin_bounds_validated,
 )
 import transformer_engine_torch as tex
 import pytest
@@ -732,6 +733,7 @@ def test_qb_topk_cuda_graph_uses_mutable_prevalidated_bounds(histogram_mode, use
     bin_bounds.copy_(torch.tensor([-0.25, 0.75], device="cuda"))
     assert bin_bounds.data_ptr() == bounds_data_ptr
     assert bin_bounds._version != validated_version
+    mark_qb_bin_bounds_validated(bin_bounds)
 
     histogram.zero_()
     graph = torch.cuda.CUDAGraph()
@@ -773,7 +775,7 @@ def test_qb_topk_cuda_graph_rejects_unvalidated_bounds(histogram_mode):
     histogram = torch.zeros(16, 32, device="cuda", dtype=torch.int32)
     bin_bounds = torch.tensor([-1.0, 1.0], device="cuda", dtype=torch.float32)
 
-    with pytest.raises(RuntimeError, match="validated by an eager router call"):
+    with pytest.raises(RuntimeError, match="current version must be validated"):
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
             fused_topk_with_score_function(
@@ -789,6 +791,36 @@ def test_qb_topk_cuda_graph_rejects_unvalidated_bounds(histogram_mode):
                 qb_bin_bounds=bin_bounds,
                 qb_histogram_mode=histogram_mode,
             )
+
+
+@pytest.mark.parametrize("histogram_mode", ["two_kernel", "fused_atomic"])
+def test_qb_topk_cuda_graph_rejects_stale_bounds_validation(histogram_mode):
+    logits = torch.randn(8, 16, device="cuda", dtype=torch.float32)
+    expert_bias = torch.zeros(16, device="cuda", dtype=torch.float32)
+    histogram = torch.zeros(16, 32, device="cuda", dtype=torch.int32)
+    bin_bounds = torch.tensor([-1.0, 1.0], device="cuda", dtype=torch.float32)
+
+    def run_router():
+        return fused_topk_with_score_function(
+            logits,
+            4,
+            False,
+            None,
+            None,
+            None,
+            "sigmoid",
+            expert_bias,
+            qb_histogram=histogram,
+            qb_bin_bounds=bin_bounds,
+            qb_histogram_mode=histogram_mode,
+        )
+
+    run_router()
+    bin_bounds.zero_()
+    with pytest.raises(RuntimeError, match="current version must be validated"):
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            run_router()
 
 
 @pytest.mark.parametrize(
