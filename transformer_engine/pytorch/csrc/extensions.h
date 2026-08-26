@@ -289,6 +289,11 @@ py::object swiglu(const at::Tensor &input, py::handle quantizer);
 
 py::object dswiglu(const at::Tensor &grad, const at::Tensor &input, py::handle quantizer);
 
+py::object situglu(const at::Tensor &input, py::handle quantizer, float beta1, float beta2);
+
+py::object dsituglu(const at::Tensor &grad, const at::Tensor &input, py::handle quantizer,
+                    float beta1, float beta2);
+
 py::object clamped_swiglu(const at::Tensor &input, py::handle quantizer, float limit, float alpha,
                           float glu_linear_offset);
 
@@ -298,6 +303,10 @@ py::object clamped_dswiglu(const at::Tensor &grad, const at::Tensor &input, py::
 /* Scaled activation */
 py::object scaled_swiglu(const at::Tensor &input, const at::Tensor &act_scales,
                          py::handle quantizer, int64_t glu_interleave_size);
+
+py::object scaled_situglu(const at::Tensor &input, const at::Tensor &act_scales,
+                          py::handle quantizer, float beta1, float beta2,
+                          int64_t glu_interleave_size);
 
 py::object scaled_clamped_swiglu(const at::Tensor &input, const at::Tensor &act_scales,
                                  py::handle quantizer, float limit, float alpha,
@@ -309,6 +318,10 @@ py::object scaled_srelu(const at::Tensor &input, const at::Tensor &act_scales,
 py::tuple scaled_dswiglu(const at::Tensor &grad, const at::Tensor &input,
                          const at::Tensor &act_scales, py::handle quantizer,
                          int64_t glu_interleave_size, bool compute_scale_grad);
+
+py::tuple scaled_dsituglu(const at::Tensor &grad, const at::Tensor &input,
+                          const at::Tensor &act_scales, py::handle quantizer, float beta1,
+                          float beta2, int64_t glu_interleave_size, bool compute_scale_grad);
 
 py::tuple scaled_clamped_dswiglu(const at::Tensor &grad, const at::Tensor &input,
                                  const at::Tensor &act_scales, py::handle quantizer, float limit,
@@ -728,6 +741,24 @@ void ep_dispatch(at::Tensor handle_mem, at::Tensor topk_idx, at::Tensor tokens,
                  at::Tensor topk_weights, at::Tensor recv_tokens, at::Tensor recv_topk_weights,
                  std::optional<at::Tensor> tokens_scale_inv = std::nullopt,
                  std::optional<at::Tensor> recv_scale_inv = std::nullopt);
+
+// Fused prepare + dispatch in a single call. When the recv outputs are omitted
+// (eager mode), they are sized and allocated here from the per-step recv-count:
+// prepare writes the total into pinned-host total_recv_tokens (UVA), a stream sync
+// makes it host-readable with no D2H copy, and the recv outputs are carved from it
+// and returned; this path forbids symm-mem zero-copy IO. When the caller supplies
+// the recv outputs (non-eager), they are used as-is and mutated in place with no
+// stream sync. Passing tokens_scale_inv selects the MXFP8 path (recv_scale_inv is
+// then required or, in eager mode, allocated). Returns the allocated recv outputs
+// in eager mode ({recv_tokens, recv_topk_weights[, recv_scale_inv]}), else empty.
+std::vector<at::Tensor> ep_prepare_and_dispatch(
+    at::Tensor handle_mem, at::Tensor topk_idx, at::Tensor tokens, at::Tensor topk_weights,
+    at::Tensor tokens_per_expert, at::Tensor total_recv_tokens, int64_t top_k,
+    int64_t dispatch_output_per_expert_alignment,
+    std::optional<at::Tensor> recv_tokens = std::nullopt,
+    std::optional<at::Tensor> recv_topk_weights = std::nullopt,
+    std::optional<at::Tensor> recv_scale_inv = std::nullopt,
+    std::optional<at::Tensor> tokens_scale_inv = std::nullopt);
 
 void ep_combine(at::Tensor handle_mem, at::Tensor expert_out, at::Tensor result);
 
