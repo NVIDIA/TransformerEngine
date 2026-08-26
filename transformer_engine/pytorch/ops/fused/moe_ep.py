@@ -305,13 +305,14 @@ def _megamoe_supported(buffer, fc1: GroupedLinear, fc2: GroupedLinear) -> bool:
         return False
     if buffer.max_tokens_per_rank is None or buffer.max_tokens_per_rank <= 0:
         return False
+    if (
+        buffer.recv_capacity_per_rank is not None
+        and buffer.recv_capacity_per_rank <= 0
+    ):
+        return False
     if buffer.hidden_dim % 128 != 0 or fc2.in_features % 256 != 0:
         return False
     if buffer.top_k > 32:
-        return False
-    ep_group = get_ep_group()
-    ep_size = 1 if ep_group is None else ep_group.size()
-    if ep_size > 16:
         return False
     return True
 
@@ -331,7 +332,7 @@ def _matches(window: Sequence[FusibleOperation], recipe: Optional[Recipe]) -> bo
     ):
         return False
     buffer = dispatch.buffer
-    if not buffer.eager or buffer.payload_dtype is not torch.bfloat16:
+    if buffer.payload_dtype is not torch.bfloat16:
         return False
     if not (_grouped_linear_supported(fc1) and _grouped_linear_supported(fc2)):
         return False
@@ -382,6 +383,8 @@ class FusedMoeEp(FusedOperation):
             top_k=dispatch.buffer.top_k,
             ep_group=ep_group,
             max_tokens_per_rank=dispatch.buffer.max_tokens_per_rank,
+            max_recv_size_per_rank=dispatch.buffer.recv_capacity_per_rank,
+            drop_on_overflow=False,
             apply_topk_in_fc1=True,
             generate_c=True,
             backward_wgrad_mode="operands",
