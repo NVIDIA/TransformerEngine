@@ -120,11 +120,11 @@ void nvte_fused_topk_with_score_function_forward_qb_v2(
     NVTETensor histogram, NVTETensor bin_bounds, NVTEQBHistogramMode histogram_mode,
     cudaStream_t stream);
 
-/*! \brief Same as nvte_fused_topk_with_score_function_forward_qb_v2, but skips host-side
- *         bin_bounds value validation.
+/*! \brief Same as nvte_fused_topk_with_score_function_forward_qb_v2, but skips bin_bounds value
+ *         validation.
  *
- *  The histogram kernel raises a device-side error if bin_bounds is not finite and ordered. Use
- *  this variant to avoid host synchronization in a hot path or CUDA graph.
+ *  The caller must have validated that bin_bounds contains finite FP32 values [lower, upper] with
+ *  lower < upper. Use this variant to avoid host synchronization in a hot path or CUDA graph.
  */
 void nvte_fused_topk_with_score_function_forward_qb_v2_unchecked(
     const NVTETensor logits, int num_tokens, int num_experts, int topk, float scaling_factor,
@@ -145,10 +145,10 @@ void nvte_fused_topk_with_score_function_forward_qb_with_indices(
     NVTEQBHistogramMode histogram_mode, cudaStream_t stream);
 
 /*! \brief Same as nvte_fused_topk_with_score_function_forward_qb_with_indices, but skips
- *         host-side bin_bounds value validation.
+ *         bin_bounds value validation.
  *
- *  The histogram kernel raises a device-side error if bin_bounds is not finite and ordered. Use
- *  this variant to avoid host synchronization in a hot path or CUDA graph.
+ *  The caller must have validated that bin_bounds contains finite FP32 values [lower, upper] with
+ *  lower < upper. Use this variant to avoid host synchronization in a hot path or CUDA graph.
  */
 void nvte_fused_topk_with_score_function_forward_qb_with_indices_unchecked(
     const NVTETensor logits, int num_tokens, int num_experts, int topk, float scaling_factor,
@@ -165,10 +165,10 @@ void nvte_qb_histogram_accumulate(const NVTETensor raw_scores, const NVTETensor 
                                   const NVTETensor bin_bounds, NVTETensor histogram,
                                   cudaStream_t stream);
 
-/*! \brief Same as nvte_qb_histogram_accumulate, but skips host-side bin_bounds value validation.
+/*! \brief Same as nvte_qb_histogram_accumulate, but skips bin_bounds value validation.
  *
- *  The histogram kernel raises a device-side error if bin_bounds is not finite and ordered. Use
- *  this variant to avoid host synchronization in a hot path or CUDA graph.
+ *  The caller must have validated that bin_bounds contains finite FP32 values [lower, upper] with
+ *  lower < upper. Use this variant to avoid host synchronization in a hot path or CUDA graph.
  */
 void nvte_qb_histogram_accumulate_unchecked(const NVTETensor raw_scores, const NVTETensor cutoff,
                                             const NVTETensor bin_bounds, NVTETensor histogram,

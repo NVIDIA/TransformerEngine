@@ -160,7 +160,7 @@ fused_topk_with_score_function_qb_fwd(at::Tensor logits, int topk,
                                       int routing_map_format,
                                       std::optional<at::Tensor> topk_indices, at::Tensor histogram,
                                       at::Tensor bin_bounds, int histogram_mode,
-                                      bool skip_bin_bounds_host_validation) {
+                                      bool bin_bounds_validated) {
   check_routing_map_format(routing_map_format);
   TORCH_CHECK(logits.dim() >= 1, "logits must have at least 1 dim");
   TORCH_CHECK(logits.is_cuda() && logits.is_contiguous(),
@@ -239,7 +239,7 @@ fused_topk_with_score_function_qb_fwd(at::Tensor logits, int topk,
   auto stream = at::cuda::getCurrentCUDAStream();
 
   if (topk_indices.has_value()) {
-    if (skip_bin_bounds_host_validation) {
+    if (bin_bounds_validated) {
       nvte_fused_topk_with_score_function_forward_qb_with_indices_unchecked(
           logits_cu.data(), static_cast<int>(num_tokens), static_cast<int>(num_experts), topk,
           scaling_factor_value, expert_bias_cu.data(), probs_cu.data(), routing_output_cu.data(),
@@ -253,7 +253,7 @@ fused_topk_with_score_function_qb_fwd(at::Tensor logits, int topk,
           bin_bounds_cu.data(), mode, stream);
     }
   } else {
-    if (skip_bin_bounds_host_validation) {
+    if (bin_bounds_validated) {
       nvte_fused_topk_with_score_function_forward_qb_v2_unchecked(
           logits_cu.data(), static_cast<int>(num_tokens), static_cast<int>(num_experts), topk,
           scaling_factor_value, expert_bias_cu.data(), probs_cu.data(), routing_output_cu.data(),

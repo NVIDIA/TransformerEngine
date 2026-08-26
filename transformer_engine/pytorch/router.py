@@ -42,8 +42,26 @@ _QB_HISTOGRAM_MODE_FROM_STRING = {
 _QB_BOUNDS_VALIDATED_VERSION_ATTR = "_nvte_qb_bounds_validated_version"
 
 
-def _prepare_qb_bin_bounds(bin_bounds: torch.Tensor) -> bool:
-    """Select recoverable host or graph-safe device validation for QB bounds."""
+def mark_qb_bin_bounds_validated(bin_bounds: torch.Tensor) -> None:
+    """Mark the current QB bounds version as valid after a trusted device-side update.
+
+    This function does not inspect tensor values. The caller must guarantee finite FP32 bounds
+    with ``lower < upper``. During CUDA graph capture, call it immediately after dispatching the
+    trusted in-place update on the same stream.
+    """
+    if not (
+        isinstance(bin_bounds, torch.Tensor)
+        and bin_bounds.is_cuda
+        and bin_bounds.is_contiguous()
+        and bin_bounds.dtype == torch.float32
+        and bin_bounds.shape == (2,)
+    ):
+        raise ValueError("QB bin_bounds must be a contiguous FP32 CUDA tensor with shape [2]")
+    setattr(bin_bounds, _QB_BOUNDS_VALIDATED_VERSION_ATTR, bin_bounds._version)
+
+
+def _validate_qb_bin_bounds(bin_bounds: torch.Tensor) -> bool:
+    """Validate QB bounds once per PyTorch tensor version."""
     if not (
         isinstance(bin_bounds, torch.Tensor)
         and bin_bounds.is_cuda
@@ -54,20 +72,21 @@ def _prepare_qb_bin_bounds(bin_bounds: torch.Tensor) -> bool:
         # The C++ binding owns metadata validation and its detailed error messages.
         return False
 
+    version = bin_bounds._version
+    validated_version = getattr(bin_bounds, _QB_BOUNDS_VALIDATED_VERSION_ATTR, None)
+    if validated_version == version:
+        return True
     with torch.cuda.device(bin_bounds.device):
         if torch.cuda.is_current_stream_capturing():
-            # The no-host-sync common path validates the device values in the histogram kernel.
-            # This check is replayed, unlike Python tensor-version bookkeeping.
-            return True
-    version = bin_bounds._version
-    if getattr(bin_bounds, _QB_BOUNDS_VALIDATED_VERSION_ATTR, None) == version:
-        return True
+            raise RuntimeError(
+                "QB bin_bounds current version must be validated before CUDA graph capture"
+            )
     lower, upper = bin_bounds.detach().cpu().tolist()
     if not (math.isfinite(lower) and math.isfinite(upper) and lower < upper):
         raise ValueError(
             f"QB bin_bounds values must be finite with lower < upper, got [{lower}, {upper}]"
         )
-    setattr(bin_bounds, _QB_BOUNDS_VALIDATED_VERSION_ATTR, version)
+    mark_qb_bin_bounds_validated(bin_bounds)
     return True
 
 
@@ -189,7 +208,7 @@ class FusedTopkScoreFunctionQB(torch.autograd.Function):
         histogram_mode: int,
     ):
         # pylint: disable=missing-function-docstring
-        skip_bin_bounds_host_validation = _prepare_qb_bin_bounds(bin_bounds)
+        bin_bounds_validated = _validate_qb_bin_bounds(bin_bounds)
         (
             probs,
             routing_output,
@@ -206,7 +225,7 @@ class FusedTopkScoreFunctionQB(torch.autograd.Function):
             histogram,
             bin_bounds,
             histogram_mode,
-            skip_bin_bounds_host_validation,
+            bin_bounds_validated,
         )
         if topk_indices is not None:
             routing_output = topk_indices
@@ -288,7 +307,11 @@ def fused_topk_with_score_function(
     qb_bin_bounds : torch.Tensor, optional
         FP32 CUDA tensor ``[lower, upper]`` defining uniform QB histogram bins. Values must be
         finite with ``lower < upper``. Eager calls revalidate PyTorch-tracked in-place updates.
-        CUDA graphs validate the device values on every execution without a host synchronization.
+        Before CUDA graph capture, validate the current version eagerly or use
+        :func:`mark_qb_bin_bounds_validated` after a trusted device-side update. The marker may be
+        called immediately after an in-place update dispatched during capture. Graph replays read
+        later trusted updates through the captured device pointer, so callers must preserve
+        validity.
     qb_histogram_mode : str, optional
         ``"two_kernel"`` or ``"fused_atomic"``. Must be provided with the two QB tensors.
 
