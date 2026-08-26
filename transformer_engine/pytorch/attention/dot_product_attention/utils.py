@@ -1239,12 +1239,6 @@ def get_attention_backend(
                 " bias for THD format"
             )
             use_fused_attention = False
-        elif fp8 and fp8_meta["recipe"].fp8_dpa and qkv_format == "thd":
-            logger.debug(
-                "Disabling FusedAttention as it does not support context parallelism with FP8"
-                " attention and THD format"
-            )
-            use_fused_attention = False
         elif fp8 and fp8_meta["recipe"].fp8_dpa and core_attention_bias_type != "no_bias":
             logger.debug(
                 "Disabling FusedAttention as it does not support context parallelism with FP8"
@@ -1695,6 +1689,15 @@ def get_attention_backend(
         use_unfused_attention,
         available_backends,
     )
+
+
+@torch.no_grad()
+def get_thd_padding_mask(num_tokens, cu_seqlens, cu_seqlens_padded):
+    """Identify inter-sequence padding in a flattened packed THD buffer."""
+    rows = torch.arange(num_tokens, device=cu_seqlens_padded.device)
+    sequence = torch.searchsorted(cu_seqlens_padded[1:], rows, right=True)
+    valid_end = cu_seqlens_padded[sequence] + cu_seqlens[sequence + 1] - cu_seqlens[sequence]
+    return rows >= valid_end
 
 
 @torch.no_grad()

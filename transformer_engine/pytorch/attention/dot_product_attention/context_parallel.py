@@ -96,6 +96,19 @@ def get_bsh_dims(tensor_format):
     return batch_dim, seq_dim, head_dim
 
 
+def _zero_thd_padding(tensors, cu_seqlens, cu_seqlens_padded):
+    """Zero inter-sequence padding in one or more tensors."""
+    if cu_seqlens is None or cu_seqlens_padded is None:
+        return
+    tensor = next((tensor for tensor in tensors if tensor is not None), None)
+    if tensor is None:
+        return
+    padding_mask = dpa_utils.get_thd_padding_mask(tensor.shape[0], cu_seqlens, cu_seqlens_padded)
+    for tensor in tensors:
+        if tensor is not None:
+            tensor[padding_mask] = 0
+
+
 def flash_attn_p2p_communicate(
     rank, send_tensor, send_dst, recv_tensor, recv_src, cp_group, batch_p2p_comm
 ):
@@ -2786,8 +2799,8 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                     elif ctx.qkv_format == "sbhd":
                         dq[0].fill_(0)
                         dq[1].copy_(dq_)
-                    else:
-                        dq.copy_(dq_)
+                    elif ctx.qkv_format == "thd":
+                        tex.thd_grad_correction(dq, dq_, cu_seqlens_q_padded, "zero", "copy")
             elif causal:
                 if i > (cp_size - rank - 1):
                     dq.add_(dq_)
@@ -2873,9 +2886,9 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                         dk[1].fill_(0)
                         dv[0].copy_(dv_)
                         dv[1].fill_(0)
-                    else:
-                        dk.copy_(dk_)
-                        dv.copy_(dv_)
+                    elif ctx.qkv_format == "thd":
+                        tex.thd_grad_correction(dk, dk_, cu_seqlens_kv_padded, "copy", "zero")
+                        tex.thd_grad_correction(dv, dv_, cu_seqlens_kv_padded, "copy", "zero")
                 else:
                     dk.copy_(dk_)
                     dv.copy_(dv_)
@@ -3012,6 +3025,12 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 ctx.dP_quantizer,
             )
 
+        # Partial-gradient reduction can write THD inter-sequence padding.
+        # Clean it while gradients and per-step sequence metadata share sequence order.
+        if ctx.qkv_format == "thd":
+            _zero_thd_padding((dq,), cu_seqlens_q_per_step[0], cu_seqlens_q_padded)
+            _zero_thd_padding((dk, dv), cu_seqlens_kv_per_step[0], cu_seqlens_kv_padded)
+
         if cp_size_a2a > 1:
             if ctx.fp8 and ctx.is_input_fp8:
                 dq_fp8, dk_fp8, dv_fp8 = dq, dk, dv
@@ -3048,23 +3067,6 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             attn_dbias = attn_dbias.view(*attn_dbias.shape[:-2], -1)
 
         nvtx_range_pop(f"{nvtx_label}")
-
-        # Zero-fill dQ/dK/dV at positions beyond the actual sequence end (THD CUDA Graph).
-        # cu_seqlens_*_padded are already local to this CP rank in the THD path.
-        # Use Q's padded boundary for dQ and KV's padded boundary for dK/dV.
-        # Skip the corresponding zero-fill when its padded cu_seqlens is absent.
-        if ctx.qkv_format == "thd":
-            if cu_seqlens_q_padded is not None and isinstance(dq, torch.Tensor) and dq.shape[0] > 0:
-                q_pad_mask = torch.arange(dq.shape[0], device=dq.device) >= cu_seqlens_q_padded[-1]
-                dq[q_pad_mask] = 0
-            if cu_seqlens_kv_padded is not None:
-                kv_actual_t = cu_seqlens_kv_padded[-1]
-                for d_tensor in [dk, dv]:
-                    if isinstance(d_tensor, torch.Tensor) and d_tensor.shape[0] > 0:
-                        kv_pad_mask = (
-                            torch.arange(d_tensor.shape[0], device=d_tensor.device) >= kv_actual_t
-                        )
-                        d_tensor[kv_pad_mask] = 0
 
         return (
             None,
@@ -3371,7 +3373,8 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
             # Non-THD cp_stream inputs are ready after K/V reorder, so wait here to
             # preserve overlap with output initialization below.
             cp_stream.wait_stream(torch.cuda.current_stream())
-        # THD all_gather only reaches this path for f16/bf16 attention today.
+
+        # Shapes before per-step slicing and FP8 metadata wrapping.
         # q: [b, 2, s//2, h, d] or [2, s//2, b, h, d]
         # k: [s, b, h, d]
         # v: [s, b, h, d]
@@ -3574,6 +3577,11 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                             )
                             max_seqlen_kv_ = kv_range[1]
                         cu_seqlens_kv_per_step[i] = thd_cu_seqlens_kv_per_step[i]
+                        if fp8:
+                            q_part, k_part, v_part = [
+                                Float8Tensor.make_like(x, data=y, dtype=fwd_nominal_dtype)
+                                for x, y in zip([q_fp8, k_fp8, v_fp8], [q_part, k_part, v_part])
+                            ]
                     if use_fused_attention:
                         # Set per-step parameters for THD vs bshd/sbhd
                         if qkv_format == "thd":
@@ -3907,7 +3915,8 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         # v: [s, b, h, d]
         if ctx.fp8 and not ctx.fp8_recipe.mxfp8():
             q, k, v = [x._data for x in [q_fp8, k_fp8, v_fp8]]
-        if not ctx.qkv_reshaped:
+        # BSHD/SBHD split the sequence into two chunks; THD stays token-major [t, h, d].
+        if not ctx.qkv_reshaped and ctx.qkv_format != "thd":
             q = q.view(
                 *q.shape[:seq_dim_qkv], 2, q.shape[seq_dim_qkv] // 2, *q.shape[(seq_dim_qkv + 1) :]
             )
