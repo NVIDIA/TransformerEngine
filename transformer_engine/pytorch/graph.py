@@ -737,6 +737,7 @@ def _make_graphed_callables(
                     per_callable_static_outputs[per_callable_fwd_idx] = tuple(flatten_outputs)
                     per_callable_output_unflatten_spec[per_callable_fwd_idx] = spec
                     graph_callables[per_callable_fwd_idx] = func
+                    del outputs, flatten_outputs
                 fwd_idx[m_chunk] += 1
             else:
                 # Capture backward graph for model chunk c_id, microbatch bwd_idx[-c_id-1]
@@ -925,6 +926,11 @@ def _make_graphed_callables(
                                     per_callable_static_grad_inputs[idx]
                                 )
                             previous_chunk_last_callable_bwd_idx = per_callable_bwd_idx
+
+                        # The per-callable containers now own all tensors that must survive
+                        # capture. Drop local strong references so weak-refed graph buffers can
+                        # be returned to the shared CUDA graph pool before the next capture.
+                        del static_outputs, static_grad_inputs, grad_inputs
                 if ceil(c_id) == c_id:
                     bwd_idx[m_chunk] += 1
     else:

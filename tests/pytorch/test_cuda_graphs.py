@@ -1094,6 +1094,39 @@ def test_inference_warmup_does_not_retain_outputs() -> None:
     reset_graphs(graphed_callables)
 
 
+def test_reused_capture_buffers_release_outputs_after_backward() -> None:
+    """Capture locals must not keep weak-refed output buffers alive."""
+
+    class OutputLifetimeModule(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.previous_capture_output = None
+
+        def forward(self, input_: torch.Tensor) -> torch.Tensor:
+            if (
+                torch.cuda.is_current_stream_capturing()
+                and self.previous_capture_output is not None
+            ):
+                assert self.previous_capture_output() is None
+            output = input_ * 2
+            if torch.cuda.is_current_stream_capturing():
+                self.previous_capture_output = weakref.ref(output)
+            return output
+
+    module = OutputLifetimeModule()
+    sample_args = tuple((torch.ones(4, 8, device="cuda", requires_grad=True),) for _ in range(2))
+    graphed_callables = make_graphed_callables(
+        (module,),
+        sample_args,
+        _order=[1, -1, 1, -1],
+        _num_layers_per_chunk=[1],
+        _reuse_graph_input_output_buffers=True,
+    )
+    assert module.previous_capture_output is not None
+    assert module.previous_capture_output() is None
+    reset_graphs(graphed_callables)
+
+
 @pytest.mark.parametrize("with_order", (False, True))
 def test_make_graphed_callables_with_capture_time_hooks(with_order: bool) -> None:
     """Test capture-time hooks around warmup and graph capture."""
