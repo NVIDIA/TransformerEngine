@@ -36,16 +36,6 @@ struct QBBinParams {
 __device__ inline QBBinParams load_qb_bin_params(const CompType *bin_bounds, int num_bins) {
   const CompType lower = bin_bounds[0];
   const CompType upper = bin_bounds[1];
-  const bool valid = isfinite(lower) && isfinite(upper) && lower < upper;
-  if (!valid) {
-    if (threadIdx.x == 0 && threadIdx.y == 0 && threadIdx.z == 0) {
-      printf("QB bin_bounds values must be finite with lower < upper.\n");
-      __trap();
-    }
-    // Keep non-reporting threads away from invalid floating-point-to-integer conversions while
-    // the device-side assertion is propagated to the host.
-    return {0.0f, 0.0f};
-  }
   return {lower, static_cast<CompType>(num_bins) / (upper - lower)};
 }
 
