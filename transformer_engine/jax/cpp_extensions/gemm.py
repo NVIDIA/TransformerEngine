@@ -913,13 +913,31 @@ class GemmPrimitive(BasePrimitive):
             (lhs_non_cdims, lhs_cdims, rhs_non_cdims, rhs_cdims),
         )
 
+        # A contracting-dim spec element can be a single mesh axis or a nested tuple of axes
+        # (e.g. ("fsdp", "tp", "expert")). Flatten so we can reason per mesh axis.
+        def _flatten_spec(spec):
+            if spec is None:
+                return []
+            return list(spec) if isinstance(spec, tuple) else [spec]
+
+        def _retain_axes(spec, keep):
+            axes = tuple(a for a in _flatten_spec(spec) if a in keep)
+            if len(axes) == 0:
+                return None
+            return axes[0] if len(axes) == 1 else axes
+
+        # The GEMM reduces over the mesh axes that shard the contracting dims of both operands.
+        # Axes sharding the contracting dim of only one operand must be gathered before the GEMM.
+        lhs_c_axes = [a for s in lhs_cspecs for a in _flatten_spec(s)]
+        rhs_c_axes = [a for s in rhs_cspecs for a in _flatten_spec(s)]
+        reduce_axes = tuple(a for a in lhs_c_axes if a in rhs_c_axes)
+        if len(set(reduce_axes)) != len(reduce_axes):
+            raise RuntimeError("Multiple reduce dimension is detected!")
         reduce_spec = None
-        for l in lhs_cspecs:
-            for r in rhs_cspecs:
-                if l is not None and l == r:
-                    if reduce_spec is not None:
-                        raise RuntimeError("Multiple reduce dimension is detected!")
-                    reduce_spec = l
+        if len(reduce_axes) == 1:
+            reduce_spec = reduce_axes[0]
+        elif len(reduce_axes) > 1:
+            reduce_spec = reduce_axes
 
         sequence_dim = None
 
@@ -951,15 +969,14 @@ class GemmPrimitive(BasePrimitive):
             sequence_dim = int(not transpose_batch_sequence)
 
         if reduce_spec is not None:
-            # Other non-reduce cdims (if exists) need to be unsharded
-            lhs_cspecs = tuple(s if s == reduce_spec else None for s in lhs_cspecs)
+            # Non-reduce contracting axes (if any) need to be gathered, i.e. set to unsharded.
+            lhs_cspecs = tuple(_retain_axes(s, reduce_axes) for s in lhs_cspecs)
             # Only do AG Sequence dim if not Overlap
             if collective_op.is_all_gather:
-                rhs_cspecs = tuple(
-                    s if s in (reduce_spec, gsr.tpsp_resource) else None for s in rhs_cspecs
-                )
+                keep = set(reduce_axes) | {gsr.tpsp_resource}
+                rhs_cspecs = tuple(_retain_axes(s, keep) for s in rhs_cspecs)
             else:
-                rhs_cspecs = tuple(s if s == reduce_spec else None for s in rhs_cspecs)
+                rhs_cspecs = tuple(_retain_axes(s, reduce_axes) for s in rhs_cspecs)
 
             # Non-contracting dims of RHS always needs to be gathered, i.e. for TP + activation_hidden
             # No batch-dim check needed as `rhs_non_cspecs` never contains batch-dim.
