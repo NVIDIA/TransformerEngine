@@ -633,13 +633,17 @@ def _make_graphed_callables(
                 warmup_outputs = []
                 for func_idx, func in zip(warmup_func_idx, warmup_func):
                     outputs = _run_warmup_forward(func_idx, func, func_idx)
-                    warmup_outputs.append((func_idx, func, outputs))
-                if is_training:
-                    for func_idx, func, outputs in reversed(warmup_outputs):
-                        _run_warmup_backward(func_idx, func, outputs, warmup_iter, func_idx)
+                    if is_training:
+                        warmup_outputs.append((func_idx, func, outputs))
+                    else:
+                        del outputs
+                while warmup_outputs:
+                    func_idx, func, outputs = warmup_outputs.pop()
+                    _run_warmup_backward(func_idx, func, outputs, warmup_iter, func_idx)
+                    del outputs
             else:
                 # Follow _order exactly, mirroring the capture phase.
-                per_fwd_outputs = {}  # per_callable_fwd_idx -> flattened outputs
+                per_fwd_outputs = {}  # per_callable_fwd_idx -> outstanding flattened outputs
                 fwd_idx = [0] * num_model_chunks
                 bwd_idx = [0] * num_model_chunks
                 for c_id in _order:
@@ -653,7 +657,10 @@ def _make_graphed_callables(
                             ) + (fwd_idx[m_chunk] * _num_layers_per_chunk[m_chunk] + l_no)
                             func = callables[callable_idx]
                             outputs = _run_warmup_forward(per_callable_fwd_idx, func, callable_idx)
-                            per_fwd_outputs[per_callable_fwd_idx] = outputs
+                            if is_training:
+                                per_fwd_outputs[per_callable_fwd_idx] = outputs
+                            else:
+                                del outputs
                         fwd_idx[m_chunk] += 1
                     elif ceil(c_id) == c_id:
                         # Backward pass for chunk -c_id.
@@ -665,10 +672,11 @@ def _make_graphed_callables(
                                     _prefix_num_layers[m_chunk] * num_microbatches
                                 ) + (bwd_idx[m_chunk] * _num_layers_per_chunk[m_chunk] + l_no)
                                 func = callables[callable_idx]
-                                outputs = per_fwd_outputs[per_callable_bwd_idx]
+                                outputs = per_fwd_outputs.pop(per_callable_bwd_idx)
                                 _run_warmup_backward(
                                     per_callable_bwd_idx, func, outputs, warmup_iter, callable_idx
                                 )
+                                del outputs
                             bwd_idx[m_chunk] += 1
 
         if post_warmup_hook is not None:

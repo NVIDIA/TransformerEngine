@@ -5,6 +5,7 @@
 from typing import Callable, Dict, Iterable, List, Tuple, Union
 import pytest
 import copy
+import weakref
 
 import torch
 from transformer_engine.pytorch import (
@@ -992,6 +993,105 @@ def _make_capture_time_hooks(
         }
         for module_idx in range(len(modules))
     ]
+
+
+def test_ordered_warmup_releases_consumed_outputs() -> None:
+    """Ordered warmup should only retain outputs until their corresponding backward."""
+
+    class OutputLifetimeModule(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.previous_output = None
+
+        def forward(self, input_: torch.Tensor) -> torch.Tensor:
+            is_warmup = not torch.cuda.is_current_stream_capturing()
+            if is_warmup and self.previous_output is not None:
+                assert self.previous_output() is None
+            output = input_ * 2
+            if is_warmup:
+                self.previous_output = weakref.ref(output)
+            return output
+
+    module = OutputLifetimeModule()
+    sample_args = tuple((torch.ones(4, 8, device="cuda", requires_grad=True),) for _ in range(2))
+    graphed_callables = make_graphed_callables(
+        (module,),
+        sample_args,
+        num_warmup_iters=2,
+        _order=[1, -1, 1, -1],
+        _num_layers_per_chunk=[1],
+    )
+    assert module.previous_output is not None
+    assert module.previous_output() is None
+    reset_graphs(graphed_callables)
+
+
+def test_unordered_warmup_releases_consumed_outputs() -> None:
+    """Unordered warmup should release each output after its corresponding backward."""
+
+    class OutputLifetimeModule(torch.nn.Module):
+        def __init__(self, output_refs: list, module_idx: int) -> None:
+            super().__init__()
+            self.output_refs = output_refs
+            self.module_idx = module_idx
+            self.capture_started = False
+
+        def forward(self, input_: torch.Tensor) -> torch.Tensor:
+            output = input_ * 2
+            if torch.cuda.is_current_stream_capturing():
+                self.capture_started = True
+            else:
+                self.output_refs[self.module_idx] = weakref.ref(output)
+            return output
+
+    output_refs = [None, None]
+    modules = tuple(OutputLifetimeModule(output_refs, module_idx) for module_idx in range(2))
+
+    def first_module_backward_pre_hook(_module: torch.nn.Module) -> None:
+        if not modules[0].capture_started:
+            assert output_refs[1] is not None
+            assert output_refs[1]() is None
+
+    graphed_callables = make_graphed_callables(
+        modules,
+        tuple((torch.ones(4, 8, device="cuda", requires_grad=True),) for _ in modules),
+        num_warmup_iters=2,
+        capture_time_hooks=[
+            {"backward_pre_hooks": {0: first_module_backward_pre_hook}},
+            None,
+        ],
+    )
+    assert all(output_ref is not None and output_ref() is None for output_ref in output_refs)
+    reset_graphs(graphed_callables)
+
+
+def test_inference_warmup_does_not_retain_outputs() -> None:
+    """Inference warmup should release outputs as soon as each forward returns."""
+
+    class OutputLifetimeModule(torch.nn.Module):
+        def __init__(self, previous_output: list) -> None:
+            super().__init__()
+            self.previous_output = previous_output
+
+        def forward(self, input_: torch.Tensor) -> torch.Tensor:
+            is_warmup = not torch.cuda.is_current_stream_capturing()
+            if is_warmup and self.previous_output[0] is not None:
+                assert self.previous_output[0]() is None
+            output = input_ * 2
+            if is_warmup:
+                self.previous_output[0] = weakref.ref(output)
+            return output
+
+    previous_output = [None]
+    modules = tuple(OutputLifetimeModule(previous_output).eval() for _ in range(2))
+    graphed_callables = make_graphed_callables(
+        modules,
+        tuple((torch.ones(4, 8, device="cuda"),) for _ in modules),
+        num_warmup_iters=2,
+    )
+    assert previous_output[0] is not None
+    assert previous_output[0]() is None
+    reset_graphs(graphed_callables)
 
 
 @pytest.mark.parametrize("with_order", (False, True))
