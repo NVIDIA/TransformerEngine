@@ -6,19 +6,19 @@
 
 import os
 from pathlib import Path
-from packaging import version
+from typing import List
 
 import setuptools
+from packaging import version
 
 from .utils import (
-    get_cuda_include_dirs,
     all_files_in_dir,
     cudnn_frontend_include_path,
     debug_build_enabled,
-    setup_mpi_flags,
+    get_cuda_include_dirs,
     nccl_ep_enabled,
+    setup_mpi_flags,
 )
-from typing import List
 
 
 def install_requirements() -> List[str]:
@@ -87,6 +87,7 @@ def setup_jax_extension(
     csrc_source_files = Path(csrc_source_files)
     extensions_dir = csrc_source_files / "extensions"
     sources = all_files_in_dir(extensions_dir, name_extension="cpp")
+    sources += all_files_in_dir(extensions_dir, name_extension="cu")
 
     # Header files
     include_dirs = get_cuda_include_dirs()
