@@ -29,7 +29,7 @@ from transformer_engine.jax.sharding import MeshResource, global_shard_guard
 
 def _mesh(axes):
     """Build a CPU mesh with a size-2 device grid over the named axes."""
-    devices = np.asarray(jax.devices()[: 2 ** len(axes)]).reshape((2,) * len(axes))
+    devices = np.asarray(jax.devices("cpu")[: 2 ** len(axes)]).reshape((2,) * len(axes))
     return Mesh(devices, axes)
 
 
