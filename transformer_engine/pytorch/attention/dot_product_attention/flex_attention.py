@@ -5,26 +5,26 @@
 """cuDNN-backed Flex Attention helpers."""
 
 from dataclasses import dataclass
-import importlib
 import inspect
 from typing import Any, Callable, Dict, Optional, Tuple
 
 import torch
 
-_cudnn_score_mod_handles: Dict[torch.device, Any] = {}
+from ._cudnn_graph import (
+    current_stream_handle,
+    finalize_graph,
+    import_cudnn_frontend,
+    make_graph,
+    torch_to_cudnn_dtype,
+)
+
 _cudnn_score_mod_graph_cache: Dict[Tuple[Any, ...], Any] = {}
 _SCORE_MOD_UNCACHEABLE = object()
 
 
 def _import_cudnn_frontend():
-    """Import the cuDNN frontend Python package."""
-    try:
-        return importlib.import_module("cudnn")
-    except ImportError as exc:
-        raise ImportError(
-            "cuDNN frontend Python package not found. "
-            "Install it with: pip install nvidia-cudnn-frontend"
-        ) from exc
+    """Compatibility wrapper around the shared attention graph runtime."""
+    return import_cudnn_frontend()
 
 
 def _bhsd_dim_stride(
@@ -41,7 +41,9 @@ def _bhsd_dim_stride(
             (tensor.shape[0], tensor.shape[2], tensor.shape[1], tensor.shape[3]),
             (tensor.stride(0), tensor.stride(2), tensor.stride(1), tensor.stride(3)),
         )
-    raise ValueError(f"Flex Attention only supports SBHD/BSHD tensor formats, got {tensor_format}.")
+    raise ValueError(
+        f"Flex Attention only supports SBHD/BSHD tensor formats, got {tensor_format}."
+    )
 
 
 def _bhsd_graph_tensor(graph, tensor: torch.Tensor, tensor_format: str):
@@ -164,10 +166,14 @@ def _score_mod_tensor_dict_metadata(
     """Describe score_mod tensor parameters without including their values."""
     if tensors is None:
         return ()
-    return tuple((name, _score_mod_tensor_metadata(tensor)) for name, tensor in tensors.items())
+    return tuple(
+        (name, _score_mod_tensor_metadata(tensor)) for name, tensor in tensors.items()
+    )
 
 
-def _score_mod_bhsd_tensor_metadata(tensor: torch.Tensor, tensor_format: str) -> Tuple[Any, ...]:
+def _score_mod_bhsd_tensor_metadata(
+    tensor: torch.Tensor, tensor_format: str
+) -> Tuple[Any, ...]:
     """Describe an SBHD/BSHD runtime tensor as a cuDNN BHSD graph tensor."""
     dim, stride = _bhsd_dim_stride(tensor, tensor_format)
     return (dim, stride, tensor.dtype, _score_mod_device_key(tensor.device))
@@ -193,41 +199,18 @@ def _wrap_score_mod(score_mod: Optional[Callable], graph_tensors: Dict[str, Any]
 
 
 def _get_cudnn_current_stream_handle(cudnn, device: torch.device):
-    """Return a cuDNN handle for device, bound to PyTorch's current stream."""
-    if device.type != "cuda":
-        raise ValueError(f"Flex Attention only supports CUDA tensors, got device {device}.")
-    if device.index is None:
-        device = torch.device("cuda", torch.cuda.current_device())
-
-    handle = _cudnn_score_mod_handles.get(device)
-    with torch.cuda.device(device):
-        if handle is None:
-            handle = cudnn.create_handle()
-            _cudnn_score_mod_handles[device] = handle
-
-        stream = torch.cuda.current_stream(device).cuda_stream
-        cudnn.set_stream(handle=handle, stream=stream)
-    return handle
+    """Compatibility wrapper around the shared current-stream handle."""
+    del cudnn
+    return current_stream_handle(device)
 
 
 def _build_cudnn_pygraph(dtype: torch.dtype, device: torch.device):
     """Create a cuDNN frontend Python graph for F16/BF16 SDPA."""
-    cudnn = _import_cudnn_frontend()
-
-    if dtype == torch.float16:
-        io_data_type = cudnn.data_type.HALF
-    elif dtype == torch.bfloat16:
-        io_data_type = cudnn.data_type.BFLOAT16
-    else:
-        raise ValueError(f"Flex Attention only supports FP16/BF16 tensors, got {dtype}.")
-
-    graph = cudnn.pygraph(
-        io_data_type=io_data_type,
-        intermediate_data_type=cudnn.data_type.FLOAT,
-        compute_data_type=cudnn.data_type.FLOAT,
-        handle=_get_cudnn_current_stream_handle(cudnn, device),
-    )
-    return graph
+    if dtype not in (torch.float16, torch.bfloat16):
+        raise ValueError(
+            f"Flex Attention only supports FP16/BF16 tensors, got {dtype}."
+        )
+    return make_graph(torch_to_cudnn_dtype(dtype), device, name="te_flex_attention")
 
 
 @dataclass
@@ -264,18 +247,8 @@ class _CudnnScoreModBwdGraphEntry:
 
 
 def _finalize_cudnn_graph(graph) -> int:
-    """Build a cuDNN frontend Python graph and return its workspace size."""
-    cudnn = _import_cudnn_frontend()
-
-    graph.validate()
-    graph.build_operation_graph()
-    try:
-        graph.create_execution_plans([cudnn.heur_mode.A, cudnn.heur_mode.FALLBACK])
-        graph.check_support()
-    except cudnn.cudnnGraphNotSupportedError as exc:
-        raise RuntimeError(f"cuDNN Flex Attention SDPA graph is not supported: {exc}") from exc
-    graph.build_plans(cudnn.build_plan_policy.HEURISTICS_CHOICE)
-    return max(graph.get_workspace_size(), 1)
+    """Compatibility wrapper around shared graph finalization."""
+    return finalize_graph(graph)
 
 
 def _execute_cudnn_graph(
@@ -357,7 +330,10 @@ def _cudnn_score_mod_bwd_cache_key(
     """Pre-build cache key for score_mod bprop execution plans."""
     score_mod_key = _score_mod_callback_cache_key(score_mod)
     score_mod_bprop_key = _score_mod_callback_cache_key(score_mod_bprop)
-    if score_mod_key is _SCORE_MOD_UNCACHEABLE or score_mod_bprop_key is _SCORE_MOD_UNCACHEABLE:
+    if (
+        score_mod_key is _SCORE_MOD_UNCACHEABLE
+        or score_mod_bprop_key is _SCORE_MOD_UNCACHEABLE
+    ):
         return None
     return (
         "bwd",
@@ -505,7 +481,9 @@ def _build_cudnn_score_mod_bwd_graph(
         else {}
     )
     wrapped_score_mod = _wrap_score_mod(score_mod, score_mod_graph_tensors)
-    wrapped_score_mod_bprop = _wrap_score_mod(score_mod_bprop, score_mod_bprop_graph_tensors)
+    wrapped_score_mod_bprop = _wrap_score_mod(
+        score_mod_bprop, score_mod_bprop_graph_tensors
+    )
 
     dq_layer = torch.empty_like(query_layer)
     dk_layer = torch.empty_like(key_layer)
@@ -616,7 +594,9 @@ class FusedAttentionWithScoreModFunc(torch.autograd.Function):
         score_mod_tensors = dict(score_mod_tensors or {})
         score_mod_bprop_tensors = dict(score_mod_bprop_tensors or {})
         output_shape = (*query_layer.shape[:-1], value_layer.shape[-1])
-        output_layer = torch.empty(output_shape, device=query_layer.device, dtype=query_layer.dtype)
+        output_layer = torch.empty(
+            output_shape, device=query_layer.device, dtype=query_layer.dtype
+        )
         if is_training:
             stats = torch.empty(
                 (*q_bhsd_dim[:-1], 1),

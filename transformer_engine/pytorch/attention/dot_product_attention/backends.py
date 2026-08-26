@@ -40,7 +40,7 @@ from transformer_engine.pytorch.constants import (
     QKVLayouts,
     dist_group_type,
 )
-from transformer_engine.pytorch.cpp_extensions.fused_attn import (
+from transformer_engine.pytorch.attention.dot_product_attention.cudnn_attention import (
     fused_attn_fwd,
     fused_attn_bwd,
     FusedAttnBackend,

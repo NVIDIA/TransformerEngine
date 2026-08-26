@@ -458,8 +458,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("swap_first_dims", &transformer_engine::pytorch::swap_first_dims,
         "Swap first two tensor dimensions", py::arg("tensor"), py::kw_only(), py::arg("out"),
         py::call_guard<py::gil_scoped_release>());
-  m.def("get_fused_attn_backend", &transformer_engine::pytorch::get_fused_attn_backend,
-        "Get Fused Attention backend", py::call_guard<py::gil_scoped_release>());
   m.def("compute_amax", &transformer_engine::pytorch::compute_amax,
         "Compute absolute max value in tensor", py::arg("input"), py::arg("amax"),
         py::call_guard<py::gil_scoped_release>());
@@ -537,6 +535,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::call_guard<py::gil_scoped_release>());
 
   // attention kernels
+  m.def("get_cudnn_attention_rng_state",
+        &transformer_engine::pytorch::get_cudnn_attention_rng_state,
+        "Reserve and unpack a graph-safe Philox state for Python cuDNN attention",
+        py::arg("rng_gen") = py::none(), py::arg("increment"),
+        py::call_guard<py::gil_scoped_release>());
   m.def("fa_prepare_fwd", &transformer_engine::pytorch::fa_prepare_fwd,
         "Prepare QKV for Flash Attention", py::call_guard<py::gil_scoped_release>());
   m.def("fa_prepare_bwd", &transformer_engine::pytorch::fa_prepare_bwd,
@@ -550,10 +553,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("multi_tensor_pad_last_dim", &transformer_engine::pytorch::multi_tensor_pad_last_dim,
         "Pad multiple tensors' last dimension to a common alignment.", py::arg("inputs"),
         py::arg("alignment"), py::call_guard<py::gil_scoped_release>());
-  m.def("fused_attn_fwd", &transformer_engine::pytorch::fused_attn_fwd,
-        "Fused Attention FP8/BF16/FP16 FWD with separate Q, K and V");
-  m.def("fused_attn_bwd", &transformer_engine::pytorch::fused_attn_bwd,
-        "Fused Attention FP8/BF16/FP16 BWD with separate Q, K and V");
   m.def("copy_to_kv_cache", &transformer_engine::pytorch::copy_to_kv_cache,
         "Copy new KV tokens to KV cache", py::call_guard<py::gil_scoped_release>());
   m.def("convert_thd_to_bshd", &transformer_engine::pytorch::convert_thd_to_bshd,

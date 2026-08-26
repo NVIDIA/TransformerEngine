@@ -94,40 +94,8 @@ std::tuple<at::Tensor, at::Tensor> moe_unpermute_bwd(at::Tensor input_bwd, at::T
  * Attention
  **************************************************************************************************/
 
-NVTE_Fused_Attn_Backend get_fused_attn_backend(
-    bool is_training, const DType q_dtype, const DType kv_dtype, NVTE_QKV_Layout qkv_layout,
-    NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type,
-    float p_dropout, size_t num_attn_heads, size_t num_gqa_groups, size_t max_seqlen_q,
-    size_t max_seqlen_kv, size_t head_dim_qk, size_t head_dim_v, int64_t window_size_left,
-    int64_t window_size_right, bool return_max_logit, bool cuda_graph, bool deterministic);
-
-std::vector<py::object> fused_attn_fwd(
-    size_t max_seqlen_q, size_t max_seqlen_kv, bool is_training, float attn_scale, float p_dropout,
-    bool set_zero, NVTE_QKV_Layout qkv_layout, NVTE_QKV_Format o_format,
-    NVTE_QKV_Format qkv_scale_inv_format, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
-    NVTE_Softmax_Type softmax_type, const std::vector<int64_t> window_size,
-    bool bottom_right_diagonal, const at::Tensor cu_seqlens_q, const at::Tensor cu_seqlens_kv,
-    const py::handle Q, const py::handle K, const py::handle V, const at::ScalarType fake_dtype,
-    const std::optional<at::Tensor> cu_seqlens_q_padded,
-    const std::optional<at::Tensor> cu_seqlens_kv_padded,
-    const std::optional<at::Tensor> page_table_k, const std::optional<at::Tensor> page_table_v,
-    py::handle s_quantizer, py::handle o_quantizer, const std::optional<at::Tensor> Bias,
-    const std::optional<at::Tensor> SoftmaxOffset, const std::optional<at::Generator> rng_gen,
-    size_t rng_elts_per_thread, bool return_max_logit, bool cuda_graph);
-
-std::vector<py::object> fused_attn_bwd(
-    size_t max_seqlen_q, size_t max_seqlen_kv, float attn_scale, float p_dropout, bool set_zero,
-    NVTE_QKV_Layout qkv_layout, NVTE_QKV_Format o_format, NVTE_QKV_Format do_format,
-    NVTE_QKV_Layout dqkv_layout, NVTE_QKV_Format qkv_scale_inv_format,
-    NVTE_QKV_Format do_scale_inv_format, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
-    NVTE_Softmax_Type softmax_type, const std::vector<int64_t> window_size,
-    bool bottom_right_diagonal, bool deterministic, const at::Tensor cu_seqlens_q,
-    const at::Tensor cu_seqlens_kv, const py::handle Q, const py::handle K, const py::handle V,
-    const py::handle O, const py::handle dO, const at::ScalarType fake_dtype,
-    const std::vector<at::Tensor> Aux_CTX_Tensors,
-    const std::optional<at::Tensor> cu_seqlens_q_padded,
-    const std::optional<at::Tensor> cu_seqlens_kv_padded, py::handle s_quantizer,
-    py::handle dp_quantizer, py::handle dqkv_quantizer, bool cuda_graph);
+at::Tensor get_cudnn_attention_rng_state(const std::optional<at::Generator> rng_gen,
+                                         size_t increment);
 
 at::Tensor fa_prepare_fwd(at::Tensor qkvi);
 at::Tensor fa_prepare_bwd(at::Tensor q, at::Tensor k, at::Tensor v);

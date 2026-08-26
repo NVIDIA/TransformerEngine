@@ -22,11 +22,7 @@ import torch.distributed as dist
 import torch.nn.functional as F
 import transformer_engine_torch as tex
 import transformer_engine as te
-from transformer_engine.pytorch.cpp_extensions.fused_attn import (
-    QKVLayout,
-    AttnBiasType,
-    AttnMaskType,
-    SoftmaxType,
+from transformer_engine.pytorch.attention.dot_product_attention.cudnn_attention import (
     FusedAttnBackend,
     META_QKV,
     META_DQKV,
@@ -34,6 +30,9 @@ from transformer_engine.pytorch.cpp_extensions.fused_attn import (
     META_DO,
     META_S,
     META_DP,
+)
+from transformer_engine.pytorch.attention.dot_product_attention._cudnn_backend import (
+    get_fused_attn_backend as get_cudnn_fused_attn_backend,
 )
 from transformer_engine.pytorch.attention.inference import InferenceParams
 from transformer_engine.pytorch.cpu_offload import is_cpu_offload_enabled
@@ -365,7 +364,7 @@ def _get_fused_attn_backend(
     softmax_type,
     *args,
 ):
-    """Constant-foldable tex.get_fused_attn_backend: the result depends only on
+    """Constant-foldable Python backend selector: the result depends only on
     the attention config. Layout/bias/mask/softmax are taken as their string
     keys and resolved to the pybind enums here, so that every argument is a
     python literal or a python enum.
@@ -377,14 +376,14 @@ def _get_fused_attn_backend(
     member comes out of the reconstruction corrupted (see the cast at the call
     site, which restores the enum)."""
     return int(
-        tex.get_fused_attn_backend(
+        get_cudnn_fused_attn_backend(
             is_training,
             q_type,
             kv_type,
-            QKVLayout[qkv_layout],
-            AttnBiasType[bias_type],
-            AttnMaskType[attn_mask_type],
-            SoftmaxType[softmax_type],
+            qkv_layout,
+            bias_type,
+            attn_mask_type,
+            softmax_type,
             *args,
         )
     )

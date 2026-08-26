@@ -1187,7 +1187,7 @@ def test_get_attention_backend_traceable(monkeypatch):
     """get_attention_backend must trace under torch.compile(fullgraph=True)
     without graph breaks. The compiled selection must stay consistent with
     eager when NVTE_* env vars flip (dynamo guards on os.environ) and when
-    attention params change, and the baked tex.get_fused_attn_backend result
+    attention params change, and the baked Python cuDNN backend result
     must drive the selection."""
     from transformer_engine.pytorch.attention.dot_product_attention import utils as dpa_utils
 
@@ -1267,8 +1267,8 @@ def test_get_attention_backend_traceable(monkeypatch):
     # guard on the wrapped function).
     monkeypatch.setenv("NVTE_FLASH_ATTN", "0")
     monkeypatch.setattr(
-        dpa_utils.tex,
-        "get_fused_attn_backend",
+        dpa_utils,
+        "get_cudnn_fused_attn_backend",
         lambda *args: dpa_utils.FusedAttnBackend["No_Backend"],
     )
 
