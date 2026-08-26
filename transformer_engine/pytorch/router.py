@@ -62,7 +62,8 @@ def _validate_qb_bin_bounds(bin_bounds: torch.Tensor) -> bool:
         if torch.cuda.is_current_stream_capturing():
             if validated_version is not None:
                 # CUDA graphs support persistent input tensors whose values are updated in place
-                # between capture and replay. The kernel reads the current bounds by device pointer.
+                # between capture and replay. Python validation is not re-entered by replay, so
+                # keeping those mutable values valid is necessarily the caller's contract.
                 return True
             raise RuntimeError(
                 "QB bin_bounds must be validated by an eager router call before CUDA graph capture"
@@ -292,8 +293,9 @@ def fused_topk_with_score_function(
         Caller-owned int32 ``[num_experts, num_bins]`` histogram accumulated in place.
     qb_bin_bounds : torch.Tensor, optional
         FP32 CUDA tensor ``[lower, upper]`` defining uniform QB histogram bins. Values must be
-        finite with ``lower < upper``. Bounds are revalidated after PyTorch-tracked in-place
-        updates; validate once with an eager call before CUDA graph capture.
+        finite with ``lower < upper``. Eager calls revalidate PyTorch-tracked in-place updates.
+        CUDA graphs read updates through the captured device pointer, so callers must preserve
+        valid values across capture and replay; validate once eagerly before capture.
     qb_histogram_mode : str, optional
         ``"two_kernel"`` or ``"fused_atomic"``. Must be provided with the two QB tensors.
 
