@@ -1,19 +1,23 @@
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
-import torch
+from copy import deepcopy
+import subprocess
+import sys
+from textwrap import dedent
 from typing import Optional
+
+import pytest
+import torch
+
 from transformer_engine.pytorch.router import (
     QBHistogramMode,
     RoutingMapFormat,
     fused_topk_with_score_function,
     fused_compute_score_for_moe_aux_loss,
     fused_moe_aux_loss,
-    mark_qb_bin_bounds_validated,
 )
 import transformer_engine_torch as tex
-import pytest
-from copy import deepcopy
 
 seed = 42
 torch.manual_seed(seed)
@@ -702,7 +706,7 @@ def test_qb_raw_binding_rejects_invalid_bin_bounds_recoverably(histogram_mode, u
 
 @pytest.mark.parametrize("histogram_mode", ["two_kernel", "fused_atomic"])
 @pytest.mark.parametrize("use_dense_indices", [False, True])
-def test_qb_topk_cuda_graph_uses_mutable_prevalidated_bounds(histogram_mode, use_dense_indices):
+def test_qb_topk_cuda_graph_uses_mutable_bounds(histogram_mode, use_dense_indices):
     logits = torch.randn(8, 16, device="cuda", dtype=torch.float32)
     expert_bias = torch.zeros(16, device="cuda", dtype=torch.float32)
     histogram = torch.zeros(16, 32, device="cuda", dtype=torch.int32)
@@ -727,13 +731,9 @@ def test_qb_topk_cuda_graph_uses_mutable_prevalidated_bounds(histogram_mode, use
             qb_histogram_mode=histogram_mode,
         )
 
-    run_router()
     bounds_data_ptr = bin_bounds.data_ptr()
-    validated_version = bin_bounds._version
     bin_bounds.copy_(torch.tensor([-0.25, 0.75], device="cuda"))
     assert bin_bounds.data_ptr() == bounds_data_ptr
-    assert bin_bounds._version != validated_version
-    mark_qb_bin_bounds_validated(bin_bounds)
 
     histogram.zero_()
     graph = torch.cuda.CUDAGraph()
@@ -769,13 +769,61 @@ def test_qb_topk_cuda_graph_uses_mutable_prevalidated_bounds(histogram_mode, use
 
 
 @pytest.mark.parametrize("histogram_mode", ["two_kernel", "fused_atomic"])
-def test_qb_topk_cuda_graph_rejects_unvalidated_bounds(histogram_mode):
+def test_qb_topk_cuda_graph_captures_bounds_update(histogram_mode):
     logits = torch.randn(8, 16, device="cuda", dtype=torch.float32)
     expert_bias = torch.zeros(16, device="cuda", dtype=torch.float32)
     histogram = torch.zeros(16, 32, device="cuda", dtype=torch.int32)
     bin_bounds = torch.tensor([-1.0, 1.0], device="cuda", dtype=torch.float32)
+    next_bounds = torch.tensor([-0.75, 0.25], device="cuda", dtype=torch.float32)
 
-    with pytest.raises(RuntimeError, match="current version must be validated"):
+    def run_iteration():
+        probs, routing_map = fused_topk_with_score_function(
+            logits,
+            4,
+            False,
+            None,
+            None,
+            None,
+            "sigmoid",
+            expert_bias,
+            qb_histogram=histogram,
+            qb_bin_bounds=bin_bounds,
+            qb_histogram_mode=histogram_mode,
+        )
+        bin_bounds.copy_(next_bounds)
+        return probs, routing_map
+
+    # Match full-iteration capture: an eager warmup ends with a bounds update, and the same
+    # update is part of the captured iteration.
+    run_iteration()
+    histogram.zero_()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        probs, routing_map = run_iteration()
+    histogram.zero_()
+    graph.replay()
+    torch.cuda.synchronize()
+
+    reference = qb_topk_score_function_pytorch(
+        logits, 4, expert_bias, next_bounds, histogram.shape[1]
+    )
+    torch.testing.assert_close(probs, reference["probs"])
+    torch.testing.assert_close(routing_map, reference["routing_map"])
+    torch.testing.assert_close(histogram, reference["histogram"])
+    torch.testing.assert_close(bin_bounds, next_bounds)
+
+
+@pytest.mark.parametrize("histogram_mode", ["two_kernel", "fused_atomic"])
+def test_qb_topk_cuda_graph_rejects_invalid_bounds_on_device(histogram_mode):
+    script = dedent(
+        f"""
+        import torch
+        from transformer_engine.pytorch.router import fused_topk_with_score_function
+
+        logits = torch.randn(8, 16, device="cuda", dtype=torch.float32)
+        expert_bias = torch.zeros(16, device="cuda", dtype=torch.float32)
+        histogram = torch.zeros(16, 32, device="cuda", dtype=torch.int32)
+        bin_bounds = torch.tensor([1.0, -1.0], device="cuda", dtype=torch.float32)
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
             fused_topk_with_score_function(
@@ -789,38 +837,23 @@ def test_qb_topk_cuda_graph_rejects_unvalidated_bounds(histogram_mode):
                 expert_bias,
                 qb_histogram=histogram,
                 qb_bin_bounds=bin_bounds,
-                qb_histogram_mode=histogram_mode,
+                qb_histogram_mode={histogram_mode!r},
             )
-
-
-@pytest.mark.parametrize("histogram_mode", ["two_kernel", "fused_atomic"])
-def test_qb_topk_cuda_graph_rejects_stale_bounds_validation(histogram_mode):
-    logits = torch.randn(8, 16, device="cuda", dtype=torch.float32)
-    expert_bias = torch.zeros(16, device="cuda", dtype=torch.float32)
-    histogram = torch.zeros(16, 32, device="cuda", dtype=torch.int32)
-    bin_bounds = torch.tensor([-1.0, 1.0], device="cuda", dtype=torch.float32)
-
-    def run_router():
-        return fused_topk_with_score_function(
-            logits,
-            4,
-            False,
-            None,
-            None,
-            None,
-            "sigmoid",
-            expert_bias,
-            qb_histogram=histogram,
-            qb_bin_bounds=bin_bounds,
-            qb_histogram_mode=histogram_mode,
-        )
-
-    run_router()
-    bin_bounds.zero_()
-    with pytest.raises(RuntimeError, match="current version must be validated"):
-        graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(graph):
-            run_router()
+        graph.replay()
+        torch.cuda.synchronize()
+        """
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+    output = result.stdout + result.stderr
+    assert result.returncode != 0
+    assert "QB bin_bounds values must be finite with lower < upper." in output
+    assert "CUDA error" in output
 
 
 @pytest.mark.parametrize(
