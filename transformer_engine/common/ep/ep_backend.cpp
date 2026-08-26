@@ -239,9 +239,12 @@ void EPBackend::init(ncclComm_t ep_comm, NVTEEpGroupConfig group_config) {
   cfg.rdma_buffer_size = NCCL_EP_AUTO;
   cfg.num_qp_per_rank = NCCL_EP_AUTO;
   cfg.num_channels = NCCL_EP_AUTO;
+  // Default the dispatch/combine (comm) kernels to 32 SMs, clamped to the device SM count.
+  constexpr int kDefaultCommSms = 32;
+  const int device_sms = cuda::sm_count();
   cfg.max_num_sms = group_config.num_comm_sms > 0
                         ? static_cast<unsigned int>(group_config.num_comm_sms)
-                        : NCCL_EP_AUTO;
+                        : static_cast<unsigned int>(std::min(kDefaultCommSms, device_sms));
   // 0 = NCCL_EP_AUTO, which enables eager mode (recv buffers sized per routing).
   cfg.max_recv_tokens_per_rank = static_cast<unsigned int>(group_config.max_recv_tokens_per_rank);
   cfg.zero_copy = group_config.zero_copy ? NCCL_EP_ZERO_COPY_ON : NCCL_EP_ZERO_COPY_OFF;
@@ -249,6 +252,14 @@ void EPBackend::init(ncclComm_t ep_comm, NVTEEpGroupConfig group_config) {
   cfg.num_topk = static_cast<unsigned int>(group_config.num_topk);
   cfg.overflow_policy =
       group_config.drop_on_overflow ? NCCL_EP_OVERFLOW_DROP : NCCL_EP_OVERFLOW_AUTO;
+
+  // Keep the local shuffle/preprocess kernels on all SMs by default (their cost scales inversely
+  // with SM count) so the comm-SM cap above does not throttle them. overwrite=0 respects a
+  // user-set value and only fills in the default when unset.
+  char sm_buf[16];
+  std::snprintf(sm_buf, sizeof(sm_buf), "%d", device_sms);
+  setenv("NCCL_EP_SHUFFLE_SMS", sm_buf, /*overwrite=*/0);
+  setenv("NCCL_EP_PREPROCESS_NUM_SMS", sm_buf, /*overwrite=*/0);
 
   NVTE_CHECK_NCCL(ncclEpCreateGroup(&ep_group_, ep_comm, &cfg));
 
