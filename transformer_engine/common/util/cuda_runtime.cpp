@@ -7,7 +7,6 @@
 #include "../util/cuda_runtime.h"
 
 #include <cublasLt.h>
-#include <dlfcn.h>
 
 #include <filesystem>
 #include <fstream>
@@ -15,6 +14,7 @@
 
 #include "../common.h"
 #include "../util/cuda_driver.h"
+#include "../util/shared_lib_wrapper.h"
 #include "../util/system.h"
 #include "common/util/cuda_runtime.h"
 
@@ -26,27 +26,6 @@ namespace {
 
 // String with build-time CUDA include path
 #include "string_path_cuda_include.h"
-
-// Get the runtime directory of the shared library that contains this code
-std::filesystem::path shared_library_directory() {
-  static const char library_anchor = 0;
-  Dl_info library_info{};
-  if (dladdr(static_cast<const void *>(&library_anchor), &library_info) == 0 ||
-      library_info.dli_fname == nullptr) {
-    return {};
-  }
-
-  std::filesystem::path library_path = library_info.dli_fname;
-  if (library_path.is_relative()) {
-    std::error_code error;
-    library_path = std::filesystem::absolute(library_path, error);
-    if (error) {
-      return {};
-    }
-  }
-
-  return library_path.parent_path();
-}
 
 std::string runtime_cuda_major_version() {
   int runtime_version = 0;
@@ -65,7 +44,9 @@ std::filesystem::path python_cuda_directory() {
   // Find the Python package root from the installed Transformer Engine package. Do not
   // assume that the root is named site-packages or dist-packages since valid installs
   // may use an arbitrary target directory.
-  Path te_package_directory = shared_library_directory();
+  static const char library_anchor = 0;
+  Path te_package_directory =
+      transformer_engine::shared_library_directory(static_cast<const void *>(&library_anchor));
   while (true) {
     if (te_package_directory.filename() == "transformer_engine") {
       break;

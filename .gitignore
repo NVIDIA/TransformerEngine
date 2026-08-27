@@ -12,6 +12,7 @@
 *.eggs
 build/
 *.so
+/nccl_ep/
 *.egg-info
 __pycache__
 .ycm_extra_conf.py

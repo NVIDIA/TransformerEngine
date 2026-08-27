@@ -100,16 +100,18 @@ def _get_shared_object_file(library: str) -> Path:
     """
     Path to shared object file for a Transformer Engine library.
 
-    TE libraries are 'core', 'torch', or 'jax'. This function first
+    TE libraries are 'core', 'torch', 'jax', or 'nccl_ep'. This function first
     searches in the imported TE directory, and then in the
     site-packages directory.
 
     """
 
     # Check provided input and determine the correct prefix for .so.
-    assert library in ("core", "torch", "jax"), f"Unsupported TE library {library}."
+    assert library in ("core", "torch", "jax", "nccl_ep"), f"Unsupported TE library {library}."
     if library == "core":
         so_prefix = "libtransformer_engine"
+    elif library == "nccl_ep":
+        so_prefix = "libnccl_ep"
     else:
         so_prefix = f"transformer_engine_{library}"
 

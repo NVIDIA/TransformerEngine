@@ -94,6 +94,9 @@ typedef struct {
 /*! \brief Bootstrap the EP backend from an existing NCCL EP sub-communicator.
  *         Requires SM>=90.
  *
+ *  This call validates that the runtime NCCL is >=2.30.4 and then loads the
+ *  optional libnccl_ep.so library. Non-EP users do not load the library.
+ *
  *  ep_comm is borrowed and must span exactly group_config.ep_size ranks. The
  *  caller retains ownership and must keep it alive until nvte_ep_shutdown()
  *  returns. Re-init after shutdown is allowed; double-init throws. One EP
