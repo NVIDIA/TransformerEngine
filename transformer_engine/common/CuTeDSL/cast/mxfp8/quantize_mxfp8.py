@@ -155,7 +155,8 @@ def quantize_rowwise_mxfp8(
     WAVES: cutlass.Constexpr[int],
     THREADS_PER_BANK: cutlass.Constexpr[int],
     PACK_SIZE: cutlass.Constexpr[int],
-    SKIP_MASKING: cutlass.Constexpr[bool],
+    SKIP_INPUT_MASKING: cutlass.Constexpr[bool] = False,
+    SKIP_SCALE_BOUNDS: cutlass.Constexpr[bool] = False,
     WITH_ACT: cutlass.Constexpr[bool] = False,
     WITH_DACT: cutlass.Constexpr[bool] = False,
     WITH_DBIAS: cutlass.Constexpr[bool] = False,
@@ -308,7 +309,7 @@ def quantize_rowwise_mxfp8(
                     # If it's relu, we can handle it later
                     if not cutlass.const_expr(FUSE_RELU):
                         x = op(x)
-                    if not cutlass.const_expr(SKIP_MASKING):
+                    if not cutlass.const_expr(SKIP_INPUT_MASKING):
                         # If the input shape is not divisible by the tile size,
                         # TMA would zero-fills the input tile outside its logical MxN bounds.
                         # This is fine for non-activation cases, but for activation cases,
@@ -343,10 +344,15 @@ def quantize_rowwise_mxfp8(
 
     # For irregular shapes, skip the scale store if this thread's logical row / col-block lies past the input's actual extents.
     # TMA already zero-fills OOB input reads and drops OOB output writes; only the direct scale-byte gmem store needs an explicit guard.
-    scale_row = tile_row_start + tidx // CTA_THREADS_X
-    scale_col_first_elt = tile_col_start + (tidx % CTA_THREADS_X) * MXFP8_BLOCK_SCALING_SIZE
-    if scale_row < M and scale_col_first_elt < N:
+    # If the input shape is divisible by the tile size, then we won't access OOB regions because
+    # we never we only access tiles we actually need (num_tiles) which are never OOB
+    if cutlass.const_expr(SKIP_SCALE_BOUNDS):
         mS_row_stage[(tidx // CTA_THREADS_X, tidx % CTA_THREADS_X)] = biased_exp_r
+    else:
+        scale_row = tile_row_start + tidx // CTA_THREADS_X
+        scale_col_first_elt = tile_col_start + (tidx % CTA_THREADS_X) * MXFP8_BLOCK_SCALING_SIZE
+        if scale_row < M and scale_col_first_elt < N:
+            mS_row_stage[(tidx // CTA_THREADS_X, tidx % CTA_THREADS_X)] = biased_exp_r
 
     inv_scale_r = exp2f_rcp(biased_exp_r)  # f32 reciprocal of the scale
     scale_2x = pack_f32x2(inv_scale_r, inv_scale_r)
@@ -387,7 +393,8 @@ def quantize_colwise_mxfp8(
     SWIZZLE: cutlass.Constexpr[bool],
     TILE_X: cutlass.Constexpr[int],
     TILE_Y: cutlass.Constexpr[int],  # pylint: disable=unused-argument  # kept for API consistency
-    SKIP_MASKING: cutlass.Constexpr[bool],
+    SKIP_INPUT_MASKING: cutlass.Constexpr[bool] = False,
+    SKIP_SCALE_BOUNDS: cutlass.Constexpr[bool] = False,
     WITH_ACT: cutlass.Constexpr[bool] = False,
     WITH_DACT: cutlass.Constexpr[bool] = False,
     WITH_DBIAS: cutlass.Constexpr[bool] = False,
@@ -452,7 +459,7 @@ def quantize_colwise_mxfp8(
                 # This is fine for non-activation cases, but for activation cases,
                 # op(0) might not be 0 which will pollute the amax and dbias.
                 # So we must manually mask the OOB region here.
-                if not cutlass.const_expr(SKIP_MASKING):
+                if not cutlass.const_expr(SKIP_INPUT_MASKING):
                     if tile_row_start + i >= M or thread_col_oob:
                         rX_thread_f32[i] = Float32(0.0)
         # Accumulate fp32 activations to DBIAS before we truncate to half precision when the input is half precision
@@ -477,12 +484,20 @@ def quantize_colwise_mxfp8(
     # column lies past the input extents. TILE_Y == MXFP8_BLOCK_SCALING_SIZE so each stage
     # is exactly one scale-row; valid iff `tile_row_start < M`.
     biased_exp_c = cvt_f32_to_fp8e8m0fnu(amax_c * MAX_NORM_RCP)
-    scale_col = tile_col_start + tidx
-    if tile_row_start < M and scale_col < N:
+    # If the input shape is divisible by the tile size, then we won't access OOB regions because 
+    # we never we only access tiles we actually need (num_tiles) which are never OOB
+    if cutlass.const_expr(SKIP_SCALE_BOUNDS):
         if cutlass.const_expr(SWIZZLE):
             mS_col_stage[(0, tidx % 32, tidx // 32)] = biased_exp_c
         else:
             mS_col_stage[(0, tidx)] = biased_exp_c
+    else:
+        scale_col = tile_col_start + tidx
+        if tile_row_start < M and scale_col < N:
+            if cutlass.const_expr(SWIZZLE):
+                mS_col_stage[(0, tidx % 32, tidx // 32)] = biased_exp_c
+            else:
+                mS_col_stage[(0, tidx)] = biased_exp_c
 
     inv_scale_c = exp2f_rcp(biased_exp_c)
     # cvt.rn.satfinite can be vectorized to convert 2 f32 to 2 fp8 in one instruction
@@ -875,10 +890,18 @@ class MXFP8QuantizeKernel(MXFP8QuantizeKernelBase):
     _THREADS_PER_BANK = _TOTAL_BANKS_WIDTH // MXFP8_BLOCK_SCALING_SIZE  # 4 threads per bank
     _NUM_STAGES = 2  # The pipeline depth is always 2
 
-    def __init__(self, cfg: MXFP8QuantizeConfig, SKIP_MASKING: bool = False):
+    def __init__(
+        self,
+        cfg: MXFP8QuantizeConfig,
+        SKIP_INPUT_MASKING: bool = False,
+        SKIP_SCALE_BOUNDS: bool = False,
+    ):
         self.cfg = cfg
-        # If the input shape is divisible by the tile size, we can skip the OOB masking in the kernel and save some instructions.
-        self.SKIP_MASKING = SKIP_MASKING
+        # If the input shape is divisible by the tile size or f(0)=0 holds for activaions, 
+        # we can skip masking inputs with zero in the kernel and save some instructions.
+        self.SKIP_INPUT_MASKING = SKIP_INPUT_MASKING
+        # If the input shape is divisible by the tile size, we can skip bounds check for scale writes and save some instructions.
+        self.SKIP_SCALE_BOUNDS = SKIP_SCALE_BOUNDS
         # Only honor the noop flag when no activation or dbias is fused to match CUDA C++'s implementation
         self.CHECK_NOOP_FLAG: cutlass.const_expr = (
             not self.cfg.WITH_ACT and not self.cfg.WITH_DACT and not self.cfg.WITH_DBIAS
@@ -1675,7 +1698,8 @@ class MXFP8QuantizeKernel(MXFP8QuantizeKernelBase):
             WAVES=self._WAVES,
             THREADS_PER_BANK=self._THREADS_PER_BANK,
             PACK_SIZE=self._PACK_SIZE,
-            SKIP_MASKING=self.SKIP_MASKING,
+            SKIP_INPUT_MASKING=self.SKIP_INPUT_MASKING,
+            SKIP_SCALE_BOUNDS=self.SKIP_SCALE_BOUNDS,
             WITH_ACT=cfg.WITH_ACT and not self.CACHE_ACTIVATION,
             WITH_DACT=cfg.WITH_DACT and not self.CACHE_ACTIVATION,
             WITH_DBIAS=self.DBIAS_REDUCTION_IN_ROWWISE,
@@ -1711,7 +1735,8 @@ class MXFP8QuantizeKernel(MXFP8QuantizeKernelBase):
             SWIZZLE=cfg.WITH_GEMM_SWIZZLED_SCALES,
             TILE_X=self._TILE_COLS,
             TILE_Y=self._TILE_ROWS,
-            SKIP_MASKING=self.SKIP_MASKING,
+            SKIP_INPUT_MASKING=self.SKIP_INPUT_MASKING,
+            SKIP_SCALE_BOUNDS=self.SKIP_SCALE_BOUNDS,
             WITH_ACT=cfg.WITH_ACT,
             WITH_DACT=cfg.WITH_DACT,
             WITH_DBIAS=self.DBIAS_REDUCTION_IN_COLWISE,
@@ -2427,23 +2452,6 @@ class MXFP8QuantizeEntry(MXFP8QuantizeKernelBase):
 
     def __init__(self, cfg: MXFP8QuantizeConfig):
         self.cfg = cfg
-        # Instantiate all possible kernels at compile time,
-        # and we will pick the right one at runtime based on the input shape and config.
-        self.general_divisible_kernel = MXFP8QuantizeKernel(cfg, SKIP_MASKING=True)
-        self.general_non_divisible_kernel = (
-            # We only need to mask when WITH_ACT is enabled because with activations applied zeros filled by TMA affect block statistics
-            MXFP8QuantizeKernel(cfg, SKIP_MASKING=False)
-            if cfg.WITH_ACT
-            else None
-        )
-        self.specialized_rowwise = (
-            MXFP8QuantizeSpecializedRowwiseKernel(cfg) if cfg.ROWWISE else None
-        )
-        self.specialized_bidim = (
-            MXFP8QuantizeSpecializedBidimensionalKernel(cfg)
-            if cfg.ROWWISE and cfg.COLWISE
-            else None
-        )
         # These activation functions satisfy f(0) = 0 so we don't need to mask with OOB regions
         # (zeros filled by TMA are still zeros without applying activation to them)
         self.ACT_NEED_MASKING = cfg.WITH_ACT and cfg.ACTIVATION not in (
@@ -2452,6 +2460,22 @@ class MXFP8QuantizeEntry(MXFP8QuantizeKernelBase):
             "silu",
             "qgelu",
             "srelu",
+        )
+        # Instantiate all possible kernels at compile time,
+        # and we will pick the right one at runtime based on the input shape and config.
+        self.general_skip_input_masking_kernel = MXFP8QuantizeKernel(cfg, SKIP_INPUT_MASKING=True)
+        self.general_skip_input_masking_and_scale_bounds_kernel = MXFP8QuantizeKernel(
+            cfg, SKIP_INPUT_MASKING=True, SKIP_SCALE_BOUNDS=True
+        )
+        # We only need to mask when WITH_ACT is enabled because with activations applied zeros filled by TMA affect block statistics
+        self.general_kernel = MXFP8QuantizeKernel(cfg) if self.ACT_NEED_MASKING else None
+        self.specialized_rowwise = (
+            MXFP8QuantizeSpecializedRowwiseKernel(cfg) if cfg.ROWWISE else None
+        )
+        self.specialized_bidim = (
+            MXFP8QuantizeSpecializedBidimensionalKernel(cfg)
+            if cfg.ROWWISE and cfg.COLWISE
+            else None
         )
 
     @cute.jit
@@ -2508,15 +2532,32 @@ class MXFP8QuantizeEntry(MXFP8QuantizeKernelBase):
                 )
         # If not using a specialized kernel, fall back to the general kernel
         if not dispatched_to_specialized:
-            # Only skip masking if not WITH_ACT (zeros filled by TMA are still zeros without applying activation to them),
-            # or if the shape is already divisible by the tile size (so no masking is needed)
-            if cutlass.const_expr(self.ACT_NEED_MASKING):
-                skip_masking = (
-                    mX.shape[0] % self.general_divisible_kernel._TILE_ROWS == 0
-                    and mX.shape[1] % self.general_divisible_kernel._TILE_COLS == 0
+            # If the input shape can be perfectly tiled by the general kernel's tile size, we can skip some boundary check because
+            # we know we will not touch any out-of-bounds region.
+            shape_is_divisible = (
+                mX.shape[0] % self.general_skip_input_masking_kernel._TILE_ROWS == 0 \
+                and mX.shape[1] % self.general_skip_input_masking_kernel._TILE_COLS == 0
+            )
+            # If shape is divisible, then we won't access OOB regions regardless whatever
+            if shape_is_divisible:
+                self.general_skip_input_masking_and_scale_bounds_kernel(
+                    mX,
+                    mO_row,
+                    mS_row,
+                    mO_col,
+                    mS_col,
+                    mAmax,
+                    mNoop,
+                    mDActInput,
+                    mWorkspace,
+                    stream,
                 )
-                if skip_masking:
-                    self.general_divisible_kernel(
+            else:
+                # Otherwise we can't skip scale bound check, but we may still skip masking activation inputs with zero
+                if cutlass.const_expr(self.ACT_NEED_MASKING):
+                    # Masking and the scale guards now share one condition, so this is a plain
+                    # two-way choice: either the shape tiles exactly (drop both) or it does not.
+                    self.general_kernel(
                         mX,
                         mO_row,
                         mS_row,
@@ -2529,7 +2570,9 @@ class MXFP8QuantizeEntry(MXFP8QuantizeKernelBase):
                         stream,
                     )
                 else:
-                    self.general_non_divisible_kernel(
+                    # We still need to check the scale bounds, but we can skip some activations masking because their output is 0 
+                    # for OOB regions where TMA fills with zeros
+                    self.general_skip_input_masking_kernel(
                         mX,
                         mO_row,
                         mS_row,
@@ -2541,10 +2584,6 @@ class MXFP8QuantizeEntry(MXFP8QuantizeKernelBase):
                         mWorkspace,
                         stream,
                     )
-            else:
-                self.general_divisible_kernel(
-                    mX, mO_row, mS_row, mO_col, mS_col, mAmax, mNoop, mDActInput, mWorkspace, stream
-                )
 
 
 def compile_cutedsl_function_from_cfg(cfg):

@@ -46,6 +46,12 @@ MATRIX_SIZES = [
     (256, 1024),
     (512, 512),
     (8192, 7168),
+    # N is 32- but not 64-divisible, so it does not tile the general kernel's TILE_COLS
+    # exactly and the entry keeps the per-thread scale-bounds guard.
+    (128, 96),
+    # M is 32- but not 64-divisible, so the last CTA's block hangs past M and num_tiles
+    # clamps it. Covers the clamp that makes TILE_ROWS (not TILE_ROWS*NUM_TILES) the bound.
+    (96, 128),
 ]
 # (block_rows, block_cols): (1,32)=rowwise, (32,1)=colwise, (32,32)=both.
 BLOCK_SIZES = [(1, 32), (32, 1), (32, 32)]
