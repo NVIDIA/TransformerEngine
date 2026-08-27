@@ -1137,13 +1137,12 @@ def get_attention_backend(
         if pad_between_seqs:
             if (  # pylint: disable=too-many-boolean-expressions
                 use_flash_attention_2 and FlashAttentionUtils.is_installed
-            ) or (use_flash_attention_4 and FlashAttentionUtils.v4_is_installed):
+            ):
                 logger.debug(
-                    "Disabling FlashAttention 2 and 4 when Q or KV uses THD and there is "
+                    "Disabling FlashAttention 2 for qkv_format = thd when there is "
                     "padding between sequences, i.e. [a, a, PAD, b, b, b, PAD, c, PAD]"
                 )
             use_flash_attention_2 = False
-            use_flash_attention_4 = False
             # FA3 supports pad_between_seqs via seqused_q/seqused_k
             if use_unfused_attention:
                 logger.debug("Disabling UnfusedDotProductAttention for pad_between_seqs = True")
@@ -1235,9 +1234,14 @@ def get_attention_backend(
             "Disabling UnfusedDotProductAttention as it does not support context parallelism"
         )
         use_unfused_attention = False
-    if context_parallel and use_flash_attention_4 and FlashAttentionUtils.v4_is_installed:
-        logger.debug("Disabling FlashAttention 4 as it does not support context parallelism yet")
-        use_flash_attention_4 = False
+    if context_parallel and use_flash_attention_4:
+        fa4_cp_supported = cp_comm_type in ["p2p", "all_gather", "a2a"]
+        if not fa4_cp_supported:
+            logger.debug(
+                "Disabling FlashAttention 4 for context parallelism with cp_comm_type = %s",
+                cp_comm_type,
+            )
+            use_flash_attention_4 = False
     if context_parallel and (
         use_flash_attention_2 or use_flash_attention_3 or use_flash_attention_4
     ):
@@ -1742,6 +1746,27 @@ def get_attention_backend(
             )
         ):
             logger.debug("Disabling FusedAttention for determinism reasons with post_scale_bias")
+            use_fused_attention = False
+            fused_attention_backend = None
+        # Observed: cuDNN deterministic F16/BF16 THD backward asks for ~128 * BHSS bytes
+        # of workspace on sm90; at 1 << 30 that's 128 GiB, which does not fit on H100's
+        # 80 GB. Held exactly at B=2 + power-of-2 S in our sweep; for B>=3 the workspace
+        # was observed to grow super-linearly (B=4 took ~4x the B=2 amount, not 2x) —
+        # revisit if a config uses B>2.
+        SM90_DET_FUSED_THD_BWD_MAX_BHSS = 1 << 30
+        if (
+            use_fused_attention
+            and fused_attention_backend == FusedAttnBackend.F16_arbitrary_seqlen.value
+            and is_training
+            and qkv_format == "thd"
+            and device_compute_capability == (9, 0)
+            and batch_size * num_heads * max_seqlen_q * max_seqlen_kv
+            >= SM90_DET_FUSED_THD_BWD_MAX_BHSS
+        ):
+            logger.debug(
+                "Disabling FusedAttention due to a known cuDNN deterministic F16/BF16 THD "
+                "backward workspace limitation on sm90 for large BHSS configurations"
+            )
             use_fused_attention = False
             fused_attention_backend = None
 

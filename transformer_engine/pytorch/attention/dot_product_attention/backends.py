@@ -37,6 +37,7 @@ from transformer_engine.pytorch.quantized_tensor import (
 )
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor
 from transformer_engine.pytorch.constants import (
+    CPLoadBalancingStrategy,
     QKVLayouts,
     dist_group_type,
 )
@@ -171,6 +172,8 @@ try:
 except PackageNotFoundError:
     flash_attn_func_v4 = None
     flash_attn_varlen_func_v4 = None
+    _flash_attn_fwd_v4 = None
+    _flash_attn_bwd_v4 = None
 else:
     try:
         cutlass_dsl_version = PkgVersion(get_pkg_version("nvidia-cutlass-dsl"))
@@ -188,10 +191,14 @@ else:
             flash_attn_func as _flash_attn_func_v4,
             flash_attn_varlen_func as _flash_attn_varlen_func_v4,
             _validate_head_dims as _fa4_validate_head_dims,
+            _flash_attn_fwd as _flash_attn_fwd_v4,
+            _flash_attn_bwd as _flash_attn_bwd_v4,
         )
     except ImportError as exc:
         flash_attn_func_v4 = None
         flash_attn_varlen_func_v4 = None
+        _flash_attn_fwd_v4 = None
+        _flash_attn_bwd_v4 = None
         warnings.warn(
             f"FlashAttention 4 is installed but cannot be loaded: {exc}",
             RuntimeWarning,
@@ -202,6 +209,8 @@ else:
         # its kernels through the CUTLASS DSL as it runs. Keep it an eager island.
         flash_attn_func_v4 = no_torch_dynamo()(_flash_attn_func_v4)
         flash_attn_varlen_func_v4 = no_torch_dynamo()(_flash_attn_varlen_func_v4)
+        _flash_attn_fwd_v4 = no_torch_dynamo()(_flash_attn_fwd_v4)
+        _flash_attn_bwd_v4 = no_torch_dynamo()(_flash_attn_bwd_v4)
 
         fa_utils.v4_validate_head_dims = _fa4_validate_head_dims
         fa_utils.set_flash_attention_4_params()
@@ -900,6 +909,7 @@ class FlashAttention(torch.nn.Module):
         num_splits: Optional[int] = 1,
         cu_seqlens_q_padded: Optional[torch.Tensor] = None,
         cu_seqlens_kv_padded: Optional[torch.Tensor] = None,
+        load_balancing_strategy=CPLoadBalancingStrategy.DUAL_CHUNK_SWAP,
     ) -> torch.Tensor:
         """flash-attn fprop"""
 
@@ -1133,7 +1143,9 @@ class FlashAttention(torch.nn.Module):
                     quantizers=quantizers,
                     pad_between_seqs=pad_between_seqs,
                     use_flash_attn_3=use_flash_attn_3,
+                    use_flash_attn_4=use_flash_attn_4,
                     fp8_output=fp8_output,
+                    load_balancing_strategy=load_balancing_strategy,
                 )
         else:
             if is_cpu_offload_enabled():
@@ -1192,11 +1204,21 @@ class FlashAttention(torch.nn.Module):
                     if inference_params is None:
                         fa_4_optional_forward_kwargs["deterministic"] = self.deterministic
                     if func is flash_attn_varlen_func_v4:
-                        cu_q, cu_kv = _unalias_cu_seqlens(cu_seqlens_q, cu_seqlens_kv)
+                        cu_q, cu_kv = _unalias_cu_seqlens(
+                            cu_seqlens_q_padded if pad_between_seqs else cu_seqlens_q,
+                            cu_seqlens_kv_padded if pad_between_seqs else cu_seqlens_kv,
+                        )
                         fa_4_optional_forward_kwargs["cu_seqlens_q"] = cu_q
                         fa_4_optional_forward_kwargs["cu_seqlens_k"] = cu_kv
                         fa_4_optional_forward_kwargs["max_seqlen_q"] = max_seqlen_q
                         fa_4_optional_forward_kwargs["max_seqlen_k"] = max_seqlen_kv
+                        if pad_between_seqs:
+                            fa_4_optional_forward_kwargs["seqused_q"] = (
+                                cu_seqlens_q[1:] - cu_seqlens_q[:-1]
+                            )
+                            fa_4_optional_forward_kwargs["seqused_k"] = (
+                                cu_seqlens_kv[1:] - cu_seqlens_kv[:-1]
+                            )
                     output = func(
                         query_layer,
                         key_layer,
@@ -2133,6 +2155,7 @@ class FusedAttention(torch.nn.Module):
         packed_qkv: Optional[torch.Tensor] = None,
         packed_kv: Optional[torch.Tensor] = None,
         bf16_backward: bool = False,
+        load_balancing_strategy=CPLoadBalancingStrategy.DUAL_CHUNK_SWAP,
     ) -> torch.Tensor:
         """fused attention fprop"""
         assert (
@@ -2299,6 +2322,7 @@ class FusedAttention(torch.nn.Module):
                     fp8_output=fp8_output,
                     layer_number=self.layer_number,
                     return_max_logit=self.return_max_logit,
+                    load_balancing_strategy=load_balancing_strategy,
                 )
         elif score_mod is not None:
             output = FusedAttentionWithScoreModFunc.apply(
