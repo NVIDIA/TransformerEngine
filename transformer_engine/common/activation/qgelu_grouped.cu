@@ -7,10 +7,11 @@
 #include "../util/math.h"
 #include "./activation_template.h"
 
-void nvte_group_gelu(const NVTEGroupedTensor input, NVTEGroupedTensor output, cudaStream_t stream) {
-  NVTE_API_CALL(nvte_group_gelu);
+void nvte_group_qgelu(const NVTEGroupedTensor input, NVTEGroupedTensor output,
+                      cudaStream_t stream) {
+  NVTE_API_CALL(nvte_group_qgelu);
   using namespace transformer_engine;
   constexpr bool IS_ACT = true;
-  dispatch::group_quantize_fwd_helper<IS_ACT, Empty, gelu<fp32, fp32>>(input, output, nullptr,
-                                                                       stream);
+  dispatch::group_quantize_fwd_helper<IS_ACT, Empty, qgelu<fp32, fp32>>(input, output, nullptr,
+                                                                        stream);
 }

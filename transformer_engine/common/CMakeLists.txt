@@ -250,18 +250,27 @@ list(APPEND transformer_engine_cuda_arch_specific_sources
      activation/gelu.cu
      activation/gelu_dbias.cu
      activation/gelu_grouped.cu
+     activation/gelu_grouped_bwd.cu
      activation/gelu_grouped_dbias.cu
+     activation/qgelu_grouped.cu
+     activation/qgelu_grouped_bwd.cu
+     activation/qgelu_grouped_dbias.cu
      activation/glu.cu
      activation/relu.cu
      activation/relu_dbias.cu
      activation/relu_grouped.cu
+     activation/relu_grouped_bwd.cu
      activation/relu_grouped_dbias.cu
+     activation/srelu_grouped.cu
+     activation/srelu_grouped_bwd.cu
+     activation/srelu_grouped_dbias.cu
      activation/scaled_activation.cu
      activation/scaled_srelu.cu
      activation/scaled_swiglu.cu
      activation/swiglu.cu
      activation/swiglu_dbias.cu
      activation/swiglu_grouped.cu
+     activation/swiglu_grouped_bwd.cu
      activation/swiglu_grouped_dbias.cu
      cast/cast.cu
      cast/cast_dbias.cu
@@ -631,18 +640,27 @@ if (NVTE_BUILD_ACTIVATION_WITH_FAST_MATH)
   list(APPEND nvte_sources_with_fast_math activation/gelu.cu
                                           activation/gelu_dbias.cu
                                           activation/gelu_grouped.cu
+                                          activation/gelu_grouped_bwd.cu
                                           activation/gelu_grouped_dbias.cu
+                                          activation/qgelu_grouped.cu
+                                          activation/qgelu_grouped_bwd.cu
+                                          activation/qgelu_grouped_dbias.cu
                                           activation/glu.cu
                                           activation/relu.cu
                                           activation/relu_dbias.cu
                                           activation/relu_grouped.cu
+                                          activation/relu_grouped_bwd.cu
                                           activation/relu_grouped_dbias.cu
+                                          activation/srelu_grouped.cu
+                                          activation/srelu_grouped_bwd.cu
+                                          activation/srelu_grouped_dbias.cu
                                           activation/scaled_activation.cu
                                           activation/scaled_srelu.cu
                                           activation/scaled_swiglu.cu
                                           activation/swiglu.cu
                                           activation/swiglu_dbias.cu
                                           activation/swiglu_grouped.cu
+                                          activation/swiglu_grouped_bwd.cu
                                           activation/swiglu_grouped_dbias.cu)
 endif()
 
