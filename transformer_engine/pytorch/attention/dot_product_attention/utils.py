@@ -811,6 +811,12 @@ def get_attention_backend(
         if use_flash_attention_2 and not FlashAttentionUtils.v2_6_0_plus:
             logger.debug("Disabling FlashAttention 2 for softcap (requires flash-attn >= 2.6.0)")
             use_flash_attention_2 = False
+        if use_flash_attention_2 and attention_dropout != 0.0 and is_training:
+            # FA2 hard-rejects a nonzero softcap combined with nonzero dropout at dispatch
+            # ("Softcapping does not support dropout for now", flash_api.cpp). Dropout only reaches
+            # the kernel while training -- backends.py passes 0.0 in eval -- hence the is_training.
+            logger.debug("Disabling FlashAttention 2 for softcap with dropout")
+            use_flash_attention_2 = False
 
     # Filter: score_mod
     if has_score_mod_bprop and not has_score_mod:
