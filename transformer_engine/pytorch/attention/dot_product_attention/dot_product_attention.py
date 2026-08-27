@@ -582,8 +582,9 @@ class DotProductAttention(TransformerEngineBaseModule):
                 tanh logit softcapping value applied to the attention scores as
                 ``softcap * tanh(scores / softcap)``. A value of ``0.0`` disables
                 softcapping. Softcapping is only supported by the FlashAttention
-                backend. Similar to :attr:`window_size`, ``softcap`` can be
-                overridden by :attr:`softcap` in ``forward`` as well.
+                and UnfusedDotProductAttention backends. Similar to
+                :attr:`window_size`, ``softcap`` can be overridden by
+                :attr:`softcap` in ``forward`` as well.
     attention_type : str, default = "self"
                    type of attention, either ``"self"`` and ``"cross"``.
     layer_number : int, default = None
@@ -1576,7 +1577,8 @@ class DotProductAttention(TransformerEngineBaseModule):
                     tanh logit softcapping value applied to the attention scores as
                     ``softcap * tanh(scores / softcap)``. A value of ``0.0`` disables
                     softcapping. When `None`, the value passed to the constructor is used.
-                    Softcapping is only supported by the FlashAttention backend.
+                    Softcapping is only supported by the FlashAttention and
+                    UnfusedDotProductAttention backends.
         bottom_right_diagonal: Optional[bool], default = None
                     Align sliding window and ALiBi diagonal to the top left (`False`)
                     or bottom right (`True`) corner of the softmax matrix in the encoder.
@@ -2041,17 +2043,6 @@ class DotProductAttention(TransformerEngineBaseModule):
                 else:
                     pad_between_seqs = False
 
-            # softcap is not supported by UnfusedDotProductAttention, which is the backend ONNX
-            # export unconditionally force-selects further down (bypassing get_attention_backend's
-            # softcap-aware filter). Fail loudly rather than silently export a model that omits
-            # softcapping. Uses an explicit raise (not assert) so the check survives python -O /
-            # PYTHONOPTIMIZE, which strips asserts and would otherwise silently re-open this gap.
-            if softcap != 0.0 and is_in_onnx_export_mode():
-                raise ValueError(
-                    "Attention logit softcapping (softcap != 0.0) is not supported with "
-                    "ONNX export!"
-                )
-
             # Validate experimental Flex Attention API inputs that backend selection
             # cannot represent.
             if score_mod is None:
@@ -2365,6 +2356,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                         attention_mask=attention_mask,
                         window_size=window_size,
                         bottom_right_diagonal=bottom_right_diagonal,
+                        softcap=softcap,
                         core_attention_bias_type=core_attention_bias_type,
                         core_attention_bias=core_attention_bias,
                         alibi_slopes=alibi_slopes,
@@ -2389,6 +2381,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                     attention_mask=attention_mask,
                     window_size=window_size,
                     bottom_right_diagonal=bottom_right_diagonal,
+                    softcap=softcap,
                     core_attention_bias_type=core_attention_bias_type,
                     core_attention_bias=core_attention_bias,
                     alibi_slopes=alibi_slopes,

@@ -645,6 +645,31 @@ def test_dpa_softmax_thd(dtype, model_configs, model):
     test_dot_product_attention(dtype, model_configs, model, True, "thd_thd_thd", False, False)
 
 
+model_configs_softcap = {
+    # test: ModelConfig(b, sq, hq, dqk)
+    "softcap_1_0": ModelConfig(4, 128, 16, 64, softcap=50.0),
+    "softcap_1_1": ModelConfig(4, 128, 16, 64, num_gqa_groups=4, softcap=50.0),
+    "softcap_2_0": ModelConfig(2, 512, 16, 64, attn_mask_type="causal", softcap=50.0),
+    "softcap_2_1": ModelConfig(2, 512, 24, 128, attn_mask_type="padding_causal", softcap=50.0),
+    # 0.01 is on the order of the logits these inputs produce, so tanh runs in its nonlinear
+    # region instead of acting as a no-op, and a misapplied softmax_scale or a missing outer
+    # softcap factor changes the output.
+    "softcap_3_0": ModelConfig(4, 128, 16, 64, softcap=0.01),
+    "softcap_3_1": ModelConfig(2, 512, 16, 64, attn_mask_type="causal", softcap=0.01),
+}
+
+
+@pytest.mark.skipif(
+    not FlashAttentionUtils.v2_6_0_plus, reason="flash-attn 2.6.0+ is required for softcap."
+)
+@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("model_configs", [model_configs_softcap])
+@pytest.mark.parametrize("model", model_configs_softcap.keys())
+def test_dpa_softcap(dtype, model_configs, model):
+    """Test DotProductAttention module with tanh logit softcapping"""
+    test_dot_product_attention(dtype, model_configs, model, False, "bshd_bshd_bshd", False, False)
+
+
 model_configs_mla = {
     # test: ModelConfig(b, sq, hq, dqk)
     "mla_1_0": ModelConfig(8, 128, 16, 64, head_dim_v=128),
@@ -1447,6 +1472,7 @@ def _run_dot_product_attention(
         attention_type=config.attn_type,
         softmax_type=config.softmax_type,
         return_max_logit=config.return_max_logit,
+        softcap=config.softcap,
     ).to(dtype=dtype, device="cuda")
     if not is_training:
         block = block.eval()

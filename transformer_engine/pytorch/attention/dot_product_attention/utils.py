@@ -236,7 +236,8 @@ class AttentionParams:
         of the softmax matrix.
     softcap : float, default = 0.0
         Tanh logit softcapping value applied to the attention scores. A value of
-        ``0.0`` disables softcapping. Only supported by the FlashAttention backend.
+        ``0.0`` disables softcapping. Only supported by the FlashAttention and
+        UnfusedDotProductAttention backends.
     alibi_slopes_shape : Optional[Union[torch.Size, List]], default = None
         Tensor shape of :attr:`alibi_slopes` in `DotProductAttention`.
     core_attention_bias_type : str, default = no_bias
@@ -776,17 +777,14 @@ def get_attention_backend(
 
     # Filter: softcap
     # The scalar `softcap` kwarg (tanh logit softcapping) is plumbed to the FlashAttention 2
-    # backend (>= 2.6.0) by default, and to FA3 only behind an explicit opt-in gate below.
-    # FusedAttention/unfused don't take the scalar kwarg (cuDNN can softcap via score_mod, but that
-    # path is not used here). Steer selection to FA2 rather than (a) hitting a runtime
-    # NotImplementedError when an unwired backend is selected, or (b) silently dropping the cap.
+    # backend (>= 2.6.0) and to UnfusedDotProductAttention by default, and to FA3 only behind an
+    # explicit opt-in gate below. FusedAttention does not take the scalar kwarg (cuDNN can softcap
+    # via score_mod, but that path is not used here), so disable it rather than silently dropping
+    # the cap.
     if softcap != 0.0:
         if use_fused_attention:
             logger.debug("Disabling FusedAttention as it does not support softcap")
             use_fused_attention = False
-        if use_unfused_attention:
-            logger.debug("Disabling UnfusedDotProductAttention as it does not support softcap")
-            use_unfused_attention = False
         if use_flash_attention_3 and not (
             FlashAttentionUtils.fa3_supports_softcap
             and os.getenv("NVTE_FA3_SOFTCAP", "0") == "1"

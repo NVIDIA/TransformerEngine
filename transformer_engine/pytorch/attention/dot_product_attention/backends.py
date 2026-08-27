@@ -440,6 +440,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
         attention_mask: Optional[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]] = None,
         window_size: Optional[Tuple[int, int]] = None,
         bottom_right_diagonal: Optional[bool] = None,
+        softcap: float = 0.0,
         core_attention_bias_type: str = "no_bias",
         core_attention_bias: Optional[torch.Tensor] = None,
         alibi_slopes: Optional[torch.Tensor] = None,
@@ -677,6 +678,13 @@ class UnfusedDotProductAttention(torch.nn.Module):
             matmul_result = (matmul_result.view(*output_size) + core_attention_bias).to(
                 dtype=query_layer.dtype
             )
+
+        # Cap the scaled logits -- softcap * tanh(scores * scale / softcap) -- matching how
+        # FlashAttention folds softmax_scale into its tanh argument. qk layer scaling defers the
+        # layer_number factor to the softmax below, so it is divided out of the cap here.
+        if softcap != 0.0:
+            cap = softcap / self.layer_number if apply_qk_layer_scaling else softcap
+            matmul_result = cap * torch.tanh(matmul_result / cap)
 
         if fp8:
             # quantize and dequantize dP to emulate FP8
