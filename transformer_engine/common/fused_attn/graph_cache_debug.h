@@ -4,26 +4,24 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-// Fused-attention graph cache diagnostics, writtent to stderr and prefixed with [FUSED-ATTN-CACHE].
-// Enable at runtime with NVTE_FUSED_ATTN_CACHE_DEBUG=<level>[:<ranks>], for example, "1:all" for
-// level 1 on all ranks, and "2:0,3" for level 2 on only ranks 0 and 3.
+// Fused-attention graph cache diagnostics. Written to stderr and prefixed with [FUSED-ATTN-CACHE].
+// Enable with NVTE_FUSED_ATTN_CACHE_DEBUG=<level>[:<ranks>] at runtime, e.g., "1:all" for level 1
+// on all ranks, and "2:0,3" for level 2 on ranks 0 and 3 only. By default, only rank 0 is enabled
+// when diagnostics are on.
 //
-//   Level 0 (off)    : default.
-//   Level 1 (summary): prints an end-of-run summary at process exit, of cache counters and cuDNN
-//                      build times. Cache events include:
-//                          HIT/MISS     : every cache lookup, given a config
-//                          CREATE_GRAPH : on a cache miss, create a cuDNN graph for the config
-//                          CACHE_GRAPH  : check if cuDNN supports the graph; if so, cache it
-//                          BUILD_PLANS  : on first execution of the graph, compile the kernels for it
-//                          EXECUTE      : every time the graph is executed
-//                      Counters are accumulated per backend (f16 vs fp8), per pass (forward vs
-//                      backward), per thread. Average times are also included for these cuDNN calls:
-//                      validate(), build_operation_graph(), create_execution_plans(), check_support(),
-//                      and build_plans().
-//   Level 2 (trace)  : all of Level 1 diagnostics, and an extra line per event as it happens. HIT/MISS
-//                      lines also contain the full normalized cache key to help identify the config.
+//   Level 0: off (default).
+//   Level 1: prints a summary at process exit, of cache counters and cuDNN build times. Cache
+//            events include: HIT/MISS, CREATE_GRAPH, CACHE_GRAPH, BUILD_PLANS, and EXECUTE, and
+//            counters are accumulated per backend (f16 vs fp8), per pass (forward vs backward), per
+//            thread. Average, CPU walltimes are also recorded for these cuDNN frontend calls:
+//            validate(), build_operation_graph(), create_execution_plans(), check_support(), and
+//            build_plans().
+//   Level 2: all Level 1 diagnostics, plus one log message per event as it happens. HIT/MISS
+//            messages also include the full normalized cache key to identify the config that
+//            triggered it.
 //
-// See docs/examples/attention/attention.ipynb for an example of the Level 2 diagnostics.
+// For an example of Level 2 diagnostics, which also includes the summary provided by Level 1,
+// please refer to docs/examples/attention/attention.ipynb.
 
 #ifndef TRANSFORMER_ENGINE_COMMON_FUSED_ATTN_GRAPH_CACHE_DEBUG_H_
 #define TRANSFORMER_ENGINE_COMMON_FUSED_ATTN_GRAPH_CACHE_DEBUG_H_
@@ -58,7 +56,7 @@ namespace detail {
 // Debug level and rank selection
 // ============================================================================
 
-// NVTE_FUSED_ATTN_CACHE_DEBUG: 0=off, 1=summary, 2=trace
+// NVTE_FUSED_ATTN_CACHE_DEBUG: 0=off, 1=summary, 2=trace.
 inline int debug_level() {
   static const int lvl = [] {
     const char *e = std::getenv("NVTE_FUSED_ATTN_CACHE_DEBUG");
@@ -69,7 +67,7 @@ inline int debug_level() {
   return lvl;
 }
 
-// Identify which rank this process is
+// Identify which rank this process is.
 inline int launcher_rank() {
   static const int rank = []() -> int {
     for (const char *var : {"RANK", "LOCAL_RANK", "OMPI_COMM_WORLD_RANK", "SLURM_PROCID"}) {
@@ -81,7 +79,7 @@ inline int launcher_rank() {
   return rank;
 }
 
-// Enable diagnostics for level >= 1; on ranks selected by ":<ranks>"
+// Enable diagnostics for level >= 1; on ranks specified by ":<ranks>".
 inline bool enabled() {
   static const bool on = [] {
     if (debug_level() < 1) return false;
@@ -105,20 +103,20 @@ inline bool enabled() {
   return on;
 }
 
-// Enable tracing for level >= 2
+// Enable tracing for level >= 2.
 inline bool enabled_with_trace() { return enabled() && debug_level() >= 2; }
 
 // ============================================================================
 // Build-site indexing and labels
 // ============================================================================
 
-// (backend, pass) pair for each build site.
+// (backend, pass) pair for each build site: (f16/fp8, fwd/bwd).
 constexpr size_t kSiteCount = 4;
 inline constexpr size_t site_index(Backend b, Pass p) {
   return (b == Backend::F16 ? 0u : 2u) + (p == Pass::Fwd ? 0u : 1u);
 }
 
-// Name the emitting rank
+// Name the emitting rank.
 inline const std::string &rank_tag() {
   static const std::string *tag = [] {
     const int rank = launcher_rank();
@@ -128,8 +126,8 @@ inline const std::string &rank_tag() {
   return *tag;
 }
 
-// Convenient, short thread IDs (0, 1, 2, ...), not pthread IDs;
-// numbered by assignment order, and incremented sequentially.
+// Short thread IDs (0, 1, 2, ...) for convenience, not pthread IDs;
+// numbered by assignment order, and incremented sequentially by each thread.
 inline unsigned thread_seq_id() {
   static std::atomic<unsigned> next{0};
   static thread_local unsigned id = next.fetch_add(1, std::memory_order_relaxed);
@@ -140,7 +138,7 @@ inline unsigned thread_seq_id() {
 // Event counters
 // ============================================================================
 
-// Cache event counters, one block per build site.
+// Cache event counters, one block per build site (f16/fp8, fwd/bwd).
 struct EventCounters {
   std::atomic<uint64_t> create_graph{0};
   std::atomic<uint64_t> cache_graph{0};
@@ -155,8 +153,8 @@ inline EventCounters &counters(Backend b, Pass p) {
   return table[site_index(b, p)];
 }
 
-// One counter block read out into plain values, so the summary can sum blocks for its per-backend
-// and all-backends rows.
+// One counter block read out into plain values, so the summary can sum blocks for
+// its per-backend and all-backends rows.
 struct CounterSnapshot {
   uint64_t create_graph = 0;
   uint64_t cache_graph = 0;
@@ -466,8 +464,8 @@ struct ScopedBuildTimer {
 }  // namespace detail
 
 // ============================================================================
-// Recorders: everything a call site (f16/fp8 + forward/backward) calls. Each
-// takes the calling (backend, pass) pair, adds one to that call site's column,
+// Recorders: everything a call site (f16/fp8 + fwd/bwd) uses. Each recorder
+// takes the calling (backend, pass) pair, adds one to that call site's counter,
 // and prints a line when the level asks for it.
 // ============================================================================
 

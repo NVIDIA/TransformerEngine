@@ -136,10 +136,9 @@ enum NVTE_Mask_Type {
  *  \brief Attention softmax types as described in
  *  Efficient Streaming Language Models with Attention Sinks (https://arxiv.org/pdf/2309.17453v3).
  *  For a given attention score S = Q*K^T, different softmax types perform different operations on S,
- *  `NVTE_VANILLA_SOFTMAX`: S[:,:,:,i] = exp(S[:,:,:,i])/sum(exp(S[:,:,:,:]), dim=-1),
- *  `NVTE_OFF_BY_ONE_SOFTMAX`: S[:,:,:,i] = exp(S[:,:,:,i])/(1 + sum(exp(S[:,:,:,:]), dim=-1)), and
- *  `NVTE_LEARNABLE_SOFTMAX`: S[:,j,:,i] = exp(S[:,j,:,i])/(exp(alpha[j]) +
- *  sum(exp(S[:,j,:,:]), dim=-1)),
+ *  NVTE_VANILLA_SOFTMAX: S[:,:,:,i] = exp(S[:,:,:,i])/sum(exp(S[:,:,:,:]), dim=-1),
+ *  NVTE_OFF_BY_ONE_SOFTMAX: S[:,:,:,i] = exp(S[:,:,:,i])/(1 + sum(exp(S[:,:,:,:]), dim=-1)), and
+ *  NVTE_LEARNABLE_SOFTMAX: S[:,j,:,i] = exp(S[:,j,:,i])/(exp(alpha[j]) + sum(exp(S[:,j,:,:]), dim=-1)),
  *  where alpha is a learnable parameter of shape [H].
  */
 enum NVTE_Softmax_Type {
@@ -206,7 +205,7 @@ typedef void *NVTEFusedAttnConfig;
  *  may be appended at the end, and existing fields are never reordered, removed, or resized.
  */
 enum NVTEFusedAttnConfigAttribute {
-  // basic attention settings
+  // Basic attention settings
   kNVTEFusedAttnConfigIsTraining = 0,
   kNVTEFusedAttnConfigDeterministic,
   kNVTEFusedAttnConfigCudaGraph,
@@ -220,19 +219,19 @@ enum NVTEFusedAttnConfigAttribute {
   kNVTEFusedAttnConfigScalingMode,
   kNVTEFusedAttnConfigDropout,
   kNVTEFusedAttnConfigAttnScale,
-  // tensor types
+  // Tensor types
   kNVTEFusedAttnConfigQKVDtype,
   kNVTEFusedAttnConfigODtype,
   kNVTEFusedAttnConfigDODtype,
   kNVTEFusedAttnConfigDQKVDtype,
-  // tensor layouts
+  // Tensor layouts
   kNVTEFusedAttnConfigQKVLayout,
   kNVTEFusedAttnConfigOFormat,
   kNVTEFusedAttnConfigDOFormat,
   kNVTEFusedAttnConfigDQKVLayout,
   kNVTEFusedAttnConfigQKVScaleInvFormat,
   kNVTEFusedAttnConfigDOScaleInvFormat,
-  // tensor dimensions
+  // Tensor dimensions
   kNVTEFusedAttnConfigBatchSize,
   kNVTEFusedAttnConfigNumAttnHeads,
   kNVTEFusedAttnConfigNumGQAGroups,
@@ -242,19 +241,19 @@ enum NVTEFusedAttnConfigAttribute {
   kNVTEFusedAttnConfigMaxSeqlenKV,
   kNVTEFusedAttnConfigNumTokensQ,
   kNVTEFusedAttnConfigNumTokensKV,
-  // paged KV dimensions
+  // Paged KV dimensions
   kNVTEFusedAttnConfigNumPagesK,
   kNVTEFusedAttnConfigNumPagesV,
   kNVTEFusedAttnConfigPageSizeK,
   kNVTEFusedAttnConfigPageSizeV,
   kNVTEFusedAttnConfigMaxPagesPerSeqK,
   kNVTEFusedAttnConfigMaxPagesPerSeqV,
-  // bias dimensions
+  // Bias dimensions
   kNVTEFusedAttnConfigBiasBatchSize,
   kNVTEFusedAttnConfigBiasNumHeads,
   kNVTEFusedAttnConfigBiasSeqlenQ,
   kNVTEFusedAttnConfigBiasSeqlenKV,
-  // number of attributes
+  // Number of attributes
   kNVTEFusedAttnConfigNumAttributes
 };
 
@@ -285,7 +284,7 @@ typedef void *NVTEFusedAttnFwdParams;
  *  may be appended at the end, and existing fields are never reordered, removed, or resized.
  */
 enum NVTEFusedAttnFwdParamsAttribute {
-  // tensor handles
+  // Tensor handles
   kNVTEFusedAttnFwdParamsQ = 0,
   kNVTEFusedAttnFwdParamsK,
   kNVTEFusedAttnFwdParamsV,
@@ -301,7 +300,7 @@ enum NVTEFusedAttnFwdParamsAttribute {
   kNVTEFusedAttnFwdParamsPageTableK,
   kNVTEFusedAttnFwdParamsPageTableV,
   kNVTEFusedAttnFwdParamsRngState,
-  // configuration knobs
+  // Configuration knobs
   kNVTEFusedAttnFwdParamsIsTraining,
   kNVTEFusedAttnFwdParamsCudaGraph,
   kNVTEFusedAttnFwdParamsReturnMaxLogit,
@@ -318,10 +317,10 @@ enum NVTEFusedAttnFwdParamsAttribute {
   kNVTEFusedAttnFwdParamsQKVScaleInvFormat,
   kNVTEFusedAttnFwdParamsMaxSeqlenQ,
   kNVTEFusedAttnFwdParamsMaxSeqlenKV,
-  // workspace and stream
+  // Workspace and stream
   kNVTEFusedAttnFwdParamsWorkspace,
   kNVTEFusedAttnFwdParamsStream,
-  // number of attributes
+  // Number of attributes
   kNVTEFusedAttnFwdParamsNumAttributes
 };
 
@@ -352,7 +351,7 @@ typedef void *NVTEFusedAttnBwdParams;
  *  may be appended at the end, and existing fields are never reordered, removed, or resized.
  */
 enum NVTEFusedAttnBwdParamsAttribute {
-  // tensor handles
+  // Tensor handles
   kNVTEFusedAttnBwdParamsQ = 0,
   kNVTEFusedAttnBwdParamsK,
   kNVTEFusedAttnBwdParamsV,
@@ -370,7 +369,7 @@ enum NVTEFusedAttnBwdParamsAttribute {
   kNVTEFusedAttnBwdParamsCuSeqlensKV,
   kNVTEFusedAttnBwdParamsCuSeqlensQPadded,
   kNVTEFusedAttnBwdParamsCuSeqlensKVPadded,
-  // configuration knobs
+  // Configuration knobs
   kNVTEFusedAttnBwdParamsDeterministic,
   kNVTEFusedAttnBwdParamsCudaGraph,
   kNVTEFusedAttnBwdParamsAttnMaskType,
@@ -389,10 +388,10 @@ enum NVTEFusedAttnBwdParamsAttribute {
   kNVTEFusedAttnBwdParamsDOScaleInvFormat,
   kNVTEFusedAttnBwdParamsMaxSeqlenQ,
   kNVTEFusedAttnBwdParamsMaxSeqlenKV,
-  // workspace and stream
+  // Workspace and stream
   kNVTEFusedAttnBwdParamsWorkspace,
   kNVTEFusedAttnBwdParamsStream,
-  // number of attributes
+  // Number of attributes
   kNVTEFusedAttnBwdParamsNumAttributes
 };
 
@@ -735,7 +734,7 @@ void nvte_cp_thd_read_half_tensor(const NVTETensor &tensor, const NVTETensor &cu
  *  \param[out]    lse                 Output tensor.
  *  \param[in]     lse_per_step        Input tensor.
  *  \param[in]     cu_seqlens          Cumulative sequence lengths, [batch_size + 1].
- *  \param[in]     lse_packed          Whether or not `lse_per_step` is packed.
+ *  \param[in]     lse_packed          Whether or not lse_per_step is packed.
  *  \param[in]     stream              CUDA stream used for this operation.
  */
 void nvte_cp_thd_second_half_lse_correction(NVTETensor lse, const NVTETensor &lse_per_step,
@@ -819,9 +818,9 @@ void nvte_cp_thd_get_partitioned_indices(const NVTETensor &cu_seqlens, NVTETenso
  *
  *  \param[in]     inp           Input THD tensor [total_tokens, ...].
  *  \param[in]     cu_seqlens    Padded cumulative sequence lengths, [batch_size + 1], int32.
- *  \param[out]    out           Output tensor, same shape/dtype as `inp`.
+ *  \param[out]    out           Output tensor, same shape/dtype as inp.
  *  \param[in]     world_size    Context-parallel size.
- *  \param[in]     total_tokens  Total padded tokens (= `inp.shape[0]`).
+ *  \param[in]     total_tokens  Total padded tokens (= inp.shape[0]).
  *  \param[in]     stream        CUDA stream used for this operation.
  */
 void nvte_thd_sequence_order_to_cp_rank_order(const NVTETensor &inp, const NVTETensor &cu_seqlens,
@@ -835,9 +834,9 @@ void nvte_thd_sequence_order_to_cp_rank_order(const NVTETensor &inp, const NVTET
  *
  *  \param[in]     inp           Input THD tensor [total_tokens, ...].
  *  \param[in]     cu_seqlens    Padded cumulative sequence lengths, [batch_size + 1], int32.
- *  \param[out]    out           Output tensor, same shape/dtype as `inp`.
+ *  \param[out]    out           Output tensor, same shape/dtype as inp.
  *  \param[in]     world_size    Context-parallel size.
- *  \param[in]     total_tokens  Total padded tokens (= `inp.shape[0]`).
+ *  \param[in]     total_tokens  Total padded tokens (= inp.shape[0]).
  *  \param[in]     stream        CUDA stream used for this operation.
  */
 void nvte_thd_cp_rank_order_to_sequence_order(const NVTETensor &inp, const NVTETensor &cu_seqlens,
@@ -852,8 +851,8 @@ void nvte_thd_cp_rank_order_to_sequence_order(const NVTETensor &inp, const NVTET
  *  \param[in]     inp                 Per-split THD source tensor [total_tokens, ...].
  *  \param[in]     cu_seqlens_padded   Padded cumulative sequence lengths, [batch_size + 1], int32.
  *  \param[in]     cu_seqlens          Valid cumulative sequence lengths, [batch_size + 1], int32.
- *  \param[in,out] out                 Rank-local accumulator, same shape/dtype as `inp`.
- *  \param[in]     total_tokens        Total padded tokens (= `inp.shape[0]`).
+ *  \param[in,out] out                 Rank-local accumulator, same shape/dtype as inp.
+ *  \param[in]     total_tokens        Total padded tokens (= inp.shape[0]).
  *  \param[in]     stream              CUDA stream used for this operation.
  */
 void nvte_thd_copy_valid_tokens_from_per_split_to_rank_local(const NVTETensor &inp,
@@ -920,7 +919,7 @@ void nvte_prepare_flash_attn_bwd(NVTETensor q, NVTETensor k, NVTETensor v, NVTET
  *  \param[in]     inputs           List of input tensors.
  *  \param[in,out] outputs          List of output tensors.
  *  \param[in]     num_tensors      Number of tensors in the list.
- *  \param[in]     original_format  Original QKV format (`NVTE_BSHD` or `NVTE_SBHD`).
+ *  \param[in]     original_format  Original QKV format (NVTE_BSHD or NVTE_SBHD).
  *  \param[in]     stream           CUDA stream.
  */
 void nvte_multi_tensor_transpose_to_bhsd(NVTETensor *inputs, NVTETensor *outputs,

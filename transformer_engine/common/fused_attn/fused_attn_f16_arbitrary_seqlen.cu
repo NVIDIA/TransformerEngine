@@ -588,7 +588,7 @@ static F16BwdGraphAndTensors create_graph_f16_bwd(const FusedAttnConfig &cfg) {
   const bool is_ragged_q = cfg.is_ragged_q;
   const bool is_ragged_kv = cfg.is_ragged_kv;
   const auto cudnn_runtime_version = cudnnGetVersion();
-  const bool use_packed_ragged_graph = cfg.uses_packed_ragged_graph;
+  const bool use_ragged_graph = cfg.uses_ragged_graph;
   const bool use_ragged_stats = cfg.uses_ragged_stats;
   const DType ragged_offset_type = cfg.ragged_offset_type_bwd;
 
@@ -691,7 +691,7 @@ static F16BwdGraphAndTensors create_graph_f16_bwd(const FusedAttnConfig &cfg) {
   if (use_ragged_stats) {
     sdpa_backward_options.set_max_total_seq_len_q(s_q);
   }
-  if (is_ragged_kv && use_packed_ragged_graph) {
+  if (is_ragged_kv && use_ragged_graph) {
     sdpa_backward_options.set_max_total_seq_len_kv(s_kv);
   }
 

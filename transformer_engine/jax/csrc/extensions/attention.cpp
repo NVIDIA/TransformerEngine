@@ -73,7 +73,7 @@ static std::tuple<NVTE_Fused_Attn_Backend, std::string> GetFusedAttnBackendImpl(
 
   const char *message = nullptr;
   auto backend = nvte_get_fused_attn_backend_v2(cfg, &message);
-  return {backend, message != nullptr ? std::string(message) : std::string()};
+  return {backend, std::string(message)};
 }
 
 std::tuple<NVTE_Fused_Attn_Backend, std::string> GetFusedAttnBackend(

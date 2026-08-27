@@ -41,11 +41,9 @@ DType get_ragged_offset_dtype(NVTE_QKV_Layout_Group layout_group, int64_t num_at
                               int64_t head_dim_qk, int64_t head_dim_v);
 
 void FusedAttnConfig::derive() {
-  const int64_t b = static_cast<int64_t>(batch_size);
-  const int64_t sq = static_cast<int64_t>(max_seqlen_q);
-  const int64_t skv = static_cast<int64_t>(max_seqlen_kv);
+  if (is_derived) return;
 
-  // Convenience fields
+  // Common attributes
   qkv_format = nvte_get_qkv_format(qkv_layout);
   q_format = nvte_get_q_format(qkv_layout);
   kv_format = nvte_get_kv_format(qkv_layout);
@@ -61,58 +59,61 @@ void FusedAttnConfig::derive() {
   is_causal_bottom_right =
       (attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_BOTTOM_RIGHT_MASK) ||
       (attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK);
+  if (is_causal_bottom_right && !bottom_right_diagonal) {
+    bottom_right_diagonal = true;
+  }
+  if (is_causal && bottom_right_diagonal) {
+    bottom_right_diagonal = false;
+  }
   is_bias = (bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS);
   is_alibi = (bias_type == NVTE_Bias_Type::NVTE_ALIBI);
   is_softmax_offset = (softmax_type != NVTE_Softmax_Type::NVTE_VANILLA_SOFTMAX);
-  is_mxfp8 = (scaling_mode == NVTE_MXFP8_1D_SCALING);
   is_dropout = is_training && dropout != 0.0f;
 
-  // Bucket the THD (ragged) batch and token counts
-  const size_t tokens_q = num_tokens_q != 0 ? num_tokens_q : static_cast<size_t>(b * sq);
-  const size_t tokens_kv = num_tokens_kv != 0 ? num_tokens_kv : static_cast<size_t>(b * skv);
-  bucketed_batch_size =
-      (is_ragged_q || is_ragged_kv) ? fused_attn::get_max_batch_size(batch_size) : 0;
-  bucketed_num_tokens_q = is_ragged_q ? fused_attn::get_max_tokens(tokens_q) : 0;
-  bucketed_num_tokens_kv = is_ragged_kv ? fused_attn::get_max_tokens(tokens_kv) : 0;
-
-  // Use cu_seqlens vs actual_seqlens
-  const size_t cudnn_runtime_version = cudnnGetVersion();
-  uses_cu_seqlens_directly = CUDNN_FRONTEND_VERSION >= 12500 &&
-                             (CUDNN_VERSION >= 92400 && cudnn_runtime_version >= 92400) &&
-                             !is_dropout;
-  fp8_uses_cu_seqlens_directly = CUDNN_FRONTEND_VERSION >= 12600 &&
-                                 (CUDNN_VERSION >= 92500 && cudnn_runtime_version >= 92500) &&
-                                 !is_dropout;
-  const bool is_fp8_dtype = (qkv_dtype == kNVTEFloat8E4M3 || qkv_dtype == kNVTEFloat8E5M2);
-  const bool passes_cu_seqlens_directly =
-      is_fp8_dtype ? fp8_uses_cu_seqlens_directly : uses_cu_seqlens_directly;
-
+  // Determine the FP8 recipe
   is_o_in_fp8 = (o_dtype == kNVTEFloat8E4M3 || o_dtype == kNVTEFloat8E5M2);
   is_dqkv_in_fp8 = (dqkv_dtype == kNVTEFloat8E4M3 || dqkv_dtype == kNVTEFloat8E5M2);
-  const bool is_o_in_f16 = (o_dtype == kNVTEFloat16 || o_dtype == kNVTEBFloat16);
-  const bool is_dqkv_in_f16 = (dqkv_dtype == kNVTEFloat16 || dqkv_dtype == kNVTEBFloat16);
-
-  // Determine the FP8 recipe
+  is_o_in_f16 = (o_dtype == kNVTEFloat16 || o_dtype == kNVTEBFloat16);
+  is_dqkv_in_f16 = (dqkv_dtype == kNVTEFloat16 || dqkv_dtype == kNVTEBFloat16);
   is_tensor_scaling = (scaling_mode == NVTE_DELAYED_TENSOR_SCALING);
+  is_mxfp8 = (scaling_mode == NVTE_MXFP8_1D_SCALING);
   is_delayed_scaling_fwd = is_tensor_scaling && is_o_in_fp8;
-  is_current_scaling_fwd = is_tensor_scaling && is_o_in_f16;
   is_delayed_scaling_bwd = is_tensor_scaling && is_dqkv_in_fp8;
+  is_current_scaling_fwd = is_tensor_scaling && is_o_in_f16;
   is_current_scaling_bwd = is_tensor_scaling && is_dqkv_in_f16;
   is_mxfp8_fwd = is_mxfp8 && is_o_in_f16;
   is_mxfp8_bwd = is_mxfp8 && is_dqkv_in_f16;
 
-  // Whether packed graphs exist for THD
+  // Use cu_seqlens vs actual_seqlens for THD or padding masks
+  const size_t cudnn_runtime_version = cudnnGetVersion();
+  const bool is_fp8_dtype = (qkv_dtype == kNVTEFloat8E4M3 || qkv_dtype == kNVTEFloat8E5M2);
+  const size_t min_frontend_version = is_fp8_dtype ? 12600 : 12500;
+  const size_t min_cudnn_version = is_fp8_dtype ? 92500 : 92400;
+  uses_cu_seqlens_directly =
+      CUDNN_FRONTEND_VERSION >= min_frontend_version &&
+      (CUDNN_VERSION >= min_cudnn_version && cudnn_runtime_version >= min_cudnn_version) &&
+      !is_dropout;
+
+  // Bucket the batch size and token counts for THD
+  bucketed_batch_size =
+      (is_ragged_q || is_ragged_kv) ? fused_attn::get_max_batch_size(batch_size) : 0;
+  bucketed_num_tokens_q = is_ragged_q ? fused_attn::get_max_tokens(num_tokens_q) : 0;
+  bucketed_num_tokens_kv = is_ragged_kv ? fused_attn::get_max_tokens(num_tokens_kv) : 0;
+
+  // Use ragged (TH1) or dense (BHS1) graphs and stats
   const int sm_arch = cuda::sm_arch(cuda::current_device());
-  uses_packed_ragged_graph = cudnn_runtime_version >= 90600 && sm_arch >= 90 && sm_arch != 120;
-  uses_ragged_stats = is_ragged_q && uses_packed_ragged_graph;
-
-  // Sequence lengths the graph is built at
+  uses_ragged_graph = cudnn_runtime_version >= 90600 && sm_arch >= 90 && sm_arch != 120;
+  uses_ragged_stats = is_ragged_q && uses_ragged_graph;
+  const bool buckets_the_batch = (is_ragged_q || is_ragged_kv) && uses_ragged_graph;
+  graph_batch_size_fwd =
+      (buckets_the_batch && !uses_cu_seqlens_directly) ? bucketed_batch_size : batch_size;
+  graph_batch_size_bwd = buckets_the_batch ? bucketed_batch_size : batch_size;
   graph_max_seqlen_q =
-      (is_ragged_q && uses_packed_ragged_graph) ? bucketed_num_tokens_q : max_seqlen_q;
+      (is_ragged_q && uses_ragged_graph) ? bucketed_num_tokens_q : max_seqlen_q;
   graph_max_seqlen_kv =
-      (is_ragged_kv && uses_packed_ragged_graph) ? bucketed_num_tokens_kv : max_seqlen_kv;
+      (is_ragged_kv && uses_ragged_graph) ? bucketed_num_tokens_kv : max_seqlen_kv;
 
-  // Ragged-offset width that this config needs
+  // Set up ragged offset widths and multipliers
   needs_64bit_ragged_offset =
       (is_ragged_q || is_ragged_kv) &&
       fused_attn::get_ragged_offset_dtype(
@@ -120,50 +121,19 @@ void FusedAttnConfig::derive() {
           static_cast<int64_t>(max_seqlen_q), static_cast<int64_t>(max_seqlen_kv),
           static_cast<int64_t>(head_dim_qk), static_cast<int64_t>(head_dim_v)) == DType::kInt64;
   const DType wide_ragged_offsets = cudnn_runtime_version >= 90500 ? DType::kInt64 : DType::kInt32;
-  ragged_offset_type_fwd = passes_cu_seqlens_directly ? DType::kInt32 : wide_ragged_offsets;
+  ragged_offset_type_fwd = uses_cu_seqlens_directly ? DType::kInt32 : wide_ragged_offsets;
   ragged_offset_type_bwd = wide_ragged_offsets;
-
-  // Batch size the graph is built at
-  const bool buckets_the_batch = (is_ragged_q || is_ragged_kv) && uses_packed_ragged_graph;
-  graph_batch_size_fwd =
-      (buckets_the_batch && !passes_cu_seqlens_directly) ? bucketed_batch_size : batch_size;
-  graph_batch_size_bwd = buckets_the_batch ? bucketed_batch_size : batch_size;
-
-  // Elements per token for each ragged tensor
   ragged_offset_mults = RaggedOffsetMultipliers(
       layout_group, static_cast<int64_t>(num_attn_heads), static_cast<int64_t>(num_gqa_groups),
       static_cast<int64_t>(head_dim_qk), static_cast<int64_t>(head_dim_v));
 
-  // Paged KV dimensions
-  if (is_paged_kv) {
-    if (num_pages_k == 0) {
-      num_pages_k = static_cast<size_t>(b);
-    }
-    if (num_pages_v == 0) {
-      num_pages_v = static_cast<size_t>(b);
-    }
-    if (page_size_k == 0) {
-      page_size_k = static_cast<size_t>(skv);
-    }
-    if (page_size_v == 0) {
-      page_size_v = static_cast<size_t>(skv);
-    }
-    if (max_pages_per_seq_k == 0) {
-      max_pages_per_seq_k = 1;
-    }
-    if (max_pages_per_seq_v == 0) {
-      max_pages_per_seq_v = 1;
-    }
-  }
-
+  // Mark as derived
   is_derived = true;
 }
 
 FusedAttnConfig FusedAttnConfig::make_cache_key(Pass pass) const {
   check_derived();
   FusedAttnConfig cache_cfg = *this;
-
-  // Key the device ID for multi-GPU single-process runs
   cache_cfg.device_id = cuda::current_device();
 
   // Normalize bottom_right_diagonal
@@ -180,7 +150,7 @@ FusedAttnConfig FusedAttnConfig::make_cache_key(Pass pass) const {
   cache_cfg.max_seqlen_kv = cache_cfg.graph_max_seqlen_kv;
 
   // Normalize batch size the graph is built at, and drop the token counts the bucketing replaced.
-  if ((cache_cfg.is_ragged_q || cache_cfg.is_ragged_kv) && cache_cfg.uses_packed_ragged_graph) {
+  if ((cache_cfg.is_ragged_q || cache_cfg.is_ragged_kv) && cache_cfg.uses_ragged_graph) {
     cache_cfg.num_tokens_q = 0;
     cache_cfg.num_tokens_kv = 0;
     cache_cfg.batch_size =
@@ -616,6 +586,7 @@ void nvte_set_fused_attn_config_attribute(NVTEFusedAttnConfig config,
   NVTE_CHECK(buf != nullptr, "Invalid buffer (got NULL)");
 
   auto &cfg = *get_fused_attn_config_mutable(config);
+  cfg.is_derived = false;
   switch (attr) {
     case kNVTEFusedAttnConfigIsTraining:
       uint8_to_bool(buf, cfg.is_training);

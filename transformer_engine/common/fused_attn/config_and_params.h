@@ -28,7 +28,7 @@ inline constexpr const char *backend_name(Backend b) { return b == Backend::F16 
 inline constexpr const char *pass_name(Pass p) { return p == Pass::Fwd ? "fwd" : "bwd"; }
 
 struct FusedAttnConfig {
-  // basic attention settings
+  // Basic attention settings
   bool is_training = true;
   bool deterministic = false;
   bool cuda_graph = false;
@@ -43,13 +43,13 @@ struct FusedAttnConfig {
   float dropout = 0.0f;
   float attn_scale = 1.0f;
 
-  // tensor types
+  // Tensor types
   NVTEDType qkv_dtype = kNVTEBFloat16;
   NVTEDType o_dtype = kNVTEBFloat16;
   NVTEDType do_dtype = kNVTEBFloat16;
   NVTEDType dqkv_dtype = kNVTEBFloat16;
 
-  // tensor layouts
+  // Tensor layouts
   NVTE_QKV_Layout qkv_layout = NVTE_QKV_Layout_NOT_SET;
   NVTE_QKV_Format o_format = NVTE_QKV_Format_NOT_SET;
   NVTE_QKV_Format do_format = NVTE_QKV_Format_NOT_SET;
@@ -57,7 +57,7 @@ struct FusedAttnConfig {
   NVTE_QKV_Format qkv_scale_inv_format = NVTE_QKV_Format_NOT_SET;
   NVTE_QKV_Format do_scale_inv_format = NVTE_QKV_Format_NOT_SET;
 
-  // tensor dimensions
+  // Tensor dimensions
   size_t batch_size = 0;
   size_t num_attn_heads = 0;
   size_t num_gqa_groups = 0;
@@ -68,7 +68,7 @@ struct FusedAttnConfig {
   size_t num_tokens_q = 0;
   size_t num_tokens_kv = 0;
 
-  // paged KV dimensions
+  // Paged KV dimensions
   size_t num_pages_k = 0;
   size_t num_pages_v = 0;
   size_t page_size_k = 0;
@@ -76,65 +76,33 @@ struct FusedAttnConfig {
   size_t max_pages_per_seq_k = 0;
   size_t max_pages_per_seq_v = 0;
 
-  // bias dimensions
+  // Bias dimensions
   size_t bias_batch_size = 0;
   size_t bias_num_heads = 0;
   size_t bias_seqlen_q = 0;
   size_t bias_seqlen_kv = 0;
 
-  // Internal fields: keyed
+  // ============================================================================
+  // Internal fields: not part of attr_sizes[] or NVTEFusedAttnConfigAttribute, and
+  // unreachable from nvte_set_fused_attn_config_attribute, hence "internal".
   //
-  // device ID is not part of attribute serialization, i.e. internal, but it participates in
-  // operator< and is used to differentiate graphs built for different devices in multi-GPU
-  // single-process runs
+  // - Keyed: do participate in operator<, and can distinguish graphs in the cache,
+  //   e.g. device_id;
+  // - Unkeyed: do not participate in operator<, and can not distinguish graphs
+  //   in the cache; used for convenience purposes only; run derive() to fill them
+  // ============================================================================
+
+  // Keyed:
+  // - distinguish graphs on different GPUs in a single-process run
   int device_id = -1;
 
-  // Internal fields: not keyed. The following fields are not part of attribute serialization,
-  // operator<, or the cache key; they are filled by derive() or set by caller such as with
-  // check_for_forward_support, and are used for convinence purposes
-  //
-  // run query_support() for forward or backward
+  // Unkeyed:
+  // - support query directions
   bool check_for_forward_support = true;
   bool check_for_backward_support = true;
-  // whether derive() has been run
+  // - whether derived fields have been filled
   bool is_derived = false;
-  // bucketed batch size/token counts for THD
-  size_t bucketed_batch_size = 0;
-  size_t bucketed_num_tokens_q = 0;
-  size_t bucketed_num_tokens_kv = 0;
-  // whether to use cu_seqlens or actual_seqlens for THD or padding masks
-  bool uses_cu_seqlens_directly = false;
-  bool fp8_uses_cu_seqlens_directly = false;
-  // Whether packed graphs exist for THD. A memory optimization, not a correctness gate: where this
-  // is false, ragged input still builds a correct graph, just the dense one, whose dimensions are
-  // max_seqlen rather than the token total and whose Stats is BHS1 rather than TH1. Nothing may
-  // gate support on it -- which architectures run ragged attention at all is cuDNN's answer.
-  bool uses_packed_ragged_graph = false;
-  bool uses_ragged_stats = false;
-  // sequence lengths the graph is built at
-  size_t graph_max_seqlen_q = 0;
-  size_t graph_max_seqlen_kv = 0;
-  // batch size the graph is built at
-  size_t graph_batch_size_fwd = 0;
-  size_t graph_batch_size_bwd = 0;
-  // ragged offset type for THD
-  DType ragged_offset_type_fwd = DType::kInt32;
-  DType ragged_offset_type_bwd = DType::kInt32;
-  // Whether this config's ragged offsets overflow 32 bits. The counterpart to the two fields above
-  // rather than a third of them: those are the width TE will use, already capped by the running
-  // cuDNN, while this is the width the config needs. nvte_get_fused_attn_backend_v2 compares the
-  // two and refuses the config whose need outruns the cuDNN it is running on.
-  bool needs_64bit_ragged_offset = false;
-  // elements per token for each ragged tensor
-  RaggedOffsetMultipliers ragged_offset_mults;
-  // convenience fields
-  //
-  // qkv_format is the combined format: it says what Q and KV each are and whether they agree, with
-  // the mixed layouts keeping their own enumerators (NVTE_THD_2BSHD and friends) rather than
-  // collapsing onto either side. Ask it only where a rule means "Q and KV are the same dense
-  // layout". Anything about raggedness belongs to is_ragged_q/is_ragged_kv instead, because
-  // NVTE_THD names only the fully ragged layouts, so a test against it passes THD_BSHD_BSHD
-  // straight through -- a rule here did exactly that until it was found.
+  // - common attributes
   NVTE_QKV_Format qkv_format = NVTE_QKV_Format_NOT_SET;
   NVTE_QKV_Format q_format = NVTE_QKV_Format_NOT_SET;
   NVTE_QKV_Format kv_format = NVTE_QKV_Format_NOT_SET;
@@ -147,33 +115,41 @@ struct FusedAttnConfig {
   bool is_bias = false;
   bool is_alibi = false;
   bool is_softmax_offset = false;
-  bool is_mxfp8 = false;
   bool is_dropout = false;
+  // - FP8 recipes
   bool is_o_in_fp8 = false;
   bool is_dqkv_in_fp8 = false;
-  // Whether the FP8 recipe is tensor scaling, i.e. delayed or current rather than MXFP8. The
-  // graphs need this on its own, wherever a tensor is per-tensor scaled and it does not matter
-  // which of the two put the scale there.
+  bool is_o_in_f16 = false;
+  bool is_dqkv_in_f16 = false;
   bool is_tensor_scaling = false;
-  // Which recipe serves each pass, one flag per recipe per pass. Each means "this recipe is in
-  // effect and can write this pass's output dtype", so at most one of a pass's three holds, and all
-  // three false is a configuration no FP8 graph is written for -- which is what lets
-  // nvte_get_fused_attn_backend_v2 refuse it by asking three booleans and nothing else.
-  //
-  // Delayed against current is told apart by that output dtype rather than by scaling_mode, because
-  // NVTEScalingMode has no current-scaling enumerator: both arrive as NVTE_DELAYED_TENSOR_SCALING,
-  // and what separates them is that delayed knows the output scale before the graph is built while
-  // current has the graph compute it. So delayed writes FP8 and current writes F16/BF16, and an
-  // output dtype neither can write (FP32, say) leaves both false rather than defaulting to one.
+  bool is_mxfp8 = false;
   bool is_delayed_scaling_fwd = false;
-  bool is_current_scaling_fwd = false;
-  bool is_mxfp8_fwd = false;
   bool is_delayed_scaling_bwd = false;
+  bool is_current_scaling_fwd = false;
   bool is_current_scaling_bwd = false;
+  bool is_mxfp8_fwd = false;
   bool is_mxfp8_bwd = false;
+  // - cu_seqlens vs actual_seqlens for THD or padding masks
+  bool uses_cu_seqlens_directly = false;
+  // - bucket the batch size and token counts for THD
+  size_t bucketed_batch_size = 0;
+  size_t bucketed_num_tokens_q = 0;
+  size_t bucketed_num_tokens_kv = 0;
+  // - packed (TH1) vs dense (BHS1) graphs and stats
+  bool uses_ragged_graph = false;
+  bool uses_ragged_stats = false;
+  size_t graph_batch_size_fwd = 0;
+  size_t graph_batch_size_bwd = 0;
+  size_t graph_max_seqlen_q = 0;
+  size_t graph_max_seqlen_kv = 0;
+  // - ragged offset widths and multipliers
+  bool needs_64bit_ragged_offset = false;
+  DType ragged_offset_type_fwd = DType::kInt32;
+  DType ragged_offset_type_bwd = DType::kInt32;
+  RaggedOffsetMultipliers ragged_offset_mults;
 
   static constexpr size_t attr_sizes[] = {
-      // basic attention settings
+      // Basic attention settings
       sizeof(uint8_t),            // is_training
       sizeof(uint8_t),            // deterministic
       sizeof(uint8_t),            // cuda_graph
@@ -187,19 +163,19 @@ struct FusedAttnConfig {
       sizeof(NVTEScalingMode),    // scaling_mode
       sizeof(float),              // dropout
       sizeof(float),              // attn_scale
-      // tensor types
+      // Tensor types
       sizeof(NVTEDType),  // qkv_dtype
       sizeof(NVTEDType),  // o_dtype
       sizeof(NVTEDType),  // do_dtype
       sizeof(NVTEDType),  // dqkv_dtype
-      // tensor layouts
+      // Tensor layouts
       sizeof(NVTE_QKV_Layout),  // qkv_layout
       sizeof(NVTE_QKV_Format),  // o_format
       sizeof(NVTE_QKV_Format),  // do_format
       sizeof(NVTE_QKV_Layout),  // dqkv_layout
       sizeof(NVTE_QKV_Format),  // qkv_scale_inv_format
       sizeof(NVTE_QKV_Format),  // do_scale_inv_format
-      // tensor dimensions
+      // Tensor dimensions
       sizeof(size_t),  // batch_size
       sizeof(size_t),  // num_attn_heads
       sizeof(size_t),  // num_gqa_groups
@@ -209,14 +185,14 @@ struct FusedAttnConfig {
       sizeof(size_t),  // max_seqlen_kv
       sizeof(size_t),  // num_tokens_q
       sizeof(size_t),  // num_tokens_kv
-      // paged KV dimensions
+      // Paged KV dimensions
       sizeof(size_t),  // num_pages_k
       sizeof(size_t),  // num_pages_v
       sizeof(size_t),  // page_size_k
       sizeof(size_t),  // page_size_v
       sizeof(size_t),  // max_pages_per_seq_k
       sizeof(size_t),  // max_pages_per_seq_v
-      // bias dimensions
+      // Bias dimensions
       sizeof(size_t),  // bias_batch_size
       sizeof(size_t),  // bias_num_heads
       sizeof(size_t),  // bias_seqlen_q
@@ -330,7 +306,7 @@ struct FusedAttnFwdParams {
   cudaStream_t stream = nullptr;
 
   static constexpr size_t attr_sizes[] = {
-      // tensor handles
+      // Tensor handles
       sizeof(NVTETensor),        // Q
       sizeof(NVTETensor),        // K
       sizeof(NVTETensor),        // V
@@ -346,7 +322,7 @@ struct FusedAttnFwdParams {
       sizeof(NVTETensor),        // page_table_k
       sizeof(NVTETensor),        // page_table_v
       sizeof(NVTETensor),        // rng_state
-      // configuration knobs
+      // Configuration knobs
       sizeof(uint8_t),            // is_training
       sizeof(uint8_t),            // cuda_graph
       sizeof(uint8_t),            // return_max_logit
@@ -363,7 +339,7 @@ struct FusedAttnFwdParams {
       sizeof(NVTE_QKV_Format),  // qkv_scale_inv_format
       sizeof(size_t),  // max_seqlen_q
       sizeof(size_t),  // max_seqlen_kv
-      // workspace and stream
+      // Workspace and stream
       sizeof(NVTETensor),    // workspace
       sizeof(cudaStream_t),  // stream
   };
@@ -434,7 +410,7 @@ struct FusedAttnBwdParams {
   cudaStream_t stream = nullptr;
 
   static constexpr size_t attr_sizes[] = {
-      // tensor handles
+      // Tensor handles
       sizeof(NVTETensor),              // Q
       sizeof(NVTETensor),              // K
       sizeof(NVTETensor),              // V
@@ -452,7 +428,7 @@ struct FusedAttnBwdParams {
       sizeof(NVTETensor),              // cu_seqlens_kv
       sizeof(NVTETensor),              // cu_seqlens_q_padded
       sizeof(NVTETensor),              // cu_seqlens_kv_padded
-      // configuration knobs
+      // Configuration knobs
       sizeof(uint8_t),            // deterministic
       sizeof(uint8_t),            // cuda_graph
       sizeof(NVTE_Mask_Type),     // attn_mask_type
@@ -471,7 +447,7 @@ struct FusedAttnBwdParams {
       sizeof(NVTE_QKV_Format),  // do_scale_inv_format
       sizeof(size_t),  // max_seqlen_q
       sizeof(size_t),  // max_seqlen_kv
-      // workspace and stream
+      // Workspace and stream
       sizeof(NVTETensor),    // workspace
       sizeof(cudaStream_t),  // stream
   };

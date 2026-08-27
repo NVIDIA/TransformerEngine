@@ -6,29 +6,11 @@
 
 // Fused-attention graph cache.
 //
-// The fused-attention backend calls cuDNN frontend at four sites, (f16/fp8, fwd/bwd). They each
-// create a different graph with different computational operations and input/output tensors, but
-// they share the same mechanism for caching, support queries, error messaging, and plan building.
-// This file implements that shared mechanism and is called by all four (f16/fp8, fwd/bwd) sites.
-//
-// Cache types:
-// - CacheEntry: a cuDNN graph, the tensors it binds, and a once_flag guarding its plan build.
-// - GraphCache: a process-wide map from a normalized FusedAttnConfig to a CacheEntry.
-//
-// Internals (namespace detail):
-// - query_support(graph, handle): takes a constructed graph through a series of cuDNN frontend calls:
-//   validate, build_operation_graph, create_execution_plans and check_support; returns true if cuDNN
-//   supports it, otherwise throws cuDNN's message.
-// - cache_graph(cache, key, handle, build): returns a cached entry if hit; otherwise, builds the graph
-//   anew, checks it with query_support() and if supported, inserts it. The work behind get_graph() below.
-//
-// Entry points by (f16/fp8, fwd/bwd) implementations:
-// - get_graph<backend, pass, kCreateGraphFn>(cfg, handle): normalizes cfg into a cache key and owns
-//   the cache for its one <backend, pass, creator> triple; kCreateGraphFn is a create_graph_f16/fp8_fwd/bwd
-//   from a .cu file, the only piece a build site supplies.
-// - support_verdict<...>(cfg, handle): wraps get_graph() in a try, returning the empty string when
-//   cuDNN accepts the graph and its rejection reason when it does not.
-// - build_plans(entry): runs the kernel compilation that cache_graph() deferred, once per entry.
+// The four fused-attention implementation sites, (f16/fp8 + fwd/bwd), each create a different graph.
+// They differ in the operations in the graph and the input/output tensors that bind to the graph,
+// but the mechanism used for their graph caching, support queries, error messaging, and plan building
+// is the same. They all call these three functions in this file: get_graph(), support_verdict(), and
+// build_plans().
 
 #ifndef TRANSFORMER_ENGINE_COMMON_FUSED_ATTN_GRAPH_CACHE_H_
 #define TRANSFORMER_ENGINE_COMMON_FUSED_ATTN_GRAPH_CACHE_H_
@@ -50,6 +32,8 @@
 namespace transformer_engine {
 namespace fused_attn {
 
+// An entry in graph cache; contains a cuDNN graph, its input/output tensors, and
+// a once_flag that guards its plan build
 template <typename GraphAndTensors>
 struct CacheEntry {
   explicit CacheEntry(GraphAndTensors graph_and_tensors)
@@ -59,6 +43,7 @@ struct CacheEntry {
   std::once_flag build_plans_once;
 };
 
+// The graph cache; a process-wide map that maps a normalized FusedAttnConfig to a CacheEntry
 template <typename GraphAndTensors>
 struct GraphCache {
   std::mutex mutex;
@@ -67,7 +52,8 @@ struct GraphCache {
 
 namespace detail {
 
-// Query if a constructed graph can be supported by cuDNN; throw cuDNN's message on refusal.
+// Query if a cuDNN graph can be supported or not; if so, safely return; if not, throw with
+// cuDNN frontend's original error message; times for the four stages are also recorded.
 inline void query_support(Backend backend, Pass pass, cudnn_frontend::graph::Graph &graph,
                           cudnnHandle_t handle) {
   using graph_cache_debug::BuildStage;
@@ -88,12 +74,14 @@ inline void query_support(Backend backend, Pass pass, cudnn_frontend::graph::Gra
   run(BuildStage::CheckSupport, "check_support", [&] { return graph.check_support(); });
 }
 
-// Look up `key` in `cache` and if missed, build the graph from fresh
+// Look up the key in the cache and if
 //   hit  -> record HIT, return the cached entry
-//   miss -> record MISS, build(), query_support(), insert if supported and throw on refusal
+//   miss -> record MISS, run build() to get a new graph, run query_support() on the new graph,
+//           if supported, insert it to the cache; if not, throw cuDNN frontend's original
+//           error message
 //
-// The cache lookup and insert are guarded by mutex, but not the graph builds. Multiple threads
-// may build for the same key concurrently, but only the first build will be inserted.
+// The cache lookup and insert are guarded by mutex, not the graph builds. Multiple threads
+// may build for the same key concurrently, but only the first successful build will be inserted.
 template <typename GraphAndTensors, typename BuildFn>
 std::shared_ptr<CacheEntry<GraphAndTensors>> cache_graph(GraphCache<GraphAndTensors> &cache,
                                                          const FusedAttnConfig &key,
@@ -135,26 +123,26 @@ auto get_graph(const FusedAttnConfig &cfg, cudnnHandle_t handle) {
                              [&] { return kCreateGraphFn(cfg); });
 }
 
-// Check if cuDNN supports a given config.
-// Return an empty string if it does, or a diagnostic string if not.
+// Check if cuDNN supports a given config; if yes, return an empty string; if not, return a diagnostic
+// string with the reason that get_graph() throws.
 template <Backend kBackend, Pass kPass, auto kCreateGraphFn>
 std::string support_verdict(const FusedAttnConfig &cfg, cudnnHandle_t handle) {
-  auto label = [] {
-    return std::string("support_verdict<") + backend_name(kBackend) + ", " + pass_name(kPass) + ">";
-  };
+  const char *fallback = nullptr;
   try {
     get_graph<kBackend, kPass, kCreateGraphFn>(cfg, handle);
     return "";
   } catch (const std::exception &e) {
-    const char *reason = e.what();
-    if (reason != nullptr && reason[0] != '\0') return reason;
-    return label() + ": rejected without a reason.";
+    if (e.what()[0] != '\0') return e.what();
+    fallback = "rejected without a reason.";
   } catch (...) {
-    return label() + ": unknown failure.";
+    fallback = "unknown failure.";
   }
+  return std::string("support_verdict<") + backend_name(kBackend) + ", " + pass_name(kPass) +
+         ">: " + fallback;
 }
 
-// Compile kernels for the graph, once per cache entry. Most expensive cuDNN frontend call.
+// Compile the kernels for the graph before execution; once per cache entry; most expensive cuDNN
+// frontend call in the pre-execution, preparation process.
 template <typename GraphAndTensors>
 void build_plans(Backend backend, Pass pass, CacheEntry<GraphAndTensors> &entry) {
   std::call_once(entry.build_plans_once, [&] {

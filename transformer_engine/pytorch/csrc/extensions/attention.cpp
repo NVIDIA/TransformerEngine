@@ -59,7 +59,7 @@ std::tuple<NVTE_Fused_Attn_Backend, std::string> get_fused_attn_backend(const py
   py::gil_scoped_release nogil;
   const char *message = nullptr;
   NVTE_Fused_Attn_Backend fused_attention_backend = nvte_get_fused_attn_backend_v2(cfg, &message);
-  return {fused_attention_backend, message != nullptr ? std::string(message) : std::string()};
+  return {fused_attention_backend, std::string(message)};
 }
 
 // helper function for S and dP quantizers

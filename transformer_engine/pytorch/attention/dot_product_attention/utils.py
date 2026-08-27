@@ -437,17 +437,12 @@ def _get_fused_attn_backend(**fused_attn_kwargs):
     """Constant-foldable tex.get_fused_attn_backend: the result depends only on
     the attention config.
 
-    The config comes in as keyword arguments rather than as a FusedAttentionParams:
-    torch.compile materializes the arguments of a constant-folded call, and a
-    dataclass built by traced code arrives here with its fields reset to defaults.
-
-    The backend comes back as a plain int rather than a FusedAttnBackend member:
-    dynamo reconstructs the result of an assume_constant_result call by
-    re-emitting the call, which is only valid inside the frame that made it. An
-    int survives a graph break because it is baked into the graph as a literal,
-    while an enum member comes out of the reconstruction corrupted (see the cast
-    at the call site, which restores the enum).
-    """
+    Returns a plain int rather than a FusedAttnBackend member: dynamo
+    reconstructs the result of an assume_constant_result call by re-emitting the
+    call, which is only valid inside the frame that made it. An int survives a
+    graph break because it is baked into the graph as a literal, while an enum
+    member comes out of the reconstruction corrupted (see the cast at the call
+    site, which restores the enum)."""
     fused_attention_backend, reject_message = tex.get_fused_attn_backend(
         FusedAttentionParams(**fused_attn_kwargs)
     )

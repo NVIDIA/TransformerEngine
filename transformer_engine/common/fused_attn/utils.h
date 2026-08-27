@@ -223,9 +223,6 @@ void generateMatrixStrides(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int6
 // by the cu_seqlens_padded_to_offsets conversion kernel and the direct-seqlens path
 // (which passes them to cuDNN as ragged offset multipliers).
 struct RaggedOffsetMultipliers {
-  // Zeroed, for a FusedAttnConfig that has not been through derive() yet. Every multiplier is
-  // a per-token element count, so zero is not a usable value; it is only ever read after
-  // derive() has replaced it, which check_derived() is what enforces.
   RaggedOffsetMultipliers() = default;
 
   RaggedOffsetMultipliers(NVTE_QKV_Layout_Group layout_group, int64_t h, int64_t hg, int64_t d_qk,

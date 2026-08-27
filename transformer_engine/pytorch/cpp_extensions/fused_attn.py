@@ -107,17 +107,10 @@ class FusedAttnBackend(IntEnum):
     ``transformer_engine_torch.NVTE_Fused_Attn_Backend`` (pybind11) enum
     value-for-value, and instances of the two enums compare equal when they
     share the same integer value. Unlike the pybind enum, a plain-python
-    ``IntEnum`` is traceable by ``torch.compile``: comparisons against a member
-    constant-fold cleanly. Lookup by name (``FusedAttnBackend["FP8"]``) works
-    the same way as with the dict this used to be. Adding ``__eq__``/``__ne__``
-    overrides is unnecessary (the inherited ``int`` comparisons already match
-    the pybind enum in both operand orders) and harmful: a python ``__eq__``
-    would push dynamo from constant-folding the comparison to
-    inline-with-guard, breaking tracing.
-
-    Members do not survive a graph break, though, so ``get_attention_backend``
-    returns the sub-backend as a plain int and ``cast`` turns it back into a
-    member.
+    ``IntEnum`` is traceable by ``torch.compile``: comparisons constant-fold
+    cleanly and instances safely cross the ``assume_constant_result`` boundary
+    in ``get_attention_backend``. Lookup by name (``FusedAttnBackend["FP8"]``)
+    works the same way as with the dict this used to be.
     """
 
     No_Backend = int(NVTE_Fused_Attn_Backend.NVTE_No_Backend)
@@ -137,6 +130,24 @@ class FusedAttnBackend(IntEnum):
         if isinstance(backend, cls):
             return backend
         return cls(int(backend))
+
+    def __eq__(self, other: object) -> bool:
+        # ``FusedAttnBackend`` is an ``IntEnum`` while ``NVTE_Fused_Attn_Backend``
+        # is a pybind11 enum. Compare by integer value so the two enums stay
+        # equivalent regardless of the pybind11 version (the pybind ``__eq__``
+        # handles the reverse order).
+        if isinstance(other, NVTE_Fused_Attn_Backend):
+            return int(self) == int(other)
+        return int.__eq__(self, other)
+
+    def __ne__(self, other: object) -> bool:
+        result = self.__eq__(other)
+        if result is NotImplemented:
+            return result
+        return not result
+
+    def __hash__(self) -> int:
+        return int.__hash__(self)
 
 
 # Fail fast at import time if a new enumerator is added on the C++ side

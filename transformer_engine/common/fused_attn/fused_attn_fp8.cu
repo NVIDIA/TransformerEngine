@@ -78,7 +78,7 @@ static Fp8FwdGraphAndTensors create_graph_fp8_fwd(const FusedAttnConfig& cfg) {
   const bool is_tensor_scaling = cfg.is_tensor_scaling;
   const bool is_delayed_scaling = cfg.is_delayed_scaling_fwd;
   const bool is_current_scaling = cfg.is_current_scaling_fwd;
-  const bool use_cu_seqlens_directly = cfg.fp8_uses_cu_seqlens_directly;
+  const bool use_cu_seqlens_directly = cfg.uses_cu_seqlens_directly;
   const bool is_ragged_q = cfg.is_ragged_q;
   const bool is_ragged_kv = cfg.is_ragged_kv;
   const bool use_ragged_stats = cfg.uses_ragged_stats;
@@ -402,7 +402,7 @@ void fused_attn_fp8_fwd_impl(const FusedAttnConfig& cfg, void* devPtrQ, void* de
 
   const bool is_tensor_scaling = cfg.is_tensor_scaling;
   const bool is_delayed_scaling = cfg.is_delayed_scaling_fwd;
-  const bool use_cu_seqlens_directly = cfg.fp8_uses_cu_seqlens_directly;
+  const bool use_cu_seqlens_directly = cfg.uses_cu_seqlens_directly;
 
   const int64_t b = static_cast<int64_t>(cfg.graph_batch_size_fwd);
   const int64_t actual_b = static_cast<int64_t>(cfg.batch_size);
@@ -1306,7 +1306,6 @@ void fused_attn_fp8_fwd(const FusedAttnConfig& cfg, const Tensor* input_Q, const
   const size_t num_attn_heads = cfg.num_attn_heads;
   const size_t max_seqlen_q = cfg.max_seqlen_q;
   const size_t num_tokens_q = cfg.num_tokens_q;
-  const NVTE_QKV_Layout qkv_layout = cfg.qkv_layout;
   const NVTE_Softmax_Type softmax_type = cfg.softmax_type;
 
   void *devPtrQ = nullptr, *devPtrK = nullptr, *devPtrV = nullptr;
@@ -1383,18 +1382,12 @@ void fused_attn_fp8_fwd(const FusedAttnConfig& cfg, const Tensor* input_Q, const
 
   size_t workspace_size = 0;
 
-  const NVTE_QKV_Format qkv_format = nvte_get_qkv_format(qkv_layout);
-  if ((qkv_format == NVTE_QKV_Format::NVTE_BSHD) || (qkv_format == NVTE_QKV_Format::NVTE_SBHD) ||
-      (qkv_format == NVTE_QKV_Format::NVTE_BHSD) || (qkv_format == NVTE_QKV_Format::NVTE_THD)) {
-    fused_attn::fused_attn_fp8_fwd_impl(
-        cfg, devPtrQ, devPtrK, devPtrV, devPtrSoftmaxOffset, devPtrM, devPtrO, devPtrDescaleQ,
-        devPtrDescaleK, devPtrDescaleV, devPtrDescaleS, devPtrScaleS, devPtrScaleO, devPtrAmaxO,
-        devPtrAmaxS, devPtrcuSeqlensQ, devPtrcuSeqlensKV, devPtrSeqOffsetsQ, devPtrSeqOffsetsKV,
-        devPtrDropoutSeed, devPtrDropoutOffset, workspace->data.dptr, &workspace_size, stream,
-        handle);
-  } else {
-    NVTE_ERROR("FP8 fused attention only supports qkv_format=BSHD, SBHD, BHSD, or THD.\n");
-  }
+  fused_attn::fused_attn_fp8_fwd_impl(
+      cfg, devPtrQ, devPtrK, devPtrV, devPtrSoftmaxOffset, devPtrM, devPtrO, devPtrDescaleQ,
+      devPtrDescaleK, devPtrDescaleV, devPtrDescaleS, devPtrScaleS, devPtrScaleO, devPtrAmaxO,
+      devPtrAmaxS, devPtrcuSeqlensQ, devPtrcuSeqlensKV, devPtrSeqOffsetsQ, devPtrSeqOffsetsKV,
+      devPtrDropoutSeed, devPtrDropoutOffset, workspace->data.dptr, &workspace_size, stream,
+      handle);
 
   if (workspace_size > 0) {
     if (workspace->data.dptr == nullptr) {
@@ -1420,7 +1413,6 @@ void fused_attn_fp8_bwd(const FusedAttnConfig& cfg, const Tensor* input_Q, const
                         Tensor* workspace, cudaStream_t stream, cudnnHandle_t handle) {
   using namespace transformer_engine;
 
-  const NVTE_QKV_Layout dqkv_layout = cfg.dqkv_layout;
   const NVTE_Softmax_Type softmax_type = cfg.softmax_type;
 
   void* devPtrQ = input_Q->data.dptr;
@@ -1499,21 +1491,15 @@ void fused_attn_fp8_bwd(const FusedAttnConfig& cfg, const Tensor* input_Q, const
 
   size_t workspace_size = 0;
 
-  const NVTE_QKV_Format dqkv_format = nvte_get_qkv_format(dqkv_layout);
-  if ((dqkv_format == NVTE_QKV_Format::NVTE_BSHD) || (dqkv_format == NVTE_QKV_Format::NVTE_SBHD) ||
-      (dqkv_format == NVTE_QKV_Format::NVTE_BHSD) || (dqkv_format == NVTE_QKV_Format::NVTE_THD)) {
-    fused_attn::fused_attn_fp8_bwd_impl(
-        cfg, devPtrQ, devPtrK, devPtrV, devPtrM, devPtrO, devPtrdO, devPtrSoftmaxOffset, devPtrdQ,
-        devPtrdK, devPtrdV, devPtrdSoftmaxOffset, devPtrDescaleQ, devPtrDescaleK, devPtrDescaleV,
-        devPtrDescaleO, devPtrDescaledO, devPtrDescaleS, devPtrDescaledP, devPtrScaleS,
-        devPtrScaledP, devPtrScaledQ, devPtrScaledK, devPtrScaledV, devPtrAmaxdP, devPtrAmaxdQ,
-        devPtrAmaxdK, devPtrAmaxdV, devPtrQ_t, devPtrK_t, devPtrdO_f16, devPtrdO_t,
-        devPtrDescaleQ_t, devPtrDescaleK_t, devPtrDescaledO_t, devPtrcuSeqlensQ, devPtrcuSeqlensKV,
-        devPtrSeqOffsetsQ, devPtrSeqOffsetsKV, devPtrDropoutSeed, devPtrDropoutOffset,
-        workspace->data.dptr, &workspace_size, stream, handle);
-  } else {
-    NVTE_ERROR("FP8 fused attention only supports dqkv_format=BSHD, SBHD, BHSD, or THD.\n");
-  }
+  fused_attn::fused_attn_fp8_bwd_impl(
+      cfg, devPtrQ, devPtrK, devPtrV, devPtrM, devPtrO, devPtrdO, devPtrSoftmaxOffset, devPtrdQ,
+      devPtrdK, devPtrdV, devPtrdSoftmaxOffset, devPtrDescaleQ, devPtrDescaleK, devPtrDescaleV,
+      devPtrDescaleO, devPtrDescaledO, devPtrDescaleS, devPtrDescaledP, devPtrScaleS, devPtrScaledP,
+      devPtrScaledQ, devPtrScaledK, devPtrScaledV, devPtrAmaxdP, devPtrAmaxdQ, devPtrAmaxdK,
+      devPtrAmaxdV, devPtrQ_t, devPtrK_t, devPtrdO_f16, devPtrdO_t, devPtrDescaleQ_t,
+      devPtrDescaleK_t, devPtrDescaledO_t, devPtrcuSeqlensQ, devPtrcuSeqlensKV, devPtrSeqOffsetsQ,
+      devPtrSeqOffsetsKV, devPtrDropoutSeed, devPtrDropoutOffset, workspace->data.dptr,
+      &workspace_size, stream, handle);
 
   if (workspace_size > 0) {
     if (workspace->data.dptr == nullptr) {
