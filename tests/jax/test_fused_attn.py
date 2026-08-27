@@ -637,7 +637,7 @@ class FusedAttnRunner:
             self.head_dim_qk,
             self.head_dim_v,
             (-1, -1) if self.window_size is None else self.window_size,
-            self.attn_mask_type.is_bottom_right(),
+            bottom_right_diagonal=self.attn_mask_type.is_bottom_right(),
             bias_batch=bias_batch,
             bias_heads=bias_heads,
             bias_seqlen_q=bias_seqlen_q,

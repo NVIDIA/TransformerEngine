@@ -223,7 +223,7 @@ class FusedAttnHelper:
     head_dim_v: int
     window_size: Tuple[int, int]
     return_max_logit: bool = False
-    bottom_right_diagonal: bool
+    bottom_right_diagonal: bool = True
     attn_scale: float = 1.0
     bias_batch: Optional[int] = None
     bias_heads: Optional[int] = None
@@ -510,8 +510,8 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             q_head_dim,
             v_head_dim,
             config.window_size,
-            config.return_max_logit,
-            config.bottom_right_diagonal,
+            return_max_logit=config.return_max_logit,
+            bottom_right_diagonal=config.bottom_right_diagonal,
             attn_scale=float(config.scaling_factor),
             bias_batch=bias_batch,
             bias_heads=bias_heads,
