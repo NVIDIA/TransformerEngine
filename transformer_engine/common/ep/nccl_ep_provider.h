@@ -32,12 +32,11 @@ ncclResult_t handle_mem_size(ncclEpGroup_t ep_group, ncclEpLayout_t layout,
 ncclResult_t update_handle(ncclEpHandle_t handle, const ncclEpTensor_t* topk_idx,
                            const ncclEpLayoutInfo_t* layout_info, cudaStream_t stream);
 ncclResult_t dispatch(ncclEpHandle_t handle, const ncclEpDispatchInputs_t* inputs,
-                      const ncclEpDispatchOutputs_t* outputs,
-                      const ncclEpLayoutInfo_t* layout_info,
+                      const ncclEpDispatchOutputs_t* outputs, const ncclEpLayoutInfo_t* layout_info,
                       const ncclEpDispatchConfig_t* config, cudaStream_t stream);
 ncclResult_t combine(ncclEpHandle_t handle, const ncclEpCombineInputs_t* inputs,
-                     const ncclEpCombineOutputs_t* outputs,
-                     const ncclEpCombineConfig_t* config, cudaStream_t stream);
+                     const ncclEpCombineOutputs_t* outputs, const ncclEpCombineConfig_t* config,
+                     cudaStream_t stream);
 
 }  // namespace nccl_ep
 

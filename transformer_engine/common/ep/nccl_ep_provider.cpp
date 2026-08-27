@@ -40,8 +40,7 @@ void set_env(const char* name, const std::filesystem::path& value) {
              std::strerror(errno));
 }
 
-void append_unique(std::vector<std::filesystem::path>* paths,
-                   const std::filesystem::path& path) {
+void append_unique(std::vector<std::filesystem::path>* paths, const std::filesystem::path& path) {
   if (path.empty()) return;
   for (const auto& existing : *paths) {
     if (existing == path) return;
@@ -128,10 +127,9 @@ void configure_nccl_include_dir() {
 
   std::vector<std::filesystem::path> candidates;
   append_ancestor_include_dirs(
-      &candidates,
-      shared_library_directory(reinterpret_cast<const void*>(&ncclGetVersion)));
-  append_ancestor_include_dirs(
-      &candidates, shared_library_directory(static_cast<const void*>(&kLibraryAnchor)));
+      &candidates, shared_library_directory(reinterpret_cast<const void*>(&ncclGetVersion)));
+  append_ancestor_include_dirs(&candidates,
+                               shared_library_directory(static_cast<const void*>(&kLibraryAnchor)));
   append_unique(&candidates, "/opt/nvidia/nccl/include");
   append_unique(&candidates, "/usr/local/nccl/include");
   append_unique(&candidates, "/usr/include");
@@ -180,8 +178,8 @@ void* open_nccl_ep_library() {
     }
     const char* error = dlerror();
     if (!failures.empty()) failures += "; ";
-    failures += candidate.string() + ": " +
-                (error == nullptr ? "unknown dynamic loader error" : error);
+    failures +=
+        candidate.string() + ": " + (error == nullptr ? "unknown dynamic loader error" : error);
   }
   NVTE_ERROR("Could not load ", kNCCLEPLibraryName, ". Tried ", failures);
   return nullptr;  // Unreachable.
@@ -262,8 +260,7 @@ ncclResult_t update_handle(ncclEpHandle_t handle, const ncclEpTensor_t* topk_idx
 }
 
 ncclResult_t dispatch(ncclEpHandle_t handle, const ncclEpDispatchInputs_t* inputs,
-                      const ncclEpDispatchOutputs_t* outputs,
-                      const ncclEpLayoutInfo_t* layout_info,
+                      const ncclEpDispatchOutputs_t* outputs, const ncclEpLayoutInfo_t* layout_info,
                       const ncclEpDispatchConfig_t* config, cudaStream_t stream) {
   using FuncT = decltype(&ncclEpDispatch);
   static FuncT func = reinterpret_cast<FuncT>(get_symbol("ncclEpDispatch"));
@@ -271,8 +268,8 @@ ncclResult_t dispatch(ncclEpHandle_t handle, const ncclEpDispatchInputs_t* input
 }
 
 ncclResult_t combine(ncclEpHandle_t handle, const ncclEpCombineInputs_t* inputs,
-                     const ncclEpCombineOutputs_t* outputs,
-                     const ncclEpCombineConfig_t* config, cudaStream_t stream) {
+                     const ncclEpCombineOutputs_t* outputs, const ncclEpCombineConfig_t* config,
+                     cudaStream_t stream) {
   using FuncT = decltype(&ncclEpCombine);
   static FuncT func = reinterpret_cast<FuncT>(get_symbol("ncclEpCombine"));
   return func(handle, inputs, outputs, config, stream);

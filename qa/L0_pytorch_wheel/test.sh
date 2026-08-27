@@ -33,6 +33,7 @@ if python3 -c "from build_tools.utils import nccl_ep_enabled; raise SystemExit(n
     test -f "${WHL_BASE}/transformer_engine/wheel_lib/libnccl_ep.so" || error_exit "Core wheel is missing libnccl_ep.so"
     test -f "${WHL_BASE}/transformer_engine/wheel_lib/nccl_ep/include/nccl_ep.h" || error_exit "Core wheel is missing nccl_ep.h"
     test -d "${WHL_BASE}/transformer_engine/wheel_lib/nccl_ep/include/nccl_ep" || error_exit "Core wheel is missing NCCL EP JIT headers"
+    python3 "$TE_PATH/qa/check_nccl_ep_headers.py" "${WHL_BASE}/transformer_engine/wheel_lib/nccl_ep/include" || error_exit "Core wheel has incomplete NCCL EP JIT headers"
 fi
 sed -i "s/Name: transformer-engine/Name: transformer-engine-cu12/g" "transformer_engine-${VERSION}/transformer_engine-${VERSION}.dist-info/METADATA"
 sed -i "s/Name: transformer_engine/Name: transformer_engine_cu12/g" "transformer_engine-${VERSION}/transformer_engine-${VERSION}.dist-info/METADATA"

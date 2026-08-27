@@ -208,7 +208,7 @@ ncclEpHandle_t EPBackend::open_handle(void* handle_mem, size_t handle_mem_size, 
   hcfg.dispatch_output_per_expert_alignment = dispatch_output_per_expert_alignment;
   ncclEpHandle_t handle;
   NVTE_CHECK_NCCL(nccl_ep::init_handle(&handle, ep_group_, NCCL_EP_LAYOUT_EXPERT_MAJOR, &hcfg,
-                                      num_topk, &routing_desc));
+                                       num_topk, &routing_desc));
   return handle;
 }
 
@@ -324,7 +324,7 @@ ncclEpHandle_t EPBackend::prepare_handle_locked(void* handle_mem, NVTEEpLayerCon
   hcfg.dispatch_output_per_expert_alignment = layer_cfg.dispatch_output_per_expert_alignment;
   size_t hm_size = 0;
   NVTE_CHECK_NCCL(nccl_ep::handle_mem_size(ep_group_, NCCL_EP_LAYOUT_EXPERT_MAJOR, &hcfg, &hm_size,
-                                          layer_cfg.top_k));
+                                           layer_cfg.top_k));
   ncclEpHandle_t h = open_handle(handle_mem, hm_size, layer_cfg.top_k,
                                  layer_cfg.dispatch_output_per_expert_alignment);
   lru_.push_front(HandleEntry{handle_mem, h, layer_cfg, hm_size});
@@ -365,8 +365,8 @@ size_t EPBackend::handle_mem_size(NVTEEpLayerConfig layer_cfg) {
   ncclEpHandleConfig_t hcfg = NCCL_EP_HANDLE_CONFIG_INIT;
   hcfg.dispatch_output_per_expert_alignment = layer_cfg.dispatch_output_per_expert_alignment;
   size_t hm_size = 0;
-  NVTE_CHECK_NCCL(nccl_ep::handle_mem_size(
-      ep_group_, NCCL_EP_LAYOUT_EXPERT_MAJOR, &hcfg, &hm_size, layer_cfg.top_k));
+  NVTE_CHECK_NCCL(nccl_ep::handle_mem_size(ep_group_, NCCL_EP_LAYOUT_EXPERT_MAJOR, &hcfg, &hm_size,
+                                           layer_cfg.top_k));
   return hm_size;
 }
 
@@ -493,9 +493,8 @@ void EPBackend::dispatch(void* handle_mem, const NVTETensor topk_idx, const NVTE
   std::lock_guard<std::mutex> lock(mutex_);
   NVTE_CHECK(initialized_, "EPBackend not initialized");
   ncclEpHandle_t h = lookup_handle_locked(handle_mem);
-  NVTE_CHECK_NCCL(nccl_ep::dispatch(
-      h, &in_struct, &out_struct,
-      /*layout_info=*/nullptr, &dispatch_cfg, stream));
+  NVTE_CHECK_NCCL(nccl_ep::dispatch(h, &in_struct, &out_struct,
+                                    /*layout_info=*/nullptr, &dispatch_cfg, stream));
 }
 
 void EPBackend::combine(void* handle_mem, const NVTETensor expert_out,
