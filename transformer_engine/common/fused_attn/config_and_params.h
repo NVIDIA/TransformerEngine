@@ -228,16 +228,9 @@ struct FusedAttnConfig {
 
   // Derive relevant fields based on input fields that have been set by the caller. They are
   // read by the graph build, cache lookup, and support query.
-  //
-  // Computes only; it validates nothing. Rules about which configurations are legal belong in
-  // nvte_get_fused_attn_backend_v2, which derives first and then states them once, so that a
-  // violation comes back as an unsupported configuration instead of being thrown from a query.
   void derive();
 
-  // Assert that derive() has run, for code about to read a derived field. Worth asserting rather
-  // than assuming because the failure is silent: an unset derived field reads as zero, which is a
-  // legal value that yields a graph of the wrong shape and a key that collides with unrelated
-  // configs.
+  // Assert that derive() has run, for code about to read a derived field.
   void check_derived() const {
     NVTE_CHECK(is_derived,
                "FusedAttnConfig's derived fields are not set. Please run "
