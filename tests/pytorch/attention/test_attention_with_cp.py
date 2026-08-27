@@ -45,6 +45,10 @@ torch.manual_seed(seed)
 torch.cuda.manual_seed(seed)
 
 test_essential = bool(int(os.getenv("NVTE_TEST_ESSENTIAL", "1")))
+# An installed FA4 package must not select tests when the backend is explicitly disabled.
+fa4_enabled = bool(int(os.getenv("NVTE_FLASH_ATTN", "1"))) and bool(
+    int(os.getenv("NVTE_FLASH_ATTN_V4", "1"))
+)
 
 model_configs_flash_attn = {
     # test: ModelConfig(b, sq, hq, dqk)
@@ -310,8 +314,12 @@ if test_essential:
 
 
 @pytest.mark.skipif(
-    not (FlashAttentionUtils.v2_plus or FlashAttentionUtils.v3_is_installed),
-    reason="Flash-attn v2 or v3 is required.",
+    not (
+        FlashAttentionUtils.v2_plus
+        or FlashAttentionUtils.v3_is_installed
+        or (fa4_enabled and FlashAttentionUtils.v4_is_installed)
+    ),
+    reason="Flash-attn v2, v3, or v4 is required.",
 )
 @pytest.mark.skipif(get_device_compute_capability() < (8, 0), reason="CP tests require sm80+.")
 @pytest.mark.parametrize("dtype", dtypes)
@@ -326,16 +334,10 @@ def test_cp_with_flash_attention(cp_pool, dtype, model, qkv_format, cp_comm_type
     if pad_between_seqs:
         if qkv_format != "thd":
             pytest.skip("pad_between_seqs only applies to THD format!")
-        if not FlashAttentionUtils.v3_is_installed or get_device_compute_capability() > (9, 0):
-            pytest.skip("pad_between_seqs with CP requires Flash Attention v3 on Hopper (sm90)!")
-        if cp_comm_type == "a2a+p2p":
-            pytest.skip("pad_between_seqs is not yet supported with A2A+P2P CP comm type!")
-
-    if pad_between_seqs:
-        if qkv_format != "thd":
-            pytest.skip("pad_between_seqs only applies to THD format!")
-        if not FlashAttentionUtils.v3_is_installed:
-            pytest.skip("pad_between_seqs with CP requires Flash Attention v3!")
+        has_fa3 = FlashAttentionUtils.v3_is_installed and get_device_compute_capability() == (9, 0)
+        has_fa4 = fa4_enabled and FlashAttentionUtils.v4_is_installed
+        if not (has_fa3 or has_fa4):
+            pytest.skip("pad_between_seqs with CP requires Flash Attention v3 on Hopper or v4!")
         if cp_comm_type == "a2a+p2p":
             pytest.skip("pad_between_seqs is not yet supported with A2A+P2P CP comm type!")
 
@@ -352,9 +354,10 @@ def test_cp_with_flash_attention(cp_pool, dtype, model, qkv_format, cp_comm_type
         qkv_format == "thd"
         and cp_comm_type == "all_gather"
         and not FlashAttentionUtils.v3_is_installed
+        and not (fa4_enabled and FlashAttentionUtils.v4_is_installed)
     ):
         pytest.skip(
-            "THD + all_gather requires FA3 (seqused_k) to separate tensor offsets from"
+            "THD + all_gather requires FA3 or FA4 (seqused_k) to separate tensor offsets from"
             " visibility limits in the gathered KV buffer."
         )
 
