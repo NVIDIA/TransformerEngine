@@ -779,12 +779,19 @@ def get_attention_backend(
     # The scalar `softcap` kwarg (tanh logit softcapping) is plumbed to the FlashAttention 2
     # backend (>= 2.6.0) and to UnfusedDotProductAttention by default, and to FA3 subject to the
     # build/shape checks below. FusedAttention does not take the scalar kwarg (cuDNN can softcap
-    # via score_mod, but that path is not used here), so disable it rather than silently dropping
-    # the cap.
+    # via score_mod, but that path is not used here), and FA4 has no softcap kernel to call, so
+    # disable both rather than silently dropping the cap.
     if softcap != 0.0:
         if use_fused_attention:
             logger.debug("Disabling FusedAttention as it does not support softcap")
             use_fused_attention = False
+        if use_flash_attention_4:
+            # FA4 exposes no softcap kwarg and its head_dim=256 kernel asserts score_mod is None,
+            # so there is no kernel to route the cap through, and the FA4 call path in backends.py
+            # passes no softcap -- selecting it here would silently drop the cap.
+            if FlashAttentionUtils.v4_is_installed:
+                logger.debug("Disabling FlashAttention 4 as it does not support softcap")
+            use_flash_attention_4 = False
         if use_flash_attention_3 and not (
             FlashAttentionUtils.fa3_supports_softcap
             and max(head_dim_qk, head_dim_v) <= 256
