@@ -192,6 +192,8 @@ class FusedAttnParams:
     head_dim_v: int = 0
     max_seqlen_q: int = 0
     max_seqlen_kv: int = 0
+    num_tokens_q: int = 0
+    num_tokens_kv: int = 0
 
     # bias dimensions
     bias_batch_size: int = 0
@@ -255,6 +257,10 @@ class FusedAttnHelper:
             bias_heads = self.bias_heads or 0
             bias_seqlen_q = self.bias_seqlen_q or 0
             bias_seqlen_kv = self.bias_seqlen_kv or 0
+        num_tokens_q = num_tokens_kv = 0
+        if self.qkv_layout.is_thd():
+            num_tokens_q = self.batch_size * self.q_max_seqlen
+            num_tokens_kv = self.batch_size * self.kv_max_seqlen
         backend, message = transformer_engine_jax.get_fused_attn_backend(
             FusedAttnParams(
                 is_training=self.is_training,
@@ -280,6 +286,8 @@ class FusedAttnHelper:
                 head_dim_v=self.head_dim_v,
                 max_seqlen_q=self.q_max_seqlen,
                 max_seqlen_kv=self.kv_max_seqlen,
+                num_tokens_q=num_tokens_q,
+                num_tokens_kv=num_tokens_kv,
                 bias_batch_size=bias_batch,
                 bias_num_heads=bias_heads,
                 bias_seqlen_q=bias_seqlen_q,

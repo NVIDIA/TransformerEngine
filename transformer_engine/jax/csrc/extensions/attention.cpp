@@ -33,8 +33,8 @@ static std::tuple<NVTE_Fused_Attn_Backend, std::string> GetFusedAttnBackendImpl(
     NVTE_QKV_Format o_format, NVTE_QKV_Format do_format, NVTE_QKV_Layout dqkv_layout,
     NVTE_QKV_Format qkv_scale_inv_format, NVTE_QKV_Format do_scale_inv_format, size_t batch_size,
     size_t q_attn_heads, size_t kv_attn_heads, size_t qk_head_dim, size_t v_head_dim,
-    size_t q_max_seqlen, size_t kv_max_seqlen, size_t bias_batch, size_t bias_heads,
-    size_t bias_seqlen_q, size_t bias_seqlen_kv) {
+    size_t q_max_seqlen, size_t kv_max_seqlen, size_t num_tokens_q, size_t num_tokens_kv,
+    size_t bias_batch, size_t bias_heads, size_t bias_seqlen_q, size_t bias_seqlen_kv) {
   FusedAttnConfigWrapper cfg;
   cfg.set_is_training(is_training)
       .set_deterministic(deterministic)
@@ -66,6 +66,8 @@ static std::tuple<NVTE_Fused_Attn_Backend, std::string> GetFusedAttnBackendImpl(
       .set_head_dim_v(v_head_dim)
       .set_max_seqlen_q(q_max_seqlen)
       .set_max_seqlen_kv(kv_max_seqlen)
+      .set_num_tokens_q(num_tokens_q)
+      .set_num_tokens_kv(num_tokens_kv)
       .set_bias_batch_size(bias_batch)
       .set_bias_num_heads(bias_heads)
       .set_bias_seqlen_q(bias_seqlen_q)
@@ -110,7 +112,8 @@ std::tuple<NVTE_Fused_Attn_Backend, std::string> GetFusedAttnBackend(
       params.attr("batch_size").cast<size_t>(), params.attr("num_attn_heads").cast<size_t>(),
       params.attr("num_gqa_groups").cast<size_t>(), params.attr("head_dim_qk").cast<size_t>(),
       params.attr("head_dim_v").cast<size_t>(), params.attr("max_seqlen_q").cast<size_t>(),
-      params.attr("max_seqlen_kv").cast<size_t>(), params.attr("bias_batch_size").cast<size_t>(),
+      params.attr("max_seqlen_kv").cast<size_t>(), params.attr("num_tokens_q").cast<size_t>(),
+      params.attr("num_tokens_kv").cast<size_t>(), params.attr("bias_batch_size").cast<size_t>(),
       params.attr("bias_num_heads").cast<size_t>(), params.attr("bias_seqlen_q").cast<size_t>(),
       params.attr("bias_seqlen_kv").cast<size_t>());
 }
@@ -408,6 +411,7 @@ static void FusedAttnForwardImpl(
       nvte_get_q_format(qkv_layout), nvte_get_q_format(qkv_layout), qkv_layout,
       NVTE_QKV_Format::NVTE_QKV_Format_NOT_SET, NVTE_QKV_Format::NVTE_QKV_Format_NOT_SET,
       input_batch, attn_heads, num_gqa_groups, qk_head_dim, v_head_dim, q_max_seqlen, kv_max_seqlen,
+      is_ragged ? input_batch * q_max_seqlen : 0, is_ragged ? input_batch * kv_max_seqlen : 0,
       bias_batch, bias_heads, bias_seqlen_q, bias_seqlen_kv);
   nvte_populate_rng_state_async(rng_state, seed, q_max_seqlen, kv_max_seqlen, backend, stream);
 
@@ -535,7 +539,6 @@ static void FusedAttnForwardImpl(
   NVTE_QKV_Layout qkv_layout =                                                                    \
       static_cast<NVTE_QKV_Layout>(get_attr_value<int64_t>(attrs, "qkv_layout"));                 \
   bool is_training = get_attr_value<bool>(attrs, "is_training");                                  \
-  bool return_max_logit = get_attr_value_or_default<bool>(attrs, "return_max_logit", false);      \
   bool deterministic = get_attr_value<bool>(attrs, "deterministic");                              \
   auto is_ragged = nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD;                  \
   size_t wkspace_size = product(workspace_buf->dimensions());                                     \
@@ -552,6 +555,7 @@ Error_Type FusedAttnForwardFFI(cudaStream_t stream, Buffer_Type q_buf, Buffer_Ty
                                Result_Type rng_state_buf, Result_Type workspace_buf,
                                Dictionary attrs) {
   FUSED_ATTN_FFI_GET_ATTRS;
+  bool return_max_logit = get_attr_value_or_default<bool>(attrs, "return_max_logit", false);
 
   FusedAttnForwardImpl(
       stream, q_buf.untyped_data(), k_buf.untyped_data(), v_buf.untyped_data(),
@@ -744,6 +748,7 @@ static void FusedAttnBackwardImpl(
       nvte_get_q_format(qkv_layout), nvte_get_q_format(qkv_layout), qkv_layout,
       NVTE_QKV_Format::NVTE_QKV_Format_NOT_SET, NVTE_QKV_Format::NVTE_QKV_Format_NOT_SET,
       input_batch, attn_heads, num_gqa_groups, qk_head_dim, v_head_dim, q_max_seqlen, kv_max_seqlen,
+      is_ragged ? input_batch * q_max_seqlen : 0, is_ragged ? input_batch * kv_max_seqlen : 0,
       bias_batch, bias_heads, bias_seqlen_q, bias_seqlen_kv);
   PrepareFusedAttnBackwardAuxTensors(&aux_input_tensors, input_batch, bias_batch, attn_heads,
                                      bias_heads, q_max_seqlen, kv_max_seqlen, dtype, backend,

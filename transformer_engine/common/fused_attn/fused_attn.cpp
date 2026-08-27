@@ -270,6 +270,12 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend_v2(NVTEFusedAttnConfig confi
         "THD format requires PADDING / PADDING_CAUSAL / PADDING_CAUSAL_BOTTOM_RIGHT mask.");
   }
 
+  if ((cfg.is_ragged_q && cfg.num_tokens_q == 0) || (cfg.is_ragged_kv && cfg.num_tokens_kv == 0)) {
+    return reject(message,
+                  "THD format requires num_tokens_q / num_tokens_kv to be set for the ragged "
+                  "inputs.");
+  }
+
   // Paged KV requires a padding mask
   if (cfg.is_paged_kv && !cfg.is_padding) {
     return reject(message,
@@ -434,6 +440,8 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
   // fill in the missing fields with the most common use case;
   // otherwise it would return NVTE_No_Backend always
   cfg.batch_size = 1;
+  cfg.num_tokens_q = cfg.batch_size * max_seqlen_q;
+  cfg.num_tokens_kv = cfg.batch_size * max_seqlen_kv;
   cfg.o_format = nvte_get_q_format(qkv_layout);
   cfg.do_format = cfg.o_format;
   cfg.dqkv_layout = qkv_layout;
