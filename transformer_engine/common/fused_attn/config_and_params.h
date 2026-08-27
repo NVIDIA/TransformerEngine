@@ -309,60 +309,63 @@ struct FusedAttnFwdParams {
   NVTETensor page_table_v = nullptr;
   NVTETensor rng_state = nullptr;
   // Scalars
-  size_t max_seqlen_q = 0;
-  size_t max_seqlen_kv = 0;
   bool is_training = true;
-  bool return_max_logit = false;
   bool cuda_graph = false;
-  float attn_scale = 1.0f;
-  float dropout = 0.0f;
-  NVTE_QKV_Layout qkv_layout = NVTE_QKV_Layout_NOT_SET;
-  NVTE_QKV_Format o_format = NVTE_QKV_Format_NOT_SET;
-  NVTE_QKV_Format qkv_scale_inv_format = NVTE_QKV_Format_NOT_SET;
-  NVTE_Bias_Type bias_type = NVTE_NO_BIAS;
+  bool return_max_logit = false;
   NVTE_Mask_Type attn_mask_type = NVTE_NO_MASK;
-  NVTE_Softmax_Type softmax_type = NVTE_VANILLA_SOFTMAX;
+  NVTE_Bias_Type bias_type = NVTE_NO_BIAS;
   int64_t window_size_left = -1;
   int64_t window_size_right = -1;
   bool bottom_right_diagonal = true;
+  NVTE_Softmax_Type softmax_type = NVTE_VANILLA_SOFTMAX;
+  float dropout = 0.0f;
+  float attn_scale = 1.0f;
+  NVTE_QKV_Layout qkv_layout = NVTE_QKV_Layout_NOT_SET;
+  NVTE_QKV_Format o_format = NVTE_QKV_Format_NOT_SET;
+  NVTE_QKV_Format qkv_scale_inv_format = NVTE_QKV_Format_NOT_SET;
+  size_t max_seqlen_q = 0;
+  size_t max_seqlen_kv = 0;
   // Workspace and stream
   NVTETensor workspace = nullptr;
   cudaStream_t stream = nullptr;
 
   static constexpr size_t attr_sizes[] = {
-      sizeof(NVTETensor),         // Q
-      sizeof(NVTETensor),         // K
-      sizeof(NVTETensor),         // V
-      sizeof(NVTETensor),         // Bias
-      sizeof(NVTETensor),         // SoftmaxOffset
-      sizeof(NVTETensor),         // S
-      sizeof(NVTETensor),         // O
-      sizeof(NVTETensorPack *),   // Aux_CTX_Tensors
-      sizeof(NVTETensor),         // cu_seqlens_q
-      sizeof(NVTETensor),         // cu_seqlens_kv
-      sizeof(NVTETensor),         // cu_seqlens_q_padded
-      sizeof(NVTETensor),         // cu_seqlens_kv_padded
-      sizeof(NVTETensor),         // page_table_k
-      sizeof(NVTETensor),         // page_table_v
-      sizeof(NVTETensor),         // rng_state
-      sizeof(size_t),             // max_seqlen_q
-      sizeof(size_t),             // max_seqlen_kv
+      // tensor handles
+      sizeof(NVTETensor),        // Q
+      sizeof(NVTETensor),        // K
+      sizeof(NVTETensor),        // V
+      sizeof(NVTETensor),        // Bias
+      sizeof(NVTETensor),        // SoftmaxOffset
+      sizeof(NVTETensor),        // S
+      sizeof(NVTETensor),        // O
+      sizeof(NVTETensorPack *),  // Aux_CTX_Tensors
+      sizeof(NVTETensor),        // cu_seqlens_q
+      sizeof(NVTETensor),        // cu_seqlens_kv
+      sizeof(NVTETensor),        // cu_seqlens_q_padded
+      sizeof(NVTETensor),        // cu_seqlens_kv_padded
+      sizeof(NVTETensor),        // page_table_k
+      sizeof(NVTETensor),        // page_table_v
+      sizeof(NVTETensor),        // rng_state
+      // configuration knobs
       sizeof(uint8_t),            // is_training
-      sizeof(uint8_t),            // return_max_logit
       sizeof(uint8_t),            // cuda_graph
-      sizeof(float),              // attn_scale
-      sizeof(float),              // dropout
-      sizeof(NVTE_QKV_Layout),    // qkv_layout
-      sizeof(NVTE_QKV_Format),    // o_format
-      sizeof(NVTE_QKV_Format),    // qkv_scale_inv_format
-      sizeof(NVTE_Bias_Type),     // bias_type
+      sizeof(uint8_t),            // return_max_logit
       sizeof(NVTE_Mask_Type),     // attn_mask_type
-      sizeof(NVTE_Softmax_Type),  // softmax_type
+      sizeof(NVTE_Bias_Type),     // bias_type
       sizeof(int64_t),            // window_size_left
       sizeof(int64_t),            // window_size_right
       sizeof(uint8_t),            // bottom_right_diagonal
-      sizeof(NVTETensor),         // workspace
-      sizeof(cudaStream_t),       // stream
+      sizeof(NVTE_Softmax_Type),  // softmax_type
+      sizeof(float),              // dropout
+      sizeof(float),              // attn_scale
+      sizeof(NVTE_QKV_Layout),  // qkv_layout
+      sizeof(NVTE_QKV_Format),  // o_format
+      sizeof(NVTE_QKV_Format),  // qkv_scale_inv_format
+      sizeof(size_t),  // max_seqlen_q
+      sizeof(size_t),  // max_seqlen_kv
+      // workspace and stream
+      sizeof(NVTETensor),    // workspace
+      sizeof(cudaStream_t),  // stream
   };
 
   static_assert(sizeof(attr_sizes) / sizeof(attr_sizes[0]) == kNVTEFusedAttnFwdParamsNumAttributes,
@@ -408,29 +411,30 @@ struct FusedAttnBwdParams {
   NVTETensor cu_seqlens_q_padded = nullptr;
   NVTETensor cu_seqlens_kv_padded = nullptr;
   // Scalars
-  size_t max_seqlen_q = 0;
-  size_t max_seqlen_kv = 0;
-  float attn_scale = 1.0f;
+  bool deterministic = false;
+  bool cuda_graph = false;
+  NVTE_Mask_Type attn_mask_type = NVTE_NO_MASK;
+  NVTE_Bias_Type bias_type = NVTE_NO_BIAS;
+  int64_t window_size_left = -1;
+  int64_t window_size_right = -1;
+  bool bottom_right_diagonal = true;
+  NVTE_Softmax_Type softmax_type = NVTE_VANILLA_SOFTMAX;
   float dropout = 0.0f;
+  float attn_scale = 1.0f;
   NVTE_QKV_Layout qkv_layout = NVTE_QKV_Layout_NOT_SET;
   NVTE_QKV_Format o_format = NVTE_QKV_Format_NOT_SET;
   NVTE_QKV_Format do_format = NVTE_QKV_Format_NOT_SET;
   NVTE_QKV_Layout dqkv_layout = NVTE_QKV_Layout_NOT_SET;
   NVTE_QKV_Format qkv_scale_inv_format = NVTE_QKV_Format_NOT_SET;
   NVTE_QKV_Format do_scale_inv_format = NVTE_QKV_Format_NOT_SET;
-  NVTE_Bias_Type bias_type = NVTE_NO_BIAS;
-  NVTE_Mask_Type attn_mask_type = NVTE_NO_MASK;
-  NVTE_Softmax_Type softmax_type = NVTE_VANILLA_SOFTMAX;
-  int64_t window_size_left = -1;
-  int64_t window_size_right = -1;
-  bool bottom_right_diagonal = true;
-  bool deterministic = false;
-  bool cuda_graph = false;
+  size_t max_seqlen_q = 0;
+  size_t max_seqlen_kv = 0;
   // Workspace and stream
   NVTETensor workspace = nullptr;
   cudaStream_t stream = nullptr;
 
   static constexpr size_t attr_sizes[] = {
+      // tensor handles
       sizeof(NVTETensor),              // Q
       sizeof(NVTETensor),              // K
       sizeof(NVTETensor),              // V
@@ -448,26 +452,28 @@ struct FusedAttnBwdParams {
       sizeof(NVTETensor),              // cu_seqlens_kv
       sizeof(NVTETensor),              // cu_seqlens_q_padded
       sizeof(NVTETensor),              // cu_seqlens_kv_padded
-      sizeof(size_t),                  // max_seqlen_q
-      sizeof(size_t),                  // max_seqlen_kv
-      sizeof(float),                   // attn_scale
-      sizeof(float),                   // dropout
-      sizeof(NVTE_QKV_Layout),         // qkv_layout
-      sizeof(NVTE_QKV_Format),         // o_format
-      sizeof(NVTE_QKV_Format),         // do_format
-      sizeof(NVTE_QKV_Layout),         // dqkv_layout
-      sizeof(NVTE_QKV_Format),         // qkv_scale_inv_format
-      sizeof(NVTE_QKV_Format),         // do_scale_inv_format
-      sizeof(NVTE_Bias_Type),          // bias_type
-      sizeof(NVTE_Mask_Type),          // attn_mask_type
-      sizeof(NVTE_Softmax_Type),       // softmax_type
-      sizeof(int64_t),                 // window_size_left
-      sizeof(int64_t),                 // window_size_right
-      sizeof(uint8_t),                 // bottom_right_diagonal
-      sizeof(uint8_t),                 // deterministic
-      sizeof(uint8_t),                 // cuda_graph
-      sizeof(NVTETensor),              // workspace
-      sizeof(cudaStream_t),            // stream
+      // configuration knobs
+      sizeof(uint8_t),            // deterministic
+      sizeof(uint8_t),            // cuda_graph
+      sizeof(NVTE_Mask_Type),     // attn_mask_type
+      sizeof(NVTE_Bias_Type),     // bias_type
+      sizeof(int64_t),            // window_size_left
+      sizeof(int64_t),            // window_size_right
+      sizeof(uint8_t),            // bottom_right_diagonal
+      sizeof(NVTE_Softmax_Type),  // softmax_type
+      sizeof(float),              // dropout
+      sizeof(float),              // attn_scale
+      sizeof(NVTE_QKV_Layout),  // qkv_layout
+      sizeof(NVTE_QKV_Format),  // o_format
+      sizeof(NVTE_QKV_Format),  // do_format
+      sizeof(NVTE_QKV_Layout),  // dqkv_layout
+      sizeof(NVTE_QKV_Format),  // qkv_scale_inv_format
+      sizeof(NVTE_QKV_Format),  // do_scale_inv_format
+      sizeof(size_t),  // max_seqlen_q
+      sizeof(size_t),  // max_seqlen_kv
+      // workspace and stream
+      sizeof(NVTETensor),    // workspace
+      sizeof(cudaStream_t),  // stream
   };
 
   static_assert(sizeof(attr_sizes) / sizeof(attr_sizes[0]) == kNVTEFusedAttnBwdParamsNumAttributes,

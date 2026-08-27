@@ -201,9 +201,9 @@ typedef void *NVTEFusedAttnConfig;
 /*! \enum NVTEFusedAttnConfigAttribute
  *  \brief Attributes for `NVTEFusedAttnConfig`.
  *
- *  This enum is used to index the `FusedAttnConfig` struct. The order of its fields must match
- *  that of the declaration fields and `attr_sizes` array of `FusedAttnConfig`. New fields may
- *  only be appended at the end and existing fields are never reordered, removed, or resized.
+ *  This enum is used to index the `FusedAttnConfig` struct. The order of its fields matches
+ *  that of the declaration fields and the `attr_sizes` array of `FusedAttnConfig`. New fields
+ *  may be appended at the end, and existing fields are never reordered, removed, or resized.
  */
 enum NVTEFusedAttnConfigAttribute {
   // basic attention settings
@@ -280,9 +280,9 @@ typedef void *NVTEFusedAttnFwdParams;
 /*! \enum NVTEFusedAttnFwdParamsAttribute
  *  \brief Attributes for `NVTEFusedAttnFwdParams`.
  *
- *  This enum is used to index the `FusedAttnFwdParams` struct. The order of its fields must match
- *  that of the declaration fields and `attr_sizes` array of `FusedAttnFwdParams`. New fields may
- *  only be appended at the end and existing fields are never reordered, removed, or resized.
+ *  This enum is used to index the `FusedAttnFwdParams` struct. The order of its fields matches
+ *  that of the declaration fields and the `attr_sizes` array of `FusedAttnFwdParams`. New fields
+ *  may be appended at the end, and existing fields are never reordered, removed, or resized.
  */
 enum NVTEFusedAttnFwdParamsAttribute {
   // tensor handles
@@ -302,22 +302,22 @@ enum NVTEFusedAttnFwdParamsAttribute {
   kNVTEFusedAttnFwdParamsPageTableV,
   kNVTEFusedAttnFwdParamsRngState,
   // configuration knobs
-  kNVTEFusedAttnFwdParamsMaxSeqlenQ,
-  kNVTEFusedAttnFwdParamsMaxSeqlenKV,
   kNVTEFusedAttnFwdParamsIsTraining,
-  kNVTEFusedAttnFwdParamsReturnMaxLogit,
   kNVTEFusedAttnFwdParamsCudaGraph,
-  kNVTEFusedAttnFwdParamsAttnScale,
-  kNVTEFusedAttnFwdParamsDropout,
-  kNVTEFusedAttnFwdParamsQKVLayout,
-  kNVTEFusedAttnFwdParamsOFormat,
-  kNVTEFusedAttnFwdParamsQKVScaleInvFormat,
-  kNVTEFusedAttnFwdParamsBiasType,
+  kNVTEFusedAttnFwdParamsReturnMaxLogit,
   kNVTEFusedAttnFwdParamsAttnMaskType,
-  kNVTEFusedAttnFwdParamsSoftmaxType,
+  kNVTEFusedAttnFwdParamsBiasType,
   kNVTEFusedAttnFwdParamsWindowSizeLeft,
   kNVTEFusedAttnFwdParamsWindowSizeRight,
   kNVTEFusedAttnFwdParamsBottomRightDiagonal,
+  kNVTEFusedAttnFwdParamsSoftmaxType,
+  kNVTEFusedAttnFwdParamsDropout,
+  kNVTEFusedAttnFwdParamsAttnScale,
+  kNVTEFusedAttnFwdParamsQKVLayout,
+  kNVTEFusedAttnFwdParamsOFormat,
+  kNVTEFusedAttnFwdParamsQKVScaleInvFormat,
+  kNVTEFusedAttnFwdParamsMaxSeqlenQ,
+  kNVTEFusedAttnFwdParamsMaxSeqlenKV,
   // workspace and stream
   kNVTEFusedAttnFwdParamsWorkspace,
   kNVTEFusedAttnFwdParamsStream,
@@ -347,9 +347,9 @@ typedef void *NVTEFusedAttnBwdParams;
 /*! \enum NVTEFusedAttnBwdParamsAttribute
  *  \brief Attributes for `NVTEFusedAttnBwdParams`.
  *
- *  This enum is used to index the `FusedAttnBwdParams` struct. The order of its fields must match
- *  that of the declaration fields and `attr_sizes` array of `FusedAttnBwdParams`. New fields may
- *  only be appended at the end and existing fields are never reordered, removed, or resized.
+ *  This enum is used to index the `FusedAttnBwdParams` struct. The order of its fields matches
+ *  that of the declaration fields and the `attr_sizes` array of `FusedAttnBwdParams`. New fields
+ *  may be appended at the end, and existing fields are never reordered, removed, or resized.
  */
 enum NVTEFusedAttnBwdParamsAttribute {
   // tensor handles
@@ -371,24 +371,24 @@ enum NVTEFusedAttnBwdParamsAttribute {
   kNVTEFusedAttnBwdParamsCuSeqlensQPadded,
   kNVTEFusedAttnBwdParamsCuSeqlensKVPadded,
   // configuration knobs
-  kNVTEFusedAttnBwdParamsMaxSeqlenQ,
-  kNVTEFusedAttnBwdParamsMaxSeqlenKV,
-  kNVTEFusedAttnBwdParamsAttnScale,
+  kNVTEFusedAttnBwdParamsDeterministic,
+  kNVTEFusedAttnBwdParamsCudaGraph,
+  kNVTEFusedAttnBwdParamsAttnMaskType,
+  kNVTEFusedAttnBwdParamsBiasType,
+  kNVTEFusedAttnBwdParamsWindowSizeLeft,
+  kNVTEFusedAttnBwdParamsWindowSizeRight,
+  kNVTEFusedAttnBwdParamsBottomRightDiagonal,
+  kNVTEFusedAttnBwdParamsSoftmaxType,
   kNVTEFusedAttnBwdParamsDropout,
+  kNVTEFusedAttnBwdParamsAttnScale,
   kNVTEFusedAttnBwdParamsQKVLayout,
   kNVTEFusedAttnBwdParamsOFormat,
   kNVTEFusedAttnBwdParamsDOFormat,
   kNVTEFusedAttnBwdParamsDQKVLayout,
   kNVTEFusedAttnBwdParamsQKVScaleInvFormat,
   kNVTEFusedAttnBwdParamsDOScaleInvFormat,
-  kNVTEFusedAttnBwdParamsBiasType,
-  kNVTEFusedAttnBwdParamsAttnMaskType,
-  kNVTEFusedAttnBwdParamsSoftmaxType,
-  kNVTEFusedAttnBwdParamsWindowSizeLeft,
-  kNVTEFusedAttnBwdParamsWindowSizeRight,
-  kNVTEFusedAttnBwdParamsBottomRightDiagonal,
-  kNVTEFusedAttnBwdParamsDeterministic,
-  kNVTEFusedAttnBwdParamsCudaGraph,
+  kNVTEFusedAttnBwdParamsMaxSeqlenQ,
+  kNVTEFusedAttnBwdParamsMaxSeqlenKV,
   // workspace and stream
   kNVTEFusedAttnBwdParamsWorkspace,
   kNVTEFusedAttnBwdParamsStream,
@@ -412,24 +412,18 @@ void nvte_set_fused_attn_bwd_params_attribute(NVTEFusedAttnBwdParams params,
                                               NVTEFusedAttnBwdParamsAttribute attr, const void *buf,
                                               size_t size_in_bytes);
 
-/*! \brief Get fused-attention backend based on user configuration.
- *
- *  This function passes the user configuration to cuDNN frontend, runs its support checks,
- *  and returns a backend if supported, or `NVTE_No_Backend` and a message explaining why.
- *  If the configuration is supported, the backend is cached and reused for future calls.
+/*! \brief Get fused-attention backend based on the user configuration.
  *
  *  \param[in]     cfg     Fused-attention configuration created by
  *                         `nvte_create_fused_attn_config()`.
  *  \param[out]    message If the configuration is supported, an empty string. If not supported,
- *                         a diagnostic message explaining why there is no support. Pass `NULL` to
- *                         skip the diagnostics. Also, note that the string pointer refers to a
- *                         per-thread buffer owned by the library and remains valid only until the
- *                         next call to `nvte_get_fused_attn_backend_v2` on the same thread.
- *                         Callers that need to retain the message across further calls must
- *                         copy it.
+ *                         a diagnostic message explaining why the configuration is rejected. Pass
+ *                         `NULL` to skip the diagnostics. The library maintains a per-thread buffer,
+ *                         and callers do not need to allocate memory for the message. The buffer
+ *                         content stays valid until the next call of `nvte_get_fused_attn_backend_v2`.
  *
  *  \return Fused-attention backend, `NVTE_F16_arbitrary_seqlen` or `NVTE_FP8`,
- *          if the given configuration is supported; otherwise, `NVTE_No_Backend`.
+ *          if the configuration is supported; otherwise, `NVTE_No_Backend`.
  */
 NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend_v2(NVTEFusedAttnConfig cfg,
                                                        const char **message);
@@ -458,13 +452,13 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend_v2(NVTEFusedAttnConfig cfg,
  *
  *  \deprecated This function has been deprecated in favor of `nvte_get_fused_attn_backend_v2`.
  *
- *  \note `nvte_get_fused_attn_backend` has a narrower input signature than
- *        `nvte_get_fused_attn_backend_v2`. It fills the fields that it cannot express with
- *        `nvte_get_fused_attn_backend_v2`'s default values. This includes setting
+ *  \note `nvte_get_fused_attn_backend` has a narrower input signature compared to
+ *        `nvte_get_fused_attn_backend_v2`. For the fields it cannot express, it fills them with
+ *        the default values of `nvte_get_fused_attn_backend_v2`. This includes setting
  *        `batch_size` = 1, deriving output/gradient formats from `qkv_layout`, assuming a standard
  *        bias shape [b, h, sq, skv] for `NVTE_POST_SCALE_BIAS`, using delayed scaling for all FP8,
- *        and not supporting paged-KV attention. Users who need more precise control should
- *        switch to `nvte_get_fused_attn_backend_v2`.
+ *        and not supporting paged-KV attention checks. Users who need more precise control should
+ *        use `nvte_get_fused_attn_backend_v2` instead.
  */
 NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
     bool is_training, NVTEDType q_dtype, NVTEDType kv_dtype, NVTE_QKV_Layout qkv_layout,
@@ -477,10 +471,10 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
  *
  *  All inputs and outputs are carried by the opaque \p params handle. Create it with
  *  `nvte_create_fused_attn_fwd_params()`, populate it with
- *  `nvte_set_fused_attn_fwd_params_attribute()` (or `FusedAttnFwdParamsWrapper`) setters, and
+ *  `nvte_set_fused_attn_fwd_params_attribute()` or `FusedAttnFwdParamsWrapper` setters, and
  *  destroy it with `nvte_destroy_fused_attn_fwd_params()`.
  *
- *  \param[in,out] params                    Opaque fused-attention forward-parameter handle.
+ *  \param[in,out] params                Fused-attention forward-parameter handle.
  */
 void nvte_fused_attn_fwd_v2(NVTEFusedAttnFwdParams params);
 
@@ -565,10 +559,10 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
  *
  *  All inputs and outputs are carried by the opaque \p params handle. Create it with
  *  `nvte_create_fused_attn_bwd_params()`, populate it with
- *  `nvte_set_fused_attn_bwd_params_attribute()` (or `FusedAttnBwdParamsWrapper`) setters, and
+ *  `nvte_set_fused_attn_bwd_params_attribute()` or `FusedAttnBwdParamsWrapper` setters, and
  *  destroy it with `nvte_destroy_fused_attn_bwd_params()`.
  *
- *  \param[in,out] params                    Opaque fused-attention backward-parameter handle.
+ *  \param[in,out] params                Fused-attention backward-parameter handle.
  */
 void nvte_fused_attn_bwd_v2(NVTEFusedAttnBwdParams params);
 
@@ -1159,8 +1153,6 @@ class FusedAttnConfigWrapper {
   }
 
  private:
-  // Common implementation for every setter: copy the value to a local variable,
-  // forward its address and size to the C API, and return *this for chaining.
   template <typename T>
   FusedAttnConfigWrapper &set_attr(NVTEFusedAttnConfigAttribute attr, T val) noexcept {
     nvte_set_fused_attn_config_attribute(cfg_, attr, &val, sizeof(val));
@@ -1253,44 +1245,20 @@ class FusedAttnFwdParamsWrapper {
   FusedAttnFwdParamsWrapper &set_rng_state(NVTETensor val) noexcept {
     return set_attr(kNVTEFusedAttnFwdParamsRngState, val);
   }
-  FusedAttnFwdParamsWrapper &set_max_seqlen_q(size_t val) noexcept {
-    return set_attr(kNVTEFusedAttnFwdParamsMaxSeqlenQ, val);
-  }
-  FusedAttnFwdParamsWrapper &set_max_seqlen_kv(size_t val) noexcept {
-    return set_attr(kNVTEFusedAttnFwdParamsMaxSeqlenKV, val);
-  }
   FusedAttnFwdParamsWrapper &set_is_training(bool val) noexcept {
     return set_attr(kNVTEFusedAttnFwdParamsIsTraining, static_cast<uint8_t>(val));
-  }
-  FusedAttnFwdParamsWrapper &set_return_max_logit(bool val) noexcept {
-    return set_attr(kNVTEFusedAttnFwdParamsReturnMaxLogit, static_cast<uint8_t>(val));
   }
   FusedAttnFwdParamsWrapper &set_cuda_graph(bool val) noexcept {
     return set_attr(kNVTEFusedAttnFwdParamsCudaGraph, static_cast<uint8_t>(val));
   }
-  FusedAttnFwdParamsWrapper &set_attn_scale(float val) noexcept {
-    return set_attr(kNVTEFusedAttnFwdParamsAttnScale, val);
-  }
-  FusedAttnFwdParamsWrapper &set_dropout(float val) noexcept {
-    return set_attr(kNVTEFusedAttnFwdParamsDropout, val);
-  }
-  FusedAttnFwdParamsWrapper &set_qkv_layout(NVTE_QKV_Layout val) noexcept {
-    return set_attr(kNVTEFusedAttnFwdParamsQKVLayout, val);
-  }
-  FusedAttnFwdParamsWrapper &set_o_format(NVTE_QKV_Format val) noexcept {
-    return set_attr(kNVTEFusedAttnFwdParamsOFormat, val);
-  }
-  FusedAttnFwdParamsWrapper &set_qkv_scale_inv_format(NVTE_QKV_Format val) noexcept {
-    return set_attr(kNVTEFusedAttnFwdParamsQKVScaleInvFormat, val);
-  }
-  FusedAttnFwdParamsWrapper &set_bias_type(NVTE_Bias_Type val) noexcept {
-    return set_attr(kNVTEFusedAttnFwdParamsBiasType, val);
+  FusedAttnFwdParamsWrapper &set_return_max_logit(bool val) noexcept {
+    return set_attr(kNVTEFusedAttnFwdParamsReturnMaxLogit, static_cast<uint8_t>(val));
   }
   FusedAttnFwdParamsWrapper &set_attn_mask_type(NVTE_Mask_Type val) noexcept {
     return set_attr(kNVTEFusedAttnFwdParamsAttnMaskType, val);
   }
-  FusedAttnFwdParamsWrapper &set_softmax_type(NVTE_Softmax_Type val) noexcept {
-    return set_attr(kNVTEFusedAttnFwdParamsSoftmaxType, val);
+  FusedAttnFwdParamsWrapper &set_bias_type(NVTE_Bias_Type val) noexcept {
+    return set_attr(kNVTEFusedAttnFwdParamsBiasType, val);
   }
   FusedAttnFwdParamsWrapper &set_window_size_left(int64_t val) noexcept {
     return set_attr(kNVTEFusedAttnFwdParamsWindowSizeLeft, val);
@@ -1301,6 +1269,30 @@ class FusedAttnFwdParamsWrapper {
   FusedAttnFwdParamsWrapper &set_bottom_right_diagonal(bool val) noexcept {
     return set_attr(kNVTEFusedAttnFwdParamsBottomRightDiagonal, static_cast<uint8_t>(val));
   }
+  FusedAttnFwdParamsWrapper &set_softmax_type(NVTE_Softmax_Type val) noexcept {
+    return set_attr(kNVTEFusedAttnFwdParamsSoftmaxType, val);
+  }
+  FusedAttnFwdParamsWrapper &set_dropout(float val) noexcept {
+    return set_attr(kNVTEFusedAttnFwdParamsDropout, val);
+  }
+  FusedAttnFwdParamsWrapper &set_attn_scale(float val) noexcept {
+    return set_attr(kNVTEFusedAttnFwdParamsAttnScale, val);
+  }
+  FusedAttnFwdParamsWrapper &set_qkv_layout(NVTE_QKV_Layout val) noexcept {
+    return set_attr(kNVTEFusedAttnFwdParamsQKVLayout, val);
+  }
+  FusedAttnFwdParamsWrapper &set_o_format(NVTE_QKV_Format val) noexcept {
+    return set_attr(kNVTEFusedAttnFwdParamsOFormat, val);
+  }
+  FusedAttnFwdParamsWrapper &set_qkv_scale_inv_format(NVTE_QKV_Format val) noexcept {
+    return set_attr(kNVTEFusedAttnFwdParamsQKVScaleInvFormat, val);
+  }
+  FusedAttnFwdParamsWrapper &set_max_seqlen_q(size_t val) noexcept {
+    return set_attr(kNVTEFusedAttnFwdParamsMaxSeqlenQ, val);
+  }
+  FusedAttnFwdParamsWrapper &set_max_seqlen_kv(size_t val) noexcept {
+    return set_attr(kNVTEFusedAttnFwdParamsMaxSeqlenKV, val);
+  }
   FusedAttnFwdParamsWrapper &set_workspace(NVTETensor val) noexcept {
     return set_attr(kNVTEFusedAttnFwdParamsWorkspace, val);
   }
@@ -1309,8 +1301,6 @@ class FusedAttnFwdParamsWrapper {
   }
 
  private:
-  // Common implementation for every setter: copy the value to a local variable,
-  // forward its address and size to the C API, and return *this for chaining.
   template <typename T>
   FusedAttnFwdParamsWrapper &set_attr(NVTEFusedAttnFwdParamsAttribute attr, T val) noexcept {
     nvte_set_fused_attn_fwd_params_attribute(params_, attr, &val, sizeof(val));
@@ -1409,17 +1399,35 @@ class FusedAttnBwdParamsWrapper {
   FusedAttnBwdParamsWrapper &set_cu_seqlens_kv_padded(NVTETensor val) noexcept {
     return set_attr(kNVTEFusedAttnBwdParamsCuSeqlensKVPadded, val);
   }
-  FusedAttnBwdParamsWrapper &set_max_seqlen_q(size_t val) noexcept {
-    return set_attr(kNVTEFusedAttnBwdParamsMaxSeqlenQ, val);
+  FusedAttnBwdParamsWrapper &set_deterministic(bool val) noexcept {
+    return set_attr(kNVTEFusedAttnBwdParamsDeterministic, static_cast<uint8_t>(val));
   }
-  FusedAttnBwdParamsWrapper &set_max_seqlen_kv(size_t val) noexcept {
-    return set_attr(kNVTEFusedAttnBwdParamsMaxSeqlenKV, val);
+  FusedAttnBwdParamsWrapper &set_cuda_graph(bool val) noexcept {
+    return set_attr(kNVTEFusedAttnBwdParamsCudaGraph, static_cast<uint8_t>(val));
   }
-  FusedAttnBwdParamsWrapper &set_attn_scale(float val) noexcept {
-    return set_attr(kNVTEFusedAttnBwdParamsAttnScale, val);
+  FusedAttnBwdParamsWrapper &set_attn_mask_type(NVTE_Mask_Type val) noexcept {
+    return set_attr(kNVTEFusedAttnBwdParamsAttnMaskType, val);
+  }
+  FusedAttnBwdParamsWrapper &set_bias_type(NVTE_Bias_Type val) noexcept {
+    return set_attr(kNVTEFusedAttnBwdParamsBiasType, val);
+  }
+  FusedAttnBwdParamsWrapper &set_window_size_left(int64_t val) noexcept {
+    return set_attr(kNVTEFusedAttnBwdParamsWindowSizeLeft, val);
+  }
+  FusedAttnBwdParamsWrapper &set_window_size_right(int64_t val) noexcept {
+    return set_attr(kNVTEFusedAttnBwdParamsWindowSizeRight, val);
+  }
+  FusedAttnBwdParamsWrapper &set_bottom_right_diagonal(bool val) noexcept {
+    return set_attr(kNVTEFusedAttnBwdParamsBottomRightDiagonal, static_cast<uint8_t>(val));
+  }
+  FusedAttnBwdParamsWrapper &set_softmax_type(NVTE_Softmax_Type val) noexcept {
+    return set_attr(kNVTEFusedAttnBwdParamsSoftmaxType, val);
   }
   FusedAttnBwdParamsWrapper &set_dropout(float val) noexcept {
     return set_attr(kNVTEFusedAttnBwdParamsDropout, val);
+  }
+  FusedAttnBwdParamsWrapper &set_attn_scale(float val) noexcept {
+    return set_attr(kNVTEFusedAttnBwdParamsAttnScale, val);
   }
   FusedAttnBwdParamsWrapper &set_qkv_layout(NVTE_QKV_Layout val) noexcept {
     return set_attr(kNVTEFusedAttnBwdParamsQKVLayout, val);
@@ -1439,29 +1447,11 @@ class FusedAttnBwdParamsWrapper {
   FusedAttnBwdParamsWrapper &set_do_scale_inv_format(NVTE_QKV_Format val) noexcept {
     return set_attr(kNVTEFusedAttnBwdParamsDOScaleInvFormat, val);
   }
-  FusedAttnBwdParamsWrapper &set_bias_type(NVTE_Bias_Type val) noexcept {
-    return set_attr(kNVTEFusedAttnBwdParamsBiasType, val);
+  FusedAttnBwdParamsWrapper &set_max_seqlen_q(size_t val) noexcept {
+    return set_attr(kNVTEFusedAttnBwdParamsMaxSeqlenQ, val);
   }
-  FusedAttnBwdParamsWrapper &set_attn_mask_type(NVTE_Mask_Type val) noexcept {
-    return set_attr(kNVTEFusedAttnBwdParamsAttnMaskType, val);
-  }
-  FusedAttnBwdParamsWrapper &set_softmax_type(NVTE_Softmax_Type val) noexcept {
-    return set_attr(kNVTEFusedAttnBwdParamsSoftmaxType, val);
-  }
-  FusedAttnBwdParamsWrapper &set_window_size_left(int64_t val) noexcept {
-    return set_attr(kNVTEFusedAttnBwdParamsWindowSizeLeft, val);
-  }
-  FusedAttnBwdParamsWrapper &set_window_size_right(int64_t val) noexcept {
-    return set_attr(kNVTEFusedAttnBwdParamsWindowSizeRight, val);
-  }
-  FusedAttnBwdParamsWrapper &set_bottom_right_diagonal(bool val) noexcept {
-    return set_attr(kNVTEFusedAttnBwdParamsBottomRightDiagonal, static_cast<uint8_t>(val));
-  }
-  FusedAttnBwdParamsWrapper &set_deterministic(bool val) noexcept {
-    return set_attr(kNVTEFusedAttnBwdParamsDeterministic, static_cast<uint8_t>(val));
-  }
-  FusedAttnBwdParamsWrapper &set_cuda_graph(bool val) noexcept {
-    return set_attr(kNVTEFusedAttnBwdParamsCudaGraph, static_cast<uint8_t>(val));
+  FusedAttnBwdParamsWrapper &set_max_seqlen_kv(size_t val) noexcept {
+    return set_attr(kNVTEFusedAttnBwdParamsMaxSeqlenKV, val);
   }
   FusedAttnBwdParamsWrapper &set_workspace(NVTETensor val) noexcept {
     return set_attr(kNVTEFusedAttnBwdParamsWorkspace, val);
@@ -1471,8 +1461,6 @@ class FusedAttnBwdParamsWrapper {
   }
 
  private:
-  // Common implementation for every setter: copy the value to a local variable,
-  // forward its address and size to the C API, and return *this for chaining.
   template <typename T>
   FusedAttnBwdParamsWrapper &set_attr(NVTEFusedAttnBwdParamsAttribute attr, T val) noexcept {
     nvte_set_fused_attn_bwd_params_attribute(params_, attr, &val, sizeof(val));

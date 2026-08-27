@@ -258,19 +258,19 @@ FusedAttnConfig FusedAttnFwdParams::make_config() const {
   cfg.deterministic = false;
   cfg.cuda_graph = params.cuda_graph;
   cfg.return_max_logit = params.return_max_logit;
-  cfg.qkv_layout = params.qkv_layout;
-  cfg.o_format = params.o_format;
-  cfg.qkv_scale_inv_format = params.qkv_scale_inv_format;
-  cfg.bias_type = params.bias_type;
   cfg.attn_mask_type = params.attn_mask_type;
-  cfg.softmax_type = params.softmax_type;
-  cfg.attn_scale = params.attn_scale;
-  cfg.dropout = params.dropout;
-  cfg.max_seqlen_q = params.max_seqlen_q;
-  cfg.max_seqlen_kv = params.max_seqlen_kv;
+  cfg.bias_type = params.bias_type;
   cfg.window_size_left = params.window_size_left;
   cfg.window_size_right = params.window_size_right;
   cfg.bottom_right_diagonal = params.bottom_right_diagonal;
+  cfg.softmax_type = params.softmax_type;
+  cfg.dropout = params.dropout;
+  cfg.attn_scale = params.attn_scale;
+  cfg.qkv_layout = params.qkv_layout;
+  cfg.o_format = params.o_format;
+  cfg.qkv_scale_inv_format = params.qkv_scale_inv_format;
+  cfg.max_seqlen_q = params.max_seqlen_q;
+  cfg.max_seqlen_kv = params.max_seqlen_kv;
 
   const Tensor *input_cu_seqlens_q = convertNVTETensorCheck(params.cu_seqlens_q);
   const Tensor *input_cu_seqlens_kv = convertNVTETensorCheck(params.cu_seqlens_kv);
@@ -366,22 +366,22 @@ FusedAttnConfig FusedAttnBwdParams::make_config() const {
   cfg.deterministic = params.deterministic;
   cfg.cuda_graph = params.cuda_graph;
   cfg.return_max_logit = false;
+  cfg.attn_mask_type = params.attn_mask_type;
+  cfg.bias_type = params.bias_type;
+  cfg.window_size_left = params.window_size_left;
+  cfg.window_size_right = params.window_size_right;
+  cfg.bottom_right_diagonal = params.bottom_right_diagonal;
+  cfg.softmax_type = params.softmax_type;
+  cfg.dropout = params.dropout;
+  cfg.attn_scale = params.attn_scale;
   cfg.qkv_layout = params.qkv_layout;
   cfg.o_format = params.o_format;
   cfg.do_format = params.do_format;
   cfg.dqkv_layout = params.dqkv_layout;
   cfg.qkv_scale_inv_format = params.qkv_scale_inv_format;
   cfg.do_scale_inv_format = params.do_scale_inv_format;
-  cfg.bias_type = params.bias_type;
-  cfg.attn_mask_type = params.attn_mask_type;
-  cfg.softmax_type = params.softmax_type;
-  cfg.attn_scale = params.attn_scale;
-  cfg.dropout = params.dropout;
   cfg.max_seqlen_q = params.max_seqlen_q;
   cfg.max_seqlen_kv = params.max_seqlen_kv;
-  cfg.window_size_left = params.window_size_left;
-  cfg.window_size_right = params.window_size_right;
-  cfg.bottom_right_diagonal = params.bottom_right_diagonal;
 
   const Tensor *input_cu_seqlens_q = convertNVTETensorCheck(params.cu_seqlens_q);
   const Tensor *input_cu_seqlens_kv = convertNVTETensorCheck(params.cu_seqlens_kv);
@@ -819,26 +819,38 @@ void nvte_get_fused_attn_fwd_params_attribute(NVTEFusedAttnFwdParams params,
     case kNVTEFusedAttnFwdParamsRngState:
       std::memcpy(buf, &p.rng_state, attr_size);
       break;
-    case kNVTEFusedAttnFwdParamsMaxSeqlenQ:
-      std::memcpy(buf, &p.max_seqlen_q, attr_size);
-      break;
-    case kNVTEFusedAttnFwdParamsMaxSeqlenKV:
-      std::memcpy(buf, &p.max_seqlen_kv, attr_size);
-      break;
     case kNVTEFusedAttnFwdParamsIsTraining:
       bool_to_uint8(p.is_training, buf);
-      break;
-    case kNVTEFusedAttnFwdParamsReturnMaxLogit:
-      bool_to_uint8(p.return_max_logit, buf);
       break;
     case kNVTEFusedAttnFwdParamsCudaGraph:
       bool_to_uint8(p.cuda_graph, buf);
       break;
-    case kNVTEFusedAttnFwdParamsAttnScale:
-      std::memcpy(buf, &p.attn_scale, attr_size);
+    case kNVTEFusedAttnFwdParamsReturnMaxLogit:
+      bool_to_uint8(p.return_max_logit, buf);
+      break;
+    case kNVTEFusedAttnFwdParamsAttnMaskType:
+      std::memcpy(buf, &p.attn_mask_type, attr_size);
+      break;
+    case kNVTEFusedAttnFwdParamsBiasType:
+      std::memcpy(buf, &p.bias_type, attr_size);
+      break;
+    case kNVTEFusedAttnFwdParamsWindowSizeLeft:
+      std::memcpy(buf, &p.window_size_left, attr_size);
+      break;
+    case kNVTEFusedAttnFwdParamsWindowSizeRight:
+      std::memcpy(buf, &p.window_size_right, attr_size);
+      break;
+    case kNVTEFusedAttnFwdParamsBottomRightDiagonal:
+      bool_to_uint8(p.bottom_right_diagonal, buf);
+      break;
+    case kNVTEFusedAttnFwdParamsSoftmaxType:
+      std::memcpy(buf, &p.softmax_type, attr_size);
       break;
     case kNVTEFusedAttnFwdParamsDropout:
       std::memcpy(buf, &p.dropout, attr_size);
+      break;
+    case kNVTEFusedAttnFwdParamsAttnScale:
+      std::memcpy(buf, &p.attn_scale, attr_size);
       break;
     case kNVTEFusedAttnFwdParamsQKVLayout:
       std::memcpy(buf, &p.qkv_layout, attr_size);
@@ -849,23 +861,11 @@ void nvte_get_fused_attn_fwd_params_attribute(NVTEFusedAttnFwdParams params,
     case kNVTEFusedAttnFwdParamsQKVScaleInvFormat:
       std::memcpy(buf, &p.qkv_scale_inv_format, attr_size);
       break;
-    case kNVTEFusedAttnFwdParamsBiasType:
-      std::memcpy(buf, &p.bias_type, attr_size);
+    case kNVTEFusedAttnFwdParamsMaxSeqlenQ:
+      std::memcpy(buf, &p.max_seqlen_q, attr_size);
       break;
-    case kNVTEFusedAttnFwdParamsAttnMaskType:
-      std::memcpy(buf, &p.attn_mask_type, attr_size);
-      break;
-    case kNVTEFusedAttnFwdParamsSoftmaxType:
-      std::memcpy(buf, &p.softmax_type, attr_size);
-      break;
-    case kNVTEFusedAttnFwdParamsWindowSizeLeft:
-      std::memcpy(buf, &p.window_size_left, attr_size);
-      break;
-    case kNVTEFusedAttnFwdParamsWindowSizeRight:
-      std::memcpy(buf, &p.window_size_right, attr_size);
-      break;
-    case kNVTEFusedAttnFwdParamsBottomRightDiagonal:
-      bool_to_uint8(p.bottom_right_diagonal, buf);
+    case kNVTEFusedAttnFwdParamsMaxSeqlenKV:
+      std::memcpy(buf, &p.max_seqlen_kv, attr_size);
       break;
     case kNVTEFusedAttnFwdParamsWorkspace:
       std::memcpy(buf, &p.workspace, attr_size);
@@ -936,26 +936,38 @@ void nvte_set_fused_attn_fwd_params_attribute(NVTEFusedAttnFwdParams params,
     case kNVTEFusedAttnFwdParamsRngState:
       std::memcpy(&p.rng_state, buf, attr_size);
       break;
-    case kNVTEFusedAttnFwdParamsMaxSeqlenQ:
-      std::memcpy(&p.max_seqlen_q, buf, attr_size);
-      break;
-    case kNVTEFusedAttnFwdParamsMaxSeqlenKV:
-      std::memcpy(&p.max_seqlen_kv, buf, attr_size);
-      break;
     case kNVTEFusedAttnFwdParamsIsTraining:
       uint8_to_bool(buf, p.is_training);
-      break;
-    case kNVTEFusedAttnFwdParamsReturnMaxLogit:
-      uint8_to_bool(buf, p.return_max_logit);
       break;
     case kNVTEFusedAttnFwdParamsCudaGraph:
       uint8_to_bool(buf, p.cuda_graph);
       break;
-    case kNVTEFusedAttnFwdParamsAttnScale:
-      std::memcpy(&p.attn_scale, buf, attr_size);
+    case kNVTEFusedAttnFwdParamsReturnMaxLogit:
+      uint8_to_bool(buf, p.return_max_logit);
+      break;
+    case kNVTEFusedAttnFwdParamsAttnMaskType:
+      std::memcpy(&p.attn_mask_type, buf, attr_size);
+      break;
+    case kNVTEFusedAttnFwdParamsBiasType:
+      std::memcpy(&p.bias_type, buf, attr_size);
+      break;
+    case kNVTEFusedAttnFwdParamsWindowSizeLeft:
+      std::memcpy(&p.window_size_left, buf, attr_size);
+      break;
+    case kNVTEFusedAttnFwdParamsWindowSizeRight:
+      std::memcpy(&p.window_size_right, buf, attr_size);
+      break;
+    case kNVTEFusedAttnFwdParamsBottomRightDiagonal:
+      uint8_to_bool(buf, p.bottom_right_diagonal);
+      break;
+    case kNVTEFusedAttnFwdParamsSoftmaxType:
+      std::memcpy(&p.softmax_type, buf, attr_size);
       break;
     case kNVTEFusedAttnFwdParamsDropout:
       std::memcpy(&p.dropout, buf, attr_size);
+      break;
+    case kNVTEFusedAttnFwdParamsAttnScale:
+      std::memcpy(&p.attn_scale, buf, attr_size);
       break;
     case kNVTEFusedAttnFwdParamsQKVLayout:
       std::memcpy(&p.qkv_layout, buf, attr_size);
@@ -966,23 +978,11 @@ void nvte_set_fused_attn_fwd_params_attribute(NVTEFusedAttnFwdParams params,
     case kNVTEFusedAttnFwdParamsQKVScaleInvFormat:
       std::memcpy(&p.qkv_scale_inv_format, buf, attr_size);
       break;
-    case kNVTEFusedAttnFwdParamsBiasType:
-      std::memcpy(&p.bias_type, buf, attr_size);
+    case kNVTEFusedAttnFwdParamsMaxSeqlenQ:
+      std::memcpy(&p.max_seqlen_q, buf, attr_size);
       break;
-    case kNVTEFusedAttnFwdParamsAttnMaskType:
-      std::memcpy(&p.attn_mask_type, buf, attr_size);
-      break;
-    case kNVTEFusedAttnFwdParamsSoftmaxType:
-      std::memcpy(&p.softmax_type, buf, attr_size);
-      break;
-    case kNVTEFusedAttnFwdParamsWindowSizeLeft:
-      std::memcpy(&p.window_size_left, buf, attr_size);
-      break;
-    case kNVTEFusedAttnFwdParamsWindowSizeRight:
-      std::memcpy(&p.window_size_right, buf, attr_size);
-      break;
-    case kNVTEFusedAttnFwdParamsBottomRightDiagonal:
-      uint8_to_bool(buf, p.bottom_right_diagonal);
+    case kNVTEFusedAttnFwdParamsMaxSeqlenKV:
+      std::memcpy(&p.max_seqlen_kv, buf, attr_size);
       break;
     case kNVTEFusedAttnFwdParamsWorkspace:
       std::memcpy(&p.workspace, buf, attr_size);
@@ -1072,17 +1072,35 @@ void nvte_get_fused_attn_bwd_params_attribute(NVTEFusedAttnBwdParams params,
     case kNVTEFusedAttnBwdParamsCuSeqlensKVPadded:
       std::memcpy(buf, &p.cu_seqlens_kv_padded, attr_size);
       break;
-    case kNVTEFusedAttnBwdParamsMaxSeqlenQ:
-      std::memcpy(buf, &p.max_seqlen_q, attr_size);
+    case kNVTEFusedAttnBwdParamsDeterministic:
+      bool_to_uint8(p.deterministic, buf);
       break;
-    case kNVTEFusedAttnBwdParamsMaxSeqlenKV:
-      std::memcpy(buf, &p.max_seqlen_kv, attr_size);
+    case kNVTEFusedAttnBwdParamsCudaGraph:
+      bool_to_uint8(p.cuda_graph, buf);
       break;
-    case kNVTEFusedAttnBwdParamsAttnScale:
-      std::memcpy(buf, &p.attn_scale, attr_size);
+    case kNVTEFusedAttnBwdParamsAttnMaskType:
+      std::memcpy(buf, &p.attn_mask_type, attr_size);
+      break;
+    case kNVTEFusedAttnBwdParamsBiasType:
+      std::memcpy(buf, &p.bias_type, attr_size);
+      break;
+    case kNVTEFusedAttnBwdParamsWindowSizeLeft:
+      std::memcpy(buf, &p.window_size_left, attr_size);
+      break;
+    case kNVTEFusedAttnBwdParamsWindowSizeRight:
+      std::memcpy(buf, &p.window_size_right, attr_size);
+      break;
+    case kNVTEFusedAttnBwdParamsBottomRightDiagonal:
+      bool_to_uint8(p.bottom_right_diagonal, buf);
+      break;
+    case kNVTEFusedAttnBwdParamsSoftmaxType:
+      std::memcpy(buf, &p.softmax_type, attr_size);
       break;
     case kNVTEFusedAttnBwdParamsDropout:
       std::memcpy(buf, &p.dropout, attr_size);
+      break;
+    case kNVTEFusedAttnBwdParamsAttnScale:
+      std::memcpy(buf, &p.attn_scale, attr_size);
       break;
     case kNVTEFusedAttnBwdParamsQKVLayout:
       std::memcpy(buf, &p.qkv_layout, attr_size);
@@ -1102,29 +1120,11 @@ void nvte_get_fused_attn_bwd_params_attribute(NVTEFusedAttnBwdParams params,
     case kNVTEFusedAttnBwdParamsDOScaleInvFormat:
       std::memcpy(buf, &p.do_scale_inv_format, attr_size);
       break;
-    case kNVTEFusedAttnBwdParamsBiasType:
-      std::memcpy(buf, &p.bias_type, attr_size);
+    case kNVTEFusedAttnBwdParamsMaxSeqlenQ:
+      std::memcpy(buf, &p.max_seqlen_q, attr_size);
       break;
-    case kNVTEFusedAttnBwdParamsAttnMaskType:
-      std::memcpy(buf, &p.attn_mask_type, attr_size);
-      break;
-    case kNVTEFusedAttnBwdParamsSoftmaxType:
-      std::memcpy(buf, &p.softmax_type, attr_size);
-      break;
-    case kNVTEFusedAttnBwdParamsWindowSizeLeft:
-      std::memcpy(buf, &p.window_size_left, attr_size);
-      break;
-    case kNVTEFusedAttnBwdParamsWindowSizeRight:
-      std::memcpy(buf, &p.window_size_right, attr_size);
-      break;
-    case kNVTEFusedAttnBwdParamsBottomRightDiagonal:
-      bool_to_uint8(p.bottom_right_diagonal, buf);
-      break;
-    case kNVTEFusedAttnBwdParamsDeterministic:
-      bool_to_uint8(p.deterministic, buf);
-      break;
-    case kNVTEFusedAttnBwdParamsCudaGraph:
-      bool_to_uint8(p.cuda_graph, buf);
+    case kNVTEFusedAttnBwdParamsMaxSeqlenKV:
+      std::memcpy(buf, &p.max_seqlen_kv, attr_size);
       break;
     case kNVTEFusedAttnBwdParamsWorkspace:
       std::memcpy(buf, &p.workspace, attr_size);
@@ -1201,17 +1201,35 @@ void nvte_set_fused_attn_bwd_params_attribute(NVTEFusedAttnBwdParams params,
     case kNVTEFusedAttnBwdParamsCuSeqlensKVPadded:
       std::memcpy(&p.cu_seqlens_kv_padded, buf, attr_size);
       break;
-    case kNVTEFusedAttnBwdParamsMaxSeqlenQ:
-      std::memcpy(&p.max_seqlen_q, buf, attr_size);
+    case kNVTEFusedAttnBwdParamsDeterministic:
+      uint8_to_bool(buf, p.deterministic);
       break;
-    case kNVTEFusedAttnBwdParamsMaxSeqlenKV:
-      std::memcpy(&p.max_seqlen_kv, buf, attr_size);
+    case kNVTEFusedAttnBwdParamsCudaGraph:
+      uint8_to_bool(buf, p.cuda_graph);
       break;
-    case kNVTEFusedAttnBwdParamsAttnScale:
-      std::memcpy(&p.attn_scale, buf, attr_size);
+    case kNVTEFusedAttnBwdParamsAttnMaskType:
+      std::memcpy(&p.attn_mask_type, buf, attr_size);
+      break;
+    case kNVTEFusedAttnBwdParamsBiasType:
+      std::memcpy(&p.bias_type, buf, attr_size);
+      break;
+    case kNVTEFusedAttnBwdParamsWindowSizeLeft:
+      std::memcpy(&p.window_size_left, buf, attr_size);
+      break;
+    case kNVTEFusedAttnBwdParamsWindowSizeRight:
+      std::memcpy(&p.window_size_right, buf, attr_size);
+      break;
+    case kNVTEFusedAttnBwdParamsBottomRightDiagonal:
+      uint8_to_bool(buf, p.bottom_right_diagonal);
+      break;
+    case kNVTEFusedAttnBwdParamsSoftmaxType:
+      std::memcpy(&p.softmax_type, buf, attr_size);
       break;
     case kNVTEFusedAttnBwdParamsDropout:
       std::memcpy(&p.dropout, buf, attr_size);
+      break;
+    case kNVTEFusedAttnBwdParamsAttnScale:
+      std::memcpy(&p.attn_scale, buf, attr_size);
       break;
     case kNVTEFusedAttnBwdParamsQKVLayout:
       std::memcpy(&p.qkv_layout, buf, attr_size);
@@ -1231,29 +1249,11 @@ void nvte_set_fused_attn_bwd_params_attribute(NVTEFusedAttnBwdParams params,
     case kNVTEFusedAttnBwdParamsDOScaleInvFormat:
       std::memcpy(&p.do_scale_inv_format, buf, attr_size);
       break;
-    case kNVTEFusedAttnBwdParamsBiasType:
-      std::memcpy(&p.bias_type, buf, attr_size);
+    case kNVTEFusedAttnBwdParamsMaxSeqlenQ:
+      std::memcpy(&p.max_seqlen_q, buf, attr_size);
       break;
-    case kNVTEFusedAttnBwdParamsAttnMaskType:
-      std::memcpy(&p.attn_mask_type, buf, attr_size);
-      break;
-    case kNVTEFusedAttnBwdParamsSoftmaxType:
-      std::memcpy(&p.softmax_type, buf, attr_size);
-      break;
-    case kNVTEFusedAttnBwdParamsWindowSizeLeft:
-      std::memcpy(&p.window_size_left, buf, attr_size);
-      break;
-    case kNVTEFusedAttnBwdParamsWindowSizeRight:
-      std::memcpy(&p.window_size_right, buf, attr_size);
-      break;
-    case kNVTEFusedAttnBwdParamsBottomRightDiagonal:
-      uint8_to_bool(buf, p.bottom_right_diagonal);
-      break;
-    case kNVTEFusedAttnBwdParamsDeterministic:
-      uint8_to_bool(buf, p.deterministic);
-      break;
-    case kNVTEFusedAttnBwdParamsCudaGraph:
-      uint8_to_bool(buf, p.cuda_graph);
+    case kNVTEFusedAttnBwdParamsMaxSeqlenKV:
+      std::memcpy(&p.max_seqlen_kv, buf, attr_size);
       break;
     case kNVTEFusedAttnBwdParamsWorkspace:
       std::memcpy(&p.workspace, buf, attr_size);
