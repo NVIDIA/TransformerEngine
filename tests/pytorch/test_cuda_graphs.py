@@ -2,6 +2,8 @@
 #
 # See LICENSE for license information.
 
+import gc
+import weakref
 from typing import Callable, Dict, Iterable, List, Tuple, Union
 import pytest
 
@@ -22,6 +24,16 @@ from transformer_engine.pytorch import (
     is_bf16_available,
 )
 from transformer_engine.pytorch.quantization import FP8GlobalStateManager
+from transformer_engine.pytorch.attention.dot_product_attention.context_parallel import (
+    _get_cp_p2p_transport_group,
+    set_cp_p2p_transport_group,
+)
+from transformer_engine.pytorch.distributed import (
+    get_distributed_group_ranks,
+    get_distributed_rank,
+    get_distributed_world_size,
+    is_logical_process_group,
+)
 import transformer_engine.pytorch.ops as te_ops
 from transformer_engine.common import recipe
 from utils import ModelConfig, reset_rng_states
@@ -37,6 +49,61 @@ reset_rng_states()
 model_configs = {
     "small": ModelConfig(2, 32, 2, 32),
 }
+
+
+def test_cp_p2p_transport_group_override():
+    class Group:
+        pass
+
+    logical_group = Group()
+    transport_group = Group()
+
+    assert _get_cp_p2p_transport_group(logical_group) == (logical_group, False)
+    set_cp_p2p_transport_group(logical_group, transport_group)
+    assert _get_cp_p2p_transport_group(logical_group) == (transport_group, True)
+    set_cp_p2p_transport_group(logical_group, None)
+    assert _get_cp_p2p_transport_group(logical_group) == (logical_group, False)
+
+    set_cp_p2p_transport_group(logical_group, transport_group)
+    logical_group_ref = weakref.ref(logical_group)
+    del logical_group
+    gc.collect()
+    assert logical_group_ref() is None
+
+    self_transport_group = Group()
+    self_transport_group_ref = weakref.ref(self_transport_group)
+    set_cp_p2p_transport_group(self_transport_group, self_transport_group)
+    del self_transport_group
+    gc.collect()
+    assert self_transport_group_ref() is None
+
+
+def test_logical_cp_group_uses_registered_parent_transport():
+    class LogicalGroup:
+        ranks = (2, 3, 6, 7)
+        cp_size = 4
+        cp_rank = 2
+
+    class ParentGroup:
+        pass
+
+    logical_group = LogicalGroup()
+    parent_group = ParentGroup()
+
+    assert is_logical_process_group(logical_group)
+    assert get_distributed_world_size(logical_group) == 4
+    assert get_distributed_rank(logical_group) == 2
+    assert get_distributed_group_ranks(logical_group) == (2, 3, 6, 7)
+    with pytest.raises(RuntimeError, match="requires a registered parent"):
+        _get_cp_p2p_transport_group(logical_group)
+
+    set_cp_p2p_transport_group(logical_group, parent_group)
+    assert _get_cp_p2p_transport_group(logical_group) == (parent_group, True)
+
+    logical_group_ref = weakref.ref(logical_group)
+    del logical_group
+    gc.collect()
+    assert logical_group_ref() is None
 
 
 def nvfp4_vanilla():

@@ -26,6 +26,7 @@ from transformer_engine.pytorch.constants import (
 from transformer_engine.pytorch.distributed import (
     get_distributed_world_size,
     get_distributed_rank,
+    is_logical_process_group,
 )
 
 from transformer_engine.pytorch.attention.dot_product_attention import DotProductAttention
@@ -609,7 +610,7 @@ class MultiheadAttention(torch.nn.Module):
                         across each CP sub-group (e.g., via NVLink), then exchanging KV with
                         p2p between sub-groups (e.g., via IBLink).
         """
-        if isinstance(cp_group, dist_group_type):
+        if isinstance(cp_group, dist_group_type) or is_logical_process_group(cp_group):
             self.cp_size = get_distributed_world_size(cp_group)
             self.cp_rank = get_distributed_rank(cp_group)
         elif isinstance(cp_group, list):
