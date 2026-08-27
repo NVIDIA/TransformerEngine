@@ -684,23 +684,6 @@ def test_cp_with_fused_attention(
         pytest.skip("Deterministic mode does not support non-vanilla softmax with FusedAttention")
     if _deterministic and config.attn_bias_type == "post_scale_bias" and is_training:
         pytest.skip("Deterministic mode does not support post_scale_bias with requires_grad")
-    # Observed: cuDNN det THD backward asks for ~128 * bHSS bytes of workspace
-    # on sm90; at 1<<30 that's 128 GiB, won't fit on H100's 80 GB. Held exactly
-    # at b=2 + power-of-2 S in our sweep; for b>=3 the workspace was observed to
-    # grow super-linearly (b=4 took ~4x the b=2 amount, not 2x) — revisit if a
-    # config uses b>2.
-    SM90_DET_FUSED_THD_BWD_MAX_BHSS = 1 << 30
-    if (
-        _deterministic
-        and qkv_format == "thd"
-        and get_device_compute_capability() == (9, 0)
-        and config.batch_size * config.num_heads * config.max_seqlen_q * config.max_seqlen_kv
-        >= SM90_DET_FUSED_THD_BWD_MAX_BHSS
-    ):
-        pytest.skip(
-            "Deterministic FusedAttention backward with THD format OOMs on sm90"
-            " for large bHSS configs (known cuDNN issue)."
-        )
 
     _submit(
         pool,
@@ -715,6 +698,59 @@ def test_cp_with_fused_attention(
         scaling_mode=scaling_mode,
         f16_O=f16_O,
         is_training=is_training,
+        deterministic=_deterministic,
+        log_level=pytest_logging_level,
+    )
+
+
+@pytest.mark.skipif(get_cudnn_version() < (8, 9, 7), reason="cuDNN 8.9.7+ is required.")
+@pytest.mark.skipif(
+    get_device_compute_capability() < (9, 0), reason="FusedAttention THD requires sm90+."
+)
+def test_cp_with_fused_attention_no_load_balance(cp_pool):
+    """Check experimental single-chunk forward/backward."""
+    config = copy.deepcopy(model_configs_fused_attn["cp_2_0"])
+    config.context_parallel = True
+    config.cp_comm_type = "all_gather"
+    config.attn_mask_type = "padding_causal"
+    available_backends, _, _ = get_available_attention_backends(
+        config,
+        qkv_dtype=torch.bfloat16,
+        qkv_layout="thd_thd_thd",
+        pad_between_seqs=True,
+        is_training=True,
+        deterministic=_deterministic,
+    )
+    if not available_backends[1]:
+        pytest.skip("No attention backend available.")
+    _submit(
+        cp_pool(2),
+        dtype="bf16",
+        model="cp_2_0",
+        qkv_format="thd",
+        kernel_backend="FusedAttention",
+        cp_comm_type="all_gather",
+        load_balancing_strategy="NO_LOAD_BALANCE",
+        deterministic=_deterministic,
+        log_level=pytest_logging_level,
+    )
+
+
+@pytest.mark.skipif(
+    get_device_compute_capability() != (9, 0) or not FlashAttentionUtils.v3_is_installed,
+    reason="FlashAttention 3 requires sm90 and an installed FA3 package.",
+)
+def test_cp_with_flash_attention_3_no_load_balance(cp_pool):
+    """Check the supported unpadded FlashAttention 3 path."""
+    _submit(
+        cp_pool(2),
+        dtype="bf16",
+        model="cp_2_0",
+        qkv_format="thd",
+        kernel_backend="FlashAttention",
+        cp_comm_type="all_gather",
+        fa_pad_between_seqs=False,
+        load_balancing_strategy="NO_LOAD_BALANCE",
         deterministic=_deterministic,
         log_level=pytest_logging_level,
     )
