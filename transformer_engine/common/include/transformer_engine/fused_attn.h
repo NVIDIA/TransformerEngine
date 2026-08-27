@@ -502,16 +502,22 @@ void nvte_cp_thd_out_correction(NVTETensor out, const NVTETensor &out_per_step,
                                 const NVTETensor &cu_seqlens, int only_second_half, int lse_packed,
                                 cudaStream_t stream);
 
-/*!  \brief Correct the THD format output of context parallelism in forward pass.
+/*!  \brief Update the two halves of each packed THD sequence during context-parallel backward.
  *
  * \warning   This API is **experimental** and subject to change.
  *
- *  \param[out]    grad                Output tensor.
- *  \param[in]     grad_per_step       THD format gradient of context parallelism.
- *  \param[in]     cu_seqlens          Cumulative sequence lengths, [batch_size + 1].
- *  \param[in]     first_half          One of ("add", "copy", "none") correction op for first half.
- *  \param[in]     second_half         One of ("add", "copy", "none") correction op for second half.
-                                       Must be different from first_half.
+ * first_half and second_half control how grad is updated from grad_per_step: "add" accumulates,
+ * "copy" replaces, "none" preserves, and "zero" clears. FP16, BF16, and FP32 gradients support
+ * (add, none), (none, add), (copy, none), (none, copy), (copy, zero), (zero, copy), (add, copy),
+ * and (copy, add). FP8 gradients are stored as raw encoded bytes, which this kernel cannot add
+ * numerically. They support only (copy, zero) and (zero, copy): copy preserves the FP8 values and
+ * zero clears the inactive sequence half.
+ *
+ *  \param[in,out] grad                Packed THD gradient to update.
+ *  \param[in]     grad_per_step       Gradient from the current context-parallel step.
+ *  \param[in]     cu_seqlens          Packed-sequence boundaries, [batch_size + 1].
+ *  \param[in]     first_half          Operation for each sequence's first half.
+ *  \param[in]     second_half         Operation for each sequence's second half.
  *  \param[in]     stream              CUDA stream used for this operation.
  */
 void nvte_cp_thd_grad_correction(NVTETensor grad, const NVTETensor &grad_per_step,
