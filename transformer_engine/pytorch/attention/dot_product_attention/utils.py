@@ -1754,14 +1754,17 @@ def get_attention_backend(
         # was observed to grow super-linearly (B=4 took ~4x the B=2 amount, not 2x) —
         # revisit if a config uses B>2.
         SM90_DET_FUSED_THD_BWD_MAX_BHSS = 1 << 30
+        exceeds_sm90_det_thd_bwd_workspace = (
+            qkv_format == "thd"
+            and device_compute_capability == (9, 0)
+            and batch_size * num_heads * max_seqlen_q * max_seqlen_kv
+            >= SM90_DET_FUSED_THD_BWD_MAX_BHSS
+        )
         if (
             use_fused_attention
             and fused_attention_backend == FusedAttnBackend.F16_arbitrary_seqlen.value
             and is_training
-            and qkv_format == "thd"
-            and device_compute_capability == (9, 0)
-            and batch_size * num_heads * max_seqlen_q * max_seqlen_kv
-            >= SM90_DET_FUSED_THD_BWD_MAX_BHSS
+            and exceeds_sm90_det_thd_bwd_workspace
         ):
             logger.debug(
                 "Disabling FusedAttention due to a known cuDNN deterministic F16/BF16 THD "
