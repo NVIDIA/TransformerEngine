@@ -484,7 +484,7 @@ def quantize_colwise_mxfp8(
     # column lies past the input extents. TILE_Y == MXFP8_BLOCK_SCALING_SIZE so each stage
     # is exactly one scale-row; valid iff `tile_row_start < M`.
     biased_exp_c = cvt_f32_to_fp8e8m0fnu(amax_c * MAX_NORM_RCP)
-    # If the input shape is divisible by the tile size, then we won't access OOB regions because 
+    # If the input shape is divisible by the tile size, then we won't access OOB regions because
     # we never we only access tiles we actually need (num_tiles) which are never OOB
     if cutlass.const_expr(SKIP_SCALE_BOUNDS):
         if cutlass.const_expr(SWIZZLE):
@@ -897,7 +897,7 @@ class MXFP8QuantizeKernel(MXFP8QuantizeKernelBase):
         SKIP_SCALE_BOUNDS: bool = False,
     ):
         self.cfg = cfg
-        # If the input shape is divisible by the tile size or f(0)=0 holds for activaions, 
+        # If the input shape is divisible by the tile size or f(0)=0 holds for activaions,
         # we can skip masking inputs with zero in the kernel and save some instructions.
         self.SKIP_INPUT_MASKING = SKIP_INPUT_MASKING
         # If the input shape is divisible by the tile size, we can skip bounds check for scale writes and save some instructions.
@@ -2535,7 +2535,7 @@ class MXFP8QuantizeEntry(MXFP8QuantizeKernelBase):
             # If the input shape can be perfectly tiled by the general kernel's tile size, we can skip some boundary check because
             # we know we will not touch any out-of-bounds region.
             shape_is_divisible = (
-                mX.shape[0] % self.general_skip_input_masking_kernel._TILE_ROWS == 0 \
+                mX.shape[0] % self.general_skip_input_masking_kernel._TILE_ROWS == 0
                 and mX.shape[1] % self.general_skip_input_masking_kernel._TILE_COLS == 0
             )
             # If shape is divisible, then we won't access OOB regions regardless whatever
@@ -2570,7 +2570,7 @@ class MXFP8QuantizeEntry(MXFP8QuantizeKernelBase):
                         stream,
                     )
                 else:
-                    # We still need to check the scale bounds, but we can skip some activations masking because their output is 0 
+                    # We still need to check the scale bounds, but we can skip some activations masking because their output is 0
                     # for OOB regions where TMA fills with zeros
                     self.general_skip_input_masking_kernel(
                         mX,
