@@ -334,11 +334,11 @@ struct FusedAttnFwdParams {
       sizeof(NVTE_Softmax_Type),  // softmax_type
       sizeof(float),              // dropout
       sizeof(float),              // attn_scale
-      sizeof(NVTE_QKV_Layout),  // qkv_layout
-      sizeof(NVTE_QKV_Format),  // o_format
-      sizeof(NVTE_QKV_Format),  // qkv_scale_inv_format
-      sizeof(size_t),  // max_seqlen_q
-      sizeof(size_t),  // max_seqlen_kv
+      sizeof(NVTE_QKV_Layout),    // qkv_layout
+      sizeof(NVTE_QKV_Format),    // o_format
+      sizeof(NVTE_QKV_Format),    // qkv_scale_inv_format
+      sizeof(size_t),             // max_seqlen_q
+      sizeof(size_t),             // max_seqlen_kv
       // Workspace and stream
       sizeof(NVTETensor),    // workspace
       sizeof(cudaStream_t),  // stream
@@ -439,14 +439,14 @@ struct FusedAttnBwdParams {
       sizeof(NVTE_Softmax_Type),  // softmax_type
       sizeof(float),              // dropout
       sizeof(float),              // attn_scale
-      sizeof(NVTE_QKV_Layout),  // qkv_layout
-      sizeof(NVTE_QKV_Format),  // o_format
-      sizeof(NVTE_QKV_Format),  // do_format
-      sizeof(NVTE_QKV_Layout),  // dqkv_layout
-      sizeof(NVTE_QKV_Format),  // qkv_scale_inv_format
-      sizeof(NVTE_QKV_Format),  // do_scale_inv_format
-      sizeof(size_t),  // max_seqlen_q
-      sizeof(size_t),  // max_seqlen_kv
+      sizeof(NVTE_QKV_Layout),    // qkv_layout
+      sizeof(NVTE_QKV_Format),    // o_format
+      sizeof(NVTE_QKV_Format),    // do_format
+      sizeof(NVTE_QKV_Layout),    // dqkv_layout
+      sizeof(NVTE_QKV_Format),    // qkv_scale_inv_format
+      sizeof(NVTE_QKV_Format),    // do_scale_inv_format
+      sizeof(size_t),             // max_seqlen_q
+      sizeof(size_t),             // max_seqlen_kv
       // Workspace and stream
       sizeof(NVTETensor),    // workspace
       sizeof(cudaStream_t),  // stream

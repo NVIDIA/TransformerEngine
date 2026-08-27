@@ -108,8 +108,7 @@ void FusedAttnConfig::derive() {
   graph_batch_size_fwd =
       (buckets_the_batch && !uses_cu_seqlens_directly) ? bucketed_batch_size : batch_size;
   graph_batch_size_bwd = buckets_the_batch ? bucketed_batch_size : batch_size;
-  graph_max_seqlen_q =
-      (is_ragged_q && uses_ragged_graph) ? bucketed_num_tokens_q : max_seqlen_q;
+  graph_max_seqlen_q = (is_ragged_q && uses_ragged_graph) ? bucketed_num_tokens_q : max_seqlen_q;
   graph_max_seqlen_kv =
       (is_ragged_kv && uses_ragged_graph) ? bucketed_num_tokens_kv : max_seqlen_kv;
 
