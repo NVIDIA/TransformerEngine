@@ -127,7 +127,7 @@ def ep_bootstrap(
             at least ep_size * max_tokens_per_rank * top_k to avoid drops.
         hidden_dim: Feature dimension of token tensors passed to ep_dispatch.
         max_token_dtype: Widest dtype the group will dispatch (only bfloat16 supported).
-        max_num_sms: SM budget for EP kernels; 0 = auto.
+        max_num_sms: SM budget for the dispatch/combine kernels; 0 = default (32).
         drop_on_overflow: Drop tokens exceeding recv_capacity_per_rank instead of
             trapping on overflow. Dropped tokens are still counted in
             total_recv_tokens, so callers can detect overflow from it.
