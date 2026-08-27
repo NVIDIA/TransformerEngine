@@ -170,6 +170,7 @@ def test_dot_product_attention(
     pad_between_seqs,
     declarative_packed=False,
     is_training=True,
+    fwd_only_without_fused_attn=True,
 ):
     """Test DotProductAttention module"""
 
@@ -222,7 +223,11 @@ def test_dot_product_attention(
     )
     flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
 
-    if not fused_attn_supported:
+    # Some backends are only available in inference mode, so when FusedAttention cannot train this
+    # config the query is repeated forward-only to recover enough backends to compare. Callers
+    # whose backward-capable pair does not include FusedAttention -- softcap, where
+    # get_attention_backend always disables FusedAttention -- opt out to keep dgrad coverage.
+    if not fused_attn_supported and fwd_only_without_fused_attn:
         is_training = False
         available_backends, _, fused_attn_backends = get_available_attention_backends(
             config,
@@ -667,7 +672,16 @@ model_configs_softcap = {
 @pytest.mark.parametrize("model", model_configs_softcap.keys())
 def test_dpa_softcap(dtype, model_configs, model):
     """Test DotProductAttention module with tanh logit softcapping"""
-    test_dot_product_attention(dtype, model_configs, model, False, "bshd_bshd_bshd", False, False)
+    test_dot_product_attention(
+        dtype,
+        model_configs,
+        model,
+        False,
+        "bshd_bshd_bshd",
+        False,
+        False,
+        fwd_only_without_fused_attn=False,
+    )
 
 
 model_configs_mla = {
