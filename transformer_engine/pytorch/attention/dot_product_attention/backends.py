@@ -170,7 +170,7 @@ else:
     # (sm90) kernels DO implement tanh logit softcapping in fwd AND bwd (dedicated
     # flash_{fwd,bwd}_hdim256_bf16_softcap_sm90 instantiations, off only behind a compile-time
     # DISABLE_SOFTCAP flag), so this is a mature path. Still fail-closed and additionally
-    # gated on opt-in (NVTE_FA3_SOFTCAP) + head_dim <= 256 in get_attention_backend.
+    # gated on head_dim <= 256 + non-CP in get_attention_backend.
     try:
         fa_utils.fa3_supports_softcap = (
             "softcap" in inspect.signature(flash_attn_func_v3).parameters
@@ -1267,10 +1267,10 @@ class FlashAttention(torch.nn.Module):
                     )
                 else:
                     # Fail-loud net: get_attention_backend only keeps FA3 for softcap on a
-                    # softcap-capable build (signature probe) + opt-in (NVTE_FA3_SOFTCAP) + Hopper
-                    # (FA3 is sm90-only upstream) + head_dim <= 256. If FA3 is still reached with
-                    # softcap while the build lacks support (force-selected / regressed path), raise
-                    # rather than silently drop the cap. The non-CP FA3 entry points
+                    # softcap-capable build (signature probe) + Hopper (FA3 is sm90-only upstream)
+                    # + head_dim <= 256. If FA3 is still reached with softcap while the build lacks
+                    # support (force-selected / regressed path), raise rather than silently drop the
+                    # cap. The non-CP FA3 entry points
                     # (flash_attn_func_v3 / flash_attn_varlen_func_v3) are self-contained autograd
                     # functions, so threading `softcap` into the forward call also drives the
                     # matching FA3 softcap backward kernel. (CP + FA3 + softcap stays blocked above.)

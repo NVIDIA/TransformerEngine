@@ -150,8 +150,8 @@ class FlashAttentionUtils:
     use_v4 = False
     # True only if the installed FA3 build exposes a `softcap` parameter (signature probe in
     # backends.py, fail-closed default False). Necessary-but-not-sufficient: FA3 softcap is also
-    # gated on opt-in (NVTE_FA3_SOFTCAP=1) and head_dim <= 256 in get_attention_backend. FA3 is
-    # already restricted to Hopper (sm90) upstream, where its softcap fwd+bwd kernels are mature.
+    # gated on head_dim <= 256 and non-CP in get_attention_backend. FA3 is already restricted to
+    # Hopper (sm90) upstream, where its softcap fwd+bwd kernels are mature.
     fa3_supports_softcap = False
     v4_installation_steps = """\
 pip install flash-attn-4==4.0.0b11 nvidia-cutlass-dsl[cu13]"""
@@ -777,8 +777,8 @@ def get_attention_backend(
 
     # Filter: softcap
     # The scalar `softcap` kwarg (tanh logit softcapping) is plumbed to the FlashAttention 2
-    # backend (>= 2.6.0) and to UnfusedDotProductAttention by default, and to FA3 only behind an
-    # explicit opt-in gate below. FusedAttention does not take the scalar kwarg (cuDNN can softcap
+    # backend (>= 2.6.0) and to UnfusedDotProductAttention by default, and to FA3 subject to the
+    # build/shape checks below. FusedAttention does not take the scalar kwarg (cuDNN can softcap
     # via score_mod, but that path is not used here), so disable it rather than silently dropping
     # the cap.
     if softcap != 0.0:
@@ -787,22 +787,18 @@ def get_attention_backend(
             use_fused_attention = False
         if use_flash_attention_3 and not (
             FlashAttentionUtils.fa3_supports_softcap
-            and os.getenv("NVTE_FA3_SOFTCAP", "0") == "1"
             and max(head_dim_qk, head_dim_v) <= 256
             and not context_parallel
         ):
-            # FA3 softcap is opt-in (NVTE_FA3_SOFTCAP=1) and requires a softcap-capable FA3 build,
-            # head_dim <= 256 (the range FA3's sm90 softcap kernels are instantiated for), and no
-            # context parallelism -- FA3's CP path hard-rejects nonzero softcap (backends.py), so
-            # selecting it here would just crash at dispatch instead of steering to FA2, which does
-            # support CP+softcap via context_parallel.py's autograd threading. FA3 is already
-            # Hopper-only upstream. FA3's non-CP softcap fwd+bwd is mature, so no arch/beta caveat is
-            # needed beyond the build probe; keep it opt-in to preserve FA2 as the default (unchanged
-            # behavior) and allow a clean FA2-vs-FA3 comparison. When all conditions hold, FA3
-            # survives and the softcap kwarg is threaded in backends.py.
+            # FA3 softcap requires a softcap-capable FA3 build, head_dim <= 256 (the range FA3's
+            # sm90 softcap kernels are instantiated for), and no context parallelism -- FA3's CP
+            # path hard-rejects nonzero softcap (backends.py), so selecting it here would just
+            # crash at dispatch instead of steering to FA2, which does support CP+softcap via
+            # context_parallel.py's autograd threading. Whether FA3 is eligible at all is governed
+            # by NVTE_FLASH_ATTN_V3 through use_flash_attention_3.
             logger.debug(
                 "Disabling FlashAttention 3 for softcap (requires softcap-capable FA3 build, "
-                "NVTE_FA3_SOFTCAP=1, head_dim <= 256, and no context parallelism)"
+                "head_dim <= 256, and no context parallelism)"
             )
             use_flash_attention_3 = False
         if use_flash_attention_2 and not FlashAttentionUtils.v2_6_0_plus:
