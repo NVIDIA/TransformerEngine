@@ -31,6 +31,7 @@ NVTE_RELEASE_BUILD=1 pip3 wheel --no-build-isolation -vvv --wheel-dir ./dist . |
 python3 -m wheel unpack dist/${WHL_BASE}-* || error_exit "Failed to unpack dist/${WHL_BASE}-*.whl"
 if python3 -c "from build_tools.utils import nccl_ep_enabled; raise SystemExit(not nccl_ep_enabled())"; then
     test -f "${WHL_BASE}/transformer_engine/wheel_lib/libnccl_ep.so" || error_exit "Core wheel is missing libnccl_ep.so"
+    test -f "${WHL_BASE}/transformer_engine/wheel_lib/nccl_ep/include/nccl_ep.h" || error_exit "Core wheel is missing nccl_ep.h"
     test -d "${WHL_BASE}/transformer_engine/wheel_lib/nccl_ep/include/nccl_ep" || error_exit "Core wheel is missing NCCL EP JIT headers"
 fi
 sed -i "s/Name: transformer-engine/Name: transformer-engine-cu12/g" "transformer_engine-${VERSION}/transformer_engine-${VERSION}.dist-info/METADATA"

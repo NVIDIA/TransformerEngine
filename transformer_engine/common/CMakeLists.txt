@@ -680,7 +680,10 @@ if(NVTE_WITH_NCCL_EP)
   install(FILES "${NCCL_EP_SHARED_LIB}"
           DESTINATION .
           RENAME libnccl_ep.so)
-  # NCCL EP JIT compilation resolves headers from NCCL_EP_HOME/include/nccl_ep.
+  # NCCL EP JIT compilation requires both the public header root and staged
+  # device headers under NCCL_EP_HOME/include/nccl_ep.
+  install(FILES "${NCCL_EP_INCLUDE_DIR}/nccl_ep.h"
+          DESTINATION nccl_ep/include)
   install(DIRECTORY "${NCCL_EP_INCLUDE_DIR}/nccl_ep"
           DESTINATION nccl_ep/include)
 endif()
