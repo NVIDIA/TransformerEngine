@@ -83,6 +83,9 @@ void FusedAttnConfig::derive() {
   fp8_uses_cu_seqlens_directly = CUDNN_FRONTEND_VERSION >= 12600 &&
                                  (CUDNN_VERSION >= 92500 && cudnn_runtime_version >= 92500) &&
                                  !is_dropout;
+  const bool is_fp8_dtype = (qkv_dtype == kNVTEFloat8E4M3 || qkv_dtype == kNVTEFloat8E5M2);
+  const bool passes_cu_seqlens_directly =
+      is_fp8_dtype ? fp8_uses_cu_seqlens_directly : uses_cu_seqlens_directly;
 
   is_o_in_fp8 = (o_dtype == kNVTEFloat8E4M3 || o_dtype == kNVTEFloat8E5M2);
   is_dqkv_in_fp8 = (dqkv_dtype == kNVTEFloat8E4M3 || dqkv_dtype == kNVTEFloat8E5M2);
@@ -117,13 +120,13 @@ void FusedAttnConfig::derive() {
           static_cast<int64_t>(max_seqlen_q), static_cast<int64_t>(max_seqlen_kv),
           static_cast<int64_t>(head_dim_qk), static_cast<int64_t>(head_dim_v)) == DType::kInt64;
   const DType wide_ragged_offsets = cudnn_runtime_version >= 90500 ? DType::kInt64 : DType::kInt32;
-  ragged_offset_type_fwd = uses_cu_seqlens_directly ? DType::kInt32 : wide_ragged_offsets;
+  ragged_offset_type_fwd = passes_cu_seqlens_directly ? DType::kInt32 : wide_ragged_offsets;
   ragged_offset_type_bwd = wide_ragged_offsets;
 
   // Batch size the graph is built at
   const bool buckets_the_batch = (is_ragged_q || is_ragged_kv) && uses_packed_ragged_graph;
   graph_batch_size_fwd =
-      (buckets_the_batch && !uses_cu_seqlens_directly) ? bucketed_batch_size : batch_size;
+      (buckets_the_batch && !passes_cu_seqlens_directly) ? bucketed_batch_size : batch_size;
   graph_batch_size_bwd = buckets_the_batch ? bucketed_batch_size : batch_size;
 
   // Elements per token for each ragged tensor

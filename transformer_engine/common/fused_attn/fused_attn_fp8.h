@@ -25,8 +25,9 @@ void fused_attn_fp8_fwd(const fused_attn::FusedAttnConfig &cfg, const Tensor *in
                         const Tensor *input_K, const Tensor *input_V,
                         const Tensor *input_SoftmaxOffset, Tensor *input_output_S, Tensor *output_O,
                         NVTETensorPack *Aux_CTX_Tensors, const Tensor *cu_seqlens_q,
-                        const Tensor *cu_seqlens_kv, const Tensor *rng_state, Tensor *workspace,
-                        cudaStream_t stream, cudnnHandle_t handle);
+                        const Tensor *cu_seqlens_kv, const Tensor *cu_seqlens_q_padded,
+                        const Tensor *cu_seqlens_kv_padded, const Tensor *rng_state,
+                        Tensor *workspace, cudaStream_t stream, cudnnHandle_t handle);
 
 // fused attention BWD FP8 with separate Q, K, V
 void fused_attn_fp8_bwd(const fused_attn::FusedAttnConfig &cfg, const Tensor *input_Q,
@@ -36,12 +37,14 @@ void fused_attn_fp8_bwd(const fused_attn::FusedAttnConfig &cfg, const Tensor *in
                         Tensor *input_output_dP, const Tensor *output_dQ, const Tensor *output_dK,
                         const Tensor *output_dV, Tensor *output_dSoftmaxOffset,
                         const Tensor *cu_seqlens_q, const Tensor *cu_seqlens_kv,
+                        const Tensor *cu_seqlens_q_padded, const Tensor *cu_seqlens_kv_padded,
                         const Tensor *rng_state, Tensor *workspace, cudaStream_t stream,
                         cudnnHandle_t handle);
 
 // The FP8 counterpart of support_verdict_f16; see there.
 std::string support_verdict_fp8(const fused_attn::FusedAttnConfig &cfg, fused_attn::Pass pass,
                                 cudnnHandle_t handle);
+
 }  // namespace transformer_engine
 
 #endif  // TRANSFORMER_ENGINE_COMMON_FUSED_ATTN_FUSED_ATTN_FP8_H_

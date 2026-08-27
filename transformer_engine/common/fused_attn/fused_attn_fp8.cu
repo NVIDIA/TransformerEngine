@@ -40,6 +40,11 @@ using Fp8FwdGraphAndTensors =
                std::shared_ptr<fe::graph::Tensor_attributes>,   // softmax_offset
                std::shared_ptr<fe::graph::Tensor_attributes>,   // seq_q
                std::shared_ptr<fe::graph::Tensor_attributes>,   // seq_kv
+               std::shared_ptr<fe::graph::Tensor_attributes>,   // offset_q
+               std::shared_ptr<fe::graph::Tensor_attributes>,   // offset_o
+               std::shared_ptr<fe::graph::Tensor_attributes>,   // offset_k
+               std::shared_ptr<fe::graph::Tensor_attributes>,   // offset_v
+               std::shared_ptr<fe::graph::Tensor_attributes>,   // offset_stats
                std::shared_ptr<fe::graph::Tensor_attributes>,   // dropout_seed
                std::shared_ptr<fe::graph::Tensor_attributes>>;  // dropout_offset
 
@@ -49,7 +54,7 @@ static Fp8FwdGraphAndTensors create_graph_fp8_fwd(const FusedAttnConfig& cfg) {
       get_cudnn_fe_dtype(static_cast<DType>(cfg.qkv_dtype));
   const cudnn_frontend::DataType_t o_tensor_type =
       get_cudnn_fe_dtype(static_cast<DType>(cfg.o_dtype));
-  const int64_t b = static_cast<int64_t>(cfg.batch_size);
+  const int64_t b = static_cast<int64_t>(cfg.graph_batch_size_fwd);
   const int64_t h = static_cast<int64_t>(cfg.num_attn_heads);
   const int64_t hg = static_cast<int64_t>(cfg.num_gqa_groups);
   const int64_t s_q = static_cast<int64_t>(cfg.graph_max_seqlen_q);
@@ -74,6 +79,11 @@ static Fp8FwdGraphAndTensors create_graph_fp8_fwd(const FusedAttnConfig& cfg) {
   const bool is_delayed_scaling = cfg.is_delayed_scaling_fwd;
   const bool is_current_scaling = cfg.is_current_scaling_fwd;
   const bool use_cu_seqlens_directly = cfg.fp8_uses_cu_seqlens_directly;
+  const bool is_ragged_q = cfg.is_ragged_q;
+  const bool is_ragged_kv = cfg.is_ragged_kv;
+  const bool use_ragged_stats = cfg.uses_ragged_stats;
+  const DType ragged_offset_type = cfg.ragged_offset_type_fwd;
+  const RaggedOffsetMultipliers offset_mults = cfg.ragged_offset_mults;
 
   auto mha_graph = std::make_shared<fe::graph::Graph>();
   mha_graph->set_io_data_type(qkv_tensor_type)
@@ -84,6 +94,8 @@ static Fp8FwdGraphAndTensors create_graph_fp8_fwd(const FusedAttnConfig& cfg) {
   std::shared_ptr<fe::graph::Tensor_attributes> descale_q, descale_k, descale_v;
   std::shared_ptr<fe::graph::Tensor_attributes> descale_s, scale_s, scale_o;
   std::shared_ptr<fe::graph::Tensor_attributes> bias, softmax_offset, seq_q, seq_kv;
+  std::shared_ptr<fe::graph::Tensor_attributes> offset_q, offset_k, offset_v, offset_o,
+      offset_stats;
   std::shared_ptr<fe::graph::Tensor_attributes> dropout_seed, dropout_offset;
 
   // Q, K, V, attn_scale
@@ -95,6 +107,17 @@ static Fp8FwdGraphAndTensors create_graph_fp8_fwd(const FusedAttnConfig& cfg) {
                             .set_dim({b, h, s_q, d_qk})
                             .set_stride(q_strides)
                             .set_data_type(qkv_tensor_type));
+  if (is_ragged_q) {
+    offset_q = mha_graph->tensor(fe::graph::Tensor_attributes()
+                                     .set_name("offset_q")
+                                     .set_dim({b + 1, 1, 1, 1})
+                                     .set_stride({1, 1, 1, 1})
+                                     .set_data_type(get_cudnn_fe_dtype(ragged_offset_type)));
+    Q->set_ragged_offset(offset_q);
+    if (use_cu_seqlens_directly) {
+      Q->set_ragged_offset_multiplier(offset_mults.q);
+    }
+  }
   K = mha_graph->tensor(fe::graph::Tensor_attributes()
                             .set_name("K")
                             .set_dim({b, hg, s_kv, d_qk})
@@ -105,6 +128,24 @@ static Fp8FwdGraphAndTensors create_graph_fp8_fwd(const FusedAttnConfig& cfg) {
                             .set_dim({b, hg, s_kv, d_v})
                             .set_stride(v_strides)
                             .set_data_type(qkv_tensor_type));
+  if (is_ragged_kv) {
+    offset_k = mha_graph->tensor(fe::graph::Tensor_attributes()
+                                     .set_name("offset_k")
+                                     .set_dim({b + 1, 1, 1, 1})
+                                     .set_stride({1, 1, 1, 1})
+                                     .set_data_type(get_cudnn_fe_dtype(ragged_offset_type)));
+    offset_v = mha_graph->tensor(fe::graph::Tensor_attributes()
+                                     .set_name("offset_v")
+                                     .set_dim({b + 1, 1, 1, 1})
+                                     .set_stride({1, 1, 1, 1})
+                                     .set_data_type(get_cudnn_fe_dtype(ragged_offset_type)));
+    K->set_ragged_offset(offset_k);
+    V->set_ragged_offset(offset_v);
+    if (use_cu_seqlens_directly) {
+      K->set_ragged_offset_multiplier(offset_mults.k);
+      V->set_ragged_offset_multiplier(offset_mults.v);
+    }
+  }
   attn_scale = mha_graph->tensor(fe::graph::Tensor_attributes()
                                      .set_name("attn_scale")
                                      .set_dim({1, 1, 1, 1})
@@ -276,15 +317,38 @@ static Fp8FwdGraphAndTensors create_graph_fp8_fwd(const FusedAttnConfig& cfg) {
   std::vector<int64_t> o_strides(4);
   generateMatrixStridesWithFormat(b, h, s_q, d_v, o_strides.data(), o_format);
   O->set_output(true).set_dim({b, h, s_q, d_v}).set_stride(o_strides).set_data_type(o_tensor_type);
+  if (is_ragged_q) {
+    offset_o = mha_graph->tensor(fe::graph::Tensor_attributes()
+                                     .set_name("offset_o")
+                                     .set_dim({b + 1, 1, 1, 1})
+                                     .set_stride({1, 1, 1, 1})
+                                     .set_data_type(get_cudnn_fe_dtype(ragged_offset_type)));
+    O->set_ragged_offset(offset_o);
+    if (use_cu_seqlens_directly) {
+      O->set_ragged_offset_multiplier(offset_mults.o);
+    }
+  }
   amax_o->set_output(!is_mxfp8)
       .set_dim({1, 1, 1, 1})
       .set_stride({1, 1, 1, 1})
       .set_data_type(fe::DataType_t::FLOAT);
 
-  Stats->set_output(true)
-      .set_data_type(fe::DataType_t::FLOAT)
-      .set_dim({b, h, s_q, 1})
-      .set_stride({h * s_q, s_q, 1, 1});
+  if (use_ragged_stats) {
+    offset_stats = mha_graph->tensor(fe::graph::Tensor_attributes()
+                                         .set_name("offset_stats")
+                                         .set_dim({b + 1, 1, 1, 1})
+                                         .set_stride({1, 1, 1, 1})
+                                         .set_data_type(get_cudnn_fe_dtype(ragged_offset_type)));
+  }
+  Stats->set_output(true).set_data_type(fe::DataType_t::FLOAT).set_dim({b, h, s_q, 1});
+  if (use_ragged_stats) {
+    Stats->set_stride({h * s_q, 1, h, 1}).set_ragged_offset(offset_stats);
+    if (use_cu_seqlens_directly) {
+      Stats->set_ragged_offset_multiplier(offset_mults.stats);
+    }
+  } else {
+    Stats->set_stride({h * s_q, s_q, 1, 1});
+  }
 
   std::tuple<std::shared_ptr<fe::graph::Tensor_attributes>,  // Q
              std::shared_ptr<fe::graph::Tensor_attributes>,  // K
@@ -310,11 +374,17 @@ static Fp8FwdGraphAndTensors create_graph_fp8_fwd(const FusedAttnConfig& cfg) {
       is_softmax_offset ? std::make_tuple(softmax_offset) : std::make_tuple(nullptr);
   auto padding_tuple =
       is_padding ? std::make_tuple(seq_q, seq_kv) : std::make_tuple(nullptr, nullptr);
+  auto offset_qo_tuple =
+      is_ragged_q ? std::make_tuple(offset_q, offset_o) : std::make_tuple(nullptr, nullptr);
+  auto offset_kv_tuple =
+      is_ragged_kv ? std::make_tuple(offset_k, offset_v) : std::make_tuple(nullptr, nullptr);
+  auto offset_s_tuple = use_ragged_stats ? std::make_tuple(offset_stats) : std::make_tuple(nullptr);
   auto dropout_tuple = is_dropout ? std::make_tuple(dropout_seed, dropout_offset)
                                   : std::make_tuple(nullptr, nullptr);
 
   return std::tuple_cat(std::make_tuple(mha_graph), key_tensors_tuple, Stats_tuple, bias_tuple,
-                        softmax_offset_tuple, padding_tuple, dropout_tuple);
+                        softmax_offset_tuple, padding_tuple, offset_qo_tuple, offset_kv_tuple,
+                        offset_s_tuple, dropout_tuple);
 }
 
 void fused_attn_fp8_fwd_impl(const FusedAttnConfig& cfg, void* devPtrQ, void* devPtrK,
@@ -322,7 +392,8 @@ void fused_attn_fp8_fwd_impl(const FusedAttnConfig& cfg, void* devPtrQ, void* de
                              void* devPtrDescaleQ, void* devPtrDescaleK, void* devPtrDescaleV,
                              void* devPtrDescaleS, void* devPtrScaleS, void* devPtrScaleO,
                              void* devPtrAmaxO, void* devPtrAmaxS, void* devPtrcuSeqlensQ,
-                             void* devPtrcuSeqlensKV, void* devPtrDropoutSeed,
+                             void* devPtrcuSeqlensKV, void* devPtrSeqOffsetsQ,
+                             void* devPtrSeqOffsetsKV, void* devPtrDropoutSeed,
                              void* devPtrDropoutOffset, void* workspace, size_t* workspace_size,
                              cudaStream_t stream, cudnnHandle_t handle) {
   using namespace transformer_engine;
@@ -333,29 +404,51 @@ void fused_attn_fp8_fwd_impl(const FusedAttnConfig& cfg, void* devPtrQ, void* de
   const bool is_delayed_scaling = cfg.is_delayed_scaling_fwd;
   const bool use_cu_seqlens_directly = cfg.fp8_uses_cu_seqlens_directly;
 
-  const int64_t b = static_cast<int64_t>(cfg.batch_size);
+  const int64_t b = static_cast<int64_t>(cfg.graph_batch_size_fwd);
+  const int64_t actual_b = static_cast<int64_t>(cfg.batch_size);
   float scaling_factor = cfg.attn_scale;
   const bool is_padding = cfg.is_padding;
   const bool is_dropout = cfg.is_dropout;
   const bool is_softmax_offset = cfg.is_softmax_offset;
+  const bool is_ragged_q = cfg.is_ragged_q;
+  const bool is_ragged_kv = cfg.is_ragged_kv;
+  const bool use_ragged_stats = cfg.uses_ragged_stats;
+  const DType ragged_offset_type = cfg.ragged_offset_type_fwd;
+  const RaggedOffsetMultipliers offset_mults = cfg.ragged_offset_mults;
 
   try {
     auto cache_entry = get_graph<Backend::FP8, Pass::Fwd, create_graph_fp8_fwd>(cfg, handle);
     auto [mha_graph, Q, K, V, descale_q, descale_k, descale_v, descale_s, scale_s, scale_o,
-          attn_scale, O, amax_s, amax_o, Stats, bias, softmax_offset, seq_q, seq_kv, dropout_seed,
-          dropout_offset] = cache_entry->graph_and_tensors;
+          attn_scale, O, amax_s, amax_o, Stats, bias, softmax_offset, seq_q, seq_kv, offset_q,
+          offset_o, offset_k, offset_v, offset_stats, dropout_seed, dropout_offset] =
+        cache_entry->graph_and_tensors;
 
     // This graph is going to be used, so finish the build the cache deferred.
     build_plans(Backend::FP8, Pass::Fwd, *cache_entry);
 
-    auto plan_workspace_size = mha_graph->get_workspace_size();
-
     // Exit to request upper level API to allocate memory if needed.
     // When passing cu_seqlens* directly to cuDNN SDPA, no conversion workspace is
     // needed: cuDNN consumes the user's cu_seqlens buffers as-is.
-    size_t actual_seqlen_workspace_size = use_cu_seqlens_directly ? 0 : 2 * b * sizeof(int32_t);
+    auto plan_workspace_size = alignTo<16>(mha_graph->get_workspace_size());
+    const size_t num_bytes_per_seqlen = alignTo<16>(b * sizeof(int32_t));
+    const size_t num_bytes_per_ragged_offset =
+        alignTo<16>(((b + 1) * typeToNumBits(ragged_offset_type)) / 8);
+    size_t actual_seqlen_workspace_size = 0;
+    size_t seqlen_offsets_workspace_size = 0;
+    if (!use_cu_seqlens_directly) {
+      if (is_padding) {
+        actual_seqlen_workspace_size = 2 * num_bytes_per_seqlen;
+      }
+      if (is_ragged_q || is_ragged_kv) {
+        const size_t count =
+            2 * (static_cast<size_t>(is_ragged_q) + static_cast<size_t>(is_ragged_kv));
+        seqlen_offsets_workspace_size =
+            (use_ragged_stats ? count + 1 : count) * num_bytes_per_ragged_offset;
+      }
+    }
     if (workspace == nullptr) {
-      *workspace_size = plan_workspace_size + actual_seqlen_workspace_size;
+      *workspace_size =
+          plan_workspace_size + actual_seqlen_workspace_size + seqlen_offsets_workspace_size;
       return;
     }
     // cuDNN stream check needs to be moved here to support dummy kernel calls with
@@ -396,15 +489,71 @@ void fused_attn_fp8_fwd_impl(const FusedAttnConfig& cfg, void* devPtrQ, void* de
         constexpr size_t nthreads_per_block = 128;
         const size_t grid = (b + nthreads_per_block - 1) / nthreads_per_block;
         void* devActualSeqlenQ = static_cast<int8_t*>(workspace) + plan_workspace_size;
-        void* devActualSeqlenKV = static_cast<int8_t*>(devActualSeqlenQ) + b * sizeof(int32_t);
-        // TODO(cyanguwa): pass bucketed_batch_size
+        void* devActualSeqlenKV = static_cast<int8_t*>(devActualSeqlenQ) + num_bytes_per_seqlen;
         cu_seqlens_to_actual_seqlens<<<grid, nthreads_per_block, 0, stream>>>(
-            b, b, static_cast<const int32_t*>(devPtrcuSeqlensQ),
+            actual_b, b, static_cast<const int32_t*>(devPtrcuSeqlensQ),
             static_cast<const int32_t*>(devPtrcuSeqlensKV), static_cast<int32_t*>(devActualSeqlenQ),
             static_cast<int32_t*>(devActualSeqlenKV));
         NVTE_CHECK_CUDA(cudaGetLastError());
         variant_pack[seq_q] = devActualSeqlenQ;
         variant_pack[seq_kv] = devActualSeqlenKV;
+      }
+    }
+
+    if (use_cu_seqlens_directly) {
+      // The token-unit cu_seqlens_padded buffers serve as the ragged offsets; the engine
+      // applies the per-tensor multipliers set at graph build time.
+      if (is_ragged_q) {
+        variant_pack[offset_q] = devPtrSeqOffsetsQ;
+        variant_pack[offset_o] = devPtrSeqOffsetsQ;
+      }
+      if (is_ragged_kv) {
+        void* devOffsetsKV = offset_mults.kv_from_q ? devPtrSeqOffsetsQ : devPtrSeqOffsetsKV;
+        variant_pack[offset_k] = devOffsetsKV;
+        variant_pack[offset_v] = devOffsetsKV;
+      }
+      if (use_ragged_stats) {
+        variant_pack[offset_stats] = devPtrSeqOffsetsQ;
+      }
+    } else if (is_ragged_q || is_ragged_kv) {
+      constexpr size_t nthreads_per_block = 128;
+      const size_t grid = (b + nthreads_per_block) / nthreads_per_block;
+      void* devOffsets =
+          static_cast<int8_t*>(workspace) + plan_workspace_size + actual_seqlen_workspace_size;
+      void* devOffsetsQ = nullptr;
+      void* devOffsetsO = nullptr;
+      if (is_ragged_q) {
+        devOffsetsQ = devOffsets;
+        devOffsetsO = static_cast<int8_t*>(devOffsetsQ) + num_bytes_per_ragged_offset;
+      }
+      void* devOffsetsK = nullptr;
+      void* devOffsetsV = nullptr;
+      if (is_ragged_kv) {
+        devOffsetsK = static_cast<int8_t*>(devOffsets) +
+                      static_cast<int>(is_ragged_q) * 2 * num_bytes_per_ragged_offset;
+        devOffsetsV = static_cast<int8_t*>(devOffsetsK) + num_bytes_per_ragged_offset;
+      }
+      void* devOffsetsS = nullptr;
+      if (use_ragged_stats) {
+        devOffsetsS = static_cast<int8_t*>(devOffsets) +
+                      (static_cast<int>(is_ragged_q) + static_cast<int>(is_ragged_kv)) * 2 *
+                          num_bytes_per_ragged_offset;
+      }
+      cu_seqlens_padded_to_offsets<<<grid, nthreads_per_block, 0, stream>>>(
+          offset_mults, actual_b, b, static_cast<int32_t*>(devPtrSeqOffsetsQ),
+          static_cast<int32_t*>(devPtrSeqOffsetsKV), ragged_offset_type, devOffsetsQ, devOffsetsK,
+          devOffsetsV, devOffsetsO, devOffsetsS);
+      NVTE_CHECK_CUDA(cudaGetLastError());
+      if (is_ragged_q) {
+        variant_pack[offset_q] = devOffsetsQ;
+        variant_pack[offset_o] = devOffsetsO;
+      }
+      if (is_ragged_kv) {
+        variant_pack[offset_k] = devOffsetsK;
+        variant_pack[offset_v] = devOffsetsV;
+      }
+      if (use_ragged_stats) {
+        variant_pack[offset_stats] = devOffsetsS;
       }
     }
 
@@ -465,6 +614,11 @@ using Fp8BwdGraphAndTensors =
                std::shared_ptr<fe::graph::Tensor_attributes>,   // d_softmax_offset
                std::shared_ptr<fe::graph::Tensor_attributes>,   // seq_q
                std::shared_ptr<fe::graph::Tensor_attributes>,   // seq_kv
+               std::shared_ptr<fe::graph::Tensor_attributes>,   // offset_q
+               std::shared_ptr<fe::graph::Tensor_attributes>,   // offset_o
+               std::shared_ptr<fe::graph::Tensor_attributes>,   // offset_k
+               std::shared_ptr<fe::graph::Tensor_attributes>,   // offset_v
+               std::shared_ptr<fe::graph::Tensor_attributes>,   // offset_stats
                std::shared_ptr<fe::graph::Tensor_attributes>,   // dropout_seed
                std::shared_ptr<fe::graph::Tensor_attributes>>;  // dropout_offset
 
@@ -478,7 +632,7 @@ static Fp8BwdGraphAndTensors create_graph_fp8_bwd(const FusedAttnConfig& cfg) {
       get_cudnn_fe_dtype(static_cast<DType>(cfg.do_dtype));
   const cudnn_frontend::DataType_t dqkv_tensor_type =
       get_cudnn_fe_dtype(static_cast<DType>(cfg.dqkv_dtype));
-  const int64_t b = static_cast<int64_t>(cfg.batch_size);
+  const int64_t b = static_cast<int64_t>(cfg.graph_batch_size_bwd);
   const int64_t h = static_cast<int64_t>(cfg.num_attn_heads);
   const int64_t hg = static_cast<int64_t>(cfg.num_gqa_groups);
   const int64_t s_q = static_cast<int64_t>(cfg.graph_max_seqlen_q);
@@ -507,6 +661,10 @@ static Fp8BwdGraphAndTensors create_graph_fp8_bwd(const FusedAttnConfig& cfg) {
   const bool is_delayed_scaling = cfg.is_delayed_scaling_bwd;
   const bool is_current_scaling = cfg.is_current_scaling_bwd;
   const bool is_O_in_F16 = !cfg.is_o_in_fp8;
+  const bool is_ragged_q = cfg.is_ragged_q;
+  const bool is_ragged_kv = cfg.is_ragged_kv;
+  const bool use_ragged_stats = cfg.uses_ragged_stats;
+  const DType ragged_offset_type = cfg.ragged_offset_type_bwd;
 
   auto mha_graph = std::make_shared<fe::graph::Graph>();
 
@@ -514,6 +672,8 @@ static Fp8BwdGraphAndTensors create_graph_fp8_bwd(const FusedAttnConfig& cfg) {
       .set_intermediate_data_type(fe::DataType_t::FLOAT)
       .set_compute_data_type(fe::DataType_t::FLOAT);
 
+  std::shared_ptr<fe::graph::Tensor_attributes> offset_q, offset_k, offset_v, offset_o,
+      offset_stats;
   std::shared_ptr<fe::graph::Tensor_attributes> Q, Q_t, K, K_t, V, O, dO, dO_t, dO_f16, Stats,
       attn_scale;
   std::shared_ptr<fe::graph::Tensor_attributes> descale_q, descale_q_t, descale_k, descale_k_t,
@@ -557,11 +717,51 @@ static Fp8BwdGraphAndTensors create_graph_fp8_bwd(const FusedAttnConfig& cfg) {
                              .set_dim({b, h, s_q, d_v})
                              .set_stride(dO_strides)
                              .set_data_type(do_tensor_type));
+  if (is_ragged_q) {
+    offset_q = mha_graph->tensor(fe::graph::Tensor_attributes()
+                                     .set_name("offset_q")
+                                     .set_dim({b + 1, 1, 1, 1})
+                                     .set_stride({1, 1, 1, 1})
+                                     .set_data_type(get_cudnn_fe_dtype(ragged_offset_type)));
+    offset_o = mha_graph->tensor(fe::graph::Tensor_attributes()
+                                     .set_name("offset_o")
+                                     .set_dim({b + 1, 1, 1, 1})
+                                     .set_stride({1, 1, 1, 1})
+                                     .set_data_type(get_cudnn_fe_dtype(ragged_offset_type)));
+    Q->set_ragged_offset(offset_q);
+    O->set_ragged_offset(offset_o);
+    dO->set_ragged_offset(offset_o);
+  }
+  if (is_ragged_kv) {
+    offset_k = mha_graph->tensor(fe::graph::Tensor_attributes()
+                                     .set_name("offset_k")
+                                     .set_dim({b + 1, 1, 1, 1})
+                                     .set_stride({1, 1, 1, 1})
+                                     .set_data_type(get_cudnn_fe_dtype(ragged_offset_type)));
+    offset_v = mha_graph->tensor(fe::graph::Tensor_attributes()
+                                     .set_name("offset_v")
+                                     .set_dim({b + 1, 1, 1, 1})
+                                     .set_stride({1, 1, 1, 1})
+                                     .set_data_type(get_cudnn_fe_dtype(ragged_offset_type)));
+    K->set_ragged_offset(offset_k);
+    V->set_ragged_offset(offset_v);
+  }
+  if (use_ragged_stats) {
+    offset_stats = mha_graph->tensor(fe::graph::Tensor_attributes()
+                                         .set_name("offset_stats")
+                                         .set_dim({b + 1, 1, 1, 1})
+                                         .set_stride({1, 1, 1, 1})
+                                         .set_data_type(get_cudnn_fe_dtype(ragged_offset_type)));
+  }
   Stats = mha_graph->tensor(fe::graph::Tensor_attributes()
                                 .set_name("Stats")
                                 .set_dim({b, h, s_q, 1})
-                                .set_stride({h * s_q, s_q, 1, 1})
                                 .set_data_type(fe::DataType_t::FLOAT));
+  if (use_ragged_stats) {
+    Stats->set_stride({h * s_q, 1, h, 1}).set_ragged_offset(offset_stats);
+  } else {
+    Stats->set_stride({h * s_q, s_q, 1, 1});
+  }
   attn_scale = mha_graph->tensor(fe::graph::Tensor_attributes()
                                      .set_name("attn_scale")
                                      .set_dim({1, 1, 1, 1})
@@ -817,6 +1017,13 @@ static Fp8BwdGraphAndTensors create_graph_fp8_bwd(const FusedAttnConfig& cfg) {
       .set_dim({b, hg, s_kv, d_v})
       .set_stride(dv_strides)
       .set_data_type(dqkv_tensor_type);
+  if (is_ragged_q) {
+    dQ->set_ragged_offset(offset_q);
+  }
+  if (is_ragged_kv) {
+    dK->set_ragged_offset(offset_k);
+    dV->set_ragged_offset(offset_v);
+  }
   amax_dQ->set_output(!is_mxfp8)
       .set_dim({1, 1, 1, 1})
       .set_stride({1, 1, 1, 1})
@@ -874,11 +1081,17 @@ static Fp8BwdGraphAndTensors create_graph_fp8_bwd(const FusedAttnConfig& cfg) {
                                                 : std::make_tuple(nullptr, nullptr);
   auto padding_tuple =
       is_padding ? std::make_tuple(seq_q, seq_kv) : std::make_tuple(nullptr, nullptr);
+  auto offset_qo_tuple =
+      is_ragged_q ? std::make_tuple(offset_q, offset_o) : std::make_tuple(nullptr, nullptr);
+  auto offset_kv_tuple =
+      is_ragged_kv ? std::make_tuple(offset_k, offset_v) : std::make_tuple(nullptr, nullptr);
+  auto offset_s_tuple = use_ragged_stats ? std::make_tuple(offset_stats) : std::make_tuple(nullptr);
   auto dropout_tuple = is_dropout ? std::make_tuple(dropout_seed, dropout_offset)
                                   : std::make_tuple(nullptr, nullptr);
 
   return std::tuple_cat(std::make_tuple(mha_graph), key_tensors_tuple, mxfp8_tensors_tuple,
-                        bias_tuple, softmax_offset_tuple, padding_tuple, dropout_tuple);
+                        bias_tuple, softmax_offset_tuple, padding_tuple, offset_qo_tuple,
+                        offset_kv_tuple, offset_s_tuple, dropout_tuple);
 }
 
 void fused_attn_fp8_bwd_impl(
@@ -890,9 +1103,9 @@ void fused_attn_fp8_bwd_impl(
     void* devPtrScaledK, void* devPtrScaledV, void* devPtrAmaxdP, void* devPtrAmaxdQ,
     void* devPtrAmaxdK, void* devPtrAmaxdV, void* devPtrQ_t, void* devPtrK_t, void* devPtrdO_f16,
     void* devPtrdO_t, void* devPtrDescaleQ_t, void* devPtrDescaleK_t, void* devPtrDescaledO_t,
-    void* devPtrcuSeqlensQ, void* devPtrcuSeqlensKV, void* devPtrDropoutSeed,
-    void* devPtrDropoutOffset, void* workspace, size_t* workspace_size, cudaStream_t stream,
-    cudnnHandle_t handle) {
+    void* devPtrcuSeqlensQ, void* devPtrcuSeqlensKV, void* devPtrSeqOffsetsQ,
+    void* devPtrSeqOffsetsKV, void* devPtrDropoutSeed, void* devPtrDropoutOffset, void* workspace,
+    size_t* workspace_size, cudaStream_t stream, cudnnHandle_t handle) {
   using namespace transformer_engine;
 
   cfg.check_derived();
@@ -903,11 +1116,16 @@ void fused_attn_fp8_bwd_impl(
   const bool is_current_scaling = cfg.is_current_scaling_bwd;
   const bool is_O_in_F16 = !cfg.is_o_in_fp8;
 
-  const int64_t b = static_cast<int64_t>(cfg.batch_size);
+  const int64_t b = static_cast<int64_t>(cfg.graph_batch_size_bwd);
+  const int64_t actual_b = static_cast<int64_t>(cfg.batch_size);
   float scaling_factor = cfg.attn_scale;
   const bool is_padding = cfg.is_padding;
   const bool is_dropout = cfg.is_dropout;
   const bool is_softmax_offset = cfg.is_softmax_offset;
+  const bool is_ragged_q = cfg.is_ragged_q;
+  const bool is_ragged_kv = cfg.is_ragged_kv;
+  const bool use_ragged_stats = cfg.uses_ragged_stats;
+  const DType ragged_offset_type = cfg.ragged_offset_type_bwd;
 
   try {
     auto cache_entry = get_graph<Backend::FP8, Pass::Bwd, create_graph_fp8_bwd>(cfg, handle);
@@ -915,17 +1133,28 @@ void fused_attn_fp8_bwd_impl(
           descale_dO, descale_s, descale_dP, scale_s, scale_dQ, scale_dK, scale_dV, scale_dP, dQ,
           dK, dV, amax_dQ, amax_dK, amax_dV, amax_dP, Q_t, K_t, dO_f16, dO_t, descale_q_t,
           descale_k_t, descale_dO_t, bias, dBias, softmax_offset, d_softmax_offset, seq_q, seq_kv,
-          dropout_seed, dropout_offset] = cache_entry->graph_and_tensors;
+          offset_q, offset_o, offset_k, offset_v, offset_stats, dropout_seed, dropout_offset] =
+        cache_entry->graph_and_tensors;
 
     // This graph is going to be used, so finish the build the cache deferred.
     build_plans(Backend::FP8, Pass::Bwd, *cache_entry);
 
-    auto plan_workspace_size = mha_graph->get_workspace_size();
-
     // Exit to request upper level API to allocate memory if needed
-    size_t actual_seqlen_workspace_size = 2 * b * sizeof(int32_t);
+    auto plan_workspace_size = alignTo<16>(mha_graph->get_workspace_size());
+    const size_t num_bytes_per_seqlen = alignTo<16>(b * sizeof(int32_t));
+    const size_t num_bytes_per_ragged_offset =
+        alignTo<16>(((b + 1) * typeToNumBits(ragged_offset_type)) / 8);
+    const size_t actual_seqlen_workspace_size = 2 * num_bytes_per_seqlen;
+    size_t seqlen_offsets_workspace_size = 0;
+    if (is_ragged_q || is_ragged_kv) {
+      const size_t count =
+          2 * (static_cast<size_t>(is_ragged_q) + static_cast<size_t>(is_ragged_kv));
+      seqlen_offsets_workspace_size =
+          (use_ragged_stats ? count + 1 : count) * num_bytes_per_ragged_offset;
+    }
     if (workspace == nullptr) {
-      *workspace_size = plan_workspace_size + actual_seqlen_workspace_size;
+      *workspace_size =
+          plan_workspace_size + actual_seqlen_workspace_size + seqlen_offsets_workspace_size;
       return;
     }
     // cuDNN stream check needs to be moved here to support dummy kernel calls with
@@ -990,15 +1219,56 @@ void fused_attn_fp8_bwd_impl(
       constexpr size_t nthreads_per_block = 128;
       const size_t grid = (b + nthreads_per_block - 1) / nthreads_per_block;
       void* devActualSeqlenQ = static_cast<int8_t*>(workspace) + plan_workspace_size;
-      void* devActualSeqlenKV = static_cast<int8_t*>(devActualSeqlenQ) + b * sizeof(int32_t);
-      // TODO(cyanguwa): pass bucketed_batch_size
+      void* devActualSeqlenKV = static_cast<int8_t*>(devActualSeqlenQ) + num_bytes_per_seqlen;
       cu_seqlens_to_actual_seqlens<<<grid, nthreads_per_block, 0, stream>>>(
-          b, b, static_cast<const int32_t*>(devPtrcuSeqlensQ),
+          actual_b, b, static_cast<const int32_t*>(devPtrcuSeqlensQ),
           static_cast<const int32_t*>(devPtrcuSeqlensKV), static_cast<int32_t*>(devActualSeqlenQ),
           static_cast<int32_t*>(devActualSeqlenKV));
       NVTE_CHECK_CUDA(cudaGetLastError());
       variant_pack[seq_q] = devActualSeqlenQ;
       variant_pack[seq_kv] = devActualSeqlenKV;
+    }
+
+    if (is_ragged_q || is_ragged_kv) {
+      constexpr size_t nthreads_per_block = 128;
+      const size_t grid = (b + nthreads_per_block) / nthreads_per_block;
+      void* devOffsets =
+          static_cast<int8_t*>(workspace) + plan_workspace_size + actual_seqlen_workspace_size;
+      void* devOffsetsQ = nullptr;
+      void* devOffsetsO = nullptr;
+      if (is_ragged_q) {
+        devOffsetsQ = devOffsets;
+        devOffsetsO = static_cast<int8_t*>(devOffsetsQ) + num_bytes_per_ragged_offset;
+      }
+      void* devOffsetsK = nullptr;
+      void* devOffsetsV = nullptr;
+      if (is_ragged_kv) {
+        devOffsetsK = static_cast<int8_t*>(devOffsets) +
+                      static_cast<int>(is_ragged_q) * 2 * num_bytes_per_ragged_offset;
+        devOffsetsV = static_cast<int8_t*>(devOffsetsK) + num_bytes_per_ragged_offset;
+      }
+      void* devOffsetsS = nullptr;
+      if (use_ragged_stats) {
+        devOffsetsS = static_cast<int8_t*>(devOffsets) +
+                      (static_cast<int>(is_ragged_q) + static_cast<int>(is_ragged_kv)) * 2 *
+                          num_bytes_per_ragged_offset;
+      }
+      cu_seqlens_padded_to_offsets<<<grid, nthreads_per_block, 0, stream>>>(
+          cfg.ragged_offset_mults, actual_b, b, static_cast<int32_t*>(devPtrSeqOffsetsQ),
+          static_cast<int32_t*>(devPtrSeqOffsetsKV), ragged_offset_type, devOffsetsQ, devOffsetsK,
+          devOffsetsV, devOffsetsO, devOffsetsS);
+      NVTE_CHECK_CUDA(cudaGetLastError());
+      if (is_ragged_q) {
+        variant_pack[offset_q] = devOffsetsQ;
+        variant_pack[offset_o] = devOffsetsO;
+      }
+      if (is_ragged_kv) {
+        variant_pack[offset_k] = devOffsetsK;
+        variant_pack[offset_v] = devOffsetsV;
+      }
+      if (use_ragged_stats) {
+        variant_pack[offset_stats] = devOffsetsS;
+      }
     }
 
     if (is_dropout) {
@@ -1027,6 +1297,7 @@ void fused_attn_fp8_fwd(const FusedAttnConfig& cfg, const Tensor* input_Q, const
                         const Tensor* input_V, const Tensor* input_SoftmaxOffset,
                         Tensor* input_output_S, Tensor* output_O, NVTETensorPack* Aux_CTX_Tensors,
                         const Tensor* cu_seqlens_q, const Tensor* cu_seqlens_kv,
+                        const Tensor* cu_seqlens_q_padded, const Tensor* cu_seqlens_kv_padded,
                         const Tensor* rng_state, Tensor* workspace, cudaStream_t stream,
                         cudnnHandle_t handle) {
   using namespace transformer_engine;
@@ -1034,6 +1305,7 @@ void fused_attn_fp8_fwd(const FusedAttnConfig& cfg, const Tensor* input_Q, const
   const size_t batch = cfg.batch_size;
   const size_t num_attn_heads = cfg.num_attn_heads;
   const size_t max_seqlen_q = cfg.max_seqlen_q;
+  const size_t num_tokens_q = cfg.num_tokens_q;
   const NVTE_QKV_Layout qkv_layout = cfg.qkv_layout;
   const NVTE_Softmax_Type softmax_type = cfg.softmax_type;
 
@@ -1067,7 +1339,11 @@ void fused_attn_fp8_fwd(const FusedAttnConfig& cfg, const Tensor* input_Q, const
     int i = 0;
     Tensor* output_M = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
     output_M->data.dptr = nullptr;
-    output_M->data.shape = {batch, num_attn_heads, max_seqlen_q, 1};
+    if (cfg.uses_ragged_stats) {
+      output_M->data.shape = {num_tokens_q, num_attn_heads, 1};
+    } else {
+      output_M->data.shape = {batch, num_attn_heads, max_seqlen_q, 1};
+    }
     output_M->data.dtype = DType::kFloat32;
     Tensor* output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
     output_rng_state->data.dptr = nullptr;
@@ -1098,6 +1374,8 @@ void fused_attn_fp8_fwd(const FusedAttnConfig& cfg, const Tensor* input_Q, const
       reinterpret_cast<void*>(reinterpret_cast<int32_t*>(cu_seqlens_q->data.dptr));
   void* devPtrcuSeqlensKV =
       reinterpret_cast<void*>(reinterpret_cast<int32_t*>(cu_seqlens_kv->data.dptr));
+  void* devPtrSeqOffsetsQ = cu_seqlens_q_padded->data.dptr;
+  void* devPtrSeqOffsetsKV = cu_seqlens_kv_padded->data.dptr;
   void* devPtrDropoutSeed =
       reinterpret_cast<void*>(reinterpret_cast<uint64_t*>(rng_state->data.dptr));
   void* devPtrDropoutOffset =
@@ -1107,14 +1385,15 @@ void fused_attn_fp8_fwd(const FusedAttnConfig& cfg, const Tensor* input_Q, const
 
   const NVTE_QKV_Format qkv_format = nvte_get_qkv_format(qkv_layout);
   if ((qkv_format == NVTE_QKV_Format::NVTE_BSHD) || (qkv_format == NVTE_QKV_Format::NVTE_SBHD) ||
-      (qkv_format == NVTE_QKV_Format::NVTE_BHSD)) {
+      (qkv_format == NVTE_QKV_Format::NVTE_BHSD) || (qkv_format == NVTE_QKV_Format::NVTE_THD)) {
     fused_attn::fused_attn_fp8_fwd_impl(
         cfg, devPtrQ, devPtrK, devPtrV, devPtrSoftmaxOffset, devPtrM, devPtrO, devPtrDescaleQ,
         devPtrDescaleK, devPtrDescaleV, devPtrDescaleS, devPtrScaleS, devPtrScaleO, devPtrAmaxO,
-        devPtrAmaxS, devPtrcuSeqlensQ, devPtrcuSeqlensKV, devPtrDropoutSeed, devPtrDropoutOffset,
-        workspace->data.dptr, &workspace_size, stream, handle);
+        devPtrAmaxS, devPtrcuSeqlensQ, devPtrcuSeqlensKV, devPtrSeqOffsetsQ, devPtrSeqOffsetsKV,
+        devPtrDropoutSeed, devPtrDropoutOffset, workspace->data.dptr, &workspace_size, stream,
+        handle);
   } else {
-    NVTE_ERROR("FP8 fused attention only supports qkv_format=BSHD, SBHD, or BHSD.\n");
+    NVTE_ERROR("FP8 fused attention only supports qkv_format=BSHD, SBHD, BHSD, or THD.\n");
   }
 
   if (workspace_size > 0) {
@@ -1136,8 +1415,9 @@ void fused_attn_fp8_bwd(const FusedAttnConfig& cfg, const Tensor* input_Q, const
                         const Tensor* input_SoftmaxOffset, Tensor* input_output_dP,
                         const Tensor* output_dQ, const Tensor* output_dK, const Tensor* output_dV,
                         Tensor* output_dSoftmaxOffset, const Tensor* cu_seqlens_q,
-                        const Tensor* cu_seqlens_kv, const Tensor* rng_state, Tensor* workspace,
-                        cudaStream_t stream, cudnnHandle_t handle) {
+                        const Tensor* cu_seqlens_kv, const Tensor* cu_seqlens_q_padded,
+                        const Tensor* cu_seqlens_kv_padded, const Tensor* rng_state,
+                        Tensor* workspace, cudaStream_t stream, cudnnHandle_t handle) {
   using namespace transformer_engine;
 
   const NVTE_QKV_Layout dqkv_layout = cfg.dqkv_layout;
@@ -1210,6 +1490,8 @@ void fused_attn_fp8_bwd(const FusedAttnConfig& cfg, const Tensor* input_Q, const
       reinterpret_cast<void*>(reinterpret_cast<int32_t*>(cu_seqlens_q->data.dptr));
   void* devPtrcuSeqlensKV =
       reinterpret_cast<void*>(reinterpret_cast<int32_t*>(cu_seqlens_kv->data.dptr));
+  void* devPtrSeqOffsetsQ = cu_seqlens_q_padded->data.dptr;
+  void* devPtrSeqOffsetsKV = cu_seqlens_kv_padded->data.dptr;
   void* devPtrDropoutSeed =
       reinterpret_cast<void*>(reinterpret_cast<uint64_t*>(rng_state->data.dptr));
   void* devPtrDropoutOffset =
@@ -1219,7 +1501,7 @@ void fused_attn_fp8_bwd(const FusedAttnConfig& cfg, const Tensor* input_Q, const
 
   const NVTE_QKV_Format dqkv_format = nvte_get_qkv_format(dqkv_layout);
   if ((dqkv_format == NVTE_QKV_Format::NVTE_BSHD) || (dqkv_format == NVTE_QKV_Format::NVTE_SBHD) ||
-      (dqkv_format == NVTE_QKV_Format::NVTE_BHSD)) {
+      (dqkv_format == NVTE_QKV_Format::NVTE_BHSD) || (dqkv_format == NVTE_QKV_Format::NVTE_THD)) {
     fused_attn::fused_attn_fp8_bwd_impl(
         cfg, devPtrQ, devPtrK, devPtrV, devPtrM, devPtrO, devPtrdO, devPtrSoftmaxOffset, devPtrdQ,
         devPtrdK, devPtrdV, devPtrdSoftmaxOffset, devPtrDescaleQ, devPtrDescaleK, devPtrDescaleV,
@@ -1227,10 +1509,10 @@ void fused_attn_fp8_bwd(const FusedAttnConfig& cfg, const Tensor* input_Q, const
         devPtrScaledP, devPtrScaledQ, devPtrScaledK, devPtrScaledV, devPtrAmaxdP, devPtrAmaxdQ,
         devPtrAmaxdK, devPtrAmaxdV, devPtrQ_t, devPtrK_t, devPtrdO_f16, devPtrdO_t,
         devPtrDescaleQ_t, devPtrDescaleK_t, devPtrDescaledO_t, devPtrcuSeqlensQ, devPtrcuSeqlensKV,
-        devPtrDropoutSeed, devPtrDropoutOffset, workspace->data.dptr, &workspace_size, stream,
-        handle);
+        devPtrSeqOffsetsQ, devPtrSeqOffsetsKV, devPtrDropoutSeed, devPtrDropoutOffset,
+        workspace->data.dptr, &workspace_size, stream, handle);
   } else {
-    NVTE_ERROR("FP8 fused attention only supports dqkv_format=BSHD, SBHD, or BHSD.\n");
+    NVTE_ERROR("FP8 fused attention only supports dqkv_format=BSHD, SBHD, BHSD, or THD.\n");
   }
 
   if (workspace_size > 0) {

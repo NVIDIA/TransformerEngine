@@ -339,9 +339,22 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend_v2(NVTEFusedAttnConfig confi
     }
     if (cfg.qkv_format != NVTE_QKV_Format::NVTE_BSHD &&
         cfg.qkv_format != NVTE_QKV_Format::NVTE_SBHD &&
-        cfg.qkv_format != NVTE_QKV_Format::NVTE_BHSD) {
-      return reject(message, "FP8 fused attention supports BSHD/SBHD/BHSD formats, found " +
+        cfg.qkv_format != NVTE_QKV_Format::NVTE_BHSD &&
+        cfg.qkv_format != NVTE_QKV_Format::NVTE_THD) {
+      return reject(message, "FP8 fused attention supports BSHD/SBHD/BHSD/THD formats, found " +
                                  std::to_string(static_cast<int>(cfg.qkv_format)) + ".");
+    }
+    if (cfg.qkv_format == NVTE_QKV_Format::NVTE_THD) {
+      std::string thd_reason = each_pass([&](Pass pass) -> std::string {
+        if (cudnn_runtime_version < 92300) {
+          return "FP8 fused attention with THD format requires cuDNN 9.23.0 or later!";
+        }
+        if (pass == Pass::Bwd && sm_arch < 100) {
+          return "FP8 fused attention with THD format supports backward on sm100+ only!";
+        }
+        return "";
+      });
+      if (!thd_reason.empty()) return reject(message, std::move(thd_reason));
     }
     if (cfg.is_bias) {
       return reject(message, "FP8 fused attention does not support pre/post_scale_bias yet!");
@@ -502,7 +515,8 @@ void nvte_fused_attn_fwd_v2(NVTEFusedAttnFwdParams params) {
   } else if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_FP8) {
     fused_attn_fp8_fwd(cfg, input_Q, input_K, input_V, input_SoftmaxOffset, input_output_S,
                        output_O, p.Aux_CTX_Tensors, input_cu_seqlens_q, input_cu_seqlens_kv,
-                       input_rng_state, wkspace, p.stream, handle);
+                       input_cu_seqlens_q_padded, input_cu_seqlens_kv_padded, input_rng_state,
+                       wkspace, p.stream, handle);
   } else {
     const char *const reject_reason =
         (fused_attn_reject_reason != nullptr && fused_attn_reject_reason[0] != '\0')
@@ -630,7 +644,8 @@ void nvte_fused_attn_bwd_v2(NVTEFusedAttnBwdParams params) {
     fused_attn_fp8_bwd(cfg, input_Q, input_K, input_V, input_O, input_dO, input_dO_f16, input_M,
                        input_S, input_SoftmaxOffset, input_output_dP, output_dQ, output_dK,
                        output_dV, output_dSoftmaxOffset, input_cu_seqlens_q, input_cu_seqlens_kv,
-                       input_rng_state, wkspace, p.stream, handle);
+                       input_cu_seqlens_q_padded, input_cu_seqlens_kv_padded, input_rng_state,
+                       wkspace, p.stream, handle);
   } else {
     const char *const reject_reason =
         (fused_attn_reject_reason != nullptr && fused_attn_reject_reason[0] != '\0')
