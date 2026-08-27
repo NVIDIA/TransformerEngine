@@ -914,22 +914,22 @@ class GemmPrimitive(BasePrimitive):
         )
 
         # A contracting-dim spec element can be a single mesh axis or a nested tuple of axes
-        # (e.g. ("fsdp", "tp", "expert")). Flatten so we can reason per mesh axis.
-        def _flatten_spec(spec):
+        # (e.g. ("fsdp", "tp", "expert")). Convert to a list so we can reason per mesh axis.
+        def _convert_axis_spec_to_list(spec):
             if spec is None:
                 return []
             return list(spec) if isinstance(spec, tuple) else [spec]
 
         def _retain_axes(spec, keep):
-            axes = tuple(a for a in _flatten_spec(spec) if a in keep)
+            axes = tuple(a for a in _convert_axis_spec_to_list(spec) if a in keep)
             if len(axes) == 0:
                 return None
             return axes[0] if len(axes) == 1 else axes
 
         # The GEMM reduces over the mesh axes that shard the contracting dims of both operands.
         # Axes sharding the contracting dim of only one operand must be gathered before the GEMM.
-        lhs_c_axes = [a for s in lhs_cspecs for a in _flatten_spec(s)]
-        rhs_c_axes = [a for s in rhs_cspecs for a in _flatten_spec(s)]
+        lhs_c_axes = [a for s in lhs_cspecs for a in _convert_axis_spec_to_list(s)]
+        rhs_c_axes = [a for s in rhs_cspecs for a in _convert_axis_spec_to_list(s)]
         reduce_axes = tuple(a for a in lhs_c_axes if a in rhs_c_axes)
         if len(set(reduce_axes)) != len(reduce_axes):
             raise RuntimeError("Multiple reduce dimension is detected!")
