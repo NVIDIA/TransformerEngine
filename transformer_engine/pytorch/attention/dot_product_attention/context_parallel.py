@@ -4563,6 +4563,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
             None,
             None,
             None,
+            None,
         )
 
 
