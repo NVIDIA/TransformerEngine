@@ -885,8 +885,7 @@ def _ep_combine_bwd(
 ):
     """Scatter the result-grad to expert positions and return the expert_out grad. High-precision
     sends the grad as-is; a quantized recipe (MXFP8 today) quantizes it and returns a per-expert
-    GroupedTensor. A fusible-op caller may instead provide its fuser-quantized grad and compact
-    scales. No autograd; the caller owns context handling."""
+    GroupedTensor. Optionally pre-mxfp8-quantized grad and scales can be provided."""
     if quantized_grad is None and not g_result.is_contiguous():
         g_result = g_result.contiguous()
     handle_mem = state.handle_mem
@@ -1027,7 +1026,14 @@ def quantize_for_ep(
     input_: torch.Tensor | QuantizedTensorStorage,
     quantizer: Optional["Quantizer"],
 ) -> tuple[MXFP8TensorStorage, torch.Tensor]:
-    """Return an MXFP8 input and its compact rowwise scales for EP."""
+    """Return E4M3 MXFP8 storage and compact rowwise scales for EP transport.
+
+    High-precision input is quantized with ``quantizer``; existing MXFP8 storage is accepted
+    as-is. The returned storage owns the FP8 payload in ``_rowwise_data``, while ``scale_inv`` has
+    the compact ``[T, H/block]`` layout routed by the EP backend. EP transports E4M3 in both
+    directions, so other FP8 formats are rejected. GEMM scale-row padding is stripped, and each
+    compact scale row must remain contiguous and 16-byte aligned.
+    """
     from .constants import DType, MXFP8_BLOCK_SCALING_SIZE
     from .tensor.mxfp8_tensor import MXFP8Quantizer
 
@@ -1046,7 +1052,7 @@ def quantize_for_ep(
     else:
         if quantizer is None:
             raise ValueError("An MXFP8 quantizer is required for a non-quantized EP input.")
-        if not quantized.internal:
+        if not quantizer.internal:
             quantizer = quantizer.copy()
             quantizer.internal = True
         quantized = quantizer(input_)
