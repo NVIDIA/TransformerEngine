@@ -10,7 +10,8 @@ import subprocess
 import sys
 import pathlib
 import copy
-from typing import Any, Dict, Tuple, Union
+from dataclasses import replace
+from typing import Any, Dict, List, NamedTuple, Tuple, Union
 
 from packaging.version import Version as PkgVersion
 import pytest
@@ -34,13 +35,17 @@ from transformer_engine.pytorch.attention.dot_product_attention import (
 )
 from transformer_engine.pytorch.attention.dot_product_attention.utils import (
     FlashAttentionUtils,
+    FusedAttentionParams,
     _get_supported_versions,
     check_set_window_size,
+    get_fused_attn_spec,
 )
 from transformer_engine.pytorch.attention import RotaryPositionEmbedding
 import transformer_engine.pytorch.cpp_extensions as ext
 from transformer_engine.pytorch.cpp_extensions.fused_attn import (
     FusedAttnBackend,
+    QKVFormat,
+    QKVLayout,
     fused_attn_bwd,
     fused_attn_fwd,
 )
@@ -133,6 +138,81 @@ def test_flash_attention_supported_version_message():
     )
 
 
+def test_fused_attn_backend_message():
+    """Test the error messaging of the fused attention backend query."""
+    baseline = FusedAttentionParams(
+        qkv_layout=tex.NVTE_QKV_Layout.NVTE_BSHD_BSHD_BSHD,
+        dqkv_layout=tex.NVTE_QKV_Layout.NVTE_BSHD_BSHD_BSHD,
+        o_format=tex.NVTE_QKV_Format.NVTE_BSHD,
+        do_format=tex.NVTE_QKV_Format.NVTE_BSHD,
+        batch_size=2,
+        num_attn_heads=8,
+        num_gqa_groups=8,
+        head_dim_qk=64,
+        head_dim_v=64,
+        max_seqlen_q=128,
+        max_seqlen_kv=128,
+        attn_scale=0.125,
+    )
+
+    # One of TE's rules is violated and the error message is surfaced
+    backend, message = tex.get_fused_attn_backend(
+        replace(baseline, bias_type=tex.NVTE_Bias_Type.NVTE_PRE_SCALE_BIAS)
+    )
+    assert backend == tex.NVTE_Fused_Attn_Backend.NVTE_No_Backend
+    assert message == "Fused attention does not support pre-scale bias."
+
+    # No error message if supported; otherwise skip the test
+    backend, message = tex.get_fused_attn_backend(baseline)
+    if backend == tex.NVTE_Fused_Attn_Backend.NVTE_No_Backend:
+        pytest.skip(f"FusedAttention does not support the baseline config: {message}")
+    assert message == ""
+
+    # All TE rules have cleared; now gets rejected by cuDNN's support check
+    # cuDNN's error message might change across cuDNN versions, so only verify the presence of the string
+    backend, message = tex.get_fused_attn_backend(
+        replace(baseline, head_dim_qk=1024, head_dim_v=1024)
+    )
+    assert backend == tex.NVTE_Fused_Attn_Backend.NVTE_No_Backend
+    assert message != ""
+
+    if not fp8_attn_available:
+        return
+
+    # The same checks in FP8; the dtypes, formats and scaling mode come from get_fused_attn_spec so
+    # that the config matches what FusedAttnFunc feeds the kernels for this recipe
+    fp8_recipe = recipe.DelayedScaling(fp8_format=recipe.Format.HYBRID, fp8_dpa=True)
+    spec = get_fused_attn_spec(fp8_recipe, torch.float8_e4m3fn, "bshd_bshd_bshd", cs_o_in_f16=True)
+    fp8_baseline = replace(
+        baseline,
+        scaling_mode=spec.scaling_mode,
+        qkv_dtype=spec.qkv,
+        o_dtype=spec.o,
+        do_dtype=spec.do,
+        dqkv_dtype=spec.dqkv,
+        qkv_layout=QKVLayout[spec.qkv_layout],
+        o_format=QKVFormat[spec.o_format],
+        do_format=QKVFormat[spec.do_format],
+        dqkv_layout=QKVLayout[spec.dqkv_layout],
+        qkv_scale_inv_format=QKVFormat[spec.scale_inv_format],
+        do_scale_inv_format=QKVFormat[spec.scale_inv_format],
+    )
+
+    # No error message if supported; otherwise skip the test
+    backend, message = tex.get_fused_attn_backend(fp8_baseline)
+    if backend == tex.NVTE_Fused_Attn_Backend.NVTE_No_Backend:
+        pytest.skip(f"FusedAttention does not support the baseline FP8 config: {message}")
+    assert backend == tex.NVTE_Fused_Attn_Backend.NVTE_FP8
+    assert message == ""
+
+    # All TE FP8 rules have cleared; now gets rejected by cuDNN's FP8 support check
+    backend, message = tex.get_fused_attn_backend(
+        replace(fp8_baseline, head_dim_qk=1024, head_dim_v=1024)
+    )
+    assert backend == tex.NVTE_Fused_Attn_Backend.NVTE_No_Backend
+    assert message != ""
+
+
 # Define F16 data types to test
 param_types = [torch.float16]
 if is_bf16_available():
@@ -216,6 +296,14 @@ def test_dot_product_attention(
             "Setting is_training to False as cuDNN does not support dbias for"
             f" {config.bias_shape=} "
         )
+    # Probe the token counts the runs below will use, so that the support check builds the graph
+    # they execute rather than one sized for a different token bucket.
+    num_tokens_q, num_tokens_kv = None, None
+    if qkv_format == "thd":
+        reset_rng_states()
+        seqlens = _generate_seqlens(config, qkv_format, pad_between_seqs)
+        num_tokens_q = int(seqlens.cu_q_after_pad[-1])
+        num_tokens_kv = int(seqlens.cu_kv_after_pad[-1])
     available_backends, _, fused_attn_backends = get_available_attention_backends(
         config,
         qkv_dtype=dtype,
@@ -223,6 +311,8 @@ def test_dot_product_attention(
         pad_between_seqs=pad_between_seqs,
         is_training=is_training,
         deterministic=_deterministic,
+        num_tokens_q=num_tokens_q,
+        num_tokens_kv=num_tokens_kv,
     )
     flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
 
@@ -235,6 +325,8 @@ def test_dot_product_attention(
             pad_between_seqs=pad_between_seqs,
             is_training=is_training,
             deterministic=_deterministic,
+            num_tokens_q=num_tokens_q,
+            num_tokens_kv=num_tokens_kv,
         )
         flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
 
@@ -1249,37 +1341,30 @@ def test_dpa_qkv_layout_thd_declarative(dtype, model_configs, model, qkv_layout)
     test_dpa_qkv_layout_thd(dtype, model_configs, model, qkv_layout, declarative_packed=True)
 
 
-def _run_dot_product_attention(
-    dtype: torch.dtype,
+class _Seqlens(NamedTuple):
+    """Sequence lengths for one test case, before and after inter-sequence padding."""
+
+    q: torch.Tensor
+    kv: torch.Tensor
+    cu_q: torch.Tensor
+    cu_kv: torch.Tensor
+    q_after_pad: torch.Tensor
+    kv_after_pad: torch.Tensor
+    cu_q_after_pad: torch.Tensor
+    cu_kv_after_pad: torch.Tensor
+    pad_len: Union[List[int], torch.Tensor]
+
+
+def _generate_seqlens(
     config: ModelConfig,
-    backend: str,
-    ckpt_attn: bool,
-    qkv_layout: str,
+    qkv_format: str,
     pad_between_seqs: bool,
-    is_training: bool,
-    declarative_packed: bool = False,
-) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
-    """Run DotProductAttention module with one forward pass and one backward pass.
+) -> _Seqlens:
+    """Draw the sequence lengths for one test case.
 
-    With declarative_packed=True (packed qkv_layout only), the packed buffer is
-    passed to DotProductAttention directly via qkv_layer/kv_layer instead of
-    slicing it into q/k/v views, and input gradients are read off the packed
-    buffer itself."""
-    # Set RNG and environment varables
-    reset_rng_states()
-    os.environ["NVTE_FLASH_ATTN"] = "0"
-    os.environ["NVTE_FUSED_ATTN"] = "0"
-    os.environ["NVTE_UNFUSED_ATTN"] = "0"
-    if backend == "FlashAttention":
-        os.environ["NVTE_FLASH_ATTN"] = "1"
-    if backend == "FusedAttention":
-        os.environ["NVTE_FUSED_ATTN"] = "1"
-    if backend == "UnfusedDotProductAttention":
-        os.environ["NVTE_UNFUSED_ATTN"] = "1"
-    _attention_backends["backend_selection_requires_update"] = True
-
-    # Create seqlens
-    qkv_format = "".join([i for i in qkv_layout.split("_")[0] if i.isalpha()])
+    The lengths are random, so the caller must call reset_rng_states() first and must consume no
+    randomness in between: every backend run of a case, and the backend probe that sizes its THD
+    tensors, has to see the same lengths."""
     if "padding" in config.attn_mask_type or qkv_format == "thd":
         if config.attn_type == "self":
             seqlens_q = torch.randint(
@@ -1320,6 +1405,62 @@ def _run_dot_product_attention(
         seqlens_kv_after_pad = seqlens_kv + pad_len
         cu_seqlens_q_after_pad[1:] = torch.cumsum(seqlens_q_after_pad, dim=0)
         cu_seqlens_kv_after_pad[1:] = torch.cumsum(seqlens_kv_after_pad, dim=0)
+
+    return _Seqlens(
+        seqlens_q,
+        seqlens_kv,
+        cu_seqlens_q,
+        cu_seqlens_kv,
+        seqlens_q_after_pad,
+        seqlens_kv_after_pad,
+        cu_seqlens_q_after_pad,
+        cu_seqlens_kv_after_pad,
+        pad_len,
+    )
+
+
+def _run_dot_product_attention(
+    dtype: torch.dtype,
+    config: ModelConfig,
+    backend: str,
+    ckpt_attn: bool,
+    qkv_layout: str,
+    pad_between_seqs: bool,
+    is_training: bool,
+    declarative_packed: bool = False,
+) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
+    """Run DotProductAttention module with one forward pass and one backward pass.
+
+    With declarative_packed=True (packed qkv_layout only), the packed buffer is
+    passed to DotProductAttention directly via qkv_layer/kv_layer instead of
+    slicing it into q/k/v views, and input gradients are read off the packed
+    buffer itself."""
+    # Set RNG and environment varables
+    reset_rng_states()
+    os.environ["NVTE_FLASH_ATTN"] = "0"
+    os.environ["NVTE_FUSED_ATTN"] = "0"
+    os.environ["NVTE_UNFUSED_ATTN"] = "0"
+    if backend == "FlashAttention":
+        os.environ["NVTE_FLASH_ATTN"] = "1"
+    if backend == "FusedAttention":
+        os.environ["NVTE_FUSED_ATTN"] = "1"
+    if backend == "UnfusedDotProductAttention":
+        os.environ["NVTE_UNFUSED_ATTN"] = "1"
+    _attention_backends["backend_selection_requires_update"] = True
+
+    # Create seqlens
+    qkv_format = "".join([i for i in qkv_layout.split("_")[0] if i.isalpha()])
+    (
+        seqlens_q,
+        seqlens_kv,
+        cu_seqlens_q,
+        cu_seqlens_kv,
+        seqlens_q_after_pad,
+        seqlens_kv_after_pad,
+        cu_seqlens_q_after_pad,
+        cu_seqlens_kv_after_pad,
+        pad_len,
+    ) = _generate_seqlens(config, qkv_format, pad_between_seqs)
 
     # Create attention mask if padding
     attention_mask = None
@@ -1714,6 +1855,13 @@ def test_transformer_layer(
 
     # Test backend availability
     is_training = True
+    # Get the exact token counts and use them for both support query and the actual run
+    num_tokens_q, num_tokens_kv = None, None
+    if qkv_format == "thd":
+        reset_rng_states()
+        seqlens = _generate_seqlens(config, qkv_format, pad_between_seqs=False)
+        num_tokens_q = int(seqlens.cu_q[-1])
+        num_tokens_kv = int(seqlens.cu_kv[-1])
     available_backends, _, fused_attn_backends = get_available_attention_backends(
         config,
         qkv_dtype=dtype,
@@ -1722,6 +1870,8 @@ def test_transformer_layer(
         ),
         is_training=is_training,
         deterministic=_deterministic,
+        num_tokens_q=num_tokens_q,
+        num_tokens_kv=num_tokens_kv,
     )
     flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
     if not fused_attn_supported:
@@ -1736,6 +1886,8 @@ def test_transformer_layer(
             ),
             is_training=is_training,
             deterministic=_deterministic,
+            num_tokens_q=num_tokens_q,
+            num_tokens_kv=num_tokens_kv,
         )
         flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
 
@@ -2258,6 +2410,74 @@ def _get_fp8_vs_f16_config(model, qkv_layout):
     return config
 
 
+def _dpa_fp8_vs_f16_seqlens(config, qkv_format):
+    """Draw the sequence lengths for one test_dpa_fp8_vs_f16 case.
+
+    The lengths are random, so the caller must call reset_rng_states() first and must consume no
+    randomness in between: every run of a case, and the backend probe that sizes its THD tensors,
+    has to see the same lengths."""
+    if "padding" in config.attn_mask_type or qkv_format == "thd":
+        if config.attn_type == "self":
+            seqlens_q = torch.randint(
+                1, config.max_seqlen_q, [config.batch_size], dtype=torch.int32, device="cuda"
+            )
+            seqlens_kv = seqlens_q
+        if config.attn_type == "cross":
+            seqlens_q = torch.randint(
+                1, config.max_seqlen_q, [config.batch_size], dtype=torch.int32, device="cuda"
+            )
+            seqlens_kv = torch.randint(
+                1, config.max_seqlen_kv, [config.batch_size], dtype=torch.int32, device="cuda"
+            )
+    else:
+        seqlens_q = torch.full(
+            [config.batch_size], config.max_seqlen_q, dtype=torch.int32, device="cuda"
+        )
+        seqlens_kv = torch.full(
+            [config.batch_size], config.max_seqlen_kv, dtype=torch.int32, device="cuda"
+        )
+    return seqlens_q, seqlens_kv
+
+
+def _mha_fp8_vs_f16_seqlens(config, qkv_format):
+    """Draw the sequence lengths for one test_mha_fp8_vs_f16 case.
+
+    These come from a dedicated generator rather than the default one, because the module the run
+    builds beforehand consumes randomness the backend probe cannot replay."""
+    gen = torch.Generator(device="cuda")
+    gen.manual_seed(seed)
+
+    def draw(high, count):
+        return torch.randint(1, high, [count], dtype=torch.int32, device="cuda", generator=gen)
+
+    if "padding" in config.attn_mask_type or qkv_format == "thd":
+
+        def random_seqlens(max_seqlen):
+            if qkv_format != "thd":
+                return draw(max_seqlen, config.batch_size)
+            # Reserve seven positions so total-token alignment only increases the final length.
+            return torch.cat((draw(max_seqlen, config.batch_size - 1), draw(max_seqlen - 6, 1)))
+
+        if config.attn_type == "self":
+            seqlens_q = random_seqlens(config.max_seqlen_q)
+            seqlens_kv = seqlens_q
+        if config.attn_type == "cross":
+            seqlens_q = random_seqlens(config.max_seqlen_q)
+            seqlens_kv = random_seqlens(config.max_seqlen_kv)
+    else:
+        seqlens_q = torch.full(
+            [config.batch_size], config.max_seqlen_q, dtype=torch.int32, device="cuda"
+        )
+        seqlens_kv = torch.full(
+            [config.batch_size], config.max_seqlen_kv, dtype=torch.int32, device="cuda"
+        )
+    if qkv_format == "thd":
+        # FP8 Linear flattens THD input to [t, h*d], so align total tokens for cuBLAS.
+        seqlens_q[-1] += -seqlens_q.sum() % 8
+        seqlens_kv[-1] += -seqlens_kv.sum() % 8
+    return seqlens_q, seqlens_kv
+
+
 @pytest.mark.skipif(get_cudnn_version() < (9, 2, 1), reason="cuDNN 9.2.1+ is required.")
 @pytest.mark.skipif(not fp8_attn_available, reason=reason_for_no_fp8_attn)
 @pytest.mark.parametrize("dtype", param_types_fp8_vs_f16)
@@ -2309,6 +2529,12 @@ def test_mha_fp8_vs_f16(
         )
     fp8_meta = {}
     fp8_meta["recipe"] = fp8_recipe
+    # Get the exact token counts and use them for both support query and the actual run
+    num_tokens_q, num_tokens_kv = None, None
+    if qkv_format == "thd":
+        seqlens_q, seqlens_kv = _mha_fp8_vs_f16_seqlens(config, qkv_format)
+        num_tokens_q = int(seqlens_q.sum())
+        num_tokens_kv = int(seqlens_kv.sum())
     available_backends, _, _ = get_available_attention_backends(
         config,
         qkv_dtype=torch.float8_e4m3fn,
@@ -2318,6 +2544,8 @@ def test_mha_fp8_vs_f16(
         fp8_meta=fp8_meta,
         is_training=is_training,
         deterministic=_deterministic,
+        num_tokens_q=num_tokens_q,
+        num_tokens_kv=num_tokens_kv,
     )
     flash_attn_supported, fused_attn_supported_fp8, unfused_attn_supported = available_backends
     available_backends, _, fused_attn_backends = get_available_attention_backends(
@@ -2326,6 +2554,8 @@ def test_mha_fp8_vs_f16(
         qkv_layout=qkv_format.replace("hd", "h3d"),
         is_training=is_training,
         deterministic=_deterministic,
+        num_tokens_q=num_tokens_q,
+        num_tokens_kv=num_tokens_kv,
     )
     _, fused_attn_supported_f16, _ = available_backends
     if flash_attn_supported + fused_attn_supported_fp8 < 1:
@@ -2446,43 +2676,7 @@ def _run_mha_fp8_vs_f16(
         if not is_training:
             mha = mha.eval()
 
-    def random_seqlens(max_seqlen):
-        if qkv_format != "thd":
-            return torch.randint(
-                1, max_seqlen, [config.batch_size], dtype=torch.int32, device="cuda"
-            )
-        # Reserve seven positions so total-token alignment only increases the final length.
-        return torch.cat(
-            (
-                torch.randint(
-                    1,
-                    max_seqlen,
-                    [config.batch_size - 1],
-                    dtype=torch.int32,
-                    device="cuda",
-                ),
-                torch.randint(1, max_seqlen - 6, [1], dtype=torch.int32, device="cuda"),
-            )
-        )
-
-    if "padding" in config.attn_mask_type or qkv_format == "thd":
-        if config.attn_type == "self":
-            seqlens_q = random_seqlens(config.max_seqlen_q)
-            seqlens_kv = seqlens_q
-        if config.attn_type == "cross":
-            seqlens_q = random_seqlens(config.max_seqlen_q)
-            seqlens_kv = random_seqlens(config.max_seqlen_kv)
-    else:
-        seqlens_q = torch.full(
-            [config.batch_size], config.max_seqlen_q, dtype=torch.int32, device="cuda"
-        )
-        seqlens_kv = torch.full(
-            [config.batch_size], config.max_seqlen_kv, dtype=torch.int32, device="cuda"
-        )
-    if qkv_format == "thd":
-        # FP8 Linear flattens THD input to [t, h*d], so align total tokens for cuBLAS.
-        seqlens_q[-1] += -seqlens_q.sum() % 8
-        seqlens_kv[-1] += -seqlens_kv.sum() % 8
+    seqlens_q, seqlens_kv = _mha_fp8_vs_f16_seqlens(config, qkv_format)
     cu_seqlens_q = torch.zeros(config.batch_size + 1, dtype=torch.int32, device="cuda")
     cu_seqlens_kv = torch.zeros(config.batch_size + 1, dtype=torch.int32, device="cuda")
     cu_seqlens_q[1:] = torch.cumsum(seqlens_q, dim=0)
@@ -2590,6 +2784,14 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training, scal
         )
     fp8_meta = {}
     fp8_meta["recipe"] = fp8_recipe
+    # Get the exact token counts and use them for both support query and the actual run
+    qkv_format = "".join([i for i in qkv_layout.split("_")[0] if i.isalpha()])
+    num_tokens_q, num_tokens_kv = None, None
+    if qkv_format == "thd":
+        reset_rng_states()
+        seqlens_q, seqlens_kv = _dpa_fp8_vs_f16_seqlens(config, qkv_format)
+        num_tokens_q = int(seqlens_q.sum())
+        num_tokens_kv = int(seqlens_kv.sum())
     available_backends, _, _ = get_available_attention_backends(
         config,
         qkv_dtype=torch.float8_e4m3fn,
@@ -2599,6 +2801,8 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training, scal
         fp8_meta=fp8_meta,
         is_training=is_training,
         deterministic=_deterministic,
+        num_tokens_q=num_tokens_q,
+        num_tokens_kv=num_tokens_kv,
     )
     flash_attn_supported, fused_attn_supported_fp8, unfused_attn_supported = available_backends
     available_backends, _, _ = get_available_attention_backends(
@@ -2607,6 +2811,8 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training, scal
         qkv_layout=qkv_layout,
         is_training=is_training,
         deterministic=_deterministic,
+        num_tokens_q=num_tokens_q,
+        num_tokens_kv=num_tokens_kv,
     )
     _, fused_attn_supported_f16, _ = available_backends
     if flash_attn_supported + fused_attn_supported_fp8 < 1:
@@ -2762,26 +2968,7 @@ def _run_dpa_fp8_vs_f16(dtype, config, fp8_dpa, qkv_layout, is_training, fp8_rec
         if not is_training:
             dpa = dpa.eval()
 
-    if "padding" in config.attn_mask_type or qkv_format == "thd":
-        if config.attn_type == "self":
-            seqlens_q = torch.randint(
-                1, config.max_seqlen_q, [config.batch_size], dtype=torch.int32, device="cuda"
-            )
-            seqlens_kv = seqlens_q
-        if config.attn_type == "cross":
-            seqlens_q = torch.randint(
-                1, config.max_seqlen_q, [config.batch_size], dtype=torch.int32, device="cuda"
-            )
-            seqlens_kv = torch.randint(
-                1, config.max_seqlen_kv, [config.batch_size], dtype=torch.int32, device="cuda"
-            )
-    else:
-        seqlens_q = torch.full(
-            [config.batch_size], config.max_seqlen_q, dtype=torch.int32, device="cuda"
-        )
-        seqlens_kv = torch.full(
-            [config.batch_size], config.max_seqlen_kv, dtype=torch.int32, device="cuda"
-        )
+    seqlens_q, seqlens_kv = _dpa_fp8_vs_f16_seqlens(config, qkv_format)
     cu_seqlens_q = torch.zeros(config.batch_size + 1, dtype=torch.int32, device="cuda")
     cu_seqlens_kv = torch.zeros(config.batch_size + 1, dtype=torch.int32, device="cuda")
     cu_seqlens_q[1:] = torch.cumsum(seqlens_q, dim=0)

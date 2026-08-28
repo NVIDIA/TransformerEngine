@@ -351,8 +351,15 @@ def get_available_attention_backends(
     score_mod_bprop: bool = False,
     cp_size: int = 1,
     cp_size_a2a: int = 1,
+    num_tokens_q: Optional[int] = None,
+    num_tokens_kv: Optional[int] = None,
 ) -> Tuple[List, List]:
     """Check for all available attention backends that support a model configuration"""
+
+    if num_tokens_q is None:
+        num_tokens_q = max(config.batch_size * config.max_seqlen_q // cp_size, 1)
+    if num_tokens_kv is None:
+        num_tokens_kv = max(config.batch_size * config.max_seqlen_kv // cp_size, 1)
 
     os.environ["NVTE_FLASH_ATTN"] = "1"
     os.environ["NVTE_FUSED_ATTN"] = "1"
@@ -402,6 +409,8 @@ def get_available_attention_backends(
             max_seqlen_kv=config.max_seqlen_kv,
             head_dim_qk=config.head_dim_qk,
             head_dim_v=config.head_dim_v,
+            num_tokens_q=num_tokens_q,
+            num_tokens_kv=num_tokens_kv,
             attn_mask_type=config.attn_mask_type,
             window_size=config.window_size,
             bottom_right_diagonal=config.bottom_right_diagonal,
