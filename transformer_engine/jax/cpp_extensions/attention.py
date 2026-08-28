@@ -573,11 +573,6 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             *bias_batch_shape, bias_heads, _, _ = bias_aval.shape
             bias_batch = reduce(operator.mul, bias_batch_shape)
 
-        bottom_right_diagonal = config.attn_mask_type in [
-            AttnMaskType.CAUSAL_BOTTOM_RIGHT_MASK,
-            AttnMaskType.PADDING_CAUSAL_BOTTOM_RIGHT_MASK,
-        ]
-
         # do a dummy kernel call here to get workspace buffer shapes/dtypes that XLA needs to
         # prepare for the active fused-attn backend
         input_batch = reduce(operator.mul, batch_shape)
@@ -603,7 +598,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             config.window_size[0],
             config.window_size[1],
             config.return_max_logit,
-            bottom_right_diagonal,
+            config.bottom_right_diagonal,
         )
         wkspace_aval = q_aval.update(
             shape=wkspace_info[0], dtype=te_dtype_to_jax_dtype(wkspace_info[1])

@@ -234,7 +234,7 @@ class AttentionParams:
         `causal_bottom_right`, `padding_causal_bottom_right`, `arbitrary`}
     window_size : Tuple[int, int], default = None
         Sliding window attention size.
-    bottom_right_diagonal: bool, default = `None`
+    bottom_right_diagonal: bool, default = `True`
         Whether to align sliding window and ALiBi diagonal to the bottom right corner
         of the softmax matrix.
     alibi_slopes_shape : Optional[Union[torch.Size, List]], default = None
