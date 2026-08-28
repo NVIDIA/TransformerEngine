@@ -402,12 +402,6 @@ class _ScaledUnary(BasicOperation, metaclass=abc.ABCMeta):
         next_op_input_quantizer: Optional[Quantizer],  # pylint: disable=unused-argument
         basic_op_kwargs: list[dict[str, Any]],  # pylint: disable=unused-argument
     ) -> tuple[torch.Tensor, Sequence[Sequence[torch.Tensor]]]:
-        if self.activation_recompute_in_mlp:
-            raise RuntimeError(
-                f"{self.__class__.__name__}(activation_recompute_in_mlp=True) requires the "
-                "fused grouped MLP path."
-            )
-
         extra_input = basic_op_extra_inputs[0][0]
 
         if torch.is_autocast_enabled():
@@ -444,12 +438,6 @@ class _ScaledUnary(BasicOperation, metaclass=abc.ABCMeta):
         Iterable[Iterable[Optional[torch.Tensor]]],
     ]:
         del basic_op_grad_extra_outputs
-
-        if self.activation_recompute_in_mlp:
-            raise RuntimeError(
-                f"{self.__class__.__name__}(activation_recompute_in_mlp=True) requires the "
-                "fused grouped MLP path."
-            )
 
         ctx = basic_op_ctxs[0]
         x, scales = ctx.saved_tensors
