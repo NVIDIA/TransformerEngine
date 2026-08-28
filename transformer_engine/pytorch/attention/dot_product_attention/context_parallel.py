@@ -5546,9 +5546,9 @@ def attn_forward_func_with_cp(
         assert (
             cp_comm_type == "all_gather"
         ), "No-load-balance THD partitioning requires cp_comm_type='all_gather'."
-        assert use_fused_attention or not pad_between_seqs, (
-            "No-load-balance THD partitioning only supports padding with FusedAttention."
-        )
+        assert (
+            use_fused_attention or not pad_between_seqs
+        ), "No-load-balance THD partitioning only supports padding with FusedAttention."
         assert "causal" in attn_mask_type and window_size == (
             -1,
             0,
