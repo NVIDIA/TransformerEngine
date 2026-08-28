@@ -4184,6 +4184,11 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                     fa_backward_kwargs["deterministic"] = ctx.deterministic
                 if fa_utils.v2_6_0_plus:
                     fa_backward_kwargs["softcap"] = 0.0
+                if (
+                    ctx.qkv_format == "thd"
+                    and ctx.load_balancing_strategy is CPLoadBalancingStrategy.NO_LOAD_BALANCE
+                ):
+                    fa_backward_kwargs["zero_tensors"] = True
 
         local_seq_chunk_ids = (
             [rank]
@@ -4538,6 +4543,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
             dq,
             dk,
             dv,
+            None,
             None,
             None,
             None,
@@ -5540,12 +5546,9 @@ def attn_forward_func_with_cp(
         assert (
             cp_comm_type == "all_gather"
         ), "No-load-balance THD partitioning requires cp_comm_type='all_gather'."
-        assert (
-            use_fused_attention or use_flash_attn_3
-        ), "No-load-balance THD partitioning requires FusedAttention or FlashAttention 3."
-        assert not (
-            use_flash_attn_3 and pad_between_seqs
-        ), "No-load-balance THD partitioning with FlashAttention 3 does not support padding yet."
+        assert use_fused_attention or not pad_between_seqs, (
+            "No-load-balance THD partitioning only supports padding with FusedAttention."
+        )
         assert "causal" in attn_mask_type and window_size == (
             -1,
             0,
