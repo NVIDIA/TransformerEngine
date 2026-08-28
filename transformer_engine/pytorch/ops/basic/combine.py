@@ -45,7 +45,9 @@ def _validate_combine_inputs(
         buffer.tokens_per_expert.dtype is not torch.int64
         or buffer.tokens_per_expert.device != input_.device
     ):
-        raise ValueError("MoeCombine tokens_per_expert must be an int64 tensor on the input device.")
+        raise ValueError(
+            "MoeCombine tokens_per_expert must be an int64 tensor on the input device."
+        )
     return tuple(input_.shape)
 
 

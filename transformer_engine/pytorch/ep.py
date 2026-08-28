@@ -779,6 +779,7 @@ class _EpPrepareAndDispatch(torch.autograd.Function):
         tokens_scale_inv = None
         if buffer.dispatch_fwd_quant_recipe is not None:
             from .tensor.mxfp8_tensor import MXFP8Quantizer
+
             # Only MXFP8 Quantizer is supported for EP dispatch
             quantizer = MXFP8Quantizer(
                 tex.DType.kFloat8E4M3,
@@ -905,6 +906,7 @@ def _ep_combine_bwd(
     else:
         if quantized_grad is None:
             from .tensor.mxfp8_tensor import MXFP8Quantizer
+
             # Only MXFP8 Quantizer is supported for EP combine bwd
             quantizer = MXFP8Quantizer(
                 tex.DType.kFloat8E4M3,
@@ -1060,9 +1062,7 @@ def quantize_for_ep(
     if isinstance(input_, MXFP8TensorStorage):
         quantized = input_
     elif isinstance(input_, QuantizedTensorStorage):
-        raise TypeError(
-            f"EP MXFP8 transport requires an MXFP8 input, got {type(input_).__name__}."
-        )
+        raise TypeError(f"EP MXFP8 transport requires an MXFP8 input, got {type(input_).__name__}.")
     else:
         if quantizer is None:
             raise ValueError("An MXFP8 quantizer is required for a non-quantized EP input.")
