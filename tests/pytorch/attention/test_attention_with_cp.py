@@ -46,10 +46,9 @@ torch.cuda.manual_seed(seed)
 
 test_essential = bool(int(os.getenv("NVTE_TEST_ESSENTIAL", "1")))
 # An installed FA4 package must not select tests when the backend is explicitly disabled.
-flash_attn_enabled = bool(int(os.getenv("NVTE_FLASH_ATTN", "1")))
-fa2_enabled = flash_attn_enabled and bool(int(os.getenv("NVTE_FLASH_ATTN_V2", "1")))
-fa3_enabled = flash_attn_enabled and bool(int(os.getenv("NVTE_FLASH_ATTN_V3", "1")))
-fa4_enabled = flash_attn_enabled and bool(int(os.getenv("NVTE_FLASH_ATTN_V4", "1")))
+fa4_enabled = bool(int(os.getenv("NVTE_FLASH_ATTN", "1"))) and bool(
+    int(os.getenv("NVTE_FLASH_ATTN_V4", "1"))
+)
 
 model_configs_flash_attn = {
     # test: ModelConfig(b, sq, hq, dqk)
@@ -740,25 +739,22 @@ def test_cp_with_fused_attention_no_load_balance(cp_pool):
     )
 
 
-@pytest.mark.skipif(
-    not (
-        (
-            get_device_compute_capability() == (9, 0)
-            and (
-                (fa2_enabled and FlashAttentionUtils.v2_plus)
-                or (fa3_enabled and FlashAttentionUtils.v3_is_installed)
-            )
-        )
-        or (
-            get_device_compute_capability() >= (10, 0)
-            and fa4_enabled
-            and FlashAttentionUtils.v4_is_installed
-        )
-    ),
-    reason="FlashAttention 2 or 3 on sm90, or FlashAttention 4 on sm100+, is required.",
-)
 def test_cp_with_flash_attention_no_load_balance(cp_pool):
     """Check the supported unpadded FlashAttention path."""
+    config = copy.deepcopy(model_configs_flash_attn["cp_2_0"])
+    config.context_parallel = True
+    config.cp_comm_type = "all_gather"
+    config.attn_mask_type = "padding_causal"
+    available_backends, _, _ = get_available_attention_backends(
+        config,
+        qkv_dtype=torch.bfloat16,
+        qkv_layout="thd_thd_thd",
+        pad_between_seqs=False,
+        is_training=True,
+        deterministic=_deterministic,
+    )
+    if not available_backends[0]:
+        pytest.skip("FlashAttention is unavailable.")
     _submit(
         cp_pool(2),
         dtype="bf16",
