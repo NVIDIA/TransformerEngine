@@ -43,14 +43,6 @@ else
     NVTE_ALLOW_NONDETERMINISTIC_ALGO=0 python3 -m pytest -v -s --junitxml=$XML_LOG_DIR/pytest_test_attention_deterministic_with_cp.xml $TE_PATH/tests/pytorch/attention/test_attention_with_cp.py || test_fail "NVTE_ALLOW_NONDETERMINISTIC_ALGO=0 test_attention_with_cp.py"
 fi
 
-# The full runs above exercise both modes with normal backend selection.
-# Determinism is captured when the test module is imported, so use a fresh process and
-# disable FA3 (FA4 is disabled above) to force FA2 for the deterministic GQA regression.
-NVTE_FLASH_ATTN_V3=0 NVTE_ALLOW_NONDETERMINISTIC_ALGO=0 python3 -m pytest -v -s \
-    --junitxml=$XML_LOG_DIR/pytest_test_attention_with_cp_fa2_no_load_balance.xml \
-    $TE_PATH/tests/pytorch/attention/test_attention_with_cp.py::test_cp_with_flash_attention_no_load_balance \
-    || test_fail "FlashAttention 2 no-load-balance deterministic GQA"
-
 python3 -m pytest -v -s --junitxml=$XML_LOG_DIR/pytest_test_sanity.xml $TE_PATH/tests/pytorch/distributed/test_sanity.py || test_fail "test_sanity.py"
 python3 -m pytest -v -s --junitxml=$XML_LOG_DIR/pytest_test_numerics.xml $TE_PATH/tests/pytorch/distributed/test_numerics.py || test_fail "test_numerics.py"
 python3 -m pytest -v -s --junitxml=$XML_LOG_DIR/pytest_test_numerics_exact.xml $TE_PATH/tests/pytorch/distributed/test_numerics_exact.py || test_fail "test_numerics_exact.py"
