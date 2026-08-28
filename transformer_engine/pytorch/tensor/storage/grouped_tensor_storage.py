@@ -799,9 +799,6 @@ class GroupedTensorStorage:
                 # Allocate columnwise data buffer (1D flattened, uint8)
                 columnwise_data = torch.empty(total_elements, dtype=dtype, device=device)
         elif compatible_recipe.mxfp8():
-            # Amax buffer for delayed scaling - one per tensor
-            amax = torch.empty(num_tensors, dtype=torch.float32, device=device)
-
             scale_inv_dtype = DType.kFloat8E8M0
 
             if rowwise_usage:
@@ -849,6 +846,9 @@ class GroupedTensorStorage:
                 columnwise_scale_inv = torch.empty(num_tensors, dtype=torch.float32, device=device)
                 # One scale per tensor, so offsets are simply 0, 1, 2, ..., num_tensors
                 columnwise_scale_inv_offsets = list(range(num_tensors + 1))
+
+            # Amax buffer for delayed scaling - one per tensor
+            amax = torch.empty(num_tensors, dtype=torch.float32, device=device)
         elif compatible_recipe.nvfp4():
             scale_inv_dtype = quantizer.scale_dtype
             row_scaled_nvfp4 = quantizer.row_scaled_nvfp4

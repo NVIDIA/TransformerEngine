@@ -696,11 +696,6 @@ def _check_ue5m3_gemm_versus_dequantized(
     M, K, N, x_columnwise, w_columnwise, disable_second_level_scale
 ):
     """Run an NVFP4/UE5M3 GEMM and compare against a dequantized FP32 reference."""
-    if M % 256 != 0:
-        pytest.skip(
-            "cuDNN's grouped GEMM pads every group to 256 rows, so the UE5M3 path (which "
-            "routes there while cuBLAS lacks UE5M3 kernels) requires M % 256 == 0."
-        )
     torch.manual_seed(0)
     device, dtype, out_dtype = "cuda", torch.bfloat16, torch.bfloat16
     x_shape = (K, M) if x_columnwise else (M, K)

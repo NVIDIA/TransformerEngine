@@ -139,12 +139,6 @@ def maybe_skip_quantization(
         elif quantization in nvfp4_variant_names:
             if math.prod(dims[:-1]) % 16 != 0 or dims[-1] % 16 != 0:
                 pytest.skip("NVFP4 GEMMs require dims that are divisible by 16")
-            if quantization in ("nvfp4_ue5m3", "nvfp4_rht_ue5m3") and (
-                math.prod(dims[:-1]) % 64 != 0 or dims[-1] % 64 != 0
-            ):
-                pytest.skip(
-                    "cuDNN FE NVFP4-UE5M3 GEMMs produce incorrect values with 32x32 tensors"
-                )
 
     # Check dtype
     if dtype is not None:

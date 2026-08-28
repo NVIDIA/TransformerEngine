@@ -1504,7 +1504,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                 if self.grouped_gemm_act_hadamard_kernel() is None:
                     # Kernel is not available
                     pass
-                elif self._cudnn_act_func in ("swiglu", "situlu"):
+                elif self._cudnn_act_func in ("swiglu", "situglu"):
                     kernel_impl = "gemm_act_rht_amax"
                 elif activation_is_srelu and _cudnn_frontend_supports_grouped_gemm_srelu_hadamard():
                     kernel_impl = "gemm_act_rht_amax"

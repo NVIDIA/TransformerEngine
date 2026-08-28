@@ -23,19 +23,19 @@ extern "C" {
  *  \brief TE datatype.
  */
 enum NVTEDType {
-  kNVTEByte = 0,         /*!< Byte */
-  kNVTEInt16 = 1,        /*!< 16-bit integer */
-  kNVTEInt32 = 2,        /*!< 32-bit integer */
-  kNVTEInt64 = 3,        /*!< 64-bit integer */
-  kNVTEFloat32 = 4,      /*!< 32-bit float */
-  kNVTEFloat16 = 5,      /*!< 16-bit float (E5M10) */
-  kNVTEBFloat16 = 6,     /*!< 16-bit bfloat (E8M7) */
-  kNVTEFloat8E4M3 = 7,   /*!< 8-bit float (E4M3) */
-  kNVTEFloat8E5M2 = 8,   /*!< 8-bit float (E5M2) */
-  kNVTEFloat8E8M0 = 9,   /*!< 8-bit float (E8M0) */
-  kNVTEFloat4E2M1 = 10,  /*!< 4-bit float (E2M1) */
-  kNVTEFloat8UE5M3 = 11, /*!< 8-bit float (UE5M3) */
-  kNVTENumTypes          /*!< Number of supported types */
+  kNVTEByte = 0,            /*!< Byte */
+  kNVTEInt16 = 1,           /*!< 16-bit integer */
+  kNVTEInt32 = 2,           /*!< 32-bit integer */
+  kNVTEInt64 = 3,           /*!< 64-bit integer */
+  kNVTEFloat32 = 4,         /*!< 32-bit float */
+  kNVTEFloat16 = 5,         /*!< 16-bit float (E5M10) */
+  kNVTEBFloat16 = 6,        /*!< 16-bit bfloat (E8M7) */
+  kNVTEFloat8E4M3 = 7,      /*!< 8-bit float (E4M3) */
+  kNVTEFloat8E5M2 = 8,      /*!< 8-bit float (E5M2) */
+  kNVTEFloat8E8M0 = 9,      /*!< 8-bit float (E8M0) */
+  kNVTEFloat4E2M1 = 10,     /*!< 4-bit float (E2M1) */
+  kNVTEFloat8UE5M3 = 11,    /*!< 8-bit float (UE5M3) */
+  kNVTENumTypes             /*!< Number of supported types */
 };
 
 /*! \struct NVTEShape
@@ -84,12 +84,15 @@ enum NVTETensorParam {
    *  its values are populated during quantization.
    */
   kNVTERowScaledNVFP4 = 8,
-  /*! Global scale-bound selector used by an NVFP4 tensor.
+  /*! Global scale bound used by an NVFP4 tensor.
    *
-   *  This is part of the tensor data contract. Downstream dequantization and
-   *  GEMM scale consumers must use the same bound used during quantization.
-   *  Standard NVFP4 uses 448; 4over6 may use 256 for map-to-4 headroom.
-   *  For UE5M3 scales, these settings map to 114688 and 65536, respectively.
+   *  When non-zero, this overrides the maximum value of the scaling
+   *  factors. This affects downstream consumers (like GEMM or
+   *  dequantization) because the maximum values of the FP4 type and
+   *  scale type are used to convert amax values to tensor scales.
+   *
+   *  Standard NVFP4 uses the maximum value of the scale type (448 for
+   *  E4M3). 4over6 may use 256 for map-to-4 headroom.
    */
   kNVTENVFP4E4M3Max = 9,
   kNVTENumTensorParams
