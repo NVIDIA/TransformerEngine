@@ -156,7 +156,13 @@ struct CastTraits<_IType, _OType, /*rowwise=*/true, /*colwise=*/false> {
   static constexpr int32_t numPrefetch = numStages - 1;
 
   static constexpr bool _use_cvt_4x = true;
-  static constexpr bool _cache_rowwise_scale_in_smem = true;
+  // Write scale bytes directly to global memory instead of staging through smem.
+  // This eliminates __syncthreads() + the collective smem-to-gmem epilogue.
+  // Scale writes are coalesced because consecutive threadIdx.x values map to
+  // consecutive scale addresses (each thread owns one 32-element MX block).
+  static constexpr bool _cache_rowwise_scale_in_smem = false;
+  // Use L2::evict_first on BF16 input (streaming) and L2::evict_last on FP8 output.
+  static constexpr bool _use_l2_hints = true;
 
   static constexpr int32_t numThreads = warpLayout::num * 32;
 
@@ -164,6 +170,28 @@ struct CastTraits<_IType, _OType, /*rowwise=*/true, /*colwise=*/false> {
       _cache_rowwise_scale_in_smem ? (blockDimM * (blockDimN / chunkElems) * sizeof(e8m0_t)) : 0ul;
   static constexpr size_t smem = smem_rowwise_scale;
 };
+
+// L2 eviction-hint helpers for the rowwise-only kernel.
+// evict_first/evict_last in PTX require .v8.b32 or .v4.b64 (256-bit) widths.
+// We use the cache_hint+createpolicy approach, which works with .v4.b32 (uint4).
+// Input: evict_first policy (streaming — prevent BF16 data from polluting L2).
+// Output: evict_last policy (keep FP8 result warm for potential consumer).
+// Only compiled for SM90+ where createpolicy is available.
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+__device__ __forceinline__ void _load_uint4_evict_first(uint4 &v, const uint4 *p) {
+    uint64_t pol;
+    asm("createpolicy.fractional.L2::evict_first.b64 %0, 1.0;" : "=l"(pol));
+    asm("ld.global.nc.L2::cache_hint.v4.b32 {%0,%1,%2,%3},[%4],%5;"
+        : "=r"(v.x), "=r"(v.y), "=r"(v.z), "=r"(v.w)
+        : "l"(p), "l"(pol));
+}
+__device__ __forceinline__ void _store_uint4_evict_last(uint4 *p, const uint4 &v) {
+    uint64_t pol;
+    asm("createpolicy.fractional.L2::evict_last.b64 %0, 1.0;" : "=l"(pol));
+    asm volatile("st.global.L2::cache_hint.v4.b32 [%0],{%1,%2,%3,%4},%5;"
+                 :: "l"(p), "r"(v.x), "r"(v.y), "r"(v.z), "r"(v.w), "l"(pol) : "memory");
+}
+#endif  // __CUDA_ARCH__ >= 900
 
 // 1x32
 template <typename CastTraits,
@@ -226,7 +254,12 @@ __global__ void quantize_mxfp8_kernel_cast_only(typename CastTraits::IType *__re
 
 #pragma unroll
       for (int32_t i = 0; i < CastTraits::numUnitsPerChunk; i++) {
-        rInput[iter][i] = input_units[i];
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+        if constexpr (CastTraits::_use_l2_hints)
+          _load_uint4_evict_first(rInput[iter][i], input_units + i);
+        else
+#endif
+          rInput[iter][i] = input_units[i];
       }
     }
   }
@@ -248,7 +281,12 @@ __global__ void quantize_mxfp8_kernel_cast_only(typename CastTraits::IType *__re
 
 #pragma unroll
         for (int32_t i = 0; i < CastTraits::numUnitsPerChunk; i++) {
-          rInput[iter % CastTraits::numStages][i] = input_units[i];
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+          if constexpr (CastTraits::_use_l2_hints)
+            _load_uint4_evict_first(rInput[iter % CastTraits::numStages][i], input_units + i);
+          else
+#endif
+            rInput[iter % CastTraits::numStages][i] = input_units[i];
         }
       }
     }
@@ -311,7 +349,12 @@ __global__ void quantize_mxfp8_kernel_cast_only(typename CastTraits::IType *__re
           reinterpret_cast<outputUnitType *>(output + coords.y * cols + coords.x);
 #pragma unroll
       for (int32_t j = 0; j < CastTraits::numOutUnitsPerChunk; j++) {
-        output_units[j] = rOutput[j];
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+        if constexpr (CastTraits::_use_l2_hints)
+          _store_uint4_evict_last(output_units + j, rOutput[j]);
+        else
+#endif
+          output_units[j] = rOutput[j];
       }
     } else {
       IType2 thread_amax2{0.f, 0.f};
@@ -364,7 +407,12 @@ __global__ void quantize_mxfp8_kernel_cast_only(typename CastTraits::IType *__re
           reinterpret_cast<outputUnitType *>(output + coords.y * cols + coords.x);
 #pragma unroll
       for (int32_t j = 0; j < CastTraits::numOutUnitsPerChunk; j++) {
-        output_units[j] = rOutput[j];
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+        if constexpr (CastTraits::_use_l2_hints)
+          _store_uint4_evict_last(output_units + j, rOutput[j]);
+        else
+#endif
+          output_units[j] = rOutput[j];
       }
     }
   }
@@ -432,7 +480,12 @@ __global__ void quantize_mxfp8_kernel_cast_only(typename CastTraits::IType *__re
           reinterpret_cast<outputUnitType *>(output + coords.y * cols + coords.x);
 #pragma unroll
       for (int32_t j = 0; j < CastTraits::numOutUnitsPerChunk; j++) {
-        output_units[j] = rOutput[j];
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+        if constexpr (CastTraits::_use_l2_hints)
+          _store_uint4_evict_last(output_units + j, rOutput[j]);
+        else
+#endif
+          output_units[j] = rOutput[j];
       }
     } else {
       IType2 thread_amax2{0.f, 0.f};
@@ -485,7 +538,12 @@ __global__ void quantize_mxfp8_kernel_cast_only(typename CastTraits::IType *__re
           reinterpret_cast<outputUnitType *>(output + coords.y * cols + coords.x);
 #pragma unroll
       for (int32_t j = 0; j < CastTraits::numOutUnitsPerChunk; j++) {
-        output_units[j] = rOutput[j];
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+        if constexpr (CastTraits::_use_l2_hints)
+          _store_uint4_evict_last(output_units + j, rOutput[j]);
+        else
+#endif
+          output_units[j] = rOutput[j];
       }
     }
   }
