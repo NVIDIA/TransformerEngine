@@ -315,8 +315,13 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend_v2(NVTEFusedAttnConfig confi
 
   // F16/BF16 support checks
   if (is_f16_or_bf16) {
-    if ((cfg.is_ragged_q || cfg.is_ragged_kv) && sm_arch < 90) {
+    if (cfg.is_ragged_q && cfg.is_ragged_kv && sm_arch < 90) {
       return reject(message, "F16/BF16 fused attention with THD format requires sm90 or later.");
+    }
+    if ((cfg.is_ragged_q || cfg.is_ragged_kv) && sm_arch < 90 && cudnn_runtime_version < 90700) {
+      return reject(message,
+                    "F16/BF16 fused attention with a ragged Q and non-ragged KV requires cuDNN "
+                    ">= 9.7 before sm90.");
     }
     const bool has_sliding_window = !(cfg.window_size_left == -1 &&
                                       (cfg.window_size_right == -1 || cfg.window_size_right == 0));
