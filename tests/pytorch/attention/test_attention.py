@@ -419,9 +419,7 @@ def test_fused_attn_graph_cache():
         timeout=900,
         check=False,
     )
-    assert result.returncode == 0, (
-        f"Graph cache worker exited with {result.returncode}."
-    )
+    assert result.returncode == 0, f"Graph cache worker exited with {result.returncode}."
     if "[CACHE-TEST] fused=1" not in result.stdout:
         pytest.skip("No FusedAttention backend for the graph cache test config.")
 
