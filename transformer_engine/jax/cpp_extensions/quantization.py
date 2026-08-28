@@ -1293,9 +1293,18 @@ def grouped_quantize(
         return quantizer.quantize(x, flatten_axis=flatten_axis, group_sizes=group_sizes)
     n_groups = group_sizes.size
     original_shape = x.shape
-    assert n_groups == len(
-        quantizer.quantizers
-    ), f"n_groups={n_groups} != n_quantizers = {len(quantizer.quantizers)}"
+    n_quantizers = len(quantizer.quantizers)
+    if quantizer.scaling_mode.is_mxfp8_scaling:
+        # Stateless MXFP8 quantizers may describe a global grouped operation
+        # while this primitive is traced inside shard_map on only the local
+        # groups. The recipe is identical for every group, and no per-group
+        # state is selected here, so the global descriptor only needs to cover
+        # the local operation.
+        assert (
+            n_groups <= n_quantizers
+        ), f"local n_groups={n_groups} exceeds global n_quantizers={n_quantizers}"
+    else:
+        assert n_groups == n_quantizers, f"n_groups={n_groups} != n_quantizers={n_quantizers}"
     scale = jnp.ones((n_groups,), jnp.float32)
 
     if quantizer.scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING:
