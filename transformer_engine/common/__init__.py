@@ -100,7 +100,7 @@ def _get_shared_object_file(library: str) -> Path:
     """
     Path to shared object file for a Transformer Engine library.
 
-    TE libraries are 'core', 'torch', 'jax', or 'nccl_ep'. This function first
+    TE libraries are 'core', 'torch', or 'jax'. This function first
     searches in the imported TE directory, and then in the
     site-packages directory.
 
