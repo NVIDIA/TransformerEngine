@@ -17,6 +17,7 @@
 #include <fstream>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "../util/cuda_runtime.h"
@@ -242,61 +243,60 @@ void initialize() { (void)library_handle(); }
 
 void* get_symbol(const char* symbol) { return load_symbol(library_handle(), symbol); }
 
+namespace {
+
+template <auto FuncPtr, typename... Args>
+auto call_symbol(const char* name, Args&&... args) {
+  using FuncT = decltype(FuncPtr);
+  static FuncT func = reinterpret_cast<FuncT>(get_symbol(name));
+  return func(std::forward<Args>(args)...);
+}
+
+}  // namespace
+
 ncclResult_t create_group(ncclEpGroup_t* ep_group, ncclComm_t comm,
                           const ncclEpGroupConfig_t* config) {
-  using FuncT = decltype(&ncclEpCreateGroup);
-  static FuncT func = reinterpret_cast<FuncT>(get_symbol("ncclEpCreateGroup"));
-  return func(ep_group, comm, config);
+  return call_symbol<&ncclEpCreateGroup>("ncclEpCreateGroup", ep_group, comm, config);
 }
 
 ncclResult_t group_destroy(ncclEpGroup_t ep_group) {
-  using FuncT = decltype(&ncclEpGroupDestroy);
-  static FuncT func = reinterpret_cast<FuncT>(get_symbol("ncclEpGroupDestroy"));
-  return func(ep_group);
+  return call_symbol<&ncclEpGroupDestroy>("ncclEpGroupDestroy", ep_group);
 }
 
 ncclResult_t handle_destroy(ncclEpHandle_t handle) {
-  using FuncT = decltype(&ncclEpHandleDestroy);
-  static FuncT func = reinterpret_cast<FuncT>(get_symbol("ncclEpHandleDestroy"));
-  return func(handle);
+  return call_symbol<&ncclEpHandleDestroy>("ncclEpHandleDestroy", handle);
 }
 
 ncclResult_t init_handle(ncclEpHandle_t* handle, ncclEpGroup_t ep_group, ncclEpLayout_t layout,
                          const ncclEpHandleConfig_t* config, int num_topk,
                          const ncclEpTensor_t* handle_mem) {
-  using FuncT = decltype(&ncclEpInitHandle);
-  static FuncT func = reinterpret_cast<FuncT>(get_symbol("ncclEpInitHandle"));
-  return func(handle, ep_group, layout, config, num_topk, handle_mem);
+  return call_symbol<&ncclEpInitHandle>("ncclEpInitHandle", handle, ep_group, layout, config,
+                                        num_topk, handle_mem);
 }
 
 ncclResult_t handle_mem_size(ncclEpGroup_t ep_group, ncclEpLayout_t layout,
                              const ncclEpHandleConfig_t* config, size_t* size_out, int num_topk) {
-  using FuncT = decltype(&ncclEpHandleMemSize);
-  static FuncT func = reinterpret_cast<FuncT>(get_symbol("ncclEpHandleMemSize"));
-  return func(ep_group, layout, config, size_out, num_topk);
+  return call_symbol<&ncclEpHandleMemSize>("ncclEpHandleMemSize", ep_group, layout, config,
+                                           size_out, num_topk);
 }
 
 ncclResult_t update_handle(ncclEpHandle_t handle, const ncclEpTensor_t* topk_idx,
                            const ncclEpLayoutInfo_t* layout_info, cudaStream_t stream) {
-  using FuncT = decltype(&ncclEpUpdateHandle);
-  static FuncT func = reinterpret_cast<FuncT>(get_symbol("ncclEpUpdateHandle"));
-  return func(handle, topk_idx, layout_info, stream);
+  return call_symbol<&ncclEpUpdateHandle>("ncclEpUpdateHandle", handle, topk_idx, layout_info,
+                                          stream);
 }
 
 ncclResult_t dispatch(ncclEpHandle_t handle, const ncclEpDispatchInputs_t* inputs,
                       const ncclEpDispatchOutputs_t* outputs, const ncclEpLayoutInfo_t* layout_info,
                       const ncclEpDispatchConfig_t* config, cudaStream_t stream) {
-  using FuncT = decltype(&ncclEpDispatch);
-  static FuncT func = reinterpret_cast<FuncT>(get_symbol("ncclEpDispatch"));
-  return func(handle, inputs, outputs, layout_info, config, stream);
+  return call_symbol<&ncclEpDispatch>("ncclEpDispatch", handle, inputs, outputs, layout_info,
+                                      config, stream);
 }
 
 ncclResult_t combine(ncclEpHandle_t handle, const ncclEpCombineInputs_t* inputs,
                      const ncclEpCombineOutputs_t* outputs, const ncclEpCombineConfig_t* config,
                      cudaStream_t stream) {
-  using FuncT = decltype(&ncclEpCombine);
-  static FuncT func = reinterpret_cast<FuncT>(get_symbol("ncclEpCombine"));
-  return func(handle, inputs, outputs, config, stream);
+  return call_symbol<&ncclEpCombine>("ncclEpCombine", handle, inputs, outputs, config, stream);
 }
 
 }  // namespace nccl_ep
