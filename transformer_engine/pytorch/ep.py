@@ -1025,24 +1025,6 @@ def _alloc_io(shape, dtype: torch.dtype, device, zero_copy: bool) -> torch.Tenso
     return torch.empty(*shape, dtype=dtype, device=device)
 
 
-def _as_mxfp8_storage(tensor: QuantizedTensorStorage):
-    """Return a lightweight MXFP8 storage view without a ``torch.Tensor`` wrapper."""
-    if type(tensor) is MXFP8TensorStorage:
-        return tensor
-    if not isinstance(tensor, MXFP8TensorStorage):
-        raise TypeError(f"Expected MXFP8 tensor storage, got {type(tensor).__name__}.")
-    return MXFP8TensorStorage(
-        rowwise_data=tensor._rowwise_data,
-        rowwise_scale_inv=tensor._rowwise_scale_inv,
-        columnwise_data=tensor._columnwise_data,
-        columnwise_scale_inv=tensor._columnwise_scale_inv,
-        fp8_dtype=tensor._fp8_dtype,
-        quantizer=tensor._quantizer,
-        with_gemm_swizzled_scales=tensor._with_gemm_swizzled_scales,
-        fake_dtype=tensor._dtype,
-    )
-
-
 def quantize_for_ep(
     input_: torch.Tensor | QuantizedTensorStorage,
     quantizer: Optional["Quantizer"],
@@ -1066,8 +1048,11 @@ def quantize_for_ep(
     else:
         if quantizer is None:
             raise ValueError("An MXFP8 quantizer is required for a non-quantized EP input.")
+        if not quantized.internal:
+            quantizer = quantizer.copy()
+            quantizer.internal = True
         quantized = quantizer(input_)
-    quantized = _as_mxfp8_storage(quantized)
+
     if quantized._fp8_dtype != DType.kFloat8E4M3:
         raise NotImplementedError("EP MXFP8 transport supports E4M3 only.")
     if quantized._with_gemm_swizzled_scales:
