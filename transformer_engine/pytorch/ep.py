@@ -853,12 +853,10 @@ def _ep_combine_fwd(
     eager: bool,
     zero_copy: bool,
 ):
-    """Run combine from explicit routing state and return ``(result, _CombineState)``.
+    """Run combine and return ``(result, _CombineState)``. Eager mode is not graph-capturable, so
+    it calls the backend op directly and skips the torch.library dispatch. No autograd; the caller
+    owns context handling."""
 
-    This is the shared implementation for the public ``ep_combine`` wrapper and
-    fusible operations. Eager mode calls the backend directly to avoid the
-    ``torch.library`` dispatch overhead.
-    """
     device = expert_out.device
     result = torch.empty(num_local_tokens, hidden_dim, dtype=expert_out.dtype, device=device)
     if eager:
