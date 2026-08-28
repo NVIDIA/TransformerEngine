@@ -501,9 +501,12 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         if config.attn_bias_type == AttnBiasType.POST_SCALE_BIAS:
             *bias_batch_shape, bias_heads, bias_seqlen_q, bias_seqlen_kv = bias_aval.shape
             bias_batch = reduce(operator.mul, bias_batch_shape)
+        num_segments = input_batch
+        if config.qkv_layout.is_thd():
+            num_segments = input_batch * config.max_segments_per_seq
         backend, message = FusedAttnHelper(
             config.is_training,
-            input_batch,
+            num_segments,
             q_dtype,
             k_dtype,
             config.qkv_layout,
