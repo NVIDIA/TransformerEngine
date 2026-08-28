@@ -23,6 +23,7 @@ from transformer_engine.pytorch import DType
 from transformer_engine.pytorch.attention.dot_product_attention import _attention_backends
 from transformer_engine.pytorch.attention.dot_product_attention.utils import (
     get_attention_backend,
+    get_qkv_format,
     AttentionParams,
     AttentionLogging,
     check_set_window_size,
@@ -356,10 +357,13 @@ def get_available_attention_backends(
 ) -> Tuple[List, List]:
     """Check for all available attention backends that support a model configuration"""
 
-    if num_tokens_q is None:
+    _, q_format, kv_format = get_qkv_format(qkv_layout, inference_params)
+    if num_tokens_q is None and q_format == "thd":
         num_tokens_q = max(config.batch_size * config.max_seqlen_q // cp_size, 1)
-    if num_tokens_kv is None:
+    if num_tokens_kv is None and kv_format == "thd":
         num_tokens_kv = max(config.batch_size * config.max_seqlen_kv // cp_size, 1)
+    num_tokens_q = num_tokens_q or 0
+    num_tokens_kv = num_tokens_kv or 0
 
     os.environ["NVTE_FLASH_ATTN"] = "1"
     os.environ["NVTE_FUSED_ATTN"] = "1"

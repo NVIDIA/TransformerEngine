@@ -148,10 +148,10 @@ FusedAttnConfig FusedAttnConfig::make_cache_key(Pass pass) const {
   cache_cfg.max_seqlen_q = cache_cfg.graph_max_seqlen_q;
   cache_cfg.max_seqlen_kv = cache_cfg.graph_max_seqlen_kv;
 
-  // Normalize batch size the graph is built at, and drop the token counts the bucketing replaced.
+  // Normalize the batch size the graph is built at, and drop the token counts.
+  cache_cfg.num_tokens_q = 0;
+  cache_cfg.num_tokens_kv = 0;
   if ((cache_cfg.is_ragged_q || cache_cfg.is_ragged_kv) && cache_cfg.uses_ragged_graph) {
-    cache_cfg.num_tokens_q = 0;
-    cache_cfg.num_tokens_kv = 0;
     cache_cfg.batch_size =
         pass == Pass::Fwd ? cache_cfg.graph_batch_size_fwd : cache_cfg.graph_batch_size_bwd;
   }
