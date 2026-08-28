@@ -49,9 +49,6 @@ bool areShapesEqual(const NVTEShape &s1, const NVTEShape &s2) {
 }
 
 size_t typeToNumBits(DType type) {
-  if (type == DType::kFloat8UE5M3) {
-    return 8;
-  }
   TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(type, T,
   {
       return TypeInfo<T>::size;
@@ -136,12 +133,16 @@ NVTEShape convertShape(const std::vector<size_t>& s) {
 }
 
 std::pair<scale_inv_meta, scale_inv_meta> get_scales(const NVTEShape& shape,
-                                                     const NVTEScalingMode scaling_mode) {
+                                                     const NVTEScalingMode scaling_mode,
+                                                     std::optional<DType> scale_type) {
   if (scaling_mode == NVTE_DELAYED_TENSOR_SCALING) {
     scale_inv_meta ret;
     ret.shape = {1};
-    ret.type = DType::kFloat32;
-    ret.type_size_bits = typeToNumBits(DType::kFloat32);
+    if (!scale_type) {
+      scale_type = DType::kFloat32;
+    }
+    ret.type = *scale_type;
+    ret.type_size_bits = typeToNumBits(*scale_type);
     return {ret, ret};
   }
   if (scaling_mode == NVTE_MXFP8_1D_SCALING) {
@@ -164,10 +165,13 @@ std::pair<scale_inv_meta, scale_inv_meta> get_scales(const NVTEShape& shape,
     size_t scale_dim_X_colwise = DIVUP_TO_MULTIPLE(last_dim, scale_tensor_alignment_X_colwise);
     ret_colwise.shape = {scale_dim_Y_colwise, scale_dim_X_colwise};
 
-    ret_rowwise.type = DType::kFloat8E8M0;
-    ret_rowwise.type_size_bits = typeToNumBits(DType::kFloat8E8M0);
-    ret_colwise.type = DType::kFloat8E8M0;
-    ret_colwise.type_size_bits = typeToNumBits(DType::kFloat8E8M0);
+    if (!scale_type) {
+      scale_type = DType::kFloat8E8M0;
+    }
+    ret_rowwise.type = *scale_type;
+    ret_rowwise.type_size_bits = typeToNumBits(*scale_type);
+    ret_colwise.type = *scale_type;
+    ret_colwise.type_size_bits = typeToNumBits(*scale_type);
 
     return {ret_rowwise, ret_colwise};
   }
@@ -192,10 +196,13 @@ std::pair<scale_inv_meta, scale_inv_meta> get_scales(const NVTEShape& shape,
     size_t scale_dim_X_t = DIVUP_TO_MULTIPLE(DIVUP(first_dim, 16lu), scale_tensor_alignment_X_rowwise);
     ret_colwise.shape = {scale_dim_Y_t, scale_dim_X_t};
 
-    ret_rowwise.type = DType::kFloat8E4M3;
-    ret_rowwise.type_size_bits = typeToNumBits(DType::kFloat8E4M3);
-    ret_colwise.type = DType::kFloat8E4M3;
-    ret_colwise.type_size_bits = typeToNumBits(DType::kFloat8E4M3);
+    if (!scale_type) {
+      scale_type = DType::kFloat8E4M3;
+    }
+    ret_rowwise.type = *scale_type;
+    ret_rowwise.type_size_bits = typeToNumBits(*scale_type);
+    ret_colwise.type = *scale_type;
+    ret_colwise.type_size_bits = typeToNumBits(*scale_type);
 
     return {ret_rowwise, ret_colwise};
   }
@@ -219,10 +226,14 @@ std::pair<scale_inv_meta, scale_inv_meta> get_scales(const NVTEShape& shape,
       size_t scale_dim_1 = DIVUP(DIVUP(first_dim, 128lu), 4) * 4;
       ret_colwise.shape = {scale_dim_0, scale_dim_1};
     }
-    ret_rowwise.type = DType::kFloat32;
-    ret_colwise.type = DType::kFloat32;
-    ret_rowwise.type_size_bits = typeToNumBits(DType::kFloat32);
-    ret_colwise.type_size_bits = typeToNumBits(DType::kFloat32);
+
+    if (!scale_type) {
+      scale_type = DType::kFloat32;
+    }
+    ret_rowwise.type = *scale_type;
+    ret_colwise.type = *scale_type;
+    ret_rowwise.type_size_bits = typeToNumBits(*scale_type);
+    ret_colwise.type_size_bits = typeToNumBits(*scale_type);
 
     return {ret_rowwise, ret_colwise};
   }
@@ -245,10 +256,13 @@ std::pair<scale_inv_meta, scale_inv_meta> get_scales(const NVTEShape& shape,
       size_t scale_dim_1 = DIVUP(last_dim, 4) * 4;
       ret_colwise.shape = {scale_dim_0, scale_dim_1};
     }
-    ret_rowwise.type = DType::kFloat32;
-    ret_colwise.type = DType::kFloat32;
-    ret_rowwise.type_size_bits = typeToNumBits(DType::kFloat32);
-    ret_colwise.type_size_bits = typeToNumBits(DType::kFloat32);
+    if (!scale_type) {
+      scale_type = DType::kFloat32;
+    }
+    ret_rowwise.type = *scale_type;
+    ret_colwise.type = *scale_type;
+    ret_rowwise.type_size_bits = typeToNumBits(*scale_type);
+    ret_colwise.type_size_bits = typeToNumBits(*scale_type);
     return {ret_rowwise, ret_colwise};
   }
 
@@ -282,7 +296,8 @@ void Tensor::Buffer::from_cpu() {
 Tensor::Tensor(const std::string& name,
                const NVTEShape &shape, const DType type,
                const bool rowwise, const bool columnwise,
-               const NVTEScalingMode &scaling_mode, const DType scale_dtype)
+               const NVTEScalingMode &scaling_mode,
+               const std::optional<DType> scale_type)
   : tensor_(scaling_mode), rowwise_{rowwise}, columnwise_{columnwise}, name_{name} {
   // Initialize RNG
   const size_t seed = create_seed_from_tensor_name(name);
@@ -377,15 +392,7 @@ Tensor::Tensor(const std::string& name,
   case NVTE_NVFP4_1D_SCALING:
     {
       // Block scaling factors
-      auto [rowwise_scale_meta, colwise_scale_meta] = get_scales(flattened_shape, tensor_.scaling_mode());
-      if (scaling_mode == NVTE_NVFP4_1D_SCALING) {
-        NVTE_CHECK(scale_dtype == DType::kFloat8E4M3 ||
-                   scale_dtype == DType::kFloat8UE5M3);
-        rowwise_scale_meta.type = scale_dtype;
-        rowwise_scale_meta.type_size_bits = typeToNumBits(scale_dtype);
-        colwise_scale_meta.type = scale_dtype;
-        colwise_scale_meta.type_size_bits = typeToNumBits(scale_dtype);
-      }
+      auto [rowwise_scale_meta, colwise_scale_meta] = get_scales(flattened_shape, tensor_.scaling_mode(), scale_type);
       if (rowwise) {
         const auto scale_shape = rowwise_scale_meta.shape;
         const auto scale_dtype = rowwise_scale_meta.type;

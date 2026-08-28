@@ -8,6 +8,7 @@
 #include <cstring>
 #include <memory>
 #include <random>
+#include <type_traits>
 #include <vector>
 
 #include <cuda_bf16.h>
@@ -88,9 +89,33 @@ float compute_amax(test::Tensor &t, size_t rows, size_t cols) {
     return amax;
 }
 
+template <typename ScaleType>
+constexpr float get_scale_max(int scale_max = 0) {
+  static_assert(std::is_same_v<ScaleType, fp8e4m3>
+#if CUDA_VERSION >= 13040
+                || std::is_same_v<ScaleType, fp8ue5m3>
+#endif
+                , "Unsupported NVFP4 scale type.");
+  if constexpr (std::is_same_v<ScaleType, fp8e4m3>) {
+    if (scale_max == 0) {
+      scale_max = 448;
+    }
+    return static_cast<float>(scale_max);
+  }
+#if CUDA_VERSION >= 13040
+  if constexpr (std::is_same_v<ScaleType, fp8ue5m3>) {
+    if (scale_max == 0) {
+      scale_max = 114688;
+    }
+    return static_cast<float>(scale_max);
+  }
+#endif
+  return 0.f;
+}
+
 struct NVFP4DequantizeTestConfig {
   NVTENVFP44Over6Mode mode = kNVTENVFP44Over6Disabled;
-  int e4m3_max = 448;
+  int scale_max = 0;
 };
 
 // Quantize a high-precision input to NVFP4, then dequantize and compare
@@ -99,7 +124,7 @@ template <typename OutputType, typename ScaleType = fp8e4m3>
 void performTest_dequantize_nvfp4(const size_t rows, const size_t cols,
                                   const bool row_scaled_nvfp4,
                                   const NVTENVFP44Over6Mode mode,
-                                  const int e4m3_max) {
+                                  const int scale_max) {
     using namespace test;
     DType otype = TypeInfo<OutputType>::dtype;
 
@@ -115,8 +140,10 @@ void performTest_dequantize_nvfp4(const size_t rows, const size_t cols,
 
     // Configure quantized tensor amax
     size_t amax_size = 1;
-    quantized.set_nvfp4_e4m3_max(e4m3_max);
-    ASSERT_EQ(quantized.nvfp4_e4m3_max(), e4m3_max);
+    if (scale_max != 0) {
+      quantized.set_nvfp4_e4m3_max(scale_max);
+      ASSERT_EQ(quantized.nvfp4_e4m3_max(), scale_max);
+    }
     if (row_scaled_nvfp4) {
       quantized.set_row_scaled_nvfp4(true);
       amax_size = rows;
@@ -158,10 +185,9 @@ void performTest_dequantize_nvfp4(const size_t rows, const size_t cols,
     const size_t scale_stride = scale_shape.data[scale_shape.ndim - 1];
     std::unique_ptr<OutputType[]> ref_output =
       std::make_unique<OutputType[]>(rows * cols);
-    const float scale_max = static_cast<float>(e4m3_max);
     compute_ref_dequantize_nvfp4<OutputType, ScaleType>(
       fp4_data, scales, amax_vals, ref_output.get(),
-      rows, cols, scale_stride, scale_max);
+      rows, cols, scale_stride, get_scale_max<ScaleType>(scale_max));
 
     // Compare results from TE and reference impls
     auto [atol, rtol] = getTolerances(otype);
@@ -173,7 +199,7 @@ template <typename OutputType, typename ScaleType = fp8e4m3>
 void performTest_dequantize_nvfp4_swizzled(const size_t rows, const size_t cols,
                                            const bool row_scaled_nvfp4,
                                            const NVTENVFP44Over6Mode mode,
-                                           const int e4m3_max) {
+                                           const int scale_max) {
     using namespace test;
     DType otype = TypeInfo<OutputType>::dtype;
 
@@ -183,8 +209,10 @@ void performTest_dequantize_nvfp4_swizzled(const size_t rows, const size_t cols,
     Tensor quantized_compact("quantized_compact", std::vector<size_t>{rows, cols},
                              DType::kFloat4E2M1, true, false, NVTE_NVFP4_1D_SCALING,
                              TypeInfo<ScaleType>::dtype);
-    quantized_compact.set_nvfp4_e4m3_max(e4m3_max);
-    ASSERT_EQ(quantized_compact.nvfp4_e4m3_max(), e4m3_max);
+    if (scale_max != 0) {
+      quantized_compact.set_nvfp4_e4m3_max(scale_max);
+      ASSERT_EQ(quantized_compact.nvfp4_e4m3_max(), scale_max);
+    }
     if (row_scaled_nvfp4) {
         quantized_compact.set_row_scaled_nvfp4(true);
     } else if (rows > 0 && cols > 0) {
@@ -209,8 +237,10 @@ void performTest_dequantize_nvfp4_swizzled(const size_t rows, const size_t cols,
     Tensor quantized_swizzled("quantized_swizzled", std::vector<size_t>{rows, cols},
                               DType::kFloat4E2M1, true, false, NVTE_NVFP4_1D_SCALING,
                               TypeInfo<ScaleType>::dtype);
-    quantized_swizzled.set_nvfp4_e4m3_max(e4m3_max);
-    ASSERT_EQ(quantized_swizzled.nvfp4_e4m3_max(), e4m3_max);
+    if (scale_max != 0) {
+      quantized_swizzled.set_nvfp4_e4m3_max(scale_max);
+      ASSERT_EQ(quantized_swizzled.nvfp4_e4m3_max(), scale_max);
+    }
     if (row_scaled_nvfp4) {
         quantized_swizzled.set_row_scaled_nvfp4(true);
     } else {
@@ -286,7 +316,22 @@ class DequantizeNVFP4TestSuite : public ::testing::TestWithParam
     <std::tuple<std::pair<size_t, size_t>,
                 transformer_engine::DType,
                 bool,
-                NVFP4DequantizeTestConfig>> {};
+                NVFP4DequantizeTestConfig,
+                transformer_engine::DType>> {
+public:
+  static std::string test_name(const testing::TestParamInfo<ParamType> &info) {
+    const NVFP4DequantizeTestConfig config = std::get<3>(info.param);
+    const bool use_4over6 = config.mode != kNVTENVFP44Over6Disabled;
+    std::string name = std::to_string(std::get<0>(info.param).first) + "X" +
+                       std::to_string(std::get<0>(info.param).second) + "X" +
+                       test::typeName(std::get<1>(info.param)) + "X" +
+                       (std::get<2>(info.param) ? "RowScaled" : "PerTensor") + "X" +
+                       (use_4over6 ? "FourOverSix" : "Default") + "X" +
+                       "ScaleMax" + std::to_string(config.scale_max) + "X" +
+                       "Scale" + test::typeName(std::get<4>(info.param));
+    return name;
+  }
+};
 
 TEST_P(DequantizeNVFP4TestSuite, TestDequantizeNVFP4)
 {
@@ -298,11 +343,25 @@ TEST_P(DequantizeNVFP4TestSuite, TestDequantizeNVFP4)
     const DType output_type = std::get<1>(GetParam());
     const bool row_scaled_nvfp4 = std::get<2>(GetParam());
     const NVFP4DequantizeTestConfig config = std::get<3>(GetParam());
+    const DType scale_type = std::get<4>(GetParam());
 
     TRANSFORMER_ENGINE_TYPE_SWITCH_FP16_FP32_ONLY(output_type, OutputType,
-        performTest_dequantize_nvfp4<OutputType>(
+      switch (scale_type) {
+      case transformer_engine::DType::kFloat8E4M3:
+        performTest_dequantize_nvfp4<OutputType, fp8e4m3>(
             tensor_size.first, tensor_size.second, row_scaled_nvfp4, config.mode,
-            config.e4m3_max);
+            config.scale_max);
+        break;
+#if CUDA_VERSION >= 13040
+      case transformer_engine::DType::kFloat8UE5M3:
+        performTest_dequantize_nvfp4<OutputType, fp8ue5m3>(
+            tensor_size.first, tensor_size.second, row_scaled_nvfp4, config.mode,
+            config.scale_max);
+        break;
+#endif  // CUDA_VERSION >= 13040
+      default:
+        NVTE_ERROR("Invalid scale type (", static_cast<int>(scale_type), ".");
+      }
     );
 }
 
@@ -315,41 +374,22 @@ INSTANTIATE_TEST_SUITE_P(
         ::testing::Bool(),
         ::testing::Values(NVFP4DequantizeTestConfig{},
                           NVFP4DequantizeTestConfig{kNVTENVFP44Over6MinMAE, 448},
-                          NVFP4DequantizeTestConfig{kNVTENVFP44Over6MinMAE, 256})),
-    [](const testing::TestParamInfo<DequantizeNVFP4TestSuite::ParamType>& info)
-    {
-        const NVFP4DequantizeTestConfig config = std::get<3>(info.param);
-        const bool use_4over6 = config.mode != kNVTENVFP44Over6Disabled;
-        std::string name = std::to_string(std::get<0>(info.param).first) + "X" +
-                           std::to_string(std::get<0>(info.param).second) + "X" +
-                           test::typeName(std::get<1>(info.param)) + "X" +
-                           (std::get<2>(info.param) ? "RowScaled" : "PerTensor") + "X" +
-                           (use_4over6 ? "FourOverSix" : "Default") + "X" +
-                           (config.e4m3_max == 256 ? "E4M3Max256" : "E4M3Max448");
-        return name;
-    }
-);
+                          NVFP4DequantizeTestConfig{kNVTENVFP44Over6MinMAE, 256}),
+        ::testing::Values(DType::kFloat8E4M3)),
+    DequantizeNVFP4TestSuite::test_name);
 
 #if CUDA_VERSION >= 13040
-TEST(DequantizeNVFP4Test, UE5M3Scales)
-{
-    if (getDeviceComputeCapability() < blackwellComputeCapability) {
-        GTEST_SKIP();
-    }
 
-    performTest_dequantize_nvfp4<fp32, fp8ue5m3>(
-        32, 64, false, kNVTENVFP44Over6Disabled, 114688);
-    performTest_dequantize_nvfp4<bf16, fp8ue5m3>(
-        32, 64, true, kNVTENVFP44Over6Disabled, 114688);
-    performTest_dequantize_nvfp4_swizzled<fp32, fp8ue5m3>(
-        32, 64, false, kNVTENVFP44Over6Disabled, 114688);
-    performTest_dequantize_nvfp4_swizzled<bf16, fp8ue5m3>(
-        32, 64, true, kNVTENVFP44Over6Disabled, 114688);
-    performTest_dequantize_nvfp4<fp32, fp8ue5m3>(
-        32, 64, false, kNVTENVFP44Over6MinMAE, 65536);
-    performTest_dequantize_nvfp4_swizzled<bf16, fp8ue5m3>(
-        32, 64, true, kNVTENVFP44Over6MinMAE, 65536);
-}
+INSTANTIATE_TEST_SUITE_P(
+    OperatorTestUE5M3Scales,
+    DequantizeNVFP4TestSuite,
+    ::testing::Combine(
+        ::testing::ValuesIn(nvfp4_tensor_dims),
+        ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16),
+        ::testing::Values(false),
+        ::testing::Values(NVFP4DequantizeTestConfig{}),
+        ::testing::Values(DType::kFloat8UE5M3)),
+    DequantizeNVFP4TestSuite::test_name);
 
 TEST(NVFP4RecipeTest, UE5M3ScaleUtilities)
 {
@@ -408,8 +448,6 @@ TEST(NVFP4RecipeTest, UE5M3PerTensorScale)
     constexpr float alpha_in = 2.0f;
     constexpr float fp4_max = 6.0f;
     constexpr float ue5m3_max = 114688.0f;
-    input_a.set_nvfp4_e4m3_max(static_cast<int>(ue5m3_max));
-    input_b.set_nvfp4_e4m3_max(static_cast<int>(ue5m3_max));
     input_a.set_amax(amax_a);
     input_b.set_tensor_amax_columnwise(amax_b);
 
@@ -421,18 +459,6 @@ TEST(NVFP4RecipeTest, UE5M3PerTensorScale)
         1.0f / (fp4_max * fp4_max * ue5m3_max * ue5m3_max);
     const float expected = alpha_in * amax_a * amax_b * factor_inv;
     EXPECT_FLOAT_EQ(alpha_out.rowwise_cpu_dptr<float>()[0], expected);
-
-    input_a.set_nvfp4_e4m3_max(65536);
-    input_b.set_nvfp4_e4m3_max(65536);
-    nvte_nvfp4_compute_per_tensor_scale(
-        input_a.data(), true, input_b.data(), false, alpha_in, alpha_out.data(), 0);
-    alpha_out.to_cpu();
-
-    constexpr float ue5m3_headroom_max = 65536.0f;
-    const float headroom_factor_inv =
-        1.0f / (fp4_max * fp4_max * ue5m3_headroom_max * ue5m3_headroom_max);
-    const float headroom_expected = alpha_in * amax_a * amax_b * headroom_factor_inv;
-    EXPECT_FLOAT_EQ(alpha_out.rowwise_cpu_dptr<float>()[0], headroom_expected);
 }
 #endif
 
@@ -456,7 +482,7 @@ TEST_P(DequantizeNVFP4SwizzledTestSuite, TestDequantizeNVFP4Swizzled)
     TRANSFORMER_ENGINE_TYPE_SWITCH_FP16_FP32_ONLY(output_type, OutputType,
         performTest_dequantize_nvfp4_swizzled<OutputType>(
             tensor_size.first, tensor_size.second, row_scaled_nvfp4, config.mode,
-            config.e4m3_max);
+            config.scale_max);
     );
 }
 
@@ -479,7 +505,7 @@ INSTANTIATE_TEST_SUITE_P(
                            test::typeName(std::get<1>(info.param)) + "X" +
                            (std::get<2>(info.param) ? "RowScaled" : "PerTensor") + "X" +
                            (use_4over6 ? "FourOverSix" : "Default") + "X" +
-                           (config.e4m3_max == 256 ? "E4M3Max256" : "E4M3Max448") + "X" +
+                           "ScaleMax" + std::to_string(config.scale_max) + "X" +
                            "Swizzled";
         return name;
     }
