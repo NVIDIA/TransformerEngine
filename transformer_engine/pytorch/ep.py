@@ -1076,7 +1076,7 @@ def quantize_for_ep(
     scale_inv = quantized._rowwise_scale_inv
     if data is None or scale_inv is None:
         raise ValueError("EP requires rowwise MXFP8 data and scales.")
-    rows, hidden = input_.shape
+    t_flat, hidden = input_.shape
     scale_cols = hidden // MXFP8_BLOCK_SCALING_SIZE
     # The backend forwards each token's scale row with a 16-byte-aligned store, so the row
     # (cols * dtype bytes) must be a multiple of 16.
@@ -1090,7 +1090,7 @@ def quantize_for_ep(
     # scale_inv is 2D [round_up(T, 128), cols]; drop the row padding to the logical [T, H/block]
     # the backend expects. cols is a multiple of 4 (16-byte row), so no column padding and the
     # slice stays contiguous; assert rather than force a copy.
-    scale_inv = scale_inv[:rows, :scale_cols]
+    scale_inv = scale_inv[:t_flat, :scale_cols]
     if not scale_inv.is_contiguous():
         raise ValueError("EP requires compact contiguous MXFP8 scales.")
     return quantized, scale_inv
