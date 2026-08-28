@@ -190,8 +190,9 @@ def quantize_rowwise_mxfp8(
 
     # PTX allows to fuse relu activation in `cvt.rn.satfinite` unless we need to reduction for dbias
     FUSE_RELU = cutlass.const_expr(ACTIVATION == "relu") and not WITH_DBIAS
-    # For this fast path we can read in pack of 2 instead of reading individual f16 / bf16 element.
-    ROW_FAST = is_packed16(DTYPE) and (ACTIVATION is None or FUSE_RELU)
+    # For this fast path we can read in pack of 2 instead of reading individual f16 / bf16 element,
+    # and keep the elements in half precision instead of upcasting every one of them to f32.
+    USE_HALF_PRECISION = is_packed16(DTYPE) and (ACTIVATION is None or FUSE_RELU)
 
     amax_r = Float32(0.0)
 
@@ -200,7 +201,7 @@ def quantize_rowwise_mxfp8(
     bank_group = (tidx % THREADS_PER_WARP) // THREADS_PER_BANK
     # The offset this thread should start reading from based on what's its first bank to access.
     offset = bank_group * PACK_SIZE
-    if cutlass.const_expr(ROW_FAST):
+    if cutlass.const_expr(USE_HALF_PRECISION):
         # If no activation, f16 / bf16 and rowwise quantization, we can read 2 f16 / bf16 at once in a pack
         # and use max.xorsign.abs.f16x2 / max.xorsign.abs.bf16x2 to compute
         kit = packed16_kit(DTYPE)
@@ -356,7 +357,7 @@ def quantize_rowwise_mxfp8(
 
     inv_scale_r = exp2f_rcp(biased_exp_r)  # f32 reciprocal of the scale
     scale_2x = pack_f32x2(inv_scale_r, inv_scale_r)
-    if cutlass.const_expr(ROW_FAST):
+    if cutlass.const_expr(USE_HALF_PRECISION):
         mul_cvt_x4_func = mul_f32x2_cvt_packed16x4_to_fp8x4(DTYPE, FP8_DTYPE, FUSE_RELU)
     else:
         mul_cvt_x4_func = mul_f32x2_cvt_f32x4_to_fp8x4(FP8_DTYPE, FUSE_RELU)
@@ -364,7 +365,7 @@ def quantize_rowwise_mxfp8(
     for w in cutlass.range_constexpr(WAVES):
         idx = (w * 4 + offset) % MXFP8_BLOCK_SCALING_SIZE
         idx = idx // 4
-        if cutlass.const_expr(ROW_FAST):
+        if cutlass.const_expr(USE_HALF_PRECISION):
             # Convert 2 packed f16/bf16 pairs to 4 fp8 in one fused op
             sO_thread_u32[idx] = mul_cvt_x4_func(in_r[w][0], in_r[w][1], scale_2x)
         else:
@@ -415,7 +416,10 @@ def quantize_colwise_mxfp8(
     sX_thread = sX_tv[tidx, None]
     sO_thread = sO_tv[tidx, None]
 
-    USE_HALF_PRECISION = is_packed16(DTYPE) and ACTIVATION is None
+    # PTX allows to fuse relu activation in `cvt.rn.satfinite` unless we need to reduction for dbias
+    FUSE_RELU = cutlass.const_expr(ACTIVATION == "relu") and not WITH_DBIAS
+    # Keep input in half precision format if possible
+    USE_HALF_PRECISION = is_packed16(DTYPE) and (ACTIVATION is None or FUSE_RELU)
     dbias_partial = Float32(0.0)
 
     if cutlass.const_expr(USE_HALF_PRECISION):
@@ -431,8 +435,16 @@ def quantize_colwise_mxfp8(
         amax_bits = Int16(0)
         for i in cutlass.range_constexpr(MXFP8_BLOCK_SCALING_SIZE):
             in_c[i] = sX_thread_i16[i]
-            amax_bits = kit.abs_max_scalar(amax_bits, in_c[i])
-        amax_c = fabs_f32(kit.bits_to_f32(amax_bits))
+            if cutlass.const_expr(FUSE_RELU):
+                # If we fuse relu then we don't want to do abs since negative value will be set to 0
+                # and they will lose comparison automatically
+                amax_bits = kit.max_scalar(amax_bits, in_c[i])
+            else:
+                amax_bits = kit.abs_max_scalar(amax_bits, in_c[i])
+        if cutlass.const_expr(FUSE_RELU):
+            amax_c = kit.bits_to_f32(amax_bits)
+        else:
+            amax_c = fabs_f32(kit.bits_to_f32(amax_bits))
     else:
         # Otherwise we need to case input values to fp32. Allocate the register tensor and load from SMEM input tiles.
         rX_thread_f32 = cute.make_rmem_tensor(
@@ -453,7 +465,9 @@ def quantize_colwise_mxfp8(
             thread_col_start = tile_col_start + tidx
             thread_col_oob = thread_col_start >= N
             for i in cutlass.range_constexpr(MXFP8_BLOCK_SCALING_SIZE):
-                rX_thread_f32[i] = op(rX_thread_f32[i])
+                # If it's relu, we can handle it later in the cvt
+                if not cutlass.const_expr(FUSE_RELU):
+                    rX_thread_f32[i] = op(rX_thread_f32[i])
                 # If the input shape is not divisible by the tile size,
                 # TMA would zero-fills the input tile outside its logical MxN bounds.
                 # This is fine for non-activation cases, but for activation cases,
@@ -478,7 +492,10 @@ def quantize_colwise_mxfp8(
                 sX_thread[i] = DTYPE(rX_thread_f32[i])
         amax_c = Float32(0.0)
         for i in cutlass.range_constexpr(MXFP8_BLOCK_SCALING_SIZE):
-            amax_c = cute.arch.fmax(amax_c, fabs_f32(rX_thread_f32[i]))
+            if cutlass.const_expr(FUSE_RELU):
+                amax_c = cute.arch.fmax(amax_c, rX_thread_f32[i])
+            else:
+                amax_c = cute.arch.fmax(amax_c, fabs_f32(rX_thread_f32[i]))
 
     # Irregular shapes: skip when this stage's row range or this thread's
     # column lies past the input extents. TILE_Y == MXFP8_BLOCK_SCALING_SIZE so each stage
@@ -501,7 +518,7 @@ def quantize_colwise_mxfp8(
 
     inv_scale_c = exp2f_rcp(biased_exp_c)
     # cvt.rn.satfinite can be vectorized to convert 2 f32 to 2 fp8 in one instruction
-    cvt_x2_func = get_cvt_f32x2_to_fp8x2_func(FP8_DTYPE)
+    cvt_x2_func = get_cvt_f32x2_to_fp8x2_func(FP8_DTYPE, FUSE_RELU)
     sO_thread_fp8 = cute.make_tensor(
         cute.recast_ptr(sO_thread.iterator, dtype=FP8_DTYPE), sO_thread.layout
     )

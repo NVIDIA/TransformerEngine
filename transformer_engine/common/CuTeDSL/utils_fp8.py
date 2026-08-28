@@ -4,6 +4,7 @@
 
 """FP8 conversion helpers (f32<->fp8 e4m3/e5m2/e8m0, fused mul+cvt PTX wrappers) for the CuTeDSL kernels."""
 
+import functools
 import logging
 from typing import Callable
 
@@ -322,8 +323,12 @@ def cvt_f32x2_to_fp8e5m2x2(
     )
 
 
-def get_cvt_f32x2_to_fp8x2_func(fp8_dtype) -> Callable[..., Uint16]:
-    """Returns the float32x2 -> float8x2 conversion function for the given FP8 type."""
-    if fp8_dtype is Float8E5M2:
-        return cvt_f32x2_to_fp8e5m2x2
-    return cvt_f32x2_to_fp8e4m3x2
+def get_cvt_f32x2_to_fp8x2_func(fp8_dtype, relu: bool = False) -> Callable[..., Uint16]:
+    """Returns the float32x2 -> float8x2 conversion function for the given FP8 type.
+
+    With `relu=True` the returned op uses `cvt.rn.satfinite.relu`, which clamps negatives to 0
+    as part of the conversion, so a fused relu activation costs no extra instruction."""
+    fn = cvt_f32x2_to_fp8e5m2x2 if fp8_dtype is Float8E5M2 else cvt_f32x2_to_fp8e4m3x2
+    if relu:
+        return functools.partial(fn, relu=True)
+    return fn

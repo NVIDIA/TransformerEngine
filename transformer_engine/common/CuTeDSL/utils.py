@@ -164,7 +164,9 @@ def _build_packed16_kit(in_fmt: str):
     with the per-format ops the rowwise/colwise inner loops need:
 
       abs_max_x2(Int32, Int32)  -> Int32   # `max.xorsign.abs.<fmt>x2`
+      max_x2(Int32, Int32)      -> Int32   # `max.<fmt>x2`
       abs_max_scalar(Int16, Int16) -> Int16  # `max.xorsign.abs.<fmt>`
+      max_scalar(Int16, Int16)  -> Int16   # `max.<fmt>`
       bits_to_f32(Int16) -> Float32          # widen one 16-bit element
       x2_lo_to_f32(Int32) -> Float32         # extract+widen low half
       x2_hi_to_f32(Int32) -> Float32         # extract+widen high half
@@ -192,6 +194,20 @@ def _build_packed16_kit(in_fmt: str):
                 [a.ir_value(loc=loc, ip=ip), b.ir_value(loc=loc, ip=ip)],
                 f"max.{in_fmt}x2 $0, $1, $2;",
                 "=r,r,r",
+                has_side_effects=False,
+                is_align_stack=False,
+                asm_dialect=llvm.AsmDialect.AD_ATT,
+            )
+        )
+
+    @dsl_user_op
+    def max_scalar(a: Int16, b: Int16, *, loc=None, ip=None) -> Int16:
+        return Int16(
+            llvm.inline_asm(
+                T.i16(),
+                [a.ir_value(loc=loc, ip=ip), b.ir_value(loc=loc, ip=ip)],
+                f"max.{in_fmt} $0, $1, $2;",
+                "=h,h,h",
                 has_side_effects=False,
                 is_align_stack=False,
                 asm_dialect=llvm.AsmDialect.AD_ATT,
@@ -311,6 +327,7 @@ def _build_packed16_kit(in_fmt: str):
         max_x2=max_x2,
         abs_max_x2=abs_max_x2,
         abs_max_scalar=abs_max_scalar,
+        max_scalar=max_scalar,
         bits_to_f32=bits_to_f32,
         x2_lo_to_f32=x2_lo_to_f32,
         x2_hi_to_f32=x2_hi_to_f32,
