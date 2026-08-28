@@ -19,12 +19,17 @@
 #include <cstdio>
 #include <cstdlib>
 #include <string>
-#include <torch/csrc/distributed/c10d/symm_mem/SymmetricMemory.hpp>
-#include <torch/csrc/distributed/c10d/symm_mem/nccl_dev_cap.hpp>
 #include <tuple>
 #include <vector>
 
 #include "transformer_engine/comm_window.h"
+
+// torch's NCCL symm-mem headers (zero-copy path) exist only since torch 2.11;
+// without them NCCL_HAS_SYMMEM_SUPPORT stays undefined and zero-copy is compiled out.
+#if __has_include(<torch/csrc/distributed/c10d/symm_mem/nccl_dev_cap.hpp>)
+#include <torch/csrc/distributed/c10d/symm_mem/SymmetricMemory.hpp>
+#include <torch/csrc/distributed/c10d/symm_mem/nccl_dev_cap.hpp>
+#endif
 
 #ifdef NCCL_HAS_SYMMEM_SUPPORT
 #include <torch/csrc/distributed/c10d/symm_mem/NCCLSymmetricMemory.hpp>
@@ -151,6 +156,14 @@ size_t check_mxfp8_scale_pair(const at::Tensor& send_scale, const at::Tensor& re
 }  // namespace
 
 bool ep_get_zero_copy() { return g_zero_copy_enabled.load(std::memory_order_relaxed); }
+
+bool ep_zero_copy_supported() {
+#ifdef NCCL_HAS_SYMMEM_SUPPORT
+  return true;
+#else
+  return false;
+#endif
+}
 
 // ── Bootstrap ────────────────────────────────────────────────────────────────
 // Borrows torch's NCCL host comm (from ``ProcessGroupNCCL._comm_ptr()``).
@@ -347,6 +360,53 @@ void ep_dispatch(at::Tensor handle_mem, at::Tensor topk_idx, at::Tensor tokens,
                    recv_topk_w_te.data(), recv_topk_w_win, stream);
 }
 
+std::vector<at::Tensor> ep_prepare_and_dispatch(
+    at::Tensor handle_mem, at::Tensor topk_idx, at::Tensor tokens, at::Tensor topk_weights,
+    at::Tensor tokens_per_expert, at::Tensor total_recv_tokens, int64_t top_k,
+    int64_t dispatch_output_per_expert_alignment, std::optional<at::Tensor> recv_tokens,
+    std::optional<at::Tensor> recv_topk_weights, std::optional<at::Tensor> recv_scale_inv,
+    std::optional<at::Tensor> tokens_scale_inv) {
+  auto stream = at::cuda::getCurrentCUDAStream().stream();
+  NVTE_CHECK(tokens.dim() == 2, "dispatch tokens must be 2D [T, H]");
+  const bool is_scaled = tokens_scale_inv.has_value();
+  // Eager sizes the recv outputs from the per-step count and allocates them here; a caller
+  // that supplies them (non-eager) uses static recv capacity, so no count read is needed.
+  const bool caller_omitted_recv = !recv_tokens.has_value();
+
+  ep_prepare(handle_mem, topk_idx, tokens_per_expert, top_k, dispatch_output_per_expert_alignment,
+             total_recv_tokens);
+
+  at::Tensor rt, rw, rsi;
+  if (caller_omitted_recv) {
+    // Prepare writes the per-step recv total straight into pinned host total_recv_tokens
+    // (UVA), so a stream sync makes it host-readable with no D2H copy. Kept in one C++ op
+    // so no Python runs between the count read and the dispatch launch below.
+    NVTE_CHECK(total_recv_tokens.is_pinned(), "eager total_recv_tokens must be pinned host memory");
+    NVTE_CHECK_CUDA(cudaStreamSynchronize(stream));
+    const int64_t num_recv = *total_recv_tokens.data_ptr<int64_t>();
+    // Recv outputs sized to the host count (eager forbids zero-copy, so plain allocations).
+    const int64_t H = tokens.size(-1);
+    rt = at::empty({num_recv, H}, tokens.options());
+    rw = at::empty({num_recv}, topk_weights.options());
+    if (is_scaled)
+      rsi = at::empty({num_recv, tokens_scale_inv->size(-1)}, tokens_scale_inv->options());
+  } else {
+    rt = *recv_tokens;
+    rw = *recv_topk_weights;
+    if (is_scaled) {
+      NVTE_CHECK(recv_scale_inv.has_value(),
+                 "recv_scale_inv must be provided together with tokens_scale_inv");
+      rsi = *recv_scale_inv;
+    }
+  }
+
+  ep_dispatch(handle_mem, topk_idx, tokens, topk_weights, rt, rw, tokens_scale_inv,
+              is_scaled ? std::optional<at::Tensor>(rsi) : std::nullopt);
+  if (!caller_omitted_recv) return {};  // caller buffers were mutated in place
+  if (is_scaled) return {rt, rw, rsi};
+  return {rt, rw};
+}
+
 void ep_combine(at::Tensor handle_mem, at::Tensor expert_out, at::Tensor result) {
   auto stream = at::cuda::getCurrentCUDAStream().stream();
   NVTE_CHECK(expert_out.dim() >= 2, "expert_out must be at least 2D [..., recv_pr, H]");
@@ -498,6 +558,8 @@ void register_ep_bindings(pybind11::module_& m) {
   m.def("ep_finalize", &ep_finalize, "Tear down the EP backend. Idempotent.",
         py::call_guard<py::gil_scoped_release>());
   m.def("ep_get_zero_copy", &ep_get_zero_copy, "Return the current EP zero-copy toggle state.");
+  m.def("ep_zero_copy_supported", &ep_zero_copy_supported,
+        "Return True when the extension was built with NCCL symm-mem (zero-copy) support.");
   m.def("ep_handle_mem_size", &ep_handle_mem_size,
         "Return the handle_mem byte size for the given layer config.", py::arg("top_k"),
         py::arg("dispatch_output_per_expert_alignment") = 0);
@@ -509,6 +571,12 @@ void register_ep_bindings(pybind11::module_& m) {
         py::arg("tokens"), py::arg("topk_weights"), py::arg("recv_tokens"),
         py::arg("recv_topk_weights"), py::arg("tokens_scale_inv") = std::nullopt,
         py::arg("recv_scale_inv") = std::nullopt, py::call_guard<py::gil_scoped_release>());
+  m.def("ep_prepare_and_dispatch", &ep_prepare_and_dispatch, "Fused EP prepare + dispatch",
+        py::arg("handle_mem"), py::arg("topk_idx"), py::arg("tokens"), py::arg("topk_weights"),
+        py::arg("tokens_per_expert"), py::arg("total_recv_tokens"), py::arg("top_k"),
+        py::arg("dispatch_output_per_expert_alignment"), py::arg("recv_tokens") = std::nullopt,
+        py::arg("recv_topk_weights") = std::nullopt, py::arg("recv_scale_inv") = std::nullopt,
+        py::arg("tokens_scale_inv") = std::nullopt, py::call_guard<py::gil_scoped_release>());
   m.def("ep_combine", &ep_combine, "EP combine", py::call_guard<py::gil_scoped_release>());
   m.def("ep_dispatch_bwd", &ep_dispatch_bwd, "EP dispatch backward",
         py::call_guard<py::gil_scoped_release>());

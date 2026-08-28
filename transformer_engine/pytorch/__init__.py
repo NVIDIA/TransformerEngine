@@ -17,7 +17,7 @@ assert torch_version() >= (2, 1), f"Minimum torch version 2.1 required. Found {t
 
 load_framework_extension("torch")
 from transformer_engine.pytorch import constants
-from transformer_engine.pytorch.constants import DType
+from transformer_engine.pytorch.constants import CPLoadBalancingStrategy, DType
 from transformer_engine.pytorch.module import LayerNormLinear
 from transformer_engine.pytorch.module import Linear
 from transformer_engine.pytorch.module import LayerNormMLP
@@ -71,9 +71,10 @@ from transformer_engine.pytorch import ops
 from transformer_engine.pytorch import optimizers
 from transformer_engine.pytorch.export import onnx_export
 from transformer_engine.pytorch.cross_entropy import parallel_cross_entropy
-from transformer_engine.pytorch.newton_schulz import (
+from transformer_engine.pytorch.optimizers.newton_schulz import (
     CusolverMpCtx,
     newton_schulz,
+    newton_schulz_tp,
 )
 from transformer_engine.pytorch.quantized_tensor import QuantizedTensorStorage
 from transformer_engine.pytorch.quantized_tensor import QuantizedTensor
