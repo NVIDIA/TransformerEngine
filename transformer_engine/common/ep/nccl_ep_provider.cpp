@@ -8,6 +8,7 @@
 
 #include <dlfcn.h>
 
+#include <algorithm>
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
@@ -35,7 +36,7 @@ bool env_is_set(const char* name) {
   return value != nullptr && value[0] != '\0';
 }
 
-void set_env(const char* name, const std::filesystem::path& value) {
+void set_default_env(const char* name, const std::filesystem::path& value) {
   NVTE_CHECK(setenv(name, value.c_str(), 0) == 0, "Could not set ", name, ": ",
              std::strerror(errno));
 }
@@ -48,6 +49,32 @@ void append_unique(std::vector<std::filesystem::path>* paths, const std::filesys
   paths->push_back(path);
 }
 
+// Add the conventional unversioned and major-version paths first, then discover
+// fully versioned files (for example, libnccl_ep.so.0.1) for installations that
+// omit symlinks. Preserve lookup order while avoiding duplicate dlopen attempts.
+void append_library_dir(std::vector<std::filesystem::path>* candidates,
+                        const std::filesystem::path& directory, const std::string& versioned_name) {
+  append_unique(candidates, directory / kNCCLEPLibraryName);
+  append_unique(candidates, directory / versioned_name);
+
+  std::error_code error;
+  if (!std::filesystem::is_directory(directory, error) || error) return;
+
+  std::vector<std::filesystem::path> fully_versioned;
+  const std::string prefix = versioned_name + ".";
+  for (std::filesystem::directory_iterator iterator(directory, error), end;
+       !error && iterator != end; iterator.increment(error)) {
+    const std::filesystem::directory_entry& entry = *iterator;
+    const std::string filename = entry.path().filename().string();
+    std::error_code file_error;
+    if (filename.rfind(prefix, 0) == 0 && entry.is_regular_file(file_error) && !file_error) {
+      fully_versioned.push_back(entry.path());
+    }
+  }
+  std::sort(fully_versioned.rbegin(), fully_versioned.rend());
+  for (const auto& path : fully_versioned) append_unique(candidates, path);
+}
+
 std::vector<std::filesystem::path> nccl_ep_library_candidates() {
   using Path = std::filesystem::path;
   std::vector<Path> candidates;
@@ -56,15 +83,12 @@ std::vector<std::filesystem::path> nccl_ep_library_candidates() {
 
   if (env_is_set("NCCL_EP_HOME")) {
     const Path home = std::getenv("NCCL_EP_HOME");
-    append_unique(&candidates, home / "lib" / kNCCLEPLibraryName);
-    append_unique(&candidates, home / "lib" / versioned_name);
-    append_unique(&candidates, home / "lib64" / kNCCLEPLibraryName);
-    append_unique(&candidates, home / "lib64" / versioned_name);
+    append_library_dir(&candidates, home / "lib", versioned_name);
+    append_library_dir(&candidates, home / "lib64", versioned_name);
   }
 
   const Path library_dir = shared_library_directory(static_cast<const void*>(&kLibraryAnchor));
-  append_unique(&candidates, library_dir / kNCCLEPLibraryName);
-  append_unique(&candidates, library_dir / versioned_name);
+  append_library_dir(&candidates, library_dir, versioned_name);
   append_unique(&candidates, versioned_name);
   append_unique(&candidates, kNCCLEPLibraryName);
   return candidates;
@@ -111,7 +135,7 @@ void configure_nccl_ep_source_dir(const std::filesystem::path& library_path) {
   for (const auto& home : homes) {
     std::error_code error;
     if (std::filesystem::is_directory(home / "include" / "nccl_ep", error) && !error) {
-      set_env("NCCL_EP_HOME", home);
+      set_default_env("NCCL_EP_HOME", home);
       return;
     }
   }
@@ -136,7 +160,7 @@ void configure_nccl_include_dir() {
 
   for (const auto& candidate : candidates) {
     if (nccl_header_version(candidate) == runtime_version) {
-      set_env("NCCL_EP_JIT_BUILD_INCLUDE_DIR", candidate);
+      set_default_env("NCCL_EP_JIT_BUILD_INCLUDE_DIR", candidate);
       return;
     }
   }
@@ -150,7 +174,7 @@ void configure_cuda_include_dir() {
 
   const std::string& include_dir = cuda::include_directory(false);
   if (!include_dir.empty()) {
-    set_env("NCCL_EP_JIT_CUDA_INCLUDE_DIR", include_dir);
+    set_default_env("NCCL_EP_JIT_CUDA_INCLUDE_DIR", include_dir);
   }
 }
 

@@ -20,7 +20,7 @@ def test_nccl_ep_library_found_from_home(monkeypatch, tmp_path):
     home = tmp_path / "nccl_ep"
     library_dir = home / "lib"
     library_dir.mkdir(parents=True)
-    (library_dir / "libnccl_ep.so.0").touch()
+    (library_dir / "libnccl_ep.so.0.1").touch()
 
     monkeypatch.setenv("NCCL_EP_HOME", str(home))
     _hide_packaged_library(monkeypatch)
@@ -30,14 +30,14 @@ def test_nccl_ep_library_found_from_home(monkeypatch, tmp_path):
 
 
 def test_nccl_ep_library_found_in_package(monkeypatch, tmp_path):
-    plugin = tmp_path / "libnccl_ep.so"
-    plugin.touch()
+    library = tmp_path / "libnccl_ep.so"
+    library.touch()
 
     monkeypatch.delenv("NCCL_EP_HOME", raising=False)
     monkeypatch.setattr(
         transformer_engine.common,
         "_get_shared_object_file",
-        lambda _: plugin,
+        lambda _: library,
     )
     monkeypatch.setattr(transformer_engine, "find_library", lambda _: None)
 
