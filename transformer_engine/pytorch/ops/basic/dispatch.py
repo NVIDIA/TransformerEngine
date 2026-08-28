@@ -166,7 +166,6 @@ class MoeDispatch(BasicOperation):
         # We won't get any fusion benefit, so don't do it here.
         ctx = basic_op_ctxs[0]
         if ctx.requires_grad:
-            ctx.input_dtype = torch.bfloat16
             ctx.dispatch_state = dispatch_state
             ctx.prev_op_grad_output_quantizer = prev_op_grad_output_quantizer
 
@@ -185,7 +184,7 @@ class MoeDispatch(BasicOperation):
     ]:
         ctx = basic_op_ctxs[0]
         # Only BF16 Dispatch_bwd is supported for now.
-        grad_output = maybe_dequantize(grad_output, ctx.input_dtype)
+        grad_output = maybe_dequantize(grad_output, torch.bfloat16)
 
         grad_recv_weights = basic_op_grad_extra_outputs[0][1]
         if grad_recv_weights is None:

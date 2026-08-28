@@ -148,6 +148,8 @@ class MoeCombine(BasicOperation):
             grad_output_quantizer,
             buffer.combine_bwd_quant_recipe,
         )
+        # Only BF16 combine forward is supported for now.
+        input_ = maybe_dequantize(input_, torch.bfloat16)
         input_shape = _validate_combine_inputs(input_, buffer)
         # Stage zero-copy input if needed, then restore local-token order.
         zero_copy = buffer.zero_copy
