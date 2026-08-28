@@ -84,11 +84,13 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   // (no cross-thread reduction needed).
   constexpr bool DBIAS_REDUCTION_IN_COLWISE = IS_DBIAS && COLWISE_SCALING;
   // If columnwise is not quantized, and dbias is fused, we will do a columnwise reduction only pass
-  // (may also cache dact values) without quantization because doing dbias in rowwise requires a SMEM shuffle
-  // which is even slower
-  constexpr bool DBIAS_REDUCTION_COLWISE_ONLY = IS_DBIAS && (!COLWISE_SCALING);
-  // Never do dbias reduction in rowwise because it is slow. Leave this so in case it's enabled in the future
-  constexpr bool DBIAS_REDUCTION_IN_ROWWISE = false;
+  // (may also cache dact values) without quantization because doing dbias in rowwise is slower
+  // With fp32 input and DBIAS+DACT in which this approach is slower so we exclude that case specifically.
+  constexpr bool DBIAS_REDUCTION_COLWISE_ONLY =
+      IS_DBIAS && (!COLWISE_SCALING) && !(COMPUTE_ACTIVATIONS && std::is_same_v<IType, float>);
+  // Rowwise reduction is usually slower unless under the exception mentioned above.
+  constexpr bool DBIAS_REDUCTION_IN_ROWWISE =
+      IS_DBIAS && (!COLWISE_SCALING) && !DBIAS_REDUCTION_COLWISE_ONLY;
 
   // Fast path: keep the elements in BF16/FP16 and compute the AMAX with the half-precision
   // abs-max instead of upcasting every element to FP32. Only possible without activations.
