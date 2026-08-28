@@ -4,7 +4,7 @@
 """Tests for fused attention"""
 import os
 from enum import Enum, auto
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import partial
 from math import sqrt
 from typing import Any, Callable, Mapping, Tuple, Optional, Dict
@@ -384,6 +384,48 @@ def test_fused_attn_score_mod_rejects_masks_before_cudnn_frontend():
             True,
             score_mod=score_mod,
         )
+
+
+def test_fused_attn_backend_message():
+    """Test the error messaging of the fused attention backend query."""
+    baseline = FusedAttnHelper(
+        is_training=True,
+        batch_size=2,
+        q_dtype=jnp.bfloat16,
+        kv_dtype=jnp.bfloat16,
+        qkv_layout=QKVLayout.BSHD_BSHD_BSHD,
+        attn_bias_type=AttnBiasType.NO_BIAS,
+        attn_mask_type=AttnMaskType.NO_MASK,
+        softmax_type=AttnSoftmaxType.VANILLA_SOFTMAX,
+        dropout_probability=0.0,
+        q_num_heads=8,
+        kv_num_heads=8,
+        q_max_seqlen=128,
+        kv_max_seqlen=128,
+        head_dim_qk=64,
+        head_dim_v=64,
+        window_size=(-1, -1),
+        attn_scale=0.125,
+    )
+
+    # One of TE's rules is violated and the error message is surfaced
+    backend, message = replace(
+        baseline, attn_bias_type=AttnBiasType.PRE_SCALE_BIAS
+    ).get_fused_attn_backend()
+    assert backend == NVTE_Fused_Attn_Backend.NVTE_No_Backend
+    assert message == "Fused attention does not support pre-scale bias."
+
+    # No error message if supported; otherwise skip the test
+    backend, message = baseline.get_fused_attn_backend()
+    if backend == NVTE_Fused_Attn_Backend.NVTE_No_Backend:
+        pytest.skip(f"FusedAttention does not support the baseline config: {message}")
+    assert message == ""
+
+    # All TE rules have cleared; now gets rejected by cuDNN's support check
+    # cuDNN's error message might change across cuDNN versions, so only verify the presence of the string
+    backend, message = replace(baseline, head_dim_qk=1024, head_dim_v=1024).get_fused_attn_backend()
+    assert backend == NVTE_Fused_Attn_Backend.NVTE_No_Backend
+    assert message != ""
 
 
 class BiasShape(Enum):
