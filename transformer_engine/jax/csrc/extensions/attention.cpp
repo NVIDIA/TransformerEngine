@@ -410,9 +410,10 @@ static void FusedAttnForwardImpl(
       dropout_probability, scaling_factor, dtype, dtype, dtype, dtype, qkv_layout,
       nvte_get_q_format(qkv_layout), nvte_get_q_format(qkv_layout), qkv_layout,
       NVTE_QKV_Format::NVTE_QKV_Format_NOT_SET, NVTE_QKV_Format::NVTE_QKV_Format_NOT_SET,
-      input_batch, attn_heads, num_gqa_groups, qk_head_dim, v_head_dim, q_max_seqlen, kv_max_seqlen,
-      is_ragged ? input_batch * q_max_seqlen : 0, is_ragged ? input_batch * kv_max_seqlen : 0,
-      bias_batch, bias_heads, bias_seqlen_q, bias_seqlen_kv);
+      num_segments, attn_heads, num_gqa_groups, qk_head_dim, v_head_dim, q_max_seqlen,
+      kv_max_seqlen, is_ragged ? input_batch * q_max_seqlen : 0,
+      is_ragged ? input_batch * kv_max_seqlen : 0, bias_batch, bias_heads, bias_seqlen_q,
+      bias_seqlen_kv);
   nvte_populate_rng_state_async(rng_state, seed, q_max_seqlen, kv_max_seqlen, backend, stream);
 
   /* Auxiliary tensors (to be propagated to the backward pass later) */
@@ -747,9 +748,10 @@ static void FusedAttnBackwardImpl(
       dropout_probability, scaling_factor, dtype, dtype, dtype, dtype, qkv_layout,
       nvte_get_q_format(qkv_layout), nvte_get_q_format(qkv_layout), qkv_layout,
       NVTE_QKV_Format::NVTE_QKV_Format_NOT_SET, NVTE_QKV_Format::NVTE_QKV_Format_NOT_SET,
-      input_batch, attn_heads, num_gqa_groups, qk_head_dim, v_head_dim, q_max_seqlen, kv_max_seqlen,
-      is_ragged ? input_batch * q_max_seqlen : 0, is_ragged ? input_batch * kv_max_seqlen : 0,
-      bias_batch, bias_heads, bias_seqlen_q, bias_seqlen_kv);
+      num_segments, attn_heads, num_gqa_groups, qk_head_dim, v_head_dim, q_max_seqlen,
+      kv_max_seqlen, is_ragged ? input_batch * q_max_seqlen : 0,
+      is_ragged ? input_batch * kv_max_seqlen : 0, bias_batch, bias_heads, bias_seqlen_q,
+      bias_seqlen_kv);
   PrepareFusedAttnBackwardAuxTensors(&aux_input_tensors, input_batch, bias_batch, attn_heads,
                                      bias_heads, q_max_seqlen, kv_max_seqlen, dtype, backend,
                                      softmax_aux, rng_state, bias, softmax_offset);
