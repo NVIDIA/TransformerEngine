@@ -9,64 +9,71 @@ from __future__ import annotations
 from typing import Any, Iterable, Optional
 
 import torch
-import transformer_engine_torch as tex
 
 from ...ep import (
+    EpBuffer,
+    EpConfig,
     _alloc_io,
     _ep_combine_bwd,
     _ep_combine_fwd,
-    _ep_is_eager,
     is_symm_backed,
+    quantize_for_ep,
 )
 from ...quantization import QuantizerRole
 from ...tensor import MXFP8Quantizer, Quantizer
 from .._common import (
-    is_quantized_tensor,
     maybe_dequantize,
-    quantize_for_ep,
     validate_buffer,
+    validate_ep_buffer,
+    validate_ep_comms_recipe,
 )
 from ..op import BasicOperation, OperationContext
 
 
 def _validate_combine_inputs(
     input_: torch.Tensor,
-    handle_mem: torch.Tensor,
-    tokens_per_expert: torch.Tensor,
-    topk_idx: torch.Tensor,
-) -> tuple[tuple[int, int], int]:
-    """Validate the expert output and routing metadata consumed by Combine."""
+    buffer: EpBuffer,
+) -> tuple[int, int]:
+    """Validate the expert output and routing metadata consumed by MoeCombine."""
     if input_.dtype is not torch.bfloat16:
         raise NotImplementedError(f"NCCL EP requires BF16 combine input, got {input_.dtype}.")
     if input_.ndim != 2:
-        raise ValueError(f"Combine input must be 2D, got shape {tuple(input_.shape)}.")
-    if handle_mem.dtype is not torch.uint8 or handle_mem.device != input_.device:
-        raise ValueError("Combine routing handle must be a uint8 tensor on the input device.")
-    if tokens_per_expert.dtype is not torch.int64 or tokens_per_expert.device != input_.device:
-        raise ValueError("Combine tokens_per_expert must be an int64 tensor on the input device.")
-    return tuple(input_.shape), topk_idx.shape[0]
+        raise ValueError(f"MoeCombine input must be 2D, got shape {tuple(input_.shape)}.")
+    if buffer.handle_mem.dtype is not torch.uint8 or buffer.handle_mem.device != input_.device:
+        raise ValueError("MoeCombine routing handle must be a uint8 tensor on the input device.")
+    if (
+        buffer.tokens_per_expert.dtype is not torch.int64
+        or buffer.tokens_per_expert.device != input_.device
+    ):
+        raise ValueError("MoeCombine tokens_per_expert must be an int64 tensor on the input device.")
+    return tuple(input_.shape)
 
 
-class Combine(BasicOperation):
+class MoeCombine(BasicOperation):
     """Combine pre-weighted local expert outputs with NCCL EP.
 
-    The operation consumes the routing handle, tokens-per-expert, and routing
-    indices produced by a preceding :class:`Dispatch` through extra-tensor
-    channels.
+    The operation consumes routing state from a runtime :class:`EpBuffer`.
     """
 
-    num_extra_inputs: int = 3
+    num_extra_inputs: int = 0
+
+    def __init__(self, config: EpConfig) -> None:
+        super().__init__()
+        if not isinstance(config, EpConfig):
+            raise TypeError(f"config must be an EpConfig, got {type(config).__name__}.")
+        self.config = config
 
     def num_quantizers(self, mode: str) -> int:
         return 1 if mode == "backward" else 0
 
     def get_quantizer_roles(self, mode: str) -> Optional[list[QuantizerRole]]:
         if mode == "backward":
+            # combine backward dispatches grad_output
             name = getattr(self, "name", "") or ""
             return [
                 QuantizerRole(
                     module_type="combine",
-                    tensor_type="grad_output",
+                    tensor_type="dispatch_grad_output",
                     name=name,
                 )
             ]
@@ -81,10 +88,10 @@ class Combine(BasicOperation):
             quantizer.internal = True
 
     def op_forward(self, *args: Any, **kwargs: Any) -> None:
-        raise RuntimeError("Combine uses fuser_forward")
+        raise RuntimeError("MoeCombine uses fuser_forward")
 
     def op_backward(self, *args: Any, **kwargs: Any) -> None:
-        raise RuntimeError("Combine uses fuser_backward")
+        raise RuntimeError("MoeCombine uses fuser_backward")
 
     @staticmethod
     def _prepare_grad_buffer(
@@ -97,7 +104,7 @@ class Combine(BasicOperation):
         zero_copy: bool,
     ) -> Optional[torch.Tensor]:
         """Validate caller storage for the expert-output gradient."""
-        if grad_output_quantizer is None:
+        if not isinstance(grad_output_quantizer, MXFP8Quantizer):
             grad_out = validate_buffer(
                 "grad_out",
                 grad_out,
@@ -113,7 +120,7 @@ class Combine(BasicOperation):
                 contiguous=True,
             )
         if zero_copy and grad_out is not None and not is_symm_backed(grad_out):
-            raise ValueError("zero-copy Combine grad_out must be symmetric-memory-backed.")
+            raise ValueError("zero-copy MoeCombine grad_out must be symmetric-memory-backed.")
         return grad_out
 
     def fuser_forward(
@@ -129,18 +136,21 @@ class Combine(BasicOperation):
         # Combine's transport format is selected by Combine's own grad-output quantizer.
         # If the preceding op expects a different gradient quantized format,
         # it is requantized in that op's backward implementation (e.g., GroupedLinear backward).
-        del prev_op_grad_output_quantizer
+        del basic_op_extra_inputs, prev_op_grad_output_quantizer, next_op_input_quantizer
         grad_output_quantizer = self.get_quantizer("backward", 0)
-        handle_mem, tokens_per_expert, topk_idx = basic_op_extra_inputs[0]
-        kwargs = basic_op_kwargs[0]
-        input_shape, num_local_tokens = _validate_combine_inputs(
-            input_,
-            handle_mem,
-            tokens_per_expert,
-            topk_idx,
+        transport_quantizer = (
+            grad_output_quantizer if isinstance(grad_output_quantizer, MXFP8Quantizer) else None
         )
+        kwargs = basic_op_kwargs[0]
+        buffer = validate_ep_buffer("MoeCombine", self.config, kwargs.get("buffer"))
+        validate_ep_comms_recipe(
+            "MoeCombine",
+            grad_output_quantizer,
+            buffer.combine_bwd_quant_recipe,
+        )
+        input_shape = _validate_combine_inputs(input_, buffer)
         # Stage zero-copy input if needed, then restore local-token order.
-        zero_copy = bool(tex.ep_get_zero_copy())
+        zero_copy = buffer.zero_copy
         expert_out = input_
         if zero_copy:
             expert_out = _alloc_io(tuple(input_.shape), input_.dtype, input_.device, True)
@@ -151,7 +161,7 @@ class Combine(BasicOperation):
         if ctx.requires_grad:
             grad_out = self._prepare_grad_buffer(
                 kwargs.get("grad_out"),
-                grad_output_quantizer,
+                transport_quantizer,
                 input_shape=input_shape,
                 input_dtype=input_.dtype,
                 device=input_.device,
@@ -161,20 +171,17 @@ class Combine(BasicOperation):
         result, combine_state = _ep_combine_fwd(
             expert_out,
             grad_out,
-            handle_mem=handle_mem,
-            token_counts=tokens_per_expert,
-            num_local_tokens=num_local_tokens,
+            handle_mem=buffer.handle_mem,
+            token_counts=buffer.tokens_per_expert,
+            num_local_tokens=buffer.num_local_tokens,
             hidden_dim=expert_out.shape[-1],
-            bwd_quant_recipe=grad_output_quantizer,
-            eager=_ep_is_eager(),
+            bwd_quant_recipe=transport_quantizer,
+            eager=buffer.eager,
             zero_copy=zero_copy,
         )
         if ctx.requires_grad:
             ctx.combine_state = combine_state
 
-        # Hand off to the next op in its requested representation.
-        if next_op_input_quantizer is not None and not is_quantized_tensor(result):
-            result = next_op_input_quantizer(result)
         return result, [()]
 
     def fuser_backward(
@@ -193,24 +200,19 @@ class Combine(BasicOperation):
         grad_output_quantizer = self.get_quantizer("backward", 0)
         grad_scale_inv = None
         # Prepare grad_output (Quantize if necessary)
-        if grad_output_quantizer is None:
-            grad_output = maybe_dequantize(grad_output, ctx.input_dtype).contiguous()
-            quantized_grad = None
-        elif isinstance(grad_output_quantizer, MXFP8Quantizer):
+        if isinstance(grad_output_quantizer, MXFP8Quantizer):
             quantized_grad, grad_scale_inv = quantize_for_ep(
                 grad_output,
                 grad_output_quantizer,
             )
             grad_output = quantized_grad
         else:
-            raise TypeError(
-                "NCCL EP Combine backward supports MXFP8Quantizer only, got "
-                f"{type(grad_output_quantizer).__name__}."
-            )
+            grad_output = maybe_dequantize(grad_output, ctx.input_dtype).contiguous()
+            quantized_grad = None
         grad_input = _ep_combine_bwd(
             ctx.combine_state,
             grad_output,
             quantized_grad,
             grad_scale_inv,
         )
-        return grad_input, [()], [(None, None, None)]
+        return grad_input, [()], [()]

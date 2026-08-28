@@ -9,6 +9,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Sequence
 import functools
 from importlib.metadata import PackageNotFoundError, version as get_pkg_version
+import os
 from typing import Any, Optional
 
 from packaging.version import Version as PkgVersion
@@ -16,7 +17,7 @@ import torch
 import transformer_engine_torch as tex
 
 from ...constants import DType, MXFP8_BLOCK_SCALING_SIZE
-from ...ep import get_ep_group
+from ...ep import get_ep_group, quantize_for_ep
 from ...quantization import Recipe
 from ...tensor import GroupedTensor, MXFP8Quantizer, Quantizer
 from ...tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
@@ -26,10 +27,9 @@ from .._common import (
     get_main_grad_from_param,
     is_quantized_tensor,
     maybe_dequantize,
-    quantize_for_ep,
     view_main_grad_as_grouped_buffer,
 )
-from ..basic import Combine, Dispatch, GroupedLinear, ScaledSwiGLU
+from ..basic import GroupedLinear, MoeCombine, MoeDispatch, ScaledSwiGLU
 from ..fuser import register_forward_backward_fusion
 from ..op import FusedOperation, FusibleOperation, OperationContext
 
@@ -40,6 +40,12 @@ def _cudnn_megamoe_supported() -> bool:
         return PkgVersion(get_pkg_version("nvidia-cudnn-frontend")) >= PkgVersion("1.28.0")
     except PackageNotFoundError:
         return False
+
+
+def _get_megamoe_combine_format() -> str:
+    """Return the MegaMoE combine wire format selected by the environment."""
+    enabled = int(os.environ.get("NVTE_MEGAMOE_MXFP8_COMBINE", "0"))
+    return "mxfp8" if enabled > 0 else "bf16"
 
 
 def _pack_as_cudnn_moe_tensor(
@@ -262,11 +268,10 @@ def _import_cudnn_moe_ep():
 
 
 def _routing_extras_internal(
-    dispatch: Dispatch,
+    dispatch: MoeDispatch,
     fc1: GroupedLinear,
     activation: ScaledSwiGLU,
     fc2: GroupedLinear,
-    combine: Combine,
 ) -> bool:
     """Whether the dispatch routing extras stay inside the fusion.
 
@@ -275,13 +280,8 @@ def _routing_extras_internal(
     sequence when those two outputs feed exactly these ops and are not
     returned to the caller.
     """
-    tokens_per_expert, routing_weights, ep_handle, routing_indices = dispatch._extra_output_channels
-    if (
-        tokens_per_expert is None
-        or routing_weights is None
-        or ep_handle is None
-        or routing_indices is None
-    ):
+    tokens_per_expert, routing_weights = dispatch._extra_output_channels
+    if tokens_per_expert is None or routing_weights is None:
         return False
     if any(dispatch._extra_output_to_caller):
         return False
@@ -289,13 +289,10 @@ def _routing_extras_internal(
         fc1._extra_input_channels[0] == tokens_per_expert
         and fc2._extra_input_channels[0] == tokens_per_expert
         and activation._extra_input_channels[0] == routing_weights
-        and combine._extra_input_channels[0] == ep_handle
-        and combine._extra_input_channels[1] == tokens_per_expert
-        and combine._extra_input_channels[2] == routing_indices
     )
 
 
-def _megamoe_supported(buffer, fc1: GroupedLinear, fc2: GroupedLinear) -> bool:
+def _megamoe_supported(config, fc1: GroupedLinear, fc2: GroupedLinear) -> bool:
     """Static MegaMoE capability gates that can be checked before first launch."""
     if not _cudnn_megamoe_supported():
         return False
@@ -303,13 +300,13 @@ def _megamoe_supported(buffer, fc1: GroupedLinear, fc2: GroupedLinear) -> bool:
         return False
     if not torch.cuda.is_available() or torch.cuda.get_device_capability() != (10, 7):
         return False
-    if buffer.max_tokens_per_rank is None or buffer.max_tokens_per_rank <= 0:
+    if config.max_tokens_per_rank <= 0:
         return False
-    if buffer.recv_capacity_per_rank is not None and buffer.recv_capacity_per_rank <= 0:
+    if config.recv_capacity_per_rank is None or config.recv_capacity_per_rank <= 0:
         return False
-    if buffer.hidden_dim % 128 != 0 or fc2.in_features % 256 != 0:
+    if config.hidden_dim % 128 != 0 or fc2.in_features % 256 != 0:
         return False
-    if buffer.top_k > 32:
+    if config.top_k > 32:
         return False
     return True
 
@@ -321,29 +318,29 @@ def _matches(window: Sequence[FusibleOperation], recipe: Optional[Recipe]) -> bo
         return False
     dispatch, fc1, activation, fc2, combine = window
     if not (
-        isinstance(dispatch, Dispatch)
+        isinstance(dispatch, MoeDispatch)
         and isinstance(fc1, GroupedLinear)
         and isinstance(activation, ScaledSwiGLU)
         and isinstance(fc2, GroupedLinear)
-        and isinstance(combine, Combine)
+        and isinstance(combine, MoeCombine)
     ):
         return False
-    buffer = dispatch.buffer
-    if buffer.payload_dtype is not torch.bfloat16:
+    config = dispatch.config
+    if combine.config != config or config.payload_dtype is not torch.bfloat16:
         return False
     if not (_grouped_linear_supported(fc1) and _grouped_linear_supported(fc2)):
         return False
     if activation.activation_recompute_in_mlp or activation.glu_interleave_size is not None:
         return False
-    if not _routing_extras_internal(dispatch, fc1, activation, fc2, combine):
+    if not _routing_extras_internal(dispatch, fc1, activation, fc2):
         return False
-    if not _megamoe_supported(buffer, fc1, fc2):
+    if not _megamoe_supported(config, fc1, fc2):
         return False
     return (
-        fc1.num_groups == buffer.num_local_experts
-        and fc2.num_groups == buffer.num_local_experts
-        and fc1.in_features == buffer.hidden_dim
-        and fc2.out_features == buffer.hidden_dim
+        fc1.num_groups == config.num_local_experts
+        and fc2.num_groups == config.num_local_experts
+        and fc1.in_features == config.hidden_dim
+        and fc2.out_features == config.hidden_dim
         and fc1.out_features == 2 * fc2.in_features
     )
 
@@ -354,11 +351,11 @@ class FusedMoeEp(FusedOperation):
     def __init__(
         self,
         *,
-        dispatch: Dispatch,
+        dispatch: MoeDispatch,
         fc1: GroupedLinear,
         activation: ScaledSwiGLU,
         fc2: GroupedLinear,
-        combine: Combine,
+        combine: MoeCombine,
     ) -> None:
         super().__init__([dispatch, fc1, activation, fc2, combine])
         moe_ep_cls = _import_cudnn_moe_ep()
@@ -372,27 +369,29 @@ class FusedMoeEp(FusedOperation):
 
         ep_group = get_ep_group()
         ep_size = 1 if ep_group is None else ep_group.size()
+        config = dispatch.config
+        combine_format = _get_megamoe_combine_format()
         self._block_scaled_cls = BlockScaledTensor
         self._moe = moe_ep_cls(
-            num_experts=dispatch.buffer.num_local_experts * ep_size,
-            hidden_size=dispatch.buffer.hidden_dim,
+            num_experts=config.num_local_experts * ep_size,
+            hidden_size=config.hidden_dim,
             intermediate_size=fc2.in_features,
-            top_k=dispatch.buffer.top_k,
+            top_k=config.top_k,
             ep_group=ep_group,
-            max_tokens_per_rank=dispatch.buffer.max_tokens_per_rank,
-            max_recv_size_per_rank=dispatch.buffer.recv_capacity_per_rank,
-            drop_on_overflow=False,
+            max_tokens_per_rank=config.max_tokens_per_rank,
+            max_recv_size_per_rank=config.recv_capacity_per_rank,
+            drop_on_overflow=config.drop_on_overflow,
             apply_topk_in_fc1=True,
             generate_c=True,
             backward_wgrad_mode="operands",
             token_padding_size=256,
             sf_padding_size=128,
-            combine_format="bf16",
+            combine_format=combine_format,
             output_format="bf16",
         )
 
     @property
-    def dispatch(self) -> Dispatch:
+    def dispatch(self) -> MoeDispatch:
         return self.basic_ops[0]
 
     @property
@@ -428,8 +427,6 @@ class FusedMoeEp(FusedOperation):
             raise NotImplementedError(
                 f"FusedMoeEp supports E4M3 MXFP8 only, got {input_._fp8_dtype}."
             )
-        if any(kwargs for kwargs in basic_op_kwargs):
-            raise NotImplementedError("FusedMoeEp does not support per-operation output buffers.")
 
         topk_idx, topk_weights = basic_op_extra_inputs[0]
         if topk_weights.dtype is not torch.float32:
@@ -478,7 +475,7 @@ class FusedMoeEp(FusedOperation):
         if next_op_input_quantizer is not None and not is_quantized_tensor(output):
             output = next_op_input_quantizer(output)
         return output, [
-            (None, None, None, None),
+            (None, None),
             (),
             (),
             (),
@@ -547,7 +544,7 @@ class FusedMoeEp(FusedOperation):
         return (
             grad_input,
             [(), fc1_param_grads, (), fc2_param_grads, ()],
-            [(None, grad_topk_weights.float()), (None,), (None,), (None,), (None, None, None)],
+            [(None, grad_topk_weights.float()), (None,), (None,), (None,), ()],
         )
 
 

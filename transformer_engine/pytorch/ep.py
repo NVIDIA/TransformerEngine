@@ -24,8 +24,10 @@ from .tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
 # common.recipe (the concrete recipe classes are imported lazily where used).
 if TYPE_CHECKING:
     from ..common.recipe import Recipe
+    from .quantized_tensor import Quantizer
 
 __all__ = [
+    "EpConfig",
     "EpBuffer",
     "ep_bootstrap",
     "get_ep_group",
@@ -83,11 +85,27 @@ _EP_GROUP: Optional[dist.ProcessGroup] = None
 # omitted); ep_dispatch reads it to size the recv outputs from the per-step
 # recv-token total instead of a fixed recv_capacity_per_rank.
 _EAGER = False
+_BOOTSTRAP_SETTINGS: Optional[dict[str, object]] = None
+
+
+@dataclass(frozen=True)
+class EpConfig:
+    """Immutable configuration shared by an EP buffer and its MoE operations."""
+
+    top_k: int
+    hidden_dim: int
+    num_local_experts: int
+    max_tokens_per_rank: int
+    recv_capacity_per_rank: Optional[int]
+    alignment: int = 0
+    payload_dtype: torch.dtype = torch.bfloat16
+    zero_copy: bool = False
+    drop_on_overflow: bool = False
 
 
 def _atexit_finalize() -> None:
     """Best-effort teardown at interpreter shutdown; swallows errors."""
-    global _BOOTSTRAPPED, _EP_GROUP, _EAGER
+    global _BOOTSTRAPPED, _EP_GROUP, _EAGER, _BOOTSTRAP_SETTINGS
     if _BOOTSTRAPPED:
         try:
             tex.ep_finalize()
@@ -99,6 +117,7 @@ def _atexit_finalize() -> None:
             _BOOTSTRAPPED = False
             _EP_GROUP = None
             _EAGER = False
+            _BOOTSTRAP_SETTINGS = None
 
 
 def ep_bootstrap(
@@ -134,7 +153,7 @@ def ep_bootstrap(
     ``drop_on_overflow`` drops tokens exceeding ``recv_capacity_per_rank`` instead
     of trapping. Requires ``recv_capacity_per_rank``.
     """
-    global _BOOTSTRAPPED, _ATEXIT_REGISTERED, _EP_GROUP, _EAGER
+    global _BOOTSTRAPPED, _ATEXIT_REGISTERED, _EP_GROUP, _EAGER, _BOOTSTRAP_SETTINGS
     eager = recv_capacity_per_rank is None
     if _BOOTSTRAPPED:
         raise RuntimeError("ep_bootstrap was already called in this process")
@@ -181,6 +200,18 @@ def ep_bootstrap(
     _BOOTSTRAPPED = True
     _EP_GROUP = ep_group
     _EAGER = bool(eager)
+    _BOOTSTRAP_SETTINGS = {
+        "top_k": int(num_topk),
+        "hidden_dim": int(hidden_dim),
+        "num_local_experts": int(num_experts) // ep_group.size(),
+        "max_tokens_per_rank": int(max_tokens_per_rank),
+        "recv_capacity_per_rank": (
+            None if recv_capacity_per_rank is None else int(recv_capacity_per_rank)
+        ),
+        "payload_dtype": max_token_dtype,
+        "zero_copy": bool(zero_copy),
+        "drop_on_overflow": bool(drop_on_overflow),
+    }
     if not _ATEXIT_REGISTERED:
         atexit.register(_atexit_finalize)
         _ATEXIT_REGISTERED = True
@@ -211,7 +242,7 @@ def ep_finalize() -> None:
     a caller that used ``symm_mem_alloc(use_pool=True)`` does not need a separate
     ``release_symm_mem_pool()`` before destroying the PG.
     """
-    global _BOOTSTRAPPED, _EP_GROUP, _EAGER
+    global _BOOTSTRAPPED, _EP_GROUP, _EAGER, _BOOTSTRAP_SETTINGS
     if not _BOOTSTRAPPED:
         return
     try:
@@ -222,6 +253,7 @@ def ep_finalize() -> None:
         _BOOTSTRAPPED = False
         _EP_GROUP = None
         _EAGER = False
+        _BOOTSTRAP_SETTINGS = None
 
 
 def is_symm_backed(t: torch.Tensor) -> bool:
@@ -248,22 +280,17 @@ def is_symm_backed(t: torch.Tensor) -> bool:
 
 
 class EpBuffer:
-    """Per-microbatch EP layer state: handle_mem, tokens_per_expert, and shape/dtype config.
+    """Per-microbatch EP routing state allocated from an immutable :class:`EpConfig`.
+
     Use one EpBuffer per concurrently-in-flight call (e.g. per PP-1F1B microbatch).
     """
 
     __slots__ = (
+        "config",
         "handle_mem",
-        "top_k",
-        "alignment",
-        "max_tokens_per_rank",
-        "recv_capacity_per_rank",
-        "hidden_dim",
-        "num_local_experts",
-        "payload_dtype",
         "device",
         "tokens_per_expert",
-        "zero_copy",
+        "num_local_tokens",
         "eager",
         "total_recv_tokens",
         "dispatch_fwd_quant_recipe",
@@ -272,49 +299,43 @@ class EpBuffer:
 
     def __init__(
         self,
-        top_k: int,
-        max_tokens_per_rank: int,
-        hidden_dim: int,
-        num_local_experts: int,
-        recv_capacity_per_rank: Optional[int] = None,
-        alignment: int = 0,
-        payload_dtype: torch.dtype = torch.bfloat16,
+        config: EpConfig,
+        *,
         device: Optional[torch.device] = None,
         dispatch_fwd_quant_recipe: Optional["Recipe"] = None,
         combine_bwd_quant_recipe: Optional["Recipe"] = None,
     ) -> None:
         if not _BOOTSTRAPPED:
             raise RuntimeError("EpBuffer requires ep_bootstrap() to be called first.")
+        if not isinstance(config, EpConfig):
+            raise TypeError(f"config must be an EpConfig, got {type(config).__name__}.")
+        if _BOOTSTRAP_SETTINGS is None:
+            raise RuntimeError("EP bootstrap configuration is unavailable.")
+        mismatches = {
+            name: (getattr(config, name), expected)
+            for name, expected in _BOOTSTRAP_SETTINGS.items()
+            if getattr(config, name) != expected
+        }
+        if mismatches:
+            details = ", ".join(
+                f"{name}={actual!r} (bootstrapped {expected!r})"
+                for name, (actual, expected) in mismatches.items()
+            )
+            raise ValueError(f"EpConfig does not match ep_bootstrap: {details}.")
         if device is None:
             device = torch.device("cuda", torch.cuda.current_device())
-        alignment = int(alignment)
-        if alignment > 1 and (alignment & (alignment - 1)) != 0:
-            raise ValueError(f"alignment must be 0, 1, or a power of two (got {alignment}).")
-        self.eager = _EAGER
-        if not self.eager and recv_capacity_per_rank is None:
-            raise ValueError(
-                "EpBuffer requires recv_capacity_per_rank unless the EP group was "
-                "bootstrapped in eager mode (recv_capacity_per_rank omitted)."
-            )
-        self.top_k = int(top_k)
-        self.alignment = alignment
-        self.max_tokens_per_rank = int(max_tokens_per_rank)
-        self.recv_capacity_per_rank = (
-            None if recv_capacity_per_rank is None else int(recv_capacity_per_rank)
-        )
-        self.hidden_dim = int(hidden_dim)
-        self.num_local_experts = int(num_local_experts)
-        self.payload_dtype = payload_dtype
+        self.config = config
+        self.eager = config.recv_capacity_per_rank is None
         self.device = device
-        self.zero_copy = bool(tex.ep_get_zero_copy())
         self.dispatch_fwd_quant_recipe = dispatch_fwd_quant_recipe
         self.combine_bwd_quant_recipe = combine_bwd_quant_recipe
 
-        size_bytes = tex.ep_handle_mem_size(self.top_k, self.alignment)
+        size_bytes = tex.ep_handle_mem_size(config.top_k, config.alignment)
         self.handle_mem = torch.empty(int(size_bytes), dtype=torch.uint8, device=device)
         self.tokens_per_expert = torch.empty(
-            self.num_local_experts, dtype=torch.int64, device=device
+            config.num_local_experts, dtype=torch.int64, device=device
         )
+        self.num_local_tokens = config.max_tokens_per_rank
         # Persistent tensor; keep resident if activation CPU offloading is on.
         mark_not_offload(self.handle_mem)
         # Per-step recv-token total (int64 [1]), written by ep_prepare. Eager reads it
@@ -328,6 +349,38 @@ class EpBuffer:
         else:
             self.total_recv_tokens = torch.empty(1, dtype=torch.int64, device=device)
             mark_not_offload(self.total_recv_tokens)
+
+    @property
+    def top_k(self) -> int:
+        return self.config.top_k
+
+    @property
+    def alignment(self) -> int:
+        return self.config.alignment
+
+    @property
+    def max_tokens_per_rank(self) -> int:
+        return self.config.max_tokens_per_rank
+
+    @property
+    def recv_capacity_per_rank(self) -> Optional[int]:
+        return self.config.recv_capacity_per_rank
+
+    @property
+    def hidden_dim(self) -> int:
+        return self.config.hidden_dim
+
+    @property
+    def num_local_experts(self) -> int:
+        return self.config.num_local_experts
+
+    @property
+    def payload_dtype(self) -> torch.dtype:
+        return self.config.payload_dtype
+
+    @property
+    def zero_copy(self) -> bool:
+        return self.config.zero_copy
 
 
 # torch.library custom ops (so they don't graph-break under torch.compile)
@@ -725,7 +778,15 @@ class _EpPrepareAndDispatch(torch.autograd.Function):
         the buffer object to keep the autograd operand list short."""
         tokens_scale_inv = None
         if buffer.dispatch_fwd_quant_recipe is not None:
-            tokens, tokens_scale_inv = _quantize_mxfp8(tokens)
+            from .tensor.mxfp8_tensor import MXFP8Quantizer
+            # Only MXFP8 Quantizer is supported for EP dispatch
+            quantizer = MXFP8Quantizer(
+                tex.DType.kFloat8E4M3,
+                rowwise=True,
+                columnwise=False,
+            )
+            quantizer.internal = True
+            tokens, tokens_scale_inv = quantize_for_ep(tokens, quantizer)
         recv_out, recv_topk_weights, state = _ep_prepare_and_dispatch_fwd(
             tokens,
             topk_weights,
@@ -843,7 +904,15 @@ def _ep_combine_bwd(
             torch.ops.transformer_engine_ep.combine_bwd(handle_mem, g_result, grad_expert_out)
     else:
         if quantized_grad is None:
-            mx, grad_scale_inv = _quantize_mxfp8(g_result)
+            from .tensor.mxfp8_tensor import MXFP8Quantizer
+            # Only MXFP8 Quantizer is supported for EP combine bwd
+            quantizer = MXFP8Quantizer(
+                tex.DType.kFloat8E4M3,
+                rowwise=True,
+                columnwise=False,
+            )
+            quantizer.internal = True
+            mx, grad_scale_inv = quantize_for_ep(g_result, quantizer)
         else:
             mx = quantized_grad
         if grad_scale_inv is None:
@@ -972,33 +1041,46 @@ def _as_mxfp8_storage(tensor: QuantizedTensorStorage):
     )
 
 
-def _quantize_mxfp8(x: torch.Tensor):
-    """Quantize to lightweight MXFP8 storage and return it with compact transport scales.
-
-    ``scale_inv`` has shape ``[T, H/block]``. EP routes and returns E4M3 data in both directions,
-    so quantize to E4M3 regardless of pass. The GEMM scale-row padding is stripped and each compact
-    scale row must remain 16-byte aligned.
-    """
-    from .constants import MXFP8_BLOCK_SCALING_SIZE
+def quantize_for_ep(
+    input_: torch.Tensor | QuantizedTensorStorage,
+    quantizer: Optional["Quantizer"],
+) -> tuple[MXFP8TensorStorage, torch.Tensor]:
+    """Return an MXFP8 input and its compact rowwise scales for EP."""
+    from .constants import DType, MXFP8_BLOCK_SCALING_SIZE
     from .tensor.mxfp8_tensor import MXFP8Quantizer
 
-    quantizer = MXFP8Quantizer(tex.DType.kFloat8E4M3, rowwise=True, columnwise=False)
-    quantizer.internal = True
-    mx = quantizer.quantize(x)
-    if mx._with_gemm_swizzled_scales:
-        raise RuntimeError(
-            "internal MXFP8 quantization produced swizzled scales; EP dispatch needs compact."
+    if quantizer is not None:
+        if not isinstance(quantizer, MXFP8Quantizer):
+            raise TypeError(
+                f"EP MXFP8 transport requires MXFP8Quantizer, got {type(quantizer).__name__}."
+            )
+        if quantizer.dtype != DType.kFloat8E4M3:
+            raise NotImplementedError("EP MXFP8 transport supports E4M3 only.")
+
+    if isinstance(input_, MXFP8TensorStorage):
+        quantized = input_
+    elif isinstance(input_, QuantizedTensorStorage):
+        raise TypeError(
+            f"EP MXFP8 transport requires an MXFP8 input, got {type(input_).__name__}."
         )
-    data = mx._rowwise_data
-    scale_inv = mx._rowwise_scale_inv
+    else:
+        if quantizer is None:
+            raise ValueError("An MXFP8 quantizer is required for a non-quantized EP input.")
+        quantized = quantizer(input_)
+    quantized = _as_mxfp8_storage(quantized)
+    if quantized._fp8_dtype != DType.kFloat8E4M3:
+        raise NotImplementedError("EP MXFP8 transport supports E4M3 only.")
+    if quantized._with_gemm_swizzled_scales:
+        raise ValueError("EP requires unswizzled MXFP8 scales.")
+    data = quantized._rowwise_data
+    scale_inv = quantized._rowwise_scale_inv
     if data is None or scale_inv is None:
-        raise ValueError("MXFP8 tokens must carry rowwise data and scale_inv for EP dispatch.")
-    t_flat = x.shape[0]
-    hidden = x.shape[-1]
-    cols = hidden // MXFP8_BLOCK_SCALING_SIZE
+        raise ValueError("EP requires rowwise MXFP8 data and scales.")
+    rows, hidden = input_.shape
+    scale_cols = hidden // MXFP8_BLOCK_SCALING_SIZE
     # The backend forwards each token's scale row with a 16-byte-aligned store, so the row
     # (cols * dtype bytes) must be a multiple of 16.
-    scale_row_bytes = cols * scale_inv.element_size()
+    scale_row_bytes = scale_cols * scale_inv.element_size()
     if scale_row_bytes % 16 != 0:
         raise ValueError(
             f"MXFP8 dispatch requires a 16-byte-aligned scale row; hidden={hidden} gives "
@@ -1008,13 +1090,10 @@ def _quantize_mxfp8(x: torch.Tensor):
     # scale_inv is 2D [round_up(T, 128), cols]; drop the row padding to the logical [T, H/block]
     # the backend expects. cols is a multiple of 4 (16-byte row), so no column padding and the
     # slice stays contiguous; assert rather than force a copy.
-    scale_inv = scale_inv[:t_flat, :cols]
+    scale_inv = scale_inv[:rows, :scale_cols]
     if not scale_inv.is_contiguous():
-        raise ValueError(
-            "MXFP8 dispatch requires compact contiguous scales [T, H/block]; got a "
-            f"non-contiguous [{t_flat}, {cols}] slice."
-        )
-    return mx, scale_inv
+        raise ValueError("EP requires compact contiguous MXFP8 scales.")
+    return quantized, scale_inv
 
 
 def _scale_alloc_io(buf, rows, data_cols, scale_cols, data_dtype, scale_dtype, device, zero_copy):

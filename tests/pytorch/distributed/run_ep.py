@@ -4,6 +4,7 @@
 """Multi-process PyTorch EP tests, launched via torchrun (one process per GPU)."""
 
 from contextlib import nullcontext
+from dataclasses import replace
 import os
 import sys
 import unittest
@@ -17,6 +18,7 @@ from transformer_engine.pytorch import ops as te_ops
 from transformer_engine.common.recipe import MXFP8BlockScaling
 from transformer_engine.pytorch.ep import (
     EpBuffer,
+    EpConfig,
     ep_bootstrap,
     ep_finalize,
     ep_prepare,
@@ -37,6 +39,7 @@ from transformer_engine.pytorch.ep_reference import (
 from transformer_engine.pytorch.ops.fused.moe_ep import (
     FusedMoeEp,
     _cudnn_megamoe_supported,
+    _get_megamoe_combine_format,
     _pack_cudnn_activation,
     _pack_cudnn_weights,
 )
@@ -290,13 +293,18 @@ class _EpTestCase(unittest.TestCase):
         dispatch_fwd_quant_recipe=None,
         combine_bwd_quant_recipe=None,
     ):
-        return EpBuffer(
+        config = EpConfig(
             top_k=top_k,
             max_tokens_per_rank=TOKENS_PER_RANK,
             hidden_dim=HIDDEN_DIM,
             num_local_experts=NUM_LOCAL_EXPERTS,
             recv_capacity_per_rank=None if EAGER else self.cfg.recv_capacity_per_rank,
             alignment=alignment,
+            zero_copy=ZERO_COPY,
+            drop_on_overflow=OVERFLOW,
+        )
+        return EpBuffer(
+            config,
             dispatch_fwd_quant_recipe=dispatch_fwd_quant_recipe,
             combine_bwd_quant_recipe=combine_bwd_quant_recipe,
         )
@@ -911,9 +919,78 @@ class TestMoeEpSequential(_EpTestCase):
                 "(set NVTE_EP_HIDDEN_DIM / NVTE_EP_TOKENS_PER_RANK)"
             )
 
+    def test_runtime_buffer_config_mismatch(self):
+        buffer = self._make_buffer()
+        wrong_config = replace(buffer.config, hidden_dim=buffer.config.hidden_dim + 1)
+        topk_idx, tokens, topk_weights = _make_identity_inputs(
+            self.cfg.rank,
+            self.cfg.ep_size,
+        )
+        with self.assertRaisesRegex(ValueError, "runtime buffer config"):
+            te_ops.MoeDispatch(wrong_config)(
+                tokens,
+                topk_idx,
+                topk_weights,
+                buffer=buffer,
+            )
+        expert_out = torch.empty(
+            self.cfg.recv_capacity_per_rank,
+            HIDDEN_DIM,
+            dtype=torch.bfloat16,
+            device=self.cfg.device,
+        )
+        with self.assertRaisesRegex(ValueError, "runtime buffer config"):
+            te_ops.MoeCombine(wrong_config)(expert_out, buffer=buffer)
+
+    def test_megamoe_combine_format_env(self):
+        old_value = os.environ.get("NVTE_MEGAMOE_MXFP8_COMBINE")
+        try:
+            os.environ["NVTE_MEGAMOE_MXFP8_COMBINE"] = "0"
+            self.assertEqual(_get_megamoe_combine_format(), "bf16")
+            os.environ["NVTE_MEGAMOE_MXFP8_COMBINE"] = "1"
+            self.assertEqual(_get_megamoe_combine_format(), "mxfp8")
+        finally:
+            if old_value is None:
+                os.environ.pop("NVTE_MEGAMOE_MXFP8_COMBINE", None)
+            else:
+                os.environ["NVTE_MEGAMOE_MXFP8_COMBINE"] = old_value
+
+    @_mxfp8_align_test
+    def test_role_quantizer_requires_matching_buffer_recipe(self):
+        self._require_mxfp8_shapes()
+        buffer = self._make_buffer(alignment=128)
+        dispatch = te_ops.MoeDispatch(buffer.config)
+        combine = te_ops.MoeCombine(buffer.config)
+        topk_idx, tokens, topk_weights = _make_identity_inputs(
+            self.cfg.rank,
+            self.cfg.ep_size,
+        )
+        recipe = MXFP8BlockScaling()
+        with te.autocast(enabled=True, recipe=recipe):
+            with self.assertRaisesRegex(ValueError, "does not have an MXFP8BlockScaling recipe"):
+                dispatch(tokens, topk_idx, topk_weights, buffer=buffer)
+            expert_out = torch.empty(
+                self.cfg.recv_capacity_per_rank,
+                HIDDEN_DIM,
+                dtype=torch.bfloat16,
+                device=self.cfg.device,
+                requires_grad=True,
+            )
+            with self.assertRaisesRegex(ValueError, "does not have an MXFP8BlockScaling recipe"):
+                combine(expert_out, buffer=buffer)
+
     def _make_dispatch_combine_ops(self, *, mxfp8):
-        buffer = self._make_buffer(alignment=128 if mxfp8 else 0)
-        return buffer, te_ops.Dispatch(buffer), te_ops.Combine()
+        recipe = MXFP8BlockScaling() if mxfp8 else None
+        buffer = self._make_buffer(
+            alignment=128 if mxfp8 else 0,
+            dispatch_fwd_quant_recipe=recipe,
+            combine_bwd_quant_recipe=recipe,
+        )
+        return (
+            buffer,
+            te_ops.MoeDispatch(buffer.config),
+            te_ops.MoeCombine(buffer.config),
+        )
 
     def _run_dispatch_combine_identity(self, *, mxfp8):
         """Route, apply top-k weights, and combine back to local token order."""
@@ -926,10 +1003,11 @@ class TestMoeEpSequential(_EpTestCase):
         )
         recipe = MXFP8BlockScaling() if mxfp8 else None
         with te.autocast(enabled=mxfp8, recipe=recipe):
-            recv_tokens, tokens_per_expert, recv_weights, handle, routing_indices = dispatch(
+            recv_tokens, tokens_per_expert, recv_weights = dispatch(
                 tokens,
                 topk_idx,
                 topk_weights,
+                buffer=buffer,
             )
         if mxfp8:
             recv_tokens = _degroup_mxfp8(recv_tokens)
@@ -939,25 +1017,23 @@ class TestMoeEpSequential(_EpTestCase):
         )
         output = combine(
             weighted_expert_output,
-            handle,
-            tokens_per_expert,
-            routing_indices,
+            buffer=buffer,
         )
         torch.cuda.synchronize()
         torch.testing.assert_close(output, tokens, atol=5e-2, rtol=5e-2)
-        self.assertEqual(handle.data_ptr(), buffer.handle_mem.data_ptr())
+        self.assertEqual(tokens_per_expert.data_ptr(), buffer.tokens_per_expert.data_ptr())
 
     @_eager_test_include
     @_zero_copy_test_include
     def test_dispatch_combine_identity_bf16(self):
-        """Dispatch and Combine basic ops form an identity in BF16."""
+        """MoeDispatch and MoeCombine basic ops form an identity in BF16."""
         self._run_dispatch_combine_identity(mxfp8=False)
 
     @_eager_test_include
     @_zero_copy_test_include
     @_mxfp8_align_test
     def test_dispatch_combine_identity_mxfp8(self):
-        """Dispatch and Combine basic ops form an identity with MXFP8 transport."""
+        """MoeDispatch and MoeCombine basic ops form an identity with MXFP8 transport."""
         self._run_dispatch_combine_identity(mxfp8=True)
 
     def _make_megamoe_model(
@@ -968,8 +1044,12 @@ class TestMoeEpSequential(_EpTestCase):
         delay_wgrad_compute=False,
     ):
         """Build the exact five-op sequence recognized by MegaMoE fusion."""
-        buffer = self._make_buffer(alignment=128 if recipe is not None else 0)
-        dispatch = te_ops.Dispatch(buffer)
+        buffer = self._make_buffer(
+            alignment=128 if recipe is not None else 0,
+            dispatch_fwd_quant_recipe=recipe,
+            combine_bwd_quant_recipe=recipe,
+        )
+        dispatch = te_ops.MoeDispatch(buffer.config)
         init_ctx = (
             te.quantized_model_init(enabled=True, recipe=recipe)
             if recipe is not None
@@ -1007,20 +1087,15 @@ class TestMoeEpSequential(_EpTestCase):
                 del os.environ["NVTE_GROUPED_LINEAR_SINGLE_PARAM"]
             else:
                 os.environ["NVTE_GROUPED_LINEAR_SINGLE_PARAM"] = previous_single_param
-        combine = te_ops.Combine()
+        combine = te_ops.MoeCombine(buffer.config)
 
         dispatch.set_extra_output_channel(0, "tokens_per_expert", output_to_caller=False)
         dispatch.set_extra_output_channel(1, "routing_weights", output_to_caller=False)
-        dispatch.set_extra_output_channel(2, "ep_handle", output_to_caller=False)
-        dispatch.set_extra_output_channel(3, "routing_indices", output_to_caller=False)
         fc1.set_extra_input_channel(0, "tokens_per_expert")
         activation.set_extra_input_channel(0, "routing_weights")
         fc2.set_extra_input_channel(0, "tokens_per_expert")
-        combine.set_extra_input_channel(0, "ep_handle")
-        combine.set_extra_input_channel(1, "tokens_per_expert")
-        combine.set_extra_input_channel(2, "routing_indices")
         model = te_ops.Sequential(dispatch, fc1, activation, fc2, combine)
-        return model, fc1, fc2
+        return model, fc1, fc2, buffer
 
     @_eager_test_include
     def test_megamoe_bf16_numerics(self):
@@ -1118,7 +1193,7 @@ class TestMoeEpSequential(_EpTestCase):
         exercises the same sequence as separate NCCL EP and grouped-MLP ops.
         """
         recipe = MXFP8BlockScaling() if quantization == "mxfp8" else None
-        model, fc1, fc2 = self._make_megamoe_model(
+        model, fc1, fc2, buffer = self._make_megamoe_model(
             recipe=recipe,
             accumulate_into_main_grad=accumulate_into_main_grad,
             delay_wgrad_compute=delay_wgrad_compute,
@@ -1168,7 +1243,15 @@ class TestMoeEpSequential(_EpTestCase):
         )
         with autocast_ctx:
             model_input = self._mxfp8_quantizer()(seq_tokens) if prequantized_input else seq_tokens
-            seq_out = model(model_input, topk_idx, seq_topk_weights)
+            seq_out = model(
+                model_input,
+                topk_idx,
+                seq_topk_weights,
+                op_kwargs={
+                    0: {"buffer": buffer},
+                    4: {"buffer": buffer},
+                },
+            )
 
         forward_ops = model._module_groups[0]._forward_ops
         fused = len(forward_ops) == 1 and isinstance(forward_ops[0][0], FusedMoeEp)
@@ -1189,7 +1272,11 @@ class TestMoeEpSequential(_EpTestCase):
             ep_group=self.ep_group,
             max_tokens_per_rank=TOKENS_PER_RANK,
             output_format=MoeFormat.BF16,
-            combine_format=MoeFormat.BF16,
+            combine_format=(
+                MoeFormat.MXFP8
+                if fused and os.environ.get("NVTE_MEGAMOE_MXFP8_COMBINE", "0") == "1"
+                else MoeFormat.BF16
+            ),
             apply_topk_in_fc1=True,
             generate_c=True,
             intermediate_format=MoeFormat.MXFP8 if emulate_mxfp8 else None,

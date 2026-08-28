@@ -12,15 +12,18 @@ import torch
 
 from ...ep import (
     EpBuffer,
+    EpConfig,
     _ep_dispatch_bwd,
     _ep_prepare_and_dispatch_fwd,
+    quantize_for_ep,
 )
 from ...quantization import QuantizerRole
 from ...tensor import MXFP8Quantizer, Quantizer
 from ...tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
 from .._common import (
     maybe_dequantize,
-    quantize_for_ep,
+    validate_ep_buffer,
+    validate_ep_comms_recipe,
 )
 from ..op import BasicOperation, OperationContext
 
@@ -33,10 +36,10 @@ def _validate_dispatch_input(
     input_shape = tuple(input_.shape)
     if len(input_shape) != 2 or input_shape[-1] != buffer.hidden_dim:
         raise ValueError(
-            f"Dispatch input must have shape (T, {buffer.hidden_dim}), got {input_shape}."
+            f"MoeDispatch input must have shape (T, {buffer.hidden_dim}), got {input_shape}."
         )
     if input_.device != buffer.device:
-        raise ValueError(f"Dispatch input must be on {buffer.device}, got {input_.device}.")
+        raise ValueError(f"MoeDispatch input must be on {buffer.device}, got {input_.device}.")
     return input_shape
 
 
@@ -54,22 +57,22 @@ def _validate_routing_inputs(
             raise ValueError(f"{name} must be on {device}, got {tensor.device}.")
 
 
-class Dispatch(BasicOperation):
+class MoeDispatch(BasicOperation):
     """Dispatch floating-point or MXFP8 tokens to local experts with NCCL EP.
 
     The extra inputs are routing indices and FP32 routing weights. The extra
-    outputs are local tokens-per-expert, received routing weights, the routing
-    handle, and routing indices for recovering the local token shape.
+    outputs are local tokens-per-expert and received routing weights.
     """
 
     num_extra_inputs: int = 2
-    # tokens-per-expert, received routing weights, and the opaque NCCL EP
-    # routing handle and routing indices consumed by Combine.
-    num_extra_outputs: int = 4
+    # tokens-per-expert and received routing weights consumed by the expert MLP.
+    num_extra_outputs: int = 2
 
-    def __init__(self, buffer: EpBuffer) -> None:
+    def __init__(self, config: EpConfig) -> None:
         super().__init__()
-        self.buffer = buffer
+        if not isinstance(config, EpConfig):
+            raise TypeError(f"config must be an EpConfig, got {type(config).__name__}.")
+        self.config = config
 
     def num_quantizers(self, mode: str) -> int:
         # quantized dispatch_bwd/combine is not supported.
@@ -81,7 +84,7 @@ class Dispatch(BasicOperation):
             return [
                 QuantizerRole(
                     module_type="dispatch",
-                    tensor_type="input",
+                    tensor_type="dispatch_input",
                     name=name,
                 )
             ]
@@ -98,10 +101,10 @@ class Dispatch(BasicOperation):
             quantizer.internal = True
 
     def op_forward(self, *args: Any, **kwargs: Any) -> None:
-        raise RuntimeError("Dispatch uses fuser_forward")
+        raise RuntimeError("MoeDispatch uses fuser_forward")
 
     def op_backward(self, *args: Any, **kwargs: Any) -> None:
-        raise RuntimeError("Dispatch uses fuser_backward")
+        raise RuntimeError("MoeDispatch uses fuser_backward")
 
     def fuser_forward(
         self,
@@ -113,35 +116,37 @@ class Dispatch(BasicOperation):
         next_op_input_quantizer: Optional[Quantizer],
         basic_op_kwargs: list[dict[str, Any]],
     ) -> tuple[torch.Tensor, Iterable[Iterable[torch.Tensor]]]:
-
+        del next_op_input_quantizer
         # Dispatch uses unquantized transport without an input quantizer and
         # MXFP8 transport with an MXFP8 input quantizer.
         input_quantizer = self.get_quantizer("forward", 0)
         topk_idx, topk_weights = basic_op_extra_inputs[0]
         kwargs = basic_op_kwargs[0]
-        _validate_dispatch_input(input_, self.buffer)
+        buffer = validate_ep_buffer("MoeDispatch", self.config, kwargs.get("buffer"))
+        validate_ep_comms_recipe(
+            "MoeDispatch",
+            input_quantizer,
+            buffer.dispatch_fwd_quant_recipe,
+        )
+        input_shape = _validate_dispatch_input(input_, buffer)
+        buffer.num_local_tokens = input_shape[0]
         _validate_routing_inputs(
             topk_idx,
             topk_weights,
-            device=self.buffer.device,
+            device=buffer.device,
         )
         # Prepare the input
         input_scale_inv = None
-        if input_quantizer is None:
-            # Only BF16 dispatch is supported for now.
-            input_ = maybe_dequantize(input_, torch.bfloat16)
-        elif isinstance(input_quantizer, MXFP8Quantizer):
+        if isinstance(input_quantizer, MXFP8Quantizer):
             input_, input_scale_inv = quantize_for_ep(input_, input_quantizer)
         else:
-            raise TypeError(
-                "NCCL EP Dispatch supports MXFP8Quantizer only, got "
-                f"{type(input_quantizer).__name__}."
-            )
+            # Only BF16 dispatch is supported for now.
+            input_ = maybe_dequantize(input_, torch.bfloat16)
         # Eager mode discovers the receive size at runtime, so persistent
         # caller-owned output buffers cannot be used.
         recv_tokens = kwargs.get("recv_tokens")
         recv_topk_weights = kwargs.get("recv_topk_weights")
-        if self.buffer.eager and (recv_tokens is not None or recv_topk_weights is not None):
+        if buffer.eager and (recv_tokens is not None or recv_topk_weights is not None):
             raise ValueError(
                 "eager mode sizes dispatch outputs per step and cannot use "
                 "caller-supplied receive buffers"
@@ -150,12 +155,12 @@ class Dispatch(BasicOperation):
             input_,
             topk_weights,
             topk_idx,
-            self.buffer,
+            buffer,
             recv_tokens,
             recv_topk_weights,
             input_scale_inv,
         )
-        tokens_per_expert = self.buffer.tokens_per_expert
+        tokens_per_expert = buffer.tokens_per_expert
         # If next_op_input_quantizer is different from input_quantizer,
         # we need to requantize the data, which is handled in grouped_linear anyway.
         # We won't get any fusion benefit, so don't do it here.
@@ -165,7 +170,7 @@ class Dispatch(BasicOperation):
             ctx.dispatch_state = dispatch_state
             ctx.prev_op_grad_output_quantizer = prev_op_grad_output_quantizer
 
-        return output, [(tokens_per_expert, recv_topk_weights, self.buffer.handle_mem, topk_idx)]
+        return output, [(tokens_per_expert, recv_topk_weights)]
 
     def fuser_backward(
         self,
@@ -197,7 +202,4 @@ class Dispatch(BasicOperation):
             grad_output,
             grad_recv_weights,
         )
-        quantizer = ctx.prev_op_grad_output_quantizer
-        if quantizer is not None:
-            grad_input = quantizer(grad_input)
         return grad_input, [()], [(None, grad_topk_weights)]

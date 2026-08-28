@@ -11,8 +11,7 @@ from typing import Optional
 import torch
 
 from transformer_engine_torch import FP8TensorMeta
-from ..constants import DType, MXFP8_BLOCK_SCALING_SIZE
-from ..ep import _as_mxfp8_storage
+from ..ep import EpBuffer, EpConfig
 from ..torch_version import torch_version
 from ..quantization import FP8GlobalStateManager
 from ..quantized_tensor import QuantizedTensorStorage, Quantizer
@@ -24,7 +23,6 @@ from ..tensor import (
     NVFP4Quantizer,
 )
 from ..tensor.float8_tensor import Float8Tensor
-from ..tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
 from ..utils import canonicalize_dtype
 
 
@@ -68,6 +66,43 @@ def validate_buffer(
         requirement = "contiguous" if contiguous else "non-contiguous"
         raise ValueError(f"{name} must be {requirement}.")
     return buffer.detach()
+
+
+def validate_ep_buffer(
+    op_name: str,
+    expected_config: EpConfig,
+    buffer: object,
+) -> EpBuffer:
+    """Validate a runtime EP buffer against an operation's immutable config."""
+    if not isinstance(buffer, EpBuffer):
+        raise TypeError(f"{op_name} requires buffer=EpBuffer(...), got {type(buffer).__name__}.")
+    if buffer.config != expected_config:
+        raise ValueError(
+            f"{op_name} runtime buffer config does not match its initialized config: "
+            f"{buffer.config!r} != {expected_config!r}."
+        )
+    return buffer
+
+
+def validate_ep_comms_recipe(
+    op_name: str,
+    quantizer: Optional[Quantizer],
+    buffer_recipe: object,
+) -> None:
+    """Require the buffer recipe to match the Op's quantizer role."""
+    if isinstance(quantizer, MXFP8Quantizer):
+        from transformer_engine.common.recipe import MXFP8BlockScaling
+
+        if not isinstance(buffer_recipe, MXFP8BlockScaling):
+            raise ValueError(
+                f"{op_name} selected MXFP8 Comms from its quantizer role, but the "
+                "runtime EpBuffer does not have an MXFP8BlockScaling recipe."
+            )
+    elif buffer_recipe is not None:
+        raise ValueError(
+            f"{op_name} selected BF16 Comms from its quantizer role, but the "
+            f"runtime EpBuffer has recipe {type(buffer_recipe).__name__}."
+        )
 
 
 def validate_or_alloc_output(
@@ -116,47 +151,6 @@ def maybe_dequantize(
     if not tensor.is_contiguous():
         tensor = tensor.contiguous()
     return tensor
-
-
-def quantize_for_ep(
-    input_: torch.Tensor | QuantizedTensorStorage,
-    quantizer: Optional[Quantizer],
-) -> tuple[MXFP8TensorStorage, torch.Tensor]:
-    """Return an MXFP8 input and its compact rowwise scales for EP."""
-    if quantizer is not None:
-        if not isinstance(quantizer, MXFP8Quantizer):
-            raise TypeError(
-                f"EP MXFP8 transport requires MXFP8Quantizer, got {type(quantizer).__name__}."
-            )
-        if quantizer.dtype != DType.kFloat8E4M3:
-            raise NotImplementedError("EP MXFP8 transport supports E4M3 only.")
-
-    if isinstance(input_, MXFP8TensorStorage):
-        quantized = input_
-    elif isinstance(input_, QuantizedTensorStorage):
-        raise TypeError(f"EP MXFP8 transport requires an MXFP8 input, got {type(input_).__name__}.")
-    else:
-        if quantizer is None:
-            raise ValueError("An MXFP8 quantizer is required for a non-quantized EP input.")
-        if not quantizer.internal:
-            quantizer = quantizer.copy()
-            quantizer.internal = True
-        quantized = quantizer(input_)
-    quantized = _as_mxfp8_storage(quantized)
-    if quantized._fp8_dtype != DType.kFloat8E4M3:
-        raise NotImplementedError("EP MXFP8 transport supports E4M3 only.")
-    if quantized._with_gemm_swizzled_scales:
-        raise ValueError("EP requires unswizzled MXFP8 scales.")
-    data = quantized._rowwise_data
-    scale_inv = quantized._rowwise_scale_inv
-    if data is None or scale_inv is None:
-        raise ValueError("EP requires rowwise MXFP8 data and scales.")
-    rows, hidden = input_.shape
-    scale_cols = hidden // MXFP8_BLOCK_SCALING_SIZE
-    scale_inv = scale_inv[:rows, :scale_cols]
-    if not scale_inv.is_contiguous():
-        raise ValueError("EP requires compact contiguous MXFP8 scales.")
-    return quantized, scale_inv
 
 
 def maybe_autocast_dtype(

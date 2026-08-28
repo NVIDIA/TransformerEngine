@@ -30,6 +30,7 @@ import torch.distributed as dist
 
 from transformer_engine.pytorch.ep import (
     EpBuffer,
+    EpConfig,
     ep_bootstrap,
     ep_combine,
     ep_dispatch,
@@ -202,13 +203,14 @@ def main():
         else None
     )
 
-    buffer = EpBuffer(
+    config = EpConfig(
         top_k=K,
         max_tokens_per_rank=T,
         recv_capacity_per_rank=recv_pr,
         hidden_dim=H,
         num_local_experts=num_local_experts,
     )
+    buffer = EpBuffer(config)
 
     tokens = tokens_hbm
     topk_w = topk_w_hbm
