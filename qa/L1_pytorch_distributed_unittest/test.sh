@@ -43,7 +43,9 @@ else
     NVTE_ALLOW_NONDETERMINISTIC_ALGO=0 python3 -m pytest -v -s --junitxml=$XML_LOG_DIR/pytest_test_attention_deterministic_with_cp.xml $TE_PATH/tests/pytorch/attention/test_attention_with_cp.py || test_fail "NVTE_ALLOW_NONDETERMINISTIC_ALGO=0 test_attention_with_cp.py"
 fi
 
-# Force FA2 in a fresh process to cover deterministic no-load-balance GQA backward.
+# The full runs above exercise both modes with normal backend selection.
+# Determinism is captured when the test module is imported, so use a fresh process and
+# disable FA3 (FA4 is disabled above) to force FA2 for the deterministic GQA regression.
 NVTE_FLASH_ATTN_V3=0 NVTE_ALLOW_NONDETERMINISTIC_ALGO=0 python3 -m pytest -v -s \
     --junitxml=$XML_LOG_DIR/pytest_test_attention_with_cp_fa2_no_load_balance.xml \
     $TE_PATH/tests/pytorch/attention/test_attention_with_cp.py::test_cp_with_flash_attention_no_load_balance \
