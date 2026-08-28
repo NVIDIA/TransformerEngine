@@ -854,6 +854,7 @@ class GroupedTensorStorage:
             row_scaled_nvfp4 = quantizer.row_scaled_nvfp4
             nvfp4_use_4over6 = quantizer.nvfp4_use_4over6
             nvfp4_e4m3_max = quantizer.nvfp4_e4m3_max
+            disable_second_level_scale = quantizer.disable_second_level_scale
             if row_scaled_nvfp4:
                 if not rowwise_usage:
                     raise ValueError(
@@ -879,7 +880,8 @@ class GroupedTensorStorage:
                     total_scale_elements += math.prod(scale_inv_shape)
                     scale_inv_offsets.append(total_scale_elements)
                 scale_inv = torch.empty(total_scale_elements, dtype=torch.uint8, device=device)
-                amax = torch.empty(total_amax_elements, dtype=torch.float32, device=device)
+                if not disable_second_level_scale:
+                    amax = torch.empty(total_amax_elements, dtype=torch.float32, device=device)
 
             if columnwise_usage:
                 # Allocate columnwise data buffer (1D flattened, uint8, FP4 packed)
@@ -896,7 +898,8 @@ class GroupedTensorStorage:
                 columnwise_scale_inv = torch.empty(
                     total_columnwise_scale_elements, dtype=torch.uint8, device=device
                 )
-                columnwise_amax = torch.empty(num_tensors, dtype=torch.float32, device=device)
+                if not disable_second_level_scale:
+                    columnwise_amax = torch.empty(num_tensors, dtype=torch.float32, device=device)
         elif compatible_recipe.float8_block_scaling():
             scale_inv_dtype = DType.kFloat32
 
