@@ -1,0 +1,2014 @@
+include:
+  - project: dl/devops/dlfw-ci
+    ref: main
+    file: /vault/vault.yml
+
+workflow:
+  name: '$PIPELINE_NAME'
+  rules:
+    - if: '$H100_4GPU_RUNNER == "cw_pdx"'
+      variables:
+        H100_4GPU_RUNNER_TAG: cs_cw_pdx_generic
+    - when: always
+      variables:
+        H100_4GPU_RUNNER_TAG: dlcluster_h100x4
+
+######################################################
+## Variables used by the test runs
+######################################################
+
+variables:
+    EXTRA_DOCKER_RUN_ARGS: "--init --ipc=host --ulimit memlock=-1 --ulimit stack=$$((1024*65536)) --label RUNNER_ID=$${RUNNER_ID}"
+    DATADIR: /mnt/nvdl/datasets
+
+    # framework containers
+    CORE_AMD64_IMAGE:
+      description: Base Docker container for core AMD64 build
+      value: gitlab-master.nvidia.com:5005/dl/dgx/cuda:13.4-devel-ubuntu24.04--main-amd64  # Last build with main branch
+    CORE_ARM64_IMAGE:
+      description: Base Docker container for core ARM64 build
+      value: gitlab-master.nvidia.com:5005/dl/dgx/cuda:13.4-devel-ubuntu24.04--main-arm64  # Last build with main branch
+    PYTORCH_AMD64_IMAGE:
+      description: Base Docker container for PyTorch AMD64 build
+      value: gitlab-master.nvidia.com:5005/dl/dgx/pytorch:main-py3-devel-amd64  # Last build with main branch (nightly build)
+    PYTORCH_ARM64_IMAGE:
+      description: Base Docker container for PyTorch ARM64 build
+      value: gitlab-master.nvidia.com:5005/dl/dgx/pytorch:main-py3-devel-arm64  # Last build with main branch (nightly build)
+    JAX_AMD64_IMAGE:
+      description: Base Docker container for JAX build
+      value: gitlab-master.nvidia.com:5005/dl/dgx/jax:26.06-jax-py3-amd64
+    JAX_ARM64_IMAGE:
+      description: Base Docker container for JAX build
+      value: gitlab-master.nvidia.com:5005/dl/dgx/jax:26.06-jax-py3-arm64
+
+    # variables that may be overridden by the pipeline vars
+    GH_BRANCH:
+      description: GitHub branch
+      value: main
+    GH_PR:
+      description: GitHub PR number (overrides GH_BRANCH)
+    GL_MR:
+      description: GitLab MR number (overrides GH_BRANCH)
+    BUILD_CORE:
+      description: Enable core builds and tests
+      value: 1
+    BUILD_PYTORCH:
+      description: Enable PyTorch builds and tests
+      value: 1
+    BUILD_JAX:
+      description: Enable JAX builds and tests
+      value: 1
+    BUILD_AMD64:
+      description: Enable AMD64 builds and tests
+      value: 1
+    BUILD_ARM64:
+      description: Enable ARM64 builds and tests
+      value: 0
+    B200_RUNNER:
+      description: Runner tag for B200 jobs (use bia only)
+      value: prenyx
+      options:
+      - bia
+      - prenyx
+    H100_4GPU_RUNNER:
+      description: Cluster for H100 multi-GPU jobs
+      value: cw_pdx
+      options:
+      - dlcluster
+      - cw_pdx
+    RUN_L0_TESTS:
+      description: Run L0 tests automatically (otherwise run tests manually)
+      value: 1
+    RUN_L1_TESTS:
+      description: Run L1 tests automatically (otherwise run tests manually)
+      value: 0
+    RUN_L2_TESTS:
+      description: Run L2 tests automatically (otherwise run tests manually)
+      value: 0
+    RUN_L3_TESTS:
+      description: Run L3 tests automatically (otherwise run tests manually)
+      value: 0
+    API_LOGGING:
+      description: Log API
+      value: 0
+    TAG_ROOT:
+      description: Base for container tags (<TAG_ROOT>-<FRAMEWORK>-py3-<BUILD_STAGE>)
+    SEND_SLACK_MESSAGE:
+      description: Send Slack message with the pipeline status
+      value: 1
+    SLACK_PING_TEST_OWNERS:
+      description: Must be paired with SEND_SLACK_MESSAGE=1. If enabled, will ping test owners on Slack if any failures occur instead of the user who launched the pipeline. Use case, scheduled CI runs on 'main'.
+      value: 0
+    PIPELINE_NAME:
+      description: Custom pipeline name shown in the GitLab UI and Slackbot messages. Leave empty for default behavior.
+      value: ""
+    CUDNN_FRONTEND:
+      description: "An argument to pip3 install command, to be used to install nvidia-cudnn-frontend package."
+      value: "nvidia-cudnn-frontend[cutedsl]==1.27.0"
+    CUDNN_BACKEND_URL_AMD64:
+      description: "Override cuDNN backend archive URL for amd64 base image builds. Artifactory example: https://artifactory.nvidia.com/artifactory/hw-cudnn-generic-local/CUDNN/v9.24/v9.24.0.31/13.3/cudnn-linux-x86_64-9.24.0.31.tar.gz. URM example: https://urm.nvidia.com/artifactory/hw-cudnn-generic-local/CUDNN/v9.21/v9.21.0.19/13.2/cudnn-linux-x86_64-9.21.0.19.tar.gz."
+    CUDNN_BACKEND_URL_ARM64:
+      description: "Override cuDNN backend archive URL for arm64/SBSA base image builds. Artifactory example: https://artifactory.nvidia.com/artifactory/hw-cudnn-generic-local/CUDNN/v9.24/v9.24.0.31/13.3/cudnn-linux-sbsa-9.24.0.31.tar.gz. URM example: https://urm.nvidia.com/artifactory/hw-cudnn-generic-local/CUDNN/v9.21/v9.21.0.19/13.2/cudnn-linux-sbsa-9.21.0.19.tar.gz."
+    INSTALL_FA3:
+      description: Install Flash Attention 3 from source (SM90 / H100 only, PyTorch). Set to 1 to enable.
+    WITH_CUBLASMP:
+      description: Whether to install cuBLASMP and build with NVTE_WITH_CUBLASMP=1
+      value: 1
+    WITH_NCCL_EP:
+      description: Whether to build with NVTE_WITH_NCCL_EP=1
+      value: 1
+
+    VIRTUAL: 0
+    JOB_START_STRING: "=== JOB START ==="
+    JOB_END_STRING: "=== JOB END ==="
+
+    # the following will be overridden by jobs of the pipeline that actually need to check out the sources
+    GIT_STRATEGY: none
+    GIT_SUBMODULE_STRATEGY: none
+
+#########################################################
+## Build steps.
+##    DO NOT MODIFY THIS SECTION
+#########################################################
+
+stages:
+    - create branch
+    - build base
+    - build devel
+    - build stage
+    - manifests
+    - trigger
+    - test
+    - finalize
+
+.setup-docker: &docker_login
+    - export NV_DOCKER_ARGS="curl -s http://localhost:3476/docker/cli?dev=${RUNNER_GPUS//,/+}"     && echo "${NV_DOCKER_ARGS}"
+    - docker login -u gitlab-ci-token -p "${CI_JOB_TOKEN}" "${CI_REGISTRY}"
+
+.setup-enroot:
+    # Emulate "enroot login" since enroot is not available on the head node
+    - export ENROOT_CONFIG_PATH="${CI_PROJECT_DIR}/${CI_JOB_ID}/.enroot" && mkdir -p "${ENROOT_CONFIG_PATH}"
+    - echo "machine ${CI_REGISTRY/:5005/} login gitlab-ci-token password ${CI_JOB_TOKEN}" > "${ENROOT_CONFIG_PATH}/.credentials"
+
+before_script:
+    - export FRAMEWORK=${FRAMEWORK:-core}                                                          && echo "${FRAMEWORK}"
+    - export ARCH=${ARCH:-amd64}                                                                   && echo "${ARCH}"
+    - export PYVER=3.8                                                                             && echo "${PYVER}"
+    - export GH_BRANCH=${GH_BRANCH:-main}                                                          && echo "${GH_BRANCH}"
+    - export FROM_IMAGE_NAME=${FROM_IMAGE_NAME}                                                    && echo "${FROM_IMAGE_NAME}"
+    - export RELEASE_BRANCH_NAME=${CI_COMMIT_REF_NAME%%-devel}                                     && echo "${RELEASE_BRANCH_NAME}"
+    - export RELEASE_BRANCH_NAME_SLUG=$(echo "${RELEASE_BRANCH_NAME}" | sed 's/[^A-Za-z0-9._\-]/../g') && echo "${RELEASE_BRANCH_NAME_SLUG}" # only letters, numbers, period, hyphen, and dash are valid in docker tags; want to keep all valid characters, though, which CI_COMMIT_REF_SLUG doesn't do
+    - test ${TAG_ROOT} || export TAG_ROOT=${RELEASE_BRANCH_NAME_SLUG}                              && echo "${TAG_ROOT}"
+    - export IMAGE_NAME_ROOT="${CI_REGISTRY_IMAGE}:${TAG_ROOT}-${FRAMEWORK}-py${PYVER%.*}"         && echo "${IMAGE_NAME_ROOT}"
+    - export CI_PIPELINE_ID="${CI_PIPELINE_ID}"                                                    && echo "${CI_PIPELINE_ID}"
+    - export BASE_IMAGE_NAME="${IMAGE_NAME_ROOT}-base"                                             && echo "${BASE_IMAGE_NAME}"
+    - export BASE_IMAGE_NAME_VERSIONED="${IMAGE_NAME_ROOT}.${CI_PIPELINE_ID}-base"                 && echo "${BASE_IMAGE_NAME_VERSIONED}"
+    - export DEVEL_IMAGE_NAME="${IMAGE_NAME_ROOT}-devel"                                           && echo "${DEVEL_IMAGE_NAME}"
+    - export DEVEL_IMAGE_NAME_VERSIONED="${IMAGE_NAME_ROOT}.${CI_PIPELINE_ID}-devel"               && echo "${DEVEL_IMAGE_NAME_VERSIONED}"
+    - export DEVEL_IMAGE_NAME_PIPELINEID="${CI_REGISTRY_IMAGE}:${CI_PIPELINE_ID}-devel"            && echo "${DEVEL_IMAGE_NAME_PIPELINEID}"
+    - export STAGE_IMAGE_NAME="${IMAGE_NAME_ROOT}-stage"                                           && echo "${STAGE_IMAGE_NAME}"
+    - export QA_IMAGE_NAME="${IMAGE_NAME_ROOT}-qa"                                                 && echo "${QA_IMAGE_NAME}"
+    - export QA_IMAGE_NAME_VERSIONED="${IMAGE_NAME_ROOT}.${CI_PIPELINE_ID}-qa"                     && echo "${QA_IMAGE_NAME_VERSIONED}"
+    - export DOCS_IMAGE_NAME="${IMAGE_NAME_ROOT}-docs"                                             && echo "${DOCS_IMAGE_NAME}"
+    - export ORIGIN1="${CI_REPOSITORY_URL##*@}"
+    - export ORIGIN_SSH=ssh://git@${ORIGIN1/\//:12051\/}                                           && echo "${ORIGIN_SSH}"
+    - export ORIGIN_HTTPS=https://${ORIGIN1}                                                       && echo "${ORIGIN_HTTPS}"
+    - export GITHUB_REPO="https://github.com/NVIDIA/TransformerEngine.git"                         && echo "${GITHUB_REPO}"
+
+.create_branch_hidden: &CREATE_BRANCH
+    stage: create branch
+    tags:
+      - vm-builder
+    variables:
+      GIT_STRATEGY: clone
+      GIT_SUBMODULE_STRATEGY: recursive
+      GET_SOURCES_ATTEMPTS: 3
+      CURL_ATTEMPTS: 3
+      CURL_SLEEP: 5
+    script:
+    - export CI_TIMESTAMP=$(date +%Y%m%d)                                                          && echo "${CI_TIMESTAMP}"
+    - export REPO="${ORIGIN1/${CI_PROJECT_NAME}/${CI_JOB_NAME}}"
+    - git config --global user.name "gitlab-runner"
+    - git config --global user.email "gitlab-runner@${REPO%%/*}"
+    - git config --global push.default simple
+    - git remote -v
+    - git remote remove github || true
+    - git remote add github ${GITHUB_REPO}
+    - git fetch github
+    - export GIT_SHA=$(git show-ref --hash github/${GH_BRANCH})                                    && echo "${GIT_SHA}"
+    - git rebase --abort || true
+    - git am --abort || true
+    - git merge --abort || true
+    - git clean -f
+    # sometimes HEAD is not what we think is so use explicitly CI_COMMIT_SHA
+    - git reset --hard ${CI_COMMIT_SHA}
+    # to avoid conflicts during rebase squash everything into one commit
+    - git reset $(git commit-tree HEAD^{tree} -m "CI on branch ${GH_BRANCH}")
+    - git rebase github/${GH_BRANCH}
+    - export GH_PR_LIST=$(echo "${GH_PR}" | tr ',' ' ' | xargs)                                      && echo "${GH_PR_LIST}"
+    - export GL_MR_LIST=$(echo "${GL_MR}" | tr ',' ' ' | xargs)                                      && echo "${GL_MR_LIST}"
+    - BUILD_BRANCH_NAME=test
+    - test ${RELEASE} && BUILD_BRANCH_NAME=build
+    - test ${GH_NIGHTLY} && BUILD_BRANCH_NAME=nightly_${CI_TIMESTAMP}
+    - test ${GH_WEEKLY} && BUILD_BRANCH_NAME=weekly_${CI_TIMESTAMP}
+    - |
+      if [ -n "${GH_PR_LIST}" ] && [ -n "${GL_MR_LIST}" ]; then
+          BUILD_BRANCH_NAME=pr_combo_gh${GH_PR//,/x}_gl${GL_MR//,/x}
+      elif [ -n "${GH_PR_LIST}" ]; then
+          BUILD_BRANCH_NAME=pr_${GH_PR//,/x}
+      elif [ -n "${GL_MR_LIST}" ]; then
+          BUILD_BRANCH_NAME=pr_gl${GL_MR//,/x}
+      elif test ${GL_MR_BRANCH}; then
+          BUILD_BRANCH_NAME=pr_gl_${GL_MR_BRANCH}
+      fi
+    - BUILD_BRANCH_NAME=${BUILD_BRANCH_NAME}_${GH_BRANCH}
+    - export BUILD_BRANCH_NAME=${BUILD_BRANCH_NAME}_${CI_PIPELINE_ID}_CI  && echo "${BUILD_BRANCH_NAME}"
+    - git branch -D ${BUILD_BRANCH_NAME} || true
+    - export MERGED_CHANGE=0
+    - |
+      if [ -n "${GH_PR_LIST}" ]; then
+          git remote -v
+          (git remote remove github || true)
+          git remote add github ${GITHUB_REPO}
+          for PR_ID in ${GH_PR_LIST}; do
+              FETCH_BRANCH=fetch_gh_${PR_ID}
+              (git branch -D ${FETCH_BRANCH} || true)
+              git fetch github pull/${PR_ID}/head:${FETCH_BRANCH}
+              export GIT_SHA=$(git rev-list ${FETCH_BRANCH} -n 1)
+              git merge ${FETCH_BRANCH} -m "Merged PR ${PR_ID} into ${GH_BRANCH}, build ${CI_PIPELINE_ID}"
+              git branch -D ${FETCH_BRANCH}
+              export MERGED_CHANGE=1
+          done
+          git remote remove github
+      fi
+    - |
+      if [ -n "${GL_MR_LIST}" ]; then
+          git remote -v
+          for MR_ID in ${GL_MR_LIST}; do
+              FETCH_BRANCH=fetch_gl${MR_ID}
+              (git branch -D ${FETCH_BRANCH} || true)
+              git fetch ${ORIGIN_SSH} merge-requests/${MR_ID}/head:${FETCH_BRANCH}
+              export GIT_SHA=$(git rev-list ${FETCH_BRANCH} -n 1)
+              git merge ${FETCH_BRANCH} -m "Merged MR gitlab${MR_ID} into ${GH_BRANCH}, build ${CI_PIPELINE_ID}"
+              git branch -D ${FETCH_BRANCH}
+              export MERGED_CHANGE=1
+          done
+      fi
+    - |
+      git checkout -b ${BUILD_BRANCH_NAME}
+      git submodule add ../../devops/dlfw-ci
+      git submodule add ../te_ci_artifacts
+      if [ "${MERGED_CHANGE}" = "1" ]; then
+          git commit -m "Merged GH PRs [${GH_PR_LIST}] and GL MRs [${GL_MR_LIST}] into ${GH_BRANCH}, build ${CI_PIPELINE_ID}"
+      else
+          git commit -m "CI on branch ${GH_BRANCH}"
+      fi
+      git push ${ORIGIN_SSH} ${BUILD_BRANCH_NAME} --force
+    # version is available only after checkout so provide it here only once
+    - export CODE_VERSION=$(cat VERSION)                                                           && echo "${DALI_VERSION}"
+    - tmp_file="${BUILD_BRANCH_NAME}_output"
+    - |
+      for i in `seq 1 ${CURL_ATTEMPTS}`; do
+          sleep ${CURL_SLEEP}
+          CURL_RESULT=$(curl --silent -o ${tmp_file} --write-out "%{http_code}" --request POST \
+            --form token=${CI_JOB_TOKEN} \
+            --form ref=${BUILD_BRANCH_NAME} \
+            --form "variables[GH_BRANCH]=${GH_BRANCH}" \
+            --form "variables[GIT_SHA]=${GIT_SHA}" \
+            --form "variables[GH_PR]=${GH_PR}" \
+            --form "variables[GL_MR]=${GL_MR}" \
+            --form "variables[CORE_AMD64_IMAGE]=${CORE_AMD64_IMAGE}" \
+            --form "variables[CORE_ARM64_IMAGE]=${CORE_ARM64_IMAGE}" \
+            --form "variables[PYTORCH_AMD64_IMAGE]=${PYTORCH_AMD64_IMAGE}" \
+            --form "variables[PYTORCH_ARM64_IMAGE]=${PYTORCH_ARM64_IMAGE}" \
+            --form "variables[JAX_AMD64_IMAGE]=${JAX_AMD64_IMAGE}" \
+            --form "variables[JAX_ARM64_IMAGE]=${JAX_ARM64_IMAGE}" \
+            --form "variables[TAG_ROOT]=${TAG_ROOT}" \
+            --form "variables[BUILD_CORE]=${BUILD_CORE}" \
+            --form "variables[BUILD_PYTORCH]=${BUILD_PYTORCH}" \
+            --form "variables[BUILD_JAX]=${BUILD_JAX}" \
+            --form "variables[BUILD_AMD64]=${BUILD_AMD64}" \
+            --form "variables[BUILD_ARM64]=${BUILD_ARM64}" \
+            --form "variables[B200_RUNNER]=${B200_RUNNER}" \
+            --form "variables[H100_4GPU_RUNNER]=${H100_4GPU_RUNNER}" \
+            --form "variables[RUN_L0_TESTS]=${RUN_L0_TESTS}" \
+            --form "variables[RUN_L1_TESTS]=${RUN_L1_TESTS}" \
+            --form "variables[RUN_L2_TESTS]=${RUN_L2_TESTS}" \
+            --form "variables[RUN_L3_TESTS]=${RUN_L3_TESTS}" \
+            --form "variables[GH_NIGHTLY]=${GH_NIGHTLY}" \
+            --form "variables[GH_WEEKLY]=${GH_WEEKLY}" \
+            --form "variables[RELEASE]=${RELEASE}" \
+            --form "variables[PUBLISH_DOCS]=${PUBLISH_DOCS}" \
+            --form "variables[PUBLISH_MAIN_DOCS]=${PUBLISH_MAIN_DOCS}" \
+            --form "variables[PUBLISH_RELEASE_DOCS]=${PUBLISH_RELEASE_DOCS}" \
+            --form "variables[PUBLISH_WHL]=${PUBLISH_WHL}" \
+            --form "variables[PUBLISH_RELEASE_WHL]=${PUBLISH_RELEASE_WHL}" \
+            --form "variables[PUBLISH_DEV_WHL]=${PUBLISH_DEV_WHL}" \
+            --form "variables[CI_TIMESTAMP]=${CI_TIMESTAMP}" \
+            --form "variables[CODE_VERSION]=${CODE_VERSION}" \
+            --form "variables[SEND_SLACK_MESSAGE]=${SEND_SLACK_MESSAGE}" \
+            --form "variables[SLACK_PING_TEST_OWNERS]=${SLACK_PING_TEST_OWNERS}" \
+            --form "variables[PIPELINE_NAME]=${PIPELINE_NAME}" \
+            --form "variables[CUDNN_FRONTEND]=${CUDNN_FRONTEND}" \
+            --form "variables[CUDNN_BACKEND_URL_AMD64]=${CUDNN_BACKEND_URL_AMD64}" \
+            --form "variables[CUDNN_BACKEND_URL_ARM64]=${CUDNN_BACKEND_URL_ARM64}" \
+            --form "variables[INSTALL_FA3]=${INSTALL_FA3}" \
+            --form "variables[WITH_CUBLASMP]=${WITH_CUBLASMP}" \
+            --form "variables[WITH_NCCL_EP]=${WITH_NCCL_EP}" \
+            --form "variables[githubData]=${githubData}" \
+            https://gitlab-master.nvidia.com/api/v4/projects/61603/trigger/pipeline | grep 201) || true
+          echo "\n" | cat ${tmp_file} -
+          rm ${tmp_file}
+          test $CURL_RESULT && exit 0
+      done
+    - exit 1
+
+create_branch:
+    <<: *CREATE_BRANCH
+    tags:
+    - vm-builder
+    rules:
+    - if: $CI_COMMIT_TAG
+      when: never
+    - if: $CI_PIPELINE_SOURCE =~ /^(web|schedule|trigger|api)$/
+
+.base_template:
+    extends:
+    - .vault-internal
+    # build-scripts now fetches from Artifactory Cloud, which requires authenticated access.
+    secrets:
+      ARTIFACTORY_USER:
+        file: false
+        vault: ci/ro/tokens/artifactory/CLOUD_ARTIFACTORY_USER@secrets
+      ARTIFACTORY_TOKEN:
+        file: false
+        vault: ci/ro/tokens/artifactory/CLOUD_ARTIFACTORY_TOKEN@secrets
+    variables:
+      GIT_STRATEGY: fetch
+      GIT_SUBMODULE_STRATEGY: recursive
+      GET_SOURCES_ATTEMPTS: 3
+      FRAMEWORK: core
+      ARCH: amd64
+    script:
+    - !reference [.setup-docker ]
+    - echo ${JOB_START_STRING}
+    # Check if a ccache image exists for this framework/arch combination
+    - export CCACHE_IMAGE_NAME="${CI_REGISTRY_IMAGE}:ccache-${FRAMEWORK}-${ARCH}"
+    - |
+      export CCACHE_ARG=""
+      if DOCKER_CLI_EXPERIMENTAL=enabled docker manifest inspect "${CCACHE_IMAGE_NAME}" > /dev/null 2>&1; then
+        echo "Found ccache image: ${CCACHE_IMAGE_NAME}"
+        export CCACHE_ARG="--ccache-image=${CCACHE_IMAGE_NAME}"
+      else
+        echo "No ccache image found at ${CCACHE_IMAGE_NAME}, building with empty cache"
+      fi
+    - bash docker-build.sh --pyver=${PYVER}
+                           --mode=b --push
+                           $(test "$VIRTUAL" -eq 1 && echo "--virtual")
+                           $(test -n "$FROM_IMAGE_NAME" && echo "--from-image=${FROM_IMAGE_NAME}")
+                           $(test -n "$FROM_SCRIPTS_IMAGE" && echo "--devops-image=${FROM_SCRIPTS_IMAGE}")
+                           $(test -n "$FRAMEWORK" && echo "--framework=${FRAMEWORK}")
+                           $(test -n "$TAG_ROOT" && echo "--tag-root=${TAG_ROOT}")
+                           --arch $ARCH
+                           ${CCACHE_ARG}
+    # Update ccache image on main branch builds
+    - |
+      if [[ "${CI_COMMIT_BRANCH}" =~ ^test_main_[0-9]+_CI$ ]]; then
+        echo "Main branch build detected, updating ccache image..."
+        BASE_IMAGE="${BASE_IMAGE_NAME_VERSIONED}-${ARCH}"
+        CONTAINER_NAME="ccache-extract-${CI_JOB_ID}"
+        docker pull "${BASE_IMAGE}"
+        docker create --name "${CONTAINER_NAME}" "${BASE_IMAGE}" /bin/true
+        rm -rf /tmp/ccache-export
+        mkdir -p /tmp/ccache-export
+        docker cp "${CONTAINER_NAME}:/ccache" /tmp/ccache-export/ccache || true
+        docker rm "${CONTAINER_NAME}"
+        if [ -d /tmp/ccache-export/ccache ]; then
+          printf 'FROM scratch\nCOPY ccache/ /ccache/\n' > /tmp/ccache-export/Dockerfile
+          docker build -t "${CCACHE_IMAGE_NAME}" /tmp/ccache-export
+          docker push "${CCACHE_IMAGE_NAME}"
+          echo "Pushed updated ccache image: ${CCACHE_IMAGE_NAME}"
+        else
+          echo "No /ccache directory found in built image, skipping ccache image update"
+        fi
+        rm -rf /tmp/ccache-export
+      fi
+    - echo ${JOB_END_STRING}
+    tags:
+    - builder
+    rules:
+    - if: $CI_PIPELINE_SOURCE != "pipeline"
+      when: never
+    - if: $CI_COMMIT_TAG
+      when: never
+    - if: $FRAMEWORK == "core" && $BUILD_CORE == "0"
+      when: never
+    - if: $FRAMEWORK == "pytorch" && $BUILD_PYTORCH == "0"
+      when: never
+    - if: $FRAMEWORK == "jax" && $BUILD_JAX == "0"
+      when: never
+    - if: $ARCH == "amd64" && $BUILD_AMD64 == "0"
+      when: never
+    - if: $ARCH == "arm64" && $BUILD_ARM64 == "0"
+      when: never
+    - when: on_success
+      allow_failure: false
+
+core-py3-base-amd64:
+    stage: build base
+    variables:
+      FROM_IMAGE_NAME: $CORE_AMD64_IMAGE
+      FRAMEWORK: core
+      ARCH: amd64
+    extends:
+    - .base_template
+
+core-py3-base-arm64:
+    stage: build base
+    variables:
+      FROM_IMAGE_NAME: $CORE_ARM64_IMAGE
+      FRAMEWORK: core
+      ARCH: arm64
+    extends:
+    - .base_template
+
+pytorch-py3-base-amd64:
+    stage: build base
+    variables:
+      FROM_IMAGE_NAME: $PYTORCH_AMD64_IMAGE
+      FRAMEWORK: pytorch
+      ARCH: amd64
+    extends:
+    - .base_template
+
+pytorch-py3-base-arm64:
+    stage: build base
+    variables:
+      FROM_IMAGE_NAME: $PYTORCH_ARM64_IMAGE
+      FRAMEWORK: pytorch
+      ARCH: arm64
+    extends:
+    - .base_template
+
+jax-py3-base-amd64:
+    stage: build base
+    variables:
+      FROM_IMAGE_NAME: $JAX_AMD64_IMAGE
+      FRAMEWORK: jax
+      ARCH: amd64
+    extends:
+    - .base_template
+
+jax-py3-base-arm64:
+    stage: build base
+    variables:
+      FROM_IMAGE_NAME: $JAX_ARM64_IMAGE
+      FRAMEWORK: jax
+      ARCH: arm64
+    extends:
+    - .base_template
+
+.devel_template:
+    variables:
+      GIT_STRATEGY: fetch
+      GIT_SUBMODULE_STRATEGY: recursive
+      GET_SOURCES_ATTEMPTS: 3
+      FRAMEWORK: core
+      ARCH: amd64
+    script:
+    - !reference [.setup-docker ]
+    - bash docker-build.sh --pyver=${PYVER}
+                           --mode=d --push
+                           $(test "$VIRTUAL" -eq 1 && echo "--virtual")
+                           $(test -n "$FROM_IMAGE_NAME" && echo "--from-image=${FROM_IMAGE_NAME}")
+                           $(test -n "$FROM_SCRIPTS_IMAGE" && echo "--devops-image=${FROM_SCRIPTS_IMAGE}")
+                           $(test -n "$TAG_ROOT" && echo "--tag-root=${TAG_ROOT}")
+                           --arch $ARCH
+    rules:
+    - if: $CI_PIPELINE_SOURCE != "pipeline"
+      when: never
+    - if: $CI_COMMIT_TAG
+      when: never
+    - if: $FRAMEWORK == "core" && $BUILD_CORE == "0"
+      when: never
+    - if: $FRAMEWORK == "pytorch" && $BUILD_PYTORCH == "0"
+      when: never
+    - if: $FRAMEWORK == "jax" && $BUILD_JAX == "0"
+      when: never
+    - if: $ARCH == "amd64" && $BUILD_AMD64 == "0"
+      when: never
+    - if: $ARCH == "arm64" && $BUILD_ARM64 == "0"
+      when: never
+    - when: on_success
+      allow_failure: false
+
+core-py3-devel-amd64:
+    stage: build devel
+    variables:
+      FRAMEWORK: core
+      ARCH: amd64
+    needs: [ core-py3-base-amd64 ]
+    extends:
+    - .devel_template
+
+core-py3-devel-arm64:
+    stage: build devel
+    variables:
+      FRAMEWORK: core
+      ARCH: arm64
+    needs: [ core-py3-base-arm64 ]
+    extends:
+    - .devel_template
+
+pytorch-py3-devel-amd64:
+    stage: build devel
+    variables:
+      FRAMEWORK: pytorch
+      ARCH: amd64
+    needs: [ pytorch-py3-base-amd64 ]
+    extends:
+    - .devel_template
+
+pytorch-py3-devel-arm64:
+    stage: build devel
+    variables:
+      FRAMEWORK: pytorch
+      ARCH: arm64
+    needs: [ pytorch-py3-base-arm64 ]
+    extends:
+    - .devel_template
+
+jax-py3-devel-amd64:
+    stage: build devel
+    variables:
+      FRAMEWORK: jax
+      ARCH: amd64
+    needs: [ jax-py3-base-amd64 ]
+    extends:
+    - .devel_template
+
+jax-py3-devel-arm64:
+    stage: build devel
+    variables:
+      FRAMEWORK: jax
+      ARCH: arm64
+    needs: [ jax-py3-base-arm64 ]
+    extends:
+    - .devel_template
+
+.stage_template : &STAGE
+    environment: staging
+    variables:
+      GIT_STRATEGY: fetch
+      GIT_SUBMODULE_STRATEGY: recursive
+      GET_SOURCES_ATTEMPTS: 3
+      FRAMEWORK: core
+      ARCH: amd64
+    dependencies: []
+    script:
+    - !reference [.setup-docker ]
+    - bash docker-build.sh --pyver=${PYVER}
+                           --mode=s --push
+                           $(test -n "$FROM_IMAGE_NAME" && echo "--from-image=${FROM_IMAGE_NAME}")
+                           $(test -n "$FROM_SCRIPTS_IMAGE" && echo "--devops-image=${FROM_SCRIPTS_IMAGE}")
+                           $(test -n "$FRAMEWORK" && echo "--framework=${FRAMEWORK}")
+                           $(test -n "$TAG_ROOT" && echo "--tag-root=${TAG_ROOT}")
+                           --arch $ARCH
+    rules:
+    - if: $CI_PIPELINE_SOURCE != "pipeline"
+      when: never
+    - if: $CI_COMMIT_TAG
+      when: never
+    - if: $FRAMEWORK == "core" && $BUILD_CORE == "0"
+      when: never
+    - if: $FRAMEWORK == "pytorch" && $BUILD_PYTORCH == "0"
+      when: never
+    - if: $FRAMEWORK == "jax" && $BUILD_JAX == "0"
+      when: never
+    - if: $ARCH == "amd64" && $BUILD_AMD64 == "0"
+      when: never
+    - if: $ARCH == "arm64" && $BUILD_ARM64 == "0"
+      when: never
+    - if: $CI_COMMIT_BRANCH =~ /^test_release_v.*$/
+
+core-py3-stage-amd64:
+    stage: build stage
+    variables:
+      FRAMEWORK: core
+      ARCH: amd64
+    needs: [ core-py3-base-amd64, core-py3-devel-amd64 ]
+    extends:
+    - .stage_template
+
+core-py3-stage-arm64:
+    stage: build stage
+    variables:
+      FRAMEWORK: core
+      ARCH: arm64
+    needs: [ core-py3-base-arm64, core-py3-devel-arm64 ]
+    extends:
+    - .stage_template
+
+pytorch-py3-stage-amd64:
+    stage: build stage
+    variables:
+      FRAMEWORK: pytorch
+      ARCH: amd64
+    needs: [ pytorch-py3-base-amd64, pytorch-py3-devel-amd64 ]
+    extends:
+    - .stage_template
+
+pytorch-py3-stage-arm64:
+    stage: build stage
+    variables:
+      FRAMEWORK: pytorch
+      ARCH: arm64
+    needs: [ pytorch-py3-base-arm64, pytorch-py3-devel-arm64 ]
+    extends:
+    - .stage_template
+
+jax-py3-stage-amd64:
+    stage: build stage
+    variables:
+      FRAMEWORK: jax
+      ARCH: amd64
+    needs: [ jax-py3-base-amd64, jax-py3-devel-amd64 ]
+    extends:
+    - .stage_template
+
+jax-py3-stage-arm64:
+    stage: build stage
+    variables:
+      FRAMEWORK: jax
+      ARCH: arm64
+    needs: [ jax-py3-base-arm64, jax-py3-devel-arm64 ]
+    extends:
+    - .stage_template
+
+# Combine images from a build stage into a multi-arch image
+.manifest_template:
+    variables:
+      FRAMEWORK: core
+      IMAGE_BUILD_STAGE: base
+    script:
+    - !reference [.setup-docker ]
+    - |
+      if [[ "${IMAGE_BUILD_STAGE}" == "base" ]]; then
+          export SOURCE_IMAGE_NAME_ROOT=${BASE_IMAGE_NAME_VERSIONED}
+          export TARGET_MANIFEST=${BASE_IMAGE_NAME}
+          export TARGET_MANIFEST_VERSIONED=${BASE_IMAGE_NAME_VERSIONED}
+      elif [[ "${IMAGE_BUILD_STAGE}" == "devel" ]]; then
+          export SOURCE_IMAGE_NAME_ROOT=${DEVEL_IMAGE_NAME_VERSIONED}
+          export TARGET_MANIFEST=${DEVEL_IMAGE_NAME}
+          export TARGET_MANIFEST_VERSIONED=${DEVEL_IMAGE_NAME_VERSIONED}
+      elif [[ "${IMAGE_BUILD_STAGE}" == "qa" ]]; then
+          export SOURCE_IMAGE_NAME_ROOT=${QA_IMAGE_NAME_VERSIONED}
+          export TARGET_MANIFEST=${QA_IMAGE_NAME}
+          export TARGET_MANIFEST_VERSIONED=${QA_IMAGE_NAME_VERSIONED}
+      else
+          echo "Could not make multi-arch image for build stage ${IMAGE_BUILD_STAGE}"
+          exit 1
+      fi
+    - |
+      export SOURCE_IMAGE_NAMES=""
+      if [[ "${BUILD_AMD64}" != "0" ]]; then
+          export SOURCE_IMAGE_NAMES="${SOURCE_IMAGE_NAME_ROOT}-amd64 ${SOURCE_IMAGE_NAMES}"
+      fi
+      if [[ "${BUILD_ARM64}" != "0" ]]; then
+          export SOURCE_IMAGE_NAMES="${SOURCE_IMAGE_NAME_ROOT}-arm64 ${SOURCE_IMAGE_NAMES}"
+      fi
+    - docker rmi --no-prune ${SOURCE_IMAGE_NAMES} || true
+    - |
+      if [[ "${VIRTUAL}" != "1" ]]; then
+          docker manifest rm ${TARGET_MANIFEST} || true
+          docker manifest create "${TARGET_MANIFEST}" ${SOURCE_IMAGE_NAMES}
+          docker manifest push ${TARGET_MANIFEST}
+      fi
+    - docker manifest rm ${TARGET_MANIFEST_VERSIONED} || true
+    - docker manifest create "${TARGET_MANIFEST_VERSIONED}" ${SOURCE_IMAGE_NAMES}
+    - docker manifest push ${TARGET_MANIFEST_VERSIONED}
+    rules:
+    - if: $CI_PIPELINE_SOURCE != "pipeline"
+      when: never
+    - if: $CI_COMMIT_TAG
+      when: never
+    - if: $FRAMEWORK == "core" && $BUILD_CORE == "0"
+      when: never
+    - if: $FRAMEWORK == "pytorch" && $BUILD_PYTORCH == "0"
+      when: never
+    - if: $FRAMEWORK == "jax" && $BUILD_JAX == "0"
+      when: never
+    - if: $BUILD_AMD64 == "0" || $BUILD_ARM64 == "0"
+      when: never
+    - if: $IMAGE_BUILD_STAGE == "qa" && $CI_COMMIT_BRANCH !~ /^test_release_v.*$/
+      when: never
+    - when: on_success
+      allow_failure: false
+
+core-py3-base-manifest:
+    stage: manifests
+    variables:
+      FRAMEWORK: core
+      IMAGE_BUILD_STAGE: base
+    needs: [ core-py3-base-amd64, core-py3-base-arm64 ]
+    extends:
+    - .manifest_template
+
+core-py3-devel-manifest:
+    stage: manifests
+    variables:
+      FRAMEWORK: core
+      IMAGE_BUILD_STAGE: devel
+    needs: [ core-py3-devel-amd64, core-py3-devel-arm64 ]
+    extends:
+    - .manifest_template
+
+core-py3-qa-manifest:
+    stage: manifests
+    variables:
+      FRAMEWORK: core
+      IMAGE_BUILD_STAGE: qa
+    needs: [ core-py3-stage-amd64, core-py3-stage-arm64 ]
+    extends:
+    - .manifest_template
+
+pytorch-py3-base-manifest:
+    stage: manifests
+    variables:
+      FRAMEWORK: pytorch
+      IMAGE_BUILD_STAGE: base
+    needs: [ pytorch-py3-base-amd64, pytorch-py3-base-arm64 ]
+    extends:
+    - .manifest_template
+
+pytorch-py3-devel-manifest:
+    stage: manifests
+    variables:
+      FRAMEWORK: pytorch
+      IMAGE_BUILD_STAGE: devel
+    needs: [ pytorch-py3-devel-amd64, pytorch-py3-devel-arm64 ]
+    extends:
+    - .manifest_template
+
+pytorch-py3-qa-manifest:
+    stage: manifests
+    variables:
+      FRAMEWORK: pytorch
+      IMAGE_BUILD_STAGE: qa
+    needs: [ pytorch-py3-stage-amd64, pytorch-py3-stage-arm64 ]
+    extends:
+    - .manifest_template
+
+jax-py3-base-manifest:
+    stage: manifests
+    variables:
+      FRAMEWORK: jax
+      IMAGE_BUILD_STAGE: base
+    needs: [ jax-py3-base-amd64, jax-py3-base-arm64 ]
+    extends:
+    - .manifest_template
+
+jax-py3-devel-manifest:
+    stage: manifests
+    variables:
+      FRAMEWORK: jax
+      IMAGE_BUILD_STAGE: devel
+    needs: [ jax-py3-devel-amd64, jax-py3-devel-arm64 ]
+    extends:
+    - .manifest_template
+
+jax-py3-qa-manifest:
+    stage: manifests
+    variables:
+      FRAMEWORK: jax
+      IMAGE_BUILD_STAGE: qa
+    needs: [ jax-py3-stage-amd64, jax-py3-stage-arm64 ]
+    extends:
+    - .manifest_template
+
+.test_template: &TEST_TEMPLATE
+    environment: "${CI_JOB_NAME}"
+    variables:
+      TEST_WORK_DIR: "/opt/${CI_PROJECT_NAME}/qa/${CI_JOB_NAME}/"
+      TEST_SCRIPT: "./test.sh"
+      FRAMEWORK: core
+      ARCH: amd64
+    script:
+    - !reference [.setup-docker ]
+    - export TEST_WORK_DIR="${TEST_WORK_DIR%%--*}"
+    - export CONTAINER_NAME="${CI_PROJECT_NAME}.${CI_JOB_ID}.${CI_JOB_NAME}"
+    - test "${CI_JOB_NAME:0:3}" == "L3_" && export TEST_TIMEOUT=$((24*60*60)) || export TEST_TIMEOUT=$((3*60*60))
+    - test "${API_LOGGING}" == "0" && export LOGGER="" || export LOGGER="cudnnLog.sh"
+    - echo Test timeout set to $TEST_TIMEOUT seconds
+    - cat /proc/driver/nvidia/version
+    - if test -f "$CI_PROJECT_DIR/success"; then rm $CI_PROJECT_DIR/success; fi
+    - docker pull "${DEVEL_IMAGE_NAME_VERSIONED}-${ARCH}"
+    - ( sleep $TEST_TIMEOUT && echo "******TIMEOUT EXPIRED******" && docker stop "${CONTAINER_NAME}") &
+      set -x &&
+      docker run $(eval ${NV_DOCKER_ARGS})
+             --name "${CONTAINER_NAME}"
+             -v $DATADIR:/data:ro,rslave
+             $(eval echo ${EXTRA_DOCKER_RUN_ARGS})
+             -w ${TEST_WORK_DIR}
+             ${DEVEL_IMAGE_NAME_VERSIONED}-${ARCH}
+             /bin/bash -c "nvidia-smi && echo -n 'nproc = ' && nproc && echo ${JOB_START_STRING} && exec ${LOGGER} bash -e ${TEST_SCRIPT}" || RV=$?;
+      echo ${JOB_END_STRING};
+      if [[ -z "$RV" ]]; then touch $CI_PROJECT_DIR/success ; fi;
+      set +x;
+      rm -rf logs/;
+      docker cp "${CONTAINER_NAME}:/logs/" "logs/" 2>/dev/null || true;
+      for LOGNAME in logs/*; do
+          mv "${LOGNAME}" $(echo "${LOGNAME}" | sed "s/-.....\./-${CI_JOB_NAME}./") 2>/dev/null || true;
+      done;
+      if [ $(cat logs/cudnnapilog-*.txt 2>/dev/null | wc -l) -eq 0 ]; then rm -f logs/cudnnapilog-* 2>/dev/null; fi;
+      gzip logs/*.txt 2>/dev/null || true;
+      docker rm -f "${CONTAINER_NAME}" >/dev/null 2>&1;
+      pkill -HUP sleep >/dev/null 2>&1 || true;
+      exit ${RV:-0}
+    artifacts:
+      name: "${CI_JOB_NAME}"
+      paths:
+      - logs/*
+      reports:
+        junit: logs/*.xml
+      expire_in: 3 days
+      when: always
+    tags:
+    - must_specify_runner
+    needs: [ core-py3-devel-amd64 ]
+
+.test_on_cluster_template: &TEST_ON_CLUSTER_TEMPLATE
+    environment: "${CI_JOB_NAME}"
+    variables:
+      TEST_WORK_DIR: "/opt/${CI_PROJECT_NAME}/qa/${CI_JOB_NAME}/"
+      TEST_SCRIPT: "./test.sh"
+      FRAMEWORK: core
+      ARCH: amd64
+    script:
+    - !reference [.setup-enroot ]
+    - export TEST_WORK_DIR="${TEST_WORK_DIR%%--*}"
+    - export CONTAINER_NAME="${CI_PROJECT_NAME}.${CI_JOB_ID}.${CI_JOB_NAME}"
+    - test "${CI_JOB_NAME:0:3}" == "L3_" && export TEST_TIMEOUT=${TEST_TIMEOUT:-$((24*60*60))} || export TEST_TIMEOUT=${TEST_TIMEOUT:-$((3*60*60))}
+    - test "${API_LOGGING}" == "0" && export LOGGER="" || export LOGGER="cudnnLog.sh"
+    - echo Test timeout set to $TEST_TIMEOUT seconds
+    - if test -f "$CI_PROJECT_DIR/success"; then rm $CI_PROJECT_DIR/success; fi
+    - mkdir -p ${CI_PROJECT_DIR}/${CI_JOB_ID}/logs
+    - export DEVEL_IMAGE_NAME_VERSIONED="${DEVEL_IMAGE_NAME_VERSIONED/:5005/}"
+    - export JOBNAME="${SLURM_ACCOUNT}:${CI_PIPELINE_ID}:${GITLAB_USER_LOGIN}:${CI_JOB_NAME}:${CI_PROJECT_PATH}:${CI_COMMIT_BRANCH}:${CI_JOB_ID}"
+    - |
+      echo "::slurm submit=$(date -u +%FT%TZ)"
+      set -x
+      # Keep the deadline process in the foreground so it cannot retain the
+      # custom executor's output pipe after srun exits.
+      timeout --foreground --preserve-status --verbose --signal=TERM "${TEST_TIMEOUT}s" \
+          srun -p ${SLURM_PARTITION} -A ${SLURM_ACCOUNT} -N ${SLURM_NODES} ${SLURM_TIMELIMIT:+-t ${SLURM_TIMELIMIT}} --job-name ${JOBNAME} --mpi=pmix --export=ALL --container-image=${DEVEL_IMAGE_NAME_VERSIONED}-${ARCH} --container-name=${CONTAINER_NAME} --container-mounts=$DATADIR:/data --container-mounts=${CI_PROJECT_DIR}/${CI_JOB_ID}/logs:/logs --container-workdir=${TEST_WORK_DIR} /bin/bash -c "echo \"::slurm start=\$(date -u +%FT%TZ) job=\${SLURM_JOB_ID} node=\$(hostname)\" && ([ ! -x /usr/bin/nvidia-smi ] || nvidia-smi) && echo -n 'nproc = ' && nproc && echo ${JOB_START_STRING} && exec ${LOGGER} bash -ex ${TEST_SCRIPT}" || RV=$?
+      echo "::slurm end=$(date -u +%FT%TZ)"
+      echo ${JOB_END_STRING}
+      if [[ -z "${RV:-}" ]]; then touch $CI_PROJECT_DIR/success ; fi
+      set +x
+      for LOGNAME in ${CI_PROJECT_DIR}/${CI_JOB_ID}/logs/**/*; do
+          if [ ! -s "${LOGNAME}" ]; then
+              rm -f "${LOGNAME}" ;
+          else
+              mv "${LOGNAME}" $(echo "${LOGNAME}" | sed "s/-.....\./-${CI_JOB_NAME_SLUG}./") 2>/dev/null || true;
+          fi;
+      done;
+      gzip ${CI_PROJECT_DIR}/${CI_JOB_ID}/logs/*.txt 2>/dev/null || true;
+      rm -rf logs/;
+      mkdir -p logs;
+      cp ${CI_PROJECT_DIR}/${CI_JOB_ID}/logs/* logs/ 2>/dev/null || true;
+      exit ${RV:-0}
+    artifacts:
+      name: "${CI_JOB_NAME}"
+      paths:
+      - logs/*
+      reports:
+        junit: logs/*.xml
+      expire_in: 3 days
+      when: always
+    tags:
+    - must_specify_runner
+    needs: [ core-py3-devel-amd64 ]
+
+.docs_template: &DOCS_BUILD
+    stage: test
+    variables:
+      GIT_STRATEGY: fetch
+      GIT_SUBMODULE_STRATEGY: recursive
+      GET_SOURCES_ATTEMPTS: 3
+      FRAMEWORK: core
+      ARCH: amd64
+    script:
+    - !reference [.setup-docker ]
+    - export CONTAINER_NAME="${CI_PROJECT_NAME}.${CI_JOB_ID}.${CI_JOB_NAME}"
+    - export TEST_TIMEOUT=$((20*60))
+    - echo Test timeout set to $TEST_TIMEOUT seconds
+    - cat /proc/driver/nvidia/version
+    - if test -f "$CI_PROJECT_DIR/success"; then rm $CI_PROJECT_DIR/success; fi
+    - docker pull "${DEVEL_IMAGE_NAME_VERSIONED}-${ARCH}"
+    - docker build --progress=plain
+                   -t ${DOCS_IMAGE_NAME}
+                   --build-arg "BASE_IMAGE_NAME=${DEVEL_IMAGE_NAME_VERSIONED}-${ARCH}"
+                   --build-arg "GIT_SHA=${GIT_SHA}"
+                   -f Dockerfile.docs .
+    - echo ${JOB_START_STRING}
+    - ( sleep $TEST_TIMEOUT && echo "******TIMEOUT EXPIRED******" && docker kill "${CONTAINER_NAME}" ) &
+      set -x &&
+      docker run $(eval ${NV_DOCKER_ARGS})
+             --name "${CONTAINER_NAME}"
+             -v $DATADIR:/data:ro
+             $(eval echo ${EXTRA_DOCKER_RUN_ARGS})
+             $(eval echo ${DOCS_IMAGE_NAME})
+             /bin/bash -ec "doxygen docs/Doxyfile && cd docs && make html" || RV=$?;
+      echo ${JOB_END_STRING};
+      set +x;
+      pkill -HUP sleep || true;
+      test ${RV} && docker rm -f ${CONTAINER_NAME} && docker rmi ${DOCS_IMAGE_NAME} && exit ${RV:-0}
+    - docker cp "${CONTAINER_NAME}:/opt/transformerengine/docs/_build/html/." "html"
+    - docker rm -f ${CONTAINER_NAME}
+    - docker rmi ${DOCS_IMAGE_NAME}
+    artifacts:
+      name: "${CI_JOB_NAME}.${CI_PIPELINE_ID}"
+      paths:
+      - html/
+      expire_in: 1 month
+    tags:
+    - 1GPU
+    needs: [ core-py3-devel-amd64 ]
+    rules:
+    - if: $CI_PIPELINE_SOURCE != "pipeline"
+      when: never
+    - if: $CI_COMMIT_TAG
+      when: never
+    - if: $FRAMEWORK == "core" && $BUILD_CORE == "0"
+      when: never
+    - if: $FRAMEWORK == "pytorch" && $BUILD_PYTORCH == "0"
+      when: never
+    - if: $FRAMEWORK == "jax" && $BUILD_JAX == "0"
+      when: never
+    - if: $ARCH == "amd64" && $BUILD_AMD64 == "0"
+      when: never
+    - if: $ARCH == "arm64" && $BUILD_ARM64 == "0"
+      when: never
+    - when: on_success
+      allow_failure: false
+
+gather:
+    stage: finalize
+    script:
+    - /bin/true
+    artifacts:
+      name: "${CI_PIPELINE_ID}"
+      paths:
+      - logs/*
+      - wheelhouse/*
+      expire_in: 1 month
+      when: always
+    rules:
+    - if: $CI_COMMIT_TAG
+      when: never
+    - if: $API_LOGGING == "0"
+      when: never
+    - when: manual
+      allow_failure: true
+
+upload_logs:
+  stage: finalize
+  variables:
+      CURL_ATTEMPTS: 3
+      CURL_SLEEP: 5
+  script:
+    - tmp_file="${CI_PIPELINE_ID}_upload_tmp"
+    - echo "Uploading logs for the commit ${GIT_SHA}"
+    - |
+      for i in `seq 1 ${CURL_ATTEMPTS}`; do
+          sleep ${CURL_SLEEP}
+          CURL_RESULT=$(curl --silent -o ${tmp_file} --write-out "%{http_code}" --request POST \
+            --user tmoon@nvidia.com:${JENKINS_TOKEN} \
+            --data token="${JENKINS_CI_TOKEN}" \
+            --data PIPELINE_ID="${CI_PIPELINE_ID}" \
+            --data githubData="${githubData}" \
+            --data COMMIT_SHA="${GIT_SHA}" \
+            "https://prod.blsm.nvidia.com/dl-fw-transformerengine-ci/job/te-ci-logs/buildWithParameters" | grep 201) || true
+          echo "\n" | cat ${tmp_file} -
+          rm ${tmp_file}
+          test $CURL_RESULT && exit 0
+      done
+    - exit 1
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "pipeline" && $CI_COMMIT_BRANCH =~ /^pr_/
+      when: always
+  tags:
+    - vm-builder
+
+send_result_to_slack:
+  stage: finalize
+  variables:
+      FAIL_SLACK_EMOJI: ":red_cross:"
+      PASS_SLACK_EMOJI: ":white_check_mark:"
+  script:
+  - |
+    function get_github_username() {
+        jq -r '.comment.user.login' <<< "${githubData}"
+    }
+
+    function get_github_pr_info_as_markdown() {
+        if [[ -z "${githubData}" ]]; then
+          echo ""
+        else
+          local pr_title=$(jq -r '.issue.title' <<< "${githubData}")
+          local pr_url=$(jq -r '.issue.html_url' <<< "${githubData}")
+          echo "<${pr_url}|PR>: ${pr_title}"
+        fi
+    }
+
+    function get_nvidia_username_from_github_username() {
+        local github_username="$1"
+        local nv_username="INVALID"
+        # Set the NVIDIA username based on the GitHub username.
+        if [[ "${github_username}" == "jberchtold-nvidia" ]]; then nv_username="jberchtold@nvidia.com" ; fi
+        if [[ "${github_username}" == "denera" ]]; then nv_username="adener@nvidia.com" ; fi
+        if [[ "${github_username}" == "ksivaman" ]]; then nv_username="ksivamani@nvidia.com" ; fi
+        if [[ "${github_username}" == "KshitijLakhani" ]]; then nv_username="klakhani@nvidia.com" ; fi
+        if [[ "${github_username}" == "Oleg-Goncharov" ]]; then nv_username="ogoncharov@nvidia.com" ; fi
+        if [[ "${github_username}" == "phu0ngng" ]]; then nv_username="phuonguyen@nvidia.com" ; fi
+        if [[ "${github_username}" == "ptrendx" ]]; then nv_username="ptredak@nvidia.com" ; fi
+        if [[ "${github_username}" == "sudhakarsingh27" ]]; then nv_username="sudhakars@nvidia.com" ; fi
+        if [[ "${github_username}" == "timmoon10" ]]; then nv_username="tmoon@nvidia.com" ; fi
+        if [[ "${github_username}" == "cyanguwa" ]]; then nv_username="charleney@nvidia.com" ; fi
+        if [[ "${github_username}" == "pggPL" ]]; then nv_username="pgadzinski@nvidia.com" ; fi
+        if [[ "${github_username}" == "mk-61" ]]; then nv_username="vcherepanov@nvidia.com" ; fi
+        if [[ "${github_username}" == "negvet" ]]; then nv_username="etsykunov@nvidia.com" ; fi
+        if [[ "${github_username}" == "tdophung" ]]; then nv_username="tdophung@nvidia.com" ; fi
+        if [[ "${github_username}" == "vthumbe1503" ]]; then nv_username="vthumbe@nvidia.com" ; fi
+        if [[ "${github_username}" == "kainzhong" ]]; then nv_username="kainingz@nvidia.com" ; fi
+        if [[ "${github_username}" == "fheinecke" ]]; then nv_username="fheinecke@nvidia.com" ; fi
+        echo "${nv_username}"
+    }
+
+    function get_slack_user_id_from_nvidia_username() {
+        local nv_username="$1"
+        local slack_user_id="(Unknown nvidia user ${nv_username})"
+        # Set the Slack user ID based on the NVIDIA username. To find a Slack user ID, click on a Slack profile, click on "More actions" (three dots), and select "Copy member ID".
+        if [[ "${nv_username}" == "jberchtold@nvidia.com" ]]; then slack_user_id="<@U023NP29RHV>" ; fi
+        if [[ "${nv_username}" == "adener@nvidia.com" ]]; then slack_user_id="<@U05NSKSK9KL>" ; fi
+        if [[ "${nv_username}" == "ksivamani@nvidia.com" ]]; then slack_user_id="<@U013FFF2QRZ>" ; fi
+        if [[ "${nv_username}" == "klakhani@nvidia.com" ]]; then slack_user_id="<@U081D91JGP4>" ; fi
+        if [[ "${nv_username}" == "ogoncharov@nvidia.com" ]]; then slack_user_id="<@U063MCT3YEP>" ; fi
+        if [[ "${nv_username}" == "phuonguyen@nvidia.com" ]]; then slack_user_id="<@U06RB69AJE8>" ; fi
+        if [[ "${nv_username}" == "ptredak@nvidia.com" ]]; then slack_user_id="<@U7P8MFMLH>" ; fi
+        if [[ "${nv_username}" == "sudhakars@nvidia.com" ]]; then slack_user_id="<@U013DK4P1NU>" ; fi
+        if [[ "${nv_username}" == "tmoon@nvidia.com" ]]; then slack_user_id="<@U037S1HPMLP>" ; fi
+        if [[ "${nv_username}" == "charleney@nvidia.com" ]]; then slack_user_id="<@U01DQ922GMA>" ; fi
+        if [[ "${nv_username}" == "pgadzinski@nvidia.com" ]]; then slack_user_id="<@U06P0EX6R19>" ; fi
+        if [[ "${nv_username}" == "vcherepanov@nvidia.com" ]]; then slack_user_id="<@USE6S7V4Z>" ; fi
+        if [[ "${nv_username}" == "etsykunov@nvidia.com" ]]; then slack_user_id="<@U08F3RZUZA5>" ; fi
+        if [[ "${nv_username}" == "tdophung@nvidia.com" ]]; then slack_user_id="<@U01RWAH5971>" ; fi
+        if [[ "${nv_username}" == "vthumbe@nvidia.com" ]]; then slack_user_id="<@U09AW1ZP8JZ>" ; fi
+        if [[ "${nv_username}" == "kainingz@nvidia.com" ]]; then slack_user_id="<@U0A6XGQKA66>" ; fi
+        if [[ "${nv_username}" == "fheinecke@nvidia.com" ]]; then slack_user_id="<@U0BGTGMSA8K>" ; fi
+        echo "${slack_user_id}"
+    }
+
+    function jq_in_place() {
+        jq "$@" > "${2}.tmp" && mv "${2}.tmp" "$2";
+    }
+
+    function get_gitlab_pipeline_jobs() {
+        curl --header "PRIVATE-TOKEN: $GITLAB_JOB_QUERY_TOKEN" "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/pipelines/${CI_PIPELINE_ID}/jobs?per_page=100"
+    }
+
+    # Count failed/errored JUnit test cases in a job's artifacts (logs/*.xml).
+    # Echoes a non-negative integer; 0 if no artifact / no JUnit / parse fails.
+    function count_failed_tests_in_job() {
+        local job_id="$1" zip count
+        zip="$(mktemp)"
+        if ! curl -sf --header "PRIVATE-TOKEN: $GITLAB_JOB_QUERY_TOKEN" "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/jobs/${job_id}/artifacts" -o "$zip"; then
+            echo "failed to download artifacts of job ${job_id}" >&2
+            rm -f "$zip"; echo 0; return
+        fi
+        if command -v python3 >/dev/null 2>&1; then
+            count=$(python3 -c "import sys,zipfile,xml.etree.ElementTree as ET; z=zipfile.ZipFile(sys.argv[1]); print(sum(1 for nm in z.namelist() if nm.endswith('.xml') for tc in ET.fromstring(z.read(nm)).iter('testcase') if tc.find('failure') is not None or tc.find('error') is not None))" "$zip" 2>/dev/null)
+        elif command -v unzip >/dev/null 2>&1; then
+            count=$(unzip -p "$zip" 'logs/*.xml' 2>/dev/null | grep -oE '<(failure|error)[ />]' | wc -l | tr -d ' ')
+        else
+            count=$(docker run --rm -v "$zip":/a.zip:ro python:3-slim python -c "import zipfile,xml.etree.ElementTree as ET; z=zipfile.ZipFile('/a.zip'); print(sum(1 for nm in z.namelist() if nm.endswith('.xml') for tc in ET.fromstring(z.read(nm)).iter('testcase') if tc.find('failure') is not None or tc.find('error') is not None))" 2>/dev/null)
+        fi
+        rm -f "$zip"
+        echo "${count:-0}"
+    }
+
+    # For a failed job, return "(N tests failed)" if JUnit reports test failures,
+    # otherwise "(RUNNER_FAILURE)" (infra/setup/timeout, not a test failure).
+    function job_failure_annotation() {
+        local c; c="$(count_failed_tests_in_job "$1")"
+        case "$c" in ''|*[!0-9]*) c=0 ;; esac
+        if [ "$c" -gt 0 ]; then echo "($c tests failed)"; else echo "(RUNNER_FAILURE)"; fi
+    }
+
+    function get_slack_ping_string_for_test_owners() {
+        RESPONSE=$(get_gitlab_pipeline_jobs)
+
+        JAX_FAILED_JOB_COUNT=$(echo "$RESPONSE" | jq '[.[] | select(.status != "manual") | select(.stage != "finalize") | select(.status != "success") | select(.name | contains("jax"))] | length')
+        PYTORCH_FAILED_JOB_COUNT=$(echo "$RESPONSE" | jq '[.[] | select(.status != "manual") | select(.stage != "finalize") | select(.status != "success") | select(.name | contains("pytorch"))] | length')
+        CORE_FAILED_JOB_COUNT=$(echo "$RESPONSE" | jq '[.[] | select(.status != "manual") | select(.stage != "finalize") | select(.status != "success") | select(.name | contains("cppunittest"))] | length')
+
+        if [[ "$JAX_FAILED_JOB_COUNT" -gt 0 ]]; then
+          echo "JAX test failures: $(get_slack_user_id_from_nvidia_username jberchtold@nvidia.com) $(get_slack_user_id_from_nvidia_username tdophung@nvidia.com) $(get_slack_user_id_from_nvidia_username klakhani@nvidia.com) $(get_slack_user_id_from_nvidia_username ptredak@nvidia.com)"
+        fi
+        if [[ "$PYTORCH_FAILED_JOB_COUNT" -gt 0 ]]; then
+          echo "PyTorch test failures: $(get_slack_user_id_from_nvidia_username ptredak@nvidia.com) $(get_slack_user_id_from_nvidia_username tmoon@nvidia.com) $(get_slack_user_id_from_nvidia_username ksivamani@nvidia.com)"
+        fi
+        if [[ "$CORE_FAILED_JOB_COUNT" -gt 0 ]]; then
+          echo "Core test failures: $(get_slack_user_id_from_nvidia_username ogoncharov@nvidia.com) $(get_slack_user_id_from_nvidia_username ptredak@nvidia.com)"
+        fi
+    }
+
+    # Prepare the pipeline status message to be sent to Slack.
+    function get_pipeline_status_message() {
+        local slack_ping_string="$1"
+        local RESPONSE=$(get_gitlab_pipeline_jobs)
+
+        local FAILED_JOB_COUNT=$(echo "$RESPONSE" | jq '[.[] | select(.status != "manual") | select(.stage != "finalize") | select(.status != "success")] | length')
+        if [ "$FAILED_JOB_COUNT" -gt 0 ]; then
+            echo -n "$FAIL_SLACK_EMOJI [FAILED] "
+        else
+            echo -n "$PASS_SLACK_EMOJI [PASSED] "
+        fi
+
+        echo "CI Pipeline <https://gitlab-master.nvidia.com/dl/transformerengine/transformerengine/-/pipelines/${CI_PIPELINE_ID}|${CI_PIPELINE_ID}> completed."
+
+        echo "$slack_ping_string"
+
+        echo "$(get_github_pr_info_as_markdown)"
+
+        if [ -n "$PIPELINE_NAME" ]; then
+          echo "Pipeline name: $PIPELINE_NAME"
+        fi
+    }
+
+    function get_pipeline_job_summary_message() {
+        local RESPONSE=$(get_gitlab_pipeline_jobs)
+
+        echo "Jobs Summary:"
+        echo "$RESPONSE" | jq --raw-output "[.[] | select(.status != \"manual\") | select(.stage != \"finalize\") | select(.status != \"success\")] | [.[] | \"$FAIL_SLACK_EMOJI \" + .name + \" (<\" + .web_url + \"|link>)\"] | join(\"\n\")"
+        echo "$RESPONSE" | jq --raw-output "[.[] | select(.status != \"manual\") | select(.stage != \"finalize\") | select(.status == \"success\")] | [.[] | \"$PASS_SLACK_EMOJI \" + .name + \" (<\" + .web_url + \"|link>)\"] | join(\"\n\")"
+    }
+
+    function get_job_list_message() {
+      local job_type="$1"
+      local failed_jobs="$2"
+      local successful_jobs="$3"
+      local header=""
+
+      if [[ -z "$failed_jobs" && -z "$successful_jobs" ]]; then
+        return
+      fi
+
+      case "$job_type" in
+        "jax")
+          header="*JAX Jobs:*"
+          ;;
+        "pytorch")
+          header="*PyTorch Jobs:*"
+          ;;
+        "cpp")
+          header="*Core C++ Unit Test Jobs:*"
+          ;;
+        "other")
+          header="*Other Jobs:*"
+          ;;
+        *)
+          header="*${job_type^} Jobs:*"
+          ;;
+      esac
+
+      echo -e "$header\n$failed_jobs\n$successful_jobs"
+    }
+
+    function send_job_messages() {
+      local thread_id="$1"
+      local RESPONSE=$(get_gitlab_pipeline_jobs)
+
+      local jobs job_count failed_jobs successful_jobs msg
+      for job_type in "cpp" "jax" "pytorch" "other"; do
+        if [[ "$job_type" == "other" ]]; then
+          jobs=$(echo "$RESPONSE" | jq -r '[.[] | select((.name | contains("jax") | not) and (.name | contains("pytorch") | not) and (.name | contains("cpp") | not))]')
+        else
+          jobs=$(echo "$RESPONSE" | jq -r "[.[] | select(.name | contains(\"$job_type\"))]")
+        fi
+        job_count=$(echo "$jobs" | jq -r 'length')
+        if [[ "$job_count" -eq 0 ]]; then
+          continue
+        fi
+        failed_jobs=$(echo "$jobs" | jq -c "[.[] | select(.status != \"manual\") | select(.stage != \"finalize\") | select(.status != \"success\")][]" | while IFS= read -r jrow; do
+            jid=$(echo "$jrow" | jq -r '.id'); jname=$(echo "$jrow" | jq -r '.name'); jurl=$(echo "$jrow" | jq -r '.web_url')
+            echo "$FAIL_SLACK_EMOJI $jname $(job_failure_annotation "$jid") (<$jurl|link>)"
+        done)
+        successful_jobs=$(echo "$jobs" | jq --raw-output "[.[] | select(.status != \"manual\") | select(.stage != \"finalize\") | select(.status == \"success\")] | [.[] | \"$PASS_SLACK_EMOJI \" + .name + \" (<\" + .web_url + \"|link>)\"] | join(\"\n\")")
+        msg=$(get_job_list_message "$job_type" "$failed_jobs" "$successful_jobs")
+        sendSlackMessage "$msg" "$thread_id"
+      done
+    }
+
+    # Send message via Slack API.
+    # Can optionally pass a parent message to 'sendSlackMessage' as the second arg to post the message as a reply in a thread.
+    function sendSlackMessage() {
+        local SLACK_MESSAGE_MRKDWN=${1}
+        local PARENT_MESSAGE_TS=${2}
+        jq '{channel: $channel, blocks: []}' -n --arg channel "#swdl-fw-transformerengine-ci" > payload.json
+        # Splits the message up into blocks due to Slack's limit of 3000 characters per block.
+        [ -n "${SLACK_MESSAGE_MRKDWN}" ] && jq_in_place '.blocks += ($mrkdwn | split("\n") | map(select(. != "")) | map({type: "section", text: {type: "mrkdwn", text: .}}))' payload.json --arg mrkdwn "${SLACK_MESSAGE_MRKDWN}"
+        [ -n "$PARENT_MESSAGE_TS" ] && jq_in_place '. += {"thread_ts" : $ts}' payload.json --arg ts ${PARENT_MESSAGE_TS//\"/}
+        curl -X POST https://slack.com/api/chat.postMessage -H "Authorization: Bearer ${SLACK_BOT_TOKEN}" -H "Content-Type: application/json" -d @payload.json -o response.json || (echo "Curl command failed with status $?"; exit 1)
+        cat response.json | jq '.' > /dev/null
+        (jq -e '.ok == true' response.json > /dev/null && echo $(jq -e '.ts' response.json)) || (echo "Slack API request failed"; cat response.json; exit 1)
+    }
+
+    if [[ -z "${githubData}" ]]; then
+      # GitLab username
+      NV_USERNAME=${GITLAB_USER_EMAIL}
+    else
+      GH_USERNAME=$(get_github_username)
+      echo "GitHub username: ${GH_USERNAME}"
+      NV_USERNAME=$(get_nvidia_username_from_github_username "${GH_USERNAME}")
+    fi
+    echo "Nvidia username: ${NV_USERNAME}"
+    SLACK_USER_ID=$(get_slack_user_id_from_nvidia_username "${NV_USERNAME}")
+    echo "Slack user ID: ${SLACK_USER_ID}"
+
+    echo "SLACK_PING_TEST_OWNERS=${SLACK_PING_TEST_OWNERS}"
+
+    if [[ "$SLACK_PING_TEST_OWNERS" != "0" ]]; then
+      SLACK_PING_STRING="$(get_slack_ping_string_for_test_owners)"
+      echo "Overriding Slack ping string to: ${SLACK_PING_STRING}"
+    else
+      SLACK_PING_STRING="Triggered by: ${SLACK_USER_ID}"
+    fi
+    thread_id=$(sendSlackMessage "$(get_pipeline_status_message "${SLACK_PING_STRING}")")
+    # Send job status in thread
+    send_job_messages "${thread_id}"
+  rules:
+    - if: $CI_PIPELINE_SOURCE != "pipeline"
+      when: never
+    - if: $SEND_SLACK_MESSAGE == "1"
+      when: always
+      allow_failure: true
+    - when: manual
+      allow_failure: true
+  tags:
+    - vm-builder
+
+.manual_test_trigger: &MANUAL_TEST_TRIGGER
+    stage: trigger
+    script:
+    - export SCOPE1=${CI_JOB_NAME%% tests}; export SCOPE=${SCOPE1##Run all }
+    - docker pull ${CI_REGISTRY}/dl/devops/scripts:nvdl_nightly_test_scheduler
+    - docker run --init --rm ${CI_REGISTRY}/dl/devops/scripts:nvdl_nightly_test_scheduler ${CI_PIPELINE_ID} ${CI_PROJECT_PATH} ${SCOPE}
+    rules:
+    - if: $CI_PIPELINE_SOURCE != "pipeline"
+      when: never
+    - if: $CI_COMMIT_TAG
+      when: never
+    - when: manual
+      allow_failure: true
+
+.L0_test: &L0_TEST
+    stage: test
+    extends:
+    - .test_template
+    rules:
+    - if: $CI_PIPELINE_SOURCE != "pipeline"
+      when: never
+    - if: $CI_COMMIT_TAG
+      when: never
+    - if: $FRAMEWORK == "core" && $BUILD_CORE == "0"
+      when: never
+    - if: $FRAMEWORK == "pytorch" && $BUILD_PYTORCH == "0"
+      when: never
+    - if: $FRAMEWORK == "jax" && $BUILD_JAX == "0"
+      when: never
+    - if: $ARCH == "amd64" && $BUILD_AMD64 == "0"
+      when: never
+    - if: $ARCH == "arm64" && $BUILD_ARM64 == "0"
+      when: never
+    - if: $RUN_L0_TESTS == "0"
+      when: manual
+      allow_failure: true
+    - when: on_success
+      allow_failure: false
+
+.L0_test_on_cluster: &L0_TEST_ON_CLUSTER
+    extends:
+    - .L0_test
+    - .test_on_cluster_template
+
+.L1_test: &L1_TEST
+    stage: test
+    extends:
+    - .test_template
+    rules:
+    - if: $CI_PIPELINE_SOURCE != "pipeline"
+      when: never
+    - if: $CI_COMMIT_TAG
+      when: never
+    - if: $FRAMEWORK == "core" && $BUILD_CORE == "0"
+      when: never
+    - if: $FRAMEWORK == "pytorch" && $BUILD_PYTORCH == "0"
+      when: never
+    - if: $FRAMEWORK == "jax" && $BUILD_JAX == "0"
+      when: never
+    - if: $ARCH == "amd64" && $BUILD_AMD64 == "0"
+      when: never
+    - if: $ARCH == "arm64" && $BUILD_ARM64 == "0"
+      when: never
+    - if: $RUN_L1_TESTS == "0"
+      when: manual
+      allow_failure: true
+    - when: on_success
+      allow_failure: false
+
+.L1_test_on_cluster: &L1_TEST_ON_CLUSTER
+    extends:
+    - .L1_test
+    - .test_on_cluster_template
+
+.L2_test: &L2_TEST
+    stage: test
+    extends:
+    - .test_template
+    rules:
+    - if: $CI_PIPELINE_SOURCE != "pipeline"
+      when: never
+    - if: $CI_COMMIT_TAG
+      when: never
+    - if: $FRAMEWORK == "core" && $BUILD_CORE == "0"
+      when: never
+    - if: $FRAMEWORK == "pytorch" && $BUILD_PYTORCH == "0"
+      when: never
+    - if: $FRAMEWORK == "jax" && $BUILD_JAX == "0"
+      when: never
+    - if: $ARCH == "amd64" && $BUILD_AMD64 == "0"
+      when: never
+    - if: $ARCH == "arm64" && $BUILD_ARM64 == "0"
+      when: never
+    - if: $RUN_L2_TESTS == "0"
+      when: manual
+      allow_failure: true
+    - when: on_success
+      allow_failure: false
+
+.L2_test_on_cluster: &L2_TEST_ON_CLUSTER
+    extends:
+    - .L2_test
+    - .test_on_cluster_template
+
+.L3_test: &L3_TEST
+    stage: test
+    extends:
+    - .test_template
+    rules:
+    - if: $CI_PIPELINE_SOURCE != "pipeline"
+      when: never
+    - if: $CI_COMMIT_TAG
+      when: never
+    - if: $FRAMEWORK == "core" && $BUILD_CORE == "0"
+      when: never
+    - if: $FRAMEWORK == "pytorch" && $BUILD_PYTORCH == "0"
+      when: never
+    - if: $FRAMEWORK == "jax" && $BUILD_JAX == "0"
+      when: never
+    - if: $ARCH == "amd64" && $BUILD_AMD64 == "0"
+      when: never
+    - if: $ARCH == "arm64" && $BUILD_ARM64 == "0"
+      when: never
+    - if: $RUN_L3_TESTS == "0"
+      when: manual
+      allow_failure: true
+    - when: on_success
+      allow_failure: false
+
+.L3_test_on_cluster: &L3_TEST_ON_CLUSTER
+    extends:
+    - .L3_test
+    - .test_on_cluster_template
+
+"Run all L1 tests":
+    <<: *MANUAL_TEST_TRIGGER
+
+"Run all L2 tests":
+    <<: *MANUAL_TEST_TRIGGER
+
+"Run all L3 tests":
+    <<: *MANUAL_TEST_TRIGGER
+
+.A100_1GPU: &A100_1GPU
+    tags:
+    - A100
+    - 1GPU
+
+.H100_1GPU:
+    tags:
+      - dlcluster_h100
+    variables:
+      CI_SCHEDULER_TYPE: docker
+      EXTRA_DOCKER_RUN_ARGS: "--init --ipc=host --ulimit memlock=-1 --ulimit stack=$$((1024*65536)) --label RUNNER_ID=$${RUNNER_ID}"
+      CI_SLURM_TIME: 240
+
+# dlcluster executes Docker directly, while cw-pdx requires Slurm/enroot.
+# Select both the tag and matching script so each test remains one logical job.
+.H100_runner:
+    tags:
+      - ${H100_4GPU_RUNNER_TAG}
+    variables:
+      EXTRA_DOCKER_RUN_ARGS: "--init --ipc=host --ulimit memlock=-1 --ulimit stack=$$((1024*65536)) --label RUNNER_ID=$${RUNNER_ID} --env CI_PIPELINE_ID=${CI_PIPELINE_ID}"
+      SLURM_PARTITION: "batch"
+      SLURM_ACCOUNT: "coreai_dlfw_ci"
+      SLURM_NODES: 1
+      # The batch default is about 31 minutes, which truncates longer TE suites.
+      CI_SLURM_TIME: 240
+    script:
+    - |
+      if [[ "${H100_4GPU_RUNNER}" == "cw_pdx" ]]; then
+          export DATADIR="${CI_PROJECT_DIR}"
+    - !reference [.test_on_cluster_template, script]
+    - else
+    - !reference [.test_template, script]
+    - fi
+
+.L40_1GPU:
+    tags:
+    - dlcluster_l40
+    variables:
+      CI_SCHEDULER_TYPE: docker
+      EXTRA_DOCKER_RUN_ARGS: "--init --ipc=host --ulimit memlock=-1 --ulimit stack=$$((1024*65536)) --label RUNNER_ID=$${RUNNER_ID}"
+      CI_SLURM_TIME: 240
+
+
+.B200_runner:
+    variables:
+      SLURM_PARTITION: "batch"
+      SLURM_ACCOUNT: "coreai_dlfw_dev"
+      # Full release L1/L2 suites exceed the cluster's two-hour default.
+      # Keep the wrapper alive ten minutes beyond the four-hour allocation.
+      TEST_TIMEOUT: 15000 # 15000 seconds = 4 hours + 10 minutes
+      SLURM_TIMELIMIT: 240 # 240 minutes = 4 hours
+    tags:
+    - ${B200_RUNNER}
+
+.B200_1GPU:
+    extends:
+    - .B200_runner
+    variables:
+      GPUS: 1
+      CI_BUILDS_DIR: "/lustre/fsw/coreai_dlfw_dev"
+      DATADIR: "/lustre/fsw/coreai_dlfw_dev/datasets"
+      SLURM_NODES: 1
+      CUDA_VISIBLE_DEVICES: "0"
+
+.B200_8GPU:
+    extends:
+    - .B200_runner
+    variables:
+      GPUS: 8
+      CI_BUILDS_DIR: "/lustre/fsw/coreai_dlfw_dev"
+      DATADIR: "/lustre/fsw/coreai_dlfw_dev/datasets"
+      SLURM_NODES: 1
+
+.GB200_1GPU:
+    tags:
+      - dlcluster_ogb_1gpu
+    variables:
+      CI_SCHEDULER_TYPE: docker
+      EXTRA_DOCKER_RUN_ARGS: "--init --ipc=host --ulimit memlock=-1 --ulimit stack=$$((1024*65536)) --label RUNNER_ID=$${RUNNER_ID}"
+      CI_SLURM_TIME: 240
+
+.GB200_4GPU:
+    tags:
+      - dlcluster_ogb_mnnvl
+    variables:
+      CI_SCHEDULER_TYPE: docker
+      EXTRA_DOCKER_RUN_ARGS: "--init --ipc=host --ulimit memlock=-1 --ulimit stack=$$((1024*65536)) --label RUNNER_ID=$${RUNNER_ID}"
+      CI_SLURM_TIME: 240
+
+.GB200_4GPU_IMEX:
+    tags:
+      - dlcluster_ogb_mnnvl
+    variables:
+      CI_SCHEDULER_TYPE: docker
+      EXTRA_DOCKER_RUN_ARGS: "--init --ipc=host --ulimit memlock=-1 --ulimit stack=$$((1024*65536)) --device /dev/nvidia-caps-imex-channels/ --label RUNNER_ID=$${RUNNER_ID}"
+      CI_SLURM_TIME: 240
+      CI_SLURM_CONSTRAINT: IMEX
+
+.GB200NVL_4GPU:
+    tags:
+      - ptyche
+    variables:
+      GPUS: 4
+      SLURM_NODES: 1
+      SLURM_PARTITION: "batch"
+      SLURM_ACCOUNT: "core_dlfw_ci"
+      SLURM_TIMELIMIT: 240
+      CI_ARCH: arm64
+      DATADIR: "/lustre/fsw/core_dlfw_ci/datasets"
+
+######################################################
+##
+## Test definitions.
+##
+##   By convention, test names should be prefixed
+##   with "L0_" or "L1_" etc.
+##
+##   Normally qa/ will be a submodule that pulls in
+##   all of the stuff needed to run the tests into the
+##   *-devel images.
+##
+##   The CI script templates above expect each test to
+##   be defined in /opt/<project>/qa/<testname>/test.sh.
+##   This behavior is specified by the variables
+##   $TEST_WORK_DIR and $TEST_SCRIPT.  You can override
+##   either of those variables for a given test, but if
+##   you do, you have to override them both together,
+##   like this:
+##
+##   L0_mytest:
+##      variables:
+##        FRAMEWORK: core
+##        ARCH: amd64
+##        TEST_WORK_DIR: "/some/other/path"
+##        TEST_SCRIPT: "./test.sh"
+##      extends:
+##      - .L0_test
+##
+######################################################
+
+L0_license:
+    variables:
+      FRAMEWORK: core
+      ARCH: amd64
+    needs: [ core-py3-devel-amd64 ]
+    extends:
+    - .L0_test
+    tags:
+    - 1GPU
+
+L0_pytorch_lint:
+    variables:
+      FRAMEWORK: pytorch
+      ARCH: amd64
+    needs: [ pytorch-py3-devel-amd64 ]
+    extends:
+    - .L0_test
+    tags:
+    - 1GPU
+
+L0_jax_lint:
+    variables:
+      FRAMEWORK: jax
+      ARCH: amd64
+    needs: [ jax-py3-devel-amd64 ]
+    extends:
+    - .L0_test
+    tags:
+    - 1GPU
+
+L0_pytorch_wheel--L40_1GPU:
+    variables:
+      FRAMEWORK: pytorch
+      ARCH: amd64
+    needs: [ pytorch-py3-devel-amd64 ]
+    extends:
+    - .L0_test
+    - .L40_1GPU
+
+L0_jax_wheel--L40_1GPU:
+    variables:
+      FRAMEWORK: jax
+      ARCH: amd64
+    needs: [ jax-py3-devel-amd64 ]
+    extends:
+    - .L0_test
+    - .L40_1GPU
+
+L0_cppunittest--L40_1GPU:
+    variables:
+      FRAMEWORK: core
+      ARCH: amd64
+    needs: [core-py3-devel-amd64]
+    extends:
+    - .L0_test
+    - .L40_1GPU
+
+L0_cppunittest--A100_1GPU:
+    variables:
+      FRAMEWORK: core
+      ARCH: amd64
+    needs: [ core-py3-devel-amd64 ]
+    extends:
+    - .L0_test
+    - .A100_1GPU
+
+L0_cppunittest--H100_1GPU:
+    variables:
+      FRAMEWORK: core
+      ARCH: amd64
+    needs: [ core-py3-devel-amd64 ]
+    extends:
+    - .L0_test
+    - .H100_1GPU
+
+L0_cppunittest--B200_1GPU:
+    variables:
+      FRAMEWORK: core
+      ARCH: amd64
+    needs: [ core-py3-devel-amd64 ]
+    extends:
+    - .L0_test_on_cluster
+    - .B200_1GPU
+
+L0_cppunittest--GB200_1GPU:
+    variables:
+      FRAMEWORK: core
+      ARCH: arm64
+    needs: [ core-py3-devel-arm64 ]
+    extends:
+    - .L0_test
+    - .GB200_1GPU
+
+L1_cpp_distributed--H100_4GPU:
+    variables:
+      FRAMEWORK: core
+      ARCH: amd64
+    needs: [ core-py3-devel-amd64 ]
+    extends:
+    - .L1_test
+    - .H100_runner
+
+L1_cpp_distributed--B200_8GPU:
+    variables:
+      FRAMEWORK: core
+      ARCH: amd64
+    needs: [ core-py3-devel-amd64 ]
+    extends:
+    - .L1_test_on_cluster
+    - .B200_8GPU
+
+L1_cpp_distributed--GB200_4GPU_IMEX:
+    variables:
+      FRAMEWORK: core
+      ARCH: arm64
+    needs: [ core-py3-devel-arm64 ]
+    extends:
+    - .L1_test
+    - .GB200_4GPU_IMEX
+
+L0_pytorch_unittest--A100_1GPU:
+    variables:
+      FRAMEWORK: pytorch
+      ARCH: amd64
+    needs: [ pytorch-py3-devel-amd64 ]
+    extends:
+    - .L0_test
+    - .A100_1GPU
+
+L0_pytorch_unittest--H100_1GPU:
+    variables:
+      FRAMEWORK: pytorch
+      ARCH: amd64
+    needs: [ pytorch-py3-devel-amd64 ]
+    extends:
+    - .L0_test
+    - .H100_1GPU
+
+L0_pytorch_unittest--L40_1GPU:
+    variables:
+      FRAMEWORK: pytorch
+      ARCH: amd64
+    needs: [ pytorch-py3-devel-amd64 ]
+    extends:
+    - .L0_test
+    - .L40_1GPU
+
+L0_pytorch_unittest--B200_1GPU:
+    variables:
+      FRAMEWORK: pytorch
+      ARCH: amd64
+    needs: [ pytorch-py3-devel-amd64 ]
+    extends:
+    - .L0_test_on_cluster
+    - .B200_1GPU
+
+L0_pytorch_unittest--GB200_1GPU:
+    variables:
+      FRAMEWORK: pytorch
+      ARCH: arm64
+    needs: [ pytorch-py3-devel-arm64 ]
+    extends:
+    - .L0_test
+    - .GB200_1GPU
+
+
+L0_pytorch_debug_unittest--H100_1GPU:
+    variables:
+      FRAMEWORK: pytorch
+      ARCH: amd64
+    needs: [ pytorch-py3-devel-amd64 ]
+    extends:
+    - .L0_test
+    - .H100_1GPU
+
+L0_pytorch_debug_unittest--B200_1GPU:
+    variables:
+      FRAMEWORK: pytorch
+      ARCH: amd64
+    needs: [ pytorch-py3-devel-amd64 ]
+    extends:
+    - .L0_test_on_cluster
+    - .B200_1GPU
+
+L1_pytorch_mcore_integration--H100_1GPU:
+    variables:
+      FRAMEWORK: pytorch
+      ARCH: amd64
+    needs: [ pytorch-py3-devel-amd64 ]
+    extends:
+    - .L1_test
+    - .H100_1GPU
+
+L1_pytorch_mcore_integration--B200_1GPU:
+    variables:
+      FRAMEWORK: pytorch
+      ARCH: amd64
+    needs: [ pytorch-py3-devel-amd64 ]
+    extends:
+    - .L1_test_on_cluster
+    - .B200_1GPU
+
+L1_pytorch_mcore_integration--GB200_1GPU:
+    variables:
+      FRAMEWORK: pytorch
+      ARCH: arm64
+    needs: [ pytorch-py3-devel-arm64 ]
+    extends:
+    - .L1_test
+    - .GB200_1GPU
+
+L1_pytorch_mcore_fsdp_integration--B200_8GPU:
+    variables:
+      FRAMEWORK: pytorch
+      ARCH: amd64
+    needs: [ pytorch-py3-devel-amd64 ]
+    extends:
+    - .L1_test_on_cluster
+    - .B200_8GPU
+
+L1_pytorch_mcore_fsdp_integration--GB200NVL_4GPU:
+    variables:
+      FRAMEWORK: pytorch
+      ARCH: arm64
+    needs: [ pytorch-py3-devel-arm64 ]
+    extends:
+    - .L1_test_on_cluster
+    - .GB200NVL_4GPU
+
+L1_pytorch_distributed_unittest--H100_4GPU:
+    variables:
+      FRAMEWORK: pytorch
+      ARCH: amd64
+    needs: [ pytorch-py3-devel-amd64 ]
+    extends:
+    - .L1_test
+    - .H100_runner
+
+L1_pytorch_distributed_unittest--B200_8GPU:
+    variables:
+      FRAMEWORK: pytorch
+      ARCH: amd64
+    needs: [ pytorch-py3-devel-amd64 ]
+    extends:
+    - .L1_test_on_cluster
+    - .B200_8GPU
+
+L1_pytorch_distributed_unittest--GB200NVL_4GPU:
+    variables:
+      FRAMEWORK: pytorch
+      ARCH: arm64
+    needs: [ pytorch-py3-devel-arm64 ]
+    extends:
+    - .L1_test_on_cluster
+    - .GB200NVL_4GPU
+
+L1_pytorch_onnx_unittest--H100_1GPU:
+    variables:
+      FRAMEWORK: pytorch
+      ARCH: amd64
+    needs: [ pytorch-py3-devel-amd64 ]
+    extends:
+    - .L1_test
+    - .H100_1GPU
+
+L1_pytorch_onnx_unittest--B200_1GPU:
+    variables:
+      FRAMEWORK: pytorch
+      ARCH: amd64
+    needs: [ pytorch-py3-devel-amd64 ]
+    extends:
+    - .L1_test_on_cluster
+    - .B200_1GPU
+
+L3_pytorch_FA_versions_test--H100_4GPU:
+    variables:
+      FRAMEWORK: pytorch
+      ARCH: amd64
+    needs: [ pytorch-py3-devel-amd64 ]
+    extends:
+    - .L3_test
+    - .H100_runner
+
+L3_pytorch_FA_versions_test--B200_8GPU:
+    variables:
+      FRAMEWORK: pytorch
+      ARCH: amd64
+    needs: [ pytorch-py3-devel-amd64 ]
+    extends:
+    - .L3_test_on_cluster
+    - .B200_8GPU
+
+L0_jax_unittest--A100_1GPU:
+    variables:
+      FRAMEWORK: jax
+      ARCH: amd64
+    needs: [ jax-py3-devel-amd64 ]
+    extends:
+    - .L0_test
+    - .A100_1GPU
+
+L0_jax_unittest--H100_1GPU:
+    variables:
+      FRAMEWORK: jax
+      ARCH: amd64
+    needs: [ jax-py3-devel-amd64 ]
+    extends:
+    - .L0_test
+    - .H100_1GPU
+
+L0_jax_unittest--L40_1GPU:
+    variables:
+      FRAMEWORK: jax
+      ARCH: amd64
+    needs: [ jax-py3-devel-amd64 ]
+    extends:
+    - .L0_test
+    - .L40_1GPU
+
+L0_jax_unittest--B200_1GPU:
+    variables:
+      FRAMEWORK: jax
+      ARCH: amd64
+    needs: [ jax-py3-devel-amd64 ]
+    extends:
+    - .L0_test_on_cluster
+    - .B200_1GPU
+
+L0_jax_unittest--GB200_1GPU:
+    variables:
+      FRAMEWORK: jax
+      ARCH: arm64
+    needs: [ jax-py3-devel-arm64 ]
+    extends:
+    - .L0_test
+    - .GB200_1GPU
+
+L0_jax_distributed_unittest--H100_4GPU:
+    variables:
+      FRAMEWORK: jax
+      ARCH: amd64
+    needs: [ jax-py3-devel-amd64 ]
+    extends:
+    - .L0_test
+    - .H100_runner
+
+L0_jax_distributed_unittest--B200_8GPU:
+    variables:
+      FRAMEWORK: jax
+      ARCH: amd64
+    needs: [ jax-py3-devel-amd64 ]
+    extends:
+    - .L0_test_on_cluster
+    - .B200_8GPU
+
+L0_jax_distributed_unittest--GB200_4GPU:
+    variables:
+      FRAMEWORK: jax
+      ARCH: arm64
+    needs: [ jax-py3-devel-arm64 ]
+    extends:
+    - .L0_test
+    - .GB200_4GPU_IMEX
+
+L1_jax_distributed_unittest--H100_4GPU:
+    variables:
+      FRAMEWORK: jax
+      ARCH: amd64
+    needs: [ jax-py3-devel-amd64 ]
+    extends:
+    - .L1_test
+    - .H100_runner
+
+L1_jax_distributed_unittest--B200_8GPU:
+    variables:
+      FRAMEWORK: jax
+      ARCH: amd64
+    needs: [ jax-py3-devel-amd64 ]
+    extends:
+    - .L1_test_on_cluster
+    - .B200_8GPU
+
+L1_jax_distributed_unittest--GB200_4GPU:
+    variables:
+      FRAMEWORK: jax
+      ARCH: arm64
+    needs: [ jax-py3-devel-arm64 ]
+    extends:
+    - .L1_test
+    - .GB200_4GPU
+
+L2_jax_unittest--A100_1GPU:
+    variables:
+      FRAMEWORK: jax
+      ARCH: amd64
+    needs: [ jax-py3-devel-amd64 ]
+    extends:
+    - .L2_test
+    - .A100_1GPU
+
+L2_jax_unittest--H100_1GPU:
+    variables:
+      FRAMEWORK: jax
+      ARCH: amd64
+    needs: [ jax-py3-devel-amd64 ]
+    extends:
+    - .L2_test
+    - .H100_1GPU
+
+L2_jax_unittest--L40_1GPU:
+    variables:
+      FRAMEWORK: jax
+      ARCH: amd64
+    needs: [ jax-py3-devel-amd64 ]
+    extends:
+    - .L2_test
+    - .L40_1GPU
+
+L2_jax_unittest--B200_1GPU:
+    variables:
+      FRAMEWORK: jax
+      ARCH: amd64
+    needs: [ jax-py3-devel-amd64 ]
+    extends:
+    - .L2_test_on_cluster
+    - .B200_1GPU
+
+L2_jax_unittest--GB200NVL_4GPU:
+    variables:
+      FRAMEWORK: jax
+      ARCH: arm64
+    needs: [ jax-py3-devel-arm64 ]
+    extends:
+    - .L2_test_on_cluster
+    - .GB200NVL_4GPU
+
+L2_jax_distributed_unittest--H100_4GPU:
+    variables:
+      FRAMEWORK: jax
+      ARCH: amd64
+    needs: [ jax-py3-devel-amd64 ]
+    extends:
+    - .L2_test
+    - .H100_runner
+
+L2_jax_distributed_unittest--B200_8GPU:
+    variables:
+      FRAMEWORK: jax
+      ARCH: amd64
+    needs: [ jax-py3-devel-amd64 ]
+    extends:
+    - .L2_test_on_cluster
+    - .B200_8GPU
+
+L2_jax_distributed_unittest--GB200_4GPU:
+    variables:
+      FRAMEWORK: jax
+      ARCH: arm64
+    needs: [ jax-py3-devel-arm64 ]
+    extends:
+    - .L2_test
+    - .GB200_4GPU
+
+docs:
+    variables:
+      FRAMEWORK: core
+      ARCH: amd64
+    needs: [ core-py3-devel-amd64 ]
+    extends:
+    - .docs_template
