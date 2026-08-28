@@ -7,6 +7,7 @@ import os
 import warnings
 from dataclasses import dataclass, replace
 from functools import partial, reduce
+from types import SimpleNamespace
 from typing import Optional, Tuple
 
 import jax
@@ -101,6 +102,96 @@ class _FusedAttnConfig:
         int | None
     )  # Only for CP + Striped. For Ring P2P, stripe_size=1 only.For AG, stripe_size>=1.
     return_max_logit: bool = False
+
+
+def _explicit_aval_spec(aval):
+    """Return a rank-padded spec when ``aval`` uses sharding-in-types."""
+    sharding = getattr(aval, "sharding", None)
+    mesh = getattr(sharding, "mesh", None)
+    axis_types = getattr(mesh, "axis_types", ())
+    if not axis_types or not any(axis_type.name == "Explicit" for axis_type in axis_types):
+        return None
+    spec = tuple(sharding.spec)
+    return spec + (None,) * (aval.ndim - len(spec))
+
+
+def _update_aval_with_spec(aval, *, shape, dtype, spec=None):
+    """Update an aval and replace typed sharding when its rank/layout changes."""
+    kwargs = {"shape": shape, "dtype": dtype}
+    if _explicit_aval_spec(aval) is not None:
+        if spec is None:
+            spec = (None,) * len(shape)
+        kwargs["sharding"] = NamedSharding(aval.sharding.mesh, PartitionSpec(*spec))
+    return aval.update(**kwargs)
+
+
+def _explicit_value_pspec(value):
+    """Return a PartitionSpec for an explicitly sharded value, else ``None``."""
+    spec = _explicit_aval_spec(jax.typeof(value))
+    return None if spec is None else PartitionSpec(*spec)
+
+
+def _fused_attn_fwd_explicit_out_specs(q, config):
+    """Output specs for the explicit fused-attention boundary."""
+    q_spec = _explicit_aval_spec(jax.typeof(q))
+    if q_spec is None:
+        return None
+
+    output_spec = (*q_spec[:-3], *q_spec[-2:]) if config.qkv_layout.is_qkvpacked() else q_spec
+    is_packed_softmax = get_cudnn_version() >= (9, 6, 0) and config.qkv_layout.is_thd()
+    if config.qkv_layout.is_qkvpacked():
+        if is_packed_softmax:
+            softmax_spec = (*q_spec[:-4], q_spec[-4], q_spec[-2], None)
+        else:
+            softmax_spec = (*q_spec[:-4], q_spec[-2], q_spec[-4], None)
+    elif is_packed_softmax:
+        softmax_spec = (*q_spec[:-3], q_spec[-3], q_spec[-2], None)
+    else:
+        softmax_spec = (*q_spec[:-3], q_spec[-2], q_spec[-3], None)
+
+    rng_spec = (tuple(jax.typeof(q).sharding.mesh.axis_names), None)
+    max_logit_spec = (output_spec[-2],) if config.return_max_logit else (None,)
+    return [
+        PartitionSpec(*spec)
+        for spec in (output_spec, softmax_spec, rng_spec, max_logit_spec)
+    ]
+
+
+def _run_explicit_partitioned(primitive_cls, config, args):
+    """Run an existing attention partition implementation via ``shard_map``."""
+    arg_avals = tuple(jax.typeof(arg) for arg in args)
+    mesh = arg_avals[0].sharding.mesh
+    out_avals = primitive_cls.outer_abstract(*arg_avals, config=config)
+
+    def to_info(aval):
+        return SimpleNamespace(
+            sharding=aval.sharding,
+            shape=aval.shape,
+            ndim=aval.ndim,
+            dtype=aval.dtype,
+        )
+
+    arg_infos = tuple(to_info(aval) for aval in arg_avals)
+    result_infos = tuple(to_info(aval) for aval in out_avals)
+    _, impl, out_shardings, arg_shardings = primitive_cls.partition(
+        config, mesh, arg_infos, result_infos
+    )
+    in_specs = tuple(
+        PartitionSpec(*tuple(sharding.spec)[: aval.ndim])
+        for sharding, aval in zip(arg_shardings, arg_avals)
+    )
+    out_specs = tuple(
+        PartitionSpec(*tuple(sharding.spec)[: aval.ndim])
+        for sharding, aval in zip(out_shardings, out_avals)
+    )
+    args = tuple(jax.sharding.reshard(arg, spec) for arg, spec in zip(args, in_specs))
+    return jax.shard_map(
+        impl,
+        mesh=mesh,
+        in_specs=in_specs,
+        out_specs=out_specs,
+        check_vma=False,
+    )(*args)
 
 
 @dataclass(frozen=True)
@@ -336,7 +427,14 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         ) = FusedAttnHelper.parse_qkv_aval(q_aval, k_aval, v_aval, config.qkv_layout)
 
         output_shape = (*batch_shape, q_max_seqlen, attn_heads, v_head_dim)
-        out_aval = q_aval.update(shape=output_shape, dtype=q_dtype)
+        q_spec = _explicit_aval_spec(q_aval)
+        if q_spec is not None and config.qkv_layout.is_qkvpacked():
+            output_spec = (*q_spec[:-3], *q_spec[-2:])
+        else:
+            output_spec = q_spec
+        out_aval = _update_aval_with_spec(
+            q_aval, shape=output_shape, dtype=q_dtype, spec=output_spec
+        )
 
         # backend determines the softmax buffer shape/dtype
         backend = FusedAttnHelper(
@@ -358,6 +456,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             config.return_max_logit,
         ).get_fused_attn_backend()
 
+        is_packed_softmax = get_cudnn_version() >= (9, 6, 0) and config.qkv_layout.is_thd()
         if backend == NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen:
             # cuDNN 9.6 reduces the required softmax shape
             if get_cudnn_version() >= (9, 6, 0):
@@ -375,7 +474,20 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             softmax_dtype = dtypes.canonicalize_dtype(jnp.float32)
         else:
             raise ValueError(f"Unsupported {backend=}")
-        softmax_aux_aval = q_aval.update(shape=softmax_shape, dtype=softmax_dtype)
+        if q_spec is None:
+            softmax_spec = None
+        elif config.qkv_layout.is_qkvpacked():
+            if is_packed_softmax:
+                softmax_spec = (*q_spec[:-4], q_spec[-4], q_spec[-2], None)
+            else:
+                softmax_spec = (*q_spec[:-4], q_spec[-2], q_spec[-4], None)
+        elif is_packed_softmax:
+            softmax_spec = (*q_spec[:-3], q_spec[-3], q_spec[-2], None)
+        else:
+            softmax_spec = (*q_spec[:-3], q_spec[-2], q_spec[-3], None)
+        softmax_aux_aval = _update_aval_with_spec(
+            q_aval, shape=softmax_shape, dtype=softmax_dtype, spec=softmax_spec
+        )
         if config.return_max_logit:
             # cuDNN Max is row-wise over S_kv. Dense and SM120 THD use
             # [..., H, S_q, 1]; cuDNN >= 9.6 non-SM120 THD uses [..., S_q, H, 1].
@@ -386,7 +498,10 @@ class FusedAttnFwdPrimitive(BasePrimitive):
                 max_tensor_shape = (*batch_shape, attn_heads, q_max_seqlen, 1)
         else:
             max_tensor_shape = (0,)
-        max_tensor_aval = q_aval.update(shape=max_tensor_shape, dtype=softmax_dtype)
+        max_tensor_spec = softmax_spec if config.return_max_logit else (None,)
+        max_tensor_aval = _update_aval_with_spec(
+            q_aval, shape=max_tensor_shape, dtype=softmax_dtype, spec=max_tensor_spec
+        )
 
         # JAX does not enable 64-bit int by default so we get XLA to allocate x8 memory with
         # 32-bit unsigned int to get the buffer size we need in the C++ kernel
@@ -396,7 +511,16 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             seed_dtype == checker.rng_state_dtype
         ), f"Expected seed_dtype={checker.rng_state_dtype}, but got seed_dtype={seed_dtype}"
         rng_state_shape = (seed_aval.shape[0], checker.rng_state_size)
-        rng_state_aval = seed_aval.update(shape=rng_state_shape, dtype=checker.rng_state_dtype)
+        seed_spec = _explicit_aval_spec(seed_aval)
+        rng_state_spec = (
+            None if seed_spec is None else (tuple(seed_aval.sharding.mesh.axis_names), None)
+        )
+        rng_state_aval = _update_aval_with_spec(
+            seed_aval,
+            shape=rng_state_shape,
+            dtype=checker.rng_state_dtype,
+            spec=rng_state_spec,
+        )
 
         if config.attn_bias_type == AttnBiasType.NO_BIAS:
             bias_batch = bias_heads = 0
@@ -436,8 +560,11 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             config.return_max_logit,
             bottom_right_diagonal,
         )
-        wkspace_aval = q_aval.update(
-            shape=wkspace_info[0], dtype=te_dtype_to_jax_dtype(wkspace_info[1])
+        wkspace_aval = _update_aval_with_spec(
+            q_aval,
+            shape=wkspace_info[0],
+            dtype=te_dtype_to_jax_dtype(wkspace_info[1]),
+            spec=(None,) * len(wkspace_info[0]),
         )
 
         assert (
@@ -465,7 +592,13 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             *args, **kwargs
         )
         max_logit_shape = (out_aval.shape[-2],) if kwargs["config"].return_max_logit else (0,)
-        max_logit_aval = out_aval.update(shape=max_logit_shape, dtype=out_aval.dtype)
+        out_spec = _explicit_aval_spec(out_aval)
+        max_logit_spec = None
+        if out_spec is not None:
+            max_logit_spec = (out_spec[-2],) if kwargs["config"].return_max_logit else (None,)
+        max_logit_aval = _update_aval_with_spec(
+            out_aval, shape=max_logit_shape, dtype=out_aval.dtype, spec=max_logit_spec
+        )
         return out_aval, softmax_aux_aval, rng_state_aval, max_logit_aval
 
     @staticmethod
@@ -990,12 +1123,26 @@ class FusedAttnBwdPrimitive(BasePrimitive):
             config.bottom_right_diagonal,
         )
 
-        dq_aval = q_aval.update(shape=q_aval.shape, dtype=q_dtype)
-        dk_aval = k_aval.update(shape=k_aval.shape, dtype=k_dtype)
-        dv_aval = v_aval.update(shape=v_aval.shape, dtype=v_dtype)
-        dbias_aval = bias_aval.update(shape=bias_aval.shape, dtype=bias_dtype)
-        wkspace_aval = q_aval.update(
-            shape=wkspace_shape, dtype=te_dtype_to_jax_dtype(wkspace_dtype)
+        dq_aval = _update_aval_with_spec(
+            q_aval, shape=q_aval.shape, dtype=q_dtype, spec=_explicit_aval_spec(q_aval)
+        )
+        dk_aval = _update_aval_with_spec(
+            k_aval, shape=k_aval.shape, dtype=k_dtype, spec=_explicit_aval_spec(k_aval)
+        )
+        dv_aval = _update_aval_with_spec(
+            v_aval, shape=v_aval.shape, dtype=v_dtype, spec=_explicit_aval_spec(v_aval)
+        )
+        dbias_aval = _update_aval_with_spec(
+            bias_aval,
+            shape=bias_aval.shape,
+            dtype=bias_dtype,
+            spec=_explicit_aval_spec(bias_aval),
+        )
+        wkspace_aval = _update_aval_with_spec(
+            q_aval,
+            shape=wkspace_shape,
+            dtype=te_dtype_to_jax_dtype(wkspace_dtype),
+            spec=(None,) * len(wkspace_shape),
         )
 
         # Validate incoming softmax_offset shape and dtype
@@ -1014,11 +1161,19 @@ class FusedAttnBwdPrimitive(BasePrimitive):
             )
 
         if config.softmax_type == AttnSoftmaxType.VANILLA_SOFTMAX:
-            dsoftmax_offset_aval = q_aval.update(
-                shape=softmax_offset_aval.shape, dtype=softmax_offset_aval.dtype
+            dsoftmax_offset_aval = _update_aval_with_spec(
+                softmax_offset_aval,
+                shape=softmax_offset_aval.shape,
+                dtype=softmax_offset_aval.dtype,
+                spec=_explicit_aval_spec(softmax_offset_aval),
             )
         else:
-            dsoftmax_offset_aval = q_aval.update(shape=(1, attn_heads, 1, 1), dtype=jnp.float32)
+            dsoftmax_offset_aval = _update_aval_with_spec(
+                softmax_offset_aval,
+                shape=(1, attn_heads, 1, 1),
+                dtype=jnp.float32,
+                spec=_explicit_aval_spec(softmax_offset_aval),
+            )
 
         return dq_aval, dk_aval, dv_aval, dbias_aval, dsoftmax_offset_aval, wkspace_aval
 
@@ -3291,7 +3446,6 @@ class FusedRingAttnStripedFwdPrimitive(FusedAttnFwdPrimitive):
                 subblock_config = config
 
             cp_size = get_mesh_axis_size(config.cp_axis, mesh)
-            cp_rank = get_mesh_axis_rank_host(config.cp_axis, mesh)
             cp_perm = [(i, (i + 1) % cp_size) for i in range(cp_size)]
 
             batch, q_max_seqlen, head, _ = q.shape
@@ -3333,6 +3487,7 @@ class FusedRingAttnStripedFwdPrimitive(FusedAttnFwdPrimitive):
                     )
 
                 if config.window_size != (-1, -1):
+                    cp_rank = get_mesh_axis_rank_host(config.cp_axis, mesh)
                     kv_src_rank = (cp_size + cp_rank - idx) % cp_size
                     # Note: all inputs of adjust_cp_striped_window_size should be host values
                     cp_striped_window_size = adjust_cp_striped_window_size(
@@ -3460,8 +3615,6 @@ class FusedRingAttnStripedBwdPrimitive(FusedAttnBwdPrimitive):
                 subblock_config = config
 
             cp_size = get_mesh_axis_size(config.cp_axis, mesh)
-            # We need cp_rank to be a host value for adjust_cp_striped_window_size()
-            cp_rank = get_mesh_axis_rank_host(config.cp_axis, mesh)
             cp_perm = [(i, (i + 1) % cp_size) for i in range(cp_size)]
 
             dq = jnp.zeros_like(q)
@@ -3502,6 +3655,8 @@ class FusedRingAttnStripedBwdPrimitive(FusedAttnBwdPrimitive):
                     return dq_per_step, dkv_per_step, dbias_per_step
 
                 if config.window_size != (-1, -1):
+                    # We need cp_rank to be a host value for adjust_cp_striped_window_size()
+                    cp_rank = get_mesh_axis_rank_host(config.cp_axis, mesh)
                     kv_src_rank = (cp_size + cp_rank - idx) % cp_size
                     # Note: all inputs of adjust_cp_striped_window_size should be host values
                     cp_striped_window_size = adjust_cp_striped_window_size(
@@ -3696,30 +3851,40 @@ def fused_attn_fwd(
         return_max_logit=return_max_logit,
     )
 
-    primitive = None
+    primitive_cls = None
     match context_parallel_strategy:
         case CPStrategy.DEFAULT | CPStrategy.ALL_GATHER:
             if qkv_layout.is_thd():
-                primitive = FusedAttnCPStripedWithAllGatherFwdPrimitive.outer_primitive
+                primitive_cls = FusedAttnCPStripedWithAllGatherFwdPrimitive
             else:
-                primitive = FusedAttnCPWithAllGatherFwdPrimitive.outer_primitive
+                primitive_cls = FusedAttnCPWithAllGatherFwdPrimitive
         case CPStrategy.RING:
             # We must use stripe attention for THD-RING
             if qkv_layout.is_thd():
-                primitive = FusedRingAttnStripedFwdPrimitive.outer_primitive
+                primitive_cls = FusedRingAttnStripedFwdPrimitive
             else:
-                primitive = FusedRingAttnFwdPrimitive.outer_primitive
+                primitive_cls = FusedRingAttnFwdPrimitive
 
     seq_desc_flatten, _ = jax.tree.flatten(sequence_descriptor)
-    output, softmax_aux, rng_state, max_logit = primitive.bind(
+    primitive_args = (
         *qkv_for_primitive,
         bias,
         softmax_offset,
         seed,
         *seq_desc_flatten,
-        config=fused_config,
     )
-    rng_state = with_sharding_constraint(rng_state, PartitionSpec(get_all_mesh_axes(), None))
+
+    def bind_primitive(*args):
+        return primitive_cls.outer_primitive.bind(*args, config=fused_config)
+
+    explicit_out_specs = _fused_attn_fwd_explicit_out_specs(qkv_for_primitive[0], fused_config)
+    if explicit_out_specs is None:
+        output, softmax_aux, rng_state, max_logit = bind_primitive(*primitive_args)
+        rng_state = with_sharding_constraint(rng_state, PartitionSpec(get_all_mesh_axes(), None))
+    else:
+        output, softmax_aux, rng_state, max_logit = _run_explicit_partitioned(
+            primitive_cls, fused_config, primitive_args
+        )
     return (output, softmax_aux, rng_state, max_logit)
 
 
@@ -3871,21 +4036,21 @@ def fused_attn_bwd(
         stripe_size=stripe_size,
     )
 
-    primitive = None
+    primitive_cls = None
     match context_parallel_strategy:
         case CPStrategy.DEFAULT | CPStrategy.ALL_GATHER:
             if qkv_layout.is_thd():
-                primitive = FusedAttnCPStripedWithAllGatherBwdPrimitive.outer_primitive
+                primitive_cls = FusedAttnCPStripedWithAllGatherBwdPrimitive
             else:
-                primitive = FusedAttnCPWithAllGatherBwdPrimitive.outer_primitive
+                primitive_cls = FusedAttnCPWithAllGatherBwdPrimitive
         case CPStrategy.RING:
             if qkv_layout.is_thd():
-                primitive = FusedRingAttnStripedBwdPrimitive.outer_primitive
+                primitive_cls = FusedRingAttnStripedBwdPrimitive
             else:
-                primitive = FusedRingAttnBwdPrimitive.outer_primitive
+                primitive_cls = FusedRingAttnBwdPrimitive
 
     seq_desc_flatten, _ = jax.tree.flatten(sequence_descriptor)
-    *qkv_grads, bias_grad, softmax_offset_grad = primitive.bind(
+    primitive_args = (
         *qkv_for_primitive,
         bias,
         softmax_offset,
@@ -3894,6 +4059,19 @@ def fused_attn_bwd(
         output,
         doutput,
         *seq_desc_flatten,
-        config=fused_config,
     )
+
+    def bind_primitive(*args):
+        return primitive_cls.outer_primitive.bind(*args, config=fused_config)
+
+    explicit_out_specs = [
+        _explicit_value_pspec(value)
+        for value in (*qkv_for_primitive, bias, softmax_offset)
+    ]
+    if any(spec is not None for spec in explicit_out_specs):
+        *qkv_grads, bias_grad, softmax_offset_grad = _run_explicit_partitioned(
+            primitive_cls, fused_config, primitive_args
+        )
+    else:
+        *qkv_grads, bias_grad, softmax_offset_grad = bind_primitive(*primitive_args)
     return tuple(qkv_grads[: len(qkv)]), bias_grad, softmax_offset_grad

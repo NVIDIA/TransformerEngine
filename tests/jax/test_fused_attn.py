@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 """Tests for fused attention"""
 import os
+from contextlib import contextmanager
 from enum import Enum, auto
 from dataclasses import dataclass, field
 from functools import partial
@@ -431,6 +432,7 @@ class FusedAttnRunner:
     mesh_shape: tuple[int, ...] = (1, 1, 1)
     mesh_axes: tuple[str, ...] = ("dp", "cp", "tp")
     mesh_resource: MeshResource = field(default_factory=partial(MeshResource, "dp", "cp", "tp"))
+    mesh_axis_types: Optional[tuple[Any, ...]] = None
 
     # Context parallel aux arguments
     cp_strategy: CPStrategy = CPStrategy.DEFAULT
@@ -623,7 +625,7 @@ class FusedAttnRunner:
 
         # Create a mesh for distributed tests
         self.devices = np.asarray(jax.devices()[: self.number_of_devices]).reshape(*self.mesh_shape)
-        self.mesh = Mesh(self.devices, self.mesh_axes)
+        self.mesh = Mesh(self.devices, self.mesh_axes, axis_types=self.mesh_axis_types)
         self.dp_size = self.mesh.shape.get(self.mesh_resource.dp_resource, 1)
         self.cp_size = self.mesh.shape.get(self.mesh_resource.cp_resource, 1)
         self.tp_size = self.mesh.shape.get(self.mesh_resource.tpsp_resource, 1)
@@ -949,6 +951,17 @@ class FusedAttnRunner:
         self.seq_length_offset_pspec = PartitionSpec(self.mesh_resource.dp_resource, None)
         self.seq_length_offset_sharding = NamedSharding(self.mesh, self.seq_length_offset_pspec)
 
+    @contextmanager
+    def _mesh_context(self):
+        """Enter the appropriate mesh context for Auto or explicit axes."""
+        mesh_context = self.mesh if self.mesh_axis_types is None else jax.set_mesh(self.mesh)
+        with mesh_context, autocast(mesh_resource=self.mesh_resource):
+            yield
+
+    def _assert_explicit_spec(self, value, expected_spec):
+        if self.mesh_axis_types is not None:
+            assert jax.typeof(value).sharding.spec == expected_spec
+
     def test_forward(self, return_max_logit=False, check_output=True):
         """
         Test forward with JITted primitive and unJITted reference
@@ -1015,10 +1028,15 @@ class FusedAttnRunner:
             ],
         )
 
-        with self.mesh, autocast(mesh_resource=self.mesh_resource):
+        with self._mesh_context():
             primitive_out = customcall_fused_dpa_jit(*customcall_args)
             if return_max_logit:
                 primitive_out, primitive_max_logit = primitive_out
+                self._assert_explicit_spec(
+                    primitive_max_logit,
+                    PartitionSpec(self.qkvo_psec[-2]),
+                )
+            self._assert_explicit_spec(primitive_out, self.qkvo_psec)
             primitive_out = self.cp_inverse_reorder_fn(primitive_out)
 
         if return_max_logit:
@@ -1050,10 +1068,8 @@ class FusedAttnRunner:
             assert_allclose(primitive_max_logit, reference_max_logit, dtype=self.dtype)
 
         if self.coll_count_ref is not None:
-            with self.mesh, autocast(mesh_resource=self.mesh_resource):
-                target_hlo = (
-                    customcall_fused_dpa_jit.lower(*customcall_args, **kwargs).compile().as_text()
-                )
+            with self._mesh_context():
+                target_hlo = customcall_fused_dpa_jit.lower(*customcall_args).compile().as_text()
             assert_equal_collectives(target_hlo, self.coll_count_ref)
 
     def test_backward(self, return_max_logit=False):
@@ -1196,8 +1212,11 @@ class FusedAttnRunner:
             )
         )
 
-        with self.mesh, autocast(mesh_resource=self.mesh_resource):
+        with self._mesh_context():
             primitive_out, primitive_dgrad = jitted_primitive(*customcall_args)
+
+        for primitive_grad in primitive_dgrad[:3]:
+            self._assert_explicit_spec(primitive_grad, self.qkvo_psec)
 
         reference_out, reference_dgrad = jitted_reference(*args)
 
@@ -1221,10 +1240,10 @@ class FusedAttnRunner:
                 _split_valid_and_invalid(primitive, reference, pad)
             )
 
-            print_debug_tensor_stats(f"primitive_grad_valid[{idx}]", primitive_valid[idx])
-            print_debug_tensor_stats(f"reference_grad_valid[{idx}]", reference_valid[idx])
+            print_debug_tensor_stats(f"primitive_grad_valid[{idx}]", primitive_valid)
+            print_debug_tensor_stats(f"reference_grad_valid[{idx}]", reference_valid)
             print_debug_tensor_stats(
-                f"diff_grad[{idx}]", jnp.abs(primitive_valid[idx] - reference_valid[idx])
+                f"diff_grad[{idx}]", jnp.abs(primitive_valid - reference_valid)
             )
 
             assert_allclose(
@@ -1297,7 +1316,7 @@ class FusedAttnRunner:
             )
 
         if self.coll_count_ref is not None:
-            with self.mesh, autocast(mesh_resource=self.mesh_resource):
+            with self._mesh_context():
                 target_hlo = jitted_primitive.lower(*customcall_args).compile().as_text()
             assert_equal_collectives(target_hlo, self.coll_count_ref)
 

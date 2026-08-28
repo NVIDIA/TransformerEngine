@@ -23,6 +23,7 @@ from test_fused_attn_score_mod import (
 )
 from utils import pytest_parametrize_wrapper
 from transformer_engine_jax import get_cudnn_version, get_device_compute_capability
+from transformer_engine.jax.sharding import MeshResource
 from transformer_engine.jax.attention import (
     is_fused_attn_kernel_available,
     AttnBiasType,
@@ -38,6 +39,35 @@ from transformer_engine.jax.attention import (
 
 
 DTYPES = [jnp.bfloat16]
+
+AxisType = getattr(jax.sharding, "AxisType", None)
+EXPLICIT_SHARDING_TEST = pytest.mark.skipif(
+    AxisType is None or not hasattr(jax, "set_mesh") or not hasattr(jax, "shard_map"),
+    reason="JAX explicit sharding is unavailable",
+)
+SHARDING_MODES = [
+    pytest.param(False, id="SHARDY"),
+    pytest.param(True, marks=EXPLICIT_SHARDING_TEST, id="EXPLICIT_SHARDING"),
+]
+EXPLICIT_SHARDING_NON_CP_CONFIGS = [
+    pytest.param(2, (2,), ("dp",), MeshResource(dp_resource="dp"), id="n2_dp2_tp1"),
+    pytest.param(
+        2,
+        (2,),
+        ("tpsp",),
+        MeshResource(tpsp_resource="tpsp"),
+        id="n2_dp1_tp2",
+    ),
+]
+EXPLICIT_SHARDING_MULTI_AXIS_CONFIGS = [
+    pytest.param(
+        4,
+        (2, 2),
+        ("dp", "tpsp"),
+        MeshResource(dp_resource="dp", tpsp_resource="tpsp"),
+        id="n4_dp2_tp2",
+    )
+]
 
 DISTRIBUTED_SELF_ATTN_DATA_SHAPES = {
     "L0": [()],
@@ -77,9 +107,11 @@ class TestDistributedSelfAttn:
         attn_mask_type,
         dtype,
         softmax_type,
+        mesh_axis_types=None,
+        test_backward=True,
+        is_training=True,
     ):
         dropout_prob = 0.0
-        is_training = True
         batch, seqlen, num_head, hidden = data_shape
 
         if not is_fused_attn_kernel_available(
@@ -131,11 +163,16 @@ class TestDistributedSelfAttn:
             mesh_shape=mesh_shape,
             mesh_axes=mesh_axes,
             mesh_resource=mesh_resource,
-            coll_count_ref=col_ref,
+            coll_count_ref=col_ref if test_backward else None,
+            mesh_axis_types=mesh_axis_types,
         )
-        runner.test_backward()
+        if test_backward:
+            runner.test_backward()
+        else:
+            runner.test_forward()
 
     @pytest.mark.parametrize("device_count,mesh_shape,mesh_axes,mesh_resource", generate_configs())
+    @pytest.mark.parametrize("explicit_sharding", SHARDING_MODES)
     @pytest_parametrize_wrapper("data_shape", DISTRIBUTED_SELF_ATTN_DATA_SHAPES)
     @pytest.mark.parametrize(
         "attn_bias_type, bias_shape",
@@ -173,6 +210,7 @@ class TestDistributedSelfAttn:
         attn_mask_type,
         dtype,
         softmax_type,
+        explicit_sharding,
     ):
         self.impl_test_self_attn(
             device_count,
@@ -185,6 +223,57 @@ class TestDistributedSelfAttn:
             attn_mask_type,
             dtype,
             softmax_type,
+            mesh_axis_types=(AxisType.Explicit,) * len(mesh_axes) if explicit_sharding else None,
+        )
+
+    @EXPLICIT_SHARDING_TEST
+    @pytest.mark.parametrize(
+        "device_count,mesh_shape,mesh_axes,mesh_resource", EXPLICIT_SHARDING_NON_CP_CONFIGS
+    )
+    @pytest.mark.parametrize(
+        "attn_mask_type", [AttnMaskType.PADDING_MASK, AttnMaskType.CAUSAL_MASK]
+    )
+    def test_self_attn_explicit_sharding_smoke(
+        self, device_count, mesh_shape, mesh_axes, mesh_resource, attn_mask_type
+    ):
+        self.impl_test_self_attn(
+            device_count,
+            mesh_shape,
+            mesh_axes,
+            mesh_resource,
+            (4, 128, 8, 64),
+            AttnBiasType.NO_BIAS,
+            None,
+            attn_mask_type,
+            jnp.bfloat16,
+            AttnSoftmaxType.VANILLA_SOFTMAX,
+            mesh_axis_types=(AxisType.Explicit,) * len(mesh_axes),
+        )
+
+    @EXPLICIT_SHARDING_TEST
+    @pytest.mark.parametrize(
+        "device_count,mesh_shape,mesh_axes,mesh_resource", EXPLICIT_SHARDING_MULTI_AXIS_CONFIGS
+    )
+    @pytest.mark.parametrize(
+        "attn_bias_type", [AttnBiasType.PRE_SCALE_BIAS, AttnBiasType.POST_SCALE_BIAS]
+    )
+    def test_self_attn_explicit_sharding_bias(
+        self, device_count, mesh_shape, mesh_axes, mesh_resource, attn_bias_type
+    ):
+        self.impl_test_self_attn(
+            device_count,
+            mesh_shape,
+            mesh_axes,
+            mesh_resource,
+            (4, 128, 8, 64),
+            attn_bias_type,
+            BiasShape._1HSS,
+            AttnMaskType.CAUSAL_MASK,
+            jnp.bfloat16,
+            AttnSoftmaxType.VANILLA_SOFTMAX,
+            mesh_axis_types=(AxisType.Explicit,) * len(mesh_axes),
+            test_backward=False,
+            is_training=False,
         )
 
 
@@ -202,21 +291,7 @@ class TestDistributedCrossAttn:
         all_reduce_loss_bytes = 4  # 1 * FP32
         return generate_collectives_count(allreduce=all_reduce_loss_bytes, allgather=0, other=0)
 
-    @pytest.mark.parametrize("device_count,mesh_shape,mesh_axes,mesh_resource", generate_configs())
-    @pytest_parametrize_wrapper("data_shape", DISTRIBUTED_CROSS_ATTN_DATA_SHAPES)
-    @pytest.mark.parametrize(
-        "attn_mask_type", [AttnMaskType.PADDING_MASK, AttnMaskType.CAUSAL_MASK]
-    )
-    @pytest.mark.parametrize("dtype", DTYPES)
-    @pytest.mark.parametrize(
-        "softmax_type",
-        [
-            pytest.param(AttnSoftmaxType.VANILLA_SOFTMAX, id="VANILLA_SOFTMAX"),
-            pytest.param(AttnSoftmaxType.OFF_BY_ONE_SOFTMAX, id="OFF_BY_ONE_SOFTMAX"),
-            pytest.param(AttnSoftmaxType.LEARNABLE_SOFTMAX, id="LEARNABLE_SOFTMAX"),
-        ],
-    )
-    def test_cross_attn(
+    def impl_test_cross_attn(
         self,
         device_count,
         mesh_shape,
@@ -226,6 +301,7 @@ class TestDistributedCrossAttn:
         attn_mask_type,
         dtype,
         softmax_type,
+        mesh_axis_types=None,
     ):
         attn_bias_type = AttnBiasType.NO_BIAS
         bias_shape = None
@@ -277,8 +353,88 @@ class TestDistributedCrossAttn:
             mesh_axes=mesh_axes,
             mesh_resource=mesh_resource,
             coll_count_ref=col_ref,
+            mesh_axis_types=mesh_axis_types,
         )
         runner.test_backward()
+
+    @pytest.mark.parametrize("device_count,mesh_shape,mesh_axes,mesh_resource", generate_configs())
+    @pytest.mark.parametrize("explicit_sharding", SHARDING_MODES)
+    @pytest_parametrize_wrapper("data_shape", DISTRIBUTED_CROSS_ATTN_DATA_SHAPES)
+    @pytest.mark.parametrize(
+        "attn_mask_type", [AttnMaskType.PADDING_MASK, AttnMaskType.CAUSAL_MASK]
+    )
+    @pytest.mark.parametrize("dtype", DTYPES)
+    @pytest.mark.parametrize(
+        "softmax_type",
+        [
+            pytest.param(AttnSoftmaxType.VANILLA_SOFTMAX, id="VANILLA_SOFTMAX"),
+            pytest.param(AttnSoftmaxType.OFF_BY_ONE_SOFTMAX, id="OFF_BY_ONE_SOFTMAX"),
+            pytest.param(AttnSoftmaxType.LEARNABLE_SOFTMAX, id="LEARNABLE_SOFTMAX"),
+        ],
+    )
+    def test_cross_attn(
+        self,
+        device_count,
+        mesh_shape,
+        mesh_axes,
+        mesh_resource,
+        data_shape,
+        attn_mask_type,
+        dtype,
+        softmax_type,
+        explicit_sharding,
+    ):
+        self.impl_test_cross_attn(
+            device_count,
+            mesh_shape,
+            mesh_axes,
+            mesh_resource,
+            data_shape,
+            attn_mask_type,
+            dtype,
+            softmax_type,
+            mesh_axis_types=(AxisType.Explicit,) * len(mesh_axes) if explicit_sharding else None,
+        )
+
+    @EXPLICIT_SHARDING_TEST
+    @pytest.mark.parametrize(
+        "device_count,mesh_shape,mesh_axes,mesh_resource", EXPLICIT_SHARDING_NON_CP_CONFIGS
+    )
+    @pytest.mark.parametrize(
+        "attn_mask_type,softmax_type",
+        [
+            pytest.param(
+                AttnMaskType.PADDING_MASK,
+                AttnSoftmaxType.OFF_BY_ONE_SOFTMAX,
+                id="padding-off-by-one",
+            ),
+            pytest.param(
+                AttnMaskType.CAUSAL_MASK,
+                AttnSoftmaxType.LEARNABLE_SOFTMAX,
+                id="causal-learnable",
+            ),
+        ],
+    )
+    def test_cross_attn_explicit_sharding(
+        self,
+        device_count,
+        mesh_shape,
+        mesh_axes,
+        mesh_resource,
+        attn_mask_type,
+        softmax_type,
+    ):
+        self.impl_test_cross_attn(
+            device_count,
+            mesh_shape,
+            mesh_axes,
+            mesh_resource,
+            (4, 128, 8, 64),
+            attn_mask_type,
+            jnp.bfloat16,
+            softmax_type,
+            mesh_axis_types=(AxisType.Explicit,) * len(mesh_axes),
+        )
 
 
 DISTRIBUTED_SCORE_MOD_DATA_SHAPES = {
@@ -431,6 +587,7 @@ class TestDistributedContextParallelSelfAttn:
         num_segments_per_seq=None,
         return_max_logit=False,
         check_forward_output=True,
+        mesh_axis_types=None,
     ):
         if qkv_layout.is_thd():
             if not load_balanced and (
@@ -486,6 +643,7 @@ class TestDistributedContextParallelSelfAttn:
             mesh_resource=mesh_resource,
             cp_strategy=cp_strategy,
             cp_load_balanced=load_balanced,
+            mesh_axis_types=mesh_axis_types,
         )
 
         def check_has_backend_for_mask(mask_type):
@@ -534,10 +692,76 @@ class TestDistributedContextParallelSelfAttn:
             runner.test_backward()
         del os.environ["NVTE_FUSED_RING_ATTENTION_USE_SCAN"]
 
+    @EXPLICIT_SHARDING_TEST
+    @pytest.mark.parametrize("cp_strategy", [CPStrategy.ALL_GATHER, CPStrategy.RING])
+    def test_context_parallel_explicit_sharding(self, cp_strategy):
+        self.impl_test_context_parallel_attn(
+            2,
+            (1, 2, 1),
+            ("dp", "cp", "tpsp"),
+            MeshResource(dp_resource="dp", cp_resource="cp", tpsp_resource="tpsp"),
+            (2, 128, 8, 64),
+            2,
+            AttnMaskType.CAUSAL_MASK,
+            jnp.bfloat16,
+            QKVLayout.BSHD_BS2HD,
+            True,
+            cp_strategy,
+            mesh_axis_types=(AxisType.Explicit,) * 3,
+        )
+
+    @EXPLICIT_SHARDING_TEST
+    @pytest.mark.parametrize(
+        "cp_strategy,window_size,stripe_size",
+        [
+            pytest.param(CPStrategy.ALL_GATHER, (20, 0), 64, id="all-gather-swa"),
+            pytest.param(CPStrategy.RING, (-1, -1), 1, id="ring"),
+        ],
+    )
+    def test_context_parallel_thd_explicit_sharding(
+        self, cp_strategy, window_size, stripe_size
+    ):
+        self.impl_test_context_parallel_attn(
+            2,
+            (1, 2, 1),
+            ("dp", "cp", "tpsp"),
+            MeshResource(dp_resource="dp", cp_resource="cp", tpsp_resource="tpsp"),
+            (2, 128, 8, 64),
+            1,
+            AttnMaskType.PADDING_CAUSAL_MASK,
+            jnp.bfloat16,
+            QKVLayout.THD_THD_THD,
+            True,
+            cp_strategy,
+            window_size=window_size,
+            stripe_size=stripe_size,
+            num_segments_per_seq=5,
+            mesh_axis_types=(AxisType.Explicit,) * 3,
+        )
+
+    @EXPLICIT_SHARDING_TEST
+    def test_context_parallel_max_logit_explicit_sharding(self):
+        self.impl_test_context_parallel_attn(
+            2,
+            (1, 2, 1),
+            ("dp", "cp", "tpsp"),
+            MeshResource(dp_resource="dp", cp_resource="cp", tpsp_resource="tpsp"),
+            (2, 128, 8, 64),
+            1,
+            AttnMaskType.CAUSAL_MASK,
+            jnp.bfloat16,
+            QKVLayout.BSHD_BSHD_BSHD,
+            True,
+            CPStrategy.ALL_GATHER,
+            return_max_logit=True,
+            mesh_axis_types=(AxisType.Explicit,) * 3,
+        )
+
     @pytest_parametrize_wrapper(
         "device_count,mesh_shape,mesh_axes,mesh_resource",
         generate_context_parallel_configs_for_attn(),
     )
+    @pytest.mark.parametrize("explicit_sharding", SHARDING_MODES)
     @pytest.mark.parametrize("data_shape", DISTRIBUTED_CONTEXT_SELF_ATTN_DATA_SHAPES[:1])
     @pytest.mark.parametrize("kv_groups", [1, 8])
     @pytest.mark.parametrize("dtype", [pytest.param(jnp.bfloat16, id="BF16")])
@@ -570,6 +794,7 @@ class TestDistributedContextParallelSelfAttn:
         cp_strategy,
         window_size,
         use_scan_ring,
+        explicit_sharding,
     ):
         """Check CP fused attention returns global per-head max_logit."""
         is_thd = qkv_layout.is_thd()
@@ -606,12 +831,14 @@ class TestDistributedContextParallelSelfAttn:
             num_segments_per_seq=num_segments_per_seq,
             return_max_logit=True,
             check_forward_output=check_forward_output,
+            mesh_axis_types=(AxisType.Explicit,) * len(mesh_axes) if explicit_sharding else None,
         )
 
     @pytest_parametrize_wrapper(
         "device_count,mesh_shape,mesh_axes,mesh_resource",
         generate_context_parallel_configs_for_attn(),
     )
+    @pytest.mark.parametrize("explicit_sharding", SHARDING_MODES)
     @pytest.mark.parametrize("data_shape", DISTRIBUTED_CONTEXT_SELF_ATTN_DATA_SHAPES[:1])
     @pytest.mark.parametrize("kv_groups", [1, 8])
     @pytest.mark.parametrize("dtype", [pytest.param(jnp.bfloat16, id="BF16")])
@@ -653,6 +880,7 @@ class TestDistributedContextParallelSelfAttn:
         window_size,
         stripe_size,
         num_segments_per_seq,
+        explicit_sharding,
     ):
         if not qkv_layout.is_thd():
             pytest.skip("Only THD layout is supported for CP + AG + Striped attention")
@@ -671,12 +899,14 @@ class TestDistributedContextParallelSelfAttn:
             window_size=window_size,
             stripe_size=stripe_size,
             num_segments_per_seq=num_segments_per_seq,
+            mesh_axis_types=(AxisType.Explicit,) * len(mesh_axes) if explicit_sharding else None,
         )
 
     @pytest_parametrize_wrapper(
         "device_count,mesh_shape,mesh_axes,mesh_resource",
         generate_context_parallel_configs_for_attn(),
     )
+    @pytest.mark.parametrize("explicit_sharding", SHARDING_MODES)
     @pytest.mark.parametrize("data_shape", DISTRIBUTED_CONTEXT_SELF_ATTN_DATA_SHAPES)
     @pytest.mark.parametrize("kv_groups", [1, 8])
     @pytest.mark.parametrize("dtype", [pytest.param(jnp.bfloat16, id="BF16")])
@@ -700,6 +930,7 @@ class TestDistributedContextParallelSelfAttn:
         dtype,
         qkv_layout,
         load_balanced,
+        explicit_sharding,
     ):
         if qkv_layout.is_thd():
             pytest.skip("Only BSHD layout is supported for CP + AG + Dual chunk attention")
@@ -715,12 +946,14 @@ class TestDistributedContextParallelSelfAttn:
             qkv_layout,
             load_balanced,
             CPStrategy.ALL_GATHER,
+            mesh_axis_types=(AxisType.Explicit,) * len(mesh_axes) if explicit_sharding else None,
         )
 
     @pytest_parametrize_wrapper(
         "device_count,mesh_shape,mesh_axes,mesh_resource",
         generate_context_parallel_configs_for_attn(),
     )
+    @pytest.mark.parametrize("explicit_sharding", SHARDING_MODES)
     @pytest.mark.parametrize("data_shape", DISTRIBUTED_CONTEXT_SELF_ATTN_DATA_SHAPES)
     @pytest.mark.parametrize("kv_groups", [1, 8])
     @pytest.mark.parametrize("dtype", [pytest.param(jnp.bfloat16, id="BF16")])
@@ -757,6 +990,7 @@ class TestDistributedContextParallelSelfAttn:
         load_balanced,
         use_scan,
         window_size,
+        explicit_sharding,
     ):
         if window_size != (-1, -1) and not qkv_layout.is_thd():
             pytest.skip("Sliding window attention is only supported for THD layout")
@@ -782,6 +1016,7 @@ class TestDistributedContextParallelSelfAttn:
             use_scan_ring=use_scan,
             window_size=window_size,
             stripe_size=stripe_size,
+            mesh_axis_types=(AxisType.Explicit,) * len(mesh_axes) if explicit_sharding else None,
         )
 
     # CP ring and all-gather tests for D=256
@@ -805,6 +1040,7 @@ class TestDistributedContextParallelSelfAttn:
         "device_count,mesh_shape,mesh_axes,mesh_resource",
         generate_context_parallel_configs_for_attn(),
     )
+    @pytest.mark.parametrize("explicit_sharding", SHARDING_MODES)
     @pytest_parametrize_wrapper(
         "data_shape",
         DISTRIBUTED_CONTEXT_SELF_ATTN_D256_DATA_SHAPES,
@@ -828,6 +1064,7 @@ class TestDistributedContextParallelSelfAttn:
         qkv_layout,
         attn_mask_type,
         window_size,
+        explicit_sharding,
     ):
         """D=256 CP ring coverage."""
         self.skip_if_d256_cp_unsupported(qkv_layout)
@@ -847,12 +1084,14 @@ class TestDistributedContextParallelSelfAttn:
             use_scan_ring=False,
             window_size=window_size,
             stripe_size=1 if qkv_layout.is_thd() else None,
+            mesh_axis_types=(AxisType.Explicit,) * len(mesh_axes) if explicit_sharding else None,
         )
 
     @pytest_parametrize_wrapper(
         "device_count,mesh_shape,mesh_axes,mesh_resource",
         generate_context_parallel_configs_for_attn(),
     )
+    @pytest.mark.parametrize("explicit_sharding", SHARDING_MODES)
     @pytest_parametrize_wrapper(
         "data_shape",
         DISTRIBUTED_CONTEXT_SELF_ATTN_D256_DATA_SHAPES,
@@ -876,6 +1115,7 @@ class TestDistributedContextParallelSelfAttn:
         qkv_layout,
         attn_mask_type,
         window_size,
+        explicit_sharding,
     ):
         """D=256 CP all-gather coverage."""
         self.skip_if_d256_cp_unsupported(qkv_layout)
@@ -895,6 +1135,7 @@ class TestDistributedContextParallelSelfAttn:
             window_size=window_size,
             stripe_size=128 if qkv_layout.is_thd() else None,
             num_segments_per_seq=5 if qkv_layout.is_thd() else None,
+            mesh_axis_types=(AxisType.Explicit,) * len(mesh_axes) if explicit_sharding else None,
         )
 
 

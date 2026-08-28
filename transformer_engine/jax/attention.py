@@ -387,6 +387,17 @@ def _obtain_batch_and_max_seqlen(qkv, qkv_layout):
     return batch, q_max_seqlen, kv_max_seqlen
 
 
+def _reorder_with_explicit_sharding(op, tensor):
+    """Run a reorder with automatic axes while preserving typed sharding."""
+    sharding = getattr(jax.typeof(tensor), "sharding", None)
+    mesh = getattr(sharding, "mesh", None)
+    axis_types = getattr(mesh, "axis_types", ())
+    if axis_types and any(axis_type.name == "Explicit" for axis_type in axis_types):
+        with jax.sharding.use_abstract_mesh(mesh):
+            return jax.sharding.auto_axes(op, out_sharding=sharding.spec)(tensor)
+    return op(tensor)
+
+
 def reorder_causal_load_balancing(
     tensor, strategy: ReorderStrategy, cp_size: int, seq_dim: int, stripe_size: int | None = None
 ):
@@ -397,7 +408,13 @@ def reorder_causal_load_balancing(
                 f"Incorrect value for CP dual chunk reordering {stripe_size=}. stripe_size must be"
                 " None"
             )
-        return tex.attention.reorder_causal_dual_chunk_swap(tensor, cp_size, seq_dim, False)
+        op = partial(
+            tex.attention.reorder_causal_dual_chunk_swap,
+            cp_size=cp_size,
+            seq_dim=seq_dim,
+            to_contiguous=False,
+        )
+        return _reorder_with_explicit_sharding(op, tensor)
     if strategy == ReorderStrategy.Striped:
         # stripe_size > 1 is only supported for CP+THD+AG+Striped>1+SWA
         # stripe_size = 128 is recommended for CP+THD+AG+Striped>1+SWA
@@ -408,9 +425,14 @@ def reorder_causal_load_balancing(
             )
         # Supporting old API defaults of stripe_size=1
         effective_stripe_size = 1 if stripe_size is None else stripe_size
-        return tex.attention.reorder_causal_striped(
-            tensor, cp_size, seq_dim, False, effective_stripe_size
+        op = partial(
+            tex.attention.reorder_causal_striped,
+            cp_size=cp_size,
+            seq_dim=seq_dim,
+            is_inverse=False,
+            stripe_size=effective_stripe_size,
         )
+        return _reorder_with_explicit_sharding(op, tensor)
     raise ValueError(f"Unsupported {strategy=}")
 
 
@@ -424,7 +446,13 @@ def inverse_reorder_causal_load_balancing(
                 f"Incorrect value for CP dual chunk reordering {stripe_size=}. stripe_size must be"
                 " None"
             )
-        return tex.attention.reorder_causal_dual_chunk_swap(tensor, cp_size, seq_dim, True)
+        op = partial(
+            tex.attention.reorder_causal_dual_chunk_swap,
+            cp_size=cp_size,
+            seq_dim=seq_dim,
+            to_contiguous=True,
+        )
+        return _reorder_with_explicit_sharding(op, tensor)
     if strategy == ReorderStrategy.Striped:
         # stripe_size > 1 is only supported for CP+THD+AG+Striped>1+SWA
         # stripe_size = 128 is recommended for CP+THD+AG+Striped>1+SWA
@@ -435,9 +463,14 @@ def inverse_reorder_causal_load_balancing(
             )
         # Supporting old API defaults of stripe_size=1
         effective_stripe_size = 1 if stripe_size is None else stripe_size
-        return tex.attention.reorder_causal_striped(
-            tensor, cp_size, seq_dim, True, effective_stripe_size
+        op = partial(
+            tex.attention.reorder_causal_striped,
+            cp_size=cp_size,
+            seq_dim=seq_dim,
+            is_inverse=True,
+            stripe_size=effective_stripe_size,
         )
+        return _reorder_with_explicit_sharding(op, tensor)
     raise ValueError(f"Unsupported {strategy=}")
 
 
