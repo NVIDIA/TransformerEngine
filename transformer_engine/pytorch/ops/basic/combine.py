@@ -157,7 +157,7 @@ class MoeCombine(BasicOperation):
         zero_copy = buffer.zero_copy
         expert_out = input_
         if zero_copy:
-            expert_out = _alloc_io(tuple(input_.shape), input_.dtype, input_.device, True)
+            expert_out = _alloc_io(tuple(input_.shape), torch.bfloat16, input_.device, True)
             expert_out.copy_(input_)
         # Preserve routing state and optional caller storage for backward.
         ctx = basic_op_ctxs[0]
@@ -167,11 +167,10 @@ class MoeCombine(BasicOperation):
                 kwargs.get("grad_out"),
                 transport_quantizer,
                 input_shape=input_shape,
-                input_dtype=input_.dtype,
+                input_dtype=torch.bfloat16,
                 device=input_.device,
                 zero_copy=zero_copy,
             )
-            ctx.input_dtype = input_.dtype
         result, combine_state = _ep_combine_fwd(
             expert_out,
             grad_out,
@@ -211,7 +210,7 @@ class MoeCombine(BasicOperation):
             )
             grad_output = quantized_grad
         else:
-            grad_output = maybe_dequantize(grad_output, ctx.input_dtype).contiguous()
+            grad_output = maybe_dequantize(grad_output, torch.bfloat16).contiguous()
             quantized_grad = None
         grad_input = _ep_combine_bwd(
             ctx.combine_state,
