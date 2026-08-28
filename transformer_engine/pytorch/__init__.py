@@ -17,7 +17,7 @@ assert torch_version() >= (2, 1), f"Minimum torch version 2.1 required. Found {t
 
 load_framework_extension("torch")
 from transformer_engine.pytorch import constants
-from transformer_engine.pytorch.constants import DType
+from transformer_engine.pytorch.constants import CPLoadBalancingStrategy, DType
 from transformer_engine.pytorch.module import LayerNormLinear
 from transformer_engine.pytorch.module import Linear
 from transformer_engine.pytorch.module import LayerNormMLP
@@ -29,7 +29,7 @@ from transformer_engine.pytorch.module import initialize_ub
 from transformer_engine.pytorch.module import destroy_ub
 from transformer_engine.pytorch.module import UserBufferQuantizationMode
 from transformer_engine.pytorch.attention import DotProductAttention
-from transformer_engine.pytorch.attention import FusedMLAQUpProjRopeQuant
+from transformer_engine.pytorch.attention import FusedMLAQUpProjFunction, FusedMLAQUpProjRopeQuant
 from transformer_engine.pytorch.attention import MultiheadAttention
 from transformer_engine.pytorch.attention import InferenceParams
 from transformer_engine.pytorch.attention import RotaryPositionEmbedding
