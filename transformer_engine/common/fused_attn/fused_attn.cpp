@@ -373,6 +373,11 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend_v2(NVTEFusedAttnConfig confi
         return reject(message,
                       "FP8 fused attention with THD format supports backward on sm100+ only!");
       }
+      if (sm_arch >= 100 && (cfg.head_dim_qk > 128 || cfg.head_dim_v > 128)) {
+        return reject(message,
+                      "FP8 fused attention with THD format supports head dimensions up to 128 on "
+                      "sm100+ only!");
+      }
     }
     if (cfg.is_bias) {
       return reject(message, "FP8 fused attention does not support pre/post_scale_bias yet!");
