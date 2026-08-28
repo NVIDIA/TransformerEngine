@@ -358,12 +358,14 @@ def get_available_attention_backends(
     """Check for all available attention backends that support a model configuration"""
 
     _, q_format, kv_format = get_qkv_format(qkv_layout, inference_params)
-    if num_tokens_q is None and q_format == "thd":
-        num_tokens_q = max(config.batch_size * config.max_seqlen_q // cp_size, 1)
-    if num_tokens_kv is None and kv_format == "thd":
-        num_tokens_kv = max(config.batch_size * config.max_seqlen_kv // cp_size, 1)
-    num_tokens_q = num_tokens_q or 0
-    num_tokens_kv = num_tokens_kv or 0
+    if num_tokens_q is None:
+        num_tokens_q = (
+            max(config.batch_size * config.max_seqlen_q // cp_size, 1) if q_format == "thd" else 0
+        )
+    if num_tokens_kv is None:
+        num_tokens_kv = (
+            max(config.batch_size * config.max_seqlen_kv // cp_size, 1) if kv_format == "thd" else 0
+        )
 
     os.environ["NVTE_FLASH_ATTN"] = "1"
     os.environ["NVTE_FUSED_ATTN"] = "1"
