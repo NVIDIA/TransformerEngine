@@ -190,10 +190,22 @@ inline CounterSnapshot snapshot(const EventCounters &c) {
 }
 
 // Per-thread counters, so the summary can break every column down by thread and backend.
+// A thread that drives more than one device accumulates all of its events in one block, so record
+// that rather than name a single device; the per-event lines at level 2 carry the live device.
 struct ThreadCounters {
   unsigned tid = 0;
   std::atomic<int> device{-1};
+  std::atomic<bool> multi_device{false};
   std::array<EventCounters, kSiteCount> sites;
+
+  void note_device(int current) {
+    const int seen = device.load(std::memory_order_relaxed);
+    if (seen < 0) {
+      device.store(current, std::memory_order_relaxed);
+    } else if (seen != current) {
+      multi_device.store(true, std::memory_order_relaxed);
+    }
+  }
 };
 
 // The registry and its mutex are heap-allocated and deliberately never freed. Static destructors
@@ -216,7 +228,6 @@ inline ThreadCounters &thread_counters() {
   static thread_local ThreadCounters *tc = [] {
     auto *p = new ThreadCounters();
     p->tid = thread_seq_id();
-    p->device.store(cuda::current_device(), std::memory_order_relaxed);
     {
       std::lock_guard<std::mutex> lock(thread_registry_mutex());
       thread_registry().push_back(p);
@@ -313,8 +324,12 @@ inline void append_thread_rows(std::string &block) {
     char tid_field[16];
     char dev_field[16];
     std::snprintf(tid_field, sizeof(tid_field), "tid=%u", tc->tid);
-    std::snprintf(dev_field, sizeof(dev_field), "dev=%d",
-                  tc->device.load(std::memory_order_relaxed));
+    if (tc->multi_device.load(std::memory_order_relaxed)) {
+      std::snprintf(dev_field, sizeof(dev_field), "dev=mixed");
+    } else {
+      std::snprintf(dev_field, sizeof(dev_field), "dev=%d",
+                    tc->device.load(std::memory_order_relaxed));
+    }
     for (const Backend b : kSummaryBackends) {
       for (const Pass p : {Pass::Fwd, Pass::Bwd}) {
         const CounterSnapshot c = snapshot(tc->sites[site_index(b, p)]);
@@ -399,6 +414,7 @@ inline bool record_counter(Backend b, Pass p, std::atomic<uint64_t> EventCounter
   register_summary_once();
   (counters(b, p).*column).fetch_add(1, std::memory_order_relaxed);
   (thread_counters(b, p).*column).fetch_add(1, std::memory_order_relaxed);
+  thread_counters().note_device(cuda::current_device());
   return enabled_with_trace();
 }
 
@@ -406,7 +422,6 @@ inline bool record_counter(Backend b, Pass p, std::atomic<uint64_t> EventCounter
 // site that raised it.
 inline void print_counters(Backend b, Pass p, const char *event) {
   const int device = cuda::current_device();
-  thread_counters().device.store(device, std::memory_order_relaxed);
   char label[32];
   char tid_field[16];
   char dev_field[16];

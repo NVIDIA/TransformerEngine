@@ -15,7 +15,6 @@
 #ifndef TRANSFORMER_ENGINE_COMMON_FUSED_ATTN_GRAPH_CACHE_H_
 #define TRANSFORMER_ENGINE_COMMON_FUSED_ATTN_GRAPH_CACHE_H_
 
-#include <exception>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -52,6 +51,13 @@ struct GraphCache {
 
 namespace detail {
 
+// Thrown only when cuDNN declines a graph, so that support_verdict() can tell a config cuDNN does
+// not support from a genuine failure -- a violated TE invariant, a CUDA error, a failed allocation
+// -- which must surface as an error rather than be reported as an unsupported config.
+struct UnsupportedByCudnn : std::runtime_error {
+  explicit UnsupportedByCudnn(const std::string &reason) : std::runtime_error(reason) {}
+};
+
 // Query if a cuDNN graph can be supported or not; if so, safely return; if not, throw with
 // cuDNN frontend's original error message; times for the four stages are also recorded.
 inline void query_support(Backend backend, Pass pass, cudnn_frontend::graph::Graph &graph,
@@ -62,7 +68,7 @@ inline void query_support(Backend backend, Pass pass, cudnn_frontend::graph::Gra
     const cudnn_frontend::error_t error =
         graph_cache_debug::record_time(backend, pass, stage, [&] { return call(); });
     if (error.is_good()) return;
-    throw std::runtime_error(error.err_msg.empty() ? std::string(call_name) + " failed."
+    throw UnsupportedByCudnn(error.err_msg.empty() ? std::string(call_name) + " failed."
                                                    : error.err_msg);
   };
 
@@ -106,10 +112,19 @@ std::shared_ptr<CacheEntry<GraphAndTensors>> cache_graph(GraphCache<GraphAndTens
   graph_cache_debug::record_create_graph(backend, pass);
 
   query_support(backend, pass, *std::get<0>(entry->graph_and_tensors), handle);
-  graph_cache_debug::record_cache_graph(backend, pass);
 
-  std::lock_guard<std::mutex> lock(cache.mutex);
-  return cache.entries.insert({key, std::move(entry)}).first->second;
+  // Concurrent builders of the same key all arrive here, but only the one whose insert wins ends
+  // up cached, so only that one counts as CACHE_GRAPH. The others discard their graph.
+  std::shared_ptr<CacheEntry<GraphAndTensors>> cached;
+  bool inserted = false;
+  {
+    std::lock_guard<std::mutex> lock(cache.mutex);
+    const auto result = cache.entries.insert({key, std::move(entry)});
+    cached = result.first->second;
+    inserted = result.second;
+  }
+  if (inserted) graph_cache_debug::record_cache_graph(backend, pass);
+  return cached;
 }
 
 }  // namespace detail
@@ -124,21 +139,19 @@ auto get_graph(const FusedAttnConfig &cfg, cudnnHandle_t handle) {
 }
 
 // Check if cuDNN supports a given config; if yes, return an empty string; if not, return a diagnostic
-// string with the reason that get_graph() throws.
+// string with the reason that get_graph() throws. Anything other than a cuDNN rejection propagates,
+// so that a real failure is not reported as an unsupported config.
 template <Backend kBackend, Pass kPass, auto kCreateGraphFn>
 std::string support_verdict(const FusedAttnConfig &cfg, cudnnHandle_t handle) {
-  const char *fallback = nullptr;
   try {
     get_graph<kBackend, kPass, kCreateGraphFn>(cfg, handle);
     return "";
-  } catch (const std::exception &e) {
+  } catch (const detail::UnsupportedByCudnn &e) {
+    // An empty reason would read as supported, so name the site instead.
     if (e.what()[0] != '\0') return e.what();
-    fallback = "rejected without a reason.";
-  } catch (...) {
-    fallback = "unknown failure.";
+    return std::string("support_verdict<") + backend_name(kBackend) + ", " + pass_name(kPass) +
+           ">: rejected without a reason.";
   }
-  return std::string("support_verdict<") + backend_name(kBackend) + ", " + pass_name(kPass) +
-         ">: " + fallback;
 }
 
 // Compile the kernels for the graph before execution; once per cache entry; most expensive cuDNN
