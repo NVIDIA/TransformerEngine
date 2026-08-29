@@ -195,4 +195,3 @@ class MoeDispatch(BasicOperation):
             grad_recv_weights,
         )
         return grad_input, [()], [(None, grad_topk_weights)]
-

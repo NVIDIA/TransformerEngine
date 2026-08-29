@@ -252,4 +252,3 @@ def _run_layer(args, rank, world_size, ep_size, num_experts, num_local_experts, 
 if __name__ == "__main__":
     main()
     sys.exit(0)
-

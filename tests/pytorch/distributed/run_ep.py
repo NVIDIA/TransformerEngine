@@ -1486,4 +1486,3 @@ if __name__ == "__main__":
     release_symm_mem_pool()
     dist.destroy_process_group()
     sys.exit(0 if result.wasSuccessful() else 1)
-

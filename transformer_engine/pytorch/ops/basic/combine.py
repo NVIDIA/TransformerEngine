@@ -171,4 +171,3 @@ class MoeCombine(BasicOperation):
             grad_scale_inv,
         )
         return grad_input, [()], [()]
-
