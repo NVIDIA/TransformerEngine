@@ -532,14 +532,13 @@ class _ScaledGLU(BasicOperation):
         if torch.is_autocast_enabled():
             dtype = torch.get_autocast_dtype("cuda")
             scale_dtype = dtype
-        elif isinstance(input_, torch.Tensor):
-            dtype = input_.dtype
         else:
-            dtype = extra_input.dtype
+            dtype = input_.dtype
+            scale_dtype = extra_input.dtype
 
         # Prepare the activation input in the compute dtype.
         input_ = maybe_dequantize(input_, dtype)
-        scales = extra_input if scale_dtype is None else maybe_dequantize(extra_input, scale_dtype)
+        scales = maybe_dequantize(extra_input, scale_dtype)
         out = self._scaled_glu_forward(input_, scales)
 
         # Save state for backward pass

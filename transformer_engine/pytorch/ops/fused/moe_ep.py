@@ -470,10 +470,6 @@ class FusedMoeEp(FusedOperation):
             basic_op_ctxs[0].input_dtype = input_dtype
             basic_op_ctxs[0].prev_op_grad_output_quantizer = prev_op_grad_output_quantizer
 
-        # Dispatch extras are channel-bound with output_to_caller=False and are
-        # only consumed by ops inside this fusion, so they need not be materialized.
-        if next_op_input_quantizer is not None and not is_quantized_tensor(output):
-            output = next_op_input_quantizer(output)
         return output, [
             (None, None),
             (),
@@ -538,9 +534,7 @@ class FusedMoeEp(FusedOperation):
         fc1_param_grads = _compute_grouped_weight_grad(self.fc1, wgrad_operands, "fc1")
         fc2_param_grads = _compute_grouped_weight_grad(self.fc2, wgrad_operands, "fc2")
         grad_input = grad_input.to(dtype=basic_op_ctxs[0].input_dtype)
-        grad_input_quantizer = basic_op_ctxs[0].prev_op_grad_output_quantizer
-        if grad_input_quantizer is not None:
-            grad_input = grad_input_quantizer(grad_input)
+
         return (
             grad_input,
             [(), fc1_param_grads, (), fc2_param_grads, ()],
