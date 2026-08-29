@@ -16,7 +16,6 @@ import torch.distributed as dist
 
 from transformer_engine.pytorch.ep import (
     EpBuffer,
-    EpConfig,
     ep_bootstrap,
     ep_combine,
     ep_dispatch,
@@ -178,14 +177,13 @@ def _run_layer(args, rank, world_size, ep_size, num_experts, num_local_experts, 
         else None
     )
 
-    config = EpConfig(
+    buffer = EpBuffer(
         top_k=args.top_k,
         max_tokens_per_rank=T,
         recv_capacity_per_rank=recv_pr,
         hidden_dim=args.hidden,
         num_local_experts=num_local_experts,
     )
-    buffer = EpBuffer(config)
 
     recv_t, recv_w_out, _tc = ep_dispatch(buffer, tokens, topk_idx, topk_w, recv_tokens=recv_tokens)
     expert_out = _batched_expert_linear(recv_t, kernels_local, num_local_experts)
@@ -254,3 +252,4 @@ def _run_layer(args, rank, world_size, ep_size, num_experts, num_local_experts, 
 if __name__ == "__main__":
     main()
     sys.exit(0)
+

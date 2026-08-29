@@ -17,7 +17,7 @@ import torch
 import transformer_engine_torch as tex
 
 from ...constants import DType, MXFP8_BLOCK_SCALING_SIZE
-from ...ep import get_ep_group, quantize_for_ep
+from ...ep import quantize_for_ep
 from ...quantization import Recipe
 from ...tensor import GroupedTensor, MXFP8Quantizer, Quantizer
 from ...tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
@@ -37,7 +37,7 @@ from ..op import FusedOperation, FusibleOperation, OperationContext
 def _cudnn_megamoe_supported() -> bool:
     """Whether the installed cuDNN frontend includes the public MegaMoE API."""
     try:
-        return PkgVersion(get_pkg_version("nvidia-cudnn-frontend")) >= PkgVersion("1.28.0")
+        return PkgVersion(get_pkg_version("nvidia-cudnn-frontend")) >= PkgVersion("1.29.0")
     except PackageNotFoundError:
         return False
 
@@ -367,9 +367,9 @@ class FusedMoeEp(FusedOperation):
             )
         from cudnn.moe_ep import BlockScaledTensor
 
-        ep_group = get_ep_group()
-        ep_size = 1 if ep_group is None else ep_group.size()
         config = dispatch.config
+        ep_group = config.ep_group
+        ep_size = ep_group.size()
         combine_format = _get_megamoe_combine_format()
         self._block_scaled_cls = BlockScaledTensor
         self._moe = moe_ep_cls(
@@ -586,3 +586,4 @@ register_forward_backward_fusion(fuse_ops, prepend=True)
 
 
 __all__ = ["FusedMoeEp"]
+

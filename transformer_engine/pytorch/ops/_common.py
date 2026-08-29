@@ -11,7 +11,12 @@ from typing import Optional
 import torch
 
 from transformer_engine_torch import FP8TensorMeta
-from ..ep import EpBuffer, EpConfig
+from ..ep import (
+    EpBuffer,
+    EpConfig,
+    get_ep_drop_on_overflow,
+    get_ep_group,
+)
 from ..torch_version import torch_version
 from ..quantization import FP8GlobalStateManager
 from ..quantized_tensor import QuantizedTensorStorage, Quantizer
@@ -76,10 +81,37 @@ def validate_ep_buffer(
     """Validate a runtime EP buffer against an operation's immutable config."""
     if not isinstance(buffer, EpBuffer):
         raise TypeError(f"{op_name} requires buffer=EpBuffer(...), got {type(buffer).__name__}.")
-    if buffer.config != expected_config:
+
+    mismatches = {
+        name: (getattr(buffer, name), getattr(expected_config, name))
+        for name in (
+            "top_k",
+            "hidden_dim",
+            "num_local_experts",
+            "max_tokens_per_rank",
+            "recv_capacity_per_rank",
+            "alignment",
+            "payload_dtype",
+            "zero_copy",
+        )
+        if getattr(buffer, name) != getattr(expected_config, name)
+    }
+    ep_group = get_ep_group()
+    if expected_config.ep_group is not ep_group:
+        mismatches["ep_group"] = (ep_group, expected_config.ep_group)
+    drop_on_overflow = get_ep_drop_on_overflow()
+    if expected_config.drop_on_overflow != drop_on_overflow:
+        mismatches["drop_on_overflow"] = (
+            drop_on_overflow,
+            expected_config.drop_on_overflow,
+        )
+    if mismatches:
+        details = ", ".join(
+            f"{name}={actual!r} (expected {expected!r})"
+            for name, (actual, expected) in mismatches.items()
+        )
         raise ValueError(
-            f"{op_name} runtime buffer config does not match its initialized config: "
-            f"{buffer.config!r} != {expected_config!r}."
+            f"{op_name} runtime buffer config does not match its initialized config: {details}."
         )
     return buffer
 

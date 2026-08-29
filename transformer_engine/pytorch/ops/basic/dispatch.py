@@ -72,6 +72,8 @@ class MoeDispatch(BasicOperation):
         super().__init__()
         if not isinstance(config, EpConfig):
             raise TypeError(f"config must be an EpConfig, got {type(config).__name__}.")
+        if config.zero_copy:
+            raise NotImplementedError("MoeDispatch does not support zero-copy EP.")
         self.config = config
 
     def num_quantizers(self, mode: str) -> int:
@@ -142,22 +144,13 @@ class MoeDispatch(BasicOperation):
         else:
             # Only BF16 dispatch is supported for now.
             input_ = maybe_dequantize(input_, torch.bfloat16)
-        # Eager mode discovers the receive size at runtime, so persistent
-        # caller-owned output buffers cannot be used.
-        recv_tokens = kwargs.get("recv_tokens")
-        recv_topk_weights = kwargs.get("recv_topk_weights")
-        if buffer.eager and (recv_tokens is not None or recv_topk_weights is not None):
-            raise ValueError(
-                "eager mode sizes dispatch outputs per step and cannot use "
-                "caller-supplied receive buffers"
-            )
         output, recv_topk_weights, dispatch_state = _ep_prepare_and_dispatch_fwd(
             input_,
             topk_weights,
             topk_idx,
             buffer,
-            recv_tokens,
-            recv_topk_weights,
+            None,
+            None,
             input_scale_inv,
         )
         tokens_per_expert = buffer.tokens_per_expert
@@ -202,3 +195,4 @@ class MoeDispatch(BasicOperation):
             grad_recv_weights,
         )
         return grad_input, [()], [(None, grad_topk_weights)]
+

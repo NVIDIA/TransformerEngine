@@ -21,6 +21,8 @@ from transformer_engine.pytorch.ep import (
     EpConfig,
     ep_bootstrap,
     ep_finalize,
+    get_ep_drop_on_overflow,
+    get_ep_group,
     ep_prepare,
     ep_dispatch,
     ep_combine,
@@ -286,6 +288,42 @@ class _EpTestCase(unittest.TestCase):
         ):
             self.skipTest("not exercised in overflow mode")
 
+    def _make_config(
+        self,
+        alignment=0,
+        top_k=TOP_K,
+    ):
+        return EpConfig(
+            top_k=top_k,
+            max_tokens_per_rank=TOKENS_PER_RANK,
+            hidden_dim=HIDDEN_DIM,
+            num_local_experts=NUM_LOCAL_EXPERTS,
+            recv_capacity_per_rank=None if EAGER else self.cfg.recv_capacity_per_rank,
+            ep_group=self.ep_group,
+            alignment=alignment,
+            zero_copy=ZERO_COPY,
+            drop_on_overflow=OVERFLOW,
+        )
+
+    def _make_buffer_from_config(
+        self,
+        config,
+        *,
+        dispatch_fwd_quant_recipe=None,
+        combine_bwd_quant_recipe=None,
+    ):
+        return EpBuffer(
+            top_k=config.top_k,
+            max_tokens_per_rank=config.max_tokens_per_rank,
+            hidden_dim=config.hidden_dim,
+            num_local_experts=config.num_local_experts,
+            recv_capacity_per_rank=config.recv_capacity_per_rank,
+            alignment=config.alignment,
+            payload_dtype=config.payload_dtype,
+            dispatch_fwd_quant_recipe=dispatch_fwd_quant_recipe,
+            combine_bwd_quant_recipe=combine_bwd_quant_recipe,
+        )
+
     def _make_buffer(
         self,
         alignment=0,
@@ -293,17 +331,8 @@ class _EpTestCase(unittest.TestCase):
         dispatch_fwd_quant_recipe=None,
         combine_bwd_quant_recipe=None,
     ):
-        config = EpConfig(
-            top_k=top_k,
-            max_tokens_per_rank=TOKENS_PER_RANK,
-            hidden_dim=HIDDEN_DIM,
-            num_local_experts=NUM_LOCAL_EXPERTS,
-            recv_capacity_per_rank=None if EAGER else self.cfg.recv_capacity_per_rank,
-            alignment=alignment,
-            zero_copy=ZERO_COPY,
-            drop_on_overflow=OVERFLOW,
-        )
-        return EpBuffer(
+        config = self._make_config(alignment=alignment, top_k=top_k)
+        return self._make_buffer_from_config(
             config,
             dispatch_fwd_quant_recipe=dispatch_fwd_quant_recipe,
             combine_bwd_quant_recipe=combine_bwd_quant_recipe,
@@ -312,6 +341,10 @@ class _EpTestCase(unittest.TestCase):
 
 class TestEP(_EpTestCase):
     """NCCL EP tests inherited from nvidia_origin/main."""
+
+    def test_bootstrap_accessors(self):
+        self.assertIs(get_ep_group(), self.ep_group)
+        self.assertEqual(get_ep_drop_on_overflow(), OVERFLOW)
 
     def _expert_out(self, expert_out):
         """Stage the combine input into symm-mem under zero-copy (combine requires it)."""
@@ -920,14 +953,48 @@ class TestMoeEpSequential(_EpTestCase):
             )
 
     def test_runtime_buffer_config_mismatch(self):
-        buffer = self._make_buffer()
-        wrong_config = replace(buffer.config, hidden_dim=buffer.config.hidden_dim + 1)
+        config = self._make_config()
+        buffer = self._make_buffer_from_config(config)
         topk_idx, tokens, topk_weights = _make_identity_inputs(
             self.cfg.rank,
             self.cfg.ep_size,
         )
-        with self.assertRaisesRegex(ValueError, "runtime buffer config"):
+        dispatch = te_ops.MoeDispatch(config)
+        replacements = {
+            "top_k": config.top_k + 1,
+            "hidden_dim": config.hidden_dim + 1,
+            "num_local_experts": config.num_local_experts + 1,
+            "max_tokens_per_rank": config.max_tokens_per_rank + 1,
+            "recv_capacity_per_rank": config.recv_capacity_per_rank + 1,
+            "alignment": 1,
+            "payload_dtype": torch.float16,
+            "zero_copy": not config.zero_copy,
+        }
+        for field_name, wrong_value in replacements.items():
+            with self.subTest(field_name=field_name):
+                original = getattr(buffer, field_name)
+                setattr(buffer, field_name, wrong_value)
+                try:
+                    with self.assertRaisesRegex(ValueError, field_name):
+                        dispatch(
+                            tokens,
+                            topk_idx,
+                            topk_weights,
+                            buffer=buffer,
+                        )
+                finally:
+                    setattr(buffer, field_name, original)
+
+        wrong_config = replace(config, drop_on_overflow=not config.drop_on_overflow)
+        with self.assertRaisesRegex(ValueError, "drop_on_overflow"):
             te_ops.MoeDispatch(wrong_config)(
+                tokens,
+                topk_idx,
+                topk_weights,
+                buffer=buffer,
+            )
+        with self.assertRaisesRegex(ValueError, "ep_group"):
+            te_ops.MoeDispatch(replace(config, ep_group=None))(
                 tokens,
                 topk_idx,
                 topk_weights,
@@ -940,7 +1007,12 @@ class TestMoeEpSequential(_EpTestCase):
             device=self.cfg.device,
         )
         with self.assertRaisesRegex(ValueError, "runtime buffer config"):
-            te_ops.MoeCombine(wrong_config)(expert_out, buffer=buffer)
+            original = buffer.hidden_dim
+            buffer.hidden_dim += 1
+            try:
+                te_ops.MoeCombine(config)(expert_out, buffer=buffer)
+            finally:
+                buffer.hidden_dim = original
 
     def test_megamoe_combine_format_env(self):
         old_value = os.environ.get("NVTE_MEGAMOE_MXFP8_COMBINE")
@@ -958,9 +1030,10 @@ class TestMoeEpSequential(_EpTestCase):
     @_mxfp8_align_test
     def test_role_quantizer_requires_matching_buffer_recipe(self):
         self._require_mxfp8_shapes()
-        buffer = self._make_buffer(alignment=128)
-        dispatch = te_ops.MoeDispatch(buffer.config)
-        combine = te_ops.MoeCombine(buffer.config)
+        config = self._make_config(alignment=128)
+        buffer = self._make_buffer_from_config(config)
+        dispatch = te_ops.MoeDispatch(config)
+        combine = te_ops.MoeCombine(config)
         topk_idx, tokens, topk_weights = _make_identity_inputs(
             self.cfg.rank,
             self.cfg.ep_size,
@@ -981,15 +1054,16 @@ class TestMoeEpSequential(_EpTestCase):
 
     def _make_dispatch_combine_ops(self, *, mxfp8):
         recipe = MXFP8BlockScaling() if mxfp8 else None
-        buffer = self._make_buffer(
-            alignment=128 if mxfp8 else 0,
+        config = self._make_config(alignment=128 if mxfp8 else 0)
+        buffer = self._make_buffer_from_config(
+            config,
             dispatch_fwd_quant_recipe=recipe,
             combine_bwd_quant_recipe=recipe,
         )
         return (
             buffer,
-            te_ops.MoeDispatch(buffer.config),
-            te_ops.MoeCombine(buffer.config),
+            te_ops.MoeDispatch(config),
+            te_ops.MoeCombine(config),
         )
 
     def _run_dispatch_combine_identity(self, *, mxfp8):
@@ -1009,28 +1083,26 @@ class TestMoeEpSequential(_EpTestCase):
                 topk_weights,
                 buffer=buffer,
             )
-        if mxfp8:
-            recv_tokens = _degroup_mxfp8(recv_tokens)
-            recv_weights = recv_weights[: recv_tokens.shape[0]]
-        weighted_expert_output = (recv_tokens.float() * recv_weights.float().unsqueeze(-1)).to(
-            torch.bfloat16
-        )
-        output = combine(
-            weighted_expert_output,
-            buffer=buffer,
-        )
+            if mxfp8:
+                recv_tokens = _degroup_mxfp8(recv_tokens)
+                recv_weights = recv_weights[: recv_tokens.shape[0]]
+            weighted_expert_output = (recv_tokens.float() * recv_weights.float().unsqueeze(-1)).to(
+                torch.bfloat16
+            )
+            output = combine(
+                weighted_expert_output,
+                buffer=buffer,
+            )
         torch.cuda.synchronize()
         torch.testing.assert_close(output, tokens, atol=5e-2, rtol=5e-2)
         self.assertEqual(tokens_per_expert.data_ptr(), buffer.tokens_per_expert.data_ptr())
 
     @_eager_test_include
-    @_zero_copy_test_include
     def test_dispatch_combine_identity_bf16(self):
         """MoeDispatch and MoeCombine basic ops form an identity in BF16."""
         self._run_dispatch_combine_identity(mxfp8=False)
 
     @_eager_test_include
-    @_zero_copy_test_include
     @_mxfp8_align_test
     def test_dispatch_combine_identity_mxfp8(self):
         """MoeDispatch and MoeCombine basic ops form an identity with MXFP8 transport."""
@@ -1044,12 +1116,13 @@ class TestMoeEpSequential(_EpTestCase):
         delay_wgrad_compute=False,
     ):
         """Build the exact five-op sequence recognized by MegaMoE fusion."""
-        buffer = self._make_buffer(
-            alignment=128 if recipe is not None else 0,
+        config = self._make_config(alignment=128 if recipe is not None else 0)
+        buffer = self._make_buffer_from_config(
+            config,
             dispatch_fwd_quant_recipe=recipe,
             combine_bwd_quant_recipe=recipe,
         )
-        dispatch = te_ops.MoeDispatch(buffer.config)
+        dispatch = te_ops.MoeDispatch(config)
         init_ctx = (
             te.quantized_model_init(enabled=True, recipe=recipe)
             if recipe is not None
@@ -1087,7 +1160,7 @@ class TestMoeEpSequential(_EpTestCase):
                 del os.environ["NVTE_GROUPED_LINEAR_SINGLE_PARAM"]
             else:
                 os.environ["NVTE_GROUPED_LINEAR_SINGLE_PARAM"] = previous_single_param
-        combine = te_ops.MoeCombine(buffer.config)
+        combine = te_ops.MoeCombine(config)
 
         dispatch.set_extra_output_channel(0, "tokens_per_expert", output_to_caller=False)
         dispatch.set_extra_output_channel(1, "routing_weights", output_to_caller=False)
@@ -1413,3 +1486,4 @@ if __name__ == "__main__":
     release_symm_mem_pool()
     dist.destroy_process_group()
     sys.exit(0 if result.wasSuccessful() else 1)
+

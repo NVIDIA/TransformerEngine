@@ -30,6 +30,7 @@ __all__ = [
     "EpConfig",
     "EpBuffer",
     "ep_bootstrap",
+    "get_ep_drop_on_overflow",
     "get_ep_group",
     "is_ep_bootstrapped",
     "ep_finalize",
@@ -88,15 +89,16 @@ _EAGER = False
 _BOOTSTRAP_SETTINGS: Optional[dict[str, object]] = None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class EpConfig:
-    """Immutable configuration shared by an EP buffer and its MoE operations."""
+    """Immutable configuration shared by EP MoE operations."""
 
     top_k: int
     hidden_dim: int
     num_local_experts: int
     max_tokens_per_rank: int
     recv_capacity_per_rank: Optional[int]
+    ep_group: dist.ProcessGroup
     alignment: int = 0
     payload_dtype: torch.dtype = torch.bfloat16
     zero_copy: bool = False
@@ -227,6 +229,13 @@ def get_ep_group() -> Optional[dist.ProcessGroup]:
     return _EP_GROUP
 
 
+def get_ep_drop_on_overflow() -> Optional[bool]:
+    """Return the overflow policy registered by :func:`ep_bootstrap`."""
+    if _BOOTSTRAP_SETTINGS is None:
+        return None
+    return bool(_BOOTSTRAP_SETTINGS["drop_on_overflow"])
+
+
 def _ep_is_eager() -> bool:
     """Return whether the bootstrapped EP group uses variable-size eager buffers."""
     return _EAGER
@@ -280,17 +289,24 @@ def is_symm_backed(t: torch.Tensor) -> bool:
 
 
 class EpBuffer:
-    """Per-microbatch EP routing state allocated from an immutable :class:`EpConfig`.
+    """Per-microbatch EP layer state: handle_mem, tokens_per_expert, and shape/dtype config.
 
     Use one EpBuffer per concurrently-in-flight call (e.g. per PP-1F1B microbatch).
     """
 
     __slots__ = (
-        "config",
         "handle_mem",
+        "top_k",
+        "alignment",
+        "max_tokens_per_rank",
+        "recv_capacity_per_rank",
+        "hidden_dim",
+        "num_local_experts",
+        "payload_dtype",
         "device",
         "tokens_per_expert",
         "num_local_tokens",
+        "zero_copy",
         "eager",
         "total_recv_tokens",
         "dispatch_fwd_quant_recipe",
@@ -299,43 +315,50 @@ class EpBuffer:
 
     def __init__(
         self,
-        config: EpConfig,
-        *,
+        top_k: int,
+        max_tokens_per_rank: int,
+        hidden_dim: int,
+        num_local_experts: int,
+        recv_capacity_per_rank: Optional[int] = None,
+        alignment: int = 0,
+        payload_dtype: torch.dtype = torch.bfloat16,
         device: Optional[torch.device] = None,
         dispatch_fwd_quant_recipe: Optional["Recipe"] = None,
         combine_bwd_quant_recipe: Optional["Recipe"] = None,
     ) -> None:
         if not _BOOTSTRAPPED:
             raise RuntimeError("EpBuffer requires ep_bootstrap() to be called first.")
-        if not isinstance(config, EpConfig):
-            raise TypeError(f"config must be an EpConfig, got {type(config).__name__}.")
-        if _BOOTSTRAP_SETTINGS is None:
-            raise RuntimeError("EP bootstrap configuration is unavailable.")
-        mismatches = {
-            name: (getattr(config, name), expected)
-            for name, expected in _BOOTSTRAP_SETTINGS.items()
-            if getattr(config, name) != expected
-        }
-        if mismatches:
-            details = ", ".join(
-                f"{name}={actual!r} (bootstrapped {expected!r})"
-                for name, (actual, expected) in mismatches.items()
-            )
-            raise ValueError(f"EpConfig does not match ep_bootstrap: {details}.")
         if device is None:
             device = torch.device("cuda", torch.cuda.current_device())
-        self.config = config
-        self.eager = config.recv_capacity_per_rank is None
+        alignment = int(alignment)
+        if alignment > 1 and (alignment & (alignment - 1)) != 0:
+            raise ValueError(f"alignment must be 0, 1, or a power of two (got {alignment}).")
+        self.eager = _EAGER
+        if not self.eager and recv_capacity_per_rank is None:
+            raise ValueError(
+                "EpBuffer requires recv_capacity_per_rank unless the EP group was "
+                "bootstrapped in eager mode (recv_capacity_per_rank omitted)."
+            )
+        self.top_k = int(top_k)
+        self.alignment = alignment
+        self.max_tokens_per_rank = int(max_tokens_per_rank)
+        self.recv_capacity_per_rank = (
+            None if recv_capacity_per_rank is None else int(recv_capacity_per_rank)
+        )
+        self.hidden_dim = int(hidden_dim)
+        self.num_local_experts = int(num_local_experts)
+        self.payload_dtype = payload_dtype
         self.device = device
+        self.zero_copy = bool(tex.ep_get_zero_copy())
         self.dispatch_fwd_quant_recipe = dispatch_fwd_quant_recipe
         self.combine_bwd_quant_recipe = combine_bwd_quant_recipe
 
-        size_bytes = tex.ep_handle_mem_size(config.top_k, config.alignment)
+        size_bytes = tex.ep_handle_mem_size(self.top_k, self.alignment)
         self.handle_mem = torch.empty(int(size_bytes), dtype=torch.uint8, device=device)
         self.tokens_per_expert = torch.empty(
-            config.num_local_experts, dtype=torch.int64, device=device
+            self.num_local_experts, dtype=torch.int64, device=device
         )
-        self.num_local_tokens = config.max_tokens_per_rank
+        self.num_local_tokens = self.max_tokens_per_rank
         # Persistent tensor; keep resident if activation CPU offloading is on.
         mark_not_offload(self.handle_mem)
         # Per-step recv-token total (int64 [1]), written by ep_prepare. Eager reads it
@@ -349,38 +372,6 @@ class EpBuffer:
         else:
             self.total_recv_tokens = torch.empty(1, dtype=torch.int64, device=device)
             mark_not_offload(self.total_recv_tokens)
-
-    @property
-    def top_k(self) -> int:
-        return self.config.top_k
-
-    @property
-    def alignment(self) -> int:
-        return self.config.alignment
-
-    @property
-    def max_tokens_per_rank(self) -> int:
-        return self.config.max_tokens_per_rank
-
-    @property
-    def recv_capacity_per_rank(self) -> Optional[int]:
-        return self.config.recv_capacity_per_rank
-
-    @property
-    def hidden_dim(self) -> int:
-        return self.config.hidden_dim
-
-    @property
-    def num_local_experts(self) -> int:
-        return self.config.num_local_experts
-
-    @property
-    def payload_dtype(self) -> torch.dtype:
-        return self.config.payload_dtype
-
-    @property
-    def zero_copy(self) -> bool:
-        return self.config.zero_copy
 
 
 # torch.library custom ops (so they don't graph-break under torch.compile)
@@ -1249,3 +1240,4 @@ def ep_combine(
         num_local_tokens,
         bwd_quant_recipe,
     )
+

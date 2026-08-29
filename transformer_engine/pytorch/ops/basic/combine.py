@@ -13,17 +13,14 @@ import torch
 from ...ep import (
     EpBuffer,
     EpConfig,
-    _alloc_io,
     _ep_combine_bwd,
     _ep_combine_fwd,
-    is_symm_backed,
     quantize_for_ep,
 )
 from ...quantization import QuantizerRole
 from ...tensor import MXFP8Quantizer, Quantizer
 from .._common import (
     maybe_dequantize,
-    validate_buffer,
     validate_ep_buffer,
     validate_ep_comms_recipe,
 )
@@ -63,6 +60,8 @@ class MoeCombine(BasicOperation):
         super().__init__()
         if not isinstance(config, EpConfig):
             raise TypeError(f"config must be an EpConfig, got {type(config).__name__}.")
+        if config.zero_copy:
+            raise NotImplementedError("MoeCombine does not support zero-copy EP.")
         self.config = config
 
     def num_quantizers(self, mode: str) -> int:
@@ -95,36 +94,6 @@ class MoeCombine(BasicOperation):
     def op_backward(self, *args: Any, **kwargs: Any) -> None:
         raise RuntimeError("MoeCombine uses fuser_backward")
 
-    @staticmethod
-    def _prepare_grad_buffer(
-        grad_out: Optional[torch.Tensor],
-        grad_output_quantizer: Optional[Quantizer],
-        *,
-        input_shape: tuple[int, int],
-        input_dtype: torch.dtype,
-        device: torch.device,
-        zero_copy: bool,
-    ) -> Optional[torch.Tensor]:
-        """Validate caller storage for the expert-output gradient."""
-        if not isinstance(grad_output_quantizer, MXFP8Quantizer):
-            grad_out = validate_buffer(
-                "grad_out",
-                grad_out,
-                shape=input_shape,
-                dtype=input_dtype,
-                device=device,
-            )
-        else:
-            grad_out = validate_buffer(
-                "MXFP8 grad_out storage",
-                grad_out,
-                device=device,
-                contiguous=True,
-            )
-        if zero_copy and grad_out is not None and not is_symm_backed(grad_out):
-            raise ValueError("zero-copy MoeCombine grad_out must be symmetric-memory-backed.")
-        return grad_out
-
     def fuser_forward(
         self,
         basic_op_ctxs: list[OperationContext],
@@ -152,35 +121,18 @@ class MoeCombine(BasicOperation):
         )
         # Only BF16 combine forward is supported for now.
         input_ = maybe_dequantize(input_, torch.bfloat16)
-        input_shape = _validate_combine_inputs(input_, buffer)
-        # Stage zero-copy input if needed, then restore local-token order.
-        zero_copy = buffer.zero_copy
-        expert_out = input_
-        if zero_copy:
-            expert_out = _alloc_io(tuple(input_.shape), torch.bfloat16, input_.device, True)
-            expert_out.copy_(input_)
-        # Preserve routing state and optional caller storage for backward.
+        _validate_combine_inputs(input_, buffer)
         ctx = basic_op_ctxs[0]
-        grad_out = None
-        if ctx.requires_grad:
-            grad_out = self._prepare_grad_buffer(
-                kwargs.get("grad_out"),
-                transport_quantizer,
-                input_shape=input_shape,
-                input_dtype=torch.bfloat16,
-                device=input_.device,
-                zero_copy=zero_copy,
-            )
         result, combine_state = _ep_combine_fwd(
-            expert_out,
-            grad_out,
+            input_,
+            None,
             handle_mem=buffer.handle_mem,
             token_counts=buffer.tokens_per_expert,
             num_local_tokens=buffer.num_local_tokens,
-            hidden_dim=expert_out.shape[-1],
+            hidden_dim=input_.shape[-1],
             bwd_quant_recipe=transport_quantizer,
             eager=buffer.eager,
-            zero_copy=zero_copy,
+            zero_copy=False,
         )
         if ctx.requires_grad:
             ctx.combine_state = combine_state
@@ -219,3 +171,4 @@ class MoeCombine(BasicOperation):
             grad_scale_inv,
         )
         return grad_input, [()], [()]
+
