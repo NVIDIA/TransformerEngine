@@ -209,9 +209,7 @@ def _inputs(
     [(64, 64), (128, 128), (64, 128)],
     ids=["qk64_v64_cutile", "qk128_v128_frost", "qk64_v128"],
 )
-@pytest.mark.parametrize(
-    "use_qk_l2norm_in_kernel", [False, True], ids=["no_l2norm", "l2norm"]
-)
+@pytest.mark.parametrize("use_qk_l2norm_in_kernel", [False, True], ids=["no_l2norm", "l2norm"])
 def test_gdn_thd_forward_final_state_and_backward(
     checkpoint_core_attention, qk_dim, v_dim, use_qk_l2norm_in_kernel
 ):
