@@ -54,7 +54,11 @@ def _validate_cu_seqlens(
 
 
 class _GatedDeltaNetAttention(torch.nn.Module):
-    """Adapter from TransformerEngine attention layouts to cuDNN frontend GDN."""
+    """Adapter from TransformerEngine attention layouts to cuDNN frontend GDN.
+
+    The cuDNN frontend GDN op is differentiated through ``torch.autograd`` (it registers
+    its own backward internally), so this module does not define an explicit backward.
+    """
 
     def __init__(
         self,
@@ -82,7 +86,6 @@ class _GatedDeltaNetAttention(torch.nn.Module):
         *,
         qkv_format: str,
         cu_seqlens_q: Optional[torch.Tensor] = None,
-        cu_seqlens_kv: Optional[torch.Tensor] = None,
         output_final_state: bool = False,
         use_qk_l2norm_in_kernel: bool = False,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
@@ -120,6 +123,7 @@ class _GatedDeltaNetAttention(torch.nn.Module):
             )
         # The underlying op supports grouped value heads, but DPA's output contract is fixed
         # at construction time. Integrations that use more V heads must expand Q/K before DPA.
+        # TODO: Support num_q_heads != num_v_heads once DPA's output-width contract allows it.
         if value_layer.shape[-2] != self.num_q_heads:
             raise ValueError(
                 f"GDN V must have {self.num_q_heads} heads, got {value_layer.shape[-2]}. "
@@ -144,10 +148,10 @@ class _GatedDeltaNetAttention(torch.nn.Module):
             raise ValueError("Q, K, V, g, and beta must be on the same CUDA device.")
         if query_layer.dtype != key_layer.dtype or query_layer.dtype != value_layer.dtype:
             raise TypeError("Q, K, and V must have the same dtype for GDN attention.")
-        if query_layer.dtype not in {torch.float16, torch.bfloat16, torch.float32}:
+        if query_layer.dtype not in {torch.float16, torch.bfloat16}:
             raise TypeError(
-                "GDN Q, K, and V must have dtype float16, bfloat16, or float32, "
-                f"got {query_layer.dtype}."
+                "GDN Q, K, and V must have dtype float16 or bfloat16 (no cuDNN frontend "
+                f"GDN engine supports float32 inputs), got {query_layer.dtype}."
             )
         if g.dtype != torch.float32 or beta.dtype != torch.float32:
             raise TypeError(
@@ -161,7 +165,6 @@ class _GatedDeltaNetAttention(torch.nn.Module):
                 "GDN g and beta must both have shape "
                 f"{expected_gate_shape}; got {tuple(g.shape)} and {tuple(beta.shape)}."
             )
-
         if qkv_format == "thd":
             if cu_seqlens_q is None:
                 raise ValueError("cu_seqlens_q is required for GDN with qkv_format='thd'.")
@@ -172,9 +175,9 @@ class _GatedDeltaNetAttention(torch.nn.Module):
             )
             cu_seqlens = cu_seqlens_q
         else:
-            if cu_seqlens_q is not None or cu_seqlens_kv is not None:
+            if cu_seqlens_q is not None:
                 raise ValueError(
-                    "Dense GDN inputs do not accept cu_seqlens_q or cu_seqlens_kv. "
+                    "Dense GDN inputs do not accept cu_seqlens_q. "
                     "Use qkv_format='thd' for packed or ragged batches."
                 )
             if qkv_format == "bshd":
@@ -189,23 +192,12 @@ class _GatedDeltaNetAttention(torch.nn.Module):
                 self._dense_cu_seqlens_key = cache_key
             cu_seqlens = self._dense_cu_seqlens
 
-        if cu_seqlens_kv is not None and cu_seqlens_kv is not cu_seqlens:
-            _validate_cu_seqlens(
-                cu_seqlens_kv,
-                device=device,
-                name="cu_seqlens_kv",
-            )
-            if cu_seqlens_kv.shape != cu_seqlens.shape:
-                raise ValueError(
-                    "GDN requires cu_seqlens_q and cu_seqlens_kv to have the same shape."
-                )
-
         batch_size = cu_seqlens.shape[0] - 1
         expected_state_shape = (
             batch_size,
             num_output_heads,
-            query_layer.shape[-1],
             value_layer.shape[-1],
+            query_layer.shape[-1],
         )
         if initial_state is not None:
             if initial_state.device != device:

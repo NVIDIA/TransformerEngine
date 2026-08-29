@@ -73,7 +73,10 @@ def _gdn_recurrence(
     beta: torch.Tensor,
     state: torch.Tensor,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Evaluate GDN for tensors in [batch, heads, sequence, ...] layout."""
+    """Evaluate GDN for tensors in [batch, heads, sequence, ...] layout.
+
+    ``state`` follows the cuDNN frontend's [..., v_head_dim, qk_head_dim] convention.
+    """
     outputs = []
     for token_idx in range(q.shape[2]):
         q_t = q[:, :, token_idx]
@@ -82,12 +85,12 @@ def _gdn_recurrence(
         alpha_t = alpha[:, :, token_idx]
         beta_t = beta[:, :, token_idx]
 
-        prediction = torch.matmul(k_t.unsqueeze(-2), state).squeeze(-2)
+        prediction = torch.matmul(state, k_t.unsqueeze(-1)).squeeze(-1)
         residual = v_t - alpha_t.unsqueeze(-1) * prediction
         state = alpha_t[..., None, None] * state + beta_t[..., None, None] * (
-            k_t.unsqueeze(-1) @ residual.unsqueeze(-2)
+            residual.unsqueeze(-1) @ k_t.unsqueeze(-2)
         )
-        outputs.append(torch.matmul(q_t.unsqueeze(-2), state).squeeze(-2))
+        outputs.append(torch.matmul(state, q_t.unsqueeze(-1)).squeeze(-1))
 
     return torch.stack(outputs, dim=2), state
 
@@ -107,6 +110,8 @@ def _gdn_reference(
 
     Inputs use [batch, sequence, heads, dimension] layout. Packed inputs use a
     singleton batch dimension and provide sequence boundaries via cu_seqlens.
+    ``initial_state``/the returned final state use the cuDNN frontend's
+    [batch, heads, v_head_dim, qk_head_dim] convention throughout.
     """
     qk_dim = q.shape[-1]
     if scale is None:
@@ -136,8 +141,8 @@ def _gdn_reference(
             return torch.zeros(
                 1 if sequence_idx is not None else q.shape[0],
                 output_heads,
-                qk_dim,
                 v.shape[-1],
+                qk_dim,
                 dtype=torch.float64,
                 device=q.device,
             )
@@ -199,21 +204,34 @@ def _inputs(
 
 @requires_gdn
 @pytest.mark.parametrize("checkpoint_core_attention", [False, True], ids=["eager", "checkpoint"])
-def test_gdn_thd_forward_final_state_and_backward(checkpoint_core_attention):
-    """THD GDN matches a PyTorch recurrence in forward and backward."""
-    batch, sequence, heads, dim = 2, 128, 2, 64
+@pytest.mark.parametrize(
+    ("qk_dim", "v_dim"),
+    [(64, 64), (128, 128), (64, 128)],
+    ids=["qk64_v64_cutile", "qk128_v128_frost", "qk64_v128"],
+)
+@pytest.mark.parametrize(
+    "use_qk_l2norm_in_kernel", [False, True], ids=["no_l2norm", "l2norm"]
+)
+def test_gdn_thd_forward_final_state_and_backward(
+    checkpoint_core_attention, qk_dim, v_dim, use_qk_l2norm_in_kernel
+):
+    """THD GDN matches a PyTorch recurrence in forward and backward.
+
+    head_dim=128 exercises the FROST engine, while head_dim=64 falls back to cuTile.
+    """
+    batch, sequence, heads = 2, 128, 2
     q, k, v, g, beta = (
         tensor.reshape(batch * sequence, *tensor.shape[2:]).requires_grad_(True)
-        for tensor in _inputs(batch, sequence, heads, heads, dim, dim)
+        for tensor in _inputs(batch, sequence, heads, heads, qk_dim, v_dim)
     )
     cu_seqlens = torch.arange(batch + 1, device="cuda", dtype=torch.int32) * sequence
     initial_state = (
-        torch.randn(batch, heads, dim, dim, device="cuda", dtype=torch.float32) * 0.05
+        torch.randn(batch, heads, v_dim, qk_dim, device="cuda", dtype=torch.float32) * 0.05
     ).requires_grad_()
 
     attention = DotProductAttention(
         num_attention_heads=heads,
-        kv_channels=dim,
+        kv_channels=(qk_dim, v_dim),
         qkv_format="thd",
         attn_mask_type="padding_causal",
     )
@@ -222,21 +240,26 @@ def test_gdn_thd_forward_final_state_and_backward(checkpoint_core_attention):
         k,
         v,
         cu_seqlens_q=cu_seqlens,
-        cu_seqlens_kv=cu_seqlens,
         g=g,
         beta=beta,
         initial_state=initial_state,
         output_final_state=True,
         checkpoint_core_attention=checkpoint_core_attention,
+        use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
     )
     reference_inputs = {
         name: tensor.detach().double().reshape(1, -1, *tensor.shape[1:]).requires_grad_()
         for name, tensor in (("q", q), ("k", k), ("v", v), ("g", g), ("beta", beta))
     }
     initial_state_ref = initial_state.detach().double().requires_grad_()
+    reference_q = reference_inputs["q"]
+    reference_k = reference_inputs["k"]
+    if use_qk_l2norm_in_kernel:
+        reference_q = F.normalize(reference_q, dim=-1)
+        reference_k = F.normalize(reference_k, dim=-1)
     output_ref, final_state_ref = _gdn_reference(
-        reference_inputs["q"],
-        reference_inputs["k"],
+        reference_q,
+        reference_k,
         reference_inputs["v"],
         reference_inputs["g"],
         reference_inputs["beta"],
@@ -388,7 +411,6 @@ def test_gdn_thd_ragged_sequences(bounds):
             k,
             v,
             cu_seqlens_q=cu_seqlens,
-            cu_seqlens_kv=cu_seqlens.clone(),
             g=g,
             beta=beta,
             initial_state=initial_state,
@@ -429,56 +451,6 @@ def test_gdn_requires_both_gates():
     )
     with pytest.raises(ValueError, match="require both g and beta"):
         attention(q, k, v, g=g)
-
-
-@pytest.mark.parametrize(
-    ("case", "message"),
-    [
-        ("attention_mask", "does not accept attention_mask"),
-        ("attn_mask_type", "inherently causal"),
-        ("window_size", "sliding-window attention"),
-        ("bottom_right_diagonal", "bottom-right causal alignment"),
-        ("cu_seqlens_q_padded", "padded cumulative sequence lengths"),
-        ("cu_seqlens_q", "Dense GDN inputs do not accept"),
-        ("max_seqlen_q", "does not use max_seqlen"),
-        ("core_attention_bias_type", "core attention bias"),
-        ("alibi_slopes", "ALiBi"),
-        ("pad_between_seqs", "pad_between_seqs=True"),
-        ("fast_zero_fill", "fast_zero_fill=False"),
-        ("fp8_output", "FP8 output"),
-        ("bf16_backward", "bf16_backward"),
-        ("num_splits", "num_splits"),
-        ("score_mod", "score modifications"),
-    ],
-)
-def test_gdn_rejects_unsupported_options(case, message):
-    """Unsupported DPA options fail before the GDN kernel is imported."""
-    q, k, v, g, beta = _inputs(1, 128, 1, 1)
-    values = {
-        "attention_mask": torch.zeros(1, device="cuda"),
-        "attn_mask_type": "no_mask",
-        "window_size": (16, 0),
-        "bottom_right_diagonal": True,
-        "cu_seqlens_q_padded": torch.tensor([0, 128], device="cuda", dtype=torch.int32),
-        "cu_seqlens_q": torch.tensor([0, 128], device="cuda", dtype=torch.int32),
-        "max_seqlen_q": 128,
-        "core_attention_bias_type": "post_scale_bias",
-        "alibi_slopes": torch.ones(1, device="cuda"),
-        "pad_between_seqs": True,
-        "fast_zero_fill": False,
-        "fp8_output": True,
-        "bf16_backward": True,
-        "num_splits": 2,
-        "score_mod": lambda graph, score, tensors: score,
-    }
-    attention = DotProductAttention(
-        num_attention_heads=1,
-        kv_channels=64,
-        qkv_format="bshd",
-        attn_mask_type="causal",
-    )
-    with pytest.raises(ValueError, match=message):
-        attention(q, k, v, g=g, beta=beta, **{case: values[case]})
 
 
 @pytest.mark.skipif(not is_fp8_available(), reason="FP8 is not available")

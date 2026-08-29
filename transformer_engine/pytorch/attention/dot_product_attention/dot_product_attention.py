@@ -1399,17 +1399,12 @@ class DotProductAttention(TransformerEngineBaseModule):
             ]
         return base[:num_quantizers]
 
-    def _forward_gdn(
+    def _validate_gdn_request(
         self,
-        query_layer: torch.Tensor,
-        key_layer: torch.Tensor,
-        value_layer: torch.Tensor,
         g: Optional[torch.Tensor],
         beta: Optional[torch.Tensor],
         *,
-        qkv_format: str,
         attention_mask: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]],
-        cu_seqlens_q: Optional[torch.Tensor],
         cu_seqlens_kv: Optional[torch.Tensor],
         cu_seqlens_q_padded: Optional[torch.Tensor],
         cu_seqlens_kv_padded: Optional[torch.Tensor],
@@ -1418,7 +1413,6 @@ class DotProductAttention(TransformerEngineBaseModule):
         attn_mask_type: Optional[str],
         window_size: Optional[Tuple[int, int]],
         bottom_right_diagonal: Optional[bool],
-        checkpoint_core_attention: bool,
         core_attention_bias_type: str,
         core_attention_bias: Optional[torch.Tensor],
         alibi_slopes: Optional[torch.Tensor],
@@ -1432,11 +1426,12 @@ class DotProductAttention(TransformerEngineBaseModule):
         score_mod_bprop: Optional[Callable],
         score_mod_tensors: Optional[Dict[str, torch.Tensor]],
         score_mod_bprop_tensors: Optional[Dict[str, torch.Tensor]],
-        initial_state: Optional[torch.Tensor],
-        output_final_state: bool,
-        use_qk_l2norm_in_kernel: bool,
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
-        """Validate GDN-specific constraints and execute the cuDNN frontend op."""
+    ) -> Tuple[str, Tuple[int, int], bool]:
+        """Reject DPA options and configurations that GDN does not support.
+
+        Returns the normalized (attn_mask_type, window_size, bottom_right_diagonal),
+        since these may be defaulted from module attributes.
+        """
         if g is None or beta is None:
             raise ValueError(
                 "GDN-specific arguments require both g and beta; "
@@ -1471,6 +1466,12 @@ class DotProductAttention(TransformerEngineBaseModule):
             raise ValueError(
                 "GDN does not accept attention_mask; use cu_seqlens_q with qkv_format='thd' "
                 "for variable-length sequences."
+            )
+        if cu_seqlens_kv is not None:
+            raise ValueError(
+                "GDN is self-attention over fully packed sequences and derives sequence "
+                "boundaries from cu_seqlens_q alone; pass only cu_seqlens_q, not "
+                "cu_seqlens_kv."
             )
         if window_size is None:
             window_size = self.window_size
@@ -1511,10 +1512,76 @@ class DotProductAttention(TransformerEngineBaseModule):
         ):
             raise ValueError("GDN does not support Flex Attention score modifications.")
 
+        return attn_mask_type, window_size, bottom_right_diagonal
+
+    def _forward_gdn(
+        self,
+        query_layer: torch.Tensor,
+        key_layer: torch.Tensor,
+        value_layer: torch.Tensor,
+        g: Optional[torch.Tensor],
+        beta: Optional[torch.Tensor],
+        *,
+        qkv_format: str,
+        attention_mask: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]],
+        cu_seqlens_q: Optional[torch.Tensor],
+        cu_seqlens_kv: Optional[torch.Tensor],
+        cu_seqlens_q_padded: Optional[torch.Tensor],
+        cu_seqlens_kv_padded: Optional[torch.Tensor],
+        max_seqlen_q: Optional[int],
+        max_seqlen_kv: Optional[int],
+        attn_mask_type: Optional[str],
+        window_size: Optional[Tuple[int, int]],
+        bottom_right_diagonal: Optional[bool],
+        checkpoint_core_attention: bool,
+        core_attention_bias_type: str,
+        core_attention_bias: Optional[torch.Tensor],
+        alibi_slopes: Optional[torch.Tensor],
+        fast_zero_fill: bool,
+        inference_params: Optional[InferenceParams],
+        pad_between_seqs: Optional[bool],
+        fp8_output: Optional[bool],
+        bf16_backward: Optional[bool],
+        num_splits: Optional[int],
+        score_mod: Optional[Callable],
+        score_mod_bprop: Optional[Callable],
+        score_mod_tensors: Optional[Dict[str, torch.Tensor]],
+        score_mod_bprop_tensors: Optional[Dict[str, torch.Tensor]],
+        initial_state: Optional[torch.Tensor],
+        output_final_state: bool,
+        use_qk_l2norm_in_kernel: bool,
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        """Validate GDN-specific constraints and execute the cuDNN frontend op."""
+        attn_mask_type, window_size, bottom_right_diagonal = self._validate_gdn_request(
+            g,
+            beta,
+            attention_mask=attention_mask,
+            cu_seqlens_kv=cu_seqlens_kv,
+            cu_seqlens_q_padded=cu_seqlens_q_padded,
+            cu_seqlens_kv_padded=cu_seqlens_kv_padded,
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_kv=max_seqlen_kv,
+            attn_mask_type=attn_mask_type,
+            window_size=window_size,
+            bottom_right_diagonal=bottom_right_diagonal,
+            core_attention_bias_type=core_attention_bias_type,
+            core_attention_bias=core_attention_bias,
+            alibi_slopes=alibi_slopes,
+            fast_zero_fill=fast_zero_fill,
+            inference_params=inference_params,
+            pad_between_seqs=pad_between_seqs,
+            fp8_output=fp8_output,
+            bf16_backward=bf16_backward,
+            num_splits=num_splits,
+            score_mod=score_mod,
+            score_mod_bprop=score_mod_bprop,
+            score_mod_tensors=score_mod_tensors,
+            score_mod_bprop_tensors=score_mod_bprop_tensors,
+        )
+
         gdn_kwargs = {
             "qkv_format": qkv_format,
             "cu_seqlens_q": cu_seqlens_q,
-            "cu_seqlens_kv": cu_seqlens_kv,
             "output_final_state": output_final_state,
             "use_qk_l2norm_in_kernel": use_qk_l2norm_in_kernel,
         }
@@ -1833,14 +1900,15 @@ class DotProductAttention(TransformerEngineBaseModule):
         g: Optional[torch.Tensor], default = None
             GDN log-space scalar decay gate, with ``alpha = exp(g)``. Its shape is the
             token dimensions followed by ``num_attention_heads`` and its dtype must be
-            ``torch.float32``. Providing any GDN-specific argument selects GDN, and both
-            :attr:`g` and :attr:`beta` are required.
+            ``torch.float32``. Expected to satisfy ``g <= 0`` so that ``alpha <= 1``.
+            Providing any GDN-specific argument selects GDN, and both :attr:`g` and
+            :attr:`beta` are required.
         beta: Optional[torch.Tensor], default = None
-            GDN per-token write strength. It has the same shape and dtype requirements as
-            :attr:`g`.
+            GDN per-token write strength, expected in ``[0, 1]``. It has the same shape
+            and dtype requirements as :attr:`g`.
         initial_state: Optional[torch.Tensor], default = None
             Optional GDN recurrent state with shape
-            ``[batch_size, output_heads, qk_head_dim, v_head_dim]`` and dtype
+            ``[batch_size, output_heads, v_head_dim, qk_head_dim]`` and dtype
             ``torch.float32``.
         output_final_state: bool, default = False
             Return ``(output, final_state)`` for GDN when ``True``. The final state can be
