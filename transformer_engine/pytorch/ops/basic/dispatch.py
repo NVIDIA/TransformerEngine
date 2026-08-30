@@ -38,7 +38,9 @@ def _validate_dispatch_input(
         or is_quantized_tensor(input_)
         or input_.dtype is not torch.bfloat16
     ):
-        raise TypeError(f"MoeDispatch input must be a plain BF16 tensor, got {type(input_).__name__}.")
+        raise TypeError(
+            f"MoeDispatch input must be a plain BF16 tensor, got {type(input_).__name__}."
+        )
     input_shape = tuple(input_.shape)
     if len(input_shape) != 2 or input_shape[-1] != buffer.hidden_dim:
         raise ValueError(

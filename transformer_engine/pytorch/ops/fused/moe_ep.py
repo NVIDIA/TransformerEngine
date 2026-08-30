@@ -56,13 +56,11 @@ def _get_megamoe_training_slot_count() -> int:
         slot_count = int(value)
     except ValueError as exc:
         raise ValueError(
-            "NVTE_MEGAMOE_TRAINING_SLOT_COUNT must be a positive integer, "
-            f"got {value!r}"
+            f"NVTE_MEGAMOE_TRAINING_SLOT_COUNT must be a positive integer, got {value!r}"
         ) from exc
     if slot_count <= 0:
         raise ValueError(
-            "NVTE_MEGAMOE_TRAINING_SLOT_COUNT must be a positive integer, "
-            f"got {value!r}"
+            f"NVTE_MEGAMOE_TRAINING_SLOT_COUNT must be a positive integer, got {value!r}"
         )
     return slot_count
 
