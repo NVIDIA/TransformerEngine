@@ -42,7 +42,6 @@ from transformer_engine.pytorch.ops.fused.moe_ep import (
     FusedMoeEp,
     _cudnn_megamoe_supported,
     _get_megamoe_combine_format,
-    _pack_cudnn_activation,
     _pack_cudnn_weights,
 )
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Tensor
@@ -194,7 +193,7 @@ def _degroup_mxfp8(recv_grouped, valid_counts=None):
 
 def _reference_weights(op):
     """Pack GroupedLinear weights into MoeEpReference ``(E, in, out)`` layout."""
-    packed = _pack_cudnn_weights(op, block_scaled_cls=BlockScaledTensor)
+    packed, _ = _pack_cudnn_weights(op, block_scaled_cls=BlockScaledTensor)
     if isinstance(packed, torch.Tensor):
         return packed.detach()
     return BlockScaledTensor(
@@ -1114,6 +1113,7 @@ class TestMoeEpSequential(_EpTestCase):
         recipe,
         accumulate_into_main_grad=False,
         delay_wgrad_compute=False,
+        glu_interleave_size=None,
     ):
         """Build the exact five-op sequence recognized by MegaMoE fusion."""
         config = self._make_config(alignment=128 if recipe is not None else 0)
@@ -1143,7 +1143,9 @@ class TestMoeEpSequential(_EpTestCase):
                     accumulate_into_main_grad=accumulate_into_main_grad,
                     delay_wgrad_compute=delay_wgrad_compute,
                 )
-                activation = te_ops.ScaledSwiGLU()
+                activation = te_ops.ScaledSwiGLU(
+                    glu_interleave_size=glu_interleave_size,
+                )
                 fc2 = te_ops.GroupedLinear(
                     NUM_LOCAL_EXPERTS,
                     256,
@@ -1178,6 +1180,111 @@ class TestMoeEpSequential(_EpTestCase):
     @_mxfp8_align_test
     def test_megamoe_mxfp8_numerics(self):
         self._run_megamoe_vs_reference(quantization="mxfp8")
+
+    @_mxfp8_align_test
+    def test_megamoe_mxfp8_cuda_graph_matches_eager(self):
+        """Fused Sequential forward/backward graph replay matches eager execution."""
+        if torch.cuda.get_device_capability() != (10, 7):
+            self.skipTest("FusedMoeEp CUDA graph test requires SM107")
+        if not _cudnn_megamoe_supported():
+            self.skipTest("installed cuDNN frontend does not provide fixed training resources")
+
+        recipe = MXFP8BlockScaling()
+        graph_model, graph_fc1, graph_fc2, graph_buffer = self._make_megamoe_model(
+            recipe=recipe,
+            glu_interleave_size=32,
+        )
+        eager_model, eager_fc1, eager_fc2, eager_buffer = self._make_megamoe_model(
+            recipe=recipe,
+            glu_interleave_size=32,
+        )
+        eager_model.load_state_dict(graph_model.state_dict())
+
+        topk_idx, tokens, topk_weights = _make_moe_inputs(
+            self.cfg.rank,
+            self.cfg.ep_size,
+            self.cfg.device,
+        )
+        static_tokens = tokens.detach().clone().requires_grad_(True)
+        static_topk_idx = topk_idx.detach().clone()
+        static_topk_weights = topk_weights.detach().clone().requires_grad_(True)
+        static_dy = torch.randn_like(static_tokens)
+        graph_op_kwargs = {
+            0: {"buffer": graph_buffer},
+            4: {"buffer": graph_buffer},
+        }
+        graphed_model = te.make_graphed_callables(
+            graph_model,
+            (static_tokens, static_topk_idx, static_topk_weights),
+            sample_kwargs={"op_kwargs": graph_op_kwargs},
+            num_warmup_iters=3,
+            enabled=True,
+            recipe=recipe,
+        )
+
+        forward_ops = graph_model._module_groups[0]._forward_ops
+        backward_ops = graph_model._module_groups[0]._backward_ops
+        self.assertEqual(len(forward_ops), 1)
+        self.assertEqual(len(backward_ops), 1)
+        self.assertIsInstance(forward_ops[0][0], FusedMoeEp)
+        self.assertIs(backward_ops[0][0], forward_ops[0][0])
+
+        # Replace the capture-time contents while retaining captured addresses.
+        with torch.no_grad():
+            static_tokens.copy_(torch.randn_like(static_tokens))
+            static_topk_weights.copy_(torch.rand_like(static_topk_weights))
+            static_dy.copy_(torch.randn_like(static_dy))
+
+        for parameter in graph_model.parameters():
+            parameter.grad = torch.zeros_like(parameter)
+        if static_tokens.grad is not None:
+            static_tokens.grad.zero_()
+        if static_topk_weights.grad is not None:
+            static_topk_weights.grad.zero_()
+        with te.autocast(enabled=True, recipe=recipe):
+            graph_out = graphed_model(
+                static_tokens,
+                static_topk_idx,
+                static_topk_weights,
+                op_kwargs=graph_op_kwargs,
+            )
+        graph_out.backward(static_dy)
+        torch.cuda.synchronize()
+        graph_results = (
+            graph_out.detach().clone(),
+            static_tokens.grad.detach().clone(),
+            static_topk_weights.grad.detach().clone(),
+            graph_fc1.weight.grad.detach().clone(),
+            graph_fc2.weight.grad.detach().clone(),
+        )
+
+        eager_tokens = static_tokens.detach().clone().requires_grad_(True)
+        eager_topk_weights = static_topk_weights.detach().clone().requires_grad_(True)
+        for parameter in eager_model.parameters():
+            parameter.grad = torch.zeros_like(parameter)
+        with te.autocast(enabled=True, recipe=recipe):
+            eager_out = eager_model(
+                eager_tokens,
+                static_topk_idx,
+                eager_topk_weights,
+                op_kwargs={
+                    0: {"buffer": eager_buffer},
+                    4: {"buffer": eager_buffer},
+                },
+            )
+        eager_out.backward(static_dy)
+        torch.cuda.synchronize()
+        eager_results = (
+            eager_out,
+            eager_tokens.grad,
+            eager_topk_weights.grad,
+            eager_fc1.weight.grad,
+            eager_fc2.weight.grad,
+        )
+
+        tolerances = {"rtol": 0.125, "atol": 0.25}
+        for graph_result, eager_result in zip(graph_results, eager_results):
+            torch.testing.assert_close(graph_result, eager_result, **tolerances)
 
     @_eager_test_include
     def test_megamoe_main_grad_accumulation_bf16(self):
@@ -1357,11 +1464,11 @@ class TestMoeEpSequential(_EpTestCase):
             backward_wgrad_mode="operands" if fused else "none",
             token_padding_size=256,
         )
-        if emulate_mxfp8:
-            reference_activation = _pack_cudnn_activation(
+        if emulate_mxfp8 and not fused:
+            reference_activation = quantize_blockwise(
                 tokens.detach(),
-                self._mxfp8_quantizer(),
-                BlockScaledTensor,
+                MoeFormat.MXFP8,
+                axis=1,
             )
         else:
             reference_activation = tokens.detach()

@@ -19,8 +19,8 @@ from ...ep import (
 )
 from ...quantization import QuantizerRole
 from ...tensor import MXFP8Quantizer, Quantizer
-from ...tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
 from .._common import (
+    is_quantized_tensor,
     maybe_dequantize,
     validate_ep_buffer,
     validate_ep_comms_recipe,
@@ -29,10 +29,16 @@ from ..op import BasicOperation, OperationContext
 
 
 def _validate_dispatch_input(
-    input_: torch.Tensor | MXFP8TensorStorage,
+    input_: torch.Tensor,
     buffer: EpBuffer,
 ) -> tuple[int, int]:
     """Validate the local token matrix."""
+    if (
+        not isinstance(input_, torch.Tensor)
+        or is_quantized_tensor(input_)
+        or input_.dtype is not torch.bfloat16
+    ):
+        raise TypeError(f"MoeDispatch input must be a plain BF16 tensor, got {type(input_).__name__}.")
     input_shape = tuple(input_.shape)
     if len(input_shape) != 2 or input_shape[-1] != buffer.hidden_dim:
         raise ValueError(
@@ -58,7 +64,7 @@ def _validate_routing_inputs(
 
 
 class MoeDispatch(BasicOperation):
-    """Dispatch floating-point or MXFP8 tokens to local experts with NCCL EP.
+    """Quantize and dispatch BF16 tokens to local experts with NCCL EP.
 
     The extra inputs are routing indices and FP32 routing weights. The extra
     outputs are local tokens-per-expert and received routing weights.
@@ -111,7 +117,7 @@ class MoeDispatch(BasicOperation):
     def fuser_forward(
         self,
         basic_op_ctxs: list[OperationContext],
-        input_: torch.Tensor | MXFP8TensorStorage,
+        input_: torch.Tensor,
         *,
         basic_op_extra_inputs: list[tuple[torch.Tensor, ...]],
         prev_op_grad_output_quantizer: Optional[Quantizer],
@@ -141,9 +147,6 @@ class MoeDispatch(BasicOperation):
         input_scale_inv = None
         if isinstance(input_quantizer, MXFP8Quantizer):
             input_, input_scale_inv = quantize_for_ep(input_, input_quantizer)
-        else:
-            # Only BF16 dispatch is supported for now.
-            input_ = maybe_dequantize(input_, torch.bfloat16)
         output, recv_topk_weights, dispatch_state = _ep_prepare_and_dispatch_fwd(
             input_,
             topk_weights,

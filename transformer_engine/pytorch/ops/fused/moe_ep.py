@@ -7,20 +7,15 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
-import functools
-from importlib.metadata import PackageNotFoundError, version as get_pkg_version
 import os
 from typing import Any, Optional
 
-from packaging.version import Version as PkgVersion
 import torch
 import transformer_engine_torch as tex
 
 from ...constants import DType, MXFP8_BLOCK_SCALING_SIZE
-from ...ep import quantize_for_ep
 from ...quantization import Recipe
-from ...tensor import GroupedTensor, MXFP8Quantizer, Quantizer
-from ...tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
+from ...tensor import GroupedTensor, Quantizer
 from .._common import (
     get_accumulate_flag_in_param,
     get_dummy_wgrads_for_params,
@@ -35,11 +30,17 @@ from ..op import FusedOperation, FusibleOperation, OperationContext
 
 
 def _cudnn_megamoe_supported() -> bool:
-    """Whether the installed cuDNN frontend includes the public MegaMoE API."""
+    """Whether cuDNN FE provides the fixed-resource training API."""
     try:
-        return PkgVersion(get_pkg_version("nvidia-cudnn-frontend")) >= PkgVersion("1.29.0")
-    except PackageNotFoundError:
+        from cudnn import grouped_gemm_wgrad_wrapper_sm100  # noqa: F401
+        from cudnn.moe_ep import (  # noqa: F401
+            MoeEp,
+            MoeEpTrainingWeights,
+            MoeEpTrainingWgradOperands,
+        )
+    except (AttributeError, ImportError):
         return False
+    return True
 
 
 def _get_megamoe_combine_format() -> str:
@@ -48,12 +49,30 @@ def _get_megamoe_combine_format() -> str:
     return "mxfp8" if enabled > 0 else "bf16"
 
 
+def _get_megamoe_training_slot_count() -> int:
+    """Return the fixed number of concurrent MegaMoE training flights."""
+    value = os.environ.get("NVTE_MEGAMOE_TRAINING_SLOT_COUNT", "8")
+    try:
+        slot_count = int(value)
+    except ValueError as exc:
+        raise ValueError(
+            "NVTE_MEGAMOE_TRAINING_SLOT_COUNT must be a positive integer, "
+            f"got {value!r}"
+        ) from exc
+    if slot_count <= 0:
+        raise ValueError(
+            "NVTE_MEGAMOE_TRAINING_SLOT_COUNT must be a positive integer, "
+            f"got {value!r}"
+        )
+    return slot_count
+
+
 def _pack_as_cudnn_moe_tensor(
     data: torch.Tensor,
     scale: Optional[torch.Tensor],
     block_scaled_cls: type,
 ):
-    """Represent payload and scales using the public cuDNN MoE tensor type."""
+    """Represent data and scales using the public cuDNN MoE tensor type."""
     if scale is None:
         return data
     return block_scaled_cls(
@@ -65,34 +84,16 @@ def _pack_as_cudnn_moe_tensor(
     )
 
 
-def _pack_cudnn_activation(
-    input_: torch.Tensor | MXFP8TensorStorage,
-    quantizer: Optional[MXFP8Quantizer],
-    block_scaled_cls: type,
-):
-    """Pack the dispatch input in the public cuDNN MoE activation layout."""
-    if quantizer is None and not isinstance(input_, MXFP8TensorStorage):
-        return input_
-    quantized, scale = quantize_for_ep(input_, quantizer)
-    return _pack_as_cudnn_moe_tensor(
-        quantized._rowwise_data.view(torch.float8_e4m3fn),
-        scale.view(torch.float8_e8m0fnu),
-        block_scaled_cls,
-    )
-
-
 def _pack_cudnn_weights(
     op: GroupedLinear,
     *,
     block_scaled_cls: Optional[type] = None,
 ):
-    """Pack a GroupedLinear ``(E, out, in)`` weight as cuDNN ``(E, in, out)``.
+    """Pack TE rowwise/columnwise weight storage for cuDNN MoE.
 
-    The permutation is intentionally not made contiguous. MegaMoE internally
-    permutes back to ``(E, out, in)`` before requesting contiguous storage, so
-    retaining this view lets quantized-model-init weights reuse their original
-    packed buffer. Dense parameters are quantized with GroupedLinear's weight
-    quantizer, matching its normal MXFP8 forward path.
+    The rowwise binding is a zero-copy ``(E, in, out)`` K-major view over TE's
+    rowwise ``(E, out, in)`` storage. The columnwise binding is a zero-copy
+    ``(E, out, in)`` view backed by TE's columnwise storage.
     """
     weight = op.weight
     num_groups = op.num_groups
@@ -100,37 +101,59 @@ def _pack_cudnn_weights(
     in_features = op.in_features
     weight_quantizer = op.get_quantizer("forward", 1)
     if weight_quantizer is None and weight.quantizer is None:
-        return weight.rowwise_data.view(
-            num_groups,
-            out_features,
-            in_features,
-        ).permute(0, 2, 1)
+        return (
+            weight.rowwise_data.view(
+                num_groups,
+                out_features,
+                in_features,
+            ).permute(0, 2, 1),
+            None,
+        )
 
     if weight_quantizer is not None and weight.quantizer is None:
-        weight_quantizer.set_usage(rowwise=True)
+        weight_quantizer.set_usage(rowwise=True, columnwise=True)
         weight = tex.group_quantize(
             weight.rowwise_data.view(weight.logical_shape),
             weight_quantizer,
             op.num_groups,
             None,
         )
-    scale_cols = in_features // MXFP8_BLOCK_SCALING_SIZE
     data = (
         weight.rowwise_data.view(num_groups, out_features, in_features)
         .view(torch.float8_e4m3fn)
         .permute(0, 2, 1)
     )
     scale = (
-        weight.scale_inv.view(num_groups, out_features, scale_cols)
+        weight.scale_inv.view(
+            num_groups,
+            out_features,
+            in_features // MXFP8_BLOCK_SCALING_SIZE,
+        )
         .view(torch.float8_e8m0fnu)
         .permute(0, 2, 1)
     )
     if block_scaled_cls is None:
         from cudnn.moe_ep import BlockScaledTensor as block_scaled_cls
-    return _pack_as_cudnn_moe_tensor(
-        data,
-        scale,
-        block_scaled_cls,
+    if weight.columnwise_data is None or weight.columnwise_scale_inv is None:
+        raise ValueError("FusedMoeEp training requires columnwise MXFP8 weight storage")
+
+    columnwise_data = weight.columnwise_data.view(
+        num_groups,
+        out_features,
+        in_features,
+    ).view(torch.float8_e4m3fn)
+    columnwise_scale = weight.columnwise_scale_inv.view(
+        num_groups,
+        out_features // MXFP8_BLOCK_SCALING_SIZE,
+        in_features,
+    ).view(torch.float8_e8m0fnu)
+    return (
+        _pack_as_cudnn_moe_tensor(data, scale, block_scaled_cls),
+        _pack_as_cudnn_moe_tensor(
+            columnwise_data,
+            columnwise_scale,
+            block_scaled_cls,
+        ),
     )
 
 
@@ -144,28 +167,31 @@ def _launch_grouped_wgrad_from_operands(
 ) -> None:
     """Compute one TE-layout grouped wgrad directly from MegaMoE's operands."""
     del unused
-    from cudnn.gemm.cutedsl.grouped.wgrad import grouped_gemm_wgrad_wrapper_sm100
+    from cudnn import grouped_gemm_wgrad_wrapper_sm100
 
     a_tensor, sfa_tensor, b_tensor, sfb_tensor = layer_operands
     output_data = (
         output.rowwise_data.view(output.shape) if isinstance(output, GroupedTensor) else output
     )
-    # MegaMoE exports dW in (in, out) layout. Swapping operands computes
-    # B.T @ A.T directly into TE's contiguous (out, in) parameter layout.
+    # The fixed-resource producer ABI already represents A @ B in cuDNN's
+    # (in, out) layout. Write through a view of TE's contiguous (out, in)
+    # buffer; no operand transpose, permutation, or copy is needed.
+    # The public wrapper selects the Rubin specialization on SM107.
     grouped_gemm_wgrad_wrapper_sm100(
-        a_tensor=b_tensor.transpose(0, 1),
-        b_tensor=a_tensor.transpose(0, 1),
-        sfa_tensor=sfb_tensor,
-        sfb_tensor=sfa_tensor,
+        a_tensor=a_tensor,
+        b_tensor=b_tensor,
+        sfa_tensor=sfa_tensor,
+        sfb_tensor=sfb_tensor,
         offsets_tensor=offsets,
         output_mode="dense",
-        wgrad_tensor=output_data,
+        wgrad_tensor=output_data.transpose(1, 2),
         wgrad_dtype=output_data.dtype,
         acc_dtype=torch.float32,
         mma_tiler_mn=(128, 128),
         cluster_shape_mn=(1, 1),
         sf_vec_size=MXFP8_BLOCK_SCALING_SIZE,
         accumulate_on_output=accumulate,
+        input_order="tensor2d",
     )
 
 
@@ -174,7 +200,7 @@ def _compute_grouped_weight_grad(
     operands,
     prefix: str,
 ) -> list[Optional[torch.Tensor]]:
-    """Launch or defer one operand-mode wgrad with GroupedLinear semantics."""
+    """Compute one dense weight gradient with cuDNN's grouped-WGrad API."""
     weight = op.weight
     if not weight.requires_grad:
         return [None]
@@ -207,27 +233,16 @@ def _compute_grouped_weight_grad(
         getattr(operands, f"{prefix}_b"),
         getattr(operands, f"{prefix}_sfb"),
     ]
-    launch = functools.partial(
-        _launch_grouped_wgrad_from_operands,
+    _launch_grouped_wgrad_from_operands(
+        layer_operands,
+        None,
+        output_data,
         offsets=operands.expert_offsets,
         accumulate=accumulate,
     )
-    delay_wgrad = op.wgrad_store is not None and op.wgrad_store.delay_wgrad_compute()
-    if delay_wgrad:
-        grouped_output = GroupedTensor.make_grouped_tensor_from_rowwise_data(
-            num_tensors=op.num_groups,
-            tensor_shape=weight_shape,
-            rowwise_data=output_data,
-            dtype=output_data.dtype,
-        )
-        op.wgrad_store.put([layer_operands, None, grouped_output], launch)
-    else:
-        launch(layer_operands, None, output_data)
 
     if op._accumulate_into_main_grad:
         return get_dummy_wgrads_for_params([weight])
-    if delay_wgrad:
-        return [None]
     return [output_data]
 
 
@@ -246,7 +261,11 @@ def _grouped_linear_supported(op: GroupedLinear) -> bool:
             and not weight._with_gemm_swizzled_scales
             and weight.rowwise_data is not None
             and weight.scale_inv is not None
+            and weight.columnwise_data is not None
+            and weight.columnwise_scale_inv is not None
         )
+    else:
+        weight_ok = False
 
     return (
         not op.use_bias
@@ -254,6 +273,7 @@ def _grouped_linear_supported(op: GroupedLinear) -> bool:
         and op.single_grouped_weight
         and not op.single_grouped_bias
         and not op._is_distributed_weight()
+        and not op.wgrad_store.delay_wgrad_compute()
         and weight_ok
     )
 
@@ -330,7 +350,7 @@ def _matches(window: Sequence[FusibleOperation], recipe: Optional[Recipe]) -> bo
         return False
     if not (_grouped_linear_supported(fc1) and _grouped_linear_supported(fc2)):
         return False
-    if activation.activation_recompute_in_mlp or activation.glu_interleave_size is not None:
+    if activation.activation_recompute_in_mlp or activation.glu_interleave_size != 32:
         return False
     if not _routing_extras_internal(dispatch, fc1, activation, fc2):
         return False
@@ -382,13 +402,63 @@ class FusedMoeEp(FusedOperation):
             max_recv_size_per_rank=config.recv_capacity_per_rank,
             drop_on_overflow=config.drop_on_overflow,
             apply_topk_in_fc1=True,
-            generate_c=True,
-            backward_wgrad_mode="operands",
-            token_padding_size=256,
+            token_padding_size=128,
             sf_padding_size=128,
             combine_format=combine_format,
             output_format="bf16",
         )
+        self._training_resources = None
+        self._training_slot_count = _get_megamoe_training_slot_count()
+        self._free_training_slots = []
+        self._active_training_slots = set()
+
+    def _make_training_weights(self):
+        """Bind cuDNN weight views to the GroupedLinear parameters' current storage."""
+        from cudnn.moe_ep import MoeEpTrainingWeights
+
+        fc1_rowwise, fc1_columnwise = _pack_cudnn_weights(
+            self.fc1,
+            block_scaled_cls=self._block_scaled_cls,
+        )
+        fc2_rowwise, fc2_columnwise = _pack_cudnn_weights(
+            self.fc2,
+            block_scaled_cls=self._block_scaled_cls,
+        )
+        return MoeEpTrainingWeights(
+            forward_fc1=fc1_rowwise,
+            forward_fc2=fc2_rowwise,
+            backward_w2_transpose=fc2_columnwise,
+            backward_w1_transpose=fc1_columnwise,
+        )
+
+    def _begin_training_flight(self):
+        """Reserve one fixed training slot for a forward/backward flight."""
+        if self._training_resources is None:
+            self._training_resources = self._moe.prepare_training_resources(
+                self._make_training_weights(),
+                slot_count=self._training_slot_count,
+                lane_count=1,
+            )
+            self._free_training_slots.extend(self._training_resources.slots)
+        if not self._free_training_slots:
+            raise RuntimeError(
+                "FusedMoeEp has no free training slots; increase "
+                "NVTE_MEGAMOE_TRAINING_SLOT_COUNT "
+                f"(currently {self._training_slot_count}) "
+                "or complete backward for an outstanding microbatch"
+            )
+        if not self._active_training_slots:
+            self._training_resources.refresh_weights()
+        slot = self._free_training_slots.pop(0)
+        self._active_training_slots.add(slot)
+        return slot
+
+    def _release_training_flight(self, slot) -> None:
+        """Return a completed forward/backward flight's slot to the pool."""
+        if slot not in self._active_training_slots:
+            raise RuntimeError("FusedMoeEp attempted to release an inactive training slot")
+        self._active_training_slots.remove(slot)
+        self._free_training_slots.append(slot)
 
     @property
     def dispatch(self) -> MoeDispatch:
@@ -405,70 +475,59 @@ class FusedMoeEp(FusedOperation):
     def fuser_forward(
         self,
         basic_op_ctxs: list[OperationContext],
-        input_: torch.Tensor | MXFP8TensorStorage,
+        input_: torch.Tensor,
         *,
         basic_op_extra_inputs: list[tuple[torch.Tensor, ...]],
         prev_op_grad_output_quantizer: Optional[Quantizer],
         next_op_input_quantizer: Optional[Quantizer],
         basic_op_kwargs: list[dict[str, Any]],
     ) -> tuple[torch.Tensor, Sequence[Sequence[Optional[torch.Tensor]]]]:
-        is_mxfp8 = isinstance(input_, MXFP8TensorStorage)
-        if is_quantized_tensor(input_) and not is_mxfp8:
+        if (
+            not isinstance(input_, torch.Tensor)
+            or is_quantized_tensor(input_)
+            or input_.dtype is not torch.bfloat16
+        ):
             raise TypeError(
-                f"FusedMoeEp supports BF16 and MXFP8 inputs, got {type(input_).__name__}."
-            )
-        input_dtype = input_.dtype if isinstance(input_, torch.Tensor) else input_._dtype
-        if input_dtype is not torch.bfloat16:
-            raise TypeError(
-                "FusedMoeEp input must be BF16 or an MXFP8 tensor representing BF16 values, "
-                f"got logical dtype {input_dtype}."
-            )
-        if is_mxfp8 and input_._fp8_dtype != DType.kFloat8E4M3:
-            raise NotImplementedError(
-                f"FusedMoeEp supports E4M3 MXFP8 only, got {input_._fp8_dtype}."
+                f"FusedMoeEp input must be a plain BF16 tensor, got {type(input_).__name__}."
             )
 
         topk_idx, topk_weights = basic_op_extra_inputs[0]
         if topk_weights.dtype is not torch.float32:
             raise TypeError(f"topk_weights must be float32, got {topk_weights.dtype}.")
-        input_quantizer = self.dispatch.get_quantizer("forward", 0)
-        activation = _pack_cudnn_activation(
-            input_,
-            input_quantizer,
-            self._block_scaled_cls,
-        )
-        fc1_weight = _pack_cudnn_weights(self.fc1, block_scaled_cls=self._block_scaled_cls)
-        fc2_weight = _pack_cudnn_weights(self.fc2, block_scaled_cls=self._block_scaled_cls)
-        output, fc1_c, route_metadata, wgrad_forward_stash = self._moe(
-            activation,
-            fc1_weight,
-            fc2_weight,
-            topk_idx,
-            topk_weights,
-        )
+        activation = input_
+        if not activation.is_contiguous():
+            activation = activation.contiguous()
+        if topk_idx.dtype is not torch.int32:
+            topk_idx = topk_idx.to(dtype=torch.int32)
+        if not topk_idx.is_contiguous():
+            topk_idx = topk_idx.contiguous()
+        if not topk_weights.is_contiguous():
+            topk_weights = topk_weights.contiguous()
 
-        if any(ctx.requires_grad for ctx in basic_op_ctxs):
-            fc1_data = fc1_weight if isinstance(fc1_weight, torch.Tensor) else fc1_weight.data
-            fc1_scale = None if isinstance(fc1_weight, torch.Tensor) else fc1_weight.scale
-            fc2_data = fc2_weight if isinstance(fc2_weight, torch.Tensor) else fc2_weight.data
-            fc2_scale = None if isinstance(fc2_weight, torch.Tensor) else fc2_weight.scale
-            basic_op_ctxs[0].save_for_backward(
-                fc1_data,
-                fc1_scale,
-                fc2_data,
-                fc2_scale,
+        slot = self._begin_training_flight()
+        try:
+            output = self._training_resources.forward(
+                slot,
+                self._training_resources.lanes[0],
+                activation,
                 topk_idx,
                 topk_weights,
-                fc1_c,
-                route_metadata,
-                wgrad_forward_stash.fc1_a,
-                wgrad_forward_stash.fc1_sfa,
-                wgrad_forward_stash.expert_offsets,
-                wgrad_forward_stash.valid_route_counts,
-                wgrad_forward_stash.route_metadata,
             )
-            basic_op_ctxs[0].input_dtype = input_dtype
+        except Exception:
+            self._release_training_flight(slot)
+            raise
+
+        if any(ctx.requires_grad for ctx in basic_op_ctxs):
+            basic_op_ctxs[0].moe_ep_training_slot = slot
             basic_op_ctxs[0].prev_op_grad_output_quantizer = prev_op_grad_output_quantizer
+        else:
+            try:
+                self._training_resources.finalize_overflow(
+                    (slot,),
+                    self._training_resources.lanes[0],
+                )
+            finally:
+                self._release_training_flight(slot)
 
         return output, [
             (None, None),
@@ -490,51 +549,27 @@ class FusedMoeEp(FusedOperation):
         Iterable[Iterable[Optional[torch.Tensor]]],
     ]:
         del basic_op_grad_extra_outputs
-        (
-            fc1_data,
-            fc1_scale,
-            fc2_data,
-            fc2_scale,
-            topk_idx,
-            topk_weights,
-            fc1_c,
-            route_metadata,
-            wgrad_fc1_a,
-            wgrad_fc1_sfa,
-            wgrad_expert_offsets,
-            wgrad_valid_route_counts,
-            wgrad_route_metadata,
-        ) = basic_op_ctxs[0].saved_tensors
-        fc1_weight = _pack_as_cudnn_moe_tensor(fc1_data, fc1_scale, self._block_scaled_cls)
-        fc2_weight = _pack_as_cudnn_moe_tensor(fc2_data, fc2_scale, self._block_scaled_cls)
         grad_output = maybe_dequantize(
             grad_output,
-            basic_op_ctxs[0].input_dtype,
+            torch.bfloat16,
         )
-        from cudnn.moe_ep import MoeEpWgradForwardStash
-
-        wgrad_forward_stash = MoeEpWgradForwardStash(
-            fc1_a=wgrad_fc1_a,
-            fc1_sfa=wgrad_fc1_sfa,
-            expert_offsets=wgrad_expert_offsets,
-            valid_route_counts=wgrad_valid_route_counts,
-            route_metadata=wgrad_route_metadata,
-        )
-        grad_input, grad_topk_weights, wgrad_operands = self._moe.backward(
-            grad_output,
-            fc1_weight,
-            fc2_weight,
-            topk_idx,
-            topk_weights,
-            fc1_c,
-            route_metadata,
-            wgrad_forward_stash=wgrad_forward_stash,
-        )
-
-        fc1_param_grads = _compute_grouped_weight_grad(self.fc1, wgrad_operands, "fc1")
-        fc2_param_grads = _compute_grouped_weight_grad(self.fc2, wgrad_operands, "fc2")
-        grad_input = grad_input.to(dtype=basic_op_ctxs[0].input_dtype)
-
+        if not grad_output.is_contiguous():
+            grad_output = grad_output.contiguous()
+        slot = basic_op_ctxs[0].moe_ep_training_slot
+        try:
+            grad_input, grad_topk_weights, wgrad_operands = self._training_resources.backward(
+                slot,
+                self._training_resources.lanes[0],
+                grad_output,
+            )
+            fc1_param_grads = _compute_grouped_weight_grad(self.fc1, wgrad_operands, "fc1")
+            fc2_param_grads = _compute_grouped_weight_grad(self.fc2, wgrad_operands, "fc2")
+            self._training_resources.finalize_overflow(
+                (slot,),
+                self._training_resources.lanes[0],
+            )
+        finally:
+            self._release_training_flight(slot)
         return (
             grad_input,
             [(), fc1_param_grads, (), fc2_param_grads, ()],
