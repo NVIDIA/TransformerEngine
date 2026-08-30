@@ -164,27 +164,28 @@ def _launch_grouped_wgrad_from_operands(
     *,
     offsets: torch.Tensor,
     accumulate: bool,
+    descriptor_workspace: torch.Tensor,
 ) -> None:
     """Compute one TE-layout grouped wgrad directly from MegaMoE's operands."""
     del unused
     from cudnn import grouped_gemm_wgrad_wrapper_sm100
 
-    a_tensor, sfa_tensor, b_tensor, sfb_tensor = layer_operands
+    x_transpose, x_scale, dy, dy_scale = layer_operands
     output_data = (
         output.rowwise_data.view(output.shape) if isinstance(output, GroupedTensor) else output
     )
-    # The fixed-resource producer ABI already represents A @ B in cuDNN's
-    # (in, out) layout. Write through a view of TE's contiguous (out, in)
-    # buffer; no operand transpose, permutation, or copy is needed.
+    # MegaMoE exports X^T and dY. Present the same dY^T @ X convention used by
+    # grouped MLP. The transposes are views, and cuDNN writes directly to TE's
+    # contiguous (expert, out, in) gradient buffer.
     # The public wrapper selects the Rubin specialization on SM107.
     grouped_gemm_wgrad_wrapper_sm100(
-        a_tensor=a_tensor,
-        b_tensor=b_tensor,
-        sfa_tensor=sfa_tensor,
-        sfb_tensor=sfb_tensor,
+        a_tensor=dy.transpose(0, 1),
+        b_tensor=x_transpose.transpose(0, 1),
+        sfa_tensor=dy_scale,
+        sfb_tensor=x_scale,
         offsets_tensor=offsets,
         output_mode="dense",
-        wgrad_tensor=output_data.transpose(1, 2),
+        wgrad_tensor=output_data,
         wgrad_dtype=output_data.dtype,
         acc_dtype=torch.float32,
         mma_tiler_mn=(128, 128),
@@ -192,6 +193,7 @@ def _launch_grouped_wgrad_from_operands(
         sf_vec_size=MXFP8_BLOCK_SCALING_SIZE,
         accumulate_on_output=accumulate,
         input_order="tensor2d",
+        descriptor_workspace=descriptor_workspace,
     )
 
 
@@ -199,6 +201,7 @@ def _compute_grouped_weight_grad(
     op: GroupedLinear,
     operands,
     prefix: str,
+    descriptor_workspace: torch.Tensor,
 ) -> list[Optional[torch.Tensor]]:
     """Compute one dense weight gradient with cuDNN's grouped-WGrad API."""
     weight = op.weight
@@ -239,6 +242,7 @@ def _compute_grouped_weight_grad(
         output_data,
         offsets=operands.expert_offsets,
         accumulate=accumulate,
+        descriptor_workspace=descriptor_workspace,
     )
 
     if op._accumulate_into_main_grad:
@@ -411,6 +415,7 @@ class FusedMoeEp(FusedOperation):
         self._training_slot_count = _get_megamoe_training_slot_count()
         self._free_training_slots = []
         self._active_training_slots = set()
+        self._training_wgrad_workspaces = {}
 
     def _make_training_weights(self):
         """Bind cuDNN weight views to the GroupedLinear parameters' current storage."""
@@ -431,6 +436,23 @@ class FusedMoeEp(FusedOperation):
             backward_w1_transpose=fc1_columnwise,
         )
 
+    def _make_training_wgrad_workspaces(self, slots):
+        """Allocate caller-owned descriptor workspaces for each slot and FC."""
+        from cudnn import get_grouped_gemm_wgrad_workspace_size_sm100
+
+        workspace_bytes = get_grouped_gemm_wgrad_workspace_size_sm100(
+            self.fc1.num_groups,
+            output_mode="dense",
+            input_order="tensor2d",
+        )
+        return {
+            slot: (
+                torch.empty(workspace_bytes, dtype=torch.uint8, device=self.fc1.weight.device),
+                torch.empty(workspace_bytes, dtype=torch.uint8, device=self.fc2.weight.device),
+            )
+            for slot in slots
+        }
+
     def _begin_training_flight(self):
         """Reserve one fixed training slot for a forward/backward flight."""
         if self._training_resources is None:
@@ -440,6 +462,9 @@ class FusedMoeEp(FusedOperation):
                 lane_count=1,
             )
             self._free_training_slots.extend(self._training_resources.slots)
+            self._training_wgrad_workspaces.update(
+                self._make_training_wgrad_workspaces(self._training_resources.slots)
+            )
         if not self._free_training_slots:
             raise RuntimeError(
                 "FusedMoeEp has no free training slots; increase "
@@ -562,8 +587,19 @@ class FusedMoeEp(FusedOperation):
                 self._training_resources.lanes[0],
                 grad_output,
             )
-            fc1_param_grads = _compute_grouped_weight_grad(self.fc1, wgrad_operands, "fc1")
-            fc2_param_grads = _compute_grouped_weight_grad(self.fc2, wgrad_operands, "fc2")
+            fc1_workspace, fc2_workspace = self._training_wgrad_workspaces[slot]
+            fc1_param_grads = _compute_grouped_weight_grad(
+                self.fc1,
+                wgrad_operands,
+                "fc1",
+                fc1_workspace,
+            )
+            fc2_param_grads = _compute_grouped_weight_grad(
+                self.fc2,
+                wgrad_operands,
+                "fc2",
+                fc2_workspace,
+            )
             self._training_resources.finalize_overflow(
                 (slot,),
                 self._training_resources.lanes[0],
