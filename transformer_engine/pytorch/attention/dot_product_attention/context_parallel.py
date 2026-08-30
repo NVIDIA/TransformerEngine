@@ -3,9 +3,10 @@
 # See LICENSE for license information.
 
 """Context Parallelism."""
-import os
 import itertools
-from typing import List, Union, Tuple
+import os
+import weakref
+from typing import List, Tuple, Union
 import torch
 import transformer_engine_torch as tex
 
@@ -54,6 +55,26 @@ _cu_seqlens_info_with_cp_cache = {}
 _seq_chunk_ids_cache_for_reordering_before_attn = {}
 _seq_chunk_ids_cache_for_reordering_after_attn = {}
 _softmax_offset_chunk_ids_cache = {}
+_cp_p2p_transport_groups = weakref.WeakKeyDictionary()
+
+
+def set_cp_p2p_transport_group(cp_group, transport_group):
+    """Override only the P2P transport group for a logical CP group."""
+    if transport_group is None:
+        _cp_p2p_transport_groups.pop(cp_group, None)
+        return
+    _cp_p2p_transport_groups[cp_group] = weakref.ref(transport_group)
+
+
+def _get_cp_p2p_transport_group(cp_group):
+    transport_group_ref = _cp_p2p_transport_groups.get(cp_group)
+    if transport_group_ref is not None:
+        transport_group = transport_group_ref()
+        if transport_group is not None:
+            return transport_group, True
+        _cp_p2p_transport_groups.pop(cp_group, None)
+    return cp_group, False
+
 
 # Float8CurrentScaling: fused_attn_bwd takes O in FP8 by default, this flag allows it in F16
 _dpa_fp8_cs_o_in_f16 = os.getenv("NVTE_DPA_FP8CS_O_in_F16", "1") == "1"
@@ -64,36 +85,39 @@ def flash_attn_p2p_communicate(
 ):
     """Point-to-point communications of KV and dKV in Attention with context parallelism"""
     send_recv_ops = []
+    transport_group, transport_overridden = _get_cp_p2p_transport_group(cp_group)
+    if transport_overridden:
+        batch_p2p_comm = True
 
     if batch_p2p_comm:
         if rank % 2 == 0:
             send_op = torch.distributed.P2POp(
-                torch.distributed.isend, send_tensor, send_dst, cp_group
+                torch.distributed.isend, send_tensor, send_dst, transport_group
             )
             recv_op = torch.distributed.P2POp(
-                torch.distributed.irecv, recv_tensor, recv_src, cp_group
+                torch.distributed.irecv, recv_tensor, recv_src, transport_group
             )
             send_recv_ops.append(send_op)
             send_recv_ops.append(recv_op)
         else:
             recv_op = torch.distributed.P2POp(
-                torch.distributed.irecv, recv_tensor, recv_src, cp_group
+                torch.distributed.irecv, recv_tensor, recv_src, transport_group
             )
             send_op = torch.distributed.P2POp(
-                torch.distributed.isend, send_tensor, send_dst, cp_group
+                torch.distributed.isend, send_tensor, send_dst, transport_group
             )
             send_recv_ops.append(recv_op)
             send_recv_ops.append(send_op)
         send_recv_reqs = torch.distributed.batch_isend_irecv(send_recv_ops)
     else:
         if rank % 2 == 0:
-            send_op = torch.distributed.isend(send_tensor, send_dst, cp_group)
-            recv_op = torch.distributed.irecv(recv_tensor, recv_src, cp_group)
+            send_op = torch.distributed.isend(send_tensor, send_dst, transport_group)
+            recv_op = torch.distributed.irecv(recv_tensor, recv_src, transport_group)
             send_recv_ops.append(send_op)
             send_recv_ops.append(recv_op)
         else:
-            recv_op = torch.distributed.irecv(recv_tensor, recv_src, cp_group)
-            send_op = torch.distributed.isend(send_tensor, send_dst, cp_group)
+            recv_op = torch.distributed.irecv(recv_tensor, recv_src, transport_group)
+            send_op = torch.distributed.isend(send_tensor, send_dst, transport_group)
             send_recv_ops.append(recv_op)
             send_recv_ops.append(send_op)
         send_recv_reqs = send_recv_ops
