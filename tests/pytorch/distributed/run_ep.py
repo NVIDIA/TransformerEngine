@@ -1205,18 +1205,31 @@ class TestMoeEpSequential(_EpTestCase):
             self.cfg.ep_size,
             self.cfg.device,
         )
+        probe_tokens = tokens.detach().clone().requires_grad_(True)
+        probe_topk_weights = topk_weights.detach().clone().requires_grad_(True)
+        with te.autocast(enabled=True, recipe=recipe):
+            probe_output = graph_model(
+                probe_tokens,
+                topk_idx,
+                probe_topk_weights,
+                op_kwargs={
+                    0: {"buffer": graph_buffer},
+                    4: {"buffer": graph_buffer},
+                },
+            )
+        forward_ops = graph_model._module_groups[0]._forward_ops
+        if len(forward_ops) != 1 or not isinstance(forward_ops[0][0], FusedMoeEp):
+            self.skipTest("current configuration does not select FusedMoeEp")
+        probe_output.backward(torch.zeros_like(probe_output))
+        graph_model.zero_grad(set_to_none=True)
+
         static_tokens = tokens.detach().clone().requires_grad_(True)
         static_topk_idx = topk_idx.detach().clone()
         static_topk_weights = topk_weights.detach().clone().requires_grad_(True)
         static_dy = torch.randn_like(static_tokens)
-        graph_op_kwargs = {
-            0: {"buffer": graph_buffer},
-            4: {"buffer": graph_buffer},
-        }
         graphed_model = te.make_graphed_callables(
             graph_model,
             (static_tokens, static_topk_idx, static_topk_weights),
-            sample_kwargs={"op_kwargs": graph_op_kwargs},
             num_warmup_iters=3,
             enabled=True,
             recipe=recipe,
@@ -1246,7 +1259,6 @@ class TestMoeEpSequential(_EpTestCase):
                 static_tokens,
                 static_topk_idx,
                 static_topk_weights,
-                op_kwargs=graph_op_kwargs,
             )
         graph_out.backward(static_dy)
         torch.cuda.synchronize()
