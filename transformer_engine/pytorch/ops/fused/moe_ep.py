@@ -404,6 +404,7 @@ class FusedMoeEp(FusedOperation):
             max_recv_size_per_rank=config.recv_capacity_per_rank,
             drop_on_overflow=config.drop_on_overflow,
             apply_topk_in_fc1=True,
+            weight_interleave_size=activation.glu_interleave_size,
             token_padding_size=128,
             sf_padding_size=128,
             combine_format=combine_format,

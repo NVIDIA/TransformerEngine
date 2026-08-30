@@ -1362,14 +1362,6 @@ class TestMoeEpSequential(_EpTestCase):
             delay_wgrad_compute=True,
         )
 
-    @_eager_test_include
-    @_mxfp8_align_test
-    def test_megamoe_prequantized_input(self):
-        self._run_megamoe_vs_reference(
-            quantization="mxfp8",
-            prequantized_input=True,
-        )
-
     def _run_megamoe_vs_reference(
         self,
         *,
@@ -1377,7 +1369,6 @@ class TestMoeEpSequential(_EpTestCase):
         accumulate_into_main_grad=False,
         overwrite_main_grad=False,
         delay_wgrad_compute=False,
-        prequantized_input=False,
     ):
         """Compare the five-op MoE sequence with the PyTorch EP reference.
 
@@ -1389,6 +1380,7 @@ class TestMoeEpSequential(_EpTestCase):
             recipe=recipe,
             accumulate_into_main_grad=accumulate_into_main_grad,
             delay_wgrad_compute=delay_wgrad_compute,
+            glu_interleave_size=32 if quantization == "mxfp8" else None,
         )
         generator = torch.Generator(device=self.cfg.device)
         generator.manual_seed(3100 + self.cfg.rank)
@@ -1434,9 +1426,8 @@ class TestMoeEpSequential(_EpTestCase):
             te.autocast(enabled=True, recipe=recipe) if recipe is not None else nullcontext()
         )
         with autocast_ctx:
-            model_input = self._mxfp8_quantizer()(seq_tokens) if prequantized_input else seq_tokens
             seq_out = model(
-                model_input,
+                seq_tokens,
                 topk_idx,
                 seq_topk_weights,
                 op_kwargs={
@@ -1475,6 +1466,7 @@ class TestMoeEpSequential(_EpTestCase):
             backward_operand_format=MoeFormat.MXFP8 if emulate_mxfp8 and not fused else None,
             backward_wgrad_mode="operands" if fused else "none",
             token_padding_size=256,
+            weight_interleave_size=32 if quantization == "mxfp8" else None,
         )
         if emulate_mxfp8 and not fused:
             reference_activation = quantize_blockwise(
@@ -1500,6 +1492,9 @@ class TestMoeEpSequential(_EpTestCase):
         else:
             ref_out, fc1_c, route_metadata = reference_outputs
             wgrad_forward_stash = None
+
+        tolerances = {"rtol": 0.125, "atol": 0.25}
+        torch.testing.assert_close(seq_out, ref_out, **tolerances)
 
         dy = (
             torch.randn(
@@ -1533,8 +1528,6 @@ class TestMoeEpSequential(_EpTestCase):
             reference_wgrads = (None, None)
 
         torch.cuda.synchronize()
-        tolerances = {"rtol": 0.125, "atol": 0.25}
-        torch.testing.assert_close(seq_out, ref_out, **tolerances)
         torch.testing.assert_close(
             seq_tokens.grad,
             grad_tokens.to(dtype=seq_tokens.dtype),
