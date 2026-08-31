@@ -56,13 +56,17 @@ class MoeCombine(BasicOperation):
 
     num_extra_inputs: int = 0
 
-    def __init__(self, config: EpConfig) -> None:
+    def __init__(self, config: EpConfig, buffer: Optional[EpBuffer] = None) -> None:
+        # EpBuffer(specific to NCCL EP) is needed by this op. Fused implementation which uses
+        # a different transport mechanism than NCCL EP wont need this buffer to be passed.
+        # For eg. FusedMoeEp fused op uses NVSHMEM.
         super().__init__()
         if not isinstance(config, EpConfig):
             raise TypeError(f"config must be an EpConfig, got {type(config).__name__}.")
         if config.zero_copy:
             raise NotImplementedError("MoeCombine does not support zero-copy EP.")
         self.config = config
+        self.buffer = buffer
 
     def num_quantizers(self, mode: str) -> int:
         return 1 if mode == "backward" else 0
@@ -107,13 +111,17 @@ class MoeCombine(BasicOperation):
         # Combine's transport format is selected by Combine's own grad-output quantizer.
         # If the preceding op expects a different gradient quantized format,
         # it is requantized in that op's backward implementation (e.g., GroupedLinear backward).
-        del basic_op_extra_inputs, prev_op_grad_output_quantizer, next_op_input_quantizer
+        del (
+            basic_op_extra_inputs,
+            prev_op_grad_output_quantizer,
+            next_op_input_quantizer,
+            basic_op_kwargs,
+        )
         grad_output_quantizer = self.get_quantizer("backward", 0)
         transport_quantizer = (
             grad_output_quantizer if isinstance(grad_output_quantizer, MXFP8Quantizer) else None
         )
-        kwargs = basic_op_kwargs[0]
-        buffer = validate_ep_buffer("MoeCombine", self.config, kwargs.get("buffer"))
+        buffer = validate_ep_buffer("MoeCombine", self.config, self.buffer)
         validate_ep_comms_recipe(
             "MoeCombine",
             grad_output_quantizer,

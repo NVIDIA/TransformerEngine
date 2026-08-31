@@ -954,7 +954,7 @@ class TestMoeEpSequential(_EpTestCase):
             self.cfg.rank,
             self.cfg.ep_size,
         )
-        dispatch = te_ops.MoeDispatch(config)
+        dispatch = te_ops.MoeDispatch(config, buffer)
         replacements = {
             "top_k": config.top_k + 1,
             "hidden_dim": config.hidden_dim + 1,
@@ -971,29 +971,16 @@ class TestMoeEpSequential(_EpTestCase):
                 setattr(buffer, field_name, wrong_value)
                 try:
                     with self.assertRaisesRegex(ValueError, field_name):
-                        dispatch(
-                            tokens,
-                            topk_idx,
-                            topk_weights,
-                            buffer=buffer,
-                        )
+                        dispatch(tokens, topk_idx, topk_weights)
                 finally:
                     setattr(buffer, field_name, original)
 
         wrong_config = replace(config, drop_on_overflow=not config.drop_on_overflow)
         with self.assertRaisesRegex(ValueError, "drop_on_overflow"):
-            te_ops.MoeDispatch(wrong_config)(
-                tokens,
-                topk_idx,
-                topk_weights,
-                buffer=buffer,
-            )
+            te_ops.MoeDispatch(wrong_config, buffer)(tokens, topk_idx, topk_weights)
         with self.assertRaisesRegex(ValueError, "ep_group"):
-            te_ops.MoeDispatch(replace(config, ep_group=None))(
-                tokens,
-                topk_idx,
-                topk_weights,
-                buffer=buffer,
+            te_ops.MoeDispatch(replace(config, ep_group=None), buffer)(
+                tokens, topk_idx, topk_weights
             )
         expert_out = torch.empty(
             self.cfg.recv_capacity_per_rank,
@@ -1001,11 +988,11 @@ class TestMoeEpSequential(_EpTestCase):
             dtype=torch.bfloat16,
             device=self.cfg.device,
         )
-        with self.assertRaisesRegex(ValueError, "runtime buffer config"):
+        with self.assertRaisesRegex(ValueError, "buffer config"):
             original = buffer.hidden_dim
             buffer.hidden_dim += 1
             try:
-                te_ops.MoeCombine(config)(expert_out, buffer=buffer)
+                te_ops.MoeCombine(config, buffer)(expert_out)
             finally:
                 buffer.hidden_dim = original
 
@@ -1027,8 +1014,8 @@ class TestMoeEpSequential(_EpTestCase):
         self._require_mxfp8_shapes()
         config = self._make_config(alignment=128)
         buffer = self._make_buffer_from_config(config)
-        dispatch = te_ops.MoeDispatch(config)
-        combine = te_ops.MoeCombine(config)
+        dispatch = te_ops.MoeDispatch(config, buffer)
+        combine = te_ops.MoeCombine(config, buffer)
         topk_idx, tokens, topk_weights = _make_identity_inputs(
             self.cfg.rank,
             self.cfg.ep_size,
@@ -1036,7 +1023,7 @@ class TestMoeEpSequential(_EpTestCase):
         recipe = MXFP8BlockScaling()
         with te.autocast(enabled=True, recipe=recipe):
             with self.assertRaisesRegex(ValueError, "does not have an MXFP8BlockScaling recipe"):
-                dispatch(tokens, topk_idx, topk_weights, buffer=buffer)
+                dispatch(tokens, topk_idx, topk_weights)
             expert_out = torch.empty(
                 self.cfg.recv_capacity_per_rank,
                 HIDDEN_DIM,
@@ -1045,7 +1032,7 @@ class TestMoeEpSequential(_EpTestCase):
                 requires_grad=True,
             )
             with self.assertRaisesRegex(ValueError, "does not have an MXFP8BlockScaling recipe"):
-                combine(expert_out, buffer=buffer)
+                combine(expert_out)
 
     def _make_dispatch_combine_ops(self, *, mxfp8):
         recipe = MXFP8BlockScaling() if mxfp8 else None
@@ -1057,8 +1044,8 @@ class TestMoeEpSequential(_EpTestCase):
         )
         return (
             buffer,
-            te_ops.MoeDispatch(config),
-            te_ops.MoeCombine(config),
+            te_ops.MoeDispatch(config, buffer),
+            te_ops.MoeCombine(config, buffer),
         )
 
     def _run_dispatch_combine_identity(self, *, mxfp8):
@@ -1076,7 +1063,6 @@ class TestMoeEpSequential(_EpTestCase):
                 tokens,
                 topk_idx,
                 topk_weights,
-                buffer=buffer,
             )
             if mxfp8:
                 recv_tokens = _degroup_mxfp8(recv_tokens)
@@ -1084,10 +1070,7 @@ class TestMoeEpSequential(_EpTestCase):
             weighted_expert_output = (recv_tokens.float() * recv_weights.float().unsqueeze(-1)).to(
                 torch.bfloat16
             )
-            output = combine(
-                weighted_expert_output,
-                buffer=buffer,
-            )
+            output = combine(weighted_expert_output)
         torch.cuda.synchronize()
         torch.testing.assert_close(output, tokens, atol=5e-2, rtol=5e-2)
         self.assertEqual(tokens_per_expert.data_ptr(), buffer.tokens_per_expert.data_ptr())
@@ -1118,7 +1101,7 @@ class TestMoeEpSequential(_EpTestCase):
             dispatch_fwd_quant_recipe=recipe,
             combine_bwd_quant_recipe=recipe,
         )
-        dispatch = te_ops.MoeDispatch(config)
+        dispatch = te_ops.MoeDispatch(config, buffer)
         init_ctx = (
             te.quantized_model_init(enabled=True, recipe=recipe)
             if recipe is not None
@@ -1158,7 +1141,7 @@ class TestMoeEpSequential(_EpTestCase):
                 del os.environ["NVTE_GROUPED_LINEAR_SINGLE_PARAM"]
             else:
                 os.environ["NVTE_GROUPED_LINEAR_SINGLE_PARAM"] = previous_single_param
-        combine = te_ops.MoeCombine(config)
+        combine = te_ops.MoeCombine(config, buffer)
 
         dispatch.set_extra_output_channel(0, "tokens_per_expert", output_to_caller=False)
         dispatch.set_extra_output_channel(1, "routing_weights", output_to_caller=False)
@@ -1184,17 +1167,37 @@ class TestMoeEpSequential(_EpTestCase):
             self.skipTest("FusedMoeEp CUDA graph test requires SM107")
         if not _cudnn_megamoe_supported():
             self.skipTest("installed cuDNN frontend does not provide fixed training resources")
+        self._run_megamoe_mxfp8_cuda_graph_matches_eager(
+            glu_interleave_size=32,
+            expect_fused=True,
+        )
 
+    @_mxfp8_align_test
+    def test_unfused_megamoe_mxfp8_cuda_graph_matches_eager(self):
+        """Unfused Sequential forward/backward graph replay matches eager execution."""
+        self._run_megamoe_mxfp8_cuda_graph_matches_eager(
+            glu_interleave_size=None,
+            expect_fused=False,
+        )
+
+    def _run_megamoe_mxfp8_cuda_graph_matches_eager(
+        self,
+        *,
+        glu_interleave_size,
+        expect_fused,
+    ):
         recipe = MXFP8BlockScaling()
         graph_model, graph_fc1, graph_fc2, _ = self._make_megamoe_model(
             recipe=recipe,
-            glu_interleave_size=32,
+            glu_interleave_size=glu_interleave_size,
         )
-        if not is_moe_fusion_supported(tuple(graph_model), recipe):
+        fusion_supported = is_moe_fusion_supported(tuple(graph_model), recipe)
+        if expect_fused and not fusion_supported:
             self.skipTest("current configuration does not support FusedMoeEp")
-        eager_model, eager_fc1, eager_fc2, eager_buffer = self._make_megamoe_model(
+        self.assertEqual(fusion_supported, expect_fused)
+        eager_model, eager_fc1, eager_fc2, _ = self._make_megamoe_model(
             recipe=recipe,
-            glu_interleave_size=32,
+            glu_interleave_size=glu_interleave_size,
         )
         eager_model.load_state_dict(graph_model.state_dict())
 
@@ -1218,10 +1221,18 @@ class TestMoeEpSequential(_EpTestCase):
 
         forward_ops = graph_model._module_groups[0]._forward_ops
         backward_ops = graph_model._module_groups[0]._backward_ops
-        self.assertEqual(len(forward_ops), 1)
-        self.assertEqual(len(backward_ops), 1)
-        self.assertIsInstance(forward_ops[0][0], FusedMoeEp)
-        self.assertIs(backward_ops[0][0], forward_ops[0][0])
+        fused_ops = [
+            op
+            for op, _ in forward_ops
+            if isinstance(op, FusedMoeEp)
+        ]
+        if expect_fused:
+            self.assertEqual(len(forward_ops), 1)
+            self.assertEqual(len(backward_ops), 1)
+            self.assertEqual(len(fused_ops), 1)
+            self.assertIs(backward_ops[0][0], fused_ops[0])
+        else:
+            self.assertFalse(fused_ops)
 
         # Replace the capture-time contents while retaining captured addresses.
         with torch.no_grad():
@@ -1260,10 +1271,6 @@ class TestMoeEpSequential(_EpTestCase):
                 eager_tokens,
                 static_topk_idx,
                 eager_topk_weights,
-                op_kwargs={
-                    0: {"buffer": eager_buffer},
-                    4: {"buffer": eager_buffer},
-                },
             )
         eager_out.backward(static_dy)
         torch.cuda.synchronize()
@@ -1357,7 +1364,7 @@ class TestMoeEpSequential(_EpTestCase):
         exercises the same sequence as separate NCCL EP and grouped-MLP ops.
         """
         recipe = MXFP8BlockScaling() if quantization == "mxfp8" else None
-        model, fc1, fc2, buffer = self._make_megamoe_model(
+        model, fc1, fc2, _ = self._make_megamoe_model(
             recipe=recipe,
             accumulate_into_main_grad=accumulate_into_main_grad,
             delay_wgrad_compute=delay_wgrad_compute,
@@ -1411,10 +1418,6 @@ class TestMoeEpSequential(_EpTestCase):
                 seq_tokens,
                 topk_idx,
                 seq_topk_weights,
-                op_kwargs={
-                    0: {"buffer": buffer},
-                    4: {"buffer": buffer},
-                },
             )
 
         forward_ops = model._module_groups[0]._forward_ops

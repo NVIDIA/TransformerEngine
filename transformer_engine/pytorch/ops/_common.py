@@ -78,9 +78,13 @@ def validate_ep_buffer(
     expected_config: EpConfig,
     buffer: object,
 ) -> EpBuffer:
-    """Validate a runtime EP buffer against an operation's immutable config."""
+    """Validate an operation-owned EP buffer against its immutable config. Needed by 
+    MoeDispatch and MoeCombine basic ops which use NCCL EP."""
     if not isinstance(buffer, EpBuffer):
-        raise TypeError(f"{op_name} requires buffer=EpBuffer(...), got {type(buffer).__name__}.")
+        raise TypeError(
+            f"{op_name} requires an EpBuffer passed to its constructor, "
+            f"got {type(buffer).__name__}."
+        )
 
     mismatches = {
         name: (getattr(buffer, name), getattr(expected_config, name))
@@ -111,7 +115,7 @@ def validate_ep_buffer(
             for name, (actual, expected) in mismatches.items()
         )
         raise ValueError(
-            f"{op_name} runtime buffer config does not match its initialized config: {details}."
+            f"{op_name} buffer config does not match its initialized config: {details}."
         )
     return buffer
 

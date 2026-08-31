@@ -76,13 +76,17 @@ class MoeDispatch(BasicOperation):
     # tokens-per-expert and received routing weights consumed by the expert MLP.
     num_extra_outputs: int = 2
 
-    def __init__(self, config: EpConfig) -> None:
+    def __init__(self, config: EpConfig, buffer: Optional[EpBuffer] = None) -> None:
+        # EpBuffer(specific to NCCL EP) is needed by this op. Fused implementation which uses
+        # a different transport mechanism than NCCL EP wont need this buffer to be passed.
+        # For eg. FusedMoeEp fused op uses NVSHMEM.
         super().__init__()
         if not isinstance(config, EpConfig):
             raise TypeError(f"config must be an EpConfig, got {type(config).__name__}.")
         if config.zero_copy:
             raise NotImplementedError("MoeDispatch does not support zero-copy EP.")
         self.config = config
+        self.buffer = buffer
 
     def num_quantizers(self, mode: str) -> int:
         # quantized dispatch_bwd/combine is not supported.
@@ -126,13 +130,12 @@ class MoeDispatch(BasicOperation):
         next_op_input_quantizer: Optional[Quantizer],
         basic_op_kwargs: list[dict[str, Any]],
     ) -> tuple[torch.Tensor, Iterable[Iterable[torch.Tensor]]]:
-        del next_op_input_quantizer
+        del next_op_input_quantizer, basic_op_kwargs
         # Dispatch uses unquantized transport without an input quantizer and
         # MXFP8 transport with an MXFP8 input quantizer.
         input_quantizer = self.get_quantizer("forward", 0)
         topk_idx, topk_weights = basic_op_extra_inputs[0]
-        kwargs = basic_op_kwargs[0]
-        buffer = validate_ep_buffer("MoeDispatch", self.config, kwargs.get("buffer"))
+        buffer = validate_ep_buffer("MoeDispatch", self.config, self.buffer)
         validate_ep_comms_recipe(
             "MoeDispatch",
             input_quantizer,
