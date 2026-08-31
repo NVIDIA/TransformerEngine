@@ -209,6 +209,7 @@ class GroupedTensor(GroupedTensorStorage, torch.Tensor):
     @staticmethod
     def __tensor_unflatten__(inner_tensors, context, outer_size, outer_stride):
         """Rebuild a GroupedTensor from PyTorch-managed backing buffers."""
+        del outer_size
         return context["cls"](
             shape=context["logical_shape"],
             dtype=context["fake_dtype"],

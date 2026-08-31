@@ -13,7 +13,7 @@ from typing import Any, Optional
 import torch
 import transformer_engine_torch as tex
 
-from ...constants import DType, MXFP8_BLOCK_SCALING_SIZE
+from ...constants import MXFP8_BLOCK_SCALING_SIZE
 from ...quantization import Recipe
 from ...tensor import GroupedTensor, Quantizer
 from .._common import (
@@ -32,15 +32,19 @@ from ..op import FusedOperation, FusibleOperation, OperationContext
 def _cudnn_megamoe_supported() -> bool:
     """Whether cuDNN FE provides the fixed-resource training API."""
     try:
-        from cudnn import grouped_gemm_wgrad_wrapper_sm100  # noqa: F401
-        from cudnn.moe_ep import (  # noqa: F401
-            MoeEp,
-            MoeEpTrainingWeights,
-            MoeEpTrainingWgradOperands,
-        )
+        import cudnn
+        import cudnn.moe_ep as cudnn_moe_ep
     except (AttributeError, ImportError):
         return False
-    return True
+    return all(
+        hasattr(module, name)
+        for module, name in (
+            (cudnn, "grouped_gemm_wgrad_wrapper_sm100"),
+            (cudnn_moe_ep, "MoeEp"),
+            (cudnn_moe_ep, "MoeEpTrainingWeights"),
+            (cudnn_moe_ep, "MoeEpTrainingWgradOperands"),
+        )
+    )
 
 
 def _get_megamoe_combine_format() -> str:
@@ -314,7 +318,7 @@ def _routing_extras_internal(
     )
 
 
-def _megamoe_supported(config, fc1: GroupedLinear, fc2: GroupedLinear) -> bool:
+def _megamoe_supported(config, fc2: GroupedLinear) -> bool:
     """Static MegaMoE capability gates that can be checked before first launch."""
     if not _cudnn_megamoe_supported():
         return False
@@ -360,7 +364,7 @@ def is_moe_fusion_supported(
         return False
     if not _routing_extras_internal(dispatch, fc1, activation, fc2):
         return False
-    if not _megamoe_supported(config, fc1, fc2):
+    if not _megamoe_supported(config, fc2):
         return False
     return (
         fc1.num_groups == config.num_local_experts
@@ -490,14 +494,17 @@ class FusedMoeEp(FusedOperation):
 
     @property
     def dispatch(self) -> MoeDispatch:
+        """Return the underlying dispatch operation."""
         return self.basic_ops[0]
 
     @property
     def fc1(self) -> GroupedLinear:
+        """Return the first grouped linear operation."""
         return self.basic_ops[1]
 
     @property
     def fc2(self) -> GroupedLinear:
+        """Return the second grouped linear operation."""
         return self.basic_ops[3]
 
     def fuser_forward(
