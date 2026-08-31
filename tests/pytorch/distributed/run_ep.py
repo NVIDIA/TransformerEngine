@@ -1221,11 +1221,7 @@ class TestMoeEpSequential(_EpTestCase):
 
         forward_ops = graph_model._module_groups[0]._forward_ops
         backward_ops = graph_model._module_groups[0]._backward_ops
-        fused_ops = [
-            op
-            for op, _ in forward_ops
-            if isinstance(op, FusedMoeEp)
-        ]
+        fused_ops = [op for op, _ in forward_ops if isinstance(op, FusedMoeEp)]
         if expect_fused:
             self.assertEqual(len(forward_ops), 1)
             self.assertEqual(len(backward_ops), 1)
