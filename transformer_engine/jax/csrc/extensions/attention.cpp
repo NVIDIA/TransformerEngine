@@ -399,7 +399,6 @@ static void FusedAttnForwardImpl(
   NVTE_QKV_Layout qkv_layout =                                                                    \
       static_cast<NVTE_QKV_Layout>(get_attr_value<int64_t>(attrs, "qkv_layout"));                 \
   bool is_training = get_attr_value<bool>(attrs, "is_training");                                  \
-  bool return_max_logit = get_attr_value_or_default<bool>(attrs, "return_max_logit", false);      \
   bool deterministic = get_attr_value<bool>(attrs, "deterministic");                              \
   auto is_ragged = nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD;                  \
   size_t wkspace_size = product(workspace_buf->dimensions());                                     \
@@ -416,6 +415,7 @@ Error_Type FusedAttnForwardFFI(cudaStream_t stream, Buffer_Type q_buf, Buffer_Ty
                                Result_Type rng_state_buf, Result_Type workspace_buf,
                                Dictionary attrs) {
   FUSED_ATTN_FFI_GET_ATTRS;
+  bool return_max_logit = get_attr_value_or_default<bool>(attrs, "return_max_logit", false);
 
   FusedAttnForwardImpl(
       stream, q_buf.untyped_data(), k_buf.untyped_data(), v_buf.untyped_data(),

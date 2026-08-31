@@ -19,8 +19,8 @@ PYTEST_INI="$TE_ROOT/tests/jax/pytest.ini"
 
 NUM_GPUS="${NUM_GPUS:-$(nvidia-smi -L | wc -l)}"
 if [ "$NUM_GPUS" -lt 4 ]; then
-    echo "[run_te_ep_moe.sh] need >=4 GPUs (got $NUM_GPUS); aborting" >&2
-    exit 1
+    echo "[run_te_ep_moe.sh] need >=4 GPUs (got $NUM_GPUS); SKIPPING."
+    exit 0
 fi
 
 export XLA_PYTHON_CLIENT_PREALLOCATE="${XLA_PYTHON_CLIENT_PREALLOCATE:-false}"

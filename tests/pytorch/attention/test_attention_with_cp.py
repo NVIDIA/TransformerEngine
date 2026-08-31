@@ -739,12 +739,22 @@ def test_cp_with_fused_attention_no_load_balance(cp_pool):
     )
 
 
-@pytest.mark.skipif(
-    get_device_compute_capability() != (9, 0) or not FlashAttentionUtils.v3_is_installed,
-    reason="FlashAttention 3 requires sm90 and an installed FA3 package.",
-)
-def test_cp_with_flash_attention_3_no_load_balance(cp_pool):
-    """Check the supported unpadded FlashAttention 3 path."""
+def test_cp_with_flash_attention_no_load_balance(cp_pool):
+    """Check the supported unpadded FlashAttention path."""
+    config = copy.deepcopy(model_configs_flash_attn["cp_2_0"])
+    config.context_parallel = True
+    config.cp_comm_type = "all_gather"
+    config.attn_mask_type = "padding_causal"
+    available_backends, _, _ = get_available_attention_backends(
+        config,
+        qkv_dtype=torch.bfloat16,
+        qkv_layout="thd_thd_thd",
+        pad_between_seqs=False,
+        is_training=True,
+        deterministic=_deterministic,
+    )
+    if not available_backends[0]:
+        pytest.skip("FlashAttention is unavailable.")
     _submit(
         cp_pool(2),
         dtype="bf16",
