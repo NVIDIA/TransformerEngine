@@ -60,7 +60,7 @@ def _inject_router(request):
 jax.config.update("jax_use_shardy_partitioner", True)
 
 from test_fused_router import (
-    reference_topk_softmax_sigmoid,
+    reference_topk_with_score_function,
     reference_compute_scores_for_aux_loss,
     reference_aux_loss,
     make_logits,
@@ -133,7 +133,7 @@ class TestDistributedFusedTopk:
 
             logits_shards = jnp.reshape(logits, (num_dp_devices, local_num_tokens, num_experts))
             ref_fwd_fn = jax.jit(
-                lambda x: reference_topk_softmax_sigmoid(
+                lambda x: reference_topk_with_score_function(
                     x,
                     topk=topk,
                     score_function=score_function,
@@ -160,21 +160,23 @@ class TestDistributedFusedTopk:
             ), "Routing map mismatch in distributed fused_topk"
 
             # === Backward ===
+            grad_weights = jnp.linspace(0.5, 1.5, num_experts, dtype=jnp.float32)[None, :]
+
             def target_loss(x):
                 p, _ = fused_topk_with_score_function(
                     x,
                     topk=topk,
                     score_function=score_function,
                 )
-                return jnp.sum(p)
+                return jnp.sum(p * grad_weights)
 
             def ref_chunk_loss(x_chunk):
-                p, _ = reference_topk_softmax_sigmoid(
+                p, _ = reference_topk_with_score_function(
                     x_chunk,
                     topk=topk,
                     score_function=score_function,
                 )
-                return jnp.sum(p)
+                return jnp.sum(p * grad_weights)
 
             target_grad = jax.jit(jax.grad(target_loss))(logits_sharded)
 
@@ -195,7 +197,7 @@ class TestDistributedFusedTopk:
         "num_tokens,num_experts,topk",
         TOPK_CASES,
     )
-    @pytest.mark.parametrize("score_function", ["softmax", "sigmoid"])
+    @pytest.mark.parametrize("score_function", ["softmax", "sigmoid", "sqrtsoftplus"])
     def test_distributed_topk(
         self,
         device_count,
@@ -293,6 +295,8 @@ class TestDistributedScoreForAuxLoss:
             ), "Routing map mismatch in distributed score_for_aux_loss"
 
             # === Backward ===
+            grad_weights = jnp.linspace(0.5, 1.5, num_experts, dtype=jnp.float32)[None, :]
+
             def target_loss(x):
                 s, _ = fused_topk_with_score_function(
                     x,
@@ -300,7 +304,7 @@ class TestDistributedScoreForAuxLoss:
                     score_function=score_function,
                     compute_aux_scores=True,
                 )
-                return jnp.sum(s)
+                return jnp.sum(s * grad_weights)
 
             def ref_chunk_loss(x_chunk):
                 _, s = reference_compute_scores_for_aux_loss(
@@ -308,7 +312,7 @@ class TestDistributedScoreForAuxLoss:
                     topk=topk,
                     score_function=score_function,
                 )
-                return jnp.sum(s)
+                return jnp.sum(s * grad_weights)
 
             target_grad = jax.jit(jax.grad(target_loss))(logits_sharded)
 
@@ -329,7 +333,7 @@ class TestDistributedScoreForAuxLoss:
         "num_tokens,num_experts,topk",
         TOPK_CASES,
     )
-    @pytest.mark.parametrize("score_function", ["softmax", "sigmoid"])
+    @pytest.mark.parametrize("score_function", ["softmax", "sigmoid", "sqrtsoftplus"])
     def test_distributed_score_for_aux_loss(
         self,
         device_count,

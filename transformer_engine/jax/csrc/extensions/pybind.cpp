@@ -255,6 +255,7 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
   pybind11::enum_<JAXX_Score_Function>(m, "JAXX_Score_Function", pybind11::module_local())
       .value("SIGMOID", JAXX_Score_Function::SIGMOID)
       .value("SOFTMAX", JAXX_Score_Function::SOFTMAX)
+      .value("SQRTSOFTPLUS", JAXX_Score_Function::SQRTSOFTPLUS)
       .export_values();
 
   pybind11::enum_<JAXX_Routing_Map_Format>(m, "JAXX_Routing_Map_Format", pybind11::module_local())
