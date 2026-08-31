@@ -800,13 +800,10 @@ class QuantizedTensor(torch.Tensor):
     def detach(self) -> QuantizedTensor:
         """Create new quantized tensor with same data
 
-        Output tensor must be detached from the current autograd
-        graph.
+        Output tensor must be detached from the current autograd graph.
 
         """
-        raise NotImplementedError(
-            f"{self.__class__.__name__} class does not implement detach function"
-        )
+        return type(self).make_like(self)
 
     def clear(self):
         """Deallocate this tensor's memory. Typically not needed and must be used carefully"""
