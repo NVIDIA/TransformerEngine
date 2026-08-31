@@ -8,8 +8,10 @@ from __future__ import annotations
 from typing import List, Optional, Tuple
 
 import torch
+import transformer_engine_torch as tex
 from torch.utils._pytree import tree_map
 
+from ..constants import TE_DType
 from ..quantized_tensor import QuantizedTensorStorage, Quantizer
 from .storage.grouped_tensor_storage import GroupedTensorStorage
 
@@ -206,6 +208,55 @@ class GroupedTensor(GroupedTensorStorage, torch.Tensor):
         }
         return present, context
 
+    def dequantize(self, dtype: Optional[torch.dtype] = None) -> GroupedTensor:
+        """Return a high-precision grouped tensor with the same logical members."""
+        if dtype is None:
+            dtype = self.get_dtype()
+        if dtype not in TE_DType:
+            raise TypeError(f"Unsupported dequantization dtype: {dtype}")
+
+        if self.quantizer is None:
+            if dtype == self.dtype:
+                return self
+            return self.to(dtype=dtype)
+
+        dequantized = tex.group_dequantize(self, TE_DType[dtype])
+        out = type(self)(
+            shape=self.logical_shape,
+            dtype=dtype,
+            num_tensors=self.num_tensors,
+            shapes=self.tensor_shapes,
+            quantizer=None,
+            data=dequantized.rowwise_data,
+            columnwise_data=None,
+            scale_inv=None,
+            columnwise_scale_inv=None,
+            amax=None,
+            columnwise_amax=None,
+            scale=None,
+            first_dims=self.first_dims,
+            last_dims=self.last_dims,
+            tensor_offsets=self.tensor_offsets,
+            offsets=self.offsets,
+            scale_inv_offsets=None,
+            columnwise_scale_inv_offsets=None,
+            requires_grad=False,
+            with_gemm_swizzled_scales=False,
+        )
+        return out
+
+    def float(self) -> GroupedTensor:
+        """Dequantize grouped storage to FP32."""
+        return self.dequantize(dtype=torch.float32)
+
+    def bfloat16(self) -> GroupedTensor:
+        """Dequantize grouped storage to BF16."""
+        return self.dequantize(dtype=torch.bfloat16)
+
+    def half(self) -> GroupedTensor:
+        """Dequantize grouped storage to FP16."""
+        return self.dequantize(dtype=torch.float16)
+
     @staticmethod
     def __tensor_unflatten__(inner_tensors, context, outer_size, outer_stride):
         """Rebuild a GroupedTensor from PyTorch-managed backing buffers."""
@@ -315,10 +366,10 @@ class GroupedTensor(GroupedTensorStorage, torch.Tensor):
             if pin_memory:
                 raise NotImplementedError(f"{cls.__name__} does not support pin_memory=True")
             if src.quantizer is not None and target_dtype != src.dtype:
-                raise NotImplementedError(
-                    f"{cls.__name__} cannot change the logical dtype of quantized storage "
-                    f"from {src.dtype} to {target_dtype}"
-                )
+                out = src.dequantize(dtype=target_dtype)
+                if target_device != src.device:
+                    out = out.to(device=target_device, non_blocking=non_blocking)
+                return out
 
             def move_storage(
                 tensor: Optional[torch.Tensor], *, convert_dtype: bool = False

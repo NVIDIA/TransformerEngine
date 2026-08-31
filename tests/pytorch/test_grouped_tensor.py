@@ -1609,6 +1609,38 @@ class TestGroupedTensor:
         for orig, deq in zip(input_tensors, dequantized_tensors):
             torch.testing.assert_close(deq, orig, atol=0.125, rtol=0.1)
 
+    @pytest.mark.parametrize("conversion", ["float", "to"])
+    @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
+    def test_grouped_mxfp8_dtype_conversion_for_optimizer(self, conversion: str) -> None:
+        """MXFP8 grouped parameters dequantize before optimizer shard flattening."""
+        shapes = [(256, 512), (512, 512)]
+        inputs = [torch.randn(shape, dtype=torch.bfloat16, device="cuda") for shape in shapes]
+        quantizer = MXFP8Quantizer(fp8_dtype=te.DType.kFloat8E4M3)
+        quantizer.set_usage(rowwise=True, columnwise=False)
+        grouped = tex.group_quantize(
+            torch.cat(inputs, dim=0),
+            quantizer,
+            len(shapes),
+            torch.tensor([shape[0] for shape in shapes], dtype=torch.int64, device="cuda"),
+        )
+
+        dequantized = (
+            grouped.float() if conversion == "float" else grouped.to(dtype=torch.float32)
+        )
+
+        assert isinstance(dequantized, GroupedTensor)
+        assert dequantized.quantizer is None
+        assert dequantized.dtype == torch.float32
+        assert dequantized.num_tensors == grouped.num_tensors
+        assert dequantized.logical_shape == grouped.logical_shape
+        assert dequantized.view(-1) is not dequantized
+        assert dequantized.view(-1).dtype == torch.float32
+        assert dequantized.view(-1).numel() == grouped.numel()
+
+        members = dequantized.split_into_quantized_tensors()
+        for original, member in zip(inputs, members):
+            torch.testing.assert_close(member, original.float(), atol=0.125, rtol=0.1)
+
     @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
     def test_group_dequantize_cudagraph_capturable(self) -> None:
         """Ensure group_dequantize is CUDA graph capturable."""
