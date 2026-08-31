@@ -663,7 +663,7 @@ class _ArgPlan:
                         kwargs[field.name] = bundle[field.name]
                 case _FieldKind.UNSUPPORTED:
                     kwargs[field.name] = None
-        obj = self.arg_type.__new__(self.arg_type)
+        obj = self.arg_type.__new__(self.arg_type)  # pylint: disable=no-value-for-parameter
         for k, v in kwargs.items():
             object.__setattr__(obj, k, v)
         return obj
