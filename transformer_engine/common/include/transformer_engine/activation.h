@@ -85,6 +85,51 @@ void nvte_silu(const NVTETensor input, NVTETensor output, cudaStream_t stream);
  */
 void nvte_group_silu(const NVTEGroupedTensor input, NVTEGroupedTensor output, cudaStream_t stream);
 
+/*! \brief Grouped scaled SwiGLU "recompute" fused with MXFP8 columnwise quantization.
+ *
+ *  Computes, per token n and feature h:
+ *      output[n, h] = ( silu(input[n, h]) * input[n, H + h] ) * prob[n]
+ *  where the grouped input has logical shape [N, 2H] (last dim = [act | gate]) and
+ *  the grouped output has logical shape [N, H]. Only the columnwise MXFP8 output is
+ *  produced (it feeds the MoE FC2 weight-gradient GEMM). Restrictions:
+ *  NVTE_MXFP8_1D_SCALING output, uniform H across experts (SAME_BOTH_DIMS /
+ *  VARYING_FIRST_DIM), per-expert token counts divisible by 128. Scales may be
+ *  compact or in the cuBLAS GEMM-swizzled layout; the swizzled layout additionally
+ *  requires H divisible by 128 and, for multiple experts, VARYING_FIRST_DIM.
+ *
+ *  \param[in]     input     Grouped input tensor [N, 2H] ([act|gate]).
+ *  \param[in]     prob      Per-token weights, at least N elements, in the same
+ *                           dtype as \p input.
+ *  \param[in,out] output    Grouped output tensor [N, H] (columnwise MXFP8).
+ *  \param[in]     stream    CUDA stream used for the operation.
+ */
+void nvte_group_scaled_swiglu(const NVTEGroupedTensor input, const NVTETensor prob,
+                              NVTEGroupedTensor output, cudaStream_t stream);
+
+/*! \brief Clamped variant of nvte_group_scaled_swiglu.
+ *
+ *  Computes, per token n and feature h, with x = input[n, h] and g = input[n, H + h]:
+ *      a = min(x, limit)
+ *      output[n, h] = ( a * sigmoid(alpha * a)
+ *                       * (clamp(g, -limit, limit) + glu_linear_offset) ) * prob[n]
+ *  Note the asymmetry, which matches nvte_clamped_swiglu and the forward path of the
+ *  gated MXFP8 kernels: the activation half is clamped from above only, the gate half
+ *  on both sides and then offset. Same shape, layout and scaling-mode restrictions as
+ *  nvte_group_scaled_swiglu.
+ *
+ *  \param[in]     input              Grouped input tensor [N, 2H] ([act|gate]).
+ *  \param[in]     prob               Per-token weights, at least N elements, in the
+ *                                    same dtype as \p input.
+ *  \param[in,out] output             Grouped output tensor [N, H] (columnwise MXFP8).
+ *  \param[in]     limit              Clamp threshold, must be positive.
+ *  \param[in]     alpha              Sigmoid gain of the activation half.
+ *  \param[in]     glu_linear_offset  Offset added to the gate half after clamping.
+ *  \param[in]     stream             CUDA stream used for the operation.
+ */
+void nvte_group_scaled_clamped_swiglu(const NVTEGroupedTensor input, const NVTETensor prob,
+                                      NVTEGroupedTensor output, float limit, float alpha,
+                                      float glu_linear_offset, cudaStream_t stream);
+
 /*! \brief Computes the ReLU activation of the input.
  *         If the scaling mode of the output tensor is set to NVTE_MXFP8_1D_SCALING,
  *         the block quantization (MXFP8) of the specified shape of the block will be used.
@@ -321,6 +366,21 @@ void nvte_geglu(const NVTETensor input, NVTETensor output, cudaStream_t stream);
  */
 void nvte_swiglu(const NVTETensor input, NVTETensor output, cudaStream_t stream);
 
+/*! \brief Computes SiTU-GLU with configurable soft-cap parameters.
+ *
+ *  Computes beta1 * tanh(gate / beta1) * sigmoid(gate) times
+ *  beta2 * tanh(up / beta2), where gate and up are the two input halves.
+ *  MXFP8 output quantization is supported on SM100+.
+ *
+ *  \param[in]     input     Input tensor of shape [N, H * 2].
+ *  \param[in,out] output    Output tensor of shape [N, H].
+ *  \param[in]     beta1     Positive gate soft-cap parameter.
+ *  \param[in]     beta2     Positive up-branch soft-cap parameter.
+ *  \param[in]     stream    CUDA stream used for the operation.
+ */
+void nvte_situglu(const NVTETensor input, NVTETensor output, float beta1, float beta2,
+                  cudaStream_t stream);
+
 /*! \brief Computes the gated Swish activation of the input used in GPT OSS.
  *
  *  \deprecated This function has been deprecated in favor of nvte_clamped_swiglu_v2,
@@ -383,6 +443,21 @@ void nvte_clamped_swiglu_v2(const NVTETensor input, NVTETensor output, float lim
  */
 void nvte_scaled_swiglu(const NVTETensor input, const NVTETensor act_scales, NVTETensor output,
                         int64_t glu_interleave_size, cudaStream_t stream);
+
+/*! \brief Computes row-scaled SiTU-GLU without materializing GLU deinterleave.
+ *
+ *  \param[in]     input                Input tensor of shape [N, H * 2].
+ *  \param[in]     act_scales           Row-wise activation scales of shape [N].
+ *  \param[in,out] output               Output tensor of shape [N, H].
+ *  \param[in]     beta1                Positive gate soft-cap parameter.
+ *  \param[in]     beta2                Positive up-branch soft-cap parameter.
+ *  \param[in]     glu_interleave_size  0 for contiguous layout; otherwise a positive multiple
+ *                                      of 32 that divides H.
+ *  \param[in]     stream               CUDA stream used for the operation.
+ */
+void nvte_scaled_situglu(const NVTETensor input, const NVTETensor act_scales, NVTETensor output,
+                         float beta1, float beta2, int64_t glu_interleave_size,
+                         cudaStream_t stream);
 
 /*! \brief Computes ScaledClampedSwiGLU without materializing GLU deinterleave.
  *
@@ -462,6 +537,18 @@ void nvte_dgeglu(const NVTETensor grad, const NVTETensor input, NVTETensor outpu
 void nvte_dswiglu(const NVTETensor grad, const NVTETensor input, NVTETensor output,
                   cudaStream_t stream);
 
+/*! \brief Computes the SiTU-GLU activation gradient.
+ *
+ *  \param[in]     grad      Incoming gradient of shape [N, H].
+ *  \param[in]     input     Forward input tensor of shape [N, H * 2].
+ *  \param[in,out] output    Outgoing gradient of shape [N, H * 2].
+ *  \param[in]     beta1     Positive gate soft-cap parameter.
+ *  \param[in]     beta2     Positive up-branch soft-cap parameter.
+ *  \param[in]     stream    CUDA stream used for the operation.
+ */
+void nvte_dsituglu(const NVTETensor grad, const NVTETensor input, NVTETensor output, float beta1,
+                   float beta2, cudaStream_t stream);
+
 /*! \brief Computes the gradient of gated Swish activation of the input used in GPT OSS.
  *
  *  \deprecated This function has been deprecated in favor of nvte_clamped_dswiglu_v2,
@@ -527,6 +614,27 @@ void nvte_clamped_dswiglu_v2(const NVTETensor grad, const NVTETensor input, NVTE
 void nvte_scaled_dswiglu(const NVTETensor grad, const NVTETensor input, const NVTETensor act_scales,
                          NVTETensor grad_input, NVTETensor grad_act_scales,
                          int64_t glu_interleave_size, cudaStream_t stream);
+
+/*! \brief Computes row-scaled SiTU-GLU backward without materializing GLU deinterleave.
+ *
+ *  When grad_act_scales is non-null, it receives the reduction
+ *  sum(dY * SiTUGLU(input), dim=-1).
+ *
+ *  \param[in]     grad                 Incoming gradient of shape [N, H].
+ *  \param[in]     input                Forward input tensor of shape [N, H * 2].
+ *  \param[in]     act_scales           Row-wise activation scales of shape [N].
+ *  \param[in,out] grad_input           Outgoing gradient of shape [N, H * 2].
+ *  \param[in,out] grad_act_scales      Optional row-wise scale gradient of shape [N], or null.
+ *  \param[in]     beta1                Positive gate soft-cap parameter.
+ *  \param[in]     beta2                Positive up-branch soft-cap parameter.
+ *  \param[in]     glu_interleave_size  0 for contiguous layout; otherwise a positive multiple
+ *                                      of 32 that divides H.
+ *  \param[in]     stream               CUDA stream used for the operation.
+ */
+void nvte_scaled_dsituglu(const NVTETensor grad, const NVTETensor input,
+                          const NVTETensor act_scales, NVTETensor grad_input,
+                          NVTETensor grad_act_scales, float beta1, float beta2,
+                          int64_t glu_interleave_size, cudaStream_t stream);
 
 /*! \brief Computes ScaledClampedSwiGLU backward without materializing GLU deinterleave.
  *

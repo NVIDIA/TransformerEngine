@@ -436,6 +436,8 @@ __launch_bounds__(unary_kernel_threads) __global__
       if constexpr (std::is_same<Param, ClampedSwiGLUParam>::value) {
         ComputeType limit = p.limit;
         val2 = std::min(std::max(-limit, val2), limit) + p.glu_linear_offset;
+      } else if constexpr (std::is_same<Param, SiTUGLUParam>::value) {
+        val2 = situ_up<ComputeType, ComputeType>(val2, p);
       }
       ComputeType temp = static_cast<ComputeType>(Activation(val, p) * val2);
       if (requires_amax) {
@@ -538,16 +540,19 @@ __launch_bounds__(unary_kernel_threads) __global__
       const ComputeType grad_val = static_cast<ComputeType>(grad_loader.separate()[i]);
       const ComputeType gelu_in = static_cast<ComputeType>(input_loader0.separate()[i]);
       ComputeType gate_in = static_cast<ComputeType>(input_loader1.separate()[i]);
-      bool dgate_in = true;
+      ComputeType dgate_in = 1.0f;
 
       if constexpr (std::is_same<Param, ClampedSwiGLUParam>::value) {
         const ComputeType limit = p.limit;
         dgate_in = gate_in <= limit && gate_in >= -limit;
         gate_in = std::min(std::max(-limit, gate_in), limit) + p.glu_linear_offset;
+      } else if constexpr (std::is_same<Param, SiTUGLUParam>::value) {
+        dgate_in = dsitu_up<ComputeType, ComputeType>(gate_in, p);
+        gate_in = situ_up<ComputeType, ComputeType>(gate_in, p);
       }
 
       ComputeType after_dgelu = Dactivation(gelu_in, p) * grad_val * gate_in;
-      ComputeType after_dgate = dgate_in ? grad_val * Activation(gelu_in, p) : 0.0f;
+      ComputeType after_dgate = dgate_in * grad_val * Activation(gelu_in, p);
 
       if (requires_amax) {
         __builtin_assume(max >= 0);

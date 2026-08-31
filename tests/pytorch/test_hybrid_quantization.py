@@ -1772,6 +1772,25 @@ class TestHybridTorchDispatch:
         assert isinstance(detached, HybridQuantizedTensor)
         assert not detached.requires_grad
 
+    def test_detach_preserves_subclass(self, hybrid_tensor):
+        """HybridQuantizedTensor detach preserves its runtime subclass."""
+
+        class DerivedHybridQuantizedTensor(HybridQuantizedTensor):
+            pass
+
+        hybrid_tensor.__class__ = DerivedHybridQuantizedTensor
+        source_data = hybrid_tensor.get_data_tensors()
+
+        detached = hybrid_tensor.detach()
+
+        assert type(detached) is DerivedHybridQuantizedTensor
+        for detached_data, source_data_tensor in zip(detached.get_data_tensors(), source_data):
+            assert detached_data is source_data_tensor
+        assert not detached.requires_grad
+
+        parameter = torch.nn.Parameter(hybrid_tensor)
+        assert type(parameter) is DerivedHybridQuantizedTensor
+
     def test_repr(self, hybrid_tensor):
         r = repr(hybrid_tensor)
         assert "HybridQuantizedTensor" in r
@@ -4806,6 +4825,13 @@ class TestHybridGroupedLinearValidation:
             model(tensor, m_splits)
             assert model._custom_quantizer_cache == {}
 
+            def unexpected_grad_mode_query():
+                pytest.fail("built-in recipe validation must not query grad mode")
+
+            with monkeypatch.context() as context:
+                context.setattr(torch, "is_grad_enabled", unexpected_grad_mode_query)
+                model._validate_custom_recipe_quantizers(False, recipe.DelayedScaling())
+
             def unexpected_custom_validation(*_args, **_kwargs):
                 pytest.fail("built-in recipes must not validate custom quantizers per forward")
 
@@ -4850,11 +4876,28 @@ class TestHybridGroupedLinearValidation:
         first_call_count = len(validation_calls)
         first_generation = model._custom_quantizer_cache["scaling_fwd"]
         assert first_call_count > 0
+        assert "scaling_bwd" not in model._custom_quantizer_cache
 
         with torch.no_grad(), autocast(enabled=True, recipe=original_recipe):
             model(tensor, m_splits)
         assert len(validation_calls) == first_call_count
         assert model._custom_quantizer_cache["scaling_fwd"] is first_generation
+
+        # Backward quantizers are validated the first time quantizers are selected
+        # with gradients enabled. Do not run a full forward here: this validation
+        # test intentionally uses a columnwise-only configuration that is not
+        # supported by the split-quantization kernel.
+        with torch.enable_grad(), autocast(enabled=True, recipe=original_recipe):
+            model._get_quantizers()
+        assert len(validation_calls) == first_call_count + 1
+        assert model._custom_quantizer_cache["scaling_bwd"] is model.quantizers["scaling_bwd"]
+
+        def unexpected_grad_mode_query():
+            pytest.fail("cached validation must not query grad mode")
+
+        with monkeypatch.context() as context:
+            context.setattr(torch, "is_grad_enabled", unexpected_grad_mode_query)
+            model._validate_custom_recipe_quantizers(False, original_recipe)
 
         rebuilt_recipe = recipe.CustomRecipe(qfactory=make_qfactory("rowwise_dequantized"))
         with torch.no_grad(), autocast(enabled=True, recipe=rebuilt_recipe):

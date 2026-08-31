@@ -524,10 +524,6 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
             return self.quantize_(tensor.dequantize(), noop_flag=noop_flag)
         return super().quantize_(tensor, noop_flag=noop_flag)
 
-    def detach(self) -> Float8Tensor:
-        # pylint: disable=missing-function-docstring
-        return Float8Tensor.make_like(self)
-
     def clone(self) -> Float8Tensor:
         # pylint: disable=missing-function-docstring
         # ``_data`` may be None for columnwise-only sub-storages of a

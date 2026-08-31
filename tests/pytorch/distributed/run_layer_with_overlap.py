@@ -17,6 +17,7 @@ from functools import partial
 
 import torch
 import torch.distributed as dist
+from torch.distributed.elastic.multiprocessing.errors import record
 
 try:
     from torch._dynamo.utils import counters as dynamo_counters
@@ -373,6 +374,7 @@ def _compare_tensors(name, test, ref, rtol, atol):
     return numerics_failed, numerics_info
 
 
+@record
 def _train(opts):
     if "OMPI_COMM_WORLD_SIZE" in os.environ:
         # Execution with `mpirun -np N`
