@@ -150,10 +150,7 @@ def _fused_attn_fwd_explicit_out_specs(q, config):
 
     rng_spec = (tuple(jax.typeof(q).sharding.mesh.axis_names), None)
     max_logit_spec = (output_spec[-2],) if config.return_max_logit else (None,)
-    return [
-        PartitionSpec(*spec)
-        for spec in (output_spec, softmax_spec, rng_spec, max_logit_spec)
-    ]
+    return [PartitionSpec(*spec) for spec in (output_spec, softmax_spec, rng_spec, max_logit_spec)]
 
 
 def _run_explicit_partitioned(primitive_cls, config, args):
@@ -4077,8 +4074,7 @@ def fused_attn_bwd(
         return primitive_cls.outer_primitive.bind(*args, config=fused_config)
 
     explicit_out_specs = [
-        _explicit_value_pspec(value)
-        for value in (*qkv_for_primitive, bias, softmax_offset)
+        _explicit_value_pspec(value) for value in (*qkv_for_primitive, bias, softmax_offset)
     ]
     if any(spec is not None for spec in explicit_out_specs):
         *qkv_grads, bias_grad, softmax_offset_grad = _run_explicit_partitioned(

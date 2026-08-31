@@ -362,6 +362,7 @@ class TestDistributedCrossAttn:
             mesh_axis_types=(AxisType.Explicit,) * len(mesh_axes) if explicit_sharding else None,
         )
 
+
 DISTRIBUTED_SCORE_MOD_DATA_SHAPES = {
     "L0": [],
     "L1": [(4, 16, 4, 64)],
@@ -643,9 +644,7 @@ class TestDistributedContextParallelSelfAttn:
             pytest.param(CPStrategy.RING, (-1, -1), 1, id="ring"),
         ],
     )
-    def test_context_parallel_thd_explicit_sharding(
-        self, cp_strategy, window_size, stripe_size
-    ):
+    def test_context_parallel_thd_explicit_sharding(self, cp_strategy, window_size, stripe_size):
         self.impl_test_context_parallel_attn(
             2,
             (1, 2, 1),
