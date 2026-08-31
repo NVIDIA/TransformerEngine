@@ -333,7 +333,11 @@ def _megamoe_supported(config, fc1: GroupedLinear, fc2: GroupedLinear) -> bool:
     return True
 
 
-def _matches(window: Sequence[FusibleOperation], recipe: Optional[Recipe]) -> bool:
+def is_moe_fusion_supported(
+    window: Sequence[FusibleOperation],
+    recipe: Optional[Recipe],
+) -> bool:
+    """Whether a five-op Sequential window supports FusedMoeEp."""
     if len(window) != 5:
         return False
     if recipe is not None and not recipe.mxfp8():
@@ -621,14 +625,15 @@ def fuse_ops(
     """Fuse supported five-op EP MoE sequences into MegaMoE.
 
     Unfused Sequential (NCCL dispatch/combine + GroupedLinear + ScaledSwiGLU)
-    is the default. MegaMoE is claimed only when ``_matches`` succeeds.
+    is the default. MegaMoE is claimed only when
+    :func:`is_moe_fusion_supported` succeeds.
     """
     del unused
     out: list[FusibleOperation] = []
     idx = 0
     while idx < len(ops):
         window = ops[idx : idx + 5]
-        if _matches(window, recipe):
+        if is_moe_fusion_supported(window, recipe):
             dispatch, fc1, activation, fc2, combine = window
             out.append(
                 FusedMoeEp(
@@ -649,4 +654,4 @@ def fuse_ops(
 register_forward_backward_fusion(fuse_ops, prepend=True)
 
 
-__all__ = ["FusedMoeEp"]
+__all__ = ["FusedMoeEp", "is_moe_fusion_supported"]

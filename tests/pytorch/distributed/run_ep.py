@@ -43,6 +43,7 @@ from transformer_engine.pytorch.ops.fused.moe_ep import (
     _cudnn_megamoe_supported,
     _get_megamoe_combine_format,
     _pack_cudnn_weights,
+    is_moe_fusion_supported,
 )
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Tensor
 
@@ -1190,10 +1191,12 @@ class TestMoeEpSequential(_EpTestCase):
             self.skipTest("installed cuDNN frontend does not provide fixed training resources")
 
         recipe = MXFP8BlockScaling()
-        graph_model, graph_fc1, graph_fc2, graph_buffer = self._make_megamoe_model(
+        graph_model, graph_fc1, graph_fc2, _ = self._make_megamoe_model(
             recipe=recipe,
             glu_interleave_size=32,
         )
+        if not is_moe_fusion_supported(tuple(graph_model), recipe):
+            self.skipTest("current configuration does not support FusedMoeEp")
         eager_model, eager_fc1, eager_fc2, eager_buffer = self._make_megamoe_model(
             recipe=recipe,
             glu_interleave_size=32,
@@ -1205,23 +1208,6 @@ class TestMoeEpSequential(_EpTestCase):
             self.cfg.ep_size,
             self.cfg.device,
         )
-        probe_tokens = tokens.detach().clone().requires_grad_(True)
-        probe_topk_weights = topk_weights.detach().clone().requires_grad_(True)
-        with te.autocast(enabled=True, recipe=recipe):
-            probe_output = graph_model(
-                probe_tokens,
-                topk_idx,
-                probe_topk_weights,
-                op_kwargs={
-                    0: {"buffer": graph_buffer},
-                    4: {"buffer": graph_buffer},
-                },
-            )
-        forward_ops = graph_model._module_groups[0]._forward_ops
-        if len(forward_ops) != 1 or not isinstance(forward_ops[0][0], FusedMoeEp):
-            self.skipTest("current configuration does not select FusedMoeEp")
-        probe_output.backward(torch.zeros_like(probe_output))
-        graph_model.zero_grad(set_to_none=True)
 
         static_tokens = tokens.detach().clone().requires_grad_(True)
         static_topk_idx = topk_idx.detach().clone()
