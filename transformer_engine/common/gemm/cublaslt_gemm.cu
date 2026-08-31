@@ -747,18 +747,15 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
   NVTE_CHECK_CUBLAS(cublasLtMatmulPreferenceCreate(&preference));
   NVTE_CHECK_CUBLAS(cublasLtMatmulPreferenceSetAttribute(
       preference, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &workspaceSize, sizeof(workspaceSize)));
-  // Avoid reduced-precision split-K reductions for BF16 GEMMs with FP32 compute. In particular,
+  // Avoid reduced-precision split-K reductions. In particular,
   // CUBLASLT_REDUCTION_SCHEME_OUTPUT_TYPE converts each split-K partial to BF16 before the final
   // reduction, which can introduce significant error for cancellation-heavy dot products.
   // Non-split algorithms remain eligible, as do split-K algorithms that reduce their partials in
   // the FP32 compute type.
-  if (A_type == CUDA_R_16BF && B_type == CUDA_R_16BF && D_type == CUDA_R_16BF &&
-      gemm_compute_type == CUBLAS_COMPUTE_32F) {
-    const uint32_t reduction_scheme_mask = CUBLASLT_REDUCTION_SCHEME_COMPUTE_TYPE;
-    NVTE_CHECK_CUBLAS(cublasLtMatmulPreferenceSetAttribute(
-        preference, CUBLASLT_MATMUL_PREF_REDUCTION_SCHEME_MASK, &reduction_scheme_mask,
-        sizeof(reduction_scheme_mask)));
-  }
+  const uint32_t reduction_scheme_mask = CUBLASLT_REDUCTION_SCHEME_COMPUTE_TYPE;
+  NVTE_CHECK_CUBLAS(cublasLtMatmulPreferenceSetAttribute(
+      preference, CUBLASLT_MATMUL_PREF_REDUCTION_SCHEME_MASK, &reduction_scheme_mask,
+      sizeof(reduction_scheme_mask)));
   const auto A_alignment = _getAlignment(reinterpret_cast<uintptr_t>(param.A));
   const auto B_alignment = _getAlignment(reinterpret_cast<uintptr_t>(param.B));
   const auto C_alignment = _getAlignment(reinterpret_cast<uintptr_t>(C));
