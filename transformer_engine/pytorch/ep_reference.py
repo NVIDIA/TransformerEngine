@@ -767,8 +767,7 @@ class MoeEpReference:
             or fc1_weight.format is not MoeFormat.MXFP8
         ):
             raise ValueError(
-                "weight_interleave_size=32 requires an MXFP8 BlockScaledTensor "
-                "for fc1_weight"
+                "weight_interleave_size=32 requires an MXFP8 BlockScaledTensor for fc1_weight"
             )
         if topk_idx.ndim != 2:
             raise ValueError(f"topk_idx must be 2-D, got shape {tuple(topk_idx.shape)}")
