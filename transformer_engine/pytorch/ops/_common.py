@@ -78,7 +78,7 @@ def validate_ep_buffer(
     expected_config: EpConfig,
     buffer: object,
 ) -> EpBuffer:
-    """Validate an operation-owned EP buffer against its immutable config. Needed by 
+    """Validate an operation-owned EP buffer against its immutable config. Needed by
     MoeDispatch and MoeCombine basic ops which use NCCL EP."""
     if not isinstance(buffer, EpBuffer):
         raise TypeError(
