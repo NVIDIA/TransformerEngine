@@ -5,6 +5,7 @@
 """JAX related extensions."""
 
 import os
+import warnings
 from pathlib import Path
 from packaging import version
 
@@ -100,6 +101,23 @@ def setup_jax_extension(
             xla_path(),
         ]
     )
+
+    # TODO(nccl-ep): temporary WAR -- do not upstream. Remove once jaxlib ships
+    # xla/ffi/api/collectives_c_api.h in its include dir.
+    #
+    # Optional extra include root for XLA FFI headers current jaxlib omits,
+    # needed by the EP borrowed-comm path. Point NVTE_JAX_XLA_FFI_EXTRA_INCLUDE
+    # at an XLA source checkout to build that path today.
+    xla_ffi_extra_include = os.getenv("NVTE_JAX_XLA_FFI_EXTRA_INCLUDE")
+    if xla_ffi_extra_include:
+        extra_root = Path(xla_ffi_extra_include)
+        include_dirs.append(extra_root)
+        if not (extra_root / "xla" / "ffi" / "api" / "collectives_c_api.h").is_file():
+            warnings.warn(
+                "NVTE_JAX_XLA_FFI_EXTRA_INCLUDE is set to "
+                f"'{xla_ffi_extra_include}' but xla/ffi/api/collectives_c_api.h was "
+                "not found there; the EP borrowed-comm path will not be built."
+            )
 
     # Compile flags
     cxx_flags = ["-O3"]
