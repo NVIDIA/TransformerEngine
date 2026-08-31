@@ -100,6 +100,57 @@ class TestFusedAdam(TestFusedOptimizer):
     def test_float(self):
         self.gen_single_type_test(param_type=torch.float)
 
+    @pytest.mark.skipif(
+        not hasattr(torch.nn.Parameter(torch.empty(0)), "grad_dtype"),
+        reason="PyTorch does not support parameter grad_dtype",
+    )
+    @pytest.mark.parametrize(
+        "param_dtype,grad_dtype,master_weights",
+        [
+            (torch.float32, torch.bfloat16, False),
+            (torch.bfloat16, torch.float32, True),
+        ],
+    )
+    def test_capturable_mixed_param_grad_dtype(self, param_dtype, grad_dtype, master_weights):
+        """Capturable Adam supports parameter and gradient tensors with different dtypes."""
+        if param_dtype == torch.bfloat16 and not is_bf16_available():
+            pytest.skip("BF16 is not supported")
+
+        ref_param = torch.nn.Parameter(torch.ones(16, device="cuda", dtype=param_dtype))
+        tst_param = torch.nn.Parameter(ref_param.detach().clone())
+        for param in (ref_param, tst_param):
+            param.grad_dtype = grad_dtype
+            param.grad = torch.ones_like(param, dtype=grad_dtype)
+
+        ref_optim = self.fused_optim(
+            [ref_param], capturable=False, master_weights=master_weights, **self.options
+        )
+        tst_optim = self.fused_optim(
+            [tst_param], capturable=True, master_weights=master_weights, **self.options
+        )
+        # Initialize optimizer state before CUDA graph capture.
+        ref_optim.step()
+        tst_optim.step()
+
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            tst_optim.step()
+        graph.replay()
+        ref_optim.step()
+
+        torch.testing.assert_close(tst_param, ref_param)
+        torch.testing.assert_close(
+            tst_optim.state[tst_param]["exp_avg"], ref_optim.state[ref_param]["exp_avg"]
+        )
+        torch.testing.assert_close(
+            tst_optim.state[tst_param]["exp_avg_sq"], ref_optim.state[ref_param]["exp_avg_sq"]
+        )
+        if master_weights:
+            torch.testing.assert_close(
+                tst_optim.state[tst_param]["master_param"],
+                ref_optim.state[ref_param]["master_param"],
+            )
+
     # NOTE(mkozuki): Current threshold values look too small for BFloat16.
     # TODO(mkozuki): Refactor `TestFusedOptimizer`
     def test_half(self):
@@ -165,6 +216,31 @@ class TestFusedAdam(TestFusedOptimizer):
             tst_optim.step()
 
             torch.testing.assert_close(ref_param, tst_param)
+
+    @pytest.mark.parametrize("capturable", [False, True])
+    def test_empty_param_group_advances_step(self, capturable):
+        # An empty param group must advance its step counter like a populated one.
+        # The same group can be empty on one data-parallel rank and populated on
+        # another, and "step" is part of the checkpoint, so a group that stops
+        # counting makes a resumed run apply a stale bias correction.
+        param = torch.nn.Parameter(torch.rand(4, dtype=torch.float, device="cuda"))
+        tst_optim = self.fused_optim(
+            [{"params": [param]}, {"params": []}], capturable=capturable, **self.options
+        )
+
+        num_steps = 3
+        for _ in range(num_steps):
+            param.grad = torch.rand_like(param)
+            tst_optim.step()
+
+        populated_step, empty_step = (int(g["step"]) for g in tst_optim.param_groups)
+        assert populated_step == num_steps
+        assert empty_step == populated_step
+
+        # The counter is checkpointed through the param groups, so the empty group
+        # has to round trip with the same value as the populated one.
+        checkpoint = tst_optim.state_dict()
+        assert int(checkpoint["param_groups"][1]["step"]) == num_steps
 
     def test_empty_param_at_end_of_group(self):
         tensors = [
