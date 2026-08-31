@@ -3214,6 +3214,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             None,
             None,
             None,
+            None,
         )
 
 
@@ -4575,6 +4576,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
             None,
             None,
             None,
+            None,
         )
 
 
@@ -5399,6 +5401,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             None,
             None,
             d_bias,
+            None,
             None,
             None,
             None,
