@@ -96,8 +96,10 @@ switcher_json_url = os.getenv(
 )
 switcher_version = os.getenv("NVTE_DOCS_SWITCHER_VERSION", "latest")
 
+public_docs_features = os.getenv("NVTE_DOCS_DISABLE_PUBLIC_FEATURES", "0") != "1"
+
 html_theme_options = {
-    "public_docs_features": True,
+    "public_docs_features": public_docs_features,
     "switcher": {
         "json_url": switcher_json_url,
         "version_match": switcher_version,
