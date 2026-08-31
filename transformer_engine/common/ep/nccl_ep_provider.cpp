@@ -140,6 +140,8 @@ void configure_nccl_ep_source_dir(const std::filesystem::path& library_path) {
       return;
     }
   }
+  NVTE_ERROR("Could not find NCCL EP JIT headers relative to ", library_path.string(),
+             ". Set NCCL_EP_HOME or NCCL_EP_JIT_SOURCE_DIR.");
 }
 
 void configure_nccl_include_dir() {
@@ -165,6 +167,10 @@ void configure_nccl_include_dir() {
       return;
     }
   }
+  NVTE_ERROR("Could not find NCCL headers matching runtime NCCL ", runtime_version / 10000, ".",
+             (runtime_version / 100) % 100, ".", runtime_version % 100,
+             ". Set NCCL_EP_JIT_BUILD_INCLUDE_DIR to the directory containing nccl.h or set "
+             "NCCL_HOME.");
 }
 
 void configure_cuda_include_dir() {
