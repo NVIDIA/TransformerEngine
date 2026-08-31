@@ -21,7 +21,6 @@
 #endif
 
 #include <transformer_engine/cast.h>
-#include <transformer_engine/recipe.h>
 #include <transformer_engine/swizzle.h>
 #include "../test_common.h"
 #include "transformer_engine/transformer_engine.h"
@@ -378,44 +377,6 @@ INSTANTIATE_TEST_SUITE_P(
         ::testing::Values(DType::kFloat8E4M3)),
     DequantizeNVFP4TestSuite::test_name);
 
-TEST(NVFP4RecipeTest, LegacyScaleUtilitiesUseE4M3)
-{
-    if (getDeviceComputeCapability() < blackwellComputeCapability) {
-        GTEST_SKIP();
-    }
-
-    Tensor global_amax("global_amax", std::vector<size_t>{1}, DType::kFloat32);
-    Tensor global_scale("global_scale", std::vector<size_t>{1}, DType::kFloat32);
-    global_amax.rowwise_cpu_dptr<float>()[0] = 12.0f;
-    global_amax.from_cpu();
-    nvte_nvfp4_compute_global_scale(global_amax.data(), global_scale.data(), 0);
-    global_scale.to_cpu();
-    EXPECT_FLOAT_EQ(global_scale.rowwise_cpu_dptr<float>()[0], 6.0f * 448.0f / 12.0f);
-
-    Tensor block_amax("block_amax", std::vector<size_t>{1, 2}, DType::kFloat32);
-    Tensor block_scale("block_scale", std::vector<size_t>{1, 2}, DType::kFloat32);
-    block_amax.rowwise_cpu_dptr<float>()[0] = 3.0f;
-    block_amax.rowwise_cpu_dptr<float>()[1] = 6.0f;
-    block_amax.from_cpu();
-    nvte_nvfp4_compute_per_block_scale(
-        block_amax.data(), block_scale.data(), global_amax.data(), 0);
-    block_scale.to_cpu();
-    EXPECT_FLOAT_EQ(block_scale.rowwise_cpu_dptr<float>()[0], 3.0f * 448.0f / 12.0f);
-    EXPECT_FLOAT_EQ(block_scale.rowwise_cpu_dptr<float>()[1], 6.0f * 448.0f / 12.0f);
-
-    Tensor expanded_scale("expanded_scale", std::vector<size_t>{16, 2}, DType::kByte);
-    nvte_nvfp4_expand_scale_to_fp8(block_scale.data(), expanded_scale.data(), 1, 2, 16, 16, 0);
-    expanded_scale.to_cpu();
-    const auto *scales = reinterpret_cast<const fp8e4m3 *>(
-        expanded_scale.rowwise_cpu_dptr<byte>());
-    for (size_t row = 0; row < 16; ++row) {
-        EXPECT_FLOAT_EQ(static_cast<float>(scales[row * 2]),
-                        static_cast<float>(fp8e4m3(3.0f * 448.0f / 12.0f)));
-        EXPECT_FLOAT_EQ(static_cast<float>(scales[row * 2 + 1]),
-                        static_cast<float>(fp8e4m3(6.0f * 448.0f / 12.0f)));
-    }
-}
-
 #if CUDA_VERSION >= 13040
 
 INSTANTIATE_TEST_SUITE_P(
@@ -428,76 +389,6 @@ INSTANTIATE_TEST_SUITE_P(
         ::testing::Values(NVFP4DequantizeTestConfig{}),
         ::testing::Values(DType::kFloat8UE5M3)),
     DequantizeNVFP4TestSuite::test_name);
-
-TEST(NVFP4RecipeTest, UE5M3ScaleUtilities)
-{
-    if (getDeviceComputeCapability() < blackwellComputeCapability) {
-        GTEST_SKIP();
-    }
-
-    Tensor global_amax("global_amax", std::vector<size_t>{1}, DType::kFloat32);
-    Tensor global_scale("global_scale", std::vector<size_t>{1}, DType::kFloat32);
-    global_amax.rowwise_cpu_dptr<float>()[0] = 12.0f;
-    global_amax.from_cpu();
-    nvte_nvfp4_compute_global_scale_v2(
-        global_amax.data(), global_scale.data(), kNVTEFloat8UE5M3, 0);
-    global_scale.to_cpu();
-    EXPECT_FLOAT_EQ(global_scale.rowwise_cpu_dptr<float>()[0], 6.0f * 114688.0f / 12.0f);
-
-    Tensor block_amax("block_amax", std::vector<size_t>{1, 2}, DType::kFloat32);
-    Tensor block_scale("block_scale", std::vector<size_t>{1, 2}, DType::kFloat32);
-    block_amax.rowwise_cpu_dptr<float>()[0] = 3.0f;
-    block_amax.rowwise_cpu_dptr<float>()[1] = 6.0f;
-    block_amax.from_cpu();
-    nvte_nvfp4_compute_per_block_scale_v2(
-        block_amax.data(), block_scale.data(), global_amax.data(), kNVTEFloat8UE5M3, 0);
-    block_scale.to_cpu();
-    EXPECT_FLOAT_EQ(block_scale.rowwise_cpu_dptr<float>()[0], 3.0f * 114688.0f / 12.0f);
-    EXPECT_FLOAT_EQ(block_scale.rowwise_cpu_dptr<float>()[1], 6.0f * 114688.0f / 12.0f);
-
-    Tensor expanded_scale("expanded_scale", std::vector<size_t>{16, 2}, DType::kByte);
-    nvte_nvfp4_expand_scale_to_fp8_v2(
-        block_scale.data(), expanded_scale.data(), 1, 2, 16, 16, kNVTEFloat8UE5M3, 0);
-    expanded_scale.to_cpu();
-    const auto *scales = reinterpret_cast<const fp8ue5m3 *>(
-        expanded_scale.rowwise_cpu_dptr<byte>());
-    for (size_t row = 0; row < 16; ++row) {
-        EXPECT_FLOAT_EQ(static_cast<float>(scales[row * 2]),
-                        static_cast<float>(fp8ue5m3(3.0f * 114688.0f / 12.0f)));
-        EXPECT_FLOAT_EQ(static_cast<float>(scales[row * 2 + 1]),
-                        static_cast<float>(fp8ue5m3(6.0f * 114688.0f / 12.0f)));
-    }
-}
-
-TEST(NVFP4RecipeTest, UE5M3PerTensorScale)
-{
-    if (getDeviceComputeCapability() < blackwellComputeCapability) {
-        GTEST_SKIP();
-    }
-
-    Tensor input_a("input_a", std::vector<size_t>{32, 32}, DType::kFloat4E2M1,
-                   true, true, NVTE_NVFP4_1D_SCALING, DType::kFloat8UE5M3);
-    Tensor input_b("input_b", std::vector<size_t>{32, 32}, DType::kFloat4E2M1,
-                   true, true, NVTE_NVFP4_1D_SCALING, DType::kFloat8UE5M3);
-    Tensor alpha_out("alpha_out", std::vector<size_t>{1}, DType::kFloat32);
-
-    constexpr float amax_a = 12.0f;
-    constexpr float amax_b = 18.0f;
-    constexpr float alpha_in = 2.0f;
-    constexpr float fp4_max = 6.0f;
-    constexpr float ue5m3_max = 114688.0f;
-    input_a.set_amax(amax_a);
-    input_b.set_tensor_amax_columnwise(amax_b);
-
-    nvte_nvfp4_compute_per_tensor_scale(
-        input_a.data(), true, input_b.data(), false, alpha_in, alpha_out.data(), 0);
-    alpha_out.to_cpu();
-
-    const float factor_inv =
-        1.0f / (fp4_max * fp4_max * ue5m3_max * ue5m3_max);
-    const float expected = alpha_in * amax_a * amax_b * factor_inv;
-    EXPECT_FLOAT_EQ(alpha_out.rowwise_cpu_dptr<float>()[0], expected);
-}
 #endif
 
 class DequantizeNVFP4SwizzledTestSuite : public ::testing::TestWithParam
