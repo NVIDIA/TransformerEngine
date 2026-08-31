@@ -15,6 +15,7 @@ import torch.distributed as dist
 
 import transformer_engine_torch as tex
 
+from .constants import DType
 from .cpu_offload import mark_not_offload
 from .distributed import symm_mem_alloc, release_symm_mem_pool
 from .quantized_tensor import QuantizedTensor, QuantizedTensorStorage
@@ -625,7 +626,7 @@ def _ep_prepare_and_dispatch_fwd(
     tokens_data = tokens._rowwise_data if isinstance(tokens, MXFP8TensorStorage) else tokens
     assert tokens_data.dim() == 2, "EP dispatch tokens must be 2D [num_tokens, hidden]"
     hidden = tokens_data.shape[-1]
-    if is_scaled and tokens._fp8_dtype != tex.DType.kFloat8E4M3:
+    if is_scaled and tokens._fp8_dtype != DType.kFloat8E4M3:
         raise NotImplementedError("EP dispatch supports only E4M3 MXFP8 tokens for now.")
     # Reinterpret byte-backed FP8 data as the fp8 dtype so the backend sees a scaled tensor.
     dispatch_tokens = tokens_data.view(torch.float8_e4m3fn) if is_scaled else tokens_data
@@ -773,7 +774,7 @@ class _EpPrepareAndDispatch(torch.autograd.Function):
 
             # Only MXFP8 Quantizer is supported for EP dispatch
             quantizer = MXFP8Quantizer(
-                tex.DType.kFloat8E4M3,
+                DType.kFloat8E4M3,
                 rowwise=True,
                 columnwise=False,
             )
@@ -897,7 +898,7 @@ def _ep_combine_bwd(
 
             # Only MXFP8 Quantizer is supported for EP combine bwd
             quantizer = MXFP8Quantizer(
-                tex.DType.kFloat8E4M3,
+                DType.kFloat8E4M3,
                 rowwise=True,
                 columnwise=False,
             )
@@ -1025,7 +1026,7 @@ def quantize_for_ep(
     directions, so other FP8 formats are rejected. GEMM scale-row padding is stripped, and each
     compact scale row must remain contiguous and 16-byte aligned.
     """
-    from .constants import DType, MXFP8_BLOCK_SCALING_SIZE
+    from .constants import MXFP8_BLOCK_SCALING_SIZE
     from .tensor.mxfp8_tensor import MXFP8Quantizer
 
     if quantizer is not None:
