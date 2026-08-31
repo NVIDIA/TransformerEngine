@@ -49,16 +49,6 @@ SHARDING_MODES = [
     pytest.param(False, id="SHARDY"),
     pytest.param(True, marks=EXPLICIT_SHARDING_TEST, id="EXPLICIT_SHARDING"),
 ]
-EXPLICIT_SHARDING_NON_CP_CONFIGS = [
-    pytest.param(2, (2,), ("dp",), MeshResource(dp_resource="dp"), id="n2_dp2_tp1"),
-    pytest.param(
-        2,
-        (2,),
-        ("tpsp",),
-        MeshResource(tpsp_resource="tpsp"),
-        id="n2_dp1_tp2",
-    ),
-]
 EXPLICIT_SHARDING_MULTI_AXIS_CONFIGS = [
     pytest.param(
         4,
@@ -228,30 +218,6 @@ class TestDistributedSelfAttn:
 
     @EXPLICIT_SHARDING_TEST
     @pytest.mark.parametrize(
-        "device_count,mesh_shape,mesh_axes,mesh_resource", EXPLICIT_SHARDING_NON_CP_CONFIGS
-    )
-    @pytest.mark.parametrize(
-        "attn_mask_type", [AttnMaskType.PADDING_MASK, AttnMaskType.CAUSAL_MASK]
-    )
-    def test_self_attn_explicit_sharding_smoke(
-        self, device_count, mesh_shape, mesh_axes, mesh_resource, attn_mask_type
-    ):
-        self.impl_test_self_attn(
-            device_count,
-            mesh_shape,
-            mesh_axes,
-            mesh_resource,
-            (4, 128, 8, 64),
-            AttnBiasType.NO_BIAS,
-            None,
-            attn_mask_type,
-            jnp.bfloat16,
-            AttnSoftmaxType.VANILLA_SOFTMAX,
-            mesh_axis_types=(AxisType.Explicit,) * len(mesh_axes),
-        )
-
-    @EXPLICIT_SHARDING_TEST
-    @pytest.mark.parametrize(
         "device_count,mesh_shape,mesh_axes,mesh_resource", EXPLICIT_SHARDING_MULTI_AXIS_CONFIGS
     )
     @pytest.mark.parametrize(
@@ -395,47 +361,6 @@ class TestDistributedCrossAttn:
             softmax_type,
             mesh_axis_types=(AxisType.Explicit,) * len(mesh_axes) if explicit_sharding else None,
         )
-
-    @EXPLICIT_SHARDING_TEST
-    @pytest.mark.parametrize(
-        "device_count,mesh_shape,mesh_axes,mesh_resource", EXPLICIT_SHARDING_NON_CP_CONFIGS
-    )
-    @pytest.mark.parametrize(
-        "attn_mask_type,softmax_type",
-        [
-            pytest.param(
-                AttnMaskType.PADDING_MASK,
-                AttnSoftmaxType.OFF_BY_ONE_SOFTMAX,
-                id="padding-off-by-one",
-            ),
-            pytest.param(
-                AttnMaskType.CAUSAL_MASK,
-                AttnSoftmaxType.LEARNABLE_SOFTMAX,
-                id="causal-learnable",
-            ),
-        ],
-    )
-    def test_cross_attn_explicit_sharding(
-        self,
-        device_count,
-        mesh_shape,
-        mesh_axes,
-        mesh_resource,
-        attn_mask_type,
-        softmax_type,
-    ):
-        self.impl_test_cross_attn(
-            device_count,
-            mesh_shape,
-            mesh_axes,
-            mesh_resource,
-            (4, 128, 8, 64),
-            attn_mask_type,
-            jnp.bfloat16,
-            softmax_type,
-            mesh_axis_types=(AxisType.Explicit,) * len(mesh_axes),
-        )
-
 
 DISTRIBUTED_SCORE_MOD_DATA_SHAPES = {
     "L0": [],

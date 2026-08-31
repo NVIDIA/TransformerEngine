@@ -44,7 +44,6 @@ from ..sharding import (
     all_reduce_sum_along_dp_fsdp,
     get_mesh_axis_size,
     get_mesh_axis_rank,
-    get_mesh_axis_rank_host,
     get_all_mesh_axes,
     num_of_devices,
     with_sharding_constraint,
@@ -3487,20 +3486,27 @@ class FusedRingAttnStripedFwdPrimitive(FusedAttnFwdPrimitive):
                     )
 
                 if config.window_size != (-1, -1):
-                    cp_rank = get_mesh_axis_rank_host(config.cp_axis, mesh)
-                    kv_src_rank = (cp_size + cp_rank - idx) % cp_size
-                    # Note: all inputs of adjust_cp_striped_window_size should be host values
-                    cp_striped_window_size = adjust_cp_striped_window_size(
-                        cp_rank, kv_src_rank, cp_size, config.window_size
-                    )
-                    current_config = replace(
-                        subblock_config, cp_striped_window_size=cp_striped_window_size
+                    cp_rank = get_mesh_axis_rank(config.cp_axis, mesh)
+                    rank_configs = []
+                    for rank in range(cp_size):
+                        kv_src_rank = (cp_size + rank - idx) % cp_size
+                        cp_striped_window_size = adjust_cp_striped_window_size(
+                            rank, kv_src_rank, cp_size, config.window_size
+                        )
+                        rank_configs.append(
+                            replace(
+                                subblock_config,
+                                cp_striped_window_size=cp_striped_window_size,
+                            )
+                        )
+                    output_per_step, softmax_aux_per_step, _, max_logit_per_step = lax.switch(
+                        cp_rank,
+                        tuple(partial(compute, rank_config) for rank_config in rank_configs),
                     )
                 else:
-                    current_config = subblock_config
-                output_per_step, softmax_aux_per_step, _, max_logit_per_step = compute(
-                    current_config
-                )
+                    output_per_step, softmax_aux_per_step, _, max_logit_per_step = compute(
+                        subblock_config
+                    )
 
                 softmax_aux_per_step = softmax_aux_per_step.reshape((batch, q_max_seqlen, head, 1))
 
@@ -3655,19 +3661,25 @@ class FusedRingAttnStripedBwdPrimitive(FusedAttnBwdPrimitive):
                     return dq_per_step, dkv_per_step, dbias_per_step
 
                 if config.window_size != (-1, -1):
-                    # We need cp_rank to be a host value for adjust_cp_striped_window_size()
-                    cp_rank = get_mesh_axis_rank_host(config.cp_axis, mesh)
-                    kv_src_rank = (cp_size + cp_rank - idx) % cp_size
-                    # Note: all inputs of adjust_cp_striped_window_size should be host values
-                    cp_striped_window_size = adjust_cp_striped_window_size(
-                        cp_rank, kv_src_rank, cp_size, config.window_size
-                    )
-                    current_config = replace(
-                        subblock_config, cp_striped_window_size=cp_striped_window_size
+                    cp_rank = get_mesh_axis_rank(config.cp_axis, mesh)
+                    rank_configs = []
+                    for rank in range(cp_size):
+                        kv_src_rank = (cp_size + rank - idx) % cp_size
+                        cp_striped_window_size = adjust_cp_striped_window_size(
+                            rank, kv_src_rank, cp_size, config.window_size
+                        )
+                        rank_configs.append(
+                            replace(
+                                subblock_config,
+                                cp_striped_window_size=cp_striped_window_size,
+                            )
+                        )
+                    dq_per_step, dkv_per_step, dbias_per_step = lax.switch(
+                        cp_rank,
+                        tuple(partial(compute, rank_config) for rank_config in rank_configs),
                     )
                 else:
-                    current_config = subblock_config
-                dq_per_step, dkv_per_step, dbias_per_step = compute(current_config)
+                    dq_per_step, dkv_per_step, dbias_per_step = compute(subblock_config)
 
                 kv_next, dkv = jnp.unstack(kv_dkv)
                 dq += dq_per_step
