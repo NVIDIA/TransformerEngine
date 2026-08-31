@@ -43,9 +43,10 @@ void nvfp4_2d_partial_cast(const at::Tensor& inp, py::handle out, const at::Tens
   const TensorWrapper scale_cu = makeTransformerEngineTensor(scale);
   const TensorWrapper global_scale_cu = makeTransformerEngineTensor(global_scale);
 
-  nvte_nvfp4_2d_partial_cast(inp_cu.data(), out_cu.data(), scale_cu.data(), global_scale_cu.data(),
-                             h, w, scale.stride(0), scale.stride(1), start_offset, block_len,
-                             static_cast<NVTEDType>(scale_dtype), at::cuda::getCurrentCUDAStream());
+  nvte_nvfp4_2d_partial_cast_v2(inp_cu.data(), out_cu.data(), scale_cu.data(),
+                                global_scale_cu.data(), h, w, scale.stride(0), scale.stride(1),
+                                start_offset, block_len, static_cast<NVTEDType>(scale_dtype),
+                                at::cuda::getCurrentCUDAStream());
 }
 
 void nvfp4_multi_tensor_2d_partial_cast(std::vector<at::Tensor> inp_list,
@@ -94,10 +95,10 @@ void nvfp4_multi_tensor_2d_partial_cast(std::vector<at::Tensor> inp_list,
     const TensorWrapper scale_cu = makeTransformerEngineTensor(scale);
     const TensorWrapper global_scale_cu = makeTransformerEngineTensor(global_scale);
 
-    nvte_nvfp4_2d_partial_cast(inp_cu.data(), out_cu.data(), scale_cu.data(),
-                               global_scale_cu.data(), h, w, scale.stride(0), scale.stride(1),
-                               start_offset, static_cast<size_t>(block_len),
-                               static_cast<NVTEDType>(scale_dtype), stream);
+    nvte_nvfp4_2d_partial_cast_v2(inp_cu.data(), out_cu.data(), scale_cu.data(),
+                                  global_scale_cu.data(), h, w, scale.stride(0), scale.stride(1),
+                                  start_offset, static_cast<size_t>(block_len),
+                                  static_cast<NVTEDType>(scale_dtype), stream);
   }
 }
 
