@@ -210,7 +210,7 @@ XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedMoEAuxLossBackwardHandler);
 void SetEpBootstrapParams(pybind11::bytes unique_id_bytes, int ep_size, int rank_within_group,
                           int num_experts, int max_tokens_per_rank, int max_recv_tokens_per_rank,
                           int hidden_dim, int max_num_sms, int max_token_dtype,
-                          bool drop_on_overflow);
+                          bool drop_on_overflow, bool borrowed_comm);
 void ReleaseEpResources();
 // Return the handle_mem byte size for a layer config.
 size_t EpHandleMemSize(int top_k, size_t dispatch_output_per_expert_alignment);
@@ -226,6 +226,11 @@ XLA_FFI_DECLARE_HANDLER_SYMBOL(EpDispatchHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(EpCombineHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(EpDispatchBwdHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(EpCombineBwdHandler);
+
+// EP-specific execute stage of the borrowed-comm bootstrap op (see
+// tex.ep.use_nccl_comm_from_xla). The prepare stage is the generic
+// FfiRequestCliqueHandler in extensions/ffi_collectives.h.
+XLA_FFI_DECLARE_HANDLER_SYMBOL(EpBootstrapBorrowedCommHandler);
 
 // TopK
 XLA_FFI_DECLARE_HANDLER_SYMBOL(TopkHandler);
