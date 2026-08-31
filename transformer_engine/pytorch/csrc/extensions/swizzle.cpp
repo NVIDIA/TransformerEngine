@@ -77,8 +77,7 @@ std::tuple<std::optional<at::Tensor>, std::optional<at::Tensor>> swizzle_scales_
     const NVTEShape input_scales_shape = input_scales_nvte.shape;
     const auto scales_dtype = static_cast<DType>(input_scales_nvte.dtype);
 
-    // Allocate buffer for swizzled scales. Byte dtype keeps the aten tensor
-    // uint8 (matching quantizer allocations); NVTE-level dtype stays scales_dtype.
+    // Allocate buffer for swizzled scales (uint8, like all quantizer allocations)
     const NVTEShape output_scales_shape = input_scales_shape;
     rowwise_scales_pyt = allocateSpace(input_scales_shape, DType::kByte, false);
     void *output_scales_dptr = getDataPtr(*rowwise_scales_pyt);
@@ -111,8 +110,7 @@ std::tuple<std::optional<at::Tensor>, std::optional<at::Tensor>> swizzle_scales_
     const NVTEShape input_scales_shape = input_scales_nvte.shape;
     const auto scales_dtype = static_cast<DType>(input_scales_nvte.dtype);
 
-    // Allocate buffer for swizzled scales. Byte dtype keeps the aten tensor
-    // uint8 (matching quantizer allocations); NVTE-level dtype stays scales_dtype.
+    // Allocate buffer for swizzled scales (uint8, like all quantizer allocations)
     const NVTEShape output_scales_shape = input_scales_shape;
     columnwise_scales_pyt = allocateSpace(input_scales_shape, DType::kByte, false);
     void *output_scales_dptr = getDataPtr(*columnwise_scales_pyt);
