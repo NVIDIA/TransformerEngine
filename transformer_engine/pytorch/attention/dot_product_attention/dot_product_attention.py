@@ -36,7 +36,13 @@ from transformer_engine.pytorch.tensor.storage.float8_tensor_storage import Floa
 from transformer_engine.pytorch.tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
 from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
 from transformer_engine.pytorch.export import is_in_onnx_export_mode
-from transformer_engine.pytorch.constants import AttnMaskTypes, AttnTypes, dist_group_type, DType
+from transformer_engine.pytorch.constants import (
+    AttnMaskTypes,
+    AttnTypes,
+    CPLoadBalancingStrategy,
+    DType,
+    dist_group_type,
+)
 from transformer_engine.pytorch.distributed import (
     get_distributed_world_size,
     checkpoint,
@@ -727,6 +733,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         self.cp_global_ranks = cp_global_ranks
         self.cp_stream = cp_stream
         self.cp_comm_type = cp_comm_type
+        self.load_balancing_strategy = CPLoadBalancingStrategy.DUAL_CHUNK_SWAP
 
         self.hidden_size_per_attention_head_k = (
             kv_channels if isinstance(kv_channels, int) else kv_channels[0]
@@ -879,6 +886,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         cp_global_ranks: List[int],
         cp_stream: torch.cuda.Stream,
         cp_comm_type: str = "p2p",
+        load_balancing_strategy=CPLoadBalancingStrategy.DUAL_CHUNK_SWAP,
     ) -> None:
         """
         Set the context parallel attributes for the given
@@ -908,11 +916,18 @@ class DotProductAttention(TransformerEngineBaseModule):
                       - ``"a2a+p2p"``: hierarchical CP implementation. First applying a2a to QKV
                         across each CP sub-group (e.g., via NVLink), then exchanging KV with
                         p2p between sub-groups (e.g., via IBLink).
+        load_balancing_strategy : CPLoadBalancingStrategy
+                                  token partition strategy for context-parallel attention.
         """
+        assert isinstance(load_balancing_strategy, CPLoadBalancingStrategy), (
+            f"Expected {CPLoadBalancingStrategy.__name__}, "
+            f"got {type(load_balancing_strategy).__name__}."
+        )
         self.cp_group = cp_group
         self.cp_global_ranks = cp_global_ranks
         self.cp_stream = cp_stream
         self.cp_comm_type = cp_comm_type
+        self.load_balancing_strategy = load_balancing_strategy
 
     def init_fp8_metadata(self, num_gemms: int = 1) -> None:
         """
@@ -2210,6 +2225,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                     cp_global_ranks=self.cp_global_ranks,
                     cp_stream=self.cp_stream,
                     cp_comm_type=self.cp_comm_type,
+                    load_balancing_strategy=self.load_balancing_strategy,
                     max_seqlen_q=max_seqlen_q,
                     max_seqlen_kv=max_seqlen_kv,
                     fp8=self.fp8 and self.fp8_meta["recipe"].fp8_dpa,
@@ -2266,6 +2282,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                         cp_global_ranks=self.cp_global_ranks,
                         cp_stream=self.cp_stream,
                         cp_comm_type=self.cp_comm_type,
+                        load_balancing_strategy=self.load_balancing_strategy,
                         fp8=self.fp8 and self.fp8_meta["recipe"].fp8_dpa,
                         fp8_meta=self.fp8_meta,
                         quantizers=self.quantizers,
@@ -2300,6 +2317,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                     cp_global_ranks=self.cp_global_ranks,
                     cp_stream=self.cp_stream,
                     cp_comm_type=self.cp_comm_type,
+                    load_balancing_strategy=self.load_balancing_strategy,
                     fp8=self.fp8 and self.fp8_meta["recipe"].fp8_dpa,
                     fp8_meta=self.fp8_meta,
                     quantizers=self.quantizers,

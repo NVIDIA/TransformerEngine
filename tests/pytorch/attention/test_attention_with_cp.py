@@ -45,6 +45,10 @@ torch.manual_seed(seed)
 torch.cuda.manual_seed(seed)
 
 test_essential = bool(int(os.getenv("NVTE_TEST_ESSENTIAL", "1")))
+# An installed FA4 package must not select tests when the backend is explicitly disabled.
+fa4_enabled = bool(int(os.getenv("NVTE_FLASH_ATTN", "1"))) and bool(
+    int(os.getenv("NVTE_FLASH_ATTN_V4", "1"))
+)
 
 model_configs_flash_attn = {
     # test: ModelConfig(b, sq, hq, dqk)
@@ -310,8 +314,12 @@ if test_essential:
 
 
 @pytest.mark.skipif(
-    not (FlashAttentionUtils.v2_plus or FlashAttentionUtils.v3_is_installed),
-    reason="Flash-attn v2 or v3 is required.",
+    not (
+        FlashAttentionUtils.v2_plus
+        or FlashAttentionUtils.v3_is_installed
+        or (fa4_enabled and FlashAttentionUtils.v4_is_installed)
+    ),
+    reason="Flash-attn v2, v3, or v4 is required.",
 )
 @pytest.mark.skipif(get_device_compute_capability() < (8, 0), reason="CP tests require sm80+.")
 @pytest.mark.parametrize("dtype", dtypes)
@@ -326,16 +334,10 @@ def test_cp_with_flash_attention(cp_pool, dtype, model, qkv_format, cp_comm_type
     if pad_between_seqs:
         if qkv_format != "thd":
             pytest.skip("pad_between_seqs only applies to THD format!")
-        if not FlashAttentionUtils.v3_is_installed or get_device_compute_capability() > (9, 0):
-            pytest.skip("pad_between_seqs with CP requires Flash Attention v3 on Hopper (sm90)!")
-        if cp_comm_type == "a2a+p2p":
-            pytest.skip("pad_between_seqs is not yet supported with A2A+P2P CP comm type!")
-
-    if pad_between_seqs:
-        if qkv_format != "thd":
-            pytest.skip("pad_between_seqs only applies to THD format!")
-        if not FlashAttentionUtils.v3_is_installed:
-            pytest.skip("pad_between_seqs with CP requires Flash Attention v3!")
+        has_fa3 = FlashAttentionUtils.v3_is_installed and get_device_compute_capability() == (9, 0)
+        has_fa4 = fa4_enabled and FlashAttentionUtils.v4_is_installed
+        if not (has_fa3 or has_fa4):
+            pytest.skip("pad_between_seqs with CP requires Flash Attention v3 on Hopper or v4!")
         if cp_comm_type == "a2a+p2p":
             pytest.skip("pad_between_seqs is not yet supported with A2A+P2P CP comm type!")
 
@@ -352,9 +354,10 @@ def test_cp_with_flash_attention(cp_pool, dtype, model, qkv_format, cp_comm_type
         qkv_format == "thd"
         and cp_comm_type == "all_gather"
         and not FlashAttentionUtils.v3_is_installed
+        and not (fa4_enabled and FlashAttentionUtils.v4_is_installed)
     ):
         pytest.skip(
-            "THD + all_gather requires FA3 (seqused_k) to separate tensor offsets from"
+            "THD + all_gather requires FA3 or FA4 (seqused_k) to separate tensor offsets from"
             " visibility limits in the gathered KV buffer."
         )
 
@@ -684,23 +687,6 @@ def test_cp_with_fused_attention(
         pytest.skip("Deterministic mode does not support non-vanilla softmax with FusedAttention")
     if _deterministic and config.attn_bias_type == "post_scale_bias" and is_training:
         pytest.skip("Deterministic mode does not support post_scale_bias with requires_grad")
-    # Observed: cuDNN det THD backward asks for ~128 * bHSS bytes of workspace
-    # on sm90; at 1<<30 that's 128 GiB, won't fit on H100's 80 GB. Held exactly
-    # at b=2 + power-of-2 S in our sweep; for b>=3 the workspace was observed to
-    # grow super-linearly (b=4 took ~4x the b=2 amount, not 2x) — revisit if a
-    # config uses b>2.
-    SM90_DET_FUSED_THD_BWD_MAX_BHSS = 1 << 30
-    if (
-        _deterministic
-        and qkv_format == "thd"
-        and get_device_compute_capability() == (9, 0)
-        and config.batch_size * config.num_heads * config.max_seqlen_q * config.max_seqlen_kv
-        >= SM90_DET_FUSED_THD_BWD_MAX_BHSS
-    ):
-        pytest.skip(
-            "Deterministic FusedAttention backward with THD format OOMs on sm90"
-            " for large bHSS configs (known cuDNN issue)."
-        )
 
     _submit(
         pool,
@@ -715,6 +701,69 @@ def test_cp_with_fused_attention(
         scaling_mode=scaling_mode,
         f16_O=f16_O,
         is_training=is_training,
+        deterministic=_deterministic,
+        log_level=pytest_logging_level,
+    )
+
+
+@pytest.mark.skipif(get_cudnn_version() < (8, 9, 7), reason="cuDNN 8.9.7+ is required.")
+@pytest.mark.skipif(
+    get_device_compute_capability() < (9, 0), reason="FusedAttention THD requires sm90+."
+)
+def test_cp_with_fused_attention_no_load_balance(cp_pool):
+    """Check experimental single-chunk forward/backward."""
+    config = copy.deepcopy(model_configs_fused_attn["cp_2_0"])
+    config.context_parallel = True
+    config.cp_comm_type = "all_gather"
+    config.attn_mask_type = "padding_causal"
+    available_backends, _, _ = get_available_attention_backends(
+        config,
+        qkv_dtype=torch.bfloat16,
+        qkv_layout="thd_thd_thd",
+        pad_between_seqs=True,
+        is_training=True,
+        deterministic=_deterministic,
+    )
+    if not available_backends[1]:
+        pytest.skip("No attention backend available.")
+    _submit(
+        cp_pool(2),
+        dtype="bf16",
+        model="cp_2_0",
+        qkv_format="thd",
+        kernel_backend="FusedAttention",
+        cp_comm_type="all_gather",
+        load_balancing_strategy="NO_LOAD_BALANCE",
+        deterministic=_deterministic,
+        log_level=pytest_logging_level,
+    )
+
+
+def test_cp_with_flash_attention_no_load_balance(cp_pool):
+    """Check the supported unpadded FlashAttention path."""
+    config = copy.deepcopy(model_configs_flash_attn["cp_2_0"])
+    config.context_parallel = True
+    config.cp_comm_type = "all_gather"
+    config.attn_mask_type = "padding_causal"
+    available_backends, _, _ = get_available_attention_backends(
+        config,
+        qkv_dtype=torch.bfloat16,
+        qkv_layout="thd_thd_thd",
+        pad_between_seqs=False,
+        is_training=True,
+        deterministic=_deterministic,
+    )
+    if not available_backends[0]:
+        pytest.skip("FlashAttention is unavailable.")
+    _submit(
+        cp_pool(2),
+        dtype="bf16",
+        model="cp_2_0",
+        qkv_format="thd",
+        kernel_backend="FlashAttention",
+        cp_comm_type="all_gather",
+        fa_pad_between_seqs=False,
+        load_balancing_strategy="NO_LOAD_BALANCE",
         deterministic=_deterministic,
         log_level=pytest_logging_level,
     )
