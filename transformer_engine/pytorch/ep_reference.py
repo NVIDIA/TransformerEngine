@@ -438,6 +438,36 @@ def _padded_expert_rows(
     return padded
 
 
+def _deinterleave_glu(tensor: torch.Tensor, interleave_size: int) -> torch.Tensor:
+    """Convert fixed-width gate/up strips to contiguous gate and up halves."""
+    shape = tensor.shape
+    return (
+        tensor.reshape(
+            *shape[:-1],
+            shape[-1] // (2 * interleave_size),
+            2,
+            interleave_size,
+        )
+        .transpose(-3, -2)
+        .reshape(shape)
+    )
+
+
+def _interleave_glu(tensor: torch.Tensor, interleave_size: int) -> torch.Tensor:
+    """Convert contiguous gate and up halves to fixed-width strips."""
+    shape = tensor.shape
+    return (
+        tensor.reshape(
+            *shape[:-1],
+            2,
+            shape[-1] // (2 * interleave_size),
+            interleave_size,
+        )
+        .transpose(-3, -2)
+        .reshape(shape)
+    )
+
+
 class MoeEpReference:
     """Reference implementation of routed SwiGLU experts plus EP dispatch.
 
@@ -467,6 +497,7 @@ class MoeEpReference:
         intermediate_format: Optional[Union[MoeFormat, str]] = None,
         backward_operand_format: Optional[Union[MoeFormat, str]] = None,
         apply_topk_in_fc1: bool = True,
+        weight_interleave_size: Optional[int] = None,
         gate_up_clamp: Optional[float] = None,
         generate_c: bool = False,
         backward_wgrad_mode: str = "none",
@@ -492,6 +523,8 @@ class MoeEpReference:
             raise ValueError("token_padding_size must be a positive integer")
         if backward_wgrad_mode == "operands" and token_padding_size != 256:
             raise ValueError("backward_wgrad_mode='operands' requires token_padding_size=256")
+        if weight_interleave_size not in (None, 32):
+            raise ValueError("weight_interleave_size must be None or 32")
 
         if ep_group is None:
             ep_size, ep_rank = 1, 0
@@ -525,6 +558,7 @@ class MoeEpReference:
             None if backward_operand_format is None else _parse_format(backward_operand_format)
         )
         self.apply_topk_in_fc1 = bool(apply_topk_in_fc1)
+        self.weight_interleave_size = weight_interleave_size
         self.gate_up_clamp = None if gate_up_clamp is None else abs(float(gate_up_clamp))
         self.generate_c = bool(generate_c)
         self.backward_wgrad_mode = backward_wgrad_mode
@@ -652,6 +686,8 @@ class MoeEpReference:
             if fc1_c_rows is not None:
                 # Raw pre-SwiGLU accumulator: before clamp, no router weight.
                 fc1_c_rows.append(gate_up.to(torch.bfloat16))
+            if self.weight_interleave_size is not None:
+                gate_up = _deinterleave_glu(gate_up, self.weight_interleave_size)
             gate, up = gate_up.split(self.intermediate_size, dim=-1)
             if self.gate_up_clamp is not None:
                 gate = gate.clamp(max=self.gate_up_clamp)
@@ -726,6 +762,14 @@ class MoeEpReference:
         re-dispatch.
         """
 
+        if self.weight_interleave_size == 32 and (
+            not isinstance(fc1_weight, BlockScaledTensor)
+            or fc1_weight.format is not MoeFormat.MXFP8
+        ):
+            raise ValueError(
+                "weight_interleave_size=32 requires an MXFP8 BlockScaledTensor "
+                "for fc1_weight"
+            )
         if topk_idx.ndim != 2:
             raise ValueError(f"topk_idx must be 2-D, got shape {tuple(topk_idx.shape)}")
         token_count = topk_idx.shape[0]
@@ -1084,6 +1128,8 @@ class MoeEpReference:
             d_y = dy_rows.index_select(0, positions)
             semantic_d_y = semantic_dy_rows.index_select(0, positions)
 
+            if self.weight_interleave_size is not None:
+                c = _deinterleave_glu(c, self.weight_interleave_size)
             gate, up = c.split(self.intermediate_size, dim=-1)
             if self.gate_up_clamp is not None:
                 g = gate.clamp(max=self.gate_up_clamp)
@@ -1117,6 +1163,8 @@ class MoeEpReference:
             else:
                 d_gate, d_up = d_g, d_u
             d_c = torch.cat((d_gate, d_up), dim=-1)
+            if self.weight_interleave_size is not None:
+                d_c = _interleave_glu(d_c, self.weight_interleave_size)
             dc_rows.index_copy_(0, positions, d_c)
             if self.intermediate_format is not None:
                 d_c = _format_round_trip(d_c, self.intermediate_format)
