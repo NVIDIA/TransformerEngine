@@ -4,7 +4,9 @@
 
 """JAX related extensions."""
 
+import importlib.util
 import os
+import warnings
 from pathlib import Path
 from packaging import version
 
@@ -79,6 +81,21 @@ def xla_path() -> str:
     return xla_home
 
 
+def _xla_ffi_collectives_floors():
+    """(nightly_floor, stable_floor) version strings from version_utils.py.
+
+    Loaded by file path, not `import transformer_engine...`, since that
+    package's __init__ requires the extension to already be built.
+    """
+    version_utils_path = (
+        Path(__file__).resolve().parent.parent / "transformer_engine" / "jax" / "version_utils.py"
+    )
+    spec = importlib.util.spec_from_file_location("_te_jax_version_utils", version_utils_path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module._XLA_FFI_COLLECTIVES_NIGHTLY_FLOOR, module._XLA_FFI_COLLECTIVES_STABLE_FLOOR
+
+
 def setup_jax_extension(
     csrc_source_files,
     csrc_header_files,
@@ -104,6 +121,26 @@ def setup_jax_extension(
             xla_path(),
         ]
     )
+
+    # jaxlib ships xla/ffi/api/collectives_c_api.h, needed by the EP
+    # borrowed-comm path, starting with the fix in jax-ml/jax#40333 (nightly
+    # floor: first container built after the fix landed; stable floor: the
+    # next jaxlib release containing it).
+    nightly_floor, stable_floor = _xla_ffi_collectives_floors()
+    try:
+        import jax
+
+        installed = version.parse(jax.__version__)
+        floor = version.parse(nightly_floor if installed.is_devrelease else stable_floor)
+        if installed < floor:
+            warnings.warn(
+                f"Installed JAX {jax.__version__} does not ship "
+                "xla/ffi/api/collectives_c_api.h (requires jaxlib >= "
+                f"{stable_floor}, see jax-ml/jax#40333); the EP borrowed-comm path"
+                " will not be built."
+            )
+    except ImportError:
+        pass
 
     # Compile flags
     cxx_flags = ["-O3"]
