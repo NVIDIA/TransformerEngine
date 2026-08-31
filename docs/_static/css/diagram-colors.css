@@ -132,3 +132,35 @@
   stroke-width: 2.5;
 }
 
+/* Dark mode overrides: darken fills and lighten text so diagrams stay
+   legible against the theme's dark background. */
+html[data-theme="dark"] .hp { fill: #3a2f5c; stroke: #b39ddb; }
+html[data-theme="dark"] .fp8 { fill: #4d3c00; stroke: #ffca28; }
+html[data-theme="dark"] .gemm { fill: #663c00; stroke: #ffb74d; }
+html[data-theme="dark"] .quantize { fill: #1b3d1e; stroke: #81c784; }
+html[data-theme="dark"] .amax { fill: #0d3c54; stroke: #4fc3f7; }
+html[data-theme="dark"] .box-blue { fill: #10375c; stroke: #64b5f6; }
+html[data-theme="dark"] .box-orange { fill: #5c3a10; stroke: #ffb74d; }
+html[data-theme="dark"] .box-green { fill: #1e4620; stroke: #81c784; }
+html[data-theme="dark"] .layernorm { fill: #10405c; stroke: #4fc3f7; }
+html[data-theme="dark"] .fused { fill: #103c38; stroke: #4db6ac; }
+html[data-theme="dark"] .computation { fill: #2b2b2b; stroke: #9e9e9e; }
+html[data-theme="dark"] .fp32 { fill: #5c1f1f; stroke: #ef9a9a; }
+
+html[data-theme="dark"] .text,
+html[data-theme="dark"] .title {
+  fill: #f5f5f5;
+}
+
+html[data-theme="dark"] .small-text {
+  fill: #bdbdbd;
+}
+
+html[data-theme="dark"] .label {
+  fill: #e0e0e0;
+}
+
+html[data-theme="dark"] .arrow {
+  stroke: #bdbdbd;
+}
+

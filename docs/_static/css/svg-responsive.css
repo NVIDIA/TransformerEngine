@@ -1,6 +1,13 @@
 /* Responsive styling for project-authored SVG images */
 
-/* Keep embedded SVG content responsive without affecting theme UI icons. */
+/* Keep embedded SVG content responsive without affecting theme UI icons.
+   nvidia_sphinx_theme/pydata-sphinx-theme wraps page content in
+   <article class="bd-article">, not the RTD theme's <div class="document">,
+   and `.. raw:: html :file:` doesn't add a `.raw-html` wrapper -- so these
+   selectors must target the article directly or SVGs with a fixed
+   width/viewBox will overflow the (narrower, "On this page" sidebar-adjacent)
+   content column. */
+article.bd-article svg,
 .document object[type="image/svg+xml"],
 .document .raw-html svg,
 .svg-figure svg {
@@ -14,6 +21,7 @@
 }
 
 /* Ensure container doesn't overflow */
+article.bd-article,
 .document .raw-html {
     max-width: 100%;
     overflow-x: auto;

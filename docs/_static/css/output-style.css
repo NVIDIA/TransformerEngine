@@ -58,3 +58,22 @@
     background: transparent !important;
 }
 
+/* Dark mode overrides */
+html[data-theme="dark"] .program-output {
+    background-color: #2b2b2b;
+}
+
+html[data-theme="dark"] .program-output pre {
+    color: #e0e0e0;
+}
+
+html[data-theme="dark"] .output-block {
+    background-color: #2b2b2b;
+    border-color: #444950;
+    color: #e0e0e0;
+}
+
+html[data-theme="dark"] .console-output {
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.4);
+}
+
