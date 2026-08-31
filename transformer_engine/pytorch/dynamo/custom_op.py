@@ -568,7 +568,14 @@ class _ArgPlan:
     fields: Tuple[_FieldPlan, ...]
     slot_names: Tuple[str, ...]
     schema_str: str
-    tensor_field_names: Tuple[str, ...]
+
+    def tensor_field_names(self) -> Tuple[str, ...]:
+        """Names of the tensor-valued fields (the ones :func:`_spec_view` converts)."""
+        return tuple(
+            f.name
+            for f in self.fields
+            if f.kind in (_FieldKind.TENSOR, _FieldKind.TENSOR_OR_QUANTIZED)
+        )
 
     def tensor_or_quantized_offsets(self) -> List[int]:
         """Start offset of each tensor-or-quantized slot group.
@@ -696,10 +703,7 @@ def _parse_arg_type(cls: type) -> _ArgPlan:
     fields = tuple(_parse_field(name, annot) for name, annot in _resolved_field_annotations(cls))
 
     slot_specs: List[_SlotSpec] = []
-    tensor_field_names: List[str] = []
     for field in fields:
-        if field.kind in (_FieldKind.TENSOR, _FieldKind.TENSOR_OR_QUANTIZED):
-            tensor_field_names.append(field.name)
         slot_specs.extend(field.slots)
     if any(f.kind in (_FieldKind.SIMPLE, _FieldKind.PROCESS_GROUP) for f in fields):
         slot_specs.append(_SlotSpec(_SIMPLE_META_SLOT, _OPAQUE_VALUE_BUNDLE_TYPE_NAME))
@@ -715,7 +719,6 @@ def _parse_arg_type(cls: type) -> _ArgPlan:
         fields=fields,
         slot_names=slot_names,
         schema_str=schema_str,
-        tensor_field_names=tuple(tensor_field_names),
     )
 
 
@@ -953,7 +956,7 @@ def _register_base_op(
 
     def _fake(*flat: Any) -> List[torch.Tensor]:
         obj = plan.unpack(dict(zip(plan.slot_names, flat)))
-        spec_obj = _spec_view(obj, plan.tensor_field_names)
+        spec_obj = _spec_view(obj, plan.tensor_field_names())
         return pack_result(fake_impl(spec_obj))
 
     op = torch.library.custom_op(
@@ -987,7 +990,7 @@ def _register_autograd_for_op(
             i: len(value) for i, value in enumerate(inputs) if isinstance(value, list)
         }
         fwd_obj = fwd_plan.unpack(dict(zip(fwd_plan.slot_names, inputs)))
-        spec_obj = _spec_view(fwd_obj, fwd_plan.tensor_field_names)
+        spec_obj = _spec_view(fwd_obj, fwd_plan.tensor_field_names())
 
         out_plan = _OutputPlan.parse(fwd_fake_impl(spec_obj))
         user_outputs = out_plan.user_outputs(output)
@@ -1313,7 +1316,7 @@ def _register_custom_op_impl(
     _quantized_tensor_passthrough_ops.add(base_bwd_op.default)
 
     def forward_fn(fwd_args):
-        spec_obj = _spec_view(fwd_args, fwd_plan.tensor_field_names)
+        spec_obj = _spec_view(fwd_args, fwd_plan.tensor_field_names())
         out_plan = _OutputPlan.parse(fwd_fake_impl(spec_obj))
         kwargs = fwd_plan.pack(fwd_args)
         flat_in = [kwargs[name] for name in fwd_plan.slot_names]
