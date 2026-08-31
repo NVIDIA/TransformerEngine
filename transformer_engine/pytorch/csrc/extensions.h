@@ -398,6 +398,19 @@ py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const 
                           std::optional<at::Tensor> tensor_offsets,
                           std::optional<at::Tensor> noop_flag, const py::object &output);
 
+py::object group_scaled_swiglu(const at::Tensor &input_2h, const at::Tensor &prob,
+                               py::handle quantizer, const size_t num_tensors,
+                               std::optional<at::Tensor> first_dims,
+                               std::optional<at::Tensor> last_dims,
+                               std::optional<at::Tensor> tensor_offsets);
+
+py::object group_scaled_clamped_swiglu(const at::Tensor &input_2h, const at::Tensor &prob,
+                                       py::handle quantizer, const size_t num_tensors, float limit,
+                                       float alpha, float glu_linear_offset,
+                                       std::optional<at::Tensor> first_dims,
+                                       std::optional<at::Tensor> last_dims,
+                                       std::optional<at::Tensor> tensor_offsets);
+
 py::object nvfp4_group_quantize_with_amax(const at::Tensor &tensor, py::handle quantizer,
                                           const size_t num_tensors,
                                           std::optional<at::Tensor> first_dims,
@@ -745,6 +758,24 @@ void ep_dispatch(at::Tensor handle_mem, at::Tensor topk_idx, at::Tensor tokens,
                  at::Tensor topk_weights, at::Tensor recv_tokens, at::Tensor recv_topk_weights,
                  std::optional<at::Tensor> tokens_scale_inv = std::nullopt,
                  std::optional<at::Tensor> recv_scale_inv = std::nullopt);
+
+// Fused prepare + dispatch in a single call. When the recv outputs are omitted
+// (eager mode), they are sized and allocated here from the per-step recv-count:
+// prepare writes the total into pinned-host total_recv_tokens (UVA), a stream sync
+// makes it host-readable with no D2H copy, and the recv outputs are carved from it
+// and returned; this path forbids symm-mem zero-copy IO. When the caller supplies
+// the recv outputs (non-eager), they are used as-is and mutated in place with no
+// stream sync. Passing tokens_scale_inv selects the MXFP8 path (recv_scale_inv is
+// then required or, in eager mode, allocated). Returns the allocated recv outputs
+// in eager mode ({recv_tokens, recv_topk_weights[, recv_scale_inv]}), else empty.
+std::vector<at::Tensor> ep_prepare_and_dispatch(
+    at::Tensor handle_mem, at::Tensor topk_idx, at::Tensor tokens, at::Tensor topk_weights,
+    at::Tensor tokens_per_expert, at::Tensor total_recv_tokens, int64_t top_k,
+    int64_t dispatch_output_per_expert_alignment,
+    std::optional<at::Tensor> recv_tokens = std::nullopt,
+    std::optional<at::Tensor> recv_topk_weights = std::nullopt,
+    std::optional<at::Tensor> recv_scale_inv = std::nullopt,
+    std::optional<at::Tensor> tokens_scale_inv = std::nullopt);
 
 void ep_combine(at::Tensor handle_mem, at::Tensor expert_out, at::Tensor result);
 

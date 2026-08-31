@@ -17,7 +17,7 @@
 #include <type_traits>
 
 #include "../common.h"
-#include "../util/ptx.cuh"
+#include "../util/ptx_arch_spec.cuh"
 #include "../utils.cuh"
 #include "mxfp8/swizzle.cuh"
 
