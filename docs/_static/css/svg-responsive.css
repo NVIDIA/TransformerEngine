@@ -1,19 +1,15 @@
-/* Responsive styling for SVG images */
+/* Responsive styling for project-authored SVG images */
 
-/* Make all SVG images responsive */
-.document svg,
+/* Keep embedded SVG content responsive without affecting theme UI icons. */
 .document object[type="image/svg+xml"],
-.bd-content svg {
+.document .raw-html svg,
+.svg-figure svg {
     max-width: 100%;
     height: auto;
-    display: block;
-    margin: 1em auto;
 }
 
 /* For raw HTML embedded SVGs */
 .document .raw-html svg {
-    max-width: 100%;
-    height: auto;
     width: 100%;
 }
 
@@ -33,6 +29,11 @@
     display: block;
     margin: 0 auto;
     height: auto;
+}
+
+.svg-figure svg {
+    display: block;
+    margin: 0 auto;
 }
 
 /* Different width classes for figures */
@@ -63,9 +64,3 @@
     font-size: 0.95em;
     line-height: 1.4;
 }
-
-
-
-
-
-
