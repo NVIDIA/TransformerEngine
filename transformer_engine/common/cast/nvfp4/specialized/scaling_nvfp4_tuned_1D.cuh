@@ -11,6 +11,7 @@
 #ifndef TRANSFORMER_ENGINE_SCALING_NVFP4_TUNED_1D_CUH_
 #define TRANSFORMER_ENGINE_SCALING_NVFP4_TUNED_1D_CUH_
 
+#include "../../../util/ptx_arch_spec.cuh"
 #include "../core_nvfp4.cuh"
 
 namespace transformer_engine {
@@ -154,12 +155,13 @@ __device__ __forceinline__ float get_amax_of_pair(const PairType pair) {
   return static_cast<float>(__hmax(__habs(pair.x), __habs(pair.y)));
 }
 
-template <typename Traits, bool USE_STOCHASTIC_ROUNDING, bool USE_FAST_MATH, typename RngType>
+template <typename Traits, bool USE_STOCHASTIC_ROUNDING, bool USE_FAST_MATH,
+          bool ROW_SCALED_NVFP4, typename RngType>
 __device__ __forceinline__ void colwise_scaling(
     const typename Traits::IType *__restrict__ sIn_ptr, fp4e2m1x2 *__restrict__ sOut_tr_ptr,
     nvfp4_scale_t *__restrict__ sSFcolwise_ptr, const float S_enc_colwise, const int stage_Y,
-    const int stage_X, const int buff_in, const int buff_out_tr, RngType &rng,
-    uint4 &random_uint4, int &rnd_idx) {
+    const int stage_X, const int buff_in, const int buff_out_tr, const float *amax_colwise_ptr,
+    const size_t col_offset, const size_t cols, RngType &rng, uint4 &random_uint4, int &rnd_idx) {
   using IType = typename Traits::IType;
   using IType2 = typename Traits::IType2;
   using IType2x3D = typename Traits::IType2x3D;
@@ -207,19 +209,27 @@ __device__ __forceinline__ void colwise_scaling(
                                static_cast<float>(__habs(thread_amax_2x.y))};
 #pragma unroll
   for (int w = 0; w < 2; ++w) {
+    float S_enc_colwise_block = S_enc_colwise;
+    if constexpr (ROW_SCALED_NVFP4) {
+      const size_t col_idx = col_offset + stage_X * TILE_DIM_X + thread_offset_X_colwise + w;
+      S_enc_colwise_block =
+          col_idx < cols
+              ? core::compute_global_encode_scaling_factor_FP4(amax_colwise_ptr[col_idx])
+              : 1.0f;
+    }
     const nvfp4_scale_t S_dec_b_fp8 =
         quantization_and_transposition_SF::compute_decoding_scaling_factor(block_amax[w],
-                                                                           S_enc_colwise);
+                                                                           S_enc_colwise_block);
 
     // Store scaling factors to SMEM buffer (R2S).
     sSFcolwise[scale_tr_offset_Y + w][scale_tr_offset_X] = S_dec_b_fp8;
 
     const scaling_coeff_type SFcoefficient =
-        core::compute_scaling_coefficient<scaling_coeff_type>(S_dec_b_fp8, S_enc_colwise);
+        core::compute_scaling_coefficient<scaling_coeff_type>(S_dec_b_fp8, S_enc_colwise_block);
 
     // Scale elements.
     __align__(8) uint32_t rOut[NVFP4_SCALE_DIM / 8];
-    #pragma unroll
+#pragma unroll
     for (int e = 0; e < NVFP4_SCALE_DIM / 8; ++e) {
       const uint64_t elts03 = *reinterpret_cast<uint64_t *>(&rIn[w][8 * e]);
       const uint64_t elts47 = *reinterpret_cast<uint64_t *>(&rIn[w][8 * e + 4]);
@@ -237,6 +247,17 @@ __device__ __forceinline__ void colwise_scaling(
     ptx::st_shared_b64(&sOut_tr[buff_out_tr][out_tr_thread_offset_Y + w][out_tr_thread_offset_X],
                        out_pack_16x);
   }
+}
+
+template <typename Traits, bool USE_STOCHASTIC_ROUNDING, bool USE_FAST_MATH, typename RngType>
+__device__ __forceinline__ void colwise_scaling(
+    const typename Traits::IType *__restrict__ sIn_ptr, fp4e2m1x2 *__restrict__ sOut_tr_ptr,
+    nvfp4_scale_t *__restrict__ sSFcolwise_ptr, const float S_enc_colwise, const int stage_Y,
+    const int stage_X, const int buff_in, const int buff_out_tr, RngType &rng,
+    uint4 &random_uint4, int &rnd_idx) {
+  colwise_scaling<Traits, USE_STOCHASTIC_ROUNDING, USE_FAST_MATH, false>(
+      sIn_ptr, sOut_tr_ptr, sSFcolwise_ptr, S_enc_colwise, stage_Y, stage_X, buff_in, buff_out_tr,
+      nullptr, 0, 0, rng, random_uint4, rnd_idx);
 }
 
 template <typename Traits, bool USE_STOCHASTIC_ROUNDING, bool USE_FAST_MATH, bool ROW_SCALED_NVFP4,

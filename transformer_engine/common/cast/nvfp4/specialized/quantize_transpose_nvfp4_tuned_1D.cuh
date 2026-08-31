@@ -21,6 +21,7 @@
 #include "../../../util/ptx_arch_spec.cuh"
 #include "../../../utils.cuh"
 #include "../core_nvfp4.cuh"
+#include "scaling_nvfp4_tuned_1D.cuh"
 
 namespace transformer_engine {
 namespace dispatch {
@@ -34,341 +35,28 @@ using namespace ptx;
 
 #if FP4_TYPE_SUPPORTED
 
+using tuned_1D_scaling_common::colwise_scaling;
+using tuned_1D_scaling_common::rowwise_scaling;
+
 struct TunableConfig {
-  static constexpr int CHUNK_DIM_Y = 128;
-  static constexpr int CHUNK_DIM_X = 128;
-  static constexpr int PREFETCH_STAGES = 1;
   static constexpr bool PERSISTENT = false;
 };
 
-constexpr int SCALE_DIM = 16;  // NVFP4 block (x16 elts)
-constexpr int THREADS_NUM = 128;
-constexpr int ELTS_PER_THREAD = 16;
-constexpr int TILE_DIM_Y = 64;
-constexpr int TILE_DIM_X = 64;
-
-static_assert(ELTS_PER_THREAD == SCALE_DIM && "Hardcoded and fixed parameter\0");
-
-static_assert((THREADS_NUM * ELTS_PER_THREAD <= TILE_DIM_Y * TILE_DIM_X) &&
-              "Unbalanced threads workload\0");
-
-static_assert((TunableConfig::CHUNK_DIM_Y % TILE_DIM_Y == 0) &&
-              "Chunk size Y must be evenly divisible by the tile size Y\0");
-static_assert((TunableConfig::CHUNK_DIM_X % TILE_DIM_X == 0) &&
-              "Chunk size X must be evenly divisible by the tile size X\0");
-
-static_assert((TILE_DIM_Y % SCALE_DIM == 0) &&
-              "Tile size Y must be evenly divisible by the scale dim\0");
-static_assert((TILE_DIM_X % SCALE_DIM == 0) &&
-              "Tile size X must be evenly divisible by the scale dim\0");
-
-constexpr int TILES_Y = TunableConfig::CHUNK_DIM_Y / TILE_DIM_Y;
-constexpr int TILES_X = TunableConfig::CHUNK_DIM_X / TILE_DIM_X;
-
-constexpr int THREADS_PER_SCALE_ROWWISE = SCALE_DIM / ELTS_PER_THREAD;
-
-constexpr int SCALES_PER_CHUNK_Y = TunableConfig::CHUNK_DIM_Y / SCALE_DIM;
-constexpr int SCALES_PER_CHUNK_X = TunableConfig::CHUNK_DIM_X / SCALE_DIM;
-
-constexpr int SCALES_PER_TILE_Y = TILE_DIM_Y / SCALE_DIM;
-constexpr int SCALES_PER_TILE_X = TILE_DIM_X / SCALE_DIM;
-
-constexpr int STAGES_Y = TILES_Y;
-constexpr int STAGES_X = TILES_X;
-constexpr int STAGES = STAGES_Y * STAGES_X;
-
-constexpr int BUFFS_NUM = TunableConfig::PREFETCH_STAGES + 1;
-constexpr int BUFFS_NUM_IN = BUFFS_NUM;
-constexpr int BUFFS_NUM_OUT = BUFFS_NUM;
-constexpr int BUFFS_NUM_OUT_TR = 2;
-constexpr int BUFF_DIM_Y = TILE_DIM_Y;
-constexpr int BUFF_DIM_X = TILE_DIM_X;
-constexpr int BUFF_SIZE = BUFF_DIM_Y * BUFF_DIM_X;
-constexpr int BUFF_SIZE_TOTAL = BUFF_SIZE * BUFFS_NUM;
-
-// Input buffer (BF16)
-constexpr int BUFF_IN_DIM_Y = BUFF_DIM_Y;
-constexpr int BUFF_IN_DIM_X = BUFF_DIM_X;
-constexpr int BUFF_IN_SIZE = BUFF_IN_DIM_Y * BUFF_IN_DIM_X;
-constexpr int BUFF_IN_ELTS_NUM = BUFF_IN_DIM_Y * BUFF_IN_DIM_X;
-
-// Output buffer (NVFP4)
-constexpr int BUFF_OUT_DIM_Y = BUFF_DIM_Y;
-constexpr int BUFF_OUT_DIM_X = (BUFF_DIM_X * 4) / 8;
-constexpr int BUFF_OUT_SIZE = BUFF_OUT_DIM_Y * BUFF_OUT_DIM_X;
-
-// Output transpose buffer (NVFP4)
-constexpr int BUFF_OUT_TR_DIM_Y = BUFF_DIM_X;
-constexpr int BUFF_OUT_TR_DIM_X = (BUFF_DIM_Y * 4) / 8;
-constexpr int BUFF_OUT_TR_SIZE = BUFF_OUT_TR_DIM_Y * BUFF_OUT_TR_DIM_X;
-
-// Manual swizzling parameters to reduce SHMEM bank conflicts
-constexpr int PACK_SIZE = 8;
-constexpr int WAVES = ELTS_PER_THREAD / PACK_SIZE;
-
-constexpr int THREADS_X_ROWWISE = TILE_DIM_X / ELTS_PER_THREAD;
-constexpr int THREADS_Y_ROWWISE = THREADS_NUM / THREADS_X_ROWWISE;
-
-constexpr int THREADS_X_TR = TILE_DIM_X / 2;
-constexpr int THREADS_Y_TR = THREADS_NUM / THREADS_X_TR;
-
-constexpr int ITERATIONS_NORMAL = BUFF_DIM_Y / THREADS_Y_ROWWISE;
-constexpr int ITERATIONS_TR = SCALES_PER_TILE_Y / THREADS_Y_TR;
-static_assert(ITERATIONS_TR >= 1 && "Number of transpose iterations should be >=1\0");
-static_assert((SCALES_PER_TILE_Y % THREADS_Y_TR == 0) &&
-              "Partial transpose iterations are not supported\0");
-
-constexpr int BUFF_OUT_IT_OFFSET = BUFF_OUT_TR_DIM_X / ITERATIONS_TR / STAGES;
-
-static_assert(BUFF_DIM_Y >= SCALE_DIM &&
-              "Number of buffer rows must be greater or equal to the size of the columwise "
-              "scaling block\0");
-static_assert(TunableConfig::CHUNK_DIM_Y >= BUFF_DIM_Y);
-static_assert(BUFF_DIM_Y >= THREADS_Y_ROWWISE &&
-              "Number of buffer rows must be greater or equal to the number of rowwise "
-              "processing threads in Y dimension\0");
-
-// Number of 4-bit elements that span 32 banks (4-byte each) of shared memory
-constexpr int TOTAL_BANKS_WIDTH = (32 * 4 * 8) / 4;  // 256
-
-// Number of threads (rowwise scaling) that span 32 banks (4-byte banks) of shared memory
-constexpr int THREADS_PER_BANK = TOTAL_BANKS_WIDTH / ELTS_PER_THREAD;
-
-using IType = bf16;
-using IType2 = typename ptx::FPx2<IType>;
-using IType3D = IType[BUFFS_NUM_IN][BUFF_IN_DIM_Y][BUFF_IN_DIM_X];
-using IType2x3D = IType2[BUFFS_NUM_IN][BUFF_IN_DIM_Y][BUFF_IN_DIM_X / 2];
-using OType2x3D = fp4e2m1x2[BUFFS_NUM_OUT][BUFF_OUT_DIM_Y][BUFF_OUT_DIM_X];
-using OType2xt3D = fp4e2m1x2[BUFFS_NUM_OUT_TR][BUFF_OUT_TR_DIM_Y][BUFF_OUT_TR_DIM_X];
-using ScalesType2D = nvfp4_scale_t[TunableConfig::CHUNK_DIM_Y][SCALES_PER_CHUNK_X];
-using ScalesTypeTr2D = nvfp4_scale_t[TunableConfig::CHUNK_DIM_X][SCALES_PER_CHUNK_Y];
 using RNG_t = typename transformer_engine::curanddx::detail::philox4x32_native_state<
     NVTE_BUILD_NUM_PHILOX_ROUNDS>;
 
-template <bool USE_FAST_MATH>
-struct SCALING_COEFFICIENT_TYPE {};
-template <>
-struct SCALING_COEFFICIENT_TYPE<false> {
-  using type = float;
-};
-template <>
-struct SCALING_COEFFICIENT_TYPE<true> {
-  using type = bf16;
-};
-
-__device__ __forceinline__ float get_amax_of_pair(const IType2 pair) {
-  return static_cast<float>(__hmax(__habs(pair.x), __habs(pair.y)));
-}
-
-// Compute "correct" per-block encoding scaling factor
-template <typename SF_TYPE>
-__device__ __forceinline__ SF_TYPE
-compute_nvfp4_scaling_coefficient(const nvfp4_scale_t S_dec_block, const float S_enc) {
-  NVTE_DEVICE_ERROR("Unsupported scaling-factor type. Only FP32 and BF16 are supported.");
-}
-
-template <>
-__device__ __forceinline__ float compute_nvfp4_scaling_coefficient<float>(
-    const nvfp4_scale_t S_dec_block, const float S_enc) {
-  const float S_dec = 1.0f / S_enc;
-  const float scale_rcp =
-      fminf(1.0f / (static_cast<float>(S_dec_block) * S_dec), detail::TypeExtrema<float>::max);
-  return scale_rcp;
-}
-
-template <>
-__device__ __forceinline__ bf16
-compute_nvfp4_scaling_coefficient<bf16>(const nvfp4_scale_t S_dec_block, const float S_enc) {
-  const float scale_rcp =
-      fminf(S_enc / (static_cast<float>(S_dec_block)), detail::TypeExtrema<bf16>::max);
-  return static_cast<bf16>(scale_rcp);
-}
-
-template <bool USE_STOCHASTIC_ROUNDING, bool USE_FAST_MATH, bool ROW_SCALED_NVFP4>
-__device__ __forceinline__ void colwise_scaling(
-    const IType *__restrict__ sIn_ptr, fp4e2m1x2 *__restrict__ sOut_tr_ptr,
-    nvfp4_scale_t *__restrict__ sSFcolwise_ptr, const float S_enc_colwise, const int stage_Y,
-    const int stage_X, const int buff_in, const int buff_out_tr, const float *amax_colwise_ptr,
-    const size_t col_offset, const size_t cols, RNG_t &rng, uint4 &random_uint4, int &rnd_idx) {
-  using scaling_coeff_type = typename SCALING_COEFFICIENT_TYPE<USE_FAST_MATH>::type;
-
-  const auto &sIn2x = *reinterpret_cast<const IType2x3D *>(sIn_ptr);
-  auto &sOut_tr = *reinterpret_cast<OType2xt3D *>(sOut_tr_ptr);
-  auto &sSFcolwise = *reinterpret_cast<ScalesTypeTr2D *>(sSFcolwise_ptr);
-
-  const int warp = threadIdx.x / THREADS_PER_WARP;
-  const int thread_lane = threadIdx.x % THREADS_PER_WARP;
-
-  const int tid_Y_colwise = (thread_lane / 2 + warp) % 4;
-  const int tid_X_colwise = thread_lane;
-
-  const int thread_offset_Y_colwise = tid_Y_colwise * SCALE_DIM;
-  const int thread_offset_X_colwise = tid_X_colwise * 2;
-
-  const int in_thread_offset_Y = thread_offset_Y_colwise;
-  const int in_thread_offset_X = thread_offset_X_colwise / 2;
-
-  const int out_tr_thread_offset_Y = thread_offset_X_colwise;
-  const int out_tr_thread_offset_X = thread_offset_Y_colwise / 2;
-
-  const int scale_tr_offset_Y = (stage_X * TILE_DIM_X) + 2 * tid_X_colwise;
-  const int scale_tr_offset_X = (stage_Y * SCALES_PER_TILE_Y) + tid_Y_colwise;
-
-  __align__(8) IType rIn[2][SCALE_DIM];
-  // Read (cache) a pair of input elements (S2R). Find NVFP4-block AMAX
-  IType2 thread_amax_2x = {static_cast<IType>(0.0f), static_cast<IType>(0.0f)};
-#pragma unroll
-  for (int i = 0; i < SCALE_DIM; ++i) {
-    const IType2 elt_pair =
-        ptx::ld_shared_b32(&sIn2x[buff_in][in_thread_offset_Y + i][in_thread_offset_X]);
-    rIn[0][i] = elt_pair.x;
-    rIn[1][i] = elt_pair.y;
-    ptx::abs_max_2x(thread_amax_2x, thread_amax_2x, elt_pair);
-  }
-  const float block_amax[2] = {static_cast<float>(__habs(thread_amax_2x.x)),
-                               static_cast<float>(__habs(thread_amax_2x.y))};
-#pragma unroll
-  for (int w = 0; w < 2; ++w) {
-    float S_enc_colwise_block = S_enc_colwise;
-    if constexpr (ROW_SCALED_NVFP4) {
-      const size_t col_idx = col_offset + stage_X * TILE_DIM_X + thread_offset_X_colwise + w;
-      S_enc_colwise_block =
-          col_idx < cols ? core::compute_global_encode_scaling_factor_FP4(amax_colwise_ptr[col_idx])
-                         : 1.0f;
-    }
-    const nvfp4_scale_t S_dec_b_fp8 =
-        compute_decoding_scaling_factor(block_amax[w], S_enc_colwise_block);
-
-    // Store scaling factors to SMEM buffer (R2S)
-    sSFcolwise[scale_tr_offset_Y + w][scale_tr_offset_X] = S_dec_b_fp8;
-
-    const scaling_coeff_type SFcoefficient =
-        compute_nvfp4_scaling_coefficient<scaling_coeff_type>(S_dec_b_fp8, S_enc_colwise_block);
-
-    // Scale elements
-    __align__(8) uint32_t rOut[SCALE_DIM / 8];
-#pragma unroll
-    for (int e = 0; e < SCALE_DIM / 8; ++e) {
-      const uint64_t elts03 = *reinterpret_cast<uint64_t *>(&rIn[w][8 * e]);
-      const uint64_t elts47 = *reinterpret_cast<uint64_t *>(&rIn[w][8 * e + 4]);
-      if constexpr (USE_STOCHASTIC_ROUNDING) {
-        const uint32_t rbits03 = core::get_rbits(rng, random_uint4, rnd_idx);
-        const uint32_t rbits47 = core::get_rbits(rng, random_uint4, rnd_idx);
-        rOut[e] = ptx::mul_cvt_bf16_to_fp4_8x_stochastic_rounding<scaling_coeff_type>(
-            elts03, elts47, SFcoefficient, rbits03, rbits47);
-      } else {
-        rOut[e] = ptx::mul_cvt_bf16_to_fp4_8x_round_to_nearest<scaling_coeff_type>(elts03, elts47,
-                                                                                   SFcoefficient);
-      }
-    }
-    uint64_t &out_pack_16x = *reinterpret_cast<uint64_t *>(rOut);
-    ptx::st_shared_b64(&sOut_tr[buff_out_tr][out_tr_thread_offset_Y + w][out_tr_thread_offset_X],
-                       out_pack_16x);
-  }
-}
-
-template <bool USE_STOCHASTIC_ROUNDING, bool USE_FAST_MATH, bool ROW_SCALED_NVFP4>
-__device__ __forceinline__ void rowwise_scaling(
-    const IType *__restrict__ sIn_ptr, fp4e2m1x2 *__restrict__ sOut_ptr,
-    nvfp4_scale_t *__restrict__ sSFrowwise_ptr, const float S_enc_rowwise, const int stage_Y,
-    const int stage_X, const int buff_in, const int buff_out, const float *amax_rowwise_ptr,
-    const size_t row_offset, const size_t rows, RNG_t &rng, uint4 &random_uint4, int &rnd_idx) {
-  using scaling_coeff_type = typename SCALING_COEFFICIENT_TYPE<USE_FAST_MATH>::type;
-
-  const auto &sIn = *reinterpret_cast<const IType3D *>(sIn_ptr);
-  auto &sOut = *reinterpret_cast<OType2x3D *>(sOut_ptr);
-  auto &sSFrowwise = *reinterpret_cast<ScalesType2D *>(sSFrowwise_ptr);
-
-  const int thread_lane = threadIdx.x % THREADS_PER_WARP;
-  const int bank_group = thread_lane / THREADS_PER_BANK;
-
-  const int tid_Y_rowwise = threadIdx.x / THREADS_X_ROWWISE;
-  const int tid_X_rowwise = threadIdx.x % THREADS_X_ROWWISE;
-
-  const int thread_offset_Y_rowwise = tid_Y_rowwise;
-  const int thread_offset_X_rowwise = tid_X_rowwise * ELTS_PER_THREAD;
-
-  const int SF_thread_offset_rowwise_Y = tid_Y_rowwise;
-  const int SF_thread_offset_rowwise_X = tid_X_rowwise / THREADS_PER_SCALE_ROWWISE;
-
-  const bool SF_storing_thread = (tid_X_rowwise % THREADS_PER_SCALE_ROWWISE == 0);
-
-  const int stage_rowwise_scales_offset_Y = SF_thread_offset_rowwise_Y + stage_Y * TILE_DIM_Y;
-  const int stage_rowwise_scales_offset_X =
-      SF_thread_offset_rowwise_X + stage_X * SCALES_PER_TILE_X;
-#pragma unroll
-  for (int it = 0; it < ITERATIONS_NORMAL; ++it) {
-    const int it_offset_Y_rowwise = thread_offset_Y_rowwise + it * THREADS_Y_ROWWISE;
-
-    __align__(16) IType2 rIn[WAVES][PACK_SIZE / 2];
-
-    // Read (cache) input elements (S2R). Find NVFP4-block AMAX
-    IType2 thread_amax_2x = {static_cast<IType>(0.0f), static_cast<IType>(0.0f)};
-#pragma unroll
-    for (int w = 0; w < WAVES; ++w) {
-      const int swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % ELTS_PER_THREAD;
-      const int swizzled_thread_idx = thread_offset_X_rowwise + swizzled_group_idx;
-
-      // Load elements
-      __uint128_t &elts_8x = *reinterpret_cast<__uint128_t *>(&rIn[w]);
-      elts_8x = ptx::ld_shared_b128(&sIn[buff_in][it_offset_Y_rowwise][swizzled_thread_idx]);
-#pragma unroll
-      for (int e = 0; e < PACK_SIZE / 2; ++e) {
-        ptx::abs_max_2x(thread_amax_2x, thread_amax_2x, rIn[w][e]);
-      }
-    }
-    const float block_amax = get_amax_of_pair(thread_amax_2x);
-
-    nvfp4_scale_t S_dec_b_fp8;
-    scaling_coeff_type SFcoefficient;
-    if constexpr (ROW_SCALED_NVFP4) {
-      const size_t row_idx = row_offset + stage_Y * TILE_DIM_Y + it_offset_Y_rowwise;
-      const float S_enc_rowwise_block =
-          row_idx < rows ? core::compute_global_encode_scaling_factor_FP4(amax_rowwise_ptr[row_idx])
-                         : 1.0f;
-      S_dec_b_fp8 = compute_decoding_scaling_factor(block_amax, S_enc_rowwise_block);
-      SFcoefficient =
-          compute_nvfp4_scaling_coefficient<scaling_coeff_type>(S_dec_b_fp8, S_enc_rowwise_block);
-    } else {
-      S_dec_b_fp8 = compute_decoding_scaling_factor(block_amax, S_enc_rowwise);
-      SFcoefficient =
-          compute_nvfp4_scaling_coefficient<scaling_coeff_type>(S_dec_b_fp8, S_enc_rowwise);
-    }
-
-    // Store scaling factors to SMEM buffer (R2S)
-    if (SF_storing_thread) {
-      const int scales_offset_Y = stage_rowwise_scales_offset_Y + it * THREADS_Y_ROWWISE;
-      const int scales_offset_X = stage_rowwise_scales_offset_X;
-      sSFrowwise[scales_offset_Y][scales_offset_X] = S_dec_b_fp8;
-    }
-
-// Scale elements
-#pragma unroll
-    for (int w = 0; w < WAVES; ++w) {
-      const uint64_t elts03 = *reinterpret_cast<uint64_t *>(&rIn[w][0]);
-      const uint64_t elts47 = *reinterpret_cast<uint64_t *>(&rIn[w][2]);
-
-      uint32_t out_x8;
-      if constexpr (USE_STOCHASTIC_ROUNDING) {
-        const uint32_t rbits03 = core::get_rbits(rng, random_uint4, rnd_idx);
-        const uint32_t rbits47 = core::get_rbits(rng, random_uint4, rnd_idx);
-        out_x8 = ptx::mul_cvt_bf16_to_fp4_8x_stochastic_rounding<scaling_coeff_type>(
-            elts03, elts47, SFcoefficient, rbits03, rbits47);
-      } else {
-        out_x8 = ptx::mul_cvt_bf16_to_fp4_8x_round_to_nearest<scaling_coeff_type>(elts03, elts47,
-                                                                                  SFcoefficient);
-      }
-
-      const int swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % ELTS_PER_THREAD;
-      const int swizzled_idx = (swizzled_group_idx + thread_offset_X_rowwise) / 2;
-      ptx::st_shared_b32(&sOut[buff_out][it_offset_Y_rowwise][swizzled_idx], out_x8);
-    }
-  }
-}
+using ScalingTraits = tuned_1D_scaling_common::NonGroupedKernelTraits;
+using IType = typename ScalingTraits::IType;
+using IType3D = typename ScalingTraits::IType3D;
+using OType2x3D = typename ScalingTraits::OType2x3D;
+using OType2xt3D = typename ScalingTraits::OType2xt3D;
+using ScalesType2D = typename ScalingTraits::ScalesType2D;
+using ScalesTypeTr2D = typename ScalingTraits::ScalesTypeTr2D;
 
 template <bool USE_STOCHASTIC_ROUNDING, bool USE_FAST_MATH, bool RETURN_TRANSPOSE,
           bool ROW_SCALED_NVFP4>
-__global__ void __launch_bounds__(THREADS_NUM) quantize_transpose_nvfp4_tuned_1D_kernel(
+__global__ void __launch_bounds__(ScalingTraits::THREADS_NUM)
+quantize_transpose_nvfp4_tuned_1D_kernel(
     const __grid_constant__ CUtensorMap tensor_map_input,
     const __grid_constant__ CUtensorMap tensor_map_output,
     const __grid_constant__ CUtensorMap tensor_map_output_t, nvfp4_scale_t *const scales_ptr,
@@ -376,6 +64,25 @@ __global__ void __launch_bounds__(THREADS_NUM) quantize_transpose_nvfp4_tuned_1D
     const float *const amax_colwise_ptr, const size_t rows, const size_t cols,
     const size_t scale_stride, const size_t scale_stride_t, const size_t *rng_state) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+  constexpr int CHUNK_DIM_Y = ScalingTraits::CHUNK_DIM_Y;
+  constexpr int CHUNK_DIM_X = ScalingTraits::CHUNK_DIM_X;
+  constexpr int PREFETCH_STAGES = ScalingTraits::PREFETCH_STAGES;
+  constexpr int THREADS_NUM = ScalingTraits::THREADS_NUM;
+  constexpr int TILE_DIM_Y = ScalingTraits::TILE_DIM_Y;
+  constexpr int TILE_DIM_X = ScalingTraits::TILE_DIM_X;
+  constexpr int STAGES_X = ScalingTraits::STAGES_X;
+  constexpr int STAGES = ScalingTraits::STAGES;
+  constexpr int BUFFS_NUM = ScalingTraits::BUFFS_NUM;
+  constexpr int BUFFS_NUM_IN = ScalingTraits::BUFFS_NUM_IN;
+  constexpr int BUFFS_NUM_OUT = ScalingTraits::BUFFS_NUM_OUT;
+  constexpr int BUFFS_NUM_OUT_TR = ScalingTraits::BUFFS_NUM_OUT_TR;
+  constexpr int BUFF_SIZE_ALIGNED_IN = ScalingTraits::BUFF_SIZE_ALIGNED_IN;
+  constexpr int BUFF_SIZE_ALIGNED_OUT = ScalingTraits::BUFF_SIZE_ALIGNED_OUT;
+  constexpr int BUFF_SIZE_ALIGNED_OUT_TR = ScalingTraits::BUFF_SIZE_ALIGNED_OUT_TR;
+  constexpr int BUFF_SIZE_ROWWISE_SCALES = ScalingTraits::BUFF_SIZE_ROWWISE_SCALES;
+  constexpr int SCALES_PER_CHUNK_X = ScalingTraits::SCALES_PER_CHUNK_X;
+  constexpr int SCALES_PER_CHUNK_Y = ScalingTraits::SCALES_PER_CHUNK_Y;
+
   if (noop != nullptr && noop[0] == 1.0f) {
     return;
   }
@@ -392,22 +99,11 @@ __global__ void __launch_bounds__(THREADS_NUM) quantize_transpose_nvfp4_tuned_1D
 
   const bool leading_thread = (threadIdx.x == 0);
 
-  constexpr int buff_elems = BUFF_DIM_Y * BUFF_IN_DIM_X;
-  constexpr int buff_elems_total_in = BUFFS_NUM_IN * buff_elems;
+  constexpr int in_mem = BUFF_SIZE_ALIGNED_IN;
 
-  constexpr int buff_size_aligned_in =
-      DIVUP_TO_MULTIPLE(buff_elems_total_in * sizeof(IType), TMA_SHMEM_ALIGNMENT);
-  constexpr int buff_size_aligned_out =
-      DIVUP_TO_MULTIPLE(BUFFS_NUM_OUT * BUFF_OUT_SIZE, TMA_SHMEM_ALIGNMENT);
-  constexpr int buff_size_aligned_out_t =
-      DIVUP_TO_MULTIPLE(BUFFS_NUM_OUT_TR * BUFF_OUT_TR_SIZE, TMA_SHMEM_ALIGNMENT);
-
-  constexpr int in_mem = buff_size_aligned_in;
-
-  constexpr int out_mem_rowwise_data = buff_size_aligned_out;
-  constexpr int out_mem_colwise_data = RETURN_TRANSPOSE ? buff_size_aligned_out_t : 0;
-  constexpr int out_mem_rowwise_scales = DIVUP_TO_MULTIPLE(
-      TunableConfig::CHUNK_DIM_Y * SCALES_PER_CHUNK_X * sizeof(nvfp4_scale_t), TMA_SHMEM_ALIGNMENT);
+  constexpr int out_mem_rowwise_data = BUFF_SIZE_ALIGNED_OUT;
+  constexpr int out_mem_colwise_data = RETURN_TRANSPOSE ? BUFF_SIZE_ALIGNED_OUT_TR : 0;
+  constexpr int out_mem_rowwise_scales = BUFF_SIZE_ROWWISE_SCALES;
 
   // The destination shared memory buffer of a bulk tensor operation should be 16-byte aligned
   extern __shared__ unsigned char dynamic_shmem[];
@@ -429,7 +125,7 @@ __global__ void __launch_bounds__(THREADS_NUM) quantize_transpose_nvfp4_tuned_1D
   auto &sSFrowwise = *reinterpret_cast<ScalesType2D *>(sSFrowwise_ptr);
   auto &sSFcolwise = *reinterpret_cast<ScalesTypeTr2D *>(sSFcolwise_ptr);
 
-  constexpr int shmem_buff_size = buff_size_aligned_in / BUFFS_NUM;
+  constexpr int shmem_buff_size = BUFF_SIZE_ALIGNED_IN / BUFFS_NUM;
 
   // Compute a global encoding/decoding scaling factors for all S_dec_b
   const float S_enc_rowwise =
@@ -474,7 +170,7 @@ __global__ void __launch_bounds__(THREADS_NUM) quantize_transpose_nvfp4_tuned_1D
 // Prefetch input data only when processing the first chunk,
 // which enables the one-iteration overlap throughout the entire kernel life
 #pragma unroll
-  for (int stage = 0; stage < TunableConfig::PREFETCH_STAGES; ++stage) {
+  for (int stage = 0; stage < PREFETCH_STAGES; ++stage) {
     const int buff_in = stage;
     const int stage_Y = stage / STAGES_X;
     const int stage_X = stage % STAGES_X;
@@ -482,8 +178,8 @@ __global__ void __launch_bounds__(THREADS_NUM) quantize_transpose_nvfp4_tuned_1D
     const int stage_offset_Y = stage_Y * TILE_DIM_Y;
     const int stage_offset_X = stage_X * TILE_DIM_X;
 
-    const int block_offset_Y = ctaid_Y * TunableConfig::CHUNK_DIM_Y;
-    const int block_offset_X = ctaid_X * TunableConfig::CHUNK_DIM_X;
+    const int block_offset_Y = ctaid_Y * CHUNK_DIM_Y;
+    const int block_offset_X = ctaid_X * CHUNK_DIM_X;
 
     const int global_offset_Y = block_offset_Y + stage_offset_Y;
     const int global_offset_X = block_offset_X + stage_offset_X;
@@ -503,18 +199,18 @@ __global__ void __launch_bounds__(THREADS_NUM) quantize_transpose_nvfp4_tuned_1D
   }
 
   while (!job_finished) {
-    const int block_offset_Y = ctaid_Y * TunableConfig::CHUNK_DIM_Y;
-    const int block_offset_X = ctaid_X * TunableConfig::CHUNK_DIM_X;
+    const int block_offset_Y = ctaid_Y * CHUNK_DIM_Y;
+    const int block_offset_X = ctaid_X * CHUNK_DIM_X;
 
-    const int block_offset_Y_tr = ctaid_X * TunableConfig::CHUNK_DIM_X;
-    const int block_offset_X_tr = ctaid_Y * TunableConfig::CHUNK_DIM_Y;
+    const int block_offset_Y_tr = ctaid_X * CHUNK_DIM_X;
+    const int block_offset_X_tr = ctaid_Y * CHUNK_DIM_Y;
 
     const int chunk_rows = rows - block_offset_Y;
     const int chunk_cols = cols - block_offset_X;
 
-    const int scales_block_offset_Y_rowwise = ctaid_Y * TunableConfig::CHUNK_DIM_Y;
+    const int scales_block_offset_Y_rowwise = ctaid_Y * CHUNK_DIM_Y;
     const int scales_block_offset_X_rowwise = ctaid_X * SCALES_PER_CHUNK_X;
-    const int scales_block_offset_Y_tr = ctaid_X * TunableConfig::CHUNK_DIM_X;
+    const int scales_block_offset_Y_tr = ctaid_X * CHUNK_DIM_X;
     const int scales_block_offset_X_tr = ctaid_Y * SCALES_PER_CHUNK_Y;
 
     if constexpr (TunableConfig::PERSISTENT) {
@@ -532,7 +228,7 @@ __global__ void __launch_bounds__(THREADS_NUM) quantize_transpose_nvfp4_tuned_1D
       const int stage_offset_Y = stage_Y * TILE_DIM_Y;
       const int stage_offset_X = stage_X * TILE_DIM_X;
 
-      if (stage == STAGES - TunableConfig::PREFETCH_STAGES) {
+      if (stage == STAGES - PREFETCH_STAGES) {
         if constexpr (TunableConfig::PERSISTENT) {
           ptx::mbarrier_wait_parity_acquire_cta_shared_cta(&workID_mbar, ctaid_parity);
           ptx::get_cancelled_cta_id_2D(&workID_response, ctaid_X, ctaid_Y);
@@ -547,9 +243,9 @@ __global__ void __launch_bounds__(THREADS_NUM) quantize_transpose_nvfp4_tuned_1D
       }
 
       // Prefetch next stage Input data
-      if (!job_finished || (stage < STAGES - TunableConfig::PREFETCH_STAGES)) {
-        const int next_prefetch_buff = (buff_in + TunableConfig::PREFETCH_STAGES) % BUFFS_NUM;
-        const int next_prefetch_stage = (stage + TunableConfig::PREFETCH_STAGES) % STAGES;
+      if (!job_finished || (stage < STAGES - PREFETCH_STAGES)) {
+        const int next_prefetch_buff = (buff_in + PREFETCH_STAGES) % BUFFS_NUM;
+        const int next_prefetch_stage = (stage + PREFETCH_STAGES) % STAGES;
         const int next_prefetch_stage_Y = next_prefetch_stage / STAGES_X;
         const int next_prefetch_stage_X = next_prefetch_stage % STAGES_X;
 
@@ -557,8 +253,8 @@ __global__ void __launch_bounds__(THREADS_NUM) quantize_transpose_nvfp4_tuned_1D
         const int next_prefetch_stage_offset_X = next_prefetch_stage_X * TILE_DIM_X;
 
         // Offsets change, because coordinates of the next "to-be-prefetched" CTA do also chage
-        const int block_offset_Y = ctaid_Y * TunableConfig::CHUNK_DIM_Y;
-        const int block_offset_X = ctaid_X * TunableConfig::CHUNK_DIM_X;
+        const int block_offset_Y = ctaid_Y * CHUNK_DIM_Y;
+        const int block_offset_X = ctaid_X * CHUNK_DIM_X;
 
         const int global_offset_Y = block_offset_Y + next_prefetch_stage_offset_Y;
         const int global_offset_X = block_offset_X + next_prefetch_stage_offset_X;
@@ -585,15 +281,22 @@ __global__ void __launch_bounds__(THREADS_NUM) quantize_transpose_nvfp4_tuned_1D
 
       // Wait for TMA transfer to have finished reading shared memory
       // I.e. the OUT buffer is ready to be written to
-      ptx::cp_async_bulk_wait_group_read<TunableConfig::PREFETCH_STAGES>();
+      if (leading_thread) {
+        ptx::cp_async_bulk_wait_group_read<PREFETCH_STAGES>();
+      }
+      // Bulk async-groups are thread-local. Publish the leading thread's completion to all
+      // threads before they cooperatively overwrite a reused output buffer.
+      __syncthreads();
 
       // NVFP4 Quantization
-      rowwise_scaling<USE_STOCHASTIC_ROUNDING, USE_FAST_MATH, ROW_SCALED_NVFP4>(
+      rowwise_scaling<ScalingTraits, USE_STOCHASTIC_ROUNDING, USE_FAST_MATH,
+                      ROW_SCALED_NVFP4>(
           sIn_ptr, sOut_ptr, sSFrowwise_ptr, S_enc_rowwise, stage_Y, stage_X, buff_in, buff_out,
           amax_rowwise_ptr, block_offset_Y, rows, rng, random_uint4, rnd_idx);
 
       if constexpr (RETURN_TRANSPOSE) {
-        colwise_scaling<USE_STOCHASTIC_ROUNDING, USE_FAST_MATH, ROW_SCALED_NVFP4>(
+        colwise_scaling<ScalingTraits, USE_STOCHASTIC_ROUNDING, USE_FAST_MATH,
+                        ROW_SCALED_NVFP4>(
             sIn_ptr, sOut_tr_ptr, sSFcolwise_ptr, S_enc_colwise, stage_Y, stage_X, buff_in,
             buff_out_tr, amax_colwise_ptr, block_offset_X, cols, rng, random_uint4, rnd_idx);
       }
@@ -635,9 +338,9 @@ __global__ void __launch_bounds__(THREADS_NUM) quantize_transpose_nvfp4_tuned_1D
       {
         using ScalesVec = Vec<nvfp4_scale_t, SCALES_PER_CHUNK_X>;
         // number of scales in X dimension of this chunk
-        const int count = min(SCALES_PER_CHUNK_X, chunk_cols / SCALE_DIM);
+        const int count = min(SCALES_PER_CHUNK_X, chunk_cols / NVFP4_SCALE_DIM);
 
-        for (size_t row = threadIdx.x; row < TunableConfig::CHUNK_DIM_Y; row += THREADS_NUM) {
+        for (size_t row = threadIdx.x; row < CHUNK_DIM_Y; row += THREADS_NUM) {
           const size_t row_global = scales_block_offset_Y_rowwise + row;
           if (row_global < rows) {
             ScalesVec &scales_vec = *reinterpret_cast<ScalesVec *>(sSFrowwise[row]);
@@ -652,9 +355,9 @@ __global__ void __launch_bounds__(THREADS_NUM) quantize_transpose_nvfp4_tuned_1D
       if constexpr (RETURN_TRANSPOSE) {
         using ScalesVec = Vec<nvfp4_scale_t, SCALES_PER_CHUNK_Y>;
         // number of scales in Y dimension of this chunk
-        const int count = min(SCALES_PER_CHUNK_Y, chunk_rows / SCALE_DIM);
+        const int count = min(SCALES_PER_CHUNK_Y, chunk_rows / NVFP4_SCALE_DIM);
 
-        for (size_t row_tr = threadIdx.x; row_tr < TunableConfig::CHUNK_DIM_X;
+        for (size_t row_tr = threadIdx.x; row_tr < CHUNK_DIM_X;
              row_tr += THREADS_NUM) {
           const size_t row_tr_global = scales_block_offset_Y_tr + row_tr;
           if (row_tr_global < cols) {
@@ -672,6 +375,11 @@ __global__ void __launch_bounds__(THREADS_NUM) quantize_transpose_nvfp4_tuned_1D
       }
     }
   }
+
+  if (leading_thread) {
+    ptx::cp_async_bulk_wait_group();
+  }
+  __syncthreads();
 
   if (leading_thread) {
 #pragma unroll
@@ -694,6 +402,17 @@ inline void quantize_transpose_tuned_1D(const Tensor &input, const Tensor *noop,
 #if FP4_TYPE_SUPPORTED
   using namespace quantize_transpose_tuned_kernel;
   using namespace ptx;
+
+  constexpr int CHUNK_DIM_Y = ScalingTraits::CHUNK_DIM_Y;
+  constexpr int CHUNK_DIM_X = ScalingTraits::CHUNK_DIM_X;
+  constexpr int THREADS_NUM = ScalingTraits::THREADS_NUM;
+  constexpr int BUFF_DIM_Y = ScalingTraits::BUFF_DIM_Y;
+  constexpr int BUFF_DIM_X = ScalingTraits::BUFF_DIM_X;
+  constexpr int BUFF_SIZE_ALIGNED_IN = ScalingTraits::BUFF_SIZE_ALIGNED_IN;
+  constexpr int BUFF_SIZE_ALIGNED_OUT = ScalingTraits::BUFF_SIZE_ALIGNED_OUT;
+  constexpr int BUFF_SIZE_ALIGNED_OUT_TR = ScalingTraits::BUFF_SIZE_ALIGNED_OUT_TR;
+  constexpr int BUFF_SIZE_ROWWISE_SCALES = ScalingTraits::BUFF_SIZE_ROWWISE_SCALES;
+  constexpr int BUFF_SIZE_COLWISE_SCALES = ScalingTraits::BUFF_SIZE_COLWISE_SCALES;
 
   const bool use_stochastic_rounding = quant_config ? quant_config->stochastic_rounding : false;
   const bool use_fast_math = quant_config ? quant_config->use_fast_math : false;
@@ -731,8 +450,8 @@ inline void quantize_transpose_tuned_1D(const Tensor &input, const Tensor *noop,
   NVTE_CHECK(cols % 32 == 0,
              "Number of tensor cols must be a multiple of 32");  // 16B alignment for TMA
 
-  const int blocks_Y = DIVUP(rows, static_cast<size_t>(TunableConfig::CHUNK_DIM_Y));
-  const int blocks_X = DIVUP(cols, static_cast<size_t>(TunableConfig::CHUNK_DIM_X));
+  const int blocks_Y = DIVUP(rows, static_cast<size_t>(CHUNK_DIM_Y));
+  const int blocks_X = DIVUP(cols, static_cast<size_t>(CHUNK_DIM_X));
   const dim3 grid(blocks_X, blocks_Y);
   const int block_size = THREADS_NUM;
 
@@ -774,26 +493,12 @@ inline void quantize_transpose_tuned_1D(const Tensor &input, const Tensor *noop,
                          BUFF_DIM_X, BUFF_DIM_Y, rows, 0, 4);
   }
 
-  constexpr int buff_elems = BUFF_DIM_Y * BUFF_DIM_X;
-  constexpr int buff_elems_total_in = BUFFS_NUM_IN * buff_elems;
-  constexpr int buff_size_aligned_in =
-      DIVUP_TO_MULTIPLE(buff_elems_total_in * sizeof(IType), TMA_SHMEM_ALIGNMENT);
-  constexpr int buff_size_aligned_out =
-      DIVUP_TO_MULTIPLE(BUFFS_NUM_OUT * BUFF_OUT_SIZE, TMA_SHMEM_ALIGNMENT);
-  constexpr int buff_size_aligned_out_t =
-      DIVUP_TO_MULTIPLE(BUFFS_NUM_OUT_TR * BUFF_OUT_TR_SIZE, TMA_SHMEM_ALIGNMENT);
+  const int in_mem = BUFF_SIZE_ALIGNED_IN;
 
-  constexpr int buff_size_scales = DIVUP_TO_MULTIPLE(
-      TunableConfig::CHUNK_DIM_Y * SCALES_PER_CHUNK_X * sizeof(nvfp4_scale_t), TMA_SHMEM_ALIGNMENT);
-  constexpr int buff_size_scales_transpose = DIVUP_TO_MULTIPLE(
-      TunableConfig::CHUNK_DIM_X * SCALES_PER_CHUNK_Y * sizeof(nvfp4_scale_t), TMA_SHMEM_ALIGNMENT);
-
-  const int in_mem = buff_size_aligned_in;
-
-  const int out_data_mem = buff_size_aligned_out;
-  const int out_data_transpose_mem = return_transpose ? buff_size_aligned_out_t : 0;
-  const int out_scales_mem = buff_size_scales;
-  const int out_scales_transpose_mem = return_transpose ? buff_size_scales_transpose : 0;
+  const int out_data_mem = BUFF_SIZE_ALIGNED_OUT;
+  const int out_data_transpose_mem = return_transpose ? BUFF_SIZE_ALIGNED_OUT_TR : 0;
+  const int out_scales_mem = BUFF_SIZE_ROWWISE_SCALES;
+  const int out_scales_transpose_mem = return_transpose ? BUFF_SIZE_COLWISE_SCALES : 0;
 
   const int out_mem = out_data_mem + out_data_transpose_mem;
 

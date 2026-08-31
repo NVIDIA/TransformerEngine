@@ -19,7 +19,7 @@
 #include "../../../common.h"
 #include "../../../util/cuda_runtime.h"
 #include "../../../util/math.h"
-#include "../../../util/ptx.cuh"
+#include "../../../util/ptx_arch_spec.cuh"
 #include "../../../utils.cuh"
 #include "../../core/common.cuh"
 #include "../core_nvfp4.cuh"
@@ -55,7 +55,8 @@ struct TunableConfig<ShapeRepresentation::SAME_BOTH_DIMS> {
   static constexpr int BLOCKS_PER_SM = 1;
 };
 
-using RNG_t = typename transformer_engine::curanddx::detail::philox4x32_native_state<10>;
+using RNG_t = typename transformer_engine::curanddx::detail::philox4x32_native_state<
+    NVTE_BUILD_NUM_PHILOX_ROUNDS>;
 
 using ScalingTraits = tuned_1D_scaling_common::GroupedKernelTraits;
 using IType = typename ScalingTraits::IType;
@@ -443,7 +444,13 @@ group_quantize_transpose_nvfp4_tuned_1D_kernel(
                                                        IN_buff_readable_parity[buff_in]);
       IN_buff_readable_parity[buff_in] ^= 1;
 
-      ptx::cp_async_bulk_wait_group_read<PREFETCH_STAGES>();
+
+      // Bulk async-groups are per-thread. Only the leading thread issues and commits the TMA
+      // stores, so it is also the only thread whose wait observes their completion. Hand that
+      // completion off to every cooperative writer before the output ring buffer is reused.
+      if (leading_thread) {
+        ptx::cp_async_bulk_wait_group_read<PREFETCH_STAGES>();
+      }
       __syncthreads();
 
       rowwise_scaling<ScalingTraits, USE_STOCHASTIC_ROUNDING, USE_FAST_MATH>(
@@ -516,8 +523,9 @@ group_quantize_transpose_nvfp4_tuned_1D_kernel(
     }
   }
 
+  // Drain every TMA store before the CTA releases its shared-memory source buffers.
   if (leading_thread) {
-    ptx::cp_async_bulk_wait_group_read<0>();
+    ptx::cp_async_bulk_wait_group();
   }
   __syncthreads();
 

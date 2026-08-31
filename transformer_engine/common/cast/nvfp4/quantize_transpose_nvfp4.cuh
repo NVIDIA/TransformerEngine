@@ -194,6 +194,40 @@ inline void compute_rowwise_amax(const Tensor &input, const Tensor *noop, Tensor
 #endif  // FP4_TYPE_SUPPORTED
 }
 
+inline void compute_columnwise_amax(const Tensor &input, const Tensor *noop, Tensor *output,
+                                    cudaStream_t stream) {
+#if FP4_TYPE_SUPPORTED
+  using namespace rowwise_amax_kernel;
+
+  const auto [rows, cols] = input.flat_2d_dims();
+  auto *amax_ptr = reinterpret_cast<float *>(output->columnwise_amax.dptr);
+  NVTE_CHECK(amax_ptr != nullptr, "Row-scaled columnwise amax tensor must be allocated.");
+  NVTE_CHECK(output->columnwise_amax.numel() == cols, "Row-scaled columnwise amax must have ", cols,
+             " entries, got ", output->columnwise_amax.shape, ".");
+
+  const auto *noop_ptr = reinterpret_cast<const float *>(noop->data.dptr);
+  if (input.dtype() == DType::kBFloat16) {
+    const auto *input_ptr = reinterpret_cast<const __nv_bfloat16 *>(input.data.dptr);
+    launch_compute_columnwise_amax<__nv_bfloat16>(static_cast<int>(rows), static_cast<int>(cols),
+                                                  input_ptr, amax_ptr, stream, noop_ptr);
+  } else if (input.dtype() == DType::kFloat16) {
+    const auto *input_ptr = reinterpret_cast<const half *>(input.data.dptr);
+    launch_compute_columnwise_amax<half>(static_cast<int>(rows), static_cast<int>(cols), input_ptr,
+                                         amax_ptr, stream, noop_ptr);
+  } else if (input.dtype() == DType::kFloat32) {
+    const auto *input_ptr = reinterpret_cast<const float *>(input.data.dptr);
+    launch_compute_columnwise_amax<float>(static_cast<int>(rows), static_cast<int>(cols), input_ptr,
+                                          amax_ptr, stream, noop_ptr);
+  } else {
+    NVTE_ERROR(
+        "Unsupported input dtype for row-scaled NVFP4 quantization. "
+        "Expected BFloat16, Float16, or Float32.");
+  }
+#else
+  NVTE_ERROR("FP4 support requires CUDA 12.8+, but compile-time CUDA version is ", CUDA_VERSION);
+#endif  // FP4_TYPE_SUPPORTED
+}
+
 namespace quantize_transpose_kernel {
 
 using namespace quantization_and_transposition_SF;
@@ -201,7 +235,6 @@ using namespace core;
 using namespace ptx;
 
 #if FP4_TYPE_SUPPORTED
-
 
 constexpr size_t CHUNK_DIM_Y = 128;
 constexpr size_t CHUNK_DIM_X = 128;
@@ -1245,7 +1278,7 @@ __global__ void __launch_bounds__(THREADS_NUM)
         size_t scale_idx_global;
         if constexpr (WITH_GEMM_SWIZZLED_SCALES) {
           // Write the scale directly into the cuBLAS GEMM-swizzled layout so no
-          // separate swizzle pass is needed. SFs_per_row (= cols / SCALE_DIM) is
+          // separate swizzle pass is needed. SFs_per_row (= cols / NVFP4_SCALE_DIM) is
           // the number of compact scale columns.
           scale_idx_global =
               swizzle::gemm_swizzled_scale_idx(scales_offset_Y, scales_offset_X, SFs_per_row);
@@ -1336,15 +1369,15 @@ __global__ void __launch_bounds__(THREADS_NUM)
   if (RETURN_TRANSPOSE && colwise_scale_is_within_bounds_Y) {
     const size_t scale_idx_sh = tid_Y_t * SCALES_PER_CHUNK_Y;
     const size_t count =  // number of scales in Y dimension of this chunk
-        (chunk_rows >= CHUNK_DIM_Y) ? SCALES_PER_CHUNK_Y : (chunk_rows / SCALE_DIM);
+        (chunk_rows >= CHUNK_DIM_Y) ? SCALES_PER_CHUNK_Y : (chunk_rows / NVFP4_SCALE_DIM);
     if constexpr (WITH_GEMM_SWIZZLED_SCALES) {
       // The swizzled layout scatters the contiguous columnwise scales, so the
       // vectorized store cannot be used. Emit each scale at its swizzled offset.
-      // The transposed scale matrix has `rows / SCALE_DIM` (= M/16) column tiles
+      // The transposed scale matrix has `rows / NVFP4_SCALE_DIM` (= M/16) column tiles
       // (exact because the swizzled path requires 128-aligned dims). Read
-      // SCALE_DIM by value; passing the namespace-scope constexpr by reference
+      // NVFP4_SCALE_DIM by value; passing the namespace-scope constexpr by reference
       // (e.g. via DIVUP) would ODR-use it and fail to compile in device code.
-      const size_t col_length_t = rows / SCALE_DIM;
+      const size_t col_length_t = rows / NVFP4_SCALE_DIM;
       for (size_t k = 0; k < count; ++k) {
         const size_t off = swizzle::gemm_swizzled_scale_idx(scales_offset_Y_t,
                                                             scales_offset_X_t + k, col_length_t);

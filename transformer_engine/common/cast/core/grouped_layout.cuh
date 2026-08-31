@@ -236,6 +236,18 @@ __device__ __forceinline__ size_t get_tensor_rows_num(
   return 0;
 }
 
+__device__ __forceinline__ size_t
+get_tensor_base_offset(const size_t tensor_id, const ShapeRepresentation shape_rep,
+                       const size_t first_logical_dim, const size_t last_logical_dim,
+                       const size_t num_tensors,
+                       const int64_t *const __restrict__ offsets_ptr) {
+  if (shape_rep == ShapeRepresentation::SAME_BOTH_DIMS) {
+    const size_t rows_per_tensor = first_logical_dim / num_tensors;
+    return tensor_id * rows_per_tensor * last_logical_dim;
+  }
+  return static_cast<size_t>(offsets_ptr[tensor_id]);
+}
+
 template <ShapeRepresentation SHAPE_REP>
 __device__ __forceinline__ size_t
 get_tensor_cols_num(const size_t tensor_id, const size_t last_logical_dim,
@@ -319,6 +331,26 @@ struct BlockDescriptor {
         block_offset_X(block_offset_X_) {}
 };
 
+// Per-tensor metadata prepared together with grouped TMA descriptors.
+struct TensorMetadata {
+  size_t rows = 0;
+  size_t cols = 0;
+  size_t tensor_base = 0;
+  size_t rowwise_scale_base = 0;
+  size_t colwise_scale_base = 0;
+
+  __host__ __device__ __forceinline__ constexpr TensorMetadata() = default;
+
+  __host__ __device__ __forceinline__ constexpr TensorMetadata(
+      const size_t rows_, const size_t cols_, const size_t tensor_base_,
+      const size_t rowwise_scale_base_, const size_t colwise_scale_base_)
+      : rows(rows_),
+        cols(cols_),
+        tensor_base(tensor_base_),
+        rowwise_scale_base(rowwise_scale_base_),
+        colwise_scale_base(colwise_scale_base_) {}
+};
+
 template <ShapeRepresentation SHAPE_REP, size_t CHUNK_DIM_Y, size_t CHUNK_DIM_X>
 __device__ __forceinline__ JobDescriptor decode_job(
     const size_t num_tensors, const size_t first_logical_dim, const size_t last_logical_dim,
@@ -338,6 +370,28 @@ __device__ __forceinline__ JobDescriptor decode_job(
       get_tensor_rows_num<SHAPE_REP>(tensor_id, first_logical_dim, first_dims_ptr, num_tensors);
   const size_t cols = get_tensor_cols_num<SHAPE_REP>(tensor_id, last_logical_dim, last_dims_ptr);
   return JobDescriptor(block_id, block_global_offset, tensor_id, rows, cols);
+}
+
+template <ShapeRepresentation SHAPE_REP, size_t CHUNK_DIM_Y, size_t CHUNK_DIM_X>
+__device__ __forceinline__ JobDescriptor decode_job(
+    const size_t num_tensors, const size_t first_logical_dim, const size_t last_logical_dim,
+    const size_t work_blocks_X, const int32_t ctaid_X, const int32_t ctaid_Y,
+    const int64_t *const __restrict__ offsets_ptr,
+    const TensorMetadata *const __restrict__ metadata_ptr) {
+  constexpr size_t ELTS_PER_CHUNK = CHUNK_DIM_Y * CHUNK_DIM_X;
+  constexpr bool is_single_tensor = (SHAPE_REP == ShapeRepresentation::SAME_BOTH_DIMS ||
+                                     SHAPE_REP == ShapeRepresentation::VARYING_FIRST_DIM);
+  const size_t ctaid_X_u = static_cast<size_t>(ctaid_X);
+  const size_t ctaid_Y_u = static_cast<size_t>(ctaid_Y);
+  const size_t block_id = ctaid_Y_u * work_blocks_X + ctaid_X_u;
+  const size_t block_global_offset =
+      is_single_tensor ? (ctaid_Y_u * CHUNK_DIM_Y * last_logical_dim + ctaid_X_u * CHUNK_DIM_X)
+                       : (block_id * ELTS_PER_CHUNK);
+  const size_t tensor_id = get_current_tensor_id<SHAPE_REP, CHUNK_DIM_Y>(
+      num_tensors, block_global_offset, ctaid_Y_u, first_logical_dim, last_logical_dim,
+      offsets_ptr);
+  const TensorMetadata metadata = metadata_ptr[tensor_id];
+  return JobDescriptor(block_id, block_global_offset, tensor_id, metadata.rows, metadata.cols);
 }
 
 template <ShapeRepresentation SHAPE_REP>
@@ -374,6 +428,13 @@ __device__ __forceinline__ bool job_has_work(const JobDescriptor &job) {
   return job.rows != 0 && job.cols != 0;
 }
 
+template <ShapeRepresentation SHAPE_REP>
+__device__ __forceinline__ bool is_job_valid_with_work(
+    const JobDescriptor &job, const size_t total_work_blocks,
+    const int64_t *const __restrict__ offsets_ptr) {
+  return is_job_valid<SHAPE_REP>(job, total_work_blocks, offsets_ptr) && job_has_work(job);
+}
+
 __device__ __forceinline__ void advance_to_next_job(bool &job_finished, int32_t &ctaid_X,
                                                     int32_t &ctaid_Y, size_t &static_next_block_id,
                                                     const size_t static_block_stride,
@@ -386,6 +447,14 @@ __device__ __forceinline__ void advance_to_next_job(bool &job_finished, int32_t 
   } else {
     job_finished = true;
   }
+}
+
+__device__ __forceinline__ void set_cta_coords_from_block_id(const size_t block_id,
+                                                             const size_t work_blocks_X,
+                                                             int32_t &ctaid_X,
+                                                             int32_t &ctaid_Y) {
+  ctaid_X = static_cast<int32_t>(block_id % work_blocks_X);
+  ctaid_Y = static_cast<int32_t>(block_id / work_blocks_X);
 }
 
 template <ShapeRepresentation SHAPE_REP, size_t CHUNK_DIM_Y, size_t CHUNK_DIM_X>
@@ -404,6 +473,37 @@ decode_block(const JobDescriptor &job, const int64_t *const __restrict__ offsets
   const size_t block_offset_X = block_id_X * CHUNK_DIM_X;
   return BlockDescriptor(tensor_base, block_id_in_current_tensor, block_id_Y, block_id_X,
                          block_offset_Y, block_offset_X);
+}
+
+template <ShapeRepresentation SHAPE_REP, size_t CHUNK_DIM_Y, size_t CHUNK_DIM_X>
+__device__ __forceinline__ BlockDescriptor decode_block(const JobDescriptor &job,
+                                                        const size_t tensor_base,
+                                                        const int32_t ctaid_X,
+                                                        const int32_t ctaid_Y) {
+  constexpr bool is_single_tensor = (SHAPE_REP == ShapeRepresentation::SAME_BOTH_DIMS ||
+                                     SHAPE_REP == ShapeRepresentation::VARYING_FIRST_DIM);
+  constexpr size_t ELTS_PER_CHUNK = CHUNK_DIM_Y * CHUNK_DIM_X;
+  const size_t blocks_X_num_in_current_tensor = DIVUP(job.cols, CHUNK_DIM_X);
+  size_t block_id_in_current_tensor = 0;
+  size_t block_id_Y = 0;
+  size_t block_id_X = 0;
+  if constexpr (is_single_tensor) {
+    block_id_X = static_cast<size_t>(ctaid_X);
+    if constexpr (SHAPE_REP == ShapeRepresentation::SAME_BOTH_DIMS) {
+      const size_t blocks_Y_per_tensor = DIVUP(job.rows, static_cast<size_t>(CHUNK_DIM_Y));
+      block_id_Y = static_cast<size_t>(ctaid_Y) - job.tensor_id * blocks_Y_per_tensor;
+    } else {
+      const size_t tensor_base_row = tensor_base / job.cols;
+      block_id_Y = static_cast<size_t>(ctaid_Y) - tensor_base_row / CHUNK_DIM_Y;
+    }
+    block_id_in_current_tensor = block_id_Y * blocks_X_num_in_current_tensor + block_id_X;
+  } else {
+    block_id_in_current_tensor = job.block_id - tensor_base / ELTS_PER_CHUNK;
+    block_id_Y = block_id_in_current_tensor / blocks_X_num_in_current_tensor;
+    block_id_X = block_id_in_current_tensor % blocks_X_num_in_current_tensor;
+  }
+  return BlockDescriptor(tensor_base, block_id_in_current_tensor, block_id_Y, block_id_X,
+                         block_id_Y * CHUNK_DIM_Y, block_id_X * CHUNK_DIM_X);
 }
 
 }  // namespace common
