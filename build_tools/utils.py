@@ -176,40 +176,80 @@ def found_pybind11() -> bool:
 
 
 @functools.lru_cache(maxsize=None)
+def nvcc_path() -> Optional[Path]:
+    """Get the NVCC binary path.
+
+    Returns `None` if NVCC is not found.
+    """
+
+    def lookup_via_cuda_home() -> Optional[Path]:
+        if cuda_home := os.getenv("CUDA_HOME"):
+            return Path(cuda_home) / "bin" / "nvcc"
+        return None
+
+    def lookup_via_python_path() -> Optional[Path]:
+        for python_path in sys.path:
+            nvidia_dir = Path(python_path) / "nvidia"
+            if not nvidia_dir.is_dir():
+                continue
+
+            cuda_roots = [nvidia_dir]
+            cuda_version_dirs = [
+                path
+                for path in nvidia_dir.iterdir()
+                if path.is_dir() and re.fullmatch(r"cu\d+", path.name)
+            ]
+            cuda_version_dirs.sort(key=lambda path: int(path.name[2:]), reverse=True)
+            cuda_roots.extend(cuda_version_dirs)
+
+            for cuda_root in cuda_roots:
+                nvcc_bin = cuda_root / "bin" / "nvcc"
+                if nvcc_bin.is_file():
+                    return nvcc_bin
+
+        return None
+
+    def lookup_via_distribution() -> Optional[Path]:
+        try:
+            cuda_nvcc_distribution = distribution("nvidia-cuda-nvcc")
+        except PackageNotFoundError:
+            return None
+
+        for package_path in cuda_nvcc_distribution.files or []:
+            package_path = Path(package_path)
+            if package_path.name == "nvcc" and package_path.parent.name == "bin":
+                return Path(cuda_nvcc_distribution.locate_file(package_path))
+
+        return None
+
+    def lookup_via_path() -> Optional[Path]:
+        if (nvcc_bin := shutil.which("nvcc")) is not None:
+            return Path(nvcc_bin)
+        return None
+
+    def lookup_via_local_cuda() -> Path:
+        return Path("/usr/local/cuda/bin/nvcc")
+
+    nvcc_lookup_funcs: List[Callable[[], Optional[Path]]] = [
+        lookup_via_cuda_home,
+        lookup_via_python_path,
+        lookup_via_distribution,
+        lookup_via_path,
+        lookup_via_local_cuda,
+    ]
+
+    for nvcc_lookup_func in nvcc_lookup_funcs:
+        if (nvcc_bin := nvcc_lookup_func()) is not None and nvcc_bin.is_file():
+            return nvcc_bin.resolve()
+
+    return None
+
+
+@functools.lru_cache(maxsize=None)
 def cuda_home_path() -> Optional[Path]:
-    """Returns the CUDA home path. This path should contain binaries (e.g. nvcc), headers, and libraries.
-
-    Returns `None` if CUDA is not found."""
-    if cuda_home := os.getenv("CUDA_HOME"):
-        return Path(cuda_home)
-
-    # Check if site-packages contains an `nvidia` directory
-    for site_package in sys.path:
-        if not Path(site_package).is_dir():
-            continue
-
-        nvidia_dir = Path(site_package) / "nvidia"
-        if not nvidia_dir.is_dir():
-            continue
-
-        if Path(nvidia_dir / "bin").is_dir():
-            return nvidia_dir
-
-        # In this case there must be a "CUDA version directory" like `cu12` or `cu13`
-        # that contains the binaries, headers, and libraries
-        for cuda_version_dir in nvidia_dir.iterdir():
-            if not cuda_version_dir.is_dir():
-                continue
-
-            # Verify that the directory name matches the expected `cu##` format
-            if not re.match(r"cu\d+", cuda_version_dir.name):
-                continue
-
-            if not (cuda_version_dir / "bin").is_dir():
-                continue
-
-            return cuda_version_dir
-
+    """Return the CUDA Toolkit root containing NVCC."""
+    if (nvcc_bin := nvcc_path()) is not None:
+        return nvcc_bin.parent.parent
     return None
 
 
@@ -260,70 +300,12 @@ def nccl_lib_path() -> Optional[Path]:
 
 
 @functools.lru_cache(maxsize=None)
-def cuda_toolkit_include_path() -> Tuple[str, str]:
-    """Returns root path for cuda toolkit includes.
-
-    return `None` if CUDA is not found."""
-    # Try finding CUDA
-    cuda_home: Optional[Path] = None
-    if cuda_home is None and os.getenv("CUDA_HOME"):
-        # Check in CUDA_HOME
-        cuda_home = Path(os.getenv("CUDA_HOME")) / "include"
-    if cuda_home is None:
-        # Check in NVCC
-        nvcc_bin = shutil.which("nvcc")
-        if nvcc_bin is not None:
-            cuda_home = Path(nvcc_bin.rstrip("/bin/nvcc")) / "include"
-    if cuda_home is None:
-        # Last-ditch guess in /usr/local/cuda
-        if Path("/usr/local/cuda").is_dir():
-            cuda_home = Path("/usr/local/cuda") / "include"
-    return cuda_home
-
-
-@functools.lru_cache(maxsize=None)
-def nvcc_path() -> Optional[Path]:
-    """Get the NVCC binary path.
-
-    Returns `None` if NVCC is not found.
-    """
-
-    def lookup_via_cuda_home() -> Optional[str]:
-        if (cuda_home := cuda_home_path()) is not None:
-            return cuda_home / "bin" / "nvcc"
-        return None
-
-    def lookup_via_path() -> Optional[str]:
-        if (nvcc_bin := shutil.which("nvcc")) is not None:
-            return nvcc_bin
-        return None
-
-    def lookup_via_distribution() -> Optional[str]:
-        try:
-            return distribution("nvidia-cuda-nvcc").locate_file("bin/nvcc")
-        except PackageNotFoundError:
-            return None
-
-    def lookup_via_local_cuda() -> Optional[str]:
-        return "/usr/local/cuda/bin/nvcc"
-
-    nvcc_lookup_funcs: List[Callable[[], Optional[str]]] = [
-        lookup_via_cuda_home,
-        lookup_via_path,
-        lookup_via_distribution,
-        lookup_via_local_cuda,
-    ]
-
-    for nvcc_lookup_func in nvcc_lookup_funcs:
-        nvcc_bin = nvcc_lookup_func()
-
-        if nvcc_bin is None:
-            continue
-
-        nvcc_bin_path = Path(nvcc_bin)
-        if nvcc_bin_path.is_file():
-            return nvcc_bin_path
-
+def cuda_toolkit_include_path() -> Optional[Path]:
+    """Return the CUDA Toolkit include directory."""
+    if (cuda_home := cuda_home_path()) is not None:
+        include_path = cuda_home / "include"
+        if include_path.is_dir():
+            return include_path
     return None
 
 
