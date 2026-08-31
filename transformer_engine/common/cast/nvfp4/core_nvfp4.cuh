@@ -32,6 +32,7 @@ namespace dispatch {
 namespace nvfp4 {
 
 using nvfp4_scale_t = fp8e4m3;
+constexpr int NVFP4_SCALE_DIM = 16;  // NVFP4 block (x16 elts)
 
 namespace quantization_and_transposition_SF {
 #if FP4_TYPE_SUPPORTED
@@ -72,6 +73,42 @@ __device__ __forceinline__ fp8e4m3 compute_decoding_scaling_factor(const float b
 
 namespace core {
 
+__device__ __forceinline__ size_t get_nvfp4_scale_stride(const size_t block_scaled_dim) {
+  return DIVUP_TO_MULTIPLE(DIVUP(block_scaled_dim, static_cast<size_t>(NVFP4_SCALE_DIM)), 4);
+}
+
+// Scale buffers are compact per-tensor concatenations. Same-dim paths keep the padded
+// scale stride explicit; fully varying supported shapes are 128-aligned, so base = elts / 16.
+__device__ __forceinline__ size_t get_rowwise_scale_base(
+    const ShapeRepresentation shape_rep, const size_t tensor_id, const size_t tensor_base,
+    const size_t rows, const size_t cols) {
+  switch (shape_rep) {
+    case ShapeRepresentation::SAME_BOTH_DIMS:
+      return tensor_id * rows * get_nvfp4_scale_stride(cols);
+    case ShapeRepresentation::VARYING_FIRST_DIM:
+      return (tensor_base / cols) * get_nvfp4_scale_stride(cols);
+    case ShapeRepresentation::VARYING_LAST_DIM:
+    case ShapeRepresentation::VARYING_BOTH_DIMS:
+      return tensor_base / static_cast<size_t>(NVFP4_SCALE_DIM);
+  }
+  return 0;
+}
+
+__device__ __forceinline__ size_t get_colwise_scale_base(
+    const ShapeRepresentation shape_rep, const size_t tensor_id, const size_t tensor_base,
+    const size_t rows, const size_t cols) {
+  switch (shape_rep) {
+    case ShapeRepresentation::SAME_BOTH_DIMS:
+      return tensor_id * cols * get_nvfp4_scale_stride(rows);
+    case ShapeRepresentation::VARYING_LAST_DIM:
+      return (tensor_base / rows) * get_nvfp4_scale_stride(rows);
+    case ShapeRepresentation::VARYING_FIRST_DIM:
+    case ShapeRepresentation::VARYING_BOTH_DIMS:
+      return tensor_base / static_cast<size_t>(NVFP4_SCALE_DIM);
+  }
+  return 0;
+}
+
 #if FP4_TYPE_SUPPORTED
 using namespace ptx;
 
@@ -92,6 +129,30 @@ __device__ __forceinline__ float compute_global_encode_scaling_factor_FP4(const 
     return 1.0f;
   }
   return global_encode_scale;
+}
+
+// Compute "correct" per-block encoding scaling factor
+template <typename SF_TYPE>
+__device__ __forceinline__ SF_TYPE compute_scaling_coefficient(const nvfp4_scale_t S_dec_block,
+                                                               const float S_enc) {
+  NVTE_DEVICE_ERROR("Unsupported scaling-factor type. Only FP32 and BF16 are supported.");
+}
+
+template <>
+__device__ __forceinline__ float compute_scaling_coefficient<float>(const nvfp4_scale_t S_dec_block,
+                                                                    const float S_enc) {
+  const float S_dec = 1.0f / S_enc;
+  const float scale_rcp =
+      fminf(1.0f / (static_cast<float>(S_dec_block) * S_dec), detail::TypeExtrema<float>::max);
+  return scale_rcp;
+}
+
+template <>
+__device__ __forceinline__ bf16 compute_scaling_coefficient<bf16>(const nvfp4_scale_t S_dec_block,
+                                                                  const float S_enc) {
+  const float scale_rcp =
+      fminf(S_enc / (static_cast<float>(S_dec_block)), detail::TypeExtrema<bf16>::max);
+  return static_cast<bf16>(scale_rcp);
 }
 
 __device__ __forceinline__ uint32_t get_rbits(

@@ -20,7 +20,7 @@
 
 #include "../../common.h"
 #include "../../util/math.h"
-#include "../../util/ptx_arch_spec.cuh"
+#include "../../util/ptx.cuh"
 #include "../../utils.cuh"
 #include "core_nvfp4.cuh"
 #include "specialized/quantize_transpose_nvfp4_tuned_1D.cuh"
@@ -194,40 +194,6 @@ inline void compute_rowwise_amax(const Tensor &input, const Tensor *noop, Tensor
 #endif  // FP4_TYPE_SUPPORTED
 }
 
-inline void compute_columnwise_amax(const Tensor &input, const Tensor *noop, Tensor *output,
-                                    cudaStream_t stream) {
-#if FP4_TYPE_SUPPORTED
-  using namespace rowwise_amax_kernel;
-
-  const auto [rows, cols] = input.flat_2d_dims();
-  auto *amax_ptr = reinterpret_cast<float *>(output->columnwise_amax.dptr);
-  NVTE_CHECK(amax_ptr != nullptr, "Row-scaled columnwise amax tensor must be allocated.");
-  NVTE_CHECK(output->columnwise_amax.numel() == cols, "Row-scaled columnwise amax must have ", cols,
-             " entries, got ", output->columnwise_amax.shape, ".");
-
-  const auto *noop_ptr = reinterpret_cast<const float *>(noop->data.dptr);
-  if (input.dtype() == DType::kBFloat16) {
-    const auto *input_ptr = reinterpret_cast<const __nv_bfloat16 *>(input.data.dptr);
-    launch_compute_columnwise_amax<__nv_bfloat16>(static_cast<int>(rows), static_cast<int>(cols),
-                                                  input_ptr, amax_ptr, stream, noop_ptr);
-  } else if (input.dtype() == DType::kFloat16) {
-    const auto *input_ptr = reinterpret_cast<const half *>(input.data.dptr);
-    launch_compute_columnwise_amax<half>(static_cast<int>(rows), static_cast<int>(cols), input_ptr,
-                                         amax_ptr, stream, noop_ptr);
-  } else if (input.dtype() == DType::kFloat32) {
-    const auto *input_ptr = reinterpret_cast<const float *>(input.data.dptr);
-    launch_compute_columnwise_amax<float>(static_cast<int>(rows), static_cast<int>(cols), input_ptr,
-                                          amax_ptr, stream, noop_ptr);
-  } else {
-    NVTE_ERROR(
-        "Unsupported input dtype for row-scaled NVFP4 quantization. "
-        "Expected BFloat16, Float16, or Float32.");
-  }
-#else
-  NVTE_ERROR("FP4 support requires CUDA 12.8+, but compile-time CUDA version is ", CUDA_VERSION);
-#endif  // FP4_TYPE_SUPPORTED
-}
-
 namespace quantize_transpose_kernel {
 
 using namespace quantization_and_transposition_SF;
@@ -236,16 +202,15 @@ using namespace ptx;
 
 #if FP4_TYPE_SUPPORTED
 
-constexpr size_t SCALE_DIM = 16;  // NVFP4 block (x16 elts)
 
 constexpr size_t CHUNK_DIM_Y = 128;
 constexpr size_t CHUNK_DIM_X = 128;
 constexpr size_t THREADS_NUM = 128;
 
-constexpr size_t SCALES_PER_CHUNK_Y = CHUNK_DIM_Y / SCALE_DIM;
-constexpr size_t SCALES_PER_CHUNK_X = CHUNK_DIM_X / SCALE_DIM;
+constexpr size_t SCALES_PER_CHUNK_Y = CHUNK_DIM_Y / NVFP4_SCALE_DIM;
+constexpr size_t SCALES_PER_CHUNK_X = CHUNK_DIM_X / NVFP4_SCALE_DIM;
 
-constexpr size_t SCALES_PER_THREAD = 2 * (CHUNK_DIM_Y * CHUNK_DIM_X) / SCALE_DIM / THREADS_NUM;
+constexpr size_t SCALES_PER_THREAD = 2 * (CHUNK_DIM_Y * CHUNK_DIM_X) / NVFP4_SCALE_DIM / THREADS_NUM;
 
 // Each call generates 4x uint32_t random numbers
 constexpr size_t RNG_GENS_PER_THREAD = SCALES_PER_THREAD / 4;
@@ -253,9 +218,9 @@ constexpr size_t RNG_GENS_PER_THREAD = SCALES_PER_THREAD / 4;
 constexpr size_t TILE_DIM_Y = 32;
 constexpr size_t TILE_DIM_X = 128;
 
-// SHould this be SCALE_DIM or BLOCK_DIM? Both are 16, should work for both 1D and 2D
-constexpr size_t SCALES_PER_TILE_Y = TILE_DIM_Y / SCALE_DIM;
-constexpr size_t SCALES_PER_TILE_X = TILE_DIM_X / SCALE_DIM;  // 128 / 16 =  8
+// SHould this be NVFP4_SCALE_DIM or BLOCK_DIM? Both are 16, should work for both 1D and 2D
+constexpr size_t SCALES_PER_TILE_Y = TILE_DIM_Y / NVFP4_SCALE_DIM;
+constexpr size_t SCALES_PER_TILE_X = TILE_DIM_X / NVFP4_SCALE_DIM;  // 128 / 16 =  8
 
 constexpr size_t TILES_Y = CHUNK_DIM_Y / TILE_DIM_Y;
 constexpr size_t TILES_X = CHUNK_DIM_X / TILE_DIM_X;
@@ -284,17 +249,17 @@ constexpr size_t BUFF_OUT_T_SIZE = BUFF_OUT_T_DIM_Y * BUFF_OUT_T_DIM_X;
 
 // Manual swizzling parameters to reduce SHMEM bank conflicts
 constexpr size_t PACK_SIZE = 8;
-constexpr size_t WAVES = SCALE_DIM / PACK_SIZE;
+constexpr size_t WAVES = NVFP4_SCALE_DIM / PACK_SIZE;
 
-constexpr size_t SCALING_FACTORS_PER_TILE_X = TILE_DIM_X / SCALE_DIM;
+constexpr size_t SCALING_FACTORS_PER_TILE_X = TILE_DIM_X / NVFP4_SCALE_DIM;
 constexpr size_t THREADS_X_ROWWISE = SCALING_FACTORS_PER_TILE_X;       // 128 / 16 = 8
 constexpr size_t THREADS_Y_ROWWISE = THREADS_NUM / THREADS_X_ROWWISE;  // 128 / 8 = 16
 
 constexpr size_t ITERATIONS_NORMAL = BUFF_DIM_Y / THREADS_Y_ROWWISE;  // 32/ 16 = 2
-constexpr size_t ITERATIONS_TRANSPOSE = BUFF_IN_DIM_Y / SCALE_DIM;
+constexpr size_t ITERATIONS_TRANSPOSE = BUFF_IN_DIM_Y / NVFP4_SCALE_DIM;
 constexpr size_t BUFF_OUT_IT_OFFSET = BUFF_OUT_T_DIM_X / ITERATIONS_TRANSPOSE;
 
-static_assert(BUFF_DIM_Y >= SCALE_DIM &&
+static_assert(BUFF_DIM_Y >= NVFP4_SCALE_DIM &&
               "Number of buffer rows must be greater or equal to the size of the columwise "
               "scaling block\0");
 static_assert(CHUNK_DIM_Y >= BUFF_DIM_Y);
@@ -306,7 +271,7 @@ static_assert(BUFF_DIM_Y >= THREADS_Y_ROWWISE &&
 constexpr size_t TOTAL_BANKS_WIDTH = (32 * 4 * 8) / 4;  // 256
 
 // Number of threads (rowwise scaling) that span 32 banks (4-byte banks) of shared memory
-constexpr size_t THREADS_PER_BANK = TOTAL_BANKS_WIDTH / SCALE_DIM;  // 8 = 128 / 16
+constexpr size_t THREADS_PER_BANK = TOTAL_BANKS_WIDTH / NVFP4_SCALE_DIM;  // 8 = 128 / 16
 
 template <bool COMPUTE_ACTIVATIONS, typename ParamOP, float (*OP)(float, const ParamOP &),
           typename IType, bool USE_STOCHASTIC_ROUNDING, bool RETURN_TRANSPOSE,
@@ -365,7 +330,7 @@ __global__ void __launch_bounds__(THREADS_NUM)
   // const size_t tid_X_t = 0;
 
   const size_t thread_offset_Y_rowwise = tid_Y_rowwise;
-  const size_t thread_offset_X_rowwise = tid_X_rowwise * SCALE_DIM;
+  const size_t thread_offset_X_rowwise = tid_X_rowwise * NVFP4_SCALE_DIM;
   const size_t thread_offset_X_colwise = tid_X_colwise;
 
   const size_t row_base_rowwise = block_offset_Y + thread_offset_Y_rowwise;
@@ -379,7 +344,7 @@ __global__ void __launch_bounds__(THREADS_NUM)
   const size_t scales_offset_Y_t = scales_block_offset_Y_t + tid_Y_t;
   const size_t scales_offset_X_t = scales_block_offset_X_t;
 
-  const size_t SFs_per_row = cols / SCALE_DIM;
+  const size_t SFs_per_row = cols / NVFP4_SCALE_DIM;
 
   const bool rowwise_scale_is_within_bounds_X = scales_offset_X_rowwise < SFs_per_row;
   const bool colwise_scale_is_within_bounds_Y = scales_offset_Y_t < cols;
@@ -481,7 +446,7 @@ __global__ void __launch_bounds__(THREADS_NUM)
     if constexpr (RETURN_TRANSPOSE) {
 #pragma unroll
       for (size_t it = 0; it < ITERATIONS_TRANSPOSE; ++it) {
-        const size_t in_thread_offset_Y = 0 + it * SCALE_DIM;
+        const size_t in_thread_offset_Y = 0 + it * NVFP4_SCALE_DIM;
         const size_t in_thread_offset_X = thread_offset_X_colwise;
 
         const size_t out_t_thread_offset_Y = thread_offset_X_colwise;
@@ -493,13 +458,13 @@ __global__ void __launch_bounds__(THREADS_NUM)
             buff_offset_out_t + out_t_thread_offset_Y * BUFF_OUT_T_DIM_X + out_t_thread_offset_X;
 
         block_amax = 0.0f;
-        float in_compute_colwise[SCALE_DIM];
-        IType in_colwise_IType[SCALE_DIM];
+        float in_compute_colwise[NVFP4_SCALE_DIM];
+        IType in_colwise_IType[NVFP4_SCALE_DIM];
         // 1. Read/Compute elements. Find NVFP4-block AMAX
         if constexpr (NO_ACTIVATIONS_NOT_FP32_INPUT) {
           IType block_amax_f16 = static_cast<IType>(0.0f);
 #pragma unroll
-          for (int i = 0; i < SCALE_DIM; ++i) {
+          for (int i = 0; i < NVFP4_SCALE_DIM; ++i) {
             const int shmem_offset_colwise = shmem_offset_base_colwise_in + i * BUFF_IN_DIM_X;
             in_colwise_IType[i] = in_sh[shmem_offset_colwise];
             block_amax_f16 = __hmax(block_amax_f16, __habs(in_colwise_IType[i]));
@@ -507,7 +472,7 @@ __global__ void __launch_bounds__(THREADS_NUM)
           block_amax = static_cast<float>(block_amax_f16);
         } else {
 #pragma unroll
-          for (int i = 0; i < SCALE_DIM; ++i) {
+          for (int i = 0; i < NVFP4_SCALE_DIM; ++i) {
             const int shmem_offset_colwise = shmem_offset_base_colwise_in + i * BUFF_IN_DIM_X;
             float elt = static_cast<float>(in_sh[shmem_offset_colwise]);
             if constexpr (COMPUTE_ACTIVATIONS) {
@@ -551,10 +516,10 @@ __global__ void __launch_bounds__(THREADS_NUM)
         const float2 block_scale_inverse_2x{block_scale_inverse, block_scale_inverse};
 
         // 3. Scale elements
-        fp4e2m1x4 regs[SCALE_DIM / 4];
+        fp4e2m1x4 regs[NVFP4_SCALE_DIM / 4];
 
 #pragma unroll
-        for (int e = 0; e < SCALE_DIM / 4; ++e) {
+        for (int e = 0; e < NVFP4_SCALE_DIM / 4; ++e) {
           const uint32_t rbits = get_rbits(rng, random_uint4, rnd_idx);
           if constexpr (NO_ACTIVATIONS_NOT_FP32_INPUT) {
             const uint64_t elts = *reinterpret_cast<uint64_t *>(&in_colwise_IType[4 * e]);
@@ -606,7 +571,7 @@ __global__ void __launch_bounds__(THREADS_NUM)
         const size_t it_offset_Y = stage_offset_Y + it * THREADS_Y_ROWWISE;
 
         block_amax = 0.0f;
-        float in_compute_rowwise[SCALE_DIM];
+        float in_compute_rowwise[NVFP4_SCALE_DIM];
         Vec<IType, PACK_SIZE> in_cached[WAVES];
 
         // used as an IType container for BF16/FP16 --> NVFP4 CAST ONLY
@@ -617,7 +582,7 @@ __global__ void __launch_bounds__(THREADS_NUM)
           IType2 thread_amax_2x = {static_cast<IType>(0.0f), static_cast<IType>(0.0f)};
 #pragma unroll
           for (int w = 0; w < WAVES; ++w) {
-            const size_t swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM;
+            const size_t swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % NVFP4_SCALE_DIM;
             const size_t swizzled_thread_idx = thread_offset_X_rowwise + swizzled_group_idx;
             const size_t shmem_offset_rowwise = shmem_offset_base_rowwise_in + swizzled_thread_idx;
             // Load elements
@@ -635,7 +600,7 @@ __global__ void __launch_bounds__(THREADS_NUM)
           IType2 thread_amax_2x = {static_cast<IType>(0.0f), static_cast<IType>(0.0f)};
 #pragma unroll
           for (int w = 0; w < WAVES; ++w) {
-            const size_t swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM;
+            const size_t swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % NVFP4_SCALE_DIM;
             const size_t swizzled_thread_idx = thread_offset_X_rowwise + swizzled_group_idx;
             const size_t shmem_offset_rowwise = shmem_offset_base_rowwise_in + swizzled_thread_idx;
 
@@ -670,7 +635,7 @@ __global__ void __launch_bounds__(THREADS_NUM)
         } else {
 #pragma unroll
           for (int w = 0; w < WAVES; ++w) {
-            const size_t swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM;
+            const size_t swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % NVFP4_SCALE_DIM;
             const size_t swizzled_thread_idx = thread_offset_X_rowwise + swizzled_group_idx;
             const size_t shmem_offset_rowwise = shmem_offset_base_rowwise_in + swizzled_thread_idx;
 
@@ -785,7 +750,7 @@ __global__ void __launch_bounds__(THREADS_NUM)
                   in01, in23, block_scale_inverse_2x, rbits);
             }
           }
-          const size_t swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM;
+          const size_t swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % NVFP4_SCALE_DIM;
           const size_t swizzled_idx = swizzled_group_idx + thread_offset_X_rowwise;
           const size_t shmem_offset_rowwise = shmem_offset_base_rowwise_out + swizzled_idx / 2;
           out.store_to(&out_data_sh[shmem_offset_rowwise]);
@@ -831,7 +796,7 @@ __global__ void __launch_bounds__(THREADS_NUM)
     ScalesVec &scales_vec = *reinterpret_cast<ScalesVec *>(&out_colwise_scales_sh[scale_idx_sh]);
     const size_t scale_idx_global = scales_offset_Y_t * scale_stride_t + scales_offset_X_t;
     const size_t count =  // number of scales in Y dimension of this chunk
-        (chunk_rows >= CHUNK_DIM_Y) ? SCALES_PER_CHUNK_Y : (chunk_rows / SCALE_DIM);
+        (chunk_rows >= CHUNK_DIM_Y) ? SCALES_PER_CHUNK_Y : (chunk_rows / NVFP4_SCALE_DIM);
     nvfp4_scale_t *dst = &scales_t_ptr[scale_idx_global];
     constexpr size_t vec_bytes = SCALES_PER_CHUNK_Y * sizeof(nvfp4_scale_t);
     if (count == SCALES_PER_CHUNK_Y && (reinterpret_cast<uintptr_t>(dst) % vec_bytes == 0)) {
@@ -911,7 +876,7 @@ __global__ void __launch_bounds__(THREADS_NUM)
   const size_t tid_Y_t = tid_X_colwise;
 
   const size_t thread_offset_Y_rowwise = tid_Y_rowwise;
-  const size_t thread_offset_X_rowwise = tid_X_rowwise * SCALE_DIM;
+  const size_t thread_offset_X_rowwise = tid_X_rowwise * NVFP4_SCALE_DIM;
   const size_t thread_offset_X_colwise = tid_X_colwise;
 
   const size_t scales_offset_Y_rowwise = scales_block_offset_Y_rowwise + tid_Y_rowwise;
@@ -919,7 +884,7 @@ __global__ void __launch_bounds__(THREADS_NUM)
   const size_t scales_offset_Y_t = scales_block_offset_Y_t + tid_Y_t;
   const size_t scales_offset_X_t = scales_block_offset_X_t;
 
-  const size_t SFs_per_row = cols / SCALE_DIM;
+  const size_t SFs_per_row = cols / NVFP4_SCALE_DIM;
 
   const bool rowwise_scale_is_within_bounds_X = scales_offset_X_rowwise < SFs_per_row;
   const bool colwise_scale_is_within_bounds_Y = scales_offset_Y_t < cols;
@@ -1101,7 +1066,7 @@ __global__ void __launch_bounds__(THREADS_NUM)
         const size_t block_in_tile_y = it;
         const size_t block_in_tile_x = threadIdx.x / BLOCK_DIM;
 
-        const size_t in_thread_offset_Y = 0 + it * SCALE_DIM;
+        const size_t in_thread_offset_Y = 0 + it * NVFP4_SCALE_DIM;
         const size_t in_thread_offset_X = thread_offset_X_colwise;
 
         const size_t out_t_thread_offset_Y = thread_offset_X_colwise;
@@ -1113,19 +1078,19 @@ __global__ void __launch_bounds__(THREADS_NUM)
             buff_offset_out_t + out_t_thread_offset_Y * BUFF_OUT_T_DIM_X + out_t_thread_offset_X;
 
         block_amax = block_amax_matrix[block_in_tile_y][block_in_tile_x];
-        float in_compute_colwise[SCALE_DIM];
-        IType in_colwise_IType[SCALE_DIM];
+        float in_compute_colwise[NVFP4_SCALE_DIM];
+        IType in_colwise_IType[NVFP4_SCALE_DIM];
         // 3. Scale elements
 
         // Load data in
         if constexpr (NO_ACTIVATIONS_NOT_FP32_INPUT) {
 #pragma unroll
-          for (int i = 0; i < SCALE_DIM; ++i) {
+          for (int i = 0; i < NVFP4_SCALE_DIM; ++i) {
             const int shmem_offset_colwise = shmem_offset_base_colwise_in + i * BUFF_IN_DIM_X;
             in_colwise_IType[i] = in_sh[shmem_offset_colwise];
           }
         } else {
-          for (int i = 0; i < SCALE_DIM; ++i) {
+          for (int i = 0; i < NVFP4_SCALE_DIM; ++i) {
             const int shmem_offset_colwise = shmem_offset_base_colwise_in + i * BUFF_IN_DIM_X;
             float elt = static_cast<float>(in_sh[shmem_offset_colwise]);
             if constexpr (COMPUTE_ACTIVATIONS) {
@@ -1159,9 +1124,9 @@ __global__ void __launch_bounds__(THREADS_NUM)
             1.0f / (static_cast<float>(S_dec_b_fp8) * S_dec_colwise), float_max);  // S_enc_b_fp8
         const float2 block_scale_inverse_2x{block_scale_inverse, block_scale_inverse};
 
-        fp4e2m1x4 regs[SCALE_DIM / 4];
+        fp4e2m1x4 regs[NVFP4_SCALE_DIM / 4];
 #pragma unroll
-        for (int e = 0; e < SCALE_DIM / 4; ++e) {
+        for (int e = 0; e < NVFP4_SCALE_DIM / 4; ++e) {
           const uint32_t rbits = get_rbits(rng, random_uint4, rnd_idx);
           if constexpr (NO_ACTIVATIONS_NOT_FP32_INPUT) {
             const uint64_t elts = *reinterpret_cast<uint64_t *>(&in_colwise_IType[4 * e]);
@@ -1212,7 +1177,7 @@ __global__ void __launch_bounds__(THREADS_NUM)
             buff_offset_out + it_thread_offset_Y_rowwise * BUFF_OUT_DIM_X;
 
         block_amax = block_amax_matrix[block_in_tile_y][block_in_tile_x];
-        float in_compute_rowwise[SCALE_DIM];
+        float in_compute_rowwise[NVFP4_SCALE_DIM];
         Vec<IType, PACK_SIZE> in_cached[WAVES];
 
         // used as an IType container for BF16/FP16 --> NVFP4 CAST ONLY
@@ -1223,7 +1188,7 @@ __global__ void __launch_bounds__(THREADS_NUM)
           IType2 thread_amax_2x = {static_cast<IType>(0.0f), static_cast<IType>(0.0f)};
 #pragma unroll
           for (int w = 0; w < WAVES; ++w) {
-            const size_t swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM;
+            const size_t swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % NVFP4_SCALE_DIM;
             const size_t swizzled_thread_idx = thread_offset_X_rowwise + swizzled_group_idx;
             const size_t shmem_offset_rowwise = shmem_offset_base_rowwise_in + swizzled_thread_idx;
             // Load elements
@@ -1234,7 +1199,7 @@ __global__ void __launch_bounds__(THREADS_NUM)
           __syncthreads();
 #pragma unroll
           for (int w = 0; w < WAVES; ++w) {
-            const size_t swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM;
+            const size_t swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % NVFP4_SCALE_DIM;
             const size_t swizzled_thread_idx = thread_offset_X_rowwise + swizzled_group_idx;
             const size_t shmem_offset_rowwise = shmem_offset_base_rowwise_in + swizzled_thread_idx;
 
@@ -1244,7 +1209,7 @@ __global__ void __launch_bounds__(THREADS_NUM)
         } else {
 #pragma unroll
           for (int w = 0; w < WAVES; ++w) {
-            const size_t swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM;
+            const size_t swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % NVFP4_SCALE_DIM;
             const size_t swizzled_thread_idx = thread_offset_X_rowwise + swizzled_group_idx;
             const size_t shmem_offset_rowwise = shmem_offset_base_rowwise_in + swizzled_thread_idx;
 
@@ -1326,7 +1291,7 @@ __global__ void __launch_bounds__(THREADS_NUM)
             }
           }
 
-          const size_t swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM;
+          const size_t swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % NVFP4_SCALE_DIM;
           const size_t swizzled_idx = swizzled_group_idx + thread_offset_X_rowwise;
           const size_t shmem_offset_rowwise = shmem_offset_base_rowwise_out + swizzled_idx / 2;
           out.store_to(&out_data_sh[shmem_offset_rowwise]);
