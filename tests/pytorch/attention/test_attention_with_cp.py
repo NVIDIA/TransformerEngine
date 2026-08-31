@@ -405,6 +405,45 @@ def test_cp_with_flash_attention(cp_pool, dtype, model, qkv_format, cp_comm_type
     )
 
 
+@pytest.mark.skipif(
+    not FlashAttentionUtils.v2_6_0_plus, reason="CP softcap requires flash-attn 2.6.0+."
+)
+@pytest.mark.skipif(get_device_compute_capability() < (8, 0), reason="CP tests require sm80+.")
+@pytest.mark.parametrize("cp_comm_type", ["p2p", "all_gather", "a2a"])
+def test_cp_with_flash_attention_softcap(cp_pool, cp_comm_type):
+    """Check softcap forward and dgrad against the non-CP reference.
+
+    One case per CP autograd function, since P2P, all-gather and A2A each thread softcap
+    through their own forward inputs and gradient slots.
+    """
+    config = copy.deepcopy(model_configs_flash_attn["cp_2_0"])
+    config.context_parallel = True
+    config.cp_comm_type = cp_comm_type
+    # The runner's clamped-randn inputs put the scaled logits at O(1), so this cap sits in
+    # tanh's nonlinear region and a path that dropped it would diverge from the reference.
+    config.softcap = 0.5
+    available_backends, _, _ = get_available_attention_backends(
+        config,
+        qkv_dtype=torch.bfloat16,
+        qkv_layout="bshd_bshd_bshd",
+        is_training=True,
+        deterministic=_deterministic,
+    )
+    if not available_backends[0]:
+        pytest.skip("FlashAttention is unavailable.")
+    _submit(
+        cp_pool(2),
+        dtype="bf16",
+        model="cp_2_0",
+        qkv_format="bshd",
+        kernel_backend="FlashAttention",
+        cp_comm_type=cp_comm_type,
+        softcap=config.softcap,
+        deterministic=_deterministic,
+        log_level=pytest_logging_level,
+    )
+
+
 model_configs_fused_attn = {
     # test: ModelConfig(b, sq, hq, dqk)
     "cp_1_0": ModelConfig(2, 4096, 12, 128, attn_mask_type="causal", return_max_logit=True),  # MHA
