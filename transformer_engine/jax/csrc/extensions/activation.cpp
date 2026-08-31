@@ -24,6 +24,8 @@ Error_Type ActLuFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_Type scal
   auto swiglu_limit = act_params.clamped_swiglu.limit;
   auto swiglu_alpha = act_params.clamped_swiglu.alpha;
   auto swiglu_glu_linear_offset = act_params.clamped_swiglu.glu_linear_offset;
+  auto situ_beta1 = act_params.situglu.beta1;
+  auto situ_beta2 = act_params.situglu.beta2;
 
   auto in_dtype = convert_ffi_datatype_to_te_dtype(input_buf.element_type());
   auto out_dtype = convert_ffi_datatype_to_te_dtype(output_buf->element_type());
@@ -140,6 +142,9 @@ Error_Type ActLuFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_Type scal
     case NVTE_Activation_Type::CLAMPED_SWIGLU:
       nvte_clamped_swiglu_v2(input_tensor.data(), output_tensor.data(), swiglu_limit, swiglu_alpha,
                              swiglu_glu_linear_offset, stream);
+      break;
+    case NVTE_Activation_Type::SITUGLU:
+      nvte_situglu(input_tensor.data(), output_tensor.data(), situ_beta1, situ_beta2, stream);
       break;
     default:
       NVTE_ERROR("Unsupported ActivationEnum");
@@ -273,6 +278,8 @@ Error_Type DActLuDBiasQuantizeFFI(cudaStream_t stream, Buffer_Type input_buf,
   auto swiglu_limit = act_params.clamped_swiglu.limit;
   auto swiglu_alpha = act_params.clamped_swiglu.alpha;
   auto swiglu_glu_linear_offset = act_params.clamped_swiglu.glu_linear_offset;
+  auto situ_beta1 = act_params.situglu.beta1;
+  auto situ_beta2 = act_params.situglu.beta2;
 
   auto in_dtype = convert_ffi_datatype_to_te_dtype(input_buf.element_type());
   auto out_dtype = convert_ffi_datatype_to_te_dtype(output_buf->element_type());
@@ -450,6 +457,10 @@ Error_Type DActLuDBiasQuantizeFFI(cudaStream_t stream, Buffer_Type input_buf,
       case NVTE_Activation_Type::CLAMPED_SWIGLU:
         nvte_clamped_dswiglu_v2(input_tensor.data(), act_input_tensor.data(), output_tensor.data(),
                                 swiglu_limit, swiglu_alpha, swiglu_glu_linear_offset, stream);
+        break;
+      case NVTE_Activation_Type::SITUGLU:
+        nvte_dsituglu(input_tensor.data(), act_input_tensor.data(), output_tensor.data(), situ_beta1,
+                      situ_beta2, stream);
         break;
       default:
         NVTE_ERROR("Unsupported ActivationEnum");
