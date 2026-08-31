@@ -13,6 +13,7 @@ import numpy as np
 import torch
 import torch.distributed as dist
 
+from ep_reference import BlockScaledTensor, MoeEpReference, MoeFormat, quantize_blockwise
 import transformer_engine.pytorch as te
 from transformer_engine.pytorch import ops as te_ops
 from transformer_engine.common.recipe import MXFP8BlockScaling
@@ -31,12 +32,6 @@ from transformer_engine.pytorch.ep import (
     is_symm_backed,
     _ep_combine_raw,
     _ep_dispatch_raw,
-)
-from transformer_engine.pytorch.ep_reference import (
-    BlockScaledTensor,
-    MoeEpReference,
-    MoeFormat,
-    quantize_blockwise,
 )
 from transformer_engine.pytorch.ops.fused.moe_ep import (
     FusedMoeEp,
