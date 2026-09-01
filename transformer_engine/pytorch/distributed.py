@@ -446,7 +446,9 @@ class _CheckpointFunction(torch.autograd.Function):
         detached_inputs = detach_variable(inputs)
         with torch.enable_grad(), ctx.recompute_ctx, ctx.torch_gpu_amp_ctx, ctx.torch_cpu_amp_ctx, activation_recompute_forward(
             activation_recompute=True, recompute_phase=True
-        ), autocast(enabled=ctx.fp8, recipe=ctx.fp8_recipe):
+        ), autocast(
+            enabled=ctx.fp8, recipe=ctx.fp8_recipe
+        ):
             outputs = ctx.run_function(*detached_inputs, **ctx.kwargs)
 
         # Set the states back to what it was at the start of this function.
