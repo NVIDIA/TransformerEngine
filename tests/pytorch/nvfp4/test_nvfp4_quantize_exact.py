@@ -17,23 +17,26 @@ from transformer_engine.common.recipe import NVFP4BlockScaling
 
 
 recipe_available, reason_for_no_recipe = te.is_nvfp4_available(return_reason=True)
+ue5m3_available, reason_for_no_ue5m3 = te.is_fp8_ue5m3_available(return_reason=True)
 NVFP4_E4M3_AMAX_FOR_UNIT_GLOBAL_SCALE = 448.0 * 6.0
+NVFP4_SUPPORTED_SCALE_MAX_VALUES = (0, 256, 448, 114688)
 
 
 @dataclass(frozen=True)
 class NVFP44Over6TestConfig:
     id: str
     use_4over6: bool = True
-    e4m3_max: int = 448
+    e4m3_max: int = 0
     err_mode: str = "MAE"
     err_use_fast_math: bool = False
 
 
 NVFP4_4OVER6_CONFIGS = [
     NVFP44Over6TestConfig(id="nvfp4", use_4over6=False),
-    NVFP44Over6TestConfig(id="4over6-mae-e4m3-448-exact", err_mode="MAE"),
+    NVFP44Over6TestConfig(id="4over6-mae-e4m3-448-exact", e4m3_max=448, err_mode="MAE"),
     NVFP44Over6TestConfig(
         id="4over6-mae-e4m3-448-err-fast",
+        e4m3_max=448,
         err_mode="MAE",
         err_use_fast_math=True,
     ),
@@ -44,9 +47,10 @@ NVFP4_4OVER6_CONFIGS = [
         err_mode="MAE",
         err_use_fast_math=True,
     ),
-    NVFP44Over6TestConfig(id="4over6-mse-e4m3-448-exact", err_mode="MSE"),
+    NVFP44Over6TestConfig(id="4over6-mse-e4m3-448-exact", e4m3_max=448, err_mode="MSE"),
     NVFP44Over6TestConfig(
         id="4over6-mse-e4m3-448-err-fast",
+        e4m3_max=448,
         err_mode="MSE",
         err_use_fast_math=True,
     ),
@@ -115,12 +119,18 @@ def check_quantization_nvfp4_versus_reference(
     with_2d_quantization: bool,
     row_scaled_nvfp4: bool = False,
     use_4over6: bool = False,
-    nvfp4_e4m3_max: int = 448,
+    nvfp4_e4m3_max: int = 0,
     nvfp4_4over6_err_mode: str = "MAE",
     nvfp4_4over6_err_use_fast_math: bool = False,
+    scale_dtype: te.DType = te.DType.kFloat8E4M3,
 ) -> None:
-    if nvfp4_e4m3_max != 448 and not use_4over6:
-        pytest.skip("E4M3 max 256 is only meaningful for 4over6")
+    scale_dtype = te.DType.cast(scale_dtype)
+    if nvfp4_e4m3_max not in NVFP4_SUPPORTED_SCALE_MAX_VALUES:
+        raise ValueError(
+            "nvfp4_e4m3_max must be 0, 256, 448, or 114688."
+        )
+    if use_4over6 and scale_dtype == te.DType.kFloat8UE5M3:
+        pytest.skip("NVFP4 4over6 is incompatible with UE5M3 scales")
     maybe_skip_row_scaled_unsupported_quantization(
         row_scaled_nvfp4, return_transpose, with_2d_quantization, use_4over6, x_dtype, M, N
     )
@@ -149,6 +159,7 @@ def check_quantization_nvfp4_versus_reference(
         nvfp4_use_4over6=use_4over6,
         nvfp4_e4m3_max=nvfp4_e4m3_max,
         nvfp4_4over6_err_mode=nvfp4_4over6_err_mode,
+        scale_dtype=scale_dtype,
     )
 
     if use_4over6:
@@ -168,6 +179,8 @@ def check_quantization_nvfp4_versus_reference(
                 (M, N), dtype=x_dtype, device=device, requires_grad=False
             )
             x_nvfp4_sut = nvfp4_quantizer.update_quantized(x, x_nvfp4_sut)
+
+    assert x_nvfp4_sut._scale_dtype == scale_dtype
 
     # Extract data from NVFP4Tensor
     assert x_nvfp4_sut._rowwise_data is not None
@@ -197,6 +210,7 @@ def check_quantization_nvfp4_versus_reference(
         nvfp4_e4m3_max=nvfp4_e4m3_max,
         nvfp4_4over6_err_mode=nvfp4_4over6_err_mode,
         nvfp4_4over6_err_use_fast_math=nvfp4_4over6_err_use_fast_math,
+        scale_dtype=scale_dtype,
     )
     x_nvfp4_ref = ref_quantizer.quantize(x)
 
@@ -493,6 +507,26 @@ def test_nvfp4_quantization_extrema_versus_reference(
         torch.testing.assert_close(qx_amax_t, ref_amax_t, atol=0.0, rtol=0.0)
 
     torch.testing.assert_close(qx_amax, ref_amax, atol=0.0, rtol=0.0)
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.skipif(not ue5m3_available, reason=reason_for_no_ue5m3)
+@pytest.mark.parametrize(
+    "with_2d_quantization",
+    [False, True],
+    ids=["1d_quantization", "2d_quantization"],
+)
+def test_nvfp4_ue5m3_quantization_versus_reference(with_2d_quantization: bool) -> None:
+    check_quantization_nvfp4_versus_reference(
+        x_dtype=torch.bfloat16,
+        M=128,
+        N=128,
+        return_transpose=True,
+        swizzled_scale=False,
+        use_cpp_allocator=False,
+        with_2d_quantization=with_2d_quantization,
+        scale_dtype=te.DType.kFloat8UE5M3,
+    )
 
 
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)

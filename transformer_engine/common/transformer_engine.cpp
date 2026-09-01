@@ -930,7 +930,7 @@ void nvte_set_tensor_param_v2(NVTETensor tensor, NVTETensorParam param, const vo
       std::memcpy(&t.nvfp4_e4m3_max, buf, attr_size);
       // Need to rename this to nvfp4_scale_type_max
       NVTE_CHECK(t.nvfp4_e4m3_max == 0 || t.nvfp4_e4m3_max == 448 || t.nvfp4_e4m3_max == 256 ||
-                     t.nvfp4_e4m3_max == 114688 || t.nvfp4_e4m3_max == 65536,
+                     t.nvfp4_e4m3_max == 114688,
                  "Unsupported NVFP4 scale type max (got ", t.nvfp4_e4m3_max, ")");
       break;
     default:

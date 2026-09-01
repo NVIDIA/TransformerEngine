@@ -142,20 +142,21 @@ inline void dequantize(const Tensor &input, Tensor *output, cudaStream_t stream)
   NVTE_CHECK(!row_scaled_nvfp4 || input.amax.numel() == N,
              "Row-scaled NVFP4 dequantization requires one rowwise amax per row.");
   const int full_scale_max = static_cast<int>(typeToMax(scale_dtype));
-  const bool uses_4over6_headroom = (scale_dtype == DType::kFloat8E4M3 && scale_type_max == 256) ||
-                                    (scale_dtype == DType::kFloat8UE5M3 && scale_type_max == 65536);
+  const bool uses_4over6_headroom = scale_dtype == DType::kFloat8E4M3 && scale_type_max == 256;
   NVTE_CHECK(scale_type_max == full_scale_max || uses_4over6_headroom, "Unsupported maximum ",
              scale_type_max, " for NVFP4 scale dtype ", to_string(scale_dtype), ".");
-  TRANSFORMER_ENGINE_NVFP4_SCALE_TYPE_SWITCH(scale_dtype, ScaleType, {
-    constexpr int full_max = static_cast<int>(TypeInfo<ScaleType>::max_finite_value);
-    constexpr int headroom_max = std::is_same_v<ScaleType, fp8e4m3> ? 256 : 65536;
-    TRANSFORMER_ENGINE_SWITCH_CONDITION(scale_type_max == headroom_max, USE_HEADROOM, {
-      constexpr int SCALE_TYPE_MAX = USE_HEADROOM ? headroom_max : full_max;
+  if (uses_4over6_headroom) {
+    launch_dequantize<fp8e4m3, 256>(input, output, with_gemm_swizzled_scales,
+                                    row_scaled_nvfp4, N, Mread, blocks, threads,
+                                    num_scale_tiles_X, stream);
+  } else {
+    TRANSFORMER_ENGINE_NVFP4_SCALE_TYPE_SWITCH(scale_dtype, ScaleType, {
+      constexpr int SCALE_TYPE_MAX = static_cast<int>(TypeInfo<ScaleType>::max_finite_value);
       launch_dequantize<ScaleType, SCALE_TYPE_MAX>(input, output, with_gemm_swizzled_scales,
                                                    row_scaled_nvfp4, N, Mread, blocks, threads,
                                                    num_scale_tiles_X, stream);
     })
-  })
+  }
   NVTE_CHECK_CUDA(cudaGetLastError());
 #else
   NVTE_ERROR("CUDA 12.8 or higher is needed for FP4 calculation!");
