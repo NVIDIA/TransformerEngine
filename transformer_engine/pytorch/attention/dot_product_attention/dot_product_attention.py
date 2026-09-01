@@ -4,7 +4,6 @@
 
 """Attention."""
 from contextlib import nullcontext
-import dataclasses
 import math
 import os
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
@@ -67,7 +66,6 @@ from transformer_engine.pytorch.attention.dot_product_attention.backends import 
     FusedAttention,
     FlashAttention,
 )
-from transformer_engine.pytorch.attention.dot_product_attention.gdn import _GatedDeltaNetAttention
 
 
 # Setup Attention Logging
@@ -826,13 +824,6 @@ class DotProductAttention(TransformerEngineBaseModule):
             return_max_logit=self.return_max_logit,
         )
 
-        self.gdn_attention = _GatedDeltaNetAttention(
-            softmax_scale,
-            num_attention_heads // self.tp_size,
-            self.hidden_size_per_attention_head_k,
-            self.hidden_size_per_attention_head_v,
-        )
-
         def remove_extra_states_check(self, incompatible_keys):  # pylint: disable=unused-argument
             """
             Temporarily remove core_attention._extra_state as a missing key
@@ -1400,193 +1391,6 @@ class DotProductAttention(TransformerEngineBaseModule):
             ]
         return base[:num_quantizers]
 
-    @dataclasses.dataclass
-    class _DPAOnlyArgs:
-        """Softmax-attention-only ``forward`` options that GDN does not support.
-
-        Bundling these keeps ``_validate_gdn_request`` and ``_forward_gdn`` from having
-        to declare (and GDN from having to reject) each individual DPA-only knob.
-        """
-
-        attention_mask: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]
-        cu_seqlens_q_padded: Optional[torch.Tensor]
-        cu_seqlens_kv_padded: Optional[torch.Tensor]
-        max_seqlen_q: Optional[int]
-        max_seqlen_kv: Optional[int]
-        attn_mask_type: Optional[str]
-        window_size: Optional[Tuple[int, int]]
-        bottom_right_diagonal: Optional[bool]
-        core_attention_bias_type: str
-        core_attention_bias: Optional[torch.Tensor]
-        alibi_slopes: Optional[torch.Tensor]
-        fast_zero_fill: bool
-        inference_params: Optional[InferenceParams]
-        pad_between_seqs: Optional[bool]
-        fp8_output: Optional[bool]
-        bf16_backward: Optional[bool]
-        num_splits: Optional[int]
-        score_mod: Optional[Callable]
-        score_mod_bprop: Optional[Callable]
-        score_mod_tensors: Optional[Dict[str, torch.Tensor]]
-        score_mod_bprop_tensors: Optional[Dict[str, torch.Tensor]]
-
-    def _validate_gdn_request(
-        self,
-        g: Optional[torch.Tensor],
-        beta: Optional[torch.Tensor],
-        cu_seqlens_q: Optional[torch.Tensor],
-        cu_seqlens_kv: Optional[torch.Tensor],
-        dpa_args: "DotProductAttention._DPAOnlyArgs",
-    ) -> Tuple[str, Tuple[int, int], bool]:
-        """Reject DPA options and configurations that GDN does not support.
-
-        Returns the normalized (attn_mask_type, window_size, bottom_right_diagonal),
-        since these may be defaulted from module attributes.
-        """
-        if g is None or beta is None:
-            raise ValueError(
-                "GDN-specific arguments require both g and beta; "
-                f"got g={'set' if g is not None else 'None'} and "
-                f"beta={'set' if beta is not None else 'None'}."
-            )
-        if FP8GlobalStateManager.is_fp8_enabled() or FP8GlobalStateManager.is_fp8_calibration():
-            raise ValueError("GDN attention does not support FP8 autocast or FP8 calibration.")
-        if self.attention_type != "self":
-            raise ValueError("GDN attention only supports attention_type='self'.")
-        if self.attention_dropout != 0.0:
-            raise ValueError("GDN attention does not support attention dropout.")
-        if self.softmax_type != "vanilla":
-            raise ValueError("GDN attention does not support sink-attention softmax types.")
-        if self.return_max_logit:
-            raise ValueError("GDN attention does not support return_max_logit.")
-        if self.cp_group is not None:
-            raise ValueError("GDN attention does not support context parallelism.")
-
-        attn_mask_type = dpa_args.attn_mask_type
-        if attn_mask_type is None:
-            attn_mask_type = self.attn_mask_type
-        else:
-            attn_mask_type = attn_mask_type.replace(",", "_")
-            if attn_mask_type == "causal_padding":
-                attn_mask_type = "padding_causal"
-        if attn_mask_type not in {"causal", "padding_causal"}:
-            raise ValueError(
-                "GDN is inherently causal and only supports attn_mask_type='causal' or "
-                f"'padding_causal', got {attn_mask_type!r}."
-            )
-        if dpa_args.attention_mask is not None:
-            raise ValueError(
-                "GDN does not accept attention_mask; use cu_seqlens_q with qkv_format='thd' "
-                "for variable-length sequences."
-            )
-        if cu_seqlens_kv is not None and cu_seqlens_kv is not cu_seqlens_q:
-            raise ValueError(
-                "GDN requires identical Q and KV sequence boundaries. Pass "
-                "cu_seqlens_kv=None or pass the same tensor object as cu_seqlens_q."
-            )
-        window_size = dpa_args.window_size
-        if window_size is None:
-            window_size = self.window_size
-        window_size = dpa_utils.check_set_window_size(attn_mask_type, window_size)
-        if window_size != (-1, 0):
-            raise ValueError("GDN does not support sliding-window attention.")
-        bottom_right_diagonal = dpa_args.bottom_right_diagonal
-        if bottom_right_diagonal is None:
-            bottom_right_diagonal = self.bottom_right_diagonal
-        if bottom_right_diagonal:
-            raise ValueError("GDN does not support bottom-right causal alignment.")
-
-        if dpa_args.cu_seqlens_q_padded is not None or dpa_args.cu_seqlens_kv_padded is not None:
-            raise ValueError("GDN does not support padded cumulative sequence lengths.")
-        if dpa_args.max_seqlen_q is not None or dpa_args.max_seqlen_kv is not None:
-            raise ValueError("GDN does not use max_seqlen_q or max_seqlen_kv.")
-        if (
-            dpa_args.core_attention_bias_type != "no_bias"
-            or dpa_args.core_attention_bias is not None
-        ):
-            raise ValueError("GDN does not support core attention bias.")
-        if dpa_args.alibi_slopes is not None:
-            raise ValueError("GDN does not support ALiBi.")
-        if dpa_args.inference_params is not None:
-            raise ValueError(
-                "GDN does not use the KV cache. Pass initial_state and set "
-                "output_final_state=True for recurrent inference."
-            )
-        if dpa_args.pad_between_seqs:
-            raise ValueError("GDN does not support pad_between_seqs=True.")
-        if not dpa_args.fast_zero_fill:
-            raise ValueError("GDN does not support fast_zero_fill=False.")
-        if dpa_args.fp8_output:
-            raise ValueError("GDN does not support FP8 output.")
-        if dpa_args.bf16_backward:
-            raise ValueError("GDN does not support bf16_backward.")
-        if dpa_args.num_splits not in {None, 1}:
-            raise ValueError("GDN does not support num_splits.")
-        if any(
-            value is not None
-            for value in (
-                dpa_args.score_mod,
-                dpa_args.score_mod_bprop,
-                dpa_args.score_mod_tensors,
-                dpa_args.score_mod_bprop_tensors,
-            )
-        ):
-            raise ValueError("GDN does not support Flex Attention score modifications.")
-
-        return attn_mask_type, window_size, bottom_right_diagonal
-
-    def _forward_gdn(
-        self,
-        query_layer: torch.Tensor,
-        key_layer: torch.Tensor,
-        value_layer: torch.Tensor,
-        g: Optional[torch.Tensor],
-        beta: Optional[torch.Tensor],
-        *,
-        qkv_format: str,
-        cu_seqlens_q: Optional[torch.Tensor],
-        cu_seqlens_kv: Optional[torch.Tensor],
-        checkpoint_core_attention: bool,
-        initial_state: Optional[torch.Tensor],
-        output_final_state: bool,
-        use_qk_l2norm_in_kernel: bool,
-        dpa_args: "DotProductAttention._DPAOnlyArgs",
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
-        """Validate GDN-specific constraints and execute the cuDNN frontend op."""
-        self._validate_gdn_request(g, beta, cu_seqlens_q, cu_seqlens_kv, dpa_args)
-
-        gdn_kwargs = {
-            "qkv_format": qkv_format,
-            "cu_seqlens_q": cu_seqlens_q,
-            "output_final_state": output_final_state,
-            "use_qk_l2norm_in_kernel": use_qk_l2norm_in_kernel,
-        }
-        with self.prepare_forward_ctx(
-            query_layer,
-            num_gemms=3,
-            allow_non_contiguous=True,
-        ) as query_layer:
-            if checkpoint_core_attention:
-                return self._checkpointed_attention_forward(
-                    self.gdn_attention,
-                    query_layer,
-                    key_layer,
-                    value_layer,
-                    g,
-                    beta,
-                    initial_state,
-                    **gdn_kwargs,
-                )
-            return self.gdn_attention(
-                query_layer,
-                key_layer,
-                value_layer,
-                g,
-                beta,
-                initial_state,
-                **gdn_kwargs,
-            )
-
     @no_torch_dynamo(when=_needs_eager_dpa)
     def forward(
         self,
@@ -1621,11 +1425,6 @@ class DotProductAttention(TransformerEngineBaseModule):
         qkv_layer: Optional[torch.Tensor] = None,
         kv_layer: Optional[torch.Tensor] = None,
         qkv_interleave_dim: int = -3,
-        g: Optional[torch.Tensor] = None,
-        beta: Optional[torch.Tensor] = None,
-        initial_state: Optional[torch.Tensor] = None,
-        output_final_state: bool = False,
-        use_qk_l2norm_in_kernel: bool = False,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         r"""
         Dot Product Attention Layer.
@@ -1644,8 +1443,7 @@ class DotProductAttention(TransformerEngineBaseModule):
             <https://docs.nvidia.com/deeplearning/cudnn/developer-guide/index.html#op-fusion>`_
             (see :attr:`FusedAttention` for more details on FusedAttention backends), and 3)
             UnfusedDotProductAttention which is the native PyTorch implementation
-            with fused scaled masked softmax. GDN requests use the cuDNN frontend linear-attention
-            custom op directly.
+            with fused scaled masked softmax.
 
         .. note::
 
@@ -1722,13 +1520,6 @@ class DotProductAttention(TransformerEngineBaseModule):
             :attr:`score_mod`, :attr:`score_mod_bprop`, :attr:`score_mod_tensors`, and
             :attr:`score_mod_bprop_tensors` are experimental cuDNN frontend Flex Attention
             APIs. Their callback signatures and supported configurations may change.
-
-        .. note::
-
-            Providing both :attr:`g` and :attr:`beta` selects cuDNN Gated DeltaNet (GDN)
-            linear attention instead of scaled-softmax attention. GDN is causal, uses
-            recurrent state instead of a KV cache, and does not support dropout, attention
-            bias, sliding windows, context parallelism, or FP8 attention.
 
         Parameters
         ----------
@@ -1873,25 +1664,6 @@ class DotProductAttention(TransformerEngineBaseModule):
             interleave sits; must be -3 (e.g. ``bs3hd``) or -2 (e.g. ``bsh3d``,
             Megatron-style). This is an explicit knob rather than shape inference,
             since e.g. ``h == 3`` would make the shapes ambiguous.
-        g: Optional[torch.Tensor], default = None
-            GDN log-space scalar decay gate, with ``alpha = exp(g)``. Its shape is the
-            token dimensions followed by ``num_attention_heads`` and its dtype must be
-            ``torch.float32``. Expected to satisfy ``g <= 0`` so that ``alpha <= 1``.
-            Providing any GDN-specific argument selects GDN, and both :attr:`g` and
-            :attr:`beta` are required.
-        beta: Optional[torch.Tensor], default = None
-            GDN per-token write strength, expected in ``[0, 1]``. It has the same shape
-            and dtype requirements as :attr:`g`.
-        initial_state: Optional[torch.Tensor], default = None
-            Optional GDN recurrent state with shape
-            ``[batch_size, output_heads, v_head_dim, qk_head_dim]`` and dtype
-            ``torch.float32``.
-        output_final_state: bool, default = False
-            Return ``(output, final_state)`` for GDN when ``True``. The final state can be
-            passed as :attr:`initial_state` to a later invocation.
-        use_qk_l2norm_in_kernel: bool, default = False
-            L2-normalize GDN Q and K rows inside the kernel before applying the attention
-            scale to Q. Engines that do not support this option will decline the operation.
         """
 
         query_layer, key_layer, value_layer, declared_qkv_layout = _unpack_packed_qkv(
@@ -1904,51 +1676,6 @@ class DotProductAttention(TransformerEngineBaseModule):
             qkv_interleave_dim,
             inference_params,
         )
-
-        gdn_requested = (
-            any(value is not None for value in (g, beta, initial_state))
-            or output_final_state
-            or use_qk_l2norm_in_kernel
-        )
-        if gdn_requested:
-            dpa_args = self._DPAOnlyArgs(
-                attention_mask=attention_mask,
-                cu_seqlens_q_padded=cu_seqlens_q_padded,
-                cu_seqlens_kv_padded=cu_seqlens_kv_padded,
-                max_seqlen_q=max_seqlen_q,
-                max_seqlen_kv=max_seqlen_kv,
-                attn_mask_type=attn_mask_type,
-                window_size=window_size,
-                bottom_right_diagonal=bottom_right_diagonal,
-                core_attention_bias_type=core_attention_bias_type,
-                core_attention_bias=core_attention_bias,
-                alibi_slopes=alibi_slopes,
-                fast_zero_fill=fast_zero_fill,
-                inference_params=inference_params,
-                pad_between_seqs=pad_between_seqs,
-                fp8_output=fp8_output,
-                bf16_backward=bf16_backward,
-                num_splits=num_splits,
-                score_mod=score_mod,
-                score_mod_bprop=score_mod_bprop,
-                score_mod_tensors=score_mod_tensors,
-                score_mod_bprop_tensors=score_mod_bprop_tensors,
-            )
-            return self._forward_gdn(
-                query_layer,
-                key_layer,
-                value_layer,
-                g,
-                beta,
-                qkv_format=qkv_format if qkv_format is not None else self.qkv_format,
-                cu_seqlens_q=cu_seqlens_q,
-                cu_seqlens_kv=cu_seqlens_kv,
-                checkpoint_core_attention=checkpoint_core_attention,
-                initial_state=initial_state,
-                output_final_state=output_final_state,
-                use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
-                dpa_args=dpa_args,
-            )
 
         with self.prepare_forward_ctx(
             query_layer,

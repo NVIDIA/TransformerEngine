@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 
-"""Tests for Gated DeltaNet through the DotProductAttention API."""
+"""Tests for Gated DeltaNet through the LinearAttention API."""
 
 import importlib.util
 import math
@@ -13,7 +13,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from transformer_engine.pytorch import DotProductAttention, autocast, is_fp8_available
+from transformer_engine.pytorch import LinearAttention, autocast, is_fp8_available
 
 
 def _gdn_available() -> bool:
@@ -227,7 +227,7 @@ def test_gdn_thd_forward_final_state_and_backward(
         torch.randn(batch, heads, v_dim, qk_dim, device="cuda", dtype=torch.float32) * 0.05
     ).requires_grad_()
 
-    attention = DotProductAttention(
+    attention = LinearAttention(
         num_attention_heads=heads,
         kv_channels=(qk_dim, v_dim),
         qkv_format="thd",
@@ -313,7 +313,7 @@ def test_gdn_dense_layout(qkv_format, dtype):
     else:
         expected = output_ref.reshape(batch, sequence, -1)
 
-    attention = DotProductAttention(
+    attention = LinearAttention(
         num_attention_heads=heads,
         kv_channels=dim,
         qkv_format=qkv_format,
@@ -325,9 +325,9 @@ def test_gdn_dense_layout(qkv_format, dtype):
 
 
 def test_gdn_rejects_value_head_count_that_changes_output_width():
-    """DPA's configured output width cannot be changed by the runtime V tensor."""
+    """LinearAttention's configured output width cannot be changed by the runtime V tensor."""
     q, k, v, g, beta = _inputs(1, 128, 1, 2)
-    attention = DotProductAttention(
+    attention = LinearAttention(
         num_attention_heads=1,
         kv_channels=64,
         qkv_format="bshd",
@@ -343,7 +343,7 @@ def test_gdn_state_round_trip_matches_single_shot():
     batch, sequence, heads, dim = 2, 128, 2, 64
     split = 64
     q, k, v, g, beta = _inputs(batch, sequence, heads, heads, dim, dim)
-    attention = DotProductAttention(
+    attention = LinearAttention(
         num_attention_heads=heads,
         kv_channels=dim,
         qkv_format="bshd",
@@ -396,7 +396,7 @@ def test_gdn_thd_ragged_sequences(bounds):
         device="cuda",
         dtype=torch.float32,
     )
-    attention = DotProductAttention(
+    attention = LinearAttention(
         num_attention_heads=heads,
         kv_channels=dim,
         qkv_format="thd",
@@ -441,7 +441,7 @@ def test_gdn_thd_ragged_sequences(bounds):
 def test_gdn_requires_both_gates():
     """A partial GDN invocation fails before entering a softmax-attention backend."""
     q, k, v, g, _ = _inputs(1, 128, 1, 1)
-    attention = DotProductAttention(
+    attention = LinearAttention(
         num_attention_heads=1,
         kv_channels=64,
         qkv_format="bshd",
@@ -455,7 +455,7 @@ def test_gdn_requires_both_gates():
 def test_gdn_rejects_fp8_autocast():
     """GDN must not silently run in high precision inside FP8 autocast."""
     q, k, v, g, beta = _inputs(1, 128, 1, 1)
-    attention = DotProductAttention(
+    attention = LinearAttention(
         num_attention_heads=1,
         kv_channels=64,
         qkv_format="bshd",
@@ -468,7 +468,7 @@ def test_gdn_rejects_fp8_autocast():
 def test_gdn_runs_te_forward_lifecycle(monkeypatch):
     """GDN calls pair prepare_forward with end_forward even without the kernel runtime."""
     q, k, v, g, beta = _inputs(1, 128, 1, 1)
-    attention = DotProductAttention(
+    attention = LinearAttention(
         num_attention_heads=1,
         kv_channels=64,
         qkv_format="bshd",

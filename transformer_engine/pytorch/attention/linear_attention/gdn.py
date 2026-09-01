@@ -121,13 +121,14 @@ class _GatedDeltaNetAttention(torch.nn.Module):
             raise ValueError(
                 f"GDN Q and K must have {self.num_q_heads} heads, got {query_layer.shape[-2]}."
             )
-        # The underlying op supports grouped value heads, but DPA's output contract is fixed
-        # at construction time. Integrations that use more V heads must expand Q/K before DPA.
-        # TODO: Support num_q_heads != num_v_heads once DPA's output-width contract allows it.
+        # The underlying op supports grouped value heads, but LinearAttention's output
+        # contract is fixed at construction time. Integrations that use more V heads must
+        # expand Q/K before LinearAttention.
+        # TODO: Support num_q_heads != num_v_heads once the output-width contract allows it.
         if value_layer.shape[-2] != self.num_q_heads:
             raise ValueError(
                 f"GDN V must have {self.num_q_heads} heads, got {value_layer.shape[-2]}. "
-                "DotProductAttention requires its output width to match "
+                "LinearAttention requires its output width to match "
                 "num_attention_heads * v_head_dim."
             )
         if query_layer.shape[-1] != self.qk_head_dim:
