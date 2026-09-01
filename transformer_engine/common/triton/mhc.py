@@ -51,7 +51,7 @@ def projection_prune_fwd(configs, named_args, **kwargs):
         block_k = align_to(K, 32)
         step_k = [256]
         warps = [2, 8]
-        stages = [3, 4]
+        stages = [2, 3, 4]
 
         pruned_configs = []
         for bm, sk, w, s in itertools.product(block_m, step_k, warps, stages):

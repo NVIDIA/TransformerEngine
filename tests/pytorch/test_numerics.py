@@ -1671,6 +1671,50 @@ def test_linear_accuracy_delay_wgrad_compute(dtype, bs, model, bias, fuse_wgrad_
         torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
 
 
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+def test_linear_delay_wgrad_compute_with_consumed_fp8_bias_grad():
+    if NVTE_TEST_NVINSPECT_ENABLED:
+        pytest.skip("Delayed wgrad compute is not supported in debug mode.")
+
+    FP8GlobalStateManager.reset()
+    fp8_recipe = recipe.DelayedScaling(fp8_format=recipe.Format.HYBRID)
+    linear = Linear(
+        16,
+        32,
+        bias=True,
+        params_dtype=torch.bfloat16,
+        device="cuda",
+        delay_wgrad_compute=True,
+    )
+    linear.bias.main_grad = torch.zeros_like(linear.bias, dtype=torch.float32)
+
+    # Emulate a framework hook that preserves the eager bias grad in a master buffer.
+    def consume_bias_grad(param):
+        param.main_grad.add_(param.grad.float())
+        param.grad = None
+
+    bias_grad_hook = linear.bias.register_post_accumulate_grad_hook(consume_bias_grad)
+
+    inp = torch.randn(16, 16, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    with autocast(enabled=True, recipe=fp8_recipe):
+        out = linear(inp)
+    out.sum().backward()
+    bias_grad_hook.remove()
+
+    expected_bias_grad = torch.full_like(linear.bias.main_grad, inp.shape[0])
+    torch.testing.assert_close(linear.bias.main_grad, expected_bias_grad, rtol=0, atol=0)
+    assert linear.bias.grad is None
+    bias_main_grad = linear.bias.main_grad.clone()
+
+    linear.backward_dw()
+    torch.cuda.synchronize()
+
+    assert linear.bias.grad is None
+    torch.testing.assert_close(linear.bias.main_grad, bias_main_grad, rtol=0, atol=0)
+    assert inp.grad is not None and torch.isfinite(inp.grad).all()
+    assert linear.weight.grad is not None and torch.isfinite(linear.weight.grad).all()
+
+
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("model", ["small"])
 @pytest.mark.parametrize("recipe", fp8_recipes + [None], ids=recipe_id)
