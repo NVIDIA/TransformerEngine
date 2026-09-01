@@ -78,12 +78,11 @@ NVTECommWindow maybe_make_window(const at::Tensor& t) {
   NVTE_CHECK(nccl_sm != nullptr,
              "Symm-mem backend mismatch: expected NCCLSymmetricMemory. Set the backend to "
              "\"NCCL\" before allocating EP payload buffers.");
-  // rendezvous resolves ``t`` by its storage base, so get_offset() is the allocation's offset in
-  // the NCCL window. Add ``t``'s own storage offset so a slice/view of a symm-mem allocation
-  // (e.g. the scale region carved from a shared recv buffer) resolves to its true position in the
-  // window rather than the allocation base.
+  // NCCL EP consumes window-relative offsets (the NCCL window starts at the signal pad,
+  // not at the buffer base). get_window_offset() = buffer_offset + get_offset(); add
+  // ``t``'s own storage offset for slice/view positioning.
   const uint64_t offset =
-      static_cast<uint64_t>(nccl_sm->get_offset()) +
+      static_cast<uint64_t>(nccl_sm->get_window_offset()) +
       static_cast<uint64_t>(t.storage_offset()) * static_cast<uint64_t>(t.element_size());
   return NVTECommWindow{static_cast<ncclWindow_t>(nccl_sm->get_window()), offset};
 #else
