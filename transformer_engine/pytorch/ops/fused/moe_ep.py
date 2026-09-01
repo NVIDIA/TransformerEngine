@@ -29,6 +29,40 @@ from ..fuser import register_forward_backward_fusion
 from ..op import FusedOperation, FusibleOperation, OperationContext
 
 
+class _MoeEpResourceManager:
+    """Track MegaMoE resources that share the process-wide EP runtime."""
+
+    def __init__(self) -> None:
+        self._ops: list["FusedMoeEp"] = []
+
+    def register(self, op: "FusedMoeEp") -> None:
+        """Register a resource-owning fused operation."""
+        self._ops.append(op)
+
+    def unregister(self, op: "FusedMoeEp") -> None:
+        """Stop tracking a closed fused operation."""
+        try:
+            self._ops.remove(op)
+        except ValueError:
+            pass
+
+    def finalize(self) -> None:
+        """Close all resources, attempting every close if one fails."""
+        first_error = None
+        while self._ops:
+            op = self._ops[-1]
+            try:
+                op.close()
+            except Exception as error:  # pylint: disable=broad-exception-caught
+                if first_error is None:
+                    first_error = error
+        if first_error is not None:
+            raise first_error
+
+
+_MOE_EP_RESOURCE_MANAGER = _MoeEpResourceManager()
+
+
 def _cudnn_megamoe_supported() -> bool:
     """Whether cuDNN FE provides the fixed-resource training API."""
     try:
@@ -45,6 +79,16 @@ def _cudnn_megamoe_supported() -> bool:
             (cudnn_moe_ep, "MoeEpTrainingWgradOperands"),
         )
     )
+
+
+def finalize_moe_ep_resources() -> None:
+    """Close cuDNN/NVSHMEM resources before destroying the EP process group."""
+    # CUDA graph callables form reference cycles. Collect unreachable graph
+    # executables before tearing down communication resources they captured.
+    import gc
+
+    gc.collect()
+    _MOE_EP_RESOURCE_MANAGER.finalize()
 
 
 def _get_megamoe_combine_format() -> str:
@@ -423,6 +467,23 @@ class FusedMoeEp(FusedOperation):
         self._free_training_slots = []
         self._active_training_slots = set()
         self._training_wgrad_workspaces = {}
+        _MOE_EP_RESOURCE_MANAGER.register(self)
+
+    def close(self) -> None:
+        """Release MegaMoE training workspaces and its NVSHMEM runtime."""
+        if self._moe is None:
+            _MOE_EP_RESOURCE_MANAGER.unregister(self)
+            return
+        moe = self._moe
+        try:
+            self._training_resources = None
+            self._training_wgrad_workspaces.clear()
+            self._free_training_slots.clear()
+            self._active_training_slots.clear()
+            moe.close()
+        finally:
+            self._moe = None
+            _MOE_EP_RESOURCE_MANAGER.unregister(self)
 
     def _make_training_weights(self):
         """Bind cuDNN weight views to the GroupedLinear parameters' current storage."""
@@ -661,4 +722,4 @@ def fuse_ops(
 register_forward_backward_fusion(fuse_ops, prepend=True)
 
 
-__all__ = ["FusedMoeEp", "is_moe_fusion_supported"]
+__all__ = ["FusedMoeEp", "finalize_moe_ep_resources", "is_moe_fusion_supported"]

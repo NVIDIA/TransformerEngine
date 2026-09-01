@@ -38,6 +38,7 @@ from transformer_engine.pytorch.ops.fused.moe_ep import (
     _cudnn_megamoe_supported,
     _get_megamoe_combine_format,
     _pack_cudnn_weights,
+    finalize_moe_ep_resources,
     is_moe_fusion_supported,
 )
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Tensor
@@ -1577,8 +1578,7 @@ if __name__ == "__main__":
     runner = unittest.TextTestRunner(stream=sys.stdout, verbosity=2)
     result = runner.run(suite)
     dist.barrier()
+    finalize_moe_ep_resources()
     ep_finalize()
-    # Deregister symm-mem windows while the comm is still valid.
-    release_symm_mem_pool()
     dist.destroy_process_group()
     sys.exit(0 if result.wasSuccessful() else 1)
