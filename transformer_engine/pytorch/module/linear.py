@@ -900,7 +900,9 @@ def _linear_forward_fake(
     # ------------------------------------------------------
     # Output tensor: y = x @ w^T (quantized iff an output quantizer is set).
     # ------------------------------------------------------
-    out_leading = _out_leading_from_inp(inp.shape[0], args)
+    # A rank-1 input is viewed to (1, in_features), so the output leads with 1.
+    inp_leading = inp.shape[0] if len(inp.shape) > 1 else 1
+    out_leading = _out_leading_from_inp(inp_leading, args)
     out = TensorSpec(
         shape=(out_leading, *tuple(inp.shape[1:-1]), out_features),
         dtype=activation_dtype,

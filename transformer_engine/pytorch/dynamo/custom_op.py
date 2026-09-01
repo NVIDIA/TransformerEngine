@@ -1009,6 +1009,14 @@ def _register_autograd_for_op(
         ctx.save_for_backward(*tensors_to_save)
         ctx.backward_objects = bwd_obj
         ctx.output_ranges = out_plan.user_ranges
+        # Input shapes for the grad slots (SymInt-safe on ctx): a bwd impl may
+        # rederive shapes lossily (e.g. rank-1 inputs come back rank-2), so the
+        # returned grads are viewed back to the true input shapes below.
+        ctx.grad_input_shapes = {
+            pos: inputs[pos].shape
+            for pos in grad_targets
+            if isinstance(inputs[pos], torch.Tensor)
+        }
 
     def _autograd_backward(ctx, *grad_outputs):
         bwd_obj = ctx.backward_objects
@@ -1032,7 +1040,12 @@ def _register_autograd_for_op(
         for pos, length in ctx.fwd_tensor_list_lengths.items():
             out[pos] = [None] * length
         for pos, g in zip(grad_targets, grads):
+            if g is not None:
+                shape = ctx.grad_input_shapes.get(pos)
+                if shape is not None and g.shape != shape:
+                    g = g.view(shape)
             out[pos] = g
+        ctx.grad_input_shapes = None
         return tuple(out)
 
     fwd_op.register_autograd(_autograd_backward, setup_context=_setup_context)
