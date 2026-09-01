@@ -1,0 +1,125 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="520" viewBox="0 0 800 520">
+  <defs>
+    <style>
+      text { font-family: Arial, Helvetica, sans-serif; }
+      .lane-label { font-size: 15px; font-weight: bold; fill: #1a1a1a; }
+      .fwd-box-label { font-size: 11px; fill: #ffffff; font-weight: bold; }
+      .fwd-box-detail { font-size: 10px; fill: #dce8f4; }
+      .bwd-box-label { font-size: 11px; fill: #ffffff; font-weight: bold; }
+      .bwd-box-detail { font-size: 10px; fill: #f4dcd0; }
+      .dotted-label { font-size: 10px; fill: #666666; font-style: italic; }
+      .arrow-fwd { stroke: #4a7ab5; stroke-width: 2; fill: none; marker-end: url(#arrowBlue); }
+      .arrow-bwd { stroke: #c05535; stroke-width: 2; fill: none; marker-end: url(#arrowRed); }
+      .dotted-arrow { stroke: #888888; stroke-width: 1.5; fill: none; stroke-dasharray: 5,3; marker-end: url(#arrowGray); }
+    </style>
+    <marker id="arrowBlue" markerWidth="9" markerHeight="6" refX="8" refY="3" orient="auto">
+      <polygon points="0 0, 9 3, 0 6" fill="#4a7ab5"/>
+    </marker>
+    <marker id="arrowRed" markerWidth="9" markerHeight="6" refX="8" refY="3" orient="auto">
+      <polygon points="0 0, 9 3, 0 6" fill="#c05535"/>
+    </marker>
+    <marker id="arrowGray" markerWidth="9" markerHeight="6" refX="8" refY="3" orient="auto">
+      <polygon points="0 0, 9 3, 0 6" fill="#888888"/>
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect width="800" height="520" fill="#ffffff"/>
+
+  <!-- Title -->
+  <text x="400" y="28" text-anchor="middle" font-size="18" font-weight="bold" fill="#1a1a1a" font-family="Arial, Helvetica, sans-serif">Linear Module End-to-End Flow</text>
+
+  <!-- ===== Forward Swim Lane ===== -->
+  <rect x="10" y="50" width="780" height="150" rx="8" ry="8" fill="#edf2f8" stroke="#b0c4de" stroke-width="1"/>
+  <text x="25" y="72" class="lane-label" fill="#2c5f8a">Forward</text>
+
+  <!-- Fwd Box 1: Input -->
+  <rect x="25" y="88" width="110" height="50" rx="7" ry="7" fill="#4a7ab5" stroke="#3a6a9f" stroke-width="1"/>
+  <text x="80" y="110" text-anchor="middle" class="fwd-box-label">Input</text>
+  <text x="80" y="124" text-anchor="middle" class="fwd-box-detail">(BF16)</text>
+
+  <!-- Arrow -->
+  <line x1="135" y1="113" x2="155" y2="113" class="arrow-fwd"/>
+
+  <!-- Fwd Box 2: All-gather -->
+  <rect x="158" y="82" width="120" height="62" rx="7" ry="7" fill="#3d6ea5" stroke="#2d5e8f" stroke-width="1"/>
+  <text x="218" y="104" text-anchor="middle" class="fwd-box-label">All-gather</text>
+  <text x="218" y="118" text-anchor="middle" class="fwd-box-detail">(col-parallel</text>
+  <text x="218" y="131" text-anchor="middle" class="fwd-box-detail">+ SP)</text>
+
+  <!-- Arrow -->
+  <line x1="278" y1="113" x2="298" y2="113" class="arrow-fwd"/>
+
+  <!-- Fwd Box 3: Quantize -->
+  <rect x="301" y="82" width="120" height="62" rx="7" ry="7" fill="#3d6ea5" stroke="#2d5e8f" stroke-width="1"/>
+  <text x="361" y="104" text-anchor="middle" class="fwd-box-label">Quantize</text>
+  <text x="361" y="118" text-anchor="middle" class="fwd-box-detail">(FP8</text>
+  <text x="361" y="131" text-anchor="middle" class="fwd-box-detail">row + col)</text>
+
+  <!-- Arrow -->
+  <line x1="421" y1="113" x2="448" y2="113" class="arrow-fwd"/>
+
+  <!-- Fwd Box 4: GEMM -->
+  <rect x="451" y="88" width="100" height="50" rx="7" ry="7" fill="#2c5f8a" stroke="#1c4f7a" stroke-width="1"/>
+  <text x="501" y="118" text-anchor="middle" class="fwd-box-label">GEMM</text>
+
+  <!-- Arrow -->
+  <line x1="551" y1="113" x2="571" y2="113" class="arrow-fwd"/>
+
+  <!-- Fwd Box 5: Reduce-scatter -->
+  <rect x="574" y="82" width="140" height="62" rx="7" ry="7" fill="#3d6ea5" stroke="#2d5e8f" stroke-width="1"/>
+  <text x="644" y="100" text-anchor="middle" class="fwd-box-label">Reduce-scatter /</text>
+  <text x="644" y="114" text-anchor="middle" class="fwd-box-label">All-reduce</text>
+  <text x="644" y="131" text-anchor="middle" class="fwd-box-detail">(row-parallel)</text>
+
+  <!-- ===== Backward Swim Lane ===== -->
+  <rect x="10" y="230" width="780" height="150" rx="8" ry="8" fill="#fdf2ee" stroke="#deb0a0" stroke-width="1"/>
+  <text x="25" y="252" class="lane-label" fill="#a04020">Backward</text>
+
+  <!-- Bwd Box 1: grad_output (right side, flow goes right to left) -->
+  <rect x="624" y="268" width="120" height="50" rx="7" ry="7" fill="#c05535" stroke="#a04525" stroke-width="1"/>
+  <text x="684" y="290" text-anchor="middle" class="bwd-box-label">grad_output</text>
+
+  <!-- Arrow (right to left) -->
+  <line x1="624" y1="293" x2="604" y2="293" class="arrow-bwd"/>
+
+  <!-- Bwd Box 2: Quantize -->
+  <rect x="494" y="268" width="107" height="50" rx="7" ry="7" fill="#c05535" stroke="#a04525" stroke-width="1"/>
+  <text x="547" y="298" text-anchor="middle" class="bwd-box-label">Quantize</text>
+
+  <!-- Arrow -->
+  <line x1="494" y1="293" x2="474" y2="293" class="arrow-bwd"/>
+
+  <!-- Bwd Box 3: Dgrad GEMM -->
+  <rect x="354" y="268" width="117" height="50" rx="7" ry="7" fill="#a04020" stroke="#8a3010" stroke-width="1"/>
+  <text x="412" y="290" text-anchor="middle" class="bwd-box-label">Dgrad</text>
+  <text x="412" y="304" text-anchor="middle" class="bwd-box-label">GEMM</text>
+
+  <!-- Arrow -->
+  <line x1="354" y1="293" x2="334" y2="293" class="arrow-bwd"/>
+
+  <!-- Bwd Box 4: Wgrad GEMM -->
+  <rect x="214" y="268" width="117" height="50" rx="7" ry="7" fill="#a04020" stroke="#8a3010" stroke-width="1"/>
+  <text x="272" y="290" text-anchor="middle" class="bwd-box-label">Wgrad</text>
+  <text x="272" y="304" text-anchor="middle" class="bwd-box-label">GEMM</text>
+
+  <!-- Arrow -->
+  <line x1="214" y1="293" x2="184" y2="293" class="arrow-bwd"/>
+
+  <!-- Bwd Box 5: All-reduce grad_weight -->
+  <rect x="40" y="262" width="141" height="62" rx="7" ry="7" fill="#c05535" stroke="#a04525" stroke-width="1"/>
+  <text x="110" y="288" text-anchor="middle" class="bwd-box-label">All-reduce</text>
+  <text x="110" y="304" text-anchor="middle" class="bwd-box-label">grad_weight</text>
+
+  <!-- ===== Dotted cross-lane arrows ===== -->
+
+  <!-- Forward Quantize (box 3) → Backward Wgrad GEMM: "saved columnwise input" -->
+  <path d="M 340 144 L 340 178 L 180 178 L 180 408 L 260 408 L 260 318" class="dotted-arrow"/>
+  <text x="85" y="410" class="dotted-label">saved columnwise</text>
+  <text x="85" y="423" class="dotted-label">input</text>
+
+  <!-- Forward GEMM weight → Backward Dgrad GEMM: "saved weight" -->
+  <!-- We draw from the GEMM box area down to Dgrad -->
+  <path d="M 520 138 L 520 178 L 620 178 L 620 440 L 420 440 L 420 318" class="dotted-arrow"/>
+  <text x="630" y="442" class="dotted-label">saved weight</text>
+</svg>

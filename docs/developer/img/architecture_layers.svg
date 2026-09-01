@@ -1,0 +1,85 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="520" viewBox="0 0 800 520">
+  <defs>
+    <style>
+      text { font-family: Arial, Helvetica, sans-serif; }
+      .band-label { font-size: 14px; font-weight: bold; fill: #1a1a1a; }
+      .sub-label { font-size: 13px; fill: #ffffff; }
+      .annotation { font-size: 12px; fill: #555555; font-style: italic; }
+      .arrow { stroke: #5a5a5a; stroke-width: 2; fill: none; marker-end: url(#arrowhead); }
+      .side-arrow { stroke: #888888; stroke-width: 1.5; fill: none; marker-end: url(#arrowheadSmall); stroke-dasharray: 6,3; }
+    </style>
+    <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#5a5a5a"/>
+    </marker>
+    <marker id="arrowheadSmall" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#888888"/>
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect width="800" height="520" fill="#ffffff"/>
+
+  <!-- Title -->
+  <text x="400" y="30" text-anchor="middle" font-size="18" font-weight="bold" fill="#1a1a1a" font-family="Arial, Helvetica, sans-serif">TransformerEngine Architecture Layers</text>
+
+  <!-- ===== Band 1: Python API ===== -->
+  <rect x="80" y="50" width="600" height="90" rx="10" ry="10" fill="#e8eef6" stroke="#7a9cc6" stroke-width="1.5"/>
+  <text x="100" y="72" class="band-label">Python API</text>
+  <!-- Sub-box: PyTorch Frontend -->
+  <rect x="120" y="82" width="240" height="44" rx="8" ry="8" fill="#4a7ab5" stroke="#3a6a9f" stroke-width="1"/>
+  <text x="240" y="110" text-anchor="middle" class="sub-label">PyTorch Frontend</text>
+  <!-- Sub-box: JAX Frontend -->
+  <rect x="400" y="82" width="240" height="44" rx="8" ry="8" fill="#4a7ab5" stroke="#3a6a9f" stroke-width="1"/>
+  <text x="520" y="110" text-anchor="middle" class="sub-label">JAX Frontend</text>
+
+  <!-- Arrow 1→2 -->
+  <line x1="380" y1="140" x2="380" y2="165" class="arrow"/>
+
+  <!-- ===== Band 2: Binding Layer ===== -->
+  <rect x="80" y="168" width="600" height="90" rx="10" ry="10" fill="#e8eef6" stroke="#7a9cc6" stroke-width="1.5"/>
+  <text x="100" y="190" class="band-label">Binding Layer</text>
+  <!-- Sub-box: pybind11 -->
+  <rect x="120" y="200" width="240" height="44" rx="8" ry="8" fill="#5e8ec4" stroke="#4a7ab5" stroke-width="1"/>
+  <text x="240" y="228" text-anchor="middle" class="sub-label">pybind11 (PyTorch)</text>
+  <!-- Sub-box: XLA FFI -->
+  <rect x="400" y="200" width="240" height="44" rx="8" ry="8" fill="#5e8ec4" stroke="#4a7ab5" stroke-width="1"/>
+  <text x="520" y="228" text-anchor="middle" class="sub-label">XLA FFI (JAX)</text>
+
+  <!-- Arrow 2→3 -->
+  <line x1="380" y1="258" x2="380" y2="283" class="arrow"/>
+
+  <!-- ===== Band 3: C++ Core Library ===== -->
+  <rect x="80" y="286" width="600" height="70" rx="10" ry="10" fill="#d0dbe9" stroke="#7a9cc6" stroke-width="1.5"/>
+  <text x="380" y="328" text-anchor="middle" font-size="15" font-weight="bold" fill="#1a1a1a" font-family="Arial, Helvetica, sans-serif">C++ Core Library</text>
+
+  <!-- Arrow 3→4 -->
+  <line x1="380" y1="356" x2="380" y2="381" class="arrow"/>
+
+  <!-- ===== Band 4: CUDA Kernels ===== -->
+  <rect x="80" y="384" width="600" height="100" rx="10" ry="10" fill="#e8eef6" stroke="#7a9cc6" stroke-width="1.5"/>
+  <text x="100" y="406" class="band-label">CUDA Kernels</text>
+  <!-- Sub-boxes -->
+  <rect x="95" y="414" width="105" height="56" rx="6" ry="6" fill="#3d6ea5" stroke="#2d5e8f" stroke-width="1"/>
+  <text x="147" y="447" text-anchor="middle" class="sub-label">GEMM</text>
+
+  <rect x="210" y="414" width="105" height="56" rx="6" ry="6" fill="#3d6ea5" stroke="#2d5e8f" stroke-width="1"/>
+  <text x="262" y="441" text-anchor="middle" font-size="12" fill="#ffffff" font-family="Arial, Helvetica, sans-serif">Normali-</text>
+  <text x="262" y="456" text-anchor="middle" font-size="12" fill="#ffffff" font-family="Arial, Helvetica, sans-serif">zation</text>
+
+  <rect x="325" y="414" width="105" height="56" rx="6" ry="6" fill="#3d6ea5" stroke="#2d5e8f" stroke-width="1"/>
+  <text x="377" y="447" text-anchor="middle" class="sub-label">Activation</text>
+
+  <rect x="440" y="414" width="105" height="56" rx="6" ry="6" fill="#3d6ea5" stroke="#2d5e8f" stroke-width="1"/>
+  <text x="492" y="447" text-anchor="middle" class="sub-label">Attention</text>
+
+  <rect x="555" y="414" width="115" height="56" rx="6" ry="6" fill="#3d6ea5" stroke="#2d5e8f" stroke-width="1"/>
+  <text x="612" y="441" text-anchor="middle" font-size="12" fill="#ffffff" font-family="Arial, Helvetica, sans-serif">Cast /</text>
+  <text x="612" y="456" text-anchor="middle" font-size="12" fill="#ffffff" font-family="Arial, Helvetica, sans-serif">Transpose</text>
+
+  <!-- ===== Side Annotation ===== -->
+  <!-- Bracket line spanning bands 3 and 4 -->
+  <path d="M 710 286 L 720 286 L 720 484 L 710 484" fill="none" stroke="#888888" stroke-width="1.5"/>
+  <line x1="720" y1="385" x2="735" y2="385" class="side-arrow"/>
+  <text x="740" y="378" class="annotation">transformer_engine/</text>
+  <text x="740" y="394" class="annotation">common/</text>
+</svg>
