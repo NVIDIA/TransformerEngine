@@ -55,6 +55,16 @@ class MUSAActivationVMMAllocation:
 
     @property
     def mapped(self) -> bool:
+        """Whether the slot currently has a physical mapping.
+
+        Drains a finished async release first so the flag reflects reality
+        once the worker has done its unmap (errors from the worker surface
+        here; use wait_for_async_release() to also block for in-flight ones).
+        """
+        if self._allocation.async_remap_done() and not self._closed:
+            self.wait_for_async_remap()
+        if self._allocation.async_release_done() and not self._closed:
+            self._allocation.wait_for_async_release()
         return bool(self._allocation.info()["mapped"])
 
     def info(self) -> dict[str, int | bool]:
@@ -68,8 +78,90 @@ class MUSAActivationVMMAllocation:
         if self.info()["address"] != self._address or self._tensor.data_ptr() != self._address:
             raise RuntimeError("MUSA VMM allocation changed virtual address after remap")
 
+    # ------------------------------------------------------------------
+    # Asynchronous release API
+    # ------------------------------------------------------------------
+
+    def release_hook_after(self, stream: torch.Stream) -> "VMMReleaseHookContext":
+        """Enqueue a stream host-func that releases backing after prior work.
+
+        The unmap/release run on a resident worker thread once `stream` has
+        completed everything enqueued before this call (the D2H burst). The
+        virtual address reservation is kept; remap with `create_and_remap()`.
+        """
+        return self._allocation.release_hook_after(_raw_musa_stream(stream))
+
+    def wait_for_async_release(self) -> None:
+        """Block until the in-flight async release completed; surface errors."""
+        self._allocation.wait_for_async_release()
+
+    def async_release_done(self) -> bool:
+        """Whether a previously enqueued async release already finished."""
+        return bool(self._allocation.async_release_done())
+
+    def wait_for_async_remap(self) -> None:
+        """Adopt a completed async remap and verify its fixed address."""
+        self._allocation.wait_for_async_remap()
+        if self.info()["address"] != self._address or self._tensor.data_ptr() != self._address:
+            raise RuntimeError("MUSA VMM allocation changed virtual address after async remap")
+
+    def adopt_async_remap(self) -> None:
+        """Adopt a worker-completed remap without waiting for it."""
+        self._allocation.adopt_async_remap()
+        if self.info()["address"] != self._address or self._tensor.data_ptr() != self._address:
+            raise RuntimeError("MUSA VMM allocation changed virtual address after async remap")
+
+    def async_remap_done(self) -> bool:
+        """Whether a previously enqueued asynchronous remap already finished."""
+        return bool(self._allocation.async_remap_done())
+
     def close(self) -> None:
         if self._closed:
             return
         self._allocation.close()
         self._closed = True
+
+
+def _raw_musa_stream(stream: torch.Stream) -> int:
+    """Return the raw MUSA stream handle (uintptr_t) for a torch stream."""
+    raw = getattr(stream, "musa_stream", None)
+    if raw is None:
+        raise ValueError(f"stream {stream!r} does not expose a musa_stream handle")
+    return int(raw)
+
+
+def release_hooks_after(allocations: Sequence["MUSAActivationVMMAllocation"],
+                        stream: torch.Stream) -> "VMMReleaseHookContext":
+    """Batch variant: one host func releases backing for many slots at once.
+
+    Enqueue all D2H copies on `stream` first; this adds a single host function
+    after them so the DMA burst stays contiguous and the worker receives all
+    raw release work in one batch.
+    """
+    return tex.release_hooks_after([a._allocation for a in allocations],
+                                   _raw_musa_stream(stream))
+
+
+def remap_hooks_after(allocations: Sequence["MUSAActivationVMMAllocation"],
+                      stream: torch.Stream) -> "VMMRemapHookContext":
+    """Submit one asynchronous fixed-address remap batch on ``stream``."""
+    return tex.remap_hooks_after([a._allocation for a in allocations],
+                                 _raw_musa_stream(stream))
+
+
+def remap_and_copy_after(
+    allocations: Sequence["MUSAActivationVMMAllocation"],
+    host_tensors: Sequence[torch.Tensor],
+    stream: torch.Stream,
+) -> "VMMRemapHookContext":
+    """Asynchronously remap slots and submit their pinned-host H2D copies."""
+    return tex.remap_and_copy_after(
+        [allocation._allocation for allocation in allocations],
+        list(host_tensors),
+        _raw_musa_stream(stream),
+    )
+
+
+def wait_remap_copy_on_stream(context: "VMMRemapHookContext", stream: torch.Stream) -> None:
+    """Install a GPU-side wait for an asynchronous reload on ``stream``."""
+    context.wait_on_stream(_raw_musa_stream(stream))
