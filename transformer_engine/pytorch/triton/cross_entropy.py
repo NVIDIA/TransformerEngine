@@ -126,11 +126,9 @@ def cross_entropy_backward(
     rank: int,
     world_size: int,
     ignore_idx: int,
-    is_cg_capturable: bool = False,
 ):
     """Reconstruct the derivative in FP32 and overwrite the saved input buffer."""
 
-    del is_cg_capturable
     B, SQ, V = saved_input.shape
     n_rows = B * SQ
     BLOCK_SIZE = min(MAX_FUSED_SIZE, triton.next_power_of_2(V))
