@@ -2238,7 +2238,7 @@ def test_te_linear_compile_train_eval_switch():
 
     def fn(inp):
         with te.autocast(recipe=fp8_recipe):
-            return model(inp, is_first_microbatch=True)
+            return model(inp)
 
     torch._dynamo.reset()
     compiled = torch.compile(fn, fullgraph=True)
