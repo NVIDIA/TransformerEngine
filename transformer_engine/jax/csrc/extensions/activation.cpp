@@ -459,8 +459,8 @@ Error_Type DActLuDBiasQuantizeFFI(cudaStream_t stream, Buffer_Type input_buf,
                                 swiglu_limit, swiglu_alpha, swiglu_glu_linear_offset, stream);
         break;
       case NVTE_Activation_Type::SITUGLU:
-        nvte_dsituglu(input_tensor.data(), act_input_tensor.data(), output_tensor.data(), situ_beta1,
-                      situ_beta2, stream);
+        nvte_dsituglu(input_tensor.data(), act_input_tensor.data(), output_tensor.data(),
+                      situ_beta1, situ_beta2, stream);
         break;
       default:
         NVTE_ERROR("Unsupported ActivationEnum");

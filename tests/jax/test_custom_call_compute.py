@@ -250,9 +250,9 @@ class TestActivation:
 
         output = _jax_act_lu(x, ("situ", "situ_linear"), act_params=params).data
         gate, up = x[:, 0, :], x[:, 1, :]
-        expected = (
-            beta1 * jnp.tanh(gate / beta1) * jax.nn.sigmoid(gate)
-        ) * (beta2 * jnp.tanh(up / beta2))
+        expected = (beta1 * jnp.tanh(gate / beta1) * jax.nn.sigmoid(gate)) * (
+            beta2 * jnp.tanh(up / beta2)
+        )
 
         assert_allclose(output, expected, dtype=x.dtype)
         assert hash(params) == hash(params)
@@ -1675,9 +1675,7 @@ class TestFusedDense:
             ),
         )
         activation_params = (
-            {"beta1": 2.0, "beta2": 8.0}
-            if activation_type == ("situ", "situ_linear")
-            else None
+            {"beta1": 2.0, "beta2": 8.0} if activation_type == ("situ", "situ_linear") else None
         )
         ref_activation_params = make_activation_params(activation_type)
 
@@ -1712,9 +1710,7 @@ class TestFusedDense:
                 bias_1_shape = (1,) * (linear_1_out.ndim - bias_1.ndim) + bias_1.shape
                 linear_1_out += jnp.reshape(bias_1, bias_1_shape)
 
-            x = _jax_act_lu(
-                linear_1_out, activation_type, act_params=ref_activation_params
-            ).data
+            x = _jax_act_lu(linear_1_out, activation_type, act_params=ref_activation_params).data
             linear_2_out = jax.lax.dot_general(x, kernel_2, (((1,), (0,)), ((), ())))
             if use_bias:
                 bias_2_shape = (1,) * (linear_2_out.ndim - bias_2.ndim) + bias_2.shape
