@@ -250,9 +250,8 @@ constexpr int FA_BUFF_IN_SIZE = FA_TILE_DIM_Y * FA_TILE_DIM_X;
 template <bool DO_ROW, bool DO_COL>
 __global__ void __launch_bounds__(FA_THREADS_NUM)
     compute_fused_amax_kernel(const __grid_constant__ CUtensorMap tensor_map_input,
-                                float *__restrict__ row_amax_out,
-                                float *__restrict__ col_amax_out,
-                                const float *noop, const size_t rows, const size_t cols) {
+                              float *__restrict__ row_amax_out, float *__restrict__ col_amax_out,
+                              const float *noop, const size_t rows, const size_t cols) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   if (noop != nullptr && noop[0] == 1.0f) {
     return;
@@ -355,8 +354,8 @@ __global__ void __launch_bounds__(FA_THREADS_NUM)
           for (int p = 0; p < 4; ++p) {
             ptx::abs_max_2x(amax_2x, amax_2x, pairs[p]);
           }
-          local_max = fmaxf(local_max,
-                            static_cast<float>(__hmax(__habs(amax_2x.x), __habs(amax_2x.y))));
+          local_max =
+              fmaxf(local_max, static_cast<float>(__hmax(__habs(amax_2x.x), __habs(amax_2x.y))));
         }
         row_partial = local_max;
       }
@@ -437,8 +436,8 @@ inline void compute_fused_amax(const Tensor &input, const Tensor *noop, Tensor *
     NVTE_CHECK_CUDA(cudaMemsetAsync(row_amax_ptr, 0, rows * sizeof(float), stream));
   }
   if (do_col) {
-    NVTE_CHECK(output->columnwise_amax.numel() == cols, "Fused columnwise amax must have ",
-               cols, " entries, got ", output->columnwise_amax.shape, ".");
+    NVTE_CHECK(output->columnwise_amax.numel() == cols, "Fused columnwise amax must have ", cols,
+               " entries, got ", output->columnwise_amax.shape, ".");
     NVTE_CHECK_CUDA(cudaMemsetAsync(col_amax_ptr, 0, cols * sizeof(float), stream));
   }
 
@@ -457,14 +456,12 @@ inline void compute_fused_amax(const Tensor &input, const Tensor *noop, Tensor *
                   static_cast<unsigned>(rows / FA_CHUNK_DIM_Y), 1);
   const dim3 block(FA_THREADS_NUM, 1, 1);
 
-  const float *noop_ptr =
-      (noop != nullptr && noop->data.dptr != nullptr) ? reinterpret_cast<const float *>(
-                                                            noop->data.dptr)
-                                                      : nullptr;
+  const float *noop_ptr = (noop != nullptr && noop->data.dptr != nullptr)
+                              ? reinterpret_cast<const float *>(noop->data.dptr)
+                              : nullptr;
 
   TRANSFORMER_ENGINE_SWITCH_CONDITION(
-      do_row, DO_ROW,
-      TRANSFORMER_ENGINE_SWITCH_CONDITION(do_col, DO_COL, {
+      do_row, DO_ROW, TRANSFORMER_ENGINE_SWITCH_CONDITION(do_col, DO_COL, {
         auto kernel = compute_fused_amax_kernel<DO_ROW, DO_COL>;
         cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size);
         kernel<<<grid, block, dshmem_size, stream>>>(
