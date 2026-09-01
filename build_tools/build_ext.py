@@ -6,6 +6,7 @@
 
 import copy
 import os
+import shutil
 import subprocess
 import sys
 import sysconfig
@@ -170,6 +171,17 @@ def get_build_ext(
                 for ext in Path(self.build_lib).glob("*.so"):
                     self.copy_file(ext, target_dir)
                     os.remove(ext)
+
+                nccl_ep_dir = Path(self.build_lib) / "nccl_ep"
+                if nccl_ep_dir.is_dir():
+                    target_nccl_ep_dir = target_dir / "nccl_ep"
+                    if target_nccl_ep_dir.exists():
+                        shutil.rmtree(target_nccl_ep_dir)
+                    shutil.copytree(
+                        nccl_ep_dir,
+                        target_nccl_ep_dir,
+                    )
+                    shutil.rmtree(nccl_ep_dir)
 
         def build_extensions(self):
             # For core lib + JAX install, fix build_ext from pybind11.setup_helpers
