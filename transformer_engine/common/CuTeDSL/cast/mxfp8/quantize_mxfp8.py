@@ -1802,6 +1802,9 @@ class MXFP8QuantizeSpecializedRowwiseKernel(MXFP8QuantizeKernelBase):
         M = mX.shape[0]
         N = mX.shape[1]
 
+        if cutlass.const_expr(self.cfg.WITH_GEMM_SWIZZLED_SCALES):
+            mS_row, _ = derive_swizzled_scale_layout(M, N, True, False, mS_row, None)
+
         grid = [
             cute.ceil_div(Int32(N), self._TILE_COLS),
             cute.ceil_div(M, self._TILE_ROWS),
@@ -1937,8 +1940,14 @@ class MXFP8QuantizeSpecializedRowwiseKernel(MXFP8QuantizeKernelBase):
         # Cooperative wide flush of the staged scales where padding columns flush as 0.
         if cutlass.const_expr(self._STASH_SCALE_TO_SMEM):
             cute.arch.sync_threads()
-            padded_cols = mS_row.shape[1]
-            if padded_cols % 16 == 0:
+            # Use cute.size instead of .shape[1] because under the swizzled layout mode 1 is
+            # a nested tuple ((4, num_tiles_SC)), not a plain int.
+            padded_cols = cute.size(mS_row, mode=[1])
+            if cutlass.const_expr(self.cfg.WITH_GEMM_SWIZZLED_SCALES):
+                # Swizzled rowwise scale layout is ((32, 4, num_tiles_M), (4, num_tiles_SC)):((16, 4, num_tiles_SC * 512), (1, 512))
+                # so we have at most 4 elements continuous which is our vectorized store width
+                self._flush_scales_to_gmem(sScale, mS_tile, tidx, bidx, bidy, M, padded_cols, 4)
+            elif padded_cols % 16 == 0:
                 # If columns is divisible by 16, use 16 bytes as the vectorized store width
                 self._flush_scales_to_gmem(sScale, mS_tile, tidx, bidx, bidy, M, padded_cols, 16)
             else:
@@ -2520,10 +2529,7 @@ class MXFP8QuantizeEntry(MXFP8QuantizeKernelBase):
         dispatched_to_specialized = False
         # Only dispatch to the specialized kernels for packed16 types (bf16/fp16)
         if cutlass.const_expr(plain_cast_only and is_packed16(self.cfg.DTYPE)):
-            # The rowwise-only specialized kernel does not handle swizzled scales yet
-            if cutlass.const_expr(
-                self.cfg.ROWWISE and not self.cfg.COLWISE and not self.cfg.WITH_GEMM_SWIZZLED_SCALES
-            ):
+            if cutlass.const_expr(self.cfg.ROWWISE and not self.cfg.COLWISE):
                 # The rowwise specialized kernel requires N divisible by 128 for vectorized stores
                 if N % 128 == 0:
                     dispatched_to_specialized = True
