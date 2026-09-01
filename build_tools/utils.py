@@ -9,6 +9,7 @@ import glob
 import importlib
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -44,14 +45,34 @@ def debug_build_enabled() -> bool:
 
 
 @functools.lru_cache(maxsize=None)
+def build_target_arch() -> str:
+    """CPU architecture targeted by the configured C++ compiler."""
+    cxx = shlex.split(os.getenv("CXX", "c++"))
+    try:
+        result = subprocess.run(
+            [*cxx, "-dumpmachine"],
+            capture_output=True,
+            check=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return platform.machine().lower()
+
+    target = result.stdout.strip().split("-", 1)[0]
+    return target.lower() or platform.machine().lower()
+
+
+def target_is_arm64() -> bool:
+    """Whether the configured C++ compiler targets Arm64."""
+    return build_target_arch() in ("aarch64", "arm64")
+
+
+@functools.lru_cache(maxsize=None)
 def bolt_compatible_build_enabled() -> bool:
     """Whether to build host ELF libraries with BOLT-compatible options."""
     configured = os.getenv("NVTE_ENABLE_BOLT_COMPATIBLE")
     if configured is None:
-        enabled = platform.system() == "Linux" and platform.machine().lower() in (
-            "aarch64",
-            "arm64",
-        )
+        enabled = platform.system() == "Linux" and target_is_arm64()
     else:
         enabled = bool(int(configured))
 
@@ -67,7 +88,7 @@ def get_bolt_build_flags() -> Tuple[List[str], List[str]]:
 
     compiler_flags = ["-fno-reorder-blocks-and-partition", "-fno-jump-tables"]
     linker_flags = ["-Wl,--emit-relocs", "-Wl,-z,now"]
-    if platform.machine().lower() in ("aarch64", "arm64"):
+    if target_is_arm64():
         compiler_flags.extend(
             [
                 "-mno-fix-cortex-a53-835769",
