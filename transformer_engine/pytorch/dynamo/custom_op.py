@@ -78,6 +78,7 @@ the wrapper a pass-through (plain / bf16 calls go straight through).
 from __future__ import annotations
 import dataclasses
 import math
+import os
 import types as _types  # aliased: torch_dispatch rules take a ``types`` param
 from enum import Enum
 from typing import (
@@ -933,6 +934,30 @@ def _slice_user_grads(
 # --------------------------------------------------------------------------- #
 
 
+def _mark_effectful(op_def: Any) -> None:
+    """Protect the op from dead-code elimination.
+
+    The real impls launch collectives and mutate persistent state (Userbuffers,
+    amax history), so an op whose outputs are unused must still run -- a DCE'd
+    collective desynchronizes ranks. Default ``fx`` mode registers the op in
+    FX's side-effect registry; ``token`` additionally threads an ordered effect
+    token through the graph (stronger -- also blocks reordering -- but
+    incompatible with cudagraph trees on current torch); ``0`` disables.
+    Controlled by ``NVTE_COMPILE_OP_SIDE_EFFECTS``.
+    """
+    mode = os.getenv("NVTE_COMPILE_OP_SIDE_EFFECTS", "fx")
+    if mode == "fx":
+        torch.fx.node.has_side_effect(op_def._opoverload)
+    elif mode == "token":
+        try:
+            # pylint: disable=import-outside-toplevel
+            from torch._higher_order_ops.effects import _register_effectful_op
+            from torch._library.effects import EffectType
+        except ImportError:
+            return
+        _register_effectful_op(op_def, EffectType.ORDERED)
+
+
 def _register_base_op(
     *,
     op_name: str,
@@ -963,6 +988,7 @@ def _register_base_op(
         f"{_TE_OP_NAMESPACE}::{op_name}", _impl, mutates_args=(), schema=schema_str
     )
     op.register_fake(_fake)
+    _mark_effectful(op)
     return op
 
 
@@ -1013,9 +1039,7 @@ def _register_autograd_for_op(
         # rederive shapes lossily (e.g. rank-1 inputs come back rank-2), so the
         # returned grads are viewed back to the true input shapes below.
         ctx.grad_input_shapes = {
-            pos: inputs[pos].shape
-            for pos in grad_targets
-            if isinstance(inputs[pos], torch.Tensor)
+            pos: inputs[pos].shape for pos in grad_targets if isinstance(inputs[pos], torch.Tensor)
         }
 
     def _autograd_backward(ctx, *grad_outputs):
@@ -1124,6 +1148,7 @@ def _register_wrapper_op(
         f"{_TE_OP_NAMESPACE}::{wrapper_op_name}", _forward, mutates_args=(), schema=schema_str
     )
     op_def.register_fake(_forward)
+    _mark_effectful(op_def)
     return op_def
 
 
