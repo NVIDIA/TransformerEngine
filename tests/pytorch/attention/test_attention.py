@@ -32,6 +32,7 @@ from transformer_engine.pytorch.attention.dot_product_attention.utils import (
     FlashAttentionUtils,
     _get_supported_versions,
     check_set_window_size,
+    get_thd_padding_mask,
 )
 from transformer_engine.pytorch.attention import RotaryPositionEmbedding
 import transformer_engine.pytorch.cpp_extensions as ext
@@ -1537,6 +1538,21 @@ def _run_dot_product_attention(
         return out, max_logit, (q_grad, k_grad, v_grad, d_softmax_offset)
     if backend in ["FusedAttention", "FlashAttention"]:
         if qkv_format == "thd" and pad_between_seqs:
+            tensors_and_boundaries = [("out", out, cu_seqlens_q, cu_seqlens_q_after_pad)]
+            if is_training:
+                tensors_and_boundaries.extend(
+                    [
+                        ("dq", q_grad, cu_seqlens_q, cu_seqlens_q_after_pad),
+                        ("dk", k_grad, cu_seqlens_kv, cu_seqlens_kv_after_pad),
+                        ("dv", v_grad, cu_seqlens_kv, cu_seqlens_kv_after_pad),
+                    ]
+                )
+            for tensor_name, tensor, cu_seqlens, cu_seqlens_padded in tensors_and_boundaries:
+                padding_mask = get_thd_padding_mask(tensor.shape[0], cu_seqlens, cu_seqlens_padded)
+                assert (
+                    torch.count_nonzero(tensor[padding_mask]).item() == 0
+                ), f"{backend} left nonzero values in {tensor_name} padding"
+
             out_orig = torch.Tensor([]).to(device="cuda", dtype=dtype)
             if is_training:
                 q_grad_orig = torch.Tensor([]).to(device="cuda", dtype=dtype)

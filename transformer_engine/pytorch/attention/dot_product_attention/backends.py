@@ -844,6 +844,31 @@ def _unalias_cu_seqlens(cu_q: torch.Tensor, cu_kv: torch.Tensor):
     return cu_q, cu_kv
 
 
+def _mask_thd_padding(tensor: torch.Tensor, padding_mask: torch.Tensor) -> torch.Tensor:
+    """Return ``tensor`` with invalid THD token rows zeroed."""
+    mask = padding_mask.view(padding_mask.shape[0], *([1] * (tensor.ndim - 1)))
+    return tensor.masked_fill(mask, 0)
+
+
+class _MaskTHDPaddingGrad(torch.autograd.Function):
+    """Identity in forward and zero THD padding rows in backward.
+
+    FA3 and FA4 may leave padding rows unwritten in their gradient buffers.
+    Keeping the forward as an identity avoids copying Q/K/V, while the custom
+    backward guarantees zero padding rows before gradients reach the caller.
+    """
+
+    @staticmethod
+    def forward(ctx, tensor: torch.Tensor, padding_mask: torch.Tensor) -> torch.Tensor:
+        ctx.save_for_backward(padding_mask)
+        return tensor
+
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor):
+        (padding_mask,) = ctx.saved_tensors
+        return _mask_thd_padding(grad_output, padding_mask), None
+
+
 class FlashAttention(torch.nn.Module):
     """Dot product attention, using HazyResearch flash-attn package:
     https://github.com/Dao-AILab/flash-attention
@@ -1092,6 +1117,21 @@ class FlashAttention(torch.nn.Module):
         use_flash_attn_3 = (
             flash_attention_backend is not None and flash_attention_backend.major == 3
         )
+        q_padding_mask = None
+        if pad_between_seqs and qkv_format == "thd" and not context_parallel:
+            assert cu_seqlens_q_padded is not None and cu_seqlens_kv_padded is not None, (
+                "cu_seqlens_q_padded and cu_seqlens_kv_padded are required when "
+                "pad_between_seqs=True"
+            )
+            q_padding_mask = dpa_utils.get_thd_padding_mask(
+                query_layer.shape[0], cu_seqlens_q, cu_seqlens_q_padded
+            )
+            kv_padding_mask = dpa_utils.get_thd_padding_mask(
+                key_layer.shape[0], cu_seqlens_kv, cu_seqlens_kv_padded
+            )
+            query_layer = _MaskTHDPaddingGrad.apply(query_layer, q_padding_mask)
+            key_layer = _MaskTHDPaddingGrad.apply(key_layer, kv_padding_mask)
+            value_layer = _MaskTHDPaddingGrad.apply(value_layer, kv_padding_mask)
         if (
             use_flash_attn_4
             and (10, 0) <= get_device_compute_capability() < (12, 0)
@@ -1229,6 +1269,8 @@ class FlashAttention(torch.nn.Module):
                     )
                     if isinstance(output, (List, Tuple)):
                         output = output[0]
+                    if q_padding_mask is not None:
+                        output = _mask_thd_padding(output, q_padding_mask)
                 elif not use_flash_attn_3:
                     fa_optional_forward_kwargs = {}
                     if fa_utils.v2_3_plus:
@@ -1340,6 +1382,8 @@ class FlashAttention(torch.nn.Module):
 
                     if fp8:
                         output = output.to(dtype=torch_orig_dtype)
+                    if q_padding_mask is not None:
+                        output = _mask_thd_padding(output, q_padding_mask)
                     if fp8 and fp8_output:
                         O_quantizer = quantizers["scaling_fwd"][META_O]
                         output = O_quantizer(output)
