@@ -659,6 +659,7 @@ class TransformerLayer(torch.nn.Module):
         fast_zero_fill: bool = True,
         pad_between_seqs: Optional[bool] = None,
         thd_attention_policies: Optional[List[Dict[str, Any]]] = None,
+        thd_attention_policy_dispatch: str = "auto",
     ) -> torch.Tensor:
         r"""
         Transformer Layer: attention block and a feedforward network (MLP)
@@ -697,6 +698,9 @@ class TransformerLayer(torch.nn.Module):
             Per-sequence policies for packed THD self-attention. Passed through to
             :class:`MultiheadAttention`; do not also pass :attr:`self_attn_mask_type`
             or :attr:`window_size`.
+        thd_attention_policy_dispatch: {``"auto"``, ``"grouped"``}, default = ``"auto"``
+            Dispatch strategy for :attr:`thd_attention_policies`. Passed through to
+            :class:`MultiheadAttention`.
         encoder_output : Optional[torch.Tensor], default = None
             Output of the encoder block to be fed into the decoder block if using
             :attr:`layer_type` = ``"decoder"``.
@@ -880,6 +884,7 @@ class TransformerLayer(torch.nn.Module):
             window_size=window_size,
             bottom_right_diagonal=bottom_right_diagonal,
             thd_attention_policies=thd_attention_policies,
+            thd_attention_policy_dispatch=thd_attention_policy_dispatch,
             inference_params=inference_params,
             is_first_microbatch=is_first_microbatch,
             checkpoint_core_attention=checkpoint_core_attention,

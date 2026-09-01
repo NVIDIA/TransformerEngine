@@ -737,6 +737,7 @@ class MultiheadAttention(torch.nn.Module):
         fast_zero_fill: bool = True,
         pad_between_seqs: Optional[bool] = None,
         thd_attention_policies: Optional[List[Dict[str, Any]]] = None,
+        thd_attention_policy_dispatch: str = "auto",
     ) -> Tuple[Union[torch.Tensor, None], ...]:
         r"""
         Forward propagation for MultiheadAttention layer.
@@ -777,6 +778,9 @@ class MultiheadAttention(torch.nn.Module):
                               Per-sequence policies for packed THD attention. Passed through to
                               :class:`DotProductAttention`; do not also pass :attr:`attn_mask_type`
                               or :attr:`window_size`.
+        thd_attention_policy_dispatch: {``"auto"``, ``"grouped"``}, default = ``"auto"``
+                              Dispatch strategy for :attr:`thd_attention_policies`. Passed through
+                              to :class:`DotProductAttention`.
         encoder_output : Optional[torch.Tensor], default = None
              Output of the encoder block to be fed into the decoder block if using
              ``layer_type="decoder"``.
@@ -1222,6 +1226,7 @@ class MultiheadAttention(torch.nn.Module):
             window_size=window_size,
             bottom_right_diagonal=bottom_right_diagonal,
             thd_attention_policies=thd_attention_policies,
+            thd_attention_policy_dispatch=thd_attention_policy_dispatch,
             checkpoint_core_attention=checkpoint_core_attention,
             core_attention_bias_type=core_attention_bias_type,
             core_attention_bias=core_attention_bias,

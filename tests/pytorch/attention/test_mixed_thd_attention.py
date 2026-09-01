@@ -95,6 +95,7 @@ def test_thd_attention_policies_plumbed_through_attention_layers(module_type):
             max_seqlen_q=7,
             max_seqlen_kv=7,
             thd_attention_policies=policies,
+            thd_attention_policy_dispatch="grouped",
         )
     assert output.shape == hidden_states.shape
 
@@ -597,11 +598,15 @@ def test_thd_mask_type_runtime_dispatch_combines_backend_outputs(monkeypatch):
     torch.testing.assert_close(output, padded_output + grouped_output)
 
 
-def test_thd_mask_type_runtime_dispatch_can_force_grouped(monkeypatch):
+@pytest.mark.parametrize("uniform_policy", (False, True))
+def test_thd_mask_type_runtime_dispatch_can_force_grouped(monkeypatch, uniform_policy):
     """The per-call override must bypass padded backend probing."""
     attention = make_dot_product_attention(torch.float16, MODEL_CONFIG, "thd")
     cu_seqlens = _make_cu_seqlens((1, 1))
-    policies = _make_policies((("padding", (0,), (-1, -1)), ("padding_causal", (1,), (-1, 0))))
+    if uniform_policy:
+        policies = _make_policies((("padding", (0, 1), (-1, -1)),))
+    else:
+        policies = _make_policies((("padding", (0,), (-1, -1)), ("padding_causal", (1,), (-1, 0))))
     query = torch.zeros(2, NUM_HEADS, HEAD_DIM, dtype=torch.float16, device="cuda")
     grouped_output = query.new_ones((2, NUM_HEADS * HEAD_DIM))
 

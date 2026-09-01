@@ -1750,7 +1750,8 @@ class DotProductAttention(TransformerEngineBaseModule):
         nonempty_policies = [policy for policy in policies if policy["sequence_ids"].numel() > 0]
         batch_size = cu_seqlens_q.shape[0] - 1
         if (
-            len(nonempty_policies) == 1
+            thd_attention_policy_dispatch != "grouped"
+            and len(nonempty_policies) == 1
             and nonempty_policies[0]["sequence_ids"].numel() == batch_size
         ):
             policy = nonempty_policies[0]
