@@ -239,8 +239,7 @@ __device__ __forceinline__ size_t get_tensor_rows_num(
 __device__ __forceinline__ size_t
 get_tensor_base_offset(const size_t tensor_id, const ShapeRepresentation shape_rep,
                        const size_t first_logical_dim, const size_t last_logical_dim,
-                       const size_t num_tensors,
-                       const int64_t *const __restrict__ offsets_ptr) {
+                       const size_t num_tensors, const int64_t *const __restrict__ offsets_ptr) {
   if (shape_rep == ShapeRepresentation::SAME_BOTH_DIMS) {
     const size_t rows_per_tensor = first_logical_dim / num_tensors;
     return tensor_id * rows_per_tensor * last_logical_dim;
@@ -341,9 +340,11 @@ struct TensorMetadata {
 
   __host__ __device__ __forceinline__ constexpr TensorMetadata() = default;
 
-  __host__ __device__ __forceinline__ constexpr TensorMetadata(
-      const size_t rows_, const size_t cols_, const size_t tensor_base_,
-      const size_t rowwise_scale_base_, const size_t colwise_scale_base_)
+  __host__ __device__ __forceinline__ constexpr TensorMetadata(const size_t rows_,
+                                                               const size_t cols_,
+                                                               const size_t tensor_base_,
+                                                               const size_t rowwise_scale_base_,
+                                                               const size_t colwise_scale_base_)
       : rows(rows_),
         cols(cols_),
         tensor_base(tensor_base_),
@@ -373,11 +374,11 @@ __device__ __forceinline__ JobDescriptor decode_job(
 }
 
 template <ShapeRepresentation SHAPE_REP, size_t CHUNK_DIM_Y, size_t CHUNK_DIM_X>
-__device__ __forceinline__ JobDescriptor decode_job(
-    const size_t num_tensors, const size_t first_logical_dim, const size_t last_logical_dim,
-    const size_t work_blocks_X, const int32_t ctaid_X, const int32_t ctaid_Y,
-    const int64_t *const __restrict__ offsets_ptr,
-    const TensorMetadata *const __restrict__ metadata_ptr) {
+__device__ __forceinline__ JobDescriptor
+decode_job(const size_t num_tensors, const size_t first_logical_dim, const size_t last_logical_dim,
+           const size_t work_blocks_X, const int32_t ctaid_X, const int32_t ctaid_Y,
+           const int64_t *const __restrict__ offsets_ptr,
+           const TensorMetadata *const __restrict__ metadata_ptr) {
   constexpr size_t ELTS_PER_CHUNK = CHUNK_DIM_Y * CHUNK_DIM_X;
   constexpr bool is_single_tensor = (SHAPE_REP == ShapeRepresentation::SAME_BOTH_DIMS ||
                                      SHAPE_REP == ShapeRepresentation::VARYING_FIRST_DIM);
@@ -451,8 +452,7 @@ __device__ __forceinline__ void advance_to_next_job(bool &job_finished, int32_t 
 
 __device__ __forceinline__ void set_cta_coords_from_block_id(const size_t block_id,
                                                              const size_t work_blocks_X,
-                                                             int32_t &ctaid_X,
-                                                             int32_t &ctaid_Y) {
+                                                             int32_t &ctaid_X, int32_t &ctaid_Y) {
   ctaid_X = static_cast<int32_t>(block_id % work_blocks_X);
   ctaid_Y = static_cast<int32_t>(block_id / work_blocks_X);
 }

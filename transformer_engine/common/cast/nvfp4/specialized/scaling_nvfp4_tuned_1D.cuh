@@ -102,11 +102,16 @@ struct KernelTraits {
 
   static constexpr int BUFF_ELEMS = BUFF_DIM_Y * BUFF_IN_DIM_X;
   static constexpr int BUFF_ELEMS_TOTAL_IN = BUFFS_NUM_IN * BUFF_ELEMS;
-  static constexpr int BUFF_SIZE_ALIGNED_IN = DIVUP_TO_MULTIPLE(BUFF_ELEMS_TOTAL_IN * sizeof(IType), TMA_SHMEM_ALIGNMENT);
-  static constexpr int BUFF_SIZE_ALIGNED_OUT = DIVUP_TO_MULTIPLE(BUFFS_NUM_OUT * BUFF_OUT_SIZE, TMA_SHMEM_ALIGNMENT);
-  static constexpr int BUFF_SIZE_ALIGNED_OUT_TR = DIVUP_TO_MULTIPLE(BUFFS_NUM_OUT_TR * BUFF_OUT_TR_SIZE, TMA_SHMEM_ALIGNMENT);
-  static constexpr int BUFF_SIZE_ROWWISE_SCALES = DIVUP_TO_MULTIPLE(CHUNK_DIM_Y * SCALES_PER_CHUNK_X * sizeof(nvfp4_scale_t), TMA_SHMEM_ALIGNMENT);
-  static constexpr int BUFF_SIZE_COLWISE_SCALES = DIVUP_TO_MULTIPLE(CHUNK_DIM_X * SCALES_PER_CHUNK_Y * sizeof(nvfp4_scale_t), TMA_SHMEM_ALIGNMENT);
+  static constexpr int BUFF_SIZE_ALIGNED_IN =
+      DIVUP_TO_MULTIPLE(BUFF_ELEMS_TOTAL_IN * sizeof(IType), TMA_SHMEM_ALIGNMENT);
+  static constexpr int BUFF_SIZE_ALIGNED_OUT =
+      DIVUP_TO_MULTIPLE(BUFFS_NUM_OUT * BUFF_OUT_SIZE, TMA_SHMEM_ALIGNMENT);
+  static constexpr int BUFF_SIZE_ALIGNED_OUT_TR =
+      DIVUP_TO_MULTIPLE(BUFFS_NUM_OUT_TR * BUFF_OUT_TR_SIZE, TMA_SHMEM_ALIGNMENT);
+  static constexpr int BUFF_SIZE_ROWWISE_SCALES = DIVUP_TO_MULTIPLE(
+      CHUNK_DIM_Y * SCALES_PER_CHUNK_X * sizeof(nvfp4_scale_t), TMA_SHMEM_ALIGNMENT);
+  static constexpr int BUFF_SIZE_COLWISE_SCALES = DIVUP_TO_MULTIPLE(
+      CHUNK_DIM_X * SCALES_PER_CHUNK_Y * sizeof(nvfp4_scale_t), TMA_SHMEM_ALIGNMENT);
 
   static constexpr int PACK_SIZE = 8;
   static constexpr int WAVES = ELTS_PER_THREAD / PACK_SIZE;
@@ -139,7 +144,8 @@ struct KernelTraits {
   // Number of threads (rowwise scaling) that span 32 banks (4-byte banks) of shared memory.
   static constexpr int THREADS_PER_BANK = TOTAL_BANKS_WIDTH / ELTS_PER_THREAD;
 
-  static constexpr size_t ELTS_PER_CHUNK = static_cast<size_t>(CHUNK_DIM_Y) * static_cast<size_t>(CHUNK_DIM_X);
+  static constexpr size_t ELTS_PER_CHUNK =
+      static_cast<size_t>(CHUNK_DIM_Y) * static_cast<size_t>(CHUNK_DIM_X);
 
   using IType3D = IType[BUFFS_NUM_IN][BUFF_IN_DIM_Y][BUFF_IN_DIM_X];
   using IType2x3D = IType2[BUFFS_NUM_IN][BUFF_IN_DIM_Y][BUFF_IN_DIM_X / 2];
@@ -168,8 +174,8 @@ __device__ __forceinline__ float get_amax_of_pair(const PairType pair) {
   return static_cast<float>(__hmax(__habs(pair.x), __habs(pair.y)));
 }
 
-template <typename Traits, bool USE_STOCHASTIC_ROUNDING, bool USE_FAST_MATH,
-          bool ROW_SCALED_NVFP4, typename RngType>
+template <typename Traits, bool USE_STOCHASTIC_ROUNDING, bool USE_FAST_MATH, bool ROW_SCALED_NVFP4,
+          typename RngType>
 __device__ __forceinline__ void colwise_scaling(
     const typename Traits::IType *__restrict__ sIn_ptr, fp4e2m1x2 *__restrict__ sOut_tr_ptr,
     nvfp4_scale_t *__restrict__ sSFcolwise_ptr, const float S_enc_colwise, const int stage_Y,
@@ -226,9 +232,8 @@ __device__ __forceinline__ void colwise_scaling(
     if constexpr (ROW_SCALED_NVFP4) {
       const size_t col_idx = col_offset + stage_X * TILE_DIM_X + thread_offset_X_colwise + w;
       S_enc_colwise_block =
-          col_idx < cols
-              ? core::compute_global_encode_scaling_factor_FP4(amax_colwise_ptr[col_idx])
-              : 1.0f;
+          col_idx < cols ? core::compute_global_encode_scaling_factor_FP4(amax_colwise_ptr[col_idx])
+                         : 1.0f;
     }
     const nvfp4_scale_t S_dec_b_fp8 =
         quantization_and_transposition_SF::compute_decoding_scaling_factor(block_amax[w],
@@ -263,11 +268,13 @@ __device__ __forceinline__ void colwise_scaling(
 }
 
 template <typename Traits, bool USE_STOCHASTIC_ROUNDING, bool USE_FAST_MATH, typename RngType>
-__device__ __forceinline__ void colwise_scaling(
-    const typename Traits::IType *__restrict__ sIn_ptr, fp4e2m1x2 *__restrict__ sOut_tr_ptr,
-    nvfp4_scale_t *__restrict__ sSFcolwise_ptr, const float S_enc_colwise, const int stage_Y,
-    const int stage_X, const int buff_in, const int buff_out_tr, RngType &rng,
-    uint4 &random_uint4, int &rnd_idx) {
+__device__ __forceinline__ void colwise_scaling(const typename Traits::IType *__restrict__ sIn_ptr,
+                                                fp4e2m1x2 *__restrict__ sOut_tr_ptr,
+                                                nvfp4_scale_t *__restrict__ sSFcolwise_ptr,
+                                                const float S_enc_colwise, const int stage_Y,
+                                                const int stage_X, const int buff_in,
+                                                const int buff_out_tr, RngType &rng,
+                                                uint4 &random_uint4, int &rnd_idx) {
   colwise_scaling<Traits, USE_STOCHASTIC_ROUNDING, USE_FAST_MATH, false>(
       sIn_ptr, sOut_tr_ptr, sSFcolwise_ptr, S_enc_colwise, stage_Y, stage_X, buff_in, buff_out_tr,
       nullptr, 0, 0, rng, random_uint4, rnd_idx);
@@ -317,7 +324,8 @@ __device__ __forceinline__ void rowwise_scaling(
   const bool SF_storing_thread = (tid_X_rowwise % THREADS_PER_SCALE_ROWWISE == 0);
 
   const int stage_rowwise_scales_offset_Y = SF_thread_offset_rowwise_Y + stage_Y * TILE_DIM_Y;
-  const int stage_rowwise_scales_offset_X = SF_thread_offset_rowwise_X + stage_X * SCALES_PER_TILE_X;
+  const int stage_rowwise_scales_offset_X =
+      SF_thread_offset_rowwise_X + stage_X * SCALES_PER_TILE_X;
 #pragma unroll
   for (int it = 0; it < ITERATIONS_NORMAL; ++it) {
     const int it_offset_Y_rowwise = thread_offset_Y_rowwise + it * THREADS_Y_ROWWISE;
@@ -333,7 +341,7 @@ __device__ __forceinline__ void rowwise_scaling(
 
       __uint128_t &elts_8x = *reinterpret_cast<__uint128_t *>(&rIn[w]);
       elts_8x = ptx::ld_shared_b128(&sIn[buff_in][it_offset_Y_rowwise][swizzled_thread_idx]);
-      #pragma unroll
+#pragma unroll
       for (int e = 0; e < PACK_SIZE / 2; ++e) {
         ptx::abs_max_2x(thread_amax_2x, thread_amax_2x, rIn[w][e]);
       }
@@ -344,14 +352,18 @@ __device__ __forceinline__ void rowwise_scaling(
     scaling_coeff_type SFcoefficient;
     if constexpr (ROW_SCALED_NVFP4) {
       const size_t row_idx = row_offset + stage_Y * TILE_DIM_Y + it_offset_Y_rowwise;
-      const float S_enc_rowwise_block = row_idx < rows
-                                        ? core::compute_global_encode_scaling_factor_FP4(amax_rowwise_ptr[row_idx])
-                                        : 1.0f;
-      S_dec_b_fp8 = quantization_and_transposition_SF::compute_decoding_scaling_factor(block_amax, S_enc_rowwise_block);
-      SFcoefficient = core::compute_scaling_coefficient<scaling_coeff_type>(S_dec_b_fp8, S_enc_rowwise_block);
+      const float S_enc_rowwise_block =
+          row_idx < rows ? core::compute_global_encode_scaling_factor_FP4(amax_rowwise_ptr[row_idx])
+                         : 1.0f;
+      S_dec_b_fp8 = quantization_and_transposition_SF::compute_decoding_scaling_factor(
+          block_amax, S_enc_rowwise_block);
+      SFcoefficient =
+          core::compute_scaling_coefficient<scaling_coeff_type>(S_dec_b_fp8, S_enc_rowwise_block);
     } else {
-      S_dec_b_fp8 = quantization_and_transposition_SF::compute_decoding_scaling_factor(block_amax, S_enc_rowwise);
-      SFcoefficient = core::compute_scaling_coefficient<scaling_coeff_type>(S_dec_b_fp8, S_enc_rowwise);
+      S_dec_b_fp8 = quantization_and_transposition_SF::compute_decoding_scaling_factor(
+          block_amax, S_enc_rowwise);
+      SFcoefficient =
+          core::compute_scaling_coefficient<scaling_coeff_type>(S_dec_b_fp8, S_enc_rowwise);
     }
 
     // Store scaling factors to SMEM buffer (R2S).
@@ -386,11 +398,13 @@ __device__ __forceinline__ void rowwise_scaling(
 }
 
 template <typename Traits, bool USE_STOCHASTIC_ROUNDING, bool USE_FAST_MATH, typename RngType>
-__device__ __forceinline__ void rowwise_scaling(
-    const typename Traits::IType *__restrict__ sIn_ptr, fp4e2m1x2 *__restrict__ sOut_ptr,
-    nvfp4_scale_t *__restrict__ sSFrowwise_ptr, const float S_enc_rowwise, const int stage_Y,
-    const int stage_X, const int buff_in, const int buff_out, RngType &rng,
-    uint4 &random_uint4, int &rnd_idx) {
+__device__ __forceinline__ void rowwise_scaling(const typename Traits::IType *__restrict__ sIn_ptr,
+                                                fp4e2m1x2 *__restrict__ sOut_ptr,
+                                                nvfp4_scale_t *__restrict__ sSFrowwise_ptr,
+                                                const float S_enc_rowwise, const int stage_Y,
+                                                const int stage_X, const int buff_in,
+                                                const int buff_out, RngType &rng,
+                                                uint4 &random_uint4, int &rnd_idx) {
   rowwise_scaling<Traits, USE_STOCHASTIC_ROUNDING, USE_FAST_MATH, false>(
       sIn_ptr, sOut_ptr, sSFrowwise_ptr, S_enc_rowwise, stage_Y, stage_X, buff_in, buff_out,
       nullptr, 0, 0, rng, random_uint4, rnd_idx);

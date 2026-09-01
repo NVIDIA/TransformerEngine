@@ -609,7 +609,7 @@ void group_quantize_bwd_helper(const NVTEGroupedTensor grad, const NVTEGroupedTe
       mxfp8::group_quantize<IS_DBIAS, IS_DACT, /*IS_ACT=*/false, ParamOP, OP>(
           grad_tensor, input_tensor, noop_tensor, output_tensor, dbias_tensor, workspace_tensor,
           &quant_config_cpp, stream);
-      break;  
+      break;
     }
     case NVTE_NVFP4_1D_SCALING: {
       NVTE_CHECK((!IS_DBIAS && !IS_DACT),

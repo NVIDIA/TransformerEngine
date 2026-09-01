@@ -642,7 +642,7 @@ std::vector<std::vector<size_t>> grouped_input_config = {
     {SAME_BOTH_DIMS,        64,     12288,12288},
     {SAME_BOTH_DIMS,        64,     14336,14336},
     {SAME_BOTH_DIMS,        64,     16384,16384},
-   
+
     {VARYING_FIRST_DIM,      1,       1024,1024,   1024},
     {VARYING_FIRST_DIM,      1,       2048,2048,   2048},
     {VARYING_FIRST_DIM,      1,       3072,3072,   3072},

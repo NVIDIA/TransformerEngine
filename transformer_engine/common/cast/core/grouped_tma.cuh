@@ -43,8 +43,7 @@ struct alignas(128) TensorMapStorage {
 
 // Internal linkage avoids device-link ODR issues when this header is included by multiple .cu TUs.
 static __device__ TensorMapStorage g_tensor_maps;
-alignas(128) static __device__ TensorMetadata
-    g_tensor_metadata[MAX_SUPPORTED_TENSOR_DESCRIPTORS];
+alignas(128) static __device__ TensorMetadata g_tensor_metadata[MAX_SUPPORTED_TENSOR_DESCRIPTORS];
 
 inline bool dimensions_supported_by_TMA(const Tensor *const t) {
   const size_t cols = t->flat_last_dim();
@@ -149,8 +148,8 @@ __global__ void __launch_bounds__(1)
                                           first_dims_ptr, descriptor_num_tensors);
   const size_t cols = get_tensor_cols_num(tensor_id, shape_rep, last_logical_dim, last_dims_ptr);
   const size_t offset_elts =
-      NVFP4_CAST ? get_tensor_base_offset(tensor_id, shape_rep, first_logical_dim,
-                                          last_logical_dim, num_tensors, offsets_ptr)
+      NVFP4_CAST ? get_tensor_base_offset(tensor_id, shape_rep, first_logical_dim, last_logical_dim,
+                                          num_tensors, offsets_ptr)
                  : static_cast<size_t>(offsets_ptr[tensor_id]);
 
   // Zero-sized groups: skip TMA descriptor update. The main kernel already returns

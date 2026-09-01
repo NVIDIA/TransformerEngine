@@ -56,13 +56,13 @@ using ScalesTypeTr2D = typename ScalingTraits::ScalesTypeTr2D;
 template <bool USE_STOCHASTIC_ROUNDING, bool USE_FAST_MATH, bool RETURN_TRANSPOSE,
           bool ROW_SCALED_NVFP4>
 __global__ void __launch_bounds__(ScalingTraits::THREADS_NUM)
-quantize_transpose_nvfp4_tuned_1D_kernel(
-    const __grid_constant__ CUtensorMap tensor_map_input,
-    const __grid_constant__ CUtensorMap tensor_map_output,
-    const __grid_constant__ CUtensorMap tensor_map_output_t, nvfp4_scale_t *const scales_ptr,
-    nvfp4_scale_t *const scales_t_ptr, const float *noop, const float *const amax_rowwise_ptr,
-    const float *const amax_colwise_ptr, const size_t rows, const size_t cols,
-    const size_t scale_stride, const size_t scale_stride_t, const size_t *rng_state) {
+    quantize_transpose_nvfp4_tuned_1D_kernel(
+        const __grid_constant__ CUtensorMap tensor_map_input,
+        const __grid_constant__ CUtensorMap tensor_map_output,
+        const __grid_constant__ CUtensorMap tensor_map_output_t, nvfp4_scale_t *const scales_ptr,
+        nvfp4_scale_t *const scales_t_ptr, const float *noop, const float *const amax_rowwise_ptr,
+        const float *const amax_colwise_ptr, const size_t rows, const size_t cols,
+        const size_t scale_stride, const size_t scale_stride_t, const size_t *rng_state) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   constexpr int CHUNK_DIM_Y = ScalingTraits::CHUNK_DIM_Y;
   constexpr int CHUNK_DIM_X = ScalingTraits::CHUNK_DIM_X;
@@ -289,14 +289,12 @@ quantize_transpose_nvfp4_tuned_1D_kernel(
       __syncthreads();
 
       // NVFP4 Quantization
-      rowwise_scaling<ScalingTraits, USE_STOCHASTIC_ROUNDING, USE_FAST_MATH,
-                      ROW_SCALED_NVFP4>(
+      rowwise_scaling<ScalingTraits, USE_STOCHASTIC_ROUNDING, USE_FAST_MATH, ROW_SCALED_NVFP4>(
           sIn_ptr, sOut_ptr, sSFrowwise_ptr, S_enc_rowwise, stage_Y, stage_X, buff_in, buff_out,
           amax_rowwise_ptr, block_offset_Y, rows, rng, random_uint4, rnd_idx);
 
       if constexpr (RETURN_TRANSPOSE) {
-        colwise_scaling<ScalingTraits, USE_STOCHASTIC_ROUNDING, USE_FAST_MATH,
-                        ROW_SCALED_NVFP4>(
+        colwise_scaling<ScalingTraits, USE_STOCHASTIC_ROUNDING, USE_FAST_MATH, ROW_SCALED_NVFP4>(
             sIn_ptr, sOut_tr_ptr, sSFcolwise_ptr, S_enc_colwise, stage_Y, stage_X, buff_in,
             buff_out_tr, amax_colwise_ptr, block_offset_X, cols, rng, random_uint4, rnd_idx);
       }
@@ -357,8 +355,7 @@ quantize_transpose_nvfp4_tuned_1D_kernel(
         // number of scales in Y dimension of this chunk
         const int count = min(SCALES_PER_CHUNK_Y, chunk_rows / NVFP4_SCALE_DIM);
 
-        for (size_t row_tr = threadIdx.x; row_tr < CHUNK_DIM_X;
-             row_tr += THREADS_NUM) {
+        for (size_t row_tr = threadIdx.x; row_tr < CHUNK_DIM_X; row_tr += THREADS_NUM) {
           const size_t row_tr_global = scales_block_offset_Y_tr + row_tr;
           if (row_tr_global < cols) {
             ScalesVec &scales_vec = *reinterpret_cast<ScalesVec *>(sSFcolwise[row_tr]);

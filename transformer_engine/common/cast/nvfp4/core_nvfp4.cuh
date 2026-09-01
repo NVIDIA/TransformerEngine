@@ -79,9 +79,10 @@ __device__ __forceinline__ size_t get_nvfp4_scale_stride(const size_t block_scal
 
 // Scale buffers are compact per-tensor concatenations. Same-dim paths keep the padded
 // scale stride explicit; fully varying supported shapes are 128-aligned, so base = elts / 16.
-__device__ __forceinline__ size_t get_rowwise_scale_base(
-    const ShapeRepresentation shape_rep, const size_t tensor_id, const size_t tensor_base,
-    const size_t rows, const size_t cols) {
+__device__ __forceinline__ size_t get_rowwise_scale_base(const ShapeRepresentation shape_rep,
+                                                         const size_t tensor_id,
+                                                         const size_t tensor_base,
+                                                         const size_t rows, const size_t cols) {
   switch (shape_rep) {
     case ShapeRepresentation::SAME_BOTH_DIMS:
       return tensor_id * rows * get_nvfp4_scale_stride(cols);
@@ -94,9 +95,10 @@ __device__ __forceinline__ size_t get_rowwise_scale_base(
   return 0;
 }
 
-__device__ __forceinline__ size_t get_colwise_scale_base(
-    const ShapeRepresentation shape_rep, const size_t tensor_id, const size_t tensor_base,
-    const size_t rows, const size_t cols) {
+__device__ __forceinline__ size_t get_colwise_scale_base(const ShapeRepresentation shape_rep,
+                                                         const size_t tensor_id,
+                                                         const size_t tensor_base,
+                                                         const size_t rows, const size_t cols) {
   switch (shape_rep) {
     case ShapeRepresentation::SAME_BOTH_DIMS:
       return tensor_id * cols * get_nvfp4_scale_stride(rows);

@@ -243,7 +243,8 @@ constexpr size_t THREADS_NUM = 128;
 constexpr size_t SCALES_PER_CHUNK_Y = CHUNK_DIM_Y / NVFP4_SCALE_DIM;
 constexpr size_t SCALES_PER_CHUNK_X = CHUNK_DIM_X / NVFP4_SCALE_DIM;
 
-constexpr size_t SCALES_PER_THREAD = 2 * (CHUNK_DIM_Y * CHUNK_DIM_X) / NVFP4_SCALE_DIM / THREADS_NUM;
+constexpr size_t SCALES_PER_THREAD =
+    2 * (CHUNK_DIM_Y * CHUNK_DIM_X) / NVFP4_SCALE_DIM / THREADS_NUM;
 
 // Each call generates 4x uint32_t random numbers
 constexpr size_t RNG_GENS_PER_THREAD = SCALES_PER_THREAD / 4;
