@@ -54,7 +54,7 @@ for later comparisons with Transformer Engine.
 
 .. raw:: html
 
-   <p style="text-align: center; font-style: italic; color: #666;">Structure of a GPT decoder layer</p>
+   <p style="text-align: center; font-style: italic; ">Structure of a GPT decoder layer</p>
 
 We construct the components as follows:
 
@@ -107,7 +107,7 @@ Putting it all together:
 
       .. raw:: html
 
-         <div style="background: #f5f5f5; border-left: 3px solid #9ca3af; padding: 4px 12px; font-size: 12px; color: #6b7280; margin-top: -16px;">
+         <div class="output-header">
             Output:
          </div>
 
@@ -143,7 +143,7 @@ Putting it all together:
 
       .. raw:: html
 
-         <div style="background: #f5f5f5; border-left: 3px solid #9ca3af; padding: 4px 12px; font-size: 12px; color: #6b7280; margin-top: -16px;">
+         <div class="output-header">
             Output:
          </div>
 
@@ -195,7 +195,7 @@ This is the simplest way to start using Transformer Engine.
 
       .. raw:: html
 
-         <div style="background: #f5f5f5; border-left: 3px solid #9ca3af; padding: 4px 12px; font-size: 12px; color: #6b7280; margin-top: -16px;">
+         <div class="output-header">
             Output:
          </div>
 
@@ -239,7 +239,7 @@ This is the simplest way to start using Transformer Engine.
 
       .. raw:: html
 
-         <div style="background: #f5f5f5; border-left: 3px solid #9ca3af; padding: 4px 12px; font-size: 12px; color: #6b7280; margin-top: -16px;">
+         <div class="output-header">
             Output:
          </div>
 
@@ -280,7 +280,7 @@ delivering optimal performance without manual tuning.
 
       .. raw:: html
 
-         <div style="background: #f5f5f5; border-left: 3px solid #9ca3af; padding: 4px 12px; font-size: 12px; color: #6b7280; margin-top: -16px;">
+         <div class="output-header">
             Output:
          </div>
 
@@ -311,7 +311,7 @@ delivering optimal performance without manual tuning.
 
       .. raw:: html
 
-         <div style="background: #f5f5f5; border-left: 3px solid #9ca3af; padding: 4px 12px; font-size: 12px; color: #6b7280; margin-top: -16px;">
+         <div class="output-header">
             Output:
          </div>
 
@@ -361,7 +361,7 @@ This provides significant speedups on supported hardware (Hopper, Ada, Blackwell
 
       .. raw:: html
 
-         <div style="background: #f5f5f5; border-left: 3px solid #9ca3af; padding: 4px 12px; font-size: 12px; color: #6b7280; margin-top: -16px;">
+         <div class="output-header">
             Output:
          </div>
 
@@ -402,7 +402,7 @@ This provides significant speedups on supported hardware (Hopper, Ada, Blackwell
 
       .. raw:: html
 
-         <div style="background: #f5f5f5; border-left: 3px solid #9ca3af; padding: 4px 12px; font-size: 12px; color: #6b7280; margin-top: -16px;">
+         <div class="output-header">
             Output:
          </div>
 
@@ -444,7 +444,7 @@ Combined with TE Attention and FP8, this delivers peak performance.
 
       .. raw:: html
 
-         <div style="background: #f5f5f5; border-left: 3px solid #9ca3af; padding: 4px 12px; font-size: 12px; color: #6b7280; margin-top: -16px;">
+         <div class="output-header">
             Output:
          </div>
 
@@ -476,7 +476,7 @@ Combined with TE Attention and FP8, this delivers peak performance.
 
       .. raw:: html
 
-         <div style="background: #f5f5f5; border-left: 3px solid #9ca3af; padding: 4px 12px; font-size: 12px; color: #6b7280; margin-top: -16px;">
+         <div class="output-header">
             Output:
          </div>
 
@@ -507,7 +507,7 @@ module that includes all optimizations out of the box.
 
       .. raw:: html
 
-         <div style="background: #f5f5f5; border-left: 3px solid #9ca3af; padding: 4px 12px; font-size: 12px; color: #6b7280; margin-top: -16px;">
+         <div class="output-header">
             Output:
          </div>
 
@@ -529,7 +529,7 @@ module that includes all optimizations out of the box.
 
       .. raw:: html
 
-         <div style="background: #f5f5f5; border-left: 3px solid #9ca3af; padding: 4px 12px; font-size: 12px; color: #6b7280; margin-top: -16px;">
+         <div class="output-header">
             Output:
          </div>
 

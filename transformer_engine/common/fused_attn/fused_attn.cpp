@@ -294,6 +294,9 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
          qkv_format == NVTE_QKV_Format::NVTE_BHSD)) ||
        ((cudnn_runtime_version >= 92300 && (sm_arch_ >= 100 || (sm_arch_ >= 90 && !is_training))) &&
         qkv_format == NVTE_QKV_Format::NVTE_THD && supported_ragged_offset_size &&
+        // cuDNN before 9.26 misindexes ragged FP8 Stats during sink-token backward.
+        (!is_training || softmax_type == NVTE_Softmax_Type::NVTE_VANILLA_SOFTMAX ||
+         cudnn_runtime_version >= 92600) &&
         (attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK ||
          attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK ||
          attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK))) &&
