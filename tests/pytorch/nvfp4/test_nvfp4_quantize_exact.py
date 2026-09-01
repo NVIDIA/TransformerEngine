@@ -126,9 +126,7 @@ def check_quantization_nvfp4_versus_reference(
 ) -> None:
     scale_dtype = te.DType.cast(scale_dtype)
     if nvfp4_e4m3_max not in NVFP4_SUPPORTED_SCALE_MAX_VALUES:
-        raise ValueError(
-            "nvfp4_e4m3_max must be 0, 256, 448, or 114688."
-        )
+        raise ValueError("nvfp4_e4m3_max must be 0, 256, 448, or 114688.")
     if use_4over6 and scale_dtype == te.DType.kFloat8UE5M3:
         pytest.skip("NVFP4 4over6 is incompatible with UE5M3 scales")
     maybe_skip_row_scaled_unsupported_quantization(

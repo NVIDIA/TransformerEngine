@@ -938,8 +938,8 @@ void nvte_nvfp4_2d_partial_cast(const NVTETensor inp, NVTETensor out, const NVTE
                                 size_t scale_stride_h, size_t scale_stride_w, size_t start_offset,
                                 size_t block_len, cudaStream_t stream) {
   NVTE_API_CALL(nvte_nvfp4_2d_partial_cast);
-  nvte_nvfp4_2d_partial_cast_v2(inp, out, scale, global_scale, h, w, scale_stride_h,
-                                scale_stride_w, start_offset, block_len, kNVTEFloat8E4M3, stream);
+  nvte_nvfp4_2d_partial_cast_v2(inp, out, scale, global_scale, h, w, scale_stride_h, scale_stride_w,
+                                start_offset, block_len, kNVTEFloat8E4M3, stream);
 }
 
 void nvte_nvfp4_2d_partial_cast_v2(const NVTETensor inp, NVTETensor out, const NVTETensor scale,

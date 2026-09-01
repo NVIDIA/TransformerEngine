@@ -431,10 +431,9 @@ void nvte_nvfp4_expand_scale_to_fp8(const NVTETensor input, NVTETensor output, s
  *  \param[in]     scale_dtype NVFP4 scale storage type (E4M3 or UE5M3).
  *  \param[in]     stream      CUDA stream.
  */
-void nvte_nvfp4_expand_scale_to_fp8_v2(const NVTETensor input, NVTETensor output,
-                                       size_t tile_rows, size_t tile_cols, size_t rows_padded,
-                                       size_t block_len, NVTEDType scale_dtype,
-                                       cudaStream_t stream);
+void nvte_nvfp4_expand_scale_to_fp8_v2(const NVTETensor input, NVTETensor output, size_t tile_rows,
+                                       size_t tile_cols, size_t rows_padded, size_t block_len,
+                                       NVTEDType scale_dtype, cudaStream_t stream);
 
 /*! \brief Compute per-block E4M3 decode scale from block amax and global amax.
  *

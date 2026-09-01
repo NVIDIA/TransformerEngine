@@ -799,8 +799,8 @@ void quantize_4over6(const Tensor &input, const Tensor *noop, Tensor *output,
                to_string(output->columnwise_scale_inv.dtype), ").");
   }
 
-  quantize_4over6_impl<fp8e4m3, use_2d_quantization>(input, noop, output, quant_config,
-                                                     scale_dtype, stream);
+  quantize_4over6_impl<fp8e4m3, use_2d_quantization>(input, noop, output, quant_config, scale_dtype,
+                                                     stream);
 #else
   NVTE_ERROR("FP4 support requires CUDA 12.8+, but compile-time CUDA version is ", CUDA_VERSION);
 #endif  // FP4_TYPE_SUPPORTED

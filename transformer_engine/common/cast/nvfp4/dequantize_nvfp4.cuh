@@ -146,9 +146,8 @@ inline void dequantize(const Tensor &input, Tensor *output, cudaStream_t stream)
   NVTE_CHECK(scale_type_max == full_scale_max || uses_4over6_headroom, "Unsupported maximum ",
              scale_type_max, " for NVFP4 scale dtype ", to_string(scale_dtype), ".");
   if (uses_4over6_headroom) {
-    launch_dequantize<fp8e4m3, 256>(input, output, with_gemm_swizzled_scales,
-                                    row_scaled_nvfp4, N, Mread, blocks, threads,
-                                    num_scale_tiles_X, stream);
+    launch_dequantize<fp8e4m3, 256>(input, output, with_gemm_swizzled_scales, row_scaled_nvfp4, N,
+                                    Mread, blocks, threads, num_scale_tiles_X, stream);
   } else {
     TRANSFORMER_ENGINE_NVFP4_SCALE_TYPE_SWITCH(scale_dtype, ScaleType, {
       constexpr int SCALE_TYPE_MAX = static_cast<int>(TypeInfo<ScaleType>::max_finite_value);

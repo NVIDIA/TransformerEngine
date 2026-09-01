@@ -155,9 +155,7 @@ def _cast_to_ue5m3(decode_scale: torch.Tensor) -> torch.Tensor:
     max_code = 0xFE
     min_normal = torch.tensor(2.0**-14, device=decode_scale.device, dtype=torch.float32)
     subnormal_step = torch.tensor(2.0**-17, device=decode_scale.device, dtype=torch.float32)
-    x = torch.nan_to_num(
-        decode_scale.to(torch.float32), nan=0.0, posinf=NVFP4_UE5M3_SCALE_MAX
-    )
+    x = torch.nan_to_num(decode_scale.to(torch.float32), nan=0.0, posinf=NVFP4_UE5M3_SCALE_MAX)
     x = torch.clamp(x, min=0.0, max=NVFP4_UE5M3_SCALE_MAX)
 
     subnormal_code = torch.round(x / subnormal_step).to(torch.int32)
@@ -165,9 +163,7 @@ def _cast_to_ue5m3(decode_scale: torch.Tensor) -> torch.Tensor:
     normal_x = torch.clamp(x, min=min_normal)
     exponent = torch.floor(torch.log2(normal_x))
     exponent_value = torch.pow(torch.tensor(2.0, device=x.device, dtype=torch.float32), exponent)
-    mantissa = torch.round((normal_x / exponent_value - 1.0) * (1 << mantissa_bits)).to(
-        torch.int32
-    )
+    mantissa = torch.round((normal_x / exponent_value - 1.0) * (1 << mantissa_bits)).to(torch.int32)
     exponent_field = exponent.to(torch.int32) + bias
     exponent_field = exponent_field + (mantissa == (1 << mantissa_bits)).to(torch.int32)
     mantissa = torch.where(mantissa == (1 << mantissa_bits), torch.zeros_like(mantissa), mantissa)
@@ -235,9 +231,7 @@ def _nvfp4_scale_dtype_max(scale_dtype: DType) -> float:
 
 def _validate_nvfp4_scale_max(nvfp4_e4m3_max: int) -> None:
     if nvfp4_e4m3_max not in NVFP4_SUPPORTED_SCALE_MAX_VALUES:
-        raise ValueError(
-            "nvfp4_e4m3_max must be 0, 256, 448, or 114688."
-        )
+        raise ValueError("nvfp4_e4m3_max must be 0, 256, 448, or 114688.")
 
 
 def _nvfp4_effective_scale_max(scale_dtype: DType, nvfp4_e4m3_max: int) -> float:
@@ -819,9 +813,7 @@ class NVFP4QuantizerRef(Quantizer):
         x = x.view(m, n // tile_len_x, tile_len_x)
         FLOAT4_E2M1_MAX = torch.tensor(NVFP4_FP4_MAX, device=x.device, dtype=torch.float32)
         global_scale_max = _nvfp4_effective_scale_max(scale_dtype, nvfp4_e4m3_max)
-        GLOBAL_SCALE_MAX = torch.tensor(
-            global_scale_max, device=x.device, dtype=torch.float32
-        )
+        GLOBAL_SCALE_MAX = torch.tensor(global_scale_max, device=x.device, dtype=torch.float32)
         decode_scale = torch.div(vec_max, FLOAT4_E2M1_MAX)
 
         if pow_2_scales:
