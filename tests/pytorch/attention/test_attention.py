@@ -205,7 +205,7 @@ def test_dot_product_attention(
 
     # UnfusedDotProductAttention backend
     if unfused_attn_supported:
-        unfused_attn_fwd, unfused_max_logit, unfused_attn_bwd = _run_dot_product_attention(
+        unfused_attn_fwd, unfused_max_logit, unfused_attn_bwd = run_dot_product_attention(
             dtype,
             config,
             "UnfusedDotProductAttention",
@@ -217,7 +217,7 @@ def test_dot_product_attention(
 
     # FusedAttention backend
     if fused_attn_supported:
-        fused_attn_fwd, fused_max_logit, fused_attn_bwd = _run_dot_product_attention(
+        fused_attn_fwd, fused_max_logit, fused_attn_bwd = run_dot_product_attention(
             dtype,
             config,
             "FusedAttention",
@@ -230,7 +230,7 @@ def test_dot_product_attention(
 
     # FlashAttention backend
     if flash_attn_supported:
-        flash_attn_fwd, _, flash_attn_bwd = _run_dot_product_attention(
+        flash_attn_fwd, _, flash_attn_bwd = run_dot_product_attention(
             dtype,
             config,
             "FlashAttention",
@@ -1115,7 +1115,47 @@ def test_dpa_qkv_layout_thd_declarative(dtype, model_configs, model, qkv_layout)
     test_dpa_qkv_layout_thd(dtype, model_configs, model, qkv_layout, declarative_packed=True)
 
 
-def _run_dot_product_attention(
+def make_cu_seqlens(seqlens: torch.Tensor) -> torch.Tensor:
+    """Construct CUDA cumulative sequence lengths from per-sequence lengths."""
+    cu_seqlens = torch.zeros(seqlens.numel() + 1, dtype=torch.int32, device=seqlens.device)
+    cu_seqlens[1:] = torch.cumsum(seqlens, dim=0)
+    return cu_seqlens
+
+
+def make_dot_product_attention(
+    dtype: torch.dtype,
+    config: ModelConfig,
+    qkv_format: str,
+    *,
+    get_rng_state_tracker=None,
+    is_training: bool = True,
+    attention_type: str = None,
+) -> DotProductAttention:
+    """Construct a configured DotProductAttention test module."""
+    block = DotProductAttention(
+        config.num_heads,
+        (config.head_dim_qk, config.head_dim_v),
+        num_gqa_groups=config.num_gqa_groups,
+        attention_dropout=config.dropout_p,
+        qkv_format=qkv_format,
+        attn_mask_type=config.attn_mask_type,
+        sequence_parallel=False,
+        tp_size=1,
+        get_rng_state_tracker=get_rng_state_tracker,
+        tp_group=None,
+        layer_number=1,
+        attention_type=config.attn_type if attention_type is None else attention_type,
+        softmax_type=config.softmax_type,
+        return_max_logit=config.return_max_logit,
+    ).to(dtype=dtype, device="cuda")
+    if not is_training:
+        block = block.eval()
+    if is_training and config.softmax_type != "vanilla":
+        block.softmax_offset.requires_grad = True
+    return block
+
+
+def run_dot_product_attention(
     dtype: torch.dtype,
     config: ModelConfig,
     backend: str,
@@ -1124,6 +1164,7 @@ def _run_dot_product_attention(
     pad_between_seqs: bool,
     is_training: bool,
     declarative_packed: bool = False,
+    forward_kwargs: Dict[str, Any] = None,
 ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
     """Run DotProductAttention module with one forward pass and one backward pass.
 
@@ -1169,10 +1210,8 @@ def _run_dot_product_attention(
         seqlens_kv = torch.full(
             [config.batch_size], config.max_seqlen_kv, dtype=torch.int32, device="cuda"
         )
-    cu_seqlens_q = torch.zeros(config.batch_size + 1, dtype=torch.int32, device="cuda")
-    cu_seqlens_kv = torch.zeros(config.batch_size + 1, dtype=torch.int32, device="cuda")
-    cu_seqlens_q[1:] = torch.cumsum(seqlens_q, dim=0)
-    cu_seqlens_kv[1:] = torch.cumsum(seqlens_kv, dim=0)
+    cu_seqlens_q = make_cu_seqlens(seqlens_q)
+    cu_seqlens_kv = make_cu_seqlens(seqlens_kv)
 
     seqlens_q_after_pad = seqlens_q.clone()
     seqlens_kv_after_pad = seqlens_kv.clone()
@@ -1398,26 +1437,13 @@ def _run_dot_product_attention(
         return _DUMMY_CUDA_RNG_STATE_TRACKER
 
     # Set up model
-    block = DotProductAttention(
-        config.num_heads,
-        (config.head_dim_qk, config.head_dim_v),
-        num_gqa_groups=config.num_gqa_groups,
-        attention_dropout=config.dropout_p,
-        qkv_format=qkv_format,
-        attn_mask_type=config.attn_mask_type,
-        sequence_parallel=False,
-        tp_size=1,
+    block = make_dot_product_attention(
+        dtype,
+        config,
+        qkv_format,
         get_rng_state_tracker=get_dummy_cuda_rng_tracker,
-        tp_group=None,
-        layer_number=1,
-        attention_type=config.attn_type,
-        softmax_type=config.softmax_type,
-        return_max_logit=config.return_max_logit,
-    ).to(dtype=dtype, device="cuda")
-    if not is_training:
-        block = block.eval()
-    if is_training and config.softmax_type != "vanilla":
-        block.softmax_offset.requires_grad = True
+        is_training=is_training,
+    )
 
     # Run a forward and backward pass
     if backend in ["UnfusedDotProductAttention"]:
@@ -1440,11 +1466,7 @@ def _run_dot_product_attention(
         else:
             packed_kwargs["kv_layer"] = packed_tensor
             k, v = None, None
-    out = block(
-        q,
-        k,
-        v,
-        **packed_kwargs,
+    dpa_forward_kwargs = dict(
         window_size=config.window_size,
         attention_mask=attention_mask,
         qkv_format=qkv_format,
@@ -1468,6 +1490,9 @@ def _run_dot_product_attention(
         # Only pass num_splits when exercising the FlashAttention path
         num_splits=config.num_splits if backend == "FlashAttention" else 1,
     )
+    if forward_kwargs is not None:
+        dpa_forward_kwargs.update(forward_kwargs)
+    out = block(q, k, v, **packed_kwargs, **dpa_forward_kwargs)
     max_logit = None
     if config.return_max_logit:
         out, max_logit = out

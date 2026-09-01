@@ -1342,7 +1342,12 @@ class DotProductAttention(TransformerEngineBaseModule):
         policies: List[Dict[str, Any]],
         attention_params_kwargs: Dict[str, Any],
     ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-        """Partition policies by inter-sequence-padding backend availability."""
+        """Partition policies using padded-first backend routing.
+
+        Backend selection here checks support, not relative performance. If any backend
+        supports a policy with inter-sequence padding, preserve the original packed layout;
+        otherwise compact that policy's tokens before attention.
+        """
         padded_policies = []
         grouped_policies = []
         for policy in policies:
@@ -1577,6 +1582,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         pad_between_seqs: Optional[bool],
         bf16_backward: Optional[bool],
         num_splits: Optional[int],
+        thd_attention_policy_dispatch: str,
     ) -> torch.Tensor:
         """Dispatch mixed THD policies through backend-compatible representations."""
         output_features = query_layer.shape[-2] * value_layer.shape[-1]
@@ -1614,10 +1620,13 @@ class DotProductAttention(TransformerEngineBaseModule):
         if not nonempty_policies:
             raise ValueError("Mixed THD policies must assign at least one sequence.")
 
-        padded_policies, grouped_policies = self._partition_thd_mask_policies(
-            nonempty_policies,
-            attention_params_kwargs,
-        )
+        if thd_attention_policy_dispatch == "grouped":
+            padded_policies, grouped_policies = [], nonempty_policies
+        else:
+            padded_policies, grouped_policies = self._partition_thd_mask_policies(
+                nonempty_policies,
+                attention_params_kwargs,
+            )
         padded_output = None
         if padded_policies:
             padded_output = self._forward_thd_mask_types_with_padding(
@@ -1695,6 +1704,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         kv_layer: Optional[torch.Tensor] = None,
         qkv_interleave_dim: int = -3,
         attn_mask_type_and_window_size_per_seq_policies: Optional[List[Dict[str, Any]]] = None,
+        thd_attention_policy_dispatch: str = "auto",
     ) -> torch.Tensor:
         r"""
         Dot Product Attention Layer.
@@ -1941,11 +1951,21 @@ class DotProductAttention(TransformerEngineBaseModule):
             are supplied as a one-dimensional, strictly ascending CUDA integer tensor;
             all policy tensors must be disjoint and together contain every sequence
             exactly once. A list may contain multiple policies with the same mask type
-            and different windows. Transformer Engine queries its ordinary backend
-            selector for every policy, preserves the original packed layout when an
-            inter-sequence-padding backend is available, and otherwise compacts that
-            policy's logical tokens before its scalar-mask attention call.
+            and different windows. Mixed THD dispatch is intentionally padded-first:
+            Transformer Engine queries its ordinary backend selector for every policy and
+            preserves the original packed layout whenever an inter-sequence-padding backend
+            is available. This is a capability check, not a performance comparison. If no
+            such backend is available, the policy's logical tokens are compacted before its
+            scalar-mask attention call.
+        thd_attention_policy_dispatch: {``"auto"``, ``"grouped"``}, default = ``"auto"``
+            Dispatch strategy for mixed THD policies. ``"auto"`` uses the padded-first
+            backend capability check described above. ``"grouped"`` compacts each policy's
+            logical tokens before attention, without changing backend eligibility for this or
+            other attention calls.
         """
+
+        if thd_attention_policy_dispatch not in {"auto", "grouped"}:
+            raise ValueError("thd_attention_policy_dispatch must be either 'auto' or 'grouped'.")
 
         thd_mask_policies = None
         if attn_mask_type_and_window_size_per_seq_policies is not None:
@@ -2514,6 +2534,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                     pad_between_seqs=pad_between_seqs,
                     bf16_backward=bf16_backward,
                     num_splits=num_splits,
+                    thd_attention_policy_dispatch=thd_attention_policy_dispatch,
                 )
 
             attention_params = dpa_utils.AttentionParams(

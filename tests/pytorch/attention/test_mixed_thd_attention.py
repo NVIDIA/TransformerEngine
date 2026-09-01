@@ -11,31 +11,33 @@ from transformer_engine.pytorch import DotProductAttention
 from transformer_engine.pytorch.attention.dot_product_attention import (
     dot_product_attention as dpa_module,
 )
+from test_attention import (
+    ModelConfig,
+    compare_and_assert,
+    dtype_tols,
+    make_cu_seqlens,
+    make_dot_product_attention,
+    reset_rng_states,
+    run_dot_product_attention,
+)
 
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
 
-NUM_HEADS = 16
-HEAD_DIM = 64
-
-
-def _make_dpa(dtype: torch.dtype, attention_type: str = "self") -> DotProductAttention:
-    return DotProductAttention(
-        num_attention_heads=NUM_HEADS,
-        kv_channels=HEAD_DIM,
-        attention_dropout=0.0,
-        qkv_format="thd",
-        attn_mask_type="padding",
-        attention_type=attention_type,
-        tp_size=1,
-        tp_group=None,
-        layer_number=1,
-    ).to(device="cuda", dtype=dtype)
+MODEL_CONFIG = ModelConfig(
+    batch_size=4,
+    max_seqlen_q=7,
+    num_heads=16,
+    head_dim_qk=64,
+    attn_mask_type="padding",
+)
+NUM_HEADS = MODEL_CONFIG.num_heads
+HEAD_DIM = MODEL_CONFIG.head_dim_qk
 
 
 def _make_cu_seqlens(lengths):
     lengths = torch.tensor(lengths, dtype=torch.int32, device="cuda")
-    return torch.cat((lengths.new_zeros(1), torch.cumsum(lengths, dim=0, dtype=torch.int32)))
+    return make_cu_seqlens(lengths)
 
 
 def _make_policies(policy_specs):
@@ -123,7 +125,7 @@ def test_thd_mask_types_match_scalar_forward_and_backward(policy_specs, dtype):
     if dtype == torch.bfloat16 and not torch.cuda.is_bf16_supported():
         pytest.skip("BF16 is not supported by this GPU")
 
-    torch.manual_seed(1234)
+    reset_rng_states()
     cu_seqlens = _make_cu_seqlens((7, 3, 5, 4))
     token_count = 19
     policies = _make_policies(policy_specs)
@@ -138,7 +140,7 @@ def test_thd_mask_types_match_scalar_forward_and_backward(policy_specs, dtype):
     reference_key = key.detach().clone().requires_grad_()
     reference_value = value.detach().clone().requires_grad_()
 
-    attention = _make_dpa(dtype)
+    attention = make_dot_product_attention(dtype, MODEL_CONFIG, "thd")
     output = attention(
         query,
         key,
@@ -160,10 +162,18 @@ def test_thd_mask_types_match_scalar_forward_and_backward(policy_specs, dtype):
         policies,
     )
 
-    tolerances = {"atol": 1.0e-3, "rtol": 1.0e-3}
-    if dtype == torch.bfloat16:
-        tolerances = {"atol": 1.5e-2, "rtol": 1.5e-2}
-    torch.testing.assert_close(output, reference_output, **tolerances)
+    tolerances = dtype_tols(dtype)
+    tolerances["atol"] = tolerances["rtol"]
+    compare_and_assert(
+        output,
+        reference_output,
+        "mixed policy output",
+        "scalar policy output",
+        tolerances["atol"],
+        tolerances["rtol"],
+        0.0,
+        False,
+    )
 
     output_grad = torch.randn_like(output)
     output.backward(output_grad)
@@ -173,12 +183,21 @@ def test_thd_mask_types_match_scalar_forward_and_backward(policy_specs, dtype):
         (key.grad, reference_key.grad),
         (value.grad, reference_value.grad),
     ):
-        torch.testing.assert_close(actual_grad, reference_grad, **tolerances)
+        compare_and_assert(
+            actual_grad,
+            reference_grad,
+            "mixed policy gradient",
+            "scalar policy gradient",
+            tolerances["atol"],
+            tolerances["rtol"],
+            0.0,
+            False,
+        )
 
 
 def test_thd_mask_types_compose_with_existing_inter_sequence_padding():
     """Policy gaps and pre-existing THD padding must share the physical layout."""
-    torch.manual_seed(1234)
+    reset_rng_states()
     dtype = torch.float16
     cu_seqlens = _make_cu_seqlens((7, 3, 5, 4))
     cu_seqlens_padded = torch.tensor((0, 9, 12, 19, 23), dtype=torch.int32, device="cuda")
@@ -193,7 +212,7 @@ def test_thd_mask_types_compose_with_existing_inter_sequence_padding():
     reference_query = query.detach().clone().requires_grad_()
     reference_key = key.detach().clone().requires_grad_()
     reference_value = value.detach().clone().requires_grad_()
-    attention = _make_dpa(dtype)
+    attention = make_dot_product_attention(dtype, MODEL_CONFIG, "thd")
 
     output = attention(
         query,
@@ -234,7 +253,7 @@ def test_thd_mask_types_compose_with_existing_inter_sequence_padding():
 
 def test_thd_mask_types_support_cross_attention_and_per_policy_windows():
     """Mask groups may use different Q/KV lengths and sliding windows."""
-    torch.manual_seed(1234)
+    reset_rng_states()
     dtype = torch.float16
     cu_seqlens_q = _make_cu_seqlens((5, 3, 4))
     cu_seqlens_kv = _make_cu_seqlens((7, 2, 5))
@@ -250,7 +269,12 @@ def test_thd_mask_types_support_cross_attention_and_per_policy_windows():
     reference_query = query.detach().clone().requires_grad_()
     reference_key = key.detach().clone().requires_grad_()
     reference_value = value.detach().clone().requires_grad_()
-    attention = _make_dpa(dtype, attention_type="cross")
+    attention = make_dot_product_attention(
+        dtype,
+        MODEL_CONFIG,
+        "thd",
+        attention_type="cross",
+    )
 
     output = attention(
         query,
@@ -302,7 +326,7 @@ def test_thd_mask_types_support_cross_attention_and_per_policy_windows():
 )
 def test_thd_mask_types_support_repeated_masks_and_policy_order(policy_specs):
     """Repeated mask types may use distinct windows in any policy-list order."""
-    torch.manual_seed(1234)
+    reset_rng_states()
     dtype = torch.float16
     cu_seqlens = _make_cu_seqlens((7, 3, 5, 4))
     policies = _make_policies(policy_specs)
@@ -316,7 +340,7 @@ def test_thd_mask_types_support_repeated_masks_and_policy_order(policy_specs):
     reference_query = query.detach().clone().requires_grad_()
     reference_key = key.detach().clone().requires_grad_()
     reference_value = value.detach().clone().requires_grad_()
-    attention = _make_dpa(dtype)
+    attention = make_dot_product_attention(dtype, MODEL_CONFIG, "thd")
 
     output = attention(
         query,
@@ -394,7 +418,7 @@ def test_thd_mask_type_runtime_dispatch_uses_backend_selection(monkeypatch):
 
 def test_thd_mask_type_runtime_dispatch_combines_backend_outputs(monkeypatch):
     """Policies routed to different backend representations share one output."""
-    attention = _make_dpa(torch.float16)
+    attention = make_dot_product_attention(torch.float16, MODEL_CONFIG, "thd")
     cu_seqlens = _make_cu_seqlens((1, 1))
     policies = [
         {
@@ -449,8 +473,114 @@ def test_thd_mask_type_runtime_dispatch_combines_backend_outputs(monkeypatch):
         pad_between_seqs=False,
         bf16_backward=None,
         num_splits=None,
+        thd_attention_policy_dispatch="auto",
     )
     torch.testing.assert_close(output, padded_output + grouped_output)
+
+
+def test_thd_mask_type_runtime_dispatch_can_force_grouped(monkeypatch):
+    """The per-call override must bypass padded backend probing."""
+    attention = make_dot_product_attention(torch.float16, MODEL_CONFIG, "thd")
+    cu_seqlens = _make_cu_seqlens((1, 1))
+    policies = _make_policies((("padding", (0,), (-1, -1)), ("padding_causal", (1,), (-1, 0))))
+    query = torch.zeros(2, NUM_HEADS, HEAD_DIM, dtype=torch.float16, device="cuda")
+    grouped_output = query.new_ones((2, NUM_HEADS * HEAD_DIM))
+
+    monkeypatch.setattr(
+        attention,
+        "_partition_thd_mask_policies",
+        lambda *_args, **_kwargs: pytest.fail("grouped override probed padded backends"),
+    )
+    monkeypatch.setattr(
+        attention,
+        "_forward_thd_mask_types_with_padding",
+        lambda *_args, **_kwargs: pytest.fail("grouped override used padded dispatch"),
+    )
+    monkeypatch.setattr(
+        attention,
+        "_forward_thd_mask_types_grouped",
+        lambda *_args, **_kwargs: grouped_output,
+    )
+
+    output = attention._forward_thd_mask_types(
+        query,
+        query,
+        query,
+        cu_seqlens,
+        cu_seqlens,
+        None,
+        None,
+        policies,
+        1,
+        1,
+        attention_params_kwargs={},
+        checkpoint_core_attention=False,
+        fast_zero_fill=True,
+        pad_between_seqs=False,
+        bf16_backward=None,
+        num_splits=None,
+        thd_attention_policy_dispatch="grouped",
+    )
+    torch.testing.assert_close(output, grouped_output)
+
+
+def test_thd_mask_type_grouped_override_matches_auto_dispatch():
+    """The shared DPA runner must produce matching automatic and grouped results."""
+    policies = _make_policies((("padding", (0, 2), (-1, -1)), ("padding_causal", (1, 3), (-1, 0))))
+    common_forward_kwargs = {
+        "attention_mask": None,
+        "attn_mask_type": None,
+        "window_size": None,
+        "attn_mask_type_and_window_size_per_seq_policies": policies,
+    }
+    runner_kwargs = {
+        "dtype": torch.float16,
+        "config": MODEL_CONFIG,
+        "backend": "FlashAttention",
+        "ckpt_attn": False,
+        "qkv_layout": "thd_thd_thd",
+        "pad_between_seqs": False,
+        "is_training": True,
+    }
+
+    auto_output, _, auto_grads = run_dot_product_attention(
+        **runner_kwargs,
+        forward_kwargs={
+            **common_forward_kwargs,
+            "thd_attention_policy_dispatch": "auto",
+        },
+    )
+    grouped_output, _, grouped_grads = run_dot_product_attention(
+        **runner_kwargs,
+        forward_kwargs={
+            **common_forward_kwargs,
+            "thd_attention_policy_dispatch": "grouped",
+        },
+    )
+
+    tolerances = dtype_tols(torch.float16)
+    tolerances["atol"] = tolerances["rtol"]
+    compare_and_assert(
+        auto_output,
+        grouped_output,
+        "automatic mixed policy output",
+        "grouped mixed policy output",
+        tolerances["atol"],
+        tolerances["rtol"],
+        0.0,
+        False,
+    )
+    for auto_grad, grouped_grad in zip(auto_grads[:3], grouped_grads[:3]):
+        compare_and_assert(
+            auto_grad,
+            grouped_grad,
+            "automatic mixed policy gradient",
+            "grouped mixed policy gradient",
+            tolerances["atol"],
+            tolerances["rtol"],
+            0.0,
+            False,
+        )
 
 
 def test_thd_mask_types_support_cuda_graph_capture(monkeypatch):
@@ -465,14 +595,19 @@ def test_thd_mask_types_support_cuda_graph_capture(monkeypatch):
     monkeypatch.setenv("NVTE_FUSED_ATTN", "0")
     monkeypatch.setenv("NVTE_UNFUSED_ATTN", "0")
 
-    torch.manual_seed(1234)
+    reset_rng_states()
     dtype = torch.float16
     cu_seqlens = _make_cu_seqlens((7, 3, 5, 4))
     policies = _make_policies((("padding", (0, 2), (-1, -1)), ("padding_causal", (1, 3), (-1, 0))))
     query = 0.1 * torch.randn(19, NUM_HEADS, HEAD_DIM, dtype=dtype, device="cuda")
     key = 0.1 * torch.randn_like(query)
     value = 0.1 * torch.randn_like(query)
-    attention = _make_dpa(dtype).eval()
+    attention = make_dot_product_attention(
+        dtype,
+        MODEL_CONFIG,
+        "thd",
+        is_training=False,
+    )
 
     def run_attention():
         return attention(
@@ -511,6 +646,7 @@ def test_thd_mask_types_support_cuda_graph_capture(monkeypatch):
         ("mask_type", "only padding mask types"),
         ("policy_keys", "must contain exactly"),
         ("scalar_mask", "do not also pass"),
+        ("policy_dispatch", "must be either 'auto' or 'grouped'"),
     ),
 )
 def test_thd_mask_types_reject_invalid_inputs(invalid_case, error):
@@ -519,9 +655,10 @@ def test_thd_mask_types_reject_invalid_inputs(invalid_case, error):
     key = torch.randn_like(query)
     value = torch.randn_like(query)
     cu_seqlens = torch.tensor((0, 2, 4), dtype=torch.int32, device="cuda")
-    attention = _make_dpa(torch.float16)
+    attention = make_dot_product_attention(torch.float16, MODEL_CONFIG, "thd")
     policies = _make_policies((("padding", (0,), (-1, -1)), ("padding_causal", (1,), (-1, 0))))
     scalar_mask_type = None
+    policy_dispatch = "auto"
 
     if invalid_case == "policy_dtype":
         policies[0]["sequence_ids"] = torch.tensor((0,), dtype=torch.float32, device="cuda")
@@ -531,8 +668,10 @@ def test_thd_mask_types_reject_invalid_inputs(invalid_case, error):
         policies[0]["mask_type"] = "no_mask"
     elif invalid_case == "policy_keys":
         del policies[0]["window_size"]
-    else:
+    elif invalid_case == "scalar_mask":
         scalar_mask_type = "padding"
+    else:
+        policy_dispatch = "padded"
 
     with pytest.raises(ValueError, match=error):
         attention(
@@ -546,12 +685,13 @@ def test_thd_mask_types_reject_invalid_inputs(invalid_case, error):
             max_seqlen_kv=2,
             attn_mask_type=scalar_mask_type,
             attn_mask_type_and_window_size_per_seq_policies=policies,
+            thd_attention_policy_dispatch=policy_dispatch,
         )
 
 
 def test_thd_mask_types_empty_batch_preserves_input_gradients():
     """An empty packed batch needs zero gradients, not a disconnected output."""
-    attention = _make_dpa(torch.float16)
+    attention = make_dot_product_attention(torch.float16, MODEL_CONFIG, "thd")
     query = torch.empty(
         0, NUM_HEADS, HEAD_DIM, device="cuda", dtype=torch.float16, requires_grad=True
     )
