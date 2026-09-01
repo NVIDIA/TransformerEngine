@@ -3128,6 +3128,68 @@ class TestBasicOps:
         assert te_ops.ScaledSReLU().activation_recompute_in_mlp is False
         assert te_ops.ScaledSReLU(activation_recompute_in_mlp=True).activation_recompute_in_mlp
 
+    def test_scaled_srelu_activation_recompute_in_mlp_warns_outside_fused_mlp(
+        self,
+        *,
+        in_shape: Iterable[int] = (71, 192),
+        dtype: torch.dtype = torch.float32,
+        device: torch.device = "cuda",
+    ) -> None:
+        """Scaled SReLU warns, but still runs, when recompute is unavailable"""
+
+        # Random data
+        x_ref, x_test = make_reference_and_test_tensors(
+            in_shape,
+            test_dtype=dtype,
+            test_device=device,
+            requires_grad=True,
+        )
+        scales_ref, scales_test = make_reference_and_test_tensors(
+            in_shape[:-1],
+            test_dtype=dtype,
+            test_device=device,
+            requires_grad=True,
+        )
+        dy_ref, dy_test = make_reference_and_test_tensors(
+            in_shape,
+            test_dtype=dtype,
+            test_device=device,
+            requires_grad=False,
+        )
+
+        # Plain PyTorch implementation
+        y_ref = scales_ref.unsqueeze(-1) * torch.nn.functional.relu(x_ref).square()
+        y_ref.backward(dy_ref)
+
+        # Activation recompute is only honored within the fused grouped MLP,
+        # so the standalone op falls back to saving the activation input.
+        op = te_ops.ScaledSReLU(activation_recompute_in_mlp=True)
+        with pytest.warns(UserWarning, match="fused grouped MLP path") as warning_log:
+            y_test = op(x_test, scales_test)
+            y_test.backward(dy_test)
+
+            # Gradients accumulate, so snapshot them before the second pass
+            dx_test = x_test.grad.detach().clone()
+            dscales_test = scales_test.grad.detach().clone()
+
+            # Second pass through the same op
+            op(x_test, scales_test).backward(dy_test)
+        warnings_seen = [
+            warning
+            for warning in warning_log
+            if "activation_recompute_in_mlp" in str(warning.message)
+        ]
+
+        # Warning is emitted at most once per op
+        assert len(warnings_seen) == 1
+
+        # Check results
+        tols = dtype_tols(dtype)
+        y_test = y_test.to(dtype=torch.float64, device="cpu")
+        assert_close(y_test, y_ref, **tols)
+        assert_close(dx_test, x_ref.grad, **tols)
+        assert_close(dscales_test, scales_ref.grad, **tols)
+
     @pytest.mark.parametrize("in_shape", ((71, 192), (5, 7, 128)))
     @pytest.mark.parametrize("input_requires_grad", (False, True))
     @pytest.mark.parametrize("scales_requires_grad", (False, True))
