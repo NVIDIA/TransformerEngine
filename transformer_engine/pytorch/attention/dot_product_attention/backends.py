@@ -641,6 +641,9 @@ class UnfusedDotProductAttention(torch.nn.Module):
         key_layer = key_layer.reshape(output_size[3], output_size[0] * output_size[1], -1)
 
         # Raw attention scores. [b * h, sq, sk]
+        # An additive `post_scale_bias`/ALiBi term is deferred until after the softcap below, so
+        # that the cap applies to the bare scaled logits (see the softcap comment for why).
+        deferred_bias = None
         if core_attention_bias_type == "no_bias":
             matmul_result = torch.baddbmm(
                 matmul_result,
@@ -684,16 +687,25 @@ class UnfusedDotProductAttention(torch.nn.Module):
                 beta=0.0,
                 alpha=scale,
             )
-            matmul_result = (matmul_result.view(*output_size) + core_attention_bias).to(
-                dtype=query_layer.dtype
-            )
+            matmul_result = matmul_result.view(*output_size)
+            deferred_bias = core_attention_bias
 
         # Cap the scaled logits -- softcap * tanh(scores * scale / softcap) -- matching how
-        # FlashAttention folds softmax_scale into its tanh argument. qk layer scaling defers the
-        # layer_number factor to the softmax below, so it is divided out of the cap here.
+        # FlashAttention folds softmax_scale into its tanh argument. The cap is applied to the
+        # bare scaled logits, before any additive bias: FA2 softcaps immediately after the QK^T
+        # gemm and only then adds ALiBi (its alibi_slope is pre-divided by scale_softmax, which
+        # softcapping sets to `softcap`, so the bias lands outside the tanh). Capping the bias
+        # too would silently diverge from FA2, which is selectable alongside this backend for
+        # ALiBi -- the one bias type flash supports (pre/post_scale_bias disable it outright).
+        # `pre_scale_bias` is folded in before the scaling by construction, so it is necessarily
+        # inside the cap. qk layer scaling defers the layer_number factor to the softmax below,
+        # so it is divided out of the cap here.
         if softcap != 0.0:
             cap = softcap / self.layer_number if apply_qk_layer_scaling else softcap
             matmul_result = cap * torch.tanh(matmul_result / cap)
+
+        if deferred_bias is not None:
+            matmul_result = (matmul_result + deferred_bias).to(dtype=query_layer.dtype)
 
         if fp8:
             # quantize and dequantize dP to emulate FP8

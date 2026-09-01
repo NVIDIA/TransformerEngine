@@ -841,6 +841,167 @@ def test_dpa_softcap_vs_reference(dtype, model_configs, model, softcap, backend)
     torch.testing.assert_close(v.grad.float(), v_ref.grad.float(), **tols)
 
 
+model_configs_softcap_bias = {
+    # test: ModelConfig(b, sq, hq, dqk)
+    "softcap_bias_1_0": ModelConfig(2, 128, 8, 64, attn_bias_type="post_scale_bias"),
+    "softcap_bias_2_0": ModelConfig(
+        2, 128, 8, 64, attn_mask_type="causal", attn_bias_type="post_scale_bias"
+    ),
+}
+
+
+@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("model_configs", [model_configs_softcap_bias])
+@pytest.mark.parametrize("model", model_configs_softcap_bias.keys())
+def test_dpa_softcap_bias_ordering(dtype, model_configs, model):
+    """An additive bias is added *after* the cap, not capped together with the logits.
+
+    FlashAttention softcaps immediately after the QK^T gemm and only then adds ALiBi: its
+    alibi_slope is pre-divided by scale_softmax, which softcapping sets to `softcap`, so the bias
+    term lands outside the tanh. UnfusedDotProductAttention serves ALiBi and post_scale_bias from
+    the same branch, so capping the sum there would silently disagree with the flash backends on
+    softcap + ALiBi. post_scale_bias drives that same branch without needing ALiBi slope
+    machinery in the reference.
+    """
+    config = copy.deepcopy(model_configs[model])
+    softcap = 0.5
+
+    reset_rng_states()
+    os.environ["NVTE_FLASH_ATTN"] = "0"
+    os.environ["NVTE_FUSED_ATTN"] = "0"
+    os.environ["NVTE_UNFUSED_ATTN"] = "1"
+    _attention_backends["backend_selection_requires_update"] = True
+
+    causal = "causal" in config.attn_mask_type
+    softmax_scale = 1.0 / config.head_dim_qk**0.5
+    q_shape = (config.batch_size, config.max_seqlen_q, config.num_heads, config.head_dim_qk)
+    kv_shape = (config.batch_size, config.max_seqlen_kv, config.num_gqa_groups, config.head_dim_qk)
+    out_shape = (config.batch_size, config.max_seqlen_q, config.num_heads, config.head_dim_v)
+    q, k, v = (
+        torch.randn(shape, dtype=dtype, device="cuda") for shape in (q_shape, kv_shape, kv_shape)
+    )
+    # O(1) against a cap of 0.5, so capping the bias too is clearly visible in the output while
+    # the softmax stays well conditioned (a much larger bias drives it to one-hot, which only
+    # sharpens fp16 rounding against the tolerance without adding signal).
+    bias = torch.randn(
+        1, config.num_heads, config.max_seqlen_q, config.max_seqlen_kv, dtype=dtype, device="cuda"
+    )
+
+    block = DotProductAttention(
+        config.num_heads,
+        (config.head_dim_qk, config.head_dim_v),
+        num_gqa_groups=config.num_gqa_groups,
+        qkv_format="bshd",
+        attn_mask_type=config.attn_mask_type,
+        softmax_scale=softmax_scale,
+        softcap=softcap,
+        layer_number=1,
+    ).to(dtype=dtype, device="cuda")
+    out = block(
+        q, k, v, core_attention_bias_type="post_scale_bias", core_attention_bias=bias
+    ).view(out_shape)
+
+    def _reference(cap_includes_bias):
+        q_f, k_f, v_f = (x.transpose(1, 2).float() for x in (q, k, v))
+        scores = torch.matmul(q_f, k_f.transpose(-2, -1)) * softmax_scale
+        bias_f = bias.float()
+        if cap_includes_bias:
+            scores = softcap * torch.tanh((scores + bias_f) / softcap)
+        else:
+            scores = softcap * torch.tanh(scores / softcap) + bias_f
+        if causal:
+            max_seqlen_q, max_seqlen_kv = scores.shape[-2], scores.shape[-1]
+            mask = torch.triu(
+                torch.ones(max_seqlen_q, max_seqlen_kv, dtype=torch.bool, device=scores.device),
+                diagonal=1 + max_seqlen_kv - max_seqlen_q,
+            )
+            scores = scores.masked_fill(mask, float("-inf"))
+        return torch.matmul(torch.softmax(scores, dim=-1), v_f).transpose(1, 2)
+
+    out_ref = _reference(cap_includes_bias=False)
+    out_capped_bias = _reference(cap_includes_bias=True)
+
+    tols = dict(atol=2e-2, rtol=2e-2)
+    if dtype == torch.bfloat16:
+        tols = dict(atol=4e-2, rtol=4e-2)
+
+    # Without this the test could be vacuous: the two orderings have to be distinguishable at
+    # this cap and bias magnitude for the comparison below to mean anything.
+    ordering_effect = (out_ref - out_capped_bias).abs().max().item()
+    assert ordering_effect > 10 * tols["atol"], (
+        f"the two bias orderings differ by only {ordering_effect:.2e}; this config would pass"
+        " whichever one the backend implements"
+    )
+    torch.testing.assert_close(out.float(), out_ref, **tols)
+
+
+@pytest.mark.parametrize("model_configs", [model_configs_softcap_reference])
+@pytest.mark.parametrize("model", ["softcap_ref_1_0", "softcap_ref_2_0"])
+def test_dpa_softcap_qk_layer_scaling(model_configs, model):
+    """softcap survives NVTE_APPLY_QK_LAYER_SCALING, which defers a layer_number factor.
+
+    With qk layer scaling UnfusedDotProductAttention scales the logits by
+    softmax_scale / layer_number and lets the softmax multiply them back by layer_number, so the
+    cap must be divided by layer_number to land on the true logits. Dropping that division leaves
+    an effective cap of softcap * layer_number, which this test pins down. fp16 only: the backend
+    gates qk layer scaling on the key dtype.
+    """
+    dtype = torch.float16
+    config = copy.deepcopy(model_configs[model])
+    softcap = 0.5
+    # The undivided cap would be softcap * layer_number; layer_number is chosen large enough that
+    # the two caps are far enough apart to separate well beyond the comparison tolerance (the
+    # assert below pins this down), since the logits here are O(1).
+    layer_number = 8
+
+    reset_rng_states()
+    os.environ["NVTE_FLASH_ATTN"] = "0"
+    os.environ["NVTE_FUSED_ATTN"] = "0"
+    os.environ["NVTE_UNFUSED_ATTN"] = "1"
+    os.environ["NVTE_APPLY_QK_LAYER_SCALING"] = "1"
+    _attention_backends["backend_selection_requires_update"] = True
+
+    causal = "causal" in config.attn_mask_type
+    softmax_scale = 1.0 / config.head_dim_qk**0.5
+    q_shape = (config.batch_size, config.max_seqlen_q, config.num_heads, config.head_dim_qk)
+    kv_shape = (config.batch_size, config.max_seqlen_kv, config.num_gqa_groups, config.head_dim_qk)
+    out_shape = (config.batch_size, config.max_seqlen_q, config.num_heads, config.head_dim_v)
+    q, k, v = (
+        torch.randn(shape, dtype=dtype, device="cuda") for shape in (q_shape, kv_shape, kv_shape)
+    )
+
+    try:
+        block = DotProductAttention(
+            config.num_heads,
+            (config.head_dim_qk, config.head_dim_v),
+            num_gqa_groups=config.num_gqa_groups,
+            qkv_format="bshd",
+            attn_mask_type=config.attn_mask_type,
+            softmax_scale=softmax_scale,
+            softcap=softcap,
+            layer_number=layer_number,
+        ).to(dtype=dtype, device="cuda")
+        out = block(q, k, v).view(out_shape)
+    finally:
+        os.environ["NVTE_APPLY_QK_LAYER_SCALING"] = "0"
+        _attention_backends["backend_selection_requires_update"] = True
+
+    out_ref = _softcap_reference_attention(q, k, v, softmax_scale, softcap, causal)
+    # Omitting the cap / layer_number division caps the reduced logits instead, which after the
+    # softmax's layer_number factor is exactly a softcap * layer_number cap on the true logits.
+    out_undivided = _softcap_reference_attention(
+        q, k, v, softmax_scale, softcap * layer_number, causal
+    )
+
+    tols = dict(atol=2e-2, rtol=2e-2)
+    scaling_effect = (out_ref - out_undivided).abs().max().item()
+    assert scaling_effect > 10 * tols["atol"], (
+        f"dividing the cap by layer_number moves the output by only {scaling_effect:.2e}; this"
+        " config would pass even without the division"
+    )
+    torch.testing.assert_close(out.float(), out_ref, **tols)
+
+
 model_configs_mla = {
     # test: ModelConfig(b, sq, hq, dqk)
     "mla_1_0": ModelConfig(8, 128, 16, 64, head_dim_v=128),
