@@ -119,6 +119,7 @@ def _per_sequence_scalar_reference(
         mask_type = policy["mask_type"]
         sequence_ids = policy["sequence_ids"]
         policy_window_size = policy["window_size"]
+        policy_bottom_right_diagonal = policy.get("bottom_right_diagonal")
         for sequence_id in sequence_ids.tolist():
             q_length = int((cu_seqlens_q[sequence_id + 1] - cu_seqlens_q[sequence_id]).item())
             kv_length = int((cu_seqlens_kv[sequence_id + 1] - cu_seqlens_kv[sequence_id]).item())
@@ -145,6 +146,7 @@ def _per_sequence_scalar_reference(
                 max_seqlen_kv=kv_length,
                 attn_mask_type=mask_type,
                 window_size=policy_window_size,
+                bottom_right_diagonal=policy_bottom_right_diagonal,
             )
 
     output = query.new_zeros((query.shape[0], NUM_HEADS * HEAD_DIM))
@@ -299,20 +301,26 @@ def test_thd_mask_types_compose_with_existing_inter_sequence_padding():
         torch.testing.assert_close(actual_grad, reference_grad, atol=1.0e-3, rtol=1.0e-3)
 
 
-def test_thd_mask_types_support_cross_attention_and_per_policy_windows():
-    """Mask groups may use different Q/KV lengths and sliding windows."""
+def test_thd_mask_types_support_cross_attention_and_per_policy_options():
+    """Mask groups may use different Q/KV lengths, windows, and diagonal alignment."""
     reset_rng_states()
     dtype = torch.float16
     cu_seqlens_q = _make_cu_seqlens((5, 3, 4))
-    cu_seqlens_kv = _make_cu_seqlens((7, 2, 5))
+    cu_seqlens_kv = _make_cu_seqlens((7, 4, 5))
     policies = _make_policies(
-        (("padding", (0, 2), (-1, -1)), ("padding_causal_bottom_right", (1,), (2, 0)))
+        (
+            ("padding", (0,), (2, 1)),
+            ("padding", (1,), (2, 1)),
+            ("padding_causal_bottom_right", (2,), (2, 0)),
+        )
     )
+    policies[0]["bottom_right_diagonal"] = True
+    policies[1]["bottom_right_diagonal"] = False
 
     query = (
         0.1 * torch.randn(12, NUM_HEADS, HEAD_DIM, dtype=dtype, device="cuda")
     ).requires_grad_()
-    key = (0.1 * torch.randn(14, NUM_HEADS, HEAD_DIM, dtype=dtype, device="cuda")).requires_grad_()
+    key = (0.1 * torch.randn(16, NUM_HEADS, HEAD_DIM, dtype=dtype, device="cuda")).requires_grad_()
     value = (0.1 * torch.randn_like(key)).requires_grad_()
     reference_query = query.detach().clone().requires_grad_()
     reference_key = key.detach().clone().requires_grad_()
@@ -759,7 +767,8 @@ def test_thd_mask_types_support_cuda_graph_capture(monkeypatch):
         ("sequence_overlap", "assign every sequence exactly once"),
         ("sequence_range", "assign every sequence exactly once"),
         ("mask_type", "only padding mask types"),
-        ("policy_keys", "must contain exactly"),
+        ("policy_keys", "must contain"),
+        ("bottom_right_diagonal", "must be a bool"),
         ("scalar_mask", "do not also pass"),
         ("policy_dispatch", "must be either 'auto' or 'grouped'"),
     ),
@@ -791,6 +800,8 @@ def test_thd_mask_types_reject_invalid_inputs(invalid_case, error):
         policies[0]["mask_type"] = "no_mask"
     elif invalid_case == "policy_keys":
         del policies[0]["window_size"]
+    elif invalid_case == "bottom_right_diagonal":
+        policies[0]["bottom_right_diagonal"] = "bottom_right"
     elif invalid_case == "scalar_mask":
         scalar_mask_type = "padding"
     else:

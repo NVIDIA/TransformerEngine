@@ -2111,8 +2111,10 @@ class DotProductAttention(TransformerEngineBaseModule):
         thd_attention_policies: Optional[List[Dict[str, Any]]],
             default = None
             Per-sequence policies for packed THD attention. Each list item must contain
-            ``"sequence_ids"``, ``"mask_type"``, and ``"window_size"``. Sequence IDs
-            are supplied as a one-dimensional, strictly ascending CUDA integer tensor;
+            ``"sequence_ids"``, ``"mask_type"``, and ``"window_size"``, and may contain
+            ``"bottom_right_diagonal"`` to override the diagonal alignment for that policy.
+            If omitted, the forward or module-level alignment is used. Sequence IDs are
+            supplied as a one-dimensional, strictly ascending CUDA integer tensor;
             all policy tensors must be disjoint and together contain every sequence
             exactly once. A list may contain multiple policies with the same mask type
             and different windows. Policy IDs are validated before their first use and
@@ -2145,14 +2147,19 @@ class DotProductAttention(TransformerEngineBaseModule):
                 )
 
             required_policy_keys = {"sequence_ids", "mask_type", "window_size"}
+            optional_policy_keys = {"bottom_right_diagonal"}
             thd_mask_policies = []
             for policy_index, policy in enumerate(thd_attention_policies):
                 if not isinstance(policy, dict):
                     raise ValueError(f"Mixed THD policy {policy_index} must be a dictionary.")
-                if set(policy) != required_policy_keys:
+                policy_keys = set(policy)
+                if not required_policy_keys.issubset(policy_keys) or not policy_keys.issubset(
+                    required_policy_keys | optional_policy_keys
+                ):
                     raise ValueError(
-                        f"Mixed THD policy {policy_index} must contain exactly "
-                        "'sequence_ids', 'mask_type', and 'window_size'."
+                        f"Mixed THD policy {policy_index} must contain 'sequence_ids', "
+                        "'mask_type', and 'window_size', and may optionally contain "
+                        "'bottom_right_diagonal'."
                     )
                 mask_type = policy["mask_type"]
                 if not isinstance(mask_type, str):
@@ -2168,7 +2175,15 @@ class DotProductAttention(TransformerEngineBaseModule):
                     mask_type,
                     policy["window_size"],
                 )
-                policy_bottom_right_diagonal = bottom_right_diagonal
+                policy_bottom_right_diagonal = policy.get("bottom_right_diagonal")
+                if policy_bottom_right_diagonal is not None and not isinstance(
+                    policy_bottom_right_diagonal, bool
+                ):
+                    raise ValueError(
+                        f"Mixed THD policy {policy_index} bottom_right_diagonal must be a bool."
+                    )
+                if policy_bottom_right_diagonal is None:
+                    policy_bottom_right_diagonal = bottom_right_diagonal
                 if policy_bottom_right_diagonal is None:
                     policy_bottom_right_diagonal = self.bottom_right_diagonal
                 if mask_type in {"causal", "padding_causal"}:
