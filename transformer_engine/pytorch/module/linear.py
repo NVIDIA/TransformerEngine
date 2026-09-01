@@ -201,9 +201,10 @@ class LinearFwdArgs:
         if self.wgrad_store is not None:
             # Non-None only when delayed wgrad compute is on (see Linear.forward).
             return "delayed wgrad compute (wgrad_store)"
-        if self.cache_weight:
+        if self.cache_weight and self.fp8:
             # The cached workspace is updated in place on the first microbatch,
-            # which the functional op (mutates_args=()) can't express.
+            # which the functional op (mutates_args=()) can't express. Without
+            # FP8 no workspace exists, so is_first_microbatch is inert.
             return "FP8 weight caching (is_first_microbatch)"
         if self.fuse_wgrad_accumulation:
             return "fuse_wgrad_accumulation (main_grad)"
