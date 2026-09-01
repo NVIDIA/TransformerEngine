@@ -64,7 +64,7 @@ Build Configuration
 
    :Type: ``int`` (0 or 1)
    :Default: ``1`` when building on Linux and the configured C++ compiler targets Arm64 (AArch64), ``0`` otherwise
-   :Description: Build the core, NCCL EP, PyTorch, and JAX host ELFs with LLVM BOLT-compatible compiler and linker flags. On an Arm64 target, this also disables the Cortex-A53 835769 and 843419 errata workarounds as required by BOLT. Set to ``0`` to disable the default on Arm64, or ``1`` to opt in on another supported Linux architecture. When using :envvar:`NVTE_CMAKE_BUILD_DIR`, use a fresh build directory after changing this setting.
+   :Description: Build the core, NCCL EP, PyTorch, and JAX host ELFs with LLVM BOLT-compatible compiler and linker flags. On an Arm64 target, this also disables the Cortex-A53 835769 and 843419 errata workarounds as required by BOLT. Set to ``0`` to disable the default on Arm64, or ``1`` to opt in on another supported Linux architecture. Automatic target detection requires the configured ``CXX`` compiler to support ``-dumpmachine``; the build fails instead of falling back to the host architecture if the target cannot be determined. When using :envvar:`NVTE_CMAKE_BUILD_DIR`, use a fresh build directory after changing this setting.
 
 .. envvar:: NVTE_RELEASE_BUILD
 

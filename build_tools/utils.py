@@ -55,11 +55,19 @@ def build_target_arch() -> str:
             check=True,
             text=True,
         )
-    except (OSError, subprocess.CalledProcessError):
-        return platform.machine().lower()
+    except (OSError, subprocess.CalledProcessError) as e:
+        raise RuntimeError(
+            "Could not determine the C++ compiler target architecture with "
+            f"`{' '.join(cxx)} -dumpmachine`"
+        ) from e
 
     target = result.stdout.strip().split("-", 1)[0]
-    return target.lower() or platform.machine().lower()
+    if not target:
+        raise RuntimeError(
+            "Could not determine the C++ compiler target architecture: "
+            f"`{' '.join(cxx)} -dumpmachine` returned no target"
+        )
+    return target.lower()
 
 
 def target_is_arm64() -> bool:
