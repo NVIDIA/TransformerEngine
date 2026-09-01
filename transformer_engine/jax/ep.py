@@ -21,6 +21,7 @@ from transformer_engine.jax.sharding import (
     get_num_devices_in_mesh,
     global_mesh_resource,
     get_mesh_axis_size,
+    normalize_mesh_axes,
     with_sharding_constraint,
 )
 
@@ -85,11 +86,21 @@ def _ep_domain_for_rank(mesh, ep_resource, rank, device_to_rank=None):
         def device_to_rank(d):
             return d.process_index
 
-    ep_pos = mesh.axis_names.index(ep_resource)
-    ep_size = mesh.shape[ep_resource]
+    ep_axes = normalize_mesh_axes(ep_resource)
+    if not ep_axes:
+        raise ValueError("ep_bootstrap: ep_resource must contain at least one mesh axis.")
+    missing = tuple(axis for axis in ep_axes if axis not in mesh.axis_names)
+    if missing:
+        raise ValueError(
+            f"ep_bootstrap: EP axes {missing} are not present in mesh axes {mesh.axis_names}."
+        )
+    ep_positions = tuple(mesh.axis_names.index(axis) for axis in ep_axes)
+    non_ep_positions = tuple(i for i in range(len(mesh.axis_names)) if i not in ep_positions)
+    ep_size = get_mesh_axis_size(ep_axes, mesh)
     ranks = np.vectorize(device_to_rank, otypes=[np.int64])(mesh.devices)
-    # Move ep last and flatten: each row is one domain (all non-ep coords fixed).
-    grid = np.moveaxis(ranks, ep_pos, -1).reshape(-1, ep_size)
+    # Move all EP axes last in the user-specified order and flatten them into
+    # one communicator dimension. Each row fixes every axis outside compound EP.
+    grid = np.transpose(ranks, non_ep_positions + ep_positions).reshape(-1, ep_size)
     loc = np.argwhere(grid == rank)
     if loc.shape[0] != 1:
         raise ValueError(
@@ -248,7 +259,9 @@ def _default_out_partition_spec():
             "ep_resource is not set on the active MeshResource; pass out_sharding=... explicitly."
         )
     outer = _ep_outer_axis()
-    leading = (outer, gsr.ep_resource) if outer is not None else gsr.ep_resource
+    ep_axes = normalize_mesh_axes(gsr.ep_resource)
+    leading_axes = ep_axes if outer is None else (outer, *ep_axes)
+    leading = leading_axes[0] if len(leading_axes) == 1 else leading_axes
     return (leading,)
 
 
