@@ -40,7 +40,7 @@ PyTorch
 
 .. autoapiclass:: transformer_engine.pytorch.autocast(enabled=True, calibrating=False, recipe=None, amax_reduction_group=None)
 
-.. autoapifunction:: transformer_engine.pytorch.backward_quantization_update_scope
+.. autoapifunction:: transformer_engine.pytorch.quantization_backward_scope
 
 .. autoapifunction:: transformer_engine.pytorch.quantized_model_init
 

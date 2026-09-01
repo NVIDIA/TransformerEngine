@@ -34,7 +34,7 @@ from .jit import jit_fuser
 
 __all__ = [
     "autocast",
-    "backward_quantization_update_scope",
+    "quantization_backward_scope",
     "quantized_model_init",
     "is_fp8_available",
     "is_mxfp8_available",
@@ -403,7 +403,7 @@ class FP8GlobalState:
     is_first_fp8_module: bool = False
     pending_backward_quantization_update: bool = False
     backward_quantization_update_callback_task_id: Optional[int] = None
-    backward_quantization_update_scope_depth: int = 0
+    quantization_backward_scope_depth: int = 0
     fp8_graph_capturing: bool = False
     autocast_depth: int = 0
     global_amax_buffer: Dict[str, list] = field(default_factory=dict)
@@ -692,7 +692,7 @@ class FP8GlobalStateManager:
         """Request an update after the enclosing logical backward."""
         qstate = cls.quantization_state
         qstate.pending_backward_quantization_update = True
-        if qstate.backward_quantization_update_scope_depth == 0:
+        if qstate.quantization_backward_scope_depth == 0:
             cls._queue_backward_quantization_update_callback()
 
     @classmethod
@@ -725,7 +725,7 @@ class FP8GlobalStateManager:
         if qstate.backward_quantization_update_callback_task_id != task_id:
             return
         qstate.backward_quantization_update_callback_task_id = None
-        if qstate.backward_quantization_update_scope_depth == 0:
+        if qstate.quantization_backward_scope_depth == 0:
             cls._run_pending_backward_quantization_update()
 
     @classmethod
@@ -880,7 +880,7 @@ class FP8GlobalStateManager:
 
 
 @contextmanager
-def backward_quantization_update_scope() -> None:
+def quantization_backward_scope() -> None:
     """Delay the quantization state update until the end of a logical backward.
 
     Ordinary backward calls update automatically and do not require this scope.
@@ -890,15 +890,15 @@ def backward_quantization_update_scope() -> None:
     outermost scope exits.
     """
     qstate = FP8GlobalStateManager.quantization_state
-    outermost = qstate.backward_quantization_update_scope_depth == 0
+    outermost = qstate.quantization_backward_scope_depth == 0
     task_id = torch._C._current_graph_task_id() if outermost else -1
     if task_id != -1:
         FP8GlobalStateManager._queue_backward_quantization_update_callback(task_id)
-    qstate.backward_quantization_update_scope_depth += 1
+    qstate.quantization_backward_scope_depth += 1
     try:
         yield
     finally:
-        qstate.backward_quantization_update_scope_depth -= 1
+        qstate.quantization_backward_scope_depth -= 1
         if outermost and task_id == -1:
             FP8GlobalStateManager._run_pending_backward_quantization_update()
 

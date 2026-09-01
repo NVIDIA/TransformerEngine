@@ -893,7 +893,7 @@ def test_delayed_scaling_updates_once_per_backward(mode):
 
 
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
-def test_backward_quantization_update_scope_groups_independent_graphs():
+def test_quantization_backward_scope_groups_independent_graphs():
     FP8GlobalStateManager.reset()
     models = [_make_update_test_model(num_layers=2, seed=seed) for seed in (1, 2)]
     inputs = [
@@ -910,7 +910,7 @@ def test_backward_quantization_update_scope_groups_independent_graphs():
     with _UpdateCounter() as counter:
         with te.autocast(enabled=True, recipe=recipe):
             outputs = [_run_update_test_layers(model, x) for model, x in zip(models, inputs)]
-        with te.backward_quantization_update_scope():
+        with te.quantization_backward_scope():
             for output in outputs:
                 output.float().sum().backward()
                 assert counter.backward == 0
@@ -920,7 +920,7 @@ def test_backward_quantization_update_scope_groups_independent_graphs():
 
 
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
-def test_backward_quantization_update_scope_covers_delayed_wgrad():
+def test_quantization_backward_scope_covers_delayed_wgrad():
     FP8GlobalStateManager.reset()
     model = te.Linear(
         _UPDATE_TEST_HIDDEN,
@@ -930,7 +930,7 @@ def test_backward_quantization_update_scope_covers_delayed_wgrad():
     ).cuda()
     recipe = DelayedScaling()
 
-    with _UpdateCounter() as counter, te.backward_quantization_update_scope():
+    with _UpdateCounter() as counter, te.quantization_backward_scope():
         x = torch.randn(
             _UPDATE_TEST_BATCH,
             _UPDATE_TEST_HIDDEN,

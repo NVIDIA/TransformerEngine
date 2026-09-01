@@ -39,7 +39,7 @@ from .utils import (
 )
 
 from .constants import dist_group_type
-from .quantization import FP8GlobalStateManager, autocast, backward_quantization_update_scope
+from .quantization import FP8GlobalStateManager, autocast, quantization_backward_scope
 from .tensor.float8_tensor import Float8Quantizer, Float8Tensor, Float8CurrentScalingQuantizer
 from .tensor.mxfp8_tensor import MXFP8Quantizer
 from .tensor.nvfp4_tensor import NVFP4Quantizer
@@ -401,7 +401,7 @@ class _CheckpointFunction(torch.autograd.Function):
         """Call backward function with activation recomputation."""
         recipe = ctx.fp8_recipe
         update_scope = (
-            backward_quantization_update_scope()
+            quantization_backward_scope()
             if ctx.fp8 and (recipe.delayed() or recipe.custom())
             else nullcontext()
         )
