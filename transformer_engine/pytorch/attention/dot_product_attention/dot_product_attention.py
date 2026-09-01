@@ -1467,11 +1467,10 @@ class DotProductAttention(TransformerEngineBaseModule):
                 "GDN does not accept attention_mask; use cu_seqlens_q with qkv_format='thd' "
                 "for variable-length sequences."
             )
-        if cu_seqlens_kv is not None:
+        if cu_seqlens_kv is not None and cu_seqlens_kv is not cu_seqlens_q:
             raise ValueError(
-                "GDN is self-attention over fully packed sequences and derives sequence "
-                "boundaries from cu_seqlens_q alone; pass only cu_seqlens_q, not "
-                "cu_seqlens_kv."
+                "GDN requires identical Q and KV sequence boundaries. Pass "
+                "cu_seqlens_kv=None or pass the same tensor object as cu_seqlens_q."
             )
         if window_size is None:
             window_size = self.window_size
