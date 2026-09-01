@@ -201,6 +201,15 @@ class LinearFwdArgs:
         if self.wgrad_store is not None:
             # Non-None only when delayed wgrad compute is on (see Linear.forward).
             return "delayed wgrad compute (wgrad_store)"
+        if (
+            self.grad_input_quantizer is not None
+            and self.is_grad_enabled
+            and self.input_requires_grad
+            and not (self.ub_overlap_rs_dgrad or self.ub_bulk_wgrad)
+        ):
+            # A quantized dgrad can't cross the op boundary: grads are packed
+            # one plain Tensor[] slot each (_pack_bwd_result).
+            return "a quantized input grad (fp8_grad=True)"
         if self.cache_weight and self.fp8:
             # The cached workspace is updated in place on the first microbatch,
             # which the functional op (mutates_args=()) can't express. Without
