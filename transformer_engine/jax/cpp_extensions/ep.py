@@ -24,7 +24,7 @@ from jax.sharding import NamedSharding, PartitionSpec
 
 import transformer_engine_jax
 from .base import BasePrimitive, register_primitive
-from ..sharding import global_mesh_resource, get_mesh_axis_size
+from ..sharding import global_mesh_resource, get_mesh_axis_size, normalize_mesh_axes
 from ..version_utils import is_collective_stream_supported
 
 
@@ -139,18 +139,24 @@ def _leading_axis_ok(spec):
     first); all other dims must be replicated.
     """
     gsr = global_mesh_resource()
-    ep_axis = gsr.ep_resource
-    outer_axes = tuple(a for a in (gsr.dp_resource, gsr.fsdp_resource) if a is not None)
-    if len(spec) < 2 or ep_axis is None:
-        return False, ep_axis, outer_axes
+    ep_axes = normalize_mesh_axes(gsr.ep_resource)
+    outer_axes = tuple(
+        a
+        for a in (gsr.dp_resource, gsr.fsdp_resource)
+        if a is not None and a not in ep_axes
+    )
+    if len(spec) < 2 or not ep_axes:
+        return False, gsr.ep_resource, outer_axes
     if any(ax is not None for ax in spec[1:]):
-        return False, ep_axis, outer_axes
+        return False, gsr.ep_resource, outer_axes
     leading = spec[0]
     elts = leading if isinstance(leading, tuple) else (leading,)
-    if ep_axis not in elts:
-        return False, ep_axis, outer_axes
-    allowed = set(outer_axes) | {ep_axis}
-    return all(a in allowed for a in elts), ep_axis, outer_axes
+    actual = set(a for a in elts if a is not None)
+    required_ep = {a for a in ep_axes if get_mesh_axis_size(a) > 1}
+    if not required_ep.issubset(actual):
+        return False, gsr.ep_resource, outer_axes
+    allowed = set(outer_axes) | set(ep_axes)
+    return actual.issubset(allowed), gsr.ep_resource, outer_axes
 
 
 def _ep_outer_axis():
@@ -163,11 +169,16 @@ def _ep_outer_axis():
     we don't pin EP-output specs to a degenerate axis that JAX may collapse.
     """
     gsr = global_mesh_resource()
-    if gsr.dp_resource is not None and get_mesh_axis_size(gsr.dp_resource) > 1:
-        return gsr.dp_resource
-    if gsr.fsdp_resource is not None and get_mesh_axis_size(gsr.fsdp_resource) > 1:
-        return gsr.fsdp_resource
-    return gsr.dp_resource or gsr.fsdp_resource
+    ep_axes = set(normalize_mesh_axes(gsr.ep_resource))
+    candidates = tuple(
+        axis
+        for axis in (gsr.dp_resource, gsr.fsdp_resource)
+        if axis is not None and axis not in ep_axes
+    )
+    for axis in candidates:
+        if get_mesh_axis_size(axis) > 1:
+            return axis
+    return candidates[0] if candidates else None
 
 
 def _ep_leading_dims(is_outer):
@@ -184,9 +195,10 @@ def _ep_output_spec(*trailing):
     DP is set (compound leading axis on a single dim), else ``("ep",*trailing)``."""
     gsr = global_mesh_resource()
     outer = _ep_outer_axis()
-    if outer is None:
-        return PartitionSpec(gsr.ep_resource, *trailing)
-    return PartitionSpec((outer, gsr.ep_resource), *trailing)
+    ep_axes = normalize_mesh_axes(gsr.ep_resource)
+    leading_axes = ep_axes if outer is None else (outer, *ep_axes)
+    leading = leading_axes[0] if len(leading_axes) == 1 else leading_axes
+    return PartitionSpec(leading, *trailing)
 
 
 def _ep_spec_ok(spec, trailing_count):
@@ -195,7 +207,7 @@ def _ep_spec_ok(spec, trailing_count):
     so the leading entry is normalized to a set of named axes before comparing.
     """
     gsr = global_mesh_resource()
-    ep_axis = gsr.ep_resource
+    ep_axes = normalize_mesh_axes(gsr.ep_resource)
     outer = _ep_outer_axis()
     if len(spec) != 1 + trailing_count:
         return False
@@ -204,8 +216,11 @@ def _ep_spec_ok(spec, trailing_count):
     leading = spec[0]
     elts = leading if isinstance(leading, tuple) else (leading,)
     actual = frozenset(a for a in elts if a is not None)
-    expected = {ep_axis} if outer is None else {ep_axis, outer}
-    return actual <= expected
+    expected = set(ep_axes)
+    if outer is not None:
+        expected.add(outer)
+    required = {axis for axis in expected if get_mesh_axis_size(axis) > 1}
+    return required.issubset(actual) and actual.issubset(expected)
 
 
 # ── ep_prepare ──────────────────────────────────────────────────────────────
