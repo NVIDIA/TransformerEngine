@@ -86,6 +86,76 @@ _alibi_cache = {
     "_alibi_bias_require_update": False,
 }
 
+# Sequence-ID validation synchronizes once to report malformed policy metadata. Share
+# successful validations across DPA layers, and retain only a small number of recent
+# policy sets so dynamically constructed batches do not grow the cache without bound.
+_THD_POLICY_VALIDATION_CACHE_LIMIT = 64
+_thd_policy_validation_cache = []
+
+
+def _get_thd_policy_tensor_version(tensor: torch.Tensor) -> Optional[int]:
+    """Return the mutation version when the tensor tracks one."""
+    try:
+        return tensor._version
+    except RuntimeError:
+        return None
+
+
+def _validate_thd_policy_sequence_ids(policies: List[Dict[str, Any]], batch_size: int) -> None:
+    """Validate static mixed-THD sequence IDs outside CUDA graph capture."""
+    sequence_id_tensors = tuple(policy["sequence_ids"] for policy in policies)
+    sequence_id_versions = tuple(
+        _get_thd_policy_tensor_version(sequence_ids) for sequence_ids in sequence_id_tensors
+    )
+
+    for cache_index, (cached_batch_size, cached_tensors, cached_versions) in enumerate(
+        _thd_policy_validation_cache
+    ):
+        if (
+            cached_batch_size == batch_size
+            and sequence_id_versions == cached_versions
+            and len(sequence_id_tensors) == len(cached_tensors)
+            and all(
+                sequence_ids is cached_sequence_ids
+                for sequence_ids, cached_sequence_ids in zip(sequence_id_tensors, cached_tensors)
+            )
+        ):
+            _thd_policy_validation_cache.append(_thd_policy_validation_cache.pop(cache_index))
+            return
+
+    if is_graph_capturing():
+        raise RuntimeError(
+            "Mixed THD policy sequence_ids must be validated by an eager warm-up call "
+            "before CUDA graph capture."
+        )
+
+    order_checks = [
+        sequence_ids[1:] > sequence_ids[:-1]
+        for sequence_ids in sequence_id_tensors
+        if sequence_ids.numel() > 1
+    ]
+    if order_checks:
+        strictly_ascending = torch.cat(order_checks).all()
+    else:
+        strictly_ascending = torch.ones((), dtype=torch.bool, device=sequence_id_tensors[0].device)
+    all_sequence_ids = torch.cat(
+        [sequence_ids.to(dtype=torch.int64) for sequence_ids in sequence_id_tensors]
+    )
+    expected_sequence_ids = torch.arange(
+        batch_size, dtype=torch.int64, device=all_sequence_ids.device
+    )
+    exact_coverage = torch.all(torch.sort(all_sequence_ids).values == expected_sequence_ids)
+    valid_order, valid_coverage = torch.stack((strictly_ascending, exact_coverage)).tolist()
+
+    if not valid_order:
+        raise ValueError("Mixed THD policy sequence_ids must be strictly ascending.")
+    if not valid_coverage:
+        raise ValueError("Mixed THD policies must assign every sequence exactly once.")
+
+    _thd_policy_validation_cache.append((batch_size, sequence_id_tensors, sequence_id_versions))
+    if len(_thd_policy_validation_cache) > _THD_POLICY_VALIDATION_CACHE_LIMIT:
+        _thd_policy_validation_cache.pop(0)
+
 
 class _IdentityWithMaskedGradient(torch.autograd.Function):
     """Preserve tensor storage in forward and zero unselected backward lanes."""
@@ -1951,7 +2021,9 @@ class DotProductAttention(TransformerEngineBaseModule):
             are supplied as a one-dimensional, strictly ascending CUDA integer tensor;
             all policy tensors must be disjoint and together contain every sequence
             exactly once. A list may contain multiple policies with the same mask type
-            and different windows. Mixed THD dispatch is intentionally padded-first:
+            and different windows. Policy IDs are validated before their first use and
+            must remain immutable during CUDA graph capture. Context parallelism is not
+            supported. Mixed THD dispatch is intentionally padded-first:
             Transformer Engine queries its ordinary backend selector for every policy and
             preserves the original packed layout whenever an inter-sequence-padding backend
             is available. This is a capability check, not a performance comparison. If no
@@ -2231,6 +2303,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                         "Mixed THD policies must assign every sequence exactly once by count: "
                         f"got {assigned_sequence_count} assignments for {batch_size} sequences."
                     )
+                _validate_thd_policy_sequence_ids(thd_mask_policies, batch_size)
 
             # update KV cache and retrieve saved tokens from cache for inference
             if inference_params is not None:
@@ -2341,6 +2414,8 @@ class DotProductAttention(TransformerEngineBaseModule):
                 for group in self.cp_group:
                     cp_size *= get_distributed_world_size(group)
             context_parallel = cp_size > 1
+            if thd_mask_policies is not None and context_parallel:
+                raise ValueError("Mixed THD policies do not support context parallelism.")
             if q_format in ["sbhd", "bshd"]:
                 max_seqlen_q *= cp_size
                 if cu_seqlens_q is None:

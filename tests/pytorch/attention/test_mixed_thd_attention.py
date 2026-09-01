@@ -643,6 +643,10 @@ def test_thd_mask_types_support_cuda_graph_capture(monkeypatch):
     (
         ("policy_dtype", "one-dimensional int32 or int64"),
         ("missing_sequence", "assign every sequence exactly once by count"),
+        ("sequence_order", "strictly ascending"),
+        ("sequence_duplicate", "strictly ascending"),
+        ("sequence_overlap", "assign every sequence exactly once"),
+        ("sequence_range", "assign every sequence exactly once"),
         ("mask_type", "only padding mask types"),
         ("policy_keys", "must contain exactly"),
         ("scalar_mask", "do not also pass"),
@@ -664,6 +668,14 @@ def test_thd_mask_types_reject_invalid_inputs(invalid_case, error):
         policies[0]["sequence_ids"] = torch.tensor((0,), dtype=torch.float32, device="cuda")
     elif invalid_case == "missing_sequence":
         policies = _make_policies((("padding", (0,), (-1, -1)),))
+    elif invalid_case == "sequence_order":
+        policies = _make_policies((("padding", (1, 0), (-1, -1)),))
+    elif invalid_case == "sequence_duplicate":
+        policies = _make_policies((("padding", (0, 0), (-1, -1)),))
+    elif invalid_case == "sequence_overlap":
+        policies = _make_policies((("padding", (0,), (-1, -1)), ("padding_causal", (0,), (-1, 0))))
+    elif invalid_case == "sequence_range":
+        policies = _make_policies((("padding", (0, 2), (-1, -1)),))
     elif invalid_case == "mask_type":
         policies[0]["mask_type"] = "no_mask"
     elif invalid_case == "policy_keys":
@@ -686,6 +698,35 @@ def test_thd_mask_types_reject_invalid_inputs(invalid_case, error):
             attn_mask_type=scalar_mask_type,
             attn_mask_type_and_window_size_per_seq_policies=policies,
             thd_attention_policy_dispatch=policy_dispatch,
+        )
+
+
+def test_thd_mask_types_reject_context_parallelism(monkeypatch):
+    """Mixed THD policies must fail before entering an unsupported CP path."""
+    query = torch.randn(4, NUM_HEADS, HEAD_DIM, device="cuda", dtype=torch.float16)
+    cu_seqlens = torch.tensor((0, 2, 4), dtype=torch.int32, device="cuda")
+    attention = make_dot_product_attention(torch.float16, MODEL_CONFIG, "thd")
+    attention.cp_group = [object()]
+    monkeypatch.setattr(dpa_module, "get_distributed_world_size", lambda _group: 2)
+    monkeypatch.setattr(
+        attention,
+        "_forward_thd_mask_types",
+        lambda *_args, **_kwargs: query.new_zeros((query.shape[0], NUM_HEADS * HEAD_DIM)),
+    )
+
+    with pytest.raises(ValueError, match="do not support context parallelism"):
+        attention(
+            query,
+            query,
+            query,
+            qkv_format="thd",
+            cu_seqlens_q=cu_seqlens,
+            cu_seqlens_kv=cu_seqlens,
+            max_seqlen_q=2,
+            max_seqlen_kv=2,
+            attn_mask_type_and_window_size_per_seq_policies=_make_policies(
+                (("padding", (0,), (-1, -1)), ("padding_causal", (1,), (-1, 0)))
+            ),
         )
 
 
