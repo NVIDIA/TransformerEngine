@@ -407,8 +407,7 @@ __global__ static void group_rht_gemm_device(
     } else if (is_mma_warp) {
       mma.accumulate_ = UMMA::ScaleOut::Zero;
 
-      tmem_allocator.allocate(cute::TMEM::Sm100TmemCapacityColumns,
-                              &shared_storage.tmem_base_ptr);
+      tmem_allocator.allocate(cute::TMEM::Sm100TmemCapacityColumns, &shared_storage.tmem_base_ptr);
       __syncwarp();
       tmem_allocation_result_barrier.arrive();
       uint32_t tmem_base_ptr = shared_storage.tmem_base_ptr;
