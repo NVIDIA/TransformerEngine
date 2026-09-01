@@ -5,7 +5,7 @@
 """Multi-head Attention."""
 import os
 import collections
-from typing import Any, Callable, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import torch
 
 from transformer_engine.pytorch.quantization import FP8GlobalStateManager, QuantizerRole
@@ -736,6 +736,7 @@ class MultiheadAttention(torch.nn.Module):
         max_seqlen_kv: Optional[int] = None,
         fast_zero_fill: bool = True,
         pad_between_seqs: Optional[bool] = None,
+        thd_attention_policies: Optional[List[Dict[str, Any]]] = None,
     ) -> Tuple[Union[torch.Tensor, None], ...]:
         r"""
         Forward propagation for MultiheadAttention layer.
@@ -772,6 +773,10 @@ class MultiheadAttention(torch.nn.Module):
                               or bottom right (`True`) corner of the softmax matrix in the encoder.
                               If `None`, it will be set to `False` for `attn_mask_type` =
                               {`causal`, `padding_causal`} and `True` for other mask types.
+        thd_attention_policies: Optional[List[Dict[str, Any]]], default = None
+                              Per-sequence policies for packed THD attention. Passed through to
+                              :class:`DotProductAttention`; do not also pass :attr:`attn_mask_type`
+                              or :attr:`window_size`.
         encoder_output : Optional[torch.Tensor], default = None
              Output of the encoder block to be fed into the decoder block if using
              ``layer_type="decoder"``.
@@ -831,23 +836,28 @@ class MultiheadAttention(torch.nn.Module):
         """
         # hidden_states: [sq, b, h]
 
-        if attn_mask_type is None:
-            attn_mask_type = self.attn_mask_type
-        if window_size is None:
-            window_size = self.window_size
+        if thd_attention_policies is None:
+            if attn_mask_type is None:
+                attn_mask_type = self.attn_mask_type
+            if window_size is None:
+                window_size = self.window_size
 
-        window_size = dpa_utils.check_set_window_size(attn_mask_type, window_size)
-        if bottom_right_diagonal is None:
-            bottom_right_diagonal = self.bottom_right_diagonal
-        if attn_mask_type in {"causal", "padding_causal"}:
-            bottom_right_diagonal = False
-        if bottom_right_diagonal is None or attn_mask_type in {
-            "causal_bottom_right",
-            "padding_causal_bottom_right",
-        }:
-            bottom_right_diagonal = True
+            window_size = dpa_utils.check_set_window_size(attn_mask_type, window_size)
+            if bottom_right_diagonal is None:
+                bottom_right_diagonal = self.bottom_right_diagonal
+            if attn_mask_type in {"causal", "padding_causal"}:
+                bottom_right_diagonal = False
+            if bottom_right_diagonal is None or attn_mask_type in {
+                "causal_bottom_right",
+                "padding_causal_bottom_right",
+            }:
+                bottom_right_diagonal = True
 
-        if "padding" in attn_mask_type and attention_mask is not None:
+        if (
+            thd_attention_policies is None
+            and "padding" in attn_mask_type
+            and attention_mask is not None
+        ):
             for mask in attention_mask:
                 assert mask.dtype == torch.bool, "Attention mask must be in boolean type!"
 
@@ -1211,6 +1221,7 @@ class MultiheadAttention(torch.nn.Module):
             attn_mask_type=attn_mask_type,
             window_size=window_size,
             bottom_right_diagonal=bottom_right_diagonal,
+            thd_attention_policies=thd_attention_policies,
             checkpoint_core_attention=checkpoint_core_attention,
             core_attention_bias_type=core_attention_bias_type,
             core_attention_bias=core_attention_bias,

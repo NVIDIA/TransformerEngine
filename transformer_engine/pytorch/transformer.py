@@ -6,7 +6,7 @@
 import os
 import warnings
 from contextlib import nullcontext
-from typing import Any, Callable, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import torch
 
@@ -658,6 +658,7 @@ class TransformerLayer(torch.nn.Module):
         max_seqlen_kv: Optional[int] = None,
         fast_zero_fill: bool = True,
         pad_between_seqs: Optional[bool] = None,
+        thd_attention_policies: Optional[List[Dict[str, Any]]] = None,
     ) -> torch.Tensor:
         r"""
         Transformer Layer: attention block and a feedforward network (MLP)
@@ -692,6 +693,10 @@ class TransformerLayer(torch.nn.Module):
             or bottom right (`True`) corner of the softmax matrix in the encoder.
             If `None`, it will be set to `False` for `self_attn_mask_type` =
             {`causal`, `padding_causal`} and `True` for other mask types.
+        thd_attention_policies: Optional[List[Dict[str, Any]]], default = None
+            Per-sequence policies for packed THD self-attention. Passed through to
+            :class:`MultiheadAttention`; do not also pass :attr:`self_attn_mask_type`
+            or :attr:`window_size`.
         encoder_output : Optional[torch.Tensor], default = None
             Output of the encoder block to be fed into the decoder block if using
             :attr:`layer_type` = ``"decoder"``.
@@ -775,11 +780,22 @@ class TransformerLayer(torch.nn.Module):
             i.e. :attr:`qkv_format` = ``'thd'``.
         """
 
-        if self_attn_mask_type is None:
-            self_attn_mask_type = self.self_attn_mask_type
-        if window_size is None:
-            window_size = self.window_size
-        window_size = dpa_utils.check_set_window_size(self_attn_mask_type, window_size)
+        if thd_attention_policies is None:
+            if self_attn_mask_type is None:
+                self_attn_mask_type = self.self_attn_mask_type
+            if window_size is None:
+                window_size = self.window_size
+            window_size = dpa_utils.check_set_window_size(self_attn_mask_type, window_size)
+
+            if bottom_right_diagonal is None:
+                bottom_right_diagonal = self.bottom_right_diagonal
+            if self_attn_mask_type in {"causal", "padding_causal"}:
+                bottom_right_diagonal = False
+            if bottom_right_diagonal is None or self_attn_mask_type in {
+                "causal_bottom_right",
+                "padding_causal_bottom_right",
+            }:
+                bottom_right_diagonal = True
 
         if enc_dec_attn_mask_type is None:
             enc_dec_attn_mask_type = self.enc_dec_attn_mask_type
@@ -788,16 +804,6 @@ class TransformerLayer(torch.nn.Module):
         enc_dec_window_size = dpa_utils.check_set_window_size(
             enc_dec_attn_mask_type, enc_dec_window_size
         )
-
-        if bottom_right_diagonal is None:
-            bottom_right_diagonal = self.bottom_right_diagonal
-        if self_attn_mask_type in {"causal", "padding_causal"}:
-            bottom_right_diagonal = False
-        if bottom_right_diagonal is None or self_attn_mask_type in {
-            "causal_bottom_right",
-            "padding_causal_bottom_right",
-        }:
-            bottom_right_diagonal = True
 
         if enc_dec_bottom_right_diagonal is None:
             enc_dec_bottom_right_diagonal = self.enc_dec_bottom_right_diagonal
@@ -809,7 +815,7 @@ class TransformerLayer(torch.nn.Module):
         }:
             enc_dec_bottom_right_diagonal = True
 
-        if self_attn_mask_type not in AttnMaskTypes:
+        if thd_attention_policies is None and self_attn_mask_type not in AttnMaskTypes:
             raise ValueError(
                 f"self_attn_mask_type {self_attn_mask_type!r} is not supported. "
                 f"Supported types are: {', '.join(repr(t) for t in AttnMaskTypes)}"
@@ -833,7 +839,8 @@ class TransformerLayer(torch.nn.Module):
                 )
 
         if (
-            "padding" in self_attn_mask_type or self_attn_mask_type == "arbitrary"
+            thd_attention_policies is None
+            and ("padding" in self_attn_mask_type or self_attn_mask_type == "arbitrary")
         ) and attention_mask is not None:
             if not all(attention_mask[i].dtype == torch.bool for i in range(len(attention_mask))):
                 non_bool_dtypes = [
@@ -872,6 +879,7 @@ class TransformerLayer(torch.nn.Module):
             attn_mask_type=self_attn_mask_type,
             window_size=window_size,
             bottom_right_diagonal=bottom_right_diagonal,
+            thd_attention_policies=thd_attention_policies,
             inference_params=inference_params,
             is_first_microbatch=is_first_microbatch,
             checkpoint_core_attention=checkpoint_core_attention,

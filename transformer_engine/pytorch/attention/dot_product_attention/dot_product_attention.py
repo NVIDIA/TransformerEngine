@@ -1867,7 +1867,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         qkv_layer: Optional[torch.Tensor] = None,
         kv_layer: Optional[torch.Tensor] = None,
         qkv_interleave_dim: int = -3,
-        attn_mask_type_and_window_size_per_seq_policies: Optional[List[Dict[str, Any]]] = None,
+        thd_attention_policies: Optional[List[Dict[str, Any]]] = None,
         thd_attention_policy_dispatch: str = "auto",
     ) -> torch.Tensor:
         r"""
@@ -2108,7 +2108,7 @@ class DotProductAttention(TransformerEngineBaseModule):
             interleave sits; must be -3 (e.g. ``bs3hd``) or -2 (e.g. ``bsh3d``,
             Megatron-style). This is an explicit knob rather than shape inference,
             since e.g. ``h == 3`` would make the shapes ambiguous.
-        attn_mask_type_and_window_size_per_seq_policies: Optional[List[Dict[str, Any]]],
+        thd_attention_policies: Optional[List[Dict[str, Any]]],
             default = None
             Per-sequence policies for packed THD attention. Each list item must contain
             ``"sequence_ids"``, ``"mask_type"``, and ``"window_size"``. Sequence IDs
@@ -2135,14 +2135,9 @@ class DotProductAttention(TransformerEngineBaseModule):
             raise ValueError("thd_attention_policy_dispatch must be either 'auto' or 'grouped'.")
 
         thd_mask_policies = None
-        if attn_mask_type_and_window_size_per_seq_policies is not None:
-            if (
-                not isinstance(attn_mask_type_and_window_size_per_seq_policies, list)
-                or not attn_mask_type_and_window_size_per_seq_policies
-            ):
-                raise ValueError(
-                    "attn_mask_type_and_window_size_per_seq_policies must be a non-empty list."
-                )
+        if thd_attention_policies is not None:
+            if not isinstance(thd_attention_policies, list) or not thd_attention_policies:
+                raise ValueError("thd_attention_policies must be a non-empty list.")
             if attn_mask_type is not None or window_size is not None:
                 raise ValueError(
                     "Mixed THD policies specify mask_type and window_size per policy; do not "
@@ -2151,7 +2146,7 @@ class DotProductAttention(TransformerEngineBaseModule):
 
             required_policy_keys = {"sequence_ids", "mask_type", "window_size"}
             thd_mask_policies = []
-            for policy_index, policy in enumerate(attn_mask_type_and_window_size_per_seq_policies):
+            for policy_index, policy in enumerate(thd_attention_policies):
                 if not isinstance(policy, dict):
                     raise ValueError(f"Mixed THD policy {policy_index} must be a dictionary.")
                 if set(policy) != required_policy_keys:

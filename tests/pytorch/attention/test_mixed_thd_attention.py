@@ -7,7 +7,7 @@
 import pytest
 import torch
 
-from transformer_engine.pytorch import DotProductAttention
+from transformer_engine.pytorch import DotProductAttention, MultiheadAttention, TransformerLayer
 from transformer_engine.pytorch.attention.dot_product_attention import (
     dot_product_attention as dpa_module,
 )
@@ -49,6 +49,54 @@ def _make_policies(policy_specs):
         }
         for mask_type, sequence_ids, window_size in policy_specs
     ]
+
+
+@pytest.mark.parametrize("module_type", ("multihead_attention", "transformer_layer"))
+def test_thd_attention_policies_plumbed_through_attention_layers(module_type):
+    """MHA and TransformerLayer should pass mixed THD policies to DPA."""
+    dtype = torch.float16
+    cu_seqlens = _make_cu_seqlens((7, 3, 5, 4))
+    policies = _make_policies((("padding", (0, 2), (-1, -1)), ("padding_causal", (1, 3), (-1, 0))))
+    hidden_states = torch.randn(
+        19,
+        MODEL_CONFIG.hidden_size,
+        dtype=dtype,
+        device="cuda",
+    )
+    if module_type == "multihead_attention":
+        module = MultiheadAttention(
+            MODEL_CONFIG.hidden_size,
+            MODEL_CONFIG.num_heads,
+            kv_channels=MODEL_CONFIG.head_dim_qk,
+            attention_dropout=0.0,
+            attn_mask_type="padding",
+            qkv_format="thd",
+            params_dtype=dtype,
+        ).to(device="cuda")
+    else:
+        module = TransformerLayer(
+            MODEL_CONFIG.hidden_size,
+            4 * MODEL_CONFIG.hidden_size,
+            MODEL_CONFIG.num_heads,
+            kv_channels=MODEL_CONFIG.head_dim_qk,
+            hidden_dropout=0.0,
+            attention_dropout=0.0,
+            self_attn_mask_type="padding",
+            attn_input_format="thd",
+            params_dtype=dtype,
+        ).to(device="cuda")
+    module.eval()
+
+    with torch.inference_mode():
+        output = module(
+            hidden_states,
+            cu_seqlens_q=cu_seqlens,
+            cu_seqlens_kv=cu_seqlens,
+            max_seqlen_q=7,
+            max_seqlen_kv=7,
+            thd_attention_policies=policies,
+        )
+    assert output.shape == hidden_states.shape
 
 
 def _per_sequence_scalar_reference(
@@ -150,7 +198,7 @@ def test_thd_mask_types_match_scalar_forward_and_backward(policy_specs, dtype):
         cu_seqlens_kv=cu_seqlens,
         max_seqlen_q=7,
         max_seqlen_kv=7,
-        attn_mask_type_and_window_size_per_seq_policies=policies,
+        thd_attention_policies=policies,
     )
     reference_output = _per_sequence_scalar_reference(
         attention,
@@ -225,7 +273,7 @@ def test_thd_mask_types_compose_with_existing_inter_sequence_padding():
         cu_seqlens_kv_padded=cu_seqlens_padded,
         max_seqlen_q=7,
         max_seqlen_kv=7,
-        attn_mask_type_and_window_size_per_seq_policies=policies,
+        thd_attention_policies=policies,
     )
     reference_output = _per_sequence_scalar_reference(
         attention,
@@ -285,7 +333,7 @@ def test_thd_mask_types_support_cross_attention_and_per_policy_windows():
         cu_seqlens_kv=cu_seqlens_kv,
         max_seqlen_q=5,
         max_seqlen_kv=7,
-        attn_mask_type_and_window_size_per_seq_policies=policies,
+        thd_attention_policies=policies,
     )
     reference_output = _per_sequence_scalar_reference(
         attention,
@@ -351,7 +399,7 @@ def test_thd_mask_types_support_repeated_masks_and_policy_order(policy_specs):
         cu_seqlens_kv=cu_seqlens,
         max_seqlen_q=7,
         max_seqlen_kv=7,
-        attn_mask_type_and_window_size_per_seq_policies=policies,
+        thd_attention_policies=policies,
     )
     reference_output = _per_sequence_scalar_reference(
         attention,
@@ -465,7 +513,7 @@ def test_thd_mask_type_runtime_dispatch_caches_backend_selection(monkeypatch):
             cu_seqlens_kv=cu_seqlens,
             max_seqlen_q=7,
             max_seqlen_kv=7,
-            attn_mask_type_and_window_size_per_seq_policies=policies,
+            thd_attention_policies=policies,
         )
 
     with torch.inference_mode():
@@ -594,7 +642,7 @@ def test_thd_mask_type_grouped_override_matches_auto_dispatch():
         "attention_mask": None,
         "attn_mask_type": None,
         "window_size": None,
-        "attn_mask_type_and_window_size_per_seq_policies": policies,
+        "thd_attention_policies": policies,
     }
     runner_kwargs = {
         "dtype": torch.float16,
@@ -682,7 +730,7 @@ def test_thd_mask_types_support_cuda_graph_capture(monkeypatch):
             cu_seqlens_kv=cu_seqlens,
             max_seqlen_q=7,
             max_seqlen_kv=7,
-            attn_mask_type_and_window_size_per_seq_policies=policies,
+            thd_attention_policies=policies,
         )
 
     warmup_stream = torch.cuda.Stream()
@@ -759,7 +807,7 @@ def test_thd_mask_types_reject_invalid_inputs(invalid_case, error):
             max_seqlen_q=2,
             max_seqlen_kv=2,
             attn_mask_type=scalar_mask_type,
-            attn_mask_type_and_window_size_per_seq_policies=policies,
+            thd_attention_policies=policies,
             thd_attention_policy_dispatch=policy_dispatch,
         )
 
@@ -787,7 +835,7 @@ def test_thd_mask_types_reject_context_parallelism(monkeypatch):
             cu_seqlens_kv=cu_seqlens,
             max_seqlen_q=2,
             max_seqlen_kv=2,
-            attn_mask_type_and_window_size_per_seq_policies=_make_policies(
+            thd_attention_policies=_make_policies(
                 (("padding", (0,), (-1, -1)), ("padding_causal", (1,), (-1, 0)))
             ),
         )
@@ -812,7 +860,7 @@ def test_thd_mask_types_empty_batch_preserves_input_gradients():
         cu_seqlens_kv=cu_seqlens,
         max_seqlen_q=0,
         max_seqlen_kv=0,
-        attn_mask_type_and_window_size_per_seq_policies=[
+        thd_attention_policies=[
             {
                 "sequence_ids": torch.empty(0, dtype=torch.int64, device="cuda"),
                 "mask_type": "padding",
