@@ -21,21 +21,30 @@ namespace tuned_1D_scaling_common {
 
 #if FP4_TYPE_SUPPORTED
 
-enum class KernelType : int {
-  NON_GROUPED = 0,
-  GROUPED = 1
-};
-
-template <KernelType kernel_type>
-struct KernelTraits {
+struct DefaultScalingConfig {
   static constexpr int CHUNK_DIM_Y = 128;
-  static constexpr int CHUNK_DIM_X = (kernel_type == KernelType::GROUPED) ? 256 : 128;
+  static constexpr int CHUNK_DIM_X = 128;
   static constexpr int PREFETCH_STAGES = 1;
-
   static constexpr int THREADS_NUM = 128;
   static constexpr int ELTS_PER_THREAD = 16;
   static constexpr int TILE_DIM_Y = 64;
   static constexpr int TILE_DIM_X = 64;
+};
+
+struct DefaultGroupedScalingConfig : DefaultScalingConfig {
+  static constexpr int CHUNK_DIM_X = 256;
+};
+
+template <typename Config>
+struct KernelTraits {
+  static constexpr int CHUNK_DIM_Y = Config::CHUNK_DIM_Y;
+  static constexpr int CHUNK_DIM_X = Config::CHUNK_DIM_X;
+  static constexpr int PREFETCH_STAGES = Config::PREFETCH_STAGES;
+
+  static constexpr int THREADS_NUM = Config::THREADS_NUM;
+  static constexpr int ELTS_PER_THREAD = Config::ELTS_PER_THREAD;
+  static constexpr int TILE_DIM_Y = Config::TILE_DIM_Y;
+  static constexpr int TILE_DIM_X = Config::TILE_DIM_X;
 
   static_assert(ELTS_PER_THREAD == NVFP4_SCALE_DIM, "Hardcoded and fixed parameter\0");
   static_assert(THREADS_NUM * ELTS_PER_THREAD <= TILE_DIM_Y * TILE_DIM_X,
@@ -61,6 +70,10 @@ struct KernelTraits {
   static constexpr int STAGES_Y = TILES_Y;
   static constexpr int STAGES_X = TILES_X;
   static constexpr int STAGES = STAGES_Y * STAGES_X;
+
+  static_assert(PREFETCH_STAGES > 0, "At least one prefetch stage is required");
+  static_assert(PREFETCH_STAGES <= STAGES,
+                "The number of prefetch stages cannot exceed the number of compute stages");
 
   static constexpr int BUFFS_NUM = PREFETCH_STAGES + 1;
   static constexpr int BUFFS_NUM_IN = BUFFS_NUM;
@@ -136,8 +149,8 @@ struct KernelTraits {
   using ScalesTypeTr2D = nvfp4_scale_t[CHUNK_DIM_X][SCALES_PER_CHUNK_Y];
 };
 
-using NonGroupedKernelTraits = KernelTraits<KernelType::NON_GROUPED>;
-using GroupedKernelTraits = KernelTraits<KernelType::GROUPED>;
+using NonGroupedKernelTraits = KernelTraits<DefaultScalingConfig>;
+using GroupedKernelTraits = KernelTraits<DefaultGroupedScalingConfig>;
 
 template <bool USE_FAST_MATH>
 struct ScalingCoefficientType {};

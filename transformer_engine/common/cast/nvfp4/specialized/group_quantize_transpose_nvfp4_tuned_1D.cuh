@@ -41,37 +41,50 @@ using namespace dispatch::common;
 using tuned_1D_scaling_common::colwise_scaling;
 using tuned_1D_scaling_common::rowwise_scaling;
 
-template <ShapeRepresentation SHAPE_REP>
-struct TunableConfig {
-  static constexpr bool PERSISTENT = true;
-  static constexpr int BLOCKS_PER_SM = 128;
-  static_assert(BLOCKS_PER_SM > 0,
-                "STATIC_PERSISTENT_BLOCKS_PER_SM must be greater than zero in persistent mode.");
+struct DefaultCastConfig : tuned_1D_scaling_common::DefaultGroupedScalingConfig {
+  static constexpr int STATIC_PERSISTENT_BLOCKS_PER_SM = 128;
 };
 
+template <ShapeRepresentation SHAPE_REP>
+struct CastConfig;
+
+// Keep every layout independently specializable while sharing the current defaults.
 template <>
-struct TunableConfig<ShapeRepresentation::SAME_BOTH_DIMS> {
-  static constexpr bool PERSISTENT = false;
-  static constexpr int BLOCKS_PER_SM = 1;
+struct CastConfig<ShapeRepresentation::SAME_BOTH_DIMS> : DefaultCastConfig {};
+
+template <>
+struct CastConfig<ShapeRepresentation::VARYING_FIRST_DIM> : DefaultCastConfig {};
+
+template <>
+struct CastConfig<ShapeRepresentation::VARYING_LAST_DIM> : DefaultCastConfig {};
+
+template <>
+struct CastConfig<ShapeRepresentation::VARYING_BOTH_DIMS> : DefaultCastConfig {};
+
+template <ShapeRepresentation SHAPE_REP, typename Config>
+struct CastTraitsImpl : tuned_1D_scaling_common::KernelTraits<Config> {
+  static constexpr ShapeRepresentation SHAPE_REPRESENTATION = SHAPE_REP;
+  static constexpr int STATIC_PERSISTENT_BLOCKS_PER_SM =
+      Config::STATIC_PERSISTENT_BLOCKS_PER_SM;
+
+  static_assert(STATIC_PERSISTENT_BLOCKS_PER_SM > 0,
+                "STATIC_PERSISTENT_BLOCKS_PER_SM must be greater than zero.");
 };
+
+template <ShapeRepresentation SHAPE_REP>
+struct CastTraits : CastTraitsImpl<SHAPE_REP, CastConfig<SHAPE_REP>> {};
 
 using RNG_t = typename transformer_engine::curanddx::detail::philox4x32_native_state<
     NVTE_BUILD_NUM_PHILOX_ROUNDS>;
 
-using ScalingTraits = tuned_1D_scaling_common::GroupedKernelTraits;
-using IType = typename ScalingTraits::IType;
-using IType3D = typename ScalingTraits::IType3D;
-using OType2x3D = typename ScalingTraits::OType2x3D;
-using OType2xt3D = typename ScalingTraits::OType2xt3D;
-using ScalesType2D = typename ScalingTraits::ScalesType2D;
-using ScalesTypeTr2D = typename ScalingTraits::ScalesTypeTr2D;
-
 template <ShapeRepresentation SHAPE_REP>
 struct WorkProvider {
+  using ActiveCastTraits = CastTraits<SHAPE_REP>;
+
   static constexpr bool FIXED_X_DIM = SHAPE_REP == ShapeRepresentation::SAME_BOTH_DIMS ||
                                       SHAPE_REP == ShapeRepresentation::VARYING_FIRST_DIM;
-  static constexpr int CHUNK_DIM_Y = ScalingTraits::CHUNK_DIM_Y;
-  static constexpr int CHUNK_DIM_X = ScalingTraits::CHUNK_DIM_X;
+  static constexpr int CHUNK_DIM_Y = ActiveCastTraits::CHUNK_DIM_Y;
+  static constexpr int CHUNK_DIM_X = ActiveCastTraits::CHUNK_DIM_X;
 
   TensorMetadata metadata_;
   int tensor_id_;
@@ -229,7 +242,7 @@ struct WorkProvider {
 
 template <ShapeRepresentation SHAPE_REP, bool USE_STOCHASTIC_ROUNDING, bool USE_FAST_MATH,
           bool RETURN_TRANSPOSE>
-__global__ void __launch_bounds__(ScalingTraits::THREADS_NUM)
+__global__ void __launch_bounds__(CastTraits<SHAPE_REP>::THREADS_NUM)
 group_quantize_transpose_nvfp4_tuned_1D_kernel(
     const size_t num_tensors,
     nvfp4_scale_t *const scales_ptr,
@@ -246,6 +259,14 @@ group_quantize_transpose_nvfp4_tuned_1D_kernel(
     const size_t common_blocks_Y_per_tensor,
     const size_t *rng_state) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+  using ScalingTraits = CastTraits<SHAPE_REP>;
+  using IType = typename ScalingTraits::IType;
+  using IType3D = typename ScalingTraits::IType3D;
+  using OType2x3D = typename ScalingTraits::OType2x3D;
+  using OType2xt3D = typename ScalingTraits::OType2xt3D;
+  using ScalesType2D = typename ScalingTraits::ScalesType2D;
+  using ScalesTypeTr2D = typename ScalingTraits::ScalesTypeTr2D;
+
   if (noop != nullptr && noop[0] == 1.0f) {
     return;
   }
@@ -549,6 +570,7 @@ inline void launch_group_quantize_transpose_kernel(
     const size_t amax_rowwise_numel, const size_t amax_colwise_numel,
     const size_t work_blocks_X, const size_t work_blocks_Y, const size_t *const rng_state,
     const int dshmem_size, cudaStream_t stream) {
+  using ScalingTraits = CastTraits<SHAPE_REP>;
   constexpr int CHUNK_DIM_Y = ScalingTraits::CHUNK_DIM_Y;
   constexpr int THREADS_NUM = ScalingTraits::THREADS_NUM;
 
@@ -596,7 +618,8 @@ inline void launch_group_quantize_transpose_kernel(
         amax_rowwise_numel, amax_colwise_numel, 0, cols, scale_stride, 0, 0, rng_state);
   } else {
     const size_t total_work_blocks = work_blocks_X * work_blocks_Y;
-    const size_t persistent_blocks_per_sm = std::min(active_blocks_per_sm, TunableConfig<SHAPE_REP>::BLOCKS_PER_SM);
+    const size_t persistent_blocks_per_sm =
+        std::min(active_blocks_per_sm, ScalingTraits::STATIC_PERSISTENT_BLOCKS_PER_SM);
     const size_t requested_workers_per_tensor = std::max<size_t>(size_t{1}, (sm_num * persistent_blocks_per_sm) / num_tensors);
     const size_t workers_per_tensor = std::min(total_work_blocks, requested_workers_per_tensor);
     NVTE_CHECK(workers_per_tensor > 0, "Tensor-local persistent grid size must be greater than zero.");
@@ -619,17 +642,6 @@ inline void group_quantize_transpose(const GroupedTensor *input, const Tensor *n
 #if FP4_TYPE_SUPPORTED
   using namespace group_quantize_transpose_tuned_kernel;
   using namespace ptx;
-
-  constexpr int CHUNK_DIM_Y = ScalingTraits::CHUNK_DIM_Y;
-  constexpr int CHUNK_DIM_X = ScalingTraits::CHUNK_DIM_X;
-  constexpr size_t ELTS_PER_CHUNK = ScalingTraits::ELTS_PER_CHUNK;
-  constexpr int BUFF_DIM_Y = ScalingTraits::BUFF_DIM_Y;
-  constexpr int BUFF_DIM_X = ScalingTraits::BUFF_DIM_X;
-  constexpr int BUFF_SIZE_ALIGNED_IN = ScalingTraits::BUFF_SIZE_ALIGNED_IN;
-  constexpr int BUFF_SIZE_ALIGNED_OUT = ScalingTraits::BUFF_SIZE_ALIGNED_OUT;
-  constexpr int BUFF_SIZE_ALIGNED_OUT_TR = ScalingTraits::BUFF_SIZE_ALIGNED_OUT_TR;
-  constexpr int BUFF_SIZE_ROWWISE_SCALES = ScalingTraits::BUFF_SIZE_ROWWISE_SCALES;
-  constexpr int BUFF_SIZE_COLWISE_SCALES = ScalingTraits::BUFF_SIZE_COLWISE_SCALES;
 
   const bool use_stochastic_rounding = quant_config ? quant_config->stochastic_rounding : false;
   const bool use_fast_math = quant_config ? quant_config->use_fast_math : false;
@@ -661,9 +673,6 @@ inline void group_quantize_transpose(const GroupedTensor *input, const Tensor *n
     shape_rep = ShapeRepresentation::VARYING_BOTH_DIMS;
   }
 
-  const bool use_single_work_grid = (shape_rep == ShapeRepresentation::SAME_BOTH_DIMS ||
-                                     shape_rep == ShapeRepresentation::VARYING_FIRST_DIM);
-
   const size_t first_logical_dim = input->logical_shape.data[0];
   const size_t last_logical_dim = input->logical_shape.data[1];
   const size_t elts_total = first_logical_dim * last_logical_dim;
@@ -672,45 +681,6 @@ inline void group_quantize_transpose(const GroupedTensor *input, const Tensor *n
   NVTE_CHECK(num_tensors <= MAX_SUPPORTED_TENSOR_DESCRIPTORS,
              "Number of tensors in a group is larger than the MAX number of supported "
              "descriptors (64).");
-  switch (shape_rep) {
-    case ShapeRepresentation::SAME_BOTH_DIMS: {
-      NVTE_CHECK(first_logical_dim % num_tensors == 0,
-                 "First logical dimension of a grouped tensor must be divisible by the number of "
-                 "tensors.");
-      NVTE_CHECK((first_logical_dim / num_tensors) % 128 == 0,
-                 "First dimension of each tensor in a group must be divisible by 128.");
-      break;
-    }
-    case ShapeRepresentation::VARYING_FIRST_DIM: {
-      NVTE_CHECK(first_logical_dim % 128 == 0,
-                 "First logical dimension of a grouped tensor must be divisible by 128.");
-      break;
-    }
-    case ShapeRepresentation::VARYING_LAST_DIM: {
-      NVTE_CHECK(first_logical_dim % 128 == 0,
-                 "First logical dimension of a grouped tensor must be divisible by 128.");
-      NVTE_CHECK(last_logical_dim % 128 == 0,
-                 "Last logical dimension of a grouped tensor must be divisible by 128.");
-      break;
-    }
-    case ShapeRepresentation::VARYING_BOTH_DIMS: {
-      NVTE_CHECK(last_logical_dim % ELTS_PER_CHUNK == 0,
-                 "Last logical dimension of a grouped tensor must be divisible by ",
-                 CHUNK_DIM_Y, "x", CHUNK_DIM_X, ".");
-      break;
-    }
-  }
-
-  size_t work_blocks_X = 0;
-  size_t work_blocks_Y = 0;
-  if (use_single_work_grid) {
-    work_blocks_Y = DIVUP(first_logical_dim, static_cast<size_t>(CHUNK_DIM_Y));
-    work_blocks_X = DIVUP(last_logical_dim, static_cast<size_t>(CHUNK_DIM_X));
-  } else {
-    work_blocks_Y = 1;
-    work_blocks_X = DIVUP(elts_total, ELTS_PER_CHUNK);
-  }
-
   const int64_t *const offsets_ptr = reinterpret_cast<const int64_t *>(output->tensor_offsets.dptr);
   const int64_t *const first_dims_ptr = reinterpret_cast<const int64_t *>(output->first_dims.dptr);
   const int64_t *const last_dims_ptr = reinterpret_cast<const int64_t *>(output->last_dims.dptr);
@@ -746,48 +716,103 @@ inline void group_quantize_transpose(const GroupedTensor *input, const Tensor *n
     rng_state = reinterpret_cast<const size_t *>(rng_state_te_tensor.data.dptr);
   }
 
-  alignas(64) CUtensorMap tensor_map_input{};
-  alignas(64) CUtensorMap tensor_map_act_input{};
-  alignas(64) CUtensorMap tensor_map_output{};
-  alignas(64) CUtensorMap tensor_map_output_transpose{};
-
-  const size_t dummy_first_logical_dim = 32;
-  const size_t dummy_last_logical_dim = 32;
-  create_2D_tensor_map(tensor_map_input, input->data, dummy_first_logical_dim, 
-                       dummy_last_logical_dim, BUFF_DIM_Y,
-                       BUFF_DIM_X, dummy_last_logical_dim, 0, sizeof(IType) * 8);
-  create_2D_tensor_map(tensor_map_output, output->data, dummy_first_logical_dim,
-                       dummy_last_logical_dim, BUFF_DIM_Y,
-                       BUFF_DIM_X, dummy_last_logical_dim, 0, 4);
-  if (return_transpose) {
-    create_2D_tensor_map(tensor_map_output_transpose, output->columnwise_data,
-                         dummy_last_logical_dim, dummy_first_logical_dim,
-                         BUFF_DIM_X, BUFF_DIM_Y,
-                         dummy_first_logical_dim, 0, 4);
-  }
-
-  const int in_mem = BUFF_SIZE_ALIGNED_IN;
-  const int out_data_mem = BUFF_SIZE_ALIGNED_OUT;
-  const int out_data_transpose_mem = return_transpose ? BUFF_SIZE_ALIGNED_OUT_TR : 0;
-  const int out_scales_mem = BUFF_SIZE_ROWWISE_SCALES;
-  const int out_scales_transpose_mem = return_transpose ? BUFF_SIZE_COLWISE_SCALES : 0;
-  const int out_mem = out_data_mem + out_data_transpose_mem;
-  const int dshmem_size = in_mem + out_mem + out_scales_transpose_mem + out_scales_mem + TMA_SHMEM_ALIGNMENT;
-
-  const IType *const input_dptr = reinterpret_cast<const IType *>(input->data.dptr);
-  const void *const output_dptr = output->data.dptr;
-  const void *const output_t_dptr = return_transpose ? output->columnwise_data.dptr : nullptr;
-
-  update_tma_descriptors<IType, void, true>
-      <<<num_tensors, 1, 0, stream>>>(
-          tensor_map_input, tensor_map_act_input, tensor_map_output, tensor_map_output_transpose,
-          input_dptr, nullptr, output_dptr, output_t_dptr, shape_rep, num_tensors,
-          first_logical_dim, last_logical_dim, offsets_ptr, first_dims_ptr, last_dims_ptr, true,
-          return_transpose, false);
-  NVTE_CHECK_CUDA(cudaGetLastError());
-
   TRANSFORMER_ENGINE_GROUP_TENSOR_SHAPE_REPRESENTATION_SWITCH(
       shape_rep, SHAPE_REP, {
+        using ActiveCastTraits = CastTraits<SHAPE_REP>;
+        using IType = typename ActiveCastTraits::IType;
+
+        constexpr int CHUNK_DIM_Y = ActiveCastTraits::CHUNK_DIM_Y;
+        constexpr int CHUNK_DIM_X = ActiveCastTraits::CHUNK_DIM_X;
+        constexpr size_t ELTS_PER_CHUNK = ActiveCastTraits::ELTS_PER_CHUNK;
+        constexpr int BUFF_DIM_Y = ActiveCastTraits::BUFF_DIM_Y;
+        constexpr int BUFF_DIM_X = ActiveCastTraits::BUFF_DIM_X;
+        constexpr int BUFF_SIZE_ALIGNED_IN = ActiveCastTraits::BUFF_SIZE_ALIGNED_IN;
+        constexpr int BUFF_SIZE_ALIGNED_OUT = ActiveCastTraits::BUFF_SIZE_ALIGNED_OUT;
+        constexpr int BUFF_SIZE_ALIGNED_OUT_TR = ActiveCastTraits::BUFF_SIZE_ALIGNED_OUT_TR;
+        constexpr int BUFF_SIZE_ROWWISE_SCALES =
+            ActiveCastTraits::BUFF_SIZE_ROWWISE_SCALES;
+        constexpr int BUFF_SIZE_COLWISE_SCALES =
+            ActiveCastTraits::BUFF_SIZE_COLWISE_SCALES;
+        constexpr bool USE_SINGLE_WORK_GRID =
+            SHAPE_REP == ShapeRepresentation::SAME_BOTH_DIMS ||
+            SHAPE_REP == ShapeRepresentation::VARYING_FIRST_DIM;
+
+        if constexpr (SHAPE_REP == ShapeRepresentation::SAME_BOTH_DIMS) {
+          NVTE_CHECK(
+              first_logical_dim % num_tensors == 0,
+              "First logical dimension of a grouped tensor must be divisible by the number of "
+              "tensors.");
+          NVTE_CHECK((first_logical_dim / num_tensors) % CHUNK_DIM_Y == 0,
+                     "First dimension of each tensor in a group must be divisible by ",
+                     CHUNK_DIM_Y, ".");
+        } else if constexpr (SHAPE_REP == ShapeRepresentation::VARYING_FIRST_DIM) {
+          NVTE_CHECK(first_logical_dim % CHUNK_DIM_Y == 0,
+                     "First logical dimension of a grouped tensor must be divisible by ",
+                     CHUNK_DIM_Y, ".");
+        } else if constexpr (SHAPE_REP == ShapeRepresentation::VARYING_LAST_DIM) {
+          NVTE_CHECK(first_logical_dim % CHUNK_DIM_Y == 0,
+                     "First logical dimension of a grouped tensor must be divisible by ",
+                     CHUNK_DIM_Y, ".");
+          NVTE_CHECK(last_logical_dim % CHUNK_DIM_Y == 0,
+                     "Last logical dimension of a grouped tensor must be divisible by ",
+                     CHUNK_DIM_Y, ".");
+        } else {
+          NVTE_CHECK(last_logical_dim % ELTS_PER_CHUNK == 0,
+                     "Last logical dimension of a grouped tensor must be divisible by ",
+                     CHUNK_DIM_Y, "x", CHUNK_DIM_X, ".");
+        }
+
+        size_t work_blocks_X = 0;
+        size_t work_blocks_Y = 0;
+        if constexpr (USE_SINGLE_WORK_GRID) {
+          work_blocks_Y = DIVUP(first_logical_dim, static_cast<size_t>(CHUNK_DIM_Y));
+          work_blocks_X = DIVUP(last_logical_dim, static_cast<size_t>(CHUNK_DIM_X));
+        } else {
+          work_blocks_Y = 1;
+          work_blocks_X = DIVUP(elts_total, ELTS_PER_CHUNK);
+        }
+
+        alignas(64) CUtensorMap tensor_map_input{};
+        alignas(64) CUtensorMap tensor_map_act_input{};
+        alignas(64) CUtensorMap tensor_map_output{};
+        alignas(64) CUtensorMap tensor_map_output_transpose{};
+
+        const size_t dummy_first_logical_dim = 32;
+        const size_t dummy_last_logical_dim = 32;
+        create_2D_tensor_map(tensor_map_input, input->data, dummy_first_logical_dim,
+                             dummy_last_logical_dim, BUFF_DIM_Y, BUFF_DIM_X,
+                             dummy_last_logical_dim, 0, sizeof(IType) * 8);
+        create_2D_tensor_map(tensor_map_output, output->data, dummy_first_logical_dim,
+                             dummy_last_logical_dim, BUFF_DIM_Y, BUFF_DIM_X,
+                             dummy_last_logical_dim, 0, 4);
+        if (return_transpose) {
+          create_2D_tensor_map(tensor_map_output_transpose, output->columnwise_data,
+                               dummy_last_logical_dim, dummy_first_logical_dim, BUFF_DIM_X,
+                               BUFF_DIM_Y, dummy_first_logical_dim, 0, 4);
+        }
+
+        const int in_mem = BUFF_SIZE_ALIGNED_IN;
+        const int out_data_mem = BUFF_SIZE_ALIGNED_OUT;
+        const int out_data_transpose_mem = return_transpose ? BUFF_SIZE_ALIGNED_OUT_TR : 0;
+        const int out_scales_mem = BUFF_SIZE_ROWWISE_SCALES;
+        const int out_scales_transpose_mem =
+            return_transpose ? BUFF_SIZE_COLWISE_SCALES : 0;
+        const int out_mem = out_data_mem + out_data_transpose_mem;
+        const int dshmem_size = in_mem + out_mem + out_scales_transpose_mem + out_scales_mem +
+                                 TMA_SHMEM_ALIGNMENT;
+
+        const IType *const input_dptr = reinterpret_cast<const IType *>(input->data.dptr);
+        const void *const output_dptr = output->data.dptr;
+        const void *const output_t_dptr =
+            return_transpose ? output->columnwise_data.dptr : nullptr;
+
+        update_tma_descriptors<IType, void, true><<<num_tensors, 1, 0, stream>>>(
+            tensor_map_input, tensor_map_act_input, tensor_map_output,
+            tensor_map_output_transpose, input_dptr, nullptr, output_dptr, output_t_dptr,
+            shape_rep, num_tensors, first_logical_dim, last_logical_dim, offsets_ptr,
+            first_dims_ptr, last_dims_ptr, true, return_transpose, false);
+        NVTE_CHECK_CUDA(cudaGetLastError());
+
         TRANSFORMER_ENGINE_SWITCH_CONDITION(
             use_stochastic_rounding, USE_STOCHASTIC_ROUNDING,
             TRANSFORMER_ENGINE_SWITCH_CONDITION(
