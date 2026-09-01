@@ -53,6 +53,12 @@ if (( NUM_GPUS < 2 )); then
     exit 0
 fi
 
+# Force this test run to compile at least one NCCL EP JIT kernel instead of
+# succeeding from a cache populated by an earlier process.
+NCCL_EP_JIT_CACHE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/te-nccl-ep-jit.XXXXXX")
+export NCCL_EP_JIT_CACHE_DIR
+trap 'rm -rf "${NCCL_EP_JIT_CACHE_DIR}"' EXIT
+
 GTEST_ARGS="${GTEST_FILTER:+--gtest_filter=${GTEST_FILTER}}"
 
 echo "=== EP Tests ==="
@@ -66,4 +72,9 @@ if [[ -n "${GTEST_XML_PREFIX:-}" ]]; then
         "exec '${TEST_BIN}' ${GTEST_ARGS} --gtest_output=xml:${GTEST_XML_PREFIX}.rank\${OMPI_COMM_WORLD_RANK}.xml"
 else
     "${MPIRUN}" --allow-run-as-root --oversubscribe -n "${NUM_GPUS}" ${MPIRUN_EXTRA:-} "${TEST_BIN}" ${GTEST_ARGS}
+fi
+
+if ! compgen -G "${NCCL_EP_JIT_CACHE_DIR}/*/*.cubin" > /dev/null; then
+    echo "ERROR: NCCL EP tests did not produce a JIT-compiled cubin."
+    exit 1
 fi
