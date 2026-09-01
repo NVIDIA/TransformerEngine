@@ -48,13 +48,7 @@
      id="g36"
      clip-path="url(#clipPath36)"
      transform="translate(0,-40.544006)">
-    <rect
-       x="0"
-       y="0"
-       width="960"
-       height="480"
-       fill="#ffffff"
-       id="rect1" />
+    
     <path
        d="M 446,56 V 399.312"
        stroke="#000000"

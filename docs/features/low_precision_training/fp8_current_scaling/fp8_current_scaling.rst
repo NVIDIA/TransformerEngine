@@ -139,7 +139,7 @@ Here's how to use FP8 Current Scaling recipe in PyTorch and JAX:
 
       .. raw:: html
 
-         <div style="background: #f0f4f8; border-left: 3px solid #5c7cfa; padding: 6px 12px; font-size: 13px; color: #495057; margin-bottom: 0; border-radius: 4px 4px 0 0;">
+         <div class="code-block-header">
             Requires SM89 (Ada) or later
          </div>
 
@@ -152,7 +152,7 @@ Here's how to use FP8 Current Scaling recipe in PyTorch and JAX:
 
       .. raw:: html
 
-         <div style="background: #f0f4f8; border-left: 3px solid #5c7cfa; padding: 6px 12px; font-size: 13px; color: #495057; margin-bottom: 0; border-radius: 4px 4px 0 0;">
+         <div class="code-block-header">
             Requires SM89 (Ada) or later
          </div>
 

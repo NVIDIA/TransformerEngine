@@ -20,6 +20,14 @@ article.bd-article svg,
     width: 100%;
 }
 
+/* CSS cannot recolor <img>-embedded SVGs: invert lightness instead,
+   hue-rotate(180deg) flips hue back so colors keep their tint */
+html[data-theme="dark"] article.bd-article img[src$=".svg"] {
+    filter: invert(0.88) hue-rotate(180deg);
+    /* undo pydata's white img background (inverts into a gray card) */
+    background: transparent;
+}
+
 /* Ensure container doesn't overflow */
 article.bd-article,
 .document .raw-html {

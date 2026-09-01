@@ -1,15 +1,29 @@
 /* Custom styling for program output blocks */
 
 .program-output {
-    background-color: #f8f9fa;
-    padding: 0;  /* No padding at all */
-    margin: 0;  /* No margins at all */
-    border-radius: 0;  /* No rounded corners */
+    background-color: #f5f6f8;
+    border: 1px solid #d7dbe0;
+    border-top: none;
+    border-radius: 0 0 4px 4px;
+    padding: 8px 14px;
+    margin: 0 0 1rem 0;
     font-family: 'Courier New', monospace;
     font-size: 14px;
     line-height: 1.5;
     width: 100%;
     max-width: 100%;
+}
+
+/* "Output:" bar attached between a code block and its program output */
+.output-header {
+    background: #eceef1;
+    border: 1px solid #d7dbe0;
+    border-left: 3px solid #9ca3af;
+    padding: 4px 12px;
+    font-size: 12px;
+    color: #4b5563;
+    margin-top: -16px;
+    margin-bottom: 0;
 }
 
 .program-output pre {
@@ -25,6 +39,14 @@
     background: transparent !important;
     margin: 0;
     width: 100%;
+}
+
+.program-output div[class*="highlight"] {
+    margin: 0;
+}
+
+.program-output pre {
+    padding: 2px 4px;
 }
 
 /* Alternative lighter style */
@@ -58,9 +80,38 @@
     background: transparent !important;
 }
 
+/* Header bar attached to the top of a code block ("Needs to be run on...") */
+.code-block-header {
+    background: #f0f4f8;
+    border-left: 3px solid #5c7cfa;
+    padding: 6px 12px;
+    font-size: 13px;
+    color: #495057;
+    margin-bottom: 0;
+    border-radius: 4px 4px 0 0;
+}
+
+.code-block-header + div[class*="highlight"] {
+    margin-top: 0;
+}
+
 /* Dark mode overrides */
+html[data-theme="dark"] .code-block-header {
+    background: #253141;
+    border-left-color: #748ffc;
+    color: #ced4da;
+}
+
 html[data-theme="dark"] .program-output {
-    background-color: #2b2b2b;
+    background-color: #232323;
+    border-color: #444950;
+}
+
+html[data-theme="dark"] .output-header {
+    background: #2f3136;
+    border-color: #444950;
+    border-left-color: #757575;
+    color: #bdbdbd;
 }
 
 html[data-theme="dark"] .program-output pre {
@@ -75,5 +126,16 @@ html[data-theme="dark"] .output-block {
 
 html[data-theme="dark"] .console-output {
     box-shadow: 0 2px 4px rgba(0, 0, 0, 0.4);
+}
+
+/* pydata forces a light bg on rendered_html outputs in dark mode;
+   ours are pygments code blocks, so darken (same selector, loaded later) */
+html[data-theme="dark"] .bd-content .nboutput .output_area.rendered_html:not(:has(table.dataframe)) {
+    background-color: #1f1f1f;
+    color: #e0e0e0;
+}
+
+html[data-theme="dark"] .output_area.stderr {
+    background: #4a1d1d;
 }
 

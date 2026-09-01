@@ -125,7 +125,7 @@ while keeping those sharding controls visible.
 
 .. raw:: html
 
-   <div style="background: #f5f5f5; border-left: 3px solid #9ca3af; padding: 4px 12px; font-size: 12px; color: #6b7280; margin-top: -16px;">
+   <div class="output-header">
       Single-GPU output:
    </div>
 
@@ -138,7 +138,7 @@ while keeping those sharding controls visible.
 
 .. raw:: html
 
-   <div style="background: #f5f5f5; border-left: 3px solid #9ca3af; padding: 4px 12px; font-size: 12px; color: #6b7280; margin-top: -16px;">
+   <div class="output-header">
       Ring output:
    </div>
 
@@ -151,7 +151,7 @@ while keeping those sharding controls visible.
 
 .. raw:: html
 
-   <div style="background: #f5f5f5; border-left: 3px solid #9ca3af; padding: 4px 12px; font-size: 12px; color: #6b7280; margin-top: -16px;">
+   <div class="output-header">
       AllGather output:
    </div>
 

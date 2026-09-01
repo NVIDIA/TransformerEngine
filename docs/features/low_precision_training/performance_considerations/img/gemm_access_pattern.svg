@@ -7,6 +7,8 @@
       .small-text { font: 9px sans-serif; fill: #555; }
       .operator { font: bold 14px sans-serif; fill: #333; }
       .equals { font: bold 14px sans-serif; fill: #333; }
+      .accent-green { fill: #388e3c; }
+      .accent-orange { fill: #f57c00; }
       
       /* Matrix colors */
       .matrix-cell { fill: #bbdefb; stroke: #1565c0; stroke-width: 1; }
@@ -50,7 +52,7 @@
     <rect x="42" y="42" width="14" height="14" class="matrix-cell"/>
     
     <!-- Label -->
-    <text x="28" y="70" class="small-text" style="fill: #388e3c; font-weight: bold; text-anchor: middle;">rowwise</text>
+    <text x="28" y="70" class="small-text accent-green" style="font-weight: bold; text-anchor: middle;">rowwise</text>
   </g>
   
   <!-- Matrix B (middle) - 4x4, centered -->
@@ -82,7 +84,7 @@
     <rect x="42" y="42" width="14" height="14" class="matrix-cell"/>
     
     <!-- Label -->
-    <text x="28" y="70" class="small-text" style="fill: #f57c00; font-weight: bold; text-anchor: middle;">columnwise</text>
+    <text x="28" y="70" class="small-text accent-orange" style="font-weight: bold; text-anchor: middle;">columnwise</text>
   </g>
   
   <!-- Result matrix 4x4 (right), centered -->
@@ -148,7 +150,7 @@
     <rect x="42" y="42" width="14" height="14" class="matrix-cell"/>
     
     <!-- Label -->
-    <text x="28" y="70" class="small-text" style="fill: #388e3c; font-weight: bold; text-anchor: middle;">rowwise</text>
+    <text x="28" y="70" class="small-text accent-green" style="font-weight: bold; text-anchor: middle;">rowwise</text>
   </g>
   
   <!-- Matrix B (middle, shown with rowwise access for B^T) - 4x4, centered -->
@@ -180,7 +182,7 @@
     <rect x="42" y="42" width="14" height="14" class="matrix-cell"/>
     
     <!-- Label -->
-    <text x="28" y="70" class="small-text" style="fill: #388e3c; font-weight: bold; text-anchor: middle;">rowwise</text>
+    <text x="28" y="70" class="small-text accent-green" style="font-weight: bold; text-anchor: middle;">rowwise</text>
   </g>
   
   <!-- Result matrix 4x4 (right), centered -->

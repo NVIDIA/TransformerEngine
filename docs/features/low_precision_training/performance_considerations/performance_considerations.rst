@@ -191,7 +191,7 @@ and columnwise tensors require separate memory layouts.
 
       .. raw:: html
 
-         <div style="background: #f0f4f8; border-left: 3px solid #5c7cfa; padding: 6px 12px; font-size: 13px; color: #495057; margin-bottom: 0; border-radius: 4px 4px 0 0;">
+         <div class="code-block-header">
             Needs to be run on SM89 (Ada) or SM90 (Hopper)
          </div>
 
@@ -202,7 +202,7 @@ and columnwise tensors require separate memory layouts.
 
       .. raw:: html
 
-         <div style="background: #f5f5f5; border-left: 3px solid #9ca3af; padding: 4px 12px; font-size: 12px; color: #6b7280; margin-top: -16px;">
+         <div class="output-header">
             Output:
          </div>
       
@@ -222,7 +222,7 @@ and columnwise tensors require separate memory layouts.
 
       .. raw:: html
 
-         <div style="background: #f0f4f8; border-left: 3px solid #5c7cfa; padding: 6px 12px; font-size: 13px; color: #495057; margin-bottom: 0; border-radius: 4px 4px 0 0;">
+         <div class="code-block-header">
             Needs to be run on SM89 (Ada) or SM90 (Hopper)
          </div>
       
@@ -233,7 +233,7 @@ and columnwise tensors require separate memory layouts.
 
       .. raw:: html
 
-         <div style="background: #f5f5f5; border-left: 3px solid #9ca3af; padding: 4px 12px; font-size: 12px; color: #6b7280; margin-top: -16px;">
+         <div class="output-header">
             Output:
          </div>
       
@@ -253,7 +253,7 @@ and columnwise tensors require separate memory layouts.
 
       .. raw:: html
 
-         <div style="background: #f0f4f8; border-left: 3px solid #5c7cfa; padding: 6px 12px; font-size: 13px; color: #495057; margin-bottom: 0; border-radius: 4px 4px 0 0;">
+         <div class="code-block-header">
             Needs to be run on SM89 (Ada) or SM90 (Hopper)
          </div>
 
@@ -264,7 +264,7 @@ and columnwise tensors require separate memory layouts.
 
       .. raw:: html
 
-         <div style="background: #f5f5f5; border-left: 3px solid #9ca3af; padding: 4px 12px; font-size: 12px; color: #6b7280; margin-top: -16px;">
+         <div class="output-header">
             Output:
          </div>
       
@@ -290,7 +290,7 @@ and columnwise tensors require separate memory layouts.
 
       .. raw:: html
 
-         <div style="background: #f0f4f8; border-left: 3px solid #5c7cfa; padding: 6px 12px; font-size: 13px; color: #495057; margin-bottom: 0; border-radius: 4px 4px 0 0;">
+         <div class="code-block-header">
             Needs to be run on SM89 (Ada) or SM90 (Hopper)
          </div>
 
@@ -301,7 +301,7 @@ and columnwise tensors require separate memory layouts.
 
       .. raw:: html
 
-         <div style="background: #f5f5f5; border-left: 3px solid #9ca3af; padding: 4px 12px; font-size: 12px; color: #6b7280; margin-top: -16px;">
+         <div class="output-header">
             Output:
          </div>
       
@@ -320,7 +320,7 @@ and columnwise tensors require separate memory layouts.
 
       .. raw:: html
 
-         <div style="background: #f0f4f8; border-left: 3px solid #5c7cfa; padding: 6px 12px; font-size: 13px; color: #495057; margin-bottom: 0; border-radius: 4px 4px 0 0;">
+         <div class="code-block-header">
             Needs to be run on SM89 (Ada) or SM90 (Hopper)
          </div>
 
@@ -331,7 +331,7 @@ and columnwise tensors require separate memory layouts.
 
       .. raw:: html
 
-         <div style="background: #f5f5f5; border-left: 3px solid #9ca3af; padding: 4px 12px; font-size: 12px; color: #6b7280; margin-top: -16px;">
+         <div class="output-header">
             Output:
          </div>
       
@@ -351,7 +351,7 @@ and columnwise tensors require separate memory layouts.
 
       .. raw:: html
 
-         <div style="background: #f0f4f8; border-left: 3px solid #5c7cfa; padding: 6px 12px; font-size: 13px; color: #495057; margin-bottom: 0; border-radius: 4px 4px 0 0;">
+         <div class="code-block-header">
             Needs to be run on SM89 (Ada) or SM90 (Hopper)
          </div>
       
@@ -362,7 +362,7 @@ and columnwise tensors require separate memory layouts.
 
       .. raw:: html
 
-         <div style="background: #f5f5f5; border-left: 3px solid #9ca3af; padding: 4px 12px; font-size: 12px; color: #6b7280; margin-top: -16px;">
+         <div class="output-header">
             Output:
          </div>
       
@@ -407,7 +407,7 @@ Let's see how we can use fused layers in different frameworks.
 
       .. raw:: html
 
-         <div style="background: #f0f4f8; border-left: 3px solid #5c7cfa; padding: 6px 12px; font-size: 13px; color: #495057; margin-bottom: 0; border-radius: 4px 4px 0 0;">
+         <div class="code-block-header">
             Needs to be run on SM89+ (Ada, Hopper, Blackwell, or newer)
          </div>
 
@@ -427,7 +427,7 @@ Let's see how we can use fused layers in different frameworks.
 
       .. raw:: html
 
-         <div style="background: #f0f4f8; border-left: 3px solid #5c7cfa; padding: 6px 12px; font-size: 13px; color: #495057; margin-bottom: 0; border-radius: 4px 4px 0 0;">
+         <div class="code-block-header">
             Needs to be run on SM89+ (Ada, Hopper, Blackwell, or newer)
          </div>
 

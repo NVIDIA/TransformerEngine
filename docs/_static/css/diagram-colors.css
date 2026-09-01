@@ -70,6 +70,27 @@
   font-size: 15px;
   font-weight: 600;
   text-anchor: middle;
+  fill: #212121;
+}
+
+/* Accent text colors (used together with .text/.small-text/.section-title) */
+.accent-blue { fill: #1565c0; }
+.accent-red { fill: #c62828; }
+.accent-green { fill: #388e3c; }
+.accent-orange { fill: #f57c00; }
+
+/* Neutral container panels (master_weights_approaches.svg) */
+.panel {
+  fill: #f5f5f5;
+  stroke: #9e9e9e;
+  stroke-width: 1.5;
+}
+
+/* Range bracket lines (fp8_scaling_concept.svg) */
+.range-bracket {
+  stroke: #666;
+  stroke-width: 1.5;
+  fill: none;
 }
 
 /* Arrows */
@@ -139,6 +160,7 @@ html[data-theme="dark"] .fp8 { fill: #4d3c00; stroke: #ffca28; }
 html[data-theme="dark"] .gemm { fill: #663c00; stroke: #ffb74d; }
 html[data-theme="dark"] .quantize { fill: #1b3d1e; stroke: #81c784; }
 html[data-theme="dark"] .amax { fill: #0d3c54; stroke: #4fc3f7; }
+html[data-theme="dark"] .allgather { fill: #0d3c54; stroke: #4fc3f7; }
 html[data-theme="dark"] .box-blue { fill: #10375c; stroke: #64b5f6; }
 html[data-theme="dark"] .box-orange { fill: #5c3a10; stroke: #ffb74d; }
 html[data-theme="dark"] .box-green { fill: #1e4620; stroke: #81c784; }
@@ -163,4 +185,97 @@ html[data-theme="dark"] .label {
 html[data-theme="dark"] .arrow {
   stroke: #bdbdbd;
 }
+
+/* Text sitting directly on the page background (not inside boxes) */
+html[data-theme="dark"] .section-title,
+html[data-theme="dark"] .section-label,
+html[data-theme="dark"] .column-title,
+html[data-theme="dark"] .dots-text,
+html[data-theme="dark"] .dots-text-small {
+  fill: #e0e0e0;
+}
+
+/* Lighter accents; must come after the .text/.small-text overrides */
+html[data-theme="dark"] .phase-forward,
+html[data-theme="dark"] .accent-blue { fill: #64b5f6; }
+html[data-theme="dark"] .phase-backward,
+html[data-theme="dark"] .accent-red { fill: #ef9a9a; }
+html[data-theme="dark"] .accent-green { fill: #81c784; }
+html[data-theme="dark"] .accent-orange { fill: #ffb74d; }
+
+/* Arrowhead markers use fill attributes, which any CSS rule overrides */
+html[data-theme="dark"] marker polygon {
+  fill: #bdbdbd;
+}
+
+/* Container panels and bracket/axis strokes on the page background */
+html[data-theme="dark"] .panel { fill: #1f1f1f; stroke: #757575; }
+html[data-theme="dark"] .range-bracket { stroke: #bdbdbd; }
+html[data-theme="dark"] .arrow-dashed { stroke: #bdbdbd; }
+html[data-theme="dark"] .axis-line,
+html[data-theme="dark"] .axis,
+html[data-theme="dark"] .tick,
+html[data-theme="dark"] .bwd-bracket { stroke: #bdbdbd; }
+
+/* Text on the page background in bit-layout / axis diagrams */
+html[data-theme="dark"] .format-label,
+html[data-theme="dark"] .value-text,
+html[data-theme="dark"] .tick-label { fill: #f5f5f5; }
+html[data-theme="dark"] .header-text,
+html[data-theme="dark"] .range-label,
+html[data-theme="dark"] .sub-label { fill: #bdbdbd; }
+html[data-theme="dark"] .param-label,
+html[data-theme="dark"] .bracket-label { fill: #e0e0e0; }
+
+/* Flow-diagram box classes (mxfp8/blockwise swizzle-flow diagrams) */
+html[data-theme="dark"] .input-box,
+html[data-theme="dark"] .quantize-box { fill: #3a2f5c; stroke: #b39ddb; }
+html[data-theme="dark"] .quantize-fused-box { fill: #4a3a70; stroke: #b39ddb; }
+html[data-theme="dark"] .mxfp8-box,
+html[data-theme="dark"] .blockwise-box { fill: #10375c; stroke: #64b5f6; }
+html[data-theme="dark"] .fp8-tile { fill: #16496f; stroke: #64b5f6; }
+html[data-theme="dark"] .scale-tile,
+html[data-theme="dark"] .gemm-box { fill: #1e4620; stroke: #81c784; }
+html[data-theme="dark"] .scale-swizzled,
+html[data-theme="dark"] .swizzle-box { fill: #5c3a10; stroke: #ffb74d; }
+html[data-theme="dark"] .comm-box { fill: #4d3c00; stroke: #ffca28; }
+
+/* rht.svg and nvfp4_all_gather.svg boxes */
+html[data-theme="dark"] .input { fill: #10375c; stroke: #64b5f6; }
+html[data-theme="dark"] .grad { fill: #5c1f38; stroke: #f48fb1; }
+html[data-theme="dark"] .rht { fill: #5c3a10; stroke: #ffb74d; }
+html[data-theme="dark"] .output { fill: #1e4620; stroke: #81c784; }
+html[data-theme="dark"] .nvfp4 { fill: #10375c; stroke: #64b5f6; }
+
+/* White backing rects behind "..." glyphs: match the page background */
+html[data-theme="dark"] .diagram-bg { fill: #121212; }
+html[data-theme="dark"] .tensor-outline { stroke: #9e9e9e; }
+
+/* Inter-frame connector segments drawn on the page background */
+html[data-theme="dark"] .connector-ext { stroke: #bdbdbd; }
+
+/* Ellipsis glyphs that sit on cells that stay light in dark mode */
+html[data-theme="dark"] .on-light-bg { fill: #212121; }
+
+/* cpu_offloading diagrams (classes unique to those four SVGs) */
+html[data-theme="dark"] .layer-box { fill: #2b2b2b; stroke: #9e9e9e; }
+html[data-theme="dark"] .layer-text { fill: #e0e0e0; }
+html[data-theme="dark"] .tensor-box { fill: #10375c; stroke: #64b5f6; }
+html[data-theme="dark"] .tensor-text { fill: #90caf9; }
+html[data-theme="dark"] .fwd-block { fill: #2e4a63; stroke: #7ba7cc; }
+html[data-theme="dark"] .bwd-block { fill: #453a52; stroke: #b39ddb; }
+html[data-theme="dark"] .offload-block { fill: #5c3a10; stroke: #d9a066; }
+html[data-theme="dark"] .reload-block { fill: #2a4a26; stroke: #81c784; }
+html[data-theme="dark"] .model-block { fill: #333333; stroke: #9e9e9e; }
+html[data-theme="dark"] .wait-block { fill: #4a1d1d; stroke: #ef9a9a; }
+html[data-theme="dark"] .wait-text { fill: #ef9a9a; }
+html[data-theme="dark"] .block-text { fill: #e0e0e0; }
+html[data-theme="dark"] .cpu-box { fill: #2e4a63; stroke: #7ba7cc; }
+html[data-theme="dark"] .gpu-box { fill: #2a4a26; stroke: #81c784; }
+html[data-theme="dark"] .frame-box { fill: #1f1f1f; stroke: #616161; }
+html[data-theme="dark"] .memory-box { fill: #333c47; stroke: #9e9e9e; }
+html[data-theme="dark"] .hbm-box { fill: #1e4620; stroke: #68d391; }
+html[data-theme="dark"] .subtitle,
+html[data-theme="dark"] .memory-label { fill: #e0e0e0; }
+html[data-theme="dark"] .connector { stroke: #bdbdbd; }
 

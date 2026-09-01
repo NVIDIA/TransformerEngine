@@ -69,7 +69,7 @@ implementations.
 
 .. raw:: html
 
-   <div style="background: #f5f5f5; border-left: 3px solid #9ca3af; padding: 4px 12px; font-size: 12px; color: #6b7280; margin-top: -16px;">
+   <div class="output-header">
       Output:
    </div>
 
@@ -104,7 +104,7 @@ head dimension separately.
 
 .. raw:: html
 
-   <div style="background: #f5f5f5; border-left: 3px solid #9ca3af; padding: 4px 12px; font-size: 12px; color: #6b7280; margin-top: -16px;">
+   <div class="output-header">
       Output:
    </div>
 
