@@ -231,6 +231,15 @@ def _cudnn_grouped_gemm_quant_kernel() -> Callable:
     return grouped_gemm_quant_wrapper_sm100
 
 
+@functools.lru_cache
+def _get_cached_offsets_tensor(
+    value: int,
+    device: torch.device,
+) -> torch.Tensor:
+    """Return a cached int32 one-element offsets tensor."""
+    return torch.full((1,), value, dtype=torch.int32, device=device)
+
+
 @functools.lru_cache(maxsize=None)
 def _cudnn_grouped_gemm_wgrad_kernel() -> Callable:
     """cuDNN CuTe DSL grouped wgrad kernel for block-scaled inputs.
@@ -304,7 +313,7 @@ def _cudnn_wgrad_grouped_gemm_nvfp4_ue5m3(
         b_tensor=b_tensor,
         sfa_tensor=_sf(sfa, out_features),
         sfb_tensor=_sf(sfb, in_features),
-        offsets_tensor=torch.tensor([tokens], dtype=torch.int32, device=a_tensor.device),
+        offsets_tensor=_get_cached_offsets_tensor(int(tokens), a_tensor.device),
         global_scale_a=global_scale_a,
         global_scale_b=global_scale_b,
         acc_dtype=torch.float32,
@@ -664,7 +673,7 @@ def _cudnn_grouped_gemm_nvfp4_ue5m3(
         "b_tensor": cudnn_b,
         "sfb_tensor": cudnn_sfb,
         # One group, so the only padded end offset is the full row count.
-        "padded_offsets": torch.tensor([N], dtype=torch.int32, device=device),
+        "padded_offsets": _get_cached_offsets_tensor(int(N), device),
         "alpha_tensor": alpha_tensor,
         "bias_tensor": bias,
         "norm_const_tensor": None,  # must be None for FP4 inputs
