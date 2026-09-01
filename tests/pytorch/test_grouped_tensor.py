@@ -1624,9 +1624,7 @@ class TestGroupedTensor:
             torch.tensor([shape[0] for shape in shapes], dtype=torch.int64, device="cuda"),
         )
 
-        dequantized = (
-            grouped.float() if conversion == "float" else grouped.to(dtype=torch.float32)
-        )
+        dequantized = grouped.float() if conversion == "float" else grouped.to(dtype=torch.float32)
 
         assert isinstance(dequantized, GroupedTensor)
         assert dequantized.quantizer is None
