@@ -2298,14 +2298,39 @@ class Linear(TransformerEngineBaseModule):
                     elif self.parallel_mode == "column":
                         set_tensor_model_parallel_attributes(getattr(self, bias), True, 0, 1)
 
-            # Allocate the process-global cuBLAS workspaces eagerly: under
-            # torch.compile the first GEMM can run inside CUDA-graph capture,
-            # and a workspace first allocated there would live in the graph pool.
-            device = getattr(self, self.weight_names[0]).device
-            if device.type == "cuda":
-                get_cublas_workspace(device.index, False, False)
-                if self.ub_name is not None:
-                    get_cublas_workspace(device.index, True, False)
+            self._prealloc_cublas_workspace()
+
+    def _apply(self, *args, **kwargs):
+        out = super()._apply(*args, **kwargs)
+        # Params may have just landed on CUDA (.to()/.cuda()/to_empty()).
+        self._prealloc_cublas_workspace()
+        return out
+
+    def _prealloc_cublas_workspace(self) -> None:
+        """Allocate the process-global cuBLAS workspaces before the first GEMM:
+        under torch.compile it can run inside a cudagraph pool, and a workspace
+        first allocated there would not survive across graph generations."""
+        # pylint: disable=import-outside-toplevel
+        from torch._guards import detect_fake_mode
+        from torch._subclasses.fake_tensor import is_fake
+
+        weight = getattr(self, self.weight_names[0], None)
+        if weight is None or weight.device.type != "cuda":
+            return
+        if is_fake(weight) or detect_fake_mode():
+            return
+        get_cublas_workspace(weight.device.index, False, False)
+        if self.ub_name is not None and any(
+            (
+                self.ub_overlap_rs_fprop,
+                self.ub_overlap_ag_dgrad,
+                self.ub_overlap_ag_fprop,
+                self.ub_overlap_rs_dgrad,
+                self.ub_bulk_dgrad,
+                self.ub_bulk_wgrad,
+            )
+        ):
+            get_cublas_workspace(weight.device.index, True, False)
 
     def forward(
         self,
