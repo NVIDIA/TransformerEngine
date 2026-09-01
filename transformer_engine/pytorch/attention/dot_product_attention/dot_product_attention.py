@@ -75,6 +75,20 @@ _attention_backends = {
     "backend_selection_requires_update": False,
 }
 
+# Mixed THD attention alternates between a small set of policy-specific attention
+# configurations. Cache their full backend-selection results to avoid re-running the
+# selector for every policy in every layer and forward pass.
+_THD_POLICY_BACKEND_CACHE_LIMIT = 64
+_THD_POLICY_BACKEND_ENV_VARS = (
+    "NVTE_FLASH_ATTN",
+    "NVTE_FLASH_ATTN_V2",
+    "NVTE_FLASH_ATTN_V3",
+    "NVTE_FLASH_ATTN_V4",
+    "NVTE_FUSED_ATTN",
+    "NVTE_UNFUSED_ATTN",
+)
+_thd_policy_backend_cache = []
+
 _alibi_cache = {
     "_num_heads": None,
     "_alibi_slopes": None,
@@ -91,6 +105,64 @@ _alibi_cache = {
 # policy sets so dynamically constructed batches do not grow the cache without bound.
 _THD_POLICY_VALIDATION_CACHE_LIMIT = 64
 _thd_policy_validation_cache = []
+
+
+def _get_thd_policy_attention_backend(
+    policy: Dict[str, Any],
+    attention_params_kwargs: Dict[str, Any],
+    pad_between_seqs: bool,
+) -> Tuple[Any, ...]:
+    """Select and cache a mixed-policy backend for reuse by the scalar forward."""
+    attention_params = dpa_utils.AttentionParams(
+        **attention_params_kwargs,
+        batch_size=policy["sequence_ids"].numel(),
+        attn_mask_type=policy["mask_type"],
+        window_size=policy["window_size"],
+        bottom_right_diagonal=policy["bottom_right_diagonal"],
+        pad_between_seqs=pad_between_seqs,
+    )
+    selector = dpa_utils.get_attention_backend
+    environment = tuple(os.environ.get(name) for name in _THD_POLICY_BACKEND_ENV_VARS)
+    for cache_index, (
+        cached_selector,
+        cached_environment,
+        cached_attention_params,
+        cached_selection,
+    ) in enumerate(_thd_policy_backend_cache):
+        if (
+            selector is cached_selector
+            and environment == cached_environment
+            and attention_params == cached_attention_params
+        ):
+            _thd_policy_backend_cache.append(_thd_policy_backend_cache.pop(cache_index))
+            selection = cached_selection
+            break
+    else:
+        selection = selector(attention_params)
+        _thd_policy_backend_cache.append((selector, environment, attention_params, selection))
+        if len(_thd_policy_backend_cache) > _THD_POLICY_BACKEND_CACHE_LIMIT:
+            _thd_policy_backend_cache.pop(0)
+
+    (
+        use_flash_attention,
+        flash_attention_backend,
+        use_fused_attention,
+        fused_attention_backend,
+        use_unfused_attention,
+        _,
+    ) = selection
+    _attention_backends.update(
+        {
+            "attention_params": attention_params,
+            "use_flash_attention": use_flash_attention,
+            "flash_attention_backend": flash_attention_backend,
+            "use_fused_attention": use_fused_attention,
+            "fused_attention_backend": fused_attention_backend,
+            "use_unfused_attention": use_unfused_attention,
+            "backend_selection_requires_update": False,
+        }
+    )
+    return selection
 
 
 def _get_thd_policy_tensor_version(tensor: torch.Tensor) -> Optional[int]:
@@ -1423,15 +1495,11 @@ class DotProductAttention(TransformerEngineBaseModule):
         for policy in policies:
             if policy["sequence_ids"].numel() == 0:
                 continue
-            padded_attention_params = dpa_utils.AttentionParams(
-                **attention_params_kwargs,
-                batch_size=policy["sequence_ids"].numel(),
-                attn_mask_type=policy["mask_type"],
-                window_size=policy["window_size"],
-                bottom_right_diagonal=policy["bottom_right_diagonal"],
-                pad_between_seqs=True,
+            *_, available_backends = _get_thd_policy_attention_backend(
+                policy,
+                attention_params_kwargs,
+                True,
             )
-            *_, available_backends = dpa_utils.get_attention_backend(padded_attention_params)
             if any(available_backends):
                 padded_policies.append(policy)
             else:
@@ -1497,6 +1565,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         max_seqlen_q: Optional[int],
         max_seqlen_kv: Optional[int],
         *,
+        attention_params_kwargs: Dict[str, Any],
         checkpoint_core_attention: bool,
         fast_zero_fill: bool,
         bf16_backward: Optional[bool],
@@ -1526,6 +1595,11 @@ class DotProductAttention(TransformerEngineBaseModule):
             )
             policy_value = _IdentityWithMaskedGradient.apply(
                 value_layer, policy_kv_token_mask[:, None, None]
+            )
+            _get_thd_policy_attention_backend(
+                policy,
+                attention_params_kwargs,
+                True,
             )
             selected_cu_seqlens_q, selected_cu_seqlens_q_padded = self._select_thd_sequences(
                 cu_seqlens_q,
@@ -1576,6 +1650,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         max_seqlen_q: Optional[int],
         max_seqlen_kv: Optional[int],
         *,
+        attention_params_kwargs: Dict[str, Any],
         checkpoint_core_attention: bool,
         fast_zero_fill: bool,
         bf16_backward: Optional[bool],
@@ -1584,6 +1659,10 @@ class DotProductAttention(TransformerEngineBaseModule):
         """Dispatch mixed THD policies by compacting each policy's tokens."""
         output_features = query_layer.shape[-2] * value_layer.shape[-1]
         output = query_layer.new_zeros((query_layer.shape[0], output_features))
+        grouped_attention_params_kwargs = {
+            **attention_params_kwargs,
+            "qkv_layout": "thd_thd_thd",
+        }
         for policy in policies:
             sequence_ids = policy["sequence_ids"]
             if sequence_ids.numel() == 0:
@@ -1612,10 +1691,18 @@ class DotProductAttention(TransformerEngineBaseModule):
                 cu_seqlens_kv_padded,
                 sequence_ids,
             )
+            policy_query = query_layer.index_select(0, q_token_indices)
+            policy_key = key_layer.index_select(0, kv_token_indices)
+            policy_value = value_layer.index_select(0, kv_token_indices)
+            _get_thd_policy_attention_backend(
+                policy,
+                grouped_attention_params_kwargs,
+                False,
+            )
             policy_output = self.forward(
-                query_layer.index_select(0, q_token_indices),
-                key_layer.index_select(0, kv_token_indices),
-                value_layer.index_select(0, kv_token_indices),
+                policy_query,
+                policy_key,
+                policy_value,
                 qkv_format="thd",
                 cu_seqlens_q=selected_cu_seqlens_q,
                 cu_seqlens_kv=selected_cu_seqlens_kv,
@@ -1667,6 +1754,11 @@ class DotProductAttention(TransformerEngineBaseModule):
             and nonempty_policies[0]["sequence_ids"].numel() == batch_size
         ):
             policy = nonempty_policies[0]
+            _get_thd_policy_attention_backend(
+                policy,
+                attention_params_kwargs,
+                pad_between_seqs,
+            )
             return self.forward(
                 query_layer,
                 key_layer,
@@ -1710,6 +1802,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                 padded_policies,
                 max_seqlen_q,
                 max_seqlen_kv,
+                attention_params_kwargs=attention_params_kwargs,
                 checkpoint_core_attention=checkpoint_core_attention,
                 fast_zero_fill=fast_zero_fill,
                 bf16_backward=bf16_backward,
@@ -1728,6 +1821,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                 grouped_policies,
                 max_seqlen_q,
                 max_seqlen_kv,
+                attention_params_kwargs=attention_params_kwargs,
                 checkpoint_core_attention=checkpoint_core_attention,
                 fast_zero_fill=fast_zero_fill,
                 bf16_backward=bf16_backward,
@@ -2035,6 +2129,7 @@ class DotProductAttention(TransformerEngineBaseModule):
             logical tokens before attention, without changing backend eligibility for this or
             other attention calls.
         """
+        global _attention_backends
 
         if thd_attention_policy_dispatch not in {"auto", "grouped"}:
             raise ValueError("thd_attention_policy_dispatch must be either 'auto' or 'grouped'.")
@@ -2592,6 +2687,8 @@ class DotProductAttention(TransformerEngineBaseModule):
                 has_score_mod_bprop=score_mod_bprop is not None,
             )
             if thd_mask_policies is not None:
+                if _attention_backends["backend_selection_requires_update"]:
+                    _thd_policy_backend_cache.clear()
                 return self._forward_thd_mask_types(
                     query_layer,
                     key_layer,
@@ -2620,7 +2717,6 @@ class DotProductAttention(TransformerEngineBaseModule):
                 bottom_right_diagonal=bottom_right_diagonal,
                 pad_between_seqs=pad_between_seqs,
             )
-            global _attention_backends
             if is_in_onnx_export_mode():
                 # We do not want to call get_attention_backend() in ONNX mode
                 # and we want to avoid using any global variables like _attention_backends.

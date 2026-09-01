@@ -415,6 +415,69 @@ def test_thd_mask_type_runtime_dispatch_uses_backend_selection(monkeypatch):
     assert [params.bottom_right_diagonal for params in observed_params] == [True, False]
     assert all(params.pad_between_seqs for params in observed_params)
 
+    DotProductAttention._partition_thd_mask_policies(policies, {})
+    assert len(observed_params) == 2
+
+    monkeypatch.setenv("NVTE_FLASH_ATTN", "0")
+    DotProductAttention._partition_thd_mask_policies(policies, {})
+    assert len(observed_params) == 4
+
+
+def test_thd_mask_type_runtime_dispatch_caches_backend_selection(monkeypatch):
+    """Repeated mixed-policy forwards should reuse backend-selection results."""
+    monkeypatch.setenv("NVTE_FLASH_ATTN", "1")
+    monkeypatch.setenv("NVTE_FUSED_ATTN", "0")
+    monkeypatch.setenv("NVTE_UNFUSED_ATTN", "0")
+
+    original_get_attention_backend = dpa_module.dpa_utils.get_attention_backend
+    selector_calls = 0
+
+    def counted_get_attention_backend(attention_params):
+        nonlocal selector_calls
+        selector_calls += 1
+        return original_get_attention_backend(attention_params)
+
+    monkeypatch.setattr(
+        dpa_module.dpa_utils,
+        "get_attention_backend",
+        counted_get_attention_backend,
+    )
+
+    attention = make_dot_product_attention(
+        torch.float16,
+        MODEL_CONFIG,
+        "thd",
+        is_training=False,
+    )
+    cu_seqlens = _make_cu_seqlens((7, 3, 5, 4))
+    query = torch.randn(19, NUM_HEADS, HEAD_DIM, dtype=torch.float16, device="cuda")
+    key = torch.randn_like(query)
+    value = torch.randn_like(query)
+    policies = _make_policies((("padding", (0, 2), (-1, -1)), ("padding_causal", (1, 3), (-1, 0))))
+
+    def run_attention():
+        return attention(
+            query,
+            key,
+            value,
+            qkv_format="thd",
+            cu_seqlens_q=cu_seqlens,
+            cu_seqlens_kv=cu_seqlens,
+            max_seqlen_q=7,
+            max_seqlen_kv=7,
+            attn_mask_type_and_window_size_per_seq_policies=policies,
+        )
+
+    with torch.inference_mode():
+        run_attention()
+        torch.cuda.synchronize()
+        warmup_selector_calls = selector_calls
+        assert warmup_selector_calls > 0
+        run_attention()
+        torch.cuda.synchronize()
+
+    assert selector_calls == warmup_selector_calls
+
 
 def test_thd_mask_type_runtime_dispatch_combines_backend_outputs(monkeypatch):
     """Policies routed to different backend representations share one output."""
