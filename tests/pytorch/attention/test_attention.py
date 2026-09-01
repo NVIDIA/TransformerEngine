@@ -897,9 +897,9 @@ def test_dpa_softcap_bias_ordering(dtype, model_configs, model):
         softcap=softcap,
         layer_number=1,
     ).to(dtype=dtype, device="cuda")
-    out = block(
-        q, k, v, core_attention_bias_type="post_scale_bias", core_attention_bias=bias
-    ).view(out_shape)
+    out = block(q, k, v, core_attention_bias_type="post_scale_bias", core_attention_bias=bias).view(
+        out_shape
+    )
 
     def _reference(cap_includes_bias):
         q_f, k_f, v_f = (x.transpose(1, 2).float() for x in (q, k, v))
