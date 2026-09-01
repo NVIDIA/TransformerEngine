@@ -276,9 +276,7 @@ def build_nccl_ep_submodule() -> str:
     nvcc_host_flags = [f"-Xcompiler={flag}" for flag in bolt_cxx_flags]
     nvcc_linker_flags = []
     if bolt_linker_flags:
-        nvcc_linker_flags.extend(
-            ["-Xlinker=--emit-relocs", "-Xlinker=-z", "-Xlinker=now"]
-        )
+        nvcc_linker_flags.extend(["-Xlinker=--emit-relocs", "-Xlinker=-z", "-Xlinker=now"])
         if "-mno-fix-cortex-a53-843419" in bolt_linker_flags:
             nvcc_linker_flags.append("-Xlinker=--no-fix-cortex-a53-843419")
 
@@ -300,9 +298,7 @@ def build_nccl_ep_submodule() -> str:
     previous_signature = gencode_stamp.read_text().strip() if gencode_stamp.exists() else None
     if not nccl_ep_shared_lib.exists() or previous_signature != build_signature:
         if nccl_ep_shared_lib.exists() and previous_signature != build_signature:
-            print(
-                "[NCCL EP] build configuration changed; rebuilding NCCL EP libraries"
-            )
+            print("[NCCL EP] build configuration changed; rebuilding NCCL EP libraries")
             subprocess.check_call(
                 ["make", "-C", "nccl_ep", "clean"],
                 cwd=str(nccl_root),
