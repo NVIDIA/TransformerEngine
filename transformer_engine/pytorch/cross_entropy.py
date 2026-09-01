@@ -186,9 +186,8 @@ def parallel_cross_entropy(
     ignore_idx : int, default = -100
         Target value for ignored rows.
     is_cg_capturable : bool, default = False
-        Deprecated and unused. The operation is always CUDA graph capturable
-        since the backward pass no longer contains a synchronization point.
-        Kept for backward compatibility; will be removed in a future release.
+        Deprecated and unused. The operation is always CUDA graph capturable.
+        Will be removed in a future release.
     overwrite_input : bool, default = False
         Allow ``inp`` to be overwritten during backward. The input must be
         contiguous and cannot be reused afterward. This mode is incompatible with
