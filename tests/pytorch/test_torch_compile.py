@@ -2125,12 +2125,13 @@ def test_te_linear_compile_delayed_scaling_raises():
 
 @pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
-@pytest.mark.parametrize("compile_mode", _compile_modes)
-def test_te_linear_compile_is_first_microbatch(compile_mode):
-    """torch.compile of ``te.Linear`` across a microbatch schedule:
-    ``is_first_microbatch=True`` caches the FP8 weight, later steps must reuse
-    it and stay numerically aligned with eager. The eager reference runs on a
-    separate module so it cannot mask a corrupted or rebuilt cache."""
+def test_te_linear_compile_is_first_microbatch():
+    """te.Linear with ``is_first_microbatch`` under torch.compile: FP8 weight
+    caching updates the cached workspace in place, which the functional custom
+    op can't express, so the schedule must fall back to eager -- warning +
+    numerics identical to eager, cache reused in place across steps. The eager
+    reference runs on a separate module so it cannot mask a corrupted or
+    rebuilt cache."""
     dtype = torch.bfloat16
     device = "cuda"
     fp8_recipe = recipe.Float8CurrentScaling()
@@ -2158,42 +2159,46 @@ def test_te_linear_compile_is_first_microbatch(compile_mode):
     is_first = schedule[0]
 
     torch._dynamo.reset()
-    if compile_mode == "reduce-overhead":
-        _cudagraph_warmup(
-            fn,
-            torch.randn(32, 64, dtype=dtype, device=device, requires_grad=True),
-            backward=True,
-        )
-        model.zero_grad(set_to_none=True)
-    compiled = torch.compile(fn, fullgraph=True, mode=compile_mode)
+    compiled = torch.compile(fn)
 
     cached_workspace = None
-    with _assert_no_cudagraph_skips(compile_mode == "reduce-overhead"):
-        for step, is_first in enumerate(schedule):
-            base = torch.randn(32, 64, dtype=dtype, device=device)
+    for step, is_first in enumerate(schedule):
+        base = torch.randn(32, 64, dtype=dtype, device=device)
 
-            inp_ref = base.detach().clone().requires_grad_(True)
-            ref_model.zero_grad(set_to_none=True)
-            out_ref = ref_fn(inp_ref)
-            out_ref.sum().backward()
+        inp_ref = base.detach().clone().requires_grad_(True)
+        ref_model.zero_grad(set_to_none=True)
+        out_ref = ref_fn(inp_ref)
+        out_ref.sum().backward()
 
-            inp = base.detach().clone().requires_grad_(True)
-            model.zero_grad(set_to_none=True)
+        inp = base.detach().clone().requires_grad_(True)
+        model.zero_grad(set_to_none=True)
+        if step == 0:
+            with pytest.warns(
+                UserWarning, match="Falling back to eager execution under torch.compile"
+            ):
+                out = compiled(inp).clone()
+        else:
             out = compiled(inp).clone()
-            out.sum().backward()
+        out.sum().backward()
 
-            torch.testing.assert_close(out, out_ref.detach(), atol=_EAGER_ATOL, rtol=_EAGER_RTOL)
-            torch.testing.assert_close(inp.grad, inp_ref.grad, atol=_EAGER_ATOL, rtol=_EAGER_RTOL)
-            torch.testing.assert_close(
-                model.weight.grad, ref_model.weight.grad, atol=_EAGER_ATOL, rtol=_EAGER_RTOL
-            )
+        torch.testing.assert_close(out, out_ref.detach(), atol=_EAGER_ATOL, rtol=_EAGER_RTOL)
+        torch.testing.assert_close(inp.grad, inp_ref.grad, atol=_EAGER_ATOL, rtol=_EAGER_RTOL)
+        torch.testing.assert_close(
+            model.weight.grad, ref_model.weight.grad, atol=_EAGER_ATOL, rtol=_EAGER_RTOL
+        )
 
-            workspace = model._fp8_workspaces.get("weight")
-            assert workspace is not None, f"no cached FP8 weight after step {step}"
-            if step == 0:
-                cached_workspace = workspace
-            else:
-                assert workspace is cached_workspace, f"cache rebuilt at step {step}"
+        workspace = model._fp8_workspaces.get("weight")
+        assert workspace is not None, f"no cached FP8 weight after step {step}"
+        if step == 0:
+            cached_workspace = workspace
+        else:
+            assert workspace is cached_workspace, f"cache rebuilt at step {step}"
+
+    torch._dynamo.reset()
+    compiled_fg = torch.compile(fn, fullgraph=True)
+    is_first = True
+    with pytest.raises(Exception, match=re.escape("FP8 weight caching")):
+        compiled_fg(torch.randn(32, 64, dtype=dtype, device=device, requires_grad=True))
 
 
 @pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
