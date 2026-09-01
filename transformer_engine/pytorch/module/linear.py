@@ -1755,9 +1755,7 @@ def _linear_backward_fake(
         # Under UB reduce-scatter or bulk-wgrad overlap the returned dgrad is a
         # plain tensor; the quantizer only feeds the comm buffer.
         dgrad_quantizer = (
-            None
-            if (args.ub_overlap_rs_dgrad or args.ub_bulk_wgrad)
-            else args.grad_input_quantizer
+            None if (args.ub_overlap_rs_dgrad or args.ub_bulk_wgrad) else args.grad_input_quantizer
         )
         dgrad = TensorSpec(
             shape=(dgrad_leading, *args.grad_output.shape[1:-1], in_features),
@@ -2383,6 +2381,16 @@ class Linear(TransformerEngineBaseModule):
             if get_ub_is_fp8(self.ub_name + "_dgrad", FP8GlobalStateManager.is_fp8_enabled()):
                 fp8_grad = True
 
+        if torch.compiler.is_compiling() and _linear_op is not None:
+            reason = self._compile_eager_fallback_reason(
+                inp, is_first_microbatch, fp8_output, fp8_grad, is_grad_enabled, debug
+            )
+            if reason is not None:
+                # A break inside the try/finally below would skip the whole frame.
+                warn_compile_eager_fallback(reason)
+                torch._dynamo.graph_break(msg=f"te.Linear falling back to eager: {reason}")
+                return self._forward_eager_fallback(inp, is_first_microbatch, fp8_output, fp8_grad)
+
         inp = self.prepare_forward(inp, allow_non_contiguous=isinstance(inp, QuantizedTensor))
         try:
             weight_tensor, bias_tensor = self._get_weight_and_bias_tensors()
@@ -2519,11 +2527,9 @@ class Linear(TransformerEngineBaseModule):
             )
 
             if use_compiled_op:
+                # Safety net for quantizer-dependent conditions only.
                 fallback_reason = fwd_args.compile_unsupported_reason()
                 if fallback_reason is not None:
-                    # Warn first: the break below makes Dynamo skip this frame,
-                    # so anything after it is never traced. Explicit break so
-                    # fullgraph=True errors show the reason.
                     warn_compile_eager_fallback(fallback_reason)
                     torch._dynamo.graph_break(
                         msg=f"te.Linear falling back to eager: {fallback_reason}"
@@ -2612,6 +2618,69 @@ class Linear(TransformerEngineBaseModule):
                 )
                 unfused_weights = [w.dequantize() for w in unfused_weights]
         return unfused_weights
+
+    def _compile_eager_fallback_reason(
+        self,
+        inp: torch.Tensor,
+        is_first_microbatch: Optional[bool],
+        fp8_output: bool,
+        fp8_grad: bool,
+        is_grad_enabled: bool,
+        debug: bool,
+    ) -> Optional[str]:
+        """Why this call can't use the compiled op (else None), decided before
+        prepare_forward. Quantizer checks stay in compile_unsupported_reason."""
+        if debug:
+            return "debug instrumentation (nvidia-dlfw-inspect)"
+        weight_tensor, bias_tensor = self._get_weight_and_bias_tensors()
+        if is_distributed_weight(weight_tensor):
+            return "a DistributedWeight (custom weight parallelism, e.g. GTP)"
+        if isinstance(inp, (QuantizedTensor, QuantizedTensorStorage)):
+            return "a quantized input tensor"
+        if self.fsdp_group is not None:
+            return "manual TE FSDP (fsdp_group); use FSDP2 or MCore FSDP"
+        any_requires_grad = (
+            inp.requires_grad
+            or weight_tensor.requires_grad
+            or (bias_tensor is not None and bias_tensor.requires_grad)
+        )
+        if fp8_output and is_grad_enabled and any_requires_grad:
+            return "differentiable fp8_output=True"
+        if is_cpu_offload_enabled():
+            return "CPU activation offloading"
+        if self.wgrad_store is not None and self.wgrad_store.delay_wgrad_compute():
+            return "delayed wgrad compute (wgrad_store)"
+        if self.fuse_wgrad_accumulation:
+            return "fuse_wgrad_accumulation (main_grad)"
+        fp8 = FP8GlobalStateManager.is_fp8_enabled()
+        needs_dgrad = is_grad_enabled and inp.requires_grad
+        if (
+            fp8
+            and fp8_grad
+            and needs_dgrad
+            and not (self.ub_overlap_rs_dgrad or self.ub_bulk_wgrad)
+        ):
+            return "a quantized input grad (fp8_grad=True)"
+        if fp8 and is_first_microbatch is not None and not self.is_fsdp2:
+            return "FP8 weight caching (is_first_microbatch)"
+        return None
+
+    @torch._dynamo.disable
+    def _forward_eager_fallback(
+        self,
+        inp: torch.Tensor,
+        is_first_microbatch: Optional[bool],
+        fp8_output: bool,
+        fp8_grad: bool,
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, ...]]:
+        """Re-run forward outside Dynamo (unsupported-config fallback)."""
+        return Linear.forward(
+            self,
+            inp,
+            is_first_microbatch=is_first_microbatch,
+            fp8_output=fp8_output,
+            fp8_grad=fp8_grad,
+        )
 
     def _get_weight_and_bias_tensors(self) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         # Get concatenated weight and bias tensors
