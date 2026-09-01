@@ -8,6 +8,7 @@ from __future__ import annotations
 import abc
 from collections.abc import Iterable, Sequence
 from typing import Any, Optional
+import warnings
 
 import torch
 
@@ -356,6 +357,17 @@ class _ScaledUnary(BasicOperation, metaclass=abc.ABCMeta):
     def __init__(self, *, activation_recompute_in_mlp: bool = False) -> None:
         super().__init__()
         self.activation_recompute_in_mlp: bool = activation_recompute_in_mlp
+        self._warned_activation_recompute_in_mlp: bool = False
+
+    def _maybe_warn_activation_recompute_in_mlp(self) -> None:
+        """Warn if activation recompute is requested outside the fused grouped MLP."""
+        if not self.activation_recompute_in_mlp or self._warned_activation_recompute_in_mlp:
+            return
+        self._warned_activation_recompute_in_mlp = True
+        warnings.warn(
+            f"{self.__class__.__name__}(activation_recompute_in_mlp=True) is only supported "
+            "in the fused grouped MLP path."
+        )
 
     @abc.abstractmethod
     def _scaled_unary_forward(
@@ -402,6 +414,8 @@ class _ScaledUnary(BasicOperation, metaclass=abc.ABCMeta):
         next_op_input_quantizer: Optional[Quantizer],  # pylint: disable=unused-argument
         basic_op_kwargs: list[dict[str, Any]],  # pylint: disable=unused-argument
     ) -> tuple[torch.Tensor, Sequence[Sequence[torch.Tensor]]]:
+        self._maybe_warn_activation_recompute_in_mlp()
+
         extra_input = basic_op_extra_inputs[0][0]
 
         if torch.is_autocast_enabled():
@@ -469,7 +483,9 @@ class ScaledSReLU(_ScaledUnary):
     ----------
     activation_recompute_in_mlp : bool, default = ``False``
         Enable fused grouped MLP kernels to recompute activation outputs
-        during backward when supported instead of saving them.
+        during backward when supported instead of saving them. Outside the
+        fused grouped MLP path this option has no effect and a warning is
+        emitted.
     """
 
     def _scaled_unary_forward(
