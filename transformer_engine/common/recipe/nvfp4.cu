@@ -12,7 +12,7 @@
 
 #include "../cast/nvfp4/core_nvfp4.cuh"
 #include "../common.h"
-#include "../util/ptx.cuh"
+#include "../util/ptx_arch_spec.cuh"
 #include "../utils.cuh"
 
 namespace transformer_engine {

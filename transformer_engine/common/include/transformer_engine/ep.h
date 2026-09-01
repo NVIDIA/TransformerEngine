@@ -49,7 +49,7 @@ typedef struct {
   int max_recv_tokens_per_rank;
   /*! Token hidden dimension. */
   int hidden_dim;
-  /*! Max SMs for NCCL EP dispatch/combine kernels. 0 = auto. */
+  /*! Max SMs for NCCL EP dispatch/combine kernels. 0 = default (32, clamped to device SM count). */
   int num_comm_sms;
   /*! Widest token dtype the group will dispatch; sizes staging buffers.
    *  Required (no default): must be set to a real token dtype. Per-dispatch
@@ -93,6 +93,9 @@ typedef struct {
 
 /*! \brief Bootstrap the EP backend from an existing NCCL EP sub-communicator.
  *         Requires SM>=90.
+ *
+ *  This call validates that the runtime NCCL is >=2.30.4 and then loads the
+ *  optional libnccl_ep.so library. Non-EP users do not load the library.
  *
  *  ep_comm is borrowed and must span exactly group_config.ep_size ranks. The
  *  caller retains ownership and must keep it alive until nvte_ep_shutdown()

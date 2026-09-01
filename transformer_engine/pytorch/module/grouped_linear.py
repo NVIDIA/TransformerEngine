@@ -1811,6 +1811,8 @@ class GroupedLinear(TransformerEngineBaseModule):
             return
         if self._custom_quantizer_cache.get(meta_key) is generation:
             return
+        if not fwd and not torch.is_grad_enabled():
+            return
 
         if fwd:
             stride = self._num_fp8_tensors_per_gemm["fwd"]
@@ -2456,8 +2458,7 @@ class GroupedLinear(TransformerEngineBaseModule):
             # a failed generation remains installed when the caller catches the error.
             recipe = FP8GlobalStateManager.get_fp8_recipe()
             self._validate_custom_recipe_quantizers(True, recipe)
-            if torch.is_grad_enabled():
-                self._validate_custom_recipe_quantizers(False, recipe)
+            self._validate_custom_recipe_quantizers(False, recipe)
 
         weight_quantizers = self._get_weight_quantizers()
         input_quantizers, output_quantizers = (
