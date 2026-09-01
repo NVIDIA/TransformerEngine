@@ -24,7 +24,7 @@ from .basic_linear import BasicLinear
 from .bias import Bias
 from .constant_scale import ConstantScale
 from .dropout import Dropout
-from .grouped_linear import GroupedLinear
+from .grouped_linear import GroupedLinear, is_op_fuser_grouped_tensor_path_supported
 from .identity import Identity
 from .l2normalization import L2Normalization
 from .layer_norm import LayerNorm
@@ -33,4 +33,11 @@ from .quantize import Quantize
 from .reduce_scatter import ReduceScatter
 from .reshape import Reshape
 from .rmsnorm import RMSNorm
-from .swiglu import ClampedSwiGLU, ScaledClampedQGeGLU, ScaledSwiGLU, SwiGLU
+from .swiglu import (
+    ClampedSwiGLU,
+    ScaledClampedQGeGLU,
+    ScaledSiTUGLU,
+    ScaledSwiGLU,
+    SiTUGLU,
+    SwiGLU,
+)

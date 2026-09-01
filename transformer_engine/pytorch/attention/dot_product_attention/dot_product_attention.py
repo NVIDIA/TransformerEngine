@@ -12,6 +12,7 @@ import logging
 
 import torch
 import torch.nn.functional as F
+from torch.fx.experimental.symbolic_shapes import guard_scalar
 from torch.nn.parameter import Parameter
 
 from transformer_engine.common.recipe import (
@@ -35,7 +36,13 @@ from transformer_engine.pytorch.tensor.storage.float8_tensor_storage import Floa
 from transformer_engine.pytorch.tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
 from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
 from transformer_engine.pytorch.export import is_in_onnx_export_mode
-from transformer_engine.pytorch.constants import AttnMaskTypes, AttnTypes, dist_group_type, DType
+from transformer_engine.pytorch.constants import (
+    AttnMaskTypes,
+    AttnTypes,
+    CPLoadBalancingStrategy,
+    DType,
+    dist_group_type,
+)
 from transformer_engine.pytorch.distributed import (
     get_distributed_world_size,
     checkpoint,
@@ -420,6 +427,49 @@ def _trim_output(attn_out, num_attention_heads, padded_head_dim_v, orig_head_dim
     out_shape = attn_out.shape[:-1]
     attn_out = attn_out.reshape(*out_shape, num_attention_heads, padded_head_dim_v)
     return attn_out[..., :orig_head_dim_v].reshape(*out_shape, -1)
+
+
+def _needs_eager_dpa(call: Dict[str, Any]) -> Optional[str]:
+    """Why this DotProductAttention call has to run outside the graph, or None.
+
+    `call` maps `DotProductAttention.forward`'s parameter names to the arguments
+    this call passed, including `self`.
+    """
+    # FP8 GEMMs with the attention itself in high precision -- the common
+    # training setup -- stay on the compiled path; only FP8 attention bails out.
+    qstate = FP8GlobalStateManager.quantization_state
+    fp8_recipe = qstate.fp8_recipe
+    if qstate.fp8_enabled and fp8_recipe is not None:
+        if fp8_recipe.fp8_dpa or fp8_recipe.fp8_mha:
+            return "FP8 attention"
+
+    if call["self"].cp_group is not None:
+        return "context parallelism"
+
+    if call.get("checkpoint_core_attention", False):
+        return "activation checkpointing of the attention"
+
+    if call.get("thd_attention_policies") is not None:
+        return "mixed THD attention policies"
+
+    qkv_format = call.get("qkv_format") or call["self"].qkv_format
+    if qkv_format == "thd" and (
+        call.get("max_seqlen_q") is None or call.get("max_seqlen_kv") is None
+    ):
+        # Deriving it reads the sequence lengths off cu_seqlens, which is a
+        # device synchronization and a data-dependent value while tracing.
+        return "deriving max_seqlen from cu_seqlens"
+
+    if call.get("qkv_layer") is None and call.get("kv_layer") is None:
+        qkv = [call.get(name) for name in ("query_layer", "key_layer", "value_layer")]
+        if dpa_utils.qkv_layout_needs_detection(*qkv):
+            return "detecting packed q/k/v that were not declared via qkv_layer/kv_layer"
+
+    if call["self"].rng_states_tracker is not None and call["self"].attention_dropout > 0:
+        # Forking the tracker swaps the global CUDA generator state, which Dynamo
+        # refuses to trace. With no dropout there is nothing to fork for.
+        return "attention dropout under a CUDA RNG states tracker"
+    return None
 
 
 def _unpack_packed_qkv(
@@ -842,6 +892,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         self.cp_global_ranks = cp_global_ranks
         self.cp_stream = cp_stream
         self.cp_comm_type = cp_comm_type
+        self.load_balancing_strategy = CPLoadBalancingStrategy.DUAL_CHUNK_SWAP
 
         self.hidden_size_per_attention_head_k = (
             kv_channels if isinstance(kv_channels, int) else kv_channels[0]
@@ -863,7 +914,10 @@ class DotProductAttention(TransformerEngineBaseModule):
         else:
             self.rng_states_tracker = get_rng_state_tracker()
             set_all_rng_states(self.rng_states_tracker.get_states())
-            attention_dropout_ctx = self.rng_states_tracker.fork
+            # Forking only matters if the dropout actually draws from the generator.
+            attention_dropout_ctx = (
+                self.rng_states_tracker.fork if attention_dropout > 0 else nullcontext
+            )
 
         if softmax_scale is None:
             softmax_scale = 1.0 / math.sqrt(
@@ -991,6 +1045,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         cp_global_ranks: List[int],
         cp_stream: torch.cuda.Stream,
         cp_comm_type: str = "p2p",
+        load_balancing_strategy=CPLoadBalancingStrategy.DUAL_CHUNK_SWAP,
     ) -> None:
         """
         Set the context parallel attributes for the given
@@ -1020,11 +1075,18 @@ class DotProductAttention(TransformerEngineBaseModule):
                       - ``"a2a+p2p"``: hierarchical CP implementation. First applying a2a to QKV
                         across each CP sub-group (e.g., via NVLink), then exchanging KV with
                         p2p between sub-groups (e.g., via IBLink).
+        load_balancing_strategy : CPLoadBalancingStrategy
+                                  token partition strategy for context-parallel attention.
         """
+        assert isinstance(load_balancing_strategy, CPLoadBalancingStrategy), (
+            f"Expected {CPLoadBalancingStrategy.__name__}, "
+            f"got {type(load_balancing_strategy).__name__}."
+        )
         self.cp_group = cp_group
         self.cp_global_ranks = cp_global_ranks
         self.cp_stream = cp_stream
         self.cp_comm_type = cp_comm_type
+        self.load_balancing_strategy = load_balancing_strategy
 
     def init_fp8_metadata(self, num_gemms: int = 1) -> None:
         """
@@ -1032,6 +1094,15 @@ class DotProductAttention(TransformerEngineBaseModule):
         Initialize fp8 related metadata and tensors during fprop.
         """
         _original_recipe = self.fp8_meta.get("recipe", None)
+
+        # get_fp8_recipe() may build a default Recipe, which asserts it is not tracing.
+        # With quantization off the base class does all that is needed.
+        qstate = FP8GlobalStateManager.quantization_state
+        if torch.compiler.is_compiling() and not (
+            qstate.fp8_enabled or qstate.fp8_calibration or qstate.fp8_parameters
+        ):
+            super().init_fp8_metadata(num_gemms=num_gemms)
+            return
 
         # global recipe set in autocast()
         fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
@@ -1834,7 +1905,7 @@ class DotProductAttention(TransformerEngineBaseModule):
             return padded_output
         return padded_output + grouped_output
 
-    @no_torch_dynamo(recursive=False)
+    @no_torch_dynamo(when=_needs_eager_dpa)
     def forward(
         self,
         query_layer: Optional[torch.Tensor] = None,
@@ -2325,6 +2396,10 @@ class DotProductAttention(TransformerEngineBaseModule):
                     batch_size = query_layer.shape[0]
                     max_seqlen_q = query_layer.shape[1] if max_seqlen_q is None else max_seqlen_q
                     max_seqlen_kv = key_layer.shape[1] if max_seqlen_kv is None else max_seqlen_kv
+                # Backend selection bakes these in, which it cannot do symbolically.
+                if not is_in_onnx_export_mode():
+                    max_seqlen_q = guard_scalar(max_seqlen_q)
+                    max_seqlen_kv = guard_scalar(max_seqlen_kv)
             if qkv_format == "thd":
                 assert all(
                     len(x.shape) == 3 for x in (query_layer, key_layer, value_layer)
@@ -2758,18 +2833,25 @@ class DotProductAttention(TransformerEngineBaseModule):
                     _attention_backends["fused_attention_backend"] = fused_attention_backend
                     _attention_backends["use_unfused_attention"] = use_unfused_attention
                     _attention_backends["backend_selection_requires_update"] = False
+                    # logging.Logger methods graph-break under torch.compile, so
+                    # selection is only logged in eager -- as in
+                    # get_attention_backend. Note the arguments below are
+                    # evaluated either way, so they have to stay traceable.
+                    logger = (
+                        dpa_utils.no_op_logger if torch.compiler.is_compiling() else self.logger
+                    )
                     if use_flash_attention:
-                        self.logger.info(
+                        logger.info(
                             "Running with FlashAttention backend (version %s)",
                             flash_attention_backend,
                         )
                     elif use_fused_attention:
-                        self.logger.info(
+                        logger.info(
                             "Running with FusedAttention backend (sub-backend %s)",
                             int(fused_attention_backend),
                         )
                     elif use_unfused_attention:
-                        self.logger.info("Running with UnfusedDotProductAttention backend")
+                        logger.info("Running with UnfusedDotProductAttention backend")
                 else:
                     use_flash_attention = _attention_backends["use_flash_attention"]
                     flash_attention_backend = _attention_backends["flash_attention_backend"]
@@ -2831,6 +2913,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                     cp_global_ranks=self.cp_global_ranks,
                     cp_stream=self.cp_stream,
                     cp_comm_type=self.cp_comm_type,
+                    load_balancing_strategy=self.load_balancing_strategy,
                     max_seqlen_q=max_seqlen_q,
                     max_seqlen_kv=max_seqlen_kv,
                     fp8=self.fp8 and self.fp8_meta["recipe"].fp8_dpa,
@@ -2887,6 +2970,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                         cp_global_ranks=self.cp_global_ranks,
                         cp_stream=self.cp_stream,
                         cp_comm_type=self.cp_comm_type,
+                        load_balancing_strategy=self.load_balancing_strategy,
                         fp8=self.fp8 and self.fp8_meta["recipe"].fp8_dpa,
                         fp8_meta=self.fp8_meta,
                         quantizers=self.quantizers,
@@ -2921,6 +3005,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                     cp_global_ranks=self.cp_global_ranks,
                     cp_stream=self.cp_stream,
                     cp_comm_type=self.cp_comm_type,
+                    load_balancing_strategy=self.load_balancing_strategy,
                     fp8=self.fp8 and self.fp8_meta["recipe"].fp8_dpa,
                     fp8_meta=self.fp8_meta,
                     quantizers=self.quantizers,

@@ -1,0 +1,13 @@
+[
+  {
+    "name": "Latest",
+    "version": "latest",
+    "url": "https://docs.nvidia.com/deeplearning/transformer-engine/",
+    "preferred": true
+  },
+ {
+   "name": "Older releases",
+    "version": "archives",
+    "url": "https://docs.nvidia.com/deeplearning/transformer-engine/documentation-archive.html"
+  }
+]

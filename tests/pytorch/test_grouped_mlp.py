@@ -5,9 +5,12 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+import functools
 import os
 import math
 import random
+import sys
+import types
 from typing import Optional
 
 import pytest
@@ -18,12 +21,14 @@ import transformer_engine.pytorch as te
 from transformer_engine.pytorch.constants import TE_DType
 import transformer_engine.pytorch.ops.fused.grouped_mlp as grouped_mlp_module
 from transformer_engine.pytorch.ops.fused.grouped_mlp import (
+    _cudnn_frontend_supports_grouped_gemm_situglu,
     _cudnn_frontend_supports_grouped_gemm_srelu,
     _cudnn_frontend_version_supported,
 )
 from transformer_engine.pytorch.ops.basic.grouped_linear import (
     OUTPUT_BUFFER_KEY,
     GRAD_INPUT_BUFFER_KEY,
+    is_op_fuser_grouped_tensor_path_supported,
 )
 from transformer_engine.pytorch import (
     QuantizedTensor,
@@ -80,6 +85,144 @@ def _reset_rng_states_per_test():
     """Restore torch, CUDA, and Python ``random`` before each test in this module."""
     reset_rng_states()
     yield
+
+
+@pytest.mark.parametrize(
+    "unsupported_wrapper",
+    (
+        "grouped_gemm_glu_wrapper_sm100",
+        "grouped_gemm_dglu_wrapper_sm100",
+        "grouped_gemm_glu_hadamard_wrapper_sm100",
+    ),
+)
+def test_cudnn_frontend_situglu_feature_detection(monkeypatch, unsupported_wrapper: str) -> None:
+    """Require SiTU-GLU support from every cuDNN wrapper used by grouped MLP."""
+
+    def _with_situglu(*, situ_beta1=4.0, situ_beta2=25.0):
+        del situ_beta1, situ_beta2
+
+    def _without_situglu():
+        return None
+
+    fake_cudnn = types.ModuleType("cudnn")
+    fake_cudnn.grouped_gemm_glu_wrapper_sm100 = _with_situglu
+    fake_cudnn.grouped_gemm_dglu_wrapper_sm100 = _with_situglu
+    fake_cudnn.grouped_gemm_glu_hadamard_wrapper_sm100 = _with_situglu
+    monkeypatch.setitem(sys.modules, "cudnn", fake_cudnn)
+    try:
+        _cudnn_frontend_supports_grouped_gemm_situglu.cache_clear()
+        assert _cudnn_frontend_supports_grouped_gemm_situglu()
+
+        setattr(fake_cudnn, unsupported_wrapper, _without_situglu)
+        _cudnn_frontend_supports_grouped_gemm_situglu.cache_clear()
+        assert not _cudnn_frontend_supports_grouped_gemm_situglu()
+    finally:
+        _cudnn_frontend_supports_grouped_gemm_situglu.cache_clear()
+
+
+def _clear_grouped_glu_kernel_caches() -> None:
+    """Clear cached cuDNN wrapper lookups after tests monkeypatch them."""
+    fused_cls = te.ops.fused.GroupedMLP_CuTeGEMMGLU
+    _cudnn_frontend_supports_grouped_gemm_situglu.cache_clear()
+    fused_cls.is_supported.cache_clear()
+    fused_cls.grouped_gemm_activation_kernel.cache_clear()
+    fused_cls.grouped_gemm_act_hadamard_kernel.cache_clear()
+    fused_cls.grouped_gemm_dactivation_kernel.cache_clear()
+
+
+@pytest.fixture
+def traced_cudnn_grouped_glu_wrappers(monkeypatch):
+    """Trace real cuDNN grouped GLU wrappers while preserving their execution."""
+    try:
+        import cudnn
+    except ImportError:
+        pytest.skip("cuDNN frontend is not installed")
+
+    original_fwd = cudnn.grouped_gemm_glu_wrapper_sm100
+    original_bwd = cudnn.grouped_gemm_dglu_wrapper_sm100
+    original_hadamard = getattr(cudnn, "grouped_gemm_glu_hadamard_wrapper_sm100", None)
+    calls = []
+
+    def _weight_dtype(kwargs):
+        b_tensor = kwargs.get("b_tensor")
+        return b_tensor.dtype if b_tensor is not None else kwargs.get("b_dtype")
+
+    @functools.wraps(original_fwd)
+    def traced_fwd(*args, **kwargs):
+        calls.append(
+            {
+                "kind": "fwd",
+                "weight_mode": "dense" if kwargs.get("b_tensor") is not None else "discrete",
+                "a_dtype": kwargs["a_tensor"].dtype,
+                "b_dtype": _weight_dtype(kwargs),
+                "alpha_dtype": kwargs["alpha_tensor"].dtype,
+                "prob_dtype": (
+                    None if kwargs.get("prob_tensor") is None else kwargs["prob_tensor"].dtype
+                ),
+                "c_dtype": kwargs["c_dtype"],
+                "d_dtype": kwargs["d_dtype"],
+                "act_func": kwargs["act_func"],
+                "situ_betas": (kwargs.get("situ_beta1"), kwargs.get("situ_beta2")),
+                "with_bias": kwargs.get("bias_tensor") is not None,
+            }
+        )
+        return original_fwd(*args, **kwargs)
+
+    @functools.wraps(original_bwd)
+    def traced_bwd(*args, **kwargs):
+        calls.append(
+            {
+                "kind": "bwd",
+                "weight_mode": "dense" if kwargs.get("b_tensor") is not None else "discrete",
+                "a_dtype": kwargs["a_tensor"].dtype,
+                "b_dtype": _weight_dtype(kwargs),
+                "c_dtype": kwargs["c_tensor"].dtype,
+                "alpha_dtype": kwargs["alpha_tensor"].dtype,
+                "beta_dtype": kwargs["beta_tensor"].dtype,
+                "prob_dtype": (
+                    None if kwargs.get("prob_tensor") is None else kwargs["prob_tensor"].dtype
+                ),
+                "dprob_dtype": (
+                    None if kwargs.get("dprob_tensor") is None else kwargs["dprob_tensor"].dtype
+                ),
+                "d_dtype": kwargs["d_dtype"],
+                "act_func": kwargs["act_func"],
+                "situ_betas": (kwargs.get("situ_beta1"), kwargs.get("situ_beta2")),
+                "generate_dbias": kwargs.get("generate_dbias", False),
+            }
+        )
+        return original_bwd(*args, **kwargs)
+
+    if original_hadamard is not None:
+
+        @functools.wraps(original_hadamard)
+        def traced_hadamard(*args, **kwargs):
+            calls.append(
+                {
+                    "kind": "fwd_hadamard",
+                    "weight_mode": "dense" if kwargs.get("b_tensor") is not None else "discrete",
+                    "a_dtype": kwargs["a_tensor"].dtype,
+                    "b_dtype": _weight_dtype(kwargs),
+                    "alpha_dtype": kwargs["alpha_tensor"].dtype,
+                    "prob_dtype": kwargs["prob_tensor"].dtype,
+                    "c_dtype": kwargs["c_dtype"],
+                    "d_dtype": kwargs["d_dtype"],
+                    "act_func": kwargs["act_func"],
+                    "situ_betas": (kwargs.get("situ_beta1"), kwargs.get("situ_beta2")),
+                    "with_bias": kwargs.get("bias_tensor") is not None,
+                }
+            )
+            return original_hadamard(*args, **kwargs)
+
+    _clear_grouped_glu_kernel_caches()
+    monkeypatch.setattr(cudnn, "grouped_gemm_glu_wrapper_sm100", traced_fwd)
+    monkeypatch.setattr(cudnn, "grouped_gemm_dglu_wrapper_sm100", traced_bwd)
+    if original_hadamard is not None:
+        monkeypatch.setattr(cudnn, "grouped_gemm_glu_hadamard_wrapper_sm100", traced_hadamard)
+    try:
+        yield calls
+    finally:
+        _clear_grouped_glu_kernel_caches()
 
 
 def maybe_skip_quantization(
@@ -278,6 +421,26 @@ class TestGroupedLinearOp:
 
         assert grouped_weight.skip_backward_post_hook
 
+    def test_single_grouped_bias_uses_registered_packed_storage(self, monkeypatch) -> None:
+        """The grouped bias compute view must alias the registered trainable parent."""
+        monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
+        op = te.ops.GroupedLinear(
+            2,
+            128,
+            128,
+            bias=True,
+            device="cuda",
+            dtype=torch.bfloat16,
+            single_grouped_bias=True,
+        )
+
+        bias_packed = op._get_packed_bias_tensor(torch.bfloat16)
+
+        assert bias_packed.shape == (op.num_groups, op.out_features)
+        assert bias_packed.untyped_storage().data_ptr() == op.bias.rowwise_data.data_ptr()
+        assert op.bias.requires_grad
+        assert dict(op.named_parameters())["bias"] is op.bias
+
     @pytest.mark.parametrize("bias", (False, True))
     @pytest.mark.parametrize("dtype", _dtypes)
     @pytest.mark.parametrize("quantization", _quantization_list)
@@ -338,6 +501,16 @@ class TestGroupedLinearOp:
 
         if single_grouped_bias and not bias:
             pytest.skip("single_grouped_bias requires bias=True")
+        recipe = make_recipe(quantization)
+        compute_recipe = recipe if quantized_compute else None
+        if (
+            single_grouped_weight or single_grouped_bias
+        ) and not is_op_fuser_grouped_tensor_path_supported(
+            compute_recipe,
+            dtype,
+        ):
+            # Single grouped parameters intentionally have no split-quantize fallback.
+            pytest.skip("Single grouped parameters require the native grouped-tensor path")
         if single_grouped_weight and quantized_weight and quantization in ("fp8_delayed_scaling"):
             pytest.skip(
                 "single_grouped_weight does not support FP8 delayed scaling "
@@ -393,7 +566,6 @@ class TestGroupedLinearOp:
             y_ref.backward(dy_ref)
 
         # Construct fusible operation
-        recipe = make_recipe(quantization)
         with te.quantized_model_init(enabled=quantized_weight, recipe=recipe):
             op = te.ops.GroupedLinear(
                 group_size,
@@ -707,22 +879,6 @@ class TestGroupedLinearOp:
                 "single_grouped_weight/single_grouped_bias requires"
                 " NVTE_GROUPED_LINEAR_SINGLE_PARAM=1"
             )
-        device_capability = torch.cuda.get_device_capability()
-        if device_capability < (9, 0):
-            pytest.skip(
-                "Grouped GEMM CUDA-graph-safe path requires Hopper (SM90) or Blackwell (SM100+)"
-            )
-        # BF16/FP16 and FP8 per-tensor current scaling run on the Hopper grouped GEMM path,
-        # but MXFP8/NVFP4 grouped quantization kernels require Blackwell (SM100+).
-        requires_blackwell = quantization is not None and quantization != "fp8_current_scaling"
-        if requires_blackwell and device_capability < (10, 0):
-            pytest.skip("MXFP8/NVFP4 grouped GEMM CUDA-graph-safe path requires SM100+ (Blackwell)")
-        # Grouped GEMM on Hopper requires cuBLAS 13.4+; Blackwell requires cuBLAS 13.3+.
-        cublaslt_version = tex.get_cublasLt_version()
-        if device_capability < (10, 0) and cublaslt_version < 130400:
-            pytest.skip("Grouped GEMM on Hopper requires cuBLAS 13.4+.")
-        if cublaslt_version < 130300:
-            pytest.skip("Grouped GEMM requires cuBLAS 13.3+.")
         if quantization is None and quantized_weight:
             pytest.skip("quantized_weight requires a quantization recipe")
         if (
@@ -740,6 +896,13 @@ class TestGroupedLinearOp:
                 "only discrete weights (single_grouped_weight=False) are supported."
             )
 
+        recipe = make_recipe(quantization)
+        if not is_op_fuser_grouped_tensor_path_supported(
+            recipe,
+            dtype,
+        ):
+            pytest.skip("Configuration falls back to the non-CUDA-graph-safe path")
+
         single_grouped_bias = bias and single_grouped_weight
 
         # Split sizes (statically pinned for graph capture)
@@ -752,7 +915,6 @@ class TestGroupedLinearOp:
         in_shape = (num_active_tokens + token_padding, in_features)
         out_shape = (in_shape[0], out_features)
 
-        recipe = make_recipe(quantization)
         with te.quantized_model_init(enabled=quantized_weight, recipe=recipe):
             op = te.ops.GroupedLinear(
                 group_size,
@@ -926,6 +1088,8 @@ class TestGroupedMLPFusedOp:
         split_alignment: int = 256,
         delay_wgrad_compute: bool = False,
         activation: str,
+        situ_betas: tuple[float, float] = (4.0, 25.0),
+        strict_fusion: Optional[bool] = None,
     ) -> None:
         """GroupedLinear + scaled activation + GroupedLinear"""
 
@@ -945,6 +1109,7 @@ class TestGroupedMLPFusedOp:
 
         activation_is_glu = activation in (
             "scaled_swiglu",
+            "scaled_situglu",
             "scaled_clamped_qgeglu",
             "scaled_clamped_qgeglu_custom",
         )
@@ -980,8 +1145,10 @@ class TestGroupedMLPFusedOp:
         if quantization == "nvfp4_rht":
             if activation == "scaled_swiglu" and (bias or glu_interleave_size != 32):
                 pytest.skip("NVFP4 RHT SwiGLU grouped MLP coverage is limited to no-bias")
-            if activation not in ("scaled_swiglu", "scaled_srelu"):
-                pytest.skip("NVFP4 RHT grouped MLP coverage is limited to SwiGLU and SReLU")
+            if activation not in ("scaled_swiglu", "scaled_situglu", "scaled_srelu"):
+                pytest.skip(
+                    "NVFP4 RHT grouped MLP coverage is limited to SwiGLU, SiTU-GLU, and SReLU"
+                )
         if (
             with_quantization
             and quantization in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6", "nvfp4_rht")
@@ -1086,6 +1253,16 @@ class TestGroupedMLPFusedOp:
             if activation == "scaled_swiglu":
                 x1, x2 = x.chunk(2, dim=-1)
                 return torch.nn.functional.silu(x1) * x2
+            if activation == "scaled_situglu":
+                x1, x2 = x.chunk(2, dim=-1)
+                beta1, beta2 = situ_betas
+                return (
+                    beta1
+                    * torch.tanh(x1 / beta1)
+                    * torch.sigmoid(x1)
+                    * beta2
+                    * torch.tanh(x2 / beta2)
+                )
             if activation.startswith("scaled_clamped_qgeglu"):
                 x1, x2 = x.chunk(2, dim=-1)
                 lim = torch.tensor(geglu_limit, device=x1.device, dtype=x1.dtype)
@@ -1120,6 +1297,12 @@ class TestGroupedMLPFusedOp:
         def _make_scaled_act():
             if activation == "scaled_swiglu":
                 return te.ops.ScaledSwiGLU(glu_interleave_size=glu_interleave_size)
+            if activation == "scaled_situglu":
+                return te.ops.ScaledSiTUGLU(
+                    glu_interleave_size=glu_interleave_size,
+                    beta1=situ_betas[0],
+                    beta2=situ_betas[1],
+                )
             if activation == "scaled_clamped_qgeglu_custom":
                 return te.ops.ScaledClampedQGeGLU(
                     glu_interleave_size=glu_interleave_size,
@@ -1218,9 +1401,13 @@ class TestGroupedMLPFusedOp:
 
         # Check for expected fusions
         cudnn_frontend_supports_grouped_mlp = (
-            _cudnn_frontend_supports_grouped_gemm_srelu()
-            if activation == "scaled_srelu"
-            else _cudnn_frontend_version_supported()
+            grouped_mlp_module._cudnn_frontend_supports_grouped_gemm_situglu()
+            if activation == "scaled_situglu"
+            else (
+                _cudnn_frontend_supports_grouped_gemm_srelu()
+                if activation == "scaled_srelu"
+                else _cudnn_frontend_version_supported()
+            )
         )
         expected_grouped_mlp_fusion = cudnn_frontend_supports_grouped_mlp and (
             (
@@ -1245,6 +1432,8 @@ class TestGroupedMLPFusedOp:
                 fused_cls = te.ops.fused.GroupedMLP_CuTeGEMMGLU
             else:
                 fused_cls = te.ops.fused.GroupedMLP_CuTeGEMMUnary
+            if strict_fusion is True:
+                assert fused_cls.is_supported()
             if fused_cls.is_supported():
                 forward_ops = module._module_groups[0]._forward_ops
                 backward_ops = module._module_groups[0]._backward_ops
@@ -1255,6 +1444,14 @@ class TestGroupedMLPFusedOp:
                     fused_cls,
                 )
                 assert backward_ops[0][0] is forward_ops[0][0]
+        if strict_fusion is False:
+            forward_ops = module._module_groups[0]._forward_ops
+            backward_ops = module._module_groups[0]._backward_ops
+            fused_cls = te.ops.fused.GroupedMLP_CuTeGEMMGLU
+            assert not any(isinstance(op, fused_cls) for op, _ in forward_ops)
+            assert not any(isinstance(op, fused_cls) for op, _ in backward_ops)
+            assert any(isinstance(op, te.ops.ScaledSiTUGLU) for op, _ in forward_ops)
+            assert any(isinstance(op, te.ops.ScaledSiTUGLU) for op, _ in backward_ops)
 
         # Loose tols for sanity checking
         tols = {"rtol": 0.125, "atol": 0.25}
@@ -1316,6 +1513,189 @@ class TestGroupedMLPFusedOp:
         elif single_grouped_weight:
             assert_close(fc1.weight.grad, fc1_w_ref_grad, **tols)
             assert_close(fc2.weight.grad, fc2_w_ref_grad, **tols)
+
+    @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
+    @pytest.mark.parametrize("situ_betas", ((4.0, 25.0), (2.0, 8.0)))
+    def test_grouped_mlp_situglu_mxfp8_fallback(
+        self, monkeypatch, situ_betas: tuple[float, float]
+    ) -> None:
+        """A cuDNN frontend without SiTU support executes the native activation."""
+        native_calls = []
+        original_native_fwd = tex.scaled_situglu
+        original_native_bwd = tex.scaled_dsituglu
+
+        def traced_native_fwd(*args, **kwargs):
+            native_calls.append("fwd")
+            return original_native_fwd(*args, **kwargs)
+
+        def traced_native_bwd(*args, **kwargs):
+            native_calls.append("bwd")
+            return original_native_bwd(*args, **kwargs)
+
+        monkeypatch.setattr(tex, "scaled_situglu", traced_native_fwd)
+        monkeypatch.setattr(tex, "scaled_dsituglu", traced_native_bwd)
+        monkeypatch.setattr(
+            grouped_mlp_module,
+            "_cudnn_frontend_supports_grouped_gemm_situglu",
+            lambda: False,
+        )
+        # The unfused GroupedLinear bias-gradient path uses an atomic Triton
+        # reduction. This test intentionally exercises that fallback even when
+        # the surrounding test job requests deterministic algorithms.
+        monkeypatch.setenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1")
+        _clear_grouped_glu_kernel_caches()
+        try:
+            self.test_grouped_mlp(
+                group_size=4,
+                bias=True,
+                hidden_size=128,
+                quantization="mxfp8",
+                single_grouped_weight=False,
+                activation="scaled_situglu",
+                situ_betas=situ_betas,
+                strict_fusion=False,
+            )
+            torch.cuda.synchronize()
+            assert native_calls == ["fwd", "bwd"]
+        finally:
+            _clear_grouped_glu_kernel_caches()
+
+    @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
+    @pytest.mark.parametrize("single_grouped_weight", (False, True), ids=("discrete", "dense"))
+    @pytest.mark.parametrize(
+        "activation,situ_betas,act_func,dact_func",
+        (
+            ("scaled_situglu", (4.0, 25.0), "situglu", "dsituglu"),
+            ("scaled_situglu", (2.0, 8.0), "situglu", "dsituglu"),
+            ("scaled_swiglu", (4.0, 25.0), "swiglu", "dswiglu"),
+        ),
+        ids=("situ-k3", "situ-generic", "swiglu"),
+    )
+    def test_grouped_mlp_glu_mxfp8_real_cudnn_fusion(
+        self,
+        monkeypatch,
+        traced_cudnn_grouped_glu_wrappers,
+        single_grouped_weight: bool,
+        activation: str,
+        situ_betas: tuple[float, float],
+        act_func: str,
+        dact_func: str,
+    ) -> None:
+        """Real cuDNN MXFP8 GLU wrappers execute with TE's generated argument dtypes."""
+        if not _cudnn_frontend_supports_grouped_gemm_situglu():
+            pytest.skip("Installed cuDNN frontend lacks grouped SiTU-GLU")
+        fused_cls = te.ops.fused.GroupedMLP_CuTeGEMMGLU
+        assert fused_cls.is_supported()
+        # FC2 bias-gradient accumulation uses an atomic Triton reduction.
+        monkeypatch.setenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1")
+        if single_grouped_weight:
+            monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
+
+        self.test_grouped_mlp(
+            group_size=4,
+            bias=True,
+            hidden_size=128,
+            dtype=torch.bfloat16,
+            quantization="mxfp8",
+            single_grouped_weight=single_grouped_weight,
+            activation=activation,
+            situ_betas=situ_betas,
+            strict_fusion=True,
+        )
+        torch.cuda.synchronize()
+
+        expected_mode = "dense" if single_grouped_weight else "discrete"
+        expected_situ_betas = situ_betas if activation == "scaled_situglu" else (None, None)
+        expected_calls = [
+            {
+                "kind": "fwd",
+                "weight_mode": expected_mode,
+                "a_dtype": torch.float8_e4m3fn,
+                "b_dtype": torch.float8_e4m3fn,
+                "alpha_dtype": torch.bfloat16,
+                "prob_dtype": torch.bfloat16,
+                "c_dtype": torch.bfloat16,
+                "d_dtype": torch.float8_e4m3fn,
+                "act_func": act_func,
+                "situ_betas": expected_situ_betas,
+                "with_bias": True,
+            },
+            {
+                "kind": "bwd",
+                "weight_mode": expected_mode,
+                "a_dtype": torch.float8_e4m3fn,
+                "b_dtype": torch.float8_e4m3fn,
+                "c_dtype": torch.bfloat16,
+                "alpha_dtype": torch.bfloat16,
+                "beta_dtype": torch.bfloat16,
+                "prob_dtype": torch.float32,
+                "dprob_dtype": torch.float32,
+                "d_dtype": torch.float8_e4m3fn,
+                "act_func": dact_func,
+                "situ_betas": expected_situ_betas,
+                "generate_dbias": True,
+            },
+        ]
+        assert traced_cudnn_grouped_glu_wrappers == expected_calls
+
+    @pytest.mark.skipif(not nvfp4_available, reason=reason_for_no_nvfp4)
+    @pytest.mark.parametrize("situ_betas", ((4.0, 25.0), (2.0, 8.0)))
+    def test_grouped_mlp_situglu_nvfp4_real_cudnn_hadamard_fusion(
+        self,
+        monkeypatch,
+        traced_cudnn_grouped_glu_wrappers,
+        situ_betas: tuple[float, float],
+    ) -> None:
+        """NVFP4 SiTU uses cuDNN's fused GLU-Hadamard forward when available."""
+        if not _cudnn_frontend_supports_grouped_gemm_situglu():
+            pytest.skip("Installed cuDNN frontend lacks grouped SiTU-GLU")
+        assert te.ops.fused.GroupedMLP_CuTeGEMMGLU.is_supported()
+        # FC2 bias-gradient accumulation uses an atomic Triton reduction.
+        monkeypatch.setenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1")
+
+        self.test_grouped_mlp(
+            group_size=4,
+            bias=True,
+            hidden_size=128,
+            dtype=torch.bfloat16,
+            quantization="nvfp4_rht",
+            single_grouped_weight=False,
+            activation="scaled_situglu",
+            situ_betas=situ_betas,
+            strict_fusion=True,
+        )
+        torch.cuda.synchronize()
+
+        assert traced_cudnn_grouped_glu_wrappers == [
+            {
+                "kind": "fwd_hadamard",
+                "weight_mode": "discrete",
+                "a_dtype": torch.float4_e2m1fn_x2,
+                "b_dtype": torch.float4_e2m1fn_x2,
+                "alpha_dtype": torch.float32,
+                "prob_dtype": torch.float32,
+                "c_dtype": torch.bfloat16,
+                "d_dtype": torch.bfloat16,
+                "act_func": "situglu",
+                "situ_betas": situ_betas,
+                "with_bias": True,
+            },
+            {
+                "kind": "bwd",
+                "weight_mode": "discrete",
+                "a_dtype": torch.float4_e2m1fn_x2,
+                "b_dtype": torch.float4_e2m1fn_x2,
+                "c_dtype": torch.bfloat16,
+                "alpha_dtype": torch.float32,
+                "beta_dtype": torch.float32,
+                "prob_dtype": torch.float32,
+                "dprob_dtype": torch.float32,
+                "d_dtype": torch.bfloat16,
+                "act_func": "dsituglu",
+                "situ_betas": situ_betas,
+                "generate_dbias": True,
+            },
+        ]
 
     @pytest.mark.parametrize("weight_requires_grad", (False, True))
     def test_grouped_mlp_prequantized_mxfp8_input(
@@ -1559,13 +1939,15 @@ class TestGroupedMLPFusedOp:
         """Single-group GroupedLinear + ScaledSwiGLU + GroupedLinear with MXFP8."""
         if (
             runtime_offsets_supported
-            and not grouped_mlp_module._cudnn_frontend_supports_single_group_runtime_offsets()
+            and not grouped_mlp_module._cudnn_frontend_supports_single_group_runtime_offsets(
+                te.ops.ScaledSwiGLU
+            )
         ):
             pytest.skip("Requires cuDNN frontend >= 1.27.0")
         monkeypatch.setattr(
             grouped_mlp_module,
             "_cudnn_frontend_supports_single_group_runtime_offsets",
-            lambda: runtime_offsets_supported,
+            lambda _activation_type: runtime_offsets_supported,
         )
         self.test_grouped_mlp(
             group_size=1,

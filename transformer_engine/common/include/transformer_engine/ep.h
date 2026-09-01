@@ -49,7 +49,7 @@ typedef struct {
   int max_recv_tokens_per_rank;
   /*! Token hidden dimension. */
   int hidden_dim;
-  /*! Max SMs for NCCL EP dispatch/combine kernels. 0 = auto. */
+  /*! Max SMs for NCCL EP dispatch/combine kernels. 0 = default (32, clamped to device SM count). */
   int num_comm_sms;
   /*! Widest token dtype the group will dispatch; sizes staging buffers.
    *  Required (no default): must be set to a real token dtype. Per-dispatch
@@ -93,6 +93,9 @@ typedef struct {
 
 /*! \brief Bootstrap the EP backend from an existing NCCL EP sub-communicator.
  *         Requires SM>=90.
+ *
+ *  This call validates that the runtime NCCL is >=2.30.4 and then loads the
+ *  optional libnccl_ep.so library. Non-EP users do not load the library.
  *
  *  ep_comm is borrowed and must span exactly group_config.ep_size ranks. The
  *  caller retains ownership and must keep it alive until nvte_ep_shutdown()
@@ -149,6 +152,12 @@ void nvte_ep_prepare(NVTETensor handle_mem, NVTETensor topk_idx, NVTETensor recv
  *  expert-major (contiguous per-expert slabs, padded per layer_cfg). The
  *  *_win arguments enable zero-copy via symmem windows; pass NVTECommWindow{}
  *  when unused. Requires a prior nvte_ep_prepare on this handle_mem.
+ *
+ *  tokens/recv_tokens may be high-precision (bf16/fp16) or FP8:
+ *  for the latter, set rowwise data and rowwise scale-inverse (unswizzled
+ *  [T, hidden_dim/block]) on the tensor and the scales are routed alongside the
+ *  data. tokens and recv_tokens must share a scaling mode. For now, only MXFP8
+ *  (NVTE_MXFP8_1D_SCALING, e4m3 data + e8m0 scales) is supported.
  *
  *  \param[in]     handle_mem             uint8 routing-state buffer (from prepare).
  *  \param[in]     topk_idx               [T, top_k] int64 sparse routing indices.

@@ -13,21 +13,21 @@ The benchmark intentionally uses CUDA-device ``m_splits`` and MXFP8 only.
 
 Example:
 
-    python benchmarks/linear/benchmark_graph_safe_grouped_linear.py
+    python benchmarks/linear/benchmark_graph_safe_grouped_mlp.py
 
 Forward-only:
 
-    python benchmarks/linear/benchmark_graph_safe_grouped_linear.py --fwd-only
+    python benchmarks/linear/benchmark_graph_safe_grouped_mlp.py --fwd-only
 
 Nsight Systems:
 
     (optionally: unset DEBUGINFOD_URLS)
 
     nsys profile \
-        --output=./benchmarks/linear/graph_safe_grouped_linear_mxfp8 \
+        --output=./benchmarks/linear/graph_safe_grouped_mlp_mxfp8 \
         --force-overwrite true \
         --trace=cuda,nvtx,cudnn,cublas \
-        python benchmarks/linear/benchmark_graph_safe_grouped_linear.py --profile
+        python benchmarks/linear/benchmark_graph_safe_grouped_mlp.py --profile
 """
 
 # Match the Qwen MXFP8 SFT launch toggles before importing TE.
