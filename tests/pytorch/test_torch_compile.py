@@ -159,7 +159,7 @@ _EAGER_ATOL, _EAGER_RTOL = 0.0, 0.0
 
 def _assert_close_eager_compiled(fn, compiled, model, base):
     """Run ``fn`` eagerly and ``compiled`` on identical inputs; assert the
-    forward output and the input / weight gradients match."""
+    forward output and the input / weight / bias gradients match."""
     inp_eager = base.detach().clone().requires_grad_(True)
     model.zero_grad(set_to_none=True)
     out_eager = fn(inp_eager)
@@ -167,6 +167,8 @@ def _assert_close_eager_compiled(fn, compiled, model, base):
     ref_out = out_eager.detach().clone()
     ref_wgrad = model.weight.grad.detach().clone()
     ref_igrad = inp_eager.grad.detach().clone()
+    # bias=False keeps a 0-element ``bias`` around; grad is None then.
+    ref_bgrad = model.bias.grad.detach().clone() if model.bias.grad is not None else None
 
     inp_compiled = base.detach().clone().requires_grad_(True)
     model.zero_grad(set_to_none=True)
@@ -177,6 +179,8 @@ def _assert_close_eager_compiled(fn, compiled, model, base):
     torch.testing.assert_close(out_compiled, ref_out, atol=_EAGER_ATOL, rtol=_EAGER_RTOL)
     torch.testing.assert_close(inp_compiled.grad, ref_igrad, atol=_EAGER_ATOL, rtol=_EAGER_RTOL)
     torch.testing.assert_close(model.weight.grad, ref_wgrad, atol=_EAGER_ATOL, rtol=_EAGER_RTOL)
+    if ref_bgrad is not None:
+        torch.testing.assert_close(model.bias.grad, ref_bgrad, atol=_EAGER_ATOL, rtol=_EAGER_RTOL)
 
 
 # ---------------------------------------------------------------------------
@@ -2065,7 +2069,7 @@ def test_te_linear_compile_eager_fallback(case):
     torch.manual_seed(0)
     model_ref, fn_ref, mode, post_bwd_ref, _ = _fallback_case(case, dtype, device)
     torch.manual_seed(0)
-    _model, fn, _, post_bwd, reason = _fallback_case(case, dtype, device)
+    model, fn, _, post_bwd, reason = _fallback_case(case, dtype, device)
 
     def make_inp():
         torch.manual_seed(1)
@@ -2094,6 +2098,20 @@ def test_te_linear_compile_eager_fallback(case):
         if post_bwd is not None:
             post_bwd()
         torch.testing.assert_close(inp.grad, inp_ref.grad, atol=_EAGER_ATOL, rtol=_EAGER_RTOL)
+        # The fallback must also preserve the stateful side effects that define
+        # these cases (main_grad accumulation, delayed wgrad), not just inp.grad.
+        if getattr(model_ref.weight, "main_grad", None) is not None:
+            assert model.weight.grad is None
+            torch.testing.assert_close(
+                model.weight.main_grad,
+                model_ref.weight.main_grad,
+                atol=_EAGER_ATOL,
+                rtol=_EAGER_RTOL,
+            )
+        else:
+            torch.testing.assert_close(
+                model.weight.grad, model_ref.weight.grad, atol=_EAGER_ATOL, rtol=_EAGER_RTOL
+            )
     torch.testing.assert_close(out.detach(), out_ref.detach(), atol=_EAGER_ATOL, rtol=_EAGER_RTOL)
 
     torch._dynamo.reset()
