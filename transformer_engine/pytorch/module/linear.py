@@ -1742,9 +1742,13 @@ def _linear_backward_fake(
         # Input shape rederived from grad_output + SP config (inp_shape is not
         # stored: torch.Size with SymInt cannot cross in OpaqueValueBundle).
         dgrad_leading = _inp_leading_from_out(args.grad_output.shape[0], args)
-        # Under UB reduce-scatter overlap the returned dgrad is the plain
-        # reduce-scatter output; the quantizer only feeds the comm buffer.
-        dgrad_quantizer = None if args.ub_overlap_rs_dgrad else args.grad_input_quantizer
+        # Under UB reduce-scatter or bulk-wgrad overlap the returned dgrad is a
+        # plain tensor; the quantizer only feeds the comm buffer.
+        dgrad_quantizer = (
+            None
+            if (args.ub_overlap_rs_dgrad or args.ub_bulk_wgrad)
+            else args.grad_input_quantizer
+        )
         dgrad = TensorSpec(
             shape=(dgrad_leading, *args.grad_output.shape[1:-1], in_features),
             dtype=out_dtype,
