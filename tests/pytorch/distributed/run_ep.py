@@ -1248,10 +1248,10 @@ class TestMoeEpSequential(_EpTestCase):
                 static_topk_idx,
                 static_topk_weights,
             )
+        graph_out_snapshot = graph_out.detach().clone()
         graph_out.backward(static_dy)
         torch.cuda.synchronize()
-        graph_results = (
-            graph_out.detach().clone(),
+        graph_grad_results = (
             static_tokens.grad.detach().clone(),
             static_topk_weights.grad.detach().clone(),
             graph_fc1.weight.grad.detach().clone(),
@@ -1268,18 +1268,22 @@ class TestMoeEpSequential(_EpTestCase):
                 static_topk_idx,
                 eager_topk_weights,
             )
+        tolerances = {"rtol": 0.125, "atol": 0.25}
+        torch.testing.assert_close(graph_out_snapshot, eager_out, **tolerances)
+
         eager_out.backward(static_dy)
         torch.cuda.synchronize()
-        eager_results = (
-            eager_out,
+        eager_grad_results = (
             eager_tokens.grad,
             eager_topk_weights.grad,
             eager_fc1.weight.grad,
             eager_fc2.weight.grad,
         )
 
-        tolerances = {"rtol": 0.125, "atol": 0.25}
-        for graph_result, eager_result in zip(graph_results, eager_results):
+        for graph_result, eager_result in zip(
+            graph_grad_results,
+            eager_grad_results,
+        ):
             torch.testing.assert_close(graph_result, eager_result, **tolerances)
 
     @_eager_test_include
