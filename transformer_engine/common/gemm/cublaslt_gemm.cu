@@ -374,6 +374,7 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
       is_nvfp_scaling(inputA->scaling_mode) && is_nvfp_scaling(inputB->scaling_mode);
 
   // Update scaling factors with NVFP4 tensor scales
+  // TODO Fix bug where amax is ignored when alpha and beta are on device
   if (use_fp4 && nvfp4_tensor_scaling && !alpha_beta_on_device) {
     // Reserve some workspace for alpha scale
     NVTE_CHECK(workspaceSize >= 4,

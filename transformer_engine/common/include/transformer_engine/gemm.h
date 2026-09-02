@@ -54,7 +54,13 @@ enum NVTEMatmulConfigAttribute {
   kNVTEMatmulConfigUseSplitAccumulator = 5,
   /*! Number of streaming multiprocessors to use in GEMM kernel. */
   kNVTEMatmulConfigSMCount = 6,
-  /*! Whether alpha and beta are device pointers. Default: false. */
+  /*! Whether alpha and beta are device pointers. Default: false.
+   *
+   *  Known bugs: only supported with NVFP4, NVFP4 amaxes are ignored when alpha and beta are device pointers.
+   * 
+   *  \todo Generalize to all tensor formats
+   *  \todo Correctly handle NVFP4 amaxes when alpha and beta are device pointers
+   */
   kNVTEMatmulConfigAlphaBetaOnDevice = 7,
   kNVTEMatmulConfigNumAttributes
 };
