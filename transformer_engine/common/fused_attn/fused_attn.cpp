@@ -378,6 +378,13 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend_v2(NVTEFusedAttnConfig confi
         return reject(message,
                       "FP8 fused attention with THD format supports backward on sm100+ only!");
       }
+      if (cfg.is_training && cfg.check_for_backward_support &&
+          cfg.softmax_type != NVTE_Softmax_Type::NVTE_VANILLA_SOFTMAX &&
+          cudnn_runtime_version < 92600) {
+        return reject(message,
+                      "FP8 fused attention with THD format and a sink token requires cuDNN 9.26.0 "
+                      "or later for backward!");
+      }
       if (sm_arch >= 100 && (cfg.head_dim_qk > 128 || cfg.head_dim_v > 128)) {
         return reject(message,
                       "FP8 fused attention with THD format supports head dimensions up to 128 on "
