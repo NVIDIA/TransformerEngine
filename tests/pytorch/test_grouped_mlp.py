@@ -903,9 +903,10 @@ class TestGroupedMLPFusedOp:
         """MXFP8 with Format.HYBRID must fall back to the unfused ops.
 
         The fused backward reinterprets the grad output's storage as E4M3, so an
-        E5M2 backward format would be misread rather than converted.
+        E5M2 backward format would be misread rather than converted. The check is
+        MXFP8-only, since fp8_format says nothing about NVFP4 gradients.
         """
-        from transformer_engine.common.recipe import Format, MXFP8BlockScaling
+        from transformer_engine.common.recipe import Format, MXFP8BlockScaling, NVFP4BlockScaling
 
         fused_op_cls = grouped_mlp_module.GroupedMLP_CuTeGEMMGLU
         monkeypatch.setattr(fused_op_cls, "is_supported", classmethod(lambda cls: True))
@@ -925,6 +926,18 @@ class TestGroupedMLPFusedOp:
         e4m3 = MXFP8BlockScaling(fp8_format=Format.E4M3)
         rebuilt = grouped_mlp_module.fuse_grouped_mlp_ops(
             ops, recipe=e4m3, fused_op_cls=fused_op_cls
+        )
+        assert rebuilt is not ops
+        assert rebuilt == ops
+
+        # NVFP4 quantizes gradients to FP4, so the FP8 format must not gate it. Forcing the
+        # lookup to E5M2 is what an NVFP4 recipe would hit if the check were not MXFP8-only.
+        monkeypatch.setattr(
+            grouped_mlp_module, "get_fp8_torch_dtype", lambda *_, **__: torch.float8_e5m2
+        )
+        nvfp4 = NVFP4BlockScaling(disable_rht=False)
+        rebuilt = grouped_mlp_module.fuse_grouped_mlp_ops(
+            ops, recipe=nvfp4, fused_op_cls=fused_op_cls
         )
         assert rebuilt is not ops
         assert rebuilt == ops

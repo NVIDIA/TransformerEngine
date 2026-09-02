@@ -817,10 +817,11 @@ def fuse_grouped_mlp_ops(
     # NVFP4 fused grouped MLP uses graph-safe grouped quantize, which currently requires RHT.
     if recipe.nvfp4() and recipe.disable_rht:
         return ops
-    # The fused backward reinterprets the grad output's storage as E4M3, so a recipe with an
-    # E5M2 backward format would have its gradients misread rather than converted. NVFP4 pins
-    # fp8_format to E4M3, so in practice this declines MXFP8 with Format.HYBRID.
-    if get_fp8_torch_dtype(recipe, fprop_tensor=False) != torch.float8_e4m3fn:
+    # The fused MXFP8 backward reinterprets the grad output's storage as E4M3, so an E5M2
+    # backward format would have its gradients misread rather than converted. This declines
+    # MXFP8 with Format.HYBRID. fp8_format does not describe NVFP4 gradients, so NVFP4 is
+    # excluded from the check rather than relying on its value.
+    if recipe.mxfp8() and get_fp8_torch_dtype(recipe, fprop_tensor=False) != torch.float8_e4m3fn:
         return ops
     if activation_op_types is None:
         activation_op_types = (ScaledSwiGLU, ScaledClampedQGeGLU)
