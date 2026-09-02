@@ -399,6 +399,7 @@ class FP8GlobalState:
     fp8_distributed_group: Optional[dist_group_type] = None
     fp8_parameters: bool = False
     high_precision_init_val: bool = False
+    omit_columnwise_primary_weight_storage: bool = False
     is_first_fp8_module: bool = False
     fp8_graph_capturing: bool = False
     autocast_depth: int = 0
@@ -583,6 +584,11 @@ class FP8GlobalStateManager:
     def with_high_precision_init_val(cls) -> bool:
         """Should the high precision initial values be stored with FP8 parameters"""
         return cls.quantization_state.high_precision_init_val
+
+    @classmethod
+    def should_omit_columnwise_primary_weight_storage(cls) -> bool:
+        """Should quantized primary weights omit columnwise storage"""
+        return cls.quantization_state.omit_columnwise_primary_weight_storage
 
     @classmethod
     def fp8_graph_capturing(cls) -> bool:
@@ -879,6 +885,7 @@ def quantized_model_init(
     enabled: bool = True,
     recipe: Optional[Recipe] = None,
     preserve_high_precision_init_val: bool = False,
+    omit_columnwise_primary_weight_storage: bool = False,
 ) -> None:
     """
     Context manager for initialization of quantized parameters.
@@ -921,21 +928,42 @@ def quantized_model_init(
              users should call `clear_high_precision_init_val()` to release this CPU memory.
 
              This functionality is *EXPERIMENTAL*.
+    omit_columnwise_primary_weight_storage : bool, default = False
+             when enabled, initialize quantized primary weights with rowwise storage only.
+             This requires a recipe with ``backward_override`` set to ``"high_precision"``
+             or ``"dequantized"`` and is intended for fixed-mode workloads such as frozen
+             LoRA base weights. A model initialized this way cannot later use quantized
+             backward without reconstructing its primary weights with columnwise storage.
+
+             This functionality is *EXPERIMENTAL*.
     """
 
     qstate = FP8GlobalStateManager.quantization_state
     _fp8_parameters = qstate.fp8_parameters
     _fp8_recipe = qstate.fp8_recipe
     _high_precision_init_val = qstate.high_precision_init_val
+    _omit_columnwise_primary_weight_storage = qstate.omit_columnwise_primary_weight_storage
+    resolved_recipe = get_default_fp8_recipe() if recipe is None else recipe
+    if (
+        enabled
+        and omit_columnwise_primary_weight_storage
+        and resolved_recipe.backward_override is None
+    ):
+        raise ValueError(
+            "omit_columnwise_primary_weight_storage requires a recipe with "
+            "backward_override='high_precision' or 'dequantized'"
+        )
     qstate.fp8_parameters = enabled
-    qstate.fp8_recipe = get_default_fp8_recipe() if recipe is None else recipe
+    qstate.fp8_recipe = resolved_recipe
     qstate.high_precision_init_val = preserve_high_precision_init_val
+    qstate.omit_columnwise_primary_weight_storage = omit_columnwise_primary_weight_storage
     try:
         yield
     finally:
         qstate.fp8_parameters = _fp8_parameters
         qstate.fp8_recipe = _fp8_recipe
         qstate.high_precision_init_val = _high_precision_init_val
+        qstate.omit_columnwise_primary_weight_storage = _omit_columnwise_primary_weight_storage
 
 
 def fp8_autocast(

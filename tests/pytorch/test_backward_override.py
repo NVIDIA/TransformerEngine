@@ -872,16 +872,26 @@ def test_backward_override_recipe_matches_requested_mode(
 
 
 @pytest.mark.parametrize("recipe_name", _primary_weight_recipe_list)
-@pytest.mark.parametrize("backward_override", (None, *_BACKWARD_OVERRIDES))
-def test_primary_weight_layout_respects_backward_override(
+@pytest.mark.parametrize("backward_override", _BACKWARD_OVERRIDES)
+@pytest.mark.parametrize(
+    "omit_columnwise_primary_weight_storage",
+    (False, True),
+    ids=("default_storage", "rowwise_only"),
+)
+def test_primary_weight_layout_with_backward_override(
     recipe_name: str,
-    backward_override: Optional[str],
+    backward_override: str,
+    omit_columnwise_primary_weight_storage: bool,
 ) -> None:
-    """Primary weights only keep representations consumed by the configured backward."""
+    """Columnwise primary-weight storage is omitted only when explicitly requested."""
     mode_recipe = make_recipe(recipe_name, backward_override=backward_override)
     skip_unsupported_backward_override("linear", mode_recipe, backward_override)
 
-    with te.quantized_model_init(enabled=True, recipe=mode_recipe):
+    with te.quantized_model_init(
+        enabled=True,
+        recipe=mode_recipe,
+        omit_columnwise_primary_weight_storage=omit_columnwise_primary_weight_storage,
+    ):
         module = te.Linear(
             64,
             64,
@@ -891,7 +901,7 @@ def test_primary_weight_layout_respects_backward_override(
         )
 
     weight = module.weight
-    expect_columnwise = backward_override is None
+    expect_columnwise = not omit_columnwise_primary_weight_storage
 
     def _check_weight_layout() -> None:
         assert weight._rowwise_data is not None
@@ -909,6 +919,66 @@ def test_primary_weight_layout_respects_backward_override(
     y.sum().backward()
 
     _check_weight_layout()
+
+
+@pytest.mark.parametrize("recipe_name", _primary_weight_recipe_list)
+def test_default_primary_weight_storage_allows_quantized_backward_switch(
+    recipe_name: str,
+) -> None:
+    """Default storage preserves runtime switches from an override to quantized backward."""
+    mode_recipe = make_recipe(recipe_name, backward_override="dequantized")
+    default_recipe = make_recipe(recipe_name)
+
+    with te.quantized_model_init(enabled=True, recipe=mode_recipe):
+        module = te.Linear(
+            64,
+            64,
+            bias=False,
+            params_dtype=torch.bfloat16,
+            device="cuda",
+        )
+
+    x = torch.randn(32, 64, dtype=torch.bfloat16, device="cuda", requires_grad=True)
+    with te.autocast(enabled=True, recipe=default_recipe):
+        y = module(x)
+    y.sum().backward()
+
+
+@pytest.mark.parametrize("recipe_name", _primary_weight_recipe_list)
+def test_rowwise_only_primary_weight_rejects_quantized_backward(recipe_name: str) -> None:
+    """A rowwise-only primary weight fails before quantized backward requests columnwise data."""
+    mode_recipe = make_recipe(recipe_name, backward_override="dequantized")
+    default_recipe = make_recipe(recipe_name)
+
+    with te.quantized_model_init(
+        enabled=True,
+        recipe=mode_recipe,
+        omit_columnwise_primary_weight_storage=True,
+    ):
+        module = te.Linear(
+            64,
+            64,
+            bias=False,
+            params_dtype=torch.bfloat16,
+            device="cuda",
+        )
+
+    x = torch.randn(32, 64, dtype=torch.bfloat16, device="cuda", requires_grad=True)
+    with pytest.raises(RuntimeError, match="without columnwise storage"):
+        with te.autocast(enabled=True, recipe=default_recipe):
+            module(x)
+
+
+@pytest.mark.parametrize("recipe_name", _primary_weight_recipe_list)
+def test_rowwise_only_primary_weight_requires_backward_override(recipe_name: str) -> None:
+    """The rowwise-only opt-in rejects recipes that need quantized backward."""
+    with pytest.raises(ValueError, match="requires a recipe with backward_override"):
+        with te.quantized_model_init(
+            enabled=True,
+            recipe=make_recipe(recipe_name),
+            omit_columnwise_primary_weight_storage=True,
+        ):
+            pass
 
 
 @pytest.mark.parametrize("recipe_name", _quantized_numerics_recipe_list)
