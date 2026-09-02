@@ -1845,7 +1845,15 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 quantizer = self.quantizers["scaling_fwd"][fp8_meta_index]
                 if quantizer is None:
                     raise RuntimeError("Weight quantizer has not been initialized")
-                quantizer.set_usage(rowwise=True, columnwise=torch.is_grad_enabled())
+                # Backward overrides consume high-precision or dequantized weights,
+                # so they do not need a quantized columnwise representation.
+                quantizer.set_usage(
+                    rowwise=True,
+                    columnwise=(
+                        torch.is_grad_enabled()
+                        and self.fp8_meta["recipe"].backward_override is None
+                    ),
+                )
                 quantizer.internal = False
                 # HybridQuantizer is included so its current-scaling / NVFP4
                 # sub-quantizers get the same cross-shard amax reduction as the

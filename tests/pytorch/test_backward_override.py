@@ -90,6 +90,19 @@ _quantized_numerics_recipe_list = [
     ),
 ]
 
+_primary_weight_recipe_list = [
+    pytest.param(
+        "mxfp8",
+        marks=pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8),
+        id="MXFP8BlockScaling",
+    ),
+    pytest.param(
+        "nvfp4",
+        marks=pytest.mark.skipif(not nvfp4_available, reason=reason_for_no_nvfp4),
+        id="NVFP4BlockScaling1D",
+    ),
+]
+
 
 @pytest.fixture(autouse=True)
 def _reset_global_fp8_state():
@@ -856,6 +869,46 @@ def test_backward_override_recipe_matches_requested_mode(
     quant_recipe = make_recipe(recipe_name)
     assert mode_recipe.backward_override == backward_override
     assert quant_recipe.backward_override is None
+
+
+@pytest.mark.parametrize("recipe_name", _primary_weight_recipe_list)
+@pytest.mark.parametrize("backward_override", (None, *_BACKWARD_OVERRIDES))
+def test_primary_weight_layout_respects_backward_override(
+    recipe_name: str,
+    backward_override: Optional[str],
+) -> None:
+    """Primary weights only keep representations consumed by the configured backward."""
+    mode_recipe = make_recipe(recipe_name, backward_override=backward_override)
+    skip_unsupported_backward_override("linear", mode_recipe, backward_override)
+
+    with te.quantized_model_init(enabled=True, recipe=mode_recipe):
+        module = te.Linear(
+            64,
+            64,
+            bias=False,
+            params_dtype=torch.bfloat16,
+            device="cuda",
+        )
+
+    weight = module.weight
+    expect_columnwise = backward_override is None
+
+    def _check_weight_layout() -> None:
+        assert weight._rowwise_data is not None
+        assert weight._rowwise_scale_inv is not None
+        assert (weight._columnwise_data is not None) == expect_columnwise
+        assert (weight._columnwise_scale_inv is not None) == expect_columnwise
+        if hasattr(weight, "_amax_columnwise"):
+            assert (weight._amax_columnwise is not None) == expect_columnwise
+
+    _check_weight_layout()
+
+    x = torch.randn(32, 64, dtype=torch.bfloat16, device="cuda", requires_grad=True)
+    with te.autocast(enabled=True, recipe=mode_recipe):
+        y = module(x)
+    y.sum().backward()
+
+    _check_weight_layout()
 
 
 @pytest.mark.parametrize("recipe_name", _quantized_numerics_recipe_list)
