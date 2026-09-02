@@ -1182,6 +1182,8 @@ def _backward_update_step_no_backward_in_scope(model, recipe):
 
 @run_distributed_test()
 def _test_backward_update_with_skipped_ranks(step_fn):
+    # Drop amax buffers registered by earlier tests so only this model is reduced.
+    FP8GlobalStateManager.reset()
     model = nn.ModuleList([te.Linear(HIDDEN_SIZE, HIDDEN_SIZE, bias=True) for _ in range(2)]).cuda()
     recipe = DelayedScaling(reduce_amax=True)
     qstate = FP8GlobalStateManager.quantization_state
@@ -1205,6 +1207,7 @@ def test_backward_update_with_skipped_ranks():
         _backward_update_step_no_backward_in_scope,
     ):
         _test_backward_update_with_skipped_ranks(step_fn)
+    FP8GlobalStateManager.reset()
 
 
 if __name__ == "__main__":
