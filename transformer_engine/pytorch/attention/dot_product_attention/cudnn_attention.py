@@ -1041,15 +1041,36 @@ def _f16_forward(
 
     max_logit = None
     if return_max_logit:
-        if q_format == "thd" and max_scores.ndim == 4:
-            seqlens_q = _sequence_lengths(cu_seqlens_q).to(device=max_scores.device)
-            sq_idx = torch.arange(max_scores.shape[2], device=max_scores.device).view(
-                1, 1, -1, 1
-            )
-            valid = sq_idx < seqlens_q.view(-1, 1, 1, 1)
-            max_scores_for_reduce = max_scores.masked_fill(~valid, float("-inf"))
-        else:
-            max_scores_for_reduce = max_scores
+        max_scores_for_reduce = max_scores
+        if q_format == "thd":
+            if max_scores.ndim == 4:
+                seqlens_q = _sequence_lengths(cu_seqlens_q).to(
+                    device=max_scores.device
+                )
+                sq_idx = torch.arange(
+                    max_scores.shape[2], device=max_scores.device
+                ).view(1, 1, -1, 1)
+                valid = sq_idx < seqlens_q.view(-1, 1, 1, 1)
+                max_scores_for_reduce = max_scores.masked_fill(
+                    ~valid, float("-inf")
+                )
+            elif max_scores.ndim == 3:
+                seqlens_q = _sequence_lengths(cu_seqlens_q).to(
+                    device=max_scores.device
+                )
+                total_tokens = max_scores.shape[0]
+                starts = cu_seqlens_q_padded[:-1].to(device=max_scores.device)
+                ends = (starts + seqlens_q).clamp(max=total_tokens)
+                delta = torch.zeros(
+                    total_tokens + 1, dtype=torch.int32, device=max_scores.device
+                )
+                updates = torch.ones_like(starts, dtype=torch.int32)
+                delta.scatter_add_(0, starts.clamp(max=total_tokens), updates)
+                delta.scatter_add_(0, ends, -updates)
+                valid = delta[:-1].cumsum(0) > 0
+                max_scores_for_reduce = max_scores.masked_fill(
+                    ~valid.view(-1, 1, 1), float("-inf")
+                )
         reduce_dims = (0, 2) if max_scores_for_reduce.ndim == 3 else (0, 2, 3)
         max_logit = torch.amax(max_scores_for_reduce, dim=reduce_dims).to(output.dtype)
     return output, aux, max_logit
