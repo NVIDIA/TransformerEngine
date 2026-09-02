@@ -688,8 +688,18 @@ class FP8GlobalStateManager:
     reduce_and_update_fp8_tensors = reduce_and_update_quantization_state
 
     @classmethod
-    def request_backward_quantization_update(cls) -> None:
-        """Request an update after the enclosing logical backward."""
+    def request_backward_quantization_update(cls, recipe: Recipe) -> None:
+        """Request an update after the enclosing logical backward.
+
+        No-op for recipes without delayed-scaling state and inside CUDA graph
+        capture, where the graphed wrapper performs the update.
+        """
+        if not (recipe.delayed() or recipe.custom()):
+            return
+        from .graph import is_graph_capturing  # pylint: disable=import-outside-toplevel
+
+        if is_graph_capturing():
+            return
         qstate = cls.quantization_state
         qstate.pending_backward_quantization_update = True
         if qstate.quantization_backward_scope_depth == 0:
@@ -888,9 +898,15 @@ def quantization_backward_scope() -> None:
     independent graphs produced under one autocast, or includes delayed work
     such as ``module.backward_dw()``. Nested scopes update once when the
     outermost scope exits.
+
+    The update runs on scope exit even if no quantized module ran backward
+    inside it, so ranks that skipped every backward (e.g. an expert with no
+    tokens) still participate in the amax reduction.
     """
     qstate = FP8GlobalStateManager.quantization_state
     outermost = qstate.quantization_backward_scope_depth == 0
+    if outermost:
+        qstate.pending_backward_quantization_update = True
     task_id = torch._C._current_graph_task_id() if outermost else -1
     if task_id != -1:
         FP8GlobalStateManager._queue_backward_quantization_update_callback(task_id)

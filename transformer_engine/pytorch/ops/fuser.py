@@ -5,7 +5,7 @@
 """Manager class for a pipeline of fusible operations."""
 
 from __future__ import annotations
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Iterable, Sequence
 import itertools
 from typing import Any, Optional, TypeAlias
 
@@ -24,24 +24,6 @@ from .op import (
 def _split_tuple(t: tuple, idx: int) -> tuple[tuple, tuple]:
     """Split tuple at index"""
     return t[:idx], t[idx:]
-
-
-# Lazily imported function used in _is_graph_capturing
-_is_graph_capturing_function: Optional[Callable[[], bool]] = None
-
-
-def _is_graph_capturing() -> bool:
-    """Whether function is called within ``make_graphed_callables``
-
-    Avoid circular import with lazy import.
-
-    """
-    global _is_graph_capturing_function
-    if _is_graph_capturing_function is None:
-        from ..graph import is_graph_capturing
-
-        _is_graph_capturing_function = is_graph_capturing
-    return _is_graph_capturing_function()
 
 
 # Type alias for a function that may perform operation fusion
@@ -227,13 +209,6 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
             func_ctx.save_for_backward(*tensors_to_save)
             func_ctx.tensor_objects = tensor_objects
 
-            recipe = FP8GlobalStateManager.get_fp8_recipe()
-            should_request_backward_quantization_update = (
-                fuser.first_op_requiring_backward < fuser._num_basic_ops
-                and FP8GlobalStateManager.is_fp8_enabled()
-                and (recipe.delayed() or recipe.custom())
-            )
-
             # Other context
             func_ctx.backward_ops = fuser._backward_ops
             func_ctx.basic_ops = fuser._basic_ops
@@ -245,8 +220,10 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
             func_ctx.basic_op_extra_output_channels = fuser._basic_op_extra_output_channels
             func_ctx.basic_op_extra_output_consumers = fuser._basic_op_extra_output_consumers
             func_ctx.basic_op_extra_input_sources = fuser._basic_op_extra_input_sources
-            func_ctx.should_request_backward_quantization_update = (
-                should_request_backward_quantization_update
+            func_ctx.fp8_recipe = (
+                FP8GlobalStateManager.get_fp8_recipe()
+                if FP8GlobalStateManager.is_fp8_enabled()
+                else None
             )
 
         # Mark output tensors as not deletable in backward
@@ -387,8 +364,8 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
             for op_idx, input_idx in func_ctx.external_extra_input_slots
         ]
 
-        if func_ctx.should_request_backward_quantization_update and not _is_graph_capturing():
-            FP8GlobalStateManager.request_backward_quantization_update()
+        if func_ctx.fp8_recipe is not None:
+            FP8GlobalStateManager.request_backward_quantization_update(func_ctx.fp8_recipe)
 
         return (
             dx,  # input_

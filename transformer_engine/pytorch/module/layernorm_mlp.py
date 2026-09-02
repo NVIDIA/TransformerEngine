@@ -46,7 +46,6 @@ from ..utils import (
     cast_if_needed,
     assert_dim_for_fp8_exec,
     clear_tensor_data,
-    requires_grad,
     needs_quantized_gemm,
     get_nvtx_range_context,
 )
@@ -64,7 +63,6 @@ from ..distributed import (
 )
 from ..constants import FP8BwdTensorIdx, FP8FwdTensorIdx, dist_group_type
 from ..jit import no_torch_dynamo
-from ..graph import is_graph_capturing
 from ..tensor.float8_tensor import Float8Tensor
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor.nvfp4_tensor import NVFP4Quantizer
@@ -907,14 +905,6 @@ class _LayerNormMLP(torch.autograd.Function):
                 inp.requires_grad or ln_weight.requires_grad or ln_bias.requires_grad
             )
             ctx.normalization = normalization
-            ctx.should_request_backward_quantization_update = (
-                ctx.fp8
-                and (ctx.fp8_recipe.delayed() or ctx.fp8_recipe.custom())
-                and requires_grad(
-                    inp, ln_weight, ln_bias, fc1_weight, fc2_weight, fc1_bias, fc2_bias
-                )
-            )
-
             ctx.wgrad_store = wgrad_store
             if is_recomputation:  # return the recomputed tensors
                 return (
@@ -1803,8 +1793,8 @@ class _LayerNormMLP(torch.autograd.Function):
         else:
             fc2_wgrad = None
 
-        if ctx.should_request_backward_quantization_update and not is_graph_capturing():
-            FP8GlobalStateManager.request_backward_quantization_update()
+        if ctx.fp8:
+            FP8GlobalStateManager.request_backward_quantization_update(ctx.fp8_recipe)
 
         # FIX THIS
         # Scatter Fp8 tranposed-weight buffers

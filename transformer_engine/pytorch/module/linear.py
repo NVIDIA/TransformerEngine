@@ -72,7 +72,6 @@ from ..cpp_extensions import (
 )
 from ..constants import FP8BwdTensorIdx, FP8FwdTensorIdx, GemmParallelModes, dist_group_type
 from ..jit import no_torch_dynamo
-from ..graph import is_graph_capturing
 from ..quantized_tensor import (
     QuantizedTensor,
     QuantizedTensorStorage,
@@ -198,6 +197,7 @@ class LinearBwdArgs:
     # --- Numerical / dtype config ---
     activation_dtype: Optional[torch.dtype] = None
     fp8: bool = False
+    fp8_recipe: Optional[Recipe] = None
     dgrad_use_split_accumulator: bool = _2X_ACC_DGRAD
     wgrad_use_split_accumulator: bool = _2X_ACC_WGRAD
     backward_override: Optional[str] = None
@@ -232,9 +232,6 @@ class LinearBwdArgs:
     origin_weight_ref: Optional[Any] = None
     origin_weight_overwrites_main_grad: bool = False
     main_grad_func: Optional[Callable[[], torch.Tensor]] = None
-
-    # --- Quantization state update bookkeeping ---
-    should_request_backward_quantization_update: bool = False
 
     # --- Misc ---
     cpu_offloading: bool = False
@@ -705,6 +702,7 @@ def _linear_setup_ctx(
     # Numerical / dtype config
     bwd_args.activation_dtype = fwd_args.activation_dtype
     bwd_args.fp8 = fp8
+    bwd_args.fp8_recipe = FP8GlobalStateManager.get_fp8_recipe() if fp8 else None
     bwd_args.dgrad_use_split_accumulator = fwd_args.dgrad_use_split_accumulator
     bwd_args.wgrad_use_split_accumulator = fwd_args.wgrad_use_split_accumulator
     bwd_args.backward_override = backward_override
@@ -1424,17 +1422,6 @@ class _Linear(torch.autograd.Function):
             ctx.save_for_backward(*tensors_to_save)
             ctx.tensor_objects = tensor_objects
             ctx.backward_objects = bwd_args
-            if fwd_args.fp8 and (
-                fwd_args.input_requires_grad
-                or fwd_args.weight_requires_grad
-                or fwd_args.bias_requires_grad
-            ):
-                recipe = FP8GlobalStateManager.get_fp8_recipe()
-                bwd_args.should_request_backward_quantization_update = (
-                    recipe.delayed() or recipe.custom()
-                )
-            if fwd_args.backward_override is not None:
-                bwd_args.should_request_backward_quantization_update = False
 
         return out, new_weight_workspace
 
@@ -1452,15 +1439,13 @@ class _Linear(torch.autograd.Function):
         if bwd_args.ub_name is not None:
             nvtx_label = f"{nvtx_label}.{bwd_args.ub_name}"
         result = _linear_backward(bwd_args) + (None,)  # fwd_args grad slot
-        should_request_backward_quantization_update = (
-            bwd_args.should_request_backward_quantization_update
-        )
+        fp8_recipe = bwd_args.fp8_recipe if bwd_args.fp8 else None
         # Drop all references held by bwd_args (saved tensors, quantizers, weakrefs,
         # main_grad closure) so they don't outlive backward via ctx under retain_graph.
         ctx.backward_objects = None
         del bwd_args
-        if should_request_backward_quantization_update and not is_graph_capturing():
-            FP8GlobalStateManager.request_backward_quantization_update()
+        if fp8_recipe is not None:
+            FP8GlobalStateManager.request_backward_quantization_update(fp8_recipe)
         return result
 
 

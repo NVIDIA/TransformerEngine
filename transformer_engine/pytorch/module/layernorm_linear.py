@@ -41,7 +41,6 @@ from ..utils import (
     init_method_constant,
     nvtx_range_pop,
     nvtx_range_push,
-    requires_grad,
     needs_quantized_gemm,
     get_nvtx_range_context,
 )
@@ -63,7 +62,6 @@ from ..distributed_weight import (
 )
 from ..constants import FP8BwdTensorIdx, FP8FwdTensorIdx, GemmParallelModes, dist_group_type
 from ..jit import no_torch_dynamo
-from ..graph import is_graph_capturing
 from ._common import (
     apply_normalization,
     noop_cat,
@@ -587,11 +585,6 @@ class _LayerNormLinear(torch.autograd.Function):
             ctx.ub_name = ub_name
             ctx.requires_dgrad = inp_requires_grad
             ctx.normalization = normalization
-            ctx.should_request_backward_quantization_update = (
-                ctx.fp8
-                and (ctx.fp8_recipe.delayed() or ctx.fp8_recipe.custom())
-                and requires_grad(inp, ln_weight, ln_bias, weight, bias)
-            )
             ctx.wgrad_store = wgrad_store
             ctx.debug = debug
 
@@ -606,7 +599,6 @@ class _LayerNormLinear(torch.autograd.Function):
                 ctx.grad_input_quantizer = None
                 ctx.grad_weight_quantizer = None
                 ctx.grad_output_quantizer = None
-                ctx.should_request_backward_quantization_update = False
 
         # ------------------------------------------------------
         # Cached state for backward pass is ready...
@@ -1181,8 +1173,8 @@ class _LayerNormLinear(torch.autograd.Function):
         else:
             wgrad = None
 
-        if ctx.should_request_backward_quantization_update and not is_graph_capturing():
-            FP8GlobalStateManager.request_backward_quantization_update()
+        if ctx.fp8:
+            FP8GlobalStateManager.request_backward_quantization_update(ctx.fp8_recipe)
 
         # Scatter fp8 weight buffers
         # if ctx.fp8 and not isinstance(weight, QuantizedTensorStorage):
