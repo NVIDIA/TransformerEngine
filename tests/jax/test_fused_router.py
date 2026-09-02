@@ -349,9 +349,7 @@ def run_topk_comparison(
     # Backward: reference (jitted)
     # Use random weights so the backward pass receives non-uniform gradients instead of
     # the all-ones gradient produced by an unweighted jnp.sum.
-    grad_weights = jax.random.uniform(
-        jax.random.PRNGKey(SEED), (1, num_experts), dtype=jnp.float32
-    )
+    grad_weights = jax.random.uniform(jax.random.PRNGKey(SEED), (1, num_experts), dtype=jnp.float32)
 
     def loss_ref(logits_):
         p, _ = reference_topk_with_score_function(
@@ -469,9 +467,7 @@ def test_fused_scores_for_aux_loss(dtype, num_tokens, num_experts, topk, score_f
     # Backward (jitted)
     # Use random weights so the backward pass receives non-uniform gradients instead of
     # the all-ones gradient produced by an unweighted jnp.sum.
-    grad_weights = jax.random.uniform(
-        jax.random.PRNGKey(SEED), (1, num_experts), dtype=jnp.float32
-    )
+    grad_weights = jax.random.uniform(jax.random.PRNGKey(SEED), (1, num_experts), dtype=jnp.float32)
 
     def loss_ref(logits_):
         _, s = reference_compute_scores_for_aux_loss(logits_, topk, score_function)
