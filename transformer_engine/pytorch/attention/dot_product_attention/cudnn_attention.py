@@ -2460,6 +2460,7 @@ def _fp8_backward(
             _tensor_metadata(_quantized_data(x) if _is_float8_tensor(x) else x)
             for x in (q, k, v, o, d_o)
         ),
+        *(getattr(x, "_fp8_dtype", None) for x in (q, k, v, o, d_o, d_q, d_k, d_v)),
         type(q).__name__,
         type(dqkv_quantizer).__name__,
         qkv_layout,
