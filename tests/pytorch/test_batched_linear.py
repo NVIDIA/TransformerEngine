@@ -233,6 +233,84 @@ def test_mxfp8_selective_gradients(
     assert (op.weight.grad is not None) == weight_requires_grad
 
 
+@pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
+@pytest.mark.parametrize("batch_dim", (0, -2))
+def test_save_original_input(monkeypatch: pytest.MonkeyPatch, batch_dim: int) -> None:
+    """MXFP8 backward reconstructs its column-wise operand from the original input."""
+    dtype = torch.bfloat16
+    num_gemms, rows = 2, 32
+    in_features, out_features = 64, 32
+    input_shape = (
+        (num_gemms, rows, in_features) if batch_dim == 0 else (rows, num_gemms, in_features)
+    )
+    output_shape = list(input_shape)
+    output_shape[-1] = out_features
+
+    op = te_ops.BatchedLinear(
+        num_gemms,
+        in_features,
+        out_features,
+        batch_dim=batch_dim,
+        bias=False,
+        save_original_input=True,
+        dtype=dtype,
+        device="cuda",
+    )
+    inp = torch.rand(input_shape, dtype=dtype, device="cuda", requires_grad=True)
+    grad_output = torch.rand(output_shape, dtype=dtype, device="cuda")
+
+    inp_ref = _to_reference(inp, requires_grad=True)
+    weight_ref = _to_reference(op.weight, requires_grad=True)
+    output_ref = (
+        torch.einsum("g...d,grd->g...r", inp_ref, weight_ref)
+        if batch_dim == 0
+        else torch.einsum("...gd,grd->...gr", inp_ref, weight_ref)
+    )
+    output_ref.backward(_to_reference(grad_output, requires_grad=False))
+
+    input_quantizations = []
+    original_quantize = batched_linear_op.BatchedLinear._quantize_for_batched_gemm
+
+    def capture_quantize(tensor, quantizer, batch_dim_, num_gemms_, *, rowwise, columnwise):
+        quantized = original_quantize(
+            tensor,
+            quantizer,
+            batch_dim_,
+            num_gemms_,
+            rowwise=rowwise,
+            columnwise=columnwise,
+        )
+        if tensor.data_ptr() == inp.data_ptr():
+            input_quantizations.append((quantized, rowwise, columnwise))
+        return quantized
+
+    monkeypatch.setattr(
+        batched_linear_op.BatchedLinear,
+        "_quantize_for_batched_gemm",
+        staticmethod(capture_quantize),
+    )
+
+    recipe = make_recipe("mxfp8")
+    with te.autocast(enabled=True, recipe=recipe):
+        output = op(inp)
+    output.backward(grad_output)
+
+    assert [(rowwise, columnwise) for _, rowwise, columnwise in input_quantizations] == [
+        (True, False),
+        (False, True),
+    ]
+    forward_input, backward_input = (entry[0] for entry in input_quantizations)
+    assert forward_input._rowwise_data is not None
+    assert forward_input._columnwise_data is None
+    assert backward_input._rowwise_data is None
+    assert backward_input._columnwise_data is not None
+
+    tols = quantization_tols("mxfp8")
+    assert_close(output, output_ref, **tols)
+    assert_close(inp.grad, inp_ref.grad, **tols)
+    assert_close(op.weight.grad, weight_ref.grad, **tols)
+
+
 @pytest.mark.parametrize("deferred_init", (False, True))
 def test_init_method_and_rng_tracker(deferred_init: bool) -> None:
     """Initialization uses the requested RNG tracker, including after meta init."""

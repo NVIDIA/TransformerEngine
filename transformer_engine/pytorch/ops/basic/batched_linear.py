@@ -76,6 +76,10 @@ class BatchedLinear(BasicOperation):
         Write weight gradients directly into the externally allocated
         ``weight.main_grad`` buffer. Setting ``weight.overwrite_main_grad`` to
         ``True`` overwrites that buffer instead of accumulating into it.
+    save_original_input : bool, default = False
+        Save the original high-precision input for the weight-gradient
+        computation instead of the cast or quantized forward operand. With
+        MXFP8 compute, the column-wise input is quantized during backward.
     init_method : callable, optional
         Weight initialization method. The default is TE's normal initializer.
     name : str, optional
@@ -103,6 +107,7 @@ class BatchedLinear(BasicOperation):
         dtype: Optional[torch.dtype] = None,
         rng_state_tracker_function: Optional[Callable[[], CudaRNGStatesTracker]] = None,
         accumulate_into_main_grad: bool = False,
+        save_original_input: bool = False,
         init_method: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
         name: Optional[str] = None,
     ) -> None:
@@ -139,6 +144,7 @@ class BatchedLinear(BasicOperation):
         self.name = name
         self._rng_state_tracker_function = rng_state_tracker_function
         self._accumulate_into_main_grad = accumulate_into_main_grad
+        self.save_original_input = save_original_input
         self._init_method = get_default_init_method() if init_method is None else init_method
 
         # Initialize recipe state if the weight itself is stored in MXFP8.
@@ -490,6 +496,7 @@ class BatchedLinear(BasicOperation):
         input_requires_grad = ctx.requires_grad
         weight_requires_grad = ctx.requires_grad and self.weight.requires_grad
         bias_requires_grad = ctx.requires_grad and self.bias is not None and self.bias.requires_grad
+        save_original_input = self.save_original_input and weight_requires_grad
         with_mxfp8_compute = FP8GlobalStateManager.is_fp8_enabled()
 
         if not with_mxfp8_compute and is_quantized_tensor(self.weight):
@@ -513,7 +520,7 @@ class BatchedLinear(BasicOperation):
                 self.batch_dim,
                 self.num_gemms,
                 rowwise=True,
-                columnwise=weight_requires_grad,
+                columnwise=weight_requires_grad and not save_original_input,
             )
             if isinstance(w, MXFP8TensorStorage):
                 self._validate_quantized_weight_usage(w, columnwise=input_requires_grad)
@@ -554,7 +561,7 @@ class BatchedLinear(BasicOperation):
 
         if ctx.requires_grad:
             ctx.save_for_backward(
-                gemm_x if weight_requires_grad else None,
+                (input_ if save_original_input else gemm_x) if weight_requires_grad else None,
                 gemm_w if input_requires_grad else None,
             )
             ctx.input_requires_grad = input_requires_grad
@@ -565,6 +572,12 @@ class BatchedLinear(BasicOperation):
             ctx.rows = rows
             ctx.dtype = dtype
             ctx.with_mxfp8_compute = with_mxfp8_compute
+            ctx.save_original_input = save_original_input
+            ctx.input_quantizer = (
+                self.get_quantizer("forward", 0)
+                if save_original_input and with_mxfp8_compute
+                else None
+            )
             ctx.grad_output_quantizer = self.get_quantizer("backward", 0)
             ctx.apply_bias = self.apply_bias
 
@@ -624,6 +637,17 @@ class BatchedLinear(BasicOperation):
         if ctx.weight_requires_grad:
             if x is None:
                 raise RuntimeError("BatchedLinear input was not saved for weight gradient")
+            if ctx.save_original_input:
+                x = maybe_dequantize(x, ctx.dtype)
+                if ctx.with_mxfp8_compute:
+                    x = self._quantize_for_batched_gemm(
+                        x,
+                        ctx.input_quantizer,
+                        self.batch_dim,
+                        self.num_gemms,
+                        rowwise=False,
+                        columnwise=True,
+                    )
             accumulate_wgrad = False
             if self._accumulate_into_main_grad:
                 main_grad = get_main_grad_from_param(
