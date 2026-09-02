@@ -799,3 +799,40 @@ def test_nvfp4_ue5m3_gemm_versus_reference(
     _check_ue5m3_gemm_versus_dequantized(
         M, K, N, x_columnwise, w_columnwise, disable_second_level_scale
     )
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.skipif(not ue5m3_available, reason=reason_for_no_ue5m3)
+@pytest.mark.parametrize("M, K, N", [(256, 256, 256), (1024, 3072, 992)])
+def test_nvfp4_ue5m3_gemm_leaves_operands_unswizzled(M: int, K: int, N: int):
+    """The UE5M3 GEMM must not swizzle operand scales in place.
+
+    Weights are persistent: the master-weight cast rewrites their scales in
+    the unswizzled layout, so a swizzled mark left behind by a GEMM makes
+    every later GEMM and dequantize read the scales in the wrong layout.
+    """
+    torch.manual_seed(0)
+    device, dtype = "cuda", torch.bfloat16
+    x = torch.randn((M, K), dtype=dtype, device=device)
+    w = torch.randn((N, K), dtype=dtype, device=device)
+    quantizer = NVFP4Quantizer(
+        fp4_dtype=tex.DType.kFloat4E2M1,
+        scale_dtype=tex.DType.kFloat8UE5M3,
+        rowwise=True,
+        columnwise=True,
+        with_rht=False,
+        with_post_rht_amax=False,
+        with_2d_quantization=True,
+    )
+    x_q = quantizer.update_quantized(x, quantizer.make_empty(x.shape, dtype=dtype, device=device))
+    w_q = quantizer.update_quantized(w, quantizer.make_empty(w.shape, dtype=dtype, device=device))
+    before = [
+        (t._rowwise_scale_inv.clone(), t._columnwise_scale_inv.clone()) for t in (w_q, x_q)
+    ]
+    y1 = general_gemm(w_q, x_q, out_dtype=dtype, layout="TN")[0]
+    y2 = general_gemm(w_q, x_q, out_dtype=dtype, layout="TN")[0]
+    for t, (rowwise, columnwise) in zip((w_q, x_q), before):
+        assert not t._with_gemm_swizzled_scales, "GEMM marked its operand as swizzled"
+        assert torch.equal(t._rowwise_scale_inv, rowwise), "GEMM changed rowwise scales"
+        assert torch.equal(t._columnwise_scale_inv, columnwise), "GEMM changed columnwise scales"
+    assert torch.equal(y1, y2), "repeated GEMM on the same operands differs"
