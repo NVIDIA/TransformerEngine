@@ -8,6 +8,7 @@ import pathlib
 import copy
 from typing import Any, Dict, Tuple, Union
 
+from packaging.version import Version as PkgVersion
 import pytest
 import torch
 
@@ -29,6 +30,7 @@ from transformer_engine.pytorch.attention.dot_product_attention import (
 )
 from transformer_engine.pytorch.attention.dot_product_attention.utils import (
     FlashAttentionUtils,
+    _get_supported_versions,
     check_set_window_size,
 )
 from transformer_engine.pytorch.attention import RotaryPositionEmbedding
@@ -92,6 +94,39 @@ reset_rng_states()
 def reset_global_fp8_state():
     yield
     FP8GlobalStateManager.reset()
+
+
+@pytest.mark.parametrize(
+    "version,expected",
+    (
+        ("2.1.0", False),
+        ("2.1.1", True),
+        ("2.8.3", True),
+        ("2.8.3+local_version", True),
+        ("2.8.3.post1", True),
+        ("2.8.4", False),
+        ("2.8.4+local_version", False),
+        ("2.9.0", False),
+    ),
+)
+def test_flash_attention_version_support(version, expected):
+    """Test the supported Flash Attention v2 version range."""
+    assert (
+        FlashAttentionUtils.is_version_supported(
+            PkgVersion(version), FlashAttentionUtils.version_required
+        )
+        is expected
+    )
+
+
+def test_flash_attention_supported_version_message():
+    """Test that the supported version range describes an exclusive upper bound."""
+    assert (
+        _get_supported_versions(
+            FlashAttentionUtils.version_required, FlashAttentionUtils.max_version
+        )
+        == ">= 2.1.1, < 2.8.4"
+    )
 
 
 # Define F16 data types to test
@@ -2095,8 +2130,20 @@ model_configs_fp8_vs_f16 = {
 }
 
 param_types_fp8_vs_f16 = [torch.float16, torch.bfloat16]
-qkv_layout_fp8_vs_f16 = ["sbh3d", "bshd_bshd_bshd", "sbhd_sbhd_sbhd"]
-qkv_format_fp8_vs_f16 = ["bshd", "sbhd"]
+qkv_layout_fp8_vs_f16 = ["sbh3d", "bshd_bshd_bshd", "sbhd_sbhd_sbhd", "thd_thd_thd"]
+qkv_format_fp8_vs_f16 = ["bshd", "sbhd", "thd"]
+
+
+def _get_fp8_vs_f16_config(model, qkv_layout):
+    config = copy.copy(model_configs_fp8_vs_f16[model])
+    # THD is variable-length, so it requires the corresponding padding-aware mask type.
+    if qkv_layout.startswith("thd"):
+        config.attn_mask_type = {
+            "no_mask": "padding",
+            "causal": "padding_causal",
+            "causal_bottom_right": "padding_causal_bottom_right",
+        }.get(config.attn_mask_type, config.attn_mask_type)
+    return config
 
 
 @pytest.mark.skipif(get_cudnn_version() < (9, 2, 1), reason="cuDNN 9.2.1+ is required.")
@@ -2121,7 +2168,7 @@ def test_mha_fp8_vs_f16(
 ):
     """Test MultiHeadAttention module in FP8"""
     os.environ["NVTE_FP8_DPA_BWD"] = "1" if fp8_dpa_bwd else "0"
-    config = model_configs_fp8_vs_f16[model]
+    config = _get_fp8_vs_f16_config(model, qkv_format)
 
     # Test backend availability
     if scaling_mode == "delayed":
@@ -2281,19 +2328,32 @@ def _run_mha_fp8_vs_f16(
         if not is_training:
             mha = mha.eval()
 
+    def random_seqlens(max_seqlen):
+        if qkv_format != "thd":
+            return torch.randint(
+                1, max_seqlen, [config.batch_size], dtype=torch.int32, device="cuda"
+            )
+        # Reserve seven positions so total-token alignment only increases the final length.
+        return torch.cat(
+            (
+                torch.randint(
+                    1,
+                    max_seqlen,
+                    [config.batch_size - 1],
+                    dtype=torch.int32,
+                    device="cuda",
+                ),
+                torch.randint(1, max_seqlen - 6, [1], dtype=torch.int32, device="cuda"),
+            )
+        )
+
     if "padding" in config.attn_mask_type or qkv_format == "thd":
         if config.attn_type == "self":
-            seqlens_q = torch.randint(
-                1, config.max_seqlen_q, [config.batch_size], dtype=torch.int32, device="cuda"
-            )
+            seqlens_q = random_seqlens(config.max_seqlen_q)
             seqlens_kv = seqlens_q
         if config.attn_type == "cross":
-            seqlens_q = torch.randint(
-                1, config.max_seqlen_q, [config.batch_size], dtype=torch.int32, device="cuda"
-            )
-            seqlens_kv = torch.randint(
-                1, config.max_seqlen_kv, [config.batch_size], dtype=torch.int32, device="cuda"
-            )
+            seqlens_q = random_seqlens(config.max_seqlen_q)
+            seqlens_kv = random_seqlens(config.max_seqlen_kv)
     else:
         seqlens_q = torch.full(
             [config.batch_size], config.max_seqlen_q, dtype=torch.int32, device="cuda"
@@ -2301,6 +2361,10 @@ def _run_mha_fp8_vs_f16(
         seqlens_kv = torch.full(
             [config.batch_size], config.max_seqlen_kv, dtype=torch.int32, device="cuda"
         )
+    if qkv_format == "thd":
+        # FP8 Linear flattens THD input to [t, h*d], so align total tokens for cuBLAS.
+        seqlens_q[-1] += -seqlens_q.sum() % 8
+        seqlens_kv[-1] += -seqlens_kv.sum() % 8
     cu_seqlens_q = torch.zeros(config.batch_size + 1, dtype=torch.int32, device="cuda")
     cu_seqlens_kv = torch.zeros(config.batch_size + 1, dtype=torch.int32, device="cuda")
     cu_seqlens_q[1:] = torch.cumsum(seqlens_q, dim=0)
@@ -2367,7 +2431,7 @@ def _run_mha_fp8_vs_f16(
 @pytest.mark.parametrize("scaling_mode", ["delayed", "current", "mxfp8"])
 def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training, scaling_mode):
     """Test DotProductAttention module in FP8"""
-    config = model_configs_fp8_vs_f16[model]
+    config = _get_fp8_vs_f16_config(model, qkv_layout)
 
     # TODO(cyang): think of another way to verify dropout results
     # test cuDNN FP8 dropout
@@ -2672,6 +2736,7 @@ def _run_dpa_fp8_vs_f16(dtype, config, fp8_dpa, qkv_layout, is_training, fp8_rec
             attn_mask_type=config.attn_mask_type,
             checkpoint_core_attention=False,
             core_attention_bias_type=config.attn_bias_type,
+            fp8_output=fp8_dpa,
         )
     if is_training:
         out.backward(out_grad)

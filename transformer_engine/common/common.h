@@ -606,6 +606,7 @@ struct QuantizationConfig {
   bool use_fast_math = false;
   NVTENVFP44Over6Mode nvfp4_4over6_mode = kNVTENVFP44Over6Disabled;
   bool nvfp4_4over6_err_use_fast_math = false;
+  bool mxfp8_2d_quantization = false;
 
   static constexpr size_t attr_sizes[] = {
       sizeof(uint8_t),                       // force_pow_2_scales
@@ -617,7 +618,8 @@ struct QuantizationConfig {
       sizeof(uint8_t),                       // stochastic_rounding
       sizeof(uint8_t),                       // use_fast_math
       sizeof(uint8_t),                       // nvfp4_4over6_mode
-      sizeof(uint8_t)                        // nvfp4_4over6_err_use_fast_math
+      sizeof(uint8_t),                       // nvfp4_4over6_err_use_fast_math
+      sizeof(uint8_t)                        // mxfp8_2d_quantization
   };
 };
 

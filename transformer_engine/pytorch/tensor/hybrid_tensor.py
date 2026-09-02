@@ -469,7 +469,7 @@ class HybridQuantizedTensor(HybridQuantizedTensorStorage, QuantizedTensor):
                     "HybridQuantizedTensor.detach() does not support storage-only "
                     f"columnwise sub-storage {col_cls.__name__}"
                 )
-        return HybridQuantizedTensor(
+        return self.__class__(
             shape=self.shape,
             dtype=self.dtype,
             rowwise_storage=row,

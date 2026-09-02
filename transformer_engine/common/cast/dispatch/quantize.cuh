@@ -21,6 +21,7 @@
 #include "../fp8/quantize_fp8.cuh"
 #include "../fp8_blockwise/group_quantize_fp8_blockwise.cuh"
 #include "../mxfp8/group_quantize_mxfp8.cuh"
+#include "../mxfp8/group_scaled_swiglu_mxfp8.cuh"
 #include "../mxfp8/quantize_mxfp8.cuh"
 #include "../nvfp4/group_quantize_transpose_nvfp4.cuh"
 #include "../nvfp4/quantize_4over6_nvfp4.cuh"
@@ -88,7 +89,7 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
       Tensor *dummy_workspace_tensor = nullptr;
       mxfp8::quantize</*IS_DBIAS=*/false, /*IS_DACT=*/false, IS_ACT, ParamOP, OP>(
           *input_tensor, dummy_input_tensor, noop_tensor, output_tensor, dummy_dbias_tensor,
-          dummy_workspace_tensor, stream);
+          dummy_workspace_tensor, quant_config_cpp.mxfp8_2d_quantization, stream);
       break;
     }
     case NVTE_NVFP4_1D_SCALING: {
@@ -264,7 +265,7 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
     case NVTE_MXFP8_1D_SCALING: {
       mxfp8::quantize<IS_DBIAS, IS_DACT, /*IS_ACT=*/false, ParamOP, OP>(
           *grad_tensor, input_tensor, noop_tensor, output_tensor, dbias_tensor, workspace_tensor,
-          stream);
+          quant_config_cpp.mxfp8_2d_quantization, stream);
       break;
     }
     case NVTE_NVFP4_1D_SCALING: {
@@ -517,6 +518,46 @@ void group_quantize_fwd_helper(const NVTEGroupedTensor input, NVTEGroupedTensor 
     }
     default:
       NVTE_ERROR("Not implemented scaling mode: " + to_string(scaling_mode) + ".");
+  }
+}
+
+// Grouped scaled SwiGLU recompute: input [N, 2H] ([act|gate]) + prob [N]
+// -> columnwise MXFP8 of (silu(act) * gate) * prob.
+template <typename ParamOP, float (*OP)(float, const ParamOP &)>
+void group_scaled_swiglu_fwd_helper(const NVTEGroupedTensor input, const NVTETensor prob,
+                                    NVTEGroupedTensor output, const ParamOP &p,
+                                    const NVTEQuantizationConfig quant_config,
+                                    cudaStream_t stream) {
+  using namespace detail;
+
+  NVTEScalingMode scaling_mode = nvte_grouped_tensor_scaling_mode(output);
+
+  const GroupedTensor *input_tensor = convertNVTEGroupedTensorCheck(input);
+  GroupedTensor *output_tensor = convertNVTEGroupedTensorCheck(output);
+  const Tensor *prob_tensor = convertNVTETensorCheck(prob);
+
+  // Quantization config
+  QuantizationConfig quant_config_cpp;
+  if (quant_config != nullptr) {
+    quant_config_cpp = *reinterpret_cast<QuantizationConfig *>(quant_config);
+  }
+
+  // Noop flag (graph-safe skip)
+  Tensor dummy_tensor;
+  Tensor *noop_tensor = &dummy_tensor;
+  if (quant_config_cpp.noop_tensor != nullptr) {
+    noop_tensor = convertNVTETensorCheck(quant_config_cpp.noop_tensor);
+  }
+
+  switch (scaling_mode) {
+    case NVTE_MXFP8_1D_SCALING: {
+      mxfp8::group_scaled_swiglu<ParamOP, OP>(input_tensor, prob_tensor, noop_tensor, output_tensor,
+                                              p, &quant_config_cpp, stream);
+      break;
+    }
+    default:
+      NVTE_ERROR("group_scaled_swiglu only supports NVTE_MXFP8_1D_SCALING, got: " +
+                 to_string(scaling_mode) + ".");
   }
 }
 
