@@ -12,6 +12,8 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <deque>
 #include <limits>
 #include <mutex>
@@ -29,6 +31,26 @@ namespace py = pybind11;
 
 namespace transformer_engine::pytorch {
 namespace {
+
+bool vmm_remap_debug_enabled() {
+  static const bool enabled = [] {
+    const char *value = std::getenv("MEGATRON_VMM_REMAP_DEBUG");
+    return value != nullptr && std::string(value) == "1";
+  }();
+  return enabled;
+}
+
+using VmmClock = std::chrono::steady_clock;
+
+void vmm_remap_trace(const char *message, double elapsed_ms = -1.0) {
+  if (!vmm_remap_debug_enabled()) return;
+  if (elapsed_ms >= 0.0) {
+    std::fprintf(stderr, "[vmm-remap] %s elapsed_ms=%.3f\\n", message, elapsed_ms);
+  } else {
+    std::fprintf(stderr, "[vmm-remap] %s\\n", message);
+  }
+  std::fflush(stderr);
+}
 
 std::string musa_error_text(MUresult result) {
   const char *name = nullptr;
@@ -398,6 +420,11 @@ class RemapWorker {
 
   static void process(const std::shared_ptr<RemapHookContext> &context) {
     auto &ctx = *context;
+    auto trace_stage = [&](const char *stage, const auto &stage_started) {
+      vmm_remap_trace(stage, std::chrono::duration<double, std::milli>(
+          VmmClock::now() - stage_started).count());
+    };
+    vmm_remap_trace("worker start");
     bool any_copy_submitted = false;
     auto fail = [&](int error_code) {
       set_error(ctx, error_code);
@@ -415,8 +442,11 @@ class RemapWorker {
     // submissions contiguous instead of inserting each following slot's VMM
     // driver latency between copies.
     for (auto &request : ctx.requests) {
+      const auto request_started = VmmClock::now();
       if (request.release_dependency) {
+        vmm_remap_trace("waiting for release dependency");
         wait_for_context(request.release_dependency);
+        trace_stage("release dependency ready", request_started);
         if (request.release_dependency->error.load(std::memory_order_acquire)) {
           fail(request.release_dependency->error_code.load(std::memory_order_relaxed));
           return;
@@ -425,12 +455,16 @@ class RemapWorker {
       ctx.releases_ready.fetch_add(1, std::memory_order_release);
 
       const auto properties = allocation_properties(request.device);
+      const auto api_started = VmmClock::now();
       MUresult rc = muMemCreate(&request.handle, request.bytes, &properties, 0);
+      trace_stage("muMemCreate", api_started);
       if (rc != MUSA_SUCCESS) {
         fail(static_cast<int>(rc));
         return;
       }
+      const auto map_started = VmmClock::now();
       rc = muMemMap(request.address, request.bytes, 0, request.handle, 0);
+      trace_stage("muMemMap", map_started);
       if (rc != MUSA_SUCCESS) {
         fail(static_cast<int>(rc));
         return;
@@ -440,12 +474,15 @@ class RemapWorker {
       access.location.type = MU_MEM_LOCATION_TYPE_DEVICE;
       access.location.id = request.device;
       access.flags = MU_MEM_ACCESS_FLAGS_PROT_READWRITE;
+      const auto access_started = VmmClock::now();
       rc = muMemSetAccess(request.address, request.bytes, &access, 1);
+      trace_stage("muMemSetAccess", access_started);
       if (rc != MUSA_SUCCESS) {
         fail(static_cast<int>(rc));
         return;
       }
       ctx.remaps_done.fetch_add(1, std::memory_order_release);
+      trace_stage("request total", request_started);
     }
 
     if (ctx.copy_enabled) {
@@ -999,7 +1036,12 @@ std::shared_ptr<RemapHookContext> remap_and_copy_after(
 
 void remap_wait_on_stream(const std::shared_ptr<RemapHookContext> &context,
                           uintptr_t raw_stream) {
+  const auto wait_started = VmmClock::now();
+  vmm_remap_trace("wait_on_stream begin");
   wait_for_context(context);
+  vmm_remap_trace(
+      "wait_on_stream context ready",
+      std::chrono::duration<double, std::milli>(VmmClock::now() - wait_started).count());
   if (context->error.load(std::memory_order_acquire)) {
     throw std::runtime_error("VMM asynchronous reload submission failed: error " +
                              std::to_string(context->error_code.load()));
