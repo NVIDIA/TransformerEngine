@@ -149,8 +149,8 @@ However, amax reduction works slightly differently in different frameworks.
       The gradient amaxes are reduced separately, once at the end of every ``backward()``
       call, on each rank where at least one quantized module ran backward. When a
       training step consists of several ``backward()`` calls (e.g. a 1F1B pipeline
-      schedule) or ends with deferred weight gradients (``backward_dw()``), wrap them in
-      ``quantization_backward_scope`` so the update runs once per step. The scope also
+      schedule), wrap them in ``quantization_backward_scope`` so the update runs once
+      per step. The scope also
       runs the update on ranks where no quantized module ran backward, so, like
       ``autocast``, it must be entered and exited on all ranks:
 

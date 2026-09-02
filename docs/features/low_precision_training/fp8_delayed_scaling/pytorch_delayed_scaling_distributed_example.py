@@ -21,5 +21,4 @@ with te.autocast(recipe=recipe, amax_reduction_group=amax_reduction_group):
 with te.quantization_backward_scope():
     for loss in microbatch_losses:
         loss.backward()
-    model.backward_dw()  # only with delay_wgrad_compute=True
 # END_BACKWARD_SCOPE_EXAMPLE

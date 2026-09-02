@@ -902,15 +902,14 @@ def quantization_backward_scope() -> None:
     across the amax reduction group and recomputing the scales. Ordinary
     ``loss.backward()`` calls do this automatically and do not need this scope.
 
-    Use it when one training step spans several autograd calls, so that the update
-    runs once when the outermost scope exits instead of after every call:
+    Use it when one training step consists of several ``backward()`` calls, so that
+    the update runs once when the outermost scope exits instead of after every call:
 
     .. code-block:: python
 
         with te.quantization_backward_scope():
             for loss in microbatch_losses:  # e.g. a 1F1B pipeline schedule
                 loss.backward()
-            model.backward_dw()  # deferred weight gradients
 
     Nested scopes are no-ops; only the outermost one triggers the update. A scope
     entered inside a running backward (e.g. in a hook) defers the update to the
