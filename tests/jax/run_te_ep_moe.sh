@@ -102,7 +102,7 @@ for i in "${!EXITS[@]}"; do
 done
 
 # Treat exit 0 (pass) and exit 5 (pytest "no tests collected", which the
-# file emits via pytest.skip(allow_module_level=True) on pre-Hopper
+# file emits via pytest.skip(allow_module_level=True) on pre-Blackwell
 # GPUs) as success.
 FAILED=0
 for e in "${EXITS[@]}"; do

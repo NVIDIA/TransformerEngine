@@ -31,7 +31,7 @@ finiteness AND numerical parity vs a pure-JAX reference. Variations
 on the block are pytest parametrize values rather than separate test
 classes:
 
-* ``test_forward`` covers BF16 (Hopper+) and MXFP8 (Blackwell+) forward execution across a
+* ``test_forward`` covers BF16 and MXFP8 forward execution across a
   curated set of configurations (softmax/sigmoid scoring, optional
   non-zero expert_bias). Each config asserts shape, dtype, finiteness
   and numerical parity vs the same BF16 reference in one run.
@@ -110,11 +110,12 @@ if not _MP_ACTIVE:
 
 from transformer_engine_jax import get_device_compute_capability
 
-# NCCL EP requires Hopper or newer. BF16 grouped GEMM falls back to the
-# legacy implementation on Hopper; MXFP8 remains gated to Blackwell below.
-if get_device_compute_capability(0) < 90:
+# Grouped GEMM in the MoE custom_vjp requires Blackwell (sm_100+). The
+# TE EP NCCL primitives themselves need SM>=90, but the FFN body uses
+# grouped_gemm, so the file as a whole gates on sm_100+.
+if get_device_compute_capability(0) < 100:
     pytest.skip(
-        "MoE TE EP tests require Hopper (sm_90+) or newer",
+        "MoE TE EP tests require Blackwell (sm_100+) for grouped GEMM",
         allow_module_level=True,
     )
 
