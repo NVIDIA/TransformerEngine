@@ -929,7 +929,8 @@ def _f16_forward(
         window_size=tuple(window_size),
         bottom_right_diagonal=bottom_right_diagonal,
         return_max_logit=return_max_logit,
-        paged=page_table_k is not None,
+        page_table_k=_tensor_metadata(page_table_k),
+        page_table_v=_tensor_metadata(page_table_v),
     )
     entry = get_graph_entry(key)
     if entry is None:
