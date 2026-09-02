@@ -257,6 +257,11 @@ def reset_global_fp8_state():
 
 @contextmanager
 def _disable_bf16_reduced_precision_reduction():
+    """TE disables cuBLASLt heuristics that store partial GEMM results in BF16.
+    This is to ensure precision is kept. This affects older archs like L40.
+    PyTorch does not do this by default, so we need to adjust PyTorch's
+    settings here to match TE's increased precision here.
+    """
     original_value = torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction
     torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False
     try:
@@ -265,7 +270,7 @@ def _disable_bf16_reduced_precision_reduction():
         torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = original_value
 
 
-@pytest.fixture
+@pytest.fixture(autouse=True)
 def disable_bf16_reduced_precision_reduction():
     with _disable_bf16_reduced_precision_reduction():
         yield
@@ -1716,14 +1721,7 @@ def test_layernorm_accuracy(dtype, bs, model, eps, zero_centered_gamma):
 @pytest.mark.parametrize("return_bias", all_boolean)
 @pytest.mark.parametrize("bias", all_boolean)
 def test_layernorm_linear_accuracy(
-    dtype,
-    bs,
-    model,
-    normalization,
-    zero_centered_gamma,
-    return_bias,
-    bias,
-    disable_bf16_reduced_precision_reduction,
+    dtype, bs, model, normalization, zero_centered_gamma, return_bias, bias
 ):
     config = model_configs[model]
 
@@ -1807,14 +1805,7 @@ def test_layernorm_linear_accuracy(
 @pytest.mark.parametrize("bias", all_boolean)
 @pytest.mark.parametrize("fuse_wgrad_accumulation", all_boolean)
 def test_layernorm_linear_accuracy_delay_wgrad_compute(
-    dtype,
-    bs,
-    model,
-    normalization,
-    zero_centered_gamma,
-    bias,
-    fuse_wgrad_accumulation,
-    disable_bf16_reduced_precision_reduction,
+    dtype, bs, model, normalization, zero_centered_gamma, bias, fuse_wgrad_accumulation
 ):
     if NVTE_TEST_NVINSPECT_ENABLED:
         pytest.skip("Delayed wgrad compute is not supported in debug mode.")
