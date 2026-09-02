@@ -14,7 +14,7 @@ import numpy as np
 
 import transformer_engine_jax
 import transformer_engine.jax.cpp_extensions as tex
-from transformer_engine.jax.cpp_extensions.ep import _ep_outer_axis
+from transformer_engine.jax.cpp_extensions.ep import _ep_outer_axis, _normalize_ep_axes
 from transformer_engine.jax.cpp_extensions.misc import jax_dtype_to_te_dtype
 from transformer_engine.jax.sharding import (
     _get_mesh,
@@ -85,11 +85,13 @@ def _ep_domain_for_rank(mesh, ep_resource, rank, device_to_rank=None):
         def device_to_rank(d):
             return d.process_index
 
-    ep_pos = mesh.axis_names.index(ep_resource)
-    ep_size = mesh.shape[ep_resource]
+    ep_axes = _normalize_ep_axes(ep_resource)
+    ep_positions = tuple(mesh.axis_names.index(axis) for axis in ep_axes)
+    non_ep_positions = tuple(i for i in range(len(mesh.axis_names)) if i not in ep_positions)
+    ep_size = int(np.prod([mesh.shape[axis] for axis in ep_axes]))
     ranks = np.vectorize(device_to_rank, otypes=[np.int64])(mesh.devices)
-    # Move ep last and flatten: each row is one domain (all non-ep coords fixed).
-    grid = np.moveaxis(ranks, ep_pos, -1).reshape(-1, ep_size)
+    # Move EP axes last in their declared order and flatten them into one domain.
+    grid = np.transpose(ranks, non_ep_positions + ep_positions).reshape(-1, ep_size)
     loc = np.argwhere(grid == rank)
     if loc.shape[0] != 1:
         raise ValueError(
@@ -110,13 +112,13 @@ def ep_bootstrap(
     max_token_dtype=jnp.bfloat16,
     max_num_sms=0,
     drop_on_overflow=False,
+    ep_axes=None,
 ):
     """Initialize the EP communicator. Call once per process before any EP op.
 
-    Must run inside the active JAX Mesh and a global_shard_guard; ep_size and
-    num_ep_groups are read from the mesh axes named by MeshResource.ep_resource
-    and MeshResource.dp_resource/fsdp_resource. Axes orthogonal to EP (tp, pp,
-    cp, ...) are supported and replicated across EP tensors.
+    Must run inside an active JAX Mesh. ``ep_axes`` overrides
+    ``MeshResource.ep_resource`` when provided; the global sharding context is
+    only required for the fallback.
 
     Args:
         world_size: Total number of processes (product of all mesh axes).
@@ -131,6 +133,8 @@ def ep_bootstrap(
         drop_on_overflow: Drop tokens exceeding recv_capacity_per_rank instead of
             trapping on overflow. Dropped tokens are still counted in
             total_recv_tokens, so callers can detect overflow from it.
+        ep_axes: Physical mesh axis name or ordered tuple of names. Defaults to
+            ``MeshResource.ep_resource``.
     """
     if jnp.dtype(max_token_dtype) != jnp.bfloat16:
         raise NotImplementedError(
@@ -149,13 +153,12 @@ def ep_bootstrap(
             " support single-process multi-device setups."
         )
 
-    gsr = global_mesh_resource()
-    ep_resource = gsr.ep_resource
+    explicit_ep_axes = ep_axes
+    ep_resource = (
+        global_mesh_resource().ep_resource if explicit_ep_axes is None else explicit_ep_axes
+    )
     if ep_resource is None:
-        raise ValueError(
-            "ep_bootstrap requires MeshResource.ep_resource to be set; enter a"
-            " global_shard_guard(MeshResource(..., ep_resource=<axis name>)) before bootstrap."
-        )
+        raise ValueError("ep_bootstrap requires ep_axes or MeshResource.ep_resource to be set.")
     mesh = _get_mesh()
     if mesh.empty:
         raise ValueError(
@@ -167,10 +170,11 @@ def ep_bootstrap(
             f"ep_bootstrap: mesh device count ({get_num_devices_in_mesh(mesh)}) must equal"
             f" world_size ({world_size})."
         )
-    ep_size = get_mesh_axis_size(ep_resource)
+    ep_axes = _normalize_ep_axes(ep_resource)
+    ep_size = int(np.prod([mesh.shape[axis] for axis in ep_axes]))
     # num_ep_groups counts only the distinct-token (dp/fsdp) axes; replicated
     # axes (tp, pp, ...) do not create distinct EP-output slabs.
-    outer_axis = _ep_outer_axis()
+    outer_axis = _ep_outer_axis(None if explicit_ep_axes is None else ep_axes)
     num_ep_groups = 1 if outer_axis is None else get_mesh_axis_size(outer_axis)
     if num_experts % ep_size != 0:
         raise ValueError(f"num_experts ({num_experts}) must be divisible by ep_size ({ep_size}).")
@@ -240,23 +244,20 @@ def ep_finalize():
     tex.ep.reset_ep_config()
 
 
-def _default_out_partition_spec():
+def _default_out_partition_spec(ep_axes=None):
     """Leading-axis default: ``(("dp","ep"),)`` if DP/FSDP is set, else ``("ep",)``."""
-    gsr = global_mesh_resource()
-    if gsr.ep_resource is None:
-        raise ValueError(
-            "ep_resource is not set on the active MeshResource; pass out_sharding=... explicitly."
-        )
-    outer = _ep_outer_axis()
-    leading = (outer, gsr.ep_resource) if outer is not None else gsr.ep_resource
+    outer = _ep_outer_axis(ep_axes)
+    resolved_ep_axes = tex.ep._resolve_ep_axes(ep_axes)
+    leading_axes = resolved_ep_axes if outer is None else (outer, *resolved_ep_axes)
+    leading = leading_axes[0] if len(leading_axes) == 1 else leading_axes
     return (leading,)
 
 
 # ── ep_dispatch (custom_vjp) ─────────────────────────────────────────────────
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(0, 4))
-def ep_dispatch(cfg, topk_idx, tokens, topk_weights, recv_capacity_per_rank):
+@partial(jax.custom_vjp, nondiff_argnums=(0, 4, 5))
+def ep_dispatch(cfg, topk_idx, tokens, topk_weights, recv_capacity_per_rank, ep_axes=None):
     """Scatter tokens and weights to expert ranks.
 
     ``cfg`` is a per-layer ``EpLayerConfig``; distinct layers may share a
@@ -271,29 +272,32 @@ def ep_dispatch(cfg, topk_idx, tokens, topk_weights, recv_capacity_per_rank):
     ``drop_on_overflow`` is set. When ``recv_capacity_per_rank`` is not sized for
     the worst case, detect overflow by ``process_allgather``-ing it, then
     ``max(...) > recv_capacity_per_rank`` flags an overflowing step.
+
+    ``ep_axes`` may be a mesh axis name or an ordered tuple of names. When it
+    is ``None``, the active ``MeshResource.ep_resource`` is used.
     """
-    return _dispatch_fwd(cfg, topk_idx, tokens, topk_weights, recv_capacity_per_rank)[0]
+    return _dispatch_fwd(cfg, topk_idx, tokens, topk_weights, recv_capacity_per_rank, ep_axes)[0]
 
 
-def _dispatch_fwd(cfg, topk_idx, tokens, topk_weights, recv_capacity_per_rank):
+def _dispatch_fwd(cfg, topk_idx, tokens, topk_weights, recv_capacity_per_rank, ep_axes=None):
     if not jnp.issubdtype(topk_weights.dtype, jnp.floating):
         raise TypeError(
             f"ep_dispatch: topk_weights must be a floating dtype; got {topk_weights.dtype}."
         )
-    token_counts, total_recv_tokens, handle_mem = tex.ep_prepare(cfg, topk_idx)
+    token_counts, total_recv_tokens, handle_mem = tex.ep_prepare(cfg, topk_idx, ep_axes=ep_axes)
     recv_tokens, recv_topk_weights = tex.ep_dispatch_fwd(
-        cfg, handle_mem, topk_idx, tokens, topk_weights, recv_capacity_per_rank
+        cfg, handle_mem, topk_idx, tokens, topk_weights, recv_capacity_per_rank, ep_axes=ep_axes
     )
     out_leading = tuple(tokens.shape[:-1])
     primal = (recv_tokens, recv_topk_weights, handle_mem, token_counts, total_recv_tokens)
     return primal, (handle_mem, out_leading)
 
 
-def _dispatch_bwd(cfg, recv_capacity_per_rank, res, g_outputs):
+def _dispatch_bwd(cfg, recv_capacity_per_rank, ep_axes, res, g_outputs):
     del recv_capacity_per_rank
     handle_mem, out_leading = res
     # Re-pin cotangent: XLA transpose can drop the EP axis and feed the FFI a global tensor.
-    out_spec = _default_out_partition_spec()
+    out_spec = _default_out_partition_spec(ep_axes)
     spec = jax.sharding.PartitionSpec(*out_spec)
     g_recv_tokens = with_sharding_constraint(g_outputs[0], spec)
     g_recv_topk_weights = with_sharding_constraint(g_outputs[1], spec)
@@ -304,6 +308,7 @@ def _dispatch_bwd(cfg, recv_capacity_per_rank, res, g_outputs):
         g_recv_topk_weights,
         out_leading,
         out_partition_spec=out_spec,
+        ep_axes=ep_axes,
     )
     return (None, grad_tokens, grad_topk_weights)
 
@@ -314,7 +319,7 @@ ep_dispatch.defvjp(_dispatch_fwd, _dispatch_bwd)
 # ── ep_combine (custom_vjp) ──────────────────────────────────────────────────
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(0, 4, 5))
+@partial(jax.custom_vjp, nondiff_argnums=(0, 4, 5, 6))
 def ep_combine(
     cfg,
     handle_mem,
@@ -322,6 +327,7 @@ def ep_combine(
     expert_out,
     num_local_tokens,
     out_sharding=None,
+    ep_axes=None,
 ):
     """Scatter-sum expert outputs back to source ranks. **Unweighted.**
 
@@ -330,6 +336,8 @@ def ep_combine(
     not through this op. ``num_local_tokens`` is STATIC: int -> ``[T, H]``,
     tuple -> ``[*tuple, H]``. ``out_sharding`` defaults via
     ``_default_out_partition_spec``; only the leading dim may be sharded.
+    ``ep_axes`` accepts an explicit mesh axis name or tuple and otherwise falls
+    back to ``MeshResource.ep_resource``.
     """
     return _combine_fwd(
         cfg,
@@ -338,6 +346,7 @@ def ep_combine(
         expert_out,
         num_local_tokens,
         out_sharding,
+        ep_axes,
     )[0]
 
 
@@ -348,24 +357,32 @@ def _combine_fwd(
     expert_out,
     num_local_tokens,
     out_sharding,
+    ep_axes=None,
 ):
     del token_counts
     if out_sharding is None:
-        out_sharding = _default_out_partition_spec()
+        out_sharding = _default_out_partition_spec(ep_axes)
     result = tex.ep_combine_fwd(
-        cfg, handle_mem, expert_out, num_local_tokens, out_partition_spec=out_sharding
+        cfg,
+        handle_mem,
+        expert_out,
+        num_local_tokens,
+        out_partition_spec=out_sharding,
+        ep_axes=ep_axes,
     )
     return result, (handle_mem, expert_out.shape[-2])
 
 
-def _combine_bwd(cfg, _num_local_tokens, _out_sharding, res, g_result):
+def _combine_bwd(cfg, _num_local_tokens, _out_sharding, ep_axes, res, g_result):
     handle_mem, recv_capacity_per_rank = res
     # Re-pin cotangent (same XLA-transpose workaround as _dispatch_bwd).
     if _out_sharding is None:
-        _out_sharding = _default_out_partition_spec()
+        _out_sharding = _default_out_partition_spec(ep_axes)
     spec = jax.sharding.PartitionSpec(*_out_sharding)
     g_result = with_sharding_constraint(g_result, spec)
-    grad_expert_out = tex.ep_combine_bwd(cfg, handle_mem, g_result, recv_capacity_per_rank)
+    grad_expert_out = tex.ep_combine_bwd(
+        cfg, handle_mem, g_result, recv_capacity_per_rank, ep_axes=ep_axes
+    )
     return (None, None, grad_expert_out)
 
 
