@@ -381,10 +381,8 @@ def _storage_span(tensor: torch.Tensor) -> int:
 
 def _allocate_grad_views(
     inputs: Sequence[torch.Tensor],
-    *,
-    fast_zero_fill: bool,
 ) -> Tuple[torch.Tensor, ...]:
-    """Allocate gradients while preserving packed-QKV storage relationships."""
+    """Allocate zeroed gradients while preserving packed-QKV storage relationships."""
 
     groups: Dict[Tuple[str, int, int], List[int]] = {}
     for index, tensor in enumerate(inputs):
@@ -399,8 +397,7 @@ def _allocate_grad_views(
             out = torch.empty_strided(
                 inp.shape, inp.stride(), dtype=inp.dtype, device=inp.device
             )
-            if fast_zero_fill:
-                out.zero_()
+            out.zero_()
             outputs[indices[0]] = out
             continue
 
@@ -410,11 +407,9 @@ def _allocate_grad_views(
             for index in indices
         )
         exemplar = inputs[indices[0]]
-        base = torch.empty(
+        base = torch.zeros(
             max_end - min_offset, dtype=exemplar.dtype, device=exemplar.device
         )
-        if fast_zero_fill:
-            base.zero_()
         for index in indices:
             inp = inputs[index]
             outputs[index] = torch.as_strided(
@@ -890,7 +885,7 @@ def _f16_forward(
         if o_format == "thd"
         else _fp8_output_shape(batch, max_seqlen_q, heads, v.shape[-1], o_format)
     )
-    output_factory = torch.zeros if fast_zero_fill else torch.empty
+    output_factory = torch.zeros if fast_zero_fill or o_format == "thd" else torch.empty
     output = output_factory(output_shape, dtype=fake_dtype, device=q.device)
     stats_shape, _, _ = _stats_layout(
         batch=batch,
@@ -2707,7 +2702,7 @@ def fused_attn_bwd(
     q_format, kv_format = _q_kv_formats(qkv_layout)
     batch = cu_seqlens_q.numel() - 1
     if q_format == "thd" or kv_format == "thd":
-        d_q, d_k, d_v = _allocate_grad_views((q, k, v), fast_zero_fill=fast_zero_fill)
+        d_q, d_k, d_v = _allocate_grad_views((q, k, v))
     else:
         heads = q.shape[1] if q_format == "bhsd" else q.shape[-2]
         kv_heads = k.shape[1] if kv_format == "bhsd" else k.shape[-2]
