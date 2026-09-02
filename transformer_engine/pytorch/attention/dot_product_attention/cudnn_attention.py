@@ -1876,7 +1876,11 @@ def _build_f16_bwd_graph(
     )
     if use_ragged_stats:
         options["max_total_seq_len_q"] = graph_seqlen_q
-    if is_ragged_kv and cudnn.backend_version() >= 90600:
+    if (
+        is_ragged_kv
+        and cudnn.backend_version() >= 90600
+        and torch.cuda.get_device_capability(q.device) != (12, 0)
+    ):
         options["max_total_seq_len_kv"] = graph_seqlen_kv
 
     if attn_bias_type == "post_scale_bias":
