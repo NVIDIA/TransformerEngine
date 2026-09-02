@@ -9,10 +9,9 @@ tensor parallelism (TP), pipeline parallelism (PP), and full-sharded data
 parallelism (FSDP). It includes functions for sharding constraints, mesh management,
 and collective operations.
 """
-
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Callable, Optional, Union
+from typing import Callable, Optional
 import warnings
 
 import jax
@@ -36,20 +35,6 @@ W_NO_SHARD_AXES = "nvte_w_no_shard"
 W_FSDP_AXES = "nvte_w_fsdp"
 W_TP_AXES = "nvte_w_tp"
 W_JOINED_AXES = "nvte_w_joined"
-
-MeshAxis = Union[str, tuple[str, ...]]
-
-
-def normalize_mesh_axes(axis: Optional[MeshAxis]) -> tuple[str, ...]:
-    """Return a mesh axis or axis group as an ordered tuple of physical names."""
-    if axis is None:
-        return ()
-    axes = axis if isinstance(axis, tuple) else (axis,)
-    if not axes or any(not isinstance(name, str) or not name for name in axes):
-        raise ValueError(f"Mesh axes must be non-empty strings, got {axis!r}.")
-    if len(set(axes)) != len(axes):
-        raise ValueError(f"Mesh axes must not contain duplicates, got {axis!r}.")
-    return axes
 
 
 def _get_mesh():
@@ -289,14 +274,11 @@ def get_mesh_axis_size(axis, mesh=None):
     if mesh is None:
         mesh = _get_mesh()
 
-    axes = normalize_mesh_axes(axis)
-    if not axes:
+    if axis is None:
         return 1
-    size = 1
-    for name in axes:
-        assert name in mesh.shape, f"{name} is not an axis of the given mesh {mesh.shape}"
-        size *= mesh.shape[name]
-    return size
+
+    assert axis in mesh.shape, f"{axis} is not a axis of the given mesh {mesh.shape}"
+    return mesh.shape[axis]
 
 
 def get_mesh_axis_rank(axis: str, mesh=None):

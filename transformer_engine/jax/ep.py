@@ -21,7 +21,6 @@ from transformer_engine.jax.sharding import (
     get_num_devices_in_mesh,
     global_mesh_resource,
     get_mesh_axis_size,
-    normalize_mesh_axes,
     with_sharding_constraint,
 )
 
@@ -86,21 +85,11 @@ def _ep_domain_for_rank(mesh, ep_resource, rank, device_to_rank=None):
         def device_to_rank(d):
             return d.process_index
 
-    ep_axes = normalize_mesh_axes(ep_resource)
-    if not ep_axes:
-        raise ValueError("ep_bootstrap: ep_resource must contain at least one mesh axis.")
-    missing = tuple(axis for axis in ep_axes if axis not in mesh.axis_names)
-    if missing:
-        raise ValueError(
-            f"ep_bootstrap: EP axes {missing} are not present in mesh axes {mesh.axis_names}."
-        )
-    ep_positions = tuple(mesh.axis_names.index(axis) for axis in ep_axes)
-    non_ep_positions = tuple(i for i in range(len(mesh.axis_names)) if i not in ep_positions)
-    ep_size = get_mesh_axis_size(ep_axes, mesh)
+    ep_pos = mesh.axis_names.index(ep_resource)
+    ep_size = mesh.shape[ep_resource]
     ranks = np.vectorize(device_to_rank, otypes=[np.int64])(mesh.devices)
-    # Move all EP axes last in the user-specified order and flatten them into
-    # one communicator dimension. Each row fixes every axis outside compound EP.
-    grid = np.transpose(ranks, non_ep_positions + ep_positions).reshape(-1, ep_size)
+    # Move ep last and flatten: each row is one domain (all non-ep coords fixed).
+    grid = np.moveaxis(ranks, ep_pos, -1).reshape(-1, ep_size)
     loc = np.argwhere(grid == rank)
     if loc.shape[0] != 1:
         raise ValueError(
@@ -121,14 +110,13 @@ def ep_bootstrap(
     max_token_dtype=jnp.bfloat16,
     max_num_sms=0,
     drop_on_overflow=False,
-    ep_axis=None,
 ):
     """Initialize the EP communicator. Call once per process before any EP op.
 
-    Must run inside the active JAX Mesh and a global_shard_guard. By default,
-    the EP axis is read from ``MeshResource.ep_resource``. ``ep_axis`` may
-    override it with an ordered tuple of physical mesh axes for a compound EP
-    communicator. DP/FSDP axes outside that group determine ``num_ep_groups``.
+    Must run inside the active JAX Mesh and a global_shard_guard; ep_size and
+    num_ep_groups are read from the mesh axes named by MeshResource.ep_resource
+    and MeshResource.dp_resource/fsdp_resource. Axes orthogonal to EP (tp, pp,
+    cp, ...) are supported and replicated across EP tensors.
 
     Args:
         world_size: Total number of processes (product of all mesh axes).
@@ -143,8 +131,6 @@ def ep_bootstrap(
         drop_on_overflow: Drop tokens exceeding recv_capacity_per_rank instead of
             trapping on overflow. Dropped tokens are still counted in
             total_recv_tokens, so callers can detect overflow from it.
-        ep_axis: Optional physical mesh axis name or ordered tuple of names.
-            Defaults to ``MeshResource.ep_resource``.
     """
     if jnp.dtype(max_token_dtype) != jnp.bfloat16:
         raise NotImplementedError(
@@ -164,9 +150,12 @@ def ep_bootstrap(
         )
 
     gsr = global_mesh_resource()
-    ep_resource = gsr.ep_resource if ep_axis is None else ep_axis
+    ep_resource = gsr.ep_resource
     if ep_resource is None:
-        raise ValueError("ep_bootstrap requires ep_axis or MeshResource.ep_resource to be set.")
+        raise ValueError(
+            "ep_bootstrap requires MeshResource.ep_resource to be set; enter a"
+            " global_shard_guard(MeshResource(..., ep_resource=<axis name>)) before bootstrap."
+        )
     mesh = _get_mesh()
     if mesh.empty:
         raise ValueError(
@@ -181,7 +170,7 @@ def ep_bootstrap(
     ep_size = get_mesh_axis_size(ep_resource)
     # num_ep_groups counts only the distinct-token (dp/fsdp) axes; replicated
     # axes (tp, pp, ...) do not create distinct EP-output slabs.
-    outer_axis = _ep_outer_axis(ep_resource)
+    outer_axis = _ep_outer_axis()
     num_ep_groups = 1 if outer_axis is None else get_mesh_axis_size(outer_axis)
     if num_experts % ep_size != 0:
         raise ValueError(f"num_experts ({num_experts}) must be divisible by ep_size ({ep_size}).")
@@ -226,7 +215,6 @@ def ep_bootstrap(
         tex.ep.EpConfig(
             world_size=world_size,
             rank=rank,
-            ep_axis=ep_resource,
             ep_size=ep_size,
             num_ep_groups=num_ep_groups,
             num_experts=num_experts,
@@ -253,12 +241,14 @@ def ep_finalize():
 
 
 def _default_out_partition_spec():
-    """Build the default leading-axis spec from the bootstrapped EP group."""
-    ep_axis = tex.ep.get_ep_config().ep_axis
+    """Leading-axis default: ``(("dp","ep"),)`` if DP/FSDP is set, else ``("ep",)``."""
+    gsr = global_mesh_resource()
+    if gsr.ep_resource is None:
+        raise ValueError(
+            "ep_resource is not set on the active MeshResource; pass out_sharding=... explicitly."
+        )
     outer = _ep_outer_axis()
-    ep_axes = normalize_mesh_axes(ep_axis)
-    leading_axes = ep_axes if outer is None else (outer, *ep_axes)
-    leading = leading_axes[0] if len(leading_axes) == 1 else leading_axes
+    leading = (outer, gsr.ep_resource) if outer is not None else gsr.ep_resource
     return (leading,)
 
 

@@ -5,8 +5,8 @@
 
 Sharding model:
   - EpPrepare / EpDispatch outputs carry a single leading ``num_procs`` dim.
-    Sharded by the bootstrapped ``ep_axis`` group, optionally preceded by an
-    outer DP/FSDP axis.
+    Sharded compound ``(dp_resource, ep_resource)`` when DP is set, else
+    ``ep_resource`` alone.
   - EpDispatch inputs are 2D ``[T, H]`` or 3D ``[B, S, H]``; only the first
     dim may be sharded, with axis in {ep, (dp, ep), dp, None}. Trailing dims
     must be replicated. ``dp`` alone gets ``ep`` folded in locally.
@@ -24,7 +24,7 @@ from jax.sharding import NamedSharding, PartitionSpec
 
 import transformer_engine_jax
 from .base import BasePrimitive, register_primitive
-from ..sharding import MeshAxis, global_mesh_resource, get_mesh_axis_size, normalize_mesh_axes
+from ..sharding import global_mesh_resource, get_mesh_axis_size
 from ..version_utils import is_collective_stream_supported
 
 
@@ -73,15 +73,12 @@ __all__ = [
 class EpConfig:
     """Snapshot of the EP bootstrap config (see ep_bootstrap).
 
-    ``ep_axis`` is the ordered physical mesh axis group used by the EP
-    communicator. ``num_ep_groups`` is the size of the outer dp/fsdp mesh
-    axis (1 if neither is set), captured at bootstrap so abstract-eval never
-    reads the mesh.
+    num_ep_groups is the size of the outer dp/fsdp mesh axis (1 if neither
+    is set), captured at bootstrap so abstract-eval never reads the mesh.
     """
 
     world_size: int
     rank: int
-    ep_axis: MeshAxis
     ep_size: int
     num_ep_groups: int
     num_experts: int
@@ -138,31 +135,25 @@ def ep_handle_mem_size(cfg: EpLayerConfig) -> int:
 def _leading_axis_ok(spec):
     """Validate an EP input spec; return ``(ok, ep_axis, outer_axes)``.
 
-    Leading dim contains the ordered EP axis group, optionally preceded by an
-    outer DP/FSDP axis; all other dims must be replicated.
+    Leading dim is ``ep`` or a tuple ending in ``ep`` (outer dp/fsdp axes
+    first); all other dims must be replicated.
     """
     gsr = global_mesh_resource()
-    ep_axis = get_ep_config().ep_axis
-    ep_axes = normalize_mesh_axes(ep_axis)
-    outer_axes = tuple(
-        a for a in (gsr.dp_resource, gsr.fsdp_resource) if a is not None and a not in ep_axes
-    )
-    if len(spec) < 2 or not ep_axes:
+    ep_axis = gsr.ep_resource
+    outer_axes = tuple(a for a in (gsr.dp_resource, gsr.fsdp_resource) if a is not None)
+    if len(spec) < 2 or ep_axis is None:
         return False, ep_axis, outer_axes
     if any(ax is not None for ax in spec[1:]):
         return False, ep_axis, outer_axes
     leading = spec[0]
     elts = leading if isinstance(leading, tuple) else (leading,)
-    actual = set(a for a in elts if a is not None)
-    active_ep_axes = tuple(a for a in ep_axes if get_mesh_axis_size(a) > 1)
-    actual_ep_axes = tuple(a for a in elts if a in active_ep_axes)
-    if actual_ep_axes != active_ep_axes:
+    if ep_axis not in elts:
         return False, ep_axis, outer_axes
-    allowed = set(outer_axes) | set(ep_axes)
-    return actual.issubset(allowed), ep_axis, outer_axes
+    allowed = set(outer_axes) | {ep_axis}
+    return all(a in allowed for a in elts), ep_axis, outer_axes
 
 
-def _ep_outer_axis(ep_axis=None):
+def _ep_outer_axis():
     """The single dp/fsdp axis (if any) sitting outside ep on EP-output tensors.
 
     When set, EP-output globals carry an extra leading ``dp_size`` dim so SPMD
@@ -172,18 +163,11 @@ def _ep_outer_axis(ep_axis=None):
     we don't pin EP-output specs to a degenerate axis that JAX may collapse.
     """
     gsr = global_mesh_resource()
-    if ep_axis is None:
-        ep_axis = get_ep_config().ep_axis
-    ep_axes = set(normalize_mesh_axes(ep_axis))
-    candidates = tuple(
-        axis
-        for axis in (gsr.dp_resource, gsr.fsdp_resource)
-        if axis is not None and axis not in ep_axes
-    )
-    for axis in candidates:
-        if get_mesh_axis_size(axis) > 1:
-            return axis
-    return candidates[0] if candidates else None
+    if gsr.dp_resource is not None and get_mesh_axis_size(gsr.dp_resource) > 1:
+        return gsr.dp_resource
+    if gsr.fsdp_resource is not None and get_mesh_axis_size(gsr.fsdp_resource) > 1:
+        return gsr.fsdp_resource
+    return gsr.dp_resource or gsr.fsdp_resource
 
 
 def _ep_leading_dims(is_outer):
@@ -196,22 +180,22 @@ def _ep_leading_dims(is_outer):
 
 
 def _ep_output_spec(*trailing):
-    """Build an EP-output spec from the bootstrapped EP and outer axis groups."""
-    ep_axis = get_ep_config().ep_axis
+    """PartitionSpec for an EP-output tensor: ``(("dp","ep"), *trailing)`` when
+    DP is set (compound leading axis on a single dim), else ``("ep",*trailing)``."""
+    gsr = global_mesh_resource()
     outer = _ep_outer_axis()
-    ep_axes = normalize_mesh_axes(ep_axis)
-    leading_axes = ep_axes if outer is None else (outer, *ep_axes)
-    leading = leading_axes[0] if len(leading_axes) == 1 else leading_axes
-    return PartitionSpec(leading, *trailing)
+    if outer is None:
+        return PartitionSpec(gsr.ep_resource, *trailing)
+    return PartitionSpec((outer, gsr.ep_resource), *trailing)
 
 
 def _ep_spec_ok(spec, trailing_count):
-    """Validate an EP output's leading axis group and replicated trailing dims.
-
-    JAX may collapse size-one mesh axes to ``None`` or drop them, so only
-    nontrivial EP axes are required.
+    """Leading dim shards along ep (and outer dp/fsdp when set); trailing dims
+    are replicated. JAX may collapse size-1 mesh axes to ``None`` or drop them,
+    so the leading entry is normalized to a set of named axes before comparing.
     """
-    ep_axes = normalize_mesh_axes(get_ep_config().ep_axis)
+    gsr = global_mesh_resource()
+    ep_axis = gsr.ep_resource
     outer = _ep_outer_axis()
     if len(spec) != 1 + trailing_count:
         return False
@@ -220,17 +204,8 @@ def _ep_spec_ok(spec, trailing_count):
     leading = spec[0]
     elts = leading if isinstance(leading, tuple) else (leading,)
     actual = frozenset(a for a in elts if a is not None)
-    active_ep_axes = tuple(a for a in ep_axes if get_mesh_axis_size(a) > 1)
-    actual_ep_axes = tuple(a for a in elts if a in active_ep_axes)
-    if actual_ep_axes != active_ep_axes:
-        return False
-    expected = set(ep_axes)
-    if outer is not None:
-        expected.add(outer)
-    required = set(active_ep_axes)
-    if outer is not None and get_mesh_axis_size(outer) > 1:
-        required.add(outer)
-    return required.issubset(actual) and actual.issubset(expected)
+    expected = {ep_axis} if outer is None else {ep_axis, outer}
+    return actual <= expected
 
 
 # ── ep_prepare ──────────────────────────────────────────────────────────────

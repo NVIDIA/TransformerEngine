@@ -16,9 +16,8 @@ residuals into the user-facing autograd graph.
 
 Sharding model
 --------------
-* Inbound activations are 3D ``[B, S, H]`` sharded on one leading
-  compound entry containing outer data-parallel axes followed by every axis
-  in ``ep_axis``. The public
+* Inbound activations are 3D ``[B, S, H]`` sharded
+  ``((*data_parallelism_axes, ep_axis), None, None)``. The public
   :func:`moe` soft-repins this on entry and warns when a reshard is
   inserted.
 * The EP, grouped-quantize, and grouped-GEMM primitives operate at global
@@ -51,7 +50,7 @@ from .quantize import (
 )
 from .flax.module import _convert_to_activation_function
 from .router import ScoreFunction, _validate_score_function
-from .sharding import MeshAxis, _get_mesh, get_mesh_axis_size, normalize_mesh_axes
+from .sharding import _get_mesh
 
 __all__ = ["get_moe_recv_capacity_per_rank", "moe"]
 
@@ -62,14 +61,6 @@ __all__ = ["get_moe_recv_capacity_per_rank", "moe"]
 # TE grouped-GEMM recipes (bf16/fp16/fp8/mxfp8) are satisfied by the
 # same 128-token tile, so a single constant covers every supported path.
 _ALIGN_SIZE = 128
-
-
-def _moe_leading_axis(ep_axis: MeshAxis, data_parallelism_axes: Tuple[str, ...]):
-    """Build one PartitionSpec entry with outer axes followed by compound EP."""
-    axes = (*data_parallelism_axes, *normalize_mesh_axes(ep_axis))
-    if not axes:
-        raise ValueError("moe(...) requires ep_axis to contain at least one mesh axis.")
-    return axes[0] if len(axes) == 1 else axes
 
 
 def get_moe_recv_capacity_per_rank(
@@ -593,14 +584,7 @@ def _moe_fwd_rule(
         raise ValueError("moe(...) requires an active jax.sharding.Mesh.")
     if ep_axis is None:
         raise ValueError("moe(...) requires ep_axis to be set (TE EP backend).")
-    ep_axes = normalize_mesh_axes(ep_axis)
-    bootstrap_ep_axes = normalize_mesh_axes(tex.ep.get_ep_config().ep_axis)
-    if ep_axes != bootstrap_ep_axes:
-        raise ValueError(
-            f"moe(...) ep_axis={ep_axes} does not match the bootstrapped EP axes "
-            f"{bootstrap_ep_axes}."
-        )
-    num_ep = get_mesh_axis_size(ep_axis, mesh)
+    num_ep = mesh.shape[ep_axis]
     if num_experts % num_ep != 0:
         raise ValueError(f"num_experts={num_experts} must be divisible by EP size={num_ep}")
     num_local_experts = num_experts // num_ep
@@ -646,9 +630,13 @@ def _moe_fwd_rule(
         ep_size=num_ep,
     )
 
-    # EP axes must be innermost and retain their declared order: communicator
-    # ranks are formed by flattening the compound resource in that order.
-    batch_pspec_axis: Any = _moe_leading_axis(ep_axis, data_parallelism_axes)
+    if not data_parallelism_axes:
+        batch_pspec_axis: Any = ep_axis
+    else:
+        # ep must be innermost: ep_bootstrap forms NCCL EP comms from
+        # consecutive global ranks (dp_color = rank // ep_size), so the
+        # comm only stays within one model replica under (outer_dp, ep).
+        batch_pspec_axis = (*data_parallelism_axes, ep_axis)
     ep3_spec = P(batch_pspec_axis, None, None)
     ep2_spec = P(batch_pspec_axis, None)
     x = jax.lax.with_sharding_constraint(x, NamedSharding(mesh, ep3_spec))
@@ -925,7 +913,10 @@ def _moe_bwd_rule(
         raise ValueError("moe(...) requires an active jax.sharding.Mesh.")
     B, S, _ = x_shape
     K = num_experts_per_tok
-    batch_pspec_axis: Any = _moe_leading_axis(ep_axis, data_parallelism_axes)
+    if not data_parallelism_axes:
+        batch_pspec_axis: Any = ep_axis
+    else:
+        batch_pspec_axis = (*data_parallelism_axes, ep_axis)
     ep3_spec = P(batch_pspec_axis, None, None)
     ep2_spec = P(batch_pspec_axis, None)
     out_partition_spec = (batch_pspec_axis, None, None)
@@ -1238,7 +1229,7 @@ def moe(
         noop_quantizer_set,
         noop_quantizer_set,
     ),
-    ep_axis: MeshAxis,
+    ep_axis: str,
     data_parallelism_axes: Tuple[str, ...] = (),
     input_axes: Tuple[Optional[str], ...] = (),
     gate_kernel_axes: Tuple[Optional[str], ...] = (),
@@ -1287,10 +1278,9 @@ def moe(
 
     Axis-name parameters:
 
-    * ``ep_axis`` and ``data_parallelism_axes`` are *physical mesh axis names*.
-      ``ep_axis`` may be an ordered tuple whose sizes are multiplied into one
-      compound EP group. These concrete axes are used to compute
-      ``num_ep`` / ``dp_size`` and construct
+    * ``ep_axis`` and ``data_parallelism_axes`` are *physical mesh
+      axis names* -- they index ``jax.sharding.Mesh.shape`` directly
+      (to compute ``num_ep`` / ``dp_size`` and to construct
       ``P((dp..., ep), None, None)`` for the physical
       ``jax.lax.with_sharding_constraint`` calls that JAX requires
       to refer to real mesh axes).
@@ -1323,7 +1313,7 @@ def moe(
     mesh = _get_mesh()
     if mesh is None or mesh.empty:
         raise ValueError("moe(...) requires an active jax.sharding.Mesh.")
-    expected_leading: Any = _moe_leading_axis(ep_axis, data_parallelism_axes)
+    expected_leading: Any = (*data_parallelism_axes, ep_axis) if data_parallelism_axes else ep_axis
     expected_spec = P(expected_leading, None, None)
     actual_spec = getattr(getattr(x, "sharding", None), "spec", None)
     if actual_spec is not None and tuple(actual_spec) != tuple(expected_spec):
