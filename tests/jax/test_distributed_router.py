@@ -86,7 +86,6 @@ AUX_LOSS_CASES = {
 }
 
 
-@pytest.mark.triton
 class TestDistributedFusedTopk:
     """Test distributed execution of fused_topk_with_score_function.
 
@@ -221,7 +220,6 @@ class TestDistributedFusedTopk:
         )
 
 
-@pytest.mark.triton
 class TestDistributedScoreForAuxLoss:
     """Test distributed execution of fused_topk_with_score_function with compute_aux_scores=True.
 
@@ -357,7 +355,6 @@ class TestDistributedScoreForAuxLoss:
         )
 
 
-@pytest.mark.triton
 class TestDistributedMoEAuxLoss:
     """Test distributed execution of fused_moe_aux_loss.
 

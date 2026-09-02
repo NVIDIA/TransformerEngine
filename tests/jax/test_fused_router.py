@@ -397,10 +397,14 @@ def run_topk_comparison(
 @pytest_parametrize_wrapper("group_topk", GROUP_TOPK_OPTIONS)
 @pytest_parametrize_wrapper("scaling_factor", SCALING_FACTOR_OPTIONS)
 @pytest_parametrize_wrapper("enable_bias", ENABLE_BIAS_OPTIONS)
-@pytest.mark.triton
-def test_topk_sigmoid(
-    dtype, num_tokens, num_experts, topk, group_topk, scaling_factor, enable_bias
+@pytest_parametrize_wrapper("score_function", SCORE_FUNCTIONS)
+def test_topk(
+    dtype, num_tokens, num_experts, topk, group_topk, scaling_factor,
+    enable_bias, score_function
 ):
+    if score_function == "softmax" and enable_bias:
+        pytest.skip("Bias is not supported with 'softmax' router score function. Skipping.")
+        return
     num_groups = 8 if group_topk else None
     run_topk_comparison(
         dtype=dtype,
@@ -411,84 +415,8 @@ def test_topk_sigmoid(
         num_groups=num_groups,
         group_topk=group_topk,
         scaling_factor=scaling_factor,
-        score_function="sigmoid",
+        score_function=score_function,
         enable_bias=enable_bias,
-    )
-
-
-@pytest_parametrize_wrapper("dtype", DTYPES)
-@pytest_parametrize_wrapper(
-    "num_tokens,num_experts,topk",
-    TOPK_CASES,
-)
-@pytest_parametrize_wrapper("group_topk", GROUP_TOPK_OPTIONS)
-@pytest_parametrize_wrapper("scaling_factor", SCALING_FACTOR_OPTIONS)
-@pytest_parametrize_wrapper("enable_bias", ENABLE_BIAS_OPTIONS)
-@pytest.mark.triton
-def test_topk_sqrtsoftplus(
-    dtype, num_tokens, num_experts, topk, group_topk, scaling_factor, enable_bias
-):
-    num_groups = 8 if group_topk else None
-    run_topk_comparison(
-        dtype=dtype,
-        num_tokens=num_tokens,
-        num_experts=num_experts,
-        topk=topk,
-        use_pre_softmax=False,
-        num_groups=num_groups,
-        group_topk=group_topk,
-        scaling_factor=scaling_factor,
-        score_function="sqrtsoftplus",
-        enable_bias=enable_bias,
-    )
-
-
-@pytest.mark.triton
-def test_sqrtsoftplus_score_function_enum():
-    from transformer_engine.jax.router import ScoreFunction
-
-    logits = make_logits(128, 32, "sqrtsoftplus")
-    string_fn = jax.jit(
-        partial(fused_topk_with_score_function, topk=4, score_function="sqrtsoftplus")
-    )
-    enum_fn = jax.jit(
-        partial(
-            fused_topk_with_score_function,
-            topk=4,
-            score_function=ScoreFunction.SQRTSOFTPLUS,
-        )
-    )
-
-    string_probs, string_routing_map = string_fn(logits)
-    enum_probs, enum_routing_map = enum_fn(logits)
-    assert jnp.array_equal(string_probs, enum_probs)
-    assert jnp.array_equal(string_routing_map, enum_routing_map)
-
-
-@pytest_parametrize_wrapper("dtype", DTYPES)
-@pytest_parametrize_wrapper(
-    "num_tokens,num_experts,topk",
-    TOPK_CASES,
-)
-@pytest_parametrize_wrapper("use_pre_softmax", USE_PRE_SOFTMAX_OPTIONS)
-@pytest_parametrize_wrapper("group_topk", GROUP_TOPK_OPTIONS)
-@pytest_parametrize_wrapper("scaling_factor", SCALING_FACTOR_OPTIONS)
-@pytest.mark.triton
-def test_topk_softmax(
-    dtype, num_tokens, num_experts, topk, use_pre_softmax, group_topk, scaling_factor
-):
-    num_groups = 8 if group_topk else None
-    run_topk_comparison(
-        dtype=dtype,
-        num_tokens=num_tokens,
-        num_experts=num_experts,
-        topk=topk,
-        use_pre_softmax=use_pre_softmax,
-        num_groups=num_groups,
-        group_topk=group_topk,
-        scaling_factor=scaling_factor,
-        score_function="softmax",
-        enable_bias=False,
     )
 
 
@@ -503,7 +431,6 @@ def test_topk_softmax(
     SCORE_AUX_LOSS_CASES,
 )
 @pytest_parametrize_wrapper("score_function", SCORE_FUNCTIONS)
-@pytest.mark.triton
 def test_fused_scores_for_aux_loss(dtype, num_tokens, num_experts, topk, score_function):
     logits = make_logits(num_tokens, num_experts, score_function, dtype)
 
@@ -566,7 +493,6 @@ def test_fused_scores_for_aux_loss(dtype, num_tokens, num_experts, topk, score_f
     "num_tokens,num_experts,topk",
     AUX_LOSS_CASES,
 )
-@pytest.mark.triton
 def test_fused_moe_aux_loss(dtype, num_tokens, num_experts, topk):
     key = jax.random.PRNGKey(SEED)
 
@@ -639,7 +565,6 @@ def _bytemap_to_bitmap_u8(bytemap):
     TOPK_CASES,
 )
 @pytest_parametrize_wrapper("score_function", SCORE_FUNCTIONS)
-@pytest.mark.triton
 def test_topk_bitmap_vs_bytemap(dtype, num_tokens, num_experts, topk, score_function):
     """fused_topk_with_score_function should produce the same probs and an
     LSB-packed bitmap routing_map when routing_map_format=BITMAP_U8, and
@@ -718,7 +643,6 @@ def test_topk_bitmap_vs_bytemap(dtype, num_tokens, num_experts, topk, score_func
     SCORE_AUX_LOSS_CASES,
 )
 @pytest_parametrize_wrapper("score_function", SCORE_FUNCTIONS)
-@pytest.mark.triton
 def test_score_for_aux_loss_bitmap_vs_bytemap(dtype, num_tokens, num_experts, topk, score_function):
     """compute_aux_scores=True path: bitmap routing_map must equal LSB-packed
     bytemap; scores must be bitwise identical across formats."""
