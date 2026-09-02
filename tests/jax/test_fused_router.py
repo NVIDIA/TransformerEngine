@@ -16,15 +16,8 @@ from utils import pytest_parametrize_wrapper
 
 
 @pytest.fixture(autouse=True, scope="function")
-def _inject_router(request):
-    """Lazy-load router API only for tests marked 'triton'. Other tests run without importing.
-
-    We inject into sys.modules[__name__] so test code can use fused_topk_with_score_function,
-    fused_moe_aux_loss as module-level names (fixture locals are not visible to tests).
-    """
-    if not request.node.get_closest_marker("triton"):
-        yield
-        return
+def _inject_router():
+    """Inject the router API as module-level names for every test in this file."""
     from transformer_engine.jax.router import (
         fused_topk_with_score_function,
         fused_moe_aux_loss,
@@ -354,7 +347,11 @@ def run_topk_comparison(
     assert jnp.array_equal(routing_map_ref, routing_map_fused), "Routing map mismatch"
 
     # Backward: reference (jitted)
-    grad_weights = jnp.linspace(0.5, 1.5, num_experts, dtype=jnp.float32)[None, :]
+    # Use random weights so the backward pass receives non-uniform gradients instead of
+    # the all-ones gradient produced by an unweighted jnp.sum.
+    grad_weights = jax.random.uniform(
+        jax.random.PRNGKey(SEED), (1, num_experts), dtype=jnp.float32
+    )
 
     def loss_ref(logits_):
         p, _ = reference_topk_with_score_function(
@@ -461,7 +458,11 @@ def test_fused_scores_for_aux_loss(dtype, num_tokens, num_experts, topk, score_f
     assert jnp.array_equal(routing_map_ref, routing_map_fused), "Routing map mismatch"
 
     # Backward (jitted)
-    grad_weights = jnp.linspace(0.5, 1.5, num_experts, dtype=jnp.float32)[None, :]
+    # Use random weights so the backward pass receives non-uniform gradients instead of
+    # the all-ones gradient produced by an unweighted jnp.sum.
+    grad_weights = jax.random.uniform(
+        jax.random.PRNGKey(SEED), (1, num_experts), dtype=jnp.float32
+    )
 
     def loss_ref(logits_):
         _, s = reference_compute_scores_for_aux_loss(logits_, topk, score_function)

@@ -36,15 +36,8 @@ from utils import assert_allclose, pytest_parametrize_wrapper
 
 
 @pytest.fixture(autouse=True, scope="function")
-def _inject_router(request):
-    """Lazy-load router API only for tests marked 'triton'. Other tests run without importing.
-
-    We inject into sys.modules[__name__] so test code can use fused_topk_with_score_function,
-    fused_moe_aux_loss as module-level names (fixture locals are not visible to tests).
-    """
-    if not request.node.get_closest_marker("triton"):
-        yield
-        return
+def _inject_router():
+    """Inject the router API as module-level names for every test in this file."""
     import sys
     from transformer_engine.jax.router import (
         fused_topk_with_score_function,
@@ -159,7 +152,11 @@ class TestDistributedFusedTopk:
             ), "Routing map mismatch in distributed fused_topk"
 
             # === Backward ===
-            grad_weights = jnp.linspace(0.5, 1.5, num_experts, dtype=jnp.float32)[None, :]
+            # Use random weights so the backward pass receives non-uniform gradients instead of
+            # the all-ones gradient produced by an unweighted jnp.sum.
+            grad_weights = jax.random.uniform(
+                jax.random.PRNGKey(42), (1, num_experts), dtype=jnp.float32
+            )
 
             def target_loss(x):
                 p, _ = fused_topk_with_score_function(
@@ -293,7 +290,11 @@ class TestDistributedScoreForAuxLoss:
             ), "Routing map mismatch in distributed score_for_aux_loss"
 
             # === Backward ===
-            grad_weights = jnp.linspace(0.5, 1.5, num_experts, dtype=jnp.float32)[None, :]
+            # Use random weights so the backward pass receives non-uniform gradients instead of
+            # the all-ones gradient produced by an unweighted jnp.sum.
+            grad_weights = jax.random.uniform(
+                jax.random.PRNGKey(42), (1, num_experts), dtype=jnp.float32
+            )
 
             def target_loss(x):
                 s, _ = fused_topk_with_score_function(
