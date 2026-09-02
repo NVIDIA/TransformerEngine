@@ -33,13 +33,7 @@ import numpy as np
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 
 from utils import is_devices_enough
-from transformer_engine.jax.cpp_extensions.ep import (
-    ep_prepare,
-    ep_dispatch_fwd,
-    ep_combine_fwd,
-    get_ep_config,
-    _ep_outer_axis,
-)
+from transformer_engine.jax.sharding import MeshResource, global_shard_guard
 from transformer_engine.jax.ep import (
     EpLayerConfig,
     ep_bootstrap,
@@ -48,15 +42,14 @@ from transformer_engine.jax.ep import (
     ep_combine,
     _ep_domain_for_rank,
 )
-from transformer_engine.jax.sharding import (
-    BATCH_AXES,
-    W_TP_AXES,
-    MeshResource,
-    get_mesh_axis_size,
-    get_sharding_map_logic_axis_to_mesh_axis,
-    global_shard_guard,
+from transformer_engine.jax.cpp_extensions.ep import (
+    ep_prepare,
+    ep_dispatch_fwd,
+    ep_combine_fwd,
+    get_ep_config,
 )
 from transformer_engine.jax.version_utils import is_collective_stream_supported
+
 
 # ── Test config ─────────────────────────────────────────────────────────────
 # NCCL EP requires NUM_LOCAL_EXPERTS*ep % 4 == 0 (TMA alignment in
@@ -966,37 +959,6 @@ class TestEpDomainGrouping(unittest.TestCase):
         domains = {root: [m[c] for c in sorted(m)] for root, m in domains.items()}
 
         self.assertEqual(domains, {0: [0, 2, 4, 6], 1: [1, 3, 5, 7]})
-
-    def test_compound_ep_axis_group(self):
-        if not is_devices_enough(4):
-            self.skipTest("requires 4 devices")
-        mesh = Mesh(
-            np.asarray(jax.devices()[:4]).reshape(2, 2, 1),
-            ("expert", "tensor", "etp"),
-        )
-        order = {int(d.id): i for i, d in enumerate(mesh.devices.reshape(-1))}
-        d2r = lambda d: order[int(d.id)]
-
-        resource = MeshResource(
-            dp_resource="expert",
-            tp_resource="tensor",
-        )
-        with mesh, global_shard_guard(resource):
-            self.assertEqual(get_mesh_axis_size(("expert", "tensor")), 4)
-            dense_rules = get_sharding_map_logic_axis_to_mesh_axis()
-            self.assertEqual(dense_rules[BATCH_AXES], "expert")
-            self.assertEqual(dense_rules[W_TP_AXES], "tensor")
-            self.assertIsNone(_ep_outer_axis(("expert", "tensor")))
-
-        domains = {}
-        for rank in range(4):
-            root, col, ndom = _ep_domain_for_rank(
-                mesh, ("expert", "tensor"), rank, device_to_rank=d2r
-            )
-            self.assertEqual(ndom, 1)
-            domains.setdefault(root, {})[col] = rank
-        domains = {root: [m[c] for c in sorted(m)] for root, m in domains.items()}
-        self.assertEqual(domains, {0: [0, 1, 2, 3]})
 
 
 # ── Entry point ──────────────────────────────────────────────────────────────

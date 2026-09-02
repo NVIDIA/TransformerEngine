@@ -57,7 +57,6 @@ import pytest
 
 from jax.experimental import mesh_utils
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
-from flax import linen as flax_linen
 from flax.linen import partitioning as nn_partitioning
 
 
@@ -130,57 +129,31 @@ from transformer_engine.jax.ep import ep_bootstrap
 from transformer_engine.common.recipe import MXFP8BlockScaling
 from transformer_engine.jax.sharding import MeshResource, global_shard_guard
 
+
 # -----------------------------------------------------------------------------
 # Mesh / shape config
 # -----------------------------------------------------------------------------
 
-COMPOUND_EP = os.environ.get("TE_EP_MOE_COMPOUND_EP", "0") == "1"
+EP_AXIS = "ep"
+FSDP_AXIS = "fsdp"
+EP_SIZE = 2
+assert (
+    jax.device_count() % EP_SIZE == 0
+), f"device_count {jax.device_count()} must be divisible by EP_SIZE={EP_SIZE}"
+FSDP_SIZE = jax.device_count() // EP_SIZE
+NUM_DEVICES_REQUIRED = EP_SIZE * FSDP_SIZE
 
-if COMPOUND_EP:
-    EP_AXIS = ("expert", "tensor")
-    EP_SIZE = 4
-    MESH_SHAPE = (2, 2, 1)
-    MESH_AXIS_NAMES = ("expert", "tensor", "etp")
-    # Both dense DP and TP axes are folded into EP for this MoE region, leaving
-    # no additional data-parallel axis outside the EP communicator.
-    DATA_PARALLELISM_AXES = ()
-    BATCH_MESH_AXIS = EP_AXIS
-    MESH_RESOURCE = MeshResource(
-        dp_resource="expert",
-        tp_resource="tensor",
-    )
-    LOGICAL_AXIS_RULES = (
-        ("exp", EP_AXIS),
-        ("embed", None),
-        ("mlp", "etp"),
-        ("batch", EP_AXIS),
-    )
-else:
-    EP_AXIS = "ep"
-    FSDP_AXIS = "fsdp"
-    EP_SIZE = 2
-    assert (
-        jax.device_count() % EP_SIZE == 0
-    ), f"device_count {jax.device_count()} must be divisible by EP_SIZE={EP_SIZE}"
-    FSDP_SIZE = jax.device_count() // EP_SIZE
-    MESH_SHAPE = (FSDP_SIZE, EP_SIZE)
-    MESH_AXIS_NAMES = (FSDP_AXIS, EP_AXIS)
-    DATA_PARALLELISM_AXES = (FSDP_AXIS,)
-    BATCH_MESH_AXIS = (FSDP_AXIS, EP_AXIS)
-    MESH_RESOURCE = MeshResource(ep_resource=EP_AXIS, fsdp_resource=FSDP_AXIS)
-    LOGICAL_AXIS_RULES = (
-        ("exp", EP_AXIS),
-        ("embed", FSDP_AXIS),
-        ("mlp", None),
-        ("batch", BATCH_MESH_AXIS),
-    )
-
-NUM_DEVICES_REQUIRED = int(np.prod(MESH_SHAPE))
+LOGICAL_AXIS_RULES = (
+    ("exp", EP_AXIS),
+    ("embed", FSDP_AXIS),
+    ("mlp", None),
+    ("batch", (FSDP_AXIS, EP_AXIS)),
+)
 
 # Small shapes so the parity tests stay tight on bf16. The block still
 # has all four ranks participating in dispatch/combine.
 DTYPE = jnp.bfloat16
-BATCH = NUM_DEVICES_REQUIRED * 2
+BATCH = EP_SIZE * FSDP_SIZE * 2  # 8 on 4-GPU, 16 on 8-GPU
 SEQ = 32
 HIDDEN = 128
 INTER = 128
@@ -216,20 +189,16 @@ AUX_TOLERANCE = {"atol": 1e-6, "rtol": 1e-6}
 
 @pytest.fixture(scope="module")
 def mesh():
-    if jax.device_count() < NUM_DEVICES_REQUIRED or (
-        COMPOUND_EP and jax.device_count() != NUM_DEVICES_REQUIRED
-    ):
+    if jax.device_count() < NUM_DEVICES_REQUIRED:
         pytest.skip(
-            f"Need {'exactly' if COMPOUND_EP else '>='} {NUM_DEVICES_REQUIRED} devices for"
-            f" mesh={MESH_SHAPE}; have {jax.device_count()}"
+            f"Need >={NUM_DEVICES_REQUIRED} devices for ep={EP_SIZE} x fsdp={FSDP_SIZE};"
+            f" have {jax.device_count()}"
         )
-    # Compound EP axes retain their declared order. With shape (2, 2, 1),
-    # (expert, tensor) flattens to contiguous ranks [0, 1, 2, 3].
-    if COMPOUND_EP:
-        devices = np.asarray(jax.devices()).reshape(MESH_SHAPE)
-    else:
-        devices = mesh_utils.create_device_mesh(MESH_SHAPE)
-    mesh_obj = Mesh(devices, axis_names=MESH_AXIS_NAMES)
+    # ``ep`` must be the inner axis: ``ep_bootstrap`` forms NCCL EP groups
+    # from consecutive global ranks via ``dp_color = rank // ep_size``, so
+    # only an (outer_fsdp, inner_ep) device layout groups ranks correctly.
+    devices = mesh_utils.create_device_mesh((FSDP_SIZE, EP_SIZE))
+    mesh_obj = Mesh(devices, axis_names=(FSDP_AXIS, EP_AXIS))
 
     num_procs = jax.process_count()
     max_tokens_per_rank = (BATCH // num_procs) * SEQ
@@ -246,7 +215,7 @@ def mesh():
     # Eager bootstrap: ep_bootstrap does a host-side NCCL UID allgather
     # and cannot run from inside jax.jit. Sized to the worst-case recv_pr
     # across _CONFIGS so every parametrized config is bootstrap-compatible.
-    with mesh_obj, global_shard_guard(MESH_RESOURCE):
+    with mesh_obj, global_shard_guard(MeshResource(ep_resource=EP_AXIS, fsdp_resource=FSDP_AXIS)):
         ep_bootstrap(
             world_size=num_procs,
             rank=jax.process_index(),
@@ -255,7 +224,6 @@ def mesh():
             recv_capacity_per_rank=recv_capacity_per_rank,
             hidden_dim=HIDDEN,
             max_token_dtype=DTYPE,
-            ep_axis=EP_AXIS if COMPOUND_EP else None,
         )
     record_ep_bootstrap_signature_for_moe(
         num_experts=NUM_EXPERTS,
@@ -396,8 +364,7 @@ def _make_block(
         num_experts=NUM_EXPERTS,
         num_experts_per_tok=TOPK,
         intermediate_size=INTER,
-        ep_axis=EP_AXIS if COMPOUND_EP else None,
-        data_parallelism_axes=DATA_PARALLELISM_AXES,
+        data_parallelism_axes=(FSDP_AXIS,),
         apply_topk_weights_early=apply_topk_weights_early,
         aux_loss_coeff=aux_loss_coeff,
         use_expert_routing_bias=use_expert_routing_bias,
@@ -427,7 +394,9 @@ def _strong_expert_bias_init(key, shape, dtype):
 
 def _shard_inputs(x, mesh):
     # Match the layout moe.py re-pins to: outer dp axes, then ep innermost.
-    return jax.lax.with_sharding_constraint(x, NamedSharding(mesh, P(BATCH_MESH_AXIS, None, None)))
+    return jax.lax.with_sharding_constraint(
+        x, NamedSharding(mesh, P((FSDP_AXIS, EP_AXIS), None, None))
+    )
 
 
 def _ctx(mesh):
@@ -436,7 +405,9 @@ def _ctx(mesh):
     class _Combo:
         def __enter__(self_inner):
             self_inner._m = mesh.__enter__()
-            self_inner._gs = global_shard_guard(MESH_RESOURCE)
+            self_inner._gs = global_shard_guard(
+                MeshResource(ep_resource=EP_AXIS, fsdp_resource=FSDP_AXIS)
+            )
             self_inner._gs.__enter__()
             self_inner._ar = nn_partitioning.axis_rules(LOGICAL_AXIS_RULES)
             self_inner._ar.__enter__()
@@ -453,18 +424,7 @@ def _ctx(mesh):
 def _init_apply(block, mesh, x, key):
     with _ctx(mesh):
         x_sh = _shard_inputs(x, mesh)
-        if COMPOUND_EP:
-            assert _axis_names(_spec_entry(x_sh.sharding.spec, 0)) == frozenset(EP_AXIS)
-            assert not any(_axis_names(entry) for entry in x_sh.sharding.spec[1:])
-        if COMPOUND_EP:
-            abstract_variables = jax.eval_shape(block.init, key, x_sh)
-            logical_specs = flax_linen.get_partition_spec(abstract_variables)
-            variable_shardings = flax_linen.logical_to_mesh_sharding(
-                logical_specs, mesh, LOGICAL_AXIS_RULES
-            )
-            variables = jax.jit(block.init, out_shardings=variable_shardings)(key, x_sh)
-        else:
-            variables = jax.jit(block.init)(key, x_sh)
+        variables = jax.jit(block.init)(key, x_sh)
         jax.block_until_ready(jax.tree_util.tree_leaves(variables)[0])
         output, aux, _trt = jax.jit(block.apply)(variables, x_sh)
         jax.block_until_ready(output)
@@ -540,50 +500,6 @@ def _params_global_numpy(variables, mesh):
     return {name: _to_global_numpy(_unwrap(p), mesh) for name, p in params.items()}
 
 
-def _axis_names(entry):
-    if entry is None:
-        return frozenset()
-    return frozenset(entry if isinstance(entry, tuple) else (entry,))
-
-
-def _spec_entry(spec, index):
-    return spec[index] if index < len(spec) else None
-
-
-def _slice_size(index, global_size):
-    start = 0 if index.start is None else index.start
-    stop = global_size if index.stop is None else index.stop
-    return stop - start
-
-
-def _assert_compound_ep_sharding(variables, output):
-    """Assert TP is folded into EP while size-one ETP leaves matrices complete."""
-    assert _axis_names(_spec_entry(output.sharding.spec, 0)) == frozenset(EP_AXIS)
-    assert not any(_axis_names(entry) for entry in output.sharding.spec[1:])
-
-    params = variables["params"]
-    gate = _unwrap(params["gate_kernel"])
-    wi = _unwrap(params["wi"])
-    wo = _unwrap(params["wo"])
-
-    assert not any(
-        _axis_names(entry) for entry in gate.sharding.spec
-    ), "gate weights should be replicated for global routing"
-    assert _axis_names(_spec_entry(wi.sharding.spec, 0)) == frozenset(EP_AXIS)
-    assert _axis_names(_spec_entry(wo.sharding.spec, 0)) == frozenset(EP_AXIS)
-    # JAX may preserve or elide a size-one axis. Either representation must
-    # leave the expert's hidden/intermediate matrices physically complete.
-    assert _axis_names(_spec_entry(wi.sharding.spec, 2)) <= {"etp"}
-    assert _axis_names(_spec_entry(wo.sharding.spec, 1)) <= {"etp"}
-
-    wi_index = wi.addressable_shards[0].index
-    wo_index = wo.addressable_shards[0].index
-    assert _slice_size(wi_index[0], NUM_EXPERTS) == NUM_EXPERTS // EP_SIZE
-    assert _slice_size(wo_index[0], NUM_EXPERTS) == NUM_EXPERTS // EP_SIZE
-    assert wi_index[1] == slice(None) and wi_index[2] == slice(None)
-    assert wo_index[1] == slice(None) and wo_index[2] == slice(None)
-
-
 def _make_inputs(key):
     """Generate a globally-identical input tensor on every process."""
     return jax.random.normal(key, (BATCH, SEQ, HIDDEN), dtype=DTYPE)
@@ -639,16 +555,11 @@ _CONFIGS = [
     ),
 ]
 
-if COMPOUND_EP:
-    # This mode is a focused sharding qualification, not a repeat of the
-    # router feature matrix covered by the default topology.
-    _CONFIGS = [_CONFIGS[0]]
-
 _QUANTIZATION_CASES = [
     pytest.param("bf16", id="bf16"),
 ]
 
-if get_device_compute_capability(0) >= 100 and not COMPOUND_EP:
+if get_device_compute_capability(0) >= 100:
     _QUANTIZATION_CASES.append(pytest.param("mxfp8", id="mxfp8"))
 
 
@@ -674,9 +585,6 @@ class TestTeEpMoeForward:
         block = _make_block(**config, quantization_recipe=_quantization_recipe(quantization))
         x = _make_inputs(jax.random.PRNGKey(0))
         variables, output, aux = _init_apply(block, mesh, x, jax.random.PRNGKey(1))
-
-        if COMPOUND_EP:
-            _assert_compound_ep_sharding(variables, output)
 
         # Shape / dtype / finiteness (cheap; on the local shard).
         assert output.shape == x.shape
@@ -784,7 +692,6 @@ class TestTeEpMoeBackward:
         )
 
 
-@pytest.mark.skipif(COMPOUND_EP, reason="compound mode focuses on EP sharding")
 class TestTeEpMoeAuxLoss:
     """Aux-loss path. Consolidated into:
     * ``test_aux_loss``: one run that checks the returned scalar's
