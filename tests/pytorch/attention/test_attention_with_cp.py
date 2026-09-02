@@ -657,7 +657,7 @@ def test_cp_with_fused_attention(
 
     # For 111s, dbias calculation is not supported as of cuDNN 9.18, hence, test fwd only for 111s.
     is_training = False if config.bias_shape == "111s" else True
-    available_backends, _, fused_attn_backends = get_available_attention_backends(
+    available_backends, *_ = get_available_attention_backends(
         config,
         qkv_dtype=dtypes[dtype] if dtype != "fp8" else torch.float8_e4m3fn,
         qkv_layout="_".join([qkv_format] * 3),
@@ -670,20 +670,6 @@ def test_cp_with_fused_attention(
     )
 
     _, fused_attn_supported, _ = available_backends
-    if fused_attn_supported and config.attn_mask_type in ["causal", "padding_causal"]:
-        config_copy = copy.deepcopy(config)
-        config_copy.context_parallel = False
-        config_copy.attn_mask_type = config.attn_mask_type + "_bottom_right"
-        available_backends, _, fused_attn_backends = get_available_attention_backends(
-            config_copy,
-            qkv_dtype=dtypes[dtype] if dtype != "fp8" else torch.float8_e4m3fn,
-            qkv_layout="_".join([qkv_format] * 3),
-            fp8=fp8,
-            fp8_meta=fp8_meta,
-            is_training=is_training,
-            deterministic=_deterministic,
-        )
-        _, fused_attn_supported, _ = available_backends
     if not fused_attn_supported:
         pytest.skip("No attention backend available.")
 
