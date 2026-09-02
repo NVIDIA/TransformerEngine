@@ -95,7 +95,7 @@ class _GDNKernelAdapter(torch.nn.Module):
         initial_state: Optional[torch.Tensor] = None,
         *,
         qkv_format: str,
-        cu_seqlens_q: Optional[torch.Tensor] = None,
+        cu_seqlens: Optional[torch.Tensor] = None,
         output_final_state: bool = False,
         use_qk_l2norm_in_kernel: bool = False,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
@@ -176,18 +176,17 @@ class _GDNKernelAdapter(torch.nn.Module):
                 f"{expected_gate_shape}; got {tuple(g.shape)} and {tuple(beta.shape)}."
             )
         if qkv_format == "thd":
-            if cu_seqlens_q is None:
-                raise ValueError("cu_seqlens_q is required for GDN with qkv_format='thd'.")
+            if cu_seqlens is None:
+                raise ValueError("cu_seqlens is required for GDN with qkv_format='thd'.")
             _validate_cu_seqlens(
-                cu_seqlens_q,
+                cu_seqlens,
                 device=device,
-                name="cu_seqlens_q",
+                name="cu_seqlens",
             )
-            cu_seqlens = cu_seqlens_q
         else:
-            if cu_seqlens_q is not None:
+            if cu_seqlens is not None:
                 raise ValueError(
-                    "Dense GDN inputs do not accept cu_seqlens_q. "
+                    "Dense GDN inputs do not accept cu_seqlens. "
                     "Use qkv_format='thd' for packed or ragged batches."
                 )
             if qkv_format == "bshd":
@@ -301,10 +300,10 @@ class GatedDeltaNetAttention(TransformerEngineBaseModule):
     layer_number : int, default = `None`
                  layer number of the current `GatedDeltaNetAttention` when multiple such
                  modules are concatenated, for instance in consecutive transformer blocks.
-    softmax_scale : Optional[float], default = `None`
-                  softmax scale for the Gated DeltaNet recurrence. Defaults to
-                  ``1.0 / sqrt(kv_channels)`` (or the query/key head size, if
-                  ``kv_channels`` is a tuple).
+    scale : Optional[float], default = `None`
+          scale for the Gated DeltaNet recurrence. Defaults to
+          ``1.0 / sqrt(kv_channels)`` (or the query/key head size, if
+          ``kv_channels`` is a tuple).
     """
 
     def __init__(
@@ -316,7 +315,7 @@ class GatedDeltaNetAttention(TransformerEngineBaseModule):
         tp_size: int = 1,
         tp_group: Optional[dist_group_type] = None,
         layer_number: Optional[int] = None,
-        softmax_scale: Optional[float] = None,
+        scale: Optional[float] = None,
         name: Optional[str] = None,
     ) -> None:
         super().__init__(name=name)
@@ -346,11 +345,11 @@ class GatedDeltaNetAttention(TransformerEngineBaseModule):
         self.qk_head_dim = kv_channels if isinstance(kv_channels, int) else kv_channels[0]
         self.v_head_dim = kv_channels if isinstance(kv_channels, int) else kv_channels[1]
 
-        if softmax_scale is None:
-            softmax_scale = 1.0 / math.sqrt(self.qk_head_dim)
+        if scale is None:
+            scale = 1.0 / math.sqrt(self.qk_head_dim)
 
         self.gdn_attention = _GDNKernelAdapter(
-            softmax_scale,
+            scale,
             num_attention_heads // self.tp_size,
             self.qk_head_dim,
             self.v_head_dim,
@@ -386,8 +385,7 @@ class GatedDeltaNetAttention(TransformerEngineBaseModule):
         beta: Optional[torch.Tensor] = None,
         *,
         qkv_format: Optional[str] = None,
-        cu_seqlens_q: Optional[torch.Tensor] = None,
-        cu_seqlens_kv: Optional[torch.Tensor] = None,
+        cu_seqlens: Optional[torch.Tensor] = None,
         checkpoint_core_attention: bool = False,
         initial_state: Optional[torch.Tensor] = None,
         output_final_state: bool = False,
@@ -407,13 +405,9 @@ class GatedDeltaNetAttention(TransformerEngineBaseModule):
             Per-head write-strength gate, of the same shape as `g`. Required.
         qkv_format : Optional[str], default = `None`
             Overrides the module's configured `qkv_format` for this call.
-        cu_seqlens_q : Optional[torch.Tensor], default = `None`
+        cu_seqlens : Optional[torch.Tensor], default = `None`
             Cumulative sequence lengths for packed (`thd`) inputs, of shape
             `[batch_size + 1]` and dtype `torch.int32`.
-        cu_seqlens_kv : Optional[torch.Tensor], default = `None`
-            Gated DeltaNet is self-attention over fully packed sequences, so Q and KV
-            must share identical sequence boundaries. Pass `None`, or the same tensor
-            object as `cu_seqlens_q`.
         checkpoint_core_attention : bool, default = `False`
             If true, forward activations for this module are recomputed
             during the backward pass instead of saved.
@@ -435,15 +429,10 @@ class GatedDeltaNetAttention(TransformerEngineBaseModule):
             raise ValueError(
                 "GatedDeltaNetAttention does not support FP8 autocast or FP8 calibration."
             )
-        if cu_seqlens_kv is not None and cu_seqlens_kv is not cu_seqlens_q:
-            raise ValueError(
-                "GatedDeltaNetAttention requires identical Q and KV sequence boundaries. Pass "
-                "cu_seqlens_kv=None or pass the same tensor object as cu_seqlens_q."
-            )
 
         gdn_kwargs = {
             "qkv_format": qkv_format if qkv_format is not None else self.qkv_format,
-            "cu_seqlens_q": cu_seqlens_q,
+            "cu_seqlens": cu_seqlens,
             "output_final_state": output_final_state,
             "use_qk_l2norm_in_kernel": use_qk_l2norm_in_kernel,
         }

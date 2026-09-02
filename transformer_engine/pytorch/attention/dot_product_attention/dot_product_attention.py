@@ -863,7 +863,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         attention_func: Callable,
         *forward_args: Tuple[torch.Tensor, ...],
         **forward_kwargs: Dict[str, Any],
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, ...]]:
+    ) -> torch.Tensor:
         """Forward method with activation checkpointing."""
 
         def custom_forward(*input_args, **input_kwargs):
@@ -1425,7 +1425,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         qkv_layer: Optional[torch.Tensor] = None,
         kv_layer: Optional[torch.Tensor] = None,
         qkv_interleave_dim: int = -3,
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+    ) -> torch.Tensor:
         r"""
         Dot Product Attention Layer.
 
@@ -1436,7 +1436,7 @@ class DotProductAttention(TransformerEngineBaseModule):
 
         .. note::
 
-            Scaled-softmax attention supports three backends: 1) FlashAttention which calls
+            DotProductAttention supports three backends: 1) FlashAttention which calls
             HazyResearch/Dao-AILab's `flash-attn <https://arxiv.org/pdf/2305.13245.pdf>`_
             PyTorch API, 2) FusedAttention which has multiple fused attention implementations
             based on `cuDNN Graph API
