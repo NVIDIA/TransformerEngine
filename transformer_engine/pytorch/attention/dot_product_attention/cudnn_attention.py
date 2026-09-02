@@ -708,7 +708,7 @@ def _build_f16_fwd_graph(
     )
     is_padding = options.pop("is_padding")
     options.update(
-        generate_stats=is_training,
+        generate_stats=True,
         attn_scale=float(attn_scale),
         use_padding_mask=is_padding,
         use_alibi_mask=attn_bias_type == "alibi",
@@ -805,33 +805,30 @@ def _build_f16_fwd_graph(
         output_t.set_ragged_offset(offset_o).set_ragged_offset_multiplier(o_mult)
     tensors["O"] = output_t
 
-    if is_training:
-        assert stats is not None
-        _, stats_dim, stats_stride = _stats_layout(
-            batch=graph_batch,
-            heads=output_dim[1],
-            max_seqlen_q=graph_seqlen_q,
-            total_tokens_q=q.shape[0] if is_ragged_q else batch * max_seqlen_q,
-            ragged=use_ragged_stats,
+    assert stats is not None
+    _, stats_dim, stats_stride = _stats_layout(
+        batch=graph_batch,
+        heads=output_dim[1],
+        max_seqlen_q=graph_seqlen_q,
+        total_tokens_q=q.shape[0] if is_ragged_q else batch * max_seqlen_q,
+        ragged=use_ragged_stats,
+    )
+    if use_ragged_stats and offset_stats is None:
+        offset_stats, stats_mult = _ragged_offset_tensor(
+            graph,
+            cu_seqlens_q_padded,
+            multiplier=1 if use_legacy_offsets else output_dim[1],
+            name="offset_stats",
+            length=graph_batch + 1,
+            data_type=torch.int64 if use_legacy_offsets else None,
         )
-        if use_ragged_stats and offset_stats is None:
-            offset_stats, stats_mult = _ragged_offset_tensor(
-                graph,
-                cu_seqlens_q_padded,
-                multiplier=1 if use_legacy_offsets else output_dim[1],
-                name="offset_stats",
-                length=graph_batch + 1,
-                data_type=torch.int64 if use_legacy_offsets else None,
-            )
-            tensors["offset_stats"] = offset_stats
-        stats_t.set_output(True).set_data_type(cudnn.data_type.FLOAT).set_dim(
-            stats_dim
-        ).set_stride(stats_stride)
-        if use_ragged_stats:
-            stats_t.set_ragged_offset(offset_stats).set_ragged_offset_multiplier(
-                stats_mult
-            )
-        tensors["Stats"] = stats_t
+        tensors["offset_stats"] = offset_stats
+    stats_t.set_output(True).set_data_type(cudnn.data_type.FLOAT).set_dim(
+        stats_dim
+    ).set_stride(stats_stride)
+    if use_ragged_stats:
+        stats_t.set_ragged_offset(offset_stats).set_ragged_offset_multiplier(stats_mult)
+    tensors["Stats"] = stats_t
 
     return GraphEntry(
         graph=graph, tensors=tensors, workspace_size=finalize_graph(graph)
@@ -891,11 +888,7 @@ def _f16_forward(
         total_tokens_q=total_tokens_q,
         ragged=ragged_stats,
     )
-    stats = (
-        torch.empty(stats_shape, dtype=torch.float32, device=q.device)
-        if is_training
-        else None
-    )
+    stats = torch.empty(stats_shape, dtype=torch.float32, device=q.device)
     max_scores = (
         torch.empty(stats_shape, dtype=torch.float32, device=q.device)
         if return_max_logit
@@ -975,8 +968,7 @@ def _f16_forward(
         tensors["V"]: v,
         tensors["O"]: output,
     }
-    if is_training:
-        variant_pack[tensors["Stats"]] = stats
+    variant_pack[tensors["Stats"]] = stats
     if attn_bias_type == "post_scale_bias":
         variant_pack[tensors["Bias"]] = attn_bias
     legacy_offsets = tensors["_legacy_offsets"]
@@ -1028,10 +1020,8 @@ def _f16_forward(
         variant_pack[tensors["Max"]] = max_scores
     entry.execute(variant_pack, q.device)
 
-    aux: List[torch.Tensor] = []
+    aux: List[torch.Tensor] = [stats, rng_state]
     if is_training:
-        aux.append(stats)
-        aux.append(rng_state)
         if attn_bias_type not in ("no_bias", "alibi"):
             aux.append(attn_bias)
         if softmax_type != "vanilla":
