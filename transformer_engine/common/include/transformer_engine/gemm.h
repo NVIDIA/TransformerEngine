@@ -57,7 +57,7 @@ enum NVTEMatmulConfigAttribute {
   /*! Whether alpha and beta are device pointers. Default: false.
    *
    *  Known bugs: only supported with NVFP4, NVFP4 amaxes are ignored when alpha and beta are device pointers.
-   * 
+   *
    *  \todo Generalize to all tensor formats
    *  \todo Correctly handle NVFP4 amaxes when alpha and beta are device pointers
    */
