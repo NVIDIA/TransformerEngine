@@ -13,6 +13,7 @@ from torch.nn import Parameter
 
 from transformer_engine.pytorch.quantization import (
     FP8GlobalStateManager,
+    quantization_backward_scope,
 )
 from transformer_engine.pytorch._extra_state import UNSAFE_PICKLE_EXTRA_STATE_ENV
 from transformer_engine.pytorch.utils import (
@@ -953,6 +954,219 @@ def test_checkpoint_with_mixed_fp8_regions_saves_only_fp8_recompute_state(use_re
 
     assert _FP8_RECOMPUTE_KEY not in non_fp8_layer.fp8_meta
     assert _FP8_RECOMPUTE_KEY in fp8_layer.fp8_meta
+
+
+_UPDATE_TEST_HIDDEN = 128
+_UPDATE_TEST_BATCH = 32
+_UPDATE_TEST_STEPS = 3
+
+
+class _UpdateCounter:
+    """Count backward updates and check they run after every given module's backward.
+
+    A module that has run backward holds a nonzero grad amax in the current
+    history slot; the update rolls the history and clears that slot.
+    """
+
+    def __init__(self, *modules):
+        self.backward = 0
+        self._original = None
+        self._modules = [m for root in modules for m in root.modules() if hasattr(m, "fp8_meta")]
+
+    def _current_bwd_amax(self):
+        return [m.fp8_meta["scaling_bwd"].amax_history[0] for m in self._modules]
+
+    def __enter__(self):
+        self._original = FP8GlobalStateManager.reduce_and_update_quantization_state.__func__
+        original = self._original
+        counter = self
+
+        def counted(cls, forward=True):
+            if not forward:
+                counter.backward += 1
+                for amax in counter._current_bwd_amax():
+                    assert amax.any(), "backward update ran before all modules finished backward"
+            result = original(cls, forward=forward)
+            if not forward:
+                for amax in counter._current_bwd_amax():
+                    assert not amax.any(), "backward update did not roll the amax history"
+            return result
+
+        FP8GlobalStateManager.reduce_and_update_quantization_state = classmethod(counted)
+        return self
+
+    def __exit__(self, *exc):
+        FP8GlobalStateManager.reduce_and_update_quantization_state = classmethod(self._original)
+
+
+def _make_update_test_model(num_layers=3, seed=1234):
+    torch.manual_seed(seed)
+    return torch.nn.ModuleList(
+        [
+            Linear(_UPDATE_TEST_HIDDEN, _UPDATE_TEST_HIDDEN, bias=True).cuda()
+            for _ in range(num_layers)
+        ]
+    )
+
+
+def _run_update_test_layers(layers, x):
+    for layer in layers:
+        x = layer(x)
+    return x
+
+
+def _update_forward_plain(model, x):
+    return _run_update_test_layers(model, x)
+
+
+def _update_forward_reentrant(model, x):
+    return te_checkpoint(_run_update_test_layers, model, x, use_reentrant=True)
+
+
+def _update_forward_non_reentrant(model, x):
+    return te_checkpoint(_run_update_test_layers, model, x, use_reentrant=False)
+
+
+def _update_forward_per_layer_reentrant(model, x):
+    for layer in model:
+        x = te_checkpoint(layer, x, use_reentrant=True)
+    return x
+
+
+def _update_forward_nested(model, x):
+    def inner(value):
+        return te_checkpoint(model[1], value, use_reentrant=True)
+
+    def outer(value):
+        return model[2](inner(model[0](value)))
+
+    return te_checkpoint(outer, x, use_reentrant=True)
+
+
+# Each case builds its modules and returns (step, tracked_modules). ``step``
+# runs one forward + backward; ``tracked_modules`` must all finish backward
+# before the single update of that step.
+
+
+def _update_case_single_graph(forward_fn):
+    def build():
+        model = _make_update_test_model()
+
+        def step(x, recipe, counter):
+            with autocast(enabled=True, recipe=recipe):
+                out = forward_fn(model, x)
+            out.float().sum().backward()
+
+        return step, [model]
+
+    return build
+
+
+def _update_case_branched(checkpoint_first_branch):
+    def build():
+        branch_a = _make_update_test_model(num_layers=2, seed=1)
+        branch_b = _make_update_test_model(num_layers=2, seed=2)
+
+        def step(x, recipe, counter):
+            with autocast(enabled=True, recipe=recipe):
+                if checkpoint_first_branch:
+                    out_a = te_checkpoint(_run_update_test_layers, branch_a, x, use_reentrant=True)
+                else:
+                    out_a = _run_update_test_layers(branch_a, x)
+                out_b = te_checkpoint(_run_update_test_layers, branch_b, x, use_reentrant=True)
+            (out_a + out_b).float().sum().backward()
+
+        return step, [branch_a, branch_b]
+
+    return build
+
+
+def _update_case_unused_checkpoint_branch():
+    used = _make_update_test_model(num_layers=2, seed=1)
+    unused = _make_update_test_model(num_layers=2, seed=2)
+
+    def step(x, recipe, counter):
+        with autocast(enabled=True, recipe=recipe):
+            unused_out = te_checkpoint(_run_update_test_layers, unused, x, use_reentrant=True)
+            out = _run_update_test_layers(used, x)
+        out.float().sum().backward()
+        del unused_out
+
+    return step, [used]
+
+
+def _update_case_scope_independent_graphs():
+    models = [_make_update_test_model(num_layers=2, seed=seed) for seed in (1, 2)]
+
+    def step(x, recipe, counter):
+        with autocast(enabled=True, recipe=recipe):
+            outputs = [_run_update_test_layers(model, x) for model in models]
+        updates_before = counter.backward
+        with quantization_backward_scope():
+            for output in outputs:
+                output.float().sum().backward()
+                assert counter.backward == updates_before
+
+    return step, models
+
+
+def _update_case_scope_delayed_wgrad():
+    model = Linear(
+        _UPDATE_TEST_HIDDEN,
+        _UPDATE_TEST_HIDDEN,
+        bias=True,
+        delay_wgrad_compute=True,
+    ).cuda()
+
+    def step(x, recipe, counter):
+        updates_before = counter.backward
+        with quantization_backward_scope():
+            with autocast(enabled=True, recipe=recipe):
+                out = model(x)
+            out.float().sum().backward()
+            assert counter.backward == updates_before
+            model.backward_dw()
+            assert model.weight.grad is not None
+            assert counter.backward == updates_before
+
+    return step, [model]
+
+
+_UPDATE_TEST_CASES = {
+    "plain": _update_case_single_graph(_update_forward_plain),
+    "reentrant": _update_case_single_graph(_update_forward_reentrant),
+    "non_reentrant": _update_case_single_graph(_update_forward_non_reentrant),
+    "per_layer_reentrant": _update_case_single_graph(_update_forward_per_layer_reentrant),
+    "nested": _update_case_single_graph(_update_forward_nested),
+    "branched": _update_case_branched(checkpoint_first_branch=False),
+    "branched_checkpoint_first": _update_case_branched(checkpoint_first_branch=True),
+    "unused_checkpoint_branch": _update_case_unused_checkpoint_branch,
+    "scope_independent_graphs": _update_case_scope_independent_graphs,
+    "scope_delayed_wgrad": _update_case_scope_delayed_wgrad,
+}
+
+
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+@pytest.mark.parametrize("case", _UPDATE_TEST_CASES.keys())
+def test_delayed_scaling_updates_once_per_backward(case):
+    FP8GlobalStateManager.reset()
+    step, tracked = _UPDATE_TEST_CASES[case]()
+    fp8_recipe = recipe.DelayedScaling()
+
+    with _UpdateCounter(*tracked) as counter:
+        for i in range(_UPDATE_TEST_STEPS):
+            x = torch.randn(
+                _UPDATE_TEST_BATCH,
+                _UPDATE_TEST_HIDDEN,
+                device="cuda",
+                requires_grad=True,
+            )
+            step(x, fp8_recipe, counter)
+            assert counter.backward == i + 1
+            assert x.grad is not None and torch.isfinite(x.grad).all()
+            qstate = FP8GlobalStateManager.quantization_state
+            assert not qstate.pending_backward_quantization_update
+            assert qstate.backward_quantization_update_callback_task_id is None
 
 
 def _test_e2e_checkpointing_get_model(config, dtype):
