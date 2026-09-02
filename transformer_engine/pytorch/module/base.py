@@ -918,6 +918,9 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self.wgrad_store = None
         self._output_quantizer_role: Optional[QuantizerRole] = None
         self._grad_input_quantizer_role: Optional[QuantizerRole] = None
+        # Device guards entered by prepare_forward, released by end_forward.
+        # A stack so nesting and activation-recompute double-forwards stay balanced.
+        self._forward_device_guards: List[Optional[torch.cuda.device]] = []
 
         if not TEDebugState.debug_enabled:
             TEDebugState.initialize()
@@ -1103,6 +1106,24 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                             meta_key
                         ].amax_history[0]
 
+    def _recipe_state_device(self) -> torch.device:
+        """Device the module's quantization state must be allocated on.
+
+        ``RecipeState`` buffers are dereferenced by kernels launched alongside
+        this module's parameters, so they have to share the parameters' device.
+        Modules with no materialized CUDA parameters or buffers yet (deferred
+        init, or parameter-less modules such as ``DotProductAttention``) fall
+        back to the current device, which ``prepare_forward`` has already
+        pinned to the input's device.
+        """
+        for tensor in self.parameters(recurse=False):
+            if tensor is not None and tensor.device.type == "cuda":
+                return tensor.device
+        for tensor in self.buffers(recurse=False):
+            if tensor is not None and tensor.device.type == "cuda":
+                return tensor.device
+        return torch.device("cuda", torch.cuda.current_device())
+
     def set_meta_tensor(self, fwd: bool, recipe: Recipe) -> None:
         """Init scales and amaxes for fwd | bwd."""
         fp8_meta_tensor_key = "scaling_fwd" if fwd else "scaling_bwd"
@@ -1151,6 +1172,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             mode=("forward" if fwd else "backward"),
             num_quantizers=num_fp8_tensors,
             roles=roles,
+            device=self._recipe_state_device(),
         )
 
         # Reached the rebuild path because ``fp8_meta_tensors_initialized``
@@ -1592,6 +1614,22 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         allow_different_data_and_param_types: bool = False,
     ) -> torch.Tensor:
         """Checks and prepares for FWD execution."""
+        # Kernel launches, workspaces and recipe-state allocation below resolve
+        # their device from the ambient current CUDA device rather than from
+        # ``inp`` (the runtime-compiled kernel cache in common/util/rtc.cpp is
+        # keyed on cuda::current_device()). Pin the current device to the
+        # input's for the duration of the forward so that a module living off
+        # the current device -- single-process multi-GPU, e.g.
+        # accelerate.dispatch_model -- launches into its own context instead of
+        # raising an illegal memory access. Released in ``end_forward``, which
+        # every caller invokes from a ``finally`` block. Always push (possibly
+        # None) so push/pop stay balanced on every path.
+        guard = None
+        if inp.is_cuda and inp.device.index != torch.cuda.current_device():
+            guard = torch.cuda.device(inp.device)
+            guard.__enter__()
+        self._forward_device_guards.append(guard)
+
         self.fast_setattr(
             "allow_different_data_and_param_types", allow_different_data_and_param_types
         )
@@ -1649,6 +1687,10 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         if delayed_scaling_recipe and self.fp8 and in_fp8_activation_recompute_phase():
             FP8GlobalStateManager.restore_fp8_meta_tensors(self.fp8_meta)
         nvtx_range_pop()
+        if self._forward_device_guards:
+            guard = self._forward_device_guards.pop()
+            if guard is not None:
+                guard.__exit__(None, None, None)
 
     @contextmanager
     def prepare_forward_ctx(
