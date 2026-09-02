@@ -329,9 +329,9 @@ using cublasHandleManager = detail::HandleManager<cublasLtHandle_t, CreateCublas
 void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
                  const Tensor *inputBias, Tensor *outputPreGelu, cublasOperation_t transa,
                  cublasOperation_t transb, bool grad, void *workspace, size_t workspaceSize,
-                 const void *alpha, const void *beta, bool use_split_accumulator, int math_sm_count,
-                 int m_split, int n_split, bool gemm_producer, const Tensor *inputCounter,
-                 cudaStream_t stream) {
+                 const void *alpha, const void *beta, bool alpha_beta_on_device,
+                 bool use_split_accumulator, int math_sm_count, int m_split, int n_split,
+                 bool gemm_producer, const Tensor *inputCounter, cudaStream_t stream) {
   NVTE_CHECK(!inputA->row_scaled_nvfp4 && !inputB->row_scaled_nvfp4,
              "cuBLAS GEMM does not support row-scaled NVFP4 inputs.");
 
@@ -372,12 +372,9 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
   const bool use_fp4 = is_fp4_dtype(param.Atype) || is_fp4_dtype(param.Btype);
   const bool nvfp4_tensor_scaling =
       is_nvfp_scaling(inputA->scaling_mode) && is_nvfp_scaling(inputB->scaling_mode);
-  const bool have_nvfp4_amax =
-      (transa == CUBLAS_OP_T ? inputA->amax.dptr : inputA->columnwise_amax.dptr) != nullptr ||
-      (transb == CUBLAS_OP_T ? inputB->columnwise_amax.dptr : inputB->amax.dptr) != nullptr;
 
   // Update scaling factors with NVFP4 tensor scales
-  if (use_fp4 && nvfp4_tensor_scaling && have_nvfp4_amax) {
+  if (use_fp4 && nvfp4_tensor_scaling && !alpha_beta_on_device) {
     // Reserve some workspace for alpha scale
     NVTE_CHECK(workspaceSize >= 4,
                "NVFP4 GEMM requires at least 4 byte workspace for alpha scale, but only has ",
@@ -850,7 +847,8 @@ void nvte_cublas_gemm(const NVTETensor A, const NVTETensor B, NVTETensor D, cons
   // Launch GEMM
   cublas_gemm(inputA, inputB, outputD, biasTensor, outputGelu, (transa) ? CUBLAS_OP_T : CUBLAS_OP_N,
               (transb) ? CUBLAS_OP_T : CUBLAS_OP_N, grad, wspace->data.dptr, wspace->data.shape[0],
-              &alpha, &beta, use_split_accumulator, math_sm_count, 0, 0, false, nullptr, stream);
+              &alpha, &beta, false, use_split_accumulator, math_sm_count, 0, 0, false, nullptr,
+              stream);
 }
 
 void nvte_cublas_gemm_v2(int transa, int transb, const float *alpha, const NVTETensor A,
@@ -911,7 +909,8 @@ void nvte_cublas_gemm_v2(int transa, int transb, const float *alpha, const NVTET
   cublas_gemm(A_tensor, B_tensor, D_tensor, epilogue_bias_tensor, epilogue_aux_tensor,
               transa ? CUBLAS_OP_T : CUBLAS_OP_N, transb ? CUBLAS_OP_T : CUBLAS_OP_N,
               with_grad_epilogue, workspace_ptr, workspace_size, alpha, beta,
-              config_.use_split_accumulator, config_.sm_count, 0, 0, false, nullptr, stream);
+              config_.alpha_beta_on_device, config_.use_split_accumulator, config_.sm_count, 0, 0,
+              false, nullptr, stream);
 }
 
 void nvte_cublas_gemm_scaled(const NVTETensor A, const NVTETensor B, NVTETensor D,
@@ -938,7 +937,8 @@ void nvte_cublas_gemm_scaled(const NVTETensor A, const NVTETensor B, NVTETensor 
   // Launch GEMM
   cublas_gemm(inputA, inputB, outputD, biasTensor, outputGelu, (transa) ? CUBLAS_OP_T : CUBLAS_OP_N,
               (transb) ? CUBLAS_OP_T : CUBLAS_OP_N, grad, wspace->data.dptr, wspace->data.shape[0],
-              &alpha, &beta, use_split_accumulator, math_sm_count, 0, 0, false, nullptr, stream);
+              &alpha, &beta, false, use_split_accumulator, math_sm_count, 0, 0, false, nullptr,
+              stream);
 }
 
 void nvte_cublas_atomic_gemm(const NVTETensor A, const NVTETensor B, NVTETensor D,
@@ -984,7 +984,7 @@ void nvte_cublas_atomic_gemm(const NVTETensor A, const NVTETensor B, NVTETensor 
              "Atomic GEMM only supports delayed scaling.");
   cublas_gemm(inputA, inputB, outputD, biasTensor, outputGelu, (transa) ? CUBLAS_OP_T : CUBLAS_OP_N,
               (transb) ? CUBLAS_OP_T : CUBLAS_OP_N, grad, wspace->data.dptr, wspace->data.shape[0],
-              alpha_ptr, beta_ptr, use_split_accumulator, math_sm_count, m_split, n_split,
+              alpha_ptr, beta_ptr, true, use_split_accumulator, math_sm_count, m_split, n_split,
               gemm_producer, inputCounter, stream);
 #endif
 }
