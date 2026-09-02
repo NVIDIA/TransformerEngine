@@ -46,7 +46,6 @@ from ..utils import (
     cast_if_needed,
     assert_dim_for_fp8_exec,
     clear_tensor_data,
-    requires_grad,
     needs_quantized_gemm,
     get_nvtx_range_context,
 )
@@ -58,14 +57,12 @@ from ..distributed import (
     reduce_scatter_along_first_dim,
     gather_along_first_dim,
     use_reentrant_activation_recompute,
-    in_fp8_activation_recompute_phase,
     _fsdp_scatter_tensors,
     _get_cuda_rng_state,
     _set_cuda_rng_state,
 )
 from ..constants import FP8BwdTensorIdx, FP8FwdTensorIdx, dist_group_type
 from ..jit import no_torch_dynamo
-from ..graph import is_graph_capturing
 from ..tensor.float8_tensor import Float8Tensor
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor.nvfp4_tensor import NVFP4Quantizer
@@ -908,17 +905,10 @@ class _LayerNormMLP(torch.autograd.Function):
                 inp.requires_grad or ln_weight.requires_grad or ln_bias.requires_grad
             )
             ctx.normalization = normalization
-            ctx.reduce_and_update_bwd_fp8_tensors = False
-            if ctx.fp8 and requires_grad(
-                inp, ln_weight, ln_bias, fc1_weight, fc2_weight, fc1_bias, fc2_bias
-            ):
-                qstate = FP8GlobalStateManager.quantization_state
-                _first_fp8_module = qstate.is_first_fp8_module
-                ctx.reduce_and_update_bwd_fp8_tensors = FP8GlobalStateManager.is_first_fp8_module()
-                if in_fp8_activation_recompute_phase() or is_recomputation:
-                    qstate.is_first_fp8_module = _first_fp8_module
-
             ctx.wgrad_store = wgrad_store
+            ctx.request_backward_quantization_update = (
+                ctx.fp8 and FP8GlobalStateManager.backward_quantization_update_needed()
+            )
             if is_recomputation:  # return the recomputed tensors
                 return (
                     ctx,
@@ -1806,8 +1796,8 @@ class _LayerNormMLP(torch.autograd.Function):
         else:
             fc2_wgrad = None
 
-        if ctx.reduce_and_update_bwd_fp8_tensors and not is_graph_capturing():
-            FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=False)
+        if ctx.request_backward_quantization_update:
+            FP8GlobalStateManager.request_backward_quantization_update()
 
         # FIX THIS
         # Scatter Fp8 tranposed-weight buffers

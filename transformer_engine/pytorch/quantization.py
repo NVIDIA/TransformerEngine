@@ -28,12 +28,13 @@ from transformer_engine.common.recipe import (
 )
 from .constants import dist_group_type, DType
 
-from .utils import get_device_compute_capability
+from .utils import get_device_compute_capability, nvtx_range_push, nvtx_range_pop
 from .jit import jit_fuser
 
 
 __all__ = [
     "autocast",
+    "quantization_backward_scope",
     "quantized_model_init",
     "is_fp8_available",
     "is_mxfp8_available",
@@ -400,6 +401,9 @@ class FP8GlobalState:
     fp8_parameters: bool = False
     high_precision_init_val: bool = False
     is_first_fp8_module: bool = False
+    pending_backward_quantization_update: bool = False
+    backward_quantization_update_callback_task_id: Optional[int] = None
+    quantization_backward_scope_depth: int = 0
     fp8_graph_capturing: bool = False
     autocast_depth: int = 0
     global_amax_buffer: Dict[str, list] = field(default_factory=dict)
@@ -653,62 +657,109 @@ class FP8GlobalStateManager:
             )
 
     @classmethod
-    def reduce_and_update_fp8_tensors(
+    def reduce_and_update_quantization_state(
         cls,
         forward: bool = True,
     ) -> None:
-        """Delayed scaling only. Concatenate, reduce, and split amaxes in the global buffer."""
-        # global_amax_buffer should only be non-empty for fp8 delayed scaling
+        """Run recipe state updates over the delayed-scaling global buffers."""
         qstate = cls.quantization_state
         for (
             buffer_key,
             amax_buffer,
         ) in qstate.global_amax_buffer.items():
-            # Check for forward or backward reduction.
+            # Check for forward or backward update.
             fwd_update, autocast_key = cls.split_key_in_buffer(buffer_key)
             if fwd_update != forward:
                 continue
             if len(amax_buffer) == 0:
                 continue
 
-            # Retrieve autocast specific args and concat amaxes.
             recipe, group = qstate.autocast_arguments[autocast_key]
-            contiguous_amax = torch.cat(amax_buffer)
-
-            # Reduction.
-            if (
-                recipe.reduce_amax
-                and torch.distributed.is_initialized()
-                and torch.distributed.get_world_size(group=group) > 1
-            ):
-                cls.reduce_tensor_across_group_op_max(contiguous_amax, group)
-
-            # Amax and scale update.
-            unfused_update = (
-                bool(int(os.getenv("NVTE_UNFUSED_FP8_UPDATE", "0")))
-                or callable(recipe.amax_compute_algo)
-                or callable(recipe.scaling_factor_compute_algo)
+            RecipeState.class_for_recipe(recipe).reduce_and_update_global_state(
+                recipe,
+                group,
+                forward,
+                amax_buffer,
+                qstate.global_amax_history_buffer[buffer_key],
+                qstate.global_scale_buffer[buffer_key],
             )
 
-            if not unfused_update:
-                tex.fused_amax_and_scale_update_after_reduction(
-                    contiguous_amax,
-                    qstate.global_amax_history_buffer[buffer_key],
-                    qstate.global_scale_buffer[buffer_key],
-                    recipe.amax_compute_algo,
-                    get_fp8_te_dtype(recipe, forward),
-                    recipe.margin,
-                )
-            else:
-                split_and_copy(contiguous_amax, amax_buffer, [x.numel() for x in amax_buffer])
+    # Compatibility alias used by Megatron-Core.
+    reduce_and_update_fp8_tensors = reduce_and_update_quantization_state
 
-                for amax_history, scale in zip(
-                    qstate.global_amax_history_buffer[buffer_key],
-                    qstate.global_scale_buffer[buffer_key],
-                ):
-                    _amax_and_scale_update(
-                        amax_history, scale, get_fp8_max(recipe, forward), recipe
-                    )
+    @classmethod
+    def backward_quantization_update_needed(cls) -> bool:
+        """Whether modules in the active autocast must request an update after backward."""
+        if not cls.is_fp8_enabled():
+            return False
+        recipe = cls.get_fp8_recipe()
+        return recipe.delayed() or recipe.custom()
+
+    @classmethod
+    def request_backward_quantization_update(cls) -> None:
+        """Request an update after the enclosing logical backward.
+
+        No-op inside CUDA graph capture, where the graphed wrapper performs the update.
+        """
+        from .graph import is_graph_capturing  # pylint: disable=import-outside-toplevel
+
+        if is_graph_capturing():
+            return
+        qstate = cls.quantization_state
+        qstate.pending_backward_quantization_update = True
+        if qstate.quantization_backward_scope_depth == 0:
+            cls._queue_backward_quantization_update_callback()
+
+    @classmethod
+    def _queue_backward_quantization_update_callback(cls, task_id: Optional[int] = None) -> None:
+        """Queue an update after an autograd task."""
+        qstate = cls.quantization_state
+        if task_id is None:
+            task_id = torch._C._current_graph_task_id()
+        if task_id == -1:
+            raise RuntimeError("Backward quantization update must be requested during backward")
+        if qstate.backward_quantization_update_callback_task_id == task_id:
+            return
+
+        qstate.backward_quantization_update_callback_task_id = task_id
+
+        def callback() -> None:
+            cls._run_backward_quantization_update_callback(task_id)
+
+        try:
+            torch.autograd.Variable._execution_engine.queue_callback(callback)
+        except RuntimeError:
+            if qstate.backward_quantization_update_callback_task_id == task_id:
+                qstate.backward_quantization_update_callback_task_id = None
+            raise
+
+    @classmethod
+    def _run_backward_quantization_update_callback(cls, task_id: int) -> None:
+        """Run the update callback for an autograd task."""
+        qstate = cls.quantization_state
+        if qstate.backward_quantization_update_callback_task_id != task_id:
+            return
+        qstate.backward_quantization_update_callback_task_id = None
+        if qstate.quantization_backward_scope_depth == 0:
+            cls._run_pending_backward_quantization_update()
+
+    @classmethod
+    def _run_pending_backward_quantization_update(cls) -> None:
+        """Run the pending backward update, if any."""
+        qstate = cls.quantization_state
+        if not qstate.pending_backward_quantization_update:
+            return
+        qstate.pending_backward_quantization_update = False
+        nvtx_range_push("transformer_engine.reduce_and_update_quantization_state.backward")
+        update_succeeded = False
+        try:
+            with torch.no_grad():
+                cls.reduce_and_update_quantization_state(forward=False)
+            update_succeeded = True
+        finally:
+            if not update_succeeded:
+                qstate.pending_backward_quantization_update = True
+            nvtx_range_pop("transformer_engine.reduce_and_update_quantization_state.backward")
 
     @staticmethod
     def get_unique_autocast_key(
@@ -779,7 +830,7 @@ class FP8GlobalStateManager:
         if enabled and qstate.autocast_depth == 0 and not _graph and torch.is_grad_enabled():
             # delayed scaling only function, for other recipes (current scaling with any granularity),
             # this is noop for other recipes because cls.global_amax_buffer is empty list
-            cls.reduce_and_update_fp8_tensors(forward=True)
+            cls.reduce_and_update_quantization_state(forward=True)
 
     @classmethod
     def copy_forward_fp8_meta_tensors_for_recompute(cls, fp8_meta: Dict[str, Any]) -> None:
@@ -841,6 +892,50 @@ class FP8GlobalStateManager:
 
         fp8_meta["scaling_fwd"].amax_history.copy_(fp8_meta["updated_amax_history_fwd"])
         fp8_meta["scaling_fwd"].scale.copy_(fp8_meta["updated_scale_fwd"])
+
+
+@contextmanager
+def quantization_backward_scope() -> None:
+    """Run the delayed-scaling update once, at the end of a logical backward.
+
+    With delayed scaling, each backward pass ends by reducing the gradient amaxes
+    across the amax reduction group and recomputing the scales. Ordinary
+    ``loss.backward()`` calls do this automatically and do not need this scope.
+
+    Use it when one training step consists of several ``backward()`` calls, so that
+    the update runs once when the outermost scope exits instead of after every call:
+
+    .. code-block:: python
+
+        with te.quantization_backward_scope():
+            for loss in microbatch_losses:  # e.g. a 1F1B pipeline schedule
+                loss.backward()
+
+    Nested scopes are no-ops; only the outermost one triggers the update. A scope
+    entered inside a running backward (e.g. in a hook) defers the update to the
+    end of that backward.
+
+    The update also runs if no quantized module ran backward inside the scope, so
+    a rank that skipped all of them (e.g. an expert that received no tokens) still
+    joins the amax reduction and does not stall the other ranks. Every rank must
+    therefore enter and exit the scope the same number of times per step.
+
+    For recipes without delayed-scaling state this scope has no effect.
+    """
+    qstate = FP8GlobalStateManager.quantization_state
+    outermost = qstate.quantization_backward_scope_depth == 0
+    if outermost:
+        qstate.pending_backward_quantization_update = True
+    task_id = torch._C._current_graph_task_id() if outermost else -1
+    if task_id != -1:
+        FP8GlobalStateManager._queue_backward_quantization_update_callback(task_id)
+    qstate.quantization_backward_scope_depth += 1
+    try:
+        yield
+    finally:
+        qstate.quantization_backward_scope_depth -= 1
+        if outermost and task_id == -1:
+            FP8GlobalStateManager._run_pending_backward_quantization_update()
 
 
 @contextmanager
@@ -1323,21 +1418,7 @@ class RecipeState(abc.ABC):
 
         """
 
-        cls = None
-        if recipe.delayed():
-            cls = DelayedScalingRecipeState
-        elif recipe.mxfp8():
-            cls = MXFP8BlockScalingRecipeState
-        elif recipe.float8_current_scaling():
-            cls = Float8CurrentScalingRecipeState
-        elif recipe.float8_block_scaling():
-            cls = Float8BlockScalingRecipeState
-        elif recipe.nvfp4():
-            cls = NVFP4BlockScalingRecipeState
-        elif recipe.custom():
-            cls = CustomRecipeState
-        else:
-            raise ValueError(f"{recipe.__class__.__name__} is not supported")
+        cls = RecipeState.class_for_recipe(recipe)
         return cls(
             recipe,
             mode=mode,
@@ -1345,6 +1426,35 @@ class RecipeState(abc.ABC):
             device=device,
             roles=roles,
         )
+
+    @staticmethod
+    def class_for_recipe(recipe: Recipe) -> type:
+        """Resolve the RecipeState subclass handling a recipe."""
+        if recipe.delayed():
+            return DelayedScalingRecipeState
+        if recipe.mxfp8():
+            return MXFP8BlockScalingRecipeState
+        if recipe.float8_current_scaling():
+            return Float8CurrentScalingRecipeState
+        if recipe.float8_block_scaling():
+            return Float8BlockScalingRecipeState
+        if recipe.nvfp4():
+            return NVFP4BlockScalingRecipeState
+        if recipe.custom():
+            return CustomRecipeState
+        raise ValueError(f"{recipe.__class__.__name__} is not supported")
+
+    @classmethod
+    def reduce_and_update_global_state(
+        cls,
+        recipe: Recipe,
+        group: Optional[dist_group_type],
+        forward: bool,
+        amax_buffer: List[torch.Tensor],
+        amax_history_buffer: List[torch.Tensor],
+        scale_buffer: List[torch.Tensor],
+    ) -> None:
+        """Update process-global state registered for this recipe."""
 
     @abc.abstractmethod
     def make_quantizers(self) -> list:
@@ -1413,6 +1523,47 @@ class DelayedScalingRecipeState(RecipeState):
     # Persistent training state inherited across role-driven rebuilds.
     # See ``RecipeState.inherit_state_from``.
     _persistent_state_buffers = ("scale", "amax_history")
+
+    @classmethod
+    def reduce_and_update_global_state(
+        cls,
+        recipe: DelayedScaling,
+        group: Optional[dist_group_type],
+        forward: bool,
+        amax_buffer: List[torch.Tensor],
+        amax_history_buffer: List[torch.Tensor],
+        scale_buffer: List[torch.Tensor],
+    ) -> None:
+        """Reduce amaxes and update delayed-scaling state."""
+        contiguous_amax = torch.cat(amax_buffer)
+
+        if (
+            recipe.reduce_amax
+            and torch.distributed.is_initialized()
+            and torch.distributed.get_world_size(group=group) > 1
+        ):
+            FP8GlobalStateManager.reduce_tensor_across_group_op_max(contiguous_amax, group)
+
+        unfused_update = (
+            bool(int(os.getenv("NVTE_UNFUSED_FP8_UPDATE", "0")))
+            or callable(recipe.amax_compute_algo)
+            or callable(recipe.scaling_factor_compute_algo)
+        )
+
+        if not unfused_update:
+            tex.fused_amax_and_scale_update_after_reduction(
+                contiguous_amax,
+                amax_history_buffer,
+                scale_buffer,
+                recipe.amax_compute_algo,
+                get_fp8_te_dtype(recipe, forward),
+                recipe.margin,
+            )
+        else:
+            split_and_copy(contiguous_amax, amax_buffer, [x.numel() for x in amax_buffer])
+
+            for amax_history, scale in zip(amax_history_buffer, scale_buffer):
+                _amax_and_scale_update(amax_history, scale, get_fp8_max(recipe, forward), recipe)
 
     def __init__(
         self,
