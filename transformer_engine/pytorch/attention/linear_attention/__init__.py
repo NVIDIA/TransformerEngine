@@ -4,6 +4,6 @@
 
 """Python interface for linear attention"""
 
-from .linear_attention import LinearAttention
+from .gdn import GatedDeltaNetAttention
 
-__all__ = ["LinearAttention"]
+__all__ = ["GatedDeltaNetAttention"]

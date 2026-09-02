@@ -25,7 +25,7 @@ PyTorch
 .. autoapiclass:: transformer_engine.pytorch.DotProductAttention(num_attention_heads, kv_channels, **kwargs)
   :members: forward, set_context_parallel_group
 
-.. autoapiclass:: transformer_engine.pytorch.LinearAttention(num_attention_heads, kv_channels, **kwargs)
+.. autoapiclass:: transformer_engine.pytorch.GatedDeltaNetAttention(num_attention_heads, kv_channels, **kwargs)
   :members: forward
 
 .. autoapiclass:: transformer_engine.pytorch.MultiheadAttention(hidden_size, num_attention_heads, **kwargs)
