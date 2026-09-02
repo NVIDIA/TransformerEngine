@@ -896,17 +896,32 @@ class FP8GlobalStateManager:
 
 @contextmanager
 def quantization_backward_scope() -> None:
-    """Delay the quantization state update until the end of a logical backward.
+    """Run the delayed-scaling update once, at the end of a logical backward.
 
-    Ordinary backward calls update automatically and do not require this scope.
-    Use it when a logical backward spans multiple autograd calls, including
-    independent graphs produced under one autocast, or includes delayed work
-    such as ``module.backward_dw()``. Nested scopes update once when the
-    outermost scope exits.
+    With delayed scaling, each backward pass ends by reducing the gradient amaxes
+    across the amax reduction group and recomputing the scales. Ordinary
+    ``loss.backward()`` calls do this automatically and do not need this scope.
 
-    The update runs on scope exit even if no quantized module ran backward
-    inside it, so ranks that skipped every backward (e.g. an expert with no
-    tokens) still participate in the amax reduction.
+    Use it when one training step spans several autograd calls, so that the update
+    runs once when the outermost scope exits instead of after every call:
+
+    .. code-block:: python
+
+        with te.quantization_backward_scope():
+            for loss in microbatch_losses:  # e.g. a 1F1B pipeline schedule
+                loss.backward()
+            model.backward_dw()  # deferred weight gradients
+
+    Nested scopes are no-ops; only the outermost one triggers the update. A scope
+    entered inside a running backward (e.g. in a hook) defers the update to the
+    end of that backward.
+
+    The update also runs if no quantized module ran backward inside the scope, so
+    a rank that skipped all of them (e.g. an expert that received no tokens) still
+    joins the amax reduction and does not stall the other ranks. Every rank must
+    therefore enter and exit the scope the same number of times per step.
+
+    For recipes without delayed-scaling state this scope has no effect.
     """
     qstate = FP8GlobalStateManager.quantization_state
     outermost = qstate.quantization_backward_scope_depth == 0
