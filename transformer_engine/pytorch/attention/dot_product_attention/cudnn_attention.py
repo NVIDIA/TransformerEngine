@@ -864,11 +864,22 @@ def _f16_forward(
     softmax_offset: Optional[torch.Tensor],
     return_max_logit: bool,
 ) -> Tuple[torch.Tensor, List[torch.Tensor], Optional[torch.Tensor]]:
-    q_format, _ = _q_kv_formats(qkv_layout)
+    q_format, kv_format = _q_kv_formats(qkv_layout)
     batch = cu_seqlens_q.numel() - 1
     heads = q.shape[1] if q_format == "bhsd" else q.shape[-2]
     total_tokens_q = q.shape[0] if q_format == "thd" else batch * max_seqlen_q
     cudnn = import_cudnn_frontend()
+    use_token_buckets = (
+        cudnn.backend_version() >= 90600
+        and torch.cuda.get_device_capability(q.device) != (12, 0)
+    )
+    use_direct_offsets = cudnn.backend_version() >= 92400 and dropout == 0.0
+    use_legacy_offsets = (
+        q_format == "thd" or kv_format == "thd"
+    ) and not use_direct_offsets
+    graph_batch = (
+        _max_ragged_batch(batch) if use_legacy_offsets and use_token_buckets else batch
+    )
     ragged_stats = (
         q_format == "thd"
         and cudnn.backend_version() >= 90600
@@ -906,6 +917,7 @@ def _f16_forward(
         is_training=is_training,
         max_seqlen_q=max_seqlen_q,
         max_seqlen_kv=max_seqlen_kv,
+        graph_batch=graph_batch,
         q=_tensor_metadata(q),
         k=_tensor_metadata(k),
         v=_tensor_metadata(v),
@@ -2668,10 +2680,10 @@ def fused_attn_bwd(
         softmax_offset = aux_ctx_tensors[aux_index]
 
     q_format, kv_format = _q_kv_formats(qkv_layout)
+    batch = cu_seqlens_q.numel() - 1
     if q_format == "thd" or kv_format == "thd":
         d_q, d_k, d_v = _allocate_grad_views((q, k, v), fast_zero_fill=fast_zero_fill)
     else:
-        batch = cu_seqlens_q.numel() - 1
         heads = q.shape[1] if q_format == "bhsd" else q.shape[-2]
         kv_heads = k.shape[1] if kv_format == "bhsd" else k.shape[-2]
         d_q, d_k, d_v = _allocate_attention_grad_data(
@@ -2701,11 +2713,21 @@ def fused_attn_bwd(
     cu_seqlens_kv_padded = (
         cu_seqlens_kv if cu_seqlens_kv_padded is None else cu_seqlens_kv_padded
     )
+    cudnn = import_cudnn_frontend()
+    use_token_buckets = (
+        cudnn.backend_version() >= 90600
+        and torch.cuda.get_device_capability(q.device) != (12, 0)
+    )
+    use_legacy_offsets = q_format == "thd" or kv_format == "thd"
+    graph_batch = (
+        _max_ragged_batch(batch) if use_legacy_offsets and use_token_buckets else batch
+    )
 
     key = (
         "f16_bwd",
         max_seqlen_q,
         max_seqlen_kv,
+        graph_batch,
         _tensor_metadata(q),
         _tensor_metadata(k),
         _tensor_metadata(v),
