@@ -2,7 +2,10 @@
 #
 # See LICENSE for license information.
 
-"""Gated DeltaNet linear attention."""
+"""Gated DeltaNet linear attention.
+
+This module is **experimental** and subject to change.
+"""
 
 import importlib
 import math
@@ -271,6 +274,8 @@ def _needs_eager_gdn_attention(call: Dict[str, Any]) -> Optional[str]:
 
 class GatedDeltaNetAttention(TransformerEngineBaseModule):
     """Apply Gated DeltaNet linear attention through the cuDNN frontend.
+
+    This module is **experimental** and subject to change.
 
     Parameters
     ----------

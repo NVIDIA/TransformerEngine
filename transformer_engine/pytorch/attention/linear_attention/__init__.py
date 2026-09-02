@@ -2,7 +2,10 @@
 #
 # See LICENSE for license information.
 
-"""Python interface for linear attention"""
+"""Python interface for linear attention.
+
+This module is **experimental** and subject to change.
+"""
 
 from .gdn import GatedDeltaNetAttention
 
