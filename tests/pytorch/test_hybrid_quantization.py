@@ -496,7 +496,7 @@ class TestHybridQuantizerConstruction:
         ``gather_along_first_dim`` cannot operate on a columnwise-only
         NVFP4 hybrid sub-storage. ``HybridQuantizer.supports_only_rowwise_all_gather``
         must return True in this case so ``_linear_forward_impl`` /
-        ``_linear_backward`` preserve rowwise data (which NVFP4 can
+        ``_linear_backward_impl`` preserve rowwise data (which NVFP4 can
         dequantize) instead.
         """
         hq = HybridQuantizer(

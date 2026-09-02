@@ -294,6 +294,9 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
          qkv_format == NVTE_QKV_Format::NVTE_BHSD)) ||
        ((cudnn_runtime_version >= 92300 && (sm_arch_ >= 100 || (sm_arch_ >= 90 && !is_training))) &&
         qkv_format == NVTE_QKV_Format::NVTE_THD && supported_ragged_offset_size &&
+        // cuDNN before 9.26 misindexes ragged FP8 Stats during sink-token backward.
+        (!is_training || softmax_type == NVTE_Softmax_Type::NVTE_VANILLA_SOFTMAX ||
+         cudnn_runtime_version >= 92600) &&
         (attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK ||
          attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK ||
          attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK))) &&
@@ -478,8 +481,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
         // pre-9.13.1: vanilla
         // 9.13.1+: vanilla, off-by-one, learnable
         (cudnn_runtime_version >= 91301 ||
-         (cudnn_runtime_version < 91301 &&
-          softmax_type == NVTE_Softmax_Type::NVTE_VANILLA_SOFTMAX)) &&
+         softmax_type == NVTE_Softmax_Type::NVTE_VANILLA_SOFTMAX) &&
         // max_logit
         // pre-9.21: no (the composite softmax node rejects the Stats + Max output combination)
         // 9.21+: yes (Stats + Max via the unified softmax node)
