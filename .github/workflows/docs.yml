@@ -28,6 +28,7 @@ jobs:
       - name: 'Build docs'
         env:
           NVTE_DOCS_DISABLE_PUBLIC_FEATURES: '1'
+          NVTE_DOCS_SWITCHER_JSON_URL: 'versions1.json'
         run: | # SPHINXOPTS="-W" errors out on warnings
           doxygen docs/Doxyfile
           cd docs
