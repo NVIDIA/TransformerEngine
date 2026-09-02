@@ -47,11 +47,11 @@ wait
 # >=4 visible GPUs.
 TE_PATH=$TE_PATH bash $TE_PATH/tests/jax/run_te_ep_moe.sh \
     || test_fail "test_te_ep_moe.py"
-# Focused four-rank mesh: dense DP2 x TP2, folded MoE EP4, explicit ETP1.
+# Focused four-rank mesh: dense DP2 x TP2, folded MoE EP4.
 if [ "$(nvidia-smi -L | wc -l)" -ge 4 ]; then
-    TE_EP_MOE_COMPOUND_ETP1=1 NUM_GPUS=4 TE_PATH=$TE_PATH \
+    TE_EP_MOE_COMPOUND_EP=1 NUM_GPUS=4 TE_PATH=$TE_PATH \
         bash $TE_PATH/tests/jax/run_te_ep_moe.sh \
-        || test_fail "test_te_ep_moe.py compound EP/ETP1"
+        || test_fail "test_te_ep_moe.py compound EP"
 fi
 # Exercise the multi-GPU tutorial in docs/examples/jax (needs >= 4 GPUs;
 # auto-skips otherwise).

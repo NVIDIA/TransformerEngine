@@ -130,27 +130,24 @@ from transformer_engine.jax.ep import ep_bootstrap
 from transformer_engine.common.recipe import MXFP8BlockScaling
 from transformer_engine.jax.sharding import MeshResource, global_shard_guard
 
-
 # -----------------------------------------------------------------------------
 # Mesh / shape config
 # -----------------------------------------------------------------------------
 
-COMPOUND_EP_ETP1 = os.environ.get("TE_EP_MOE_COMPOUND_ETP1", "0") == "1"
+COMPOUND_EP = os.environ.get("TE_EP_MOE_COMPOUND_EP", "0") == "1"
 
-if COMPOUND_EP_ETP1:
+if COMPOUND_EP:
     EP_AXIS = ("expert", "tensor")
     EP_SIZE = 4
     MESH_SHAPE = (2, 2, 1)
     MESH_AXIS_NAMES = ("expert", "tensor", "etp")
-    # Preserve the dense-layer DP declaration. MoEBlock must recognize that
-    # this physical axis is already folded into compound EP and not count it twice.
-    DATA_PARALLELISM_AXES = ("expert",)
+    # Both dense DP and TP axes are folded into EP for this MoE region, leaving
+    # no additional data-parallel axis outside the EP communicator.
+    DATA_PARALLELISM_AXES = ()
     BATCH_MESH_AXIS = EP_AXIS
     MESH_RESOURCE = MeshResource(
         dp_resource="expert",
         tp_resource="tensor",
-        ep_resource=EP_AXIS,
-        etp_resource="etp",
     )
     LOGICAL_AXIS_RULES = (
         ("exp", EP_AXIS),
@@ -220,15 +217,15 @@ AUX_TOLERANCE = {"atol": 1e-6, "rtol": 1e-6}
 @pytest.fixture(scope="module")
 def mesh():
     if jax.device_count() < NUM_DEVICES_REQUIRED or (
-        COMPOUND_EP_ETP1 and jax.device_count() != NUM_DEVICES_REQUIRED
+        COMPOUND_EP and jax.device_count() != NUM_DEVICES_REQUIRED
     ):
         pytest.skip(
-            f"Need {'exactly' if COMPOUND_EP_ETP1 else '>='} {NUM_DEVICES_REQUIRED} devices for"
+            f"Need {'exactly' if COMPOUND_EP else '>='} {NUM_DEVICES_REQUIRED} devices for"
             f" mesh={MESH_SHAPE}; have {jax.device_count()}"
         )
     # Compound EP axes retain their declared order. With shape (2, 2, 1),
     # (expert, tensor) flattens to contiguous ranks [0, 1, 2, 3].
-    if COMPOUND_EP_ETP1:
+    if COMPOUND_EP:
         devices = np.asarray(jax.devices()).reshape(MESH_SHAPE)
     else:
         devices = mesh_utils.create_device_mesh(MESH_SHAPE)
@@ -258,6 +255,7 @@ def mesh():
             recv_capacity_per_rank=recv_capacity_per_rank,
             hidden_dim=HIDDEN,
             max_token_dtype=DTYPE,
+            ep_axis=EP_AXIS if COMPOUND_EP else None,
         )
     record_ep_bootstrap_signature_for_moe(
         num_experts=NUM_EXPERTS,
@@ -398,6 +396,7 @@ def _make_block(
         num_experts=NUM_EXPERTS,
         num_experts_per_tok=TOPK,
         intermediate_size=INTER,
+        ep_axis=EP_AXIS if COMPOUND_EP else None,
         data_parallelism_axes=DATA_PARALLELISM_AXES,
         apply_topk_weights_early=apply_topk_weights_early,
         aux_loss_coeff=aux_loss_coeff,
@@ -454,10 +453,10 @@ def _ctx(mesh):
 def _init_apply(block, mesh, x, key):
     with _ctx(mesh):
         x_sh = _shard_inputs(x, mesh)
-        if COMPOUND_EP_ETP1:
+        if COMPOUND_EP:
             assert _axis_names(_spec_entry(x_sh.sharding.spec, 0)) == frozenset(EP_AXIS)
             assert not any(_axis_names(entry) for entry in x_sh.sharding.spec[1:])
-        if COMPOUND_EP_ETP1:
+        if COMPOUND_EP:
             abstract_variables = jax.eval_shape(block.init, key, x_sh)
             logical_specs = flax_linen.get_partition_spec(abstract_variables)
             variable_shardings = flax_linen.logical_to_mesh_sharding(
@@ -557,8 +556,8 @@ def _slice_size(index, global_size):
     return stop - start
 
 
-def _assert_compound_ep_etp1_sharding(variables, output):
-    """Assert TP is folded into EP while every local expert matrix is complete."""
+def _assert_compound_ep_sharding(variables, output):
+    """Assert TP is folded into EP while size-one ETP leaves matrices complete."""
     assert _axis_names(_spec_entry(output.sharding.spec, 0)) == frozenset(EP_AXIS)
     assert not any(_axis_names(entry) for entry in output.sharding.spec[1:])
 
@@ -567,9 +566,9 @@ def _assert_compound_ep_etp1_sharding(variables, output):
     wi = _unwrap(params["wi"])
     wo = _unwrap(params["wo"])
 
-    assert not any(_axis_names(entry) for entry in gate.sharding.spec), (
-        "gate weights should be replicated for global routing"
-    )
+    assert not any(
+        _axis_names(entry) for entry in gate.sharding.spec
+    ), "gate weights should be replicated for global routing"
     assert _axis_names(_spec_entry(wi.sharding.spec, 0)) == frozenset(EP_AXIS)
     assert _axis_names(_spec_entry(wo.sharding.spec, 0)) == frozenset(EP_AXIS)
     # JAX may preserve or elide a size-one axis. Either representation must
@@ -640,7 +639,7 @@ _CONFIGS = [
     ),
 ]
 
-if COMPOUND_EP_ETP1:
+if COMPOUND_EP:
     # This mode is a focused sharding qualification, not a repeat of the
     # router feature matrix covered by the default topology.
     _CONFIGS = [_CONFIGS[0]]
@@ -649,7 +648,7 @@ _QUANTIZATION_CASES = [
     pytest.param("bf16", id="bf16"),
 ]
 
-if get_device_compute_capability(0) >= 100 and not COMPOUND_EP_ETP1:
+if get_device_compute_capability(0) >= 100 and not COMPOUND_EP:
     _QUANTIZATION_CASES.append(pytest.param("mxfp8", id="mxfp8"))
 
 
@@ -676,8 +675,8 @@ class TestTeEpMoeForward:
         x = _make_inputs(jax.random.PRNGKey(0))
         variables, output, aux = _init_apply(block, mesh, x, jax.random.PRNGKey(1))
 
-        if COMPOUND_EP_ETP1:
-            _assert_compound_ep_etp1_sharding(variables, output)
+        if COMPOUND_EP:
+            _assert_compound_ep_sharding(variables, output)
 
         # Shape / dtype / finiteness (cheap; on the local shard).
         assert output.shape == x.shape
@@ -706,27 +705,6 @@ class TestTeEpMoeForward:
             **FWD_TOLERANCE[quantization],
             err_msg=f"forward parity breach for config={config}, quantization={quantization}",
         )
-
-    def test_active_etp_is_rejected(self, mesh):
-        if not COMPOUND_EP_ETP1:
-            pytest.skip("only applies to the explicit ETP resource mode")
-        active_etp_mesh = Mesh(mesh.devices.reshape(1, 2, 2), MESH_AXIS_NAMES)
-        resource = MeshResource(
-            dp_resource="expert",
-            tp_resource="tensor",
-            ep_resource=("expert", "tensor"),
-            etp_resource="etp",
-        )
-        rules = (
-            ("exp", ("expert", "tensor")),
-            ("embed", None),
-            ("mlp", "etp"),
-            ("batch", ("expert", "tensor")),
-        )
-        block = _make_block()
-        with active_etp_mesh, global_shard_guard(resource), nn_partitioning.axis_rules(rules):
-            with pytest.raises(NotImplementedError, match="ETP=1"):
-                block.init(jax.random.PRNGKey(40), _make_inputs(jax.random.PRNGKey(41)))
 
 
 class TestTeEpMoeBackward:
@@ -806,7 +784,7 @@ class TestTeEpMoeBackward:
         )
 
 
-@pytest.mark.skipif(COMPOUND_EP_ETP1, reason="compound mode focuses on EP/ETP sharding")
+@pytest.mark.skipif(COMPOUND_EP, reason="compound mode focuses on EP sharding")
 class TestTeEpMoeAuxLoss:
     """Aux-loss path. Consolidated into:
     * ``test_aux_loss``: one run that checks the returned scalar's

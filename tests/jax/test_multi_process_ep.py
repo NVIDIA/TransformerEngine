@@ -48,18 +48,15 @@ from transformer_engine.jax.ep import (
     ep_combine,
     _ep_domain_for_rank,
 )
-from transformer_engine.jax.moe import _moe_etp_axis
 from transformer_engine.jax.sharding import (
     BATCH_AXES,
     W_TP_AXES,
     MeshResource,
-    get_active_resource_axis,
     get_mesh_axis_size,
     get_sharding_map_logic_axis_to_mesh_axis,
     global_shard_guard,
 )
 from transformer_engine.jax.version_utils import is_collective_stream_supported
-
 
 # ── Test config ─────────────────────────────────────────────────────────────
 # NCCL EP requires NUM_LOCAL_EXPERTS*ep % 4 == 0 (TMA alignment in
@@ -970,7 +967,7 @@ class TestEpDomainGrouping(unittest.TestCase):
 
         self.assertEqual(domains, {0: [0, 2, 4, 6], 1: [1, 3, 5, 7]})
 
-    def test_compound_ep_with_explicit_etp1(self):
+    def test_compound_ep_axis_group(self):
         if not is_devices_enough(4):
             self.skipTest("requires 4 devices")
         mesh = Mesh(
@@ -983,20 +980,13 @@ class TestEpDomainGrouping(unittest.TestCase):
         resource = MeshResource(
             dp_resource="expert",
             tp_resource="tensor",
-            ep_resource=("expert", "tensor"),
-            etp_resource="etp",
         )
         with mesh, global_shard_guard(resource):
-            self.assertEqual(get_mesh_axis_size(resource.ep_resource), 4)
-            self.assertEqual(get_mesh_axis_size(resource.etp_resource), 1)
-            self.assertEqual(get_active_resource_axis("ep_resource"), ("expert", "tensor"))
-            self.assertIsNone(get_active_resource_axis("etp_resource"))
+            self.assertEqual(get_mesh_axis_size(("expert", "tensor")), 4)
             dense_rules = get_sharding_map_logic_axis_to_mesh_axis()
             self.assertEqual(dense_rules[BATCH_AXES], "expert")
             self.assertEqual(dense_rules[W_TP_AXES], "tensor")
-            # Dense DP is folded into compound EP here, not counted again as an
-            # outer group for the MoE communication buffers.
-            self.assertIsNone(_ep_outer_axis())
+            self.assertIsNone(_ep_outer_axis(("expert", "tensor")))
 
         domains = {}
         for rank in range(4):
@@ -1007,26 +997,6 @@ class TestEpDomainGrouping(unittest.TestCase):
             domains.setdefault(root, {})[col] = rank
         domains = {root: [m[c] for c in sorted(m)] for root, m in domains.items()}
         self.assertEqual(domains, {0: [0, 1, 2, 3]})
-
-        # A size-one member is legal in a compound resource even if JAX later
-        # elides it from a concrete PartitionSpec.
-        etp1_domains = {}
-        for rank in range(4):
-            root, col, ndom = _ep_domain_for_rank(
-                mesh, ("expert", "etp"), rank, device_to_rank=d2r
-            )
-            self.assertEqual(ndom, 2)
-            etp1_domains.setdefault(root, {})[col] = rank
-        etp1_domains = {
-            root: [members[c] for c in sorted(members)]
-            for root, members in etp1_domains.items()
-        }
-        self.assertEqual(etp1_domains, {0: [0, 2], 1: [1, 3]})
-        with mesh, global_shard_guard(
-            MeshResource(ep_resource=("expert", "etp"), etp_resource="etp")
-        ):
-            self.assertEqual(get_active_resource_axis("ep_resource"), ("expert", "etp"))
-        self.assertIsNone(_moe_etp_axis(("expert", "etp"), "etp"))
 
 
 # ── Entry point ──────────────────────────────────────────────────────────────

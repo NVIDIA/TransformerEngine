@@ -13,7 +13,7 @@ to:
    as ``self.param`` slots (with the right
    :func:`flax.linen.with_logical_partitioning` annotations so JAX's
    sharding layer FSDPs the params correctly).
-2. Resolve compound EP and ETP axis resources from the active
+2. Resolve the EP axis from an explicit layer setting or the active
    :class:`transformer_engine.jax.sharding.MeshResource`.
 3. Forward all knobs to :func:`moe`.
 
@@ -34,14 +34,12 @@ import jax.numpy as jnp
 from flax import linen as nn
 
 from transformer_engine.common.recipe import Recipe
-from ..moe import _moe_outer_axes, moe
+from ..moe import MeshAxis, moe
 from ..quantize import QuantizerSet
 from ..router import ScoreFunction
 from ..sharding import (
     _get_mesh,
     get_active_resource_axis,
-    get_mesh_axis_size,
-    global_mesh_resource,
 )
 from .module import TransformerEngineBase
 
@@ -102,8 +100,11 @@ class _MoEBlock(TransformerEngineBase):
         ADDITION to the EP axis. Empty (default) means activations are
         replicated across non-EP axes within an EP group; set e.g.
         ``("fsdp",)`` for true FSDP-of-batch where each device owns a
-        unique slice of the batch. Any dense DP axis already included in a
-        compound EP resource is ignored here rather than counted twice.
+        unique slice of the batch. These axes must be outside ``ep_axis``.
+    ep_axis : Optional[str | tuple[str, ...]]
+        Physical mesh axis name, or ordered compound axis group, used for this
+        MoE block's EP communicator. Defaults to the active
+        ``MeshResource.ep_resource`` for backward compatibility.
     apply_topk_weights_early : bool
         If ``True``, multiply expert outputs by their top-k weights
         *inside* each shard before ``ep_combine`` (saves one global
@@ -152,6 +153,7 @@ class _MoEBlock(TransformerEngineBase):
     input_axes: Tuple[Optional[str], ...] = ()
 
     # Parallelism
+    ep_axis: Optional[MeshAxis] = None
     data_parallelism_axes: Tuple[str, ...] = ()
 
     # MoE knobs forwarded to ``moe()``
@@ -259,17 +261,12 @@ class _MoEBlock(TransformerEngineBase):
                 jnp.float32,
             )
 
-        ep_axis = get_active_resource_axis("ep_resource")
+        ep_axis = self.ep_axis
+        if ep_axis is None:
+            ep_axis = get_active_resource_axis("ep_resource")
         mesh = _get_mesh()
-        etp_axis = global_mesh_resource().etp_resource
-        if etp_axis is not None and get_mesh_axis_size(etp_axis, mesh) != 1:
-            raise NotImplementedError(
-                "_MoEBlock currently supports expert tensor parallelism only with ETP=1; "
-                f"axis {etp_axis!r} has size {get_mesh_axis_size(etp_axis, mesh)}."
-            )
         data_parallel_size = 1
-        effective_data_parallelism_axes = _moe_outer_axes(ep_axis, self.data_parallelism_axes)
-        for axis in effective_data_parallelism_axes:
+        for axis in self.data_parallelism_axes:
             data_parallel_size *= mesh.shape[axis]
 
         def make_grouped_quantizer_set(postfix):
@@ -318,8 +315,7 @@ class _MoEBlock(TransformerEngineBase):
             quantizer_sets=quantizer_sets,
             recv_capacity_per_rank=self.recv_capacity_per_rank,
             ep_axis=ep_axis,
-            etp_axis=etp_axis,
-            data_parallelism_axes=effective_data_parallelism_axes,
+            data_parallelism_axes=self.data_parallelism_axes,
             input_axes=self.input_axes,
             gate_kernel_axes=self.gate_kernel_axes,
             wi_kernel_axes=self.wi_kernel_axes,
