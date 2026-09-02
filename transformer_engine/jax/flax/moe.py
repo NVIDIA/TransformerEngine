@@ -13,7 +13,7 @@ to:
    as ``self.param`` slots (with the right
    :func:`flax.linen.with_logical_partitioning` annotations so JAX's
    sharding layer FSDPs the params correctly).
-2. Resolve the EP axis name from the active
+2. Resolve the EP axes explicitly or from the active
    :class:`transformer_engine.jax.sharding.MeshResource`.
 3. Forward all knobs to :func:`moe`.
 
@@ -98,6 +98,9 @@ class _MoEBlock(TransformerEngineBase):
         replicated across non-EP axes within an EP group; set e.g.
         ``("fsdp",)`` for true FSDP-of-batch where each device owns a
         unique slice of the batch.
+    ep_axis : Optional[str | tuple[str, ...]]
+        Physical mesh axis or ordered tuple of axes used for expert parallelism.
+        Defaults to ``MeshResource.ep_resource``.
     apply_topk_weights_early : bool
         If ``True``, multiply expert outputs by their top-k weights
         *inside* each shard before ``ep_combine`` (saves one global
@@ -146,6 +149,7 @@ class _MoEBlock(TransformerEngineBase):
     input_axes: Tuple[Optional[str], ...] = ()
 
     # Parallelism
+    ep_axis: Optional[Union[str, Tuple[str, ...]]] = None
     data_parallelism_axes: Tuple[str, ...] = ()
 
     # MoE knobs forwarded to ``moe()``
@@ -253,7 +257,9 @@ class _MoEBlock(TransformerEngineBase):
                 jnp.float32,
             )
 
-        ep_axis = get_active_resource_axis("ep_resource")
+        ep_axis = self.ep_axis
+        if ep_axis is None:
+            ep_axis = get_active_resource_axis("ep_resource")
         mesh = _get_mesh()
         data_parallel_size = 1
         for axis in self.data_parallelism_axes:
