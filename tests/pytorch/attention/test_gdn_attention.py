@@ -231,7 +231,6 @@ def test_gdn_thd_forward_final_state_and_backward(
         num_attention_heads=heads,
         kv_channels=(qk_dim, v_dim),
         qkv_format="thd",
-        attn_mask_type="padding_causal",
     )
     output, final_state = attention(
         q,
@@ -317,7 +316,6 @@ def test_gdn_dense_layout(qkv_format, dtype):
         num_attention_heads=heads,
         kv_channels=dim,
         qkv_format=qkv_format,
-        attn_mask_type="causal",
     )
     output = attention(q, k, v, g=g, beta=beta, use_qk_l2norm_in_kernel=True)
     assert output.shape == expected.shape
@@ -331,7 +329,6 @@ def test_gdn_rejects_value_head_count_that_changes_output_width():
         num_attention_heads=1,
         kv_channels=64,
         qkv_format="bshd",
-        attn_mask_type="causal",
     )
     with pytest.raises(ValueError, match="GDN V must have 1 heads"):
         attention(q, k, v, g=g, beta=beta)
@@ -347,7 +344,6 @@ def test_gdn_state_round_trip_matches_single_shot():
         num_attention_heads=heads,
         kv_channels=dim,
         qkv_format="bshd",
-        attn_mask_type="causal",
     )
 
     with torch.no_grad():
@@ -400,7 +396,6 @@ def test_gdn_thd_ragged_sequences(bounds):
         num_attention_heads=heads,
         kv_channels=dim,
         qkv_format="thd",
-        attn_mask_type="padding_causal",
     )
 
     with torch.no_grad():
@@ -445,7 +440,6 @@ def test_gdn_requires_both_gates():
         num_attention_heads=1,
         kv_channels=64,
         qkv_format="bshd",
-        attn_mask_type="causal",
     )
     with pytest.raises(ValueError, match="requires both g and beta"):
         attention(q, k, v, g=g)
@@ -459,7 +453,6 @@ def test_gdn_rejects_fp8_autocast():
         num_attention_heads=1,
         kv_channels=64,
         qkv_format="bshd",
-        attn_mask_type="causal",
     )
     with autocast(enabled=True), pytest.raises(ValueError, match="does not support FP8 autocast"):
         attention(q, k, v, g=g, beta=beta)
@@ -472,7 +465,6 @@ def test_gdn_runs_te_forward_lifecycle(monkeypatch):
         num_attention_heads=1,
         kv_channels=64,
         qkv_format="bshd",
-        attn_mask_type="causal",
     )
     events = []
     prepare_forward = attention.prepare_forward

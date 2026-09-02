@@ -289,10 +289,10 @@ class GatedDeltaNetAttention(TransformerEngineBaseModule):
                {`sbhd`, `bshd`, `thd`}. `s` stands for the sequence length,
                `b` batch size, `h` the number of heads, `d` head size, and
                `t` the total number of tokens in a batch, with with with
-               ``t = sum(s_i)`` for all sequences in the batch.
-    attn_mask_type : str, default = `causal`
-                    Gated DeltaNet is inherently causal; only `causal` and
-                    `padding_causal` are accepted.
+               ``t = sum(s_i)`` for all sequences in the batch. Gated DeltaNet is
+               inherently causal; padded batches must use `qkv_format='thd'` with
+               `cu_seqlens` passed to `forward` to exclude padding tokens from the
+               recurrence.
     tp_size : int, default = 1
             tensor parallel world size.
     tp_group : ProcessGroup, default = `None`
@@ -311,7 +311,6 @@ class GatedDeltaNetAttention(TransformerEngineBaseModule):
         num_attention_heads: int,
         kv_channels: Union[int, Tuple[int, int]],
         qkv_format: str = "sbhd",
-        attn_mask_type: str = "causal",
         tp_size: int = 1,
         tp_group: Optional[dist_group_type] = None,
         layer_number: Optional[int] = None,
@@ -321,15 +320,6 @@ class GatedDeltaNetAttention(TransformerEngineBaseModule):
         super().__init__(name=name)
 
         self.qkv_format = qkv_format
-        attn_mask_type = attn_mask_type.replace(",", "_")
-        if attn_mask_type == "causal_padding":
-            attn_mask_type = "padding_causal"
-        if attn_mask_type not in {"causal", "padding_causal"}:
-            raise ValueError(
-                "GatedDeltaNetAttention is inherently causal and only supports "
-                f"attn_mask_type='causal' or 'padding_causal', got {attn_mask_type!r}."
-            )
-        self.attn_mask_type = attn_mask_type
 
         if tp_group is None:
             self.tp_size = tp_size
@@ -338,6 +328,14 @@ class GatedDeltaNetAttention(TransformerEngineBaseModule):
         else:
             self.tp_size = get_distributed_world_size(tp_group)
             self.set_tensor_parallel_group(tp_group)
+
+        if self.tp_size <= 0:
+            raise ValueError(f"tp_size must be positive, got {self.tp_size}.")
+        if num_attention_heads % self.tp_size != 0:
+            raise ValueError(
+                f"num_attention_heads ({num_attention_heads}) must be divisible by "
+                f"tp_size ({self.tp_size})."
+            )
 
         self.num_attention_heads = num_attention_heads
         self.layer_number = 1 if layer_number is None else layer_number
