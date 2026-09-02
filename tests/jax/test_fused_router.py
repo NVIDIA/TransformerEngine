@@ -394,21 +394,30 @@ def run_topk_comparison(
 @pytest_parametrize_wrapper("group_topk", GROUP_TOPK_OPTIONS)
 @pytest_parametrize_wrapper("scaling_factor", SCALING_FACTOR_OPTIONS)
 @pytest_parametrize_wrapper("enable_bias", ENABLE_BIAS_OPTIONS)
+@pytest_parametrize_wrapper("use_pre_softmax", USE_PRE_SOFTMAX_OPTIONS)
 @pytest_parametrize_wrapper("score_function", SCORE_FUNCTIONS)
 def test_topk(
-    dtype, num_tokens, num_experts, topk, group_topk, scaling_factor,
-    enable_bias, score_function
+    dtype,
+    num_tokens,
+    num_experts,
+    topk,
+    group_topk,
+    scaling_factor,
+    enable_bias,
+    use_pre_softmax,
+    score_function,
 ):
+    if use_pre_softmax and score_function != "softmax":
+        pytest.skip("Pre-softmax is only applicable to the 'softmax' router score function.")
     if score_function == "softmax" and enable_bias:
         pytest.skip("Bias is not supported with 'softmax' router score function. Skipping.")
-        return
     num_groups = 8 if group_topk else None
     run_topk_comparison(
         dtype=dtype,
         num_tokens=num_tokens,
         num_experts=num_experts,
         topk=topk,
-        use_pre_softmax=False,
+        use_pre_softmax=use_pre_softmax,
         num_groups=num_groups,
         group_topk=group_topk,
         scaling_factor=scaling_factor,
