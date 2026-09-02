@@ -311,16 +311,16 @@ def _logical_bhsd_desc(
     stride = tuple(tensor.stride())
     if tensor_format == "sbhd":
         return (
-            (shape[1], shape[2], shape[0], shape[3]),
+            (batch, shape[2], shape[0], shape[3]),
             (stride[1], stride[2], stride[0], stride[3]),
         )
     if tensor_format == "bshd":
         return (
-            (shape[0], shape[2], shape[1], shape[3]),
+            (batch, shape[2], shape[1], shape[3]),
             (stride[0], stride[2], stride[1], stride[3]),
         )
     if tensor_format == "bhsd":
-        return (shape, stride)
+        return ((batch, shape[1], shape[2], shape[3]), stride)
     if tensor_format == "thd":
         # The ragged offset selects each batch's first token.  The synthetic
         # batch stride is only graph metadata; S/H/D use the real packed view.
