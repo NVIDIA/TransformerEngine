@@ -789,9 +789,19 @@ _UPDATE_TEST_STEPS = 3
 
 
 class _UpdateCounter:
-    def __init__(self):
+    """Count backward updates and check they run after every given module's backward.
+
+    A module that has run backward holds a nonzero grad amax in the current
+    history slot; the update rolls the history and clears that slot.
+    """
+
+    def __init__(self, *modules):
         self.backward = 0
         self._original = None
+        self._modules = [m for root in modules for m in root.modules() if hasattr(m, "fp8_meta")]
+
+    def _current_bwd_amax(self):
+        return [m.fp8_meta["scaling_bwd"].amax_history[0] for m in self._modules]
 
     def __enter__(self):
         self._original = FP8GlobalStateManager.reduce_and_update_quantization_state.__func__
@@ -801,7 +811,13 @@ class _UpdateCounter:
         def counted(cls, forward=True):
             if not forward:
                 counter.backward += 1
-            return original(cls, forward=forward)
+                for amax in counter._current_bwd_amax():
+                    assert amax.any(), "backward update ran before all modules finished backward"
+            result = original(cls, forward=forward)
+            if not forward:
+                for amax in counter._current_bwd_amax():
+                    assert not amax.any(), "backward update did not roll the amax history"
+            return result
 
         FP8GlobalStateManager.reduce_and_update_quantization_state = classmethod(counted)
         return self
@@ -877,7 +893,7 @@ def test_delayed_scaling_updates_once_per_backward(mode):
     model = _make_update_test_model()
     recipe = DelayedScaling()
 
-    with _UpdateCounter() as counter:
+    with _UpdateCounter(model) as counter:
         for step in range(_UPDATE_TEST_STEPS):
             x = torch.randn(
                 _UPDATE_TEST_BATCH,
@@ -907,7 +923,7 @@ def test_quantization_backward_scope_groups_independent_graphs():
     ]
     recipe = DelayedScaling()
 
-    with _UpdateCounter() as counter:
+    with _UpdateCounter(*models) as counter:
         with te.autocast(enabled=True, recipe=recipe):
             outputs = [_run_update_test_layers(model, x) for model, x in zip(models, inputs)]
         with te.quantization_backward_scope():
@@ -930,7 +946,7 @@ def test_quantization_backward_scope_covers_delayed_wgrad():
     ).cuda()
     recipe = DelayedScaling()
 
-    with _UpdateCounter() as counter, te.quantization_backward_scope():
+    with _UpdateCounter(model) as counter, te.quantization_backward_scope():
         x = torch.randn(
             _UPDATE_TEST_BATCH,
             _UPDATE_TEST_HIDDEN,
@@ -955,7 +971,7 @@ def test_delayed_scaling_update_on_branched_graph(checkpoint_first_branch):
     branch_b = _make_update_test_model(num_layers=2, seed=2)
     recipe = DelayedScaling()
 
-    with _UpdateCounter() as counter:
+    with _UpdateCounter(branch_a, branch_b) as counter:
         x = torch.randn(
             _UPDATE_TEST_BATCH,
             _UPDATE_TEST_HIDDEN,
@@ -980,7 +996,7 @@ def test_unused_checkpoint_branch_does_not_own_backward_update():
     unused = _make_update_test_model(num_layers=2, seed=2)
     recipe = DelayedScaling()
 
-    with _UpdateCounter() as counter:
+    with _UpdateCounter(used) as counter:
         x = torch.randn(
             _UPDATE_TEST_BATCH,
             _UPDATE_TEST_HIDDEN,
