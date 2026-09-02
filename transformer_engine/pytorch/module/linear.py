@@ -2421,6 +2421,11 @@ class Linear(TransformerEngineBaseModule):
             use_compiled_op = torch.compiler.is_compiling() and _linear_op is not None
             if _linear_op is None and torch.compiler.is_compiling():
                 warn_if_compile_disabled()
+            if use_compiled_op:
+                # Process groups cross the op boundary separately from quantizers.
+                for quantizer in (input_quantizer, grad_output_quantizer):
+                    if getattr(quantizer, "amax_reduction_group", None) is not None:
+                        set_quantizer_amax_reduction_group(quantizer, None)
 
             cache_name = None if (is_first_microbatch is None or self.is_fsdp2) else "weight"
             weight_workspace = (
