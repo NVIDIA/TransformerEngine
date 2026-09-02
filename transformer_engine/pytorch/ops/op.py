@@ -431,6 +431,9 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
                             qstate.global_amax_history_buffer[buffer_key][
                                 pos
                             ] = recipe_state.amax_history
+                            qstate.global_amax_devices[buffer_key].add(
+                                recipe_state.amax_history.device
+                            )
 
         # Add meta tensors to global buffer to participate in reduction
         for mode in ("forward", "backward"):

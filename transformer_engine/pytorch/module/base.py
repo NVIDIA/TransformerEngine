@@ -1105,6 +1105,9 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                         qstate.global_amax_buffer[buffer_key][pos] = self.fp8_meta[
                             meta_key
                         ].amax_history[0]
+                        qstate.global_amax_devices[buffer_key].add(
+                            self.fp8_meta[meta_key].amax_history.device
+                        )
 
     def _recipe_state_device(self) -> torch.device:
         """Device the module's quantization state must be allocated on.
