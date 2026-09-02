@@ -5,6 +5,7 @@
 """JAX related extensions."""
 
 import os
+from importlib.metadata import version as get_package_version
 from pathlib import Path
 from typing import List
 
@@ -23,7 +24,14 @@ from .utils import (
 
 def install_requirements() -> List[str]:
     """Install dependencies for TE/JAX extensions."""
-    return ["jax", "flax>=0.7.1", "nvidia-cudnn-frontend>=1.25.0"]
+    # Serialized cuDNN graphs use a version-specific wire format, so the Python
+    # frontend used at runtime must match the headers used to build the extension.
+    frontend_version = get_package_version("nvidia-cudnn-frontend")
+    return [
+        "jax",
+        "flax>=0.7.1",
+        f"nvidia-cudnn-frontend=={frontend_version}",
+    ]
 
 
 def test_requirements() -> List[str]:

@@ -213,7 +213,9 @@ def _device_arch() -> int:
 def ragged_graph_batch_size(input_batch: int, max_segments_per_seq: int) -> int:
     """Match TE common's cuDNN graph batch-size bucket for ragged attention."""
     batch = int(input_batch) * int(max_segments_per_seq)
-    if _device_arch() == 120:
+    # Bucketing is part of cuDNN's ragged-stats layout, introduced in 9.6.
+    # Older versions use dense stats and require the physical metadata extent.
+    if get_cudnn_version() < (9, 6, 0) or _device_arch() == 120:
         return batch
     if batch <= 32:
         return 32
@@ -239,14 +241,13 @@ def _graph_dimensions(info: _LayoutInfo, config):
     arch = _device_arch()
     use_ragged_stats = is_ragged and cudnn_version >= (9, 6, 0) and arch != 120
     if is_ragged:
-        graph_batch = info.input_batch * int(config.max_segments_per_seq)
-        if arch == 120:
+        graph_batch = ragged_graph_batch_size(
+            info.input_batch, config.max_segments_per_seq
+        )
+        if cudnn_version < (9, 6, 0) or arch == 120:
             graph_sq = info.q_max_seqlen
             graph_skv = info.kv_max_seqlen
         else:
-            graph_batch = ragged_graph_batch_size(
-                info.input_batch, config.max_segments_per_seq
-            )
             graph_sq = _ragged_graph_token_count(info.input_batch * info.q_max_seqlen)
             graph_skv = _ragged_graph_token_count(
                 info.input_batch * info.kv_max_seqlen

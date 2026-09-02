@@ -40,7 +40,7 @@ from transformer_engine.jax.attention import (
     CPStrategy,
     ReorderStrategy,
 )
-from transformer_engine.jax.cpp_extensions import FusedAttnHelper
+from transformer_engine.jax.cpp_extensions import FusedAttnHelper, cudnn_attention
 from transformer_engine_jax import (
     NVTE_Fused_Attn_Backend,
     get_cudnn_version,
@@ -381,6 +381,43 @@ def test_fused_attn_score_mod_rejects_masks_before_cudnn_frontend():
             True,
             score_mod=score_mod,
         )
+
+
+@pytest.mark.parametrize(
+    "cudnn_version, expected_dimensions",
+    [
+        ((9, 5, 1), (8, 768, 640, False)),
+        ((9, 6, 0), (32, 2048, 2048, True)),
+    ],
+)
+def test_thd_graph_bucketing_requires_cudnn_9_6(
+    monkeypatch, cudnn_version, expected_dimensions
+):
+    """Pre-9.6 THD graphs retain dense dimensions and metadata extents."""
+    monkeypatch.setattr(cudnn_attention, "get_cudnn_version", lambda: cudnn_version)
+    monkeypatch.setattr(cudnn_attention, "_device_arch", lambda: 90)
+    info = cudnn_attention._LayoutInfo(
+        batch_shape=(2,),
+        input_batch=2,
+        q_max_seqlen=768,
+        kv_max_seqlen=640,
+        q_heads=8,
+        kv_heads=8,
+        qk_dim=128,
+        v_dim=128,
+    )
+    class Config:
+        qkv_layout = QKVLayout.THD_THD_THD
+        max_segments_per_seq = 4
+        return_max_logit = False
+
+    dimensions = cudnn_attention._graph_dimensions(info, Config())
+
+    assert dimensions[:4] == expected_dimensions
+    if cudnn_version < (9, 6, 0):
+        assert dimensions[4] == (2, 8, 768, 4)
+    else:
+        assert dimensions[4] == (2, 768, 8, 1)
 
 
 class BiasShape(Enum):
