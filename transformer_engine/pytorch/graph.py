@@ -8,7 +8,7 @@ import contextlib
 import gc
 import warnings
 from math import ceil
-from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar, Union
+from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple, TypeVar, Union
 
 import torch
 from torch.utils._pytree import tree_flatten as _tree_flatten
@@ -42,6 +42,13 @@ _CAPTURE_TIME_HOOK_NAMES = (
     "backward_pre_hooks",
     "backward_hooks",
 )
+
+
+class _GraphedCallableHelpers(NamedTuple):
+    """Lifecycle helpers owned by one graphed callable invocation."""
+
+    ensure_not_reset: Callable[[], None]
+    release_static_state: Callable[[], None]
 
 
 def set_capture_start() -> None:
@@ -1214,9 +1221,13 @@ def _make_graphed_callables(
             static_grad_outputs = ()
             static_grad_inputs = ()
 
-        return functionalized, release_static_state, ensure_not_reset
+        helpers = _GraphedCallableHelpers(
+            ensure_not_reset=ensure_not_reset,
+            release_static_state=release_static_state,
+        )
+        return functionalized, helpers
 
-    def make_graphed_attribute_functions(graph_idx, release_static_state, ensure_not_reset):
+    def make_graphed_attribute_functions(graph_idx, helpers):
         # Snapshot per-callable state so returned closures do not retain the outer lists.
         fwd_graph = fwd_graphs[graph_idx]
         bwd_graph = bwd_graphs[graph_idx]
@@ -1226,7 +1237,7 @@ def _make_graphed_callables(
 
         # Attach backward_dw as an attribute to the graphed callable.
         def backward_dw():
-            ensure_not_reset()
+            helpers.ensure_not_reset()
             if need_bwd_dw:
                 bwd_dw_graph.replay()
 
@@ -1250,14 +1261,14 @@ def _make_graphed_callables(
             bwd_graph = None
             bwd_dw_graph = None
             te_modules = ()
-            release_static_state()
+            helpers.release_static_state()
 
         return backward_dw, reset
 
     # Put together the final graphed callables
     ret = []
     for i in range(len(sample_args)):
-        graphed, release_static_state, ensure_not_reset = make_graphed_autograd_function(
+        graphed, helpers = make_graphed_autograd_function(
             fwd_graphs[i],
             bwd_graphs[i],
             per_callable_module_params[i],
@@ -1281,10 +1292,10 @@ def _make_graphed_callables(
                 graphed,
                 orig_fwd,
                 te_modules,
-                ensure_not_reset,
+                helpers,
             ):
                 def new_fwd(*user_args, **user_kwargs):
-                    ensure_not_reset()
+                    helpers.ensure_not_reset()
 
                     # If the module's training-or-eval state matches what we graphed,
                     # run the graph, otherwise run the original forward method
@@ -1336,7 +1347,7 @@ def _make_graphed_callables(
                 graphed,
                 func.forward,
                 te_modules,
-                ensure_not_reset,
+                helpers,
             )
             if _order is None:
                 func.forward = forward
@@ -1348,8 +1359,7 @@ def _make_graphed_callables(
 
         backward_dw_func, reset_func = make_graphed_attribute_functions(
             i,
-            release_static_state,
-            ensure_not_reset,
+            helpers,
         )
         setattr(ret[-1], "backward_dw", backward_dw_func)
         setattr(ret[-1], "reset", reset_func)
