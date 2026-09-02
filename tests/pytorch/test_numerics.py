@@ -4,6 +4,7 @@
 
 import math
 import os
+from contextlib import contextmanager
 from typing import Dict, List, Tuple, Optional
 import pytest
 
@@ -252,6 +253,22 @@ def assert_allclose(
 def reset_global_fp8_state():
     yield
     FP8GlobalStateManager.reset()
+
+
+@contextmanager
+def _disable_bf16_reduced_precision_reduction():
+    original_value = torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction
+    torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False
+    try:
+        yield
+    finally:
+        torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = original_value
+
+
+@pytest.fixture
+def disable_bf16_reduced_precision_reduction():
+    with _disable_bf16_reduced_precision_reduction():
+        yield
 
 
 class TorchScaledMaskedSoftmax(nn.Module):
@@ -1699,7 +1716,14 @@ def test_layernorm_accuracy(dtype, bs, model, eps, zero_centered_gamma):
 @pytest.mark.parametrize("return_bias", all_boolean)
 @pytest.mark.parametrize("bias", all_boolean)
 def test_layernorm_linear_accuracy(
-    dtype, bs, model, normalization, zero_centered_gamma, return_bias, bias
+    dtype,
+    bs,
+    model,
+    normalization,
+    zero_centered_gamma,
+    return_bias,
+    bias,
+    disable_bf16_reduced_precision_reduction,
 ):
     config = model_configs[model]
 
@@ -1783,7 +1807,14 @@ def test_layernorm_linear_accuracy(
 @pytest.mark.parametrize("bias", all_boolean)
 @pytest.mark.parametrize("fuse_wgrad_accumulation", all_boolean)
 def test_layernorm_linear_accuracy_delay_wgrad_compute(
-    dtype, bs, model, normalization, zero_centered_gamma, bias, fuse_wgrad_accumulation
+    dtype,
+    bs,
+    model,
+    normalization,
+    zero_centered_gamma,
+    bias,
+    fuse_wgrad_accumulation,
+    disable_bf16_reduced_precision_reduction,
 ):
     if NVTE_TEST_NVINSPECT_ENABLED:
         pytest.skip("Delayed wgrad compute is not supported in debug mode.")
