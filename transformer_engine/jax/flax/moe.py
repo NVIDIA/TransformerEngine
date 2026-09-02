@@ -92,6 +92,8 @@ class _MoEBlock(TransformerEngineBase):
         Logical sharding axis tuples (consumed by Flax's
         :func:`with_logical_partitioning` and our internal
         :func:`with_sharding_constraint_by_logical_axes`).
+    ep_axis : Optional[str | tuple[str, ...]]
+        Physical EP axis or ordered tuple of axes, overriding the EP resource.
     mesh_resource : Optional[MeshResource]
         Physical DP, FSDP and EP mesh axes. ``None`` resolves the active global
         MeshResource context. An explicit resource takes precedence; one of
@@ -163,6 +165,7 @@ class _MoEBlock(TransformerEngineBase):
     input_axes: Tuple[Optional[str], ...] = ()
 
     # Parallelism
+    ep_axis: Optional[Union[str, Tuple[str, ...]]] = None
     mesh_resource: Optional[MeshResource] = None
     quant_before_fsdp_ag: bool = False
 
@@ -218,6 +221,7 @@ class _MoEBlock(TransformerEngineBase):
         mesh_resource, quant_before_fsdp_ag = _resolve_moe_mesh_resource(
             self.mesh_resource,
             self.quant_before_fsdp_ag,
+            ep_axis=self.ep_axis,
         )
         _, data_parallelism_axes = _moe_mesh_axes(mesh_resource)
         assert (
