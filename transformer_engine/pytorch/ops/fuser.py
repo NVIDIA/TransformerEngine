@@ -220,10 +220,8 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
             func_ctx.basic_op_extra_output_channels = fuser._basic_op_extra_output_channels
             func_ctx.basic_op_extra_output_consumers = fuser._basic_op_extra_output_consumers
             func_ctx.basic_op_extra_input_sources = fuser._basic_op_extra_input_sources
-            func_ctx.fp8_recipe = (
-                FP8GlobalStateManager.get_fp8_recipe()
-                if FP8GlobalStateManager.is_fp8_enabled()
-                else None
+            func_ctx.request_backward_quantization_update = (
+                FP8GlobalStateManager.backward_quantization_update_needed()
             )
 
         # Mark output tensors as not deletable in backward
@@ -364,8 +362,8 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
             for op_idx, input_idx in func_ctx.external_extra_input_slots
         ]
 
-        if func_ctx.fp8_recipe is not None:
-            FP8GlobalStateManager.request_backward_quantization_update(func_ctx.fp8_recipe)
+        if func_ctx.request_backward_quantization_update:
+            FP8GlobalStateManager.request_backward_quantization_update()
 
         return (
             dx,  # input_

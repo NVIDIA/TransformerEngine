@@ -906,6 +906,9 @@ class _LayerNormMLP(torch.autograd.Function):
             )
             ctx.normalization = normalization
             ctx.wgrad_store = wgrad_store
+            ctx.request_backward_quantization_update = (
+                ctx.fp8 and FP8GlobalStateManager.backward_quantization_update_needed()
+            )
             if is_recomputation:  # return the recomputed tensors
                 return (
                     ctx,
@@ -1793,8 +1796,8 @@ class _LayerNormMLP(torch.autograd.Function):
         else:
             fc2_wgrad = None
 
-        if ctx.fp8:
-            FP8GlobalStateManager.request_backward_quantization_update(ctx.fp8_recipe)
+        if ctx.request_backward_quantization_update:
+            FP8GlobalStateManager.request_backward_quantization_update()
 
         # FIX THIS
         # Scatter Fp8 tranposed-weight buffers

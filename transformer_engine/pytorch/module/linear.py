@@ -197,7 +197,7 @@ class LinearBwdArgs:
     # --- Numerical / dtype config ---
     activation_dtype: Optional[torch.dtype] = None
     fp8: bool = False
-    fp8_recipe: Optional[Recipe] = None
+    request_backward_quantization_update: bool = False
     dgrad_use_split_accumulator: bool = _2X_ACC_DGRAD
     wgrad_use_split_accumulator: bool = _2X_ACC_WGRAD
     backward_override: Optional[str] = None
@@ -702,7 +702,6 @@ def _linear_setup_ctx(
     # Numerical / dtype config
     bwd_args.activation_dtype = fwd_args.activation_dtype
     bwd_args.fp8 = fp8
-    bwd_args.fp8_recipe = FP8GlobalStateManager.get_fp8_recipe() if fp8 else None
     bwd_args.dgrad_use_split_accumulator = fwd_args.dgrad_use_split_accumulator
     bwd_args.wgrad_use_split_accumulator = fwd_args.wgrad_use_split_accumulator
     bwd_args.backward_override = backward_override
@@ -757,6 +756,9 @@ def _linear_setup_ctx(
         bwd_args.grad_input_quantizer = None
         bwd_args.grad_weight_quantizer = None
         bwd_args.grad_output_quantizer = None
+    bwd_args.request_backward_quantization_update = (
+        bwd_args.fp8 and FP8GlobalStateManager.backward_quantization_update_needed()
+    )
 
     saved_inputmat, wt_save, saved_weight, saved_bias = tensors_to_save_from_forward
     inputmat_alias, wt_save_alias, saved_weight_alias, bias_alias = ctx_attrs[
@@ -1439,13 +1441,13 @@ class _Linear(torch.autograd.Function):
         if bwd_args.ub_name is not None:
             nvtx_label = f"{nvtx_label}.{bwd_args.ub_name}"
         result = _linear_backward(bwd_args) + (None,)  # fwd_args grad slot
-        fp8_recipe = bwd_args.fp8_recipe if bwd_args.fp8 else None
+        request_update = bwd_args.request_backward_quantization_update
         # Drop all references held by bwd_args (saved tensors, quantizers, weakrefs,
         # main_grad closure) so they don't outlive backward via ctx under retain_graph.
         ctx.backward_objects = None
         del bwd_args
-        if fp8_recipe is not None:
-            FP8GlobalStateManager.request_backward_quantization_update(fp8_recipe)
+        if request_update:
+            FP8GlobalStateManager.request_backward_quantization_update()
         return result
 
 

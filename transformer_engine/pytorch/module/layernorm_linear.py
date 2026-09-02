@@ -599,6 +599,9 @@ class _LayerNormLinear(torch.autograd.Function):
                 ctx.grad_input_quantizer = None
                 ctx.grad_weight_quantizer = None
                 ctx.grad_output_quantizer = None
+            ctx.request_backward_quantization_update = (
+                ctx.fp8 and FP8GlobalStateManager.backward_quantization_update_needed()
+            )
 
         # ------------------------------------------------------
         # Cached state for backward pass is ready...
@@ -1173,8 +1176,8 @@ class _LayerNormLinear(torch.autograd.Function):
         else:
             wgrad = None
 
-        if ctx.fp8:
-            FP8GlobalStateManager.request_backward_quantization_update(ctx.fp8_recipe)
+        if ctx.request_backward_quantization_update:
+            FP8GlobalStateManager.request_backward_quantization_update()
 
         # Scatter fp8 weight buffers
         # if ctx.fp8 and not isinstance(weight, QuantizedTensorStorage):

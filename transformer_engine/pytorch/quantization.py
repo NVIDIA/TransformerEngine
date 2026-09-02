@@ -688,14 +688,19 @@ class FP8GlobalStateManager:
     reduce_and_update_fp8_tensors = reduce_and_update_quantization_state
 
     @classmethod
-    def request_backward_quantization_update(cls, recipe: Recipe) -> None:
+    def backward_quantization_update_needed(cls) -> bool:
+        """Whether modules in the active autocast must request an update after backward."""
+        if not cls.is_fp8_enabled():
+            return False
+        recipe = cls.get_fp8_recipe()
+        return recipe.delayed() or recipe.custom()
+
+    @classmethod
+    def request_backward_quantization_update(cls) -> None:
         """Request an update after the enclosing logical backward.
 
-        No-op for recipes without delayed-scaling state and inside CUDA graph
-        capture, where the graphed wrapper performs the update.
+        No-op inside CUDA graph capture, where the graphed wrapper performs the update.
         """
-        if not (recipe.delayed() or recipe.custom()):
-            return
         from .graph import is_graph_capturing  # pylint: disable=import-outside-toplevel
 
         if is_graph_capturing():
