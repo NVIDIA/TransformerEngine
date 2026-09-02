@@ -64,32 +64,12 @@ __all__ = ["get_moe_recv_capacity_per_rank", "moe"]
 _ALIGN_SIZE = 128
 
 
-def _moe_outer_axes(
-    ep_axis: MeshAxis, data_parallelism_axes: Tuple[str, ...]
-) -> Tuple[str, ...]:
-    """Drop dense DP axes that are folded into the compound EP resource."""
-    ep_axes = set(normalize_mesh_axes(ep_axis))
-    return tuple(axis for axis in data_parallelism_axes if axis not in ep_axes)
-
-
 def _moe_leading_axis(ep_axis: MeshAxis, data_parallelism_axes: Tuple[str, ...]):
     """Build one PartitionSpec entry with outer axes followed by compound EP."""
-    axes = (*_moe_outer_axes(ep_axis, data_parallelism_axes), *normalize_mesh_axes(ep_axis))
+    axes = (*data_parallelism_axes, *normalize_mesh_axes(ep_axis))
     if not axes:
         raise ValueError("moe(...) requires ep_axis to contain at least one mesh axis.")
     return axes[0] if len(axes) == 1 else axes
-
-
-def _moe_etp_axis(ep_axis: MeshAxis, etp_axis: Optional[str]) -> Optional[str]:
-    """Avoid assigning one physical axis to two tensor dimensions.
-
-    A size-one ETP axis may legally appear inside a compound EP resource. JAX
-    can elide that axis, but it cannot name it on both the expert and matrix
-    dimensions of the same PartitionSpec.
-    """
-    if etp_axis in normalize_mesh_axes(ep_axis):
-        return None
-    return etp_axis
 
 
 def get_moe_recv_capacity_per_rank(
@@ -589,7 +569,6 @@ def _moe_fwd_rule(
     scaling_factor,
     aux_loss_coeff,
     ep_axis,
-    etp_axis,
     data_parallelism_axes,
     input_axes,
     gate_kernel_axes,
@@ -614,12 +593,18 @@ def _moe_fwd_rule(
         raise ValueError("moe(...) requires an active jax.sharding.Mesh.")
     if ep_axis is None:
         raise ValueError("moe(...) requires ep_axis to be set (TE EP backend).")
+    ep_axes = normalize_mesh_axes(ep_axis)
+    bootstrap_ep_axes = normalize_mesh_axes(tex.ep.get_ep_config().ep_axis)
+    if ep_axes != bootstrap_ep_axes:
+        raise ValueError(
+            f"moe(...) ep_axis={ep_axes} does not match the bootstrapped EP axes "
+            f"{bootstrap_ep_axes}."
+        )
     num_ep = get_mesh_axis_size(ep_axis, mesh)
     if num_experts % num_ep != 0:
         raise ValueError(f"num_experts={num_experts} must be divisible by EP size={num_ep}")
     num_local_experts = num_experts // num_ep
 
-    data_parallelism_axes = _moe_outer_axes(ep_axis, data_parallelism_axes)
     dp_size = 1
     for ax in data_parallelism_axes:
         dp_size *= mesh.shape[ax]
@@ -777,15 +762,12 @@ def _moe_fwd_rule(
 
     # ---------------- FFN (per-shard via shard_map) ----------------
     has_bias = wi_0_bias is not None
-    ffn_etp_axis = _moe_etp_axis(ep_axis, etp_axis)
-    wi_spec = P(ep_axis, None, ffn_etp_axis)
-    wo_spec = P(ep_axis, ffn_etp_axis, None)
-    wi_bias_spec = P(ep_axis, ffn_etp_axis)
-    wo_bias_spec = P(ep_axis, None)
-    ffn_in_specs = (ep3_spec, ep2_spec, ep2_spec, wi_spec, wo_spec)
+    kernel_spec = P(ep_axis, None, None)
+    bias_spec = P(ep_axis, None)
+    ffn_in_specs = (ep3_spec, ep2_spec, ep2_spec, kernel_spec, kernel_spec)
     ffn_in_args = [recv_tokens, recv_topk_weights, token_counts, wi, wo]
     if has_bias:
-        ffn_in_specs += (wi_bias_spec, wi_bias_spec, wo_bias_spec)
+        ffn_in_specs += (bias_spec, bias_spec, bias_spec)
         ffn_in_args.extend([wi_0_bias, wi_1_bias, wo_bias])
 
     # Quantized grouped tensors store their data, scales, and group metadata
@@ -915,7 +897,6 @@ def _moe_bwd_rule(
     scaling_factor,
     aux_loss_coeff,
     ep_axis,
-    etp_axis,
     data_parallelism_axes,
     input_axes,
     gate_kernel_axes,
@@ -944,7 +925,6 @@ def _moe_bwd_rule(
         raise ValueError("moe(...) requires an active jax.sharding.Mesh.")
     B, S, _ = x_shape
     K = num_experts_per_tok
-    data_parallelism_axes = _moe_outer_axes(ep_axis, data_parallelism_axes)
     batch_pspec_axis: Any = _moe_leading_axis(ep_axis, data_parallelism_axes)
     ep3_spec = P(batch_pspec_axis, None, None)
     ep2_spec = P(batch_pspec_axis, None)
@@ -968,11 +948,8 @@ def _moe_bwd_rule(
         d_recv_w_from_combine = d_recv_w_from_combine.astype(ctx.recv_topk_weights.dtype)
 
     # ---------------- FFN bwd (per-shard via shard_map) ----------------
-    ffn_etp_axis = _moe_etp_axis(ep_axis, etp_axis)
-    wi_spec = P(ep_axis, None, ffn_etp_axis)
-    wo_spec = P(ep_axis, ffn_etp_axis, None)
-    wi_bias_spec = P(ep_axis, ffn_etp_axis)
-    wo_bias_spec = P(ep_axis, None)
+    kernel_spec = P(ep_axis, None, None)
+    bias_spec = P(ep_axis, None)
     token_buffer_spec = P(batch_pspec_axis)
     token_matrix_spec = P(batch_pspec_axis, None)
     expert_buffer_spec = P(ep_axis)
@@ -1037,14 +1014,14 @@ def _moe_bwd_rule(
         bwd_out_specs = (
             ep3_spec,
             ep2_spec,
-            wi_spec,
-            wo_spec,
-            wi_bias_spec,
-            wi_bias_spec,
-            wo_bias_spec,
+            kernel_spec,
+            kernel_spec,
+            bias_spec,
+            bias_spec,
+            bias_spec,
         )
     else:
-        bwd_out_specs = (ep3_spec, ep2_spec, wi_spec, wo_spec, None, None, None)
+        bwd_out_specs = (ep3_spec, ep2_spec, kernel_spec, kernel_spec, None, None, None)
 
     (
         d_sorted_x,
@@ -1172,7 +1149,7 @@ def _moe_bwd_rule(
 # =============================================================================
 
 
-@partial(jax.custom_vjp, nondiff_argnums=tuple(range(9, 28)))
+@partial(jax.custom_vjp, nondiff_argnums=tuple(range(9, 27)))
 def _moe(
     x,
     gate_kernel,
@@ -1193,7 +1170,6 @@ def _moe(
     scaling_factor,
     aux_loss_coeff,
     ep_axis,
-    etp_axis,
     data_parallelism_axes,
     input_axes,
     gate_kernel_axes,
@@ -1223,7 +1199,6 @@ def _moe(
         scaling_factor,
         aux_loss_coeff,
         ep_axis,
-        etp_axis,
         data_parallelism_axes,
         input_axes,
         gate_kernel_axes,
@@ -1264,7 +1239,6 @@ def moe(
         noop_quantizer_set,
     ),
     ep_axis: MeshAxis,
-    etp_axis: Optional[str] = None,
     data_parallelism_axes: Tuple[str, ...] = (),
     input_axes: Tuple[Optional[str], ...] = (),
     gate_kernel_axes: Tuple[Optional[str], ...] = (),
@@ -1313,11 +1287,10 @@ def moe(
 
     Axis-name parameters:
 
-    * ``ep_axis``, ``etp_axis``, and ``data_parallelism_axes`` are *physical mesh
-      axis names*. ``ep_axis`` may be an ordered tuple whose sizes are
-      multiplied into one compound EP resource. ETP is currently accepted
-      only when its mesh size is one, leaving expert GEMM matrices complete.
-      These concrete axes are used to compute ``num_ep`` / ``dp_size`` and construct
+    * ``ep_axis`` and ``data_parallelism_axes`` are *physical mesh axis names*.
+      ``ep_axis`` may be an ordered tuple whose sizes are multiplied into one
+      compound EP group. These concrete axes are used to compute
+      ``num_ep`` / ``dp_size`` and construct
       ``P((dp..., ep), None, None)`` for the physical
       ``jax.lax.with_sharding_constraint`` calls that JAX requires
       to refer to real mesh axes).
@@ -1350,11 +1323,6 @@ def moe(
     mesh = _get_mesh()
     if mesh is None or mesh.empty:
         raise ValueError("moe(...) requires an active jax.sharding.Mesh.")
-    if etp_axis is not None and get_mesh_axis_size(etp_axis, mesh) != 1:
-        raise NotImplementedError(
-            "moe(...) currently supports expert tensor parallelism only with ETP=1; "
-            f"axis {etp_axis!r} has size {get_mesh_axis_size(etp_axis, mesh)}."
-        )
     expected_leading: Any = _moe_leading_axis(ep_axis, data_parallelism_axes)
     expected_spec = P(expected_leading, None, None)
     actual_spec = getattr(getattr(x, "sharding", None), "spec", None)
@@ -1396,7 +1364,6 @@ def moe(
         scaling_factor,
         float(aux_loss_coeff),
         ep_axis,
-        etp_axis,
         data_parallelism_axes,
         input_axes,
         gate_kernel_axes,

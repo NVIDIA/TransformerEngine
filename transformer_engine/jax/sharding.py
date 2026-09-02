@@ -9,6 +9,7 @@ tensor parallelism (TP), pipeline parallelism (PP), and full-sharded data
 parallelism (FSDP). It includes functions for sharding constraints, mesh management,
 and collective operations.
 """
+
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Callable, Optional, Union
@@ -40,7 +41,7 @@ MeshAxis = Union[str, tuple[str, ...]]
 
 
 def normalize_mesh_axes(axis: Optional[MeshAxis]) -> tuple[str, ...]:
-    """Return a mesh resource as an ordered tuple of physical axis names."""
+    """Return a mesh axis or axis group as an ordered tuple of physical names."""
     if axis is None:
         return ()
     axes = axis if isinstance(axis, tuple) else (axis,)
@@ -348,18 +349,12 @@ class MeshResource:
         fsdp_resource: Axis name for full-sharded data parallelism, default is None
         pp_resource: Axis name for pipeline parallelism (layer sharding), default is None
         cp_resource: Axis name for context parallelism (sequence sharding), default is None
-        ep_resource: Axis name or ordered tuple of axis names for expert
-            parallelism. A compound resource such as ``("expert", "tensor")``
-            folds both physical axes into EP while preserving their order.
-            Dispatch input tokens
+        ep_resource: Axis name for expert parallelism. Dispatch input tokens
             must be sharded on their leading dim by ``ep_resource`` (alone or
             compound with ``dp_resource`` / ``fsdp_resource`` as outer, e.g.
             ``PartitionSpec(("dp", "ep"), None, None)``). Dispatch output
             ``[ep_size, recv_capacity, H]`` is always sharded by ``ep_resource``
             on the leading ``ep_size`` dim.
-        etp_resource: Axis name for expert tensor parallelism. MoEBlock currently
-            supports this resource only when its mesh size is one, in which case
-            expert GEMM matrices remain complete.
     """
 
     dp_resource: str = None
@@ -368,8 +363,7 @@ class MeshResource:
     fsdp_resource: str = None
     pp_resource: str = None
     cp_resource: str = None
-    ep_resource: Optional[MeshAxis] = None
-    etp_resource: str = None
+    ep_resource: str = None
 
 
 _GLOBAL_MESH_RESOURCE = None
@@ -409,7 +403,7 @@ def global_mesh_resource() -> MeshResource:
     return _GLOBAL_MESH_RESOURCE
 
 
-def get_active_resource_axis(resource_name: str) -> Optional[MeshAxis]:
+def get_active_resource_axis(resource_name: str) -> Optional[str]:
     """Resolve a :class:`MeshResource` attribute to its mesh axis name,
     or return ``None`` if that resource is not active.
 

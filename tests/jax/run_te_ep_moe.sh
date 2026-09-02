@@ -18,13 +18,13 @@ TEST_FILE="${TEST_FILE:-$TE_ROOT/tests/jax/test_te_ep_moe.py}"
 PYTEST_INI="$TE_ROOT/tests/jax/pytest.ini"
 
 NUM_GPUS="${NUM_GPUS:-$(nvidia-smi -L | wc -l)}"
-COMPOUND_EP_ETP1="${TE_EP_MOE_COMPOUND_ETP1:-0}"
+COMPOUND_EP="${TE_EP_MOE_COMPOUND_EP:-0}"
 if [ "$NUM_GPUS" -lt 4 ]; then
     echo "[run_te_ep_moe.sh] need >=4 GPUs (got $NUM_GPUS); SKIPPING."
     exit 0
 fi
-if [ "$COMPOUND_EP_ETP1" = "1" ] && [ "$NUM_GPUS" -ne 4 ]; then
-    echo "[run_te_ep_moe.sh] compound EP/ETP1 mode requires exactly 4 processes (got $NUM_GPUS); SKIPPING."
+if [ "$COMPOUND_EP" = "1" ] && [ "$NUM_GPUS" -ne 4 ]; then
+    echo "[run_te_ep_moe.sh] compound EP mode requires exactly 4 processes (got $NUM_GPUS); SKIPPING."
     exit 0
 fi
 
@@ -36,7 +36,7 @@ echo "============================================================"
 echo "TE-EP MoE MULTIPROCESS test (one process per GPU, ${NUM_GPUS} GPUs)"
 echo "  test file          : $TEST_FILE"
 echo "  coordinator        : $TE_EP_MOE_COORDINATOR_ADDRESS"
-echo "  compound EP/ETP1   : $COMPOUND_EP_ETP1"
+echo "  compound EP        : $COMPOUND_EP"
 echo "  XLA_PYTHON_CLIENT_PREALLOCATE: $XLA_PYTHON_CLIENT_PREALLOCATE"
 echo "  XLA_PYTHON_CLIENT_MEM_FRACTION: $XLA_PYTHON_CLIENT_MEM_FRACTION"
 echo "============================================================"
