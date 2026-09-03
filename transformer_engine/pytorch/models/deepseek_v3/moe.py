@@ -45,7 +45,8 @@ class DeepSeekV3MoE(torch.nn.Module):
     given, expert-parallel over NCCL (``ep_dispatch``/``ep_combine``).
 
     When expert parallelism is used, ``transformer_engine.pytorch.ep.ep_bootstrap``
-    must be called once per process before the first forward, and inputs must
+    must be called once per process before constructing the module (it allocates
+    the ``EpBuffer`` in ``__init__``), and inputs must
     be bfloat16.
 
     Parameters
