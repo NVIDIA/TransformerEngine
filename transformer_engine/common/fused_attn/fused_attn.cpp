@@ -357,8 +357,6 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend_v2(NVTEFusedAttnConfig confi
       return reject(message, "FP8 fused attention supports BSHD/SBHD/BHSD/THD formats, found " +
                                  std::to_string(static_cast<int>(cfg.qkv_format)) + ".");
     }
-    // Backward writes dQ/dK/dV through dqkv_layout, which a forward-only caller may leave unset;
-    // nvte_get_qkv_format() rejects NVTE_QKV_Layout_NOT_SET, so only classify a layout that is set.
     if (cfg.is_training && cfg.check_for_backward_support &&
         cfg.dqkv_layout != NVTE_QKV_Layout_NOT_SET) {
       const NVTE_QKV_Format dqkv_format = nvte_get_qkv_format(cfg.dqkv_layout);
@@ -423,7 +421,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend_v2(NVTEFusedAttnConfig confi
   return reject(message, "Unsupported QKV dtype qkv_dtype=" + std::to_string(cfg.qkv_dtype) + " .");
 }
 
-// select a backend for fused attention
+// Select a backend for fused attention
 NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
     bool is_training, NVTEDType q_dtype, NVTEDType kv_dtype, NVTE_QKV_Layout qkv_layout,
     NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type,

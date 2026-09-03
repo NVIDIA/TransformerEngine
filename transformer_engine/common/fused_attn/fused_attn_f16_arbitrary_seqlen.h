@@ -41,12 +41,6 @@ void fused_attn_arbitrary_seqlen_bwd(const fused_attn::FusedAttnConfig &cfg, con
                                      const Tensor *cu_seqlens_kv_padded, const Tensor *rng_state,
                                      Tensor *workspace, cudaStream_t stream, cudnnHandle_t handle);
 
-// cuDNN's verdict on this config's F16/BF16 graph for `pass`: an empty string if it can run,
-// otherwise a diagnostic message explaining why not. A verdict of "supported" leaves the graph in
-// the cache, where the execution path finds it.
-//
-// The direction is a runtime argument, not two functions, because the graph builder it selects is
-// local to this translation unit -- so this is the only place that can map one to the other.
 std::string support_verdict_f16(const fused_attn::FusedAttnConfig &cfg, fused_attn::Pass pass,
                                 cudnnHandle_t handle);
 

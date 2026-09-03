@@ -41,7 +41,6 @@ void fused_attn_fp8_bwd(const fused_attn::FusedAttnConfig &cfg, const Tensor *in
                         const Tensor *rng_state, Tensor *workspace, cudaStream_t stream,
                         cudnnHandle_t handle);
 
-// The FP8 counterpart of support_verdict_f16; see there.
 std::string support_verdict_fp8(const fused_attn::FusedAttnConfig &cfg, fused_attn::Pass pass,
                                 cudnnHandle_t handle);
 
