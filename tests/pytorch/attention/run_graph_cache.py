@@ -5,10 +5,10 @@
 """Worker for test_attention.py::test_fused_attn_graph_cache.
 
 Runs a fixed sequence of support queries and executions against the FusedAttention graph cache and
-collects level-2 diagnostics with NVTE_FUSED_ATTN_CACHE_DEBUG=2 on, for different phases.
-  query    the first support query for a config -- the miss that creates its graphs
-  requery  the identical query again -- should hit the cache
-  exec     forward and backward of that config -- should hit the cache and build plans before executing
+collects level-2 diagnostics with NVTE_FUSED_ATTN_CACHE_DEBUG=2 for different phases:
+  query    the first support query for a config -- the miss that creates its fwd/bwd graphs
+  requery  the identical query again -- hits the cache
+  exec     forward and backward of that config -- hits the cache and builds plans before execution
   rescale  the same execution with only softmax_scale changed -- should hit the cache and reuse the plans,
            since attn_scale is normalized out of the cache key
   reshape  a query differing in max_seqlen -- should miss and recreate the graphs

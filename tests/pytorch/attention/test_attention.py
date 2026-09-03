@@ -296,8 +296,7 @@ def test_dot_product_attention(
             "Setting is_training to False as cuDNN does not support dbias for"
             f" {config.bias_shape=} "
         )
-    # Probe the token counts the runs below will use, so that the support check builds the graph
-    # they execute rather than one sized for a different token bucket.
+    # Generate token counts for THD so the support query and execution will use the same values
     num_tokens_q, num_tokens_kv = None, None
     if qkv_format == "thd":
         reset_rng_states()
@@ -404,7 +403,7 @@ _CACHE_PHASE = re.compile(r"\[CACHE-TEST\] phase=(?P<name>\w+)")
 @pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
 def test_fused_attn_graph_cache():
     """Test FusedAttention graph cache with level 2 diagnostics. It runs a subprocess
-    to avoid contamination from other tests, because the counters are process-wide.
+    to avoid contamination from other tests as the counters are process-wide.
     """
     worker = _current_file.parent / "run_graph_cache.py"
     result = subprocess.run(
@@ -1401,11 +1400,7 @@ def _generate_seqlens(
     qkv_format: str,
     pad_between_seqs: bool,
 ) -> _Seqlens:
-    """Draw the sequence lengths for one test case.
-
-    The lengths are random, so the caller must call reset_rng_states() first and must consume no
-    randomness in between: every backend run of a case, and the backend probe that sizes its THD
-    tensors, has to see the same lengths."""
+    """Draw the sequence lengths for one test case."""
     if "padding" in config.attn_mask_type or qkv_format == "thd":
         if config.attn_type == "self":
             seqlens_q = torch.randint(
@@ -1881,7 +1876,7 @@ def test_transformer_layer(
 
     # Test backend availability
     is_training = True
-    # Get the exact token counts and use them for both support query and the actual run
+    # Get the token counts for THD and use them for both support query and actual execution
     num_tokens_q, num_tokens_kv = None, None
     if qkv_format == "thd":
         reset_rng_states()
@@ -2437,11 +2432,7 @@ def _get_fp8_vs_f16_config(model, qkv_layout):
 
 
 def _dpa_fp8_vs_f16_seqlens(config, qkv_format):
-    """Draw the sequence lengths for one test_dpa_fp8_vs_f16 case.
-
-    The lengths are random, so the caller must call reset_rng_states() first and must consume no
-    randomness in between: every run of a case, and the backend probe that sizes its THD tensors,
-    has to see the same lengths."""
+    """Draw the sequence lengths for one test_dpa_fp8_vs_f16 case."""
     if "padding" in config.attn_mask_type or qkv_format == "thd":
         if config.attn_type == "self":
             seqlens_q = torch.randint(
@@ -2555,7 +2546,7 @@ def test_mha_fp8_vs_f16(
         )
     fp8_meta = {}
     fp8_meta["recipe"] = fp8_recipe
-    # Get the exact token counts and use them for both support query and the actual run
+    # Get the token counts for THD and use them for both support query and actual execution
     num_tokens_q, num_tokens_kv = None, None
     if qkv_format == "thd":
         seqlens_q, seqlens_kv = _mha_fp8_vs_f16_seqlens(config, qkv_format)
@@ -2810,7 +2801,7 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training, scal
         )
     fp8_meta = {}
     fp8_meta["recipe"] = fp8_recipe
-    # Get the exact token counts and use them for both support query and the actual run
+    # Get the token counts for THD and use them for both support query and actual execution
     qkv_format = "".join([i for i in qkv_layout.split("_")[0] if i.isalpha()])
     num_tokens_q, num_tokens_kv = None, None
     if qkv_format == "thd":

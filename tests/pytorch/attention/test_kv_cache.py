@@ -469,12 +469,11 @@ def test_kv_cache(dtype, model, qkv_format, is_paged, backend, module, is_cuda_g
         for layer_number in range(1, num_layers + 1):
             inference_params.allocate_memory(layer_number)
 
-    # figure out supported backends
+    # figure out supported backends for both reference and inference models
     inference_params_qkv_format = "bshd"
     qkv_layout = qkv_format + "_" + "_".join([inference_params_qkv_format] * 2)
     if is_paged:
         qkv_layout = "paged_kv_" + qkv_layout
-    # Both models run on the single backend the env vars below leave enabled, so probe both.
     inference_config = copy.deepcopy(config)
     inference_config.attn_mask_type = "padding_causal"
     inference_backends, _, _ = get_available_attention_backends(
@@ -487,8 +486,6 @@ def test_kv_cache(dtype, model, qkv_format, is_paged, backend, module, is_cuda_g
         fp8_meta=fp8_meta,
         inference_params=inference_params,
     )
-    # the reference model takes every request's full sequence at once, in bshd with no cache, and
-    # get_model() builds it with causal masking and without fp8
     reference_config = copy.deepcopy(config)
     reference_config.attn_mask_type = "causal"
     reference_config.batch_size = config.total_requests
