@@ -47,6 +47,7 @@ from ..basic import (
     ScaledSiTUGLU,
     ScaledSReLU,
     ScaledSwiGLU,
+    ScaledTanhSReLU,
 )
 from ..fuser import register_forward_backward_fusion
 from ..op import FusedOperation, FusibleOperation, OperationContext
@@ -99,6 +100,34 @@ def _cudnn_frontend_supports_grouped_gemm_srelu_hadamard() -> bool:
 
 
 @functools.lru_cache(maxsize=None)
+def _cudnn_frontend_supports_grouped_gemm_srelu_tanh() -> bool:
+    """Feature-detect complete cuDNN frontend grouped tanh-SReLU support.
+
+    Both directions are required: a frontend with only the forward clamp would
+    train against an unclamped backward. Detected by signature rather than
+    version so this can be developed against an editable cuDNN FE checkout; a
+    min-version constant can replace it once the feature is in a release.
+    """
+    try:
+        from cudnn import (  # pylint: disable=import-outside-toplevel
+            grouped_gemm_dsrelu_wrapper_sm100,
+            grouped_gemm_srelu_wrapper_sm100,
+        )
+    except ImportError:
+        return False
+    try:
+        wrappers = (
+            grouped_gemm_srelu_wrapper_sm100,
+            grouped_gemm_dsrelu_wrapper_sm100,
+        )
+        return all(
+            "tanh_clamp_scale" in inspect.signature(wrapper).parameters for wrapper in wrappers
+        )
+    except (TypeError, ValueError):
+        return False
+
+
+@functools.lru_cache(maxsize=None)
 def _cudnn_frontend_supports_grouped_gemm_situglu() -> bool:
     """Feature-detect complete cuDNN frontend grouped SiTU-GLU support."""
     try:
@@ -132,9 +161,13 @@ def _cudnn_frontend_supports_single_group_runtime_offsets(
     activation_type: type[FusibleOperation],
 ) -> bool:
     """Check cuDNN FE support for single-group runtime offsets."""
-    return not issubclass(activation_type, ScaledSReLU) and _cudnn_frontend_version_at_least(
-        "1.27.0"
-    )
+    # The srelu/dsrelu wrappers take no use_single_group_runtime_offsets argument,
+    # so every activation in that family has to be excluded here, not just
+    # ScaledSReLU -- passing it through would raise TypeError on the single-group
+    # (shared expert) path.
+    return not issubclass(
+        activation_type, (ScaledSReLU, ScaledTanhSReLU)
+    ) and _cudnn_frontend_version_at_least("1.27.0")
 
 
 def _wrap_single_quantized_as_grouped(
@@ -794,7 +827,7 @@ def validate_grouped_mlp_dims(fc1, activation_op, fc2) -> None:
         )
     if is_glu_activation(activation_op):
         expected_fc1_out_features = 2 * fc2.in_features
-    elif isinstance(activation_op, ScaledSReLU):
+    elif isinstance(activation_op, (ScaledSReLU, ScaledTanhSReLU)):
         expected_fc1_out_features = fc2.in_features
     else:
         raise TypeError(f"Unsupported grouped MLP activation ({activation_op.__class__.__name__}).")
@@ -1007,6 +1040,21 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         if self._pass_situglu_params:
             self._cudnn_situ_beta1: float = activation.beta1
             self._cudnn_situ_beta2: float = activation.beta2
+
+        # Set unconditionally: the forward/backward paths read this attribute for
+        # every activation, so leaving it undefined would break plain ScaledSReLU.
+        self._pass_srelu_tanh_params: bool = isinstance(activation, ScaledTanhSReLU)
+        if self._pass_srelu_tanh_params:
+            # Fail at construction rather than silently running unclamped, which
+            # would train a different model than the config asks for.
+            if not _cudnn_frontend_supports_grouped_gemm_srelu_tanh():
+                raise RuntimeError(
+                    "ScaledTanhSReLU requires a cuDNN frontend whose "
+                    "grouped_gemm_srelu_wrapper_sm100 and grouped_gemm_dsrelu_wrapper_sm100 "
+                    "accept tanh_clamp_scale. The installed frontend does not, and running "
+                    "without it would silently apply an unclamped squared ReLU."
+                )
+            self._cudnn_tanh_clamp_scale: float = activation.tanh_clamp_scale
 
     def fuser_forward(
         self,
@@ -1386,6 +1434,10 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             and fc2_input_quantizer.with_rht
             and fc2_input_quantizer.with_post_rht_amax
         )
+        # Deliberately ScaledSReLU only: the hadamard kernel this selects is the GLU
+        # one, which has no soft-clamp support, so ScaledTanhSReLU must not reach it.
+        # The cost is that NVFP4 RHT gives up hadamard fusion for tanh-SReLU -- a
+        # performance limitation, not a correctness one.
         activation_is_srelu = isinstance(activation_op, ScaledSReLU)
         activation_supports_hadamard = self._cudnn_act_func in ("swiglu", "situglu") or (
             activation_is_srelu and _cudnn_frontend_supports_grouped_gemm_srelu_hadamard()
@@ -1434,6 +1486,8 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                 situ_beta1=self._cudnn_situ_beta1,
                 situ_beta2=self._cudnn_situ_beta2,
             )
+        if self._pass_srelu_tanh_params:
+            fc1_activation_kwargs.update(tanh_clamp_scale=self._cudnn_tanh_clamp_scale)
 
         if fc1_op.single_grouped_weight:
             # Clone and swizzle scales for GEMM.
@@ -1749,6 +1803,10 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             mark_grouped_tensor(saved_fc1_x, activation_in, scales, grouped_fc2_x)
             activation_op = self.basic_ops[1]
             cpu_offloading = is_cpu_offload_enabled()
+            # Deliberately ScaledSReLU only for now: ScaledTanhSReLU falls back to
+            # saving fc2_x, which costs memory but stays correct. The cuDNN dsrelu
+            # d_srelu regeneration does honour the clamp, so enabling recompute here
+            # is a viable follow-up rather than a blocker.
             activation_is_srelu = isinstance(activation_op, ScaledSReLU)
             activation_recompute_in_mlp = bool(
                 getattr(activation_op, "activation_recompute_in_mlp", False)
@@ -1835,7 +1893,9 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
 
         # Get basic operations
         fc1_op, activation_op, fc2_op = self.basic_ops
-        activation_is_srelu = isinstance(activation_op, ScaledSReLU)
+        # Selects how the NVFP4 fc2 alpha is folded below: the whole dsrelu family
+        # applies alpha once, unlike the gated kernels which need sqrt(product).
+        activation_is_srelu = isinstance(activation_op, (ScaledSReLU, ScaledTanhSReLU))
         fc1_ctx, _activation_ctx, fc2_ctx = basic_op_ctxs
 
         # Tensor properties
@@ -2098,6 +2158,8 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                 situ_beta1=self._cudnn_situ_beta1,
                 situ_beta2=self._cudnn_situ_beta2,
             )
+        if self._pass_srelu_tanh_params:
+            fc2_dactivation_kwargs.update(tanh_clamp_scale=self._cudnn_tanh_clamp_scale)
 
         fc2_leader = fc2_op.weight if fc2_op.single_grouped_weight else fc2_op.weight0
         if is_distributed_weight(fc2_leader):
@@ -2629,13 +2691,21 @@ def fuse_srelu_ops(
     recipe: Optional[Recipe] = None,
     **unused,  # pylint: disable=unused-argument
 ) -> list[FusibleOperation]:
-    """Apply joint GroupedLinear + ScaledSReLU + GroupedLinear fusion."""
+    """Apply joint GroupedLinear + scaled unary activation + GroupedLinear fusion."""
+
+    # ScaledTanhSReLU joins only when the installed cuDNN frontend can actually
+    # clamp. Listing it unconditionally would let the op fuse and then raise from
+    # _GroupedMLP_CuTeGEMMBase.__init__; leaving it out simply declines the fusion
+    # and runs the correct unfused activation instead.
+    activation_op_types: tuple[type[FusibleOperation], ...] = (ScaledSReLU,)
+    if _cudnn_frontend_supports_grouped_gemm_srelu_tanh():
+        activation_op_types += (ScaledTanhSReLU,)
 
     return fuse_grouped_mlp_ops(
         ops,
         recipe=recipe,
         fused_op_cls=GroupedMLP_CuTeGEMMUnary,
-        activation_op_types=(ScaledSReLU,),
+        activation_op_types=activation_op_types,
     )
 
 
