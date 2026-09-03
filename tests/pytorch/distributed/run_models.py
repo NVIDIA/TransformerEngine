@@ -135,12 +135,9 @@ def test_layer_ep_matches_local(rank: int, ep_size: int, ep_group) -> None:
 def main() -> int:
     dist.init_process_group(backend="nccl")
     torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
-    try:
-        from torch.distributed import _symmetric_memory as _symm_mem
+    from torch.distributed import _symmetric_memory as _symm_mem
 
-        _symm_mem.set_backend("NCCL")
-    except (ImportError, RuntimeError):
-        pass
+    _symm_mem.set_backend("NCCL")
 
     rank = dist.get_rank()
     ep_size = dist.get_world_size()
@@ -159,14 +156,13 @@ def main() -> int:
         num_topk=TOP_K,
         recv_capacity_per_rank=_recv_capacity(ep_size),
     )
-    try:
-        test_layer_ep_matches_local(rank, ep_size, ep_group)
-        print(f"[rank {rank}] PASSED")
-    finally:
-        dist.barrier()
-        ep_finalize()
-        release_symm_mem_pool()
-        dist.destroy_process_group()
+    test_layer_ep_matches_local(rank, ep_size, ep_group)
+    print(f"[rank {rank}] PASSED")
+
+    dist.barrier()
+    ep_finalize()
+    release_symm_mem_pool()
+    dist.destroy_process_group()
     return 0
 
 
