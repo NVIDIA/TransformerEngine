@@ -315,10 +315,21 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
             return self.get_quantizer("backward", 0)
         return None
 
+    def _recipe_state_device(self) -> torch.device:
+        """Device on which this operation's quantization state must be allocated."""
+        for tensor in self.parameters(recurse=False):
+            if tensor is not None and tensor.device.type == "cuda":
+                return tensor.device
+        for tensor in self.buffers(recurse=False):
+            if tensor is not None and tensor.device.type == "cuda":
+                return tensor.device
+        return torch.device("cuda", torch.cuda.current_device())
+
     def reset_recipe_state(
         self,
         *,
         recipe: Optional[Recipe],
+        device: Optional[torch.device] = None,
     ) -> None:
         """Construct state for quantization recipe"""
 
@@ -369,6 +380,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
                     recipe,
                     mode=mode,
                     num_quantizers=num_quantizers,
+                    device=device if device is not None else self._recipe_state_device(),
                     roles=roles,
                 )
                 fp8_meta_key = FP8GlobalStateManager.get_meta_tensor_key(
@@ -431,6 +443,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
                             qstate.global_amax_history_buffer[buffer_key][
                                 pos
                             ] = recipe_state.amax_history
+                            FP8GlobalStateManager._refresh_global_amax_devices(buffer_key)
 
         # Add meta tensors to global buffer to participate in reduction
         for mode in ("forward", "backward"):

@@ -146,7 +146,10 @@ class BasicLinear(BasicOperation):
         # Initialize recipe state if needed for natively quantized weight
         self._with_quantized_weight: bool = FP8GlobalStateManager.with_fp8_parameters()
         if self._with_quantized_weight:
-            self.reset_recipe_state(recipe=FP8GlobalStateManager.get_fp8_recipe())
+            self.reset_recipe_state(
+                recipe=FP8GlobalStateManager.get_fp8_recipe(),
+                device=device if device.type == "cuda" else None,
+            )
 
         # Initialize parameters if needed
         weight = torch.empty(
@@ -333,7 +336,10 @@ class BasicLinear(BasicOperation):
                 columnwise=torch.is_grad_enabled(),
             )
             quantizer.internal = False
-            with torch.no_grad():
+            device_context = (
+                torch.cuda.device(weight.device) if weight.is_cuda else contextlib.nullcontext()
+            )
+            with device_context, torch.no_grad():
                 weight = quantizer(weight)
 
         # Save updated parameter
@@ -361,8 +367,10 @@ class BasicLinear(BasicOperation):
             weight_quantizer.set_usage(rowwise=True, columnwise=requires_grad)
             grad_output_quantizer.set_usage(rowwise=True, columnwise=columnwise_usage)
 
-    def reset_recipe_state(self, *, recipe: Optional[Recipe]) -> None:
-        super().reset_recipe_state(recipe=recipe)
+    def reset_recipe_state(
+        self, *, recipe: Optional[Recipe], device: Optional[torch.device] = None
+    ) -> None:
+        super().reset_recipe_state(recipe=recipe, device=device)
 
         # Configure input/grad output quantizers
         # Note: These tensors are only used internally. If there is no

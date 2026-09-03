@@ -242,7 +242,10 @@ class GroupedLinear(BasicOperation):
         # Initialize recipe state if needed for natively quantized weight
         self._with_quantized_weight: bool = FP8GlobalStateManager.with_fp8_parameters()
         if self._with_quantized_weight:
-            self.reset_recipe_state(recipe=FP8GlobalStateManager.get_fp8_recipe())
+            self.reset_recipe_state(
+                recipe=FP8GlobalStateManager.get_fp8_recipe(),
+                device=device if device.type == "cuda" else None,
+            )
 
         # RNG state tracker
         self._rng_state_tracker_function: Optional[Callable[[], CudaRNGStatesTracker]]
@@ -585,7 +588,10 @@ class GroupedLinear(BasicOperation):
             return self._quantize_weights_mxfp8(weights, quantizers)
 
         # Use quantizers to construct quantized weights
-        with torch.no_grad():
+        device_context = (
+            torch.cuda.device(weights[0].device) if weights[0].is_cuda else contextlib.nullcontext()
+        )
+        with device_context, torch.no_grad():
             return [quantizer(weight) for quantizer, weight in zip(quantizers, weights)]
 
     def _quantize_weights_mxfp8(
@@ -775,8 +781,10 @@ class GroupedLinear(BasicOperation):
                 weight_quantizer.set_usage(rowwise=True, columnwise=requires_grad)
                 grad_output_quantizer.set_usage(rowwise=True, columnwise=weight_requires_grad)
 
-    def reset_recipe_state(self, *, recipe: Optional[Recipe]) -> None:
-        super().reset_recipe_state(recipe=recipe)
+    def reset_recipe_state(
+        self, *, recipe: Optional[Recipe], device: Optional[torch.device] = None
+    ) -> None:
+        super().reset_recipe_state(recipe=recipe, device=device)
 
         for group_idx in range(self.num_groups):
             # Input/grad output quantizers use internal tensors
