@@ -9,7 +9,6 @@ import abc
 import math
 from collections.abc import Iterable, Sequence
 from typing import Any, Optional
-import warnings
 
 import torch
 
@@ -17,7 +16,7 @@ import transformer_engine_torch as tex
 from ...constants import DType
 from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ...tensor.float8_tensor import Float8CurrentScalingQuantizer, Quantizer
-from ...utils import clear_tensor_data
+from ...utils import _compile_safe_warn, clear_tensor_data
 from ..op import BasicOperation, OperationContext
 from .._common import maybe_dequantize
 
@@ -359,14 +358,17 @@ class _ScaledUnary(BasicOperation, metaclass=abc.ABCMeta):
     def __init__(self, *, activation_recompute_in_mlp: bool = False) -> None:
         super().__init__()
         self.activation_recompute_in_mlp: bool = activation_recompute_in_mlp
-        self._warned_activation_recompute_in_mlp: bool = False
 
     def _maybe_warn_activation_recompute_in_mlp(self) -> None:
-        """Warn if activation recompute is requested outside the fused grouped MLP."""
-        if not self.activation_recompute_in_mlp or self._warned_activation_recompute_in_mlp:
+        """Warn if activation recompute is requested outside the fused grouped MLP.
+
+        Runs inside the forward pass, so the warning must survive Dynamo
+        tracing (see :func:`_compile_safe_warn`).
+
+        """
+        if not self.activation_recompute_in_mlp:
             return
-        self._warned_activation_recompute_in_mlp = True
-        warnings.warn(
+        _compile_safe_warn(
             f"{self.__class__.__name__}(activation_recompute_in_mlp=True) is only supported "
             "in the fused grouped MLP path."
         )

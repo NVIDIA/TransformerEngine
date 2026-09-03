@@ -3260,24 +3260,27 @@ class TestBasicOps:
         # Activation recompute is only honored within the fused grouped MLP,
         # so the standalone op falls back to saving the activation input.
         op = te_ops.ScaledSReLU(activation_recompute_in_mlp=True)
+        num_passes = 2
         with pytest.warns(UserWarning, match="fused grouped MLP path") as warning_log:
             y_test = op(x_test, scales_test)
             y_test.backward(dy_test)
 
-            # Gradients accumulate, so snapshot them before the second pass
+            # Gradients accumulate, so snapshot them after the first pass
             dx_test = x_test.grad.detach().clone()
             dscales_test = scales_test.grad.detach().clone()
 
-            # Second pass through the same op
-            op(x_test, scales_test).backward(dy_test)
+            for _ in range(num_passes - 1):
+                op(x_test, scales_test).backward(dy_test)
         warnings_seen = [
             warning
             for warning in warning_log
             if "activation_recompute_in_mlp" in str(warning.message)
         ]
 
-        # Warning is emitted at most once per op
-        assert len(warnings_seen) == 1
+        # Every pass warns. The warning is emitted from the forward pass, so a
+        # regression that drops it (for example one that is invisible to Dynamo)
+        # shows up as a count below num_passes.
+        assert len(warnings_seen) == num_passes
 
         # Check results
         tols = dtype_tols(dtype)
