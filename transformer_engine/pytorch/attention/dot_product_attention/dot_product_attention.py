@@ -241,11 +241,13 @@ class _IdentityWithMaskedGradient(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, tensor: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        # pylint: disable=missing-function-docstring
         ctx.save_for_backward(mask)
         return tensor
 
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor) -> Tuple[torch.Tensor, None]:
+        # pylint: disable=missing-function-docstring
         (mask,) = ctx.saved_tensors
         return torch.where(mask, grad_output, 0.0), None
 
