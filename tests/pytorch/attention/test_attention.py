@@ -2,7 +2,6 @@
 #
 # See LICENSE for license information.
 import collections
-import copy
 import logging
 import os
 import re
