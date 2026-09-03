@@ -27,18 +27,22 @@ __all__ = ["DeepSeekV3MoE"]
 _EP_ALIGNMENT = 128
 
 
-def _make_expert_mlp(num_experts, hidden_size, ffn_hidden_size, dtype, device):
-    # GroupedLinear + ScaledSwiGLU + GroupedLinear fuses into a single CuTe
-    # grouped MLP on supported hardware; elsewhere it runs as three ops with
-    # the same API and checkpoint layout.
+def _make_swiglu_mlp(hidden_size, ffn_hidden_size, dtype, device, num_experts=None):
+    """Dense SwiGLU MLP, or a grouped one (probs applied inside the activation) per expert.
+
+    The grouped variant fuses into a single CuTe grouped MLP on supported hardware.
+    """
+    common = dict(bias=False, dtype=dtype, device=device)
+    if num_experts is None:
+        return te_ops.Sequential(
+            te_ops.Linear(hidden_size, 2 * ffn_hidden_size, **common),
+            te_ops.SwiGLU(),
+            te_ops.Linear(ffn_hidden_size, hidden_size, **common),
+        )
     return te_ops.Sequential(
-        te_ops.GroupedLinear(
-            num_experts, hidden_size, 2 * ffn_hidden_size, bias=False, dtype=dtype, device=device
-        ),
+        te_ops.GroupedLinear(num_experts, hidden_size, 2 * ffn_hidden_size, **common),
         te_ops.ScaledSwiGLU(glu_interleave_size=32),
-        te_ops.GroupedLinear(
-            num_experts, ffn_hidden_size, hidden_size, bias=False, dtype=dtype, device=device
-        ),
+        te_ops.GroupedLinear(num_experts, ffn_hidden_size, hidden_size, **common),
     )
 
 
@@ -132,28 +136,14 @@ class DeepSeekV3MoE(torch.nn.Module):
         assert num_experts % self.ep_size == 0
         num_local_experts = num_experts // self.ep_size
 
-        self.experts = _make_expert_mlp(
-            num_local_experts, hidden_size, moe_ffn_hidden_size, dtype, device
+        self.experts = _make_swiglu_mlp(
+            hidden_size, moe_ffn_hidden_size, dtype, device, num_experts=num_local_experts
         )
 
         self.shared_expert = None
         if shared_expert_ffn_hidden_size is not None:
-            self.shared_expert = te_ops.Sequential(
-                te_ops.Linear(
-                    hidden_size,
-                    2 * shared_expert_ffn_hidden_size,
-                    bias=False,
-                    dtype=dtype,
-                    device=device,
-                ),
-                te_ops.SwiGLU(),
-                te_ops.Linear(
-                    shared_expert_ffn_hidden_size,
-                    hidden_size,
-                    bias=False,
-                    dtype=dtype,
-                    device=device,
-                ),
+            self.shared_expert = _make_swiglu_mlp(
+                hidden_size, shared_expert_ffn_hidden_size, dtype, device
             )
 
         self.ep_buffer = None
