@@ -218,8 +218,8 @@ __global__ void __launch_bounds__(FA_THREADS_NUM)
           for (int p = 0; p < 4; ++p) {
             ptx::abs_max_2x(amax_2x, amax_2x, pairs[p]);
           }
-          local_max = fmaxf(local_max,
-                            static_cast<float>(__hmax(__habs(amax_2x.x), __habs(amax_2x.y))));
+          local_max =
+              fmaxf(local_max, static_cast<float>(__hmax(__habs(amax_2x.x), __habs(amax_2x.y))));
         }
         row_partial = local_max;
       }
@@ -358,8 +358,7 @@ inline void group_compute_fused_amax(const Tensor &input, const Tensor *noop,
   const dim3 block(FA_THREADS_NUM, 1, 1);
 
   TRANSFORMER_ENGINE_SWITCH_CONDITION(
-      do_row, DO_ROW,
-      TRANSFORMER_ENGINE_SWITCH_CONDITION(do_col, DO_COL, {
+      do_row, DO_ROW, TRANSFORMER_ENGINE_SWITCH_CONDITION(do_col, DO_COL, {
         auto kernel = group_compute_fused_amax_kernel<DO_ROW, DO_COL>;
         cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size);
         kernel<<<grid, block, dshmem_size, stream>>>(tensor_map_input, args, noop_ptr, rows, cols);
