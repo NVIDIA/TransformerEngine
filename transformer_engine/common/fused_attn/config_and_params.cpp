@@ -65,6 +65,10 @@ void FusedAttnConfig::derive() {
   if (is_causal && bottom_right_diagonal) {
     bottom_right_diagonal = false;
   }
+  const bool has_window = window_size_left != -1 || window_size_right != -1;
+  if (!is_causal && !is_causal_bottom_right && !has_window) {
+    bottom_right_diagonal = false;
+  }
   is_bias = (bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS);
   is_alibi = (bias_type == NVTE_Bias_Type::NVTE_ALIBI);
   is_softmax_offset = (softmax_type != NVTE_Softmax_Type::NVTE_VANILLA_SOFTMAX);
@@ -134,15 +138,6 @@ FusedAttnConfig FusedAttnConfig::make_cache_key(Pass pass) const {
   check_derived();
   FusedAttnConfig cache_cfg = *this;
   cache_cfg.device_id = cuda::current_device();
-
-  // Normalize bottom_right_diagonal
-  const bool has_window = cache_cfg.window_size_left != -1 || cache_cfg.window_size_right != -1;
-  if (!cache_cfg.is_causal && !cache_cfg.is_causal_bottom_right && !has_window) {
-    cache_cfg.bottom_right_diagonal = false;
-  } else if (cache_cfg.is_causal_bottom_right &&
-             cache_cfg.max_seqlen_q == cache_cfg.max_seqlen_kv && !cache_cfg.is_padding) {
-    cache_cfg.bottom_right_diagonal = false;
-  }
 
   // Normalize sequence lengths the graph is built at
   cache_cfg.max_seqlen_q = cache_cfg.graph_max_seqlen_q;
