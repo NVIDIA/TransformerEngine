@@ -574,6 +574,15 @@ class FP8GlobalStateManager:
             fp8_meta[index_in_buffer].append(key)
 
     @classmethod
+    def _refresh_global_amax_devices(cls, buffer_key: str) -> None:
+        """Rebuild the device index after registered amax tensors are replaced."""
+        qstate = cls.quantization_state
+        if buffer_key in qstate.global_amax_buffer:
+            qstate.global_amax_devices[buffer_key] = {
+                tensor.device for tensor in qstate.global_amax_buffer[buffer_key]
+            }
+
+    @classmethod
     def is_fp8_enabled(cls) -> bool:
         """Is FP8 enabled"""
         return cls.quantization_state.fp8_enabled

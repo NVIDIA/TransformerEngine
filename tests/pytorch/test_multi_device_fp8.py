@@ -13,6 +13,7 @@ import pytest
 import torch
 
 import transformer_engine.pytorch as te
+import transformer_engine.pytorch.ops as te_ops
 from transformer_engine.common.recipe import DelayedScaling, Format
 from transformer_engine.pytorch.quantization import FP8GlobalStateManager
 
@@ -107,6 +108,43 @@ def test_module_off_current_device():
         assert hist_dev == torch.device("cuda:1")
     _assert_global_buffer_invariants([(module, torch.device("cuda:1"))])
     _assert_state_evolved(module)
+
+
+def test_prepare_forward_exception_restores_current_device(monkeypatch):
+    """A failed prepare must not leak the temporary CUDA device guard."""
+    assert torch.cuda.current_device() == 0
+    module = te.Linear(16, 16, bias=False, params_dtype=DT, device="cuda:1")
+    inp = torch.randn(2, 16, device="cuda:1", dtype=DT)
+
+    def fail_init(*args, **kwargs):
+        raise RuntimeError("injected prepare_forward failure")
+
+    monkeypatch.setattr(module, "init_fp8_metadata", fail_init)
+    with pytest.raises(RuntimeError, match="injected prepare_forward failure"):
+        module.prepare_forward(inp)
+
+    assert torch.cuda.current_device() == 0
+    assert module._forward_device_guards == []
+
+
+def test_basic_operation_device_awareness():
+    """The standalone ops API must use the op's device for state and execution."""
+    recipe = DelayedScaling(fp8_format=Format.HYBRID)
+    assert torch.cuda.current_device() == 0
+    with te.quantized_model_init(enabled=True, recipe=recipe):
+        op = te_ops.basic.BasicLinear(512, 1024, device="cuda:1", dtype=DT)
+    inp = torch.randn(128, 512, device="cuda:1", dtype=DT, requires_grad=True)
+    with te.autocast(enabled=True, recipe=DelayedScaling(fp8_format=Format.HYBRID)):
+        out = op(inp)
+    out.sum().backward()
+    torch.cuda.synchronize()
+    assert out.device == torch.device("cuda:1")
+    assert inp.grad is not None and inp.grad.device == torch.device("cuda:1")
+    assert torch.cuda.current_device() == 0
+    for mode in ("forward", "backward"):
+        state = op._fp8_metas[mode][FP8GlobalStateManager.get_meta_tensor_key(mode == "forward")]
+        assert state.scale.device == torch.device("cuda:1")
+        assert state.amax_history.device == torch.device("cuda:1")
 
 
 def test_two_modules_on_different_devices_one_autocast():

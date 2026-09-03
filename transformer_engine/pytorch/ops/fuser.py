@@ -267,6 +267,25 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
         grad_output: torch.Tensor,
         *grad_extra_outputs: torch.Tensor,
     ) -> tuple[Optional[torch.Tensor], ...]:
+        """Run backward under the output tensor's CUDA device context."""
+        guard = None
+        if grad_output.is_cuda and grad_output.device.index != torch.cuda.current_device():
+            guard = torch.cuda.device(grad_output.device)
+            guard.__enter__()
+        try:
+            return _OperationFuserAutogradFunction._backward_impl(
+                func_ctx, grad_output, *grad_extra_outputs
+            )
+        finally:
+            if guard is not None:
+                guard.__exit__(None, None, None)
+
+    @staticmethod
+    def _backward_impl(
+        func_ctx: Any,
+        grad_output: torch.Tensor,
+        *grad_extra_outputs: torch.Tensor,
+    ) -> tuple[Optional[torch.Tensor], ...]:
         """Backward pass"""
 
         # Operations and autograd state
@@ -692,6 +711,23 @@ class OperationFuser:
             self._last_amax_history_len = 0
 
     def __call__(
+        self,
+        input: torch.Tensor,  # pylint: disable=redefined-builtin
+        *extra_inputs: torch.Tensor,
+        basic_op_kwargs: Optional[list[dict[str, Any]]] = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, ...]:
+        """Apply this fuser under the input tensor's CUDA device context."""
+        guard = None
+        if input.is_cuda and input.device.index != torch.cuda.current_device():
+            guard = torch.cuda.device(input.device)
+            guard.__enter__()
+        try:
+            return self._call_impl(input, *extra_inputs, basic_op_kwargs=basic_op_kwargs)
+        finally:
+            if guard is not None:
+                guard.__exit__(None, None, None)
+
+    def _call_impl(
         self,
         input: torch.Tensor,  # pylint: disable=redefined-builtin
         *extra_inputs: torch.Tensor,
