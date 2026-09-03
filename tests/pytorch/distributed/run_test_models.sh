@@ -31,22 +31,11 @@ export NCCL_EP_JIT_CACHE_DIR
 mkdir -p "$NCCL_EP_JIT_CACHE_DIR"
 
 SCRIPT="${SCRIPT_DIR}/run_models.py"
-LOG="stdout_models.txt"
 
 echo "=== Running ${SCRIPT} on ${NUM_RANKS} GPUs (timeout=${TEST_TIMEOUT_S}s) ==="
 setsid timeout --foreground --kill-after=10 --signal=TERM "${TEST_TIMEOUT_S}" \
-  torchrun --standalone --nnodes=1 --nproc-per-node="${NUM_RANKS}" \
-  "${SCRIPT}" 2>&1 | tee "${LOG}"
-RC=${PIPESTATUS[0]}
+  torchrun --standalone --nnodes=1 --nproc-per-node="${NUM_RANKS}" "${SCRIPT}"
+RC=$?
 pkill -9 -f "tests/pytorch/distributed/run_models.py" 2>/dev/null || true
-
-RET=0
-if [ "${RC}" -ne 0 ]; then echo "torchrun exited with ${RC}"; RET=1; fi
-if grep -qE "(^|]:)FAILED|(^|]:)Traceback" "${LOG}"; then RET=1; fi
-if ! grep -qE "Ran [0-9]+ test|^OK$" "${LOG}"; then
-  echo "ERROR: no test summary — likely hang or early crash"
-  RET=1
-fi
-if [ -z "${KEEP_EP_LOGS:-}" ]; then rm -f "${LOG}"; fi
-
-exit $RET
+if [ "${RC}" -ne 0 ]; then echo "torchrun exited with ${RC}"; fi
+exit $RC

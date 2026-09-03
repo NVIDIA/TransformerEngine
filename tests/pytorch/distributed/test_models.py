@@ -19,7 +19,7 @@ def test_multi_process_deepseek_ep():
     timeout_s = int(os.environ.get("NVTE_TEST_EP_TIMEOUT_S", "180"))
     proc = subprocess.run(
         ["bash", str(LAUNCHER)],
-        env={**os.environ, "KEEP_EP_LOGS": "1", "TEST_TIMEOUT_S": str(timeout_s)},
+        env={**os.environ, "TEST_TIMEOUT_S": str(timeout_s)},
         timeout=timeout_s + 30,
         check=False,
     )
