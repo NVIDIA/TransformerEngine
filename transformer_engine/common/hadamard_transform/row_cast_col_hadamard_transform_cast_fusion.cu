@@ -15,6 +15,8 @@
 #include <cuda/barrier>
 #include <cute/tensor.hpp>
 
+#include "common/cast/core/common.cuh"
+#include "common/cast/nvfp4/quantize_transpose_nvfp4.cuh"
 #include "common/common.h"
 #include "common/util/cuda_runtime.h"
 #include "common/util/curanddx.hpp"
@@ -1311,6 +1313,22 @@ void hadamard_transform_cast_fusion(const Tensor &input_, Tensor &output_,
   NVTE_CHECK(n % hadamard_dimension == 0, "row_length must be divisible by hadamard_dimension.");
 
   NVTE_CHECK(m % hadamard_dimension == 0, "num_rows must be divisible by hadamard_dimension");
+
+  // SM120/121 do not provide TMEM. Reuse the NVFP4 1D TMA pipeline and perform the
+  // 16-point columnwise RHT in registers, while leaving the SM100/110 UMMA/TMEM path below intact.
+  const int sm_arch = transformer_engine::cuda::sm_arch(transformer_engine::cuda::current_device());
+  if (sm_arch == 120 || sm_arch == 121) {
+    Tensor noop;
+    if (output_.columnwise_data.dptr != nullptr) {
+      dispatch::nvfp4::quantize_transpose<true, true>(input_, &noop, &output_, &quant_config,
+                                                      stream, &hadamard_matrix_);
+    } else {
+      // RHT only affects the columnwise result. Keep rowwise-only quantization on
+      // the regular 1D scaling path rather than accidentally selecting 2D scaling.
+      dispatch::nvfp4::quantize_transpose<false>(input_, &noop, &output_, &quant_config, stream);
+    }
+    return;
+  }
 
   int k_tile_size = 1024;
 
