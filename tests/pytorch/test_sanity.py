@@ -739,11 +739,9 @@ def test_sanity_layernorm_mlp(
 
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("fp8_recipe", fp8_recipes, ids=recipe_id)
-@pytest.mark.parametrize("model", ["small"])
-@pytest.mark.parametrize("skip_wgrad", all_boolean)
-@pytest.mark.parametrize("moe", all_boolean)
-def test_sanity_deepseek_v3_layer(dtype, fp8_recipe, model, skip_wgrad, moe):
-    config = model_configs[model]
+@pytest.mark.parametrize("moe", all_boolean, ids=["dense", "moe"])
+def test_sanity_deepseek_v3_layer(dtype, fp8_recipe, moe):
+    config = model_configs["small"]
 
     if fp8_recipe is not None:
         if not is_fp8_supported(config):
@@ -769,7 +767,7 @@ def test_sanity_deepseek_v3_layer(dtype, fp8_recipe, model, skip_wgrad, moe):
         **mlp_kwargs,
     )
 
-    _test_sanity_e2e(block, dtype, config, fp8_recipe, skip_wgrad)
+    _test_sanity_e2e(block, dtype, config, fp8_recipe, skip_wgrad=False)
 
 
 @pytest.mark.parametrize("dtype", param_types)

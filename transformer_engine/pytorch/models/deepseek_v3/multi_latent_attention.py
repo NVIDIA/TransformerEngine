@@ -37,7 +37,7 @@ class MultiLatentAttention(torch.nn.Module):
 
     RoPE uses the fused MLA kernels from :mod:`.mla_rope` (in-place on the
     query rope slice, single-pass key/value assembly); the rope slice follows
-    the HF/Megatron DeepSeekV3 convention (interleaved weights, NeoX output).
+    the DeepSeekV3 checkpoint convention (interleaved weights, NeoX output).
 
     Parameters
     ----------
@@ -174,6 +174,7 @@ class MultiLatentAttention(torch.nn.Module):
         if softmax_scale is None and rope_scaling_factor is not None:
             m = yarn_mscale(rope_scaling_factor, mscale_all_dim)
             softmax_scale = m * m / math.sqrt(self.qk_head_dim)
+        self.softmax_scale = softmax_scale
 
         self.core_attention = DotProductAttention(
             num_attention_heads,

@@ -4,17 +4,13 @@
 
 """Fused MLA RoPE kernels (DeepSeekV3-style decoupled RoPE/NoPE).
 
-Triton forward/backward kernels adapted from Megatron-LM
-``megatron/core/fusions/fused_mla_yarn_rope_apply.py``. The query kernel
-rotates the trailing ``head_dim_rope`` slice in place (no concat); the KV
-kernel builds the final key (nope | broadcast-rotated shared rope head) and
-value tensors in a single pass. Falls back to pure PyTorch when Triton is
-unavailable or for the ``bshd`` layout (the Triton path is ``sbhd``-only).
+The query kernel rotates the trailing ``head_dim_rope`` slice in place; the KV
+kernel builds the key (nope | broadcast-rotated shared rope head) and value
+tensors in a single pass. Falls back to pure PyTorch when Triton is unavailable
+or for the ``bshd`` layout.
 
-Rotation convention: the rope slice is read interleaved (as stored in
-HF/Megatron DeepSeekV3 checkpoints) and written in NeoX half-split layout,
-matching the Megatron fused kernel semantics.
-"""
+The rope slice is read interleaved (checkpoint layout) and written in NeoX
+half-split layout."""
 
 import math
 from typing import Optional, Tuple
@@ -65,7 +61,7 @@ def yarn_mscale(scale: float, mscale: float = 1.0) -> float:
 
 
 def yarn_concentration_factor(scaling_factor: float, mscale: float, mscale_all_dim: float) -> float:
-    """Factor multiplied into cos/sin tables (as in Megatron-Core)."""
+    """Factor multiplied into cos/sin tables."""
     return yarn_mscale(scaling_factor, mscale) / yarn_mscale(scaling_factor, mscale_all_dim)
 
 

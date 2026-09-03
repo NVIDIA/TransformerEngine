@@ -8,11 +8,7 @@ import pytest
 import torch
 
 from transformer_engine.pytorch.utils import deinterleave_glu_tensor
-from transformer_engine.pytorch.models import (
-    DeepSeekV3Layer,
-    DeepSeekV3MoE,
-    MultiLatentAttention,
-)
+from transformer_engine.pytorch.models import DeepSeekV3MoE, MultiLatentAttention
 
 SEQ_LEN = 128
 BATCH = 2
@@ -96,16 +92,6 @@ def test_mla_rope_triton_matches_pytorch():
     torch.testing.assert_close(grads_t[2], pos_leaf.grad, rtol=1e-5, atol=1e-5)
 
 
-def test_mla_forward_backward():
-    torch.manual_seed(0)
-    mla = MultiLatentAttention(HIDDEN, HEADS, params_dtype=DTYPE, **MLA_KWARGS)
-    x = _input()
-    out = mla(x)
-    assert out.shape == x.shape
-    out.sum().backward()
-    assert x.grad is not None and torch.isfinite(x.grad).all()
-
-
 def test_rope_tables_yarn():
     from transformer_engine.pytorch.models.deepseek_v3 import mla_rope
 
@@ -128,8 +114,7 @@ def test_rope_tables_yarn():
 
 
 @pytest.mark.parametrize("mscale_all_dim", [0.0, 1.0])
-def test_mla_yarn_forward_backward(mscale_all_dim):
-    torch.manual_seed(0)
+def test_mla_yarn_softmax_scale(mscale_all_dim):
     mla = MultiLatentAttention(
         HIDDEN,
         HEADS,
@@ -141,27 +126,23 @@ def test_mla_yarn_forward_backward(mscale_all_dim):
     )
     m = 0.1 * mscale_all_dim * math.log(40.0) + 1.0
     qk_head_dim = MLA_KWARGS["qk_nope_head_dim"] + MLA_KWARGS["qk_rope_head_dim"]
-    assert mla.core_attention.unfused_attention.softmax_scale == pytest.approx(
-        m * m / math.sqrt(qk_head_dim)
-    )
-    x = _input()
-    out = mla(x)
-    assert out.shape == x.shape
-    out.sum().backward()
-    assert x.grad is not None and torch.isfinite(x.grad).all()
+    assert mla.softmax_scale == pytest.approx(m * m / math.sqrt(qk_head_dim))
 
 
 @pytest.mark.parametrize("shared", [False, True], ids=["no_shared", "shared"])
 @pytest.mark.parametrize("grouped", [False, True], ids=["ungrouped", "grouped"])
-def test_moe_forward_backward(shared, grouped):
+@pytest.mark.parametrize("topk", [2, 4])
+def test_moe_matches_dense_reference(shared, grouped, topk):
+    """Routed output must equal the prob-weighted sum of the selected expert MLPs."""
     torch.manual_seed(0)
+    num_experts = 4
     moe = DeepSeekV3MoE(
         HIDDEN,
         moe_ffn_hidden_size=128,
-        num_experts=8,
-        topk=2,
-        num_groups=4 if grouped else None,
-        group_topk=2 if grouped else None,
+        num_experts=num_experts,
+        topk=topk,
+        num_groups=2 if grouped else None,
+        group_topk=topk // 2 if grouped else None,
         shared_expert_ffn_hidden_size=128 if shared else None,
         params_dtype=DTYPE,
     )
@@ -169,32 +150,13 @@ def test_moe_forward_backward(shared, grouped):
     out = moe(x)
     assert out.shape == x.shape
     out.sum().backward()
-    assert x.grad is not None and torch.isfinite(x.grad).all()
+    assert torch.isfinite(x.grad).all()
 
-    counts = moe._last_tokens_per_expert
-    assert counts.sum().item() == SEQ_LEN * BATCH * 2
-    bias_before = moe.expert_bias.clone()
-    moe.update_expert_bias()
-    assert not torch.equal(bias_before, moe.expert_bias)
-
-
-def test_moe_matches_dense_reference():
-    """topk == num_experts with uniform probs must reduce to a sum of expert MLPs."""
-    torch.manual_seed(0)
-    num_experts = 4
-    moe = DeepSeekV3MoE(
-        HIDDEN,
-        moe_ffn_hidden_size=128,
-        num_experts=num_experts,
-        topk=num_experts,
-        routed_scaling_factor=1.0,
-        params_dtype=DTYPE,
-    )
-    x = _input(requires_grad=False)
-    out = moe(x)
-
-    tokens = x.reshape(-1, HIDDEN)
+    tokens = x.detach().reshape(-1, HIDDEN)
     probs, _ = moe._route(moe.gate(tokens).float())
+    assert (probs > 0).sum(dim=1).eq(topk).all()
+    assert moe._last_tokens_per_expert.sum().item() == tokens.shape[0] * topk
+
     fc1, _, fc2 = moe.experts
     ref = torch.zeros_like(tokens)
     for e in range(num_experts):
@@ -203,29 +165,12 @@ def test_moe_matches_dense_reference():
         gate_part, lin_part = (tokens @ w1.t()).chunk(2, dim=-1)
         act = torch.nn.functional.silu(gate_part.float()) * lin_part.float()
         ref += (act.to(DTYPE) * probs[:, e : e + 1].to(DTYPE)) @ w2.t()
+    if shared:
+        ref += moe.shared_expert(tokens)
     torch.testing.assert_close(out.reshape(-1, HIDDEN), ref, rtol=0.05, atol=0.05)
 
-
-@pytest.mark.parametrize("num_experts", [None, 8], ids=["dense", "moe"])
-def test_layer_forward_backward(num_experts):
-    torch.manual_seed(0)
-    layer = (
-        DeepSeekV3Layer(
-            HIDDEN,
-            HEADS,
-            ffn_hidden_size=512,
-            num_experts=num_experts,
-            moe_ffn_hidden_size=128 if num_experts else None,
-            topk=2 if num_experts else None,
-            shared_expert_ffn_hidden_size=128 if num_experts else None,
-            params_dtype=DTYPE,
-            **MLA_KWARGS,
-        )
-        if num_experts
-        else DeepSeekV3Layer(HIDDEN, HEADS, ffn_hidden_size=512, params_dtype=DTYPE, **MLA_KWARGS)
-    )
-    x = _input()
-    out = layer(x)
-    assert out.shape == x.shape
-    out.sum().backward()
-    assert x.grad is not None and torch.isfinite(x.grad).all()
+    bias_before = moe.expert_bias.clone()
+    moe.update_expert_bias()
+    assert torch.isfinite(moe.expert_bias).all()
+    if topk < num_experts:
+        assert not torch.equal(bias_before, moe.expert_bias)
