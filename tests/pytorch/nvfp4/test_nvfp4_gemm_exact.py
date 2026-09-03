@@ -826,9 +826,7 @@ def test_nvfp4_ue5m3_gemm_leaves_operands_unswizzled(M: int, K: int, N: int):
     )
     x_q = quantizer.update_quantized(x, quantizer.make_empty(x.shape, dtype=dtype, device=device))
     w_q = quantizer.update_quantized(w, quantizer.make_empty(w.shape, dtype=dtype, device=device))
-    before = [
-        (t._rowwise_scale_inv.clone(), t._columnwise_scale_inv.clone()) for t in (w_q, x_q)
-    ]
+    before = [(t._rowwise_scale_inv.clone(), t._columnwise_scale_inv.clone()) for t in (w_q, x_q)]
     y1 = general_gemm(w_q, x_q, out_dtype=dtype, layout="TN")[0]
     y2 = general_gemm(w_q, x_q, out_dtype=dtype, layout="TN")[0]
     for t, (rowwise, columnwise) in zip((w_q, x_q), before):
