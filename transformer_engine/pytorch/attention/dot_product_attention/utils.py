@@ -1434,12 +1434,17 @@ def get_attention_backend(
                 "Disabling FlashAttention as sliding window attention requires flash-attn 2.3+"
             )
             use_flash_attention_2 = False
-        elif not bottom_right_diagonal and max_seqlen_q != max_seqlen_kv:
-            logger.debug(
-                "Disabling FlashAttention as it only supports sliding window with bottom right"
-                " diagonal alignment for cross-attention"
-            )
-            use_flash_attention = False
+    if (
+        use_flash_attention
+        and (window_size[0] != -1 or window_size[1] not in [-1, 0])
+        and not bottom_right_diagonal
+        and max_seqlen_q != max_seqlen_kv
+    ):
+        logger.debug(
+            "Disabling FlashAttention as it only supports sliding window with bottom right"
+            " diagonal alignment for cross-attention"
+        )
+        use_flash_attention = False
 
     # Filter: Attention bias
     #    backend                 |      bias types              | ALiBi diagonal alignment
