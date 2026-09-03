@@ -31,6 +31,7 @@ __all__ = [
     "general_gemm",
     "general_grouped_gemm",
     "general_grouped_gemm_for_grouped_tensor",
+    "get_cublas_workspace",
 ]
 
 

@@ -481,8 +481,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
         // pre-9.13.1: vanilla
         // 9.13.1+: vanilla, off-by-one, learnable
         (cudnn_runtime_version >= 91301 ||
-         (cudnn_runtime_version < 91301 &&
-          softmax_type == NVTE_Softmax_Type::NVTE_VANILLA_SOFTMAX)) &&
+         softmax_type == NVTE_Softmax_Type::NVTE_VANILLA_SOFTMAX) &&
         // max_logit
         // pre-9.21: no (the composite softmax node rejects the Stats + Max output combination)
         // 9.21+: yes (Stats + Max via the unified softmax node)

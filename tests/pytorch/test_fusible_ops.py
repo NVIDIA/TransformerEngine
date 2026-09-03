@@ -3101,6 +3101,101 @@ class TestBasicOps:
         assert_close_grads(x_test, x_ref, **tols)
         assert_close_grads(scales_test, scales_ref, **tols)
 
+    @pytest.mark.parametrize("in_shape", ((71, 192), (5, 7, 128)))
+    @pytest.mark.parametrize("input_requires_grad", (False, True))
+    @pytest.mark.parametrize("scales_requires_grad", (False, True))
+    @pytest.mark.parametrize("tanh_clamp_scale", (0.5, 2.0))
+    def test_scaled_tanh_srelu(
+        self,
+        *,
+        in_shape: Iterable[int],
+        dtype: torch.dtype = torch.float32,
+        device: torch.device = "cuda",
+        input_requires_grad: bool,
+        scales_requires_grad: bool,
+        tanh_clamp_scale: float,
+    ) -> None:
+        """Tanh soft-clamped SReLU with post-scale.
+
+        Covers the unfused path specifically: the fused grouped-MLP op goes straight
+        to the cuDNN srelu_tanh epilogue and never runs this code. Small clamp scales
+        are used so tanh genuinely saturates -- with a large scale the result is
+        numerically indistinguishable from plain ScaledSReLU.
+        """
+
+        # Random data
+        x_ref, x_test = make_reference_and_test_tensors(
+            in_shape,
+            test_dtype=dtype,
+            test_device=device,
+            requires_grad=input_requires_grad,
+        )
+        scales_ref, scales_test = make_reference_and_test_tensors(
+            in_shape[:-1],
+            test_dtype=dtype,
+            test_device=device,
+            requires_grad=scales_requires_grad,
+        )
+        dy_ref, dy_test = make_reference_and_test_tensors(
+            in_shape,
+            test_dtype=dtype,
+            test_device=device,
+            requires_grad=False,
+        )
+
+        # Plain PyTorch implementation. Autograd supplies the reference gradients, so
+        # the op's hand-written backward is checked against a derivative it played no
+        # part in computing.
+        y = (
+            tanh_clamp_scale * torch.tanh(torch.nn.functional.relu(x_ref) / tanh_clamp_scale)
+        ).square()
+        y_ref = scales_ref.unsqueeze(-1) * y
+        if input_requires_grad or scales_requires_grad:
+            y_ref.backward(dy_ref)
+
+        # Implementation with fusible operation
+        op = te_ops.ScaledTanhSReLU(tanh_clamp_scale=tanh_clamp_scale)
+        y_test = op(x_test, scales_test)
+        if input_requires_grad or scales_requires_grad:
+            y_test.backward(dy_test)
+
+        # Check results
+        tols = dtype_tols(dtype)
+        y_test = y_test.to(dtype=torch.float64, device="cpu")
+        assert_close(y_test, y_ref, **tols)
+        if input_requires_grad:
+            assert_close_grads(x_test, x_ref, **tols)
+        if scales_requires_grad:
+            assert_close_grads(scales_test, scales_ref, **tols)
+
+    def test_scaled_tanh_srelu_saturates(self) -> None:
+        """Large inputs pin the output at tanh_clamp_scale**2, unlike plain SReLU."""
+        s = 2.0
+        x = torch.full((4, 8), 1.0e3, device="cuda", dtype=torch.float32)
+        scales = torch.ones((4,), device="cuda", dtype=torch.float32)
+
+        y = te_ops.ScaledTanhSReLU(tanh_clamp_scale=s)(x, scales)
+        torch.testing.assert_close(y, torch.full_like(y, s * s))
+
+        # Plain SReLU on the same input is ~250000x larger, so this cannot pass by
+        # accident if the clamp were silently dropped.
+        y_unclamped = te_ops.ScaledSReLU()(x, scales)
+        assert y_unclamped.min().item() > 1.0e5
+
+    @pytest.mark.parametrize("tanh_clamp_scale", (0.0, -1.0, float("inf"), float("nan")))
+    def test_scaled_tanh_srelu_rejects_bad_clamp_scale(self, tanh_clamp_scale) -> None:
+        """The clamp scale must be finite and positive."""
+        with pytest.raises(ValueError, match="tanh_clamp_scale"):
+            te_ops.ScaledTanhSReLU(tanh_clamp_scale=tanh_clamp_scale)
+
+    def test_scaled_tanh_srelu_activation_recompute_in_mlp_config(self) -> None:
+        """Tanh SReLU exposes the same activation recompute knob as ScaledSReLU."""
+        op = te_ops.ScaledTanhSReLU(tanh_clamp_scale=2.0)
+        assert op.activation_recompute_in_mlp is False
+        assert te_ops.ScaledTanhSReLU(
+            tanh_clamp_scale=2.0, activation_recompute_in_mlp=True
+        ).activation_recompute_in_mlp
+
     def test_interleaved_scaled_swiglu(self):
         """SwiGLU with post-scale and block interleaved input format"""
         self.test_scaled_swiglu(
