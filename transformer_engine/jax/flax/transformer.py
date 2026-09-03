@@ -847,6 +847,8 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
             bias_heads=bias_heads,
             bias_seqlen_q=bias_seqlen_q,
             bias_seqlen_kv=bias_seqlen_kv,
+            num_tokens_q=batch_size * seqlen_q,
+            num_tokens_kv=batch_size * seqlen_kv,
         )
         fused_attn_backend, _ = fused_attn_helper.get_fused_attn_backend()
         has_fused_attn_kernel = fused_attn_backend != NVTE_Fused_Attn_Backend.NVTE_No_Backend

@@ -231,6 +231,8 @@ class FusedAttnHelper:
     bias_heads: Optional[int] = None
     bias_seqlen_q: Optional[int] = None
     bias_seqlen_kv: Optional[int] = None
+    num_tokens_q: Optional[int] = None
+    num_tokens_kv: Optional[int] = None
 
     def is_fused_attn_kernel_available(self):
         """Check if there is available fused attention kernel"""
@@ -259,8 +261,16 @@ class FusedAttnHelper:
             bias_seqlen_kv = self.bias_seqlen_kv or 0
         num_tokens_q = num_tokens_kv = 0
         if self.qkv_layout.is_thd():
-            num_tokens_q = self.batch_size * self.q_max_seqlen
-            num_tokens_kv = self.batch_size * self.kv_max_seqlen
+            num_tokens_q = (
+                self.batch_size * self.q_max_seqlen
+                if self.num_tokens_q is None
+                else self.num_tokens_q
+            )
+            num_tokens_kv = (
+                self.batch_size * self.kv_max_seqlen
+                if self.num_tokens_kv is None
+                else self.num_tokens_kv
+            )
         backend, message = transformer_engine_jax.get_fused_attn_backend(
             FusedAttnParams(
                 is_training=self.is_training,
@@ -528,6 +538,8 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             bias_heads=bias_heads,
             bias_seqlen_q=bias_seqlen_q,
             bias_seqlen_kv=bias_seqlen_kv,
+            num_tokens_q=input_batch * q_max_seqlen,
+            num_tokens_kv=input_batch * kv_max_seqlen,
         ).get_fused_attn_backend()
 
         if backend == NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen:
