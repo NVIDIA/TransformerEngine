@@ -89,6 +89,12 @@ model_configs_flash_attn = {
 # if a slower machine or expanded test matrix needs more room.
 POOL_SUBMIT_TIMEOUT_SEC = float(os.getenv("NVTE_CP_POOL_TIMEOUT_SEC", "90"))
 
+# Non-infrastructure retries stay FP8+THD-only; fresh-worker evidence is required.
+RETRYABLE_ERROR_ALLOWLIST = (
+    "has nan values",  # Seen 2026-08-14; narrow retry committed 2026-08-20.
+    "rmse nan",  # Seen 2026-08-14; fresh-pool passes confirmed 2026-08-31.
+)
+
 
 class PoolWorker:
     # Crash-path AssertionErrors include the tail of the worker's stderr so CI
@@ -178,10 +184,19 @@ class PoolWorker:
     _MAX_RETRIES = 1
 
     def submit(self, kwargs: dict, timeout: float = POOL_SUBMIT_TIMEOUT_SEC) -> None:
+        # Attribute retries without changing test signatures or the worker protocol.
+        test_id = os.environ.get("PYTEST_CURRENT_TEST", "<unknown>").removesuffix(" (call)")
         first_err = None
         for attempt in range(self._MAX_RETRIES + 1):
             try:
-                return self._submit_once(kwargs, timeout)
+                self._submit_once(kwargs, timeout)
+                if attempt:
+                    sys.stderr.write(
+                        f"[POOL-RETRY-PASS] status=recovered test={test_id!r} "
+                        f"world_size={self.world_size}\n"
+                    )
+                    sys.stderr.flush()
+                return
             except AssertionError as e:
                 msg = str(e)
                 msg_head = msg.splitlines()[0]
@@ -190,19 +205,16 @@ class PoolWorker:
                     or "timed out" in msg_head
                     or "before request could be sent" in msg_head
                 )
-                # Heterogeneous CP cases can leave a retained worker in a state where
-                # FP8 THD emits NaNs even though the same case passes in a fresh worker.
-                # Retry only that signature once; a NaN from the fresh worker still fails.
-                fp8_thd_nan = (
+                retryable = infrastructure_flake or (
                     kwargs.get("dtype") == "fp8"
                     and kwargs.get("qkv_format") == "thd"
-                    and "has nan values" in msg.lower()
+                    and any(signature in msg.lower() for signature in RETRYABLE_ERROR_ALLOWLIST)
                 )
-                retryable = infrastructure_flake or fp8_thd_nan
                 if not retryable or attempt == self._MAX_RETRIES:
                     if first_err is not None:
                         sys.stderr.write(
-                            f"[POOL-RETRY-FAIL] world_size={self.world_size}: "
+                            f"[POOL-RETRY-FAIL] status=failed test={test_id!r} "
+                            f"world_size={self.world_size}: "
                             "both attempts failed; first error was: "
                             f"{str(first_err).splitlines()[0]!r}\n"
                         )
@@ -210,8 +222,9 @@ class PoolWorker:
                     raise
                 first_err = e
                 sys.stderr.write(
-                    f"[POOL-RETRY] world_size={self.world_size} attempt {attempt + 1} "
-                    f"failed: {msg_head!r}; respawning pool and retrying\n"
+                    f"[POOL-RETRY] status=retrying test={test_id!r} "
+                    f"world_size={self.world_size} attempt={attempt + 1} "
+                    f"error={msg_head!r}; respawning pool and retrying\n"
                 )
                 sys.stderr.flush()
         raise first_err  # unreachable; loop either returns or raises

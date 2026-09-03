@@ -59,6 +59,12 @@ mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available(return_reason=True)
 nvfp4_available, reason_for_no_nvfp4 = te.is_nvfp4_available(return_reason=True)
 fp8_ue5m3_available, reason_for_no_fp8_ue5m3 = te.is_fp8_ue5m3_available(return_reason=True)
 
+# Soft-clamp scale for ScaledTanhSReLU coverage. Deliberately small relative to the
+# FC1 outputs these tests produce, so tanh actually saturates -- a large scale would
+# make the activation numerically indistinguishable from plain ScaledSReLU and the
+# test would pass even if the clamp were dropped.
+_TANH_SRELU_CLAMP_SCALE: float = 2.0
+
 # Supported data types
 _dtypes: list[torch.dtype] = [torch.float32, torch.float16]
 if is_bf16_available():  # bf16 requires sm_80 or higher
@@ -1086,6 +1092,7 @@ class TestGroupedMLPFusedOp:
             "scaled_clamped_qgeglu",
             "scaled_clamped_qgeglu_custom",
             "scaled_srelu",
+            "scaled_tanh_srelu",
         ),
     )
     def test_grouped_mlp(
@@ -1154,12 +1161,25 @@ class TestGroupedMLPFusedOp:
             pytest.skip("Unary activations do not use GLU interleaving")
         if quantization == "nvfp4_4over6":
             pytest.skip("NVFP4 4over6 grouped quantization is not supported")
-        if activation == "scaled_srelu" and quantization in ("nvfp4", "nvfp4_rht") and bias:
+        if (
+            activation in ("scaled_srelu", "scaled_tanh_srelu")
+            and quantization in ("nvfp4", "nvfp4_rht")
+            and bias
+        ):
             pytest.skip("NVFP4 SReLU grouped MLP coverage is limited to no-bias")
         if quantization == "nvfp4_rht":
             if activation == "scaled_swiglu" and (bias or glu_interleave_size != 32):
                 pytest.skip("NVFP4 RHT SwiGLU grouped MLP coverage is limited to no-bias")
-            if activation not in ("scaled_swiglu", "scaled_situglu", "scaled_srelu"):
+            # tanh-SReLU is included deliberately: NVFP4 is the only path that exercises
+            # the dsrelu-family fc2 alpha (full product rather than sqrt), so excluding
+            # it here would leave that branch untested. It runs without the hadamard
+            # sub-kernel, which the fused op handles via the generic quantize fallback.
+            if activation not in (
+                "scaled_swiglu",
+                "scaled_situglu",
+                "scaled_srelu",
+                "scaled_tanh_srelu",
+            ):
                 pytest.skip(
                     "NVFP4 RHT grouped MLP coverage is limited to SwiGLU, SiTU-GLU, and SReLU"
                 )
@@ -1285,6 +1305,11 @@ class TestGroupedMLPFusedOp:
                 return (x2c + geglu_offset) * (x1c * torch.sigmoid(geglu_alpha * x1c))
             if activation == "scaled_srelu":
                 return torch.nn.functional.relu(x).square()
+            if activation == "scaled_tanh_srelu":
+                s = _TANH_SRELU_CLAMP_SCALE
+                return (
+                    (s * torch.tanh(torch.nn.functional.relu(x.float()) / s)).square().to(x.dtype)
+                )
             raise ValueError(f"Unexpected grouped MLP activation ({activation})")
 
         # Reference implementation
@@ -1328,6 +1353,8 @@ class TestGroupedMLPFusedOp:
                 return te.ops.ScaledClampedQGeGLU(glu_interleave_size=glu_interleave_size)
             if activation == "scaled_srelu":
                 return te.ops.ScaledSReLU()
+            if activation == "scaled_tanh_srelu":
+                return te.ops.ScaledTanhSReLU(tanh_clamp_scale=_TANH_SRELU_CLAMP_SCALE)
             raise ValueError(f"Unexpected grouped MLP activation ({activation})")
 
         def _make_module():
@@ -1414,15 +1441,20 @@ class TestGroupedMLPFusedOp:
             fc2.backward_dw()
 
         # Check for expected fusions
-        cudnn_frontend_supports_grouped_mlp = (
-            grouped_mlp_module._cudnn_frontend_supports_grouped_gemm_situglu()
-            if activation == "scaled_situglu"
-            else (
-                _cudnn_frontend_supports_grouped_gemm_srelu()
-                if activation == "scaled_srelu"
-                else _cudnn_frontend_version_supported()
+        if activation == "scaled_situglu":
+            cudnn_frontend_supports_grouped_mlp = (
+                grouped_mlp_module._cudnn_frontend_supports_grouped_gemm_situglu()
             )
-        )
+        elif activation == "scaled_srelu":
+            cudnn_frontend_supports_grouped_mlp = _cudnn_frontend_supports_grouped_gemm_srelu()
+        elif activation == "scaled_tanh_srelu":
+            # Needs both the base srelu kernels and the tanh_clamp_scale parameter.
+            cudnn_frontend_supports_grouped_mlp = (
+                _cudnn_frontend_supports_grouped_gemm_srelu()
+                and grouped_mlp_module._cudnn_frontend_supports_grouped_gemm_srelu_tanh()
+            )
+        else:
+            cudnn_frontend_supports_grouped_mlp = _cudnn_frontend_version_supported()
         expected_grouped_mlp_fusion = cudnn_frontend_supports_grouped_mlp and (
             (
                 quantization == "mxfp8"
@@ -1922,6 +1954,7 @@ class TestGroupedMLPFusedOp:
             "scaled_clamped_qgeglu",
             "scaled_clamped_qgeglu_custom",
             "scaled_srelu",
+            "scaled_tanh_srelu",
         ),
     )
     def test_grouped_mlp_fp16(
