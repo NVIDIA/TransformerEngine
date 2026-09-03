@@ -4,6 +4,7 @@
 
 """Multi-Latent Attention (MLA) block as used in DeepSeekV3."""
 
+import math
 from typing import Optional, Union
 
 import torch
@@ -14,6 +15,7 @@ from transformer_engine.pytorch.models.deepseek_v3.mla_rope import (
     apply_mla_rope_kv,
     apply_mla_rope_q,
     build_rope_tables,
+    yarn_mscale,
 )
 
 __all__ = ["MultiLatentAttention"]
@@ -61,9 +63,22 @@ class MultiLatentAttention(torch.nn.Module):
                        epsilon of the latent RMSNorms (matches DeepSeekV3).
     rotary_base : float, default = 10000.0
                  RoPE base.
+    rope_scaling_factor : float, optional
+                         YaRN context-extension factor; ``None`` disables YaRN.
+    original_max_position_embeddings : int, default = 4096
+                                      pre-extension context length (YaRN).
+    beta_fast : float, default = 32.0
+               YaRN high-frequency rotation bound.
+    beta_slow : float, default = 1.0
+               YaRN low-frequency rotation bound.
+    mscale : float, default = 1.0
+            YaRN mscale of the rope part.
+    mscale_all_dim : float, default = 0.0
+                    YaRN mscale of all dims; sets the default softmax scale to
+                    ``m**2 / sqrt(qk head dim)`` with ``m = 0.1 * mscale_all_dim * ln(factor) + 1``.
     softmax_scale : float, optional
-                   softmax scale; defaults to ``1/sqrt(qk head dim)`` inside
-                   :class:`DotProductAttention`.
+                   softmax scale; defaults to ``1/sqrt(qk head dim)`` (times the YaRN
+                   ``m**2`` when YaRN is enabled).
     qkv_format : str, default = "sbhd"
                 layout of the input/output tensors.
     params_dtype : torch.dtype, optional
@@ -87,6 +102,12 @@ class MultiLatentAttention(torch.nn.Module):
         attn_mask_type: str = "causal",
         layernorm_epsilon: float = 1e-6,
         rotary_base: float = 10000.0,
+        rope_scaling_factor: Optional[float] = None,
+        original_max_position_embeddings: int = 4096,
+        beta_fast: float = 32.0,
+        beta_slow: float = 1.0,
+        mscale: float = 1.0,
+        mscale_all_dim: float = 0.0,
         softmax_scale: Optional[float] = None,
         qkv_format: str = "sbhd",
         params_dtype: Optional[torch.dtype] = None,
@@ -140,7 +161,19 @@ class MultiLatentAttention(torch.nn.Module):
         )
 
         self.rotary_base = rotary_base
+        self._yarn_kwargs = dict(
+            scaling_factor=rope_scaling_factor,
+            original_max_position_embeddings=original_max_position_embeddings,
+            beta_fast=beta_fast,
+            beta_slow=beta_slow,
+            mscale=mscale,
+            mscale_all_dim=mscale_all_dim,
+        )
         self._rope_tables: Optional[tuple] = None
+
+        if softmax_scale is None and rope_scaling_factor is not None:
+            m = yarn_mscale(rope_scaling_factor, mscale_all_dim)
+            softmax_scale = m * m / math.sqrt(self.qk_head_dim)
 
         self.core_attention = DotProductAttention(
             num_attention_heads,
@@ -156,7 +189,11 @@ class MultiLatentAttention(torch.nn.Module):
     def _rope_tables_for(self, seq_len: int, device: torch.device):
         if self._rope_tables is None or self._rope_tables[0].shape[0] < seq_len:
             self._rope_tables = build_rope_tables(
-                seq_len, self.qk_rope_head_dim, base=self.rotary_base, device=device
+                seq_len,
+                self.qk_rope_head_dim,
+                base=self.rotary_base,
+                device=device,
+                **self._yarn_kwargs,
             )
         cos, sin = self._rope_tables
         return cos[:seq_len], sin[:seq_len]

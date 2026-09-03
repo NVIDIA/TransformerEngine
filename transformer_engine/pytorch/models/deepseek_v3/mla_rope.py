@@ -16,6 +16,7 @@ HF/Megatron DeepSeekV3 checkpoints) and written in NeoX half-split layout,
 matching the Megatron fused kernel semantics.
 """
 
+import math
 from typing import Optional, Tuple
 
 import torch
@@ -28,7 +29,44 @@ try:
 except ImportError:
     HAVE_TRITON = False
 
-__all__ = ["build_rope_tables", "apply_mla_rope_q", "apply_mla_rope_kv"]
+__all__ = [
+    "build_rope_tables",
+    "apply_mla_rope_q",
+    "apply_mla_rope_kv",
+    "yarn_mscale",
+    "yarn_concentration_factor",
+]
+
+
+def _yarn_correction_dim(num_rotations, dim, base, max_pos):
+    return (dim * math.log(max_pos / (num_rotations * 2 * math.pi))) / (2 * math.log(base))
+
+
+def _yarn_correction_range(beta_fast, beta_slow, dim, base, max_pos, round_to_int=True):
+    low = _yarn_correction_dim(beta_fast, dim, base, max_pos)
+    high = _yarn_correction_dim(beta_slow, dim, base, max_pos)
+    if round_to_int:
+        low, high = math.floor(low), math.ceil(high)
+    return max(low, 0), min(high, dim - 1)
+
+
+def _yarn_linear_ramp(low, high, dim, device):
+    if low == high:
+        high += 0.001
+    ramp = (torch.arange(dim, dtype=torch.float32, device=device) - low) / (high - low)
+    return torch.clamp(ramp, 0, 1)
+
+
+def yarn_mscale(scale: float, mscale: float = 1.0) -> float:
+    """YaRN attention temperature factor ``0.1 * mscale * ln(scale) + 1`` (1 for scale <= 1)."""
+    if scale <= 1:
+        return 1.0
+    return 0.1 * mscale * math.log(scale) + 1.0
+
+
+def yarn_concentration_factor(scaling_factor: float, mscale: float, mscale_all_dim: float) -> float:
+    """Factor multiplied into cos/sin tables (as in Megatron-Core)."""
+    return yarn_mscale(scaling_factor, mscale) / yarn_mscale(scaling_factor, mscale_all_dim)
 
 
 def build_rope_tables(
@@ -36,15 +74,33 @@ def build_rope_tables(
     emb_dim: int,
     base: float = 10000.0,
     device: Optional[torch.device] = None,
+    scaling_factor: Optional[float] = None,
+    original_max_position_embeddings: int = 4096,
+    beta_fast: float = 32.0,
+    beta_slow: float = 1.0,
+    mscale: float = 1.0,
+    mscale_all_dim: float = 0.0,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """cos/sin tables of shape ``[seq_len, emb_dim]`` (fp32, NeoX duplicated halves)."""
-    inv_freq = 1.0 / (
-        base ** (torch.arange(0, emb_dim, 2, dtype=torch.float32, device=device) / emb_dim)
-    )
+    """cos/sin tables of shape ``[seq_len, emb_dim]`` (fp32, NeoX duplicated halves).
+
+    With ``scaling_factor`` set, frequencies follow YaRN (NTK-by-parts ramp between
+    ``beta_fast``/``beta_slow`` rotations over ``original_max_position_embeddings``) and the
+    tables are scaled by the YaRN concentration factor.
+    """
+    exponent = torch.arange(0, emb_dim, 2, dtype=torch.float32, device=device) / emb_dim
+    inv_freq = 1.0 / (base**exponent)
+    factor = 1.0
+    if scaling_factor is not None:
+        low, high = _yarn_correction_range(
+            beta_fast, beta_slow, emb_dim, base, original_max_position_embeddings
+        )
+        extra_mask = 1.0 - _yarn_linear_ramp(low, high, emb_dim // 2, device)
+        inv_freq = (inv_freq / scaling_factor) * (1 - extra_mask) + inv_freq * extra_mask
+        factor = yarn_concentration_factor(scaling_factor, mscale, mscale_all_dim)
     t = torch.arange(seq_len, device=device, dtype=torch.float32)
     freqs = torch.outer(t, inv_freq)
     freqs = torch.cat([freqs, freqs], dim=-1)
-    return torch.cos(freqs).contiguous(), torch.sin(freqs).contiguous()
+    return (torch.cos(freqs) * factor).contiguous(), (torch.sin(freqs) * factor).contiguous()
 
 
 if HAVE_TRITON:

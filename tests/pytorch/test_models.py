@@ -2,6 +2,8 @@
 #
 # See LICENSE for license information.
 
+import math
+
 import pytest
 import torch
 
@@ -97,6 +99,51 @@ def test_mla_rope_triton_matches_pytorch():
 def test_mla_forward_backward():
     torch.manual_seed(0)
     mla = MultiLatentAttention(HIDDEN, HEADS, params_dtype=DTYPE, **MLA_KWARGS)
+    x = _input()
+    out = mla(x)
+    assert out.shape == x.shape
+    out.sum().backward()
+    assert x.grad is not None and torch.isfinite(x.grad).all()
+
+
+def test_rope_tables_yarn():
+    from transformer_engine.pytorch.models.deepseek_v3 import mla_rope
+
+    s, rope = 8192, 64
+    cos, sin = mla_rope.build_rope_tables(s, rope, device="cuda")
+    cos_none, sin_none = mla_rope.build_rope_tables(s, rope, device="cuda", scaling_factor=None)
+    assert torch.equal(cos, cos_none) and torch.equal(sin, sin_none)
+
+    yarn = dict(scaling_factor=40.0, original_max_position_embeddings=4096)
+    cos_y, sin_y = mla_rope.build_rope_tables(s, rope, device="cuda", **yarn)
+    factor = mla_rope.yarn_concentration_factor(40.0, 1.0, 0.0)
+    assert factor == pytest.approx(0.1 * math.log(40.0) + 1.0)
+    # amplitude scaled by the concentration factor
+    torch.testing.assert_close(cos_y**2 + sin_y**2, torch.full_like(cos_y, factor**2))
+    # high-frequency dims untouched, low-frequency dims interpolated by 1/scaling_factor
+    torch.testing.assert_close(cos_y[:, 0] / factor, cos[:, 0])
+    angle_y = torch.atan2(sin_y[:, rope // 2 - 1], cos_y[:, rope // 2 - 1])
+    angle = torch.atan2(sin[:, rope // 2 - 1], cos[:, rope // 2 - 1])
+    torch.testing.assert_close(angle_y[:64], angle[:64] / 40.0, atol=1e-4, rtol=0)
+
+
+@pytest.mark.parametrize("mscale_all_dim", [0.0, 1.0])
+def test_mla_yarn_forward_backward(mscale_all_dim):
+    torch.manual_seed(0)
+    mla = MultiLatentAttention(
+        HIDDEN,
+        HEADS,
+        params_dtype=DTYPE,
+        rope_scaling_factor=40.0,
+        original_max_position_embeddings=64,
+        mscale_all_dim=mscale_all_dim,
+        **MLA_KWARGS,
+    )
+    m = 0.1 * mscale_all_dim * math.log(40.0) + 1.0
+    qk_head_dim = MLA_KWARGS["qk_nope_head_dim"] + MLA_KWARGS["qk_rope_head_dim"]
+    assert mla.core_attention.unfused_attention.softmax_scale == pytest.approx(
+        m * m / math.sqrt(qk_head_dim)
+    )
     x = _input()
     out = mla(x)
     assert out.shape == x.shape
