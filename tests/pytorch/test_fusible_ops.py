@@ -2404,6 +2404,98 @@ class TestBasicOps:
         )
 
     @pytest.mark.parametrize("dtype", _dtypes)
+    @pytest.mark.parametrize("glu_interleave_size", (None, 32))
+    @pytest.mark.parametrize("betas", ((4.0, 25.0), (3.0, 12.0)))
+    def test_situglu(
+        self,
+        *,
+        dtype: torch.dtype,
+        glu_interleave_size: Optional[int],
+        betas: tuple[float, float],
+        device: torch.device = "cuda",
+    ) -> None:
+        """SiTU-GLU forward and backward."""
+        in_shape = (17, 192)
+        out_shape = (17, 96)
+        beta1, beta2 = betas
+        x_ref, x_test = make_reference_and_test_tensors(
+            in_shape,
+            test_dtype=dtype,
+            test_device=device,
+        )
+        dy_ref, dy_test = make_reference_and_test_tensors(
+            out_shape,
+            test_dtype=dtype,
+            test_device=device,
+            requires_grad=False,
+        )
+
+        x = x_ref
+        if glu_interleave_size is not None:
+            x = x.reshape(-1, 3, 2, glu_interleave_size).transpose(1, 2).reshape(in_shape)
+        gate, up = x.chunk(2, dim=-1)
+        y_ref = (
+            beta1 * torch.tanh(gate / beta1) * torch.sigmoid(gate) * beta2 * torch.tanh(up / beta2)
+        )
+        y_ref.backward(dy_ref)
+
+        op = te_ops.SiTUGLU(
+            beta1=beta1,
+            beta2=beta2,
+            glu_interleave_size=glu_interleave_size,
+        )
+        y_test = op(x_test)
+        y_test.backward(dy_test)
+
+        tols = dtype_tols(dtype)
+        assert_close(y_test, y_ref, **tols)
+        assert_close_grads(x_test, x_ref, **tols)
+
+    @pytest.mark.parametrize("name,value", (("beta1", 0.0), ("beta2", float("inf"))))
+    def test_situglu_invalid_beta(self, name: str, value: float) -> None:
+        """SiTU-GLU soft-cap parameters must be finite and positive."""
+        with pytest.raises(ValueError, match=name):
+            te_ops.SiTUGLU(**{name: value})
+        with pytest.raises(ValueError, match=name):
+            te_ops.ScaledSiTUGLU(**{name: value})
+
+    def test_situglu_mxfp8_quantization(self, device: torch.device = "cuda") -> None:
+        """SiTU-GLU supports fused MXFP8 output and input-gradient quantization."""
+        dtype = torch.bfloat16
+        quantization = "mxfp8"
+        in_shape = (256, 256)
+        out_shape = (256, 128)
+        maybe_skip_quantization(quantization, dims=in_shape, device=device, dtype=dtype)
+        x_ref, x_test = make_reference_and_test_tensors(
+            in_shape,
+            test_dtype=dtype,
+            test_device=device,
+        )
+        dy_ref, dy_test = make_reference_and_test_tensors(
+            out_shape,
+            test_dtype=dtype,
+            test_device=device,
+            requires_grad=False,
+        )
+
+        gate, up = x_ref.chunk(2, dim=-1)
+        y_ref = 4.0 * torch.tanh(gate / 4.0) * torch.sigmoid(gate) * 25.0 * torch.tanh(up / 25.0)
+        y_ref.backward(dy_ref)
+
+        forward = te_ops.Sequential(
+            te_ops.Quantize(forward=False, backward=True),
+            te_ops.SiTUGLU(),
+            te_ops.Quantize(forward=True, backward=False),
+        )
+        with te.autocast(enabled=True, recipe=make_recipe(quantization)):
+            y_test = forward(x_test)
+        y_test.backward(dy_test)
+
+        tols = quantization_tols(quantization)
+        assert_close(y_test, y_ref, **tols)
+        assert_close_grads(x_test, x_ref, **tols)
+
+    @pytest.mark.parametrize("dtype", _dtypes)
     @pytest.mark.parametrize("quantization", _quantization_list)
     @pytest.mark.parametrize("quantize_forward", (False, True))
     @pytest.mark.parametrize("quantize_backward", (False, True))
@@ -2458,8 +2550,9 @@ class TestBasicOps:
             x = x.transpose(-3, -2)
             x = x.reshape(in_shape)
         x_glu, x_linear = x.chunk(2, dim=-1)
-        x_glu = x_glu.clamp(min=None, max=limit)
-        x_linear = x_linear.clamp(min=-limit, max=limit)
+        x_glu = torch.where(x_glu > limit, limit, x_glu)
+        x_linear = torch.where(x_linear < -limit, -limit, x_linear)
+        x_linear = torch.where(x_linear > limit, limit, x_linear)
         out_glu = x_glu * torch.sigmoid(alpha * x_glu)
         y_ref = out_glu * (x_linear + glu_linear_offset)
         y_ref.backward(dy_ref)
@@ -2907,6 +3000,54 @@ class TestBasicOps:
         assert_close_grads(x_test, x_ref, **tols)
         assert_close_grads(scales_test, scales_ref, **tols)
 
+    @pytest.mark.parametrize("dtype", _dtypes)
+    @pytest.mark.parametrize("glu_interleave_size", (None, 32))
+    def test_scaled_situglu(
+        self,
+        *,
+        dtype: torch.dtype,
+        glu_interleave_size: Optional[int],
+        device: torch.device = "cuda",
+    ) -> None:
+        """SiTU-GLU with a differentiable row-wise post-scale."""
+        in_shape = (17, 192)
+        out_shape = (17, 96)
+        x_ref, x_test = make_reference_and_test_tensors(
+            in_shape,
+            test_dtype=dtype,
+            test_device=device,
+        )
+        scales_ref, scales_test = make_reference_and_test_tensors(
+            in_shape[:-1],
+            test_dtype=dtype,
+            test_device=device,
+        )
+        dy_ref, dy_test = make_reference_and_test_tensors(
+            out_shape,
+            test_dtype=dtype,
+            test_device=device,
+            requires_grad=False,
+        )
+
+        x = x_ref
+        if glu_interleave_size is not None:
+            x = x.reshape(-1, 3, 2, glu_interleave_size).transpose(1, 2).reshape(in_shape)
+        gate, up = x.chunk(2, dim=-1)
+        activation = (
+            4.0 * torch.tanh(gate / 4.0) * torch.sigmoid(gate) * 25.0 * torch.tanh(up / 25.0)
+        )
+        y_ref = scales_ref.unsqueeze(-1) * activation
+        y_ref.backward(dy_ref)
+
+        op = te_ops.ScaledSiTUGLU(glu_interleave_size=glu_interleave_size)
+        y_test = op(x_test, scales_test)
+        y_test.backward(dy_test)
+
+        tols = dtype_tols(dtype)
+        assert_close(y_test, y_ref, **tols)
+        assert_close_grads(x_test, x_ref, **tols)
+        assert_close_grads(scales_test, scales_ref, **tols)
+
     @pytest.mark.parametrize("in_shape", ((71, 192), (5, 7, 128)))
     @pytest.mark.parametrize("input_requires_grad", (False, True))
     @pytest.mark.parametrize("scales_requires_grad", (False, True))
@@ -2960,6 +3101,101 @@ class TestBasicOps:
         assert_close_grads(x_test, x_ref, **tols)
         assert_close_grads(scales_test, scales_ref, **tols)
 
+    @pytest.mark.parametrize("in_shape", ((71, 192), (5, 7, 128)))
+    @pytest.mark.parametrize("input_requires_grad", (False, True))
+    @pytest.mark.parametrize("scales_requires_grad", (False, True))
+    @pytest.mark.parametrize("tanh_clamp_scale", (0.5, 2.0))
+    def test_scaled_tanh_srelu(
+        self,
+        *,
+        in_shape: Iterable[int],
+        dtype: torch.dtype = torch.float32,
+        device: torch.device = "cuda",
+        input_requires_grad: bool,
+        scales_requires_grad: bool,
+        tanh_clamp_scale: float,
+    ) -> None:
+        """Tanh soft-clamped SReLU with post-scale.
+
+        Covers the unfused path specifically: the fused grouped-MLP op goes straight
+        to the cuDNN srelu_tanh epilogue and never runs this code. Small clamp scales
+        are used so tanh genuinely saturates -- with a large scale the result is
+        numerically indistinguishable from plain ScaledSReLU.
+        """
+
+        # Random data
+        x_ref, x_test = make_reference_and_test_tensors(
+            in_shape,
+            test_dtype=dtype,
+            test_device=device,
+            requires_grad=input_requires_grad,
+        )
+        scales_ref, scales_test = make_reference_and_test_tensors(
+            in_shape[:-1],
+            test_dtype=dtype,
+            test_device=device,
+            requires_grad=scales_requires_grad,
+        )
+        dy_ref, dy_test = make_reference_and_test_tensors(
+            in_shape,
+            test_dtype=dtype,
+            test_device=device,
+            requires_grad=False,
+        )
+
+        # Plain PyTorch implementation. Autograd supplies the reference gradients, so
+        # the op's hand-written backward is checked against a derivative it played no
+        # part in computing.
+        y = (
+            tanh_clamp_scale * torch.tanh(torch.nn.functional.relu(x_ref) / tanh_clamp_scale)
+        ).square()
+        y_ref = scales_ref.unsqueeze(-1) * y
+        if input_requires_grad or scales_requires_grad:
+            y_ref.backward(dy_ref)
+
+        # Implementation with fusible operation
+        op = te_ops.ScaledTanhSReLU(tanh_clamp_scale=tanh_clamp_scale)
+        y_test = op(x_test, scales_test)
+        if input_requires_grad or scales_requires_grad:
+            y_test.backward(dy_test)
+
+        # Check results
+        tols = dtype_tols(dtype)
+        y_test = y_test.to(dtype=torch.float64, device="cpu")
+        assert_close(y_test, y_ref, **tols)
+        if input_requires_grad:
+            assert_close_grads(x_test, x_ref, **tols)
+        if scales_requires_grad:
+            assert_close_grads(scales_test, scales_ref, **tols)
+
+    def test_scaled_tanh_srelu_saturates(self) -> None:
+        """Large inputs pin the output at tanh_clamp_scale**2, unlike plain SReLU."""
+        s = 2.0
+        x = torch.full((4, 8), 1.0e3, device="cuda", dtype=torch.float32)
+        scales = torch.ones((4,), device="cuda", dtype=torch.float32)
+
+        y = te_ops.ScaledTanhSReLU(tanh_clamp_scale=s)(x, scales)
+        torch.testing.assert_close(y, torch.full_like(y, s * s))
+
+        # Plain SReLU on the same input is ~250000x larger, so this cannot pass by
+        # accident if the clamp were silently dropped.
+        y_unclamped = te_ops.ScaledSReLU()(x, scales)
+        assert y_unclamped.min().item() > 1.0e5
+
+    @pytest.mark.parametrize("tanh_clamp_scale", (0.0, -1.0, float("inf"), float("nan")))
+    def test_scaled_tanh_srelu_rejects_bad_clamp_scale(self, tanh_clamp_scale) -> None:
+        """The clamp scale must be finite and positive."""
+        with pytest.raises(ValueError, match="tanh_clamp_scale"):
+            te_ops.ScaledTanhSReLU(tanh_clamp_scale=tanh_clamp_scale)
+
+    def test_scaled_tanh_srelu_activation_recompute_in_mlp_config(self) -> None:
+        """Tanh SReLU exposes the same activation recompute knob as ScaledSReLU."""
+        op = te_ops.ScaledTanhSReLU(tanh_clamp_scale=2.0)
+        assert op.activation_recompute_in_mlp is False
+        assert te_ops.ScaledTanhSReLU(
+            tanh_clamp_scale=2.0, activation_recompute_in_mlp=True
+        ).activation_recompute_in_mlp
+
     def test_interleaved_scaled_swiglu(self):
         """SwiGLU with post-scale and block interleaved input format"""
         self.test_scaled_swiglu(
@@ -2971,12 +3207,22 @@ class TestBasicOps:
 
     @pytest.mark.parametrize(
         "op_cls",
-        (te_ops.ScaledSwiGLU, te_ops.ScaledSReLU, te_ops.ScaledClampedQGeGLU),
+        (
+            te_ops.ScaledSwiGLU,
+            te_ops.ScaledSiTUGLU,
+            te_ops.ScaledClampedQGeGLU,
+        ),
     )
-    def test_scaled_activation_recompute_in_mlp_config(self, op_cls) -> None:
-        """Scaled activations expose a per-op recompute knob."""
+    def test_scaled_glu_rejects_activation_recompute_in_mlp(self, op_cls) -> None:
+        """Scaled GLUs reject unsupported activation recomputation."""
         assert op_cls().activation_recompute_in_mlp is False
-        assert op_cls(activation_recompute_in_mlp=True).activation_recompute_in_mlp is True
+        with pytest.raises(ValueError, match="does not support activation recomputation"):
+            op_cls(activation_recompute_in_mlp=True)
+
+    def test_scaled_srelu_activation_recompute_in_mlp_config(self) -> None:
+        """Scaled SReLU exposes its supported activation recompute knob."""
+        assert te_ops.ScaledSReLU().activation_recompute_in_mlp is False
+        assert te_ops.ScaledSReLU(activation_recompute_in_mlp=True).activation_recompute_in_mlp
 
     @pytest.mark.parametrize("in_shape", ((71, 192), (5, 7, 128)))
     @pytest.mark.parametrize("input_requires_grad", (False, True))
@@ -3033,8 +3279,9 @@ class TestBasicOps:
             x = x.transpose(1, 2)
             x = x.reshape(in_shape)
         x_glu, x_linear = x.chunk(2, dim=-1)
-        x_glu = x_glu.clamp(min=None, max=limit)
-        x_linear = x_linear.clamp(min=-limit, max=limit)
+        x_glu = torch.where(x_glu > limit, limit, x_glu)
+        x_linear = torch.where(x_linear < -limit, -limit, x_linear)
+        x_linear = torch.where(x_linear > limit, limit, x_linear)
         out_glu = x_glu * torch.sigmoid(alpha * x_glu)
         y = out_glu * (x_linear + glu_linear_offset)
         y_ref = scales_ref.unsqueeze(-1) * y

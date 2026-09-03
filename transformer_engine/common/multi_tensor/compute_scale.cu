@@ -14,7 +14,7 @@
 #include <sstream>
 
 #include "../recipe/recipe_common.cuh"
-#include "../util/ptx.cuh"
+#include "../util/ptx_arch_spec.cuh"
 #include "../utils.cuh"
 #include "multi_tensor_apply.cuh"
 
