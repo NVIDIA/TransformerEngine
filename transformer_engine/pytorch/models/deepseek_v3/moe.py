@@ -11,7 +11,15 @@ import torch
 
 import transformer_engine.pytorch.ops as te_ops
 from transformer_engine.pytorch.router import fused_topk_with_score_function
-from transformer_engine.pytorch.permutation import moe_permute_with_probs, moe_unpermute
+from transformer_engine.pytorch.permutation import (
+    moe_permute_and_pad_with_probs,
+    moe_permute_with_probs,
+    moe_unpermute,
+)
+from transformer_engine.pytorch.quantization import (
+    FP8GlobalStateManager,
+    get_align_size_for_quantization,
+)
 
 __all__ = ["DeepSeekV3MoE"]
 
@@ -189,14 +197,24 @@ class DeepSeekV3MoE(torch.nn.Module):
         tokens_per_expert = routing_map.sum(dim=0)
         self._last_tokens_per_expert = tokens_per_expert.detach()
 
-        num_out = tokens.shape[0] * self.topk
-        permuted, permuted_probs, row_id_map = moe_permute_with_probs(
-            tokens, probs, routing_map, num_out_tokens=num_out
-        )
+        # Quantized grouped GEMMs need every expert's row count aligned.
+        align = 1
+        if FP8GlobalStateManager.is_fp8_enabled():
+            align = get_align_size_for_quantization(FP8GlobalStateManager.get_fp8_recipe())
+        if align > 1:
+            permuted, permuted_probs, row_id_map, pad_offsets, tokens_per_expert = (
+                moe_permute_and_pad_with_probs(tokens, probs, routing_map, tokens_per_expert, align)
+            )
+        else:
+            permuted, permuted_probs, row_id_map = moe_permute_with_probs(
+                tokens, probs, routing_map, num_out_tokens=tokens.shape[0] * self.topk
+            )
+            pad_offsets = None
 
         # The fused grouped MLP requires the total row count to be a multiple
         # of 128; rows beyond sum(tokens_per_expert) fall outside every group.
-        pad = (-num_out) % 128
+        num_rows = permuted.shape[0]
+        pad = (-num_rows) % 128
         if pad:
             permuted = torch.nn.functional.pad(permuted, (0, 0, 0, pad))
             permuted_probs = torch.nn.functional.pad(permuted_probs, (0, pad))
@@ -204,7 +222,9 @@ class DeepSeekV3MoE(torch.nn.Module):
         out = self.experts(
             permuted, tokens_per_expert, permuted_probs.to(tokens.dtype), tokens_per_expert
         )
-        return moe_unpermute(out[:num_out], row_id_map, restore_shape=tokens.shape)
+        return moe_unpermute(
+            out[:num_rows], row_id_map, restore_shape=tokens.shape, pad_offsets=pad_offsets
+        )
 
     def _forward_ep(self, tokens: torch.Tensor) -> torch.Tensor:
         from transformer_engine.pytorch.ep import ep_dispatch, ep_combine
