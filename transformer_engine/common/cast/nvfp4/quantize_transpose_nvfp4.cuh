@@ -247,6 +247,25 @@ constexpr int FA_PREFETCH_STAGES = 1;
 constexpr int FA_BUFFS_NUM = FA_PREFETCH_STAGES + 1;
 constexpr int FA_BUFF_IN_SIZE = FA_TILE_DIM_Y * FA_TILE_DIM_X;
 
+static __global__ void fused_amax_zero_kernel(float *row_amax, const int rows, float *col_amax,
+                                              const int cols, const float *noop) {
+  if (noop != nullptr && noop[0] == 1.0f) {
+    return;
+  }
+  const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  const int stride = gridDim.x * blockDim.x;
+  if (row_amax != nullptr) {
+    for (int i = idx; i < rows; i += stride) {
+      row_amax[i] = 0.0f;
+    }
+  }
+  if (col_amax != nullptr) {
+    for (int i = idx; i < cols; i += stride) {
+      col_amax[i] = 0.0f;
+    }
+  }
+}
+
 template <bool DO_ROW, bool DO_COL>
 __global__ void __launch_bounds__(FA_THREADS_NUM)
     compute_fused_amax_kernel(const __grid_constant__ CUtensorMap tensor_map_input,
@@ -433,12 +452,23 @@ inline void compute_fused_amax(const Tensor &input, const Tensor *noop, Tensor *
   if (do_row) {
     NVTE_CHECK(output->amax.numel() == rows, "Fused rowwise amax must have ", rows,
                " entries, got ", output->amax.shape, ".");
-    NVTE_CHECK_CUDA(cudaMemsetAsync(row_amax_ptr, 0, rows * sizeof(float), stream));
   }
   if (do_col) {
     NVTE_CHECK(output->columnwise_amax.numel() == cols, "Fused columnwise amax must have ", cols,
                " entries, got ", output->columnwise_amax.shape, ".");
-    NVTE_CHECK_CUDA(cudaMemsetAsync(col_amax_ptr, 0, cols * sizeof(float), stream));
+  }
+
+  const float *noop_ptr = (noop != nullptr && noop->data.dptr != nullptr)
+                              ? reinterpret_cast<const float *>(noop->data.dptr)
+                              : nullptr;
+
+  {
+    const size_t zero_extent = rows > cols ? rows : cols;
+    const dim3 zero_grid(static_cast<unsigned>(DIVUP(zero_extent, static_cast<size_t>(256))), 1, 1);
+    fused_amax_zero_kernel<<<zero_grid, 256, 0, stream>>>(
+        do_row ? row_amax_ptr : nullptr, static_cast<int>(rows), do_col ? col_amax_ptr : nullptr,
+        static_cast<int>(cols), noop_ptr);
+    NVTE_CHECK_CUDA(cudaGetLastError());
   }
 
   checkCuDriverContext(stream);
@@ -455,10 +485,6 @@ inline void compute_fused_amax(const Tensor &input, const Tensor *noop, Tensor *
   const dim3 grid(static_cast<unsigned>(cols / FA_CHUNK_DIM_X),
                   static_cast<unsigned>(rows / FA_CHUNK_DIM_Y), 1);
   const dim3 block(FA_THREADS_NUM, 1, 1);
-
-  const float *noop_ptr = (noop != nullptr && noop->data.dptr != nullptr)
-                              ? reinterpret_cast<const float *>(noop->data.dptr)
-                              : nullptr;
 
   TRANSFORMER_ENGINE_SWITCH_CONDITION(
       do_row, DO_ROW, TRANSFORMER_ENGINE_SWITCH_CONDITION(do_col, DO_COL, {
