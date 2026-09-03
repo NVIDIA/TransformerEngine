@@ -612,11 +612,6 @@ class FusedAttnRunner:
                 pytest.skip(
                     "B1SS, BHSS and 11SS bias shapes are only supported for non-padding mask"
                 )
-            elif self.backend != NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen:
-                pytest.skip(
-                    "B1SS, BHSS and 11SS bias shapes are only supported for "
-                    "the F16_arbitrary_seqlen backend."
-                )
 
     def _setup_inputs(self):
         self._check_configs()
@@ -1417,6 +1412,40 @@ class TestFusedAttnMaxLogit:
             seq_desc_format=SeqDescFormat.Seqlens,
         )
         runner.test_backward(return_max_logit=True)
+
+
+def test_post_scale_non_1hss_bias_shapes_do_not_hit_unreachable_backend_skip():
+    """
+    Regression test for the removed unreachable backend check.
+
+    A config that reaches `_check_configs` with a non-1HSS post-scale bias
+    shape must already have selected the F16_arbitrary_seqlen backend (the
+    guard above skips everything else). The removed `elif` arm could
+    therefore never fire. The fix removed that dead branch; this test locks
+    the remaining behavior: the F16 backend selection is unchanged and the
+    padding-mask restriction is preserved.
+    """
+    runner = FusedAttnRunner(
+        batch_size=2,
+        max_seqlen_q=2048,
+        max_seqlen_kv=2048,
+        num_heads_q=12,
+        num_heads_kv=12,
+        head_dim_qk=64,
+        head_dim_v=64,
+        attn_bias_type=AttnBiasType.POST_SCALE_BIAS,
+        attn_mask_type=AttnMaskType.NO_MASK,
+        softmax_type=AttnSoftmaxType.VANILLA_SOFTMAX,
+        dropout_prob=0.0,
+        dtype=jnp.bfloat16,
+        is_training=True,
+        qkv_layout=QKVLayout.BSHD_BSHD_BSHD,
+        bias_shape=BiasShape._B1SS,
+        window_size=None,
+        seq_desc_format=SeqDescFormat.Mask,
+    )
+    runner._check_configs()
+    assert runner.backend == NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen
 
 
 def _get_swa_window_size_for_test(s_kv: int, attn_mask_type: AttnMaskType) -> Tuple[int, int]:
