@@ -283,3 +283,73 @@ def test_multi_device_gather_reduce_matches_local(monkeypatch):
         assert dev == torch.device("cuda:0")  # first-registered module's device
         assert dtype == torch.float32
         assert numel == (fwd_numel if i % 2 == 0 else bwd_numel)
+
+
+def test_multi_device_collective_preserves_registration_order(monkeypatch):
+    """The distributed staging buffer must preserve logical registration order."""
+    fake_dist = {"on": True}
+    calls = []
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: fake_dist["on"])
+    monkeypatch.setattr(torch.distributed, "get_world_size", lambda *a, **k: 2)
+
+    original_update = FP8GlobalStateManager.reduce_and_update_fp8_tensors
+
+    def set_sentinels(cls, forward=True):
+        prefix = "forward_" if forward else "backward_"
+        qstate = FP8GlobalStateManager.quantization_state
+        for key, entries in qstate.global_amax_buffer.items():
+            if key.startswith(prefix):
+                for index, entry in enumerate(entries):
+                    entry.fill_(1000 + index)
+        original_update(forward=forward)
+
+    monkeypatch.setattr(
+        FP8GlobalStateManager,
+        "reduce_and_update_fp8_tensors",
+        classmethod(set_sentinels),
+    )
+
+    def fake_reduce(tensor, group):
+        prefix = "forward_" if not calls else "backward_"
+        qstate = FP8GlobalStateManager.quantization_state
+        matching_keys = [
+            key
+            for key, entries in qstate.global_amax_buffer.items()
+            if key.startswith(prefix) and sum(entry.numel() for entry in entries) == tensor.numel()
+        ]
+        assert len(matching_keys) == 1
+        entries = qstate.global_amax_buffer[matching_keys[0]]
+        expected_rank0 = torch.cat(
+            [
+                torch.full(
+                    (entry.numel(),),
+                    1000 + index,
+                    dtype=tensor.dtype,
+                    device=tensor.device,
+                )
+                for index, entry in enumerate(entries)
+            ]
+        )
+        torch.testing.assert_close(tensor, expected_rank0, rtol=0, atol=0)
+
+        # Simulate a second rank with a different value at every logical slot,
+        # then apply the MAX operation that NCCL would perform.
+        slot = torch.arange(tensor.numel(), device=tensor.device)
+        delta = torch.where(slot % 3 == 0, 1, torch.where(slot % 3 == 1, -1, 5))
+        expected_rank1 = expected_rank0 + delta.to(dtype=tensor.dtype)
+        tensor.copy_(torch.maximum(expected_rank0, expected_rank1))
+        calls.append((tensor.device, tensor.numel(), tensor.dtype))
+
+    monkeypatch.setattr(
+        FP8GlobalStateManager,
+        "reduce_tensor_across_group_op_max",
+        staticmethod(fake_reduce),
+    )
+
+    _run_three_module_chain(iters=1)
+
+    assert len(calls) == 2
+    assert calls[0][0] == calls[1][0] == torch.device("cuda:0")
+    assert calls[0][1] == 9  # 3 modules x 3 forward FP8 tensors
+    assert calls[1][1] == 6  # 3 modules x 2 backward FP8 tensors
+    assert calls[0][2] == calls[1][2] == torch.float32
