@@ -11,7 +11,7 @@ import torch
 import torch.distributed as dist
 
 from transformer_engine.pytorch.ep import ep_bootstrap, ep_finalize, release_symm_mem_pool
-from transformer_engine.pytorch.models import DeepSeekV3Layer, DeepSeekV3MoE
+from transformer_engine.pytorch.models import DeepSeekV3Layer
 
 HIDDEN = 256
 MOE_FFN = 128
@@ -65,64 +65,72 @@ class TestDeepSeekEP(unittest.TestCase):
             recv_capacity_per_rank=_recv_capacity(cls.ep_size),
         )
 
-    def _make_moe(self, ep: bool, shared: bool = True) -> DeepSeekV3MoE:
-        return DeepSeekV3MoE(
+    def _make_layer(self, ep: bool) -> DeepSeekV3Layer:
+        return DeepSeekV3Layer(
             HIDDEN,
-            moe_ffn_hidden_size=MOE_FFN,
+            HEADS,
             num_experts=self.num_experts,
+            moe_ffn_hidden_size=MOE_FFN,
             topk=TOP_K,
-            shared_expert_ffn_hidden_size=SHARED_FFN if shared else None,
+            shared_expert_ffn_hidden_size=SHARED_FFN,
             params_dtype=DTYPE,
             ep_group=self.ep_group if ep else None,
             ep_max_tokens_per_rank=TOKENS_PER_RANK if ep else None,
             ep_recv_capacity_per_rank=_recv_capacity(self.ep_size) if ep else None,
+            **MLA_KWARGS,
         )
 
-    def _copy_local_expert_weights(self, ep_moe: DeepSeekV3MoE, ref: DeepSeekV3MoE) -> None:
+    def _copy_weights(self, ep_layer: DeepSeekV3Layer, ref: DeepSeekV3Layer) -> None:
+        ref_params = dict(ref.named_parameters())
+        ref_bufs = dict(ref.named_buffers())
         with torch.no_grad():
-            ep_moe.gate.weight.copy_(ref.gate.weight)
-            if ref.shared_expert is not None:
-                for dst, src in zip(
-                    ep_moe.shared_expert.parameters(), ref.shared_expert.parameters()
-                ):
-                    dst.copy_(src)
-            ep_fc1, _, ep_fc2 = ep_moe.experts
-            ref_fc1, _, ref_fc2 = ref.experts
+            for name, p in ep_layer.named_parameters():
+                if not name.startswith("mlp.experts."):
+                    p.copy_(ref_params[name])
+            for name, b in ep_layer.named_buffers():
+                if name in ref_bufs and b.shape == ref_bufs[name].shape:
+                    b.copy_(ref_bufs[name])
+            ep_fc1, _, ep_fc2 = ep_layer.mlp.experts
+            ref_fc1, _, ref_fc2 = ref.mlp.experts
             for local_e in range(NUM_LOCAL_EXPERTS):
                 global_e = self.rank * NUM_LOCAL_EXPERTS + local_e
                 getattr(ep_fc1, f"weight{local_e}").copy_(getattr(ref_fc1, f"weight{global_e}"))
                 getattr(ep_fc2, f"weight{local_e}").copy_(getattr(ref_fc2, f"weight{global_e}"))
 
-    def test_moe_ep_matches_local(self):
-        """EP MoE must match the single-GPU (all-experts-local) path numerically."""
+    def test_layer_ep_matches_local(self):
+        """Full DeepSeekV3Layer with EP must match the all-experts-local layer numerically."""
         torch.manual_seed(0)
-        ref = self._make_moe(ep=False)
+        ref = self._make_layer(ep=False)
         _broadcast_params(ref)
-        ep_moe = self._make_moe(ep=True)
-        self._copy_local_expert_weights(ep_moe, ref)
+        ep_layer = self._make_layer(ep=True)
+        self._copy_weights(ep_layer, ref)
 
         torch.manual_seed(1234 + self.rank)
-        x = torch.randn(TOKENS_PER_RANK, HIDDEN, dtype=DTYPE, device="cuda")
+        x = torch.randn(TOKENS_PER_RANK // 2, 2, HIDDEN, dtype=DTYPE, device="cuda")
         x_ep = x.clone().requires_grad_(True)
         x_ref = x.clone().requires_grad_(True)
 
-        out_ep = ep_moe(x_ep)
+        out_ep = ep_layer(x_ep)
         out_ref = ref(x_ref)
+        self.assertEqual(out_ep.shape, x.shape)
         torch.testing.assert_close(out_ep, out_ref, rtol=0.05, atol=0.05)
 
         grad_out = torch.randn_like(out_ep)
         out_ep.backward(grad_out)
         out_ref.backward(grad_out)
         torch.testing.assert_close(x_ep.grad, x_ref.grad, rtol=0.05, atol=0.05)
-        torch.testing.assert_close(
-            ep_moe.gate.weight.grad, ref.gate.weight.grad, rtol=0.1, atol=0.1
-        )
+
+        ref_params = dict(ref.named_parameters())
+        for name, p in ep_layer.named_parameters():
+            if name.startswith("mlp.experts.") or p.grad is None:
+                continue
+            torch.testing.assert_close(p.grad, ref_params[name].grad, rtol=0.1, atol=0.1, msg=name)
 
         # A local expert's wgrad on its owner rank equals the sum of the
         # reference wgrads over all ranks. all_reduce is collective, so every
         # rank must reduce every expert's grad (in the same order).
-        ep_fc1, _, ep_fc2 = ep_moe.experts
-        ref_fc1, _, ref_fc2 = ref.experts
+        ep_fc1, _, ep_fc2 = ep_layer.mlp.experts
+        ref_fc1, _, ref_fc2 = ref.mlp.experts
         for ep_fc, ref_fc in ((ep_fc1, ref_fc1), (ep_fc2, ref_fc2)):
             ref_grads = [
                 getattr(ref_fc, f"weight{e}").grad.float().clone() for e in range(self.num_experts)
@@ -134,37 +142,12 @@ class TestDeepSeekEP(unittest.TestCase):
                 ep_grad = getattr(ep_fc, f"weight{local_e}").grad.float()
                 torch.testing.assert_close(ep_grad, ref_grads[global_e], rtol=0.1, atol=0.1)
 
-        counts = ep_moe._last_tokens_per_expert.clone()
+        counts = ep_layer.mlp._last_tokens_per_expert.clone()
         dist.all_reduce(counts)
         self.assertEqual(counts.sum().item(), self.ep_size * TOKENS_PER_RANK * TOP_K)
 
-    def test_layer_ep_forward_backward(self):
-        """Full DeepSeekV3Layer smoke test with an EP MoE block."""
-        torch.manual_seed(10 + self.rank)
-        layer = DeepSeekV3Layer(
-            HIDDEN,
-            HEADS,
-            num_experts=self.num_experts,
-            moe_ffn_hidden_size=MOE_FFN,
-            topk=TOP_K,
-            shared_expert_ffn_hidden_size=SHARED_FFN,
-            params_dtype=DTYPE,
-            ep_group=self.ep_group,
-            ep_max_tokens_per_rank=TOKENS_PER_RANK,
-            ep_recv_capacity_per_rank=_recv_capacity(self.ep_size),
-            **MLA_KWARGS,
-        )
-        x = torch.randn(
-            TOKENS_PER_RANK // 2, 2, HIDDEN, dtype=DTYPE, device="cuda", requires_grad=True
-        )
-        out = layer(x)
-        self.assertEqual(out.shape, x.shape)
-        out.sum().backward()
-        self.assertIsNotNone(x.grad)
-        self.assertTrue(torch.isfinite(x.grad).all())
-
-        layer.mlp.update_expert_bias()
-        self.assertTrue(torch.isfinite(layer.mlp.expert_bias).all())
+        ep_layer.mlp.update_expert_bias()
+        self.assertTrue(torch.isfinite(ep_layer.mlp.expert_bias).all())
 
 
 def _init_distributed():
