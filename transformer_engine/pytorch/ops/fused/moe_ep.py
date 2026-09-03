@@ -228,6 +228,7 @@ def finalize_moe_ep_resources() -> None:
     # CUDA graph callables form reference cycles. Collect unreachable graph
     # executables before tearing down communication resources they captured.
     import gc
+
     gc.collect()
     _MOE_EP_RESOURCE_MANAGER.cleanup()
 
@@ -513,6 +514,7 @@ class FusedMoeEp(FusedOperation):
     ) -> None:
         super().__init__([dispatch, fc1, activation, fc2, combine])
         from cudnn.moe_ep import BlockScaledTensor
+
         self._block_scaled_cls = BlockScaledTensor
         self._resource = None
 
