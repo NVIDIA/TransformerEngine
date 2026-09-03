@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -22,6 +23,7 @@
 #include "common/util/cuda_runtime.h"
 #include "common/util/system.h"
 #include "pybind.h"
+#include "transformer_engine/activation.h"
 #include "transformer_engine/multi_tensor.h"
 #include "transformer_engine/recipe.h"
 #include "transformer_engine/transformer_engine.h"
@@ -424,6 +426,136 @@ py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const 
   }
 
   return py::reinterpret_borrow<py::object>(grouped_output_py);
+}
+
+namespace {
+
+// Absent means plain scaled SwiGLU.
+struct ClampedSwigluArgs {
+  float limit;
+  float alpha;
+  float glu_linear_offset;
+};
+
+// Shared body of group_scaled_swiglu and group_scaled_clamped_swiglu, which differ only
+// in the nvte entry point they call at the end.
+py::object group_scaled_swiglu_impl(const char *api_name, const at::Tensor &input_2h,
+                                    const at::Tensor &prob, py::handle quantizer,
+                                    const size_t num_tensors, std::optional<at::Tensor> first_dims,
+                                    std::optional<at::Tensor> last_dims,
+                                    std::optional<at::Tensor> tensor_offsets,
+                                    std::optional<ClampedSwigluArgs> clamp) {
+  using namespace transformer_engine::pytorch::detail;
+  init_extension();
+
+  // Grouped scaled SwiGLU recompute of the MoE FC2 input:
+  //   input_2h : [N, 2H] ([act|gate]) in model dtype (bf16).
+  //   prob     : [N] per-token weights, model dtype (matches TE fc1_prob_tensor).
+  //   output   : columnwise MXFP8 of (silu(act) * gate) * prob, logical [N, H].
+  NVTE_CHECK(input_2h.dim() == 2, "group_scaled_swiglu input must be 2D [N, 2H].");
+  const auto N = static_cast<size_t>(input_2h.size(0));
+  const auto two_h = static_cast<size_t>(input_2h.size(1));
+  NVTE_CHECK(two_h % 2 == 0, "group_scaled_swiglu input last dim must be even (=2H).");
+  const size_t H = two_h / 2;
+
+  NVTE_CHECK(IsMXFP8Quantizers(quantizer.ptr()),
+             "group_scaled_swiglu only supports MXFP8 quantizers.");
+  NVTE_CHECK(input_2h.is_cuda(), "group_scaled_swiglu input must be a CUDA tensor.");
+  // Both operands are handed to the kernel as raw pointers over a densely packed
+  // range, so a strided view would be read as if it were contiguous.
+  NVTE_CHECK(input_2h.is_contiguous(), "group_scaled_swiglu input must be contiguous.");
+  NVTE_CHECK(prob.is_contiguous(), "group_scaled_swiglu prob must be contiguous.");
+  NVTE_CHECK(prob.device() == input_2h.device(),
+             "group_scaled_swiglu prob must be on the same device as the input.");
+  NVTE_CHECK(prob.dim() == 1 && prob.numel() == static_cast<int64_t>(N),
+             "group_scaled_swiglu prob must be a 1D tensor with exactly N elements.");
+  NVTE_CHECK(prob.scalar_type() == input_2h.scalar_type(),
+             "group_scaled_swiglu prob must have the same dtype as the input (model dtype).");
+
+  if (clamp.has_value()) {
+    // A negative limit collapses the gate clamp min(max(-limit, g), limit) to the limit
+    // itself, turning every gate element into a constant with nothing downstream raising.
+    NVTE_CHECK(clamp->limit > 0.0f, api_name, " limit must be positive, got ", clamp->limit, ".");
+    NVTE_CHECK(std::isfinite(clamp->limit) && std::isfinite(clamp->alpha) &&
+                   std::isfinite(clamp->glu_linear_offset),
+               api_name, " limit, alpha and glu_linear_offset must all be finite.");
+  }
+
+  // The grouped metadata is turned into offsets by a kernel on the guarded device below,
+  // and the fused kernel then indexes the input with those offsets.
+  auto check_metadata_device = [&input_2h](const std::optional<at::Tensor> &metadata,
+                                           const char *name) {
+    if (metadata.has_value()) {
+      NVTE_CHECK(metadata->device() == input_2h.device(), "group_scaled_swiglu ", name,
+                 " must be on the same device as the input.");
+    }
+  };
+  check_metadata_device(first_dims, "first_dims");
+  check_metadata_device(last_dims, "last_dims");
+  check_metadata_device(tensor_offsets, "tensor_offsets");
+
+  // Allocate the output and launch on the operands' device rather than on whatever
+  // torch.cuda.set_device last selected.
+  at::cuda::CUDAGuard device_guard(input_2h.device());
+
+  const bool empty_input_buffer = (N == 0 || H == 0);
+
+  auto quantizer_cpp = convert_quantizer(quantizer);
+
+  // Input GroupedTensor: [N, 2H].
+  std::vector<size_t> in_logical_shape = {N, two_h};
+  auto grouped_input_tensor = GroupedTensorWrapper(num_tensors, in_logical_shape);
+  grouped_input_tensor.set_rowwise_data(input_2h.data_ptr(),
+                                        GetTransformerEngineDType(input_2h.scalar_type()),
+                                        std::vector<size_t>{static_cast<size_t>(input_2h.numel())});
+
+  // Output GroupedTensor: [N, H] (columnwise MXFP8). Driving logical_last_dim = H
+  // makes the allocated data/scales and the tensor_offsets H-based.
+  std::vector<size_t> out_logical_shape = {N, H};
+  auto [grouped_output_tensor_cpp, grouped_output_py] = quantizer_cpp->create_grouped_tensor(
+      num_tensors, out_logical_shape, GetTransformerEngineDType(input_2h.scalar_type()),
+      py::reinterpret_borrow<py::object>(quantizer), first_dims, last_dims, tensor_offsets, N, H);
+
+  if (empty_input_buffer) {
+    return py::reinterpret_borrow<py::object>(grouped_output_py);
+  }
+
+  auto prob_te = makeTransformerEngineTensor(prob);
+
+  NVTE_SCOPED_GIL_RELEASE({
+    if (clamp.has_value()) {
+      nvte_group_scaled_clamped_swiglu(grouped_input_tensor.data(), prob_te.data(),
+                                       grouped_output_tensor_cpp.data(), clamp->limit, clamp->alpha,
+                                       clamp->glu_linear_offset, at::cuda::getCurrentCUDAStream());
+    } else {
+      nvte_group_scaled_swiglu(grouped_input_tensor.data(), prob_te.data(),
+                               grouped_output_tensor_cpp.data(), at::cuda::getCurrentCUDAStream());
+    }
+  });
+
+  return py::reinterpret_borrow<py::object>(grouped_output_py);
+}
+
+}  // namespace
+
+py::object group_scaled_swiglu(const at::Tensor &input_2h, const at::Tensor &prob,
+                               py::handle quantizer, const size_t num_tensors,
+                               std::optional<at::Tensor> first_dims,
+                               std::optional<at::Tensor> last_dims,
+                               std::optional<at::Tensor> tensor_offsets) {
+  return group_scaled_swiglu_impl("group_scaled_swiglu", input_2h, prob, quantizer, num_tensors,
+                                  first_dims, last_dims, tensor_offsets, std::nullopt);
+}
+
+py::object group_scaled_clamped_swiglu(const at::Tensor &input_2h, const at::Tensor &prob,
+                                       py::handle quantizer, const size_t num_tensors, float limit,
+                                       float alpha, float glu_linear_offset,
+                                       std::optional<at::Tensor> first_dims,
+                                       std::optional<at::Tensor> last_dims,
+                                       std::optional<at::Tensor> tensor_offsets) {
+  return group_scaled_swiglu_impl("group_scaled_clamped_swiglu", input_2h, prob, quantizer,
+                                  num_tensors, first_dims, last_dims, tensor_offsets,
+                                  ClampedSwigluArgs{limit, alpha, glu_linear_offset});
 }
 
 py::object nvfp4_group_quantize_with_amax(const at::Tensor &tensor, py::handle quantizer,
