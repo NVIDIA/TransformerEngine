@@ -883,17 +883,18 @@ at::Tensor thd_read_second_half_lse(const at::Tensor &lse, const at::Tensor &cu_
  * Support THD format for Context Parallel: Out correction in forward
  **************************************************************************************************/
 
-void thd_out_correction(at::Tensor out, const at::Tensor &out_per_step, const at::Tensor &lse,
-                        const at::Tensor &lse_per_step, const at::Tensor &cu_seqlens,
-                        bool only_second_half, bool lse_packed) {
+void thd_out_correction(at::Tensor out, const at::Tensor &out_per_step, const at::Tensor &old_lse,
+                        const at::Tensor &lse, const at::Tensor &lse_per_step,
+                        const at::Tensor &cu_seqlens, bool only_second_half, bool lse_packed) {
   auto te_out = makeTransformerEngineTensor(out);
   auto te_out_per_step = makeTransformerEngineTensor(out_per_step);
+  auto te_old_lse = makeTransformerEngineTensor(old_lse);
   auto te_lse = makeTransformerEngineTensor(lse);
   auto te_lse_per_step = makeTransformerEngineTensor(lse_per_step);
   auto te_cu_seqlens = makeTransformerEngineTensor(cu_seqlens);
-  nvte_cp_thd_out_correction(te_out.data(), te_out_per_step.data(), te_lse.data(),
-                             te_lse_per_step.data(), te_cu_seqlens.data(), only_second_half,
-                             lse_packed, at::cuda::getCurrentCUDAStream());
+  nvte_cp_thd_out_correction(te_out.data(), te_out_per_step.data(), te_old_lse.data(),
+                             te_lse.data(), te_lse_per_step.data(), te_cu_seqlens.data(),
+                             only_second_half, lse_packed, at::cuda::getCurrentCUDAStream());
 }
 
 /***************************************************************************************************

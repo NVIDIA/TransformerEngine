@@ -490,7 +490,8 @@ void nvte_cp_thd_read_second_half_lse(const NVTETensor &lse, const NVTETensor &c
  *
  *  \param[out]    out                   Output tensor.
  *  \param[in]     out_per_step          THD format output of context parallelism in forward pass.
- *  \param[in]     lse                   Softmax LSE.
+ *  \param[in]     old_lse               Softmax LSE before adding this step.
+ *  \param[in]     lse                   Softmax LSE after adding this step.
  *  \param[in]     lse_per_step          Softmax LSE per step.
  *  \param[in]     cu_seqlens            Cumulative sequence lengths, [batch_size + 1].
  *  \param[in]     only_second_half      Whether or not to correct only second half.
@@ -498,9 +499,9 @@ void nvte_cp_thd_read_second_half_lse(const NVTETensor &lse, const NVTETensor &c
  *  \param[in]     stream                CUDA stream used for this operation.
  */
 void nvte_cp_thd_out_correction(NVTETensor out, const NVTETensor &out_per_step,
-                                const NVTETensor &lse, const NVTETensor &lse_per_step,
-                                const NVTETensor &cu_seqlens, int only_second_half, int lse_packed,
-                                cudaStream_t stream);
+                                const NVTETensor &old_lse, const NVTETensor &lse,
+                                const NVTETensor &lse_per_step, const NVTETensor &cu_seqlens,
+                                int only_second_half, int lse_packed, cudaStream_t stream);
 
 /*!  \brief Update the two halves of each packed THD sequence during context-parallel backward.
  *
