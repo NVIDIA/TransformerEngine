@@ -1531,8 +1531,13 @@ std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor(
   if (columnwise_usage) {
     const std::vector<int64_t> scale_inv_shape_int64(columnwise_scale_inv_shape.begin(),
                                                      columnwise_scale_inv_shape.end());
-    columnwise_data_tensor = at::empty(shape_int64, uint8_tensor_opts);
     columnwise_scale_inv_tensor = at::empty(scale_inv_shape_int64, uint8_tensor_opts);
+    if (with_2d_quantization && rowwise_usage) {
+      // 2D quantization: rowwise and columnwise data are identical, share the buffer
+      columnwise_data_tensor = rowwise_data_tensor;
+    } else {
+      columnwise_data_tensor = at::empty(shape_int64, uint8_tensor_opts);
+    }
   }
 
   // Convert tensors to Python
