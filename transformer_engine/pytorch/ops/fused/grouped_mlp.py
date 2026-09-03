@@ -1803,11 +1803,11 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             mark_grouped_tensor(saved_fc1_x, activation_in, scales, grouped_fc2_x)
             activation_op = self.basic_ops[1]
             cpu_offloading = is_cpu_offload_enabled()
-            # Deliberately ScaledSReLU only for now: ScaledTanhSReLU falls back to
-            # saving fc2_x, which costs memory but stays correct. The cuDNN dsrelu
-            # d_srelu regeneration does honour the clamp, so enabling recompute here
-            # is a viable follow-up rather than a blocker.
-            activation_is_srelu = isinstance(activation_op, ScaledSReLU)
+            # Both SReLU flavours: the cuDNN dsrelu kernel's d_srelu regeneration
+            # applies the soft clamp, so a clamped fc2_x can be rebuilt in the
+            # backward exactly as an unclamped one is, and the clamp scale is already
+            # threaded into the dactivation kwargs below.
+            activation_is_srelu = isinstance(activation_op, (ScaledSReLU, ScaledTanhSReLU))
             activation_recompute_in_mlp = bool(
                 getattr(activation_op, "activation_recompute_in_mlp", False)
             )
