@@ -1286,6 +1286,12 @@ class TestMoeEpSequential(_EpTestCase):
                 eager_topk_weights,
             )
         if expect_fused:
+            eager_fused_ops = [
+                op
+                for op, _ in eager_model._module_groups[0]._forward_ops
+                if isinstance(op, FusedMoeEp)
+            ]
+            self.assertEqual(len(eager_fused_ops), 1)
             self.assertIs(fused_ops[0]._resource, eager_fused_ops[0]._resource)
         tolerances = {"rtol": 0.125, "atol": 0.25}
         torch.testing.assert_close(graph_out_snapshot, eager_out, **tolerances)
