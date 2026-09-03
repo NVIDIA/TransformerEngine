@@ -4,13 +4,11 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-// Fused-attention graph cache.
-//
-// The four fused-attention implementation sites, (f16/fp8 + fwd/bwd), each create a different graph.
-// They differ in the operations in the graph and the input/output tensors that bind to the graph,
-// but the mechanism used for their graph caching, support queries, error messaging, and plan building
-// is the same. They all call these three functions in this file: get_graph(), support_verdict(), and
-// build_plans().
+// Fused-attention graph cache. The four fused-attention implementation sites, (f16/fp8 + fwd/bwd),
+// each create a different graph. They differ in the operations in the graph and the input/output tensors
+// that bind to the graph, but the mechanism used for their graph caching, support queries, error messaging,
+// and plan building is the same. They all call these functions in this file: get_graph(), support_verdict(),
+// and build_plans().
 
 #ifndef TRANSFORMER_ENGINE_COMMON_FUSED_ATTN_GRAPH_CACHE_H_
 #define TRANSFORMER_ENGINE_COMMON_FUSED_ATTN_GRAPH_CACHE_H_
