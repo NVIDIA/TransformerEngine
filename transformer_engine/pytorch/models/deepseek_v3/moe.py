@@ -32,7 +32,7 @@ def _make_swiglu_mlp(hidden_size, ffn_hidden_size, dtype, device, num_experts=No
 
     The grouped variant fuses into a single CuTe grouped MLP on supported hardware.
     """
-    common = dict(bias=False, dtype=dtype, device=device)
+    common = {"bias": False, "dtype": dtype, "device": device}
     if num_experts is None:
         return te_ops.Sequential(
             te_ops.Linear(hidden_size, 2 * ffn_hidden_size, **common),

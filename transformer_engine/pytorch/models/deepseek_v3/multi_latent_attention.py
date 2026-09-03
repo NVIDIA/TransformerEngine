@@ -161,14 +161,14 @@ class MultiLatentAttention(torch.nn.Module):
         )
 
         self.rotary_base = rotary_base
-        self._yarn_kwargs = dict(
-            scaling_factor=rope_scaling_factor,
-            original_max_position_embeddings=original_max_position_embeddings,
-            beta_fast=beta_fast,
-            beta_slow=beta_slow,
-            mscale=mscale,
-            mscale_all_dim=mscale_all_dim,
-        )
+        self._yarn_kwargs = {
+            "scaling_factor": rope_scaling_factor,
+            "original_max_position_embeddings": original_max_position_embeddings,
+            "beta_fast": beta_fast,
+            "beta_slow": beta_slow,
+            "mscale": mscale,
+            "mscale_all_dim": mscale_all_dim,
+        }
         self._rope_tables: Optional[tuple] = None
 
         if softmax_scale is None and rope_scaling_factor is not None:
