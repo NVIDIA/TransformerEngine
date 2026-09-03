@@ -2483,9 +2483,9 @@ class TestGroupedMLPFusedOp:
         # Seeded: the deviations recorded above are a property of the recipe rather than of a
         # particular draw, and pinning the inputs keeps them comparable run to run.
         torch.manual_seed(1234)
-        rand = lambda *shape: torch.empty(  # noqa: E731
-            shape, device=device, dtype=dtype
-        ).uniform_(-0.25, 0.25)
+        rand = lambda *shape: torch.empty(shape, device=device, dtype=dtype).uniform_(  # noqa: E731
+            -0.25, 0.25
+        )
         tensors = {
             "x": rand(*in_shape),
             "probs": rand(in_shape[0]),
@@ -2521,12 +2521,8 @@ class TestGroupedMLPFusedOp:
             # FC1's dbias comes out of the same dSReLU kernel call as the regenerated tensor,
             # so it is worth pinning that enabling reuse does not perturb the call's other
             # output. Not bitwise: it is an atomic reduction.
-            torch.testing.assert_close(
-                on["fc1_db"], off["fc1_db"], rtol=0.05, atol=0.015625
-            )
-            torch.testing.assert_close(
-                on["fc2_db"], off["fc2_db"], rtol=0.05, atol=0.015625
-            )
+            torch.testing.assert_close(on["fc1_db"], off["fc1_db"], rtol=0.05, atol=0.015625)
+            torch.testing.assert_close(on["fc2_db"], off["fc2_db"], rtol=0.05, atol=0.015625)
         scale = off["fc2_dw"].float().pow(2).mean().sqrt().clamp_min(1e-12)
         error = on["fc2_dw"].float() - off["fc2_dw"].float()
         error_rms = error.pow(2).mean().sqrt()
@@ -2633,9 +2629,7 @@ class TestGroupedMLPFusedOp:
                 f"{activation}: expected one non-recompute backward then one recompute "
                 f"backward, got use_dsrelu_reuse={reuse}"
             )
-            expected_scale = (
-                _TANH_SRELU_CLAMP_SCALE if activation == "scaled_tanh_srelu" else None
-            )
+            expected_scale = _TANH_SRELU_CLAMP_SCALE if activation == "scaled_tanh_srelu" else None
             for call in traced_cudnn_grouped_dsrelu_wrapper:
                 assert call["tanh_clamp_scale"] == expected_scale, (
                     "the dSReLU kernel regenerates FC2's input, so it must be given the same "
@@ -2674,9 +2668,7 @@ class TestGroupedMLPFusedOp:
             )
 
     @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
-    @pytest.mark.parametrize(
-        "variant", ("bias", "single_grouped_weight", "delay_wgrad_compute")
-    )
+    @pytest.mark.parametrize("variant", ("bias", "single_grouped_weight", "delay_wgrad_compute"))
     def test_grouped_mlp_srelu_activation_recompute_options(
         self,
         traced_cudnn_grouped_dsrelu_wrapper,
@@ -2746,9 +2738,9 @@ class TestGroupedMLPFusedOp:
             f"max={deviation['max']:.1%} rms={deviation['rms']:.1%} "
             f"bias={deviation['bias']:+.2f}"
         )
-        assert deviation["max"] <= self._RECOMPUTE_WGRAD_ABSOLUTE_CEILING["mxfp8"], (
-            f"{variant}: recomputed FC2 wgrad deviates by {deviation['max']:.2%} of its RMS"
-        )
+        assert (
+            deviation["max"] <= self._RECOMPUTE_WGRAD_ABSOLUTE_CEILING["mxfp8"]
+        ), f"{variant}: recomputed FC2 wgrad deviates by {deviation['max']:.2%} of its RMS"
 
     @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
     def test_grouped_mlp_srelu_activation_recompute_saves_memory(
