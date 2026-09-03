@@ -11,7 +11,7 @@ from typing import Any, Optional, TypeAlias
 
 import torch
 
-from ..quantization import FP8GlobalStateManager, Recipe, DelayedScaling
+from ..quantization import FP8GlobalStateManager, Recipe
 from ..quantized_tensor import prepare_for_saving, restore_from_func_ctx
 from .op import (
     BasicOperation,
@@ -639,26 +639,25 @@ class OperationFuser:
         # paths that reuse a cached fused operation configuration.
         self.first_op_requiring_backward = first_op_requiring_backward
 
-        # Recipe state belongs to the basic ops and is independent of the
-        # runtime backward boundary. Only reconfigure it when recipe settings
-        # that are relevant to operation fusion change.
+        # Check if recipe parameters don't match cached values. In this case,
+        # the recipe state in the basic ops might be invalid, so reset it.
         recipe_type = type(recipe)
+        need_to_reset_recipe_state = self.recipe_type != recipe_type
+
         backward_override = recipe.backward_override if recipe is not None else None
-        recipe_params = (recipe_type, backward_override)
-        need_reset = recipe_params != (
-            self.recipe_type,
-            self.backward_override,
-        )
+        if backward_override != self.backward_override:
+            self.backward_override = backward_override
+            need_to_reset_recipe_state = True
+
         if (
-            not need_reset
-            and recipe is not None
+            recipe is not None
             and recipe.delayed()
             and self._last_amax_history_len != recipe.amax_history_len
         ):
-            # Delayed-scaling history affects quantizer state, but it does not
-            # select a different fused operation configuration.
-            need_reset = True
-        if need_reset:
+            self._last_amax_history_len = recipe.amax_history_len
+            need_to_reset_recipe_state = True
+
+        if need_to_reset_recipe_state:
             for op in self._basic_ops:
                 op.reset_recipe_state(recipe=recipe)
 
@@ -667,10 +666,7 @@ class OperationFuser:
                 for op in self._basic_ops:
                     op.pre_first_fuser_forward()
 
-            self.recipe_type, self.backward_override = recipe_params
-            self._last_amax_history_len = (
-                recipe.amax_history_len if isinstance(recipe, DelayedScaling) else 0
-            )
+            self.recipe_type = recipe_type
 
         # Training and inference may support different fusions. Keep the
         # backward boundary in the key, but pay construction cost only once for

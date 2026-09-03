@@ -220,6 +220,99 @@ def test_operation_fuser_caches_plans_by_grad_requirement(monkeypatch) -> None:
     assert fuser._backward_ops is grad_backward_ops
 
 
+def test_operation_fuser_resets_recipe_state_independently_from_plan_cache(monkeypatch) -> None:
+    """Track recipe-state resets independently from fusion-plan construction."""
+
+    fusion_calls = 0
+
+    def track_fusion(ops, *, recipe):  # pylint: disable=unused-argument
+        nonlocal fusion_calls
+        fusion_calls += 1
+        return ops
+
+    # Replace the process-wide fusion registries so one callback corresponds to
+    # one plan construction. monkeypatch restores the registries after the test.
+    monkeypatch.setattr(OperationFuser, "forward_backward_fusion_functions", [track_fusion])
+    monkeypatch.setattr(OperationFuser, "forward_fusion_functions", [])
+    monkeypatch.setattr(OperationFuser, "backward_fusion_functions", [])
+
+    op = te_ops.Identity()
+    reset_recipes = []
+    first_forward_calls = 0
+
+    def track_recipe_reset(*, recipe):
+        reset_recipes.append(recipe)
+
+    def track_first_forward():
+        nonlocal first_forward_calls
+        first_forward_calls += 1
+
+    # Identity has no quantizers, so replace its state hooks with counters. This
+    # keeps the test CPU-only and isolates OperationFuser's reset decisions.
+    monkeypatch.setattr(op, "reset_recipe_state", track_recipe_reset)
+    monkeypatch.setattr(op, "pre_first_fuser_forward", track_first_forward)
+
+    fuser = OperationFuser([op])
+    x = torch.ones(1)
+    extra_inputs = [()]
+
+    current_scaling = transformer_engine.common.recipe.Float8CurrentScaling(backward_override=None)
+    fuser.maybe_fuse_ops(False, current_scaling, x, extra_inputs)
+    assert reset_recipes == [current_scaling]
+    assert first_forward_calls == 1
+    assert fusion_calls == 1
+
+    # A fresh but equivalent recipe does not invalidate state or the plan.
+    equivalent_current_scaling = transformer_engine.common.recipe.Float8CurrentScaling(
+        backward_override=None
+    )
+    fuser.maybe_fuse_ops(False, equivalent_current_scaling, x, extra_inputs)
+    assert reset_recipes == [current_scaling]
+    assert first_forward_calls == 1
+    assert fusion_calls == 1
+
+    # Backward override affects both recipe state and fusion topology, so it
+    # triggers one reset and constructs a distinct cached plan.
+    overridden_current_scaling = transformer_engine.common.recipe.Float8CurrentScaling(
+        backward_override="high_precision"
+    )
+    fuser.maybe_fuse_ops(False, overridden_current_scaling, x, extra_inputs)
+    assert reset_recipes == [current_scaling, overridden_current_scaling]
+    assert first_forward_calls == 1
+    assert fusion_calls == 2
+
+    delayed_scaling = transformer_engine.common.recipe.DelayedScaling(
+        amax_history_len=8,
+        backward_override=None,
+    )
+    fuser.maybe_fuse_ops(False, delayed_scaling, x, extra_inputs)
+    assert reset_recipes == [current_scaling, overridden_current_scaling, delayed_scaling]
+    assert first_forward_calls == 1
+    assert fusion_calls == 3
+
+    # Amax history length only affects delayed-scaling recipe state. Reset that
+    # state, but restore the existing DelayedScaling fusion plan from the cache.
+    resized_delayed_scaling = transformer_engine.common.recipe.DelayedScaling(
+        amax_history_len=16,
+        backward_override=None,
+    )
+    fuser.maybe_fuse_ops(False, resized_delayed_scaling, x, extra_inputs)
+    assert reset_recipes == [
+        current_scaling,
+        overridden_current_scaling,
+        delayed_scaling,
+        resized_delayed_scaling,
+    ]
+    assert first_forward_calls == 1
+    assert fusion_calls == 3
+
+    # Repeating the exact recipe parameters performs neither operation again.
+    fuser.maybe_fuse_ops(False, resized_delayed_scaling, x, extra_inputs)
+    assert len(reset_recipes) == 4
+    assert first_forward_calls == 1
+    assert fusion_calls == 3
+
+
 @torch.no_grad()
 def make_reference_and_test_tensors(
     shape: int | Iterable[int],
