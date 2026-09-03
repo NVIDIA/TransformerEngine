@@ -1,7 +1,7 @@
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
-"""Multi-process DeepSeekV3 MoE/layer EP tests, launched via torchrun."""
+"""Multi-process tests for model-specific layers (te.models), launched via torchrun."""
 
 import os
 import sys

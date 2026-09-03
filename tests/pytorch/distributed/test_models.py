@@ -1,7 +1,7 @@
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
-"""Pytest driver — spawns run_deepseek_ep.py under torchrun and asserts it passed."""
+"""Pytest driver — spawns run_models.py (model-specific layers, multi-GPU) under torchrun."""
 
 import os
 import subprocess
@@ -11,7 +11,7 @@ import pytest
 import torch
 
 TEST_ROOT = Path(__file__).parent.resolve()
-LAUNCHER = TEST_ROOT / "run_test_deepseek_ep.sh"
+LAUNCHER = TEST_ROOT / "run_test_models.sh"
 
 
 @pytest.mark.skipif(torch.cuda.device_count() < 2, reason="DeepSeek EP requires >= 2 GPUs")

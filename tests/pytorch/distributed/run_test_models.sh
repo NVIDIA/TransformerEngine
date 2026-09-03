@@ -3,7 +3,7 @@
 #
 # See LICENSE for license information.
 #
-# Launcher for tests/pytorch/distributed/run_deepseek_ep.py. Auto-detects GPU count.
+# Launcher for tests/pytorch/distributed/run_models.py (model-specific layers). Auto-detects GPU count.
 
 set -uo pipefail
 
@@ -30,15 +30,15 @@ TEST_TIMEOUT_S="${TEST_TIMEOUT_S:-180}"
 export NCCL_EP_JIT_CACHE_DIR
 mkdir -p "$NCCL_EP_JIT_CACHE_DIR"
 
-SCRIPT="${SCRIPT_DIR}/run_deepseek_ep.py"
-LOG="stdout_deepseek_ep.txt"
+SCRIPT="${SCRIPT_DIR}/run_models.py"
+LOG="stdout_models.txt"
 
 echo "=== Running ${SCRIPT} on ${NUM_RANKS} GPUs (timeout=${TEST_TIMEOUT_S}s) ==="
 setsid timeout --foreground --kill-after=10 --signal=TERM "${TEST_TIMEOUT_S}" \
   torchrun --standalone --nnodes=1 --nproc-per-node="${NUM_RANKS}" \
   "${SCRIPT}" 2>&1 | tee "${LOG}"
 RC=${PIPESTATUS[0]}
-pkill -9 -f "tests/pytorch/distributed/run_deepseek_ep.py" 2>/dev/null || true
+pkill -9 -f "tests/pytorch/distributed/run_models.py" 2>/dev/null || true
 
 RET=0
 if [ "${RC}" -ne 0 ]; then echo "torchrun exited with ${RC}"; RET=1; fi
