@@ -41,21 +41,23 @@ def _make_expert_mlp(num_experts, hidden_size, ffn_hidden_size, dtype, device):
 
 class DeepSeekV3MoE(torch.nn.Module):
     """
-    DeepSeekV3-style Mixture of Experts block.
+    DeepSeekV3 Mixture-of-Experts block.
 
-    Routing uses the fused sigmoid router with aux-loss-free expert bias and
-    node-limited (grouped) top-k (``fused_topk_with_score_function``). Routed
-    experts run as a grouped SwiGLU MLP built from ``te.ops`` (fusable into a
-    single CuTe grouped-GEMM kernel); routing probabilities are applied
-    per-token inside the expert MLP, so unpermute/combine is a plain
-    accumulation. Token routing is either local
-    (``moe_permute_with_probs``/``moe_unpermute``) or, when ``ep_group`` is
-    given, expert-parallel over NCCL (``ep_dispatch``/``ep_combine``).
+    Each token is scored by a sigmoid router with a non-trainable expert bias
+    updated by ``update_expert_bias()`` (aux-loss-free load balancing) and,
+    optionally, group-limited routing: experts are split into ``num_groups``
+    groups, the top ``group_topk`` groups are selected by their summed scores,
+    and the final ``topk`` experts are chosen only from those groups. Selected
+    tokens run through the routed experts, a SwiGLU MLP shared across experts
+    as a grouped GEMM, with the routing probability applied inside the MLP. An
+    optional shared expert (dense SwiGLU MLP) is added to every token. On
+    hardware that supports it the expert MLP runs as a single fused
+    grouped-GEMM kernel.
 
-    When expert parallelism is used, ``transformer_engine.pytorch.ep.ep_bootstrap``
-    must be called once per process before constructing the module (it allocates
-    the ``EpBuffer`` in ``__init__``), and inputs must
-    be bfloat16.
+    Without ``ep_group`` all experts live on the local device. With
+    ``ep_group`` the experts are split across the group and tokens are
+    exchanged over NCCL; this requires ``ep_bootstrap`` to be called once per
+    process before constructing the module, and bfloat16 inputs.
 
     Parameters
     ----------
