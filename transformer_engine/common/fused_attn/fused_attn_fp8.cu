@@ -146,7 +146,8 @@ void fused_attn_fp8_fwd_impl(
                                o_tensor_type,
                                cudnn_frontend::DataType_t::NOT_SET,
                                cudnn_frontend::DataType_t::NOT_SET,
-                               false};
+                               false,
+                               cuda::current_device()};
 
     namespace fe = cudnn_frontend;
     using graph_and_tensors =
@@ -748,7 +749,8 @@ void fused_attn_fp8_bwd_impl(
                                o_tensor_type,
                                do_tensor_type,
                                dqkv_tensor_type,
-                               false};
+                               false,
+                               cuda::current_device()};
 
     namespace fe = cudnn_frontend;
     using graph_and_tensors =
