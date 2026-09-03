@@ -833,10 +833,7 @@ class FP8GlobalStateManager:
                 total += amax.numel()
             positions = {
                 dev: torch.cat(
-                    [
-                        torch.arange(offsets[i], offsets[i] + amax_buffer[i].numel())
-                        for i in idxs
-                    ]
+                    [torch.arange(offsets[i], offsets[i] + amax_buffer[i].numel()) for i in idxs]
                 ).to(reduce_device)
                 for dev, idxs in by_device.items()
             }
@@ -852,8 +849,7 @@ class FP8GlobalStateManager:
                 # Compact each device's reduced entries on the reduction
                 # device before the one D2D copy back.
                 reduced = {
-                    dev: contiguous_amax.index_select(0, positions[dev])
-                    for dev in by_device
+                    dev: contiguous_amax.index_select(0, positions[dev]) for dev in by_device
                 }
 
             for dev, idxs in by_device.items():

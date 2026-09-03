@@ -126,9 +126,7 @@ def test_two_modules_on_different_devices_one_autocast():
 
     assert out.device == torch.device("cuda:1")
     assert hidden.device == torch.device("cuda:0")
-    _assert_global_buffer_invariants(
-        [(a, torch.device("cuda:0")), (b, torch.device("cuda:1"))]
-    )
+    _assert_global_buffer_invariants([(a, torch.device("cuda:0")), (b, torch.device("cuda:1"))])
     _assert_state_evolved(a)
     _assert_state_evolved(b)
 
@@ -224,7 +222,9 @@ def test_multi_device_gather_reduce_matches_local(monkeypatch):
     monkeypatch.setattr(
         FP8GlobalStateManager,
         "reduce_tensor_across_group_op_max",
-        staticmethod(lambda tensor, group: calls.append((tensor.device, tensor.numel(), tensor.dtype))),
+        staticmethod(
+            lambda tensor, group: calls.append((tensor.device, tensor.numel(), tensor.dtype))
+        ),
     )
 
     gather_outs, gather_states = _run_three_module_chain()
