@@ -16,15 +16,8 @@ from utils import pytest_parametrize_wrapper
 
 
 @pytest.fixture(autouse=True, scope="function")
-def _inject_router(request):
-    """Lazy-load router API only for tests marked 'triton'. Other tests run without importing.
-
-    We inject into sys.modules[__name__] so test code can use fused_topk_with_score_function,
-    fused_moe_aux_loss as module-level names (fixture locals are not visible to tests).
-    """
-    if not request.node.get_closest_marker("triton"):
-        yield
-        return
+def _inject_router():
+    """Inject the router API as module-level names for every test in this file."""
     from transformer_engine.jax.router import (
         fused_topk_with_score_function,
         fused_moe_aux_loss,
@@ -90,9 +83,9 @@ SCORE_AUX_LOSS_CASES = {
     "L2": ALL_SCORE_AUX_LOSS_CASES,
 }
 
-ALL_SCORE_FUNCTIONS = ["softmax", "sigmoid"]
+ALL_SCORE_FUNCTIONS = ["softmax", "sigmoid", "sqrtsoftplus"]
 SCORE_FUNCTIONS = {
-    "L0": ["softmax"],
+    "L0": ["softmax", "sqrtsoftplus"],
     "L2": ALL_SCORE_FUNCTIONS,
 }
 
@@ -166,7 +159,7 @@ def reference_group_limited_topk(
     return probs, top_indices
 
 
-def reference_topk_softmax_sigmoid(
+def reference_topk_with_score_function(
     logits: jnp.ndarray,
     topk: int,
     use_pre_softmax: bool = False,
@@ -176,7 +169,7 @@ def reference_topk_softmax_sigmoid(
     score_function: str = "softmax",
     expert_bias: Optional[jnp.ndarray] = None,
 ):
-    """Reference implementation for topk + softmax/sigmoid."""
+    """Reference implementation for topk with a supported score function."""
     num_tokens, num_experts = logits.shape
 
     def compute_topk(scores, topk, num_groups=None, group_topk=None):
@@ -199,8 +192,11 @@ def reference_topk_softmax_sigmoid(
         else:
             scores, top_indices = compute_topk(logits, topk, num_groups, group_topk)
             probs = jax.nn.softmax(scores.astype(jnp.float32), axis=-1).astype(logits.dtype)
-    elif score_function == "sigmoid":
-        scores = jax.nn.sigmoid(logits.astype(jnp.float32)).astype(logits.dtype)
+    elif score_function in ("sigmoid", "sqrtsoftplus"):
+        if score_function == "sigmoid":
+            scores = jax.nn.sigmoid(logits.astype(jnp.float32)).astype(logits.dtype)
+        else:
+            scores = jnp.sqrt(jax.nn.softplus(logits.astype(jnp.float32))).astype(logits.dtype)
         if expert_bias is not None:
             scores_for_routing = scores + expert_bias
             _, top_indices = compute_topk(scores_for_routing, topk, num_groups, group_topk)
@@ -232,6 +228,9 @@ def reference_compute_scores_for_aux_loss(logits: jnp.ndarray, topk: int, score_
         scores = jax.nn.softmax(logits.astype(jnp.float32), axis=-1)
     elif score_function == "sigmoid":
         scores = jax.nn.sigmoid(logits.astype(jnp.float32))
+        scores = scores / (scores.sum(axis=-1, keepdims=True) + 1e-20) if topk > 1 else scores
+    elif score_function == "sqrtsoftplus":
+        scores = jnp.sqrt(jax.nn.softplus(logits.astype(jnp.float32)))
         scores = scores / (scores.sum(axis=-1, keepdims=True) + 1e-20) if topk > 1 else scores
     else:
         raise ValueError(f"Invalid score_function: {score_function}")
@@ -269,7 +268,7 @@ def reference_aux_loss(
 
 def make_logits(num_tokens, num_experts, score_function, dtype=jnp.float32):
     """Create deterministic logits for testing."""
-    if score_function == "sigmoid":
+    if score_function in ("sigmoid", "sqrtsoftplus"):
         offset = jnp.arange(-num_tokens // 2, num_tokens // 2, dtype=dtype) * 1e-4
         logits = jnp.arange(-num_experts // 2, num_experts // 2, dtype=dtype) * 1e-2
         logits = logits[None, :].repeat(num_tokens, axis=0) + offset[:, None]
@@ -306,7 +305,7 @@ def run_topk_comparison(
     """Compare fused vs reference top-k implementation, both jitted."""
     logits = make_logits(num_tokens, num_experts, score_function, dtype)
 
-    if enable_bias and score_function == "sigmoid":
+    if enable_bias and score_function in ("sigmoid", "sqrtsoftplus"):
         expert_bias = jnp.arange(num_experts, dtype=jnp.float32) * 0.1
         expert_bias = jnp.flip(expert_bias)
     else:
@@ -315,7 +314,7 @@ def run_topk_comparison(
     # Forward: reference (jitted)
     ref_fwd_fn = jax.jit(
         partial(
-            reference_topk_softmax_sigmoid,
+            reference_topk_with_score_function,
             topk=topk,
             use_pre_softmax=use_pre_softmax,
             num_groups=num_groups,
@@ -348,8 +347,12 @@ def run_topk_comparison(
     assert jnp.array_equal(routing_map_ref, routing_map_fused), "Routing map mismatch"
 
     # Backward: reference (jitted)
+    # Use random weights so the backward pass receives non-uniform gradients instead of
+    # the all-ones gradient produced by an unweighted jnp.sum.
+    grad_weights = jax.random.uniform(jax.random.PRNGKey(SEED), (1, num_experts), dtype=jnp.float32)
+
     def loss_ref(logits_):
-        p, _ = reference_topk_softmax_sigmoid(
+        p, _ = reference_topk_with_score_function(
             logits_,
             topk,
             use_pre_softmax,
@@ -359,7 +362,7 @@ def run_topk_comparison(
             score_function,
             expert_bias,
         )
-        return p.sum()
+        return jnp.sum(p * grad_weights)
 
     def loss_fused(logits_):
         p, _ = fused_topk_with_score_function(
@@ -372,7 +375,7 @@ def run_topk_comparison(
             score_function,
             expert_bias,
         )
-        return p.sum()
+        return jnp.sum(p * grad_weights)
 
     grad_ref = jax.jit(jax.grad(loss_ref))(logits)
     grad_fused = jax.jit(jax.grad(loss_fused))(logits)
@@ -389,37 +392,23 @@ def run_topk_comparison(
 @pytest_parametrize_wrapper("group_topk", GROUP_TOPK_OPTIONS)
 @pytest_parametrize_wrapper("scaling_factor", SCALING_FACTOR_OPTIONS)
 @pytest_parametrize_wrapper("enable_bias", ENABLE_BIAS_OPTIONS)
-@pytest.mark.triton
-def test_topk_sigmoid(
-    dtype, num_tokens, num_experts, topk, group_topk, scaling_factor, enable_bias
-):
-    num_groups = 8 if group_topk else None
-    run_topk_comparison(
-        dtype=dtype,
-        num_tokens=num_tokens,
-        num_experts=num_experts,
-        topk=topk,
-        use_pre_softmax=False,
-        num_groups=num_groups,
-        group_topk=group_topk,
-        scaling_factor=scaling_factor,
-        score_function="sigmoid",
-        enable_bias=enable_bias,
-    )
-
-
-@pytest_parametrize_wrapper("dtype", DTYPES)
-@pytest_parametrize_wrapper(
-    "num_tokens,num_experts,topk",
-    TOPK_CASES,
-)
 @pytest_parametrize_wrapper("use_pre_softmax", USE_PRE_SOFTMAX_OPTIONS)
-@pytest_parametrize_wrapper("group_topk", GROUP_TOPK_OPTIONS)
-@pytest_parametrize_wrapper("scaling_factor", SCALING_FACTOR_OPTIONS)
-@pytest.mark.triton
-def test_topk_softmax(
-    dtype, num_tokens, num_experts, topk, use_pre_softmax, group_topk, scaling_factor
+@pytest_parametrize_wrapper("score_function", SCORE_FUNCTIONS)
+def test_topk(
+    dtype,
+    num_tokens,
+    num_experts,
+    topk,
+    group_topk,
+    scaling_factor,
+    enable_bias,
+    use_pre_softmax,
+    score_function,
 ):
+    if use_pre_softmax and score_function != "softmax":
+        pytest.skip("Pre-softmax is only applicable to the 'softmax' router score function.")
+    if score_function == "softmax" and enable_bias:
+        pytest.skip("Bias is not supported with 'softmax' router score function. Skipping.")
     num_groups = 8 if group_topk else None
     run_topk_comparison(
         dtype=dtype,
@@ -430,8 +419,8 @@ def test_topk_softmax(
         num_groups=num_groups,
         group_topk=group_topk,
         scaling_factor=scaling_factor,
-        score_function="softmax",
-        enable_bias=False,
+        score_function=score_function,
+        enable_bias=enable_bias,
     )
 
 
@@ -446,7 +435,6 @@ def test_topk_softmax(
     SCORE_AUX_LOSS_CASES,
 )
 @pytest_parametrize_wrapper("score_function", SCORE_FUNCTIONS)
-@pytest.mark.triton
 def test_fused_scores_for_aux_loss(dtype, num_tokens, num_experts, topk, score_function):
     logits = make_logits(num_tokens, num_experts, score_function, dtype)
 
@@ -477,9 +465,13 @@ def test_fused_scores_for_aux_loss(dtype, num_tokens, num_experts, topk, score_f
     assert jnp.array_equal(routing_map_ref, routing_map_fused), "Routing map mismatch"
 
     # Backward (jitted)
+    # Use random weights so the backward pass receives non-uniform gradients instead of
+    # the all-ones gradient produced by an unweighted jnp.sum.
+    grad_weights = jax.random.uniform(jax.random.PRNGKey(SEED), (1, num_experts), dtype=jnp.float32)
+
     def loss_ref(logits_):
         _, s = reference_compute_scores_for_aux_loss(logits_, topk, score_function)
-        return s.sum()
+        return jnp.sum(s * grad_weights)
 
     def loss_fused(logits_):
         s, _ = fused_topk_with_score_function(
@@ -488,7 +480,7 @@ def test_fused_scores_for_aux_loss(dtype, num_tokens, num_experts, topk, score_f
             score_function=score_function,
             compute_aux_scores=True,
         )
-        return s.sum()
+        return jnp.sum(s * grad_weights)
 
     grad_ref = jax.jit(jax.grad(loss_ref))(logits)
     grad_fused = jax.jit(jax.grad(loss_fused))(logits)
@@ -507,7 +499,6 @@ def test_fused_scores_for_aux_loss(dtype, num_tokens, num_experts, topk, score_f
     "num_tokens,num_experts,topk",
     AUX_LOSS_CASES,
 )
-@pytest.mark.triton
 def test_fused_moe_aux_loss(dtype, num_tokens, num_experts, topk):
     key = jax.random.PRNGKey(SEED)
 
@@ -580,7 +571,6 @@ def _bytemap_to_bitmap_u8(bytemap):
     TOPK_CASES,
 )
 @pytest_parametrize_wrapper("score_function", SCORE_FUNCTIONS)
-@pytest.mark.triton
 def test_topk_bitmap_vs_bytemap(dtype, num_tokens, num_experts, topk, score_function):
     """fused_topk_with_score_function should produce the same probs and an
     LSB-packed bitmap routing_map when routing_map_format=BITMAP_U8, and
@@ -659,7 +649,6 @@ def test_topk_bitmap_vs_bytemap(dtype, num_tokens, num_experts, topk, score_func
     SCORE_AUX_LOSS_CASES,
 )
 @pytest_parametrize_wrapper("score_function", SCORE_FUNCTIONS)
-@pytest.mark.triton
 def test_score_for_aux_loss_bitmap_vs_bytemap(dtype, num_tokens, num_experts, topk, score_function):
     """compute_aux_scores=True path: bitmap routing_map must equal LSB-packed
     bytemap; scores must be bitwise identical across formats."""
