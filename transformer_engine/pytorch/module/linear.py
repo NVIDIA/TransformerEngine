@@ -34,6 +34,9 @@ from .base import (
 from ._common import (
     can_reconstruct_wgrad_input_from_original,
     check_fp8_reduce_and_update,
+    fake_workspace_valid,
+    sp_inp_leading,
+    sp_out_leading,
     noop_cat,
     set_quantizer_amax_reduction_group,
     set_quantizer_usage_for_wgrad_all_gather,
@@ -316,40 +319,6 @@ class LinearBwdArgs:
         ) = restore_from_func_ctx(
             ctx
         )  # pylint: disable=unbalanced-tuple-unpacking
-
-
-def _out_leading_from_inp(leading: int, args: Union[LinearFwdArgs, LinearBwdArgs]) -> int:
-    """Output's leading (sequence) dim from the input's: sequence parallelism
-    gathers it (column-parallel) or scatters it (row-parallel)."""
-    if not args.sequence_parallel:
-        return leading
-    if args.parallel_mode == "column":
-        return leading * args.tp_size
-    if args.parallel_mode == "row":
-        return leading // args.tp_size
-    return leading
-
-
-def _inp_leading_from_out(leading: int, args: Union[LinearFwdArgs, LinearBwdArgs]) -> int:
-    """Inverse of :func:`_out_leading_from_inp`."""
-    if not args.sequence_parallel:
-        return leading
-    if args.parallel_mode == "column":
-        return leading // args.tp_size
-    if args.parallel_mode == "row":
-        return leading * args.tp_size
-    return leading
-
-
-def _fake_workspace_valid(workspace: TensorSpec, quantizer: Optional[Quantizer]) -> bool:
-    """Spec-level mirror of ``_is_weight_workspace_valid``: the cached workspace
-    must already hold every inner buffer the quantizer's current usage needs."""
-    if quantizer is None:
-        return True
-    required = TensorSpec(
-        shape=workspace.shape, dtype=workspace.dtype, quantizer=quantizer, device=workspace.device
-    ).inner_names()
-    return set(required) <= set(workspace.inner_names())
 
 
 def _linear_forward_impl(
@@ -870,7 +839,7 @@ def _linear_forward_fake(
         else:
             weightmat_is_storage = True
             workspace = args.weight_workspace
-            if workspace is not None and not _fake_workspace_valid(workspace, weight_quantizer):
+            if workspace is not None and not fake_workspace_valid(workspace, weight_quantizer):
                 # quantize_weight drops a stale workspace and builds a new one.
                 workspace = None
             if workspace is not None:
@@ -903,7 +872,7 @@ def _linear_forward_fake(
     # ------------------------------------------------------
     # A rank-1 input is viewed to (1, in_features), so the output leads with 1.
     inp_leading = inp.shape[0] if len(inp.shape) > 1 else 1
-    out_leading = _out_leading_from_inp(inp_leading, args)
+    out_leading = sp_out_leading(inp_leading, args)
     out = TensorSpec(
         shape=(out_leading, *tuple(inp.shape[1:-1]), out_features),
         dtype=activation_dtype,
@@ -1184,7 +1153,7 @@ def _linear_backward_impl(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None
         # Reconstruct inp_shape when not stored (compiled mode with dynamic shapes).
         if bwd_args.inp_shape is None:
             in_features = saved_weight.shape[-1]
-            inp_leading = _inp_leading_from_out(grad_output.shape[0], bwd_args)
+            inp_leading = sp_inp_leading(grad_output.shape[0], bwd_args)
             bwd_args.inp_shape = torch.Size([inp_leading, *grad_output.shape[1:-1], in_features])
 
         # Configure Userbuffers communication (comm+GEMM overlap)
@@ -1749,7 +1718,7 @@ def _linear_backward_fake(
     if args.requires_dgrad:
         # Input shape rederived from grad_output + SP config (inp_shape is not
         # stored: torch.Size with SymInt cannot cross in OpaqueValueBundle).
-        dgrad_leading = _inp_leading_from_out(args.grad_output.shape[0], args)
+        dgrad_leading = sp_inp_leading(args.grad_output.shape[0], args)
         # Under UB reduce-scatter or bulk-wgrad overlap the returned dgrad is a
         # plain tensor; the quantizer only feeds the comm buffer.
         dgrad_quantizer = (

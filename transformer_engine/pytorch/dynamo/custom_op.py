@@ -61,8 +61,9 @@ Autograd, registered on the op, drives backward:
     forward state + ``ctx_attrs`` (e.g. saved-tensor aliases) and return the
     tensors to persist; the plan's output ranges are stashed on ``ctx``;
   * on ``backward()`` the incoming flat grads are sliced per user output from the
-    stashed plan (a ``grad_outputs`` field on the backward args receives the
-    whole tuple; otherwise ``grad_output`` receives the first output's grad),
+    stashed plan (the backward args' ``GRAD_OUTPUT_FIELDS`` class attribute names
+    one field per user output; else a ``grad_outputs`` field receives the whole
+    tuple; otherwise ``grad_output`` receives the first output's grad),
     the container's optional ``setup_saved_tensors`` hook restores the saved
     tensors, then the *backward op* runs the real ``bwd_impl`` and returns the
     flat grads (``bwd_fake_impl`` is its data-free fake).
@@ -468,6 +469,9 @@ def _is_simple_annot(annot: Any) -> bool:
     if get_origin(annot) in (tuple, list):
         inner = [a for a in get_args(annot) if a is not Ellipsis]
         return bool(inner) and all(_is_simple_annot(a) for a in inner)
+    if get_origin(annot) is dict:
+        key, value = get_args(annot)
+        return key is str and _is_simple_annot(value)
     return False
 
 
@@ -1009,6 +1013,10 @@ def _register_autograd_for_op(
     the saved tuple + ``ctx_attrs`` to the module's ``setup_context`` and stashes
     the plan on ``ctx`` so backward can slice its grads per user output.
     """
+    # Where the incoming grads land on the backward args: the fields named by
+    # ``GRAD_OUTPUT_FIELDS`` (one per user output, in order), else a
+    # ``grad_outputs`` tuple field, else ``grad_output`` (first output only).
+    grad_output_fields = getattr(bwd_plan.arg_type, "GRAD_OUTPUT_FIELDS", None)
     bwd_takes_grad_tuple = any(f.name == "grad_outputs" for f in bwd_plan.fields)
 
     def _setup_context(ctx, inputs, output):
@@ -1049,7 +1057,10 @@ def _register_autograd_for_op(
         ctx.tensor_objects = None
         user_grads = _slice_user_grads(ctx.output_ranges, grad_outputs[0])
         ctx.output_ranges = None
-        if bwd_takes_grad_tuple:
+        if grad_output_fields is not None:
+            for name, grad in zip(grad_output_fields, user_grads):
+                setattr(bwd_obj, name, grad)
+        elif bwd_takes_grad_tuple:
             bwd_obj.grad_outputs = tuple(user_grads)
         else:
             bwd_obj.grad_output = user_grads[0]
@@ -1219,11 +1230,12 @@ def register_custom_op(
     forward state and returns the tensors to persist; the framework saves them
     via ``ctx.save_for_backward``. Before ``bwd_impl`` runs, the framework
     restores them into the container's tensor fields through the
-    ``setup_saved_tensors`` hook and sets the incoming gradient directly --
-    into a ``grad_outputs`` field (tuple, one grad per user output) if
-    ``bwd_arg_type`` declares one, else into ``grad_output`` (the first user
-    output's grad) -- so ``bwd_impl`` receives a fully-populated
-    ``bwd_arg_type``.
+    ``setup_saved_tensors`` hook and sets the incoming gradients directly --
+    into the fields named by a ``GRAD_OUTPUT_FIELDS`` class attribute (one per
+    user output, in order) if ``bwd_arg_type`` declares one, else into a
+    ``grad_outputs`` field (tuple, one grad per user output), else into
+    ``grad_output`` (the first user output's grad) -- so ``bwd_impl`` receives
+    a fully-populated ``bwd_arg_type``.
 
     Registration touches experimental ``torch.library`` / opaque-object APIs
     that may be missing on older PyTorch. If it fails, this warns once and

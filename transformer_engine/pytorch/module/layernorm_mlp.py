@@ -7,7 +7,7 @@ import os
 import warnings
 from dataclasses import dataclass, replace as dataclass_replace
 import weakref
-from typing import Any, Callable, Dict, Optional, Sequence, Tuple, Union, List
+from typing import Any, Callable, ClassVar, Dict, Optional, Sequence, Tuple, Union, List
 from functools import reduce
 from operator import mul as multiply_op
 
@@ -100,76 +100,54 @@ from ...debug.pytorch.debug_state import TEDebugState
 __all__ = ["LayerNormMLP"]
 
 
-def _get_act_func_supported_list(recipe: Optional[Recipe] = None):
-    if recipe is None:
-        # bf16 (recipe is None):
-        return {
-            "gelu": (tex.gelu, tex.dgelu, None),
-            "geglu": (tex.geglu, tex.dgeglu, None),
-            "glu": (tex.glu, tex.dglu, None),
-            "qgelu": (tex.qgelu, tex.dqgelu, None),
-            "qgeglu": (tex.qgeglu, tex.dqgeglu, None),
-            "relu": (tex.relu, tex.drelu, None),
-            "reglu": (tex.reglu, tex.dreglu, None),
-            "srelu": (tex.srelu, tex.dsrelu, None),
-            "sreglu": (tex.sreglu, tex.dsreglu, None),
-            "silu": (tex.silu, tex.dsilu, None),
-            "swiglu": (tex.swiglu, tex.dswiglu, None),
-            "clamped_swiglu": (tex.clamped_swiglu, tex.clamped_dswiglu, None),
-        }
-    if recipe.delayed() or recipe.mxfp8():
-        # Delayed scaling, fusion supported list: [tex.dbias_dgelu, tex.dbias_drelu, tex.dbias_dqgelu, tex.dbias_dsrelu]
-        # MXFP8: [tex.dbias_dgelu, tex.dbias_drelu, tex.dbias_dqgelu, tex.dbias_dsrelu]
-        return {
-            "gelu": (tex.gelu, tex.dgelu, tex.dbias_dgelu),
-            "geglu": (tex.geglu, tex.dgeglu, None),
-            "glu": (tex.glu, tex.dglu, None),
-            "qgelu": (tex.qgelu, tex.dqgelu, tex.dbias_dqgelu),
-            "qgeglu": (tex.qgeglu, tex.dqgeglu, None),
-            "relu": (tex.relu, tex.drelu, tex.dbias_drelu),
-            "reglu": (tex.reglu, tex.dreglu, None),
-            "srelu": (tex.srelu, tex.dsrelu, tex.dbias_dsrelu),
-            "sreglu": (tex.sreglu, tex.dsreglu, None),
-            "silu": (tex.silu, tex.dsilu, tex.dbias_dsilu),
-            "swiglu": (tex.swiglu, tex.dswiglu, None),
-            "clamped_swiglu": (tex.clamped_swiglu, tex.clamped_dswiglu, None),
-        }
-    # no activation fusion written yet
-    # Per-tensor current scaling or fp8 blockwise scaling or custom quantization: []
-    # TODO(ksivaman): Fuse nvfp4 act once kernel is available.
-    if (
-        recipe.float8_current_scaling()
-        or recipe.float8_block_scaling()
-        or recipe.nvfp4()
-        or recipe.custom()
-    ):
-        return {
-            "gelu": (tex.gelu, tex.dgelu, None),
-            "geglu": (tex.geglu, tex.dgeglu, None),
-            "glu": (tex.glu, tex.dglu, None),
-            "qgelu": (tex.qgelu, tex.dqgelu, None),
-            "qgeglu": (tex.qgeglu, tex.dqgeglu, None),
-            "relu": (tex.relu, tex.drelu, None),
-            "reglu": (tex.reglu, tex.dreglu, None),
-            "srelu": (tex.srelu, tex.dsrelu, None),
-            "sreglu": (tex.sreglu, tex.dsreglu, None),
-            "silu": (tex.silu, tex.dsilu, None),
-            "swiglu": (tex.swiglu, tex.dswiglu, None),
-            "clamped_swiglu": (tex.clamped_swiglu, tex.clamped_dswiglu, None),
-        }
-    raise NotImplementedError(f"Unhandled recipe type {recipe}")
+_ACT_FUNCS = {
+    "gelu": (tex.gelu, tex.dgelu),
+    "geglu": (tex.geglu, tex.dgeglu),
+    "glu": (tex.glu, tex.dglu),
+    "qgelu": (tex.qgelu, tex.dqgelu),
+    "qgeglu": (tex.qgeglu, tex.dqgeglu),
+    "relu": (tex.relu, tex.drelu),
+    "reglu": (tex.reglu, tex.dreglu),
+    "srelu": (tex.srelu, tex.dsrelu),
+    "sreglu": (tex.sreglu, tex.dsreglu),
+    "silu": (tex.silu, tex.dsilu),
+    "swiglu": (tex.swiglu, tex.dswiglu),
+    "clamped_swiglu": (tex.clamped_swiglu, tex.clamped_dswiglu),
+}
+
+# Fused dbias + dact + quantize kernels; only delayed scaling and MXFP8 have them.
+_DBIAS_DACT_FUNCS = {
+    "gelu": tex.dbias_dgelu,
+    "qgelu": tex.dbias_dqgelu,
+    "relu": tex.dbias_drelu,
+    "srelu": tex.dbias_dsrelu,
+    "silu": tex.dbias_dsilu,
+}
+
+# Activations whose output halves the last dim (gated linear units).
+_GATED_ACTIVATIONS = frozenset(
+    {"geglu", "glu", "qgeglu", "reglu", "sreglu", "swiglu", "clamped_swiglu"}
+)
 
 
-def _act_func(activation: str, recipe: Optional[Recipe] = None):
-    # based on each quantization mode, we have different kernel fusion supported:
-    # bf16 (recipe is None): [tex.dbias_dgelu, tex.dbias_drelu, tex.dbias_dqgelu, tex.dbias_dsrelu]
-    # Delayed scaling, fusion supported list: [tex.dbias_dgelu, tex.dbias_drelu, tex.dbias_dqgelu, tex.dbias_dsrelu]
-    # MXFP8: [tex.dbias_dgelu, tex.dbias_drelu, tex.dbias_dqgelu, tex.dbias_dsrelu]
-    # Per-tensor current scaling or fp8 blockwise scaling: []
-    funcs = _get_act_func_supported_list(recipe)
-    if activation not in funcs:
+def _recipe_has_dbias_dact_fusion(recipe: Optional[Recipe]) -> bool:
+    return recipe is not None and (recipe.delayed() or recipe.mxfp8())
+
+
+def _act_func(
+    activation: str, recipe: Optional[Recipe] = None, dbias_fusion: Optional[bool] = None
+):
+    """``(act, dact, dbias_dact_quantize or None)`` for ``activation``.
+
+    The fused dbias kernel is available for delayed scaling and MXFP8 only;
+    pass ``dbias_fusion`` to decide without a recipe object.
+    """
+    if activation not in _ACT_FUNCS:
         raise NotImplementedError("Activation type " + activation + " is not supported!")
-    return funcs[activation]
+    if dbias_fusion is None:
+        dbias_fusion = _recipe_has_dbias_dact_fusion(recipe)
+    act, dact = _ACT_FUNCS[activation]
+    return act, dact, _DBIAS_DACT_FUNCS.get(activation) if dbias_fusion else None
 
 
 @dataclass(slots=True)
@@ -234,6 +212,10 @@ class LayerNormMLPFwdArgs:
     backward_override: Optional[str]
     dgrad_use_split_accumulator: bool
     wgrad_use_split_accumulator: bool
+    # Recipe properties the backward needs (the recipe itself can't cross the op boundary).
+    recipe_float8_block_scaling: bool
+    recipe_custom: bool
+    recipe_dbias_dact_fusion: bool
     debug: bool
 
     # --- Weight-workspace caching ---
@@ -291,6 +273,9 @@ class LayerNormMLPFwdArgs:
 @dataclass(slots=True)
 class LayerNormMLPBwdArgs:
     """Single-argument bag for the backward path of :class:`_LayerNormMLP`."""
+
+    # One field per user output of the forward op, in order (see custom_op.py).
+    GRAD_OUTPUT_FIELDS: ClassVar[Tuple[str, ...]] = ("grad_output", "grad_ln_out")
 
     # --- Incoming gradients (populated at backward entry) ---
     grad_output: Optional[torch.Tensor] = None
@@ -354,7 +339,9 @@ class LayerNormMLPBwdArgs:
     # --- Numerical / dtype config ---
     activation_dtype: Optional[torch.dtype] = None
     fp8: bool = False
-    fp8_recipe: Optional[Any] = None
+    recipe_float8_block_scaling: bool = False
+    recipe_custom: bool = False
+    recipe_dbias_dact_fusion: bool = False
     dgrad_use_split_accumulator: bool = _2X_ACC_DGRAD
     wgrad_use_split_accumulator: bool = _2X_ACC_WGRAD
     backward_override: Optional[str] = None
@@ -1157,7 +1144,9 @@ def _layernorm_mlp_setup_ctx(
     bwd_args.fc1_weight_requires_grad = fc1_weight_requires_grad
     bwd_args.fc1_bias_requires_grad = fwd_args.fc1_bias_requires_grad
     bwd_args.fc2_weight_requires_grad = fc2_weight_requires_grad
-    bwd_args.inp_shape = inp.shape
+    # Not stored (SymInt dims are not hashable in OpaqueValueBundle under
+    # torch.compile(dynamic=True)); backward rederives it from grad_output.
+    bwd_args.inp_shape = None
 
     # Normalization
     bwd_args.normalization = fwd_args.normalization
@@ -1176,7 +1165,9 @@ def _layernorm_mlp_setup_ctx(
     # Numerical / dtype config
     bwd_args.activation_dtype = fwd_args.activation_dtype
     bwd_args.fp8 = fp8
-    bwd_args.fp8_recipe = FP8GlobalStateManager.get_fp8_recipe() if fp8 else None
+    bwd_args.recipe_float8_block_scaling = fwd_args.recipe_float8_block_scaling
+    bwd_args.recipe_custom = fwd_args.recipe_custom
+    bwd_args.recipe_dbias_dact_fusion = fwd_args.recipe_dbias_dact_fusion
     bwd_args.dgrad_use_split_accumulator = fwd_args.dgrad_use_split_accumulator
     bwd_args.wgrad_use_split_accumulator = fwd_args.wgrad_use_split_accumulator
     bwd_args.backward_override = fwd_args.backward_override
@@ -1330,6 +1321,14 @@ def _layernorm_mlp_backward_impl(
     the saved-tensor fields before invocation. Returns ``(dgrad, dgamma,
     dbeta, fc1_wgrad, fc1_bias_grad, fc2_wgrad, fc2_bias_grad)``.
     """
+    if args.inp_shape is None:
+        in_features = args.ln_weight.shape[-1]
+        inp_leading = args.grad_output.shape[0]
+        if args.sequence_parallel and not args.set_parallel_mode:
+            # FC1's input was all-gathered but FC2's output was not reduce-scattered.
+            inp_leading = inp_leading // args.tp_size
+        args.inp_shape = torch.Size([inp_leading, *args.grad_output.shape[1:-1], in_features])
+
     with get_nvtx_range_context("_LayerNormMLP_backward"):
         inputmat = args.inputmat
         ln_weight = args.ln_weight
@@ -1621,7 +1620,7 @@ def _layernorm_mlp_backward_impl(
 
             # Whether to set grad arg in general_gemm
             grad_arg = True
-            if args.fp8 and args.fp8_recipe.float8_block_scaling():
+            if args.fp8 and args.recipe_float8_block_scaling:
                 grad_arg = False
 
             # Arguments to include in wgrad GEMM closure
@@ -1667,7 +1666,7 @@ def _layernorm_mlp_backward_impl(
 
                 # Update grad bias if needed
                 if fc2_bias_grad is None:
-                    if args.fp8 and args.fp8_recipe.float8_block_scaling() and fc2_bias is not None:
+                    if args.fp8 and args.recipe_float8_block_scaling and fc2_bias is not None:
                         # BGRAD not fused with GEMM for float8 blockwise gemm.
                         fc2_bias_grad_ = act_out.view(-1, act_out.shape[-1]).sum(dim=0)
                     fc2_bias_grad = fc2_bias_grad_
@@ -1700,14 +1699,15 @@ def _layernorm_mlp_backward_impl(
             fc1_bias_grad = dact.sum(dim=0)
             dact = args.fc1_grad_output_quantizer(dact)
         elif (
-            _act_func(args.activation, args.fp8_recipe if args.fp8 else None)[2] is not None
+            _act_func(args.activation, dbias_fusion=args.fp8 and args.recipe_dbias_dact_fusion)[2]
+            is not None
             and args.fp8
         ):
             # Fusion: gemm, bias + gelu + quantize
             dbias_dact_quantize_func = _act_func(
-                args.activation, args.fp8_recipe if args.fp8 else None
+                args.activation, dbias_fusion=args.fp8 and args.recipe_dbias_dact_fusion
             )[2]
-            fc1_bias_grad, dact = dbias_dact_quantize_func(
+            fc1_bias_grad, dact = dbias_dact_quantize_func(  # pylint: disable=not-callable
                 fc2_dgrad,
                 fc1_out.to(args.activation_dtype),
                 args.fc1_grad_output_quantizer,
@@ -1716,9 +1716,7 @@ def _layernorm_mlp_backward_impl(
         else:
             # Fusion: gemm + gelu,
             if not fc2_dgrad_gemm_gelu_fusion:
-                activation_func_bwd = _act_func(
-                    args.activation, args.fp8_recipe if args.fp8 else None
-                )[1]
+                activation_func_bwd = _act_func(args.activation)[1]
                 dact = activation_func_bwd(
                     fc2_dgrad, fc1_out.to(args.activation_dtype), None, **act_params
                 )  # activation in high precision
@@ -1730,7 +1728,7 @@ def _layernorm_mlp_backward_impl(
                         args.fc1_grad_output_quantizer,
                         (Float8BlockQuantizer, IdentityQuantizer),
                     )
-                    or args.fp8_recipe.custom()
+                    or args.recipe_custom
                 ):
                     fc1_bias_grad = dact.view(-1, dact.shape[-1]).sum(dim=0)
                     dact = args.fc1_grad_output_quantizer(dact)
@@ -1836,7 +1834,11 @@ def _layernorm_mlp_backward_impl(
         elif args.set_parallel_mode and not ub_bulk_wgrad:
             fc1_dgrad = gemm_out
             if args.sequence_parallel:
-                if args.return_layernorm_output and args.return_layernorm_output_gathered:
+                if (
+                    args.return_layernorm_output
+                    and args.return_layernorm_output_gathered
+                    and args.grad_ln_out is not None
+                ):
                     fc1_dgrad = fc1_dgrad + args.grad_ln_out.view_as(fc1_dgrad)
                 fc1_dgrad, fc1_dgrad_work = reduce_scatter_along_first_dim(
                     fc1_dgrad,
@@ -1977,7 +1979,11 @@ def _layernorm_mlp_backward_impl(
 
         # Residual gradient
         dgrad = fc1_dgrad.view(inputmat.shape)
-        if args.return_layernorm_output and not args.return_layernorm_output_gathered:
+        if (
+            args.return_layernorm_output
+            and not args.return_layernorm_output_gathered
+            and args.grad_ln_out is not None
+        ):
             dgrad = dgrad + args.grad_ln_out.view_as(dgrad)
 
         # Norm gradient
@@ -2721,6 +2727,9 @@ class LayerNormMLP(TransformerEngineBaseModule):
 
             dgrad_use_split_accumulator = _2X_ACC_DGRAD
             wgrad_use_split_accumulator = _2X_ACC_WGRAD
+            recipe_float8_block_scaling = False
+            recipe_custom = False
+            recipe_dbias_dact_fusion = False
             if self.fp8:
                 _recipe = FP8GlobalStateManager.get_fp8_recipe()
                 backward_override = _recipe.backward_override
@@ -2728,6 +2737,9 @@ class LayerNormMLP(TransformerEngineBaseModule):
                     dgrad_use_split_accumulator = _recipe.fp8_gemm_dgrad.use_split_accumulator
                 if hasattr(_recipe, "fp8_gemm_wgrad"):
                     wgrad_use_split_accumulator = _recipe.fp8_gemm_wgrad.use_split_accumulator
+                recipe_float8_block_scaling = _recipe.float8_block_scaling()
+                recipe_custom = _recipe.custom()
+                recipe_dbias_dact_fusion = _recipe_has_dbias_dact_fusion(_recipe)
             else:
                 backward_override = None
 
@@ -2807,6 +2819,9 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 backward_override=backward_override,
                 dgrad_use_split_accumulator=dgrad_use_split_accumulator,
                 wgrad_use_split_accumulator=wgrad_use_split_accumulator,
+                recipe_float8_block_scaling=recipe_float8_block_scaling,
+                recipe_custom=recipe_custom,
+                recipe_dbias_dact_fusion=recipe_dbias_dact_fusion,
                 debug=debug,
                 # weight-workspace caching
                 is_first_microbatch=is_first_microbatch,

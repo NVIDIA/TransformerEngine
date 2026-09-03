@@ -13,8 +13,10 @@ import torch
 from .. import cpp_extensions as tex
 from ..constants import TE_DType
 from ..distributed import in_fp8_activation_recompute_phase
+from ..dynamo import TensorSpec
 from ..export import is_in_onnx_export_mode
 from ..quantization import FP8GlobalStateManager
+from ..quantized_tensor import Quantizer
 from ..tensor.hybrid_tensor import HybridQuantizer
 from ..utils import get_default_init_method
 
@@ -336,3 +338,38 @@ def check_fp8_reduce_and_update(restore_first_module: bool = False) -> bool:
     if restore_first_module or in_fp8_activation_recompute_phase():
         qstate.is_first_fp8_module = first_fp8_module
     return result
+
+
+def sp_out_leading(leading: int, args: Any) -> int:
+    """Output's leading (sequence) dim from the input's: sequence parallelism
+    gathers it (column-parallel) or scatters it (row-parallel). ``args`` carries
+    ``sequence_parallel`` / ``parallel_mode`` / ``tp_size``."""
+    if not args.sequence_parallel:
+        return leading
+    if args.parallel_mode == "column":
+        return leading * args.tp_size
+    if args.parallel_mode == "row":
+        return leading // args.tp_size
+    return leading
+
+
+def sp_inp_leading(leading: int, args: Any) -> int:
+    """Inverse of :func:`sp_out_leading`."""
+    if not args.sequence_parallel:
+        return leading
+    if args.parallel_mode == "column":
+        return leading // args.tp_size
+    if args.parallel_mode == "row":
+        return leading * args.tp_size
+    return leading
+
+
+def fake_workspace_valid(workspace: TensorSpec, quantizer: Optional[Quantizer]) -> bool:
+    """Spec-level mirror of ``_is_weight_workspace_valid``: the cached workspace
+    must already hold every inner buffer the quantizer's current usage needs."""
+    if quantizer is None:
+        return True
+    required = TensorSpec(
+        shape=workspace.shape, dtype=workspace.dtype, quantizer=quantizer, device=workspace.device
+    ).inner_names()
+    return set(required) <= set(workspace.inner_names())

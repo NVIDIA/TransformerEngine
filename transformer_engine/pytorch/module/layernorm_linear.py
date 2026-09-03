@@ -7,7 +7,7 @@ import os
 import warnings
 import weakref
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Optional, Tuple, Union, List
+from typing import Any, Callable, ClassVar, Dict, Optional, Tuple, Union, List
 from functools import reduce
 from operator import mul as multiply_op
 
@@ -68,6 +68,7 @@ from ._common import (
     apply_normalization,
     check_fp8_reduce_and_update,
     noop_cat,
+    sp_inp_leading,
     set_quantizer_amax_reduction_group,
     set_quantizer_usage_for_wgrad_all_gather,
     WeightGradStore,
@@ -143,6 +144,7 @@ class LayerNormLinearFwdArgs:
     activation_dtype: torch.dtype
     fp8: bool
     fp8_calibration: bool
+    fp8_output: bool
     backward_override: Optional[str]
     dgrad_use_split_accumulator: bool
     wgrad_use_split_accumulator: bool
@@ -198,6 +200,9 @@ class LayerNormLinearFwdArgs:
 @dataclass(slots=True)
 class LayerNormLinearBwdArgs:
     """Single-argument bag for the backward path of :class:`_LayerNormLinear`."""
+
+    # One field per user output of the forward op, in order (see custom_op.py).
+    GRAD_OUTPUT_FIELDS: ClassVar[Tuple[str, ...]] = ("grad_output", "grad_ln_out")
 
     # --- Incoming gradients (populated at backward entry) ---
     grad_output: Optional[torch.Tensor] = None
@@ -780,7 +785,9 @@ def _layernorm_linear_setup_ctx(
     bwd_args.requires_dgrad = fwd_args.input_requires_grad
     bwd_args.requires_wgrad = fwd_args.weight_requires_grad
     bwd_args.ln_out_needs_gather = ctx_attrs["ln_out_needs_gather"]
-    bwd_args.inp_shape = inp.shape
+    # Not stored (SymInt dims are not hashable in OpaqueValueBundle under
+    # torch.compile(dynamic=True)); backward rederives it from grad_output.
+    bwd_args.inp_shape = None
 
     # Normalization
     bwd_args.normalization = fwd_args.normalization
@@ -914,6 +921,10 @@ def _layernorm_linear_backward_impl(
     """
     grad_output = args.grad_output
     assert grad_output is not None
+    if args.inp_shape is None:
+        in_features = args.saved_weight.shape[-1]
+        inp_leading = sp_inp_leading(grad_output.shape[0], args)
+        args.inp_shape = torch.Size([inp_leading, *grad_output.shape[1:-1], in_features])
 
     # NVTX label for profiling
     nvtx_label = "transformer_engine._LayerNormLinear.backward"
@@ -1403,7 +1414,11 @@ def _layernorm_linear_backward_impl(
 
         # Residual gradient
         dgrad = dgrad.view(inputmat.shape)
-        if args.return_layernorm_output and not args.return_layernorm_output_gathered:
+        if (
+            args.return_layernorm_output
+            and not args.return_layernorm_output_gathered
+            and args.grad_ln_out is not None
+        ):
             dgrad = dgrad + args.grad_ln_out.view_as(dgrad)
 
         # Norm gradient
@@ -2181,6 +2196,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 activation_dtype=self.activation_dtype,
                 fp8=self.fp8,
                 fp8_calibration=self.fp8_calibration,
+                fp8_output=fp8_output,
                 backward_override=backward_override,
                 dgrad_use_split_accumulator=dgrad_use_split_accumulator,
                 wgrad_use_split_accumulator=wgrad_use_split_accumulator,
