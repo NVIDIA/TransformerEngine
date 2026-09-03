@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
 import os
 from typing import Any, Optional
 
@@ -14,6 +15,7 @@ import torch
 import transformer_engine_torch as tex
 
 from ...constants import MXFP8_BLOCK_SCALING_SIZE
+from ...ep import EpConfig
 from ...quantization import Recipe
 from ...tensor import GroupedTensor, Quantizer
 from .._common import (
@@ -29,33 +31,168 @@ from ..fuser import register_forward_backward_fusion
 from ..op import FusedOperation, FusibleOperation, OperationContext
 
 
+@dataclass
+class _MoeEpResource:
+    """One cached cuDNN operator and its prepared symmetric buffers."""
+
+    moe: Any
+    requirements: Any = None
+    lane: Any = None
+    symmetric_buffers: Any = None
+    device: Optional[torch.device] = None
+
+
 class _MoeEpResourceManager:
-    """Track MegaMoE resources that share the process-wide EP runtime."""
+    """Share one cuDNN MoeEp instance per compatible fused-MoE configuration."""
 
     def __init__(self) -> None:
-        self._ops: list["FusedMoeEp"] = []
+        self._resources: dict[tuple[Any, ...], _MoeEpResource] = {}
 
-    def register(self, op: "FusedMoeEp") -> None:
-        """Register a resource-owning fused operation."""
-        self._ops.append(op)
+    def get(
+        self,
+        config: EpConfig,
+        device: torch.device,
+        intermediate_size: int,
+        glu_interleave_size: int,
+    ) -> _MoeEpResource:
+        """Get or construct the cuDNN operator for one complete configuration."""
+        device = torch.device(device)
+        combine_format = _get_megamoe_combine_format()
+        key = self._resource_key(
+            config,
+            device,
+            intermediate_size,
+            glu_interleave_size,
+            combine_format,
+        )
+        resource = self._resources.get(key)
+        if resource is None:
+            resource = _MoeEpResource(
+                moe=self._construct_moe(
+                    config,
+                    intermediate_size,
+                    glu_interleave_size,
+                    combine_format,
+                ),
+            )
+            self._resources[key] = resource
+        self._prepare(resource, device)
+        return resource
 
-    def unregister(self, op: "FusedMoeEp") -> None:
-        """Stop tracking a closed fused operation."""
-        try:
-            self._ops.remove(op)
-        except ValueError:
-            pass
+    @staticmethod
+    def _construct_moe(
+        config: EpConfig,
+        intermediate_size: int,
+        glu_interleave_size: int,
+        combine_format: str,
+    ):
+        """Construct one cuDNN MoeEp instance from its complete static configuration."""
+        moe_ep_cls = _import_cudnn_moe_ep()
+        if moe_ep_cls is None:
+            raise ImportError(
+                "FusedMoeEp requires cudnn.moe_ep.MoeEp. Install the in-tree "
+                "cuDNN frontend with: pip install --force-reinstall "
+                "'./cudnn_frontend[moe_ep]'"
+            )
+        from cudnn.moe_ep import MoeEpTuningConfig
 
-    def finalize(self) -> None:
-        """Close all resources, attempting every close if one fails."""
+        forward_group_hint = 768 if combine_format == "mxfp8" else 1024
+        return moe_ep_cls(
+            num_experts=config.num_local_experts * config.ep_group.size(),
+            hidden_size=config.hidden_dim,
+            intermediate_size=intermediate_size,
+            top_k=config.top_k,
+            ep_group=config.ep_group,
+            max_tokens_per_rank=config.max_tokens_per_rank,
+            max_recv_size_per_rank=config.recv_capacity_per_rank,
+            drop_on_overflow=config.drop_on_overflow,
+            apply_topk_in_fc1=True,
+            weight_interleave_size=glu_interleave_size,
+            token_padding_size=128,
+            sf_padding_size=128,
+            combine_format=combine_format,
+            output_format="bf16",
+            forward_tuning=MoeEpTuningConfig(
+                token_back_mode="standalone_warps",
+                epi_flag_batch=(2, 2),
+                token_in_flag_batch=8,
+                group_hint=forward_group_hint,
+                reduce_topk_in_kernel=False,
+            ),
+            backward_tuning=MoeEpTuningConfig(
+                token_back_mode="epi_warps",
+                epi_flag_batch=(2, 2),
+                token_in_flag_batch=8,
+                group_hint=512,
+                reduce_topk_in_kernel=False,
+            ),
+        )
+
+    @staticmethod
+    def _resource_key(
+        config: EpConfig,
+        device: torch.device,
+        intermediate_size: int,
+        glu_interleave_size: int,
+        combine_format: str,
+    ) -> tuple[Any, ...]:
+        """Return every value that affects a shared cuDNN MoeEp instance."""
+        return (
+            id(config.ep_group),
+            device.type,
+            device.index,
+            config.top_k,
+            config.hidden_dim,
+            intermediate_size,
+            config.num_local_experts,
+            config.max_tokens_per_rank,
+            config.recv_capacity_per_rank,
+            config.alignment,
+            config.payload_dtype,
+            config.zero_copy,
+            config.drop_on_overflow,
+            glu_interleave_size,
+            combine_format,
+        )
+
+    def _prepare(
+        self,
+        resource: _MoeEpResource,
+        device: torch.device,
+    ) -> tuple[Any, Any, Any]:
+        """Prepare and cache one resource's lane and symmetric buffer views."""
+        device = torch.device(device)
+        if resource.requirements is None:
+            resource.requirements = resource.moe.prepare_training(
+                lane_count=1,
+                device=device,
+            )
+            resource.lane = resource.moe.training_lanes[0]
+            resource.symmetric_buffers = resource.moe.training_symmetric_buffers(resource.lane)
+            resource.device = device
+        elif resource.device != device:
+            raise ValueError(
+                f"shared MoeEp is prepared on {resource.device}, but was requested on {device}"
+            )
+        return resource.requirements, resource.lane, resource.symmetric_buffers
+
+    def cleanup(self) -> None:
+        """Close every cached MoeEp instance and clear the registry."""
         first_error = None
-        while self._ops:
-            op = self._ops[-1]
+        for resource in tuple(self._resources.values()):
             try:
-                op.close()
+                if resource.moe is not None:
+                    resource.moe.close()
             except Exception as error:  # pylint: disable=broad-exception-caught
                 if first_error is None:
                     first_error = error
+            finally:
+                resource.requirements = None
+                resource.lane = None
+                resource.symmetric_buffers = None
+                resource.device = None
+                resource.moe = None
+        self._resources.clear()
         if first_error is not None:
             raise first_error
 
@@ -64,7 +201,7 @@ _MOE_EP_RESOURCE_MANAGER = _MoeEpResourceManager()
 
 
 def _cudnn_megamoe_supported() -> bool:
-    """Whether cuDNN FE provides the fixed-resource training API."""
+    """Whether cuDNN FE provides the stateless training API."""
     try:
         import cudnn
         import cudnn.moe_ep as cudnn_moe_ep
@@ -75,20 +212,24 @@ def _cudnn_megamoe_supported() -> bool:
         for module, name in (
             (cudnn, "grouped_gemm_wgrad_wrapper_sm100"),
             (cudnn_moe_ep, "MoeEp"),
-            (cudnn_moe_ep, "MoeEpTrainingWeights"),
+            (cudnn_moe_ep, "MoeEpTuningConfig"),
+            (cudnn_moe_ep.MoeEp, "training_symmetric_buffers"),
+            (cudnn_moe_ep, "MoeEpNativeForwardWeights"),
+            (cudnn_moe_ep, "MoeEpNativeBackwardWeights"),
+            (cudnn_moe_ep, "MoeEpTrainingForwardOutputs"),
+            (cudnn_moe_ep, "MoeEpTrainingBackwardOutputs"),
             (cudnn_moe_ep, "MoeEpTrainingWgradOperands"),
         )
     )
 
 
 def finalize_moe_ep_resources() -> None:
-    """Close cuDNN/NVSHMEM resources before destroying the EP process group."""
+    """Close all cached cuDNN/NVSHMEM resources before EP group teardown."""
     # CUDA graph callables form reference cycles. Collect unreachable graph
     # executables before tearing down communication resources they captured.
     import gc
-
     gc.collect()
-    _MOE_EP_RESOURCE_MANAGER.finalize()
+    _MOE_EP_RESOURCE_MANAGER.cleanup()
 
 
 def _get_megamoe_combine_format() -> str:
@@ -97,109 +238,48 @@ def _get_megamoe_combine_format() -> str:
     return "mxfp8" if enabled > 0 else "bf16"
 
 
-def _get_megamoe_training_slot_count() -> int:
-    """Return the fixed number of concurrent MegaMoE training flights."""
-    value = os.environ.get("NVTE_MEGAMOE_TRAINING_SLOT_COUNT", "8")
-    try:
-        slot_count = int(value)
-    except ValueError as exc:
-        raise ValueError(
-            f"NVTE_MEGAMOE_TRAINING_SLOT_COUNT must be a positive integer, got {value!r}"
-        ) from exc
-    if slot_count <= 0:
-        raise ValueError(
-            f"NVTE_MEGAMOE_TRAINING_SLOT_COUNT must be a positive integer, got {value!r}"
-        )
-    return slot_count
+def _allocate_training_buffer(requirements, name: str, device: torch.device) -> torch.Tensor:
+    """Allocate one caller-owned buffer from cuDNN's named contract."""
+    shape, stride, dtype, _alignment = requirements[name]
+    return torch.empty_strided(shape, stride, dtype=dtype, device=device)
 
 
-def _pack_as_cudnn_moe_tensor(
-    data: torch.Tensor,
-    scale: Optional[torch.Tensor],
+def _quantize_into_cudnn_symmetric_buffer(
+    input_: torch.Tensor,
+    data_buffer: torch.Tensor,
+    scale_buffer: torch.Tensor,
     block_scaled_cls: type,
 ):
-    """Represent data and scales using the public cuDNN MoE tensor type."""
-    if scale is None:
-        return data
+    """Quantize a plain tensor directly into cuDNN's symmetric MXFP8 storage."""
+    from ...tensor.mxfp8_tensor import MXFP8Quantizer
+    from ...tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
+
+    token_count, hidden_size = input_.shape
+    scale_rows = (token_count + 127) // 128 * 128
+    quantizer = MXFP8Quantizer(
+        tex.DType.kFloat8E4M3,
+        rowwise=True,
+        columnwise=False,
+    )
+    data = data_buffer[:token_count]
+    padded_scale = scale_buffer[:scale_rows]
+    output = MXFP8TensorStorage(
+        data.view(torch.uint8),
+        padded_scale.view(torch.uint8),
+        None,
+        None,
+        tex.DType.kFloat8E4M3,
+        quantizer,
+        False,
+        fake_dtype=input_.dtype,
+    )
+    tex.quantize(input_, quantizer, output, None)
     return block_scaled_cls(
         data=data,
-        scale=scale,
+        scale=padded_scale[:token_count, : hidden_size // MXFP8_BLOCK_SCALING_SIZE],
         format="mxfp8",
-        logical_shape=tuple(data.shape),
+        logical_shape=tuple(input_.shape),
         axis=1,
-    )
-
-
-def _pack_cudnn_weights(
-    op: GroupedLinear,
-    *,
-    block_scaled_cls: Optional[type] = None,
-):
-    """Pack TE rowwise/columnwise weight storage for cuDNN MoE.
-
-    The rowwise binding is a zero-copy ``(E, in, out)`` K-major view over TE's
-    rowwise ``(E, out, in)`` storage. The columnwise binding is a zero-copy
-    ``(E, out, in)`` view backed by TE's columnwise storage.
-    """
-    weight = op.weight
-    num_groups = op.num_groups
-    out_features = op.out_features
-    in_features = op.in_features
-    weight_quantizer = op.get_quantizer("forward", 1)
-    if weight_quantizer is None and weight.quantizer is None:
-        return (
-            weight.rowwise_data.view(
-                num_groups,
-                out_features,
-                in_features,
-            ).permute(0, 2, 1),
-            None,
-        )
-
-    if weight_quantizer is not None and weight.quantizer is None:
-        weight_quantizer.set_usage(rowwise=True, columnwise=True)
-        weight = tex.group_quantize(
-            weight.rowwise_data.view(weight.logical_shape),
-            weight_quantizer,
-            op.num_groups,
-            None,
-        )
-    data = (
-        weight.rowwise_data.view(num_groups, out_features, in_features)
-        .view(torch.float8_e4m3fn)
-        .permute(0, 2, 1)
-    )
-    scale = (
-        weight.scale_inv.view(
-            num_groups,
-            out_features,
-            in_features // MXFP8_BLOCK_SCALING_SIZE,
-        )
-        .view(torch.float8_e8m0fnu)
-        .permute(0, 2, 1)
-    )
-    if block_scaled_cls is None:
-        from cudnn.moe_ep import BlockScaledTensor as block_scaled_cls
-    if weight.columnwise_data is None or weight.columnwise_scale_inv is None:
-        raise ValueError("FusedMoeEp training requires columnwise MXFP8 weight storage")
-
-    columnwise_data = weight.columnwise_data.view(
-        num_groups,
-        out_features,
-        in_features,
-    ).view(torch.float8_e4m3fn)
-    columnwise_scale = weight.columnwise_scale_inv.view(
-        num_groups,
-        out_features // MXFP8_BLOCK_SCALING_SIZE,
-        in_features,
-    ).view(torch.float8_e8m0fnu)
-    return (
-        _pack_as_cudnn_moe_tensor(data, scale, block_scaled_cls),
-        _pack_as_cudnn_moe_tensor(
-            columnwise_data,
-            columnwise_scale,
-            block_scaled_cls,
-        ),
     )
 
 
@@ -432,80 +512,124 @@ class FusedMoeEp(FusedOperation):
         combine: MoeCombine,
     ) -> None:
         super().__init__([dispatch, fc1, activation, fc2, combine])
-        moe_ep_cls = _import_cudnn_moe_ep()
-        if moe_ep_cls is None:
-            raise ImportError(
-                "FusedMoeEp requires cudnn.moe_ep.MoeEp. Install the in-tree "
-                "cuDNN frontend with: pip install --force-reinstall "
-                "'./cudnn_frontend[moe_ep]'"
-            )
         from cudnn.moe_ep import BlockScaledTensor
-
-        config = dispatch.config
-        ep_group = config.ep_group
-        ep_size = ep_group.size()
-        combine_format = _get_megamoe_combine_format()
         self._block_scaled_cls = BlockScaledTensor
-        self._moe = moe_ep_cls(
-            num_experts=config.num_local_experts * ep_size,
-            hidden_size=config.hidden_dim,
-            intermediate_size=fc2.in_features,
-            top_k=config.top_k,
-            ep_group=ep_group,
-            max_tokens_per_rank=config.max_tokens_per_rank,
-            max_recv_size_per_rank=config.recv_capacity_per_rank,
-            drop_on_overflow=config.drop_on_overflow,
-            apply_topk_in_fc1=True,
-            weight_interleave_size=activation.glu_interleave_size,
-            token_padding_size=128,
-            sf_padding_size=128,
-            combine_format=combine_format,
-            output_format="bf16",
-        )
-        self._training_resources = None
-        self._training_slot_count = _get_megamoe_training_slot_count()
-        self._free_training_slots = []
-        self._active_training_slots = set()
-        self._training_wgrad_workspaces = {}
-        _MOE_EP_RESOURCE_MANAGER.register(self)
+        self._resource = None
 
-    def close(self) -> None:
-        """Release MegaMoE training workspaces and its NVSHMEM runtime."""
-        if self._moe is None:
-            _MOE_EP_RESOURCE_MANAGER.unregister(self)
+    def _prepare_training(self, device: torch.device) -> None:
+        """Acquire and prepare the shared cuDNN runtime on the execution device."""
+        if self._resource is not None:
             return
-        moe = self._moe
-        try:
-            self._training_resources = None
-            self._training_wgrad_workspaces.clear()
-            self._free_training_slots.clear()
-            self._active_training_slots.clear()
-            moe.close()
-        finally:
-            self._moe = None
-            _MOE_EP_RESOURCE_MANAGER.unregister(self)
-
-    def _make_training_weights(self):
-        """Bind cuDNN weight views to the GroupedLinear parameters' current storage."""
-        from cudnn.moe_ep import MoeEpTrainingWeights
-
-        fc1_rowwise, fc1_columnwise = _pack_cudnn_weights(
-            self.fc1,
-            block_scaled_cls=self._block_scaled_cls,
+        resource = _MOE_EP_RESOURCE_MANAGER.get(
+            self.dispatch.config,
+            device,
+            self.fc2.in_features,
+            self.basic_ops[2].glu_interleave_size,
         )
-        fc2_rowwise, fc2_columnwise = _pack_cudnn_weights(
-            self.fc2,
-            block_scaled_cls=self._block_scaled_cls,
-        )
-        return MoeEpTrainingWeights(
-            forward_fc1=fc1_rowwise,
-            forward_fc2=fc2_rowwise,
-            backward_w2_transpose=fc2_columnwise,
-            backward_w1_transpose=fc1_columnwise,
+        self._resource = resource
+
+    def _make_native_training_weights(self):
+        """Expose TE payloads with freshly swizzled caller-owned scale buffers."""
+        from cudnn.moe_ep import (
+            MoeEpNativeBackwardWeights,
+            MoeEpNativeForwardWeights,
+            MoeEpNativeWeight,
+            MoeEpNativeWeightLayout,
         )
 
-    def _make_training_wgrad_workspaces(self, slots):
-        """Allocate caller-owned descriptor workspaces for each slot and FC."""
+        def swizzle(weight: GroupedTensor):
+            native = weight.copy()
+            tex.grouped_swizzle_for_gemm(native, rowwise=True, columnwise=True)
+            return native
+
+        fc1 = swizzle(self.fc1.weight)
+        fc2 = swizzle(self.fc2.weight)
+        num_experts = self.fc1.num_groups
+
+        def data(tensor: torch.Tensor, shape: tuple[int, ...]) -> torch.Tensor:
+            return tensor.view(*shape).view(torch.float8_e4m3fn)
+
+        def scale(tensor: torch.Tensor) -> torch.Tensor:
+            return tensor.view(torch.float8_e8m0fnu).reshape(num_experts, -1)
+
+        fc1_rowwise = data(
+            fc1.rowwise_data,
+            (num_experts, self.fc1.out_features, self.fc1.in_features),
+        ).permute(0, 2, 1)
+        fc2_rowwise = data(
+            fc2.rowwise_data,
+            (num_experts, self.fc2.out_features, self.fc2.in_features),
+        ).permute(0, 2, 1)
+        fc1_columnwise = data(
+            fc1.columnwise_data,
+            (num_experts, self.fc1.out_features, self.fc1.in_features),
+        )
+        fc2_columnwise = data(
+            fc2.columnwise_data,
+            (num_experts, self.fc2.out_features, self.fc2.in_features),
+        )
+        forward = MoeEpNativeForwardWeights(
+            fc1=MoeEpNativeWeight(
+                fc1_rowwise,
+                scale(fc1.scale_inv),
+                MoeEpNativeWeightLayout.FORWARD_FC1_GATE_UP_INTERLEAVED_32_V1,
+            ),
+            fc2=MoeEpNativeWeight(
+                fc2_rowwise,
+                scale(fc2.scale_inv),
+                MoeEpNativeWeightLayout.FORWARD_FC2_K_MAJOR_V1,
+            ),
+        )
+        backward = MoeEpNativeBackwardWeights(
+            w2_transpose=MoeEpNativeWeight(
+                fc2_columnwise,
+                scale(fc2.columnwise_scale_inv),
+                MoeEpNativeWeightLayout.BACKWARD_W2_TRANSPOSE_V1,
+            ),
+            w1_transpose=MoeEpNativeWeight(
+                fc1_columnwise,
+                scale(fc1.columnwise_scale_inv),
+                MoeEpNativeWeightLayout.BACKWARD_W1_TRANSPOSE_GATE_UP_INTERLEAVED_32_V1,
+            ),
+        )
+        return forward, backward
+
+    def _make_training_forward_outputs(self, device: torch.device):
+        """Allocate forward output and backward-state destinations."""
+        from cudnn.moe_ep import MoeEpTrainingForwardOutputs
+
+        requirements = self._resource.requirements
+        return MoeEpTrainingForwardOutputs(
+            output=self._resource.symmetric_buffers["output"],
+            fc1_preact=_allocate_training_buffer(requirements, "fc1_preact", device),
+            fc1_a=_allocate_training_buffer(requirements, "fc1_a", device),
+            fc1_sfa=_allocate_training_buffer(requirements, "fc1_sfa", device),
+            valid_route_counts=_allocate_training_buffer(
+                requirements,
+                "valid_route_counts",
+                device,
+            ),
+            expert_offsets=_allocate_training_buffer(requirements, "expert_offsets", device),
+        )
+
+    def _make_training_backward_outputs(self, device: torch.device):
+        """Allocate gradient and grouped-WGrad operand destinations."""
+        from cudnn.moe_ep import MoeEpTrainingBackwardOutputs
+
+        requirements = self._resource.requirements
+        return MoeEpTrainingBackwardOutputs(
+            grad_activation=self._resource.symmetric_buffers["grad_activation"],
+            dprob=self._resource.symmetric_buffers["dprob"],
+            fc1_b=_allocate_training_buffer(requirements, "fc1_b", device),
+            fc1_sfb=_allocate_training_buffer(requirements, "fc1_sfb", device),
+            fc2_a=_allocate_training_buffer(requirements, "fc2_a", device),
+            fc2_sfa=_allocate_training_buffer(requirements, "fc2_sfa", device),
+            fc2_b=_allocate_training_buffer(requirements, "fc2_b", device),
+            fc2_sfb=_allocate_training_buffer(requirements, "fc2_sfb", device),
+        )
+
+    def _make_training_wgrad_workspaces(self):
+        """Allocate caller-owned descriptor workspaces for both FC gradients."""
         from cudnn import get_grouped_gemm_wgrad_workspace_size_sm100
 
         workspace_bytes = get_grouped_gemm_wgrad_workspace_size_sm100(
@@ -513,45 +637,10 @@ class FusedMoeEp(FusedOperation):
             output_mode="dense",
             input_order="tensor2d",
         )
-        return {
-            slot: (
-                torch.empty(workspace_bytes, dtype=torch.uint8, device=self.fc1.weight.device),
-                torch.empty(workspace_bytes, dtype=torch.uint8, device=self.fc2.weight.device),
-            )
-            for slot in slots
-        }
-
-    def _begin_training_flight(self):
-        """Reserve one fixed training slot for a forward/backward flight."""
-        if self._training_resources is None:
-            self._training_resources = self._moe.prepare_training_resources(
-                self._make_training_weights(),
-                slot_count=self._training_slot_count,
-                lane_count=1,
-            )
-            self._free_training_slots.extend(self._training_resources.slots)
-            self._training_wgrad_workspaces.update(
-                self._make_training_wgrad_workspaces(self._training_resources.slots)
-            )
-        if not self._free_training_slots:
-            raise RuntimeError(
-                "FusedMoeEp has no free training slots; increase "
-                "NVTE_MEGAMOE_TRAINING_SLOT_COUNT "
-                f"(currently {self._training_slot_count}) "
-                "or complete backward for an outstanding microbatch"
-            )
-        if not self._active_training_slots:
-            self._training_resources.refresh_weights()
-        slot = self._free_training_slots.pop(0)
-        self._active_training_slots.add(slot)
-        return slot
-
-    def _release_training_flight(self, slot) -> None:
-        """Return a completed forward/backward flight's slot to the pool."""
-        if slot not in self._active_training_slots:
-            raise RuntimeError("FusedMoeEp attempted to release an inactive training slot")
-        self._active_training_slots.remove(slot)
-        self._free_training_slots.append(slot)
+        return (
+            torch.empty(workspace_bytes, dtype=torch.uint8, device=self.fc1.weight.device),
+            torch.empty(workspace_bytes, dtype=torch.uint8, device=self.fc2.weight.device),
+        )
 
     @property
     def dispatch(self) -> MoeDispatch:
@@ -600,30 +689,38 @@ class FusedMoeEp(FusedOperation):
         if not topk_weights.is_contiguous():
             topk_weights = topk_weights.contiguous()
 
-        slot = self._begin_training_flight()
-        try:
-            output = self._training_resources.forward(
-                slot,
-                self._training_resources.lanes[0],
-                activation,
-                topk_idx,
-                topk_weights,
-            )
-        except Exception:
-            self._release_training_flight(slot)
-            raise
+        self._prepare_training(activation.device)
+        activation = _quantize_into_cudnn_symmetric_buffer(
+            activation,
+            self._resource.symmetric_buffers["forward_input"],
+            self._resource.symmetric_buffers["forward_input_scale"],
+            self._block_scaled_cls,
+        )
+        forward_weights, backward_weights = self._make_native_training_weights()
+        forward_out = self._make_training_forward_outputs(activation.device)
+        output = self._resource.moe.training_forward(
+            self._resource.lane,
+            activation,
+            topk_idx,
+            topk_weights,
+            weights=forward_weights,
+            out=forward_out,
+        )
 
         if any(ctx.requires_grad for ctx in basic_op_ctxs):
-            basic_op_ctxs[0].moe_ep_training_slot = slot
-            basic_op_ctxs[0].prev_op_grad_output_quantizer = prev_op_grad_output_quantizer
-        else:
-            try:
-                self._training_resources.finalize_overflow(
-                    (slot,),
-                    self._training_resources.lanes[0],
-                )
-            finally:
-                self._release_training_flight(slot)
+            basic_op_ctxs[0].save_for_backward(
+                topk_idx,
+                topk_weights,
+                forward_out.fc1_preact,
+                forward_out.fc1_a,
+                forward_out.fc1_sfa,
+                forward_out.valid_route_counts,
+                forward_out.expert_offsets,
+                backward_weights.w2_transpose.payload,
+                backward_weights.w2_transpose.scale,
+                backward_weights.w1_transpose.payload,
+                backward_weights.w1_transpose.scale,
+            )
 
         return output, [
             (None, None),
@@ -651,32 +748,70 @@ class FusedMoeEp(FusedOperation):
         )
         if not grad_output.is_contiguous():
             grad_output = grad_output.contiguous()
-        slot = basic_op_ctxs[0].moe_ep_training_slot
-        try:
-            grad_input, grad_topk_weights, wgrad_operands = self._training_resources.backward(
-                slot,
-                self._training_resources.lanes[0],
-                grad_output,
-            )
-            fc1_workspace, fc2_workspace = self._training_wgrad_workspaces[slot]
-            fc1_param_grads = _compute_grouped_weight_grad(
-                self.fc1,
-                wgrad_operands,
-                "fc1",
-                fc1_workspace,
-            )
-            fc2_param_grads = _compute_grouped_weight_grad(
-                self.fc2,
-                wgrad_operands,
-                "fc2",
-                fc2_workspace,
-            )
-            self._training_resources.finalize_overflow(
-                (slot,),
-                self._training_resources.lanes[0],
-            )
-        finally:
-            self._release_training_flight(slot)
+        grad_output = _quantize_into_cudnn_symmetric_buffer(
+            grad_output,
+            self._resource.symmetric_buffers["backward_input"],
+            self._resource.symmetric_buffers["backward_input_scale"],
+            self._block_scaled_cls,
+        )
+        (
+            topk_idx,
+            topk_weights,
+            fc1_preact,
+            fc1_a,
+            fc1_sfa,
+            valid_route_counts,
+            expert_offsets,
+            w2_payload,
+            w2_scale,
+            w1_payload,
+            w1_scale,
+        ) = basic_op_ctxs[0].saved_tensors
+        from cudnn.moe_ep import (
+            MoeEpNativeBackwardWeights,
+            MoeEpNativeWeight,
+            MoeEpNativeWeightLayout,
+        )
+
+        backward_weights = MoeEpNativeBackwardWeights(
+            w2_transpose=MoeEpNativeWeight(
+                w2_payload,
+                w2_scale,
+                MoeEpNativeWeightLayout.BACKWARD_W2_TRANSPOSE_V1,
+            ),
+            w1_transpose=MoeEpNativeWeight(
+                w1_payload,
+                w1_scale,
+                MoeEpNativeWeightLayout.BACKWARD_W1_TRANSPOSE_GATE_UP_INTERLEAVED_32_V1,
+            ),
+        )
+        backward_out = self._make_training_backward_outputs(grad_output.device)
+        grad_input, grad_topk_weights, wgrad_operands = self._resource.moe.training_backward(
+            self._resource.lane,
+            grad_output,
+            topk_idx,
+            topk_weights,
+            weights=backward_weights,
+            fc1_preact=fc1_preact,
+            fc1_a=fc1_a,
+            fc1_sfa=fc1_sfa,
+            valid_route_counts=valid_route_counts,
+            expert_offsets=expert_offsets,
+            out=backward_out,
+        )
+        fc1_workspace, fc2_workspace = self._make_training_wgrad_workspaces()
+        fc1_param_grads = _compute_grouped_weight_grad(
+            self.fc1,
+            wgrad_operands,
+            "fc1",
+            fc1_workspace,
+        )
+        fc2_param_grads = _compute_grouped_weight_grad(
+            self.fc2,
+            wgrad_operands,
+            "fc2",
+            fc2_workspace,
+        )
         return (
             grad_input,
             [(), fc1_param_grads, (), fc2_param_grads, ()],
@@ -722,4 +857,8 @@ def fuse_ops(
 register_forward_backward_fusion(fuse_ops, prepend=True)
 
 
-__all__ = ["FusedMoeEp", "finalize_moe_ep_resources", "is_moe_fusion_supported"]
+__all__ = [
+    "FusedMoeEp",
+    "finalize_moe_ep_resources",
+    "is_moe_fusion_supported",
+]

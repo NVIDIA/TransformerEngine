@@ -37,7 +37,6 @@ from transformer_engine.pytorch.ops.fused.moe_ep import (
     FusedMoeEp,
     _cudnn_megamoe_supported,
     _get_megamoe_combine_format,
-    _pack_cudnn_weights,
     finalize_moe_ep_resources,
     is_moe_fusion_supported,
 )
@@ -190,15 +189,32 @@ def _degroup_mxfp8(recv_grouped, valid_counts=None):
 
 def _reference_weights(op):
     """Pack GroupedLinear weights into MoeEpReference ``(E, in, out)`` layout."""
-    packed, _ = _pack_cudnn_weights(op, block_scaled_cls=BlockScaledTensor)
-    if isinstance(packed, torch.Tensor):
-        return packed.detach()
+    weight = op.weight
+    num_groups = op.num_groups
+    out_features = op.out_features
+    in_features = op.in_features
+    data = weight.rowwise_data.view(
+        num_groups,
+        out_features,
+        in_features,
+    ).permute(0, 2, 1)
+    if weight.quantizer is None:
+        return data.detach()
+    scale = (
+        weight.scale_inv.view(
+            num_groups,
+            out_features,
+            in_features // 32,
+        )
+        .view(torch.float8_e8m0fnu)
+        .permute(0, 2, 1)
+    )
     return BlockScaledTensor(
-        data=packed.data.detach(),
-        scale=packed.scale.detach(),
-        format=packed.format,
-        logical_shape=packed.logical_shape,
-        axis=packed.axis,
+        data=data.view(torch.float8_e4m3fn).detach(),
+        scale=scale.detach(),
+        format="mxfp8",
+        logical_shape=tuple(data.shape),
+        axis=1,
     )
 
 
@@ -1167,7 +1183,7 @@ class TestMoeEpSequential(_EpTestCase):
         if torch.cuda.get_device_capability() != (10, 7):
             self.skipTest("FusedMoeEp CUDA graph test requires SM107")
         if not _cudnn_megamoe_supported():
-            self.skipTest("installed cuDNN frontend does not provide fixed training resources")
+            self.skipTest("installed cuDNN frontend does not provide stateless training")
         self._run_megamoe_mxfp8_cuda_graph_matches_eager(
             glu_interleave_size=32,
             expect_fused=True,
@@ -1269,6 +1285,8 @@ class TestMoeEpSequential(_EpTestCase):
                 static_topk_idx,
                 eager_topk_weights,
             )
+        if expect_fused:
+            self.assertIs(fused_ops[0]._resource, eager_fused_ops[0]._resource)
         tolerances = {"rtol": 0.125, "atol": 0.25}
         torch.testing.assert_close(graph_out_snapshot, eager_out, **tolerances)
 
