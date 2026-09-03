@@ -4,7 +4,7 @@
 
 import math
 import os
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from typing import Dict, List, Tuple, Optional
 import pytest
 
@@ -253,6 +253,27 @@ def assert_allclose(
 def reset_global_fp8_state():
     yield
     FP8GlobalStateManager.reset()
+
+
+@contextmanager
+def _disable_bf16_reduced_precision_reduction():
+    """TE disables cuBLASLt heuristics that store partial GEMM results in BF16.
+    This is to ensure precision is kept. This affects older archs like L40.
+    PyTorch does not do this by default, so we need to adjust PyTorch's
+    settings here to match TE's increased precision here.
+    """
+    original_value = torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction
+    torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False
+    try:
+        yield
+    finally:
+        torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = original_value
+
+
+@pytest.fixture(autouse=True)
+def disable_bf16_reduced_precision_reduction():
+    with _disable_bf16_reduced_precision_reduction():
+        yield
 
 
 class TorchScaledMaskedSoftmax(nn.Module):
