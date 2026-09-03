@@ -81,8 +81,6 @@ class DeepSeekV3Layer(torch.nn.Module):
             "expert_bias_update_rate",
             "ep_group",
             "ep_max_tokens_per_rank",
-            "ep_recv_capacity_per_rank",
-            "ep_alignment",
         }
     )
 

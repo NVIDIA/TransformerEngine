@@ -57,7 +57,6 @@ def _make_layer(ep_group, ep_size: int, num_experts: int) -> DeepSeekV3Layer:
         params_dtype=DTYPE,
         ep_group=ep_group,
         ep_max_tokens_per_rank=TOKENS_PER_RANK if ep else None,
-        ep_recv_capacity_per_rank=_recv_capacity(ep_size) if ep else None,
         **MLA_KWARGS,
     )
 

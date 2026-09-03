@@ -24,6 +24,9 @@ from transformer_engine.pytorch.quantization import (
 __all__ = ["DeepSeekV3MoE"]
 
 
+_EP_ALIGNMENT = 128
+
+
 def _make_expert_mlp(num_experts, hidden_size, ffn_hidden_size, dtype, device):
     # GroupedLinear + ScaledSwiGLU + GroupedLinear fuses into a single CuTe
     # grouped MLP on supported hardware; elsewhere it runs as three ops with
@@ -87,11 +90,6 @@ class DeepSeekV3MoE(torch.nn.Module):
               expert-parallel process group; enables the NCCL EP path.
     ep_max_tokens_per_rank : int, optional
                             max local tokens per forward (required with EP).
-    ep_recv_capacity_per_rank : int, optional
-                               receive-buffer capacity; defaults to
-                               ``ep_size * ep_max_tokens_per_rank * topk``.
-    ep_alignment : int, default = 128
-                  per-expert row alignment of the EP receive buffer.
     """
 
     def __init__(
@@ -109,8 +107,6 @@ class DeepSeekV3MoE(torch.nn.Module):
         device: Union[torch.device, str] = "cuda",
         ep_group: Optional[torch.distributed.ProcessGroup] = None,
         ep_max_tokens_per_rank: Optional[int] = None,
-        ep_recv_capacity_per_rank: Optional[int] = None,
-        ep_alignment: int = 128,
     ) -> None:
         super().__init__()
 
@@ -165,19 +161,18 @@ class DeepSeekV3MoE(torch.nn.Module):
             from transformer_engine.pytorch.ep import EpBuffer
 
             assert ep_max_tokens_per_rank is not None, "EP requires ep_max_tokens_per_rank."
-            if ep_recv_capacity_per_rank is None:
-                # Worst case plus per-expert alignment padding, rounded up to
-                # the multiple of 128 required by the fused grouped MLP.
-                cap = self.ep_size * ep_max_tokens_per_rank * topk
-                cap += num_local_experts * max(ep_alignment, 1)
-                ep_recv_capacity_per_rank = -(-cap // 128) * 128
+            # Worst case plus per-expert alignment padding, rounded up to
+            # the multiple of 128 required by the fused grouped MLP.
+            cap = self.ep_size * ep_max_tokens_per_rank * topk
+            cap += num_local_experts * _EP_ALIGNMENT
+            cap = -(-cap // _EP_ALIGNMENT) * _EP_ALIGNMENT
             self.ep_buffer = EpBuffer(
                 top_k=topk,
                 max_tokens_per_rank=ep_max_tokens_per_rank,
                 hidden_dim=hidden_size,
                 num_local_experts=num_local_experts,
-                recv_capacity_per_rank=ep_recv_capacity_per_rank,
-                alignment=ep_alignment,
+                recv_capacity_per_rank=cap,
+                alignment=_EP_ALIGNMENT,
                 device=device,
             )
 
