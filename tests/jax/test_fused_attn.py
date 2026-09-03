@@ -225,7 +225,7 @@ def make_mask(
             segment_pos_q,
             segment_pos_kv,
             window_size,
-            dtype=jnp.bool,
+            dtype=jnp.bool_,
             segment_ids_q=segment_ids_q,
             segment_ids_kv=segment_ids_kv,
         )
