@@ -242,10 +242,14 @@ __global__ void __launch_bounds__(FA_THREADS_NUM)
   }
 
   if constexpr (DO_ROW) {
-    atomicMaxFloat(&row_amax_out[local_row], row_partial);
+    if (row_amax_out != nullptr) {
+      atomicMaxFloat(&row_amax_out[local_row], row_partial);
+    }
   }
   if constexpr (DO_COL) {
-    atomicMaxFloat(&col_amax_out[global_col], col_partial);
+    if (col_amax_out != nullptr) {
+      atomicMaxFloat(&col_amax_out[global_col], col_partial);
+    }
   }
 
   if (leading_thread) {
@@ -301,15 +305,20 @@ inline void group_compute_fused_amax(const Tensor &input, const Tensor *noop,
   NVTE_CHECK(input.dtype() == DType::kBFloat16, "Grouped fused amax requires BF16 input.");
   NVTE_CHECK(num_tensors <= static_cast<size_t>(kMaxAmaxTensorsPerKernel),
              "Number of tensors should be <= ", kMaxAmaxTensorsPerKernel);
+  NVTE_CHECK(cols % FA_CHUNK_DIM_X == 0, "Grouped fused amax requires cols to be a multiple of ",
+             FA_CHUNK_DIM_X, " (got ", cols, ").");
 
-  // Determine directions from the first non-empty output.
+  // A direction runs if any non-empty expert allocates it; per-expert null buffers
+  // are then skipped by the kernel, so experts may opt in independently.
   bool do_row = false;
   bool do_col = false;
   for (size_t i = 0; i < num_tensors; ++i) {
     if (split_sections[i] == 0) continue;
-    do_row = output_list[i]->amax.dptr != nullptr;
-    do_col = output_list[i]->columnwise_amax.dptr != nullptr;
-    break;
+    NVTE_CHECK(split_sections[i] % FA_CHUNK_DIM_Y == 0,
+               "Grouped fused amax requires each split to be a multiple of ", FA_CHUNK_DIM_Y,
+               " (split ", i, " = ", split_sections[i], ").");
+    if (output_list[i]->amax.dptr != nullptr) do_row = true;
+    if (output_list[i]->columnwise_amax.dptr != nullptr) do_col = true;
   }
   if (!do_row && !do_col) return;
 
@@ -318,10 +327,9 @@ inline void group_compute_fused_amax(const Tensor &input, const Tensor *noop,
   args.split_sections_range[0] = 0;
   for (size_t i = 0; i < num_tensors; ++i) {
     if (split_sections[i] == 0) continue;
-    args.row_amax_list[args.num_tensors] =
-        do_row ? reinterpret_cast<void *>(output_list[i]->amax.dptr) : nullptr;
+    args.row_amax_list[args.num_tensors] = reinterpret_cast<void *>(output_list[i]->amax.dptr);
     args.col_amax_list[args.num_tensors] =
-        do_col ? reinterpret_cast<void *>(output_list[i]->columnwise_amax.dptr) : nullptr;
+        reinterpret_cast<void *>(output_list[i]->columnwise_amax.dptr);
     args.split_sections_range[args.num_tensors + 1] =
         args.split_sections_range[args.num_tensors] + static_cast<int>(split_sections[i]);
     args.num_tensors++;

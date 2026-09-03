@@ -498,9 +498,11 @@ void nvte_group_nvfp4_quantize_with_amax(const NVTETensor input, NVTETensor *out
  *         row-scaled NVFP4 input in a single kernel launch.
  *
  *  The input is one packed (sum_M, K) BF16 buffer; `split_sections` gives the
- *  per-expert row counts (each a multiple of 128). For expert i the rowwise amax
- *  [M_i] is written to `outputs[i]->amax` and the columnwise amax [K] to
- *  `outputs[i]->columnwise_amax`, whichever are allocated.
+ *  per-expert row counts (each a multiple of 128) and K must also be a multiple
+ *  of 128. For expert i the rowwise amax [M_i] is written to `outputs[i]->amax`
+ *  and the columnwise amax [K] to `outputs[i]->columnwise_amax`, whichever are
+ *  allocated; experts may opt into either direction independently (a null buffer
+ *  is skipped).
  *
  *  \param[in]      input           Packed grouped input tensor (BF16).
  *  \param[in,out]  outputs         Per-expert output tensors receiving the amax vectors.
