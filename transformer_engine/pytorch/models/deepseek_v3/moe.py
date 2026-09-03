@@ -221,10 +221,11 @@ class DeepSeekV3MoE(torch.nn.Module):
             (tokens.shape[0], self.topk), dtype=torch.int64, device=tokens.device
         )
         probs, topk_idx = self._route(self.gate(tokens).float(), topk_indices=topk_idx)
-        self._last_tokens_per_expert = torch.bincount(
-            topk_idx.flatten(), minlength=self.num_experts
-        )
-        topk_weights = probs.gather(1, topk_idx).float()
+        flat_idx = topk_idx.flatten()
+        self._last_tokens_per_expert = torch.zeros(
+            self.num_experts, dtype=torch.long, device=tokens.device
+        ).scatter_add_(0, flat_idx, torch.ones_like(flat_idx))
+        topk_weights = probs.gather(1, topk_idx)
 
         # Zero-filled recv/grad buffers: per-expert alignment padding lands
         # inside the grouped-GEMM m_splits, so uninitialized rows would poison
