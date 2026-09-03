@@ -1491,7 +1491,22 @@ def get_attention_backend(
             deterministic,
         )
         if fused_attention_backend == FusedAttnBackend.No_Backend.value:
-            logger.debug("Disabling FusedAttention as no backend supports the provided input")
+            if (
+                q_type in (TE_DType[torch.float16], TE_DType[torch.bfloat16])
+                and is_training
+                and qkv_format == "thd"
+                and softmax_type == "learnable"
+                and cudnn_version < (9, 26, 0)
+                and head_dim_v not in (64, 128, 256)
+            ):
+                logger.warning(
+                    "Disabling FusedAttention due to a known cuDNN issue with THD learnable "
+                    "softmax backward and head_dim_v = %s. Upgrade to cuDNN 9.26 or later to "
+                    "use FusedAttention for this configuration.",
+                    head_dim_v,
+                )
+            else:
+                logger.debug("Disabling FusedAttention as no backend supports the provided input")
             use_fused_attention = False
             fused_attention_backend = None
         elif (
