@@ -948,6 +948,17 @@ def test_transformer_layer_softcap_plumbing(dtype):
 
         return hook
 
+    # Every softcap test above sets these and none restore them, so inherit nothing: with a
+    # nonzero cap the filter also drops FusedAttention and FA4, and a leftover
+    # NVTE_UNFUSED_ATTN=0 would leave no backend at all on a machine without flash-attn.
+    # Leaving flash and unfused both enabled keeps this backend-agnostic; the hook fires on
+    # DotProductAttention regardless of which one is selected.
+    reset_rng_states()
+    os.environ["NVTE_FLASH_ATTN"] = "1"
+    os.environ["NVTE_FUSED_ATTN"] = "0"
+    os.environ["NVTE_UNFUSED_ATTN"] = "1"
+    _attention_backends["backend_selection_requires_update"] = True
+
     block = TransformerLayer(
         hidden_size,
         4 * hidden_size,
