@@ -25,6 +25,7 @@ import os
 import re
 import sys
 import unittest
+from unittest import mock
 
 import jax
 import jax.experimental.multihost_utils as jmu
@@ -47,8 +48,13 @@ from transformer_engine.jax.cpp_extensions.ep import (
     ep_dispatch_fwd,
     ep_combine_fwd,
     get_ep_config,
+    is_ep_borrowed_comm_built,
+    use_nccl_comm_from_xla,
 )
-from transformer_engine.jax.version_utils import is_collective_stream_supported
+from transformer_engine.jax.version_utils import (
+    is_collective_stream_supported,
+    is_xla_ffi_collectives_supported,
+)
 
 
 # ── Test config ─────────────────────────────────────────────────────────────
@@ -107,11 +113,23 @@ def _local_device_sm():
 
 
 class TestEP(unittest.TestCase):
+    # Selects the EP comm path for this class. False forces the self-hosted NCCL
+    # comm; the TestEPBorrowedComm subclass flips it to exercise the borrowed path.
+    USE_BORROWED_COMM = False
+
     @classmethod
     def setUpClass(cls):
         sm = _local_device_sm()
         if sm is not None and sm < 90:
             raise unittest.SkipTest(f"NCCL EP requires SM>=90 (got SM{sm})")
+        if cls.USE_BORROWED_COMM and not (
+            is_ep_borrowed_comm_built() and is_xla_ffi_collectives_supported()
+        ):
+            raise unittest.SkipTest("EP borrowed-comm path needs a newer JAX/XLA build")
+        cls._prev_comm_env = os.environ.get("NVTE_JAX_EP_NCCL_COMM_FROM_XLA")
+        os.environ["NVTE_JAX_EP_NCCL_COMM_FROM_XLA"] = "1" if cls.USE_BORROWED_COMM else "0"
+        # Drop any communicator a prior class left so we bootstrap on a clean slate.
+        ep_finalize()
         cls.num_procs = jax.process_count()
         cls.rank = jax.process_index()
         cls.dp, cls.ep = _factor_dp_ep(cls.num_procs)
@@ -143,6 +161,15 @@ class TestEP(unittest.TestCase):
         # One layer config shared by all single-layer tests below; non-zero
         # alignment exercises dispatch_output_per_expert_alignment end-to-end.
         cls.hk = EpLayerConfig(top_k=TOP_K, dispatch_output_per_expert_alignment=16)
+
+    @classmethod
+    def tearDownClass(cls):
+        # Leave a clean slate for the next class and restore the env override.
+        ep_finalize()
+        if cls._prev_comm_env is None:
+            os.environ.pop("NVTE_JAX_EP_NCCL_COMM_FROM_XLA", None)
+        else:
+            os.environ["NVTE_JAX_EP_NCCL_COMM_FROM_XLA"] = cls._prev_comm_env
 
     # ── Bootstrap precondition ────────────────────────────────────────────
 
@@ -820,6 +847,37 @@ class TestEP(unittest.TestCase):
                 self.assertEqual(hlo.count(op), 0, f"unexpected XLA {op} in bwd HLO:\n{hlo}")
 
 
+# ── Borrowed-comm path ───────────────────────────────────────────────────────
+
+
+class TestEPBorrowedComm(TestEP):
+    """Re-run EP primitives on the XLA borrowed-comm path.
+
+    Skipped entirely unless the build and installed JAX both provide the
+    collectives FFI extension. To keep L0/L1 fast, only a small smoke subset
+    (_SMOKE) runs by default; the full borrowed-path suite runs at L2
+    (NVTE_JAX_UNITTEST_LEVEL=L2).
+    """
+
+    USE_BORROWED_COMM = True
+
+    # Representative cases kept outside L2: one dispatch/combine round-trip (fwd)
+    # and its gradient (bwd). Every other inherited case runs only at L2.
+    _SMOKE = frozenset(
+        {
+            "test_primitive_dispatch_combine_identity_uniform",
+            "test_primitive_dispatch_combine_identity_bwd_uniform",
+        }
+    )
+
+    def setUp(self):
+        if (
+            os.environ.get("NVTE_JAX_UNITTEST_LEVEL", "L0") != "L2"
+            and self._testMethodName not in self._SMOKE
+        ):
+            self.skipTest("borrowed-comm full suite runs at L2 (NVTE_JAX_UNITTEST_LEVEL=L2)")
+
+
 # ── Drop-on-overflow ─────────────────────────────────────────────────────────
 
 
@@ -961,6 +1019,46 @@ class TestEpDomainGrouping(unittest.TestCase):
         self.assertEqual(domains, {0: [0, 2, 4, 6], 1: [1, 3, 5, 7]})
 
 
+# ── Comm-path selection (single-process; no GPU needed) ──────────────────────
+
+
+class TestEpCommSelection(unittest.TestCase):
+    """use_nccl_comm_from_xla() build/version gating and NVTE_JAX_EP_NCCL_COMM_FROM_XLA override."""
+
+    @staticmethod
+    def _use(env, built, supported):
+        import transformer_engine.jax.cpp_extensions.ep as ep_mod
+
+        prev = os.environ.pop("NVTE_JAX_EP_NCCL_COMM_FROM_XLA", None)
+        if env is not None:
+            os.environ["NVTE_JAX_EP_NCCL_COMM_FROM_XLA"] = env
+        try:
+            with mock.patch.object(
+                ep_mod, "is_ep_borrowed_comm_built", return_value=built
+            ), mock.patch.object(
+                ep_mod, "is_xla_ffi_collectives_supported", return_value=supported
+            ):
+                return ep_mod.use_nccl_comm_from_xla()
+        finally:
+            os.environ.pop("NVTE_JAX_EP_NCCL_COMM_FROM_XLA", None)
+            if prev is not None:
+                os.environ["NVTE_JAX_EP_NCCL_COMM_FROM_XLA"] = prev
+
+    def test_auto_requires_build_and_version(self):
+        # Env unset: borrowed path only when both build and JAX support it.
+        self.assertTrue(self._use(None, built=True, supported=True))
+        self.assertFalse(self._use(None, built=True, supported=False))
+        self.assertFalse(self._use(None, built=False, supported=True))
+
+    def test_env_override_wins_over_version(self):
+        self.assertTrue(self._use("1", built=True, supported=False))
+        self.assertFalse(self._use("0", built=True, supported=True))
+
+    def test_force_on_without_build_raises(self):
+        with self.assertRaisesRegex(RuntimeError, "without the EP borrowed-comm path"):
+            self._use("1", built=False, supported=True)
+
+
 # ── Entry point ──────────────────────────────────────────────────────────────
 
 
@@ -981,7 +1079,7 @@ if __name__ == "__main__":
     )
 
     loader = unittest.TestLoader()
-    test_cases = (TestEP, TestEPOverflowDrop, TestEpDomainGrouping)
+    test_cases = (TestEP, TestEPBorrowedComm, TestEPOverflowDrop, TestEpDomainGrouping)
     target = os.environ.get("TARGET_TEST")
     if target:
         name = target.split(".")[-1]

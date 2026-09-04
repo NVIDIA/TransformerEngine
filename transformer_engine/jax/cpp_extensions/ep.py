@@ -15,17 +15,19 @@ Sharding model:
 """
 
 import functools
+import os
 from dataclasses import dataclass
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jax import dtypes, ffi
 from jax.sharding import NamedSharding, PartitionSpec
 
 import transformer_engine_jax
 from .base import BasePrimitive, register_primitive
 from ..sharding import global_mesh_resource, get_mesh_axis_size
-from ..version_utils import is_collective_stream_supported
+from ..version_utils import is_collective_stream_supported, is_xla_ffi_collectives_supported
 
 
 def _on_collective_stream(func):
@@ -69,6 +71,35 @@ __all__ = [
 # ── Module-level EP config ──────────────────────────────────────────────────
 
 
+@functools.lru_cache(maxsize=None)
+def is_ep_borrowed_comm_built() -> bool:
+    """True if transformer_engine_jax was compiled with the borrowed-comm FFI."""
+    try:
+        return "te_ep_bootstrap_borrowed_comm_ffi" in transformer_engine_jax.registrations()
+    except Exception:  # pylint: disable=broad-except
+        return False
+
+
+def use_nccl_comm_from_xla() -> bool:
+    """True when EP should borrow XLA's NCCL comm instead of self-hosting NCCL.
+
+    Auto-selected when both the build and the installed JAX support the XLA
+    collectives FFI extension. NVTE_JAX_EP_NCCL_COMM_FROM_XLA=1/0 is an internal
+    override for tests, not a supported user knob.
+    """
+    env = os.environ.get("NVTE_JAX_EP_NCCL_COMM_FROM_XLA")
+    if env is not None:
+        forced_on = env not in ("0", "", "false", "False")
+        if forced_on and not is_ep_borrowed_comm_built():
+            raise RuntimeError(
+                "NVTE_JAX_EP_NCCL_COMM_FROM_XLA is set but transformer_engine_jax was built "
+                "without the EP borrowed-comm path (XLA collectives FFI headers were "
+                "unavailable at build time). Unset it to use the self-hosted NCCL comm."
+            )
+        return forced_on
+    return is_ep_borrowed_comm_built() and is_xla_ffi_collectives_supported()
+
+
 @dataclass(frozen=True)
 class EpConfig:
     """Snapshot of the EP bootstrap config (see ep_bootstrap).
@@ -89,6 +120,39 @@ class EpConfig:
 
 
 _ep_config: EpConfig = None
+
+
+# Fixed sentinel keeps EP on its own private comm so it never aliases an XLA
+# collective over the same devices. Must stay in [0, 2**63 - 1].
+# 0x54454550 spells "TEEP".
+EP_COMMUNICATION_ID = 0x54454550
+
+
+def run_borrowed_comm_bootstrap(
+    mesh, replica_groups_flat, group_size, communication_id=EP_COMMUNICATION_ID
+):
+    """Initialize EPBackend on the borrowed XLA comm (one-shot, all devices)."""
+    try:
+        from jax import shard_map  # top-level since v0.8.0
+    except ImportError:  # older JAX
+        from jax.experimental.shard_map import shard_map
+
+    all_axes = tuple(mesh.axis_names)
+    spec = PartitionSpec(all_axes)
+    world = int(np.prod([mesh.shape[a] for a in all_axes]))
+    rg = np.asarray(replica_groups_flat, np.int64)
+    gs = np.int64(group_size)
+    cid = np.int64(communication_id)
+
+    def _body(x):
+        out_type = jax.ShapeDtypeStruct(x.shape, x.dtype)
+        return ffi.ffi_call("te_ep_bootstrap_borrowed_comm_ffi", out_type, has_side_effect=True)(
+            x, replica_groups=rg, group_size=gs, communication_id=cid
+        )
+
+    dummy = jnp.zeros((world,), dtype=jnp.uint8)
+    fn = jax.jit(shard_map(_body, mesh=mesh, in_specs=spec, out_specs=spec))
+    jax.block_until_ready(fn(dummy))
 
 
 def set_ep_config(config: EpConfig) -> None:

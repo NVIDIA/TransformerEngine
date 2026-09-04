@@ -19,6 +19,8 @@ using Result_Type = xla::ffi::Result<xla::ffi::AnyBuffer>;
 using Variadic_Buffer_Type = xla::ffi::RemainingArgs;
 using Variadic_Result_Type = xla::ffi::RemainingRets;
 using Error_Type = xla::ffi::Error;
+template <typename T>
+using Span_Type = xla::ffi::Span<const T>;
 using FFI = xla::ffi::Ffi;
 using FFI_Stream_Type = xla::ffi::PlatformStream<cudaStream_t>;
 using Dictionary = xla::ffi::Dictionary;
