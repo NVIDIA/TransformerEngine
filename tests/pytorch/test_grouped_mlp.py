@@ -1068,6 +1068,46 @@ class TestGroupedLinearOp:
 class TestGroupedMLPFusedOp:
     """Tests for grouped MLP fused op"""
 
+    def test_fusion_requires_supported_grad_output_format(self, monkeypatch) -> None:
+        """Fuse E4M3 MXFP8 and NVFP4, but decline MXFP8 with an E5M2 backward."""
+        from transformer_engine.common.recipe import Format, MXFP8BlockScaling, NVFP4BlockScaling
+
+        fused_op_cls = grouped_mlp_module.GroupedMLP_CuTeGEMMGLU
+        monkeypatch.setattr(fused_op_cls, "is_supported", classmethod(lambda cls: True))
+
+        fc1 = te.ops.GroupedLinear(1, 64, 128, bias=False, device="cuda")
+        activation = te.ops.ScaledSwiGLU(glu_interleave_size=32)
+        fc2 = te.ops.GroupedLinear(1, 64, 64, bias=False, device="cuda")
+        ops = [fc1, activation, fc2]
+
+        def fuse(recipe):
+            return grouped_mlp_module.fuse_grouped_mlp_ops(
+                ops,
+                recipe=recipe,
+                fused_op_cls=fused_op_cls,
+            )
+
+        def assert_fused(recipe):
+            fused_ops = fuse(recipe)
+            assert len(fused_ops) == 1
+            fused_op = fused_ops[0]
+            assert isinstance(fused_op, fused_op_cls)
+            assert list(fused_op.basic_ops) == ops
+
+        hybrid = MXFP8BlockScaling(fp8_format=Format.HYBRID)
+        assert fuse(hybrid) is ops
+
+        e4m3 = MXFP8BlockScaling(fp8_format=Format.E4M3)
+        assert_fused(e4m3)
+
+        # NVFP4 quantizes gradients to FP4, so the FP8 format must not gate it. Forcing the
+        # lookup to E5M2 is what an NVFP4 recipe would hit if the check were not MXFP8-only.
+        monkeypatch.setattr(
+            grouped_mlp_module, "get_fp8_torch_dtype", lambda *_, **__: torch.float8_e5m2
+        )
+        nvfp4 = NVFP4BlockScaling(disable_rht=False)
+        assert_fused(nvfp4)
+
     @pytest.mark.parametrize("bias", (False, True))
     @pytest.mark.parametrize("quantization", _grouped_mlp_quantization_list)
     @pytest.mark.parametrize("single_grouped_weight", (False, True))
