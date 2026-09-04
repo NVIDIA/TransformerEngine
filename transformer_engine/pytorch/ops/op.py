@@ -185,6 +185,8 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
     num_extra_inputs: int = 0
     # Number of extra tensor outputs
     num_extra_outputs: int = 0
+    # Number of param registrations
+    _param_version: int = 0
 
     def __init__(self) -> None:
         super().__init__()
@@ -277,6 +279,16 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
     @property
     def is_fused_op(self) -> bool:
         return False
+
+    @property
+    def param_version(self) -> int:
+        """Counter for param registrations, so the fuser can detect replaced params"""
+        return self._param_version
+
+    def register_parameter(self, name: str, param: Optional[torch.nn.Parameter]) -> None:
+        """Add a parameter to the operation"""
+        super().register_parameter(name, param)
+        self._param_version += 1
 
     def num_quantizers(
         self,
@@ -846,6 +858,12 @@ class FusedOperation(FusibleOperation):
     def pre_fuser_forward(self, *, requires_grad: bool) -> None:
         for op in self.basic_ops:
             op.pre_fuser_forward(requires_grad=requires_grad)
+
+    def reset_parameters(self) -> None:
+        """Initialize parameters, materializing them if needed"""
+        for op in self.basic_ops:
+            if hasattr(op, "reset_parameters"):
+                op.reset_parameters()
 
     def forward(
         self,

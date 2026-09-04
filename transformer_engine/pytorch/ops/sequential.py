@@ -142,6 +142,12 @@ class Sequential(torch.nn.Module):
         out.extend(modules)
         return out
 
+    def reset_parameters(self) -> None:
+        """Initialize parameters, materializing them if needed"""
+        for module in self._modules.values():
+            if hasattr(module, "reset_parameters"):
+                module.reset_parameters()
+
     @classmethod
     def _make_module_groups(
         cls,
