@@ -117,10 +117,7 @@ struct FusedAttnConfig {
   bool is_softmax_offset = false;
   bool is_dropout = false;
   // - FP8 recipes
-  bool is_o_in_fp8 = false;
-  bool is_dqkv_in_fp8 = false;
   bool is_o_in_f16 = false;
-  bool is_dqkv_in_f16 = false;
   bool is_tensor_scaling = false;
   bool is_mxfp8 = false;
   bool is_delayed_scaling_fwd = false;

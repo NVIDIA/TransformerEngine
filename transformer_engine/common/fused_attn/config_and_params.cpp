@@ -75,10 +75,10 @@ void FusedAttnConfig::derive() {
   is_dropout = is_training && dropout != 0.0f;
 
   // Determine the FP8 recipe
-  is_o_in_fp8 = (o_dtype == kNVTEFloat8E4M3 || o_dtype == kNVTEFloat8E5M2);
-  is_dqkv_in_fp8 = (dqkv_dtype == kNVTEFloat8E4M3 || dqkv_dtype == kNVTEFloat8E5M2);
+  const bool is_o_in_fp8 = (o_dtype == kNVTEFloat8E4M3 || o_dtype == kNVTEFloat8E5M2);
+  const bool is_dqkv_in_fp8 = (dqkv_dtype == kNVTEFloat8E4M3 || dqkv_dtype == kNVTEFloat8E5M2);
   is_o_in_f16 = (o_dtype == kNVTEFloat16 || o_dtype == kNVTEBFloat16);
-  is_dqkv_in_f16 = (dqkv_dtype == kNVTEFloat16 || dqkv_dtype == kNVTEBFloat16);
+  const bool is_dqkv_in_f16 = (dqkv_dtype == kNVTEFloat16 || dqkv_dtype == kNVTEBFloat16);
   is_tensor_scaling = (scaling_mode == NVTE_DELAYED_TENSOR_SCALING);
   is_mxfp8 = (scaling_mode == NVTE_MXFP8_1D_SCALING);
   is_delayed_scaling_fwd = is_tensor_scaling && is_o_in_fp8;

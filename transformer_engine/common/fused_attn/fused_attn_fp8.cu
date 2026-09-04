@@ -660,7 +660,7 @@ static Fp8BwdGraphAndTensors create_graph_fp8_bwd(const FusedAttnConfig& cfg) {
   const bool is_tensor_scaling = cfg.is_tensor_scaling;
   const bool is_delayed_scaling = cfg.is_delayed_scaling_bwd;
   const bool is_current_scaling = cfg.is_current_scaling_bwd;
-  const bool is_O_in_F16 = !cfg.is_o_in_fp8;
+  const bool is_O_in_F16 = cfg.is_o_in_f16;
   const bool is_ragged_q = cfg.is_ragged_q;
   const bool is_ragged_kv = cfg.is_ragged_kv;
   const bool use_ragged_stats = cfg.uses_ragged_stats;
@@ -1114,7 +1114,7 @@ void fused_attn_fp8_bwd_impl(
   const bool is_tensor_scaling = cfg.is_tensor_scaling;
   const bool is_delayed_scaling = cfg.is_delayed_scaling_bwd;
   const bool is_current_scaling = cfg.is_current_scaling_bwd;
-  const bool is_O_in_F16 = !cfg.is_o_in_fp8;
+  const bool is_O_in_F16 = cfg.is_o_in_f16;
 
   const int64_t b = static_cast<int64_t>(cfg.graph_batch_size_bwd);
   const int64_t actual_b = static_cast<int64_t>(cfg.batch_size);
