@@ -5,7 +5,8 @@
 [build-system]
 requires = [
     "setuptools>=61.0",
-    "cmake>=3.21",
+    # CMake 3.25.0 breaks FindCUDAToolkit when nvptxcompiler_static is absent from CUDA wheels.
+    "cmake>=3.21,!=3.25.0",
     "wheel",
     "pybind11[global]",
     "ninja",
