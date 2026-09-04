@@ -664,7 +664,6 @@ class TransformerLayer(torch.nn.Module):
         self_attn_mask_type: Optional[str] = None,
         window_size: Optional[Tuple[int, int]] = None,
         bottom_right_diagonal: Optional[bool] = None,
-        softcap: Optional[float] = None,
         encoder_output: Optional[torch.Tensor] = None,
         enc_dec_attn_mask: Optional[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]] = None,
         enc_dec_attn_mask_type: Optional[str] = None,
@@ -687,6 +686,7 @@ class TransformerLayer(torch.nn.Module):
         pad_between_seqs: Optional[bool] = None,
         thd_attention_policies: Optional[List[Dict[str, Any]]] = None,
         thd_attention_policy_dispatch: str = "auto",
+        softcap: Optional[float] = None,
     ) -> torch.Tensor:
         r"""
         Transformer Layer: attention block and a feedforward network (MLP)

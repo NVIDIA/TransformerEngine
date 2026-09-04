@@ -744,7 +744,6 @@ class MultiheadAttention(torch.nn.Module):
         attn_mask_type: Optional[str] = None,
         window_size: Optional[Tuple[int, int]] = None,
         bottom_right_diagonal: Optional[bool] = None,
-        softcap: Optional[float] = None,
         is_first_microbatch: Optional[bool] = None,
         checkpoint_core_attention: bool = False,
         inference_params: Optional[InferenceParams] = None,
@@ -762,6 +761,7 @@ class MultiheadAttention(torch.nn.Module):
         pad_between_seqs: Optional[bool] = None,
         thd_attention_policies: Optional[List[Dict[str, Any]]] = None,
         thd_attention_policy_dispatch: str = "auto",
+        softcap: Optional[float] = None,
     ) -> Tuple[Union[torch.Tensor, None], ...]:
         r"""
         Forward propagation for MultiheadAttention layer.
