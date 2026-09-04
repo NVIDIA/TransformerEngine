@@ -6,6 +6,7 @@
 
 #include "../util/rtc.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <iostream>
 #include <utility>
@@ -26,22 +27,33 @@ namespace {
 #include "string_code_util_math_h.h"
 #include "string_code_utils_cuh.h"
 
+/*! \brief Compute capabilities that NVRTC supports */
+const std::vector<int>& supported_sm_archs() {
+  static const std::vector<int> archs_ = [] {
+    int num_archs = 0;
+    NVTE_CHECK_NVRTC(nvrtcGetNumSupportedArchs(&num_archs));
+    NVTE_CHECK(num_archs > 0, "Could not determine SM archs that NVRTC supports");
+    std::vector<int> archs(num_archs);
+    NVTE_CHECK_NVRTC(nvrtcGetSupportedArchs(archs.data()));
+    return archs;
+  }();
+  return archs_;
+}
+
 /*! \brief Latest compute capability that NVRTC supports
  *
  * \return Compute capability as int. Last digit is minor revision,
  *         remaining digits are major revision.
  */
 inline int max_supported_sm_arch() {
-  static int arch_ = -1;
-  if (arch_ < 0) {
-    int num_archs = 0;
-    NVTE_CHECK_NVRTC(nvrtcGetNumSupportedArchs(&num_archs));
-    NVTE_CHECK(num_archs > 0, "Could not determine SM archs that NVRTC supports");
-    std::vector<int> archs(num_archs);
-    NVTE_CHECK_NVRTC(nvrtcGetSupportedArchs(archs.data()));
-    arch_ = archs.back();
-  }
-  return arch_;
+  const auto& archs = supported_sm_archs();
+  return *std::max_element(archs.begin(), archs.end());
+}
+
+/*! \brief Whether NVRTC supports an exact compute capability */
+inline bool is_supported_sm_arch(int sm_arch) {
+  const auto& archs = supported_sm_archs();
+  return std::find(archs.begin(), archs.end(), sm_arch) != archs.end();
 }
 
 }  // namespace
@@ -148,7 +160,8 @@ KernelManager& KernelManager::instance() {
 void KernelManager::compile(const std::string& kernel_label, const std::string& kernel_name,
                             const std::string& code, const std::string& filename,
                             const std::vector<std::string>& extra_options,
-                            const std::vector<Header>& extra_headers) {
+                            const std::vector<Header>& extra_headers,
+                            ArchRequirement arch_requirement) {
   const int device_id = cuda::current_device();
   const auto key = get_kernel_cache_key(kernel_label, device_id);
   std::unique_lock<std::shared_mutex> lock_guard_(lock_);
@@ -158,8 +171,23 @@ void KernelManager::compile(const std::string& kernel_label, const std::string& 
 
   // Choose whether to compile to PTX or cubin
   const int sm_arch_ = cuda::sm_arch(device_id);
-  const int compile_sm_arch = std::min(sm_arch_, max_supported_sm_arch());
-  const bool compile_ptx = sm_arch_ != compile_sm_arch;
+  NVTE_CHECK(sm_arch_ >= arch_requirement.min_sm_arch, "RTC kernel ", kernel_label, " requires sm_",
+             arch_requirement.min_sm_arch, " or newer, but the current device is sm_", sm_arch_);
+
+  int compile_sm_arch = std::min(sm_arch_, max_supported_sm_arch());
+  bool compile_ptx = sm_arch_ != compile_sm_arch;
+  const char* arch_suffix = "";
+  if (arch_requirement.specificity == ArchSpecificity::ArchitectureSpecific) {
+    NVTE_CHECK(
+        is_supported_sm_arch(sm_arch_), "RTC kernel ", kernel_label,
+        " requires an architecture-specific target for sm_", sm_arch_,
+        ", but the runtime NVRTC does not support that architecture. Use a newer CUDA toolkit, "
+        "or disable NVRTC and rebuild with the corresponding legacy static kernel enabled.");
+    NVTE_CHECK(sm_arch_ >= 90, "Architecture-specific RTC targets require sm_90 or newer");
+    compile_sm_arch = sm_arch_;
+    compile_ptx = false;
+    arch_suffix = "a";
+  }
 
   // Compilation flags
   std::vector<std::string> opts = {
@@ -168,9 +196,9 @@ void KernelManager::compile(const std::string& kernel_label, const std::string& 
 #endif
       "--std=c++17"};
   if (compile_ptx) {
-    opts.push_back(concat_strings("--gpu-architecture=compute_", compile_sm_arch));
+    opts.push_back(concat_strings("--gpu-architecture=compute_", compile_sm_arch, arch_suffix));
   } else {
-    opts.push_back(concat_strings("--gpu-architecture=sm_", compile_sm_arch));
+    opts.push_back(concat_strings("--gpu-architecture=sm_", compile_sm_arch, arch_suffix));
   }
   opts.push_back(concat_strings("-I", cuda::include_directory(true)));
   opts.insert(opts.end(), extra_options.begin(), extra_options.end());
@@ -272,8 +300,10 @@ void KernelManager::set_cache_config(const std::string& kernel_label, CUfunc_cac
   const int device_id = cuda::current_device();
   const auto key = get_kernel_cache_key(kernel_label, device_id);
   std::shared_lock<std::shared_mutex> lock_guard_(lock_);
-  NVTE_CHECK(kernel_cache_.count(key) > 0, "Attempted to configure RTC kernel before compilation");
-  kernel_cache_.at(key).set_function_cache_config(device_id, cache_config);
+  const auto kernel_it = kernel_cache_.find(key);
+  NVTE_CHECK(kernel_it != kernel_cache_.end(),
+             "Attempted to configure RTC kernel before compilation");
+  kernel_it->second.set_function_cache_config(device_id, cache_config);
 }
 
 void KernelManager::set_function_attribute(const std::string& kernel_label,
@@ -281,8 +311,10 @@ void KernelManager::set_function_attribute(const std::string& kernel_label,
   const int device_id = cuda::current_device();
   const auto key = get_kernel_cache_key(kernel_label, device_id);
   std::shared_lock<std::shared_mutex> lock_guard_(lock_);
-  NVTE_CHECK(kernel_cache_.count(key) > 0, "Attempted to configure RTC kernel before compilation");
-  kernel_cache_.at(key).set_function_attribute(device_id, attr, value);
+  const auto kernel_it = kernel_cache_.find(key);
+  NVTE_CHECK(kernel_it != kernel_cache_.end(),
+             "Attempted to configure RTC kernel before compilation");
+  kernel_it->second.set_function_attribute(device_id, attr, value);
 }
 
 int KernelManager::occupancy_max_active_blocks_per_sm(const std::string& kernel_label,
@@ -291,9 +323,10 @@ int KernelManager::occupancy_max_active_blocks_per_sm(const std::string& kernel_
   const int device_id = cuda::current_device();
   const auto key = get_kernel_cache_key(kernel_label, device_id);
   std::shared_lock<std::shared_mutex> lock_guard_(lock_);
-  NVTE_CHECK(kernel_cache_.count(key) > 0, "Attempted to query occupancy before compilation");
-  return kernel_cache_.at(key).occupancy_max_active_blocks_per_sm(device_id, block_size,
-                                                                  dynamic_smem_bytes);
+  const auto kernel_it = kernel_cache_.find(key);
+  NVTE_CHECK(kernel_it != kernel_cache_.end(), "Attempted to query occupancy before compilation");
+  return kernel_it->second.occupancy_max_active_blocks_per_sm(device_id, block_size,
+                                                              dynamic_smem_bytes);
 }
 
 bool KernelManager::is_compiled(const std::string& kernel_label, int device_id) const {
@@ -304,7 +337,12 @@ bool KernelManager::is_compiled(const std::string& kernel_label, int device_id) 
 
 std::string KernelManager::get_kernel_cache_key(const std::string& kernel_label,
                                                 int device_id) const {
-  return concat_strings("sm=", cuda::sm_arch(device_id), ",", kernel_label);
+  const std::string sm_arch = std::to_string(cuda::sm_arch(device_id));
+  std::string key;
+  key.reserve(3 + sm_arch.size() + 1 + kernel_label.size());
+  key.append("sm=").append(sm_arch).push_back(',');
+  key.append(kernel_label);
+  return key;
 }
 
 }  // namespace rtc

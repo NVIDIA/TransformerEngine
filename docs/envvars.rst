@@ -99,6 +99,12 @@ Optional Dependencies
    :Default: ``OFF``
    :Description: Compile activation kernels (GELU, ReLU, SwiGLU) with the ``--use_fast_math`` CUDA compiler flag for improved performance at the cost of some precision.
 
+.. envvar:: NVTE_BUILD_LEGACY_STATIC_NVFP4
+
+   :Type: CMake option
+   :Default: ``OFF``
+   :Description: Additionally compile the legacy static NVFP4 4over6 quantization kernel. Enable this option to provide a static fallback when runtime compilation is disabled with :envvar:`NVTE_DISABLE_NVRTC`. Enabling it increases build time because the NVFP4 4over6 template specializations are instantiated at build time.
+
 CUDA Configuration
 ^^^^^^^^^^^^^^^^^^
 
@@ -311,7 +317,7 @@ Kernel Configuration
 
    :Type: ``int`` (0 or 1)
    :Default: ``0``
-   :Description: Disable NVRTC (CUDA Runtime Compilation) support. When set to ``1``, runtime kernel compilation is disabled. Existing transpose operations select their static fallback automatically. Fused softmax and normalization paths require their corresponding ``NVTE_BUILD_LEGACY_STATIC_FUSED_SOFTMAX`` or ``NVTE_BUILD_LEGACY_STATIC_NORM`` CMake option to have been enabled when the library was built; otherwise no static fallback is available.
+   :Description: Disable NVRTC (CUDA Runtime Compilation) support. When set to ``1``, runtime kernel compilation is disabled. Existing transpose operations select their static fallback automatically. NVFP4 4over6 quantization, fused softmax, and normalization paths require their corresponding ``NVTE_BUILD_LEGACY_STATIC_NVFP4``, ``NVTE_BUILD_LEGACY_STATIC_FUSED_SOFTMAX``, or ``NVTE_BUILD_LEGACY_STATIC_NORM`` CMake option to have been enabled when the library was built; otherwise no static fallback is available.
 
 .. envvar:: NVTE_USE_CUTLASS_GROUPED_GEMM
 

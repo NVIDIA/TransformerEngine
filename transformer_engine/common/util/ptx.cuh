@@ -11,17 +11,34 @@
 #ifndef TRANSFORMER_ENGINE_PTX_CUH_
 #define TRANSFORMER_ENGINE_PTX_CUH_
 
+#if !defined(__CUDACC_RTC__)
 #include <cuda.h>
 #include <cuda_runtime.h>
 
 #include "common/common.h"
+#else
+// NVRTC build: common.h drags in host-only headers (cuDNN etc.) and cannot be
+// compiled by NVRTC.
+#ifndef FP4_TYPE_SUPPORTED
+#define FP4_TYPE_SUPPORTED (CUDA_VERSION >= 12080)
+#endif
+#endif  // __CUDACC_RTC__
 
+#include <cuda_bf16.h>
 #if FP4_TYPE_SUPPORTED
 #include <cuda_fp4.h>
 #endif  // FP4_TYPE_SUPPORTED
-#include <cuda_bf16.h>
 
+#if !defined(__CUDACC_RTC__)
 #include "common/utils.cuh"
+#else
+#include "utils.cuh"
+
+namespace transformer_engine {
+using fp16 = half;
+using bf16 = nv_bfloat16;
+}  // namespace transformer_engine
+#endif  // __CUDACC_RTC__
 
 namespace transformer_engine {
 
