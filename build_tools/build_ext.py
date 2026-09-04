@@ -70,10 +70,19 @@ class CMakeExtension(setuptools.Extension):
         if discovered_cuda_home is not None:
             configure_command.append(f"-DCUDAToolkit_ROOT={discovered_cuda_home}")
 
-            # CUDA wheels use `lib`, while toolkit installations typically use
-            # `lib64`. Only override CMake's library discovery for a wheel-style
-            # layout with the expected libraries present.
             cuda_lib_dir = discovered_cuda_home / "lib"
+            if cuda_lib_dir.is_dir():
+                # NVCC searches `lib64` for its static runtime libraries, while
+                # CUDA wheels install them in `lib`.
+                cuda_static_libraries = (
+                    cuda_lib_dir / "libcudadevrt.a",
+                    cuda_lib_dir / "libcudart_static.a",
+                )
+                if all(library.is_file() for library in cuda_static_libraries):
+                    configure_command.append(f"-DCMAKE_CUDA_FLAGS=-L{cuda_lib_dir}")
+
+            # Override CMake's shared-library discovery for each library that is
+            # present in the wheel-style layout.
             if cuda_lib_dir.is_dir() and (cuda_full_version := cuda_version()):
                 cuda_major_version = cuda_full_version[0]
                 cuda_libraries = {
@@ -82,11 +91,11 @@ class CMakeExtension(setuptools.Extension):
                     "CUDA_cublas_LIBRARY": cuda_lib_dir / f"libcublas.so.{cuda_major_version}",
                     "CUDA_cublasLt_LIBRARY": cuda_lib_dir / f"libcublasLt.so.{cuda_major_version}",
                 }
-                if all(library.is_file() for library in cuda_libraries.values()):
-                    configure_command.append(f"-DCMAKE_CUDA_FLAGS=-L{cuda_lib_dir}")
-                    configure_command.extend(
-                        f"-D{variable}={library}" for variable, library in cuda_libraries.items()
-                    )
+                configure_command.extend(
+                    f"-D{variable}={library}"
+                    for variable, library in cuda_libraries.items()
+                    if library.is_file()
+                )
 
         discovered_nvcc_path = nvcc_path()
         if discovered_nvcc_path is not None:
