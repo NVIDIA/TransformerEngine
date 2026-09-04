@@ -250,18 +250,29 @@ list(APPEND transformer_engine_cuda_arch_specific_sources
      activation/gelu.cu
      activation/gelu_dbias.cu
      activation/gelu_grouped.cu
+     activation/gelu_grouped_bwd.cu
      activation/gelu_grouped_dbias.cu
+     activation/qgelu_grouped.cu
+     activation/qgelu_grouped_bwd.cu
+     activation/qgelu_grouped_dbias.cu
      activation/glu.cu
      activation/relu.cu
      activation/relu_dbias.cu
      activation/relu_grouped.cu
+     activation/relu_grouped_bwd.cu
      activation/relu_grouped_dbias.cu
+     activation/srelu_grouped.cu
+     activation/srelu_grouped_bwd.cu
+     activation/srelu_grouped_dbias.cu
      activation/scaled_activation.cu
+     activation/scaled_clamped_swiglu_grouped.cu
      activation/scaled_srelu.cu
      activation/scaled_swiglu.cu
+     activation/scaled_swiglu_grouped.cu
      activation/swiglu.cu
      activation/swiglu_dbias.cu
      activation/swiglu_grouped.cu
+     activation/swiglu_grouped_bwd.cu
      activation/swiglu_grouped_dbias.cu
      cast/cast.cu
      cast/cast_dbias.cu
@@ -628,18 +639,29 @@ if (NVTE_BUILD_ACTIVATION_WITH_FAST_MATH)
   list(APPEND nvte_sources_with_fast_math activation/gelu.cu
                                           activation/gelu_dbias.cu
                                           activation/gelu_grouped.cu
+                                          activation/gelu_grouped_bwd.cu
                                           activation/gelu_grouped_dbias.cu
+                                          activation/qgelu_grouped.cu
+                                          activation/qgelu_grouped_bwd.cu
+                                          activation/qgelu_grouped_dbias.cu
                                           activation/glu.cu
                                           activation/relu.cu
                                           activation/relu_dbias.cu
                                           activation/relu_grouped.cu
+                                          activation/relu_grouped_bwd.cu
                                           activation/relu_grouped_dbias.cu
+                                          activation/srelu_grouped.cu
+                                          activation/srelu_grouped_bwd.cu
+                                          activation/srelu_grouped_dbias.cu
                                           activation/scaled_activation.cu
+                                          activation/scaled_clamped_swiglu_grouped.cu
                                           activation/scaled_srelu.cu
                                           activation/scaled_swiglu.cu
+                                          activation/scaled_swiglu_grouped.cu
                                           activation/swiglu.cu
                                           activation/swiglu_dbias.cu
                                           activation/swiglu_grouped.cu
+                                          activation/swiglu_grouped_bwd.cu
                                           activation/swiglu_grouped_dbias.cu)
 endif()
 
@@ -653,6 +675,14 @@ endforeach()
 
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --expt-relaxed-constexpr")
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -O3")
+
+# Compress every embedded cubin. CUDA 13 supports size-optimized compression
+# without imposing an additional driver requirement. Keep CUDA 12 on its
+# legacy/default compression mode to preserve compatibility with pre-12.4 drivers.
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xfatbin -compress-all")
+if (CUDAToolkit_VERSION VERSION_GREATER_EQUAL 13.0)
+  set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --compress-mode=size")
+endif()
 
 # Number of parallel build jobs
 if($ENV{MAX_JOBS})
