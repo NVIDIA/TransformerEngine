@@ -829,7 +829,12 @@ def test_dpa_softmax_thd(dtype, model_configs, model):
     """Test DotProductAttention module with different softmax types"""
     config = model_configs[model]
     if "padding" not in config.attn_mask_type:
-        pytest.skip(f"Duplicate test to others with THD and padding mask.")
+        promoted = dict(vars(config))
+        promoted["attn_mask_type"] = (
+            "padding" if config.attn_mask_type == "no_mask" else "padding_" + config.attn_mask_type
+        )
+        if any(name != model and vars(other) == promoted for name, other in model_configs.items()):
+            pytest.skip("Duplicate test to others with THD and padding mask.")
     test_dot_product_attention(dtype, model_configs, model, True, "thd_thd_thd", False, False)
 
 
@@ -1102,7 +1107,7 @@ def test_dpa_sliding_window(dtype, model_configs, model, qkv_layout):
     """Test DotProductAttention module with sliding window attention"""
     config = model_configs[model]
     if qkv_layout == "thd_thd_thd" and "padding" not in config.attn_mask_type:
-        pytest.skip(f"Duplicate test to others with THD and padding mask.")
+        pytest.skip("Duplicate test to others with THD and padding mask.")
     test_dot_product_attention(dtype, model_configs, model, False, qkv_layout, True, False)
 
 
