@@ -676,6 +676,7 @@ def cast_if_needed(tensor: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
     with torch.enable_grad():
         return tensor.to(dtype=dtype)
 
+
 def check_gemm_dims(inp: torch.Tensor, weight: torch.Tensor, fp8: bool) -> None:
     """Emit the TN GEMM (``y = x @ w^T``) dim constraints as ``torch._check``
     guards at trace time. torch.compile path only; eager validation lives in
