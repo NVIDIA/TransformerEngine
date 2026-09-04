@@ -48,6 +48,9 @@ def _get_sharding_for_gemm(mesh, mesh_resource, partition_layout="rowwise"):
     dp_axis = mesh_resource.dp_resource
     tp_axis = mesh_resource.tpsp_resource
 
+    if mesh_resource.fsdp_resource is not None:
+        dp_axis = (mesh_resource.dp_resource, mesh_resource.fsdp_resource)
+
     if partition_layout == "colwise":
         x_spec = PartitionSpec(dp_axis, None, None)
         weight_spec = PartitionSpec(None, tp_axis)

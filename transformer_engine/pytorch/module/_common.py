@@ -13,7 +13,58 @@ import torch
 from .. import cpp_extensions as tex
 from ..constants import TE_DType
 from ..export import is_in_onnx_export_mode
+from ..tensor.hybrid_tensor import HybridQuantizer
 from ..utils import get_default_init_method
+
+
+def set_quantizer_amax_reduction_group(quantizer, amax_reduction_group) -> None:
+    """Set the amax reduction group on a quantizer; no-op if it doesn't support it.
+
+    Unwraps ``DebugQuantizer`` to its ``parent_quantizer``, which is the one that
+    actually performs the quantization (and thus the amax reduction).
+    """
+    if quantizer is None:
+        return
+    # DebugQuantizer delegates quantization to parent_quantizer
+    target = getattr(quantizer, "parent_quantizer", quantizer)
+    if target is not None and hasattr(target, "with_amax_reduction"):
+        target.with_amax_reduction = amax_reduction_group is not None
+        target.amax_reduction_group = amax_reduction_group
+
+
+def set_quantizer_usage_for_wgrad_all_gather(quantizer) -> None:
+    """Configure an all-gather output for consumption by wgrad."""
+    if quantizer is None:
+        return
+
+    parent_quantizer = getattr(quantizer, "parent_quantizer", None)
+    target = parent_quantizer if parent_quantizer is not None else quantizer
+
+    # Hybrid currently gathers in high precision, then quantizes the full
+    # result, so request the columnwise representation consumed by wgrad.
+    if isinstance(target, HybridQuantizer):
+        rowwise_usage, columnwise_usage = False, True
+    elif quantizer.supports_only_rowwise_all_gather():
+        # Per-tensor FP8 gathers rowwise data and synthesizes its transpose.
+        rowwise_usage, columnwise_usage = True, False
+    else:
+        rowwise_usage, columnwise_usage = False, True
+
+    # Preserve wrapper-specific bookkeeping. In particular, DebugQuantizer
+    # propagates usage to its parent while keeping its own state synchronized.
+    quantizer.set_usage(rowwise=rowwise_usage, columnwise=columnwise_usage)
+
+
+def can_reconstruct_wgrad_input_from_original(quantizer) -> bool:
+    """Whether wgrad input can be reconstructed from a saved original tensor."""
+    target = getattr(quantizer, "parent_quantizer", quantizer)
+    if target is None:
+        target = quantizer
+    if isinstance(target, HybridQuantizer):
+        if target.columnwise_source == "original":
+            return True
+        return target.rowwise_quantizer.is_requantization_safe()
+    return target.is_requantization_safe()
 
 
 def _get_normalization_func(normalization: str, forward: bool):

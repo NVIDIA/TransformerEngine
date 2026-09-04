@@ -6,10 +6,7 @@
 
 from dataclasses import dataclass
 import importlib
-import importlib.util
 import inspect
-from pathlib import Path
-import sys
 from typing import Any, Callable, Dict, Optional, Tuple
 
 import torch
@@ -17,27 +14,17 @@ import torch
 _cudnn_score_mod_handles: Dict[torch.device, Any] = {}
 _cudnn_score_mod_graph_cache: Dict[Tuple[Any, ...], Any] = {}
 _SCORE_MOD_UNCACHEABLE = object()
-_CUDNN_FRONTEND_PYTHON_PATH = (
-    Path(__file__).resolve().parents[4] / "3rdparty" / "cudnn-frontend" / "python"
-)
 
 
 def _import_cudnn_frontend():
-    """Import the vendored cuDNN frontend if built, otherwise use the installed package."""
-    cudnn_frontend_path = str(_CUDNN_FRONTEND_PYTHON_PATH)
-    cudnn_frontend_package = _CUDNN_FRONTEND_PYTHON_PATH / "cudnn"
-    if any(cudnn_frontend_package.glob("_compiled_module*")):
-        if cudnn_frontend_path not in sys.path:
-            sys.path.insert(0, cudnn_frontend_path)
+    """Import the cuDNN frontend Python package."""
+    try:
         return importlib.import_module("cudnn")
-
-    if importlib.util.find_spec("cudnn") is not None:
-        return importlib.import_module("cudnn")
-
-    raise ImportError(
-        "cuDNN frontend Python package not found. "
-        "Install it with: pip install nvidia-cudnn-frontend"
-    )
+    except ImportError as exc:
+        raise ImportError(
+            "cuDNN frontend Python package not found. "
+            "Install it with: pip install nvidia-cudnn-frontend"
+        ) from exc
 
 
 def _bhsd_dim_stride(

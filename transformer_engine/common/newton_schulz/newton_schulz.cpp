@@ -134,6 +134,19 @@ void FreeWorkspace(NVTECusolverMpCtx* ctx) {
 
 NVTECusolverMpCtx* nvte_cusolvermp_ctx_create(ncclComm_t comm, int nranks, int rank) {
   NVTE_API_CALL(nvte_cusolvermp_ctx_create);
+  NVTE_CHECK(comm != nullptr, "NCCL communicator must be non-null");
+  NVTE_CHECK(nranks > 0, "Number of ranks must be positive, got ", nranks);
+  NVTE_CHECK(rank >= 0 && rank < nranks, "Rank ", rank, " is outside [0, ", nranks, ")");
+
+  int comm_nranks{};
+  int comm_rank{};
+  NVTE_CHECK_NCCL(ncclCommCount(comm, &comm_nranks));
+  NVTE_CHECK_NCCL(ncclCommUserRank(comm, &comm_rank));
+  NVTE_CHECK(comm_nranks == nranks, "NCCL communicator has ", comm_nranks,
+             " ranks, but the process group reports ", nranks);
+  NVTE_CHECK(comm_rank == rank, "NCCL communicator rank is ", comm_rank,
+             ", but the process group reports ", rank);
+
   int device_id{};
   NVTE_CHECK_CUDA(cudaGetDevice(&device_id));
 

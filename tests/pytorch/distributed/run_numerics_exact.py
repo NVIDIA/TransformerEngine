@@ -22,8 +22,8 @@ from transformer_engine.common.recipe import (
 )
 from transformer_engine.pytorch import NVFP4Quantizer
 from transformer_engine.pytorch.constants import NVFP4_BLOCK_SCALING_SIZE
-from transformer_engine.pytorch.custom_recipes import quantization_ref_nvfp4
-from transformer_engine.pytorch.custom_recipes import utils
+from transformer_engine.pytorch.custom_recipes import reference_nvfp4
+from transformer_engine.pytorch.custom_recipes import reference_utils
 from run_layer_with_overlap import _compare_tensors
 
 
@@ -58,7 +58,7 @@ def get_nvfp4_quantizer_factory():
 
     Mirrors the canonical "branch on what we care about, default fall-through"
     pattern from
-    ``transformer_engine.pytorch.custom_recipes.quantization_recipes_base``;
+    ``transformer_engine.pytorch.custom_recipes.quantizer_factories``;
     every slot gets a real :class:`NVFP4QuantizerRef` (``CustomRecipeState``
     rejects ``None`` returns).
 
@@ -73,14 +73,14 @@ def get_nvfp4_quantizer_factory():
             and role.tensor_type == "weight"
         )
         if is_weight:
-            return quantization_ref_nvfp4.NVFP4QuantizerRef(
-                dtype=utils.Fp4Formats.E2M1,
+            return reference_nvfp4.NVFP4QuantizerRef(
+                dtype=reference_utils.Fp4Formats.E2M1,
                 quant_tile_shape=(16, 16),
                 pow_2_scales=False,
                 with_rht=False,
             )
-        return quantization_ref_nvfp4.NVFP4QuantizerRef(
-            dtype=utils.Fp4Formats.E2M1,
+        return reference_nvfp4.NVFP4QuantizerRef(
+            dtype=reference_utils.Fp4Formats.E2M1,
             quant_tile_shape=(1, 16),
             pow_2_scales=False,
             with_rht=True,

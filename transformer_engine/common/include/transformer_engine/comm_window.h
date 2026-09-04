@@ -26,6 +26,9 @@ struct ncclWindow_vidmem;
 typedef struct {
   struct ncclWindow_vidmem* window; /*!< NCCL window, or NULL to use the raw data pointer. */
   uint64_t offset;                  /*!< Byte offset of the payload within window. */
+  struct ncclWindow_vidmem*
+      scale_window;      /*!< Window for a block-scaled tensor's scale-inverse, or NULL for raw. */
+  uint64_t scale_offset; /*!< Byte offset of the scale-inverse within scale_window. */
 } NVTECommWindow;
 
 #ifdef __cplusplus

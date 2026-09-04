@@ -23,11 +23,7 @@ git checkout $TARGET_BRANCH
 git submodule update --init --recursive
 
 # Install deps
-/opt/python/cp310-cp310/bin/pip install cmake pybind11[global] ninja setuptools wheel
-
-# Enable optional build features. cuSolverMp is provided by the build image
-# (see Dockerfile.x86 / Dockerfile.aarch), which also sets CUSOLVERMP_HOME.
-export NVTE_WITH_CUSOLVERMP=1
+/opt/python/cp310-cp310/bin/pip install cmake pybind11[global] ninja setuptools wheel 'nvidia-cudnn-frontend>=1.25.0'
 
 if $BUILD_METAPACKAGE ; then
         cd /TransformerEngine

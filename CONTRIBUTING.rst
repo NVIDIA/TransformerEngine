@@ -13,7 +13,7 @@ Coding Guidelines
 -----------------
 
 * We follow `Google C++ Style Guide <https://google.github.io/styleguide/cppguide.html>`_. When no
-  rules can be found, follow the already occuring conventions. If there is no precedence in our
+  rules can be found, follow the already occurring conventions. If there is no precedence in our
   codebase we are open to discussion.
 * Prior to your contribution, please make sure that the code passes the linter check. We do both C++
   and Python linting. To invoke the check, please use

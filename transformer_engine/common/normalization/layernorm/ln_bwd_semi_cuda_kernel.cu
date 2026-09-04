@@ -7,6 +7,7 @@
 #include "../../common.h"
 #include "../common.h"
 #include "../kernel_traits.h"
+#include "../rtc_dispatch.h"
 #include "ln_bwd_kernels.cuh"
 
 using namespace transformer_engine::normalization;
@@ -132,6 +133,30 @@ void launch_ln_bwd_general_(LaunchParams<BackwardKernelParams> &launch_params,
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
+#define REGISTER_NORM_LAUNCHER_LN_BWD_tuned(HIDDEN_SIZE, WTYPE, ITYPE, OTYPE, CTYPE, CTAS_PER_ROW,                                            \
+                                            WARPS_M, WARPS_N, BL_MAIN, BL_FINAL, STATIC_FALLBACK)                                             \
+  [[maybe_unused]] static const int                                                                                                           \
+      _ln_bwd_tuned_##HIDDEN_SIZE##_##WTYPE##_##ITYPE##_##OTYPE##_##CTYPE##_##CTAS_PER_ROW##_##WARPS_M##_##WARPS_N##_##BL_MAIN##_##BL_FINAL = \
+          ([] {                                                                                                                               \
+            ::transformer_engine::normalization::rtc_norm::register_ln_bwd_tuned(                                                             \
+                TypeToDType<WTYPE>::value, TypeToDType<ITYPE>::value, TypeToDType<OTYPE>::value,                                              \
+                TypeToDType<CTYPE>::value, HIDDEN_SIZE, CTAS_PER_ROW, WARPS_M, WARPS_N, BL_MAIN,                                              \
+                BL_FINAL, STATIC_FALLBACK);                                                                                                   \
+            return 0;                                                                                                                         \
+          })()
+#define REGISTER_NORM_LAUNCHER_LN_BWD_general(HIDDEN_SIZE, WTYPE, ITYPE, OTYPE, CTYPE, WARPS_M,                                \
+                                              WARPS_N, BL_MAIN, BL_FINAL, STATIC_FALLBACK)                                     \
+  [[maybe_unused]] static const int                                                                                            \
+      _ln_bwd_general_##HIDDEN_SIZE##_##WTYPE##_##ITYPE##_##OTYPE##_##CTYPE##_##WARPS_M##_##WARPS_N##_##BL_MAIN##_##BL_FINAL = \
+          ([] {                                                                                                                \
+            ::transformer_engine::normalization::rtc_norm::register_ln_bwd_general(                                            \
+                TypeToDType<WTYPE>::value, TypeToDType<ITYPE>::value, TypeToDType<OTYPE>::value,                               \
+                TypeToDType<CTYPE>::value, HIDDEN_SIZE, WARPS_M, WARPS_N, BL_MAIN, BL_FINAL,                                   \
+                STATIC_FALLBACK);                                                                                              \
+            return 0;                                                                                                          \
+          })()
+
+#if NVTE_BUILD_LEGACY_STATIC_NORM
 #define REGISTER_NORM_LAUNCHER(NORM_TYPE, NORM_STAGE, LAUNCH_TYPE, HIDDEN_SIZE, WTYPE, ITYPE,                   \
                                OTYPE, CTYPE, ...)                                                               \
   namespace {                                                                                                   \
@@ -141,10 +166,16 @@ void launch_ln_bwd_general_(LaunchParams<BackwardKernelParams> &launch_params,
     launch_ln_bwd_##LAUNCH_TYPE##_<WTYPE, ITYPE, OTYPE, CTYPE, uint32_t, HIDDEN_SIZE,                           \
                                    __VA_ARGS__>(launch_params, configure_params);                               \
   }                                                                                                             \
-  REGISTER_NORM_BASE(                                                                                           \
-      NORM_TYPE, NORM_STAGE, LAUNCH_TYPE, HIDDEN_SIZE, WTYPE, ITYPE, OTYPE, CTYPE,                              \
+  REGISTER_NORM_LAUNCHER_LN_BWD_##LAUNCH_TYPE(                                                                  \
+      HIDDEN_SIZE, WTYPE, ITYPE, OTYPE, CTYPE, __VA_ARGS__,                                                     \
       norm_##NORM_TYPE##_##NORM_STAGE##_##LAUNCH_TYPE##_##HIDDEN_SIZE##_##WTYPE##_##ITYPE##_##OTYPE##_##CTYPE); \
-  }  //  namespace
+  }  // namespace
+#else
+#define REGISTER_NORM_LAUNCHER(NORM_TYPE, NORM_STAGE, LAUNCH_TYPE, HIDDEN_SIZE, WTYPE, ITYPE, \
+                               OTYPE, CTYPE, ...)                                             \
+  REGISTER_NORM_LAUNCHER_LN_BWD_##LAUNCH_TYPE(HIDDEN_SIZE, WTYPE, ITYPE, OTYPE, CTYPE,        \
+                                              __VA_ARGS__, nullptr)
+#endif  // NVTE_BUILD_LEGACY_STATIC_NORM
 
 // Create tuned launch function and register. Macro signature:
 //  HIDDEN_SIZE, WTYPE, ITYPE, OTYPE, CTYPE, CTAS_PER_ROW, ...

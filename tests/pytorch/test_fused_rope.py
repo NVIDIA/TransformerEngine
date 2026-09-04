@@ -143,7 +143,6 @@ def test_fused_rope_thd(
     start_positions: bool,
     margin: int,
 ) -> None:
-
     device = torch.device("cuda:0")
     batch_size, head_num = 2, 64
     cu_seqlens = [0, 400, 542, 711, 727, 752, 1270, 1426, 1450, 1954, 2044, 2048]
@@ -179,7 +178,9 @@ def test_fused_rope_thd(
     t.requires_grad = True
 
     rotary_pos_emb = RotaryPositionEmbedding(hidden_size, rotary_percent, interleaved=interleaved)
-    emb = rotary_pos_emb(cu_seqlens_padded[-1])
+    # A long frequency table with many packed spans exercises the default
+    # linear-grid dispatch heuristic without a test-only override.
+    emb = rotary_pos_emb(8192)
     assert emb.is_contiguous()
 
     for cp_rank in range(cp_size):
@@ -345,7 +346,8 @@ def test_unfused_rope_thd_vs_bshd(
             grad_unfused_bshd.reshape(*grad_unfused_thd.shape), grad_unfused_thd
         )
         torch.testing.assert_close(
-            grad_unfused_sbhd.transpose(1, 0).reshape(*grad_unfused_thd.shape), grad_unfused_thd
+            grad_unfused_sbhd.transpose(1, 0).reshape(*grad_unfused_thd.shape),
+            grad_unfused_thd,
         )
 
         assert output_unfused_thd.is_contiguous()

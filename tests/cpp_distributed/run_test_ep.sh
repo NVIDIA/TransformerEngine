@@ -35,6 +35,12 @@ if (( MIN_SM > 0 && MIN_SM < 90 )); then
     exit 0
 fi
 
+# NCCL EP requires active NVLink P2P among ranks on the node.
+if ! nvidia-smi nvlink --status 2>/dev/null | grep -qE 'Link [0-9]+:.*GB/s'; then
+    echo "NVLink not detected on this platform; SKIPPING."
+    exit 0
+fi
+
 TEST_BIN="${BUILD_DIR}/test_ep"
 if [[ ! -x "${TEST_BIN}" ]]; then
     echo "ERROR: binary not found: ${TEST_BIN}"
@@ -46,6 +52,12 @@ if (( NUM_GPUS < 2 )); then
     echo "EP Tests: requires at least 2 GPUs, found ${NUM_GPUS}. Skipping."
     exit 0
 fi
+
+# Force this test run to compile at least one NCCL EP JIT kernel instead of
+# succeeding from a cache populated by an earlier process.
+NCCL_EP_JIT_CACHE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/te-nccl-ep-jit.XXXXXX")
+export NCCL_EP_JIT_CACHE_DIR
+trap 'rm -rf "${NCCL_EP_JIT_CACHE_DIR}"' EXIT
 
 GTEST_ARGS="${GTEST_FILTER:+--gtest_filter=${GTEST_FILTER}}"
 
@@ -60,4 +72,9 @@ if [[ -n "${GTEST_XML_PREFIX:-}" ]]; then
         "exec '${TEST_BIN}' ${GTEST_ARGS} --gtest_output=xml:${GTEST_XML_PREFIX}.rank\${OMPI_COMM_WORLD_RANK}.xml"
 else
     "${MPIRUN}" --allow-run-as-root --oversubscribe -n "${NUM_GPUS}" ${MPIRUN_EXTRA:-} "${TEST_BIN}" ${GTEST_ARGS}
+fi
+
+if ! compgen -G "${NCCL_EP_JIT_CACHE_DIR}/*/*.cubin" > /dev/null; then
+    echo "ERROR: NCCL EP tests did not produce a JIT-compiled cubin."
+    exit 1
 fi

@@ -6,11 +6,11 @@
 
 from __future__ import annotations
 from collections.abc import Iterable, Iterator
-from typing import Optional
+from typing import Any, Optional
 
 import torch
 
-from transformer_engine.pytorch.ops.op import FusibleOperation
+from transformer_engine.pytorch.ops.op import BasicOperation, FusibleOperation
 from transformer_engine.pytorch.ops.fuser import OperationFuser
 
 
@@ -168,23 +168,34 @@ class Sequential(torch.nn.Module):
         self,
         input: torch.Tensor,  # pylint: disable=redefined-builtin
         *extra_inputs: torch.Tensor,
+        op_kwargs: Optional[dict[torch.nn.Module | int, dict[str, Any]]] = None,
     ) -> torch.Tensor | tuple[torch.Tensor, ...]:
-        """Forward pass"""
+        """Forward pass.
+
+        op_kwargs : optional mapping from a contained op, keyed by module
+            or index, to extra keyword arguments forwarded to that op.
+            Only fusible operations can be targeted, for example to pass
+            preallocated output or grad input buffers to a grouped linear
+            or grouped MLP.
+        """
 
         # Create module groups if needed
         if self._module_groups is None:
             self._module_groups = self._make_module_groups(self._modules.values())
 
+        # Route op kwargs to each module group's basic ops
+        group_op_kwargs = self._resolve_op_kwargs(op_kwargs)
+
         # Forward pass for each module group
         x = input
         extra_outputs: list[torch.Tensor] = []
-        for module_group in self._module_groups:
+        for group_idx, module_group in enumerate(self._module_groups):
             if isinstance(module_group, OperationFuser):
                 xs, extra_inputs = (
                     (x,) + extra_inputs[: module_group.num_extra_inputs],
                     extra_inputs[module_group.num_extra_inputs :],
                 )
-                xs = module_group(*xs)
+                xs = module_group(*xs, basic_op_kwargs=group_op_kwargs[group_idx])
                 if isinstance(xs, tuple):
                     x, ys = xs[0], xs[1:]
                     extra_outputs.extend(ys)
@@ -196,3 +207,39 @@ class Sequential(torch.nn.Module):
         if extra_outputs:
             return (x,) + tuple(extra_outputs)
         return x
+
+    def _resolve_op_kwargs(
+        self,
+        op_kwargs: Optional[dict[torch.nn.Module | int, dict[str, Any]]],
+    ) -> list[Optional[list[dict[str, Any]]]]:
+        """Map per-op kwargs onto each module group's basic-op kwargs list."""
+        group_kwargs: list[Optional[list[dict[str, Any]]]] = [None] * len(self._module_groups)
+        if not op_kwargs:
+            return group_kwargs
+
+        # Construct map from basic-op id to its kwarg dict
+        resolved: dict[int, dict[str, Any]] = {}
+        for key, kwargs in op_kwargs.items():
+            module = self[key] if isinstance(key, int) else key
+            if not isinstance(module, BasicOperation):
+                raise ValueError(
+                    f"Attempted to provide forward kwargs to {type(module).__name__}, but "
+                    "Sequential only allows providing forward kwargs to a BasicOperation."
+                )
+            resolved[id(module)] = kwargs
+
+        # Slot each op's kwargs into its module group by matching basic-op identity
+        for group_idx, module_group in enumerate(self._module_groups):
+            if not isinstance(module_group, OperationFuser):
+                continue
+            # pylint: disable-next=protected-access
+            group_kwargs[group_idx] = [{} for _ in module_group._basic_ops]
+            # pylint: disable-next=protected-access
+            for idx, op in enumerate(module_group._basic_ops):
+                if id(op) in resolved:
+                    group_kwargs[group_idx][idx] = resolved.pop(id(op))
+
+        # Any keys left over target an op that is not in this Sequential
+        if resolved:
+            raise ValueError("op_kwargs contains keys that are not in this Sequential")
+        return group_kwargs

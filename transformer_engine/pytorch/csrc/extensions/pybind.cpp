@@ -120,6 +120,7 @@ void init_grouped_tensor_extension() {
 }
 
 void init_extension() {
+  pybind11::gil_scoped_acquire gil;
   std::call_once(extension_init_flag, []() {
     init_float8_extension();
     init_mxfp8_extension();
@@ -136,12 +137,20 @@ void init_router_bindings(pybind11::module &m) {
   pybind11::enum_<NVTERoutingMapFormat>(m, "NVTERoutingMapFormat", pybind11::module_local())
       .value("BYTEMAP", NVTE_ROUTING_MAP_FORMAT_BYTEMAP)
       .value("BITMAP_U8", NVTE_ROUTING_MAP_FORMAT_BITMAP_U8);
+  pybind11::enum_<NVTEQBHistogramMode>(m, "NVTEQBHistogramMode", pybind11::module_local())
+      .value("TWO_KERNEL", NVTE_QB_HISTOGRAM_TWO_KERNEL)
+      .value("FUSED_ATOMIC", NVTE_QB_HISTOGRAM_FUSED_ATOMIC);
   m.def("fused_topk_with_score_function_fwd", &fused_topk_with_score_function_fwd,
         py::arg("logits"), py::arg("topk"), py::arg("use_pre_softmax"), py::arg("num_groups"),
         py::arg("group_topk"), py::arg("scaling_factor"), py::arg("score_function"),
         py::arg("expert_bias"),
         py::arg("routing_map_format") = static_cast<int>(NVTE_ROUTING_MAP_FORMAT_BYTEMAP),
         py::arg("topk_indices") = std::nullopt, "Fused topk with score function fwd");
+  m.def("fused_topk_with_score_function_qb_fwd", &fused_topk_with_score_function_qb_fwd,
+        py::arg("logits"), py::arg("topk"), py::arg("scaling_factor"), py::arg("expert_bias"),
+        py::arg("routing_map_format"), py::arg("topk_indices"), py::arg("histogram"),
+        py::arg("bin_bounds"), py::arg("histogram_mode"), py::arg("bin_bounds_validated") = false,
+        "Kimi K3 QB fused topk with histogram accumulation");
   m.def("fused_topk_with_score_function_bwd", &fused_topk_with_score_function_bwd,
         py::arg("routing_map"), py::arg("intermediate_output"), py::arg("grad_probs"),
         py::arg("grad_logits"), py::arg("topk"), py::arg("use_pre_softmax"),
@@ -158,7 +167,11 @@ void init_router_bindings(pybind11::module &m) {
   m.def("fused_moe_aux_loss_fwd", &fused_moe_aux_loss_fwd, py::arg("probs"),
         py::arg("tokens_per_expert"), py::arg("total_num_tokens"), py::arg("num_experts"),
         py::arg("num_rows"), py::arg("num_cols"), py::arg("topk"), py::arg("coeff"),
-        "Fused aux loss fwd");
+        "Fused aux loss fwd (host-int total_num_tokens, host-folded C_coeff)");
+  m.def("fused_moe_aux_loss_fwd_graph_safe", &fused_moe_aux_loss_fwd_graph_safe, py::arg("probs"),
+        py::arg("tokens_per_expert"), py::arg("total_num_tokens"), py::arg("num_experts"),
+        py::arg("num_rows"), py::arg("num_cols"), py::arg("topk"), py::arg("coeff"),
+        "Fused aux loss fwd (device-tensor total_num_tokens, CUDA-graph-safe)");
   m.def("fused_moe_aux_loss_bwd", &fused_moe_aux_loss_bwd, py::arg("Const_buf"),
         py::arg("tokens_per_expert"), py::arg("num_rows"), py::arg("num_cols"),
         py::arg("grad_aux_loss"), "Fused aux loss bwd");
@@ -204,13 +217,30 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("group_quantize", transformer_engine::pytorch::group_quantize, py::arg("tensor"),
         py::arg("quantizer"), py::arg("num_tensors"), py::arg("first_dims"),
         py::arg("last_dims") = py::none(), py::arg("tensor_offsets") = py::none(),
-        py::arg("noop_flag") = py::none());
+        py::arg("noop_flag") = py::none(), py::arg("output") = py::none());
+  m.def("group_scaled_swiglu", transformer_engine::pytorch::group_scaled_swiglu,
+        "Grouped scaled SwiGLU recompute fused with columnwise MXFP8 quantization",
+        py::arg("input_2h"), py::arg("prob"), py::arg("quantizer"), py::arg("num_tensors"),
+        py::arg("first_dims") = py::none(), py::arg("last_dims") = py::none(),
+        py::arg("tensor_offsets") = py::none());
+  m.def("group_scaled_clamped_swiglu", transformer_engine::pytorch::group_scaled_clamped_swiglu,
+        "Grouped scaled clamped-SwiGLU recompute fused with columnwise MXFP8 quantization",
+        py::arg("input_2h"), py::arg("prob"), py::arg("quantizer"), py::arg("num_tensors"),
+        py::arg("limit"), py::arg("alpha") = 1.702f, py::arg("glu_linear_offset") = 1.0f,
+        py::arg("first_dims") = py::none(), py::arg("last_dims") = py::none(),
+        py::arg("tensor_offsets") = py::none());
   transformer_engine::pytorch::bind_quantize_with_amax_extensions(m);
   m.def("group_dequantize", transformer_engine::pytorch::group_dequantize,
         "Dequantize group tensor", py::arg("input"), py::arg("otype"));
   m.def("bgrad_group_quantize", transformer_engine::pytorch::bgrad_group_quantize,
         py::arg("tensor"), py::arg("quantizer"), py::arg("num_tensors"), py::arg("first_dims"),
         py::arg("last_dims") = py::none(), py::arg("tensor_offsets") = py::none());
+  m.def("group_requantize_inplace", transformer_engine::pytorch::group_requantize_inplace,
+        "Rebuild the columnwise copy of a rowwise-prequantized MXFP8 grouped tensor and swizzle "
+        "its rowwise scales for GEMM, in place",
+        py::arg("grouped_x"), py::arg("quantizer"), py::arg("num_tensors"), py::arg("first_dims"),
+        py::arg("otype"), py::arg("tensor_offsets") = py::none(),
+        py::arg("return_dequantized") = false);
   m.def("bgrad_quantize", transformer_engine::pytorch::bgrad_quantize,
         "Compute bias gradient and quantize", py::arg("input"), py::arg("quantizer"));
   m.def("generic_gemm", transformer_engine::pytorch::gemm, "Compute GEMM (matrix-matrix multiply)",
@@ -247,6 +277,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("quantizer"));
   m.def("swiglu", transformer_engine::pytorch::swiglu, "SwiGLU activation", py::arg("input"),
         py::arg("quantizer"));
+  m.def("situglu", transformer_engine::pytorch::situglu, "SiTU-GLU activation", py::arg("input"),
+        py::arg("quantizer"), py::arg("beta1") = 4.0f, py::arg("beta2") = 25.0f);
   m.def("clamped_swiglu", transformer_engine::pytorch::clamped_swiglu,
         "SwiGLU activation used in GPT OSS", py::arg("input"), py::arg("quantizer"),
         py::arg("limit") = 7.0f, py::arg("alpha") = 1.702f, py::arg("glu_linear_offset") = 1.0f);
@@ -276,10 +308,41 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("fwd_input"), py::arg("quantizer"));
   m.def("dswiglu", transformer_engine::pytorch::dswiglu, "Backward of SwiGLU", py::arg("grad"),
         py::arg("fwd_input"), py::arg("quantizer"));
+  m.def("dsituglu", transformer_engine::pytorch::dsituglu, "Backward of SiTU-GLU", py::arg("grad"),
+        py::arg("fwd_input"), py::arg("quantizer"), py::arg("beta1") = 4.0f,
+        py::arg("beta2") = 25.0f);
   m.def("clamped_dswiglu", transformer_engine::pytorch::clamped_dswiglu,
         "Backward of SwiGLU used in GPT OSS", py::arg("grad"), py::arg("fwd_input"),
         py::arg("quantizer"), py::arg("limit") = 7.0f, py::arg("alpha") = 1.702f,
         py::arg("glu_linear_offset") = 1.0f);
+  /* Scaled activation */
+  m.def("scaled_swiglu", transformer_engine::pytorch::scaled_swiglu, "Scaled SwiGLU activation",
+        py::arg("input"), py::arg("act_scales"), py::arg("quantizer"),
+        py::arg("glu_interleave_size") = 0);
+  m.def("scaled_situglu", transformer_engine::pytorch::scaled_situglu, "Scaled SiTU-GLU activation",
+        py::arg("input"), py::arg("act_scales"), py::arg("quantizer"), py::arg("beta1") = 4.0f,
+        py::arg("beta2") = 25.0f, py::arg("glu_interleave_size") = 0);
+  m.def("scaled_clamped_swiglu", transformer_engine::pytorch::scaled_clamped_swiglu,
+        "Scaled clamped SwiGLU activation", py::arg("input"), py::arg("act_scales"),
+        py::arg("quantizer"), py::arg("limit") = 7.0f, py::arg("alpha") = 1.702f,
+        py::arg("glu_linear_offset") = 1.0f, py::arg("glu_interleave_size") = 0);
+  m.def("scaled_srelu", transformer_engine::pytorch::scaled_srelu, "Scaled SReLU activation",
+        py::arg("input"), py::arg("act_scales"), py::arg("quantizer"));
+  m.def("scaled_dswiglu", transformer_engine::pytorch::scaled_dswiglu, "Scaled SwiGLU backward",
+        py::arg("grad"), py::arg("fwd_input"), py::arg("act_scales"), py::arg("quantizer"),
+        py::arg("glu_interleave_size") = 0, py::arg("compute_scale_grad") = true);
+  m.def("scaled_dsituglu", transformer_engine::pytorch::scaled_dsituglu, "Scaled SiTU-GLU backward",
+        py::arg("grad"), py::arg("fwd_input"), py::arg("act_scales"), py::arg("quantizer"),
+        py::arg("beta1") = 4.0f, py::arg("beta2") = 25.0f, py::arg("glu_interleave_size") = 0,
+        py::arg("compute_scale_grad") = true);
+  m.def("scaled_clamped_dswiglu", transformer_engine::pytorch::scaled_clamped_dswiglu,
+        "Scaled clamped SwiGLU backward", py::arg("grad"), py::arg("fwd_input"),
+        py::arg("act_scales"), py::arg("quantizer"), py::arg("limit") = 7.0f,
+        py::arg("alpha") = 1.702f, py::arg("glu_linear_offset") = 1.0f,
+        py::arg("glu_interleave_size") = 0, py::arg("compute_scale_grad") = true);
+  m.def("scaled_dsrelu", transformer_engine::pytorch::scaled_dsrelu, "Scaled SReLU backward",
+        py::arg("grad"), py::arg("fwd_input"), py::arg("act_scales"), py::arg("quantizer"),
+        py::arg("compute_scale_grad") = true);
   /* DBias + DAct fusions*/
   m.def("dbias_dgelu", transformer_engine::pytorch::dbias_dgelu, "DGeLU + DBias + Quantize",
         py::arg("grad"), py::arg("fwd_input"), py::arg("quantizer"));
@@ -292,6 +355,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("dbias_dsrelu", transformer_engine::pytorch::dbias_dsrelu,
         "DSquaredReLU + DBias + Quantize", py::arg("grad"), py::arg("fwd_input"),
         py::arg("quantizer"));
+
+#ifdef NVTE_WITH_NCCL_EP
+  transformer_engine::pytorch::register_ep_bindings(m);
+#endif  // NVTE_WITH_NCCL_EP
 
   // Permutation functions
   m.def("moe_permute_fwd", transformer_engine::pytorch::moe_permute_fwd, "MOE permute FWD",
@@ -561,6 +628,18 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("thd_get_partitioned_indices", &transformer_engine::pytorch::thd_get_partitioned_indices,
         "Generate partitioned indices for inputs in THD format",
         py::call_guard<py::gil_scoped_release>());
+  m.def("thd_sequence_order_to_cp_rank_order",
+        &transformer_engine::pytorch::thd_sequence_order_to_cp_rank_order,
+        "Reorder a THD tensor from sequence order to dual-chunk CP rank order",
+        py::call_guard<py::gil_scoped_release>());
+  m.def("thd_cp_rank_order_to_sequence_order",
+        &transformer_engine::pytorch::thd_cp_rank_order_to_sequence_order,
+        "Reorder a THD tensor from dual-chunk CP rank order to sequence order",
+        py::call_guard<py::gil_scoped_release>());
+  m.def("thd_copy_valid_tokens_from_per_split_to_rank_local",
+        &transformer_engine::pytorch::thd_copy_valid_tokens_from_per_split_to_rank_local,
+        "Copy valid THD token entries from a per-split tensor into a rank-local accumulator",
+        py::call_guard<py::gil_scoped_release>());
 
   // nvshmem functions
   m.def("init_nvshmem_backend", &transformer_engine::pytorch::init_nvshmem_backend,
@@ -696,6 +775,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
                        int num_max_streams, int comm_cga_size, int gemm_priority, int comm_priority,
                        int num_comm_sm, bool set_sm_margin, bool atomic_gemm,
                        bool rs_overlap_first_gemm) {
+             // Release the GIL only around the native construction (blocking collectives) to avoid
+             // tripping pybind11's inc_ref/dec_ref GIL assertions.
+             py::gil_scoped_release nogil;
              if (use_cublasmp) {
                return std::make_shared<CommOverlap>(helper, helper->mylocal, tp_size, comm_type,
                                                     buffer_shape, buffer_dtype, num_comm_sm,
@@ -706,8 +788,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
                  comm_cga_size, gemm_priority, comm_priority, num_comm_sm, set_sm_margin,
                  atomic_gemm, rs_overlap_first_gemm);
            }),
-           py::call_guard<py::gil_scoped_release>(), py::arg("buffer_shape"),
-           py::arg("buffer_dtype"), py::arg("helper"), py::arg("tp_size"),
+           py::arg("buffer_shape"), py::arg("buffer_dtype"), py::arg("helper"), py::arg("tp_size"),
            py::arg("use_cublasmp") = false,
            py::arg("comm_type") = transformer_engine::CommOverlapType::RS,
            py::arg("num_splits") = 4, py::arg("num_max_streams") = NVTE_COMM_OVERLAP_MAX_STREAMS,
@@ -731,6 +812,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
                        int comm_cga_size, int gemm_priority, int comm_priority, int num_comm_sm,
                        bool set_sm_margin, bool atomic_gemm, bool use_ce, bool aggregate,
                        bool use_cublasmp) {
+             // Release the GIL only around the native construction (blocking collectives) to avoid
+             // tripping pybind11's inc_ref/dec_ref GIL assertions.
+             py::gil_scoped_release nogil;
              if (use_cublasmp) {
                return std::make_shared<CommOverlapP2P>(helper, helper->mylocal, tp_size, comm_type,
                                                        buffer_shape, buffer_dtype, num_comm_sm,
@@ -741,12 +825,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
                                                      gemm_priority, comm_priority, num_comm_sm,
                                                      set_sm_margin, atomic_gemm, use_ce, aggregate);
            }),
-           py::call_guard<py::gil_scoped_release>(), py::arg("buffer_shape"),
-           py::arg("buffer_dtype"), py::arg("helper"), py::arg("tp_size"), py::arg("comm_type"),
-           py::arg("num_max_streams") = NVTE_COMM_OVERLAP_MAX_STREAMS, py::arg("comm_cga_size") = 1,
-           py::arg("gemm_priority") = 0, py::arg("comm_priority") = 0, py::arg("num_comm_sm") = 1,
-           py::arg("set_sm_margin") = false, py::arg("atomic_gemm") = false,
-           py::arg("use_ce") = true, py::arg("aggregate") = false, py::arg("use_cublasmp") = false)
+           py::arg("buffer_shape"), py::arg("buffer_dtype"), py::arg("helper"), py::arg("tp_size"),
+           py::arg("comm_type"), py::arg("num_max_streams") = NVTE_COMM_OVERLAP_MAX_STREAMS,
+           py::arg("comm_cga_size") = 1, py::arg("gemm_priority") = 0, py::arg("comm_priority") = 0,
+           py::arg("num_comm_sm") = 1, py::arg("set_sm_margin") = false,
+           py::arg("atomic_gemm") = false, py::arg("use_ce") = true, py::arg("aggregate") = false,
+           py::arg("use_cublasmp") = false)
       .def("copy_into_buffer",
            static_cast<void (CommOverlapP2P::*)(const at::Tensor &, bool)>(
                &CommOverlapP2P::copy_into_buffer),

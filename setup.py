@@ -19,11 +19,15 @@ from build_tools.build_ext import CMakeExtension, get_build_ext
 from build_tools.te_version import te_version
 from build_tools.utils import (
     cuda_archs,
+    cuda_home_path,
     cuda_version,
-    cusolvermp_pypi_package_name,
+    cudnn_frontend_include_path,
     get_frameworks,
     remove_dups,
     min_python_version_str,
+    nccl_ep_enabled,
+    get_max_jobs_for_parallel_build,
+    nvcc_path,
 )
 
 frameworks = get_frameworks()
@@ -56,7 +60,10 @@ class TimedBdist(bdist_wheel):
 
 def setup_common_extension() -> CMakeExtension:
     """Setup CMake extension for common library"""
-    cmake_flags = ["-DCMAKE_CUDA_ARCHITECTURES={}".format(archs)]
+    cmake_flags = [
+        "-DCMAKE_CUDA_ARCHITECTURES={}".format(archs),
+        f"-DCUDNN_FRONTEND_INCLUDE_DIR={cudnn_frontend_include_path()}",
+    ]
     if bool(int(os.getenv("NVTE_UB_WITH_MPI", "0"))):
         assert (
             os.getenv("MPI_HOME") is not None
@@ -86,24 +93,7 @@ def setup_common_extension() -> CMakeExtension:
 
     # NCCL EP (Hopper+): on by default; auto-skipped when no arch >= 90 is
     # targeted. Set NVTE_WITH_NCCL_EP=0 to force off.
-    nccl_ep_env = os.getenv("NVTE_WITH_NCCL_EP")
-    nccl_ep_explicit = nccl_ep_env is not None
-    build_with_nccl_ep = bool(int(nccl_ep_env if nccl_ep_explicit else "1"))
-    if build_with_nccl_ep:
-        arch_tokens = [a.strip() for a in str(archs or "").split(";") if a.strip()]
-        has_hopper_or_newer = any(
-            t.lower() == "native" or (t.rstrip("af").isdigit() and int(t.rstrip("af")) >= 90)
-            for t in arch_tokens
-        )
-        if not has_hopper_or_newer:
-            if nccl_ep_explicit:
-                raise RuntimeError(
-                    f"NVTE_WITH_NCCL_EP=1 was set but NVTE_CUDA_ARCHS ('{archs}') "
-                    "contains no arch >= 90. NCCL EP requires Hopper or newer."
-                )
-            print(f"[NCCL EP] No arch >= 90 in NVTE_CUDA_ARCHS ('{archs}'); skipping build.")
-            build_with_nccl_ep = False
-    if build_with_nccl_ep:
+    if nccl_ep_enabled(archs):
         nccl_home = build_nccl_ep_submodule()
         cmake_flags.append(f"-DNCCL_INCLUDE_DIR={nccl_home}/include")
     else:
@@ -135,7 +125,6 @@ def setup_requirements() -> Tuple[List[str], List[str]]:
         "pydantic",
         "importlib-metadata>=1.0",
         "packaging",
-        cusolvermp_pypi_package_name(),
     ]
     test_reqs: List[str] = ["pytest>=8.2.1"]
 
@@ -156,7 +145,12 @@ def setup_requirements() -> Tuple[List[str], List[str]]:
 
 
 def _discover_nccl_home() -> str:
-    """Resolve NCCL_HOME: honor env var, else probe well-known prefixes, else ldconfig."""
+    """Resolve NCCL_HOME, preferring the NCCL the dynamic loader resolves at runtime.
+
+    Probes in order: NCCL_HOME env var, ldconfig cache, well-known prefixes, then a
+    pip-installed nvidia-nccl-cu* wheel. To test a non-default NCCL (e.g. a wheel), set
+    NCCL_HOME and ensure the runtime loader resolves the same lib (e.g. LD_LIBRARY_PATH).
+    """
     env_home = os.environ.get("NCCL_HOME")
     if env_home:
         if (Path(env_home) / "include" / "nccl.h").exists():
@@ -170,28 +164,11 @@ def _discover_nccl_home() -> str:
     # Include Debian/Ubuntu multiarch subdirs (e.g. lib/aarch64-linux-gnu).
     lib_subdirs = ("lib", "lib64", "lib/aarch64-linux-gnu", "lib/x86_64-linux-gnu")
 
-    # pip-installed NCCL (nvidia-nccl-cu* wheel) lives under nvidia/nccl in
-    # site-packages and has no top-level include/lib layout.
-    try:
-        import importlib.util
-
-        spec = importlib.util.find_spec("nvidia.nccl")
-        if spec is not None and spec.submodule_search_locations:
-            pip_root = Path(next(iter(spec.submodule_search_locations)))
-            if (pip_root / "include" / "nccl.h").exists() and any(
-                (pip_root / sub / name).exists() for sub in lib_subdirs for name in lib_names
-            ):
-                return str(pip_root)
-    except (ImportError, ValueError):
-        pass
-
-    for cand in ("/opt/nvidia/nccl", "/usr/local/nccl", "/usr"):
-        p = Path(cand)
-        if (p / "include" / "nccl.h").exists() and any(
-            (p / sub / name).exists() for sub in lib_subdirs for name in lib_names
-        ):
-            return str(p)
-
+    # Prefer the NCCL the dynamic loader will actually resolve at runtime so the
+    # EP build links against the same libnccl that gets loaded. libtransformer_engine
+    # carries no NCCL RUNPATH, so the loader uses ldconfig/system paths; building
+    # against a different NCCL (e.g. a pip wheel) causes ABI mismatches. ldconfig is
+    # the ground truth for runtime resolution, so consult it before well-known prefixes.
     try:
         out = subprocess.check_output(["ldconfig", "-p"], stderr=subprocess.DEVNULL).decode()
         for line in out.splitlines():
@@ -205,22 +182,44 @@ def _discover_nccl_home() -> str:
     except (subprocess.CalledProcessError, FileNotFoundError):
         pass
 
+    for cand in ("/opt/nvidia/nccl", "/usr/local/nccl", "/usr"):
+        p = Path(cand)
+        if (p / "include" / "nccl.h").exists() and any(
+            (p / sub / name).exists() for sub in lib_subdirs for name in lib_names
+        ):
+            return str(p)
+
+    # Fall back to a pip-installed NCCL (nvidia-nccl-cu* wheel) under nvidia/nccl
+    # in site-packages, used only when no system NCCL is present.
+    try:
+        import importlib.util
+
+        spec = importlib.util.find_spec("nvidia.nccl")
+        if spec is not None and spec.submodule_search_locations:
+            pip_root = Path(next(iter(spec.submodule_search_locations)))
+            if (pip_root / "include" / "nccl.h").exists() and any(
+                (pip_root / sub / name).exists() for sub in lib_subdirs for name in lib_names
+            ):
+                return str(pip_root)
+    except (ImportError, ValueError):
+        pass
+
     raise RuntimeError(
         "Could not locate NCCL core (nccl.h + libnccl.so). Set NCCL_HOME to the install prefix."
     )
 
 
 def build_nccl_ep_submodule() -> str:
-    """Build libnccl_ep.a from the 3rdparty/nccl submodule and return NCCL_HOME."""
-    nccl_root = current_file_path / "3rdparty" / "nccl"
-    if not (nccl_root / "Makefile").exists():
+    """Build NCCL EP libraries from 3rdparty/nccl-extensions and return NCCL_HOME."""
+    nccl_root = current_file_path / "3rdparty" / "nccl-extensions"
+    if not (nccl_root / "nccl_ep" / "Makefile").exists():
         raise RuntimeError(
-            f"NCCL submodule not found at {nccl_root}. "
+            f"NCCL EP submodule not found at {nccl_root}. "
             "Run `git submodule update --init --recursive`."
         )
 
     build_dir = nccl_root / "build"
-    nccl_ep_lib = build_dir / "lib" / "libnccl_ep.a"
+    nccl_ep_shared_lib = build_dir / "lib" / "libnccl_ep.so"
     gencode_stamp = build_dir / "lib" / "libnccl_ep.gencode"
 
     # Caller gates on arch >= 90 or "native"; expand "native" to the host's
@@ -254,8 +253,12 @@ def build_nccl_ep_submodule() -> str:
         )
     gencode = " ".join(f"-gencode=arch=compute_{a},code=sm_{a}" for a in arch_list)
 
-    nproc = os.cpu_count() or 8
+    nproc = get_max_jobs_for_parallel_build()
     env = os.environ.copy()
+    if (cuda_home := cuda_home_path()) is not None:
+        env.setdefault("CUDA_HOME", str(cuda_home))
+    if (nvcc_bin := nvcc_path()) is not None:
+        env.setdefault("NVCC", str(nvcc_bin))
     env["NVCC_GENCODE"] = gencode
     # NCCL EP needs the core NCCL headers + libnccl.so; write NCCL EP build
     # outputs to the submodule's local build/ tree.
@@ -264,20 +267,21 @@ def build_nccl_ep_submodule() -> str:
     env["NCCL_EP_BUILDDIR"] = str(build_dir)
 
     prev_gencode = gencode_stamp.read_text().strip() if gencode_stamp.exists() else None
-    if not nccl_ep_lib.exists() or prev_gencode != gencode:
-        if nccl_ep_lib.exists() and prev_gencode != gencode:
+    if not nccl_ep_shared_lib.exists() or prev_gencode != gencode:
+        if nccl_ep_shared_lib.exists() and prev_gencode != gencode:
             print(
                 f"[NCCL EP] gencode changed ('{prev_gencode}' -> '{gencode}'); "
-                "rebuilding libnccl_ep.a"
+                "rebuilding NCCL EP libraries"
             )
             subprocess.check_call(
-                ["make", "-C", "contrib/nccl_ep", "clean"],
+                ["make", "-C", "nccl_ep", "clean"],
                 cwd=str(nccl_root),
                 env=env,
             )
-        print(f"[NCCL EP] Building libnccl_ep.a (gencode='{gencode}')")
+        print(f"[NCCL EP] Building static and shared libraries (gencode='{gencode}')")
+        make_jobs = f"-j{nproc}" if nproc else "-j"
         subprocess.check_call(
-            ["make", "-j", str(nproc), "-C", "contrib/nccl_ep", "lib"],
+            ["make", make_jobs, "-C", "nccl_ep", "lib"],
             cwd=str(nccl_root),
             env=env,
         )
