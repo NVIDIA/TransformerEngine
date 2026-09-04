@@ -450,6 +450,13 @@ class TestDistributedContextParallelSelfAttn:
             cp_load_balanced=load_balanced,
         )
 
+        # Mirror _FusedAttnCPWithAllGatherHelper.get_adjusted_max_segments_per_seq()
+        runner_segments = runner._get_max_segments_per_sequence()
+        if stripe_size and cp_strategy in (CPStrategy.DEFAULT, CPStrategy.ALL_GATHER):
+            max_segments_per_seq = runner_segments + seqlen // (stripe_size * cp_size)
+        else:
+            max_segments_per_seq = runner_segments
+
         def check_has_backend_for_mask(mask_type):
             return is_fused_attn_kernel_available(
                 is_training,
@@ -467,8 +474,9 @@ class TestDistributedContextParallelSelfAttn:
                 seqlen,
                 hidden,
                 hidden,
-                None,
-            )  # no SWA for CP
+                None,  # no SWA for CP
+                max_segments_per_seq=max_segments_per_seq,
+            )
 
         # For causal masking we depend on having bottom right support also.
         # The API does not check this and instead we rely on lower level checks to raise

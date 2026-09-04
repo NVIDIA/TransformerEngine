@@ -261,6 +261,7 @@ def context_parallel_supported() -> Tuple[bool, str]:
         head_dim_qk=head_dim,
         head_dim_v=head_dim,
         window_size=window_size,
+        max_segments_per_seq=max_segments_per_seq,
     )
     if not has_kernel:
         return False, "no fused attention kernel for the THD SWA shape"

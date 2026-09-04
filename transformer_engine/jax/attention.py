@@ -346,6 +346,7 @@ def is_fused_attn_kernel_available(
     bias_heads: Optional[int] = None,
     bias_seqlen_q: Optional[int] = None,
     bias_seqlen_kv: Optional[int] = None,
+    max_segments_per_seq: int = 1,
 ):
     """
     To check whether the fused attention kernel is supported.
@@ -381,6 +382,7 @@ def is_fused_attn_kernel_available(
             bias_heads=bias_heads,
             bias_seqlen_q=bias_seqlen_q,
             bias_seqlen_kv=bias_seqlen_kv,
+            max_segments_per_seq=max_segments_per_seq,
         )
 
     helper = make_helper(attn_mask_type)

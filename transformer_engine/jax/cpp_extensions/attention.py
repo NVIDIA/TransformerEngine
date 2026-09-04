@@ -231,8 +231,7 @@ class FusedAttnHelper:
     bias_heads: Optional[int] = None
     bias_seqlen_q: Optional[int] = None
     bias_seqlen_kv: Optional[int] = None
-    num_tokens_q: Optional[int] = None
-    num_tokens_kv: Optional[int] = None
+    max_segments_per_seq: int = 1
 
     def is_fused_attn_kernel_available(self):
         """Check if there is available fused attention kernel"""
@@ -259,18 +258,12 @@ class FusedAttnHelper:
             bias_heads = self.bias_heads or 0
             bias_seqlen_q = self.bias_seqlen_q or 0
             bias_seqlen_kv = self.bias_seqlen_kv or 0
+        num_segments = self.batch_size
         num_tokens_q = num_tokens_kv = 0
         if self.qkv_layout.is_thd():
-            num_tokens_q = (
-                self.batch_size * self.q_max_seqlen
-                if self.num_tokens_q is None
-                else self.num_tokens_q
-            )
-            num_tokens_kv = (
-                self.batch_size * self.kv_max_seqlen
-                if self.num_tokens_kv is None
-                else self.num_tokens_kv
-            )
+            num_segments = self.batch_size * self.max_segments_per_seq
+            num_tokens_q = self.batch_size * self.q_max_seqlen
+            num_tokens_kv = self.batch_size * self.kv_max_seqlen
         backend, message = transformer_engine_jax.get_fused_attn_backend(
             FusedAttnParams(
                 is_training=self.is_training,
@@ -289,7 +282,7 @@ class FusedAttnHelper:
                 do_dtype=q_type,
                 dqkv_dtype=q_type,
                 qkv_layout=self.qkv_layout.value,
-                batch_size=self.batch_size,
+                batch_size=num_segments,
                 num_attn_heads=self.q_num_heads,
                 num_gqa_groups=self.kv_num_heads,
                 head_dim_qk=self.head_dim_qk,
@@ -511,12 +504,9 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         if config.attn_bias_type == AttnBiasType.POST_SCALE_BIAS:
             *bias_batch_shape, bias_heads, bias_seqlen_q, bias_seqlen_kv = bias_aval.shape
             bias_batch = reduce(operator.mul, bias_batch_shape)
-        num_segments = input_batch
-        if config.qkv_layout.is_thd():
-            num_segments = input_batch * config.max_segments_per_seq
         backend, message = FusedAttnHelper(
             config.is_training,
-            num_segments,
+            input_batch,
             q_dtype,
             k_dtype,
             config.qkv_layout,
@@ -538,8 +528,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             bias_heads=bias_heads,
             bias_seqlen_q=bias_seqlen_q,
             bias_seqlen_kv=bias_seqlen_kv,
-            num_tokens_q=input_batch * q_max_seqlen,
-            num_tokens_kv=input_batch * kv_max_seqlen,
+            max_segments_per_seq=config.max_segments_per_seq,
         ).get_fused_attn_backend()
 
         if backend == NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen:

@@ -103,6 +103,7 @@ def _context_parallel_supported():
         head_dim_qk=128,
         head_dim_v=128,
         window_size=(8192, 0),
+        max_segments_per_seq=4,
     )
     if not has_kernel:
         return False, "no fused attention kernel for the THD SWA shape"

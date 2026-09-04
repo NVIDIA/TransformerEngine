@@ -684,6 +684,7 @@ class FusedAttnRunner:
             bias_heads=bias_heads,
             bias_seqlen_q=bias_seqlen_q,
             bias_seqlen_kv=bias_seqlen_kv,
+            max_segments_per_seq=self._get_max_segments_per_sequence(),
         ).get_fused_attn_backend()
         if self.backend != NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen:
             pytest.skip(message)

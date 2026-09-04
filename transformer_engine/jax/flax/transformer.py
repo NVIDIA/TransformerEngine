@@ -817,14 +817,11 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
         if attn_bias_type == AttnBiasType.POST_SCALE_BIAS:
             *bias_batch_shape, bias_heads, bias_seqlen_q, bias_seqlen_kv = bias.shape
             bias_batch = functools.reduce(operator.mul, bias_batch_shape)
-        num_segments = batch_size
-        if kernel_qkv_layout.is_thd():
-            num_segments = batch_size * self.max_segments_per_seq
         fused_attn_helper = FusedAttnHelper(
             # This needs to be fixed: TE-Jax has historically correlated training mode
             # with deterministic mode.
             not deterministic,
-            num_segments,
+            batch_size,
             input_dtype,
             # self._assert_dtypes enforces Q, K, V, bias to have the same dtype, so
             # using input_dtype as kv dtype is sufficient.
@@ -847,8 +844,7 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
             bias_heads=bias_heads,
             bias_seqlen_q=bias_seqlen_q,
             bias_seqlen_kv=bias_seqlen_kv,
-            num_tokens_q=batch_size * seqlen_q,
-            num_tokens_kv=batch_size * seqlen_kv,
+            max_segments_per_seq=self.max_segments_per_seq,
         )
         fused_attn_backend, _ = fused_attn_helper.get_fused_attn_backend()
         has_fused_attn_kernel = fused_attn_backend != NVTE_Fused_Attn_Backend.NVTE_No_Backend
