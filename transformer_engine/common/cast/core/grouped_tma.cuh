@@ -83,8 +83,7 @@ __device__ __forceinline__ void modify_base_tensor_map(const CUtensorMap base_te
           "tensormap.replace.tile.global_stride.shared::cta.b1024.b64 [%0], 0, %4;\n"
           :
           : "r"(shared_tensor_map_ptr), "l"(global_data_ptr),
-            "r"(static_cast<uint32_t>(global_dim_Y)),
-            "r"(static_cast<uint32_t>(global_dim_X)),
+            "r"(static_cast<uint32_t>(global_dim_Y)), "r"(static_cast<uint32_t>(global_dim_X)),
             "l"(static_cast<uint64_t>(global_stride_bytes))
           : "memory");
     }
