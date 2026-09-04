@@ -7,12 +7,12 @@
 from contextlib import contextmanager
 import os
 import re
-import shutil
 import subprocess
-from pathlib import Path
 from typing import Iterator, List, Mapping, Optional, Union
 
 from setuptools import build_meta
+
+from build_tools.utils import nvcc_path
 
 _SETUPTOOLS_BACKEND = build_meta.__legacy__
 _CUDA_BUILD_PACKAGES = {
@@ -165,38 +165,23 @@ def _framework_environment(config_settings: ConfigSettings) -> Iterator[None]:
             os.environ["NVTE_FRAMEWORK"] = previous
 
 
-def _system_cuda_version() -> Optional[str]:
-    """Get the version reported by a system-installed NVCC."""
-    candidates = []
-    if cuda_compiler := os.getenv("CUDACXX"):
-        candidates.append(Path(cuda_compiler))
-    if cuda_home := os.getenv("CUDA_HOME"):
-        candidates.append(Path(cuda_home) / "bin" / "nvcc")
-    if nvcc := shutil.which("nvcc"):
-        candidates.append(Path(nvcc))
-    candidates.append(Path("/usr/local/cuda/bin/nvcc"))
+def _nvcc_cuda_version() -> Optional[str]:
+    """Get the version reported by the selected NVCC."""
+    if (cuda_compiler := nvcc_path()) is None:
+        return None
 
-    checked = set()
-    for candidate in candidates:
-        if candidate in checked or not candidate.is_file():
-            continue
+    try:
+        result = subprocess.run(
+            [cuda_compiler, "--version"],
+            capture_output=True,
+            check=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return None
 
-        checked.add(candidate)
-        try:
-            result = subprocess.run(
-                [candidate, "--version"],
-                capture_output=True,
-                check=True,
-                text=True,
-            )
-        except (OSError, subprocess.CalledProcessError):
-            continue
-
-        match = re.search(r"release\s+(\d+\.\d+)", result.stdout)
-        if match is not None:
-            return _normalize_cuda_version(match.group(1))
-
-    return None
+    match = re.search(r"release\s+(\d+\.\d+)", result.stdout)
+    return _normalize_cuda_version(match.group(1)) if match is not None else None
 
 
 def _torch_cuda_version() -> Optional[str]:
@@ -227,7 +212,7 @@ def _cuda_version(config_settings: ConfigSettings) -> str:
     return (
         _config_cuda_version(config_settings)
         or _environment_cuda_version()
-        or _system_cuda_version()
+        or _nvcc_cuda_version()
         or _framework_cuda_version(config_settings)
         or _DEFAULT_CUDA_VERSION
     )
