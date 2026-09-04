@@ -3,8 +3,17 @@
 # See LICENSE for license information.
 
 [build-system]
-# CUDA build-time requirements are defined in `build_tools/build_backend.py`.
+requires = [
+    "setuptools>=61.0",
+    "cmake>=3.21",
+    "wheel",
+    "pybind11[global]",
+    "ninja",
+    "nvidia-cudnn-frontend>=1.28.0",
+]
 
-# Select build dependencies with --config-setting cuda-version=<version>.
+# CUDA and framework-specific requirements are defined in `build_tools/build_backend.py`.
+# Isolated builds must select a framework with --config-settings framework=<framework>
+# or NVTE_FRAMEWORK. Select CUDA with --config-settings cuda-version=<version>.
 build-backend = "build_tools.build_backend"
 backend-path = ["."]

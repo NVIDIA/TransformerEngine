@@ -2,17 +2,17 @@
 #
 # See LICENSE for license information.
 
-"""PEP 517 backend with CUDA-version-specific build requirements."""
+"""PEP 517 backend with CUDA-version- and framework-specific build requirements."""
 
+from contextlib import contextmanager
 import os
 import re
 import shutil
 import subprocess
 from pathlib import Path
-from typing import List, Mapping, Optional, Union
+from typing import Iterator, List, Mapping, Optional, Union
 
 from setuptools import build_meta
-
 
 _SETUPTOOLS_BACKEND = build_meta.__legacy__
 _CUDA_BUILD_PACKAGES = {
@@ -34,6 +34,11 @@ _CUDA_BUILD_PACKAGES = {
         "nvidia-nvvm",
     ],
 }
+_FRAMEWORK_BUILD_PACKAGES = {
+    "pytorch": ["torch>=2.1"],
+    "jax": ["jax>=0.5.0", "flax>=0.7.1"],
+}
+_SUPPORTED_FRAMEWORKS = tuple(_FRAMEWORK_BUILD_PACKAGES)
 _DEFAULT_CUDA_VERSION = "13.3"
 
 ConfigValue = Union[str, List[str]]
@@ -47,6 +52,7 @@ def _setuptools_config_settings(config_settings: ConfigSettings) -> ConfigSettin
 
     settings = dict(config_settings)
     settings.pop("cuda-version", None)
+    settings.pop("framework", None)
     return settings or None
 
 
@@ -85,6 +91,78 @@ def _environment_cuda_version() -> Optional[str]:
     """Get the CUDA version from the environment."""
     value = os.getenv("NVTE_CUDA_VERSION")
     return _normalize_cuda_version(value) if value is not None else None
+
+
+def _normalize_frameworks(value: str) -> List[str]:
+    """Validate and normalize a framework selection."""
+    frameworks = list(
+        dict.fromkeys(
+            framework.strip().lower() for framework in value.split(",") if framework.strip()
+        )
+    )
+    if not frameworks:
+        raise ValueError("Framework selection cannot be empty")
+
+    special_frameworks = {"all", "none"}.intersection(frameworks)
+    if special_frameworks:
+        if len(frameworks) != 1:
+            raise ValueError("'all' and 'none' cannot be combined with other frameworks")
+        return list(_SUPPORTED_FRAMEWORKS) if frameworks[0] == "all" else []
+
+    unsupported = [framework for framework in frameworks if framework not in _SUPPORTED_FRAMEWORKS]
+    if unsupported:
+        supported = ", ".join((*_SUPPORTED_FRAMEWORKS, "all", "none"))
+        raise ValueError(
+            f"Unsupported framework {unsupported[0]!r}; expected one or more of: {supported}"
+        )
+
+    return frameworks
+
+
+def _config_frameworks(config_settings: ConfigSettings) -> Optional[List[str]]:
+    """Get the target frameworks from PEP 517 config settings."""
+    settings: Mapping[str, ConfigValue] = config_settings or {}
+    value = settings.get("framework")
+    if value is None:
+        return None
+
+    if isinstance(value, list):
+        if not value:
+            raise ValueError("Framework selection cannot be empty")
+        value = value[-1]
+
+    return _normalize_frameworks(str(value))
+
+
+def _environment_frameworks() -> Optional[List[str]]:
+    """Get the target frameworks from the environment."""
+    value = os.getenv("NVTE_FRAMEWORK")
+    return _normalize_frameworks(value) if value is not None else None
+
+
+def _requested_frameworks(config_settings: ConfigSettings) -> Optional[List[str]]:
+    """Resolve an explicit framework selection in descending order of precedence."""
+    configured = _config_frameworks(config_settings)
+    return configured if configured is not None else _environment_frameworks()
+
+
+@contextmanager
+def _framework_environment(config_settings: ConfigSettings) -> Iterator[None]:
+    """Apply a config-setting framework selection while running setuptools."""
+    frameworks = _config_frameworks(config_settings)
+    if frameworks is None:
+        yield
+        return
+
+    previous = os.environ.get("NVTE_FRAMEWORK")
+    os.environ["NVTE_FRAMEWORK"] = ",".join(frameworks) if frameworks else "none"
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("NVTE_FRAMEWORK", None)
+        else:
+            os.environ["NVTE_FRAMEWORK"] = previous
 
 
 def _system_cuda_version() -> Optional[str]:
@@ -131,15 +209,11 @@ def _torch_cuda_version() -> Optional[str]:
     return _normalize_cuda_version(value) if value else None
 
 
-def _framework_cuda_version() -> Optional[str]:
+def _framework_cuda_version(config_settings: ConfigSettings) -> Optional[str]:
     """Get a CUDA version required by the selected framework."""
-    frameworks = {
-        framework.strip().lower()
-        for framework in os.getenv("NVTE_FRAMEWORK", "").split(",")
-        if framework.strip()
-    }
+    frameworks = _requested_frameworks(config_settings)
 
-    if not frameworks or frameworks.intersection({"all", "pytorch"}):
+    if frameworks is None or "pytorch" in frameworks:
         if cuda_version := _torch_cuda_version():
             return cuda_version
 
@@ -154,7 +228,7 @@ def _cuda_version(config_settings: ConfigSettings) -> str:
         _config_cuda_version(config_settings)
         or _environment_cuda_version()
         or _system_cuda_version()
-        or _framework_cuda_version()
+        or _framework_cuda_version(config_settings)
         or _DEFAULT_CUDA_VERSION
     )
 
@@ -171,6 +245,28 @@ def _cuda_build_requirements(config_settings: ConfigSettings) -> List[str]:
     return requirements
 
 
+def _framework_build_requirements(config_settings: ConfigSettings) -> List[str]:
+    """Get build requirements for the requested frameworks."""
+    frameworks = _requested_frameworks(config_settings)
+    if frameworks is None:
+        raise ValueError(
+            "Framework must be selected for an isolated build; set NVTE_FRAMEWORK or pass "
+            "--config-settings framework=pytorch (or jax, all, none)"
+        )
+
+    return [
+        requirement
+        for framework in frameworks
+        for requirement in _FRAMEWORK_BUILD_PACKAGES[framework]
+    ]
+
+
+def _build_requirements(config_settings: ConfigSettings) -> List[str]:
+    """Get CUDA and framework-specific build requirements."""
+    framework_requirements = _framework_build_requirements(config_settings)
+    return _cuda_build_requirements(config_settings) + framework_requirements
+
+
 ###################################################################################################
 # PEP 517 and PEP 660 defined functions
 ###################################################################################################
@@ -178,17 +274,17 @@ def _cuda_build_requirements(config_settings: ConfigSettings) -> List[str]:
 
 # Defined by PEP 517
 def get_requires_for_build_wheel(config_settings: ConfigSettings = None) -> List[str]:
-    """Get CUDA requirements for building a wheel."""
-    return _cuda_build_requirements(config_settings)
+    """Get requirements for building a wheel."""
+    return _build_requirements(config_settings)
 
 
 # Defined by PEP 517
 def get_requires_for_build_sdist(config_settings: ConfigSettings = None) -> List[str]:
-    """Get CUDA requirements needed while evaluating setup.py for an sdist."""
-    # CUDA build requirements are needed even for sdist because setup.py currently always
-    # depends on these packages. It could be refactored to only depend on them when building
-    # a wheel, but that would require a more invasive refactor.
-    return _cuda_build_requirements(config_settings)
+    """Get requirements needed while evaluating setup.py for an sdist."""
+    # Build requirements are needed even for sdist because setup.py currently always depends
+    # on them. It could be refactored to only depend on them when building a wheel, but that
+    # would require a more invasive refactor.
+    return _build_requirements(config_settings)
 
 
 # Defined by PEP 517
@@ -198,11 +294,12 @@ def build_wheel(
     metadata_directory: Optional[str] = None,
 ) -> str:
     """Build a wheel with setuptools."""
-    return _SETUPTOOLS_BACKEND.build_wheel(
-        wheel_directory,
-        _setuptools_config_settings(config_settings),
-        metadata_directory,
-    )
+    with _framework_environment(config_settings):
+        return _SETUPTOOLS_BACKEND.build_wheel(
+            wheel_directory,
+            _setuptools_config_settings(config_settings),
+            metadata_directory,
+        )
 
 
 # Defined by PEP 517
@@ -211,10 +308,11 @@ def prepare_metadata_for_build_wheel(
     config_settings: ConfigSettings = None,
 ) -> str:
     """Prepare wheel metadata with setuptools."""
-    return _SETUPTOOLS_BACKEND.prepare_metadata_for_build_wheel(
-        metadata_directory,
-        _setuptools_config_settings(config_settings),
-    )
+    with _framework_environment(config_settings):
+        return _SETUPTOOLS_BACKEND.prepare_metadata_for_build_wheel(
+            metadata_directory,
+            _setuptools_config_settings(config_settings),
+        )
 
 
 # Defined by PEP 517
@@ -223,18 +321,19 @@ def build_sdist(
     config_settings: ConfigSettings = None,
 ) -> str:
     """Build an sdist with setuptools."""
-    return _SETUPTOOLS_BACKEND.build_sdist(
-        sdist_directory,
-        _setuptools_config_settings(config_settings),
-    )
+    with _framework_environment(config_settings):
+        return _SETUPTOOLS_BACKEND.build_sdist(
+            sdist_directory,
+            _setuptools_config_settings(config_settings),
+        )
 
 
 if hasattr(_SETUPTOOLS_BACKEND, "build_editable"):
 
     # Defined by PEP 660
     def get_requires_for_build_editable(config_settings: ConfigSettings = None) -> List[str]:
-        """Get CUDA requirements for building an editable wheel."""
-        return _cuda_build_requirements(config_settings)
+        """Get requirements for building an editable wheel."""
+        return _build_requirements(config_settings)
 
     # Defined by PEP 660
     def build_editable(
@@ -243,11 +342,12 @@ if hasattr(_SETUPTOOLS_BACKEND, "build_editable"):
         metadata_directory: Optional[str] = None,
     ) -> str:
         """Build an editable wheel with setuptools."""
-        return _SETUPTOOLS_BACKEND.build_editable(
-            wheel_directory,
-            _setuptools_config_settings(config_settings),
-            metadata_directory,
-        )
+        with _framework_environment(config_settings):
+            return _SETUPTOOLS_BACKEND.build_editable(
+                wheel_directory,
+                _setuptools_config_settings(config_settings),
+                metadata_directory,
+            )
 
     # Defined by PEP 660
     def prepare_metadata_for_build_editable(
@@ -255,7 +355,8 @@ if hasattr(_SETUPTOOLS_BACKEND, "build_editable"):
         config_settings: ConfigSettings = None,
     ) -> str:
         """Prepare editable-wheel metadata with setuptools."""
-        return _SETUPTOOLS_BACKEND.prepare_metadata_for_build_editable(
-            metadata_directory,
-            _setuptools_config_settings(config_settings),
-        )
+        with _framework_environment(config_settings):
+            return _SETUPTOOLS_BACKEND.prepare_metadata_for_build_editable(
+                metadata_directory,
+                _setuptools_config_settings(config_settings),
+            )

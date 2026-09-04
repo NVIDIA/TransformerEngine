@@ -39,8 +39,8 @@ Build Configuration
 .. envvar:: NVTE_FRAMEWORK
 
    :Type: ``str``
-   :Default: Auto-detected
-   :Description: Comma-separated list of frameworks to build support for (``pytorch``, ``jax``, ``all``, or ``none``). If not specified, automatically detects installed frameworks.
+   :Default: Auto-detected without build isolation; required with build isolation
+   :Description: Comma-separated list of frameworks to build support for (``pytorch``, ``jax``, ``all``, or ``none``). Isolated PEP 517 builds cannot inspect frameworks in the caller's environment, so an explicit selection is required through this variable or pip's ``--config-settings framework=<framework>`` option. The config setting takes precedence over this variable.
 
 .. envvar:: NVTE_USE_CCACHE
 
