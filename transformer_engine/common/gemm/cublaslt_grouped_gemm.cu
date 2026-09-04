@@ -989,13 +989,29 @@ inline void set_fp8_scale_pointers(cublasLtMatmulDescOpaque_t &matmulDesc, void 
                                                    CUBLASLT_MATMUL_DESC_B_SCALE_POINTER,
                                                    &b_scale_inv_ptrs, sizeof(b_scale_inv_ptrs)));
 }
-inline cublasLtMatmulAlgo_t select_grouped_gemm_algo(cublasLtHandle_t handle,
-                                                     cublasLtMatmulDescOpaque_t &matmulDesc,
-                                                     cublasLtMatrixLayoutOpaque_t &descA,
-                                                     cublasLtMatrixLayoutOpaque_t &descB,
-                                                     cublasLtMatrixLayoutOpaque_t &descC,
-                                                     cublasLtMatrixLayoutOpaque_t &descD,
-                                                     int64_t avg_m, int64_t avg_n, int64_t avg_k) {
+
+inline bool needs_nvfp4_grouped_gemm_algo_filter(bool nvfp4) {
+  if (!nvfp4 || transformer_engine::cuda::cublas_version() < 130700) {
+    return false;
+  }
+  const int sm = transformer_engine::cuda::sm_arch(transformer_engine::cuda::current_device());
+  return sm == 103 || sm == 107;
+}
+
+inline bool is_unsafe_nvfp4_grouped_gemm_algo(
+    const cublasLtMatmulHeuristicResult_t &heuristic_result) {
+  uint32_t stages_id = CUBLASLT_MATMUL_STAGES_UNDEFINED;
+  NVTE_CHECK_CUBLAS(cublasLtMatmulAlgoConfigGetAttribute(&heuristic_result.algo,
+                                                         CUBLASLT_ALGO_CONFIG_STAGES_ID, &stages_id,
+                                                         sizeof(stages_id), nullptr));
+  return stages_id == static_cast<uint32_t>(CUBLASLT_MATMUL_STAGES_768xAUTO);
+}
+
+inline cublasLtMatmulAlgo_t select_grouped_gemm_algo(
+    cublasLtHandle_t handle, cublasLtMatmulDescOpaque_t &matmulDesc,
+    cublasLtMatrixLayoutOpaque_t &descA, cublasLtMatrixLayoutOpaque_t &descB,
+    cublasLtMatrixLayoutOpaque_t &descC, cublasLtMatrixLayoutOpaque_t &descD, int64_t avg_m,
+    int64_t avg_n, int64_t avg_k, bool filter_unsafe_algos) {
   cublasLtMatmulPreferenceOpaque_t preference;
   NVTE_CHECK_CUBLAS(cublasLtMatmulPreferenceInit(&preference));
   NVTE_CHECK_CUBLAS(
@@ -1008,15 +1024,23 @@ inline cublasLtMatmulAlgo_t select_grouped_gemm_algo(cublasLtHandle_t handle,
   NVTE_CHECK_CUBLAS(cublasLtMatmulPreferenceSetAttribute(
       &preference, CUBLASLT_MATMUL_PREF_GROUPED_AVERAGE_REDUCTION_DIM, &avg_k, sizeof(int64_t)));
 
-  cublasLtMatmulHeuristicResult_t heuristicResult;
+  constexpr int kMaxHeuristicResults = 32;
+  const int requested_results = filter_unsafe_algos ? kMaxHeuristicResults : 1;
+  std::vector<cublasLtMatmulHeuristicResult_t> heuristic_results(requested_results);
   int returnedResults = 0;
   auto status = cublasLtMatmulAlgoGetHeuristic(handle, &matmulDesc, &descA, &descB, &descC, &descD,
-                                               &preference, 1, &heuristicResult, &returnedResults);
+                                               &preference, requested_results,
+                                               heuristic_results.data(), &returnedResults);
   NVTE_CHECK(status != CUBLAS_STATUS_NOT_SUPPORTED,
              "Unable to find suitable cuBLAS grouped GEMM algorithm");
   NVTE_CHECK_CUBLAS(status);
   NVTE_CHECK(returnedResults > 0, "No suitable algorithm found for grouped GEMM");
-  return heuristicResult.algo;
+  for (int i = 0; i < returnedResults; ++i) {
+    if (!filter_unsafe_algos || !is_unsafe_nvfp4_grouped_gemm_algo(heuristic_results[i])) {
+      return heuristic_results[i].algo;
+    }
+  }
+  NVTE_ERROR("Unable to find suitable cuBLAS grouped GEMM algorithm");
 }
 
 struct GroupedGemmWorkspace {
@@ -1091,8 +1115,11 @@ inline void execute_grouped_gemm(const GroupedGemmSetupWorkspace &setup_workspac
                                                      CUBLASLT_MATMUL_DESC_SM_COUNT_TARGET,
                                                      &config.sm_count, sizeof(config.sm_count)));
   }
-  cublasLtMatmulAlgo_t algo = select_grouped_gemm_algo(
-      handle, matmulDesc, descA, descB, descC, descD, config.avg_m, config.avg_n, config.avg_k);
+  const bool needs_algo_filtering =
+      needs_nvfp4_grouped_gemm_algo_filter(transformer_engine::is_nvfp_scaling(A_sel.scaling_mode));
+  cublasLtMatmulAlgo_t algo =
+      select_grouped_gemm_algo(handle, matmulDesc, descA, descB, descC, descD, config.avg_m,
+                               config.avg_n, config.avg_k, needs_algo_filtering);
 
   // Hopper uses a single scalar alpha/beta for the whole grouped GEMM;
   // Blackwell+ uses per-matrix alpha/beta arrays.
