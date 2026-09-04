@@ -111,13 +111,9 @@ def setup_common_extension() -> CMakeExtension:
 
     # Keep the common CMake library consistent with the framework and NCCL EP
     # libraries, which use the same Python-side BOLT configuration.
-    cmake_flags.append(
-        f"-DNVTE_ENABLE_BOLT_COMPATIBLE={'ON' if bolt_compatible else 'OFF'}"
-    )
+    cmake_flags.append(f"-DNVTE_ENABLE_BOLT_COMPATIBLE={'ON' if bolt_compatible else 'OFF'}")
     if bolt_compatible:
-        cmake_flags.append(
-            f"-DNVTE_BUILD_TARGET_IS_ARM64={'ON' if target_is_arm64() else 'OFF'}"
-        )
+        cmake_flags.append(f"-DNVTE_BUILD_TARGET_IS_ARM64={'ON' if target_is_arm64() else 'OFF'}")
 
     # Project directory root
     root_path = Path(__file__).resolve().parent
