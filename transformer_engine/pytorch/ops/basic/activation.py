@@ -16,7 +16,7 @@ import transformer_engine_torch as tex
 from ...constants import DType
 from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ...tensor.float8_tensor import Float8CurrentScalingQuantizer, Quantizer
-from ...utils import clear_tensor_data
+from ...utils import _compile_safe_warn, clear_tensor_data
 from ..op import BasicOperation, OperationContext
 from .._common import maybe_dequantize
 
@@ -404,13 +404,13 @@ class _ScaledUnary(BasicOperation, metaclass=abc.ABCMeta):
         next_op_input_quantizer: Optional[Quantizer],  # pylint: disable=unused-argument
         basic_op_kwargs: list[dict[str, Any]],  # pylint: disable=unused-argument
     ) -> tuple[torch.Tensor, Sequence[Sequence[torch.Tensor]]]:
-        if self.activation_recompute_in_mlp:
-            raise RuntimeError(
-                f"{self.__class__.__name__}(activation_recompute_in_mlp=True) requires the "
-                "fused grouped MLP path."
-            )
-
         extra_input = basic_op_extra_inputs[0][0]
+
+        if self.activation_recompute_in_mlp:
+            _compile_safe_warn(
+                f"{self.__class__.__name__}(activation_recompute_in_mlp=True) is only supported "
+                "in the fused grouped MLP path."
+            )
 
         if torch.is_autocast_enabled():
             dtype = torch.get_autocast_dtype("cuda")
@@ -447,17 +447,17 @@ class _ScaledUnary(BasicOperation, metaclass=abc.ABCMeta):
     ]:
         del basic_op_grad_extra_outputs
 
-        if self.activation_recompute_in_mlp:
-            raise RuntimeError(
-                f"{self.__class__.__name__}(activation_recompute_in_mlp=True) requires the "
-                "fused grouped MLP path."
-            )
-
         ctx = basic_op_ctxs[0]
         x, scales = ctx.saved_tensors
         x = maybe_dequantize(x.contiguous(), ctx.dtype)
         scales = maybe_dequantize(scales, ctx.dtype)
         grad_output = maybe_dequantize(grad_output.contiguous(), ctx.dtype)
+
+        if self.activation_recompute_in_mlp:
+            _compile_safe_warn(
+                f"{self.__class__.__name__}(activation_recompute_in_mlp=True) is only supported "
+                "in the fused grouped MLP path."
+            )
 
         grad_input, grad_extra_input = self._scaled_unary_backward(
             grad_output,
@@ -483,7 +483,9 @@ class ScaledSReLU(_ScaledUnary):
     ----------
     activation_recompute_in_mlp : bool, default = ``False``
         Enable fused grouped MLP kernels to recompute activation outputs
-        during backward when supported instead of saving them.
+        during backward when supported instead of saving them. Outside the
+        fused grouped MLP path this option has no effect and a warning is
+        emitted.
     """
 
     def _scaled_unary_forward(
