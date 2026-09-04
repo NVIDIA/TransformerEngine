@@ -359,20 +359,6 @@ class _ScaledUnary(BasicOperation, metaclass=abc.ABCMeta):
         super().__init__()
         self.activation_recompute_in_mlp: bool = activation_recompute_in_mlp
 
-    def _maybe_warn_activation_recompute_in_mlp(self) -> None:
-        """Warn if activation recompute is requested outside the fused grouped MLP.
-
-        Runs inside the forward pass, so the warning must survive Dynamo
-        tracing (see :func:`_compile_safe_warn`).
-
-        """
-        if not self.activation_recompute_in_mlp:
-            return
-        _compile_safe_warn(
-            f"{self.__class__.__name__}(activation_recompute_in_mlp=True) is only supported "
-            "in the fused grouped MLP path."
-        )
-
     @abc.abstractmethod
     def _scaled_unary_forward(
         self,
@@ -418,9 +404,13 @@ class _ScaledUnary(BasicOperation, metaclass=abc.ABCMeta):
         next_op_input_quantizer: Optional[Quantizer],  # pylint: disable=unused-argument
         basic_op_kwargs: list[dict[str, Any]],  # pylint: disable=unused-argument
     ) -> tuple[torch.Tensor, Sequence[Sequence[torch.Tensor]]]:
-        self._maybe_warn_activation_recompute_in_mlp()
-
         extra_input = basic_op_extra_inputs[0][0]
+
+        if self.activation_recompute_in_mlp:
+            _compile_safe_warn(
+                f"{self.__class__.__name__}(activation_recompute_in_mlp=True) is only supported "
+                "in the fused grouped MLP path."
+            )
 
         if torch.is_autocast_enabled():
             dtype = torch.get_autocast_dtype("cuda")
@@ -462,6 +452,12 @@ class _ScaledUnary(BasicOperation, metaclass=abc.ABCMeta):
         x = maybe_dequantize(x.contiguous(), ctx.dtype)
         scales = maybe_dequantize(scales, ctx.dtype)
         grad_output = maybe_dequantize(grad_output.contiguous(), ctx.dtype)
+
+        if self.activation_recompute_in_mlp:
+            _compile_safe_warn(
+                f"{self.__class__.__name__}(activation_recompute_in_mlp=True) is only supported "
+                "in the fused grouped MLP path."
+            )
 
         grad_input, grad_extra_input = self._scaled_unary_backward(
             grad_output,
