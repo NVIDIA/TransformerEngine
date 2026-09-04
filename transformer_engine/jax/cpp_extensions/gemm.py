@@ -2122,6 +2122,7 @@ def _should_enforce_v2_grouped_gemm() -> bool:
             f"NVTE_JAX_ENFORCE_V2_GROUPED_GEMM must be an integer (0 or 1), got: {val!r}"
         ) from e
 
+
 @cache
 def _v2_grouped_gemm_supports_per_group_alpha_beta() -> bool:
     """Whether nvte_grouped_gemm accepts per-group alpha/beta on all visible devices."""
@@ -2235,10 +2236,9 @@ def _is_v2_grouped_gemm_supported(
     return (
         False,
         (
-            "The TE V2 grouped GEMM currently only supports non-quantized BF16 on SM90+, and MXFP8 with"
-            " 1D block scaling on SM100+, but NVTE_JAX_ENFORCE_V2_GROUPED_GEMM is enabled and"
-            " the input parameters do not meet these requirements"
-            f" (scaling_mode= {scaling_mode},"
+            "The TE V2 grouped GEMM currently only supports non-quantized BF16 on SM90+, and MXFP8"
+            " with 1D block scaling on SM100+, but NVTE_JAX_ENFORCE_V2_GROUPED_GEMM is enabled and"
+            f" the input parameters do not meet these requirements (scaling_mode= {scaling_mode},"
             f" dtype={dtype}, has_bias={has_bias}, lhs_shape={lhs_shape}, rhs_shape={rhs_shape},"
             f" lhs_axis_boundary={lhs_axis_boundary}, rhs_axis_boundary={rhs_axis_boundary})."
         ),
