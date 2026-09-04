@@ -468,8 +468,7 @@ inline void group_dequantize(const GroupedTensor *input, GroupedTensor *output,
             const IType *const input_dptr = reinterpret_cast<const IType *>(input_data.dptr);
             OType *const output_dptr = reinterpret_cast<OType *>(output->data.dptr);
 
-            update_tma_descriptors<IType, OType>
-                <<<num_tensors, THREADS_PER_WARP, 0, stream>>>(
+            update_tma_descriptors<IType, OType><<<num_tensors, THREADS_PER_WARP, 0, stream>>>(
                 tensor_map_input, tensor_map_output, input_dptr, output_dptr, shape_rep,
                 num_tensors, first_logical_dim, last_logical_dim, offsets_ptr, first_dims_ptr,
                 last_dims_ptr);

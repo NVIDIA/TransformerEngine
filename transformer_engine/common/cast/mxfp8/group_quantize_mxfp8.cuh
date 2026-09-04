@@ -668,8 +668,8 @@ __global__ void __launch_bounds__(CastTraits::THREADS_PER_CHUNK) group_quantize_
     // Validate all per-tensor row counts once, using the first CTA. num_tensors is bounded by
     // MAX_SUPPORTED_TENSOR_DESCRIPTORS (64), which is smaller than the CTA size.
     if (blockIdx.x == 0 && threadIdx.x < num_tensors) {
-      get_tensor_rows_num<ShapeRepresentation::VARYING_FIRST_DIM>(
-          threadIdx.x, first_logical_dim, first_dims_ptr, num_tensors);
+      get_tensor_rows_num<ShapeRepresentation::VARYING_FIRST_DIM>(threadIdx.x, first_logical_dim,
+                                                                  first_dims_ptr, num_tensors);
     }
   }
 
