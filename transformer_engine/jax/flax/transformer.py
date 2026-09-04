@@ -33,6 +33,7 @@ from ..attention import (
 from ..attention import is_fused_attn_kernel_available, make_swa_mask, canonicalize_attn_mask_type
 from ..attention import fused_attn
 from ..attention import CPStrategy
+from ..cpp_extensions.misc import get_cudnn_version
 from ..softmax import SoftmaxFusionType
 from ..sharding import num_of_devices
 from ..sharding import get_sharding_map_logic_axis_to_mesh_axis
@@ -843,14 +844,30 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
         use_fused_attn = enable_fused_attn and has_fused_attn_kernel
 
         if enable_fused_attn and not has_fused_attn_kernel:
-            warnings.warn(
-                "Fused attention is not enabled because there is no available kernel.\n"
-                "Fall back to the unfused attention.\n"
-                "Please try to update the cuDNN and TE to the latest version.\n"
-                f"{qkv_layout=}\n{attn_bias_type=}\n{attn_mask_type=}\n"
-                f"{self.attention_dropout=}\n{self.num_attention_heads=}\n{self.window_size=}\n"
-                f"{self.num_gqa_groups=}\n{seqlen_q=}\n{seqlen_kv=}\n{head_dim_qk=}\n{head_dim_v=}\n"
-            )
+            if (
+                input_dtype in (jnp.float16, jnp.bfloat16)
+                and not deterministic
+                and qkv_layout.is_thd()
+                and softmax_type == AttnSoftmaxType.LEARNABLE_SOFTMAX
+                and get_cudnn_version() < (9, 26, 0)
+                and head_dim_v not in (64, 128, 256)
+            ):
+                warnings.warn(
+                    "Disabling fused attention due to a known cuDNN issue with THD learnable "
+                    f"softmax backward and head_dim_v = {head_dim_v}. Upgrade to cuDNN 9.26 or "
+                    "later to use fused attention for this configuration. Falling back to "
+                    "unfused attention."
+                )
+            else:
+                warnings.warn(
+                    "Fused attention is not enabled because there is no available kernel.\n"
+                    "Fall back to the unfused attention.\n"
+                    "Please try to update the cuDNN and TE to the latest version.\n"
+                    f"{qkv_layout=}\n{attn_bias_type=}\n{attn_mask_type=}\n"
+                    f"{self.attention_dropout=}\n{self.num_attention_heads=}\n{self.window_size=}\n"
+                    f"{self.num_gqa_groups=}\n{seqlen_q=}\n{seqlen_kv=}\n{head_dim_qk=}\n"
+                    f"{head_dim_v=}\n"
+                )
 
         dropout_rng = None
         if not deterministic and self.attention_dropout > 0.0:
