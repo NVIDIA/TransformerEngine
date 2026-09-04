@@ -957,9 +957,7 @@ def test_transformer_layer_softcap_plumbing(dtype):
         params_dtype=dtype,
         device="cuda",
     )
-    block.self_attention.core_attention.register_forward_pre_hook(
-        _record("self"), with_kwargs=True
-    )
+    block.self_attention.core_attention.register_forward_pre_hook(_record("self"), with_kwargs=True)
     block.inter_attention.core_attention.register_forward_pre_hook(
         _record("cross"), with_kwargs=True
     )
@@ -969,9 +967,7 @@ def test_transformer_layer_softcap_plumbing(dtype):
     )
     forward_kwargs = dict(
         encoder_output=hidden_states,
-        enc_dec_attn_mask=torch.zeros(
-            batch_size, 1, 1, seqlen, dtype=torch.bool, device="cuda"
-        ),
+        enc_dec_attn_mask=torch.zeros(batch_size, 1, 1, seqlen, dtype=torch.bool, device="cuda"),
     )
 
     # The constructor value reaches both attention modules.
