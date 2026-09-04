@@ -170,6 +170,17 @@ def _cudnn_frontend_supports_single_group_runtime_offsets(
     ) and _cudnn_frontend_version_at_least("1.27.0")
 
 
+def _deterministic_algorithms_required() -> bool:
+    """Whether bit-exact reproducibility was asked for. Same union as ``DotProductAttention``.
+
+    Uncached: both knobs can change during the process.
+    """
+    return (
+        not bool(int(os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1")))
+        or torch.are_deterministic_algorithms_enabled()
+    )
+
+
 def _wrap_single_quantized_as_grouped(
     tensor: torch.Tensor,
     quantized: MXFP8Tensor | NVFP4Tensor | NVFP4TensorStorage,
@@ -955,6 +966,11 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
     def grouped_gemm_dactivation_kernel(cls) -> Callable:
         """Fused kernel for grouped GEMM, activation backward, and scale grad."""
         raise NotImplementedError
+
+    @classmethod
+    def grouped_gemm_dactivation_is_deterministic(cls) -> bool:
+        """Whether this op's dactivation kernel can produce a bit-exact ``dprob``."""
+        return False
 
     @classmethod
     @functools.lru_cache(maxsize=None)
@@ -2098,6 +2114,28 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         current_stream = torch.cuda.current_stream(device.index).cuda_stream
 
         unit_activation_scale = bool(getattr(fc1_ctx, "unit_activation_scale", False))
+        # A unit activation scale produces no dprob, so there is nothing to make deterministic.
+        deterministic_dactivation = (
+            not unit_activation_scale and _deterministic_algorithms_required()
+        )
+        if deterministic_dactivation:
+            # Two kernels write dprob and both have to be exact. The cuDNN dactivation
+            # epilogue produces it below; then, when scale_bias is set, it is passed to
+            # compute_grouped_dbias_dscales as the ``dscales`` accumulator and atomically
+            # added into (see triton/grouped_dbias_dscales.py). That Triton kernel is never
+            # deterministic, so scale_bias rules out a bit-exact dprob on its own.
+            dprob_is_deterministic = (
+                self.grouped_gemm_dactivation_is_deterministic() and not scale_bias
+            )
+            if not dprob_is_deterministic:
+                raise RuntimeError(
+                    "Deterministic execution was requested"
+                    " (NVTE_ALLOW_NONDETERMINISTIC_ALGO=0 or"
+                    " torch.use_deterministic_algorithms), but the scale gradient (dprob) is"
+                    " accumulated with nondeterministic atomics on this configuration."
+                    " A bit-exact dprob requires the scaled-SReLU activation,"
+                    " nvidia-cudnn-frontend 1.28.0 or later, and an FC2 without scale_bias."
+                )
         scales_f32 = None
         scales_tensor = None
         dscales_tensor = None
@@ -2152,6 +2190,9 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             "use_dynamic_sched": True,
         }
         dactivation_kernel = self.grouped_gemm_dactivation_kernel()
+        if deterministic_dactivation:
+            # Never passed to a wrapper that would reject it -- the check above raises first.
+            fc2_dactivation_kwargs["deterministic"] = True
         if _cudnn_frontend_supports_single_group_runtime_offsets(type(activation_op)):
             fc2_dactivation_kwargs["use_single_group_runtime_offsets"] = num_groups == 1
         if self._cudnn_dact_func is not None:
@@ -2681,6 +2722,19 @@ class GroupedMLP_CuTeGEMMUnary(_GroupedMLP_CuTeGEMMBase):
         from cudnn import grouped_gemm_dsrelu_wrapper_sm100  # pylint: disable=no-name-in-module
 
         return grouped_gemm_dsrelu_wrapper_sm100
+
+    @classmethod
+    @functools.lru_cache(maxsize=None)
+    def grouped_gemm_dactivation_is_deterministic(cls) -> bool:
+        """Feature-detect the dSReLU wrapper's ``deterministic`` argument (cuDNN FE 1.28.0+)."""
+        try:
+            kernel = cls.grouped_gemm_dactivation_kernel()
+        except ImportError:
+            return False
+        try:
+            return "deterministic" in inspect.signature(kernel).parameters
+        except (TypeError, ValueError):
+            return False
 
 
 def fuse_ops(
