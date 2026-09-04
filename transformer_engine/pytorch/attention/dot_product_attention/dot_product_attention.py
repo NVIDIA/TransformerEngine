@@ -1770,7 +1770,11 @@ class DotProductAttention(TransformerEngineBaseModule):
             policy_value = value_layer.index_select(0, kv_token_indices)
             _get_thd_policy_attention_backend(
                 policy,
-                grouped_attention_params_kwargs,
+                {
+                    **grouped_attention_params_kwargs,
+                    "num_tokens_q": policy_query.shape[0],
+                    "num_tokens_kv": policy_key.shape[0],
+                },
                 False,
             )
             policy_output = self.forward(
