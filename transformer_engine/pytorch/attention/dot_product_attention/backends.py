@@ -690,16 +690,11 @@ class UnfusedDotProductAttention(torch.nn.Module):
             matmul_result = matmul_result.view(*output_size)
             deferred_bias = core_attention_bias
 
-        # Cap the scaled logits -- softcap * tanh(scores * scale / softcap) -- matching how
-        # FlashAttention folds softmax_scale into its tanh argument. The cap is applied to the
-        # bare scaled logits, before any additive bias: FA2 softcaps immediately after the QK^T
-        # gemm and only then adds ALiBi (its alibi_slope is pre-divided by scale_softmax, which
-        # softcapping sets to `softcap`, so the bias lands outside the tanh). Capping the bias
-        # too would silently diverge from FA2, which is selectable alongside this backend for
-        # ALiBi -- the one bias type flash supports (pre/post_scale_bias disable it outright).
-        # `pre_scale_bias` is folded in before the scaling by construction, so it is necessarily
-        # inside the cap. qk layer scaling defers the layer_number factor to the softmax below,
-        # so it is divided out of the cap here.
+        # Cap the scaled logits: softcap * tanh(scores * scale / softcap), matching how
+        # FlashAttention folds softmax_scale into its tanh argument. The cap must land on the
+        # bare scaled logits, before any additive bias: FA2 caps right after the QK^T gemm and
+        # adds ALiBi afterwards, so capping the bias too would diverge from it. qk layer scaling
+        # defers the layer_number factor to the softmax below, so it is divided out of the cap.
         if softcap != 0.0:
             cap = softcap / self.layer_number if apply_qk_layer_scaling else softcap
             matmul_result = cap * torch.tanh(matmul_result / cap)
@@ -1300,14 +1295,6 @@ class FlashAttention(torch.nn.Module):
                         **fa_optional_forward_kwargs,
                     )
                 else:
-                    # Fail-loud net: get_attention_backend only keeps FA3 for softcap on a
-                    # softcap-capable build (signature probe) + Hopper (FA3 is sm90-only upstream)
-                    # + head_dim <= 256. If FA3 is still reached with softcap while the build lacks
-                    # support (force-selected / regressed path), raise rather than silently drop the
-                    # cap. The non-CP FA3 entry points
-                    # (flash_attn_func_v3 / flash_attn_varlen_func_v3) are self-contained autograd
-                    # functions, so threading `softcap` into the forward call also drives the
-                    # matching FA3 softcap backward kernel. (CP + FA3 + softcap stays blocked above.)
                     if softcap != 0.0 and not fa_utils.fa3_supports_softcap:
                         raise NotImplementedError(
                             "softcap is not supported by the installed FlashAttention 3 build. "
@@ -1317,6 +1304,7 @@ class FlashAttention(torch.nn.Module):
                     fa_3_optional_forward_kwargs["window_size"] = window_size
                     fa_3_optional_forward_kwargs["num_splits"] = num_splits
                     if softcap != 0.0 and fa_utils.fa3_supports_softcap:
+                        # FA3 entry points are autograd functions, so this drives the backward too.
                         fa_3_optional_forward_kwargs["softcap"] = softcap
                     if pad_between_seqs:
                         fa_3_optional_forward_kwargs["seqused_q"] = (

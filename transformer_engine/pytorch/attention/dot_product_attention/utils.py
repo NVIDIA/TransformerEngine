@@ -235,9 +235,8 @@ class AttentionParams:
         Whether to align sliding window and ALiBi diagonal to the bottom right corner
         of the softmax matrix.
     softcap : float, default = 0.0
-        Tanh logit softcapping value applied to the attention scores. A value of
-        ``0.0`` disables softcapping. Only supported by the FlashAttention and
-        UnfusedDotProductAttention backends.
+        Tanh logit softcapping value applied to the attention scores, as
+        ``softcap * tanh(scores / softcap)``. A value of ``0.0`` disables softcapping.
     alibi_slopes_shape : Optional[Union[torch.Size, List]], default = None
         Tensor shape of :attr:`alibi_slopes` in `DotProductAttention`.
     core_attention_bias_type : str, default = no_bias

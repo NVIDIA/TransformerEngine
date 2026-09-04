@@ -748,10 +748,8 @@ class DotProductAttention(TransformerEngineBaseModule):
     softcap : float, default = 0.0
                 tanh logit softcapping value applied to the attention scores as
                 ``softcap * tanh(scores / softcap)``. A value of ``0.0`` disables
-                softcapping. Softcapping is only supported by the FlashAttention
-                and UnfusedDotProductAttention backends. Similar to
-                :attr:`window_size`, ``softcap`` can be overridden by
-                :attr:`softcap` in ``forward`` as well.
+                softcapping. Similar to :attr:`window_size`, ``softcap`` can be
+                overridden by :attr:`softcap` in ``forward`` as well.
     attention_type : str, default = "self"
                    type of attention, either ``"self"`` and ``"cross"``.
     layer_number : int, default = None
@@ -2110,8 +2108,6 @@ class DotProductAttention(TransformerEngineBaseModule):
                     tanh logit softcapping value applied to the attention scores as
                     ``softcap * tanh(scores / softcap)``. A value of ``0.0`` disables
                     softcapping. When `None`, the value passed to the constructor is used.
-                    Softcapping is only supported by the FlashAttention and
-                    UnfusedDotProductAttention backends.
         bottom_right_diagonal: Optional[bool], default = None
                     Align sliding window and ALiBi diagonal to the top left (`False`)
                     or bottom right (`True`) corner of the softmax matrix in the encoder.

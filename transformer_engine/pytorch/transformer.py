@@ -154,6 +154,12 @@ class TransformerLayer(torch.nn.Module):
                         or bottom right (`True`) corner of the softmax matrix in the encoder.
                         If `None`, it will be set to `False` for `self_attn_mask_type` =
                         {`causal`, `padding_causal`} and `True` for other mask types.
+    softcap : float, default = 0.0
+            tanh logit softcapping value applied to the attention scores as
+            ``softcap * tanh(scores / softcap)``. A value of ``0.0`` disables softcapping.
+            Applied to both self-attention and, in decoder layers, cross-attention.
+            Similar to :attr:`window_size`, ``softcap`` can be overridden by
+            :attr:`softcap` in :meth:`forward` as well.
     enc_dec_attn_mask_type : {'no_mask', 'causal', 'padding', 'padding_causal', 'arbitrary'},
                            default = "no_mask"
                            type of attention mask passed into softmax operation for decoder.
@@ -314,6 +320,7 @@ class TransformerLayer(torch.nn.Module):
         self_attn_mask_type: str = "causal",
         window_size: Optional[Tuple[int, int]] = None,
         bottom_right_diagonal: Optional[bool] = None,
+        softcap: float = 0.0,
         enc_dec_attn_mask_type: str = "no_mask",
         enc_dec_bottom_right_diagonal: Optional[bool] = None,
         enc_dec_window_size: Optional[Tuple[int, int]] = None,
@@ -358,6 +365,7 @@ class TransformerLayer(torch.nn.Module):
         self.self_attn_mask_type = self_attn_mask_type
         self.window_size = window_size
         self.bottom_right_diagonal = bottom_right_diagonal
+        self.softcap = softcap
         self.enc_dec_attn_mask_type = enc_dec_attn_mask_type
         self.enc_dec_window_size = enc_dec_window_size
         self.enc_dec_bottom_right_diagonal = enc_dec_bottom_right_diagonal
@@ -460,6 +468,7 @@ class TransformerLayer(torch.nn.Module):
             "seq_length": seq_length,
             "micro_batch_size": micro_batch_size,
             "softmax_type": self.softmax_type,
+            "softcap": self.softcap,
         }
 
         self.self_attention = MultiheadAttention(
@@ -655,6 +664,7 @@ class TransformerLayer(torch.nn.Module):
         self_attn_mask_type: Optional[str] = None,
         window_size: Optional[Tuple[int, int]] = None,
         bottom_right_diagonal: Optional[bool] = None,
+        softcap: Optional[float] = None,
         encoder_output: Optional[torch.Tensor] = None,
         enc_dec_attn_mask: Optional[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]] = None,
         enc_dec_attn_mask_type: Optional[str] = None,
@@ -711,6 +721,10 @@ class TransformerLayer(torch.nn.Module):
             or bottom right (`True`) corner of the softmax matrix in the encoder.
             If `None`, it will be set to `False` for `self_attn_mask_type` =
             {`causal`, `padding_causal`} and `True` for other mask types.
+        softcap: Optional[float], default = None
+            tanh logit softcapping value applied to the attention scores as
+            ``softcap * tanh(scores / softcap)``. A value of ``0.0`` disables softcapping.
+            When `None`, the value passed to the constructor is used.
         thd_attention_policies: Optional[List[Dict[str, Any]]], default = None
             Per-sequence policies for packed THD self-attention. Passed through to
             :class:`MultiheadAttention`; do not also pass :attr:`self_attn_mask_type`
@@ -818,6 +832,10 @@ class TransformerLayer(torch.nn.Module):
             }:
                 bottom_right_diagonal = True
 
+        # softcap is not mask-specific, so resolve it outside the policy branch above.
+        if softcap is None:
+            softcap = self.softcap
+
         if enc_dec_attn_mask_type is None:
             enc_dec_attn_mask_type = self.enc_dec_attn_mask_type
         if enc_dec_window_size is None:
@@ -900,6 +918,7 @@ class TransformerLayer(torch.nn.Module):
             attn_mask_type=self_attn_mask_type,
             window_size=window_size,
             bottom_right_diagonal=bottom_right_diagonal,
+            softcap=softcap,
             thd_attention_policies=thd_attention_policies,
             thd_attention_policy_dispatch=thd_attention_policy_dispatch,
             inference_params=inference_params,
@@ -938,6 +957,7 @@ class TransformerLayer(torch.nn.Module):
                 attn_mask_type=enc_dec_attn_mask_type,
                 window_size=enc_dec_window_size,
                 bottom_right_diagonal=enc_dec_bottom_right_diagonal,
+                softcap=softcap,
                 encoder_output=encoder_output,
                 inference_params=inference_params,
                 is_first_microbatch=is_first_microbatch,
