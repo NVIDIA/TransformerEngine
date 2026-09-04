@@ -325,6 +325,7 @@ def canonicalize_attn_mask_type(attn_mask_type: str):
 
 def is_fused_attn_kernel_available(
     is_training,
+    batch_size,
     q_dtype,
     kv_dtype,
     qkv_layout,
@@ -340,15 +341,27 @@ def is_fused_attn_kernel_available(
     head_dim_v,
     window_size: Optional[Tuple[int, int]] = None,
     return_max_logit: bool = False,
+    bottom_right_diagonal: Optional[bool] = None,
+    bias_batch: Optional[int] = None,
+    bias_heads: Optional[int] = None,
+    bias_seqlen_q: Optional[int] = None,
+    bias_seqlen_kv: Optional[int] = None,
+    max_segments_per_seq: int = 1,
 ):
     """
-    To check whether the fused attention kernel is supported
+    To check whether the fused attention kernel is supported.
     """
     window_size_tuple = (-1, -1) if window_size is None else window_size
 
     def make_helper(attn_mask_type):
+        bottom_right = (
+            attn_mask_type.is_bottom_right()
+            if bottom_right_diagonal is None
+            else bottom_right_diagonal
+        )
         return tex.FusedAttnHelper(
             is_training,
+            batch_size,
             q_dtype,
             kv_dtype,
             qkv_layout,
@@ -363,10 +376,17 @@ def is_fused_attn_kernel_available(
             head_dim_qk,
             head_dim_v,
             window_size_tuple,
-            return_max_logit,
+            return_max_logit=return_max_logit,
+            bottom_right_diagonal=bottom_right,
+            bias_batch=bias_batch,
+            bias_heads=bias_heads,
+            bias_seqlen_q=bias_seqlen_q,
+            bias_seqlen_kv=bias_seqlen_kv,
+            max_segments_per_seq=max_segments_per_seq,
         )
 
-    return make_helper(attn_mask_type).is_fused_attn_kernel_available()
+    helper = make_helper(attn_mask_type)
+    return helper.is_fused_attn_kernel_available()
 
 
 def _obtain_batch_and_max_seqlen(qkv, qkv_layout):
