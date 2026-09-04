@@ -45,7 +45,7 @@ def debug_build_enabled() -> bool:
 
 
 @functools.lru_cache(maxsize=None)
-def build_target_arch() -> str:
+def build_target_cpu_arch() -> str:
     """CPU architecture targeted by the configured C++ compiler."""
     cxx = shlex.split(os.getenv("CXX", "c++"))
     try:
@@ -72,7 +72,7 @@ def build_target_arch() -> str:
 
 def target_is_arm64() -> bool:
     """Whether the configured C++ compiler targets Arm64."""
-    return build_target_arch() in ("aarch64", "arm64")
+    return build_target_cpu_arch() in ("aarch64", "arm64")
 
 
 @functools.lru_cache(maxsize=None)
