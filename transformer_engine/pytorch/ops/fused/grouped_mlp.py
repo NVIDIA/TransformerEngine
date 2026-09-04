@@ -1746,7 +1746,20 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         # Save state for backward pass
         if requires_grad:
             saved_fc1_x = grouped_fc1_x
-            mark_grouped_tensor(saved_fc1_x, activation_in, scales, grouped_fc2_x)
+            mark_grouped_tensor(
+                [
+                    saved_fc1_x.columnwise_data,
+                    activation_in,
+                    scales,
+                    grouped_fc2_x.columnwise_data,
+                ],
+                [
+                    saved_fc1_x.columnwise_scale_inv,
+                    None,
+                    None,
+                    grouped_fc2_x.columnwise_scale_inv,
+                ],
+            )
             activation_op = self.basic_ops[1]
             cpu_offloading = is_cpu_offload_enabled()
             activation_is_srelu = isinstance(activation_op, ScaledSReLU)

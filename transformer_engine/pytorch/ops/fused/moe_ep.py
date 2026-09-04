@@ -18,6 +18,7 @@ from ...constants import MXFP8_BLOCK_SCALING_SIZE
 from ...ep import EpConfig
 from ...quantization import Recipe
 from ...tensor import GroupedTensor, Quantizer
+from ...utils import mark_grouped_tensor
 from .._common import (
     get_accumulate_flag_in_param,
     get_dummy_wgrads_for_params,
@@ -710,6 +711,18 @@ class FusedMoeEp(FusedOperation):
         )
 
         if any(ctx.requires_grad for ctx in basic_op_ctxs):
+            active_pool_tokens = forward_out.expert_offsets[-1:]
+            mark_grouped_tensor(
+                [forward_out.fc1_preact],
+                scale_invs=[None],
+                num_tokens=active_pool_tokens,
+            )
+            mark_grouped_tensor(
+                [forward_out.fc1_a],
+                scale_invs=[forward_out.fc1_sfa],
+                transposed=True,
+                num_tokens=active_pool_tokens,
+            )
             basic_op_ctxs[0].save_for_backward(
                 topk_idx,
                 topk_weights,
