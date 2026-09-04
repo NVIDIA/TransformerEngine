@@ -1302,7 +1302,8 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
                               use_colwise_scaling
                                   ? reinterpret_cast<OType *>(output->columnwise_data.dptr)
                                   : nullptr;
-                          update_tma_descriptors<IType, OType><<<num_tensors, 1, 0, stream>>>(
+                          update_tma_descriptors<IType, OType>
+                              <<<num_tensors, THREADS_PER_WARP, 0, stream>>>(
                               tensor_map_input, tensor_map_act_input, tensor_map_output_rowwise,
                               tensor_map_output_colwise, input_dptr, act_input_dptr,
                               output_rowwise_dptr, output_colwise_dptr, shape_rep, num_tensors,
