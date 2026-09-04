@@ -660,6 +660,19 @@ __global__ void __launch_bounds__(CastTraits::THREADS_PER_CHUNK) group_quantize_
 
   const bool leading_thread = (threadIdx.x == 0);
 
+  if constexpr (use_direct_varying_first_mapper) {
+    static_assert(CastTraits::THREADS_PER_CHUNK >= MAX_SUPPORTED_TENSOR_DESCRIPTORS,
+                  "The first CTA must have enough threads to validate every tensor.");
+    // The direct mapper relies on every tensor boundary being TILE_DIM_Y-aligned. The legacy
+    // mapper validated this while decoding each job, but the direct path no longer calls it.
+    // Validate all per-tensor row counts once, using the first CTA. num_tensors is bounded by
+    // MAX_SUPPORTED_TENSOR_DESCRIPTORS (64), which is smaller than the CTA size.
+    if (blockIdx.x == 0 && threadIdx.x < num_tensors) {
+      get_tensor_rows_num<ShapeRepresentation::VARYING_FIRST_DIM>(threadIdx.x, first_logical_dim,
+                                                                  first_dims_ptr, num_tensors);
+    }
+  }
+
   // Decode the linear direct-mapper grid once per CTA. Valid CUDA grid extents fit in uint, which
   // also keeps this one-time coordinate calculation in 32-bit arithmetic.
   [[maybe_unused]] uint direct_block_id_X = 0;
@@ -704,8 +717,8 @@ __global__ void __launch_bounds__(CastTraits::THREADS_PER_CHUNK) group_quantize_
   constexpr size_t out_mem_rowwise = (ROWWISE_SCALING ? buff_size_aligned_out : 0);
 
   // The destination shared memory buffer of a bulk tensor operation should be 16-byte aligned
-  extern __shared__ unsigned char dynamic_shmem[];
-  unsigned char *dshmem = align_smem_ptr_per_TMA_requirements(dynamic_shmem);
+  extern __shared__ char dynamic_shmem[];
+  char *dshmem = align_up(dynamic_shmem, TMA_SHMEM_ALIGNMENT);
 
   // The destination shared memory buffer of a bulk tensor operation should be 16-byte aligned
   IType *sIn_ptr = reinterpret_cast<IType *>(dshmem);
@@ -1289,12 +1302,13 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
                               use_colwise_scaling
                                   ? reinterpret_cast<OType *>(output->columnwise_data.dptr)
                                   : nullptr;
-                          update_tma_descriptors<IType, OType><<<num_tensors, 1, 0, stream>>>(
-                              tensor_map_input, tensor_map_act_input, tensor_map_output_rowwise,
-                              tensor_map_output_colwise, input_dptr, act_input_dptr,
-                              output_rowwise_dptr, output_colwise_dptr, shape_rep, num_tensors,
-                              first_logical_dim, last_logical_dim, offsets_ptr, first_dims_ptr,
-                              last_dims_ptr, use_rowwise_scaling, use_colwise_scaling, IS_DACT);
+                          update_tma_descriptors<IType, OType>
+                              <<<num_tensors, THREADS_PER_WARP, 0, stream>>>(
+                                  tensor_map_input, tensor_map_act_input, tensor_map_output_rowwise,
+                                  tensor_map_output_colwise, input_dptr, act_input_dptr,
+                                  output_rowwise_dptr, output_colwise_dptr, shape_rep, num_tensors,
+                                  first_logical_dim, last_logical_dim, offsets_ptr, first_dims_ptr,
+                                  last_dims_ptr, use_rowwise_scaling, use_colwise_scaling, IS_DACT);
                         }
 
                         TRANSFORMER_ENGINE_SWITCH_CONDITION(
