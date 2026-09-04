@@ -1304,11 +1304,11 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
                                   : nullptr;
                           update_tma_descriptors<IType, OType>
                               <<<num_tensors, THREADS_PER_WARP, 0, stream>>>(
-                              tensor_map_input, tensor_map_act_input, tensor_map_output_rowwise,
-                              tensor_map_output_colwise, input_dptr, act_input_dptr,
-                              output_rowwise_dptr, output_colwise_dptr, shape_rep, num_tensors,
-                              first_logical_dim, last_logical_dim, offsets_ptr, first_dims_ptr,
-                              last_dims_ptr, use_rowwise_scaling, use_colwise_scaling, IS_DACT);
+                                  tensor_map_input, tensor_map_act_input, tensor_map_output_rowwise,
+                                  tensor_map_output_colwise, input_dptr, act_input_dptr,
+                                  output_rowwise_dptr, output_colwise_dptr, shape_rep, num_tensors,
+                                  first_logical_dim, last_logical_dim, offsets_ptr, first_dims_ptr,
+                                  last_dims_ptr, use_rowwise_scaling, use_colwise_scaling, IS_DACT);
                         }
 
                         TRANSFORMER_ENGINE_SWITCH_CONDITION(
