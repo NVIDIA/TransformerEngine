@@ -53,12 +53,6 @@ inline bool dimensions_supported_by_TMA(const Tensor *const t) {
   return cols % alignment_requirement == 0;
 }
 
-__device__ __forceinline__ unsigned char *align_smem_ptr_per_TMA_requirements(unsigned char *p) {
-  size_t addr = reinterpret_cast<size_t>(p);
-  addr = (addr + TMA_SHMEM_ALIGNMENT - 1) & ~(TMA_SHMEM_ALIGNMENT - 1);
-  return reinterpret_cast<unsigned char *>(addr);
-}
-
 // Copies the base tensor map to shmem, modifies the copy, stores the modified tensor map at index
 __device__ __forceinline__ void modify_base_tensor_map(const CUtensorMap base_tensor_map,
                                                        CUtensorMap *global_tensor_map,

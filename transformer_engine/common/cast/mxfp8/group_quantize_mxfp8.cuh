@@ -704,8 +704,8 @@ __global__ void __launch_bounds__(CastTraits::THREADS_PER_CHUNK) group_quantize_
   constexpr size_t out_mem_rowwise = (ROWWISE_SCALING ? buff_size_aligned_out : 0);
 
   // The destination shared memory buffer of a bulk tensor operation should be 16-byte aligned
-  extern __shared__ unsigned char dynamic_shmem[];
-  unsigned char *dshmem = align_smem_ptr_per_TMA_requirements(dynamic_shmem);
+  extern __shared__ char dynamic_shmem[];
+  char *dshmem = align_up(dynamic_shmem, TMA_SHMEM_ALIGNMENT);
 
   // The destination shared memory buffer of a bulk tensor operation should be 16-byte aligned
   IType *sIn_ptr = reinterpret_cast<IType *>(dshmem);
