@@ -100,7 +100,7 @@ __device__ __forceinline__ void modify_base_tensor_map(const CUtensorMap base_te
         : "l"(global_tensor_map_ptr), "r"(shared_tensor_map_ptr)
         : "memory");
   } else {
-    NVTE_DEVICE_ERROR("tensormap.replace is only supported on SM 10.0+.");
+    NVTE_DEVICE_ERROR("tensormap.replace is architecture-specific. ");
   }
 }
 
