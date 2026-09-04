@@ -275,6 +275,8 @@ list(APPEND transformer_engine_cuda_arch_specific_sources
      activation/swiglu_grouped_bwd.cu
      activation/swiglu_grouped_dbias.cu
      cast/cast.cu
+     cast/mxfp8/specialized/cast_rowwise.cu
+     cast/mxfp8/specialized/cast_bidim.cu
      cast/cast_dbias.cu
      cast/cast_grouped.cu
      cast/cast_grouped_dbias.cu
