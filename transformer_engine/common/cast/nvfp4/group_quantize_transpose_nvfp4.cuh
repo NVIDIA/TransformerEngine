@@ -331,6 +331,17 @@ __global__ void __launch_bounds__(THREADS_NUM)
     const size_t buff_offset_out = buff * BUFF_OUT_SIZE;
     const size_t buff_offset_out_t = buff * BUFF_OUT_T_SIZE;
 
+    // Wait for TMA transfer to have finished reading shared memory.
+    // I.e. the buffer is ready to be written to
+    if (stage >= BUFFS_NUM) {
+      if (is_master_thread) {
+        ptx::cp_async_bulk_wait_group_read<BUFFS_NUM - 1>();
+      }
+      // Bulk async-groups are thread-local. Publish the master's completion before any thread
+      // overwrites this reused output buffer.
+      __syncthreads();
+    }
+
     // for stages from 1 to STAGES - 1, we need to update the tensor id
     // skip updating tensor id if it's the last CTA, and some stages will be out of bounds
     if (need_update_tensor_id && stage > 0 && (block_offset_Y + stage_offset_Y < rows)) {
@@ -349,10 +360,6 @@ __global__ void __launch_bounds__(THREADS_NUM)
     }
 
     if (next_stage < STAGES) {
-      // Wait for TMA transfer to have finished reading shared memory.
-      // I.e. the buffer is ready to be written to
-      ptx::cp_async_bulk_wait_group_read<1>();
-
       const size_t next_buff = next_stage % BUFFS_NUM;
       const size_t next_stage_offset_Y = next_stage * BUFF_DIM_Y;
       const size_t global_offset_Y = block_offset_Y + next_stage_offset_Y;
@@ -725,6 +732,11 @@ __global__ void __launch_bounds__(THREADS_NUM)
   //     scales_vec.store_to_elts(dst, 0, count);
   //   }
   // }
+
+  if (is_master_thread) {
+    ptx::cp_async_bulk_wait_group();
+  }
+  __syncthreads();
 
   destroy_barriers<STAGES>(mbar, is_master_thread);
 #else

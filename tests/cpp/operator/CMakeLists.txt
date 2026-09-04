@@ -15,6 +15,7 @@ add_executable(test_operator
                test_cast_mxfp8_grouped.cu
                test_cast_mxfp8_grouped_scaled_swiglu.cu
                test_cast_nvfp4_transpose.cu
+               test_cast_nvfp4_transpose_grouped.cu
                test_cast_float8blockwise.cu
                test_cast_float8blockwise_grouped.cu
                test_dequantize_mxfp8.cu
