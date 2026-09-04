@@ -4,6 +4,8 @@
  * See LICENSE for license information.
  ************************************************************************/
 
+#include <cmath>
+
 #include "../util/math.h"
 #include "./activation_template.h"
 
@@ -33,6 +35,27 @@ void nvte_dswiglu(const NVTETensor grad, const NVTETensor input, NVTETensor outp
   using namespace transformer_engine;
   Empty e = {};
   dgated_act_fn<fp32, Empty, silu<fp32, fp32>, dsilu<fp32, fp32>>(grad, input, output, e, stream);
+}
+
+void nvte_situglu(const NVTETensor input, NVTETensor output, float beta1, float beta2,
+                  cudaStream_t stream) {
+  NVTE_API_CALL(nvte_situglu);
+  using namespace transformer_engine;
+  NVTE_CHECK(beta1 > 0.0f && std::isfinite(beta1), "beta1 must be finite and positive.");
+  NVTE_CHECK(beta2 > 0.0f && std::isfinite(beta2), "beta2 must be finite and positive.");
+  SiTUGLUParam param = {beta1, beta2};
+  gated_act_fn<fp32, SiTUGLUParam, situ_gate<fp32, fp32>>(input, output, param, stream);
+}
+
+void nvte_dsituglu(const NVTETensor grad, const NVTETensor input, NVTETensor output, float beta1,
+                   float beta2, cudaStream_t stream) {
+  NVTE_API_CALL(nvte_dsituglu);
+  using namespace transformer_engine;
+  NVTE_CHECK(beta1 > 0.0f && std::isfinite(beta1), "beta1 must be finite and positive.");
+  NVTE_CHECK(beta2 > 0.0f && std::isfinite(beta2), "beta2 must be finite and positive.");
+  SiTUGLUParam param = {beta1, beta2};
+  dgated_act_fn<fp32, SiTUGLUParam, situ_gate<fp32, fp32>, dsitu_gate<fp32, fp32>>(
+      grad, input, output, param, stream);
 }
 
 void nvte_clamped_swiglu(const NVTETensor input, NVTETensor output, float limit, float alpha,

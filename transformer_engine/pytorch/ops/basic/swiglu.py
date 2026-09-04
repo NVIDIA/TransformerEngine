@@ -5,7 +5,8 @@
 """Fusible operation for SwiGLU and variants."""
 
 from __future__ import annotations
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
+import math
 from typing import Any, Optional
 
 import torch
@@ -18,7 +19,14 @@ from ...utils import clear_tensor_data
 from ..op import BasicOperation, OperationContext
 from .._common import maybe_dequantize
 
-__all__ = ["SwiGLU", "ClampedSwiGLU", "ScaledSwiGLU", "ScaledClampedQGeGLU"]
+__all__ = [
+    "SwiGLU",
+    "SiTUGLU",
+    "ClampedSwiGLU",
+    "ScaledSwiGLU",
+    "ScaledSiTUGLU",
+    "ScaledClampedQGeGLU",
+]
 
 
 class SwiGLU(BasicOperation):
@@ -80,6 +88,23 @@ class SwiGLU(BasicOperation):
         self.cache_quantized_input: bool = cache_quantized_input
         self.glu_interleave_size: Optional[int] = glu_interleave_size
 
+    def _tex_swiglu_forward(
+        self,
+        input_: torch.Tensor,
+        quantizer: Optional[Quantizer],
+    ) -> torch.Tensor:
+        """Call the Transformer Engine SwiGLU forward kernel."""
+        return tex.swiglu(input_, quantizer)
+
+    def _tex_swiglu_backward(
+        self,
+        grad_output: torch.Tensor,
+        input_: torch.Tensor,
+        quantizer: Optional[Quantizer],
+    ) -> torch.Tensor:
+        """Call the Transformer Engine SwiGLU backward kernel."""
+        return tex.dswiglu(grad_output, input_, quantizer)
+
     def op_forward(
         self,
         ctx: OperationContext,
@@ -114,7 +139,7 @@ class SwiGLU(BasicOperation):
             swiglu_in = swiglu_in.view(shape)
 
         # Launch kernel
-        out = tex.swiglu(swiglu_in, next_op_input_quantizer)
+        out = self._tex_swiglu_forward(swiglu_in, next_op_input_quantizer)
 
         # Quantize input to FP8 before caching if needed
         if self.cache_quantized_input:
@@ -167,7 +192,7 @@ class SwiGLU(BasicOperation):
             quantizer = None
 
         # Launch kernel
-        grad_swiglu_in = tex.dswiglu(dy, swiglu_in, quantizer)
+        grad_swiglu_in = self._tex_swiglu_backward(dy, swiglu_in, quantizer)
 
         # Apply interleaving if needed
         dx = grad_swiglu_in
@@ -186,6 +211,66 @@ class SwiGLU(BasicOperation):
         clear_tensor_data(input_)
 
         return dx, ()
+
+
+class SiTUGLU(SwiGLU):
+    r"""Soft-capped SiLU gated linear unit used by Kimi K3.
+
+    See the `Kimi K3 technical report
+    <https://github.com/MoonshotAI/Kimi-K3/blob/main/k3_tech_report.pdf>`__.
+
+    The input is split into gate and up-projection halves and computes
+
+    .. math::
+
+       \beta_1 \tanh(a / \beta_1) \sigma(a)
+       \; \beta_2 \tanh(b / \beta_2).
+
+    Parameters
+    ----------
+    beta1 : float, default = 4.0
+        Positive gate soft-cap parameter.
+    beta2 : float, default = 25.0
+        Positive up-branch soft-cap parameter.
+    cache_quantized_input : bool, default = False
+        Quantize the saved input for backward, as in :class:`SwiGLU`.
+    glu_interleave_size : int, optional
+        Block-interleaved GLU layout, as in :class:`SwiGLU`.
+    """
+
+    def __init__(
+        self,
+        *,
+        beta1: float = 4.0,
+        beta2: float = 25.0,
+        cache_quantized_input: bool = False,
+        glu_interleave_size: Optional[int] = None,
+    ) -> None:
+        super().__init__(
+            cache_quantized_input=cache_quantized_input,
+            glu_interleave_size=glu_interleave_size,
+        )
+        self.beta1 = float(beta1)
+        self.beta2 = float(beta2)
+        if not math.isfinite(self.beta1) or self.beta1 <= 0.0:
+            raise ValueError(f"beta1 must be finite and positive, got {self.beta1}")
+        if not math.isfinite(self.beta2) or self.beta2 <= 0.0:
+            raise ValueError(f"beta2 must be finite and positive, got {self.beta2}")
+
+    def _tex_swiglu_forward(
+        self,
+        input_: torch.Tensor,
+        quantizer: Optional[Quantizer],
+    ) -> torch.Tensor:
+        return tex.situglu(input_, quantizer, self.beta1, self.beta2)
+
+    def _tex_swiglu_backward(
+        self,
+        grad_output: torch.Tensor,
+        input_: torch.Tensor,
+        quantizer: Optional[Quantizer],
+    ) -> torch.Tensor:
+        return tex.dsituglu(grad_output, input_, quantizer, self.beta1, self.beta2)
 
 
 class ClampedSwiGLU(BasicOperation):
@@ -385,6 +470,11 @@ class _ScaledGLU(BasicOperation):
     ) -> None:
         super().__init__()
         self.glu_interleave_size: Optional[int] = glu_interleave_size
+        if activation_recompute_in_mlp:
+            raise ValueError(
+                f"{self.__class__.__name__} does not support activation recomputation "
+                "in the fused grouped MLP"
+            )
         self.activation_recompute_in_mlp: bool = activation_recompute_in_mlp
 
     def _scaled_glu_forward(
@@ -429,7 +519,7 @@ class _ScaledGLU(BasicOperation):
         prev_op_grad_output_quantizer: Optional[Quantizer],
         next_op_input_quantizer: Optional[Quantizer],
         basic_op_kwargs: list[dict[str, Any]],
-    ) -> tuple[torch.Tensor, Iterable[Iterable[torch.Tensor]]]:
+    ) -> tuple[torch.Tensor, Sequence[Sequence[torch.Tensor]]]:
         if self.activation_recompute_in_mlp:
             raise RuntimeError(
                 f"{self.__class__.__name__}(activation_recompute_in_mlp=True) requires the "
@@ -518,8 +608,8 @@ class ScaledSwiGLU(_ScaledGLU):
         interleaved format. See the corresponding option in the SwiGLU
         operation for more details.
     activation_recompute_in_mlp : bool, default = ``False``
-        Enable fused grouped MLP kernels to recompute activation outputs
-        during backward when supported instead of saving them.
+        Must be ``False``. Fused grouped-MLP activation recomputation is not
+        implemented for SwiGLU.
 
     """
 
@@ -553,6 +643,78 @@ class ScaledSwiGLU(_ScaledGLU):
         )
 
 
+class ScaledSiTUGLU(_ScaledGLU):
+    r"""SiTU-GLU with a row-wise post-activation scale.
+
+    This is the native fallback and the pattern marker for cuDNN-frontend's
+    block-scaled grouped-MLP SiTU-GLU fusion.
+
+    Parameters
+    ----------
+    beta1 : float, default = 4.0
+        Positive gate soft-cap parameter.
+    beta2 : float, default = 25.0
+        Positive up-branch soft-cap parameter.
+    glu_interleave_size : int, optional
+        Block-interleaved GLU layout, as in :class:`ScaledSwiGLU`.
+    activation_recompute_in_mlp : bool, default = ``False``
+        Must be ``False``. Fused grouped-MLP activation recomputation is not
+        implemented for SiTU-GLU.
+    """
+
+    def __init__(
+        self,
+        glu_interleave_size: Optional[int] = None,
+        *,
+        activation_recompute_in_mlp: bool = False,
+        beta1: float = 4.0,
+        beta2: float = 25.0,
+    ) -> None:
+        super().__init__(
+            glu_interleave_size,
+            activation_recompute_in_mlp=activation_recompute_in_mlp,
+        )
+        self.beta1 = float(beta1)
+        self.beta2 = float(beta2)
+        if not math.isfinite(self.beta1) or self.beta1 <= 0.0:
+            raise ValueError(f"beta1 must be finite and positive, got {self.beta1}")
+        if not math.isfinite(self.beta2) or self.beta2 <= 0.0:
+            raise ValueError(f"beta2 must be finite and positive, got {self.beta2}")
+
+    def _scaled_glu_forward(
+        self,
+        input_: torch.Tensor,
+        scales: torch.Tensor,
+    ) -> torch.Tensor:
+        return tex.scaled_situglu(
+            input_,
+            scales,
+            None,
+            self.beta1,
+            self.beta2,
+            int(self.glu_interleave_size or 0),
+        )
+
+    def _scaled_glu_backward(
+        self,
+        grad_output: torch.Tensor,
+        input_: torch.Tensor,
+        scales: torch.Tensor,
+        *,
+        compute_scale_grad: bool,
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        return tex.scaled_dsituglu(
+            grad_output,
+            input_,
+            scales,
+            None,
+            self.beta1,
+            self.beta2,
+            int(self.glu_interleave_size or 0),
+            compute_scale_grad,
+        )
+
+
 class ScaledClampedQGeGLU(_ScaledGLU):
     r"""Clamped QGeGLU with post-scaling
     (matches cuDNN grouped GEMM ``act_func="geglu"``).
@@ -567,8 +729,8 @@ class ScaledClampedQGeGLU(_ScaledGLU):
         When set, the GLU activations will use an experimental block
         interleaved format. See :class:`ClampedSwiGLU`.
     activation_recompute_in_mlp : bool, default = ``False``
-        Enable fused grouped MLP kernels to recompute activation outputs
-        during backward when supported instead of saving them.
+        Must be ``False``. Fused grouped-MLP activation recomputation is not
+        implemented for clamped QGeGLU.
     limit : float, default ``7.0``
         Clamp limit (see :class:`ClampedSwiGLU`).
     alpha : float, default ``1.702``

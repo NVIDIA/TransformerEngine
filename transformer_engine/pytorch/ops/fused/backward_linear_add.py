@@ -40,7 +40,7 @@ class BackwardLinearAdd(FusedOperation):
         basic_op_ctxs: list[OperationContext],
         grad_output: torch.Tensor,
         *,
-        basic_op_grad_extra_outputs: list[tuple[torch.Tensor, ...]],
+        basic_op_grad_extra_outputs: list[tuple[Optional[torch.Tensor], ...]],
     ) -> tuple[
         torch.Tensor,
         list[tuple[Optional[torch.Tensor], ...]],
@@ -67,19 +67,21 @@ class BackwardLinearAdd(FusedOperation):
         else:
             accumulate_into_main_grad = False
 
-        # Linear backward pass
+        # Linear backward pass. Skip in-place add when there is no
+        # extra-output gradient.
         grad_input = basic_op_grad_extra_outputs[0][0]
+        accumulate_into_grad_input = grad_input is not None
         grad_input, grad_weight = BasicLinear._functional_backward(
             grad_output=grad_output,
             input=x_local,
             weight=w,
             input_requires_grad=linear_op_ctx.input_requires_grad,
             weight_requires_grad=linear_op_ctx.weight_requires_grad,
-            dtype=grad_input.dtype,
+            dtype=None if grad_input is None else grad_input.dtype,
             grad_weight=grad_weight,
             accumulate_into_grad_weight=accumulate_into_main_grad,
             grad_input=grad_input,
-            accumulate_into_grad_input=True,
+            accumulate_into_grad_input=accumulate_into_grad_input,
             tensor_parallel_mode=linear_op.tensor_parallel_mode,
             tensor_parallel_group=linear_op.tensor_parallel_group,
             sequence_parallel=linear_op.sequence_parallel,

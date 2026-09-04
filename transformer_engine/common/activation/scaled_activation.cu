@@ -56,12 +56,14 @@ __device__ __forceinline__ float block_reduce_sum(float value, float *smem) {
 template <typename ParamOP, float (*ActOP)(float, const ParamOP &)>
 __device__ __forceinline__ float gated_forward_value(const float act_in, const float gate_in,
                                                      const ParamOP &param) {
+  const float act_elt = ActOP(act_in, param);
+  float gate_elt = gate_in;
   if constexpr (std::is_same<ParamOP, ClampedSwiGLUParam>::value) {
-    const float gate = fminf(fmaxf(-param.limit, gate_in), param.limit) + param.glu_linear_offset;
-    return ActOP(act_in, param) * gate;
-  } else {
-    return ActOP(act_in, param) * gate_in;
+    gate_elt = fminf(fmaxf(-param.limit, gate_in), param.limit) + param.glu_linear_offset;
+  } else if constexpr (std::is_same<ParamOP, SiTUGLUParam>::value) {
+    gate_elt = situ_up<float, float>(gate_in, param);
   }
+  return act_elt * gate_elt;
 }
 
 template <typename ParamOP, float (*ActOP)(float, const ParamOP &),
@@ -70,31 +72,44 @@ __device__ __forceinline__ void gated_backward_values(const float act_in, const 
                                                       const ParamOP &param, float *dact,
                                                       float *dgate, float *unscaled) {
   Empty empty = {};
-  float act_x = 0.0f;
-  float dact_x = 0.0f;
-  float gate = gate_in;
-  bool dgate_mask = true;
+  float act_elt = 0.0f;
+  float gate_elt = gate_in;
+  float dact_elt = 0.0f;
+  float dgate_elt = 1.0f;
 
   if constexpr (std::is_same<ParamOP, ClampedSwiGLUParam>::value) {
-    dgate_mask = gate_in <= param.limit && gate_in >= -param.limit;
-    gate = fminf(fmaxf(-param.limit, gate_in), param.limit) + param.glu_linear_offset;
+    if (gate_in > param.limit || gate_in < -param.limit) {
+      dgate_elt = 0.f;
+    }
+    gate_elt = fminf(fmaxf(-param.limit, gate_in), param.limit) + param.glu_linear_offset;
+  } else if constexpr (std::is_same<ParamOP, SiTUGLUParam>::value) {
+    dgate_elt = dsitu_up<float, float>(gate_in, param);
+    gate_elt = situ_up<float, float>(gate_in, param);
+  }
+
+  if constexpr (std::is_same<ParamOP, ClampedSwiGLUParam>::value) {
     const bool dact_mask = act_in <= param.limit;
     const float clamped_act_in = fminf(act_in, param.limit);
     const float s = sigmoid<float, float>(param.alpha * clamped_act_in, empty);
-    act_x = clamped_act_in * s;
-    dact_x = dact_mask ? s + param.alpha * clamped_act_in * s * (1.0f - s) : 0.0f;
-  } else if constexpr ((ActOP == &silu<fp32, fp32>) && (DActOP == &dsilu<fp32, fp32>)) {
-    const float s = sigmoid<float, float>(act_in, empty);
-    act_x = act_in * s;
-    dact_x = s + act_in * s * (1.0f - s);
+    act_elt = clamped_act_in * s;
+    dact_elt = dact_mask ? s + param.alpha * clamped_act_in * s * (1.0f - s) : 0.0f;
+  } else if constexpr (std::is_same<ParamOP, Empty>::value) {
+    if constexpr ((ActOP == &silu<fp32, fp32>) && (DActOP == &dsilu<fp32, fp32>)) {
+      const float s = sigmoid<float, float>(act_in, empty);
+      act_elt = act_in * s;
+      dact_elt = s + act_in * s * (1.0f - s);
+    } else {
+      act_elt = ActOP(act_in, param);
+      dact_elt = DActOP(act_in, param);
+    }
   } else {
-    act_x = ActOP(act_in, param);
-    dact_x = DActOP(act_in, param);
+    act_elt = ActOP(act_in, param);
+    dact_elt = DActOP(act_in, param);
   }
 
-  *unscaled = act_x * gate;
-  *dact = dact_x * gate;
-  *dgate = dgate_mask ? act_x : 0.0f;
+  *unscaled = act_elt * gate_elt;
+  *dact = dact_elt * gate_elt;
+  *dgate = act_elt * dgate_elt;
 }
 
 // ---------------------------------------------------------------------------
@@ -630,6 +645,14 @@ template void launch_scaled_gated_backward<ClampedSwiGLUParam, clamped_silu<fp32
                                            clamped_dsilu<fp32, fp32>>(
     const NVTETensor, const NVTETensor, const NVTETensor, NVTETensor, NVTETensor,
     ClampedSwiGLUParam, int64_t, cudaStream_t, const char *);
+
+template void launch_scaled_gated_forward<SiTUGLUParam, situ_gate<fp32, fp32>>(
+    const NVTETensor, const NVTETensor, NVTETensor, SiTUGLUParam, int64_t, cudaStream_t,
+    const char *);
+template void
+launch_scaled_gated_backward<SiTUGLUParam, situ_gate<fp32, fp32>, dsitu_gate<fp32, fp32>>(
+    const NVTETensor, const NVTETensor, const NVTETensor, NVTETensor, NVTETensor, SiTUGLUParam,
+    int64_t, cudaStream_t, const char *);
 
 template void launch_scaled_unary_forward<Empty, srelu<fp32, fp32>>(const NVTETensor,
                                                                     const NVTETensor, NVTETensor,

@@ -25,6 +25,7 @@ from transformer_engine.pytorch import (
     MXFP8Quantizer,
     NVFP4Quantizer,
 )
+from transformer_engine.pytorch.module import _split_quantization
 from transformer_engine.pytorch.tensor.identity_tensor import IdentityTensor
 from transformer_engine.pytorch.tensor.storage.identity_tensor_storage import (
     IdentityTensorStorage,
@@ -237,6 +238,26 @@ class TestIdentityQuantizerUnit:
         out = IdentityQuantizer()(x)
         assert isinstance(out, IdentityTensor)
 
+    def test_detach_preserves_subclass(self):
+        """IdentityTensor detach preserves its runtime subclass."""
+
+        class DerivedIdentityTensor(IdentityTensor):
+            pass
+
+        tensor = IdentityQuantizer()(torch.randn(8, 16, device="cuda", dtype=torch.bfloat16))
+        tensor.__class__ = DerivedIdentityTensor
+
+        detached = tensor.detach()
+
+        assert type(detached) is DerivedIdentityTensor
+        assert detached._hp_data.data_ptr() == tensor._hp_data.data_ptr()
+        assert detached._hp_data.stride() == tensor._hp_data.stride()
+        assert detached._hp_data.storage_offset() == tensor._hp_data.storage_offset()
+        assert not detached.requires_grad
+
+        parameter = torch.nn.Parameter(tensor)
+        assert type(parameter) is DerivedIdentityTensor
+
     def test_internal_returns_storage(self):
         x = torch.randn(8, 16, device="cuda", dtype=torch.bfloat16)
         q = IdentityQuantizer()
@@ -257,28 +278,38 @@ class TestIdentityQuantizerUnit:
         assert out.dequantize().dtype == torch.bfloat16
 
     def test_grouped_split_all_identity_uses_plain_tensor_views(self):
-        from transformer_engine.pytorch.module.grouped_linear import (
-            _split_quantize_non_hybrid,
-        )
-
         x = torch.randn(8, 16, device="cuda", dtype=torch.bfloat16)
         m_splits = [3, 5]
         quantizers = [IdentityQuantizer(), IdentityQuantizer()]
 
-        out = _split_quantize_non_hybrid(x, m_splits, quantizers, activation_dtype=torch.bfloat16)
+        out, dbiases = _split_quantization._split_quantize(
+            x,
+            m_splits,
+            quantizers,
+            activation_dtype=torch.bfloat16,
+            compute_dbias=True,
+        )
 
         assert all(isinstance(t, torch.Tensor) for t in out)
         assert not any(isinstance(t, IdentityTensorStorage) for t in out)
-        for actual, expected in zip(out, torch.split(x, m_splits)):
+        expected_splits = torch.split(x, m_splits)
+        for actual, expected in zip(out, expected_splits):
             torch.testing.assert_close(actual, expected, rtol=0.0, atol=0.0)
+        assert dbiases is not None
+        for actual, expected in zip(dbiases, expected_splits):
+            torch.testing.assert_close(actual, expected.sum(dim=0), rtol=0.0, atol=0.0)
 
         cast_quantizers = [
             IdentityQuantizer(dtype=torch.float32),
             IdentityQuantizer(dtype=torch.float32),
         ]
-        cast_out = _split_quantize_non_hybrid(
-            x, m_splits, cast_quantizers, activation_dtype=torch.bfloat16
+        cast_out, cast_dbiases = _split_quantization._split_quantize(
+            x,
+            m_splits,
+            cast_quantizers,
+            activation_dtype=torch.bfloat16,
         )
+        assert cast_dbiases is None
         assert all(isinstance(t, IdentityTensorStorage) for t in cast_out)
         for actual, expected in zip(cast_out, torch.split(x, m_splits)):
             dequantized = actual.dequantize()
@@ -291,10 +322,6 @@ class TestIdentityQuantizerUnit:
             )
 
     def test_grouped_split_rejects_mixed_identity_and_quantized_operands(self):
-        from transformer_engine.pytorch.module.grouped_linear import (
-            _validate_grouped_quantizer_list,
-        )
-
         cases = [
             [IdentityQuantizer(), _mxfp8(tex.DType.kFloat8E4M3)],
             [
@@ -311,12 +338,11 @@ class TestIdentityQuantizerUnit:
 
         for quantizers in cases:
             with pytest.raises(ValueError, match="mix Identity-backed and quantized"):
-                _validate_grouped_quantizer_list(quantizers, operand_name="input")
+                _split_quantization.validate_grouped_quantizer_list(
+                    quantizers, operand_name="input"
+                )
 
     def test_hybrid_split_forwards_disable_bulk_allocation_to_both_directions(self, monkeypatch):
-        import transformer_engine.pytorch.module.grouped_linear as grouped_linear
-        from transformer_engine.pytorch.module.grouped_linear import _split_quantize_hybrid
-
         calls = []
 
         def fake_split_quantize(tensor, m_splits, quantizers, *, disable_bulk_allocation=False):
@@ -326,9 +352,9 @@ class TestIdentityQuantizerUnit:
                 for tensor_part, quantizer in zip(torch.split(tensor, m_splits), quantizers)
             ]
 
-        monkeypatch.setattr(grouped_linear.tex, "split_quantize", fake_split_quantize)
+        monkeypatch.setattr(_split_quantization.tex, "split_quantize", fake_split_quantize)
         monkeypatch.setattr(
-            grouped_linear,
+            _split_quantization,
             "_supports_native_split_quantize",
             lambda quantizer: True,
         )
@@ -342,15 +368,17 @@ class TestIdentityQuantizerUnit:
             for _ in m_splits
         ]
 
-        out = _split_quantize_hybrid(
+        out, dbiases = _split_quantization._split_quantize(
             x,
             m_splits,
             quantizers,
+            activation_dtype=torch.bfloat16,
             disable_bulk_allocation=True,
         )
 
         assert calls == [True, True]
         assert len(out) == len(m_splits)
+        assert dbiases is None
 
     @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
     def test_grouped_linear_cpu_offload_disables_bulk_allocation_for_hybrid_input(
@@ -371,15 +399,25 @@ class TestIdentityQuantizerUnit:
 
         calls = []
 
-        def fake_split_quantize_hybrid(
-            tensor, m_splits, quantizers, *, disable_bulk_allocation=False, **kwargs
+        def fake_split_quantize(
+            tensor,
+            m_splits,
+            quantizers,
+            activation_dtype,
+            *,
+            disable_bulk_allocation=False,
+            **kwargs,
         ):
-            del tensor, m_splits, quantizers, kwargs
+            del tensor, m_splits, quantizers, activation_dtype, kwargs
             calls.append(disable_bulk_allocation)
             raise StopAfterFlagCapture("captured hybrid split kwargs")
 
         monkeypatch.setattr(grouped_linear, "is_cpu_offload_enabled", lambda: True)
-        monkeypatch.setattr(grouped_linear, "_split_quantize_hybrid", fake_split_quantize_hybrid)
+        monkeypatch.setattr(
+            _split_quantization,
+            "_split_quantize",
+            fake_split_quantize,
+        )
 
         model = te.GroupedLinear(2, 64, 64, params_dtype=torch.bfloat16).cuda()
         x = torch.randn(64, 64, device="cuda", dtype=torch.bfloat16)
