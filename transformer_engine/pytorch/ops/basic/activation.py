@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 import abc
+import math
 from collections.abc import Iterable, Sequence
 from typing import Any, Optional
 
@@ -29,6 +30,7 @@ __all__ = [
     "ReGLU",
     "SReLU",
     "ScaledSReLU",
+    "ScaledTanhSReLU",
     "SReGLU",
     "SiLU",
 ]
@@ -506,6 +508,88 @@ class ScaledSReLU(_ScaledUnary):
             None,
             compute_scale_grad,
         )
+
+
+class ScaledTanhSReLU(_ScaledUnary):
+    r"""Tanh soft-clamped squared ReLU with per-row post-scaling.
+
+    Identical to :class:`ScaledSReLU` except that the ReLU output is soft-clamped
+    by a tanh before squaring, which bounds the activation by
+    ``tanh_clamp_scale ** 2``:
+
+    .. math::
+        y = \left( s \cdot \tanh\left( \frac{\mathrm{relu}(x)}{s} \right) \right)^2 \cdot \mathrm{scales}
+
+    "Tanh" rather than "Clamped" is deliberate: in these ops ``Clamped`` already
+    means a hard min/max clamp (see :class:`ScaledClampedQGeGLU`), whereas this is
+    a smooth saturating clamp.
+
+    Parameters
+    ----------
+    tanh_clamp_scale : float
+        The soft-clamp scale ``s``; must be finite and positive. Required, since
+        an unclamped tanh-SReLU is just :class:`ScaledSReLU`.
+    activation_recompute_in_mlp : bool, default = ``False``
+        Enable fused grouped MLP kernels to recompute activation outputs
+        during backward when supported instead of saving them.
+    """
+
+    def __init__(
+        self,
+        *,
+        tanh_clamp_scale: float,
+        activation_recompute_in_mlp: bool = False,
+    ) -> None:
+        super().__init__(activation_recompute_in_mlp=activation_recompute_in_mlp)
+        self.tanh_clamp_scale: float = float(tanh_clamp_scale)
+        if not math.isfinite(self.tanh_clamp_scale) or self.tanh_clamp_scale <= 0.0:
+            raise ValueError(
+                f"tanh_clamp_scale must be finite and positive, got {tanh_clamp_scale}"
+            )
+
+    def _tanh_srelu_terms(self, input_: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """``b = s*tanh(relu(x)/s)`` and ``t``, in fp32.
+
+        Matches the fused kernels, which evaluate the whole epilogue in fp32 and
+        round once at the store rather than at each step.
+        """
+        s = self.tanh_clamp_scale
+        t = torch.tanh(torch.relu(input_.float()) / s)
+        return s * t, t
+
+    def _scaled_unary_forward(
+        self,
+        input_: torch.Tensor,
+        scales: torch.Tensor,
+    ) -> torch.Tensor:
+        # No fused CUDA kernel for this activation yet, so the unfused path is
+        # expressed in torch. It only serves non-SM100 / non-fused configurations;
+        # the fused grouped-MLP path goes straight to the cuDNN srelu_tanh epilogue.
+        b, _ = self._tanh_srelu_terms(input_)
+        out = b.square() * scales.float().unsqueeze(-1)
+        return out.to(input_.dtype)
+
+    def _scaled_unary_backward(
+        self,
+        grad_output: torch.Tensor,
+        input_: torch.Tensor,
+        scales: torch.Tensor,
+        *,
+        compute_scale_grad: bool,
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        # d/dx (b^2) = 2*b*(1 - t^2); the scale multiplies it, exactly as the
+        # scaled-unary CUDA kernel does for the plain squared ReLU.
+        b, t = self._tanh_srelu_terms(input_)
+        grad_output_f32 = grad_output.float()
+        grad_input = grad_output_f32 * scales.float().unsqueeze(-1) * (2.0 * b * (1.0 - t * t))
+
+        grad_scales = None
+        if compute_scale_grad:
+            # Gradient wrt the per-row scale is sum over the last dim of the
+            # unscaled activation times the incoming gradient.
+            grad_scales = (b.square() * grad_output_f32).sum(dim=-1).to(scales.dtype)
+
+        return grad_input.to(input_.dtype), grad_scales
 
 
 class SReGLU(_ActivationOperation):
