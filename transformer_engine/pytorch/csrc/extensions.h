@@ -22,6 +22,16 @@ class CommOverlapP2P;
 
 namespace transformer_engine::pytorch {
 
+#ifdef NVTE_WITH_NCCL_DEVICE_CP
+std::tuple<int64_t, at::Tensor> cp_native_transport_create(int64_t nccl_comm_ptr,
+                                                           int64_t payload_bytes);
+void cp_native_transport_destroy(int64_t handle);
+int64_t cp_native_transport_send_recv(int64_t handle, at::Tensor send_tensor,
+                                      at::Tensor recv_tensor, int64_t send_peer, int64_t recv_peer,
+                                      int64_t channel);
+void cp_native_transport_wait(int64_t handle, int64_t channel);
+#endif
+
 /***************************************************************************************************
  * Router fusion
  **************************************************************************************************/
