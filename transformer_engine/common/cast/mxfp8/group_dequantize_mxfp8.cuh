@@ -89,7 +89,6 @@ __global__ void update_tma_descriptors(const __grid_constant__ CUtensorMap base_
                                        const int64_t *const __restrict__ offsets_ptr,
                                        const int64_t *const __restrict__ first_dims_ptr,
                                        const int64_t *const __restrict__ last_dims_ptr) {
-  const bool leading_thread = (threadIdx.x == 0);
   const size_t tensor_id = blockIdx.x;
 
   const size_t rows =
@@ -105,7 +104,7 @@ __global__ void update_tma_descriptors(const __grid_constant__ CUtensorMap base_
     return;
   }
 
-  if (leading_thread && (tensor_id < num_tensors)) {
+  if (tensor_id < num_tensors) {
     {
       const uintptr_t global_data_ptr = reinterpret_cast<uintptr_t>(input_data_ptr + offset_elts);
       modify_base_tensor_map(base_tensor_map_input, &g_tensor_maps_input[tensor_id],
@@ -469,7 +468,8 @@ inline void group_dequantize(const GroupedTensor *input, GroupedTensor *output,
             const IType *const input_dptr = reinterpret_cast<const IType *>(input_data.dptr);
             OType *const output_dptr = reinterpret_cast<OType *>(output->data.dptr);
 
-            update_tma_descriptors<IType, OType><<<num_tensors, 32, 0, stream>>>(
+            update_tma_descriptors<IType, OType>
+                <<<num_tensors, THREADS_PER_WARP, 0, stream>>>(
                 tensor_map_input, tensor_map_output, input_dptr, output_dptr, shape_rep,
                 num_tensors, first_logical_dim, last_logical_dim, offsets_ptr, first_dims_ptr,
                 last_dims_ptr);
