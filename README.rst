@@ -160,7 +160,7 @@ System Requirements
 * **Software:**
 
   * CUDA: 12.1+ (Hopper/Ada/Ampere), 12.8+ (Blackwell) with compatible NVIDIA drivers
-  * cuDNN: 9.3+
+  * cuDNN: 9.11+
   * Compiler: GCC 9+ or Clang 10+ with C++17 support
   * Python: 3.12 recommended
 
