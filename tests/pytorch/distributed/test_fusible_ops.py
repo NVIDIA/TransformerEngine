@@ -12,6 +12,7 @@ import os
 import pathlib
 import subprocess
 import sys
+import tempfile
 from typing import Optional
 
 import pytest
@@ -58,13 +59,8 @@ def world_group() -> torch.distributed.ProcessGroup:
     torch.cuda.set_device(rank)
     group = torch.distributed.init_process_group(
         "nccl",
-        # Keyed by world_size (see test_distributed_fuser_ops, which launches
-        # a separate subprocess job per world_size): a fixed, shared path here
-        # would let a stale FileStore left behind by one world_size's run
-        # corrupt a differently-shaped world_size's run that reuses it, since
-        # nothing in this file ever calls destroy_process_group() or deletes
-        # the file afterwards.
-        init_method=f"file:///tmp/rdzv_test_fusible_ops_{world_size}",
+        # Each parallel job must use a fresh FileStore shared by only its ranks.
+        init_method=f"file://{os.environ['NVTE_TEST_RDZV_PATH']}",
         world_size=world_size,
         rank=rank,
     )
@@ -1049,13 +1045,6 @@ if torch.cuda.device_count() >= 2 and 2 not in _world_sizes:
 @pytest.mark.parametrize("world_size", _world_sizes)
 def test_distributed_fuser_ops(world_size: int) -> None:
     """Launch parallel job that runs parallel tests"""
-    # world_group() (see above) never calls destroy_process_group() or
-    # removes its rendezvous file, so a file left behind by a previous
-    # (possibly crashed) run of this same world_size would otherwise make
-    # NCCL bootstrap against stale content -- observed as a confusing
-    # "Connection refused" error deep in NCCL rather than a clear failure.
-    # Safe to remove here, before any subprocess in this job starts.
-    pathlib.Path(f"/tmp/rdzv_test_fusible_ops_{world_size}").unlink(missing_ok=True)
     python_exe = pathlib.Path(sys.executable)
     current_file = pathlib.Path(__file__).resolve()
     command = [
@@ -1066,10 +1055,10 @@ def test_distributed_fuser_ops(world_size: int) -> None:
         current_file,
         "--parallel",
     ]
-    result = subprocess.run(
-        command,
-        check=True,
-    )
+    with tempfile.TemporaryDirectory(prefix="te-test-fusible-ops-") as temp_dir:
+        env = dict(os.environ)
+        env["NVTE_TEST_RDZV_PATH"] = str(pathlib.Path(temp_dir) / "rdzv")
+        subprocess.run(command, check=True, env=env)
 
 
 def main() -> None:
