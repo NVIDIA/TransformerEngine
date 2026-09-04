@@ -660,6 +660,19 @@ __global__ void __launch_bounds__(CastTraits::THREADS_PER_CHUNK) group_quantize_
 
   const bool leading_thread = (threadIdx.x == 0);
 
+  if constexpr (use_direct_varying_first_mapper) {
+    static_assert(CastTraits::THREADS_PER_CHUNK >= MAX_SUPPORTED_TENSOR_DESCRIPTORS,
+                  "The first CTA must have enough threads to validate every tensor.");
+    // The direct mapper relies on every tensor boundary being TILE_DIM_Y-aligned. The legacy
+    // mapper validated this while decoding each job, but the direct path no longer calls it.
+    // Validate all per-tensor row counts once, using the first CTA. num_tensors is bounded by
+    // MAX_SUPPORTED_TENSOR_DESCRIPTORS (64), which is smaller than the CTA size.
+    if (blockIdx.x == 0 && threadIdx.x < num_tensors) {
+      (void)get_tensor_rows_num<ShapeRepresentation::VARYING_FIRST_DIM>(
+          threadIdx.x, first_logical_dim, first_dims_ptr, num_tensors);
+    }
+  }
+
   // Decode the linear direct-mapper grid once per CTA. Valid CUDA grid extents fit in uint, which
   // also keeps this one-time coordinate calculation in 32-bit arithmetic.
   [[maybe_unused]] uint direct_block_id_X = 0;
