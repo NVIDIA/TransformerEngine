@@ -468,7 +468,6 @@ class TransformerLayer(torch.nn.Module):
             "seq_length": seq_length,
             "micro_batch_size": micro_batch_size,
             "softmax_type": self.softmax_type,
-            "softcap": self.softcap,
         }
 
         self.self_attention = MultiheadAttention(

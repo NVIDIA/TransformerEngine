@@ -929,6 +929,63 @@ def test_dpa_softcap_vs_reference(dtype, model_configs, model, softcap, backend,
         torch.testing.assert_close(v.grad.float(), v_ref.grad.float(), **tols)
 
 
+@pytest.mark.parametrize("dtype", param_types)
+def test_transformer_layer_softcap_plumbing(dtype):
+    """Test that TransformerLayer forwards softcap to both of its attention modules.
+
+    The value only has to arrive; the numerics are covered by the DotProductAttention tests
+    above. Cross-attention is the half worth asserting: it is reached through a separate call
+    site from self-attention, so a refactor can drop the cap there while self-attention keeps
+    working, and nothing else in the suite would notice.
+    """
+    # head_dim 64, matching the other softcap configs, so every backend can serve the shape.
+    hidden_size, num_heads, seqlen, batch_size = 256, 4, 32, 2
+    seen = {}
+
+    def _record(name):
+        def hook(_module, _args, kwargs):
+            seen[name] = kwargs.get("softcap")
+
+        return hook
+
+    block = TransformerLayer(
+        hidden_size,
+        4 * hidden_size,
+        num_heads,
+        layer_type="decoder",
+        softcap=50.0,
+        params_dtype=dtype,
+        device="cuda",
+    )
+    block.self_attention.core_attention.register_forward_pre_hook(
+        _record("self"), with_kwargs=True
+    )
+    block.inter_attention.core_attention.register_forward_pre_hook(
+        _record("cross"), with_kwargs=True
+    )
+
+    hidden_states = torch.randn(
+        seqlen, batch_size, hidden_size, dtype=dtype, device="cuda", requires_grad=True
+    )
+    forward_kwargs = dict(
+        encoder_output=hidden_states,
+        enc_dec_attn_mask=torch.zeros(
+            batch_size, 1, 1, seqlen, dtype=torch.bool, device="cuda"
+        ),
+    )
+
+    # The constructor value reaches both attention modules.
+    block(hidden_states, **forward_kwargs)
+    assert seen["self"] == 50.0, f"self-attention saw softcap={seen['self']}, expected 50.0"
+    assert seen["cross"] == 50.0, f"cross-attention saw softcap={seen['cross']}, expected 50.0"
+
+    # A forward override wins over the constructor, for both.
+    seen.clear()
+    block(hidden_states, softcap=10.0, **forward_kwargs)
+    assert seen["self"] == 10.0, f"self-attention saw softcap={seen['self']}, expected 10.0"
+    assert seen["cross"] == 10.0, f"cross-attention saw softcap={seen['cross']}, expected 10.0"
+
+
 model_configs_mla = {
     # test: ModelConfig(b, sq, hq, dqk)
     "mla_1_0": ModelConfig(8, 128, 16, 64, head_dim_v=128),
