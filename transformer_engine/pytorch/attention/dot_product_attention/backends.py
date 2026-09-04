@@ -1782,8 +1782,14 @@ def _fused_attn_forward_impl(
     aux = list(aux_ctx_tensors)
     softmax_stats = aux.pop(0)
     rng_state = aux.pop(0)
-    aux_bias = aux.pop(0) if args.attn_bias_type not in ["no_bias", "alibi"] else None
-    aux_softmax_offset = aux.pop(0) if args.softmax_type != "vanilla" else None
+    aux_bias = (
+        aux.pop(0)
+        if args.attn_bias_type not in ["no_bias", "alibi"] and args.attn_bias is not None
+        else None
+    )
+    aux_softmax_offset = (
+        aux.pop(0) if args.softmax_type != "vanilla" and args.softmax_offset is not None else None
+    )
     assert not aux, f"unexpected fused attention aux tensors: {len(aux)} left"
 
     tensors_to_save = (
