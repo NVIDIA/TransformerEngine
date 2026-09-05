@@ -232,6 +232,57 @@ def traced_cudnn_grouped_glu_wrappers(monkeypatch):
         _clear_grouped_glu_kernel_caches()
 
 
+def _clear_grouped_unary_kernel_caches() -> None:
+    """Clear cached cuDNN wrapper lookups after tests monkeypatch them.
+
+    Note the asymmetry with the GLU helper above: only the entries that actually memoize a
+    reference to a wrapper are listed. ``_cudnn_frontend_supports_grouped_gemm_srelu`` is a
+    plain version check with no cache to clear, while the tanh probe inspects the wrapper's
+    signature and the dSReLU-backward probe imports it, so both must be reset.
+    """
+    fused_cls = te.ops.fused.GroupedMLP_CuTeGEMMUnary
+    grouped_mlp_module._cudnn_frontend_supports_grouped_gemm_srelu_tanh.cache_clear()
+    grouped_mlp_module._grouped_gemm_dsrelu_backward_supported.cache_clear()
+    fused_cls.is_supported.cache_clear()
+    fused_cls.grouped_gemm_activation_kernel.cache_clear()
+    fused_cls.grouped_gemm_act_hadamard_kernel.cache_clear()
+    fused_cls.grouped_gemm_dactivation_kernel.cache_clear()
+
+
+@pytest.fixture
+def traced_cudnn_grouped_dsrelu_wrapper(monkeypatch):
+    """Trace the real cuDNN grouped dSReLU wrapper while preserving its execution.
+
+    Records only what distinguishes an activation-recompute backward from an ordinary one:
+    whether the kernel was asked to reuse its dSReLU output as the regenerated FC2 input, and
+    which clamp scale it was given.
+    """
+    try:
+        import cudnn
+    except ImportError:
+        pytest.skip("cuDNN frontend is not installed")
+
+    original_bwd = cudnn.grouped_gemm_dsrelu_wrapper_sm100
+    calls = []
+
+    @functools.wraps(original_bwd)
+    def traced_bwd(*args, **kwargs):
+        calls.append(
+            {
+                "use_dsrelu_reuse": bool(kwargs.get("use_dsrelu_reuse", False)),
+                "tanh_clamp_scale": kwargs.get("tanh_clamp_scale"),
+            }
+        )
+        return original_bwd(*args, **kwargs)
+
+    _clear_grouped_unary_kernel_caches()
+    monkeypatch.setattr(cudnn, "grouped_gemm_dsrelu_wrapper_sm100", traced_bwd)
+    try:
+        yield calls
+    finally:
+        _clear_grouped_unary_kernel_caches()
+
+
 def maybe_skip_quantization(
     quantization: Optional[str],
     *,
@@ -2322,6 +2373,543 @@ class TestGroupedMLPFusedOp:
             bias_tols = {"rtol": 0.05, "atol": 0.015625}
             torch.testing.assert_close(fc1_db_false, fc1_db_true, **bias_tols)
             torch.testing.assert_close(fc2_db_false, fc2_db_true, **bias_tols)
+
+    # Recompute-vs-save deviation in FC2's wgrad, as a fraction of that tensor's own RMS,
+    # measured on GB300 (hidden 256, 4 groups):
+    #
+    #                          max-abs    RMS of error
+    #     MXFP8      SReLU         14%            1.6%
+    #                TanhSReLU     19%            1.5%
+    #     NVFP4_RHT  SReLU         62%            8.8%
+    #                TanhSReLU     33%            4.1%
+    #
+    # The max column looks alarming and the RMS column is the one that matters. The forward
+    # applies the activation to its FP32 accumulator while the backward applies it to the
+    # saved BF16 FC1 output, so the two disagree by that round trip however well the two
+    # copies of the activation match; under a 4-bit recipe the requantized result then lands
+    # in a different bin often enough that the tail reaches 60% while the typical
+    # disagreement stays below 10%. So the binding check is on RMS and max is only a ceiling.
+    #
+    # The clamped op comes out *ahead* of the unclamped one under NVFP4 (4.1% against 8.8%),
+    # which is the expected direction rather than luck: bounding the activation at s**2
+    # compresses exactly the dynamic range 4-bit quantization handles worst.
+    #
+    # Plain ScaledSReLU has shipped with recompute enabled all along, carrying these numbers,
+    # so it is the accepted baseline rather than a target. That is why the binding check is
+    # the comparison against it -- it stays meaningful across recipes, shapes and hardware,
+    # unlike a constant that would have to be re-derived for each. The absolute ceilings exist
+    # only to catch a regression that degrades both at once.
+    _RECOMPUTE_WGRAD_RATIO_LIMIT: float = 2.0
+    _RECOMPUTE_WGRAD_ABSOLUTE_CEILING: dict = {"mxfp8": 0.40, "nvfp4_rht": 1.00}
+
+    def _run_recompute_case(
+        self,
+        *,
+        activation: str,
+        activation_recompute_in_mlp: bool,
+        quantization: str,
+        tensors: dict,
+        split_sizes: torch.Tensor,
+        group_size: int,
+        hidden_size: int,
+        dtype: torch.dtype,
+        device: torch.device | str,
+        bias: bool = False,
+        single_grouped_weight: bool = False,
+        delay_wgrad_compute: bool = False,
+        weights_require_grad: bool = True,
+        measure_saved_state: bool = False,
+    ) -> dict:
+        """One fused forward+backward, returning everything the recompute tests compare."""
+        recipe = make_recipe(quantization)
+        with te.quantized_model_init(enabled=True, recipe=recipe):
+            if activation == "scaled_srelu":
+                scaled_act = te.ops.ScaledSReLU(
+                    activation_recompute_in_mlp=activation_recompute_in_mlp
+                )
+            else:
+                scaled_act = te.ops.ScaledTanhSReLU(
+                    tanh_clamp_scale=_TANH_SRELU_CLAMP_SCALE,
+                    activation_recompute_in_mlp=activation_recompute_in_mlp,
+                )
+            common = dict(
+                bias=bias,
+                device=device,
+                dtype=dtype,
+                single_grouped_weight=single_grouped_weight,
+                delay_wgrad_compute=delay_wgrad_compute,
+            )
+            fc1 = te.ops.GroupedLinear(group_size, hidden_size, hidden_size, **common)
+            fc2 = te.ops.GroupedLinear(
+                group_size, hidden_size, hidden_size, scale_bias=bias, **common
+            )
+            module = te.ops.Sequential(fc1, scaled_act, fc2)
+
+        with torch.no_grad():
+            if single_grouped_weight:
+                fc1_ws = fc1.weight.quantized_tensors
+                if fc1_ws is None:
+                    fc1_ws = fc1.weight.split_into_quantized_tensors()
+                fc2_ws = fc2.weight.quantized_tensors
+                if fc2_ws is None:
+                    fc2_ws = fc2.weight.split_into_quantized_tensors()
+            for i in range(group_size):
+                if single_grouped_weight:
+                    fc1_ws[i].copy_(tensors["fc1_ws"][i])
+                    fc2_ws[i].copy_(tensors["fc2_ws"][i])
+                else:
+                    getattr(fc1, f"weight{i}").copy_(tensors["fc1_ws"][i])
+                    getattr(fc2, f"weight{i}").copy_(tensors["fc2_ws"][i])
+                if bias:
+                    getattr(fc1, f"bias{i}").copy_(tensors["fc1_bs"][i])
+                    getattr(fc2, f"bias{i}").copy_(tensors["fc2_bs"][i])
+
+        if not weights_require_grad:
+            for fc in (fc1, fc2):
+                for param in fc.parameters():
+                    param.requires_grad_(False)
+
+        x = tensors["x"].detach().clone().requires_grad_(True)
+        probs = tensors["probs"].detach().clone().requires_grad_(True)
+
+        if measure_saved_state:
+            torch.cuda.synchronize()
+            before = torch.cuda.memory_allocated()
+        with te.autocast(enabled=True, recipe=recipe):
+            fc2_extra = (split_sizes, probs) if bias else (split_sizes,)
+            y = module(x, split_sizes, probs, *fc2_extra)
+        saved_state_bytes = None
+        if measure_saved_state:
+            # Taken here, with the graph alive and before the backward frees anything: this
+            # is exactly the state the forward stashed, which is the quantity recompute exists
+            # to shrink. A peak measured across forward+backward would not show it, because
+            # the backward allocates the regenerated tensor regardless.
+            torch.cuda.synchronize()
+            saved_state_bytes = torch.cuda.memory_allocated() - before
+
+        y.backward(tensors["dy"].detach().clone())
+        if delay_wgrad_compute:
+            fc1.backward_dw()
+            fc2.backward_dw()
+
+        forward_ops = module._module_groups[0]._forward_ops
+        assert len(forward_ops) == 1 and isinstance(
+            forward_ops[0][0], te.ops.fused.GroupedMLP_CuTeGEMMUnary
+        ), "the fused unary grouped MLP did not run; nothing below would be about recompute"
+
+        def grads(fc, name):
+            if not weights_require_grad:
+                return None
+            if single_grouped_weight and name == "weight":
+                return fc.weight.grad.detach().clone()
+            return torch.stack(
+                [getattr(fc, f"{name}{i}").grad.detach().clone() for i in range(group_size)]
+            )
+
+        return {
+            "y": y.detach().clone(),
+            "dx": x.grad.detach().clone(),
+            "dprobs": probs.grad.detach().clone(),
+            "fc1_dw": grads(fc1, "weight"),
+            "fc2_dw": grads(fc2, "weight"),
+            "fc1_db": grads(fc1, "bias") if bias else None,
+            "fc2_db": grads(fc2, "bias") if bias else None,
+            "saved_state_bytes": saved_state_bytes,
+        }
+
+    def _make_recompute_tensors(
+        self, *, group_size, hidden_size, split_sizes, dtype, device, bias=False
+    ) -> dict:
+        in_shape = (int(split_sizes.sum()), hidden_size)
+        # Seeded: the deviations recorded above are a property of the recipe rather than of a
+        # particular draw, and pinning the inputs keeps them comparable run to run.
+        torch.manual_seed(1234)
+        rand = lambda *shape: torch.empty(shape, device=device, dtype=dtype).uniform_(  # noqa: E731
+            -0.25, 0.25
+        )
+        tensors = {
+            "x": rand(*in_shape),
+            "probs": rand(in_shape[0]),
+            "dy": rand(*in_shape),
+            "fc1_ws": [rand(hidden_size, hidden_size) for _ in range(group_size)],
+            "fc2_ws": [rand(hidden_size, hidden_size) for _ in range(group_size)],
+        }
+        if bias:
+            tensors["fc1_bs"] = [rand(hidden_size) for _ in range(group_size)]
+            tensors["fc2_bs"] = [rand(hidden_size) for _ in range(group_size)]
+        return tensors
+
+    @staticmethod
+    def _assert_recompute_preserves_everything_but_fc2_wgrad(off: dict, on: dict) -> dict:
+        """Bit-exact everywhere the regeneration cannot reach; return FC2 wgrad deviation.
+
+        Recompute changes only what the forward stashes, so the forward output, both input
+        gradients and FC1's weight gradient are required to be bitwise identical -- anything
+        else there is a bug rather than a tolerance question. FC2's weight gradient is the one
+        output the regenerated tensor feeds, and it is returned as fractions of its own RMS so
+        callers can judge it against a baseline instead of a constant.
+
+        Two statistics, because they answer different questions. ``rms`` is the one that
+        matters for training -- the typical size of the disagreement -- while ``max`` is a tail
+        statistic that a single badly-placed quantization bin can dominate, and under a 4-bit
+        recipe routinely does.
+        """
+        torch.testing.assert_close(on["y"], off["y"], rtol=0, atol=0)
+        torch.testing.assert_close(on["dx"], off["dx"], rtol=0, atol=0)
+        torch.testing.assert_close(on["dprobs"], off["dprobs"], rtol=0, atol=0)
+        torch.testing.assert_close(on["fc1_dw"], off["fc1_dw"], rtol=0, atol=0)
+        if off["fc1_db"] is not None:
+            # FC1's dbias comes out of the same dSReLU kernel call as the regenerated tensor,
+            # so it is worth pinning that enabling reuse does not perturb the call's other
+            # output. Not bitwise: it is an atomic reduction.
+            torch.testing.assert_close(on["fc1_db"], off["fc1_db"], rtol=0.05, atol=0.015625)
+            torch.testing.assert_close(on["fc2_db"], off["fc2_db"], rtol=0.05, atol=0.015625)
+        scale = off["fc2_dw"].float().pow(2).mean().sqrt().clamp_min(1e-12)
+        error = on["fc2_dw"].float() - off["fc2_dw"].float()
+        error_rms = error.pow(2).mean().sqrt()
+        return {
+            "max": (error.abs().max() / scale).item(),
+            "rms": (error_rms / scale).item(),
+            # Mean as a fraction of the error's own RMS: is the disagreement noise or a bias?
+            # The distinction decides whether the number above matters. Zero-mean noise on a
+            # weight gradient averages out over training steps; a systematic offset does not,
+            # and would accumulate into the weights in a way no per-step check would show.
+            # For an unbiased error over this many elements this sits near zero.
+            "bias": (error.mean() / error_rms.clamp_min(1e-12)).item(),
+        }
+
+    @pytest.mark.parametrize(
+        "quantization",
+        [
+            pytest.param(
+                "mxfp8",
+                marks=pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8),
+            ),
+            pytest.param(
+                "nvfp4_rht",
+                marks=pytest.mark.skipif(not nvfp4_available, reason=reason_for_no_nvfp4),
+            ),
+        ],
+    )
+    def test_grouped_mlp_srelu_activation_recompute(
+        self,
+        traced_cudnn_grouped_dsrelu_wrapper,
+        quantization: str,
+        *,
+        dtype: torch.dtype = torch.bfloat16,
+        device: torch.device = "cuda",
+        group_size: int = 4,
+        hidden_size: int = 256,
+    ) -> None:
+        """activation_recompute_in_mlp regenerates FC2's input instead of saving it.
+
+        The oracle is the same fused op with recompute off: identical weights, identical
+        input, identical kernels. The only difference is whether FC2's input was saved in the
+        forward or rebuilt in the backward from the dSReLU output, so any disagreement is the
+        regeneration and nothing else.
+
+        That matters because of where the regenerated tensor goes: it feeds FC2's *weight*
+        gradient. A regeneration that quietly disagrees with the forward corrupts wgrad while
+        leaving the loss, the dgrad and the forward output all correct.
+
+        Both activations run, and the clamped one is judged against the unclamped one rather
+        than against an absolute tolerance. Plain ScaledSReLU has shipped with recompute
+        enabled all along, so it defines what this feature's regeneration error already is;
+        the claim being made by enabling the clamped op is that it is no worse, which is a
+        statement no constant could express and which stays valid across shapes and hardware.
+
+        Both recipes run because the regeneration is genuinely two code paths: under MXFP8 the
+        columnwise data and scales come straight out of the kernel, while under NVFP4 cuDNN
+        returns BF16 and TE re-quantizes it in Python.
+        """
+        if not te.ops.fused.GroupedMLP_CuTeGEMMUnary.is_supported():
+            pytest.skip("Fused grouped MLP is not supported on this system")
+        if not grouped_mlp_module._cudnn_frontend_supports_grouped_gemm_srelu_tanh():
+            pytest.skip("Installed cuDNN frontend lacks tanh_clamp_scale")
+        # Preconditions of recompute in fuser_forward. Skipping rather than failing keeps a
+        # failure here about the activation type, which is what this change touches.
+        if not grouped_mlp_module._grouped_gemm_dsrelu_backward_supported():
+            pytest.skip("cuDNN FE grouped dSReLU backward wrapper unavailable")
+        if not grouped_mlp_module._nvidia_cudnn_frontend_supports_wgrad():
+            pytest.skip("cuDNN FE too old for the grouped GEMM wgrad kernel")
+
+        split_sizes = torch.tensor(
+            [256 * (i + 1) for i in range(group_size)], dtype=torch.int64, device=device
+        )
+        tensors = self._make_recompute_tensors(
+            group_size=group_size,
+            hidden_size=hidden_size,
+            split_sizes=split_sizes,
+            dtype=dtype,
+            device=device,
+        )
+        common = dict(
+            quantization=quantization,
+            tensors=tensors,
+            split_sizes=split_sizes,
+            group_size=group_size,
+            hidden_size=hidden_size,
+            dtype=dtype,
+            device=device,
+        )
+
+        deviations = {}
+        for activation in ("scaled_srelu", "scaled_tanh_srelu"):
+            traced_cudnn_grouped_dsrelu_wrapper.clear()
+            off = self._run_recompute_case(
+                activation=activation, activation_recompute_in_mlp=False, **common
+            )
+            on = self._run_recompute_case(
+                activation=activation, activation_recompute_in_mlp=True, **common
+            )
+
+            # The two runs really did take different paths. Without this the comparison could
+            # pass by having quietly saved FC2's input on both sides.
+            reuse = [c["use_dsrelu_reuse"] for c in traced_cudnn_grouped_dsrelu_wrapper]
+            assert reuse == [False, True], (
+                f"{activation}: expected one non-recompute backward then one recompute "
+                f"backward, got use_dsrelu_reuse={reuse}"
+            )
+            expected_scale = _TANH_SRELU_CLAMP_SCALE if activation == "scaled_tanh_srelu" else None
+            for call in traced_cudnn_grouped_dsrelu_wrapper:
+                assert call["tanh_clamp_scale"] == expected_scale, (
+                    "the dSReLU kernel regenerates FC2's input, so it must be given the same "
+                    f"clamp the forward used; expected {expected_scale}, got "
+                    f"{call['tanh_clamp_scale']}"
+                )
+
+            deviations[activation] = self._assert_recompute_preserves_everything_but_fc2_wgrad(
+                off, on
+            )
+
+        # Printed rather than only asserted: the absolute level here is a property of the
+        # recipe and the shapes, so the measurement is worth having in the log of every run
+        # instead of only when a bound is crossed.
+        report = "  ".join(
+            f"{name}: max={dev['max']:.1%} rms={dev['rms']:.1%} bias={dev['bias']:+.2f}"
+            for name, dev in deviations.items()
+        )
+        print(f"\n[recompute FC2 wgrad deviation, {quantization}] {report}")
+
+        baseline = deviations["scaled_srelu"]
+        clamped = deviations["scaled_tanh_srelu"]
+        # The binding check. RMS rather than max: it is the training-relevant statistic and it
+        # is not hostage to a single element landing across a quantization bin.
+        assert clamped["rms"] <= self._RECOMPUTE_WGRAD_RATIO_LIMIT * max(baseline["rms"], 1e-6), (
+            f"clamped FC2 wgrad regeneration deviates by {clamped['rms']:.2%} of RMS against "
+            f"{baseline['rms']:.2%} for the unclamped op that already ships with recompute "
+            "enabled; the clamp is making the regeneration materially worse"
+        )
+        # Ceilings, so a regression that degrades both at once still fails.
+        ceiling = self._RECOMPUTE_WGRAD_ABSOLUTE_CEILING[quantization]
+        for activation, deviation in deviations.items():
+            assert deviation["max"] <= ceiling, (
+                f"{activation}: recomputed FC2 wgrad deviates by {deviation['max']:.2%} of its "
+                f"RMS against a {ceiling:.0%} ceiling for {quantization}"
+            )
+
+    @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
+    @pytest.mark.parametrize("variant", ("bias", "single_grouped_weight", "delay_wgrad_compute"))
+    def test_grouped_mlp_srelu_activation_recompute_options(
+        self,
+        traced_cudnn_grouped_dsrelu_wrapper,
+        variant: str,
+        *,
+        dtype: torch.dtype = torch.bfloat16,
+        device: torch.device = "cuda",
+        group_size: int = 4,
+        hidden_size: int = 256,
+    ) -> None:
+        """The clamped recompute path survives the options that change what wgrad consumes.
+
+        Each of these reaches the regenerated tensor by a different route: ``bias`` makes the
+        same dSReLU kernel call also produce FC1's dbias, ``single_grouped_weight`` changes how
+        the wgrad GEMM packs its weights, and ``delay_wgrad_compute`` defers the GEMM to
+        ``backward_dw`` so the regenerated tensor has to survive past the point where the
+        non-delayed path clears it. That last one is the sharp one: a tensor freed too early
+        would corrupt wgrad silently, exactly like a bad regeneration.
+        """
+        if not te.ops.fused.GroupedMLP_CuTeGEMMUnary.is_supported():
+            pytest.skip("Fused grouped MLP is not supported on this system")
+        if not grouped_mlp_module._cudnn_frontend_supports_grouped_gemm_srelu_tanh():
+            pytest.skip("Installed cuDNN frontend lacks tanh_clamp_scale")
+        if not grouped_mlp_module._grouped_gemm_dsrelu_backward_supported():
+            pytest.skip("cuDNN FE grouped dSReLU backward wrapper unavailable")
+        if not grouped_mlp_module._nvidia_cudnn_frontend_supports_wgrad():
+            pytest.skip("cuDNN FE too old for the grouped GEMM wgrad kernel")
+        if variant == "single_grouped_weight" and (
+            os.environ.get("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "0") == "0"
+        ):
+            pytest.skip("single_grouped_weight requires NVTE_GROUPED_LINEAR_SINGLE_PARAM=1")
+
+        bias = variant == "bias"
+        split_sizes = torch.tensor(
+            [256 * (i + 1) for i in range(group_size)], dtype=torch.int64, device=device
+        )
+        tensors = self._make_recompute_tensors(
+            group_size=group_size,
+            hidden_size=hidden_size,
+            split_sizes=split_sizes,
+            dtype=dtype,
+            device=device,
+            bias=bias,
+        )
+        common = dict(
+            activation="scaled_tanh_srelu",
+            quantization="mxfp8",
+            tensors=tensors,
+            split_sizes=split_sizes,
+            group_size=group_size,
+            hidden_size=hidden_size,
+            dtype=dtype,
+            device=device,
+            bias=bias,
+            single_grouped_weight=variant == "single_grouped_weight",
+            delay_wgrad_compute=variant == "delay_wgrad_compute",
+        )
+
+        off = self._run_recompute_case(activation_recompute_in_mlp=False, **common)
+        on = self._run_recompute_case(activation_recompute_in_mlp=True, **common)
+
+        reuse = [c["use_dsrelu_reuse"] for c in traced_cudnn_grouped_dsrelu_wrapper]
+        assert reuse == [False, True], f"use_dsrelu_reuse={reuse} for variant {variant}"
+        deviation = self._assert_recompute_preserves_everything_but_fc2_wgrad(off, on)
+        print(
+            f"\n[recompute FC2 wgrad deviation, {variant}] "
+            f"max={deviation['max']:.1%} rms={deviation['rms']:.1%} "
+            f"bias={deviation['bias']:+.2f}"
+        )
+        assert (
+            deviation["max"] <= self._RECOMPUTE_WGRAD_ABSOLUTE_CEILING["mxfp8"]
+        ), f"{variant}: recomputed FC2 wgrad deviates by {deviation['max']:.2%} of its RMS"
+
+    @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
+    def test_grouped_mlp_srelu_activation_recompute_saves_memory(
+        self,
+        *,
+        dtype: torch.dtype = torch.bfloat16,
+        device: torch.device = "cuda",
+        group_size: int = 4,
+        hidden_size: int = 256,
+    ) -> None:
+        """Recompute actually shrinks the saved state -- the entire reason the feature exists.
+
+        Every other test here establishes that the regenerated tensor is *correct*. None of
+        them would notice a "recompute" that regenerates FC2's input and also keeps a
+        reference to the saved one, which would be correct, slower, and pointless. Measured
+        between the forward and the backward, where the stashed state is what is resident.
+        """
+        if not te.ops.fused.GroupedMLP_CuTeGEMMUnary.is_supported():
+            pytest.skip("Fused grouped MLP is not supported on this system")
+        if not grouped_mlp_module._cudnn_frontend_supports_grouped_gemm_srelu_tanh():
+            pytest.skip("Installed cuDNN frontend lacks tanh_clamp_scale")
+        if not grouped_mlp_module._grouped_gemm_dsrelu_backward_supported():
+            pytest.skip("cuDNN FE grouped dSReLU backward wrapper unavailable")
+        if not grouped_mlp_module._nvidia_cudnn_frontend_supports_wgrad():
+            pytest.skip("cuDNN FE too old for the grouped GEMM wgrad kernel")
+
+        split_sizes = torch.tensor(
+            [256 * (i + 1) for i in range(group_size)], dtype=torch.int64, device=device
+        )
+        tensors = self._make_recompute_tensors(
+            group_size=group_size,
+            hidden_size=hidden_size,
+            split_sizes=split_sizes,
+            dtype=dtype,
+            device=device,
+        )
+        common = dict(
+            activation="scaled_tanh_srelu",
+            quantization="mxfp8",
+            tensors=tensors,
+            split_sizes=split_sizes,
+            group_size=group_size,
+            hidden_size=hidden_size,
+            dtype=dtype,
+            device=device,
+            measure_saved_state=True,
+        )
+
+        off = self._run_recompute_case(activation_recompute_in_mlp=False, **common)
+        on = self._run_recompute_case(activation_recompute_in_mlp=True, **common)
+
+        # FC2's input is (total_tokens, hidden_size) in FP8 columnwise form. Requiring most of
+        # it back, rather than merely "less", keeps this from passing on allocator noise.
+        total_tokens = int(split_sizes.sum())
+        expected = total_tokens * hidden_size
+        saved = off["saved_state_bytes"] - on["saved_state_bytes"]
+        assert saved >= 0.5 * expected, (
+            f"recompute freed only {saved} bytes of saved state against roughly {expected} "
+            f"for FC2's input ({off['saved_state_bytes']} -> {on['saved_state_bytes']}); the "
+            "tensor is being regenerated but apparently still held somewhere"
+        )
+
+    @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "Pre-existing: the fused grouped MLP asserts in mark_grouped_tensor when the "
+            "weights are frozen but the input still needs a gradient. Unrelated to activation "
+            "recompute -- remove this marker when it is fixed."
+        ),
+    )
+    def test_grouped_mlp_srelu_activation_recompute_requires_weight_grad(
+        self,
+        traced_cudnn_grouped_dsrelu_wrapper,
+        *,
+        dtype: torch.dtype = torch.bfloat16,
+        device: torch.device = "cuda",
+        group_size: int = 4,
+        hidden_size: int = 256,
+    ) -> None:
+        """No weight gradients means nothing consumes FC2's input, so do not regenerate it.
+
+        ``weight_requires_grad`` is part of the recompute gate, and losing it would cost a
+        kernel output nobody reads -- which no correctness test would catch.
+
+        The assertion is currently unreachable, and the reason is worth recording. With frozen
+        weights and an input that still needs a gradient, ``fuser_forward`` reaches
+        ``mark_grouped_tensor(..., grouped_fc2_x)`` while ``grouped_fc2_x`` has no columnwise
+        data -- there are no weight gradients to need columnwise tiles -- and that helper
+        asserts it is set. So the whole configuration raises before the recompute gate is
+        consulted. That is a pre-existing defect in a real configuration (frozen experts under
+        an input that still requires grad); it is not caused by recompute, and it does not
+        depend on the clamp. Kept as a strict xfail so the day it is fixed, this starts
+        passing and the gate below actually gets checked.
+        """
+        if not te.ops.fused.GroupedMLP_CuTeGEMMUnary.is_supported():
+            pytest.skip("Fused grouped MLP is not supported on this system")
+        if not grouped_mlp_module._cudnn_frontend_supports_grouped_gemm_srelu_tanh():
+            pytest.skip("Installed cuDNN frontend lacks tanh_clamp_scale")
+
+        split_sizes = torch.tensor(
+            [256 * (i + 1) for i in range(group_size)], dtype=torch.int64, device=device
+        )
+        tensors = self._make_recompute_tensors(
+            group_size=group_size,
+            hidden_size=hidden_size,
+            split_sizes=split_sizes,
+            dtype=dtype,
+            device=device,
+        )
+        self._run_recompute_case(
+            activation="scaled_tanh_srelu",
+            activation_recompute_in_mlp=True,
+            quantization="mxfp8",
+            tensors=tensors,
+            split_sizes=split_sizes,
+            group_size=group_size,
+            hidden_size=hidden_size,
+            dtype=dtype,
+            device=device,
+            weights_require_grad=False,
+        )
+
+        reuse = [c["use_dsrelu_reuse"] for c in traced_cudnn_grouped_dsrelu_wrapper]
+        assert reuse == [False], (
+            "recompute must stay off when no weight needs a gradient, since the regenerated "
+            f"FC2 input would go unused; got use_dsrelu_reuse={reuse}"
+        )
 
     @pytest.mark.parametrize("quantization", ("mxfp8", "nvfp4_rht"))
     def test_grouped_mlp_caller_buffers(
