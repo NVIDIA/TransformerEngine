@@ -6,6 +6,11 @@
 PyTorch
 =======
 
+.. autoapiclass:: transformer_engine.pytorch.autocast(enabled=True, calibrating=False, recipe=None, amax_reduction_group=None)
+
+Standard layers
+---------------
+
 .. autoapiclass:: transformer_engine.pytorch.Linear(in_features, out_features, bias=True, **kwargs)
   :members: forward, set_tensor_parallel_group
 
@@ -34,19 +39,33 @@ PyTorch
 .. autoapiclass:: transformer_engine.pytorch.TransformerLayer(hidden_size, ffn_hidden_size, num_attention_heads, **kwargs)
   :members: forward, set_context_parallel_group, set_tensor_parallel_group
 
+Model-specific layers
+---------------------
+
+DeepSeek-V3
+^^^^^^^^^^^
+
+.. autoapiclass:: transformer_engine.pytorch.models.DeepSeekV3Layer(hidden_size, num_attention_heads, **kwargs)
+  :members: forward
+
+.. autoapiclass:: transformer_engine.pytorch.models.DeepSeekV3MoE(hidden_size, moe_ffn_hidden_size, num_experts, **kwargs)
+  :members: forward, update_expert_bias
+
+.. autoapiclass:: transformer_engine.pytorch.models.MultiLatentAttention(hidden_size, num_attention_heads, **kwargs)
+  :members: forward
+
+Other
+-----
+
 .. autoapiclass:: transformer_engine.pytorch.dot_product_attention.inference.InferenceParams(max_batch_size, max_sequence_length)
   :members: reset, allocate_memory, pre_step, get_seqlens_pre_step, convert_paged_to_nonpaged, step
 
 .. autoapiclass:: transformer_engine.pytorch.CudaRNGStatesTracker()
   :members: reset, get_states, set_states, add, fork
 
-
-.. autoapiclass:: transformer_engine.pytorch.autocast(enabled=True, calibrating=False, recipe=None, amax_reduction_group=None)
-
 .. autoapifunction:: transformer_engine.pytorch.quantized_model_init
 
 .. autoapifunction:: transformer_engine.pytorch.checkpoint
-
 
 .. autoapifunction:: transformer_engine.pytorch.make_graphed_callables
 
