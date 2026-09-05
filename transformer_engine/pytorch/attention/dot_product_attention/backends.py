@@ -7,6 +7,7 @@
 from contextlib import nullcontext
 from importlib.metadata import version as get_pkg_version
 from importlib.metadata import PackageNotFoundError
+import inspect
 import os
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import warnings
@@ -165,6 +166,19 @@ else:
     from flash_attn_interface import _flash_attn_backward as _flash_attn_bwd_v3
 
     fa_utils.set_flash_attention_3_params()
+
+    # Probe whether this FA3 build exposes a `softcap` parameter on BOTH entry points. FA3's Hopper
+    # (sm90) kernels DO implement tanh logit softcapping in fwd AND bwd (dedicated
+    # flash_{fwd,bwd}_hdim256_bf16_softcap_sm90 instantiations, off only behind a compile-time
+    # DISABLE_SOFTCAP flag), so this is a mature path. Still fail-closed and additionally
+    # gated on head_dim <= 256 + non-CP in get_attention_backend.
+    try:
+        fa_utils.fa3_supports_softcap = (
+            "softcap" in inspect.signature(flash_attn_func_v3).parameters
+            and "softcap" in inspect.signature(flash_attn_varlen_func_v3).parameters
+        )
+    except (ValueError, TypeError):
+        fa_utils.fa3_supports_softcap = False
 
 # Try to import Flash Attention v4
 try:
@@ -435,6 +449,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
         attention_mask: Optional[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]] = None,
         window_size: Optional[Tuple[int, int]] = None,
         bottom_right_diagonal: Optional[bool] = None,
+        softcap: float = 0.0,
         core_attention_bias_type: str = "no_bias",
         core_attention_bias: Optional[torch.Tensor] = None,
         alibi_slopes: Optional[torch.Tensor] = None,
@@ -626,6 +641,9 @@ class UnfusedDotProductAttention(torch.nn.Module):
         key_layer = key_layer.reshape(output_size[3], output_size[0] * output_size[1], -1)
 
         # Raw attention scores. [b * h, sq, sk]
+        # An additive `post_scale_bias`/ALiBi term is deferred until after the softcap below, so
+        # that the cap applies to the bare scaled logits (see the softcap comment for why).
+        deferred_bias = None
         if core_attention_bias_type == "no_bias":
             matmul_result = torch.baddbmm(
                 matmul_result,
@@ -669,9 +687,20 @@ class UnfusedDotProductAttention(torch.nn.Module):
                 beta=0.0,
                 alpha=scale,
             )
-            matmul_result = (matmul_result.view(*output_size) + core_attention_bias).to(
-                dtype=query_layer.dtype
-            )
+            matmul_result = matmul_result.view(*output_size)
+            deferred_bias = core_attention_bias
+
+        # Cap the scaled logits: softcap * tanh(scores * scale / softcap), matching how
+        # FlashAttention folds softmax_scale into its tanh argument. The cap must land on the
+        # bare scaled logits, before any additive bias: FA2 caps right after the QK^T gemm and
+        # adds ALiBi afterwards, so capping the bias too would diverge from it. qk layer scaling
+        # defers the layer_number factor to the softmax below, so it is divided out of the cap.
+        if softcap != 0.0:
+            cap = softcap / self.layer_number if apply_qk_layer_scaling else softcap
+            matmul_result = cap * torch.tanh(matmul_result / cap)
+
+        if deferred_bias is not None:
+            matmul_result = (matmul_result + deferred_bias).to(dtype=query_layer.dtype)
 
         if fp8:
             # quantize and dequantize dP to emulate FP8
@@ -894,6 +923,7 @@ class FlashAttention(torch.nn.Module):
         max_seqlen_kv: Optional[int] = None,
         attn_mask_type: str = "causal",
         window_size: Optional[Tuple[int, int]] = None,
+        softcap: float = 0.0,
         alibi_slopes: Optional[torch.Tensor] = None,
         cp_group: Optional[Union[dist_group_type, List[dist_group_type]]] = None,
         cp_global_ranks: List[int] = None,
@@ -1110,6 +1140,11 @@ class FlashAttention(torch.nn.Module):
             assert (
                 alibi_slopes is None
             ), "Alibi slope bias addition is not supported with context parallelism."
+            if use_flash_attn_3 and softcap != 0.0:
+                raise NotImplementedError(
+                    "softcap is not supported by the FlashAttention 3 backend in context "
+                    "parallel. Please use FlashAttention 2 (>= 2.6.0) for softcap support."
+                )
             with self.attention_dropout_ctx():
                 output = attn_forward_func_with_cp(
                     self.training,
@@ -1140,6 +1175,7 @@ class FlashAttention(torch.nn.Module):
                     attn_mask_type=attn_mask_type,
                     deterministic=self.deterministic,
                     window_size=window_size,
+                    softcap=softcap,
                     quantizers=quantizers,
                     pad_between_seqs=pad_between_seqs,
                     use_flash_attn_3=use_flash_attn_3,
@@ -1237,6 +1273,8 @@ class FlashAttention(torch.nn.Module):
                         fa_optional_forward_kwargs["alibi_slopes"] = alibi_slopes
                     if fa_utils.v2_4_1_plus:
                         fa_optional_forward_kwargs["deterministic"] = self.deterministic
+                    if fa_utils.v2_6_0_plus:
+                        fa_optional_forward_kwargs["softcap"] = softcap
                     if inference_params is not None:
                         # use block_table kwarg to support thd_2bshd for non-paged
                         fa_optional_forward_kwargs["block_table"] = (
@@ -1257,9 +1295,17 @@ class FlashAttention(torch.nn.Module):
                         **fa_optional_forward_kwargs,
                     )
                 else:
+                    if softcap != 0.0 and not fa_utils.fa3_supports_softcap:
+                        raise NotImplementedError(
+                            "softcap is not supported by the installed FlashAttention 3 build. "
+                            "Please use FlashAttention 2 (>= 2.6.0) for softcap support."
+                        )
                     fa_3_optional_forward_kwargs = {}
                     fa_3_optional_forward_kwargs["window_size"] = window_size
                     fa_3_optional_forward_kwargs["num_splits"] = num_splits
+                    if softcap != 0.0 and fa_utils.fa3_supports_softcap:
+                        # FA3 entry points are autograd functions, so this drives the backward too.
+                        fa_3_optional_forward_kwargs["softcap"] = softcap
                     if pad_between_seqs:
                         fa_3_optional_forward_kwargs["seqused_q"] = (
                             cu_seqlens_q[1:] - cu_seqlens_q[:-1]

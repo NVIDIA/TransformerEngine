@@ -170,6 +170,7 @@ def test_dot_product_attention(
     pad_between_seqs,
     declarative_packed=False,
     is_training=True,
+    fwd_only_without_fused_attn=True,
 ):
     """Test DotProductAttention module"""
 
@@ -222,7 +223,11 @@ def test_dot_product_attention(
     )
     flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
 
-    if not fused_attn_supported:
+    # Some backends are only available in inference mode, so when FusedAttention cannot train this
+    # config the query is repeated forward-only to recover enough backends to compare. Callers
+    # whose backward-capable pair does not include FusedAttention -- softcap, where
+    # get_attention_backend always disables FusedAttention -- opt out to keep dgrad coverage.
+    if not fused_attn_supported and fwd_only_without_fused_attn:
         is_training = False
         available_backends, _, fused_attn_backends = get_available_attention_backends(
             config,
@@ -643,6 +648,349 @@ def test_dpa_softmax(dtype, model_configs, model):
 def test_dpa_softmax_thd(dtype, model_configs, model):
     """Test DotProductAttention module with different softmax types"""
     test_dot_product_attention(dtype, model_configs, model, True, "thd_thd_thd", False, False)
+
+
+model_configs_softcap = {
+    # test: ModelConfig(b, sq, hq, dqk)
+    # High cap, no padding -> flash_attn_func.
+    "softcap_1_0": ModelConfig(4, 128, 16, 64, softcap=50.0),
+    # Low cap, padding -> flash_attn_varlen_func. The shared harness feeds 0.1 * randn, putting
+    # logits at O(1e-2) whatever the head dim, so tanh is numerically linear at a Gemma-sized
+    # cap. A cap of 0.01 is the one regime these inputs can distinguish. Softcapping in tanh's
+    # saturating region is covered by test_dpa_softcap_vs_reference, which uses its own inputs.
+    "softcap_3_1": ModelConfig(2, 512, 16, 64, attn_mask_type="padding_causal", softcap=0.01),
+}
+
+
+@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("model_configs", [model_configs_softcap])
+@pytest.mark.parametrize("model", model_configs_softcap.keys())
+def test_dpa_softcap(dtype, model_configs, model):
+    """Test DotProductAttention module with tanh logit softcapping"""
+    test_dot_product_attention(
+        dtype,
+        model_configs,
+        model,
+        False,
+        "bshd_bshd_bshd",
+        False,
+        False,
+        fwd_only_without_fused_attn=False,
+    )
+
+
+@pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
+@pytest.mark.parametrize("dtype", param_types_lean)
+@pytest.mark.parametrize("model_configs", [model_configs_softcap])
+@pytest.mark.parametrize("model", ["softcap_1_0"])
+def test_dpa_softcap_zero_backend_selection(dtype, model_configs, model):
+    """Test that softcap=0.0 leaves backend selection untouched.
+
+    The softcap filter in get_attention_backend disables FusedAttention (and FA4) whenever the
+    cap is nonzero. If it also fired at 0.0, those backends would silently drop out of every
+    other test in this file rather than failing one, so assert both halves here.
+
+    Whether FusedAttention is available at all is arch- and mode-dependent (cuDNN support,
+    NVTE_ALLOW_NONDETERMINISTIC_ALGO=0), and is not what this test is about, so that half is a
+    skip rather than an assert.
+    """
+    config = copy.deepcopy(model_configs[model])
+    query = dict(
+        qkv_dtype=dtype,
+        qkv_layout="bshd_bshd_bshd",
+        is_training=True,
+        deterministic=_deterministic,
+    )
+
+    config.softcap = 0.0
+    (_, fused_off, unfused_off), _, _ = get_available_attention_backends(config, **query)
+    config.softcap = 50.0
+    (_, fused_on, unfused_on), _, _ = get_available_attention_backends(config, **query)
+
+    if not fused_off:
+        pytest.skip(
+            "FusedAttention is unavailable for this config irrespective of softcap (no cuDNN"
+            " support for this arch/shape, or deterministic mode), so the softcap filter has"
+            " nothing to disable and the comparison below would be vacuous."
+        )
+    assert not fused_on, "a nonzero softcap must disable FusedAttention"
+    assert unfused_off and unfused_on, "UnfusedDotProductAttention must support softcap"
+
+
+def _softcap_reference_attention(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    softmax_scale: float,
+    softcap: float,
+    causal: bool,
+    bias: torch.Tensor = None,
+    cap_includes_bias: bool = False,
+) -> torch.Tensor:
+    """Closed-form softcapped attention in bshd layout, computed in fp32.
+
+    scores = softcap * tanh(Q @ K^T * softmax_scale / softcap), with the tanh skipped entirely
+    when softcap == 0.0, so this doubles as the reference for the no-op claim. GQA is supported.
+    An additive `bias` lands outside the tanh unless `cap_includes_bias`, which builds the
+    reference an implementation that capped the bias along with the logits would produce.
+    """
+    q, k, v = (x.transpose(1, 2).float() for x in (q, k, v))
+    if q.shape[1] != k.shape[1]:
+        repeats = q.shape[1] // k.shape[1]
+        k = k.repeat_interleave(repeats, dim=1)
+        v = v.repeat_interleave(repeats, dim=1)
+    scores = torch.matmul(q, k.transpose(-2, -1)) * softmax_scale
+    if bias is not None and cap_includes_bias:
+        scores = scores + bias.float()
+    if softcap != 0.0:
+        scores = softcap * torch.tanh(scores / softcap)
+    if bias is not None and not cap_includes_bias:
+        scores = scores + bias.float()
+    if causal:
+        max_seqlen_q, max_seqlen_kv = scores.shape[-2], scores.shape[-1]
+        mask = torch.triu(
+            torch.ones(max_seqlen_q, max_seqlen_kv, dtype=torch.bool, device=scores.device),
+            diagonal=1 + max_seqlen_kv - max_seqlen_q,
+        )
+        scores = scores.masked_fill(mask, float("-inf"))
+    return torch.matmul(torch.softmax(scores, dim=-1), v).transpose(1, 2)
+
+
+model_configs_softcap_reference = {
+    # test: ModelConfig(b, sq, hq, dqk)
+    "softcap_ref_1_0": ModelConfig(2, 128, 8, 64),
+    "softcap_ref_2_0": ModelConfig(2, 128, 8, 64, num_gqa_groups=2, attn_mask_type="causal"),
+}
+
+# "plain" checks the cap itself. The other two pin down *where* the cap is applied inside
+# UnfusedDotProductAttention, so they run on that backend only, at a cap that saturates.
+softcap_variants = ["plain", "bias_outside_cap", "qk_layer_scaling"]
+
+# Large enough that a cap of softcap * layer_number is far from a cap of softcap for O(1)
+# logits; at layer_number=3 the two references differ by less than the tolerance below.
+_SOFTCAP_QK_LAYER_NUMBER = 8
+
+
+def _softcap_variant_spec(variant, config, dtype, softcap, softmax_scale, q, k, v):
+    """Return (dpa_kwargs, forward_kwargs, right_fn, wrong_fn) for one softcap variant.
+
+    `wrong_fn` is the reference that an implementation carrying the bug this variant guards
+    against would produce, or None when there is no distinguishable wrong answer.
+    """
+    causal = "causal" in config.attn_mask_type
+
+    def _ref(cap, **kwargs):
+        return _softcap_reference_attention(q, k, v, softmax_scale, cap, causal, **kwargs)
+
+    if variant == "plain":
+        # A backend that ignored the cap entirely would land on the uncapped reference.
+        wrong_fn = None if softcap == 0.0 else (lambda: _ref(0.0))
+        return dict(layer_number=1), {}, (lambda: _ref(softcap)), wrong_fn
+
+    if variant == "bias_outside_cap":
+        # O(1) against the cap, so capping the bias too is visible in the output while the
+        # softmax stays well conditioned; a larger bias only sharpens fp16 rounding.
+        bias = torch.randn(
+            1,
+            config.num_heads,
+            config.max_seqlen_q,
+            config.max_seqlen_kv,
+            dtype=dtype,
+            device="cuda",
+        )
+        forward_kwargs = dict(core_attention_bias_type="post_scale_bias", core_attention_bias=bias)
+        return (
+            dict(layer_number=1),
+            forward_kwargs,
+            (lambda: _ref(softcap, bias=bias)),
+            (lambda: _ref(softcap, bias=bias, cap_includes_bias=True)),
+        )
+
+    if variant == "qk_layer_scaling":
+        # Omitting the cap / layer_number division caps the reduced logits instead, which after
+        # the softmax's layer_number factor is exactly a softcap * layer_number cap.
+        layer_number = _SOFTCAP_QK_LAYER_NUMBER
+        return (
+            dict(layer_number=layer_number),
+            {},
+            (lambda: _ref(softcap)),
+            (lambda: _ref(softcap * layer_number)),
+        )
+
+    raise ValueError(f"Unknown softcap variant {variant}!")
+
+
+@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("model_configs", [model_configs_softcap_reference])
+@pytest.mark.parametrize("model", model_configs_softcap_reference.keys())
+@pytest.mark.parametrize("softcap", [0.0, 0.5])
+@pytest.mark.parametrize("backend", ["UnfusedDotProductAttention", "FlashAttention"])
+@pytest.mark.parametrize("variant", softcap_variants)
+def test_dpa_softcap_vs_reference(dtype, model_configs, model, softcap, backend, variant):
+    """Test softcap against a closed-form reference, one backend and one variant at a time.
+
+    This needs only one TE backend, so UnfusedDotProductAttention -- the reference
+    implementation for every other softcap test -- stays covered on machines without
+    flash-attn. softcap=0.0 checks against a reference that never applies tanh, which is the
+    numerical half of the no-op claim. Every variant with a distinguishable wrong answer
+    asserts the two references are further apart than the tolerance, so a backend that
+    implemented the wrong one could not pass.
+    """
+    config = copy.deepcopy(model_configs[model])
+    causal = "causal" in config.attn_mask_type
+    if variant != "plain":
+        # These pin down UnfusedDotProductAttention's own arithmetic and need one saturating
+        # cap on one mask type; "plain" carries the backend and mask coverage.
+        if backend != "UnfusedDotProductAttention" or softcap == 0.0 or causal:
+            pytest.skip(f"{variant} is covered once, on the non-causal config with a nonzero cap")
+        if variant == "qk_layer_scaling" and dtype != torch.float16:
+            pytest.skip("qk layer scaling is gated on fp16 keys")
+
+    config.softcap = softcap
+    available_backends, _, _ = get_available_attention_backends(
+        config,
+        qkv_dtype=dtype,
+        qkv_layout="bshd_bshd_bshd",
+        is_training=True,
+        deterministic=_deterministic,
+    )
+    supported = dict(
+        zip(["FlashAttention", "FusedAttention", "UnfusedDotProductAttention"], available_backends)
+    )
+    if not supported[backend]:
+        pytest.skip(f"{backend} is unavailable for this config.")
+
+    reset_rng_states()
+    os.environ["NVTE_FLASH_ATTN"] = "1" if backend == "FlashAttention" else "0"
+    os.environ["NVTE_FUSED_ATTN"] = "0"
+    os.environ["NVTE_UNFUSED_ATTN"] = "1" if backend == "UnfusedDotProductAttention" else "0"
+    if variant == "qk_layer_scaling":
+        os.environ["NVTE_APPLY_QK_LAYER_SCALING"] = "1"
+    _attention_backends["backend_selection_requires_update"] = True
+
+    softmax_scale = 1.0 / config.head_dim_qk**0.5
+    q_shape = (config.batch_size, config.max_seqlen_q, config.num_heads, config.head_dim_qk)
+    k_shape = (config.batch_size, config.max_seqlen_kv, config.num_gqa_groups, config.head_dim_qk)
+    v_shape = (config.batch_size, config.max_seqlen_kv, config.num_gqa_groups, config.head_dim_v)
+    out_shape = (config.batch_size, config.max_seqlen_q, config.num_heads, config.head_dim_v)
+    # randn puts the logits at O(1), so a cap of 0.5 lands in tanh's saturating region and moves
+    # the output by O(1). The shared harness uses 0.1 * randn, where the logits are O(1e-2) and
+    # no cap value is distinguishable from no cap at all.
+    q, k, v = (
+        torch.randn(shape, dtype=dtype, device="cuda").requires_grad_()
+        for shape in (q_shape, k_shape, v_shape)
+    )
+    q_ref, k_ref, v_ref = (x.detach().clone().requires_grad_() for x in (q, k, v))
+    # DotProductAttention merges the head and head-dim axes of its output.
+    d_out = torch.randn(out_shape, dtype=dtype, device="cuda")
+
+    dpa_kwargs, forward_kwargs, right_fn, wrong_fn = _softcap_variant_spec(
+        variant, config, dtype, softcap, softmax_scale, q_ref, k_ref, v_ref
+    )
+
+    try:
+        block = DotProductAttention(
+            config.num_heads,
+            (config.head_dim_qk, config.head_dim_v),
+            num_gqa_groups=config.num_gqa_groups,
+            qkv_format="bshd",
+            attn_mask_type=config.attn_mask_type,
+            softmax_scale=softmax_scale,
+            softcap=softcap,
+            **dpa_kwargs,
+        ).to(dtype=dtype, device="cuda")
+        out = block(q, k, v, **forward_kwargs).view(out_shape)
+    finally:
+        os.environ["NVTE_APPLY_QK_LAYER_SCALING"] = "0"
+        _attention_backends["backend_selection_requires_update"] = True
+
+    out_ref = right_fn()
+
+    tols = dict(atol=2e-2, rtol=2e-2)
+    if dtype == torch.bfloat16:
+        tols = dict(atol=4e-2, rtol=4e-2)
+
+    if wrong_fn is not None:
+        # Without this the test could be vacuous: the right and wrong references have to be
+        # distinguishable at this cap for the comparison below to mean anything.
+        variant_effect = (out_ref.detach() - wrong_fn().detach()).abs().max().item()
+        assert variant_effect > 10 * tols["atol"], (
+            f"{variant} moves the reference output by only {variant_effect:.2e}; this config"
+            " would pass even if the backend implemented the wrong variant"
+        )
+
+    torch.testing.assert_close(out.float(), out_ref, **tols)
+
+    if variant == "plain":
+        out.backward(d_out)
+        out_ref.backward(d_out.float())
+        torch.testing.assert_close(q.grad.float(), q_ref.grad.float(), **tols)
+        torch.testing.assert_close(k.grad.float(), k_ref.grad.float(), **tols)
+        torch.testing.assert_close(v.grad.float(), v_ref.grad.float(), **tols)
+
+
+@pytest.mark.parametrize("dtype", param_types)
+def test_transformer_layer_softcap_plumbing(dtype):
+    """Test that TransformerLayer forwards softcap to both of its attention modules.
+
+    The value only has to arrive; the numerics are covered by the DotProductAttention tests
+    above. Cross-attention is the half worth asserting: it is reached through a separate call
+    site from self-attention, so a refactor can drop the cap there while self-attention keeps
+    working, and nothing else in the suite would notice.
+    """
+    # head_dim 64, matching the other softcap configs, so every backend can serve the shape.
+    hidden_size, num_heads, seqlen, batch_size = 256, 4, 32, 2
+    seen = {}
+
+    def _record(name):
+        def hook(_module, _args, kwargs):
+            seen[name] = kwargs.get("softcap")
+
+        return hook
+
+    # Every softcap test above sets these and none restore them, so inherit nothing: with a
+    # nonzero cap the filter also drops FusedAttention and FA4, and a leftover
+    # NVTE_UNFUSED_ATTN=0 would leave no backend at all on a machine without flash-attn.
+    # Leaving flash and unfused both enabled keeps this backend-agnostic; the hook fires on
+    # DotProductAttention regardless of which one is selected.
+    reset_rng_states()
+    os.environ["NVTE_FLASH_ATTN"] = "1"
+    os.environ["NVTE_FUSED_ATTN"] = "0"
+    os.environ["NVTE_UNFUSED_ATTN"] = "1"
+    _attention_backends["backend_selection_requires_update"] = True
+
+    block = TransformerLayer(
+        hidden_size,
+        4 * hidden_size,
+        num_heads,
+        layer_type="decoder",
+        softcap=50.0,
+        params_dtype=dtype,
+        device="cuda",
+    )
+    block.self_attention.core_attention.register_forward_pre_hook(_record("self"), with_kwargs=True)
+    block.inter_attention.core_attention.register_forward_pre_hook(
+        _record("cross"), with_kwargs=True
+    )
+
+    hidden_states = torch.randn(
+        seqlen, batch_size, hidden_size, dtype=dtype, device="cuda", requires_grad=True
+    )
+    forward_kwargs = dict(
+        encoder_output=hidden_states,
+        enc_dec_attn_mask=torch.zeros(batch_size, 1, 1, seqlen, dtype=torch.bool, device="cuda"),
+    )
+
+    # The constructor value reaches both attention modules.
+    block(hidden_states, **forward_kwargs)
+    assert seen["self"] == 50.0, f"self-attention saw softcap={seen['self']}, expected 50.0"
+    assert seen["cross"] == 50.0, f"cross-attention saw softcap={seen['cross']}, expected 50.0"
+
+    # A forward override wins over the constructor, for both.
+    seen.clear()
+    block(hidden_states, softcap=10.0, **forward_kwargs)
+    assert seen["self"] == 10.0, f"self-attention saw softcap={seen['self']}, expected 10.0"
+    assert seen["cross"] == 10.0, f"cross-attention saw softcap={seen['cross']}, expected 10.0"
 
 
 model_configs_mla = {
@@ -1181,6 +1529,7 @@ def make_dot_product_attention(
         attention_type=config.attn_type if attention_type is None else attention_type,
         softmax_type=config.softmax_type,
         return_max_logit=config.return_max_logit,
+        softcap=config.softcap,
     ).to(dtype=dtype, device="cuda")
     if not is_training:
         block = block.eval()
