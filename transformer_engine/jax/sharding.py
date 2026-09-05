@@ -164,6 +164,11 @@ def with_sharding_constraint(x: jnp.array, pspec: PartitionSpec):
         return x
 
     cleaned_pspec = PartitionSpec(*cleaned_axis_names)
+    abstract_mesh = get_abstract_mesh()
+    if abstract_mesh.axis_types and all(
+        axis_type.name == "Explicit" for axis_type in abstract_mesh.axis_types
+    ):
+        return jax.sharding.reshard(x, cleaned_pspec)
     return jax.lax.with_sharding_constraint(x, cleaned_pspec)
 
 
