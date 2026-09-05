@@ -910,6 +910,9 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self.param_init_meta = {}
         self.primary_weights_in_fp8 = FP8GlobalStateManager.with_fp8_parameters()
         self.preserve_high_precision_init_val = FP8GlobalStateManager.with_high_precision_init_val()
+        self.omit_columnwise_primary_weight_storage = (
+            FP8GlobalStateManager.should_omit_columnwise_primary_weight_storage()
+        )
         self.fsdp_wrapped = False
         self.fsdp_group = None
         self._fp8_workspaces: Dict[str, QuantizedTensor] = {}
@@ -1845,7 +1848,12 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 quantizer = self.quantizers["scaling_fwd"][fp8_meta_index]
                 if quantizer is None:
                     raise RuntimeError("Weight quantizer has not been initialized")
-                quantizer.set_usage(rowwise=True, columnwise=torch.is_grad_enabled())
+                quantizer.set_usage(
+                    rowwise=True,
+                    columnwise=(
+                        torch.is_grad_enabled() and not self.omit_columnwise_primary_weight_storage
+                    ),
+                )
                 quantizer.internal = False
                 # HybridQuantizer is included so its current-scaling / NVFP4
                 # sub-quantizers get the same cross-shard amax reduction as the
@@ -2061,6 +2069,12 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             return
 
         recipe = self.fp8_meta["recipe"]
+        if self.omit_columnwise_primary_weight_storage and recipe.backward_override is None:
+            raise RuntimeError(
+                "Primary weights were initialized without columnwise storage, but the current "
+                "recipe uses quantized backward. Recreate the model with columnwise primary-weight "
+                "storage or keep backward_override set to 'high_precision' or 'dequantized'."
+            )
         weight_tensors = [getattr(self, name) for name in self.weight_names]
         for i, tensor in enumerate(weight_tensors):
             if isinstance(tensor, QuantizedTensorStorage):
