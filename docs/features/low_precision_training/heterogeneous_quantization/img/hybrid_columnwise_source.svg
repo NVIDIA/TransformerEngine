@@ -1,0 +1,79 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 430" width="100%" style="max-width: 900px;" role="img" aria-labelledby="title description">
+  <title id="title">Hybrid quantizer columnwise source choices</title>
+  <desc id="description">With original provenance, both quantizers consume the original high-precision tensor. With rowwise-dequantized provenance, the columnwise quantizer consumes the dequantized rowwise representation.</desc>
+  <defs>
+    <style>
+      .heading { font: 600 18px 'Segoe UI', Arial, sans-serif; fill: #212121; text-anchor: middle; }
+      .section { font: 600 16px 'Segoe UI', Arial, sans-serif; fill: #424242; text-anchor: middle; }
+      .text { font: 14px 'Segoe UI', Arial, sans-serif; fill: #212121; text-anchor: middle; }
+      .small { font: 13px 'Segoe UI', Arial, sans-serif; fill: #616161; text-anchor: middle; }
+      .panel { fill: #fafafa; stroke: #bdbdbd; stroke-width: 1.5; }
+      .source { fill: #ede7f6; stroke: #673ab7; stroke-width: 2; }
+      .quantizer { fill: #e8f5e9; stroke: #388e3c; stroke-width: 2; }
+      .representation { fill: #e3f2fd; stroke: #1976d2; stroke-width: 2; }
+      .dequantize { fill: #fff3e0; stroke: #f57c00; stroke-width: 2; }
+      .arrow { stroke: #616161; stroke-width: 2; fill: none; marker-end: url(#arrowhead); }
+    </style>
+    <marker id="arrowhead" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#616161"/>
+    </marker>
+  </defs>
+
+  <text x="500" y="28" class="heading">Choosing the columnwise source</text>
+
+  <g aria-label="Original source">
+    <rect x="20" y="50" width="460" height="350" rx="8" class="panel"/>
+    <text x="250" y="82" class="section">columnwise_source="original"</text>
+
+    <rect x="150" y="105" width="200" height="48" rx="6" class="source"/>
+    <text x="250" y="134" class="text">High-precision tensor</text>
+
+    <path d="M 250 153 L 250 178 L 130 178 L 130 205" class="arrow"/>
+    <path d="M 250 153 L 250 178 L 370 178 L 370 205" class="arrow"/>
+    <text x="250" y="198" class="small">same original source</text>
+
+    <rect x="55" y="210" width="150" height="50" rx="6" class="quantizer"/>
+    <text x="130" y="240" class="text">Rowwise quantizer</text>
+    <rect x="295" y="210" width="150" height="50" rx="6" class="quantizer"/>
+    <text x="370" y="240" class="text">Columnwise quantizer</text>
+
+    <path d="M 130 260 L 130 300" class="arrow"/>
+    <path d="M 370 260 L 370 300" class="arrow"/>
+    <rect x="55" y="305" width="150" height="55" rx="6" class="representation"/>
+    <text x="130" y="329" class="text">Rowwise</text>
+    <text x="130" y="347" class="small">representation</text>
+    <rect x="295" y="305" width="150" height="55" rx="6" class="representation"/>
+    <text x="370" y="329" class="text">Columnwise</text>
+    <text x="370" y="347" class="small">representation</text>
+  </g>
+
+  <g aria-label="Rowwise-dequantized source">
+    <rect x="520" y="50" width="460" height="350" rx="8" class="panel"/>
+    <text x="750" y="82" class="section">columnwise_source="rowwise_dequantized"</text>
+
+    <rect x="555" y="105" width="180" height="48" rx="6" class="source"/>
+    <text x="645" y="134" class="text">High-precision tensor</text>
+    <path d="M 645 153 L 645 180" class="arrow"/>
+
+    <rect x="570" y="185" width="150" height="50" rx="6" class="quantizer"/>
+    <text x="645" y="215" class="text">Rowwise quantizer</text>
+    <path d="M 645 235 L 645 262" class="arrow"/>
+
+    <rect x="570" y="267" width="150" height="55" rx="6" class="representation"/>
+    <text x="645" y="291" class="text">Rowwise</text>
+    <text x="645" y="309" class="small">representation</text>
+    <path d="M 720 294 L 775 294" class="arrow"/>
+
+    <rect x="780" y="267" width="150" height="55" rx="6" class="dequantize"/>
+    <text x="855" y="299" class="text">Dequantize</text>
+    <path d="M 855 322 L 855 332" class="arrow"/>
+
+    <rect x="780" y="337" width="150" height="45" rx="6" class="quantizer"/>
+    <text x="855" y="365" class="text">Columnwise quantizer</text>
+    <path d="M 780 359 L 725 359" class="arrow"/>
+    <rect x="570" y="337" width="150" height="45" rx="6" class="representation"/>
+    <text x="645" y="355" class="text">Columnwise</text>
+    <text x="645" y="372" class="small">representation</text>
+  </g>
+</svg>
