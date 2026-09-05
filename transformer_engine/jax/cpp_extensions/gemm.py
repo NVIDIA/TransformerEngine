@@ -895,8 +895,8 @@ class GemmPrimitive(BasePrimitive):
         if gsr.tp_resource is not None:
             if gsr.tp_resource in lhs_specs:
                 warnings.warn(
-                    "Tensor sequence parallelism is detected as tp_resource='{gsr.tp_resource}'"
-                    " appears in lhs_specs: {lhs_specs}. Please setting MeshResource.tpsp_resource"
+                    f"Tensor sequence parallelism is detected as tp_resource='{gsr.tp_resource}'"
+                    f" appears in lhs_specs: {lhs_specs}. Please setting MeshResource.tpsp_resource"
                     " for tensor sequence parallelism to avoid potential issues."
                 )
 
