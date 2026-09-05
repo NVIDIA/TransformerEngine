@@ -1926,8 +1926,9 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
         The sequence of activation functions to apply after the first linear transformation.
         Each activation has its own transformation layer.
     mlp_activation_params: dict = None
-         This is only used when ``('clamped_silu', 'clamped_linear')`` is in :attr:`mlp_activations`. At the moment
-        ``ClampedSwiglu`` is the only activation that requires parameters.
+        Parameters for configurable MLP activations. SiTU-GLU uses
+        ``mlp_activations=('situ', 'situ_linear')`` with ``beta1`` and ``beta2`` values;
+        ``situ_linear`` denotes its soft-capped up branch.
     use_bias: bool, default = False
         Indicate whether to enable bias shifting for QKVO projections, FC1 and FC2.
         If set to ``False``, the layer will not learn additive biases.

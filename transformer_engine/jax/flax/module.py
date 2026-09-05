@@ -26,7 +26,7 @@ from ..layernorm import canonicalize_norm_type
 from ..layernorm import layernorm
 from ..layernorm_dense import layernorm_dense
 from ..layernorm_mlp import layernorm_mlp
-from ..activation import activation
+from ..activation import activation, ActivationParams
 from ..softmax import softmax, SoftmaxFusionType
 from ..sharding import with_sharding_constraint_by_logical_axes
 from ..attention import AttnSoftmaxType
@@ -948,8 +948,9 @@ class LayerNormMLP(TransformerEngineBase):
         Each activation has its own transformation layer.
     activation_params: dict, default = None
         The parameters needed(if any) by the activation functions specified in :attr:`activations`.
-        At the moment only ('clamped_silu', 'clamped_linear') which is clamped_swiglu used in GPT OSS
-        need additional parameters.
+        ClampedSwiGLU and SiTU-GLU require additional parameters. SiTU-GLU is selected with
+        ``('situ', 'situ_linear')``; ``situ_linear`` is the soft-capped up branch rather than
+        an identity function.
     intermediate_dropout_rng_name: str, default = 'dropout'
         The key in given RNGs via flax.linen.Module.apply that for generating Dropout masks.
     intermediate_dropout_rate: float, default = 0.0
@@ -1087,6 +1088,7 @@ class LayerNormMLP(TransformerEngineBase):
             ("quick_gelu", "linear"),
             ("squared_relu", "linear"),
             ("clamped_silu", "clamped_linear"),
+            ("situ", "situ_linear"),
         ]
         act_pool = [("gelu",), ("silu",), ("relu",), ("quick_gelu",), ("squared_relu",)]
         normalized_acts = []
@@ -1096,7 +1098,7 @@ class LayerNormMLP(TransformerEngineBase):
             normalized_acts.append(act.lower())
         normalized_acts = tuple(
             reversed(normalized_acts)
-            if (normalized_acts[0] == "linear" or normalized_acts[0] == "clamped_linear")
+            if normalized_acts[0] in ("linear", "clamped_linear", "situ_linear")
             else normalized_acts
         )
 
@@ -1293,7 +1295,15 @@ class LayerNormMLP(TransformerEngineBase):
 
             x = checkpoint_name(x, self.ffn1_ckpt_name)
             if is_act_implemented:
-                z = activation(x, normalized_acts)
+                z = activation(
+                    x,
+                    normalized_acts,
+                    act_params=(
+                        ActivationParams.create(normalized_acts, **self.activation_params)
+                        if self.activation_params
+                        else None
+                    ),
+                )
             else:
                 activations = []
                 x = jnp.split(x, num_activations, axis=-2)
