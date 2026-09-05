@@ -192,6 +192,8 @@ Operation fuser
 .. autoapiclass:: transformer_engine.pytorch.ops.BasicLinear
    :members: _functional_forward, _functional_backward
 
+.. autoapiclass:: transformer_engine.pytorch.ops.BatchedLinear
+
 .. autoapiclass:: transformer_engine.pytorch.ops.Bias
 
 .. autoapiclass:: transformer_engine.pytorch.ops.ClampedSwiGLU
