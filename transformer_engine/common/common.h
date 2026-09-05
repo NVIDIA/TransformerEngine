@@ -61,6 +61,8 @@ inline std::string to_string(const DType type) {
       return "Float8E5M2";
     case DType::kFloat8E8M0:
       return "Float8E8M0";
+    case DType::kFloat8UE5M3:
+      return "Float8UE5M3";
     case DType::kFloat4E2M1:
       return "Float4E2M1";
     case DType::kInt16:
@@ -302,12 +304,15 @@ struct Tensor {
    *  Only meaningful for NVFP4 tensors.
    */
   bool row_scaled_nvfp4 = false;
-  /*! \brief Global E4M3 scale bound used by NVFP4.
+  /*! \brief Global scale bound used by NVFP4.
    *
-   *  Standard NVFP4 uses 448. Some 4over6 tensors use 256 to leave room for
-   *  map-to-4 local scale expansion.
+   *  When zero, use the maximum value of the scale-inverse dtype.
+   *  Some 4over6 tensors use 256 (instead of the E4M3 max of 448) in
+   *  order to leave room for map-to-4 local scale expansion.
+   *
+   *  TODO: Change to a dtype-agnostic name.
    */
-  int nvfp4_e4m3_max = 448;
+  int nvfp4_e4m3_max = 0;
 
   /*! Map from NVTETensorParam to parameter sizes */
   static constexpr size_t attr_sizes[] = {
@@ -337,7 +342,7 @@ struct Tensor {
     scaling_mode = NVTE_DELAYED_TENSOR_SCALING;
     with_gemm_swizzled_scales = false;
     row_scaled_nvfp4 = false;
-    nvfp4_e4m3_max = 448;
+    nvfp4_e4m3_max = 0;
   }
 
   explicit operator NVTETensor() const noexcept { return nvte_tensor; }
@@ -447,6 +452,36 @@ struct Tensor {
    * as a (D1*D2*...*D(n-1), Dn) matrix.
    */
   size_t flat_last_dim() const { return flat_2d_dims()[1]; }
+
+  /*! \brief Global scale bound used by NVFP4. */
+  int get_nvfp4_scale_max() const {
+    if (scaling_mode != NVTE_NVFP4_1D_SCALING) {
+      return 0;
+    }
+
+    // Return non-default scale max
+    if (nvfp4_e4m3_max != 0) {
+      return nvfp4_e4m3_max;
+    }
+
+    // Deduce scale max based on scale-inverse dtype
+    DType dtype;
+    if (scale_inv.has_data()) {
+      dtype = scale_inv.dtype;
+    } else if (columnwise_scale_inv.has_data()) {
+      dtype = columnwise_scale_inv.dtype;
+    } else {
+      dtype = DType::kFloat8E4M3;
+    }
+    switch (dtype) {
+      case DType::kFloat8E4M3:
+        return 448;
+      case DType::kFloat8UE5M3:
+        return 114688;
+      default:
+        NVTE_ERROR("Unsupported scale dtype for NVFP4 tensor (", to_string(dtype), ")");
+    }
+  }
 };
 
 struct GroupedTensor {
@@ -649,6 +684,9 @@ using fp8e5m2 = __nv_fp8_e5m2;
 #if CUDA_VERSION >= 12080
 using fp8e8m0 = __nv_fp8_e8m0;
 #endif
+#if CUDA_VERSION >= 13040
+using fp8ue5m3 = __nv_fp8_ue5m3;
+#endif
 #if FP4_TYPE_SUPPORTED
 using fp4e2m1 = __nv_fp4_e2m1;
 using fp4e2m1x2 = __nv_fp4x2_e2m1;
@@ -677,6 +715,9 @@ TRANSFORMER_ENGINE_TYPE_NAME(__nv_fp8_e5m2)
 #if CUDA_VERSION >= 12080
 TRANSFORMER_ENGINE_TYPE_NAME(__nv_fp8_e8m0)
 #endif
+#if CUDA_VERSION >= 13040
+TRANSFORMER_ENGINE_TYPE_NAME(__nv_fp8_ue5m3)
+#endif
 #if FP4_TYPE_SUPPORTED
 TRANSFORMER_ENGINE_TYPE_NAME(__nv_fp4_e2m1)
 #endif
@@ -704,6 +745,14 @@ struct TypeExtrema<fp8e5m2> {
   static constexpr float max = 57344.0f;
   static constexpr float max_inverse = 1.0 / max;
 };
+
+#if CUDA_VERSION >= 13040
+template <>
+struct TypeExtrema<fp8ue5m3> {
+  static constexpr float max = 114688.f;
+  static constexpr float max_inverse = 1.0 / max;
+};
+#endif
 
 template <>
 struct TypeExtrema<bf16> {
@@ -747,12 +796,20 @@ struct TypeInfo {
                            ,
                            fp8e8m0
 #endif
+#if CUDA_VERSION >= 13040
+                           ,
+                           fp8ue5m3
+#endif
                            >;
 #else
   using types = std::tuple<byte, int16, int32, int64, fp32, fp16, bf16, fp8e4m3, fp8e5m2
 #if CUDA_VERSION >= 12080
                            ,
                            fp8e8m0
+#endif
+#if CUDA_VERSION >= 13040
+                           ,
+                           fp8ue5m3
 #endif
                            >;
 #endif
@@ -793,6 +850,15 @@ struct TypeInfo {
   } break;
 #else
 #define SWITCH_FP4_TYPE_HANDLE(type, ...)  // do nothing
+#endif
+#if CUDA_VERSION >= 13040
+#define SWITCH_FP8UE5M3_TYPE_HANDLE(type, ...) \
+  case DType::kFloat8UE5M3: {                  \
+    using type = fp8ue5m3;                     \
+    { __VA_ARGS__ }                            \
+  } break;
+#else
+#define SWITCH_FP8UE5M3_TYPE_HANDLE(type, ...)  // do nothing
 #endif
 
 #define TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(dtype, type, ...)                 \
@@ -839,11 +905,12 @@ struct TypeInfo {
       { __VA_ARGS__ }                                                        \
     } break;                                                                 \
       SWITCH_FP4_TYPE_HANDLE(type, __VA_ARGS__)                              \
+      SWITCH_FP8UE5M3_TYPE_HANDLE(type, __VA_ARGS__)                         \
     default:                                                                 \
       NVTE_ERROR("Unsupported dtype ", to_string(static_cast<DType>(dtype)), \
                  ". Expected one of: Byte, Int16, Int32, Int64, Float32, "   \
                  "Float16, BFloat16, Float8E4M3, Float8E5M2, "               \
-                 "Float8E8M0, Float4E2M1.");                                 \
+                 "Float8E8M0.");                                             \
   }
 
 #define TRANSFORMER_ENGINE_TYPE_SWITCH_FLOAT(dtype, type, ...)               \
@@ -1181,6 +1248,7 @@ inline bool is_aligned_tensor_data(const Tensor &t, size_t alignment) {
 
 size_t typeToSize(const DType type);
 size_t typeToNumBits(const DType type);
+float typeToMax(const DType type);
 
 void CheckNoopTensor(const Tensor &t, std::string_view name);
 void CheckInputTensor(const Tensor &t, std::string_view name, bool check_scale_inv_shapes = true);

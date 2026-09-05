@@ -851,7 +851,17 @@ def _cast_master_weights_to_nvfp4_2d(
     # This replaces multiple Python tensor operations with a single kernel
     global_scale_tensor = torch.empty_like(global_amaxes)
 
-    tex.nvfp4_compute_global_scale(global_amaxes, global_scale_tensor)
+    # There should only be one scale dtype for all quantizers in the params list if using the same NVFP4 recipe.
+    scale_dtypes = {p[0]._get_quantizer().scale_dtype for p in params}
+    if len(scale_dtypes) != 1:
+        raise ValueError(
+            "quantize_master_weights requires a single NVFP4 scale dtype per call, "
+            f"but got {scale_dtypes}."
+        )
+    # NVFP4Quantizer.scale_dtype is the pure-python constants.DType; the pybind
+    # entry points want tex.DType. The enum values are shared, so map by value.
+    scale_dtype = tex.DType(int(scale_dtypes.pop()))
+    tex.nvfp4_compute_global_scale(global_amaxes, global_scale_tensor, scale_dtype=scale_dtype)
     global_scale_views = [global_scale_tensor[i : i + 1] for i in range(len(params))]
 
     # Collect tensors for batched fused scale kernel
@@ -949,6 +959,7 @@ def _cast_master_weights_to_nvfp4_2d(
             fused_scale_tile_cols_list,
             fused_scale_rows_padded_list,
             block_len,
+            scale_dtype=scale_dtype,
         )
 
     # Batched multi-tensor call for partial cast
@@ -962,6 +973,7 @@ def _cast_master_weights_to_nvfp4_2d(
             partial_cast_w_list,
             partial_cast_start_offset_list,
             block_len,
+            scale_dtype=scale_dtype,
         )
 
 
