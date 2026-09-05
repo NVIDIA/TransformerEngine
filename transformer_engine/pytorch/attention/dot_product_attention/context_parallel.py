@@ -2270,6 +2270,11 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                         softmax_lse_in_packed_format,
                     )
         out = out.view(post_a2a_o_shape)
+        if qkv_format == "thd" and pad_between_seqs:
+            # Multi-step output correction can write THD padding even when each
+            # FA3/FA4 tile respected `seqused_q`. Clean it before an optional
+            # inverse A2A changes the local sequence order.
+            _zero_thd_padding((out,), cu_seqlens_q_per_step[0], cu_seqlens_q_padded)
         out_part = out.to(fwd_nominal_dtype)
 
         if cp_size_a2a > 1:
@@ -3106,21 +3111,15 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             and cu_seqlens_q_padded is not None
             and cu_seqlens_kv_padded is not None
         ):
-            if is_graph_capturing():
-                # arange+mask under capture: `tensor[scalar_tensor:]` slicing would
-                # force a GPU->CPU sync that is forbidden during CUDA graph capture.
-                q_pad_mask = torch.arange(dq.shape[0], device=dq.device) >= cu_seqlens_q_padded[-1]
-                kv_pad_mask = (
-                    torch.arange(dk.shape[0], device=dk.device) >= cu_seqlens_kv_padded[-1]
-                )
-                dq[q_pad_mask] = 0
-                dk[kv_pad_mask] = 0
-                dv[kv_pad_mask] = 0
-            else:
-                # Pre-existing TE eager-mode behaviour.
-                dq[cu_seqlens_q_padded[-1] :].fill_(0)
-                dk[cu_seqlens_kv_padded[-1] :].fill_(0)
-                dv[cu_seqlens_kv_padded[-1] :].fill_(0)
+            # Use a device-side mask unconditionally. `is_graph_capturing()` only
+            # tracks TE's `make_graphed_callables` path and is false inside a raw
+            # `torch.cuda.graph` capture, where slicing with a CUDA scalar would
+            # otherwise force a forbidden GPU-to-CPU synchronization.
+            q_pad_mask = torch.arange(dq.shape[0], device=dq.device) >= cu_seqlens_q_padded[-1]
+            kv_pad_mask = torch.arange(dk.shape[0], device=dk.device) >= cu_seqlens_kv_padded[-1]
+            dq[q_pad_mask] = 0
+            dk[kv_pad_mask] = 0
+            dv[kv_pad_mask] = 0
 
         if ctx.fp8 and ctx.is_input_fp8:
             dq, dk, dv, _, _ = combine_and_quantize(ctx.qkv_layout, dq, dk, dv, ctx.dQKV_quantizer)
@@ -4918,6 +4917,17 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             aux_ctx_tensors = [softmax_lse, rng_state]
             out_part = out_
 
+        # FA3/FA4 may leave physically padded THD rows unwritten. Zero them
+        # while output is still in global sequence order, before A2A restores
+        # the rank-local dual-chunk layout.
+        if (
+            qkv_format == "thd"
+            and pad_between_seqs
+            and not use_fused_attention
+            and (use_flash_attn_3 or use_flash_attn_4)
+        ):
+            _zero_thd_padding((out_,), cu_seqlens_q, cu_seqlens_q_padded)
+
         # a2a: split s and gather h
         # [b, s, h//cp, d] -> [b*s//cp, h, d]
         # [s, b, h//cp, d] -> [s//cp*b, h, d]
@@ -5314,6 +5324,16 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                     *fa_backward_args_thd,
                     **fa_backward_kwargs,
                 )
+
+        # Clean FA3/FA4 padding before the inverse A2A changes sequence order.
+        if (
+            ctx.dqkv_format == "thd"
+            and ctx.pad_between_seqs
+            and not ctx.use_fused_attention
+            and (ctx.use_flash_attn_3 or ctx.use_flash_attn_4)
+        ):
+            _zero_thd_padding((dq,), cu_seqlens_q, cu_seqlens_q_padded)
+            _zero_thd_padding((dk, dv), cu_seqlens_kv, cu_seqlens_kv_padded)
 
         # dq, dk, dv:
         # FP8DS: torch.uint8
