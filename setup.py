@@ -18,16 +18,19 @@ from wheel.bdist_wheel import bdist_wheel
 from build_tools.build_ext import CMakeExtension, get_build_ext
 from build_tools.te_version import te_version
 from build_tools.utils import (
+    bolt_compatible_build_enabled,
     cuda_archs,
     cuda_home_path,
     cuda_version,
     cudnn_frontend_include_path,
+    get_bolt_build_flags,
     get_frameworks,
     remove_dups,
     min_python_version_str,
     nccl_ep_enabled,
     get_max_jobs_for_parallel_build,
     nvcc_path,
+    target_is_arm64,
 )
 
 frameworks = get_frameworks()
@@ -79,6 +82,8 @@ def setup_common_extension() -> CMakeExtension:
     if bool(int(os.getenv("NVTE_BUILD_ACTIVATION_WITH_FAST_MATH", "0"))):
         cmake_flags.append("-DNVTE_BUILD_ACTIVATION_WITH_FAST_MATH=ON")
 
+    bolt_compatible = bolt_compatible_build_enabled()
+
     if bool(int(os.getenv("NVTE_WITH_CUBLASMP", "0"))):
         cmake_flags.append("-DNVTE_WITH_CUBLASMP=ON")
         cublasmp_dir = os.getenv("CUBLASMP_HOME") or metadata.distribution(
@@ -103,6 +108,12 @@ def setup_common_extension() -> CMakeExtension:
     nvte_cmake_extra_args = os.getenv("NVTE_CMAKE_EXTRA_ARGS")
     if nvte_cmake_extra_args:
         cmake_flags.extend(nvte_cmake_extra_args.split())
+
+    # Keep the common CMake library consistent with the framework and NCCL EP
+    # libraries, which use the same Python-side BOLT configuration.
+    cmake_flags.append(f"-DNVTE_ENABLE_BOLT_COMPATIBLE={'ON' if bolt_compatible else 'OFF'}")
+    if bolt_compatible:
+        cmake_flags.append(f"-DNVTE_BUILD_TARGET_IS_ARM64={'ON' if target_is_arm64() else 'OFF'}")
 
     # Project directory root
     root_path = Path(__file__).resolve().parent
@@ -266,13 +277,33 @@ def build_nccl_ep_submodule() -> str:
     env["NCCL_HOME"] = nccl_home
     env["NCCL_EP_BUILDDIR"] = str(build_dir)
 
-    prev_gencode = gencode_stamp.read_text().strip() if gencode_stamp.exists() else None
-    if not nccl_ep_shared_lib.exists() or prev_gencode != gencode:
-        if nccl_ep_shared_lib.exists() and prev_gencode != gencode:
-            print(
-                f"[NCCL EP] gencode changed ('{prev_gencode}' -> '{gencode}'); "
-                "rebuilding NCCL EP libraries"
-            )
+    bolt_cxx_flags, bolt_linker_flags = get_bolt_build_flags()
+    nvcc_host_flags = [f"-Xcompiler={flag}" for flag in bolt_cxx_flags]
+    nvcc_linker_flags = []
+    if bolt_linker_flags:
+        nvcc_linker_flags.extend(["-Xlinker=--emit-relocs", "-Xlinker=-z", "-Xlinker=now"])
+        if "-mno-fix-cortex-a53-843419" in bolt_linker_flags:
+            nvcc_linker_flags.append("-Xlinker=--no-fix-cortex-a53-843419")
+
+    def append_env_flags(name: str, flags: List[str]) -> None:
+        if flags:
+            env[name] = " ".join([env.get(name, ""), *flags]).strip()
+
+    append_env_flags("CXXFLAGS", bolt_cxx_flags)
+    append_env_flags("NVCC_PREPEND_FLAGS", nvcc_host_flags)
+    append_env_flags("LDFLAGS", nvcc_linker_flags)
+
+    build_signature = "\n".join(
+        (
+            f"gencode={gencode}",
+            f"bolt_cxx_flags={' '.join(bolt_cxx_flags)}",
+            f"bolt_linker_flags={' '.join(nvcc_linker_flags)}",
+        )
+    )
+    previous_signature = gencode_stamp.read_text().strip() if gencode_stamp.exists() else None
+    if not nccl_ep_shared_lib.exists() or previous_signature != build_signature:
+        if nccl_ep_shared_lib.exists() and previous_signature != build_signature:
+            print("[NCCL EP] build configuration changed; rebuilding NCCL EP libraries")
             subprocess.check_call(
                 ["make", "-C", "nccl_ep", "clean"],
                 cwd=str(nccl_root),
@@ -286,7 +317,7 @@ def build_nccl_ep_submodule() -> str:
             env=env,
         )
         gencode_stamp.parent.mkdir(parents=True, exist_ok=True)
-        gencode_stamp.write_text(gencode)
+        gencode_stamp.write_text(build_signature)
 
     return nccl_home
 

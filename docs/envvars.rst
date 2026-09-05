@@ -60,6 +60,12 @@ Build Configuration
    :Default: None
    :Description: Path to the CMake build directory for incremental builds. If set, CMake will use this directory for build artifacts.
 
+.. envvar:: NVTE_ENABLE_BOLT_COMPATIBLE
+
+   :Type: ``int`` (0 or 1)
+   :Default: ``1`` when building on Linux and the configured C++ compiler targets Arm64 (AArch64), ``0`` otherwise
+   :Description: Enable LLVM BOLT-compatible compiler and linker flags for all native libraries. Arm64 targets also disable Cortex-A53 errata workarounds 835769 and 843419. Target detection uses ``CXX -dumpmachine`` and must agree with ``CMAKE_SYSTEM_PROCESSOR``; failures stop the build rather than falling back to the host architecture. Use a fresh :envvar:`NVTE_CMAKE_BUILD_DIR` after changing this setting.
+
 .. envvar:: NVTE_RELEASE_BUILD
 
    :Type: ``int`` (0 or 1)

@@ -9,6 +9,7 @@ import glob
 import importlib
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -41,6 +42,70 @@ if sys.version_info < min_python_version():
 def debug_build_enabled() -> bool:
     """Whether to build with a debug configuration"""
     return bool(int(os.getenv("NVTE_BUILD_DEBUG", "0")))
+
+
+@functools.lru_cache(maxsize=None)
+def build_target_cpu_arch() -> str:
+    """CPU architecture targeted by the configured C++ compiler."""
+    cxx = shlex.split(os.getenv("CXX", "c++"))
+    try:
+        result = subprocess.run(
+            [*cxx, "-dumpmachine"],
+            capture_output=True,
+            check=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as e:
+        raise RuntimeError(
+            "Could not determine the C++ compiler target architecture with "
+            f"`{' '.join(cxx)} -dumpmachine`"
+        ) from e
+
+    target = result.stdout.strip().split("-", 1)[0]
+    if not target:
+        raise RuntimeError(
+            "Could not determine the C++ compiler target architecture: "
+            f"`{' '.join(cxx)} -dumpmachine` returned no target"
+        )
+    return target.lower()
+
+
+def target_is_arm64() -> bool:
+    """Whether the configured C++ compiler targets Arm64."""
+    return build_target_cpu_arch() in ("aarch64", "arm64")
+
+
+@functools.lru_cache(maxsize=None)
+def bolt_compatible_build_enabled() -> bool:
+    """Whether to build host ELF libraries with BOLT-compatible options."""
+    configured = os.getenv("NVTE_ENABLE_BOLT_COMPATIBLE")
+    if configured is None:
+        enabled = platform.system() == "Linux" and target_is_arm64()
+    else:
+        enabled = bool(int(configured))
+
+    if enabled and platform.system() != "Linux":
+        raise RuntimeError("NVTE_ENABLE_BOLT_COMPATIBLE is only supported on Linux")
+    return enabled
+
+
+def get_bolt_build_flags() -> Tuple[List[str], List[str]]:
+    """BOLT-compatible host compiler and linker flags."""
+    if not bolt_compatible_build_enabled():
+        return [], []
+
+    compiler_flags = ["-fno-reorder-blocks-and-partition", "-fno-jump-tables"]
+    linker_flags = ["-Wl,--emit-relocs", "-Wl,-z,now"]
+    if target_is_arm64():
+        compiler_flags.extend(
+            [
+                "-mno-fix-cortex-a53-835769",
+                "-mno-fix-cortex-a53-843419",
+            ]
+        )
+        # The Cortex-A53 843419 workaround is applied by the linker.
+        linker_flags.append("-mno-fix-cortex-a53-843419")
+    return compiler_flags, linker_flags
 
 
 @functools.lru_cache(maxsize=None)
