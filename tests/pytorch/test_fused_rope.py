@@ -5,6 +5,7 @@ from typing import Callable, Tuple, Union, List
 import math
 import torch
 import pytest
+from transformer_engine.common.testing import Case, benchmark
 from transformer_engine.pytorch.attention.rope import (
     RotaryPositionEmbedding,
     apply_rotary_pos_emb,
@@ -29,6 +30,16 @@ def _non_overlapping_grad(output: Union[List[torch.Tensor], torch.Tensor]) -> to
         return torch.sum(output * t)
 
 
+# start_positions must stay False here: True would hit the margin==0 skip below and
+# drop half of the inherited margin values.
+@benchmark("start_positions", [False])
+@benchmark("dtype", [torch.bfloat16])
+@benchmark("seq_length", [8192])
+@benchmark("hidden_size", [128])
+@benchmark("transpose", [None])
+@benchmark("tensor_format", ["sbhd"])
+@benchmark("cp_size", [1, 2])
+@benchmark("interleaved", [True])
 @pytest.mark.parametrize("start_positions", [True, False])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("seq_length", [2048, 4096])
@@ -52,7 +63,7 @@ def test_fused_rope(
     cp_size: int,
     interleaved: bool,
     start_positions: bool,
-) -> None:
+):
     if margin == 0 and start_positions == True:
         # This makes sure that the `start_positions` offsets being applied
         # are with the maximum length of the rope embeddings.
@@ -60,67 +71,97 @@ def test_fused_rope(
 
     device = torch.device("cuda:0")
     batch_size, head_num = 2, 64
-    t = torch.rand(
-        (seq_length - margin, batch_size, head_num, hidden_size),
-        dtype=dtype,
-        device=device,
-    )
 
-    # Get arbitrary offsets to be used with RoPE for all the sequences
-    start_positions = (
-        torch.randint(0, margin, (batch_size,), dtype=torch.int32, device=device)
-        if start_positions
-        else None
-    )
-
-    if tensor_format == "bshd":
-        t = t.transpose(0, 1).contiguous()
-    if transpose:
-        t = t.transpose(*transpose).contiguous().transpose(*transpose)
-    t.requires_grad = True
-
-    rotary_pos_emb = RotaryPositionEmbedding(hidden_size, rotary_percent, interleaved=interleaved)
-    emb = rotary_pos_emb(seq_length * cp_size)
-    assert emb.is_contiguous()
-
-    for cp_rank in range(cp_size):
-        # unfused
-        # The fused kernel computes in float32 internally, so we force the unfused func to use float32
-        # for more accurate comparison
-        output_unfused = apply_rotary_pos_emb(
-            t.float(),
-            emb,
-            tensor_format=tensor_format,
-            start_positions=start_positions,
-            interleaved=interleaved,
-            fused=False,
-            cp_size=cp_size,
-            cp_rank=cp_rank,
-        ).to(dtype)
-        loss_unfused = loss_func(output_unfused)
-        loss_unfused.backward()
-        grad_unfused = t.grad.detach().clone()
-        t.grad = None
-
-        # fused
-        output_fused = apply_rotary_pos_emb(
-            t,
-            emb,
-            tensor_format=tensor_format,
-            start_positions=start_positions,
-            interleaved=interleaved,
-            fused=True,
-            cp_size=cp_size,
-            cp_rank=cp_rank,
+    def setup():
+        t = torch.rand(
+            (seq_length - margin, batch_size, head_num, hidden_size),
+            dtype=dtype,
+            device=device,
         )
-        loss_fused = loss_func(output_fused)
-        loss_fused.backward()
-        grad_fused = t.grad.detach().clone()
-        t.grad = None
 
-        torch.testing.assert_close(output_fused, output_unfused)
-        torch.testing.assert_close(grad_fused, grad_unfused)
-        assert output_fused.is_contiguous()
+        # Get arbitrary offsets to be used with RoPE for all the sequences
+        sp = (
+            torch.randint(0, margin, (batch_size,), dtype=torch.int32, device=device)
+            if start_positions
+            else None
+        )
+
+        if tensor_format == "bshd":
+            t = t.transpose(0, 1).contiguous()
+        if transpose:
+            t = t.transpose(*transpose).contiguous().transpose(*transpose)
+        t.requires_grad = True
+
+        rotary_pos_emb = RotaryPositionEmbedding(
+            hidden_size, rotary_percent, interleaved=interleaved
+        )
+        emb = rotary_pos_emb(seq_length * cp_size)
+        assert emb.is_contiguous()
+        return {"t": t, "start_positions": sp, "emb": emb}
+
+    def reset(state):
+        # A no-op here (the cp_rank loop already clears `t.grad`); declared to
+        # exercise the runner's reset contract, whose presence pins this case to
+        # batchable=False / inner_iterations=1.
+        state["t"].grad = None
+
+    def evaluate(state):
+        t, emb, sp = state["t"], state["emb"], state["start_positions"]
+        outputs = []
+        for cp_rank in range(cp_size):
+            output_fused = apply_rotary_pos_emb(
+                t,
+                emb,
+                tensor_format=tensor_format,
+                start_positions=sp,
+                interleaved=interleaved,
+                fused=True,
+                cp_size=cp_size,
+                cp_rank=cp_rank,
+            )
+            loss_fused = loss_func(output_fused)
+            loss_fused.backward()
+            grad_fused = t.grad.detach()
+            # detach() without clone(): the `t.grad = None` below is what keeps the
+            # capture alias-free -- the next backward() installs a fresh buffer
+            # instead of accumulating into what `grad_fused` aliases. Removing or
+            # reordering it silently corrupts every earlier capture.
+            t.grad = None
+            outputs.append((output_fused, grad_fused))
+        return tuple(outputs)
+
+    def reference(state):
+        t, emb, sp = state["t"], state["emb"], state["start_positions"]
+        outputs = []
+        for cp_rank in range(cp_size):
+            # The fused kernel computes in float32 internally, so we force the unfused func to use float32
+            # for more accurate comparison
+            output_unfused = apply_rotary_pos_emb(
+                t.float(),
+                emb,
+                tensor_format=tensor_format,
+                start_positions=sp,
+                interleaved=interleaved,
+                fused=False,
+                cp_size=cp_size,
+                cp_rank=cp_rank,
+            ).to(dtype)
+            loss_unfused = loss_func(output_unfused)
+            loss_unfused.backward()
+            grad_unfused = t.grad.detach()
+            # detach() without clone(); as in evaluate(), the `t.grad = None` below
+            # is what keeps the capture alias-free.
+            t.grad = None
+            outputs.append((output_unfused, grad_unfused))
+        return tuple(outputs)
+
+    def verify(actual, expected):
+        for (output_fused, grad_fused), (output_unfused, grad_unfused) in zip(actual, expected):
+            torch.testing.assert_close(output_fused, output_unfused)
+            torch.testing.assert_close(grad_fused, grad_unfused)
+            assert output_fused.is_contiguous()
+
+    return Case(setup=setup, evaluate=evaluate, reference=reference, verify=verify, reset=reset)
 
 
 @pytest.mark.parametrize("margin", [10])
