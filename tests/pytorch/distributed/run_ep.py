@@ -3,6 +3,8 @@
 # See LICENSE for license information.
 """Multi-process PyTorch EP tests, launched via torchrun (one process per GPU)."""
 
+from contextlib import nullcontext
+from dataclasses import replace
 import os
 import sys
 import unittest
@@ -11,11 +13,17 @@ import numpy as np
 import torch
 import torch.distributed as dist
 
+from ep_reference import BlockScaledTensor, MoeEpReference, MoeFormat, quantize_blockwise
+import transformer_engine.pytorch as te
+from transformer_engine.pytorch import ops as te_ops
 from transformer_engine.common.recipe import MXFP8BlockScaling
 from transformer_engine.pytorch.ep import (
     EpBuffer,
+    EpConfig,
     ep_bootstrap,
     ep_finalize,
+    get_ep_drop_on_overflow,
+    get_ep_group,
     ep_prepare,
     ep_dispatch,
     ep_combine,
@@ -25,6 +33,14 @@ from transformer_engine.pytorch.ep import (
     _ep_combine_raw,
     _ep_dispatch_raw,
 )
+from transformer_engine.pytorch.ops.fused.moe_ep import (
+    FusedMoeEp,
+    _cudnn_megamoe_supported,
+    _get_megamoe_combine_format,
+    finalize_moe_ep_resources,
+    is_moe_fusion_supported,
+)
+from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Tensor
 
 ZERO_COPY = os.environ.get("NVTE_EP_ZERO_COPY", "0") == "1"
 EAGER = os.environ.get("NVTE_EP_EAGER", "0") == "1"
@@ -136,6 +152,31 @@ def _make_identity_inputs(rank, ep_size, device="cuda"):
     )
 
 
+def _make_moe_inputs(rank, ep_size, device="cuda"):
+    """Deterministic BF16 activations and FP32 top-k router weights."""
+    generator = torch.Generator(device=device)
+    generator.manual_seed(2026 + rank)
+    tokens = (
+        torch.randn(
+            TOKENS_PER_RANK,
+            HIDDEN_DIM,
+            generator=generator,
+            dtype=torch.float32,
+            device=device,
+        )
+        * 0.25
+    ).to(torch.bfloat16)
+    router_logits = torch.randn(
+        TOKENS_PER_RANK,
+        ep_size * NUM_LOCAL_EXPERTS,
+        generator=generator,
+        dtype=torch.float32,
+        device=device,
+    )
+    topk_logits, topk_idx = torch.topk(router_logits, TOP_K, dim=-1)
+    return topk_idx, tokens, torch.softmax(topk_logits, dim=-1)
+
+
 def _degroup_mxfp8(recv_grouped, valid_counts=None):
     """Dequantize a per-expert MXFP8 GroupedTensor to a dense tensor in expert-major order.
     With ``valid_counts`` keep only the first ``valid_counts[e]`` rows of each padded expert
@@ -144,6 +185,37 @@ def _degroup_mxfp8(recv_grouped, valid_counts=None):
     if valid_counts is None:
         return torch.cat([p.dequantize() for p in parts], dim=0)
     return torch.cat([p.dequantize()[:v] for p, v in zip(parts, valid_counts)], dim=0)
+
+
+def _reference_weights(op):
+    """Pack GroupedLinear weights into MoeEpReference ``(E, in, out)`` layout."""
+    weight = op.weight
+    num_groups = op.num_groups
+    out_features = op.out_features
+    in_features = op.in_features
+    data = weight.rowwise_data.view(
+        num_groups,
+        out_features,
+        in_features,
+    ).permute(0, 2, 1)
+    if weight.quantizer is None:
+        return data.detach()
+    scale = (
+        weight.scale_inv.view(
+            num_groups,
+            out_features,
+            in_features // 32,
+        )
+        .view(torch.float8_e8m0fnu)
+        .permute(0, 2, 1)
+    )
+    return BlockScaledTensor(
+        data=data.view(torch.float8_e4m3fn).detach(),
+        scale=scale.detach(),
+        format="mxfp8",
+        logical_shape=tuple(data.shape),
+        axis=1,
+    )
 
 
 class _Cfg:
@@ -173,16 +245,24 @@ def _make_cfg() -> _Cfg:
     return cfg
 
 
-class TestEP(unittest.TestCase):
+class _EpTestCase(unittest.TestCase):
+    """Shared NCCL EP process state and pass selection."""
+
     cfg: _Cfg
     ep_group: dist.ProcessGroup
 
     @classmethod
     def setUpClass(cls):
+        if hasattr(_EpTestCase, "cfg"):
+            cls.cfg = _EpTestCase.cfg
+            cls.ep_group = _EpTestCase.ep_group
+            return
         if _device_sm() < 90:
             raise unittest.SkipTest(f"NCCL EP requires SM>=90 (got SM{_device_sm()})")
-        cls.cfg = _make_cfg()
-        cls.ep_group = _build_ep_group()
+        _EpTestCase.cfg = _make_cfg()
+        _EpTestCase.ep_group = _build_ep_group()
+        cls.cfg = _EpTestCase.cfg
+        cls.ep_group = _EpTestCase.ep_group
         ep_bootstrap(
             cls.ep_group,
             num_experts=cls.cfg.num_experts,
@@ -220,6 +300,42 @@ class TestEP(unittest.TestCase):
         ):
             self.skipTest("not exercised in overflow mode")
 
+    def _make_config(
+        self,
+        alignment=0,
+        top_k=TOP_K,
+    ):
+        return EpConfig(
+            top_k=top_k,
+            max_tokens_per_rank=TOKENS_PER_RANK,
+            hidden_dim=HIDDEN_DIM,
+            num_local_experts=NUM_LOCAL_EXPERTS,
+            recv_capacity_per_rank=None if EAGER else self.cfg.recv_capacity_per_rank,
+            ep_group=self.ep_group,
+            alignment=alignment,
+            zero_copy=ZERO_COPY,
+            drop_on_overflow=OVERFLOW,
+        )
+
+    def _make_buffer_from_config(
+        self,
+        config,
+        *,
+        dispatch_fwd_quant_recipe=None,
+        combine_bwd_quant_recipe=None,
+    ):
+        return EpBuffer(
+            top_k=config.top_k,
+            max_tokens_per_rank=config.max_tokens_per_rank,
+            hidden_dim=config.hidden_dim,
+            num_local_experts=config.num_local_experts,
+            recv_capacity_per_rank=config.recv_capacity_per_rank,
+            alignment=config.alignment,
+            payload_dtype=config.payload_dtype,
+            dispatch_fwd_quant_recipe=dispatch_fwd_quant_recipe,
+            combine_bwd_quant_recipe=combine_bwd_quant_recipe,
+        )
+
     def _make_buffer(
         self,
         alignment=0,
@@ -227,16 +343,20 @@ class TestEP(unittest.TestCase):
         dispatch_fwd_quant_recipe=None,
         combine_bwd_quant_recipe=None,
     ):
-        return EpBuffer(
-            top_k=top_k,
-            max_tokens_per_rank=TOKENS_PER_RANK,
-            hidden_dim=HIDDEN_DIM,
-            num_local_experts=NUM_LOCAL_EXPERTS,
-            recv_capacity_per_rank=None if EAGER else self.cfg.recv_capacity_per_rank,
-            alignment=alignment,
+        config = self._make_config(alignment=alignment, top_k=top_k)
+        return self._make_buffer_from_config(
+            config,
             dispatch_fwd_quant_recipe=dispatch_fwd_quant_recipe,
             combine_bwd_quant_recipe=combine_bwd_quant_recipe,
         )
+
+
+class TestEP(_EpTestCase):
+    """NCCL EP tests inherited from nvidia_origin/main."""
+
+    def test_bootstrap_accessors(self):
+        self.assertIs(get_ep_group(), self.ep_group)
+        self.assertEqual(get_ep_drop_on_overflow(), OVERFLOW)
 
     def _expert_out(self, expert_out):
         """Stage the combine input into symm-mem under zero-copy (combine requires it)."""
@@ -829,6 +949,633 @@ class TestEP(unittest.TestCase):
         torch.testing.assert_close(tokens_p.grad.float(), tokens.float(), atol=5e-2, rtol=5e-2)
 
 
+class TestMoeEpSequential(_EpTestCase):
+    """Integration tests for Dispatch -> expert MLP -> Combine sequences."""
+
+    def _mxfp8_quantizer(self):
+        from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
+
+        return MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3, rowwise=True, columnwise=False)
+
+    def _require_mxfp8_shapes(self):
+        if HIDDEN_DIM % 512 != 0 or TOKENS_PER_RANK % 32 != 0:
+            self.skipTest(
+                "MXFP8 needs HIDDEN_DIM % 512 == 0 and TOKENS_PER_RANK % 32 == 0 "
+                "(set NVTE_EP_HIDDEN_DIM / NVTE_EP_TOKENS_PER_RANK)"
+            )
+
+    def test_runtime_buffer_config_mismatch(self):
+        config = self._make_config()
+        buffer = self._make_buffer_from_config(config)
+        topk_idx, tokens, topk_weights = _make_identity_inputs(
+            self.cfg.rank,
+            self.cfg.ep_size,
+        )
+        dispatch = te_ops.MoeDispatch(config, buffer)
+        replacements = {
+            "top_k": config.top_k + 1,
+            "hidden_dim": config.hidden_dim + 1,
+            "num_local_experts": config.num_local_experts + 1,
+            "max_tokens_per_rank": config.max_tokens_per_rank + 1,
+            "recv_capacity_per_rank": config.recv_capacity_per_rank + 1,
+            "alignment": 1,
+            "payload_dtype": torch.float16,
+            "zero_copy": not config.zero_copy,
+        }
+        for field_name, wrong_value in replacements.items():
+            with self.subTest(field_name=field_name):
+                original = getattr(buffer, field_name)
+                setattr(buffer, field_name, wrong_value)
+                try:
+                    with self.assertRaisesRegex(ValueError, field_name):
+                        dispatch(tokens, topk_idx, topk_weights)
+                finally:
+                    setattr(buffer, field_name, original)
+
+        wrong_config = replace(config, drop_on_overflow=not config.drop_on_overflow)
+        with self.assertRaisesRegex(ValueError, "drop_on_overflow"):
+            te_ops.MoeDispatch(wrong_config, buffer)(tokens, topk_idx, topk_weights)
+        with self.assertRaisesRegex(ValueError, "ep_group"):
+            te_ops.MoeDispatch(replace(config, ep_group=None), buffer)(
+                tokens, topk_idx, topk_weights
+            )
+        expert_out = torch.empty(
+            self.cfg.recv_capacity_per_rank,
+            HIDDEN_DIM,
+            dtype=torch.bfloat16,
+            device=self.cfg.device,
+        )
+        with self.assertRaisesRegex(ValueError, "buffer config"):
+            original = buffer.hidden_dim
+            buffer.hidden_dim += 1
+            try:
+                te_ops.MoeCombine(config, buffer)(expert_out)
+            finally:
+                buffer.hidden_dim = original
+
+    def test_megamoe_combine_format_env(self):
+        old_value = os.environ.get("NVTE_MEGAMOE_MXFP8_COMBINE")
+        try:
+            os.environ["NVTE_MEGAMOE_MXFP8_COMBINE"] = "0"
+            self.assertEqual(_get_megamoe_combine_format(), "bf16")
+            os.environ["NVTE_MEGAMOE_MXFP8_COMBINE"] = "1"
+            self.assertEqual(_get_megamoe_combine_format(), "mxfp8")
+        finally:
+            if old_value is None:
+                os.environ.pop("NVTE_MEGAMOE_MXFP8_COMBINE", None)
+            else:
+                os.environ["NVTE_MEGAMOE_MXFP8_COMBINE"] = old_value
+
+    @_mxfp8_align_test
+    def test_role_quantizer_requires_matching_buffer_recipe(self):
+        self._require_mxfp8_shapes()
+        config = self._make_config(alignment=128)
+        buffer = self._make_buffer_from_config(config)
+        dispatch = te_ops.MoeDispatch(config, buffer)
+        combine = te_ops.MoeCombine(config, buffer)
+        topk_idx, tokens, topk_weights = _make_identity_inputs(
+            self.cfg.rank,
+            self.cfg.ep_size,
+        )
+        recipe = MXFP8BlockScaling()
+        with te.autocast(enabled=True, recipe=recipe):
+            with self.assertRaisesRegex(ValueError, "does not have an MXFP8BlockScaling recipe"):
+                dispatch(tokens, topk_idx, topk_weights)
+            expert_out = torch.empty(
+                self.cfg.recv_capacity_per_rank,
+                HIDDEN_DIM,
+                dtype=torch.bfloat16,
+                device=self.cfg.device,
+                requires_grad=True,
+            )
+            with self.assertRaisesRegex(ValueError, "does not have an MXFP8BlockScaling recipe"):
+                combine(expert_out)
+
+    def _make_dispatch_combine_ops(self, *, mxfp8):
+        recipe = MXFP8BlockScaling() if mxfp8 else None
+        config = self._make_config(alignment=128 if mxfp8 else 0)
+        buffer = self._make_buffer_from_config(
+            config,
+            dispatch_fwd_quant_recipe=recipe,
+            combine_bwd_quant_recipe=recipe,
+        )
+        return (
+            buffer,
+            te_ops.MoeDispatch(config, buffer),
+            te_ops.MoeCombine(config, buffer),
+        )
+
+    def _run_dispatch_combine_identity(self, *, mxfp8):
+        """Route, apply top-k weights, and combine back to local token order."""
+        if mxfp8:
+            self._require_mxfp8_shapes()
+        buffer, dispatch, combine = self._make_dispatch_combine_ops(mxfp8=mxfp8)
+        topk_idx, tokens, topk_weights = _make_identity_inputs(
+            self.cfg.rank,
+            self.cfg.ep_size,
+        )
+        recipe = MXFP8BlockScaling() if mxfp8 else None
+        with te.autocast(enabled=mxfp8, recipe=recipe):
+            recv_tokens, tokens_per_expert, recv_weights = dispatch(
+                tokens,
+                topk_idx,
+                topk_weights,
+            )
+            if mxfp8:
+                recv_tokens = _degroup_mxfp8(recv_tokens)
+                recv_weights = recv_weights[: recv_tokens.shape[0]]
+            weighted_expert_output = (recv_tokens.float() * recv_weights.float().unsqueeze(-1)).to(
+                torch.bfloat16
+            )
+            output = combine(weighted_expert_output)
+        torch.cuda.synchronize()
+        torch.testing.assert_close(output, tokens, atol=5e-2, rtol=5e-2)
+        self.assertEqual(tokens_per_expert.data_ptr(), buffer.tokens_per_expert.data_ptr())
+
+    @_eager_test_include
+    def test_dispatch_combine_identity_bf16(self):
+        """MoeDispatch and MoeCombine basic ops form an identity in BF16."""
+        self._run_dispatch_combine_identity(mxfp8=False)
+
+    @_eager_test_include
+    @_mxfp8_align_test
+    def test_dispatch_combine_identity_mxfp8(self):
+        """MoeDispatch and MoeCombine basic ops form an identity with MXFP8 transport."""
+        self._run_dispatch_combine_identity(mxfp8=True)
+
+    def _make_megamoe_model(
+        self,
+        *,
+        recipe,
+        accumulate_into_main_grad=False,
+        delay_wgrad_compute=False,
+        glu_interleave_size=None,
+    ):
+        """Build the exact five-op sequence recognized by MegaMoE fusion."""
+        config = self._make_config(alignment=128 if recipe is not None else 0)
+        buffer = self._make_buffer_from_config(
+            config,
+            dispatch_fwd_quant_recipe=recipe,
+            combine_bwd_quant_recipe=recipe,
+        )
+        dispatch = te_ops.MoeDispatch(config, buffer)
+        init_ctx = (
+            te.quantized_model_init(enabled=True, recipe=recipe)
+            if recipe is not None
+            else nullcontext()
+        )
+        previous_single_param = os.environ.get("NVTE_GROUPED_LINEAR_SINGLE_PARAM")
+        os.environ["NVTE_GROUPED_LINEAR_SINGLE_PARAM"] = "1"
+        try:
+            with init_ctx:
+                fc1 = te_ops.GroupedLinear(
+                    NUM_LOCAL_EXPERTS,
+                    HIDDEN_DIM,
+                    2 * 256,
+                    bias=False,
+                    device=self.cfg.device,
+                    dtype=torch.bfloat16,
+                    single_grouped_weight=True,
+                    accumulate_into_main_grad=accumulate_into_main_grad,
+                    delay_wgrad_compute=delay_wgrad_compute,
+                )
+                activation = te_ops.ScaledSwiGLU(
+                    glu_interleave_size=glu_interleave_size,
+                )
+                fc2 = te_ops.GroupedLinear(
+                    NUM_LOCAL_EXPERTS,
+                    256,
+                    HIDDEN_DIM,
+                    bias=False,
+                    device=self.cfg.device,
+                    dtype=torch.bfloat16,
+                    single_grouped_weight=True,
+                    accumulate_into_main_grad=accumulate_into_main_grad,
+                    delay_wgrad_compute=delay_wgrad_compute,
+                )
+        finally:
+            if previous_single_param is None:
+                del os.environ["NVTE_GROUPED_LINEAR_SINGLE_PARAM"]
+            else:
+                os.environ["NVTE_GROUPED_LINEAR_SINGLE_PARAM"] = previous_single_param
+        combine = te_ops.MoeCombine(config, buffer)
+
+        dispatch.set_extra_output_channel(0, "tokens_per_expert", output_to_caller=False)
+        dispatch.set_extra_output_channel(1, "routing_weights", output_to_caller=False)
+        fc1.set_extra_input_channel(0, "tokens_per_expert")
+        activation.set_extra_input_channel(0, "routing_weights")
+        fc2.set_extra_input_channel(0, "tokens_per_expert")
+        model = te_ops.Sequential(dispatch, fc1, activation, fc2, combine)
+        return model, fc1, fc2, buffer
+
+    @_eager_test_include
+    def test_megamoe_bf16_numerics(self):
+        self._run_megamoe_vs_reference(quantization="bf16")
+
+    @_eager_test_include
+    @_mxfp8_align_test
+    def test_megamoe_mxfp8_numerics(self):
+        self._run_megamoe_vs_reference(quantization="mxfp8")
+
+    @_mxfp8_align_test
+    def test_megamoe_mxfp8_cuda_graph_matches_eager(self):
+        """Fused Sequential forward/backward graph replay matches eager execution."""
+        if torch.cuda.get_device_capability() != (10, 7):
+            self.skipTest("FusedMoeEp CUDA graph test requires SM107")
+        if not _cudnn_megamoe_supported():
+            self.skipTest("installed cuDNN frontend does not provide stateless training")
+        self._run_megamoe_mxfp8_cuda_graph_matches_eager(
+            glu_interleave_size=32,
+            expect_fused=True,
+        )
+
+    @_mxfp8_align_test
+    def test_unfused_megamoe_mxfp8_cuda_graph_matches_eager(self):
+        """Unfused Sequential forward/backward graph replay matches eager execution."""
+        self._run_megamoe_mxfp8_cuda_graph_matches_eager(
+            glu_interleave_size=None,
+            expect_fused=False,
+        )
+
+    def _run_megamoe_mxfp8_cuda_graph_matches_eager(
+        self,
+        *,
+        glu_interleave_size,
+        expect_fused,
+    ):
+        recipe = MXFP8BlockScaling()
+        graph_model, graph_fc1, graph_fc2, _ = self._make_megamoe_model(
+            recipe=recipe,
+            glu_interleave_size=glu_interleave_size,
+        )
+        fusion_supported = is_moe_fusion_supported(tuple(graph_model), recipe)
+        if expect_fused and not fusion_supported:
+            self.skipTest("current configuration does not support FusedMoeEp")
+        self.assertEqual(fusion_supported, expect_fused)
+        eager_model, eager_fc1, eager_fc2, _ = self._make_megamoe_model(
+            recipe=recipe,
+            glu_interleave_size=glu_interleave_size,
+        )
+        eager_model.load_state_dict(graph_model.state_dict())
+
+        topk_idx, tokens, topk_weights = _make_moe_inputs(
+            self.cfg.rank,
+            self.cfg.ep_size,
+            self.cfg.device,
+        )
+
+        static_tokens = tokens.detach().clone().requires_grad_(True)
+        static_topk_idx = topk_idx.detach().clone()
+        static_topk_weights = topk_weights.detach().clone().requires_grad_(True)
+        static_dy = torch.randn_like(static_tokens)
+        graphed_model = te.make_graphed_callables(
+            graph_model,
+            (static_tokens, static_topk_idx, static_topk_weights),
+            num_warmup_iters=3,
+            enabled=True,
+            recipe=recipe,
+        )
+
+        forward_ops = graph_model._module_groups[0]._forward_ops
+        backward_ops = graph_model._module_groups[0]._backward_ops
+        fused_ops = [op for op, _ in forward_ops if isinstance(op, FusedMoeEp)]
+        if expect_fused:
+            self.assertEqual(len(forward_ops), 1)
+            self.assertEqual(len(backward_ops), 1)
+            self.assertEqual(len(fused_ops), 1)
+            self.assertIs(backward_ops[0][0], fused_ops[0])
+        else:
+            self.assertFalse(fused_ops)
+
+        # Replace the capture-time contents while retaining captured addresses.
+        with torch.no_grad():
+            static_tokens.copy_(torch.randn_like(static_tokens))
+            static_topk_weights.copy_(torch.rand_like(static_topk_weights))
+            static_dy.copy_(torch.randn_like(static_dy))
+
+        for parameter in graph_model.parameters():
+            parameter.grad = torch.zeros_like(parameter)
+        if static_tokens.grad is not None:
+            static_tokens.grad.zero_()
+        if static_topk_weights.grad is not None:
+            static_topk_weights.grad.zero_()
+        with te.autocast(enabled=True, recipe=recipe):
+            graph_out = graphed_model(
+                static_tokens,
+                static_topk_idx,
+                static_topk_weights,
+            )
+        graph_out_snapshot = graph_out.detach().clone()
+        graph_out.backward(static_dy)
+        torch.cuda.synchronize()
+        graph_grad_results = (
+            static_tokens.grad.detach().clone(),
+            static_topk_weights.grad.detach().clone(),
+            graph_fc1.weight.grad.detach().clone(),
+            graph_fc2.weight.grad.detach().clone(),
+        )
+
+        eager_tokens = static_tokens.detach().clone().requires_grad_(True)
+        eager_topk_weights = static_topk_weights.detach().clone().requires_grad_(True)
+        for parameter in eager_model.parameters():
+            parameter.grad = torch.zeros_like(parameter)
+        with te.autocast(enabled=True, recipe=recipe):
+            eager_out = eager_model(
+                eager_tokens,
+                static_topk_idx,
+                eager_topk_weights,
+            )
+        if expect_fused:
+            eager_fused_ops = [
+                op
+                for op, _ in eager_model._module_groups[0]._forward_ops
+                if isinstance(op, FusedMoeEp)
+            ]
+            self.assertEqual(len(eager_fused_ops), 1)
+            self.assertIs(fused_ops[0]._resource, eager_fused_ops[0]._resource)
+        tolerances = {"rtol": 0.125, "atol": 0.25}
+        torch.testing.assert_close(graph_out_snapshot, eager_out, **tolerances)
+
+        eager_out.backward(static_dy)
+        torch.cuda.synchronize()
+        eager_grad_results = (
+            eager_tokens.grad,
+            eager_topk_weights.grad,
+            eager_fc1.weight.grad,
+            eager_fc2.weight.grad,
+        )
+
+        for graph_result, eager_result in zip(
+            graph_grad_results,
+            eager_grad_results,
+        ):
+            torch.testing.assert_close(graph_result, eager_result, **tolerances)
+
+    @_eager_test_include
+    def test_megamoe_main_grad_accumulation_bf16(self):
+        self._run_megamoe_vs_reference(
+            quantization="bf16",
+            accumulate_into_main_grad=True,
+        )
+
+    @_eager_test_include
+    @_mxfp8_align_test
+    def test_megamoe_main_grad_accumulation(self):
+        self._run_megamoe_vs_reference(
+            quantization="mxfp8",
+            accumulate_into_main_grad=True,
+        )
+
+    @_eager_test_include
+    def test_megamoe_main_grad_overwrite_bf16(self):
+        self._run_megamoe_vs_reference(
+            quantization="bf16",
+            accumulate_into_main_grad=True,
+            overwrite_main_grad=True,
+        )
+
+    @_eager_test_include
+    @_mxfp8_align_test
+    def test_megamoe_main_grad_overwrite(self):
+        self._run_megamoe_vs_reference(
+            quantization="mxfp8",
+            accumulate_into_main_grad=True,
+            overwrite_main_grad=True,
+        )
+
+    @_eager_test_include
+    def test_megamoe_delayed_wgrad_bf16(self):
+        self._run_megamoe_vs_reference(
+            quantization="bf16",
+            delay_wgrad_compute=True,
+        )
+
+    @_eager_test_include
+    @_mxfp8_align_test
+    def test_megamoe_delayed_wgrad(self):
+        self._run_megamoe_vs_reference(
+            quantization="mxfp8",
+            delay_wgrad_compute=True,
+        )
+
+    @_eager_test_include
+    def test_megamoe_delayed_main_grad_bf16(self):
+        self._run_megamoe_vs_reference(
+            quantization="bf16",
+            accumulate_into_main_grad=True,
+            delay_wgrad_compute=True,
+        )
+
+    @_eager_test_include
+    @_mxfp8_align_test
+    def test_megamoe_delayed_main_grad(self):
+        self._run_megamoe_vs_reference(
+            quantization="mxfp8",
+            accumulate_into_main_grad=True,
+            delay_wgrad_compute=True,
+        )
+
+    def _run_megamoe_vs_reference(
+        self,
+        *,
+        quantization,
+        accumulate_into_main_grad=False,
+        overwrite_main_grad=False,
+        delay_wgrad_compute=False,
+    ):
+        """Compare the five-op MoE sequence with the PyTorch EP reference.
+
+        The fuser selects MegaMoE when its runtime gates pass. Otherwise this
+        exercises the same sequence as separate NCCL EP and grouped-MLP ops.
+        """
+        recipe = MXFP8BlockScaling() if quantization == "mxfp8" else None
+        model, fc1, fc2, _ = self._make_megamoe_model(
+            recipe=recipe,
+            accumulate_into_main_grad=accumulate_into_main_grad,
+            delay_wgrad_compute=delay_wgrad_compute,
+            glu_interleave_size=32 if quantization == "mxfp8" else None,
+        )
+        generator = torch.Generator(device=self.cfg.device)
+        generator.manual_seed(3100 + self.cfg.rank)
+        with torch.no_grad():
+            for op in (fc1, fc2):
+                weights = op.weight.quantized_tensors
+                if weights is None:
+                    weights = op.weight.split_into_quantized_tensors()
+                for expert in range(NUM_LOCAL_EXPERTS):
+                    weight = (
+                        torch.randn(
+                            weights[expert].shape,
+                            generator=generator,
+                            dtype=torch.float32,
+                            device=self.cfg.device,
+                        )
+                        * 0.1
+                    ).to(torch.bfloat16)
+                    weights[expert].copy_(weight)
+                    if quantization == "mxfp8":
+                        self.assertIsInstance(weights[expert], MXFP8Tensor)
+
+        topk_idx, tokens, topk_weights = _make_moe_inputs(
+            self.cfg.rank,
+            self.cfg.ep_size,
+            self.cfg.device,
+        )
+        seq_tokens = tokens.detach().clone().requires_grad_(True)
+        seq_topk_weights = topk_weights.detach().clone().requires_grad_(True)
+        main_grad_sentinel = 0.5
+        if accumulate_into_main_grad:
+            for op in (fc1, fc2):
+                op.weight.main_grad = torch.full(
+                    op.weight.size(),
+                    main_grad_sentinel,
+                    dtype=torch.float32,
+                    device=op.weight.device,
+                )
+                op.weight.overwrite_main_grad = overwrite_main_grad
+                op.weight.zero_out_wgrad = False
+                op.weight.grad_added_to_main_grad = False
+        autocast_ctx = (
+            te.autocast(enabled=True, recipe=recipe) if recipe is not None else nullcontext()
+        )
+        with autocast_ctx:
+            seq_out = model(
+                seq_tokens,
+                topk_idx,
+                seq_topk_weights,
+            )
+
+        forward_ops = model._module_groups[0]._forward_ops
+        fused = len(forward_ops) == 1 and isinstance(forward_ops[0][0], FusedMoeEp)
+        if fused:
+            self.assertTrue(_cudnn_megamoe_supported())
+        else:
+            self.assertFalse(any(isinstance(op, FusedMoeEp) for op, _ in forward_ops))
+        self.assertEqual(seq_out.dtype, torch.bfloat16)
+
+        fc1_weight = _reference_weights(fc1)
+        fc2_weight = _reference_weights(fc2)
+        emulate_mxfp8 = fused or quantization == "mxfp8"
+        reference = MoeEpReference(
+            num_experts=self.cfg.num_experts,
+            hidden_size=HIDDEN_DIM,
+            intermediate_size=256,
+            top_k=TOP_K,
+            ep_group=self.ep_group,
+            max_tokens_per_rank=TOKENS_PER_RANK,
+            output_format=MoeFormat.BF16,
+            combine_format=(
+                MoeFormat.MXFP8
+                if fused and os.environ.get("NVTE_MEGAMOE_MXFP8_COMBINE", "0") == "1"
+                else MoeFormat.BF16
+            ),
+            apply_topk_in_fc1=True,
+            generate_c=True,
+            intermediate_format=MoeFormat.MXFP8 if emulate_mxfp8 else None,
+            backward_operand_format=MoeFormat.MXFP8 if emulate_mxfp8 and not fused else None,
+            backward_wgrad_mode="operands" if fused else "none",
+            token_padding_size=256,
+            weight_interleave_size=32 if quantization == "mxfp8" else None,
+        )
+        if emulate_mxfp8 and not fused:
+            reference_activation = quantize_blockwise(
+                tokens.detach(),
+                MoeFormat.MXFP8,
+                axis=1,
+            )
+        else:
+            reference_activation = tokens.detach()
+        if emulate_mxfp8 and not isinstance(fc1_weight, BlockScaledTensor):
+            fc1_weight = quantize_blockwise(fc1_weight, MoeFormat.MXFP8, axis=1)
+        if emulate_mxfp8 and not isinstance(fc2_weight, BlockScaledTensor):
+            fc2_weight = quantize_blockwise(fc2_weight, MoeFormat.MXFP8, axis=1)
+        reference_outputs = reference(
+            reference_activation,
+            fc1_weight,
+            fc2_weight,
+            topk_idx,
+            topk_weights.detach(),
+        )
+        if fused:
+            ref_out, fc1_c, route_metadata, wgrad_forward_stash = reference_outputs
+        else:
+            ref_out, fc1_c, route_metadata = reference_outputs
+            wgrad_forward_stash = None
+
+        tolerances = {"rtol": 0.125, "atol": 0.25}
+        torch.testing.assert_close(seq_out, ref_out, **tolerances)
+
+        dy = (
+            torch.randn(
+                seq_out.shape,
+                generator=generator,
+                dtype=torch.float32,
+                device=self.cfg.device,
+            )
+            * 0.1
+        ).to(torch.bfloat16)
+        seq_out.backward(dy)
+        if delay_wgrad_compute:
+            fc1.backward_dw()
+            fc2.backward_dw()
+        reference_grads = reference.backward(
+            dy,
+            fc1_weight,
+            fc2_weight,
+            topk_idx,
+            topk_weights.detach(),
+            fc1_c,
+            route_metadata,
+            wgrad_forward_stash=wgrad_forward_stash,
+        )
+        if fused:
+            grad_tokens, grad_topk_weights, wgrad_operands = reference_grads
+            grad_fc1, grad_fc2 = wgrad_operands.dense_wgrads()
+            reference_wgrads = (grad_fc1, grad_fc2)
+        else:
+            grad_tokens, grad_topk_weights = reference_grads
+            reference_wgrads = (None, None)
+
+        torch.cuda.synchronize()
+        torch.testing.assert_close(
+            seq_tokens.grad,
+            grad_tokens.to(dtype=seq_tokens.dtype),
+            **tolerances,
+        )
+        torch.testing.assert_close(seq_topk_weights.grad, grad_topk_weights.float(), **tolerances)
+        for op, ref_grad in zip((fc1, fc2), reference_wgrads):
+            expected_grad = None if ref_grad is None else ref_grad.transpose(1, 2)
+            if accumulate_into_main_grad:
+                if expected_grad is not None and not overwrite_main_grad:
+                    expected_grad = expected_grad + main_grad_sentinel
+                if expected_grad is not None:
+                    torch.testing.assert_close(
+                        op.weight.main_grad,
+                        expected_grad.to(dtype=op.weight.main_grad.dtype),
+                        **tolerances,
+                    )
+                else:
+                    self.assertTrue(torch.isfinite(op.weight.main_grad).all())
+                    self.assertFalse(torch.all(op.weight.main_grad == main_grad_sentinel).item())
+                self.assertTrue(op.weight.grad_added_to_main_grad)
+                self.assertIsNotNone(op.weight.grad)
+                continue
+            seq_grad = op.weight.grad
+            self.assertEqual(seq_grad.dtype, torch.bfloat16)
+            self.assertEqual(
+                tuple(seq_grad.shape),
+                (NUM_LOCAL_EXPERTS, op.out_features, op.in_features),
+            )
+            self.assertTrue(seq_grad.is_contiguous())
+            self.assertTrue(torch.isfinite(seq_grad).all())
+            if expected_grad is not None:
+                torch.testing.assert_close(
+                    seq_grad,
+                    expected_grad.to(dtype=seq_grad.dtype),
+                    **tolerances,
+                )
+
+
 def _init_distributed():
     dist.init_process_group(backend="nccl")
     torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
@@ -846,12 +1593,16 @@ if __name__ == "__main__":
     name_filter = os.environ.get("NVTE_EP_TEST_FILTER")
     if name_filter:
         loader.testMethodPrefix = name_filter
-    suite = loader.loadTestsFromTestCase(TestEP)
+    suite = unittest.TestSuite(
+        (
+            loader.loadTestsFromTestCase(TestEP),
+            loader.loadTestsFromTestCase(TestMoeEpSequential),
+        )
+    )
     runner = unittest.TextTestRunner(stream=sys.stdout, verbosity=2)
     result = runner.run(suite)
     dist.barrier()
+    finalize_moe_ep_resources()
     ep_finalize()
-    # Deregister symm-mem windows while the comm is still valid.
-    release_symm_mem_pool()
     dist.destroy_process_group()
     sys.exit(0 if result.wasSuccessful() else 1)

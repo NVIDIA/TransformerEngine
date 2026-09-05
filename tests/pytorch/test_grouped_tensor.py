@@ -286,6 +286,36 @@ class TestGroupedTensor:
         assert grouped_tensor.get_common_last_dim() == 512
         assert grouped_tensor.has_data()
 
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+    def test_module_to_moves_grouped_parameter_storage(self) -> None:
+        """Module.to preserves GroupedTensor parameters initialized on CPU."""
+        grouped_tensor = GroupedTensor.make_grouped_tensor_with_shapes(
+            num_tensors=2,
+            shapes=[(4, 8), (4, 8)],
+            quantizer=None,
+            device="cpu",
+            dtype=torch.float32,
+        )
+        values = torch.arange(grouped_tensor.numel(), dtype=torch.float32)
+        grouped_tensor.rowwise_data.copy_(values)
+
+        module = torch.nn.Module()
+        module.register_parameter("weight", torch.nn.Parameter(grouped_tensor))
+        original_parameter = module.weight
+        expected = values.to(device="cuda", dtype=torch.bfloat16)
+
+        module.to(device="cuda", dtype=torch.bfloat16)
+
+        assert module.weight is original_parameter
+        assert isinstance(module.weight, GroupedTensor)
+        assert module.weight.device.type == "cuda"
+        assert module.weight.dtype == torch.bfloat16
+        assert module.weight.rowwise_data.device.type == "cuda"
+        assert module.weight.rowwise_data.dtype == torch.bfloat16
+        torch.testing.assert_close(module.weight.rowwise_data, expected, rtol=0, atol=0)
+        members = module.weight.split_into_quantized_tensors()
+        assert all(member.device.type == "cuda" for member in members)
+
     def test_basic_construction_varying_first_dim(self) -> None:
         """Test GroupedTensor construction with varying first dimension"""
         num_tensors = 3
@@ -1578,6 +1608,36 @@ class TestGroupedTensor:
         assert len(dequantized_tensors) == num_tensors
         for orig, deq in zip(input_tensors, dequantized_tensors):
             torch.testing.assert_close(deq, orig, atol=0.125, rtol=0.1)
+
+    @pytest.mark.parametrize("conversion", ["float", "to"])
+    @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
+    def test_grouped_mxfp8_dtype_conversion_for_optimizer(self, conversion: str) -> None:
+        """MXFP8 grouped parameters dequantize before optimizer shard flattening."""
+        shapes = [(256, 512), (512, 512)]
+        inputs = [torch.randn(shape, dtype=torch.bfloat16, device="cuda") for shape in shapes]
+        quantizer = MXFP8Quantizer(fp8_dtype=te.DType.kFloat8E4M3)
+        quantizer.set_usage(rowwise=True, columnwise=False)
+        grouped = tex.group_quantize(
+            torch.cat(inputs, dim=0),
+            quantizer,
+            len(shapes),
+            torch.tensor([shape[0] for shape in shapes], dtype=torch.int64, device="cuda"),
+        )
+
+        dequantized = grouped.float() if conversion == "float" else grouped.to(dtype=torch.float32)
+
+        assert isinstance(dequantized, GroupedTensor)
+        assert dequantized.quantizer is None
+        assert dequantized.dtype == torch.float32
+        assert dequantized.num_tensors == grouped.num_tensors
+        assert dequantized.logical_shape == grouped.logical_shape
+        assert dequantized.view(-1) is not dequantized
+        assert dequantized.view(-1).dtype == torch.float32
+        assert dequantized.view(-1).numel() == grouped.numel()
+
+        members = dequantized.split_into_quantized_tensors()
+        for original, member in zip(inputs, members):
+            torch.testing.assert_close(member, original.float(), atol=0.125, rtol=0.1)
 
     @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
     def test_group_dequantize_cudagraph_capturable(self) -> None:

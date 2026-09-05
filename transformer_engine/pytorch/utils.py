@@ -376,27 +376,32 @@ def divide(numerator: int, denominator: int) -> int:
     return numerator // denominator
 
 
-def mark_grouped_tensor(*tensors: List[Any]):
+def mark_grouped_tensor(
+    tensors: List[Optional[torch.Tensor]],
+    scale_invs: List[Optional[torch.Tensor]],
+    transposed: bool = False,
+    num_tokens: Optional[torch.Tensor] = None,
+):
     """
     Needed for paged stashing in Megatron-LM. This attribute allows
     Megatron-LM to detect which tensors are dynamic (varying shapes)
     and remove the padding before doing the `save_for_backward` to
     save memory.
-    Note: Only columnwise data is saved for backward."""
-    for tensor in tensors:
-        if tensor is None:
-            continue
-        if hasattr(tensor, "columnwise_data"):
-            assert (
-                tensor.columnwise_data is not None
-            ), "Columnwise data is not set for grouped tensor"
-            assert (
-                tensor.columnwise_scale_inv is not None
-            ), "Columnwise scale inverse is not set for grouped tensor"
-            setattr(tensor.columnwise_data, "grouped_tensor_scale_inv", False)
-            setattr(tensor.columnwise_scale_inv, "grouped_tensor_scale_inv", True)
-        else:
-            setattr(tensor, "grouped_tensor_scale_inv", False)
+    Marks plain tensors and their corresponding scale-inverse tensors.
+    ``transposed`` describes whether tokens are physically on axis 1.
+    """
+
+    def _mark(tensor: torch.Tensor, is_scale_inv: bool) -> None:
+        setattr(tensor, "grouped_tensor_scale_inv", is_scale_inv)
+        setattr(tensor, "grouped_tensor_token_axis", 1 if transposed else 0)
+        if num_tokens is not None:
+            setattr(tensor, "grouped_tensor_num_tokens", num_tokens)
+
+    for tensor, scale_inv in zip(tensors, scale_invs):
+        if tensor is not None:
+            _mark(tensor, False)
+        if scale_inv is not None:
+            _mark(scale_inv, True)
 
 
 def split_tensor_along_dim(
