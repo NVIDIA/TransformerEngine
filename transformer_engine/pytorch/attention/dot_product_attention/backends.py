@@ -174,6 +174,7 @@ else:
         fa_utils.fa3_supports_softcap = (
             "softcap" in inspect.signature(flash_attn_func_v3).parameters
             and "softcap" in inspect.signature(flash_attn_varlen_func_v3).parameters
+            and "softcap" in inspect.signature(flash_attn_with_kvcache_v3).parameters
         )
     except (ValueError, TypeError):
         fa_utils.fa3_supports_softcap = False
