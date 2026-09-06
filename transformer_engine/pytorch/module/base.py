@@ -794,32 +794,11 @@ def release_frozen_weight_columnwise(
 ) -> None:
     """Release the columnwise copy of frozen quantized weights after dgrad.
 
-    Frozen weights (e.g. the base model in LoRA/PEFT fine-tuning) never
-    need a wgrad, so their columnwise (transposed) copy is only used
-    transiently as the dgrad GEMM operand. Keeping it resident costs up
-    to 1 byte/param of GPU memory for the whole run. When
-    ``NVTE_RELEASE_FROZEN_WEIGHT_COLUMNWISE=1``, release the columnwise
-    copy right after the dgrad GEMM; it is rebuilt on demand from the
-    rowwise data by the next ``update_usage`` call.
-
-    Callers must only pass weights that do not require a wgrad in this
-    backward pass (e.g. gated on ``ctx.weights_requires_grad``); the
-    weight objects seen in backward may be workspaces or restored saved
-    tensors whose ``requires_grad`` attribute is not meaningful.
-
-    Note: if the tensor's quantizer requests columnwise usage (e.g. a
-    primary quantized parameter initialized with gradients enabled), the
-    next forward's ``quantize_weight`` rebuilds the copy, so the release
-    then mainly reduces between-step residency rather than the full-step
-    peak. Initializing frozen parameters under ``torch.no_grad()``
-    avoids the rebuild and yields the peak-memory benefit.
-
-    Only weights that can rebuild the columnwise copy from a complete
-    rowwise representation are released: 2D-block-scaled
-    ``Float8BlockwiseQTensorStorage`` with both rowwise data and scale-inv
-    present. Columnwise-only tensors (e.g. FSDP2 all-gathered weights in
-    backward) and other layouts are skipped. No-op during CUDA graph
-    capture.
+    Callers must gate on their backward wgrad flag; restored tensors and
+    workspaces may not have a meaningful ``requires_grad`` attribute.
+    Requires ``NVTE_RELEASE_FROZEN_WEIGHT_COLUMNWISE=1`` and a complete
+    rowwise representation of 2D-block-scaled FP8 weights for rebuilding.
+    Skips CUDA graph capture. See ``docs/envvars.rst`` for usage limitations.
     """
     if os.getenv("NVTE_RELEASE_FROZEN_WEIGHT_COLUMNWISE", "0") != "1":
         return
@@ -830,10 +809,7 @@ def release_frozen_weight_columnwise(
             continue
         if not weight._is_2D_scaled:
             continue
-        # Only weights holding a complete rowwise representation can be
-        # released and rebuilt later. FSDP2 all-gathered weights in
-        # backward are columnwise-only and must be skipped (they are
-        # cleaned up by ``clear_columnwise_cache`` right after this).
+        # Columnwise-only FSDP2 backward weights cannot rebuild from rowwise data.
         if weight._rowwise_data is None or weight._rowwise_scale_inv is None:
             continue
         weight.update_usage(rowwise_usage=True, columnwise_usage=False)
@@ -886,6 +862,19 @@ def quantize_weight(
     if isinstance(tensor, QuantizedTensor):
         update_rowwise = True if quantizer.rowwise_usage else None
         update_columnwise = True if quantizer.columnwise_usage else None
+        # Frozen primary weights need columnwise data only for dgrad.
+        if (
+            os.getenv("NVTE_RELEASE_FROZEN_WEIGHT_COLUMNWISE", "0") == "1"
+            and isinstance(tensor, Float8BlockwiseQTensorStorage)
+            and not tensor.requires_grad
+            and tensor._is_2D_scaled
+            and tensor._rowwise_data is not None
+            and tensor._rowwise_scale_inv is not None
+            and not isinstance(quantizer, DebugQuantizer)
+            and not FP8GlobalStateManager.fp8_graph_capturing()
+        ):
+            update_rowwise = True
+            update_columnwise = False
         tensor.update_usage(
             rowwise_usage=update_rowwise,
             columnwise_usage=update_columnwise,

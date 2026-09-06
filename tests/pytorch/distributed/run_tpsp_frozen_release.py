@@ -2,14 +2,9 @@
 #
 # See LICENSE for license information.
 
-"""Multi-GPU TP/SP smoke for NVTE_RELEASE_FROZEN_WEIGHT_COLUMNWISE.
+"""Check frozen primary FP8 weight release and dgrad equivalence under TP/SP.
 
 Launch: torchrun --nproc_per_node=2 run_tpsp_frozen_release.py
-
-Frozen column-parallel + row-parallel te.Linear pair (Float8BlockScaling,
-quantized_model_init) with sequence_parallel=True. One fwd+bwd per step,
-3 steps: must not raise, frozen weights must have columnwise released,
-and dgrad must be bitwise identical to a flag-off run.
 """
 
 import os

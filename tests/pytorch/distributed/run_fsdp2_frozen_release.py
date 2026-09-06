@@ -2,27 +2,13 @@
 #
 # See LICENSE for license information.
 
-"""Multi-GPU FSDP2 validation for NVTE_RELEASE_FROZEN_WEIGHT_COLUMNWISE.
+"""Check FSDP2 safety and dgrad equivalence with BF16 parameters and FP8 workspaces.
 
 Launch: torchrun --nproc_per_node=2 run_fsdp2_frozen_release.py --reshard-after-forward {0,1}
 
-Model: frozen TE Linear stack (bf16 Parameters, Float8BlockScaling autocast)
-+ trainable bf16 head, wrapped with FSDP2 fully_shard. TE intentionally
-disables FP8 weight-workspace caching under FSDP2 (linear.py:
-``cache_name = None`` when ``is_fsdp2``), so there is no persistent cache to
-inspect after the step; transient backward workspaces may still be handled by
-the release helper and the existing FSDP2 cleanup, without forming resident
-state. This path validates safety and numerics. For both
-reshard_after_forward settings this script verifies:
-  1. 3 training steps run without error with the flag on;
-  2. input grads are bitwise identical to a flag-off run;
-  3. no cached FP8 weight workspaces exist (cache-free expectation).
-
-Note: quantized_model_init (primary FP8 params) + FSDP2 + Float8BlockScaling is
-currently broken upstream (scale-inv padding in all-gather slice ops, see
-fsdp2_tests/run_fsdp2_model.py xfail), so that combination cannot be run here;
-the columnwise-only all-gather guard is covered at unit level in
-tests/pytorch/test_frozen_weight_columnwise_release.py.
+FSDP2 does not cache these workspaces across steps. Primary FP8 parameters
+with Float8BlockScaling are marked xfail upstream in fsdp2_tests/run_fsdp2_model.py;
+the columnwise-only guard is covered separately in the single-GPU tests.
 """
 
 import argparse
@@ -74,10 +60,7 @@ def run(flag: str, reshard: bool, device):
         torch.manual_seed(SEED + step + dist.get_rank())
         inp = torch.randn(TOKENS, FEATURES, device=device, dtype=torch.bfloat16, requires_grad=True)
         with te.autocast(enabled=True, recipe=fp8_recipe):
-            # is_first_microbatch is passed, but under FSDP2 TE disables the
-            # weight-workspace cache (cache_name=None when is_fsdp2), so no
-            # workspace is retained across the step; transient backward
-            # workspaces may still be processed by the release helper.
+            # FSDP2 disables workspace caching even when is_first_microbatch is set.
             out = inp
             for layer in model[:-1]:
                 out = layer(out, is_first_microbatch=(step == 0))
@@ -110,10 +93,7 @@ def main():
     grads_off, workspaces_off = run("0", reshard, device)
     grads_on, workspaces_on = run("1", reshard, device)
 
-    # TE intentionally disables weight-workspace caching under FSDP2
-    # (linear.py: cache_name=None when is_fsdp2). Assert that cache-free
-    # expectation explicitly (no empty-`all()` vacuous pass): there is no
-    # persistent cache to inspect; this path validates safety and numerics.
+    # FSDP2 workspaces are transient; neither run should retain a cached copy.
     assert len(workspaces_off) == 0, f"unexpected cached workspaces: {len(workspaces_off)}"
     assert len(workspaces_on) == 0, f"unexpected cached workspaces: {len(workspaces_on)}"
     for ref, rel in zip(grads_off, grads_on):

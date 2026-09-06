@@ -2,15 +2,7 @@
 #
 # See LICENSE for license information.
 
-"""Tests for NVTE_RELEASE_FROZEN_WEIGHT_COLUMNWISE.
-
-Frozen (``requires_grad=False``) quantized weights only need their
-columnwise (transposed) copy transiently, as the dgrad GEMM operand.
-With ``NVTE_RELEASE_FROZEN_WEIGHT_COLUMNWISE=1`` the copy is released
-right after the dgrad GEMM and rebuilt on demand from rowwise data,
-saving up to 1 byte/param of resident GPU memory for PEFT-style
-fine-tuning of large frozen base models.
-"""
+"""Tests for releasing frozen FP8 block-scaled weight columnwise copies."""
 
 from __future__ import annotations
 
@@ -160,6 +152,29 @@ def test_frozen_columnwise_release_preserves_numerics(module_cls, monkeypatch):
 
 
 @pytest.mark.skipif(not fp8_block_scaling_available, reason=reason_for_no_fp8_block_scaling)
+@pytest.mark.parametrize("module_cls", _MODULE_CLASSES, ids=_MODULE_IDS)
+def test_frozen_primary_forward_skips_columnwise(module_cls, monkeypatch):
+    """Freezing after grad-enabled initialization does not require a quantizer edit."""
+    monkeypatch.setenv("NVTE_RELEASE_FROZEN_WEIGHT_COLUMNWISE", "1")
+    fp8_recipe = _make_block_scaling_recipe()
+    module = _make_module(module_cls, fp8_recipe, frozen=False)
+    for param in module.parameters():
+        param.requires_grad_(False)
+    weights = _quantized_weights(module)
+    assert weights and all(_columnwise_present(w) for w in weights)
+    usages = [w._quantizer.columnwise_usage for w in weights]
+
+    def check_forward(_module, _inputs, _output):
+        assert all(not _columnwise_present(w) for w in weights)
+        assert [w._quantizer.columnwise_usage for w in weights] == usages
+
+    module.register_forward_hook(check_forward)
+    for _ in range(3):
+        _run_fwd_bwd(module, fp8_recipe)
+        assert all(not _columnwise_present(w) for w in weights)
+
+
+@pytest.mark.skipif(not fp8_block_scaling_available, reason=reason_for_no_fp8_block_scaling)
 def test_grouped_linear_release_with_backward_override(monkeypatch):
     """Release also works when dgrad runs on dequantized weight copies."""
     monkeypatch.setenv("NVTE_RELEASE_FROZEN_WEIGHT_COLUMNWISE", "1")
@@ -210,13 +225,7 @@ def _run_grouped_tensor_fwd_bwd(module, fp8_recipe):
 
 @pytest.mark.skipif(not fp8_block_scaling_available, reason=reason_for_no_fp8_block_scaling)
 def test_grouped_tensor_path_release(monkeypatch):
-    """The native grouped-tensor backward releases frozen columnwise copies too.
-
-    ``GroupedLinear`` has a second backward implementation
-    (``_backward_grouped_tensor``) that is selected by ``use_grouped_tensor=True``
-    and carries its own release call site, so it needs coverage independent of
-    the legacy backward.
-    """
+    """The native grouped-tensor backward releases frozen columnwise copies."""
     fp8_recipe = _make_block_scaling_recipe()
     if not is_module_grouped_tensor_path_supported(fp8_recipe, torch.bfloat16):
         pytest.skip("Native GroupedTensor GEMM is unavailable on this system.")
@@ -254,14 +263,7 @@ def test_grouped_tensor_path_release_preserves_numerics(monkeypatch):
 
 
 def test_grouped_tensor_path_call_site_bf16(monkeypatch):
-    """The grouped-tensor backward reaches its release call site without error.
-
-    The release helper is a no-op for weights that are not 2D-block-scaled, but
-    the call site itself is still evaluated, so a BF16 run exercises it. BF16
-    needs only cuBLASLt 13.4 on Hopper, whereas the FP8 block-scaling tests
-    above need 13.6, so this is the variant that stays runnable on most
-    machines and guards the call site against name/scope regressions.
-    """
+    """BF16 grouped-tensor backward smoke test (no FP8 block-scaling requirement)."""
     if not is_module_grouped_tensor_path_supported(None, torch.bfloat16):
         pytest.skip("Native GroupedTensor GEMM is unavailable on this system.")
 
@@ -309,12 +311,7 @@ def test_trainable_weights_unaffected(module_cls, monkeypatch):
 
 @pytest.mark.skipif(not fp8_block_scaling_available, reason=reason_for_no_fp8_block_scaling)
 def test_columnwise_only_tensor_skipped(monkeypatch):
-    """Columnwise-only tensors (FSDP2 backward all-gather shape) are skipped, not crashed.
-
-    Upstream FSDP2 + Float8BlockScaling + quantized_model_init is currently
-    broken (scale-inv padding in all-gather slice ops), so the guard is
-    exercised here at unit level with a hand-built columnwise-only tensor.
-    """
+    """Skip columnwise-only tensors such as FSDP2 backward all-gather outputs."""
     from transformer_engine.pytorch.module.base import release_frozen_weight_columnwise
 
     monkeypatch.setenv("NVTE_RELEASE_FROZEN_WEIGHT_COLUMNWISE", "1")
@@ -336,11 +333,7 @@ def test_columnwise_only_tensor_skipped(monkeypatch):
 
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
 def test_non_blockwise_never_receives_release_call(monkeypatch):
-    """Spy on Float8TensorStorage.update_usage: no columnwise release is ever requested.
-
-    Architecture-independent proof (works even where releasing would be a
-    physical no-op, e.g. non-TN-capable GEMM hardware).
-    """
+    """Delayed-scaling weights receive no columnwise release request."""
     from transformer_engine.pytorch.tensor.storage.float8_tensor_storage import (
         Float8TensorStorage,
     )
@@ -367,11 +360,7 @@ def test_non_blockwise_never_receives_release_call(monkeypatch):
 @pytest.mark.skipif(not fp8_block_scaling_available, reason=reason_for_no_fp8_block_scaling)
 @pytest.mark.parametrize("frozen", (True, False), ids=("frozen", "trainable"))
 def test_workspace_path_with_microbatch_cache(frozen, monkeypatch):
-    """bf16 Parameters + FP8 workspaces (no quantized_model_init), with microbatch cache.
-
-    Trainable workspaces must keep their columnwise copy; frozen workspaces
-    are released and rebuilt with numerics identical to flag-off.
-    """
+    """Cached FP8 workspaces preserve dgrad and release only frozen weights."""
     fp8_recipe = _make_block_scaling_recipe()
 
     def build_and_run(flag: str):
@@ -485,9 +474,7 @@ def test_cuda_graph_make_graphed_callables(monkeypatch):
         out = graphed(inp)
         out.float().pow(2).mean().backward()
 
-    # Guard is the only thing standing between capture-time dgrad and the
-    # release: columnwise must still be present after capture + replays
-    # (replay executes no Python, so the state must be stable).
+    # Replay executes no Python, so capture must leave the columnwise copy intact.
     for weight in weights:
         assert _columnwise_present(weight), "columnwise must survive graph capture/replay"
     assert_close(out.detach(), ref_out, rtol=0, atol=0)
