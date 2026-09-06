@@ -167,11 +167,9 @@ else:
 
     fa_utils.set_flash_attention_3_params()
 
-    # Probe whether this FA3 build exposes a `softcap` parameter on BOTH entry points. FA3's Hopper
-    # (sm90) kernels DO implement tanh logit softcapping in fwd AND bwd (dedicated
-    # flash_{fwd,bwd}_hdim256_bf16_softcap_sm90 instantiations, off only behind a compile-time
-    # DISABLE_SOFTCAP flag), so this is a mature path. Still fail-closed and additionally
-    # gated on head_dim <= 256 + non-CP in get_attention_backend.
+    # Older FA3 releases expose no `softcap` kwarg, so probe the API rather than the version.
+    # This cannot see a FLASHATTENTION_DISABLE_SOFTCAP build: that still exposes the kwarg and
+    # rejects a nonzero cap at dispatch.
     try:
         fa_utils.fa3_supports_softcap = (
             "softcap" in inspect.signature(flash_attn_func_v3).parameters
@@ -641,8 +639,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
         key_layer = key_layer.reshape(output_size[3], output_size[0] * output_size[1], -1)
 
         # Raw attention scores. [b * h, sq, sk]
-        # An additive `post_scale_bias`/ALiBi term is deferred until after the softcap below, so
-        # that the cap applies to the bare scaled logits (see the softcap comment for why).
+        # `post_scale_bias`/ALiBi are deferred until after the softcap below; see the cap.
         deferred_bias = None
         if core_attention_bias_type == "no_bias":
             matmul_result = torch.baddbmm(
@@ -690,11 +687,10 @@ class UnfusedDotProductAttention(torch.nn.Module):
             matmul_result = matmul_result.view(*output_size)
             deferred_bias = core_attention_bias
 
-        # Cap the scaled logits: softcap * tanh(scores * scale / softcap), matching how
-        # FlashAttention folds softmax_scale into its tanh argument. The cap must land on the
-        # bare scaled logits, before any additive bias: FA2 caps right after the QK^T gemm and
-        # adds ALiBi afterwards, so capping the bias too would diverge from it. qk layer scaling
-        # defers the layer_number factor to the softmax below, so it is divided out of the cap.
+        # The cap lands on the scaled logits before `post_scale_bias`/ALiBi: FA2 caps right
+        # after the QK^T gemm and adds ALiBi afterwards, so capping those would diverge from it.
+        # `pre_scale_bias` is folded in before the scaling, so it stays inside the cap. qk layer
+        # scaling defers the layer_number factor to the softmax below, so divide it out here.
         if softcap != 0.0:
             cap = softcap / self.layer_number if apply_qk_layer_scaling else softcap
             matmul_result = cap * torch.tanh(matmul_result / cap)

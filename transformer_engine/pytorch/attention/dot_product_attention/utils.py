@@ -148,10 +148,7 @@ class FlashAttentionUtils:
     v4_is_installed = False
     fa4_version = PkgVersion("0")
     use_v4 = False
-    # True only if the installed FA3 build exposes a `softcap` parameter (signature probe in
-    # backends.py, fail-closed default False). Necessary-but-not-sufficient: FA3 softcap is also
-    # gated on head_dim <= 256 and non-CP in get_attention_backend. FA3 is already restricted to
-    # Hopper (sm90) upstream, where its softcap fwd+bwd kernels are mature.
+    # Set by a signature probe in backends.py; fail-closed default.
     fa3_supports_softcap = False
     v4_installation_steps = """\
 pip install flash-attn-4==4.0.0b11 nvidia-cutlass-dsl[cu13]"""
@@ -775,33 +772,21 @@ def get_attention_backend(
             logger.debug("Disabling all backends for max_logit with FP8 attention")
 
     # Filter: softcap
-    # The scalar `softcap` kwarg (tanh logit softcapping) is plumbed to the FlashAttention 2
-    # backend (>= 2.6.0) and to UnfusedDotProductAttention by default, and to FA3 subject to the
-    # build/shape checks below. FusedAttention does not take the scalar kwarg (cuDNN can softcap
-    # via score_mod, but that path is not used here), and FA4 has no softcap kernel to call, so
-    # disable both rather than silently dropping the cap.
+    # Disable any backend that would not honour a nonzero cap, rather than silently dropping it.
     if softcap != 0.0:
         if use_fused_attention:
             logger.debug("Disabling FusedAttention as it does not support softcap")
             use_fused_attention = False
         if use_flash_attention_4:
-            # FA4 exposes no softcap kwarg and its head_dim=256 kernel asserts score_mod is None,
-            # so there is no kernel to route the cap through, and the FA4 call path in backends.py
-            # passes no softcap -- selecting it here would silently drop the cap.
             if FlashAttentionUtils.v4_is_installed:
-                logger.debug("Disabling FlashAttention 4 as it does not support softcap")
+                # FA4 implements softcap; TE does not plumb it to the FA4 call path yet.
+                logger.debug("Disabling FlashAttention 4 as TE does not pass it softcap")
             use_flash_attention_4 = False
         if use_flash_attention_3 and not (
             FlashAttentionUtils.fa3_supports_softcap
             and max(head_dim_qk, head_dim_v) <= 256
             and not context_parallel
         ):
-            # FA3 softcap requires a softcap-capable FA3 build, head_dim <= 256 (the range FA3's
-            # sm90 softcap kernels are instantiated for), and no context parallelism -- FA3's CP
-            # path hard-rejects nonzero softcap (backends.py), so selecting it here would just
-            # crash at dispatch instead of steering to FA2, which does support CP+softcap via
-            # context_parallel.py's autograd threading. Whether FA3 is eligible at all is governed
-            # by NVTE_FLASH_ATTN_V3 through use_flash_attention_3.
             logger.debug(
                 "Disabling FlashAttention 3 for softcap (requires softcap-capable FA3 build, "
                 "head_dim <= 256, and no context parallelism)"
@@ -811,9 +796,8 @@ def get_attention_backend(
             logger.debug("Disabling FlashAttention 2 for softcap (requires flash-attn >= 2.6.0)")
             use_flash_attention_2 = False
         if use_flash_attention_2 and attention_dropout != 0.0 and is_training:
-            # FA2 hard-rejects a nonzero softcap combined with nonzero dropout at dispatch
-            # ("Softcapping does not support dropout for now", flash_api.cpp). Dropout only reaches
-            # the kernel while training -- backends.py passes 0.0 in eval -- hence the is_training.
+            # FA2 rejects softcap with dropout at dispatch (flash_api.cpp). Dropout only
+            # reaches the kernel while training, hence the is_training guard.
             logger.debug("Disabling FlashAttention 2 for softcap with dropout")
             use_flash_attention_2 = False
 

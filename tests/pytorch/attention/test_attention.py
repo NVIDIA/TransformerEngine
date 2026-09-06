@@ -933,12 +933,10 @@ def test_dpa_softcap_vs_reference(dtype, model_configs, model, softcap, backend,
 def test_transformer_layer_softcap_plumbing(dtype):
     """Test that TransformerLayer forwards softcap to both of its attention modules.
 
-    The value only has to arrive; the numerics are covered by the DotProductAttention tests
-    above. Cross-attention is the half worth asserting: it is reached through a separate call
-    site from self-attention, so a refactor can drop the cap there while self-attention keeps
-    working, and nothing else in the suite would notice.
+    Numerics are covered above; this only checks the value arrives. Cross-attention is
+    reached through a separate call site, so a refactor can drop the cap there while
+    self-attention keeps working and nothing else in the suite would notice.
     """
-    # head_dim 64, matching the other softcap configs, so every backend can serve the shape.
     hidden_size, num_heads, seqlen, batch_size = 256, 4, 32, 2
     seen = {}
 
@@ -948,11 +946,8 @@ def test_transformer_layer_softcap_plumbing(dtype):
 
         return hook
 
-    # Every softcap test above sets these and none restore them, so inherit nothing: with a
-    # nonzero cap the filter also drops FusedAttention and FA4, and a leftover
-    # NVTE_UNFUSED_ATTN=0 would leave no backend at all on a machine without flash-attn.
-    # Leaving flash and unfused both enabled keeps this backend-agnostic; the hook fires on
-    # DotProductAttention regardless of which one is selected.
+    # Set explicitly rather than inheriting: the tests above leave these set, and a stale
+    # NVTE_UNFUSED_ATTN=0 would leave no eligible backend once softcap drops the fused ones.
     reset_rng_states()
     os.environ["NVTE_FLASH_ATTN"] = "1"
     os.environ["NVTE_FUSED_ATTN"] = "0"
