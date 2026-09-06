@@ -18,7 +18,7 @@ available, reason = te.is_mxfp8_available(return_reason=True)
 pytestmark = pytest.mark.skipif(not available, reason=reason)
 
 
-@pytest.fixture
+@pytest.fixture(scope="module")
 def group():
     owned = not torch.distributed.is_initialized()
     if owned:
