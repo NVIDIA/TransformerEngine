@@ -1017,6 +1017,8 @@ def _cast_master_weights_to_fp8_mxfp8_scaling(
 ):  # pylint: disable=unused-argument
     r"""Helper function to cast master weights to FP8 primary weights for mxfp8 scaling.
 
+    Row-only primaries omit columnwise amax, scale updates, and output writes.
+
     Parameters
     ----------
     params : List of tuple, each tuple contains a model weight, a master weight, and an offset
@@ -1046,7 +1048,15 @@ def _cast_master_weights_to_fp8_mxfp8_scaling(
             raise ValueError(
                 f"rowwise_scale_inv must be 2D, got {len(rowwise_shape)}D shape {rowwise_shape}"
             )
-        colwise_shape = model_weight._columnwise_scale_inv.shape
+        if (model_weight._columnwise_data is None) != (
+            model_weight._columnwise_scale_inv is None
+        ):
+            raise ValueError("MXFP8 columnwise data and scales must both be present or absent")
+        colwise_shape = (
+            model_weight._columnwise_scale_inv.shape
+            if model_weight._columnwise_scale_inv is not None
+            else (0, 0)
+        )
         if len(colwise_shape) != 2:
             raise ValueError(
                 f"columnwise_scale_inv must be 2D, got {len(colwise_shape)}D shape {colwise_shape}"
@@ -1075,7 +1085,11 @@ def _cast_master_weights_to_fp8_mxfp8_scaling(
     amaxes_colwise, scale_invs_colwise = [], []
     for i, (model_weight, master_weight, start_offset, _) in enumerate(params):
         rowwise_shape = model_weight._rowwise_scale_inv.shape
-        colwise_shape = model_weight._columnwise_scale_inv.shape
+        colwise_shape = (
+            model_weight._columnwise_scale_inv.shape
+            if model_weight._columnwise_scale_inv is not None
+            else (0, 0)
+        )
         rowwise_start = cu_rowwise_amax_sizes[i]
         rowwise_end = cu_rowwise_amax_sizes[i + 1]
         colwise_start = cu_rowwise_amax_sizes[-1] + cu_colwise_amax_sizes[i]
@@ -1085,7 +1099,12 @@ def _cast_master_weights_to_fp8_mxfp8_scaling(
         amaxes_rowwise.append(amax_rowwise)
         amaxes_colwise.append(amax_colwise)
         scale_invs_rowwise.append(model_weight._rowwise_scale_inv)
-        scale_invs_colwise.append(model_weight._columnwise_scale_inv)
+        # Empty tensors mark an omitted direction without allocating a GPU payload.
+        scale_invs_colwise.append(
+            model_weight._columnwise_scale_inv
+            if model_weight._columnwise_scale_inv is not None
+            else torch.empty((0, 0), dtype=torch.uint8, device=device)
+        )
 
         # Compute amax of the master weight and store it in packed_amaxes.
         if master_weight is not None:
@@ -1111,8 +1130,8 @@ def _cast_master_weights_to_fp8_mxfp8_scaling(
         multi_tensor_compute_scale_inv_e8m0,
         None,  # dummy_overflow_buf
         [
-            amaxes_rowwise + amaxes_colwise,
-            scale_invs_rowwise + scale_invs_colwise,
+            amaxes_rowwise + [amax for amax in amaxes_colwise if amax.numel()],
+            scale_invs_rowwise + [scale for scale in scale_invs_colwise if scale.numel()],
         ],
     )
 
@@ -1133,10 +1152,18 @@ def _cast_master_weights_to_fp8_mxfp8_scaling(
         end_offset = start_offset + master_weight.numel()
         if use_fsdp_shard_model_weights:
             rowwise_fragment = model_weight_fragment[0]
-            colwise_fragment = model_weight_fragment[1]
+            colwise_fragment = (
+                model_weight_fragment[1]
+                if scale_inv_colwise.numel()
+                else torch.empty(0, dtype=torch.uint8, device=device)
+            )
         else:
             rowwise_fragment = model_weight._rowwise_data.reshape(-1)[start_offset:end_offset]
-            colwise_fragment = model_weight._columnwise_data.reshape(-1)[start_offset:end_offset]
+            colwise_fragment = (
+                model_weight._columnwise_data.reshape(-1)[start_offset:end_offset]
+                if scale_inv_colwise.numel()
+                else torch.empty(0, dtype=torch.uint8, device=device)
+            )
         if len(model_weight.shape) != 2:
             raise ValueError(
                 "model_weight must be 2D for MXFP8 scaling partial cast, "
