@@ -1048,9 +1048,7 @@ def _cast_master_weights_to_fp8_mxfp8_scaling(
             raise ValueError(
                 f"rowwise_scale_inv must be 2D, got {len(rowwise_shape)}D shape {rowwise_shape}"
             )
-        if (model_weight._columnwise_data is None) != (
-            model_weight._columnwise_scale_inv is None
-        ):
+        if (model_weight._columnwise_data is None) != (model_weight._columnwise_scale_inv is None):
             raise ValueError("MXFP8 columnwise data and scales must both be present or absent")
         colwise_shape = (
             model_weight._columnwise_scale_inv.shape
