@@ -868,13 +868,15 @@ def quantize_weight(
             and isinstance(tensor, Float8BlockwiseQTensorStorage)
             and not tensor.requires_grad
             and tensor._is_2D_scaled
-            and tensor._rowwise_data is not None
-            and tensor._rowwise_scale_inv is not None
-            and not isinstance(quantizer, DebugQuantizer)
-            and not FP8GlobalStateManager.fp8_graph_capturing()
         ):
-            update_rowwise = True
-            update_columnwise = False
+            if (
+                tensor._rowwise_data is not None
+                and tensor._rowwise_scale_inv is not None
+                and not isinstance(quantizer, DebugQuantizer)
+                and not FP8GlobalStateManager.fp8_graph_capturing()
+            ):
+                update_rowwise = True
+                update_columnwise = False
         tensor.update_usage(
             rowwise_usage=update_rowwise,
             columnwise_usage=update_columnwise,

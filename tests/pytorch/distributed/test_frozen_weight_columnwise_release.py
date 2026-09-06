@@ -9,6 +9,7 @@ and run_tpsp_frozen_release.py for the executed checks).
 """
 
 import os
+import signal
 import subprocess
 from pathlib import Path
 
@@ -29,6 +30,7 @@ fp8_block_scaling_available, reason_for_no_fp8_block_scaling = te.is_fp8_block_s
 TEST_ROOT = Path(__file__).parent.resolve()
 NUM_PROCS: int = 2
 LAUNCH_CMD = ["torchrun", f"--nproc_per_node={NUM_PROCS}"]
+TEST_TIMEOUT = 600
 
 _CASES = (
     ("fsdp2_reshard_true", "run_fsdp2_frozen_release.py", ["--reshard-after-forward", "1"]),
@@ -40,7 +42,17 @@ _CASES = (
 @pytest.mark.skipif(not fp8_block_scaling_available, reason=reason_for_no_fp8_block_scaling)
 @pytest.mark.parametrize("case", _CASES, ids=lambda case: case[0])
 def test_distributed_frozen_columnwise_release(case):
-    _, script, extra_args = case
+    case_name, script, extra_args = case
     test_cmd = LAUNCH_CMD + [str(TEST_ROOT / script)] + extra_args
-    result = subprocess.run(test_cmd, env=os.environ, check=False)
-    assert result.returncode == 0
+    with subprocess.Popen(test_cmd, env=os.environ, start_new_session=True) as process:
+        try:
+            process.wait(timeout=TEST_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            # Kill the whole group so torchrun's ranks cannot outlive the timeout.
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait()
+            pytest.fail(f"{case_name} timed out after {TEST_TIMEOUT}s; process group terminated")
+        assert process.returncode == 0
