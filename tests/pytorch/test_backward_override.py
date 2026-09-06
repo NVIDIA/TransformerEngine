@@ -872,36 +872,26 @@ def test_backward_override_recipe_matches_requested_mode(
 
 
 @pytest.mark.parametrize("recipe_name", _primary_weight_recipe_list)
-@pytest.mark.parametrize("backward_override", _BACKWARD_OVERRIDES)
-@pytest.mark.parametrize(
-    "omit_columnwise_primary_weight_storage",
-    (False, True),
-    ids=("default_storage", "rowwise_only"),
-)
+@pytest.mark.parametrize("backward_override", (None, *_BACKWARD_OVERRIDES))
+@pytest.mark.parametrize("module_kind", ("linear", "basic_linear"))
 def test_primary_weight_layout_with_backward_override(
     recipe_name: str,
-    backward_override: str,
-    omit_columnwise_primary_weight_storage: bool,
+    backward_override: Optional[str],
+    module_kind: str,
 ) -> None:
-    """Columnwise primary-weight storage is omitted only when explicitly requested."""
+    """The recipe determines primary storage, which survives forward/backward."""
     mode_recipe = make_recipe(recipe_name, backward_override=backward_override)
-    skip_unsupported_backward_override("linear", mode_recipe, backward_override)
+    if backward_override is not None:
+        skip_unsupported_backward_override("linear", mode_recipe, backward_override)
 
-    with te.quantized_model_init(
-        enabled=True,
-        recipe=mode_recipe,
-        omit_columnwise_primary_weight_storage=omit_columnwise_primary_weight_storage,
-    ):
-        module = te.Linear(
-            64,
-            64,
-            bias=False,
-            params_dtype=torch.bfloat16,
-            device="cuda",
-        )
+    with te.quantized_model_init(enabled=True, recipe=mode_recipe):
+        if module_kind == "linear":
+            module = te.Linear(64, 64, bias=False, params_dtype=torch.bfloat16, device="cuda")
+        else:
+            module = te_ops.BasicLinear(64, 64, dtype=torch.bfloat16, device="cuda")
 
     weight = module.weight
-    expect_columnwise = not omit_columnwise_primary_weight_storage
+    expect_columnwise = backward_override is None
 
     def _check_weight_layout() -> None:
         assert weight._rowwise_data is not None
@@ -925,11 +915,11 @@ def test_primary_weight_layout_with_backward_override(
 def test_default_primary_weight_storage_allows_quantized_backward_switch(
     recipe_name: str,
 ) -> None:
-    """Default storage preserves runtime switches from an override to quantized backward."""
+    """Weights initialized for quantized backward can enter and leave override mode."""
     mode_recipe = make_recipe(recipe_name, backward_override="dequantized")
     default_recipe = make_recipe(recipe_name)
 
-    with te.quantized_model_init(enabled=True, recipe=mode_recipe):
+    with te.quantized_model_init(enabled=True, recipe=default_recipe):
         module = te.Linear(
             64,
             64,
@@ -939,29 +929,26 @@ def test_default_primary_weight_storage_allows_quantized_backward_switch(
         )
 
     x = torch.randn(32, 64, dtype=torch.bfloat16, device="cuda", requires_grad=True)
-    with te.autocast(enabled=True, recipe=default_recipe):
-        y = module(x)
-    y.sum().backward()
+    for runtime_recipe in (mode_recipe, default_recipe):
+        with te.autocast(enabled=True, recipe=runtime_recipe):
+            y = module(x)
+        y.sum().backward()
 
 
 @pytest.mark.parametrize("recipe_name", _primary_weight_recipe_list)
-def test_rowwise_only_primary_weight_rejects_quantized_backward(recipe_name: str) -> None:
+@pytest.mark.parametrize("module_kind", ("linear", "basic_linear"))
+def test_rowwise_only_primary_weight_rejects_quantized_backward(
+    recipe_name: str, module_kind: str
+) -> None:
     """A rowwise-only primary weight fails before quantized backward requests columnwise data."""
     mode_recipe = make_recipe(recipe_name, backward_override="dequantized")
     default_recipe = make_recipe(recipe_name)
 
-    with te.quantized_model_init(
-        enabled=True,
-        recipe=mode_recipe,
-        omit_columnwise_primary_weight_storage=True,
-    ):
-        module = te.Linear(
-            64,
-            64,
-            bias=False,
-            params_dtype=torch.bfloat16,
-            device="cuda",
-        )
+    with te.quantized_model_init(enabled=True, recipe=mode_recipe):
+        if module_kind == "linear":
+            module = te.Linear(64, 64, bias=False, params_dtype=torch.bfloat16, device="cuda")
+        else:
+            module = te_ops.BasicLinear(64, 64, dtype=torch.bfloat16, device="cuda")
 
     x = torch.randn(32, 64, dtype=torch.bfloat16, device="cuda", requires_grad=True)
     with pytest.raises(RuntimeError, match="without columnwise storage"):
@@ -969,16 +956,27 @@ def test_rowwise_only_primary_weight_rejects_quantized_backward(recipe_name: str
             module(x)
 
 
-@pytest.mark.parametrize("recipe_name", _primary_weight_recipe_list)
-def test_rowwise_only_primary_weight_requires_backward_override(recipe_name: str) -> None:
-    """The rowwise-only opt-in rejects recipes that need quantized backward."""
-    with pytest.raises(ValueError, match="requires a recipe with backward_override"):
-        with te.quantized_model_init(
-            enabled=True,
-            recipe=make_recipe(recipe_name),
-            omit_columnwise_primary_weight_storage=True,
-        ):
-            pass
+@pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
+@pytest.mark.parametrize("backward_override", (None, *_BACKWARD_OVERRIDES))
+def test_grouped_op_primary_weight_layout(backward_override: Optional[str]) -> None:
+    """Packed op weights use the same recipe-driven allocation policy as modules.
+
+    This checks allocation, not support for grouped-op override backward.
+    """
+    mode_recipe = make_recipe("mxfp8", backward_override=backward_override)
+    with te.quantized_model_init(recipe=mode_recipe):
+        module = te_ops.GroupedLinear(2, 64, 64, bias=False, dtype=torch.bfloat16, device="cuda")
+    for idx in range(2):
+        weight = getattr(module, f"weight{idx}")
+        assert weight._rowwise_data is not None
+        assert weight._rowwise_scale_inv is not None
+        assert (weight._columnwise_data is not None) == (backward_override is None)
+        assert (weight._columnwise_scale_inv is not None) == (backward_override is None)
+
+    if backward_override is not None:
+        with te.autocast(recipe=make_recipe("mxfp8")):
+            with pytest.raises(RuntimeError, match="without columnwise storage"):
+                module.pre_fuser_forward(requires_grad=True)
 
 
 @pytest.mark.parametrize("recipe_name", _quantized_numerics_recipe_list)
