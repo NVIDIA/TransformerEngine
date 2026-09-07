@@ -17,13 +17,20 @@ recv_capacity = ep_size * num_tokens * top_k  # dropless worst case per rank
 
 # Once per process: sets up NCCL EP on ep_group's communicator.
 ep_bootstrap(
-    ep_group, num_experts=num_experts, max_tokens_per_rank=num_tokens,
-    hidden_dim=hidden_size, num_topk=top_k, recv_capacity_per_rank=recv_capacity,
+    ep_group,
+    num_experts=num_experts,
+    max_tokens_per_rank=num_tokens,
+    hidden_dim=hidden_size,
+    num_topk=top_k,
+    recv_capacity_per_rank=recv_capacity,
 )
 # One buffer per in-flight layer call (e.g. per pipeline microbatch).
 buffer = EpBuffer(
-    top_k=top_k, max_tokens_per_rank=num_tokens, recv_capacity_per_rank=recv_capacity,
-    hidden_dim=hidden_size, num_local_experts=num_local_experts,
+    top_k=top_k,
+    max_tokens_per_rank=num_tokens,
+    recv_capacity_per_rank=recv_capacity,
+    hidden_dim=hidden_size,
+    num_local_experts=num_local_experts,
 )
 
 # Dispatch: all-to-all sends each token to the rank owning its expert.

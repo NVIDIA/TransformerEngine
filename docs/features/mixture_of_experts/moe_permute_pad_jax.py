@@ -30,6 +30,8 @@ expert_out = expert_out * permuted_probs[:, None]
 
 # Pass pad_offsets so token combine removes the padding it added.
 output = te_permutation.token_combine(
-    expert_out, row_id_map, pad_offsets=pad_offsets,
+    expert_out,
+    row_id_map,
+    pad_offsets=pad_offsets,
 )
 # END_MOE_PERMUTE_PAD_JAX

@@ -14,20 +14,27 @@ keys = jax.random.split(jax.random.key(0), 3)
 hidden_states = jax.random.normal(keys[0], (num_tokens, hidden_size), dtype=jnp.bfloat16)
 gate_kernel = jax.random.normal(keys[1], (hidden_size, num_experts), dtype=jnp.bfloat16)
 kernel = jax.random.normal(
-    keys[2], (num_experts, hidden_size, hidden_size), dtype=jnp.bfloat16,
+    keys[2],
+    (num_experts, hidden_size, hidden_size),
+    dtype=jnp.bfloat16,
 )
+
 
 @jax.jit
 def moe_layer(tokens, gate_weight, expert_weights):
     # 1. Router: score the experts and pick the top-k for each token.
     logits = tokens @ gate_weight
     probs, routing_map = fused_topk_with_score_function(
-        logits, topk=top_k, score_function="softmax",
+        logits,
+        topk=top_k,
+        score_function="softmax",
     )
 
     # 2. Dispatch: gather tokens into expert-contiguous order.
     permuted, _, row_id_map, _, group_sizes = te_permutation.token_dispatch(
-        tokens, routing_map.astype(jnp.int32), num_out_tokens=num_tokens * top_k,
+        tokens,
+        routing_map.astype(jnp.int32),
+        num_out_tokens=num_tokens * top_k,
     )
 
     # 3. Experts: one grouped call over all expert token blocks.
@@ -35,6 +42,7 @@ def moe_layer(tokens, gate_weight, expert_weights):
 
     # 4. Combine: restore token order and merge the top-k contributions.
     return te_permutation.token_combine(expert_out, row_id_map, merging_probs=probs)
+
 
 output = moe_layer(hidden_states, gate_kernel, kernel)
 output.block_until_ready()

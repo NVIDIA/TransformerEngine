@@ -14,7 +14,11 @@ from transformer_engine.pytorch import moe_permute_and_pad_with_probs, moe_unper
 tokens_per_expert = routing_map.sum(dim=0)  # [num_experts]
 padded, permuted_probs, row_id_map, pad_offsets, padded_tokens_per_expert = (
     moe_permute_and_pad_with_probs(
-        tokens, probs, routing_map, tokens_per_expert, align_size=128,
+        tokens,
+        probs,
+        routing_map,
+        tokens_per_expert,
+        align_size=128,
     )
 )
 
