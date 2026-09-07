@@ -1,4 +1,3 @@
-<?xml version="1.0" encoding="UTF-8" standalone="no"?>
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 300" width="100%" style="max-width: 820px;">
   <defs>
     <style>
@@ -8,7 +7,7 @@
       .tiny-label { font: 10px sans-serif; fill: #777; text-anchor: middle; }
       .op { fill: #e3f2fd; stroke: #1976d2; stroke-width: 1.8; }
       .act { fill: #e8f5e9; stroke: #388e3c; stroke-width: 1.8; }
-      .fused { fill: #f3e5f5; stroke: #7b1fa2; stroke-width: 2.5; }
+      .fused-mlp { fill: #f3e5f5; stroke: #7b1fa2; stroke-width: 2.5; }
       .hbm { fill: #fafafa; stroke: #9e9e9e; stroke-width: 1.3; }
       .arrow { stroke: #424242; stroke-width: 2; fill: none; marker-end: url(#ah); }
       .farrow { stroke: #7b1fa2; stroke-width: 2.2; fill: none; marker-end: url(#ahp); }
@@ -46,7 +45,7 @@
   <text x="424" y="165" class="small-label" style="text-anchor:start;">op fuser</text>
 
   <!-- Fused row -->
-  <rect x="160" y="196" width="500" height="56" class="fused"/>
+  <rect x="160" y="196" width="500" height="56" class="fused-mlp"/>
   <text x="410" y="220" class="label">Fused grouped MLP — single CuTe DSL kernel</text>
   <text x="410" y="239" class="small-label">FC1 + SwiGLU + FC2, intermediate kept on-chip</text>
   <text x="410" y="280" class="tiny-label">Blackwell (SM100), MXFP8 or NVFP4; activation also GeGLU or SReLU</text>
