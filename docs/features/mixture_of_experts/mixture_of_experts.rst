@@ -465,23 +465,30 @@ combine.
 
 **Communication and permutation in one step**
 
-Dispatch reads the top-k expert indices and moves each token straight into the
-slot range of its expert on the owning rank:
+Over a generic all-to-all the tokens have to be permuted twice: sorted by
+destination rank before the collective and regrouped by expert after it. The
+NCCL EP kernels fold both permutations into the transfer:
 
-* the receive buffer is already grouped by local expert;
-* combine reverses it and sums the contributions into the original token order.
+* dispatch computes the destination slot of every token from the top-k indices
+  and writes it there directly, so no permutation kernel runs before or after
+  the communication;
+* combine does the inverse in one pass: it returns each expert output to its
+  source rank and sums it into the original token position.
 
 **Receive buffer**
 
-Every expert owns a fixed slot range, so the buffer is sized up front:
+The number of tokens a rank receives depends on the routing, so the receive
+buffer can be sized in two ways:
 
-* ``recv_capacity_per_rank`` is the maximum number of tokens a rank receives per
-  step; ``ep_size * max_tokens_per_rank * top_k`` never drops a token, a smaller
-  value can overflow on skewed routing (see ``drop_on_overflow``);
-* with a fixed capacity the step allocates nothing, needs no host
-  synchronization and is CUDA-graph capturable;
-* without it (eager mode) the buffer is sized per step, with a host
-  synchronization.
+* **Fixed capacity.** ``recv_capacity_per_rank`` bounds the tokens a rank
+  receives per step and every local expert gets a fixed slot range in the
+  buffer. The step then allocates nothing, needs no host synchronization and is
+  CUDA-graph capturable. ``ep_size * max_tokens_per_rank * top_k`` never drops
+  a token; a smaller value saves memory but can overflow on skewed routing (see
+  ``drop_on_overflow``).
+* **Eager.** Without a capacity the buffer is sized from the actual receive
+  count each step. This costs a host synchronization and is not CUDA-graph
+  capturable.
 
 **Low precision**
 
@@ -498,7 +505,9 @@ Optionally:
 
 * the token and receive buffers are allocated as NCCL symmetric memory
   (``symm_mem_alloc``) and the kernels write directly into the peer's buffer;
-* the buffers must be persistent, which also makes them CUDA-graph friendly.
+* CUDA graphs work in both modes, but in zero-copy mode the automatically
+  allocated buffers are not capturable, so persistent buffers have to be
+  allocated once and passed to dispatch and combine.
 
 .. tabs::
 
