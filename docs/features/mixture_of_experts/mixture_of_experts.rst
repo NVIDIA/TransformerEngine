@@ -24,23 +24,23 @@ A token passes through the layer in the following stages:
 #. The **router** scores the experts for each token and selects the top-k of
    them.
 #. **Token dispatch** gathers the tokens into expert-contiguous order.
-#. With expert parallelism - experts sharded across devices - an
-   **all-to-all dispatch** sends each token to the rank that owns its expert.
 #. The **grouped MLP** (the experts) runs a single batched computation over all
-   expert blocks local to the device.
-#. With expert parallelism, an **all-to-all combine** returns the expert outputs
-   to the rank the token came from.
+   expert blocks.
 #. **Token combine** scatters the expert outputs back into the original token
    order, merging the contributions when a token was sent to more than one
    expert.
 
+With expert parallelism the experts are sharded across ranks, and an
+**all-to-all dispatch** and **all-to-all combine** take the place of token
+dispatch and token combine: the dispatch takes the router output directly and
+delivers each rank's tokens already grouped by local expert, and the combine
+returns the outputs to the source rank in the original token order.
+
 .. raw:: html
    :file: img/moe_layer_ep.svg
 
-*Figure 1. The stages of an MoE layer with expert parallelism. The router produces
-the* ``routing_map`` *consumed by token dispatch and the* ``probs`` *used as merging
-weights in token combine; the all-to-all dispatch and combine are only present
-when the experts are sharded across ranks.*
+*Figure 1. The stages of an MoE layer on a single device and with expert
+parallelism.*
 
 Transformer Engine provides a building block for each stage. They are exposed as
 standalone functions, so they can be assembled into a complete MoE layer or
@@ -413,7 +413,10 @@ With expert parallelism (EP) the experts are sharded across devices, and each
 device owns a slice of them. Two all-to-all collectives wrap the local expert
 computation: a **dispatch** all-to-all sends each token to the rank that owns its
 expert, the local grouped GEMM runs, and a **combine** all-to-all returns the
-results to the source rank.
+results to the source rank. Dispatch takes the router output (expert indices and
+weights) directly and delivers a receive buffer grouped by local expert, and
+combine writes the results back in the original token order, so no separate
+token dispatch or token combine is needed.
 
 .. raw:: html
    :file: img/moe_expert_parallel.svg
