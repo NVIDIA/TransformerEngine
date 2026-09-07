@@ -498,17 +498,6 @@ Dispatch can quantize the tokens before sending them:
   local expert) that the fused grouped MLP accepts as is;
 * MXFP8 is supported today; further recipes are in progress.
 
-**Zero-copy mode**
-
-By default the payload is copied through the library's staging buffers.
-Optionally:
-
-* the token and receive buffers are allocated as NCCL symmetric memory
-  (``symm_mem_alloc``) and the kernels write directly into the peer's buffer;
-* CUDA graphs work in both modes, but in zero-copy mode the automatically
-  allocated buffers are not capturable, so persistent buffers have to be
-  allocated once and passed to dispatch and combine.
-
 .. tabs::
 
    .. tab:: PyTorch
