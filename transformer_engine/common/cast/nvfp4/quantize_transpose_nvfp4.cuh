@@ -20,10 +20,11 @@
 
 #include "../../common.h"
 #include "../../util/math.h"
-#include "../../util/ptx.cuh"
+#include "../../util/ptx_arch_spec.cuh"
 #include "../../utils.cuh"
 #include "core_nvfp4.cuh"
 #include "specialized/quantize_transpose_nvfp4_tuned_1D.cuh"
+#include "swizzle.cuh"
 
 namespace transformer_engine {
 namespace dispatch {
@@ -98,6 +99,31 @@ __launch_bounds__(BLOCK_SIZE)
 #endif
 }
 
+template <typename IType, int BLOCK_SIZE>
+__global__ void __launch_bounds__(BLOCK_SIZE)
+    compute_columnwise_amax_kernel(const int num_rows, const int num_cols,
+                                   const IType *__restrict__ input,
+                                   float *__restrict__ output_columnwise_amax,
+                                   const float *__restrict__ noop) {
+  if (noop != nullptr && noop[0] == 1.0f) {
+    return;
+  }
+
+  const int col_idx = blockIdx.x;
+  if (col_idx >= num_cols) return;
+
+  float thread_max = 0.0f;
+  for (int row_idx = threadIdx.x; row_idx < num_rows; row_idx += BLOCK_SIZE) {
+    thread_max = fmaxf(thread_max, fabsf(static_cast<float>(input[row_idx * num_cols + col_idx])));
+  }
+  const float col_amax =
+      reduce_max<BLOCK_SIZE / THREADS_PER_WARP>(thread_max, threadIdx.x / THREADS_PER_WARP);
+
+  if (threadIdx.x == 0) {
+    output_columnwise_amax[col_idx] = col_amax;
+  }
+}
+
 template <typename IType>
 void launch_compute_rowwise_amax(const int num_rows, const int num_cols, const IType *input,
                                  float *output_rowwise_amax, cudaStream_t stream,
@@ -109,6 +135,20 @@ void launch_compute_rowwise_amax(const int num_rows, const int num_cols, const I
 
   compute_rowwise_amax_kernel<IType, ROWWISE_AMAX_BLOCK_SIZE>
       <<<grid, block, 0, stream>>>(num_rows, num_cols, input, output_rowwise_amax, noop);
+  NVTE_CHECK_CUDA(cudaGetLastError());
+}
+
+template <typename IType>
+void launch_compute_columnwise_amax(const int num_rows, const int num_cols, const IType *input,
+                                    float *output_columnwise_amax, cudaStream_t stream,
+                                    const float *noop = nullptr) {
+  if (num_rows == 0 || num_cols == 0) return;
+
+  dim3 grid(num_cols);
+  dim3 block(ROWWISE_AMAX_BLOCK_SIZE);
+
+  compute_columnwise_amax_kernel<IType, ROWWISE_AMAX_BLOCK_SIZE>
+      <<<grid, block, 0, stream>>>(num_rows, num_cols, input, output_columnwise_amax, noop);
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
@@ -144,6 +184,40 @@ inline void compute_rowwise_amax(const Tensor &input, const Tensor *noop, Tensor
     const auto *input_ptr = reinterpret_cast<const float *>(input.data.dptr);
     launch_compute_rowwise_amax<float>(static_cast<int>(rows), static_cast<int>(cols), input_ptr,
                                        amax_ptr, stream, noop_ptr);
+  } else {
+    NVTE_ERROR(
+        "Unsupported input dtype for row-scaled NVFP4 quantization. "
+        "Expected BFloat16, Float16, or Float32.");
+  }
+#else
+  NVTE_ERROR("FP4 support requires CUDA 12.8+, but compile-time CUDA version is ", CUDA_VERSION);
+#endif  // FP4_TYPE_SUPPORTED
+}
+
+inline void compute_columnwise_amax(const Tensor &input, const Tensor *noop, Tensor *output,
+                                    cudaStream_t stream) {
+#if FP4_TYPE_SUPPORTED
+  using namespace rowwise_amax_kernel;
+
+  const auto [rows, cols] = input.flat_2d_dims();
+  auto *amax_ptr = reinterpret_cast<float *>(output->columnwise_amax.dptr);
+  NVTE_CHECK(amax_ptr != nullptr, "Row-scaled columnwise amax tensor must be allocated.");
+  NVTE_CHECK(output->columnwise_amax.numel() == cols, "Row-scaled columnwise amax must have ", cols,
+             " entries, got ", output->columnwise_amax.shape, ".");
+
+  const auto *noop_ptr = reinterpret_cast<const float *>(noop->data.dptr);
+  if (input.dtype() == DType::kBFloat16) {
+    const auto *input_ptr = reinterpret_cast<const __nv_bfloat16 *>(input.data.dptr);
+    launch_compute_columnwise_amax<__nv_bfloat16>(static_cast<int>(rows), static_cast<int>(cols),
+                                                  input_ptr, amax_ptr, stream, noop_ptr);
+  } else if (input.dtype() == DType::kFloat16) {
+    const auto *input_ptr = reinterpret_cast<const half *>(input.data.dptr);
+    launch_compute_columnwise_amax<half>(static_cast<int>(rows), static_cast<int>(cols), input_ptr,
+                                         amax_ptr, stream, noop_ptr);
+  } else if (input.dtype() == DType::kFloat32) {
+    const auto *input_ptr = reinterpret_cast<const float *>(input.data.dptr);
+    launch_compute_columnwise_amax<float>(static_cast<int>(rows), static_cast<int>(cols), input_ptr,
+                                          amax_ptr, stream, noop_ptr);
   } else {
     NVTE_ERROR(
         "Unsupported input dtype for row-scaled NVFP4 quantization. "
@@ -329,11 +403,9 @@ __global__ void __launch_bounds__(THREADS_NUM)
   constexpr size_t out_mem_rowwise_scales = 0;
 
   extern __shared__ char dynamic_shmem[];
-  uintptr_t base_shmem_ptr = reinterpret_cast<uintptr_t>(dynamic_shmem);
   // Manually align dynamic SHMEM per TMA requirements using padding
   // __align__(128) Does not guarantee the pointer to be aligned!
-  uintptr_t dshmem = (base_shmem_ptr + TMA_SHMEM_ALIGNMENT - 1) &
-                     ~(static_cast<uintptr_t>(TMA_SHMEM_ALIGNMENT - 1));
+  char *dshmem = align_up(dynamic_shmem, TMA_SHMEM_ALIGNMENT);
 
   // The destination shared memory buffer of a bulk tensor operation should be 16-byte aligned
   IType *in_sh = reinterpret_cast<IType *>(dshmem);
@@ -778,7 +850,8 @@ __global__ void __launch_bounds__(THREADS_NUM)
 }
 
 template <bool COMPUTE_ACTIVATIONS, typename ParamOP, float (*OP)(float, const ParamOP &),
-          typename IType, bool USE_STOCHASTIC_ROUNDING, bool RETURN_ROWWISE, bool RETURN_TRANSPOSE>
+          typename IType, bool USE_STOCHASTIC_ROUNDING, bool RETURN_ROWWISE, bool RETURN_TRANSPOSE,
+          bool WITH_GEMM_SWIZZLED_SCALES = false>
 __global__ void __launch_bounds__(THREADS_NUM)
     quantize_transpose_nvfp4_2D_kernel(const __grid_constant__ CUtensorMap tensor_map_input,
                                        const __grid_constant__ CUtensorMap tensor_map_output,
@@ -870,11 +943,9 @@ __global__ void __launch_bounds__(THREADS_NUM)
   constexpr size_t out_mem_rowwise_scales = 0;
 
   extern __shared__ char dynamic_shmem[];
-  uintptr_t base_shmem_ptr = reinterpret_cast<uintptr_t>(dynamic_shmem);
   // Manually align dynamic SHMEM per TMA requirements using padding
   // __align__(128) Does not guarantee the pointer to be aligned!
-  uintptr_t dshmem = (base_shmem_ptr + TMA_SHMEM_ALIGNMENT - 1) &
-                     ~(static_cast<uintptr_t>(TMA_SHMEM_ALIGNMENT - 1));
+  char *dshmem = align_up(dynamic_shmem, TMA_SHMEM_ALIGNMENT);
 
   // The destination shared memory buffer of a bulk tensor operation should be 16-byte aligned
   IType *in_sh = reinterpret_cast<IType *>(dshmem);
@@ -1206,7 +1277,16 @@ __global__ void __launch_bounds__(THREADS_NUM)
         const size_t scales_offset_Y =
             scales_offset_Y_rowwise + stage * BUFF_DIM_Y + it * THREADS_Y_ROWWISE;
         const size_t scales_offset_X = scales_offset_X_rowwise;
-        const size_t scale_idx_global = scales_offset_Y * scale_stride + scales_offset_X;
+        size_t scale_idx_global;
+        if constexpr (WITH_GEMM_SWIZZLED_SCALES) {
+          // Write the scale directly into the cuBLAS GEMM-swizzled layout so no
+          // separate swizzle pass is needed. SFs_per_row (= cols / SCALE_DIM) is
+          // the number of compact scale columns.
+          scale_idx_global =
+              swizzle::gemm_swizzled_scale_idx(scales_offset_Y, scales_offset_X, SFs_per_row);
+        } else {
+          scale_idx_global = scales_offset_Y * scale_stride + scales_offset_X;
+        }
 
         const bool rowwise_scale_is_within_bounds_Y =
             (stage_rowwise_scales_offset_Y + it * THREADS_Y_ROWWISE + tid_Y_rowwise) < chunk_rows;
@@ -1289,20 +1369,35 @@ __global__ void __launch_bounds__(THREADS_NUM)
 
   // Vectorized store scaling factors through SHMEM
   if (RETURN_TRANSPOSE && colwise_scale_is_within_bounds_Y) {
-    using ScalesVec = Vec<nvfp4_scale_t, SCALES_PER_CHUNK_Y>;
     const size_t scale_idx_sh = tid_Y_t * SCALES_PER_CHUNK_Y;
-    ScalesVec &scales_vec = *reinterpret_cast<ScalesVec *>(&out_colwise_scales_sh[scale_idx_sh]);
-    const size_t scale_idx_global = scales_offset_Y_t * scale_stride_t + scales_offset_X_t;
     const size_t count =  // number of scales in Y dimension of this chunk
         (chunk_rows >= CHUNK_DIM_Y) ? SCALES_PER_CHUNK_Y : (chunk_rows / SCALE_DIM);
-    nvfp4_scale_t *dst = &scales_t_ptr[scale_idx_global];
-    constexpr size_t vec_bytes = SCALES_PER_CHUNK_Y * sizeof(nvfp4_scale_t);
-    if (count == SCALES_PER_CHUNK_Y && (reinterpret_cast<uintptr_t>(dst) % vec_bytes == 0)) {
-      // Fast path: vectorized store when destination is properly aligned
-      scales_vec.store_to(dst);
+    if constexpr (WITH_GEMM_SWIZZLED_SCALES) {
+      // The swizzled layout scatters the contiguous columnwise scales, so the
+      // vectorized store cannot be used. Emit each scale at its swizzled offset.
+      // The transposed scale matrix has `rows / SCALE_DIM` (= M/16) column tiles
+      // (exact because the swizzled path requires 128-aligned dims). Read
+      // SCALE_DIM by value; passing the namespace-scope constexpr by reference
+      // (e.g. via DIVUP) would ODR-use it and fail to compile in device code.
+      const size_t col_length_t = rows / SCALE_DIM;
+      for (size_t k = 0; k < count; ++k) {
+        const size_t off = swizzle::gemm_swizzled_scale_idx(scales_offset_Y_t,
+                                                            scales_offset_X_t + k, col_length_t);
+        scales_t_ptr[off] = out_colwise_scales_sh[scale_idx_sh + k];
+      }
     } else {
-      // Safe path: element-wise store for tails or unaligned destinations
-      scales_vec.store_to_elts(dst, 0, count);
+      using ScalesVec = Vec<nvfp4_scale_t, SCALES_PER_CHUNK_Y>;
+      ScalesVec &scales_vec = *reinterpret_cast<ScalesVec *>(&out_colwise_scales_sh[scale_idx_sh]);
+      const size_t scale_idx_global = scales_offset_Y_t * scale_stride_t + scales_offset_X_t;
+      nvfp4_scale_t *dst = &scales_t_ptr[scale_idx_global];
+      constexpr size_t vec_bytes = SCALES_PER_CHUNK_Y * sizeof(nvfp4_scale_t);
+      if (count == SCALES_PER_CHUNK_Y && (reinterpret_cast<uintptr_t>(dst) % vec_bytes == 0)) {
+        // Fast path: vectorized store when destination is properly aligned
+        scales_vec.store_to(dst);
+      } else {
+        // Safe path: element-wise store for tails or unaligned destinations
+        scales_vec.store_to_elts(dst, 0, count);
+      }
     }
   }
 
@@ -1358,7 +1453,12 @@ void quantize_transpose(const Tensor &input, const Tensor *noop, Tensor *output,
              "Row-scaled NVFP4 quantization requires rowwise amax.");
   NVTE_CHECK(!row_scaled_nvfp4 || !output->has_columnwise_data(),
              "Row-scaled NVFP4 quantization does not produce columnwise output.");
-  NVTE_CHECK(!output->with_gemm_swizzled_scales, "Output must have scales in compact format.");
+  // In-kernel GEMM-swizzled scale output is only implemented on the 2D quantization
+  // path; every other configuration must emit compact scales.
+  const bool with_gemm_swizzled_scales = output->with_gemm_swizzled_scales;
+  NVTE_CHECK(!with_gemm_swizzled_scales || use_2d_quantization,
+             "In-kernel GEMM-swizzled NVFP4 scales are only supported on the 2D quantization path; "
+             "other paths must emit scales in compact format.");
   if (return_transpose) {
     NVTE_CHECK(output->has_columnwise_data(), "NVFP4 transposed output tensor must be allocated.");
     NVTE_CHECK(is_fp4_dtype(output->columnwise_data.dtype),
@@ -1373,6 +1473,10 @@ void quantize_transpose(const Tensor &input, const Tensor *noop, Tensor *output,
              "Number of tensor rows must be a multiple of 32");  // 16B alignment for TMA
   NVTE_CHECK(cols % 32 == 0,
              "Number of tensor cols must be a multiple of 32");  // 16B alignment for TMA
+  // The swizzled scale-factor layout is tiled 128x4; only 128-aligned dims avoid
+  // needing padded (zeroed) scale tiles, so restrict in-kernel swizzle to them.
+  NVTE_CHECK(!with_gemm_swizzled_scales || (rows % 128 == 0 && cols % 128 == 0),
+             "In-kernel GEMM-swizzled NVFP4 scales require rows and cols to be multiples of 128.");
 
   const size_t blocks_Y = DIVUP(rows, CHUNK_DIM_Y);
   const size_t blocks_X = DIVUP(cols, CHUNK_DIM_X);
@@ -1451,9 +1555,15 @@ void quantize_transpose(const Tensor &input, const Tensor *noop, Tensor *output,
                                                           ROW_SCALED_NVFP4>;
 
             if constexpr (use_2d_quantization) {
-              kernel = quantize_transpose_nvfp4_2D_kernel<COMPUTE_ACTIVATIONS, ParamOP, OP, IType,
-                                                          USE_STOCHASTIC_ROUNDING, RETURN_ROWWISE,
-                                                          RETURN_TRANSPOSE>;
+              if (with_gemm_swizzled_scales) {
+                kernel = quantize_transpose_nvfp4_2D_kernel<
+                    COMPUTE_ACTIVATIONS, ParamOP, OP, IType, USE_STOCHASTIC_ROUNDING,
+                    RETURN_ROWWISE, RETURN_TRANSPOSE, /*WITH_GEMM_SWIZZLED_SCALES=*/true>;
+              } else {
+                kernel = quantize_transpose_nvfp4_2D_kernel<
+                    COMPUTE_ACTIVATIONS, ParamOP, OP, IType, USE_STOCHASTIC_ROUNDING,
+                    RETURN_ROWWISE, RETURN_TRANSPOSE, /*WITH_GEMM_SWIZZLED_SCALES=*/false>;
+              }
             }
 
             cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size);

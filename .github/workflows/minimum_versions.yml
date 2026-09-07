@@ -1,0 +1,85 @@
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# See LICENSE for license information.
+
+# Verify that TE builds and imports against the minimum supported framework versions.
+name: 'Minimum supported versions'
+on:
+  pull_request:
+  workflow_dispatch:
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+env:
+  MIN_TORCH_VERSION: "2.8.0"
+  MIN_JAX_VERSION: "0.5.3"
+jobs:
+  min-pytorch:
+    name: 'Minimum supported PyTorch'
+    runs-on: ubuntu-latest
+    container:
+      image: nvcr.io/nvidia/cuda:12.8.0-devel-ubuntu22.04
+      options: --user root
+    steps:
+      - name: 'Dependencies'
+        run: |
+          apt-get update
+          apt-get install -y --allow-change-held-packages git python3.10 python3-pip cudnn9-cuda-12 libnccl-dev libnccl2
+          python3.10 --version
+          python3.10 -m pip install torch==${MIN_TORCH_VERSION}
+          python3.10 -m pip install cmake pybind11[global] ninja pydantic "importlib-metadata>=1.0" packaging einops onnxscript "nvidia-cudnn-frontend>=1.25.0"
+      - name: 'Checkout'
+        uses: actions/checkout@v3
+        with:
+          submodules: recursive
+      - name: ccache
+        uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad
+      - name: 'Build'
+        run: NVTE_USE_CCACHE=1 NVTE_CCACHE_BIN=sccache python3.10 -m pip install --no-build-isolation --no-deps . -v
+        env:
+          NVTE_FRAMEWORK: pytorch
+          # Single arch to keep memory/build size down; sm90 so the NCCL EP
+          # path (and its torch-version gate) is exercised
+          NVTE_CUDA_ARCHS: "90"
+          # Prefer apt cudnn9 headers over the pip nvidia-cudnn-cu12 copy
+          CUDNN_INCLUDE_PATH: /usr/include/x86_64-linux-gnu
+          CUDNN_LIBRARY_PATH: /usr/lib/x86_64-linux-gnu
+          # Full parallelism OOMs the 7GB runner (exit 137)
+          MAX_JOBS: 2
+          SCCACHE_GHA_ENABLED: "true"
+      - name: 'Sanity check'
+        # No GPU driver on the runner; the sm90 build links libcuda via NCCL EP
+        run: |
+          ln -s /usr/local/cuda/lib64/stubs/libcuda.so /usr/lib/x86_64-linux-gnu/libcuda.so.1
+          python3.10 tests/pytorch/test_sanity_import.py
+  min-jax:
+    name: 'Minimum supported JAX'
+    runs-on: ubuntu-latest
+    container:
+      image: nvcr.io/nvidia/cuda:12.8.0-devel-ubuntu22.04
+      options: --user root
+    steps:
+      - name: 'Dependencies'
+        run: |
+          apt-get update
+          apt-get install -y git python3.10 python3-pip cudnn9-cuda-12
+          python3.10 --version
+          python3.10 -m pip install jax==${MIN_JAX_VERSION} "flax>=0.7.1"
+          python3.10 -m pip install cmake pybind11[global] ninja packaging pydantic "nvidia-cudnn-frontend>=1.25.0"
+      - name: 'Checkout'
+        uses: actions/checkout@v3
+        with:
+          submodules: recursive
+      - name: ccache
+        uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad
+      - name: 'Build'
+        run: NVTE_USE_CCACHE=1 NVTE_CCACHE_BIN=sccache python3.10 -m pip install --no-build-isolation --no-deps . -v
+        env:
+          NVTE_FRAMEWORK: jax
+          NVTE_CUDA_ARCHS: "70"
+          CUDNN_INCLUDE_PATH: /usr/include/x86_64-linux-gnu
+          CUDNN_LIBRARY_PATH: /usr/lib/x86_64-linux-gnu
+          MAX_JOBS: 2
+          SCCACHE_GHA_ENABLED: "true"
+      - name: 'Sanity check'
+        run: python3.10 tests/jax/test_sanity_import.py

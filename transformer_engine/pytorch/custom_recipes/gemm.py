@@ -4,16 +4,32 @@
 
 """GEMM API that enables custom GEMM logic for custom quantization recipes."""
 
+import dataclasses
+import enum
 from typing import Iterable, Optional
 
 import torch
 
-from transformer_engine.pytorch.custom_recipes.quantization import (
-    MMParams,
-    GEMMType,
-)
 from transformer_engine.pytorch.quantized_tensor import QuantizedTensorStorage, Quantizer
 from transformer_engine.pytorch.tensor.utils import is_custom
+
+
+@enum.unique
+class GEMMType(enum.Enum):
+    """Type of GEMM operation being performed."""
+
+    FPROP = "fprop"
+    DGRAD = "dgrad"
+    WGRAD = "wgrad"
+
+
+@dataclasses.dataclass(frozen=True)
+class MMParams:
+    """Matrix multiplication parameters."""
+
+    out_dtype: torch.dtype | None = None
+    # Use split accumulator for more accurate FP8 GEMM
+    use_split_accumulator: bool = True
 
 
 def custom_gemm(

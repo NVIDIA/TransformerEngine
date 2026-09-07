@@ -38,6 +38,9 @@ struct alignas(128) TensorMapStorage {
   alignas(128) CUtensorMap act_input[MAX_SUPPORTED_TENSOR_DESCRIPTORS];
   alignas(128) CUtensorMap output_rowwise[MAX_SUPPORTED_TENSOR_DESCRIPTORS];
   alignas(128) CUtensorMap output_colwise[MAX_SUPPORTED_TENSOR_DESCRIPTORS];
+  size_t rows[MAX_SUPPORTED_TENSOR_DESCRIPTORS];
+  size_t cols[MAX_SUPPORTED_TENSOR_DESCRIPTORS];
+  size_t offsets[MAX_SUPPORTED_TENSOR_DESCRIPTORS];
 };
 
 // Internal linkage avoids device-link ODR issues when this header is included by multiple .cu TUs.
@@ -115,6 +118,9 @@ __global__ void __launch_bounds__(1)
   const size_t cols = get_tensor_cols_num(tensor_id, shape_rep, last_logical_dim, last_dims_ptr);
 
   const size_t offset_elts = offsets_ptr[tensor_id];
+  g_tensor_maps.rows[tensor_id] = rows;
+  g_tensor_maps.cols[tensor_id] = cols;
+  g_tensor_maps.offsets[tensor_id] = offset_elts;
 
   // Zero-sized groups: skip TMA descriptor update. The main kernel already returns
   // early for rows==0 or cols==0, but creating a TMA descriptor with a zero dimension

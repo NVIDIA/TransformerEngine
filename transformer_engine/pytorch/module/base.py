@@ -21,6 +21,12 @@ from torch.distributed.tensor import DTensor
 import transformer_engine_torch as tex
 
 from ._common import _ParameterInitMeta, noop_cat
+from .._extra_state import (
+    extra_state_pickle_advisory,
+    is_stateless_recipe,
+    should_load_extra_state_pickle,
+    unsafe_pickle_extra_state_enabled,
+)
 from ..quantization import (
     MXFP8BlockScalingRecipeState,
     DelayedScalingRecipeState,
@@ -46,12 +52,16 @@ from ..tensor.float8_tensor import Float8Quantizer, Float8CurrentScalingQuantize
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor.nvfp4_tensor import NVFP4Quantizer
 from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
+from ..tensor.hybrid_tensor import HybridQuantizer
+from ..tensor.identity_tensor import IdentityQuantizer
 from ..tensor.storage.float8_tensor_storage import Float8TensorStorage
 from ..tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
 from ..tensor.storage.nvfp4_tensor_storage import NVFP4TensorStorage
+from ..tensor.storage.hybrid_tensor_storage import HybridQuantizedTensorStorage
 from ..utils import (
     is_non_tn_fp8_gemm_supported,
     torch_get_autocast_gpu_dtype,
+    get_device_compute_capability,
     get_nvtx_range_context,
     nvtx_range_push,
     nvtx_range_pop,
@@ -79,6 +89,27 @@ _ub_initialized = False
 _ub_with_cublasmp = False
 _MIN_STREAM_PRIORITY, _MAX_STREAM_PRIORITY = None, None
 layers_atomic_ring_exchange = []
+
+
+def _get_high_precision_init_val(parameter: torch.Tensor) -> Optional[torch.Tensor]:
+    """Return temporary pre-quantization initialization stored on a parameter."""
+    return getattr(parameter, "_high_precision_init_val", None)
+
+
+def _clear_high_precision_init_val(parameter: torch.Tensor) -> None:
+    """Release temporary pre-quantization initialization stored on a parameter."""
+    if hasattr(parameter, "_high_precision_init_val"):
+        del parameter._high_precision_init_val
+
+
+def _attach_high_precision_init_val(
+    parameter: torch.Tensor,
+    high_precision_init_val: torch.Tensor,
+) -> None:
+    """Attach TE's temporary high-precision initialization contract to a parameter."""
+    parameter._high_precision_init_val = high_precision_init_val
+    parameter.get_high_precision_init_val = MethodType(_get_high_precision_init_val, parameter)
+    parameter.clear_high_precision_init_val = MethodType(_clear_high_precision_init_val, parameter)
 
 
 def is_ub_initialized() -> bool:
@@ -554,6 +585,12 @@ def get_ub(name: str, use_fp8: bool):
     return _ub_communicators[key]
 
 
+@torch.compiler.assume_constant_result
+def get_ub_is_fp8(name: str, use_fp8: bool) -> bool:
+    """Query is_fp8_ubuf for a named UB communicator; treated as compile-time constant."""
+    return get_ub(name, use_fp8).is_fp8_ubuf()
+
+
 def destroy_ub():
     """Destroy all allocated userbuffer communicators."""
     global _ub_communicators, _ub_with_cublasmp, _ub_initialized
@@ -562,6 +599,9 @@ def destroy_ub():
     _ub_initialized = False
     global layers_atomic_ring_exchange
     layers_atomic_ring_exchange = []
+    # Compiled graphs may have baked is_fp8_ubuf() via assume_constant_result;
+    # reset so re-init with different settings doesn't read stale constants.
+    torch.compiler.reset()
 
 
 def fill_userbuffers_buffer_for_all_gather(
@@ -736,6 +776,14 @@ def _is_weight_workspace_valid(
             return False
         if quantizer.columnwise_usage and workspace._columnwise_data is None:
             return False
+    elif isinstance(workspace, HybridQuantizedTensorStorage):
+        # Workspace cached under one flag setting (e.g. inference with
+        # ``columnwise=False``) becomes stale when the next call needs the
+        # missing direction; invalidate so a fresh workspace is built.
+        if quantizer.rowwise_usage and workspace._rowwise_storage is None:
+            return False
+        if quantizer.columnwise_usage and workspace._columnwise_storage is None:
+            return False
     if isinstance(workspace, DebugQuantizedTensor) != isinstance(quantizer, DebugQuantizer):
         return False
     return True
@@ -890,6 +938,35 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         """
         super().__setattr__(name, value)
 
+    def _apply(self, *args, **kwargs):
+        """Re-attach attributes that ``swap_tensors`` moves off a quantized parameter.
+
+        ``_apply`` moves wrapper subclasses by exchanging the parameter's whole
+        ``__dict__``, which carries the inner buffers over but takes externally
+        attached state (``_high_precision_init_val``, ``main_grad``, ...) with it.
+        """
+        snapshots = {
+            name: (param, dict(param.__dict__))
+            for name, param in self._parameters.items()
+            if isinstance(param, QuantizedTensorStorage)
+        }
+        out = super()._apply(*args, **kwargs)
+        for name, (old_param, attrs) in snapshots.items():
+            new_param = self._parameters.get(name)
+            if new_param is None:
+                raise RuntimeError(
+                    f"{type(self).__name__}.{name} disappeared during _apply; the state"
+                    " attached to it cannot be restored"
+                )
+            for key, value in attrs.items():
+                # Still present -> tensor state; the post-swap value is the right one.
+                if key in new_param.__dict__:
+                    continue
+                if isinstance(value, MethodType) and value.__self__ is old_param:
+                    value = MethodType(value.__func__, new_param)
+                setattr(new_param, key, value)
+        return out
+
     @property
     def output_quantizer_role(self) -> Optional[QuantizerRole]:
         """Caller-configurable :class:`QuantizerRole` for the forward output quantizer.
@@ -1033,6 +1110,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         # Return early if recipe state matches recipe
         if self.fp8_meta_tensors_initialized:
             recipe_state = self.fp8_meta[fp8_meta_tensor_key]
+            # TODO(#3157): Match built-in recipes by full config, not just RecipeState type, so
+            # same-class mid-training changes rebuild quantizers/workspaces correctly.
             if recipe.delayed() and isinstance(recipe_state, DelayedScalingRecipeState):
                 self.adjust_amax_history_length(recipe.amax_history_len, fwd=fwd)
                 return
@@ -1049,7 +1128,11 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             if recipe.nvfp4() and isinstance(recipe_state, NVFP4BlockScalingRecipeState):
                 return
             if recipe.custom() and isinstance(recipe_state, CustomRecipeState):
-                return
+                # TODO(#3157): Compare CustomRecipe/qfactory config here. qfactory changes made
+                # mid-training on the same recipe object currently do not take effect because
+                # stale quantizers are reused.
+                if recipe_state.recipe is recipe:
+                    return
 
         # Max. number of fp8 tensors per GEMM = 3 (input, weight, output) for fwd and
         # 2 (grad_output and grad_input) for bwd
@@ -1191,6 +1274,40 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             f"{self.__class__.__name__} class does not implement _get_weight_quantizers function"
         )
 
+    def _enable_weight_preswizzle(
+        self,
+        quantizer: Quantizer,
+        weight: torch.Tensor,
+    ) -> bool:
+        """Whether to fuse scale-factor swizzling into weight quantization.
+
+        When enabled, scales are preswizzled during quantization instead of lazily
+        inside every GEMM. Disabled when primary weights are already quantized
+        (dequant and FSDP2 all-gather expect the unswizzled layout). For NVFP4,
+        enabled only for shapes/architectures where the fused swizzle+quantize
+        kernel is supported. Weight quantization always uses the single-tensor
+        kernel (including GroupedLinear's cached weights), so NVFP4 RHT
+        eligibility uses that kernel's 64-row alignment.
+        """
+        if self.primary_weights_in_fp8:
+            return False
+        if isinstance(quantizer, MXFP8Quantizer):
+            return True
+        if isinstance(quantizer, NVFP4Quantizer):
+            rows, cols = weight.numel() // weight.shape[-1], weight.shape[-1]
+            arch_supported = get_device_compute_capability() >= (10, 0)
+            if quantizer.with_rht:
+                return arch_supported and rows % 64 == 0 and cols % 128 == 0
+            return (
+                arch_supported
+                and quantizer.with_2d_quantization
+                and not quantizer.row_scaled_nvfp4
+                and not quantizer.nvfp4_use_4over6
+                and rows % 128 == 0
+                and cols % 128 == 0
+            )
+        return False
+
     def init_fp8_meta_tensors(self, recipe: Recipe) -> None:
         """Init scales and amaxes."""
         self.set_meta_tensor(True, recipe)
@@ -1271,9 +1388,13 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         if not fp8_checkpoint:
             return torch.empty(0, dtype=torch.uint8)
 
+        recipe = self.fp8_meta["recipe"]
+        if is_stateless_recipe(recipe):
+            return torch.empty(0, dtype=torch.uint8)
+
         # Copy tensors to CPU and store
         state = {}
-        state["recipe"] = self.fp8_meta["recipe"]
+        state["recipe"] = recipe
         if _has_delayed_scaling_state(self.fp8_meta):
             state["scale_fwd"] = to_cpu(self.fp8_meta["scaling_fwd"].scale)
             state["amax_history_fwd"] = to_cpu(self.fp8_meta["scaling_fwd"].amax_history)
@@ -1303,16 +1424,21 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             return
 
         # Load state
+        context = self.__class__.__name__
         if isinstance(state, torch.Tensor):
-            # No FP8 is indicated by an empty tensor we don't need to unpickle.
+            # Empty extra state does not need pickle handling.
             if state.numel() == 0:
                 return
-            # Default format: byte tensor with pickled data
-            state = pickle.loads(state.detach().cpu().numpy().tobytes())
+            state_bytes = state.detach().cpu().numpy().tobytes()
+            if not should_load_extra_state_pickle(state_bytes, context):
+                return
+            state = pickle.loads(state_bytes)
         elif isinstance(state, io.BytesIO):
-            # Deprecated format with io.BytesIO
+            # Deprecated format with io.BytesIO. Treat it as unsafe pickle.
+            if not unsafe_pickle_extra_state_enabled():
+                raise RuntimeError(extra_state_pickle_advisory(context))
             state.seek(0)
-            state = torch.load(state, map_location="cuda")
+            state = torch.load(state, map_location="cuda", weights_only=False)
         else:
             raise RuntimeError("Unsupported checkpoint format.")
 
@@ -1506,7 +1632,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     FP8GlobalStateManager.add_fp8_tensors_to_global_buffer(self.fp8_meta)
 
                 # Activation recomputation is used and this is the first forward phase.
-                if self.training and is_fp8_activation_recompute_enabled():
+                if is_fp8_activation_recompute_enabled():
                     FP8GlobalStateManager.copy_forward_fp8_meta_tensors_for_recompute(self.fp8_meta)
 
         nvtx_range_push(self.__class__.__name__ + " forward")
@@ -1649,8 +1775,12 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             ):
                 grad_bias = grad_output.dequantize().view(-1, grad_output.shape[-1]).sum(dim=0)
             else:
-                if isinstance(quantizer, Float8BlockQuantizer):
-                    # unfuse bgrad for now until cast_transpose + dgrad calculation is ready for Float8BlockQuantizer.
+                if isinstance(
+                    quantizer, (Float8BlockQuantizer, HybridQuantizer, IdentityQuantizer)
+                ):
+                    # Float8BlockQuantizer: unfused until cast_transpose + dgrad is ready.
+                    # HybridQuantizer: tex.bgrad_quantize doesn't recognize hybrid quantizers.
+                    # IdentityQuantizer: high-precision passthrough; bgrad computed in HP.
                     grad_bias = grad_output.view(-1, grad_output.shape[-1]).sum(dim=0)
                 else:
                     grad_bias, grad_output = tex.bgrad_quantize(grad_output, quantizer)
@@ -1717,8 +1847,11 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     raise RuntimeError("Weight quantizer has not been initialized")
                 quantizer.set_usage(rowwise=True, columnwise=torch.is_grad_enabled())
                 quantizer.internal = False
+                # HybridQuantizer is included so its current-scaling / NVFP4
+                # sub-quantizers get the same cross-shard amax reduction as the
+                # vanilla path (no-op for block-scaled sub-quantizers like MXFP8).
                 if is_dtensor and isinstance(
-                    quantizer, (Float8CurrentScalingQuantizer, NVFP4Quantizer)
+                    quantizer, (Float8CurrentScalingQuantizer, NVFP4Quantizer, HybridQuantizer)
                 ):
                     device_mesh = dtensor_param.device_mesh
                     amax_reduction_group = (
@@ -1762,21 +1895,10 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 #   should call `clear_high_precision_init_val` to remove it after master weight
                 #   is initialized.
 
-                def get(self):
-                    if hasattr(self, "_high_precision_init_val"):
-                        return self._high_precision_init_val
-                    return None
-
-                def clear(self):
-                    if hasattr(self, "_high_precision_init_val"):
-                        del self._high_precision_init_val
-
                 # DTensor.from_local() does not preserve object identity,
                 # so attach to the DTensor's local tensor when applicable.
                 target = dtensor_param._local_tensor if is_dtensor else param
-                target._high_precision_init_val = high_precision_init_val
-                target.get_high_precision_init_val = MethodType(get, target)
-                target.clear_high_precision_init_val = MethodType(clear, target)
+                _attach_high_precision_init_val(target, high_precision_init_val)
 
             if not is_dtensor:
                 self.module_setattr(name, param)
@@ -1839,7 +1961,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             if not self.fuse_wgrad_accumulation:
                 weight_tensor = noop_cat(self._get_weight_tensors())
                 weight_tensor.grad = wgrad.to(weight_tensor.dtype)
-            if self.use_bias:
+            if self.use_bias and bgrad is not None and bgrad.numel() != 0:
                 bias_tensor = noop_cat([getattr(self, name) for name in self.bias_names])
                 if bias_tensor.grad is None:
                     bias_tensor.grad = bgrad.to(bias_tensor.dtype)
