@@ -512,21 +512,31 @@ the NCCL EP dispatch writes every token straight into its expert slot.*
 
 **Receive buffer**
 
-The number of tokens a rank receives depends on the routing, so the receive
-buffer can be sized in two ways:
+The number of tokens a rank receives depends on the routing, so the buffer is
+sized in one of two ways.
 
-* **Fixed capacity.** ``recv_capacity_per_rank`` (an integer) bounds the
-  tokens a rank receives per step and every local expert gets a fixed slot
-  range in the buffer. The step then allocates nothing, needs no host
-  synchronization and is CUDA-graph capturable. ``ep_size *
-  max_tokens_per_rank * top_k`` never drops a token, but with balanced routing
-  a rank receives only about ``max_tokens_per_rank * top_k``, so a small
-  multiple of that is the usual choice; it saves ``ep_size`` times the memory
-  and overflows only on skewed routing (``drop_on_overflow=True`` then drops
-  the excess instead of failing, and ``total_recv_tokens`` reports it).
-* **Eager.** Without a capacity the buffer is sized from the actual receive
-  count each step. This costs a host synchronization and is not CUDA-graph
-  capturable.
+* **Fixed capacity**, ``recv_capacity_per_rank`` (an integer): every local
+  expert gets a fixed slot range and the buffer is allocated once.
+
+  * The step allocates nothing, needs no host synchronization and is
+    CUDA-graph capturable.
+  * ``ep_size * max_tokens_per_rank * top_k`` can never overflow. With balanced
+    routing a rank receives only about ``max_tokens_per_rank * top_k``, so a
+    small multiple of that is the usual choice and saves ``ep_size`` times the
+    memory.
+  * On overflow the dispatch fails with a device-side error. With
+    ``drop_on_overflow=True`` it instead drops the tokens that do not fit; they
+    are not sent, so their experts contribute nothing to the output, like
+    token dropping in capacity-limited MoE.
+  * ``total_recv_tokens`` counts the tokens that wanted to arrive, dropped
+    ones included; compare it with the capacity after the step to detect an
+    overflow.
+
+* **Eager**, no capacity given: the buffer is sized from the actual receive
+  count each step.
+
+  * This costs a host synchronization per step and is not CUDA-graph
+    capturable; ``drop_on_overflow`` does not apply.
 
 **Low precision**
 
