@@ -107,9 +107,8 @@ architectures:
   experts are chosen only from those groups. This bounds how many groups a
   token's experts span, which limits all-to-all traffic under expert
   parallelism (the node-limited routing of DeepSeek-V3).
-* **Expert bias:** with the sigmoid score function, ``expert_bias`` shifts the
-  selection without changing the returned weights - the bias-adjustment scheme
-  used for auxiliary-loss-free load balancing.
+* **Expert bias:** ``expert_bias`` is added to the scores before the top-k
+  selection (see :ref:`Load balancing <moe-load-balancing>`).
 * **Scaling:** ``scaling_factor`` rescales the returned probabilities.
 
 .. tabs::
@@ -142,10 +141,12 @@ respect to every expert's logit. Those dense scores come from
 ``fused_compute_score_for_moe_aux_loss`` in PyTorch, or from
 ``fused_topk_with_score_function(..., compute_aux_scores=True)`` in JAX.
 
-An alternative that needs no auxiliary loss is to bias the selection directly:
-with the sigmoid score function, the router's ``expert_bias`` shifts which experts
-are selected without changing the returned weights, so it can be adjusted between
-steps to steer load towards under-used experts.
+An alternative that needs no auxiliary loss is to bias the selection directly.
+With the sigmoid score function, the router's ``expert_bias`` is added to the
+scores only for the top-k selection, so it changes which experts are picked but
+not the returned routing weights. Adjusting it between steps - lowering it for
+overloaded experts and raising it for under-used ones - steers the load without
+touching the training objective.
 
 .. tabs::
 
