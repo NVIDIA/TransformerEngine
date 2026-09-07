@@ -658,7 +658,9 @@ model_configs_softcap = {
     # logits at O(1e-2) whatever the head dim, so tanh is numerically linear at a Gemma-sized
     # cap. A cap of 0.01 is the one regime these inputs can distinguish. Softcapping in tanh's
     # saturating region is covered by test_dpa_softcap_vs_reference, which uses its own inputs.
-    "softcap_3_1": ModelConfig(2, 512, 16, 64, attn_mask_type="padding_causal", softcap=0.01),
+    # head_dim 128 rather than 64: FA2 and FA3 compile a separate softcap kernel per head_dim,
+    # and the logit scale above is head_dim invariant since softmax_scale cancels the sqrt(d).
+    "softcap_3_1": ModelConfig(2, 512, 16, 128, attn_mask_type="padding_causal", softcap=0.01),
 }
 
 
