@@ -109,7 +109,7 @@ Communication-computation overlap
   :members: FP8, NONE
 
 
-Heterogeneous quantization recipes
+Mixed-format quantization recipes
 ----------------------------------
 
 .. autoapiclass:: transformer_engine.pytorch.QuantizerRole(module_type="", tensor_type="", name="")

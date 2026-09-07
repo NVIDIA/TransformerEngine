@@ -3,7 +3,7 @@
 #
 # See LICENSE for license information.
 
-"""Runnable heterogeneous quantization recipe example.
+"""Runnable mixed-format quantization recipe example.
 
 The factory assigns one precision to each ``demo.fc1`` Linear GEMM:
 
@@ -16,8 +16,8 @@ special-cased and therefore exercises the MXFP8 base-factory fallback.
 
 Run from the Transformer Engine repository root::
 
-    python docs/examples/heterogeneous_quantization/\
-        pytorch_heterogeneous_quantization_example.py
+    python docs/examples/mixed_format_quantization/\
+        pytorch_mixed_format_quantization_example.py
 """
 
 from __future__ import annotations
@@ -46,7 +46,7 @@ def require_supported_hardware() -> None:
 
 require_supported_hardware()
 
-# START_HETEROGENEOUS_QUANTIZATION_EXAMPLE
+# START_MIXED_FORMAT_QUANTIZATION_EXAMPLE
 
 from typing import Optional
 
@@ -119,7 +119,7 @@ with te.autocast(enabled=True, recipe=recipe):
 loss = outputs.float().square().mean()
 loss.backward()
 
-# END_HETEROGENEOUS_QUANTIZATION_EXAMPLE
+# END_MIXED_FORMAT_QUANTIZATION_EXAMPLE
 
 gradients = [inputs.grad, *(parameter.grad for parameter in model.parameters())]
 assert all(gradient is not None for gradient in gradients)

@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 300" width="100%" style="max-width: 900px;" role="img" aria-labelledby="title description">
+  <title id="title">HybridQuantizer data flow</title>
+  <desc id="description">A high-precision tensor enters a HybridQuantizer whose rowwise child is an MXFP8 quantizer and columnwise child is an NVFP4 quantizer. The result is a HybridQuantizedTensor with an MXFP8 rowwise representation and an NVFP4 columnwise representation, each consumed by a different GEMM.</desc>
+  <defs>
+    <style>
+      .label { font: 600 14px 'Segoe UI', Arial, sans-serif; fill: #212121; text-anchor: middle; }
+      .detail { font: 13px 'Segoe UI', Arial, sans-serif; fill: #424242; text-anchor: middle; }
+      .format { font: 600 13px 'Segoe UI', Arial, sans-serif; text-anchor: middle; }
+      .card { fill: #fafafa; stroke: #9e9e9e; stroke-width: 1.5; }
+      .mxfp8 { fill: #e3f2fd; stroke: #1976d2; stroke-width: 2; }
+      .nvfp4 { fill: #fff3e0; stroke: #f57c00; stroke-width: 2; }
+      .bf16 { fill: #e8f5e9; stroke: #388e3c; stroke-width: 2; }
+      .mxfp8-text { fill: #1565c0; }
+      .nvfp4-text { fill: #e65100; }
+      .bf16-text { fill: #2e7d32; }
+      .arrow { stroke: #616161; stroke-width: 2; fill: none; marker-end: url(#arrowhead); }
+    </style>
+    <marker id="arrowhead" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#616161"/>
+    </marker>
+  </defs>
+
+  <g aria-label="High-precision input">
+    <rect x="30" y="115" width="160" height="70" rx="7" class="bf16"/>
+    <text x="110" y="145" class="label bf16-text">tensor</text>
+    <text x="110" y="165" class="detail">high precision (BF16)</text>
+  </g>
+
+  <line x1="190" y1="150" x2="250" y2="150" class="arrow"/>
+
+  <g aria-label="HybridQuantizer">
+    <rect x="255" y="60" width="280" height="180" rx="7" class="card"/>
+    <text x="395" y="88" class="label">HybridQuantizer</text>
+    <rect x="275" y="105" width="240" height="50" rx="6" class="mxfp8"/>
+    <text x="395" y="126" class="detail">rowwise_quantizer</text>
+    <text x="395" y="144" class="format mxfp8-text">MXFP8Quantizer</text>
+    <rect x="275" y="170" width="240" height="50" rx="6" class="nvfp4"/>
+    <text x="395" y="191" class="detail">columnwise_quantizer</text>
+    <text x="395" y="209" class="format nvfp4-text">NVFP4Quantizer</text>
+  </g>
+
+  <line x1="535" y1="150" x2="595" y2="150" class="arrow"/>
+
+  <g aria-label="HybridQuantizedTensor">
+    <rect x="600" y="60" width="250" height="180" rx="7" class="card"/>
+    <text x="725" y="88" class="label">HybridQuantizedTensor</text>
+    <rect x="620" y="105" width="210" height="50" rx="6" class="mxfp8"/>
+    <text x="725" y="126" class="detail">rowwise</text>
+    <text x="725" y="144" class="format mxfp8-text">MXFP8</text>
+    <rect x="620" y="170" width="210" height="50" rx="6" class="nvfp4"/>
+    <text x="725" y="191" class="detail">columnwise</text>
+    <text x="725" y="209" class="format nvfp4-text">NVFP4</text>
+  </g>
+
+  <line x1="830" y1="130" x2="900" y2="130" class="arrow"/>
+  <line x1="830" y1="195" x2="900" y2="195" class="arrow"/>
+  <text x="935" y="134" class="detail">GEMM 1</text>
+  <text x="935" y="199" class="detail">GEMM 2</text>
+</svg>

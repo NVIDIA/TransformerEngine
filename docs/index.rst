@@ -60,7 +60,6 @@ Transformer Engine documentation
    examples/onnx/onnx_export.ipynb
    examples/te_jax_integration.rst
    examples/op_fuser/op_fuser.rst
-   examples/heterogeneous_quantization/heterogeneous_quantization.rst
    examples/gemm_profiling/gemm_profiling.rst
 
 .. toctree::
