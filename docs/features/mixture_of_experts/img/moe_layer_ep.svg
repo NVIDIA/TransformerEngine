@@ -1,8 +1,8 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 300" width="100%" style="max-width: 900px;">
   <defs>
     <style>
-      .label { font: 13px sans-serif; fill: #333; text-anchor: middle; }
-      .small-label { font: 11px sans-serif; fill: #555; text-anchor: middle; }
+      .label { font: 15px sans-serif; fill: #333; text-anchor: middle; }
+      .small-label { font: 13px sans-serif; fill: #555; text-anchor: middle; }
       .stage { fill: #f3e5f5; stroke: #7b1fa2; stroke-width: 2.5; }
       .box-blue { fill: #e3f2fd; stroke: #1976d2; stroke-width: 2.5; }
       .arrow { stroke: #424242; stroke-width: 2; fill: none; marker-end: url(#arrowhead); }

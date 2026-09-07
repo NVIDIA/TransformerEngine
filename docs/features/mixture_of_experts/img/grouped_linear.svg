@@ -1,12 +1,12 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 860" width="100%" style="max-width: 920px;">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-80 0 1000 860" width="100%" style="max-width: 920px;">
   <defs>
     <style>
       .title { font: bold 18px sans-serif; fill: #1a1a1a; text-anchor: middle; }
-      .section-title { font: bold 15px sans-serif; fill: #333; text-anchor: middle; }
-      .label { font: 12px sans-serif; fill: #333; text-anchor: middle; }
-      .small-label { font: 11px sans-serif; fill: #555; text-anchor: middle; }
-      .tiny-label { font: 10px sans-serif; fill: #555; text-anchor: middle; }
-      .brace-label { font: 13px sans-serif; fill: #333; text-anchor: end; }
+      .section-title { font: bold 17px sans-serif; fill: #333; text-anchor: middle; }
+      .label { font: 14px sans-serif; fill: #333; text-anchor: middle; }
+      .small-label { font: 13px sans-serif; fill: #555; text-anchor: middle; }
+      .tiny-label { font: 12px sans-serif; fill: #555; text-anchor: middle; }
+      .brace-label { font: 15px sans-serif; fill: #333; text-anchor: end; }
       .expert-e0 { fill: #e3f2fd; stroke: #1976d2; stroke-width: 1.5; }
       .expert-e1 { fill: #e8f5e9; stroke: #388e3c; stroke-width: 1.5; }
       .expert-e2 { fill: #fff3e0; stroke: #f57c00; stroke-width: 1.5; }
@@ -112,11 +112,11 @@
       <text x="62" y="151" class="label">X2</text>
 
       <path class="brace" d="M -2 0 Q -6 0 -6 4 L -6 14 Q -6 18 -10 18 Q -6 18 -6 22 L -6 32 Q -6 36 -2 36"/>
-      <text x="-14" y="23" class="brace-label">tokens for expert 0</text>
+      <text x="-14" y="23" class="brace-label" style="text-anchor: end;">tokens for expert 0</text>
       <path class="brace" d="M -2 36 Q -6 36 -6 41 L -6 74 Q -6 78 -10 78 Q -6 78 -6 82 L -6 115 Q -6 120 -2 120"/>
-      <text x="-14" y="83" class="brace-label">tokens for expert 1</text>
+      <text x="-14" y="83" class="brace-label" style="text-anchor: end;">tokens for expert 1</text>
       <path class="brace" d="M -2 120 Q -6 120 -6 125 L -6 143 Q -6 147 -10 147 Q -6 147 -6 151 L -6 169 Q -6 174 -2 174"/>
-      <text x="-14" y="152" class="brace-label">tokens for expert 2</text>
+      <text x="-14" y="152" class="brace-label" style="text-anchor: end;">tokens for expert 2</text>
     </g>
 
     <!-- Arrow X -> GroupedLinear (horizontal) -->
@@ -126,7 +126,6 @@
     <rect x="245" y="178" width="175" height="174" class="grouped"/>
     <text x="332" y="252" class="label">Grouped GEMM</text>
     <text x="332" y="272" class="small-label">multiple experts</text>
-    <text x="332" y="292" class="tiny-label">(GroupedLinear / grouped_dense)</text>
 
     <!-- per-expert token counts parameter input -->
     <rect x="262" y="380" width="140" height="26" class="param"/>

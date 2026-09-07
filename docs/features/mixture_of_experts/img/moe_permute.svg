@@ -1,11 +1,11 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 380" width="100%" style="max-width: 920px;">
   <defs>
     <style>
-      .section-title { font: bold 15px sans-serif; fill: #333; text-anchor: middle; }
-      .label { font: 12px sans-serif; fill: #333; text-anchor: middle; }
-      .small-label { font: 11px sans-serif; fill: #555; text-anchor: middle; }
-      .tiny-label { font: 10px sans-serif; fill: #555; text-anchor: middle; }
-      .brace-label { font: 13px sans-serif; fill: #333; }
+      .section-title { font: bold 17px sans-serif; fill: #333; text-anchor: middle; }
+      .label { font: 14px sans-serif; fill: #333; text-anchor: middle; }
+      .small-label { font: 13px sans-serif; fill: #555; text-anchor: middle; }
+      .tiny-label { font: 12px sans-serif; fill: #555; text-anchor: middle; }
+      .brace-label { font: 15px sans-serif; fill: #333; }
       .expert-e0 { fill: #e3f2fd; stroke: #1976d2; stroke-width: 1.5; }
       .expert-e1 { fill: #e8f5e9; stroke: #388e3c; stroke-width: 1.5; }
       .expert-e2 { fill: #fff3e0; stroke: #f57c00; stroke-width: 1.5; }
@@ -77,10 +77,10 @@
     <text x="42" y="213" class="label">t5</text>
 
     <path class="brace" d="M 87 0 Q 91 0 91 5 L 91 33 Q 91 38 95 38 Q 91 38 91 43 L 91 71 Q 91 76 87 76"/>
-    <text x="100" y="42" class="brace-label">expert 0</text>
+    <text x="100" y="42" class="brace-label" style="text-anchor: start;">expert 0</text>
     <path class="brace" d="M 87 76 Q 91 76 91 81 L 91 109 Q 91 114 95 114 Q 91 114 91 119 L 91 147 Q 91 152 87 152"/>
-    <text x="100" y="118" class="brace-label">expert 1</text>
+    <text x="100" y="118" class="brace-label" style="text-anchor: start;">expert 1</text>
     <path class="brace" d="M 87 152 Q 91 152 91 157 L 91 185 Q 91 190 95 190 Q 91 190 91 195 L 91 223 Q 91 228 87 228"/>
-    <text x="100" y="194" class="brace-label">expert 2</text>
+    <text x="100" y="194" class="brace-label" style="text-anchor: start;">expert 2</text>
   </g>
 </svg>

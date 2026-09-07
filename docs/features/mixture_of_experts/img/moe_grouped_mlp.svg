@@ -1,8 +1,8 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 230" width="100%" style="max-width: 820px;">
   <defs>
     <style>
-      .label { font: 13px sans-serif; fill: #333; text-anchor: middle; }
-      .small-label { font: 11px sans-serif; fill: #555; text-anchor: middle; }
+      .label { font: 15px sans-serif; fill: #333; text-anchor: middle; }
+      .small-label { font: 13px sans-serif; fill: #555; text-anchor: middle; }
       .op { fill: #e3f2fd; stroke: #1976d2; stroke-width: 1.8; }
       .act { fill: #e8f5e9; stroke: #388e3c; stroke-width: 1.8; }
       .fused-mlp { fill: #f3e5f5; stroke: #7b1fa2; stroke-width: 2.5; }

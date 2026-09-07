@@ -1,10 +1,10 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 230" width="100%" style="max-width: 900px;">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 215" width="100%" style="max-width: 900px;">
   <defs>
     <style>
-      .label { font: 13px sans-serif; fill: #333; text-anchor: middle; }
-      .small-label { font: 11px sans-serif; fill: #555; text-anchor: middle; }
-      .tiny-label { font: 10px sans-serif; fill: #555; text-anchor: middle; }
-      .rank-label { font: bold 12px sans-serif; fill: #444; text-anchor: start; }
+      .label { font: 15px sans-serif; fill: #333; text-anchor: middle; }
+      .small-label { font: 13px sans-serif; fill: #555; text-anchor: middle; }
+      .tiny-label { font: 12px sans-serif; fill: #555; text-anchor: middle; }
+      .rank-label { font: bold 14px sans-serif; fill: #444; text-anchor: start; }
       .expert-e0 { fill: #e3f2fd; stroke: #1976d2; stroke-width: 1.4; }
       .expert-e1 { fill: #e8f5e9; stroke: #388e3c; stroke-width: 1.4; }
       .expert-e2 { fill: #fff3e0; stroke: #f57c00; stroke-width: 1.4; }
@@ -40,5 +40,4 @@
   <text x="697" y="143" class="label">E2</text>
   <rect x="745" y="88" width="75" height="100" class="expert-e3"/>
   <text x="782" y="143" class="label">E3</text>
-  <text x="450" y="225" class="small-label">4 experts on 2 ranks: each rank holds its own tokens and two of the experts; token colors mark the selected expert</text>
 </svg>
