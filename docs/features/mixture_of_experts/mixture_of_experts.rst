@@ -499,13 +499,17 @@ library (``libnccl_ep``, loaded at runtime) and are differentiable.
       * ``ep_bootstrap(ep_group, ...)`` initializes EP once per process on an
         existing process group and fixes the group-wide sizes (number of experts,
         maximum tokens per rank, hidden size, top-k, receive capacity).
-      * ``EpBuffer`` holds the per-call state (routing handle and per-expert
-        token counts). Use one buffer per layer call that is in flight at the
-        same time, for example one per pipeline microbatch. Passing
-        ``dispatch_fwd_quant_recipe=MXFP8BlockScaling()`` makes dispatch return
-        the receive buffer as an MXFP8 grouped tensor (see
-        `tests/pytorch/distributed/run_ep.py <https://github.com/NVIDIA/TransformerEngine/blob/main/tests/pytorch/distributed/run_ep.py>`_
-        for a complete example).
+      * ``EpBuffer`` holds the routing state of one dispatch/combine pair: where
+        each token was sent, how many tokens each local expert received, and the
+        metadata the combine and both backward passes need to undo the dispatch.
+        Dispatch writes this state and combine and backward read it, so a buffer
+        must not be reused until the backward of that call has run. Use one
+        buffer per MoE layer, and one per microbatch when several microbatches
+        are in flight (pipeline parallelism). ``dispatch_fwd_quant_recipe``
+        selects the quantization applied by dispatch; with
+        ``MXFP8BlockScaling()`` the receive buffer is returned as an MXFP8
+        grouped tensor that the grouped GEMM consumes directly (see
+        `tests/pytorch/distributed/run_ep.py <https://github.com/NVIDIA/TransformerEngine/blob/main/tests/pytorch/distributed/run_ep.py>`_).
       * ``ep_dispatch(buffer, tokens, topk_idx, topk_weights)`` returns the
         receive buffer with one fixed slot range per local expert, the routing
         weights of the received tokens, and the number of valid tokens per local
