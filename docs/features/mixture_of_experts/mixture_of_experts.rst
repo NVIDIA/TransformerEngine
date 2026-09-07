@@ -33,12 +33,18 @@ A token passes through an MoE layer in four stages:
    order, merging the contributions when a token was sent to more than one
    expert.
 
-.. raw:: html
-   :file: img/moe_layer.svg
+When the experts do not fit on one device, they are sharded across devices
+(**expert parallelism**). The layer then gains two all-to-all collectives: a
+dispatch that sends each token to the rank owning its expert, and a combine that
+returns the results to the source rank. The experts themselves stay local.
 
-*Figure 1. The four stages of an MoE layer. The router produces the*
-``routing_map`` *consumed by token dispatch and the* ``probs`` *used as merging
-weights in token combine.*
+.. raw:: html
+   :file: img/moe_layer_ep.svg
+
+*Figure 1. The stages of an MoE layer with expert parallelism. The router produces
+the* ``routing_map`` *consumed by token dispatch and the* ``probs`` *used as merging
+weights in token combine; the all-to-all dispatch and combine are only present
+when the experts are sharded across ranks.*
 
 Transformer Engine provides an optimized building block for each stage. They are
 exposed as standalone functions, so they can be assembled into a complete MoE
@@ -586,17 +592,12 @@ expert step is built from the :ref:`grouped GEMM <moe-grouped-gemm>`; a full
 expert MLP stacks two grouped GEMMs around an activation. Every stage is differentiable, so the assembled layer
 trains end to end.
 
-When the experts are sharded across devices, the same layer gains two all-to-all
-collectives around the local experts.
-
-.. raw:: html
-   :file: img/moe_layer_ep.svg
-
-*Figure 9. The MoE layer with expert parallelism. Token dispatch groups the tokens
-by destination rank, the all-to-all dispatch moves them to the ranks owning their
-experts, the local grouped MLP runs, and the all-to-all combine returns the
-outputs before token combine restores the original order and applies the routing
-weights.*
+When the experts are sharded across devices, the same layer gains the two
+all-to-all collectives from Figure 1 around the local experts: token dispatch
+groups the tokens by destination rank, the all-to-all dispatch moves them to the
+ranks owning their experts, the local grouped MLP runs, and the all-to-all
+combine returns the outputs before token combine restores the original order and
+applies the routing weights.
 
 The routing kernels and expert parallelism complement each other. With a generic
 all-to-all, the routing kernels do the reordering on both sides of the
