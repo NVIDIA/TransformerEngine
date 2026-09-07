@@ -463,46 +463,42 @@ operations built on the NCCL EP library (``libnccl_ep``, loaded at runtime), so
 an MoE layer with expert parallelism is just router, dispatch, local experts and
 combine.
 
-**One step.** Dispatch reads the top-k expert indices of the local tokens and
-moves the tokens in a single pass:
+**Communication and permutation in one step**
 
-* it counts how many tokens every rank and every local expert will receive;
-* it writes each token straight into the slot range of its expert in the
-  receive buffer on the owning rank, so the receive buffer is already grouped by
-  local expert;
-* combine reverses this: it returns each expert output to the source rank and
-  sums the contributions into the original token order.
+Dispatch reads the top-k expert indices and moves each token straight into the
+slot range of its expert on the owning rank:
 
-**Receive buffer.** Because every expert owns a fixed slot range, the receive
-buffer has a fixed layout and has to be sized up front:
+* the receive buffer is already grouped by local expert;
+* combine reverses it and sums the contributions into the original token order.
 
-* ``recv_capacity_per_rank`` is the maximum number of tokens (rows of
-  ``hidden_size``) a rank receives per step. Every rank sends at most
-  ``max_tokens_per_rank`` tokens to ``top_k`` experts each, and in the worst
-  case all of them go to one rank, so ``ep_size * max_tokens_per_rank * top_k``
-  never drops a token. A smaller capacity saves memory but can overflow when the
-  routing is skewed (see ``drop_on_overflow``).
-* With a fixed capacity the step allocates nothing and needs no host
-  synchronization, so it can be captured in a CUDA graph.
-* Without a capacity (eager mode) the buffer is sized from the actual receive
-  count each step, at the cost of a host synchronization.
+**Receive buffer**
 
-**Payload.** By default the tokens travel as BF16 rows. Dispatch can quantize
-them first:
+Every expert owns a fixed slot range, so the buffer is sized up front:
 
-* the communication then moves the low-precision payload, and the receive
-  buffer comes back as a quantized ``GroupedTensor`` (one group per local
-  expert) that the fused grouped MLP accepts without quantizing it again;
-* MXFP8 is supported today; support for further recipes is in progress.
+* ``recv_capacity_per_rank`` is the maximum number of tokens a rank receives per
+  step; ``ep_size * max_tokens_per_rank * top_k`` never drops a token, a smaller
+  value can overflow on skewed routing (see ``drop_on_overflow``);
+* with a fixed capacity the step allocates nothing, needs no host
+  synchronization and is CUDA-graph capturable;
+* without it (eager mode) the buffer is sized per step, with a host
+  synchronization.
 
-**Transfer path.** By default the library copies the payload through its own
-staging buffers. Zero-copy mode removes these copies:
+**Low precision**
+
+Dispatch can quantize the tokens before sending them:
+
+* the receive buffer comes back as a quantized ``GroupedTensor`` (one group per
+  local expert) that the fused grouped MLP accepts as is;
+* MXFP8 is supported today; further recipes are in progress.
+
+**Zero-copy mode**
+
+By default the payload is copied through the library's staging buffers.
+Optionally:
 
 * the token and receive buffers are allocated as NCCL symmetric memory
-  (``symm_mem_alloc``), so the same buffer is registered on every rank as a
-  window and the kernels write directly into the peer's buffer;
-* the buffers have to be persistent, which also makes them the buffers to pass
-  in when capturing a CUDA graph.
+  (``symm_mem_alloc``) and the kernels write directly into the peer's buffer;
+* the buffers must be persistent, which also makes them CUDA-graph friendly.
 
 .. tabs::
 
