@@ -46,10 +46,11 @@ Transformer Engine provides a building block for each stage. They are exposed as
 standalone functions, so they can be assembled into a complete MoE layer or
 dropped into an existing implementation one piece at a time:
 
-* :ref:`Routing kernels <moe-routing-kernels>`: a fused router (score function
-  and top-k selection), a fused :ref:`load-balancing loss <moe-load-balancing>`,
-  and token dispatch and combine kernels that move tokens between their original
-  order and the expert-contiguous layout.
+* :ref:`Router <moe-router>`: fused score function and top-k selection, and a
+  fused :ref:`load-balancing loss <moe-load-balancing>`.
+* :ref:`Token permutation <moe-token-permutation>`: token dispatch and combine
+  kernels that move tokens between their original order and the
+  expert-contiguous layout.
 * :ref:`Grouped GEMM <moe-grouped-gemm>`: the expert linear layers as one call
   over expert-contiguous blocks; the :ref:`grouped MLP <moe-grouped-mlp>` fuses
   the whole expert MLP into one kernel.
@@ -59,22 +60,10 @@ dropped into an existing implementation one piece at a time:
 The :ref:`example at the end <moe-putting-it-together>` wires the blocks into a
 complete MoE layer.
 
-.. _moe-routing-kernels:
-
-Routing kernels
----------------
-
-The router produces a routing map. Token dispatch moves the tokens into the
-expert-contiguous layout expected by the grouped GEMM, and token combine moves
-the expert outputs back. All of these kernels are differentiable. The snippets
-below use the mask-map routing variant; other variants (for example index-map
-routing) follow the same pattern, see the :doc:`PyTorch API reference
-</api/pytorch>` and :doc:`JAX API reference </api/jax>`.
-
 .. _moe-router:
 
 Router
-~~~~~~
+------
 
 The router decides which experts each token is sent to. It applies a score
 function to the gating logits, selects the top-k experts per token, and produces
@@ -157,6 +146,18 @@ ones.
          :language: python
          :start-after: # START_ROUTER_AUX_JAX
          :end-before: # END_ROUTER_AUX_JAX
+
+.. _moe-token-permutation:
+
+Token permutation
+-----------------
+
+Token dispatch moves the tokens into the expert-contiguous layout expected by
+the grouped GEMM, and token combine moves the expert outputs back. All of these
+kernels are differentiable. The snippets below use the mask-map routing variant;
+other variants (for example index-map routing) follow the same pattern, see the
+:doc:`PyTorch API reference </api/pytorch>` and :doc:`JAX API reference
+</api/jax>`.
 
 Token dispatch
 ~~~~~~~~~~~~~~
@@ -508,7 +509,7 @@ With experts sharded across devices there are two options. With a generic
 all-to-all, the routing kernels do the reordering on both sides of the
 communication: tokens are sorted by destination rank before the all-to-all and
 regrouped by local expert after it (see :ref:`Reordering expert chunks
-<moe-routing-kernels>`). With the NCCL-based :ref:`expert parallelism
+<moe-token-permutation>`). With the NCCL-based :ref:`expert parallelism
 <moe-expert-parallelism>` primitives the permutation is folded into the
 communication: the dispatch delivers an expert-contiguous receive buffer and the
 combine writes the results straight back into the original token order, so no
