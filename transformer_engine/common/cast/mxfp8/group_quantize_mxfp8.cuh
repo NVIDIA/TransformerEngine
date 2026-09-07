@@ -133,6 +133,13 @@ struct LaunchConfig {
   dim3 grid;
 };
 
+struct alignas(8) DirectVaryingFirstMapperStorage {
+  size_t active_elements;
+  size_t tensor_id;
+  size_t rows;
+  size_t tensor_start_offset;
+};
+
 template <typename CastTraits>
 LaunchConfig get_launch_config(const size_t first_logical_dim, const size_t last_logical_dim,
                                const size_t elts_total, const size_t num_tensors) {
@@ -659,6 +666,9 @@ __global__ void __launch_bounds__(CastTraits::THREADS_PER_CHUNK) group_quantize_
   constexpr bool is_single_tensor = (shape_rep == SAME_BOTH_DIMS || shape_rep == VARYING_FIRST_DIM);
 
   const bool leading_thread = (threadIdx.x == 0);
+  // Keep mapper metadata separate from dynamic shared memory. The latter is the destination of
+  // asynchronous TMA loads and may be overwritten before every warp has consumed the metadata.
+  __shared__ DirectVaryingFirstMapperStorage direct_mapper_storage;
 
   if constexpr (use_direct_varying_first_mapper) {
     static_assert(CastTraits::THREADS_PER_CHUNK >= MAX_SUPPORTED_TENSOR_DESCRIPTORS,
@@ -732,26 +742,26 @@ __global__ void __launch_bounds__(CastTraits::THREADS_PER_CHUNK) group_quantize_
 
   if constexpr (use_direct_varying_first_mapper) {
     // logical_shape may describe graph-safe capacity beyond the active tensors. Resolve the
-    // active tail once per CTA and reject it before initializing TMA barriers. Reuse the same
-    // temporary storage for the exceptional colwise-swizzled tensor metadata.
-    size_t *const mapper_storage = reinterpret_cast<size_t *>(dshmem);
+    // active tail once per CTA and reject it before initializing TMA barriers. Cache the
+    // exceptional colwise-swizzled tensor metadata in dedicated static shared memory.
     const size_t block_offset_Y = direct_block_id_Y * CHUNK_DIM_Y;
     const size_t tensor_offset = block_offset_Y * last_logical_dim;
     if (leading_thread) {
       const size_t active_elements = static_cast<size_t>(offsets_ptr[num_tensors]);
-      mapper_storage[0] = active_elements;
+      direct_mapper_storage.active_elements = active_elements;
       if constexpr (WITH_GEMM_SWIZZLED_SCALES && COLWISE_SCALING) {
         if (tensor_offset < active_elements) {
           const size_t mapped_tensor_id =
               find_tensor_from_offsets(offsets_ptr, num_tensors, tensor_offset);
-          mapper_storage[1] = mapped_tensor_id;
-          mapper_storage[2] = static_cast<size_t>(first_dims_ptr[mapped_tensor_id]);
-          mapper_storage[3] = static_cast<size_t>(offsets_ptr[mapped_tensor_id]);
+          direct_mapper_storage.tensor_id = mapped_tensor_id;
+          direct_mapper_storage.rows = static_cast<size_t>(first_dims_ptr[mapped_tensor_id]);
+          direct_mapper_storage.tensor_start_offset =
+              static_cast<size_t>(offsets_ptr[mapped_tensor_id]);
         }
       }
     }
     __syncthreads();
-    if (tensor_offset >= mapper_storage[0]) {
+    if (tensor_offset >= direct_mapper_storage.active_elements) {
       return;
     }
   }
@@ -852,10 +862,10 @@ __global__ void __launch_bounds__(CastTraits::THREADS_PER_CHUNK) group_quantize_
       if constexpr (WITH_GEMM_SWIZZLED_SCALES && COLWISE_SCALING) {
         // Colwise GEMM-swizzled scale indices restart at each tensor and depend on M_i.
         // The leading thread decoded this exceptional metadata before barrier initialization.
-        size_t *const mapper_storage = reinterpret_cast<size_t *>(dshmem);
-        tensor_id = mapper_storage[1];
-        rows = mapper_storage[2];
-        tensor_start_offset = mapper_storage[3];
+        tensor_id = direct_mapper_storage.tensor_id;
+        rows = direct_mapper_storage.rows;
+        tensor_start_offset = direct_mapper_storage.tensor_start_offset;
+        tensor_offset_Y = block_offset_Y - tensor_start_offset / cols;
       }
     } else {
       block_id_Y = current_block_id / fixed_blocks_X;
