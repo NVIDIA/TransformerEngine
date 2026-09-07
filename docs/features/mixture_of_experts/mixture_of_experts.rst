@@ -55,40 +55,8 @@ layer or dropped into an existing implementation one piece at a time:
 * :ref:`Expert parallelism <moe-expert-parallelism>` shards the experts across
   devices with all-to-all dispatch and combine.
 
-.. _moe-putting-it-together:
-
-Putting it together
-~~~~~~~~~~~~~~~~~~~
-
-The building blocks assemble into the four stages above: route, dispatch, run
-the experts, and combine. The example below wires them together for top-k
-routing; the sections that follow describe each block on its own.
-
-.. tabs::
-
-   .. tab:: PyTorch
-
-      .. literalinclude:: moe_layer_pytorch.py
-         :language: python
-         :start-after: # START_MOE_LAYER_PYTORCH
-         :end-before: # END_MOE_LAYER_PYTORCH
-
-   .. tab:: JAX
-
-      .. literalinclude:: moe_layer_jax.py
-         :language: python
-         :start-after: # START_MOE_LAYER_JAX
-         :end-before: # END_MOE_LAYER_JAX
-
-This uses dropless routing (``num_out_tokens = num_tokens * top_k``), so the
-dispatch buffer is sized statically rather than from a device-to-host sync. The
-expert step is built from the :ref:`grouped GEMM <moe-grouped-gemm>`; a full
-expert MLP stacks two grouped GEMMs around an activation. Every stage is differentiable, so the assembled layer
-trains end to end.
-
-When the experts are sharded across devices, the dispatch and combine steps
-become collectives; see :ref:`Expert parallelism
-<moe-expert-parallelism>`.
+The :ref:`example at the end <moe-putting-it-together>` wires the blocks into a
+complete MoE layer.
 
 .. _moe-routing-kernels:
 
@@ -586,3 +554,38 @@ In PyTorch, ``ep_dispatch`` can quantize the tokens on the fly when the
 all-to-all moves the low-precision payload and the local grouped GEMM consumes
 it directly. Complete runnable examples live in ``examples/pytorch/ep/`` and
 ``examples/jax/ep/`` in the repository.
+
+.. _moe-putting-it-together:
+
+Example: putting it all together
+--------------------------------
+
+The building blocks assemble into the four stages from the introduction: route,
+dispatch, run the experts, and combine. The example below wires them together
+for top-k routing on a single device.
+
+.. tabs::
+
+   .. tab:: PyTorch
+
+      .. literalinclude:: moe_layer_pytorch.py
+         :language: python
+         :start-after: # START_MOE_LAYER_PYTORCH
+         :end-before: # END_MOE_LAYER_PYTORCH
+
+   .. tab:: JAX
+
+      .. literalinclude:: moe_layer_jax.py
+         :language: python
+         :start-after: # START_MOE_LAYER_JAX
+         :end-before: # END_MOE_LAYER_JAX
+
+This uses dropless routing (``num_out_tokens = num_tokens * top_k``), so the
+dispatch buffer is sized statically rather than from a device-to-host sync. The
+expert step is built from the :ref:`grouped GEMM <moe-grouped-gemm>`; a full
+expert MLP stacks two grouped GEMMs around an activation. Every stage is differentiable, so the assembled layer
+trains end to end.
+
+When the experts are sharded across devices, the dispatch and combine steps
+become the all-to-all collectives described in :ref:`Expert parallelism
+<moe-expert-parallelism>`.
