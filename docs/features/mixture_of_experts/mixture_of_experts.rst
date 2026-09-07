@@ -575,15 +575,6 @@ Dispatch can quantize the tokens before sending them:
       * ``ep_combine(buffer, expert_out)`` reads ``expert_out`` in place and
         returns the summed expert outputs ``[num_tokens, hidden_size]`` in the
         original token order.
-      * Backward mirrors the forward with the roles swapped. The backward of
-        combine scatters the result gradient into the expert slots like a
-        dispatch (``[recv_capacity_per_rank, hidden_size]``); the backward of
-        dispatch returns the receive-buffer gradient to the source ranks like a
-        combine, summing the ``top_k`` copies of each token into the token
-        gradient ``[num_tokens, hidden_size]`` and producing the gradient of the
-        routing weights ``[num_tokens, top_k]``. Both read the routing state from
-        the ``EpBuffer``, which is why it must stay untouched until backward has
-        run.
 
       .. raw:: html
 
