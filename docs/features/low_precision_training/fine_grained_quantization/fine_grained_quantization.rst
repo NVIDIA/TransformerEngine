@@ -336,11 +336,11 @@ assignment lands in one of three buckets:
 
 * **Fast** — quantization hits TE's fused kernels and every GEMM runs a
   native low-precision implementation.
-* **Correct but slow** — the recipe executes, but parts of it take fallback
-  paths. For example, ``HybridQuantizer`` launches a separate kernel per
-  direction instead of producing both representations in one fused kernel,
-  and under tensor parallelism it currently gathers the high-precision tensor
-  instead of the quantized one.
+* **Correct but potentially unoptimized** — the recipe executes, but some
+  selected paths may not have fused or optimized implementations in the
+  current TE release. For example, ``HybridQuantizer`` may produce its rowwise
+  and columnwise representations in separate kernel launches; future releases
+  may fuse this work.
 * **Rejected** — the two operands of some GEMM end up in a combination of
   formats or layouts that no GEMM backend supports, and TE raises an error.
   This can happen with plain and hybrid quantizers alike.
@@ -352,7 +352,7 @@ Before adopting a recipe for a real workload, check that:
 * accuracy and convergence hold on the target model and distributed setup;
 * throughput and memory actually improve on the target workload.
 
-The slow paths are still useful: accuracy and convergence experiments can run
+The unoptimized paths are still useful: accuracy and convergence experiments can run
 on them before dedicated kernels exist, so the precision of each GEMM can be
 treated as an accuracy/performance trade-off to explore.
 
