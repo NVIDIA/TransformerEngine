@@ -381,8 +381,6 @@ inline void group_dequantize(const GroupedTensor *input, GroupedTensor *output,
   const bool use_colwise_scaling = input->has_columnwise_data();
   NVTE_CHECK(use_rowwise_scaling || use_colwise_scaling,
              "Input tensor must have either rowwise or columnwise data.");
-  NVTE_CHECK(!(use_rowwise_scaling && use_colwise_scaling),
-             "Dequantize only supports rowwise or columnwise scaling, not both simultaneously.");
 
   NVTE_CHECK(!input->with_gemm_swizzled_scales, "Input must have scales in compact format.");
   NVTE_CHECK(!is_fp8_dtype(output->dtype()), "Output must be in higher precision.");
@@ -443,6 +441,7 @@ inline void group_dequantize(const GroupedTensor *input, GroupedTensor *output,
   const int64_t *const first_dims_ptr = reinterpret_cast<const int64_t *>(input->first_dims.dptr);
   const int64_t *const last_dims_ptr = reinterpret_cast<const int64_t *>(input->last_dims.dptr);
 
+  // Prefer the rowwise representation when both GEMM orientations are available.
   const e8m0_t *const scales_ptr =
       use_rowwise_scaling ? reinterpret_cast<e8m0_t *>(input->scale_inv.dptr)
                           : reinterpret_cast<e8m0_t *>(input->columnwise_scale_inv.dptr);
