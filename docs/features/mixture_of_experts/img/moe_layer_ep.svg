@@ -13,7 +13,7 @@
   </defs>
 
   <!-- Row 1: single device -->
-  <text x="450" y="30" class="small-label">single device</text>
+  <text x="450" y="30" class="label" style="font-weight: 600;">single device</text>
   <rect x="60"  y="45" width="150" height="60" class="stage" rx="6"/>
   <text x="135" y="80" class="label">Router</text>
   <path d="M 210 75 L 270 75" class="arrow"/>
@@ -27,7 +27,7 @@
   <text x="765" y="80" class="label">Token combine</text>
 
   <!-- Row 2: expert parallelism -->
-  <text x="450" y="170" class="small-label">expert parallelism (experts sharded across ranks)</text>
+  <text x="450" y="170" class="label" style="font-weight: 600;">expert parallelism (experts sharded across ranks)</text>
   <rect x="60"  y="185" width="150" height="60" class="stage" rx="6"/>
   <text x="135" y="220" class="label">Router</text>
   <path d="M 210 215 L 270 215" class="arrow"/>
