@@ -70,6 +70,27 @@ complete MoE layer.
 Routing kernels
 ---------------
 
+The router decides where each token goes; once it has produced a routing map,
+the tokens must be moved into the expert-contiguous layout expected by the
+grouped GEMM (``GroupedLinear`` in PyTorch, ``grouped_dense`` in JAX) and,
+afterwards, moved back. Transformer Engine provides differentiable kernels for
+all of these steps. This section starts with the router and then focuses on the
+two core data-movement operations - token dispatch and token combine - because
+they illustrate the layout transformation used by the other variants.
+
+The token dispatch and combine snippets below show one concrete instance of this
+pattern: the mask-map routing path, exposed in PyTorch as ``transformer_engine.pytorch.moe_permute``
+and ``transformer_engine.pytorch.moe_unpermute``, and in JAX as
+``transformer_engine.jax.permutation.token_dispatch`` and
+``transformer_engine.jax.permutation.token_combine``. Other routing variants
+(for example, index-map routing in PyTorch via ``map_type="index"``) are
+available in both frameworks and follow the same pattern; see the
+:doc:`PyTorch API reference </api/pytorch>` and
+:doc:`JAX API reference </api/jax>` for the complete list and signatures.
+The mask-map APIs have different framework-specific wrappers, but lower to the
+same shared Triton permutation kernels, and both pairs are differentiable so they
+can be used directly inside training graphs.
+
 .. _moe-router:
 
 Router
@@ -163,26 +184,6 @@ touching the training objective.
          :language: python
          :start-after: # START_ROUTER_AUX_JAX
          :end-before: # END_ROUTER_AUX_JAX
-
-Once the router has produced a routing map, the tokens must be moved into the
-expert-contiguous layout expected by the grouped GEMM (``GroupedLinear`` in
-PyTorch, ``grouped_dense`` in JAX) and, afterwards, moved back. Transformer
-Engine provides differentiable kernels for both directions. This section focuses on
-the two core operations - token dispatch and token combine - because they
-illustrate the layout transformation used by the other variants.
-
-The snippets below show one concrete instance of this pattern: the mask-map
-routing path, exposed in PyTorch as ``transformer_engine.pytorch.moe_permute``
-and ``transformer_engine.pytorch.moe_unpermute``, and in JAX as
-``transformer_engine.jax.permutation.token_dispatch`` and
-``transformer_engine.jax.permutation.token_combine``. Other routing variants
-(for example, index-map routing in PyTorch via ``map_type="index"``) are
-available in both frameworks and follow the same pattern; see the
-:doc:`PyTorch API reference </api/pytorch>` and
-:doc:`JAX API reference </api/jax>` for the complete list and signatures.
-The mask-map APIs have different framework-specific wrappers, but lower to the
-same shared Triton permutation kernels, and both pairs are differentiable so they
-can be used directly inside training graphs.
 
 Token dispatch
 ~~~~~~~~~~~~~~
