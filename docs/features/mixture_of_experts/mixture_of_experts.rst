@@ -320,25 +320,6 @@ token-count argument.
 baseline launches one* ``Linear`` *per expert; the grouped GEMM replaces the
 loop with one call.*
 
-The snippets assume the tokens have already been permuted into
-expert-contiguous order.
-
-.. tabs::
-
-   .. tab:: PyTorch
-
-      .. literalinclude:: grouped_linear_pytorch.py
-         :language: python
-         :start-after: # START_GROUPED_LINEAR_PYTORCH
-         :end-before: # END_GROUPED_LINEAR_PYTORCH
-
-   .. tab:: JAX
-
-      .. literalinclude:: grouped_linear_jax.py
-         :language: python
-         :start-after: # START_GROUPED_LINEAR_JAX
-         :end-before: # END_GROUPED_LINEAR_JAX
-
 The grouped GEMM works with the :doc:`low-precision training recipes
 </features/low_precision_training/index>` available to ``Linear``: the inputs
 are quantized per expert and the expert GEMMs run in the recipe's precision.
@@ -359,6 +340,25 @@ There are two execution paths:
   13.5 / 13.6. FP8 delayed scaling and custom recipes are not supported on this
   path. The snippets show how it is selected.
 
+The snippets assume the tokens have already been permuted into
+expert-contiguous order.
+
+.. tabs::
+
+   .. tab:: PyTorch
+
+      .. literalinclude:: grouped_linear_pytorch.py
+         :language: python
+         :start-after: # START_GROUPED_LINEAR_PYTORCH
+         :end-before: # END_GROUPED_LINEAR_PYTORCH
+
+   .. tab:: JAX
+
+      .. literalinclude:: grouped_linear_jax.py
+         :language: python
+         :start-after: # START_GROUPED_LINEAR_JAX
+         :end-before: # END_GROUPED_LINEAR_JAX
+
 .. _moe-grouped-mlp:
 
 Grouped MLP
@@ -372,9 +372,8 @@ the GEMMs.
 .. raw:: html
    :file: img/moe_grouped_mlp.svg
 
-*Figure 7. The operation fuser replaces the first grouped GEMM, the activation,
-and the second grouped GEMM with a single fused grouped-MLP kernel that keeps
-the intermediate on chip.*
+*Figure 7. The operation fuser replaces the two grouped GEMMs and the activation
+between them with a single fused grouped-MLP kernel.*
 
 The fusion is applied by the :doc:`operation fuser </examples/op_fuser/op_fuser>`:
 a grouped linear, a scaled GLU (or SReLU) activation and another grouped linear
