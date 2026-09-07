@@ -1610,13 +1610,18 @@ class TestGroupedTensor:
             torch.testing.assert_close(deq, orig, atol=0.125, rtol=0.1)
 
     @pytest.mark.parametrize("conversion", ["float", "to"])
+    @pytest.mark.parametrize("columnwise", [False, True])
     @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
-    def test_grouped_mxfp8_dtype_conversion_for_optimizer(self, conversion: str) -> None:
+    def test_grouped_mxfp8_dtype_conversion_for_optimizer(
+        self,
+        conversion: str,
+        columnwise: bool,
+    ) -> None:
         """MXFP8 grouped parameters dequantize before optimizer shard flattening."""
         shapes = [(256, 512), (512, 512)]
         inputs = [torch.randn(shape, dtype=torch.bfloat16, device="cuda") for shape in shapes]
         quantizer = MXFP8Quantizer(fp8_dtype=te.DType.kFloat8E4M3)
-        quantizer.set_usage(rowwise=True, columnwise=False)
+        quantizer.set_usage(rowwise=True, columnwise=columnwise)
         grouped = tex.group_quantize(
             torch.cat(inputs, dim=0),
             quantizer,
