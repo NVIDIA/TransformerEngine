@@ -27,7 +27,7 @@ A token passes through an MoE layer in the following stages:
 #. The **router** scores the experts for each token and selects the top-k of
    them.
 #. **Token dispatch** gathers the tokens into expert-contiguous order.
-#. With **expert parallelism** - experts sharded across devices - an
+#. With expert parallelism - experts sharded across devices - an
    **all-to-all dispatch** sends each token to the rank that owns its expert.
 #. The **grouped MLP** (the experts) runs a single batched computation over all
    expert blocks local to the device.
@@ -85,10 +85,8 @@ the two tensors that drive the rest of the layer:
   these as merging weights when a token was routed to more than one expert.
 
 Transformer Engine fuses the score function and the top-k selection into a single
-differentiable kernel, exposed as ``fused_topk_with_score_function`` in both
-``transformer_engine.pytorch.router`` and ``transformer_engine.jax.router``. All
-internal math runs in FP32 for numerical stability, regardless of the logits
-dtype.
+differentiable kernel, ``fused_topk_with_score_function``. All internal math runs
+in FP32 for numerical stability, regardless of the logits dtype.
 
 .. raw:: html
    :file: img/moe_router.svg
@@ -103,8 +101,12 @@ architectures:
 * **Score function:** ``"softmax"`` or ``"sigmoid"`` (the PyTorch API also offers
   ``"sqrtsoftplus"``). With softmax, ``use_pre_softmax`` selects whether the
   softmax is applied before or after the top-k.
-* **Grouped (device-limited) routing:** ``num_groups`` and ``group_topk`` restrict
-  selection to a subset of expert groups, as in DeepSeek-style routing.
+* **Grouped routing:** the experts are split into ``num_groups`` equal groups
+  (for example, one group per node). Each group is scored by the sum of its best
+  expert scores, the top ``group_topk`` groups are kept, and the final top-k
+  experts are chosen only from those groups. This bounds how many groups a
+  token's experts span, which limits all-to-all traffic under expert
+  parallelism (the node-limited routing of DeepSeek-V3).
 * **Expert bias:** with the sigmoid score function, ``expert_bias`` shifts the
   selection without changing the returned weights - the bias-adjustment scheme
   used for auxiliary-loss-free load balancing.
