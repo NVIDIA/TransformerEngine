@@ -556,12 +556,29 @@ library (``libnccl_ep``, loaded at runtime) and are differentiable.
         are sharded over and the dispatch and combine become all-to-all
         collectives over that axis. It also returns the load-balancing loss when
         ``aux_loss_coeff`` is non-zero.
-      * ``transformer_engine.jax.ep`` exposes the primitives separately:
-        ``ep_bootstrap`` initializes EP once per process from the mesh,
-        ``ep_dispatch`` scatters tokens and weights to the expert ranks and
-        returns the receive buffer together with the routing handle and token
-        counts, and ``ep_combine`` sums the expert outputs back on the source
-        ranks.
+      * ``transformer_engine.jax.ep`` exposes the primitives separately. Unlike
+        the PyTorch ``EpBuffer``, the routing state is not kept in an object:
+        dispatch returns it as arrays and the caller passes them on to combine.
+
+        * ``ep_bootstrap(world_size, rank, num_experts, max_tokens_per_rank,
+          recv_capacity_per_rank, hidden_dim, ...)`` initializes the EP group
+          once per process. It runs inside the active ``Mesh`` and reads the EP
+          axis (and the data-parallel axes) from ``MeshResource``; one process
+          per device is required.
+        * ``EpLayerConfig(top_k, ...)`` is a small per-layer configuration that
+          every per-step call takes as its first argument.
+        * ``ep_dispatch(cfg, topk_idx, tokens, topk_weights,
+          recv_capacity_per_rank)`` scatters the tokens to the expert ranks and
+          returns ``(recv_tokens, recv_topk_weights, handle_mem, token_counts,
+          total_recv_tokens)``: the receive buffer grouped by local expert, the
+          weights of the received tokens, the routing handle and per-expert
+          token counts needed by combine, and the pre-drop receive total that can
+          be used to detect overflow.
+        * ``ep_combine(cfg, handle_mem, token_counts, expert_out,
+          num_local_tokens)`` sums the expert outputs back on the source ranks in
+          the original token order. It is unweighted: multiply ``expert_out`` by
+          ``recv_topk_weights`` (and zero the padded slots) before calling it.
+          ``num_local_tokens`` must be static because it fixes the output shape.
 
       .. raw:: html
 
