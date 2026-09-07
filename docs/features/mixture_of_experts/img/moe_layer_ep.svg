@@ -1,0 +1,77 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 330" width="100%" style="max-width: 900px;">
+  <defs>
+    <style>
+      .section-title { font: bold 15px sans-serif; fill: #333; text-anchor: middle; }
+      .label { font: 12px sans-serif; fill: #333; text-anchor: middle; }
+      .small-label { font: 11px sans-serif; fill: #555; text-anchor: middle; }
+      .tiny-label { font: 10px sans-serif; fill: #555; text-anchor: middle; }
+      .stage { fill: #f3e5f5; stroke: #7b1fa2; stroke-width: 2.5; }
+      .box-blue { fill: #e3f2fd; stroke: #1976d2; stroke-width: 2.5; }
+      .arrow { stroke: #424242; stroke-width: 2; fill: none; marker-end: url(#arrowhead); }
+      .skip { stroke: #7b1fa2; stroke-width: 1.8; fill: none; stroke-dasharray: 5 4; marker-end: url(#arrowhead-p); }
+      .brace { stroke: #1976d2; stroke-width: 1.4; fill: none; }
+    </style>
+    <marker id="arrowhead" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#424242"/>
+    </marker>
+    <marker id="arrowhead-p" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#7b1fa2"/>
+    </marker>
+  </defs>
+
+  <text x="450" y="30" class="section-title">Mixture of Experts layer with expert parallelism</text>
+
+  <!-- Stage boxes -->
+  <rect x="40"  y="100" width="110" height="80" class="stage"/>
+  <text x="95" y="145" class="label">Router</text>
+
+  <rect x="170" y="100" width="110" height="80" class="stage"/>
+  <text x="225" y="135" class="label">Token</text>
+  <text x="225" y="152" class="label">Dispatch</text>
+
+  <rect x="300" y="100" width="110" height="80" class="box-blue"/>
+  <text x="355" y="135" class="label">All-to-all</text>
+  <text x="355" y="152" class="label">dispatch</text>
+
+  <rect x="430" y="100" width="110" height="80" class="stage"/>
+  <text x="485" y="135" class="label">Grouped MLP</text>
+  <text x="485" y="152" class="label">(local experts)</text>
+
+  <rect x="560" y="100" width="110" height="80" class="box-blue"/>
+  <text x="615" y="135" class="label">All-to-all</text>
+  <text x="615" y="152" class="label">combine</text>
+
+  <rect x="690" y="100" width="110" height="80" class="stage"/>
+  <text x="745" y="135" class="label">Token</text>
+  <text x="745" y="152" class="label">Combine</text>
+
+  <!-- Flow arrows -->
+  <path d="M 5 140 L 40 140" class="arrow"/>
+  <text x="22" y="131" class="tiny-label">tokens</text>
+
+  <path d="M 150 140 L 170 140" class="arrow"/>
+  <text x="160" y="92" class="tiny-label">routing_map</text>
+
+  <path d="M 280 140 L 300 140" class="arrow"/>
+  <text x="290" y="92" class="tiny-label">by rank</text>
+
+  <path d="M 410 140 L 430 140" class="arrow"/>
+  <text x="420" y="92" class="tiny-label">by expert</text>
+
+  <path d="M 540 140 L 560 140" class="arrow"/>
+  <text x="550" y="92" class="tiny-label">expert out</text>
+
+  <path d="M 670 140 L 690 140" class="arrow"/>
+  <text x="680" y="92" class="tiny-label">returned</text>
+
+  <path d="M 800 140 L 860 140" class="arrow"/>
+  <text x="830" y="131" class="tiny-label">output</text>
+
+  <!-- probs skip connection: router -> token combine -->
+  <path d="M 95 180 L 95 235 L 745 235 L 745 182" class="skip"/>
+  <text x="420" y="252" class="small-label">probs (routing weights)</text>
+
+  <!-- EP bracket -->
+  <path d="M 300 272 L 300 282 L 670 282 L 670 272" class="brace"/>
+  <text x="485" y="300" class="small-label">expert parallelism: tokens cross ranks, experts stay local</text>
+</svg>

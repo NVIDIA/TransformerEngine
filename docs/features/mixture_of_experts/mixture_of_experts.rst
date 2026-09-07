@@ -586,6 +586,24 @@ expert step is built from the :ref:`grouped GEMM <moe-grouped-gemm>`; a full
 expert MLP stacks two grouped GEMMs around an activation. Every stage is differentiable, so the assembled layer
 trains end to end.
 
-When the experts are sharded across devices, the dispatch and combine steps
-become the all-to-all collectives described in :ref:`Expert parallelism
-<moe-expert-parallelism>`.
+When the experts are sharded across devices, the same layer gains two all-to-all
+collectives around the local experts.
+
+.. raw:: html
+   :file: img/moe_layer_ep.svg
+
+*Figure 9. The MoE layer with expert parallelism. Token dispatch groups the tokens
+by destination rank, the all-to-all dispatch moves them to the ranks owning their
+experts, the local grouped MLP runs, and the all-to-all combine returns the
+outputs before token combine restores the original order and applies the routing
+weights.*
+
+The routing kernels and expert parallelism complement each other. With a generic
+all-to-all, the routing kernels do the reordering on both sides of the
+communication: tokens are sorted by destination rank before the all-to-all and
+regrouped by local expert after it (see :ref:`Reordering expert chunks
+<moe-routing-kernels>`). With the NCCL-based :ref:`expert parallelism
+<moe-expert-parallelism>` primitives, this permutation is folded into the
+communication itself: the dispatch delivers an expert-contiguous receive buffer
+and the combine writes the results straight back into the original token order,
+so no separate permute or unpermute is needed on the local side.
