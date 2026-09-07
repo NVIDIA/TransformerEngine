@@ -283,12 +283,21 @@ that token combine needs to remove the padding.
 Reordering expert chunks
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
-The sort-chunks-by-index kernels permute contiguous chunks of a token tensor
-according to a list of chunk sizes and a permutation of chunk indices, for
-example to regroup tokens by destination rank before an all-to-all and to
-restore the original grouping afterwards. A ``_with_probs`` variant reorders an
-accompanying probability tensor in the same call. See the API reference for the
-signatures.
+``sort_chunks_by_index`` reorders whole blocks of rows. The input
+``[num_tokens, hidden_size]`` is split along the first dimension into chunks
+of the given ``split_sizes``, and the chunks are concatenated again in the order
+given by ``sorted_indices``: output chunk ``i`` is input chunk
+``sorted_indices[i]``. The rows inside a chunk keep their order. The operation is
+differentiable, and a ``_with_probs`` variant moves a per-row probability tensor
+along with the rows.
+
+The typical use is expert parallelism over a generic all-to-all. The buffer a
+rank receives is ordered by source rank and then by expert, while the grouped
+GEMM needs all rows of one expert together. With two source ranks and two local
+experts the received chunks are ``(rank 0, E4)``, ``(rank 0, E5)``,
+``(rank 1, E4)``, ``(rank 1, E5)``; ``sorted_indices = [0, 2, 1, 3]`` regroups
+them into ``E4, E4, E5, E5``. After the experts have run, the inverse
+permutation restores the rank-major order for the combine all-to-all.
 
 .. _moe-grouped-gemm:
 
@@ -436,18 +445,8 @@ experts run on the receive buffer, and combine returns the outputs to the source
 rank.*
 
 Transformer Engine implements dispatch and combine directly on NCCL, using
-symmetric-memory windows for zero-copy transfers. The implementation is shared by
-both frameworks through the common C API in
-``transformer_engine/common/include/transformer_engine/ep.h``:
-
-* ``nvte_ep_initialize`` / ``nvte_ep_shutdown`` set up the EP group on an
-  existing NCCL communicator, once per process.
-* ``nvte_ep_prepare`` seeds the routing for one step from the top-k expert
-  indices; ``nvte_ep_dispatch`` and ``nvte_ep_combine`` run the two all-to-alls,
-  with ``nvte_ep_dispatch_bwd`` and ``nvte_ep_combine_bwd`` for the backward
-  pass. Per-layer state lives in a caller-owned ``handle_mem`` buffer.
-
-The per-step operations are allocation-free and CUDA-graph capturable when the
+symmetric-memory windows for zero-copy transfers. Both operations are
+differentiable. They are allocation-free and CUDA-graph capturable when the
 receive buffer has a fixed size: ``recv_capacity_per_rank`` bounds the tokens a
 rank receives per step, with ``ep_size * max_tokens_per_rank * top_k`` as the
 dropless worst case. Without it the buffer is sized from the actual receive count
@@ -457,62 +456,66 @@ low-precision payload and the local grouped GEMM consumes it directly. Complete
 runnable examples live in ``examples/pytorch/ep/`` and ``examples/jax/ep/`` in
 the repository.
 
-PyTorch
-~~~~~~~
+.. tabs::
 
-``transformer_engine.pytorch.ep`` exposes the primitives with autograd support:
+   .. tab:: PyTorch
 
-* ``ep_bootstrap(ep_group, ...)`` initializes EP once per process on an existing
-  process group and fixes the group-wide sizes (number of experts, maximum tokens
-  per rank, hidden size, top-k, receive capacity).
-* ``EpBuffer`` holds the per-call state (routing handle and per-expert token
-  counts). Use one buffer per layer call that is in flight at the same time, for
-  example one per pipeline microbatch. Its ``dispatch_fwd_quant_recipe`` enables
-  the MXFP8 quantization in dispatch.
-* ``ep_dispatch(buffer, tokens, topk_idx, topk_weights)`` returns the receive
-  buffer with one fixed slot range per local expert, the routing weights of the
-  received tokens, and the number of valid tokens per local expert.
-* ``ep_combine(buffer, expert_out)`` returns the summed expert outputs in the
-  original token order. The routing weights are applied by the caller before the
-  combine.
+      ``transformer_engine.pytorch.ep`` exposes the primitives with autograd
+      support:
 
-.. raw:: html
+      * ``ep_bootstrap(ep_group, ...)`` initializes EP once per process on an
+        existing process group and fixes the group-wide sizes (number of experts,
+        maximum tokens per rank, hidden size, top-k, receive capacity).
+      * ``EpBuffer`` holds the per-call state (routing handle and per-expert
+        token counts). Use one buffer per layer call that is in flight at the
+        same time, for example one per pipeline microbatch. Its
+        ``dispatch_fwd_quant_recipe`` enables the MXFP8 quantization in dispatch.
+      * ``ep_dispatch(buffer, tokens, topk_idx, topk_weights)`` returns the
+        receive buffer with one fixed slot range per local expert, the routing
+        weights of the received tokens, and the number of valid tokens per local
+        expert.
+      * ``ep_combine(buffer, expert_out)`` returns the summed expert outputs in
+        the original token order. The routing weights are applied by the caller
+        before the combine.
 
-   <div class="code-block-header">
-      Requires SM90 (Hopper) or later
-   </div>
+      .. raw:: html
 
-.. literalinclude:: moe_expert_parallel_pytorch.py
-   :language: python
-   :start-after: # START_MOE_EXPERT_PARALLEL_PYTORCH
-   :end-before: # END_MOE_EXPERT_PARALLEL_PYTORCH
+         <div class="code-block-header">
+            Requires SM90 (Hopper) or later
+         </div>
 
-JAX
-~~~
+      .. literalinclude:: moe_expert_parallel_pytorch.py
+         :language: python
+         :start-after: # START_MOE_EXPERT_PARALLEL_PYTORCH
+         :end-before: # END_MOE_EXPERT_PARALLEL_PYTORCH
 
-JAX offers two levels of API, both experimental:
+   .. tab:: JAX
 
-* ``transformer_engine.jax.moe.moe`` runs the whole MoE block (router, dispatch,
-  expert MLPs, combine) as a single differentiable call. It is executed inside a
-  ``Mesh``; ``ep_axis`` names the mesh axis the experts are sharded over and the
-  dispatch and combine become all-to-all collectives over that axis. It also
-  returns the load-balancing loss when ``aux_loss_coeff`` is non-zero.
-* ``transformer_engine.jax.ep`` exposes the primitives separately:
-  ``ep_bootstrap`` initializes EP once per process from the mesh, ``ep_dispatch``
-  scatters tokens and weights to the expert ranks and returns the receive buffer
-  together with the routing handle and token counts, and ``ep_combine`` sums the
-  expert outputs back on the source ranks.
+      JAX offers two levels of API, both experimental:
 
-.. raw:: html
+      * ``transformer_engine.jax.moe.moe`` runs the whole MoE block (router,
+        dispatch, expert MLPs, combine) as a single differentiable call. It is
+        executed inside a ``Mesh``; ``ep_axis`` names the mesh axis the experts
+        are sharded over and the dispatch and combine become all-to-all
+        collectives over that axis. It also returns the load-balancing loss when
+        ``aux_loss_coeff`` is non-zero.
+      * ``transformer_engine.jax.ep`` exposes the primitives separately:
+        ``ep_bootstrap`` initializes EP once per process from the mesh,
+        ``ep_dispatch`` scatters tokens and weights to the expert ranks and
+        returns the receive buffer together with the routing handle and token
+        counts, and ``ep_combine`` sums the expert outputs back on the source
+        ranks.
 
-   <div class="code-block-header">
-      Requires SM90 (Hopper) or later
-   </div>
+      .. raw:: html
 
-.. literalinclude:: moe_expert_parallel_jax.py
-   :language: python
-   :start-after: # START_MOE_EXPERT_PARALLEL_JAX
-   :end-before: # END_MOE_EXPERT_PARALLEL_JAX
+         <div class="code-block-header">
+            Requires SM90 (Hopper) or later
+         </div>
+
+      .. literalinclude:: moe_expert_parallel_jax.py
+         :language: python
+         :start-after: # START_MOE_EXPERT_PARALLEL_JAX
+         :end-before: # END_MOE_EXPERT_PARALLEL_JAX
 
 .. _moe-putting-it-together:
 
