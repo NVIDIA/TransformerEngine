@@ -766,6 +766,8 @@ model_configs_softcap_reference = {
 
 # "plain" checks the cap itself. The other two pin down *where* the cap is applied inside
 # UnfusedDotProductAttention, so they run on that backend only, at a cap that saturates.
+_SOFTCAP_BACKEND_ENV = ("NVTE_FLASH_ATTN", "NVTE_FUSED_ATTN", "NVTE_UNFUSED_ATTN")
+
 softcap_variants = ["plain", "bias_outside_cap", "qk_layer_scaling"]
 
 # Large enough that a cap of softcap * layer_number is far from a cap of softcap for O(1)
@@ -950,44 +952,58 @@ def test_transformer_layer_softcap_plumbing(dtype):
 
     # Set explicitly rather than inheriting: the tests above leave these set, and a stale
     # NVTE_UNFUSED_ATTN=0 would leave no eligible backend once softcap drops the fused ones.
+    # Restored in the finally below so this test does not do to others what they did to it.
+    backend_env = {k: os.environ.get(k) for k in _SOFTCAP_BACKEND_ENV}
     reset_rng_states()
     os.environ["NVTE_FLASH_ATTN"] = "1"
     os.environ["NVTE_FUSED_ATTN"] = "0"
     os.environ["NVTE_UNFUSED_ATTN"] = "1"
     _attention_backends["backend_selection_requires_update"] = True
 
-    block = TransformerLayer(
-        hidden_size,
-        4 * hidden_size,
-        num_heads,
-        layer_type="decoder",
-        softcap=50.0,
-        params_dtype=dtype,
-        device="cuda",
-    )
-    block.self_attention.core_attention.register_forward_pre_hook(_record("self"), with_kwargs=True)
-    block.inter_attention.core_attention.register_forward_pre_hook(
-        _record("cross"), with_kwargs=True
-    )
+    try:
+        block = TransformerLayer(
+            hidden_size,
+            4 * hidden_size,
+            num_heads,
+            layer_type="decoder",
+            softcap=50.0,
+            params_dtype=dtype,
+            device="cuda",
+        )
+        block.self_attention.core_attention.register_forward_pre_hook(
+            _record("self"), with_kwargs=True
+        )
+        block.inter_attention.core_attention.register_forward_pre_hook(
+            _record("cross"), with_kwargs=True
+        )
 
-    hidden_states = torch.randn(
-        seqlen, batch_size, hidden_size, dtype=dtype, device="cuda", requires_grad=True
-    )
-    forward_kwargs = dict(
-        encoder_output=hidden_states,
-        enc_dec_attn_mask=torch.zeros(batch_size, 1, 1, seqlen, dtype=torch.bool, device="cuda"),
-    )
+        hidden_states = torch.randn(
+            seqlen, batch_size, hidden_size, dtype=dtype, device="cuda", requires_grad=True
+        )
+        forward_kwargs = dict(
+            encoder_output=hidden_states,
+            enc_dec_attn_mask=torch.zeros(
+                batch_size, 1, 1, seqlen, dtype=torch.bool, device="cuda"
+            ),
+        )
 
-    # The constructor value reaches both attention modules.
-    block(hidden_states, **forward_kwargs)
-    assert seen["self"] == 50.0, f"self-attention saw softcap={seen['self']}, expected 50.0"
-    assert seen["cross"] == 50.0, f"cross-attention saw softcap={seen['cross']}, expected 50.0"
+        # The constructor value reaches both attention modules.
+        block(hidden_states, **forward_kwargs)
+        assert seen["self"] == 50.0, f"self-attention saw softcap={seen['self']}, expected 50.0"
+        assert seen["cross"] == 50.0, f"cross-attention saw softcap={seen['cross']}, expected 50.0"
 
-    # A forward override wins over the constructor, for both.
-    seen.clear()
-    block(hidden_states, softcap=10.0, **forward_kwargs)
-    assert seen["self"] == 10.0, f"self-attention saw softcap={seen['self']}, expected 10.0"
-    assert seen["cross"] == 10.0, f"cross-attention saw softcap={seen['cross']}, expected 10.0"
+        # A forward override wins over the constructor, for both.
+        seen.clear()
+        block(hidden_states, softcap=10.0, **forward_kwargs)
+        assert seen["self"] == 10.0, f"self-attention saw softcap={seen['self']}, expected 10.0"
+        assert seen["cross"] == 10.0, f"cross-attention saw softcap={seen['cross']}, expected 10.0"
+    finally:
+        for key, value in backend_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        _attention_backends["backend_selection_requires_update"] = True
 
 
 model_configs_mla = {
