@@ -410,72 +410,109 @@ Expert parallelism
     or newer. It is compiled in by default when Transformer Engine is built for
     these architectures; set ``NVTE_WITH_NCCL_EP=0`` at build time to disable it.
 
-With expert parallelism (EP) the experts are sharded across devices, and each
-device owns a slice of them. Two all-to-all collectives wrap the local expert
-computation: a **dispatch** all-to-all sends each token to the rank that owns its
-expert, the local grouped GEMM runs, and a **combine** all-to-all returns the
-results to the source rank. Dispatch takes the router output (expert indices and
-weights) directly and delivers a receive buffer grouped by local expert, and
-combine writes the results back in the original token order, so no separate
-token dispatch or token combine is needed.
+With expert parallelism (EP) the experts are sharded across ranks: every rank
+keeps its own shard of the tokens and holds only a slice of the experts.
+
+.. raw:: html
+   :file: img/moe_expert_placement.svg
+
+*Figure 8. Expert placement: each rank holds its token shard and a subset of the
+experts.*
+
+A token routed to an expert on another rank has to travel there and back. Two
+all-to-all collectives wrap the local expert computation: a **dispatch**
+all-to-all sends each token to the rank that owns its expert, the local grouped
+GEMM runs, and a **combine** all-to-all returns the results to the source rank.
+Dispatch takes the router output (expert indices and weights) directly and
+delivers a receive buffer grouped by local expert, and combine writes the results
+back in the original token order, so no separate token dispatch or token combine
+is needed.
 
 .. raw:: html
    :file: img/moe_expert_parallel.svg
 
-*Figure 8. With experts sharded across ranks, a dispatch all-to-all routes each
-token to the rank owning its expert and a combine all-to-all returns the
-outputs to the source rank.*
+*Figure 9. Dispatch routes each token to the rank owning its expert, the local
+experts run on the receive buffer, and combine returns the outputs to the source
+rank.*
 
-Dispatch and combine are implemented directly on NCCL, using symmetric-memory
-windows for zero-copy transfers. Both are differentiable. The common C API
-(``nvte_ep_dispatch`` / ``nvte_ep_combine`` and their backward passes, declared
-in ``transformer_engine/common/include/transformer_engine/ep.h``) is exposed in
-both frameworks; the snippets show how the dispatch, the local experts and the
-combine are wired together.
+Transformer Engine implements dispatch and combine directly on NCCL, using
+symmetric-memory windows for zero-copy transfers. The implementation is shared by
+both frameworks through the common C API in
+``transformer_engine/common/include/transformer_engine/ep.h``:
 
-.. tabs::
+* ``nvte_ep_initialize`` / ``nvte_ep_shutdown`` set up the EP group on an
+  existing NCCL communicator, once per process.
+* ``nvte_ep_prepare`` seeds the routing for one step from the top-k expert
+  indices; ``nvte_ep_dispatch`` and ``nvte_ep_combine`` run the two all-to-alls,
+  with ``nvte_ep_dispatch_bwd`` and ``nvte_ep_combine_bwd`` for the backward
+  pass. Per-layer state lives in a caller-owned ``handle_mem`` buffer.
 
-   .. tab:: PyTorch
+The per-step operations are allocation-free and CUDA-graph capturable when the
+receive buffer has a fixed size: ``recv_capacity_per_rank`` bounds the tokens a
+rank receives per step, with ``ep_size * max_tokens_per_rank * top_k`` as the
+dropless worst case. Without it the buffer is sized from the actual receive count
+each step, at the cost of a host synchronization. Dispatch can also quantize the
+tokens to MXFP8 before the all-to-all, so the communication moves the
+low-precision payload and the local grouped GEMM consumes it directly. Complete
+runnable examples live in ``examples/pytorch/ep/`` and ``examples/jax/ep/`` in
+the repository.
 
-      .. raw:: html
+PyTorch
+~~~~~~~
 
-         <div class="code-block-header">
-            Requires SM90 (Hopper) or later
-         </div>
+``transformer_engine.pytorch.ep`` exposes the primitives with autograd support:
 
-      .. literalinclude:: moe_expert_parallel_pytorch.py
-         :language: python
-         :start-after: # START_MOE_EXPERT_PARALLEL_PYTORCH
-         :end-before: # END_MOE_EXPERT_PARALLEL_PYTORCH
+* ``ep_bootstrap(ep_group, ...)`` initializes EP once per process on an existing
+  process group and fixes the group-wide sizes (number of experts, maximum tokens
+  per rank, hidden size, top-k, receive capacity).
+* ``EpBuffer`` holds the per-call state (routing handle and per-expert token
+  counts). Use one buffer per layer call that is in flight at the same time, for
+  example one per pipeline microbatch. Its ``dispatch_fwd_quant_recipe`` enables
+  the MXFP8 quantization in dispatch.
+* ``ep_dispatch(buffer, tokens, topk_idx, topk_weights)`` returns the receive
+  buffer with one fixed slot range per local expert, the routing weights of the
+  received tokens, and the number of valid tokens per local expert.
+* ``ep_combine(buffer, expert_out)`` returns the summed expert outputs in the
+  original token order. The routing weights are applied by the caller before the
+  combine.
 
-   .. tab:: JAX
+.. raw:: html
 
-      .. raw:: html
+   <div class="code-block-header">
+      Requires SM90 (Hopper) or later
+   </div>
 
-         <div class="code-block-header">
-            Requires SM90 (Hopper) or later
-         </div>
+.. literalinclude:: moe_expert_parallel_pytorch.py
+   :language: python
+   :start-after: # START_MOE_EXPERT_PARALLEL_PYTORCH
+   :end-before: # END_MOE_EXPERT_PARALLEL_PYTORCH
 
-      .. literalinclude:: moe_expert_parallel_jax.py
-         :language: python
-         :start-after: # START_MOE_EXPERT_PARALLEL_JAX
-         :end-before: # END_MOE_EXPERT_PARALLEL_JAX
+JAX
+~~~
 
-Sizing the receive buffer
-~~~~~~~~~~~~~~~~~~~~~~~~~
+JAX offers two levels of API, both experimental:
 
-Each rank receives a data-dependent number of tokens per step. Passing a fixed
-receive capacity (``recv_capacity_per_rank``) sizes the receive buffer up front,
-so the step needs no device-to-host synchronization and can be captured in a
-CUDA graph; the dropless worst case is ``ep_size * max_tokens_per_rank * top_k``.
-Without it the buffer is sized from the actual receive count each step, at the
-cost of a host sync.
+* ``transformer_engine.jax.moe.moe`` runs the whole MoE block (router, dispatch,
+  expert MLPs, combine) as a single differentiable call. It is executed inside a
+  ``Mesh``; ``ep_axis`` names the mesh axis the experts are sharded over and the
+  dispatch and combine become all-to-all collectives over that axis. It also
+  returns the load-balancing loss when ``aux_loss_coeff`` is non-zero.
+* ``transformer_engine.jax.ep`` exposes the primitives separately:
+  ``ep_bootstrap`` initializes EP once per process from the mesh, ``ep_dispatch``
+  scatters tokens and weights to the expert ranks and returns the receive buffer
+  together with the routing handle and token counts, and ``ep_combine`` sums the
+  expert outputs back on the source ranks.
 
-Dispatch can quantize the tokens to MXFP8 before the all-to-all
-(``dispatch_fwd_quant_recipe``), so the communication moves the low-precision
-payload and the local grouped GEMM consumes it directly. Complete runnable
-examples live in ``examples/pytorch/ep/`` and ``examples/jax/ep/`` in the
-repository.
+.. raw:: html
+
+   <div class="code-block-header">
+      Requires SM90 (Hopper) or later
+   </div>
+
+.. literalinclude:: moe_expert_parallel_jax.py
+   :language: python
+   :start-after: # START_MOE_EXPERT_PARALLEL_JAX
+   :end-before: # END_MOE_EXPERT_PARALLEL_JAX
 
 .. _moe-putting-it-together:
 
