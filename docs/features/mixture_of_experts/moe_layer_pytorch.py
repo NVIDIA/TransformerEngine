@@ -4,15 +4,24 @@
 
 # START_MOE_LAYER_PYTORCH
 import torch
-from transformer_engine.pytorch import moe_permute, moe_unpermute
+import transformer_engine.pytorch as te
 from transformer_engine.pytorch.router import fused_topk_with_score_function
 
-# hidden_states: [num_tokens, hidden_size]
-# gate:          torch.nn.Linear(hidden_size, num_experts), the router projection
-# experts:       the per-expert MLP, built from te.GroupedLinear (see "Grouped GEMM");
-#                a full expert MLP stacks two grouped GEMMs around an activation.
-top_k = 2
-num_tokens, hidden_size = hidden_states.shape
+num_tokens, hidden_size, num_experts, top_k = 16, 64, 4, 2
+hidden_states = torch.randn(
+    num_tokens, hidden_size, device="cuda", dtype=torch.bfloat16, requires_grad=True,
+)
+gate = torch.nn.Linear(
+    hidden_size, num_experts, bias=False, device="cuda", dtype=torch.bfloat16,
+)
+experts = te.GroupedLinear(
+    num_experts,
+    hidden_size,
+    hidden_size,
+    bias=False,
+    params_dtype=torch.bfloat16,
+    device="cuda",
+)
 
 # 1. Router: score the experts and pick the top-k for each token.
 logits = gate(hidden_states)
@@ -23,19 +32,17 @@ probs, routing_map = fused_topk_with_score_function(
 
 # 2. Dispatch: gather tokens into expert-contiguous order.
 routing_map = routing_map.to(torch.int32)
-permuted, row_id_map = moe_permute(
+permuted, row_id_map = te.moe_permute(
     hidden_states, routing_map, num_out_tokens=num_tokens * top_k,
 )
 
-# 3. Experts: one grouped MLP call over all expert token blocks.
+# 3. Experts: one grouped call over all expert token blocks.
 m_splits = routing_map.sum(dim=0).tolist()  # tokens routed to each expert
 expert_out = experts(permuted, m_splits)
 
 # 4. Combine: scatter the outputs back and merge the top-k contributions.
-# restore_shape is the original token shape; it is needed whenever the permuted
-# buffer has more rows than the input (top-k routing: num_out_tokens > num_tokens).
-output = moe_unpermute(
+output = te.moe_unpermute(
     expert_out, row_id_map, merging_probs=probs, restore_shape=(num_tokens, hidden_size),
 )
-# output: [num_tokens, hidden_size]
+output.square().mean().backward()
 # END_MOE_LAYER_PYTORCH

@@ -208,10 +208,13 @@ of the grouped GEMM and the ``row_id_map`` returned by token dispatch, and
 returns a tensor of shape ``[num_tokens, hidden_size]`` with the rows written
 back into the original token order.
 
-For top-k routing pass the routing weights as ``merging_probs``; the kernel
-then computes the weighted sum of the per-expert contributions in the same
-fused pass. Without it the contributions are summed unweighted; for top-1
-routing it is not needed.
+Pass the routing weights as ``merging_probs``; the kernel then computes the
+weighted sum of the per-expert contributions in the same fused pass. Without
+them the contributions are summed unweighted. They may be omitted for top-1
+only when the router guarantees that every selected weight is one, for example
+post-top-k softmax with ``scaling_factor=1``. Pre-softmax, sigmoid,
+sqrtsoftplus, or an additional scaling factor can produce non-unit top-1
+weights that must still be applied.
 
 .. raw:: html
    :file: img/moe_unpermute.svg
@@ -242,13 +245,20 @@ A typical call looks like:
 Token probabilities
 ~~~~~~~~~~~~~~~~~~~
 
-The routing weights can be applied in two equivalent places:
+The routing weights must be applied exactly once:
 
-* **At combine (output side).** Pass them to token combine as ``merging_probs``,
+* **In token combine.** Pass the original routing weights as ``merging_probs``,
   as in the examples above.
-* **At dispatch (input side).** Pass them to token dispatch as ``probs``. They
-  are permuted alongside the tokens into the expert-contiguous layout, so each
-  expert's input can be scaled before the grouped GEMM.
+* **Before token combine.** Pass the weights to token dispatch as ``probs`` to
+  receive them in expert-contiguous order, multiply the completed expert
+  outputs by the permuted weights, and call token combine without
+  ``merging_probs``. An implementation may instead fold the weights into a
+  mathematically equivalent point, such as immediately before the expert's
+  final bias-free linear layer.
+
+Token dispatch only permutes ``probs``; it does not apply them. In particular,
+scaling the input to a nonlinear expert is not equivalent to weighting that
+expert's output.
 
 Padding and alignment
 ~~~~~~~~~~~~~~~~~~~~~
@@ -348,17 +358,15 @@ There are two execution paths:
 
 * **Per-expert GEMMs.** The per-expert token counts are read on the host, the
   input is split and quantized per expert, and one cuBLAS GEMM per expert is
-  launched on a pool of CUDA streams (on Hopper, ``NVTE_USE_CUTLASS_GROUPED_GEMM=1``
-  switches BF16/FP16 to a CUTLASS grouped GEMM kernel). This path supports all
-  recipes, but reading the token counts is a device-to-host synchronization, so
-  it cannot be captured in a CUDA graph.
+  launched on a pool of CUDA streams. This path supports the broadest range of
+  configurations, but reading the token counts is a device-to-host
+  synchronization, so it cannot be captured in a CUDA graph.
 * **Single grouped GEMM.** The token counts stay on the device and all experts
-  run as one cuBLASLt grouped GEMM (cuBLAS 13.3 or newer), with the
-  quantization fused across experts. There is no host synchronization, so the
-  step is CUDA-graph capturable. Supported for BF16/FP16, and for MXFP8 and NVFP4
-  on Blackwell; FP8 current scaling and FP8 block scaling on Hopper need cuBLAS
-  13.5 / 13.6. FP8 delayed scaling and custom recipes are not supported on this
-  path. The snippets show how it is selected.
+  run in one grouped operation, with quantization fused across experts. There
+  is no host synchronization, so the step is CUDA-graph capturable. Support
+  depends on the framework, GPU, data type, recipe, and matrix shapes; an
+  unsupported configuration falls back to per-expert GEMMs. See the framework
+  API reference for the current compatibility details.
 
 The snippets assume the tokens have already been permuted into
 expert-contiguous order.
@@ -423,8 +431,11 @@ not supported, the three operations run separately with identical results.
 Example: MoE layer on a single device
 -------------------------------------
 
-The example below wires the blocks together for top-k routing on a single
-device: route, dispatch, run the experts, combine.
+The runnable examples below wire the blocks together for top-k routing on a
+single supported NVIDIA GPU: route, dispatch, run the experts, combine. To keep
+them short, each expert is represented by one grouped linear layer; a full
+expert MLP uses the same routing around two grouped linear layers and an
+activation.
 
 .. tabs::
 
@@ -596,7 +607,10 @@ Dispatch can quantize the tokens before sending them:
         executed inside a ``Mesh``; ``ep_axis`` names the mesh axis the experts
         are sharded over and the dispatch and combine become all-to-all
         collectives over that axis. It also returns the load-balancing loss when
-        ``aux_loss_coeff`` is non-zero.
+        ``aux_loss_coeff`` is non-zero. Before the first call, initialize EP
+        eagerly with ``ep_bootstrap`` and record the same configuration with
+        ``record_ep_bootstrap_signature_for_moe``. The snippet below shows the
+        required TE EP bootstrap sequence.
       * ``transformer_engine.jax.ep`` exposes the primitives separately. Unlike
         the PyTorch ``EpBuffer``, the routing state is not kept in an object:
         dispatch returns it as arrays and the caller passes them on to combine.
@@ -635,4 +649,3 @@ Dispatch can quantize the tokens before sending them:
 Complete runnable examples:
 `examples/pytorch/ep <https://github.com/NVIDIA/TransformerEngine/tree/main/examples/pytorch/ep>`_
 and `examples/jax/ep <https://github.com/NVIDIA/TransformerEngine/tree/main/examples/jax/ep>`_.
-

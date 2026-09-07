@@ -9,8 +9,8 @@ from transformer_engine.jax import permutation as te_permutation
 #               produced by grouped_dense (or a grouped MLP).
 # row_id_map:   returned by token_dispatch.
 # router_probs: [num_tokens, num_experts]; the original (un-permuted) routing
-#               probabilities. Provide for top-k routing to weight per-expert
-#               contributions in the same fused pass; pass None for top-1.
+#               probabilities. Provide whenever the selected weights are not
+#               all one, including top-1 configurations with non-unit weights.
 tokens_out = te_permutation.token_combine(
     expert_out,
     row_id_map,

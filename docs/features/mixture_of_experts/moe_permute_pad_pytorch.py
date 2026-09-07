@@ -24,12 +24,15 @@ padded, permuted_probs, row_id_map, pad_offsets, padded_tokens_per_expert = (
 
 # ... run the grouped MLP on `padded`, producing expert_out ...
 
+# Apply the permuted routing weights to the completed expert outputs. Since the
+# weights are applied here, do not pass them to moe_unpermute as well.
+expert_out = expert_out * permuted_probs[:, None]
+
 # Pass pad_offsets so token combine removes the padding it added, and
 # restore_shape so the result has the original [num_tokens, hidden_size] shape.
 output = moe_unpermute(
     expert_out,
     row_id_map,
-    merging_probs=probs,
     restore_shape=tokens.shape,
     pad_offsets=pad_offsets,
 )
