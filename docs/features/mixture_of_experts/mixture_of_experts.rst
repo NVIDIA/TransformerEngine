@@ -458,9 +458,18 @@ dense MLP on the local tokens on every rank.
 experts run on the receive buffer, and combine returns the outputs to the source
 rank.*
 
-Transformer Engine implements dispatch and combine directly on NCCL, using
-symmetric-memory windows for zero-copy transfers. Both operations are
+Dispatch and combine are built on the NCCL EP library (``libnccl_ep``, loaded
+at runtime), not on generic all-to-all collectives. Both operations are
 differentiable.
+
+* **Communication.** The NCCL EP kernels move each token straight to the slot
+  of its expert on the owning rank, so the routing and the communication happen
+  in one step.
+* **Zero-copy mode.** Optionally, the token and receive buffers are allocated as
+  NCCL symmetric memory (``symm_mem_alloc``): the same buffer is registered on
+  every rank as a window, so the kernels write directly into the peer's buffer
+  instead of staging the payload in internal NCCL buffers. Without it the
+  library copies through its own staging buffers.
 
 * **Receive buffer size.** ``recv_capacity_per_rank`` is the maximum number of
   tokens (rows of ``hidden_size``) a rank receives per step; the dropless worst
@@ -472,8 +481,9 @@ differentiable.
   all-to-all, so the communication moves the low-precision payload and the local
   grouped GEMM consumes it directly. Currently only the MXFP8 recipe is
   supported there.
-* **Examples.** Complete runnable examples live in ``examples/pytorch/ep/`` and
-  ``examples/jax/ep/`` in the repository.
+* **Examples.** Complete runnable examples:
+  `examples/pytorch/ep <https://github.com/NVIDIA/TransformerEngine/tree/main/examples/pytorch/ep>`_
+  and `examples/jax/ep <https://github.com/NVIDIA/TransformerEngine/tree/main/examples/jax/ep>`_.
 
 .. tabs::
 
@@ -490,7 +500,8 @@ differentiable.
         same time, for example one per pipeline microbatch. Passing
         ``dispatch_fwd_quant_recipe=MXFP8BlockScaling()`` makes dispatch return
         the receive buffer as an MXFP8 grouped tensor (see
-        ``tests/pytorch/distributed/run_ep.py`` for a complete example).
+        `tests/pytorch/distributed/run_ep.py <https://github.com/NVIDIA/TransformerEngine/blob/main/tests/pytorch/distributed/run_ep.py>`_
+        for a complete example).
       * ``ep_dispatch(buffer, tokens, topk_idx, topk_weights)`` returns the
         receive buffer with one fixed slot range per local expert, the routing
         weights of the received tokens, and the number of valid tokens per local
