@@ -426,7 +426,7 @@ keeps its own shard of the tokens and holds only a slice of the experts.
    :file: img/moe_expert_placement.svg
 
 *Figure 8. Expert placement: each rank holds its token shard and a subset of the
-experts.*
+experts. Tokens t1, t3 and t5 are routed to experts on the other rank.*
 
 A token routed to an expert on another rank has to travel there and back. Two
 all-to-all collectives wrap the local expert computation: a **dispatch**
@@ -435,7 +435,8 @@ GEMM runs, and a **combine** all-to-all returns the results to the source rank.
 Dispatch takes the router output (expert indices and weights) directly and
 delivers a receive buffer grouped by local expert, and combine writes the results
 back in the original token order, so no separate token dispatch or token combine
-is needed.
+is needed. Shared experts, which every token passes through, are not part of the
+dispatch: they run as a regular dense MLP on the local tokens on every rank.
 
 .. raw:: html
    :file: img/moe_expert_parallel.svg
@@ -447,14 +448,15 @@ rank.*
 Transformer Engine implements dispatch and combine directly on NCCL, using
 symmetric-memory windows for zero-copy transfers. Both operations are
 differentiable. They are allocation-free and CUDA-graph capturable when the
-receive buffer has a fixed size: ``recv_capacity_per_rank`` bounds the tokens a
-rank receives per step, with ``ep_size * max_tokens_per_rank * top_k`` as the
-dropless worst case. Without it the buffer is sized from the actual receive count
-each step, at the cost of a host synchronization. Dispatch can also quantize the
-tokens to MXFP8 before the all-to-all, so the communication moves the
-low-precision payload and the local grouped GEMM consumes it directly. Complete
-runnable examples live in ``examples/pytorch/ep/`` and ``examples/jax/ep/`` in
-the repository.
+receive buffer has a fixed size: ``recv_capacity_per_rank`` is the maximum
+number of tokens (rows of ``hidden_size``) a rank receives per step, with
+``ep_size * max_tokens_per_rank * top_k`` as the dropless worst case. Without it
+the buffer is sized from the actual receive count each step, at the cost of a
+host synchronization. Dispatch can also quantize the tokens before the
+all-to-all, so the communication moves the low-precision payload and the local
+grouped GEMM consumes it directly; currently only the MXFP8 recipe is supported
+there. Complete runnable examples live in ``examples/pytorch/ep/`` and
+``examples/jax/ep/`` in the repository.
 
 .. tabs::
 
@@ -468,8 +470,10 @@ the repository.
         maximum tokens per rank, hidden size, top-k, receive capacity).
       * ``EpBuffer`` holds the per-call state (routing handle and per-expert
         token counts). Use one buffer per layer call that is in flight at the
-        same time, for example one per pipeline microbatch. Its
-        ``dispatch_fwd_quant_recipe`` enables the MXFP8 quantization in dispatch.
+        same time, for example one per pipeline microbatch. Passing
+        ``dispatch_fwd_quant_recipe=MXFP8BlockScaling()`` makes dispatch return
+        the receive buffer as an MXFP8 grouped tensor (see
+        ``tests/pytorch/distributed/run_ep.py`` for a complete example).
       * ``ep_dispatch(buffer, tokens, topk_idx, topk_weights)`` returns the
         receive buffer with one fixed slot range per local expert, the routing
         weights of the received tokens, and the number of valid tokens per local

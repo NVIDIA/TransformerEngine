@@ -3,58 +3,42 @@
     <style>
       .label { font: 13px sans-serif; fill: #333; text-anchor: middle; }
       .small-label { font: 11px sans-serif; fill: #555; text-anchor: middle; }
+      .tiny-label { font: 10px sans-serif; fill: #555; text-anchor: middle; }
       .rank-label { font: bold 12px sans-serif; fill: #444; text-anchor: start; }
       .expert-e0 { fill: #e3f2fd; stroke: #1976d2; stroke-width: 1.4; }
       .expert-e1 { fill: #e8f5e9; stroke: #388e3c; stroke-width: 1.4; }
       .expert-e2 { fill: #fff3e0; stroke: #f57c00; stroke-width: 1.4; }
       .expert-e3 { fill: #fce4ec; stroke: #c2185b; stroke-width: 1.4; }
-      .box { fill: #ffffff; stroke: #bdbdbd; stroke-width: 1.3; }
       .panel { fill: #f5f5f5; stroke: #9e9e9e; stroke-width: 1.2; stroke-dasharray: 5 4; }
     </style>
   </defs>
-  <rect x="30" y="30" width="195" height="170" rx="6" class="panel"/>
-  <text x="40" y="50" class="rank-label">Rank 0</text>
-  <rect x="45" y="65" width="165" height="40" class="box"/>
-  <text x="127" y="83" class="label">tokens</text>
-  <text x="127" y="98" class="small-label">local batch shard</text>
-  <rect x="45" y="125" width="80" height="55" class="expert-e0"/>
-  <text x="85" y="149" class="label">E0</text>
-  <text x="85" y="166" class="small-label">expert weights</text>
-  <rect x="130" y="125" width="80" height="55" class="expert-e0"/>
-  <text x="170" y="149" class="label">E1</text>
-  <text x="170" y="166" class="small-label">expert weights</text>
-  <rect x="245" y="30" width="195" height="170" rx="6" class="panel"/>
-  <text x="255" y="50" class="rank-label">Rank 1</text>
-  <rect x="260" y="65" width="165" height="40" class="box"/>
-  <text x="342" y="83" class="label">tokens</text>
-  <text x="342" y="98" class="small-label">local batch shard</text>
-  <rect x="260" y="125" width="80" height="55" class="expert-e1"/>
-  <text x="300" y="149" class="label">E2</text>
-  <text x="300" y="166" class="small-label">expert weights</text>
-  <rect x="345" y="125" width="80" height="55" class="expert-e1"/>
-  <text x="385" y="149" class="label">E3</text>
-  <text x="385" y="166" class="small-label">expert weights</text>
-  <rect x="460" y="30" width="195" height="170" rx="6" class="panel"/>
-  <text x="470" y="50" class="rank-label">Rank 2</text>
-  <rect x="475" y="65" width="165" height="40" class="box"/>
-  <text x="557" y="83" class="label">tokens</text>
-  <text x="557" y="98" class="small-label">local batch shard</text>
-  <rect x="475" y="125" width="80" height="55" class="expert-e2"/>
-  <text x="515" y="149" class="label">E4</text>
-  <text x="515" y="166" class="small-label">expert weights</text>
-  <rect x="560" y="125" width="80" height="55" class="expert-e2"/>
-  <text x="600" y="149" class="label">E5</text>
-  <text x="600" y="166" class="small-label">expert weights</text>
-  <rect x="675" y="30" width="195" height="170" rx="6" class="panel"/>
-  <text x="685" y="50" class="rank-label">Rank 3</text>
-  <rect x="690" y="65" width="165" height="40" class="box"/>
-  <text x="772" y="83" class="label">tokens</text>
-  <text x="772" y="98" class="small-label">local batch shard</text>
-  <rect x="690" y="125" width="80" height="55" class="expert-e3"/>
-  <text x="730" y="149" class="label">E6</text>
-  <text x="730" y="166" class="small-label">expert weights</text>
-  <rect x="775" y="125" width="80" height="55" class="expert-e3"/>
-  <text x="815" y="149" class="label">E7</text>
-  <text x="815" y="166" class="small-label">expert weights</text>
-  <text x="450" y="222" class="small-label">8 experts on 4 ranks: every rank keeps its own tokens and holds 2 of the 8 experts</text>
+  <rect x="60" y="30" width="380" height="175" rx="6" class="panel"/>
+  <text x="72" y="52" class="rank-label">Rank 0</text>
+  <text x="155" y="78" class="small-label">tokens</text>
+  <rect x="80" y="88" width="150" height="26" class="expert-e0"/>
+  <text x="155" y="105" class="tiny-label">t0 → E0</text>
+  <rect x="80" y="122" width="150" height="26" class="expert-e2"/>
+  <text x="155" y="139" class="tiny-label">t1 → E2</text>
+  <rect x="80" y="156" width="150" height="26" class="expert-e0"/>
+  <text x="155" y="173" class="tiny-label">t2 → E0</text>
+  <text x="340" y="78" class="small-label">local experts</text>
+  <rect x="260" y="88" width="75" height="100" class="expert-e0"/>
+  <text x="297" y="143" class="label">E0</text>
+  <rect x="345" y="88" width="75" height="100" class="expert-e1"/>
+  <text x="382" y="143" class="label">E1</text>
+  <rect x="460" y="30" width="380" height="175" rx="6" class="panel"/>
+  <text x="472" y="52" class="rank-label">Rank 1</text>
+  <text x="555" y="78" class="small-label">tokens</text>
+  <rect x="480" y="88" width="150" height="26" class="expert-e1"/>
+  <text x="555" y="105" class="tiny-label">t3 → E1</text>
+  <rect x="480" y="122" width="150" height="26" class="expert-e3"/>
+  <text x="555" y="139" class="tiny-label">t4 → E3</text>
+  <rect x="480" y="156" width="150" height="26" class="expert-e2"/>
+  <text x="555" y="173" class="tiny-label">t5 → E2</text>
+  <text x="740" y="78" class="small-label">local experts</text>
+  <rect x="660" y="88" width="75" height="100" class="expert-e2"/>
+  <text x="697" y="143" class="label">E2</text>
+  <rect x="745" y="88" width="75" height="100" class="expert-e3"/>
+  <text x="782" y="143" class="label">E3</text>
+  <text x="450" y="225" class="small-label">4 experts on 2 ranks: each rank holds its own tokens and two of the experts; token colors mark the selected expert</text>
 </svg>
