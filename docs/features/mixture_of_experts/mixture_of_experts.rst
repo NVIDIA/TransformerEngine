@@ -17,12 +17,9 @@ Mixture of Experts
 Introduction
 ------------
 
-Mixture of Experts (MoE) layers replace a dense feed-forward network with a set
+A Mixture of Experts (MoE) layer replaces a dense feed-forward network with a set
 of expert networks and a router that sends each token to one or more experts.
-This keeps the activated parameter count per token small while allowing the
-model to scale to many more total parameters.
-
-A token passes through an MoE layer in the following stages:
+A token passes through the layer in the following stages:
 
 #. The **router** scores the experts for each token and selects the top-k of
    them.
@@ -45,22 +42,19 @@ the* ``routing_map`` *consumed by token dispatch and the* ``probs`` *used as mer
 weights in token combine; the all-to-all dispatch and combine are only present
 when the experts are sharded across ranks.*
 
-Transformer Engine provides an optimized building block for each stage. They are
-exposed as standalone functions, so they can be assembled into a complete MoE
-layer or dropped into an existing implementation one piece at a time:
+Transformer Engine provides a building block for each stage. They are exposed as
+standalone functions, so they can be assembled into a complete MoE layer or
+dropped into an existing implementation one piece at a time:
 
-* :ref:`Routing kernels <moe-routing-kernels>`: the router fuses the score
-  function with the top-k selection, a fused :ref:`load-balancing loss
-  <moe-load-balancing>` keeps the routing spread evenly across experts, and token
-  dispatch and combine move tokens between their original order and the
-  expert-contiguous layout with optimized kernels instead of Python-level
-  gather / sort / concatenate chains.
-* :ref:`Grouped GEMM <moe-grouped-gemm>` primitives execute the expert linear
-  layers efficiently once the tokens are laid out in expert-contiguous blocks,
-  and the :ref:`grouped MLP <moe-grouped-mlp>` fuses the whole expert MLP into
-  one kernel.
-* :ref:`Expert parallelism <moe-expert-parallelism>` shards the experts across
-  devices with all-to-all dispatch and combine.
+* :ref:`Routing kernels <moe-routing-kernels>`: a fused router (score function
+  and top-k selection), a fused :ref:`load-balancing loss <moe-load-balancing>`,
+  and token dispatch and combine kernels that move tokens between their original
+  order and the expert-contiguous layout.
+* :ref:`Grouped GEMM <moe-grouped-gemm>`: the expert linear layers as one call
+  over expert-contiguous blocks; the :ref:`grouped MLP <moe-grouped-mlp>` fuses
+  the whole expert MLP into one kernel.
+* :ref:`Expert parallelism <moe-expert-parallelism>`: all-to-all dispatch and
+  combine for experts sharded across devices.
 
 The :ref:`example at the end <moe-putting-it-together>` wires the blocks into a
 complete MoE layer.
@@ -70,26 +64,12 @@ complete MoE layer.
 Routing kernels
 ---------------
 
-The router decides where each token goes; once it has produced a routing map,
-the tokens must be moved into the expert-contiguous layout expected by the
-grouped GEMM (``GroupedLinear`` in PyTorch, ``grouped_dense`` in JAX) and,
-afterwards, moved back. Transformer Engine provides differentiable kernels for
-all of these steps. This section starts with the router and then focuses on the
-two core data-movement operations - token dispatch and token combine - because
-they illustrate the layout transformation used by the other variants.
-
-The token dispatch and combine snippets below show one concrete instance of this
-pattern: the mask-map routing path, exposed in PyTorch as ``transformer_engine.pytorch.moe_permute``
-and ``transformer_engine.pytorch.moe_unpermute``, and in JAX as
-``transformer_engine.jax.permutation.token_dispatch`` and
-``transformer_engine.jax.permutation.token_combine``. Other routing variants
-(for example, index-map routing in PyTorch via ``map_type="index"``) are
-available in both frameworks and follow the same pattern; see the
-:doc:`PyTorch API reference </api/pytorch>` and
-:doc:`JAX API reference </api/jax>` for the complete list and signatures.
-The mask-map APIs have different framework-specific wrappers, but lower to the
-same shared Triton permutation kernels, and both pairs are differentiable so they
-can be used directly inside training graphs.
+The router produces a routing map. Token dispatch moves the tokens into the
+expert-contiguous layout expected by the grouped GEMM, and token combine moves
+the expert outputs back. All of these kernels are differentiable. The snippets
+below use the mask-map routing variant; other variants (for example index-map
+routing) follow the same pattern, see the :doc:`PyTorch API reference
+</api/pytorch>` and :doc:`JAX API reference </api/jax>`.
 
 .. _moe-router:
 
@@ -105,9 +85,9 @@ the two tensors that drive the rest of the layer:
 * ``probs`` - the routing weight of each selected expert. Token combine uses
   these as merging weights when a token was routed to more than one expert.
 
-Transformer Engine fuses the score function and the top-k selection into a single
-differentiable kernel, ``fused_topk_with_score_function``. All internal math runs
-in FP32 for numerical stability, regardless of the logits dtype.
+``fused_topk_with_score_function`` runs the score function and the top-k
+selection in a single differentiable kernel. All internal math runs in FP32,
+regardless of the logits dtype.
 
 .. raw:: html
    :file: img/moe_router.svg
@@ -116,18 +96,14 @@ in FP32 for numerical stability, regardless of the logits dtype.
 The selected entries populate* ``routing_map`` *(a 0/1 mask) and* ``probs`` *(the
 routing weights); all other entries are zero.*
 
-The kernel covers the score functions and selection variants used by common MoE
-architectures:
+Options:
 
-* **Score function:** ``"softmax"`` or ``"sigmoid"`` (the PyTorch API also offers
-  ``"sqrtsoftplus"``). With softmax, ``use_pre_softmax`` selects whether the
-  softmax is applied before or after the top-k.
-* **Grouped routing:** the experts are split into ``num_groups`` equal groups
-  (for example, one group per node). Each group is scored by the sum of its best
-  expert scores, the top ``group_topk`` groups are kept, and the final top-k
-  experts are chosen only from those groups. This bounds how many groups a
-  token's experts span, which limits all-to-all traffic under expert
-  parallelism (the node-limited routing of DeepSeek-V3).
+* **Score function:** softmax or sigmoid. With softmax, ``use_pre_softmax``
+  selects whether the softmax is applied before or after the top-k.
+* **Grouped routing:** the experts are split into ``num_groups`` equal groups.
+  Each group is scored by the sum of its best expert scores, the top
+  ``group_topk`` groups are kept, and the top-k experts are chosen only from
+  those groups.
 * **Expert bias:** ``expert_bias`` is added to the scores before the top-k
   selection (see :ref:`Load balancing <moe-load-balancing>`).
 * **Scaling:** ``scaling_factor`` rescales the returned probabilities.
@@ -153,21 +129,18 @@ architectures:
 Load balancing
 ~~~~~~~~~~~~~~
 
-Left unconstrained, a router tends to collapse onto a handful of experts. The
-usual remedy is an auxiliary load-balancing loss that rewards spreading tokens
-evenly across experts. Transformer Engine computes it with ``fused_moe_aux_loss``
-from the per-expert token counts and the *dense* routing scores - one value per
-expert rather than only the selected top-k - so the loss has a gradient with
-respect to every expert's logit. Those dense scores come from
-``fused_compute_score_for_moe_aux_loss`` in PyTorch, or from
-``fused_topk_with_score_function(..., compute_aux_scores=True)`` in JAX.
+``fused_moe_aux_loss`` computes the auxiliary load-balancing loss that penalizes
+uneven token counts across experts. It takes the per-expert token counts and the
+*dense* routing scores (one value per expert, not only the selected top-k), so
+the loss has a gradient with respect to every expert's logit. The dense scores
+are returned by the router functions shown below; add the scaled loss to the
+training loss.
 
-An alternative that needs no auxiliary loss is to bias the selection directly.
-With the sigmoid score function, the router's ``expert_bias`` is added to the
-scores only for the top-k selection, so it changes which experts are picked but
-not the returned routing weights. Adjusting it between steps - lowering it for
-overloaded experts and raising it for under-used ones - steers the load without
-touching the training objective.
+``expert_bias`` balances the load without an extra loss term. With the sigmoid
+score function it is added to the scores only for the top-k selection, so it
+changes which experts are picked but not the returned routing weights. Update
+it between steps: lower it for overloaded experts and raise it for under-used
+ones.
 
 .. tabs::
 
@@ -188,15 +161,10 @@ touching the training objective.
 Token dispatch
 ~~~~~~~~~~~~~~
 
-Token dispatch is the canonical routing operation: given the original token
-tensor and a routing map describing each token's destination expert, it returns
-a permuted token buffer in which all rows assigned to the same expert are
-stored contiguously. In PyTorch this operation is exposed as ``moe_permute``;
-in JAX it is exposed as ``token_dispatch``. This is exactly the layout that
-the grouped linear layer consumes via its per-expert token-count argument
-(``m_splits`` in PyTorch ``GroupedLinear``, ``group_sizes`` in JAX
-``grouped_dense``), so token dispatch followed by the grouped GEMM forms a
-typical MoE forward block.
+Token dispatch takes the token tensor and a routing map describing each
+token's destination experts, and returns a permuted token buffer in which all
+rows assigned to the same expert are stored contiguously. This is the layout the
+grouped GEMM consumes, together with the per-expert token counts.
 
 .. raw:: html
    :file: img/moe_permute.svg
@@ -223,30 +191,22 @@ A typical call looks like:
          :start-after: # START_MOE_PERMUTE_JAX
          :end-before: # END_MOE_PERMUTE_JAX
 
-Both variants return the permuted token buffer of shape
-``[num_out_tokens, hidden_size]`` together with a ``row_id_map`` that
-carries enough information for token combine to restore the original token
-order once the expert computation is done. Token dispatch and token combine
-are typically used as a matched pair around the grouped GEMM call.
+The call returns the permuted token buffer of shape
+``[num_out_tokens, hidden_size]`` together with a ``row_id_map`` that token
+combine uses to restore the original token order after the experts have run.
 
 Token combine
 ~~~~~~~~~~~~~
 
-Token combine is the inverse routing operation: it takes the expert-contiguous
-output produced by the grouped GEMM (or any per-expert computation) and the
-``row_id_map`` returned by token dispatch, and returns a single tensor of
-shape ``[num_tokens, hidden_size]`` with the rows written back into the
-original token order. In PyTorch this operation is exposed as
-``moe_unpermute``; in JAX it is exposed as ``token_combine``.
+Token combine is the inverse operation: it takes the expert-contiguous output
+of the grouped GEMM and the ``row_id_map`` returned by token dispatch, and
+returns a tensor of shape ``[num_tokens, hidden_size]`` with the rows written
+back into the original token order.
 
-For top-1 routing each token has exactly one expert contribution, so
-``merging_probs`` is omitted. For top-k routing pass the per-token expert
-weights as ``merging_probs`` and the kernel computes a weighted sum of the
-per-expert contributions in the same fused pass; without it the per-expert
-contributions are summed unweighted. In PyTorch, also pass
-``restore_shape=(num_tokens, hidden_size)`` whenever the permuted buffer has more
-rows than the original tokens (top-k routing); JAX infers the original token
-count from the ``row_id_map``.
+For top-k routing pass the routing weights as ``merging_probs``; the kernel
+then computes the weighted sum of the per-expert contributions in the same
+fused pass. Without it the contributions are summed unweighted; for top-1
+routing it is not needed.
 
 .. raw:: html
    :file: img/moe_unpermute.svg
@@ -277,27 +237,20 @@ A typical call looks like:
 Token probabilities
 ~~~~~~~~~~~~~~~~~~~
 
-In top-k routing each token contributes to several experts, and those
-contributions are recombined using the routing weights. There are two equivalent
-places to apply the weights:
+The routing weights can be applied in two equivalent places:
 
-* **At combine (output side).** Pass the routing weights to token combine as
-  ``merging_probs``; it forms the weighted sum of the per-expert contributions in
-  the same fused pass. This is the path used in the examples above.
-* **At dispatch (input side).** Scale each expert's input by its routing weight
-  before the grouped GEMM. ``moe_permute_with_probs`` (PyTorch) and the ``probs``
-  argument of ``token_dispatch`` (JAX) permute a probability tensor alongside the
-  tokens, so the weights arrive already aligned with the expert-contiguous
-  layout.
+* **At combine (output side).** Pass them to token combine as ``merging_probs``,
+  as in the examples above.
+* **At dispatch (input side).** Pass them to token dispatch as ``probs``. They
+  are permuted alongside the tokens into the expert-contiguous layout, so each
+  expert's input can be scaled before the grouped GEMM.
 
 Padding and alignment
 ~~~~~~~~~~~~~~~~~~~~~
 
-Grouped GEMM backends are most efficient when each expert's token block starts at
-an aligned offset (for example, a multiple of 128 rows). Because the number of
-tokens routed to an expert is data dependent, the blocks are generally ragged.
-Transformer Engine can pad each block up to a multiple of ``align_size`` as part
-of the dispatch kernel, avoiding a separate padding pass.
+Grouped GEMM backends require or prefer each expert's token block to start at
+an aligned offset (for example, a multiple of 128 rows). Token dispatch can pad
+each block up to a multiple of ``align_size`` in the same kernel.
 
 .. raw:: html
    :file: img/moe_padding.svg
@@ -306,11 +259,9 @@ of the dispatch kernel, avoiding a separate padding pass.
 The per-expert padding offsets are returned so that token combine can drop the
 padding again.*
 
-In PyTorch this is ``moe_permute_and_pad_with_probs``; in JAX it is the
-``align_size`` argument of ``token_dispatch``. Both return the padded token
-buffer, the aligned per-expert token counts (used as ``m_splits`` /
-``group_sizes`` for the grouped GEMM), and the per-expert ``pad_offsets`` that
-token combine needs in order to remove the padding.
+The padded dispatch returns the padded token buffer, the aligned per-expert
+token counts to pass to the grouped GEMM, and the per-expert ``pad_offsets``
+that token combine needs to remove the padding.
 
 .. tabs::
 
@@ -331,28 +282,20 @@ token combine needs in order to remove the padding.
 Reordering expert chunks
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
-When experts are sharded across devices, the per-expert token blocks often have
-to be reordered - for example, to regroup tokens by destination rank before an
-all-to-all, or to restore the original grouping afterwards.
-``moe_sort_chunks_by_index`` (PyTorch) and ``sort_chunks_by_index`` (JAX) permute
-contiguous chunks of a token tensor according to a list of chunk sizes and a
-permutation of chunk indices, without falling back to Python-level slicing and
-concatenation. ``moe_sort_chunks_by_index_with_probs`` reorders an accompanying
-probability tensor in the same call.
+The sort-chunks-by-index kernels permute contiguous chunks of a token tensor
+according to a list of chunk sizes and a permutation of chunk indices, for
+example to regroup tokens by destination rank before an all-to-all and to
+restore the original grouping afterwards. A ``_with_probs`` variant reorders an
+accompanying probability tensor in the same call. See the API reference for the
+signatures.
 
 .. _moe-grouped-gemm:
 
 Grouped GEMM
 ------------
 
-The straightforward way to apply per-expert linear layers is to loop over the
-experts and call a separate ``Linear`` for each one. This is correct, but it
-is not the most efficient way to execute many expert GEMMs.
-
-Transformer Engine provides a grouped GEMM primitive
-(``GroupedLinear`` in PyTorch and ``grouped_dense`` in JAX) - an optimized
-replacement that produces the same outputs as the loop while using
-implementations that are better suited for MoE workloads.
+The grouped GEMM applies the per-expert linear layers in one call, replacing a
+loop of one ``Linear`` call per expert and producing the same outputs.
 
 Let ``G`` be the number of experts. For expert ``i``, ``X_i`` is the routed
 token block, ``W_i`` is the expert weight, and ``b_i`` is the optional bias:
@@ -367,20 +310,18 @@ The full layer output is the concatenation of all expert outputs:
 
    Y = \mathrm{concat}(Y_0, Y_1, \ldots, Y_{G-1})
 
-The grouped GEMM is told how many token rows belong to each expert via a
-per-expert token-count argument: ``m_splits`` in PyTorch ``GroupedLinear`` and
-``group_sizes`` in JAX ``grouped_dense``.
+The number of token rows belonging to each expert is passed as a per-expert
+token-count argument.
 
 .. raw:: html
    :file: img/grouped_linear.svg
 
 *Figure 6. Both paths produce the same outputs from the same inputs. The
-baseline launches one* ``Linear`` *per expert, while the grouped GEMM
-(*\ ``GroupedLinear`` *in PyTorch,* ``grouped_dense`` *in JAX) is an optimized
-grouped implementation that replaces the loop.*
+baseline launches one* ``Linear`` *per expert; the grouped GEMM replaces the
+loop with one call.*
 
-The following snippets show how to replace the loop with the grouped GEMM.
-They assume the tokens have already been permuted into expert-contiguous order.
+The snippets assume the tokens have already been permuted into
+expert-contiguous order.
 
 .. tabs::
 
@@ -398,49 +339,27 @@ They assume the tokens have already been permuted into expert-contiguous order.
          :start-after: # START_GROUPED_LINEAR_JAX
          :end-before: # END_GROUPED_LINEAR_JAX
 
-The grouped GEMM uses implementations tuned for grouped expert execution:
-
-* **Optimized backends:** Transformer Engine selects from several grouped GEMM
-  backends depending on the framework, datatype, and GPU architecture. This
-  can be, for example, cuBLAS GEMMs launched on multiple CUDA streams or a
-  single grouped GEMM kernel, among other backend-specific implementations.
-* **Recipe compatibility:** the grouped GEMM is integrated with
-  Transformer Engine's :doc:`low-precision training stack
-  </features/low_precision_training/index>`, so the recipes available to
-  regular ``Linear`` layers can also be used for MoE experts. The exact set
-  depends on the execution path, GPU architecture, and cuBLAS version; see the
-  ``GroupedLinear`` / ``grouped_dense`` API reference for the current
-  constraints.
-* **Fused quantization:** Low-precision grouped GEMM paths can fuse
-  quantization-related work such as scale computation, casting, and
-  cast/transpose steps across experts instead of repeating the same work in a
-  Python loop.
-* **Fused expert MLP:** Through the :doc:`operation-based API
-  </examples/op_fuser/op_fuser>`, the two expert GEMMs and the activation
-  between them can be fused into a single grouped operation on recent
-  architectures; see :ref:`Grouped MLP <moe-grouped-mlp>`.
-
-The PyTorch ``GroupedLinear`` module also supports the features expected of a
-Transformer Engine linear layer - tensor and sequence parallelism, gradient
-accumulation fusion, and FP8 weight caching - so it can serve as a drop-in expert
-layer. See the :doc:`PyTorch API reference </api/pytorch>` for the full
-signature.
+* **Backends:** the grouped GEMM backend is selected based on datatype and GPU
+  architecture, for example cuBLAS GEMMs on multiple CUDA streams or a single
+  grouped GEMM kernel.
+* **Low-precision recipes:** the grouped GEMM works with the
+  :doc:`low-precision training recipes </features/low_precision_training/index>`
+  available to ``Linear``. The supported set depends on the GPU architecture and
+  cuBLAS version; see the API reference for the current constraints.
+* **Fused quantization:** in low-precision paths the scale computation, casting
+  and cast/transpose steps are fused across experts.
+* **Fused expert MLP:** the two expert GEMMs and the activation between them can
+  be fused into one operation, see :ref:`Grouped MLP <moe-grouped-mlp>`.
 
 .. _moe-grouped-mlp:
 
 Grouped MLP
 -----------
 
-An expert MLP is two grouped GEMMs with an activation between them: the first
-projects into the (gated) feed-forward dimension, the activation is applied, and
-the second projects back. Running these as separate kernels writes the large
-intermediate activation out to HBM and reads it back for the second GEMM, and
-re-quantizes it in a separate pass.
-
-On Blackwell (SM100) GPUs, Transformer Engine can fuse the whole expert MLP -
-both grouped GEMMs and the activation - into a single CuTe DSL kernel. The
-intermediate stays on chip and the cross-expert quantization is folded into the
-GEMMs, removing the HBM round-trip and the extra kernel launches.
+An expert MLP is two grouped GEMMs with an activation between them. On
+Blackwell (SM100) GPUs the whole expert MLP can run as a single CuTe DSL kernel:
+the intermediate activation stays on chip and its quantization is folded into
+the GEMMs.
 
 .. raw:: html
    :file: img/moe_grouped_mlp.svg
@@ -449,11 +368,9 @@ GEMMs, removing the HBM round-trip and the extra kernel launches.
 and the second grouped GEMM with a single fused grouped-MLP kernel that keeps
 the intermediate on chip.*
 
-The fusion is exposed through the operation-based API and applied automatically
-by the :doc:`operation fuser </examples/op_fuser/op_fuser>`: when it sees a
-grouped linear, a scaled GLU (or SReLU) activation, and another grouped linear in
-sequence, it replaces them with one fused grouped-MLP operation. No change to the
-forward code is needed to opt in.
+The fusion is applied by the :doc:`operation fuser </examples/op_fuser/op_fuser>`:
+a grouped linear, a scaled GLU (or SReLU) activation and another grouped linear
+in sequence are replaced with one fused grouped-MLP operation.
 
 .. tabs::
 
@@ -470,8 +387,8 @@ forward code is needed to opt in.
          :start-after: # START_GROUPED_MLP_PYTORCH
          :end-before: # END_GROUPED_MLP_PYTORCH
 
-The fused path is taken when all of the following hold; otherwise the three ops
-run separately and produce identical results:
+The fused path is taken when all of the following hold; otherwise the three
+operations run separately with identical results:
 
 * **Architecture:** Blackwell (SM100) with cuDNN frontend 1.23 or newer.
 * **Recipe:** a block-scaled low-precision recipe - MXFP8, or NVFP4 with the
@@ -491,17 +408,11 @@ Expert parallelism
     or newer. It is compiled in by default when Transformer Engine is built for
     these architectures; set ``NVTE_WITH_NCCL_EP=0`` at build time to disable it.
 
-The grouped GEMM keeps all experts on a single device. When the experts no longer
-fit there - or to add another dimension of parallelism - they are sharded across
-devices, a scheme called expert parallelism (EP). Each device then owns only a
-slice of the experts, so a token routed to a non-local expert has to travel to
-the device that owns it.
-
-That data movement is two all-to-all collectives wrapped around the local expert
+With expert parallelism (EP) the experts are sharded across devices, and each
+device owns a slice of them. Two all-to-all collectives wrap the local expert
 computation: a **dispatch** all-to-all sends each token to the rank that owns its
 expert, the local grouped GEMM runs, and a **combine** all-to-all returns the
-results to the source rank. It is the distributed counterpart of the
-:ref:`token dispatch and token combine kernels <moe-routing-kernels>`.
+results to the source rank.
 
 .. raw:: html
    :file: img/moe_expert_parallel.svg
@@ -510,24 +421,12 @@ results to the source rank. It is the distributed counterpart of the
 token to the rank owning its expert and a combine all-to-all returns the
 outputs to the source rank.*
 
-Transformer Engine implements dispatch and combine directly on NCCL, using
-NCCL symmetric-memory windows for zero-copy transfers. The backend is a common
-C API (``nvte_ep_dispatch`` / ``nvte_ep_combine`` and their backward passes,
-declared in ``transformer_engine/common/include/transformer_engine/ep.h``) that
-both frameworks build on:
-
-* **PyTorch.** ``transformer_engine.pytorch.ep`` exposes the primitives with
-  autograd support. ``ep_bootstrap`` initializes EP once per process on an
-  existing process group, an ``EpBuffer`` holds the per-call state, and
-  ``ep_dispatch`` / ``ep_combine`` perform the two all-to-alls. The routing
-  itself comes from the :ref:`router <moe-router>`; the local experts run
-  on the receive buffer between the two calls.
-* **JAX.** ``transformer_engine.jax.moe.moe`` runs the entire layer - router,
-  dispatch, grouped expert GEMMs, and combine - as a single differentiable call.
-  ``ep_axis`` names the mesh axis the experts are sharded over, and the dispatch
-  and combine steps become all-to-all collectives over that axis. The underlying
-  primitives are also available separately in ``transformer_engine.jax.ep``.
-  This API is currently experimental.
+Dispatch and combine are implemented directly on NCCL, using symmetric-memory
+windows for zero-copy transfers. Both are differentiable. The common C API
+(``nvte_ep_dispatch`` / ``nvte_ep_combine`` and their backward passes, declared
+in ``transformer_engine/common/include/transformer_engine/ep.h``) is exposed in
+both frameworks; the snippets show how the dispatch, the local experts and the
+combine are wired together.
 
 .. tabs::
 
@@ -560,27 +459,26 @@ both frameworks build on:
 Sizing the receive buffer
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Each rank receives a data-dependent number of tokens per step. Passing
-``recv_capacity_per_rank`` fixes the size of the receive buffer up front, so the
-step needs no device-to-host synchronization and can be captured in a CUDA graph;
-the dropless worst case is ``ep_size * max_tokens_per_rank * top_k``. Omitting it
-selects eager mode, which sizes the buffer from the actual receive count each
-step at the cost of a host sync.
+Each rank receives a data-dependent number of tokens per step. Passing a fixed
+receive capacity (``recv_capacity_per_rank``) sizes the receive buffer up front,
+so the step needs no device-to-host synchronization and can be captured in a
+CUDA graph; the dropless worst case is ``ep_size * max_tokens_per_rank * top_k``.
+Without it the buffer is sized from the actual receive count each step, at the
+cost of a host sync.
 
-In PyTorch, ``ep_dispatch`` can quantize the tokens on the fly when the
-``EpBuffer`` is created with an MXFP8 ``dispatch_fwd_quant_recipe``, so the
-all-to-all moves the low-precision payload and the local grouped GEMM consumes
-it directly. Complete runnable examples live in ``examples/pytorch/ep/`` and
-``examples/jax/ep/`` in the repository.
+Dispatch can quantize the tokens to MXFP8 before the all-to-all
+(``dispatch_fwd_quant_recipe``), so the communication moves the low-precision
+payload and the local grouped GEMM consumes it directly. Complete runnable
+examples live in ``examples/pytorch/ep/`` and ``examples/jax/ep/`` in the
+repository.
 
 .. _moe-putting-it-together:
 
 Example: putting it all together
 --------------------------------
 
-The building blocks assemble into the four stages from the introduction: route,
-dispatch, run the experts, and combine. The example below wires them together
-for top-k routing on a single device.
+The example below wires the blocks together for top-k routing on a single
+device: route, dispatch, run the experts, combine.
 
 .. tabs::
 
@@ -598,25 +496,16 @@ for top-k routing on a single device.
          :start-after: # START_MOE_LAYER_JAX
          :end-before: # END_MOE_LAYER_JAX
 
-This uses dropless routing (``num_out_tokens = num_tokens * top_k``), so the
-dispatch buffer is sized statically rather than from a device-to-host sync. The
-expert step is built from the :ref:`grouped GEMM <moe-grouped-gemm>`; a full
-expert MLP stacks two grouped GEMMs around an activation. Every stage is differentiable, so the assembled layer
-trains end to end.
+The example uses dropless routing (``num_out_tokens = num_tokens * top_k``), so
+the dispatch buffer is sized statically rather than from a device-to-host sync.
+Every stage is differentiable, so the assembled layer trains end to end.
 
-When the experts are sharded across devices, the same layer gains the two
-all-to-all collectives from Figure 1 around the local experts: token dispatch
-groups the tokens by destination rank, the all-to-all dispatch moves them to the
-ranks owning their experts, the local grouped MLP runs, and the all-to-all
-combine returns the outputs before token combine restores the original order and
-applies the routing weights.
-
-The routing kernels and expert parallelism complement each other. With a generic
+With experts sharded across devices there are two options. With a generic
 all-to-all, the routing kernels do the reordering on both sides of the
 communication: tokens are sorted by destination rank before the all-to-all and
 regrouped by local expert after it (see :ref:`Reordering expert chunks
 <moe-routing-kernels>`). With the NCCL-based :ref:`expert parallelism
-<moe-expert-parallelism>` primitives, this permutation is folded into the
-communication itself: the dispatch delivers an expert-contiguous receive buffer
-and the combine writes the results straight back into the original token order,
-so no separate permute or unpermute is needed on the local side.
+<moe-expert-parallelism>` primitives the permutation is folded into the
+communication: the dispatch delivers an expert-contiguous receive buffer and the
+combine writes the results straight back into the original token order, so no
+separate token dispatch or combine is needed.
