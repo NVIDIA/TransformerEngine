@@ -8,6 +8,15 @@
 Mixture of Experts
 ===================================
 
+.. warning::
+
+    Low-precision support across the MoE building blocks is uneven. Which
+    recipes (FP8 delayed, current, and blockwise scaling, MXFP8, NVFP4) a given
+    block accepts depends on the block, the framework, the GPU architecture, and
+    the cuBLAS/cuDNN version; some paths are BF16/FP16 only. Coverage is being
+    extended with each release, so check the API reference of the specific
+    function or module for the current constraints.
+
 Mixture of Experts (MoE) layers replace a dense feed-forward network with a set
 of expert networks and a router that sends each token to one or more experts.
 This keeps the activated parameter count per token small while allowing the
@@ -379,9 +388,11 @@ The grouped GEMM uses implementations tuned for grouped expert execution:
   single grouped GEMM kernel, among other backend-specific implementations.
 * **Recipe compatibility:** the grouped GEMM is integrated with
   Transformer Engine's :doc:`low-precision training stack
-  </features/low_precision_training/index>`, so the same recipes available to
-  regular ``Linear`` layers - FP8 (delayed, current, and blockwise scaling),
-  MXFP8, and NVFP4 - can be used for MoE experts.
+  </features/low_precision_training/index>`, so the recipes available to
+  regular ``Linear`` layers can also be used for MoE experts. The exact set
+  depends on the execution path, GPU architecture, and cuBLAS version; see the
+  ``GroupedLinear`` / ``grouped_dense`` API reference for the current
+  constraints.
 * **Fused quantization:** Low-precision grouped GEMM paths can fuse
   quantization-related work such as scale computation, casting, and
   cast/transpose steps across experts instead of repeating the same work in a
