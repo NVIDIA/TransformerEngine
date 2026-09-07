@@ -475,17 +475,26 @@ NCCL EP kernels fold both permutations into the transfer:
 * combine does the inverse in one pass: it returns each expert output to its
   source rank and sums it into the original token position.
 
+.. raw:: html
+   :file: img/moe_ep_one_step.svg
+
+*Figure 10. Dispatch over a generic all-to-all needs a permutation on each side;
+the NCCL EP dispatch writes every token straight into its expert slot.*
+
 **Receive buffer**
 
 The number of tokens a rank receives depends on the routing, so the receive
 buffer can be sized in two ways:
 
-* **Fixed capacity.** ``recv_capacity_per_rank`` bounds the tokens a rank
-  receives per step and every local expert gets a fixed slot range in the
-  buffer. The step then allocates nothing, needs no host synchronization and is
-  CUDA-graph capturable. ``ep_size * max_tokens_per_rank * top_k`` never drops
-  a token; a smaller value saves memory but can overflow on skewed routing (see
-  ``drop_on_overflow``).
+* **Fixed capacity.** ``recv_capacity_per_rank`` (an integer) bounds the
+  tokens a rank receives per step and every local expert gets a fixed slot
+  range in the buffer. The step then allocates nothing, needs no host
+  synchronization and is CUDA-graph capturable. ``ep_size *
+  max_tokens_per_rank * top_k`` never drops a token, but with balanced routing
+  a rank receives only about ``max_tokens_per_rank * top_k``, so a small
+  multiple of that is the usual choice; it saves ``ep_size`` times the memory
+  and overflows only on skewed routing (``drop_on_overflow=True`` then drops
+  the excess instead of failing, and ``total_recv_tokens`` reports it).
 * **Eager.** Without a capacity the buffer is sized from the actual receive
   count each step. This costs a host synchronization and is not CUDA-graph
   capturable.
