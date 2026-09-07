@@ -195,9 +195,8 @@ def with_sharding_constraint_by_logical_axes(
 
         flax_rules = flax.linen.get_logical_axis_rules()
         if len(flax_rules) > 0:
-            return flax.linen.with_logical_constraint(
-                x, logical_axis_names, fallback=flax.linen.spmd.RulesFallback.AXIS_IS_UNSHARDED
-            )
+            pspec = flax.linen.logical_to_mesh_axes(logical_axis_names)
+            return with_sharding_constraint(x, pspec)
     except ImportError:
         pass
 
@@ -332,7 +331,12 @@ class MeshResource:
         fsdp_resource: Axis name for full-sharded data parallelism, default is None
         pp_resource: Axis name for pipeline parallelism (layer sharding), default is None
         cp_resource: Axis name for context parallelism (sequence sharding), default is None
-        ep_resource: Axis name for expert parallelism (MoE expert sharding), default is None
+        ep_resource: Axis name for expert parallelism. Dispatch input tokens
+            must be sharded on their leading dim by ``ep_resource`` (alone or
+            compound with ``dp_resource`` / ``fsdp_resource`` as outer, e.g.
+            ``PartitionSpec(("dp", "ep"), None, None)``). Dispatch output
+            ``[ep_size, recv_capacity, H]`` is always sharded by ``ep_resource``
+            on the leading ``ep_size`` dim.
     """
 
     dp_resource: str = None
@@ -475,3 +479,8 @@ def dp_or_fsdp_axis_size():
     dp_size = get_mesh_axis_size(global_mesh_resource().dp_resource)
     fsdp_size = get_mesh_axis_size(global_mesh_resource().fsdp_resource)
     return dp_size if dp_size > 1 else fsdp_size
+
+
+def ep_axis_size():
+    """Get the size of the dispatch/EP axis (ep_resource). Returns 1 if unset."""
+    return get_mesh_axis_size(global_mesh_resource().ep_resource)

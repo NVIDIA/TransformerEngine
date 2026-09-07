@@ -436,6 +436,8 @@ enum NVTEQuantizationConfigAttribute {
    *  of ordinary NVFP4 fast-math settings.
    */
   kNVTEQuantizationConfigNVFP44Over6ErrUseFastMath = 9,
+  /*! Whether to use 2D block scaling for MXFP8 */
+  kNVTEQuantizationConfigMXFP82DQuantization = 10,
   kNVTEQuantizationConfigNumAttributes
 };
 
@@ -508,6 +510,24 @@ void nvte_memset(void *ptr, int value, size_t size_in_bytes, cudaStream_t stream
  */
 void nvte_splits_to_offsets(const int64_t *split_sizes, int64_t *output, size_t num_splits,
                             int64_t stride, cudaStream_t stream);
+
+/*! \brief Compute prefix-sum element offsets for grouped tensors with both dimensions varying.
+ *
+ *  Given per-tensor "first" and "last" dimensions, compute the cumulative
+ *  element offsets:
+ *
+ *    output[0] = 0
+ *    output[i] = sum_{j < i} first_dims[j] * last_dims[j]   for i in [1, N]
+ *
+ *  where N is the number of entries in first_dims (== entries in last_dims).
+ *
+ *  \param[in] first_dims  Per-tensor first dim, int32/int64 1D tensor of shape [N].
+ *  \param[in] last_dims   Per-tensor last dim, int32/int64 1D tensor of shape [N].
+ *  \param[out] output     Int32/int64 1D output tensor of shape [N + 1].
+ *  \param[in] stream      CUDA stream to use for the operation.
+ */
+void nvte_splits_to_offsets_2d(const NVTETensor first_dims, const NVTETensor last_dims,
+                               NVTETensor output, cudaStream_t stream);
 
 /*! \brief Compute multiple scaled prefix-sum offsets for grouped tensors.
  *
@@ -1454,6 +1474,13 @@ class QuantizationConfigWrapper {
   void set_nvfp4_2d_quantization(bool nvfp4_2d_quantization) {
     const auto val = static_cast<uint8_t>(nvfp4_2d_quantization);
     nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigNVFP42DQuantization,
+                                           &val, sizeof(val));
+  }
+
+  /*! \brief Set whether to use 2D block scaling for MXFP8 */
+  void set_mxfp8_2d_quantization(bool mxfp8_2d_quantization) {
+    const auto val = static_cast<uint8_t>(mxfp8_2d_quantization);
+    nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigMXFP82DQuantization,
                                            &val, sizeof(val));
   }
 

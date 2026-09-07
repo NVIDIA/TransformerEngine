@@ -35,7 +35,7 @@ namespace multi_tensor_sgd {
  **/
 template <int N, typename T_grad, typename T_weight>
 struct SGDFunctor {
-  __device__ __forceinline__ void operator()(int chunk_size, volatile int* noop_gmem,
+  __device__ __forceinline__ void operator()(int64_t chunk_size, volatile int* noop_gmem,
                                              TensorListMetadata<N>& tl,  // NOLINT(*)
                                              float wd, float momentum, float dampening, float lr,
                                              bool nesterov, bool first_run, bool wd_after_momentum,
@@ -45,7 +45,7 @@ struct SGDFunctor {
 
     int tensor_loc = tl.block_to_tensor[blockIdx.x];
     int chunk_idx = tl.block_to_chunk[blockIdx.x];
-    int n = tl.sizes[tensor_loc];
+    int64_t n = tl.sizes[tensor_loc];
 
     T_grad* grad_in = reinterpret_cast<T_grad*>(tl.addresses[0][tensor_loc]);
     grad_in += chunk_idx * chunk_size;

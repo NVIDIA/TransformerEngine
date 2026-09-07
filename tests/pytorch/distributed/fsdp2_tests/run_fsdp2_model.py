@@ -27,6 +27,7 @@ Other options:
 """
 
 import gc
+import math
 import os
 import sys
 import argparse
@@ -211,10 +212,14 @@ def shard_model_with_fsdp2(model, mesh):
 
 
 @torch.no_grad()
-def _check_fp8_fsdp2_allgather(model):
-    # Do manual allgather in fp32 and match against fp8 allgather done
-    # with fsdp2
-    # FP32 manual weight allgather
+def _check_fp8_fsdp2_allgather(model, *, tols=None):
+    """Compare FSDP2's quantized all-gather against a manual HP all-gather.
+
+    ``tols=None`` preserves the format-specific defaults used by the original
+    FP8 checker. Callers for other quantized tensor compositions can provide a
+    single tolerance dictionary that applies to every parameter.
+    """
+    # Manual high-precision weight all-gather.
     fp32_allgathered_params = {}
     for name, param in model.named_parameters():
         assert isinstance(param, DTensor)
@@ -225,29 +230,32 @@ def _check_fp8_fsdp2_allgather(model):
             if device_mesh.ndim > 1
             else device_mesh.get_group()
         )
-        # Perform manual allgather on local_tensor. zeros_like will create hp tensor since
-        # torch_dispatch for local_tensor will go down the dequantization route.
+        # Materialize high precision explicitly so this also works for composite
+        # quantized tensors such as HybridQuantizedTensor.
+        local_hp = local_tensor.dequantize()
         gathered_tensor = [
-            torch.zeros_like(local_tensor) for _ in range(dist.get_world_size(group=dist_group))
+            torch.zeros_like(local_hp) for _ in range(dist.get_world_size(group=dist_group))
         ]
-        dist.all_gather(gathered_tensor, local_tensor.dequantize(), group=dist_group)
+        dist.all_gather(gathered_tensor, local_hp, group=dist_group)
         full_tensor = torch.cat(gathered_tensor, dim=0)
         fp32_allgathered_params[name] = full_tensor
-    # FP8 allgather using FSDP2
+    # Quantized all-gather using FSDP2.
     for module in model.modules():
         # Not all modules are wrapped/sharded with FSDP2.
         if hasattr(module, "unshard"):
             module.unshard()
-    # Make sure allgathered parameters match exactly
+    # Make sure all-gathered parameters match.
     for name, param in model.named_parameters():
-        # NVFP4 scale unpad/repad through FSDP2 introduces small numerical
-        # differences vs the manual dequantize-then-allgather path.
-        if isinstance(param, NVFP4Tensor):
-            tols = dict(atol=5e-4, rtol=5e-3)
+        if tols is not None:
+            param_tols = tols
+        elif isinstance(param, NVFP4Tensor):
+            # NVFP4 scale unpad/repad through FSDP2 introduces small numerical
+            # differences vs the manual dequantize-then-allgather path.
+            param_tols = dict(atol=5e-4, rtol=5e-3)
         else:
-            tols = {}
-        torch.testing.assert_close(param.dequantize(), fp32_allgathered_params[name], **tols)
-    # Revert model to original sharded state
+            param_tols = {}
+        torch.testing.assert_close(param.dequantize(), fp32_allgathered_params[name], **param_tols)
+    # Revert model to original sharded state.
     for module in model.modules():
         # Not all modules are wrapped/sharded with FSDP2.
         if hasattr(module, "reshard"):
@@ -403,6 +411,255 @@ def test_distributed(recipe_name, fp8_init, sharding_dims, layer_type):
         device="meta",
     )
     _run_training(args)
+
+
+def test_distributed_hybrid(hybrid_recipe_name):
+    """FSDP2 training with hybrid quantized_model_init.
+
+    Uses quantized_model_init with a hybrid CustomRecipe on a TransformerLayer
+    model:
+    - params are DTensors wrapping HybridQuantizedTensor local shards,
+    - the loss is finite and strictly decreasing on fixed data (grads flow),
+    - params keep their hybrid quantized type across optimizer.step(),
+    - FSDP2's quantized all-gather matches a manual fp32 dequant-then-allgather.
+    """
+    from fsdp2_utils import get_hybrid_recipe_from_string
+
+    hybrid_recipe = get_hybrid_recipe_from_string(hybrid_recipe_name)
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    device = torch.device(f"cuda:{int(os.getenv('LOCAL_RANK', '0'))}")
+
+    torch.manual_seed(42)
+    torch.cuda.manual_seed(42)
+
+    # Float8 block scaling requires every local FSDP shard's flattened M
+    # dimension to contain whole 128-row scale tiles. Keep the historical
+    # 512-wide model on up to four ranks, and scale it for larger worlds so
+    # the projection, fused-QKV, and MLP output dimensions all stay aligned.
+    shard_alignment = 128 * world_size
+    hidden_size = ((512 + shard_alignment - 1) // shard_alignment) * shard_alignment
+    ffn_hidden_size = 4 * hidden_size
+    assert hidden_size % shard_alignment == 0
+
+    kwargs = dict(
+        fuse_qkv_params=True,
+        params_dtype=torch.bfloat16,
+        hidden_dropout=0.0,
+        attention_dropout=0.0,
+        device="meta",
+    )
+    with te.quantized_model_init(enabled=True, recipe=hybrid_recipe):
+        model = torch.nn.Sequential(
+            *[te.TransformerLayer(hidden_size, ffn_hidden_size, 8, **kwargs) for _ in range(2)]
+        )
+
+    custom_attrs = save_custom_attrs(model)
+    mesh = get_device_mesh(world_size, [world_size])
+    model = shard_model_with_fsdp2(model, mesh)
+    for module in model.modules():
+        if hasattr(module, "reset_parameters"):
+            module.reset_parameters()
+    restore_custom_attrs(model, custom_attrs)
+
+    from transformer_engine.pytorch import HybridQuantizedTensor
+
+    def _hybrid_param_count():
+        return sum(
+            1
+            for p in model.parameters()
+            if isinstance(p, DTensor) and isinstance(p._local_tensor, HybridQuantizedTensor)
+        )
+
+    # quantized_model_init must produce HybridQuantizedTensor local shards.
+    hybrid_count = _hybrid_param_count()
+    assert hybrid_count > 0, "No HybridQuantizedTensor local tensors after sharding"
+
+    optimizer_lr = 1e-3 if hidden_size <= 512 else 1e-4
+    optimizer = optim.Adam(model.parameters(), lr=optimizer_lr)
+
+    input_data = torch.randn(128, 16, hidden_size, device=device, dtype=torch.bfloat16)
+    target = torch.randn(128, 16, hidden_size, device=device, dtype=torch.bfloat16)
+
+    losses = []
+    for iteration in range(3):
+        optimizer.zero_grad()
+        with te.autocast(enabled=True, recipe=hybrid_recipe):
+            output = model(input_data)
+            loss = F.mse_loss(output, target)
+        loss.backward()
+        optimizer.step()
+        loss_val = loss.item()
+        assert math.isfinite(loss_val), f"Non-finite loss at iter {iteration}: {loss_val}"
+        losses.append(loss_val)
+        dist_print(f"Hybrid iteration {iteration} completed with loss {loss_val}")
+
+    # Training must actually progress on fixed data: strictly monotonic decrease.
+    assert all(
+        losses[i + 1] < losses[i] for i in range(len(losses) - 1)
+    ), f"Loss not strictly decreasing each step: {losses}"
+
+    # Params must stay HybridQuantizedTensor after the optimizer step -- guards a
+    # silent dequantize-to-bf16 through the FSDP2 / optimizer path.
+    assert (
+        _hybrid_param_count() == hybrid_count
+    ), "HybridQuantizedTensor params lost their quantized type after optimizer.step()"
+
+    # FSDP2 quantized all-gather must match a manual fp32 dequant-then-allgather.
+    # Hybrid sub-storages (e.g. MXFP8 scale unpad/repad through FSDP2) can
+    # introduce small differences vs the manual dequantize-then-allgather path.
+    _check_fp8_fsdp2_allgather(model, tols=dict(atol=5e-4, rtol=5e-3))
+
+
+def test_distributed_hybrid_identity_all():
+    """FSDP2 training/all-gather with an all-Identity CustomRecipe.
+
+    This is the high-precision passthrough baseline for the hybrid/identity
+    tensor plumbing: quantized_model_init should produce IdentityTensor local
+    shards, optimizer steps should preserve that type, and FSDP2 all-gather
+    should reconstruct the same high-precision values as a manual gather.
+    """
+    from transformer_engine.pytorch.tensor.identity_tensor import IdentityTensor
+    from fsdp2_utils import get_hybrid_recipe_from_string
+
+    identity_recipe = get_hybrid_recipe_from_string("Identity")
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    device = torch.device(f"cuda:{int(os.getenv('LOCAL_RANK', '0'))}")
+
+    torch.manual_seed(42)
+    torch.cuda.manual_seed(42)
+
+    kwargs = dict(
+        fuse_qkv_params=True,
+        params_dtype=torch.bfloat16,
+        hidden_dropout=0.0,
+        attention_dropout=0.0,
+        device="meta",
+    )
+    with te.quantized_model_init(enabled=True, recipe=identity_recipe):
+        model = torch.nn.Sequential(
+            *[te.TransformerLayer(512, 2048, 8, **kwargs) for _ in range(2)]
+        )
+
+    custom_attrs = save_custom_attrs(model)
+    mesh = get_device_mesh(world_size, [world_size])
+    model = shard_model_with_fsdp2(model, mesh)
+    for module in model.modules():
+        if hasattr(module, "reset_parameters"):
+            module.reset_parameters()
+    restore_custom_attrs(model, custom_attrs)
+
+    def _identity_param_count():
+        return sum(
+            1
+            for p in model.parameters()
+            if isinstance(p, DTensor) and isinstance(p._local_tensor, IdentityTensor)
+        )
+
+    identity_count = _identity_param_count()
+    assert identity_count > 0, "No IdentityTensor local tensors after FSDP2 sharding"
+
+    optimizer = optim.Adam(model.parameters(), lr=1e-3)
+    input_data = torch.randn(128, 16, 512, device=device, dtype=torch.bfloat16)
+    target = torch.randn(128, 16, 512, device=device, dtype=torch.bfloat16)
+
+    losses = []
+    for iteration in range(3):
+        optimizer.zero_grad()
+        with te.autocast(enabled=True, recipe=identity_recipe):
+            output = model(input_data)
+            loss = F.mse_loss(output, target)
+        loss.backward()
+        optimizer.step()
+        loss_val = loss.item()
+        assert math.isfinite(loss_val), f"Non-finite Identity loss at iter {iteration}: {loss_val}"
+        losses.append(loss_val)
+        dist_print(f"Identity iteration {iteration} completed with loss {loss_val}")
+
+    assert losses[-1] < losses[0], f"Identity loss did not decrease: {losses}"
+    assert (
+        _identity_param_count() == identity_count
+    ), "IdentityTensor params lost their quantized type after optimizer.step()"
+
+    _check_fp8_fsdp2_allgather(model, tols={})
+
+
+def test_distributed_hybrid_reshard_after_forward(hybrid_recipe_name):
+    """FSDP2 training with hybrid params and reshard_after_forward=True.
+
+    A single LayerNormLinear as the root module gets reshard_after_forward=True
+    from FSDP2. This exercises the forward-reshard-backward-reshard cycle where
+    split/as_strided/slice dispatch ops fire every iteration.
+    """
+    from fsdp2_utils import get_hybrid_recipe_from_string
+
+    hybrid_recipe = get_hybrid_recipe_from_string(hybrid_recipe_name)
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    device = torch.device(f"cuda:{int(os.getenv('LOCAL_RANK', '0'))}")
+
+    torch.manual_seed(42)
+    torch.cuda.manual_seed(42)
+
+    # Keep dim-0 FSDP shards aligned to Float8 block scaling's 128-row tiles.
+    shard_alignment = 128 * world_size
+    in_features = ((512 + shard_alignment - 1) // shard_alignment) * shard_alignment
+    out_features = in_features * 3
+    assert in_features % shard_alignment == 0
+    with te.quantized_model_init(enabled=True, recipe=hybrid_recipe):
+        model = te.LayerNormLinear(
+            in_features,
+            out_features,
+            params_dtype=torch.bfloat16,
+            device="meta",
+        )
+
+    custom_attrs = save_custom_attrs(model)
+    mesh = get_device_mesh(world_size, [world_size])
+    fully_shard(model, mesh=mesh)
+    for module in model.modules():
+        if hasattr(module, "reset_parameters"):
+            module.reset_parameters()
+    restore_custom_attrs(model, custom_attrs)
+
+    from transformer_engine.pytorch import HybridQuantizedTensor
+
+    def _hybrid_param_count():
+        return sum(
+            1
+            for p in model.parameters()
+            if isinstance(p, DTensor) and isinstance(p._local_tensor, HybridQuantizedTensor)
+        )
+
+    hybrid_count = _hybrid_param_count()
+    assert hybrid_count > 0, "No HybridQuantizedTensor local tensors after sharding"
+
+    optimizer = optim.Adam(model.parameters(), lr=1e-3)
+
+    x = torch.randn(128, 16, in_features, device=device, dtype=torch.bfloat16)
+    target = torch.randn(128, 16, out_features, device=device, dtype=torch.bfloat16)
+
+    losses = []
+    for iteration in range(5):
+        optimizer.zero_grad()
+        with te.autocast(enabled=True, recipe=hybrid_recipe):
+            output = model(x)
+            loss = F.mse_loss(output, target)
+        loss.backward()
+        optimizer.step()
+        loss_val = loss.item()
+        assert math.isfinite(loss_val), f"Non-finite loss at iter {iteration}: {loss_val}"
+        losses.append(loss_val)
+        dist_print(f"Hybrid reshard_after_fwd iter {iteration}, loss {loss_val:.4f}")
+
+    # The forward-reshard-backward-reshard cycle must still train: strict decrease.
+    assert all(
+        losses[i + 1] < losses[i] for i in range(len(losses) - 1)
+    ), f"Loss not strictly decreasing each step: {losses}"
+
+    # Params must survive the split/as_strided/slice reshard dispatch ops with
+    # their hybrid quantized type intact.
+    assert (
+        _hybrid_param_count() == hybrid_count
+    ), "HybridQuantizedTensor params lost their quantized type after optimizer.step()"
 
 
 if __name__ == "__main__":

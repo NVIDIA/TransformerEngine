@@ -7,12 +7,37 @@
 #ifndef TRANSFORMER_ENGINE_FUSED_ROUTER_UTILS_H_
 #define TRANSFORMER_ENGINE_FUSED_ROUTER_UTILS_H_
 
+#include <cassert>
+
 #include "../util/logging.h"
+#include "../util/system.h"
 #include "../utils.cuh"
+#include "transformer_engine/fused_router.h"
 #include "transformer_engine/transformer_engine.h"
 
 namespace transformer_engine {
 namespace fused_router {
+
+inline void check_routing_map_format(NVTERoutingMapFormat routing_map_format) {
+  NVTE_CHECK(routing_map_format == NVTE_ROUTING_MAP_FORMAT_BYTEMAP ||
+                 routing_map_format == NVTE_ROUTING_MAP_FORMAT_BITMAP_U8,
+             "routing_map_format must be BYTEMAP (0) or BITMAP_U8 (1), got ",
+             static_cast<int>(routing_map_format));
+}
+
+// Topk values below this threshold use naive O(K*E) selection;
+// at or above it, use radix O(E) selection.  Configurable via
+// NVTE_RADIX_TOPK_THRESHOLD (default 16: matches the upstream naive/radix switch,
+// naive avoids overhead for very small K).
+//
+// NOTE: This is an inline function with a static local.  Each translation unit
+// that includes this header gets its own copy of the static, so the env var is
+// read once per TU (not once globally).  This is safe because environment
+// variables are immutable during process lifetime in our usage.
+inline int get_radix_topk_threshold() {
+  static int threshold = getenv<int>("NVTE_RADIX_TOPK_THRESHOLD", 16);
+  return threshold;
+}
 
 // Check if requested shared memory size exceeds device capacity.
 // Throws an error with num_experts info to help users diagnose the issue.
@@ -38,93 +63,50 @@ constexpr int kThreadsPerBlock =
     128;  // Using 4 warps in 1 CTA, Each warp is responsible for 1 token.
 constexpr float epsilon = 1e-20;
 
-template <typename T>
-__device__ inline T max(T a, T b) {
-  return a > b ? a : b;
-}
-
-template <typename T>
-__device__ inline T sum(T a, T b) {
-  return a + b;
-}
-
 enum ReduceFuncType {
   SUM,
   MAX,
 };
 
-__device__ inline float warp_reduce_sum_float(float val) {
-  // __shfl_down_sync accumulates the total only in lane 0;
-  // the broadcast below is required so every lane sees the final sum.
-  for (int offset = kThreadsPerWarp / 2; offset > 0; offset /= 2) {
-    val += __shfl_down_sync(0xffffffff, val, offset);
-  }
-  return __shfl_sync(0xffffffff, val, 0);
-}
+// Warp-level reduction over shared memory data.  Templated on the reduction
+// type to enable compile-time dispatch (no function pointer overhead).
+template <typename T, ReduceFuncType type>
+__device__ inline T warp_reduce_on_shmem(T *data_ptr, int data_size, int lane_id) {
+  constexpr CompType default_val =
+      (type == ReduceFuncType::SUM) ? 0.0f : -std::numeric_limits<CompType>::infinity();
 
-template <typename T>
-__device__ inline T warp_reduce_on_shmem(T *data_ptr, int data_size, ReduceFuncType type,
-                                         int lane_id) {
-  T (*reduce_func)(T, T);
-  CompType default_val = 0.0;
-  if (type == ReduceFuncType::SUM) {
-    reduce_func = sum;
-    default_val = 0.0;
-  } else if (type == ReduceFuncType::MAX) {
-    reduce_func = max;
-    default_val = -std::numeric_limits<CompType>::infinity();
-  }
-
-  // Some value is handled in local thread
-  // Thread 0 is responsible for the: 0-th, 32-th, 64-th, 96-th ...
-  // Reduce the value in local thread
+  // Each lane accumulates its strided slice
   CompType val = lane_id < data_size ? data_ptr[lane_id] : default_val;
   for (int i = lane_id + kThreadsPerWarp; i < data_size; i += kThreadsPerWarp) {
-    val = reduce_func(val, data_ptr[i]);
-  }
-
-  // Warp shuffle between threads
-  val = reduce_func(val, __shfl_xor_sync(0xffffffff, val, 16));
-  val = reduce_func(val, __shfl_xor_sync(0xffffffff, val, 8));
-  val = reduce_func(val, __shfl_xor_sync(0xffffffff, val, 4));
-  val = reduce_func(val, __shfl_xor_sync(0xffffffff, val, 2));
-  val = reduce_func(val, __shfl_xor_sync(0xffffffff, val, 1));
-  __syncwarp();
-  return T(val);
-}
-
-template <typename T>
-__device__ inline T masked_warp_reduce_on_shmem(T *data_ptr, bool *mask, int data_size,
-                                                ReduceFuncType type, int lane_id) {
-  T (*reduce_func)(T, T);
-  CompType default_val = 0.0;
-  if (type == ReduceFuncType::SUM) {
-    reduce_func = sum;
-    default_val = 0.0;
-  } else if (type == ReduceFuncType::MAX) {
-    reduce_func = max;
-    default_val = -std::numeric_limits<CompType>::infinity();
-  }
-
-  // Some value is handled in local thread
-  // Thread 0 is responsible for the: 0-th, 32-th, 64-th, 96-th ...
-  // Reduce the value in local thread
-  CompType val = lane_id < data_size && mask[lane_id] ? data_ptr[lane_id] : default_val;
-  for (int i = lane_id + kThreadsPerWarp; i < data_size; i += kThreadsPerWarp) {
-    if (mask[i]) {
-      val = reduce_func(val, data_ptr[i]);
+    if constexpr (type == ReduceFuncType::SUM) {
+      val += data_ptr[i];
+    } else {
+      val = (data_ptr[i] > val) ? static_cast<CompType>(data_ptr[i]) : val;
     }
   }
 
-  // Warp shuffle between threads
-  val = reduce_func(val, __shfl_xor_sync(0xffffffff, val, 16));
-  val = reduce_func(val, __shfl_xor_sync(0xffffffff, val, 8));
-  val = reduce_func(val, __shfl_xor_sync(0xffffffff, val, 4));
-  val = reduce_func(val, __shfl_xor_sync(0xffffffff, val, 2));
-  val = reduce_func(val, __shfl_xor_sync(0xffffffff, val, 1));
+  // Warp shuffle butterfly reduction
+  if constexpr (type == ReduceFuncType::SUM) {
+    val += __shfl_xor_sync(0xffffffff, val, 16);
+    val += __shfl_xor_sync(0xffffffff, val, 8);
+    val += __shfl_xor_sync(0xffffffff, val, 4);
+    val += __shfl_xor_sync(0xffffffff, val, 2);
+    val += __shfl_xor_sync(0xffffffff, val, 1);
+  } else {
+    auto shfl_max = [](CompType a, CompType b) { return a > b ? a : b; };
+    val = shfl_max(val, __shfl_xor_sync(0xffffffff, val, 16));
+    val = shfl_max(val, __shfl_xor_sync(0xffffffff, val, 8));
+    val = shfl_max(val, __shfl_xor_sync(0xffffffff, val, 4));
+    val = shfl_max(val, __shfl_xor_sync(0xffffffff, val, 2));
+    val = shfl_max(val, __shfl_xor_sync(0xffffffff, val, 1));
+  }
   __syncwarp();
   return T(val);
 }
+
+// ============================================================================
+// Array (in-place on shmem) score functions — used by legacy simple kernel
+// ============================================================================
 
 __device__ inline void apply_sigmoid_on_float(float *scores, int data_size, int lane_id) {
   for (int i = lane_id; i < data_size; i += kThreadsPerWarp) {
@@ -132,22 +114,12 @@ __device__ inline void apply_sigmoid_on_float(float *scores, int data_size, int 
   }
 }
 
-__device__ inline void apply_sigmoid_bwd_on_float(float *grad, float *fwd_output, int data_size,
-                                                  int lane_id) {
-  for (int i = lane_id; i < data_size; i += kThreadsPerWarp) {
-    grad[i] = grad[i] * fwd_output[i] * (1.0f - fwd_output[i]);
-  }
-}
-
-// sqrtsoftplus: y = sqrt(softplus(x)) = sqrt(log(1 + exp(x)))
 __device__ inline void apply_sqrtsoftplus_on_float(float *scores, int data_size, int lane_id) {
   for (int i = lane_id; i < data_size; i += kThreadsPerWarp) {
     float x = scores[i];
-    // softplus(x) = log(1 + exp(x)), numerically stable version
-    // Matches PyTorch's Softplus(beta=1.0, threshold=20.0)
     float softplus_val;
     if (x > 20.0f) {
-      softplus_val = x;  // for large x, softplus(x) ≈ x
+      softplus_val = x;
     } else {
       softplus_val = log1pf(expf(x));
     }
@@ -155,60 +127,51 @@ __device__ inline void apply_sqrtsoftplus_on_float(float *scores, int data_size,
   }
 }
 
-// sqrtsoftplus backward:
-// y = sqrt(softplus(x))
-// Matches PyTorch's Softplus(beta=1.0, threshold=20.0)
-// We need the original logits (x) to compute the gradient
-__device__ inline void apply_sqrtsoftplus_bwd_on_float(float *grad, float *fwd_output,
-                                                       float *logits_buf, int data_size,
-                                                       int lane_id) {
-  for (int i = lane_id; i < data_size; i += kThreadsPerWarp) {
-    float x = logits_buf[i];  // original logit
-    float y = fwd_output[i];  // sqrtsoftplus output
-    float dy_dx;
-    if (x > 20.0f) {
-      // When softplus(x) = x, y = sqrt(x), dy/dx = 1/(2*y)
-      dy_dx = 1.0f / (2.0f * y + epsilon);
-    } else {
-      // When softplus(x) = log(1+exp(x)), dy/dx = sigmoid(x) / (2*y)
-      // where sigmoid(x) = 1 / (1 + exp(-x))
-      float sigmoid_x = 1.0f / (1.0f + expf(-x));
-      dy_dx = sigmoid_x / (2.0f * y + epsilon);
-    }
-    grad[i] = grad[i] * dy_dx;
-  }
+// ============================================================================
+// Scalar (per-element) score functions — for fused paths
+// ============================================================================
+
+// Forward: y = sigmoid(x) = 1 / (1 + exp(-x))
+__device__ __forceinline__ float sigmoid_scalar(float x) { return 1.0f / (1.0f + expf(-x)); }
+
+// Forward: y = sqrt(softplus(x)) = sqrt(log(1 + exp(x)))
+__device__ __forceinline__ float sqrtsoftplus_scalar(float x) {
+  float sp = (x > 20.0f) ? x : log1pf(expf(x));
+  return sqrtf(sp);
 }
 
-__device__ inline void apply_softmax_bwd_on_float(float *grad, float *fwd_output, float *comp_buf,
-                                                  bool *mask, int data_size, int lane_id) {
-  // Put the result of output * grad to the comp_buf
-  for (int i = lane_id; i < data_size; i += kThreadsPerWarp) {
-    if (mask) {
-      if (mask[i])
-        comp_buf[i] = grad[i] * fwd_output[i];
-      else
-        comp_buf[i] = 0.0f;
-    } else {
-      comp_buf[i] = grad[i] * fwd_output[i];
-    }
-  }
-  __syncwarp();
-  float sum_Output_x_Grad = warp_reduce_on_shmem(
-      /*data ptr = */ comp_buf,
-      /*data size = */ data_size,
-      /*reduce func = */ ReduceFuncType::SUM, lane_id);
-  // In-place update
-  for (int i = lane_id; i < data_size; i += kThreadsPerWarp) {
-    if (mask) {
-      if (mask[i])
-        grad[i] = fwd_output[i] * (grad[i] - sum_Output_x_Grad);
-      else
-        grad[i] = 0.0f;
-    } else {
-      grad[i] = fwd_output[i] * (grad[i] - sum_Output_x_Grad);
-    }
-  }
+// Backward: sigmoid — given sigmoid output y, dy/dx = y * (1 - y)
+__device__ __forceinline__ float sigmoid_bwd_scalar(float grad, float y) {
+  return grad * y * (1.0f - y);
 }
+
+// Backward: sqrtsoftplus — given original logit x and sqrtsoftplus output y = sqrt(softplus(x)),
+// dy/dx = sigmoid(x) / (2 * y).  For large x (>20), softplus(x) ≈ x so dy/dx ≈ 1/(2*y).
+__device__ __forceinline__ float sqrtsoftplus_bwd_scalar(float grad, float x, float y) {
+  float dy_dx =
+      (x > 20.0f) ? (1.0f / (2.0f * y + epsilon)) : (sigmoid_scalar(x) / (2.0f * y + epsilon));
+  return grad * dy_dx;
+}
+
+// Backward: normalization — given grad, routed flag, and pre-computed sums.
+// Used by sigmoid/sqrtsoftplus with topk > 1.
+// sum_act = sum of activation outputs over routed experts.
+// sum_grad_act = sum of grad * act over routed experts.
+__device__ __forceinline__ float normalize_bwd_scalar(float grad, bool routed, float sum_act,
+                                                      float sum_grad_act) {
+  if (!routed) return 0.0f;
+  float denom = sum_act + epsilon;
+  return grad / denom - sum_grad_act / (denom * denom);
+}
+
+// Backward: softmax element — given grad, softmax output, and sum(output * grad).
+__device__ __forceinline__ float softmax_bwd_scalar(float grad, float act, float dot) {
+  return act * (grad - dot);
+}
+
+// ============================================================================
+// Array (in-place on shmem) softmax — still used by forward kernels
+// ============================================================================
 
 __device__ inline void apply_softmax_on_float(float *scores, int data_size, int lane_id) {
   // --- Pass 1: Online accumulation of max and sum_exp ---
@@ -265,6 +228,11 @@ enum class TopkFuncType {
   Radix = 1,
 };
 
+// Maximum num_experts supported by the packed 8-bit radix topk histogram.
+// Each thread processes ceil(data_size/32) elements per bucket.  With 8-bit
+// counters the max per-thread count is 255, so data_size <= 255 * 32 = 8160.
+constexpr int kMaxExpertsRadixTopk = 255 * 32;  // 8160
+
 /*******************************************************************************
  * radix_topk_and_mask — Warp-level radix-selection based top-K
  *
@@ -290,11 +258,16 @@ enum class TopkFuncType {
  *     broken by ascending index for determinism matching torch.topk).
  *     Write indices and scores to the output arrays.
  *
+ * Register pressure optimization: pack 16 bucket counts into 4 registers
+ * using 8-bit fields (4 counters per u32).  The original counts[16] +
+ * total_counts[16] required 32 registers, causing massive spill to local
+ * memory on large kernels (81% of L1 traffic on E=2304, K=36).
+ *
  * Tie-breaking: (value DESC, index ASC) — matches torch.topk behavior.
  *
  * Constraints:
  *   - 0 < topk <= data_size
- *   - No upper limit on topk or data_size (unlike v1's 128 cap)
+ *   - data_size <= kMaxExpertsRadixTopk (8160) to avoid 8-bit overflow
  *   - scores must be in shared memory accessible by the warp
  *
  * Complexity: 9 × O(E/32) = O(E) per warp, independent of K.
@@ -302,8 +275,8 @@ enum class TopkFuncType {
 
 __device__ inline void radix_topk_and_mask(CompType *scores, int data_size, int topk,
                                            int *topk_indices, CompType *topk_scores, int lane_id) {
-  // assert(topk > 0 && "naive_topk_and_mask_v2: topk must be positive");
-  // assert(topk <= data_size && "naive_topk_and_mask_v2: topk exceeds data_size");
+  assert(data_size > 0 && data_size <= kMaxExpertsRadixTopk);
+  assert(topk > 0 && topk <= data_size);
 
   constexpr int RADIX_BITS = 4;
   constexpr int RADIX_SIZE = 1 << RADIX_BITS;  // 16 buckets
@@ -312,54 +285,58 @@ __device__ inline void radix_topk_and_mask(CompType *scores, int data_size, int 
 
   // =========================================================================
   // Phase 1: Radix selection — find the bit pattern of the K-th largest value
+  //
+  // Packed counters: 16 bucket counts are stored in 4 × u32 registers using
+  // 8-bit fields (4 counters per register).  Bucket b is in byte (b % 4) of
+  // packed[b / 4].  This reduces register usage from 32 (counts[16] +
+  // total_counts[16]) to 4 registers.
+  //
+  // Max per-thread count per bucket = ceil(data_size / 32).
+  // For E=2304: max 72 — fits in 8 bits (max 255).
+  // Constraint: data_size must be <= kMaxExpertsRadixTopk (8160).
   // =========================================================================
   unsigned int desired = 0;       // accumulated bit pattern of the K-th value
   unsigned int desired_mask = 0;  // bits determined so far
   int k_remaining = topk;         // how many more elements we need to skip
 
+#pragma unroll 1
   for (int pass = NUM_PASSES - 1; pass >= 0; pass--) {
     int digit_pos = pass * RADIX_BITS;
 
-    // Each thread counts elements per bucket that match the desired pattern
-    unsigned int counts[RADIX_SIZE];
-#pragma unroll
-    for (int b = 0; b < RADIX_SIZE; b++) {
-      counts[b] = 0;
-    }
+    // Packed counters: packed[i] holds 4 × 8-bit counts for buckets [4i..4i+3].
+    // Bucket b is in byte (b % 4) of packed[b / 4].
+    unsigned int packed[4] = {0, 0, 0, 0};
 
     for (int i = lane_id; i < data_size; i += kThreadsPerWarp) {
       unsigned int u = float_to_ordered_uint(scores[i]);
-      // Check if this element matches the desired pattern on already-decided bits
       if ((u & desired_mask) == desired) {
         int bucket = (u >> digit_pos) & RADIX_MASK;
-        counts[bucket]++;
+        int pack_idx = bucket >> 2;         // bucket / 4
+        int byte_idx = bucket & 3;          // bucket % 4
+        int shift = byte_idx << 3;          // byte_idx * 8
+        packed[pack_idx] += (1u << shift);  // increment the 8-bit field
       }
     }
 
-    // Warp-reduce each bucket count across all 32 lanes
-    unsigned int total_counts[RADIX_SIZE];
-#pragma unroll
-    for (int b = 0; b < RADIX_SIZE; b++) {
-      unsigned int c = warp_allreduce_sum(counts[b]);
-      total_counts[b] = c;  // same value on all lanes after full reduction
-    }
-
-    // Scan buckets from LARGEST digit value (15) to smallest (0).
-    // We're looking for the top-K largest, so we want the highest-valued
-    // bucket first.  Accumulate counts until we find the bucket containing
-    // the k_remaining-th element.
+    // Warp-reduce each bucket, then scan to find the target bucket.
     int target_bucket = 0;
+    int k_remaining_copy = k_remaining;
+#pragma unroll
     for (int b = RADIX_SIZE - 1; b >= 0; b--) {
-      unsigned int bc = total_counts[b];
-      if (bc < static_cast<unsigned int>(k_remaining)) {
-        // All elements in this bucket are in the top set; skip them
-        k_remaining -= bc;
+      // Unpack: extract 8-bit count for bucket b from packed[b/4]
+      int pack_idx = b >> 2;
+      int shift = (b & 3) << 3;
+      unsigned int my_count = (packed[pack_idx] >> shift) & 0xFFu;
+      // Warp-reduce to get total count across all 32 lanes
+      unsigned int bc = warp_allreduce_sum(my_count);
+      if (bc < static_cast<unsigned int>(k_remaining_copy)) {
+        k_remaining_copy -= bc;
       } else {
-        // The K-th element is in this bucket
         target_bucket = b;
         break;
       }
     }
+    k_remaining = k_remaining_copy;
 
     // Update the desired pattern and mask
     desired |= (static_cast<unsigned int>(target_bucket) << digit_pos);
@@ -506,7 +483,7 @@ __device__ inline void naive_topk_and_mask_generic(CompType *scores, int data_si
                        ? scores[lane_id]
                        : -std::numeric_limits<CompType>::infinity();
     int index = (lane_id < data_size) ? lane_id : 0;
-    // Some value is hanlded in local thread
+    // Some value is handled in local thread
     // Thread 0 is responsible for the: 0-th, 32-th, 64-th, 96-th ...
     // Reduce the value in local thread
     for (int i = lane_id + kThreadsPerWarp; i < data_size; i += kThreadsPerWarp) {
@@ -600,6 +577,10 @@ __device__ __forceinline__ void topk_and_mask(CompType *scores, int data_size, i
 #define TE_ROUTER_INDEX_TYPE_SWITCH_ALL(dtype, type, ...)                                 \
   switch (dtype) {                                                                        \
     using namespace transformer_engine;                                                   \
+    case DType::kInt16: {                                                                 \
+      using type = int16_t;                                                               \
+      { __VA_ARGS__ }                                                                     \
+    } break;                                                                              \
     case DType::kInt32: {                                                                 \
       using type = int32_t;                                                               \
       { __VA_ARGS__ }                                                                     \
@@ -618,8 +599,28 @@ __device__ __forceinline__ void topk_and_mask(CompType *scores, int data_size, i
     } break;                                                                              \
     default:                                                                              \
       NVTE_ERROR("Unsupported router index dtype ", to_string(static_cast<DType>(dtype)), \
-                 ". Expected one of: Int32, Int64, BFloat16, "                            \
+                 ". Expected one of: Int16, Int32, Int64, BFloat16, "                     \
                  "Float32.");                                                             \
+  }
+
+#define TE_ROUTER_DENSE_INDEX_TYPE_SWITCH_ALL(dtype, type, ...)                                 \
+  switch (dtype) {                                                                              \
+    using namespace transformer_engine;                                                         \
+    case DType::kInt16: {                                                                       \
+      using type = int16_t;                                                                     \
+      { __VA_ARGS__ }                                                                           \
+    } break;                                                                                    \
+    case DType::kInt32: {                                                                       \
+      using type = int32_t;                                                                     \
+      { __VA_ARGS__ }                                                                           \
+    } break;                                                                                    \
+    case DType::kInt64: {                                                                       \
+      using type = int64_t;                                                                     \
+      { __VA_ARGS__ }                                                                           \
+    } break;                                                                                    \
+    default:                                                                                    \
+      NVTE_ERROR("Unsupported dense router index dtype ", to_string(static_cast<DType>(dtype)), \
+                 ". Expected one of: Int16, Int32, Int64.");                                    \
   }
 }  // namespace fused_router
 }  // namespace transformer_engine

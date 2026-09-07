@@ -8,35 +8,6 @@
 #include "common.h"
 #include "pybind.h"
 
-namespace {
-
-constexpr int block_size = 512;
-
-// fast zero-fills of tensors
-void mha_fill(const transformer_engine::TensorWrapper &self, const at::Tensor &start_index) {
-  std::vector<size_t> shape = transformer_engine::pytorch::convertShape(self.shape());
-
-  auto max_tokens = shape[0];
-  auto fcd_size = 1;
-  for (size_t i = 1; i <= shape.size(); i++) {
-    fcd_size *= shape[i];
-  }
-
-  NVTE_CHECK(fcd_size % block_size == 0, "input size not aligned to block size");
-
-  size_t element_size_bits = transformer_engine::pytorch::typeToNumBits(self.dtype());
-  int32_t start_row = start_index.data_ptr<int32_t>()[0];
-  void *base_ptr = static_cast<char *>(self.get_rowwise_data().data_ptr) +
-                   static_cast<size_t>(start_row) * fcd_size * element_size_bits / 8;
-  size_t num_rows_to_zero = max_tokens - start_row;
-  size_t total_bytes = num_rows_to_zero * fcd_size * element_size_bits / 8;
-
-  NVTE_SCOPED_GIL_RELEASE(
-      { nvte_memset(base_ptr, 0, total_bytes, at::cuda::getCurrentCUDAStream()); });
-}
-
-}  // namespace
-
 namespace transformer_engine::pytorch {
 
 // get the fused attention backend
@@ -150,7 +121,6 @@ std::vector<py::object> fused_attn_fwd(
   auto o_shape = std::vector<size_t>{o_shape_tmp.begin(), o_shape_tmp.end()};
   NVTE_QKV_Format q_format = nvte_get_q_format(qkv_layout);
   AttentionShape o_parsed(q_format, o_shape_tmp.data());
-  size_t h = o_parsed.h(), d = o_parsed.d();
   o_parsed.to_format(o_format, o_shape.data());
   const DType fake_dtype_te = GetTransformerEngineDType(fake_dtype);
   auto [te_O, py_O, o_amax_buf] =
@@ -164,11 +134,8 @@ std::vector<py::object> fused_attn_fwd(
   if (qkv_type == DType::kFloat8E4M3 || qkv_type == DType::kFloat8E5M2) {
     // FP8
     if (set_zero && (o_format == NVTE_QKV_Format::NVTE_THD)) {
-      if ((h * d) % block_size == 0) {
-        mha_fill(te_O, cu_seqlens_q.index({torch::indexing::Slice(-1, torch::indexing::None)}));
-      } else {
-        te_O.zero_(at::cuda::getCurrentCUDAStream());
-      }
+      // Initialize both the output data and its amax metadata.
+      te_O.zero_(at::cuda::getCurrentCUDAStream());
     }
   } else if (qkv_type == DType::kBFloat16 || qkv_type == DType::kFloat16) {
     if (o_format == NVTE_QKV_Format::NVTE_THD) {
@@ -365,13 +332,11 @@ std::vector<py::object> fused_attn_bwd(
   NVTE_QKV_Format dq_format = nvte_get_q_format(dqkv_layout);
   NVTE_QKV_Format dkv_format = nvte_get_kv_format(dqkv_layout);
   AttentionShape q_parsed(q_format, q_shape.data());
-  size_t h_q = q_parsed.h(), d_qk = q_parsed.d();
+  size_t h_q = q_parsed.h();
   q_parsed.to_format(dq_format, dQ_shape.data());
   AttentionShape k_parsed(kv_format, k_shape.data());
-  size_t h_kv = k_parsed.h();
   k_parsed.to_format(dkv_format, dK_shape.data());
   AttentionShape v_parsed(kv_format, v_shape.data());
-  size_t d_v = v_parsed.d();
   v_parsed.to_format(dkv_format, dV_shape.data());
   at::Tensor dQ, dK, dV, dQKV, dKV;
   // FP16/BF16: dqkv_fake_dtype = kFloat16/kBFloat16, dQ/dK/dV.dtype = torch.float16/torch.bfloat16
@@ -468,22 +433,18 @@ std::vector<py::object> fused_attn_bwd(
   if (detail::IsFloat8Quantizers(dqkv_quantizer.ptr())) {
     // FP8
     if (set_zero) {
+      // dQ/dK/dV may be strided views, so zero data through ATen and reset the shared amax
+      // separately.
       if (dq_format == NVTE_QKV_Format::NVTE_THD) {
-        if (((h_q * d_qk) % block_size == 0) && dQ.is_contiguous()) {
-          mha_fill(te_dQ, cu_seqlens_q.index({torch::indexing::Slice(-1, torch::indexing::None)}));
-        } else {
-          dQ.fill_(0);
-        }
+        dQ.fill_(0);
       }
       if (dkv_format == NVTE_QKV_Format::NVTE_THD) {
-        if (((h_kv * d_qk) % block_size == 0) && ((h_kv * d_v) % block_size == 0) &&
-            dK.is_contiguous() && dV.is_contiguous()) {
-          mha_fill(te_dK, cu_seqlens_kv.index({torch::indexing::Slice(-1, torch::indexing::None)}));
-          mha_fill(te_dV, cu_seqlens_kv.index({torch::indexing::Slice(-1, torch::indexing::None)}));
-        } else {
-          dK.fill_(0);
-          dV.fill_(0);
-        }
+        dK.fill_(0);
+        dV.fill_(0);
+      }
+      if (dq_format == NVTE_QKV_Format::NVTE_THD || dkv_format == NVTE_QKV_Format::NVTE_THD) {
+        auto *fp8_quantizer = dynamic_cast<Float8Quantizer *>(dQKV_quantizer.get());
+        fp8_quantizer->amax.zero_();
       }
     }
   } else if (dqkv_quantizer.is_none() ||
@@ -973,6 +934,76 @@ at::Tensor thd_get_partitioned_indices(const at::Tensor &cu_seqlens, int total_t
                                       world_size, rank, at::cuda::getCurrentCUDAStream());
 
   return output;
+}
+
+at::Tensor thd_reorder_between_sequence_and_cp_rank_order(const at::Tensor &inp,
+                                                          const at::Tensor &cu_seqlens, int cp_size,
+                                                          bool cp_rank_to_sequence_order,
+                                                          int total_tokens) {
+  NVTE_CHECK(cu_seqlens.scalar_type() == at::ScalarType::Int);
+  NVTE_CHECK(cu_seqlens.dim() == 1);
+  NVTE_CHECK(cu_seqlens.size(0) >= 2);
+  NVTE_CHECK(cp_size > 0);
+  NVTE_CHECK(total_tokens > 0 && total_tokens % (cp_size * 2) == 0);
+  NVTE_CHECK(inp.dim() >= 1 && inp.size(0) == total_tokens);
+
+  auto inp_c = inp.contiguous();
+  at::Tensor out = at::empty_like(inp_c);
+
+  auto te_inp = makeTransformerEngineTensor(inp_c);
+  auto te_cu_seqlens = makeTransformerEngineTensor(cu_seqlens);
+  auto te_out = makeTransformerEngineTensor(out);
+
+  if (cp_rank_to_sequence_order) {
+    nvte_thd_cp_rank_order_to_sequence_order(te_inp.data(), te_cu_seqlens.data(), te_out.data(),
+                                             cp_size, total_tokens,
+                                             at::cuda::getCurrentCUDAStream());
+  } else {
+    nvte_thd_sequence_order_to_cp_rank_order(te_inp.data(), te_cu_seqlens.data(), te_out.data(),
+                                             cp_size, total_tokens,
+                                             at::cuda::getCurrentCUDAStream());
+  }
+
+  return out;
+}
+
+at::Tensor thd_sequence_order_to_cp_rank_order(const at::Tensor &inp, const at::Tensor &cu_seqlens,
+                                               int cp_size, int total_tokens) {
+  return thd_reorder_between_sequence_and_cp_rank_order(inp, cu_seqlens, cp_size, false,
+                                                        total_tokens);
+}
+
+at::Tensor thd_cp_rank_order_to_sequence_order(const at::Tensor &inp, const at::Tensor &cu_seqlens,
+                                               int cp_size, int total_tokens) {
+  return thd_reorder_between_sequence_and_cp_rank_order(inp, cu_seqlens, cp_size, true,
+                                                        total_tokens);
+}
+
+void thd_copy_valid_tokens_from_per_split_to_rank_local(at::Tensor out, const at::Tensor &inp,
+                                                        const at::Tensor &cu_seqlens_padded,
+                                                        const at::Tensor &cu_seqlens) {
+  NVTE_CHECK(cu_seqlens.scalar_type() == at::ScalarType::Int);
+  NVTE_CHECK(cu_seqlens_padded.scalar_type() == at::ScalarType::Int);
+  NVTE_CHECK(cu_seqlens.dim() == 1 && cu_seqlens_padded.dim() == 1);
+  NVTE_CHECK(cu_seqlens.size(0) >= 2);
+  NVTE_CHECK(cu_seqlens_padded.size(0) == cu_seqlens.size(0));
+  NVTE_CHECK(inp.dim() >= 1);
+  NVTE_CHECK(out.sizes() == inp.sizes() && out.scalar_type() == inp.scalar_type());
+  NVTE_CHECK(out.is_contiguous(),
+             "thd_copy_valid_tokens_from_per_split_to_rank_local output must be contiguous.");
+
+  auto inp_c = inp.contiguous();
+  auto cu_seqlens_padded_c = cu_seqlens_padded.contiguous();
+  auto cu_seqlens_c = cu_seqlens.contiguous();
+  int total_tokens = inp_c.size(0);
+  auto te_inp = makeTransformerEngineTensor(inp_c);
+  auto te_cu_seqlens_padded = makeTransformerEngineTensor(cu_seqlens_padded_c);
+  auto te_cu_seqlens = makeTransformerEngineTensor(cu_seqlens_c);
+  auto te_out = makeTransformerEngineTensor(out);
+
+  nvte_thd_copy_valid_tokens_from_per_split_to_rank_local(
+      te_inp.data(), te_cu_seqlens_padded.data(), te_cu_seqlens.data(), te_out.data(), total_tokens,
+      at::cuda::getCurrentCUDAStream());
 }
 
 /***************************************************************************************************

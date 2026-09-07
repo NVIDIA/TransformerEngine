@@ -23,8 +23,6 @@ dtype = torch.bfloat16
 num_iters = 3
 # checkpointing
 ckpt_attn = False
-# workspace optimization path for cuDNN attention
-workspace_opt = True
 # QKV memory layout
 qkv_layout = "bshd_bshd_bshd"
 # padding between sequences for qkv_format=thd
@@ -59,7 +57,6 @@ def benchmark_dot_product_attention(model, fused_attn_supported, flash_attn_supp
                 "FusedAttention",
                 ckpt_attn,
                 qkv_layout,
-                workspace_opt,
                 pad_between_seqs,
                 is_training,
             )
@@ -70,7 +67,6 @@ def benchmark_dot_product_attention(model, fused_attn_supported, flash_attn_supp
                 "FlashAttention",
                 ckpt_attn,
                 qkv_layout,
-                workspace_opt,
                 pad_between_seqs,
                 is_training,
             )
@@ -90,7 +86,6 @@ def benchmark_dot_product_attention(model, fused_attn_supported, flash_attn_supp
                 "FusedAttention",
                 ckpt_attn,
                 qkv_layout,
-                workspace_opt,
                 pad_between_seqs,
                 is_training,
             )
@@ -107,7 +102,6 @@ def benchmark_dot_product_attention(model, fused_attn_supported, flash_attn_supp
                 "FlashAttention",
                 ckpt_attn,
                 qkv_layout,
-                workspace_opt,
                 pad_between_seqs,
                 is_training,
             )

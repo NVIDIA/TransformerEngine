@@ -3,7 +3,9 @@
 # See LICENSE for license information.
 
 """NVFuser functions and JIT utilities"""
+import inspect
 import os
+import warnings
 from functools import wraps
 from typing import Callable, Optional, Tuple
 import torch
@@ -26,6 +28,8 @@ def lazy_compile(func):
     @wraps(func)
     def wrapper(*args, **kwargs):
         nonlocal compiled_func
+        if torch.compiler.is_compiling():
+            return func(*args, **kwargs)
         if compiled_func is None:
             compiled_func = torch.compile(func)
         return compiled_func(*args, **kwargs)
@@ -49,22 +53,66 @@ if torch_version() >= (2, 2, 0) and bool(int(os.getenv("NVTE_TORCH_COMPILE", "1"
 if torch.__version__ >= "2":
     import torch._dynamo
 
-    def no_torch_dynamo(recursive=True):
-        """Decorator to disable Torch Dynamo, except during ONNX export."""
+    def no_torch_dynamo(recursive=True, when=None):
+        """Decorator to disable Torch Dynamo, except during ONNX export.
 
-        def decorator(f):
+        `when` makes it conditional: it is called with the arguments of the call
+        keyed by parameter name -- an argument the call left out is absent, so
+        reading it with .get() yields its default as long as that default is
+        None -- and returns the reason this particular call cannot be traced, or
+        None to have it traced as usual. The reason is reported once per
+        distinct message.
+        """
+
+        def _disable(f):
             # no "recursive" option in pyTorch 2.0 - it acts as if recursive was True
-            disabled_f = (
+            return (
                 torch._dynamo.disable(f, recursive=recursive)
                 if torch.__version__ >= "2.1"
                 else torch._dynamo.disable(f)
             )
 
-            @wraps(f)
-            def wrapper(*args, **kwargs):
-                if is_in_onnx_export_mode():
+        def decorator(f):
+            disabled_f = _disable(f)
+            if when is None:
+
+                @wraps(f)
+                def wrapper(*args, **kwargs):
+                    if is_in_onnx_export_mode():
+                        return f(*args, **kwargs)
+                    return disabled_f(*args, **kwargs)
+
+            else:
+                parameters = inspect.signature(f).parameters
+                # Arguments are matched to names by position, which only holds
+                # without a *args in between.
+                assert not any(
+                    p.kind is inspect.Parameter.VAR_POSITIONAL for p in parameters.values()
+                ), f"no_torch_dynamo(when=...) does not support *args, which {f.__name__} takes"
+                parameter_names = list(parameters)
+
+                # The warning belongs inside the disabled function: warnings.warn
+                # graph-breaks on its own, which would mask the break that matters.
+                def report_and_run(reason, *args, **kwargs):
+                    warnings.warn(
+                        f"Falling back to eager execution under torch.compile: {reason} is"
+                        " unsupported on the compiled path (graph-breaks under fullgraph=True).",
+                        stacklevel=3,
+                    )
                     return f(*args, **kwargs)
-                return disabled_f(*args, **kwargs)
+
+                disabled_report_and_run = _disable(report_and_run)
+
+                @wraps(f)
+                def wrapper(*args, **kwargs):  # pylint: disable=function-redefined
+                    if is_in_onnx_export_mode() or not torch.compiler.is_compiling():
+                        return f(*args, **kwargs)
+                    call = dict(zip(parameter_names, args))
+                    call.update(kwargs)
+                    reason = when(call)
+                    if reason is None:
+                        return f(*args, **kwargs)
+                    return disabled_report_and_run(reason, *args, **kwargs)
 
             return wrapper
 
@@ -72,7 +120,7 @@ if torch.__version__ >= "2":
 
 else:
     # Fallback for PyTorch < 2.0: no-op decorator
-    def no_torch_dynamo(recursive=True):  # pylint: disable=unused-argument
+    def no_torch_dynamo(recursive=True, when=None):  # pylint: disable=unused-argument
         """No-op decorator for PyTorch < 2.0."""
         return lambda func: func
 

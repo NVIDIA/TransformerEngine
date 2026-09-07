@@ -25,6 +25,7 @@ from ...module.base import (
     _2X_ACC_DGRAD,
     _2X_ACC_WGRAD,
 )
+from ...module._common import set_quantizer_amax_reduction_group
 from ...tensor import Quantizer
 from ...tensor.float8_tensor import Float8Quantizer
 from ...tensor.storage.float8_tensor_storage import Float8TensorStorage
@@ -401,23 +402,6 @@ class BasicLinear(BasicOperation):
                 weight_quantizer.amax_epsilon_scales = recipe.fp8_quant_fwd_weight.amax_epsilon
                 grad_output_quantizer.force_pow_2_scales = recipe.fp8_quant_bwd_grad.power_2_scale
                 grad_output_quantizer.amax_epsilon_scales = recipe.fp8_quant_bwd_grad.amax_epsilon
-                if getattr(self, "sequence_parallel", False):
-                    tensor_parallel_mode = getattr(self, "tensor_parallel_mode", None)
-                    if tensor_parallel_mode == "column":
-                        input_quantizer.with_amax_reduction = True
-                        input_quantizer.amax_reduction_group = self.tensor_parallel_group
-                    elif tensor_parallel_mode == "row":
-                        grad_output_quantizer.with_amax_reduction = True
-                        grad_output_quantizer.amax_reduction_group = self.tensor_parallel_group
-            if recipe.nvfp4():
-                if getattr(self, "sequence_parallel", False):
-                    tensor_parallel_mode = getattr(self, "tensor_parallel_mode", None)
-                    if tensor_parallel_mode == "column":
-                        input_quantizer.with_amax_reduction = True
-                        input_quantizer.amax_reduction_group = self.tensor_parallel_group
-                    elif tensor_parallel_mode == "row":
-                        grad_output_quantizer.with_amax_reduction = True
-                        grad_output_quantizer.amax_reduction_group = self.tensor_parallel_group
 
         # Update quantizer in quantized weight tensor
         if weight_quantizer is not None and is_quantized_tensor(weight):
@@ -543,6 +527,10 @@ class BasicLinear(BasicOperation):
             input_quantizer.set_usage(
                 rowwise=True,
                 columnwise=weight_requires_grad and backward_override is None,
+            )
+            # Amax reduction group for the input quantizer (column-parallel sequence parallel)
+            set_quantizer_amax_reduction_group(
+                input_quantizer, tensor_parallel_group if with_x_all_gather else None
             )
             if with_x_all_gather:
                 input_quantizer.set_usage(columnwise=False)
@@ -788,6 +776,10 @@ class BasicLinear(BasicOperation):
                 rowwise=input_requires_grad,
                 columnwise=weight_requires_grad,
             )
+            # Amax reduction group for grad output (row-parallel sequence parallel)
+            set_quantizer_amax_reduction_group(
+                grad_output_quantizer, tensor_parallel_group if with_dy_all_gather else None
+            )
             if with_dy_all_gather:
                 dy, dy_async = gather_along_first_dim(
                     dy_local,
@@ -828,6 +820,10 @@ class BasicLinear(BasicOperation):
                 if input_quantizer is None:
                     raise ValueError("Missing quantizer for input tensor")
                 input_quantizer.set_usage(rowwise=False, columnwise=True)
+                # Amax reduction group for the input quantizer (column-parallel sequence parallel)
+                set_quantizer_amax_reduction_group(
+                    input_quantizer, tensor_parallel_group if with_x_all_gather else None
+                )
                 if with_x_all_gather:
                     x, x_async = gather_along_first_dim(
                         x_local,
@@ -1050,6 +1046,9 @@ class BasicLinear(BasicOperation):
                 saved_input = x_local
                 saved_weight = w
             if is_cpu_offload_enabled():
+                # No special CPU offloading logic is needed for weights. saved_weight is
+                # either self.weight (nn.Parameter, auto-excluded from offload) or a
+                # workspace freshly created each forward pass.
                 mark_activation_offload(saved_input)
             ctx.save_for_backward(saved_input, saved_weight)
             ctx.with_quantized_compute = with_quantized_compute and backward_override is None
